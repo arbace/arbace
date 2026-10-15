@@ -22,9 +22,10 @@ covers what.
     of `clojure.asm`, to `arbace.asm`), was `arbace/asm/` and `arbace/asm.ae` until 2026-10-12,
     when it left main with the JVM's bytecode back end (doc/STANDALONE-NOTES.md, S4; it remains
     on the branch `arbace-for-java-26`). No file of main is derived from it now; its license
-    stays below for the JVM jars main uses, which embed it (`seed/arbace-seed.jar` while it is
-    committed, and the frozen jar of `arbace-for-java-26-v4`, the oracle's reference, built from
-    its tag), and for `jdk/edge.edn` while it holds ASM's declarations;
+    stays below for the JVM jars main uses or used, which embed it (`seed/arbace-seed.jar`
+    while it was committed, until S4, 2026-10-12, now on the branch `arbace-for-java-26`, and the
+    frozen jar of `arbace-for-java-26-v4`, the oracle's reference, built from its tag), and for
+    `jdk/edge.edn` while it holds ASM's declarations;
   - `arbace/lang/Murmur3.ae`: from Guava (Copyright (C) 2011 The Guava Authors), as included in
     Clojure, under the Apache License 2.0; the MurmurHash3 algorithm it implements was written
     by Austin Appleby and placed in the public domain;
@@ -36,7 +37,8 @@ covers what.
   Files there that are Arbace's own, not derived from Clojure (they say so in their header, such
   as `arbace/lang/KeywordInvokeSite.ae`), are under the Eclipse Public License 1.0 as Arbace.
   The Go-build variants of vendored files (`arbace/lang/go/`, read by a2g only) are derived
-  from the files they vary, under their licenses.
+  from the files they vary, under their licenses (since SA150, 2026-10-13, merged into their
+  bases; `arbace/lang/go/` holds only the generated `CompilerOps.ae` and `CompilerAOTFn.ae`).
 - `arbace/spec/` (`arbace/spec/alpha.ae`, `gen/alpha.ae`, `test/alpha.ae`): spec.alpha,
   https://github.com/clojure/spec.alpha at `v0.6.249`
   (`3d1efb353b8a95c699b4051ba8273568c21f874e`), Copyright (c) Rich Hickey, under the Eclipse
@@ -85,8 +87,10 @@ covers what.
   1.0, except the parts of `go/arbace/jrt/` listed below.
 - `box/` (`box/go/arbace/box.../`, the packages `arbace/box/hv`, `vmm`, `abi`, `board` and
   `libsys`, with `board/boot_amd64.s` and `boot_arm64.s`; box/README.md, doc/go/BOX-NOTES.md;
-  the launcher `arbace/box/cmd/arbace-box`, added in S1, and `box/mac/`, added in S4, are
-  Arbace's own, under the Eclipse Public License 1.0; purego is the next entry):
+  the launcher `arbace/box/cmd/arbace-box`, added in S1, `box/mac/`, added in S4, and the
+  packages `arbace/box/tool` and `arbace/box/tree` (`box/go/arbace/box/tool.ae`, `tool/`,
+  `tree.ae`, `tree/`), added in S7, are Arbace's own, under the Eclipse Public License 1.0;
+  purego is the next entry):
   the box of go-whim, https://github.com/arbace/go-whim at
   `80c49bf53cd6340487ac623f3d6d135b77ac1db6`, its `hv/`, `vmm/` (without `vmm/cmd/`),
   `guest/abi/`, `guest/tamago/board/` and `internal/libsys/`, converted to Go forms by
@@ -388,13 +392,13 @@ covers what.
   combines works under several licenses, each covering its part:
   - Arbace: the `arbace/` namespaces the executable carries (the vendored Clojure, spec.alpha,
     core.specs.alpha and Arbace's own, translated by a2g and embedded as sources with the image
-    of their analyzed forms), jrt (`go/`, and `overlay/jdk/` translated with jdk26u's Java) and
+    of their analyzed forms; since S6 compiled to Go, the image only for what stays evaluated), jrt (`go/`, and `overlay/jdk/` translated with jdk26u's Java) and
     the main package (`go/arbace/cmd/arbace/` with what a2g writes): under the licenses given
     above for their files, the Eclipse Public License 1.0 but for `arbace/lang/Murmur3.ae`
     (the Apache License 2.0) and the parts derived from jdk26u (the GNU General Public License
     version 2 with the Classpath Exception). ASM is not in them.
   - jdk26u: the classes of java.base that `bin/jrt-convert` converts to class forms from
-    https://github.com/openjdk/jdk26u at `baf63fb` (committed in `jdk/forms/`; 835 files with the default locale set, the
+    https://github.com/openjdk/jdk26u at `baf63fb` (committed in `jdk/forms/`; 835 files with the default locale set, 838 as of 2026-10-15, the
     sources the JDK build generates among them; with `JRT_LOCALES`, jdk.localedata's bundles of
     the locales selected) and a2g translates into Go, with the generic signatures a2g writes from
     them (`arbace/classes/generics.edn`, embedded): Copyright (c) Oracle and/or its affiliates,
@@ -451,7 +455,22 @@ covers what.
   `abi` and the launcher's own package (the Eclipse Public License 1.0) and Go's runtime and
   standard library (Go's BSD 3-Clause License). A distribution of the box carries this file, as
   for the executables above.
-- `seed/arbace-seed.jar`: the binary seed of the bootstrap, Arbace as built at the tag
+- `seed/arbace-seed-go.tar.xz` (since S4, 2026-10-13; doc/STANDALONE-NOTES.md, "S4: the
+  Go-source seed"): the seed of the bootstrap, Arbace's Go program as the Go-hosted fixpoint
+  printed it, the source of the Go build's executables (above): the main package with its
+  embedded resources (`mod/cmd/arbace/`), a2g's translation of the runtime (`mod/lang/`) and of
+  the compiled namespaces (`mod/aot_*/`), jrt with the translated JDK classes (`mod/jrt/`), the
+  x509roots bundle (`mod/x509roots/`) and Go's runtime as `overlay/go` patches it
+  (`overlay/runtime/`). Each part is under the licenses of what it was translated or printed
+  from, as given above: `arbace/` (the Eclipse Public License 1.0; `Murmur3` the Apache License
+  2.0), `go/` and `overlay/jdk/` (the Eclipse Public License 1.0, but for their parts derived
+  from jdk26u), jdk26u's classes and resource data (the GNU General Public License version 2
+  with the Classpath Exception; the Unicode License V3 for their Unicode, ICU4J and CLDR data),
+  `overlay/go/` (Go's BSD 3-Clause License) and `x509roots/` (Go's BSD 3-Clause License; the
+  certificates under the Mozilla Public License 2.0). `seed/arbace-seed-go.tar.xz.sha256` and
+  `seed/goroot.sha256` are Arbace's own, under the Eclipse Public License 1.0.
+- `seed/arbace-seed.jar` (until S4, 2026-10-12; on the branch `arbace-for-java-26`): the binary
+  seed of the bootstrap, Arbace as built at the tag
   `arbace-for-java-26-v1` (doc/VENDOR-NOTES.md, "The binary seed"): the `arbace/` sources of
   that tag and the classes compiled from them. Each entry is under the license of the `arbace/`
   file it is or is compiled from, as above (`arbace/asm/...` classes under ASM's BSD 3-Clause

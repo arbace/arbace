@@ -1373,7 +1373,9 @@ evaluates to its class, loaded by name. Classes written only with the Java subse
 to their namespace and can be used without loading it, which is what `arbace.lang` needed.
 `defmodule` and `defpackage` only write files.
 
-On main since 2026-10-12 there is no AOT compilation: no class file is written (`compile` loads
+On main since 2026-10-12 there is no class-file AOT compilation (since S6 the program's
+namespaces are compiled to Go at build time, doc/STANDALONE-NOTES.md, "S6: Arbace compiled to
+Go"): no class file is written (`compile` loads
 the namespace, `*compile-files*` changes nothing); the classes of `arbace.lang` are translated to
 Go by a2g, and a class form evaluated at run time makes an interpreted class
 (doc/go/CLASSFORMS-REPL.md). `defmodule` and `defpackage` do nothing.
@@ -1395,7 +1397,7 @@ They all stay as they are; they implement Clojure's data types, not Java's.
 | self-reference while compiling | a stub class | the class environment |
 
 `gen-class` generates stub classes delegating to vars, for AOT only. `defclass` covers its uses
-directly. (On main, without AOT since 2026-10-12, `gen-class` does nothing, as Clojure's does
+directly. (On main, without class-file AOT since 2026-10-12, `gen-class` does nothing, as Clojure's does
 when not compiling; `gen-interface` makes its interface at run time, and `proxy` its class.) Arbace could later define `deftype*` and `reify*` as macros over `class*`; that is not
 part of this spec.
 

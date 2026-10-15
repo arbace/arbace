@@ -4,9 +4,13 @@ B1a step 6 ([B1-PLAN.md](B1-PLAN.md), branch `step6`, 2026-10-09): `bin/arbace-g
 static executables of Arbace for `linux/amd64` and `linux/arm64`, running `arbace.main`'s REPL,
 `-e` and scripts; the core namespaces are prepared at build time, so that the executable starts
 in about 0.3 s instead of 4.2 s. This document describes the image of prepared namespaces (the
-step's main lever), the build, the measurements against the JVM's `bin/arbace` (now
-`bin/arbace-j`) and against Joker, the REPL as a user process, the gate question, the results,
+step's main lever), the build, the measurements against the JVM's `bin/arbace` (then
+`bin/arbace-j`, removed from main in S4; on `arbace-for-java-26`) and against Joker, the REPL as a user process, the gate question, the results,
 and the amendments (accepted).
+
+Since S6 (doc/STANDALONE-NOTES.md, "S6: Arbace compiled to Go") the namespaces are compiled to
+Go by default (`ARBACE_AOT=1`); the image holds only what stays evaluated (a source the back end
+cannot compile), and all of them with `ARBACE_AOT=0`. The sections below are as built.
 
 ```
 $ bin/arbace-go --build                    # a2g, the Go builds, the image, the links
@@ -150,8 +154,8 @@ time, and the units whose evaluation takes more than 3 ms), and `ARBACE_LOAD_TIM
 
 The start allocates the decoded trees and what their evaluation makes, most of which stays.
 With Go's default (`GOGC=100`) the collector runs many cycles while the heap grows from nothing;
-until `Main.main` has loaded `arbace.main` (a variant of `Main`, `arbace/lang/go/Main.ae`,
-calls `Compiler$Image.started`), the program runs it at `GOGC=400` unless `GOGC` is set, then
+until `Main.main` has loaded `arbace.main` (a variant of `Main`, `arbace/lang/go/Main.ae`, since SA150 merged
+into `arbace/lang/Main.ae`, calls `Compiler$Image.started`), the program runs it at `GOGC=400` unless `GOGC` is set, then
 sets it back. Measured: amd64, best of 10 runs, `-e nil`: 0.32 s with the start's `GOGC=400`, 0.41 s with
 `GOGC=100` throughout; with the collector off the start takes 0.28 s (and 280 MB). The setting of the running program was D7's
 question, decided by step 7a (amendment O1, `GOGC=200` and a 64 MiB minimum heap:
@@ -183,7 +187,7 @@ and `spec.alpha`'s top-level defs; the rest the collector. Joker starts from Go-
 data structures with nothing evaluated; the JVM from classes already loaded and linked (the AOT
 cache) with compiled code. The remaining levers were step 7's: closure compilation (the `refer`s
 and the other evaluated start code; done, start 0.21 s: "With the closure compiler" above), then
-namespaces compiled to Go (no decoding at all; not scheduled, the user, 2026-10-10).
+namespaces compiled to Go (no decoding at all; not scheduled, the user, 2026-10-10; done in S6, the default since).
 
 Before this step's decoding was made direct (field offsets, cached method tables, member lists
 cached per class) it took 580 ms; with `ObjExpr.src` and the clearing paths encoded the image

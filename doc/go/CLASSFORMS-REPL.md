@@ -17,7 +17,9 @@ end, `interp` and `go` (no longer variants: `arbace/classes/interp.ae`, `arbace/
 `native` requires `interp` itself, the access flags come from `arbace.classes.opcodes` (alias
 `Opcodes`, values not a cut class), and `TypeReference` is `arbace.classes.go` on every host.
 The variants `types`, `env`, `analyze` (generic signatures from the world, no source path lookup)
-stay, for the front end still runs on a JVM: j2a and a2g's edge recording on the frozen jar.
+stayed, for the front end still runs on a JVM: j2a and a2g's edge recording on the frozen jar.
+Since 2026-10-13 (35255c7) they are merged into their bases: `arbace.classes.go/go-build?`
+(`Compiler$CFGo` exists) selects the world's signatures on Go, reflection on the frozen JVM.
 `test/classforms/jvm_check.ae` is gone with the back end. The sections below are as built.
 
 Contents: 1 Measurements · 2 Design · 3 Alternatives considered · 4 What is built ·
@@ -179,9 +181,14 @@ linked to the newest class of a name, as SPEC §10 says for the JVM.
 - **Analysis in class forms** (porting arbace.classes to the Java subset, so that a2g translates
   it): the analysis is 5,500 lines of Clojure; evaluated it costs 2.3 s once and 20 ms per class.
   Not worth a port now; step 6's image (the embedded namespaces pre-analyzed) is the remedy in
-  place; AOT of namespaces to Go is not scheduled.
+  place; AOT of namespaces to Go is not scheduled (as of 2026-10-10; since S6 the namespaces are
+  compiled to Go by default, `ARBACE_AOT=1`, doc/STANDALONE-NOTES.md, "S6: Arbace compiled to Go").
 
 ## 4. What is built
+
+As built (2026-10-10). Today `Compiler$CF` and `Compiler$CFGo` are in `arbace/lang/Compiler.ae`
+(the variants merged, SA150, f862ece), `interp` and `go` in `arbace/classes/`, and the `.subst`
+variants and `test/classforms/jvm_check.ae` are gone (S4, e831e8d; `types`, `env`, `analyze` 35255c7).
 
 | where | what |
 |---|---|

@@ -198,7 +198,10 @@ new) replaces text found exactly once. Each file's header says why; as of 2026-1
 `core_proxy.ae`, `main.after.ae`, `main.subst.ae`, `core/server.subst.ae`,
 `reflect/java.subst.ae`, `classes/native.subst.ae`, `classes/go.ae` and `classes/interp.ae` are
 applied to or moved into their sources and gone from `arbace/lang/go/ns/`; `gen-class` does
-nothing there, as Clojure's when not compiling):
+nothing there, as Clojure's when not compiling). Since 2026-10-13 `arbace/lang/go/ns/` is gone:
+every variant is applied to its source (`core_bean.subst.ae`, `instant.ae`, `box/host.ae`,
+`tls/host.ae`, `java/io.subst.ae` in S4, ac66b27; `classes/types`, `env`, `analyze` in SA150,
+35255c7). The table is as of 2026-10-11:
 
 | variant | why |
 |---|---|
@@ -657,7 +660,8 @@ then the suite's `test/`), which, as upstream's JVM does, requires every test na
 fixtures step is skipped: the Go build loads no class files, so the AOT fixtures load from source;
 the Java fixtures are translated into the test build (FX1; before `gofix` they did not exist). The
 reference is `test/arbace-go-results.edn` (the default `CLOJURE_TESTS_EXPECTED` in this mode), in
-the shape of `test/arbace-results.edn`, with a comment per namespace that fails saying why. Exit
+the shape of `test/arbace-results.edn` (the JVM's, on `arbace-for-java-26` since S4; as
+`test/baseline-results.edn`), with a comment per namespace that fails saying why. Exit
 status as for the JVM: 0 when nothing differs from the reference (the counts of tests are compared
 exactly, so an improvement is reported too, and the reference is then rewritten from
 `.tmp/clojure-tests/go/results.edn`).
@@ -828,7 +832,7 @@ GB in the afternoon):
   Before: about 7 minutes.
 
 arm64 (qemu) stays out of the gate (the smoke test there takes minutes, the suite hours). The
-essential gate stays as it is: the Go build depends on nothing it checks, and a a2g or jrt
+essential gate stays as it is: the Go build depends on nothing it checks, and an a2g or jrt
 change is what the Go checks guard.
 
 ## Phase 2B: jrt's surface for the REPL
@@ -1228,7 +1232,7 @@ elsewhere (`java.io`, `method-thunks`, `reader`'s and `sequences`' `File` errors
 
 (Decided since: the Java fixtures were done (FX1, "The suite's Java fixtures"), and processes
 (`java.shell`, `java.process`: JRT-NOTES.md, "Processes"); XML (SAX), gen-class and Java
-serialization stay out for good (the user, 2026-10-10; JOURNAL.md, "what comes after the
+serialization stay out for good (the user, 2026-10-10; the journal on `arbace-for-golang`, "what comes after the
 freeze").)
 
 Fixed here as the cheap ones: `transducers` (its 18 other tests run), `api` (loads, its specs
@@ -1456,7 +1460,7 @@ is unchanged (its Go check is the shipped executable's smoke test).
 
 ### Amendments FX1-FX7 (accepted by the user 2026-10-10)
 
-Prefix FX (unique to this branch). Accepted by the user 2026-10-10 (JOURNAL.md, "the suite's
+Prefix FX (unique to this branch). Accepted by the user 2026-10-10 (the journal on `arbace-for-golang`, "the suite's
 Java fixtures, resources by URL"); where each is folded is marked below.
 
 - **FX1 (B1-PLAN D6; A2G-SPEC §10.6; the gate) The test build.** `bin/arbace-go --build-tests`

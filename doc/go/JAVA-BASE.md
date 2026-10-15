@@ -38,8 +38,9 @@ java.security's basics (9,124 members, 52.0%, on `gosec`) and, on `gotext`
 ## Method
 
 `bin/jrt-coverage [OUT]` (bash) with its Clojure in `test/jrt/jrt_coverage.ae`
-(`jrt.jrt-coverage`, next to `jrt.java-surface`). It runs on Arbace's `target/stage2`
-(`bin/lib/tools.bash`), takes about 15 s, and writes:
+(`jrt.jrt-coverage`, next to `jrt.java-surface`). It ran on Arbace's `target/stage2`
+(`bin/lib/tools.bash`); since S4 on the frozen JVM Arbace (`bin/lib/frozen.bash`), takes about
+15 s, and writes:
 
 - `doc/go/java-base-coverage.edn` (OUT; Clojure reader): totals, Arbace's use, per package
   family, per package, and per class its status and its members' counts by status;
@@ -47,10 +48,11 @@ java.security's basics (9,124 members, 52.0%, on `gosec`) and, on `gotext`
 - `.tmp/jrt-coverage/summary.md`: the tables of this document.
 
 Inputs: a2g's output for the program (`A2G_OUT`, default `target/arbace-go/a2g`, written by
-`bin/arbace-go --build`, or `bin/a2g --program --out DIR` after `bin/jrt-convert`), jrt's forms
-(`go/arbace/jrt/`, its `manifest.edn`), `bin/jrt-convert`'s `sources.txt` (`JRT_WORK`, default
-`.tmp/jrt`) and Arbace's use (`SURFACE`, default `doc/go/java-surface.edn`, from
-`bin/java-surface`). Deterministic: the output depends only on these and the JDK.
+`bin/arbace-go --build`, or `bin/a2g --program --out DIR`; since S1 a2g reads the committed
+`jdk/forms`), jrt's forms (`go/arbace/jrt/`, its `manifest.edn`), `bin/jrt-convert`'s
+`sources.txt` (`JRT_WORK`'s, default the committed `jdk/sources.txt`) and Arbace's use
+(`SURFACE`, default `doc/go/java-surface.edn`, the last output of `bin/java-surface`, retired
+2026-10-12). Deterministic: the output depends only on these and the JDK.
 
 **The API** is read by reflection on the running JDK 26 (26.0.2.1, built from `/root/jdk26u`,
 the sources jrt translates): the packages `java.base` exports to every module
@@ -208,7 +210,7 @@ first). The 64 others are cut or reworked by decision: method handles and call s
 `JarFile.getEntry`, `ZipEntry.getTime`), channels (`FileChannel`, `getChannel`,
 `Reader.read(CharBuffer)`, `AbstractInterruptibleChannel.close`, 6), annotations (`Retention`,
 `RetentionPolicy`, `getAnnotation` twice, 4), modules (`Class.getModule`, `Module.getName`, `Module.isExported`: the Go build's `bean` has no
-modules, `arbace/lang/go/ns/core_bean.subst.ae`),
+modules, `arbace/lang/go/ns/core_bean.subst.ae`, since S4 `arbace/core_bean.ae`),
 `Runtime.version`/`Version.feature`, `System.loadLibrary`, `URLEncoder.encode`, serialization's
 `defaultWriteObject`, and `Executable.getName` (declared abstract there; `Method` and
 `Constructor` provide it). Processes (`Process`, `ProcessBuilder`, its `Redirect`, 21; amendments
