@@ -191,3 +191,37 @@ identical); `bin/g2a test` (150 assertions); the tool guests built from the form
 `bin/box-tools` (amd64) and the box's smoke test with them (compile spawned with trees in and
 out, a failing compile, an image booted from the store); the essential gate on `0db720f`
 (passed, 12m23s) and on the branch's last commit (its result in STANDALONE-NOTES.md, S9).
+
+## 2026-10-15: the build's speed, second round; the seed remade (9b2a4687...)
+
+The user's order ("do a second build-speed round"), after the first round's SA160-SA163. Four
+branches, one per part, each measured on the shared host (the emulated arm64 VM beside),
+output-neutral unless stated; recorded in `doc/STANDALONE-NOTES.md`, "the build's speed, second
+round", parts A-D.
+- A, the host's compiling of the namespaces (`speed2-host`): about four fifths of its CPU was
+  the evaluator, since the host loads the namespaces from source to record their units and so
+  ran the back end (`arbace.aot`, core, what they call) evaluated. `arbace.aot.main/run` now runs
+  the host's compiled loaders of the back end's closure (23 sources) first, when each is byte for
+  byte the host's embedded copy (SA164): the back end 22 to 29 s, was 55 to 58; the same tree
+  (G1 = G2). Alternatives: only `arbace.aot` compiled (a third of the gain), `GOGC` (no gain).
+- B, a2g after the compiled namespaces arrive (`speed2-a2g`): the writer (no dynamic binding per
+  tag, newlines by `indexOf`), `simple?`/`effects?` cached per node, pure name functions cached,
+  dyn's default methods by an index, registrations and collisions in parallel, reachability in
+  batches flattened in parallel and scanned in order: 66 to 75 s, was 123; a2g's output for the
+  same input byte for byte the same. Tried and dropped: the core loader's analysis first.
+- C, `jrt` split (`speed2-jrt`): measured, not built (SA180 (a)): Go's cache holds `jrt` unless
+  the runtime changes, so a one-run build compiles none of it; a split would gain about 45 s at
+  best once per runtime change for S5's 5 to 10 days. SA181 (a): the method's scripts stay in
+  `.tmp/speed2/`.
+- D, g2a's own work (`speed2-g2a`): it read all 77 MB of forms every build (62% of its CPU) even
+  with every package cached; the print cache's collect index (SA190) skips the packages whose
+  files are unchanged (by SHA-256), cached Go files copied as is: its step about 8 s, was 18 to
+  21; the printed module the same. SA191 (a): `aot_arbace_core_protocols` left its own package
+  (about 2 s, only when the runtime changes).
+The user decided SA164, SA180, SA181, SA190, SA191 (a). Merged (`d45e718`): the essential gate
+passed, the fixpoint G1 = G2 = G3. S9 merged after (`57a4428`, its journal entry above), then
+the seed remade once for both from the fixpoint at `57a4428`: `9b2a4687...` (was `79d4f552...`),
+verified by `bin/seed --verify` (the same tree and archive; stage 0 = G1 = G2 = G3 byte for byte,
+`2ee89825...`); the essential gate passed on it (`dd61501`, 8:07, its two builds 5:06). Left:
+the analysis of `arbace.core`'s loader on one thread (9 to 14 s), a2g's sequential load after
+the tree arrives (about 10 s), reachability's scan (12 to 16 s).

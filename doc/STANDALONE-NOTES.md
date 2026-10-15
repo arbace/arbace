@@ -3129,3 +3129,16 @@ build (`ARBACE_GO_ARCHES=amd64 bin/arbace-go --build`, 4:49 on the busy host: on
 s), and the print cache with its collect index after it (the gate's shipped build, the same
 program: g2a 9 s); the essential `bin/gate` on `84667f3` (10m04s): the suite 20,506 of 20,520, no
 regressions; the oracle 22,508 of 22,561, the 53 known, 0 new.
+
+## The second round merged; the seed (2026-10-15)
+
+The four branches merged into main (`d45e718`): the essential gate passed (11:02), the fixpoint
+G1 = G2 = G3 byte for byte (`fbacea35...`). S9 merged after (`57a4428`; its g2a is in stage 0
+too), so the seed was remade once for both: the fixpoint at `57a4428` (11:29, G1 = G2 = G3,
+`2ee89825...`, 101,863,584 bytes), G3 packed: `seed/arbace-seed-go.tar.xz`
+**`9b2a46878d274182f165f7e6d5fb1483d1b665add65adeebba550bde9a262c23`** (5,415,076 bytes, 1,691
+files), was `79d4f552...`. **`bin/seed --verify`**: printed again at `57a4428`, the same tree
+(the tar `2496a2eb...`) and archive; **stage 0 = G1 = G2 = G3 byte for byte**, `2ee89825...`, 675
+s for the three (G1 219 s, G2 184 s, G3 189 s: a fresh worktree, g2a's print cache cold, the
+emulated arm64 VM busy beside). The essential gate on the seed's commit (`dd61501`): passed in
+8:07, the two builds 5:06 (were 6 to 8 minutes).

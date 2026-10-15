@@ -115,7 +115,7 @@ Prior art:
   default since S6; `ARBACE_AOT=0`: evaluated from the image of prepared namespaces, as before):
   by the host when its runtime (`bin/lib/version.bash`'s `arbace_runtime_key`: `arbace/lang`,
   `go`, `overlay/jdk`, `jdk` but a2g's edge) is the checkout's, one a2g run, started as the host
-  compiles them (SA160), about 3 minutes; else by a first build of the program, two runs, about
+  compiles them (SA160), about 2.5 to 3 minutes; else by a first build of the program, two runs, about
   5.5 minutes (after a change to the runtime). The test build reuses the shipped build's compiled namespaces when made from the same sources and
   runtime (`target/arbace-go/aot.key`); g2a keeps a cache of printed packages
   (`--print-cache`, `.tmp/g2a-print-cache`); `--fixpoint` builds G1 by the host, G2 by G1, G3 by G2 into

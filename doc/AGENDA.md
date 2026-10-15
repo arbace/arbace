@@ -7,13 +7,13 @@ The current state of the work. This file is rewritten as things change. For the 
 
 ## State
 
-- The bootstrap starts from the Go-source seed `seed/arbace-seed-go.tar.xz` (`79d4f552…`), the
+- The bootstrap starts from the Go-source seed `seed/arbace-seed-go.tar.xz` (`9b2a4687…`), the
   program printed by the Go-hosted fixpoint, its toolchain (TamaGo's go1.27.1) pinned by
   `seed/goroot.sha256`. `bin/seed --check`, `--build` (stage 0), `--make`, `--verify`.
 - Stage 0 hosts every Arbace tool (a2g, g2a, c2a, the suite's runner), compiled into it;
   `bin/arbace-go --build` is a Go-hosted build, `--fixpoint` the chain G1 → G2 → G3.
 - The program's namespaces are compiled to Go (`ARBACE_AOT=1`, the default since S6): the
-  executable 101.4 MB (amd64), a build about 3 minutes.
+  executable 101.9 MB (amd64), a one-run build about 2.5 to 3 minutes.
 - The box: the same program as a TamaGo guest of go-whim's monitor (/dev/kvm on amd64; KVM/arm64
   and Hypervisor.framework on arm64), and the box rebuilding Arbace inside itself byte for byte
   (`bin/box-rebuild`, run by hand at milestones).
@@ -61,15 +61,21 @@ The current state of the work. This file is rewritten as things change. For the 
   `asm` build from, for linux/amd64, tamago/amd64 and tamago/arm64 (`bin/toolchain-vendor`); the
   nine tools built from the forms byte-identical to the originals'; the box's tool guests built
   from them (SA203 (b)); `verify` and `check` in `bin/gate --full` (SA204 (a)).
+- Done (2026-10-15): the build's speed, second round ([STANDALONE-NOTES.md](STANDALONE-NOTES.md),
+  "the build's speed, second round", parts A-D): the host's back end run compiled (SA164; about
+  half as long), a2g after the compiled namespaces arrive 66 to 75 s (was 123), g2a's collect
+  index (SA190; its step about 8 s, was 18 to 21), `jrt` not split (SA180). SA164, SA180, SA181,
+  SA190, SA191 decided (a). The seed remade after S9's merge (`9b2a4687…`, was `79d4f552…`) and
+  verified: stage 0 = G1 = G2 = G3 (`2ee89825…`).
 - Running: the whole chain in the emulated arm64 VM, nothing given (BX117 (a), at `434021a`,
   since 2026-10-14 22:49); recorded when it ends.
 - The Mac may move to macOS 26 (the user).
 
 ## Next
 
-- Running: the build's speed, second round (the user, 2026-10-15), on three branches: the host's
-  compiling of the namespaces (`speed2-host`), a2g's single-core phases (`speed2-a2g`), `jrt`
-  split into Go packages, measured first (`speed2-jrt`).
+- The user's choice among Later's surveys. Left of the build's speed: the analysis of
+  `arbace.core`'s loader (9 to 14 s on one thread; the class split by the back end), a2g's
+  sequential load after the tree arrives (about 10 s) and reachability's scan (12 to 16 s).
 
 ## Later
 
