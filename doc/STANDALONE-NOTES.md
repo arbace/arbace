@@ -2696,3 +2696,63 @@ byte**, `b6f2e89e...`, the three builds one run each from the new stage 0, 561 s
   other. *Recommended: (a)*.
 - **SA163 a2g's edge outside the runtime key.** (a) Left out (built); (b) in the key (a
   re-recorded edge makes builds two runs until a re-seed). *Recommended: (a)*.
+
+## After the milestone: the build's speed, second round (2026-10-15)
+
+The user's order after the first round: a second one, in three parts on branches of their own
+(A: the host's compiling of the namespaces; B: a2g; C: g2a's builds). Measured on the shared
+host, busy with the emulated arm64 VM and other builds: single timings vary by up to a half.
+
+### A: the host's compiling of the namespaces (branch `speed2-host`)
+
+**Where the time went** (`9942951`, stage 0 the host, alone): loading the 100 sources (85
+namespaces) about 19 s, the back end about 32 s (`compile-all` 27 s on one core, the printing
+8.5 s on 16 threads), about 53 s in all (56 to 64 s in a build, beside a2g). A CPU profile: four
+fifths of it the evaluator. The host prepares the namespaces from source (`ARBACE_NO_AOT`, so
+that their units are recorded), so the back end, and `arbace.core` and the other namespaces it
+calls, ran evaluated, not as the host's compiled code.
+
+**What changed (SA164).** `arbace.aot.main/run`, before compiling, runs the compiled loaders of
+the back end's namespaces and the ones they need when the program holds them for the sources on
+`ARBACE_PATH`: the closure of `arbace.aot.main` and `arbace.core` under `:require`, `:use` and
+top-level `load`, found from the sources' forms (23 sources: core's ten with
+`arbace.core.protocols`, `arbace.instant` and `arbace.uuid`, `arbace.java.io`, `string`, `set`,
+`classes.types`, `a2g.names`, `a2g.jrt`, `g2a.print`'s four, `aot.emit`, `aot.main`), each
+source's text compared with the embedded one. The loaders run in the order the sources were
+loaded, in the bindings `Compiler$AOT/load` makes (a nested `load` is then a no-op: the source is
+loaded); their vars' roots become the compiled fns, and the units the back end reads are the
+analysis' as before. When a source of the closure is not the program's own (stage 0 the host
+and the checkout's core or back end changed since the seed), the back end runs evaluated, as
+before. Where it applies: the fixpoint's G2 and G3, `bin/seed --verify`, the box's rebuild (its
+host image is built from the same sources), and builds by stage 0 once the seed holds it and as
+long as those 23 sources are unchanged since.
+
+**Tried and left.** Only `arbace.aot` compiled: 4 to 11 s (core's fns stay evaluated). The
+closure without core: no better than `arbace.aot` alone. `GOGC` 1000 or 2000 instead of 400: no
+faster, the peak RSS 5.1 → 9.7 GB. Not tried: the namespaces' loading compiled. The analysis
+needs each top-level form evaluated before the next, and a unit run as the host's compiled code
+would mix the analysis' evaluated classes (deftypes, protocols' interfaces) with the compiled
+ones. The namespace list (0.6 s) is not worth it.
+
+**Measured** (`b65bb74`):
+
+| | evaluated (stage 0 the host) | compiled (G1 the host) |
+|---|---|---|
+| alone, the back end (the host busy) | 55 to 58 s | 22 to 29 s |
+| in `bin/arbace-go --build`, the host's compiling (two pairs) | 56 s, 80 s | 38 s, 61 s |
+
+**Checked.** The tree compiled by the evaluated back end (G1, built by stage 0) and by the
+compiled one (G2, built by G1): the same, and **G2 = G1 byte for byte** (amd64 `1cd633b0...`,
+arm64 `9483503d...`). The essential gate on `b65bb74` passed (12:56, the host busy): the suite
+as recorded, the oracle's 53 known mismatches, 0 new. The executable is not main's: `aot/main.ae`
+is one of the compiled sources. A quirk found: the line of `arbace.pprint`'s last unit is
+the line of the driver script's `require` (bin/arbace-go's and the box's both on line 1), so a
+driver laid out differently prints another tree; not changed.
+
+### Amendments (proposed 2026-10-15)
+
+- **SA164 The back end compiled while the host prepares the namespaces.** (a) The compiled
+  loaders of the back end's closure run first when their sources are the program's own (built);
+  (b) evaluated, as before; (c) only `arbace.aot`'s two sources compiled (a smaller closure, a
+  third of the gain). *Recommended: (a)*: the same tree, the back end about half as long, and
+  nothing changes when a source of the closure is not the program's.
