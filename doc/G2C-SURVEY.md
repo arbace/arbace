@@ -5,10 +5,11 @@ decisions differ from the survey's recommendations: phase a (G3-G6) is skipped, 
 configuration is `GOOS=tamago`. The decisions are in
 the journal on `arbace-for-java-26` ([JOURNAL.md](https://github.com/arbace/arbace/blob/arbace-for-java-26/doc/JOURNAL.md#2026-10-07-decisions-on-g2cs-open-questions)) and noted in §9; the survey
 is otherwise left as written. Nothing here was implemented in `arbace/` when it was written; since
-then G0-G2 are done (`arbace/g2c/`, `tools/godump`, `tools/gocmp`, `bin/g2c`; spec
+then G0-G2 are done (`arbace/g2c/`, `tools/godump`, `tools/gocmp`, `bin/g2c`, now `arbace/g2a/`
+and `bin/g2a` since 2026-10-11; spec
 [go/SPEC.md](go/SPEC.md), the round trip in `bin/gate --full`), Go's BSD-3-Clause is in
 `LICENSE.md` (§9, question 8), and B1 was replanned as B1a, a static executable through c2g
-and jrt, and B1b, the box ([go/B1-PLAN.md](go/B1-PLAN.md), [go/BOX-SURVEY.md](go/BOX-SURVEY.md)).
+(now a2g) and jrt, and B1b, the box ([go/B1-PLAN.md](go/B1-PLAN.md), [go/BOX-SURVEY.md](go/BOX-SURVEY.md)).
 The experiments it cites ran in `.tmp/g2c/` (§10).
 
 g2c is a Go → Clojure mechanism, the counterpart of j2c (`arbace/j2c/`,

@@ -31,6 +31,9 @@ installation. The line's dependency closure is 485 packages, and the other 75 co
 `install_if`: the `-openrc` service scripts, the `-pyc` caches, `git-perl`, `gcc-gdb` and the
 like. apk adds those on its own when what they name is present.
 
+Packages installed on the host after 2026-10-12 for the user's own use (ffmpeg, for screen
+recordings; world holds 85 since) are outside Arbace's set and not in the line.
+
 `bin/alpine-env` derives and checks it:
 
 - `world` prints the line, computed from `/etc/apk/world` and `/lib/apk/db/installed`.
@@ -59,9 +62,9 @@ scripts and has not yet been tried on a fresh host.
 | Need | Packages |
 |---|---|
 | The scripts | `bash coreutils findutils grep sed diffutils tar xz cpio unzip` (flock, setsid and awk from busybox) |
-| Helpers in some scripts (`box-suite`, `box-smoke`, `tamago-vendor`, `arbace-go`'s REPL check) | `python3` |
+| Helpers in some scripts (`box-suite`, `box-smoke`, `tamago-vendor`, `arbace-go`'s REPL check, `box-vendor`, `box-arm64-vm`, `net-check`, `alpine-env`) | `python3` |
 | Sources, Clojure's suite's jars from Maven Central, the arm64 VM's netboot | `git curl ca-certificates` |
-| The REPL's line editing (`bin/arbace-j`; optional) | `rlwrap` |
+| The REPL's line editing (the executable runs its interactive REPL under it, doc/go/EXEC-NOTES.md; checked by `bin/arbace-go --smoke` and `bin/box-smoke`; optional) | `rlwrap` |
 | arm64 executables run on amd64 (`bin/arbace-go`, `bin/jrt`, `bin/a2g-evalproof`) | `qemu-aarch64` |
 | The arm64 box's checks (`bin/box-arm64-vm`) | `qemu-system-aarch64 openssh-client` |
 | go-whim's KVM tests and jrt's tests use cgo; `readelf` | `gcc musl-dev linux-headers binutils` |
@@ -86,15 +89,17 @@ These are built or fetched once, and pinned where Arbace depends on their bytes:
   - Configured with `--enable-headless-only --disable-warnings-as-errors`, boot JDK
     `/usr/lib/jvm/java-25-openjdk`.
   - Its image, `build/linux-x86_64-server-release/images/jdk`, is the `java` on PATH (26.0.2).
-  - It runs the bootstrap, the tools and the oracle's reference.
+  - It ran the bootstrap, the tools and the oracle's reference until S4; since then (2026-10-12)
+    it runs only the frozen jar of `arbace-for-java-26-v4`: the oracle's reference, j2a, a2g's edge
+    (`bin/a2g-edge`), the fixtures' forms and the data generators.
   - Its sources are j2a's input (`bin/jrt-convert update`). Since S1, the build itself reads
     `jdk/`, not the checkout.
 - **TamaGo's Go**, go1.27.1 (https://github.com/usbarmory/tamago-go, VERSION 2026-08-28), in
   `/root/tamago-go` (`G2A_GOROOT`).
   - It builds everything Go: the executables, the box, g2a's helpers and go-whim's monitor and
     tests.
-  - Its `src/` is pinned by `seed/goroot.sha256` (`bin/seed --go-check`), and its tree by
-    `bin/tamago-vendor`.
+  - Its `src/` is pinned by `seed/goroot.sha256` (checked by `bin/seed --build` and `--verify`;
+    `--check` checks the seed's own hash), and its tree by `bin/tamago-vendor`.
   - Since 2026-10-12 nothing runs Alpine's `go`, so an upgrade of the `go` package changes
     nothing.
 - **go-whim**: https://github.com/arbace/go-whim at `80c49bf`, in `/root/go-whim`

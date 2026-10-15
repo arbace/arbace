@@ -2,7 +2,8 @@
 
 Status: survey and plan for discussion, 2026-10-14, long term (after `arbace-inside-itself-v1`;
 the agenda's Later). Nothing here is built. The proposals (IR1-IR13, §8) are the user's to
-decide. The user's screenshots of the model app (§2); §3 lists what more would answer.
+decide. §2 records what the user's screenshots of the model app show; §3 lists what more would
+answer.
 
 ## Why
 
@@ -12,7 +13,8 @@ down to the ISA; its interface today is a cooked console under rlwrap (go/EXEC-N
 editing: rlwrap"; go/BOX-NOTES.md, S1). A touch interface of Arbace's own, as good as Moshi's on
 a phone, is the REPL's first interface beyond a terminal. The user named Moshi's tooling as one
 to study (AGENDA, Later): a Go backend on Linux and macOS and a GPU-accelerated Go frontend on
-macOS, confirmed by the user's measurements; the iOS app's tooling is not known.
+macOS, confirmed by the user's measurements; the iOS app's tooling, from its licenses page, is in
+§2 ("The app's tooling").
 
 ## 1. Clean room
 
@@ -170,8 +172,9 @@ a check that a build can pass (§7).
 - **On the device**: Arbace runs on the iPhone. iOS gives third parties no hypervisor, so not
   in the box: the native program, built for `ios/arm64` (Go supports it), sandboxed by iOS
   itself. Arbace's evaluator interprets and its code is compiled ahead of time (S6), so no JIT,
-  which the App Store forbids; an interpreter is allowed. The program is large (75 MB AOT,
-  S6) and uses gigabytes for a2g, but the REPL alone fits a phone's limits (to measure).
+  which the App Store forbids; an interpreter is allowed. The program is large (101.3 MB
+  compiled, S6; 72.4 MB evaluated) and uses gigabytes for a2g, but the REPL alone fits a
+  phone's limits (to measure).
 - Both: one interface over two transports, local (a pipe to the in-process REPL) and remote.
 
 ### 5.2 Layers
@@ -212,7 +215,10 @@ forward and backward over forms), completion from the REPL's namespaces, a form 
 cursor, results as data that can be folded and browsed, the REPL's history across sessions. The
 REPL's own line editing replaces rlwrap there.
 
-## 6. Experiments before deciding (on the Mac, macOS 14, after the milestone's bundle)
+## 6. Experiments before deciding (on the Mac)
+
+The milestone's bundle has run on the Mac (macOS 14.8.7; go/BOX-NOTES.md), so the user may now
+upgrade its macOS for these.
 
 - **X1**: a minimal `ios/arm64` Go program in the iOS simulator and on the device: Go's entry,
   one UIKit view, text input from the system keyboard, through purego or cgo; what it needs of
