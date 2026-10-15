@@ -1,15 +1,17 @@
 # The box: go-whim's VMM for Arbace — survey and plan
 
-Status: survey, 2026-10-10, for B1b ([B1-PLAN.md](B1-PLAN.md), "B1b, after the freeze: the
-box"). The decisions (§10) are the user's, taken 2026-10-11, after the `arbace-for-golang`
-freeze. Stage S0 is done (2026-10-11: go-whim's box vendored as Go forms under `box/`;
-[BOX-NOTES.md](BOX-NOTES.md)), S1 (2026-10-11: the boxed REPL on amd64, BOX-NOTES.md, S1)
-and S2 (2026-10-11: measured and hardened, BOX-NOTES.md, S2), S6's amd64 half (2026-10-11:
-the guest's Go as forms in `tamago/`, BOX-NOTES.md, S6), S3 on amd64 (2026-10-11: the store,
-BOX-NOTES.md, S3) and S5 on amd64 (2026-10-11: the network as a stream proxy, D12 decided;
-BOX-NOTES.md, S5); the rest of this document is the
-survey as written. The experiments (§9) ran in `.tmp/boxsurvey/` on copies; go-whim
-was read only.
+Status: survey, 2026-10-10, for B1b ([B1-PLAN.md](B1-PLAN.md), "B1b, after the freeze: the box").
+The decisions (§10) are the user's, taken 2026-10-11, after the `arbace-for-golang` freeze. Stage
+S0 is done (2026-10-11: go-whim's box vendored as Go forms under `box/`;
+[BOX-NOTES.md](BOX-NOTES.md)), S1 (2026-10-11: the boxed REPL on amd64, BOX-NOTES.md, S1) and S2
+(2026-10-11: measured and hardened, BOX-NOTES.md, S2), S6's amd64 half (2026-10-11: the guest's Go
+as forms in `tamago/`, BOX-NOTES.md, S6), S3 on amd64 (2026-10-11: the store, BOX-NOTES.md, S3) and
+S5 on amd64 (2026-10-11: the network as a stream proxy, D12 decided; BOX-NOTES.md, S5); amd64 is
+the milestone `arbace-box-amd64-v1` (2026-10-12). Since done: S4 (2026-10-12: arm64, KVM/arm64 in
+the emulated aarch64 VM and Hypervisor.framework on the Mac, the checklist 42 of 42; BOX-NOTES.md,
+"S4: arm64 and the Mac, done") with S6's arm64 half (tamago/arm64 in the same tree, BX63), the
+milestone `arbace-box-arm64-v1` (2026-10-12). The rest of this document is the survey as written.
+The experiments (§9) ran in `.tmp/boxsurvey/` on copies; go-whim was read only.
 
 Sources: go-whim at `80c49bf` (2026-10-06, `/root/go-whim`, `github.com/arbace/go-whim`);
 TamaGo's Go distribution `/root/tamago-go` (`VERSION` go1.27.1, 2026-08-28), its `goos` module
@@ -375,12 +377,12 @@ each re-running S6's byte-identity proof; S4 (arm64, the Mac) and S6's arm64 hal
 | stage | content | gate |
 |---|---|---|
 | **S0 vendor** (after the freeze). *Done 2026-10-11 ([BOX-NOTES.md](BOX-NOTES.md), S0): copied unchanged as Go forms under `box/` (`arbace/box/{hv,vmm,abi,board,libsys}`), the dispatch left to S1 (D3's second step)* | `hv/`, `vmm/` (dispatch made a call table), `guest/abi`, the board, `internal/libsys` into Arbace as Go forms (g2a convert, round trip), or as a pinned checkout (D3, §10); `LICENSE.md`, `doc/ARBACE.md`, journal | go-whim's `hv` and `vmm` tests pass from Arbace's copy; a hello TamaGo image on the vendored board and monitor runs on /dev/kvm |
-| **S1 the boxed REPL, amd64**. *Done 2026-10-11 ([BOX-NOTES.md](BOX-NOTES.md), S1): vmm's own host interface, the launcher `arbace-box`, jrt's box host, the wall clock at entry, the evaluator's yield, the console polled; checks: the box's smoke test, the oracle's subset (`known-go-box-amd64.edn`), Clojure's suite in the box (`bin/box-suite`, `test/arbace-box-results.edn`)* | jrt's `BoxHost` (console via `WaitRead`/`Write`/`Message`, `Exit`, `Random`, the wall clock, args, env, resources; no `NetHost`, `HostProc`, `HostFS`, `HostLinks`); the main package's box variant (no rlwrap, the board imported); the launcher `bin/arbace-box` (image appended, rlwrap around it on a tty, an env allow-list); the evaluator's periodic yield (R2); files in TamaGo's in-memory fs (OSHost's file calls, unchanged; its `RandomBytes` is Linux-only since `gosec`, the box host's own); four vCPUs, the console read bounded (R3) | `-e`, `-m`, the REPL on stdin answer as the native executable on the smoke test's forms; the oracle's box subset; Clojure's suite in the box, its known exclusions recorded (`test/arbace-box-results.edn`) |
+| **S1 the boxed REPL, amd64**. *Done 2026-10-11 ([BOX-NOTES.md](BOX-NOTES.md), S1): vmm's own host interface, the launcher `arbace-box`, jrt's box host, the wall clock at entry, the evaluator's yield, the console polled; checks: the box's smoke test, the oracle's subset (`known-go-box-amd64.edn`), Clojure's suite in the box (`bin/box-suite`, `test/arbace-box-results.edn`)* | jrt's `BoxHost` (console via `WaitRead`/`Write`/`Message`, `Exit`, `Random`, the wall clock, args, env, resources; no `NetHost`, `HostProc`, `HostFS`, `HostLinks`); the main package's box variant (no rlwrap, the board imported); the launcher `bin/arbace-box` (as built: `bin/arbace-go --build --box`, `target/arbace-go/box-<arch>/arbace-box`; image appended, rlwrap around it on a tty, an env allow-list); the evaluator's periodic yield (R2); files in TamaGo's in-memory fs (OSHost's file calls, unchanged; its `RandomBytes` is Linux-only since `gosec`, the box host's own); four vCPUs, the console read bounded (R3) | `-e`, `-m`, the REPL on stdin answer as the native executable on the smoke test's forms; the oracle's box subset; Clojure's suite in the box, its known exclusions recorded (`test/arbace-box-results.edn`) |
 | **S2 measured and hardened**. *Done 2026-10-11 ([BOX-NOTES.md](BOX-NOTES.md), S2): the image mapped (BX11), the symbol table cut to the monitor's three symbols, a default memory limit, the watchdog kept off, the suite's file tests and reducers in the box, `fold` 3.2-3.4x on 4 vCPUs; the times against native in BOX-NOTES* | the start (63 `Random` exits batched, the 85 MB image's DWARF: the box image keeps its symbol table, which the monitor reads, §9.4, while the native executables are stripped since SZ1; `-w` alone could drop the DWARF), the collector's setting in the box, the watchdog's setting for long evaluations, the suite's file tests over the in-memory fs, `ARBACE_PATH` inside it | the suite's file tests pass; reducers' `fold` scales on 4 vCPUs; start and suite times recorded against native |
 | **S3 the store**. *Done on amd64 2026-10-11 ([BOX-NOTES.md](BOX-NOTES.md), S3): `arbace.box` in the box and natively (one directory format, shareable), the monitor's refusals as answers of their own, scripts by `ref:NAME` and namespaces by `ARBACE_PATH`'s `store:PREFIX`, the in-memory file system's snapshot as a tar (`save-fs!`, `ARBACE_BOX_FS`), the launcher's `--store` and its tool; the store's checks in both smoke tests; S6's proof holds* | an `arbace.box` namespace (`put`, `get`, `ref`, `ref!` as Joker's `box`); scripts and namespaces loaded from refs; optionally the in-memory fs seeded from / saved to a ref (a tar or EDN snapshot) | a script run from a ref; `load` from the store; the store's refusals |
-| **S4 arm64** | the same image for arm64; KVM/arm64 in the emulated aarch64 VM here; Hypervisor.framework on the Mac (the user's run, go-whim's `mac.sh` as the model) | the S1 gate in the aarch64 VM and on the Mac |
+| **S4 arm64**. *Done 2026-10-12 ([BOX-NOTES.md](BOX-NOTES.md), "S4: arm64 and the Mac, done"): the arm64 guest in the emulated aarch64 VM on KVM/arm64 and on the Mac's Hypervisor.framework (`bin/box-mac-bundle`, the checklist 42 of 42); the milestone `arbace-box-arm64-v1`* | the same image for arm64; KVM/arm64 in the emulated aarch64 VM here; Hypervisor.framework on the Mac (the user's run, go-whim's `mac.sh` as the model) | the S1 gate in the aarch64 VM and on the Mac |
 | **S5 the network**. *Done on amd64 2026-10-11 ([BOX-NOTES.md](BOX-NOTES.md), S5): D12 decided, a stream proxy: TCP streams through the calls 40-52, the monitor dialling, listening and resolving on the host under the launcher's `ARBACE_BOX_NET` policy, jrt's `NetHost` over them; `forms/net.ae` in the box's oracle (83 of 83), `bin/net-check --box`, the socket REPL from the host; TLS out (jrt has none); amendments BX40-BX44 accepted* | the design first (R5): a stream proxy (`NetHost` over calls: `Dial`/`Listen` under the launcher's policy) or packets (a datagram call, netstack and TLS in the guest, go-whim's sketch); the socket REPL from the host | `java.net`'s oracle forms; a socket REPL session from the host |
-| **S6 the image's Go as forms**. *amd64 half done 2026-10-11 ([BOX-NOTES.md](BOX-NOTES.md), S6): TamaGo's std (371 packages) and goos module (69) for tamago/amd64 as forms in `tamago/` (`bin/tamago-vendor`), the guest built from them printed by default; the guest image byte-identical to the originals' (`bin/tamago-vendor check`); arm64 the next milestone* | the board, TamaGo's runtime and std in the image as round-tripped Go forms; the image byte-identical to one built from the originals (B1-PLAN.md, B1b) | byte identity, amd64 and arm64 |
+| **S6 the image's Go as forms**. *amd64 half done 2026-10-11 ([BOX-NOTES.md](BOX-NOTES.md), S6): TamaGo's std (371 packages) and goos module (69) for tamago/amd64 as forms in `tamago/` (`bin/tamago-vendor`), the guest built from them printed by default; the guest image byte-identical to the originals' (`bin/tamago-vendor check`); arm64 the next milestone; since done 2026-10-12: tamago/arm64 in the same tree (BX63, BOX-NOTES.md, "tamago/ for both architectures"), both guests byte-identical* | the board, TamaGo's runtime and std in the image as round-tripped Go forms; the image byte-identical to one built from the originals (B1-PLAN.md, B1b) | byte identity, amd64 and arm64 |
 
 Not staged: processes (cut for good in the box), the terminal's raw mode.
 
@@ -403,13 +405,15 @@ Not staged: processes (cut for good in the box), the terminal's raw mode.
   build: later, and only if the size matters (58 MB executable at the survey, 66.4 MB on 2026-10-11; go-whim's slot is 3 GiB).
 - **The tools.** `bin/g2a build` takes `--goos tamago` (it fixes `GOOS=linux` today:
   `arbace.g2a.build/go-env`, `bin/arbace-go`'s `go_env`) and the go.mod's `require
-  github.com/usbarmory/tamago v1.27.1` with `GOOSPKG` (from the module cache, `GOPROXY=off`);
-  the ldflags `-T 0x201000 -R 0x1000`. `bin/arbace-go --build` gains the box flavour
-  (`ARBACE_GO_TARGETS=linux/amd64,linux/arm64,tamago/amd64,tamago/arm64`), sharing a2g's
-  output, the overlay (the patched `proc.go`/`runtime2.go` are TamaGo's own files, converted
-  from `/root/tamago-go`, so they carry the `GOOS == "tamago"` branches already) and the
-  image. `bin/jrt-convert` is unchanged. The monitor is a separate, ordinary `linux` (or
-  `darwin`) Go program: `bin/arbace-box --build` builds it with the image appended.
+  github.com/usbarmory/tamago v1.27.1` with `GOOSPKG` (from the module cache, `GOPROXY=off`); the
+  ldflags `-T 0x201000 -R 0x1000`. `bin/arbace-go --build` gains the box flavour
+  (`ARBACE_GO_TARGETS=linux/amd64,linux/arm64,tamago/amd64,tamago/arm64`; as built: `bin/arbace-go
+  --build --box`, the box's architectures in `ARBACE_BOX_ARCHES`), sharing a2g's output, the
+  overlay (the patched `proc.go`/`runtime2.go` are TamaGo's own files, converted from
+  `/root/tamago-go`, so they carry the `GOOS == "tamago"` branches already) and the image.
+  `bin/jrt-convert` is unchanged. The monitor is a separate, ordinary `linux` (or `darwin`) Go
+  program: `bin/arbace-box --build` builds it with the image appended (as built: `bin/arbace-go
+  --build --box`, `target/arbace-go/box-<arch>/arbace-box`).
 - **The board** is the guest's main package's import; its `go:linkname`s define the
   `runtime/goos` hooks. With `GOOSPKG` unset, the same `GOOS=tamago` program links against
   TamaGo's `linux_user` goos instead: a Linux process with the box's runtime (§8).
@@ -424,9 +428,9 @@ Not staged: processes (cut for good in the box), the terminal's raw mode.
   host of its own over raw `read(0)` it would be a check of `GOOS=tamago` without a monitor,
   arm64 included (`qemu-aarch64`). The box itself is cheap enough here (0.4 s a start) that
   this is optional.
-- **The oracle's box subset**: `bin/oracle check --expected test/oracle/known-box-amd64.edn`
+- **The oracle's box subset**: `bin/oracle check --expected test/oracle/known-go-box-amd64.edn`
   with the categories that need files beyond memory, sockets, processes and the host's zone
-  marked as expected differences (as `known-go-amd64.edn` is for the native build).
+  marked as expected differences (as `known-go-amd64-frozen.edn` is for the native build).
 - **Clojure's suite in the box**: a result file of its own (`test/arbace-box-results.edn`);
   the socket tests excluded; the file tests run over the in-memory fs (made to pass in S2).
 - **arm64**: images cross-compile here (`GOARCH=arm64`); the `linux_user` flavour under

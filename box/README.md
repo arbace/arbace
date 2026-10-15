@@ -58,7 +58,10 @@ above 4 GiB, the image where it is linked (`vmm.Config.RAM`, two RAM ranges, the
 setting `goos.Bloc`, arm64's translation 36 bits; the launcher's `ARBACE_BOX_RAM`; BX80-BX83);
 since S7 a guest may spawn tool guests (the calls 54-56, `abi.Spawn` ...; `vmm.Spawner`; the
 launcher's `ARBACE_BOX_SPAWN`, its helper `--spawner` and children `--tool`, the store tool's
-`tree`), and `tree` and `tool` are new (BX90-).
+`tree`), and `tree` and `tool` are new (BX90-); since S8 `DirStore.Put` waits for a concurrent
+writer of the same blob (`8073e7f`, in `vmm/storewait.go` since `dabda9e`) and the guest's RAM is
+checked against the monitor's limit before it is mapped (`vmm/guestram.go`'s `mapGuest`,
+`c3fdd36`).
 
 purego (S4, BX62): https://github.com/ebitengine/purego v0.11.1 (go.sum
 `h1:2zpWRSQNVKN4eKsKO9eM1ILDgWfYMY9GwqRmK6XeQ/0=`, from Go's module cache), the files of its

@@ -2,8 +2,9 @@
 
 Working notes of the standalone stages ([STANDALONE-SURVEY.md](STANDALONE-SURVEY.md), §9.1; the
 user's decisions D1-D13 of 2026-10-12): what each stage did, how it is checked, and its
-amendments (SA1-SA9 for S4's preparation, SA10... for S2, SA20... for S3's fixpoint, SA30... for S3's g2a), proposed to the user, the
-recommended choice applied meanwhile. S1 (the
+amendments (SA1-SA9 for S4's preparation, SA10... for S2, SA20... for S3's fixpoint, SA30... for
+S3's g2a, SA40-SA88 for S4, SA90-SA92 and SA104-SA107 after S4, SA100-SA103 for S5, SA130-SA159
+for S6, its size included), proposed to the user, the recommended choice applied meanwhile. S1 (the
 JDK's forms committed in `jdk/`) is recorded in [go/JRT-SOURCES.md](go/JRT-SOURCES.md), "The
 committed forms", and `jdk/README.md`.
 
@@ -222,9 +223,11 @@ branch; renumbered at the merge, since S4's preparation had taken SA1-SA9.
 
 ## S4: the Go-source seed
 
-Status: preparation, 2026-10-12, amendments SA1-SA9 accepted by the user the same day, branch `s4-seed` (beside S2 and S3, which it does not depend
-on). The JVM bootstrap stays as it is; nothing here removes it. The tooling, a candidate seed
-printed by today's JVM chain, and the proofs below.
+Status: preparation, 2026-10-12, amendments SA1-SA9 accepted by the user the same day, branch
+`s4-seed` (beside S2 and S3, which it does not depend on). (Superseded: "S4: the JVM removed"; the
+modes renamed `--check`, `--make`, `--build`, `--verify`.) The JVM bootstrap stays as it is;
+nothing here removes it. The tooling, a candidate seed printed by today's JVM chain, and the proofs
+below.
 
 ### What the seed is (D3)
 
@@ -750,11 +753,12 @@ instrumentation (wrapped vars: its cost hid the costs measured).
 ### Left for S3
 
 - a2g on the Go executable (S2's a2g, `s3-fixpoint`), then the chain G1 → G2 → G3 with
-  `G2A_HOST=go`.
+  `G2A_HOST=go`. (Since done: "S3: the Go-hosted fixpoint", below.)
 - g2a embedded in the executable and prepared in its image would save its load from source (1.6
   s per run); compiling the tools' namespaces to Go (B1-PLAN step 7's second half, AOT to Go
   forms) is what would close most of the remaining 2-3x: it needs a2g's embedding (`embed.ae`
-  excludes `arbace/g2a/`).
+  excludes `arbace/g2a/`). (Since done: S6, the tools compiled into stage 0, SA133; "S6: the
+  compiled build as the default".)
 - The converter on Go (5.6x the JVM's time, 13 GB) is untuned; the round trip is not part of
   the build.
 - The reader on Go (`LispReader` through `LineNumberingPushbackReader`, jrt's regex per token)
@@ -900,14 +904,17 @@ uncompressed, the zlib not yet written).
 
 - The default: `ARBACE_GO_HOST=go` (and `A2G_HOST`, `G2A_HOST`) becomes the build's, the seed's
   executable as G1 (`bin/seed --build`, then `--fixpoint` from it, not from the JVM); the
-  `--fixpoint`'s first step then is stage 0 instead of the JVM chain.
+  `--fixpoint`'s first step then is stage 0 instead of the JVM chain. (Since done: "S4: the JVM
+  removed", the tools on stage 0.)
 - The time: a Go-hosted `--build` takes about 24 minutes against 2 on the JVM (a2g 23 of them).
   `bin/gate`'s cached executable hides it when nothing changed; a change to `arbace/` costs a
   full a2g run. S6 (Arbace compiled to Go) is the remedy; until then, a2g's phases could run in
-  parallel (translation per class is independent but for the shared literal pools).
+  parallel (translation per class is independent but for the shared literal pools). (Since done:
+  a2g in parallel in S4, SA50-SA53; S6 the remedy, "S6: the compiled build as the default".)
 - The edge (`bin/a2g-edge`) and its recording stay on the JVM (D4).
 - `bin/arbace-go --build-tests` (the test build) and `--build --box` on Go: the same a2g and g2a,
-  not separately proven here.
+  not separately proven here. (Since done: both built by stage 0 in S4's proofs, "S4: the JVM
+  removed".)
 
 ### Amendments
 
@@ -1193,16 +1200,21 @@ On `s4-final` (2026-10-13), the sources at `ed892a1`, the seed committed alone i
 
 - `go/arbace/jrt/reflect_tables.ae` is stale against `bin/jrt manifest` (the order of
   `ForkJoinTask.adapt`'s overloads): regenerate it deliberately (it changes the Go build).
+  (Since done in S5: "After S4: the known issues".)
 - Two Go-build bugs found by the moved native tests (a top-level `do` of mutually referring
   `defclass`es; a class forms `lambda` called in a handed-over fn): fixed after S4 (below, "After
   S4: two Go-build bugs"). By design: eval fns implement no primitive `IFn$LL` interfaces
   (`native.ae:233`, `:234`, `:237`); no `java.lang.SecurityManager` (`:412`); jrt's
   `Method.invoke` wrong-receiver message (`:652`).
-- `test/oracle/known-go-box-amd64.edn` has the new groups but was not run on the box.
+- `test/oracle/known-go-box-amd64.edn` has the new groups but was not run on the box. (Since
+  done in S5: run on the box, 0 new; "After S4: the known issues".)
 - The class forms' Go variants (`arbace/lang/go/*.ae`) and the front end's `.subst` variants stay
-  (SA82, SA83): merging them waits until nothing else reads the bases.
+  (SA82, SA83): merging them waits until nothing else reads the bases. (Since done: `Var`,
+  `Reflector` and the `.subst` variants in S5, SA105, "After S4: the known issues"; `RT`, `Main`
+  and `Compiler` in S6, SA150; the generated `CompilerOps.ae` and `CompilerAOTFn.ae` stay.)
 - JVM-only code paths kept in shared sources (the version resource in `arbace.core`,
-  `RT.inArbacePath`'s class path case): harmless on Go, to trim with the variants' merge.
+  `RT.inArbacePath`'s class path case): harmless on Go, to trim with the variants' merge. (Since:
+  `RT.inArbacePath` gone with SA150's merge, `f862ece`; the version resource stays.)
 - The load's analysis and the reach in a2g stay sequential (S6).
 
 ### Amendments
@@ -1444,11 +1456,11 @@ Accepted by the user as recommended (2026-10-13).
 ## S5: jrt as core and library
 
 Status: measured on the branch `s5-jrt` (2026-10-13), from main at `38bcad1`; the split is not
-built. R1 (STANDALONE-SURVEY §9.3) bites: the reached classes form one strongly connected
-component however the graph is cut at the level of Java packages, and the cuts that would make
-a core small enough need a cross-package mechanism a2g does not have. The amendments SA100-SA103
-ask what to do; meanwhile HV1 (b) (RAM above 4 GiB for a guest, BOX-NOTES.md) has removed the
-premise that a package must compile in 3 GiB.
+built. R1 (STANDALONE-SURVEY §9.3) bites: the reached classes form one strongly connected component
+however the graph is cut at the level of Java packages, and the cuts that would make a core small
+enough need a cross-package mechanism a2g does not have. The amendments SA100-SA103 ask what to do
+(decided 2026-10-13, below: no split); meanwhile HV1 (b) (RAM above 4 GiB for a guest,
+BOX-NOTES.md) has removed the premise that a package must compile in 3 GiB.
 
 ### The graph (`tools/godeps`)
 
@@ -1616,7 +1628,8 @@ formatting and chronologies, the locale and security providers, ICU's normalizer
 
 ### Amendments
 
-Proposed, for the user's decision.
+Proposed, for the user's decision (decided 2026-10-13, the end of "After S4: the known issues"
+below).
 
 - **SA100 S5's split.** The reached classes are one component at the level of Java packages
   (74 of 75), 84% of jrt at the level of classes; a core under 2.5 GiB needs a cross-package
@@ -1726,7 +1739,8 @@ tool guest's RAM", measured. SA101 (b), against the recommendation: gc's default
 ## S6: Arbace compiled to Go
 
 Status: in progress on the branch `s6-compile` (from main at `38bcad1`, main merged at
-`86b744f`), 2026-10-13: the design below, the back end, and its first checks. Survey §9.1, row
+`86b744f`), 2026-10-13: the design below, the back end, and its first checks. (Done 2026-10-14:
+"S6: the compiled build as the default"; SA130-SA140 decided 2026-10-14, below.) Survey §9.1, row
 S6; decisions D5 (a) (R1: Arbace compiled to Go forms) and D6 (a) (T1 now, T3 measured here,
 T4 with Arbace's own back end). The amendments SA130 onward are proposals for the user's
 decision; the recommended choice is applied meanwhile.
@@ -1877,22 +1891,27 @@ namespaces' Go and its stage 0 hosts the tools compiled.
 
 ### Left (next steps)
 
+(As of 2026-10-13; since done but for primitive fns: "S6: the compiled build as the default" and
+"S6: the compiled program's size".)
+
 - Clojure's suite on the compiled test build (`ARBACE_AOT=1 bin/arbace-go --build-tests`), then
-  `ARBACE_AOT=1` the default (SA140) and the gate's.
+  `ARBACE_AOT=1` the default (SA140) and the gate's. (Done: "Clojure's suite and the oracle
+  (2026-10-14)", SA140, SA151.)
 - The build's time: the tools' host compiled (a build hosted by a compiled one; the seed remade
   from a compiled fixpoint makes stage 0 compiled), a2g's second run reusing the first's world;
   gc's time and memory for `lang` (455-606 s); the program's size (the compiled classes are
   rooted as the REPL's world, every public member in the member tables, and each fn class gets
-  forwarders for `IFn`'s arities).
+  forwarders for `IFn`'s arities). (Done: SA144, SA146-SA148; the size, SA153-SA159.)
 - The fixpoint and `bin/seed --verify` with `ARBACE_AOT=1` (the compiled tree a function of the
-  sources: to prove).
+  sources: to prove). (Done: SA151.)
 - T3 measured (SA139): the benchmarks compiled (a script's code is evaluated; a namespace of
-  them compiled into a test build).
+  them compiled into a test build). (Done: "Benchmarks and T3 (SA139)".)
 - Stack traces name the class forms file (`aot_arbace_core.ae:49`) with the source's line; the
-  source's file name per member (a2g's line file) is to do.
+  source's file name per member (a2g's line file) is to do. (Done: SA149.)
 - Primitive fns (`invokePrim`): the analysis makes none in the Go build (EVAL-PLAN Q1); compiled
-  code could have them, the analysis's variant permitting.
+  code could have them, the analysis's variant permitting. (Open.)
 - The variants of `RT`, `Main` and `Compiler` merged into their bases (the milestone, after S6).
+  (Done: SA150.)
 
 ### Checking the back end's output
 
@@ -2498,7 +2517,9 @@ as before. The gate's builds (`--gate-build`: the executable, then the test buil
   guest 100.8 MB (was 209.3 MB), the launcher with it 105.9 MB; the arm64 guest 98.5 MB, its
   launcher 103.4 MB (4:27 for both, after the native build by the new stage 0, 4:41). The box's
   smoke test (`bin/arbace-go --smoke --box`, amd64: 4 and 1 vCPUs, the store, the tool guests,
-  TLS, the terminal): 113 checks ok, 3:26. (The arm64 VM was not run.)
+  TLS, the terminal): 113 checks ok, 3:26. (The arm64 VM was not run; since run on
+  this program: BOX-NOTES.md, "The runs again on the final program", byte for byte,
+  `a733f9bc…`.)
 - **`bin/box-rebuild`** (amd64, at `761a781`, the new seed's commit, 23:38 with `bin/box-tools
   build`): the namespaces compiled in the box (67 s), a2g there (307 s, was 500), the image built
   in the box **= the host's, byte for byte** (`4f394cc6...`, 100,757,802 bytes; the box's run

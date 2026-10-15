@@ -1,29 +1,33 @@
 # B1: Arbace on Go — plan
 
-Status: plan, revised at the user's proposal (2026-10-08); the user decided D1, D2, D4, D5 and
-D6 the same day (below); D6 was partly reversed on 2026-10-09 and 2026-10-10 (`proxy`, the
-fork-join pool and streams, dates, `defclass`, files, sockets, processes, java.time,
-java.util.concurrent, java.security's basics, java.text: D6 below). Steps 0-8 are done: B1a
-ended with its freeze on 2026-10-11 (the branch `arbace-for-golang`, the tag
-`arbace-for-go1.27.1-v1`). B1b, the box, started the same day (below): S0, S1, S2 and S6's
-amd64 half done, S3 and S5 done on amd64 (amendments BX30-BX36 and BX40-BX44 accepted).
-B1 is the milestone after g2a's G0-G2 ([G2C-SURVEY.md](../G2C-SURVEY.md) §5.2, §7). The user's
-decisions of 2026-10-07 put the box built by gc + TamaGo first; on 2026-10-08 the user proposed
-to postpone the box and arm64, and to reach first **a standalone static `linux/amd64` Go
-executable of Arbace**, testable as an ordinary user process on this machine. B1 is split
-accordingly:
+Status: plan, revised at the user's proposal (2026-10-08); the user decided D1, D2, D4, D5 and D6
+the same day (below); D6 was partly reversed on 2026-10-09 and 2026-10-10 (`proxy`, the fork-join
+pool and streams, dates, `defclass`, files, sockets, processes, java.time, java.util.concurrent,
+java.security's basics, java.text: D6 below). Steps 0-8 are done: B1a ended with its freeze on
+2026-10-11 (the branch `arbace-for-golang`, the tag `arbace-for-go1.27.1-v1`). B1b, the box,
+started the same day (below): S0, S1, S2 and S6's amd64 half done, S3 and S5 done on amd64
+(amendments BX30-BX36 and BX40-BX44 accepted). Since done: the box on amd64 and on arm64
+(KVM/arm64, the Mac's Hypervisor.framework), the milestones `arbace-box-amd64-v1` and
+`arbace-box-arm64-v1` (2026-10-12, [BOX-NOTES.md](BOX-NOTES.md)); then the standalone Arbace's
+S1-S8 ([../STANDALONE-NOTES.md](../STANDALONE-NOTES.md), BOX-NOTES.md): the milestones
+`arbace-seed-is-go-v1` (2026-10-13, S1-S4) and `arbace-inside-itself-v1` (2026-10-15, S5-S8, the
+box rebuilding Arbace inside itself byte for byte). B1 is the milestone after g2a's G0-G2
+([G2C-SURVEY.md](../G2C-SURVEY.md) §5.2, §7). The user's decisions of 2026-10-07 put the box built
+by gc + TamaGo first; on 2026-10-08 the user proposed to postpone the box and arm64, and to reach
+first **a standalone static `linux/amd64` Go executable of Arbace**, testable as an ordinary user
+process on this machine. B1 is split accordingly:
 
-- **B1a (now): Arbace as a native Go executable.** A static binary (`CGO_ENABLED=0`, go1.27.1,
-  `GOOS=linux GOARCH=amd64`) running Arbace's REPL, built by gc from sources Arbace holds as
-  forms.
-  B1a is a milestone that ends with a freeze, as the JVM state was frozen on
-  `arbace-for-java-26`: a well-known branch and tag, advertised in the docs (the user's intent,
-  2026-10-08). Proposed names (the user, 2026-10-08): the branch `arbace-for-golang`, the tag
-  `arbace-for-go1.27.1-v1` after the pinned Go toolchain, with `-v2`... for fix releases on the
-  same toolchain, as `arbace-for-java-26-v1`/`-v2` (the user, 2026-10-10). It includes `linux/arm64`: Go cross-compiles the same
-  program, and the arm64 executable is tested here under QEMU's user-mode emulation
-  (`qemu-aarch64`).
-- **B1b (later): the box.** The same program built with TamaGo (`GOOS=tamago`) on go-whim's
+- **B1a (now; done, frozen 2026-10-11): Arbace as a native Go executable.** A static binary
+  (`CGO_ENABLED=0`, go1.27.1, `GOOS=linux GOARCH=amd64`) running Arbace's REPL, built by gc from
+  sources Arbace holds as forms. B1a is a milestone that ends with a freeze, as the JVM state was
+  frozen on `arbace-for-java-26`: a well-known branch and tag, advertised in the docs (the user's
+  intent, 2026-10-08). Proposed names (the user, 2026-10-08): the branch `arbace-for-golang`, the
+  tag `arbace-for-go1.27.1-v1` after the pinned Go toolchain, with `-v2`... for fix releases on the
+  same toolchain, as `arbace-for-java-26-v1`/`-v2` (the user, 2026-10-10). It includes
+  `linux/arm64`: Go cross-compiles the same program, and the arm64 executable is tested here under
+  QEMU's user-mode emulation (`qemu-aarch64`).
+- **B1b (later; done: the milestones `arbace-box-amd64-v1` and `arbace-box-arm64-v1`,
+  2026-10-12): the box.** The same program built with TamaGo (`GOOS=tamago`) on go-whim's
   monitor, amd64 on /dev/kvm, then arm64 on Hypervisor.framework.
 
 ## Where things stood (2026-10-08)
@@ -57,10 +61,11 @@ So B1a is mostly not g2a work: it is getting Arbace's *runtime and evaluator* on
    evaluator over the `Expr` tree: Clojure's `Expr` classes already have `eval`, which Compiler
    uses for top-level forms; `FnExpr` and the rest get closures (go-whim's closure backend for
    Joker is the model). Later, AOT: namespaces compiled to Go forms and built into the
-   executable (survey §5.2 (ii)), for start-up and speed.
+   executable (survey §5.2 (ii)), for start-up and speed (since done: standalone S6, the default).
 3. **Differential testing against the JVM.** The JVM Arbace is the oracle: the same forms
    evaluated by both, the same printed results; Clojure's test suite run by both, recorded per
-   namespace as `test/arbace-results.edn` is.
+   namespace as `test/arbace-results.edn` is (removed from main in S4, 2026-10-12, with the JVM
+   build: the baseline is `test/baseline-results.edn`, the Go build's `test/arbace-go-results.edn`).
 4. **The OS in one place.** jrt's use of the operating system (files, stdin/stdout, time,
    environment, threads' OS side) goes through one small host interface, so that B1b swaps it
    for the monitor's host calls without touching the rest.
@@ -78,8 +83,8 @@ the pace of the class forms and g2a work, rough, growing with the step number.
 | **3 jrt** | the Java runtime subset in Go forms: `Object` protocol, `String`/`StringBuilder`, boxed numbers, `Math`, per [JAVA-SURFACE.md](JAVA-SURFACE.md) and its decisions: the plain Java of the measured closure translated from jdk26u's source with j2a (collections, `BigInteger`/`BigDecimal`, `Character`, `Formatter`, `java.util.regex` (D5), `ConcurrentHashMap`), hand-written the VM's edge (UTF-16 `String`/`StringBuilder`, reflection over a2g's member tables, atomics, locks, executors and threads over Go's `sync` and goroutines, `ThreadLocal` over a goroutine-local slot in the Go runtime, a small `Date` on Go's `time`); the host interface. *Done* | its own tests (regex: Java's behaviour, checked against the JVM on a corpus of patterns); the round trip of its forms | 10-15 |
 | **4 a2g converter** | class forms → Go forms, in dependency order: `Util`, `Murmur3`, `Numbers`, the persistent collections, `Symbol`/`Keyword`/`Var`/`Namespace`, seqs, `LispReader`, printing, `RT`. *Done* | per class, differential tests against the JVM Arbace: the same operations, the same results | 6-10 |
 | **5 The evaluator** | `Compiler`'s analyser through a2g, with an `Expr` evaluator in place of bytecode emission (closures for `fn*`, `loop`/`recur`, `try`, `letfn`; `deftype`/`reify` through jrt's dispatch). *Done 2026-10-09 (phase 2B)* | `arbace/core.ae` loads from source; a growing part of Clojure's test suite passes, recorded per namespace | 6-10 |
-| **6 The executable** | `bin/arbace-go` (name to choose): static binaries for `linux/amd64` and `linux/arm64` with `arbace.main`'s REPL, `-e`, scripts; the core namespaces prepared at build time (pre-read or pre-analysed) to start fast. *Done 2026-10-09: pre-analysed, the image of prepared namespaces (EXEC-NOTES.md, amendment U1); start 4.2 s to 0.32 s on amd64* | a REPL as a user process: read, eval, print, `doc`, errors; start time and size measured against the JVM launcher (`bin/arbace`, now `bin/arbace-j`) and Joker; a smoke test in `bin/gate`; the arm64 binary passes the same under `qemu-aarch64` | 2-3 |
-| **7 Speed** | closure compilation of `Expr`s, then AOT of namespaces to Go forms built into the executable. *Done 2026-10-10: 7a the running program's speed (amendments O1, O2, O4, O5; O3 dropped), 7b the evaluator's closure compilation (EC1-EC6) ([SPEED-NOTES.md](SPEED-NOTES.md)); AOT of namespaces to Go not scheduled (the user, 2026-10-10)* | benchmarks (`bin/arbace-bench`'s workload) against the JVM Arbace; the suite still passes | open |
+| **6 The executable** | `bin/arbace-go` (name to choose): static binaries for `linux/amd64` and `linux/arm64` with `arbace.main`'s REPL, `-e`, scripts; the core namespaces prepared at build time (pre-read or pre-analysed) to start fast. *Done 2026-10-09: pre-analysed, the image of prepared namespaces (EXEC-NOTES.md, amendment U1); start 4.2 s to 0.32 s on amd64* | a REPL as a user process: read, eval, print, `doc`, errors; start time and size measured against the JVM launcher (`bin/arbace`, then `bin/arbace-j`; removed from main in S4, on `arbace-for-java-26` as `bin/arbace`) and Joker; a smoke test in `bin/gate`; the arm64 binary passes the same under `qemu-aarch64` | 2-3 |
+| **7 Speed** | closure compilation of `Expr`s, then AOT of namespaces to Go forms built into the executable. *Done 2026-10-10: 7a the running program's speed (amendments O1, O2, O4, O5; O3 dropped), 7b the evaluator's closure compilation (EC1-EC6) ([SPEED-NOTES.md](SPEED-NOTES.md)); AOT of namespaces to Go not scheduled (the user, 2026-10-10; since done: standalone S6, the default)* | benchmarks (`bin/arbace-bench`'s workload, on `arbace-for-java-26`) against the JVM Arbace; the suite still passes | open |
 | **8 The freeze** | the docs, the gate, and a branch and tag for the static executables, as for `arbace-for-java-26`; the READMEs diverge as at that freeze: main's gains a section "Arbace for Golang" after "Arbace for Java 26" (the branch `arbace-for-golang`, its tags, a link to the branch's freeze document), and the branch's README describes it locally (its own freeze document, how to build and run the executables, the releases); main's journal starts over, as at the JVM freeze: the history up to the freeze stays on `arbace-for-golang`, its tag and in git, and main's new journal opens with a pointer to them. *Done 2026-10-11: the branch `arbace-for-golang` and the tag `arbace-for-go1.27.1-v1`* | the user's confirmation | 1 |
 
 The `.ae` rename (Arbace's sources from `.clj` to `.ae`, one self-contained change; the user's
@@ -111,35 +116,35 @@ The focus right after the `arbace-for-golang` freeze and the `.ae` rename (the u
 
 From the executable: the configuration becomes `GOOS=tamago` (TamaGo's go1.27.1), jrt's host
 interface is answered by go-whim's doorbell through its TamaGo board, and the image runs on its
-monitor. Then: the image's own Go (board, TamaGo's runtime, std) as round-tripped forms, the
-image byte-identical to one built from the originals; amd64 on /dev/kvm here; arm64 under QEMU
-here and on Hypervisor.framework on the user's Mac. How Arbace depends on go-whim (its checkout
-pinned by commit, or vendored) is decided then. The survey and its stages S0-S6:
-[BOX-SURVEY.md](BOX-SURVEY.md). Decided 2026-10-11 (D3, D8-D14, all as recommended): vendored
-as Go forms. S0 done 2026-10-11: go-whim's box copied unchanged as Go forms under `box/`,
-proved by the round trip's oracle, byte-identical builds of go-whim's monitor and guests and
-go-whim's tests on /dev/kvm ([BOX-NOTES.md](BOX-NOTES.md)). S1 done 2026-10-11: the same
-program built with `GOOS=tamago` runs its REPL, `-e`, `-m` and scripts in the box on /dev/kvm,
-on one and four vCPUs, under Arbace's own launcher `arbace-box` (`bin/arbace-go --build --box`,
-`--smoke --box`; BOX-NOTES.md, S1; amendments BX1-BX10 accepted). S2 done 2026-10-11 (BOX-NOTES.md,
-S2): the image mapped (BX11), the guest's symbol table cut to the monitor's symbols, a memory
-limit in the box, the watchdog kept off, the suite's file tests and reducers passing in the box
-(the evaluator's tail calls clear the method's object, embedded namespaces load once), `fold`
-scaling on 4 vCPUs (the evaluator's yield counted per thread); start and suite times against
-native (amendments BX12-BX17 proposed). S6's amd64 half done 2026-10-11 (BOX-NOTES.md, S6):
-the guest's own Go, TamaGo's runtime and standard library and its `goos` module, held as Go
+monitor. Then: the image's own Go (board, TamaGo's runtime, std) as round-tripped forms, the image
+byte-identical to one built from the originals; amd64 on /dev/kvm here; arm64 under QEMU here and
+on Hypervisor.framework on the user's Mac. How Arbace depends on go-whim (its checkout pinned by
+commit, or vendored) is decided then. The survey and its stages S0-S6:
+[BOX-SURVEY.md](BOX-SURVEY.md). Decided 2026-10-11 (D3, D8-D14, all as recommended): vendored as Go
+forms. S0 done 2026-10-11: go-whim's box copied unchanged as Go forms under `box/`, proved by the
+round trip's oracle, byte-identical builds of go-whim's monitor and guests and go-whim's tests on
+/dev/kvm ([BOX-NOTES.md](BOX-NOTES.md)). S1 done 2026-10-11: the same program built with
+`GOOS=tamago` runs its REPL, `-e`, `-m` and scripts in the box on /dev/kvm, on one and four vCPUs,
+under Arbace's own launcher `arbace-box` (`bin/arbace-go --build --box`, `--smoke --box`;
+BOX-NOTES.md, S1; amendments BX1-BX10 accepted). S2 done 2026-10-11 (BOX-NOTES.md, S2): the image
+mapped (BX11), the guest's symbol table cut to the monitor's symbols, a memory limit in the box,
+the watchdog kept off, the suite's file tests and reducers passing in the box (the evaluator's tail
+calls clear the method's object, embedded namespaces load once), `fold` scaling on 4 vCPUs (the
+evaluator's yield counted per thread); start and suite times against native (amendments BX12-BX17
+proposed; accepted 2026-10-11, BOX-NOTES.md, S2). S6's amd64 half done 2026-10-11 (BOX-NOTES.md,
+S6): the guest's own Go, TamaGo's runtime and standard library and its `goos` module, held as Go
 forms in `tamago/` (`bin/tamago-vendor`), the box's guest built from them printed by default,
 byte-identical to the guest built from the originals (without build IDs; amendments BX20-BX24
 accepted). S3 done on amd64 2026-10-11 (BOX-NOTES.md, S3): the store, blobs by SHA-256 and refs
 with compare-and-set, in a host directory (`ARBACE_BOX_STORE`, `arbace-box --store DIR`), the
 namespace `arbace.box` over it in the box (the monitor's calls) and natively (jrt's directory
 store, the same format, one directory shareable), scripts and namespaces loaded from refs
-(`ref:NAME`, `ARBACE_PATH` entries `store:PREFIX`), the in-memory file system's snapshot as a
-tar (`arbace.box/save-fs!`, `ARBACE_BOX_FS`), the launcher's store tool (amendments BX30-BX36
-accepted). S5 done on amd64 2026-10-11 (BOX-NOTES.md, S5; D12 decided: a stream proxy): TCP
-streams through the monitor's calls under the launcher's `ARBACE_BOX_NET` policy, jrt's
-`NetHost` in the box, the sockets' oracle corpus and `bin/net-check` in the box, the socket REPL
-from the host (amendments BX40-BX44 accepted).
+(`ref:NAME`, `ARBACE_PATH` entries `store:PREFIX`), the in-memory file system's snapshot as a tar
+(`arbace.box/save-fs!`, `ARBACE_BOX_FS`), the launcher's store tool (amendments BX30-BX36
+accepted). S5 done on amd64 2026-10-11 (BOX-NOTES.md, S5; D12 decided: a stream proxy): TCP streams
+through the monitor's calls under the launcher's `ARBACE_BOX_NET` policy, jrt's `NetHost` in the
+box, the sockets' oracle corpus and `bin/net-check` in the box, the socket REPL from the host
+(amendments BX40-BX44 accepted).
 
 ## Decisions (the user's, 2026-10-08)
 
@@ -197,6 +202,7 @@ from the host (amendments BX40-BX44 accepted).
   committing to scope.
 - **Semantic drift between the JVM and Go builds.** Mitigated by differential testing for
   every step and by Clojure's suite.
-- **Performance of an interpreter.** Joker's numbers are the baseline; closure compilation
-  (step 7b) is the remedy taken, AOT (step 7's second half) not scheduled, and a native back end is B2-B4 ([G2C-SURVEY.md](../G2C-SURVEY.md) §7).
+- **Performance of an interpreter.** Joker's numbers are the baseline; closure compilation (step
+  7b) is the remedy taken, AOT (step 7's second half) not scheduled (since done: standalone S6, the
+  default), and a native back end is B2-B4 ([G2C-SURVEY.md](../G2C-SURVEY.md) §7).
 - **The box later.** Keeping the OS behind jrt's host interface is what keeps B1b small.

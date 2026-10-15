@@ -566,6 +566,7 @@ heap and no symbol tables made thrice.
 - BX11 accepted. The default stays mapped (258 MB, 0.55 s here; it shares the image's pages
   between boxes, and the slower start is nested virtualization's); `ARBACE_BOX_MAP=0` copies
   (293 MB, 0.32 s here).
+
 ## S2, the rest: measured and hardened (2026-10-11)
 
 Branch `box-s2`, S2's items but R1 (the image mapped: branch `box-mmap`, BX11, the section
@@ -2517,8 +2518,8 @@ explicit metadata after any line inserted.
   "ARBACE_BOX_RAM=6GiB: RAM above 4 GiB (HV1 (b)) ..." on 1 and 4 vCPUs.
 - `bin/box-arm64-vm smoke` (KVM/arm64 in the VM, the same smoke test, the arm64 build before the
   board's last edit, which only changed how `Hwinit0` tells the RAM is past the image): the RAM
-  check ok on 4 and 1 vCPUs, and every check ok (the run
-  of the run: 112 ok, 0 failed).
+  check ok on 4 and 1 vCPUs, and every check ok (112 ok, 0
+  failed).
 - `bin/box-vendor kvm-tests`: 27 passed, none failed (go-whim's tests on `box/` as it is: hv, vmm
   with the new `TestPlanGoHigh`, the C and TamaGo guests, go-whim's own guests on the old layout).
 - `bin/box-vendor roundtrip`: every package in every configuration passes (tree, export, code).
@@ -2750,6 +2751,9 @@ the shared host), the launcher of main `38bcad1`:
   it enters the gate's key).
 
 ### Next (S7's rest)
+
+(Since done: "S7's exit criterion (2026-10-13)" below.)
+
 
 - `arbace.box` gains the spawn (`spawn`, `spawn-wait`, the request and result as maps) and the
   trees (`put-tree`, `tree`, `get-tree`, mounted or extracted), over new natives of jrt's
@@ -3284,7 +3288,9 @@ times are this machine's under that load, not the box's best):
 
 ### The runs again on the final program (2026-10-14, the commits `3bf351b`, `338c4a2`)
 
-After S6 and its size work (`.tmp/s8b/run.sh`, at `3bf351b`; the journal's entry of the day):
+After S6 and its size work (`.tmp/s8b/run.sh`, at `3bf351b`; the journal at the tag
+`arbace-inside-itself-v1`, the entries of 2026-10-14 "S8 again on the final program; the Mac byte
+for byte" and "S8 in the emulated arm64 VM on the final program, byte for byte"):
 
 - **amd64** (`bin/box-rebuild --dir .tmp/box-rebuild/amd64-v1 prepare box host compare boot smoke
   plan-check`): in the box 785 s, on the host 661 s. **The image built in the box = the host's,
@@ -3306,7 +3312,9 @@ After S6 and its size work (`.tmp/s8b/run.sh`, at `3bf351b`; the journal's entry
   set only inside the checklist, and its boot check did not expect `aarch64`; and a guest of 61
   GiB was refused by Hypervisor.framework's `hv_vm_map` (`HV_BAD_ARGUMENT`) before the monitor's
   limit check could name the limit. Fixed in `338c4a2`: the monitor checks the guest's RAM against
-  `maxGuestEnd` before any memory is mapped; `box` defaults to 4 vCPUs; the boot check expects
+  `maxGuestEnd` before any memory is mapped (moved in `c3fdd36` to
+`vmm/guestram.go`'s `mapGuest`, `vmm.go`'s vendored layout restored: `bin/box-vendor roundtrip`
+27 of 27); `box` defaults to 4 vCPUs; the boot check expects
   `aarch64`. The bundle of `338c4a2` (its arm64 host image `579c8b3b…`): the checklist 46 of 46,
   the rebuild 4 of 4, the image rebuilt on the Mac = Linux's, `579c8b3b…`, 98,464,042 bytes, in 352
   s, booted by its ref. HV1 on the Mac: 6 GiB and 60 GiB slots, 61 GiB refused with the limit
@@ -3314,15 +3322,26 @@ After S6 and its size work (`.tmp/s8b/run.sh`, at `3bf351b`; the journal's entry
   on the Mac against 785 s in the amd64 box (nested KVM). The whole chain on arm64 hardware holds.
 
 So S8's exit criterion holds on the final program: byte for byte on amd64, in the emulated arm64
-VM and on the Mac. The whole chain in the VM (BX117 (a)) is tried again after it.
+VM and on the Mac. The whole chain in the VM (BX117 (a)) is running since 2026-10-14 22:49 (the
+namespaces compiled in 8,839 s; no result yet, as of 2026-10-15).
+
+### The milestone (2026-10-15, `c3fdd36`)
+
+`bin/gate --full` passed at `c3fdd36` in 37 min 48 s, after two fixes of its first run's
+failures: `jdk/edge.edn` recorded again (a2g's program unchanged), and the guest's RAM check moved
+from `vmm.go` to `vmm/guestram.go` (`mapGuest`), `vmm.go`'s vendored layout restored
+(`bin/box-vendor roundtrip` 27 of 27). `bin/box-rebuild` by hand at `c3fdd36` (amd64): in the box
+702 s, on the host 622 s, **the image built in the box = the host's, byte for byte**:
+`3131e754d401aad5774c023091147ed7c60cd890c0e78a96d9df51919acd68e7`, 100,757,802 bytes; booted by
+its ref ("arbace-seed-is-go-v1-155-gc3fdd36 amd64"); bin/box-smoke 119 ok; plan-check 281
+packages. Tagged `arbace-inside-itself-v1` on main (`e0ad476`).
 
 ### Left
 
-- The Mac's run and the runs again after S6: done (above).
-- The whole chain in the VM (BX117 (a)), tried again after S6.
+- The whole chain in the VM (BX117 (a)): running since 2026-10-14 (no result yet).
 - The guests' peak memory per step is not measured (the launcher's statistics report counts,
   not a guest's touched pages); BX116's sizes are SA101's and S7's.
-- `bin/box-rebuild` is not in `bin/gate --full` until BX119 is decided.
+- `bin/box-rebuild` stays out of `bin/gate --full`, run by hand at milestones (BX119).
 
 **Decided (2026-10-14, the user):** BX110 (a), BX111-BX116 (a), BX118 (a), as recommended;
 BX117 (b) now, (a) tried again after S6, the Mac running the whole chain on arm64; BX119 against
