@@ -2761,6 +2761,8 @@ driver laid out differently prints another tree; not changed.
   third of the gain). *Recommended: (a)*: the same tree, the back end about half as long, and
   nothing changes when a source of the closure is not the program's.
 
+**Decided (2026-10-15, the user):** SA164 (a), as built.
+
 ## The build's speed, second round, part B: a2g (2026-10-15)
 
 The user's order (a second round, part B): a2g's phases after the compiled namespaces arrive,
@@ -2970,3 +2972,5 @@ not done (SA191).
 - **SA191 `aot_arbace_core_protocols`.** (a) Left a package of its own; (b) merged into
   `aot_arbace_core` (the back end's packaging). *Recommended: (a)*: about 2 s, only when the
   runtime or the protocols change.
+
+**Decided (2026-10-15, the user):** SA190 (a), as built; SA191 (a), left as it is.
