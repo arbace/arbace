@@ -2700,3 +2700,71 @@ byte**, `b6f2e89e...`, the three builds one run each from the new stage 0, 561 s
   re-recorded edge makes builds two runs until a re-seed). *Recommended: (a)*.
 
 **Decided (2026-10-15, the user):** SA160-SA163 (a) as recommended, all as built.
+
+## The build's speed, second round, part D: g2a's own work (2026-10-15)
+
+Status: on the branch `speed2-g2a` (from main at `1b24757`). Part C measured g2a's step in a
+one-run build at about 18.6 s, `jrt` cached: Go's link about 5 s, the rest g2a's own. Measured on
+the shared host (the emulated arm64 VM and the other parts' builds running), `.tmp/speed2g/`
+(`bench.sh`: `bin/g2a build --line-file --arch amd64` of one fixed a2g program, Go's build cache
+warm, the print cache as named).
+
+### Where the time went
+
+A CPU profile of main's g2a with every package in the print cache (`ARBACE_CPUPROFILE`, 17.6 s,
+62.6 CPU-seconds): 62% in `LispReader` and the readers under it, the rest mostly Go's collector.
+g2a read every forms file of the program (77 MB, `read-all`, in parallel) on every build, cached
+or not: collecting a package (`arbace.g2a.print/collect`: its `go/package` options, its files
+and the files it loads) needs its forms, and `package-file?` reads every file to find the
+package files. The print cache then skipped only the printing.
+
+### What changed
+
+- **The collect index** (SA190). With `--print-cache`, per source root and host
+  (`DIR/collect/<sha>`, the SHA-256 of `G2A_HOST_ID` and the root's path): which forms files
+  are package files, by their contents' SHA-256, and for each package file its collection
+  (`:package`, `:name`, `:path`) and the files it read, each with its SHA-256. A package whose
+  files all hash the same is taken from the index, its forms not read (`:collected`, a delay:
+  read and collected only when the package must be printed, and then required equal to the
+  index's); only the files of packages not in the index are read, in parallel as before. The
+  files are hashed once each, in parallel. The index is written (atomically, a file renamed)
+  when it changes, an entry left out unless its data prints and reads back equal (metadata
+  included); read, its mtime is set, and `bin/lib/gocache.bash` trims indexes with the
+  entries. `doc/go/BUILD.md`, "The print cache".
+- **Cached printed files copied byte for byte**, not read into strings and written again
+  (decoding and encoding 61 MB of text, most of what was left).
+
+### Measured
+
+| case (g2a build, amd64, one a2g program) | main | `speed2-g2a` |
+|---|---:|---:|
+| the print cache cold (every package printed) | 41.9 s | 37.6 s (the same, within the noise) |
+| every package in the print cache | 18.0 to 20.6 s | 6.0 to 7.1 s (g2a about 1.5 s, Go's link 4.6 s) |
+| four packages changed, `lang` (9.2 MB) and `aot_arbace_core` among them | 20.3 s | 23.0 s (the same: printing them is the time) |
+
+`bin/arbace-go --build` on the branch, twice from the same sources: g2a's builds (amd64, arm64
+at once) 60 and 63 s (its print cache cold: the host's identity new), then 6 and 7 s, the
+executables the same (`162c5fb6...`, `08154aca...`). Then a one-run build after a one-string
+change to `arbace/c2a/rules.ae` (reverted after): g2a 8 and 8 s, one package printed
+(`aot_arbace_c2a_rules`), where main reads every package's forms (about 18 to 20 s). The printed
+module is byte for byte main's: the branch's build of that program printed again by main's g2a
+with a cold cache (`diff -r` of both work modules, the first and the second build's), and on
+`bench.sh` the same executable from both (`e4026df7...`).
+
+### `aot_arbace_core` late
+
+`aot_arbace_core` imports `aot_arbace_core_protocols` (arbace.core uses the protocols' types),
+so Go compiles it after that package (2.0 to 2.4 s after `lang`); then the small packages
+importing it (0.5 s), `cmd/arbace` (1.8 s) and the link. It counts only when `lang` or the
+protocols change (Go's cache keeps the rest): a build after a change to the runtime. Merging the
+protocols into core's package (the back end's choice of packages) would save about 2 s there;
+not done (SA191).
+
+### Amendments (proposed 2026-10-15)
+
+- **SA190 g2a's collect index.** (a) As built: with `--print-cache`, a package whose files are
+  unchanged is not read; (b) the forms read on every build, as before. *Recommended: (a)*: the
+  printed module is the same; a one-run build's g2a about 10 to 12 s shorter.
+- **SA191 `aot_arbace_core_protocols`.** (a) Left a package of its own; (b) merged into
+  `aot_arbace_core` (the back end's packaging). *Recommended: (a)*: about 2 s, only when the
+  runtime or the protocols change.
