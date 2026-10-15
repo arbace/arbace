@@ -62,7 +62,7 @@ The current state of the work. This file is rewritten as things change. For the 
   decided as recommended (the slot 3 GiB by default, `ARBACE_BOX_RAM` per launch); the Mac's
   RAM checks with the next Mac bundle. HV6 measured (29 ppm, no resync).
 
-- The next milestone, `arbace-inside-itself-v1` (the user, 2026-10-13), includes all of this
+- The milestone `arbace-inside-itself-v1` (the user, 2026-10-13; reached 2026-10-15) includes all of this
   section: the standalone survey's S5-S8 (the box rebuilding Arbace inside itself), the known
   issues below and the speed item. `bin/gate --full` runs at it. Decided (the user): three
   tracks in parallel, S5 with the known issues, S6 (which carries the speed item), S7; S8 when
@@ -82,8 +82,10 @@ The current state of the work. This file is rewritten as things change. For the 
   byte for byte on amd64 (`b7c00302…`), in the emulated arm64 VM (`a733f9bc…`, 8 h 21 min) and on
   the Mac (`579c8b3b…`, 352 s; the checklist 46 of 46, the rebuild 4 of 4; two checklist fixes,
   `338c4a2`); the Mac's HV1, HV6 (5 ppm) and HV7 (352 s against the amd64 box's 785 s) measured.
-  Left: the whole chain in the VM tried again (BX117 (a)), `bin/gate --full` with `bin/box-rebuild`
-  by hand, the tag. The user may upgrade the Mac to macOS 26.
+  `bin/gate --full` passed at `c3fdd36` (after two fixes: the edge recorded again, the RAM check
+  in `vmm/guestram.go`), `bin/box-rebuild` by hand byte for byte (`3131e754…`). **The milestone
+  `arbace-inside-itself-v1` reached and tagged (2026-10-15).** Running: the whole chain in the VM
+  (BX117 (a)), recorded when it ends. The user may upgrade the Mac to macOS 26.
 - Known issues: fixed in S5 (SA90 (b), `reflect_tables.ae`, the box's oracle run, `Var`,
   `Reflector` and the `.subst` variants merged, `bin/box-vendor convert`); RT, Main and
   Compiler's hand-written variants merged in S6 (SA150).

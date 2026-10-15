@@ -1516,3 +1516,20 @@ time as `bin/gate --full`, then `bin/box-rebuild` by hand and the tag.
   checked against `maxGuestEnd`, then `syscall.Mmap`), called where `newMachine` called
   `syscall.Mmap`: vmm.go's layout is the vendored one again; the round trip 27 of 27.
 The essential gate does not run either check; `bin/gate --full` runs again.
+
+## 2026-10-15: the milestone `arbace-inside-itself-v1`
+
+`bin/gate --full` at `c3fdd36` passed (37 min 48 s): the seed, stage 0, the build, the smoke
+test, Clojure's suite and the oracle as recorded, j2a's suite, `jrt-convert verify`, `a2g-edge
+verify`, the fixtures' forms, the build afresh, the box's guests from `tamago/`'s forms identical
+to TamaGo's originals' and the box's smoke test, the fixpoint, g2a's round trips and the box's
+vendoring checks. Then `bin/box-rebuild` by hand (BX119; `bin/arbace-go --build --box`,
+`bin/box-tools build amd64`, `bin/box-rebuild --dir .tmp/box-rebuild/amd64-milestone prepare box
+host compare boot smoke plan-check`): in the box 702 s, on the host 622 s, the image built in the
+box = the host's, byte for byte, `3131e754d401aad5774c023091147ed7c60cd890c0e78a96d9df51919acd68e7`,
+100,757,802 bytes; booted by its ref (`arbace-seed-is-go-v1-155-gc3fdd36 amd64`); the box's smoke
+test 119 ok; plan-check 281 packages, the same as go list's. With S8 on the final program in the
+emulated arm64 VM and on the Mac (the entries of 2026-10-14), the milestone holds: S5-S8, the
+known issues, the speed and the size. Tagged `arbace-inside-itself-v1` on main (not a freeze).
+Still running: the whole chain in the emulated arm64 VM, nothing given (BX117 (a), at
+`434021a`), recorded when it ends.
