@@ -6,8 +6,9 @@ executable for `linux/amd64` or `linux/arm64`. This is B1a's step 0 ([B1-PLAN.md
 the path by which Arbace itself is built from forms (`bin/arbace-go`).
 
 ```sh
-bin/g2a build [--arch amd64|arm64] [-o OUT] [--layout gofmt|lines] [--line-file] [--work DIR]
-              [--overlay FILE] [--pgo FILE] DIR
+bin/g2a build [--arch amd64|arm64] [--goos linux|tamago|darwin] [-o OUT] [--layout gofmt|lines]
+              [--line-file] [--work DIR] [--overlay FILE] [--pgo FILE] [--print-cache DIR]
+              [--root ROOT]... [--goos-dir DIR] DIR
 bin/g2a build --print-only --work DIR [--tests] [--module PATH] [--layout gofmt|lines]
               [--line-file] SRC
 bin/g2a-build-tests [--arch amd64|arm64]... [PROG...]
@@ -60,7 +61,8 @@ DIR/
   embedded namespace sources (`go/arbace/cmd/arbace/res/`, its `:embed-files`).
 - **Files.** One Go file per `go/file` form; when `go/package` has `:files`, the two must name
   the same files.
-- **Configuration.** The target is the command's: `GOOS=linux`, `GOARCH` from `--arch`. A
+- **Configuration.** The target is the command's: `GOOS` from `--goos` (default `linux`;
+  `tamago` and `darwin` below and in BOX-NOTES.md, S1 and S4), `GOARCH` from `--arch`. A
   package's `:config` (SPEC §4.2) is not needed; its `:goos` and `:goarch` are not used, so one
   forms tree builds for both architectures (files for one architecture only carry `:build`
   lines, which gc evaluates). The main package's `:config` `:tags` and `:goexperiment`, when
@@ -132,6 +134,18 @@ reproducible: the overlay's files are inputs of gc's build IDs like any source. 
 forms are `overlay/go/runtime/` (jrt phase 2a, JRT-NOTES.md; A2G-SPEC §9.3, amendment T15);
 `bin/jrt overlay` prints them and writes the overlay file for `$G2A_GOROOT`, and `bin/jrt
 overlay --check` compares them with the toolchain's runtime.
+
+## The print cache (standalone S6, SA146)
+
+`--print-cache DIR` keeps the printed files of each package in `DIR`, keyed by the host's
+identity (`G2A_HOST_ID`, the executable's and `arbace/g2a/`'s sources' hashes, set by
+`bin/lib/g2a-host.bash` for this option), the options that change the printing (`--layout`,
+`--line-file`, the tests) and the package's forms files (their paths and contents): a package
+the same host printed from the same forms is taken from the cache, not printed again. Without
+`G2A_HOST_ID` the option does nothing. `bin/arbace-go` passes `.tmp/g2a-print-cache` and trims it
+before each build of entries unused for six hours (`bin/lib/gocache.bash`,
+`ARBACE_GOCACHE_KEEP_MIN`). The printed module is the same either way (STANDALONE-NOTES.md, "The
+build's time (SA146-SA148)").
 
 Checked (2026-10-08) with the experiment's overlay of `.tmp/a2g-exp/gls/` (A2G-SPEC §13.3): a
 program of Go forms pulling `runtime.arbace_getLocal` with `//go:linkname` fails to link

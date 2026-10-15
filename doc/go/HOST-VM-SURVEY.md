@@ -3,7 +3,13 @@
 Status: survey, 2026-10-13, on main `68e00ce`, for the standalone survey's next stages (S5-S8,
 [../STANDALONE-SURVEY.md](../STANDALONE-SURVEY.md) §9.1: the box rebuilding Arbace inside
 itself) and the box's design ([BOX-SURVEY.md](BOX-SURVEY.md), [BOX-NOTES.md](BOX-NOTES.md)).
-Nothing here is implemented. The proposals (HV1-HV9, §14) are the user's to decide.
+The proposals (HV1-HV9, §14) were decided by the user on 2026-10-13, all accepted as
+recommended (HV1 going to (b) after its measurement). Since built (BOX-NOTES.md): HV1 (b), RAM
+above 4 GiB ("HV1 (b): RAM above 4 GiB", BX80-BX84); HV3 (b), HV4 (b), HV5 (a), HV8 (a) and HV9
+(a) in S7's tool guests ("S7: tool guests"); HV2 (a) and HV6 (a) leave things as they were (HV2
+(b) waits for a long-lived large box, BX84); HV6's and HV7's runs on the Mac done with S8 on the
+final program (2026-10-14). The measurements of the host VM and the box below are as of
+2026-10-13.
 
 ## Why
 
@@ -16,7 +22,7 @@ of the cloud's hypervisor. Two virtual machines are therefore stacked, made to o
   boot loader, a whole Linux distribution);
 - the box is a single Go program in ring 0 or EL1, with no firmware, no devices and no
   interrupts. Everything it gets from outside passes through one doorbell page and about 40
-  calls.
+  calls (as of 2026-10-13; S7's spawn calls make `abi.NCalls` 57).
 
 S5-S8 ask the box to do what the host VM does every day: hold a source tree, run a compiler
 toolchain, use several gigabytes of memory for a long time, and keep its results. This survey
@@ -56,7 +62,8 @@ what the host VM's design teaches.
   plausibly explain why the box's exits cost 16-18 µs here against about 1 µs on bare metal
   *(inferred)*.
 - **The box is small on every axis.** It has 1-32 vCPUs (4 by default) and a fixed 3 GiB slot
-  whose collector limit is 2 GiB. Its RAM is never given back to the host. It has no block
+  whose collector limit is 2 GiB (as of 2026-10-13; since HV1 (b) the 3 GiB is the default,
+  `ARBACE_BOX_RAM` per launch, BX81). Its RAM is never given back to the host. It has no block
   device: its file system is TamaGo's in memory (`/dev`, `/tmp`), lost at exit, and the store
   (blobs of at most 256 MiB, in a host directory) is its only persistence. It has no network
   unless the launcher allows one (then a TCP stream proxy under a policy). It has no processes,
@@ -114,7 +121,7 @@ what the host VM's design teaches.
   (`box/go/arbace/box/abi/abi.ae`: `Doorbell`). The guest stores the address of a 64-byte call
   block there and exits. The calls are numbered 1-29 (go-whim's, of which Arbace uses 12-14),
   40-52 (the network) and 53 (the event area), with `abi.NCalls` 54 (BOX-NOTES S1 BX8, S5 BX40,
-  BX50).
+  BX50; as of 2026-10-13: since S7, 54-56 are the spawn calls, `abi.NCalls` 57).
 - **Clock source**: the TSC, scaled by `KVM_GET_TSC_KHZ` (`hv/tsc_linux_amd64.ae`), or
   `CNTVCT_EL0` on arm64. The board's `Nanotime` computes it in the guest, without an exit.
 - **Nesting from inside**: the box cannot nest a VM of its own. It has no processes, and running
@@ -437,11 +444,11 @@ what the host VM's design teaches.
 |---|---|---|
 | hypervisor | KVM under QEMU 9.2 (`pc-q35-9.2`), L1 of the cloud | go-whim's monitor on `/dev/kvm` of the host VM (L2), KVM/arm64, Hypervisor.framework |
 | firmware, boot | OVMF (UEFI 2.7, Secure Boot off) → GRUB 2.14 → Linux 6.18.56 + initramfs → OpenRC, about 20 s | none: the ELF mapped from the launcher's file, entry in long mode or EL1 with registers set, 0.3-0.9 s |
-| platform | PC: ACPI, PCI, LAPIC (x2APIC), HPET, RTC, 16550 UART | none: one doorbell page at `0xf0000000`, 43 calls (1-29, 40-53) |
+| platform | PC: ACPI, PCI, LAPIC (x2APIC), HPET, RTC, 16550 UART | none: one doorbell page at `0xf0000000`, 43 calls (1-29, 40-53; since S7 46, 54-56 the spawn) |
 | paravirtual devices | virtio net, blk ×2, rng, balloon, console (guest agent) | calls: console, store, network proxy, random, SMP, event area |
 | vCPUs | 64 (one socket, no SMT), Zen 3, AVX2, no invariant-TSC bit | 1-32, default 4; SSE only (no XSAVE, no AVX); no preemption, evaluator yields |
 | nested virtualization | offered (NPT, VMCB clean, TSC scaling; no decode assists, no AVIC, 16 ASIDs) | none |
-| memory | 64 GiB booted, 33 GiB ballooned away, 29.7 GiB visible; no swap; THP always; one NUMA node | 3 GiB fixed slot, 2 GiB collector limit, committed on touch, never returned |
+| memory | 64 GiB booted, 33 GiB ballooned away, 29.7 GiB visible; no swap; THP always; one NUMA node | 3 GiB fixed slot (since HV1 (b) the default, `ARBACE_BOX_RAM` per launch), 2 GiB collector limit, committed on touch, never returned |
 | memory return | balloon with free-page reporting | none (AP stacks only) |
 | storage | virtio-blk 120 GiB, ext4 (1 KiB blocks), 68 GB free; 426 MB/s sequential read, about 1.4 ms per synced 4 KiB write | no block device; in-memory file system in the heap, lost at exit; the store (blobs of 256 MiB at most, a host directory) |
 | network | virtio-net, MTU 1500, IPv4 private /24 plus a public /32, IPv6 link-local only, no in-VM firewall, sshd and mosh listening | none by default; a TCP stream proxy under the launcher's policy (loopback listening, dial allow-list, host-side DNS), TLS in the guest, about 330 MB/s |
@@ -590,7 +597,8 @@ are recorded below each.
   a2g fits in the slot but the collector runs constantly in translate and write: beyond the
   1.5× criterion, so by the user's decision HV1 goes to (b), RAM above 4 GiB with the doorbell
   unchanged, starting with its experiment (a TamaGo guest linked and loaded above 4 GiB on amd64;
-  the IPA limits on KVM/arm64 and Hypervisor.framework).
+  the IPA limits on KVM/arm64 and Hypervisor.framework). (Since done: BOX-NOTES "HV1 (b): RAM
+  above 4 GiB", BX80-BX84; on the Mac 6 and 60 GiB slots, 61 GiB refused.)
 
 - **HV2 Memory back to the host.** Options:
   - (a) nothing: tool guests are short, and their exit frees all;
@@ -643,15 +651,18 @@ are recorded below each.
   on the Mac. Take (b) only if the drift exceeds about a second an hour.
 
   **Measured (2026-10-13), HV6's test here:** an idle box (1 vCPU, the launcher of
-  `target/arbace-go/box-amd64`) printed `System/currentTimeMillis` every minute for an hour,
-  each line stamped by the host's clock on arrival (`.tmp/hv6/run.sh`). The guest's clock minus
-  the host's went from -6 ms to -111 ms, steadily, about 1.75 ms a minute: the guest's clock
-  runs about 29 ppm slow, about 0.1 s an hour (2.5 s a day), presumably the TSC's rate as the
-  board takes it, not tracking the host's NTP-disciplined clock. Five single-minute outliers
-  (-73, -96, -94, -75 ms and one of -4.3 s at minute 51, while another agent's large guest
-  was starting) came back to the line the next minute: delivery delays, not clock steps. Below
-  the 1 s an hour criterion, so (a) stands here; the Mac's run is due at the next box
-  milestone (HV7). A resync (b) would be wanted for boxes living for days.
+  `target/arbace-go/box-amd64`) printed `System/currentTimeMillis` every minute for an hour, each
+  line stamped by the host's clock on arrival (`.tmp/hv6/run.sh`). The guest's clock minus the
+  host's went from -6 ms to -111 ms, steadily, about 1.75 ms a minute: the guest's clock runs about
+  29 ppm slow, about 0.1 s an hour (2.5 s a day), presumably the TSC's rate as the board takes it,
+  not tracking the host's NTP-disciplined clock. Five single-minute outliers (-73, -96, -94, -75 ms
+  and one of -4.3 s at minute 51, while another agent's large guest was starting) came back to the
+  line the next minute: delivery delays, not clock steps. Below the 1 s an hour criterion, so (a)
+  stands here; the Mac's run is due at the next box milestone (HV7). (Since done, 2026-10-14,
+  BOX-NOTES "The runs again on the final program": on the Mac about 5 ppm over an hour, no resync;
+  HV7's timed build 352 s on the Mac against 785 s in the amd64 box; HV1 on the Mac 6 and 60 GiB
+  slots, 61 GiB refused with the limit named.) A resync (b) would be wanted for boxes living for
+  days.
 
 - **HV7 Where S8's times are measured.** Options:
   - (a) here only (nested SVM without decode assists: exits 16-18 µs);
@@ -704,5 +715,6 @@ are recorded below each.
   - `box/go/arbace/box/{abi/abi.ae,vmm/{layout,tamago,smp,seccomp_linux_amd64,dontneed_linux}.ae,hv/{kvm_linux_amd64,tsc_linux_amd64}.ae}`;
   - doc/go/BOX-SURVEY.md, doc/go/BOX-NOTES.md (S1-S6, the store, the network, wake on events,
     TLS, BX1-BX75);
-  - doc/STANDALONE-SURVEY.md (§6, §8, §9), doc/STANDALONE-NOTES.md ("Speed", "a2g in
-    parallel"), doc/ALPINE.md, doc/AGENDA.md, doc/JOURNAL.md (D8-D10).
+  - doc/STANDALONE-SURVEY.md (§6, §8, §9), doc/STANDALONE-NOTES.md ("Speed", "a2g in parallel"),
+    doc/ALPINE.md, doc/AGENDA.md, doc/JOURNAL.md (D8-D10; since 2026-10-15 the journal at the tag
+    `arbace-inside-itself-v1`).
