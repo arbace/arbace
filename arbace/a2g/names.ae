@@ -51,13 +51,29 @@
   "Names a2g's generated code uses for itself (receivers, imports, temporaries)."
   #{"t" "this" "jrt" "math" "atomic" "reflect" "unsafe" "lang" "exc" "ctl" "rv" "_"})
 
+(defn- memo-str
+  "f of one string argument, its results kept (a2g's names are asked for again and again,
+  from every thread translating)."
+  [f]
+  (let [cache (java.util.concurrent.ConcurrentHashMap.)]
+    (fn [^String k]
+      (or (.get cache k)
+          (let [v (f k)]
+            (.put cache k v)
+            v)))))
+
+(def ^:private munge-name*
+  (memo-str
+    (fn [s]
+      (let [m (str/replace (str (munge s)) "$" "_")]
+        ;; munge leaves characters Go rejects that Clojure allows in symbols only rarely;
+        ;; anything else not a letter, digit or _ becomes _
+        (apply str (map (fn [c] (if (or (Character/isLetterOrDigit (char c)) (= c \_)) c \_)) m))))))
+
 (defn munge-name
   "A Java or Clojure name as a Go identifier fragment: Clojure's munge, $ as _."
   [s]
-  (let [m (str/replace (str (munge (str s))) "$" "_")]
-    ;; munge leaves characters Go rejects that Clojure allows in symbols only rarely; anything
-    ;; else not a letter, digit or _ becomes _
-    (apply str (map (fn [c] (if (or (Character/isLetterOrDigit (char c)) (= c \_)) c \_)) m))))
+  (munge-name* (str s)))
 
 (defn local-name
   "The Go name of a Java local or parameter (§4.4): munged, with _ appended when it would be a
@@ -114,12 +130,17 @@
   (and (str/starts-with? internal "arbace/") (not (str/starts-with? internal "arbace/lang/"))
        (not (str/starts-with? internal "arbace/java/api/"))))
 
+(declare go-class-name*)
+
 (defn go-class-name
   "The Go type name of a class: its binary name after the package, $ as _; X prepended when it
   does not start with an upper-case letter. A compiled namespace's class (S6), in package lang
   with the runtime's, is named by its whole binary name between A_ and _A (arbace.core.Vec is
   A_arbace_core_Vec_A, the fn arbace.walk$walk A_arbace_walk_walk_A)."
   [internal]
+  (go-class-name* internal))
+
+(defn- go-class-name** [internal]
   (or (get renames internal)
   (when (compiled-class? internal)
     ;; _A at the end: a2g's suffixes (_class, _New, _Init ...) cannot make another one's name
@@ -130,11 +151,17 @@
       s
       (str "X" s)))))
 
+(def ^:private go-class-name* (memo-str go-class-name**))
+
 (defn capitalize [^String s]
   (if (empty? s) s (str (Character/toUpperCase (.charAt s 0)) (subs s 1))))
 
 ;; ---------------------------------------------------------------------------------------
 ;; descriptor codes (§4.4)
+
+(def ^:private method-bases
+  "[name desc] -> method-base's answer."
+  (java.util.concurrent.ConcurrentHashMap.))
 
 (defn desc-code
   "The code of a parameter or return descriptor in a mangled name."
@@ -147,9 +174,19 @@
     (t/class-desc? d) (go-class-name (t/desc->internal d))
     :else d))
 
+(declare method-base*)
+
 (defn method-base
   "The mangled method name without a class prefix: M_P1_..._Pn__R."
   [name desc]
+  (let [^java.util.concurrent.ConcurrentHashMap c method-bases
+        k [name desc]]
+    (or (.get c k)
+        (let [v (method-base* name desc)]
+          (.put c k v)
+          v))))
+
+(defn- method-base* [name desc]
   (let [[ps r] (t/parse-method-desc desc)
         m (capitalize (munge-name name))
         m (if (str/starts-with? m "_") (str "X" m) m)]

@@ -46,18 +46,34 @@
 ;; ---------------------------------------------------------------------------------------
 ;; Java's method resolution, independent of the world
 
+(def ^:dynamic ^java.util.HashMap *methods-by-key*
+  "Class -> {[name desc] method} of its methods in env/info's order (the first of a key), for
+  java-impl-of's lookups in a run (instead of a scan of the class's methods each; the class
+  environment does not change once the world is loaded), or nil."
+  nil)
+
+(defn- find-method-of [c name desc]
+  (if-let [^java.util.HashMap cache *methods-by-key*]
+    (let [ix (or (.get cache c)
+                 (let [ix (reduce (fn [ix mm] (let [k [(:name mm) (:desc mm)]] (if (contains? ix k) ix (assoc ix k mm))))
+                                  {} (:methods (env/info c)))]
+                   (.put cache c ix)
+                   ix))]
+      (get ix [name desc]))
+    (some #(when (and (= name (:name %)) (= desc (:desc %))) %) (:methods (env/info c)))))
+
 (defn java-impl-of
   "The [class name desc] implementing virtual method [name desc] for class n (a body in n or a
   superclass, else an interface's default), by Java's rules on the class environment."
   [n [name desc]]
   (or (some (fn [c]
-              (when-let [mm (some #(when (and (= name (:name %)) (= desc (:desc %))) %) (:methods (env/info c)))]
+              (when-let [mm (find-method-of c name desc)]
                 (when (and (not (m/static? mm)) (not (m/abstract-m? mm)) (or (not (m/private? mm)) (= c n)))
                   [c name desc])))
             (take-while some? (iterate #(:super (env/info %)) n)))
       (let [cands (for [c (env/all-supertypes n)
                         :when (and (not= c n) (env/interface? c))
-                        :let [mm (some #(when (and (= name (:name %)) (= desc (:desc %))) %) (:methods (env/info c)))]
+                        :let [mm (find-method-of c name desc)]
                         :when (and mm (not (m/abstract-m? mm)) (not (m/static? mm)) (not (m/private? mm)))]
                     c)
             cands (remove (fn [x] (some #(and (not= % x) (env/subclass? % x)) cands)) cands)]
@@ -350,7 +366,29 @@
                     (pat (:pattern cc))))]
           (pat (:pattern l)))))))
 
-(defn scan-code! [node] (walk-nodes scan-node! node))
+(def ^:dynamic ^java.util.IdentityHashMap *flat*
+  "Node -> the nodes in it scan-node! acts on, in walk-nodes' order (the run's batches of
+  methods computed in parallel ahead of their sequential scan), or nil."
+  nil)
+
+(def ^:private scanned-ops
+  "The ops scan-node! acts on (an accessor's call, an :invoke, may stand for a field access)."
+  #{:invoke :new :ctor-call :get-static :set-static :get-field :set-field :cast :instance? :class-lit
+    :new-array :array-init :try :lambda :method-ref :java-str :for-each :assert :if-instance
+    :var-deref :var-invoke :fi-adapter :switch})
+
+(defn- flatten-code
+  "The nodes of node scan-node! acts on, in walk-nodes' order."
+  [node]
+  (let [acc (java.util.ArrayList.)]
+    (walk-nodes (fn [n] (when (contains? scanned-ops (:op n)) (.add acc n))) node)
+    (vec acc)))
+
+(defn scan-code! [node]
+  (let [^java.util.IdentityHashMap flat *flat*]
+    (if-let [ns (and flat (.get flat node))]
+      (run! scan-node! ns)
+      (walk-nodes scan-node! node))))
 
 (defn method-code
   "The analyzed code of method [c name desc] of a translated class: a vector of nodes."
@@ -417,7 +455,9 @@
                 :lambda-fis (atom #{})})]
     (binding [*st* st
               *slice?* (or slice? (constantly true))
-              m/*w* (assoc m/*w* :T (:T st))]
+              m/*w* (assoc m/*w* :T (:T st))
+              *flat* (java.util.IdentityHashMap.)
+              *methods-by-key* (java.util.HashMap.)]
       (doseq [c classes] (use! c))
       (doseq [[c name desc :as k] roots]
         (when (use! c)
@@ -435,11 +475,25 @@
       (doseq [c instantiate] (when (use! c) (instantiate! c)))
       ;; functional interfaces whose adapters exist without a lambda (FromFn, A2G-SPEC §7.11)
       (doseq [fi fis] (when (use! fi) (lambda! fi)))
+      ;; the queue in batches: the methods queued so far, their code flattened in parallel
+      ;; (flatten-code: pure), then scanned one after another in the queue's order, the methods
+      ;; they reach queued for the next batch (the order of a scan one method at a time)
       (loop []
-        (when-let [k (first @(:queue st))]
-          (swap! (:queue st) subvec 1)
-          (scan-method! k)
-          (recur))))
+        (let [batch @(:queue st)]
+          (when (seq batch)
+            (reset! (:queue st) [])
+            (let [seen (java.util.IdentityHashMap.)
+                  roots (vec (for [k batch
+                                   nd (if (= "<clinit>" (second k))
+                                        (:clinit @(:state (a/decl (first k))))
+                                        (method-code k))
+                                   :when (not (or (.containsKey *flat* nd) (.containsKey seen nd)))]
+                               (do (.put seen nd true) nd)))
+                  flats (m/par-mapv (m/jobs) flatten-code roots)]
+              (dotimes [i (count roots)]
+                (.put *flat* (nth roots i) (nth flats i))))
+            (run! scan-method! batch)
+            (recur)))))
     {:T @(:T st) :reached @(:reached st) :inst @(:inst st) :unavailable @(:unavailable st)
      :missing @(:missing st) :failed-classes @(:failed-classes st) :vcalls @(:vcalls st)
      :state st}))

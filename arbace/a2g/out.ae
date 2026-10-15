@@ -51,66 +51,74 @@
 ;; when the text has not passed it yet, so that the reader's position is that line; else it
 ;; gets an explicit ^{:line n}, as does every list inside it without a line of its own. The
 ;; printer's lines layout (bin/g2a build --line-file) then gives gc's line tables the class
-;; forms' lines.
-(def ^:dynamic *lay*
-  "nil (no layout), or {:line (volatile! current line) :forced line-or-nil}."
-  nil)
+;; forms' lines. The writer passes the layout, lay, along: nil (no layout), or {:line
+;; (volatile! current line) :forced line-or-nil :meta inside-metadata?}.
 
-(defn- out! [^StringBuilder sb ^String s]
+(defn- newlines
+  "The number of newlines in s."
+  ^long [^String s]
+  (loop [i (long (.indexOf s "\n")) n 0]
+    (if (neg? i) n (recur (long (.indexOf s "\n" (unchecked-int (inc i)))) (inc n)))))
+
+(defn- out! [^StringBuilder sb lay ^String s]
   (.append sb s)
-  (when *lay*
-    (let [n (count (filter #(= % \newline) s))]
-      (when (pos? n) (vswap! (:line *lay*) + n)))))
+  (when lay
+    (let [n (newlines s)]
+      (when (pos? n) (vswap! (:line lay) + n)))))
 
-(defn- write-meta [^StringBuilder sb mt]
+(defn- write-meta [^StringBuilder sb lay mt]
   (let [mt (dissoc mt :a2g/line)]
     (when (seq mt)
-     (binding [*lay* (when *lay* (assoc *lay* :meta true))]
-      (if (and (= [:tag] (keys mt)) (symbol? (:tag mt)))
-        (do (out! sb "^") (write-form sb (:tag mt)) (out! sb " "))
-        (do (out! sb "^") (write-form sb mt) (out! sb " ")))))))
+      (let [lay (when lay (assoc lay :meta true))]
+        (if (and (= [:tag] (keys mt)) (symbol? (:tag mt)))
+          (do (out! sb lay "^") (write-form sb lay (:tag mt)) (out! sb lay " "))
+          (do (out! sb lay "^") (write-form sb lay mt) (out! sb lay " ")))))))
 
-(defn- write-items [^StringBuilder sb xs]
-  (doseq [[i x] (map-indexed vector xs)]
-    (when (pos? i) (out! sb " "))
-    (write-form sb x)))
+(defn- write-items [^StringBuilder sb lay xs]
+  (loop [xs (seq xs) first? true]
+    (when xs
+      (when-not first? (out! sb lay " "))
+      (write-form sb lay (first xs))
+      (recur (next xs) false))))
 
-(defn- write-list [^StringBuilder sb f mt]
+(defn- write-list [^StringBuilder sb lay f mt]
   (let [own (:a2g/line mt)
-        forced (:forced *lay*)
-        cur (when *lay* @(:line *lay*))
+        forced (:forced lay)
+        cur (when lay @(:line lay))
         explicit (cond
-                   (nil? *lay*) nil
+                   (nil? lay) nil
                    forced (or own forced)
                    ;; inside metadata (tags): no padding, the line of the form around
-                   (:meta *lay*) nil
+                   (:meta lay) nil
                    (nil? own) nil
-                   (>= own cur) (do (out! sb (apply str (repeat (- own cur) "\n"))) nil)
+                   (>= own cur) (do (out! sb lay (apply str (repeat (- own cur) "\n"))) nil)
                    :else own)
-        body (fn []
-               (write-meta sb (if explicit (assoc mt :line explicit) mt))
-               (out! sb "(") (write-items sb f) (out! sb ")"))]
-    (if (and explicit (not= explicit forced))
-      (binding [*lay* (assoc *lay* :forced explicit)] (body))
-      (body))))
+        lay (if (and explicit (not= explicit forced)) (assoc lay :forced explicit) lay)]
+    (write-meta sb lay (if explicit (assoc mt :line explicit) mt))
+    (out! sb lay "(") (write-items sb lay f) (out! sb lay ")")))
 
-(defn- write-form [^StringBuilder sb f]
+(defn- write-form [^StringBuilder sb lay f]
   (let [mt (when (or (symbol? f) (seq? f) (vector? f)) (meta f))]
     (cond
-      (seq? f) (write-list sb f mt)
-      (vector? f) (do (write-meta sb mt)
-                      (out! sb "[") (write-items sb f) (out! sb "]"))
-      (map? f) (do (out! sb "{")
-                   (doseq [[i [k v]] (map-indexed vector f)]
-                     (when (pos? i) (out! sb " "))
-                     (write-form sb k) (out! sb " ") (write-form sb v))
-                   (out! sb "}"))
-      (symbol? f) (do (write-meta sb mt) (out! sb (str f)))
-      :else (out! sb (binding [*print-meta* false] (pr-str f))))))
+      (seq? f) (write-list sb lay f mt)
+      (vector? f) (do (write-meta sb lay mt)
+                      (out! sb lay "[") (write-items sb lay f) (out! sb lay "]"))
+      (map? f) (do (out! sb lay "{")
+                   (loop [es (seq f) first? true]
+                     (when es
+                       (let [[k v] (first es)]
+                         (when-not first? (out! sb lay " "))
+                         (write-form sb lay k) (out! sb lay " ") (write-form sb lay v))
+                       (recur (next es) false)))
+                   (out! sb lay "}"))
+      (symbol? f) (do (write-meta sb lay mt) (out! sb lay (str f)))
+      ;; a value without metadata prints the same whatever *print-meta* is
+      (instance? arbace.lang.IMeta f) (out! sb lay (binding [*print-meta* false] (pr-str f)))
+      :else (out! sb lay (pr-str f)))))
 
 (defn form-text [f]
   (let [sb (StringBuilder.)]
-    (binding [*lay* nil] (write-form sb (clean f)))
+    (write-form sb nil (clean f))
     (str sb)))
 
 (def import-paths
@@ -157,7 +165,7 @@
                   (let [f (clean f)]
                     (when-not (lined? f)
                       (let [sb (StringBuilder.)]
-                        (binding [*lay* {:line (volatile! 1) :forced nil}] (write-form sb f))
+                        (write-form sb {:line (volatile! 1) :forced nil} f)
                         (str sb))))))
           chunks (partition-all (max 16 (quot (count forms) (* 2 (m/jobs)))) forms)]
       (into [] cat (m/par-mapv (m/jobs) (fn [fs] (mapv one fs)) chunks)))))
@@ -177,12 +185,12 @@
                            :when (not (and (= q "arbace.core")))]
                        [(symbol q) (path-of q)]))
         sb (StringBuilder.)]
-    (binding [*lay* {:line (volatile! 1) :forced nil}]
-      (out! sb (str ";; Generated by a2g (arbace/a2g, doc/go/A2G-SPEC.md); do not edit.\n"))
-      (when header (out! sb header))
-      (out! sb (str "(in-ns '" (nm/pkg-ns pkg) ")\n\n"))
-      (write-form sb (clean (list 'go/file go-name :imports imports)))
-      (out! sb "\n")
+    (let [lay {:line (volatile! 1) :forced nil}]
+      (out! sb lay (str ";; Generated by a2g (arbace/a2g, doc/go/A2G-SPEC.md); do not edit.\n"))
+      (when header (out! sb lay header))
+      (out! sb lay (str "(in-ns '" (nm/pkg-ns pkg) ")\n\n"))
+      (write-form sb lay (clean (list 'go/file go-name :imports imports)))
+      (out! sb lay "\n")
       ;; Go's package-level declarations may come in any order: those with a class forms line
       ;; first, by line (so that each lands on its line), then the rest in their order
       ;; (by index: pre is the text of the i-th form, or nil)
@@ -191,14 +199,14 @@
                   (concat (sort-by line-of lined) (remove line-of (range (count forms)))))
               :let [f (nth forms i)]]
         (if (and (seq? f) (= 'a2g/comment (first f)))
-          (out! sb (str "\n;; " (second f) "\n"))
+          (out! sb lay (str "\n;; " (second f) "\n"))
           (let [own (when (seq? f) (:a2g/line (meta f)))]
             ;; a blank line between declarations, unless the next one's line comes later
-            (when-not (and own (>= own @(:line *lay*))) (out! sb "\n"))
+            (when-not (and own (>= own @(:line lay))) (out! sb lay "\n"))
             (if-let [text (and pre (nth pre i))]
-              (out! sb text)
-              (write-form sb (clean f)))
-            (out! sb "\n")))))
+              (out! sb lay text)
+              (write-form sb lay (clean f)))
+            (out! sb lay "\n")))))
     (str sb)))
 
 (defn go-file-name
@@ -219,17 +227,26 @@
 ;; ---------------------------------------------------------------------------------------
 ;; generated package files
 
+(defn- lone-surrogate?
+  "Does string s hold a surrogate that is not half of a pair?"
+  [^String s]
+  (let [n (.length s)]
+    (loop [i 0]
+      (if (< i n)
+        (let [ch (.charAt s i)]
+          (cond
+            (Character/isHighSurrogate ch)
+            (if (and (< (inc i) n) (Character/isLowSurrogate (.charAt s (inc i)))) (recur (+ i 2)) true)
+            (Character/isLowSurrogate ch) true
+            :else (recur (inc i))))
+        false))))
+
 (defn strings-forms
   "The literal pool (§7.5): Lit_n vars interned at package initialization."
   [pkg lits]
   (for [[s sym] (sort-by (comp #(Long/parseLong (subs (name %) 4)) val) lits)]
     (let [units (map int s)
-          lone? (some (fn [[i ch]]
-                        (let [hi (Character/isHighSurrogate (char ch))
-                              lo (Character/isLowSurrogate (char ch))]
-                          (or (and hi (not (and (< (inc i) (count s)) (Character/isLowSurrogate (.charAt ^String s (inc i))))))
-                              (and lo (not (and (pos? i) (Character/isHighSurrogate (.charAt ^String s (dec i)))))))))
-                      (map-indexed vector units))]
+          lone? (lone-surrogate? s)]
       (list 'go/var (tag sym (list '* (m/jrt-sym pkg "String")))
             (if lone?
               (list (m/jrt-sym pkg "InternUTF16") (apply list 'lit '(slice uint16) units))
