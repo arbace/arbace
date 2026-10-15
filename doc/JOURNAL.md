@@ -139,3 +139,55 @@ forms/processes. --expected test/oracle/known-go-box-amd64.edn`, as run by hand 
 essential gate (it would need the box built on every change, 3 minutes more, and /dev/kvm for
 every gate run); concurrently with the fixpoint (memory). Arm64's box oracle and suite stay
 out (an emulated VM takes hours).
+
+## 2026-10-15: S9, Go's toolchain as forms
+
+At the user's request, started beside the build's second speed round: the survey's last stage
+(doc/STANDALONE-SURVEY.md §7 step b1', §8.1's S9), branch `s9`; recorded in
+`doc/STANDALONE-NOTES.md`, "S9: Go's toolchain as forms", and `tamago/cmd/README.md`.
+
+Source: TamaGo's Go distribution, https://github.com/usbarmory/tamago-go, `VERSION` "go1.27.1"
+(time 2026-08-28T16:20:06Z), the local tree `/root/tamago-go` (Arbace's toolchain,
+`G2A_GOROOT`; it carries no git metadata), the whole tree pinned by `seed/goroot.sha256`
+(`5745170f...`) and its `src/cmd/` by `bin/toolchain-vendor` (`c0db2e8f...`, the sorted SHA-256
+list of every file). `cmd/vendor/golang.org/x/telemetry` is Go's vendored copy of
+https://go.googlesource.com/telemetry at the version `src/cmd/go.mod` names.
+
+What: `go list -deps cmd/compile cmd/link cmd/asm` gives the same 105 packages under `cmd/` for
+linux/amd64 (the host's tools) and tamago/amd64, tamago/arm64 (the box's tool guests): 653 Go
+files, 766,624 lines (469,834 generated). `bin/toolchain-vendor convert` (new, modelled on
+`bin/tamago-vendor`) converts them with `bin/g2a convert` for each configuration and merges the
+three into `tamago/cmd/` (758 forms files, 30.3 MB; no file's forms differ by configuration),
+with `src/cmd/`'s `go.mod`, `go.sum`, `vendor/modules.txt` and `compile/default.pgo` (cmd/compile's
+PGO profile). `check` builds `compile`, `link` and `asm` from the forms printed and from the
+originals, the same way (linux/amd64: `go build -trimpath`; tamago: as `bin/box-tools` builds the
+tool guests), both with empty build IDs (`-buildid=` and `-X=cmd/internal/objabi.buildID=`, the
+build ID the go command stores in a toolchain binary): all nine byte-identical, linux/amd64's
+DWARF included. `verify`: a fresh conversion is the tree byte for byte.
+
+Fixed on the way, in g2a's printing (lines layout): a labeled declaration whose label is not on
+the line before the declaration (a comment between: `cmd/asm`'s `parse.go:182`; gc records such
+a label's line) now carries `:go/label-line` in the forms, printed there (SPEC §7.3; in std only
+`regexp/backtrack.ae` changes, as a fresh conversion writes it); a parameter list after type
+parameters that span lines is printed from its vector's line, before its `(` (the parameter's
+DWARF line in `compile`); `--module std` prints a tree with several main packages.
+`bin/tamago-vendor`'s verify and key take its two roots only; `bin/box-rebuild` puts those two of
+`tamago/` into the box's store.
+
+Decided by the user (2026-10-15): SA200 (a), the printing fixes as built (alternative: the
+label's line always recorded, every labeled declaration's forms changing); SA201 (a),
+`tamago/cmd/` as a third root of `tamago/` (alternatives: inside `tamago/goroot/go/cmd/` with std,
+which every box build would print, 30 MB more; a top-level tree); SA202 (a), the three
+configurations (alternative: the tool guests' two); SA203 (b), the box's tool guests built from
+`tamago/cmd/` printed, `BOX_TOOLS_GO=orig` the way back (alternative (a): the forms only proven
+equivalent, the tools built from the toolchain's tree); SA204 (a), `bin/toolchain-vendor verify`
+and `check` in `bin/gate --full`, a chain of their own beside the JVM's, the Go build's and g2a's
+(alternative: by hand at milestones); `bin/g2a convert` takes its dumps' directory from
+`G2A_DUMPS` so that the two vendoring scripts convert concurrently.
+
+Checks: `bin/toolchain-vendor check` and `verify`; `bin/tamago-vendor check amd64` (std's round
+trip without regressions, the goos module 69 of 69, the box's guest from the printed forms
+identical); `bin/g2a test` (150 assertions); the tool guests built from the forms by
+`bin/box-tools` (amd64) and the box's smoke test with them (compile spawned with trees in and
+out, a failing compile, an image booted from the store); the essential gate on `0db720f`
+(passed, 12m23s) and on the branch's last commit (its result in STANDALONE-NOTES.md, S9).

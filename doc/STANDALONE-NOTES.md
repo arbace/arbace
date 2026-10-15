@@ -3078,7 +3078,7 @@ the toolchain's forms.
 - The essential `bin/gate` on `0db720f` (12m23s): the suite 20,506 of 20,520, no
   regressions; the oracle 22,508 of 22,561, the 53 known, 0 new.
 
-### Amendments (proposed 2026-10-15)
+### Amendments
 
 - **SA200 g2a's two printing fixes.** (a) `:go/label-line` in the forms where a labeled
   declaration's label stands apart, the parameter list's `(` at the vector's line, several main
@@ -3104,3 +3104,18 @@ the toolchain's forms.
   chain (the conversion of three configurations, 23 minutes on the shared host; the check about
   3 minutes a configuration: two prints and two builds of the three tools); (b) at milestones by hand. *Recommended: (a)*,
   as `bin/tamago-vendor`'s are.
+
+**Decided (2026-10-15, the user):** SA200-SA202 (a), SA203 (b), SA204 (a). Built:
+- SA203 (b): `bin/box-tools` builds the tool guests for tamago/ARCH from `tamago/cmd/` printed
+  for that configuration (`bin/toolchain-vendor print tamago-ARCH`, into
+  `.tmp/toolchain-vendor/print-tamago-ARCH`, reused while its key holds: the forms, the printer,
+  the toolchain's version), the overlay of the board and the shim written for that GOROOT;
+  `BOX_TOOLS_GO=orig` builds them from the toolchain's tree as before, `BOX_TOOLS_GOROOT` from a
+  given GOROOT (`bin/toolchain-vendor check`'s two builds). The host's tools (the host step of
+  `bin/box-rebuild`, `go build`) are still the toolchain's binaries; the tool guests are built on
+  the host and put into the box's store, as before (building them inside the box is not S9's).
+- SA204 (a): `bin/gate --full` runs a fourth chain, `toolchain` (`bin/toolchain-vendor verify`,
+  then `check`), concurrently with the JVM's, the Go build's and g2a's. `bin/g2a convert` takes
+  the dumps' directory from `G2A_DUMPS` (default `.tmp/g2a/dumps`), which `bin/toolchain-vendor`
+  sets to its own per configuration: `bin/tamago-vendor verify` in the g2a chain converts beside
+  it.
