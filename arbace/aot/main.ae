@@ -1,7 +1,8 @@
 (ns arbace.aot.main
   "Standalone S6: compiles the namespaces the program prepared (Compiler$AST/units, recorded
   with ARBACE_COMPILE set) to class forms (arbace.aot.emit), a tree a2g reads as one more input
-  (bin/a2g --input DIR).
+  (bin/a2g --input DIR). The back end runs as the program's compiled code when the program holds
+  it for the sources on ARBACE_PATH (compiled-back-end, SA164).
 
   (run OUT SOURCES): SOURCES the source paths to compile (arbace/walk.ae ...), or nil for every
   source recorded. Writes OUT/arbace.ae (the namespace of the classes' package, loading the
@@ -111,7 +112,143 @@
                    {:errors (merge (:errors (meta failed))
                                    (into {} (for [r results :when (:error r)] [(:src r) (:error r)])))})))))))
 
-(defn run
+(def ^:private ^:dynamic *compiled*
+  "True while run is the program's compiled one (compiled-back-end)."
+  false)
+
+(defn- path-source
+  "The bytes of source path p (arbace/aot/main.ae) as ARBACE_PATH finds it (a directory, or a
+  store's entry store:PREFIX, as RT.pathResource looks), nil when it does not."
+  ^bytes [^String p]
+  (when-let [path (System/getenv "ARBACE_PATH")]
+    (some (fn [^String e]
+            (if (str/starts-with? e "store:")
+              (jdk.internal.jrt.HostStore/resource (subs e 6) p)
+              (let [f (io/file e p)]
+                (when (.isFile f) (java.nio.file.Files/readAllBytes (.toPath f))))))
+          (jdk.internal.jrt.HostStore/pathEntries path))))
+
+(defn- forms
+  "The top-level forms of source text (only the first n when n), read with *read-eval* false;
+  nil when unreadable."
+  ([b] (forms b nil))
+  ([^bytes b n]
+   (try
+     (binding [*read-eval* false]
+       (let [r (java.io.PushbackReader. (java.io.StringReader. (String. b "UTF-8")))
+             eof (Object.)
+             fs (take-while #(not (identical? % eof)) (repeatedly #(read r false eof)))]
+         (doall (if n (take n fs) fs))))
+     (catch Throwable _ nil))))
+
+(defn- libs
+  "The namespaces an ns form requires or uses (:require, :use; libspecs, prefix lists)."
+  [form]
+  (for [clause (drop 2 form)
+        :when (and (seq? clause) (#{:require :use} (first clause)))
+        spec (rest clause)
+        lib (cond
+              (symbol? spec) [spec]
+              (vector? spec) [(first spec)]
+              (seq? spec) (for [x (rest spec)]
+                            (symbol (str (first spec) "." (if (sequential? x) (first x) x))))
+              :else nil)]
+    lib))
+
+(defn- source-ns
+  "The namespace of a source's top-level forms: an ns form's name, or an in-ns form's (a source
+  of a namespace another source declares, as core_print is core's)."
+  [fs]
+  (let [f (first fs)]
+    (when (seq? f)
+      (case (first f)
+        ns (second f)
+        in-ns (let [n (second f)] (if (seq? n) (second n) n))
+        nil))))
+
+(defn- source-deps
+  "The namespaces source forms fs (of namespace n) need: its ns form's libs and the sources its
+  top-level load forms load (a path relative to n's directory, as load takes it), by path."
+  [n fs]
+  (let [dir (let [p (-> (str n) (str/replace "-" "_") (str/replace "." "/"))]
+              (subs p 0 (max 0 (.lastIndexOf p "/"))))]
+    (concat
+      (when (and (seq? (first fs)) (= 'ns (ffirst fs))) (map (fn [l] [:ns l]) (libs (first fs))))
+      (for [f fs
+            :when (and (seq? f) (= 'load (first f)))
+            p (rest f)
+            :when (string? p)]
+        [:src (str (if (str/starts-with? p "/") (subs p 1) (str dir "/" p)) ".ae")]))))
+
+(defn- back-end-sources
+  "The recorded sources (srcs, in the order they were loaded) of the namespaces the back end
+  needs: the closure of arbace.aot.main and arbace.core under :require, :use and top-level load,
+  each [src text-on-ARBACE_PATH]; nil when one of them is not on ARBACE_PATH or not readable."
+  [srcs]
+  (let [texts (into {} (for [src srcs] [src (path-source src)]))
+        ns-of (into {} (for [[src b] texts :when b :let [n (source-ns (forms b 1))] :when n] [src n]))
+        fss (memoize (fn [src] (some-> (texts src) forms)))
+        srcs-of (group-by ns-of (keys ns-of))
+        closure (loop [todo ['arbace.aot.main 'arbace.core] seen #{}]
+                  (if-let [n (first todo)]
+                    (if (seen n)
+                      (recur (rest todo) seen)
+                      (recur (concat (rest todo)
+                                     (for [src (srcs-of n)
+                                           [k d] (source-deps n (fss src))
+                                           :let [m (if (= k :ns) d (ns-of d))]
+                                           :when m]
+                                       m))
+                             (conj seen n)))
+                    seen))
+        mine (filter #(closure (ns-of %)) srcs)]
+    (when (and (seq mine) (every? (comp seq fss) mine) (every? srcs-of closure))
+      (for [src mine] [src (texts src)]))))
+
+(defn- compiled-back-end
+  "Whether the back end now runs as the program's compiled code (SA164). The namespaces the
+  program prepares to compile them (ARBACE_NO_AOT) are evaluated, and the back end and the
+  namespaces it calls with them (arbace.core, arbace.string ...), most of its time. When
+  the program holds the compiled loaders of those namespaces' sources (S6) and the sources on
+  ARBACE_PATH are the program's embedded ones, the loaders run in the order the sources were
+  loaded, in the bindings Compiler$AOT/load makes, so that their vars' roots are the compiled
+  fns: the units the back end reads are the analysis' either way, and the code is the same
+  sources'. Else nothing changes."
+  []
+  (let [srcs (distinct (map #(aget ^objects % 0) (or (Compiler$AST/units) [])))
+        bs (back-end-sources srcs)
+        loader (fn [^String src]
+                 (try (Class/forName (str (str/replace (subs src 0 (- (count src) 3)) "/" ".") "__init"))
+                      (catch Throwable _ nil)))]
+    (boolean
+      (when (and (seq bs)
+                 (every? (fn [[src ^bytes b]]
+                           (and (loader src)
+                                (when-let [ins (arbace.lang.RT/resourceAsStream nil src)]
+                                  (java.util.Arrays/equals b (with-open [i ins] (.readAllBytes i))))))
+                         bs))
+        (doseq [[^String src] bs]
+          (push-thread-bindings
+            {arbace.lang.Compiler/LOADER (arbace.lang.RT/makeClassLoader)
+             arbace.lang.Compiler/SOURCE_PATH src
+             arbace.lang.Compiler/SOURCE (subs src (inc (.lastIndexOf src "/")))
+             arbace.lang.Compiler/METHOD nil arbace.lang.Compiler/LOCAL_ENV nil
+             arbace.lang.Compiler/LOOP_LOCALS nil arbace.lang.Compiler/CLASS_FORM_SIBLINGS nil
+             arbace.lang.Compiler/NEXT_LOCAL_NUM (Integer/valueOf 0)
+             #'*read-eval* true #'*ns* *ns* #'*unchecked-math* *unchecked-math*
+             #'*warn-on-reflection* *warn-on-reflection* #'*data-readers* *data-readers*
+             arbace.lang.Compiler/LINE_BEFORE (Integer/valueOf 1)
+             arbace.lang.Compiler/COLUMN_BEFORE (Integer/valueOf 1)
+             arbace.lang.Compiler/LINE_AFTER (Integer/valueOf 1)
+             arbace.lang.Compiler/COLUMN_AFTER (Integer/valueOf 1)
+             arbace.lang.Compiler$Image/RECORDER nil arbace.lang.Compiler$Image/PENDING nil
+             arbace.lang.Compiler$Evaluator/EMBEDDED_LOAD true})
+          (try
+            (arbace.lang.Reflector/invokeStaticMethod (loader src) "load" (object-array 0))
+            (finally (pop-thread-bindings))))
+        true))))
+
+(defn- run*
   "Compiles sources (or all recorded) into directory out; returns the report."
   [out sources]
   (let [us (units)
@@ -170,3 +307,11 @@
                   :classes (count (remove #(= :holder (:kind %)) (vals classes)))}]
       (spit (io/file dir "aot.edn") (with-out-str (prn report)))
       report)))
+
+(defn run
+  "Compiles sources (or all recorded) into directory out; returns the report. The back end's
+  own code compiled when the program holds it (compiled-back-end)."
+  [out sources]
+  (if (and (not *compiled*) (compiled-back-end))
+    (binding [*compiled* true] ((var-get #'run) out sources))
+    (run* out sources)))
