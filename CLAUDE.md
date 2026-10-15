@@ -154,7 +154,8 @@ Prior art:
   JVM `bin/j2a-check --suite`, `bin/jrt-convert verify` (`jdk/` converted afresh, byte for byte),
   `bin/a2g-edge verify`, `bin/clojure-tests --java-fixtures verify`; the Go build afresh with its
   smoke test, the box's guests from `tamago/`'s forms byte-identical to TamaGo's originals'
-  (`bin/arbace-go --build --box`, `bin/tamago-vendor check`) and the box's smoke test, then
+  (`bin/arbace-go --build --box`, `bin/tamago-vendor check`), the box's smoke test, its oracle's
+  subset and `bin/box-suite`, then
   `bin/arbace-go --fixpoint`; g2a's round trips (`bin/g2a roundtrip amd64`, `linux/amd64`), the
   box's vendoring checks (`bin/box-vendor roundtrip`, `kvm-tests`, `purego-check`),
   `bin/tamago-vendor verify`, `bin/x509roots-vendor verify`, `check`. Run it when the class forms'

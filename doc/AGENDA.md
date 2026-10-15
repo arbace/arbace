@@ -54,7 +54,8 @@ The current state of the work. This file is rewritten as things change. For the 
   ([STANDALONE-NOTES.md](STANDALONE-NOTES.md), "After the milestone: the build's speed"): a
   one-run build about 2:45 to 3:00 (was about 4:15), a2g alone about 100 s (was 160 to 210), the
   seed remade (`79d4f552…`) and verified. SA160-SA163 decided (a), as built. SA90 (b)'s last
-  case: a do evaluated again names the new sibling class in reflection (`6e9af3c`).
+  case: a do evaluated again names the new sibling class in reflection (`6e9af3c`). The box's
+  oracle and `bin/box-suite` in `bin/gate --full`.
 - Running: the whole chain in the emulated arm64 VM, nothing given (BX117 (a), at `434021a`,
   since 2026-10-14 22:49); recorded when it ends.
 - The Mac may move to macOS 26 (the user).
@@ -99,8 +100,7 @@ The current state of the work. This file is rewritten as things change. For the 
   any hardware, the guests only where virtualization is there. Prior art: Go's runtime as a user
   process; GoTEE (github.com/usbarmory/GoTEE: TamaGo unikernels and user-mode applets, TrustZone
   on arm), to check; unikernels with a privilege split.
-- The box's oracle and `box-suite` in `bin/gate --full` (manual today); the mapped start measured
-  without nested KVM; the arm64 box's oracle subset and `box-suite` (an arm64 host with KVM).
+- The mapped start measured without nested KVM; the arm64 box's oracle subset and `box-suite` (an arm64 host with KVM).
 - g2a's open ends: mode `:full` in the printer (columns; positions exact); `$GOROOT/test`'s
   directory tests.
 - A note from the user (2026-10-13): the tooling of the Mac GUI app Moshi Go may be useful for

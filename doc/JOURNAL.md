@@ -122,3 +122,20 @@ A case added to `test/oracle/forms/native.ae` (the SA/SB do evaluated a second t
 type of `SA.mk` and the type of `SA.b` against the new `SB`), recorded on the frozen jar
 (`[11 11 false true true]`); main's build gave `[11 11 false false false]` before the fix. The
 essential gate passed on `6e9af3c` (9m16s): the oracle 22,508 of 22,561, the 53 known, 0 new.
+
+## 2026-10-15: the box's oracle and `bin/box-suite` in `bin/gate --full`
+
+At the user's request (the agenda's Later: "the box's oracle and `box-suite` in `bin/gate
+--full`, manual today"). `bin/gate --full`'s Go chain runs, after the box's smoke test and only
+when it passed, `box-oracle` (`ARBACE_BOX_NET=loopback bin/oracle check
+'target/arbace-go/box-amd64/arbace-box -' -j 8 --timeout 900 --exclude forms/files. --exclude
+forms/processes. --expected test/oracle/known-go-box-amd64.edn`, as run by hand since S1) and
+`box-suite` (`bin/box-suite`, on the renamed suite the essential gate's `suite-go` leaves in
+`.tmp/clojure-tests/go`), one after the other and before the fixpoint (the box on /dev/kvm takes
+4 vCPUs a run; the fixpoint's builds beside them would contend for memory). Measured by hand at
+`1b24757` (the box built afresh, 3m10s): the box's oracle 22,055 of 22,108 cases, the 53 of
+`known-go-box-amd64.edn`, 0 new, in 54 s; `bin/box-suite` 67 namespaces, 685 tests, 19,647 of
+19,647 assertions, in 2m41s. About 3.5 minutes added to the Go chain. Alternatives: in the
+essential gate (it would need the box built on every change, 3 minutes more, and /dev/kvm for
+every gate run); concurrently with the fixpoint (memory). Arm64's box oracle and suite stay
+out (an emulated VM takes hours).
