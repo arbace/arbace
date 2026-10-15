@@ -2763,3 +2763,6 @@ not Go): left for the round's other parts.
   above kept as the method (`.tmp/speed2/trace.sh`, `tx.sh`, `an.py`: `go build -debug-trace`, a
   `-toolexec` timer, `-gcflags=<pkg>=-bench`), not committed as tools; (b) a `tools/` command for
   it. *Recommended: (a)*: a measurement, not a check the build runs.
+
+**Decided (2026-10-15, the user):** SA180 (a), `jrt` not split; SA181 (a), the scripts kept in
+`.tmp/speed2/`.
