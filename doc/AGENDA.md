@@ -53,7 +53,8 @@ The current state of the work. This file is rewritten as things change. For the 
 - Done (2026-10-15): the docs searched for sloppiness and fixed; the build's speed, first round
   ([STANDALONE-NOTES.md](STANDALONE-NOTES.md), "After the milestone: the build's speed"): a
   one-run build about 2:45 to 3:00 (was about 4:15), a2g alone about 100 s (was 160 to 210), the
-  seed remade (`79d4f552…`) and verified. SA160-SA163 decided (a), as built.
+  seed remade (`79d4f552…`) and verified. SA160-SA163 decided (a), as built. SA90 (b)'s last
+  case: a do evaluated again names the new sibling class in reflection (`6e9af3c`).
 - Running: the whole chain in the emulated arm64 VM, nothing given (BX117 (a), at `434021a`,
   since 2026-10-14 22:49); recorded when it ends.
 - The Mac may move to macOS 26 (the user).
@@ -63,9 +64,6 @@ The current state of the work. This file is rewritten as things change. For the 
 - Running: the build's speed, second round (the user, 2026-10-15), on three branches: the host's
   compiling of the namespaces (`speed2-host`), a2g's single-core phases (`speed2-a2g`), `jrt`
   split into Go packages, measured first (`speed2-jrt`).
-- SA90 (b) is done (S5, `3f31072`, SA104 (a)): a member typed by a later sibling is published
-  again when the sibling is defined. Not covered: a do evaluated again reports the previous
-  sibling class until the new one is defined.
 
 ## Later
 

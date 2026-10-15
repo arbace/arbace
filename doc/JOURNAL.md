@@ -107,3 +107,18 @@ The leftover of the docs' sweep closed (the user: "fix that one stale string"):
 main has not had since S4; it now says, as `doc/C2A.md` does, that it was the JVM's runtime image
 (on `arbace-for-java-26`) and that main removed the three namespaces at S4. Only
 `bin/c2a --rules` prints it (checked). The essential gate passed on it (`9942951`).
+
+## 2026-10-15: a do evaluated again names the new sibling class in reflection
+
+SA90 (b) (S5, `3f31072`, decided as SA104 (a)) was already done; its uncovered case fixed at
+the user's request: a top-level do of class forms evaluated again published a member whose type
+names a later sibling with the class its previous evaluation defined (`desc->class` found it in
+the registry, as `*eager*` is false while publishing), so reflection reported the old class.
+`arbace.classes.interp/sig-class` now resolves under `*eager*`: the sibling is pending, the member
+published with `Object` and again when the new sibling is defined, as on the first evaluation.
+Alternative considered: dropping the old class from the registry at the do's start (it would
+change what the do's earlier forms see of the name, which the JVM's lazy resolution keeps).
+A case added to `test/oracle/forms/native.ae` (the SA/SB do evaluated a second time; the return
+type of `SA.mk` and the type of `SA.b` against the new `SB`), recorded on the frozen jar
+(`[11 11 false true true]`); main's build gave `[11 11 false false false]` before the fix. The
+essential gate passed on `6e9af3c` (9m16s): the oracle 22,508 of 22,561, the 53 known, 0 new.
