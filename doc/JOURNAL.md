@@ -33,3 +33,30 @@ the tag and in git history:
   (127 times the amd64 box's); its result is recorded here when it ends.
 - Next, the user's order: the docs searched for sloppiness, then the build's speed (the agenda's
   "Later": the builds keep 5 to 9 of the host's 64 cores busy).
+
+## 2026-10-15: the docs searched for sloppiness
+
+The user's order: four read-only audits of the repository's Markdown (35,940 lines; README,
+CLAUDE.md, `doc/`, `box/README.md`, `tamago/README.md`, `LICENSE.md`'s coverage), then four
+fixes on branches `docs-1` to `docs-4`, one set of files each, merged (`8d8e87c`, `36e1356`,
+`5ccdf7e`, `f0dd320`); the state documents (the agenda rewritten, CLAUDE.md's direction, the
+README) on main (`0df2cdf`). About 120 findings, of these kinds:
+- present state left stale: statuses and "Left"/"Next" lists of work since done (S4-S8, the
+  Mac's run, HV1-HV9's decisions, BX12-BX17, AOT "not scheduled" though the default since S6),
+  sizes and counts given as current (the seed 3 MB, now 5.4; 75 MB, now 101.3; jdk's 835 files,
+  now 838);
+- names that no longer exist: `bin/arbace-j`, `bin/arbace-box`, `bin/java-surface`,
+  `arbace/lang/go/ns/` and the hand-written variants merged by SA150, `test/arbace-results.edn`,
+  `seed/arbace-seed.jar`, `bin/seed --go-*`, `known-box-amd64.edn`;
+- the tools described as loaded from the checkout, though compiled into the host since S6
+  (SA133), also in the headers of `bin/a2g`, `bin/g2a-print`, `bin/lib/g2a-host.bash`,
+  `bin/lib/tools.bash`;
+- references to journal entries now at the tag `arbace-inside-itself-v1` or on the frozen
+  branches (one quoted title renamed by the tools' rename: "g2c's open questions");
+- `LICENSE.md`: the Go-source seed was covered by no entry (added: its parts and the licenses
+  they carry, each one already recorded); `box/`'s `tool` and `tree` added as Arbace's own;
+- typos ("a a2g", 17 times), a garbled sentence, missing blank lines before headings.
+Kept as decided: the user's git identity where the docs name the commits' author; public
+endpoints; HOST-VM-SURVEY's list of absent devices (no provider named). Dated history was
+annotated, not rewritten. Left: `arbace/c2a/rules.ae`'s `:why` for "Optional modules" (code)
+still names the runtime image.

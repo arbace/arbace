@@ -374,6 +374,6 @@ package, E7 the root spec `CLASS$*`, E8 `clj-fi-method` for classes from source.
 - **Q6 Stack traces.** (a) The evaluator records the Clojure fn and line per frame (a field of
   `Frame`) and `StackTraceElement`s come from the frame chain (recommended for step 5's
   REPL); (b) Go frames only (the evaluator's functions, unreadable to the user).
-- **Q7 ASM's erasure.** (a) Erasure as a a2g rule (`a2g/erase`, done: no line of `Compiler`
+- **Q7 ASM's erasure.** (a) Erasure as an a2g rule (`a2g/erase`, done: no line of `Compiler`
   copied into the variant) (recommended); (b) cut each back-end member by name in the variant
   (about 150 methods and 120 fields listed, drifting with `Compiler`).
