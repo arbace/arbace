@@ -2,8 +2,10 @@
 
 The implementation of [SPEC.md](SPEC.md) (agenda step 2): one plain-Clojure compiler of the class
 forms (§12 question 17) that emits bytecode with ASM. It first ran on the frozen baseline
-`clojure/` (stage 0 until 2026-10-08); since then stage 0 is the binary seed, Arbace itself
-(doc/VENDOR-NOTES.md, "The binary seed"), and it runs on Arbace at every stage.
+`clojure/` (stage 0 until 2026-10-08); since then stage 0 was the binary seed, Arbace itself
+(doc/VENDOR-NOTES.md, "The binary seed"), and it ran on Arbace at every stage (until S4, on
+`arbace-for-java-26`). Since S4 stage 0 is the Go executable built from the Go-source seed
+(`bin/seed --build`), and the front end runs on it and on the frozen jar (`bin/lib/frozen.bash`).
 These notes say how it is built, how to use and test it, what it covers (the §8 tables), and
 where implementing the spec suggested changes to it (amendments, accepted and folded into
 SPEC.md, last section).
@@ -48,7 +50,7 @@ visitors) and `arbace.lang.DynamicClassLoader`/`RT` for the REPL loaders.
 
 The front end (`types`, `env`, `parse`, `lower`, `analyze`) also serves the Go build: a2g
 translates its analysis into Go forms (doc/go/A2G-SPEC.md), and the Go executable's REPL
-evaluates it for class forms (doc/go/CLASSFORMS-REPL.md). Amendment 15 came from that use.
+runs it for class forms (evaluated; compiled to Go since S6) (doc/go/CLASSFORMS-REPL.md). Amendment 15 came from that use.
 
 ## Use
 
@@ -97,7 +99,7 @@ stage: `java -cp target/stageN:. arbace.lang.Main -m arbace.classes.verify DIR [
 (exit status 1 on any error, with a report grouped by kind). `bin/build-arbace` runs it on
 stages 1 and 2 (stage 3 equals stage 2): 5,091 classes each when it was added, the class forms'
 and the Clojure compiler's, verified in about 0.9 s (1.7 s with the JVM launch); 5,756 each
-on 2026-10-07, 5,740 on 2026-10-08 (the journal), 5,771 in `target/stage2` on 2026-10-11.
+on 2026-10-07, 5,740 on 2026-10-08 (the journal on `arbace-for-golang`), 5,771 in `target/stage2` on 2026-10-11.
 
 ## How it works
 
@@ -224,7 +226,7 @@ at any stage: `java -cp target/stage1:. arbace.lang.Main` and `(defclass ...)`.
   macros (`defclass` ... `when-instance`) and the operators of §5.4 in `arbace.core`. Until the
   freeze `arbace.classes.boot` also loaded the same file into the frozen `clojure.core` at stage
   0, where `defclass` and `defclasses` compiled at macroexpansion time; that path was removed on
-  2026-10-08 (journal, "A faster gate").
+  2026-10-08 (the journal on `arbace-for-golang`, "A faster gate").
 - **The operators.** The operators of §5.4 that Clojure lacks (`bit-and-int` ...
   `unsigned-bit-shift-right-int`, `unchecked-add-float` ... `unchecked-negate-float`,
   `unchecked-divide`, `unchecked-remainder`) are defined by `defop` with `:inline` expansions

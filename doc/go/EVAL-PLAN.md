@@ -247,11 +247,14 @@ kinds the compiler does not know.
 - `*compiler-options*`, direct linking: off (the variant); `:static` fns are ordinary fns.
 - **As built** (amendments M1, M3, M5, accepted 2026-10-09; A2G-SPEC §10.3, §4.1): `bin/a2g
   --program` embeds the namespaces' sources with the Go build's namespace variants applied
-  (`arbace/lang/go/ns/`); `RT.load` reads them, then the directories of `ARBACE_PATH`; the
+  (`arbace/lang/go/ns/`; gone since 2026-10-13, every variant applied to its source, SA150,
+  35255c7); `RT.load` reads them, then the directories of `ARBACE_PATH`; the
   classes the namespaces name outside the world are cut classes whose members throw.
 - **Since step 6** (amendment U1, accepted 2026-10-09; A2G-SPEC §10.3, EXEC-NOTES.md): the
   embedded namespaces are analyzed at build time; `RT.load` replays them from the program's
   image (the `Expr` trees and the events of their analysis), skipping reading and analysis.
+  Since S6 only with `ARBACE_AOT=0`: by default the namespaces are compiled to Go
+  (doc/STANDALONE-NOTES.md, "S6: Arbace compiled to Go").
 
 ### 2.8 Recursion depth and errors
 
@@ -272,7 +275,8 @@ kinds the compiler does not know.
 `(fn [^long x] ...)` makes the analyzer pick a primitive interface (`IFn$LL`) for the fn and
 `(.invokePrim ...)` calls for its callers (`InvokeExpr.parse`), which an `EvalFn` cannot answer: Go
 has no type for each of the 322 interfaces made at run time, and `Dyn` covers only the interfaces
-the world uses. Decided (Q1 (a)): the Go build's variant makes `FnMethod.primInterface` return nil
+the world uses. Decided (Q1 (a)): the Go build's variant makes `FnMethod.primInterface` return nil (since SA150, 2026-10-13,
+`arbace/lang/Compiler.ae` itself)
 (no primitive fns: callers call `invoke`), and `invokeFn` converts a `^long` or `^double` parameter
 with `RT.longCast`/`doubleCast` on entry and a primitive return on exit, so the arithmetic stays the
 same; `IFn$LL` and the rest stay in the closed world for translated code (Q1).
@@ -318,7 +322,8 @@ compilation is per method at its first call, not at `fn*` evaluation; the hot st
 are called directly (EC2, generated `CodeOpN`), other resolved members through their invoker
 (EC5). The benchmarks run 5 to 69 times faster than the tree walk (geometric mean 12.8x), about
 54 times slower than the JVM. AOT of namespaces to Go forms is not scheduled (the user,
-2026-10-10).
+2026-10-10); done in S6, the default since (`ARBACE_AOT=1`, doc/STANDALONE-NOTES.md, "S6:
+Arbace compiled to Go").
 
 ## 7. Checks
 

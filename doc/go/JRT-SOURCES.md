@@ -31,19 +31,20 @@ j2a's output; reversed by standalone S1's D2, 2026-10-12: the output is committe
 
 | step | what | output |
 |---|---|---|
-| sources | the closure's files: the keys of `[:closure :repl :sources]` in `doc/go/java-surface.edn` (`SURFACE`; `bin/java-surface F` recomputes it), copied from `$JDK/src/java.base/share/classes` | `src/java.base/`, `sources.txt` |
+| sources | the closure's files: the keys of `[:closure :repl :sources]` in `doc/go/java-surface.edn` (`SURFACE`; `bin/java-surface F` recomputed it until it was retired, 2026-10-12), copied from `$JDK/src/java.base/share/classes` | `src/java.base/`, `sources.txt` |
 | generate | the 8 generated files, made as the JDK build makes them (below) and compared byte for byte with the JDK build's `support/gensrc` when `$JDK/build` has one | `src/java.base/`, `generated.edn` |
 | convert | `bin/j2a -m arbace.j2a.main jdk --check conv java.base src/java.base`: attributed as `java.base` with `--patch-module` against the running JDK (built from the same sources), run from `.tmp/jrt` so its patch directories stay there; `--origins origins.edn` (made from `sources.txt`) names each file's source in its header by where it comes from (`jdk26u src/java.base/share/classes/...`, `overlay/jdk/java.base/...`, `jdk26u support/gensrc/...` for a generated one), not by j2a's scratch copy, whose numbered directory moved with the chunking (2026-10-11) | `conv/` (184 class-form files and 17 package files, 70,146 lines) |
 | javac | the same tree compiled twice by javac with `java.base`'s build options (`-XDstringConcat=inline`, `--patch-module`, `-implicit:none`, as `bin/j2a-check --jdk`) | `ref1/`, `ref2/` (591 classes) |
-| check | until S4: `bin/class-forms-check` on chunks of about 8 files, `JRT_JOBS` JVMs (default 4, `-Xmx3g` each), `REF=ref1:ref2` (classes javac made from a file that the forms did not make count as differences), the compiled classes written out; since S4 forms-level: each converted file compared with the committed `jdk/forms` (the same, different, added, removed: a report, not a failure) | until S4 `res/`, `forms-classes/`; since `forms-check.edn` |
+| check | until S4: `bin/class-forms-check` on chunks of about 8 files, `JRT_JOBS` JVMs (default 4, `-Xmx3g` each), `REF=ref1:ref2` (classes javac made from a file that the forms did not make count as differences), the compiled classes written out; since S4 forms-level: each converted file compared with the committed `jdk/forms` (the same, different, added, removed: a report, not a failure) | until S4 `res/`, `forms-classes/`; since S4 `forms-check.edn` |
 | edge | `jrt.jrt-sources/write-edge` on the forms' classes, and on javac's for a cross-check (the two must be the same); since S4 on javac's classes alone | `edge.edn` (and until S4 `edge-javac.edn`) |
 | report | the counts and the edge's tables; a hash of every file of `src/`, `conv/` (and until S4 `forms-classes/`) | `report.md`, `report.edn`, `manifest.sha256` |
 
 `--twice` then makes the sources, runs the generators and j2a a second time into
 `.tmp/jrt/again/` and requires identical trees. Exit status 0 when all 184 files convert and
 compile to javac's shapes (and, with `--twice`, deterministically). Environment: `JDK`
-(default `/root/jdk26u`), `SURFACE`, `GEN_JDK` (below), `JRT_WORK`, `JRT_JOBS`, `J2A_JVM_OPTS`
-(default here `-Xmx8g`). Peak memory: one 8 GB j2a JVM, then four 3 GB check JVMs.
+(default `/root/jdk26u`), `SURFACE`, `GEN_JDK` (below), `JRT_WORK`, `JRT_JOBS` (until S4),
+`J2A_JVM_OPTS` (default here `-Xmx8g`). Peak memory: one 8 GB j2a JVM, then (until S4) four 3 GB
+check JVMs.
 
 ## The generated sources
 
@@ -228,12 +229,13 @@ taken.
 
 ## The closure as grown (B1a step 4 phase 2C, step 5 phase 2B)
 
-**On main now** (2026-10-11, after `gotext`, the default `JRT_LOCALES=none`):
+**On main** (as of 2026-10-11, after `gotext`, the default `JRT_LOCALES=none`):
 `bin/jrt-convert` translates **835 files**: 755 of `share`, 6 `unix`, 31 generated (`gensrc`), 2
 of `share:java.sql`, 40 of jrt's own Java (`overlay`) and jrt's generated `LocaleDataIndex`
 (`jrtgen`); 830 identical to javac's class shapes, the 5 known differences (JRT-NOTES.md, "Text
 and locales"). The counts below, here and in the dated sections, are each branch's at the time,
-from its own base.
+from its own base. As of 2026-10-15, `jdk/sources.txt` lists **838 files**, 43 of them `overlay`
+(the rest as above).
 
 The 184 files above are the measured closure. At step 5 phase 2B's end, with the files and the
 JDK's resource data merged, `bin/jrt-convert` translated **424 files** (`sources.txt` lines as
@@ -485,6 +487,7 @@ to the image's `jdk/conf/security/java.security` (a data file under `conf/` is c
 image's `jdk/conf`, as one under `lib/` with `jdk/lib`). **Result**: 717 files (637 before), all
 converted and compiled to javac's class shapes, 713 identical and the 4 known differences,
 1,979 classes; 26 of 26 generated sources and 5 of 5 data files equal to the JDK build's.
+
 ## Text and locales (2026-10-10)
 
 java.text and jdk.localedata's locales in the Go build (JRT-NOTES.md, "Text and locales"; the
@@ -561,7 +564,7 @@ top-level directory `jdk/` (jdk/README.md), as `tamago/` holds TamaGo's Go as fo
 
 | path | what |
 |---|---|
-| `jdk/forms/` | `conv/` without j2a's report `j2a-report.edn`: 909 class forms files (836 Java files: 755 of `share`, 6 `unix`, 2 of java.sql, 31 generated, `LocaleDataIndex`, 41 of jrt's own `overlay/jdk/java.base`), 202,034 lines, 11 MB |
+| `jdk/forms/` | `conv/` without j2a's report `j2a-report.edn`: 909 class forms files (836 Java files: 755 of `share`, 6 `unix`, 2 of java.sql, 31 generated, `LocaleDataIndex`, 41 of jrt's own `overlay/jdk/java.base`), 202,034 lines, 11 MB (at S1; as of 2026-10-15 911 files, 838 Java files, 43 of the overlay, 202,131 lines) |
 | `jdk/data/` | `data/`: the 10 resource data files the program embeds (545 KB) |
 | `jdk/sources.txt` | `sources.txt`, each file's module, kind and path (`bin/jrt-coverage` reads it by default) |
 | `jdk/provenance.edn` | jdk26u's repository, commit and clean state, the JDK attributing for j2a, the generators' JDK, `JRT_LOCALES`, a hash of j2a's sources (`arbace/j2a`, `bin/j2a`) and, since S4, the frozen jar that runs it, the counts: written by every run's convert step into `provenance.edn`, nothing of the run's place or time |
@@ -600,7 +603,7 @@ for byte (`verify`; doc/STANDALONE-NOTES.md).
   and `jdk/provenance.edn` replaced by them (`README.md` stays).
 
 What makes `jdk/` stale, so that `verify` fails until `update` and a commit: jrt's own Java
-(`overlay/jdk/java.base`: its 41 files are converted into `jdk/forms`; `overlay/jdk/variants` is
+(`overlay/jdk/java.base`: its 41 files, 43 as of 2026-10-15, are converted into `jdk/forms`; `overlay/jdk/variants` is
 read by a2g directly and is not), the closure (`test/jrt/jrt_sources.ae`,
 `doc/go/java-surface.edn`), j2a (its hash is in `provenance.edn`), jdk26u's checkout and the
 JDKs, `JRT_LOCALES`.

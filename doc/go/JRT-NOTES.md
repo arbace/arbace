@@ -10,7 +10,7 @@ the earlier text is kept as written then, so read a part with the table below.
 ## Reading guide and state (2026-10-11)
 
 **State on main** (B1a, before the `arbace-for-golang` freeze): `bin/jrt-convert` translates 835
-files (JRT-SOURCES.md, "The closure as grown"); the Go build provides 9,807 of java.base's 17,546
+files (838 as of 2026-10-15; JRT-SOURCES.md, "The closure as grown"); the Go build provides 9,807 of java.base's 17,546
 API members (55.9%; [JAVA-BASE.md](JAVA-BASE.md)); `bin/jrt test` passes on amd64 and arm64
 (under `qemu-aarch64`). jrt's phases 1, 2a and 2b are B1a step 3's; phase 2C is step 4's (a2g's
 parts, A2G-NOTES.md) and phase 2B step 5's (the evaluator's parts, EVAL-NOTES.md): a letter's
@@ -56,9 +56,14 @@ measurements in each part are its branch's, before merging main unless it says o
 | `resources.ae`, `resources_linux.ae` | the class path's resources by URL, `HostExecutable` | "Resources by URL" |
 | `digests.ae`, `hostrand_linux.ae` | the digests' block functions over Go's crypto, the host's random source | "Security" |
 | `standin_lang.ae`, `standin_character.ae`, `manifest.edn`, `manifest_test.ae` | generated: stand-ins, the manifest | phase 1, "Stand-ins", "The manifest" |
+| `programhost.ae`, `hostbox_tamago.ae` | (since the box) the program's host: `OSHost` natively, the box's host under TamaGo | BOX-NOTES.md, S1 |
+| `net_linux.ae`, `netbox_tamago.ae` | (since the box) the network: natively over Go's `net`, in the box over the monitor's calls | "Sockets"; BOX-NOTES.md, S5 |
+| `store.ae`, `store_linux.ae` | (since S3) the store of blobs and refs: the box's over the monitor, natively a directory | BOX-NOTES.md, S3 |
+| `spawn.ae`, `spawn_linux.ae`, `spawn_tamago.ae` | (since S7) tool guests, `SpawnHost` | BOX-NOTES.md, S7 |
+| `tls.ae` | (since the box) TLS over Go's `crypto/tls`, `jdk.internal.jrt.HostNet`'s natives | BOX-NOTES.md, "TLS (option 2)" |
 
-`overlay/jdk/java.base/` holds jrt's own Java (40 files), `overlay/jdk/variants/` the Go-build
-variants of jdk26u's classes (69); each part names those it added.
+`overlay/jdk/java.base/` holds jrt's own Java (40 files; 43 as of 2026-10-15),
+`overlay/jdk/variants/` the Go-build variants of jdk26u's classes (69); each part names those it added.
 
 # Phase 1 (step 3): the core
 
@@ -457,7 +462,8 @@ Go tests written as Go forms (`*_test.ae`, printed as `_test.go`, in package `jr
 | `TestToString`, `TestDoubles`, `TestFloats`, `TestInts`, `TestNoFusion`, `TestMathExceptions` | 60,228 + 110,312 + 65,072 + 47,754 cases of the numbers files; the FMA idiom |
 
 **Differential test data** comes from the JVM. `test/jrt/testdata.ae` (ns `jrt.testdata`) runs
-on `bin/arbace-j`, the JDK 26 Arbace runs on, and writes `strings.txt`, `chars.txt`,
+on `bin/arbace-j`, the JDK 26 Arbace runs on (since S4 on the frozen JVM Arbace,
+`bin/lib/frozen.bash`), and writes `strings.txt`, `chars.txt`,
 `exceptions.txt`, `tostring.txt`, `doubles.txt`, `floats.txt` and `ints.txt`.
 
 - **Format:** one case per line with tab-separated fields: the operation, its arguments, the
@@ -1479,7 +1485,7 @@ their class forms to javac's class shapes (630 classes), against the measured cl
 
 All 26 translated from jdk26u (above): each is plain Java with nothing jrt must do by hand, and
 the stand-in shapes were exactly the translated ones, so jrt's hand-written code needed no
-change. With them **a2g replaces all 64 of jrt's stand-ins**: in a a2g program no `standin_*`
+change. With them **a2g replaces all 64 of jrt's stand-ins**: in an a2g program no `standin_*`
 class remains hand-written. The stand-in files stay for jrt's own build (`bin/jrt build`,
 `bin/jrt test` without a2g), which has no translated classes; nothing in them is meant to stay.
 None was cut.
@@ -1495,14 +1501,14 @@ None was cut.
   (`printStackTrace()`, uncaught exceptions) through `System.err`; `String_CASE_INSENSITIVE_ORDER`;
   `String.split` (both), `replaceAll`, `replaceFirst`, `matches` over the translated
   `java.util.regex`.
-- `bin/jrt build|test --prog DIR` builds or tests a a2g program root (`bin/a2g --tests --out
+- `bin/jrt build|test --prog DIR` builds or tests an a2g program root (`bin/a2g --tests --out
   OUT` writes `OUT/prog`): jrt's tests with the stand-ins replaced.
 - `TestReflectAgainstJVM`'s expectations are generated twice (`test/jrt/testdata_reflect.ae`):
-  `methods` for jrt's own build (the hand-written tables), `methods-a2g` for a a2g program,
+  `methods` for jrt's own build (the hand-written tables), `methods-a2g` for an a2g program,
   where the translated supertypes' tables add their public methods whose types are in the world
   (the bridges `compareTo(Object)` through `Comparable`, `append(C)Appendable` through
   `Appendable`; not `chars()`/`codePoints()`, whose `IntStream` is cut). The test takes the one
-  that applies (a a2g program registers `jdk.internal.jrt.StandardStreams`).
+  that applies (an a2g program registers `jdk.internal.jrt.StandardStreams`).
 
 ## Tests (phase 2C)
 
@@ -1970,7 +1976,7 @@ SOCKS and HTTP impls, the resolver providers and `isReachable` stay out.
   quotes removed; other options ignored). So one setting starts a server on both builds:
 
       JAVA_TOOL_OPTIONS='-Darbace.server.repl="{:port 5555 :accept arbace.core.server/repl}"' target/arbace-go/amd64/arbace
-      JAVA_TOOL_OPTIONS='-Darbace.server.repl="{:port 5555 :accept arbace.core.server/repl}"' bin/arbace-j
+      JAVA_TOOL_OPTIONS='-Darbace.server.repl="{:port 5555 :accept arbace.core.server/repl}"' bin/arbace-j   # until S4
 
   The JVM prints `Picked up JAVA_TOOL_OPTIONS: ...` on its standard error; the Go executable
   does not (NT2).
@@ -2302,7 +2308,7 @@ public member (P2), which led to amendment RD2.
   combining classes) are both `Normalizer` in Go; the rename table (A2G-SPEC §4.4) makes the
   latter `Sun_Normalizer`.
 - `CharBuffer`'s code cast to `StringCharBuffer`, outside the world, as an undefined
-  `StringCharBuffer_Cast` (a a2g gap for a checkcast to a class outside the world that the
+  `StringCharBuffer_Cast` (an a2g gap for a checkcast to a class outside the world that the
   build caught); with `StringCharBuffer` in the world (`CharBuffer.wrap(CharSequence)` needs
   it anyway) it does not arise; the gap itself is not fixed here.
 - jrt: `Reference.reachabilityFence` (`runtime.KeepAlive`; `ScopedMemoryAccess`'s every access);
@@ -3094,7 +3100,7 @@ slightly lower (158 MB, 162 before), the member tables no longer built at the st
   functions; the largest remaining groups are the translated code itself and the `DynSub_C`
   wrappers that Go needs for the types' method sets.
 - **CLDR's bundles as code** (`FormatData`, `TimeZoneNames`, `ZoneName`: 1.0 MB of code): arrays
-  of string literals compile to one store per element; a a2g helper building such arrays from
+  of string literals compile to one store per element; an a2g helper building such arrays from
   one string would save perhaps half, at the cost of a special case in a2g. Not done.
 - **jrt's hand-written classes' tables** (`reflect_tables.ae`, 0.4 MB): could use the
   `MemberTable` too (`test/jrt/tables.ae`); small.
@@ -3580,6 +3586,7 @@ transcribed in part: `src/java.base/share/classes/javax/crypto/JceSecurity.java.
 `make/jdk/src/classes/build/tools/makejavasecurity/MakeJavaSecurity.java`,
 `make/modules/java.base/Gendata.gmk`; the view bounds of
 `src/java.base/share/classes/java/lang/invoke/X-VarHandleByteArrayView.java.template`.
+
 # Text and locales: java.text and jdk.localedata's locales in the Go build
 
 Branch `gotext` (2026-10-10, the user's decision): `java.text` translated from jdk26u, and the
@@ -3629,7 +3636,7 @@ default locale from `user.language`, `user.country`, ...), the referenced-key ca
 `SoftReference` gains the constructors a translated subclass calls), `java.lang.LazyConstant`
 and `jdk.internal.lang.LazyConstantImpl` (over `Unsafe`), and `jdk.internal.misc.CDS` (its
 natives jrt's: no archive). jrt's `Locale` and `Locale.Category` remain as stand-ins for jrt's
-own build and tests (`standin_locale.ae`); a a2g program drops them. jrt's hand-written
+own build and tests (`standin_locale.ae`); an a2g program drops them. jrt's hand-written
 `DecimalFormatSymbols` is gone. The default locale is en_US: jrt's system properties gain
 `user.language=en`, `user.country=US` (and `stdin.encoding`), which `JAVA_TOOL_OPTIONS`' `-D`
 overrides as on the JVM.
