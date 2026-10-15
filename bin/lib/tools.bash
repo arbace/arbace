@@ -6,9 +6,13 @@
 #                   arbace_host_exe: ARBACE_HOST_EXE, else stage 0 built from the Go seed), with
 #                   ARG... (e.g. -m NS ARGS..., -e EXPR, a script), from the current directory.
 #                   ARBACE_PATH is the checkout ($root), then each -p DIR (test/, a scratch tree),
-#                   then the caller's ARBACE_PATH: the tools' namespaces (arbace.g2a, arbace.a2g,
-#                   arbace.j2a, test/'s) are not embedded in the executable and load from the
-#                   checkout's sources, as they did on the JVM's target/stage2 until standalone S4.
+#                   then the caller's ARBACE_PATH. The tools a2g, g2a, c2a and arbace.aot are
+#                   embedded in the executable and compiled since standalone S6 (SA133); a source
+#                   of theirs on ARBACE_PATH that differs from the embedded copy is loaded from it
+#                   instead, evaluated (RT.toolSource), so a change in the checkout runs until the
+#                   next build. The rest (arbace.j2a, test/'s) is not embedded and loads from the
+#                   checkout's sources, as all the tools did on the JVM's target/stage2 until S4
+#                   and on the executable until S6.
 #                   -s NS loads an embedded namespace from the checkout instead (its file under
 #                   $root, by load-file, then marked loaded, so that requires keep it): the
 #                   executable's embedded sources come before ARBACE_PATH, and a tool embedded

@@ -18,7 +18,9 @@ bin/g2a-print-tests [REGEX]
 `:embed-files` (SHA-256 checked) and writes `OUTDIR/overlay.json`; `--build` then runs
 `go build -trimpath -overlay` in `DIR` under the forms' `:config` (§12.4). Both scripts run on
 Arbace's Go executable (`bin/lib/g2a-host.bash`: `G2A_GO_EXE`, else the tools' host; on
-`target/stage2` until standalone S4); `arbace.g2a` loads from the checkout's sources.
+`target/stage2` until standalone S4); `arbace.g2a` loaded from the checkout's sources until S6,
+compiled into the executable since (SA133), a source in the checkout that differs from the
+embedded copy loaded from it instead, evaluated.
 
 ## Structure
 

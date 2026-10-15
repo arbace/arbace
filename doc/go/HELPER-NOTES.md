@@ -404,8 +404,8 @@ three, in 1.4 s, 1.3 s and 0.8 s, read in 5.7 s, 5.5 s and 2.5 s: the type ids m
 
 ## Spec amendments (accepted 2026-10-08)
 
-Writing format 2 raised seven amendments to [SPEC.md](SPEC.md) (journal, 2026-10-08, "The
-helper's format 2"). The user accepted all seven on 2026-10-08, with the printer's A1-A10 and
+Writing format 2 raised seven amendments to [SPEC.md](SPEC.md) (the journal on `arbace-for-golang`,
+2026-10-08, "The helper's format 2 (spec §11.3)"). The user accepted all seven on 2026-10-08, with the printer's A1-A10 and
 the converter's C1-C11; where they disagreed, the converter's wins over the printer's over the
 helper's (SPEC §15, "Amendments (2026-10-08)").
 

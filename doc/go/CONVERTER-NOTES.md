@@ -32,7 +32,9 @@ bin/g2a test                          # the converter's tests (bin/g2a-convert-t
 
 The tools run on Arbace's Go executable (`bin/lib/g2a-host.bash`: `G2A_GO_EXE`, else the
 tools' host, `bin/lib/host.bash`; on `target/stage2` until standalone S4, with a heap
-`G2A_JVM_OPTS`, default `-Xmx12g`); `arbace.g2a` loads from the checkout's sources. Conversion
+`G2A_JVM_OPTS`, default `-Xmx12g`); `arbace.g2a` loaded from the checkout's sources until S6,
+compiled into the executable since (SA133), a source in the checkout that differs from the
+embedded copy loaded from it instead, evaluated. Conversion
 runs one package per task on a thread pool (`G2A_JOBS`, default half the cores). Every file written is read back with Arbace's
 reader (`LineNumberingPushbackReader`, `*read-eval*` false) and compared with the forms in
 memory: data, every metadata key, and, in mode `:lines`, the line of every list (the reader's
@@ -243,9 +245,9 @@ The linux rows were measured later the same day (2026-10-08) with the conversion
 candidate included (`bin/g2a roundtrip`, `--print`); the tamago corpora measured that way take the
 same time as linux's (std about 20 s). Every node kind of the linux corpora is converted (nodes
 consumed equal the dumps' per kind; std linux/amd64: 2,357,789 nodes), with no node kind, directive
-or marker that tamago's corpora lacked. The JVM's start adds about 2 s. Measured with `-Xmx16g`, the
-process peaked at about 14 GB (the heap grows to its allowance; runtime's dump alone is 24.8 MB of
-text); the default is now `-Xmx12g`.
+or marker that tamago's corpora lacked. The JVM's start added about 2 s. Measured with `-Xmx16g`, the
+process peaked at about 14 GB (the heap grew to its allowance; runtime's dump alone is 24.8 MB of
+text); the default became `-Xmx12g` (the JVM host's, until standalone S4).
 
 Two runs give byte-identical forms trees (checked on std amd64).
 

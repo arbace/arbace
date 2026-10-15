@@ -20,8 +20,9 @@ per script are in "End-to-end results" below.
 ## Structure
 
 `arbace/a2g/` (namespaces `arbace.a2g.*`, run by `bin/a2g` on Arbace's Go executable,
-`A2G_GO_EXE`, else the tools' host, `bin/lib/host.bash`, loaded from the checkout's sources;
-on `target/stage2` until standalone S4):
+`A2G_GO_EXE`, else the tools' host, `bin/lib/host.bash`; loaded from the checkout's sources
+until S6, compiled into the host since (SA133), a source in the checkout that differs from the
+embedded copy loaded from it instead, evaluated; on `target/stage2` until standalone S4):
 
 | namespace | what |
 |---|---|
@@ -655,7 +656,7 @@ supersedes P2A-4's (P4's) interim streams.
   `matches`, written by a2g when their classes are translated; `printStackTrace()` and uncaught
   exceptions print through `System.err`. *Accepted 2026-10-09, folded into A2G-SPEC §11 (and
   §7.9.6, §9.1, §9.4) as K2.*
-- **P2C-3 (J9) The stand-ins.** All 64 are translated classes in a a2g program; the stand-in
+- **P2C-3 (J9) The stand-ins.** All 64 are translated classes in an a2g program; the stand-in
   files remain only for jrt's own build. *Accepted 2026-10-09, folded into A2G-SPEC §4.3 as
   K3.*
 
