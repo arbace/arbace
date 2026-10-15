@@ -2701,6 +2701,280 @@ byte**, `b6f2e89e...`, the three builds one run each from the new stage 0, 561 s
 
 **Decided (2026-10-15, the user):** SA160-SA163 (a) as recommended, all as built.
 
+## After the milestone: the build's speed, second round, part A: the host's compiling (2026-10-15)
+
+The user's order after the first round: a second one, in three parts on branches of their own
+(A: the host's compiling of the namespaces; B: a2g; C: g2a's builds). Measured on the shared
+host, busy with the emulated arm64 VM and other builds: single timings vary by up to a half.
+
+### A: the host's compiling of the namespaces (branch `speed2-host`)
+
+**Where the time went** (`9942951`, stage 0 the host, alone): loading the 100 sources (85
+namespaces) about 19 s, the back end about 32 s (`compile-all` 27 s on one core, the printing
+8.5 s on 16 threads), about 53 s in all (56 to 64 s in a build, beside a2g). A CPU profile: four
+fifths of it the evaluator. The host prepares the namespaces from source (`ARBACE_NO_AOT`, so
+that their units are recorded), so the back end, and `arbace.core` and the other namespaces it
+calls, ran evaluated, not as the host's compiled code.
+
+**What changed (SA164).** `arbace.aot.main/run`, before compiling, runs the compiled loaders of
+the back end's namespaces and the ones they need when the program holds them for the sources on
+`ARBACE_PATH`: the closure of `arbace.aot.main` and `arbace.core` under `:require`, `:use` and
+top-level `load`, found from the sources' forms (23 sources: core's ten with
+`arbace.core.protocols`, `arbace.instant` and `arbace.uuid`, `arbace.java.io`, `string`, `set`,
+`classes.types`, `a2g.names`, `a2g.jrt`, `g2a.print`'s four, `aot.emit`, `aot.main`), each
+source's text compared with the embedded one. The loaders run in the order the sources were
+loaded, in the bindings `Compiler$AOT/load` makes (a nested `load` is then a no-op: the source is
+loaded); their vars' roots become the compiled fns, and the units the back end reads are the
+analysis' as before. When a source of the closure is not the program's own (stage 0 the host
+and the checkout's core or back end changed since the seed), the back end runs evaluated, as
+before. Where it applies: the fixpoint's G2 and G3, `bin/seed --verify`, the box's rebuild (its
+host image is built from the same sources), and builds by stage 0 once the seed holds it and as
+long as those 23 sources are unchanged since.
+
+**Tried and left.** Only `arbace.aot` compiled: 4 to 11 s (core's fns stay evaluated). The
+closure without core: no better than `arbace.aot` alone. `GOGC` 1000 or 2000 instead of 400: no
+faster, the peak RSS 5.1 → 9.7 GB. Not tried: the namespaces' loading compiled. The analysis
+needs each top-level form evaluated before the next, and a unit run as the host's compiled code
+would mix the analysis' evaluated classes (deftypes, protocols' interfaces) with the compiled
+ones. The namespace list (0.6 s) is not worth it.
+
+**Measured** (`b65bb74`):
+
+| | evaluated (stage 0 the host) | compiled (G1 the host) |
+|---|---|---|
+| alone, the back end (the host busy) | 55 to 58 s | 22 to 29 s |
+| in `bin/arbace-go --build`, the host's compiling (two pairs) | 56 s, 80 s | 38 s, 61 s |
+
+**Checked.** The tree compiled by the evaluated back end (G1, built by stage 0) and by the
+compiled one (G2, built by G1): the same, and **G2 = G1 byte for byte** (amd64 `1cd633b0...`,
+arm64 `9483503d...`). The essential gate on `b65bb74` passed (12:56, the host busy): the suite
+as recorded, the oracle's 53 known mismatches, 0 new. The executable is not main's: `aot/main.ae`
+is one of the compiled sources. A quirk found: the line of `arbace.pprint`'s last unit is
+the line of the driver script's `require` (bin/arbace-go's and the box's both on line 1), so a
+driver laid out differently prints another tree; not changed.
+
+### Amendments (proposed 2026-10-15)
+
+- **SA164 The back end compiled while the host prepares the namespaces.** (a) The compiled
+  loaders of the back end's closure run first when their sources are the program's own (built);
+  (b) evaluated, as before; (c) only `arbace.aot`'s two sources compiled (a smaller closure, a
+  third of the gain). *Recommended: (a)*: the same tree, the back end about half as long, and
+  nothing changes when a source of the closure is not the program's.
+
+**Decided (2026-10-15, the user):** SA164 (a), as built.
+
+## The build's speed, second round, part B: a2g (2026-10-15)
+
+The user's order (a second round, part B): a2g's phases after the compiled namespaces arrive,
+which ran on few cores. Branch `speed2-a2g`. Measured as `bin/arbace-go` runs a2g (`--await`, the
+same compiled tree copied in 60 s after a2g starts), on the shared host (the emulated arm64 VM
+and other builds beside it: single timings vary by a fifth or more).
+
+### Where the time went (`9942951`)
+
+After the compiled tree was ready, a2g took 123 s: loading it 31 s (the sequential part 10 s,
+the analysis 22 s, of which `arbace.core`'s loader alone, 903 methods and 1,588 fields, the last
+9 to 14 s), reachability 23 s on one core, the translation 41 s (the classes 17 s in parallel;
+then dyn 6, registrations 6, the packages 11, collisions 3, one after another) and the writing
+24 s (the files' texts 19 s in parallel). The parallel steps were bound by allocation (Go's
+collector), not threads.
+
+### What changed (`cb834cf`; a2g's output unchanged)
+
+- **The writer** (`arbace.a2g.out`): the layout passed along as an argument, not a dynamic var
+  bound for every tag; a text's newlines counted with `indexOf`, not a lazy seq per character;
+  no `map-indexed` per list; `*print-meta*` bound only for a value with metadata. The texts
+  19 → 4.3 s.
+- **`simple?` and `effects?`** (`arbace.a2g.code`) kept per node, by identity, while a class is
+  translated (`*node-memo*`, bound by `apart`; with the class and staticness of the function
+  being written, on which `guarded-static?` depends): each walked an operand's whole subtree,
+  and `operands` asks them again at every level of an expression. With the names below, the
+  classes 17 → 8 s.
+- **Names**: `munge-name`, `go-class-name`, `method-base` and model's `method-desc-classes`
+  kept per argument (pure; asked for again and again from every thread).
+- **dyn**: a slot's default methods asked only of the interfaces of which a supertype declares
+  the method (an index), not of all 627 for each of the 1,410 slots. dyn 6 → 0.5 to 1 s.
+- **Registrations**: the classes of all the packages in one parallel pass (they ran per
+  package, the small packages on few threads), merged in package order as before; T grouped by
+  package once; the literal pool's lone-surrogate test a loop. Registrations 6 → 0.5 to 1 s, the
+  packages 11 → 0.7 s.
+- **Collisions**: the files' declared names collected in parallel. 3 → 0.8 s.
+- **Reachability**: the queue in batches, each batch's code flattened (the nodes the scan acts
+  on) in parallel, then scanned in the queue's order, as before; `java-impl-of`'s lookups
+  through an index of each class's methods. 23 → 12 to 16 s; the rest is the scan itself, one
+  core, many small lookups.
+- **`arbace.classes.analyze/find-own-field`**: a Clojure name munged once per lookup, not once
+  per field of the class (the loader's 1,588 fields for each symbol).
+
+Tried and left: `arbace.core`'s loader analyzed with the member classes, the largest first
+(not after them, alone): no gain, the one long task slower among the 16 (the collector). The
+analysis of one class is sequential (its temporaries are numbered in one id space): the loader
+split into several classes (the compiler's emit, part A's) would let it run in parallel.
+
+### Measured
+
+| | before (`9942951`) | after (`cb834cf`) |
+|---|---|---|
+| a2g after the tree is ready | 123 s | 66 to 75 s |
+| reachability | 23 s | 12 to 16 s |
+| the translation (its steps after the classes) | 41 s (27 s) | 10 to 14 s (2 to 3 s) |
+| the writing (the texts) | 24 s (19 s) | 8 to 11 s (4 to 5 s) |
+| the fixpoint's one-run builds (G2 by G1, G3 by G2) | 2:57, 2:44 | 2:32, 2:15 |
+
+a2g's output for the same compiled tree is the same, byte for byte, but its own embedded
+sources and report.edn's times (`diff -r`). The fixpoint at `cb834cf` (G1 by the seed's stage
+0, whose a2g is the previous one): a2g's programs G1 = G2 = G3, **G1 = G2 = G3 byte for byte**
+(`bb9a9bf7...`, 101,515,424 bytes): the new a2g prints the program the old one printed. The
+essential gate passed on `cb834cf` (9:08: the suite 20,506 of 20,520, no regressions; the
+oracle 22,505 of 22,558, the 53 known, 0 new).
+
+### Left
+
+- `arbace.core`'s loader: one class of 903 methods, analyzed in one task (9 to 14 s, at the end
+  of the analysis, alone); split by the compiler (part A), its parts would analyze in parallel.
+- The load's sequential part after the tree arrives (10 s: entering, headers, members,
+  bridges), in `arbace.classes`; reachability's scan (12 to 16 s, one core).
+
+## The build's speed, second round, part C: `jrt` split? (2026-10-15)
+
+Status: measured on the branch `speed2-jrt` (from main at `9942951`); no split built. The
+question: `jrt`, one Go package of 20 MB (914 files: about 840 translated JDK sources, a2g's
+shared files such as `a2g_classes.go` of 3.5 MB, about 70 hand-written forms), is the program's
+largest; is Go compiling it on the critical path of the host's builds, and would a split pay?
+
+### Measured (`.tmp/speed2/`, TamaGo's go1.27.1, the amd64 work module of a build at `9942951`)
+
+`go build -debug-trace` of `target/arbace-go/work-amd64/mod` as g2a runs it (`-trimpath`, the
+overlay of `bin/jrt overlay`), each compile timed by a `-toolexec` wrapper, on the shared host
+(the emulated arm64 VM busy):
+
+| case | wall | the chain |
+|---|---:|---|
+| a fresh build cache (the standard library too) | 96.9 s | `jrt` 54.7 s (from 5.0 s), then `lang` 21.0 s, the namespaces' packages about 9 s (`aot_arbace_core` last, 6.7 s), the link 4.4 s |
+| the standard library cached, every Arbace package changed | 103.9 s | `jrt` 64.1 s (wall 62.3, user 235.1 s, `-c=64`, peak RSS 8.8 GiB), `lang` 22.1 s (user 94.2 s, 3.7 GiB), the namespaces' about 10 s, `main` 2.2 s, the link |
+| everything cached (the output path new) | 5.2 s | the link alone, 4.9 s |
+
+`jrt`'s compile by phase (`-gcflags=arbace/jrt=-bench`, 53.6 s): the front end 30.5 s on one
+core (parsing and type checking 1,079,724 lines 18.1 s, devirtualizing and inlining 9.5 s, escape
+analysis 2.9 s), the back end 23.1 s (its functions, 202,064, compiled in parallel 14.6 s; the
+object written 8.5 s, one core). So Go uses about 3.8 cores on `jrt`; `lang` waits for its export
+data, and every namespace's package for `lang`'s.
+
+**But `jrt` is cached in the builds that matter for speed.** Go's cache is keyed by content:
+`jrt` compiles again only when its printed text changes, i.e. when the runtime does
+(`go/arbace/jrt`, `jdk/`, `overlay/jdk`, a2g's translation of them). A change to the namespaces
+leaves it as it was (the shipped build's and the test build's `jrt` are identical, `diff -r`,
+though the test build has more namespaces). The one-run build (the runtime the checkout's) and
+the fixpoint's G2 and G3 compile no `jrt`: g2a's step there is about 18 s (`bin/g2a build` on
+the current program, everything cached, 18.6 s wall, 76 s user): Go's part is about 5 s (the
+link), the rest g2a's own (reading the forms, printing with the print cache, writing 61 MB of
+Go). After a change to the runtime (two runs), `jrt` compiles once (the second run's `jrt` is the
+same text, cached): about 60 s of that build's 5.5 minutes. In the box's rebuild (a fresh cache
+in the guest), 94 s.
+
+### What a split could gain, and cost
+
+The bound: S5's graph ("S5: jrt as core and library", `tools/godeps`): with all edges the
+reached classes are one strongly connected component of 84% of `jrt`'s nodes, and by Java
+packages 74 of 75 are one component; only with bodies outlined (`-decls`, 13.7% of the nodes in
+the largest component) would the rest compile in parallel. At best the chain `jrt` → `lang`
+would lose about 45 s, and only in the builds where `jrt` changed: **0 s on the one-run build**,
+about 45 s once per change to the runtime. The cost, from S5: a2g writing several packages, the
+partition checked acyclic, linkname pulls or outlined bodies or hook variables for the upward
+edges (a call more per outlined method), `lang` the same (its cycles are calls), the seed and
+the fixpoint again: 5 to 10 days, decided against at S5 (SA100 (a)) on other grounds.
+
+Cheaper levers on `jrt`'s compile all change the output and the program (`-l`, no inlining:
+slower code; a smaller `jrt` means fewer reached JDK members, which reachability already
+minimizes) or do nothing (`-c` is already 64; GOGC raised in the first round was slower).
+
+Where g2a's 18 s on the one-run build goes is the next lever (g2a's own printing and writing,
+not Go): left for the round's other parts.
+
+### Amendments (proposed 2026-10-15)
+
+- **SA180 `jrt` split for the build's speed.** (a) Not split: `jrt` is cached in the one-run
+  build and the fixpoint's later stages, so a split gains nothing there; about 45 s at best once
+  per change to the runtime, for S5's 5 to 10 days of a2g's work; (b) split along S5's `-decls`
+  model (outlined bodies, linkname pulls), `lang` too. *Recommended: (a)*.
+- **SA181 What is measured as a build's Go step.** (a) The trace and the per-compile timing
+  above kept as the method (`.tmp/speed2/trace.sh`, `tx.sh`, `an.py`: `go build -debug-trace`, a
+  `-toolexec` timer, `-gcflags=<pkg>=-bench`), not committed as tools; (b) a `tools/` command for
+  it. *Recommended: (a)*: a measurement, not a check the build runs.
+
+**Decided (2026-10-15, the user):** SA180 (a), `jrt` not split; SA181 (a), the scripts kept in
+`.tmp/speed2/`.
+
+## The build's speed, second round, part D: g2a's own work (2026-10-15)
+
+Status: on the branch `speed2-g2a` (from main at `1b24757`). Part C measured g2a's step in a
+one-run build at about 18.6 s, `jrt` cached: Go's link about 5 s, the rest g2a's own. Measured on
+the shared host (the emulated arm64 VM and the other parts' builds running), `.tmp/speed2g/`
+(`bench.sh`: `bin/g2a build --line-file --arch amd64` of one fixed a2g program, Go's build cache
+warm, the print cache as named).
+
+### Where the time went
+
+A CPU profile of main's g2a with every package in the print cache (`ARBACE_CPUPROFILE`, 17.6 s,
+62.6 CPU-seconds): 62% in `LispReader` and the readers under it, the rest mostly Go's collector.
+g2a read every forms file of the program (77 MB, `read-all`, in parallel) on every build, cached
+or not: collecting a package (`arbace.g2a.print/collect`: its `go/package` options, its files
+and the files it loads) needs its forms, and `package-file?` reads every file to find the
+package files. The print cache then skipped only the printing.
+
+### What changed
+
+- **The collect index** (SA190). With `--print-cache`, per source root and host
+  (`DIR/collect/<sha>`, the SHA-256 of `G2A_HOST_ID` and the root's path): which forms files
+  are package files, by their contents' SHA-256, and for each package file its collection
+  (`:package`, `:name`, `:path`) and the files it read, each with its SHA-256. A package whose
+  files all hash the same is taken from the index, its forms not read (`:collected`, a delay:
+  read and collected only when the package must be printed, and then required equal to the
+  index's); only the files of packages not in the index are read, in parallel as before. The
+  files are hashed once each, in parallel. The index is written (atomically, a file renamed)
+  when it changes, an entry left out unless its data prints and reads back equal (metadata
+  included); read, its mtime is set, and `bin/lib/gocache.bash` trims indexes with the
+  entries. `doc/go/BUILD.md`, "The print cache".
+- **Cached printed files copied byte for byte**, not read into strings and written again
+  (decoding and encoding 61 MB of text, most of what was left).
+
+### Measured
+
+| case (g2a build, amd64, one a2g program) | main | `speed2-g2a` |
+|---|---:|---:|
+| the print cache cold (every package printed) | 41.9 s | 37.6 s (the same, within the noise) |
+| every package in the print cache | 18.0 to 20.6 s | 6.0 to 7.1 s (g2a about 1.5 s, Go's link 4.6 s) |
+| four packages changed, `lang` (9.2 MB) and `aot_arbace_core` among them | 20.3 s | 23.0 s (the same: printing them is the time) |
+
+`bin/arbace-go --build` on the branch, twice from the same sources: g2a's builds (amd64, arm64
+at once) 60 and 63 s (its print cache cold: the host's identity new), then 6 and 7 s, the
+executables the same (`162c5fb6...`, `08154aca...`). Then a one-run build after a one-string
+change to `arbace/c2a/rules.ae` (reverted after): g2a 8 and 8 s, one package printed
+(`aot_arbace_c2a_rules`), where main reads every package's forms (about 18 to 20 s). The printed
+module is byte for byte main's: the branch's build of that program printed again by main's g2a
+with a cold cache (`diff -r` of both work modules, the first and the second build's), and on
+`bench.sh` the same executable from both (`e4026df7...`).
+
+### `aot_arbace_core` late
+
+`aot_arbace_core` imports `aot_arbace_core_protocols` (arbace.core uses the protocols' types),
+so Go compiles it after that package (2.0 to 2.4 s after `lang`); then the small packages
+importing it (0.5 s), `cmd/arbace` (1.8 s) and the link. It counts only when `lang` or the
+protocols change (Go's cache keeps the rest): a build after a change to the runtime. Merging the
+protocols into core's package (the back end's choice of packages) would save about 2 s there;
+not done (SA191).
+
+### Amendments (proposed 2026-10-15)
+
+- **SA190 g2a's collect index.** (a) As built: with `--print-cache`, a package whose files are
+  unchanged is not read; (b) the forms read on every build, as before. *Recommended: (a)*: the
+  printed module is the same; a one-run build's g2a about 10 to 12 s shorter.
+- **SA191 `aot_arbace_core_protocols`.** (a) Left a package of its own; (b) merged into
+  `aot_arbace_core` (the back end's packaging). *Recommended: (a)*: about 2 s, only when the
+  runtime or the protocols change.
+
+**Decided (2026-10-15, the user):** SA190 (a), as built; SA191 (a), left as it is.
+
 ## S9: Go's toolchain as forms (2026-10-15)
 
 The survey's S9 (STANDALONE-SURVEY.md §7, step b1'; §8.1): `cmd/compile`, `cmd/link`, `cmd/asm`

@@ -14,9 +14,11 @@ gocache_trim() {
 }
 
 # g2a_print_cache_trim DIR: g2a build's cache of printed packages (--print-cache, standalone
-# S6) trimmed alike, of entries unused for ARBACE_GOCACHE_KEEP_MIN minutes
+# S6) trimmed alike, of entries unused for ARBACE_GOCACHE_KEEP_MIN minutes, and its collect
+# indexes (DIR/collect/, files: arbace.g2a.build's root-packages)
 g2a_print_cache_trim() {
   local keep=${ARBACE_GOCACHE_KEEP_MIN:-360}
   [ -d "$1" ] || return 0
   find "$1" -mindepth 2 -maxdepth 2 -type d -mmin +"$keep" -exec rm -rf {} + 2>/dev/null || true
+  [ -d "$1/collect" ] && find "$1/collect" -type f -mmin +"$keep" -delete 2>/dev/null || true
 }

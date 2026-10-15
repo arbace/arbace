@@ -332,7 +332,8 @@
             :ups (atom []) :lambdas (atom []) :cuts (atom [])}
         races (atom [])
         sw (java.io.StringWriter.)
-        r (binding [c/*pkgstate* ps c/*races* races *out* sw]
+        r (binding [c/*pkgstate* ps c/*races* races *out* sw
+                    c/*node-memo* {:simple (java.util.IdentityHashMap.) :effects (java.util.IdentityHashMap.)}]
             (if catch?
               (try
                 {:forms (f)}
@@ -394,26 +395,41 @@
       {}
       (map vector ns results))))
 
+(defn- merge-registrations!
+  "Merges the registrations' results rs, in order, into the package state ps (as
+  translate-classes). Returns their literals' renames."
+  [rs ps]
+  (reduce (fn [renames r] (merge-apart! r ps renames)) {} rs))
+
+(defn- registration-forms
+  "The forms of a2g_classes.go of package pkg from its classes' registrations rs."
+  [pkg rs]
+  (let [forms (mapcat :forms rs)
+        code? #(and (seq? %) (= 'a2g/code-decl (first %)))
+        decls (map second (filter code? forms))
+        cd (m/jrt-sym pkg "CodeDecl")]
+    (vec (concat
+          ;; the compiled fns' code classes (SA159): one table of static data, defined
+          ;; first (the package's other classes may name them), linked at init
+          (when (seq decls)
+            [(list 'go/var (with-meta 'a2gCode {:tag (list 'slice cd)}) (apply list 'lit (list 'slice cd) decls))
+             (list 'go/var (with-meta 'a2gCodeDefined {:tag 'bool}) (list (m/jrt-sym pkg "DefineCode") 'a2gCode))
+             (list 'go/func 'init [] (list (m/jrt-sym pkg "LinkCode") 'a2gCode))])
+          (remove code? forms)))))
+
 (defn registrations
-  "The forms of a2g_classes.go of package pkg (out/class-registration of each class, in order),
-  the classes in parallel, each apart, merged in order into the package state ps (as
-  translate-classes). Returns [forms renames]."
-  [pkg classes ps]
-  (let [rs (m/par-mapv (m/jobs) (fn [[i n]] (apart (str "r" (name pkg)) i n #(out/class-registration pkg n) false))
-                       (map-indexed vector classes))]
-    (let [forms (mapcat :forms rs)
-          code? #(and (seq? %) (= 'a2g/code-decl (first %)))
-          decls (map second (filter code? forms))
-          cd (m/jrt-sym pkg "CodeDecl")]
-      [(vec (concat
-              ;; the compiled fns' code classes (SA159): one table of static data, defined
-              ;; first (the package's other classes may name them), linked at init
-              (when (seq decls)
-                [(list 'go/var (with-meta 'a2gCode {:tag (list 'slice cd)}) (apply list 'lit (list 'slice cd) decls))
-                 (list 'go/var (with-meta 'a2gCodeDefined {:tag 'bool}) (list (m/jrt-sym pkg "DefineCode") 'a2gCode))
-                 (list 'go/func 'init [] (list (m/jrt-sym pkg "LinkCode") 'a2gCode))])
-              (remove code? forms)))
-       (reduce (fn [renames r] (merge-apart! r ps renames)) {} rs)])))
+  "The forms of a2g_classes.go of each package pkg of pkg-classes ([pkg classes], in order;
+  out/class-registration of each class, in order), the classes of all the packages in
+  parallel, each apart. Returns [pkg forms results], whose results merge-registrations! merges
+  into the package's state, in order."
+  [pkg-classes]
+  (let [jobs (vec (for [[pkg classes] pkg-classes [i n] (map-indexed vector classes)] [pkg i n]))
+        rs (m/par-mapv (m/jobs) (fn [[pkg i n]] (apart (str "r" (name pkg)) i n #(out/class-registration pkg n) false))
+                       jobs)
+        by-pkg (group-by first (map (fn [[pkg] r] [pkg r]) jobs rs))]
+    (for [[pkg _] pkg-classes]
+      (let [rs (mapv second (get by-pkg pkg))]
+        [pkg (registration-forms pkg rs) rs]))))
 
 (def default-edge "jdk/edge.edn")
 
@@ -614,7 +630,8 @@
             prog-dir (str (:out opts) "/prog")
             cuts (atom #{})
             ;; the Go packages: jrt, lang, and the compiled namespaces' (S6, SA142)
-            pkgs (vec (concat [:jrt :lang] (sort (distinct (filter nm/compiled-pkg? (map m/pkg T))))))
+            T-by-pkg (group-by m/pkg T)
+            pkgs (vec (concat [:jrt :lang] (sort (filter nm/compiled-pkg? (keys T-by-pkg)))))
             pkgstates (into {} (for [p pkgs] [p {:lits (atom {}) :ups (atom #{}) :lambdas (atom #{}) :cuts cuts}]))
             files (atom {})   ; [pkg go-file] -> forms
             errors (atom [])
@@ -667,18 +684,17 @@
           (lap :adapters)
           ;; per package: registrations first (their member tables may name cut classes of
           ;; either package), then the literal pool, conversions, frames, support, cut classes
-          (doseq [pkg pkgs
-                  :let [ps (get pkgstates pkg)
-                        classes (sort (filter #(= pkg (m/pkg %)) T))]
-                  :when (or (seq classes) (= pkg :jrt))]
-            ;; in parallel, each class apart (registrations)
-            (let [[forms renames] (registrations pkg (vec classes) ps)]
-              (swap! lit-renames merge renames)
+          (let [regs (registrations (for [pkg pkgs
+                                          :let [classes (vec (sort (get T-by-pkg pkg)))]
+                                          :when (or (seq classes) (= pkg :jrt))]
+                                      [pkg classes]))]
+            (doseq [[pkg forms rs] regs]
+              (swap! lit-renames merge (merge-registrations! rs (get pkgstates pkg)))
               (swap! files assoc [pkg "a2g_classes.go"] forms)))
           (lap :registrations)
           (doseq [pkg pkgs
                   :let [ps (get pkgstates pkg)
-                        classes (sort (filter #(= pkg (m/pkg %)) T))]
+                        classes (sort (get T-by-pkg pkg))]
                   :when (or (seq classes) (= pkg :jrt))]
             (binding [c/*pkgstate* ps]
               (when-let [fr (out/frames-forms pkg classes)] (swap! files assoc [pkg "a2g_frames.go"] (vec fr)))
