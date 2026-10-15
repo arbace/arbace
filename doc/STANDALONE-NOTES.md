@@ -2683,7 +2683,7 @@ byte**, `b6f2e89e...`, the three builds one run each from the new stage 0, 561 s
 - g2a's builds: Go compiling `jrt`, one package of the program's largest (94 s in the box): a
   split into packages.
 
-### Amendments (proposed 2026-10-15)
+### Amendments
 
 - **SA160 a2g loads in two rounds, and waits for the compiled namespaces.** (a) As above:
   `--await`, `bin/arbace-go` overlapping a2g with the host's compiling (built); (b) one round
@@ -2696,3 +2696,5 @@ byte**, `b6f2e89e...`, the three builds one run each from the new stage 0, 561 s
   other. *Recommended: (a)*.
 - **SA163 a2g's edge outside the runtime key.** (a) Left out (built); (b) in the key (a
   re-recorded edge makes builds two runs until a re-seed). *Recommended: (a)*.
+
+**Decided (2026-10-15, the user):** SA160-SA163 (a) as recommended, all as built.

@@ -93,3 +93,17 @@ byte for byte. The seed remade from the fixpoint at `d23bc5e`, `79d4f552...` (wa
 compiling of the namespaces (about 60 s; its emit sequential by its shared constant pools),
 a2g's reachability (19 s) and sequential translation steps (18 s), and `jrt`, one Go package,
 the long pole of g2a's builds. SA160-SA163 proposed for the user, recommended (a).
+
+## 2026-10-15: SA160-SA163 decided; c2a's stale `:why` fixed
+
+The user decided the build speed's amendments (`doc/STANDALONE-NOTES.md`, "After the milestone:
+the build's speed", Amendments): SA160-SA163 (a) as recommended, all as built: a2g's two rounds
+with `--await`, overlapping the host's compiling of the namespaces (SA160); report.edn printed
+directly (SA161); g2a's architectures built concurrently (SA162); `jdk/edge.edn` out of the
+runtime key (SA163). The alternatives, (b) each, were the previous behaviour.
+
+The leftover of the docs' sweep closed (the user: "fix that one stale string"):
+`arbace/c2a/rules.ae`'s `:why` for the divergence "Optional modules" named a runtime image that
+main has not had since S4; it now says, as `doc/C2A.md` does, that it was the JVM's runtime image
+(on `arbace-for-java-26`) and that main removed the three namespaces at S4. Only
+`bin/c2a --rules` prints it (checked). The essential gate passed on it (`9942951`).
