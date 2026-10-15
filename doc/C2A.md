@@ -74,8 +74,10 @@ text).
 | `:core-names` | `.clj`, `.cljc` | Names `arbace.core` has and `clojure.core` has not are those marked `{:added "arbace"}`: the class forms' macros and operators, such as `return`, `switch`, `label`, `lambda` and `bit-and-int`. When a file defines one of them (`def`, `defn`, `defmacro`, ... at any depth), the name joins its `ns` form's `(:refer-clojure :exclude [...])`, as a library does for a core name it redefines. The name is added to an `:exclude` already there. If there is none, `:exclude [...]` is added to the `:refer-clojure`, or `(:refer-clojure :exclude [...])` to the `ns` form. Without the rule the library still works, but every load warns `return already refers to: #'arbace.core/return` (test.check's `generators` defines `return`). A file with `:only`, or without an `ns` form, is left as it is. |
 | `:security-manager` | `.clj`, `.cljc` | An unqualified `SecurityManager` (as a symbol, `SecurityManager/x`, `SecurityManager.` or a hint) becomes `java.lang.SecurityManager`, because Arbace does not import it by default (hand change 11). A file that imports it is left as it is. |
 
-The table in `arbace.c2a.rules/divergences` says, for each divergence of VENDOR-NOTES.md, which
-rule answers it, or why no source rewrite can:
+The table in `arbace.c2a.rules/divergences` says, for eight of the divergences of
+VENDOR-NOTES.md (not the REPL's banner, `data_readers.ae`, the store or "Without the JVM", which
+it does not name; `gen-class` is under "Limits", below), which rule answers each, or why no
+source rewrite can:
 
 | divergence | rule |
 |---|---|
@@ -83,7 +85,7 @@ rule answers it, or why no source rewrite can:
 | `SecurityManager` is not a default import | `:security-manager` |
 | A multimethod's ambiguity message | None: only the message's wording differs. A test comparing the message must be edited. |
 | `bean` ignores explicit `BeanInfo` classes | None: this is what `bean` returns at run time, and nothing in the source names it. |
-| Optional modules (`java.sql`, `java.xml`, `java.desktop`) | None: this depends on the runtime image, not the source. |
+| Optional modules (`java.sql`, `java.xml`, `java.desktop`) | None: this depended on the JVM's runtime image, not the source (on `arbace-for-java-26`; on main since S4 the namespaces are removed, VENDOR-NOTES.md, "Without the JVM"). |
 | Source files are `.ae` | c2a's output names, and `:reader-conditionals`. The vendored namespaces' source paths are renamed by `:rename`. |
 | Names `arbace.core` adds | `:core-names` |
 | Runtime-visible names | `:proxy-methods`. Thread names (`arbace-agent-send-pool-N`, ...), the error reports' file prefix and the socket server's thread names are data in strings, and are left alone (below, "Limits"). |
@@ -168,8 +170,8 @@ What c2a cannot translate mechanically:
   needs its `.java` sources renamed (c2a does that) and compiled again, or converted by j2a
   for the Go build. `bin/clojure-tests --java-fixtures` does this for the suite's fixtures.
 - **`gen-class` on Go.** The Go build has no `gen-class` (go/B1-PLAN.md, D6; out for good,
-  go/JAVA-SURFACE.md): a library using it loads on the JVM build only. c2a cannot write class
-  forms for it. A `defclass` by hand is the way.
+  go/JAVA-SURFACE.md): a library using it loads only on the frozen JVM Arbace
+  (`arbace-for-java-26`). c2a cannot write class forms for it. A `defclass` by hand is the way.
 - **Names built at run time.** `(symbol (str "clojure." "core"))`, `(str "clojure.lang." n)`
   and resource paths assembled from parts escape the rename.
 - **Sources found by extension.** Code that looks for `.clj`/`.cljc` files (tools.namespace's

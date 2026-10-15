@@ -2,7 +2,7 @@
 
 What `arbace/` holds (all `.ae`, Arbace's source extension since 2026-10-11: Clojure plus the
 class forms, which Clojure cannot evaluate; VENDOR-NOTES.md, hand change 19): Arbace's Clojure
-code. Two kinds of things live here:
+code. Three kinds of things live here:
 
 - Arbace's own tools: `classes/` (the class forms' analysis and the Go build's interpreter of
   them, `arbace.classes.*`; the bytecode back end is on the branch `arbace-for-java-26`), `c2a/` (the
@@ -10,15 +10,25 @@ code. Two kinds of things live here:
   (the Java to class forms converter, `arbace.j2a.*`), `g2a/` (Go to Arbace forms,
   `arbace.g2a.*`, with its Go helpers under `tools/godump/` and `tools/gocmp/`; doc/go/) and
   `a2g/` (the class forms to Go forms translator of the Go build, `arbace.a2g.*`;
-  doc/go/A2G-SPEC.md).
+  doc/go/A2G-SPEC.md), `aot/` (the back end compiling namespaces to class forms, `arbace.aot.*`;
+  doc/STANDALONE-NOTES.md, "S6: Arbace compiled to Go").
+- Arbace's own namespaces of the program, not derived from Clojure: `box.ae` and `box/`
+  (`arbace.box`, the store, over its host layer `arbace.box.host`; the box's build driver
+  `arbace.box.build`, its plan `arbace.box.plan`, the rebuild in the box `arbace.box.rebuild`
+  with its printing steps `arbace.box.print`, the symbol table cut `arbace.box.elf`;
+  doc/go/BOX-NOTES.md, S3, S7, S8), `tls.ae` and `tls/` (`arbace.tls`, TLS client connections,
+  over `arbace.tls.host`) and `http.ae` (`arbace.http`, a small HTTP/1.1 client; BOX-NOTES.md,
+  "TLS (option 2)").
 - The vendored Clojure, renamed `clojure.*` → `arbace.*`, everything else: the namespaces
   `arbace.core`, `arbace.main`, `arbace.pprint`, ... (`*.ae`), and the Java classes as class
   forms, one namespace per Java package (`lang.ae`, `java/api.ae`) with one file per
   Java file (`lang/RT.ae`, `lang/Compiler.ae`, ...). Clojure's main class `clojure.main` is
   `arbace.lang.Main` (`lang/Main.ae`). A few files among them are Arbace's own, not derived from
   Clojure, and say so in their header (`lang/KeywordInvokeSite.ae`,
-  `lang/ReflectorCallSite.ae`). `lang/go/` holds the Go build's variants of some of these
-  classes and namespaces (derived from the vendored files; read by a2g only).
+  `lang/ReflectorCallSite.ae`). `lang/go/` holds only the Go build's generated variants of `Compiler`,
+  `CompilerOps.ae` (by `test/a2g/eval_ops.ae`) and `CompilerAOTFn.ae` (by `test/aot/gen_fns.ae`);
+  the hand-written variants it held of `RT`, `Main` and `Compiler` were merged into their bases
+  (SA150).
 
 ASM (`asm.ae`, `asm/`, Clojure's `clojure.asm` renamed `arbace.asm`), the JVM's bytecode back end
 of `lang/Compiler.ae` and of the class forms compiler (`classes/emit.ae` ...), `lang/Compile.ae`,
@@ -26,7 +36,7 @@ of `lang/Compiler.ae` and of the class forms compiler (`classes/emit.ae` ...), `
 (doc/STANDALONE-NOTES.md, S4: the JVM removed); they remain on the branch `arbace-for-java-26`,
 whose `doc/ARBACE.md` records ASM's origin (below). The namespaces `genclass.ae`,
 `core_proxy.ae`, `reflect/java.ae`, `main.ae` and `core/server.ae` took the Go build's variants
-then (`lang/go/ns/`).
+then (they were under `lang/go/ns/`, since merged).
 
 Origin of the vendored Clojure: the frozen baseline `clojure/` this repository held until the
 freeze (it remains on the branch `arbace-for-java-26`), that is

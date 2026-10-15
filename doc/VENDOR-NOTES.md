@@ -6,7 +6,9 @@
 >
 > Since 2026-10-11 Arbace's sources are `.ae` files (hand change 19). The layout, the bootstrap
 > and spec's sections below name the current files; the derivation and the records of hand
-> changes 1 to 18 name them as they were then, `.clj`.
+> changes 1 to 18 name them as they were then, `.clj`. (2026-10-15: the layout's rows marked "on
+> the branch `arbace-for-java-26` only" left main with the JVM in S4; the bootstrap's section is
+> that branch's, as the next note says.)
 >
 > Since standalone S4 (2026-10-12; doc/STANDALONE-NOTES.md, "S4: the JVM removed") main builds
 > no JVM Arbace: the three-stage bootstrap (`bin/build-arbace`), the jar and its AOT cache, the
@@ -41,7 +43,7 @@ and stage 2, and, since spec was vendored too (below, "Spec"), passes in full.
 
 | path | what |
 |---|---|
-| `arbace/*.ae`, `arbace/{core,java,pprint,reflect,repl,test,tools}/**.ae` | Clojure's namespaces, renamed: `arbace.core` (with `core_print.ae` and the other files it loads), `arbace.main`, `arbace.pprint`, `arbace.java.io`, ... |
+| `arbace/*.ae`, `arbace/{core,java,pprint,reflect,test}/**.ae` | Clojure's namespaces, renamed: `arbace.core` (with `core_print.ae` and the other files it loads), `arbace.main`, `arbace.pprint`, `arbace.java.io`, ... (`arbace/repl/` and `arbace/tools/` on the branch `arbace-for-java-26` only since S4, hand change 23; among `arbace/*.ae` also Arbace's own `box.ae`, `tls.ae`, `http.ae`, doc/ARBACE.md) |
 | `arbace/lang.ae`, `arbace/lang/*.ae` | namespace `arbace.lang` (Java package `clojure.lang`), one file per Java file: `RT.ae`, `Compiler.ae`, ... |
 | `arbace/asm.ae`, `arbace/asm/**.ae` | `arbace.asm`, `arbace.asm.commons`, `arbace.asm.signature` (ASM, BSD 3-Clause); on the branch `arbace-for-java-26` only since 2026-10-12 |
 | `arbace/java/api.ae`, `arbace/java/api/Clojure.ae` | `arbace.java.api` |
@@ -51,10 +53,10 @@ and stage 2, and, since spec was vendored too (below, "Spec"), passes in full.
 | `bin/vendor-arbace` | replays the derivation into `.tmp/vendor/` (never into `arbace/`) and checks it; on the branch `arbace-for-java-26` only |
 | `arbace/spec/**.ae`, `arbace/core/specs/alpha.ae` | spec.alpha and core.specs.alpha, vendored later and renamed alike (below, "Spec") |
 | `bin/vendor-spec` | replays the vendoring of spec into `.tmp/vendor-spec/`; on the branch `arbace-for-java-26` only |
-| `test/arbace-results.edn` | the suite's reference for Arbace's stages (`test/baseline-results.edn` is the frozen baseline's) |
-| `seed/arbace-seed.jar`, `seed/arbace-seed.jar.sha256`, `bin/seed` | the binary seed, stage 0 of the bootstrap since 2026-10-08, and its pinned SHA-256 (below, "The binary seed") |
-| `bin/build-arbace` | builds stages 1 to 3 into `target/` and checks the fixpoint; `--suite` runs the test suite on stages 1 and 2 |
-| `target/stage1`, `target/stage2`, `target/stage3` | build output (gitignored, `/target/`): each stage's classes, those of the class forms under `arbace/` and the stage's AOT-compiled namespaces (below, "Compiled namespaces"; 5,756 classes per stage on 2026-10-08, the seed's) |
+| `test/arbace-results.edn` | the suite's reference for Arbace's stages (`test/baseline-results.edn` is the frozen baseline's); on the branch `arbace-for-java-26` only since 2026-10-12; main's is the Go build's, `test/arbace-go-results.edn` |
+| `seed/arbace-seed.jar`, `seed/arbace-seed.jar.sha256`, `bin/seed` | the binary seed, stage 0 of the bootstrap since 2026-10-08, and its pinned SHA-256 (below, "The binary seed"); the jar on the branch `arbace-for-java-26` only since 2026-10-12: main's seed is `seed/arbace-seed-go.tar.xz`, `bin/seed` its tool (hand change 23) |
+| `bin/build-arbace` | builds stages 1 to 3 into `target/` and checks the fixpoint; `--suite` runs the test suite on stages 1 and 2; on the branch `arbace-for-java-26` only since 2026-10-12 |
+| `target/stage1`, `target/stage2`, `target/stage3` | build output (gitignored, `/target/`): each stage's classes, those of the class forms under `arbace/` and the stage's AOT-compiled namespaces (below, "Compiled namespaces"; 5,756 classes per stage on 2026-10-08, the seed's); on the branch `arbace-for-java-26` only since 2026-10-12 |
 
 `clojure/version.properties` is not vendored (below). Nothing under `clojure/` changed.
 
@@ -1014,7 +1016,9 @@ the runtime-visible renames are listed once, as c2a's mechanical part.
   their names, not of the method table.
 - **`bean`** (hand change 15) ignores explicit `BeanInfo` classes: for `javax.swing.JLabel` it
   lists all of `java.awt.Component`'s properties.
-- **Optional modules** (hand changes 16, 17): without `java.sql`, `#inst` still reads (to a
+- **Optional modules** (hand changes 16, 17; the JVM's, on the branch `arbace-for-java-26`: on
+  main since S4 there is no runtime image, the Go build holds `java.sql.Timestamp`, and the three
+  namespaces are removed, below, "Without the JVM"): without `java.sql`, `#inst` still reads (to a
   `java.util.Date`; upstream then has no `#inst`); without `java.xml` or
   `java.desktop`, `arbace.xml`, `arbace.inspector` and `arbace.java.browse-ui` throw an
   `UnsupportedOperationException` naming the module when loaded.
@@ -1049,7 +1053,8 @@ the runtime-visible renames are listed once, as c2a's mechanical part.
   by none; `add-classpath` throws, `*loader*` is nil, and no `DynamicClassLoader` exists;
   `:direct-linking` is ignored; `arbace.reflect`'s `AsmReflector` throws; the namespaces
   `arbace.repl.deps`, `arbace.java.basis`, `arbace.tools.deps.interop`, `arbace.java.browse`,
-  `arbace.java.javadoc`, `arbace.inspector` and `arbace.xml` do not exist.
+  `arbace.java.browse-ui`, `arbace.java.javadoc`, `arbace.inspector` and `arbace.xml` do not
+  exist.
 
 ## Spec (2026-10-07)
 

@@ -1,8 +1,15 @@
 # The standalone Arbace — survey and plan
 
 Status: survey, 2026-10-12, for the main line after the box's milestones (`arbace-box-amd64-v1`,
-`arbace-box-arm64-v1`), by the user's decision of 2026-10-12 (JOURNAL.md, "The user's decisions
-after S4"). Nothing here is implemented. The decisions (§9) are the user's. The measurements
+`arbace-box-arm64-v1`), by the user's decision of 2026-10-12 (the journal at the tag
+`arbace-inside-itself-v1`,
+[JOURNAL.md](https://github.com/arbace/arbace/blob/arbace-inside-itself-v1/doc/JOURNAL.md),
+2026-10-12, "The user's decisions after S4"). Nothing here was implemented then. The decisions
+(§9) are the user's.
+
+Since then (2026-10-15): D1-D13 decided, S1-S8 done (doc/STANDALONE-NOTES.md; the milestones
+`arbace-seed-is-go-v1`, 2026-10-13, and `arbace-inside-itself-v1`, 2026-10-15), S9 open. The
+survey is otherwise as written on 2026-10-12. The measurements
 were taken on main at `a6a6b86` with its build outputs (`target/`, `.tmp/jrt`); the experiments
 (§8) ran in `.tmp/standalone-survey/`.
 
