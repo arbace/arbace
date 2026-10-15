@@ -1,0 +1,163 @@
+;; Copyright 2023 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; Package telemetry manages the telemetry mode file.
+(in-ns 'go.cmd.vendor.golang_org.x.telemetry.internal.telemetry) (go/file "dir.go" :doc "Package telemetry manages the telemetry mode file.\n" :imports [
+
+
+    ^{:line 9} [fmt "fmt"]
+    ^{:line 10} [os "os"]
+    ^{:line 11} [filepath "path/filepath"]
+    ^{:line 12} [runtime "runtime"]
+    ^{:line 13} [strings "strings"]
+    ^{:line 14} [time "time"]])
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+(go/var ^{:tag Dir :doc "Default is the default directory containing Go telemetry configuration and\ndata.\n\nIf Default is uninitialized, Default.Mode will be \"off\". As a consequence,\nno data should be written to the directory, and so the path values of\nLocalDir, UploadDir, etc. must not matter.\n\nDefault is a global for convenience and testing, but should not be mutated\noutside of tests.\n\nTODO(rfindley): it would be nice to completely eliminate this global state,\nor at least push it in the golang.org/x/telemetry package\n"} Default)
+
+
+(go/type Dir "A Dir holds paths to telemetry data inside a directory.\n" (struct
+    ^{:line 33 :tag string} dir ^string local ^string upload ^string debug ^string modefile))
+
+
+
+
+
+
+^{:go/end 48} (go/func NewDir "NewDir creates a new Dir encapsulating paths in the given dir.\n\nNewDir does not create any new directories or files--it merely encapsulates\nthe telemetry directory layout.\n" ^Dir [^string dir]
+  ^{:go/breaks [2 4 6 8 10]} (lit Dir
+    :dir dir
+    :local (filepath/Join dir "local")
+    :upload (filepath/Join dir "upload")
+    :debug (filepath/Join dir "debug")
+    :modefile (filepath/Join dir "mode")))
+
+
+
+^{:go/end 56} (go/func init []
+  (let [(values cfgDir err) (os/UserConfigDir)]
+    (when (!= err nil)
+      (return))
+
+    (set! Default (NewDir (filepath/Join cfgDir "go" "telemetry")))))
+
+
+^{:go/end 60} (go/method Dir ^string [^Dir d]
+  (.-dir d))
+
+
+^{:go/end 64} (go/method LocalDir ^string [^Dir d]
+  (.-local d))
+
+
+^{:go/end 68} (go/method UploadDir ^string [^Dir d]
+  (.-upload d))
+
+
+^{:go/end 72} (go/method DebugDir ^string [^Dir d]
+  (.-debug d))
+
+
+^{:go/end 76} (go/method ModeFile ^string [^Dir d]
+  (.-modefile d))
+
+
+
+
+
+
+
+
+^{:go/end 86} (go/method SetMode "SetMode updates the telemetry mode with the given mode.\nAcceptable values for mode are \"on\", \"off\", or \"local\".\n\nSetMode always writes the mode file, and explicitly records the date at\nwhich the modefile was updated. This means that calling SetMode with \"on\"\neffectively resets the timeout before the next telemetry report is uploaded.\n" ^error [^Dir d ^string mode]
+  (.SetModeAsOf d mode (time/Now)))
+
+
+
+
+^{:go/end 113} (go/method SetModeAsOf "SetModeAsOf is like SetMode, but accepts an explicit time to use to\nback-date the mode state. This exists only for testing purposes.\n" ^error [^Dir d ^string mode ^time/Time asofTime]
+  (set! mode (strings/TrimSpace mode))
+  (switch mode
+    (case ["on" "off" "local"])
+    (default
+      (return (fmt/Errorf "invalid telemetry mode: %q" mode))))
+
+  (when (== (.-modefile d) "")
+    (return (fmt/Errorf "cannot determine telemetry mode file name")))
+
+  ;; TODO(rfindley): why is this not 777, consistent with the use of 666 below?
+  (when [err (os/MkdirAll (filepath/Dir (.-modefile d)) 0755)] (!= err nil)
+    (return (fmt/Errorf "cannot create a telemetry mode file: %w" err)))
+
+
+  (let [asof (.Format (.UTC asofTime) DateOnly)]
+    ;; Defensively guarantee that we can parse the asof time.
+    (when [(values _ err) (time/Parse DateOnly asof)] (!= err nil)
+      (return (fmt/Errorf "internal error: invalid mode date %q: %v" asof err)))
+
+
+    (let [data (conv (slice byte) (+ mode " " asof))]
+      (os/WriteFile (.-modefile d) data 0666))))
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 147} (go/method Mode "Mode returns the current telemetry mode, as well as the time that the mode\nwas effective.\n\nIf there is no effective time, the second result is the zero time.\n\nIf Mode is \"off\", no data should be written to the telemetry directory, and\nthe other paths values referenced by Dir should be considered undefined.\nThis accounts for the case where initializing [Default] fails, and therefore\nlocal telemetry paths are unknown.\n" [^Dir d] :results [string time/Time]
+  (when (== (.-modefile d) "")
+    (return "off" (lit time/Time))) ; it's likely LocalDir/UploadDir are empty too. Turn off telemetry.
+
+  (let [(values data err) (os/ReadFile (.-modefile d))]
+    (when (!= err nil)
+      (return "local" (lit time/Time))) ; default
+
+    (let [mode (conv string data)]
+      (set! mode (strings/TrimSpace mode))
+
+      ;; Forward compatibility for https://go.dev/issue/63142#issuecomment-1734025130
+      ;;
+      ;; If the modefile contains a date, return it.
+      (when [idx (strings/Index mode " ")] (>= idx 0)
+        (let [(values d err) (time/Parse DateOnly (subslice mode (+ idx 1)))]
+          (when (!= err nil)
+            (set! d (lit time/Time)))
+
+          (return (subslice mode _ idx) d)))
+
+
+      (return mode (lit time/Time)))))
+
+
+
+
+
+
+(go/const ^{:val false :doc "DisabledOnPlatform indicates whether telemetry is disabled\ndue to bugs in the current platform.\n\nTODO(rfindley): move to a more appropriate file.\n"} DisabledOnPlatform (or false
+    ;; The following platforms could potentially be supported in the future:
+    (== runtime/GOOS "openbsd") ; #60614
+    (== runtime/GOOS "solaris") ; #60968 #60970
+    (== runtime/GOOS "android") ; #60967
+    (== runtime/GOOS "illumos") ; #65544
+    ;; These platforms fundamentally can't be supported:
+    (== runtime/GOOS "js") ; #60971
+    (== runtime/GOOS "wasip1") ; #60971
+    (== runtime/GOOS "plan9") ; https://github.com/golang/go/issues/57540#issuecomment-1470766639
+    (== runtime/GOARCH "mips") (== runtime/GOARCH "mipsle"))) ; mips lacks cross-process 64-bit atomics

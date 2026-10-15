@@ -1,0 +1,600 @@
+;; Copyright 2023 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.cmd.compile.internal.ssa) (go/file "sccp.go" :imports [])
+
+;; ----------------------------------------------------------------------------
+;; Sparse Conditional Constant Propagation
+;;
+;; Described in
+;; Mark N. Wegman, F. Kenneth Zadeck: Constant Propagation with Conditional Branches.
+;; TOPLAS 1991.
+;;
+;; This algorithm uses three level lattice for SSA value
+;;
+;;      Top        undefined
+;;     / | \
+;; .. 1  2  3 ..   constant
+;;     \ | /
+;;     Bottom      not constant
+;;
+;; It starts with optimistically assuming that all SSA values are initially Top
+;; and then propagates constant facts only along reachable control flow paths.
+;; Since some basic blocks are not visited yet, corresponding inputs of phi become
+;; Top, we use the meet(phi) to compute its lattice.
+;;
+;; 	  Top ∩ any = any
+;; 	  Bottom ∩ any = Bottom
+;; 	  ConstantA ∩ ConstantA = ConstantA
+;; 	  ConstantA ∩ ConstantB = Bottom
+;;
+;; Each lattice value is lowered most twice(Top to Constant, Constant to Bottom)
+;; due to lattice depth, resulting in a fast convergence speed of the algorithm.
+;; In this way, sccp can discover optimization opportunities that cannot be found
+;; by just combining constant folding and constant propagation and dead code
+;; elimination separately.
+
+
+(go/const "Three level lattice holds compile time knowledge about SSA value\n"
+  ^{:line 40} [^{:tag int8 :val 0} top iota] ; undefined
+  ^{:line 41} [^{:val 1} constant] ; constant
+  ^{:line 42} [^{:val 2} bottom]) ; not a constant
+
+
+(go/type lattice (struct
+    ^{:line 46 :tag int8} tag ; lattice type
+    ^{:line 47 :tag (* Value)} val)) ; constant value
+
+
+(go/type worklist (struct
+    ^{:line 51 :tag (* Func)} f ; the target function to be optimized out
+    ^{:line 52 :tag (slice Edge)} edges ; propagate constant facts through edges
+    ^{:line 53 :tag (* sparseSet)} inUses ; IDs already in uses, for duplicate check
+    ^{:line 54 :tag (slice (* Value))} uses ; re-visiting set
+    ^{:line 55 :tag (map Edge bool)} visited ; visited edges
+    ^{:line 56 :tag (map (* Value) lattice)} latticeCells ; constant lattices
+    ^{:line 57 :tag (map (* Value) (slice (* Value)))} defUse ; def-use chains for some values
+    ^{:line 58 :tag (map (* Value) (slice (* Block)))} defBlock ; use blocks of def
+    ^{:line 59 :tag (slice bool)} visitedBlock)) ; visited block
+
+
+
+
+
+^{:go/end 124} (go/func sccp "sccp stands for sparse conditional constant propagation, it propagates constants\nthrough CFG conditionally and applies constant folding, constant replacement and\ndead code elimination all together.\n" [^{:tag (* Func)} f]
+  (let [^worklist t (zero worklist)]
+    (set! (.-f t) f)
+    (set! (.-edges t) (make (slice Edge) 0))
+    (set! (.-visited t) (make (map Edge bool)))
+    (set! (.-edges t) (append (.-edges t) (lit Edge (.-Entry f) 0)))
+    (set! (.-defUse t) (make (map (* Value) (slice (* Value)))))
+    (set! (.-defBlock t) (make (map (* Value) (slice (* Block)))))
+    (set! (.-latticeCells t) (make (map (* Value) lattice)))
+    (set! (.-visitedBlock t) (.allocBoolSlice (.-Cache f) (.NumBlocks f)))
+    (set! (.-inUses t) (.newSparseSet f (.NumValues f)))
+    (defer (.retSparseSet f (.-inUses t)))
+    (defer (.freeBoolSlice (.-Cache f) (.-visitedBlock t)))
+
+    ;; build it early since we rely heavily on the def-use chain later
+    (.buildDefUses t)
+
+    ;; pick up either an edge or SSA value from worklist, process it
+    (while true
+      (when (> (len (.-edges t)) 0)
+        (let [edge (aget (.-edges t) 0)]
+          (set! (.-edges t) (subslice (.-edges t) 1))
+          (when [(values _ exist) (aget (.-visited t) edge)] (not exist)
+            (let [dest (.-b edge)
+                ^{:line 89} destVisited (aget (.-visitedBlock t) (.-ID dest))]
+
+              ;; mark edge as visited
+              (aset (.-visited t) edge true)
+              (aset (.-visitedBlock t) (.-ID dest) true)
+              (range [_ val (.-Values dest)]
+                (when (or (== (.-Op val) OpPhi) (not destVisited))
+                  (.visitValue t val)))
+
+
+              ;; propagates constants facts through CFG, taking condition test
+              ;; into account
+              (when (not destVisited)
+                (.propagate t dest))))
+
+
+          (continue)))
+
+      (when (> (len (.-uses t)) 0)
+        (let [use (aget (.-uses t) 0)]
+          (set! (.-uses t) (subslice (.-uses t) 1))
+          (.remove (.-inUses t) (.-ID use))
+          (.visitValue t use)
+          (continue)))
+
+      (break))
+
+
+    ;; apply optimizations based on discovered constants
+    (let [(values constCnt rewireCnt) (.replaceConst t)]
+      (when (> (.-debug (.-pass f)) 0)
+        (when (or (> constCnt 0) (> rewireCnt 0))
+          (.Warnl f (.-Pos (.-Entry f)) "Phase SCCP for %v : %v constants, %v dce" (.-Name f) constCnt rewireCnt))))))
+
+
+
+
+^{:go/breaks [[6 145]] :go/end 146} (go/func equals ^bool [^lattice a ^lattice b]
+  (when (== a b)
+    ;; fast path
+    (return true))
+
+  (when (!= (.-tag a) (.-tag b))
+    (return false))
+
+  (when (== (.-tag a) constant)
+    ;; The same content of const value may be different, we should
+    ;; compare with auxInt instead
+    (let [v1 (.-val a)
+        ^{:line 138} v2 (.-val b)]
+      (if (and (== (.-Op v1) (.-Op v2)) (== (.-AuxInt v1) (.-AuxInt v2)))
+        (return true)
+
+        (return false))))
+
+
+  true)
+
+
+
+
+^{:go/end 223} (go/func possibleConst "possibleConst checks if Value can be folded to const. For those Values that can\nnever become constants(e.g. StaticCall), we don't make futile efforts.\n" ^bool [^{:tag (* Value)} val]
+  (when (isConst val)
+    (return true))
+
+  (switch (.-Op val)
+    (case [OpCopy]
+      (return true))
+    (case [OpPhi]
+      (return true))
+    (case
+      ;; negate
+      ^{:line 161} [OpNeg8 OpNeg16 OpNeg32 OpNeg64 OpNeg32F OpNeg64F
+        ^{:line 162} OpCom8 OpCom16 OpCom32 OpCom64
+        ;; math
+        ^{:line 164} OpFloor OpCeil OpTrunc OpRoundToEven OpSqrt
+        ;; conversion
+        ^{:line 166} OpTrunc16to8 OpTrunc32to8 OpTrunc32to16 OpTrunc64to8
+        ^{:line 167} OpTrunc64to16 OpTrunc64to32 OpCvt32to32F OpCvt32to64F
+        ^{:line 168} OpCvt64to32F OpCvt64to64F OpCvt32Fto32 OpCvt32Fto64
+        ^{:line 169} OpCvt64Fto32 OpCvt64Fto64 OpCvt32Fto64F OpCvt64Fto32F
+        ^{:line 170} OpCvtBoolToUint8
+        ^{:line 171} OpZeroExt8to16 OpZeroExt8to32 OpZeroExt8to64 OpZeroExt16to32
+        ^{:line 172} OpZeroExt16to64 OpZeroExt32to64 OpSignExt8to16 OpSignExt8to32
+        ^{:line 173} OpSignExt8to64 OpSignExt16to32 OpSignExt16to64 OpSignExt32to64
+        ;; bit
+        ^{:line 175} OpCtz8 OpCtz16 OpCtz32 OpCtz64
+        ;; mask
+        ^{:line 177} OpSlicemask
+        ;; safety check
+        ^{:line 179} OpIsNonNil
+        ;; not
+        ^{:line 181} OpNot]
+      (return true))
+    (case
+      ;; add
+      ^{:line 185} [OpAdd64 OpAdd32 OpAdd16 OpAdd8
+        ^{:line 186} OpAdd32F OpAdd64F
+        ;; sub
+        ^{:line 188} OpSub64 OpSub32 OpSub16 OpSub8
+        ^{:line 189} OpSub32F OpSub64F
+        ;; mul
+        ^{:line 191} OpMul64 OpMul32 OpMul16 OpMul8
+        ^{:line 192} OpMul32F OpMul64F
+        ;; div
+        ^{:line 194} OpDiv32F OpDiv64F
+        ^{:line 195} OpDiv8 OpDiv16 OpDiv32 OpDiv64
+        ^{:line 196} OpDiv8u OpDiv16u OpDiv32u OpDiv64u
+        ^{:line 197} OpMod8 OpMod16 OpMod32 OpMod64
+        ^{:line 198} OpMod8u OpMod16u OpMod32u OpMod64u
+        ;; compare
+        ^{:line 200} OpEq64 OpEq32 OpEq16 OpEq8
+        ^{:line 201} OpEq32F OpEq64F
+        ^{:line 202} OpLess64 OpLess32 OpLess16 OpLess8
+        ^{:line 203} OpLess64U OpLess32U OpLess16U OpLess8U
+        ^{:line 204} OpLess32F OpLess64F
+        ^{:line 205} OpLeq64 OpLeq32 OpLeq16 OpLeq8
+        ^{:line 206} OpLeq64U OpLeq32U OpLeq16U OpLeq8U
+        ^{:line 207} OpLeq32F OpLeq64F
+        ^{:line 208} OpEqB OpNeqB
+        ;; shift
+        ^{:line 210} OpLsh64x64 OpRsh64x64 OpRsh64Ux64 OpLsh32x64
+        ^{:line 211} OpRsh32x64 OpRsh32Ux64 OpLsh16x64 OpRsh16x64
+        ^{:line 212} OpRsh16Ux64 OpLsh8x64 OpRsh8x64 OpRsh8Ux64
+        ;; safety check
+        ^{:line 214} OpIsInBounds OpIsSliceInBounds
+        ;; bit
+        ^{:line 216} OpAnd8 OpAnd16 OpAnd32 OpAnd64
+        ^{:line 217} OpOr8 OpOr16 OpOr32 OpOr64
+        ^{:line 218} OpXor8 OpXor16 OpXor32 OpXor64]
+      (return true))
+    (default
+      (return false))))
+
+
+
+^{:go/end 235} (go/method getLatticeCell ^lattice [^{:tag (* worklist)} t ^{:tag (* Value)} val]
+  (when (not (possibleConst val))
+    ;; they are always worst
+    (return (lit lattice bottom nil)))
+
+  (let [(values lt exist) (aget (.-latticeCells t) val)]
+    (when (not exist)
+      (return (lit lattice top nil))) ; optimistically for un-visited value
+
+    ^{:line 234} lt))
+
+
+^{:go/end 245} (go/func isConst ^bool [^{:tag (* Value)} val]
+  (switch (.-Op val)
+    (case [OpConst64 OpConst32 OpConst16 OpConst8
+        ^{:line 240} OpConstBool OpConst32F OpConst64F]
+      (return true))
+    (default
+      (return false))))
+
+
+
+
+
+
+
+
+^{:go/end 276} (go/method buildDefUses "buildDefUses builds def-use chain for some values early, because once the\nlattice of a value is changed, we need to update lattices of use. But we don't\nneed all uses of it, only uses that can become constants would be added into\nre-visit worklist since no matter how many times they are revisited, uses which\ncan't become constants lattice remains unchanged, i.e. Bottom.\n" [^{:tag (* worklist)} t]
+  (range [_ block (.-Blocks (.-f t))]
+    (range [_ val (.-Values block)]
+      (range [_ arg (.-Args val)]
+        ;; find its uses, only uses that can become constants take into account
+        (when (and (possibleConst arg) (possibleConst val))
+          ;; Phi may refer to itself as uses, avoid duplicate visits
+          (when (== arg val)
+            (continue))
+
+          (when [(values _ exist) (aget (.-defUse t) arg)] (not exist)
+            (aset (.-defUse t) arg (make (slice (* Value)) 0 (.-Uses arg))))
+
+          (aset (.-defUse t) arg (append (aget (.-defUse t) arg) val)))))
+
+
+
+    (range [_ ctl (.ControlValues block)]
+      ;; for control values that can become constants, find their use blocks
+      (when (possibleConst ctl)
+        (aset (.-defBlock t) ctl (append (aget (.-defBlock t) ctl) block))))))
+
+
+
+
+
+
+^{:go/end 297} (go/method addUses "addUses finds all uses of value and appends them into work list for further process\n" [^{:tag (* worklist)} t ^{:tag (* Value)} val]
+  (range [_ use (aget (.-defUse t) val)]
+    ;; Provenly not a constant, ignore
+    (let [useLt (.getLatticeCell t use)]
+      (when (== (.-tag useLt) bottom)
+        (continue))
+
+      ;; Avoid duplicate visits
+      (when (not (.contains (.-inUses t) (.-ID use)))
+        (.add (.-inUses t) (.-ID use))
+        (set! (.-uses t) (append (.-uses t) use)))))
+
+
+  (range [_ block (aget (.-defBlock t) val)]
+    (when (aget (.-visitedBlock t) (.-ID block))
+      (.propagate t block))))
+
+
+
+
+
+^{:go/end 333} (go/method meet "meet meets all of phi arguments and computes result lattice\n" ^lattice [^{:tag (* worklist)} t ^{:tag (* Value)} val]
+  (let [optimisticLt (lit lattice top nil)]
+    (for [i 0] (< i (len (.-Args val))) (inc! i)
+      (let [edge (lit Edge (.-Block val) i)]
+        ;; If incoming edge for phi is not visited, assume top optimistically.
+        ;; According to rules of meet:
+        ;; 		Top ∩ any = any
+        ;; Top participates in meet() but does not affect the result, so here
+        ;; we will ignore Top and only take other lattices into consideration.
+        (if [(values _ exist) (aget (.-visited t) edge)] exist
+          (let [lt (.getLatticeCell t (aget (.-Args val) i))]
+            (cond (== (.-tag lt) constant)
+              (if (== (.-tag optimisticLt) top)
+                (set! optimisticLt lt)
+                (do
+                  (when (not (equals optimisticLt lt))
+                    ;; ConstantA ∩ ConstantB = Bottom
+                    (return (lit lattice bottom nil)))))
+
+
+              (== (.-tag lt) bottom)
+              ;; Bottom ∩ any = Bottom
+              (return (lit lattice bottom nil)) :else
+              (do)))
+          ;; Top ∩ any = any
+
+          (do))))
+    ;; Top ∩ any = any
+
+
+
+    ;; ConstantA ∩ ConstantA = ConstantA or Top ∩ any = any
+    ^{:line 332} optimisticLt))
+
+
+^{:go/end 374} (go/func computeLattice ^lattice [^{:tag (* Func)} f ^{:tag (* Value)} val & ^{:tag (slice (* Value))} args]
+  ;; In general, we need to perform constant evaluation based on constant args:
+  ;;
+  ;;  res := lattice{constant, nil}
+  ;; 	switch op {
+  ;; 	case OpAdd16:
+  ;;		res.val = newConst(argLt1.val.AuxInt16() + argLt2.val.AuxInt16())
+  ;; 	case OpAdd32:
+  ;; 		res.val = newConst(argLt1.val.AuxInt32() + argLt2.val.AuxInt32())
+  ;;	case OpDiv8:
+  ;;		if !isDivideByZero(argLt2.val.AuxInt8()) {
+  ;;			res.val = newConst(argLt1.val.AuxInt8() / argLt2.val.AuxInt8())
+  ;;		}
+  ;;  ...
+  ;; 	}
+  ;;
+  ;; However, this would create a huge switch for all opcodes that can be
+  ;; evaluated during compile time. Moreover, some operations can be evaluated
+  ;; only if its arguments satisfy additional conditions(e.g. divide by zero).
+  ;; It's fragile and error-prone. We did a trick by reusing the existing rules
+  ;; in generic rules for compile-time evaluation. But generic rules rewrite
+  ;; original value, this behavior is undesired, because the lattice of values
+  ;; may change multiple times, once it was rewritten, we lose the opportunity
+  ;; to change it permanently, which can lead to errors. For example, We cannot
+  ;; change its value immediately after visiting Phi, because some of its input
+  ;; edges may still not be visited at this moment.
+  (let [constValue (.newValue f (.-Op val) (.-Type val) (.-Entry f) (.-Pos val))]
+    (.AddArgs constValue (spread args))
+    (let [matched (rewriteValuegeneric constValue)]
+      (when matched
+        (when (isConst constValue)
+          (return (lit lattice constant constValue))))
+
+
+      ;; Either we can not match generic rules for given value or it does not
+      ;; satisfy additional constraints(e.g. divide by zero), in these cases, clean
+      ;; up temporary value immediately in case they are not dominated by their args.
+      (.reset constValue OpInvalid)
+      (lit lattice bottom nil))))
+
+
+^{:go/end 496} (go/method visitValue [^{:tag (* worklist)} t ^{:tag (* Value)} val]
+  ;; Impossible to be a constant, fast fail
+  (when (not (possibleConst val))
+    (return))
+
+
+  ;; Provenly not a constant, fast fail
+  (let [oldLt (.getLatticeCell t val)]
+    (when (== (.-tag oldLt) bottom)
+      (return))
+
+
+    ;; Re-visit all uses of value if its lattice is changed
+    (defer (^{:go/end 397} (fn []
+          (let [newLt (.getLatticeCell t val)]
+            (when (not (equals newLt oldLt))
+              (when (> (.-tag oldLt) (.-tag newLt))
+                (.Fatalf (.-f t) "Must lower lattice\n"))
+
+              (.addUses t val))))))
+
+
+
+    (switch (.-Op val)
+      ;; they are constant values, aren't they?
+      (case [OpConst64 OpConst32 OpConst16 OpConst8
+          ^{:line 402} OpConstBool OpConst32F OpConst64F] ;TODO: support ConstNil ConstString etc
+        (aset (.-latticeCells t) val (lit lattice constant val)))
+      ;; lattice value of copy(x) actually means lattice value of (x)
+      (case [OpCopy]
+        (aset (.-latticeCells t) val (.getLatticeCell t (aget (.-Args val) 0))))
+      ;; phi should be processed specially
+      (case [OpPhi]
+        (aset (.-latticeCells t) val (.meet t val)))
+      ;; fold 1-input operations:
+      (case
+        ;; negate
+        ^{:line 413} [OpNeg8 OpNeg16 OpNeg32 OpNeg64 OpNeg32F OpNeg64F
+          ^{:line 414} OpCom8 OpCom16 OpCom32 OpCom64
+          ;; math
+          ^{:line 416} OpFloor OpCeil OpTrunc OpRoundToEven OpSqrt
+          ;; conversion
+          ^{:line 418} OpTrunc16to8 OpTrunc32to8 OpTrunc32to16 OpTrunc64to8
+          ^{:line 419} OpTrunc64to16 OpTrunc64to32 OpCvt32to32F OpCvt32to64F
+          ^{:line 420} OpCvt64to32F OpCvt64to64F OpCvt32Fto32 OpCvt32Fto64
+          ^{:line 421} OpCvt64Fto32 OpCvt64Fto64 OpCvt32Fto64F OpCvt64Fto32F
+          ^{:line 422} OpCvtBoolToUint8
+          ^{:line 423} OpZeroExt8to16 OpZeroExt8to32 OpZeroExt8to64 OpZeroExt16to32
+          ^{:line 424} OpZeroExt16to64 OpZeroExt32to64 OpSignExt8to16 OpSignExt8to32
+          ^{:line 425} OpSignExt8to64 OpSignExt16to32 OpSignExt16to64 OpSignExt32to64
+          ;; bit
+          ^{:line 427} OpCtz8 OpCtz16 OpCtz32 OpCtz64
+          ;; mask
+          ^{:line 429} OpSlicemask
+          ;; safety check
+          ^{:line 431} OpIsNonNil
+          ;; not
+          ^{:line 433} OpNot]
+        (let [lt1 (.getLatticeCell t (aget (.-Args val) 0))]
+
+          (if (== (.-tag lt1) constant)
+            ;; here we take a shortcut by reusing generic rules to fold constants
+            (aset (.-latticeCells t) val (computeLattice (.-f t) val (.-val lt1)))
+
+            (aset (.-latticeCells t) val (lit lattice (.-tag lt1) nil)))))
+
+      ;; fold 2-input operations
+      (case
+        ;; add
+        ^{:line 445} [OpAdd64 OpAdd32 OpAdd16 OpAdd8
+          ^{:line 446} OpAdd32F OpAdd64F
+          ;; sub
+          ^{:line 448} OpSub64 OpSub32 OpSub16 OpSub8
+          ^{:line 449} OpSub32F OpSub64F
+          ;; mul
+          ^{:line 451} OpMul64 OpMul32 OpMul16 OpMul8
+          ^{:line 452} OpMul32F OpMul64F
+          ;; div
+          ^{:line 454} OpDiv32F OpDiv64F
+          ^{:line 455} OpDiv8 OpDiv16 OpDiv32 OpDiv64
+          ^{:line 456} OpDiv8u OpDiv16u OpDiv32u OpDiv64u ;TODO: support div128u
+          ;; mod
+          ^{:line 458} OpMod8 OpMod16 OpMod32 OpMod64
+          ^{:line 459} OpMod8u OpMod16u OpMod32u OpMod64u
+          ;; compare
+          ^{:line 461} OpEq64 OpEq32 OpEq16 OpEq8
+          ^{:line 462} OpEq32F OpEq64F
+          ^{:line 463} OpLess64 OpLess32 OpLess16 OpLess8
+          ^{:line 464} OpLess64U OpLess32U OpLess16U OpLess8U
+          ^{:line 465} OpLess32F OpLess64F
+          ^{:line 466} OpLeq64 OpLeq32 OpLeq16 OpLeq8
+          ^{:line 467} OpLeq64U OpLeq32U OpLeq16U OpLeq8U
+          ^{:line 468} OpLeq32F OpLeq64F
+          ^{:line 469} OpEqB OpNeqB
+          ;; shift
+          ^{:line 471} OpLsh64x64 OpRsh64x64 OpRsh64Ux64 OpLsh32x64
+          ^{:line 472} OpRsh32x64 OpRsh32Ux64 OpLsh16x64 OpRsh16x64
+          ^{:line 473} OpRsh16Ux64 OpLsh8x64 OpRsh8x64 OpRsh8Ux64
+          ;; safety check
+          ^{:line 475} OpIsInBounds OpIsSliceInBounds
+          ;; bit
+          ^{:line 477} OpAnd8 OpAnd16 OpAnd32 OpAnd64
+          ^{:line 478} OpOr8 OpOr16 OpOr32 OpOr64
+          ^{:line 479} OpXor8 OpXor16 OpXor32 OpXor64]
+        (let [lt1 (.getLatticeCell t (aget (.-Args val) 0))
+            ^{:line 481} lt2 (.getLatticeCell t (aget (.-Args val) 1))]
+
+          (if (and (== (.-tag lt1) constant) (== (.-tag lt2) constant))
+            ;; here we take a shortcut by reusing generic rules to fold constants
+            (aset (.-latticeCells t) val (computeLattice (.-f t) val (.-val lt1) (.-val lt2)))
+            (do
+              (if (or (== (.-tag lt1) bottom) (== (.-tag lt2) bottom))
+                (aset (.-latticeCells t) val (lit lattice bottom nil))
+
+                (aset (.-latticeCells t) val (lit lattice top nil)))))))
+
+
+      (default))))
+;; Any other type of value cannot be a constant, they are always worst(Bottom)
+
+
+
+
+
+
+^{:go/end 538} (go/method propagate "propagate propagates constants facts through CFG. If the block has single successor,\nadd the successor anyway. If the block has multiple successors, only add the\nbranch destination corresponding to lattice value of condition value.\n" [^{:tag (* worklist)} t ^{:tag (* Block)} block]
+  (switch (.-Kind block)
+    (case [BlockExit BlockRet BlockRetJmp BlockInvalid]
+      ;; control flow ends, do nothing then
+      (break))
+    (case [BlockDefer]
+      ;; we know nothing about control flow, add all branch destinations
+      (set! (.-edges t) (append (.-edges t) (spread (.-Succs block)))))
+    (case [BlockFirst]
+      (fallthrough)) ; always takes the first branch
+    (case [BlockPlain]
+      (set! (.-edges t) (append (.-edges t) (aget (.-Succs block) 0))))
+    (case [BlockIf BlockJumpTable]
+      (let [cond (aget (.ControlValues block) 0)
+          ^{:line 515} condLattice (.getLatticeCell t cond)]
+        (cond (== (.-tag condLattice) bottom)
+          ;; we know nothing about control flow, add all branch destinations
+          (set! (.-edges t) (append (.-edges t) (spread (.-Succs block))))
+          (== (.-tag condLattice) constant)
+          ;; add branchIdx destinations depends on its condition
+          (let [^int64 branchIdx (zero int64)]
+            (if (== (.-Kind block) BlockIf)
+              (set! branchIdx (- 1 (.-AuxInt (.-val condLattice))))
+              (do
+                (set! branchIdx (.-AuxInt (.-val condLattice)))
+                (when (or (< branchIdx 0) (>= branchIdx (conv int64 (len (.-Succs block)))))
+                  ;; unreachable code, do nothing then
+                  (break))))
+
+
+            (set! (.-edges t) (append (.-edges t) (aget (.-Succs block) branchIdx)))) :else
+          (do))))
+    ;; condition value is not visited yet, don't propagate it now
+
+    (default
+      (.Fatalf (.-f t) "All kind of block should be processed above."))))
+
+
+
+
+
+
+^{:go/end 572} (go/func rewireSuccessor "rewireSuccessor rewires corresponding successors according to constant value\ndiscovered by previous analysis. As the result, some successors become unreachable\nand thus can be removed in further deadcode phase\n" ^bool [^{:tag (* Block)} block ^{:tag (* Value)} constVal]
+  (switch (.-Kind block)
+    (case [BlockIf]
+      (.removeEdge block (conv int (.-AuxInt constVal)))
+      (set! (.-Kind block) BlockPlain)
+      (set! (.-Likely block) BranchUnknown)
+      (.ResetControls block)
+      (return true))
+    (case [BlockJumpTable]
+      ;; Remove everything but the known taken branch.
+      (let [idx (conv int (.-AuxInt constVal))]
+        (when (or (< idx 0) (>= idx (len (.-Succs block))))
+          ;; This can only happen in unreachable code,
+          ;; as an invariant of jump tables is that their
+          ;; input index is in range.
+          ;; See issue 64826.
+          (return false))
+
+        (.swapSuccessorsByIdx block 0 idx)
+        (while (> (len (.-Succs block)) 1)
+          (.removeEdge block 1))
+
+        (set! (.-Kind block) BlockPlain)
+        (set! (.-Likely block) BranchUnknown)
+        (.ResetControls block)
+        (return true)))
+    (default
+      (return false))))
+
+
+
+
+
+^{:go/end 601} (go/method replaceConst "replaceConst will replace non-constant values that have been proven by sccp\nto be constants.\n" [^{:tag (* worklist)} t] :results [int int]
+  (let [(values constCnt rewireCnt) (values 0 0)]
+    (range [val lt (.-latticeCells t)]
+      (when (== (.-tag lt) constant)
+        (when (not (isConst val))
+          (when (> (.-debug (.-pass (.-f t))) 0)
+            (.Warnl (.-f t) (.-Pos val) "Replace %v with %v" (.LongString val) (.LongString (.-val lt))))
+
+          (.reset val (.-Op (.-val lt)))
+          (set! (.-AuxInt val) (.-AuxInt (.-val lt)))
+          (inc! constCnt))
+
+        ;; If const value controls this block, rewires successors according to its value
+        (let [ctrlBlock (aget (.-defBlock t) val)]
+          (range [_ block ctrlBlock]
+            (when (rewireSuccessor block (.-val lt))
+              (inc! rewireCnt)
+              (when (> (.-debug (.-pass (.-f t))) 0)
+                (.Warnl (.-f t) (.-Pos block) "Rewire %v %v successors" (.-Kind block) block)))))))
+
+
+
+
+
+    (return constCnt rewireCnt)))

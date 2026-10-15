@@ -1,0 +1,316 @@
+;; Copyright 2023 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; This file implements functions for untyped constant operands.
+
+(in-ns 'go.cmd.compile.internal.types2) (go/file "const.go" :imports [
+
+
+    ^{:line 10} [syntax "cmd/compile/internal/syntax"]
+    ^{:line 11} [constant "go/constant"]
+    ^{:line 12} [token "go/token"]
+    ^{:line 13} [. "internal/types/errors"]
+    ^{:line 14} [math "math"]])
+
+
+
+
+
+^{:go/end 62} (go/method overflow "overflow checks that the constant x is representable by its type.\nFor untyped constants, it checks that the value doesn't become\narbitrarily large.\n" [^{:tag (* Checker)} check ^{:tag (* operand)} x ^syntax/Pos opPos]
+  (go/call assert (== (.mode x) constant_))
+
+  (when (== (.Kind (.-val x)) constant/Unknown)
+    ;; TODO(gri) We should report exactly what went wrong. At the
+    ;;           moment we don't have the (go/constant) API for that.
+    ;;           See also TODO in go/constant/value.go.
+    (.error check (atPos opPos) InvalidConstVal "constant result is not representable")
+    (return))
+
+
+  ;; Typed constants must be representable in
+  ;; their type after each constant operation.
+  ;; x.typ cannot be a type parameter (type
+  ;; parameters cannot be constant types).
+  (when (isTyped (.typ x))
+    (.representable check x (assert (* Basic) (.Underlying (.typ x))))
+    (return))
+
+
+  ;; Untyped integer values must not grow arbitrarily.
+  (let [^:const ^{:val 512} prec 512] ; 512 is the constant precision
+    (when (and (== (.Kind (.-val x)) constant/Int) (> (constant/BitLen (.-val x)) prec))
+      (let [op (opName (.-expr x))]
+        (when (!= op "")
+          (set! op + " "))
+
+        (.errorf check (atPos opPos) InvalidConstVal "constant %soverflow" op)
+        (set! (.-val x) (constant/MakeUnknown))
+        (return)))
+
+
+    ;; String values must not become arbitrarily long (go.dev/issue/78346).
+    (let [^:const ^{:val 2000000000} maxLen (conv int64 2.0E9)] ; cmd/internal/obj.MaxSymSize
+      (when (== (.Kind (.-val x)) constant/String)
+        (let [len (constant/StringLen (.-val x))]
+          (when (> len maxLen)
+            (.errorf check (atPos opPos) InvalidConstVal "constant string too long (%d bytes > %d bytes)" len maxLen)
+            (set! (.-val x) (constant/MakeUnknown))
+            (return)))))))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 217} (go/func representableConst "representableConst reports whether x can be represented as\nvalue of the given basic type and for the configuration\nprovided (only needed for int/uint sizes).\n\nIf rounded != nil, *rounded is set to the rounded value of x for\nrepresentable floating-point and complex values, and to an Int\nvalue for integer values; it is left alone otherwise.\nIt is ok to provide the addressof the first argument for rounded.\n\nThe check parameter may be nil if representableConst is invoked\n(indirectly) through an exported API call (AssignableTo, ConvertibleTo)\nbecause we don't need the Checker's config for those calls.\n" ^bool [^constant/Value x ^{:tag (* Checker)} check ^{:tag (* Basic)} typ ^{:tag (* constant/Value)} rounded]
+  (when (== (.Kind x) constant/Unknown)
+    (return true)) ; avoid follow-up errors
+
+
+  (let [^{:tag (* Config)} conf (zero (* Config))]
+    (when (!= check nil)
+      (set! conf (.-conf check)))
+
+
+    ^{:go/breaks [[3 216]]} (let [sizeof ^{:go/end 89} (fn ^int64 [^Type T]
+          (let [s (.sizeof conf T)]
+            ^{:line 88} s))]
+
+
+      (switch
+        (case [(isInteger typ)]
+          (let [x (constant/ToInt x)]
+            (when (!= (.Kind x) constant/Int)
+              (return false))
+
+            (when (!= rounded nil)
+              (set! @rounded x))
+
+            (when [(values x ok) (constant/Int64Val x)] ok
+              (switch (.-kind typ)
+                (case [Int]
+                  (let [^:var s (* (conv uint (sizeof typ)) 8)]
+                    (return (and (<= (<< (conv int64 -1) (- s 1)) x) (<= x (- (<< (conv int64 1) (- s 1)) 1))))))
+                (case [Int8]
+                  (let [^:const ^{:val 8} s 8]
+                    (return (and (<= (<< -1 (- s 1)) x) (<= x (- (<< 1 (- s 1)) 1))))))
+                (case [Int16]
+                  (let [^:const ^{:val 16} s 16]
+                    (return (and (<= (<< -1 (- s 1)) x) (<= x (- (<< 1 (- s 1)) 1))))))
+                (case [Int32]
+                  (let [^:const ^{:val 32} s 32]
+                    (return (and (<= (<< -1 (- s 1)) x) (<= x (- (<< 1 (- s 1)) 1))))))
+                (case [Int64 UntypedInt]
+                  (return true))
+                (case [Uint Uintptr]
+                  (when [s (* (conv uint (sizeof typ)) 8)] (< s 64)
+                    (return (and (<= 0 x) (<= x (- (<< (conv int64 1) s) 1)))))
+
+                  (return (<= 0 x)))
+                (case [Uint8]
+                  (let [^:const ^{:val 8} s 8]
+                    (return (and (<= 0 x) (<= x (- (<< 1 s) 1))))))
+                (case [Uint16]
+                  (let [^:const ^{:val 16} s 16]
+                    (return (and (<= 0 x) (<= x (- (<< 1 s) 1))))))
+                (case [Uint32]
+                  (let [^:const ^{:val 32} s 32]
+                    (return (and (<= 0 x) (<= x (- (<< 1 s) 1))))))
+                (case [Uint64]
+                  (return (<= 0 x)))
+                (default
+                  (panic "unreachable"))))
+
+
+            ;; x does not fit into int64
+            (switch [n (constant/BitLen x)] (.-kind typ)
+              (case [Uint Uintptr]
+                (let [^:var s (* (conv uint (sizeof typ)) 8)]
+                  (return (and (>= (constant/Sign x) 0) (<= n (conv int s))))))
+              (case [Uint64]
+                (return (and (>= (constant/Sign x) 0) (<= n 64))))
+              (case [UntypedInt]
+                (return true)))))
+
+
+        (case [(isFloat typ)]
+          (let [x (constant/ToFloat x)]
+            (when (!= (.Kind x) constant/Float)
+              (return false))
+
+            (switch (.-kind typ)
+              (case [Float32]
+                (when (== rounded nil)
+                  (return (fitsFloat32 x)))
+
+                (let [r (roundFloat32 x)]
+                  (when (!= r nil)
+                    (set! @rounded r)
+                    (return true))))
+
+              (case [Float64]
+                (when (== rounded nil)
+                  (return (fitsFloat64 x)))
+
+                (let [r (roundFloat64 x)]
+                  (when (!= r nil)
+                    (set! @rounded r)
+                    (return true))))
+
+              (case [UntypedFloat]
+                (return true))
+              (default
+                (panic "unreachable")))))
+
+
+        (case [(isComplex typ)]
+          (let [x (constant/ToComplex x)]
+            (when (!= (.Kind x) constant/Complex)
+              (return false))
+
+            (switch (.-kind typ)
+              (case [Complex64]
+                (when (== rounded nil)
+                  (return (and (fitsFloat32 (constant/Real x)) (fitsFloat32 (constant/Imag x)))))
+
+                (let [re (roundFloat32 (constant/Real x))
+                    ^{:line 188} im (roundFloat32 (constant/Imag x))]
+                  (when (and (!= re nil) (!= im nil))
+                    (set! @rounded (constant/BinaryOp re token/ADD (constant/MakeImag im)))
+                    (return true))))
+
+              (case [Complex128]
+                (when (== rounded nil)
+                  (return (and (fitsFloat64 (constant/Real x)) (fitsFloat64 (constant/Imag x)))))
+
+                (let [re (roundFloat64 (constant/Real x))
+                    ^{:line 198} im (roundFloat64 (constant/Imag x))]
+                  (when (and (!= re nil) (!= im nil))
+                    (set! @rounded (constant/BinaryOp re token/ADD (constant/MakeImag im)))
+                    (return true))))
+
+              (case [UntypedComplex]
+                (return true))
+              (default
+                (panic "unreachable")))))
+
+
+        (case [(isString typ)]
+          (return (== (.Kind x) constant/String)))
+
+        (case [(isBoolean typ)]
+          (return (== (.Kind x) constant/Bool))))
+
+
+      false)))
+
+
+^{:go/end 223} (go/func fitsFloat32 ^bool [^constant/Value x]
+  (let [(values f32 _) (constant/Float32Val x)
+      ^{:line 221} f (conv float64 f32)]
+    (not (math/IsInf f 0))))
+
+
+^{:go/end 232} (go/func roundFloat32 ^constant/Value [^constant/Value x]
+  ^{:go/breaks [[3 231]]} (let [(values f32 _) (constant/Float32Val x)
+      ^{:line 227} f (conv float64 f32)]
+    (when (not (math/IsInf f 0))
+      (return (constant/MakeFloat64 f)))
+
+    nil))
+
+
+^{:go/end 237} (go/func fitsFloat64 ^bool [^constant/Value x]
+  (let [(values f _) (constant/Float64Val x)]
+    (not (math/IsInf f 0))))
+
+
+^{:go/end 245} (go/func roundFloat64 ^constant/Value [^constant/Value x]
+  ^{:go/breaks [[3 244]]} (let [(values f _) (constant/Float64Val x)]
+    (when (not (math/IsInf f 0))
+      (return (constant/MakeFloat64 f)))
+
+    nil))
+
+
+
+
+^{:go/end 258} (go/method representable "representable checks that a constant operand is representable in the given\nbasic type.\n" [^{:tag (* Checker)} check ^{:tag (* operand)} x ^{:tag (* Basic)} typ]
+  (let [(values v code) (.representation check x typ)]
+    (when (!= code 0)
+      (.invalidConversion check code x typ)
+      (.invalidate x)
+      (return))
+
+    (go/call assert (!= v nil))
+    (set! (.-val x) v)))
+
+
+
+
+
+
+^{:go/end 285} (go/method representation "representation returns the representation of the constant operand x as the\nbasic type typ.\n\nIf no such representation is possible, it returns a non-zero error code.\n" [^{:tag (* Checker)} check ^{:tag (* operand)} x ^{:tag (* Basic)} typ] :results [constant/Value Code]
+  (go/call assert (== (.mode x) constant_))
+  (let [v (.-val x)]
+    (when (not (representableConst (.-val x) check typ (addr v)))
+      (when (and (isNumeric (.typ x)) (isNumeric typ))
+        ;; numeric conversion : error msg
+        ;;
+        ;; integer -> integer : overflows
+        ;; integer -> float   : overflows (actually not possible)
+        ;; float   -> integer : truncated
+        ;; float   -> float   : overflows
+        ;;
+        (if (and (not (isInteger (.typ x))) (isInteger typ))
+          (return nil TruncatedFloat)
+
+          (return nil NumericOverflow)))
+
+
+      (return nil InvalidConstVal))
+
+    (return v 0)))
+
+
+^{:go/end 296} (go/method invalidConversion [^{:tag (* Checker)} check ^Code code ^{:tag (* operand)} x ^Type target]
+  (let [msg "cannot convert %s to type %s"]
+    (switch code
+      (case [TruncatedFloat]
+        (set! msg "%s truncated to %s"))
+      (case [NumericOverflow]
+        (set! msg "%s overflows %s")))
+
+    (.errorf check x code msg x target)))
+
+
+
+^{:go/end 318} (go/method convertUntyped "convertUntyped attempts to set the type of an untyped value to the target type.\n" [^{:tag (* Checker)} check ^{:tag (* operand)} x ^Type target]
+  (let [(values newType val code) (.implicitTypeAndValue check x target)]
+    (when (!= code 0)
+      (let [t target]
+        (when (not (isTypeParam target))
+          (set! t (safeUnderlying target)))
+
+        (.invalidConversion check code x t)
+        (.invalidate x)
+        (return)))
+
+    (when (!= val nil)
+      (set! (.-val x) val)
+      (.updateExprVal check (.-expr x) val))
+
+    (when (!= newType (.typ x))
+      (set! (.-typ_ x) newType)
+      (.updateExprType check (.-expr x) newType false))))

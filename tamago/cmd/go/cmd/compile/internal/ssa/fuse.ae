@@ -1,0 +1,342 @@
+;; Copyright 2015 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.cmd.compile.internal.ssa) (go/file "fuse.go" :imports [
+
+
+    ^{:line 8} [src "cmd/internal/src"]
+    ^{:line 9} [fmt "fmt"]])
+
+
+
+^{:go/end 15} (go/func fuseEarly "fuseEarly runs fuse(f, fuseTypePlain|fuseTypeIntInRange|fuseTypeNanCheck).\n" [^{:tag (* Func)} f]
+  (fuse f (bit-or fuseTypePlain fuseTypeIntInRange fuseTypeSingleBitDifference fuseTypeNanCheck)))
+
+
+
+^{:go/end 18} (go/func fuseLate "fuseLate runs fuse(f, fuseTypePlain|fuseTypeIf|fuseTypeBranchRedirect).\n" [^{:tag (* Func)} f] (fuse f (bit-or fuseTypePlain fuseTypeIf fuseTypeBranchRedirect)))
+
+(go/type fuseType uint8)
+
+(go/const
+  ^{:line 23} [^{:tag fuseType :val 1} fuseTypePlain (<< 1 iota)]
+  ^{:line 24} [^{:val 2} fuseTypeIf]
+  ^{:line 25} [^{:val 4} fuseTypeIntInRange]
+  ^{:line 26} [^{:val 8} fuseTypeSingleBitDifference]
+  ^{:line 27} [^{:val 16} fuseTypeNanCheck]
+  ^{:line 28} [^{:val 32} fuseTypeBranchRedirect]
+  ^{:line 29} [^{:val 64} fuseTypeShortCircuit])
+
+
+
+^{:go/end 68} (go/func fuse "fuse simplifies control flow by joining basic blocks.\n" [^{:tag (* Func)} f ^fuseType typ]
+  (for [changed true] changed _
+    (set! changed false)
+    ;; Be sure to avoid quadratic behavior in fuseBlockPlain. See issue 13554.
+    ;; Previously this was dealt with using backwards iteration, now fuseBlockPlain
+    ;; handles large runs of blocks.
+    (for [i (- (len (.-Blocks f)) 1)] (>= i 0) (dec! i)
+      (let [b (aget (.-Blocks f) i)]
+        (when (!= (bit-and typ fuseTypeIf) 0)
+          (set! changed (or (fuseBlockIf b) changed)))
+
+        (when (!= (bit-and typ fuseTypeIntInRange) 0)
+          (set! changed (or (fuseIntInRange b) changed)))
+
+        (when (!= (bit-and typ fuseTypeSingleBitDifference) 0)
+          (set! changed (or (fuseSingleBitDifference b) changed)))
+
+        (when (!= (bit-and typ fuseTypeNanCheck) 0)
+          (set! changed (or (fuseNanCheck b) changed)))
+
+        (when (!= (bit-and typ fuseTypePlain) 0)
+          (set! changed (or (fuseBlockPlain b) changed)))
+
+        (when (!= (bit-and typ fuseTypeShortCircuit) 0)
+          (set! changed (or (shortcircuitBlock b) changed)))))
+
+
+
+    (when (!= (bit-and typ fuseTypeBranchRedirect) 0)
+      (set! changed (or (fuseBranchRedirect f) changed)))
+
+    (when changed
+      (.invalidateCFG f))))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 176} (go/func fuseBlockIf "fuseBlockIf handles the following cases where s0 and s1 are empty blocks.\n\n\t   b        b           b       b\n\t\\ / \\ /    | \\  /    \\ / |     | |\n\t s0  s1    |  s1      s0 |     | |\n\t  \\ /      | /         \\ |     | |\n\t   ss      ss           ss      ss\n\nIf all Phi ops in ss have identical variables for slots corresponding to\ns0, s1 and b then the branch can be dropped.\nThis optimization often comes up in switch statements with multiple\nexpressions in a case clause:\n\n\tswitch n {\n\t  case 1,2,3: return 4\n\t}\n\nTODO: If ss doesn't contain any OpPhis, are s0 and s1 dead code anyway.\n" ^bool [^{:tag (* Block)} b]
+  (when (!= (.-Kind b) BlockIf)
+    (return false))
+
+  ;; It doesn't matter how much Preds does s0 or s1 have.
+  (let [(values ^{:tag (* Block)} ss0 ^{:tag (* Block)} ss1) (zero (* Block))
+      ^{:line 94} s0 (.-b (aget (.-Succs b) 0))
+      ^{:line 95} i0 (.-i (aget (.-Succs b) 0))]
+    (if (or (!= (.-Kind s0) BlockPlain) (not (isEmpty s0)))
+      (set! (values s0 ss0) (values b s0))
+      (do
+        (set! ss0 (.-b (aget (.-Succs s0) 0)))
+        (set! i0 (.-i (aget (.-Succs s0) 0)))))
+
+    (let [s1 (.-b (aget (.-Succs b) 1))
+        ^{:line 103} i1 (.-i (aget (.-Succs b) 1))]
+      (if (or (!= (.-Kind s1) BlockPlain) (not (isEmpty s1)))
+        (set! (values s1 ss1) (values b s1))
+        (do
+          (set! ss1 (.-b (aget (.-Succs s1) 0)))
+          (set! i1 (.-i (aget (.-Succs s1) 0)))))
+
+      (when (!= ss0 ss1)
+        (if (and (== (.-Kind s0) BlockPlain) (isEmpty s0) (== (.-Kind s1) BlockPlain) (isEmpty s1))
+          ;; Two special cases where both s0, s1 and ss are empty blocks.
+          (cond (== s0 ss1)
+            (set! (values s0 ss0) (values b ss1))
+            (== ss0 s1)
+            (set! (values s1 ss1) (values b ss0)) :else
+
+            (return false))
+
+
+          (return false)))
+
+
+      (let [ss ss0]
+
+        ;; s0 and s1 are equal with b if the corresponding block is missing
+        ;; (2nd, 3rd and 4th case in the figure).
+
+        (range [_ v (.-Values ss)]
+          (when (and (== (.-Op v) OpPhi) (> (.-Uses v) 0) (!= (aget (.-Args v) i0) (aget (.-Args v) i1)))
+            (return false)))
+
+
+
+        ;; We do not need to redirect the Preds of s0 and s1 to ss,
+        ;; the following optimization will do this.
+        (.removeEdge b 0)
+        (when (and (!= s0 b) (== (len (.-Preds s0)) 0))
+          (.removeEdge s0 0)
+          ;; Move any (dead) values in s0 to b,
+          ;; where they will be eliminated by the next deadcode pass.
+          (range [_ v (.-Values s0)]
+            (set! (.-Block v) b))
+
+          (set! (.-Values b) (append (.-Values b) (spread (.-Values s0))))
+          ;; Clear s0.
+          (set! (.-Kind s0) BlockInvalid)
+          (set! (.-Values s0) nil)
+          (set! (.-Succs s0) nil)
+          (set! (.-Preds s0) nil))
+
+
+        (set! (.-Kind b) BlockPlain)
+        (set! (.-Likely b) BranchUnknown)
+        (.ResetControls b)
+        ;; The values in b may be dead codes, and clearing them in time may
+        ;; obtain new optimization opportunities.
+        ;; First put dead values that can be deleted into a slice walkValues.
+        ;; Then put their arguments in walkValues before resetting the dead values
+        ;; in walkValues, because the arguments may also become dead values.
+        ^{:go/breaks [[4 175]]} (let [walkValues (lit (slice (* Value)))]
+          (range [_ v (.-Values b)]
+            (when (and (== (.-Uses v) 0) (.removeable v))
+              (set! walkValues (append walkValues v))))
+
+
+          (while (!= (len walkValues) 0)
+            (let [v (aget walkValues (- (len walkValues) 1))]
+              (set! walkValues (subslice walkValues _ (- (len walkValues) 1)))
+              (when (and (== (.-Uses v) 0) (.removeable v))
+                (set! walkValues (append walkValues (spread (.-Args v))))
+                (.reset v OpInvalid))))
+
+
+          true)))))
+
+
+
+
+^{:go/breaks [[5 186]] :go/end 187} (go/func isEmpty "isEmpty reports whether b contains any live values.\nThere may be false positives.\n" ^bool [^{:tag (* Block)} b]
+  (range [_ v (.-Values b)]
+    (when (or (> (.-Uses v) 0) (.IsCall (.-Op v)) (.HasSideEffects (.-Op v)) (.IsVoid (.-Type v)) (.-nilCheck (aget opcodeTable (.-Op v))))
+      (return false)))
+
+
+  true)
+
+
+
+
+
+
+
+^{:go/end 343} (go/func fuseBlockPlain "fuseBlockPlain handles a run of blocks with length >= 2,\nwhose interior has single predecessors and successors,\nb must be BlockPlain, allowing it to be any node except the\nlast (multiple successors means not BlockPlain).\nCycles are handled and merged into b's successor.\n" ^bool [^{:tag (* Block)} b]
+  (when (!= (.-Kind b) BlockPlain)
+    (return false))
+
+
+  (let [c (.-b (aget (.-Succs b) 0))]
+    (when (or (!= (len (.-Preds c)) 1) (== c b)) ; At least 2 distinct blocks.
+      (return false))
+
+
+    ;; find earliest block in run.  Avoid simple cycles.
+    (while (and (== (len (.-Preds b)) 1) (!= (.-b (aget (.-Preds b) 0)) c) (== (.-Kind (.-b (aget (.-Preds b) 0))) BlockPlain))
+      (set! b (.-b (aget (.-Preds b) 0))))
+
+
+    ;; find latest block in run.  Still beware of simple cycles.
+    (while true
+      (when (!= (.-Kind c) BlockPlain)
+        (break))
+      ;; Has exactly 1 successor
+      (let [cNext (.-b (aget (.-Succs c) 0))]
+        (when (== cNext b)
+          (break))
+        ;; not a cycle
+        (when (!= (len (.-Preds cNext)) 1)
+          (break))
+        ;; no other incoming edge
+        (set! c cNext)))
+
+
+    ;; Try to preserve any statement marks on the ends of blocks; move values to C
+    (let [^{:tag (* Block)} b_next (zero (* Block))]
+      (for [bx b] (!= bx c) (set! bx b_next)
+        ;; For each bx with an end-of-block statement marker,
+        ;; try to move it to a value in the next block,
+        ;; or to the next block's end, if possible.
+        (set! b_next (.-b (aget (.-Succs bx) 0)))
+        (when (== ^{:go/via [lico]} (.IsStmt (.-Pos bx)) src/PosIsStmt)
+          (let [l ^{:go/via [lico]} (.Line (.-Pos bx)) ; looking for another place to mark for line l
+              ^{:line 233} outOfOrder false]
+            (range [_ v (.-Values b_next)]
+              (when (== ^{:go/via [lico]} (.IsStmt (.-Pos v)) src/PosNotStmt)
+                (continue))
+
+              (when (== l ^{:go/via [lico]} (.Line (.-Pos v))) ; Found a Value with same line, therefore done.
+                (set! (.-Pos v) (.WithIsStmt (.-Pos v)))
+                (set! l 0)
+                (break))
+
+              (when (< l ^{:go/via [lico]} (.Line (.-Pos v)))
+                ;; The order of values in a block is not specified so OOO in a block is not interesting,
+                ;; but they do all come before the end of the block, so this disqualifies attaching to end of b_next.
+                (set! outOfOrder true)))
+
+
+            (when (and (!= l 0) (not outOfOrder) ^:go/paren (or (== ^{:go/via [lico]} (.Line (.-Pos b_next)) l) (!= ^{:go/via [lico]} (.IsStmt (.-Pos b_next)) src/PosIsStmt)))
+              (set! (.-Pos b_next) (.WithIsStmt (.-Pos bx))))))
+
+
+        ;; move all of bx's values to c (note containing loop excludes c)
+        (range [_ v (.-Values bx)]
+          (set! (.-Block v) c)))
+
+
+
+      ;; Compute the total number of values and find the largest value slice in the run, to maximize chance of storage reuse.
+      (let [total 0
+          ^{:line 261} totalBeforeMax 0 ; number of elements preceding the maximum block (i.e. its position in the result).
+          ^{:line 262} max_b b] ; block with maximum capacity
+
+        (for [bx b] _ (set! bx (.-b (aget (.-Succs bx) 0)))
+          (when (> (cap (.-Values bx)) (cap (.-Values max_b)))
+            (set! totalBeforeMax total)
+            (set! max_b bx))
+
+          (set! total + (len (.-Values bx)))
+          (when (== bx c)
+            (break)))
+
+
+
+        ;; Use c's storage if fused blocks will fit, else use the max if that will fit, else allocate new storage.
+
+        ;; Take care to avoid c.Values pointing to b.valstorage.
+        ;; See golang.org/issue/18602.
+
+        ;; It's important to keep the elements in the same order; maintenance of
+        ;; debugging information depends on the order of *Values in Blocks.
+        ;; This can also cause changes in the order (which may affect other
+        ;; optimizations and possibly compiler output) for 32-vs-64 bit compilation
+        ;; platforms (word size affects allocation bucket size affects slice capacity).
+
+        ;; figure out what slice will hold the values,
+        ;; preposition the destination elements if not allocating new storage
+        (let [^{:tag (slice (* Value))} t (zero (slice (* Value)))]
+          (cond (<= total (len (.-valstorage c))) (do
+              (set! t (subslice (.-valstorage c) _ total))
+              (set! max_b c)
+              (set! totalBeforeMax (- total (len (.-Values c))))
+              (copy (subslice t totalBeforeMax) (.-Values c)))
+            (<= total (cap (.-Values max_b))) (do ; in place, somewhere
+              (set! t (subslice (.-Values max_b) 0 total))
+              (copy (subslice t totalBeforeMax) (.-Values max_b))) :else
+            (do
+              (set! t (make (slice (* Value)) total))
+              (set! max_b nil)))
+
+
+          ;; copy the values
+          (let [copyTo 0]
+            (for [bx b] _ (set! bx (.-b (aget (.-Succs bx) 0)))
+              (cond (!= bx max_b)
+                (copy (subslice t copyTo) (.-Values bx))
+                (!= copyTo totalBeforeMax) ; trust but verify.
+                (panic (fmt/Errorf "totalBeforeMax (%d) != copyTo (%d), max_b=%v, b=%v, c=%v" totalBeforeMax copyTo max_b b c)))
+
+              (when (== bx c)
+                (break))
+
+              (set! copyTo + (len (.-Values bx))))
+
+            (set! (.-Values c) t)
+
+            ;; replace b->c edge with preds(b) -> c
+            (aset (.-predstorage c) 0 (lit Edge))
+            (if (> (len (.-Preds b)) (len (.-predstorage b)))
+              (set! (.-Preds c) (.-Preds b))
+
+              (set! (.-Preds c) (append (subslice (.-predstorage c) _ 0) (spread (.-Preds b)))))
+
+            (range [i e (.-Preds c)]
+              (let [p (.-b e)]
+                (aset (.-Succs p) (.-i e) (lit Edge c i))))
+
+            ^{:go/breaks [[4 342]]} (let [f (.-Func b)]
+              (when (== (.-Entry f) b)
+                (set! (.-Entry f) c))
+
+
+              ;; trash b's fields, just in case
+              (for [bx b] (!= bx c) (set! bx b_next)
+                (set! b_next (.-b (aget (.-Succs bx) 0)))
+
+                (set! (.-Kind bx) BlockInvalid)
+                (set! (.-Values bx) nil)
+                (set! (.-Preds bx) nil)
+                (set! (.-Succs bx) nil))
+
+              true)))))))

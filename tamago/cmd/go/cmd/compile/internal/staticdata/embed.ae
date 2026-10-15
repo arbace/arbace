@@ -1,0 +1,169 @@
+;; Copyright 2020 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.cmd.compile.internal.staticdata) (go/file "embed.go" :imports [
+
+
+    ^{:line 8} [path "path"]
+    ^{:line 9} [sort "sort"]
+    ^{:line 10} [strings "strings"]
+
+    ^{:line 12} [base "cmd/compile/internal/base"]
+    ^{:line 13} [ir "cmd/compile/internal/ir"]
+    ^{:line 14} [objw "cmd/compile/internal/objw"]
+    ^{:line 15} [types "cmd/compile/internal/types"]
+    ^{:line 16} [obj "cmd/internal/obj"]])
+
+
+(go/const
+  ^{:line 20} [^{:val 0} embedUnknown iota]
+  ^{:line 21} [^{:val 1} embedBytes]
+  ^{:line 22} [^{:val 2} embedString]
+  ^{:line 23} [^{:val 3} embedFiles])
+
+
+^{:go/end 66} (go/func embedFileList ^{:tag (slice string)} [^{:tag (* ir/Name)} v ^int kind]
+  ;; Build list of files to store.
+  (let [have (make (map string bool))
+      ^{:line 29 :tag (slice string)} list (zero (slice string))]
+    (range [_ e @(.-Embed v)]
+      (range [_ pattern (.-Patterns e)]
+        (let [(values files ok) (aget (.-Patterns (.-Embed (.-Cfg base/Flag))) pattern)]
+          (when (not ok)
+            (base/ErrorfAt (.-Pos e) 0 "invalid go:embed: build system did not map pattern: %s" pattern))
+
+          (range [_ file files]
+            (when (== (aget (.-Files (.-Embed (.-Cfg base/Flag))) file) "")
+              (base/ErrorfAt (.-Pos e) 0 "invalid go:embed: build system did not map file: %s" file)
+              (continue))
+
+            (when (not (aget have file))
+              (aset have file true)
+              (set! list (append list file)))
+
+            (when (== kind embedFiles)
+              (for [dir (path/Dir file)] (and (!= dir ".") (not (aget have dir))) (set! dir (path/Dir dir))
+                (aset have dir true)
+                (set! list (append list (+ dir "/")))))))))
+
+
+
+
+
+    (sort/Slice list ^{:go/end 56} (fn ^bool [^int i ^int j]
+        (embedFileLess (aget list i) (aget list j))))
+
+
+    (when (or (== kind embedString) (== kind embedBytes))
+      (when (> (len list) 1)
+        (base/ErrorfAt ^{:go/via [miniExpr miniNode]} (.Pos v) 0 "invalid go:embed: multiple files for type %v" ^{:go/via [miniExpr]} (.Type v))
+        (return nil)))
+
+
+
+    ^{:line 65} list))
+
+
+
+^{:go/end 80} (go/func embedKind "embedKind determines the kind of embedding variable.\n" ^int [^{:tag (* types/Type)} typ]
+  (when (and (!= (.Sym typ) nil) (== (.-Name (.Sym typ)) "FS") (== (.-Path (.-Pkg (.Sym typ))) "embed"))
+    (return embedFiles))
+
+  (when (== (.Kind typ) types/TSTRING)
+    (return embedString))
+
+  (when (and (.IsSlice typ) (== (.Kind (.Elem typ)) types/TUINT8))
+    (return embedBytes))
+
+  ^{:line 79} embedUnknown)
+
+
+^{:go/end 89} (go/func embedFileNameSplit [^string name] :results [^string dir ^string elem ^bool isDir]
+  (set! (values name isDir) (strings/CutSuffix name "/"))
+  (let [i (strings/LastIndexByte name \/)]
+    (when (< i 0)
+      (return "." name isDir))
+
+    (return (subslice name _ i) (subslice name (+ i 1)) isDir)))
+
+
+
+
+^{:go/end 97} (go/func embedFileLess "embedFileLess implements the sort order for a list of embedded files.\nSee the comment inside ../../../../embed/embed.go's Files struct for rationale.\n" ^bool [^string x ^string y]
+  (let [(values xdir xelem _) (embedFileNameSplit x)
+      (values ydir yelem _) (embedFileNameSplit y)]
+    (or (< xdir ydir) (and (== xdir ydir) (< xelem yelem)))))
+
+
+
+
+^{:go/end 171} (go/func WriteEmbed "WriteEmbed emits the init data for a //go:embed variable,\nwhich is either a string, a []byte, or an embed.FS.\n" [^{:tag (* ir/Name)} v]
+  ;; TODO(mdempsky): User errors should be reported by the frontend.
+
+  (let [commentPos (.-Pos (aget @(.-Embed v) 0))]
+    (when (== (.-Patterns (.-Embed (.-Cfg base/Flag))) nil)
+      (base/ErrorfAt commentPos 0 "invalid go:embed: build system did not supply embed configuration")
+      (return))
+
+    (let [kind (embedKind ^{:go/via [miniExpr]} (.Type v))]
+      (when (== kind embedUnknown)
+        (base/ErrorfAt ^{:go/via [miniExpr miniNode]} (.Pos v) 0 "go:embed cannot apply to var of type %v" ^{:go/via [miniExpr]} (.Type v))
+        (return))
+
+
+      (let [files (embedFileList v kind)]
+        (when (> (base/Errors) 0)
+          (return))
+
+        (switch kind
+          (case [embedString embedBytes]
+            (let [file (aget files 0)
+                (values fsym size err) (fileStringSym ^{:go/via [miniExpr miniNode]} (.Pos v) (aget (.-Files (.-Embed (.-Cfg base/Flag))) file) (== kind embedString) nil)]
+              (when (!= err nil)
+                (base/ErrorfAt ^{:go/via [miniExpr miniNode]} (.Pos v) 0 "embed %s: %v" file err))
+
+              (let [sym (.Linksym v)
+                  ^{:line 127} off 0]
+                (set! off (objw/SymPtr sym off fsym 0)) ; data string
+                (set! off (objw/Uintptr sym off (conv uint64 size))) ; len
+                (when (== kind embedBytes)
+                  (objw/Uintptr sym off (conv uint64 size)))))) ; cap for slice
+
+
+          (case [embedFiles]
+            (let [slicedata (.Linksym (.Lookup (.-Pkg (.Sym v)) (+ (.-Name (.Sym v)) ".files")))
+                ^{:line 136} off 0]
+              ;; []files pointed at by Files
+              (set! off (objw/SymPtr slicedata off slicedata (* 3 types/PtrSize))) ; []file, pointing just past slice
+              (set! off (objw/Uintptr slicedata off (conv uint64 (len files))))
+              (set! off (objw/Uintptr slicedata off (conv uint64 (len files))))
+
+              ;; embed/embed.go type file is:
+              ;;	name string
+              ;;	data string
+              ;;	hash [16]byte
+              ;; Emit one of these per file in the set.
+              (let [^:const ^{:val 16} hashSize 16
+                  ^{:line 148} hash (make (slice byte) hashSize)]
+                (range [_ file files]
+                  (set! off (objw/SymPtr slicedata off (StringSym ^{:go/via [miniExpr miniNode]} (.Pos v) file) 0)) ; file string
+                  (set! off (objw/Uintptr slicedata off (conv uint64 (len file))))
+                  (if (strings/HasSuffix file "/") (do
+                      ;; entry for directory - no data
+                      (set! off (objw/Uintptr slicedata off 0))
+                      (set! off (objw/Uintptr slicedata off 0))
+                      (set! off + hashSize))
+
+                    (let [(values fsym size err) (fileStringSym ^{:go/via [miniExpr miniNode]} (.Pos v) (aget (.-Files (.-Embed (.-Cfg base/Flag))) file) true hash)]
+                      (when (!= err nil)
+                        (base/ErrorfAt ^{:go/via [miniExpr miniNode]} (.Pos v) 0 "embed %s: %v" file err))
+
+                      (set! off (objw/SymPtr slicedata off fsym 0)) ; data string
+                      (set! off (objw/Uintptr slicedata off (conv uint64 size)))
+                      (set! off (conv int (.WriteBytes slicedata base/Ctxt (conv int64 off) hash))))))
+
+
+                (objw/Global slicedata (conv int32 off) (bit-or obj/RODATA obj/LOCAL))
+                (let [sym (.Linksym v)]
+                  (objw/SymPtr sym 0 slicedata 0))))))))))

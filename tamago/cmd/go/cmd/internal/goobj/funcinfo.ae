@@ -1,0 +1,144 @@
+;; Copyright 2019 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.cmd.internal.goobj) (go/file "funcinfo.go" :imports [
+
+
+    ^{:line 8} [bytes "bytes"]
+    ^{:line 9} [binary "encoding/binary"]
+    ^{:line 10} [abi "internal/abi"]])
+
+
+
+
+(go/type CUFileIndex "CUFileIndex is used to index the filenames that are stored in the\nper-package/per-CU FileList.\n" uint32)
+
+
+
+(go/type FuncInfo "FuncInfo is serialized as a symbol (aux symbol). The symbol data is\nthe binary encoding of the struct below.\n" (struct
+    ^{:line 20 :tag uint32} Args
+    ^{:line 21 :tag uint32} Locals
+    ^{:line 22 :tag abi/FuncID} FuncID
+    ^{:line 23 :tag abi/FuncFlag} FuncFlag
+    ^{:line 24 :tag int32} StartLine
+    ^{:line 25 :tag (slice CUFileIndex)} File
+    ^{:line 26 :tag (slice InlTreeNode)} InlTree))
+
+
+^{:go/end 55} (go/method Write [^{:tag (* FuncInfo)} a ^{:tag (* bytes/Buffer)} w]
+  (let [writeUint8 ^{:go/end 32} (fn [^uint8 x]
+        (.WriteByte w x))
+
+      ^{:line 33 :tag (array 4 byte)} b (zero (array 4 byte))
+      ^{:line 34} writeUint32 ^{:go/end 37} (fn [^uint32 x]
+        (.PutUint32 binary/LittleEndian (subslice b) x)
+        (.Write w (subslice b)))]
+
+
+    (writeUint32 (.-Args a))
+    (writeUint32 (.-Locals a))
+    (writeUint8 (conv uint8 (.-FuncID a)))
+    (writeUint8 (conv uint8 (.-FuncFlag a)))
+    (writeUint8 0) ; pad to uint32 boundary
+    (writeUint8 0)
+    (writeUint32 (conv uint32 (.-StartLine a)))
+
+    (writeUint32 (conv uint32 (len (.-File a))))
+    (range [_ f (.-File a)]
+      (writeUint32 (conv uint32 f)))
+
+    (writeUint32 (conv uint32 (len (.-InlTree a))))
+    (range [i (.-InlTree a)]
+      (.Write (aget (.-InlTree a) i) w))))
+
+
+
+
+
+
+
+
+(go/type FuncInfoLengths "FuncInfoLengths is a cache containing a roadmap of offsets and\nlengths for things within a serialized FuncInfo. Each length field\nstores the number of items (e.g. files, inltree nodes, etc), and the\ncorresponding \"off\" field stores the byte offset of the start of\nthe items in question.\n" (struct
+    ^{:line 63 :tag uint32} NumFile
+    ^{:line 64 :tag uint32} FileOff
+    ^{:line 65 :tag uint32} NumInlTree
+    ^{:line 66 :tag uint32} InlTreeOff
+    ^{:line 67 :tag bool} Initialized))
+
+
+^{:go/end 86} (go/method ReadFuncInfoLengths ^FuncInfoLengths [(* FuncInfo) ^{:tag (slice byte)} b]
+  (let [^FuncInfoLengths result (zero FuncInfoLengths)
+
+      ;; Offset to the number of the file table. This value is determined by counting
+      ;; the number of bytes until we write funcdataoff to the file.
+      ^:const ^{:line 75 :val 16} numfileOff 16]
+    (set! (.-NumFile result) (.Uint32 binary/LittleEndian (subslice b numfileOff)))
+    (set! (.-FileOff result) (+ numfileOff 4))
+
+    (let [numinltreeOff (+ (.-FileOff result) (* 4 (.-NumFile result)))]
+      (set! (.-NumInlTree result) (.Uint32 binary/LittleEndian (subslice b numinltreeOff)))
+      (set! (.-InlTreeOff result) (+ numinltreeOff 4))
+
+      (set! (.-Initialized result) true)
+
+      ^{:line 85} result)))
+
+
+^{:go/end 88} (go/method ReadArgs ^uint32 [(* FuncInfo) ^{:tag (slice byte)} b] (.Uint32 binary/LittleEndian b))
+
+^{:go/end 90} (go/method ReadLocals ^uint32 [(* FuncInfo) ^{:tag (slice byte)} b] (.Uint32 binary/LittleEndian (subslice b 4)))
+
+^{:go/end 92} (go/method ReadFuncID ^abi/FuncID [(* FuncInfo) ^{:tag (slice byte)} b] (conv abi/FuncID (aget b 8)))
+
+^{:go/end 94} (go/method ReadFuncFlag ^abi/FuncFlag [(* FuncInfo) ^{:tag (slice byte)} b] (conv abi/FuncFlag (aget b 9)))
+
+^{:go/end 96} (go/method ReadStartLine ^int32 [(* FuncInfo) ^{:tag (slice byte)} b] (conv int32 (.Uint32 binary/LittleEndian (subslice b 12))))
+
+^{:go/end 100} (go/method ReadFile ^CUFileIndex [(* FuncInfo) ^{:tag (slice byte)} b ^uint32 filesoff ^uint32 k]
+  (conv CUFileIndex (.Uint32 binary/LittleEndian (subslice b (+ filesoff (* 4 k))))))
+
+
+^{:go/end 107} (go/method ReadInlTree ^InlTreeNode [(* FuncInfo) ^{:tag (slice byte)} b ^uint32 inltreeoff ^uint32 k]
+  (let [^:const ^{:val 24} inlTreeNodeSize (* 4 6)
+      ^{:line 104 :tag InlTreeNode} result (zero InlTreeNode)]
+    (.Read result (subslice b (+ inltreeoff (* k inlTreeNodeSize))))
+    ^{:line 106} result))
+
+
+
+(go/type InlTreeNode "InlTreeNode is the serialized form of FileInfo.InlTree.\n" (struct
+    ^{:line 111 :tag int32} Parent
+    ^{:line 112 :tag CUFileIndex} File
+    ^{:line 113 :tag int32} Line
+    ^{:line 114 :tag SymRef} Func
+    ^{:line 115 :tag int32} ParentPC))
+
+
+^{:go/end 130} (go/method Write [^{:tag (* InlTreeNode)} inl ^{:tag (* bytes/Buffer)} w]
+  (let [^{:tag (array 4 byte)} b (zero (array 4 byte))
+      ^{:line 120} writeUint32 ^{:go/end 123} (fn [^uint32 x]
+        (.PutUint32 binary/LittleEndian (subslice b) x)
+        (.Write w (subslice b)))]
+
+    (writeUint32 (conv uint32 (.-Parent inl)))
+    (writeUint32 (conv uint32 (.-File inl)))
+    (writeUint32 (conv uint32 (.-Line inl)))
+    (writeUint32 (.-PkgIdx (.-Func inl)))
+    (writeUint32 (.-SymIdx (.-Func inl)))
+    (writeUint32 (conv uint32 (.-ParentPC inl)))))
+
+
+
+^{:go/end 145} (go/method Read "Read an InlTreeNode from b, return the remaining bytes.\n" ^{:tag (slice byte)} [^{:tag (* InlTreeNode)} inl ^{:tag (slice byte)} b]
+  (let [readUint32 ^{:go/end 138} (fn ^uint32 []
+        (let [x (.Uint32 binary/LittleEndian b)]
+          (set! b (subslice b 4))
+          ^{:line 137} x))]
+
+    (set! (.-Parent inl) (conv int32 (readUint32)))
+    (set! (.-File inl) (conv CUFileIndex (readUint32)))
+    (set! (.-Line inl) (conv int32 (readUint32)))
+    (set! (.-Func inl) (lit SymRef (readUint32) (readUint32)))
+    (set! (.-ParentPC inl) (conv int32 (readUint32)))
+    ^{:line 144} b))

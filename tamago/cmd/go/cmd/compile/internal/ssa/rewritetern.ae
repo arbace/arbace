@@ -1,0 +1,292 @@
+;; Copyright 2025 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.cmd.compile.internal.ssa) (go/file "rewritetern.go" :imports [
+
+
+    ^{:line 8} [goarch "internal/goarch"]
+    ^{:line 9} [slices "slices"]])
+
+
+(go/var ^{:tag (array 3 uint8)} truthTableValues (lit (array 3 uint8) 2r11110000 2r11001100 2r10101010))
+
+^{:go/end 35} (go/method String ^string [^SIMDLogicalOP slop]
+  (when (== slop sloInterior)
+    (return "leaf"))
+
+  ^{:go/breaks [[4 34]]} (let [interior ""]
+    (when (!= (bit-and slop sloInterior) 0)
+      (set! interior "+interior"))
+
+    (switch (bit-and-not slop sloInterior)
+      (case [sloAnd]
+        (return (+ "and" interior)))
+      (case [sloXor]
+        (return (+ "xor" interior)))
+      (case [sloOr]
+        (return (+ "or" interior)))
+      (case [sloAndNot]
+        (return (+ "andNot" interior)))
+      (case [sloNot]
+        (return (+ "not" interior))))
+
+    "wrong"))
+
+
+^{:go/end 294} (go/func rewriteTern [^{:tag (* Func)} f]
+  (when (== (.-maxCPUFeatures f) CPUNone)
+    (return))
+
+
+  (let [arch ^{:go/via [Arch]} (.-Family (.-Arch (.Ctxt (.-Config f))))]
+    ;; TODO there are other SIMD architectures
+    (when (!= arch goarch/AMD64)
+      (return))
+
+
+    (let [boolExprTrees (make (map (* Value) SIMDLogicalOP))]
+
+      ;; Find logical-expr expression trees, including leaves.
+      ;; interior nodes will be marked sloInterior,
+      ;; root nodes will not be marked sloInterior,
+      ;; leaf nodes are only marked sloInterior.
+      (range [_ b (.-Blocks f)]
+        (range [_ v (.-Values b)]
+          (let [slo (classifyBooleanSIMD v)]
+            (switch slo
+              (case [sloOr
+                  ^{:line 59} sloAndNot
+                  ^{:line 60} sloXor
+                  ^{:line 61} sloAnd]
+                (set! (aget boolExprTrees (aget (.-Args v) 1)) bit-or sloInterior)
+                (fallthrough))
+              (case [sloNot]
+                (set! (aget boolExprTrees (aget (.-Args v) 0)) bit-or sloInterior)
+                (set! (aget boolExprTrees v) bit-or slo))))))
+
+
+
+
+      ;; get a canonical sorted set of roots
+      (let [^{:tag (slice (* Value))} roots (zero (slice (* Value)))]
+        (range [v slo boolExprTrees]
+          (when (> (.-debug (.-pass f)) 1)
+            (.Warnl f (.-Pos v) "%s has SLO %v" (.LongString v) slo))
+
+
+          (when (and (== (bit-and slo sloInterior) 0) (.hasFeature (.-CPUfeatures (.-Block v)) CPUavx512))
+            (set! roots (append roots v))))
+
+
+        (^{:inst [(slice (* Value)) (* Value)]} slices/SortFunc roots ^{:go/end 82} (fn ^int [^{:tag (* Value)} u ^{:tag (* Value)} v] (conv int (- (.-ID u) (.-ID v))))) ; IDs are small enough to not care about overflow.
+
+        ;; This rewrite works by iterating over the root set.
+        ;; For each boolean expression, it walks the expression
+        ;; bottom up accumulating sets of variables mentioned in
+        ;; subexpressions, lazy-greedily finding the largest subexpressions
+        ;; of 3 inputs that can be rewritten to use ternary-truth-table instructions.
+
+        ;; rewrite recursively attempts to replace v and v's subexpressions with
+        ;; ternary-logic truth-table operations, returning a set of not more than 3
+        ;; subexpressions within v that may be combined into a parent's replacement.
+        ;; V need not have the CPU features that allow a ternary-logic operation;
+        ;; in that case, v will not be rewritten.  Replacements also require
+        ;; exactly 3 different variable inputs to a boolean expression.
+        ;;
+        ;; Given the CPU feature and 3 inputs, v is replaced in the following
+        ;; cases:
+        ;;
+        ;; 1) v is a root
+        ;; 2) u = NOT(v) and u lacks the CPU feature
+        ;; 3) u = OP(v, w) and u lacks the CPU feature
+        ;; 4) u = OP(v, w) and u has more than 3 variable inputs.	var rewrite func(v *Value) [3]*Value
+        (let [^{:tag (func [^{:tag (* Value)} v] [(array 3 (* Value))])} rewrite (zero (func [^{:tag (* Value)} v] [(array 3 (* Value))]))
+
+            ;; computeTT returns the truth table for a boolean expression
+            ;; over the variables in vars, where vars[0] varies slowest in
+            ;; the truth table and vars[2] varies fastest.
+            ;; e.g. computeTT( "and(x, or(y, not(z)))", {x,y,z} ) returns
+            ;; (bit 0 first) 0 0 0 0 1 0 1 1 = (reversed) 1101_0000 = 0xD0
+            ;;            x: 0 0 0 0 1 1 1 1
+            ;;            y: 0 0 1 1 0 0 1 1
+            ;;            z: 0 1 0 1 0 1 0 1
+            ^{:line 114 :tag (func [^{:tag (* Value)} v ^{:tag (array 3 (* Value))} vars] [uint8])} computeTT (zero (func [^{:tag (* Value)} v ^{:tag (array 3 (* Value))} vars] [uint8]))
+
+            ;; combine two sets of variables into one, returning ok/not
+            ;; if the two sets contained 3 or fewer elements.  Combine
+            ;; ensures that the sets of Values never contain duplicates.
+            ;; (Duplicates would create less-efficient code, not incorrect code.)
+            ^{:line 120} combine ^{:go/end 147} (fn [^{:tag (array 3 (* Value))} a ^{:tag (array 3 (* Value))} b] :results [(array 3 (* Value)) bool]
+              (let [^{:tag (array 3 (* Value))} c (zero (array 3 (* Value)))
+                  ^{:line 122} i 0]
+                (range [_ v a]
+                  (when (== v nil)
+                    (break))
+
+                  (aset c i v)
+                  (inc! i))
+
+                (label :bloop
+                  (range [_ v b]
+                    (when (== v nil)
+                      (break))
+
+                    (range [_ u a]
+                      (when (== v u)
+                        (continue :bloop)))
+
+
+                    (when (== i 3)
+                      (return (lit (array 3 (* Value))) false))
+
+                    (aset c i v)
+                    (inc! i)))
+
+                (return c true)))]
+
+
+          (set! computeTT ^{:go/end 171} (fn ^uint8 [^{:tag (* Value)} v ^{:tag (array 3 (* Value))} vars]
+              (let [i 0]
+                (for [] (< i (len vars)) (inc! i)
+                  (when (== (aget vars i) v)
+                    (return (aget truthTableValues i))))
+
+
+                (let [slo (bit-and-not (aget boolExprTrees v) sloInterior)
+                    ^{:line 157} a (computeTT (aget (.-Args v) 0) vars)]
+                  (switch slo
+                    (case [sloNot]
+                      (return (bit-not a)))
+                    (case [sloAnd]
+                      (return (bit-and a (computeTT (aget (.-Args v) 1) vars))))
+                    (case [sloXor]
+                      (return (bit-xor a (computeTT (aget (.-Args v) 1) vars))))
+                    (case [sloOr]
+                      (return (bit-or a (computeTT (aget (.-Args v) 1) vars))))
+                    (case [sloAndNot]
+                      (return (bit-and a (bit-not (computeTT (aget (.-Args v) 1) vars))))))
+
+                  (panic "switch should have covered all cases, or unknown var in logical expression")))))
+
+
+          (let [replace ^{:go/end 189} (fn [^{:tag (* Value)} a0 ^{:tag (array 3 (* Value))} vars0]
+                (let [imm (computeTT a0 vars0)
+                    ^{:line 175} op (ternOpForLogical (.-Op a0))]
+                  (when (== op (.-Op a0))
+                    (when (> (.-debug (.-pass f)) 0)
+                      (.Warnl f (.-Pos a0) "Skipping rewrite for %s, op=%v" (.LongString a0) op))
+
+                    (return))
+
+                  (when (> (.-debug (.-pass f)) 0)
+                    (.Warnl f (.-Pos a0) "Rewriting %s into %v of 0b%b %v %v %v" (.LongString a0) op imm
+                      (aget vars0 0) (aget vars0 1) (aget vars0 2)))
+
+                  (.reset a0 op)
+                  (.SetArgs3 a0 (aget vars0 0) (aget vars0 1) (aget vars0 2))
+                  (set! (.-AuxInt a0) (conv int64 (conv int8 imm)))))
+
+
+              ;; addOne ensures the no-duplicates addition of a single value
+              ;; to a set that is not full.  It seems possible that a shared
+              ;; subexpression in tricky combination with blocks lacking the
+              ;; AVX512 feature might permit this.
+              ^{:line 195} addOne ^{:go/end 208} (fn ^{:tag (array 3 (* Value))} [^{:tag (array 3 (* Value))} vars ^{:tag (* Value)} v]
+                (when (!= (aget vars 2) nil)
+                  (panic "rewriteTern.addOne, vars[2] should be nil"))
+
+                (when (or (== v (aget vars 0)) (== v (aget vars 1)))
+                  (return vars))
+
+                (if (== (aget vars 1) nil)
+                  (aset vars 1 v)
+
+                  (aset vars 2 v))
+
+                ^{:line 207} vars)]
+
+
+            (set! rewrite ^{:go/end 286} (fn ^{:tag (array 3 (* Value))} [^{:tag (* Value)} v]
+                (let [slo (aget boolExprTrees v)]
+                  (when (== slo sloInterior) ; leaf node, i.e., a "variable"
+                    (return (lit (array 3 (* Value)) v nil nil)))
+
+                  (let [^{:tag (array 3 (* Value))} vars (zero (array 3 (* Value)))
+                      ^{:line 216} hasFeature (.hasFeature (.-CPUfeatures (.-Block v)) CPUavx512)]
+                    (if (== (bit-and slo sloNot) sloNot) (do
+                        (set! vars (rewrite (aget (.-Args v) 0)))
+                        (when (not hasFeature)
+                          (when (!= (aget vars 2) nil)
+                            (replace (aget (.-Args v) 0) vars)
+                            (return (lit (array 3 (* Value)) v nil nil)))
+
+                          (return vars)))
+
+
+                      (let [^bool ok (zero bool)
+                          (values a0 a1) (values (aget (.-Args v) 0) (aget (.-Args v) 1))
+                          ^{:line 229} vars0 (rewrite a0)
+                          ^{:line 230} vars1 (rewrite a1)]
+                        (set! (values vars ok) (combine vars0 vars1))
+
+                        (when (> (.-debug (.-pass f)) 1)
+                          (.Warnl f (.-Pos a0) "combine(%v, %v) -> %v, %v" vars0 vars1 vars ok))
+
+
+                        (when (not (and ok (.hasFeature (.-CPUfeatures (.-Block v)) CPUavx512)))
+                          ;; too many variables, or cannot rewrite current values.
+                          ;; rewrite one or both subtrees if possible
+                          (when (and (!= (aget vars0 2) nil) (.hasFeature (.-CPUfeatures (.-Block a0)) CPUavx512))
+                            (replace a0 vars0))
+
+                          (when (and (!= (aget vars1 2) nil) (.hasFeature (.-CPUfeatures (.-Block a1)) CPUavx512))
+                            (replace a1 vars1))
+
+
+                          ;; 3-element var arrays are either rewritten, or unable to be rewritten
+                          ;; because of the features in effect in their block.  Either way, they
+                          ;; are treated as a "new var" if 3 elements are present.
+
+                          (cond (== (aget vars0 2) nil)
+                            (if (== (aget vars1 2) nil)
+                              ;; both subtrees are 2-element and were not rewritten.
+                              ;;
+                              ;; TODO a clever person would look at subtrees of inputs,
+                              ;; e.g. rewrite
+                              ;;        ((a AND b) XOR b) XOR (d  XOR (c AND d))
+                              ;; to    (((a AND b) XOR b) XOR  d) XOR (c AND d)
+                              ;; to v = TERNLOG(truthtable, a, b, d) XOR (c AND d)
+                              ;; and return the variable set {v, c, d}
+                              ;;
+                              ;; But for now, just restart with a0 and a1.
+                              (return (lit (array 3 (* Value)) a0 a1 nil))
+
+                              ;; a1 (maybe) rewrote, a0 has room for another var
+                              (set! vars (addOne vars0 a1)))
+
+                            (== (aget vars1 2) nil)
+                            ;; a0 (maybe) rewrote, a1 has room for another var
+                            (set! vars (addOne vars1 a0))
+                            (not ok)
+                            ;; both (maybe) rewrote
+                            ;; a0 and a1 are different because otherwise their variable
+                            ;; sets would have combined "ok".
+                            (return (lit (array 3 (* Value)) a0 a1 nil))))))
+
+                    ;; continue with either the vars from "ok" or the updated set of vars.
+
+
+                    ;; if root and 3 vars and hasFeature, rewrite.
+                    (when (and (== (bit-and slo sloInterior) 0) (!= (aget vars 2) nil) hasFeature)
+                      (replace v vars)
+                      (return (lit (array 3 (* Value)) v nil nil)))
+
+                    ^{:line 285} vars))))
+
+
+            (range [_ v roots]
+              (when (> (.-debug (.-pass f)) 1)
+                (.Warnl f (.-Pos v) "SLO root %s" (.LongString v)))
+
+              (rewrite v))))))))

@@ -1,0 +1,839 @@
+;; Copyright 2023 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.cmd.compile.internal.ssa) (go/file "memcombine.go" :imports [
+
+
+    ^{:line 8} [base "cmd/compile/internal/base"]
+    ^{:line 9} [types "cmd/compile/internal/types"]
+    ^{:line 10} [src "cmd/internal/src"]
+    ^{:line 11} [cmp "cmp"]
+    ^{:line 12} [slices "slices"]])
+
+
+
+
+
+^{:go/end 27} (go/func memcombine "memcombine combines smaller loads and stores into larger ones.\nWe ensure this generates good code for encoding/binary operations.\nIt may help other cases also.\n" [^{:tag (* Func)} f]
+  ;; This optimization requires that the architecture has
+  ;; unaligned loads and unaligned stores.
+  (when (not (.-unalignedOK (.-Config f)))
+    (return))
+
+
+  (memcombineLoads f)
+  (memcombineStores f))
+
+
+^{:go/end 86} (go/func memcombineLoads [^{:tag (* Func)} f]
+  ;; Find "OR trees" to start with.
+  (let [mark (.newSparseSet f (.NumValues f))]
+    (defer (.retSparseSet f mark))
+    (let [^{:tag (slice (* Value))} order (zero (slice (* Value)))]
+
+      ;; Mark all values that are the argument of an OR.
+      (range [_ b (.-Blocks f)]
+        (range [_ v (.-Values b)]
+          (when (or (== (.-Op v) OpOr16) (== (.-Op v) OpOr32) (== (.-Op v) OpOr64))
+            (.add mark (.-ID (aget (.-Args v) 0)))
+            (.add mark (.-ID (aget (.-Args v) 1))))))
+
+
+
+      (range [_ b (.-Blocks f)]
+        (set! order (subslice order _ 0))
+        (range [_ v (.-Values b)]
+          (when (and (!= (.-Op v) OpOr16) (!= (.-Op v) OpOr32) (!= (.-Op v) OpOr64))
+            (continue))
+
+          (when (.contains mark (.-ID v))
+            ;; marked - means it is not the root of an OR tree
+            (continue))
+
+          ;; Add the OR tree rooted at v to the order.
+          ;; We use BFS here, but any walk that puts roots before leaves would work.
+          (let [i (len order)]
+            (set! order (append order v))
+            (for [] (< i (len order)) (inc! i)
+              (let [x (aget order i)]
+                (for [j 0] (< j 2) (inc! j)
+                  (let [a (aget (.-Args x) j)]
+                    (when (or (== (.-Op a) OpOr16) (== (.-Op a) OpOr32) (== (.-Op a) OpOr64))
+                      (set! order (append order a)))))))))
+
+
+
+
+        (range [_ v order]
+          (let [max (.-RegSize (.-Config f))]
+            (switch (.-Op v)
+              (case [OpOr64])
+              (case [OpOr32]
+                (set! max 4))
+              (case [OpOr16]
+                (set! max 2))
+              (default
+                (continue)))
+
+            (for [n max] (> n 1) (set! n / 2)
+              (when (combineLoads v n)
+                (break)))))))))
+
+
+
+
+
+
+
+
+
+(go/type BaseAddress "A BaseAddress represents the address ptr+idx, where\nptr is a pointer type and idx is an integer type.\nidx may be nil, in which case it is treated as 0.\n" (struct
+    ^{:line 92 :tag (* Value)} ptr
+    ^{:line 93 :tag (* Value)} idx))
+
+
+
+
+
+
+^{:go/end 128} (go/func splitPtr "splitPtr returns the base address of ptr and any\nconstant offset from that base.\nBaseAddress{ptr,nil},0 is always a valid result, but splitPtr\ntries to peel away as many constants into off as possible.\n" [^{:tag (* Value)} ptr] :results [BaseAddress int64]
+  (let [^{:tag (* Value)} idx (zero (* Value))
+      ^{:line 102 :tag int64} off (zero int64)]
+    (while true
+      (cond (== (.-Op ptr) OpOffPtr) (do
+          (set! off + (.-AuxInt ptr))
+          (set! ptr (aget (.-Args ptr) 0)))
+        (== (.-Op ptr) OpAddPtr) (do
+          (when (!= idx nil)
+            ;; We have two or more indexing values.
+            ;; Pick the first one we found.
+            (return (lit BaseAddress :ptr ptr :idx idx) off))
+
+          (set! idx (aget (.-Args ptr) 1))
+          (when (or (== (.-Op idx) OpAdd32) (== (.-Op idx) OpAdd64))
+            (cond (or (== (.-Op (aget (.-Args idx) 0)) OpConst32) (== (.-Op (aget (.-Args idx) 0)) OpConst64)) (do
+                (set! off + (.-AuxInt (aget (.-Args idx) 0)))
+                (set! idx (aget (.-Args idx) 1)))
+              (or (== (.-Op (aget (.-Args idx) 1)) OpConst32) (== (.-Op (aget (.-Args idx) 1)) OpConst64)) (do
+                (set! off + (.-AuxInt (aget (.-Args idx) 1)))
+                (set! idx (aget (.-Args idx) 0)))))
+
+
+          (set! ptr (aget (.-Args ptr) 0))) :else
+
+        (return (lit BaseAddress :ptr ptr :idx idx) off)))))
+
+
+
+
+^{:go/end 331} (go/func combineLoads ^bool [^{:tag (* Value)} root ^int64 n]
+  (let [orOp (.-Op root)
+      ^{:line 132 :tag Op} shiftOp (zero Op)]
+    (switch orOp
+      (case [OpOr64]
+        (set! shiftOp OpLsh64x64))
+      (case [OpOr32]
+        (set! shiftOp OpLsh32x64))
+      (case [OpOr16]
+        (set! shiftOp OpLsh16x64))
+      (default
+        (return false)))
+
+
+    ;; Find n values that are ORed together with the above op.
+    (let [a (make (slice (* Value)) 0 8)]
+      (set! a (append a root))
+      (for [i 0] (and (< i (len a)) (< (conv int64 (len a)) n)) (inc! i)
+        (let [v (aget a i)]
+          (when (and (!= (.-Uses v) 1) (!= v root))
+            ;; Something in this subtree is used somewhere else.
+            (return false))
+
+          (when (== (.-Op v) orOp)
+            (aset a i (aget (.-Args v) 0))
+            (set! a (append a (aget (.-Args v) 1)))
+            (dec! i))))
+
+
+      (when (!= (conv int64 (len a)) n)
+        (return false))
+
+
+      ;; Check that the first entry to see what ops we're looking for.
+      ;; All the entries should be of the form shift(extend(load)), maybe with no shift.
+      (let [v (aget a 0)]
+        (when (== (.-Op v) shiftOp)
+          (set! v (aget (.-Args v) 0)))
+
+        (let [^Op extOp (zero Op)]
+          (if (or (and (== orOp OpOr64) ^:go/paren (or (== (.-Op v) OpZeroExt8to64) (== (.-Op v) OpZeroExt16to64) (== (.-Op v) OpZeroExt32to64)))
+              (and (== orOp OpOr32) ^:go/paren (or (== (.-Op v) OpZeroExt8to32) (== (.-Op v) OpZeroExt16to32)))
+              (and (== orOp OpOr16) (== (.-Op v) OpZeroExt8to16))) (do
+              (set! extOp (.-Op v))
+              (set! v (aget (.-Args v) 0)))
+
+            (return false))
+
+          (when (!= (.-Op v) OpLoad)
+            (return false))
+
+          (let [(values base _) (splitPtr (aget (.-Args v) 0))
+              ^{:line 182} mem (aget (.-Args v) 1)
+              ^{:line 183} size (.Size (.-Type v))]
+
+            (when (== (.-arch (.-Config (.-Func (.-Block root)))) "S390X")
+              ;; s390x can't handle unaligned accesses to global variables.
+              (when (== (.-Op (.-ptr base)) OpAddr)
+                (return false)))
+
+
+
+            ;; Check all the entries, extract useful info.
+            (let-type [LoadRecord (struct
+                  ^{:line 194 :tag (* Value)} load
+                  ^{:line 195 :tag int64} offset ; offset of load address from base
+                  ^{:line 196 :tag int64} shift)]
+
+              (let [r (make (slice LoadRecord) n 8)]
+                (for [i (conv int64 0)] (< i n) (inc! i)
+                  (let [v (aget a i)]
+                    (when (!= (.-Uses v) 1)
+                      (return false))
+
+                    (let [shift (conv int64 0)]
+                      (when (== (.-Op v) shiftOp)
+                        (when (!= (.-Op (aget (.-Args v) 1)) OpConst64)
+                          (return false))
+
+                        (set! shift (.-AuxInt (aget (.-Args v) 1)))
+                        (set! v (aget (.-Args v) 0))
+                        (when (!= (.-Uses v) 1)
+                          (return false)))
+
+
+                      (when (!= (.-Op v) extOp)
+                        (return false))
+
+                      (let [load (aget (.-Args v) 0)]
+                        (when (!= (.-Op load) OpLoad)
+                          (return false))
+
+                        (when (!= (.-Uses load) 1)
+                          (return false))
+
+                        (when (!= (aget (.-Args load) 1) mem)
+                          (return false))
+
+                        (let [(values p off) (splitPtr (aget (.-Args load) 0))]
+                          (when (!= p base)
+                            (return false))
+
+                          (aset r i (lit LoadRecord :load load :offset off :shift shift)))))))
+
+
+                ;; Sort in memory address order.
+                (^{:inst [(slice LoadRecord) LoadRecord]} slices/SortFunc r ^{:go/end 238} (fn ^int [^LoadRecord a ^LoadRecord b]
+                    (^{:inst [int64]} cmp/Compare (.-offset a) (.-offset b))))
+
+
+                ;; Check that we have contiguous offsets.
+                (for [i (conv int64 0)] (< i n) (inc! i)
+                  (when (!= (.-offset (aget r i)) (+ (.-offset (aget r 0)) (* i size)))
+                    (return false)))
+
+
+
+                ;; Check for reads in little-endian or big-endian order.
+                (let [shift0 (.-shift (aget r 0))
+                    ^{:line 249} isLittleEndian true]
+                  (for [i (conv int64 0)] (< i n) (inc! i)
+                    (when (!= (.-shift (aget r i)) (+ shift0 (* i size 8)))
+                      (set! isLittleEndian false)
+                      (break)))
+
+
+                  (let [isBigEndian true]
+                    (for [i (conv int64 0)] (< i n) (inc! i)
+                      (when (!= (.-shift (aget r i)) (- shift0 (* i size 8)))
+                        (set! isBigEndian false)
+                        (break)))
+
+
+                    (when (and (not isLittleEndian) (not isBigEndian))
+                      (return false))
+
+
+                    ;; Find a place to put the new load.
+                    ;; This is tricky, because it has to be at a point where
+                    ;; its memory argument is live. We can't just put it in root.Block.
+                    ;; We use the block of the latest load.
+                    (let [loads (make (slice (* Value)) n 8)]
+                      (for [i (conv int64 0)] (< i n) (inc! i)
+                        (aset loads i (.-load (aget r i))))
+
+                      (let [loadBlock (mergePoint (.-Block root) (spread loads))]
+                        (when (== loadBlock nil)
+                          (return false))
+
+                        ;; Find a source position to use.
+                        (let [pos src/NoXPos]
+                          (range [_ load loads]
+                            (when (== (.-Block load) loadBlock)
+                              (set! pos (.-Pos load))
+                              (break)))
+
+
+                          (when (== pos src/NoXPos)
+                            (return false))
+
+
+                          ;; Check to see if we need byte swap before storing.
+                          ^{:go/breaks [[11 330]]} (let [needSwap (or (and isLittleEndian (.-BigEndian (.-Config (.-Func (.-Block root)))))
+                                (and isBigEndian (not (.-BigEndian (.-Config (.-Func (.-Block root)))))))]
+                            (when (and needSwap ^:go/paren (or (!= size 1) (not (.haveByteSwap (.-Config (.-Func (.-Block root))) n))))
+                              (return false))
+
+
+                            ;; This is the commit point.
+
+                            ;; First, issue load at lowest address.
+                            (set! v (.NewValue2 loadBlock pos OpLoad (sizeType (* n size)) (aget (.-Args (.-load (aget r 0))) 0) mem))
+
+                            ;; Byte swap if needed,
+                            (when needSwap
+                              (set! v (byteSwap loadBlock pos v)))
+
+
+                            ;; Extend if needed.
+                            (when (< (* n size) (.Size (.-Type root)))
+                              (set! v (zeroExtend loadBlock pos v (* n size) (.Size (.-Type root)))))
+
+
+                            ;; Shift if needed.
+                            (when (and isLittleEndian (!= shift0 0))
+                              (set! v (leftShift loadBlock pos v shift0)))
+
+                            (when (and isBigEndian (!= (- shift0 (* (- n 1) size 8)) 0))
+                              (set! v (leftShift loadBlock pos v (- shift0 (* (- n 1) size 8)))))
+
+
+                            ;; Install with (Copy v).
+                            (.reset root OpCopy)
+                            (.AddArg root v)
+
+                            ;; Clobber the loads, just to prevent additional work being done on
+                            ;; subtrees (which are now unreachable).
+                            (for [i (conv int64 0)] (< i n) (inc! i)
+                              (clobber (.-load (aget r i))))
+
+                            true))))))))))))))
+
+
+^{:go/end 380} (go/func memcombineStores [^{:tag (* Func)} f]
+  (let [mark (.newSparseSet f (.NumValues f))]
+    (defer (.retSparseSet f mark))
+    (let [^{:tag (slice (* Value))} order (zero (slice (* Value)))]
+
+      (range [_ b (.-Blocks f)]
+        ;; Mark all stores which are not last in a store sequence.
+        (.clear mark)
+        (range [_ v (.-Values b)]
+          (when (== (.-Op v) OpStore)
+            (.add mark (.-ID (.MemoryArg v)))))
+
+
+
+        ;; pick an order for visiting stores such that
+        ;; later stores come earlier in the ordering.
+        (set! order (subslice order _ 0))
+        (range [_ v (.-Values b)]
+          (when (!= (.-Op v) OpStore)
+            (continue))
+
+          (when (.contains mark (.-ID v))
+            (continue)) ; not last in a chain of stores
+
+          (while true
+            (set! order (append order v))
+            (set! v (aget (.-Args v) 2))
+            (when (or (!= (.-Block v) b) (!= (.-Op v) OpStore))
+              (break))))
+
+
+
+
+        ;; Look for combining opportunities at each store in queue order.
+        (range [_ v order]
+          (when (!= (.-Op v) OpStore) ; already rewritten
+            (continue))
+
+
+          (let [size (.Size (assert (* types/Type) (.-Aux v)))]
+            (when (or (>= size (.-RegSize (.-Config f))) (== size 0))
+              (continue))
+
+
+            (combineStores v)))))))
+
+
+
+
+
+^{:go/end 755} (go/func combineStores "combineStores tries to combine the stores ending in root.\n" [^{:tag (* Value)} root]
+  ;; Helper functions.
+  (let [maxRegSize (.-RegSize (.-Config (.-Func (.-Block root))))]
+    (let-type [StoreRecord (struct
+          ^{:line 387 :tag (* Value)} store
+          ^{:line 388 :tag int64} offset
+          ^{:line 389 :tag int64} size)]
+
+      (let [getShiftBase ^{:go/end 431} (fn ^{:tag (* Value)} [^{:tag (slice StoreRecord)} a]
+            (let [x (aget (.-Args (.-store (aget a 0))) 1)
+                ^{:line 393} y (aget (.-Args (.-store (aget a 1))) 1)]
+              (switch (.-Op x)
+                (case [OpTrunc64to8 OpTrunc64to16 OpTrunc64to32 OpTrunc32to8 OpTrunc32to16 OpTrunc16to8]
+                  (set! x (aget (.-Args x) 0)))
+                (default
+                  (return nil)))
+
+              (switch (.-Op y)
+                (case [OpTrunc64to8 OpTrunc64to16 OpTrunc64to32 OpTrunc32to8 OpTrunc32to16 OpTrunc16to8]
+                  (set! y (aget (.-Args y) 0)))
+                (default
+                  (return nil)))
+
+              (let [^{:tag (* Value)} x2 (zero (* Value))]
+                (switch (.-Op x)
+                  (case [OpRsh64Ux64 OpRsh32Ux64 OpRsh16Ux64]
+                    (set! x2 (aget (.-Args x) 0)))
+                  (default))
+
+                ^{:go/breaks [[6 430]]} (let [^{:tag (* Value)} y2 (zero (* Value))]
+                  (switch (.-Op y)
+                    (case [OpRsh64Ux64 OpRsh32Ux64 OpRsh16Ux64]
+                      (set! y2 (aget (.-Args y) 0)))
+                    (default))
+
+                  (when (== y2 x)
+                    ;; a shift of x and x itself.
+                    (return x))
+
+                  (when (== x2 y)
+                    ;; a shift of y and y itself.
+                    (return y))
+
+                  (when (== x2 y2)
+                    ;; 2 shifts both of the same argument.
+                    (return x2))
+
+                  nil))))
+
+          ^{:line 432} isShiftBase ^{:go/end 450} (fn ^bool [^{:tag (* Value)} v ^{:tag (* Value)} base]
+            (let [val (aget (.-Args v) 1)]
+              (switch (.-Op val)
+                (case [OpTrunc64to8 OpTrunc64to16 OpTrunc64to32 OpTrunc32to8 OpTrunc32to16 OpTrunc16to8]
+                  (set! val (aget (.-Args val) 0)))
+                (default
+                  (return false)))
+
+              (when (== val base)
+                (return true))
+
+              (switch (.-Op val)
+                (case [OpRsh64Ux64 OpRsh32Ux64 OpRsh16Ux64]
+                  (set! val (aget (.-Args val) 0)))
+                (default
+                  (return false)))
+
+              (== val base)))
+
+          ^{:line 451} shift ^{:go/end 472} (fn ^int64 [^{:tag (* Value)} v ^{:tag (* Value)} base]
+            (let [val (aget (.-Args v) 1)]
+              (switch (.-Op val)
+                (case [OpTrunc64to8 OpTrunc64to16 OpTrunc64to32 OpTrunc32to8 OpTrunc32to16 OpTrunc16to8]
+                  (set! val (aget (.-Args val) 0)))
+                (default
+                  (return -1)))
+
+              (when (== val base)
+                (return 0))
+
+              (switch (.-Op val)
+                (case [OpRsh64Ux64 OpRsh32Ux64 OpRsh16Ux64]
+                  (set! val (aget (.-Args val) 1)))
+                (default
+                  (return -1)))
+
+              (when (!= (.-Op val) OpConst64)
+                (return -1))
+
+              (.-AuxInt val)))
+
+
+          ;; Gather n stores to look at. Check easy conditions we require.
+          ^{:line 475} allMergeable (make (slice StoreRecord) 0 8)
+          (values rbase roff) (splitPtr (aget (.-Args root) 0))]
+        (when (== (.-arch (.-Config (.-Func (.-Block root)))) "S390X")
+          ;; s390x can't handle unaligned accesses to global variables.
+          (when (== (.-Op (.-ptr rbase)) OpAddr)
+            (return)))
+
+
+        (set! allMergeable (append allMergeable (lit StoreRecord root roff (.Size (assert (* types/Type) (.-Aux root))))))
+        (let [allMergeableSize (.Size (assert (* types/Type) (.-Aux root)))]
+          ;; TODO: this loop strictly requires stores to chain together in memory.
+          ;; maybe we can break this constraint and match more patterns.
+          (for [(values i x) (values 1 (aget (.-Args root) 2))] (< i 8) (set! (values i x) (values (+ i 1) (aget (.-Args x) 2)))
+            (when (!= (.-Op x) OpStore)
+              (break))
+
+            (when (!= (.-Block x) (.-Block root))
+              (break))
+
+            (when (!= (.-Uses x) 1) ; Note: root can have more than one use.
+              (break))
+
+            (let [xSize (.Size (assert (* types/Type) (.-Aux x)))]
+              (when (== xSize 0)
+                (break))
+
+              (when (> xSize (- maxRegSize allMergeableSize))
+                (break))
+
+              (let [(values base off) (splitPtr (aget (.-Args x) 0))]
+                (when (!= base rbase)
+                  (break))
+
+                (set! allMergeable (append allMergeable (lit StoreRecord x off xSize)))
+                (set! allMergeableSize + xSize))))
+
+          (when (<= (len allMergeable) 1)
+            (return))
+
+          ;; Fit the combined total size to be one of the register size.
+          (let [mergeableSet (lit (map int64 (slice StoreRecord)))]
+            (for [(values i size) (values 0 (conv int64 0))] (< i (len allMergeable)) (inc! i)
+              (set! size + (.-size (aget allMergeable i)))
+              (range [_ bucketSize (lit (slice int64) 8 4 2)]
+                (when (== size bucketSize)
+                  (aset mergeableSet size (^{:inst [(slice StoreRecord) StoreRecord]} slices/Clone (subslice allMergeable _ (+ i 1))))
+                  (break))))
+
+
+
+            (let [^{:tag (slice StoreRecord)} a (zero (slice StoreRecord))
+                ^{:line 526 :tag int64} aTotalSize (zero int64)
+                ^{:line 527 :tag (* Value)} mem (zero (* Value))
+                ^{:line 528 :tag src/XPos} pos (zero src/XPos)]
+              ;; Pick the largest mergeable set.
+              (range [_ s (lit (slice int64) 8 4 2)]
+                (let [candidate (aget mergeableSet s)]
+                  ;; TODO: a refactoring might be more efficient:
+                  ;; Find a bunch of stores that are all adjacent and then decide how big a chunk of
+                  ;; those sequential stores to combine.
+                  (when (>= (len candidate) 2)
+                    ;; Before we sort, grab the memory arg the result should have.
+                    (set! mem (aget (.-Args (.-store (aget candidate (- (len candidate) 1)))) 2))
+                    ;; Also grab position of first store (last in array = first in memory order).
+                    (set! pos (.-Pos (.-store (aget candidate (- (len candidate) 1)))))
+                    ;; Sort stores in increasing address order.
+                    (^{:inst [(slice StoreRecord) StoreRecord]} slices/SortFunc candidate ^{:go/end 543} (fn ^int [^StoreRecord sr1 ^StoreRecord sr2]
+                        (^{:inst [int64]} cmp/Compare (.-offset sr1) (.-offset sr2))))
+
+                    ;; Check that everything is written to sequential locations.
+                    (let [sequential true]
+                      (for [i 1] (< i (len candidate)) (inc! i)
+                        (when (!= (.-offset (aget candidate i)) (+ (.-offset (aget candidate (- i 1))) (.-size (aget candidate (- i 1)))))
+                          (set! sequential false)
+                          (break)))
+
+
+                      (when sequential
+                        (set! a candidate)
+                        (set! aTotalSize s)
+                        (break))))))
+
+
+
+              (when (<= (len a) 1)
+                (return))
+
+              ;; Memory location we're going to write at (the lowest one).
+              (let [ptr (aget (.-Args (.-store (aget a 0))) 0)
+
+                  ;; Check for constant stores
+                  ^{:line 566} isConst true]
+                (range [i a]
+                  (switch (.-Op (aget (.-Args (.-store (aget a i))) 1))
+                    (case [OpConst32 OpConst16 OpConst8 OpConstBool])
+                    (default
+                      (set! isConst false)))
+
+                  (when (not isConst)
+                    (break)))
+
+
+                (when isConst
+                  ;; Modify root to do all the stores.
+                  (let [^int64 c (zero int64)]
+                    (range [i a]
+                      (let [mask (- (<< (conv int64 1) (* 8 (.-size (aget a i)))) 1)
+                          ^{:line 582} s (* 8 (- (.-offset (aget a i)) (.-offset (aget a 0))))]
+                        (when (.-BigEndian (.-Config (.-Func (.-Block root))))
+                          (set! s (- (* (- aTotalSize (.-size (aget a i))) 8) s)))
+
+                        (set! c bit-or (<< (bit-and (.-AuxInt (aget (.-Args (.-store (aget a i))) 1)) mask) s))))
+
+                    (let [^{:tag (* Value)} cv (zero (* Value))]
+                      (switch aTotalSize
+                        (case [2]
+                          (set! cv (.ConstInt16 (.-Func (.-Block root)) (aget types/Types types/TUINT16) (conv int16 c))))
+                        (case [4]
+                          (set! cv (.ConstInt32 (.-Func (.-Block root)) (aget types/Types types/TUINT32) (conv int32 c))))
+                        (case [8]
+                          (set! cv (.ConstInt64 (.-Func (.-Block root)) (aget types/Types types/TUINT64) c))))
+
+
+                      ;; Move all the stores to the root.
+                      (range [i a]
+                        (let [v (.-store (aget a i))]
+                          (if (== v root) (do
+                              (set! (.-Aux v) (.-Type cv)) ; widen store type
+                              (set! (.-Pos v) pos)
+                              (.SetArg v 0 ptr)
+                              (.SetArg v 1 cv)
+                              (.SetArg v 2 mem))
+                            (do
+                              (clobber v)
+                              (set! (.-Type v) (aget types/Types types/TBOOL)))))) ; erase memory type
+
+
+                      (return))))
+
+
+                ;; Check for consecutive loads as the source of the stores.
+                (let [^{:tag (* Value)} loadMem (zero (* Value))
+                    ^{:line 617 :tag BaseAddress} loadBase (zero BaseAddress)
+                    ^{:line 618 :tag int64} loadIdx (zero int64)]
+                  (range [i a]
+                    (let [load (aget (.-Args (.-store (aget a i))) 1)]
+                      (when (!= (.-Op load) OpLoad)
+                        (set! loadMem nil)
+                        (break))
+
+                      (when (!= (.-Uses load) 1)
+                        (set! loadMem nil)
+                        (break))
+
+                      (when (.HasPointers (.-Type load))
+                        ;; Don't combine stores containing a pointer, as we need
+                        ;; a write barrier for those. This can happen on an
+                        ;; 8-byte-reg/4-byte-ptr architecture like wasm32.
+                        (set! loadMem nil)
+                        (break))
+
+                      (let [mem (aget (.-Args load) 1)
+                          (values base idx) (splitPtr (aget (.-Args load) 0))]
+                        (when (== loadMem nil)
+                          ;; First one we found
+                          (set! loadMem mem)
+                          (set! loadBase base)
+                          (set! loadIdx idx)
+                          (continue))
+
+                        (when (or (!= base loadBase) (!= mem loadMem))
+                          (set! loadMem nil)
+                          (break))
+
+                        (when (!= idx (+ loadIdx (- (.-offset (aget a i)) (.-offset (aget a 0)))))
+                          (set! loadMem nil)
+                          (break)))))
+
+
+                  (when (!= loadMem nil)
+                    ;; Modify the first load to do a larger load instead.
+                    (let [load (aget (.-Args (.-store (aget a 0))) 1)]
+                      (switch aTotalSize
+                        (case [2]
+                          (set! (.-Type load) (aget types/Types types/TUINT16)))
+                        (case [4]
+                          (set! (.-Type load) (aget types/Types types/TUINT32)))
+                        (case [8]
+                          (set! (.-Type load) (aget types/Types types/TUINT64))))
+
+
+                      ;; Modify root to do the store.
+                      (range [i a]
+                        (let [v (.-store (aget a i))]
+                          (if (== v root) (do
+                              (set! (.-Aux v) (.-Type load)) ; widen store type
+                              (set! (.-Pos v) pos)
+                              (.SetArg v 0 ptr)
+                              (.SetArg v 1 load)
+                              (.SetArg v 2 mem))
+                            (do
+                              (clobber v)
+                              (set! (.-Type v) (aget types/Types types/TBOOL)))))) ; erase memory type
+
+
+                      (return)))
+
+
+                  ;; Check that all the shift/trunc are of the same base value.
+                  (let [shiftBase (getShiftBase a)]
+                    (when (== shiftBase nil)
+                      (return))
+
+                    (range [i a]
+                      (when (not (isShiftBase (.-store (aget a i)) shiftBase))
+                        (return)))
+
+
+
+                    ;; Check for writes in little-endian or big-endian order.
+                    (let [isLittleEndian true
+                        ^{:line 696} shift0 (shift (.-store (aget a 0)) shiftBase)]
+                      (for [i 1] (< i (len a)) (inc! i)
+                        (when (!= (shift (.-store (aget a i)) shiftBase) (+ shift0 (* (- (.-offset (aget a i)) (.-offset (aget a 0))) 8)))
+                          (set! isLittleEndian false)
+                          (break)))
+
+
+                      (let [isBigEndian true
+                          ^{:line 704} shiftedSize (conv int64 0)]
+                        (for [i 1] (< i (len a)) (inc! i)
+                          (set! shiftedSize + (.-size (aget a i)))
+                          (when (!= (shift (.-store (aget a i)) shiftBase) (- shift0 (* shiftedSize 8)))
+                            (set! isBigEndian false)
+                            (break)))
+
+
+                        (when (and (not isLittleEndian) (not isBigEndian))
+                          (return))
+
+
+                        ;; Check to see if we need byte swap before storing.
+                        (let [needSwap (or (and isLittleEndian (.-BigEndian (.-Config (.-Func (.-Block root)))))
+                              (and isBigEndian (not (.-BigEndian (.-Config (.-Func (.-Block root)))))))]
+                          (when (and needSwap ^:go/paren (or (!= (conv int64 (len a)) aTotalSize) (not (.haveByteSwap (.-Config (.-Func (.-Block root))) aTotalSize))))
+                            (return))
+
+
+                          ;; This is the commit point.
+
+                          ;; Modify root to do all the stores.
+                          (let [sv shiftBase]
+                            (when (and isLittleEndian (!= shift0 0))
+                              (set! sv (rightShift (.-Block root) (.-Pos root) sv shift0)))
+
+                            (set! shiftedSize (- aTotalSize (.-size (aget a 0))))
+                            (when (and isBigEndian (!= (- shift0 (* shiftedSize 8)) 0))
+                              (set! sv (rightShift (.-Block root) (.-Pos root) sv (- shift0 (* shiftedSize 8)))))
+
+                            (when (> (.Size (.-Type sv)) aTotalSize)
+                              (set! sv (truncate (.-Block root) (.-Pos root) sv (.Size (.-Type sv)) aTotalSize)))
+
+                            (when needSwap
+                              (set! sv (byteSwap (.-Block root) (.-Pos root) sv)))
+
+
+                            ;; Move all the stores to the root.
+                            (range [i a]
+                              (let [v (.-store (aget a i))]
+                                (if (== v root) (do
+                                    (set! (.-Aux v) (.-Type sv)) ; widen store type
+                                    (set! (.-Pos v) pos)
+                                    (.SetArg v 0 ptr)
+                                    (.SetArg v 1 sv)
+                                    (.SetArg v 2 mem))
+                                  (do
+                                    (clobber v)
+                                    (set! (.-Type v) (aget types/Types types/TBOOL)))))))))))))))))))) ; erase memory type
+
+
+
+
+^{:go/end 769} (go/func sizeType ^{:tag (* types/Type)} [^int64 size]
+  (switch size
+    (case [8]
+      (return (aget types/Types types/TUINT64)))
+    (case [4]
+      (return (aget types/Types types/TUINT32)))
+    (case [2]
+      (return (aget types/Types types/TUINT16)))
+    (default
+      (base/Fatalf "bad size %d\n" size)
+      (return nil))))
+
+
+
+^{:go/end 783} (go/func truncate ^{:tag (* Value)} [^{:tag (* Block)} b ^src/XPos pos ^{:tag (* Value)} v ^int64 from ^int64 to]
+  (switch (+ (* from 10) to)
+    (case [82]
+      (return (.NewValue1 b pos OpTrunc64to16 (aget types/Types types/TUINT16) v)))
+    (case [84]
+      (return (.NewValue1 b pos OpTrunc64to32 (aget types/Types types/TUINT32) v)))
+    (case [42]
+      (return (.NewValue1 b pos OpTrunc32to16 (aget types/Types types/TUINT16) v)))
+    (default
+      (base/Fatalf "bad sizes %d %d\n" from to)
+      (return nil))))
+
+
+^{:go/end 796} (go/func zeroExtend ^{:tag (* Value)} [^{:tag (* Block)} b ^src/XPos pos ^{:tag (* Value)} v ^int64 from ^int64 to]
+  (switch (+ (* from 10) to)
+    (case [24]
+      (return (.NewValue1 b pos OpZeroExt16to32 (aget types/Types types/TUINT32) v)))
+    (case [28]
+      (return (.NewValue1 b pos OpZeroExt16to64 (aget types/Types types/TUINT64) v)))
+    (case [48]
+      (return (.NewValue1 b pos OpZeroExt32to64 (aget types/Types types/TUINT64) v)))
+    (default
+      (base/Fatalf "bad sizes %d %d\n" from to)
+      (return nil))))
+
+
+
+^{:go/end 812} (go/func leftShift ^{:tag (* Value)} [^{:tag (* Block)} b ^src/XPos pos ^{:tag (* Value)} v ^int64 shift]
+  (let [s (.ConstInt64 (.-Func b) (aget types/Types types/TUINT64) shift)
+      ^{:line 800} size (.Size (.-Type v))]
+    (switch size
+      (case [8]
+        (return (.NewValue2 b pos OpLsh64x64 (.-Type v) v s)))
+      (case [4]
+        (return (.NewValue2 b pos OpLsh32x64 (.-Type v) v s)))
+      (case [2]
+        (return (.NewValue2 b pos OpLsh16x64 (.-Type v) v s)))
+      (default
+        (base/Fatalf "bad size %d\n" size)
+        (return nil)))))
+
+
+^{:go/end 827} (go/func rightShift ^{:tag (* Value)} [^{:tag (* Block)} b ^src/XPos pos ^{:tag (* Value)} v ^int64 shift]
+  (let [s (.ConstInt64 (.-Func b) (aget types/Types types/TUINT64) shift)
+      ^{:line 815} size (.Size (.-Type v))]
+    (switch size
+      (case [8]
+        (return (.NewValue2 b pos OpRsh64Ux64 (.-Type v) v s)))
+      (case [4]
+        (return (.NewValue2 b pos OpRsh32Ux64 (.-Type v) v s)))
+      (case [2]
+        (return (.NewValue2 b pos OpRsh16Ux64 (.-Type v) v s)))
+      (default
+        (base/Fatalf "bad size %d\n" size)
+        (return nil)))))
+
+
+^{:go/end 841} (go/func byteSwap ^{:tag (* Value)} [^{:tag (* Block)} b ^src/XPos pos ^{:tag (* Value)} v]
+  (switch (.Size (.-Type v))
+    (case [8]
+      (return (.NewValue1 b pos OpBswap64 (.-Type v) v)))
+    (case [4]
+      (return (.NewValue1 b pos OpBswap32 (.-Type v) v)))
+    (case [2]
+      (return (.NewValue1 b pos OpBswap16 (.-Type v) v)))
+
+    (default
+      (.Fatalf v "bad size %d\n" (.Size (.-Type v)))
+      (return nil))))

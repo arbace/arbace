@@ -1,0 +1,661 @@
+;; Copyright 2009 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.cmd.compile.internal.types) (go/file "fmt.go" :imports [
+
+
+    ^{:line 8} [bytes "bytes"]
+    ^{:line 9} [binary "encoding/binary"]
+    ^{:line 10} [fmt "fmt"]
+    ^{:line 11} [strconv "strconv"]
+    ^{:line 12} [strings "strings"]
+    ^{:line 13} [sync "sync"]
+
+    ^{:line 15} [base "cmd/compile/internal/base"]
+    ^{:line 16} [hash "cmd/internal/hash"]])
+
+
+
+(go/var ^{:tag (* Pkg) :doc "BuiltinPkg is a fake package that declares the universe block.\n"} BuiltinPkg)
+
+
+(go/var ^{:tag (* Pkg) :doc "LocalPkg is the package being compiled.\n"} LocalPkg)
+
+
+(go/var ^{:tag (* Pkg) :doc "UnsafePkg is package unsafe.\n"} UnsafePkg)
+
+
+(go/var ^{:tag (* Sym) :doc "BlankSym is the blank (_) symbol.\n"} BlankSym)
+
+
+
+
+
+(go/var ^{:doc "numImport tracks how often a package with a given name is imported.\nIt is used to provide a better error message (by using the package\npath to disambiguate) if a package that appears multiple times with\nthe same name appears in an error message.\n"} NumImport (make (map string int)))
+
+
+
+
+
+
+(go/type fmtMode "fmtMode represents the kind of printing being done.\nThe default is regular Go syntax (fmtGo).\nfmtDebug is like fmtGo but for debugging dumps and prints the type kind too.\nfmtTypeID and fmtTypeIDName are for generating various unique representations\nof types used in hashes, the linker, and function/method instantiations.\n" int)
+
+(go/const
+  ^{:line 45} [^{:tag fmtMode :val 0} fmtGo iota]
+  ^{:line 46} [^{:val 1} fmtDebug]
+  ^{:line 47} [^{:val 2} fmtTypeID]
+  ^{:line 48} [^{:val 3} fmtTypeIDName])
+
+
+;; Sym
+
+
+
+
+
+
+
+^{:go/end 71} (go/method Format "Format implements formatting for a Sym.\nThe valid formats are:\n\n\t%v\tGo syntax: Name for symbols in the local package, PkgName.Name for imported symbols.\n\t%+v\tDebug syntax: always include PkgName. prefix even for local names.\n\t%S\tShort syntax: Name only, no matter what.\n" [^{:tag (* Sym)} s ^fmt/State f ^rune verb]
+  (let [mode fmtGo]
+    (switch verb
+      (case [\v \S]
+        (when (and (== verb \v) (.Flag f \+))
+          (set! mode fmtDebug))
+
+        (fmt/Fprint f (sconv s verb mode)))
+
+      (default
+        (fmt/Fprintf f "%%!%c(*types.Sym=%p)" verb s)))))
+
+
+
+^{:go/end 75} (go/method String ^string [^{:tag (* Sym)} s]
+  (sconv s 0 fmtGo))
+
+
+
+
+^{:go/end 101} (go/func sconv "See #16897 for details about performance implications\nbefore changing the implementation of sconv.\n" ^string [^{:tag (* Sym)} s ^rune verb ^fmtMode mode]
+  (when (== verb \L)
+    (panic "linksymfmt"))
+
+
+  (when (== s nil)
+    (return "<S>"))
+
+
+  (let [q (pkgqual (.-Pkg s) verb mode)]
+    (when (== q "")
+      (return (.-Name s)))
+
+
+    (let [buf (assert (* bytes/Buffer) (.Get fmtBufferPool))]
+      (.Reset buf)
+      (defer (.Put fmtBufferPool buf))
+
+      (.WriteString buf q)
+      (.WriteByte buf \.)
+      (.WriteString buf (.-Name s))
+      (InternString (.Bytes buf)))))
+
+
+^{:go/end 113} (go/func sconv2 [^{:tag (* bytes/Buffer)} b ^{:tag (* Sym)} s ^rune verb ^fmtMode mode]
+  (when (== verb \L)
+    (panic "linksymfmt"))
+
+  (when (== s nil)
+    (.WriteString b "<S>")
+    (return))
+
+
+  (symfmt b s verb mode))
+
+
+^{:go/end 122} (go/func symfmt [^{:tag (* bytes/Buffer)} b ^{:tag (* Sym)} s ^rune verb ^fmtMode mode]
+  (let [name (.-Name s)]
+    (when [q (pkgqual (.-Pkg s) verb mode)] (!= q "")
+      (.WriteString b q)
+      (.WriteByte b \.))
+
+    (.WriteString b name)))
+
+
+
+
+
+^{:go/breaks [[6 157]] :go/end 158} (go/func pkgqual "pkgqual returns the qualifier that should be used for printing\nsymbols from the given package in the given mode.\nIf it returns the empty string, no qualification is needed.\n" ^string [^{:tag (* Pkg)} pkg ^rune verb ^fmtMode mode]
+  (when (== pkg nil)
+    (return ""))
+
+  (when (!= verb \S)
+    (switch mode
+      (case [fmtGo] ; This is for the user
+        (when (or (== pkg BuiltinPkg) (== pkg LocalPkg))
+          (return ""))
+
+
+        ;; If the name was used by multiple packages, display the full path,
+        (when (and (!= (.-Name pkg) "") (> (aget NumImport (.-Name pkg)) 1))
+          (return (strconv/Quote (.-Path pkg))))
+
+        (return (.-Name pkg)))
+
+      (case [fmtDebug]
+        (return (.-Name pkg)))
+
+      (case [fmtTypeIDName]
+        ;; dcommontype, typehash
+        (return (.-Name pkg)))
+
+      (case [fmtTypeID]
+        ;; (methodsym), typesym, weaksym
+        (return (.-Prefix pkg)))))
+
+
+
+  "")
+
+
+;; Type
+
+(go/var BasicTypeNames (lit (slice string)
+    ^{:line 163} [TINT "int"]
+    ^{:line 164} [TUINT "uint"]
+    ^{:line 165} [TINT8 "int8"]
+    ^{:line 166} [TUINT8 "uint8"]
+    ^{:line 167} [TINT16 "int16"]
+    ^{:line 168} [TUINT16 "uint16"]
+    ^{:line 169} [TINT32 "int32"]
+    ^{:line 170} [TUINT32 "uint32"]
+    ^{:line 171} [TINT64 "int64"]
+    ^{:line 172} [TUINT64 "uint64"]
+    ^{:line 173} [TUINTPTR "uintptr"]
+    ^{:line 174} [TFLOAT32 "float32"]
+    ^{:line 175} [TFLOAT64 "float64"]
+    ^{:line 176} [TCOMPLEX64 "complex64"]
+    ^{:line 177} [TCOMPLEX128 "complex128"]
+    ^{:line 178} [TBOOL "bool"]
+    ^{:line 179} [TANY "any"]
+    ^{:line 180} [TSTRING "string"]
+    ^{:line 181} [TNIL "nil"]
+    ^{:line 182} [TIDEAL "untyped number"]
+    ^{:line 183} [TBLANK "blank"]))
+
+
+(go/var fmtBufferPool ^{:go/breaks [2]} (lit sync/Pool
+    :New ^{:go/end 189} (fn ^any []
+      (new bytes/Buffer))))
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 214} (go/method Format "Format implements formatting for a Type.\nThe valid formats are:\n\n\t%v\tGo syntax\n\t%+v\tDebug syntax: Go syntax with a KIND- prefix for all but builtins.\n\t%L\tGo syntax for underlying type if t is named\n\t%S\tshort Go syntax: drop leading \"func\" in function type\n\t%-S\tspecial case for method receiver symbol\n" [^{:tag (* Type)} t ^fmt/State s ^rune verb]
+  (let [mode fmtGo]
+    (switch verb
+      (case [\v \S \L]
+        (when (and (== verb \v) (.Flag s \+)) ; %+v is debug format
+          (set! mode fmtDebug))
+
+        (when (and (== verb \S) (.Flag s \-)) ; %-S is special case for receiver - short typeid format
+          (set! mode fmtTypeID))
+
+        (fmt/Fprint s (tconv t verb mode)))
+      (default
+        (fmt/Fprintf s "%%!%c(*Type=%p)" verb t)))))
+
+
+
+
+^{:go/end 219} (go/method String "String returns the Go syntax for the type t.\n" ^string [^{:tag (* Type)} t]
+  (tconv t 0 fmtGo))
+
+
+
+
+
+
+
+
+
+^{:go/end 230} (go/method LinkString "LinkString returns a string description of t, suitable for use in\nlink symbols.\n\nThe description corresponds to type identity. That is, for any pair\nof types t1 and t2, Identical(t1, t2) == (t1.LinkString() ==\nt2.LinkString()) is true. Thus it's safe to use as a map key to\nimplement a type-identity-keyed map.\n" ^string [^{:tag (* Type)} t]
+  (tconv t 0 fmtTypeID))
+
+
+
+
+
+
+
+
+
+
+^{:go/end 242} (go/method NameString "NameString generates a user-readable, mostly unique string\ndescription of t. NameString always returns the same description\nfor identical types, even across compilation units.\n\nNameString qualifies identifiers by package name, so it has\ncollisions when different packages share the same names and\nidentifiers. It also does not distinguish function-scope defined\ntypes from package-scoped defined types or from each other.\n" ^string [^{:tag (* Type)} t]
+  (tconv t 0 fmtTypeIDName))
+
+
+^{:go/end 251} (go/func tconv ^string [^{:tag (* Type)} t ^rune verb ^fmtMode mode]
+  (let [buf (assert (* bytes/Buffer) (.Get fmtBufferPool))]
+    (.Reset buf)
+    (defer (.Put fmtBufferPool buf))
+
+    (tconv2 buf t verb mode nil)
+    (InternString (.Bytes buf))))
+
+
+
+
+
+
+^{:go/end 524} (go/func tconv2 "tconv2 writes a string representation of t to b.\nflag and mode control exactly what is printed.\nAny types x that are already in the visited map get printed as @%d where %d=visited[x].\nSee #16897 before changing the implementation of tconv.\n" [^{:tag (* bytes/Buffer)} b ^{:tag (* Type)} t ^rune verb ^fmtMode mode ^{:tag (map (* Type) int)} visited]
+  (when [(values off ok) (aget visited t)] ok
+    ;; We've seen this type before, so we're trying to print it recursively.
+    ;; Print a reference to it instead.
+    (fmt/Fprintf b "@%d" off)
+    (return))
+
+  (when (== t nil)
+    (.WriteString b "<T>")
+    (return))
+
+  (when (== (.Kind t) TSSA)
+    (.WriteString b (assert string (.-extra t)))
+    (return))
+
+  (when (== (.Kind t) TTUPLE)
+    (.WriteString b (.String (.FieldType t 0)))
+    (.WriteByte b \,)
+    (.WriteString b (.String (.FieldType t 1)))
+    (return))
+
+
+  (when (== (.Kind t) TRESULTS)
+    (let [tys (.-Types (assert (* Results) (.-extra t)))]
+      (range [i et tys]
+        (when (> i 0)
+          (.WriteByte b \,))
+
+        (.WriteString b (.String et)))
+
+      (return)))
+
+
+  (when (or (== t AnyType) (== t ByteType) (== t RuneType))
+    ;; in %-T mode collapse predeclared aliases with their originals.
+    (switch mode
+      (case [fmtTypeIDName fmtTypeID]
+        (set! t (aget Types (.Kind t))))
+      (default
+        (sconv2 b (.Sym t) \S mode)
+        (return))))
+
+
+  (when (== t ErrorType)
+    (.WriteString b "error")
+    (return))
+
+
+  ;; Unless the 'L' flag was specified, if the type has a name, just print that name.
+  (when (and (!= verb \L) (!= (.Sym t) nil) (!= t (aget Types (.Kind t))))
+    ;; Default to 'v' if verb is invalid.
+    (when (!= verb \S)
+      (set! verb \v))
+
+
+    ;; In unified IR, function-scope defined types will have a ·N
+    ;; suffix embedded directly in their Name. Trim this off for
+    ;; non-fmtTypeID modes.
+    (let [sym (.Sym t)]
+      (when (!= mode fmtTypeID)
+        (let [(values base _) (SplitVargenSuffix (.-Name sym))]
+          (when (< (len base) (len (.-Name sym)))
+            (set! sym (addr (lit Sym :Pkg (.-Pkg sym) :Name base))))))
+
+
+      (sconv2 b sym verb mode)
+      (return)))
+
+
+  (when (and (< (conv int (.Kind t)) (len BasicTypeNames)) (!= (aget BasicTypeNames (.Kind t)) ""))
+    (let [^string name (zero string)]
+      (switch t
+        (case [UntypedBool]
+          (set! name "untyped bool"))
+        (case [UntypedString]
+          (set! name "untyped string"))
+        (case [UntypedInt]
+          (set! name "untyped int"))
+        (case [UntypedRune]
+          (set! name "untyped rune"))
+        (case [UntypedFloat]
+          (set! name "untyped float"))
+        (case [UntypedComplex]
+          (set! name "untyped complex"))
+        (default
+          (set! name (aget BasicTypeNames (.Kind t)))))
+
+      (.WriteString b name)
+      (return)))
+
+
+  (when (== mode fmtDebug)
+    (.WriteString b (.String (.Kind t)))
+    (.WriteByte b \-)
+    (tconv2 b t \v fmtGo visited)
+    (return))
+
+
+  ;; At this point, we might call tconv2 recursively. Add the current type to the visited list so we don't
+  ;; try to print it recursively.
+  ;; We record the offset in the result buffer where the type's text starts. This offset serves as a reference
+  ;; point for any later references to the same type.
+  ;; Note that we remove the type from the visited map as soon as the recursive call is done.
+  ;; This prevents encoding types like map[*int]*int as map[*int]@4. (That encoding would work,
+  ;; but I'd like to use the @ notation only when strictly necessary.)
+  (when (== visited nil)
+    (set! visited (lit (map (* Type) int))))
+
+  (aset visited t (.Len b))
+  (defer (delete visited t))
+
+  (switch (.Kind t)
+    (case [TPTR]
+      (.WriteByte b \*)
+      (switch mode
+        (case [fmtTypeID fmtTypeIDName]
+          (when (== verb \S)
+            (tconv2 b (.Elem t) \S mode visited)
+            (return))))
+
+
+      (tconv2 b (.Elem t) \v mode visited))
+
+    (case [TARRAY]
+      (.WriteByte b \[)
+      (.WriteString b (strconv/FormatInt (.NumElem t) 10))
+      (.WriteByte b \])
+      (tconv2 b (.Elem t) 0 mode visited))
+
+    (case [TSLICE]
+      (.WriteString b "[]")
+      (tconv2 b (.Elem t) 0 mode visited))
+
+    (case [TCHAN]
+      (switch (.ChanDir t)
+        (case [Crecv]
+          (.WriteString b "<-chan ")
+          (tconv2 b (.Elem t) 0 mode visited))
+        (case [Csend]
+          (.WriteString b "chan<- ")
+          (tconv2 b (.Elem t) 0 mode visited))
+        (default
+          (.WriteString b "chan ")
+          (if (and (!= (.Elem t) nil) (.IsChan (.Elem t)) (== (.Sym (.Elem t)) nil) (== (.ChanDir (.Elem t)) Crecv)) (do
+              (.WriteByte b \()
+              (tconv2 b (.Elem t) 0 mode visited)
+              (.WriteByte b \)))
+
+            (tconv2 b (.Elem t) 0 mode visited)))))
+
+
+
+    (case [TMAP]
+      (.WriteString b "map[")
+      (tconv2 b (.Key t) 0 mode visited)
+      (.WriteByte b \])
+      (tconv2 b (.Elem t) 0 mode visited))
+
+    (case [TINTER]
+      (when (.IsEmptyInterface t)
+        (.WriteString b "interface {}")
+        (break))
+
+      (.WriteString b "interface {")
+      (range [i f (.AllMethods t)]
+        (when (!= i 0)
+          (.WriteByte b \;))
+
+        (.WriteByte b \space)
+        (switch
+          (case [(== (.-Sym f) nil)]
+            ;; Check first that a symbol is defined for this type.
+            ;; Wrong interface definitions may have types lacking a symbol.
+            (break))
+          (case [(IsExported (.-Name (.-Sym f)))]
+            (sconv2 b (.-Sym f) \S mode))
+          (default
+            (let [smode mode]
+              (when (!= mode fmtTypeIDName)
+                (set! smode fmtTypeID))
+
+              (sconv2 b (.-Sym f) \v smode))))
+
+        (tconv2 b (.-Type f) \S mode visited))
+
+      (when (!= (len (.AllMethods t)) 0)
+        (.WriteByte b \space))
+
+      (.WriteByte b \}))
+
+    (case [TFUNC]
+      (if (== verb \S) (do)
+        ;; no leading func
+        (do
+          (when (!= (.Recv t) nil)
+            (.WriteString b "method")
+            (formatParams b (.Recvs t) mode visited)
+            (.WriteByte b \space))
+
+          (.WriteString b "func")))
+
+      (formatParams b (.Params t) mode visited)
+
+      (switch (.NumResults t)
+        (case [0])
+        ;; nothing to do
+
+        (case [1]
+          (.WriteByte b \space)
+          (tconv2 b (.-Type (.Result t 0)) 0 mode visited)) ; struct->field->field's type
+
+        (default
+          (.WriteByte b \space)
+          (formatParams b (.Results t) mode visited))))
+
+
+    (case [TSTRUCT]
+      (when [m (.-Map (.StructType t))] (!= m nil)
+        (let [mt (.MapType m)]
+          ;; Format the bucket struct for map[x]y as map.group[x]y.
+          ;; This avoids a recursive print that generates very long names.
+          (switch t
+            (case [(.-Group mt)]
+              (.WriteString b "map.group["))
+            (default
+              (base/Fatalf "unknown internal map type")))
+
+          (tconv2 b (.Key m) 0 mode visited)
+          (.WriteByte b \])
+          (tconv2 b (.Elem m) 0 mode visited)
+          (break)))
+
+
+      (.WriteString b "struct {")
+      (range [i f (.Fields t)]
+        (when (!= i 0)
+          (.WriteByte b \;))
+
+        (.WriteByte b \space)
+        (fldconv b f \L mode visited false))
+
+      (when (!= (.NumFields t) 0)
+        (.WriteByte b \space))
+
+      (.WriteByte b \}))
+
+    (case [TFORW]
+      (.WriteString b "undefined")
+      (when (!= (.Sym t) nil)
+        (.WriteByte b \space)
+        (sconv2 b (.Sym t) \v mode)))
+
+
+    (case [TUNSAFEPTR]
+      (.WriteString b "unsafe.Pointer"))
+
+    (case [Txxx]
+      (.WriteString b "Txxx"))
+
+    (default
+      ;; Don't know how to handle - fall back to detailed prints
+      (.WriteString b (.String (.Kind t)))
+      (.WriteString b " <")
+      (sconv2 b (.Sym t) \v mode)
+      (.WriteString b ">"))))
+
+
+
+
+^{:go/end 541} (go/func formatParams [^{:tag (* bytes/Buffer)} b ^{:tag (slice (* Field))} params ^fmtMode mode ^{:tag (map (* Type) int)} visited]
+  (.WriteByte b \()
+  (let [fieldVerb \v]
+    (switch mode
+      (case [fmtTypeID fmtTypeIDName fmtGo]
+        ;; no argument names on function signature, and no "noescape"/"nosplit" tags
+        (set! fieldVerb \S)))
+
+    (range [i param params]
+      (when (!= i 0)
+        (.WriteString b ", "))
+
+      (fldconv b param fieldVerb mode visited true))
+
+    (.WriteByte b \))))
+
+
+^{:go/end 628} (go/func fldconv [^{:tag (* bytes/Buffer)} b ^{:tag (* Field)} f ^rune verb ^fmtMode mode ^{:tag (map (* Type) int)} visited ^bool isParam]
+  (when (== f nil)
+    (.WriteString b "<T>")
+    (return))
+
+
+  (let [^string name (zero string)
+      ^{:line 550} nameSep " "]
+    (when (!= verb \S)
+      (let [s (.-Sym f)]
+
+        ;; Using type aliases and embedded fields, it's possible to
+        ;; construct types that can't be directly represented as a
+        ;; type literal. For example, given "type Int = int" (#50190),
+        ;; it would be incorrect to format "struct{ Int }" as either
+        ;; "struct{ int }" or "struct{ Int int }", because those each
+        ;; represent other, distinct types.
+        ;;
+        ;; So for the purpose of LinkString (i.e., fmtTypeID), we use
+        ;; the non-standard syntax "struct{ Int = int }" to represent
+        ;; embedded fields that have been renamed through the use of
+        ;; type aliases.
+        (when (!= (.-Embedded f) 0)
+          (if (== mode fmtTypeID) (do
+              (set! nameSep " = ")
+
+              ;; Compute tsym, the symbol that would normally be used as
+              ;; the field name when embedding f.Type.
+              ;; TODO(mdempsky): Check for other occurrences of this logic
+              ;; and deduplicate.
+              (let [typ (.-Type f)]
+                (when (.IsPtr typ)
+                  (base/Assertf (== (.Sym typ) nil) "embedded pointer type has name: %L" typ)
+                  (set! typ (.Elem typ)))
+
+                (let [tsym (.Sym typ)]
+
+                  ;; If the field name matches the embedded type's name, then
+                  ;; suppress printing of the field name. For example, format
+                  ;; "struct{ T }" as simply that instead of "struct{ T = T }".
+                  (when (and (!= tsym nil) ^:go/paren (or (== s tsym) (and (IsExported (.-Name tsym)) (== (.-Name s) (.-Name tsym)))))
+                    (set! s nil)))))
+
+
+            ;; Suppress the field name for embedded fields for
+            ;; non-LinkString formats, to match historical behavior.
+            ;; TODO(mdempsky): Re-evaluate this.
+            (set! s nil)))
+
+
+
+        (when (!= s nil)
+          (cond isParam
+            (set! name (fmt/Sprint (.-Nname f)))
+            (== verb \L) (do
+              (set! name (.-Name s))
+              (when (and (not (IsExported name)) (!= mode fmtTypeIDName))
+                (set! name (sconv s 0 mode)))) :else ; qualify non-exported names (used on structs, not on funarg)
+
+
+            (set! name (sconv s 0 mode))))))
+
+
+
+
+    (when (!= name "")
+      (.WriteString b name)
+      (.WriteString b nameSep))
+
+
+    (if (.IsDDD f)
+      (let [^{:tag (* Type)} et (zero (* Type))]
+        (when (!= (.-Type f) nil)
+          (set! et (.Elem (.-Type f))))
+
+        (.WriteString b "...")
+        (tconv2 b et 0 mode visited))
+
+      (tconv2 b (.-Type f) 0 mode visited))
+
+
+    (when (and (!= verb \S) (not isParam) (!= (.-Note f) ""))
+      (.WriteString b " ")
+      (.WriteString b (strconv/Quote (.-Note f))))))
+
+
+
+
+
+^{:go/end 643} (go/func SplitVargenSuffix "SplitVargenSuffix returns name split into a base string and a ·N\nsuffix, if any.\n" [^string name] :results [^string base ^string suffix]
+  (let [i (len name)]
+    (while (and (> i 0) (>= (aget name (- i 1)) \0) (<= (aget name (- i 1)) \9))
+      (dec! i))
+
+    (let [^:const ^{:val "·"} dot "·"]
+      (when (and (>= i (len dot)) (== (subslice name (- i (len dot)) i) dot))
+        (set! i - (len dot))
+        (return (subslice name _ i) (subslice name i)))
+
+      (return name ""))))
+
+
+
+
+^{:go/end 653} (go/func SplitMethSuffix "SplitMethSuffix returns name split into a defining type name and a .m\nsuffix, if any.\n" [^string name] :results [^string tname ^string suffix]
+  (let [i (strings/LastIndex name ".")]
+    (when (>= i 0)
+      (return (subslice name _ i) (subslice name i)))
+
+    (return name "")))
+
+
+
+^{:go/end 662} (go/func TypeHash "TypeHash computes a hash value for type t to use in type switch statements.\n" ^uint32 [^{:tag (* Type)} t]
+  (let [p (.LinkString t)
+
+      ;; Using a cryptographic hash is overkill but minimizes accidental collisions.
+      ^{:line 660} h (hash/Sum32 (conv (slice byte) p))]
+    (.Uint32 binary/LittleEndian (subslice h _ 4))))

@@ -1,0 +1,321 @@
+#!/bin/bash
+# Go's toolchain as Go forms (standalone S9, doc/STANDALONE-NOTES.md, "S9: Go's toolchain as
+# forms"; tamago/cmd/README.md): the packages of TamaGo's go1.27.1 GOROOT/src/cmd that
+# cmd/compile, cmd/link and cmd/asm build from (105: cmd/compile/..., cmd/link/...,
+# cmd/asm/..., cmd/internal/... and cmd/vendor/golang.org/x/telemetry/...), converted by g2a
+# into tamago/cmd/, for the three configurations Arbace builds them for: linux/amd64 (the host's
+# tools) and tamago/amd64, tamago/arm64 (the box's tool guests, bin/box-tools); printed back to
+# GOROOT/src/cmd.
+#
+#   bin/toolchain-vendor convert  convert them into OUT (default tamago/cmd/) for each
+#                                 configuration (`bin/g2a convert --goos GOOS --goarch ARCH`,
+#                                 run in GOROOT/src/cmd, the packages of `go list -deps
+#                                 cmd/compile cmd/link cmd/asm` under cmd/ for that
+#                                 configuration), each package's other files (assembly)
+#                                 copied into its forms directory, and merge them as
+#                                 bin/tamago-vendor merges its two architectures (BX63): OUT/go,
+#                                 a file the configurations convert alike once, a file some
+#                                 build only beside them (its build constraints select it), the
+#                                 package files merged (their files' union, no :config, no
+#                                 :init-order); the files whose forms differ by configuration in
+#                                 OUT/conf/CONF/go at the same path; GOROOT/src/cmd's files of no
+#                                 package that the build reads (go.mod, go.sum,
+#                                 vendor/modules.txt, compile/default.pgo: cmd/compile's PGO
+#                                 profile) in OUT/src/cmd
+#   bin/toolchain-vendor verify   convert into WORK/fresh and compare with OUT (diff -r): the tree
+#                                 is what the conversion gives, byte for byte
+#   bin/toolchain-vendor print [CONF [DIR]]
+#                                 print OUT for CONF (default linux-amd64) into DIR (default
+#                                 WORK/print-CONF): DIR/goroot, a GOROOT whose src/cmd holds the
+#                                 packages printed (lines layout) and OUT/src/cmd's files, the
+#                                 rest of the toolchain's tree (std, bin, pkg ...) linked
+#   bin/toolchain-vendor check [CONF...]
+#                                 the proofs for each configuration (default all three): compile,
+#                                 link and asm built from the original GOROOT and from the
+#                                 printed one, byte-identical; both with empty build IDs
+#                                 (-buildid= and the tools' own cmd/internal/objabi.buildID:
+#                                 they hash the source text, and the printer keeps no comments). linux-amd64: `go build
+#                                 -trimpath`, as a host executable; tamago-ARCH: as bin/box-tools
+#                                 builds the tool guests (its overlay, board and link flags)
+#   bin/toolchain-vendor all      convert, then check
+#
+# Options (before the command): --work DIR (default .tmp/toolchain-vendor), --out DIR (default
+# tamago/cmd). Environment: G2A_GOROOT / TAMAGO_ROOT (default /root/tamago-go: TamaGo's go1.27.1,
+# pinned by seed/goroot.sha256; GOROOT/src/cmd pinned below). g2a runs on the tools' host.
+set -euo pipefail
+root=$(cd "$(dirname "$0")/.." && pwd)
+work=$root/.tmp/toolchain-vendor out=$root/tamago/cmd
+while [ $# -gt 0 ]; do
+  case $1 in
+    --work) work=$2; shift 2 ;;
+    --out) out=$2; shift 2 ;;
+    *) break ;;
+  esac
+done
+cmd=${1:-}
+[ $# -gt 0 ] && shift
+case $work in /*) ;; *) work=$root/$work ;; esac
+case $out in /*) ;; *) out=$root/$out ;; esac
+tg=${TAMAGO_ROOT:-${G2A_GOROOT:-/root/tamago-go}}
+confs="linux-amd64 tamago-amd64 tamago-arm64"
+tools="compile link asm"
+export G2A_GOROOT=$tg GOPROXY=off GOFLAGS= GOTOOLCHAIN=local
+
+# The origin, pinned: TamaGo's go1.27.1 tree (https://github.com/usbarmory/tamago-go, VERSION
+# "go1.27.1"), the hash of every file of its src/cmd/ (sha256sum of the sorted list, then of
+# that); the whole tree is seed/goroot.sha256's
+cmd_hash=c0db2e8fb99b930304b87caf3757aebd10509744483ef41711c201bf3702ebf6
+
+fail() { echo "toolchain-vendor: $*" >&2; exit 1; }
+
+cmd_digest() {
+  (cd "$tg/src" && find cmd -type f | LC_ALL=C sort | xargs -d '\n' sha256sum | sha256sum | cut -c1-64)
+}
+
+conf_env() {  # conf_env CONF: GOOS=... GOARCH=... and the architecture level
+  local o=${1%-*} a=${1#*-}
+  echo "GOOS=$o GOARCH=$a $([ "$a" = amd64 ] && echo GOAMD64=v1 || echo GOARM64=v8.0)"
+}
+
+# packages CONF: the packages of cmd/ that compile, link and asm build from, for CONF
+packages() {
+  (cd "$tg/src/cmd" && env -u GOOS -u GOARCH $(conf_env "$1") GOROOT="$tg" CGO_ENABLED=0 \
+     "$tg/bin/go" list -deps -f '{{.ImportPath}}' cmd/compile cmd/link cmd/asm) \
+    | sed 's/ \[.*//' | grep '^cmd/' | LC_ALL=C sort -u
+}
+
+# assemble FORMS DST: the converter's tree FORMS/go into DST/go, each package's :other-files
+# copied from GOROOT/src/<its path> into its forms directory (SPEC §9.5)
+assemble() {
+  python3 -I - "$1" "$tg/src" "$2" <<'EOF'
+import os, re, shutil, sys
+forms, orig, dst = sys.argv[1:4]
+shutil.rmtree(os.path.join(dst, "go"), ignore_errors=True)
+shutil.copytree(os.path.join(forms, "go"), os.path.join(dst, "go"))
+pkgs = others = 0
+for d, _, fs in sorted(os.walk(os.path.join(dst, "go"))):
+    for f in sorted(fs):
+        p = os.path.join(d, f)
+        if not f.endswith(".ae"):
+            continue
+        s = open(p, encoding="utf-8").read()
+        if "\n(go/package " not in s:
+            continue
+        pkgs += 1
+        path = re.search(r'\n  :path "([^"]+)"', s).group(1)
+        if re.search(r'\n  :embed-files ', s):
+            sys.exit("%s embeds files: not expected in cmd" % path)
+        m = re.search(r'\n  :other-files \[([^\]]*)\]', s)
+        for o in re.findall(r'"([^"]+)"', m.group(1)) if m else []:
+            os.makedirs(p[:-3], exist_ok=True)
+            shutil.copyfile(os.path.join(orig, path, o), os.path.join(p[:-3], o))
+            others += 1
+print("%s: %d packages, %d other files" % (os.path.relpath(dst), pkgs, others), file=sys.stderr)
+EOF
+}
+
+# merge DST TREE...: the configurations' assembled trees (TREE/go) into one, DST/go, as
+# bin/tamago-vendor's merge_trees does for two architectures, for any number: the package files
+# merged (:files, :other-files and the loads the union, sorted; no :config, no :init-order); a
+# file every configuration that has it converts alike once; a file whose forms differ, each
+# configuration's in DST/conf/CONF/go (CONF the tree's directory name). Other files once.
+merge() {
+  python3 -I - "$@" <<'EOF'
+import os, re, shutil, sys
+dst, trees = sys.argv[1], sys.argv[2:]
+for d in ("go", "conf"):
+    shutil.rmtree(os.path.join(dst, d), ignore_errors=True)
+def files(root):
+    out = {}
+    base = os.path.join(root, "go")
+    for d, _, fs in os.walk(base):
+        for f in fs:
+            p = os.path.join(d, f)
+            out[os.path.relpath(p, base)] = p
+    return out
+names = [os.path.basename(t.rstrip("/")) for t in trees]
+fts = [files(t) for t in trees]
+def read(p):
+    return open(p, encoding="utf-8").read()
+def lst(s, key):
+    m = re.search(r'\n  :%s \[([^\]]*)\]' % key, s)
+    return re.findall(r'"([^"]+)"', m.group(1)) if m else []
+def put(rel, text, sub="go"):
+    t = os.path.join(dst, sub, rel)
+    os.makedirs(os.path.dirname(t), exist_ok=True)
+    open(t, "w", encoding="utf-8").write(text)
+def merge_pkg(rel, texts):
+    fs = sorted(set(sum((lst(x, "files") for x in texts), [])))
+    os_ = sorted(set(sum((lst(x, "other-files") for x in texts), [])))
+    loads = set(sum((re.findall(r'\n\(load "([^"]+)"\)', x) for x in texts), []))
+    loads = sorted(loads, key=lambda l: l.rsplit("/", 1)[-1] + ".go")
+    heads = []
+    for x in texts:
+        h = x[:x.index("\n(go/package ")]
+        m = re.search(r'\n\(go/package [^\n]*\n  :path "[^"]+"', x)
+        rest = x[m.end():x.index("\n\n(load ") if "\n\n(load " in x else len(x)]
+        keys = [l for l in rest.split("\n") if l.startswith("  :") and not re.match(r'  :(config|init-order|files|other-files) ', l)]
+        heads.append((h + m.group(0), keys))
+    if any(h != heads[0] for h in heads):
+        sys.exit("merge: %s: the package files differ beyond their files and configuration" % rel)
+    h, keys = heads[0]
+    out = h + "\n  :files [%s]" % " ".join('"%s"' % f for f in fs)
+    if os_:
+        out += "\n  :other-files [%s]" % " ".join('"%s"' % f for f in os_)
+    for k in keys:
+        out += "\n" + k
+    if not keys or not keys[-1].endswith(")"):
+        sys.exit("merge: %s: unexpected package file" % rel)
+    out += "\n\n" + "".join('(load "%s")\n' % l for l in loads)
+    put(rel, out)
+shared = per = pkgs = 0
+for rel in sorted(set().union(*fts)):
+    ps = [(n, ft[rel]) for n, ft in zip(names, fts) if rel in ft]
+    if rel.endswith(".ae"):
+        texts = [read(p) for _, p in ps]
+        if "\n(go/package " in texts[0]:
+            merge_pkg(rel, texts); pkgs += 1
+        elif len(set(texts)) > 1:
+            for (n, _), t in zip(ps, texts):
+                put(rel, t, "conf/%s/go" % n)
+            per += 1
+        else:
+            put(rel, texts[0]); shared += 1
+    else:
+        if len(set(open(p, "rb").read() for _, p in ps)) > 1:
+            sys.exit("merge: %s differs by configuration" % rel)
+        t = os.path.join(dst, "go", rel)
+        os.makedirs(os.path.dirname(t), exist_ok=True)
+        shutil.copyfile(ps[0][1], t)
+print("%s: %d package files merged, %d files once, %d per configuration (conf/CONF/go)"
+      % (os.path.relpath(dst), pkgs, shared, per), file=sys.stderr)
+EOF
+}
+
+convert_conf() {  # convert_conf CONF W: CONF's packages converted and assembled into W/CONF
+  local c=$1 w=$2 o=${1%-*} a=${1#*-} n
+  echo "== cmd for $o/$a (bin/g2a convert --goos $o --goarch $a)" >&2
+  packages "$c" > "$work/pkgs-$c.txt"
+  n=$(wc -l < "$work/pkgs-$c.txt")
+  rm -rf "$work/forms-$c"
+  (cd "$tg/src/cmd" && "$root/bin/g2a" convert --goos "$o" --goarch "$a" --out "$work/forms-$c" $(cat "$work/pkgs-$c.txt")) \
+    > "$work/convert-$c.log" 2>&1 || { tail -20 "$work/convert-$c.log" >&2; fail "$c: the conversion failed ($work/convert-$c.log)"; }
+  grep -q "^converted $n of $n dumps .*; 0 failed, 0 did not read back\$" "$work/convert-$c.log" \
+    || { tail -3 "$work/convert-$c.log" >&2; fail "$c: packages failed to dump or convert ($work/convert-$c.log)"; }
+  rm -rf "$w/$c"; mkdir -p "$w/$c"
+  assemble "$work/forms-$c" "$w/$c"
+}
+
+convert() {
+  local o=$1 c
+  [ "$(cmd_digest)" = "$cmd_hash" ] || fail "$tg/src/cmd is not the pinned tree (digest $(cmd_digest), pinned $cmd_hash)"
+  mkdir -p "$work" "$o"
+  for c in $confs; do convert_conf "$c" "$work/confs"; done
+  echo "== merged: the files the configurations convert alike once" >&2
+  rm -rf "$o/src"
+  merge "$o" $(for c in $confs; do echo "$work/confs/$c"; done)
+  mkdir -p "$o/src/cmd/vendor" "$o/src/cmd/compile"
+  cp "$tg/src/cmd/go.mod" "$tg/src/cmd/go.sum" "$o/src/cmd/"
+  cp "$tg/src/cmd/vendor/modules.txt" "$o/src/cmd/vendor/"
+  cp "$tg/src/cmd/compile/default.pgo" "$o/src/cmd/compile/"
+  echo "converted into ${o#$root/}: $(find "$o" -name '*.ae' | wc -l) forms files, $(find "$o" -type f | wc -l) files, $(du -sb "$o" | cut -f1) bytes" >&2
+}
+
+# tree_key CONF: the hash of OUT, of the printer (arbace/g2a, bin/g2a) and of CONF
+tree_key() {
+  { (cd "$out" && find . -type f ! -name README.md | LC_ALL=C sort | xargs -d '\n' sha256sum)
+    (cd "$root" && find arbace/g2a bin/g2a -type f | LC_ALL=C sort | xargs -d '\n' sha256sum)
+    cat "$tg/VERSION"; echo "$1"; } | sha256sum | cut -c1-64
+}
+
+# print_tree CONF DIR: OUT printed for CONF into DIR/goroot (unless DIR/key is OUT's)
+print_tree() {
+  local c=$1 d=$2 key e
+  key=$(tree_key "$c")
+  if [ -f "$d/key" ] && [ "$(cat "$d/key")" = "$key" ]; then
+    echo "== tamago/cmd printed for $c (unchanged, key ${key:0:12}): ${d#$root/}" >&2
+    return 0
+  fi
+  echo "== print tamago/cmd for $c into ${d#$root/}" >&2
+  rm -rf "$d"; mkdir -p "$d/goroot/src"
+  # the toolchain's tree but src, and src but cmd, linked; src/cmd printed
+  for e in "$tg"/* "$tg"/.[!.]*; do
+    [ -e "$e" ] || continue
+    [ "$(basename "$e")" = src ] || ln -s "$e" "$d/goroot/"
+  done
+  for e in "$tg"/src/*; do
+    [ "$(basename "$e")" = cmd ] || ln -s "$e" "$d/goroot/src/"
+  done
+  rm -rf "$d/forms"; mkdir -p "$d/forms"
+  cp -al "$out/go" "$d/forms/go"
+  [ ! -d "$out/conf/$c/go" ] || cp -al "$out/conf/$c/go/." "$d/forms/go/"
+  "$root/bin/g2a" build --print-only --module std --layout lines --work "$d/print" "$d/forms" > "$d/print.log" 2>&1 \
+    || { tail -20 "$d/print.log" >&2; fail "$c: the printing failed ($d/print.log)"; }
+  mv "$d/print/mod/cmd" "$d/goroot/src/cmd"
+  rm -rf "$d/print" "$d/forms"
+  cp -r "$out/src/cmd/." "$d/goroot/src/cmd/"
+  echo "$key" > "$d/key"
+  echo "   $(find "$d/goroot/src/cmd" -name '*.go' | wc -l) Go files, $(du -sb "$d/goroot/src/cmd" | cut -f1) bytes" >&2
+}
+
+# build_tools CONF GOROOT DIR: compile, link and asm for CONF from GOROOT into DIR/TOOL, the
+# build IDs empty: the executable's (-buildid=) and the one the go command stores in a
+# toolchain binary for its staleness checks (cmd/go/internal/work/gc.go:
+# -X=cmd/internal/objabi.buildID=, the same hash of the source text)
+noid="-buildid= -X=cmd/internal/objabi.buildID="
+build_tools() {
+  local c=$1 g=$2 d=$3 t
+  mkdir -p "$d"
+  case $c in
+    linux-amd64)
+      for t in $tools; do
+        (cd "$g/src/cmd" && env -u GOOS -u GOARCH $(conf_env "$c") GOROOT="$g" GOTOOLCHAIN=local GOFLAGS= GOWORK=off \
+           GOPROXY=off GOEXPERIMENT= CGO_ENABLED=0 "$tg/bin/go" build -trimpath -buildvcs=false "-ldflags=$noid" \
+           -o "$d/$t" "cmd/$t") || return 1
+      done ;;
+    tamago-*)
+      # as bin/box-tools builds the tool guests, with the build ID empty
+      G2A_GOROOT=$g BOX_TOOLS_OUT=$d/box BOX_TOOLS_LDFLAGS=$noid "$root/bin/box-tools" build "${c#*-}" > "$d/box-tools.log" 2>&1 \
+        || { tail -20 "$d/box-tools.log" >&2; return 1; }
+      for t in $tools; do mv "$d/box/${c#*-}/$t.elf" "$d/$t"; done
+      rm -rf "$d/box" ;;
+  esac
+}
+
+check_conf() {
+  local c=$1 d=$work/print-$c p=$work/proof-$1 status=0 t
+  print_tree "$c" "$d"
+  echo "== $c: compile, link and asm from the originals and from the printed forms (build ID empty)" >&2
+  rm -rf "$p"
+  build_tools "$c" "$tg" "$p/orig" || fail "$c: the tools from the originals failed to build"
+  build_tools "$c" "$d/goroot" "$p/printed" || fail "$c: the tools from the printed forms failed to build"
+  for t in $tools; do
+    if cmp -s "$p/orig/$t" "$p/printed/$t"; then
+      printf '%s: %-7s identical (%d bytes, sha256 %s)\n' "$c" "$t" "$(stat -c %s "$p/orig/$t")" "$(sha256sum < "$p/orig/$t" | cut -c1-16)"
+    else
+      echo "$c: $t DIFFERENT ($(cmp -l "$p/orig/$t" "$p/printed/$t" | wc -l) bytes)"; status=1
+    fi
+  done
+  return $status
+}
+
+check() {
+  local status=0 c
+  for c in ${@:-$confs}; do check_conf "$c" || status=1; done
+  return $status
+}
+
+case $cmd in
+  convert) convert "$out" ;;
+  verify)
+    convert "$work/fresh"
+    if diff -r -x README.md "$out" "$work/fresh" > "$work/verify.diff"; then
+      echo "verify: ${out#$root/} is the conversion, byte for byte"
+    else
+      echo "verify: ${out#$root/} differs from a fresh conversion ($work/verify.diff: $(wc -l < "$work/verify.diff") lines)"; exit 1
+    fi ;;
+  print) c=${1:-linux-amd64}; print_tree "$c" "${2:-$work/print-$c}" ;;
+  check) check "$@" ;;
+  all) convert "$out" && check ;;
+  *) sed -n '2,/^set -/p' "$0" | sed '$d; s/^# \{0,1\}//' >&2; exit 2 ;;
+esac

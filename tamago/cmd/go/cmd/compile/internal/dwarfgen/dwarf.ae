@@ -1,0 +1,695 @@
+;; Copyright 2011 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.cmd.compile.internal.dwarfgen) (go/file "dwarf.go" :imports [
+
+
+    ^{:line 8} [bytes "bytes"]
+    ^{:line 9} [flag "flag"]
+    ^{:line 10} [fmt "fmt"]
+    ^{:line 11} [buildcfg "internal/buildcfg"]
+    ^{:line 12} [slices "slices"]
+    ^{:line 13} [sort "sort"]
+    ^{:line 14} [strings "strings"]
+
+    ^{:line 16} [base "cmd/compile/internal/base"]
+    ^{:line 17} [ir "cmd/compile/internal/ir"]
+    ^{:line 18} [reflectdata "cmd/compile/internal/reflectdata"]
+    ^{:line 19} [ssa "cmd/compile/internal/ssa"]
+    ^{:line 20} [ssagen "cmd/compile/internal/ssagen"]
+    ^{:line 21} [typecheck "cmd/compile/internal/typecheck"]
+    ^{:line 22} [types "cmd/compile/internal/types"]
+    ^{:line 23} [dwarf "cmd/internal/dwarf"]
+    ^{:line 24} [obj "cmd/internal/obj"]
+    ^{:line 25} [objabi "cmd/internal/objabi"]
+    ^{:line 26} [src "cmd/internal/src"]])
+
+
+^{:go/end 169} (go/func Info [^{:tag (* obj/Link)} ctxt ^{:tag (* obj/LSym)} fnsym ^{:tag (* obj/LSym)} infosym ^obj/Func curfn] :results [^{:tag (slice dwarf/Scope)} scopes ^dwarf/InlCalls inlcalls]
+  (let [fn (assert (* ir/Func) curfn)]
+
+    (when (!= (.-Nname fn) nil)
+      (let [expect (.Linksym fn)]
+        (when (== ^{:go/via [Attribute]} (.ABI fnsym) obj/ABI0)
+          (set! expect (.LinksymABI fn obj/ABI0)))
+
+        (when (!= fnsym expect)
+          (base/Fatalf "unexpected fnsym: %v != %v" fnsym expect))))
+
+
+
+    ;; Back when there were two different *Funcs for a function, this code
+    ;; was not consistent about whether a particular *Node being processed
+    ;; was an ODCLFUNC or ONAME node. Partly this is because inlined function
+    ;; bodies have no ODCLFUNC node, which was it's own inconsistency.
+    ;; In any event, the handling of the two different nodes for DWARF purposes
+    ;; was subtly different, likely in unintended ways. CL 272253 merged the
+    ;; two nodes' Func fields, so that code sees the same *Func whether it is
+    ;; holding the ODCLFUNC or the ONAME. This resulted in changes in the
+    ;; DWARF output. To preserve the existing DWARF output and leave an
+    ;; intentional change for a future CL, this code does the following when
+    ;; fn.Op == ONAME:
+    ;;
+    ;; 1. Disallow use of createComplexVars in createDwarfVars.
+    ;;    It was not possible to reach that code for an ONAME before,
+    ;;    because the DebugInfo was set only on the ODCLFUNC Func.
+    ;;    Calling into it in the ONAME case causes an index out of bounds panic.
+    ;;
+    ;; 2. Do not populate apdecls. fn.Func.Dcl was in the ODCLFUNC Func,
+    ;;    not the ONAME Func. Populating apdecls for the ONAME case results
+    ;;    in selected being populated after createSimpleVars is called in
+    ;;    createDwarfVars, and then that causes the loop to skip all the entries
+    ;;    in dcl, meaning that the RecordAutoType calls don't happen.
+    ;;
+    ;; These two adjustments keep toolstash -cmp working for now.
+    ;; Deciding the right answer is, as they say, future work.
+    ;;
+    ;; We can tell the difference between the old ODCLFUNC and ONAME
+    ;; cases by looking at the infosym.Name. If it's empty, DebugInfo is
+    ;; being called from (*obj.Link).populateDWARF, which used to use
+    ;; the ODCLFUNC. If it's non-empty (the name will end in $abstract),
+    ;; DebugInfo is being called from (*obj.Link).DwarfAbstractFunc,
+    ;; which used to use the ONAME form.
+    (let [isODCLFUNC (== (.-Name infosym) "")
+
+        ^{:line 76 :tag (slice (* ir/Name))} apdecls (zero (slice (* ir/Name)))]
+      ;; Populate decls for fn.
+      (when isODCLFUNC
+        (range [_ n (.-Dcl fn)]
+          (when (!= ^{:go/via [miniExpr miniNode]} (.Op n) ir/ONAME) ; might be OTYPE or OLITERAL
+            (continue))
+
+          (switch (.-Class n)
+            (case [ir/PAUTO]
+              (when (not (.Used n))
+                ;; Text == nil -> generating abstract function
+                (when (!= (.-Text (.Func fnsym)) nil)
+                  (base/Fatalf "debuginfo unused node (AllocFrame should truncate fn.Func.Dcl)"))
+
+                (continue)))
+
+            (case [ir/PPARAM ir/PPARAMOUT])
+            (default
+              (continue)))
+
+          (when (not (shouldEmitDwarfVar n))
+            (continue))
+
+          (set! apdecls (append apdecls n))
+          (when (== (.Kind ^{:go/via [miniExpr]} (.Type n)) types/TSSA)
+            ;; Can happen for TypeInt128 types. This only happens for
+            ;; spill locations, so not a huge deal.
+            (continue))
+
+          (.RecordAutoType (.Func fnsym) (reflectdata/TypeLinksym ^{:go/via [miniExpr]} (.Type n)))))
+
+
+
+      (let [^{:tag (map (* ir/Name) int64)} closureVars (zero (map (* ir/Name) int64))]
+        (when (.Needctxt fn)
+          (set! closureVars (make (map (* ir/Name) int64)))
+          (let [csiter (typecheck/NewClosureStructIter (.-ClosureVars fn))]
+            (while true
+              (let [(values n _ offset) (.Next csiter)]
+                (when (== n nil)
+                  (break))
+
+                (aset closureVars n offset)
+                (when (!= (.-Heapaddr n) nil)
+                  (aset closureVars (.-Heapaddr n) offset))))))
+
+
+
+
+        (let [(values decls dwarfVars) (createDwarfVars fnsym isODCLFUNC fn apdecls closureVars)
+
+            ;; For each type referenced by the functions auto vars but not
+            ;; already referenced by a dwarf var, attach an R_USETYPE relocation to
+            ;; the function symbol to insure that the type included in DWARF
+            ;; processing during linking.
+            ;; Do the same with R_USEIFACE relocations from the function symbol for the
+            ;; same reason.
+            ;; All these R_USETYPE relocations are only looked at if the function
+            ;; survives deadcode elimination in the linker.
+            ^{:line 135} typesyms (lit (slice (* obj/LSym)))]
+          (range [t (.-Autot (.Func fnsym))]
+            (set! typesyms (append typesyms t)))
+
+          (range [i (.-R fnsym)]
+            (when (and (== (.-Type (aget (.-R fnsym) i)) objabi/R_USEIFACE) (not (strings/HasPrefix (.-Name (.-Sym (aget (.-R fnsym) i))) "go:itab.")))
+              ;; Types referenced through itab will be referenced from somewhere else
+              (set! typesyms (append typesyms (.-Sym (aget (.-R fnsym) i))))))
+
+
+          (^{:inst [(slice (* obj/LSym)) (* obj/LSym)]} slices/SortFunc typesyms ^{:go/end 147} (fn ^int [^{:tag (* obj/LSym)} a ^{:tag (* obj/LSym)} b]
+              (strings/Compare (.-Name a) (.-Name b))))
+
+          (let [^{:tag (* obj/LSym)} lastsym (zero (* obj/LSym))]
+            (range [_ sym typesyms]
+              (when (== sym lastsym)
+                (continue))
+
+              (set! lastsym sym)
+              (.AddRel infosym ctxt (lit obj/Reloc :Type objabi/R_USETYPE :Sym sym)))
+
+            (set! (.-Autot (.Func fnsym)) nil)
+
+            (let [^{:tag (slice ir/ScopeID)} varScopes (zero (slice ir/ScopeID))]
+              (range [_ decl decls]
+                (let [pos (declPos decl)]
+                  (set! varScopes (append varScopes (findScope (.-Marks fn) pos)))))
+
+
+              (set! scopes (assembleScopes fnsym fn dwarfVars varScopes))
+              (when (> (.-GenDwarfInl base/Flag) 0)
+                (set! inlcalls (assembleInlines fnsym dwarfVars)))
+
+              (return scopes inlcalls))))))))
+
+
+^{:go/end 173} (go/func declPos ^src/XPos [^{:tag (* ir/Name)} decl]
+  ^{:go/via [miniExpr miniNode]} (.Pos (.Canonical decl)))
+
+
+
+
+^{:go/end 322} (go/func createDwarfVars "createDwarfVars process fn, returning a list of DWARF variables and the\nNodes they represent.\n" [^{:tag (* obj/LSym)} fnsym ^bool complexOK ^{:tag (* ir/Func)} fn ^{:tag (slice (* ir/Name))} apDecls ^{:tag (map (* ir/Name) int64)} closureVars] :results [(slice (* ir/Name)) (slice (* dwarf/Var))]
+  ;; Collect a raw list of DWARF vars.
+  (let [^{:tag (slice (* dwarf/Var))} vars (zero (slice (* dwarf/Var)))
+      ^{:line 180 :tag (slice (* ir/Name))} decls (zero (slice (* ir/Name)))
+
+      ;; Build a VarID lookup map for SSA debug info if available.
+      ^{:line 183 :tag (* ssa/FuncDebug)} debug (zero (* ssa/FuncDebug))
+      ^{:line 184 :tag (map (* ir/Name) ssa/VarID)} varIDMap (zero (map (* ir/Name) ssa/VarID))]
+    (when (!= (.-DebugInfo fn) nil)
+      (set! debug (assert (* ssa/FuncDebug) (.-DebugInfo fn)))
+      (set! varIDMap (make (map (* ir/Name) ssa/VarID) (len (.-Vars debug))))
+      (range [i n (.-Vars debug)]
+        (aset varIDMap n (conv ssa/VarID i))))
+
+
+    (let [canUseComplex (and complexOK (!= debug nil))
+
+        ;; markVarSeen marks a variable and all its associated slot names as seen.
+        ;; This is needed because decomposed variables may have slots whose ir.Name
+        ;; differs from the variable itself (e.g., PAUTO vs PPARAMOUT for the same
+        ;; logical variable). Without this, the dcl loop could create duplicate
+        ;; conservative entries for names that are already covered by a complex var.
+        ^{:line 199} seen (make (map (* ir/Name) bool))
+        ^{:line 200} markVarSeen ^{:go/end 207} (fn [^{:tag (* ir/Name)} n ^ssa/VarID varID]
+          (aset seen n true)
+          (when (and (!= debug nil) (< (conv int varID) (len (.-VarSlots debug))))
+            (range [_ slot (aget (.-VarSlots debug) varID)]
+              (aset seen (.-N (aget (.-Slots debug) slot)) true))))]
+
+
+
+
+      ;; Unified loop: for each variable in apDecls, try createComplexVar
+      ;; (SSA debug info) first, then fall back to createSimpleVar.
+      (range [_ n apDecls]
+        (when (not (shouldEmitDwarfVar n))
+          (continue))
+
+        (when canUseComplex
+          (when [(values vid ok) (aget varIDMap n)] ok
+            (when [dvar (createComplexVar fnsym fn vid closureVars)] (!= dvar nil)
+              (set! decls (append decls n))
+              (set! vars (append vars dvar))
+              (markVarSeen n vid)
+              (continue))))
+
+
+
+        (aset seen n true)
+        (set! decls (append decls n))
+        (set! vars (append vars (createSimpleVar fnsym n closureVars))))
+
+
+      ;; Add SSA-tracked vars not in apDecls.
+      (when canUseComplex
+        (range [i n (.-Vars debug)]
+          (when (aget seen n)
+            (continue))
+
+          (when (not (shouldEmitDwarfVar n))
+            (continue))
+
+          (when [dvar (createComplexVar fnsym fn (conv ssa/VarID i) closureVars)] (!= dvar nil)
+            (set! decls (append decls n))
+            (set! vars (append vars dvar))
+            (markVarSeen n (conv ssa/VarID i)))))
+
+
+
+
+      ;; Recover zero-sized variables eliminated by the stackframe pass.
+      (when (!= debug nil)
+        (range [_ n (.-OptDcl debug)]
+          (when (aget seen n)
+            (continue))
+
+          (when (!= (.-Class n) ir/PAUTO)
+            (continue))
+
+          (types/CalcSize ^{:go/via [miniExpr]} (.Type n))
+          (when (== (.Size ^{:go/via [miniExpr]} (.Type n)) 0)
+            (set! decls (append decls n))
+            (set! vars (append vars (createSimpleVar fnsym n closureVars)))
+            (set! (.-StackOffset (aget vars (- (len vars) 1))) 0)
+            (.RecordAutoType (.Func fnsym) (reflectdata/TypeLinksym ^{:go/via [miniExpr]} (.Type n)))
+            (aset seen n true))))
+
+
+
+
+      ;; For inlined functions or functions with register output params,
+      ;; collect additional declarations that may not be in apDecls.
+      (let [dcl apDecls]
+        (cond ^{:go/via [Attribute]} (.WasInlined fnsym)
+          (set! dcl (preInliningDcls fnsym))
+          (!= debug nil)
+          ;; The backend's stackframe pass prunes away entries from the
+          ;; fn's Dcl list, including PARAMOUT nodes that correspond to
+          ;; output params passed in registers. Add back in these
+          ;; entries here so that we can process them properly during
+          ;; DWARF-gen. See issue 48573 for more details.
+          (range [_ n (.-RegOutputParams debug)]
+            (when (not (ssa/IsVarWantedForDebug n))
+              (continue))
+
+            (when (or (!= (.-Class n) ir/PPARAMOUT) (not (.IsOutputParamInRegisters n)))
+              (base/Fatalf "invalid ir.Name on debugInfo.RegOutputParams list"))
+
+            (set! dcl (append dcl n))))
+
+
+
+        ;; Process remaining variables not yet handled. For each variable,
+        ;; try createComplexVar first, then fall back to createSimpleVar
+        ;; for non-SSA-able params, or createConservativeVar for the rest.
+        (range [_ n dcl]
+          (when (aget seen n)
+            (continue))
+
+          (when (not (shouldEmitDwarfVar n))
+            (continue))
+
+          (aset seen n true)
+          (when canUseComplex
+            (when [(values vid ok) (aget varIDMap n)] ok
+              (when [dvar (createComplexVar fnsym fn vid closureVars)] (!= dvar nil)
+                (set! decls (append decls n))
+                (set! vars (append vars dvar))
+                (continue))))
+
+
+
+          (when (and (== (.-Class n) ir/PPARAM) (not (ssa/CanSSA ^{:go/via [miniExpr]} (.Type n))))
+            (set! decls (append decls n))
+            (set! vars (append vars (createSimpleVar fnsym n closureVars)))
+            (continue))
+
+          (set! decls (append decls n))
+          (set! vars (append vars (createConservativeVar fnsym fn n closureVars))))
+
+
+        ;; Sort decls and vars.
+        (sortDeclsAndVars fn decls vars)
+
+        (return decls vars)))))
+
+
+
+
+
+
+
+
+
+^{:go/end 380} (go/func createConservativeVar "createConservativeVar creates a DWARF variable with a conservative location\ndescription. This is used for variables that were optimized away or otherwise\ndon't have precise location info. The intent is to communicate that \"yes,\nthere is a variable named X in this function, but no, I don't have enough\ninformation to reliably report its contents.\"\nFor heap-escaped variables, a location list is created that describes\ndereferencing the pointer at the stack offset.\n" ^{:tag (* dwarf/Var)} [^{:tag (* obj/LSym)} fnsym ^{:tag (* ir/Func)} fn ^{:tag (* ir/Name)} n ^{:tag (map (* ir/Name) int64)} closureVars]
+  (let [typename (+ dwarf/InfoPrefix (types/TypeSymName ^{:go/via [miniExpr]} (.Type n)))
+      ^{:line 333} tag dwarf/DW_TAG_variable
+      ^{:line 334} isReturnValue (== (.-Class n) ir/PPARAMOUT)]
+    (when (or (== (.-Class n) ir/PPARAM) (== (.-Class n) ir/PPARAMOUT))
+      (set! tag dwarf/DW_TAG_formal_parameter))
+
+    (let [inlIndex 0]
+      (when (> (.-GenDwarfInl base/Flag) 1)
+        (when (or (.InlFormal n) (.InlLocal n))
+          (set! inlIndex (+ (posInlIndex ^{:go/via [miniExpr miniNode]} (.Pos n)) 1))
+          (when (.InlFormal n)
+            (set! tag dwarf/DW_TAG_formal_parameter))))
+
+
+
+      (let [declpos (.InnermostPos base/Ctxt ^{:go/via [miniExpr miniNode]} (.Pos n))
+          ^{:line 348} dvar (addr ^{:go/breaks [2 4 6 8 10 12 14 16 18 20 22 24 26]} (lit dwarf/Var
+              :Name (.-Name (.Sym n))
+              :IsReturnValue isReturnValue
+              :Tag tag
+              :WithLoclist true
+              :StackOffset (conv int32 (.FrameOffset n))
+              :Type (.Lookup base/Ctxt typename)
+              :DeclFile (.RelFilename declpos)
+              :DeclLine (.RelLine declpos)
+              :DeclCol (.RelCol declpos)
+              :InlIndex (conv int32 inlIndex)
+              :ChildIndex -1
+              :DictIndex (.-DictIndex n)
+              :ClosureOffset (closureOffset n closureVars)))]
+
+        (when (and (== ^{:go/via [miniExpr miniNode]} (.Esc n) ir/EscHeap) (!= (.-Heapaddr n) nil))
+          ;; The variable was promoted to the heap and has a known heap
+          ;; address, so describe its location by dereferencing the pointer
+          ;; stored at its stack offset. A heap-escaped variable may have no
+          ;; Heapaddr if it was declared in unreachable code: escape analysis
+          ;; marks it as heap-allocated, but SSA generation skips the dead
+          ;; declaration and never allocates the address. In that case fall
+          ;; through and emit a conservative variable with no location list.
+          (let [debug (assert (* ssa/FuncDebug) (.-DebugInfo fn))
+              ^{:line 372} list (createHeapDerefLocationList n (.-EntryID debug))]
+            (set! (.-PutLocationList dvar) ^{:go/end 375} (fn [^dwarf/Sym listSym ^dwarf/Sym startPC]
+                (.PutLocationList debug list base/Ctxt (assert (* obj/LSym) listSym) (assert (* obj/LSym) startPC))))))
+
+
+        ;; Record go type to ensure that it gets emitted by the linker.
+        (.RecordAutoType (.Func fnsym) (reflectdata/TypeLinksym ^{:go/via [miniExpr]} (.Type n)))
+        ^{:line 379} dvar))))
+
+
+
+
+
+
+
+
+^{:go/end 398} (go/func sortDeclsAndVars "sortDeclsAndVars sorts the decl and dwarf var lists according to\nparameter declaration order, so as to insure that when a subprogram\nDIE is emitted, its parameter children appear in declaration order.\nPrior to the advent of the register ABI, sorting by frame offset\nwould achieve this; with the register we now need to go back to the\noriginal function signature.\n" [^{:tag (* ir/Func)} fn ^{:tag (slice (* ir/Name))} decls ^{:tag (slice (* dwarf/Var))} vars]
+  (let [paramOrder (make (map (* ir/Name) int))
+      ^{:line 390} idx 1]
+    (range [_ f (.RecvParamsResults (.Type fn))]
+      (when [(values n ok) (assert (* ir/Name) (.-Nname f))] ok
+        (aset paramOrder n idx)
+        (inc! idx)))
+
+
+    (sort/Stable (lit varsAndDecls decls vars paramOrder))))
+
+
+(go/type varsAndDecls (struct
+    ^{:line 401 :tag (slice (* ir/Name))} decls
+    ^{:line 402 :tag (slice (* dwarf/Var))} vars
+    ^{:line 403 :tag (map (* ir/Name) int)} paramOrder))
+
+
+^{:go/end 408} (go/method Len ^int [^varsAndDecls v]
+  (len (.-decls v)))
+
+
+^{:go/end 424} (go/method Less ^bool [^varsAndDecls v ^int i ^int j]
+  (let [nameLT ^{:go/end 422} (fn ^bool [^{:tag (* ir/Name)} ni ^{:tag (* ir/Name)} nj]
+        ^{:go/breaks [[3 421]]} (let [(values oi foundi) (aget (.-paramOrder v) ni)
+            (values oj foundj) (aget (.-paramOrder v) nj)]
+          (when foundi
+            (if foundj
+              (return (< oi oj))
+
+              (return true)))
+
+
+          false))]
+
+    (nameLT (aget (.-decls v) i) (aget (.-decls v) j))))
+
+
+^{:go/end 429} (go/method Swap [^varsAndDecls v ^int i ^int j]
+  (set! (values (aget (.-vars v) i) (aget (.-vars v) j)) (values (aget (.-vars v) j) (aget (.-vars v) i)))
+  (set! (values (aget (.-decls v) i) (aget (.-decls v) j)) (values (aget (.-decls v) j) (aget (.-decls v) i))))
+
+
+
+
+
+
+
+
+^{:go/end 447} (go/func preInliningDcls "Given a function that was inlined at some point during the\ncompilation, return a sorted list of nodes corresponding to the\nautos/locals in that function prior to inlining. If this is a\nfunction that is not local to the package being compiled, then the\nnames of the variables may have been \"versioned\" to avoid conflicts\nwith local vars; disregard this versioning when sorting.\n" ^{:tag (slice (* ir/Name))} [^{:tag (* obj/LSym)} fnsym]
+  (let [fn (assert (* ir/Func) (.GetPrecursorFunc (.-DwFixups base/Ctxt) fnsym))
+      ^{:line 439 :tag (slice (* ir/Name))} rdcl (zero (slice (* ir/Name)))]
+    (range [_ n (.-Dcl (.-Inl fn))]
+      (when (or (== (aget (.-Name (.Sym n)) 0) \.) (not (shouldEmitDwarfVarSafe n)))
+        (continue))
+
+      (set! rdcl (append rdcl n)))
+
+    ^{:line 446} rdcl))
+
+
+^{:go/end 507} (go/func createSimpleVar ^{:tag (* dwarf/Var)} [^{:tag (* obj/LSym)} fnsym ^{:tag (* ir/Name)} n ^{:tag (map (* ir/Name) int64)} closureVars]
+  (let [^int tag (zero int)
+      ^{:line 451 :tag int64} offs (zero int64)
+
+      ^{:line 453} localAutoOffset ^{:go/end 462} (fn ^int64 []
+        (set! offs (.FrameOffset n))
+        (when (== ^{:go/via [Arch]} (.-FixedFrameSize (.-Arch base/Ctxt)) 0)
+          (set! offs - (conv int64 types/PtrSize)))
+
+        (when buildcfg/FramePointerEnabled
+          (set! offs - (conv int64 types/PtrSize)))
+
+        ^{:line 461} offs)]
+
+
+    (switch (.-Class n)
+      (case [ir/PAUTO]
+        (set! offs (localAutoOffset))
+        (set! tag dwarf/DW_TAG_variable))
+      (case [ir/PPARAM ir/PPARAMOUT]
+        (set! tag dwarf/DW_TAG_formal_parameter)
+        (if (.IsOutputParamInRegisters n)
+          (set! offs (localAutoOffset))
+
+          (set! offs (+ (.FrameOffset n) ^{:go/via [Arch]} (.-FixedFrameSize (.-Arch base/Ctxt))))))
+
+
+      (default
+        (base/Fatalf "createSimpleVar unexpected class %v for node %v" (.-Class n) n)))
+
+
+    (let [typename (+ dwarf/InfoPrefix (types/TypeSymName ^{:go/via [miniExpr]} (.Type n)))]
+      (delete (.-Autot (.Func fnsym)) (reflectdata/TypeLinksym ^{:go/via [miniExpr]} (.Type n)))
+      (let [inlIndex 0]
+        (when (> (.-GenDwarfInl base/Flag) 1)
+          (when (or (.InlFormal n) (.InlLocal n))
+            (set! inlIndex (+ (posInlIndex ^{:go/via [miniExpr miniNode]} (.Pos n)) 1))
+            (when (.InlFormal n)
+              (set! tag dwarf/DW_TAG_formal_parameter))))
+
+
+
+        (let [declpos (.InnermostPos base/Ctxt (declPos n))]
+          (addr ^{:go/breaks [2 4 6 8 10 12 14 16 18 20 22 24 26]} (lit dwarf/Var
+              :Name (.-Name (.Sym n))
+              :IsReturnValue (== (.-Class n) ir/PPARAMOUT)
+              :IsInlFormal (.InlFormal n)
+              :Tag tag
+              :StackOffset (conv int32 offs)
+              :Type (.Lookup base/Ctxt typename)
+              :DeclFile (.RelFilename declpos)
+              :DeclLine (.RelLine declpos)
+              :DeclCol (.RelCol declpos)
+              :InlIndex (conv int32 inlIndex)
+              :ChildIndex -1
+              :DictIndex (.-DictIndex n)
+              :ClosureOffset (closureOffset n closureVars))))))))
+
+
+
+
+^{:go/end 564} (go/func createComplexVar "createComplexVar builds a single DWARF variable entry and location list.\n" ^{:tag (* dwarf/Var)} [^{:tag (* obj/LSym)} fnsym ^{:tag (* ir/Func)} fn ^ssa/VarID varID ^{:tag (map (* ir/Name) int64)} closureVars]
+  (let [debug (assert (* ssa/FuncDebug) (.-DebugInfo fn))
+      ^{:line 512} n (aget (.-Vars debug) varID)
+
+      ^{:line 514 :tag int} tag (zero int)]
+    (switch (.-Class n)
+      (case [ir/PAUTO]
+        (set! tag dwarf/DW_TAG_variable))
+      (case [ir/PPARAM ir/PPARAMOUT]
+        (set! tag dwarf/DW_TAG_formal_parameter))
+      (default
+        (return nil)))
+
+
+    (let [gotype (reflectdata/TypeLinksym ^{:go/via [miniExpr]} (.Type n))]
+      (delete (.-Autot (.Func fnsym)) gotype)
+      (let [typename (+ dwarf/InfoPrefix (subslice (.-Name gotype) (len "type:")))
+          ^{:line 527} inlIndex 0]
+        (when (> (.-GenDwarfInl base/Flag) 1)
+          (when (or (.InlFormal n) (.InlLocal n))
+            (set! inlIndex (+ (posInlIndex ^{:go/via [miniExpr miniNode]} (.Pos n)) 1))
+            (when (.InlFormal n)
+              (set! tag dwarf/DW_TAG_formal_parameter))))
+
+
+
+        (let [declpos (.InnermostPos base/Ctxt ^{:go/via [miniExpr miniNode]} (.Pos n))
+            ^{:line 537} dvar (addr ^{:go/breaks [2 4 6 8 10 12 [14 548] 16 18 20 22 24 26 28]} (lit dwarf/Var
+                :Name (.-Name (.Sym n))
+                :IsReturnValue (== (.-Class n) ir/PPARAMOUT)
+                :IsInlFormal (.InlFormal n)
+                :Tag tag
+                :WithLoclist true
+                :Type (.Lookup base/Ctxt typename)
+                ;; The stack offset is used as a sorting key, so for decomposed
+                ;; variables just give it the first one. It's not used otherwise.
+                ;; This won't work well if the first slot hasn't been assigned a stack
+                ;; location, but it's not obvious how to do better.
+                :StackOffset (ssagen/StackOffset (aget (.-Slots debug) (aget (aget (.-VarSlots debug) varID) 0)))
+                :DeclFile (.RelFilename declpos)
+                :DeclLine (.RelLine declpos)
+                :DeclCol (.RelCol declpos)
+                :InlIndex (conv int32 inlIndex)
+                :ChildIndex -1
+                :DictIndex (.-DictIndex n)
+                :ClosureOffset (closureOffset n closureVars)))
+
+            ^{:line 557} list (aget (.-LocationLists debug) varID)]
+          (when (!= (len list) 0)
+            (set! (.-PutLocationList dvar) ^{:go/end 561} (fn [^dwarf/Sym listSym ^dwarf/Sym startPC]
+                (.PutLocationList debug list base/Ctxt (assert (* obj/LSym) listSym) (assert (* obj/LSym) startPC)))))
+
+
+          ^{:line 563} dvar)))))
+
+
+
+
+^{:go/end 591} (go/func createHeapDerefLocationList "createHeapDerefLocationList creates a location list for a heap-escaped variable\nthat describes \"dereference pointer at stack offset\"\n" ^{:tag (slice ssa/LocListEntry)} [^{:tag (* ir/Name)} n ^ssa/ID entryID]
+  ;; Get the stack offset where the heap pointer is stored
+  (let [heapPtrOffset (.FrameOffset (.-Heapaddr n))]
+    (when (== ^{:go/via [Arch]} (.-FixedFrameSize (.-Arch base/Ctxt)) 0)
+      (set! heapPtrOffset - (conv int64 types/PtrSize)))
+
+    (when buildcfg/FramePointerEnabled
+      (set! heapPtrOffset - (conv int64 types/PtrSize)))
+
+
+    ;; Create a location expression: DW_OP_fbreg <offset> DW_OP_deref
+    (let [^{:tag (slice byte)} expr (zero (slice byte))]
+      (set! expr (append expr dwarf/DW_OP_fbreg))
+      (set! expr (dwarf/AppendSleb128 expr heapPtrOffset))
+      (set! expr (append expr dwarf/DW_OP_deref))
+
+      (lit (slice ssa/LocListEntry) ^{:go/breaks [2 4 6 8 10]} (lit _
+          :StartBlock entryID
+          :StartValue (.-ID ssa/BlockStart)
+          :EndBlock entryID
+          :EndValue (.-ID ssa/FuncEnd)
+          :Expr expr)))))
+
+
+
+
+
+^{:go/end 652} (go/func RecordFlags "RecordFlags records the specified command-line flags to be placed\nin the DWARF info.\n" [& ^{:tag (slice string)} flags]
+  (when (== (.-Pkgpath base/Ctxt) "")
+    (base/Fatalf "missing pkgpath"))
+
+
+  (let-type [BoolFlag (interface
+        (IsBoolFlag ^bool []))
+
+      ^{:line 603} CountFlag (interface
+        (IsCountFlag ^bool []))]
+
+    (let [^bytes/Buffer cmd (zero bytes/Buffer)]
+      (range [_ name flags]
+        (let [f (flag/Lookup name)]
+          (when (== f nil)
+            (continue))
+
+          (let [getter (assert flag/Getter (.-Value f))]
+            (when (== (.String getter) (.-DefValue f))
+              ;; Flag has default value, so omit it.
+              (continue))
+
+            (when [(values bf ok) (assert BoolFlag (.-Value f))] (and ok (.IsBoolFlag bf))
+              (let [(values val ok) (assert bool (.Get getter))]
+                (when (and ok val)
+                  (fmt/Fprintf (addr cmd) " -%s" (.-Name f))
+                  (continue))))
+
+
+            (when [(values cf ok) (assert CountFlag (.-Value f))] (and ok (.IsCountFlag cf))
+              (let [(values val ok) (assert int (.Get getter))]
+                (when (and ok (== val 1))
+                  (fmt/Fprintf (addr cmd) " -%s" (.-Name f))
+                  (continue))))
+
+
+            (fmt/Fprintf (addr cmd) " -%s=%v" (.-Name f) (.Get getter)))))
+
+
+      ;; Adds flag to producer string signaling whether regabi is turned on or
+      ;; off.
+      ;; Once regabi is turned on across the board and the relative GOEXPERIMENT
+      ;; knobs no longer exist this code should be removed.
+      (when ^{:go/via [Flags]} (.-RegabiArgs buildcfg/Experiment)
+        (.Write cmd (conv (slice byte) " regabi")))
+
+
+      (when (== (.Len cmd) 0)
+        (return))
+
+      (let [s (.Lookup base/Ctxt (+ dwarf/CUInfoPrefix "producer." (.-Pkgpath base/Ctxt)))]
+        (set! (.-Type s) objabi/SDWARFCUINFO)
+        ;; Sometimes (for example when building tests) we can link
+        ;; together two package main archives. So allow dups.
+        ^{:go/via [Attribute]} (.Set s obj/AttrDuplicateOK true)
+        (set! (.-Data base/Ctxt) (append (.-Data base/Ctxt) s))
+        (set! (.-P s) (subslice (.Bytes cmd) 1))))))
+
+
+
+
+^{:go/end 664} (go/func RecordPackageName "RecordPackageName records the name of the package being\ncompiled, so that the linker can save it in the compile unit's DIE.\n" []
+  (let [s (.Lookup base/Ctxt (+ dwarf/CUInfoPrefix "packagename." (.-Pkgpath base/Ctxt)))]
+    (set! (.-Type s) objabi/SDWARFCUINFO)
+    ;; Sometimes (for example when building tests) we can link
+    ;; together two package main archives. So allow dups.
+    ^{:go/via [Attribute]} (.Set s obj/AttrDuplicateOK true)
+    (set! (.-Data base/Ctxt) (append (.-Data base/Ctxt) s))
+    (set! (.-P s) (conv (slice byte) (.-Name types/LocalPkg)))))
+
+
+
+
+
+^{:go/end 674} (go/func shouldEmitDwarfVar "shouldEmitDwarfVar reports whether n should have a DWARF variable entry.\nThis consolidates filtering that was previously spread across IR (AutoTemp),\nSSA (IsVarWantedForDebug), and dwarfgen (symbol name checks).\n" ^bool [^{:tag (* ir/Name)} n]
+  (when (ir/IsAutoTmp n)
+    (return false))
+
+  (shouldEmitDwarfVarSafe n))
+
+
+
+
+
+
+
+^{:go/breaks [[7 691]] :go/end 692} (go/func shouldEmitDwarfVarSafe "shouldEmitDwarfVarSafe is like shouldEmitDwarfVar but omits the ir.IsAutoTmp\ncheck, making it safe to call during parallel compilation on shared ir.Name\nnodes (e.g., in preInliningDcls). ir.IsAutoTmp reads the mutable flags bitset,\nwhich can race with other goroutines writing different flags during compilation.\nAuto temps have names starting with \".\" so callers must filter those separately.\n" ^bool [^{:tag (* ir/Name)} n]
+  (when (not (ssa/IsVarWantedForDebug n))
+    (return false))
+
+  (when (== (.-Name (.Sym n)) "_")
+    (return false))
+
+  (when (.IsUntyped ^{:go/via [miniExpr]} (.Type n))
+    (return false))
+
+  true)
+
+
+^{:go/end 696} (go/func closureOffset ^int64 [^{:tag (* ir/Name)} n ^{:tag (map (* ir/Name) int64)} closureVars]
+  (aget closureVars n))

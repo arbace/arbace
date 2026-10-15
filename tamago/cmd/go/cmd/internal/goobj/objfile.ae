@@ -1,0 +1,876 @@
+;; Copyright 2019 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; This package defines the Go object file format, and provide "low-level" functions
+;; for reading and writing object files.
+
+;; The object file is understood by the compiler, assembler, linker, and tools. They
+;; have "high level" code that operates on object files, handling application-specific
+;; logics, and use this package for the actual reading and writing. Specifically, the
+;; code below:
+;;
+;; - cmd/internal/obj/objfile.go (used by cmd/asm and cmd/compile)
+;; - cmd/internal/objfile/goobj.go (used cmd/nm, cmd/objdump)
+;; - cmd/link/internal/loader package (used by cmd/link)
+;;
+;; If the object file format changes, they may (or may not) need to change.
+
+(in-ns 'go.cmd.internal.goobj) (go/file "objfile.go" :imports [
+
+
+    ^{:line 22} [bio "cmd/internal/bio"]
+    ^{:line 23} [binary "encoding/binary"]
+    ^{:line 24} [errors "errors"]
+    ^{:line 25} [fmt "fmt"]
+    ^{:line 26} [unsafe "unsafe"]])
+
+
+;; New object file format.
+;;
+;;    Header struct {
+;;       Magic       [...]byte   // "\x00go120ld"
+;;       Fingerprint [8]byte
+;;       Flags       uint32
+;;       Offsets     [...]uint32 // byte offset of each block below
+;;    }
+;;
+;;    Strings [...]struct {
+;;       Data [...]byte
+;;    }
+;;
+;;    Autolib  [...]struct { // imported packages (for file loading)
+;;       Pkg         string
+;;       Fingerprint [8]byte
+;;    }
+;;
+;;    PkgIndex [...]string // referenced packages by index
+;;
+;;    Files [...]string
+;;
+;;    SymbolDefs [...]struct {
+;;       Name  string
+;;       ABI   uint16
+;;       Type  uint8
+;;       Flag  uint8
+;;       Flag2 uint8
+;;       Size  uint32
+;;       Align uint32
+;;    }
+;;    Hashed64Defs [...]struct { // short hashed (content-addressable) symbol definitions
+;;       ... // same as SymbolDefs
+;;    }
+;;    HashedDefs [...]struct { // hashed (content-addressable) symbol definitions
+;;       ... // same as SymbolDefs
+;;    }
+;;    NonPkgDefs [...]struct { // non-pkg symbol definitions
+;;       ... // same as SymbolDefs
+;;    }
+;;    NonPkgRefs [...]struct { // non-pkg symbol references
+;;       ... // same as SymbolDefs
+;;    }
+;;
+;;    RefFlags [...]struct { // referenced symbol flags
+;;       Sym   symRef
+;;       Flag  uint8
+;;       Flag2 uint8
+;;    }
+;;
+;;    Hash64 [...][8]byte
+;;    Hash   [...][N]byte
+;;
+;;    RelocIndex [...]uint32 // index to Relocs
+;;    AuxIndex   [...]uint32 // index to Aux
+;;    DataIndex  [...]uint32 // offset to Data
+;;
+;;    Relocs [...]struct {
+;;       Off  int32
+;;       Size uint8
+;;       Type uint16
+;;       Add  int64
+;;       Sym  symRef
+;;    }
+;;
+;;    Aux [...]struct {
+;;       Type uint8
+;;       Sym  symRef
+;;    }
+;;
+;;    Data   [...]byte
+;;
+;;    // blocks only used by tools (objdump, nm)
+;;
+;;    RefNames [...]struct { // referenced symbol names
+;;       Sym  symRef
+;;       Name string
+;;       // TODO: include ABI version as well?
+;;    }
+;;
+;; string is encoded as is a uint32 length followed by a uint32 offset
+;; that points to the corresponding string bytes.
+;;
+;; symRef is struct { PkgIdx, SymIdx uint32 }.
+;;
+;; Slice type (e.g. []symRef) is encoded as a length prefix (uint32)
+;; followed by that number of elements.
+;;
+;; The types below correspond to the encoded data structure in the
+;; object file.
+
+;; Symbol indexing.
+;;
+;; Each symbol is referenced with a pair of indices, { PkgIdx, SymIdx },
+;; as the symRef struct above.
+;;
+;; PkgIdx is either a predeclared index (see PkgIdxNone below) or
+;; an index of an imported package. For the latter case, PkgIdx is the
+;; index of the package in the PkgIndex array. 0 is an invalid index.
+;;
+;; SymIdx is the index of the symbol in the given package.
+;; - If PkgIdx is PkgIdxSelf, SymIdx is the index of the symbol in the
+;;   SymbolDefs array.
+;; - If PkgIdx is PkgIdxHashed64, SymIdx is the index of the symbol in the
+;;   Hashed64Defs array.
+;; - If PkgIdx is PkgIdxHashed, SymIdx is the index of the symbol in the
+;;   HashedDefs array.
+;; - If PkgIdx is PkgIdxNone, SymIdx is the index of the symbol in the
+;;   NonPkgDefs array (could naturally overflow to NonPkgRefs array).
+;; - Otherwise, SymIdx is the index of the symbol in some other package's
+;;   SymbolDefs array.
+;;
+;; {0, 0} represents a nil symbol. Otherwise PkgIdx should not be 0.
+;;
+;; Hash contains the content hashes of content-addressable symbols, of
+;; which PkgIdx is PkgIdxHashed, in the same order of HashedDefs array.
+;; Hash64 is similar, for PkgIdxHashed64 symbols.
+;;
+;; RelocIndex, AuxIndex, and DataIndex contains indices/offsets to
+;; Relocs/Aux/Data blocks, one element per symbol, first for all the
+;; defined symbols, then all the defined hashed and non-package symbols,
+;; in the same order of SymbolDefs/Hashed64Defs/HashedDefs/NonPkgDefs
+;; arrays. For N total defined symbols, the array is of length N+1. The
+;; last element is the total number of relocations (aux symbols, data
+;; blocks, etc.).
+;;
+;; They can be accessed by index. For the i-th symbol, its relocations
+;; are the RelocIndex[i]-th (inclusive) to RelocIndex[i+1]-th (exclusive)
+;; elements in the Relocs array. Aux/Data are likewise. (The index is
+;; 0-based.)
+
+;; Auxiliary symbols.
+;;
+;; Each symbol may (or may not) be associated with a number of auxiliary
+;; symbols. They are described in the Aux block. See Aux struct below.
+;; Currently a symbol's Gotype, FuncInfo, and associated DWARF symbols
+;; are auxiliary symbols.
+
+(go/const ^{:val 8} stringRefSize 8) ; two uint32s
+
+(go/type FingerprintType (array 8 byte))
+
+^{:go/end 171} (go/method IsZero ^bool [^FingerprintType fp] (== fp (lit FingerprintType)))
+
+
+(go/const "Package Index.\n"
+  ^{:line 175} [^{:val 2147483647} PkgIdxNone (- (<< 1 31) 1 iota)] ; Non-package symbols
+  ^{:line 176} [^{:val 2147483646} PkgIdxHashed64] ; Short hashed (content-addressable) symbols
+  ^{:line 177} [^{:val 2147483645} PkgIdxHashed] ; Hashed (content-addressable) symbols
+  ^{:line 178} [^{:val 2147483644} PkgIdxBuiltin] ; Predefined runtime symbols (ex: runtime.newobject)
+  ^{:line 179} [^{:val 2147483643} PkgIdxSelf] ; Symbols defined in the current package
+  ^{:line 180} [^{:val 2147483643} PkgIdxSpecial PkgIdxSelf] ; Indices above it has special meanings
+  ^{:line 181} [^{:val 0} PkgIdxInvalid 0])
+;; The index of other referenced packages starts from 1.
+
+
+
+(go/const "Blocks\n"
+  ^{:line 187} [^{:val 0} BlkAutolib iota]
+  ^{:line 188} [^{:val 1} BlkPkgIdx]
+  ^{:line 189} [^{:val 2} BlkFile]
+  ^{:line 190} [^{:val 3} BlkSymdef]
+  ^{:line 191} [^{:val 4} BlkHashed64def]
+  ^{:line 192} [^{:val 5} BlkHasheddef]
+  ^{:line 193} [^{:val 6} BlkNonpkgdef]
+  ^{:line 194} [^{:val 7} BlkNonpkgref]
+  ^{:line 195} [^{:val 8} BlkRefFlags]
+  ^{:line 196} [^{:val 9} BlkHash64]
+  ^{:line 197} [^{:val 10} BlkHash]
+  ^{:line 198} [^{:val 11} BlkRelocIdx]
+  ^{:line 199} [^{:val 12} BlkAuxIdx]
+  ^{:line 200} [^{:val 13} BlkDataIdx]
+  ^{:line 201} [^{:val 14} BlkReloc]
+  ^{:line 202} [^{:val 15} BlkAux]
+  ^{:line 203} [^{:val 16} BlkData]
+  ^{:line 204} [^{:val 17} BlkRefName]
+  ^{:line 205} [^{:val 18} BlkEnd]
+  ^{:line 206} [^{:val 19} NBlk])
+
+
+
+
+(go/type Header "File header.\nTODO: probably no need to export this.\n" (struct
+    ^{:line 212 :tag string} Magic
+    ^{:line 213 :tag FingerprintType} Fingerprint
+    ^{:line 214 :tag uint32} Flags
+    ^{:line 215 :tag (array NBlk uint32)} Offsets))
+
+
+(go/const ^{:val "\u0000go120ld"} Magic "\u0000go120ld")
+
+^{:go/end 227} (go/method Write [^{:tag (* Header)} h ^{:tag (* Writer)} w]
+  (.RawString w (.-Magic h))
+  (.Bytes w (subslice (.-Fingerprint h)))
+  (.Uint32 w (.-Flags h))
+  (range [_ x (.-Offsets h)]
+    (.Uint32 w x)))
+
+
+
+^{:go/end 245} (go/method Read ^error [^{:tag (* Header)} h ^{:tag (* Reader)} r]
+  (let [b (.BytesAt r 0 (len Magic))]
+    (set! (.-Magic h) (conv string b))
+    (when (!= (.-Magic h) Magic)
+      (return (errors/New "wrong magic, not a Go object file")))
+
+    ^{:go/breaks [[7 244]]} (let [off (conv uint32 (len (.-Magic h)))]
+      (copy (subslice (.-Fingerprint h)) (.BytesAt r off (len (.-Fingerprint h))))
+      (set! off + 8)
+      (set! (.-Flags h) (.uint32At r off))
+      (set! off + 4)
+      (range [i (.-Offsets h)]
+        (aset (.-Offsets h) i (.uint32At r off))
+        (set! off + 4))
+
+      nil)))
+
+
+^{:go/end 249} (go/method Size ^int [^{:tag (* Header)} h]
+  (+ (len (.-Magic h)) (len (.-Fingerprint h)) 4 (* 4 (len (.-Offsets h)))))
+
+
+
+(go/type ImportedPkg "Autolib\n" (struct
+    ^{:line 253 :tag string} Pkg
+    ^{:line 254 :tag FingerprintType} Fingerprint))
+
+
+(go/const ^{:val 16} importedPkgSize (+ stringRefSize 8))
+
+^{:go/end 262} (go/method Write [^{:tag (* ImportedPkg)} p ^{:tag (* Writer)} w]
+  (.StringRef w (.-Pkg p))
+  (.Bytes w (subslice (.-Fingerprint p))))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+(go/type Sym "Symbol definition.\n\nSerialized format:\n\n\tSym struct {\n\t   Name  string\n\t   ABI   uint16\n\t   Type  uint8\n\t   Flag  uint8\n\t   Flag2 uint8\n\t   Siz   uint32\n\t   Align uint32\n\t}\n" (array SymSize byte))
+
+(go/const ^{:val 21} SymSize (+ stringRefSize 2 1 1 1 4 4))
+
+(go/const ^{:val 65535} SymABIstatic (bit-not (conv uint16 0)))
+
+(go/const
+  ^{:line 284} [^{:val 1} ObjFlagShared (<< 1 iota)] ; this object is built with -shared
+  ^{:line 285} [^{:val 2} _] ; was ObjFlagNeedNameExpansion
+  ^{:line 286} [^{:val 4} ObjFlagFromAssembly] ; object is from asm src, not go
+  ^{:line 287} [^{:val 8} ObjFlagUnlinkable] ; unlinkable package (linker will emit an error)
+  ^{:line 288} [^{:val 16} ObjFlagStd]) ; standard library package
+
+
+
+(go/const "Sym.Flag\n"
+  ^{:line 293} [^{:val 1} SymFlagDupok (<< 1 iota)]
+  ^{:line 294} [^{:val 2} SymFlagLocal]
+  ^{:line 295} [^{:val 4} SymFlagTypelink]
+  ^{:line 296} [^{:val 8} SymFlagLeaf]
+  ^{:line 297} [^{:val 16} SymFlagNoSplit]
+  ^{:line 298} [^{:val 32} SymFlagReflectMethod]
+  ^{:line 299} [^{:val 64} SymFlagGoType])
+
+
+
+(go/const "Sym.Flag2\n"
+  ^{:line 304} [^{:val 1} SymFlagUsedInIface (<< 1 iota)]
+  ^{:line 305} [^{:val 2} SymFlagItab]
+  ^{:line 306} [^{:val 4} SymFlagDict]
+  ^{:line 307} [^{:val 8} SymFlagPkgInit]
+  ^{:line 308} [^{:val 16} SymFlagLinkname]
+  ^{:line 309} [^{:val 32} SymFlagLinknameStd]
+  ^{:line 310} [^{:val 64} SymFlagABIWrapper]
+  ^{:line 311} [^{:val 128} SymFlagWasmExport])
+
+
+
+^{:go/end 317} (go/method NameLen "Returns the length of the name of the symbol.\n" ^int [^{:tag (* Sym)} s ^{:tag (* Reader)} r]
+  (conv int (.Uint32 binary/LittleEndian (subslice s))))
+
+
+^{:go/end 323} (go/method Name ^string [^{:tag (* Sym)} s ^{:tag (* Reader)} r]
+  (let [len (.Uint32 binary/LittleEndian (subslice s))
+      ^{:line 321} off (.Uint32 binary/LittleEndian (subslice s 4))]
+    (.StringAt r off len)))
+
+
+^{:go/end 325} (go/method ABI ^uint16 [^{:tag (* Sym)} s] (.Uint16 binary/LittleEndian (subslice s 8)))
+^{:go/end 326} (go/method Type ^uint8 [^{:tag (* Sym)} s] (aget s 10))
+^{:go/end 327} (go/method Flag ^uint8 [^{:tag (* Sym)} s] (aget s 11))
+^{:go/end 328} (go/method Flag2 ^uint8 [^{:tag (* Sym)} s] (aget s 12))
+^{:go/end 329} (go/method Siz ^uint32 [^{:tag (* Sym)} s] (.Uint32 binary/LittleEndian (subslice s 13)))
+^{:go/end 330} (go/method Align ^uint32 [^{:tag (* Sym)} s] (.Uint32 binary/LittleEndian (subslice s 17)))
+
+^{:go/end 332} (go/method Dupok ^bool [^{:tag (* Sym)} s] (!= (bit-and (.Flag s) SymFlagDupok) 0))
+^{:go/end 333} (go/method Local ^bool [^{:tag (* Sym)} s] (!= (bit-and (.Flag s) SymFlagLocal) 0))
+^{:go/end 334} (go/method Typelink ^bool [^{:tag (* Sym)} s] (!= (bit-and (.Flag s) SymFlagTypelink) 0))
+^{:go/end 335} (go/method Leaf ^bool [^{:tag (* Sym)} s] (!= (bit-and (.Flag s) SymFlagLeaf) 0))
+^{:go/end 336} (go/method NoSplit ^bool [^{:tag (* Sym)} s] (!= (bit-and (.Flag s) SymFlagNoSplit) 0))
+^{:go/end 337} (go/method ReflectMethod ^bool [^{:tag (* Sym)} s] (!= (bit-and (.Flag s) SymFlagReflectMethod) 0))
+^{:go/end 338} (go/method IsGoType ^bool [^{:tag (* Sym)} s] (!= (bit-and (.Flag s) SymFlagGoType) 0))
+^{:go/end 339} (go/method UsedInIface ^bool [^{:tag (* Sym)} s] (!= (bit-and (.Flag2 s) SymFlagUsedInIface) 0))
+^{:go/end 340} (go/method IsItab ^bool [^{:tag (* Sym)} s] (!= (bit-and (.Flag2 s) SymFlagItab) 0))
+^{:go/end 341} (go/method IsDict ^bool [^{:tag (* Sym)} s] (!= (bit-and (.Flag2 s) SymFlagDict) 0))
+^{:go/end 342} (go/method IsPkgInit ^bool [^{:tag (* Sym)} s] (!= (bit-and (.Flag2 s) SymFlagPkgInit) 0))
+^{:go/end 343} (go/method IsLinkname ^bool [^{:tag (* Sym)} s] (!= (bit-and (.Flag2 s) SymFlagLinkname) 0))
+^{:go/end 344} (go/method IsLinknameStd ^bool [^{:tag (* Sym)} s] (!= (bit-and (.Flag2 s) SymFlagLinknameStd) 0))
+^{:go/end 345} (go/method ABIWrapper ^bool [^{:tag (* Sym)} s] (!= (bit-and (.Flag2 s) SymFlagABIWrapper) 0))
+^{:go/end 346} (go/method WasmExport ^bool [^{:tag (* Sym)} s] (!= (bit-and (.Flag2 s) SymFlagWasmExport) 0))
+
+^{:go/end 351} (go/method SetName [^{:tag (* Sym)} s ^string x ^{:tag (* Writer)} w]
+  (.PutUint32 binary/LittleEndian (subslice s) (conv uint32 (len x)))
+  (.PutUint32 binary/LittleEndian (subslice s 4) (.stringOff w x)))
+
+
+^{:go/end 353} (go/method SetABI [^{:tag (* Sym)} s ^uint16 x] (.PutUint16 binary/LittleEndian (subslice s 8) x))
+^{:go/end 354} (go/method SetType [^{:tag (* Sym)} s ^uint8 x] (aset s 10 x))
+^{:go/end 355} (go/method SetFlag [^{:tag (* Sym)} s ^uint8 x] (aset s 11 x))
+^{:go/end 356} (go/method SetFlag2 [^{:tag (* Sym)} s ^uint8 x] (aset s 12 x))
+^{:go/end 357} (go/method SetSiz [^{:tag (* Sym)} s ^uint32 x] (.PutUint32 binary/LittleEndian (subslice s 13) x))
+^{:go/end 358} (go/method SetAlign [^{:tag (* Sym)} s ^uint32 x] (.PutUint32 binary/LittleEndian (subslice s 17) x))
+
+^{:go/end 360} (go/method Write [^{:tag (* Sym)} s ^{:tag (* Writer)} w] (.Bytes w (subslice s)))
+
+
+^{:go/end 363} (go/method fromBytes "for testing\n" [^{:tag (* Sym)} s ^{:tag (slice byte)} b] (copy (subslice s) b))
+
+
+(go/type SymRef "Symbol reference.\n" (struct
+    ^{:line 367 :tag uint32} PkgIdx
+    ^{:line 368 :tag uint32} SymIdx))
+
+
+^{:go/end 371} (go/method IsZero ^bool [^SymRef s] (== s (lit SymRef)))
+
+
+(go/type Hash64Type "Hash64\n" (array Hash64Size byte))
+
+(go/const ^{:val 8} Hash64Size 8)
+
+
+(go/type HashType "Hash\n" (array HashSize byte))
+
+(go/const ^{:val 16} HashSize 16) ; truncated SHA256
+
+
+
+
+
+
+
+
+
+
+
+
+(go/type Reloc "Relocation.\n\nSerialized format:\n\n\tReloc struct {\n\t   Off  int32\n\t   Siz  uint8\n\t   Type uint16\n\t   Add  int64\n\t   Sym  SymRef\n\t}\n" (array RelocSize byte))
+
+(go/const ^{:val 23} RelocSize (+ 4 1 2 8 8))
+
+^{:go/end 398} (go/method Off ^int32 [^{:tag (* Reloc)} r] (conv int32 (.Uint32 binary/LittleEndian (subslice r))))
+^{:go/end 399} (go/method Siz ^uint8 [^{:tag (* Reloc)} r] (aget r 4))
+^{:go/end 400} (go/method Type ^uint16 [^{:tag (* Reloc)} r] (.Uint16 binary/LittleEndian (subslice r 5)))
+^{:go/end 401} (go/method Add ^int64 [^{:tag (* Reloc)} r] (conv int64 (.Uint64 binary/LittleEndian (subslice r 7))))
+^{:go/end 404} (go/method Sym ^SymRef [^{:tag (* Reloc)} r]
+  (lit SymRef (.Uint32 binary/LittleEndian (subslice r 15)) (.Uint32 binary/LittleEndian (subslice r 19))))
+
+
+^{:go/end 406} (go/method SetOff [^{:tag (* Reloc)} r ^int32 x] (.PutUint32 binary/LittleEndian (subslice r) (conv uint32 x)))
+^{:go/end 407} (go/method SetSiz [^{:tag (* Reloc)} r ^uint8 x] (aset r 4 x))
+^{:go/end 408} (go/method SetType [^{:tag (* Reloc)} r ^uint16 x] (.PutUint16 binary/LittleEndian (subslice r 5) x))
+^{:go/end 409} (go/method SetAdd [^{:tag (* Reloc)} r ^int64 x] (.PutUint64 binary/LittleEndian (subslice r 7) (conv uint64 x)))
+^{:go/end 413} (go/method SetSym [^{:tag (* Reloc)} r ^SymRef x]
+  (.PutUint32 binary/LittleEndian (subslice r 15) (.-PkgIdx x))
+  (.PutUint32 binary/LittleEndian (subslice r 19) (.-SymIdx x)))
+
+
+^{:go/end 421} (go/method Set [^{:tag (* Reloc)} r ^int32 off ^uint8 size ^uint16 typ ^int64 add ^SymRef sym]
+  (.SetOff r off)
+  (.SetSiz r size)
+  (.SetType r typ)
+  (.SetAdd r add)
+  (.SetSym r sym))
+
+
+^{:go/end 423} (go/method Write [^{:tag (* Reloc)} r ^{:tag (* Writer)} w] (.Bytes w (subslice r)))
+
+
+^{:go/end 426} (go/method fromBytes "for testing\n" [^{:tag (* Reloc)} r ^{:tag (slice byte)} b] (copy (subslice r) b))
+
+
+
+
+
+
+
+
+
+(go/type Aux "Aux symbol info.\n\nSerialized format:\n\n\tAux struct {\n\t   Type uint8\n\t   Sym  SymRef\n\t}\n" (array AuxSize byte))
+
+(go/const ^{:val 9} AuxSize (+ 1 8))
+
+
+(go/const "Aux Type\n"
+  ^{:line 442} [^{:val 0} AuxGotype iota]
+  ^{:line 443} [^{:val 1} AuxFuncInfo]
+  ^{:line 444} [^{:val 2} AuxFuncdata]
+  ^{:line 445} [^{:val 3} AuxDwarfInfo]
+  ^{:line 446} [^{:val 4} AuxDwarfLoc]
+  ^{:line 447} [^{:val 5} AuxDwarfRanges]
+  ^{:line 448} [^{:val 6} AuxDwarfLines]
+  ^{:line 449} [^{:val 7} AuxPcsp]
+  ^{:line 450} [^{:val 8} AuxPcfile]
+  ^{:line 451} [^{:val 9} AuxPcline]
+  ^{:line 452} [^{:val 10} AuxPcinline]
+  ^{:line 453} [^{:val 11} AuxPcdata]
+  ^{:line 454} [^{:val 12} AuxWasmImport]
+  ^{:line 455} [^{:val 13} AuxWasmType]
+  ^{:line 456} [^{:val 14} AuxSehUnwindInfo])
+
+
+^{:go/end 459} (go/method Type ^uint8 [^{:tag (* Aux)} a] (aget a 0))
+^{:go/end 462} (go/method Sym ^SymRef [^{:tag (* Aux)} a]
+  (lit SymRef (.Uint32 binary/LittleEndian (subslice a 1)) (.Uint32 binary/LittleEndian (subslice a 5))))
+
+
+^{:go/end 464} (go/method SetType [^{:tag (* Aux)} a ^uint8 x] (aset a 0 x))
+^{:go/end 468} (go/method SetSym [^{:tag (* Aux)} a ^SymRef x]
+  (.PutUint32 binary/LittleEndian (subslice a 1) (.-PkgIdx x))
+  (.PutUint32 binary/LittleEndian (subslice a 5) (.-SymIdx x)))
+
+
+^{:go/end 470} (go/method Write [^{:tag (* Aux)} a ^{:tag (* Writer)} w] (.Bytes w (subslice a)))
+
+
+^{:go/end 473} (go/method fromBytes "for testing\n" [^{:tag (* Aux)} a ^{:tag (slice byte)} b] (copy (subslice a) b))
+
+
+
+
+
+
+
+
+
+
+(go/type RefFlags "Referenced symbol flags.\n\nSerialized format:\n\n\tRefFlags struct {\n\t   Sym   symRef\n\t   Flag  uint8\n\t   Flag2 uint8\n\t}\n" (array RefFlagsSize byte))
+
+(go/const ^{:val 10} RefFlagsSize (+ 8 1 1))
+
+^{:go/end 490} (go/method Sym ^SymRef [^{:tag (* RefFlags)} r]
+  (lit SymRef (.Uint32 binary/LittleEndian (subslice r)) (.Uint32 binary/LittleEndian (subslice r 4))))
+
+^{:go/end 491} (go/method Flag ^uint8 [^{:tag (* RefFlags)} r] (aget r 8))
+^{:go/end 492} (go/method Flag2 ^uint8 [^{:tag (* RefFlags)} r] (aget r 9))
+
+^{:go/end 497} (go/method SetSym [^{:tag (* RefFlags)} r ^SymRef x]
+  (.PutUint32 binary/LittleEndian (subslice r) (.-PkgIdx x))
+  (.PutUint32 binary/LittleEndian (subslice r 4) (.-SymIdx x)))
+
+^{:go/end 498} (go/method SetFlag [^{:tag (* RefFlags)} r ^uint8 x] (aset r 8 x))
+^{:go/end 499} (go/method SetFlag2 [^{:tag (* RefFlags)} r ^uint8 x] (aset r 9 x))
+
+^{:go/end 501} (go/method Write [^{:tag (* RefFlags)} r ^{:tag (* Writer)} w] (.Bytes w (subslice r)))
+
+
+
+
+(go/const ^{:val 93368854 :doc "Used to construct an artificially large array type when reading an\nitem from the object file relocs section or aux sym section (needs\nto work on 32-bit as well as 64-bit). See issue 41621.\n"} huge (/ (- (<< 1 31) 1) RelocSize))
+
+
+
+
+
+
+
+
+
+(go/type RefName "Referenced symbol name.\n\nSerialized format:\n\n\tRefName struct {\n\t   Sym  symRef\n\t   Name string\n\t}\n" (array RefNameSize byte))
+
+(go/const ^{:val 16} RefNameSize (+ 8 stringRefSize))
+
+^{:go/end 522} (go/method Sym ^SymRef [^{:tag (* RefName)} n]
+  (lit SymRef (.Uint32 binary/LittleEndian (subslice n)) (.Uint32 binary/LittleEndian (subslice n 4))))
+
+^{:go/end 527} (go/method Name ^string [^{:tag (* RefName)} n ^{:tag (* Reader)} r]
+  (let [len (.Uint32 binary/LittleEndian (subslice n 8))
+      ^{:line 525} off (.Uint32 binary/LittleEndian (subslice n 12))]
+    (.StringAt r off len)))
+
+
+^{:go/end 532} (go/method SetSym [^{:tag (* RefName)} n ^SymRef x]
+  (.PutUint32 binary/LittleEndian (subslice n) (.-PkgIdx x))
+  (.PutUint32 binary/LittleEndian (subslice n 4) (.-SymIdx x)))
+
+^{:go/end 536} (go/method SetName [^{:tag (* RefName)} n ^string x ^{:tag (* Writer)} w]
+  (.PutUint32 binary/LittleEndian (subslice n 8) (conv uint32 (len x)))
+  (.PutUint32 binary/LittleEndian (subslice n 12) (.stringOff w x)))
+
+
+^{:go/end 538} (go/method Write [^{:tag (* RefName)} n ^{:tag (* Writer)} w] (.Bytes w (subslice n)))
+
+(go/type Writer (struct
+    ^{:line 541 :tag (* bio/Writer)} wr
+    ^{:line 542 :tag (map string uint32)} stringMap
+    ^{:line 543 :tag uint32} off ; running offset
+
+    ^{:line 545 :tag (array 8 byte)} b)) ; scratch space for writing bytes
+
+
+^{:go/end 550} (go/func NewWriter ^{:tag (* Writer)} [^{:tag (* bio/Writer)} wr]
+  (addr (lit Writer :wr wr :stringMap (make (map string uint32)))))
+
+
+^{:go/end 558} (go/method AddString [^{:tag (* Writer)} w ^string s]
+  (when [(values _ ok) (aget (.-stringMap w) s)] ok
+    (return))
+
+  (aset (.-stringMap w) s (.-off w))
+  (.RawString w s))
+
+
+^{:go/end 566} (go/method stringOff ^uint32 [^{:tag (* Writer)} w ^string s]
+  (let [(values off ok) (aget (.-stringMap w) s)]
+    (when (not ok)
+      (panic (fmt/Sprintf "writeStringRef: string not added: %q" s)))
+
+    ^{:line 565} off))
+
+
+^{:go/end 571} (go/method StringRef [^{:tag (* Writer)} w ^string s]
+  (.Uint32 w (conv uint32 (len s)))
+  (.Uint32 w (.stringOff w s)))
+
+
+^{:go/end 576} (go/method RawString [^{:tag (* Writer)} w ^string s]
+  ^{:go/via [Writer]} (.WriteString (.-wr w) s)
+  (set! (.-off w) + (conv uint32 (len s))))
+
+
+^{:go/end 581} (go/method Bytes [^{:tag (* Writer)} w ^{:tag (slice byte)} s]
+  ^{:go/via [Writer]} (.Write (.-wr w) s)
+  (set! (.-off w) + (conv uint32 (len s))))
+
+
+^{:go/end 587} (go/method Uint64 [^{:tag (* Writer)} w ^uint64 x]
+  (.PutUint64 binary/LittleEndian (subslice (.-b w)) x)
+  ^{:go/via [Writer]} (.Write (.-wr w) (subslice (.-b w)))
+  (set! (.-off w) + 8))
+
+
+^{:go/end 593} (go/method Uint32 [^{:tag (* Writer)} w ^uint32 x]
+  (.PutUint32 binary/LittleEndian (subslice (.-b w) _ 4) x)
+  ^{:go/via [Writer]} (.Write (.-wr w) (subslice (.-b w) _ 4))
+  (set! (.-off w) + 4))
+
+
+^{:go/end 599} (go/method Uint16 [^{:tag (* Writer)} w ^uint16 x]
+  (.PutUint16 binary/LittleEndian (subslice (.-b w) _ 2) x)
+  ^{:go/via [Writer]} (.Write (.-wr w) (subslice (.-b w) _ 2))
+  (set! (.-off w) + 2))
+
+
+^{:go/end 604} (go/method Uint8 [^{:tag (* Writer)} w ^uint8 x]
+  ^{:go/via [Writer]} (.WriteByte (.-wr w) x)
+  (inc! (.-off w)))
+
+
+^{:go/end 608} (go/method Offset ^uint32 [^{:tag (* Writer)} w]
+  (.-off w))
+
+
+(go/type Reader (struct
+    ^{:line 611 :tag (slice byte)} b ; mmapped bytes, if not nil
+    ^{:line 612 :tag bool} readonly ; whether b is backed with read-only memory
+
+    ^{:line 614 :tag uint32} start
+    ^{:line 615 :tag Header} h)) ; keep block offsets
+
+
+^{:go/end 625} (go/func NewReaderFromBytes ^{:tag (* Reader)} [^{:tag (slice byte)} b ^bool readonly]
+  (let [r (addr (lit Reader :b b :readonly readonly :start 0))
+      ^{:line 620} err (.Read (.-h r) r)]
+    (when (!= err nil)
+      (return nil))
+
+    ^{:line 624} r))
+
+
+^{:go/end 633} (go/method BytesAt ^{:tag (slice byte)} [^{:tag (* Reader)} r ^uint32 off ^int len]
+  (when (== len 0)
+    (return nil))
+
+  (let [end (+ (conv int off) len)]
+    (subslice (.-b r) (conv int off) end end)))
+
+
+^{:go/end 638} (go/method uint64At ^uint64 [^{:tag (* Reader)} r ^uint32 off]
+  (let [b (.BytesAt r off 8)]
+    (.Uint64 binary/LittleEndian b)))
+
+
+^{:go/end 643} (go/method uint32At ^uint32 [^{:tag (* Reader)} r ^uint32 off]
+  (let [b (.BytesAt r off 4)]
+    (.Uint32 binary/LittleEndian b)))
+
+
+^{:go/end 651} (go/method StringAt ^string [^{:tag (* Reader)} r ^uint32 off ^uint32 len]
+  (let [b (subslice (.-b r) off (+ off len))]
+    (when (.-readonly r)
+      (return (toString b))) ; backed by RO memory, ok to make unsafe string
+
+    (conv string b)))
+
+
+^{:go/end 658} (go/func toString ^string [^{:tag (slice byte)} b]
+  (when (== (len b) 0)
+    (return ""))
+
+  (unsafe/String (addr (aget b 0)) (len b)))
+
+
+^{:go/end 663} (go/method StringRef ^string [^{:tag (* Reader)} r ^uint32 off]
+  (let [l (.uint32At r off)]
+    (.StringAt r (.uint32At r (+ off 4)) l)))
+
+
+^{:go/end 667} (go/method Fingerprint ^FingerprintType [^{:tag (* Reader)} r]
+  (.-Fingerprint (.-h r)))
+
+
+^{:go/end 679} (go/method Autolib ^{:tag (slice ImportedPkg)} [^{:tag (* Reader)} r]
+  (let [n (/ (- (aget (.-Offsets (.-h r)) (+ BlkAutolib 1)) (aget (.-Offsets (.-h r)) BlkAutolib)) importedPkgSize)
+      ^{:line 671} s (make (slice ImportedPkg) n)
+      ^{:line 672} off (aget (.-Offsets (.-h r)) BlkAutolib)]
+    (range [i s]
+      (set! (.-Pkg (aget s i)) (.StringRef r off))
+      (copy (subslice (.-Fingerprint (aget s i))) (.BytesAt r (+ off stringRefSize) (len (.-Fingerprint (aget s i)))))
+      (set! off + importedPkgSize))
+
+    ^{:line 678} s))
+
+
+^{:go/end 690} (go/method Pkglist ^{:tag (slice string)} [^{:tag (* Reader)} r]
+  (let [n (/ (- (aget (.-Offsets (.-h r)) (+ BlkPkgIdx 1)) (aget (.-Offsets (.-h r)) BlkPkgIdx)) stringRefSize)
+      ^{:line 683} s (make (slice string) n)
+      ^{:line 684} off (aget (.-Offsets (.-h r)) BlkPkgIdx)]
+    (range [i s]
+      (aset s i (.StringRef r off))
+      (set! off + stringRefSize))
+
+    ^{:line 689} s))
+
+
+^{:go/end 694} (go/method NPkg ^int [^{:tag (* Reader)} r]
+  (/ (conv int (- (aget (.-Offsets (.-h r)) (+ BlkPkgIdx 1)) (aget (.-Offsets (.-h r)) BlkPkgIdx))) stringRefSize))
+
+
+^{:go/end 699} (go/method Pkg ^string [^{:tag (* Reader)} r ^int i]
+  (let [off (+ (aget (.-Offsets (.-h r)) BlkPkgIdx) (* (conv uint32 i) stringRefSize))]
+    (.StringRef r off)))
+
+
+^{:go/end 703} (go/method NFile ^int [^{:tag (* Reader)} r]
+  (/ (conv int (- (aget (.-Offsets (.-h r)) (+ BlkFile 1)) (aget (.-Offsets (.-h r)) BlkFile))) stringRefSize))
+
+
+^{:go/end 708} (go/method File ^string [^{:tag (* Reader)} r ^int i]
+  (let [off (+ (aget (.-Offsets (.-h r)) BlkFile) (* (conv uint32 i) stringRefSize))]
+    (.StringRef r off)))
+
+
+^{:go/end 712} (go/method NSym ^int [^{:tag (* Reader)} r]
+  (/ (conv int (- (aget (.-Offsets (.-h r)) (+ BlkSymdef 1)) (aget (.-Offsets (.-h r)) BlkSymdef))) SymSize))
+
+
+^{:go/end 716} (go/method NHashed64def ^int [^{:tag (* Reader)} r]
+  (/ (conv int (- (aget (.-Offsets (.-h r)) (+ BlkHashed64def 1)) (aget (.-Offsets (.-h r)) BlkHashed64def))) SymSize))
+
+
+^{:go/end 720} (go/method NHasheddef ^int [^{:tag (* Reader)} r]
+  (/ (conv int (- (aget (.-Offsets (.-h r)) (+ BlkHasheddef 1)) (aget (.-Offsets (.-h r)) BlkHasheddef))) SymSize))
+
+
+^{:go/end 724} (go/method NNonpkgdef ^int [^{:tag (* Reader)} r]
+  (/ (conv int (- (aget (.-Offsets (.-h r)) (+ BlkNonpkgdef 1)) (aget (.-Offsets (.-h r)) BlkNonpkgdef))) SymSize))
+
+
+^{:go/end 728} (go/method NNonpkgref ^int [^{:tag (* Reader)} r]
+  (/ (conv int (- (aget (.-Offsets (.-h r)) (+ BlkNonpkgref 1)) (aget (.-Offsets (.-h r)) BlkNonpkgref))) SymSize))
+
+
+
+^{:go/end 733} (go/method SymOff "SymOff returns the offset of the i-th symbol.\n" ^uint32 [^{:tag (* Reader)} r ^uint32 i]
+  (+ (aget (.-Offsets (.-h r)) BlkSymdef) (* i SymSize)))
+
+
+
+^{:go/end 739} (go/method Sym "Sym returns a pointer to the i-th symbol.\n" ^{:tag (* Sym)} [^{:tag (* Reader)} r ^uint32 i]
+  (let [off (.SymOff r i)]
+    (conv (* Sym) (conv unsafe/Pointer (addr (aget (.-b r) off))))))
+
+
+
+^{:go/end 744} (go/method NRefFlags "NRefFlags returns the number of referenced symbol flags.\n" ^int [^{:tag (* Reader)} r]
+  (/ (conv int (- (aget (.-Offsets (.-h r)) (+ BlkRefFlags 1)) (aget (.-Offsets (.-h r)) BlkRefFlags))) RefFlagsSize))
+
+
+
+
+^{:go/end 751} (go/method RefFlags "RefFlags returns a pointer to the i-th referenced symbol flags.\nNote: here i is not a local symbol index, just a counter.\n" ^{:tag (* RefFlags)} [^{:tag (* Reader)} r ^int i]
+  (let [off (+ (aget (.-Offsets (.-h r)) BlkRefFlags) (conv uint32 (* i RefFlagsSize)))]
+    (conv (* RefFlags) (conv unsafe/Pointer (addr (aget (.-b r) off))))))
+
+
+
+
+
+^{:go/end 759} (go/method Hash64 "Hash64 returns the i-th short hashed symbol's hash.\nNote: here i is the index of short hashed symbols, not all symbols\n(unlike other accessors).\n" ^uint64 [^{:tag (* Reader)} r ^uint32 i]
+  (let [off (+ (aget (.-Offsets (.-h r)) BlkHash64) (* i Hash64Size))]
+    (.uint64At r off)))
+
+
+
+
+
+^{:go/end 767} (go/method Hash "Hash returns a pointer to the i-th hashed symbol's hash.\nNote: here i is the index of hashed symbols, not all symbols\n(unlike other accessors).\n" ^{:tag (* HashType)} [^{:tag (* Reader)} r ^uint32 i]
+  (let [off (+ (aget (.-Offsets (.-h r)) BlkHash) (* i HashSize))]
+    (conv (* HashType) (conv unsafe/Pointer (addr (aget (.-b r) off))))))
+
+
+
+^{:go/end 773} (go/method NReloc "NReloc returns the number of relocations of the i-th symbol.\n" ^int [^{:tag (* Reader)} r ^uint32 i]
+  (let [relocIdxOff (+ (aget (.-Offsets (.-h r)) BlkRelocIdx) (* i 4))]
+    (conv int (- (.uint32At r (+ relocIdxOff 4)) (.uint32At r relocIdxOff)))))
+
+
+
+^{:go/end 780} (go/method RelocOff "RelocOff returns the offset of the j-th relocation of the i-th symbol.\n" ^uint32 [^{:tag (* Reader)} r ^uint32 i ^int j]
+  (let [relocIdxOff (+ (aget (.-Offsets (.-h r)) BlkRelocIdx) (* i 4))
+      ^{:line 778} relocIdx (.uint32At r relocIdxOff)]
+    (+ (aget (.-Offsets (.-h r)) BlkReloc) (* (+ relocIdx (conv uint32 j)) (conv uint32 RelocSize)))))
+
+
+
+^{:go/end 786} (go/method Reloc "Reloc returns a pointer to the j-th relocation of the i-th symbol.\n" ^{:tag (* Reloc)} [^{:tag (* Reader)} r ^uint32 i ^int j]
+  (let [off (.RelocOff r i j)]
+    (conv (* Reloc) (conv unsafe/Pointer (addr (aget (.-b r) off))))))
+
+
+
+^{:go/end 793} (go/method Relocs "Relocs returns a pointer to the relocations of the i-th symbol.\n" ^{:tag (slice Reloc)} [^{:tag (* Reader)} r ^uint32 i]
+  (let [off (.RelocOff r i 0)
+      ^{:line 791} n (.NReloc r i)]
+    (subslice (conv (* (array huge Reloc)) (conv unsafe/Pointer (addr (aget (.-b r) off)))) _ n n)))
+
+
+
+^{:go/end 799} (go/method NAux "NAux returns the number of aux symbols of the i-th symbol.\n" ^int [^{:tag (* Reader)} r ^uint32 i]
+  (let [auxIdxOff (+ (aget (.-Offsets (.-h r)) BlkAuxIdx) (* i 4))]
+    (conv int (- (.uint32At r (+ auxIdxOff 4)) (.uint32At r auxIdxOff)))))
+
+
+
+^{:go/end 806} (go/method AuxOff "AuxOff returns the offset of the j-th aux symbol of the i-th symbol.\n" ^uint32 [^{:tag (* Reader)} r ^uint32 i ^int j]
+  (let [auxIdxOff (+ (aget (.-Offsets (.-h r)) BlkAuxIdx) (* i 4))
+      ^{:line 804} auxIdx (.uint32At r auxIdxOff)]
+    (+ (aget (.-Offsets (.-h r)) BlkAux) (* (+ auxIdx (conv uint32 j)) (conv uint32 AuxSize)))))
+
+
+
+^{:go/end 812} (go/method Aux "Aux returns a pointer to the j-th aux symbol of the i-th symbol.\n" ^{:tag (* Aux)} [^{:tag (* Reader)} r ^uint32 i ^int j]
+  (let [off (.AuxOff r i j)]
+    (conv (* Aux) (conv unsafe/Pointer (addr (aget (.-b r) off))))))
+
+
+
+^{:go/end 819} (go/method Auxs "Auxs returns the aux symbols of the i-th symbol.\n" ^{:tag (slice Aux)} [^{:tag (* Reader)} r ^uint32 i]
+  (let [off (.AuxOff r i 0)
+      ^{:line 817} n (.NAux r i)]
+    (subslice (conv (* (array huge Aux)) (conv unsafe/Pointer (addr (aget (.-b r) off)))) _ n n)))
+
+
+
+^{:go/end 825} (go/method DataOff "DataOff returns the offset of the i-th symbol's data.\n" ^uint32 [^{:tag (* Reader)} r ^uint32 i]
+  (let [dataIdxOff (+ (aget (.-Offsets (.-h r)) BlkDataIdx) (* i 4))]
+    (+ (aget (.-Offsets (.-h r)) BlkData) (.uint32At r dataIdxOff))))
+
+
+
+^{:go/end 831} (go/method DataSize "DataSize returns the size of the i-th symbol's data.\n" ^int [^{:tag (* Reader)} r ^uint32 i]
+  (let [dataIdxOff (+ (aget (.-Offsets (.-h r)) BlkDataIdx) (* i 4))]
+    (conv int (- (.uint32At r (+ dataIdxOff 4)) (.uint32At r dataIdxOff)))))
+
+
+
+^{:go/end 840} (go/method Data "Data returns the i-th symbol's data.\n" ^{:tag (slice byte)} [^{:tag (* Reader)} r ^uint32 i]
+  (let [dataIdxOff (+ (aget (.-Offsets (.-h r)) BlkDataIdx) (* i 4))
+      ^{:line 836} base (aget (.-Offsets (.-h r)) BlkData)
+      ^{:line 837} off (.uint32At r dataIdxOff)
+      ^{:line 838} end (.uint32At r (+ dataIdxOff 4))]
+    (.BytesAt r (+ base off) (conv int (- end off)))))
+
+
+
+^{:go/end 849} (go/method DataString "DataString returns the i-th symbol's data as a string.\n" ^string [^{:tag (* Reader)} r ^uint32 i]
+  (let [dataIdxOff (+ (aget (.-Offsets (.-h r)) BlkDataIdx) (* i 4))
+      ^{:line 845} base (aget (.-Offsets (.-h r)) BlkData)
+      ^{:line 846} off (.uint32At r dataIdxOff)
+      ^{:line 847} end (.uint32At r (+ dataIdxOff 4))]
+    (.StringAt r (+ base off) (- end off))))
+
+
+
+^{:go/end 854} (go/method NRefName "NRefName returns the number of referenced symbol names.\n" ^int [^{:tag (* Reader)} r]
+  (/ (conv int (- (aget (.-Offsets (.-h r)) (+ BlkRefName 1)) (aget (.-Offsets (.-h r)) BlkRefName))) RefNameSize))
+
+
+
+
+^{:go/end 861} (go/method RefName "RefName returns a pointer to the i-th referenced symbol name.\nNote: here i is not a local symbol index, just a counter.\n" ^{:tag (* RefName)} [^{:tag (* Reader)} r ^int i]
+  (let [off (+ (aget (.-Offsets (.-h r)) BlkRefName) (conv uint32 (* i RefNameSize)))]
+    (conv (* RefName) (conv unsafe/Pointer (addr (aget (.-b r) off))))))
+
+
+
+^{:go/end 866} (go/method ReadOnly "ReadOnly returns whether r.BytesAt returns read-only bytes.\n" ^bool [^{:tag (* Reader)} r]
+  (.-readonly r))
+
+
+
+^{:go/end 871} (go/method Flags "Flags returns the flag bits read from the object file header.\n" ^uint32 [^{:tag (* Reader)} r]
+  (.-Flags (.-h r)))
+
+
+^{:go/end 873} (go/method Shared ^bool [^{:tag (* Reader)} r] (!= (bit-and (.Flags r) ObjFlagShared) 0))
+^{:go/end 874} (go/method FromAssembly ^bool [^{:tag (* Reader)} r] (!= (bit-and (.Flags r) ObjFlagFromAssembly) 0))
+^{:go/end 875} (go/method Unlinkable ^bool [^{:tag (* Reader)} r] (!= (bit-and (.Flags r) ObjFlagUnlinkable) 0))
+^{:go/end 876} (go/method Std ^bool [^{:tag (* Reader)} r] (!= (bit-and (.Flags r) ObjFlagStd) 0))

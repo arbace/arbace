@@ -1,0 +1,4313 @@
+;; Copyright 2021 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.cmd.compile.internal.noder) (go/file "reader.go" :imports [
+
+
+    ^{:line 8} [hex "encoding/hex"]
+    ^{:line 9} [fmt "fmt"]
+    ^{:line 10} [constant "go/constant"]
+    ^{:line 11} [buildcfg "internal/buildcfg"]
+    ^{:line 12} [pkgbits "internal/pkgbits"]
+    ^{:line 13} [filepath "path/filepath"]
+    ^{:line 14} [strings "strings"]
+
+    ^{:line 16} [base "cmd/compile/internal/base"]
+    ^{:line 17} [dwarfgen "cmd/compile/internal/dwarfgen"]
+    ^{:line 18} [inline "cmd/compile/internal/inline"]
+    ^{:line 19} [interleaved "cmd/compile/internal/inline/interleaved"]
+    ^{:line 20} [ir "cmd/compile/internal/ir"]
+    ^{:line 21} [objw "cmd/compile/internal/objw"]
+    ^{:line 22} [pgoir "cmd/compile/internal/pgoir"]
+    ^{:line 23} [reflectdata "cmd/compile/internal/reflectdata"]
+    ^{:line 24} [staticinit "cmd/compile/internal/staticinit"]
+    ^{:line 25} [typecheck "cmd/compile/internal/typecheck"]
+    ^{:line 26} [types "cmd/compile/internal/types"]
+    ^{:line 27} [hash "cmd/internal/hash"]
+    ^{:line 28} [obj "cmd/internal/obj"]
+    ^{:line 29} [objabi "cmd/internal/objabi"]
+    ^{:line 30} [src "cmd/internal/src"]])
+
+
+;; This file implements cmd/compile backend's reader for the Unified
+;; IR export data.
+
+
+(go/type pkgReader "A pkgReader reads Unified IR export data.\n" (struct
+    ^{:line 38} pkgbits/PkgDecoder
+
+    ;; Indices for encoded things; lazily populated as needed.
+    ;;
+    ;; Note: Objects (i.e., ir.Names) are lazily instantiated by
+    ;; populating their types.Sym.Def; see objReader below.
+
+    ^{:line 45 :tag (slice (* src/PosBase))} posBases
+    ^{:line 46 :tag (slice (* types/Pkg))} pkgs
+    ^{:line 47 :tag (slice (* types/Type))} typs
+
+
+
+
+    ^{:line 52 :tag (slice index) :doc "offset for rewriting the given (absolute!) index into the output,\nbut bitwise inverted so we can detect if we're missing the entry\nor not.\n"} newindex))
+
+
+^{:go/end 65} (go/func newPkgReader ^{:tag (* pkgReader)} [^pkgbits/PkgDecoder pr]
+  (addr ^{:go/breaks [2 [4 59] 6 8 [10 63]]} (lit pkgReader
+      :PkgDecoder pr
+
+      :posBases (make (slice (* src/PosBase)) (.NumElems pr pkgbits/SectionPosBase))
+      :pkgs (make (slice (* types/Pkg)) (.NumElems pr pkgbits/SectionPkg))
+      :typs (make (slice (* types/Type)) (.NumElems pr pkgbits/SectionType))
+
+      :newindex (make (slice index) (.TotalElems pr)))))
+
+
+
+
+
+(go/type pkgReaderIndex "A pkgReaderIndex compactly identifies an index (and its\ncorresponding dictionary) within a package's export data.\n" (struct
+    ^{:line 70 :tag (* pkgReader)} pr
+    ^{:line 71 :tag index} idx
+    ^{:line 72 :tag (* readerDict)} dict
+    ^{:line 73 :tag (* types/Sym)} methodSym
+
+    ^{:line 75 :tag (func [^src/XPos pos ^{:tag (* reader)} r])} synthetic))
+
+
+^{:go/end 87} (go/method asReader ^{:tag (* reader)} [^pkgReaderIndex pri ^pkgbits/SectionKind k ^pkgbits/SyncMarker marker]
+  (when (!= (.-synthetic pri) nil)
+    (return (addr (lit reader :synthetic (.-synthetic pri)))))
+
+
+  (let [r (.newReader (.-pr pri) k (.-idx pri) marker)]
+    (set! (.-dict r) (.-dict pri))
+    (set! (.-methodSym r) (.-methodSym pri))
+    ^{:line 86} r))
+
+
+^{:go/end 94} (go/method newReader ^{:tag (* reader)} [^{:tag (* pkgReader)} pr ^pkgbits/SectionKind k ^index idx ^pkgbits/SyncMarker marker]
+  (addr ^{:go/breaks [2 4]} (lit reader
+      :Decoder ^{:go/via [PkgDecoder]} (.NewDecoder pr k idx marker)
+      :p pr)))
+
+
+
+
+(go/type reader "A reader provides APIs for reading an individual element.\n" (struct
+    ^{:line 98} pkgbits/Decoder
+
+    ^{:line 100 :tag (* pkgReader)} p
+
+    ^{:line 102 :tag (* readerDict)} dict
+
+
+    ^{:line 105 :tag int :doc "funcLitGen is a counter for closure names.\n"} funcLitGen
+
+    ^{:line 107 :tag int :doc "rangeLitGen is a counter for range func closure names.\n"} rangeLitGen
+
+    ;; TODO(mdempsky): The state below is all specific to reading
+    ;; function bodies. It probably makes sense to split it out
+    ;; separately so that it doesn't take up space in every reader
+    ;; instance.
+
+    ^{:line 114 :tag (* ir/Func)} curfn
+    ^{:line 115 :tag (slice (* ir/Name))} locals
+    ^{:line 116 :tag (slice (* ir/Name))} closureVars
+
+
+
+
+
+
+    ^{:line 123 :tag bool :doc "funarghack is used during inlining to suppress setting\nField.Nname to the inlined copies of the parameters. This is\nnecessary because we reuse the same types.Type as the original\nfunction, and most of the compiler still relies on field.Nname to\nfind parameters/results.\n"} funarghack
+
+
+
+    ^{:line 127 :tag (* types/Sym) :doc "methodSym is the name of method's name, if reading a method.\nIt's nil if reading a normal function or closure body.\n"} methodSym
+
+
+    ^{:line 130 :tag (* ir/Name) :doc "dictParam is the .dict param, if any.\n"} dictParam
+
+
+
+
+    ^{:line 135 :tag (func [^src/XPos pos ^{:tag (* reader)} r]) :doc "synthetic is a callback function to construct a synthetic\nfunction body. It's used for creating the bodies of function\nliterals used to curry arguments to shaped functions.\n"} synthetic
+
+
+
+    ^{:line 139 :tag (slice int) :doc "scopeVars is a stack tracking the number of variables declared in\nthe current function at the moment each open scope was opened.\n"} scopeVars
+    ^{:line 140 :tag dwarfgen/ScopeMarker} marker
+    ^{:line 141 :tag src/XPos} lastCloseScopePos
+
+    ;; === details for handling inline body expansion ===
+
+
+
+    ^{:line 147 :tag (* ir/Func) :doc "If we're reading in a function body because of inlining, this is\nthe call that we're inlining for.\n"} inlCaller
+    ^{:line 148 :tag (* ir/CallExpr)} inlCall
+    ^{:line 149 :tag (* ir/Func)} inlFunc
+    ^{:line 150 :tag int} inlTreeIndex
+    ^{:line 151 :tag (map (* src/PosBase) (* src/PosBase))} inlPosBases
+
+
+
+    ^{:line 155 :tag int :doc "suppressInlPos tracks whether position base rewriting for\ninlining should be suppressed. See funcLit.\n"} suppressInlPos
+
+    ^{:line 157 :tag bool} delayResults
+
+
+    ^{:line 160 :tag (* types/Sym) :doc "Label to return to.\n"} retlabel))
+
+
+
+
+
+
+
+
+
+
+
+(go/type readerDict "A readerDict represents an instantiated \"compile-time dictionary,\"\nused for resolving any derived types needed for instantiating a\ngeneric object.\n\nA compile-time dictionary can either be \"shaped\" or \"non-shaped.\"\nShaped compile-time dictionaries are only used for instantiating\nshaped type definitions and function bodies, while non-shaped\ncompile-time dictionaries are used for instantiating runtime\ndictionaries.\n" (struct
+    ^{:line 173 :tag bool} shaped ; whether this is a shaped dictionary
+
+
+
+
+    ^{:line 178 :tag (* types/Sym) :doc "baseSym is the symbol for the object this dictionary belongs to.\nIf the object is an instantiated function or defined type, then\nbaseSym is the mangled symbol, including any type arguments.\n"} baseSym
+
+
+
+    ^{:line 182 :tag (* ir/Name) :doc "For non-shaped dictionaries, shapedObj is a reference to the\ncorresponding shaped object (always a function or defined type).\n"} shapedObj
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    ^{:line 202 :tag (slice (* types/Type)) :doc "targs holds the implicit and explicit type arguments in use for\nreading the current object. For example:\n\n\tfunc F[T any]() {\n\t\ttype X[U any] struct { t T; u U }\n\t\tvar _ X[string]\n\t}\n\n\tvar _ = F[int]\n\nWhile instantiating F[int], we need to in turn instantiate\nX[string]. [int] and [string] are explicit type arguments for F\nand X, respectively; but [int] is also the implicit type\narguments for X.\n\n(As an analogy to function literals, explicits are the function\nliteral's formal parameters, while implicits are variables\ncaptured by the function literal.)\n"} targs
+
+
+
+    ^{:line 206 :tag int :doc "implicits counts how many of types within targs are implicit type\narguments; the rest are explicit.\n"} implicits
+
+
+    ^{:line 209 :tag int :doc "receivers counts how many of types within targs are receiver type\narguments; they are explicit.\n"} receivers
+
+    ^{:line 211 :tag (slice derivedInfo)} derived ; reloc index of the derived type's descriptor
+    ^{:line 212 :tag (slice (* types/Type))} derivedTypes ; slice of previously computed derived types
+
+
+    ^{:line 215 :tag (slice readerMethodExprInfo) :doc "These slices correspond to entries in the runtime dictionary.\n"} typeParamMethodExprs
+    ^{:line 216 :tag (slice objInfo)} subdicts
+    ^{:line 217 :tag (slice typeInfo)} rtypes
+    ^{:line 218 :tag (slice itabInfo)} itabs))
+
+
+(go/type readerMethodExprInfo (struct
+    ^{:line 222 :tag int} typeParamIdx
+    ^{:line 223 :tag (* types/Sym)} method))
+
+
+^{:go/end 229} (go/func setType [^ir/Node n ^{:tag (* types/Type)} typ]
+  (.SetType n typ)
+  (.SetTypecheck n 1))
+
+
+^{:go/end 234} (go/func setValue [^{:tag (* ir/Name)} name ^constant/Value val]
+  (.SetVal name val)
+  (set! (.-Defn name) nil))
+
+
+;; @@@ Positions
+
+
+^{:go/end 241} (go/method pos "pos reads a position from the bitstream.\n" ^src/XPos [^{:tag (* reader)} r]
+  (.XPos (.-PosTable base/Ctxt) (.pos0 r)))
+
+
+
+
+^{:go/end 251} (go/method origPos "origPos reads a position from the bitstream, and returns both the\noriginal raw position and an inlining-adjusted position.\n" [^{:tag (* reader)} r] :results [^src/XPos origPos ^src/XPos inlPos]
+  (inc! (.-suppressInlPos r))
+  (set! origPos (.pos r))
+  (dec! (.-suppressInlPos r))
+  (set! inlPos (.inlPos r origPos))
+  (return))
+
+
+^{:go/end 263} (go/method pos0 ^src/Pos [^{:tag (* reader)} r]
+  ^{:go/via [Decoder]} (.Sync r pkgbits/SyncPos)
+  (when (not ^{:go/via [Decoder]} (.Bool r))
+    (return src/NoPos))
+
+
+  (let [posBase (.posBase r)
+      ^{:line 260} line ^{:go/via [Decoder]} (.Uint r)
+      ^{:line 261} col ^{:go/via [Decoder]} (.Uint r)]
+    (src/MakePos posBase line col)))
+
+
+
+^{:go/end 268} (go/method posBase "posBase reads a position base from the bitstream.\n" ^{:tag (* src/PosBase)} [^{:tag (* reader)} r]
+  (.inlPosBase r (.posBaseIdx (.-p r) ^{:go/via [Decoder]} (.Reloc r pkgbits/SectionPosBase))))
+
+
+
+
+^{:go/end 311} (go/method posBaseIdx "posBaseIdx returns the specified position base, reading it first if\nneeded.\n" ^{:tag (* src/PosBase)} [^{:tag (* pkgReader)} pr ^index idx]
+  (when [b (aget (.-posBases pr) idx)] (!= b nil)
+    (return b))
+
+
+  (let [r (.newReader pr pkgbits/SectionPosBase idx pkgbits/SyncPosBase)
+      ^{:line 278 :tag (* src/PosBase)} b (zero (* src/PosBase))
+
+      ^{:line 280} absFilename ^{:go/via [Decoder]} (.String r)
+      ^{:line 281} filename absFilename
+
+      ;; For build artifact stability, the export data format only
+      ;; contains the "absolute" filename as returned by objabi.AbsFile.
+      ;; However, some tests (e.g., test/run.go's asmcheck tests) expect
+      ;; to see the full, original filename printed out. Re-expanding
+      ;; "$GOROOT" to buildcfg.GOROOT is a close-enough approximation to
+      ;; satisfy this.
+      ;;
+      ;; The export data format only ever uses slash paths
+      ;; (for cross-operating-system reproducible builds),
+      ;; but error messages need to use native paths (backslash on Windows)
+      ;; as if they had been specified on the command line.
+      ;; (The go command always passes native paths to the compiler.)
+      ^:const ^{:line 295 :val "$GOROOT"} dollarGOROOT "$GOROOT"]
+    (when (and (!= buildcfg/GOROOT "") (strings/HasPrefix filename dollarGOROOT))
+      (set! filename (filepath/FromSlash (+ buildcfg/GOROOT (subslice filename (len dollarGOROOT))))))
+
+
+    (if ^{:go/via [Decoder]} (.Bool r)
+      (set! b (src/NewFileBase filename absFilename))
+
+      (let [pos (.pos0 r)
+          ^{:line 304} line ^{:go/via [Decoder]} (.Uint r)
+          ^{:line 305} col ^{:go/via [Decoder]} (.Uint r)]
+        (set! b (src/NewLinePragmaBase pos filename absFilename line col))))
+
+
+    (aset (.-posBases pr) idx b)
+    ^{:line 310} b))
+
+
+
+
+
+^{:go/end 332} (go/method inlPosBase "inlPosBase returns the inlining-adjusted src.PosBase corresponding\nto oldBase, which must be a non-inlined position. When not\ninlining, this is just oldBase.\n" ^{:tag (* src/PosBase)} [^{:tag (* reader)} r ^{:tag (* src/PosBase)} oldBase]
+  (when [index (.InliningIndex oldBase)] (>= index 0)
+    (base/Fatalf "oldBase %v already has inlining index %v" oldBase index))
+
+
+  (when (or (== (.-inlCall r) nil) (!= (.-suppressInlPos r) 0))
+    (return oldBase))
+
+
+  (when [(values newBase ok) (aget (.-inlPosBases r) oldBase)] ok
+    (return newBase))
+
+
+  (let [newBase (src/NewInliningBase oldBase (.-inlTreeIndex r))]
+    (aset (.-inlPosBases r) oldBase newBase)
+    ^{:line 331} newBase))
+
+
+
+
+
+^{:go/end 341} (go/method inlPos "inlPos returns the inlining-adjusted src.XPos corresponding to\nxpos, which must be a non-inlined position. When not inlining, this\nis just xpos.\n" ^src/XPos [^{:tag (* reader)} r ^src/XPos xpos]
+  (let [pos (.Pos (.-PosTable base/Ctxt) xpos)]
+    (.SetBase pos (.inlPosBase r (.Base pos)))
+    (.XPos (.-PosTable base/Ctxt) pos)))
+
+
+;; @@@ Packages
+
+
+^{:go/end 349} (go/method pkg "pkg reads a package reference from the bitstream.\n" ^{:tag (* types/Pkg)} [^{:tag (* reader)} r]
+  ^{:go/via [Decoder]} (.Sync r pkgbits/SyncPkg)
+  (.pkgIdx (.-p r) ^{:go/via [Decoder]} (.Reloc r pkgbits/SectionPkg)))
+
+
+
+
+^{:go/end 361} (go/method pkgIdx "pkgIdx returns the specified package from the export data, reading\nit first if needed.\n" ^{:tag (* types/Pkg)} [^{:tag (* pkgReader)} pr ^index idx]
+  (when [pkg (aget (.-pkgs pr) idx)] (!= pkg nil)
+    (return pkg))
+
+
+  (let [pkg (.doPkg (.newReader pr pkgbits/SectionPkg idx pkgbits/SyncPkgDef))]
+    (aset (.-pkgs pr) idx pkg)
+    ^{:line 360} pkg))
+
+
+
+^{:go/end 386} (go/method doPkg "doPkg reads a package definition from the bitstream.\n" ^{:tag (* types/Pkg)} [^{:tag (* reader)} r]
+  (let [path ^{:go/via [Decoder]} (.String r)]
+    (switch path
+      (case [""]
+        (set! path ^{:go/via [PkgDecoder]} (.PkgPath (.-p r))))
+      (case ["builtin"]
+        (return types/BuiltinPkg))
+      (case ["unsafe"]
+        (return types/UnsafePkg)))
+
+
+    (let [name ^{:go/via [Decoder]} (.String r)
+
+        ^{:line 377} pkg (types/NewPkg path "")]
+
+      (if (== (.-Name pkg) "")
+        (set! (.-Name pkg) name)
+
+        (base/Assertf (== (.-Name pkg) name) "package %q has name %q, but want %q" (.-Path pkg) (.-Name pkg) name))
+
+
+      ^{:line 385} pkg)))
+
+
+;; @@@ Types
+
+^{:go/end 392} (go/method typ ^{:tag (* types/Type)} [^{:tag (* reader)} r]
+  (.typWrapped r true))
+
+
+
+
+^{:go/end 398} (go/method typWrapped "typWrapped is like typ, but allows suppressing generation of\nunnecessary wrappers as a compile-time optimization.\n" ^{:tag (* types/Type)} [^{:tag (* reader)} r ^bool wrapped]
+  (.typIdx (.-p r) (.typInfo r) (.-dict r) wrapped))
+
+
+^{:go/end 406} (go/method typInfo ^typeInfo [^{:tag (* reader)} r]
+  ^{:go/via [Decoder]} (.Sync r pkgbits/SyncType)
+  (when ^{:go/via [Decoder]} (.Bool r)
+    (return (lit typeInfo :idx (conv index ^{:go/via [Decoder]} (.Len r)) :derived true)))
+
+  (lit typeInfo :idx ^{:go/via [Decoder]} (.Reloc r pkgbits/SectionType) :derived false))
+
+
+
+
+^{:go/end 416} (go/method typListIdx "typListIdx returns a list of the specified types, resolving derived\ntypes within the given dictionary.\n" ^{:tag (slice (* types/Type))} [^{:tag (* pkgReader)} pr ^{:tag (slice typeInfo)} infos ^{:tag (* readerDict)} dict]
+  (let [typs (make (slice (* types/Type)) (len infos))]
+    (range [i info infos]
+      (aset typs i (.typIdx pr info dict true)))
+
+    ^{:line 415} typs))
+
+
+
+
+
+^{:go/end 500} (go/method typIdx "typIdx returns the specified type. If info specifies a derived\ntype, it's resolved within the given dictionary. If wrapped is\ntrue, then method wrappers will be generated, if appropriate.\n" ^{:tag (* types/Type)} [^{:tag (* pkgReader)} pr ^typeInfo info ^{:tag (* readerDict)} dict ^bool wrapped]
+  (let [idx (.-idx info)
+      ^{:line 423 :tag (* (* types/Type))} where (zero (* (* types/Type)))]
+    (if (.-derived info) (do
+        (set! where (addr (aget (.-derivedTypes dict) idx)))
+        (set! idx (.-idx (aget (.-derived dict) idx))))
+
+      (set! where (addr (aget (.-typs pr) idx))))
+
+
+    (when [typ @where] (!= typ nil)
+      (return typ))
+
+
+    (let [r (.newReader pr pkgbits/SectionType idx pkgbits/SyncTypeIdx)]
+      (set! (.-dict r) dict)
+
+      (let [typ (.doTyp r)]
+        (when (== typ nil)
+          (base/Fatalf "doTyp returned nil for info=%v" info))
+
+
+        ;; For recursive type declarations involving interfaces and aliases,
+        ;; above r.doTyp() call may have already set pr.typs[idx], so just
+        ;; double check and return the type.
+        ;;
+        ;; Example:
+        ;;
+        ;;     type F = func(I)
+        ;;
+        ;;     type I interface {
+        ;;         m(F)
+        ;;     }
+        ;;
+        ;; The writer writes data types in following index order:
+        ;;
+        ;;     0: func(I)
+        ;;     1: I
+        ;;     2: interface{m(func(I))}
+        ;;
+        ;; The reader resolves it in following index order:
+        ;;
+        ;;     0 -> 1 -> 2 -> 0 -> 1
+        ;;
+        ;; and can divide in logically 2 steps:
+        ;;
+        ;;  - 0 -> 1     : first time the reader reach type I,
+        ;;                 it creates new named type with symbol I.
+        ;;
+        ;;  - 2 -> 0 -> 1: the reader ends up reaching symbol I again,
+        ;;                 now the symbol I was setup in above step, so
+        ;;                 the reader just return the named type.
+        ;;
+        ;; Now, the functions called return, the pr.typs looks like below:
+        ;;
+        ;;  - 0 -> 1 -> 2 -> 0 : [<T> I <T>]
+        ;;  - 0 -> 1 -> 2      : [func(I) I <T>]
+        ;;  - 0 -> 1           : [func(I) I interface { "".m(func("".I)) }]
+        ;;
+        ;; The idx 1, corresponding with type I was resolved successfully
+        ;; after r.doTyp() call.
+
+        (when [prev @where] (!= prev nil)
+          (return prev))
+
+
+        (when wrapped
+          ;; Only cache if we're adding wrappers, so that other callers that
+          ;; find a cached type know it was wrapped.
+          (set! @where typ)
+
+          (.needWrapper r typ))
+
+
+        (when (not (.IsUntyped typ))
+          (types/CheckSize typ))
+
+
+        ^{:line 499} typ))))
+
+
+^{:go/end 539} (go/method doTyp ^{:tag (* types/Type)} [^{:tag (* reader)} r]
+  (switch [tag (conv pkgbits/CodeType ^{:go/via [Decoder]} (.Code r pkgbits/SyncType))] tag
+    (default
+      (panic (fmt/Sprintf "unexpected type: %v" tag)))
+
+    (case [pkgbits/TypeBasic]
+      (return @(aget basics ^{:go/via [Decoder]} (.Len r))))
+
+    (case [pkgbits/TypeNamed]
+      (let [obj (.obj r)]
+        (go/call assert (== (.Op obj) ir/OTYPE))
+        (return (.Type obj))))
+
+    (case [pkgbits/TypeTypeParam]
+      (return (aget (.-targs (.-dict r)) ^{:go/via [Decoder]} (.Len r))))
+
+    (case [pkgbits/TypeArray]
+      (let [len (conv int64 ^{:go/via [Decoder]} (.Uint64 r))]
+        (return (types/NewArray (.typ r) len))))
+    (case [pkgbits/TypeChan]
+      (let [dir (aget dirs ^{:go/via [Decoder]} (.Len r))]
+        (return (types/NewChan (.typ r) dir))))
+    (case [pkgbits/TypeMap]
+      (return (types/NewMap (.typ r) (.typ r))))
+    (case [pkgbits/TypePointer]
+      (return (types/NewPtr (.typ r))))
+    (case [pkgbits/TypeSignature]
+      (return (.signature r nil)))
+    (case [pkgbits/TypeSlice]
+      (return (types/NewSlice (.typ r))))
+    (case [pkgbits/TypeStruct]
+      (return (.structType r)))
+    (case [pkgbits/TypeInterface]
+      (return (.interfaceType r)))
+    (case [pkgbits/TypeUnion]
+      (return (.unionType r)))))
+
+
+
+^{:go/end 574} (go/method unionType ^{:tag (* types/Type)} [^{:tag (* reader)} r]
+  ;; In the types1 universe, we only need to handle value types.
+  ;; Impure interfaces (i.e., interfaces with non-trivial type sets
+  ;; like "int | string") can only appear as type parameter bounds,
+  ;; and this is enforced by the types2 type checker.
+  ;;
+  ;; However, type unions can still appear in pure interfaces if the
+  ;; type union is equivalent to "any". E.g., typeparam/issue52124.go
+  ;; declares variables with the type "interface { any | int }".
+  ;;
+  ;; To avoid needing to represent type unions in types1 (since we
+  ;; don't have any uses for that today anyway), we simply fold them
+  ;; to "any".
+
+  ;; TODO(mdempsky): Restore consistency check to make sure folding to
+  ;; "any" is safe. This is unfortunately tricky, because a pure
+  ;; interface can reference impure interfaces too, including
+  ;; cyclically (#60117).
+  (when false
+    (let [pure false]
+      (for [(values i n) (values 0 ^{:go/via [Decoder]} (.Len r))] (< i n) (inc! i)
+        (set! _ ^{:go/via [Decoder]} (.Bool r)) ; tilde
+        (let [term (.typ r)]
+          (when (.IsEmptyInterface term)
+            (set! pure true))))
+
+
+      (when (not pure)
+        (base/Fatalf "impure type set used in value type"))))
+
+
+
+  (aget types/Types types/TINTER))
+
+
+^{:go/end 595} (go/method interfaceType ^{:tag (* types/Type)} [^{:tag (* reader)} r]
+  (let [(values nmethods nembeddeds) (values ^{:go/via [Decoder]} (.Len r) ^{:go/via [Decoder]} (.Len r))
+      ^{:line 578} implicit (and (== nmethods 0) (== nembeddeds 1) ^{:go/via [Decoder]} (.Bool r))]
+    (go/call assert (not implicit)) ; implicit interfaces only appear in constraints
+
+    (let [fields (make (slice (* types/Field)) (+ nmethods nembeddeds))
+        (values methods embeddeds) (values (subslice fields _ nmethods) (subslice fields nmethods))]
+
+      (range [i methods]
+        (aset methods i (types/NewField (.pos r) (.selector r) (.signature r (types/FakeRecv)))))
+
+      (range [i embeddeds]
+        (aset embeddeds i (types/NewField src/NoXPos nil (.typ r))))
+
+
+      (when (== (len fields) 0)
+        (return (aget types/Types types/TINTER))) ; empty interface
+
+      (types/NewInterface fields))))
+
+
+^{:go/end 608} (go/method structType ^{:tag (* types/Type)} [^{:tag (* reader)} r]
+  (let [fields (make (slice (* types/Field)) ^{:go/via [Decoder]} (.Len r))]
+    (range [i fields]
+      (let [field (types/NewField (.pos r) (.selector r) (.typ r))]
+        (set! (.-Note field) ^{:go/via [Decoder]} (.String r))
+        (when ^{:go/via [Decoder]} (.Bool r)
+          (set! (.-Embedded field) 1))
+
+        (aset fields i field)))
+
+    (types/NewStruct fields)))
+
+
+^{:go/end 620} (go/method signature ^{:tag (* types/Type)} [^{:tag (* reader)} r ^{:tag (* types/Field)} recv]
+  ^{:go/via [Decoder]} (.Sync r pkgbits/SyncSignature)
+
+  (let [params (.params r)
+      ^{:line 614} results (.params r)]
+    (when ^{:go/via [Decoder]} (.Bool r) ; variadic
+      (.SetIsDDD (aget params (- (len params) 1)) true))
+
+
+    (types/NewSignature recv params results)))
+
+
+^{:go/end 629} (go/method params ^{:tag (slice (* types/Field))} [^{:tag (* reader)} r]
+  ^{:go/via [Decoder]} (.Sync r pkgbits/SyncParams)
+  (let [params (make (slice (* types/Field)) ^{:go/via [Decoder]} (.Len r))]
+    (range [i params]
+      (aset params i (.param r)))
+
+    ^{:line 628} params))
+
+
+^{:go/end 634} (go/method param ^{:tag (* types/Field)} [^{:tag (* reader)} r]
+  ^{:go/via [Decoder]} (.Sync r pkgbits/SyncParam)
+  (types/NewField (.pos r) (.localIdent r) (.typ r)))
+
+
+;; @@@ Objects
+
+
+
+
+(go/var ^{:doc "objReader maps qualified identifiers (represented as *types.Sym) to\na pkgReader and corresponding index that can be used for reading\nthat object's definition.\n"} objReader (lit (map (* types/Sym) pkgReaderIndex)))
+
+
+^{:go/end 646} (go/method obj "obj reads an instantiated object reference from the bitstream.\n" ^ir/Node [^{:tag (* reader)} r]
+  (.objInstIdx (.-p r) (.objInfo r) (.-dict r) false))
+
+
+
+
+^{:go/end 663} (go/method objInfo "objInfo reads an instantiated object reference from the bitstream\nand returns the encoded reference to it, without instantiating it.\n" ^objInfo [^{:tag (* reader)} r]
+  ^{:go/via [Decoder]} (.Sync r pkgbits/SyncObject)
+  (when (.Has ^{:go/via [Decoder]} (.Version r) pkgbits/DerivedFuncInstance)
+    (go/call assert (not ^{:go/via [Decoder]} (.Bool r))))
+
+  (let [idx ^{:go/via [Decoder]} (.Reloc r pkgbits/SectionObj)
+
+      ^{:line 657} explicits (make (slice typeInfo) ^{:go/via [Decoder]} (.Len r))]
+    (range [i explicits]
+      (aset explicits i (.typInfo r)))
+
+
+    (lit objInfo idx explicits)))
+
+
+
+
+^{:go/end 676} (go/method objInstIdx "objInstIdx returns the encoded, instantiated object. If shaped is\ntrue, then the shaped variant of the object is returned instead.\n" ^ir/Node [^{:tag (* pkgReader)} pr ^objInfo info ^{:tag (* readerDict)} dict ^bool shaped]
+  (let [explicits (.typListIdx pr (.-explicits info) dict)
+
+      ^{:line 670 :tag (slice (* types/Type))} implicits (zero (slice (* types/Type)))]
+    (when (!= dict nil)
+      (set! implicits (.-targs dict)))
+
+
+    (.objIdx pr (.-idx info) implicits explicits shaped)))
+
+
+
+
+
+
+^{:go/end 688} (go/method objIdx "objIdx returns the specified object, instantiated with the given\ntype arguments, if any.\nIf shaped is true, then the shaped variant of the object is returned\ninstead.\n" ^ir/Node [^{:tag (* pkgReader)} pr ^index idx ^{:tag (slice (* types/Type))} implicits ^{:tag (slice (* types/Type))} explicits ^bool shaped]
+  (let [(values n err) (.objIdxMayFail pr idx implicits explicits shaped)]
+    (when (!= err nil)
+      (base/Fatalf "%v" err))
+
+    ^{:line 687} n))
+
+
+
+
+
+
+
+
+^{:go/end 882} (go/method objIdxMayFail "objIdxMayFail is equivalent to objIdx, but returns an error rather than\nfailing the build if this object requires type arguments and the incorrect\nnumber of type arguments were passed.\n\nOther sources of internal failure (such as duplicate definitions) still fail\nthe build.\n" [^{:tag (* pkgReader)} pr ^index idx ^{:tag (slice (* types/Type))} implicits ^{:tag (slice (* types/Type))} explicits ^bool shaped] :results [ir/Node error]
+  (let [rname (.newReader pr pkgbits/SectionName idx pkgbits/SyncObject1)
+      (values _ sym) (.qualifiedIdent rname)
+      ^{:line 699} tag (conv pkgbits/CodeObj ^{:go/via [Decoder]} (.Code rname pkgbits/SyncCodeObj))]
+
+    (when (== tag pkgbits/ObjStub)
+      (go/call assert (not (.IsBlank sym)))
+      (switch (.-Pkg sym)
+        (case [types/BuiltinPkg types/UnsafePkg]
+          (return (assert ir/Node (.-Def sym)) nil)))
+
+      (when [(values pri ok) (aget objReader sym)] ok
+        (return (.objIdxMayFail (.-pr pri) (.-idx pri) nil explicits shaped)))
+
+      (when (== (.-Path (.-Pkg sym)) "runtime")
+        (return (typecheck/LookupRuntime (.-Name sym)) nil))
+
+      (base/Fatalf "unresolved stub: %v" sym))
+
+
+    (let [(values dict err) (.objDictIdx pr sym idx implicits explicits shaped)]
+      (when (!= err nil)
+        (return nil err))
+
+
+      (set! sym (.-baseSym dict))
+      (when (and (not (.IsBlank sym)) (!= (.-Def sym) nil))
+        (return (assert (* ir/Name) (.-Def sym)) nil))
+
+
+      (let [r (.newReader pr pkgbits/SectionObj idx pkgbits/SyncObject1)
+          ^{:line 727} rext (.newReader pr pkgbits/SectionObjExt idx pkgbits/SyncObject1)]
+
+        (set! (.-dict r) dict)
+        (set! (.-dict rext) dict)
+
+        (let [do ^{:go/end 749} (fn ^{:tag (* ir/Name)} [^ir/Op op ^bool hasTParams]
+              (let [pos (.pos r)]
+                (setBasePos pos)
+                (when hasTParams
+                  (.typeParamNames r))
+
+
+                (let [name (ir/NewDeclNameAt pos op sym)]
+                  (set! (.-Class name) ir/PEXTERN) ; may be overridden later
+                  (when (not (.IsBlank sym))
+                    (when (!= (.-Def sym) nil)
+                      (base/FatalfAt ^{:go/via [miniExpr miniNode]} (.Pos name) "already have a definition for %v" name))
+
+                    (go/call assert (== (.-Def sym) nil))
+                    (set! (.-Def sym) name))
+
+                  ^{:line 748} name)))]
+
+
+          (switch tag
+            (default
+              (panic "unexpected object"))
+
+            (case [pkgbits/ObjAlias]
+              (let [name (go/call do ir/OTYPE false)]
+
+                (when (.Has ^{:go/via [Decoder]} (.Version r) pkgbits/AliasTypeParamNames)
+                  (.typeParamNames r))
+
+
+                ;; Clumsy dance: the r.typ() call here might recursively find this
+                ;; type alias name, before we've set its type (#66873). So we
+                ;; temporarily clear sym.Def and then restore it later, if still
+                ;; unset.
+                (let [hack (== (.-Def sym) name)]
+                  (when hack
+                    (set! (.-Def sym) nil))
+
+                  (let [typ (.typ r)]
+                    (when hack
+                      (when (!= (.-Def sym) nil)
+                        (set! name (assert (* ir/Name) (.-Def sym)))
+                        (go/call assert (types/IdenticalStrict ^{:go/via [miniExpr]} (.Type name) typ))
+                        (return name nil))
+
+                      (set! (.-Def sym) name))
+
+
+                    (setType name typ)
+                    (.SetAlias name true)
+                    (return name nil)))))
+
+            (case [pkgbits/ObjConst]
+              (let [name (go/call do ir/OLITERAL false)
+                  ^{:line 786} typ (.typ r)
+                  ^{:line 787} val (FixValue typ ^{:go/via [Decoder]} (.Value r))]
+                (setType name typ)
+                (setValue name val)
+                (return name nil)))
+
+            (case [pkgbits/ObjFunc]
+              (let [npos (.pos r)]
+                (setBasePos npos)
+
+                (let [^{:tag (* types/Sym)} sel (zero (* types/Sym))
+                    ^{:line 797 :tag (* types/Field)} recv (zero (* types/Field))]
+                  (if (and (.Has ^{:go/via [Decoder]} (.Version r) pkgbits/GenericMethods) ^{:go/via [Decoder]} (.Bool r)) (do
+                      (set! sel (.selector r))
+                      (.recvTypeParamNames r)
+                      (set! recv (.param r)))
+                    (do
+                      (when (== (.-Name sym) "init")
+                        (set! sym (Renameinit)))))
+
+
+                  (.typeParamNames r)
+                  (let [typ (.signature r recv)
+                      ^{:line 809} fpos (.pos r)
+
+                      ^{:line 811} fn (ir/NewFunc fpos npos sym typ)]
+                    (when (and (.hasTypeParams r) (.-shaped (.-dict r)))
+                      (.SetHasShape typ true))
+
+
+                    (let [name (.-Nname fn)]
+                      (when (not (.IsBlank sym))
+                        (when (!= (.-Def sym) nil)
+                          (base/FatalfAt ^{:go/via [miniExpr miniNode]} (.Pos name) "already have a definition for %v" name))
+
+                        (go/call assert (== (.-Def sym) nil))
+                        (set! (.-Def sym) name))
+
+
+                      (when (.hasTypeParams r)
+                        (.SetDupok (.-Func name) true)
+                        (if (.-shaped (.-dict r))
+                          (setType name (shapeSig (.-Func name) (.-dict r)))
+
+                          (set! todoDicts (append todoDicts ^{:go/end 832} (fn []
+                                (set! (.-shapedObj (.-dict r)) (assert (* ir/Name) (.objIdx pr idx implicits explicits true))))))))
+
+
+
+
+                      (.funcExt rext name sel)
+                      (return name nil))))))
+
+            (case [pkgbits/ObjType]
+              (let [name (go/call do ir/OTYPE true)
+                  ^{:line 841} typ (types/NewNamed name)]
+                (setType name typ)
+                (when (and (.hasTypeParams r) (.-shaped (.-dict r)))
+                  (.SetHasShape typ true))
+
+
+                ;; Important: We need to do this before SetUnderlying.
+                (.typeExt rext name)
+
+                ;; We need to defer CheckSize until we've called SetUnderlying to
+                ;; handle recursive types.
+                (types/DeferCheckSize)
+                (.SetUnderlying typ (.typWrapped r false))
+                (types/ResumeCheckSize)
+
+                (when (and (.hasTypeParams r) (not (.-shaped (.-dict r))))
+                  (set! todoDicts (append todoDicts ^{:go/end 859} (fn []
+                        (set! (.-shapedObj (.-dict r)) (assert (* ir/Name) (.objIdx pr idx implicits explicits true)))))))
+
+
+
+                (let [methods (make (slice (* types/Field)) ^{:go/via [Decoder]} (.Len r))]
+                  (range [i methods]
+                    (aset methods i (.method r rext)))
+
+                  (when (!= (len methods) 0)
+                    (.SetMethods typ methods))
+
+
+                  (when (not (.-shaped (.-dict r)))
+                    (.needWrapper r typ))
+
+
+                  (return name nil))))
+
+            (case [pkgbits/ObjVar]
+              (let [name (go/call do ir/ONAME false)]
+                (setType name (.typ r))
+                (.varExt rext name)
+                (return name nil)))))))))
+
+
+
+
+^{:go/end 954} (go/method mangle "mangle shapes the non-shaped symbol sym under the current dictionary.\n" ^{:tag (* types/Sym)} [^{:tag (* readerDict)} dict ^{:tag (* types/Sym)} sym]
+  (when (not (.hasTypeParams dict))
+    (return sym))
+
+
+  (let [^strings/Builder buf (zero strings/Builder)
+      ;; If sym is a locally defined generic type, we need the suffix to
+      ;; stay at the end after mangling so that types/fmt.go can strip it
+      ;; out again when writing the type's runtime descriptor (#54456).
+      (values n0 vsuff) (types/SplitVargenSuffix (.-Name sym))
+      (values n1 msuff) (types/SplitMethSuffix (.-Name sym))
+
+      ;; Methods are never locally defined.
+      ^{:line 898 :tag string} n (zero string)]
+    (go/call assert (or (== vsuff "") (== msuff "")))
+    (if (!= vsuff "")
+      (set! n n0)
+
+      (set! n n1))
+
+
+    (let [^int j (zero int)]
+      (go/call assert (or (== (.-implicits dict) 0) (== (.-receivers dict) 0)))
+      (if (!= msuff "")
+        (set! j (.-receivers dict)) ; consume receiver type arguments
+
+        (set! j (len (.-targs dict)))) ; consume all type arguments
+
+
+      ;; put type arguments inside parenthesis; (*T)[int] -> (*T[int])
+      (let [(values ^:assign n ok) (strings/CutSuffix n ")")]
+
+        ;; type arguments, if any
+        (.WriteString buf n)
+        (when (> j 0)
+          (.WriteByte buf \[)
+          (for [i 0] (< i j) (inc! i)
+            (when (> i 0)
+              (if (== i (.-implicits dict))
+                (.WriteByte buf \;)
+
+                (.WriteByte buf \,)))
+
+
+            (.WriteString buf (.LinkString (aget (.-targs dict) i))))
+
+          (.WriteByte buf \]))
+
+
+        (when ok
+          (.WriteString buf ")"))
+
+
+        (.WriteString buf vsuff)
+        (.WriteString buf msuff)
+
+        ;; method arguments, if any
+        (when (!= msuff "")
+          (.WriteByte buf \[)
+          (for [i j] (< i (len (.-targs dict))) (inc! i)
+            (when (> i j)
+              (.WriteByte buf \,))
+
+            (.WriteString buf (.LinkString (aget (.-targs dict) i))))
+
+          (.WriteByte buf \]))
+
+
+        (.Lookup (.-Pkg sym) (.String buf))))))
+
+
+
+
+
+
+^{:go/end 1023} (go/func Shapify "Shapify returns the shape type for targ.\n\nIf basic is true, then the type argument is used to instantiate a\ntype parameter whose constraint is a basic interface.\n" ^{:tag (* types/Type)} [^{:tag (* types/Type)} targ ^bool basic]
+  (when (== (.Kind targ) types/TFORW)
+    (if (.IsFullyInstantiated targ) (do
+        ;; For recursive instantiated type argument, it may  still be a TFORW
+        ;; when shapifying happens. If we don't have targ's underlying type,
+        ;; shapify won't work. The worst case is we end up not reusing code
+        ;; optimally in some tricky cases.
+        (when (!= (.-Shapify base/Debug) 0)
+          (base/Warn "skipping shaping of recursive type %v" targ))
+
+        (when (.HasShape targ)
+          (return targ)))
+
+
+      (base/Fatalf "%v is missing its underlying type" targ)))
+
+
+  ;; For fully instantiated shape interface type, use it as-is. Otherwise, the instantiation
+  ;; involved recursive generic interface may cause mismatching in function signature, see issue #65362.
+  (when (and (== (.Kind targ) types/TINTER) (.IsFullyInstantiated targ) (.HasShape targ))
+    (return targ))
+
+
+  ;; When a pointer type is used to instantiate a type parameter
+  ;; constrained by a basic interface, we know the pointer's element
+  ;; type can't matter to the generated code. In this case, we can use
+  ;; an arbitrary pointer type as the shape type. (To match the
+  ;; non-unified frontend, we use `*byte`.)
+  ;;
+  ;; Otherwise, we simply use the type's underlying type as its shape.
+  ;;
+  ;; TODO(mdempsky): It should be possible to do much more aggressive
+  ;; shaping still; e.g., collapsing all pointer-shaped types into a
+  ;; common type, collapsing scalars of the same size/alignment into a
+  ;; common type, recursively shaping the element types of composite
+  ;; types, and discarding struct field names and tags. However, we'll
+  ;; need to start tracking how type parameters are actually used to
+  ;; implement some of these optimizations.
+  (let [under (.Underlying targ)]
+    (when (and basic (.IsPtr targ) (not (.NotInHeap (.Elem targ))))
+      (set! under (types/NewPtr (aget types/Types types/TUINT8))))
+
+
+    ;; Hash long type names to bound symbol name length seen by users,
+    ;; particularly for large protobuf structs (#65030).
+    (let [uls (.LinkString under)]
+      (when (and (!= (.-MaxShapeLen base/Debug) 0)
+          (> (len uls) (.-MaxShapeLen base/Debug)))
+        (let [h (hash/Sum32 (conv (slice byte) uls))]
+          (set! uls (hex/EncodeToString (subslice h)))))
+
+
+      (let [sym (.Lookup types/ShapePkg uls)]
+        (when (== (.-Def sym) nil)
+          (let [name (ir/NewDeclNameAt (.Pos under) ir/OTYPE sym)
+              ^{:line 1015} typ (types/NewNamed name)]
+            (.SetUnderlying typ under)
+            (set! (.-Def sym) (typed typ name))))
+
+        (let [res (.Type (.-Def sym))]
+          (go/call assert (.IsShape res))
+          (go/call assert (.HasShape res))
+          ^{:line 1022} res)))))
+
+
+
+^{:go/end 1111} (go/method objDictIdx "objDictIdx reads and returns the specified object dictionary.\n" [^{:tag (* pkgReader)} pr ^{:tag (* types/Sym)} sym ^index idx ^{:tag (slice (* types/Type))} implicits ^{:tag (slice (* types/Type))} explicits ^bool shaped] :results [(* readerDict) error]
+  (let [r (.newReader pr pkgbits/SectionObjDict idx pkgbits/SyncObject1)
+
+      ^{:line 1029} dict ^{:go/breaks [2]} (lit readerDict
+        :shaped shaped)
+
+
+      ^{:line 1033} nimplicits ^{:go/via [Decoder]} (.Len r)
+      ^{:line 1034} nreceivers 0]
+    (when (.Has ^{:go/via [Decoder]} (.Version r) pkgbits/GenericMethods)
+      (set! nreceivers ^{:go/via [Decoder]} (.Len r)))
+
+    (let [nexplicits (+ ^{:go/via [Decoder]} (.Len r) nreceivers)]
+
+      (when (or (> nimplicits (len implicits)) (!= nexplicits (len explicits)))
+        (return nil (fmt/Errorf "%v has %v+%v params, but instantiated with %v+%v args" sym nimplicits nexplicits (len implicits) (len explicits))))
+
+
+      (set! (.-targs dict) (append (subslice implicits _ nimplicits nimplicits) (spread explicits)))
+      (set! (.-implicits dict) nimplicits)
+      (set! (.-receivers dict) nreceivers)
+
+      ;; Within the compiler, we can just skip over the type parameters.
+      (range [(subslice (.-targs dict) (.-implicits dict))]
+        ;; Skip past bounds without actually evaluating them.
+        (.typInfo r))
+
+
+      (set! (.-derived dict) (make (slice derivedInfo) ^{:go/via [Decoder]} (.Len r)))
+      (set! (.-derivedTypes dict) (make (slice (* types/Type)) (len (.-derived dict))))
+      (range [i (.-derived dict)]
+        (aset (.-derived dict) i (lit derivedInfo :idx ^{:go/via [Decoder]} (.Reloc r pkgbits/SectionType)))
+        (when (.Has ^{:go/via [Decoder]} (.Version r) pkgbits/DerivedInfoNeeded)
+          (go/call assert (not ^{:go/via [Decoder]} (.Bool r)))))
+
+
+
+      ;; Runtime dictionary information; private to the compiler.
+
+      ;; If any type argument is already shaped, then we're constructing a
+      ;; shaped object, even if not explicitly requested (i.e., calling
+      ;; objIdx with shaped==true). This can happen with instantiating
+      ;; types that are referenced within a function body.
+      (range [_ targ (.-targs dict)]
+        (when (.HasShape targ)
+          (set! (.-shaped dict) true)
+          (break)))
+
+
+
+      ;; And if we're constructing a shaped object, then shapify all type
+      ;; arguments.
+      (range [i targ (.-targs dict)]
+        (let [basic ^{:go/via [Decoder]} (.Bool r)]
+          (when (.-shaped dict)
+            (aset (.-targs dict) i (Shapify targ basic)))))
+
+
+
+      (set! (.-baseSym dict) (.mangle dict sym))
+
+      (set! (.-typeParamMethodExprs dict) (make (slice readerMethodExprInfo) ^{:go/via [Decoder]} (.Len r)))
+      (range [i (.-typeParamMethodExprs dict)]
+        (let [typeParamIdx ^{:go/via [Decoder]} (.Len r)
+            ^{:line 1090} method (.selector r)]
+
+          (aset (.-typeParamMethodExprs dict) i (lit readerMethodExprInfo typeParamIdx method))))
+
+
+      (set! (.-subdicts dict) (make (slice objInfo) ^{:go/via [Decoder]} (.Len r)))
+      (range [i (.-subdicts dict)]
+        (aset (.-subdicts dict) i (.objInfo r)))
+
+
+      (set! (.-rtypes dict) (make (slice typeInfo) ^{:go/via [Decoder]} (.Len r)))
+      (range [i (.-rtypes dict)]
+        (aset (.-rtypes dict) i (.typInfo r)))
+
+
+      (set! (.-itabs dict) (make (slice itabInfo) ^{:go/via [Decoder]} (.Len r)))
+      (range [i (.-itabs dict)]
+        (aset (.-itabs dict) i (lit itabInfo :typ (.typInfo r) :iface (.typInfo r))))
+
+
+      (return (addr dict) nil))))
+
+
+^{:go/end 1120} (go/method recvTypeParamNames [^{:tag (* reader)} r]
+  ^{:go/via [Decoder]} (.Sync r pkgbits/SyncTypeParamNames)
+
+  (range [(subslice (.-targs (.-dict r)) (.-implicits (.-dict r)) (+ (.-implicits (.-dict r)) (.-receivers (.-dict r))))]
+    (.pos r)
+    (.localIdent r)))
+
+
+
+^{:go/end 1129} (go/method typeParamNames [^{:tag (* reader)} r]
+  ^{:go/via [Decoder]} (.Sync r pkgbits/SyncTypeParamNames)
+
+  (range [(subslice (.-targs (.-dict r)) (+ (.-implicits (.-dict r)) (.-receivers (.-dict r))))]
+    (.pos r)
+    (.localIdent r)))
+
+
+
+^{:go/end 1158} (go/method method ^{:tag (* types/Field)} [^{:tag (* reader)} r ^{:tag (* reader)} rext]
+  ^{:go/via [Decoder]} (.Sync r pkgbits/SyncMethod)
+  (let [npos (.pos r)
+      ^{:line 1134} sym (.selector r)]
+    (.typeParamNames r)
+    (let [recv (.param r)
+        ^{:line 1137} typ (.signature r recv)
+
+        ^{:line 1139} fpos (.pos r)
+        ^{:line 1140} fn (ir/NewFunc fpos npos (ir/MethodSym (.-Type recv) sym) typ)
+        ^{:line 1141} name (.-Nname fn)]
+
+      (when (.hasTypeParams r)
+        (.SetDupok (.-Func name) true)
+        (when (.-shaped (.-dict r))
+          (set! typ (shapeSig (.-Func name) (.-dict r)))
+          (setType name typ)))
+
+
+
+      (.funcExt rext name sym)
+
+      (let [meth (types/NewField ^{:go/via [miniNode]} (.Pos (.-Func name)) sym typ)]
+        (set! (.-Nname meth) name)
+        (.SetNointerface meth (!= (bit-and (.-Pragma (.-Func name)) ir/Nointerface) 0))
+
+        ^{:line 1157} meth))))
+
+
+^{:go/end 1167} (go/method qualifiedIdent [^{:tag (* reader)} r] :results [^{:tag (* types/Pkg)} pkg ^{:tag (* types/Sym)} sym]
+  ^{:go/via [Decoder]} (.Sync r pkgbits/SyncSym)
+  (set! pkg (.pkg r))
+  (when [name ^{:go/via [Decoder]} (.String r)] (!= name "")
+    (set! sym (.Lookup pkg name)))
+
+  (return))
+
+
+^{:go/end 1176} (go/method localIdent ^{:tag (* types/Sym)} [^{:tag (* reader)} r]
+  ^{:go/via [Decoder]} (.Sync r pkgbits/SyncLocalIdent)
+  ^{:go/breaks [[3 1175]]} (let [pkg (.pkg r)]
+    (when [name ^{:go/via [Decoder]} (.String r)] (!= name "")
+      (return (.Lookup pkg name)))
+
+    nil))
+
+
+^{:go/end 1186} (go/method selector ^{:tag (* types/Sym)} [^{:tag (* reader)} r]
+  ^{:go/via [Decoder]} (.Sync r pkgbits/SyncSelector)
+  (let [pkg (.pkg r)
+      ^{:line 1181} name ^{:go/via [Decoder]} (.String r)]
+    (when (types/IsExported name)
+      (set! pkg types/LocalPkg))
+
+    (.Lookup pkg name)))
+
+
+^{:go/end 1190} (go/method hasTypeParams ^bool [^{:tag (* reader)} r]
+  (.hasTypeParams (.-dict r)))
+
+
+^{:go/end 1194} (go/method hasTypeParams ^bool [^{:tag (* readerDict)} dict]
+  (and (!= dict nil) (!= (len (.-targs dict)) 0)))
+
+
+;; @@@ Compiler extensions
+
+^{:go/end 1264} (go/method funcExt [^{:tag (* reader)} r ^{:tag (* ir/Name)} name ^{:tag (* types/Sym)} method]
+  ^{:go/via [Decoder]} (.Sync r pkgbits/SyncFuncExt)
+
+  (let [fn (.-Func name)]
+
+    ;; XXX: Workaround because linker doesn't know how to copy Pos.
+    (when (not (.IsKnown ^{:go/via [miniNode]} (.Pos fn)))
+      ^{:go/via [miniNode]} (.SetPos fn ^{:go/via [miniExpr miniNode]} (.Pos name)))
+
+
+    ;; Normally, we only compile local functions, which saves redundant compilation work.
+    ;; n.Defn is not nil for local functions, and is nil for imported function. But for
+    ;; generic functions, we might have an instantiation that no other package has seen before.
+    ;; So we need to be conservative and compile it again.
+    ;;
+    ;; That's why name.Defn is set here, so ir.VisitFuncsBottomUp can analyze function.
+    ;; TODO(mdempsky,cuonglm): find a cleaner way to handle this.
+    (when (or (== (.-Pkg (.Sym name)) types/LocalPkg) (.hasTypeParams r))
+      (set! (.-Defn name) fn))
+
+
+    (set! (.-Pragma fn) (.pragmaFlag r))
+    (.linkname r name)
+
+    (when (== buildcfg/GOARCH "wasm")
+      (let [importmod ^{:go/via [Decoder]} (.String r)
+          ^{:line 1224} importname ^{:go/via [Decoder]} (.String r)
+          ^{:line 1225} exportname ^{:go/via [Decoder]} (.String r)]
+
+        (when (and (!= importmod "") (!= importname ""))
+          (set! (.-WasmImport fn) (addr ^{:go/breaks [2 4]} (lit ir/WasmImport
+                :Module importmod
+                :Name importname))))
+
+
+        (when (!= exportname "")
+          (when (!= method nil)
+            (base/ErrorfAt ^{:go/via [miniNode]} (.Pos fn) 0 "cannot use //go:wasmexport on a method"))
+
+          (set! (.-WasmExport fn) (addr (lit ir/WasmExport :Name exportname))))))
+
+
+
+    (if ^{:go/via [Decoder]} (.Bool r) (do
+        (go/call assert (== (.-Defn name) nil))
+
+        (set! (.-ABI fn) (conv obj/ABI ^{:go/via [Decoder]} (.Uint64 r)))
+
+        ;; Escape analysis.
+        (range [_ f (.RecvParams ^{:go/via [miniExpr]} (.Type name))]
+          (set! (.-Note f) ^{:go/via [Decoder]} (.String r)))
+
+
+        (when ^{:go/via [Decoder]} (.Bool r)
+          (set! (.-Inl fn) (addr ^{:go/breaks [2 4]} (lit ir/Inline
+                :Cost (conv int32 ^{:go/via [Decoder]} (.Len r))
+                :CanDelayResults ^{:go/via [Decoder]} (.Bool r))))
+
+          (when ^{:go/via [Flags]} (.-NewInliner buildcfg/Experiment)
+            (set! (.-Properties (.-Inl fn)) ^{:go/via [Decoder]} (.String r)))))
+
+
+
+      (.addBody r (.-Func name) method))
+
+    ^{:go/via [Decoder]} (.Sync r pkgbits/SyncEOF)))
+
+
+^{:go/end 1287} (go/method typeExt [^{:tag (* reader)} r ^{:tag (* ir/Name)} name]
+  ^{:go/via [Decoder]} (.Sync r pkgbits/SyncTypeExt)
+
+  (let [typ ^{:go/via [miniExpr]} (.Type name)]
+
+    (when (.hasTypeParams r)
+      ;; Mark type as fully instantiated to ensure the type descriptor is written
+      ;; out as DUPOK and method wrappers are generated even for imported types.
+      (.SetIsFullyInstantiated typ true)
+      ;; HasShape should be set if any type argument is or has a shape type.
+      (range [_ targ (.-targs (.-dict r))]
+        (when (.HasShape targ)
+          (.SetHasShape typ true)
+          (break))))
+
+
+
+
+    (.SetPragma name (.pragmaFlag r))
+
+    (typecheck/SetBaseTypeIndex typ ^{:go/via [Decoder]} (.Int64 r) ^{:go/via [Decoder]} (.Int64 r))))
+
+
+^{:go/end 1292} (go/method varExt [^{:tag (* reader)} r ^{:tag (* ir/Name)} name]
+  ^{:go/via [Decoder]} (.Sync r pkgbits/SyncVarExt)
+  (.linkname r name))
+
+
+^{:go/end 1321} (go/method linkname [^{:tag (* reader)} r ^{:tag (* ir/Name)} name]
+  (go/call assert (== ^{:go/via [miniExpr miniNode]} (.Op name) ir/ONAME))
+  ^{:go/via [Decoder]} (.Sync r pkgbits/SyncLinkname)
+
+  (if [idx ^{:go/via [Decoder]} (.Int64 r)] (>= idx 0)
+    (let [lsym (.Linksym name)]
+      (set! (.-SymIdx lsym) (conv int32 idx))
+      ^{:go/via [Attribute]} (.Set lsym obj/AttrIndexed true))
+
+    (let [linkname ^{:go/via [Decoder]} (.String r)
+        ^{:line 1304} std ^{:go/via [Decoder]} (.Bool r)
+        ^{:line 1305} sym (.Sym name)]
+      (set! (.-Linkname sym) linkname)
+      (when (and (== (.-Pkg sym) types/LocalPkg) (!= linkname ""))
+        ;; Mark linkname in the current package. We don't mark the
+        ;; ones that are imported and propagated (e.g. through
+        ;; inlining or instantiation, which are marked in their
+        ;; corresponding packages). So we can tell in which package
+        ;; the linkname is used (pulled), and the linker can
+        ;; make a decision for allowing or disallowing it.
+        (if std
+          ^{:go/via [Attribute]} (.Set (.Linksym sym) obj/AttrLinknameStd true)
+
+          ^{:go/via [Attribute]} (.Set (.Linksym sym) obj/AttrLinkname true))))))
+
+
+
+
+
+^{:go/end 1326} (go/method pragmaFlag ^ir/PragmaFlag [^{:tag (* reader)} r]
+  ^{:go/via [Decoder]} (.Sync r pkgbits/SyncPragma)
+  (conv ir/PragmaFlag ^{:go/via [Decoder]} (.Int r)))
+
+
+;; @@@ Function bodies
+
+
+
+(go/var ^{:doc "bodyReader tracks where the serialized IR for a local or imported,\ngeneric function's body can be found.\n"} bodyReader (lit (map (* ir/Func) pkgReaderIndex)))
+
+
+
+(go/var ^{:doc "importBodyReader tracks where the serialized IR for an imported,\nstatic (i.e., non-generic) function body can be read.\n"} importBodyReader (lit (map (* types/Sym) pkgReaderIndex)))
+
+
+
+^{:go/end 1348} (go/func bodyReaderFor "bodyReaderFor returns the pkgReaderIndex for reading fn's\nserialized IR, and whether one was found.\n" [^{:tag (* ir/Func)} fn] :results [^pkgReaderIndex pri ^bool ok]
+  (if (!= (.-Defn (.-Nname fn)) nil) (do
+      (set! (values pri ok) (aget bodyReader fn))
+      (base/AssertfAt ok base/Pos "must have bodyReader for %v" fn)) ; must always be available
+
+    (set! (values pri ok) (aget importBodyReader (.Sym fn))))
+
+  (return))
+
+
+
+
+(go/var ^{:tag (slice (func [])) :doc "todoDicts holds the list of dictionaries that still need their\nruntime dictionary objects constructed.\n"} todoDicts)
+
+
+
+(go/var ^{:tag (slice (* ir/Func)) :doc "todoBodies holds the list of function bodies that still need to be\nconstructed.\n"} todoBodies)
+
+
+
+^{:go/end 1376} (go/method addBody "addBody reads a function body reference from the element bitstream,\nand associates it with fn.\n" [^{:tag (* reader)} r ^{:tag (* ir/Func)} fn ^{:tag (* types/Sym)} method]
+  ;; addBody should only be called for local functions or imported
+  ;; generic functions; see comment in funcExt.
+  (go/call assert (!= (.-Defn (.-Nname fn)) nil))
+
+  (let [idx ^{:go/via [Decoder]} (.Reloc r pkgbits/SectionBody)
+
+      ^{:line 1367} pri (lit pkgReaderIndex (.-p r) idx (.-dict r) method nil)]
+    (aset bodyReader fn pri)
+
+    (when (== (.-curfn r) nil)
+      (set! todoBodies (append todoBodies fn))
+      (return))
+
+
+    (.funcBody pri fn)))
+
+
+^{:go/end 1393} (go/method funcBody [^pkgReaderIndex pri ^{:tag (* ir/Func)} fn]
+  (let [r (.asReader pri pkgbits/SectionBody pkgbits/SyncFuncBody)
+      ^{:line 1380} panicking true]
+    (defer (^{:go/end 1389} (fn []
+          (when panicking
+            ;; TODO not sure what the best way to print in this context is.
+            ;; If code panics in unified IR reading, you want *something* like this.
+            ;; Whoever ends up debugging the next unified IR failure, please
+            ;; improve this (base.Warnf?) if you can figure out how.
+            (fmt/Printf "****** panic traversed funcBody of %v\n" fn)))))
+
+
+    (.funcBody r fn)
+    (set! panicking false)))
+
+
+
+
+
+^{:go/end 1424} (go/method funcBody "funcBody reads a function body definition from the element\nbitstream, and populates fn with it.\n" [^{:tag (* reader)} r ^{:tag (* ir/Func)} fn]
+  (set! (.-curfn r) fn)
+  (set! (.-closureVars r) (.-ClosureVars fn))
+  (when (and (!= (len (.-closureVars r)) 0) (.hasTypeParams r))
+    (set! (.-dictParam r) (aget (.-closureVars r) (- (len (.-closureVars r)) 1)))) ; dictParam is last; see reader.funcLit
+
+
+  (ir/WithFunc fn ^{:go/end 1421} (fn []
+      (.declareParams r)
+
+      (when (.syntheticBody r ^{:go/via [miniNode]} (.Pos fn))
+        (return))
+
+
+      (when (not ^{:go/via [Decoder]} (.Bool r))
+        (return))
+
+
+      (let [body (.stmts r)]
+        (when (== body nil)
+          (set! body (lit (slice ir/Node) (typecheck/Stmt (ir/NewBlockStmt src/NoXPos nil)))))
+
+        (set! (.-Body fn) body)
+        (set! (.-Endlineno fn) (.pos r)))))
+
+
+  (.WriteTo (.-marker r) fn))
+
+
+
+
+^{:go/breaks [[6 1441]] :go/end 1442} (go/method syntheticBody "syntheticBody adds a synthetic body to r.curfn if appropriate, and\nreports whether it did.\n" ^bool [^{:tag (* reader)} r ^src/XPos pos]
+  (when (!= (.-synthetic r) nil)
+    ((.-synthetic r) pos r)
+    (return true))
+
+
+  ;; If this function has type parameters and isn't shaped, then we
+  ;; just tail call its corresponding shaped variant.
+  (when (and (.hasTypeParams r) (not (.-shaped (.-dict r))))
+    (.callShaped r pos)
+    (return true))
+
+
+  false)
+
+
+
+
+^{:go/end 1481} (go/method callShaped "callShaped emits a tail call to r.shapedFn, passing along the\narguments to the current function.\n" [^{:tag (* reader)} r ^src/XPos pos]
+  (let [shapedObj (.-shapedObj (.-dict r))]
+    (go/call assert (!= shapedObj nil))
+
+    (let [^ir/Node shapedFn (zero ir/Node)]
+      (if (== (.-methodSym r) nil) (do
+          ;; Instantiating a generic function; shapedObj is the shaped function itself.
+          (go/call assert (and (== ^{:go/via [miniExpr miniNode]} (.Op shapedObj) ir/ONAME) (== (.-Class shapedObj) ir/PFUNC)))
+          (set! shapedFn shapedObj))
+
+        ;; Instantiating a generic type's method; shapedObj is the shaped method itself
+        ;; if the method is generic — else, it is the shaped type declaring the method.
+        (set! shapedFn (shapedMethodExpr pos shapedObj (.-methodSym r))))
+
+
+      (let [params (.syntheticArgs r)
+
+          ;; Construct the arguments list: receiver (if any), then runtime
+          ;; dictionary, and finally normal parameters.
+          ;;
+          ;; Note: For simplicity, shaped methods are added as normal methods
+          ;; on their shaped types. So existing code (e.g., packages ir and
+          ;; typecheck) expects the shaped type to appear as the receiver
+          ;; parameter (or first parameter, as a method expression). Hence
+          ;; putting the dictionary parameter after that is the least invasive
+          ;; solution at the moment.
+          ^{:line 1472 :tag ir/Nodes} args (zero ir/Nodes)]
+        (when (!= (.-methodSym r) nil)
+          (.Append args (aget params 0))
+          (set! params (subslice params 1)))
+
+        (.Append args (typecheck/Expr (ir/NewAddrExpr pos (.dictNameOf (.-p r) (.-dict r)))))
+        (.Append args (spread params))
+
+        (.syntheticTailCall r pos shapedFn args)))))
+
+
+
+
+^{:go/end 1488} (go/method syntheticArgs "syntheticArgs returns the recvs and params arguments passed to the\ncurrent function.\n" ^ir/Nodes [^{:tag (* reader)} r]
+  (let [sig ^{:go/via [miniExpr]} (.Type (.-Nname (.-curfn r)))]
+    (^{:inst [(* ir/Name)]} ir/ToNodes (subslice (.-Dcl (.-curfn r)) _ (+ (.NumRecvs sig) (.NumParams sig))))))
+
+
+
+
+^{:go/end 1506} (go/method syntheticTailCall "syntheticTailCall emits a tail call to fn, passing the given\narguments list.\n" [^{:tag (* reader)} r ^src/XPos pos ^ir/Node fn ^ir/Nodes args]
+  ;; Mark the function as a wrapper so it doesn't show up in stack
+  ;; traces.
+  (.SetWrapper (.-curfn r) true)
+
+  (let [call (assert (* ir/CallExpr) (typecheck/Call pos fn args (.IsVariadic (.Type fn))))
+
+      ^{:line 1499 :tag ir/Node} stmt (zero ir/Node)]
+    (if (!= (.NumResults (.Type fn)) 0)
+      (set! stmt (typecheck/Stmt (ir/NewReturnStmt pos (lit (slice ir/Node) call))))
+
+      (set! stmt call))
+
+    (.Append (.-Body (.-curfn r)) stmt)))
+
+
+
+^{:go/end 1587} (go/method dictNameOf "dictNameOf returns the runtime dictionary corresponding to dict.\n" ^{:tag (* ir/Name)} [^{:tag (* pkgReader)} pr ^{:tag (* readerDict)} dict]
+  (let [pos base/AutogeneratedPos]
+
+    ;; Check that we only instantiate runtime dictionaries with real types.
+    (base/AssertfAt (not (.-shaped dict)) pos "runtime dictionary of shaped object %v" (.-baseSym dict))
+
+    (let [sym (.Lookup (.-Pkg (.-baseSym dict)) (+ objabi/GlobalDictPrefix "." (.-Name (.-baseSym dict))))]
+      (when (!= (.-Def sym) nil)
+        (return (assert (* ir/Name) (.-Def sym))))
+
+
+      (let [name (ir/NewNameAt pos sym (.varType dict))]
+        (set! (.-Class name) ir/PEXTERN)
+        (set! (.-Def sym) name) ; break cycles with mutual subdictionaries
+
+        (let [lsym (.Linksym name)
+            ^{:line 1525} ot 0
+
+            ^{:line 1527} assertOffset ^{:go/end 1529} (fn [^string section ^int offset]
+              (base/AssertfAt (== ot (* offset types/PtrSize)) pos "writing section %v at offset %v, but it should be at %v*%v" section ot offset types/PtrSize))]
+
+
+          (assertOffset "type param method exprs" (.typeParamMethodExprsOffset dict))
+          (range [_ info (.-typeParamMethodExprs dict)]
+            (let [typeParam (aget (.-targs dict) (.-typeParamIdx info))
+                ^{:line 1534} method (typecheck/NewMethodExpr pos typeParam (.-method info))
+
+                ^{:line 1536} rsym (.Linksym (.FuncName method))]
+              (go/call assert (== ^{:go/via [Attribute]} (.ABI rsym) obj/ABIInternal)) ; must be ABIInternal; see ir.OCFUNC in ssagen/ssa.go
+
+              (set! ot (objw/SymPtr lsym ot rsym 0))))
+
+
+          (assertOffset "subdictionaries" (.subdictsOffset dict))
+          (range [_ info (.-subdicts dict)]
+            (let [explicits (.typListIdx pr (.-explicits info) dict)
+
+                ;; Careful: Due to subdictionary cycles, name may not be fully
+                ;; initialized yet.
+                ^{:line 1548} name (.objDictName pr (.-idx info) (.-targs dict) explicits)]
+
+              (set! ot (objw/SymPtr lsym ot (.Linksym name) 0))))
+
+
+          (assertOffset "rtypes" (.rtypesOffset dict))
+          (range [_ info (.-rtypes dict)]
+            (let [typ (.typIdx pr info dict true)]
+              (set! ot (objw/SymPtr lsym ot (reflectdata/TypeLinksym typ) 0))
+
+              ;; TODO(mdempsky): Double check this.
+              (reflectdata/MarkTypeUsedInInterface typ lsym)))
+
+
+          ;; For each (typ, iface) pair, we write the *runtime.itab pointer
+          ;; for the pair. For pairs that don't actually require an itab
+          ;; (i.e., typ is an interface, or iface is an empty interface), we
+          ;; write a nil pointer instead. This is wasteful, but rare in
+          ;; practice (e.g., instantiating a type parameter with an interface
+          ;; type).
+          (assertOffset "itabs" (.itabsOffset dict))
+          (range [_ info (.-itabs dict)]
+            (let [typ (.typIdx pr (.-typ info) dict true)
+                ^{:line 1571} iface (.typIdx pr (.-iface info) dict true)]
+
+              (if (and (not (.IsInterface typ)) (.IsInterface iface) (not (.IsEmptyInterface iface)))
+                (set! ot (objw/SymPtr lsym ot (reflectdata/ITabLsym typ iface) 0))
+
+                (set! ot + types/PtrSize))
+
+
+              ;; TODO(mdempsky): Double check this.
+              (reflectdata/MarkTypeUsedInInterface typ lsym)
+              (reflectdata/MarkTypeUsedInInterface iface lsym)))
+
+
+          (objw/Global lsym (conv int32 ot) (bit-or obj/DUPOK obj/RODATA))
+
+          ^{:line 1586} name)))))
+
+
+
+
+^{:go/breaks [4] :go/end 1593} (go/method typeParamMethodExprsOffset "typeParamMethodExprsOffset returns the offset of the runtime\ndictionary's type parameter method expressions section, in words.\n" ^int [^{:tag (* readerDict)} dict]
+  0)
+
+
+
+
+^{:go/end 1599} (go/method subdictsOffset "subdictsOffset returns the offset of the runtime dictionary's\nsubdictionary section, in words.\n" ^int [^{:tag (* readerDict)} dict]
+  (+ (.typeParamMethodExprsOffset dict) (len (.-typeParamMethodExprs dict))))
+
+
+
+
+^{:go/end 1605} (go/method rtypesOffset "rtypesOffset returns the offset of the runtime dictionary's rtypes\nsection, in words.\n" ^int [^{:tag (* readerDict)} dict]
+  (+ (.subdictsOffset dict) (len (.-subdicts dict))))
+
+
+
+
+^{:go/end 1611} (go/method itabsOffset "itabsOffset returns the offset of the runtime dictionary's itabs\nsection, in words.\n" ^int [^{:tag (* readerDict)} dict]
+  (+ (.rtypesOffset dict) (len (.-rtypes dict))))
+
+
+
+
+^{:go/end 1617} (go/method numWords "numWords returns the total number of words that comprise dict's\nruntime dictionary variable.\n" ^int64 [^{:tag (* readerDict)} dict]
+  (conv int64 (+ (.itabsOffset dict) (len (.-itabs dict)))))
+
+
+
+^{:go/end 1622} (go/method varType "varType returns the type of dict's runtime dictionary variable.\n" ^{:tag (* types/Type)} [^{:tag (* readerDict)} dict]
+  (types/NewArray (aget types/Types types/TUINTPTR) (.numWords dict)))
+
+
+^{:go/end 1635} (go/method declareParams [^{:tag (* reader)} r]
+  (.DeclareParams (.-curfn r) (not (.-funarghack r)))
+
+  (range [_ name (.-Dcl (.-curfn r))]
+    (when (== (.-Name (.Sym name)) dictParamName)
+      (set! (.-dictParam r) name)
+      (continue))
+
+
+    (.addLocal r name)))
+
+
+
+^{:go/end 1650} (go/method addLocal [^{:tag (* reader)} r ^{:tag (* ir/Name)} name]
+  (when (== (.-synthetic r) nil)
+    ^{:go/via [Decoder]} (.Sync r pkgbits/SyncAddLocal)
+    (when ^{:go/via [PkgDecoder]} (.SyncMarkers (.-p r))
+      (let [want ^{:go/via [Decoder]} (.Int r)]
+        (when [have (len (.-locals r))] (!= have want)
+          (base/FatalfAt ^{:go/via [miniExpr miniNode]} (.Pos name) "locals table has desynced"))))
+
+
+    (.varDictIndex r name))
+
+
+  (set! (.-locals r) (append (.-locals r) name)))
+
+
+^{:go/end 1658} (go/method useLocal ^{:tag (* ir/Name)} [^{:tag (* reader)} r]
+  ^{:go/via [Decoder]} (.Sync r pkgbits/SyncUseObjLocal)
+  (when ^{:go/via [Decoder]} (.Bool r)
+    (return (aget (.-locals r) ^{:go/via [Decoder]} (.Len r))))
+
+  (aget (.-closureVars r) ^{:go/via [Decoder]} (.Len r)))
+
+
+^{:go/end 1668} (go/method openScope [^{:tag (* reader)} r]
+  ^{:go/via [Decoder]} (.Sync r pkgbits/SyncOpenScope)
+  (let [pos (.pos r)]
+
+    (when (.-Dwarf base/Flag)
+      (set! (.-scopeVars r) (append (.-scopeVars r) (len (.-Dcl (.-curfn r)))))
+      (.Push (.-marker r) pos))))
+
+
+
+^{:go/end 1675} (go/method closeScope [^{:tag (* reader)} r]
+  ^{:go/via [Decoder]} (.Sync r pkgbits/SyncCloseScope)
+  (set! (.-lastCloseScopePos r) (.pos r))
+
+  (.closeAnotherScope r))
+
+
+
+
+
+
+^{:go/end 1730} (go/method closeAnotherScope "closeAnotherScope is like closeScope, but it reuses the same mark\nposition as the last closeScope call. This is useful for \"for\" and\n\"if\" statements, as their implicit blocks always end at the same\nposition as an explicit block.\n" [^{:tag (* reader)} r]
+  ^{:go/via [Decoder]} (.Sync r pkgbits/SyncCloseAnotherScope)
+
+  (when (.-Dwarf base/Flag)
+    (let [scopeVars (aget (.-scopeVars r) (- (len (.-scopeVars r)) 1))]
+      (set! (.-scopeVars r) (subslice (.-scopeVars r) _ (- (len (.-scopeVars r)) 1)))
+
+      ;; Quirkish: noder decides which scopes to keep before
+      ;; typechecking, whereas incremental typechecking during IR
+      ;; construction can result in new autotemps being allocated. To
+      ;; produce identical output, we ignore autotemps here for the
+      ;; purpose of deciding whether to retract the scope.
+      ;;
+      ;; This is important for net/http/fcgi, because it contains:
+      ;;
+      ;;	var body io.ReadCloser
+      ;;	if len(content) > 0 {
+      ;;		body, req.pw = io.Pipe()
+      ;;	} else { … }
+      ;;
+      ;; Notably, io.Pipe is inlinable, and inlining it introduces a ~R0
+      ;; variable at the call site.
+      ;;
+      ;; Noder does not preserve the scope where the io.Pipe() call
+      ;; resides, because it doesn't contain any declared variables in
+      ;; source. So the ~R0 variable ends up being assigned to the
+      ;; enclosing scope instead.
+      ;;
+      ;; However, typechecking this assignment also introduces
+      ;; autotemps, because io.Pipe's results need conversion before
+      ;; they can be assigned to their respective destination variables.
+      ;;
+      ;; TODO(mdempsky): We should probably just keep all scopes, and
+      ;; let dwarfgen take care of pruning them instead.
+      (let [retract true]
+        (range [_ n (subslice (.-Dcl (.-curfn r)) scopeVars)]
+          (when (not (.AutoTemp n))
+            (set! retract false)
+            (break)))
+
+
+
+        (if retract
+          ;; no variables were declared in this scope, so we can retract it.
+          (.Unpush (.-marker r))
+
+          (.Pop (.-marker r) (.-lastCloseScopePos r)))))))
+
+
+
+
+;; @@@ Statements
+
+^{:go/end 1736} (go/method stmt ^ir/Node [^{:tag (* reader)} r]
+  (block (.stmts r)))
+
+
+^{:go/end 1747} (go/func block ^ir/Node [^{:tag (slice ir/Node)} stmts]
+  (switch (len stmts)
+    (case [0]
+      (return nil))
+    (case [1]
+      (return (aget stmts 0)))
+    (default
+      (return (ir/NewBlockStmt (.Pos (aget stmts 0)) stmts)))))
+
+
+
+^{:go/end 1765} (go/method stmts ^ir/Nodes [^{:tag (* reader)} r]
+  (go/call assert (== ir/CurFunc (.-curfn r)))
+  (let [^ir/Nodes res (zero ir/Nodes)]
+
+    ^{:go/via [Decoder]} (.Sync r pkgbits/SyncStmts)
+    (while true
+      (let [tag (conv codeStmt ^{:go/via [Decoder]} (.Code r pkgbits/SyncStmt1))]
+        (when (== tag stmtEnd)
+          ^{:go/via [Decoder]} (.Sync r pkgbits/SyncStmtsEnd)
+          (return res))
+
+
+        (when [n (.stmt1 r tag (addr res))] (!= n nil)
+          (.Append res (typecheck/Stmt n)))))))
+
+
+
+
+^{:go/end 1872} (go/method stmt1 ^ir/Node [^{:tag (* reader)} r ^codeStmt tag ^{:tag (* ir/Nodes)} out]
+  (let [^{:tag (* types/Sym)} label (zero (* types/Sym))]
+    (when [n (len @out)] (> n 0)
+      (when [(values ls ok) (assert (* ir/LabelStmt) (aget @out (- n 1)))] ok
+        (set! label (.-Label ls))))
+
+
+
+    (switch tag
+      (default
+        (panic "unexpected statement"))
+
+      (case [stmtAssign]
+        (let [pos (.pos r)
+            (values names lhs) (.assignList r)
+            ^{:line 1782} rhs (.multiExpr r)]
+
+          (when (== (len rhs) 0)
+            (range [_ name names]
+              (let [as (ir/NewAssignStmt pos name nil)]
+                (.Append ^{:go/via [miniStmt]} (.PtrInit as) (ir/NewDecl pos ir/ODCL name))
+                (.Append out (typecheck/Stmt as))))
+
+            (return nil))
+
+
+          (when (and (== (len lhs) 1) (== (len rhs) 1))
+            (let [n (ir/NewAssignStmt pos (aget lhs 0) (aget rhs 0))]
+              (set! (.-Def n) (.initDefn r n names))
+              (return n)))
+
+
+          (let [n (ir/NewAssignListStmt pos ir/OAS2 lhs rhs)]
+            (set! (.-Def n) (.initDefn r n names))
+            (return n))))
+
+      (case [stmtAssignOp]
+        (let [op (.op r)
+            ^{:line 1805} lhs (.expr r)
+            ^{:line 1806} pos (.pos r)
+            ^{:line 1807} rhs (.expr r)]
+          (return (ir/NewAssignOpStmt pos op lhs rhs))))
+
+      (case [stmtIncDec]
+        (let [op (.op r)
+            ^{:line 1812} lhs (.expr r)
+            ^{:line 1813} pos (.pos r)
+            ^{:line 1814} n (ir/NewAssignOpStmt pos op lhs (ir/NewOne pos (.Type lhs)))]
+          (set! (.-IncDec n) true)
+          (return n)))
+
+      (case [stmtBlock]
+        (.Append out (spread (.blockStmt r)))
+        (return nil))
+
+      (case [stmtBranch]
+        (let [pos (.pos r)
+            ^{:line 1824} op (.op r)
+            ^{:line 1825} sym (.optLabel r)]
+          (return (ir/NewBranchStmt pos op sym))))
+
+      (case [stmtCall]
+        (let [pos (.pos r)
+            ^{:line 1830} op (.op r)
+            ^{:line 1831} call (.expr r)
+            ^{:line 1832} stmt (ir/NewGoDeferStmt pos op call)]
+          (when (== op ir/ODEFER)
+            (let [x (.optExpr r)]
+              (when (!= x nil)
+                (set! (.-DeferAt stmt) (assert ir/Expr x)))))
+
+
+          (return stmt)))
+
+      (case [stmtExpr]
+        (return (.expr r)))
+
+      (case [stmtFor]
+        (return (.forStmt r label)))
+
+      (case [stmtIf]
+        (return (.ifStmt r)))
+
+      (case [stmtLabel]
+        (let [pos (.pos r)
+            ^{:line 1852} sym (.label r)]
+          (return (ir/NewLabelStmt pos sym))))
+
+      (case [stmtReturn]
+        (let [pos (.pos r)
+            ^{:line 1857} results (.multiExpr r)]
+          (return (ir/NewReturnStmt pos results))))
+
+      (case [stmtSelect]
+        (return (.selectStmt r label)))
+
+      (case [stmtSend]
+        (let [pos (.pos r)
+            ^{:line 1865} ch (.expr r)
+            ^{:line 1866} value (.expr r)]
+          (return (ir/NewSendStmt pos ch value))))
+
+      (case [stmtSwitch]
+        (return (.switchStmt r label))))))
+
+
+
+^{:go/end 1887} (go/method assignList [^{:tag (* reader)} r] :results [(slice (* ir/Name)) (slice ir/Node)]
+  (let [lhs (make (slice ir/Node) ^{:go/via [Decoder]} (.Len r))
+      ^{:line 1876 :tag (slice (* ir/Name))} names (zero (slice (* ir/Name)))]
+
+    (range [i lhs]
+      (let [(values expr def) (.assign r)]
+        (aset lhs i expr)
+        (when def
+          (set! names (append names (assert (* ir/Name) expr))))))
+
+
+
+    (return names lhs)))
+
+
+
+
+^{:go/end 1909} (go/method assign "assign returns an assignee expression. It also reports whether the\nreturned expression is a newly declared variable.\n" [^{:tag (* reader)} r] :results [ir/Node bool]
+  (switch [tag (conv codeAssign ^{:go/via [Decoder]} (.Code r pkgbits/SyncAssign))] tag
+    (default
+      (panic "unhandled assignee expression"))
+
+    (case [assignBlank]
+      (return (typecheck/AssignExpr ir/BlankNode) false))
+
+    (case [assignDef]
+      (let [pos (.pos r)]
+        (setBasePos pos) ; test/fixedbugs/issue49767.go depends on base.Pos being set for the r.typ() call here, ugh
+        (let [name (.NewLocal (.-curfn r) pos (.localIdent r) (.typ r))]
+          (.addLocal r name)
+          (return name true))))
+
+    (case [assignExpr]
+      (return (.expr r) false))))
+
+
+
+^{:go/end 1917} (go/method blockStmt ^{:tag (slice ir/Node)} [^{:tag (* reader)} r]
+  ^{:go/via [Decoder]} (.Sync r pkgbits/SyncBlockStmt)
+  (.openScope r)
+  (let [stmts (.stmts r)]
+    (.closeScope r)
+    ^{:line 1916} stmts))
+
+
+^{:go/end 1971} (go/method forStmt ^ir/Node [^{:tag (* reader)} r ^{:tag (* types/Sym)} label]
+  ^{:go/via [Decoder]} (.Sync r pkgbits/SyncForStmt)
+
+  (.openScope r)
+
+  (when ^{:go/via [Decoder]} (.Bool r)
+    (let [pos (.pos r)
+        ^{:line 1926} rang (ir/NewRangeStmt pos nil nil nil nil false)]
+      (set! (.-Label rang) label)
+
+      (let [(values names lhs) (.assignList r)]
+        (when (>= (len lhs) 1)
+          (set! (.-Key rang) (aget lhs 0))
+          (when (>= (len lhs) 2)
+            (set! (.-Value rang) (aget lhs 1))))
+
+
+        (set! (.-Def rang) (.initDefn r rang names))
+
+        (set! (.-X rang) (.expr r))
+        (when (.IsMap (.Type (.-X rang)))
+          (set! (.-RType rang) (.rtype r pos)))
+
+        (when (and (!= (.-Key rang) nil) (not (ir/IsBlank (.-Key rang))))
+          (set! (values (.-KeyTypeWord rang) (.-KeySrcRType rang)) (.convRTTI r pos)))
+
+        (when (and (!= (.-Value rang) nil) (not (ir/IsBlank (.-Value rang))))
+          (set! (values (.-ValueTypeWord rang) (.-ValueSrcRType rang)) (.convRTTI r pos)))
+
+
+        (set! (.-Body rang) (.blockStmt r))
+        (set! (.-DistinctVars rang) ^{:go/via [Decoder]} (.Bool r))
+        (.closeAnotherScope r)
+
+        (return rang))))
+
+
+  (let [pos (.pos r)
+      ^{:line 1957} init (.stmt r)
+      ^{:line 1958} cond (.optExpr r)
+      ^{:line 1959} post (.stmt r)
+      ^{:line 1960} body (.blockStmt r)
+      ^{:line 1961} perLoopVars ^{:go/via [Decoder]} (.Bool r)]
+    (.closeAnotherScope r)
+
+    (when (and (ir/IsConst cond constant/Bool) (not (ir/BoolVal cond)))
+      (return init)) ; simplify "for init; false; post { ... }" into "init"
+
+
+    (let [stmt (ir/NewForStmt pos init cond post body perLoopVars)]
+      (set! (.-Label stmt) label)
+      ^{:line 1970} stmt)))
+
+
+^{:go/end 2007} (go/method ifStmt ^ir/Node [^{:tag (* reader)} r]
+  ^{:go/via [Decoder]} (.Sync r pkgbits/SyncIfStmt)
+  (.openScope r)
+  (let [pos (.pos r)
+      ^{:line 1977} init (.stmts r)
+      ^{:line 1978} cond (.expr r)
+      ^{:line 1979} staticCond ^{:go/via [Decoder]} (.Int r)
+      (values ^{:tag (slice ir/Node)} then ^{:tag (slice ir/Node)} els) (zero (slice ir/Node))]
+    (if (>= staticCond 0)
+      (set! then (.blockStmt r))
+
+      (set! (.-lastCloseScopePos r) (.pos r)))
+
+    (when (<= staticCond 0)
+      (set! els (.stmts r)))
+
+    (.closeAnotherScope r)
+
+    (when (!= staticCond 0)
+      ;; We may have removed a dead return statement, which can trip up
+      ;; later passes (#62211). To avoid confusion, we instead flatten
+      ;; the if statement into a block.
+
+      (when (!= (.Op cond) ir/OLITERAL)
+        (.Append init (typecheck/Stmt (ir/NewAssignStmt pos ir/BlankNode cond)))) ; for side effects
+
+      (.Append init (spread then))
+      (.Append init (spread els))
+      (return (block init)))
+
+
+    (let [n (ir/NewIfStmt pos cond then els)]
+      ^{:go/via [miniStmt]} (.SetInit n init)
+      ^{:line 2006} n)))
+
+
+^{:go/end 2070} (go/method selectStmt ^ir/Node [^{:tag (* reader)} r ^{:tag (* types/Sym)} label]
+  ^{:go/via [Decoder]} (.Sync r pkgbits/SyncSelectStmt)
+
+  (let [pos (.pos r)
+      ^{:line 2013} clauses (make (slice (* ir/CommClause)) ^{:go/via [Decoder]} (.Len r))]
+    (range [i clauses]
+      (when (> i 0)
+        (.closeScope r))
+
+      (.openScope r)
+
+      (let [pos (.pos r)
+          ^{:line 2021} comm (.stmt r)
+          ^{:line 2022} body (.stmts r)]
+
+        ;; "case i = <-c: ..." may require an implicit conversion (e.g.,
+        ;; see fixedbugs/bug312.go). Currently, typecheck throws away the
+        ;; implicit conversion and relies on it being reinserted later,
+        ;; but that would lose any explicit RTTI operands too. To preserve
+        ;; RTTI, we rewrite this as "case tmp := <-c: i = tmp; ...".
+        (when [(values as ok) (assert (* ir/AssignStmt) comm)] (and ok (== ^{:go/via [miniStmt miniNode]} (.Op as) ir/OAS) (not (.-Def as)))
+          (when [(values conv ok) (assert (* ir/ConvExpr) (.-Y as))] (and ok (== ^{:go/via [miniExpr miniNode]} (.Op conv) ir/OCONVIFACE))
+            (base/AssertfAt (.Implicit conv) ^{:go/via [miniExpr miniNode]} (.Pos conv) "expected implicit conversion: %v" conv)
+
+            (let [recv (.-X conv)]
+              (base/AssertfAt (== (.Op recv) ir/ORECV) (.Pos recv) "expected receive expression: %v" recv)
+
+              (let [tmp (.temp r pos (.Type recv))
+
+                  ;; Replace comm with `tmp := <-c`.
+                  ^{:line 2039} tmpAs (ir/NewAssignStmt pos tmp recv)]
+                (set! (.-Def tmpAs) true)
+                (.Append ^{:go/via [miniStmt]} (.PtrInit tmpAs) (ir/NewDecl pos ir/ODCL tmp))
+                (set! comm tmpAs)
+
+                ;; Change original assignment to `i = tmp`, and prepend to body.
+                (set! (.-X conv) tmp)
+                (set! body (append (lit (slice ir/Node) as) (spread body)))))))
+
+
+
+        ;; multiExpr will have desugared a comma-ok receive expression
+        ;; into a separate statement. However, the rest of the compiler
+        ;; expects comm to be the OAS2RECV statement itself, so we need to
+        ;; shuffle things around to fit that pattern.
+        (when [(values as2 ok) (assert (* ir/AssignListStmt) comm)] (and ok (== ^{:go/via [miniStmt miniNode]} (.Op as2) ir/OAS2))
+          (let [init (ir/TakeInit (aget (.-Rhs as2) 0))]
+            (base/AssertfAt (and (== (len init) 1) (== (.Op (aget init 0)) ir/OAS2RECV)) ^{:go/via [miniStmt miniNode]} (.Pos as2) "unexpected assignment: %+v" as2)
+
+            (set! comm (aget init 0))
+            (set! body (append (lit (slice ir/Node) as2) (spread body)))))
+
+
+        (aset clauses i (ir/NewCommStmt pos comm body))))
+
+    (when (> (len clauses) 0)
+      (.closeScope r))
+
+    (let [n (ir/NewSelectStmt pos clauses)]
+      (set! (.-Label n) label)
+      ^{:line 2069} n)))
+
+
+^{:go/end 2161} (go/method switchStmt ^ir/Node [^{:tag (* reader)} r ^{:tag (* types/Sym)} label]
+  ^{:go/via [Decoder]} (.Sync r pkgbits/SyncSwitchStmt)
+
+  (.openScope r)
+  (let [pos (.pos r)
+      ^{:line 2077} init (.stmt r)
+
+      ^{:line 2079 :tag ir/Node} tag (zero ir/Node)
+      ^{:line 2080 :tag (* ir/Ident)} ident (zero (* ir/Ident))
+      ^{:line 2081 :tag (* types/Type)} iface (zero (* types/Type))]
+    (if ^{:go/via [Decoder]} (.Bool r)
+      (let [pos (.pos r)]
+        (when ^{:go/via [Decoder]} (.Bool r)
+          (set! ident (ir/NewIdent (.pos r) (.localIdent r))))
+
+        (let [x (.expr r)]
+          (set! iface (.Type x))
+          (set! tag (ir/NewTypeSwitchGuard pos ident x))))
+
+      (set! tag (.optExpr r)))
+
+
+    (let [clauses (make (slice (* ir/CaseClause)) ^{:go/via [Decoder]} (.Len r))]
+      (range [i clauses]
+        (when (> i 0)
+          (.closeScope r))
+
+        (.openScope r)
+
+        (let [pos (.pos r)
+            (values ^{:tag (slice ir/Node)} cases ^{:tag (slice ir/Node)} rtypes) (zero (slice ir/Node))]
+          (if (!= iface nil) (do
+              (set! cases (make (slice ir/Node) ^{:go/via [Decoder]} (.Len r)))
+              (when (== (len cases) 0)
+                (set! cases nil)) ; TODO(mdempsky): Unclear if this matters.
+
+              (range [i cases]
+                (if ^{:go/via [Decoder]} (.Bool r) ; case nil
+                  (aset cases i (typecheck/Expr (assert (* ir/NilExpr) (.-Def (.Lookup types/BuiltinPkg "nil")))))
+
+                  (aset cases i (.exprType r)))))
+
+
+            (do
+              (set! cases (.exprList r))
+
+              ;; For `switch { case any(true): }` (e.g., issue 3980 in
+              ;; test/switch.go), the backend still creates a mixed bool/any
+              ;; comparison, and we need to explicitly supply the RTTI for the
+              ;; comparison.
+              ;;
+              ;; TODO(mdempsky): Change writer.go to desugar "switch {" into
+              ;; "switch true {", which we already handle correctly.
+              (when (== tag nil)
+                (range [i cas cases]
+                  (when (.IsEmptyInterface (.Type cas))
+                    (while (< (len rtypes) i)
+                      (set! rtypes (append rtypes nil)))
+
+                    (set! rtypes (append rtypes (reflectdata/TypePtrAt (.Pos cas) (aget types/Types types/TBOOL)))))))))
+
+
+
+
+
+          (let [clause (ir/NewCaseStmt pos cases nil)]
+            (set! (.-RTypes clause) rtypes)
+
+            (when (!= ident nil)
+              (let [name (.NewLocal (.-curfn r) (.pos r) (.Sym ident) (.typ r))]
+                (.addLocal r name)
+                (set! (.-Var clause) name)
+                (set! (.-Defn name) tag)))
+
+
+            (set! (.-Body clause) (.stmts r))
+            (aset clauses i clause))))
+
+      (when (> (len clauses) 0)
+        (.closeScope r))
+
+      (.closeScope r)
+
+      (let [n (ir/NewSwitchStmt pos tag clauses)]
+        (set! (.-Label n) label)
+        (when (!= init nil)
+          ^{:go/via [miniStmt]} (.SetInit n (lit (slice ir/Node) init)))
+
+        ^{:line 2160} n))))
+
+
+^{:go/end 2170} (go/method label ^{:tag (* types/Sym)} [^{:tag (* reader)} r]
+  ^{:go/via [Decoder]} (.Sync r pkgbits/SyncLabel)
+  (let [name ^{:go/via [Decoder]} (.String r)]
+    (when (and (!= (.-inlCall r) nil) (!= name "_"))
+      (set! name (fmt/Sprintf "~%s·%d" name inlgen)))
+
+    (typecheck/Lookup name)))
+
+
+^{:go/breaks [[5 2177]] :go/end 2178} (go/method optLabel ^{:tag (* types/Sym)} [^{:tag (* reader)} r]
+  ^{:go/via [Decoder]} (.Sync r pkgbits/SyncOptLabel)
+  (when ^{:go/via [Decoder]} (.Bool r)
+    (return (.label r)))
+
+  nil)
+
+
+
+
+
+^{:go/end 2195} (go/method initDefn "initDefn marks the given names as declared by defn and populates\nits Init field with ODCL nodes. It then reports whether any names\nwere so declared, which can be used to initialize defn.Def.\n" ^bool [^{:tag (* reader)} r ^ir/InitNode defn ^{:tag (slice (* ir/Name))} names]
+  (when (== (len names) 0)
+    (return false))
+
+
+  ^{:go/breaks [4]} (let [init (make (slice ir/Node) (len names))]
+    (range [i name names]
+      (set! (.-Defn name) defn)
+      (aset init i (ir/NewDecl ^{:go/via [miniExpr miniNode]} (.Pos name) ir/ODCL name)))
+
+    (.SetInit defn init)
+    true))
+
+
+;; @@@ Expressions
+
+
+^{:go/end 2653} (go/method expr "expr reads and returns a typechecked expression.\n" [^{:tag (* reader)} r] :results [^ir/Node res]
+  (defer (^{:go/end 2205} (fn []
+        (when (and (!= res nil) (== (.Typecheck res) 0))
+          (base/FatalfAt (.Pos res) "%v missed typecheck" res)))))
+
+
+
+  (switch [tag (conv codeExpr ^{:go/via [Decoder]} (.Code r pkgbits/SyncExpr))] tag
+    (default
+      (panic "unhandled expression"))
+
+    (case [exprLocal]
+      (return (typecheck/Expr (.useLocal r))))
+
+    (case [exprGlobal]
+      ;; Callee instead of Expr allows builtins
+      ;; TODO(mdempsky): Handle builtins directly in exprCall, like method calls?
+      (return (typecheck/Callee (.obj r))))
+
+    (case [exprFuncInst]
+      (let [(values origPos pos) (.origPos r)
+          (values wrapperFn baseFn dictPtr) (.funcInst r pos)]
+        (when (!= wrapperFn nil)
+          (return wrapperFn))
+
+        (return (.curry r origPos false baseFn dictPtr nil))))
+
+    (case [exprConst]
+      (let [pos (.pos r)
+          ^{:line 2229} typ (.typ r)
+          ^{:line 2230} val (FixValue typ ^{:go/via [Decoder]} (.Value r))]
+        (return (ir/NewBasicLit pos typ val))))
+
+    (case [exprZero]
+      (let [pos (.pos r)
+          ^{:line 2235} typ (.typ r)]
+        (return (ir/NewZero pos typ))))
+
+    (case [exprCompLit]
+      (return (.compLit r)))
+
+    (case [exprFuncLit]
+      (return (.funcLit r)))
+
+    (case [exprFieldVal]
+      (let [x (.expr r)
+          ^{:line 2246} pos (.pos r)
+          ^{:line 2247} sym (.selector r)]
+
+        (return (typecheck/XDotField pos x sym))))
+
+    (case [exprMethodVal]
+      (let [recv (.expr r)
+          (values origPos pos) (.origPos r)
+          (values wrapperFn baseFn dictPtr) (.methodExpr r)]
+
+        ;; For simple wrapperFn values, the existing machinery for creating
+        ;; and deduplicating wrapperFn value wrappers still works fine.
+        (when [(values wrapperFn ok) (assert (* ir/SelectorExpr) wrapperFn)] (and ok (== ^{:go/via [miniExpr miniNode]} (.Op wrapperFn) ir/OMETHEXPR))
+          ;; The receiver expression we constructed may have a shape type.
+          ;; For example, in fixedbugs/issue54343.go, `New[int]()` is
+          ;; constructed as `New[go.shape.int](&.dict.New[int])`, which
+          ;; has type `*T[go.shape.int]`, not `*T[int]`.
+          ;;
+          ;; However, the method we want to select here is `(*T[int]).M`,
+          ;; not `(*T[go.shape.int]).M`, so we need to manually convert
+          ;; the type back so that the OXDOT resolves correctly.
+          ;;
+          ;; TODO(mdempsky): Logically it might make more sense for
+          ;; exprCall to take responsibility for setting a non-shaped
+          ;; result type, but this is the only place where we care
+          ;; currently. And only because existing ir.OMETHVALUE backend
+          ;; code relies on n.X.Type() instead of n.Selection.Recv().Type
+          ;; (because the latter is types.FakeRecvType() in the case of
+          ;; interface method values).
+          ;;
+          (when (.HasShape (.Type recv))
+            (let [typ (.-Type (.Param ^{:go/via [miniExpr]} (.Type wrapperFn) 0))]
+              (when (not (types/Identical typ (.Type recv)))
+                (base/FatalfAt ^{:go/via [miniExpr miniNode]} (.Pos wrapperFn) "receiver %L does not match %L" recv wrapperFn))
+
+              (set! recv (typecheck/Expr (ir/NewConvExpr (.Pos recv) ir/OCONVNOP typ recv)))))
+
+
+          (let [n (typecheck/XDotMethod pos recv (.-Sel wrapperFn) false)]
+
+            ;; As a consistency check here, we make sure "n" selected the
+            ;; same method (represented by a types.Field) that wrapperFn
+            ;; selected. However, for anonymous receiver types, there can be
+            ;; multiple such types.Field instances (#58563). So we may need
+            ;; to fallback to making sure Sym and Type (including the
+            ;; receiver parameter's type) match.
+            (when (!= (.-Selection n) (.-Selection wrapperFn))
+              (go/call assert (== (.-Sym (.-Selection n)) (.-Sym (.-Selection wrapperFn))))
+              (go/call assert (types/Identical (.-Type (.-Selection n)) (.-Type (.-Selection wrapperFn))))
+              (go/call assert (types/Identical (.-Type (.Recv (.-Type (.-Selection n)))) (.-Type (.Recv (.-Type (.-Selection wrapperFn)))))))
+
+
+            (let [wrapper ^{:go/breaks [2 4]} (lit methodValueWrapper
+                  :rcvr (.Type (.-X n))
+                  :method (.-Selection n))]
+
+
+              (if (.importedDef r)
+                (set! haveMethodValueWrappers (append haveMethodValueWrappers wrapper))
+
+                (set! needMethodValueWrappers (append needMethodValueWrappers wrapper)))
+
+              (return n))))
+
+
+        ;; For more complicated method expressions, we construct a
+        ;; function literal wrapper.
+        (return (.curry r origPos true baseFn recv dictPtr))))
+
+    (case [exprMethodExpr]
+      (let [recv (.typ r)
+
+          ^{:line 2318} implicits (make (slice int) ^{:go/via [Decoder]} (.Len r))]
+        (range [i implicits]
+          (aset implicits i ^{:go/via [Decoder]} (.Len r)))
+
+        (let [(values ^bool deref ^bool addr) (zero bool)]
+          (cond ^{:go/via [Decoder]} (.Bool r)
+            (set! deref true)
+            ^{:go/via [Decoder]} (.Bool r)
+            (set! addr true))
+
+
+          (let [(values origPos pos) (.origPos r)
+              (values wrapperFn baseFn dictPtr) (.methodExpr r)]
+
+            ;; If we already have a wrapper and don't need to do anything with
+            ;; it, we can just return the wrapper directly.
+            ;;
+            ;; N.B., we use implicits/deref/addr here as the source of truth
+            ;; rather than types.Identical, because the latter can be confused
+            ;; by tricky promoted methods (e.g., typeparam/mdempsky/21.go).
+            (when (and (!= wrapperFn nil) (== (len implicits) 0) (not deref) (not addr))
+              (when (not (types/Identical recv (.-Type (.Param (.Type wrapperFn) 0))))
+                (base/FatalfAt pos "want receiver type %v, but have method %L" recv wrapperFn))
+
+              (return wrapperFn))
+
+
+            ;; Otherwise, if the wrapper function is a static method
+            ;; expression (OMETHEXPR) and the receiver type is unshaped, then
+            ;; we can rely on a statically generated wrapper being available.
+            (when [(values method ok) (assert (* ir/SelectorExpr) wrapperFn)] (and ok (== ^{:go/via [miniExpr miniNode]} (.Op method) ir/OMETHEXPR) (not (.HasShape recv)))
+              (return (typecheck/NewMethodExpr pos recv (.-Sel method))))
+
+
+            (return (.methodExprWrap r origPos recv implicits deref addr baseFn dictPtr))))))
+
+    (case [exprIndex]
+      (let [x (.expr r)
+          ^{:line 2356} pos (.pos r)
+          ^{:line 2357} index (.expr r)
+          ^{:line 2358} n (typecheck/Expr (ir/NewIndexExpr pos x index))]
+        (switch (.Op n)
+          (case [ir/OINDEXMAP]
+            (let [n (assert (* ir/IndexExpr) n)]
+              (set! (.-RType n) (.rtype r pos)))))
+
+        (return n)))
+
+    (case [exprSlice]
+      (let [x (.expr r)
+          ^{:line 2368} pos (.pos r)
+          ^{:line 2369 :tag (array 3 ir/Node)} index (zero (array 3 ir/Node))]
+        (range [i index]
+          (aset index i (.optExpr r)))
+
+        (let [op ir/OSLICE]
+          (when (!= (aget index 2) nil)
+            (set! op ir/OSLICE3))
+
+          (return (typecheck/Expr (ir/NewSliceExpr pos op x (aget index 0) (aget index 1) (aget index 2)))))))
+
+    (case [exprAssert]
+      (let [x (.expr r)
+          ^{:line 2381} pos (.pos r)
+          ^{:line 2382} typ (.exprType r)
+          ^{:line 2383} srcRType (.rtype r pos)]
+
+        ;; TODO(mdempsky): Always emit ODYNAMICDOTTYPE for uniformity?
+        (when [(values typ ok) (assert (* ir/DynamicType) typ)] (and ok (== ^{:go/via [miniExpr miniNode]} (.Op typ) ir/ODYNAMICTYPE))
+          (let [assert (ir/NewDynamicTypeAssertExpr pos ir/ODYNAMICDOTTYPE x (.-RType typ))]
+            (set! (.-SrcRType assert) srcRType)
+            (set! (.-ITab assert) (.-ITab typ))
+            (return (typed ^{:go/via [miniExpr]} (.Type typ) assert))))
+
+        (return (typecheck/Expr (ir/NewTypeAssertExpr pos x (.Type typ))))))
+
+    (case [exprUnaryOp]
+      (let [op (.op r)
+          ^{:line 2396} pos (.pos r)
+          ^{:line 2397} x (.expr r)]
+
+        (switch op
+          (case [ir/OADDR]
+            (return (typecheck/Expr (typecheck/NodAddrAt pos x))))
+          (case [ir/ODEREF]
+            (return (typecheck/Expr (ir/NewStarExpr pos x)))))
+
+        (return (typecheck/Expr (ir/NewUnaryExpr pos op x)))))
+
+    (case [exprBinaryOp]
+      (let [op (.op r)
+          ^{:line 2409} x (.expr r)
+          ^{:line 2410} pos (.pos r)
+          ^{:line 2411} y (.expr r)]
+
+        (switch op
+          (case [ir/OANDAND ir/OOROR]
+            (return (typecheck/Expr (ir/NewLogicalExpr pos op x y))))
+          (case [ir/OLSH ir/ORSH]
+            ;; Untyped rhs of non-constant shift, e.g. x << 1.0.
+            ;; If we have a constant value, it must be an int >= 0.
+            (when (ir/IsConstNode y)
+              (let [val (constant/ToInt (.Val y))]
+                (go/call assert (and (== (.Kind val) constant/Int) (>= (constant/Sign val) 0)))))))
+
+
+        (return (typecheck/Expr (ir/NewBinaryExpr pos op x y)))))
+
+    (case [exprRecv]
+      (let [x (.expr r)
+          ^{:line 2428} pos (.pos r)]
+        (for [(values i n) (values 0 ^{:go/via [Decoder]} (.Len r))] (< i n) (inc! i)
+          (set! x (Implicit (typecheck/DotField pos x ^{:go/via [Decoder]} (.Len r)))))
+
+        (cond ^{:go/via [Decoder]} (.Bool r) ; needs deref
+          (set! x (Implicit (Deref pos (.Elem (.Type x)) x)))
+          ^{:go/via [Decoder]} (.Bool r) ; needs addr
+          (set! x (Implicit (Addr pos x))))
+
+        (return x)))
+
+    (case [exprCall]
+      (let [^ir/Node fun (zero ir/Node)
+          ^{:line 2441 :tag ir/Nodes} args (zero ir/Nodes)]
+        (cond ^{:go/via [Decoder]} (.Bool r) ; method call
+          (let [recv (.expr r)
+              (values _ method dictPtr) (.methodExpr r)]
+
+            (if (and (.IsInterface (.Type recv)) (== (.Op method) ir/OMETHEXPR))
+              (let [method (assert (* ir/SelectorExpr) method)]
+
+                ;; The compiler backend (e.g., devirtualization) handle
+                ;; OCALLINTER/ODOTINTER better than OCALLFUNC/OMETHEXPR for
+                ;; interface calls, so we prefer to continue constructing
+                ;; calls that way where possible.
+                ;;
+                ;; There are also corner cases where semantically it's perhaps
+                ;; significant; e.g., fixedbugs/issue15975.go, #38634, #52025.
+
+                (set! fun (typecheck/XDotMethod ^{:go/via [miniExpr miniNode]} (.Pos method) recv (.-Sel method) true)))
+              (do
+                (when (.IsInterface (.Type recv))
+                  ;; N.B., this happens currently for typeparam/issue51521.go
+                  ;; and typeparam/typeswitch3.go.
+                  (when (!= (.-LowerM base/Flag) 0)
+                    (base/WarnfAt (.Pos method) "imprecise interface call")))
+
+
+
+                (set! fun method)
+                (.Append args recv)))
+
+            (when (!= dictPtr nil)
+              (.Append args dictPtr)))
+
+          ^{:go/via [Decoder]} (.Bool r) ; call to instanced function
+          (let [pos (.pos r)
+              (values _ shapedFn dictPtr) (.funcInst r pos)]
+            (set! fun shapedFn)
+            (.Append args dictPtr)) :else
+
+          (set! fun (.expr r)))
+
+        (let [pos (.pos r)]
+          (.Append args (spread (.multiExpr r)))
+          (let [dots ^{:go/via [Decoder]} (.Bool r)
+              ^{:line 2484} n (typecheck/Call pos fun args dots)]
+            (switch (.Op n)
+              (case [ir/OAPPEND]
+                (let [n (assert (* ir/CallExpr) n)]
+                  (set! (.-RType n) (.rtype r pos))
+                  ;; For append(a, b...), we don't need the implicit conversion. The typechecker already
+                  ;; ensured that a and b are both slices with the same base type, or []byte and string.
+                  (when (.-IsDDD n)
+                    (when [(values conv ok) (assert (* ir/ConvExpr) (aget (.-Args n) 1))] (and ok (== ^{:go/via [miniExpr miniNode]} (.Op conv) ir/OCONVNOP) (.Implicit conv))
+                      (aset (.-Args n) 1 (.-X conv))))))
+
+
+              (case [ir/OCOPY]
+                (let [n (assert (* ir/BinaryExpr) n)]
+                  (set! (.-RType n) (.rtype r pos))))
+              (case [ir/ODELETE]
+                (let [n (assert (* ir/CallExpr) n)]
+                  (set! (.-RType n) (.rtype r pos))))
+              (case [ir/OUNSAFESLICE]
+                (let [n (assert (* ir/BinaryExpr) n)]
+                  (set! (.-RType n) (.rtype r pos)))))
+
+            (return n)))))
+
+    (case [exprMake]
+      (let [pos (.pos r)
+          ^{:line 2510} typ (.exprType r)
+          ^{:line 2511} extra (.exprs r)
+          ^{:line 2512} n (assert (* ir/MakeExpr) (typecheck/Expr (ir/NewCallExpr pos ir/OMAKE nil (append (lit (slice ir/Node) typ) (spread extra)))))]
+        (set! (.-RType n) (.rtype r pos))
+        (return n)))
+
+    (case [exprNew]
+      (let [pos (.pos r)]
+        (when ^{:go/via [Decoder]} (.Bool r)
+          ;; new(expr) -> tmp := expr; &tmp
+          (let [x (.expr r)]
+            (set! x (typecheck/DefaultLit x nil)) ; See TODO in exprConvert case.
+            (let [^ir/Nodes init (zero ir/Nodes)
+                ^{:line 2523} addr (ir/NewAddrExpr pos (.tempCopy r pos x (addr init)))]
+              ^{:go/via [miniExpr]} (.SetInit addr init)
+              (return (typecheck/Expr addr)))))
+
+        ;; new(T)
+        (return (typecheck/Expr (ir/NewUnaryExpr pos ir/ONEW (.exprType r))))))
+
+    (case [exprSizeof]
+      (return (ir/NewUintptr (.pos r) (.Size (.typ r)))))
+
+    (case [exprAlignof]
+      (return (ir/NewUintptr (.pos r) (.Alignment (.typ r)))))
+
+    (case [exprOffsetof]
+      (let [pos (.pos r)
+          ^{:line 2538} typ (.typ r)]
+        (types/CalcSize typ)
+
+        (let [^int64 offset (zero int64)]
+          (for [i ^{:go/via [Decoder]} (.Len r)] (>= i 0) (dec! i)
+            (let [field (.Field typ ^{:go/via [Decoder]} (.Len r))]
+              (set! offset + (.-Offset field))
+              (set! typ (.-Type field))))
+
+
+          (return (ir/NewUintptr pos offset)))))
+
+    (case [exprReshape]
+      (let [typ (.typ r)
+          ^{:line 2552} x (.expr r)]
+
+        (when (types/IdenticalStrict (.Type x) typ)
+          (return x))
+
+
+        ;; Comparison expressions are constructed as "untyped bool" still.
+        ;;
+        ;; TODO(mdempsky): It should be safe to reshape them here too, but
+        ;; maybe it's better to construct them with the proper type
+        ;; instead.
+        (when (and (== (.Type x) types/UntypedBool) (.IsBoolean typ))
+          (return x))
+
+
+        (base/AssertfAt (or (.HasShape (.Type x)) (.HasShape typ)) (.Pos x) "%L and %v are not shape types" x typ)
+        (base/AssertfAt (types/Identical (.Type x) typ) (.Pos x) "%L is not shape-identical to %v" x typ)
+
+        ;; We use ir.HasUniquePos here as a check that x only appears once
+        ;; in the AST, so it's okay for us to call SetType without
+        ;; breaking any other uses of it.
+        ;;
+        ;; Notably, any ONAMEs should already have the exactly right shape
+        ;; type and been caught by types.IdenticalStrict above.
+        (base/AssertfAt (ir/HasUniquePos x) (.Pos x) "cannot call SetType(%v) on %L" typ x)
+
+        (when (!= (.-Reshape base/Debug) 0)
+          (base/WarnfAt (.Pos x) "reshaping %L to %v" x typ))
+
+
+        (.SetType x typ)
+
+        (when [(values call ok) (assert (* ir/CallExpr) x)] ok
+          (set! (.-Reshape call) true))
+
+
+        (return x)))
+
+    (case [exprConvert]
+      (let [implicit ^{:go/via [Decoder]} (.Bool r)
+          ^{:line 2592} typ (.typ r)
+          ^{:line 2593} pos (.pos r)
+          (values typeWord srcRType) (.convRTTI r pos)
+          ^{:line 2595} dstTypeParam ^{:go/via [Decoder]} (.Bool r)
+          ^{:line 2596} identical ^{:go/via [Decoder]} (.Bool r)
+          ^{:line 2597} x (.expr r)]
+
+        ;; spec: "If the type is a type parameter, the constant is converted
+        ;; into a non-constant value of the type parameter."
+        (when (and dstTypeParam (ir/IsConstNode x))
+          ;; ConvertVal only handles conversions to constant types.
+          (when [v (typecheck/ConvertVal (.Val x) typ false)] (!= (.Kind v) constant/Unknown)
+            (set! x (ir/NewBasicLit (.Pos x) typ v))
+            ;; Wrap in an OCONVNOP node to ensure result is non-constant.
+            (let [n (Implicit (ir/NewConvExpr pos ir/OCONVNOP typ x))]
+              (.SetTypecheck n 1)
+              (return n))))
+
+        ;; A Go language constant could be converted to a non-constant value,
+        ;; like converting string to []byte/[]rune. In this case, just construct
+        ;; the conversion expression as usual, see #79960.
+
+
+        ;; TODO(mdempsky): Stop constructing expressions of untyped type.
+        (set! x (typecheck/DefaultLit x typ))
+
+        (let [ce (ir/NewConvExpr pos ir/OCONV typ x)]
+          (set! (values (.-TypeWord ce) (.-SrcRType ce)) (values typeWord srcRType))
+          (when implicit
+            (.SetImplicit ce true))
+
+          (let [n (typecheck/Expr ce)]
+
+            ;; Conversions between non-identical, non-empty interfaces always
+            ;; requires a runtime call, even if they have identical underlying
+            ;; interfaces. This is because we create separate itab instances
+            ;; for each unique interface type, not merely each unique
+            ;; interface shape.
+            ;;
+            ;; However, due to shape types, typecheck.Expr might mistakenly
+            ;; think a conversion between two non-empty interfaces are
+            ;; identical and set ir.OCONVNOP, instead of ir.OCONVIFACE. To
+            ;; ensure we update the itab field appropriately, we force it to
+            ;; ir.OCONVIFACE instead when shape types are involved.
+            ;;
+            ;; TODO(mdempsky): Are there other places we might get this wrong?
+            ;; Should this be moved down into typecheck.{Assign,Convert}op?
+            ;; This would be a non-issue if itabs were unique for each
+            ;; *underlying* interface type instead.
+            (when (not identical)
+              (when [(values n ok) (assert (* ir/ConvExpr) n)] (and ok (== ^{:go/via [miniExpr miniNode]} (.Op n) ir/OCONVNOP) (.IsInterface ^{:go/via [miniExpr]} (.Type n)) (not (.IsEmptyInterface ^{:go/via [miniExpr]} (.Type n))) ^:go/paren (or (.HasShape ^{:go/via [miniExpr]} (.Type n)) (.HasShape (.Type (.-X n)))))
+                (.SetOp n ir/OCONVIFACE)))
+
+
+
+            (return n)))))
+
+    (case [exprRuntimeBuiltin]
+      (let [builtin (typecheck/LookupRuntime ^{:go/via [Decoder]} (.String r))]
+        (return builtin)))))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 2709} (go/method funcInst "funcInst reads an instantiated function reference, and returns\nthree (possibly nil) expressions related to it:\n\nbaseFn is always non-nil: it's either a function of the appropriate\ntype already, or it has an extra dictionary parameter as the first\nparameter.\n\nIf dictPtr is non-nil, then it's a dictionary argument that must be\npassed as the first argument to baseFn.\n\nIf wrapperFn is non-nil, then it's either the same as baseFn (if\ndictPtr is nil), or it's semantically equivalent to currying baseFn\nto pass dictPtr. (wrapperFn is nil when dictPtr is an expression\nthat needs to be computed dynamically.)\n\nFor callers that are creating a call to the returned function, it's\nbest to emit a call to baseFn, and include dictPtr in the arguments\nlist as appropriate.\n\nFor callers that want to return the function without invoking it,\nthey may return wrapperFn if it's non-nil; but otherwise, they need\nto create their own wrapper.\n" [^{:tag (* reader)} r ^src/XPos pos] :results [^ir/Node wrapperFn ^ir/Node baseFn ^ir/Node dictPtr]
+  ;; Like in methodExpr, I'm pretty sure this isn't needed.
+  (let [^{:tag (slice (* types/Type))} implicits (zero (slice (* types/Type)))]
+    (when (!= (.-dict r) nil)
+      (set! implicits (.-targs (.-dict r))))
+
+
+    (when ^{:go/via [Decoder]} (.Bool r) ; dynamic subdictionary
+      (let [idx ^{:go/via [Decoder]} (.Len r)
+          ^{:line 2686} info (aget (.-subdicts (.-dict r)) idx)
+          ^{:line 2687} explicits (.typListIdx (.-p r) (.-explicits info) (.-dict r))]
+
+        (set! baseFn (assert (* ir/Name) (.objIdx (.-p r) (.-idx info) implicits explicits true)))
+
+        ;; TODO(mdempsky): Is there a more robust way to get the
+        ;; dictionary pointer type here?
+        (let [dictPtrType (.-Type (.Param (.Type baseFn) 0))]
+          (set! dictPtr (typecheck/Expr (ir/NewConvExpr pos ir/OCONVNOP dictPtrType (.dictWord r pos (+ (.subdictsOffset (.-dict r)) idx)))))
+
+          (return))))
+
+
+    (let [info (.objInfo r)
+        ^{:line 2700} explicits (.typListIdx (.-p r) (.-explicits info) (.-dict r))]
+
+      (set! wrapperFn (assert (* ir/Name) (.objIdx (.-p r) (.-idx info) implicits explicits false)))
+      (set! baseFn (assert (* ir/Name) (.objIdx (.-p r) (.-idx info) implicits explicits true)))
+
+      (let [dictName (.objDictName (.-p r) (.-idx info) implicits explicits)]
+        (set! dictPtr (typecheck/Expr (ir/NewAddrExpr pos dictName)))
+
+        (return)))))
+
+
+^{:go/end 2730} (go/method objDictName ^{:tag (* ir/Name)} [^{:tag (* pkgReader)} pr ^index idx ^{:tag (slice (* types/Type))} implicits ^{:tag (slice (* types/Type))} explicits]
+  (let [rname (.newReader pr pkgbits/SectionName idx pkgbits/SyncObject1)
+      (values _ sym) (.qualifiedIdent rname)
+      ^{:line 2714} tag (conv pkgbits/CodeObj ^{:go/via [Decoder]} (.Code rname pkgbits/SyncCodeObj))]
+
+    (when (== tag pkgbits/ObjStub)
+      (go/call assert (not (.IsBlank sym)))
+      (when [(values pri ok) (aget objReader sym)] ok
+        (return (.objDictName (.-pr pri) (.-idx pri) nil explicits)))
+
+      (base/Fatalf "unresolved stub: %v" sym))
+
+
+    (let [(values dict err) (.objDictIdx pr sym idx implicits explicits false)]
+      (when (!= err nil)
+        (base/Fatalf "%v" err))
+
+
+      (.dictNameOf pr dict))))
+
+
+
+
+
+
+
+
+
+^{:go/end 2761} (go/method curry "curry returns a function literal that calls fun with arg0 and\n(optionally) arg1, accepting additional arguments to the function\nliteral as necessary to satisfy fun's signature.\n\nIf nilCheck is true and arg0 is an interface value, then it's\nchecked to be non-nil as an initial step at the point of evaluating\nthe function literal itself.\n" ^ir/Node [^{:tag (* reader)} r ^src/XPos origPos ^bool ifaceHack ^ir/Node fun ^ir/Node arg0 ^ir/Node arg1]
+  (let [^ir/Nodes captured (zero ir/Nodes)]
+    (.Append captured fun arg0)
+    (when (!= arg1 nil)
+      (.Append captured arg1))
+
+
+    (let [(values params results) (syntheticSig (.Type fun))]
+      (set! params (subslice params (- (len captured) 1))) ; skip curried parameters
+      (let [typ (types/NewSignature nil params results)
+
+          ^{:line 2750} addBody ^{:go/end 2758} (fn [^src/XPos pos ^{:tag (* reader)} r ^{:tag (slice ir/Node)} captured]
+            (let [fun (aget captured 0)
+
+                ^{:line 2753 :tag ir/Nodes} args (zero ir/Nodes)]
+              (.Append args (spread (subslice captured 1)))
+              (.Append args (spread (.syntheticArgs r)))
+
+              (.syntheticTailCall r pos fun args)))]
+
+
+        (.syntheticClosure r origPos typ ifaceHack captured addBody)))))
+
+
+
+
+
+^{:go/end 2816} (go/method methodExprWrap "methodExprWrap returns a function literal that changes method's\nfirst parameter's type to recv, and uses implicits/deref/addr to\nselect the appropriate receiver parameter to pass to method.\n" ^ir/Node [^{:tag (* reader)} r ^src/XPos origPos ^{:tag (* types/Type)} recv ^{:tag (slice int)} implicits ^bool deref ^bool addr ^ir/Node method ^ir/Node dictPtr]
+  (let [^ir/Nodes captured (zero ir/Nodes)]
+    (.Append captured method)
+
+    (let [(values params results) (syntheticSig (.Type method))]
+
+      ;; Change first parameter to recv.
+      (set! (.-Type (aget params 0)) recv)
+
+      ;; If we have a dictionary pointer argument to pass, then omit the
+      ;; underlying method expression's dictionary parameter from the
+      ;; returned signature too.
+      (when (!= dictPtr nil)
+        (.Append captured dictPtr)
+        (set! params (append (subslice params _ 1) (spread (subslice params 2)))))
+
+
+      (let [typ (types/NewSignature nil params results)
+
+          ^{:line 2785} addBody ^{:go/end 2813} (fn [^src/XPos pos ^{:tag (* reader)} r ^{:tag (slice ir/Node)} captured]
+            (let [fn (aget captured 0)
+                ^{:line 2787} args (.syntheticArgs r)]
+
+              ;; Rewrite first argument based on implicits/deref/addr.
+              (do
+                (let [arg (aget args 0)]
+                  (range [_ ix implicits]
+                    (set! arg (Implicit (typecheck/DotField pos arg ix))))
+
+                  (cond deref
+                    (set! arg (Implicit (Deref pos (.Elem (.Type arg)) arg)))
+                    ^{:line 2797} addr
+                    (set! arg (Implicit (Addr pos arg))))
+
+                  (aset args 0 arg)))
+
+
+              ;; Insert dictionary argument, if provided.
+              (when (!= dictPtr nil)
+                (let [newArgs (make (slice ir/Node) (+ (len args) 1))]
+                  (aset newArgs 0 (aget args 0))
+                  (aset newArgs 1 (aget captured 1))
+                  (copy (subslice newArgs 2) (subslice args 1))
+                  (set! args newArgs)))
+
+
+              (.syntheticTailCall r pos fn args)))]
+
+
+        (.syntheticClosure r origPos typ false captured addBody)))))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 2891} (go/method syntheticClosure "syntheticClosure constructs a synthetic function literal for\ncurrying dictionary arguments. origPos is the position used for the\nclosure, which must be a non-inlined position. typ is the function\nliteral's signature type.\n\ncaptures is a list of expressions that need to be evaluated at the\npoint of function literal evaluation and captured by the function\nliteral. If ifaceHack is true and captures[1] is an interface type,\nit's checked to be non-nil after evaluation.\n\naddBody is a callback function to populate the function body. The\nlist of captured values passed back has the captured variables for\nuse within the function literal, corresponding to the expressions\nin captures.\n" ^ir/Node [^{:tag (* reader)} r ^src/XPos origPos ^{:tag (* types/Type)} typ ^bool ifaceHack ^ir/Nodes captures ^{:tag (func [^src/XPos pos ^{:tag (* reader)} r ^{:tag (slice ir/Node)} captured])} addBody]
+  ;; isSafe reports whether n is an expression that we can safely
+  ;; defer to evaluating inside the closure instead, to avoid storing
+  ;; them into the closure.
+  ;;
+  ;; In practice this is always (and only) the wrappee function.
+  (let [isSafe ^{:go/breaks [[4 2846]] :go/end 2847} (fn ^bool [^ir/Node n]
+        (when (and (== (.Op n) ir/ONAME) (== (.-Class (assert (* ir/Name) n)) ir/PFUNC))
+          (return true))
+
+        (when (== (.Op n) ir/OMETHEXPR)
+          (return true))
+
+
+        false)
+
+
+      ^{:line 2849} fn (.inlClosureFunc r origPos typ ir/OCLOSURE)]
+    (.SetWrapper fn true)
+
+    (let [clo (.-OClosure fn)
+        ^{:line 2853} inlPos ^{:go/via [miniExpr miniNode]} (.Pos clo)
+
+        ^{:line 2855 :tag ir/Nodes} init (zero ir/Nodes)]
+      (range [i n captures]
+        (when (isSafe n)
+          (continue)) ; skip capture; can reference directly
+
+
+        (let [tmp (.tempCopy r inlPos n (addr init))]
+          (ir/NewClosureVar origPos fn tmp)
+
+          ;; We need to nil check interface receivers at the point of method
+          ;; value evaluation, ugh.
+          (when (and ifaceHack (== i 1) (.IsInterface (.Type n)))
+            (let [check (ir/NewUnaryExpr inlPos ir/OCHECKNIL (ir/NewUnaryExpr inlPos ir/OITAB tmp))]
+              (.Append init (typecheck/Stmt check))))))
+
+
+
+      (let [pri (lit pkgReaderIndex :synthetic ^{:go/end 2886} (fn [^src/XPos pos ^{:tag (* reader)} r]
+              (let [captured (make (slice ir/Node) (len captures))
+                  ^{:line 2874} next 0]
+                (range [i n captures]
+                  (if (isSafe n)
+                    (aset captured i n)
+                    (do
+                      (aset captured i (aget (.-closureVars r) next))
+                      (inc! next))))
+
+
+                (go/call assert (== next (len (.-closureVars r))))
+
+                (addBody origPos r captured))))]
+
+        (aset bodyReader fn pri)
+        (.funcBody pri fn)
+
+        (ir/InitExpr init clo)))))
+
+
+
+
+
+^{:go/end 2913} (go/func syntheticSig "syntheticSig duplicates and returns the params and results lists\nfor sig, but renaming anonymous parameters so they can be assigned\nir.Names.\n" [^{:tag (* types/Type)} sig] :results [^{:tag (slice (* types/Field))} params ^{:tag (slice (* types/Field))} results]
+  (let [clone ^{:go/end 2910} (fn ^{:tag (slice (* types/Field))} [^{:tag (slice (* types/Field))} params]
+        (let [res (make (slice (* types/Field)) (len params))]
+          (range [i param params]
+            ;; TODO(mdempsky): It would be nice to preserve the original
+            ;; parameter positions here instead, but at least
+            ;; typecheck.NewMethodType replaces them with base.Pos, making
+            ;; them useless. Worse, the positions copied from base.Pos may
+            ;; have inlining contexts, which we definitely don't want here
+            ;; (e.g., #54625).
+            (aset res i (types/NewField base/AutogeneratedPos (.-Sym param) (.-Type param)))
+            (.SetIsDDD (aget res i) (.IsDDD param)))
+
+          ^{:line 2909} res))]
+
+
+    (return (clone (.Params sig)) (clone (.Results sig)))))
+
+
+^{:go/breaks [[4 2919]] :go/end 2920} (go/method optExpr ^ir/Node [^{:tag (* reader)} r]
+  (when ^{:go/via [Decoder]} (.Bool r)
+    (return (.expr r)))
+
+  nil)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 3027} (go/method methodExpr "methodExpr reads a method expression reference, and returns three\n(possibly nil) expressions related to it:\n\nbaseFn is always non-nil: it's either a function of the appropriate\ntype already, or it has an extra dictionary parameter as the second\nparameter (i.e., immediately after the promoted receiver\nparameter).\n\nIf dictPtr is non-nil, then it's a dictionary argument that must be\npassed as the second argument to baseFn.\n\nIf wrapperFn is non-nil, then it's either the same as baseFn (if\ndictPtr is nil), or it's semantically equivalent to currying baseFn\nto pass dictPtr. (wrapperFn is nil when dictPtr is an expression\nthat needs to be computed dynamically.)\n\nFor callers that are creating a call to the returned method, it's\nbest to emit a call to baseFn, and include dictPtr in the arguments\nlist as appropriate.\n\nFor callers that want to return a method expression without\ninvoking it, they may return wrapperFn if it's non-nil; but\notherwise, they need to create their own wrapper.\n" [^{:tag (* reader)} r] :results [^ir/Node wrapperFn ^ir/Node baseFn ^ir/Node dictPtr]
+  (let [recv (.typ r)
+
+      ^{:line 2948 :tag (* types/Type)} sig (zero (* types/Type))
+      ^{:line 2949} generic (and (.Has ^{:go/via [Decoder]} (.Version r) pkgbits/GenericMethods) ^{:go/via [Decoder]} (.Bool r))]
+    (when (not generic)
+      ;; Signature type to return (i.e., recv prepended to the method's
+      ;; normal parameters list).
+      (set! sig (typecheck/NewMethodType (.typ r) recv)))
+
+
+    (let [pos (.pos r)
+        ^{:line 2957} sym (.selector r)]
+
+      (when ^{:go/via [Decoder]} (.Bool r) ; type parameter method expression
+        (let [idx ^{:go/via [Decoder]} (.Len r)
+            ^{:line 2961} word (.dictWord r pos (+ (.typeParamMethodExprsOffset (.-dict r)) idx))
+
+            ;; TODO(mdempsky): If the type parameter was instantiated with an
+            ;; interface type (i.e., embed.IsInterface()), then we could
+            ;; return the OMETHEXPR instead and save an indirection.
+
+            ;; We wrote the method expression's entry point PC into the
+            ;; dictionary, but for Go `func` values we need to return a
+            ;; closure (i.e., pointer to a structure with the PC as the first
+            ;; field). Because method expressions don't have any closure
+            ;; variables, we pun the dictionary entry as the closure struct.
+            ^{:line 2972} fn (typecheck/Expr (ir/NewConvExpr pos ir/OCONVNOP sig (ir/NewAddrExpr pos word)))]
+          (return fn fn nil)))
+
+
+      (when ^{:go/via [Decoder]} (.Bool r) ; dynamic subdictionary
+        (let [idx ^{:go/via [Decoder]} (.Len r)
+            ^{:line 2978} info (aget (.-subdicts (.-dict r)) idx)
+            ^{:line 2979} explicits (.typListIdx (.-p r) (.-explicits info) (.-dict r))
+
+            ^{:line 2981} shapedObj (assert (* ir/Name) (.objIdx (.-p r) (.-idx info) nil explicits true))
+            ^{:line 2982} shapedFn (shapedMethodExpr pos shapedObj sym)
+
+            ;; TODO(mdempsky): Is there a more robust way to get the
+            ;; dictionary pointer type here?
+            ^{:line 2986} dictPtrType (.-Type (.Param (.Type shapedFn) 1))
+            ^{:line 2987} dictPtr (typecheck/Expr (ir/NewConvExpr pos ir/OCONVNOP dictPtrType (.dictWord r pos (+ (.subdictsOffset (.-dict r)) idx))))]
+
+          (return nil shapedFn dictPtr)))
+
+
+      (when ^{:go/via [Decoder]} (.Bool r) ; static dictionary
+        (let [info (.objInfo r)
+            ^{:line 2994} explicits (.typListIdx (.-p r) (.-explicits info) (.-dict r))
+
+            ^{:line 2996} shapedObj (assert (* ir/Name) (.objIdx (.-p r) (.-idx info) nil explicits true))
+            ^{:line 2997} shapedFn (shapedMethodExpr pos shapedObj sym)
+
+            ^{:line 2999} dict (.objDictName (.-p r) (.-idx info) nil explicits)
+            ^{:line 3000} dictPtr (typecheck/Expr (ir/NewAddrExpr pos dict))]
+
+          ;; Check that dictPtr matches shapedFn's dictionary parameter.
+          (when (not (types/Identical (.Type dictPtr) (.-Type (.Param (.Type shapedFn) 1))))
+            (base/FatalfAt pos "dict %L, but shaped method %L" dict shapedFn))
+
+
+          (if (not generic) (do
+              ;; For statically known instantiations, we can take advantage of
+              ;; the stenciled wrapper.
+              (base/AssertfAt (not (.HasShape recv)) pos "shaped receiver %v" recv)
+              (let [wrapperFn (typecheck/NewMethodExpr pos recv sym)]
+                (base/AssertfAt (types/Identical sig ^{:go/via [miniExpr]} (.Type wrapperFn)) pos "wrapper %L does not have type %v" wrapperFn sig)
+                (return wrapperFn shapedFn dictPtr)))
+
+            ;; Also statically known, but there is a good amount of existing
+            ;; machinery downstream which makes assumptions about method
+            ;; wrapper functions. It's safest not to emit them for now.
+            ;; TODO(mark): Emit wrapper functions for generic methods.
+            (return nil shapedFn dictPtr))))
+
+
+
+      ;; Simple method expression; no dictionary needed.
+      (base/AssertfAt (or (not (.HasShape recv)) (.IsInterface recv)) pos "shaped receiver %v" recv)
+      (let [fn (typecheck/NewMethodExpr pos recv sym)]
+        (return fn fn nil)))))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 3113} (go/func shapedMethodExpr "shapedMethodExpr creates an OMETHEXPR for obj using sym.\n\nIf obj is an OTYPE, it must refer to a generic type. If obj is an ONAME,\nit must refer to a generic method. In either case, sym.Name must be the\nunqualified name of the method.\n\nFor example, given:\n\n\tpackage p\n\n\ttype T[P any] struct {}\n\n\tfunc (T[P]) m() {}\n\tfunc (T[P]) n[Q any]() {}\n\nthen, using S as go.shape.int:\n  - in T[int].m,      obj is T[S]      and sym.Name is \"m\".\n  - in T[int].n[int], obj is T[S].n[S] and sym.Name is \"n\".\n\nNote that we could have pushed dictionaries down to methods in every case,\nbut since non-generic methods will always share the same \"type environment\"\nas their defining type, we can optimize by reusing the type's dictionary.\n" ^ir/Node [^src/XPos pos ^{:tag (* ir/Name)} obj ^{:tag (* types/Sym)} sym]
+  (if (== ^{:go/via [miniExpr miniNode]} (.Op obj) ir/OTYPE)
+    ;; non-generic method on generic type
+    (let [typ ^{:go/via [miniExpr]} (.Type obj)]
+      (go/call assert (.HasShape typ))
+
+      (let [method (^{:go/end 3066} (fn ^{:tag (* types/Field)} []
+              (range [_ m (.Methods typ)]
+                (when (== (.-Sym m) sym)
+                  (return m)))
+
+
+
+              (base/FatalfAt pos "failed to find method %v in shaped type %v" sym typ)
+              (panic "unreachable")))]
+
+
+        (return (typecheck/NewMethodExpr pos (.-Type (.Recv (.-Type method))) sym))))
+    (do
+      ;; generic method on possibly generic type
+      (go/call assert (and (== ^{:go/via [miniExpr miniNode]} (.Op obj) ir/ONAME) (== (.-Class obj) ir/PFUNC)))
+      (let [typ ^{:go/via [miniExpr]} (.Type obj)]
+        (go/call assert (.HasShape typ))
+
+        ;; OMETHEXPR assumes that the linker symbol to call looks like "<type sym>.<method sym>".
+        ;; This works because non-generic method symbols are relative to their type. But generic
+        ;; methods use fully-qualified names, so this won't work.
+        ;;
+        ;; To use OMETHEXPR for generic methods, we craft a dummy field on the type by removing
+        ;; the qualifier; OMETHEXPR will put it back later.
+        (let [lsym (.-Name (.Linksym obj))
+            ;; Since the method is generic, we know the method name must be followed by a bracket.
+            ;; TODO(mark): It's not ideal to rely on string naming here. Find a more robust solution.
+            ^{:line 3084} idx (^{:go/end 3098} (fn ^int [] ; Find the index of the bracket following the method name.
+                (let [(values depth i) (values 0 (- (len lsym) 1))]
+                  (while true
+                    (switch (aget lsym i)
+                      (case [\]]
+                        (inc! depth))
+                      (case [\[]
+                        (dec! depth)))
+
+                    (when (== depth 0)
+                      (return i))
+
+                    (dec! i)))))
+
+
+            ^{:line 3099} msym (.Lookup (.-Pkg sym) (subslice lsym (- idx (len (.-Name sym)))))
+
+            ;; Note that the field name here includes the type arguments; while also not ideal, the
+            ;; types package does not seem to complain.
+            ^{:line 3103} m (types/NewField ^{:go/via [miniExpr miniNode]} (.Pos obj) msym typ)]
+          (set! (.-Nname m) obj)
+
+          (let [n (ir/NewSelectorExpr pos ir/OMETHEXPR (ir/TypeNode (.-Type (.Recv typ))) msym)]
+            (set! (.-Selection n) m)
+            ^{:go/via [miniExpr]} (.SetType n (typecheck/NewMethodType typ (.-Type (.Recv typ))))
+            ^{:go/via [miniExpr miniNode]} (.SetTypecheck n 1)
+
+            (return n)))))))
+
+
+
+^{:go/end 3155} (go/method multiExpr ^{:tag (slice ir/Node)} [^{:tag (* reader)} r]
+  ^{:go/via [Decoder]} (.Sync r pkgbits/SyncMultiExpr)
+
+  (when ^{:go/via [Decoder]} (.Bool r) ; N:1
+    (let [pos (.pos r)
+        ^{:line 3120} expr (.expr r)
+
+        ^{:line 3122} results (make (slice ir/Node) ^{:go/via [Decoder]} (.Len r))
+        ^{:line 3123} as (ir/NewAssignListStmt pos ir/OAS2 nil (lit (slice ir/Node) expr))]
+      (set! (.-Def as) true)
+      (range [i results]
+        (let [tmp (.temp r pos (.typ r))]
+          (set! (.-Defn tmp) as)
+          (.Append ^{:go/via [miniStmt]} (.PtrInit as) (ir/NewDecl pos ir/ODCL tmp))
+          (.Append (.-Lhs as) tmp)
+
+          (let [res (conv ir/Node tmp)]
+            (when ^{:go/via [Decoder]} (.Bool r)
+              (let [n (ir/NewConvExpr pos ir/OCONV (.typ r) res)]
+                (set! (values (.-TypeWord n) (.-SrcRType n)) (.convRTTI r pos))
+                (.SetImplicit n true)
+                (set! res (typecheck/Expr n))))
+
+            (aset results i res))))
+
+
+      ;; TODO(mdempsky): Could use ir.InlinedCallExpr instead?
+      (aset results 0 (ir/InitExpr (lit (slice ir/Node) (typecheck/Stmt as)) (aget results 0)))
+      (return results)))
+
+
+  ;; N:N
+  (let [exprs (make (slice ir/Node) ^{:go/via [Decoder]} (.Len r))]
+    (when (== (len exprs) 0)
+      (return nil))
+
+    (range [i exprs]
+      (aset exprs i (.expr r)))
+
+    ^{:line 3154} exprs))
+
+
+
+^{:go/end 3160} (go/method temp "temp returns a new autotemp of the specified type.\n" ^{:tag (* ir/Name)} [^{:tag (* reader)} r ^src/XPos pos ^{:tag (* types/Type)} typ]
+  (typecheck/TempAt pos (.-curfn r) typ))
+
+
+
+
+^{:go/end 3176} (go/method tempCopy "tempCopy declares and returns a new autotemp initialized to the\nvalue of expr.\n" ^{:tag (* ir/Name)} [^{:tag (* reader)} r ^src/XPos pos ^ir/Node expr ^{:tag (* ir/Nodes)} init]
+  (let [tmp (.temp r pos (.Type expr))]
+
+    (.Append init (typecheck/Stmt (ir/NewDecl pos ir/ODCL tmp)))
+
+    (let [assign (ir/NewAssignStmt pos tmp expr)]
+      (set! (.-Def assign) true)
+      (.Append init (typecheck/Stmt assign))
+
+      (set! (.-Defn tmp) assign)
+
+      ^{:line 3175} tmp)))
+
+
+^{:go/end 3237} (go/method compLit ^ir/Node [^{:tag (* reader)} r]
+  ^{:go/via [Decoder]} (.Sync r pkgbits/SyncCompLit)
+  (let [pos (.pos r)
+      ^{:line 3181} typ0 (.typ r)
+
+      ^{:line 3183} typ typ0]
+    (when (.IsPtr typ)
+      (set! typ (.Elem typ)))
+
+    (when (== (.Kind typ) types/TFORW)
+      (base/FatalfAt pos "unresolved composite literal type: %v" typ))
+
+    (let [^ir/Node rtype (zero ir/Node)]
+      (when (.IsMap typ)
+        (set! rtype (.rtype r pos)))
+
+
+      (let [^{:tag (slice ir/Node)} elems (zero (slice ir/Node))]
+        (if (.Has ^{:go/via [Decoder]} (.Version r) pkgbits/CompactCompLiterals)
+          (let [n ^{:go/via [Decoder]} (.Int r)]
+            (set! elems (make (slice ir/Node) (max n (- n)))) ; /* abs(n) */
+            (switch (.Kind typ)
+              (default
+                (base/FatalfAt pos "unexpected composite literal type: %v" typ))
+              (case [types/TARRAY]
+                (.arrayElems r (>= n 0) elems))
+              (case [types/TMAP]
+                (.mapElems r elems))
+              (case [types/TSLICE]
+                (.arrayElems r (>= n 0) elems))
+              (case [types/TSTRUCT]
+                (.structElems r typ (>= n 0) elems))))
+
+          (do
+            (set! elems (make (slice ir/Node) ^{:go/via [Decoder]} (.Len r)))
+            (let [isStruct (== (.Kind typ) types/TSTRUCT)]
+              (range [i elems]
+                (let [elemp (addr (aget elems i))]
+                  (cond isStruct
+                    (let [sk (ir/NewStructKeyExpr (.pos r) (.Field typ ^{:go/via [Decoder]} (.Len r)) nil)]
+                      (set! (values @elemp elemp) (values sk (addr (.-Value sk)))))
+                    ^{:go/via [Decoder]} (.Bool r)
+                    (let [kv (ir/NewKeyExpr (.pos r) (.expr r) nil)]
+                      (set! (values @elemp elemp) (values kv (addr (.-Value kv))))))
+
+                  (set! @elemp (.expr r)))))))
+
+
+
+        (let [lit (typecheck/Expr (ir/NewCompLitExpr pos ir/OCOMPLIT typ elems))]
+          (when (!= rtype nil)
+            (let [lit (assert (* ir/CompLitExpr) lit)]
+              (set! (.-RType lit) rtype)))
+
+          (when (.IsPtr typ0)
+            (set! lit (typecheck/Expr (typecheck/NodAddrAt pos lit)))
+            (.SetType lit typ0))
+
+          ^{:line 3236} lit)))))
+
+
+^{:go/end 3256} (go/method arrayElems [^{:tag (* reader)} r ^bool valuesOnly ^{:tag (slice ir/Node)} elems]
+  (when valuesOnly
+    (range [i elems]
+      (aset elems i (.expr r)))
+
+    (return))
+
+  ;; some elements may have a key
+  (range [i elems]
+    (if ^{:go/via [Decoder]} (.Bool r)
+      (let [kv (ir/NewKeyExpr (.pos r) (.expr r) nil)]
+        (set! (.-Value kv) (.expr r))
+        (aset elems i kv))
+
+      (aset elems i (.expr r)))))
+
+
+
+
+^{:go/end 3265} (go/method mapElems [^{:tag (* reader)} r ^{:tag (slice ir/Node)} elems]
+  ;; all elements have a key
+  (range [i elems]
+    (let [kv (ir/NewKeyExpr (.pos r) (.expr r) nil)]
+      (set! (.-Value kv) (.expr r))
+      (aset elems i kv))))
+
+
+
+^{:go/end 3295} (go/method structElems [^{:tag (* reader)} r ^{:tag (* types/Type)} typ ^bool valuesOnly ^{:tag (slice ir/Node)} elems]
+  (when valuesOnly
+    (range [i elems]
+      (let [sk (ir/NewStructKeyExpr (.pos r) (.Field typ i) nil)]
+        (set! (.-Value sk) (.expr r))
+        (aset elems i sk)))
+
+    (return))
+
+
+  ;; all elements have a key
+  (range [i elems]
+    (let [pos (.pos r)
+        ^{:line 3280 :tag (* types/Field)} fld (zero (* types/Field))]
+      (if [n ^{:go/via [Decoder]} (.Int r)] (< n 0)
+        ;; embedded field
+        (let [typ typ] ; don't modify the original typ
+          (range [(- n)]
+            (set! fld (.Field typ ^{:go/via [Decoder]} (.Int r)))
+            (set! typ (.-Type fld))))
+
+        ;; n >= 0
+        (set! fld (.Field typ n)))
+
+      (let [sk (ir/NewStructKeyExpr pos fld nil)]
+        (set! (.-Value sk) (.expr r))
+        (aset elems i sk)))))
+
+
+
+^{:go/end 3342} (go/method funcLit ^ir/Node [^{:tag (* reader)} r]
+  ^{:go/via [Decoder]} (.Sync r pkgbits/SyncFuncLit)
+
+  ;; The underlying function declaration (including its parameters'
+  ;; positions, if any) need to remain the original, uninlined
+  ;; positions. This is because we track inlining-context on nodes so
+  ;; we can synthesize the extra implied stack frames dynamically when
+  ;; generating tracebacks, whereas those stack frames don't make
+  ;; sense *within* the function literal. (Any necessary inlining
+  ;; adjustments will have been applied to the call expression
+  ;; instead.)
+  ;;
+  ;; This is subtle, and getting it wrong leads to cycles in the
+  ;; inlining tree, which lead to infinite loops during stack
+  ;; unwinding (#46234, #54625).
+  ;;
+  ;; Note that we *do* want the inline-adjusted position for the
+  ;; OCLOSURE node, because that position represents where any heap
+  ;; allocation of the closure is credited (#49171).
+  (inc! (.-suppressInlPos r))
+  (let [origPos (.pos r)
+      ^{:line 3318} sig (.signature r nil)]
+    (dec! (.-suppressInlPos r))
+    (let [why ir/OCLOSURE]
+      (when ^{:go/via [Decoder]} (.Bool r)
+        (set! why ir/ORANGE))
+
+
+      (let [fn (.inlClosureFunc r origPos sig why)]
+
+        (set! (.-ClosureVars fn) (make (slice (* ir/Name)) 0 ^{:go/via [Decoder]} (.Len r)))
+        (while (< (len (.-ClosureVars fn)) (cap (.-ClosureVars fn)))
+          ;; TODO(mdempsky): I think these should be original positions too
+          ;; (i.e., not inline-adjusted).
+          (ir/NewClosureVar (.pos r) fn (.useLocal r)))
+
+        (when [param (.-dictParam r)] (!= param nil)
+          ;; If we have a dictionary parameter, capture it too. For
+          ;; simplicity, we capture it last and unconditionally.
+          (ir/NewClosureVar ^{:go/via [miniExpr miniNode]} (.Pos param) fn param))
+
+
+        (.addBody r fn nil)
+
+        (.-OClosure fn)))))
+
+
+
+
+^{:go/end 3363} (go/method inlClosureFunc "inlClosureFunc constructs a new closure function, but correctly\nhandles inlining.\n" ^{:tag (* ir/Func)} [^{:tag (* reader)} r ^src/XPos origPos ^{:tag (* types/Type)} sig ^ir/Op why]
+  (let [curfn (.-inlCaller r)]
+    (when (== curfn nil)
+      (set! curfn (.-curfn r)))
+
+
+    (let [^int gen (zero int)]
+      (if (== why ir/ORANGE) (do
+          (inc! (.-rangeLitGen r))
+          (set! gen (.-rangeLitGen r)))
+        (do
+          (inc! (.-funcLitGen r))
+          (set! gen (.-funcLitGen r))))
+
+
+      ;; TODO(mdempsky): Remove hard-coding of typecheck.Target.
+      (ir/NewClosureFunc origPos (.inlPos r origPos) why sig curfn typecheck/Target gen))))
+
+
+^{:go/end 3368} (go/method exprList ^{:tag (slice ir/Node)} [^{:tag (* reader)} r]
+  ^{:go/via [Decoder]} (.Sync r pkgbits/SyncExprList)
+  (.exprs r))
+
+
+^{:go/end 3380} (go/method exprs ^{:tag (slice ir/Node)} [^{:tag (* reader)} r]
+  ^{:go/via [Decoder]} (.Sync r pkgbits/SyncExprs)
+  (let [nodes (make (slice ir/Node) ^{:go/via [Decoder]} (.Len r))]
+    (when (== (len nodes) 0)
+      (return nil)) ; TODO(mdempsky): Unclear if this matters.
+
+    (range [i nodes]
+      (aset nodes i (.expr r)))
+
+    ^{:line 3379} nodes))
+
+
+
+
+^{:go/end 3387} (go/method dictWord "dictWord returns an expression to return the specified\nuintptr-typed word from the dictionary parameter.\n" ^ir/Node [^{:tag (* reader)} r ^src/XPos pos ^int idx]
+  (base/AssertfAt (!= (.-dictParam r) nil) pos "expected dictParam in %v" (.-curfn r))
+  (typecheck/Expr (ir/NewIndexExpr pos (.-dictParam r) (ir/NewInt pos (conv int64 idx)))))
+
+
+
+
+^{:go/end 3393} (go/method rttiWord "rttiWord is like dictWord, but converts it to *byte (the type used\ninternally to represent *runtime._type and *runtime.itab).\n" ^ir/Node [^{:tag (* reader)} r ^src/XPos pos ^int idx]
+  (typecheck/Expr (ir/NewConvExpr pos ir/OCONVNOP (types/NewPtr (aget types/Types types/TUINT8)) (.dictWord r pos idx))))
+
+
+
+
+
+^{:go/end 3401} (go/method rtype "rtype reads a type reference from the element bitstream, and\nreturns an expression of type *runtime._type representing that\ntype.\n" ^ir/Node [^{:tag (* reader)} r ^src/XPos pos]
+  (let [(values _ rtype) (.rtype0 r pos)]
+    ^{:line 3400} rtype))
+
+
+^{:go/end 3416} (go/method rtype0 [^{:tag (* reader)} r ^src/XPos pos] :results [^{:tag (* types/Type)} typ ^ir/Node rtype]
+  ^{:go/via [Decoder]} (.Sync r pkgbits/SyncRType)
+  (when ^{:go/via [Decoder]} (.Bool r) ; derived type
+    (let [idx ^{:go/via [Decoder]} (.Len r)
+        ^{:line 3407} info (aget (.-rtypes (.-dict r)) idx)]
+      (set! typ (.typIdx (.-p r) info (.-dict r) true))
+      (set! rtype (.rttiWord r pos (+ (.rtypesOffset (.-dict r)) idx)))
+      (return)))
+
+
+  (set! typ (.typ r))
+  (set! rtype (reflectdata/TypePtrAt pos typ))
+  (return))
+
+
+
+^{:go/end 3427} (go/method varDictIndex "varDictIndex populates name.DictIndex if name is a derived type.\n" [^{:tag (* reader)} r ^{:tag (* ir/Name)} name]
+  (when ^{:go/via [Decoder]} (.Bool r)
+    (let [idx (+ 1 (.rtypesOffset (.-dict r)) ^{:go/via [Decoder]} (.Len r))]
+      (when (!= (conv int (conv uint16 idx)) idx)
+        (base/FatalfAt ^{:go/via [miniExpr miniNode]} (.Pos name) "DictIndex overflow for %v: %v" name idx))
+
+      (set! (.-DictIndex name) (conv uint16 idx)))))
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 3459} (go/method itab "itab returns a (typ, iface) pair of types.\n\ntypRType and ifaceRType are expressions that evaluate to the\n*runtime._type for typ and iface, respectively.\n\nIf typ is a concrete type and iface is a non-empty interface type,\nthen itab is an expression that evaluates to the *runtime.itab for\nthe pair. Otherwise, itab is nil.\n" [^{:tag (* reader)} r ^src/XPos pos] :results [^{:tag (* types/Type)} typ ^ir/Node typRType ^{:tag (* types/Type)} iface ^ir/Node ifaceRType ^ir/Node itab]
+  (set! (values typ typRType) (.rtype0 r pos))
+  (set! (values iface ifaceRType) (.rtype0 r pos))
+
+  (let [idx -1]
+    (when ^{:go/via [Decoder]} (.Bool r)
+      (set! idx ^{:go/via [Decoder]} (.Len r)))
+
+
+    (when (and (not (.IsInterface typ)) (.IsInterface iface) (not (.IsEmptyInterface iface)))
+      (if (>= idx 0)
+        (set! itab (.rttiWord r pos (+ (.itabsOffset (.-dict r)) idx)))
+        (do
+          (base/AssertfAt (not (.HasShape typ)) pos "%v is a shape type" typ)
+          (base/AssertfAt (not (.HasShape iface)) pos "%v is a shape type" iface)
+
+          (let [lsym (reflectdata/ITabLsym typ iface)]
+            (set! itab (typecheck/LinksymAddr pos lsym (aget types/Types types/TUINT8)))))))
+
+
+
+    (return)))
+
+
+
+
+^{:go/end 3488} (go/method convRTTI "convRTTI returns expressions appropriate for populating an\nir.ConvExpr's TypeWord and SrcRType fields, respectively.\n" [^{:tag (* reader)} r ^src/XPos pos] :results [^ir/Node typeWord ^ir/Node srcRType]
+  ^{:go/via [Decoder]} (.Sync r pkgbits/SyncConvRTTI)
+  (let [(values src srcRType0 dst dstRType itab) (.itab r pos)]
+    (when (not (.IsInterface dst))
+      (return))
+
+
+    ;; See reflectdata.ConvIfaceTypeWord.
+    (switch
+      (case [(.IsEmptyInterface dst)]
+        (when (not (.IsInterface src))
+          (set! typeWord srcRType0))) ; direct eface construction
+
+      (case [(not (.IsInterface src))]
+        (set! typeWord itab)) ; direct iface construction
+      (default
+        (set! typeWord dstRType))) ; convI2I
+
+
+    ;; See reflectdata.ConvIfaceSrcRType.
+    (when (not (.IsInterface src))
+      (set! srcRType srcRType0))
+
+
+    (return)))
+
+
+^{:go/end 3518} (go/method exprType ^ir/Node [^{:tag (* reader)} r]
+  ^{:go/via [Decoder]} (.Sync r pkgbits/SyncExprType)
+  (let [pos (.pos r)
+
+      ^{:line 3494 :tag (* types/Type)} typ (zero (* types/Type))
+      (values ^ir/Node rtype ^ir/Node itab) (zero ir/Node)]
+
+    (if ^{:go/via [Decoder]} (.Bool r) (do
+        ;; non-empty interface
+        (set! (values typ rtype _ _ itab) (.itab r pos))
+        (when (not (.IsInterface typ))
+          (set! rtype nil))) ; TODO(mdempsky): Leave set?
+
+      (do
+        (set! (values typ rtype) (.rtype0 r pos))
+
+        (when (not ^{:go/via [Decoder]} (.Bool r)) ; not derived
+          (return (ir/TypeNode typ)))))
+
+
+
+    (let [dt (ir/NewDynamicType pos rtype)]
+      (set! (.-ITab dt) itab)
+      (set! dt (assert (* ir/DynamicType) (typed typ dt)))
+      (when [st (.ToStatic dt)] (!= st nil)
+        (return st))
+
+      ^{:line 3517} dt)))
+
+
+^{:go/end 3523} (go/method op ^ir/Op [^{:tag (* reader)} r]
+  ^{:go/via [Decoder]} (.Sync r pkgbits/SyncOp)
+  (conv ir/Op ^{:go/via [Decoder]} (.Len r)))
+
+
+;; @@@ Package initialization
+
+^{:go/end 3539} (go/method pkgInit [^{:tag (* reader)} r ^{:tag (* types/Pkg)} self ^{:tag (* ir/Package)} target]
+  (let [cgoPragmas (make (slice (slice string)) ^{:go/via [Decoder]} (.Len r))]
+    (range [i cgoPragmas]
+      (aset cgoPragmas i ^{:go/via [Decoder]} (.Strings r)))
+
+    (set! (.-CgoPragmas target) cgoPragmas)
+
+    (.pkgInitOrder r target)
+
+    (.pkgDecls r target)
+
+    ^{:go/via [Decoder]} (.Sync r pkgbits/SyncEOF)))
+
+
+
+
+^{:go/end 3592} (go/method pkgInitOrder "pkgInitOrder creates a synthetic init function to handle any\npackage-scope initialization statements.\n" [^{:tag (* reader)} r ^{:tag (* ir/Package)} target]
+  (let [initOrder (make (slice ir/Node) ^{:go/via [Decoder]} (.Len r))]
+    (when (== (len initOrder) 0)
+      (return))
+
+
+    ;; Make a function that contains all the initialization statements.
+    (let [pos base/AutogeneratedPos]
+      (set! base/Pos pos)
+
+      (let [fn (ir/NewFunc pos pos (typecheck/Lookup "init") (types/NewSignature nil nil nil))]
+        (.SetIsPackageInit fn true)
+        (.SetInlinabilityChecked fn true) ; suppress useless "can inline" diagnostics
+
+        (typecheck/DeclFunc fn)
+        (set! (.-curfn r) fn)
+
+        (range [i initOrder]
+          (let [lhs (make (slice ir/Node) ^{:go/via [Decoder]} (.Len r))]
+            (range [j lhs]
+              (aset lhs j (.obj r)))
+
+            (let [rhs (.expr r)
+                ^{:line 3566} pos (.Pos (aget lhs 0))
+
+                ^{:line 3568 :tag ir/Node} as (zero ir/Node)]
+              (if (== (len lhs) 1)
+                (set! as (typecheck/Stmt (ir/NewAssignStmt pos (aget lhs 0) rhs)))
+
+                (set! as (typecheck/Stmt (ir/NewAssignListStmt pos ir/OAS2 lhs (lit (slice ir/Node) rhs)))))
+
+
+              (range [_ v lhs]
+                (set! (.-Defn (assert (* ir/Name) v)) as))
+
+
+              (aset initOrder i as))))
+
+
+        (set! (.-Body fn) initOrder)
+
+        (typecheck/FinishFuncBody)
+        (set! (.-curfn r) nil)
+        (set! (.-locals r) nil)
+
+        ;; Outline (if legal/profitable) global map inits.
+        (staticinit/OutlineMapInits fn)
+
+        (set! (.-Inits target) (append (.-Inits target) fn))))))
+
+
+^{:go/end 3633} (go/method pkgDecls [^{:tag (* reader)} r ^{:tag (* ir/Package)} target]
+  ^{:go/via [Decoder]} (.Sync r pkgbits/SyncDecls)
+  (while true
+    (switch [code (conv codeDecl ^{:go/via [Decoder]} (.Code r pkgbits/SyncDecl))] code
+      (default
+        (panic (fmt/Sprintf "unhandled decl: %v" code)))
+
+      (case [declEnd]
+        (return))
+
+      (case [declFunc]
+        (let [names (.pkgObjs r target)]
+          (go/call assert (== (len names) 1))
+          (set! (.-Funcs target) (append (.-Funcs target) (.-Func (aget names 0))))))
+
+      (case [declMethod]
+        (let [typ (.typ r)
+            ^{:line 3611} sym (.selector r)
+
+            ^{:line 3613} method (typecheck/Lookdot1 nil sym typ (.Methods typ) 0)]
+          (set! (.-Funcs target) (append (.-Funcs target) (.-Func (assert (* ir/Name) (.-Nname method)))))))
+
+      (case [declVar]
+        (let [names (.pkgObjs r target)]
+
+          (when [n ^{:go/via [Decoder]} (.Len r)] (> n 0)
+            (go/call assert (== (len names) 1))
+            (let [embeds (make (slice ir/Embed) n)]
+              (range [i embeds]
+                (aset embeds i (lit ir/Embed :Pos (.pos r) :Patterns ^{:go/via [Decoder]} (.Strings r))))
+
+              (set! (.-Embed (aget names 0)) (addr embeds))
+              (set! (.-Embeds target) (append (.-Embeds target) (aget names 0)))))))
+
+
+      (case [declOther]
+        (.pkgObjs r target)))))
+
+
+
+
+^{:go/end 3679} (go/method pkgObjs ^{:tag (slice (* ir/Name))} [^{:tag (* reader)} r ^{:tag (* ir/Package)} target]
+  ^{:go/via [Decoder]} (.Sync r pkgbits/SyncDeclNames)
+  (let [nodes (make (slice (* ir/Name)) ^{:go/via [Decoder]} (.Len r))]
+    (range [i nodes]
+      ^{:go/via [Decoder]} (.Sync r pkgbits/SyncDeclName)
+
+      (let [name (assert (* ir/Name) (.obj r))]
+        (aset nodes i name)
+
+        (let [sym (.Sym name)]
+          (when (.IsBlank sym)
+            (continue))
+
+
+          (switch (.-Class name)
+            (default
+              (base/FatalfAt ^{:go/via [miniExpr miniNode]} (.Pos name) "unexpected class: %v" (.-Class name)))
+
+            (case [ir/PEXTERN]
+              (set! (.-Externs target) (append (.-Externs target) name)))
+
+            (case [ir/PFUNC]
+              (go/call assert (== (.Recv ^{:go/via [miniExpr]} (.Type name)) nil))
+
+              ;; TODO(mdempsky): Cleaner way to recognize init?
+              (when (strings/HasPrefix (.-Name sym) "init.")
+                (set! (.-Inits target) (append (.-Inits target) (.-Func name))))))
+
+
+
+          (when (and (.-Flag_dynlink base/Ctxt) (== (.-Name types/LocalPkg) "main") (types/IsExported (.-Name sym)) (== ^{:go/via [miniExpr miniNode]} (.Op name) ir/ONAME))
+            (go/call assert (not (.OnExportList sym)))
+            (set! (.-PluginExports target) (append (.-PluginExports target) name))
+            (.SetOnExportList sym true))
+
+
+          (when (and (!= (.-AsmHdr base/Flag) "") ^:go/paren (or (== ^{:go/via [miniExpr miniNode]} (.Op name) ir/OLITERAL) (== ^{:go/via [miniExpr miniNode]} (.Op name) ir/OTYPE)))
+            (go/call assert (not (.Asm sym)))
+            (set! (.-AsmHdrDecls target) (append (.-AsmHdrDecls target) name))
+            (.SetAsm sym true)))))
+
+
+
+    ^{:line 3678} nodes))
+
+
+;; @@@ Inlining
+
+
+
+^{:go/end 3692} (go/func unifiedHaveInlineBody "unifiedHaveInlineBody reports whether we have the function body for\nfn, so we can inline it.\n" ^bool [^{:tag (* ir/Func)} fn]
+  (when (== (.-Inl fn) nil)
+    (return false))
+
+
+  (let [(values _ ok) (bodyReaderFor fn)]
+    ^{:line 3691} ok))
+
+
+(go/var inlgen 0)
+
+
+
+^{:go/end 3854} (go/func unifiedInlineCall "unifiedInlineCall implements inline.NewInline by re-reading the function\nbody from its Unified IR export data.\n" ^{:tag (* ir/InlinedCallExpr)} [^{:tag (* ir/Func)} callerfn ^{:tag (* ir/CallExpr)} call ^{:tag (* ir/Func)} fn ^int inlIndex ^{:tag (* pgoir/Profile)} profile]
+  (let [(values pri ok) (bodyReaderFor fn)]
+    (when (not ok)
+      (base/FatalfAt ^{:go/via [miniExpr miniNode]} (.Pos call) "cannot inline call to %v: missing inline body" fn))
+
+
+    (when (not (.-HaveDcl (.-Inl fn)))
+      (expandInline fn pri))
+
+
+    (let [r (.asReader pri pkgbits/SectionBody pkgbits/SyncFuncBody)
+
+        ^{:line 3710} tmpfn (ir/NewFunc ^{:go/via [miniNode]} (.Pos fn) ^{:go/via [miniExpr miniNode]} (.Pos (.-Nname fn)) (.Sym callerfn) (.Type fn))]
+
+      (set! (.-curfn r) tmpfn)
+
+      (set! (.-inlCaller r) callerfn)
+      (set! (.-inlCall r) call)
+      (set! (.-inlFunc r) fn)
+      (set! (.-inlTreeIndex r) inlIndex)
+      (set! (.-inlPosBases r) (make (map (* src/PosBase) (* src/PosBase))))
+      (set! (.-funarghack r) true)
+
+      (set! (.-closureVars r) (make (slice (* ir/Name)) (len (.-ClosureVars (.-inlFunc r)))))
+      (range [i cv (.-ClosureVars (.-inlFunc r))]
+        ;; TODO(mdempsky): It should be possible to support this case, but
+        ;; for now we rely on the inliner avoiding it.
+        (when (!= (.-Curfn (.-Outer cv)) callerfn)
+          (base/FatalfAt ^{:go/via [miniExpr miniNode]} (.Pos call) "inlining closure call across frames"))
+
+        (aset (.-closureVars r) i (.-Outer cv)))
+
+      (when (and (!= (len (.-closureVars r)) 0) (.hasTypeParams r))
+        (set! (.-dictParam r) (aget (.-closureVars r) (- (len (.-closureVars r)) 1)))) ; dictParam is last; see reader.funcLit
+
+
+      (.declareParams r)
+
+      (let [(values ^{:tag (slice (* ir/Name))} inlvars ^{:tag (slice (* ir/Name))} retvars) (zero (slice (* ir/Name)))]
+        (do
+          (let [sig (.Type (.-curfn r))
+              ^{:line 3739} endParams (+ (.NumRecvs sig) (.NumParams sig))
+              ^{:line 3740} endResults (+ endParams (.NumResults sig))]
+
+            (set! inlvars (subslice (.-Dcl (.-curfn r)) _ endParams))
+            (set! retvars (subslice (.-Dcl (.-curfn r)) endParams endResults))))
+
+
+        (set! (.-delayResults r) (.-CanDelayResults (.-Inl fn)))
+
+        (set! (.-retlabel r) (typecheck/AutoLabel ".i"))
+        (inc! inlgen)
+
+        (let [init (ir/TakeInit call)]
+
+          ;; For normal function calls, the function callee expression
+          ;; may contain side effects. Make sure to preserve these,
+          ;; if necessary (#42703).
+          (when (== ^{:go/via [miniExpr miniNode]} (.Op call) ir/OCALLFUNC)
+            (inline/CalleeEffects (addr init) (.-Fun call)))
+
+
+          (let [^ir/Nodes args (zero ir/Nodes)]
+            (when (== ^{:go/via [miniExpr miniNode]} (.Op call) ir/OCALLMETH)
+              (base/FatalfAt ^{:go/via [miniExpr miniNode]} (.Pos call) "OCALLMETH missed by typecheck"))
+
+            (.Append args (spread (.-Args call)))
+
+            ;; Create assignment to declare and initialize inlvars.
+            (let [as2 (ir/NewAssignListStmt ^{:go/via [miniExpr miniNode]} (.Pos call) ir/OAS2 (^{:inst [(* ir/Name)]} ir/ToNodes inlvars) args)]
+              (set! (.-Def as2) true)
+              (let [^ir/Nodes as2init (zero ir/Nodes)]
+                (range [_ name inlvars]
+                  (when (ir/IsBlank name)
+                    (continue))
+
+                  ;; TODO(mdempsky): Use inlined position of name.Pos() instead?
+                  (.Append as2init (ir/NewDecl ^{:go/via [miniExpr miniNode]} (.Pos call) ir/ODCL name))
+                  (set! (.-Defn name) as2))
+
+                ^{:go/via [miniStmt]} (.SetInit as2 as2init)
+                (.Append init (typecheck/Stmt as2))
+
+                (when (not (.-delayResults r))
+                  ;; If not delaying retvars, declare and zero initialize the
+                  ;; result variables now.
+                  (range [_ name retvars]
+                    ;; TODO(mdempsky): Use inlined position of name.Pos() instead?
+                    (.Append init (ir/NewDecl ^{:go/via [miniExpr miniNode]} (.Pos call) ir/ODCL name))
+                    (let [ras (ir/NewAssignStmt ^{:go/via [miniExpr miniNode]} (.Pos call) name nil)]
+                      (.Append init (typecheck/Stmt ras)))))
+
+
+
+                ;; Add an inline mark just before the inlined body.
+                ;; This mark is inline in the code so that it's a reasonable spot
+                ;; to put a breakpoint. Not sure if that's really necessary or not
+                ;; (in which case it could go at the end of the function instead).
+                ;; Note issue 28603.
+                (.Append init (ir/NewInlineMarkStmt (.WithIsStmt ^{:go/via [miniExpr miniNode]} (.Pos call)) (conv int64 (.-inlTreeIndex r))))
+
+                (ir/WithFunc (.-curfn r) ^{:go/end 3824} (fn []
+                    (when (not (.syntheticBody r ^{:go/via [miniExpr miniNode]} (.Pos call)))
+                      (go/call assert ^{:go/via [Decoder]} (.Bool r)) ; have body
+
+                      (set! (.-Body (.-curfn r)) (.stmts r))
+                      (set! (.-Endlineno (.-curfn r)) (.pos r)))
+
+
+                    ;; TODO(mdempsky): This shouldn't be necessary. Inlining might
+                    ;; read in new function/method declarations, which could
+                    ;; potentially be recursively inlined themselves; but we shouldn't
+                    ;; need to read in the non-inlined bodies for the declarations
+                    ;; themselves. But currently it's an easy fix to #50552.
+                    (readBodies typecheck/Target true profile)
+
+                    ;; Replace any "return" statements within the function body.
+                    (let [^{:tag (func [ir/Node] [ir/Node])} edit (zero (func [ir/Node] [ir/Node]))]
+                      (set! edit ^{:go/end 3822} (fn ^ir/Node [^ir/Node n]
+                          (when [(values ret ok) (assert (* ir/ReturnStmt) n)] ok
+                            (set! n (typecheck/Stmt (.inlReturn r ret retvars))))
+
+                          (ir/EditChildren n edit)
+                          ^{:line 3821} n))
+
+                      (edit (.-curfn r)))))
+
+
+                (let [body (.-Body (.-curfn r))]
+
+                  ;; Reparent any declarations into the caller function.
+                  (range [_ name (.-Dcl (.-curfn r))]
+                    (set! (.-Curfn name) callerfn)
+
+                    (if (!= (.-Class name) ir/PAUTO) (do
+                        ^{:go/via [miniExpr miniNode]} (.SetPos name (.inlPos r ^{:go/via [miniExpr miniNode]} (.Pos name)))
+                        (.SetInlFormal name true)
+                        (set! (.-Class name) ir/PAUTO))
+
+                      (.SetInlLocal name true)))
+
+
+                  (set! (.-Dcl callerfn) (append (.-Dcl callerfn) (spread (.-Dcl (.-curfn r)))))
+
+                  (.Append body (ir/NewLabelStmt ^{:go/via [miniExpr miniNode]} (.Pos call) (.-retlabel r)))
+
+                  (let [res (ir/NewInlinedCallExpr ^{:go/via [miniExpr miniNode]} (.Pos call) body (^{:inst [(* ir/Name)]} ir/ToNodes retvars))]
+                    ^{:go/via [miniExpr]} (.SetInit res init)
+                    ^{:go/via [miniExpr]} (.SetType res ^{:go/via [miniExpr]} (.Type call))
+                    ^{:go/via [miniExpr miniNode]} (.SetTypecheck res 1)
+                    (set! (.-Reshape res) (.-Reshape call))
+
+                    ;; Inlining shouldn't add any functions to todoBodies.
+                    (go/call assert (== (len todoBodies) 0))
+
+                    ^{:line 3853} res))))))))))
+
+
+
+
+^{:go/end 3881} (go/method inlReturn "inlReturn returns a statement that can substitute for the given\nreturn statement when inlining.\n" ^{:tag (* ir/BlockStmt)} [^{:tag (* reader)} r ^{:tag (* ir/ReturnStmt)} ret ^{:tag (slice (* ir/Name))} retvars]
+  (let [pos ^{:go/via [miniExpr miniNode]} (.Pos (.-inlCall r))
+
+      ^{:line 3861} block (ir/TakeInit ret)]
+
+    (when [results (.-Results ret)] (!= (len results) 0)
+      (go/call assert (== (len retvars) (len results)))
+
+      (let [as2 (ir/NewAssignListStmt pos ir/OAS2 (^{:inst [(* ir/Name)]} ir/ToNodes retvars) (.-Results ret))]
+
+        (when (.-delayResults r)
+          (range [_ name retvars]
+            ;; TODO(mdempsky): Use inlined position of name.Pos() instead?
+            (.Append block (ir/NewDecl pos ir/ODCL name))
+            (set! (.-Defn name) as2)))
+
+
+
+        (.Append block as2)))
+
+
+    (.Append block (ir/NewBranchStmt pos ir/OGOTO (.-retlabel r)))
+    (ir/NewBlockStmt pos block)))
+
+
+
+
+^{:go/end 3920} (go/func expandInline "expandInline reads in an extra copy of IR to populate\nfn.Inl.Dcl.\n" [^{:tag (* ir/Func)} fn ^pkgReaderIndex pri]
+  ;; TODO(mdempsky): Remove this function. It's currently needed by
+  ;; dwarfgen/dwarf.go:preInliningDcls, which requires fn.Inl.Dcl to
+  ;; create abstract function DIEs. But we should be able to provide it
+  ;; with the same information some other way.
+
+  (let [fndcls (len (.-Dcl fn))
+      ^{:line 3892} topdcls (len (.-Funcs typecheck/Target))
+
+      ^{:line 3894} tmpfn (ir/NewFunc ^{:go/via [miniNode]} (.Pos fn) ^{:go/via [miniExpr miniNode]} (.Pos (.-Nname fn)) (.Sym fn) (.Type fn))]
+    (set! (.-ClosureVars tmpfn) (.-ClosureVars fn))
+
+    (do
+      (let [r (.asReader pri pkgbits/SectionBody pkgbits/SyncFuncBody)]
+
+        ;; Don't change parameter's Sym/Nname fields.
+        (set! (.-funarghack r) true)
+
+        (.funcBody r tmpfn)))
+
+
+    ;; Move tmpfn's params to fn.Inl.Dcl, and reparent under fn.
+    (range [_ name (.-Dcl tmpfn)]
+      (set! (.-Curfn name) fn))
+
+    (set! (.-Dcl (.-Inl fn)) (.-Dcl tmpfn))
+    (set! (.-HaveDcl (.-Inl fn)) true)
+
+    ;; Double check that we didn't change fn.Dcl by accident.
+    (go/call assert (== fndcls (len (.-Dcl fn))))
+
+    ;; typecheck.Stmts may have added function literals to
+    ;; typecheck.Target.Decls. Remove them again so we don't risk trying
+    ;; to compile them multiple times.
+    (set! (.-Funcs typecheck/Target) (subslice (.-Funcs typecheck/Target) _ topdcls))))
+
+
+;; @@@ Method wrappers
+;;
+;; Here we handle constructing "method wrappers," alternative entry
+;; points that adapt methods to different calling conventions. Given a
+;; user-declared method "func (T) M(i int) bool { ... }", there are a
+;; few wrappers we may need to construct:
+;;
+;;	- Implicit dereferencing. Methods declared with a value receiver T
+;;	  are also included in the method set of the pointer type *T, so
+;;	  we need to construct a wrapper like "func (recv *T) M(i int)
+;;	  bool { return (*recv).M(i) }".
+;;
+;;	- Promoted methods. If struct type U contains an embedded field of
+;;	  type T or *T, we need to construct a wrapper like "func (recv U)
+;;	  M(i int) bool { return recv.T.M(i) }".
+;;
+;;	- Method values. If x is an expression of type T, then "x.M" is
+;;	  roughly "tmp := x; func(i int) bool { return tmp.M(i) }".
+;;
+;; At call sites, we always prefer to call the user-declared method
+;; directly, if known, so wrappers are only needed for indirect calls
+;; (for example, interface method calls that can't be devirtualized).
+;; Consequently, we can save some compile time by skipping
+;; construction of wrappers that are never needed.
+;;
+;; Alternatively, because the linker doesn't care which compilation
+;; unit constructed a particular wrapper, we can instead construct
+;; them as needed. However, if a wrapper is needed in multiple
+;; downstream packages, we may end up needing to compile it multiple
+;; times, costing us more compile time and object file size. (We mark
+;; the wrappers as DUPOK, so the linker doesn't complain about the
+;; duplicate symbols.)
+;;
+;; The current heuristics we use to balance these trade offs are:
+;;
+;;	- For a (non-parameterized) defined type T, we construct wrappers
+;;	  for *T and any promoted methods on T (and *T) in the same
+;;	  compilation unit as the type declaration.
+;;
+;;	- For a parameterized defined type, we construct wrappers in the
+;;	  compilation units in which the type is instantiated. We
+;;	  similarly handle wrappers for anonymous types with methods and
+;;	  compilation units where their type literals appear in source.
+;;
+;;	- Method value expressions are relatively uncommon, so we
+;;	  construct their wrappers in the compilation units that they
+;;	  appear in.
+;;
+;; Finally, as an opportunistic compile-time optimization, if we know
+;; a wrapper was constructed in any imported package's compilation
+;; unit, then we skip constructing a duplicate one. However, currently
+;; this is only done on a best-effort basis.
+
+
+
+(go/var ^{:tag (slice (* types/Type)) :doc "needWrapperTypes lists types for which we may need to generate\nmethod wrappers.\n"} needWrapperTypes)
+
+
+
+(go/var ^{:tag (slice (* types/Type)) :doc "haveWrapperTypes lists types for which we know we already have\nmethod wrappers, because we found the type in an imported package.\n"} haveWrapperTypes)
+
+
+
+(go/var ^{:tag (slice methodValueWrapper) :doc "needMethodValueWrappers lists methods for which we may need to\ngenerate method value wrappers.\n"} needMethodValueWrappers)
+
+
+
+
+(go/var ^{:tag (slice methodValueWrapper) :doc "haveMethodValueWrappers lists methods for which we know we already\nhave method value wrappers, because we found it in an imported\npackage.\n"} haveMethodValueWrappers)
+
+(go/type methodValueWrapper (struct
+    ^{:line 3993 :tag (* types/Type)} rcvr
+    ^{:line 3994 :tag (* types/Field)} method))
+
+
+
+
+^{:go/end 4015} (go/method needWrapper "needWrapper records that wrapper methods may be needed at link\ntime.\n" [^{:tag (* reader)} r ^{:tag (* types/Type)} typ]
+  (when (or (.IsPtr typ) (.IsKind typ types/TFORW))
+    (return))
+
+
+  ;; Special case: runtime must define error even if imported packages mention it (#29304).
+  (let [forceNeed (and (== typ types/ErrorType) (== (.-Pkgpath base/Ctxt) "runtime"))]
+
+    ;; If a type was found in an imported package, then we can assume
+    ;; that package (or one of its transitive dependencies) already
+    ;; generated method wrappers for it.
+    (if (and (.importedDef r) (not forceNeed))
+      (set! haveWrapperTypes (append haveWrapperTypes typ))
+
+      (set! needWrapperTypes (append needWrapperTypes typ)))))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 4033} (go/method importedDef "importedDef reports whether r is reading from an imported and\nnon-generic element.\n\nIf a type was found in an imported package, then we can assume that\npackage (or one of its transitive dependencies) already generated\nmethod wrappers for it.\n\nException: If we're instantiating an imported generic type or\nfunction, we might be instantiating it with type arguments not\npreviously seen before.\n\nTODO(mdempsky): Distinguish when a generic function or type was\ninstantiated in an imported package so that we can add types to\nhaveWrapperTypes instead.\n" ^bool [^{:tag (* reader)} r]
+  (and (!= (.-p r) localPkgReader) (not (.hasTypeParams r))))
+
+
+
+
+^{:go/end 4062} (go/func MakeWrappers "MakeWrappers constructs all wrapper methods needed for the target\ncompilation unit.\n" [^{:tag (* ir/Package)} target]
+  ;; always generate a wrapper for error.Error (#29304)
+  (set! needWrapperTypes (append needWrapperTypes types/ErrorType))
+
+  (let [seen (make (map string (* types/Type)))]
+
+    (range [_ typ haveWrapperTypes]
+      (wrapType typ target seen false))
+
+    (set! haveWrapperTypes nil)
+
+    (range [_ typ needWrapperTypes]
+      (wrapType typ target seen true))
+
+    (set! needWrapperTypes nil)
+
+    (range [_ wrapper haveMethodValueWrappers]
+      (wrapMethodValue (.-rcvr wrapper) (.-method wrapper) target false))
+
+    (set! haveMethodValueWrappers nil)
+
+    (range [_ wrapper needMethodValueWrappers]
+      (wrapMethodValue (.-rcvr wrapper) (.-method wrapper) target true))
+
+    (set! needMethodValueWrappers nil)))
+
+
+^{:go/end 4100} (go/func wrapType [^{:tag (* types/Type)} typ ^{:tag (* ir/Package)} target ^{:tag (map string (* types/Type))} seen ^bool needed]
+  (let [key (.LinkString typ)]
+    (when [prev (aget seen key)] (!= prev nil)
+      (when (not (types/Identical typ prev))
+        (base/Fatalf "collision: types %v and %v have link string %q" typ prev key))
+
+      (return))
+
+    (aset seen key typ)
+
+    (when (not needed)
+      ;; Only called to add to 'seen'.
+      (return))
+
+
+    (when (not (.IsInterface typ))
+      (typecheck/CalcMethods typ))
+
+    (range [_ meth (.AllMethods typ)]
+      (when (or (.IsBlank (.-Sym meth)) (not (.IsMethod meth)))
+        (base/FatalfAt (.-Pos meth) "invalid method: %v" meth))
+
+
+      (methodWrapper 0 typ meth target)
+
+      ;; For non-interface types, we also want *T wrappers.
+      (when (not (.IsInterface typ))
+        (methodWrapper 1 typ meth target)
+
+        ;; For not-in-heap types, *T is a scalar, not pointer shaped,
+        ;; so the interface wrappers use **T.
+        (when (.NotInHeap typ)
+          (methodWrapper 2 typ meth target))))))
+
+
+
+
+
+^{:go/end 4143} (go/func methodWrapper [^int derefs ^{:tag (* types/Type)} tbase ^{:tag (* types/Field)} method ^{:tag (* ir/Package)} target]
+  (let [wrapper tbase]
+    (for [i 0] (< i derefs) (inc! i)
+      (set! wrapper (types/NewPtr wrapper)))
+
+
+    (let [sym (ir/MethodSym wrapper (.-Sym method))]
+      (base/Assertf (not (.Siggen sym)) "already generated wrapper %v" sym)
+      (.SetSiggen sym true)
+
+      (let [wrappee (.-Type (.Recv (.-Type method)))]
+        (when (or (types/Identical wrapper wrappee)
+            (not (types/IsMethodApplicable wrapper method))
+            (not (reflectdata/NeedEmit tbase)))
+          (return))
+
+
+        ;; TODO(mdempsky): Use method.Pos instead?
+        (let [pos base/AutogeneratedPos
+
+            ^{:line 4122} fn (newWrapperFunc pos sym wrapper method)
+
+            ^{:line 4124 :tag ir/Node} recv (assert (* ir/Name) (.-Nname (.Recv ^{:go/via [miniExpr]} (.Type (.-Nname fn)))))]
+
+          ;; For simple *T wrappers around T methods, panicwrap produces a
+          ;; nicer panic message.
+          (when (and (.IsPtr wrapper) (types/Identical (.Elem wrapper) wrappee))
+            (let [cond (ir/NewBinaryExpr pos ir/OEQ recv (assert ir/Node (.-Def (.Lookup types/BuiltinPkg "nil"))))
+                ^{:line 4130} then (lit (slice ir/Node) (ir/NewCallExpr pos ir/OCALL (typecheck/LookupRuntime "panicwrap") nil))]
+              (.Append (.-Body fn) (ir/NewIfStmt pos cond then nil))))
+
+
+          ;; typecheck will add one implicit deref, if necessary,
+          ;; but not-in-heap types require more for their **T wrappers.
+          (for [i 1] (< i derefs) (inc! i)
+            (set! recv (Implicit (ir/NewStarExpr pos recv))))
+
+
+          (addTailCall pos fn recv method)
+
+          (finishWrapperFunc fn target))))))
+
+
+^{:go/end 4168} (go/func wrapMethodValue [^{:tag (* types/Type)} recvType ^{:tag (* types/Field)} method ^{:tag (* ir/Package)} target ^bool needed]
+  (let [sym (ir/MethodSymSuffix recvType (.-Sym method) "-fm")]
+    (when (.Uniq sym)
+      (return))
+
+    (.SetUniq sym true)
+
+    ;; TODO(mdempsky): Use method.Pos instead?
+    (let [pos base/AutogeneratedPos
+
+        ^{:line 4155} fn (newWrapperFunc pos sym nil method)]
+      (set! (.-Def sym) (.-Nname fn))
+
+      ;; Declare and initialize variable holding receiver.
+      (let [recv (ir/NewHiddenParam pos fn (typecheck/Lookup ".this") recvType)]
+
+        (when (not needed)
+          (return))
+
+
+        (addTailCall pos fn recv method)
+
+        (finishWrapperFunc fn target)))))
+
+
+^{:go/end 4177} (go/func newWrapperFunc ^{:tag (* ir/Func)} [^src/XPos pos ^{:tag (* types/Sym)} sym ^{:tag (* types/Type)} wrapper ^{:tag (* types/Field)} method]
+  (let [sig (newWrapperType wrapper method)
+      ^{:line 4172} fn (ir/NewFunc pos pos sym sig)]
+    (.DeclareParams fn true)
+    (.SetDupok fn true) ; TODO(mdempsky): Leave unset for local, non-generic wrappers?
+
+    ^{:line 4176} fn))
+
+
+^{:go/end 4204} (go/func finishWrapperFunc [^{:tag (* ir/Func)} fn ^{:tag (* ir/Package)} target]
+  (ir/WithFunc fn ^{:go/end 4182} (fn []
+      (typecheck/Stmts (.-Body fn))))
+
+
+  ;; We generate wrappers after the global inlining pass,
+  ;; so we're responsible for applying inlining ourselves here.
+  ;; TODO(prattmic): plumb PGO.
+  (interleaved/DevirtualizeAndInlineFunc fn nil)
+
+  ;; The body of wrapper function after inlining may reveal new ir.OMETHVALUE node,
+  ;; we don't know whether wrapper function has been generated for it or not, so
+  ;; generate one immediately here.
+  ;;
+  ;; Further, after CL 492017, function that construct closures is allowed to be inlined,
+  ;; even though the closure itself can't be inline. So we also need to visit body of any
+  ;; closure that we see when visiting body of the wrapper function.
+  (ir/VisitFuncAndClosures fn ^{:go/end 4200} (fn [^ir/Node n]
+      (when [(values n ok) (assert (* ir/SelectorExpr) n)] (and ok (== ^{:go/via [miniExpr miniNode]} (.Op n) ir/OMETHVALUE))
+        (wrapMethodValue (.Type (.-X n)) (.-Selection n) target true))))
+
+
+
+  (set! (.-Defn (.-Nname fn)) fn)
+  (set! (.-Funcs target) (append (.-Funcs target) fn)))
+
+
+
+
+
+
+^{:go/end 4230} (go/func newWrapperType "newWrapperType returns a copy of the given signature type, but with\nthe receiver parameter type substituted with recvType.\nIf recvType is nil, newWrapperType returns a signature\nwithout a receiver parameter.\n" ^{:tag (* types/Type)} [^{:tag (* types/Type)} recvType ^{:tag (* types/Field)} method]
+  (let [clone ^{:go/end 4218} (fn ^{:tag (slice (* types/Field))} [^{:tag (slice (* types/Field))} params]
+        (let [res (make (slice (* types/Field)) (len params))]
+          (range [i param params]
+            (aset res i (types/NewField (.-Pos param) (.-Sym param) (.-Type param)))
+            (.SetIsDDD (aget res i) (.IsDDD param)))
+
+          ^{:line 4217} res))
+
+
+      ^{:line 4220} sig (.-Type method)
+
+      ^{:line 4222 :tag (* types/Field)} recv (zero (* types/Field))]
+    (when (!= recvType nil)
+      (set! recv (types/NewField (.-Pos (.Recv sig)) (.-Sym (.Recv sig)) recvType)))
+
+    (let [params (clone (.Params sig))
+        ^{:line 4227} results (clone (.Results sig))]
+
+      (types/NewSignature recv params results))))
+
+
+^{:go/end 4267} (go/func addTailCall [^src/XPos pos ^{:tag (* ir/Func)} fn ^ir/Node recv ^{:tag (* types/Field)} method]
+  (let [sig ^{:go/via [miniExpr]} (.Type (.-Nname fn))
+      ^{:line 4234} args (make (slice ir/Node) (.NumParams sig))]
+    (range [i param (.Params sig)]
+      (aset args i (assert (* ir/Name) (.-Nname param))))
+
+
+    (let [dot (typecheck/XDotMethod pos recv (.-Sym method) true)
+        ^{:line 4240} call (assert (* ir/CallExpr) (typecheck/Call pos dot args (.IsVariadic (.-Type method))))]
+
+      (when (and (!= (.Type recv) nil) (.IsPtr (.Type recv)) (.IsPtr (.-Type (.Recv (.-Type method))))
+          (!= (.-Embedded method) 0)
+          ^:go/paren (or (and (types/IsInterfaceMethod (.-Type method)) (!= ^{:go/via [Arch]} (.-Name (.-Arch base/Ctxt)) "wasm"))
+            (and (not (types/IsInterfaceMethod (.-Type method))) (not (unifiedHaveInlineBody (.-Func (ir/MethodExprName dot))))))
+          ;; TODO: implement wasm indirect tail calls
+          ;; TODO: do we need the ppc64le/dynlink restriction for interface tail calls?
+          (not (and ^:go/paren (or (== ^{:go/via [Arch]} (.-Name (.-Arch base/Ctxt)) "ppc64le") (== ^{:go/via [Arch]} (.-Name (.-Arch base/Ctxt)) "ppc64")) (.-Flag_dynlink base/Ctxt))))
+        (when (!= (.-TailCall base/Debug) 0)
+          (base/WarnfAt (.Pos (.Elem (.-Type (.Recv ^{:go/via [miniExpr]} (.Type (.-Nname fn)))))) "tail call emitted for the method %v wrapper" (.-Nname method)))
+
+        ;; Prefer OTAILCALL to reduce code size (except the case when the called method can be inlined).
+        (.Append (.-Body fn) (ir/NewTailCallStmt pos call))
+        (return))
+
+
+      (.SetWrapper fn true)
+
+      (when (== (.NumResults (.-Type method)) 0)
+        (.Append (.-Body fn) call)
+        (return))
+
+
+      (let [ret (ir/NewReturnStmt pos nil)]
+        (set! (.-Results ret) (lit (slice ir/Node) call))
+        (.Append (.-Body fn) ret)))))
+
+
+^{:go/end 4272} (go/func setBasePos [^src/XPos pos]
+  ;; Set the position for any error messages we might print (e.g. too large types).
+  (set! base/Pos pos))
+
+
+
+
+
+
+
+(go/const ^{:val ".dict" :doc "dictParamName is the name of the synthetic dictionary parameter\nadded to shaped functions.\n\nN.B., this variable name is known to Delve:\nhttps://github.com/go-delve/delve/blob/cb91509630529e6055be845688fd21eb89ae8714/pkg/proc/eval.go#L28\n"} dictParamName typecheck/LocalDictName)
+
+
+
+
+
+
+
+
+
+^{:go/end 4314} (go/func shapeSig "shapeSig returns a copy of fn's signature, except adding a\ndictionary parameter and promoting the receiver parameter (if any)\nto a normal parameter.\n\nThe parameter types.Fields are all copied too, so their Nname\nfields can be initialized for use by the shape function.\n\nAll signatures returned by shapeSig are marked as shaped.\n" ^{:tag (* types/Type)} [^{:tag (* ir/Func)} fn ^{:tag (* readerDict)} dict]
+  (let [sig ^{:go/via [miniExpr]} (.Type (.-Nname fn))
+      ^{:line 4291} oldRecv (.Recv sig)
+
+      ^{:line 4293 :tag (* types/Field)} recv (zero (* types/Field))]
+    (when (!= oldRecv nil)
+      (set! recv (types/NewField (.-Pos oldRecv) (.-Sym oldRecv) (.-Type oldRecv))))
+
+
+    (let [params (make (slice (* types/Field)) (+ 1 (.NumParams sig)))]
+      (aset params 0 (types/NewField ^{:go/via [miniNode]} (.Pos fn) (.Lookup (.-Pkg (.Sym fn)) dictParamName) (types/NewPtr (.varType dict))))
+      (range [i param (.Params sig)]
+        (let [d (types/NewField (.-Pos param) (.-Sym param) (.-Type param))]
+          (.SetIsDDD d (.IsDDD param))
+          (aset params (+ 1 i) d)))
+
+
+      (let [results (make (slice (* types/Field)) (.NumResults sig))]
+        (range [i result (.Results sig)]
+          (aset results i (types/NewField (.-Pos result) (.-Sym result) (.-Type result))))
+
+
+        (let [typ (types/NewSignature recv params results)]
+          (.SetHasShape typ true)
+          ^{:line 4313} typ)))))

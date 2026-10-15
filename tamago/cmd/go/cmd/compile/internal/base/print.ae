@@ -1,0 +1,290 @@
+;; Copyright 2020 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.cmd.compile.internal.base) (go/file "print.go" :imports [
+
+
+    ^{:line 8} [fmt "fmt"]
+    ^{:line 9} [buildcfg "internal/buildcfg"]
+    ^{:line 10} [errors "internal/types/errors"]
+    ^{:line 11} [os "os"]
+    ^{:line 12} [debug "runtime/debug"]
+    ^{:line 13} [sort "sort"]
+    ^{:line 14} [strings "strings"]
+
+    ^{:line 16} [src "cmd/internal/src"]
+    ^{:line 17} [counter "cmd/internal/telemetry/counter"]])
+
+
+
+(go/type errorMsg "An errorMsg is a queued error message, waiting to be printed.\n" (struct
+    ^{:line 22 :tag src/XPos} pos
+    ^{:line 23 :tag string} msg
+    ^{:line 24 :tag errors/Code} code))
+
+
+
+
+(go/var ^{:tag src/XPos :doc "Pos is the current source position being processed,\nprinted by Errorf, ErrorfLang, Fatalf, and Warnf.\n"} Pos)
+
+(go/var
+  ^{:line 32} [^{:tag (slice errorMsg)} errorMsgs]
+  ^{:line 33} [^int numErrors] ; number of entries in errorMsgs that are errors (as opposed to warnings)
+  ^{:line 34} [^int numSyntaxErrors])
+
+
+
+^{:go/end 40} (go/func Errors "Errors returns the number of errors reported.\n" ^int []
+  ^{:line 39} numErrors)
+
+
+
+^{:go/end 45} (go/func SyntaxErrors "SyntaxErrors returns the number of syntax errors reported.\n" ^int []
+  ^{:line 44} numSyntaxErrors)
+
+
+
+^{:go/end 60} (go/func addErrorMsg "addErrorMsg adds a new errorMsg (which may be a warning) to errorMsgs.\n" [^src/XPos pos ^errors/Code code ^string format & ^{:tag (slice any)} args]
+  (let [msg (fmt/Sprintf format (spread args))]
+    ;; Only add the position if know the position.
+    ;; See issue golang.org/issue/11361.
+    (when (.IsKnown pos)
+      (set! msg (fmt/Sprintf "%v: %s" (FmtPos pos) msg)))
+
+    (set! errorMsgs (append errorMsgs ^{:go/breaks [2 4 6]} (lit errorMsg
+          :pos pos
+          :msg (+ msg "\n")
+          :code code)))))
+
+
+
+
+^{:go/end 68} (go/func FmtPos "FmtPos formats pos as a file:line string.\n" ^string [^src/XPos pos]
+  (when (== Ctxt nil)
+    (return "???"))
+
+  (.Format (.OutermostPos Ctxt pos) (== (.-C Flag) 0) (== (.-L Flag) 1)))
+
+
+
+(go/type byPos "byPos sorts errors by source position.\n" (slice errorMsg))
+
+^{:go/end 73} (go/method Len ^int [^byPos x] (len x))
+^{:go/end 74} (go/method Less ^bool [^byPos x ^int i ^int j] (.Before (.-pos (aget x i)) (.-pos (aget x j))))
+^{:go/end 75} (go/method Swap [^byPos x ^int i ^int j] (set! (values (aget x i) (aget x j)) (values (aget x j) (aget x i))))
+
+
+
+^{:go/end 95} (go/func FlushErrors "FlushErrors sorts errors seen so far by line number, prints them to stdout,\nand empties the errors array.\n" []
+  (when (and (!= Ctxt nil) (!= (.-Bso Ctxt) nil))
+    (.Flush (.-Bso Ctxt)))
+
+  (when (== (len errorMsgs) 0)
+    (return))
+
+  (when (== (.-LowerU Flag) 0)
+    (sort/Stable (conv byPos errorMsgs)))
+
+  (range [i err errorMsgs]
+    (when (or (== i 0) (!= (.-msg err) (.-msg (aget errorMsgs (- i 1)))))
+      (fmt/Print (.-msg err))))
+
+
+  (set! errorMsgs (subslice errorMsgs _ 0)))
+
+
+
+
+(go/var ^{:tag (struct ^src/XPos syntax ^src/XPos other ^string msg) :doc "lasterror keeps track of the most recently issued error,\nto avoid printing multiple error messages on the same line.\n"} lasterror)
+;; source position of last syntax error
+;; source position of last non-syntax error
+;; error message of last non-syntax error
+
+
+
+^{:go/end 110} (go/func sameline "sameline reports whether two positions a, b are on the same line.\n" ^bool [^src/XPos a ^src/XPos b]
+  (let [p (.Pos (.-PosTable Ctxt) a)
+      ^{:line 108} q (.Pos (.-PosTable Ctxt) b)]
+    (and (== (.Base p) (.Base q)) (== ^{:go/via [lico]} (.Line p) ^{:go/via [lico]} (.Line q)))))
+
+
+
+^{:go/end 115} (go/func Errorf "Errorf reports a formatted error at the current line.\n" [^string format & ^{:tag (slice any)} args]
+  (ErrorfAt Pos 0 format (spread args)))
+
+
+
+^{:go/end 150} (go/func ErrorfAt "ErrorfAt reports a formatted error message at pos.\n" [^src/XPos pos ^errors/Code code ^string format & ^{:tag (slice any)} args]
+  (let [msg (fmt/Sprintf format (spread args))]
+
+    (if (strings/HasPrefix msg "syntax error") (do
+        (inc! numSyntaxErrors)
+        ;; only one syntax error per line, no matter what error
+        (when (sameline (.-syntax lasterror) pos)
+          (return))
+
+        (set! (.-syntax lasterror) pos))
+      (do
+        ;; only one of multiple equal non-syntax errors per line
+        ;; (FlushErrors shows only one of them, so we filter them
+        ;; here as best as we can (they may not appear in order)
+        ;; so that we don't count them here and exit early, and
+        ;; then have nothing to show for.)
+        (when (and (sameline (.-other lasterror) pos) (== (.-msg lasterror) msg))
+          (return))
+
+        (set! (.-other lasterror) pos)
+        (set! (.-msg lasterror) msg)))
+
+
+    (addErrorMsg pos code "%s" msg)
+    (inc! numErrors)
+
+    (hcrash)
+    (when (and (>= numErrors 10) (== (.-LowerE Flag) 0))
+      (FlushErrors)
+      (fmt/Printf "%v: too many errors\n" (FmtPos pos))
+      (ErrorExit))))
+
+
+
+
+
+
+^{:go/end 163} (go/func UpdateErrorDot "UpdateErrorDot is a clumsy hack that rewrites the last error,\nif it was \"LINE: undefined: NAME\", to be \"LINE: undefined: NAME in EXPR\".\nIt is used to give better error messages for dot (selector) expressions.\n" [^string line ^string name ^string expr]
+  (when (== (len errorMsgs) 0)
+    (return))
+
+  (let [e (addr (aget errorMsgs (- (len errorMsgs) 1)))]
+    (when (and (strings/HasPrefix (.-msg e) line) (== (.-msg e) (fmt/Sprintf "%v: undefined: %v\n" line name)))
+      (set! (.-msg e) (fmt/Sprintf "%v: undefined: %v in %v\n" line name expr)))))
+
+
+
+
+
+
+
+^{:go/end 171} (go/func Warn "Warn reports a formatted warning at the current line.\nIn general the Go compiler does NOT generate warnings,\nso this should be used only when the user has opted in\nto additional output by setting a particular flag.\n" [^string format & ^{:tag (slice any)} args]
+  (WarnfAt Pos format (spread args)))
+
+
+
+
+
+
+^{:go/end 182} (go/func WarnfAt "WarnfAt reports a formatted warning at pos.\nIn general the Go compiler does NOT generate warnings,\nso this should be used only when the user has opted in\nto additional output by setting a particular flag.\n" [^src/XPos pos ^string format & ^{:tag (slice any)} args]
+  (addErrorMsg pos 0 format (spread args))
+  (when (!= (.-LowerM Flag) 0)
+    (FlushErrors)))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 198} (go/func Fatalf "Fatalf reports a fatal error - an internal problem - at the current line and exits.\nIf other errors have already been printed, then Fatalf just quietly exits.\n(The internal problem may have been caused by incomplete information\nafter the already-reported errors, so best to let users fix those and\ntry again without being bothered about a spurious internal error.)\n\nBut if no errors have been printed, or if -d panic has been specified,\nFatalf prints the error as an \"internal compiler error\". In a released build,\nit prints an error asking to file a bug report. In development builds, it\nprints a stack trace.\n\nIf -h has been specified, Fatalf panics to force the usual runtime info dump.\n" [^string format & ^{:tag (slice any)} args]
+  (FatalfAt Pos format (spread args)))
+
+
+(go/var bugStack (counter/NewStack "compile/bug" 16)) ; 16 is arbitrary; used by gopls and crashmonitor
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 239} (go/func FatalfAt "FatalfAt reports a fatal error - an internal problem - at pos and exits.\nIf other errors have already been printed, then FatalfAt just quietly exits.\n(The internal problem may have been caused by incomplete information\nafter the already-reported errors, so best to let users fix those and\ntry again without being bothered about a spurious internal error.)\n\nBut if no errors have been printed, or if -d panic has been specified,\nFatalfAt prints the error as an \"internal compiler error\". In a released build,\nit prints an error asking to file a bug report. In development builds, it\nprints a stack trace.\n\nIf -h has been specified, FatalfAt panics to force the usual runtime info dump.\n" [^src/XPos pos ^string format & ^{:tag (slice any)} args]
+  (FlushErrors)
+
+  (.Inc bugStack)
+
+  (when (or (!= (.-Panic Debug) 0) (== numErrors 0))
+    (fmt/Printf "%v: internal compiler error: " (FmtPos pos))
+    (fmt/Printf format (spread args))
+    (fmt/Printf "\n")
+
+    ;; If this is a released compiler version, ask for a bug report.
+    (if (and (== (.-Panic Debug) 0) (strings/HasPrefix buildcfg/Version "go") (not (strings/Contains buildcfg/Version "devel"))) (do
+        (fmt/Printf "\n")
+        (fmt/Printf "Please file a bug report including a short program that triggers the error.\n")
+        (fmt/Printf "https://go.dev/issue/new\n"))
+      (do
+        ;; Not a release; dump a stack trace, too.
+        (fmt/Println)
+        (.Write os/Stdout (debug/Stack))
+        (fmt/Println))))
+
+
+
+  (hcrash)
+  (ErrorExit))
+
+
+
+^{:go/end 246} (go/func Assert "Assert reports \"assertion failed\" with Fatalf, unless b is true.\n" [^bool b]
+  (when (not b)
+    (Fatalf "assertion failed")))
+
+
+
+
+^{:go/end 253} (go/func Assertf "Assertf reports a fatal error with Fatalf, unless b is true.\n" [^bool b ^string format & ^{:tag (slice any)} args]
+  (when (not b)
+    (Fatalf format (spread args))))
+
+
+
+
+^{:go/end 260} (go/func AssertfAt "AssertfAt reports a fatal error with FatalfAt, unless b is true.\n" [^bool b ^src/XPos pos ^string format & ^{:tag (slice any)} args]
+  (when (not b)
+    (FatalfAt pos format (spread args))))
+
+
+
+
+^{:go/end 271} (go/func hcrash "hcrash crashes the compiler when -h is set, to find out where a message is generated.\n" []
+  (when (!= (.-LowerH Flag) 0)
+    (FlushErrors)
+    (when (!= (.-LowerO Flag) "")
+      (os/Remove (.-LowerO Flag)))
+
+    (panic "-h")))
+
+
+
+
+
+^{:go/end 281} (go/func ErrorExit "ErrorExit handles an error-status exit.\nIt flushes any pending errors, removes the output file, and exits.\n" []
+  (FlushErrors)
+  (when (!= (.-LowerO Flag) "")
+    (os/Remove (.-LowerO Flag)))
+
+  (os/Exit 2))
+
+
+
+^{:go/end 288} (go/func ExitIfErrors "ExitIfErrors calls ErrorExit if any errors have been reported.\n" []
+  (when (> (Errors) 0)
+    (ErrorExit)))
+
+
+
+(go/var ^src/XPos AutogeneratedPos)

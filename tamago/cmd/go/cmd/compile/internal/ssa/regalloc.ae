@@ -1,0 +1,3622 @@
+;; Copyright 2015 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; Register allocation.
+;;
+;; We use a version of a linear scan register allocator. We treat the
+;; whole function as a single long basic block and run through
+;; it using a greedy register allocator. Then all merge edges
+;; (those targeting a block with len(Preds)>1) are processed to
+;; shuffle data into the place that the target of the edge expects.
+;;
+;; The greedy allocator moves values into registers just before they
+;; are used, spills registers only when necessary, and spills the
+;; value whose next use is farthest in the future.
+;;
+;; The register allocator requires that a block is not scheduled until
+;; at least one of its predecessors have been scheduled. The most recent
+;; such predecessor provides the starting register state for a block.
+;;
+;; It also requires that there are no critical edges (critical =
+;; comes from a block with >1 successor and goes to a block with >1
+;; predecessor).  This makes it easy to add fixup code on merge edges -
+;; the source of a merge edge has only one successor, so we can add
+;; fixup code to the end of that block.
+
+;; Spilling
+;;
+;; During the normal course of the allocator, we might throw a still-live
+;; value out of all registers. When that value is subsequently used, we must
+;; load it from a slot on the stack. We must also issue an instruction to
+;; initialize that stack location with a copy of v.
+;;
+;; pre-regalloc:
+;;   (1) v = Op ...
+;;   (2) x = Op ...
+;;   (3) ... = Op v ...
+;;
+;; post-regalloc:
+;;   (1) v = Op ...    : AX // computes v, store result in AX
+;;       s = StoreReg v     // spill v to a stack slot
+;;   (2) x = Op ...    : AX // some other op uses AX
+;;       c = LoadReg s : CX // restore v from stack slot
+;;   (3) ... = Op c ...     // use the restored value
+;;
+;; Allocation occurs normally until we reach (3) and we realize we have
+;; a use of v and it isn't in any register. At that point, we allocate
+;; a spill (a StoreReg) for v. We can't determine the correct place for
+;; the spill at this point, so we allocate the spill as blockless initially.
+;; The restore is then generated to load v back into a register so it can
+;; be used. Subsequent uses of v will use the restored value c instead.
+;;
+;; What remains is the question of where to schedule the spill.
+;; During allocation, we keep track of the dominator of all restores of v.
+;; The spill of v must dominate that block. The spill must also be issued at
+;; a point where v is still in a register.
+;;
+;; To find the right place, start at b, the block which dominates all restores.
+;;  - If b is v.Block, then issue the spill right after v.
+;;    It is known to be in a register at that point, and dominates any restores.
+;;  - Otherwise, if v is in a register at the start of b,
+;;    put the spill of v at the start of b.
+;;  - Otherwise, set b = immediate dominator of b, and repeat.
+;;
+;; Phi values are special, as always. We define two kinds of phis, those
+;; where the merge happens in a register (a "register" phi) and those where
+;; the merge happens in a stack location (a "stack" phi).
+;;
+;; A register phi must have the phi and all of its inputs allocated to the
+;; same register. Register phis are spilled similarly to regular ops.
+;;
+;; A stack phi must have the phi and all of its inputs allocated to the same
+;; stack location. Stack phis start out life already spilled - each phi
+;; input must be a store (using StoreReg) at the end of the corresponding
+;; predecessor block.
+;;     b1: y = ... : AX        b2: z = ... : BX
+;;         y2 = StoreReg y         z2 = StoreReg z
+;;         goto b3                 goto b3
+;;     b3: x = phi(y2, z2)
+;; The stack allocator knows that StoreReg args of stack-allocated phis
+;; must be allocated to the same stack slot as the phi that uses them.
+;; x is now a spilled value and a restore must appear before its first use.
+
+;; TODO
+
+;; Use an affinity graph to mark two values which should use the
+;; same register. This affinity graph will be used to prefer certain
+;; registers for allocation. This affinity helps eliminate moves that
+;; are required for phi implementations and helps generate allocations
+;; for 2-register architectures.
+
+;; Note: regalloc generates a not-quite-SSA output. If we have:
+;;
+;;             b1: x = ... : AX
+;;                 x2 = StoreReg x
+;;                 ... AX gets reused for something else ...
+;;                 if ... goto b3 else b4
+;;
+;;   b3: x3 = LoadReg x2 : BX       b4: x4 = LoadReg x2 : CX
+;;       ... use x3 ...                 ... use x4 ...
+;;
+;;             b2: ... use x3 ...
+;;
+;; If b3 is the primary predecessor of b2, then we use x3 in b2 and
+;; add a x4:CX->BX copy at the end of b4.
+;; But the definition of x3 doesn't dominate b2.  We should really
+;; insert an extra phi at the start of b2 (x5=phi(x3,x4):BX) to keep
+;; SSA form. For now, we ignore this problem as remaining in strict
+;; SSA form isn't needed after regalloc. We'll just leave the use
+;; of x3 not dominated by the definition of x3, and the CX->BX copy
+;; will have no use (so don't run deadcode after regalloc!).
+;; TODO: maybe we should introduce these extra phis?
+
+(in-ns 'go.cmd.compile.internal.ssa) (go/file "regalloc.go" :imports [
+
+
+    ^{:line 117} [base "cmd/compile/internal/base"]
+    ^{:line 118} [ir "cmd/compile/internal/ir"]
+    ^{:line 119} [types "cmd/compile/internal/types"]
+    ^{:line 120} [src "cmd/internal/src"]
+    ^{:line 121} [sys "cmd/internal/sys"]
+    ^{:line 122} [cmp "cmp"]
+    ^{:line 123} [fmt "fmt"]
+    ^{:line 124} [buildcfg "internal/buildcfg"]
+    ^{:line 125} [math "math"]
+    ^{:line 126} [bits "math/bits"]
+    ^{:line 127} [slices "slices"]
+    ^{:line 128} [unsafe "unsafe"]])
+
+
+(go/const
+  ^{:line 132} [^{:val 0} moveSpills iota]
+  ^{:line 133} [^{:val 1} logSpills]
+  ^{:line 134} [^{:val 2} regDebug]
+  ^{:line 135} [^{:val 3} stackDebug])
+
+
+
+
+(go/const "distance is a measure of how far into the future values are used.\ndistance is measured in units of instructions.\n"
+  ^{:line 141} [^{:val 1} likelyDistance 1]
+  ^{:line 142} [^{:val 10} normalDistance 10]
+  ^{:line 143} [^{:val 100} unlikelyDistance 100])
+
+
+
+
+^{:go/end 153} (go/func regalloc "regalloc performs register allocation on f. It sets f.RegAlloc\nto the resulting allocation.\n" [^{:tag (* Func)} f]
+  (let [^regAllocState s (zero regAllocState)]
+    (.init s f)
+    (.regalloc s f)
+    (.close s)))
+
+
+(go/type register uint8)
+
+(go/const ^{:tag register :val 255} noRegister 255)
+
+
+(go/var ^{:tag (array 32 register) :doc "For bulk initializing\n"} noRegisters (lit (array 32 register)
+    ^{:line 161} noRegister noRegister noRegister noRegister noRegister noRegister noRegister noRegister
+    ^{:line 162} noRegister noRegister noRegister noRegister noRegister noRegister noRegister noRegister
+    ^{:line 163} noRegister noRegister noRegister noRegister noRegister noRegister noRegister noRegister
+    ^{:line 164} noRegister noRegister noRegister noRegister noRegister noRegister noRegister noRegister))
+
+
+
+(go/type regMask "A regMask encodes a set of machine registers.\n" (struct
+    ^{:line 169 :tag uint64} v1 ^uint64 v2))
+
+
+^{:go/end 174} (go/method intersect ^regMask [^regMask r ^regMask s]
+  (lit regMask (bit-and (.-v1 r) (.-v1 s)) (bit-and (.-v2 r) (.-v2 s))))
+
+
+^{:go/end 178} (go/method union ^regMask [^regMask r ^regMask s]
+  (lit regMask (bit-or (.-v1 r) (.-v1 s)) (bit-or (.-v2 r) (.-v2 s))))
+
+
+^{:go/end 182} (go/method minus ^regMask [^regMask r ^regMask s]
+  (lit regMask (bit-and-not (.-v1 r) (.-v1 s)) (bit-and-not (.-v2 r) (.-v2 s))))
+
+
+^{:go/end 186} (go/method empty ^bool [^regMask r]
+  (and (== (.-v1 r) 0) (== (.-v2 r) 0)))
+
+
+^{:go/end 197} (go/method pickReg ^register [^regMask r]
+  (when (.empty r)
+    (panic "can't pick a register from an empty set"))
+
+  ;; pick the lowest one
+  (when (!= (.-v1 r) 0)
+    (return (conv register (bits/TrailingZeros64 (.-v1 r)))))
+
+  (conv register (+ (bits/TrailingZeros64 (.-v2 r)) 64)))
+
+
+^{:go/end 204} (go/func regMaskAt ^regMask [^register i]
+  (when (< i 64)
+    (return (lit regMask :v1 ^uint64 (<< 1 i))))
+
+  (lit regMask :v2 ^uint64 (<< 1 (- i 64))))
+
+
+^{:go/end 211} (go/method addReg ^regMask [^regMask r ^register i]
+  (when (< i 64)
+    (return (lit regMask (bit-or (.-v1 r) ^uint64 (<< 1 i)) (.-v2 r))))
+
+  (lit regMask (.-v1 r) (bit-or (.-v2 r) ^uint64 (<< 1 (- i 64)))))
+
+
+^{:go/end 218} (go/method removeReg ^regMask [^regMask r ^register i]
+  (when (< i 64)
+    (return (lit regMask (bit-and-not (.-v1 r) ^uint64 (<< 1 i)) (.-v2 r))))
+
+  (lit regMask (.-v1 r) (bit-and-not (.-v2 r) ^uint64 (<< 1 (- i 64)))))
+
+
+^{:go/end 225} (go/method hasReg ^bool [^regMask r ^register i]
+  (when (< i 64)
+    (return (!= (bit-and (>> (.-v1 r) i) 1) 0)))
+
+  (!= (bit-and (>> (.-v2 r) (- i 64)) 1) 0))
+
+
+^{:go/end 240} (go/method String ^string [^regMask m]
+  (let [s ""]
+    (for [r (conv register 0)] (not (.empty m)) (inc! r)
+      (when (not (.hasReg m r))
+        (continue))
+
+      (set! m (.removeReg m r))
+      (when (!= s "")
+        (set! s + " "))
+
+      (set! s + (fmt/Sprintf "r%d" r)))
+
+    ^{:line 239} s))
+
+
+^{:go/end 255} (go/method RegMaskString ^string [^{:tag (* regAllocState)} s ^regMask m]
+  (let [str ""]
+    (for [r (conv register 0)] (not (.empty m)) (inc! r)
+      (when (not (.hasReg m r))
+        (continue))
+
+      (set! m (.removeReg m r))
+      (when (!= str "")
+        (set! str + " "))
+
+      (set! str + (.String (aget (.-registers s) r))))
+
+    ^{:line 254} str))
+
+
+
+^{:go/end 260} (go/func countRegs "countRegs returns the number of set bits in the register mask.\n" ^int [^regMask r]
+  (+ (bits/OnesCount64 (.-v1 r)) (bits/OnesCount64 (.-v2 r))))
+
+
+
+^{:go/end 272} (go/method pickReg "pickReg picks a register from the register mask.\n" ^register [^{:tag (* regAllocState)} s ^regMask rm]
+  (when (== (.-Arch (.-Arch (.-ctxt (.-Config (.-f s))))) sys/ArchRISCV64)
+    ;; Prefer x8-x15 and f8-f15 to enable increased use of compressed instructions.
+    (let [riscv64CompressedMask (.intersect rm (lit regMask :v1 0x0000ff000000ff00))]
+      (when (not (.empty riscv64CompressedMask))
+        (set! rm riscv64CompressedMask))))
+
+
+  (.pickReg rm))
+
+
+(go/type use (struct
+
+
+
+
+
+    ^{:line 280 :tag int32 :doc "distance from start of the block to a use of a value\n  dist == 0                 used by first instruction in block\n  dist == len(b.Values)-1   used by last instruction in block\n  dist == len(b.Values)     used by block's control value\n  dist  > len(b.Values)     used by a subsequent block\n"} dist
+    ^{:line 281 :tag src/XPos} pos ; source position of the use
+    ^{:line 282 :tag (* use)} next)) ; linked list of uses of a value in nondecreasing dist order
+
+
+
+(go/type valState "A valState records the register allocation state for a (pre-regalloc) value.\n" (struct
+    ^{:line 287 :tag regMask} regs ; the set of registers holding a Value (usually just one)
+    ^{:line 288 :tag (* use)} uses ; list of uses in this block
+    ^{:line 289 :tag (* Value)} spill ; spilled copy of the Value (if any)
+    ^{:line 290 :tag int32} restoreMin ; minimum of all restores' blocks' sdom.entry
+    ^{:line 291 :tag int32} restoreMax ; maximum of all restores' blocks' sdom.exit
+    ^{:line 292 :tag bool} needReg ; cached value of !v.Type.IsMemory() && !v.Type.IsVoid() && !.v.Type.IsFlags()
+    ^{:line 293 :tag bool} rematerializeable)) ; cached value of v.rematerializeable()
+
+
+(go/type regState (struct
+    ^{:line 297 :tag (* Value)} v ; Original (preregalloc) Value stored in this register.
+    ^{:line 298 :tag (* Value)} c)) ; A Value equal to v which is currently in a register.  Might be v or a copy of it.
+;; If a register is unused, v==c==nil
+
+
+(go/type regAllocState (struct
+    ^{:line 303 :tag (* Func)} f
+
+    ^{:line 305 :tag SparseTree} sdom
+    ^{:line 306 :tag (slice Register)} registers
+    ^{:line 307 :tag register} numRegs
+    ^{:line 308 :tag register} SPReg
+    ^{:line 309 :tag register} SBReg
+    ^{:line 310 :tag register} GReg
+    ^{:line 311 :tag register} ZeroIntReg
+    ^{:line 312 :tag regMask} allocatable
+
+
+
+
+    ^{:line 317 :tag (slice (slice liveInfo)) :doc "live values at the end of each block.  live[b.ID] is a list of value IDs\nwhich are live at the end of b, together with a count of how many instructions\nforward to the next use.\n"} live
+
+
+
+
+    ^{:line 322 :tag (slice desiredState) :doc "desired register assignments at the end of each block.\nNote that this is a static map computed before allocation occurs. Dynamic\nregister desires (from partially completed allocations) will trump\nthis information.\n"} desired
+
+
+    ^{:line 325 :tag (slice valState) :doc "current state of each (preregalloc) Value\n"} values
+
+
+    ^{:line 328 :tag ID :doc "ID of SP, SB values\n"} sp ^{:tag ID :doc "ID of SP, SB values\n"} sb
+
+
+
+    ^{:line 332 :tag (slice (* Value)) :doc "For each Value, map from its value ID back to the\npreregalloc Value it was derived from.\n"} orig
+
+
+
+    ^{:line 336 :tag (slice regState) :doc "current state of each register.\nIncludes only registers in allocatable.\n"} regs
+
+
+    ^{:line 339 :tag regMask :doc "registers that contain values which can't be kicked out\n"} nospill
+
+
+    ^{:line 342 :tag regMask :doc "mask of registers currently in use\n"} used
+
+
+    ^{:line 345 :tag regMask :doc "mask of registers used since the start of the current block\n"} usedSinceBlockStart
+
+
+    ^{:line 348 :tag regMask :doc "mask of registers used in the current instruction\n"} tmpused
+
+
+    ^{:line 351 :tag (* Block) :doc "current block we're working on\n"} curBlock
+
+
+    ^{:line 354 :tag (* use) :doc "cache of use records\n"} freeUseRecords
+
+
+
+    ^{:line 358 :tag (slice (slice endReg)) :doc "endRegs[blockid] is the register state at the end of each block.\nencoded as a set of endReg records.\n"} endRegs
+
+
+
+    ^{:line 362 :tag (slice (slice startReg)) :doc "startRegs[blockid] is the register state at the start of merge blocks.\nsaved state does not include the state of phi ops in the block.\n"} startRegs
+
+
+
+
+    ^{:line 367 :tag regMask :doc "startRegsMask is a mask of the registers in startRegs[curBlock.ID].\nRegisters dropped from startRegsMask are later synchronoized back to\nstartRegs by dropping from there as well.\n"} startRegsMask
+
+
+    ^{:line 370 :tag (slice (slice ID)) :doc "spillLive[blockid] is the set of live spills at the end of each block\n"} spillLive
+
+
+
+    ^{:line 374 :tag (map (* Value) bool) :doc "a set of copies we generated to move things around, and\nwhether it is used in shuffle. Unused copies will be deleted.\n"} copies
+
+    ^{:line 376 :tag (* loopnest)} loopnest
+
+
+    ^{:line 379 :tag (slice (* Block)) :doc "choose a good order in which to visit blocks for allocation purposes.\n"} visitOrder
+
+
+    ^{:line 382 :tag (slice int32) :doc "blockOrder[b.ID] corresponds to the index of block b in visitOrder.\n"} blockOrder
+
+
+    ^{:line 385 :tag bool :doc "whether to insert instructions that clobber dead registers at call sites\n"} doClobber
+
+
+
+
+
+
+    ^{:line 392 :tag (slice int32) :doc "For each instruction index in a basic block, the index of the next call\nat or after that instruction index.\nIf there is no next call, returns maxInt32.\nnextCall for a call instruction points to itself.\n(Indexes and results are pre-regalloc.)\n"} nextCall
+
+
+
+    ^{:line 396 :tag int :doc "Index of the instruction we're currently working on.\nIndex is expressed in terms of the pre-regalloc b.Values list.\n"} curIdx))
+
+
+(go/type endReg (struct
+    ^{:line 400 :tag register} r
+    ^{:line 401 :tag (* Value)} v ; pre-regalloc value held in this register (TODO: can we use ID here?)
+    ^{:line 402 :tag (* Value)} c)) ; cached version of the value
+
+
+(go/type startReg (struct
+    ^{:line 406 :tag register} r
+    ^{:line 407 :tag (* Value)} v ; pre-regalloc value needed in this register
+    ^{:line 408 :tag (* Value)} c ; cached version of the value
+    ^{:line 409 :tag src/XPos} pos)) ; source position of use of this register
+
+
+
+^{:go/end 429} (go/method freeReg "freeReg frees up register r. Any current user of r is kicked out.\n" [^{:tag (* regAllocState)} s ^register r]
+  (when (and (not (.hasReg (.-allocatable s) r)) (not (.isGReg s r)))
+    (return))
+
+  (let [v (.-v (aget (.-regs s) r))]
+    (when (== v nil)
+      (.Fatalf (.-f s) "tried to free an already free register %d\n" r))
+
+
+    ;; Mark r as unused.
+    (when (> (.-debug (.-pass (.-f s))) regDebug)
+      (fmt/Printf "freeReg %s (dump %s/%s)\n" (addr (aget (.-registers s) r)) v (.-c (aget (.-regs s) r))))
+
+    (aset (.-regs s) r (lit regState))
+    (set! (.-regs (aget (.-values s) (.-ID v))) (.removeReg (.-regs (aget (.-values s) (.-ID v))) r))
+    (set! (.-used s) (.removeReg (.-used s) r))))
+
+
+
+^{:go/end 436} (go/method freeRegs "freeRegs frees up all registers listed in m.\n" [^{:tag (* regAllocState)} s ^regMask m]
+  (while (not (.empty (.intersect m (.-used s))))
+    (.freeReg s (.pickReg s (.intersect m (.-used s))))))
+
+
+
+
+^{:go/end 447} (go/method clobberRegs "clobberRegs inserts instructions that clobber registers listed in m.\n" [^{:tag (* regAllocState)} s ^regMask m]
+  (set! m (.intersect m (.intersect (.-allocatable s) (.-gpRegMask (.-Config (.-f s)))))) ; only integer register can contain pointers, only clobber them
+  (while (not (.empty m))
+    (let [r (.pickReg s m)]
+      (set! m (.removeReg m r))
+      (let [x (.NewValue0 (.-curBlock s) src/NoXPos OpClobberReg types/TypeVoid)]
+        (.setHome (.-f s) x (addr (aget (.-registers s) r)))))))
+
+
+
+
+
+^{:go/end 465} (go/method setOrig "setOrig records that c's original value is the same as\nv's original value.\n" [^{:tag (* regAllocState)} s ^{:tag (* Value)} c ^{:tag (* Value)} v]
+  (when (>= (conv int (.-ID c)) (cap (.-orig s)))
+    (let [x (.allocValueSlice (.-Cache (.-f s)) (+ (conv int (.-ID c)) 1))]
+      (copy x (.-orig s))
+      (.freeValueSlice (.-Cache (.-f s)) (.-orig s))
+      (set! (.-orig s) x)))
+
+  (while (>= (conv int (.-ID c)) (len (.-orig s)))
+    (set! (.-orig s) (append (.-orig s) nil)))
+
+  (when (!= (aget (.-orig s) (.-ID c)) nil)
+    (.Fatalf (.-f s) "orig value set twice %s %s" c v))
+
+  (aset (.-orig s) (.-ID c) (aget (.-orig s) (.-ID v))))
+
+
+
+
+^{:go/end 486} (go/method assignReg "assignReg assigns register r to hold c, a copy of v.\nr must be unused.\n" [^{:tag (* regAllocState)} s ^register r ^{:tag (* Value)} v ^{:tag (* Value)} c]
+  (when (> (.-debug (.-pass (.-f s))) regDebug)
+    (fmt/Printf "assignReg %s %s/%s\n" (addr (aget (.-registers s) r)) v c))
+
+  ;; Allocate v to r.
+  (set! (.-regs (aget (.-values s) (.-ID v))) (.addReg (.-regs (aget (.-values s) (.-ID v))) r))
+  (.setHome (.-f s) c (addr (aget (.-registers s) r)))
+
+  ;; Allocate r to v.
+  (when (and (not (.hasReg (.-allocatable s) r)) (not (.isGReg s r)))
+    (return))
+
+  (when (!= (.-v (aget (.-regs s) r)) nil)
+    (.Fatalf (.-f s) "tried to assign register %d to %s/%s but it is already used by %s" r v c (.-v (aget (.-regs s) r))))
+
+  (aset (.-regs s) r (lit regState v c))
+  (set! (.-used s) (.addReg (.-used s) r)))
+
+
+
+
+
+^{:go/end 576} (go/method allocReg "allocReg chooses a register from the set of registers in mask.\nIf there is no unused register, a Value will be kicked out of\na register to make room.\n" ^register [^{:tag (* regAllocState)} s ^regMask mask ^{:tag (* Value)} v]
+  (when (.-OnWasmStack v)
+    (return noRegister))
+
+
+  (set! mask (.intersect mask (.-allocatable s)))
+  (set! mask (.minus mask (.-nospill s)))
+  (when (.empty mask)
+    (.Fatalf (.-f s) "no register available for %s" (.LongString v)))
+
+
+  ;; Pick an unused register if one is available.
+  (when (not (.empty (.minus mask (.-used s))))
+    (let [r (.pickReg s (.minus mask (.-used s)))]
+      (set! (.-usedSinceBlockStart s) (.addReg (.-usedSinceBlockStart s) r))
+      (return r)))
+
+
+  ;; Pick a value to spill. Spill the value with the
+  ;; farthest-in-the-future use.
+  ;; TODO: Prefer registers with already spilled Values?
+  ;; TODO: Modify preference using affinity graph.
+  ;; TODO: if a single value is in multiple registers, spill one of them
+  ;; before spilling a value in just a single register.
+
+  ;; Find a register to spill. We spill the register containing the value
+  ;; whose next use is as far in the future as possible.
+  ;; https://en.wikipedia.org/wiki/Page_replacement_algorithm#The_theoretically_optimal_page_replacement_algorithm
+  (let [^register r (zero register)
+      ^{:line 520} maxuse (conv int32 -1)]
+    (for [t (conv register 0)] (< t (.-numRegs s)) (inc! t)
+      (when (not (.hasReg mask t))
+        (continue))
+
+      (let [v (.-v (aget (.-regs s) t))]
+        (when [n (.-dist (.-uses (aget (.-values s) (.-ID v))))] (> n maxuse)
+          ;; v's next use is farther in the future than any value
+          ;; we've seen so far. A new best spill candidate.
+          (set! r t)
+          (set! maxuse n))))
+
+
+    (when (== maxuse -1)
+      (.Fatalf (.-f s) "couldn't find register to spill"))
+
+
+    (when (== (.-Arch (.-Arch (.-ctxt (.-Config (.-f s))))) sys/ArchWasm)
+      ;; TODO(neelance): In theory this should never happen, because all wasm registers are equal.
+      ;; So if there is still a free register, the allocation should have picked that one in the first place instead of
+      ;; trying to kick some other value out. In practice, this case does happen and it breaks the stack optimization.
+      (.freeReg s r)
+      (return r))
+
+
+    ;; Try to move it around before kicking out, if there is a free register.
+    ;; We generate a Copy and record it. It will be deleted if never used.
+    (let [v2 (.-v (aget (.-regs s) r))
+        ^{:line 548} m (.removeReg (.minus (.minus (.compatRegs s (.-Type v2)) (.-used s)) (.-tmpused s)) r)]
+      (when (and (not (.empty m)) (not (.-rematerializeable (aget (.-values s) (.-ID v2)))) (== (countRegs (.-regs (aget (.-values s) (.-ID v2)))) 1))
+        (set! (.-usedSinceBlockStart s) (.addReg (.-usedSinceBlockStart s) r))
+        (let [r2 (.pickReg s m)
+            ^{:line 552} c (.NewValue1 (.-curBlock s) (.-Pos v2) OpCopy (.-Type v2) (.-c (aget (.-regs s) r)))]
+          (aset (.-copies s) c false)
+          (when (> (.-debug (.-pass (.-f s))) regDebug)
+            (fmt/Printf "copy %s to %s : %s\n" v2 c (addr (aget (.-registers s) r2))))
+
+          (.setOrig s c v2)
+          (.assignReg s r2 v2 c)))
+
+
+      ;; If the evicted register isn't used between the start of the block
+      ;; and now then there is no reason to even request it on entry. We can
+      ;; drop from startRegs in that case.
+      (when (not (.hasReg (.-usedSinceBlockStart s) r))
+        (when (.hasReg (.-startRegsMask s) r)
+          (when (> (.-debug (.-pass (.-f s))) regDebug)
+            (fmt/Printf "dropped from startRegs: %s\n" (addr (aget (.-registers s) r))))
+
+          (set! (.-startRegsMask s) (.removeReg (.-startRegsMask s) r))))
+
+
+
+      (.freeReg s r)
+      (set! (.-usedSinceBlockStart s) (.addReg (.-usedSinceBlockStart s) r))
+      ^{:line 575} r)))
+
+
+
+
+^{:go/end 598} (go/method makeSpill "makeSpill returns a Value which represents the spilled value of v.\nb is the block in which the spill is used.\n" ^{:tag (* Value)} [^{:tag (* regAllocState)} s ^{:tag (* Value)} v ^{:tag (* Block)} b]
+  (let [vi (addr (aget (.-values s) (.-ID v)))]
+    (when (!= (.-spill vi) nil)
+      ;; Final block not known - keep track of subtree where restores reside.
+      (set! (.-restoreMin vi) (min (.-restoreMin vi) (.-entry (aget (.-sdom s) (.-ID b)))))
+      (set! (.-restoreMax vi) (max (.-restoreMax vi) (.-exit (aget (.-sdom s) (.-ID b)))))
+      (return (.-spill vi)))
+
+    ;; Make a spill for v. We don't know where we want
+    ;; to put it yet, so we leave it blockless for now.
+    (let [spill (.newValueNoBlock (.-f s) OpStoreReg (.-Type v) (.-Pos v))]
+      ;; We also don't know what the spill's arg will be.
+      ;; Leave it argless for now.
+      (.setOrig s spill v)
+      (set! (.-spill vi) spill)
+      (set! (.-restoreMin vi) (.-entry (aget (.-sdom s) (.-ID b))))
+      (set! (.-restoreMax vi) (.-exit (aget (.-sdom s) (.-ID b))))
+      ^{:line 597} spill)))
+
+
+
+
+
+
+
+
+^{:go/end 726} (go/method allocValToReg "allocValToReg allocates v to a register selected from regMask and\nreturns the register copy of v. Any previous user is kicked out and spilled\n(if necessary). Load code is added at the current pc. If nospill is set the\nallocated register is marked nospill so the assignment cannot be\nundone until the caller allows it by clearing nospill. Returns a\n*Value which is either v or a copy of v allocated to the chosen register.\n" ^{:tag (* Value)} [^{:tag (* regAllocState)} s ^{:tag (* Value)} v ^regMask mask ^bool nospill ^src/XPos pos]
+  (when (and (== (.-Arch (.-Arch (.-ctxt (.-Config (.-f s))))) sys/ArchWasm) (.rematerializeable v))
+    (let [c (.copyIntoWithXPos v (.-curBlock s) pos)]
+      (set! (.-OnWasmStack c) true)
+      (.setOrig s c v)
+      (return c)))
+
+  (when (.-OnWasmStack v)
+    (return v))
+
+
+  (let [vi (addr (aget (.-values s) (.-ID v)))]
+    (set! pos (.WithNotStmt pos))
+    ;; Check if v is already in a requested register.
+    (when (not (.empty (.intersect mask (.-regs vi))))
+      (set! mask (.intersect mask (.-regs vi)))
+      (let [r (.pickReg s mask)]
+        (when (.hasReg mask (.-SPReg s))
+          ;; Prefer the stack pointer if it is allowed.
+          ;; (Needed because the op might have an Aux symbol
+          ;; that needs SP as its base.)
+          (set! r (.-SPReg s)))
+
+        (when (not (.hasReg (.-allocatable s) r))
+          (return v)) ; v is in a fixed register
+
+        (when (or (!= (.-v (aget (.-regs s) r)) v) (== (.-c (aget (.-regs s) r)) nil))
+          (panic "bad register state"))
+
+        (when nospill
+          (set! (.-nospill s) (.addReg (.-nospill s) r)))
+
+        (set! (.-usedSinceBlockStart s) (.addReg (.-usedSinceBlockStart s) r))
+        (return (.-c (aget (.-regs s) r)))))
+
+
+    (let [^register r (zero register)
+        ;; If nospill is set, the value is used immediately, so it can live on the WebAssembly stack.
+        ^{:line 644} onWasmStack (and nospill (== (.-Arch (.-Arch (.-ctxt (.-Config (.-f s))))) sys/ArchWasm))]
+      (when (not onWasmStack)
+        ;; Allocate a register.
+        (set! r (.allocReg s mask v)))
+
+
+      ;; Allocate v to the new register.
+      (let [^{:tag (* Value)} c (zero (* Value))]
+        (cond (not (.empty (.-regs vi)))
+          ;; Copy from a register that v is already in.
+          (let [^{:tag (* Value)} current (zero (* Value))]
+            (if (not (.empty (.minus (.-regs vi) (.-allocatable s))))
+              ;; v is in a fixed register, prefer that
+              (set! current v)
+
+              (let [r2 (.pickReg s (.-regs vi))]
+                (when (!= (.-v (aget (.-regs s) r2)) v)
+                  (panic "bad register state"))
+
+                (set! current (.-c (aget (.-regs s) r2)))
+                (set! (.-usedSinceBlockStart s) (.addReg (.-usedSinceBlockStart s) r2))))
+
+            (set! c (.NewValue1 (.-curBlock s) pos OpCopy (.-Type v) current)))
+          (.rematerializeable v) (do
+            ;; Rematerialize instead of loading from the spill location.
+            (set! c (.copyIntoWithXPos v (.-curBlock s) pos))
+            ;; We need to consider its output mask and potentially issue a Copy
+            ;; if there are register mask conflicts.
+            ;; This currently happens for the SIMD package only between GP and FP
+            ;; register. Because Intel's vector extension can put integer value into
+            ;; FP, which is seen as a vector. Example instruction: VPSLL[BWDQ]
+            ;; Because GP and FP masks do not overlap, mask & outputMask == 0
+            ;; detects this situation thoroughly.
+            (let [sourceMask (.-regs (aget (.-outputs (.regspec s c)) 0))]
+              (when (and (.empty (.intersect mask sourceMask)) (not onWasmStack))
+                (.setOrig s c v)
+                (.assignReg s (.allocReg s sourceMask v) v c)
+                ;; v.Type for the new OpCopy is likely wrong and it might delay the problem
+                ;; until ssa to asm lowering, which might need the types to generate the right
+                ;; assembly for OpCopy. For Intel's GP to FP move, it happens to be that
+                ;; MOV instruction has such a variant so it happens to be right.
+                ;; But it's unclear for other architectures or situations, and the problem
+                ;; might be exposed when the assembler sees illegal instructions.
+                ;; Right now make we still pick v.Type, because at least its size should be correct
+                ;; for the rematerialization case the amd64 SIMD package exposed.
+                ;; TODO: We might need to figure out a way to find the correct type or make
+                ;; the asm lowering use reg info only for OpCopy.
+                (set! c (.NewValue1 (.-curBlock s) pos OpCopy (.-Type v) c))))) :else
+
+
+          ;; Load v from its spill location.
+          (let [spill (.makeSpill s v (.-curBlock s))]
+            (when (> (.-debug (.-pass (.-f s))) logSpills)
+              (.Warnl (.-f s) (.-Pos (.-spill vi)) "load spill for %v from %v" v spill))
+
+            (set! c (.NewValue1 (.-curBlock s) pos OpLoadReg (.-Type v) spill))
+            (let [sourceMask (.compatRegs s (.-Type v))]
+              (when (and (not (.hasReg sourceMask r)) (not onWasmStack))
+                ;; Assign a temporary register that can be copied to the desired destination;
+                ;; this at least works where it is currently a problem (x86).
+                ;; This happens processing e.g. ASAN/TSAN with SIMD *simdtype methods.
+                (.setOrig s c v)
+                (.assignReg s (.allocReg s sourceMask v) v c)
+                (set! c (.NewValue1 (.-curBlock s) pos OpCopy (.-Type v) c))))))
+
+
+
+        (.setOrig s c v)
+
+        (when onWasmStack
+          (set! (.-OnWasmStack c) true)
+          (return c))
+
+
+        (.assignReg s r v c)
+        (when (and (== (.-Op c) OpLoadReg) (.isGReg s r))
+          (.Fatalf (.-f s) (+ "allocValToReg.OpLoadReg targeting g: " (.LongString c))))
+
+        (when nospill
+          (set! (.-nospill s) (.addReg (.-nospill s) r)))
+
+        ^{:line 725} c))))
+
+
+
+^{:go/breaks [[5 738]] :go/end 739} (go/func isLeaf "isLeaf reports whether f performs any calls.\n" ^bool [^{:tag (* Func)} f]
+  (range [_ b (.-Blocks f)]
+    (range [_ v (.-Values b)]
+      (when (and (.IsCall (.-Op v)) (not (.IsTailCall (.-Op v))))
+        ;; tail call is not counted as it does not save the return PC or need a frame
+        (return false))))
+
+
+
+  true)
+
+
+
+^{:go/end 744} (go/method needRegister "needRegister reports whether v needs a register.\n" ^bool [^{:tag (* Value)} v]
+  (and (not (.IsMemory (.-Type v))) (not (.IsVoid (.-Type v))) (not (.IsFlags (.-Type v))) (not (.IsTuple (.-Type v)))))
+
+
+^{:go/end 912} (go/method init [^{:tag (* regAllocState)} s ^{:tag (* Func)} f]
+  (set! (.-f s) f)
+  (set! (.-RegAlloc (.-f s)) (subslice (.-locs (.-Cache (.-f s))) _ 0))
+  (set! (.-registers s) (.-registers (.-Config f)))
+  (if [nr (len (.-registers s))] (or (== nr 0) (> nr (conv int noRegister)) (> nr (conv int (* (unsafe/Sizeof (lit regMask)) 8))))
+    (.Fatalf (.-f s) "bad number of registers: %d" nr)
+
+    (set! (.-numRegs s) (conv register nr)))
+
+  ;; Locate SP, SB, and g registers.
+  (set! (.-SPReg s) noRegister)
+  (set! (.-SBReg s) noRegister)
+  (set! (.-GReg s) noRegister)
+  (set! (.-ZeroIntReg s) noRegister)
+  (for [r (conv register 0)] (< r (.-numRegs s)) (inc! r)
+    (switch (.String (aget (.-registers s) r))
+      (case ["SP"]
+        (set! (.-SPReg s) r))
+      (case ["SB"]
+        (set! (.-SBReg s) r))
+      (case ["g"]
+        (set! (.-GReg s) r))
+      (case ["ZERO"] ; TODO: arch-specific?
+        (set! (.-ZeroIntReg s) r))))
+
+
+  ;; Make sure we found all required registers.
+  (switch noRegister
+    (case [(.-SPReg s)]
+      (.Fatalf (.-f s) "no SP register found"))
+    (case [(.-SBReg s)]
+      (.Fatalf (.-f s) "no SB register found"))
+    (case [(.-GReg s)]
+      (when (.-hasGReg (.-Config f))
+        (.Fatalf (.-f s) "no g register found"))))
+
+
+
+  ;; Figure out which registers we're allowed to use.
+  (set! (.-allocatable s) (.union (.union (.union (.-gpRegMask (.-Config (.-f s))) (.-fpRegMask (.-Config (.-f s)))) (.-specialRegMask (.-Config (.-f s)))) (.-simdRegMask (.-Config (.-f s)))))
+  (set! (.-allocatable s) (.removeReg (.-allocatable s) (.-SPReg s)))
+  (set! (.-allocatable s) (.removeReg (.-allocatable s) (.-SBReg s)))
+  (when (.-hasGReg (.-Config (.-f s)))
+    (set! (.-allocatable s) (.removeReg (.-allocatable s) (.-GReg s))))
+
+  (when (!= (.-ZeroIntReg s) noRegister)
+    (set! (.-allocatable s) (.removeReg (.-allocatable s) (.-ZeroIntReg s))))
+
+  (when (and buildcfg/FramePointerEnabled (>= (.-FPReg (.-Config (.-f s))) 0))
+    (set! (.-allocatable s) (.removeReg (.-allocatable s) (conv register (.-FPReg (.-Config (.-f s)))))))
+
+  (when (!= (.-LinkReg (.-Config (.-f s))) -1)
+    (when (isLeaf f)
+      ;; Leaf functions don't save/restore the link register.
+      (set! (.-allocatable s) (.removeReg (.-allocatable s) (conv register (.-LinkReg (.-Config (.-f s))))))))
+
+
+  (when (.-Flag_dynlink (.-ctxt (.-Config (.-f s))))
+    (switch (.-arch (.-Config (.-f s)))
+      (case ["386"])
+      ;; nothing to do.
+      ;; Note that for Flag_shared (position independent code)
+      ;; we do need to be careful, but that carefulness is hidden
+      ;; in the rewrite rules so we always have a free register
+      ;; available for global load/stores. See _gen/386.rules (search for Flag_shared).
+      (case ["amd64"]
+        (set! (.-allocatable s) (.removeReg (.-allocatable s) 15))) ; R15
+      (case ["arm"]
+        (set! (.-allocatable s) (.removeReg (.-allocatable s) 9))) ; R9
+      (case ["arm64"])
+      ;; nothing to do
+      (case ["loong64"]) ; R2 (aka TP) already reserved.
+      ;; nothing to do
+      (case ["ppc64" "ppc64le"]) ; R2 already reserved.
+      ;; nothing to do
+      (case ["riscv64"]) ; X3 (aka GP) and X4 (aka TP) already reserved.
+      ;; nothing to do
+      (case ["s390x"]
+        (set! (.-allocatable s) (.removeReg (.-allocatable s) 11))) ; R11
+      (default
+        (.Fatalf (.-fe (.-f s)) src/NoXPos "arch %s not implemented" (.-arch (.-Config (.-f s)))))))
+
+
+
+  ;; Linear scan register allocation can be influenced by the order in which blocks appear.
+  ;; Decouple the register allocation order from the generated block order.
+  ;; This also creates an opportunity for experiments to find a better order.
+  (set! (.-visitOrder s) (layoutRegallocOrder f))
+
+  ;; Compute block order. This array allows us to distinguish forward edges
+  ;; from backward edges and compute how far they go.
+  (set! (.-blockOrder s) (make (slice int32) (.NumBlocks f)))
+  (range [i b (.-visitOrder s)]
+    (aset (.-blockOrder s) (.-ID b) (conv int32 i)))
+
+
+  (set! (.-regs s) (make (slice regState) (.-numRegs s)))
+  (let [nv (.NumValues f)]
+    (if (>= (cap (.-regallocValues (.-Cache (.-f s)))) nv)
+      (set! (.-regallocValues (.-Cache (.-f s))) (subslice (.-regallocValues (.-Cache (.-f s))) _ nv))
+
+      (set! (.-regallocValues (.-Cache (.-f s))) (make (slice valState) nv)))
+
+    (set! (.-values s) (.-regallocValues (.-Cache (.-f s))))
+    (set! (.-orig s) (.allocValueSlice (.-Cache (.-f s)) nv))
+    (set! (.-copies s) (make (map (* Value) bool)))
+    (range [_ b (.-visitOrder s)]
+      (range [_ v (.-Values b)]
+        (when (.needRegister v)
+          (set! (.-needReg (aget (.-values s) (.-ID v))) true)
+          (set! (.-rematerializeable (aget (.-values s) (.-ID v))) (.rematerializeable v))
+          (aset (.-orig s) (.-ID v) v))))
+
+    ;; Note: needReg is false for values returning Tuple types.
+    ;; Instead, we mark the corresponding Selects as needReg.
+
+
+    (.computeLive s)
+
+    (set! (.-endRegs s) (make (slice (slice endReg)) (.NumBlocks f)))
+    (set! (.-startRegs s) (make (slice (slice startReg)) (.NumBlocks f)))
+    (set! (.-spillLive s) (make (slice (slice ID)) (.NumBlocks f)))
+    (set! (.-sdom s) (.Sdom f))
+
+    ;; wasm: Mark instructions that can be optimized to have their values only on the WebAssembly stack.
+    (when (== (.-Arch (.-Arch (.-ctxt (.-Config f)))) sys/ArchWasm)
+      (let [canLiveOnStack (.newSparseSet f (.NumValues f))]
+        (defer (.retSparseSet f canLiveOnStack))
+        (range [_ b (.-Blocks f)]
+          ;; New block. Clear candidate set.
+          (.clear canLiveOnStack)
+          (range [_ c (.ControlValues b)]
+            (when (and (== (.-Uses c) 1) (not (.-generic (aget opcodeTable (.-Op c)))))
+              (.add canLiveOnStack (.-ID c))))
+
+
+          ;; Walking backwards.
+          (for [i (- (len (.-Values b)) 1)] (>= i 0) (dec! i)
+            (let [v (aget (.-Values b) i)]
+              (if (.contains canLiveOnStack (.-ID v))
+                (set! (.-OnWasmStack v) true)
+
+                ;; Value can not live on stack. Values are not allowed to be reordered, so clear candidate set.
+                (.clear canLiveOnStack))
+
+              (range [_ arg (.-Args v)]
+                ;; Value can live on the stack if:
+                ;; - it is only used once
+                ;; - it is used in the same basic block
+                ;; - it is not a "mem" value
+                ;; - it is a WebAssembly op
+                (when (and (== (.-Uses arg) 1) (== (.-Block arg) (.-Block v)) (not (.IsMemory (.-Type arg))) (not (.-generic (aget opcodeTable (.-Op arg)))))
+                  (.add canLiveOnStack (.-ID arg)))))))))
+
+
+
+
+
+
+    ;; The clobberdeadreg experiment inserts code to clobber dead registers
+    ;; at call sites.
+    ;; Ignore huge functions to avoid doing too much work.
+    (when (and (.-ClobberDeadReg base/Flag) (<= (len (.-Blocks (.-f s))) 10000))
+      ;; TODO: honor GOCLOBBERDEADHASH, or maybe GOSSAHASH.
+      (set! (.-doClobber s) true))))
+
+
+
+^{:go/end 916} (go/method close [^{:tag (* regAllocState)} s]
+  (.freeValueSlice (.-Cache (.-f s)) (.-orig s)))
+
+
+
+
+^{:go/end 934} (go/method addUse "Adds a use record for id at distance dist from the start of the block.\nAll calls to addUse must happen with nonincreasing dist.\n" [^{:tag (* regAllocState)} s ^ID id ^int32 dist ^src/XPos pos]
+  (let [r (.-freeUseRecords s)]
+    (if (!= r nil)
+      (set! (.-freeUseRecords s) (.-next r))
+
+      (set! r (addr (lit use))))
+
+    (set! (.-dist r) dist)
+    (set! (.-pos r) pos)
+    (set! (.-next r) (.-uses (aget (.-values s) id)))
+    (set! (.-uses (aget (.-values s) id)) r)
+    (when (and (!= (.-next r) nil) (> dist (.-dist (.-next r))))
+      (.Fatalf (.-f s) "uses added in wrong order"))))
+
+
+
+
+
+^{:go/end 954} (go/method advanceUses "advanceUses advances the uses of v's args from the state before v to the state after v.\nAny values which have no more uses are deallocated from registers.\n" [^{:tag (* regAllocState)} s ^{:tag (* Value)} v]
+  (range [_ a (.-Args v)]
+    (when (not (.-needReg (aget (.-values s) (.-ID a))))
+      (continue))
+
+    (let [ai (addr (aget (.-values s) (.-ID a)))
+        ^{:line 944} r (.-uses ai)]
+      (set! (.-uses ai) (.-next r))
+      (when (or (== (.-next r) nil) ^:go/paren (and (not (.-fixedReg (aget opcodeTable (.-Op a)))) (> (.-dist (.-next r)) (aget (.-nextCall s) (.-curIdx s)))))
+        ;; Value is dead (or is not used again until after a call), free all registers that hold it.
+        (.freeRegs s (.-regs ai)))
+
+      (set! (.-next r) (.-freeUseRecords s))
+      (set! (.-freeUseRecords s) r)))
+
+  (.dropIfUnused s v))
+
+
+
+
+^{:go/end 975} (go/method dropIfUnused "Drop v from registers if it isn't used again, or its only uses are after\na call instruction.\n" [^{:tag (* regAllocState)} s ^{:tag (* Value)} v]
+  (when (not (.-needReg (aget (.-values s) (.-ID v))))
+    (return))
+
+  (let [vi (addr (aget (.-values s) (.-ID v)))
+      ^{:line 963} r (.-uses vi)
+      ^{:line 964} nextCall (aget (.-nextCall s) (.-curIdx s))]
+    (when (.-call (aget opcodeTable (.-Op v)))
+      (if (== (.-curIdx s) (- (len (.-nextCall s)) 1))
+        (set! nextCall math/MaxInt32)
+
+        (set! nextCall (aget (.-nextCall s) (+ (.-curIdx s) 1)))))
+
+
+    (when (or (== r nil) ^:go/paren (and (not (.-fixedReg (aget opcodeTable (.-Op v)))) (> (.-dist r) nextCall)))
+      (.freeRegs s (.-regs vi)))))
+
+
+
+
+
+
+^{:go/end 990} (go/method liveAfterCurrentInstruction "liveAfterCurrentInstruction reports whether v is live after\nthe current instruction is completed.  v must be used by the\ncurrent instruction.\n" ^bool [^{:tag (* regAllocState)} s ^{:tag (* Value)} v]
+  (let [u (.-uses (aget (.-values s) (.-ID v)))]
+    (when (== u nil)
+      (panic (fmt/Errorf "u is nil, v = %s, s.values[v.ID] = %v" (.LongString v) (aget (.-values s) (.-ID v)))))
+
+    (let [d (.-dist u)]
+      (while (and (!= u nil) (== (.-dist u) d))
+        (set! u (.-next u)))
+
+      (and (!= u nil) (> (.-dist u) d)))))
+
+
+
+^{:go/end 998} (go/method setState "Sets the state of the registers to that encoded in regs.\n" [^{:tag (* regAllocState)} s ^{:tag (slice endReg)} regs]
+  (.freeRegs s (.-used s))
+  (range [_ x regs]
+    (.assignReg s (.-r x) (.-v x) (.-c x))))
+
+
+
+
+^{:go/end 1026} (go/method compatRegs "compatRegs returns the set of registers which can store a type t.\n" ^regMask [^{:tag (* regAllocState)} s ^{:tag (* types/Type)} t]
+  (let [^regMask m (zero regMask)]
+    (when (or (.IsTuple t) (.IsFlags t))
+      (return (lit regMask)))
+
+    (when (.IsSIMD t)
+      (if (> (.Size t) 8)
+        (return (.intersect (.-simdRegMask (.-Config (.-f s))) (.-allocatable s)))
+
+        ;; K mask
+        (return (.intersect (.-gpRegMask (.-Config (.-f s))) (.-allocatable s)))))
+
+
+    (if (or (.IsFloat t) (== t types/TypeInt128))
+      (cond (and (== (.Kind t) types/TFLOAT32) (not (.empty (.-fp32RegMask (.-Config (.-f s))))))
+        (set! m (.-fp32RegMask (.-Config (.-f s))))
+        (and (== (.Kind t) types/TFLOAT64) (not (.empty (.-fp64RegMask (.-Config (.-f s))))))
+        (set! m (.-fp64RegMask (.-Config (.-f s)))) :else
+
+        (set! m (.-fpRegMask (.-Config (.-f s)))))
+
+
+      (set! m (.-gpRegMask (.-Config (.-f s)))))
+
+    (.intersect m (.-allocatable s))))
+
+
+
+^{:go/end 1055} (go/method regspec "regspec returns the regInfo for operation op.\n" ^regInfo [^{:tag (* regAllocState)} s ^{:tag (* Value)} v]
+  (let [op (.-Op v)]
+    (when (== op OpConvert)
+      ;; OpConvert is a generic op, so it doesn't have a
+      ;; register set in the static table. It can use any
+      ;; allocatable integer register.
+      (let [m (.intersect (.-allocatable s) (.-gpRegMask (.-Config (.-f s))))]
+        (return (lit regInfo :inputs (lit (slice inputInfo) (lit _ :regs m)) :outputs (lit (slice outputInfo) (lit _ :regs m))))))
+
+    (when (== op OpArgIntReg)
+      (let [reg (aget (.-intParamRegs (.-Config (.-Func (.-Block v)))) (.AuxInt8 v))]
+        (return (lit regInfo :outputs (lit (slice outputInfo) (lit _ :regs (regMaskAt (conv register reg))))))))
+
+    (when (== op OpArgFloatReg)
+      (let [reg (aget (.-floatParamRegs (.-Config (.-Func (.-Block v)))) (.AuxInt8 v))]
+        (return (lit regInfo :outputs (lit (slice outputInfo) (lit _ :regs (regMaskAt (conv register reg))))))))
+
+    (when (.IsCall op)
+      (when [(values ac ok) (assert (* AuxCall) (.-Aux v))] (and ok (!= (.-reg ac) nil))
+        (return @(.Reg ac (addr (.-reg (aget opcodeTable op))) (.-Config (.-f s))))))
+
+
+    (when (and (== op OpMakeResult) (!= (.-reg (.-OwnAux (.-f s))) nil))
+      (return @(.ResultReg (.-OwnAux (.-f s)) (.-Config (.-f s)))))
+
+    (.-reg (aget opcodeTable op))))
+
+
+^{:go/end 1059} (go/method isGReg ^bool [^{:tag (* regAllocState)} s ^register r]
+  (and (.-hasGReg (.-Config (.-f s))) (== (.-GReg s) r)))
+
+
+
+(go/var ^{:tag Value :doc "Dummy value used to represent the value being held in a temporary register.\n"} tmpVal)
+
+^{:go/end 2305} (go/method regalloc [^{:tag (* regAllocState)} s ^{:tag (* Func)} f]
+  (let [regValLiveSet (.newSparseSet f (.NumValues f))] ; set of values that may be live in register
+    (defer (.retSparseSet f regValLiveSet))
+    (let [^{:tag (slice (* Value))} oldSched (zero (slice (* Value)))
+        ^{:line 1068 :tag (slice (* Value))} phis (zero (slice (* Value)))
+        ^{:line 1069 :tag (slice register)} phiRegs (zero (slice register))
+        ^{:line 1070 :tag (slice (* Value))} args (zero (slice (* Value)))
+
+        ;; Data structure used for computing desired registers.
+        ^{:line 1073 :tag desiredState} desired (zero desiredState)
+        ^{:line 1074} desiredSecondReg (lit (map ID (array 4 register)))] ; desired register allocation for 2nd part of a tuple
+
+      ;; Desired registers for inputs & outputs for each instruction in the block.
+      (let-type [dentry (struct
+            ^{:line 1078 :tag (array 4 register)} out ; desired output registers
+            ^{:line 1079 :tag (array 3 (array 4 register))} in)] ; desired input registers (for inputs 0,1, and 2)
+
+        (let [^{:tag (slice dentry)} dinfo (zero (slice dentry))]
+
+          (when (!= (.-Entry f) (aget (.-Blocks f) 0))
+            (.Fatalf f "entry block must be first"))
+
+
+          (range [_ b (.-visitOrder s)]
+            (when (> (.-debug (.-pass (.-f s))) regDebug)
+              (fmt/Printf "Begin processing block %v\n" b))
+
+            (set! (.-curBlock s) b)
+            (set! (.-startRegsMask s) (lit regMask))
+            (set! (.-usedSinceBlockStart s) (lit regMask))
+            (clear desiredSecondReg)
+
+            ;; Initialize regValLiveSet and uses fields for this block.
+            ;; Walk backwards through the block doing liveness analysis.
+            (.clear regValLiveSet)
+            (when (!= (.-live s) nil)
+              (range [_ e (aget (.-live s) (.-ID b))]
+                (.addUse s (.-ID e) (+ (conv int32 (len (.-Values b))) (.-dist e)) (.-pos e)) ; pseudo-uses from beyond end of block
+                (.add regValLiveSet (.-ID e))))
+
+
+            (range [_ v (.ControlValues b)]
+              (when (.-needReg (aget (.-values s) (.-ID v)))
+                (.addUse s (.-ID v) (conv int32 (len (.-Values b))) (.-Pos b)) ; pseudo-use by control values
+                (.add regValLiveSet (.-ID v))))
+
+
+            (if (< (cap (.-nextCall s)) (len (.-Values b)))
+              (let [c (cap (.-nextCall s))]
+                (set! (.-nextCall s) (append (subslice (.-nextCall s) _ c) (spread (make (slice int32) (- (len (.-Values b)) c))))))
+
+              (set! (.-nextCall s) (subslice (.-nextCall s) _ (len (.-Values b)))))
+
+            (let [^int32 nextCall math/MaxInt32]
+              (for [i (- (len (.-Values b)) 1)] (>= i 0) (dec! i)
+                (let [v (aget (.-Values b) i)]
+                  (.remove regValLiveSet (.-ID v))
+                  (when (== (.-Op v) OpPhi)
+                    ;; Remove v from the live set, but don't add
+                    ;; any inputs. This is the state the len(b.Preds)>1
+                    ;; case below desires; it wants to process phis specially.
+                    (aset (.-nextCall s) i nextCall)
+                    (continue))
+
+                  (when (.-call (aget opcodeTable (.-Op v)))
+                    ;; Function call clobbers all the registers but SP and SB.
+                    (.clear regValLiveSet)
+                    (when (and (!= (.-sp s) 0) (!= (.-uses (aget (.-values s) (.-sp s))) nil))
+                      (.add regValLiveSet (.-sp s)))
+
+                    (when (and (!= (.-sb s) 0) (!= (.-uses (aget (.-values s) (.-sb s))) nil))
+                      (.add regValLiveSet (.-sb s)))
+
+                    (set! nextCall (conv int32 i)))
+
+                  (range [_ a (.-Args v)]
+                    (when (not (.-needReg (aget (.-values s) (.-ID a))))
+                      (continue))
+
+                    (.addUse s (.-ID a) (conv int32 i) (.-Pos v))
+                    (.add regValLiveSet (.-ID a)))
+
+                  (aset (.-nextCall s) i nextCall)))
+
+              (when (> (.-debug (.-pass (.-f s))) regDebug)
+                (fmt/Printf "use distances for %s\n" b)
+                (range [i (.-values s)]
+                  (let [vi (addr (aget (.-values s) i))
+                      ^{:line 1152} u (.-uses vi)]
+                    (when (== u nil)
+                      (continue))
+
+                    (fmt/Printf "  v%d:" i)
+                    (while (!= u nil)
+                      (fmt/Printf " %d" (.-dist u))
+                      (set! u (.-next u)))
+
+                    (fmt/Println))))
+
+
+
+              ;; Make a copy of the block schedule so we can generate a new one in place.
+              ;; We make a separate copy for phis and regular values.
+              (let [nphi 0]
+                (range [_ v (.-Values b)]
+                  (when (!= (.-Op v) OpPhi)
+                    (break))
+
+                  (inc! nphi))
+
+                (set! phis (append (subslice phis _ 0) (spread (subslice (.-Values b) _ nphi))))
+                (set! oldSched (append (subslice oldSched _ 0) (spread (subslice (.-Values b) nphi))))
+                (set! (.-Values b) (subslice (.-Values b) _ 0))
+
+                ;; Initialize start state of block.
+                (cond (== b (.-Entry f))
+                  ;; Regalloc state is empty to start.
+                  (when (> nphi 0)
+                    (.Fatalf f "phis in entry block"))
+
+                  (== (len (.-Preds b)) 1) (do
+                    ;; Start regalloc state with the end state of the previous block.
+                    (.setState s (aget (.-endRegs s) (.-ID (.-b (aget (.-Preds b) 0)))))
+                    (when (> nphi 0)
+                      (.Fatalf f "phis in single-predecessor block"))
+
+                    ;; Drop any values which are no longer live.
+                    ;; This may happen because at the end of p, a value may be
+                    ;; live but only used by some other successor of p.
+                    (for [r (conv register 0)] (< r (.-numRegs s)) (inc! r)
+                      (let [v (.-v (aget (.-regs s) r))]
+                        (when (and (!= v nil) (not (.contains regValLiveSet (.-ID v))))
+                          (.freeReg s r))))) :else
+
+
+
+                  ;; This is the complicated case. We have more than one predecessor,
+                  ;; which means we may have Phi ops.
+
+                  ;; Start with the final register state of the predecessor with least spill values.
+                  ;; This is based on the following points:
+                  ;; 1, The less spill value indicates that the register pressure of this path is smaller,
+                  ;;    so the values of this block are more likely to be allocated to registers.
+                  ;; 2, Avoid the predecessor that contains the function call, because the predecessor that
+                  ;;    contains the function call usually generates a lot of spills and lose the previous
+                  ;;    allocation state.
+                  ;; TODO: Improve this part. At least the size of endRegs of the predecessor also has
+                  ;; an impact on the code size and compiler speed. But it is not easy to find a simple
+                  ;; and efficient method that combines multiple factors.
+                  (let [idx -1]
+                    (range [i p (.-Preds b)]
+                      ;; If the predecessor has not been visited yet, skip it because its end state
+                      ;; (redRegs and spillLive) has not been computed yet.
+                      (let [pb (.-b p)]
+                        (when (>= (aget (.-blockOrder s) (.-ID pb)) (aget (.-blockOrder s) (.-ID b)))
+                          (continue))
+
+                        (when (== idx -1)
+                          (set! idx i)
+                          (continue))
+
+                        (let [pSel (.-b (aget (.-Preds b) idx))]
+                          (cond (< (len (aget (.-spillLive s) (.-ID pb))) (len (aget (.-spillLive s) (.-ID pSel))))
+                            (set! idx i)
+                            (== (len (aget (.-spillLive s) (.-ID pb))) (len (aget (.-spillLive s) (.-ID pSel))))
+                            ;; Use a bit of likely information. After critical pass, pb and pSel must
+                            ;; be plain blocks, so check edge pb->pb.Preds instead of edge pb->b.
+                            ;; TODO: improve the prediction of the likely predecessor. The following
+                            ;; method is only suitable for the simplest cases. For complex cases,
+                            ;; the prediction may be inaccurate, but this does not affect the
+                            ;; correctness of the program.
+                            ;; According to the layout algorithm, the predecessor with the
+                            ;; smaller blockOrder is the true branch, and the test results show
+                            ;; that it is better to choose the predecessor with a smaller
+                            ;; blockOrder than no choice.
+                            (when (or (and (.likelyBranch pb) (not (.likelyBranch pSel))) (< (aget (.-blockOrder s) (.-ID pb)) (aget (.-blockOrder s) (.-ID pSel))))
+                              (set! idx i))))))
+
+
+
+                    (when (< idx 0)
+                      (.Fatalf f "bad visitOrder, no predecessor of %s has been visited before it" b))
+
+                    (let [p (.-b (aget (.-Preds b) idx))]
+                      (.setState s (aget (.-endRegs s) (.-ID p)))
+
+                      (when (> (.-debug (.-pass (.-f s))) regDebug)
+                        (fmt/Printf "starting merge block %s with end state of %s:\n" b p)
+                        (range [_ x (aget (.-endRegs s) (.-ID p))]
+                          (fmt/Printf "  %s: orig:%s cache:%s\n" (addr (aget (.-registers s) (.-r x))) (.-v x) (.-c x))))
+
+
+
+                      ;; Decide on registers for phi ops. Use the registers determined
+                      ;; by the primary predecessor if we can.
+                      ;; TODO: pick best of (already processed) predecessors?
+                      ;; Majority vote? Deepest nesting level?
+                      (set! phiRegs (subslice phiRegs _ 0))
+                      (let [^regMask phiUsed (zero regMask)]
+
+                        (range [_ v phis]
+                          (when (not (.-needReg (aget (.-values s) (.-ID v))))
+                            (set! phiRegs (append phiRegs noRegister))
+                            (continue))
+
+                          (let [a (aget (.-Args v) idx)
+                              ;; Some instructions target not-allocatable registers.
+                              ;; They're not suitable for further (phi-function) allocation.
+                              ^{:line 1272} m (.intersect (.minus (.-regs (aget (.-values s) (.-ID a))) phiUsed) (.-allocatable s))]
+                            (if (not (.empty m))
+                              (let [r (.pickReg s m)]
+                                (set! phiUsed (.addReg phiUsed r))
+                                (set! phiRegs (append phiRegs r)))
+
+                              (set! phiRegs (append phiRegs noRegister)))))
+
+
+
+                        ;; Second pass - deallocate all in-register phi inputs.
+                        (range [i v phis]
+                          (when (not (.-needReg (aget (.-values s) (.-ID v))))
+                            (continue))
+
+                          (let [a (aget (.-Args v) idx)
+                              ^{:line 1288} r (aget phiRegs i)]
+                            (when (== r noRegister)
+                              (continue))
+
+                            (when (.contains regValLiveSet (.-ID a))
+                              ;; Input value is still live (it is used by something other than Phi).
+                              ;; Try to move it around before kicking out, if there is a free register.
+                              ;; We generate a Copy in the predecessor block and record it. It will be
+                              ;; deleted later if never used.
+                              ;;
+                              ;; Pick a free register. At this point some registers used in the predecessor
+                              ;; block may have been deallocated. Those are the ones used for Phis. Exclude
+                              ;; them (and they are not going to be helpful anyway).
+                              (let [m (.minus (.minus (.compatRegs s (.-Type a)) (.-used s)) phiUsed)]
+                                (when (and (not (.empty m)) (not (.-rematerializeable (aget (.-values s) (.-ID a)))) (== (countRegs (.-regs (aget (.-values s) (.-ID a)))) 1))
+                                  (let [r2 (.pickReg s m)
+                                      ^{:line 1304} c (.NewValue1 p (.-Pos a) OpCopy (.-Type a) (.-c (aget (.-regs s) r)))]
+                                    (aset (.-copies s) c false)
+                                    (when (> (.-debug (.-pass (.-f s))) regDebug)
+                                      (fmt/Printf "copy %s to %s : %s\n" a c (addr (aget (.-registers s) r2))))
+
+                                    (.setOrig s c a)
+                                    (.assignReg s r2 a c)
+                                    (aset (.-endRegs s) (.-ID p) (append (aget (.-endRegs s) (.-ID p)) (lit endReg r2 a c)))))))
+
+
+                            (.freeReg s r)))
+
+
+                        ;; Copy phi ops into new schedule.
+                        (set! (.-Values b) (append (.-Values b) (spread phis)))
+
+                        ;; Third pass - pick registers for phis whose input
+                        ;; was not in a register in the primary predecessor.
+                        (range [i v phis]
+                          (when (not (.-needReg (aget (.-values s) (.-ID v))))
+                            (continue))
+
+                          (when (!= (aget phiRegs i) noRegister)
+                            (continue))
+
+                          (let [m (.minus (.minus (.compatRegs s (.-Type v)) phiUsed) (.-used s))]
+                            ;; If one of the other inputs of v is in a register, and the register is available,
+                            ;; select this register, which can save some unnecessary copies.
+                            (range [i pe (.-Preds b)]
+                              (when (== i idx)
+                                (continue))
+
+                              (let [ri noRegister]
+                                (range [_ er (aget (.-endRegs s) (.-ID (.-b pe)))]
+                                  (when (== (.-v er) (aget (.-orig s) (.-ID (aget (.-Args v) i))))
+                                    (set! ri (.-r er))
+                                    (break)))
+
+
+                                (when (and (!= ri noRegister) (.hasReg m ri))
+                                  (set! m (regMaskAt ri))
+                                  (break))))
+
+
+                            (when (not (.empty m))
+                              (let [r (.pickReg s m)]
+                                (aset phiRegs i r)
+                                (set! phiUsed (.addReg phiUsed r))))))
+
+
+
+                        ;; Set registers for phis. Add phi spill code.
+                        (range [i v phis]
+                          (when (not (.-needReg (aget (.-values s) (.-ID v))))
+                            (continue))
+
+                          (let [r (aget phiRegs i)]
+                            (when (== r noRegister)
+                              ;; stack-based phi
+                              ;; Spills will be inserted in all the predecessors below.
+                              (set! (.-spill (aget (.-values s) (.-ID v))) v) ; v starts life spilled
+                              (continue))
+
+                            ;; register-based phi
+                            (.assignReg s r v v)))
+
+
+                        ;; Deallocate any values which are no longer live. Phis are excluded.
+                        (for [r (conv register 0)] (< r (.-numRegs s)) (inc! r)
+                          (when (.hasReg phiUsed r)
+                            (continue))
+
+                          (let [v (.-v (aget (.-regs s) r))]
+                            (when (and (!= v nil) (not (.contains regValLiveSet (.-ID v))))
+                              (.freeReg s r))))
+
+
+
+                        ;; Save the starting state for use by merge edges.
+                        ;; We append to a stack allocated variable that we'll
+                        ;; later copy into s.startRegs in one fell swoop, to save
+                        ;; on allocations.
+                        (let [regList (make (slice startReg) 0 32)]
+                          (for [r (conv register 0)] (< r (.-numRegs s)) (inc! r)
+                            (let [v (.-v (aget (.-regs s) r))]
+                              (when (== v nil)
+                                (continue))
+
+                              (when (.hasReg phiUsed r)
+                                ;; Skip registers that phis used, we'll handle those
+                                ;; specially during merge edge processing.
+                                (continue))
+
+                              (set! regList (append regList (lit startReg r v (.-c (aget (.-regs s) r)) (.-pos (.-uses (aget (.-values s) (.-ID v)))))))
+                              (set! (.-startRegsMask s) (.addReg (.-startRegsMask s) r))))
+
+                          (aset (.-startRegs s) (.-ID b) (make (slice startReg) (len regList)))
+                          (copy (aget (.-startRegs s) (.-ID b)) regList)
+
+                          (when (> (.-debug (.-pass (.-f s))) regDebug)
+                            (fmt/Printf "after phis\n")
+                            (range [_ x (aget (.-startRegs s) (.-ID b))]
+                              (fmt/Printf "  %s: v%d\n" (addr (aget (.-registers s) (.-r x))) (.-ID (.-v x))))))))))
+
+
+
+
+                ;; Drop phis from registers if they immediately go dead.
+                (range [i v phis]
+                  (set! (.-curIdx s) i)
+                  (.dropIfUnused s v))
+
+
+                ;; Allocate space to record the desired registers for each value.
+                (if [l (len oldSched)] (< (cap dinfo) l)
+                  (set! dinfo (make (slice dentry) l))
+                  (do
+                    (set! dinfo (subslice dinfo _ l))
+                    (clear dinfo)))
+
+
+                ;; Load static desired register info at the end of the block.
+                (when (!= (.-desired s) nil)
+                  (.copy desired (addr (aget (.-desired s) (.-ID b)))))
+
+
+                ;; Check actual assigned registers at the start of the next block(s).
+                ;; Dynamically assigned registers will trump the static
+                ;; desired registers computed during liveness analysis.
+                ;; Note that we do this phase after startRegs is set above, so that
+                ;; we get the right behavior for a block which branches to itself.
+                (range [_ e (.-Succs b)]
+                  (let [succ (.-b e)]
+                    ;; TODO: prioritize likely successor?
+                    (range [_ x (aget (.-startRegs s) (.-ID succ))]
+                      (.add desired (.-ID (.-v x)) (.-r x)))
+
+                    ;; Process phi ops in succ.
+                    (let [pidx (.-i e)]
+                      (range [_ v (.-Values succ)]
+                        (when (!= (.-Op v) OpPhi)
+                          (break))
+
+                        (when (not (.-needReg (aget (.-values s) (.-ID v))))
+                          (continue))
+
+                        (let [(values rp ok) (assert (* Register) (.getHome (.-f s) (.-ID v)))]
+                          (when (not ok)
+                            ;; If v is not assigned a register, pick a register assigned to one of v's inputs.
+                            ;; Hopefully v will get assigned that register later.
+                            ;; If the inputs have allocated register information, add it to desired,
+                            ;; which may reduce spill or copy operations when the register is available.
+                            (range [_ a (.-Args v)]
+                              (set! (values rp ok) (assert (* Register) (.getHome (.-f s) (.-ID a))))
+                              (when ok
+                                (break)))
+
+
+                            (when (not ok)
+                              (continue)))
+
+
+                          (.add desired (.-ID (aget (.-Args v) pidx)) (conv register (.-num rp))))))))
+
+
+                ;; Walk values backwards computing desired register info.
+                ;; See computeDesired for more comments.
+                (for [i (- (len oldSched) 1)] (>= i 0) (dec! i)
+                  (let [v (aget oldSched i)
+                      ^{:line 1473} prefs (.remove desired (.-ID v))
+                      ^{:line 1474} regspec (.regspec s v)]
+                    (.clobber desired (.-clobbers regspec))
+                    (range [_ j (.-inputs regspec)]
+                      (when (!= (countRegs (.-regs j)) 1)
+                        (continue))
+
+                      (.clobber desired (.-regs j))
+                      (.add desired (.-ID (aget (.-Args v) (.-idx j))) (.pickReg s (.-regs j))))
+
+                    (when (or (.-resultInArg0 (aget opcodeTable (.-Op v))) (== (.-Op v) OpAMD64ADDQconst) (== (.-Op v) OpAMD64ADDLconst) (== (.-Op v) OpSelect0))
+                      (when (.-commutative (aget opcodeTable (.-Op v)))
+                        (.addList desired (.-ID (aget (.-Args v) 1)) prefs))
+
+                      (.addList desired (.-ID (aget (.-Args v) 0)) prefs))
+
+                    ;; Save desired registers for this value.
+                    (set! (.-out (aget dinfo i)) prefs)
+                    (range [j a (.-Args v)]
+                      (when (>= j (len (.-in (aget dinfo i))))
+                        (break))
+
+                      (aset (.-in (aget dinfo i)) j (.get desired (.-ID a))))
+
+                    (when (and (== (.-Op v) OpSelect1) (!= (aget prefs 0) noRegister))
+                      ;; Save desired registers of select1 for
+                      ;; use by the tuple generating instruction.
+                      (aset desiredSecondReg (.-ID (aget (.-Args v) 0)) prefs))))
+
+
+
+                ;; Process all the non-phi values.
+                (range [idx v oldSched]
+                  (set! (.-curIdx s) (+ nphi idx))
+                  (let [tmpReg noRegister]
+                    (when (> (.-debug (.-pass (.-f s))) regDebug)
+                      (fmt/Printf "  processing %s\n" (.LongString v)))
+
+                    (let [regspec (.regspec s v)]
+                      (when (== (.-Op v) OpPhi)
+                        (.Fatalf f "phi %s not at start of block" v))
+
+                      (when (.-fixedReg (aget opcodeTable (.-Op v)))
+                        (switch (.-Op v)
+                          (case [OpSP]
+                            (.assignReg s (.-SPReg s) v v)
+                            (set! (.-sp s) (.-ID v)))
+                          (case [OpSB]
+                            (.assignReg s (.-SBReg s) v v)
+                            (set! (.-sb s) (.-ID v)))
+                          (case [OpARM64ZERO OpLOONG64ZERO OpMIPS64ZERO]
+                            (.assignReg s (.-ZeroIntReg s) v v))
+                          (case [OpAMD64Zero128 OpAMD64Zero256 OpAMD64Zero512]
+                            (let [regspec (.regspec s v)
+                                ^{:line 1527} m (.-regs (aget (.-outputs regspec) 0))]
+                              (when (!= (countRegs m) 1)
+                                (.Fatalf f "bad fixed-register op %s" v))
+
+                              (.assignReg s (.pickReg s m) v v)))
+                          (default
+                            (.Fatalf f "unknown fixed-register op %s" v)))
+
+                        (set! (.-Values b) (append (.-Values b) v))
+                        (.advanceUses s v)
+                        (continue))
+
+                      (when (or (== (.-Op v) OpSelect0) (== (.-Op v) OpSelect1) (== (.-Op v) OpSelectN))
+                        (when (.-needReg (aget (.-values s) (.-ID v)))
+                          (if (== (.-Op v) OpSelectN)
+                            (.assignReg s (conv register (.-num (assert (* Register) (aget (assert LocResults (.getHome (.-f s) (.-ID (aget (.-Args v) 0)))) (conv int (.-AuxInt v)))))) v v)
+
+                            (let [^:var i 0]
+                              (when (== (.-Op v) OpSelect1)
+                                (set! i 1))
+
+                              (.assignReg s (conv register (.-num (assert (* Register) (aget (assert LocPair (.getHome (.-f s) (.-ID (aget (.-Args v) 0)))) i)))) v v))))
+
+
+                        (set! (.-Values b) (append (.-Values b) v))
+                        (.advanceUses s v)
+                        (continue))
+
+                      (when (and (== (.-Op v) OpGetG) (.-hasGReg (.-Config (.-f s))))
+                        ;; use hardware g register
+                        (when (!= (.-v (aget (.-regs s) (.-GReg s))) nil)
+                          (.freeReg s (.-GReg s))) ; kick out the old value
+
+                        (.assignReg s (.-GReg s) v v)
+                        (set! (.-Values b) (append (.-Values b) v))
+                        (.advanceUses s v)
+                        (continue))
+
+                      (when (== (.-Op v) OpArg)
+                        ;; Args are "pre-spilled" values. We don't allocate
+                        ;; any register here. We just set up the spill pointer to
+                        ;; point at itself and any later user will restore it to use it.
+                        (set! (.-spill (aget (.-values s) (.-ID v))) v)
+                        (set! (.-Values b) (append (.-Values b) v))
+                        (.advanceUses s v)
+                        (continue))
+
+                      (when (== (.-Op v) OpKeepAlive)
+                        ;; Make sure the argument to v is still live here.
+                        (.advanceUses s v)
+                        (let [a (aget (.-Args v) 0)
+                            ^{:line 1578} vi (addr (aget (.-values s) (.-ID a)))]
+                          (if (and (.empty (.-regs vi)) (not (.-rematerializeable vi)))
+                            ;; Use the spill location.
+                            ;; This forces later liveness analysis to make the
+                            ;; value live at this point.
+                            (.SetArg v 0 (.makeSpill s a b))
+                            (if [(values _ ok) (assert (* ir/Name) (.-Aux a))] (and ok (.-rematerializeable vi)) (do
+                                ;; Rematerializeable value with a *ir.Name. This is the address of
+                                ;; a stack object (e.g. an LEAQ). Keep the object live.
+                                ;; Change it to VarLive, which is what plive expects for locals.
+                                (set! (.-Op v) OpVarLive)
+                                (.SetArgs1 v (aget (.-Args v) 1))
+                                (set! (.-Aux v) (.-Aux a)))
+                              (do
+                                ;; In-register and rematerializeable values are already live.
+                                ;; These are typically rematerializeable constants like nil,
+                                ;; or values of a variable that were modified since the last call.
+                                (set! (.-Op v) OpCopy)
+                                (.SetArgs1 v (aget (.-Args v) 1)))))
+
+                          (set! (.-Values b) (append (.-Values b) v))
+                          (continue)))
+
+                      (when (and (== (len (.-inputs regspec)) 0) (== (len (.-outputs regspec)) 0))
+                        ;; No register allocation required (or none specified yet)
+                        (when (and (.-doClobber s) (.IsCall (.-Op v)))
+                          (.clobberRegs s (.-clobbers regspec)))
+
+                        (.freeRegs s (.-clobbers regspec))
+                        (set! (.-Values b) (append (.-Values b) v))
+                        (.advanceUses s v)
+                        (continue))
+
+
+                      (when (.-rematerializeable (aget (.-values s) (.-ID v)))
+                        ;; Value is rematerializeable, don't issue it here.
+                        ;; It will get issued just before each use (see
+                        ;; allocValueToReg).
+                        (range [_ a (.-Args v)]
+                          (dec! (.-Uses a)))
+
+                        (.advanceUses s v)
+                        (continue))
+
+
+                      (when (> (.-debug (.-pass (.-f s))) regDebug)
+                        (fmt/Printf "value %s\n" (.LongString v))
+                        (fmt/Printf "  out:")
+                        (range [_ r (.-out (aget dinfo idx))]
+                          (when (!= r noRegister)
+                            (fmt/Printf " %s" (addr (aget (.-registers s) r)))))
+
+
+                        (fmt/Println)
+                        (for [i 0] (and (< i (len (.-Args v))) (< i 3)) (inc! i)
+                          (fmt/Printf "  in%d:" i)
+                          (range [_ r (aget (.-in (aget dinfo idx)) i)]
+                            (when (!= r noRegister)
+                              (fmt/Printf " %s" (addr (aget (.-registers s) r)))))
+
+
+                          (fmt/Println)))
+
+
+
+                      ;; Move arguments to registers.
+                      ;; First, if an arg must be in a specific register and it is already
+                      ;; in place, keep it.
+                      (set! args (append (subslice args _ 0) (spread (make (slice (* Value)) (len (.-Args v))))))
+                      (range [i a (.-Args v)]
+                        (when (not (.-needReg (aget (.-values s) (.-ID a))))
+                          (aset args i a)))
+
+
+                      (range [_ i (.-inputs regspec)]
+                        (let [mask (.-regs i)]
+                          (when (and (== (countRegs mask) 1) (not (.empty (.intersect mask (.-regs (aget (.-values s) (.-ID (aget (.-Args v) (.-idx i)))))))))
+                            (aset args (.-idx i) (.allocValToReg s (aget (.-Args v) (.-idx i)) mask true (.-Pos v))))))
+
+
+                      ;; Then, if an arg must be in a specific register and that
+                      ;; register is free, allocate that one. Otherwise when processing
+                      ;; another input we may kick a value into the free register, which
+                      ;; then will be kicked out again.
+                      ;; This is a common case for passing-in-register arguments for
+                      ;; function calls.
+                      (while true
+                        (let [freed false]
+                          (range [_ i (.-inputs regspec)]
+                            (when (!= (aget args (.-idx i)) nil)
+                              (continue)) ; already allocated
+
+                            (let [mask (.-regs i)]
+                              (when (and (== (countRegs mask) 1) (not (.empty (.minus mask (.-used s)))))
+                                (aset args (.-idx i) (.allocValToReg s (aget (.-Args v) (.-idx i)) mask true (.-Pos v)))
+                                ;; If the input is in other registers that will be clobbered by v,
+                                ;; or the input is dead, free the registers. This may make room
+                                ;; for other inputs.
+                                (let [oldregs (.-regs (aget (.-values s) (.-ID (aget (.-Args v) (.-idx i)))))]
+                                  (when (or (.empty (.minus oldregs (.-clobbers regspec))) (not (.liveAfterCurrentInstruction s (aget (.-Args v) (.-idx i)))))
+                                    (.freeRegs s (.minus (.minus oldregs mask) (.-nospill s)))
+                                    (set! freed true))))))
+
+
+
+                          (when (not freed)
+                            (break))))
+
+
+                      ;; Last, allocate remaining ones, in an ordering defined
+                      ;; by the register specification (most constrained first).
+                      (range [_ i (.-inputs regspec)]
+                        (when (!= (aget args (.-idx i)) nil)
+                          (continue)) ; already allocated
+
+                        (let [mask (.-regs i)]
+                          (when (.empty (.intersect mask (.-regs (aget (.-values s) (.-ID (aget (.-Args v) (.-idx i)))))))
+                            ;; Need a new register for the input.
+                            (set! mask (.intersect mask (.-allocatable s)))
+                            (set! mask (.minus mask (.-nospill s)))
+                            ;; Used desired register if available.
+                            (when (< (.-idx i) 3)
+                              (range [_ r (aget (.-in (aget dinfo idx)) (.-idx i))]
+                                (when (and (!= r noRegister) (.hasReg (.minus mask (.-used s)) r))
+                                  ;; Desired register is allowed and unused.
+                                  (set! mask (regMaskAt r))
+                                  (break))))
+
+
+
+                            ;; Avoid registers we're saving for other values.
+                            (when (not (.empty (.minus mask (.-avoid desired))))
+                              (set! mask (.minus mask (.-avoid desired)))))
+
+
+                          (when (.hasReg (.intersect mask (.-regs (aget (.-values s) (.-ID (aget (.-Args v) (.-idx i)))))) (.-SPReg s))
+                            ;; Prefer SP register. This ensures that local variables
+                            ;; use SP as their base register (instead of a copy of the
+                            ;; stack pointer living in another register). See issue 74836.
+                            (set! mask (regMaskAt (.-SPReg s))))
+
+                          (aset args (.-idx i) (.allocValToReg s (aget (.-Args v) (.-idx i)) mask true (.-Pos v)))))
+
+
+                      ;; If the output clobbers the input register, make sure we have
+                      ;; at least two copies of the input register so we don't
+                      ;; have to reload the value from the spill location.
+                      (when (.-resultInArg0 (aget opcodeTable (.-Op v)))
+                        (let [^regMask m (zero regMask)]
+                          (when (not (.liveAfterCurrentInstruction s (aget (.-Args v) 0)))
+                            ;; arg0 is dead.  We can clobber its register.
+                            (goto :ok))
+
+                          (when (and (.-commutative (aget opcodeTable (.-Op v))) (not (.liveAfterCurrentInstruction s (aget (.-Args v) 1))))
+                            (set! (values (aget args 0) (aget args 1)) (values (aget args 1) (aget args 0)))
+                            (goto :ok))
+
+                          (when (.-rematerializeable (aget (.-values s) (.-ID (aget (.-Args v) 0))))
+                            ;; We can rematerialize the input, don't worry about clobbering it.
+                            (goto :ok))
+
+                          (when (and (.-commutative (aget opcodeTable (.-Op v))) (.-rematerializeable (aget (.-values s) (.-ID (aget (.-Args v) 1)))))
+                            (set! (values (aget args 0) (aget args 1)) (values (aget args 1) (aget args 0)))
+                            (goto :ok))
+
+                          (when (>= (countRegs (.-regs (aget (.-values s) (.-ID (aget (.-Args v) 0))))) 2)
+                            ;; we have at least 2 copies of arg0.  We can afford to clobber one.
+                            (goto :ok))
+
+                          (when (and (.-commutative (aget opcodeTable (.-Op v))) (>= (countRegs (.-regs (aget (.-values s) (.-ID (aget (.-Args v) 1))))) 2))
+                            (set! (values (aget args 0) (aget args 1)) (values (aget args 1) (aget args 0)))
+                            (goto :ok))
+
+
+                          ;; We can't overwrite arg0 (or arg1, if commutative).  So we
+                          ;; need to make a copy of an input so we have a register we can modify.
+
+                          ;; Possible new registers to copy into.
+                          (set! m (.minus (.compatRegs s (.-Type (aget (.-Args v) 0))) (.-used s)))
+                          (when (.empty m)
+                            ;; No free registers.  In this case we'll just clobber
+                            ;; an input and future uses of that input must use a restore.
+                            ;; TODO(khr): We should really do this like allocReg does it,
+                            ;; spilling the value with the most distant next use.
+                            (goto :ok))
+
+
+                          ;; Try to move an input to the desired output, if allowed.
+                          (range [_ r (.-out (aget dinfo idx))]
+                            (when (and (!= r noRegister) (.hasReg (.intersect m (.-regs (aget (.-outputs regspec) 0))) r))
+                              (set! m (regMaskAt r))
+                              (aset args 0 (.allocValToReg s (aget (.-Args v) 0) m true (.-Pos v)))
+                              ;; Note: we update args[0] so the instruction will
+                              ;; use the register copy we just made.
+                              (goto :ok)))
+
+
+                          ;; Try to copy input to its desired location & use its old
+                          ;; location as the result register.
+                          (range [_ r (aget (.-in (aget dinfo idx)) 0)]
+                            (when (and (!= r noRegister) (.hasReg m r))
+                              (set! m (regMaskAt r))
+                              (let [c (.allocValToReg s (aget (.-Args v) 0) m true (.-Pos v))]
+                                (aset (.-copies s) c false)
+                                ;; Note: no update to args[0] so the instruction will
+                                ;; use the original copy.
+                                (goto :ok))))
+
+
+                          (when (.-commutative (aget opcodeTable (.-Op v)))
+                            (range [_ r (aget (.-in (aget dinfo idx)) 1)]
+                              (when (and (!= r noRegister) (.hasReg m r))
+                                (set! m (regMaskAt r))
+                                (let [c (.allocValToReg s (aget (.-Args v) 1) m true (.-Pos v))]
+                                  (aset (.-copies s) c false)
+                                  (set! (values (aget args 0) (aget args 1)) (values (aget args 1) (aget args 0)))
+                                  (goto :ok)))))
+
+
+
+
+                          ;; Avoid future fixed uses if we can.
+                          (when (not (.empty (.minus m (.-avoid desired))))
+                            (set! m (.minus m (.-avoid desired))))
+
+                          ;; Save input 0 to a new register so we can clobber it.
+                          (let [c (.allocValToReg s (aget (.-Args v) 0) m true (.-Pos v))]
+                            (aset (.-copies s) c false)
+
+                            ;; Normally we use the register of the old copy of input 0 as the target.
+                            ;; However, if input 0 is already in its desired register then we use
+                            ;; the register of the new copy instead.
+                            (when (.hasReg (.-regs (aget (.-outputs regspec) 0)) (conv register (.-num (assert (* Register) (.getHome (.-f s) (.-ID c))))))
+                              (when [(values rp ok) (assert (* Register) (.getHome (.-f s) (.-ID (aget args 0))))] ok
+                                (let [r (conv register (.-num rp))]
+                                  (range [_ r2 (aget (.-in (aget dinfo idx)) 0)]
+                                    (when (== r r2)
+                                      (aset args 0 c)
+                                      (break)))))))))
+
+
+
+
+
+                      (label :ok
+                        (for [i 0] (< i 2) (inc! i)
+                          (when (not (or (and (== i 0) (.-clobbersArg0 regspec)) (and (== i 1) (.-clobbersArg1 regspec))))
+                            (continue))
+
+                          (when (not (.liveAfterCurrentInstruction s (aget (.-Args v) i)))
+                            ;; arg is dead.  We can clobber its register.
+                            (continue))
+
+                          (when (.-rematerializeable (aget (.-values s) (.-ID (aget (.-Args v) i))))
+                            ;; We can rematerialize the input, don't worry about clobbering it.
+                            (continue))
+
+                          (when (>= (countRegs (.-regs (aget (.-values s) (.-ID (aget (.-Args v) i))))) 2)
+                            ;; We have at least 2 copies of arg.  We can afford to clobber one.
+                            (continue))
+
+                          ;; Possible new registers to copy into.
+                          (let [m (.minus (.compatRegs s (.-Type (aget (.-Args v) i))) (.-used s))]
+                            (when (.empty m)
+                              ;; No free registers.  In this case we'll just clobber the
+                              ;; input and future uses of that input must use a restore.
+                              ;; TODO(khr): We should really do this like allocReg does it,
+                              ;; spilling the value with the most distant next use.
+                              (continue))
+
+                            ;; Copy input to a different register that won't be clobbered.
+                            (let [c (.allocValToReg s (aget (.-Args v) i) m true (.-Pos v))]
+                              (aset (.-copies s) c false)))))
+
+
+                      ;; Pick a temporary register if needed.
+                      ;; It should be distinct from all the input registers, so we
+                      ;; allocate it after all the input registers, but before
+                      ;; the input registers are freed via advanceUses below.
+                      ;; (Not all instructions need that distinct part, but it is conservative.)
+                      ;; We also ensure it is not any of the single-choice output registers.
+                      (when (.-needIntTemp (aget opcodeTable (.-Op v)))
+                        (let [m (.intersect (.-allocatable s) (.-gpRegMask (.-Config (.-f s))))]
+                          (range [_ out (.-outputs regspec)]
+                            (when (== (countRegs (.-regs out)) 1)
+                              (set! m (.minus m (.-regs out)))))
+
+
+                          (when (not (.empty (.minus (.minus m (.-avoid desired)) (.-nospill s))))
+                            (set! m (.minus m (.-avoid desired))))
+
+                          (set! tmpReg (.allocReg s m (addr tmpVal)))
+                          (set! (.-nospill s) (.addReg (.-nospill s) tmpReg))
+                          (set! (.-tmpused s) (.addReg (.-tmpused s) tmpReg))))
+
+
+                      (when (.-clobbersArg0 regspec)
+                        (.freeReg s (conv register (.-num (assert (* Register) (.getHome (.-f s) (.-ID (aget args 0))))))))
+
+                      (when (and (.-clobbersArg1 regspec) (not (and (.-clobbersArg0 regspec) (== (.getHome (.-f s) (.-ID (aget args 0))) (.getHome (.-f s) (.-ID (aget args 1)))))))
+                        (.freeReg s (conv register (.-num (assert (* Register) (.getHome (.-f s) (.-ID (aget args 1))))))))
+
+
+                      ;; Now that all args are in regs, we're ready to issue the value itself.
+                      ;; Before we pick a register for the output value, allow input registers
+                      ;; to be deallocated. We do this here so that the output can use the
+                      ;; same register as a dying input.
+                      (when (not (.-resultNotInArgs (aget opcodeTable (.-Op v))))
+                        (set! (.-tmpused s) (.-nospill s))
+                        (set! (.-nospill s) (lit regMask))
+                        (.advanceUses s v)) ; frees any registers holding args that are no longer live
+
+
+                      ;; Dump any registers which will be clobbered
+                      (when (and (.-doClobber s) (.IsCall (.-Op v)))
+                        ;; clobber registers that are marked as clobber in regmask, but
+                        ;; don't clobber inputs.
+                        (.clobberRegs s (.minus (.minus (.-clobbers regspec) (.-tmpused s)) (.-nospill s))))
+
+                      (.freeRegs s (.-clobbers regspec))
+                      (set! (.-tmpused s) (.union (.-tmpused s) (.-clobbers regspec)))
+
+                      ;; Pick registers for outputs.
+                      (do
+                        (let [outRegs noRegisters ; TODO if this is costly, hoist and clear incrementally below.
+                            ^{:line 1903} maxOutIdx -1
+                            ^{:line 1904 :tag regMask} used (zero regMask)]
+                          (when (!= tmpReg noRegister)
+                            ;; Ensure output registers are distinct from the temporary register.
+                            ;; (Not all instructions need that distinct part, but it is conservative.)
+                            (set! used (.addReg used tmpReg)))
+
+                          (range [_ out (.-outputs regspec)]
+                            (when (.empty (.-regs out))
+                              (continue))
+
+                            (let [mask (.minus (.intersect (.-regs out) (.-allocatable s)) used)]
+                              (when (.empty mask)
+                                (.Fatalf (.-f s) "can't find any output register %s" (.LongString v)))
+
+                              (when (and (.-resultInArg0 (aget opcodeTable (.-Op v))) (== (.-idx out) 0))
+                                (if (not (.-commutative (aget opcodeTable (.-Op v))))
+                                  ;; Output must use the same register as input 0.
+                                  (let [r (conv register (.-num (assert (* Register) (.getHome (.-f s) (.-ID (aget args 0))))))]
+                                    (when (not (.hasReg mask r))
+                                      (.Fatalf (.-f s) "resultInArg0 value's input %v cannot be an output of %s" (assert (* Register) (.getHome (.-f s) (.-ID (aget args 0)))) (.LongString v)))
+
+                                    (set! mask (regMaskAt r)))
+
+                                  ;; Output must use the same register as input 0 or 1.
+                                  (let [r0 (conv register (.-num (assert (* Register) (.getHome (.-f s) (.-ID (aget args 0))))))
+                                      ^{:line 1929} r1 (conv register (.-num (assert (* Register) (.getHome (.-f s) (.-ID (aget args 1))))))
+                                      ;; Check r0 and r1 for desired output register.
+                                      ^{:line 1931} found false]
+                                    (range [_ r (.-out (aget dinfo idx))]
+                                      (when (and ^:go/paren (or (== r r0) (== r r1)) (.hasReg (.minus mask (.-used s)) r))
+                                        (set! mask (regMaskAt r))
+                                        (set! found true)
+                                        (when (== r r1)
+                                          (set! (values (aget args 0) (aget args 1)) (values (aget args 1) (aget args 0))))
+
+                                        (break)))
+
+
+                                    (when (not found)
+                                      ;; Neither are desired, pick r0.
+                                      (set! mask (regMaskAt r0))))))
+
+
+
+                              (when (== (.-idx out) 0) ; desired registers only apply to the first element of a tuple result
+                                (range [_ r (.-out (aget dinfo idx))]
+                                  (when (and (!= r noRegister) (.hasReg (.minus mask (.-used s)) r))
+                                    ;; Desired register is allowed and unused.
+                                    (set! mask (regMaskAt r))
+                                    (break))))
+
+
+
+                              (when (== (.-idx out) 1)
+                                (when [(values prefs ok) (aget desiredSecondReg (.-ID v))] ok
+                                  (range [_ r prefs]
+                                    (when (and (!= r noRegister) (.hasReg (.minus mask (.-used s)) r))
+                                      ;; Desired register is allowed and unused.
+                                      (set! mask (regMaskAt r))
+                                      (break)))))
+
+
+
+
+                              ;; Avoid registers we're saving for other values.
+                              (when (not (.empty (.minus (.minus (.minus mask (.-avoid desired)) (.-nospill s)) (.-used s))))
+                                (set! mask (.minus mask (.-avoid desired))))
+
+                              (let [r (.allocReg s mask v)]
+                                (when (> (.-idx out) maxOutIdx)
+                                  (set! maxOutIdx (.-idx out)))
+
+                                (aset outRegs (.-idx out) r)
+                                (set! used (.addReg used r))
+                                (set! (.-tmpused s) (.addReg (.-tmpused s) r)))))
+
+                          ;; Record register choices
+                          (cond (.IsTuple (.-Type v))
+                            (let [^LocPair outLocs (zero LocPair)]
+                              (when [r (aget outRegs 0)] (!= r noRegister)
+                                (aset outLocs 0 (addr (aget (.-registers s) r))))
+
+                              (when [r (aget outRegs 1)] (!= r noRegister)
+                                (aset outLocs 1 (addr (aget (.-registers s) r))))
+
+                              (.setHome (.-f s) v outLocs))
+                            ;; Note that subsequent SelectX instructions will do the assignReg calls.
+                            (.IsResults (.-Type v))
+                            ;; preallocate outLocs to the right size, which is maxOutIdx+1
+                            (let [outLocs (make LocResults (+ maxOutIdx 1) (+ maxOutIdx 1))]
+                              (for [i 0] (<= i maxOutIdx) (inc! i)
+                                (when [r (aget outRegs i)] (!= r noRegister)
+                                  (aset outLocs i (addr (aget (.-registers s) r)))))
+
+
+                              (.setHome (.-f s) v outLocs)) :else
+                            (do
+                              (when [r (aget outRegs 0)] (!= r noRegister)
+                                (.assignReg s r v v))))
+
+
+                          (when (!= tmpReg noRegister)
+                            ;; Remember the temp register allocation, if any.
+                            (when (== (.-tempRegs (.-f s)) nil)
+                              (set! (.-tempRegs (.-f s)) (lit (map ID (* Register)))))
+
+                            (aset (.-tempRegs (.-f s)) (.-ID v) (addr (aget (.-registers s) tmpReg))))))
+
+
+
+                      ;; deallocate dead args, if we have not done so
+                      (when (.-resultNotInArgs (aget opcodeTable (.-Op v)))
+                        (set! (.-nospill s) (lit regMask))
+                        (.advanceUses s v)) ; frees any registers holding args that are no longer live
+
+                      (set! (.-tmpused s) (lit regMask))
+
+                      ;; Issue the Value itself.
+                      (range [i a args]
+                        (.SetArg v i a)) ; use register version of arguments
+
+                      (set! (.-Values b) (append (.-Values b) v))
+                      (.dropIfUnused s v))))
+
+
+                ;; Copy the control values - we need this so we can reduce the
+                ;; uses property of these values later.
+                (let [controls (append (make (slice (* Value)) 0 2) (spread (.ControlValues b)))]
+
+                  ;; Load control values into registers.
+                  (range [i v (.ControlValues b)]
+                    (when (not (.-needReg (aget (.-values s) (.-ID v))))
+                      (continue))
+
+                    (when (> (.-debug (.-pass (.-f s))) regDebug)
+                      (fmt/Printf "  processing control %s\n" (.LongString v)))
+
+                    ;; We assume that a control input can be passed in any
+                    ;; type-compatible register. If this turns out not to be true,
+                    ;; we'll need to introduce a regspec for a block's control value.
+                    (.ReplaceControl b i (.allocValToReg s v (.compatRegs s (.-Type v)) false (.-Pos b))))
+
+
+                  ;; Reduce the uses of the control values once registers have been loaded.
+                  ;; This loop is equivalent to the advanceUses method.
+                  (range [_ v controls]
+                    (let [vi (addr (aget (.-values s) (.-ID v)))]
+                      (when (not (.-needReg vi))
+                        (continue))
+
+                      ;; Remove this use from the uses list.
+                      (let [u (.-uses vi)]
+                        (set! (.-uses vi) (.-next u))
+                        (when (== (.-next u) nil)
+                          (.freeRegs s (.-regs vi))) ; value is dead
+
+                        (set! (.-next u) (.-freeUseRecords s))
+                        (set! (.-freeUseRecords s) u))))
+
+
+                  ;; If we are approaching a merge point and we are the primary
+                  ;; predecessor of it, find live values that we use soon after
+                  ;; the merge point and promote them to registers now.
+                  (when (== (len (.-Succs b)) 1)
+                    (when (and (.-hasGReg (.-Config (.-f s))) (!= (.-v (aget (.-regs s) (.-GReg s))) nil))
+                      (.freeReg s (.-GReg s))) ; Spill value in G register before any merge.
+
+                    (when (> (aget (.-blockOrder s) (.-ID b)) (aget (.-blockOrder s) (.-ID (.-b (aget (.-Succs b) 0)))))
+                      ;; No point if we've already regalloc'd the destination.
+                      (goto :badloop))
+
+                    ;; For this to be worthwhile, the loop must have no calls in it.
+                    (let [top (.-b (aget (.-Succs b) 0))
+                        ^{:line 2077} loop (aget (.-b2l (.-loopnest s)) (.-ID top))]
+                      (when (or (== loop nil) (!= (.-header loop) top) (.-containsUnavoidableCall loop))
+                        (goto :badloop))
+
+
+                      ;; Look into target block, find Phi arguments that come from b.
+                      (let [phiArgs regValLiveSet] ; reuse this space
+                        (.clear phiArgs)
+                        (range [_ v (.-Values (.-b (aget (.-Succs b) 0)))]
+                          (when (== (.-Op v) OpPhi)
+                            (.add phiArgs (.-ID (aget (.-Args v) (.-i (aget (.-Succs b) 0)))))))
+
+
+
+                        ;; Get mask of all registers that might be used soon in the destination.
+                        ;; We don't want to kick values out of these registers, but we will
+                        ;; kick out an unlikely-to-be-used value for a likely-to-be-used one.
+                        (let [^regMask likelyUsedRegs (zero regMask)]
+                          (range [_ live (aget (.-live s) (.-ID b))]
+                            (when (< (.-dist live) unlikelyDistance)
+                              (set! likelyUsedRegs (.union likelyUsedRegs (.-regs (aget (.-values s) (.-ID live)))))))
+
+
+                          ;; Promote values we're going to use soon in the destination to registers.
+                          ;; Note that this iterates nearest-use first, as we sorted
+                          ;; live lists by distance in computeLive.
+                          (range [_ live (aget (.-live s) (.-ID b))]
+                            (when (>= (.-dist live) unlikelyDistance)
+                              ;; Don't preload anything live after the loop.
+                              (continue))
+
+                            (let [vid (.-ID live)
+                                ^{:line 2109} vi (addr (aget (.-values s) vid))
+                                ^{:line 2110} v (aget (.-orig s) vid)]
+                              (if (.contains phiArgs vid)
+                                ;; A phi argument needs its value in a regular register,
+                                ;; as returned by compatRegs. Being in a fixed register
+                                ;; (e.g. the zero register) or being easily
+                                ;; rematerializeable isn't enough.
+                                (when (not (.empty (.intersect (.-regs vi) (.compatRegs s (.-Type v)))))
+                                  (continue))
+
+                                (do
+                                  (when (not (.empty (.-regs vi)))
+                                    (continue))
+
+                                  (when (.-rematerializeable vi)
+                                    ;; TODO: maybe we should not skip rematerializeable
+                                    ;; values here. One rematerialization outside the loop
+                                    ;; is better than N in the loop. But rematerializations
+                                    ;; are cheap, and spilling another value may not be.
+                                    ;; And we don't want to materialize the zero register
+                                    ;; into a different register when it is just the
+                                    ;; argument to a store.
+                                    (continue))))
+
+
+                              (when (and (.-rematerializeable vi) (== (.-Arch (.-Arch (.-ctxt (.-Config (.-f s))))) sys/ArchWasm))
+                                (continue))
+
+                              ;; Registers we could load v into.
+                              ;; Don't kick out other likely-used values.
+                              (let [m (.minus (.compatRegs s (.-Type v)) likelyUsedRegs)]
+                                (when (.empty m)
+                                  ;; To many likely-used values to give them all a register.
+                                  (continue))
+
+
+                                ;; Used desired register if available.
+                                (label :outerloop
+                                  (range [_ e (.-entries desired)]
+                                    (when (!= (.-ID e) (.-ID v))
+                                      (continue))
+
+                                    (range [_ r (.-regs e)]
+                                      (when (and (!= r noRegister) (.hasReg m r))
+                                        (set! m (regMaskAt r))
+                                        (break :outerloop)))))
+
+
+
+                                (when (not (.empty (.minus m (.-avoid desired))))
+                                  (set! m (.minus m (.-avoid desired))))
+
+                                (.allocValToReg s v m false (.-Pos b))
+                                (set! likelyUsedRegs (.union likelyUsedRegs (.-regs (aget (.-values s) (.-ID v))))))))))))
+
+
+                  (label :badloop)
+
+
+                  ;; Save end-of-block register state.
+                  ;; First count how many, this cuts allocations in half.
+                  (let [k 0]
+                    (for [r (conv register 0)] (< r (.-numRegs s)) (inc! r)
+                      (let [v (.-v (aget (.-regs s) r))]
+                        (when (== v nil)
+                          (continue))
+
+                        (inc! k)))
+
+                    (let [regList (make (slice endReg) 0 k)]
+                      (for [r (conv register 0)] (< r (.-numRegs s)) (inc! r)
+                        (let [v (.-v (aget (.-regs s) r))]
+                          (when (== v nil)
+                            (continue))
+
+                          (set! regList (append regList (lit endReg r v (.-c (aget (.-regs s) r)))))))
+
+                      (aset (.-endRegs s) (.-ID b) regList)
+
+                      (when checkEnabled
+                        (.clear regValLiveSet)
+                        (when (!= (.-live s) nil)
+                          (range [_ x (aget (.-live s) (.-ID b))]
+                            (.add regValLiveSet (.-ID x))))
+
+
+                        (for [r (conv register 0)] (< r (.-numRegs s)) (inc! r)
+                          (let [v (.-v (aget (.-regs s) r))]
+                            (when (== v nil)
+                              (continue))
+
+                            (when (not (.contains regValLiveSet (.-ID v)))
+                              (.Fatalf (.-f s) "val %s is in reg but not live at end of %s" v b)))))
+
+
+
+
+                      ;; If a value is live at the end of the block and
+                      ;; isn't in a register, generate a use for the spill location.
+                      ;; We need to remember this information so that
+                      ;; the liveness analysis in stackalloc is correct.
+                      (when (!= (.-live s) nil)
+                        (range [_ e (aget (.-live s) (.-ID b))]
+                          (let [vi (addr (aget (.-values s) (.-ID e)))]
+                            (when (not (.empty (.-regs vi)))
+                              ;; in a register, we'll use that source for the merge.
+                              (continue))
+
+                            (when (.-rematerializeable vi)
+                              ;; we'll rematerialize during the merge.
+                              (continue))
+
+                            (when (> (.-debug (.-pass (.-f s))) regDebug)
+                              (fmt/Printf "live-at-end spill for %s at %s\n" (aget (.-orig s) (.-ID e)) b))
+
+                            (let [spill (.makeSpill s (aget (.-orig s) (.-ID e)) b)]
+                              (aset (.-spillLive s) (.-ID b) (append (aget (.-spillLive s) (.-ID b)) (.-ID spill))))))
+
+
+                        ;; Clear any final uses.
+                        ;; All that is left should be the pseudo-uses added for values which
+                        ;; are live at the end of b.
+                        (range [_ e (aget (.-live s) (.-ID b))]
+                          (let [u (.-uses (aget (.-values s) (.-ID e)))]
+                            (when (== u nil)
+                              (.Fatalf f "live at end, no uses v%d" (.-ID e)))
+
+                            (when (!= (.-next u) nil)
+                              (.Fatalf f "live at end, too many uses v%d" (.-ID e)))
+
+                            (set! (.-uses (aget (.-values s) (.-ID e))) nil)
+                            (set! (.-next u) (.-freeUseRecords s))
+                            (set! (.-freeUseRecords s) u))))
+
+
+
+                      ;; allocReg may have dropped registers from startRegsMask that
+                      ;; aren't actually needed in startRegs. Synchronize back to
+                      ;; startRegs.
+                      ;;
+                      ;; This must be done before placing spills, which will look at
+                      ;; startRegs to decide if a block is a valid block for a spill.
+                      (when [c (countRegs (.-startRegsMask s))] (!= c (len (aget (.-startRegs s) (.-ID b))))
+                        (let [regs (make (slice startReg) 0 c)]
+                          (range [_ sr (aget (.-startRegs s) (.-ID b))]
+                            (when (not (.hasReg (.-startRegsMask s) (.-r sr)))
+                              (continue))
+
+                            (set! regs (append regs sr)))
+
+                          (aset (.-startRegs s) (.-ID b) regs)))))))))
+
+
+
+          ;; Decide where the spills we generated will go.
+          (.placeSpills s)
+
+          ;; Anything that didn't get a register gets a stack location here.
+          ;; (StoreReg, stack-based phis, inputs, ...)
+          (let [stacklive (stackalloc (.-f s) (.-spillLive s))]
+
+            ;; Fix up all merge edges.
+            (.shuffle s stacklive)
+
+            ;; Erase any copies we never used.
+            ;; Also, an unused copy might be the only use of another copy,
+            ;; so continue erasing until we reach a fixed point.
+            (while true
+              (let [progress false]
+                (range [c used (.-copies s)]
+                  (when (and (not used) (== (.-Uses c) 0))
+                    (when (> (.-debug (.-pass (.-f s))) regDebug)
+                      (fmt/Printf "delete copied value %s\n" (.LongString c)))
+
+                    (.resetArgs c)
+                    (.freeValue f c)
+                    (delete (.-copies s) c)
+                    (set! progress true)))
+
+
+                (when (not progress)
+                  (break))))
+
+
+
+            (range [_ b (.-visitOrder s)]
+              (let [i 0]
+                (range [_ v (.-Values b)]
+                  (when (== (.-Op v) OpInvalid)
+                    (continue))
+
+                  (aset (.-Values b) i v)
+                  (inc! i))
+
+                (set! (.-Values b) (subslice (.-Values b) _ i))))))))))
+
+
+
+^{:go/end 2428} (go/method placeSpills [^{:tag (* regAllocState)} s]
+  (let [mustBeFirst ^{:go/end 2310} (fn ^bool [^Op op]
+        (or (.isLoweredGetClosurePtr op) (== op OpPhi) (== op OpArgIntReg) (== op OpArgFloatReg)))
+
+
+      ;; Start maps block IDs to the list of spills
+      ;; that go at the start of the block (but after any phis).
+      ^{:line 2314} start (lit (map ID (slice (* Value))))
+      ;; After maps value IDs to the list of spills
+      ;; that go immediately after that value ID.
+      ^{:line 2317} after (lit (map ID (slice (* Value))))]
+
+    (range [i (.-values s)]
+      (let [vi (aget (.-values s) i)
+          ^{:line 2321} spill (.-spill vi)]
+        (when (== spill nil)
+          (continue))
+
+        (when (!= (.-Block spill) nil)
+          ;; Some spills are already fully set up,
+          ;; like OpArgs and stack-based phis.
+          (continue))
+
+        (let [v (aget (.-orig s) i)]
+
+          ;; Walk down the dominator tree looking for a good place to
+          ;; put the spill of v.  At the start "best" is the best place
+          ;; we have found so far.
+          ;; TODO: find a way to make this O(1) without arbitrary cutoffs.
+          (when (== v nil)
+            (panic (fmt/Errorf "nil v, s.orig[%d], vi = %v, spill = %s" i vi (.LongString spill))))
+
+          (let [best (.-Block v)
+              ^{:line 2340} bestArg v
+              ^{:line 2341 :tag int16} bestDepth (zero int16)]
+            (when (and (!= (.-loopnest s) nil) (!= (aget (.-b2l (.-loopnest s)) (.-ID best)) nil))
+              (set! bestDepth (.-depth (aget (.-b2l (.-loopnest s)) (.-ID best)))))
+
+            (let [b best
+                ^:const ^{:line 2346 :val 100} maxSpillSearch 100]
+              (for [i 0] (< i maxSpillSearch) (inc! i)
+                ;; Find the child of b in the dominator tree which
+                ;; dominates all restores.
+                (let [p b]
+                  (set! b nil)
+                  (for [c (.Child (.-sdom s) p)] (and (!= c nil) (< i maxSpillSearch)) (set! (values c i) (values (.Sibling (.-sdom s) c) (+ i 1)))
+                    (when (and (<= (.-entry (aget (.-sdom s) (.-ID c))) (.-restoreMin vi)) (>= (.-exit (aget (.-sdom s) (.-ID c))) (.-restoreMax vi)))
+                      ;; c also dominates all restores.  Walk down into c.
+                      (set! b c)
+                      (break)))
+
+
+                  (when (== b nil)
+                    ;; Ran out of blocks which dominate all restores.
+                    (break))
+
+
+                  (let [^int16 depth (zero int16)]
+                    (when (and (!= (.-loopnest s) nil) (!= (aget (.-b2l (.-loopnest s)) (.-ID b)) nil))
+                      (set! depth (.-depth (aget (.-b2l (.-loopnest s)) (.-ID b)))))
+
+                    (when (> depth bestDepth)
+                      ;; Don't push the spill into a deeper loop.
+                      (continue))
+
+
+                    ;; If v is in a register at the start of b, we can
+                    ;; place the spill here (after the phis).
+                    (if (== (len (.-Preds b)) 1)
+                      (range [_ e (aget (.-endRegs s) (.-ID (.-b (aget (.-Preds b) 0))))]
+                        (when (== (.-v e) v)
+                          ;; Found a better spot for the spill.
+                          (set! best b)
+                          (set! bestArg (.-c e))
+                          (set! bestDepth depth)
+                          (break)))
+
+
+
+                      (range [_ e (aget (.-startRegs s) (.-ID b))]
+                        (when (== (.-v e) v)
+                          ;; Found a better spot for the spill.
+                          (set! best b)
+                          (set! bestArg (.-c e))
+                          (set! bestDepth depth)
+                          (break)))))))
+
+
+
+
+
+              ;; Put the spill in the best block we found.
+              (set! (.-Block spill) best)
+              (.AddArg spill bestArg)
+              (if (and (== best (.-Block v)) (not (mustBeFirst (.-Op v))))
+                ;; Place immediately after v.
+                (aset after (.-ID v) (append (aget after (.-ID v)) spill))
+
+                ;; Place at the start of best block.
+                (aset start (.-ID best) (append (aget start (.-ID best)) spill))))))))
+
+
+
+    ;; Insert spill instructions into the block schedules.
+    (let [^{:tag (slice (* Value))} oldSched (zero (slice (* Value)))]
+      (range [_ b (.-visitOrder s)]
+        (let [nfirst 0]
+          (range [_ v (.-Values b)]
+            (when (not (mustBeFirst (.-Op v)))
+              (break))
+
+            (inc! nfirst))
+
+          (set! oldSched (append (subslice oldSched _ 0) (spread (subslice (.-Values b) nfirst))))
+          (set! (.-Values b) (subslice (.-Values b) _ nfirst))
+          (set! (.-Values b) (append (.-Values b) (spread (aget start (.-ID b)))))
+          (range [_ v oldSched]
+            (set! (.-Values b) (append (.-Values b) v))
+            (set! (.-Values b) (append (.-Values b) (spread (aget after (.-ID v)))))))))))
+
+
+
+
+
+^{:go/end 2458} (go/method shuffle "shuffle fixes up all the merge edges (those going into blocks of indegree > 1).\n" [^{:tag (* regAllocState)} s ^{:tag (slice (slice ID))} stacklive]
+  (let [^edgeState e (zero edgeState)]
+    (set! (.-s e) s)
+    (set! (.-cache e) (lit (map ID (slice (* Value)))))
+    (set! (.-contents e) (lit (map Location contentRecord)))
+    (when (> (.-debug (.-pass (.-f s))) regDebug)
+      (fmt/Printf "shuffle %s\n" (.-Name (.-f s)))
+      (fmt/Println (.String (.-f s))))
+
+
+    (range [_ b (.-visitOrder s)]
+      (when (<= (len (.-Preds b)) 1)
+        (continue))
+
+      (set! (.-b e) b)
+      (range [i edge (.-Preds b)]
+        (let [p (.-b edge)]
+          (set! (.-p e) p)
+          (.setup e i (aget (.-endRegs s) (.-ID p)) (aget (.-startRegs s) (.-ID b)) (aget stacklive (.-ID p)))
+          (.process e))))
+
+
+
+    (when (> (.-debug (.-pass (.-f s))) regDebug)
+      (fmt/Printf "post shuffle %s\n" (.-Name (.-f s)))
+      (fmt/Println (.String (.-f s))))))
+
+
+
+(go/type edgeState (struct
+    ^{:line 2461 :tag (* regAllocState)} s
+    ^{:line 2462 :tag (* Block)} p ^{:tag (* Block)} b ; edge goes from p->b.
+
+
+    ^{:line 2465 :tag (map ID (slice (* Value))) :doc "for each pre-regalloc value, a list of equivalent cached values\n"} cache
+    ^{:line 2466 :tag (slice ID)} cachedVals ; (superset of) keys of the above map, for deterministic iteration
+
+
+    ^{:line 2469 :tag (map Location contentRecord) :doc "map from location to the value it contains\n"} contents
+
+
+    ^{:line 2472 :tag (slice dstRecord) :doc "desired destination locations\n"} destinations
+    ^{:line 2473 :tag (slice dstRecord)} extra
+
+    ^{:line 2475 :tag regMask} usedRegs ; registers currently holding something
+    ^{:line 2476 :tag regMask} uniqueRegs ; registers holding the only copy of a value
+    ^{:line 2477 :tag regMask} finalRegs ; registers holding final target
+    ^{:line 2478 :tag regMask} rematerializeableRegs)) ; registers that hold rematerializeable values
+
+
+(go/type contentRecord (struct
+    ^{:line 2482 :tag ID} vid ; pre-regalloc value
+    ^{:line 2483 :tag (* Value)} c ; cached value
+    ^{:line 2484 :tag bool} final ; this is a satisfied destination
+    ^{:line 2485 :tag src/XPos} pos)) ; source position of use of the value
+
+
+(go/type dstRecord (struct
+    ^{:line 2489 :tag Location} loc ; register or stack slot
+    ^{:line 2490 :tag ID} vid ; pre-regalloc value it should contain
+    ^{:line 2491 :tag (* (* Value))} splice ; place to store reference to the generating instruction
+    ^{:line 2492 :tag src/XPos} pos)) ; source position of use of this location
+
+
+
+^{:go/end 2561} (go/method setup "setup initializes the edge state for shuffling.\n" [^{:tag (* edgeState)} e ^int idx ^{:tag (slice endReg)} srcReg ^{:tag (slice startReg)} dstReg ^{:tag (slice ID)} stacklive]
+  (when (> (.-debug (.-pass (.-f (.-s e)))) regDebug)
+    (fmt/Printf "edge %s->%s\n" (.-p e) (.-b e)))
+
+
+  ;; Clear state.
+  (clear (.-cache e))
+  (set! (.-cachedVals e) (subslice (.-cachedVals e) _ 0))
+  (clear (.-contents e))
+  (set! (.-usedRegs e) (lit regMask))
+  (set! (.-uniqueRegs e) (lit regMask))
+  (set! (.-finalRegs e) (lit regMask))
+  (set! (.-rematerializeableRegs e) (lit regMask))
+
+  ;; Live registers can be sources.
+  (range [_ x srcReg]
+    (.set e (addr (aget (.-registers (.-s e)) (.-r x))) (.-ID (.-v x)) (.-c x) false src/NoXPos)) ; don't care the position of the source
+
+  ;; So can all of the spill locations.
+  (range [_ spillID stacklive]
+    (let [v (aget (.-orig (.-s e)) spillID)
+        ^{:line 2517} spill (.-spill (aget (.-values (.-s e)) (.-ID v)))]
+      (when (not (.IsAncestorEq (.-sdom (.-s e)) (.-Block spill) (.-p e)))
+        ;; Spills were placed that only dominate the uses found
+        ;; during the first regalloc pass. The edge fixup code
+        ;; can't use a spill location if the spill doesn't dominate
+        ;; the edge.
+        ;; We are guaranteed that if the spill doesn't dominate this edge,
+        ;; then the value is available in a register (because we called
+        ;; makeSpill for every value not in a register at the start
+        ;; of an edge).
+        (continue))
+
+      (.set e (.getHome (.-f (.-s e)) spillID) (.-ID v) spill false src/NoXPos))) ; don't care the position of the source
+
+
+  ;; Figure out all the destinations we need.
+  (let [dsts (subslice (.-destinations e) _ 0)]
+    (range [_ x dstReg]
+      (set! dsts (append dsts (lit dstRecord (addr (aget (.-registers (.-s e)) (.-r x))) (.-ID (.-v x)) nil (.-pos x)))))
+
+    ;; Phis need their args to end up in a specific location.
+    (range [_ v (.-Values (.-b e))]
+      (when (!= (.-Op v) OpPhi)
+        (break))
+
+      (let [loc (.getHome (.-f (.-s e)) (.-ID v))]
+        (when (== loc nil)
+          (continue))
+
+        (set! dsts (append dsts (lit dstRecord loc (.-ID (aget (.-Args v) idx)) (addr (aget (.-Args v) idx)) (.-Pos v))))))
+
+    (set! (.-destinations e) dsts)
+
+    (when (> (.-debug (.-pass (.-f (.-s e)))) regDebug)
+      (range [_ vid (.-cachedVals e)]
+        (let [a (aget (.-cache e) vid)]
+          (range [_ c a]
+            (fmt/Printf "src %s: v%d cache=%s\n" (.getHome (.-f (.-s e)) (.-ID c)) vid c))))
+
+
+      (range [_ d (.-destinations e)]
+        (fmt/Printf "dst %s: v%d\n" (.-loc d) (.-vid d))))))
+
+
+
+
+
+^{:go/end 2629} (go/method process "process generates code to move all the values to the right destination locations.\n" [^{:tag (* edgeState)} e]
+  (let [dsts (.-destinations e)]
+
+    ;; Process the destinations until they are all satisfied.
+    (while (> (len dsts) 0)
+      (let [i 0]
+        (range [_ d dsts]
+          (when (not (.processDest e (.-loc d) (.-vid d) (.-splice d) (.-pos d)))
+            ;; Failed - save for next iteration.
+            (aset dsts i d)
+            (inc! i)))
+
+
+        (when (< i (len dsts))
+          ;; Made some progress. Go around again.
+          (set! dsts (subslice dsts _ i))
+
+          ;; Append any extras destinations we generated.
+          (set! dsts (append dsts (spread (.-extra e))))
+          (set! (.-extra e) (subslice (.-extra e) _ 0))
+          (continue))
+
+
+        ;; We made no progress. That means that any
+        ;; remaining unsatisfied moves are in simple cycles.
+        ;; For example, A -> B -> C -> D -> A.
+        ;;   A ----> B
+        ;;   ^       |
+        ;;   |       |
+        ;;   |       v
+        ;;   D <---- C
+
+        ;; To break the cycle, we pick an unused register, say R,
+        ;; and put a copy of B there.
+        ;;   A ----> B
+        ;;   ^       |
+        ;;   |       |
+        ;;   |       v
+        ;;   D <---- C <---- R=copyofB
+        ;; When we resume the outer loop, the A->B move can now proceed,
+        ;; and eventually the whole cycle completes.
+
+        ;; Copy any cycle location to a temp register. This duplicates
+        ;; one of the cycle entries, allowing the just duplicated value
+        ;; to be overwritten and the cycle to proceed.
+        (let [d (aget dsts 0)
+            ^{:line 2610} loc (.-loc d)
+            ^{:line 2611} vid (.-vid (aget (.-contents e) loc))
+            ^{:line 2612} c (.-c (aget (.-contents e) loc))
+            ^{:line 2613} r (.findRegFor e (.-Type c))]
+          (when (> (.-debug (.-pass (.-f (.-s e)))) regDebug)
+            (fmt/Printf "breaking cycle with v%d in %s:%s\n" vid loc c))
+
+          (.erase e r)
+          (let [pos (.WithNotStmt (.-pos d))]
+            (if [(values _ isReg) (assert (* Register) loc)] isReg
+              (set! c (.NewValue1 (.-p e) pos OpCopy (.-Type c) c))
+
+              (set! c (.NewValue1 (.-p e) pos OpLoadReg (.-Type c) c)))
+
+            (.set e r vid c false pos)
+            (when (and (== (.-Op c) OpLoadReg) (.isGReg (.-s e) (conv register (.-num (assert (* Register) r)))))
+              (.Fatalf (.-f (.-s e)) (+ "process.OpLoadReg targeting g: " (.LongString c))))))))))
+
+
+
+
+
+
+^{:go/end 2778} (go/method processDest "processDest generates code to put value vid into location loc. Returns true\nif progress was made.\n" ^bool [^{:tag (* edgeState)} e ^Location loc ^ID vid ^{:tag (* (* Value))} splice ^src/XPos pos]
+  (set! pos (.WithNotStmt pos))
+  (let [occupant (aget (.-contents e) loc)]
+    (when (== (.-vid occupant) vid)
+      ;; Value is already in the correct place.
+      (aset (.-contents e) loc (lit contentRecord vid (.-c occupant) true pos))
+      (when (!= splice nil)
+        (dec! (.-Uses @splice))
+        (set! @splice (.-c occupant))
+        (inc! (.-Uses (.-c occupant))))
+
+      ;; Note: if splice==nil then c will appear dead. This is
+      ;; non-SSA formed code, so be careful after this pass not to run
+      ;; deadcode elimination.
+      (when [(values _ ok) (aget (.-copies (.-s e)) (.-c occupant))] ok
+        ;; The copy at occupant.c was used to avoid spill.
+        (aset (.-copies (.-s e)) (.-c occupant) true))
+
+      (return true))
+
+
+    ;; Check if we're allowed to clobber the destination location.
+    (when (and (== (len (aget (.-cache e) (.-vid occupant))) 1) (not (.-rematerializeable (aget (.-values (.-s e)) (.-vid occupant)))) (not (.-fixedReg (aget opcodeTable (.-Op (aget (.-orig (.-s e)) (.-vid occupant)))))))
+      ;; We can't overwrite the last copy
+      ;; of a value that needs to survive.
+      (return false))
+
+
+    ;; Copy from a source of v, register preferred.
+    (let [v (aget (.-orig (.-s e)) vid)
+        ^{:line 2663 :tag (* Value)} c (zero (* Value))
+        ^{:line 2664 :tag Location} src (zero Location)]
+      (when (> (.-debug (.-pass (.-f (.-s e)))) regDebug)
+        (fmt/Printf "moving v%d to %s\n" vid loc)
+        (fmt/Printf "sources of v%d:" vid))
+
+      (if (.-fixedReg (aget opcodeTable (.-Op v))) (do
+          (set! c v)
+          (set! src (.getHome (.-f (.-s e)) (.-ID v))))
+
+        (range [_ w (aget (.-cache e) vid)]
+          (let [h (.getHome (.-f (.-s e)) (.-ID w))]
+            (when (> (.-debug (.-pass (.-f (.-s e)))) regDebug)
+              (fmt/Printf " %s:%s" h w))
+
+            (let [(values _ isreg) (assert (* Register) h)]
+              (when (or (== src nil) isreg)
+                (set! c w)
+                (set! src h))))))
+
+
+
+      (when (> (.-debug (.-pass (.-f (.-s e)))) regDebug)
+        (if (!= src nil)
+          (fmt/Printf " [use %s]\n" src)
+
+          (fmt/Printf " [no source]\n")))
+
+
+      (let [(values _ dstReg) (assert (* Register) loc)]
+
+        ;; Pre-clobber destination. This avoids the
+        ;; following situation:
+        ;;   - v is currently held in R0 and stacktmp0.
+        ;;   - We want to copy stacktmp1 to stacktmp0.
+        ;;   - We choose R0 as the temporary register.
+        ;; During the copy, both R0 and stacktmp0 are
+        ;; clobbered, losing both copies of v. Oops!
+        ;; Erasing the destination early means R0 will not
+        ;; be chosen as the temp register, as it will then
+        ;; be the last copy of v.
+        (.erase e loc)
+        ^{:go/breaks [[6 2777]]} (let [^{:tag (* Value)} x (zero (* Value))]
+          (if (or (== c nil) (.-rematerializeable (aget (.-values (.-s e)) vid))) (do
+              (when (not (.-rematerializeable (aget (.-values (.-s e)) vid)))
+                (.Fatalf (.-f (.-s e)) "can't find source for %s->%s: %s\n" (.-p e) (.-b e) (.LongString v)))
+
+              (if dstReg
+                ;; We want to rematerialize v into a register that is incompatible with v's op's register mask.
+                ;; Instead of setting the wrong register for the rematerialized v, we should find the right register
+                ;; for it and emit an additional copy to move to the desired register.
+                ;; For #70451.
+                (if (not (.hasReg (.-regs (aget (.-outputs (.regspec (.-s e) v)) 0)) (conv register (.-num (assert (* Register) loc)))))
+                  (let [(values _ srcReg) (assert (* Register) src)]
+                    (if srcReg
+                      ;; It exists in a valid register already, so just copy it to the desired register
+                      ;; If src is a Register, c must have already been set.
+                      (set! x (.NewValue1 (.-p e) pos OpCopy (.-Type c) c))
+                      (do
+                        ;; We need a tmp register
+                        (set! x (.copyInto v (.-p e)))
+                        (let [r (.findRegFor e (.-Type x))]
+                          (.erase e r)
+                          ;; Rematerialize to the tmp register
+                          (.set e r vid x false pos)
+                          ;; Copy from tmp to the desired register
+                          (set! x (.NewValue1 (.-p e) pos OpCopy (.-Type x) x))))))
+
+
+                  (set! x (.copyInto v (.-p e))))
+
+
+                ;; Rematerialize into stack slot. Need a free
+                ;; register to accomplish this.
+                (let [r (.findRegFor e (.-Type v))]
+                  (.erase e r)
+                  (set! x (.copyIntoWithXPos v (.-p e) pos))
+                  (.set e r vid x false pos)
+                  ;; Make sure we spill with the size of the slot, not the
+                  ;; size of x (which might be wider due to our dropping
+                  ;; of narrowing conversions).
+                  (set! x (.NewValue1 (.-p e) pos OpStoreReg (.-Type (assert LocalSlot loc)) x)))))
+
+
+            ;; Emit move from src to dst.
+            (let [(values _ srcReg) (assert (* Register) src)]
+              (if srcReg
+                (if dstReg
+                  (set! x (.NewValue1 (.-p e) pos OpCopy (.-Type c) c))
+
+                  (set! x (.NewValue1 (.-p e) pos OpStoreReg (.-Type (assert LocalSlot loc)) c)))
+
+                (do
+                  (if dstReg
+                    (set! x (.NewValue1 (.-p e) pos OpLoadReg (.-Type c) c))
+
+                    ;; mem->mem. Use temp register.
+                    (let [r (.findRegFor e (.-Type c))]
+                      (.erase e r)
+                      (let [t (.NewValue1 (.-p e) pos OpLoadReg (.-Type c) c)]
+                        (.set e r vid t false pos)
+                        (set! x (.NewValue1 (.-p e) pos OpStoreReg (.-Type (assert LocalSlot loc)) t)))))))))
+
+
+
+          (.set e loc vid x true pos)
+          (when (and (== (.-Op x) OpLoadReg) (.isGReg (.-s e) (conv register (.-num (assert (* Register) loc)))))
+            (.Fatalf (.-f (.-s e)) (+ "processDest.OpLoadReg targeting g: " (.LongString x))))
+
+          (when (!= splice nil)
+            (dec! (.-Uses @splice))
+            (set! @splice x)
+            (inc! (.-Uses x)))
+
+          true)))))
+
+
+
+^{:go/end 2814} (go/method set "set changes the contents of location loc to hold the given value and its cached representative.\n" [^{:tag (* edgeState)} e ^Location loc ^ID vid ^{:tag (* Value)} c ^bool final ^src/XPos pos]
+  (.setHome (.-f (.-s e)) c loc)
+  (aset (.-contents e) loc (lit contentRecord vid c final pos))
+  (let [a (aget (.-cache e) vid)]
+    (when (== (len a) 0)
+      (set! (.-cachedVals e) (append (.-cachedVals e) vid)))
+
+    (set! a (append a c))
+    (aset (.-cache e) vid a)
+    (when [(values r ok) (assert (* Register) loc)] ok
+      (when (.hasReg (.-usedRegs e) (conv register (.-num r)))
+        (.Fatalf (.-f (.-s e)) "%v is already set (v%d/%v)" r vid c))
+
+      (set! (.-usedRegs e) (.addReg (.-usedRegs e) (conv register (.-num r))))
+      (when final
+        (set! (.-finalRegs e) (.addReg (.-finalRegs e) (conv register (.-num r)))))
+
+      (when (== (len a) 1)
+        (set! (.-uniqueRegs e) (.addReg (.-uniqueRegs e) (conv register (.-num r)))))
+
+      (when (== (len a) 2)
+        (when [(values t ok) (assert (* Register) (.getHome (.-f (.-s e)) (.-ID (aget a 0))))] ok
+          (set! (.-uniqueRegs e) (.removeReg (.-uniqueRegs e) (conv register (.-num t))))))
+
+
+      (when (.-rematerializeable (aget (.-values (.-s e)) vid))
+        (set! (.-rematerializeableRegs e) (.addReg (.-rematerializeableRegs e) (conv register (.-num r))))))
+
+
+    (when (> (.-debug (.-pass (.-f (.-s e)))) regDebug)
+      (fmt/Printf "%s\n" (.LongString c))
+      (fmt/Printf "v%d now available in %s:%s\n" vid loc c))))
+
+
+
+
+^{:go/end 2857} (go/method erase "erase removes any user of loc.\n" [^{:tag (* edgeState)} e ^Location loc]
+  (let [cr (aget (.-contents e) loc)]
+    (when (== (.-c cr) nil)
+      (return))
+
+    (let [vid (.-vid cr)]
+
+      (when (.-final cr)
+        ;; Add a destination to move this value back into place.
+        ;; Make sure it gets added to the tail of the destination queue
+        ;; so we make progress on other moves first.
+        (set! (.-extra e) (append (.-extra e) (lit dstRecord loc (.-vid cr) nil (.-pos cr)))))
+
+
+      ;; Remove c from the list of cached values.
+      (let [a (aget (.-cache e) vid)]
+        (range [i c a]
+          (when (== (.getHome (.-f (.-s e)) (.-ID c)) loc)
+            (when (> (.-debug (.-pass (.-f (.-s e)))) regDebug)
+              (fmt/Printf "v%d no longer available in %s:%s\n" vid loc c))
+
+            (set! (values (aget a i) a) (values (aget a (- (len a) 1)) (subslice a _ (- (len a) 1))))
+            (break)))
+
+
+        (aset (.-cache e) vid a)
+
+        ;; Update register masks.
+        (when [(values r ok) (assert (* Register) loc)] ok
+          (set! (.-usedRegs e) (.removeReg (.-usedRegs e) (conv register (.-num r))))
+          (when (.-final cr)
+            (set! (.-finalRegs e) (.removeReg (.-finalRegs e) (conv register (.-num r)))))
+
+          (set! (.-rematerializeableRegs e) (.removeReg (.-rematerializeableRegs e) (conv register (.-num r)))))
+
+        (when (== (len a) 1)
+          (when [(values r ok) (assert (* Register) (.getHome (.-f (.-s e)) (.-ID (aget a 0))))] ok
+            (set! (.-uniqueRegs e) (.addReg (.-uniqueRegs e) (conv register (.-num r))))))))))
+
+
+
+
+
+^{:go/end 2919} (go/method findRegFor "findRegFor finds a register we can use to make a temp copy of type typ.\n" ^Location [^{:tag (* edgeState)} e ^{:tag (* types/Type)} typ]
+  ;; Which registers are possibilities.
+  ^{:go/breaks [13]} (let [m (.compatRegs (.-s e) typ)
+
+      ;; Pick a register. In priority order:
+      ;; 1) an unused register
+      ;; 2) a non-unique register not holding a final value
+      ;; 3) a non-unique register
+      ;; 4) a register holding a rematerializeable value
+      ^{:line 2869} x (.minus m (.-usedRegs e))]
+    (when (not (.empty x))
+      (return (addr (aget (.-registers (.-s e)) (.pickReg (.-s e) x)))))
+
+    (set! x (.minus (.minus m (.-uniqueRegs e)) (.-finalRegs e)))
+    (when (not (.empty x))
+      (return (addr (aget (.-registers (.-s e)) (.pickReg (.-s e) x)))))
+
+    (set! x (.minus m (.-uniqueRegs e)))
+    (when (not (.empty x))
+      (return (addr (aget (.-registers (.-s e)) (.pickReg (.-s e) x)))))
+
+    (set! x (.intersect m (.-rematerializeableRegs e)))
+    (when (not (.empty x))
+      (return (addr (aget (.-registers (.-s e)) (.pickReg (.-s e) x)))))
+
+
+    ;; No register is available.
+    ;; Pick a register to spill.
+    (range [_ vid (.-cachedVals e)]
+      (let [a (aget (.-cache e) vid)]
+        (range [_ c a]
+          (when [(values r ok) (assert (* Register) (.getHome (.-f (.-s e)) (.-ID c)))] (and ok (.hasReg m (conv register (.-num r))))
+            (when (not (.rematerializeable c))
+              (let [x (.NewValue1 (.-p e) (.-Pos c) OpStoreReg (.-Type c) c)
+                  ;; Allocate a temp location to spill a register to.
+                  ^{:line 2895} t (lit LocalSlot :N (.NewLocal (.-f (.-s e)) (.-Pos c) (.-Type c)) :Type (.-Type c))]
+                ;; TODO: reuse these slots. They'll need to be erased first.
+                (.set e t vid x false (.-Pos c))
+                (when (> (.-debug (.-pass (.-f (.-s e)))) regDebug)
+                  (fmt/Printf "  SPILL %s->%s %s\n" r t (.LongString x)))))
+
+
+            ;; r will now be overwritten by the caller. At some point
+            ;; later, the newly saved value will be moved back to its
+            ;; final destination in processDest.
+            (return r)))))
+
+
+
+
+    (fmt/Printf "m:%d unique:%d final:%d rematerializable:%d\n" m (.-uniqueRegs e) (.-finalRegs e) (.-rematerializeableRegs e))
+    (range [_ vid (.-cachedVals e)]
+      (let [a (aget (.-cache e) vid)]
+        (range [_ c a]
+          (fmt/Printf "v%d: %s %s\n" vid c (.getHome (.-f (.-s e)) (.-ID c))))))
+
+
+    (.Fatalf (.-f (.-s e)) "can't find empty register on edge %s->%s" (.-p e) (.-b e))
+    nil))
+
+
+
+
+^{:go/breaks [[6 2934]] :go/end 2935} (go/method rematerializeable "rematerializeable reports whether the register allocator should recompute\na value instead of spilling/restoring it.\n" ^bool [^{:tag (* Value)} v]
+  (when (not (.-rematerializeable (aget opcodeTable (.-Op v))))
+    (return false))
+
+  (range [_ a (.-Args v)]
+    ;; Fixed-register allocations (SP, SB, etc.) are always available.
+    ;; Any other argument of an opcode makes it not rematerializeable.
+    (when (not (.-fixedReg (aget opcodeTable (.-Op a))))
+      (return false)))
+
+
+  true)
+
+
+(go/type liveInfo (struct
+    ^{:line 2938 :tag ID} ID ; ID of value
+    ^{:line 2939 :tag int32} dist ; # of instructions before next use
+    ^{:line 2940 :tag src/XPos} pos)) ; source position of next use
+
+
+
+
+
+^{:go/end 3258} (go/method computeLive "computeLive computes a map from block ID to a list of value IDs live at the end\nof that block. Together with the value ID is a count of how many instructions\nto the next use of that value. The resulting map is stored in s.live.\n" [^{:tag (* regAllocState)} s]
+  (let [f (.-f s)]
+    ;; single block functions do not have variables that are live across
+    ;; branches
+    (when (== (len (.-Blocks f)) 1)
+      (return))
+
+    (let [po (.postorder f)]
+      (set! (.-live s) (make (slice (slice liveInfo)) (.NumBlocks f)))
+      (set! (.-desired s) (make (slice desiredState) (.NumBlocks f)))
+      (set! (.-loopnest s) (.loopnest f))
+
+      (let [rematIDs (make (slice ID) 0 64)
+
+          ^{:line 2960} live (.newSparseMapPos f (.NumValues f))]
+        (defer (.retSparseMapPos f live))
+        (let [t (.newSparseMapPos f (.NumValues f))]
+          (defer (.retSparseMapPos f t))
+
+          (.computeUnavoidableCalls (.-loopnest s))
+
+          ;; Liveness analysis.
+          ;; This is an adapted version of the algorithm described in chapter 2.4.2
+          ;; of Fabrice Rastello's On Sparse Intermediate Representations.
+          ;;   https://web.archive.org/web/20240417212122if_/https://inria.hal.science/hal-00761555/file/habilitation.pdf#section.50
+          ;;
+          ;; For our implementation, we fall back to a traditional iterative algorithm when we encounter
+          ;; Irreducible CFGs. They are very uncommon in Go code because they need to be constructed with
+          ;; gotos and our current loopnest definition does not compute all the information that
+          ;; we'd need to compute the loop ancestors for that step of the algorithm.
+          ;;
+          ;; Additionally, instead of only considering non-loop successors in the initial DFS phase,
+          ;; we compute the liveout as the union of all successors. This larger liveout set is a subset
+          ;; of the final liveout for the block and adding this information in the DFS phase means that
+          ;; we get slightly more accurate distance information.
+          (let [^{:tag (map (* loop) (slice liveInfo))} loopLiveIn (zero (map (* loop) (slice liveInfo)))
+              ^{:line 2982 :tag (slice int32)} numCalls (zero (slice int32))]
+            (when (and (> (len (.-loops (.-loopnest s))) 0) (not (.-hasIrreducible (.-loopnest s))))
+              (set! loopLiveIn (make (map (* loop) (slice liveInfo))))
+              (set! numCalls (.allocInt32Slice (.-Cache f) (.NumBlocks f)))
+              (defer (.freeInt32Slice (.-Cache f) numCalls)))
+
+
+            (while true
+              (let [changed false]
+
+                (range [_ b po]
+                  ;; Start with known live values at the end of the block.
+                  (.clear live)
+                  (range [_ e (aget (.-live s) (.-ID b))]
+                    (.set live (.-ID e) (.-dist e) (.-pos e)))
+
+                  (let [update false]
+                    ;; arguments to phi nodes are live at this blocks out
+                    (range [_ e (.-Succs b)]
+                      (let [succ (.-b e)
+                          ^{:line 3002} delta (branchDistance b succ)]
+                        (range [_ v (.-Values succ)]
+                          (when (!= (.-Op v) OpPhi)
+                            (break))
+
+                          (let [arg (aget (.-Args v) (.-i e))]
+                            (when (and (.-needReg (aget (.-values s) (.-ID arg))) ^:go/paren (or (not (.contains live (.-ID arg))) (< delta (.get live (.-ID arg)))))
+                              (.set live (.-ID arg) delta (.-Pos v))
+                              (set! update true))))))
+
+
+
+                    (when update
+                      (aset (.-live s) (.-ID b) (updateLive live (aget (.-live s) (.-ID b)))))
+
+                    ;; Add len(b.Values) to adjust from end-of-block distance
+                    ;; to beginning-of-block distance.
+                    (let [c (.contents live)]
+                      (range [i c]
+                        (set! (.-val (aget c i)) + (conv int32 (len (.-Values b)))))
+
+
+                      ;; Mark control values as live
+                      (range [_ c (.ControlValues b)]
+                        (when (.-needReg (aget (.-values s) (.-ID c)))
+                          (.set live (.-ID c) (conv int32 (len (.-Values b))) (.-Pos b))))
+
+
+
+                      (for [i (- (len (.-Values b)) 1)] (>= i 0) (dec! i)
+                        (let [v (aget (.-Values b) i)]
+                          (.remove live (.-ID v))
+                          (when (== (.-Op v) OpPhi)
+                            (continue))
+
+                          (when (.-call (aget opcodeTable (.-Op v)))
+                            (when (!= numCalls nil)
+                              (inc! (aget numCalls (.-ID b))))
+
+                            (set! rematIDs (subslice rematIDs _ 0))
+                            (let [c (.contents live)]
+                              (range [i c]
+                                (set! (.-val (aget c i)) + unlikelyDistance)
+                                (let [vid (.-key (aget c i))]
+                                  (when (.-rematerializeable (aget (.-values s) vid))
+                                    (set! rematIDs (append rematIDs vid)))))
+
+
+                              ;; We don't spill rematerializeable values, and assuming they
+                              ;; are live across a call would only force shuffle to add some
+                              ;; (dead) constant rematerialization. Remove them.
+                              (range [_ r rematIDs]
+                                (.remove live r))))
+
+
+                          (range [_ a (.-Args v)]
+                            (when (.-needReg (aget (.-values s) (.-ID a)))
+                              (.set live (.-ID a) (conv int32 i) (.-Pos v))))))
+
+
+
+                      ;; This is a loop header, save our live-in so that
+                      ;; we can use it to fill in the loop bodies later
+                      (when (!= loopLiveIn nil)
+                        (let [loop (aget (.-b2l (.-loopnest s)) (.-ID b))]
+                          (when (and (!= loop nil) (== (.-ID (.-header loop)) (.-ID b)))
+                            (aset loopLiveIn loop (updateLive live nil)))))
+
+
+                      ;; For each predecessor of b, expand its list of live-at-end values.
+                      ;; invariant: live contains the values live at the start of b
+                      (range [_ e (.-Preds b)]
+                        (let [p (.-b e)
+                            ^{:line 3075} delta (branchDistance p b)]
+
+                          ;; Start t off with the previously known live values at the end of p.
+                          (.clear t)
+                          (range [_ e (aget (.-live s) (.-ID p))]
+                            (.set t (.-ID e) (.-dist e) (.-pos e)))
+
+                          (let [update false]
+
+                            ;; Add new live values from scanning this block.
+                            (range [_ e (.contents live)]
+                              (let [d (+ (.-val e) delta)]
+                                (when (or (not (.contains t (.-key e))) (< d (.get t (.-key e))))
+                                  (set! update true)
+                                  (.set t (.-key e) d (.-pos e)))))
+
+
+
+                            (when (not update)
+                              (continue))
+
+                            (aset (.-live s) (.-ID p) (updateLive t (aget (.-live s) (.-ID p))))
+                            (set! changed true)))))))
+
+
+
+                ;; Doing a traditional iterative algorithm and have run
+                ;; out of changes
+                (when (not changed)
+                  (break))
+
+
+                ;; Doing a pre-pass and will fill in the liveness information
+                ;; later
+                (when (!= loopLiveIn nil)
+                  (break))
+
+                ;; For loopless code, we have full liveness info after a single
+                ;; iteration
+                (when (== (len (.-loops (.-loopnest s))) 0)
+                  (break))))
+
+
+            (when (> (.-debug (.-pass f)) regDebug)
+              (.debugPrintLive s "after dfs walk" f (.-live s) (.-desired s)))
+
+
+            ;; irreducible CFGs and functions without loops are already
+            ;; done, compute their desired registers and return
+            (when (== loopLiveIn nil)
+              (.computeDesired s)
+              (return))
+
+
+            ;; Walk the loopnest from outer to inner, adding
+            ;; all live-in values from their parent. Instead of
+            ;; a recursive algorithm, iterate in depth order.
+            ;; TODO(dmo): can we permute the loopnest? can we avoid this copy?
+            (let [loops (^{:inst [(slice (* loop)) (* loop)]} slices/Clone (.-loops (.-loopnest s)))]
+              (^{:inst [(slice (* loop)) (* loop)]} slices/SortFunc loops ^{:go/end 3136} (fn ^int [^{:tag (* loop)} a ^{:tag (* loop)} b]
+                  (^{:inst [int16]} cmp/Compare (.-depth a) (.-depth b))))
+
+
+              (let [loopset (.newSparseMapPos f (.NumValues f))]
+                (defer (.retSparseMapPos f loopset))
+                (range [_ loop loops]
+                  (when (== (.-outer loop) nil)
+                    (continue))
+
+                  (let [livein (aget loopLiveIn loop)]
+                    (.clear loopset)
+                    (range [_ l livein]
+                      (.set loopset (.-ID l) (.-dist l) (.-pos l)))
+
+                    (let [update false]
+                      (range [_ l (aget loopLiveIn (.-outer loop))]
+                        (when (not (.contains loopset (.-ID l)))
+                          (.set loopset (.-ID l) (.-dist l) (.-pos l))
+                          (set! update true)))
+
+
+                      (when update
+                        (aset loopLiveIn loop (updateLive loopset livein))))))
+
+
+                ;; unknownDistance is a sentinel value for when we know a variable
+                ;; is live at any given block, but we do not yet know how far until it's next
+                ;; use. The distance will be computed later.
+                (let [^:const ^{:val -1} unknownDistance -1]
+
+                  ;; add live-in values of the loop headers to their children.
+                  ;; This includes the loop headers themselves, since they can have values
+                  ;; that die in the middle of the block and aren't live-out
+                  (range [_ b po]
+                    (let [loop (aget (.-b2l (.-loopnest s)) (.-ID b))]
+                      (when (== loop nil)
+                        (continue))
+
+                      (let [headerLive (aget loopLiveIn loop)]
+                        (.clear loopset)
+                        (range [_ l (aget (.-live s) (.-ID b))]
+                          (.set loopset (.-ID l) (.-dist l) (.-pos l)))
+
+                        (let [update false]
+                          (range [_ l headerLive]
+                            (when (not (.contains loopset (.-ID l)))
+                              (.set loopset (.-ID l) unknownDistance src/NoXPos)
+                              (set! update true)))
+
+
+                          (when update
+                            (aset (.-live s) (.-ID b) (updateLive loopset (aget (.-live s) (.-ID b)))))))))
+
+
+                  (when (> (.-debug (.-pass f)) regDebug)
+                    (.debugPrintLive s "after live loop prop" f (.-live s) (.-desired s)))
+
+                  ;; Filling in liveness from loops leaves some blocks with no distance information
+                  ;; Run over them and fill in the information from their successors.
+                  ;; To stabilize faster, we quit when no block has missing values and we only
+                  ;; look at blocks that still have missing values in subsequent iterations
+                  (let [unfinishedBlocks (.allocBlockSlice (.-Cache f) (len po))]
+                    (defer (.freeBlockSlice (.-Cache f) unfinishedBlocks))
+                    (copy unfinishedBlocks po)
+
+                    (while (> (len unfinishedBlocks) 0)
+                      (let [n 0]
+                        (range [_ b unfinishedBlocks]
+                          (.clear live)
+                          (let [unfinishedValues 0]
+                            (range [_ l (aget (.-live s) (.-ID b))]
+                              (when (== (.-dist l) unknownDistance)
+                                (inc! unfinishedValues))
+
+                              (.set live (.-ID l) (.-dist l) (.-pos l)))
+
+                            (let [update false]
+                              (range [_ e (.-Succs b)]
+                                (let [succ (.-b e)]
+                                  (range [_ l (aget (.-live s) (.-ID succ))]
+                                    (when (or (not (.contains live (.-ID l))) (== (.-dist l) unknownDistance))
+                                      (continue))
+
+                                    (let [dist (+ (conv int32 (len (.-Values succ))) (.-dist l) (branchDistance b succ))]
+                                      (set! dist + (* (aget numCalls (.-ID succ)) unlikelyDistance))
+                                      (let [val (.get live (.-ID l))]
+                                        (switch
+                                          (case [(== val unknownDistance)]
+                                            (dec! unfinishedValues)
+                                            (fallthrough))
+                                          (case [(< dist val)]
+                                            (set! update true)
+                                            (.set live (.-ID l) dist (.-pos l)))))))))
+
+
+
+                              (when update
+                                (aset (.-live s) (.-ID b) (updateLive live (aget (.-live s) (.-ID b)))))
+
+                              (when (> unfinishedValues 0)
+                                (aset unfinishedBlocks n b)
+                                (inc! n)))))
+
+
+                        (set! unfinishedBlocks (subslice unfinishedBlocks _ n))))
+
+
+                    ;; Sort live values in order of their nearest next use.
+                    ;; Useful for promoting values to registers, nearest use first.
+                    (range [_ b (.-Blocks f)]
+                      (^{:inst [(slice liveInfo) liveInfo]} slices/SortFunc (aget (.-live s) (.-ID b)) ^{:go/end 3250} (fn ^int [^liveInfo a ^liveInfo b]
+                          (when (!= (.-dist a) (.-dist b))
+                            (return (^{:inst [int32]} cmp/Compare (.-dist a) (.-dist b))))
+
+                          (^{:inst [ID]} cmp/Compare (.-ID a) (.-ID b))))) ; for deterministic sorting
+
+
+
+                    (.computeDesired s)
+
+                    (when (> (.-debug (.-pass f)) regDebug)
+                      (.debugPrintLive s "final" f (.-live s) (.-desired s)))))))))))))
+
+
+
+
+
+
+^{:go/end 3352} (go/method computeDesired "computeDesired computes the desired register information at the end of each block.\nIt is essentially a liveness analysis on machine registers instead of SSA values\nThe desired register information is stored in s.desired.\n" [^{:tag (* regAllocState)} s]
+
+  ;; TODO: Can we speed this up using the liveness information we have already
+  ;; from computeLive?
+  (let [^desiredState desired (zero desiredState)
+      ^{:line 3268} f (.-f s)
+      ^{:line 3269} po (.postorder f)
+      ^{:line 3270} maxPreds 0]
+    (range [_ b (.-Blocks f)]
+      (set! maxPreds (max maxPreds (len (.-Preds b)))))
+
+    ;; phiPrefs[i] collects desired registers for phi inputs coming from b.Preds[i].
+    (let [phiPrefs (make (slice desiredState) maxPreds)]
+      (while true
+        (let [changed false]
+          (range [_ b po]
+            (.copy desired (addr (aget (.-desired s) (.-ID b))))
+            (range [i (.-Preds b)]
+              (.reset (aget phiPrefs i)))
+
+            (let [^{:tag (* loop)} headerLoop (zero (* loop))] ; loop whose header is b, if any
+              (when [l (aget (.-b2l (.-loopnest s)) (.-ID b))] (and (!= l nil) (== (.-header l) b))
+                (set! headerLoop l))
+
+              ;; Process non-phis, then phis.
+              (let [i (- (len (.-Values b)) 1)]
+                (for [] (>= i 0) (dec! i)
+                  (let [v (aget (.-Values b) i)]
+                    (when (== (.-Op v) OpPhi)
+                      (break))
+
+                    (let [prefs (.remove desired (.-ID v))
+                        ^{:line 3295} regspec (.regspec s v)]
+                      ;; Cancel desired registers if they get clobbered.
+                      (.clobber desired (.-clobbers regspec))
+                      ;; Update desired registers if there are any fixed register inputs.
+                      (range [_ j (.-inputs regspec)]
+                        (when (!= (countRegs (.-regs j)) 1)
+                          (continue))
+
+                        (.clobber desired (.-regs j))
+                        (.add desired (.-ID (aget (.-Args v) (.-idx j))) (.pickReg s (.-regs j))))
+
+                      ;; Set desired register of input 0 if this is a 2-operand instruction.
+                      (when (or (.-resultInArg0 (aget opcodeTable (.-Op v))) (== (.-Op v) OpAMD64ADDQconst) (== (.-Op v) OpAMD64ADDLconst) (== (.-Op v) OpSelect0))
+                        ;; ADDQconst is added here because we want to treat it as resultInArg0 for
+                        ;; the purposes of desired registers, even though it is not an absolute requirement.
+                        ;; This is because we'd rather implement it as ADDQ instead of LEAQ.
+                        ;; Same for ADDLconst
+                        ;; Select0 is added here to propagate the desired register to the tuple-generating instruction.
+                        (when (.-commutative (aget opcodeTable (.-Op v)))
+                          (.addList desired (.-ID (aget (.-Args v) 1)) prefs))
+
+                        (.addList desired (.-ID (aget (.-Args v) 0)) prefs)))))
+
+
+                (for [] (>= i 0) (dec! i)
+                  (let [v (aget (.-Values b) i)
+                      ^{:line 3321} prefs (.remove desired (.-ID v))]
+                    (when (== (aget prefs 0) noRegister)
+                      (continue))
+
+                    ;; Phi desires go to phiPrefs (per-pred), so drop them from desired.avoid.
+                    ;; The merge below re-adds any bits other entries still need.
+                    (range [_ r prefs]
+                      (when (!= r noRegister)
+                        (set! (.-avoid desired) (.minus (.-avoid desired) (regMaskAt r)))))
+
+
+                    ;; Propagate v's desired registers back to its args.
+                    (range [pidx a (.-Args v)]
+                      (when (and (!= headerLoop nil) (== (aget (.-b2l (.-loopnest s)) (.-ID (.-b (aget (.-Preds b) pidx)))) headerLoop))
+                        ;; Skip direct back-edges to avoid pessimizing the loop body to skip a single reg-reg move.
+                        ;; We check only the immediate loop; it is simple and empirically sufficient.
+                        (continue))
+
+                      (.addList (aget phiPrefs pidx) (.-ID a) prefs))))
+
+
+                (range [pidx e (.-Preds b)]
+                  (let [p (.-b e)]
+                    (set! changed (or (.merge (aget (.-desired s) (.-ID p)) (addr desired)) changed))
+                    (set! changed (or (.merge (aget (.-desired s) (.-ID p)) (addr (aget phiPrefs pidx))) changed)))))))
+
+
+          (when (or (not changed) ^:go/paren (and (not (.-hasIrreducible (.-loopnest s))) (== (len (.-loops (.-loopnest s))) 0)))
+            (break)))))))
+
+
+
+
+
+^{:go/end 3364} (go/func updateLive "updateLive updates a given liveInfo slice with the contents of t\n" ^{:tag (slice liveInfo)} [^{:tag (* sparseMapPos)} t ^{:tag (slice liveInfo)} live]
+  (set! live (subslice live _ 0))
+  (when (< (cap live) (.size t))
+    (set! live (make (slice liveInfo) 0 (.size t))))
+
+  (range [_ e (.contents t)]
+    (set! live (append live (lit liveInfo (.-key e) (.-val e) (.-pos e)))))
+
+  ^{:line 3363} live)
+
+
+
+
+
+^{:go/end 3383} (go/func branchDistance "branchDistance calculates the distance between a block and a\nsuccessor in pseudo-instructions. This is used to indicate\nlikeliness\n" ^int32 [^{:tag (* Block)} b ^{:tag (* Block)} s]
+  (when (== (len (.-Succs b)) 2)
+    (when (or (and (== (.-b (aget (.-Succs b) 0)) s) (== (.-Likely b) BranchLikely))
+        (and (== (.-b (aget (.-Succs b) 1)) s) (== (.-Likely b) BranchUnlikely)))
+      (return likelyDistance))
+
+    (when (or (and (== (.-b (aget (.-Succs b) 0)) s) (== (.-Likely b) BranchUnlikely))
+        (and (== (.-b (aget (.-Succs b) 1)) s) (== (.-Likely b) BranchLikely)))
+      (return unlikelyDistance)))
+
+
+  ;; Note: the branch distance must be at least 1 to distinguish the control
+  ;; value use from the first user in a successor block.
+  ^{:line 3382} normalDistance)
+
+
+^{:go/end 3390} (go/method debugPrintLive [^{:tag (* regAllocState)} s ^string stage ^{:tag (* Func)} f ^{:tag (slice (slice liveInfo))} live ^{:tag (slice desiredState)} desired]
+  (fmt/Printf "%s: live values at end of each block: %s\n" stage (.-Name f))
+  (range [_ b (.-Blocks f)]
+    (.debugPrintLiveBlock s b (aget live (.-ID b)) (addr (aget desired (.-ID b))))))
+
+
+
+^{:go/end 3422} (go/method debugPrintLiveBlock [^{:tag (* regAllocState)} s ^{:tag (* Block)} b ^{:tag (slice liveInfo)} live ^{:tag (* desiredState)} desired]
+  (fmt/Printf "  %s:" b)
+  (^{:inst [(slice liveInfo) liveInfo]} slices/SortFunc live ^{:go/end 3396} (fn ^int [^liveInfo a ^liveInfo b]
+      (^{:inst [ID]} cmp/Compare (.-ID a) (.-ID b))))
+
+  (range [_ x live]
+    (fmt/Printf " v%d(%d)" (.-ID x) (.-dist x))
+    (range [_ e (.-entries desired)]
+      (when (!= (.-ID e) (.-ID x))
+        (continue))
+
+      (fmt/Printf "[")
+      (let [first true]
+        (range [_ r (.-regs e)]
+          (when (== r noRegister)
+            (continue))
+
+          (when (not first)
+            (fmt/Printf ","))
+
+          (fmt/Print (addr (aget (.-registers s) r)))
+          (set! first false))
+
+        (fmt/Printf "]"))))
+
+
+  (when [avoid (.-avoid desired)] (not (.empty avoid))
+    (fmt/Printf " avoid=%v" (.RegMaskString s avoid)))
+
+  (fmt/Println))
+
+
+
+(go/type desiredState "A desiredState represents desired register assignments.\n" (struct
+
+
+    ^{:line 3428 :tag (slice desiredStateEntry) :doc "Desired assignments will be small, so we just use a list\nof valueID+registers entries.\n"} entries
+
+
+
+
+    ^{:line 3433 :tag regMask :doc "Registers that other values want to be in.  This value will\ncontain at least the union of the regs fields of entries, but\nmay contain additional entries for values that were once in\nthis data structure but are no longer.\n"} avoid))
+
+(go/type desiredStateEntry (struct
+
+    ^{:line 3437 :tag ID :doc "(pre-regalloc) value\n"} ID
+
+
+
+
+
+    ^{:line 3443 :tag (array 4 register) :doc "Registers it would like to be in, in priority order.\nUnused slots are filled with noRegister.\nFor opcodes that return tuples, we track desired registers only\nfor the first element of the tuple (see desiredSecondReg for\ntracking the desired register for second part of a tuple).\n"} regs))
+
+
+
+^{:go/end 3454} (go/method get "get returns a list of desired registers for value vid.\n" ^{:tag (array 4 register)} [^{:tag (* desiredState)} d ^ID vid]
+  (range [_ e (.-entries d)]
+    (when (== (.-ID e) vid)
+      (return (.-regs e))))
+
+
+  (lit (array 4 register) noRegister noRegister noRegister noRegister))
+
+
+
+^{:go/end 3481} (go/method add "add records that we'd like value vid to be in register r.\n" [^{:tag (* desiredState)} d ^ID vid ^register r]
+  (set! (.-avoid d) (.addReg (.-avoid d) r))
+  (range [i (.-entries d)]
+    (let [e (addr (aget (.-entries d) i))]
+      (when (!= (.-ID e) vid)
+        (continue))
+
+      (when (== (aget (.-regs e) 0) r)
+        ;; Already known and highest priority
+        (return))
+
+      (for [j 1] (< j (len (.-regs e))) (inc! j)
+        (when (== (aget (.-regs e) j) r)
+          ;; Move from lower priority to top priority
+          (copy (subslice (.-regs e) 1) (subslice (.-regs e) _ j))
+          (aset (.-regs e) 0 r)
+          (return)))
+
+
+      (copy (subslice (.-regs e) 1) (subslice (.-regs e)))
+      (aset (.-regs e) 0 r)
+      (return)))
+
+  (set! (.-entries d) (append (.-entries d) (lit desiredStateEntry vid (lit (array 4 register) r noRegister noRegister noRegister)))))
+
+
+^{:go/end 3491} (go/method addList [^{:tag (* desiredState)} d ^ID vid ^{:tag (array 4 register)} regs]
+  ;; regs is in priority order, so iterate in reverse order.
+  (for [i (- (len regs) 1)] (>= i 0) (dec! i)
+    (let [r (aget regs i)]
+      (when (!= r noRegister)
+        (.add d vid r)))))
+
+
+
+
+
+^{:go/end 3516} (go/method clobber "clobber erases any desired registers in the set m.\n" [^{:tag (* desiredState)} d ^regMask m]
+  (for [i 0] (< i (len (.-entries d))) _
+    (let [e (addr (aget (.-entries d) i))
+        ^{:line 3497} j 0]
+      (range [_ r (.-regs e)]
+        (when (and (!= r noRegister) (not (.hasReg m r)))
+          (aset (.-regs e) j r)
+          (inc! j)))
+
+
+      (when (== j 0)
+        ;; No more desired registers for this value.
+        (aset (.-entries d) i (aget (.-entries d) (- (len (.-entries d)) 1)))
+        (set! (.-entries d) (subslice (.-entries d) _ (- (len (.-entries d)) 1)))
+        (continue))
+
+      (for [] (< j (len (.-regs e))) (inc! j)
+        (aset (.-regs e) j noRegister))
+
+      (inc! i)))
+
+  (set! (.-avoid d) (.minus (.-avoid d) m)))
+
+
+
+^{:go/end 3522} (go/method reset "reset prepares d for re-use.\n" [^{:tag (* desiredState)} d]
+  (set! (.-entries d) (subslice (.-entries d) _ 0))
+  (set! (.-avoid d) (lit regMask)))
+
+
+
+^{:go/end 3528} (go/method copy "copy copies a desired state from another desiredState x.\n" [^{:tag (* desiredState)} d ^{:tag (* desiredState)} x]
+  (set! (.-entries d) (append (subslice (.-entries d) _ 0) (spread (.-entries x))))
+  (set! (.-avoid d) (.-avoid x)))
+
+
+
+^{:go/end 3541} (go/method remove "remove removes the desired registers for vid and returns them.\n" ^{:tag (array 4 register)} [^{:tag (* desiredState)} d ^ID vid]
+  (range [i (.-entries d)]
+    (when (== (.-ID (aget (.-entries d) i)) vid)
+      (let [regs (.-regs (aget (.-entries d) i))]
+        (aset (.-entries d) i (aget (.-entries d) (- (len (.-entries d)) 1)))
+        (set! (.-entries d) (subslice (.-entries d) _ (- (len (.-entries d)) 1)))
+        (return regs))))
+
+
+  (lit (array 4 register) noRegister noRegister noRegister noRegister))
+
+
+
+
+^{:go/end 3554} (go/method merge "merge merges another desired state x into d. Returns whether the set has\nchanged\n" ^bool [^{:tag (* desiredState)} d ^{:tag (* desiredState)} x]
+  (let [oldAvoid (.-avoid d)]
+    (set! (.-avoid d) (.union (.-avoid d) (.-avoid x)))
+    ;; There should only be a few desired registers, so
+    ;; linear insert is ok.
+    (range [_ e (.-entries x)]
+      (.addList d (.-ID e) (.-regs e)))
+
+    (!= oldAvoid (.-avoid d))))
+
+
+
+^{:go/end 3611} (go/method computeUnavoidableCalls "computeUnavoidableCalls computes the containsUnavoidableCall fields in the loop nest.\n" [^{:tag (* loopnest)} loopnest]
+  (let [f (.-f loopnest)
+
+      ^{:line 3560} hasCall (.allocBoolSlice (.-Cache f) (.NumBlocks f))]
+    (defer (.freeBoolSlice (.-Cache f) hasCall))
+    (range [_ b (.-Blocks f)]
+      (when (.containsCall b)
+        (aset hasCall (.-ID b) true)))
+
+
+    (let [found (.allocSparseSet (.-Cache f) (.NumBlocks f))]
+      (defer (.freeSparseSet (.-Cache f) found))
+      ;; Run dfs to find path through the loop that avoids all calls.
+      ;; Such path either escapes the loop or returns back to the header.
+      ;; It isn't enough to have exit not dominated by any call, for example:
+      ;; ... some loop
+      ;; call1    call2
+      ;;   \       /
+      ;;     block
+      ;; ...
+      ;; block is not dominated by any single call, but we don't have call-free path to it.
+      (label :loopLoop
+        (range [_ l (.-loops loopnest)]
+          (.clear found)
+          (let [tovisit (make (slice (* Block)) 0 8)]
+            (set! tovisit (append tovisit (.-header l)))
+            (while (> (len tovisit) 0)
+              (let [cur (aget tovisit (- (len tovisit) 1))]
+                (set! tovisit (subslice tovisit _ (- (len tovisit) 1)))
+                (when (aget hasCall (.-ID cur))
+                  (continue))
+
+                (range [_ s (.-Succs cur)]
+                  (let [nb (.Block s)]
+                    (when (== nb (.-header l))
+                      ;; Found a call-free path around the loop.
+                      (continue :loopLoop))
+
+                    (when (.contains found (.-ID nb))
+                      ;; Already found via another path.
+                      (continue))
+
+                    (let [nl (aget (.-b2l loopnest) (.-ID nb))]
+                      (when (or (== nl nil) ^:go/paren (and (<= (.-depth nl) (.-depth l)) (!= nl l)))
+                        ;; Left the loop.
+                        (continue))
+
+                      (set! tovisit (append tovisit nb))
+                      (.add found (.-ID nb)))))))
+
+
+            ;; No call-free path was found.
+            (set! (.-containsUnavoidableCall l) true)))))))
+
+
+
+^{:go/breaks [[5 3622]] :go/end 3623} (go/method containsCall ^bool [^{:tag (* Block)} b]
+  (when (== (.-Kind b) BlockDefer)
+    (return true))
+
+  (range [_ v (.-Values b)]
+    (when (.-call (aget opcodeTable (.-Op v)))
+      (return true)))
+
+
+  false)

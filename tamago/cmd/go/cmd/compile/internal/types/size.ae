@@ -1,0 +1,726 @@
+;; Copyright 2009 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.cmd.compile.internal.types) (go/file "size.go" :imports [
+
+
+    ^{:line 8} [math "math"]
+    ^{:line 9} [slices "slices"]
+
+    ^{:line 11} [base "cmd/compile/internal/base"]
+    ^{:line 12} [src "cmd/internal/src"]
+    ^{:line 13} [buildcfg "internal/buildcfg"]
+    ^{:line 14} [errors "internal/types/errors"]])
+
+
+(go/var ^int PtrSize)
+
+(go/var ^int RegSize)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+(go/var "Slices in the runtime are represented by three components:\n\n\ttype slice struct {\n\t\tptr unsafe.Pointer\n\t\tlen int\n\t\tcap int\n\t}\n\nStrings in the runtime are represented by two components:\n\n\ttype string struct {\n\t\tptr unsafe.Pointer\n\t\tlen int\n\t}\n\nThese variables are the offsets of fields and sizes of these structs.\n"
+  ^{:line 38} [^int64 SlicePtrOffset]
+  ^{:line 39} [^int64 SliceLenOffset]
+  ^{:line 40} [^int64 SliceCapOffset]
+
+  ^{:line 42} [^int64 SliceSize]
+  ^{:line 43} [^int64 StringSize])
+
+
+(go/var ^bool SkipSizeForTracing)
+
+
+
+^{:go/end 56} (go/func typePos "typePos returns the position associated with t.\nThis is where t was declared or where it appeared as a type expression.\n" ^src/XPos [^{:tag (* Type)} t]
+  (when [pos (.Pos t)] (.IsKnown pos)
+    (return pos))
+
+  (base/Fatalf "bad type: %v" t)
+  (panic "unreachable"))
+
+
+
+(go/var ^{:tag int64 :doc "MaxWidth is the maximum size of a value on the target architecture.\n"} MaxWidth)
+
+
+
+(go/var ^{:tag bool :doc "CalcSizeDisabled indicates whether it is safe\nto calculate Types' widths and alignments. See CalcSize.\n"} CalcSizeDisabled)
+
+
+
+(go/var ^{:tag int :doc "machine size and rounding alignment is dictated around\nthe size of a pointer, set in gc.Main (see ../gc/main.go).\n"} defercalc)
+
+
+^{:go/end 75} (go/func RoundUp "RoundUp rounds o to a multiple of r, r is a power of 2.\n" ^int64 [^int64 o ^int64 r]
+  (when (or (< r 1) (> r 8) (!= (bit-and r (- r 1)) 0))
+    (base/Fatalf "Round %d" r))
+
+  (bit-and-not (- (+ o r) 1) (- r 1)))
+
+
+
+
+^{:go/end 160} (go/func expandiface "expandiface computes the method set for interface type t by\nexpanding embedded interfaces.\n" [^{:tag (* Type)} t]
+  (let [seen (make (map (* Sym) (* Field)))
+      ^{:line 81 :tag (slice (* Field))} methods (zero (slice (* Field)))
+
+      ^{:line 83} addMethod ^{:go/end 93} (fn [^{:tag (* Field)} m ^bool explicit]
+        (switch [prev (aget seen (.-Sym m))]
+          (case [(== prev nil)]
+            (aset seen (.-Sym m) m))
+          (case [(and (not explicit) (Identical (.-Type m) (.-Type prev)))]
+            (return))
+          (default
+            (base/ErrorfAt (.-Pos m) errors/DuplicateDecl "duplicate method %s" (.-Name (.-Sym m)))))
+
+        (set! methods (append methods m)))]
+
+
+    (do
+      (let [methods (.Methods t)]
+        (^{:inst [(slice (* Field)) (* Field)]} slices/SortStableFunc methods ^{:go/end 112} (fn ^int [^{:tag (* Field)} a ^{:tag (* Field)} b]
+            ;; Sort embedded types by type name (if any).
+            (when (and (== (.-Sym a) nil) (== (.-Sym b) nil))
+              (return (CompareSyms (.Sym (.-Type a)) (.Sym (.-Type b)))))
+
+
+            ;; Sort methods before embedded types.
+            (cond (== (.-Sym a) nil)
+              (return -1)
+              (== (.-Sym b) nil)
+              (return (+ 1)))
+
+
+            ;; Sort methods by symbol name.
+            (CompareSyms (.-Sym a) (.-Sym b))))))
+
+
+
+    (range [_ m (.Methods t)]
+      (when (== (.-Sym m) nil)
+        (continue))
+
+
+      (CheckSize (.-Type m))
+      (addMethod m true))
+
+
+    (range [_ m (.Methods t)]
+      (when (or (!= (.-Sym m) nil) (== (.-Type m) nil))
+        (continue))
+
+
+      ;; In 1.18, embedded types can be anything. In Go 1.17, we disallow
+      ;; embedding anything other than interfaces. This requirement was caught
+      ;; by types2 already, so allow non-interface here.
+      (when (not (.IsInterface (.-Type m)))
+        (continue))
+
+
+      ;; Embedded interface: duplicate all methods
+      ;; and add to t's method set.
+      (range [_ t1 (.AllMethods (.-Type m))]
+        (let [f (NewField (.-Pos m) (.-Sym t1) (.-Type t1))]
+          (addMethod f false)
+
+          ;; Clear position after typechecking, for consistency with types2.
+          (set! (.-Pos f) src/NoXPos)))
+
+
+      ;; Clear position after typechecking, for consistency with types2.
+      (set! (.-Pos m) src/NoXPos))
+
+
+    (^{:inst [(slice (* Field)) (* Field)]} slices/SortFunc methods CompareFields)
+
+    (when (>= (conv int64 (len methods)) (/ MaxWidth (conv int64 PtrSize)))
+      (base/ErrorfAt (typePos t) 0 "interface too large"))
+
+    (range [i m methods]
+      (set! (.-Offset m) (* (conv int64 i) (conv int64 PtrSize))))
+
+
+    (.SetAllMethods t methods)))
+
+
+
+
+
+^{:go/end 197} (go/func calcStructOffset "calcStructOffset computes the offsets of a sequence of fields,\nstarting at the given offset. It returns the resulting offset and\nmaximum field alignment.\n" ^int64 [^{:tag (* Type)} t ^{:tag (slice (* Field))} fields ^int64 offset]
+  (range [_ f fields]
+    (CalcSize (.-Type f))
+    (set! offset (RoundUp offset (conv int64 (.-align (.-Type f)))))
+
+    (when (.IsStruct t) ; param offsets depend on ABI
+      (set! (.-Offset f) offset)
+
+      ;; If type T contains a field F marked as not-in-heap,
+      ;; then T must also be a not-in-heap type. Otherwise,
+      ;; you could heap allocate T and then get a pointer F,
+      ;; which would be a heap pointer to a not-in-heap type.
+      (when (.NotInHeap (.-Type f))
+        (.SetNotInHeap t true)))
+
+
+
+    (set! offset + (.-width (.-Type f)))
+
+    (let [maxwidth MaxWidth]
+      ;; On 32-bit systems, reflect tables impose an additional constraint
+      ;; that each field start offset must fit in 31 bits.
+      (when (< maxwidth (<< 1 32))
+        (set! maxwidth (- (<< 1 31) 1)))
+
+      (when (>= offset maxwidth)
+        (base/ErrorfAt (typePos t) 0 "type %L too large" t)
+        (set! offset 8)))) ; small but nonzero
+
+
+
+  ^{:line 196} offset)
+
+
+^{:go/end 204} (go/func isAtomicStdPkg ^bool [^{:tag (* Pkg)} p]
+  (when (== (.-Prefix p) "\"\"")
+    (panic "bad package prefix"))
+
+  (or (== (.-Prefix p) "sync/atomic") (== (.-Prefix p) "internal/runtime/atomic")))
+
+
+
+
+
+
+
+^{:go/end 460} (go/func CalcSize "CalcSize calculates and stores the size, alignment, eq/hash algorithm,\nand ptrBytes for t.\nIf CalcSizeDisabled is set, and the size/alignment\nhave not already been calculated, it calls Fatal.\nThis is used to prevent data races in the back end.\n" [^{:tag (* Type)} t]
+  ;; Calling CalcSize when typecheck tracing enabled is not safe.
+  ;; See issue #33658.
+  (when (and base/EnableTrace SkipSizeForTracing)
+    (return))
+
+  (when (== PtrSize 0)
+    ;; Assume this is a test.
+    (return))
+
+
+  (when (== t nil)
+    (return))
+
+
+  (when (== (.-width t) -2)
+    (set! (.-width t) 0)
+    (set! (.-align t) 1)
+    (base/Fatalf "invalid recursive type %v" t)
+    (return))
+
+
+  (when (.widthCalculated t)
+    (return))
+
+
+  (when CalcSizeDisabled
+    (base/Fatalf "width not calculated: %v" t))
+
+
+  ;; defer CheckSize calls until after we're done
+  (DeferCheckSize)
+
+  (let [lno base/Pos]
+    (when [pos (.Pos t)] (.IsKnown pos)
+      (set! base/Pos pos))
+
+
+    (set! (.-width t) -2)
+    (set! (.-align t) 0) ; 0 means use t.Width, below
+    (set! (.-alg t) AMEM) ; default
+    ;; default t.ptrBytes is 0.
+    (when (.Noalg t)
+      (.setAlg t ANOALG))
+
+
+    (let [et (.Kind t)]
+      (switch et
+        (case [TFUNC TCHAN TMAP TSTRING]
+          (break))
+
+        ;; SimType == 0 during bootstrap
+        (default
+          (when (!= (aget SimType (.Kind t)) 0)
+            (set! et (aget SimType (.Kind t))))))
+
+
+
+      (let [^int64 w (zero int64)]
+        (switch et
+          (default
+            (base/Fatalf "CalcSize: unknown type: %v" t))
+
+          ;; compiler-specific stuff
+          (case [TINT8 TUINT8 TBOOL]
+            ;; bool is int8
+            (set! w 1)
+            (set! (.-intRegs t) 1))
+
+          (case [TINT16 TUINT16]
+            (set! w 2)
+            (set! (.-intRegs t) 1))
+
+          (case [TINT32 TUINT32]
+            (set! w 4)
+            (set! (.-intRegs t) 1))
+
+          (case [TINT64 TUINT64]
+            (set! w 8)
+            (set! (.-align t) (conv uint8 RegSize))
+            (set! (.-intRegs t) (conv uint8 (/ 8 RegSize))))
+
+          (case [TFLOAT32]
+            (set! w 4)
+            (set! (.-floatRegs t) 1)
+            (.setAlg t AFLOAT32))
+
+          (case [TFLOAT64]
+            (set! w 8)
+            (set! (.-align t) (conv uint8 RegSize))
+            (set! (.-floatRegs t) 1)
+            (.setAlg t AFLOAT64))
+
+          (case [TCOMPLEX64]
+            (set! w 8)
+            (set! (.-align t) 4)
+            (set! (.-floatRegs t) 2)
+            (.setAlg t ACPLX64))
+
+          (case [TCOMPLEX128]
+            (set! w 16)
+            (set! (.-align t) (conv uint8 RegSize))
+            (set! (.-floatRegs t) 2)
+            (.setAlg t ACPLX128))
+
+          (case [TPTR]
+            (set! w (conv int64 PtrSize))
+            (set! (.-intRegs t) 1)
+            (CheckSize (.Elem t))
+            (set! (.-ptrBytes t) (conv int64 PtrSize))) ; See PtrDataSize
+
+          (case [TUNSAFEPTR]
+            (set! w (conv int64 PtrSize))
+            (set! (.-intRegs t) 1)
+            (set! (.-ptrBytes t) (conv int64 PtrSize)))
+
+          (case [TINTER] ; implemented as 2 pointers
+            (set! w (* 2 (conv int64 PtrSize)))
+            (set! (.-align t) (conv uint8 PtrSize))
+            (set! (.-intRegs t) 2)
+            (expandiface t)
+            (if (== (len (.Slice (.-allMethods t))) 0)
+              (.setAlg t ANILINTER)
+
+              (.setAlg t AINTER))
+
+            (set! (.-ptrBytes t) (conv int64 (* 2 PtrSize))))
+
+          (case [TCHAN] ; implemented as pointer
+            (set! w (conv int64 PtrSize))
+            (set! (.-intRegs t) 1)
+            (set! (.-ptrBytes t) (conv int64 PtrSize))
+
+            (CheckSize (.Elem t))
+
+            ;; Make fake type to trigger channel element size check after
+            ;; any top-level recursive type has been completed.
+            (let [t1 (NewChanArgs t)]
+              (CheckSize t1)))
+
+          (case [TCHANARGS]
+            (let [t1 (.ChanArgs t)]
+              (CalcSize t1) ; just in case
+              ;; Make sure size of t1.Elem() is calculated at this point. We can
+              ;; use CalcSize() here rather than CheckSize(), because the top-level
+              ;; (possibly recursive) type will have been calculated before the fake
+              ;; chanargs is handled.
+              (CalcSize (.Elem t1))
+              (when (>= (.-width (.Elem t1)) (<< 1 16))
+                (base/Errorf "channel element type too large (>64kB)"))
+
+              (set! w 1))) ; anything will do
+
+          (case [TMAP] ; implemented as pointer
+            (set! w (conv int64 PtrSize))
+            (set! (.-intRegs t) 1)
+            (CheckSize (.Elem t))
+            (CheckSize (.Key t))
+            (when (>= (.-width (.Elem t)) (<< 1 31))
+              (base/Errorf "map element type too large"))
+
+            (when (>= (.-width (.Key t)) (<< 1 31))
+              (base/Errorf "map key type too large"))
+
+            (.setAlg t ANOEQ)
+            (set! (.-ptrBytes t) (conv int64 PtrSize)))
+
+          (case [TFORW] ; should have been filled in
+            (base/Fatalf "invalid recursive type %v" t))
+
+          (case [TANY] ; not a real type; should be replaced before use.
+            (base/Fatalf "CalcSize any"))
+
+          (case [TSTRING]
+            (when (== StringSize 0)
+              (base/Fatalf "early CalcSize string"))
+
+            (set! w StringSize)
+            (set! (.-align t) (conv uint8 PtrSize))
+            (set! (.-intRegs t) 2)
+            (.setAlg t ASTRING)
+            (set! (.-ptrBytes t) (conv int64 PtrSize)))
+
+          (case [TARRAY]
+            (when (== (.Elem t) nil)
+              (break))
+
+            (CalcArraySize t)
+            (set! w (.-width t)))
+
+          (case [TSLICE]
+            (when (== (.Elem t) nil)
+              (break))
+
+            (set! w SliceSize)
+            (CheckSize (.Elem t))
+            (set! (.-align t) (conv uint8 PtrSize))
+            (set! (.-intRegs t) 3)
+            (.setAlg t ANOEQ)
+            (when (not (.NotInHeap (.Elem t)))
+              (set! (.-ptrBytes t) (conv int64 PtrSize))))
+
+
+          (case [TSTRUCT]
+            (when (.IsFuncArgStruct t)
+              (base/Fatalf "CalcSize fn struct %v" t))
+
+            (CalcStructSize t)
+            (set! w (.-width t)))
+
+          ;; make fake type to check later to
+          ;; trigger function argument computation.
+          (case [TFUNC]
+            (let [t1 (NewFuncArgs t)]
+              (CheckSize t1)
+              (set! w (conv int64 PtrSize)) ; width of func type is pointer
+              (set! (.-intRegs t) 1)
+              (.setAlg t ANOEQ)
+              (set! (.-ptrBytes t) (conv int64 PtrSize))))
+
+          ;; function is 3 cated structures;
+          ;; compute their widths as side-effect.
+          (case [TFUNCARGS]
+            (let [t1 (.FuncArgs t)]
+              ;; TODO(mdempsky): Should package abi be responsible for computing argwid?
+              (set! w (calcStructOffset t1 (.Recvs t1) 0))
+              (set! w (calcStructOffset t1 (.Params t1) w))
+              (set! w (RoundUp w (conv int64 RegSize)))
+              (set! w (calcStructOffset t1 (.Results t1) w))
+              (set! w (RoundUp w (conv int64 RegSize)))
+              (set! (.-Argwid (assert (* Func) (.-extra t1))) w)
+              (set! (.-align t) 1))))
+
+
+        (when (and (== PtrSize 4) (!= w (conv int64 (conv int32 w))))
+          (base/Errorf "type %v too large" t))
+
+
+        (set! (.-width t) w)
+        (when (== (.-align t) 0)
+          (when (or (== w 0) (> w 8) (!= (bit-and w (- w 1)) 0))
+            (base/Fatalf "invalid alignment for %v" t))
+
+          (set! (.-align t) (conv uint8 w)))
+
+
+        (set! base/Pos lno)
+
+        (ResumeCheckSize)))))
+
+
+
+
+
+
+
+
+^{:go/end 480} (go/func simdify "simdify marks as type as \"SIMD\", either as a tag field,\nor having the SIMD attribute.  The tag field is a marker\ntype used to identify a struct that is not really a struct.\nA SIMD type is allocated to a vector register (on amd64,\nxmm, ymm, or zmm).  The fields of a SIMD type are ignored\nby the compiler except for the space that they reserve.\n" [^{:tag (* Type)} st ^bool isTag]
+  (set! (.-align st) 8)
+  (set! (.-alg st) ANOALG) ; not comparable with ==
+  (set! (.-intRegs st) 0)
+  (set! (.-isSIMD st) true)
+  (if isTag (do
+      (set! (.-width st) 0)
+      (set! (.-isSIMDTag st) true)
+      (set! (.-floatRegs st) 0))
+
+    (set! (.-floatRegs st) 1)))
+
+
+
+
+
+
+^{:go/end 591} (go/func CalcStructSize "CalcStructSize calculates the size of t,\nfilling in t.width, t.align, t.intRegs, and t.floatRegs,\neven if size calculation is otherwise disabled.\n" [^{:tag (* Type)} t]
+  (let [^uint8 maxAlign 1]
+
+    ;; Recognize special types. This logic is duplicated in go/types and
+    ;; cmd/compile/internal/types2.
+    (when [sym (.Sym t)] (!= sym nil)
+      (switch
+        (case [(and (== (.-Name sym) "align64") (isAtomicStdPkg (.-Pkg sym)))]
+          (set! maxAlign 8))
+
+        (case [(and ^{:go/via [Flags]} (.-SIMD buildcfg/Experiment) ^:go/paren (== (.-Path (.-Pkg sym)) "simd/archsimd") (>= (len (.Fields t)) 1))]
+          ;; This gates the experiment -- without it, no user-visible types can be "simd".
+          ;; The SSA-visible SIMD types remain.
+          (switch (.-Name sym)
+            (case ["v128"]
+              (simdify t true)
+              (return))
+            (case ["v256"]
+              (simdify t true)
+              (return))
+            (case ["v512"]
+              (simdify t true)
+              (return))))))
+
+
+
+
+    (let [fields (.Fields t)
+
+        ^{:line 514} size (calcStructOffset t fields 0)]
+
+      ;; For non-zero-sized structs which end in a zero-sized field, we
+      ;; add an extra byte of padding to the type. This padding ensures
+      ;; that taking the address of a zero-sized field can't manufacture a
+      ;; pointer to the next object in the heap. See issue 9401.
+      (when (and (> size 0) (== (.-width (.-Type (aget fields (- (len fields) 1)))) 0))
+        (inc! size))
+
+
+      (let [(values ^uint64 intRegs ^uint64 floatRegs) (zero uint64)]
+        (range [_ field fields]
+          (let [typ (.-Type field)]
+
+            ;; The alignment of a struct type is the maximum alignment of its
+            ;; field types.
+            (when [align (.-align typ)] (> align maxAlign)
+              (set! maxAlign align))
+
+
+            ;; Each field needs its own registers.
+            ;; We sum in uint64 to avoid possible overflows.
+            (set! intRegs + (conv uint64 (.-intRegs typ)))
+            (set! floatRegs + (conv uint64 (.-floatRegs typ)))))
+
+
+        ;; Final size includes trailing padding.
+        (set! size (RoundUp size (conv int64 maxAlign)))
+
+        (when (or (> intRegs math/MaxUint8) (> floatRegs math/MaxUint8))
+          (set! intRegs math/MaxUint8)
+          (set! floatRegs math/MaxUint8))
+
+
+        (set! (.-width t) size)
+        (set! (.-align t) maxAlign)
+        (set! (.-intRegs t) (conv uint8 intRegs))
+        (set! (.-floatRegs t) (conv uint8 floatRegs))
+
+        ;; Compute eq/hash algorithm type.
+        (set! (.-alg t) AMEM) ; default
+        (when (.Noalg t)
+          (.setAlg t ANOALG))
+
+        (if (and (== (len fields) 1) (not (.IsBlank (.-Sym (aget fields 0)))))
+          ;; One-field struct is same as that one field alone.
+          (.setAlg t (.-alg (.-Type (aget fields 0))))
+
+          (range [i f fields]
+            (let [a (.-alg (.-Type f))]
+              (switch a
+                (case [ANOEQ ANOALG])
+                (case [AMEM]
+                  ;; Blank fields and padded fields need a special compare.
+                  (when (or (.IsBlank (.-Sym f)) (IsPaddedField t i))
+                    (set! a ASPECIAL)))
+
+                (default
+                  ;; Fields with non-memory equality need a special compare.
+                  (set! a ASPECIAL)))
+
+              (.setAlg t a))))
+
+
+        ;; Compute ptrBytes.
+        (for [i (- (len fields) 1)] (>= i 0) (dec! i)
+          (let [f (aget fields i)]
+            (when [size (PtrDataSize (.-Type f))] (> size 0)
+              (set! (.-ptrBytes t) (+ (.-Offset f) size))
+              (break))))
+
+
+
+        (when (and (>= (len (.Fields t)) 1) (.-isSIMDTag (.-Type (aget (.Fields t) 0))))
+          ;; this catches `type Foo simd.Whatever` -- Foo is also SIMD.
+          (simdify t false))))))
+
+
+
+
+
+
+^{:go/end 648} (go/func CalcArraySize "CalcArraySize calculates the size of t,\nfilling in t.width, t.align, t.alg, and t.ptrBytes,\neven if size calculation is otherwise disabled.\n" [^{:tag (* Type)} t]
+  (let [elem (.Elem t)
+      ^{:line 598} n (.NumElem t)]
+    (CalcSize elem)
+    (.SetNotInHeap t (.NotInHeap elem))
+    (when (!= (.-width elem) 0)
+      (let [cap (/ (- (conv uint64 MaxWidth) 1) (conv uint64 (.-width elem)))]
+        (when (> (conv uint64 n) cap)
+          (base/Errorf "type %L larger than address space" t))))
+
+
+
+    (set! (.-width t) (* (.-width elem) n))
+    (set! (.-align t) (.-align elem))
+    ;; ABIInternal only allows "trivial" arrays (i.e., length 0 or 1)
+    ;; to be passed by register.
+    (switch n
+      (case [0]
+        (set! (.-intRegs t) 0)
+        (set! (.-floatRegs t) 0))
+      (case [1]
+        (set! (.-intRegs t) (.-intRegs elem))
+        (set! (.-floatRegs t) (.-floatRegs elem)))
+      (default
+        (set! (.-intRegs t) math/MaxUint8)
+        (set! (.-floatRegs t) math/MaxUint8)))
+
+    (set! (.-alg t) AMEM) ; default
+    (when (.Noalg t)
+      (.setAlg t ANOALG))
+
+    (switch [a (.-alg elem)] a
+      (case [AMEM ANOEQ ANOALG]
+        (.setAlg t a))
+      (default
+        (switch n
+          (case [0]
+            ;; We checked above that the element type is comparable.
+            (.setAlg t AMEM))
+          (case [1]
+            ;; Single-element array is same as its lone element.
+            (.setAlg t a))
+          (default
+            (.setAlg t ASPECIAL)))))
+
+
+    (when (> n 0)
+      (let [x (PtrDataSize elem)]
+        (when (> x 0)
+          (set! (.-ptrBytes t) (+ (* (.-width elem) (- n 1)) x)))))))
+
+
+
+
+^{:go/end 652} (go/method widthCalculated ^bool [^{:tag (* Type)} t]
+  (> (.-align t) 0))
+
+
+;; when a type's width should be known, we call CheckSize
+;; to compute it.  during a declaration like
+;;
+;;	type T *struct { next T }
+;;
+;; it is necessary to defer the calculation of the struct width
+;; until after T has been initialized to be a pointer to that struct.
+;; similarly, during import processing structs may be used
+;; before their definition.  in those situations, calling
+;; DeferCheckSize() stops width calculations until
+;; ResumeCheckSize() is called, at which point all the
+;; CalcSizes that were deferred are executed.
+;; CalcSize should only be called when the type's size
+;; is needed immediately.  CheckSize makes sure the
+;; size is evaluated eventually.
+
+(go/var ^{:tag (slice (* Type))} deferredTypeStack)
+
+^{:go/end 693} (go/func CheckSize [^{:tag (* Type)} t]
+  (when (== t nil)
+    (return))
+
+
+  ;; function arg structs should not be checked
+  ;; outside of the enclosing function.
+  (when (.IsFuncArgStruct t)
+    (base/Fatalf "CheckSize %v" t))
+
+
+  (when (== defercalc 0)
+    (CalcSize t)
+    (return))
+
+
+  ;; if type has not yet been pushed on deferredTypeStack yet, do it now
+  (when (not (.Deferwidth t))
+    (.SetDeferwidth t true)
+    (set! deferredTypeStack (append deferredTypeStack t))))
+
+
+
+^{:go/end 697} (go/func DeferCheckSize []
+  (inc! defercalc))
+
+
+^{:go/end 710} (go/func ResumeCheckSize []
+  (when (== defercalc 1)
+    (while (> (len deferredTypeStack) 0)
+      (let [t (aget deferredTypeStack (- (len deferredTypeStack) 1))]
+        (set! deferredTypeStack (subslice deferredTypeStack _ (- (len deferredTypeStack) 1)))
+        (.SetDeferwidth t false)
+        (CalcSize t))))
+
+
+
+  (dec! defercalc))
+
+
+
+
+
+
+
+^{:go/end 727} (go/func PtrDataSize "PtrDataSize returns the length in bytes of the prefix of t\ncontaining pointer data. Anything after this offset is scalar data.\n\nPtrDataSize is only defined for actual Go types. It's an error to\nuse it on compiler-internal types (e.g., TSSA, TRESULTS).\n" ^int64 [^{:tag (* Type)} t]
+  (CalcSize t)
+  (let [x (.-ptrBytes t)]
+    (when (and (== (.Kind t) TPTR) (.NotInHeap (.Elem t)))
+      ;; Note: this is done here instead of when we're setting
+      ;; the ptrBytes field, because at that time (in NewPtr, usually)
+      ;; the NotInHeap bit of the element type might not be set yet.
+      (set! x 0))
+
+    ^{:line 726} x))

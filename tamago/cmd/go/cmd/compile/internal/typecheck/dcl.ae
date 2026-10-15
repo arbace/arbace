@@ -1,0 +1,129 @@
+;; Copyright 2009 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.cmd.compile.internal.typecheck) (go/file "dcl.go" :imports [
+
+
+    ^{:line 8} [fmt "fmt"]
+    ^{:line 9} [sync "sync"]
+
+    ^{:line 11} [base "cmd/compile/internal/base"]
+    ^{:line 12} [ir "cmd/compile/internal/ir"]
+    ^{:line 13} [types "cmd/compile/internal/types"]
+    ^{:line 14} [src "cmd/internal/src"]])
+
+
+(go/var ^{:tag (slice (* ir/Func))} funcStack) ; stack of previous values of ir.CurFunc
+
+
+
+
+
+
+^{:go/end 31} (go/func DeclFunc "DeclFunc declares the parameters for fn and adds it to\nTarget.Funcs.\n\nBefore returning, it sets CurFunc to fn. When the caller is done\nconstructing fn, it must call FinishFuncBody to restore CurFunc.\n" [^{:tag (* ir/Func)} fn]
+  (.DeclareParams fn true)
+  (set! (.-Defn (.-Nname fn)) fn)
+  (set! (.-Funcs Target) (append (.-Funcs Target) fn))
+
+  (set! funcStack (append funcStack ir/CurFunc))
+  (set! ir/CurFunc fn))
+
+
+
+
+^{:go/end 37} (go/func FinishFuncBody "FinishFuncBody restores ir.CurFunc to its state before the last\ncall to DeclFunc.\n" []
+  (set! (values funcStack ir/CurFunc) (values (subslice funcStack _ (- (len funcStack) 1)) (aget funcStack (- (len funcStack) 1)))))
+
+
+^{:go/end 43} (go/func CheckFuncStack []
+  (when (!= (len funcStack) 0)
+    (base/Fatalf "funcStack is non-empty: %v" (len funcStack))))
+
+
+
+
+
+
+
+
+
+^{:go/end 73} (go/func TempAt "TempAt makes a new Node off the books.\n\nN.B., the new Node is a function-local variable defaulting to function scope.\nIt helps in some cases if an ODCL is also created and placed in a narrower scope,\nsuch as if the variable can be used in a loop body and potentially escape.\nTODO: Consider some mechanism to more conveniently create a block scoped temporary.\n" ^{:tag (* ir/Name)} [^src/XPos pos ^{:tag (* ir/Func)} curfn ^{:tag (* types/Type)} typ]
+  (when (== curfn nil)
+    (base/FatalfAt pos "no curfn for TempAt"))
+
+  (when (== typ nil)
+    (base/FatalfAt pos "TempAt called with nil type"))
+
+  (when (and (== (.Kind typ) types/TFUNC) (!= (.Recv typ) nil))
+    (base/FatalfAt pos "misuse of method type: %v" typ))
+
+  (types/CalcSize typ)
+
+  (let [sym (addr ^{:go/breaks [2 4]} (lit types/Sym
+          :Name (autotmpname (len (.-Dcl curfn)))
+          :Pkg types/LocalPkg))
+
+      ^{:line 67} name (.NewLocal curfn pos sym typ)]
+    ^{:go/via [miniExpr miniNode]} (.SetEsc name ir/EscNever)
+    (.SetUsed name true)
+    (.SetAutoTemp name true)
+
+    ^{:line 72} name))
+
+
+(go/var
+  ^{:line 76} [^sync/Mutex autotmpnamesmu]
+  ^{:line 77} [^{:tag (slice string)} autotmpnames])
+
+
+
+^{:go/end 101} (go/func autotmpname "autotmpname returns the name for an autotmp variable numbered n.\n" ^string [^int n]
+  (.Lock autotmpnamesmu)
+  (defer (.Unlock autotmpnamesmu))
+
+  ;; Grow autotmpnames, if needed.
+  (when (>= n (len autotmpnames))
+    (set! autotmpnames (append autotmpnames (spread (make (slice string) (- (+ n 1) (len autotmpnames))))))
+    (set! autotmpnames (subslice autotmpnames _ (cap autotmpnames))))
+
+
+  (let [s (aget autotmpnames n)]
+    (when (== s "")
+      ;; Give each tmp a different name so that they can be registerized.
+      ;; Add a preceding . to avoid clashing with legal names.
+      (let [prefix ".autotmp_%d"]
+
+        (set! s (fmt/Sprintf prefix n))
+        (aset autotmpnames n s)))
+
+    ^{:line 100} s))
+
+
+
+
+^{:go/end 130} (go/func NewMethodType "f is method type, with receiver.\nreturn function type, receiver as first argument (or not).\n" ^{:tag (* types/Type)} [^{:tag (* types/Type)} sig ^{:tag (* types/Type)} recv]
+  (let [nrecvs 0]
+    (when (!= recv nil)
+      (inc! nrecvs))
+
+
+    ;; TODO(mdempsky): Move this function to types.
+    ;; TODO(mdempsky): Preserve positions, names, and package from sig+recv.
+
+    (let [params (make (slice (* types/Field)) (+ nrecvs (.NumParams sig)))]
+      (when (!= recv nil)
+        (aset params 0 (types/NewField base/Pos nil recv)))
+
+      (range [i param (.Params sig)]
+        (let [d (types/NewField base/Pos nil (.-Type param))]
+          (.SetIsDDD d (.IsDDD param))
+          (aset params (+ nrecvs i) d)))
+
+
+      (let [results (make (slice (* types/Field)) (.NumResults sig))]
+        (range [i t (.Results sig)]
+          (aset results i (types/NewField base/Pos nil (.-Type t))))
+
+
+        (types/NewSignature nil params results)))))

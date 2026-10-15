@@ -1,0 +1,1602 @@
+;; Copyright 2009 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.cmd.link.internal.ld) (go/file "macho.go" :imports [
+
+
+    ^{:line 8} [bytes "bytes"]
+    ^{:line 9} [codesign "cmd/internal/codesign"]
+    ^{:line 10} [hash "cmd/internal/hash"]
+    ^:alias ^{:line 11} [imacho "cmd/internal/macho"]
+    ^{:line 12} [objabi "cmd/internal/objabi"]
+    ^{:line 13} [sys "cmd/internal/sys"]
+    ^{:line 14} [loader "cmd/link/internal/loader"]
+    ^{:line 15} [sym "cmd/link/internal/sym"]
+    ^{:line 16} [macho "debug/macho"]
+    ^{:line 17} [binary "encoding/binary"]
+    ^{:line 18} [fmt "fmt"]
+    ^{:line 19} [buildcfg "internal/buildcfg"]
+    ^{:line 20} [io "io"]
+    ^{:line 21} [os "os"]
+    ^{:line 22} [sort "sort"]
+    ^{:line 23} [strconv "strconv"]
+    ^{:line 24} [strings "strings"]
+    ^{:line 25} [unsafe "unsafe"]])
+
+
+(go/type MachoHdr (struct
+    ^{:line 29 :tag uint32} cpu
+    ^{:line 30 :tag uint32} subcpu))
+
+
+(go/type MachoSect (struct
+    ^{:line 34 :tag string} name
+    ^{:line 35 :tag string} segname
+    ^{:line 36 :tag uint64} addr
+    ^{:line 37 :tag uint64} size
+    ^{:line 38 :tag uint32} off
+    ^{:line 39 :tag uint32} align
+    ^{:line 40 :tag uint32} reloc
+    ^{:line 41 :tag uint32} nreloc
+    ^{:line 42 :tag uint32} flag
+    ^{:line 43 :tag uint32} res1
+    ^{:line 44 :tag uint32} res2))
+
+
+(go/type MachoSeg (struct
+    ^{:line 48 :tag string} name
+    ^{:line 49 :tag uint64} vsize
+    ^{:line 50 :tag uint64} vaddr
+    ^{:line 51 :tag uint64} fileoffset
+    ^{:line 52 :tag uint64} filesize
+    ^{:line 53 :tag uint32} prot1
+    ^{:line 54 :tag uint32} prot2
+    ^{:line 55 :tag uint32} nsect
+    ^{:line 56 :tag uint32} msect
+    ^{:line 57 :tag (slice MachoSect)} sect
+    ^{:line 58 :tag uint32} flag))
+
+
+
+
+(go/type MachoPlatformLoad "MachoPlatformLoad represents a LC_VERSION_MIN_* or\nLC_BUILD_VERSION load command.\n" (struct
+    ^{:line 64 :tag MachoPlatform} platform ; One of PLATFORM_* constants.
+    ^{:line 65 :tag MachoLoad} cmd))
+
+
+(go/type MachoLoad (struct
+    ^{:line 69 :tag uint32} type_
+    ^{:line 70 :tag (slice uint32)} data))
+
+
+(go/type MachoPlatform int)
+
+
+
+
+
+
+(go/const " * Total amount of space to reserve at the start of the file\n * for Header, PHeaders, and SHeaders.\n * May waste some.\n"
+  ^{:line 81} [^{:val 4096} INITIAL_MACHO_HEADR (* 4 1024)])
+
+
+(go/const
+  ^{:line 85} [^{:val 16777223} MACHO_CPU_AMD64 (bit-or (<< 1 24) 7)]
+  ^{:line 86} [^{:val 7} MACHO_CPU_386 7]
+  ^{:line 87} [^{:val 3} MACHO_SUBCPU_X86 3]
+  ^{:line 88} [^{:val 12} MACHO_CPU_ARM 12]
+  ^{:line 89} [^{:val 0} MACHO_SUBCPU_ARM 0]
+  ^{:line 90} [^{:val 9} MACHO_SUBCPU_ARMV7 9]
+  ^{:line 91} [^{:val 16777228} MACHO_CPU_ARM64 (bit-or (<< 1 24) 12)]
+  ^{:line 92} [^{:val 0} MACHO_SUBCPU_ARM64_ALL 0]
+  ^{:line 93} [^{:val 1} MACHO_SUBCPU_ARM64_V8 1]
+  ^{:line 94} [^{:val 2} MACHO_SUBCPU_ARM64E 2]
+  ^{:line 95} [^{:val 12} MACHO32SYMSIZE 12]
+  ^{:line 96} [^{:val 16} MACHO64SYMSIZE 16]
+  ^{:line 97} [^{:val 0} MACHO_X86_64_RELOC_UNSIGNED 0]
+  ^{:line 98} [^{:val 1} MACHO_X86_64_RELOC_SIGNED 1]
+  ^{:line 99} [^{:val 2} MACHO_X86_64_RELOC_BRANCH 2]
+  ^{:line 100} [^{:val 3} MACHO_X86_64_RELOC_GOT_LOAD 3]
+  ^{:line 101} [^{:val 4} MACHO_X86_64_RELOC_GOT 4]
+  ^{:line 102} [^{:val 5} MACHO_X86_64_RELOC_SUBTRACTOR 5]
+  ^{:line 103} [^{:val 6} MACHO_X86_64_RELOC_SIGNED_1 6]
+  ^{:line 104} [^{:val 7} MACHO_X86_64_RELOC_SIGNED_2 7]
+  ^{:line 105} [^{:val 8} MACHO_X86_64_RELOC_SIGNED_4 8]
+  ^{:line 106} [^{:val 0} MACHO_ARM_RELOC_VANILLA 0]
+  ^{:line 107} [^{:val 1} MACHO_ARM_RELOC_PAIR 1]
+  ^{:line 108} [^{:val 2} MACHO_ARM_RELOC_SECTDIFF 2]
+  ^{:line 109} [^{:val 5} MACHO_ARM_RELOC_BR24 5]
+  ^{:line 110} [^{:val 0} MACHO_ARM64_RELOC_UNSIGNED 0]
+  ^{:line 111} [^{:val 1} MACHO_ARM64_RELOC_SUBTRACTOR 1]
+  ^{:line 112} [^{:val 2} MACHO_ARM64_RELOC_BRANCH26 2]
+  ^{:line 113} [^{:val 3} MACHO_ARM64_RELOC_PAGE21 3]
+  ^{:line 114} [^{:val 4} MACHO_ARM64_RELOC_PAGEOFF12 4]
+  ^{:line 115} [^{:val 5} MACHO_ARM64_RELOC_GOT_LOAD_PAGE21 5]
+  ^{:line 116} [^{:val 6} MACHO_ARM64_RELOC_GOT_LOAD_PAGEOFF12 6]
+  ^{:line 117} [^{:val 7} MACHO_ARM64_RELOC_POINTER_TO_GOT 7]
+  ^{:line 118} [^{:val 10} MACHO_ARM64_RELOC_ADDEND 10]
+  ^{:line 119} [^{:val 0} MACHO_GENERIC_RELOC_VANILLA 0]
+  ^{:line 120} [^{:val 100} MACHO_FAKE_GOTPCREL 100])
+
+
+(go/const
+  ^{:line 124} [^{:val 4277009102} MH_MAGIC 0xfeedface]
+  ^{:line 125} [^{:val 4277009103} MH_MAGIC_64 0xfeedfacf]
+
+  ^{:line 127} [^{:val 1} MH_OBJECT 0x1]
+  ^{:line 128} [^{:val 2} MH_EXECUTE 0x2]
+
+  ^{:line 130} [^{:val 1} MH_NOUNDEFS 0x1]
+  ^{:line 131} [^{:val 4} MH_DYLDLINK 0x4]
+  ^{:line 132} [^{:val 2097152} MH_PIE 0x200000])
+
+
+(go/const
+  ^{:line 136} [^{:val 0} S_REGULAR 0x0]
+  ^{:line 137} [^{:val 1} S_ZEROFILL 0x1]
+  ^{:line 138} [^{:val 6} S_NON_LAZY_SYMBOL_POINTERS 0x6]
+  ^{:line 139} [^{:val 8} S_SYMBOL_STUBS 0x8]
+  ^{:line 140} [^{:val 9} S_MOD_INIT_FUNC_POINTERS 0x9]
+  ^{:line 141} [^{:val 2147483648} S_ATTR_PURE_INSTRUCTIONS 0x80000000]
+  ^{:line 142} [^{:val 33554432} S_ATTR_DEBUG 0x02000000]
+  ^{:line 143} [^{:val 1024} S_ATTR_SOME_INSTRUCTIONS 0x00000400])
+
+
+(go/const
+  ^{:line 147} [^{:tag MachoPlatform :val 1} PLATFORM_MACOS 1]
+  ^{:line 148} [^{:tag MachoPlatform :val 2} PLATFORM_IOS 2]
+  ^{:line 149} [^{:tag MachoPlatform :val 3} PLATFORM_TVOS 3]
+  ^{:line 150} [^{:tag MachoPlatform :val 4} PLATFORM_WATCHOS 4]
+  ^{:line 151} [^{:tag MachoPlatform :val 5} PLATFORM_BRIDGEOS 5]
+  ^{:line 152} [^{:tag MachoPlatform :val 6} PLATFORM_MACCATALYST 6])
+
+
+
+(go/const "rebase table opcode\n"
+  ^{:line 157} [^{:val 1} REBASE_TYPE_POINTER 1]
+  ^{:line 158} [^{:val 2} REBASE_TYPE_TEXT_ABSOLUTE32 2]
+  ^{:line 159} [^{:val 3} REBASE_TYPE_TEXT_PCREL32 3]
+
+  ^{:line 161} [^{:val 240} REBASE_OPCODE_MASK 0xF0]
+  ^{:line 162} [^{:val 15} REBASE_IMMEDIATE_MASK 0x0F]
+  ^{:line 163} [^{:val 0} REBASE_OPCODE_DONE 0x00]
+  ^{:line 164} [^{:val 16} REBASE_OPCODE_SET_TYPE_IMM 0x10]
+  ^{:line 165} [^{:val 32} REBASE_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB 0x20]
+  ^{:line 166} [^{:val 48} REBASE_OPCODE_ADD_ADDR_ULEB 0x30]
+  ^{:line 167} [^{:val 64} REBASE_OPCODE_ADD_ADDR_IMM_SCALED 0x40]
+  ^{:line 168} [^{:val 80} REBASE_OPCODE_DO_REBASE_IMM_TIMES 0x50]
+  ^{:line 169} [^{:val 96} REBASE_OPCODE_DO_REBASE_ULEB_TIMES 0x60]
+  ^{:line 170} [^{:val 112} REBASE_OPCODE_DO_REBASE_ADD_ADDR_ULEB 0x70]
+  ^{:line 171} [^{:val 128} REBASE_OPCODE_DO_REBASE_ULEB_TIMES_SKIPPING_ULEB 0x80])
+
+
+
+(go/const "bind table opcode\n"
+  ^{:line 176} [^{:val 1} BIND_TYPE_POINTER 1]
+  ^{:line 177} [^{:val 2} BIND_TYPE_TEXT_ABSOLUTE32 2]
+  ^{:line 178} [^{:val 3} BIND_TYPE_TEXT_PCREL32 3]
+
+  ^{:line 180} [^{:val 0} BIND_SPECIAL_DYLIB_SELF 0]
+  ^{:line 181} [^{:val -1} BIND_SPECIAL_DYLIB_MAIN_EXECUTABLE -1]
+  ^{:line 182} [^{:val -2} BIND_SPECIAL_DYLIB_FLAT_LOOKUP -2]
+  ^{:line 183} [^{:val -3} BIND_SPECIAL_DYLIB_WEAK_LOOKUP -3]
+
+  ^{:line 185} [^{:val 1} BIND_SYMBOL_FLAGS_WEAK_IMPORT 0x1]
+
+  ^{:line 187} [^{:val 240} BIND_OPCODE_MASK 0xF0]
+  ^{:line 188} [^{:val 15} BIND_IMMEDIATE_MASK 0x0F]
+  ^{:line 189} [^{:val 0} BIND_OPCODE_DONE 0x00]
+  ^{:line 190} [^{:val 16} BIND_OPCODE_SET_DYLIB_ORDINAL_IMM 0x10]
+  ^{:line 191} [^{:val 32} BIND_OPCODE_SET_DYLIB_ORDINAL_ULEB 0x20]
+  ^{:line 192} [^{:val 48} BIND_OPCODE_SET_DYLIB_SPECIAL_IMM 0x30]
+  ^{:line 193} [^{:val 64} BIND_OPCODE_SET_SYMBOL_TRAILING_FLAGS_IMM 0x40]
+  ^{:line 194} [^{:val 80} BIND_OPCODE_SET_TYPE_IMM 0x50]
+  ^{:line 195} [^{:val 96} BIND_OPCODE_SET_ADDEND_SLEB 0x60]
+  ^{:line 196} [^{:val 112} BIND_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB 0x70]
+  ^{:line 197} [^{:val 128} BIND_OPCODE_ADD_ADDR_ULEB 0x80]
+  ^{:line 198} [^{:val 144} BIND_OPCODE_DO_BIND 0x90]
+  ^{:line 199} [^{:val 160} BIND_OPCODE_DO_BIND_ADD_ADDR_ULEB 0xA0]
+  ^{:line 200} [^{:val 176} BIND_OPCODE_DO_BIND_ADD_ADDR_IMM_SCALED 0xB0]
+  ^{:line 201} [^{:val 192} BIND_OPCODE_DO_BIND_ULEB_TIMES_SKIPPING_ULEB 0xC0]
+  ^{:line 202} [^{:val 208} BIND_OPCODE_THREADED 0xD0]
+  ^{:line 203} [^{:val 0} BIND_SUBOPCODE_THREADED_SET_BIND_ORDINAL_TABLE_SIZE_ULEB 0x00]
+  ^{:line 204} [^{:val 1} BIND_SUBOPCODE_THREADED_APPLY 0x01])
+
+
+(go/const ^{:val 32} machoHeaderSize64 (* 8 4)) ; size of 64-bit Mach-O header
+
+;; Mach-O file writing
+;; https://developer.apple.com/mac/library/DOCUMENTATION/DeveloperTools/Conceptual/MachORuntime/Reference/reference.html
+
+(go/var ^MachoHdr machohdr)
+
+(go/var ^{:tag (slice MachoLoad)} load)
+
+(go/var ^MachoPlatform machoPlatform)
+
+(go/var ^{:tag (array 16 MachoSeg)} seg)
+
+(go/var ^int nseg)
+
+(go/var ^int ndebug)
+
+(go/var ^int nsect)
+
+(go/const
+  ^{:line 227} [^{:val 0} SymKindLocal (+ 0 iota)]
+  ^{:line 228} [^{:val 1} SymKindExtdef]
+  ^{:line 229} [^{:val 2} SymKindUndef]
+  ^{:line 230} [^{:val 3} NumSymKind])
+
+
+(go/var ^{:tag (array NumSymKind int)} nkind)
+
+(go/var ^{:tag (slice loader/Sym)} sortsym)
+
+(go/var ^int nsortsym)
+
+
+
+
+
+
+
+(go/var ^{:doc "Amount of space left for adding load commands\nthat refer to dynamic libraries. Because these have\nto go in the Mach-O header, we can't just pick a\n\"big enough\" header size. The initial header is\none page, the non-dynamic library stuff takes\nup about 1300 bytes; we overestimate that as 2k.\n"} loadBudget (- INITIAL_MACHO_HEADR (* 2 1024)))
+
+^{:go/end 249} (go/func getMachoHdr ^{:tag (* MachoHdr)} []
+  (addr machohdr))
+
+
+
+
+^{:go/end 263} (go/func newMachoLoad "Create a new Mach-O load command. ndata is the number of 32-bit words for\nthe data (not including the load command header).\n" ^{:tag (* MachoLoad)} [^{:tag (* sys/Arch)} arch ^uint32 type_ ^uint32 ndata]
+  (when (and (== (.-PtrSize arch) 8) ^:go/paren (!= (bit-and ndata 1) 0))
+    (inc! ndata))
+
+
+  (set! load (append load (lit MachoLoad)))
+  (let [l (addr (aget load (- (len load) 1)))]
+    (set! (.-type_ l) type_)
+    (set! (.-data l) (make (slice uint32) ndata))
+    ^{:line 262} l))
+
+
+^{:go/end 276} (go/func newMachoSeg ^{:tag (* MachoSeg)} [^string name ^int msect]
+  (when (>= nseg (len seg))
+    (Exitf "too many segs"))
+
+
+  (let [s (addr (aget seg nseg))]
+    (inc! nseg)
+    (set! (.-name s) name)
+    (set! (.-msect s) (conv uint32 msect))
+    (set! (.-sect s) (make (slice MachoSect) msect))
+    ^{:line 275} s))
+
+
+^{:go/end 289} (go/func newMachoSect ^{:tag (* MachoSect)} [^{:tag (* MachoSeg)} seg ^string name ^string segname]
+  (when (>= (.-nsect seg) (.-msect seg))
+    (Exitf "too many sects in segment %s" (.-name seg)))
+
+
+  (let [s (addr (aget (.-sect seg) (.-nsect seg)))]
+    (inc! (.-nsect seg))
+    (set! (.-name s) name)
+    (set! (.-segname s) segname)
+    (inc! nsect)
+    ^{:line 288} s))
+
+
+;; Generic linking code.
+
+(go/var ^{:tag (slice string)} dylib)
+
+(go/var ^int64 linkoff)
+
+^{:go/end 407} (go/func machowrite ^int [^{:tag (* Link)} ctxt ^{:tag (* sys/Arch)} arch ^{:tag (* OutBuf)} out ^LinkMode linkmode]
+  (let [o1 (.Offset out)
+
+      ^{:line 300} loadsize (* 4 4 ndebug)]
+    (range [i load]
+      (set! loadsize + (* 4 (+ (len (.-data (aget load i))) 2))))
+
+    (if (== (.-PtrSize arch) 8) (do
+        (set! loadsize + (* 18 4 nseg))
+        (set! loadsize + (* 20 4 nsect)))
+      (do
+        (set! loadsize + (* 14 4 nseg))
+        (set! loadsize + (* 17 4 nsect))))
+
+
+    (if (== (.-PtrSize arch) 8)
+      (.Write32 out MH_MAGIC_64)
+
+      (.Write32 out MH_MAGIC))
+
+    (.Write32 out (.-cpu machohdr))
+    (.Write32 out (.-subcpu machohdr))
+    (if (== linkmode LinkExternal)
+      (.Write32 out MH_OBJECT) ; /* file type - mach object */
+
+      (.Write32 out MH_EXECUTE)) ; /* file type - mach executable */
+
+    (.Write32 out (+ (conv uint32 (len load)) (conv uint32 nseg) (conv uint32 ndebug)))
+    (.Write32 out (conv uint32 loadsize))
+    (let [flags (conv uint32 0)]
+      (when (== (aget nkind SymKindUndef) 0)
+        (set! flags bit-or MH_NOUNDEFS))
+
+      (when (and ^{:go/via [Target]} (.IsPIE ctxt) (== linkmode LinkInternal))
+        (set! flags bit-or (bit-or MH_PIE MH_DYLDLINK)))
+
+      (.Write32 out flags) ; /* flags */
+      (when (== (.-PtrSize arch) 8)
+        (.Write32 out 0)) ; /* reserved */
+
+
+      (for [i 0] (< i nseg) (inc! i)
+        (let [s (addr (aget seg i))]
+          (if (== (.-PtrSize arch) 8) (do
+              (.Write32 out imacho/LC_SEGMENT_64)
+              (.Write32 out (+ 72 (* 80 (.-nsect s))))
+              (.WriteStringN out (.-name s) 16)
+              (.Write64 out (.-vaddr s))
+              (.Write64 out (.-vsize s))
+              (.Write64 out (.-fileoffset s))
+              (.Write64 out (.-filesize s))
+              (.Write32 out (.-prot1 s))
+              (.Write32 out (.-prot2 s))
+              (.Write32 out (.-nsect s))
+              (.Write32 out (.-flag s)))
+            (do
+              (.Write32 out imacho/LC_SEGMENT)
+              (.Write32 out (+ 56 (* 68 (.-nsect s))))
+              (.WriteStringN out (.-name s) 16)
+              (.Write32 out (conv uint32 (.-vaddr s)))
+              (.Write32 out (conv uint32 (.-vsize s)))
+              (.Write32 out (conv uint32 (.-fileoffset s)))
+              (.Write32 out (conv uint32 (.-filesize s)))
+              (.Write32 out (.-prot1 s))
+              (.Write32 out (.-prot2 s))
+              (.Write32 out (.-nsect s))
+              (.Write32 out (.-flag s))))
+
+
+          (for [j (conv uint32 0)] (< j (.-nsect s)) (inc! j)
+            (let [t (addr (aget (.-sect s) j))]
+              (if (== (.-PtrSize arch) 8) (do
+                  (.WriteStringN out (.-name t) 16)
+                  (.WriteStringN out (.-segname t) 16)
+                  (.Write64 out (.-addr t))
+                  (.Write64 out (.-size t))
+                  (.Write32 out (.-off t))
+                  (.Write32 out (.-align t))
+                  (.Write32 out (.-reloc t))
+                  (.Write32 out (.-nreloc t))
+                  (.Write32 out (.-flag t))
+                  (.Write32 out (.-res1 t)) ; /* reserved */
+                  (.Write32 out (.-res2 t)) ; /* reserved */
+                  (.Write32 out 0)) ; /* reserved */
+                (do
+                  (.WriteStringN out (.-name t) 16)
+                  (.WriteStringN out (.-segname t) 16)
+                  (.Write32 out (conv uint32 (.-addr t)))
+                  (.Write32 out (conv uint32 (.-size t)))
+                  (.Write32 out (.-off t))
+                  (.Write32 out (.-align t))
+                  (.Write32 out (.-reloc t))
+                  (.Write32 out (.-nreloc t))
+                  (.Write32 out (.-flag t))
+                  (.Write32 out (.-res1 t)) ; /* reserved */
+                  (.Write32 out (.-res2 t)))))))) ; /* reserved */
+
+
+
+
+      (range [i load]
+        (let [l (addr (aget load i))]
+          (.Write32 out (.-type_ l))
+          (.Write32 out (* 4 (+ (conv uint32 (len (.-data l))) 2)))
+          (for [j 0] (< j (len (.-data l))) (inc! j)
+            (.Write32 out (aget (.-data l) j)))))
+
+
+
+      (conv int (- (.Offset out) o1)))))
+
+
+(go/type macVersionFlag (array 3 byte))
+
+^{:go/end 413} (go/method String ^string [^{:tag (* macVersionFlag)} f]
+  (fmt/Sprintf "%d.%d.%d" (aget f 0) (aget f 1) (aget f 2)))
+
+
+^{:go/end 434} (go/method Set ^error [^{:tag (* macVersionFlag)} f ^string s]
+  (let [^macVersionFlag parsed (zero macVersionFlag)
+      ^{:line 417} nums (strings/Split s ".")]
+    (when (> (len nums) 3)
+      (goto :Error))
+
+    (range [i num nums]
+      (let [(values n err) (strconv/Atoi num)]
+        (when (or (!= err nil) (< n 0) (> n 0xFF))
+          (goto :Error))
+
+        (aset parsed i (conv byte n))))
+
+    ;; success, now modify f
+    (set! @f parsed)
+    (return nil)
+
+    (label :Error
+      (return (fmt/Errorf "invalid version %q" s)))))
+
+
+^{:go/end 438} (go/method version ^uint32 [^{:tag (* macVersionFlag)} f]
+  (bit-or (<< (conv uint32 (aget f 0)) 16) (<< (conv uint32 (aget f 1)) 8) (conv uint32 (aget f 2))))
+
+
+(go/var
+
+
+
+
+
+
+
+
+  ^{:line 449} [^{:doc "On advice from Apple engineers, we keep macOS set to the\noldest supported macOS version but keep macSDK to the newest\ntested OS/SDK version. If these defaults are not good enough,\nthe -macos and -macsdk linker flags can override them.\nFor past problems involving these values, see\n\tgo.dev/issue/30488\n\tgo.dev/issue/56784\n\tgo.dev/issue/77917\n"} macOS (lit macVersionFlag 13 0 0)]
+  ^{:line 450} [macSDK (lit macVersionFlag 26 2 0)])
+
+
+^{:go/end 564} (go/method domacho [^{:tag (* Link)} ctxt]
+  (when @FlagD
+    (return))
+
+
+  ;; Copy platform load command.
+  (range [_ h hostobj]
+    (let [(values load err) (hostobjMachoPlatform (addr h))]
+      (when (!= err nil)
+        (Exitf "%v" err))
+
+      (when (and (!= load nil) (!= (.-platform load) PLATFORM_MACOS))
+        (let [ml (newMachoLoad ^{:go/via [Target]} (.-Arch ctxt) (.-type_ (.-cmd load)) (conv uint32 (len (.-data (.-cmd load)))))]
+          (copy (.-data ml) (.-data (.-cmd load)))
+          (break)))))
+
+
+  (when (== machoPlatform 0)
+    (set! machoPlatform PLATFORM_MACOS)
+    (when (== buildcfg/GOOS "ios")
+      (set! machoPlatform PLATFORM_IOS))
+
+    (when (and (== load nil) (== machoPlatform PLATFORM_MACOS))
+      (let [ml (newMachoLoad ^{:go/via [Target]} (.-Arch ctxt) imacho/LC_BUILD_VERSION 4)]
+        (aset (.-data ml) 0 (conv uint32 machoPlatform))
+        (aset (.-data ml) 1 (.version macOS))
+        (aset (.-data ml) 2 (.version macSDK))
+        (aset (.-data ml) 3 0)))) ; ntools
+
+
+
+  ;; empirically, string table must begin with " \x00".
+  (let [s (.LookupOrCreateSym (.-loader ctxt) ".machosymstr" 0)
+      ^{:line 486} sb (.MakeSymbolUpdater (.-loader ctxt) s)]
+
+    (.SetType sb sym/SMACHOSYMSTR)
+    (.SetReachable sb true)
+    (.AddUint8 sb \space)
+    (.AddUint8 sb \u0000)
+
+    (set! s (.LookupOrCreateSym (.-loader ctxt) ".machosymtab" 0))
+    (set! sb (.MakeSymbolUpdater (.-loader ctxt) s))
+    (.SetType sb sym/SMACHOSYMTAB)
+    (.SetReachable sb true)
+
+    (when ^{:go/via [Target]} (.IsInternal ctxt)
+      (set! s (.LookupOrCreateSym (.-loader ctxt) ".plt" 0)) ; will be __symbol_stub
+      (set! sb (.MakeSymbolUpdater (.-loader ctxt) s))
+      (.SetType sb sym/SMACHOPLT)
+      (.SetReachable sb true)
+
+      (set! s (.LookupOrCreateSym (.-loader ctxt) ".got" 0)) ; will be __got
+      (set! sb (.MakeSymbolUpdater (.-loader ctxt) s))
+      (if ^{:go/via [Target]} (.UseRelro ctxt)
+        (.SetType sb sym/SMACHORELROSECT)
+
+        (.SetType sb sym/SMACHOGOT))
+
+      (.SetReachable sb true)
+      (.SetAlign sb 4)
+
+      (set! s (.LookupOrCreateSym (.-loader ctxt) ".linkedit.plt" 0)) ; indirect table for .plt
+      (set! sb (.MakeSymbolUpdater (.-loader ctxt) s))
+      (.SetType sb sym/SMACHOINDIRECTPLT)
+      (.SetReachable sb true)
+
+      (set! s (.LookupOrCreateSym (.-loader ctxt) ".linkedit.got" 0)) ; indirect table for .got
+      (set! sb (.MakeSymbolUpdater (.-loader ctxt) s))
+      (.SetType sb sym/SMACHOINDIRECTGOT)
+      (.SetReachable sb true))
+
+
+    ;; Add a dummy symbol that will become the __asm marker section.
+    (when ^{:go/via [Target]} (.IsExternal ctxt)
+      (set! s (.LookupOrCreateSym (.-loader ctxt) ".llvmasm" 0))
+      (set! sb (.MakeSymbolUpdater (.-loader ctxt) s))
+      (.SetType sb sym/SMACHO)
+      (.SetReachable sb true)
+      (.AddUint8 sb 0))
+
+
+    ;; Un-export runtime symbols from plugins. Since the runtime
+    ;; is included in both the main binary and each plugin, these
+    ;; symbols appear in both images. If we leave them exported in
+    ;; the plugin, then the dynamic linker will resolve
+    ;; relocations to these functions in the plugin's functab to
+    ;; point to the main image, causing the runtime to think the
+    ;; plugin's functab is corrupted. By unexporting them, these
+    ;; become static references, which are resolved to the
+    ;; plugin's text.
+    ;;
+    ;; It would be better to omit the runtime from plugins. (Using
+    ;; relative PCs in the functab instead of relocations would
+    ;; also address this.)
+    ;;
+    ;; See issue #18190.
+    (when (== ^{:go/via [Target]} (.-BuildMode ctxt) BuildModePlugin)
+      (range [_ name (lit (slice string) "_cgo_topofstack" "__cgo_topofstack" "_cgo_panic" "crosscall2")]
+        ;; Most of these are data symbols or C
+        ;; symbols, so they have symbol version 0.
+        (let [ver 0]
+          ;; _cgo_panic is a Go function, so it uses ABIInternal.
+          (when (== name "_cgo_panic")
+            (set! ver abiInternalVer))
+
+          (let [s (.Lookup (.-loader ctxt) name ver)]
+            (when (!= s 0)
+              (.SetAttrCgoExportDynamic (.-loader ctxt) s false))))))))
+
+
+
+
+
+^{:go/end 585} (go/func machoadddynlib [^string lib ^LinkMode linkmode]
+  (when (or (aget seenlib lib) (== linkmode LinkExternal))
+    (return))
+
+  (aset seenlib lib true)
+
+  ;; Will need to store the library name rounded up
+  ;; and 24 bytes of header metadata. If not enough
+  ;; space, grab another page of initial space at the
+  ;; beginning of the output file.
+  (set! loadBudget - (+ (* (/ (+ (len lib) 7) 8) 8) 24))
+
+  (when (< loadBudget 0)
+    (set! HEADR + 4096)
+    (set! @FlagTextAddr + 4096)
+    (set! loadBudget + 4096))
+
+
+  (set! dylib (append dylib lib)))
+
+
+^{:go/end 654} (go/func machoshbits [^{:tag (* Link)} ctxt ^{:tag (* MachoSeg)} mseg ^{:tag (* sym/Section)} sect ^string segname]
+  (let [buf (+ "__" (strings/ReplaceAll (subslice (.-Name sect) 1) "." "_"))
+
+      ^{:line 590} msect (newMachoSect mseg buf segname)]
+
+    (when (> (.-Rellen sect) 0)
+      (set! (.-reloc msect) (conv uint32 (.-Reloff sect)))
+      (set! (.-nreloc msect) (conv uint32 (/ (.-Rellen sect) 8))))
+
+
+    (while (< ^int32 (<< 1 (.-align msect)) (.-Align sect))
+      (inc! (.-align msect)))
+
+    (set! (.-addr msect) (.-Vaddr sect))
+    (set! (.-size msect) (.-Length sect))
+
+    (if (< (.-Vaddr sect) (+ (.-Vaddr (.-Seg sect)) (.-Filelen (.-Seg sect)))) (do
+        ;; data in file
+        (when (> (.-Length sect) (- (+ (.-Vaddr (.-Seg sect)) (.-Filelen (.-Seg sect))) (.-Vaddr sect)))
+          (Errorf "macho cannot represent section %s crossing data and bss" (.-Name sect)))
+
+        (set! (.-off msect) (conv uint32 (- (+ (.-Fileoff (.-Seg sect)) (.-Vaddr sect)) (.-Vaddr (.-Seg sect))))))
+      (do
+        (set! (.-off msect) 0)
+        (set! (.-flag msect) bit-or S_ZEROFILL)))
+
+
+    (when (!= (bit-and (.-Rwx sect) 1) 0)
+      (set! (.-flag msect) bit-or S_ATTR_SOME_INSTRUCTIONS))
+
+
+    (when (== (.-Name sect) ".text")
+      (set! (.-flag msect) bit-or S_ATTR_PURE_INSTRUCTIONS))
+
+
+    (when (== (.-Name sect) ".plt")
+      (set! (.-name msect) "__symbol_stub1")
+      (set! (.-flag msect) (bit-or S_ATTR_PURE_INSTRUCTIONS S_ATTR_SOME_INSTRUCTIONS S_SYMBOL_STUBS))
+      (set! (.-res1 msect) 0) ;nkind[SymKindLocal];
+      (set! (.-res2 msect) 6))
+
+
+    (when (== (.-Name sect) ".got")
+      (set! (.-name msect) "__got")
+      (set! (.-flag msect) S_NON_LAZY_SYMBOL_POINTERS)
+      (set! (.-res1 msect) (conv uint32 (/ (.SymSize (.-loader ctxt) (.-LinkEditPLT (.-ArchSyms ctxt))) 4)))) ; /* offset into indirect symbol table */
+
+
+    (when (== (.-Name sect) ".init_array")
+      (set! (.-name msect) "__mod_init_func")
+      (set! (.-flag msect) S_MOD_INIT_FUNC_POINTERS))
+
+
+    ;; Some platforms such as watchOS and tvOS require binaries with
+    ;; bitcode enabled. The Go toolchain can't output bitcode, so use
+    ;; a marker section in the __LLVM segment, "__asm", to tell the Apple
+    ;; toolchain that the Go text came from assembler and thus has no
+    ;; bitcode. This is not true, but Kotlin/Native, Rust and Flutter
+    ;; are also using this trick.
+    (when (== (.-Name sect) ".llvmasm")
+      (set! (.-name msect) "__asm")
+      (set! (.-segname msect) "__LLVM"))
+
+
+    (when (== segname "__DWARF")
+      (set! (.-flag msect) bit-or S_ATTR_DEBUG))))
+
+
+
+^{:go/end 887} (go/func asmbMacho [^{:tag (* Link)} ctxt]
+  (let [machlink (doMachoLink ctxt)]
+    (when ^{:go/via [Target]} (.IsExternal ctxt)
+      (let [symo (conv int64 (+ (.-Fileoff Segdwarf) (conv uint64 (Rnd (conv int64 (.-Filelen Segdwarf)) @FlagRound)) (conv uint64 machlink)))]
+        (.SeekSet (.-Out ctxt) symo)
+        (machoEmitReloc ctxt)))
+
+    (.SeekSet (.-Out ctxt) 0)
+
+    (let [ldr (.-loader ctxt)
+
+        ;; /* apple MACH */
+        ^{:line 668} va (- @FlagTextAddr (conv int64 HEADR))
+
+        ^{:line 670} mh (getMachoHdr)]
+      (switch (.-Family ^{:go/via [Target]} (.-Arch ctxt))
+        (default
+          (Exitf "unknown macho architecture: %v" (.-Family ^{:go/via [Target]} (.-Arch ctxt))))
+
+        (case [sys/AMD64]
+          (set! (.-cpu mh) MACHO_CPU_AMD64)
+          (set! (.-subcpu mh) MACHO_SUBCPU_X86))
+
+        (case [sys/ARM64]
+          (set! (.-cpu mh) MACHO_CPU_ARM64)
+          (set! (.-subcpu mh) MACHO_SUBCPU_ARM64_ALL)))
+
+
+      (let [^{:tag (* MachoSeg)} ms (zero (* MachoSeg))]
+        (when (== ^{:go/via [Target]} (.-LinkMode ctxt) LinkExternal)
+          ;; /* segment for entire file */
+          (set! ms (newMachoSeg "" 40))
+
+          (set! (.-fileoffset ms) (.-Fileoff Segtext))
+          (set! (.-filesize ms) (- (+ (.-Fileoff Segdwarf) (.-Filelen Segdwarf)) (.-Fileoff Segtext)))
+          (set! (.-vsize ms) (- (+ (.-Vaddr Segdwarf) (.-Length Segdwarf)) (.-Vaddr Segtext))))
+
+
+        ;; /* segment for zero page */
+        (when (!= ^{:go/via [Target]} (.-LinkMode ctxt) LinkExternal)
+          (set! ms (newMachoSeg "__PAGEZERO" 0))
+          (set! (.-vsize ms) (conv uint64 va)))
+
+
+        ;; /* text */
+        (let [v (Rnd (conv int64 (+ (conv uint64 HEADR) (.-Length Segtext))) @FlagRound)
+
+            ^{:line 703 :tag (* MachoSeg)} mstext (zero (* MachoSeg))]
+          (when (!= ^{:go/via [Target]} (.-LinkMode ctxt) LinkExternal)
+            (set! ms (newMachoSeg "__TEXT" 20))
+            (set! (.-vaddr ms) (conv uint64 va))
+            (set! (.-vsize ms) (conv uint64 v))
+            (set! (.-fileoffset ms) 0)
+            (set! (.-filesize ms) (conv uint64 v))
+            (set! (.-prot1 ms) 7)
+            (set! (.-prot2 ms) 5)
+            (set! mstext ms))
+
+
+          (range [_ sect (.-Sections Segtext)]
+            (machoshbits ctxt ms sect "__TEXT"))
+
+
+          ;; /* rodata */
+          (when (and (!= ^{:go/via [Target]} (.-LinkMode ctxt) LinkExternal) (> (.-Length Segrelrodata) 0))
+            (set! ms (newMachoSeg "__DATA_CONST" 20))
+            (set! (.-vaddr ms) (.-Vaddr Segrelrodata))
+            (set! (.-vsize ms) (.-Length Segrelrodata))
+            (set! (.-fileoffset ms) (.-Fileoff Segrelrodata))
+            (set! (.-filesize ms) (.-Filelen Segrelrodata))
+            (set! (.-prot1 ms) 3)
+            (set! (.-prot2 ms) 3)
+            (set! (.-flag ms) 0x10)) ; SG_READ_ONLY
+
+
+          (range [_ sect (.-Sections Segrelrodata)]
+            (machoshbits ctxt ms sect "__DATA_CONST"))
+
+
+          ;; /* data */
+          (when (!= ^{:go/via [Target]} (.-LinkMode ctxt) LinkExternal)
+            (set! ms (newMachoSeg "__DATA" 20))
+            (set! (.-vaddr ms) (.-Vaddr Segdata))
+            (set! (.-vsize ms) (.-Length Segdata))
+            (set! (.-fileoffset ms) (.-Fileoff Segdata))
+            (set! (.-filesize ms) (.-Filelen Segdata))
+            (set! (.-prot1 ms) 3)
+            (set! (.-prot2 ms) 3))
+
+
+          (range [_ sect (.-Sections Segdata)]
+            (machoshbits ctxt ms sect "__DATA"))
+
+
+          ;; /* dwarf */
+          (when (not @FlagW)
+            (when (!= ^{:go/via [Target]} (.-LinkMode ctxt) LinkExternal)
+              (set! ms (newMachoSeg "__DWARF" 20))
+              (set! (.-vaddr ms) (.-Vaddr Segdwarf))
+              (set! (.-vsize ms) 0)
+              (set! (.-fileoffset ms) (.-Fileoff Segdwarf))
+              (set! (.-filesize ms) (.-Filelen Segdwarf)))
+
+            (range [_ sect (.-Sections Segdwarf)]
+              (machoshbits ctxt ms sect "__DWARF")))
+
+
+
+          (when (!= ^{:go/via [Target]} (.-LinkMode ctxt) LinkExternal)
+            (switch (.-Family ^{:go/via [Target]} (.-Arch ctxt))
+              (default
+                (Exitf "unknown macho architecture: %v" (.-Family ^{:go/via [Target]} (.-Arch ctxt))))
+
+              (case [sys/AMD64]
+                (let [ml (newMachoLoad ^{:go/via [Target]} (.-Arch ctxt) imacho/LC_UNIXTHREAD (+ 42 2))]
+                  (aset (.-data ml) 0 4) ; /* thread type */
+                  (aset (.-data ml) 1 42) ; /* word count */
+                  (aset (.-data ml) (+ 2 32) (conv uint32 (Entryvalue ctxt))) ; /* start pc */
+                  (aset (.-data ml) (+ 2 32 1) (conv uint32 (>> (Entryvalue ctxt) 32)))))
+
+              (case [sys/ARM64]
+                (let [ml (newMachoLoad ^{:go/via [Target]} (.-Arch ctxt) imacho/LC_MAIN 4)]
+                  (aset (.-data ml) 0 (conv uint32 (- (conv uint64 (Entryvalue ctxt)) (- (.-Vaddr Segtext) (conv uint64 HEADR)))))
+                  (aset (.-data ml) 1 (conv uint32 (>> (- (conv uint64 (Entryvalue ctxt)) (- (.-Vaddr Segtext) (conv uint64 HEADR))) 32)))))))
+
+
+
+          (let [^int64 codesigOff (zero int64)]
+            (when (not @FlagD)
+              ;; must match doMachoLink below
+              (let [s1 (.SymSize ldr (.Lookup ldr ".machorebase" 0))
+                  ^{:line 787} s2 (.SymSize ldr (.Lookup ldr ".machobind" 0))
+                  ^{:line 788} s3 (.SymSize ldr (.Lookup ldr ".machosymtab" 0))
+                  ^{:line 789} s4 (.SymSize ldr (.-LinkEditPLT (.-ArchSyms ctxt)))
+                  ^{:line 790} s5 (.SymSize ldr (.-LinkEditGOT (.-ArchSyms ctxt)))
+                  ^{:line 791} s6 (.SymSize ldr (.Lookup ldr ".machosymstr" 0))
+                  ^{:line 792} s7 (.SymSize ldr (.Lookup ldr ".machocodesig" 0))]
+
+                (when (!= ^{:go/via [Target]} (.-LinkMode ctxt) LinkExternal)
+                  (let [ms (newMachoSeg "__LINKEDIT" 0)]
+                    (set! (.-vaddr ms) (conv uint64 (Rnd (conv int64 (+ (.-Vaddr Segdata) (.-Length Segdata))) @FlagRound)))
+                    (set! (.-vsize ms) (conv uint64 (+ s1 s2 s3 s4 s5 s6 s7)))
+                    (set! (.-fileoffset ms) (conv uint64 linkoff))
+                    (set! (.-filesize ms) (.-vsize ms))
+                    (set! (.-prot1 ms) 1)
+                    (set! (.-prot2 ms) 1)
+
+                    (set! codesigOff (+ linkoff s1 s2 s3 s4 s5 s6))))
+
+
+                (when (and (!= ^{:go/via [Target]} (.-LinkMode ctxt) LinkExternal) ^{:go/via [Target]} (.IsPIE ctxt))
+                  (let [ml (newMachoLoad ^{:go/via [Target]} (.-Arch ctxt) imacho/LC_DYLD_INFO_ONLY 10)]
+                    (aset (.-data ml) 0 (conv uint32 linkoff)) ; rebase off
+                    (aset (.-data ml) 1 (conv uint32 s1)) ; rebase size
+                    (aset (.-data ml) 2 (conv uint32 (+ linkoff s1))) ; bind off
+                    (aset (.-data ml) 3 (conv uint32 s2)) ; bind size
+                    (aset (.-data ml) 4 0) ; weak bind off
+                    (aset (.-data ml) 5 0) ; weak bind size
+                    (aset (.-data ml) 6 0) ; lazy bind off
+                    (aset (.-data ml) 7 0) ; lazy bind size
+                    (aset (.-data ml) 8 0) ; export
+                    (aset (.-data ml) 9 0))) ; export size
+
+
+                (let [ml (newMachoLoad ^{:go/via [Target]} (.-Arch ctxt) imacho/LC_SYMTAB 4)]
+                  (aset (.-data ml) 0 (conv uint32 (+ linkoff s1 s2))) ; /* symoff */
+                  (aset (.-data ml) 1 (conv uint32 nsortsym)) ; /* nsyms */
+                  (aset (.-data ml) 2 (conv uint32 (+ linkoff s1 s2 s3 s4 s5))) ; /* stroff */
+                  (aset (.-data ml) 3 (conv uint32 s6)) ; /* strsize */
+
+                  (when (!= ^{:go/via [Target]} (.-LinkMode ctxt) LinkExternal)
+                    (machodysymtab ctxt (+ linkoff s1 s2))
+
+                    (let [ml (newMachoLoad ^{:go/via [Target]} (.-Arch ctxt) imacho/LC_LOAD_DYLINKER 6)]
+                      (aset (.-data ml) 0 12) ; /* offset to string */
+                      (stringtouint32 (subslice (.-data ml) 1) "/usr/lib/dyld")
+
+                      (range [_ lib dylib]
+                        (set! ml (newMachoLoad ^{:go/via [Target]} (.-Arch ctxt) imacho/LC_LOAD_DYLIB (+ 4 (* (/ (+ (conv uint32 (len lib)) 1 7) 8) 2))))
+                        (aset (.-data ml) 0 24) ; /* offset of string from beginning of load */
+                        (aset (.-data ml) 1 0) ; /* time stamp */
+                        (aset (.-data ml) 2 0) ; /* version */
+                        (aset (.-data ml) 3 0) ; /* compatibility version */
+                        (stringtouint32 (subslice (.-data ml) 4) lib))))
+
+
+
+                  (when (and ^{:go/via [Target]} (.IsInternal ctxt) (!= @flagHostBuildid "none"))
+                    (let [ml (newMachoLoad ^{:go/via [Target]} (.-Arch ctxt) imacho/LC_UUID 4)
+                        ^{:line 845 :tag (array 16 byte)} uuid (zero (array 16 byte))]
+                      (if (>= (len buildinfo) 16)
+                        (copy (subslice uuid) buildinfo)
+
+                        ;; Note: When setting macSDK to 26.2, dyld refuses to run any
+                        ;; binary without an LC_UUID, which makes bootstrap fail.
+                        ;; To work around that situation, if buildinfo is missing we
+                        ;; construct a hash of the binary written so far and use that.
+                        ;; Using -B none will bypass this if desired,
+                        ;; but the resulting binary may not be runnable.
+                        (copy (subslice uuid) (uuidFromHash (hash/Sum32 (.Data (.-Out ctxt))))))
+
+                      (aset (.-data ml) 0 (.Uint32 (.-ByteOrder ^{:go/via [Target]} (.-Arch ctxt)) (subslice uuid 0)))
+                      (aset (.-data ml) 1 (.Uint32 (.-ByteOrder ^{:go/via [Target]} (.-Arch ctxt)) (subslice uuid 4)))
+                      (aset (.-data ml) 2 (.Uint32 (.-ByteOrder ^{:go/via [Target]} (.-Arch ctxt)) (subslice uuid 8)))
+                      (aset (.-data ml) 3 (.Uint32 (.-ByteOrder ^{:go/via [Target]} (.-Arch ctxt)) (subslice uuid 12)))))
+
+
+                  (when (and ^{:go/via [Target]} (.IsInternal ctxt) (.NeedCodeSign ctxt))
+                    (let [ml (newMachoLoad ^{:go/via [Target]} (.-Arch ctxt) imacho/LC_CODE_SIGNATURE 2)]
+                      (aset (.-data ml) 0 (conv uint32 codesigOff))
+                      (aset (.-data ml) 1 (conv uint32 s7)))))))
+
+
+
+            (let [a (machowrite ctxt ^{:go/via [Target]} (.-Arch ctxt) (.-Out ctxt) ^{:go/via [Target]} (.-LinkMode ctxt))]
+              (when (> (conv int32 a) HEADR)
+                (Exitf "HEADR too small: %d > %d" a HEADR))
+
+
+              ;; Now we have written everything. Compute the code signature (which
+              ;; is a hash of the file content, so it must be done at last.)
+              (when (and ^{:go/via [Target]} (.IsInternal ctxt) (.NeedCodeSign ctxt))
+                (let [cs (.Lookup ldr ".machocodesig" 0)
+                    ^{:line 879} data (.Data (.-Out ctxt))]
+                  (when (!= (conv int64 (len data)) codesigOff)
+                    (panic "wrong size"))
+
+                  (codesign/Sign (.Data ldr cs) (bytes/NewBuffer data) "a.out" codesigOff (conv int64 (.-fileoffset mstext)) (conv int64 (.-filesize mstext)) (or ^{:go/via [Target]} (.IsExe ctxt) ^{:go/via [Target]} (.IsPIE ctxt)))
+                  (.SeekSet (.-Out ctxt) codesigOff)
+                  (.Write (.-Out ctxt) (.Data ldr cs)))))))))))
+
+
+
+^{:go/end 897} (go/func symkind ^int [^{:tag (* loader/Loader)} ldr ^loader/Sym s]
+  (when [t (.SymType ldr s)] (or (== t sym/SDYNIMPORT) (== t sym/SHOSTOBJ) (== t sym/SUNDEFEXT))
+    (return SymKindUndef))
+
+  (when (.AttrCgoExport ldr s)
+    (return SymKindExtdef))
+
+  ^{:line 896} SymKindLocal)
+
+
+^{:go/end 1006} (go/func collectmachosyms [^{:tag (* Link)} ctxt]
+  (let [ldr (.-loader ctxt)
+
+      ^{:line 902} addsym ^{:go/end 905} (fn [^loader/Sym s]
+        (set! sortsym (append sortsym s))
+        (inc! (aget nkind (symkind ldr s))))]
+
+
+    ;; On Mach-O, even with -s, we still need to keep dynamically exported and
+    ;; referenced symbols. We can strip defined local text and data symbols.
+    ;; So *FlagS is applied based on symbol type.
+
+    ;; Add special runtime.text and runtime.etext symbols (which are local).
+    ;; We've already included this symbol in Textp on darwin if ctxt.DynlinkingGo().
+    ;; See data.go:/textaddress
+    ;; NOTE: runtime.text.N symbols (if we split text sections) are not added, though,
+    ;; so we handle them here.
+    (when (not @FlagS)
+      (when (not (.DynlinkingGo ctxt))
+        (let [s (.Lookup ldr "runtime.text" 0)]
+          (when (.IsText (.SymType ldr s))
+            (addsym s))))
+
+
+      (range [n (subslice (.-Sections Segtext) 1)]
+        (let [s (.Lookup ldr (fmt/Sprintf "runtime.text.%d" (+ n 1)) 0)]
+          (if (!= s 0)
+            (addsym s)
+
+            (break))))
+
+
+      (when (not (.DynlinkingGo ctxt))
+        (let [s (.Lookup ldr "runtime.etext" 0)]
+          (when (.IsText (.SymType ldr s))
+            (addsym s)))))
+
+
+
+
+    ;; Add text symbols.
+    (range [_ s (.-Textp ctxt)]
+      (when (and @FlagS (not (.AttrCgoExportDynamic ldr s)))
+        (continue))
+
+      (addsym s))
+
+
+    (let [shouldBeInSymbolTable ^{:go/end 956} (fn ^bool [^loader/Sym s]
+          (when (.AttrNotInSymbolTable ldr s)
+            (return false))
+
+          ^{:go/breaks [[3 955]]} (let [name (.SymName ldr s)] ; TODO: try not to read the name
+            (when (or (== name "") (== (aget name 0) \.))
+              (return false))
+
+            true))]
+
+
+      ;; Add data symbols and external references.
+      (for [s (conv loader/Sym 1)] (< s (conv loader/Sym (.NSym ldr))) (inc! s)
+        (when (not (.AttrReachable ldr s))
+          (continue))
+
+        (let [t (.SymType ldr s)]
+          (when (and (>= t sym/SELFRXSECT) (< t sym/SFirstUnallocated)) ; data sections handled in dodata
+            (when (== t sym/STLSBSS)
+              ;; TLSBSS is not used on darwin. See data.go:allocateDataSections
+              (continue))
+
+            (when (not (shouldBeInSymbolTable s))
+              (continue))
+
+            (when (and @FlagS (not (.AttrCgoExportDynamic ldr s)))
+              (continue))
+
+            (addsym s)
+            (continue))
+
+
+          (switch t
+            (case [sym/SDYNIMPORT sym/SHOSTOBJ sym/SUNDEFEXT]
+              ;; Keep dynamic symbol references even if *FlagS.
+              (addsym s)))
+
+
+          ;; Some 64-bit functions have a "$INODE64" or "$INODE64$UNIX2003" suffix.
+          (when (and (== t sym/SDYNIMPORT) (== (.SymDynimplib ldr s) "/usr/lib/libSystem.B.dylib"))
+            ;; But only on macOS.
+            (when (or (== machoPlatform PLATFORM_MACOS) (== machoPlatform PLATFORM_MACCATALYST))
+              (switch [n (.SymExtname ldr s)] n
+                (case ["fdopendir"]
+                  (switch buildcfg/GOARCH
+                    (case ["amd64"]
+                      (.SetSymExtname ldr s (+ n "$INODE64")))))
+
+                (case ["readdir_r" "getfsstat"]
+                  (switch buildcfg/GOARCH
+                    (case ["amd64"]
+                      (.SetSymExtname ldr s (+ n "$INODE64"))))))))))
+
+
+
+
+
+
+      (set! nsortsym (len sortsym)))))
+
+
+^{:go/end 1033} (go/func machosymorder [^{:tag (* Link)} ctxt]
+  (let [ldr (.-loader ctxt)]
+
+    ;; On Mac OS X Mountain Lion, we must sort exported symbols
+    ;; So we sort them here and pre-allocate dynid for them
+    ;; See https://golang.org/issue/4029
+    (range [_ s (.-dynexp ctxt)]
+      (when (not (.AttrReachable ldr s))
+        (panic "dynexp symbol is not reachable")))
+
+
+    (collectmachosyms ctxt)
+    (sort/Slice (subslice sortsym _ nsortsym) ^{:go/end 1029} (fn ^bool [^int i ^int j]
+        (let [s1 (aget sortsym i)
+            ^{:line 1022} s2 (aget sortsym j)
+            ^{:line 1023} k1 (symkind ldr s1)
+            ^{:line 1024} k2 (symkind ldr s2)]
+          (when (!= k1 k2)
+            (return (< k1 k2)))
+
+          (< (.SymExtname ldr s1) (.SymExtname ldr s2))))) ; Note: unnamed symbols are not added in collectmachosyms
+
+    (range [i s sortsym]
+      (.SetSymDynid ldr s (conv int32 i)))))
+
+
+
+
+
+^{:go/end 1042} (go/func AddMachoSym "AddMachoSym adds s to Mach-O symbol table, used in GenSymLate.\nCurrently only used on ARM64 when external linking.\n" [^{:tag (* loader/Loader)} ldr ^loader/Sym s]
+  (.SetSymDynid ldr s (conv int32 nsortsym))
+  (set! sortsym (append sortsym s))
+  (inc! nsortsym)
+  (inc! (aget nkind (symkind ldr s))))
+
+
+
+
+
+
+^{:go/end 1069} (go/func machoShouldExport "machoShouldExport reports whether a symbol needs to be exported.\n\nWhen dynamically linking, all non-local variables and plugin-exported\nsymbols need to be exported.\n" ^bool [^{:tag (* Link)} ctxt ^{:tag (* loader/Loader)} ldr ^loader/Sym s]
+  (when (or (not (.DynlinkingGo ctxt)) (.AttrLocal ldr s) ^:go/paren (and (.IsContentHashed ldr s) (.IsText (.SymType ldr s))))
+    (return false))
+
+  (when (and (== ^{:go/via [Target]} (.-BuildMode ctxt) BuildModePlugin) (strings/HasPrefix (.SymExtname ldr s) (objabi/PathToPrefix @flagPluginPath)))
+    (return true))
+
+  (let [name (.SymName ldr s)]
+    (when (strings/HasPrefix name "go:itab.")
+      (return true))
+
+    (when (and (strings/HasPrefix name "type:") (not (strings/HasPrefix name "type:.")))
+      ;; reduce runtime typemap pressure, but do not
+      ;; export alg functions (type:.*), as these
+      ;; appear in pclntable.
+      (return true))
+
+    (when (strings/HasPrefix name "go:link.pkghash")
+      (return true))
+
+    (>= (.SymType ldr s) sym/SFirstWritable))) ; only writable sections
+
+
+^{:go/end 1121} (go/func machosymtab [^{:tag (* Link)} ctxt]
+  (let [ldr (.-loader ctxt)
+      ^{:line 1073} symtab (.CreateSymForUpdate ldr ".machosymtab" 0)
+      ^{:line 1074} symstr (.CreateSymForUpdate ldr ".machosymstr" 0)]
+
+    (range [_ s (subslice sortsym _ nsortsym)]
+      (.AddUint32 symtab ^{:go/via [Target]} (.-Arch ctxt) (conv uint32 (.Size symstr)))
+
+      (let [export (machoShouldExport ctxt ldr s)]
+
+        ;; Prefix symbol names with "_" to match the system toolchain.
+        ;; (We used to only prefix C symbols, which is all required for the build.
+        ;; But some tools don't recognize Go symbols as symbols, so we prefix them
+        ;; as well.)
+        (.AddUint8 symstr \_)
+
+        ;; replace "·" as ".", because DTrace cannot handle it.
+        (let [name (strings/ReplaceAll (.SymExtname ldr s) "·" ".")]
+
+          (set! name (mangleABIName ctxt ldr s name))
+          (.Addstring symstr name)
+
+          (if [t (.SymType ldr s)] (or (== t sym/SDYNIMPORT) (== t sym/SHOSTOBJ) (== t sym/SUNDEFEXT)) (do
+              (.AddUint8 symtab 0x01) ; type N_EXT, external symbol
+              (.AddUint8 symtab 0) ; no section
+              (.AddUint16 symtab ^{:go/via [Target]} (.-Arch ctxt) 0) ; desc
+              (.AddUintXX symtab ^{:go/via [Target]} (.-Arch ctxt) 0 (.-PtrSize ^{:go/via [Target]} (.-Arch ctxt)))) ; no value
+            (do
+              (cond (or export (.AttrCgoExportDynamic ldr s))
+                (.AddUint8 symtab 0x0f) ; N_SECT | N_EXT
+                (.AttrCgoExportStatic ldr s)
+                ;; Only export statically, not dynamically. (N_PEXT is like hidden visibility)
+                (.AddUint8 symtab 0x1f) :else ; N_SECT | N_EXT | N_PEXT
+
+                (.AddUint8 symtab 0x0e)) ; N_SECT
+
+              (let [o s]
+                (when [outer (.OuterSym ldr o)] (!= outer 0)
+                  (set! o outer))
+
+                (if (== (.SymSect ldr o) nil) (do
+                    (.Errorf ldr s "missing section for symbol")
+                    (.AddUint8 symtab 0))
+
+                  (.AddUint8 symtab (conv uint8 (.-Extnum (.SymSect ldr o)))))
+
+                (.AddUint16 symtab ^{:go/via [Target]} (.-Arch ctxt) 0) ; desc
+                (.AddUintXX symtab ^{:go/via [Target]} (.-Arch ctxt) (conv uint64 (.SymAddr ldr s)) (.-PtrSize ^{:go/via [Target]} (.-Arch ctxt)))))))))))
+
+
+
+
+^{:go/end 1158} (go/func machodysymtab [^{:tag (* Link)} ctxt ^int64 base]
+  (let [ml (newMachoLoad ^{:go/via [Target]} (.-Arch ctxt) imacho/LC_DYSYMTAB 18)
+
+      ^{:line 1126} n 0]
+    (aset (.-data ml) 0 (conv uint32 n)) ; /* ilocalsym */
+    (aset (.-data ml) 1 (conv uint32 (aget nkind SymKindLocal))) ; /* nlocalsym */
+    (set! n + (aget nkind SymKindLocal))
+
+    (aset (.-data ml) 2 (conv uint32 n)) ; /* iextdefsym */
+    (aset (.-data ml) 3 (conv uint32 (aget nkind SymKindExtdef))) ; /* nextdefsym */
+    (set! n + (aget nkind SymKindExtdef))
+
+    (aset (.-data ml) 4 (conv uint32 n)) ; /* iundefsym */
+    (aset (.-data ml) 5 (conv uint32 (aget nkind SymKindUndef))) ; /* nundefsym */
+
+    (aset (.-data ml) 6 0) ; /* tocoffset */
+    (aset (.-data ml) 7 0) ; /* ntoc */
+    (aset (.-data ml) 8 0) ; /* modtaboff */
+    (aset (.-data ml) 9 0) ; /* nmodtab */
+    (aset (.-data ml) 10 0) ; /* extrefsymoff */
+    (aset (.-data ml) 11 0) ; /* nextrefsyms */
+
+    (let [ldr (.-loader ctxt)
+
+        ;; must match domacholink below
+        ^{:line 1148} s1 (.SymSize ldr (.Lookup ldr ".machosymtab" 0))
+        ^{:line 1149} s2 (.SymSize ldr (.-LinkEditPLT (.-ArchSyms ctxt)))
+        ^{:line 1150} s3 (.SymSize ldr (.-LinkEditGOT (.-ArchSyms ctxt)))]
+      (aset (.-data ml) 12 (conv uint32 (+ base s1))) ; /* indirectsymoff */
+      (aset (.-data ml) 13 (conv uint32 (/ (+ s2 s3) 4))) ; /* nindirectsyms */
+
+      (aset (.-data ml) 14 0) ; /* extreloff */
+      (aset (.-data ml) 15 0) ; /* nextrel */
+      (aset (.-data ml) 16 0) ; /* locreloff */
+      (aset (.-data ml) 17 0)))) ; /* nlocrel */
+
+
+^{:go/end 1218} (go/func doMachoLink ^int64 [^{:tag (* Link)} ctxt]
+  (machosymtab ctxt)
+  (machoDyldInfo ctxt)
+
+  (let [ldr (.-loader ctxt)
+
+      ;; write data that will be linkedit section
+      ^{:line 1167} s1 (.Lookup ldr ".machorebase" 0)
+      ^{:line 1168} s2 (.Lookup ldr ".machobind" 0)
+      ^{:line 1169} s3 (.Lookup ldr ".machosymtab" 0)
+      ^{:line 1170} s4 (.-LinkEditPLT (.-ArchSyms ctxt))
+      ^{:line 1171} s5 (.-LinkEditGOT (.-ArchSyms ctxt))
+      ^{:line 1172} s6 (.Lookup ldr ".machosymstr" 0)
+
+      ^{:line 1174} size (+ (.SymSize ldr s1) (.SymSize ldr s2) (.SymSize ldr s3) (.SymSize ldr s4) (.SymSize ldr s5) (.SymSize ldr s6))]
+
+    ;; Force the linkedit section to end on a 16-byte
+    ;; boundary. This allows pure (non-cgo) Go binaries
+    ;; to be code signed correctly.
+    ;;
+    ;; Apple's codesign_allocate (a helper utility for
+    ;; the codesign utility) can do this fine itself if
+    ;; it is run on a dynamic Mach-O binary. However,
+    ;; when it is run on a pure (non-cgo) Go binary, where
+    ;; the linkedit section is mostly empty, it fails to
+    ;; account for the extra padding that it itself adds
+    ;; when adding the LC_CODE_SIGNATURE load command
+    ;; (which must be aligned on a 16-byte boundary).
+    ;;
+    ;; By forcing the linkedit section to end on a 16-byte
+    ;; boundary, codesign_allocate will not need to apply
+    ;; any alignment padding itself, working around the
+    ;; issue.
+    (when (!= (% size 16) 0)
+      (let [n (- 16 (% size 16))
+          ^{:line 1195} s6b (.MakeSymbolUpdater ldr s6)]
+        ^{:go/via [extSymPayload]} (.Grow s6b (+ (.Size s6b) n))
+        (.SetSize s6b (+ (.Size s6b) n))
+        (set! size + n)))
+
+
+    (when (> size 0)
+      (set! linkoff (+ (Rnd (conv int64 (+ (conv uint64 HEADR) (.-Length Segtext))) @FlagRound) (Rnd (conv int64 (.-Filelen Segrelrodata)) @FlagRound) (Rnd (conv int64 (.-Filelen Segdata)) @FlagRound) (Rnd (conv int64 (.-Filelen Segdwarf)) @FlagRound)))
+      (.SeekSet (.-Out ctxt) linkoff)
+
+      (.Write (.-Out ctxt) (.Data ldr s1))
+      (.Write (.-Out ctxt) (.Data ldr s2))
+      (.Write (.-Out ctxt) (.Data ldr s3))
+      (.Write (.-Out ctxt) (.Data ldr s4))
+      (.Write (.-Out ctxt) (.Data ldr s5))
+      (.Write (.-Out ctxt) (.Data ldr s6))
+
+      ;; Add code signature if necessary. This must be the last.
+      (let [s7 (machoCodeSigSym ctxt (+ linkoff size))]
+        (set! size + (.SymSize ldr s7))))
+
+
+    (Rnd size @FlagRound)))
+
+
+^{:go/end 1272} (go/func machorelocsect [^{:tag (* Link)} ctxt ^{:tag (* OutBuf)} out ^{:tag (* sym/Section)} sect ^{:tag (slice loader/Sym)} syms]
+  ;; If main section has no bits, nothing to relocate.
+  (when (>= (.-Vaddr sect) (+ (.-Vaddr (.-Seg sect)) (.-Filelen (.-Seg sect))))
+    (return))
+
+  (let [ldr (.-loader ctxt)]
+
+    (range [i s syms]
+      (when (not (.AttrReachable ldr s))
+        (continue))
+
+      (when (>= (conv uint64 (.SymValue ldr s)) (.-Vaddr sect))
+        (set! syms (subslice syms i))
+        (break)))
+
+
+
+    (let [eaddr (+ (.-Vaddr sect) (.-Length sect))]
+      (range [_ s syms]
+        (when (not (.AttrReachable ldr s))
+          (continue))
+
+        (when (>= (.SymValue ldr s) (conv int64 eaddr))
+          (break))
+
+
+        ;; Compute external relocations on the go, and pass to Machoreloc1
+        ;; to stream out.
+        (let [relocs (.Relocs ldr s)]
+          (for [ri 0] (< ri (.Count relocs)) (inc! ri)
+            (let [r (.At relocs ri)
+                (values rr ok) (extreloc ctxt ldr s r)]
+              (when (not ok)
+                (continue))
+
+              (when (== (.-Xsym rr) 0)
+                (.Errorf ldr s "missing xsym in relocation")
+                (continue))
+
+              (when (not (.AttrReachable ldr (.-Xsym rr)))
+                (.Errorf ldr s "unreachable reloc %d (%s) target %v" (.Type r) (sym/RelocName ^{:go/via [Target]} (.-Arch ctxt) (.Type r)) (.SymName ldr (.-Xsym rr))))
+
+              (when (not ((.-Machoreloc1 thearch) ^{:go/via [Target]} (.-Arch ctxt) out ldr s rr (conv int64 (- (conv uint64 (+ (.SymValue ldr s) (conv int64 ^{:go/via [Reloc]} (.Off r)))) (.-Vaddr sect)))))
+                (.Errorf ldr s "unsupported obj reloc %d (%s)/%d to %s" (.Type r) (sym/RelocName ^{:go/via [Target]} (.-Arch ctxt) (.Type r)) ^{:go/via [Reloc]} (.Siz r) (.SymName ldr (.Sym r))))))))
+
+
+
+
+      ;; sanity check
+      (when (!= (conv uint64 (.Offset out)) (+ (.-Reloff sect) (.-Rellen sect)))
+        (panic "machorelocsect: size mismatch")))))
+
+
+
+^{:go/end 1306} (go/func machoEmitReloc [^{:tag (* Link)} ctxt]
+  (while (!= (bit-and (.Offset (.-Out ctxt)) 7) 0)
+    (.Write8 (.-Out ctxt) 0))
+
+
+  (sizeExtRelocs ctxt (.-MachorelocSize thearch))
+  (let [(values relocSect wg) (relocSectFn ctxt machorelocsect)]
+
+    (relocSect ctxt (aget (.-Sections Segtext) 0) (.-Textp ctxt))
+    (range [_ sect (subslice (.-Sections Segtext) 1)]
+      (if (== (.-Name sect) ".text")
+        (relocSect ctxt sect (.-Textp ctxt))
+
+        (relocSect ctxt sect (.-datap ctxt))))
+
+
+    (range [_ sect (.-Sections Segrelrodata)]
+      (relocSect ctxt sect (.-datap ctxt)))
+
+    (range [_ sect (.-Sections Segdata)]
+      (relocSect ctxt sect (.-datap ctxt)))
+
+    (for [i 0] (< i (len (.-Sections Segdwarf))) (inc! i)
+      (let [sect (aget (.-Sections Segdwarf) i)
+          ^{:line 1298} si (aget dwarfp i)]
+        (when (or (!= (.secSym si) (.-Sym sect))
+            (!= (.SymSect (.-loader ctxt) (.secSym si)) sect))
+          (panic "inconsistency between dwarfp and Segdwarf"))
+
+        (relocSect ctxt sect (.-syms si))))
+
+    (.Wait wg)))
+
+
+
+
+^{:go/end 1323} (go/func hostobjMachoPlatform "hostobjMachoPlatform returns the first platform load command found\nin the host object, if any.\n" [^{:tag (* Hostobj)} h] :results [(* MachoPlatformLoad) error]
+  (let [(values f err) (os/Open (.-file h))]
+    (when (!= err nil)
+      (return nil (fmt/Errorf "%s: failed to open host object: %v\n" (.-file h) err)))
+
+    (defer (.Close f))
+    (let [sr (io/NewSectionReader f (.-off h) (.-length h))
+        (values m ^:assign err) (macho/NewFile sr)]
+      (when (!= err nil)
+        ;; Not a valid Mach-O file.
+        (return nil nil))
+
+      (peekMachoPlatform m))))
+
+
+
+
+^{:go/end 1361} (go/func peekMachoPlatform "peekMachoPlatform returns the first LC_VERSION_MIN_* or LC_BUILD_VERSION\nload command found in the Mach-O file, if any.\n" [^{:tag (* macho/File)} m] :results [(* MachoPlatformLoad) error]
+  (range [_ cmd (.-Loads m)]
+    (let [raw (.Raw cmd)
+        ^{:line 1330} ml ^{:go/breaks [2]} (lit MachoLoad
+          :type_ (.Uint32 (.-ByteOrder m) raw))
+
+        ;; Skip the type and command length.
+        ^{:line 1334} data (subslice raw 8)
+        ^{:line 1335 :tag MachoPlatform} p (zero MachoPlatform)]
+      (switch (.-type_ ml)
+        (case [imacho/LC_VERSION_MIN_IPHONEOS]
+          (set! p PLATFORM_IOS))
+        (case [imacho/LC_VERSION_MIN_MACOSX]
+          (set! p PLATFORM_MACOS))
+        (case [imacho/LC_VERSION_MIN_WATCHOS]
+          (set! p PLATFORM_WATCHOS))
+        (case [imacho/LC_VERSION_MIN_TVOS]
+          (set! p PLATFORM_TVOS))
+        (case [imacho/LC_BUILD_VERSION]
+          (set! p (conv MachoPlatform (.Uint32 (.-ByteOrder m) data))))
+        (default
+          (continue)))
+
+      (set! (.-data ml) (make (slice uint32) (/ (len data) 4)))
+      (let [r (bytes/NewReader data)]
+        (when [err (binary/Read r (.-ByteOrder m) (addr (.-data ml)))] (!= err nil)
+          (return nil err))
+
+        ^{:go/breaks [2]} (return (addr ^{:go/breaks [2 4]} (lit MachoPlatformLoad
+              :platform p
+              :cmd ml))
+          nil))))
+
+  (return nil nil))
+
+
+
+
+
+
+
+
+
+(go/type machoRebaseRecord "A rebase entry tells the dynamic linker the data at sym+off needs to be\nrelocated when the in-memory image moves. (This is somewhat like, say,\nELF R_X86_64_RELATIVE).\nFor now, the only kind of entry we support is that the data is an absolute\naddress. That seems all we need.\nIn the binary it uses a compact stateful bytecode encoding. So we record\nentries as we go and build the table at the end.\n" (struct
+    ^{:line 1371 :tag loader/Sym} sym
+    ^{:line 1372 :tag int64} off))
+
+
+(go/var ^{:tag (slice machoRebaseRecord)} machorebase)
+
+^{:go/end 1379} (go/func MachoAddRebase [^loader/Sym s ^int64 off]
+  (set! machorebase (append machorebase (lit machoRebaseRecord s off))))
+
+
+
+
+
+
+
+
+
+
+(go/type machoBindRecord "A bind entry tells the dynamic linker the data at sym+off should be bound\nto the address of the target symbol, which is a dynamic import.\nsym is the symbol containing the pointer (e.g. the GOT or a data symbol),\noff is the offset within that symbol, and targ is the dynamic import target.\nFor now, the only kind of entry we support is that the data is an absolute\naddress. That seems all we need.\nIn the binary it uses a compact stateful bytecode encoding. So we record\nentries as we go and build the table at the end.\n" (struct
+    ^{:line 1390 :tag loader/Sym} sym
+    ^{:line 1391 :tag int64} off
+    ^{:line 1392 :tag loader/Sym} targ))
+
+
+(go/var ^{:tag (slice machoBindRecord)} machobind)
+
+^{:go/end 1399} (go/func MachoAddBind [^loader/Sym sym ^int64 off ^loader/Sym targ]
+  (set! machobind (append machobind (lit machoBindRecord sym off targ))))
+
+
+
+
+
+^{:go/end 1497} (go/func machoDyldInfo "Generate data for the dynamic linker, used in LC_DYLD_INFO_ONLY load command.\nSee mach-o/loader.h, struct dyld_info_command, for the encoding.\ne.g. https://opensource.apple.com/source/xnu/xnu-6153.81.5/EXTERNAL_HEADERS/mach-o/loader.h\n" [^{:tag (* Link)} ctxt]
+  (let [ldr (.-loader ctxt)
+      ^{:line 1406} rebase (.CreateSymForUpdate ldr ".machorebase" 0)
+      ^{:line 1407} bind (.CreateSymForUpdate ldr ".machobind" 0)]
+
+    (when (not (and ^{:go/via [Target]} (.IsPIE ctxt) ^{:go/via [Target]} (.IsInternal ctxt)))
+      (return))
+
+
+    (let [segId ^{:go/end 1426} (fn ^uint8 [^{:tag (* sym/Segment)} seg]
+          (switch seg
+            (case [(addr Segtext)]
+              (return 1))
+            (case [(addr Segrelrodata)]
+              (return 2))
+            (case [(addr Segdata)]
+              (when (> (.-Length Segrelrodata) 0)
+                (return 3))
+
+              (return 2)))
+
+          (panic "unknown segment"))
+
+
+        ^{:line 1428} dylibId ^{:go/end 1436} (fn ^int [^loader/Sym s]
+          (let [slib (.SymDynimplib ldr s)]
+            (range [i lib dylib]
+              (when (== lib slib)
+                (return (+ i 1))))
+
+
+            ^{:line 1435} BIND_SPECIAL_DYLIB_FLAT_LOOKUP))] ; don't know where it is from
+
+
+      ;; Rebase table.
+      ;; TODO: use more compact encoding. The encoding is stateful, and
+      ;; we can use delta encoding.
+      (.AddUint8 rebase (bit-or REBASE_OPCODE_SET_TYPE_IMM REBASE_TYPE_POINTER))
+      (range [_ r machorebase]
+        (let [seg (.-Seg (.SymSect ldr (.-sym r)))
+            ^{:line 1444} off (- (conv uint64 (+ (.SymValue ldr (.-sym r)) (.-off r))) (.-Vaddr seg))]
+          (.AddUint8 rebase (bit-or REBASE_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB (segId seg)))
+          (.AddUleb rebase off)
+
+          (.AddUint8 rebase (bit-or REBASE_OPCODE_DO_REBASE_IMM_TIMES 1))))
+
+      (.AddUint8 rebase REBASE_OPCODE_DONE)
+      (let [sz (Rnd (.Size rebase) 8)]
+        ^{:go/via [extSymPayload]} (.Grow rebase sz)
+        (.SetSize rebase sz)
+
+        ;; Bind table.
+        ;; TODO: compact encoding, as above.
+        ;; TODO: lazy binding?
+        (.AddUint8 bind (bit-or BIND_OPCODE_SET_TYPE_IMM BIND_TYPE_POINTER))
+        (range [_ r machobind]
+          (let [seg (.-Seg (.SymSect ldr (.-sym r)))
+              ^{:line 1461} off (- (conv uint64 (+ (.SymValue ldr (.-sym r)) (.-off r))) (.-Vaddr seg))]
+            (.AddUint8 bind (bit-or BIND_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB (segId seg)))
+            (.AddUleb bind off)
+
+            (let [d (dylibId (.-targ r))]
+              (cond (and (> d 0) (< d 128))
+                (.AddUint8 bind (bit-or BIND_OPCODE_SET_DYLIB_ORDINAL_IMM (bit-and (conv uint8 d) 0xf)))
+                (>= d 128) (do
+                  (.AddUint8 bind BIND_OPCODE_SET_DYLIB_ORDINAL_ULEB)
+                  (.AddUleb bind (conv uint64 d))) :else
+                ;; d <= 0
+                (.AddUint8 bind (bit-or BIND_OPCODE_SET_DYLIB_SPECIAL_IMM (bit-and (conv uint8 d) 0xf))))
+
+
+              (let [flags (conv uint8 0)]
+                (when (.SymWeakBinding ldr (.-targ r))
+                  (set! flags bit-or BIND_SYMBOL_FLAGS_WEAK_IMPORT))
+
+                (.AddUint8 bind (bit-or BIND_OPCODE_SET_SYMBOL_TRAILING_FLAGS_IMM flags))
+                ;; target symbol name as a C string, with _ prefix
+                (.AddUint8 bind \_)
+                (.Addstring bind (.SymExtname ldr (.-targ r)))
+
+                (.AddUint8 bind BIND_OPCODE_DO_BIND)))))
+
+        (.AddUint8 bind BIND_OPCODE_DONE)
+        (set! sz (Rnd (.Size bind) 16)) ; make it 16-byte aligned, see the comment in doMachoLink
+        ^{:go/via [extSymPayload]} (.Grow bind sz)
+        (.SetSize bind sz)))))
+
+;; TODO: export table.
+;; The symbols names are encoded as a trie. I'm really too lazy to do that
+;; for now.
+;; Without it, the symbols are not dynamically exported, so they cannot be
+;; e.g. dlsym'd. But internal linking is not the default in that case, so
+;; it is fine.
+
+
+
+
+
+^{:go/end 1512} (go/func machoCodeSigSym "machoCodeSigSym creates and returns a symbol for code signature.\nThe symbol context is left as zeros, which will be generated at the end\n(as it depends on the rest of the file).\n" ^loader/Sym [^{:tag (* Link)} ctxt ^int64 codeSize]
+  (let [ldr (.-loader ctxt)
+      ^{:line 1504} cs (.CreateSymForUpdate ldr ".machocodesig" 0)]
+    (when (or (not (.NeedCodeSign ctxt)) ^{:go/via [Target]} (.IsExternal ctxt))
+      (return (.Sym cs)))
+
+    (let [sz (codesign/Size codeSize "a.out")]
+      ^{:go/via [extSymPayload]} (.Grow cs sz)
+      (.SetSize cs sz)
+      (.Sym cs))))
+
+
+
+
+^{:go/end 1603} (go/func machoCodeSign "machoCodeSign code-signs Mach-O file fname with an ad-hoc signature.\nThis is used for updating an external linker generated binary.\n" ^error [^{:tag (* Link)} ctxt ^string fname]
+  (let [(values f err) (os/OpenFile fname os/O_RDWR 0)]
+    (when (!= err nil)
+      (return err))
+
+    (defer (.Close f))
+
+    (let [(values mf ^:assign err) (macho/NewFile f)]
+      (when (!= err nil)
+        (return err))
+
+      (when (!= ^{:go/via [FileHeader]} (.-Magic mf) macho/Magic64)
+        (Exitf "not 64-bit Mach-O file: %s" fname))
+
+
+      ;; Find existing LC_CODE_SIGNATURE and __LINKEDIT segment
+      (let [(values ^int64 sigOff ^int64 sigSz ^int64 csCmdOff ^int64 linkeditOff) (zero int64)
+          (values ^{:tag (* macho/Segment)} linkeditSeg ^{:tag (* macho/Segment)} textSeg) (zero (* macho/Segment))
+          ^{:line 1534} loadOff (conv int64 machoHeaderSize64)
+          ^{:line 1535} get32 (.-Uint32 (.-ByteOrder mf))]
+        (range [_ l (.-Loads mf)]
+          (let [data (.Raw l)
+              (values cmd sz) (values (get32 data) (get32 (subslice data 4)))]
+            (when (== cmd imacho/LC_CODE_SIGNATURE)
+              (set! sigOff (conv int64 (get32 (subslice data 8))))
+              (set! sigSz (conv int64 (get32 (subslice data 12))))
+              (set! csCmdOff loadOff))
+
+            (when [(values seg ok) (assert (* macho/Segment) l)] ok
+              (switch ^{:go/via [SegmentHeader]} (.-Name seg)
+                (case ["__LINKEDIT"]
+                  (set! linkeditSeg seg)
+                  (set! linkeditOff loadOff))
+                (case ["__TEXT"]
+                  (set! textSeg seg))))
+
+
+            (set! loadOff + (conv int64 sz))))
+
+
+        (when (== sigOff 0)
+          ;; The C linker doesn't generate a signed binary, for some reason.
+          ;; Skip.
+          (return nil))
+
+
+        (let [(values fi ^:assign err) (.Stat f)]
+          (when (!= err nil)
+            (return err))
+
+          (when (!= (+ sigOff sigSz) (.Size fi))
+            ;; We don't expect anything after the signature (this will invalidate
+            ;; the signature anyway.)
+            (return (fmt/Errorf "unexpected content after code signature")))
+
+
+          (let [sz (codesign/Size sigOff "a.out")]
+            (when (!= sz sigSz)
+              ;; Update the load command,
+              (let [^{:tag (array 8 byte)} tmp (zero (array 8 byte))]
+                (.PutUint32 (.-ByteOrder mf) (subslice tmp _ 4) (conv uint32 sz))
+                (set! (values _ err) (.WriteAt f (subslice tmp _ 4) (+ csCmdOff 12)))
+                (when (!= err nil)
+                  (return err))
+
+
+                ;; Uodate the __LINKEDIT segment.
+                (let [segSz (- (+ sigOff sz) (conv int64 ^{:go/via [SegmentHeader]} (.-Offset linkeditSeg)))]
+                  (.PutUint64 (.-ByteOrder mf) (subslice tmp _ 8) (conv uint64 segSz))
+                  (set! (values _ err) (.WriteAt f (subslice tmp _ 8) (+ linkeditOff (conv int64 (unsafe/Offsetof (.-Memsz (lit macho/Segment64)))))))
+                  (when (!= err nil)
+                    (return err))
+
+                  (set! (values _ err) (.WriteAt f (subslice tmp _ 8) (+ linkeditOff (conv int64 (unsafe/Offsetof (.-Filesz (lit macho/Segment64)))))))
+                  (when (!= err nil)
+                    (return err)))))
+
+
+
+            (let [cs (make (slice byte) sz)]
+              (codesign/Sign cs f "a.out" sigOff (conv int64 ^{:go/via [SegmentHeader]} (.-Offset textSeg)) (conv int64 ^{:go/via [SegmentHeader]} (.-Filesz textSeg)) (or ^{:go/via [Target]} (.IsExe ctxt) ^{:go/via [Target]} (.IsPIE ctxt)))
+              (set! (values _ err) (.WriteAt f cs sigOff))
+              (when (!= err nil)
+                (return err))
+
+              (set! err (.Truncate f (+ sigOff sz)))
+              ^{:line 1602} err)))))))

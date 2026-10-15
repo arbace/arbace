@@ -1,0 +1,3175 @@
+;; Copyright 2016 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.cmd.compile.internal.ssa) (go/file "prove.go" :imports [
+
+
+    ^{:line 8} [types "cmd/compile/internal/types"]
+    ^{:line 9} [src "cmd/internal/src"]
+    ^{:line 10} [cmp "cmp"]
+    ^{:line 11} [fmt "fmt"]
+    ^{:line 12} [math "math"]
+    ^{:line 13} [bits "math/bits"]
+    ^{:line 14} [slices "slices"]
+    ^{:line 15} [strings "strings"]])
+
+
+(go/type branch int)
+
+(go/const
+  ^{:line 21} [^{:tag branch :val 0} unknown iota]
+  ^{:line 22} [^{:val 1} positive]
+  ^{:line 23} [^{:val 2} negative]
+
+
+
+  ^{:line 27} [^{:val 3 :doc "The outedges from a jump table are jumpTable0,\njumpTable0+1, jumpTable0+2, etc. There could be an\narbitrary number so we can't list them all here.\n"} jumpTable0])
+
+
+^{:go/end 41} (go/method String ^string [^branch b]
+  (switch b
+    (case [unknown]
+      (return "unk"))
+    (case [positive]
+      (return "pos"))
+    (case [negative]
+      (return "neg"))
+    (default
+      (return (fmt/Sprintf "jmp%d" (- b jumpTable0))))))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+(go/type relation "relation represents the set of possible relations between\npairs of variables (v, w). Without a priori knowledge the\nmask is lt | eq | gt meaning v can be less than, equal to or\ngreater than w. When the execution path branches on the condition\n`v op w` the set of relations is updated to exclude any\nrelation not possible due to `v op w` being true (or false).\n\nE.g.\n\n\tr := relation(...)\n\n\tif v < w {\n\t  newR := r & lt\n\t}\n\tif v >= w {\n\t  newR := r & (eq|gt)\n\t}\n\tif v != w {\n\t  newR := r & (lt|gt)\n\t}\n" uint)
+
+(go/const
+  ^{:line 66} [^{:tag relation :val 1} lt (<< 1 iota)]
+  ^{:line 67} [^{:val 2} eq]
+  ^{:line 68} [^{:val 4} gt])
+
+
+(go/var relationStrings (lit (array ... string)
+    ^{:line 72} [0 "none"] [lt "<"] [eq "=="] [(bit-or lt eq) "<="]
+    ^{:line 73} [gt ">"] [(bit-or gt lt) "!="] [(bit-or gt eq) ">="] [(bit-or gt eq lt) "any"]))
+
+
+^{:go/end 81} (go/method String ^string [^relation r]
+  (when (< r (conv relation (len relationStrings)))
+    (return (aget relationStrings r)))
+
+  (fmt/Sprintf "relation(%d)" (conv uint r)))
+
+
+
+
+
+
+(go/type domain "domain represents the domain of a variable pair in which a set\nof relations is known. For example, relations learned for unsigned\npairs cannot be transferred to signed pairs because the same bit\nrepresentation can mean something else.\n" uint)
+
+(go/const
+  ^{:line 90} [^{:tag domain :val 1} signed (<< 1 iota)]
+  ^{:line 91} [^{:val 2} unsigned]
+  ^{:line 92} [^{:val 4} pointer]
+  ^{:line 93} [^{:val 8} boolean])
+
+
+(go/var domainStrings ^{:go/breaks [2]} (lit (array ... string)
+    "signed" "unsigned" "pointer" "boolean"))
+
+
+^{:go/end 118} (go/method String ^string [^domain d]
+  (let [s ""]
+    (range [i ds domainStrings]
+      (when (!= (bit-and d ^domain (<< 1 (conv uint i))) 0)
+        (when (!= (len s) 0)
+          (set! s + "|"))
+
+        (set! s + ds)
+        (set! d bit-and-not ^domain (<< 1 (conv uint i)))))
+
+
+    (when (!= d 0)
+      (when (!= (len s) 0)
+        (set! s + "|"))
+
+      (set! s + (fmt/Sprintf "0x%x" (conv uint d))))
+
+    ^{:line 117} s))
+
+
+
+
+
+
+
+
+
+
+(go/type limit "a limit records known upper and lower bounds for a value.\n\nIf we have min>max or umin>umax, then this limit is\ncalled \"unsatisfiable\". When we encounter such a limit, we\nknow that any code for which that limit applies is unreachable.\nWe don't particularly care how unsatisfiable limits propagate,\nincluding becoming satisfiable, because any optimization\ndecisions based on those limits only apply to unreachable code.\n" (struct
+    ^{:line 129 :tag int64} min ^int64 max ; min <= value <= max, signed
+    ^{:line 130 :tag uint64} umin ^uint64 umax)) ; umin <= value <= umax, unsigned
+;; For booleans, we use 0==false, 1==true for both ranges
+;; For pointers, we use 0,0,0,0 for nil and minInt64,maxInt64,1,maxUint64 for nonnil
+
+
+^{:go/end 137} (go/method String ^string [^limit l]
+  (fmt/Sprintf "sm,SM=%d,%d um,UM=%d,%d" (.-min l) (.-max l) (.-umin l) (.-umax l)))
+
+
+^{:go/end 145} (go/method intersect ^limit [^limit l ^limit l2]
+  (set! (.-min l) (max (.-min l) (.-min l2)))
+  (set! (.-umin l) (max (.-umin l) (.-umin l2)))
+  (set! (.-max l) (min (.-max l) (.-max l2)))
+  (set! (.-umax l) (min (.-umax l) (.-umax l2)))
+  ^{:line 144} l)
+
+
+^{:go/end 150} (go/method signedMin ^limit [^limit l ^int64 m]
+  (set! (.-min l) (max (.-min l) m))
+  ^{:line 149} l)
+
+
+^{:go/end 156} (go/method signedMinMax ^limit [^limit l ^int64 minimum ^int64 maximum]
+  (set! (.-min l) (max (.-min l) minimum))
+  (set! (.-max l) (min (.-max l) maximum))
+  ^{:line 155} l)
+
+
+^{:go/end 161} (go/method unsignedMin ^limit [^limit l ^uint64 m]
+  (set! (.-umin l) (max (.-umin l) m))
+  ^{:line 160} l)
+
+^{:go/end 165} (go/method unsignedMax ^limit [^limit l ^uint64 m]
+  (set! (.-umax l) (min (.-umax l) m))
+  ^{:line 164} l)
+
+^{:go/end 170} (go/method unsignedMinMax ^limit [^limit l ^uint64 minimum ^uint64 maximum]
+  (set! (.-umin l) (max (.-umin l) minimum))
+  (set! (.-umax l) (min (.-umax l) maximum))
+  ^{:line 169} l)
+
+
+^{:go/end 174} (go/method nonzero ^bool [^limit l]
+  (or (> (.-min l) 0) (> (.-umin l) 0) (< (.-max l) 0)))
+
+^{:go/end 177} (go/method maybeZero ^bool [^limit l]
+  (not (.nonzero l)))
+
+^{:go/end 180} (go/method nonnegative ^bool [^limit l]
+  (>= (.-min l) 0))
+
+^{:go/end 183} (go/method unsat ^bool [^limit l]
+  (or (> (.-min l) (.-max l)) (> (.-umin l) (.-umax l))))
+
+
+
+
+
+^{:go/end 200} (go/func safeAdd "If x and y can add without overflow or underflow\n(using b bits), safeAdd returns x+y, true.\nOtherwise, returns 0, false.\n" [^int64 x ^int64 y ^uint b] :results [int64 bool]
+  (let [s (+ x y)]
+    (when (and (>= x 0) (>= y 0) (< s 0))
+      (return 0 false)) ; 64-bit overflow
+
+    (when (and (< x 0) (< y 0) (>= s 0))
+      (return 0 false)) ; 64-bit underflow
+
+    (when (not (fitsInBits s b))
+      (return 0 false))
+
+    (return s true)))
+
+
+
+^{:go/end 212} (go/func safeAddU "same as safeAdd for unsigned arithmetic.\n" [^uint64 x ^uint64 y ^uint b] :results [uint64 bool]
+  (let [s (+ x y)]
+    (when (or (< s x) (< s y))
+      (return 0 false)) ; 64-bit overflow
+
+    (when (not (fitsInBitsU s b))
+      (return 0 false))
+
+    (return s true)))
+
+
+
+^{:go/end 224} (go/func safeSub "same as safeAdd but for subtraction.\n" [^int64 x ^int64 y ^uint b] :results [int64 bool]
+  (when (== y math/MinInt64)
+    (when (== x math/MaxInt64)
+      (return 0 false)) ; 64-bit overflow
+
+    (inc! x)
+    (inc! y))
+
+  (safeAdd x (- y) b))
+
+
+
+^{:go/end 236} (go/func safeSubU "same as safeAddU but for subtraction.\n" [^uint64 x ^uint64 y ^uint b] :results [uint64 bool]
+  (when (< x y)
+    (return 0 false)) ; 64-bit underflow
+
+  (let [s (- x y)]
+    (when (not (fitsInBitsU s b))
+      (return 0 false))
+
+    (return s true)))
+
+
+
+^{:go/end 246} (go/func fitsInBits "fitsInBits reports whether x fits in b bits (signed).\n" ^bool [^int64 x ^uint b]
+  (when (== b 64)
+    (return true))
+
+  (let [m (<< (conv int64 -1) (- b 1))
+      ^{:line 244} M (- (- m) 1)]
+    (and (>= x m) (<= x M))))
+
+
+
+^{:go/end 251} (go/func fitsInBitsU "fitsInBitsU reports whether x fits in b bits (unsigned).\n" ^bool [^uint64 x ^uint b]
+  (== (>> x b) 0))
+
+
+^{:go/end 255} (go/func noLimit ^limit []
+  (noLimitForBitsize 64))
+
+
+^{:go/end 259} (go/func noLimitForBitsize ^limit [^uint bitsize]
+  (lit limit :min (- ^int64 (<< 1 (- bitsize 1))) :max (- ^int64 (<< 1 (- bitsize 1)) 1) :umin 0 :umax (- ^uint64 (<< 1 bitsize) 1)))
+
+
+^{:go/end 274} (go/func convertIntWithBitsize :type-params [^{:tag (| uint64 int64)} Target ^{:go/grouped false :tag (| uint64 int64)} Source] ^Target [^Source x ^uint bitsize]
+  (switch bitsize
+    (case [64]
+      (return (conv Target x)))
+    (case [32]
+      (return (conv Target (conv int32 x))))
+    (case [16]
+      (return (conv Target (conv int16 x))))
+    (case [8]
+      (return (conv Target (conv int8 x))))
+    (default
+      (panic "unreachable"))))
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 290} (go/method unsignedFixedLeadingBits "unsignedFixedLeadingBits extracts the all the most significant fixed bits from the limit.\nfixed and count are an other way to represent a limit, you can convert them to a limit as follows:\n\n\tumin = fixed\n\tumax = fixed | (1<<(64-count) - 1)\n\nIn order to be useful for bitmanip analysis fixed and count are a coarser tool than a limit:\n1. the varying section (umax-umin) is always one less than a power of two\n2. that section is naturally aligned inside the 64-bit space\n" [^limit l] :results [^uint64 fixed ^uint count]
+  (let [varying (conv uint (bits/Len64 (bit-xor (.-umin l) (.-umax l))))]
+    (set! count (conv uint (bits/LeadingZeros64 (bit-xor (.-umin l) (.-umax l)))))
+    (set! fixed (bit-and-not (.-umin l) (- ^uint64 (<< 1 varying) 1)))
+    (return)))
+
+
+
+
+^{:go/end 332} (go/method add "add returns the limit obtained by adding a value with limit l\nto a value with limit l2. The result must fit in b bits.\n" ^limit [^limit l ^limit l2 ^uint b]
+  (let [(values ^bool isLConst ^bool isL2Const) (zero bool)
+      (values ^uint64 lConst ^uint64 l2Const) (zero uint64)]
+    (cond (== (.-min l) (.-max l)) (do
+        (set! isLConst true)
+        (set! lConst ((inst ^{:inst [uint64 int64]} convertIntWithBitsize uint64) (.-min l) b)))
+      (== (.-umin l) (.-umax l)) (do
+        (set! isLConst true)
+        (set! lConst (.-umin l))))
+
+    (cond (== (.-min l2) (.-max l2)) (do
+        (set! isL2Const true)
+        (set! l2Const ((inst ^{:inst [uint64 int64]} convertIntWithBitsize uint64) (.-min l2) b)))
+      (== (.-umin l2) (.-umax l2)) (do
+        (set! isL2Const true)
+        (set! l2Const (.-umin l2))))
+
+    (when (and isLConst isL2Const)
+      (let [r (+ lConst l2Const)]
+        (set! r bit-and (- (<< (conv uint64 1) b) 1))
+        (let [int64r ((inst ^{:inst [int64 uint64]} convertIntWithBitsize int64) r b)]
+          (return (lit limit :min int64r :max int64r :umin r :umax r)))))
+
+
+    (let [r (noLimit)
+        (values min minOk) (safeAdd (.-min l) (.-min l2) b)
+        (values max maxOk) (safeAdd (.-max l) (.-max l2) b)]
+      (when (and minOk maxOk)
+        (set! (.-min r) min)
+        (set! (.-max r) max))
+
+      (let [(values umin uminOk) (safeAddU (.-umin l) (.-umin l2) b)
+          (values umax umaxOk) (safeAddU (.-umax l) (.-umax l2) b)]
+        (when (and uminOk umaxOk)
+          (set! (.-umin r) umin)
+          (set! (.-umax r) umax))
+
+        ^{:line 331} r))))
+
+
+
+^{:go/end 350} (go/method sub "same as add but for subtraction.\n" ^limit [^limit l ^limit l2 ^uint b]
+  (let [r (noLimit)
+      (values min minOk) (safeSub (.-min l) (.-max l2) b)
+      (values max maxOk) (safeSub (.-max l) (.-min l2) b)]
+    (when (and minOk maxOk)
+      (set! (.-min r) min)
+      (set! (.-max r) max))
+
+    (let [(values umin uminOk) (safeSubU (.-umin l) (.-umax l2) b)
+        (values umax umaxOk) (safeSubU (.-umax l) (.-umin l2) b)]
+      (when (and uminOk umaxOk)
+        (set! (.-umin r) umin)
+        (set! (.-umax r) umax))
+
+      ^{:line 349} r)))
+
+
+
+^{:go/end 372} (go/method mul "same as add but for multiplication.\n" ^limit [^limit l ^limit l2 ^uint b]
+  (let [r (noLimit)
+      (values umaxhi umaxlo) (bits/Mul64 (.-umax l) (.-umax l2))]
+    (when (and (== umaxhi 0) (fitsInBitsU umaxlo b))
+      (set! (.-umax r) umaxlo)
+      (set! (.-umin r) (* (.-umin l) (.-umin l2))))
+    ;; Note: if the code containing this multiply is
+    ;; unreachable, then we may have umin>umax, and this
+    ;; multiply may overflow.  But that's ok for
+    ;; unreachable code. If this code is reachable, we
+    ;; know umin<=umax, so this multiply will not overflow
+    ;; because the max multiply didn't.
+
+    ;; Signed is harder, so don't bother. The only useful
+    ;; case is when we know both multiplicands are nonnegative,
+    ;; but that case is handled above because we would have then
+    ;; previously propagated signed info to the unsigned domain,
+    ;; and will propagate it back after the multiply.
+    ^{:line 371} r))
+
+
+
+^{:go/end 384} (go/method exp2 "Similar to add, but compute 1 << l if it fits without overflow in b bits.\n" ^limit [^limit l ^uint b]
+  (let [r (noLimit)]
+    (when (< (.-umax l) (conv uint64 b))
+      (set! (.-umin r) ^uint64 (<< 1 (.-umin l)))
+      (set! (.-umax r) ^uint64 (<< 1 (.-umax l))))
+    ;; Same as above in mul, signed<->unsigned propagation
+    ;; will handle the signed case for us.
+
+    ^{:line 383} r))
+
+
+
+^{:go/end 420} (go/method com "Similar to add, but computes the complement of the limit for bitsize b.\n" ^limit [^limit l ^uint b]
+  (switch b
+    (case [64]
+      (return ^{:go/breaks [2 4 6 8]} (lit limit
+          :min (bit-not (.-max l))
+          :max (bit-not (.-min l))
+          :umin (bit-not (.-umax l))
+          :umax (bit-not (.-umin l)))))
+
+    (case [32]
+      (return ^{:go/breaks [2 4 6 8]} (lit limit
+          :min (conv int64 (bit-not (conv int32 (.-max l))))
+          :max (conv int64 (bit-not (conv int32 (.-min l))))
+          :umin (conv uint64 (bit-not (conv uint32 (.-umax l))))
+          :umax (conv uint64 (bit-not (conv uint32 (.-umin l)))))))
+
+    (case [16]
+      (return ^{:go/breaks [2 4 6 8]} (lit limit
+          :min (conv int64 (bit-not (conv int16 (.-max l))))
+          :max (conv int64 (bit-not (conv int16 (.-min l))))
+          :umin (conv uint64 (bit-not (conv uint16 (.-umax l))))
+          :umax (conv uint64 (bit-not (conv uint16 (.-umin l)))))))
+
+    (case [8]
+      (return ^{:go/breaks [2 4 6 8]} (lit limit
+          :min (conv int64 (bit-not (conv int8 (.-max l))))
+          :max (conv int64 (bit-not (conv int8 (.-min l))))
+          :umin (conv uint64 (bit-not (conv uint8 (.-umax l))))
+          :umax (conv uint64 (bit-not (conv uint8 (.-umin l)))))))
+
+    (default
+      (panic "unreachable"))))
+
+
+
+
+^{:go/end 425} (go/method neg "Similar to add, but computes the negation of the limit for bitsize b.\n" ^limit [^limit l ^uint b]
+  (.add (.com l b) (lit limit :min 1 :max 1 :umin 1 :umax 1) b))
+
+
+
+^{:go/end 442} (go/method ctz "Similar to add, but computes the TrailingZeros of the limit for bitsize b.\n" ^limit [^limit l ^uint b]
+  (let [(values fixed fixedCount) (.unsignedFixedLeadingBits l)]
+    (when (== fixedCount 64)
+      (let [constResult (min (conv uint (bits/TrailingZeros64 fixed)) b)]
+        (return (lit limit :min (conv int64 constResult) :max (conv int64 constResult) :umin (conv uint64 constResult) :umax (conv uint64 constResult)))))
+
+
+    (let [varying (- 64 fixedCount)]
+      (when (!= (bit-and (.-umin l) (- ^uint64 (<< 1 varying) 1)) 0)
+        ;; there will always be at least one non-zero bit in the varying part
+        (dec! varying)
+        (return (.unsignedMax (noLimit) (conv uint64 varying))))
+
+      (.unsignedMax (noLimit) (conv uint64 (min (conv uint (bits/TrailingZeros64 fixed)) b))))))
+
+
+
+^{:go/end 450} (go/method bitlen "Similar to add, but computes the Len of the limit for bitsize b.\n" ^limit [^limit l ^uint b]
+  (.unsignedMinMax (noLimit)
+    (conv uint64 (bits/Len64 (.-umin l)))
+    (conv uint64 (bits/Len64 (.-umax l)))))
+
+
+
+
+^{:go/end 473} (go/method popcount "Similar to add, but computes the PopCount of the limit for bitsize b.\n" ^limit [^limit l ^uint b]
+  (let [(values fixed fixedCount) (.unsignedFixedLeadingBits l)
+      ^{:line 455} varying (- 64 fixedCount)
+      ^{:line 456} fixedContribution (conv uint64 (bits/OnesCount64 fixed))
+
+      ^{:line 458} min fixedContribution
+      ^{:line 459} max (+ fixedContribution (conv uint64 varying))
+
+      ^{:line 461} varyingMask (- (<< (conv uint64 1) varying) 1)]
+
+    (when [varyingPartOfUmax (bit-and (.-umax l) varyingMask)] (!= (conv uint (bits/OnesCount64 varyingPartOfUmax)) varying)
+      ;; there is at least one zero bit in the varying part
+      (dec! max))
+
+    (when [varyingPartOfUmin (bit-and (.-umin l) varyingMask)] (!= varyingPartOfUmin 0)
+      ;; there is at least one non-zero bit in the varying part
+      (inc! min))
+
+
+    (.unsignedMinMax (noLimit) min max)))
+
+
+^{:go/end 484} (go/method constValue [^limit l] :results [^int64 _ ^bool ok]
+  (switch
+    (case [(== (.-min l) (.-max l))]
+      (return (.-min l) true))
+    (case [(== (.-umin l) (.-umax l))]
+      (return (conv int64 (.-umin l)) true))
+    (default
+      (return 0 false))))
+
+
+
+
+(go/type limitFact "a limitFact is a limit known for a particular value.\n" (struct
+    ^{:line 488 :tag ID} vid
+    ^{:line 489 :tag limit} limit))
+
+
+
+(go/type ordering "An ordering encodes facts like v < w.\n" (struct
+    ^{:line 494 :tag (* ordering)} next ; linked list of all known orderings for v.
+
+    ^{:line 496 :tag (* Value) :doc "Note: v is implicit here, determined by which linked list it is in.\n"} w
+    ^{:line 497 :tag domain} d
+    ^{:line 498 :tag relation} r)) ; one of ==,!=,<,<=,>,>=
+;; if d is boolean or pointer, r can only be ==, !=
+
+
+
+
+
+
+
+
+
+(go/type factsTable "factsTable keeps track of relations between pairs of values.\n\nThe fact table logic is sound, but incomplete. Outside of a few\nspecial cases, it performs no deduction or arithmetic. While there\nare known decision procedures for this, the ad hoc approach taken\nby the facts table is effective for real code while remaining very\nefficient.\n" (struct
+
+
+
+
+
+    ^{:line 515 :tag bool :doc "unsat is true if facts contains a contradiction.\n\nNote that the factsTable logic is incomplete, so if unsat\nis false, the assertions in factsTable could be satisfiable\n*or* unsatisfiable.\n"} unsat ; true if facts contains a contradiction
+    ^{:line 516 :tag int} unsatDepth ; number of unsat checkpoints
+
+
+
+
+    ^{:line 521 :tag (* poset) :doc "order* is a couple of partial order sets that record information\nabout relations between SSA values in the signed and unsigned\ndomain.\n"} orderS
+    ^{:line 522 :tag (* poset)} orderU
+
+
+
+
+
+
+    ^{:line 529 :tag (map ID (* ordering)) :doc "orderings contains a list of known orderings between values.\nThese lists are indexed by v.ID.\nWe do not record transitive orderings. Only explicitly learned\norderings are recorded. Transitive orderings can be obtained\nby walking along the individual orderings.\n"} orderings
+
+
+    ^{:line 532 :tag (slice ID) :doc "stack of IDs which have had an entry added in orderings.\nIn addition, ID==0 are checkpoint markers.\n"} orderingsStack
+    ^{:line 533 :tag (* ordering)} orderingCache ; unused ordering records
+
+
+    ^{:line 536 :tag (slice limit) :doc "known lower and upper constant bounds on individual values.\n"} limits ; indexed by value ID
+    ^{:line 537 :tag (slice limitFact)} limitStack ; previous entries
+    ^{:line 538 :tag (slice bool)} recurseCheck ; recursion detector for limit propagation
+
+
+
+
+    ^{:line 543 :tag (map ID (* Value)) :doc "For each slice s, a map from s to a len(s)/cap(s) value (if any)\nTODO: check if there are cases that matter where we have\nmore than one len(s) for a slice. We could keep a list if necessary.\n"} lens
+    ^{:line 544 :tag (map ID (* Value))} caps
+
+
+    ^{:line 547 :tag (slice uint) :doc "reusedTopoSortScoresTable recycle allocations for topo-sort\n"} reusedTopoSortScoresTable))
+
+
+
+
+(go/var ^{:doc "checkpointBound is an invalid value used for checkpointing\nand restoring factsTable.\n"} checkpointBound (lit limitFact))
+
+^{:go/end 570} (go/func newFactsTable ^{:tag (* factsTable)} [^{:tag (* Func)} f]
+  (let [ft (addr (lit factsTable))]
+    (set! (.-orderS ft) (.newPoset f))
+    (set! (.-orderU ft) (.newPoset f))
+    (.SetUnsigned (.-orderS ft) false)
+    (.SetUnsigned (.-orderU ft) true)
+    (set! (.-orderings ft) (make (map ID (* ordering))))
+    (set! (.-limits ft) (.allocLimitSlice (.-Cache f) (.NumValues f)))
+    (range [_ b (.-Blocks f)]
+      (range [_ v (.-Values b)]
+        (aset (.-limits ft) (.-ID v) (initLimit v))))
+
+
+    (set! (.-limitStack ft) (make (slice limitFact) 4))
+    (set! (.-recurseCheck ft) (.allocBoolSlice (.-Cache f) (.NumValues f)))
+    ^{:line 569} ft))
+
+
+
+
+
+^{:go/end 589} (go/method initLimitForNewValue "initLimitForNewValue initializes the limits for newly created values,\npossibly needing to expand the limits slice. Currently used by\nsimplifyBlock when certain provably constant results are folded.\n" [^{:tag (* factsTable)} ft ^{:tag (* Value)} v]
+  (when (>= (conv int (.-ID v)) (len (.-limits ft)))
+    (let [f (.-Func (.-Block v))
+        ^{:line 578} n (.NumValues f)]
+      (if (>= (cap (.-limits ft)) n)
+        (set! (.-limits ft) (subslice (.-limits ft) _ n))
+
+        (let [old (.-limits ft)]
+          (set! (.-limits ft) (.allocLimitSlice (.-Cache f) n))
+          (copy (.-limits ft) old)
+          (.freeLimitSlice (.-Cache f) old)))))
+
+
+  (aset (.-limits ft) (.-ID v) (initLimit v)))
+
+
+
+
+^{:go/end 595} (go/method signedMin "signedMin records the fact that we know v is at least\nmin in the signed domain.\n" [^{:tag (* factsTable)} ft ^{:tag (* Value)} v ^int64 min]
+  (.newLimit ft v (lit limit :min min :max math/MaxInt64 :umin 0 :umax math/MaxUint64)))
+
+
+
+
+^{:go/end 601} (go/method signedMax "signedMax records the fact that we know v is at most\nmax in the signed domain.\n" [^{:tag (* factsTable)} ft ^{:tag (* Value)} v ^int64 max]
+  (.newLimit ft v (lit limit :min math/MinInt64 :max max :umin 0 :umax math/MaxUint64)))
+
+^{:go/end 604} (go/method signedMinMax [^{:tag (* factsTable)} ft ^{:tag (* Value)} v ^int64 min ^int64 max]
+  (.newLimit ft v (lit limit :min min :max max :umin 0 :umax math/MaxUint64)))
+
+
+
+^{:go/end 609} (go/method setNonNegative "setNonNegative records the fact that v is known to be non-negative.\n" [^{:tag (* factsTable)} ft ^{:tag (* Value)} v]
+  (.signedMin ft v 0))
+
+
+
+
+^{:go/end 615} (go/method unsignedMin "unsignedMin records the fact that we know v is at least\nmin in the unsigned domain.\n" [^{:tag (* factsTable)} ft ^{:tag (* Value)} v ^uint64 min]
+  (.newLimit ft v (lit limit :min math/MinInt64 :max math/MaxInt64 :umin min :umax math/MaxUint64)))
+
+
+
+
+^{:go/end 621} (go/method unsignedMax "unsignedMax records the fact that we know v is at most\nmax in the unsigned domain.\n" [^{:tag (* factsTable)} ft ^{:tag (* Value)} v ^uint64 max]
+  (.newLimit ft v (lit limit :min math/MinInt64 :max math/MaxInt64 :umin 0 :umax max)))
+
+^{:go/end 624} (go/method unsignedMinMax [^{:tag (* factsTable)} ft ^{:tag (* Value)} v ^uint64 min ^uint64 max]
+  (.newLimit ft v (lit limit :min math/MinInt64 :max math/MaxInt64 :umin min :umax max)))
+
+
+^{:go/end 628} (go/method booleanFalse [^{:tag (* factsTable)} ft ^{:tag (* Value)} v]
+  (.newLimit ft v (lit limit :min 0 :max 0 :umin 0 :umax 0)))
+
+^{:go/end 631} (go/method booleanTrue [^{:tag (* factsTable)} ft ^{:tag (* Value)} v]
+  (.newLimit ft v (lit limit :min 1 :max 1 :umin 1 :umax 1)))
+
+^{:go/end 634} (go/method pointerNil [^{:tag (* factsTable)} ft ^{:tag (* Value)} v]
+  (.newLimit ft v (lit limit :min 0 :max 0 :umin 0 :umax 0)))
+
+^{:go/end 639} (go/method pointerNonNil [^{:tag (* factsTable)} ft ^{:tag (* Value)} v]
+  (let [l (noLimit)]
+    (set! (.-umin l) 1)
+    (.newLimit ft v l)))
+
+
+
+^{:go/end 838} (go/method newLimit "newLimit adds new limiting information for v.\n" [^{:tag (* factsTable)} ft ^{:tag (* Value)} v ^limit newLim]
+  (let [oldLim (aget (.-limits ft) (.-ID v))
+
+      ;; Merge old and new information.
+      ^{:line 646} lim (.intersect oldLim newLim)]
+
+    ;; signed <-> unsigned propagation
+    (when (>= (.-min lim) 0)
+      (set! lim (.unsignedMinMax lim (conv uint64 (.-min lim)) (conv uint64 (.-max lim)))))
+
+    (when (fitsInBitsU (.-umax lim) (conv uint (- (* 8 (.Size (.-Type v))) 1)))
+      (set! lim (.signedMinMax lim (conv int64 (.-umin lim)) (conv int64 (.-umax lim)))))
+
+
+    (when (== lim oldLim)
+      (return)) ; nothing new to record
+
+
+    (when (.unsat lim)
+      (set! (.-unsat ft) true)
+      (return))
+
+
+    ;; Check for recursion. This normally happens because in unsatisfiable
+    ;; cases we have a < b < a, and every update to a's limits returns
+    ;; here again with the limit increased by 2.
+    ;; Normally this is caught early by the orderS/orderU posets, but in
+    ;; cases where the comparisons jump between signed and unsigned domains,
+    ;; the posets will not notice.
+    (when (aget (.-recurseCheck ft) (.-ID v))
+      ;; This should only happen for unsatisfiable cases. TODO: check
+      (return))
+
+    (aset (.-recurseCheck ft) (.-ID v) true)
+    (defer (^{:go/end 678} (fn []
+          (aset (.-recurseCheck ft) (.-ID v) false))))
+
+
+    ;; Record undo information.
+    (set! (.-limitStack ft) (append (.-limitStack ft) (lit limitFact (.-ID v) oldLim)))
+    ;; Record new information.
+    (aset (.-limits ft) (.-ID v) lim)
+    (when (> (.-debug (.-pass (.-Func (.-Block v)))) 2)
+      ;; TODO: pos is probably wrong. This is the position where v is defined,
+      ;; not the position where we learned the fact about it (which was
+      ;; probably some subsequent compare+branch).
+      (.Warnl (.-Func (.-Block v)) (.-Pos v) "new limit %s %s unsat=%v" v (.String lim) (.-unsat ft)))
+
+
+    ;; Propagate this new constant range to other values
+    ;; that we know are ordered with respect to this one.
+    ;; Note overflow/underflow in the arithmetic below is ok,
+    ;; it will just lead to imprecision (undetected unsatisfiability).
+    (for [o (aget (.-orderings ft) (.-ID v))] (!= o nil) (set! o (.-next o))
+      (switch (.-d o)
+        (case [signed]
+          (switch (.-r o)
+            (case [eq] ; v == w
+              (.signedMinMax ft (.-w o) (.-min lim) (.-max lim)))
+            (case [(bit-or lt eq)] ; v <= w
+              (.signedMin ft (.-w o) (.-min lim)))
+            (case [lt] ; v < w
+              (.signedMin ft (.-w o) (+ (.-min lim) 1)))
+            (case [(bit-or gt eq)] ; v >= w
+              (.signedMax ft (.-w o) (.-max lim)))
+            (case [gt] ; v > w
+              (.signedMax ft (.-w o) (- (.-max lim) 1)))
+            (case [(bit-or lt gt)] ; v != w
+              (when (== (.-min lim) (.-max lim)) ; v is a constant
+                (let [c (.-min lim)]
+                  (when (== (.-min (aget (.-limits ft) (.-ID (.-w o)))) c)
+                    (.signedMin ft (.-w o) (+ c 1)))
+
+                  (when (== (.-max (aget (.-limits ft) (.-ID (.-w o)))) c)
+                    (.signedMax ft (.-w o) (- c 1))))))))
+
+
+
+        (case [unsigned]
+          (switch (.-r o)
+            (case [eq] ; v == w
+              (.unsignedMinMax ft (.-w o) (.-umin lim) (.-umax lim)))
+            (case [(bit-or lt eq)] ; v <= w
+              (.unsignedMin ft (.-w o) (.-umin lim)))
+            (case [lt] ; v < w
+              (.unsignedMin ft (.-w o) (+ (.-umin lim) 1)))
+            (case [(bit-or gt eq)] ; v >= w
+              (.unsignedMax ft (.-w o) (.-umax lim)))
+            (case [gt] ; v > w
+              (.unsignedMax ft (.-w o) (- (.-umax lim) 1)))
+            (case [(bit-or lt gt)] ; v != w
+              (when (== (.-umin lim) (.-umax lim)) ; v is a constant
+                (let [c (.-umin lim)]
+                  (when (== (.-umin (aget (.-limits ft) (.-ID (.-w o)))) c)
+                    (.unsignedMin ft (.-w o) (+ c 1)))
+
+                  (when (== (.-umax (aget (.-limits ft) (.-ID (.-w o)))) c)
+                    (.unsignedMax ft (.-w o) (- c 1))))))))
+
+
+
+        (case [boolean]
+          (switch (.-r o)
+            (case [eq]
+              (when (and (== (.-min lim) 0) (== (.-max lim) 0)) ; constant false
+                (.booleanFalse ft (.-w o)))
+
+              (when (and (== (.-min lim) 1) (== (.-max lim) 1)) ; constant true
+                (.booleanTrue ft (.-w o))))
+
+            (case [(bit-or lt gt)]
+              (when (and (== (.-min lim) 0) (== (.-max lim) 0)) ; constant false
+                (.booleanTrue ft (.-w o)))
+
+              (when (and (== (.-min lim) 1) (== (.-max lim) 1)) ; constant true
+                (.booleanFalse ft (.-w o))))))
+
+
+        (case [pointer]
+          (switch (.-r o)
+            (case [eq]
+              (when (== (.-umax lim) 0) ; nil
+                (.pointerNil ft (.-w o)))
+
+              (when (> (.-umin lim) 0) ; non-nil
+                (.pointerNonNil ft (.-w o))))
+
+            (case [(bit-or lt gt)]
+              (when (== (.-umax lim) 0) ; nil
+                (.pointerNonNil ft (.-w o))))))))
+
+    ;; note: not equal to non-nil doesn't tell us anything.
+
+
+
+
+    ;; If this is new known constant for a boolean value,
+    ;; extract relation between its args. For example, if
+    ;; We learn v is false, and v is defined as a<b, then we learn a>=b.
+    (when (.IsBoolean (.-Type v))
+      ;; If we reach here, it is because we have a more restrictive
+      ;; value for v than the default. The only two such values
+      ;; are constant true or constant false.
+      (when (!= (.-min lim) (.-max lim))
+        (.Fatalf (.-Func (.-Block v)) "boolean not constant %v" v))
+
+      (let [isTrue (== (.-min lim) 1)]
+        (when [(values dr ok) (aget domainRelationTable (.-Op v))] (and ok (!= (.-Op v) OpIsInBounds) (!= (.-Op v) OpIsSliceInBounds))
+          (let [d (.-d dr)
+              ^{:line 791} r (.-r dr)]
+            (when (and (== d signed) (.isNonNegative ft (aget (.-Args v) 0)) (.isNonNegative ft (aget (.-Args v) 1)))
+              (set! d bit-or unsigned))
+
+            (when (not isTrue)
+              (set! r bit-xor (bit-or lt gt eq)))
+
+            ;; TODO: v.Block is wrong?
+            (addRestrictions (.-Block v) ft d (aget (.-Args v) 0) (aget (.-Args v) 1) r)))
+
+        (switch (.-Op v)
+          (case [OpIsNonNil]
+            (if isTrue
+              (.pointerNonNil ft (aget (.-Args v) 0))
+
+              (.pointerNil ft (aget (.-Args v) 0))))
+
+          (case [OpIsInBounds OpIsSliceInBounds]
+            ;; 0 <= a0 < a1 (or 0 <= a0 <= a1)
+            (let [r lt]
+              (when (== (.-Op v) OpIsSliceInBounds)
+                (set! r bit-or eq))
+
+              (if isTrue (do
+                  ;; On the positive branch, we learn:
+                  ;;   signed: 0 <= a0 < a1 (or 0 <= a0 <= a1)
+                  ;;   unsigned:    a0 < a1 (or a0 <= a1)
+                  (.setNonNegative ft (aget (.-Args v) 0))
+                  (.update ft (.-Block v) (aget (.-Args v) 0) (aget (.-Args v) 1) signed r)
+                  (.update ft (.-Block v) (aget (.-Args v) 0) (aget (.-Args v) 1) unsigned r))
+                (do
+                  ;; On the negative branch, we learn (0 > a0 ||
+                  ;; a0 >= a1). In the unsigned domain, this is
+                  ;; simply a0 >= a1 (which is the reverse of the
+                  ;; positive branch, so nothing surprising).
+                  ;; But in the signed domain, we can't express the ||
+                  ;; condition, so check if a0 is non-negative instead,
+                  ;; to be able to learn something.
+                  (set! r bit-xor (bit-or lt gt eq)) ; >= (index) or > (slice)
+                  (when (.isNonNegative ft (aget (.-Args v) 0))
+                    (.update ft (.-Block v) (aget (.-Args v) 0) (aget (.-Args v) 1) signed r))
+
+                  (.update ft (.-Block v) (aget (.-Args v) 0) (aget (.-Args v) 1) unsigned r))))))))))
+;; TODO: v.Block is wrong here
+
+
+
+
+
+^{:go/end 853} (go/method addOrdering [^{:tag (* factsTable)} ft ^{:tag (* Value)} v ^{:tag (* Value)} w ^domain d ^relation r]
+  (let [o (.-orderingCache ft)]
+    (if (== o nil)
+      (set! o (addr (lit ordering)))
+
+      (set! (.-orderingCache ft) (.-next o)))
+
+    (set! (.-w o) w)
+    (set! (.-d o) d)
+    (set! (.-r o) r)
+    (set! (.-next o) (aget (.-orderings ft) (.-ID v)))
+    (aset (.-orderings ft) (.-ID v) o)
+    (set! (.-orderingsStack ft) (append (.-orderingsStack ft) (.-ID v)))))
+
+
+
+
+^{:go/end 1243} (go/method update "update updates the set of relations between v and w in domain d\nrestricting it to r.\n" [^{:tag (* factsTable)} ft ^{:tag (* Block)} parent ^{:tag (* Value)} v ^{:tag (* Value)} w ^domain d ^relation r]
+  (when (> (.-debug (.-pass (.-Func parent))) 2)
+    (.Warnl (.-Func parent) (.-Pos parent) "parent=%s, update %s %s %s" parent v w r))
+
+  ;; No need to do anything else if we already found unsat.
+  (when (.-unsat ft)
+    (return))
+
+
+  ;; Self-fact. It's wasteful to register it into the facts
+  ;; table, so just note whether it's satisfiable
+  (when (== v w)
+    (when (== (bit-and r eq) 0)
+      (set! (.-unsat ft) true))
+
+    (return))
+
+
+  (when (or (== d signed) (== d unsigned))
+    (let [^bool ok (zero bool)
+        ^{:line 877} order (.-orderS ft)]
+      (when (== d unsigned)
+        (set! order (.-orderU ft)))
+
+      (switch r
+        (case [lt]
+          (set! ok (.SetOrder order v w)))
+        (case [gt]
+          (set! ok (.SetOrder order w v)))
+        (case [(bit-or lt eq)]
+          (set! ok (.SetOrderOrEqual order v w)))
+        (case [(bit-or gt eq)]
+          (set! ok (.SetOrderOrEqual order w v)))
+        (case [eq]
+          (set! ok (.SetEqual order v w)))
+        (case [(bit-or lt gt)]
+          (set! ok (.SetNonEqual order v w)))
+        (default
+          (panic "unknown relation")))
+
+      (.addOrdering ft v w d r)
+      (.addOrdering ft w v d (aget reverseBits r))
+
+      (when (not ok)
+        (when (> (.-debug (.-pass (.-Func parent))) 2)
+          (.Warnl (.-Func parent) (.-Pos parent) "unsat %s %s %s" v w r))
+
+        (set! (.-unsat ft) true)
+        (return))))
+
+
+  (when (or (== d boolean) (== d pointer))
+    (for [o (aget (.-orderings ft) (.-ID v))] (!= o nil) (set! o (.-next o))
+      (when (and (== (.-d o) d) (== (.-w o) w))
+        ;; We already know a relationship between v and w.
+        ;; Either it is a duplicate, or it is a contradiction,
+        ;; as we only allow eq and lt|gt for these domains,
+        (when (!= (.-r o) r)
+          (set! (.-unsat ft) true))
+
+        (return)))
+
+
+    ;; TODO: this does not do transitive equality.
+    ;; We could use a poset like above, but somewhat degenerate (==,!= only).
+    (.addOrdering ft v w d r)
+    (.addOrdering ft w v d r)) ; note: reverseBits unnecessary for eq and lt|gt.
+
+
+  ;; Extract new constant limits based on the comparison.
+  (let [vLimit (aget (.-limits ft) (.-ID v))
+      ^{:line 928} wLimit (aget (.-limits ft) (.-ID w))]
+    ;; Note: all the +1/-1 below could overflow/underflow. Either will
+    ;; still generate correct results, it will just lead to imprecision.
+    ;; In fact if there is overflow/underflow, the corresponding
+    ;; code is unreachable because the known range is outside the range
+    ;; of the value's type.
+    (switch d
+      (case [signed]
+        (switch r
+          (case [eq] ; v == w
+            (.signedMinMax ft v (.-min wLimit) (.-max wLimit))
+            (.signedMinMax ft w (.-min vLimit) (.-max vLimit)))
+          (case [lt] ; v < w
+            (.signedMax ft v (- (.-max wLimit) 1))
+            (.signedMin ft w (+ (.-min vLimit) 1)))
+          (case [(bit-or lt eq)] ; v <= w
+            (.signedMax ft v (.-max wLimit))
+            (.signedMin ft w (.-min vLimit)))
+          (case [gt] ; v > w
+            (.signedMin ft v (+ (.-min wLimit) 1))
+            (.signedMax ft w (- (.-max vLimit) 1)))
+          (case [(bit-or gt eq)] ; v >= w
+            (.signedMin ft v (.-min wLimit))
+            (.signedMax ft w (.-max vLimit)))
+          (case [(bit-or lt gt)] ; v != w
+            (when (== (.-min vLimit) (.-max vLimit)) ; v is a constant
+              (let [c (.-min vLimit)]
+                (when (== (.-min wLimit) c)
+                  (.signedMin ft w (+ c 1)))
+
+                (when (== (.-max wLimit) c)
+                  (.signedMax ft w (- c 1)))))
+
+
+            (when (== (.-min wLimit) (.-max wLimit)) ; w is a constant
+              (let [c (.-min wLimit)]
+                (when (== (.-min vLimit) c)
+                  (.signedMin ft v (+ c 1)))
+
+                (when (== (.-max vLimit) c)
+                  (.signedMax ft v (- c 1))))))))
+
+
+
+      (case [unsigned]
+        (switch r
+          (case [eq] ; v == w
+            (.unsignedMinMax ft v (.-umin wLimit) (.-umax wLimit))
+            (.unsignedMinMax ft w (.-umin vLimit) (.-umax vLimit)))
+          (case [lt] ; v < w
+            (.unsignedMax ft v (- (.-umax wLimit) 1))
+            (.unsignedMin ft w (+ (.-umin vLimit) 1)))
+          (case [(bit-or lt eq)] ; v <= w
+            (.unsignedMax ft v (.-umax wLimit))
+            (.unsignedMin ft w (.-umin vLimit)))
+          (case [gt] ; v > w
+            (.unsignedMin ft v (+ (.-umin wLimit) 1))
+            (.unsignedMax ft w (- (.-umax vLimit) 1)))
+          (case [(bit-or gt eq)] ; v >= w
+            (.unsignedMin ft v (.-umin wLimit))
+            (.unsignedMax ft w (.-umax vLimit)))
+          (case [(bit-or lt gt)] ; v != w
+            (when (== (.-umin vLimit) (.-umax vLimit)) ; v is a constant
+              (let [c (.-umin vLimit)]
+                (when (== (.-umin wLimit) c)
+                  (.unsignedMin ft w (+ c 1)))
+
+                (when (== (.-umax wLimit) c)
+                  (.unsignedMax ft w (- c 1)))))
+
+
+            (when (== (.-umin wLimit) (.-umax wLimit)) ; w is a constant
+              (let [c (.-umin wLimit)]
+                (when (== (.-umin vLimit) c)
+                  (.unsignedMin ft v (+ c 1)))
+
+                (when (== (.-umax vLimit) c)
+                  (.unsignedMax ft v (- c 1))))))))
+
+
+
+      (case [boolean]
+        (switch r
+          (case [eq] ; v == w
+            (when (== (.-min vLimit) 1) ; v is true
+              (.booleanTrue ft w))
+
+            (when (== (.-max vLimit) 0) ; v is false
+              (.booleanFalse ft w))
+
+            (when (== (.-min wLimit) 1) ; w is true
+              (.booleanTrue ft v))
+
+            (when (== (.-max wLimit) 0) ; w is false
+              (.booleanFalse ft v)))
+
+          (case [(bit-or lt gt)] ; v != w
+            (when (== (.-min vLimit) 1) ; v is true
+              (.booleanFalse ft w))
+
+            (when (== (.-max vLimit) 0) ; v is false
+              (.booleanTrue ft w))
+
+            (when (== (.-min wLimit) 1) ; w is true
+              (.booleanFalse ft v))
+
+            (when (== (.-max wLimit) 0) ; w is false
+              (.booleanTrue ft v)))))
+
+
+      (case [pointer]
+        (switch r
+          (case [eq] ; v == w
+            (when (== (.-umax vLimit) 0) ; v is nil
+              (.pointerNil ft w))
+
+            (when (> (.-umin vLimit) 0) ; v is non-nil
+              (.pointerNonNil ft w))
+
+            (when (== (.-umax wLimit) 0) ; w is nil
+              (.pointerNil ft v))
+
+            (when (> (.-umin wLimit) 0) ; w is non-nil
+              (.pointerNonNil ft v)))
+
+          (case [(bit-or lt gt)] ; v != w
+            (when (== (.-umax vLimit) 0) ; v is nil
+              (.pointerNonNil ft w))
+
+            (when (== (.-umax wLimit) 0) ; w is nil
+              (.pointerNonNil ft v))))))
+
+    ;; Note: the other direction doesn't work.
+    ;; Being not equal to a non-nil pointer doesn't
+    ;; make you (necessarily) a nil pointer.
+
+
+
+    ;; Derived facts below here are only about numbers.
+    (when (and (!= d signed) (!= d unsigned))
+      (return))
+
+
+    ;; Additional facts we know given the relationship between len and cap.
+    ;;
+    ;; TODO: Since prove now derives transitive relations, it
+    ;; should be sufficient to learn that len(w) <= cap(w) at the
+    ;; beginning of prove where we look for all len/cap ops.
+    (when (and (== (.-Op v) OpSliceLen) (== (bit-and r lt) 0) (!= (aget (.-caps ft) (.-ID (aget (.-Args v) 0))) nil))
+      ;; len(s) > w implies cap(s) > w
+      ;; len(s) >= w implies cap(s) >= w
+      ;; len(s) == w implies cap(s) >= w
+      (.update ft parent (aget (.-caps ft) (.-ID (aget (.-Args v) 0))) w d (bit-or r gt)))
+
+    (when (and (== (.-Op w) OpSliceLen) (== (bit-and r gt) 0) (!= (aget (.-caps ft) (.-ID (aget (.-Args w) 0))) nil))
+      ;; same, length on the RHS.
+      (.update ft parent v (aget (.-caps ft) (.-ID (aget (.-Args w) 0))) d (bit-or r lt)))
+
+    (when (and (== (.-Op v) OpSliceCap) (== (bit-and r gt) 0) (!= (aget (.-lens ft) (.-ID (aget (.-Args v) 0))) nil))
+      ;; cap(s) < w implies len(s) < w
+      ;; cap(s) <= w implies len(s) <= w
+      ;; cap(s) == w implies len(s) <= w
+      (.update ft parent (aget (.-lens ft) (.-ID (aget (.-Args v) 0))) w d (bit-or r lt)))
+
+    (when (and (== (.-Op w) OpSliceCap) (== (bit-and r lt) 0) (!= (aget (.-lens ft) (.-ID (aget (.-Args w) 0))) nil))
+      ;; same, capacity on the RHS.
+      (.update ft parent v (aget (.-lens ft) (.-ID (aget (.-Args w) 0))) d (bit-or r gt)))
+
+
+    ;; Process fence-post implications.
+    ;;
+    ;; First, make the condition > or >=.
+    (when (or (== r lt) (== r (bit-or lt eq)))
+      (set! (values v w) (values w v))
+      (set! r (aget reverseBits r)))
+
+    (switch r
+      (case [gt]
+        (if [(values x delta) (isConstDelta v)] (and (!= x nil) (== delta 1))
+          ;; x+1 > w  ⇒  x >= w
+          ;;
+          ;; This is useful for eliminating the
+          ;; growslice branch of append.
+          (.update ft parent x w d (bit-or gt eq))
+          (when [(values x delta) (isConstDelta w)] (and (!= x nil) (== delta -1))
+            ;; v > x-1  ⇒  v >= x
+            (.update ft parent v x d (bit-or gt eq)))))
+
+      (case [(bit-or gt eq)]
+        (if [(values x delta) (isConstDelta v)] (and (!= x nil) (== delta -1))
+          ;; x-1 >= w && x > min  ⇒  x > w
+          ;;
+          ;; Useful for i > 0; s[i-1].
+          (let [lim (aget (.-limits ft) (.-ID x))]
+            (when (or ^:go/paren (and (== d signed) (> (.-min lim) (aget opMin (.-Op v)))) ^:go/paren (and (== d unsigned) (> (.-umin lim) 0)))
+              (.update ft parent x w d gt)))
+
+          (when [(values x delta) (isConstDelta w)] (and (!= x nil) (== delta 1))
+            ;; v >= x+1 && x < max  ⇒  v > x
+            (let [lim (aget (.-limits ft) (.-ID x))]
+              (when (or ^:go/paren (and (== d signed) (< (.-max lim) (aget opMax (.-Op w)))) ^:go/paren (and (== d unsigned) (< (.-umax lim) (aget opUMax (.-Op w)))))
+                (.update ft parent v x d gt)))))))
+
+
+
+
+    ;; Process: x+delta > w (with delta constant)
+    ;; Only signed domain for now (useful for accesses to slices in loops).
+    (when (or (== r gt) (== r (bit-or gt eq)))
+      (when [(values x delta) (isConstDelta v)] (and (!= x nil) (== d signed))
+        (when (> (.-debug (.-pass (.-Func parent))) 1)
+          (.Warnl (.-Func parent) (.-Pos parent) "x+d %s w; x:%v %v delta:%v w:%v d:%v" r x (.String parent) delta (.-AuxInt w) d))
+
+        (let [underflow true]
+          (when (< delta 0)
+            (let [l (aget (.-limits ft) (.-ID x))]
+              (when (or ^:go/paren (and (== (.Size (.-Type x)) 8) (>= (.-min l) (- math/MinInt64 delta)))
+                  ^:go/paren (and (== (.Size (.-Type x)) 4) (>= (.-min l) (- math/MinInt32 delta))))
+                (set! underflow false))))
+
+
+          (when (and (< delta 0) (not underflow))
+            ;; If delta < 0 and x+delta cannot underflow then x > x+delta (that is, x > v)
+            (.update ft parent x v signed gt))
+
+          (if (not (.isGenericIntConst w))
+            ;; If we know that x+delta > w but w is not constant, we can derive:
+            ;;    if delta < 0 and x+delta cannot underflow, then x > w
+            ;; This is useful for loops with bounds "len(slice)-K" (delta = -K)
+            (when (and (< delta 0) (not underflow))
+              (.update ft parent x w signed r))
+
+
+            ;; With w,delta constants, we want to derive: x+delta > w  ⇒  x > w-delta
+            ;;
+            ;; We compute (using integers of the correct size):
+            ;;    min = w - delta
+            ;;    max = MaxInt - delta
+            ;;
+            ;; And we prove that:
+            ;;    if min<max: min < x AND x <= max
+            ;;    if min>max: min < x OR  x <= max
+            ;;
+            ;; This is always correct, even in case of overflow.
+            ;;
+            ;; If the initial fact is x+delta >= w instead, the derived conditions are:
+            ;;    if min<max: min <= x AND x <= max
+            ;;    if min>max: min <= x OR  x <= max
+            ;;
+            ;; Notice the conditions for max are still <=, as they handle overflows.
+            (let [(values ^int64 min ^int64 max) (zero int64)]
+              (switch (.Size (.-Type x))
+                (case [8]
+                  (set! min (- (.-AuxInt w) delta))
+                  (set! max (- (conv int64 (>> (bit-not (conv uint64 0)) 1)) delta)))
+                (case [4]
+                  (set! min (conv int64 (- (conv int32 (.-AuxInt w)) (conv int32 delta))))
+                  (set! max (conv int64 (- (conv int32 (>> (bit-not (conv uint32 0)) 1)) (conv int32 delta)))))
+                (case [2]
+                  (set! min (conv int64 (- (conv int16 (.-AuxInt w)) (conv int16 delta))))
+                  (set! max (conv int64 (- (conv int16 (>> (bit-not (conv uint16 0)) 1)) (conv int16 delta)))))
+                (case [1]
+                  (set! min (conv int64 (- (conv int8 (.-AuxInt w)) (conv int8 delta))))
+                  (set! max (conv int64 (- (conv int8 (>> (bit-not (conv uint8 0)) 1)) (conv int8 delta)))))
+                (default
+                  (panic "unimplemented")))
+
+
+              (if (< min max) (do
+                  ;; Record that x > min and max >= x
+                  (when (== r gt)
+                    (inc! min))
+
+                  (.signedMinMax ft x min max))
+
+                ;; We know that either x>min OR x<=max. factsTable cannot record OR conditions,
+                ;; so let's see if we can already prove that one of them is false, in which case
+                ;; the other must be true
+                (let [l (aget (.-limits ft) (.-ID x))]
+                  (cond (<= (.-max l) min)
+                    (when (or (== (bit-and r eq) 0) (< (.-max l) min))
+                      ;; x>min (x>=min) is impossible, so it must be x<=max
+                      (.signedMax ft x max))
+
+                    (> (.-min l) max) (do
+                      ;; x<=max is impossible, so it must be x>min
+                      (when (== r gt)
+                        (inc! min))
+
+                      (.signedMin ft x min))))))))))
+
+
+
+
+
+
+    ;; Look through value-preserving extensions.
+    ;; If the domain is appropriate for the pre-extension Type,
+    ;; repeat the update with the pre-extension Value.
+    (when (isCleanExt v)
+      (switch
+        (case [(and (== d signed) (.IsSigned (.-Type (aget (.-Args v) 0))))]
+          (fallthrough))
+        (case [(and (== d unsigned) (not (.IsSigned (.-Type (aget (.-Args v) 0)))))]
+          (.update ft parent (aget (.-Args v) 0) w d r))))
+
+
+    (when (isCleanExt w)
+      (switch
+        (case [(and (== d signed) (.IsSigned (.-Type (aget (.-Args w) 0))))]
+          (fallthrough))
+        (case [(and (== d unsigned) (not (.IsSigned (.-Type (aget (.-Args w) 0)))))]
+          (.update ft parent v (aget (.-Args w) 0) d r))))))
+
+
+
+
+(go/var opMin (lit (map Op int64)
+    ^{:line 1246} [OpAdd64 math/MinInt64] [OpSub64 math/MinInt64]
+    ^{:line 1247} [OpAdd32 math/MinInt32] [OpSub32 math/MinInt32]))
+
+
+(go/var opMax (lit (map Op int64)
+    ^{:line 1251} [OpAdd64 math/MaxInt64] [OpSub64 math/MaxInt64]
+    ^{:line 1252} [OpAdd32 math/MaxInt32] [OpSub32 math/MaxInt32]))
+
+
+(go/var opUMax (lit (map Op uint64)
+    ^{:line 1256} [OpAdd64 math/MaxUint64] [OpSub64 math/MaxUint64]
+    ^{:line 1257} [OpAdd32 math/MaxUint32] [OpSub32 math/MaxUint32]))
+
+
+
+^{:go/end 1263} (go/method isNonNegative "isNonNegative reports whether v is known to be non-negative.\n" ^bool [^{:tag (* factsTable)} ft ^{:tag (* Value)} v]
+  (>= (.-min (aget (.-limits ft) (.-ID v))) 0))
+
+
+
+
+^{:go/end 1275} (go/method checkpoint "checkpoint saves the current state of known relations.\nCalled when descending on a branch.\n" [^{:tag (* factsTable)} ft]
+  (when (.-unsat ft)
+    (inc! (.-unsatDepth ft)))
+
+  (set! (.-limitStack ft) (append (.-limitStack ft) checkpointBound))
+  (.Checkpoint (.-orderS ft))
+  (.Checkpoint (.-orderU ft))
+  (set! (.-orderingsStack ft) (append (.-orderingsStack ft) 0)))
+
+
+
+
+
+^{:go/end 1307} (go/method restore "restore restores known relation to the state just\nbefore the previous checkpoint.\nCalled when backing up on a branch.\n" [^{:tag (* factsTable)} ft]
+  (if (> (.-unsatDepth ft) 0)
+    (dec! (.-unsatDepth ft))
+
+    (set! (.-unsat ft) false))
+
+  (while true
+    (let [old (aget (.-limitStack ft) (- (len (.-limitStack ft)) 1))]
+      (set! (.-limitStack ft) (subslice (.-limitStack ft) _ (- (len (.-limitStack ft)) 1)))
+      (when (== (.-vid old) 0) ; checkpointBound
+        (break))
+
+      (aset (.-limits ft) (.-vid old) (.-limit old))))
+
+  (.Undo (.-orderS ft))
+  (.Undo (.-orderU ft))
+  (while true
+    (let [id (aget (.-orderingsStack ft) (- (len (.-orderingsStack ft)) 1))]
+      (set! (.-orderingsStack ft) (subslice (.-orderingsStack ft) _ (- (len (.-orderingsStack ft)) 1)))
+      (when (== id 0) ; checkpoint marker
+        (break))
+
+      (let [o (aget (.-orderings ft) id)]
+        (aset (.-orderings ft) id (.-next o))
+        (set! (.-next o) (.-orderingCache ft))
+        (set! (.-orderingCache ft) o)))))
+
+
+
+(go/var
+  ^{:line 1310} [reverseBits (lit (array ... relation) 0 4 2 6 1 5 3 7)]
+
+
+
+
+
+
+
+  ^{:line 1318} [^{:doc "maps what we learn when the positive branch is taken.\nFor example:\n     OpLess8:   {signed, lt},\n\tv1 = (OpLess8 v2 v3).\nIf we learn that v1 is true, then we can deduce that v2<v3\nin the signed domain.\n"} domainRelationTable (lit (map Op (struct
+          ^{:line 1319 :tag domain} d
+          ^{:line 1320 :tag relation} r))
+
+      ^{:line 1322} [OpEq8 (lit _ (bit-or signed unsigned) eq)]
+      ^{:line 1323} [OpEq16 (lit _ (bit-or signed unsigned) eq)]
+      ^{:line 1324} [OpEq32 (lit _ (bit-or signed unsigned) eq)]
+      ^{:line 1325} [OpEq64 (lit _ (bit-or signed unsigned) eq)]
+      ^{:line 1326} [OpEqPtr (lit _ pointer eq)]
+      ^{:line 1327} [OpEqB (lit _ boolean eq)]
+
+      ^{:line 1329} [OpNeq8 (lit _ (bit-or signed unsigned) (bit-or lt gt))]
+      ^{:line 1330} [OpNeq16 (lit _ (bit-or signed unsigned) (bit-or lt gt))]
+      ^{:line 1331} [OpNeq32 (lit _ (bit-or signed unsigned) (bit-or lt gt))]
+      ^{:line 1332} [OpNeq64 (lit _ (bit-or signed unsigned) (bit-or lt gt))]
+      ^{:line 1333} [OpNeqPtr (lit _ pointer (bit-or lt gt))]
+      ^{:line 1334} [OpNeqB (lit _ boolean (bit-or lt gt))]
+
+      ^{:line 1336} [OpLess8 (lit _ signed lt)]
+      ^{:line 1337} [OpLess8U (lit _ unsigned lt)]
+      ^{:line 1338} [OpLess16 (lit _ signed lt)]
+      ^{:line 1339} [OpLess16U (lit _ unsigned lt)]
+      ^{:line 1340} [OpLess32 (lit _ signed lt)]
+      ^{:line 1341} [OpLess32U (lit _ unsigned lt)]
+      ^{:line 1342} [OpLess64 (lit _ signed lt)]
+      ^{:line 1343} [OpLess64U (lit _ unsigned lt)]
+
+      ^{:line 1345} [OpLeq8 (lit _ signed (bit-or lt eq))]
+      ^{:line 1346} [OpLeq8U (lit _ unsigned (bit-or lt eq))]
+      ^{:line 1347} [OpLeq16 (lit _ signed (bit-or lt eq))]
+      ^{:line 1348} [OpLeq16U (lit _ unsigned (bit-or lt eq))]
+      ^{:line 1349} [OpLeq32 (lit _ signed (bit-or lt eq))]
+      ^{:line 1350} [OpLeq32U (lit _ unsigned (bit-or lt eq))]
+      ^{:line 1351} [OpLeq64 (lit _ signed (bit-or lt eq))]
+      ^{:line 1352} [OpLeq64U (lit _ unsigned (bit-or lt eq))])])
+
+
+
+
+^{:go/end 1373} (go/method cleanup "cleanup returns the posets to the free list\n" [^{:tag (* factsTable)} ft ^{:tag (* Func)} f]
+  (range [_ po (lit (slice (* poset)) (.-orderS ft) (.-orderU ft))]
+    ;; Make sure it's empty as it should be. A non-empty poset
+    ;; might cause errors and miscompilations if reused.
+    (when checkEnabled
+      (when [err (.CheckEmpty po)] (!= err nil)
+        (.Fatalf f "poset not empty after function %s: %v" (.-Name f) err)))
+
+
+    (.retPoset f po))
+
+  (.freeLimitSlice (.-Cache f) (.-limits ft))
+  (.freeBoolSlice (.-Cache f) (.-recurseCheck ft))
+  (when (> (cap (.-reusedTopoSortScoresTable ft)) 0)
+    (.freeUintSlice (.-Cache f) (.-reusedTopoSortScoresTable ft))))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 1449} (go/func addSlicesOfSameLen "addSlicesOfSameLen finds the slices that are in the same block and whose Op\nis OpPhi and always have the same length, then add the equality relationship\nbetween them to ft. If two slices start out with the same length and decrease\nin length by the same amount on each round of the loop (or in the if block),\nthen we think their lengths are always equal.\n\nSee https://go.dev/issues/75144\n\nIn fact, we are just propagating the equality\n\n\tif len(a) == len(b) { // from here\n\t\tfor len(a) > 4 {\n\t\t\ta = a[4:]\n\t\t\tb = b[4:]\n\t\t}\n\t\tif len(a) == len(b) { // to here\n\t\t\treturn true\n\t\t}\n\t}\n\nor change the for to if:\n\n\tif len(a) == len(b) { // from here\n\t\tif len(a) > 4 {\n\t\t\ta = a[4:]\n\t\t\tb = b[4:]\n\t\t}\n\t\tif len(a) == len(b) { // to here\n\t\t\treturn true\n\t\t}\n\t}\n" [^{:tag (* factsTable)} ft ^{:tag (* Block)} b]
+  ;; Let w points to the first value we're interested in, and then we
+  ;; only process those values ​​that appear to be the same length as w,
+  ;; looping only once. This should be enough in most cases. And u is
+  ;; similar to w, see comment for predIndex.
+  (let [(values ^{:tag (* Value)} u ^{:tag (* Value)} w) (zero (* Value))
+      (values ^sliceInfo i ^sliceInfo j ^sliceInfo k) (zero sliceInfo)
+      ^{:line 1413} isInterested ^{:go/end 1416} (fn ^bool [^{:tag (* Value)} v]
+        (set! j (getSliceInfo v))
+        (!= (.-sliceWhere j) sliceUnknown))]
+
+    (range [_ v (.-Values b)]
+      (when (== (.-Uses v) 0)
+        (continue))
+
+      (when (and (== (.-Op v) OpPhi) (== (len (.-Args v)) 2) (!= (aget (.-lens ft) (.-ID v)) nil) (isInterested v))
+        (cond (and (== (.-predIndex j) 1) (!= (aget (.-lens ft) (.-ID (aget (.-Args v) 0))) nil)) (do
+            ;; found v = (Phi x (SliceMake _ (Add64 (Const64 [n]) (SliceLen x)) _))) or
+            ;; v = (Phi x (SliceMake _ (Add64 (Const64 [n]) (SliceLen v)) _)))
+            (when (== w nil)
+              (set! k j)
+              (set! w v)
+              (continue))
+
+            ;; propagate the equality
+            (when (and (== j k) (.Equal (.-orderS ft) (aget (.-lens ft) (.-ID (aget (.-Args v) 0))) (aget (.-lens ft) (.-ID (aget (.-Args w) 0)))))
+              (.update ft b (aget (.-lens ft) (.-ID v)) (aget (.-lens ft) (.-ID w)) signed eq)))
+
+          (and (== (.-predIndex j) 0) (!= (aget (.-lens ft) (.-ID (aget (.-Args v) 1))) nil)) (do
+            ;; found v = (Phi (SliceMake _ (Add64 (Const64 [n]) (SliceLen x)) _)) x) or
+            ;; v = (Phi (SliceMake _ (Add64 (Const64 [n]) (SliceLen v)) _)) x)
+            (when (== u nil)
+              (set! i j)
+              (set! u v)
+              (continue))
+
+            ;; propagate the equality
+            (when (and (== j i) (.Equal (.-orderS ft) (aget (.-lens ft) (.-ID (aget (.-Args v) 1))) (aget (.-lens ft) (.-ID (aget (.-Args u) 1)))))
+              (.update ft b (aget (.-lens ft) (.-ID v)) (aget (.-lens ft) (.-ID u)) signed eq))))))))
+
+
+
+
+
+
+(go/type sliceWhere int)
+
+(go/const
+  ^{:line 1454} [^{:tag sliceWhere :val 0} sliceUnknown iota]
+  ^{:line 1455} [^{:val 1} sliceInFor]
+  ^{:line 1456} [^{:val 2} sliceInIf])
+
+
+
+
+(go/type predIndex "predIndex is used to indicate the branch represented by the predecessor\nblock in which the slicing operation occurs.\n" int)
+
+(go/type sliceInfo (struct
+    ^{:line 1464 :tag int64} lengthDiff
+    ^{:line 1465} sliceWhere
+    ^{:line 1466} predIndex))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 1540} (go/func getSliceInfo "getSliceInfo returns the negative increment of the slice length in a slice\noperation by examine the Phi node at the merge block. So, we only interest\nin the slice operation if it is inside a for block or an if block.\nOtherwise it returns sliceInfo{0, sliceUnknown, 0}.\n\nFor the following for block:\n\n\tfor len(a) > 4 {\n\t    a = a[4:]\n\t}\n\nvp = (Phi v3 v9)\nv5 = (SliceLen vp)\nv7 = (Add64 (Const64 [-4]) v5)\nv9 = (SliceMake _ v7 _)\n\nreturns sliceInfo{-4, sliceInFor, 1}\n\nFor a subsequent merge block after an if block:\n\n\tif len(a) > 4 {\n\t    a = a[4:]\n\t}\n\ta // here\n\nvp = (Phi v3 v9)\nv5 = (SliceLen v3)\nv7 = (Add64 (Const64 [-4]) v5)\nv9 = (SliceMake _ v7 _)\n\nreturns sliceInfo{-4, sliceInIf, 1}\n\nReturns sliceInfo{0, sliceUnknown, 0} if it is not the slice\noperation we are interested in.\n" [^{:tag (* Value)} vp] :results [^sliceInfo inf]
+  (when (or (!= (.-Op vp) OpPhi) (!= (len (.-Args vp)) 2))
+    (return))
+
+  (let [^predIndex i (zero predIndex)
+      ^{:line 1508 :tag (* Value)} l (zero (* Value))] ; length for OpSliceMake
+    (cond (and (!= (.-Op (aget (.-Args vp) 0)) OpSliceMake) (== (.-Op (aget (.-Args vp) 1)) OpSliceMake)) (do
+        (set! l (aget (.-Args (aget (.-Args vp) 1)) 1))
+        (set! i 1))
+      (and (== (.-Op (aget (.-Args vp) 0)) OpSliceMake) (!= (.-Op (aget (.-Args vp) 1)) OpSliceMake)) (do
+        (set! l (aget (.-Args (aget (.-Args vp) 0)) 1))
+        (set! i 0)) :else
+
+      (return))
+
+    (let [^Op op (zero Op)]
+      (switch (.-Op l)
+        (case [OpAdd64]
+          (set! op OpConst64))
+        (case [OpAdd32]
+          (set! op OpConst32))
+        (default
+          (return)))
+
+      (when (and (== (.-Op (aget (.-Args l) 0)) op) (== (.-Op (aget (.-Args l) 1)) OpSliceLen) (== (aget (.-Args (aget (.-Args l) 1)) 0) vp))
+        (return (lit sliceInfo (.-AuxInt (aget (.-Args l) 0)) sliceInFor i)))
+
+      (when (and (== (.-Op (aget (.-Args l) 1)) op) (== (.-Op (aget (.-Args l) 0)) OpSliceLen) (== (aget (.-Args (aget (.-Args l) 0)) 0) vp))
+        (return (lit sliceInfo (.-AuxInt (aget (.-Args l) 1)) sliceInFor i)))
+
+      (when (and (== (.-Op (aget (.-Args l) 0)) op) (== (.-Op (aget (.-Args l) 1)) OpSliceLen) (== (aget (.-Args (aget (.-Args l) 1)) 0) (aget (.-Args vp) (- 1 i))))
+        (return (lit sliceInfo (.-AuxInt (aget (.-Args l) 0)) sliceInIf i)))
+
+      (when (and (== (.-Op (aget (.-Args l) 1)) op) (== (.-Op (aget (.-Args l) 0)) OpSliceLen) (== (aget (.-Args (aget (.-Args l) 0)) 0) (aget (.-Args vp) (- 1 i))))
+        (return (lit sliceInfo (.-AuxInt (aget (.-Args l) 1)) sliceInIf i)))
+
+      (return))))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 1738} (go/func prove "prove removes redundant BlockIf branches that can be inferred\nfrom previous dominating comparisons.\n\nBy far, the most common redundant pair are generated by bounds checking.\nFor example for the code:\n\n\ta[i] = 4\n\tfoo(a[i])\n\nThe compiler will generate the following code:\n\n\tif i >= len(a) {\n\t    panic(\"not in bounds\")\n\t}\n\ta[i] = 4\n\tif i >= len(a) {\n\t    panic(\"not in bounds\")\n\t}\n\tfoo(a[i])\n\nThe second comparison i >= len(a) is clearly redundant because if the\nelse branch of the first comparison is executed, we already know that i < len(a).\nThe code for the second panic can be removed.\n\nprove works by finding contradictions and trimming branches whose\nconditions are unsatisfiable given the branches leading up to them.\nIt tracks a \"fact table\" of branch conditions. For each branching\nblock, it asserts the branch conditions that uniquely dominate that\nblock, and then separately asserts the block's branch condition and\nits negation. If either leads to a contradiction, it can trim that\nsuccessor.\n" [^{:tag (* Func)} f]
+  ;; Find induction variables.
+  (let [^{:tag (map (* Block) (slice indVar))} indVars (zero (map (* Block) (slice indVar)))]
+    (range [_ v (findIndVar f)]
+      (let [ind (.-ind v)]
+        (when (!= (len (.-Args ind)) 2)
+          ;; the rewrite code assumes there is only ever two parents to loops
+          (panic "unexpected induction with too many parents"))
+
+
+        (let [nxt (.-nxt v)]
+          (if (not (and (== (.-Uses ind) 2) ; 2 used by comparison and next
+                (== (.-Uses nxt) 1))) (do ; 1 used by induction
+              ;; ind or nxt is used inside the loop, add it for the facts table
+              (when (== indVars nil)
+                (set! indVars (make (map (* Block) (slice indVar)))))
+
+              (aset indVars (.-entry v) (append (aget indVars (.-entry v)) v))
+              (continue))
+            (do))
+          ;; Since this induction variable is not used for anything but counting the iterations,
+          ;; no point in putting it into the facts table.
+
+
+          (maybeRewriteLoopToDownwardCountingLoop f v))))
+
+
+    (let [ft (newFactsTable f)]
+      (.checkpoint ft)
+
+      ;; Find length and capacity ops.
+      (range [_ b (.-Blocks f)]
+        (range [_ v (.-Values b)]
+          (when (== (.-Uses v) 0)
+            ;; We don't care about dead values.
+            ;; (There can be some that are CSEd but not removed yet.)
+            (continue))
+
+          (switch (.-Op v)
+            (case [OpSliceLen]
+              (when (== (.-lens ft) nil)
+                (set! (.-lens ft) (lit (map ID (* Value)))))
+
+              ;; Set all len Values for the same slice as equal in the poset.
+              ;; The poset handles transitive relations, so Values related to
+              ;; any OpSliceLen for this slice will be correctly related to others.
+              (if [(values l ok) (aget (.-lens ft) (.-ID (aget (.-Args v) 0)))] ok
+                (.update ft b v l signed eq)
+
+                (aset (.-lens ft) (.-ID (aget (.-Args v) 0)) v)))
+
+            (case [OpSliceCap]
+              (when (== (.-caps ft) nil)
+                (set! (.-caps ft) (lit (map ID (* Value)))))
+
+              ;; Same as case OpSliceLen above, but for slice cap.
+              (if [(values c ok) (aget (.-caps ft) (.-ID (aget (.-Args v) 0)))] ok
+                (.update ft b v c signed eq)
+
+                (aset (.-caps ft) (.-ID (aget (.-Args v) 0)) v))))))
+
+
+
+
+
+      ;; current node state
+      (let-type [walkState int]
+        (let [
+            ^:const ^{:line 1641 :tag walkState :val 0} descend iota
+            ^:const ^:go/grouped ^:go/implicit ^{:line 1642 :tag walkState :val 1} restore iota]
+
+          ;; work maintains the DFS stack.
+          (let-type [bp (struct
+                ^{:line 1646 :tag (* Block)} block ; current handled block
+                ^{:line 1647 :tag walkState} state)] ; what's to do
+
+            (let [work (make (slice bp) 0 256)]
+              (set! work (append work ^{:go/breaks [2 4]} (lit bp
+                    :block (.-Entry f)
+                    :state descend)))
+
+
+              (let [idom (.Idom f)
+                  ^{:line 1656} sdom (.Sdom f)]
+
+                ;; DFS on the dominator tree.
+                ;;
+                ;; For efficiency, we consider only the dominator tree rather
+                ;; than the entire flow graph. On the way down, we consider
+                ;; incoming branches and accumulate conditions that uniquely
+                ;; dominate the current block. If we discover a contradiction,
+                ;; we can eliminate the entire block and all of its children.
+                ;; On the way back up, we consider outgoing branches that
+                ;; haven't already been considered. This way we consider each
+                ;; branch condition only once.
+                (while (> (len work) 0)
+                  (let [node (aget work (- (len work) 1))]
+                    (set! work (subslice work _ (- (len work) 1)))
+                    (let [parent (aget idom (.-ID (.-block node)))
+                        ^{:line 1672} branch (getBranch sdom parent (.-block node))]
+
+                      (switch (.-state node)
+                        (case [descend]
+                          (.checkpoint ft)
+
+                          ;; Entering the block, add facts about the induction variable
+                          ;; that is bound to this block.
+                          (range [_ iv (aget indVars (.-block node))]
+                            (addIndVarRestrictions ft parent iv))
+
+
+                          ;; Add results of reaching this block via a branch from
+                          ;; its immediate dominator (if any).
+                          (when (!= branch unknown)
+                            (addBranchRestrictions ft parent branch))
+
+
+                          ;; Add slices of the same length start from current block.
+                          (addSlicesOfSameLen ft (.-block node))
+
+                          (when (.-unsat ft)
+                            ;; node.block is unreachable.
+                            ;; Remove it and don't visit
+                            ;; its children.
+                            (removeBranch parent branch)
+                            (.restore ft)
+                            (break))
+
+                          ;; Otherwise, we can now commit to
+                          ;; taking this branch. We'll restore
+                          ;; ft when we unwind.
+
+                          (.topoSortValuesInBlock ft (.-block node))
+
+                          (range [_ v (.-Values (.-block node))]
+                            (.flowLimit ft v)
+                            ;; constant fold arguments before addValueFact to avoid v's v.Args learned facts time traveling into v's arguments.
+                            ;; in other words if v teaches us something about it's arguments,
+                            ;; we can't use that to optimize v's arguments since v hasn't ran yet.
+                            (.constantFoldArguments ft v)
+                            (.addValueFact ft (.-block node) v)
+                            (.simplifyValue ft (.-block node) v))
+
+
+                          (.simplifyBlock ft sdom (.-block node))
+
+                          (set! work (append work ^{:go/breaks [2 4]} (lit bp
+                                :block (.-block node)
+                                :state restore)))
+
+                          (for [s (.Child sdom (.-block node))] (!= s nil) (set! s (.Sibling sdom s))
+                            (set! work (append work ^{:go/breaks [2 4]} (lit bp
+                                  :block s
+                                  :state descend)))))
+
+
+
+                        (case [restore]
+                          (.restore ft))))))
+
+
+
+                (.restore ft)
+
+                (.cleanup ft f)))))))))
+
+
+
+
+
+
+
+
+^{:go/end 1838} (go/func initLimit "initLimit sets initial constant limit for v.  This limit is based\nonly on the operation itself, not any of its input arguments. This\nmethod is only used in two places, once when the prove pass startup\nand the other when a new ssa value is created, both for init. (unlike\nflowLimit, below, which computes additional constraints based on\nranges of opcode arguments).\n" ^limit [^{:tag (* Value)} v]
+  (when (.IsBoolean (.-Type v))
+    (switch (.-Op v)
+      (case [OpConstBool]
+        (let [b (.-AuxInt v)]
+          (return (lit limit :min b :max b :umin (conv uint64 b) :umax (conv uint64 b)))))
+      (default
+        (return (lit limit :min 0 :max 1 :umin 0 :umax 1)))))
+
+
+  (when (.IsPtrShaped (.-Type v)) ; These are the types that EqPtr/NeqPtr operate on, except uintptr.
+    (switch (.-Op v)
+      (case [OpConstNil]
+        (return (lit limit :min 0 :max 0 :umin 0 :umax 0)))
+      (case [OpAddr OpLocalAddr] ; TODO: others?
+        (let [l (noLimit)]
+          (set! (.-umin l) 1)
+          (return l)))
+      (default
+        (return (noLimit)))))
+
+
+  (when (not (.IsInteger (.-Type v)))
+    (return (noLimit)))
+
+
+  ;; Default limits based on type.
+  (let [lim (noLimitForBitsize (* (conv uint (.Size (.-Type v))) 8))]
+
+    ;; Tighter limits on some opcodes.
+    (switch (.-Op v)
+      ;; constants
+      (case [OpConst64]
+        (set! lim (lit limit :min (.-AuxInt v) :max (.-AuxInt v) :umin (conv uint64 (.-AuxInt v)) :umax (conv uint64 (.-AuxInt v)))))
+      (case [OpConst32]
+        (set! lim (lit limit :min (.-AuxInt v) :max (.-AuxInt v) :umin (conv uint64 (conv uint32 (.-AuxInt v))) :umax (conv uint64 (conv uint32 (.-AuxInt v))))))
+      (case [OpConst16]
+        (set! lim (lit limit :min (.-AuxInt v) :max (.-AuxInt v) :umin (conv uint64 (conv uint16 (.-AuxInt v))) :umax (conv uint64 (conv uint16 (.-AuxInt v))))))
+      (case [OpConst8]
+        (set! lim (lit limit :min (.-AuxInt v) :max (.-AuxInt v) :umin (conv uint64 (conv uint8 (.-AuxInt v))) :umax (conv uint64 (conv uint8 (.-AuxInt v))))))
+
+      ;; extensions
+      (case [OpZeroExt8to64 OpZeroExt8to32 OpZeroExt8to16]
+        (set! lim (.signedMinMax lim 0 (- (<< 1 8) 1)))
+        (set! lim (.unsignedMax lim (- (<< 1 8) 1))))
+      (case [OpZeroExt16to64 OpZeroExt16to32]
+        (set! lim (.signedMinMax lim 0 (- (<< 1 16) 1)))
+        (set! lim (.unsignedMax lim (- (<< 1 16) 1))))
+      (case [OpZeroExt32to64]
+        (set! lim (.signedMinMax lim 0 (- (<< 1 32) 1)))
+        (set! lim (.unsignedMax lim (- (<< 1 32) 1))))
+      (case [OpSignExt8to64 OpSignExt8to32 OpSignExt8to16]
+        (set! lim (.signedMinMax lim math/MinInt8 math/MaxInt8)))
+      (case [OpSignExt16to64 OpSignExt16to32]
+        (set! lim (.signedMinMax lim math/MinInt16 math/MaxInt16)))
+      (case [OpSignExt32to64]
+        (set! lim (.signedMinMax lim math/MinInt32 math/MaxInt32)))
+
+      ;; math/bits intrinsics
+      (case [OpCtz64 OpBitLen64 OpPopCount64
+          ^{:line 1806} OpCtz32 OpBitLen32 OpPopCount32
+          ^{:line 1807} OpCtz16 OpBitLen16 OpPopCount16
+          ^{:line 1808} OpCtz8 OpBitLen8 OpPopCount8]
+        (set! lim (.unsignedMax lim (conv uint64 (* (.Size (.-Type (aget (.-Args v) 0))) 8)))))
+
+      ;; bool to uint8 conversion
+      (case [OpCvtBoolToUint8]
+        (set! lim (.unsignedMax lim 1)))
+
+      ;; length operations
+      (case [OpSliceLen OpSliceCap]
+        (let [f (.-Func (.-Block v))
+            ^{:line 1818} elemSize (conv uint64 (.Size (.Elem (.-Type (aget (.-Args v) 0)))))]
+          (when (> elemSize 0)
+            (let [heapSize (- (<< (conv uint64 1) (* (conv uint64 (.-PtrSize (.-Config f))) 8)) 1)
+                ^{:line 1821} maximumElementsFittingInHeap (/ heapSize elemSize)]
+              (set! lim (.unsignedMax lim maximumElementsFittingInHeap))))
+
+          (fallthrough)))
+      (case [OpStringLen]
+        (set! lim (.signedMin lim 0))))
+
+
+    ;; signed <-> unsigned propagation
+    (when (>= (.-min lim) 0)
+      (set! lim (.unsignedMinMax lim (conv uint64 (.-min lim)) (conv uint64 (.-max lim)))))
+
+    (when (fitsInBitsU (.-umax lim) (conv uint (- (* 8 (.Size (.-Type v))) 1)))
+      (set! lim (.signedMinMax lim (conv int64 (.-umin lim)) (conv int64 (.-umax lim)))))
+
+
+    ^{:line 1837} lim))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 2009} (go/method flowLimit "flowLimit updates the known limits of v in ft.\nflowLimit can use the ranges of input arguments.\n\nNote: this calculation only happens at the point the value is defined. We do not reevaluate\nit later. So for example:\n\n\tv := x + y\n\tif 0 <= x && x < 5 && 0 <= y && y < 5 { ... use v ... }\n\nwe don't discover that the range of v is bounded in the conditioned\nblock. We could recompute the range of v once we enter the block so\nwe know that it is 0 <= v <= 8, but we don't have a mechanism to do\nthat right now.\n" [^{:tag (* factsTable)} ft ^{:tag (* Value)} v]
+  (when (not (.IsInteger (.-Type v)))
+    ;; TODO: boolean?
+    (return))
+
+
+  ;; Additional limits based on opcode and argument.
+  ;; No need to repeat things here already done in initLimit.
+  (switch (.-Op v)
+
+    ;; extensions
+    (case [OpZeroExt8to64 OpZeroExt8to32 OpZeroExt8to16 OpZeroExt16to64 OpZeroExt16to32 OpZeroExt32to64]
+      (let [a (aget (.-limits ft) (.-ID (aget (.-Args v) 0)))]
+        (.unsignedMinMax ft v (.-umin a) (.-umax a))))
+    (case [OpSignExt8to64 OpSignExt8to32 OpSignExt8to16 OpSignExt16to64 OpSignExt16to32 OpSignExt32to64]
+      (let [a (aget (.-limits ft) (.-ID (aget (.-Args v) 0)))]
+        (.signedMinMax ft v (.-min a) (.-max a))))
+    (case [OpTrunc64to8 OpTrunc64to16 OpTrunc64to32 OpTrunc32to8 OpTrunc32to16 OpTrunc16to8]
+      (let [a (aget (.-limits ft) (.-ID (aget (.-Args v) 0)))]
+        (when (<= (.-umax a) (- ^uint64 (<< 1 (* (conv uint64 (.Size (.-Type v))) 8)) 1))
+          (.unsignedMinMax ft v (.-umin a) (.-umax a)))))
+
+
+    ;; math/bits
+    (case [OpCtz64 OpCtz32 OpCtz16 OpCtz8]
+      (let [a (aget (.-Args v) 0)
+          ^{:line 1879} al (aget (.-limits ft) (.-ID a))]
+        (.newLimit ft v (.ctz al (* (conv uint (.Size (.-Type a))) 8)))))
+
+    (case [OpPopCount64 OpPopCount32 OpPopCount16 OpPopCount8]
+      (let [a (aget (.-Args v) 0)
+          ^{:line 1884} al (aget (.-limits ft) (.-ID a))]
+        (.newLimit ft v (.popcount al (* (conv uint (.Size (.-Type a))) 8)))))
+
+    (case [OpBitLen64 OpBitLen32 OpBitLen16 OpBitLen8]
+      (let [a (aget (.-Args v) 0)
+          ^{:line 1889} al (aget (.-limits ft) (.-ID a))]
+        (.newLimit ft v (.bitlen al (* (conv uint (.Size (.-Type a))) 8)))))
+
+    ;; Masks.
+
+    ;; TODO: if y.umax and y.umin share a leading bit pattern, y also has that leading bit pattern.
+    ;; we could compare the patterns of always set bits in a and b and learn more about minimum and maximum.
+    ;; But I doubt this help any real world code.
+    (case [OpOr64 OpOr32 OpOr16 OpOr8]
+      ;; OR can only make the value bigger and can't flip bits proved to be zero in both inputs.
+      (let [a (aget (.-limits ft) (.-ID (aget (.-Args v) 0)))
+          ^{:line 1900} b (aget (.-limits ft) (.-ID (aget (.-Args v) 1)))]
+        (.unsignedMinMax ft v
+          (max (.-umin a) (.-umin b))
+          (- ^uint64 (<< 1 (bits/Len64 (bit-or (.-umax a) (.-umax b)))) 1))))
+    (case [OpXor64 OpXor32 OpXor16 OpXor8]
+      ;; XOR can't flip bits that are proved to be zero in both inputs.
+      (let [a (aget (.-limits ft) (.-ID (aget (.-Args v) 0)))
+          ^{:line 1907} b (aget (.-limits ft) (.-ID (aget (.-Args v) 1)))]
+        (.unsignedMax ft v (- ^uint64 (<< 1 (bits/Len64 (bit-or (.-umax a) (.-umax b)))) 1))))
+    (case [OpCom64 OpCom32 OpCom16 OpCom8]
+      (let [a (aget (.-limits ft) (.-ID (aget (.-Args v) 0)))]
+        (.newLimit ft v (.com a (* (conv uint (.Size (.-Type v))) 8)))))
+
+    ;; Arithmetic.
+    (case [OpAdd64 OpAdd32 OpAdd16 OpAdd8]
+      (let [a (aget (.-limits ft) (.-ID (aget (.-Args v) 0)))
+          ^{:line 1916} b (aget (.-limits ft) (.-ID (aget (.-Args v) 1)))]
+        (.newLimit ft v (.add a b (* (conv uint (.Size (.-Type v))) 8)))))
+    (case [OpSub64 OpSub32 OpSub16 OpSub8]
+      (let [a (aget (.-limits ft) (.-ID (aget (.-Args v) 0)))
+          ^{:line 1920} b (aget (.-limits ft) (.-ID (aget (.-Args v) 1)))]
+        (.newLimit ft v (.sub a b (* (conv uint (.Size (.-Type v))) 8)))
+        (.detectMod ft v)
+        (.detectSliceLenRelation ft v)
+        (.detectSubRelations ft v)))
+    (case [OpNeg64 OpNeg32 OpNeg16 OpNeg8]
+      (let [a (aget (.-limits ft) (.-ID (aget (.-Args v) 0)))
+          ^{:line 1927} bitsize (* (conv uint (.Size (.-Type v))) 8)]
+        (.newLimit ft v (.neg a bitsize))))
+    (case [OpMul64 OpMul32 OpMul16 OpMul8]
+      (let [a (aget (.-limits ft) (.-ID (aget (.-Args v) 0)))
+          ^{:line 1931} b (aget (.-limits ft) (.-ID (aget (.-Args v) 1)))]
+        (.newLimit ft v (.mul a b (* (conv uint (.Size (.-Type v))) 8)))))
+    (case [OpLsh64x64 OpLsh64x32 OpLsh64x16 OpLsh64x8
+        ^{:line 1934} OpLsh32x64 OpLsh32x32 OpLsh32x16 OpLsh32x8
+        ^{:line 1935} OpLsh16x64 OpLsh16x32 OpLsh16x16 OpLsh16x8
+        ^{:line 1936} OpLsh8x64 OpLsh8x32 OpLsh8x16 OpLsh8x8]
+      (let [a (aget (.-limits ft) (.-ID (aget (.-Args v) 0)))
+          ^{:line 1938} b (aget (.-limits ft) (.-ID (aget (.-Args v) 1)))
+          ^{:line 1939} bitsize (* (conv uint (.Size (.-Type v))) 8)]
+        (.newLimit ft v (.mul a (.exp2 b bitsize) bitsize))))
+    (case [OpRsh64x64 OpRsh64x32 OpRsh64x16 OpRsh64x8
+        ^{:line 1942} OpRsh32x64 OpRsh32x32 OpRsh32x16 OpRsh32x8
+        ^{:line 1943} OpRsh16x64 OpRsh16x32 OpRsh16x16 OpRsh16x8
+        ^{:line 1944} OpRsh8x64 OpRsh8x32 OpRsh8x16 OpRsh8x8]
+      (let [a (aget (.-limits ft) (.-ID (aget (.-Args v) 0)))
+          ^{:line 1946} b (aget (.-limits ft) (.-ID (aget (.-Args v) 1)))]
+        (when (>= (.-min b) 0)
+          ;; Shift of negative makes a value closer to 0 (greater),
+          ;; so if a.min is negative, v.min is a.min>>b.min instead of a.min>>b.max,
+          ;; and similarly if a.max is negative, v.max is a.max>>b.max.
+          ;; Easier to compute min and max of both than to write sign logic.
+          (let [vmin (min (>> (.-min a) (.-min b)) (>> (.-min a) (.-max b)))
+              ^{:line 1953} vmax (max (>> (.-max a) (.-min b)) (>> (.-max a) (.-max b)))]
+            (.signedMinMax ft v vmin vmax)))))
+
+    (case [OpRsh64Ux64 OpRsh64Ux32 OpRsh64Ux16 OpRsh64Ux8
+        ^{:line 1957} OpRsh32Ux64 OpRsh32Ux32 OpRsh32Ux16 OpRsh32Ux8
+        ^{:line 1958} OpRsh16Ux64 OpRsh16Ux32 OpRsh16Ux16 OpRsh16Ux8
+        ^{:line 1959} OpRsh8Ux64 OpRsh8Ux32 OpRsh8Ux16 OpRsh8Ux8]
+      (let [a (aget (.-limits ft) (.-ID (aget (.-Args v) 0)))
+          ^{:line 1961} b (aget (.-limits ft) (.-ID (aget (.-Args v) 1)))]
+        (when (>= (.-min b) 0)
+          (.unsignedMinMax ft v (>> (.-umin a) (.-max b)) (>> (.-umax a) (.-min b))))))
+
+    (case [OpDiv64 OpDiv32 OpDiv16 OpDiv8]
+      (let [a (aget (.-limits ft) (.-ID (aget (.-Args v) 0)))
+          ^{:line 1967} b (aget (.-limits ft) (.-ID (aget (.-Args v) 1)))]
+        (when (not (and (.nonnegative a) (.nonnegative b)))
+          ;; TODO: we could handle signed limits but I didn't bother.
+          (break))
+
+        (fallthrough)))
+    (case [OpDiv64u OpDiv32u OpDiv16u OpDiv8u]
+      (let [a (aget (.-limits ft) (.-ID (aget (.-Args v) 0)))
+          ^{:line 1975} b (aget (.-limits ft) (.-ID (aget (.-Args v) 1)))
+          ^{:line 1976} lim (noLimit)]
+        (when (> (.-umax b) 0)
+          (set! lim (.unsignedMin lim (/ (.-umin a) (.-umax b)))))
+
+        (when (> (.-umin b) 0)
+          (set! lim (.unsignedMax lim (/ (.-umax a) (.-umin b)))))
+
+        (.newLimit ft v lim)))
+    (case [OpMod64 OpMod32 OpMod16 OpMod8]
+      (.modLimit ft true v (aget (.-Args v) 0) (aget (.-Args v) 1)))
+    (case [OpMod64u OpMod32u OpMod16u OpMod8u]
+      (.modLimit ft false v (aget (.-Args v) 0) (aget (.-Args v) 1)))
+
+    (case [OpPhi]
+      ;; Compute the union of all the input phis.
+      ;; Often this will convey no information, because the block
+      ;; is not dominated by its predecessors and hence the
+      ;; phi arguments might not have been processed yet. But if
+      ;; the values are declared earlier, it may help. e.g., for
+      ;;    v = phi(c3, c5)
+      ;; where c3 = OpConst [3] and c5 = OpConst [5] are
+      ;; defined in the entry block, we can derive [3,5]
+      ;; as the limit for v.
+      (let [l (aget (.-limits ft) (.-ID (aget (.-Args v) 0)))]
+        (range [_ a (subslice (.-Args v) 1)]
+          (let [l2 (aget (.-limits ft) (.-ID a))]
+            (set! (.-min l) (min (.-min l) (.-min l2)))
+            (set! (.-max l) (max (.-max l) (.-max l2)))
+            (set! (.-umin l) (min (.-umin l) (.-umin l2)))
+            (set! (.-umax l) (max (.-umax l) (.-umax l2)))))
+
+        (.newLimit ft v l)))))
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 2075} (go/method detectSliceLenRelation "detectSliceLenRelation matches the pattern where\n 1. v := slicelen - index, OR v := slicecap - index\n    AND\n 2. index <= slicelen - K\n    THEN\n\nslicecap - index >= slicelen - index >= K\n\nNote that \"index\" is not used for indexing in this pattern, but\nin the motivating example (chunked slice iteration) it is.\n" [^{:tag (* factsTable)} ft ^{:tag (* Value)} v]
+  (when (!= (.-Op v) OpSub64)
+    (return))
+
+
+  (when (not (or (== (.-Op (aget (.-Args v) 0)) OpSliceLen) (== (.-Op (aget (.-Args v) 0)) OpStringLen) (== (.-Op (aget (.-Args v) 0)) OpSliceCap)))
+    (return))
+
+
+  (let [index (aget (.-Args v) 1)]
+    (when (not (.isNonNegative ft index))
+      (return))
+
+    (let [slice (aget (.-Args (aget (.-Args v) 0)) 0)]
+
+      (for [o (aget (.-orderings ft) (.-ID index))] (!= o nil) (set! o (.-next o))
+        (when (!= (.-d o) signed)
+          (continue))
+
+        (let [or (.-r o)]
+          (when (and (!= or lt) (!= or (bit-or lt eq)))
+            (continue))
+
+          (let [ow (.-w o)]
+            (when (and (!= (.-Op ow) OpAdd64) (!= (.-Op ow) OpSub64))
+              (continue))
+
+            (let [^{:tag (* Value)} lenOffset (zero (* Value))]
+              (if [bound (aget (.-Args ow) 0)] (and ^:go/paren (or (== (.-Op bound) OpSliceLen) (== (.-Op bound) OpStringLen)) (== (aget (.-Args bound) 0) slice))
+                (set! lenOffset (aget (.-Args ow) 1))
+                (when [bound (aget (.-Args ow) 1)] (and ^:go/paren (or (== (.-Op bound) OpSliceLen) (== (.-Op bound) OpStringLen)) (== (aget (.-Args bound) 0) slice))
+                  ;; Do not infer K - slicelen, see issue #76709.
+                  (when (== (.-Op ow) OpAdd64)
+                    (set! lenOffset (aget (.-Args ow) 0)))))
+
+
+              (when (or (== lenOffset nil) (!= (.-Op lenOffset) OpConst64))
+                (continue))
+
+              (let [K (.-AuxInt lenOffset)]
+                (when (== (.-Op ow) OpAdd64)
+                  (set! K (- K)))
+
+                (when (< K 0)
+                  (continue))
+
+                (when (== or lt)
+                  (inc! K))
+
+                (when (< K 0) ; We hate thinking about overflow
+                  (continue))
+
+                (.signedMin ft v K)))))))))
+
+
+
+
+^{:go/end 2142} (go/method detectSubRelations "v must be Sub{64,32,16,8}.\n" [^{:tag (* factsTable)} ft ^{:tag (* Value)} v]
+  ;; v = x-y
+  (let [x (aget (.-Args v) 0)
+      ^{:line 2081} y (aget (.-Args v) 1)]
+    (when (== x y)
+      (.signedMinMax ft v 0 0)
+      (return))
+
+    (let [xLim (aget (.-limits ft) (.-ID x))
+        ^{:line 2087} yLim (aget (.-limits ft) (.-ID y))
+
+        ;; Check if we might wrap around. If so, give up.
+        ^{:line 2090} width (* (conv uint (.Size (.-Type v))) 8)
+
+        ;; v >= 1 in the signed domain?
+        ^{:line 2093 :tag bool} vSignedMinOne (zero bool)]
+
+      ;; Signed optimizations
+      (when [(values _ ok) (safeSub (.-min xLim) (.-max yLim) width)] ok
+        ;; Large abs negative y can also overflow
+        (when [(values _ ok) (safeSub (.-max xLim) (.-min yLim) width)] ok
+          ;; x-y won't overflow
+
+          ;; Subtracting a positive non-zero number only makes
+          ;; things smaller. If it's positive or zero, it might
+          ;; also do nothing (x-0 == v).
+          (cond (> (.-min yLim) 0)
+            (.update ft (.-Block v) v x signed lt)
+            (== (.-min yLim) 0)
+            (.update ft (.-Block v) v x signed (bit-or lt eq)))
+
+
+          ;; Subtracting a number from a bigger one
+          ;; can't go below 1. If the numbers might be
+          ;; equal, then it can't go below 0.
+          ;;
+          ;; This requires the overflow checks because
+          ;; large negative y can cause an overflow.
+          (cond (.Ordered (.-orderS ft) y x) (do
+              (.signedMin ft v 1)
+              (set! vSignedMinOne true))
+            (.OrderedOrEqual (.-orderS ft) y x)
+            (.setNonNegative ft v))))
+
+
+
+
+      ;; Unsigned optimizations
+      (when [(values _ ok) (safeSubU (.-umin xLim) (.-umax yLim) width)] ok
+        (if (> (.-umin yLim) 0)
+          (.update ft (.-Block v) v x unsigned lt)
+
+          (.update ft (.-Block v) v x unsigned (bit-or lt eq))))
+
+
+
+      ;; Proving v >= 1 in the signed domain automatically
+      ;; proves it in the unsigned domain, so we can skip it.
+      ;;
+      ;; We don't need overflow checks here, since if y < x,
+      ;; then x-y can never overflow for uint.
+      (when (and (not vSignedMinOne) (.Ordered (.-orderU ft) y x))
+        (.unsignedMin ft v 1)))))
+
+
+
+
+^{:go/end 2182} (go/method detectMod "x%d has been rewritten to x - (x/d)*d.\n" [^{:tag (* factsTable)} ft ^{:tag (* Value)} v]
+  (let [(values ^Op opDiv ^Op opDivU ^Op opMul ^Op opConst) (zero Op)]
+    (switch (.-Op v)
+      (case [OpSub64]
+        (set! opDiv OpDiv64)
+        (set! opDivU OpDiv64u)
+        (set! opMul OpMul64)
+        (set! opConst OpConst64))
+      (case [OpSub32]
+        (set! opDiv OpDiv32)
+        (set! opDivU OpDiv32u)
+        (set! opMul OpMul32)
+        (set! opConst OpConst32))
+      (case [OpSub16]
+        (set! opDiv OpDiv16)
+        (set! opDivU OpDiv16u)
+        (set! opMul OpMul16)
+        (set! opConst OpConst16))
+      (case [OpSub8]
+        (set! opDiv OpDiv8)
+        (set! opDivU OpDiv8u)
+        (set! opMul OpMul8)
+        (set! opConst OpConst8)))
+
+
+    (let [mul (aget (.-Args v) 1)]
+      (when (!= (.-Op mul) opMul)
+        (return))
+
+      (let [(values div con) (values (aget (.-Args mul) 0) (aget (.-Args mul) 1))]
+        (when (== (.-Op div) opConst)
+          (set! (values div con) (values con div)))
+
+        (when (or (!= (.-Op con) opConst) ^:go/paren (and (!= (.-Op div) opDiv) (!= (.-Op div) opDivU)) (!= (aget (.-Args div) 0) (aget (.-Args v) 0)) (!= (.-Op (aget (.-Args div) 1)) opConst) (!= (.-AuxInt (aget (.-Args div) 1)) (.-AuxInt con)))
+          (return))
+
+        (.modLimit ft (== (.-Op div) opDiv) v (aget (.-Args v) 0) con)))))
+
+
+
+^{:go/end 2203} (go/method modLimit "modLimit sets v with facts derived from v = p % q.\n" [^{:tag (* factsTable)} ft ^bool signed ^{:tag (* Value)} v ^{:tag (* Value)} p ^{:tag (* Value)} q]
+  (let [a (aget (.-limits ft) (.-ID p))
+      ^{:line 2187} b (aget (.-limits ft) (.-ID q))]
+    (when signed
+      (when (and (< (.-min a) 0) (> (.-min b) 0))
+        (.signedMinMax ft v (- (- (.-max b) 1)) (- (.-max b) 1))
+        (return))
+
+      (when (not (and (.nonnegative a) (.nonnegative b)))
+        ;; TODO: we could handle signed limits but I didn't bother.
+        (return))
+
+      (when (and (>= (.-min a) 0) (> (.-min b) 0))
+        (.setNonNegative ft v)))
+
+
+    ;; Underflow in the arithmetic below is ok, it gives to MaxUint64 which does nothing to the limit.
+    (.unsignedMax ft v (min (.-umax a) (- (.-umax b) 1)))))
+
+
+
+
+^{:go/end 2235} (go/func getBranch "getBranch returns the range restrictions added by p\nwhen reaching b. p is the immediate dominator of b.\n" ^branch [^SparseTree sdom ^{:tag (* Block)} p ^{:tag (* Block)} b]
+  (when (== p nil)
+    (return unknown))
+
+  (switch (.-Kind p)
+    (case [BlockIf]
+      ;; If p and p.Succs[0] are dominators it means that every path
+      ;; from entry to b passes through p and p.Succs[0]. We care that
+      ;; no path from entry to b passes through p.Succs[1]. If p.Succs[0]
+      ;; has one predecessor then (apart from the degenerate case),
+      ;; there is no path from entry that can reach b through p.Succs[1].
+      ;; TODO: how about p->yes->b->yes, i.e. a loop in yes.
+      (when (and (.IsAncestorEq sdom (.-b (aget (.-Succs p) 0)) b) (== (len (.-Preds (.-b (aget (.-Succs p) 0)))) 1))
+        (return positive))
+
+      (when (and (.IsAncestorEq sdom (.-b (aget (.-Succs p) 1)) b) (== (len (.-Preds (.-b (aget (.-Succs p) 1)))) 1))
+        (return negative)))
+
+    (case [BlockJumpTable]
+      ;; TODO: this loop can lead to quadratic behavior, as
+      ;; getBranch can be called len(p.Succs) times.
+      (range [i e (.-Succs p)]
+        (when (and (.IsAncestorEq sdom (.-b e) b) (== (len (.-Preds (.-b e))) 1))
+          (return (+ jumpTable0 (conv branch i)))))))
+
+
+
+  ^{:line 2234} unknown)
+
+
+
+
+
+^{:go/end 2257} (go/func addIndVarRestrictions "addIndVarRestrictions updates the factsTables ft with the facts\nlearned from the induction variable indVar which drives the loop\nstarting in Block b.\n" [^{:tag (* factsTable)} ft ^{:tag (* Block)} b ^indVar iv]
+  (let [d signed]
+    (when (and (.isNonNegative ft (.-min iv)) (.isNonNegative ft (.-max iv)))
+      (set! d bit-or unsigned))
+
+
+    (if (== (bit-and (.-flags iv) indVarMinExc) 0)
+      (addRestrictions b ft d (.-min iv) (.-ind iv) (bit-or lt eq))
+
+      (addRestrictions b ft d (.-min iv) (.-ind iv) lt))
+
+
+    (if (== (bit-and (.-flags iv) indVarMaxInc) 0)
+      (addRestrictions b ft d (.-ind iv) (.-max iv) lt)
+
+      (addRestrictions b ft d (.-ind iv) (.-max iv) (bit-or lt eq)))))
+
+
+
+
+
+^{:go/end 2281} (go/func addBranchRestrictions "addBranchRestrictions updates the factsTables ft with the facts learned when\nbranching from Block b in direction br.\n" [^{:tag (* factsTable)} ft ^{:tag (* Block)} b ^branch br]
+  (let [c (aget (.-Controls b) 0)]
+    (switch
+      (case [(== br negative)]
+        (.booleanFalse ft c))
+      (case [(== br positive)]
+        (.booleanTrue ft c))
+      (case [(>= br jumpTable0)]
+        (let [idx (- br jumpTable0)
+            ^{:line 2270} val (conv int64 idx)]
+          (when [(values v off) (isConstDelta c)] (!= v nil)
+            ;; Establish the bound on the underlying value we're switching on,
+            ;; not on the offset-ed value used as the jump table index.
+            (set! c v)
+            (set! val - off))
+
+          (.newLimit ft c (lit limit :min val :max val :umin (conv uint64 val) :umax (conv uint64 val)))))
+      (default
+        (panic "unknown branch")))))
+
+
+
+
+
+^{:go/end 2297} (go/func addRestrictions "addRestrictions updates restrictions from the immediate\ndominating block (p) using r.\n" [^{:tag (* Block)} parent ^{:tag (* factsTable)} ft ^domain t ^{:tag (* Value)} v ^{:tag (* Value)} w ^relation r]
+  (when (== t 0)
+    ;; Trivial case: nothing to do.
+    ;; Should not happen, but just in case.
+    (return))
+
+  (for [i (conv domain 1)] (<= i t) (set! i << 1)
+    (when (== (bit-and t i) 0)
+      (continue))
+
+    (.update ft parent v w i r)))
+
+
+
+^{:go/end 2312} (go/func unsignedAddOverflows ^bool [^uint64 a ^uint64 b ^{:tag (* types/Type)} t]
+  (switch (.Size t)
+    (case [8]
+      (return (< (+ a b) a)))
+    (case [4]
+      (return (> (+ a b) math/MaxUint32)))
+    (case [2]
+      (return (> (+ a b) math/MaxUint16)))
+    (case [1]
+      (return (> (+ a b) math/MaxUint8)))
+    (default
+      (panic "unreachable"))))
+
+
+
+^{:go/end 2328} (go/func signedAddOverflowsOrUnderflows ^bool [^int64 a ^int64 b ^{:tag (* types/Type)} t]
+  (let [r (+ a b)]
+    (switch (.Size t)
+      (case [8]
+        (return (or ^:go/paren (and (>= a 0) (>= b 0) (< r 0)) ^:go/paren (and (< a 0) (< b 0) (>= r 0)))))
+      (case [4]
+        (return (or (< r math/MinInt32) (< math/MaxInt32 r))))
+      (case [2]
+        (return (or (< r math/MinInt16) (< math/MaxInt16 r))))
+      (case [1]
+        (return (or (< r math/MinInt8) (< math/MaxInt8 r))))
+      (default
+        (panic "unreachable")))))
+
+
+
+^{:go/end 2332} (go/func unsignedSubUnderflows ^bool [^uint64 a ^uint64 b]
+  (< a b))
+
+
+
+
+
+
+^{:go/end 2402} (go/func checkForChunkedIndexBounds "checkForChunkedIndexBounds looks for index expressions of the form\nA[i+delta] where delta < K and i <= len(A)-K.  That is, this is a chunked\niteration where the index is not directly compared to the length.\nif isReslice, then delta can be equal to K.\n" ^bool [^{:tag (* factsTable)} ft ^{:tag (* Block)} b ^{:tag (* Value)} index ^{:tag (* Value)} bound ^bool isReslice]
+  (when (and (!= (.-Op bound) OpSliceLen) (!= (.-Op bound) OpStringLen) (!= (.-Op bound) OpSliceCap))
+    (return false))
+
+
+  ;; this is a slice bounds check against len or capacity,
+  ;; and refers back to a prior check against length, which
+  ;; will also work for the cap since that is not smaller
+  ;; than the length.
+
+  (let [slice (aget (.-Args bound) 0)
+      ^{:line 2349} lim (aget (.-limits ft) (.-ID index))]
+    (when (< (.-min lim) 0)
+      (return false))
+
+    ^{:go/breaks [[5 2401]]} (let [(values i delta) (isConstDelta index)]
+      (when (== i nil)
+        (return false))
+
+      (when (< delta 0)
+        (return false))
+
+      ;; special case for blocked iteration over a slice.
+      ;; slicelen > i + delta && <==== if clauses above
+      ;; && index >= 0           <==== if clause above
+      ;; delta >= 0 &&           <==== if clause above
+      ;; slicelen-K >/>= x       <==== checked below
+      ;; && K >=/> delta         <==== checked below
+      ;; then v > w
+      ;; example: i <=/< len - 4/3 means i+{0,1,2,3} are legal indices
+      (for [o (aget (.-orderings ft) (.-ID i))] (!= o nil) (set! o (.-next o))
+        (when (!= (.-d o) signed)
+          (continue))
+
+        (when [ow (.-w o)] (== (.-Op ow) OpAdd64)
+          (let [^{:tag (* Value)} lenOffset (zero (* Value))]
+            (if [bound (aget (.-Args ow) 0)] (and ^:go/paren (or (== (.-Op bound) OpSliceLen) (== (.-Op bound) OpStringLen)) (== (aget (.-Args bound) 0) slice))
+              (set! lenOffset (aget (.-Args ow) 1))
+              (when [bound (aget (.-Args ow) 1)] (and ^:go/paren (or (== (.-Op bound) OpSliceLen) (== (.-Op bound) OpStringLen)) (== (aget (.-Args bound) 0) slice))
+                (set! lenOffset (aget (.-Args ow) 0))))
+
+            (when (or (== lenOffset nil) (!= (.-Op lenOffset) OpConst64))
+              (continue))
+
+            (when [K (- (.-AuxInt lenOffset))] (>= K 0)
+              (let [or (.-r o)]
+                (when isReslice
+                  (inc! K))
+
+                (when (== or lt)
+                  (set! or (bit-or lt eq))
+                  (inc! K))
+
+                (when (< K 0) ; We hate thinking about overflow
+                  (continue))
+
+
+                (when (and (< delta K) (== or (bit-or lt eq)))
+                  (return true)))))))
+
+
+
+
+      false)))
+
+
+^{:go/end 2571} (go/method addValueFact [^{:tag (* factsTable)} ft ^{:tag (* Block)} b ^{:tag (* Value)} v]
+  (switch (.-Op v)
+    (case [OpAdd64 OpAdd32 OpAdd16 OpAdd8]
+      (let [x (aget (.-limits ft) (.-ID (aget (.-Args v) 0)))
+          ^{:line 2408} y (aget (.-limits ft) (.-ID (aget (.-Args v) 1)))]
+        (when (not (unsignedAddOverflows (.-umax x) (.-umax y) (.-Type v)))
+          (let [r gt]
+            (when (.maybeZero x)
+              (set! r bit-or eq))
+
+            (.update ft b v (aget (.-Args v) 1) unsigned r)
+            (set! r gt)
+            (when (.maybeZero y)
+              (set! r bit-or eq))
+
+            (.update ft b v (aget (.-Args v) 0) unsigned r)))
+
+        (when (and (>= (.-min x) 0) (not (signedAddOverflowsOrUnderflows (.-max x) (.-max y) (.-Type v))))
+          (let [r gt]
+            (when (.maybeZero x)
+              (set! r bit-or eq))
+
+            (.update ft b v (aget (.-Args v) 1) signed r)))
+
+        (when (and (>= (.-min y) 0) (not (signedAddOverflowsOrUnderflows (.-max x) (.-max y) (.-Type v))))
+          (let [r gt]
+            (when (.maybeZero y)
+              (set! r bit-or eq))
+
+            (.update ft b v (aget (.-Args v) 0) signed r)))
+
+        (when (and (<= (.-max x) 0) (not (signedAddOverflowsOrUnderflows (.-min x) (.-min y) (.-Type v))))
+          (let [r lt]
+            (when (.maybeZero x)
+              (set! r bit-or eq))
+
+            (.update ft b v (aget (.-Args v) 1) signed r)))
+
+        (when (and (<= (.-max y) 0) (not (signedAddOverflowsOrUnderflows (.-min x) (.-min y) (.-Type v))))
+          (let [r lt]
+            (when (.maybeZero y)
+              (set! r bit-or eq))
+
+            (.update ft b v (aget (.-Args v) 0) signed r)))))
+
+    (case [OpSub64 OpSub32 OpSub16 OpSub8]
+      (let [x (aget (.-limits ft) (.-ID (aget (.-Args v) 0)))
+          ^{:line 2451} y (aget (.-limits ft) (.-ID (aget (.-Args v) 1)))]
+        (when (not (unsignedSubUnderflows (.-umin x) (.-umax y)))
+          (let [r lt]
+            (when (.maybeZero y)
+              (set! r bit-or eq))
+
+            (.update ft b v (aget (.-Args v) 0) unsigned r)))))
+
+    ;; FIXME: we could also do signed facts but the overflow checks are much trickier and I don't need it yet.
+    (case [OpAnd64 OpAnd32 OpAnd16 OpAnd8]
+      (.update ft b v (aget (.-Args v) 0) unsigned (bit-or lt eq))
+      (.update ft b v (aget (.-Args v) 1) unsigned (bit-or lt eq))
+      (when (.isNonNegative ft (aget (.-Args v) 0))
+        (.update ft b v (aget (.-Args v) 0) signed (bit-or lt eq)))
+
+      (when (.isNonNegative ft (aget (.-Args v) 1))
+        (.update ft b v (aget (.-Args v) 1) signed (bit-or lt eq))))
+
+    (case [OpOr64 OpOr32 OpOr16 OpOr8])
+    ;; TODO: investigate how to always add facts without much slowdown, see issue #57959
+    ;;ft.update(b, v, v.Args[0], unsigned, gt|eq)
+    ;;ft.update(b, v, v.Args[1], unsigned, gt|eq)
+    (case [OpDiv64 OpDiv32 OpDiv16 OpDiv8]
+      (when (not (.isNonNegative ft (aget (.-Args v) 1)))
+        (break))
+
+      (fallthrough))
+    (case [OpRsh8x64 OpRsh8x32 OpRsh8x16 OpRsh8x8
+        ^{:line 2479} OpRsh16x64 OpRsh16x32 OpRsh16x16 OpRsh16x8
+        ^{:line 2480} OpRsh32x64 OpRsh32x32 OpRsh32x16 OpRsh32x8
+        ^{:line 2481} OpRsh64x64 OpRsh64x32 OpRsh64x16 OpRsh64x8]
+      (when (not (.isNonNegative ft (aget (.-Args v) 0)))
+        (break))
+
+      (fallthrough))
+    (case [OpDiv64u OpDiv32u OpDiv16u OpDiv8u
+        ^{:line 2487} OpRsh8Ux64 OpRsh8Ux32 OpRsh8Ux16 OpRsh8Ux8
+        ^{:line 2488} OpRsh16Ux64 OpRsh16Ux32 OpRsh16Ux16 OpRsh16Ux8
+        ^{:line 2489} OpRsh32Ux64 OpRsh32Ux32 OpRsh32Ux16 OpRsh32Ux8
+        ^{:line 2490} OpRsh64Ux64 OpRsh64Ux32 OpRsh64Ux16 OpRsh64Ux8]
+      (switch [add (aget (.-Args v) 0)] (.-Op add)
+        ;; round-up division pattern; given:
+        ;; v = (x + y) / z
+        ;; if y < z then v <= x
+        (case [OpAdd64 OpAdd32 OpAdd16 OpAdd8]
+          (let [z (aget (.-Args v) 1)
+              ^{:line 2497} zl (aget (.-limits ft) (.-ID z))
+              ^{:line 2498 :tag uint64} uminDivisor (zero uint64)]
+            (switch (.-Op v)
+              (case [OpDiv64u OpDiv32u OpDiv16u OpDiv8u
+                  ^{:line 2501} OpDiv64 OpDiv32 OpDiv16 OpDiv8]
+                (set! uminDivisor (.-umin zl)))
+              (case [OpRsh8Ux64 OpRsh8Ux32 OpRsh8Ux16 OpRsh8Ux8
+                  ^{:line 2504} OpRsh16Ux64 OpRsh16Ux32 OpRsh16Ux16 OpRsh16Ux8
+                  ^{:line 2505} OpRsh32Ux64 OpRsh32Ux32 OpRsh32Ux16 OpRsh32Ux8
+                  ^{:line 2506} OpRsh64Ux64 OpRsh64Ux32 OpRsh64Ux16 OpRsh64Ux8
+                  ^{:line 2507} OpRsh8x64 OpRsh8x32 OpRsh8x16 OpRsh8x8
+                  ^{:line 2508} OpRsh16x64 OpRsh16x32 OpRsh16x16 OpRsh16x8
+                  ^{:line 2509} OpRsh32x64 OpRsh32x32 OpRsh32x16 OpRsh32x8
+                  ^{:line 2510} OpRsh64x64 OpRsh64x32 OpRsh64x16 OpRsh64x8]
+                (set! uminDivisor ^uint64 (<< 1 (.-umin zl))))
+              (default
+                (panic "unreachable")))
+
+
+            (let [x (aget (.-Args add) 0)
+                ^{:line 2517} xl (aget (.-limits ft) (.-ID x))
+                ^{:line 2518} y (aget (.-Args add) 1)
+                ^{:line 2519} yl (aget (.-limits ft) (.-ID y))]
+              (when (not (unsignedAddOverflows (.-umax xl) (.-umax yl) (.-Type add)))
+                (when (< (.-umax xl) uminDivisor)
+                  (.update ft b v y unsigned (bit-or lt eq)))
+
+                (when (< (.-umax yl) uminDivisor)
+                  (.update ft b v x unsigned (bit-or lt eq))))))))
+
+
+
+      (.update ft b v (aget (.-Args v) 0) unsigned (bit-or lt eq)))
+    (case [OpMod64 OpMod32 OpMod16 OpMod8]
+      (when (or (not (.isNonNegative ft (aget (.-Args v) 0))) (not (.isNonNegative ft (aget (.-Args v) 1))))
+        (break))
+
+      (fallthrough))
+    (case [OpMod64u OpMod32u OpMod16u OpMod8u]
+      (.update ft b v (aget (.-Args v) 0) unsigned (bit-or lt eq))
+      ;; Note: we have to be careful that this doesn't imply
+      ;; that the modulus is >0, which isn't true until *after*
+      ;; the mod instruction executes (and thus panics if the
+      ;; modulus is 0). See issue 67625.
+      (.update ft b v (aget (.-Args v) 1) unsigned lt))
+    (case [OpStringLen]
+      (when (== (.-Op (aget (.-Args v) 0)) OpStringMake)
+        (.update ft b v (aget (.-Args (aget (.-Args v) 0)) 1) signed eq)))
+
+    (case [OpSliceLen]
+      (when (== (.-Op (aget (.-Args v) 0)) OpSliceMake)
+        (.update ft b v (aget (.-Args (aget (.-Args v) 0)) 1) signed eq)))
+
+    (case [OpSliceCap]
+      (when (== (.-Op (aget (.-Args v) 0)) OpSliceMake)
+        (.update ft b v (aget (.-Args (aget (.-Args v) 0)) 2) signed eq)))
+
+    (case [OpIsInBounds]
+      (when (checkForChunkedIndexBounds ft b (aget (.-Args v) 0) (aget (.-Args v) 1) false)
+        (when (> (.-debug (.-pass (.-Func b))) 0)
+          (.Warnl (.-Func b) (.-Pos v) "Proved %s for blocked indexing" (.-Op v)))
+
+        (.booleanTrue ft v)))
+
+    (case [OpIsSliceInBounds]
+      (when (checkForChunkedIndexBounds ft b (aget (.-Args v) 0) (aget (.-Args v) 1) true)
+        (when (> (.-debug (.-pass (.-Func b))) 0)
+          (.Warnl (.-Func b) (.-Pos v) "Proved %s for blocked reslicing" (.-Op v)))
+
+        (.booleanTrue ft v)))
+
+    (case [OpPhi]
+      (addLocalFactsPhi ft v))))
+
+
+
+^{:go/end 2646} (go/func addLocalFactsPhi [^{:tag (* factsTable)} ft ^{:tag (* Value)} v]
+  ;; Look for phis that implement min/max.
+  ;;   z:
+  ;;      c = Less64 x y (or other Less/Leq operation)
+  ;;      If c -> bx by
+  ;;   bx: <- z
+  ;;       -> b ...
+  ;;   by: <- z
+  ;;      -> b ...
+  ;;   b: <- bx by
+  ;;      v = Phi x y
+  ;; Then v is either min or max of x,y.
+  ;; If it is the min, then we deduce v <= x && v <= y.
+  ;; If it is the max, then we deduce v >= x && v >= y.
+  ;; The min case is useful for the copy builtin, see issue 16833.
+  (when (!= (len (.-Args v)) 2)
+    (return))
+
+  (let [b (.-Block v)
+      ^{:line 2592} x (aget (.-Args v) 0)
+      ^{:line 2593} y (aget (.-Args v) 1)
+      ^{:line 2594} bx (.-b (aget (.-Preds b) 0))
+      ^{:line 2595} by (.-b (aget (.-Preds b) 1))
+      ^{:line 2596 :tag (* Block)} z (zero (* Block))] ; branch point
+    (switch
+      (case [(== bx by)] ; bx == by == z case
+        (set! z bx))
+      (case [(== (.uniquePred by) bx)] ; bx == z case
+        (set! z bx))
+      (case [(== (.uniquePred bx) by)] ; by == z case
+        (set! z by))
+      (case [(== (.uniquePred bx) (.uniquePred by))]
+        (set! z (.uniquePred bx))))
+
+    (when (or (== z nil) (!= (.-Kind z) BlockIf))
+      (return))
+
+    (let [c (aget (.-Controls z) 0)]
+      (when (!= (len (.-Args c)) 2)
+        (return))
+
+      (let [^bool isMin (zero bool)] ; if c, a less-than comparison, is true, phi chooses x.
+        (if (== bx z)
+          (set! isMin (== (.-i (aget (.-Preds b) 0)) 0))
+
+          (set! isMin (== (.-i (aget (.-Preds bx) 0)) 0)))
+
+        (cond (and (== (aget (.-Args c) 0) x) (== (aget (.-Args c) 1) y)) (do)
+          ;; ok
+          (and (== (aget (.-Args c) 0) y) (== (aget (.-Args c) 1) x))
+          ;; Comparison is reversed from how the values are listed in the Phi.
+          (set! isMin (not isMin)) :else
+
+          ;; Not comparing x and y.
+          (return))
+
+        (let [^domain dom (zero domain)]
+          (switch (.-Op c)
+            (case [OpLess64 OpLess32 OpLess16 OpLess8 OpLeq64 OpLeq32 OpLeq16 OpLeq8]
+              (set! dom signed))
+            (case [OpLess64U OpLess32U OpLess16U OpLess8U OpLeq64U OpLeq32U OpLeq16U OpLeq8U]
+              (set! dom unsigned))
+            (default
+              (return)))
+
+          (let [^relation rel (zero relation)]
+            (if isMin
+              (set! rel (bit-or lt eq))
+
+              (set! rel (bit-or gt eq)))
+
+            (.update ft b v x dom rel)
+            (.update ft b v y dom rel)))))))
+
+
+(go/var ctzNonZeroOp (lit (map Op Op)
+    ^{:line 2649} [OpCtz8 OpCtz8NonZero]
+    ^{:line 2650} [OpCtz16 OpCtz16NonZero]
+    ^{:line 2651} [OpCtz32 OpCtz32NonZero]
+    ^{:line 2652} [OpCtz64 OpCtz64NonZero]))
+
+(go/var mostNegativeDividend (lit (map Op int64)
+    ^{:line 2655} [OpDiv16 (<< -1 15)]
+    ^{:line 2656} [OpMod16 (<< -1 15)]
+    ^{:line 2657} [OpDiv32 (<< -1 31)]
+    ^{:line 2658} [OpMod32 (<< -1 31)]
+    ^{:line 2659} [OpDiv64 (<< -1 63)]
+    ^{:line 2660} [OpMod64 (<< -1 63)]))
+
+(go/var unsignedOp (lit (map Op Op)
+    ^{:line 2663} [OpDiv8 OpDiv8u]
+    ^{:line 2664} [OpDiv16 OpDiv16u]
+    ^{:line 2665} [OpDiv32 OpDiv32u]
+    ^{:line 2666} [OpDiv64 OpDiv64u]
+    ^{:line 2667} [OpMod8 OpMod8u]
+    ^{:line 2668} [OpMod16 OpMod16u]
+    ^{:line 2669} [OpMod32 OpMod32u]
+    ^{:line 2670} [OpMod64 OpMod64u]
+    ^{:line 2671} [OpRsh8x8 OpRsh8Ux8]
+    ^{:line 2672} [OpRsh8x16 OpRsh8Ux16]
+    ^{:line 2673} [OpRsh8x32 OpRsh8Ux32]
+    ^{:line 2674} [OpRsh8x64 OpRsh8Ux64]
+    ^{:line 2675} [OpRsh16x8 OpRsh16Ux8]
+    ^{:line 2676} [OpRsh16x16 OpRsh16Ux16]
+    ^{:line 2677} [OpRsh16x32 OpRsh16Ux32]
+    ^{:line 2678} [OpRsh16x64 OpRsh16Ux64]
+    ^{:line 2679} [OpRsh32x8 OpRsh32Ux8]
+    ^{:line 2680} [OpRsh32x16 OpRsh32Ux16]
+    ^{:line 2681} [OpRsh32x32 OpRsh32Ux32]
+    ^{:line 2682} [OpRsh32x64 OpRsh32Ux64]
+    ^{:line 2683} [OpRsh64x8 OpRsh64Ux8]
+    ^{:line 2684} [OpRsh64x16 OpRsh64Ux16]
+    ^{:line 2685} [OpRsh64x32 OpRsh64Ux32]
+    ^{:line 2686} [OpRsh64x64 OpRsh64Ux64]))
+
+
+(go/var bytesizeToConst (lit (array ... Op)
+    ^{:line 2690} [(/ 8 8) OpConst8]
+    ^{:line 2691} [(/ 16 8) OpConst16]
+    ^{:line 2692} [(/ 32 8) OpConst32]
+    ^{:line 2693} [(/ 64 8) OpConst64]))
+
+(go/var bytesizeToNeq (lit (array ... Op)
+    ^{:line 2696} [(/ 8 8) OpNeq8]
+    ^{:line 2697} [(/ 16 8) OpNeq16]
+    ^{:line 2698} [(/ 32 8) OpNeq32]
+    ^{:line 2699} [(/ 64 8) OpNeq64]))
+
+(go/var bytesizeToAnd (lit (array ... Op)
+    ^{:line 2702} [(/ 8 8) OpAnd8]
+    ^{:line 2703} [(/ 16 8) OpAnd16]
+    ^{:line 2704} [(/ 32 8) OpAnd32]
+    ^{:line 2705} [(/ 64 8) OpAnd64]))
+
+
+(go/var invertEqNeqOp (lit (map Op Op)
+    ^{:line 2709} [OpEq8 OpNeq8]
+    ^{:line 2710} [OpNeq8 OpEq8]
+
+    ^{:line 2712} [OpEq16 OpNeq16]
+    ^{:line 2713} [OpNeq16 OpEq16]
+
+    ^{:line 2715} [OpEq32 OpNeq32]
+    ^{:line 2716} [OpNeq32 OpEq32]
+
+    ^{:line 2718} [OpEq64 OpNeq64]
+    ^{:line 2719} [OpNeq64 OpEq64]))
+
+
+^{:go/end 2970} (go/method simplifyValue [^{:tag (* factsTable)} ft ^{:tag (* Block)} b ^{:tag (* Value)} v]
+  (switch (.-Op v)
+    (case [OpStaticLECall]
+      (when (and (> (.-debug (.-pass (.-Func b))) 0) (== (len (.-Args v)) 2))
+        (let [fn (.-Fn (auxToCall (.-Aux v)))]
+          (when (and (!= fn nil) (strings/Contains (.String fn) "prove"))
+            ;; Print bounds of any argument to single-arg function with "prove" in name,
+            ;; for debugging and especially for test/prove.go.
+            ;; (v.Args[1] is mem).
+            (let [x (aget (.-Args v) 0)]
+              (.Warnl (.-Func b) (.-Pos v) "Proved %v (%v)" (aget (.-limits ft) (.-ID x)) x))))))
+
+
+    (case [OpSlicemask]
+      ;; Replace OpSlicemask operations in b with constants where possible.
+      (let [cap (aget (.-Args v) 0)
+          (values x delta) (isConstDelta cap)]
+        (when (!= x nil)
+          ;; slicemask(x + y)
+          ;; if x is larger than -y (y is negative), then slicemask is -1.
+          (let [lim (aget (.-limits ft) (.-ID x))]
+            (when (> (.-umin lim) (conv uint64 (- delta)))
+              (if (== (.Size (.-Type v)) 8)
+                (.reset v OpConst64)
+
+                (.reset v OpConst32))
+
+              (when (> (.-debug (.-pass (.-Func b))) 0)
+                (.Warnl (.-Func b) (.-Pos v) "Proved slicemask not needed"))
+
+              (set! (.-AuxInt v) -1))
+
+            (break)))
+
+        (let [lim (aget (.-limits ft) (.-ID cap))]
+          (when (> (.-umin lim) 0)
+            (if (== (.Size (.-Type v)) 8)
+              (.reset v OpConst64)
+
+              (.reset v OpConst32))
+
+            (when (> (.-debug (.-pass (.-Func b))) 0)
+              (.Warnl (.-Func b) (.-Pos v) "Proved slicemask not needed (by limit)"))
+
+            (set! (.-AuxInt v) -1)))))
+
+
+    (case [OpCtz8 OpCtz16 OpCtz32 OpCtz64]
+      ;; On some architectures, notably amd64, we can generate much better
+      ;; code for CtzNN if we know that the argument is non-zero.
+      ;; Capture that information here for use in arch-specific optimizations.
+      (let [x (aget (.-Args v) 0)
+          ^{:line 2774} lim (aget (.-limits ft) (.-ID x))]
+        (when (or (> (.-umin lim) 0) (> (.-min lim) 0) (< (.-max lim) 0))
+          (when (> (.-debug (.-pass (.-Func b))) 0)
+            (.Warnl (.-Func b) (.-Pos v) "Proved %v non-zero" (.-Op v)))
+
+          (set! (.-Op v) (aget ctzNonZeroOp (.-Op v))))))
+
+    (case [OpRsh8x8 OpRsh8x16 OpRsh8x32 OpRsh8x64
+        ^{:line 2782} OpRsh16x8 OpRsh16x16 OpRsh16x32 OpRsh16x64
+        ^{:line 2783} OpRsh32x8 OpRsh32x16 OpRsh32x32 OpRsh32x64
+        ^{:line 2784} OpRsh64x8 OpRsh64x16 OpRsh64x32 OpRsh64x64]
+      (when (.isNonNegative ft (aget (.-Args v) 0))
+        (when (> (.-debug (.-pass (.-Func b))) 0)
+          (.Warnl (.-Func b) (.-Pos v) "Proved %v is unsigned" (.-Op v)))
+
+        (set! (.-Op v) (aget unsignedOp (.-Op v))))
+
+      (fallthrough))
+    (case [OpLsh8x8 OpLsh8x16 OpLsh8x32 OpLsh8x64
+        ^{:line 2793} OpLsh16x8 OpLsh16x16 OpLsh16x32 OpLsh16x64
+        ^{:line 2794} OpLsh32x8 OpLsh32x16 OpLsh32x32 OpLsh32x64
+        ^{:line 2795} OpLsh64x8 OpLsh64x16 OpLsh64x32 OpLsh64x64
+        ^{:line 2796} OpRsh8Ux8 OpRsh8Ux16 OpRsh8Ux32 OpRsh8Ux64
+        ^{:line 2797} OpRsh16Ux8 OpRsh16Ux16 OpRsh16Ux32 OpRsh16Ux64
+        ^{:line 2798} OpRsh32Ux8 OpRsh32Ux16 OpRsh32Ux32 OpRsh32Ux64
+        ^{:line 2799} OpRsh64Ux8 OpRsh64Ux16 OpRsh64Ux32 OpRsh64Ux64]
+      ;; Check whether, for a << b, we know that b
+      ;; is strictly less than the number of bits in a.
+      (let [by (aget (.-Args v) 1)
+          ^{:line 2803} lim (aget (.-limits ft) (.-ID by))
+          ^{:line 2804} bits (* 8 (.Size (.-Type (aget (.-Args v) 0))))]
+        (when (or (< (.-umax lim) (conv uint64 bits)) ^:go/paren (and (< (.-max lim) bits) (.isNonNegative ft by)))
+          (set! (.-AuxInt v) 1) ; see shiftIsBounded
+          (when (and (> (.-debug (.-pass (.-Func b))) 0) (not (.isGenericIntConst by)))
+            (.Warnl (.-Func b) (.-Pos v) "Proved %v bounded" (.-Op v))))))
+
+
+    (case [OpDiv8 OpDiv16 OpDiv32 OpDiv64 OpMod8 OpMod16 OpMod32 OpMod64]
+      (let [(values p q) (values (aget (.-limits ft) (.-ID (aget (.-Args v) 0))) (aget (.-limits ft) (.-ID (aget (.-Args v) 1))))] ; p/q
+        (when (and (.nonnegative p) (.nonnegative q))
+          (when (> (.-debug (.-pass (.-Func b))) 0)
+            (.Warnl (.-Func b) (.-Pos v) "Proved %v is unsigned" (.-Op v)))
+
+          (set! (.-Op v) (aget unsignedOp (.-Op v)))
+          (set! (.-AuxInt v) 0)
+          (break))
+
+        ;; Fixup code can be avoided on x86 if we know
+        ;;  the divisor is not -1 or the dividend > MinIntNN.
+        (when (and (!= (.-Op v) OpDiv8) (!= (.-Op v) OpMod8) ^:go/paren (or (< (.-max q) -1) (> (.-min q) -1) (> (.-min p) (aget mostNegativeDividend (.-Op v)))))
+          ;; See DivisionNeedsFixUp in rewrite.go.
+          ;; v.AuxInt = 1 means we have proved that the divisor is not -1
+          ;; or that the dividend is not the most negative integer,
+          ;; so we do not need to add fix-up code.
+          (when (> (.-debug (.-pass (.-Func b))) 0)
+            (.Warnl (.-Func b) (.-Pos v) "Proved %v does not need fix-up" (.-Op v)))
+
+          ;; Only usable on amd64 and 386, and only for ≥ 16-bit ops.
+          ;; Don't modify AuxInt on other architectures, as that can interfere with CSE.
+          ;; (Print the debug info above always, so that test/prove.go can be
+          ;; checked on non-x86 systems.)
+          ;; TODO: add other architectures?
+          (when (or (== (.-arch (.-Config (.-Func b))) "386") (== (.-arch (.-Config (.-Func b))) "amd64"))
+            (set! (.-AuxInt v) 1)))))
+
+
+    (case [OpMul64 OpMul32 OpMul16 OpMul8]
+      (when [vl (aget (.-limits ft) (.-ID v))] (or (== (.-min vl) (.-max vl)) (== (.-umin vl) (.-umax vl)))
+        ;; v is going to be constant folded away; don't "optimize" it.
+        (break))
+
+      (let [x (aget (.-Args v) 0)
+          ^{:line 2846} xl (aget (.-limits ft) (.-ID x))
+          ^{:line 2847} y (aget (.-Args v) 1)
+          ^{:line 2848} yl (aget (.-limits ft) (.-ID y))]
+        (when (or (and (== (.-umin xl) (.-umax xl)) (^{:inst [uint64]} isPowerOfTwo (.-umin xl)))
+            (and (== (.-min xl) (.-max xl)) (^{:inst [int64]} isPowerOfTwo (.-min xl)))
+            (and (== (.-umin yl) (.-umax yl)) (^{:inst [uint64]} isPowerOfTwo (.-umin yl)))
+            (and (== (.-min yl) (.-max yl)) (^{:inst [int64]} isPowerOfTwo (.-min yl))))
+          ;; 0,1 * a power of two is better done as a shift
+          (break))
+
+        (switch [(values xOne yOne) (values (<= (.-umax xl) 1) (<= (.-umax yl) 1))]
+          (case [(and xOne yOne)]
+            (set! (.-Op v) (aget bytesizeToAnd (.Size (.-Type v))))
+            (when (> (.-debug (.-pass (.-Func b))) 0)
+              (.Warnl (.-Func b) (.-Pos v) "Rewrote Mul %v into And" v)))
+
+          (case [(and yOne (.-haveCondSelect (.-Config (.-Func b))))]
+            (set! (values x y) (values y x))
+            (fallthrough))
+          (case [(and xOne (.-haveCondSelect (.-Config (.-Func b))))]
+            (when (not (canCondSelect v (.-arch (.-Config (.-Func b))) nil))
+              (break))
+
+            (let [zero (.constVal (.-Func b) (aget bytesizeToConst (.Size (.-Type v))) (.-Type v) 0 true)]
+              (.initLimitForNewValue ft zero)
+              (let [check (.NewValue2 b (.-Pos v) (aget bytesizeToNeq (.Size (.-Type v))) (aget types/Types types/TBOOL) zero x)]
+                (.initLimitForNewValue ft check)
+                (.reset v OpCondSelect)
+                (.AddArg3 v y zero check)
+
+                (when (> (.-debug (.-pass (.-Func b))) 0)
+                  (.Warnl (.-Func b) (.-Pos v) "Rewrote Mul %v into CondSelect; %v is bool" v x))))))))
+
+
+    (case [OpEq64 OpEq32 OpEq16 OpEq8
+        ^{:line 2881} OpNeq64 OpNeq32 OpNeq16 OpNeq8]
+      ;; Canonicalize:
+      ;; [0,1] != 1 → [0,1] == 0
+      ;; [0,1] == 1 → [0,1] != 0
+      ;; Comparison with zero often encode smaller.
+      (let [(values xPos yPos) (values 0 1)
+          (values x y) (values (aget (.-Args v) xPos) (aget (.-Args v) yPos))
+          (values xl yl) (values (aget (.-limits ft) (.-ID x)) (aget (.-limits ft) (.-ID y)))
+          (values xConst xIsConst) (.constValue xl)
+          (values yConst yIsConst) (.constValue yl)]
+        (switch
+          (case [(and xIsConst yIsConst)])
+          (case [xIsConst]
+            (set! (values xPos yPos) (values yPos xPos))
+            (set! (values x y) (values y x))
+            (set! (values xl yl) (values yl xl))
+            (set! (values xConst yConst) (values yConst xConst))
+            (fallthrough))
+          (case [yIsConst]
+            (when (or (!= yConst 1)
+                (> (.-umax xl) 1))
+              (break))
+
+            (let [zero (.constVal (.-Func b) (aget bytesizeToConst (.Size (.-Type x))) (.-Type x) 0 true)]
+              (.initLimitForNewValue ft zero)
+              (let [oldOp (.-Op v)]
+                (set! (.-Op v) (aget invertEqNeqOp (.-Op v)))
+                (.SetArg v yPos zero)
+                (when (> (.-debug (.-pass (.-Func b))) 0)
+                  (.Warnl (.-Func b) (.-Pos v) "Rewrote %v (%v) %v argument is boolean-like; rewrote to %v against 0" v oldOp x (.-Op v)))))))))
+
+
+    (case [OpAnd64 OpAnd32 OpAnd16 OpAnd8]
+      (let [(values x y) (values (aget (.-Args v) 0) (aget (.-Args v) 1))
+          (values xl yl) (values (aget (.-limits ft) (.-ID x)) (aget (.-limits ft) (.-ID y)))
+          (values xConst xIsConst) (.constValue xl)
+          (values yConst yIsConst) (.constValue yl)]
+        ;; Remove no-op Ands
+        (switch
+          (case [(and xIsConst yIsConst)])
+          (case [xIsConst]
+            (set! (values x y) (values y x))
+            (set! (values xl yl) (values yl xl))
+            (set! (values xConst yConst) (values yConst xConst))
+            (fallthrough))
+          (case [yIsConst]
+            (let [(values knownBits fixedLen) (.unsignedFixedLeadingBits xl)
+                ^{:line 2928} varyingLen (- 64 fixedLen)
+                ^{:line 2929} wantBits (bit-or knownBits (- (<< (conv uint64 1) varyingLen) 1))]
+              ;; wantBits has the fixed bits and the worst case bits (set) for the varying bits
+              ;; if after anding it with y it isn't modified we know the and is always a no-op.
+              (when (!= (bit-and wantBits (conv uint64 yConst)) wantBits)
+                (break))
+
+
+              (let [oldOp (.-Op v)]
+                (.copyOf v x)
+                (when (> (.-debug (.-pass (.-Func b))) 0)
+                  (.Warnl (.-Func b) (.-Pos v) "Proved %v is a no-op %v" v oldOp))))))))
+
+
+    (case [OpOr64 OpOr32 OpOr16 OpOr8]
+      (let [(values x y) (values (aget (.-Args v) 0) (aget (.-Args v) 1))
+          (values xl yl) (values (aget (.-limits ft) (.-ID x)) (aget (.-limits ft) (.-ID y)))
+          (values xConst xIsConst) (.constValue xl)
+          (values yConst yIsConst) (.constValue yl)]
+        ;; Remove no-op Ors
+        (switch
+          (case [(and xIsConst yIsConst)])
+          (case [xIsConst]
+            (set! (values x y) (values y x))
+            (set! (values xl yl) (values yl xl))
+            (set! (values xConst yConst) (values yConst xConst))
+            (fallthrough))
+          (case [yIsConst]
+            (let [(values wantBits _) (.unsignedFixedLeadingBits xl)]
+              ;; wantBits has the fixed bits and the worst case bits (unset) for the varying bits
+              ;; if after oring it with y it isn't modified we know the or is always a no-op.
+              (when (!= (bit-or wantBits (conv uint64 yConst)) wantBits)
+                (break))
+
+
+              (let [oldOp (.-Op v)]
+                (.copyOf v x)
+                (when (> (.-debug (.-pass (.-Func b))) 0)
+                  (.Warnl (.-Func b) (.-Pos v) "Proved %v is a no-op %v" v oldOp))))))))))
+
+
+
+
+
+^{:go/end 3016} (go/method constantFoldArguments [^{:tag (* factsTable)} ft ^{:tag (* Value)} v]
+  (range [i arg (.-Args v)]
+    (let [lim (aget (.-limits ft) (.-ID arg))
+        (values constValue ok) (.constValue lim)]
+      (when (not ok)
+        (continue))
+
+      (switch (.-Op arg)
+        (case [OpConst64 OpConst32 OpConst16 OpConst8 OpConstBool OpConstNil]
+          (continue)))
+
+      (let [typ (.-Type arg)
+          ^{:line 2984} f (.-Func (.-Block v))
+          ^{:line 2985 :tag (* Value)} c (zero (* Value))]
+        (switch
+          (case [(.IsBoolean typ)]
+            (set! c (.ConstBool f typ (!= constValue 0))))
+          (case [(and (.IsInteger typ) (== (.Size typ) 1))]
+            (set! c (.ConstInt8 f typ (conv int8 constValue))))
+          (case [(and (.IsInteger typ) (== (.Size typ) 2))]
+            (set! c (.ConstInt16 f typ (conv int16 constValue))))
+          (case [(and (.IsInteger typ) (== (.Size typ) 4))]
+            (set! c (.ConstInt32 f typ (conv int32 constValue))))
+          (case [(and (.IsInteger typ) (== (.Size typ) 8))]
+            (set! c (.ConstInt64 f typ constValue)))
+          (case [(.IsPtrShaped typ)]
+            (if (== constValue 0)
+              (set! c (.ConstNil f typ))
+
+              ;; Not sure how this might happen, but if it
+              ;; does, just skip it.
+              (continue)))
+
+          (default
+            ;; Not sure how this might happen, but if it
+            ;; does, just skip it.
+            (continue)))
+
+        (.SetArg v i c)
+        (.initLimitForNewValue ft c)
+        (when (> (.-debug (.-pass f)) 1)
+          (.Warnl f (.-Pos v) "Proved %v's arg %d (%v) is constant %d" v i arg constValue))))))
+
+
+
+
+^{:go/end 3050} (go/method simplifyBlock [^{:tag (* factsTable)} ft ^SparseTree sdom ^{:tag (* Block)} b]
+  (when (!= (.-Kind b) BlockIf)
+    (return))
+
+
+  ;; Consider outgoing edges from this block.
+  (let [parent b]
+    (range [i branch (lit (array ... branch) positive negative)]
+      (let [child (.-b (aget (.-Succs parent) i))]
+        (when (!= (getBranch sdom parent child) unknown)
+          ;; For edges to uniquely dominated blocks, we
+          ;; already did this when we visited the child.
+          (continue))
+
+        ;; For edges to other blocks, this can trim a branch
+        ;; even if we couldn't get rid of the child itself.
+        (.checkpoint ft)
+        (addBranchRestrictions ft parent branch)
+        (let [unsat (.-unsat ft)]
+          (.restore ft)
+          (when unsat
+            ;; This branch is impossible, so remove it
+            ;; from the block.
+            (removeBranch parent branch)
+            ;; No point in considering the other branch.
+            ;; (It *is* possible for both to be
+            ;; unsatisfiable since the fact table is
+            ;; incomplete. We could turn this into a
+            ;; BlockExit, but it doesn't seem worth it.)
+            (break)))))))
+
+
+
+
+^{:go/end 3078} (go/func removeBranch [^{:tag (* Block)} b ^branch branch]
+  (let [c (aget (.-Controls b) 0)]
+    (when (and (!= c nil) (> (.-debug (.-pass (.-Func b))) 0))
+      (let [verb "Proved"]
+        (when (== branch positive)
+          (set! verb "Disproved"))
+
+        (if (> (.-debug (.-pass (.-Func b))) 1)
+          (.Warnl (.-Func b) (.-Pos b) "%s %s (%s)" verb (.-Op c) c)
+
+          (.Warnl (.-Func b) (.-Pos b) "%s %s" verb (.-Op c)))))
+
+
+    (when (and (!= c nil) (== ^{:go/via [lico]} (.IsStmt (.-Pos c)) src/PosIsStmt) (.SameFileAndLine (.-Pos c) (.-Pos b)))
+      ;; attempt to preserve statement marker.
+      (set! (.-Pos b) (.WithIsStmt (.-Pos b))))
+
+    (if (or (== branch positive) (== branch negative)) (do
+        (set! (.-Kind b) BlockFirst)
+        (.ResetControls b)
+        (when (== branch positive)
+          (.swapSuccessors b)))
+
+      (do))))
+;; TODO: figure out how to remove an entry from a jump table
+
+
+
+
+^{:go/end 3108} (go/func isConstDelta "isConstDelta returns non-nil if v is equivalent to w+delta (signed).\n" [^{:tag (* Value)} v] :results [^{:tag (* Value)} w ^int64 delta]
+  (let [cop OpConst64]
+    (switch (.-Op v)
+      (case [OpAdd32 OpSub32]
+        (set! cop OpConst32))
+      (case [OpAdd16 OpSub16]
+        (set! cop OpConst16))
+      (case [OpAdd8 OpSub8]
+        (set! cop OpConst8)))
+
+    (switch (.-Op v)
+      (case [OpAdd64 OpAdd32 OpAdd16 OpAdd8]
+        (when (== (.-Op (aget (.-Args v) 0)) cop)
+          (return (aget (.-Args v) 1) (.-AuxInt (aget (.-Args v) 0))))
+
+        (when (== (.-Op (aget (.-Args v) 1)) cop)
+          (return (aget (.-Args v) 0) (.-AuxInt (aget (.-Args v) 1)))))
+
+      (case [OpSub64 OpSub32 OpSub16 OpSub8]
+        (when (== (.-Op (aget (.-Args v) 1)) cop)
+          (let [aux (.-AuxInt (aget (.-Args v) 1))]
+            (when (!= aux (- aux)) ; Overflow; too bad
+              (return (aget (.-Args v) 0) (- aux)))))))
+
+
+
+    (return nil 0)))
+
+
+
+
+^{:go/breaks [[5 3124]] :go/end 3125} (go/func isCleanExt "isCleanExt reports whether v is the result of a value-preserving\nsign or zero extension.\n" ^bool [^{:tag (* Value)} v]
+  (switch (.-Op v)
+    (case [OpSignExt8to16 OpSignExt8to32 OpSignExt8to64
+        ^{:line 3115} OpSignExt16to32 OpSignExt16to64 OpSignExt32to64]
+      ;; signed -> signed is the only value-preserving sign extension
+      (return (and (.IsSigned (.-Type (aget (.-Args v) 0))) (.IsSigned (.-Type v)))))
+
+    (case [OpZeroExt8to16 OpZeroExt8to32 OpZeroExt8to64
+        ^{:line 3120} OpZeroExt16to32 OpZeroExt16to64 OpZeroExt32to64]
+      ;; unsigned -> signed/unsigned are value-preserving zero extensions
+      (return (not (.IsSigned (.-Type (aget (.-Args v) 0)))))))
+
+  false)
+
+
+^{:go/end 3145} (go/func getDependencyScore [^{:tag (slice uint)} scores ^{:tag (* Value)} v] :results [^uint score]
+  (when [(set! score (aget scores (.-ID v)))] (!= score 0)
+    (return score))
+
+  (defer (^{:go/end 3133} (fn []
+        (aset scores (.-ID v) score))))
+
+  (when (== (.-Op v) OpPhi)
+    (return 1))
+
+  (set! score 2) ; NIT(@Jorropo): always order phis first to make GOSSAFUNC pretty.
+  (range [_ a (.-Args v)]
+    (when (!= (.-Block a) (.-Block v))
+      (continue))
+
+    (set! score (max score (+ (getDependencyScore scores a) 1))))
+
+  ^{:line 3144} score)
+
+
+
+
+
+^{:go/end 3177} (go/method topoSortValuesInBlock "topoSortValuesInBlock ensure ranging over b.Values visit values before they are being used.\nIt does not consider dependencies with other blocks; thus Phi nodes are considered to not have any dependencies.\nThe result is always deterministic and does not depend on the previous slice ordering.\n" [^{:tag (* factsTable)} ft ^{:tag (* Block)} b]
+  (let [f (.-Func b)
+      ^{:line 3152} want (.NumValues f)
+
+      ^{:line 3154} scores (.-reusedTopoSortScoresTable ft)]
+    (if (<= want (cap scores))
+      (set! scores (subslice scores _ want))
+      (do
+        (when (> (cap scores) 0)
+          (.freeUintSlice (.-Cache f) scores))
+
+        (set! scores (.allocUintSlice (.-Cache f) want))
+        (set! (.-reusedTopoSortScoresTable ft) scores)))
+
+
+    (range [_ v (.-Values b)]
+      (aset scores (.-ID v) 0)) ; sentinel
+
+
+    (^{:inst [(slice (* Value)) (* Value)]} slices/SortFunc (.-Values b) ^{:go/end 3176} (fn ^int [^{:tag (* Value)} a ^{:tag (* Value)} b]
+        (let [dependencyScoreA (getDependencyScore scores a)
+            ^{:line 3171} dependencyScoreB (getDependencyScore scores b)]
+          (when (!= dependencyScoreA dependencyScoreB)
+            (return (^{:inst [uint]} cmp/Compare dependencyScoreA dependencyScoreB)))
+
+          (^{:inst [ID]} cmp/Compare (.-ID a) (.-ID b)))))))

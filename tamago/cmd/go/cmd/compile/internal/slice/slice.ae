@@ -1,0 +1,480 @@
+;; Copyright 2025 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.cmd.compile.internal.slice) (go/file "slice.go" :imports [
+
+    ;; This file implements a stack-allocation optimization
+    ;; for the backing store of slices.
+    ;;
+    ;; Consider the code:
+    ;;
+    ;;     var s []int
+    ;;     for i := range ... {
+    ;;        s = append(s, i)
+    ;;     }
+    ;;     return s
+    ;;
+    ;; Some of the append operations will need to do an allocation
+    ;; by calling growslice. This will happen on the 1st, 2nd, 4th,
+    ;; 8th, etc. append calls. The allocations done by all but the
+    ;; last growslice call will then immediately be garbage.
+    ;;
+    ;; We'd like to avoid doing some of those intermediate
+    ;; allocations if possible.
+    ;;
+    ;; If we can determine that the "return s" statement is the
+    ;; *only* way that the backing store for s escapes, then we
+    ;; can rewrite the code to something like:
+    ;;
+    ;;     var s []int
+    ;;     for i := range N {
+    ;;        s = append(s, i)
+    ;;     }
+    ;;     s = move2heap(s)
+    ;;     return s
+    ;;
+    ;; Using the move2heap runtime function, which does:
+    ;;
+    ;;     move2heap(s):
+    ;;         If s is not backed by a stackframe-allocated
+    ;;         backing store, return s. Otherwise, copy s
+    ;;         to the heap and return the copy.
+    ;;
+    ;; Now we can treat the backing store of s allocated at the
+    ;; append site as not escaping. Previous stack allocation
+    ;; optimizations now apply, which can use a fixed-size
+    ;; stack-allocated backing store for s when appending.
+    ;; (See ../ssagen/ssa.go:(*state).append)
+    ;;
+    ;; It is tricky to do this optimization safely. To describe
+    ;; our analysis, we first define what an "exclusive" slice
+    ;; variable is.
+    ;;
+    ;; A slice variable (a variable of slice type) is called
+    ;; "exclusive" if, when it has a reference to a
+    ;; stackframe-allocated backing store, it is the only
+    ;; variable with such a reference.
+    ;;
+    ;; In other words, a slice variable is exclusive if
+    ;; any of the following holds:
+    ;;  1) It points to a heap-allocated backing store
+    ;;  2) It points to a stack-allocated backing store
+    ;;     for any parent frame.
+    ;;  3) It is the only variable that references its
+    ;;     backing store.
+    ;;  4) It is nil.
+    ;;
+    ;; The nice thing about exclusive slice variables is that
+    ;; it is always safe to do
+    ;;    s = move2heap(s)
+    ;; whenever s is an exclusive slice variable. Because no
+    ;; one else has a reference to the backing store, no one
+    ;; else can tell that we moved the backing store from one
+    ;; location to another.
+    ;;
+    ;; Note that exclusiveness is a dynamic property. A slice
+    ;; variable may be exclusive during some parts of execution
+    ;; and not exclusive during others.
+    ;;
+    ;; The following operations set or preserve the exclusivity
+    ;; of a slice variable s:
+    ;;     s = nil
+    ;;     s = append(s, ...)
+    ;;     s = s[i:j]
+    ;;     ... = s[i]
+    ;;     s[i] = ...
+    ;;     f(s) where f does not escape its argument
+    ;; Other operations destroy exclusivity. A non-exhaustive list includes:
+    ;;     x = s
+    ;;     *p = s
+    ;;     f(s) where f escapes its argument
+    ;;     return s
+    ;; To err on the safe side, we white list exclusivity-preserving
+    ;; operations and we asssume that any other operations that mention s
+    ;; destroy its exclusivity.
+    ;;
+    ;; Our strategy is to move the backing store of s to the heap before
+    ;; any exclusive->nonexclusive transition. That way, s will only ever
+    ;; have a reference to a stack backing store while it is exclusive.
+    ;;
+    ;; move2heap for a variable s is implemented with:
+    ;;     if s points to within the stack frame {
+    ;;         s2 := make([]T, s.len, s.cap)
+    ;;         copy(s2[:s.cap], s[:s.cap])
+    ;;         s = s2
+    ;;     }
+    ;; Note that in general we need to copy all of s[:cap(s)] elements when
+    ;; moving to the heap. As an optimization, we keep track of slice variables
+    ;; whose capacity, and the elements in s[len(s):cap(s)], are never accessed.
+    ;; For those slice variables, we can allocate to the next size class above
+    ;; the length, which saves memory and copying cost.
+
+
+    ^{:line 114} [base "cmd/compile/internal/base"]
+    ^{:line 115} [escape "cmd/compile/internal/escape"]
+    ^{:line 116} [ir "cmd/compile/internal/ir"]
+    ^{:line 117} [reflectdata "cmd/compile/internal/reflectdata"]])
+
+
+^{:go/end 132} (go/func Funcs [^{:tag (slice (* ir/Func))} all]
+  (when (!= (.-N base/Flag) 0)
+    (return))
+
+  (range [_ fn all]
+    (analyze fn))
+
+  (range [_ fn all]
+    (when (ir/MatchAstDump fn "slice")
+      (ir/AstDump fn (+ "slice, " (ir/FuncName fn))))))
+
+
+
+
+^{:go/end 460} (go/func analyze [^{:tag (* ir/Func)} fn]
+  (let-type [sliceInfo (struct
+
+        ^{:line 137 :tag (* ir/Name) :doc "Slice variable.\n"} s
+
+
+        ^{:line 140 :tag int32 :doc "Count of uses that this pass understands.\n"} okUses
+
+        ^{:line 142 :tag int32 :doc "Count of all uses found.\n"} allUses
+
+
+
+
+
+
+
+        ^{:line 150 :tag ir/Stmt :doc "A place where the slice variable transitions from\nexclusive to nonexclusive.\nWe could keep track of more than one, but one is enough for now.\nCurrently, this can be either a return statement or\nan assignment.\nTODO: other possible transitions?\n"} transition
+
+
+        ^{:line 153 :tag (slice (* ir/CallExpr)) :doc "Each s = append(s, ...) instance we found.\n"} appends
+
+
+
+
+        ^{:line 158 :tag int :doc "Weight of the number of s = append(s, ...) instances we found.\nThe optimizations we do are only really useful if there are at\nleast weight 2. (Note: appends in loops have weight >= 2.)\n"} appendWeight
+
+
+
+
+        ^{:line 163 :tag int :doc "Loop depth at declaration point.\nUse for heuristics only, it is not guaranteed to be correct\nin the presence of gotos.\n"} declDepth
+
+
+
+        ^{:line 167 :tag bool :doc "Whether we ever do cap(s), or other operations that use cap(s)\n(possibly implicitly), like s[i:j].\n"} capUsed)]
+
+
+    ;; Every variable (*ir.Name) that we are tracking will have
+    ;; a non-nil *sliceInfo in its Opt field.
+    (let [haveLocalSlice false
+        ^{:line 173} maxStackSize (conv int64 (.-VariableMakeThreshold base/Debug))
+        ^{:line 174 :tag (slice (* ir/Name))} namedRets (zero (slice (* ir/Name)))]
+      (range [_ s (.-Dcl fn)]
+        (when (not (.IsSlice ^{:go/via [miniExpr]} (.Type s)))
+          (continue))
+
+        (when (> (.Size (.Elem ^{:go/via [miniExpr]} (.Type s))) maxStackSize)
+          (continue))
+
+        (when (not (.MatchPos base/VariableMakeHash ^{:go/via [miniExpr miniNode]} (.Pos s) nil))
+          (continue))
+
+        (set! (.-Opt s) (addr (lit sliceInfo :s s))) ; start tracking s
+        (set! haveLocalSlice true)
+        (when (== (.-Class s) ir/PPARAMOUT)
+          (set! namedRets (append namedRets s))))
+
+
+      (when (not haveLocalSlice)
+        (return))
+
+
+      ;; Keep track of loop depth while walking.
+      (let [loopDepth 0
+
+          ;; tracking returns the info for the slice variable if n is a slice
+          ;; variable that we're still considering, or nil otherwise.
+          ^{:line 200} tracking ^{:go/end 209} (fn ^{:tag (* sliceInfo)} [^ir/Node n]
+            (when (or (== n nil) (!= (.Op n) ir/ONAME))
+              (return nil))
+
+            (let [s (assert (* ir/Name) n)]
+              (when (== (.-Opt s) nil)
+                (return nil))
+
+              (assert (* sliceInfo) (.-Opt s))))
+
+
+          ;; addTransition(n, loc) records that s experiences an exclusive->nonexclusive
+          ;; transition somewhere within loc.
+          ^{:line 213} addTransition ^{:go/end 237} (fn [^{:tag (* sliceInfo)} i ^ir/Stmt loc]
+            (when (!= (.-transition i) nil)
+              ;; We only keep track of a single exclusive->nonexclusive transition
+              ;; for a slice variable. If we find more than one, give up.
+              ;; (More than one transition location would be fine, but we would
+              ;; start to get worried about introducing too much additional code.)
+              (set! (.-Opt (.-s i)) nil)
+              (return))
+
+            (when (> loopDepth (.-declDepth i))
+              ;; Conservatively, we disable this optimization when the
+              ;; transition is inside a loop. This can result in adding
+              ;; overhead unnecessarily in cases like:
+              ;; func f(n int, p *[]byte) {
+              ;;     var s []byte
+              ;;     for i := range n {
+              ;;         *p = s
+              ;;         s = append(s, 0)
+              ;;     }
+              ;; }
+              (set! (.-Opt (.-s i)) nil)
+              (return))
+
+            (set! (.-transition i) loc))
+
+
+          ;; Examine an x = y assignment that occurs somewhere within statement stmt.
+          ^{:line 240} assign ^{:go/end 287} (fn [^ir/Node x ^ir/Node y ^ir/Stmt stmt]
+            (when [i (tracking x)] (!= i nil)
+              ;; s = y. Check for understood patterns for y.
+              (cond (or (== y nil) (== (.Op y) ir/ONIL))
+                ;; s = nil is ok.
+                (inc! (.-okUses i))
+                (== (.Op y) ir/OSLICELIT) (do
+                  ;; s = []{...} is ok.
+                  ;; Note: this reveals capacity. Should it?
+                  (inc! (.-okUses i))
+                  (set! (.-capUsed i) true))
+                (== (.Op y) ir/OSLICE)
+                (let [y (assert (* ir/SliceExpr) y)]
+                  (when (== (.-X y) (.-s i))
+                    ;; s = s[...:...] is ok
+                    (set! (.-okUses i) + 2)
+                    (set! (.-capUsed i) true)))
+
+                (== (.Op y) ir/OAPPEND)
+                (let [y (assert (* ir/CallExpr) y)]
+                  (when (== (aget (.-Args y) 0) (.-s i))
+                    ;; s = append(s, ...) is ok
+                    (set! (.-okUses i) + 2)
+                    (set! (.-appends i) (append (.-appends i) y))
+                    (set! (.-appendWeight i) + (+ 1 (- loopDepth (.-declDepth i))))))))
+
+            ;; TODO: s = append(nil, ...)?
+
+            ;; Note that technically s = make([]T, ...) preserves exclusivity, but
+            ;; we don't track that because we assume users who wrote that know
+            ;; better than the compiler does.
+
+            ;; TODO: figure out how to handle s = fn(..., s, ...)
+            ;; It would be nice to maintain exclusivity of s in this situation.
+            ;; But unfortunately, fn can return one of its other arguments, which
+            ;; may be a slice with a stack-allocated backing store other than s.
+            ;; (which may have preexisting references to its backing store).
+            ;;
+            ;; Maybe we could do it if s is the only argument?
+
+
+            (when [i (tracking y)] (!= i nil)
+              ;; ... = s
+              ;; Treat this as an exclusive->nonexclusive transition.
+              (inc! (.-okUses i))
+              (addTransition i stmt)))
+
+
+
+          ^{:line 289 :tag (func [ir/Node] [bool])} do (zero (func [ir/Node] [bool]))]
+        (set! do ^{:go/breaks [6] :go/end 394} (fn ^bool [^ir/Node n]
+            (when (== n nil)
+              (return false))
+
+            (switch (.Op n)
+              (case [ir/ONAME]
+                (when [i (tracking n)] (!= i nil)
+                  ;; A use of a slice variable. Count it.
+                  (inc! (.-allUses i))))
+
+              (case [ir/ODCL]
+                (let [n (assert (* ir/Decl) n)]
+                  (when [i (tracking (.-X n))] (!= i nil)
+                    (inc! (.-okUses i))
+                    (set! (.-declDepth i) loopDepth))))
+
+              (case [ir/OINDEX]
+                (let [n (assert (* ir/IndexExpr) n)]
+                  (when [i (tracking (.-X n))] (!= i nil)
+                    ;; s[i] is ok.
+                    (inc! (.-okUses i)))))
+
+              (case [ir/OLEN]
+                (let [n (assert (* ir/UnaryExpr) n)]
+                  (when [i (tracking (.-X n))] (!= i nil)
+                    ;; len(s) is ok
+                    (inc! (.-okUses i)))))
+
+              (case [ir/OCAP]
+                (let [n (assert (* ir/UnaryExpr) n)]
+                  (when [i (tracking (.-X n))] (!= i nil)
+                    ;; cap(s) is ok
+                    (inc! (.-okUses i))
+                    (set! (.-capUsed i) true))))
+
+              (case [ir/OADDR]
+                (let [n (assert (* ir/AddrExpr) n)]
+                  (when (== (.Op (.-X n)) ir/OINDEX)
+                    (let [n (assert (* ir/IndexExpr) (.-X n))]
+                      (when [i (tracking (.-X n))] (!= i nil)
+                        ;; &s[i] is definitely a nonexclusive transition.
+                        ;; (We need this case because s[i] is ok, but &s[i] is not.)
+                        (set! (.-Opt (.-s i)) nil))))))
+
+
+              (case [ir/ORETURN]
+                (let [n (assert (* ir/ReturnStmt) n)]
+                  (range [_ x (.-Results n)]
+                    (when [i (tracking x)] (!= i nil)
+                      (inc! (.-okUses i))
+                      ;; We go exclusive->nonexclusive here
+                      (addTransition i n)))
+
+
+                  (when (== (len (.-Results n)) 0)
+                    ;; Uses of named result variables are implicit here.
+                    (range [_ x namedRets]
+                      (when [i (tracking x)] (!= i nil)
+                        (addTransition i n))))))
+
+
+
+              (case [ir/OCALLFUNC]
+                (let [n (assert (* ir/CallExpr) n)]
+                  (range [idx arg (.-Args n)]
+                    (when [i (tracking arg)] (!= i nil)
+                      (when (not (argLeak n idx))
+                        ;; Passing s to a nonescaping arg is ok.
+                        (inc! (.-okUses i))
+                        (set! (.-capUsed i) true))))))
+
+
+
+              (case [ir/ORANGE]
+                (let [n (assert (* ir/RangeStmt) n)]
+                  (when [i (tracking (.-X n))] (!= i nil)
+                    (inc! (.-okUses i))
+                    ;; Range over slice keeps a pointer to the backing store, see #79909.
+                    (addTransition i n))))
+
+              (case [ir/OAS]
+                (let [n (assert (* ir/AssignStmt) n)]
+                  (assign (.-X n) (.-Y n) n)))
+              (case [ir/OAS2]
+                (let [n (assert (* ir/AssignListStmt) n)]
+                  (range [i (len (.-Lhs n))]
+                    (assign (aget (.-Lhs n) i) (aget (.-Rhs n) i) n))))
+
+              (case [ir/OCLOSURE]
+                (let [n (assert (* ir/ClosureExpr) n)]
+                  (range [_ v (.-ClosureVars (.-Func n))]
+                    (go/call do (.-Outer v))))))
+
+
+            (when (or (== (.Op n) ir/OFOR) (== (.Op n) ir/ORANGE))
+              ;; Note: loopDepth isn't really right for init portion
+              ;; of the for statement, but that's ok. Correctness
+              ;; does not depend on depth info.
+              (inc! loopDepth)
+              (defer (^{:go/end 389} (fn [] (dec! loopDepth)))))
+
+            ;; Check all the children.
+            (ir/DoChildren n do)
+            false))
+
+
+        ;; Run the analysis over the whole body.
+        (range [_ stmt (.-Body fn)]
+          (go/call do stmt))
+
+
+        ;; Process accumulated info to find slice variables
+        ;; that we can allocate on the stack.
+        (range [_ s (.-Dcl fn)]
+          (when (== (.-Opt s) nil)
+            (continue))
+
+          (let [i (assert (* sliceInfo) (.-Opt s))]
+            (set! (.-Opt s) nil)
+            (when (!= (.-okUses i) (.-allUses i))
+              ;; Some use of i.s that don't understand lurks. Give up.
+              (continue))
+
+
+            ;; At this point, we've decided that we *can* do
+            ;; the optimization.
+
+            (when (== (.-transition i) nil)
+              ;; Exclusive for its whole lifetime. That means it
+              ;; didn't escape. We can already handle nonescaping
+              ;; slices without this pass.
+              (continue))
+
+            (when (< (.-appendWeight i) 2)
+              ;; This optimization only really helps if there is
+              ;; (dynamically) more than one append.
+              (continue))
+
+
+            ;; Commit point - at this point we've decided we *should*
+            ;; do the optimization.
+
+            ;; Insert a move2heap operation before the exclusive->nonexclusive
+            ;; transition.
+            (let [move (ir/NewMoveToHeapExpr (.Pos (.-transition i)) (.-s i))]
+              (when (.-capUsed i)
+                (set! (.-PreserveCapacity move) true))
+
+              (set! (.-RType move) (reflectdata/AppendElemRType (.Pos (.-transition i)) (aget (.-appends i) 0)))
+              ^{:go/via [miniExpr]} (.SetType move ^{:go/via [miniExpr]} (.Type (.-s i)))
+              ^{:go/via [miniExpr miniNode]} (.SetTypecheck move 1)
+              (let [as (ir/NewAssignStmt (.Pos (.-transition i)) (.-s i) move)]
+                ^{:go/via [miniStmt miniNode]} (.SetTypecheck as 1)
+                (.Prepend (.PtrInit (.-transition i)) as)
+                ;; Note: we prepend because we need to put the move2heap
+                ;; operation first, before any other init work, as the transition
+                ;; might occur in the init work.
+
+                ;; Now that we've inserted a move2heap operation before every
+                ;; exclusive -> nonexclusive transition, appends can now use
+                ;; stack backing stores.
+                ;; (This is the whole point of this pass, to enable stack
+                ;; allocation of append backing stores.)
+                (range [_ a (.-appends i)]
+                  ^{:go/via [miniExpr miniNode]} (.SetEsc a ir/EscNone)
+                  (when (.-capUsed i)
+                    (set! (.-UseBuf a) true)))))))))))
+
+
+
+
+
+
+
+
+^{:go/end 481} (go/func argLeak "argLeak reports if the idx'th argument to the call n escapes anywhere\n(to the heap, another argument, return value, etc.)\nIf unknown returns true.\n" ^bool [^{:tag (* ir/CallExpr)} n ^int idx]
+  (when (!= ^{:go/via [miniExpr miniNode]} (.Op n) ir/OCALLFUNC)
+    (return true))
+
+  (let [fn (ir/StaticCalleeName (ir/StaticValue (.-Fun n)))]
+    (when (== fn nil)
+      (return true))
+
+    (let [fntype ^{:go/via [miniExpr]} (.Type fn)]
+      (when [recv (.Recv fntype)] (!= recv nil)
+        (when (== idx 0)
+          (return (.Any (escape/ParseLeaks (.-Note recv)))))
+
+        (dec! idx))
+
+      (.Any (escape/ParseLeaks (.-Note (aget (.Params fntype) idx)))))))

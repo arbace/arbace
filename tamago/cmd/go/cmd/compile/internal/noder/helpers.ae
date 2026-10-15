@@ -1,0 +1,138 @@
+;; Copyright 2021 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.cmd.compile.internal.noder) (go/file "helpers.go" :imports [
+
+
+    ^{:line 8} [constant "go/constant"]
+
+    ^{:line 10} [ir "cmd/compile/internal/ir"]
+    ^{:line 11} [syntax "cmd/compile/internal/syntax"]
+    ^{:line 12} [typecheck "cmd/compile/internal/typecheck"]
+    ^{:line 13} [types "cmd/compile/internal/types"]
+    ^{:line 14} [types2 "cmd/compile/internal/types2"]
+    ^{:line 15} [src "cmd/internal/src"]])
+
+
+;; Helpers for constructing typed IR nodes.
+;;
+;; TODO(mdempsky): Move into their own package so they can be easily
+;; reused by iimport and frontend optimizations.
+
+(go/type ImplicitNode (interface
+    ^{:line 24} ir/Node
+    (SetImplicit [^bool x])))
+
+
+
+^{:go/end 32} (go/func Implicit "Implicit returns n after marking it as Implicit.\n" ^ImplicitNode [^ImplicitNode n]
+  (.SetImplicit n true)
+  ^{:line 31} n)
+
+
+
+^{:go/end 39} (go/func typed "typed returns n after setting its type to typ.\n" ^ir/Node [^{:tag (* types/Type)} typ ^ir/Node n]
+  (.SetType n typ)
+  (.SetTypecheck n 1)
+  ^{:line 38} n)
+
+
+;; Values
+
+
+
+^{:go/end 60} (go/func FixValue "FixValue returns val after converting and truncating it as\nappropriate for typ.\n" ^constant/Value [^{:tag (* types/Type)} typ ^constant/Value val]
+  (go/call assert (!= (.Kind typ) types/TFORW))
+  (switch
+    (case [(.IsInteger typ)]
+      (set! val (constant/ToInt val)))
+    (case [(.IsFloat typ)]
+      (set! val (constant/ToFloat val)))
+    (case [(.IsComplex typ)]
+      (set! val (constant/ToComplex val))))
+
+  (when (not (.IsUntyped typ))
+    (set! val (typecheck/ConvertVal val typ false)))
+
+  (ir/AssertValidTypeForConst typ val)
+  ^{:line 59} val)
+
+
+;; Expressions
+
+^{:go/end 68} (go/func Addr ^{:tag (* ir/AddrExpr)} [^src/XPos pos ^ir/Node x]
+  (let [n (typecheck/NodAddrAt pos x)]
+    (typed (types/NewPtr (.Type x)) n)
+    ^{:line 67} n))
+
+
+^{:go/end 74} (go/func Deref ^{:tag (* ir/StarExpr)} [^src/XPos pos ^{:tag (* types/Type)} typ ^ir/Node x]
+  (let [n (ir/NewStarExpr pos x)]
+    (typed typ n)
+    ^{:line 73} n))
+
+
+;; Statements
+
+^{:go/end 109} (go/func idealType ^types2/Type [^syntax/TypeAndValue tv]
+  ;; The gc backend expects all expressions to have a concrete type, and
+  ;; types2 mostly satisfies this expectation already. But there are a few
+  ;; cases where the Go spec doesn't require converting to concrete type,
+  ;; and so types2 leaves them untyped. So we need to fix those up here.
+  (let [typ (types2/Unalias (.-Type tv))]
+    (when [(values basic ok) (assert (* types2/Basic) typ)] (and ok (!= (bit-and (.Info basic) types2/IsUntyped) 0))
+      (switch (.Kind basic)
+        (case [types2/UntypedNil])
+        ;; ok; can appear in type switch case clauses
+        ;; TODO(mdempsky): Handle as part of type switches instead?
+        (case [types2/UntypedInt types2/UntypedFloat types2/UntypedComplex]
+          (set! typ (aget types2/Typ types2/Uint))
+          (when (!= (.-Value tv) nil)
+            (let [s (constant/ToInt (.-Value tv))]
+              (go/call assert (== (.Kind s) constant/Int))
+              (when (< (constant/Sign s) 0)
+                (set! typ (aget types2/Typ types2/Int))))))
+
+
+        (case [types2/UntypedBool]
+          (set! typ (aget types2/Typ types2/Bool))) ; expression in "if" or "for" condition
+        (case [types2/UntypedString]
+          (set! typ (aget types2/Typ types2/String))) ; argument to "append" or "copy" calls
+        (case [types2/UntypedRune]
+          (set! typ (aget types2/Typ types2/Int32))) ; range over rune
+        (default
+          (return nil))))
+
+
+    ^{:line 108} typ))
+
+
+^{:go/end 114} (go/func isTypeParam ^bool [^types2/Type t]
+  (let [(values _ ok) (assert (* types2/TypeParam) (types2/Unalias t))]
+    ^{:line 113} ok))
+
+
+
+
+^{:go/end 140} (go/func isNotInHeap "isNotInHeap reports whether typ is or contains an element of type\ninternal/runtime/sys.NotInHeap.\n" ^bool [^types2/Type typ]
+  (set! typ (types2/Unalias typ))
+  (when [(values named ok) (assert (* types2/Named) typ)] ok
+    (when [obj (.Obj named)] (and (== ^{:go/via [object]} (.Name obj) "nih") (== (.Path ^{:go/via [object]} (.Pkg obj)) "internal/runtime/sys"))
+      (return true))
+
+    (set! typ (.Underlying named)))
+
+
+  (type-switch [typ typ]
+    (case [(* types2/Array)]
+      (return (isNotInHeap (.Elem typ))))
+    (case [(* types2/Struct)]
+      (for [i 0] (< i (.NumFields typ)) (inc! i)
+        (when (isNotInHeap ^{:go/via [object]} (.Type (.Field typ i)))
+          (return true)))
+
+
+      (return false))
+    (default
+      (return false))))

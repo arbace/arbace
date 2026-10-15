@@ -1,0 +1,723 @@
+;; Copyright 2009 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.cmd.compile.internal.typecheck) (go/file "stmt.go" :imports [
+
+
+    ^{:line 8} [base "cmd/compile/internal/base"]
+    ^{:line 9} [ir "cmd/compile/internal/ir"]
+    ^{:line 10} [types "cmd/compile/internal/types"]
+    ^{:line 11} [src "cmd/internal/src"]
+    ^{:line 12} [errors "internal/types/errors"]])
+
+
+^{:go/end 20} (go/func RangeExprType ^{:tag (* types/Type)} [^{:tag (* types/Type)} t]
+  (when (and (.IsPtr t) (.IsArray (.Elem t)))
+    (return (.Elem t)))
+
+  ^{:line 19} t)
+
+
+
+
+
+^{:go/end 43} (go/func tcAssign "type check assignment.\nif this assignment is the definition of a var on the left side,\nfill in the var's type.\n" [^{:tag (* ir/AssignStmt)} n]
+  (when (and base/EnableTrace (.-LowerT base/Flag))
+    (defer ((tracePrint "tcAssign" n) nil)))
+
+
+  (when (== (.-Y n) nil)
+    (set! (.-X n) (AssignExpr (.-X n)))
+    (return))
+
+
+  (let [(values lhs rhs) (values (lit (slice ir/Node) (.-X n)) (lit (slice ir/Node) (.-Y n)))]
+    (assign n lhs rhs)
+    (set! (values (.-X n) (.-Y n)) (values (aget lhs 0) (aget rhs 0)))
+
+    ;; TODO(mdempsky): This seems out of place.
+    (when (not (ir/IsBlank (.-X n)))
+      (types/CheckSize (.Type (.-X n)))))) ; ensure width is calculated for backend
+
+
+
+^{:go/end 51} (go/func tcAssignList [^{:tag (* ir/AssignListStmt)} n]
+  (when (and base/EnableTrace (.-LowerT base/Flag))
+    (defer ((tracePrint "tcAssignList" n) nil)))
+
+
+  (assign n (.-Lhs n) (.-Rhs n)))
+
+
+^{:go/end 164} (go/func assign [^ir/Node stmt ^{:tag (slice ir/Node)} lhs ^{:tag (slice ir/Node)} rhs]
+  ;; delicate little dance.
+  ;; the definition of lhs may refer to this assignment
+  ;; as its definition, in which case it will call tcAssign.
+  ;; in that case, do not call typecheck back, or it will cycle.
+  ;; if the variable has a type (ntype) then typechecking
+  ;; will not look at defn, so it is okay (and desirable,
+  ;; so that the conversion below happens).
+
+  (let [checkLHS ^{:go/end 71} (fn [^int i ^{:tag (* types/Type)} typ]
+        (when [n (aget lhs i)] (and (!= typ nil) (ir/DeclaredBy n stmt) (== (.Type n) nil))
+          (base/Assertf (== (.Kind typ) types/TNIL) "unexpected untyped nil")
+          (.SetType n (defaultType typ)))
+
+        (when (== (.Typecheck (aget lhs i)) 0)
+          (aset lhs i (AssignExpr (aget lhs i))))
+
+        (checkassign (aget lhs i)))
+
+
+      ^{:line 73} assignType ^{:go/end 78} (fn [^int i ^{:tag (* types/Type)} typ]
+        (checkLHS i typ)
+        (when (!= typ nil)
+          (checkassignto typ (aget lhs i))))
+
+
+
+      ^{:line 80} cr (len rhs)]
+    (if (== (len rhs) 1) (do
+        (aset rhs 0 (typecheck (aget rhs 0) (bit-or ctxExpr ctxMultiOK)))
+        (when [rtyp (.Type (aget rhs 0))] (and (!= rtyp nil) (.IsFuncArgStruct rtyp))
+          (set! cr (.NumFields rtyp))))
+
+
+      (Exprs rhs))
+
+
+    ;; x, ok = y
+    (label :assignOK
+      (while (and (== (len lhs) 2) (== cr 1))
+        (let [stmt (assert (* ir/AssignListStmt) stmt)
+            ^{:line 94} r (aget rhs 0)]
+
+          (switch (.Op r)
+            (case [ir/OINDEXMAP]
+              (.SetOp stmt ir/OAS2MAPR))
+            (case [ir/ORECV]
+              (.SetOp stmt ir/OAS2RECV))
+            (case [ir/ODOTTYPE]
+              (let [r (assert (* ir/TypeAssertExpr) r)]
+                (.SetOp stmt ir/OAS2DOTTYPE)
+                (.SetOp r ir/ODOTTYPE2)))
+            (case [ir/ODYNAMICDOTTYPE]
+              (let [r (assert (* ir/DynamicTypeAssertExpr) r)]
+                (.SetOp stmt ir/OAS2DOTTYPE)
+                (.SetOp r ir/ODYNAMICDOTTYPE2)))
+            (default
+              (break :assignOK)))
+
+
+          (assignType 0 (.Type r))
+          (assignType 1 types/UntypedBool)
+          (return))))
+
+
+    (when (!= (len lhs) cr)
+      (if [(values r ok) (assert (* ir/CallExpr) (aget rhs 0))] (and ok (== (len rhs) 1))
+        (when (!= ^{:go/via [miniExpr]} (.Type r) nil)
+          (base/ErrorfAt (.Pos stmt) errors/WrongAssignCount "assignment mismatch: %d variable%s but %v returns %d value%s" (len lhs) (plural (len lhs)) (.-Fun r) cr (plural cr)))
+
+
+        (base/ErrorfAt (.Pos stmt) errors/WrongAssignCount "assignment mismatch: %d variable%s but %v value%s" (len lhs) (plural (len lhs)) (len rhs) (plural (len rhs))))
+
+
+      (range [i lhs]
+        (checkLHS i nil))
+
+      (return))
+
+
+    ;; x,y,z = f()
+    (when (> cr (len rhs))
+      (let [stmt (assert (* ir/AssignListStmt) stmt)]
+        (.SetOp stmt ir/OAS2FUNC)
+        (let [r (assert (* ir/CallExpr) (aget rhs 0))
+            ^{:line 138} rtyp ^{:go/via [miniExpr]} (.Type r)
+
+            ^{:line 140} mismatched false
+            ^{:line 141} failed false]
+          (range [i lhs]
+            (let [result (.-Type (.Field rtyp i))]
+              (assignType i result)
+
+              (cond (or (== (.Type (aget lhs i)) nil) (== result nil))
+                (set! failed true)
+                (and (!= (aget lhs i) ir/BlankNode) (not (types/Identical (.Type (aget lhs i)) result)))
+                (set! mismatched true))))
+
+
+          (when (and mismatched (not failed))
+            (RewriteMultiValueCall stmt r))
+
+          (return))))
+
+
+    (range [i r rhs]
+      (checkLHS i (.Type r))
+      (when (!= (.Type (aget lhs i)) nil)
+        (aset rhs i (AssignConv r (.Type (aget lhs i)) "assignment"))))))
+
+
+
+
+^{:go/breaks [[4 170]] :go/end 171} (go/func plural ^string [^int n]
+  (when (== n 1)
+    (return ""))
+
+  "s")
+
+
+
+^{:go/end 180} (go/func tcCheckNil "tcCheckNil typechecks an OCHECKNIL node.\n" ^ir/Node [^{:tag (* ir/UnaryExpr)} n]
+  (set! (.-X n) (Expr (.-X n)))
+  (when (not (.IsPtrShaped (.Type (.-X n))))
+    (base/FatalfAt ^{:go/via [miniExpr miniNode]} (.Pos n) "%L is not pointer shaped" (.-X n)))
+
+  ^{:line 179} n)
+
+
+
+^{:go/end 196} (go/func tcFor "tcFor typechecks an OFOR node.\n" ^ir/Node [^{:tag (* ir/ForStmt)} n]
+  (Stmts ^{:go/via [miniStmt]} (.Init n))
+  (set! (.-Cond n) (Expr (.-Cond n)))
+  (set! (.-Cond n) (DefaultLit (.-Cond n) nil))
+  (when (!= (.-Cond n) nil)
+    (let [t (.Type (.-Cond n))]
+      (when (and (!= t nil) (not (.IsBoolean t)))
+        (base/Errorf "non-bool %L used as for condition" (.-Cond n)))))
+
+
+  (set! (.-Post n) (Stmt (.-Post n)))
+  (Stmts (.-Body n))
+  ^{:line 195} n)
+
+
+
+^{:go/end 203} (go/func tcGoDefer "tcGoDefer typechecks (normalizes) an OGO/ODEFER statement.\n" [^{:tag (* ir/GoDeferStmt)} n]
+  (let [call (normalizeGoDeferCall ^{:go/via [miniStmt miniNode]} (.Pos n) ^{:go/via [miniStmt miniNode]} (.Op n) (.-Call n) ^{:go/via [miniStmt]} (.PtrInit n))]
+    (set! (.-GoDefer call) true)
+    (set! (.-Call n) call)))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 378} (go/func normalizeGoDeferCall "normalizeGoDeferCall normalizes call into a normal function call\nwith no arguments and no results, suitable for use in an OGO/ODEFER\nstatement.\n\nFor example, it normalizes:\n\n\tf(x, y)\n\ninto:\n\n\tx1, y1 := x, y          // added to init\n\tfunc() { f(x1, y1) }()  // result\n" ^{:tag (* ir/CallExpr)} [^src/XPos pos ^ir/Op op ^ir/Node call ^{:tag (* ir/Nodes)} init]
+  (.Append init (spread (ir/TakeInit call)))
+
+  (when [(values call ok) (assert (* ir/CallExpr) call)] (and ok (== ^{:go/via [miniExpr miniNode]} (.Op call) ir/OCALLFUNC))
+    (when [sig (.Type (.-Fun call))] (== (+ (.NumParams sig) (.NumResults sig)) 0)
+      (return call))) ; already in normal form
+
+
+
+  ;; Create a new wrapper function without parameters or results.
+  (let [wrapperFn (ir/NewClosureFunc pos pos op (types/NewSignature nil nil nil) ir/CurFunc Target 0)]
+    (.DeclareParams wrapperFn true)
+    (.SetWrapper wrapperFn true)
+
+    ;; argps collects the list of operands within the call expression
+    ;; that must be evaluated at the go/defer statement.
+    (let [^{:tag (slice (* ir/Node))} argps (zero (slice (* ir/Node)))
+
+        ^{:line 235 :tag (func [^{:tag (* ir/Node)} argp])} visit (zero (func [^{:tag (* ir/Node)} argp]))]
+      (set! visit ^{:go/end 291} (fn [^{:tag (* ir/Node)} argp]
+          (let [arg @argp]
+            (when (== arg nil)
+              (return))
+
+
+            ;; Recognize a few common expressions that can be evaluated within
+            ;; the wrapper, so we don't need to allocate space for them within
+            ;; the closure.
+            (switch (.Op arg)
+              (case [ir/OLITERAL ir/ONIL ir/OMETHEXPR ir/ONEW]
+                (return))
+              (case [ir/ONAME]
+                (let [arg (assert (* ir/Name) arg)]
+                  (when (== (.-Class arg) ir/PFUNC)
+                    (return)))) ; reference to global function
+
+              (case [ir/OADDR]
+                (let [arg (assert (* ir/AddrExpr) arg)]
+                  (when (== (.Op (.-X arg)) ir/OLINKSYMOFFSET)
+                    (return)))) ; address of global symbol
+
+
+              (case [ir/OCONVNOP]
+                (let [arg (assert (* ir/ConvExpr) arg)]
+
+                  ;; For unsafe.Pointer->uintptr conversion arguments, save the
+                  ;; unsafe.Pointer argument. This is necessary to handle cases
+                  ;; like fixedbugs/issue24491a.go correctly.
+                  ;;
+                  ;; TODO(mdempsky): Limit to static callees with
+                  ;; //go:uintptr{escapes,keepalive}?
+                  (when (and (.IsUintptr ^{:go/via [miniExpr]} (.Type arg)) (.IsUnsafePtr (.Type (.-X arg))))
+                    (visit (addr (.-X arg)))
+                    (return))))
+
+
+              (case [ir/OARRAYLIT ir/OSLICELIT ir/OSTRUCTLIT]
+                ;; TODO(mdempsky): For very large slices, it may be preferable
+                ;; to construct them at the go/defer statement instead.
+                (let [list (.-List (assert (* ir/CompLitExpr) arg))]
+                  (range [i el list]
+                    (type-switch [el el]
+                      (case [(* ir/KeyExpr)]
+                        (visit (addr (.-Value el))))
+                      (case [(* ir/StructKeyExpr)]
+                        (visit (addr (.-Value el))))
+                      (default
+                        (visit (addr (aget list i))))))
+
+
+                  (return))))
+
+
+            (set! argps (append argps argp)))))
+
+
+      (let [visitList ^{:go/end 297} (fn [^{:tag (slice ir/Node)} list]
+            (range [i list]
+              (visit (addr (aget list i)))))]
+
+
+
+        (switch (.Op call)
+          (default
+            (base/Fatalf "unexpected call op: %v" (.Op call)))
+
+          (case [ir/OCALLFUNC]
+            (let [call (assert (* ir/CallExpr) call)]
+
+              ;; If the callee is a named function, link to the original callee.
+              (when [wrapped (ir/StaticCalleeName (.-Fun call))] (!= wrapped nil)
+                (set! (.-WrappedFunc wrapperFn) (.-Func wrapped)))
+
+
+              (visit (addr (.-Fun call)))
+              (visitList (.-Args call))))
+
+          (case [ir/OCALLINTER]
+            (let [call (assert (* ir/CallExpr) call)]
+              (set! argps (append argps (addr (.-X (assert (* ir/SelectorExpr) (.-Fun call)))))) ; must be first for OCHECKNIL; see below
+              (visitList (.-Args call))))
+
+          (case [ir/OAPPEND ir/ODELETE ir/OPRINT ir/OPRINTLN ir/ORECOVER]
+            (let [call (assert (* ir/CallExpr) call)]
+              (visitList (.-Args call))
+              (visit (addr (.-RType call)))))
+
+          (case [ir/OCOPY]
+            (let [call (assert (* ir/BinaryExpr) call)]
+              (visit (addr (.-X call)))
+              (visit (addr (.-Y call)))
+              (visit (addr (.-RType call)))))
+
+          (case [ir/OCLEAR ir/OCLOSE ir/OPANIC]
+            (let [call (assert (* ir/UnaryExpr) call)]
+              (visit (addr (.-X call))))))
+
+
+        (when (!= (len argps) 0)
+          ;; Found one or more operands that need to be evaluated upfront
+          ;; and spilled to temporary variables, which can be captured by
+          ;; the wrapper function.
+
+          (let [stmtPos base/Pos
+              ^{:line 341} callPos base/Pos
+
+              ^{:line 343} as (ir/NewAssignListStmt callPos ir/OAS2 (make (slice ir/Node) (len argps)) (make (slice ir/Node) (len argps)))]
+            (range [i argp argps]
+              (let [arg @argp
+
+                  ^{:line 347} pos callPos]
+                (when (ir/HasUniquePos arg)
+                  (set! pos (.Pos arg)))
+
+
+                ;; tmp := arg
+                (let [tmp (TempAt pos ir/CurFunc (.Type arg))]
+                  (.Append init (Stmt (ir/NewDecl pos ir/ODCL tmp)))
+                  (set! (.-Defn tmp) as)
+                  (aset (.-Lhs as) i tmp)
+                  (aset (.-Rhs as) i arg)
+
+                  ;; Rewrite original expression to use/capture tmp.
+                  (set! @argp (ir/NewClosureVar pos wrapperFn tmp)))))
+
+            (.Append init (Stmt as))
+
+            ;; For "go/defer iface.M()", if iface is nil, we need to panic at
+            ;; the point of the go/defer statement.
+            (when (== (.Op call) ir/OCALLINTER)
+              (let [iface (aget (.-Lhs as) 0)]
+                (.Append init (Stmt (ir/NewUnaryExpr stmtPos ir/OCHECKNIL (ir/NewUnaryExpr (.Pos iface) ir/OITAB iface))))))))
+
+
+
+        ;; Move call into the wrapper function, now that it's safe to
+        ;; evaluate there.
+        (set! (.-Body wrapperFn) (lit (slice ir/Node) call))
+
+        ;; Finally, construct a call to the wrapper.
+        (assert (* ir/CallExpr) (Call (.Pos call) (.-OClosure wrapperFn) nil false))))))
+
+
+
+^{:go/end 394} (go/func tcIf "tcIf typechecks an OIF node.\n" ^ir/Node [^{:tag (* ir/IfStmt)} n]
+  (Stmts ^{:go/via [miniStmt]} (.Init n))
+  (set! (.-Cond n) (Expr (.-Cond n)))
+  (set! (.-Cond n) (DefaultLit (.-Cond n) nil))
+  (when (!= (.-Cond n) nil)
+    (let [t (.Type (.-Cond n))]
+      (when (and (!= t nil) (not (.IsBoolean t)))
+        (base/Errorf "non-bool %L used as if condition" (.-Cond n)))))
+
+
+  (Stmts (.-Body n))
+  (Stmts (.-Else n))
+  ^{:line 393} n)
+
+
+
+^{:go/end 424} (go/func tcRange "range\n" [^{:tag (* ir/RangeStmt)} n]
+  (set! (.-X n) (Expr (.-X n)))
+
+  ;; delicate little dance.  see tcAssignList
+  (when (!= (.-Key n) nil)
+    (when (not (ir/DeclaredBy (.-Key n) n))
+      (set! (.-Key n) (AssignExpr (.-Key n))))
+
+    (checkassign (.-Key n)))
+
+  (when (!= (.-Value n) nil)
+    (when (not (ir/DeclaredBy (.-Value n) n))
+      (set! (.-Value n) (AssignExpr (.-Value n))))
+
+    (checkassign (.-Value n)))
+
+
+  ;; second half of dance
+  ^{:go/via [miniStmt miniNode]} (.SetTypecheck n 1)
+  (when (and (!= (.-Key n) nil) (== (.Typecheck (.-Key n)) 0))
+    (set! (.-Key n) (AssignExpr (.-Key n))))
+
+  (when (and (!= (.-Value n) nil) (== (.Typecheck (.-Value n)) 0))
+    (set! (.-Value n) (AssignExpr (.-Value n))))
+
+
+  (Stmts (.-Body n)))
+
+
+
+^{:go/end 437} (go/func tcReturn "tcReturn typechecks an ORETURN node.\n" ^ir/Node [^{:tag (* ir/ReturnStmt)} n]
+  (when (== ir/CurFunc nil)
+    (base/FatalfAt ^{:go/via [miniStmt miniNode]} (.Pos n) "return outside function"))
+
+
+  (typecheckargs n)
+  (when (!= (len (.-Results n)) 0)
+    (typecheckaste ir/ORETURN nil false (.Results (.Type ir/CurFunc)) (.-Results n) ^{:go/end 434} (fn ^string [] "return argument")))
+
+  ^{:line 436} n)
+
+
+
+^{:go/end 513} (go/func tcSelect "select\n" [^{:tag (* ir/SelectStmt)} sel]
+  (let [^{:tag (* ir/CommClause)} def (zero (* ir/CommClause))
+      ^{:line 442} lno (ir/SetPos sel)]
+    (Stmts ^{:go/via [miniStmt]} (.Init sel))
+    (range [_ ncase (.-Cases sel)]
+      (if (== (.-Comm ncase) nil)
+        ;; default
+        (if (!= def nil)
+          (base/ErrorfAt ^{:go/via [miniStmt miniNode]} (.Pos ncase) errors/DuplicateDefault "multiple defaults in select (first at %v)" (ir/Line def))
+
+          (set! def ncase))
+
+
+        (let [n (Stmt (.-Comm ncase))]
+          (set! (.-Comm ncase) n)
+          (let [oselrecv2 ^{:go/end 461} (fn [^ir/Node dst ^ir/Node recv ^bool def]
+                (let [selrecv (ir/NewAssignListStmt (.Pos n) ir/OSELRECV2 (lit (slice ir/Node) dst ir/BlankNode) (lit (slice ir/Node) recv))]
+                  (set! (.-Def selrecv) def)
+                  ^{:go/via [miniStmt miniNode]} (.SetTypecheck selrecv 1)
+                  ^{:go/via [miniStmt]} (.SetInit selrecv (.Init n))
+                  (set! (.-Comm ncase) selrecv)))]
+
+            (switch (.Op n)
+              (default
+                (let [pos (.Pos n)]
+                  (when (== (.Op n) ir/ONAME)
+                    ;; We don't have the right position for ONAME nodes (see #15459 and
+                    ;; others). Using ncase.Pos for now as it will provide the correct
+                    ;; line number (assuming the expression follows the "case" keyword
+                    ;; on the same line). This matches the approach before 1.10.
+                    (set! pos ^{:go/via [miniStmt miniNode]} (.Pos ncase)))
+
+                  (base/ErrorfAt pos errors/InvalidSelectCase "select case must be receive, send or assign recv")))
+
+              (case [ir/OAS]
+                ;; convert x = <-c into x, _ = <-c
+                ;; remove implicit conversions; the eventual assignment
+                ;; will reintroduce them.
+                (let [n (assert (* ir/AssignStmt) n)]
+                  (when [r (.-Y n)] (or (== (.Op r) ir/OCONVNOP) (== (.Op r) ir/OCONVIFACE))
+                    (let [r (assert (* ir/ConvExpr) r)]
+                      (when (.Implicit r)
+                        (set! (.-Y n) (.-X r)))))
+
+
+                  (when (!= (.Op (.-Y n)) ir/ORECV)
+                    (base/ErrorfAt ^{:go/via [miniStmt miniNode]} (.Pos n) errors/InvalidSelectCase "select assignment must have receive on right hand side")
+                    (break))
+
+                  (oselrecv2 (.-X n) (.-Y n) (.-Def n))))
+
+              (case [ir/OAS2RECV]
+                (let [n (assert (* ir/AssignListStmt) n)]
+                  (when (!= (.Op (aget (.-Rhs n) 0)) ir/ORECV)
+                    (base/ErrorfAt ^{:go/via [miniStmt miniNode]} (.Pos n) errors/InvalidSelectCase "select assignment must have receive on right hand side")
+                    (break))
+
+                  (.SetOp n ir/OSELRECV2)))
+
+              (case [ir/ORECV]
+                ;; convert <-c into _, _ = <-c
+                (let [n (assert (* ir/UnaryExpr) n)]
+                  (oselrecv2 ir/BlankNode n false)))
+
+              (case [ir/OSEND]
+                (break))))))
+
+
+
+      (Stmts (.-Body ncase)))
+
+
+    (set! base/Pos lno)))
+
+
+
+^{:go/end 539} (go/func tcSend "tcSend typechecks an OSEND node.\n" ^ir/Node [^{:tag (* ir/SendStmt)} n]
+  (set! (.-Chan n) (Expr (.-Chan n)))
+  (set! (.-Value n) (Expr (.-Value n)))
+  (set! (.-Chan n) (DefaultLit (.-Chan n) nil))
+  (let [t (.Type (.-Chan n))]
+    (when (== t nil)
+      (return n))
+
+    (when (not (.IsChan t))
+      (base/Errorf "invalid operation: %v (send to non-chan type %v)" n t)
+      (return n))
+
+
+    (when (not (.CanSend (.ChanDir t)))
+      (base/Errorf "invalid operation: %v (send to receive-only type %v)" n t)
+      (return n))
+
+
+    (set! (.-Value n) (AssignConv (.-Value n) (.Elem t) "send"))
+    (when (== (.Type (.-Value n)) nil)
+      (return n))
+
+    ^{:line 538} n))
+
+
+
+^{:go/end 549} (go/func tcSwitch "tcSwitch typechecks a switch statement.\n" [^{:tag (* ir/SwitchStmt)} n]
+  (Stmts ^{:go/via [miniStmt]} (.Init n))
+  (if (and (!= (.-Tag n) nil) (== (.Op (.-Tag n)) ir/OTYPESW))
+    (tcSwitchType n)
+
+    (tcSwitchExpr n)))
+
+
+
+^{:go/end 618} (go/func tcSwitchExpr [^{:tag (* ir/SwitchStmt)} n]
+  (let [t (aget types/Types types/TBOOL)]
+    (when (!= (.-Tag n) nil)
+      (set! (.-Tag n) (Expr (.-Tag n)))
+      (set! (.-Tag n) (DefaultLit (.-Tag n) nil))
+      (set! t (.Type (.-Tag n))))
+
+
+    (let [^string nilonly (zero string)]
+      (when (!= t nil)
+        (switch
+          (case [(.IsMap t)]
+            (set! nilonly "map"))
+          (case [(== (.Kind t) types/TFUNC)]
+            (set! nilonly "func"))
+          (case [(.IsSlice t)]
+            (set! nilonly "slice"))
+
+          (case [(not (types/IsComparable t))]
+            (if (.IsStruct t)
+              (base/ErrorfAt ^{:go/via [miniStmt miniNode]} (.Pos n) errors/InvalidExprSwitch "cannot switch on %L (struct containing %v cannot be compared)" (.-Tag n) (.-Type (types/IncomparableField t)))
+
+              (base/ErrorfAt ^{:go/via [miniStmt miniNode]} (.Pos n) errors/InvalidExprSwitch "cannot switch on %L" (.-Tag n)))
+
+            (set! t nil))))
+
+
+
+      (let [^ir/Node defCase (zero ir/Node)]
+        (range [_ ncase (.-Cases n)]
+          (let [ls (.-List ncase)]
+            (when (== (len ls) 0) ; default:
+              (if (!= defCase nil)
+                (base/ErrorfAt ^{:go/via [miniStmt miniNode]} (.Pos ncase) errors/DuplicateDefault "multiple defaults in switch (first at %v)" (ir/Line defCase))
+
+                (set! defCase ncase)))
+
+
+
+            (range [i ls]
+              (ir/SetPos ncase)
+              (aset ls i (Expr (aget ls i)))
+              (aset ls i (DefaultLit (aget ls i) t))
+              (let [n1 (aget ls i)]
+                (when (or (== t nil) (== (.Type n1) nil))
+                  (continue))
+
+
+                (cond (and (!= nilonly "") (not (ir/IsNil n1)))
+                  (base/ErrorfAt ^{:go/via [miniStmt miniNode]} (.Pos ncase) errors/MismatchedTypes "invalid case %v in switch (can only compare %s %v to nil)" n1 nilonly (.-Tag n))
+                  (and (.IsInterface t) (not (.IsInterface (.Type n1))) (not (types/IsComparable (.Type n1))))
+                  (base/ErrorfAt ^{:go/via [miniStmt miniNode]} (.Pos ncase) errors/UndefinedOp "invalid case %L in switch (incomparable type)" n1) :else
+
+                  (let [(values op1 _) (assignOp (.Type n1) t)
+                      (values op2 _) (assignOp t (.Type n1))]
+                    (when (and (== op1 ir/OXXX) (== op2 ir/OXXX))
+                      (if (!= (.-Tag n) nil)
+                        (base/ErrorfAt ^{:go/via [miniStmt miniNode]} (.Pos ncase) errors/MismatchedTypes "invalid case %v in switch on %v (mismatched types %v and %v)" n1 (.-Tag n) (.Type n1) t)
+
+                        (base/ErrorfAt ^{:go/via [miniStmt miniNode]} (.Pos ncase) errors/MismatchedTypes "invalid case %v in switch (mismatched types %v and bool)" n1 (.Type n1))))))))
+
+
+
+
+
+            (Stmts (.-Body ncase))))))))
+
+
+
+^{:go/end 707} (go/func tcSwitchType [^{:tag (* ir/SwitchStmt)} n]
+  (let [guard (assert (* ir/TypeSwitchGuard) (.-Tag n))]
+    (set! (.-X guard) (Expr (.-X guard)))
+    (let [t (.Type (.-X guard))]
+      (when (and (!= t nil) (not (.IsInterface t)))
+        (base/ErrorfAt ^{:go/via [miniStmt miniNode]} (.Pos n) errors/InvalidTypeSwitch "cannot type switch on non-interface value %L" (.-X guard))
+        (set! t nil))
+
+
+      ;; We don't actually declare the type switch's guarded
+      ;; declaration itself. So if there are no cases, we won't
+      ;; notice that it went unused.
+      (when [v (.-Tag guard)] (and (!= v nil) (not (ir/IsBlank v)) (== (len (.-Cases n)) 0))
+        (base/ErrorfAt ^{:go/via [miniExpr miniNode]} (.Pos v) errors/UnusedVar "%v declared but not used" (.Sym v)))
+
+
+      (let [(values ^ir/Node defCase ^ir/Node nilCase) (zero ir/Node)
+          ^{:line 637 :tag typeSet} ts (zero typeSet)]
+        (range [_ ncase (.-Cases n)]
+          (let [ls (.-List ncase)]
+            (when (== (len ls) 0) ; default:
+              (if (!= defCase nil)
+                (base/ErrorfAt ^{:go/via [miniStmt miniNode]} (.Pos ncase) errors/DuplicateDefault "multiple defaults in switch (first at %v)" (ir/Line defCase))
+
+                (set! defCase ncase)))
+
+
+
+            (range [i ls]
+              (aset ls i (typecheck (aget ls i) (bit-or ctxExpr ctxType)))
+              (let [n1 (aget ls i)]
+                (when (or (== t nil) (== (.Type n1) nil))
+                  (continue))
+
+
+                (when (ir/IsNil n1) ; case nil:
+                  (if (!= nilCase nil)
+                    (base/ErrorfAt ^{:go/via [miniStmt miniNode]} (.Pos ncase) errors/DuplicateCase "multiple nil cases in type switch (first at %v)" (ir/Line nilCase))
+
+                    (set! nilCase ncase))
+
+                  (continue))
+
+                (when (== (.Op n1) ir/ODYNAMICTYPE)
+                  (continue))
+
+                (when (!= (.Op n1) ir/OTYPE)
+                  (base/ErrorfAt ^{:go/via [miniStmt miniNode]} (.Pos ncase) errors/NotAType "%L is not a type" n1)
+                  (continue))
+
+                (when (not (.IsInterface (.Type n1)))
+                  (let [why (ImplementsExplain (.Type n1) t)]
+                    (when (!= why "")
+                      (base/ErrorfAt ^{:go/via [miniStmt miniNode]} (.Pos ncase) errors/ImpossibleAssert "impossible type switch case: %L cannot have dynamic type %v (%s)" (.-X guard) (.Type n1) why))
+
+                    (continue)))
+
+
+                (.add ts ^{:go/via [miniStmt miniNode]} (.Pos ncase) (.Type n1))))
+
+
+            (when (!= (.-Var ncase) nil)
+              ;; Assign the clause variable's type.
+              (let [vt t]
+                (when (== (len ls) 1)
+                  (cond (or (== (.Op (aget ls 0)) ir/OTYPE) (== (.Op (aget ls 0)) ir/ODYNAMICTYPE))
+                    (set! vt (.Type (aget ls 0)))
+                    (not (ir/IsNil (aget ls 0)))
+                    ;; Invalid single-type case;
+                    ;; mark variable as broken.
+                    (set! vt nil)))
+
+
+
+                (let [nvar (.-Var ncase)]
+                  ^{:go/via [miniExpr]} (.SetType nvar vt)
+                  (if (!= vt nil)
+                    (set! nvar (assert (* ir/Name) (AssignExpr nvar)))
+
+                    ;; Clause variable is broken; prevent typechecking.
+                    ^{:go/via [miniExpr miniNode]} (.SetTypecheck nvar 1))
+
+                  (set! (.-Var ncase) nvar))))
+
+
+            (Stmts (.-Body ncase))))))))
+
+
+
+(go/type typeSet (struct
+    ^{:line 710 :tag (map string src/XPos)} m))
+
+
+^{:go/end 724} (go/method add [^{:tag (* typeSet)} s ^src/XPos pos ^{:tag (* types/Type)} typ]
+  (when (== (.-m s) nil)
+    (set! (.-m s) (make (map string src/XPos))))
+
+
+  (let [ls (.LinkString typ)]
+    (when [(values prev ok) (aget (.-m s) ls)] ok
+      (base/ErrorfAt pos errors/DuplicateCase "duplicate case %v in type switch\n\tprevious case at %s" typ (base/FmtPos prev))
+      (return))
+
+    (aset (.-m s) ls pos)))

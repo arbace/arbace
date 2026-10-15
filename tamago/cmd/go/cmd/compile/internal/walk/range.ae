@@ -1,0 +1,610 @@
+;; Copyright 2009 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.cmd.compile.internal.walk) (go/file "range.go" :imports [
+
+
+    ^{:line 8} [constant "go/constant"]
+    ^{:line 9} [utf8 "unicode/utf8"]
+
+    ^{:line 11} [base "cmd/compile/internal/base"]
+    ^{:line 12} [ir "cmd/compile/internal/ir"]
+    ^{:line 13} [reflectdata "cmd/compile/internal/reflectdata"]
+    ^{:line 14} [ssagen "cmd/compile/internal/ssagen"]
+    ^{:line 15} [typecheck "cmd/compile/internal/typecheck"]
+    ^{:line 16} [types "cmd/compile/internal/types"]
+    ^{:line 17} [src "cmd/internal/src"]
+    ^{:line 18} [sys "cmd/internal/sys"]])
+
+
+^{:go/breaks [[4 34]] :go/end 35} (go/func cheapComputableIndex ^bool [^int64 width]
+  (switch ^{:go/via [Arch]} (.-Family (.-LinkArch ssagen/Arch))
+    ;; MIPS does not have R+R addressing
+    ;; Arm64 may lack ability to generate this code in our assembler,
+    ;; but the architecture supports it.
+    (case [sys/Loong64 sys/PPC64 sys/S390X]
+      (return (== width 1)))
+    (case [sys/AMD64 sys/I386 sys/ARM64 sys/ARM]
+      (switch width
+        (case [1 2 4 8]
+          (return true)))))
+
+
+  false)
+
+
+
+
+
+
+^{:go/end 389} (go/func walkRange "walkRange transforms various forms of ORANGE into\nsimpler forms.  The result must be assigned back to n.\nNode n may also be modified in place, and may also be\nthe returned node.\n" ^ir/Node [^{:tag (* ir/RangeStmt)} nrange]
+  (base/Assert (not (.-DistinctVars nrange))) ; Should all be rewritten before escape analysis
+  (when (isMapClear nrange)
+    (return (mapRangeClear nrange)))
+
+
+  (let [nfor (ir/NewForStmt ^{:go/via [miniStmt miniNode]} (.Pos nrange) nil nil nil nil (.-DistinctVars nrange))]
+    ^{:go/via [miniStmt]} (.SetInit nfor ^{:go/via [miniStmt]} (.Init nrange))
+    (set! (.-Label nfor) (.-Label nrange))
+
+    ;; variable name conventions:
+    ;;	ohv1, hv1, hv2: hidden (old) val 1, 2
+    ;;	ha, hit: hidden aggregate, iterator
+    ;;	hn, hp: hidden len, pointer
+    ;;	hb: hidden bool
+    ;;	a, v1, v2: not hidden aggregate, val 1, 2
+
+    (let [a (.-X nrange)
+        ^{:line 59} t (.Type a)
+        ^{:line 60} lno (ir/SetPos a)
+
+        (values v1 v2) (values (.-Key nrange) (.-Value nrange))]
+
+      (when (ir/IsBlank v2)
+        (set! v2 nil))
+
+
+      (when (and (ir/IsBlank v1) (== v2 nil))
+        (set! v1 nil))
+
+
+      (when (and (== v1 nil) (!= v2 nil))
+        (base/Fatalf "walkRange: v2 != nil while v1 == nil"))
+
+
+      (let [^{:tag (slice ir/Node)} body (zero (slice ir/Node))
+          ^{:line 77 :tag (slice ir/Node)} init (zero (slice ir/Node))]
+        (switch [k (.Kind t)]
+          (default
+            (base/Fatalf "walkRange"))
+
+          (case [(aget types/IsInt k)]
+            (when [nn (arrayRangeClear nrange v1 v2 a)] (!= nn nil)
+              (set! base/Pos lno)
+              (return nn))
+
+            (let [hv1 (typecheck/TempAt base/Pos ir/CurFunc t)
+                ^{:line 88} hn (typecheck/TempAt base/Pos ir/CurFunc t)]
+
+              (set! init (append init (ir/NewAssignStmt base/Pos hv1 nil)))
+              (set! init (append init (ir/NewAssignStmt base/Pos hn a)))
+
+              (set! (.-Cond nfor) (ir/NewBinaryExpr base/Pos ir/OLT hv1 hn))
+              (set! (.-Post nfor) (ir/NewAssignStmt base/Pos hv1 (ir/NewBinaryExpr base/Pos ir/OADD hv1 (ir/NewInt base/Pos 1))))
+
+              (when (!= v1 nil)
+                (set! body (lit (slice ir/Node) (rangeAssign nrange hv1))))))
+
+
+          (case [(== k types/TARRAY) (== k types/TSLICE) (== k types/TPTR)] ; TPTR is pointer-to-array
+            (when [nn (arrayRangeClear nrange v1 v2 a)] (!= nn nil)
+              (set! base/Pos lno)
+              (return nn))
+
+
+            ;; Element type of the iteration
+            (let [^{:tag (* types/Type)} elem (zero (* types/Type))]
+              (switch (.Kind t)
+                (case [types/TSLICE types/TARRAY]
+                  (set! elem (.Elem t)))
+                (case [types/TPTR]
+                  (set! elem (.Elem (.Elem t)))))
+
+
+              ;; order.stmt arranged for a copy of the array/slice variable if needed.
+              (let [ha a
+
+                  ^{:line 118} hv1 (typecheck/TempAt base/Pos ir/CurFunc (aget types/Types types/TINT))
+                  ^{:line 119} hn (typecheck/TempAt base/Pos ir/CurFunc (aget types/Types types/TINT))]
+
+                (set! init (append init (ir/NewAssignStmt base/Pos hv1 nil)))
+                (set! init (append init (ir/NewAssignStmt base/Pos hn (ir/NewUnaryExpr base/Pos ir/OLEN ha))))
+
+                (set! (.-Cond nfor) (ir/NewBinaryExpr base/Pos ir/OLT hv1 hn))
+                (set! (.-Post nfor) (ir/NewAssignStmt base/Pos hv1 (ir/NewBinaryExpr base/Pos ir/OADD hv1 (ir/NewInt base/Pos 1))))
+
+                ;; for range ha { body }
+                (when (== v1 nil)
+                  (break))
+
+
+                ;; for v1 := range ha { body }
+                (when (== v2 nil)
+                  (set! body (lit (slice ir/Node) (rangeAssign nrange hv1)))
+                  (break))
+
+
+                ;; for v1, v2 := range ha { body }
+                (when (cheapComputableIndex (.Size elem))
+                  ;; v1, v2 = hv1, ha[hv1]
+                  (let [tmp (ir/NewIndexExpr base/Pos ha hv1)]
+                    ^{:go/via [miniExpr]} (.SetBounded tmp true)
+                    (set! body (lit (slice ir/Node) (rangeAssign2 nrange hv1 tmp)))
+                    (break)))
+
+
+                ;; Slice to iterate over
+                (let [^ir/Node hs (zero ir/Node)]
+                  (if (.IsSlice t)
+                    (set! hs ha)
+
+                    (let [^ir/Node arr (zero ir/Node)]
+                      (if (.IsPtr t)
+                        (set! arr ha)
+                        (do
+                          (set! arr (typecheck/NodAddr ha))
+                          (.SetType arr (.PtrTo t))
+                          (.SetTypecheck arr 1)))
+
+                      (set! hs (ir/NewSliceExpr base/Pos ir/OSLICEARR arr nil nil nil))
+                      ;; old typechecker doesn't know OSLICEARR, so we set types explicitly
+                      (.SetType hs (types/NewSlice elem))
+                      (.SetTypecheck hs 1)))
+
+
+                  ;; We use a "pointer" to keep track of where we are in the backing array
+                  ;; of the slice hs. This pointer starts at hs.ptr and gets incremented
+                  ;; by the element size each time through the loop.
+                  ;;
+                  ;; It's tricky, though, as on the last iteration this pointer gets
+                  ;; incremented to point past the end of the backing array. We can't
+                  ;; let the garbage collector see that final out-of-bounds pointer.
+                  ;;
+                  ;; To avoid this, we keep the "pointer" alternately in 2 variables, one
+                  ;; pointer typed and one uintptr typed. Most of the time it lives in the
+                  ;; regular pointer variable, but when it might be out of bounds (after it
+                  ;; has been incremented, but before the loop condition has been checked)
+                  ;; it lives briefly in the uintptr variable.
+                  ;;
+                  ;; hp contains the pointer version (of type *T, where T is the element type).
+                  ;; It is guaranteed to always be in range, keeps the backing store alive,
+                  ;; and is updated on stack copies. If a GC occurs when this function is
+                  ;; suspended at any safepoint, this variable ensures correct operation.
+                  ;;
+                  ;; hu contains the equivalent uintptr version. It may point past the
+                  ;; end, but doesn't keep the backing store alive and doesn't get updated
+                  ;; on a stack copy. If a GC occurs while this function is on the top of
+                  ;; the stack, then the last frame is scanned conservatively and hu will
+                  ;; act as a reference to the backing array to ensure it is not collected.
+                  ;;
+                  ;; The "pointer" we're moving across the backing array lives in one
+                  ;; or the other of hp and hu as the loop proceeds.
+                  ;;
+                  ;; hp is live during most of the body of the loop. But it isn't live
+                  ;; at the very top of the loop, when we haven't checked i<n yet, and
+                  ;; it could point off the end of the backing store.
+                  ;; hu is live only at the very top and very bottom of the loop.
+                  ;; In particular, only when it cannot possibly be live across a call.
+                  ;;
+                  ;; So we do
+                  ;;   hu = uintptr(unsafe.Pointer(hs.ptr))
+                  ;;   for i := 0; i < hs.len; i++ {
+                  ;;     hp = (*T)(unsafe.Pointer(hu))
+                  ;;     v1, v2 = i, *hp
+                  ;;     ... body of loop ...
+                  ;;     hu = uintptr(unsafe.Pointer(hp)) + elemsize
+                  ;;   }
+                  ;;
+                  ;; Between the assignments to hu and the assignment back to hp, there
+                  ;; must not be any calls.
+
+                  ;; Pointer to current iteration position. Start on entry to the loop
+                  ;; with the pointer in hu.
+                  (let [ptr (ir/NewUnaryExpr base/Pos ir/OSPTR hs)]
+                    ^{:go/via [miniExpr]} (.SetBounded ptr true)
+                    (let [huVal (ir/NewConvExpr base/Pos ir/OCONVNOP (aget types/Types types/TUNSAFEPTR) ptr)]
+                      (set! huVal (ir/NewConvExpr base/Pos ir/OCONVNOP (aget types/Types types/TUINTPTR) huVal))
+                      (let [hu (typecheck/TempAt base/Pos ir/CurFunc (aget types/Types types/TUINTPTR))]
+                        (set! init (append init (ir/NewAssignStmt base/Pos hu huVal)))
+
+                        ;; Convert hu to hp at the top of the loop (after the condition has been checked).
+                        (let [hpVal (ir/NewConvExpr base/Pos ir/OCONVNOP (aget types/Types types/TUNSAFEPTR) hu)]
+                          (.SetCheckPtr hpVal true) ; disable checkptr on this conversion
+                          (set! hpVal (ir/NewConvExpr base/Pos ir/OCONVNOP (.PtrTo elem) hpVal))
+                          (let [hp (typecheck/TempAt base/Pos ir/CurFunc (.PtrTo elem))]
+                            (set! body (append body (ir/NewAssignStmt base/Pos hp hpVal)))
+
+                            ;; Assign variables on the LHS of the range statement. Use *hp to get the element.
+                            (let [e (ir/NewStarExpr base/Pos hp)]
+                              ^{:go/via [miniExpr]} (.SetBounded e true)
+                              (let [a (rangeAssign2 nrange hv1 e)]
+                                (set! body (append body a))
+
+                                ;; Advance pointer for next iteration of the loop.
+                                ;; This reads from hp and writes to hu.
+                                (set! huVal (ir/NewConvExpr base/Pos ir/OCONVNOP (aget types/Types types/TUNSAFEPTR) hp))
+                                (set! huVal (ir/NewConvExpr base/Pos ir/OCONVNOP (aget types/Types types/TUINTPTR) huVal))
+                                (let [as (ir/NewAssignStmt base/Pos hu (ir/NewBinaryExpr base/Pos ir/OADD huVal (ir/NewInt base/Pos (.Size elem))))]
+                                  (set! (.-Post nfor) (ir/NewBlockStmt base/Pos (lit (slice ir/Node) (.-Post nfor) as)))))))))))))))
+
+          (case [(== k types/TMAP)]
+            ;; order.stmt allocated the iterator for us.
+            ;; we only use a once, so no copy needed.
+            (let [ha a
+
+                ^{:line 246} hit (.-Prealloc nrange)
+                ^{:line 247} th ^{:go/via [miniExpr]} (.Type hit)
+                ;; depends on layout of iterator struct.
+                ;; See cmd/compile/internal/reflectdata/map.go:MapIterType
+                ^{:line 250} keysym (.-Sym (.Field th 0))
+                ^{:line 251} elemsym (.-Sym (.Field th 1)) ; ditto
+                ^{:line 252} iterInit "mapIterStart"
+                ^{:line 253} iterNext "mapIterNext"
+
+                ^{:line 255} fn (typecheck/LookupRuntime iterInit (.Key t) (.Elem t) th)]
+              (set! init (append init (mkcallstmt1 fn (reflectdata/RangeMapRType base/Pos nrange) ha (typecheck/NodAddr hit))))
+              (set! (.-Cond nfor) (ir/NewBinaryExpr base/Pos ir/ONE (ir/NewSelectorExpr base/Pos ir/ODOT hit keysym) (typecheck/NodNil)))
+
+              (set! fn (typecheck/LookupRuntime iterNext th))
+              (set! (.-Post nfor) (mkcallstmt1 fn (typecheck/NodAddr hit)))
+
+              (let [key (ir/NewStarExpr base/Pos (typecheck/ConvNop (ir/NewSelectorExpr base/Pos ir/ODOT hit keysym) (types/NewPtr (.Key t))))]
+                (cond (== v1 nil)
+                  (set! body nil)
+                  (== v2 nil)
+                  (set! body (lit (slice ir/Node) (rangeAssign nrange key))) :else
+
+                  (let [elem (ir/NewStarExpr base/Pos (typecheck/ConvNop (ir/NewSelectorExpr base/Pos ir/ODOT hit elemsym) (types/NewPtr (.Elem t))))]
+                    (set! body (lit (slice ir/Node) (rangeAssign2 nrange key elem))))))))
+
+
+          (case [(== k types/TCHAN)]
+            ;; order.stmt arranged for a copy of the channel variable.
+            (let [ha a
+
+                ^{:line 276} hv1 (typecheck/TempAt base/Pos ir/CurFunc (.Elem t))]
+              ^{:go/via [miniExpr miniNode]} (.SetTypecheck hv1 1)
+              (when (.HasPointers (.Elem t))
+                (set! init (append init (ir/NewAssignStmt base/Pos hv1 nil))))
+
+              (let [hb (typecheck/TempAt base/Pos ir/CurFunc (aget types/Types types/TBOOL))]
+
+                (set! (.-Cond nfor) (ir/NewBinaryExpr base/Pos ir/ONE hb (ir/NewBool base/Pos false)))
+                (let [lhs (lit (slice ir/Node) hv1 hb)
+                    ^{:line 285} rhs (lit (slice ir/Node) (ir/NewUnaryExpr base/Pos ir/ORECV ha))
+                    ^{:line 286} a (ir/NewAssignListStmt base/Pos ir/OAS2RECV lhs rhs)]
+                  ^{:go/via [miniStmt miniNode]} (.SetTypecheck a 1)
+                  (set! (.-Cond nfor) (ir/InitExpr (lit (slice ir/Node) a) (.-Cond nfor)))
+                  (if (== v1 nil)
+                    (set! body nil)
+
+                    (set! body (lit (slice ir/Node) (rangeAssign nrange hv1))))
+
+                  ;; Zero hv1. This prevents hv1 from being the sole, inaccessible
+                  ;; reference to an otherwise GC-able value during the next channel receive.
+                  ;; See issue 15281.
+                  (set! body (append body (ir/NewAssignStmt base/Pos hv1 nil)))))))
+
+          (case [(== k types/TSTRING)]
+            ;; Transform string range statements like "for v1, v2 = range a" into
+            ;;
+            ;; ha := a
+            ;; for hv1 := 0; hv1 < len(ha); {
+            ;;   hv1t := hv1
+            ;;   hv2 := rune(ha[hv1])
+            ;;   if hv2 < utf8.RuneSelf {
+            ;;      hv1++
+            ;;   } else {
+            ;;      hv2, hv1 = decoderune(ha, hv1)
+            ;;   }
+            ;;   v1, v2 = hv1t, hv2
+            ;;   // original body
+            ;; }
+
+            ;; order.stmt arranged for a copy of the string variable.
+            (let [ha a
+
+                ^{:line 318} hv1 (typecheck/TempAt base/Pos ir/CurFunc (aget types/Types types/TINT))
+                ^{:line 319} hv1t (typecheck/TempAt base/Pos ir/CurFunc (aget types/Types types/TINT))
+                ^{:line 320} hv2 (typecheck/TempAt base/Pos ir/CurFunc types/RuneType)]
+
+              ;; hv1 := 0
+              (set! init (append init (ir/NewAssignStmt base/Pos hv1 nil)))
+
+              ;; hv1 < len(ha)
+              (set! (.-Cond nfor) (ir/NewBinaryExpr base/Pos ir/OLT hv1 (ir/NewUnaryExpr base/Pos ir/OLEN ha)))
+
+              (when (!= v1 nil)
+                ;; hv1t = hv1
+                (set! body (append body (ir/NewAssignStmt base/Pos hv1t hv1))))
+
+
+              ;; hv2 := rune(ha[hv1])
+              (let [nind (ir/NewIndexExpr base/Pos ha hv1)]
+                ^{:go/via [miniExpr]} (.SetBounded nind true)
+                (set! body (append body (ir/NewAssignStmt base/Pos hv2 (typecheck/Conv nind types/RuneType))))
+
+                ;; if hv2 < utf8.RuneSelf
+                (let [nif (ir/NewIfStmt base/Pos nil nil nil)]
+
+                  ;; On x86, hv2 <= 127 is shorter to encode than hv2 < 128
+                  ;; Doesn't hurt other archs.
+                  (set! (.-Cond nif) (ir/NewBinaryExpr base/Pos ir/OLE hv2 (ir/NewInt base/Pos (- utf8/RuneSelf 1))))
+
+                  ;; hv1++
+                  (set! (.-Body nif) (lit (slice ir/Node) (ir/NewAssignStmt base/Pos hv1 (ir/NewBinaryExpr base/Pos ir/OADD hv1 (ir/NewInt base/Pos 1)))))
+
+                  ;; } else {
+                  ;; hv2, hv1 = decoderune(ha, hv1)
+                  (let [fn (typecheck/LookupRuntime "decoderune")
+                      ;; decoderune expects a uint, but hv1 is an int.
+                      ;; This is safe because hv1 is always >= 0.
+                      ^{:line 353} call (mkcall1 fn (.ResultsTuple ^{:go/via [miniExpr]} (.Type fn)) (addr (.-Else nif)) ha hv1)
+                      ^{:line 354} a (ir/NewAssignListStmt base/Pos ir/OAS2 (lit (slice ir/Node) hv2 hv1) (lit (slice ir/Node) call))]
+                    (.Append (.-Else nif) a)
+
+                    (set! body (append body nif))
+
+                    (when (!= v1 nil)
+                      (if (!= v2 nil)
+                        ;; v1, v2 = hv1t, hv2
+                        (set! body (append body (rangeAssign2 nrange hv1t hv2)))
+
+                        ;; v1 = hv1t
+                        (set! body (append body (rangeAssign nrange hv1t)))))))))))
+
+
+
+
+        (typecheck/Stmts init)
+
+        (.Append ^{:go/via [miniStmt]} (.PtrInit nfor) (spread init))
+
+        (typecheck/Stmts (.Init (.-Cond nfor)))
+
+        (set! (.-Cond nfor) (typecheck/Expr (.-Cond nfor)))
+        (set! (.-Cond nfor) (typecheck/DefaultLit (.-Cond nfor) nil))
+        (set! (.-Post nfor) (typecheck/Stmt (.-Post nfor)))
+        (typecheck/Stmts body)
+        (.Append (.-Body nfor) (spread body))
+        (.Append (.-Body nfor) (spread (.-Body nrange)))
+
+        (let [^ir/Node n nfor]
+
+          (set! n (walkStmt n))
+
+          (set! base/Pos lno)
+          ^{:line 388} n)))))
+
+
+
+^{:go/end 395} (go/func rangeAssign "rangeAssign returns \"n.Key = key\".\n" ^ir/Node [^{:tag (* ir/RangeStmt)} n ^ir/Node key]
+  (set! key (rangeConvert n (.Type (.-Key n)) key (.-KeyTypeWord n) (.-KeySrcRType n)))
+  (ir/NewAssignStmt ^{:go/via [miniStmt miniNode]} (.Pos n) (.-Key n) key))
+
+
+
+^{:go/end 404} (go/func rangeAssign2 "rangeAssign2 returns \"n.Key, n.Value = key, value\".\n" ^ir/Node [^{:tag (* ir/RangeStmt)} n ^ir/Node key ^ir/Node value]
+  ;; Use OAS2 to correctly handle assignments
+  ;; of the form "v1, a[v1] = range".
+  (set! key (rangeConvert n (.Type (.-Key n)) key (.-KeyTypeWord n) (.-KeySrcRType n)))
+  (set! value (rangeConvert n (.Type (.-Value n)) value (.-ValueTypeWord n) (.-ValueSrcRType n)))
+  (ir/NewAssignListStmt ^{:go/via [miniStmt miniNode]} (.Pos n) ir/OAS2 (lit (slice ir/Node) (.-Key n) (.-Value n)) (lit (slice ir/Node) key value)))
+
+
+
+
+
+^{:go/end 419} (go/func rangeConvert "rangeConvert returns src, converted to dst if necessary. If a\nconversion is necessary, then typeWord and srcRType are copied to\ntheir respective ConvExpr fields.\n" ^ir/Node [^{:tag (* ir/RangeStmt)} nrange ^{:tag (* types/Type)} dst ^ir/Node src ^ir/Node typeWord ^ir/Node srcRType]
+  (set! src (typecheck/Expr src))
+  (when (or (== (.Kind dst) types/TBLANK) (types/Identical dst (.Type src)))
+    (return src))
+
+
+  (let [n (ir/NewConvExpr ^{:go/via [miniStmt miniNode]} (.Pos nrange) ir/OCONV dst src)]
+    (set! (.-TypeWord n) typeWord)
+    (set! (.-SrcRType n) srcRType)
+    (typecheck/Expr n)))
+
+
+
+
+
+
+
+
+
+^{:go/end 464} (go/func isMapClear "isMapClear checks if n is of the form:\n\n\tfor k := range m {\n\t\tdelete(m, k)\n\t}\n\nwhere == for keys of map m is reflexive.\n" ^bool [^{:tag (* ir/RangeStmt)} n]
+  (when (or (!= (.-N base/Flag) 0) (.-Instrumenting (.-Cfg base/Flag)))
+    (return false))
+
+
+  (let [t (.Type (.-X n))]
+    (when (or (!= ^{:go/via [miniStmt miniNode]} (.Op n) ir/ORANGE) (!= (.Kind t) types/TMAP) (== (.-Key n) nil) (!= (.-Value n) nil))
+      (return false))
+
+
+    (let [k (.-Key n)]
+      ;; Require k to be a new variable name.
+      (when (not (ir/DeclaredBy k n))
+        (return false))
+
+
+      (when (!= (len (.-Body n)) 1)
+        (return false))
+
+
+      (let [stmt (aget (.-Body n) 0)] ; only stmt in body
+        (when (or (== stmt nil) (!= (.Op stmt) ir/ODELETE))
+          (return false))
+
+
+        ^{:go/breaks [[4 463]]} (let [m (.-X n)]
+          (when [delete (assert (* ir/CallExpr) stmt)] (or (not (ir/SameSafeExpr (aget (.-Args delete) 0) m)) (not (ir/SameSafeExpr (aget (.-Args delete) 1) k)))
+            (return false))
+
+
+          ;; Keys where equality is not reflexive can not be deleted from maps.
+          (when (not (types/IsReflexive (.Key t)))
+            (return false))
+
+
+          true)))))
+
+
+
+^{:go/end 473} (go/func mapRangeClear "mapRangeClear constructs a call to runtime.mapclear for the map range idiom.\n" ^ir/Node [^{:tag (* ir/RangeStmt)} nrange]
+  (let [m (.-X nrange)
+      ^{:line 469} origPos (ir/SetPos m)]
+    (defer (^{:go/end 470} (fn [] (set! base/Pos origPos))))
+
+    (mapClear m (reflectdata/RangeMapRType base/Pos nrange))))
+
+
+
+^{:go/end 483} (go/func mapClear "mapClear constructs a call to runtime.mapclear for the map m.\n" ^ir/Node [^ir/Node m ^ir/Node rtyp]
+  (let [t (.Type m)
+
+      ;; instantiate mapclear(typ *type, hmap map[any]any)
+      ^{:line 480} fn (typecheck/LookupRuntime "mapclear" (.Key t) (.Elem t))
+      ^{:line 481} n (mkcallstmt1 fn rtyp m)]
+    (typecheck/Stmt n)))
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 554} (go/func arrayRangeClear "Lower n into runtime·memclr if possible, for\nfast zeroing of slices and arrays (issue 5373).\nLook for instances of\n\n\tfor i := range a {\n\t\ta[i] = zero\n\t}\n\nin which the evaluation of a is side-effect-free.\n\nParameters are as in walkRange: \"for v1, v2 = range a\".\n" ^ir/Node [^{:tag (* ir/RangeStmt)} loop ^ir/Node v1 ^ir/Node v2 ^ir/Node a]
+  (when (or (!= (.-N base/Flag) 0) (.-Instrumenting (.-Cfg base/Flag)))
+    (return nil))
+
+
+  (when (or (== v1 nil) (!= v2 nil))
+    (return nil))
+
+
+  (when (or (!= (len (.-Body loop)) 1) (== (aget (.-Body loop) 0) nil))
+    (return nil))
+
+
+  (let [stmt1 (aget (.-Body loop) 0)] ; only stmt in body
+    (when (!= (.Op stmt1) ir/OAS)
+      (return nil))
+
+    (let [stmt (assert (* ir/AssignStmt) stmt1)]
+      (when (!= (.Op (.-X stmt)) ir/OINDEX)
+        (return nil))
+
+      (let [lhs (assert (* ir/IndexExpr) (.-X stmt))
+          ^{:line 518} x (.-X lhs)
+
+          ;; Get constant number of iterations for int and array cases.
+          ^{:line 521} n (conv int64 -1)]
+        (cond (ir/IsConst a constant/Int)
+          (set! n (ir/Int64Val a))
+          (.IsArray (.Type a))
+          (set! n (.NumElem (.Type a)))
+          (and (.IsPtr (.Type a)) (.IsArray (.Elem (.Type a))))
+          (set! n (.NumElem (.Elem (.Type a)))))
+
+
+        (if (>= n 0) (do
+            ;; Int/Array case.
+            (when (not (.IsArray (.Type x)))
+              (return nil))
+
+            (when (!= (.NumElem (.Type x)) n)
+              (return nil)))
+
+          (do
+            ;; Slice case.
+            (when (not (ir/SameSafeExpr x a))
+              (return nil))))
+
+
+
+        (when (not (ir/SameSafeExpr (.-Index lhs) v1))
+          (return nil))
+
+
+        (when (not (ir/IsZero (.-Y stmt)))
+          (return nil))
+
+
+        (arrayClear ^{:go/via [miniStmt miniNode]} (.Pos stmt) x loop)))))
+
+
+
+^{:go/end 611} (go/func arrayClear "arrayClear constructs a call to runtime.memclr for fast zeroing of slices and arrays.\n" ^ir/Node [^src/XPos wbPos ^ir/Node a ^{:tag (* ir/RangeStmt)} nrange]
+  (let [elemsize (.Size (.Elem (typecheck/RangeExprType (.Type a))))]
+    (when (<= elemsize 0)
+      (return nil))
+
+
+    ;; Convert to
+    ;; if ln := len(a); ln != 0 {
+    ;; 	hp = &a[0]
+    ;; 	hn = len(a)*sizeof(elem(a))
+    ;; 	memclr{NoHeap,Has}Pointers(hp, hn)
+    ;; 	i = ln - 1
+    ;; }
+    (let [n (ir/NewIfStmt base/Pos nil nil nil)
+        ^{:line 571} ln (typecheck/TempAt base/Pos ir/CurFunc (aget types/Types types/TINT))
+        ^{:line 572} as (ir/NewAssignStmt base/Pos ln (ir/NewUnaryExpr base/Pos ir/OLEN a))]
+      (.Append ^{:go/via [miniStmt]} (.PtrInit n) (typecheck/Stmt as))
+      (set! (.-Cond n) (ir/NewBinaryExpr base/Pos ir/ONE ln (ir/NewInt base/Pos 0)))
+
+      ;; hp = &a[0]
+      (let [hp (typecheck/TempAt base/Pos ir/CurFunc (aget types/Types types/TUNSAFEPTR))
+
+          ^{:line 579} ix (ir/NewIndexExpr base/Pos a (ir/NewInt base/Pos 0))]
+        ^{:go/via [miniExpr]} (.SetBounded ix true)
+        (let [addr (typecheck/ConvNop (typecheck/NodAddr ix) (aget types/Types types/TUNSAFEPTR))]
+          (.Append (.-Body n) (ir/NewAssignStmt base/Pos hp addr))
+
+          ;; hn = len(a) * sizeof(elem(a))
+          (let [hn (typecheck/TempAt base/Pos ir/CurFunc (aget types/Types types/TUINTPTR))
+              ^{:line 586} mul (typecheck/Conv (ir/NewBinaryExpr base/Pos ir/OMUL ln (ir/NewInt base/Pos elemsize)) (aget types/Types types/TUINTPTR))]
+            (.Append (.-Body n) (ir/NewAssignStmt base/Pos hn mul))
+
+            (let [^ir/Node fn (zero ir/Node)]
+              (if (.HasPointers (.Elem (.Type a))) (do
+                  ;; memclrHasPointers(hp, hn)
+                  (.SetWBPos ir/CurFunc wbPos)
+                  (set! fn (mkcallstmt "memclrHasPointers" hp hn)))
+
+                ;; memclrNoHeapPointers(hp, hn)
+                (set! fn (mkcallstmt "memclrNoHeapPointers" hp hn)))
+
+
+              (.Append (.-Body n) fn)
+
+              ;; For array range clear, also set "i = len(a) - 1"
+              (when (!= nrange nil)
+                (let [idx (ir/NewAssignStmt base/Pos (.-Key nrange) (typecheck/Conv (ir/NewBinaryExpr base/Pos ir/OSUB ln (ir/NewInt base/Pos 1)) (.Type (.-Key nrange))))]
+                  (.Append (.-Body n) idx)))
+
+
+              (set! (.-Cond n) (typecheck/Expr (.-Cond n)))
+              (set! (.-Cond n) (typecheck/DefaultLit (.-Cond n) nil))
+              (typecheck/Stmts (.-Body n))
+              (walkStmt n))))))))

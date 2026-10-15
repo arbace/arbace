@@ -1,0 +1,135 @@
+;; Copyright 2017 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.cmd.compile.internal.dwarfgen) (go/file "scope.go" :imports [
+
+
+    ^{:line 8} [sort "sort"]
+
+    ^{:line 10} [base "cmd/compile/internal/base"]
+    ^{:line 11} [ir "cmd/compile/internal/ir"]
+    ^{:line 12} [dwarf "cmd/internal/dwarf"]
+    ^{:line 13} [obj "cmd/internal/obj"]
+    ^{:line 14} [src "cmd/internal/src"]])
+
+
+
+^{:go/end 20} (go/func xposBefore "See golang.org/issue/20390.\n" ^bool [^src/XPos p ^src/XPos q]
+  (.Before (.Pos (.-PosTable base/Ctxt) p) (.Pos (.-PosTable base/Ctxt) q)))
+
+
+^{:go/end 30} (go/func findScope ^ir/ScopeID [^{:tag (slice ir/Mark)} marks ^src/XPos pos]
+  (let [i (sort/Search (len marks) ^{:go/end 25} (fn ^bool [^int i]
+          (xposBefore pos (.-Pos (aget marks i)))))]
+
+    (when (== i 0)
+      (return 0))
+
+    (.-Scope (aget marks (- i 1)))))
+
+
+^{:go/end 44} (go/func assembleScopes ^{:tag (slice dwarf/Scope)} [^{:tag (* obj/LSym)} fnsym ^{:tag (* ir/Func)} fn ^{:tag (slice (* dwarf/Var))} dwarfVars ^{:tag (slice ir/ScopeID)} varScopes]
+  ;; Initialize the DWARF scope tree based on lexical scopes.
+  (let [dwarfScopes (make (slice dwarf/Scope) (+ 1 (len (.-Parents fn))))]
+    (range [i parent (.-Parents fn)]
+      (set! (.-Parent (aget dwarfScopes (+ i 1))) (conv int32 parent)))
+
+
+    (scopeVariables dwarfVars varScopes dwarfScopes (!= ^{:go/via [Attribute]} (.ABI fnsym) obj/ABI0))
+    (when (!= (.-Text (.Func fnsym)) nil)
+      (scopePCs fnsym (.-Marks fn) dwarfScopes))
+
+    (compactScopes dwarfScopes)))
+
+
+
+^{:go/end 65} (go/func scopeVariables "scopeVariables assigns DWARF variable records to their scopes.\n" [^{:tag (slice (* dwarf/Var))} dwarfVars ^{:tag (slice ir/ScopeID)} varScopes ^{:tag (slice dwarf/Scope)} dwarfScopes ^bool regabi]
+  (if regabi
+    (sort/Stable (lit varsByScope dwarfVars varScopes))
+
+    (sort/Stable (lit varsByScopeAndOffset dwarfVars varScopes)))
+
+
+  (let [i0 0]
+    (range [i dwarfVars]
+      (when (== (aget varScopes i) (aget varScopes i0))
+        (continue))
+
+      (set! (.-Vars (aget dwarfScopes (aget varScopes i0))) (subslice dwarfVars i0 i))
+      (set! i0 i))
+
+    (when (< i0 (len dwarfVars))
+      (set! (.-Vars (aget dwarfScopes (aget varScopes i0))) (subslice dwarfVars i0)))))
+
+
+
+
+^{:go/end 87} (go/func scopePCs "scopePCs assigns PC ranges to their scopes.\n" [^{:tag (* obj/LSym)} fnsym ^{:tag (slice ir/Mark)} marks ^{:tag (slice dwarf/Scope)} dwarfScopes]
+  ;; If there aren't any child scopes (in particular, when scope
+  ;; tracking is disabled), we can skip a whole lot of work.
+  (when (== (len marks) 0)
+    (return))
+
+  (let [p0 (.-Text (.Func fnsym))
+      ^{:line 75} scope (findScope marks (.-Pos p0))]
+    (for [p p0] (!= p nil) (set! p (.-Link p))
+      (when (== (.-Pos p) (.-Pos p0))
+        (continue))
+
+      (.AppendRange (aget dwarfScopes scope) (lit dwarf/Range :Start (.-Pc p0) :End (.-Pc p)))
+      (set! p0 p)
+      (set! scope (findScope marks (.-Pos p0))))
+
+    (when (< (.-Pc p0) (.-Size fnsym))
+      (.AppendRange (aget dwarfScopes scope) (lit dwarf/Range :Start (.-Pc p0) :End (.-Size fnsym))))))
+
+
+
+^{:go/end 97} (go/func compactScopes ^{:tag (slice dwarf/Scope)} [^{:tag (slice dwarf/Scope)} dwarfScopes]
+  ;; Reverse pass to propagate PC ranges to parent scopes.
+  (for [i (- (len dwarfScopes) 1)] (> i 0) (dec! i)
+    (let [s (addr (aget dwarfScopes i))]
+      (.UnifyRanges (aget dwarfScopes (.-Parent s)) s)))
+
+
+  ^{:line 96} dwarfScopes)
+
+
+(go/type varsByScopeAndOffset (struct
+    ^{:line 100 :tag (slice (* dwarf/Var))} vars
+    ^{:line 101 :tag (slice ir/ScopeID)} scopes))
+
+
+^{:go/end 106} (go/method Len ^int [^varsByScopeAndOffset v]
+  (len (.-vars v)))
+
+
+^{:go/end 113} (go/method Less ^bool [^varsByScopeAndOffset v ^int i ^int j]
+  (when (!= (aget (.-scopes v) i) (aget (.-scopes v) j))
+    (return (< (aget (.-scopes v) i) (aget (.-scopes v) j))))
+
+  (< (.-StackOffset (aget (.-vars v) i)) (.-StackOffset (aget (.-vars v) j))))
+
+
+^{:go/end 118} (go/method Swap [^varsByScopeAndOffset v ^int i ^int j]
+  (set! (values (aget (.-vars v) i) (aget (.-vars v) j)) (values (aget (.-vars v) j) (aget (.-vars v) i)))
+  (set! (values (aget (.-scopes v) i) (aget (.-scopes v) j)) (values (aget (.-scopes v) j) (aget (.-scopes v) i))))
+
+
+(go/type varsByScope (struct
+    ^{:line 121 :tag (slice (* dwarf/Var))} vars
+    ^{:line 122 :tag (slice ir/ScopeID)} scopes))
+
+
+^{:go/end 127} (go/method Len ^int [^varsByScope v]
+  (len (.-vars v)))
+
+
+^{:go/end 131} (go/method Less ^bool [^varsByScope v ^int i ^int j]
+  (< (aget (.-scopes v) i) (aget (.-scopes v) j)))
+
+
+^{:go/end 136} (go/method Swap [^varsByScope v ^int i ^int j]
+  (set! (values (aget (.-vars v) i) (aget (.-vars v) j)) (values (aget (.-vars v) j) (aget (.-vars v) i)))
+  (set! (values (aget (.-scopes v) i) (aget (.-scopes v) j)) (values (aget (.-scopes v) j) (aget (.-scopes v) i))))

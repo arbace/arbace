@@ -1,0 +1,1007 @@
+;; Copyright 2013 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; This file implements typechecking of call and selector expressions.
+
+(in-ns 'go.cmd.compile.internal.types2) (go/file "call.go" :imports [
+
+
+    ^{:line 10} [syntax "cmd/compile/internal/syntax"]
+    ^{:line 11} [. "internal/types/errors"]
+    ^{:line 12} [strings "strings"]])
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 129} (go/method funcInst "funcInst type-checks a function instantiation.\nThe incoming x must be a generic function.\nIf inst != nil, it provides some or all of the type arguments (inst.Index).\nIf target != nil, it may be used to infer missing type arguments of x, if any.\nAt least one of T or inst must be provided.\n\nThere are two modes of operation:\n\n 1. If infer == true, funcInst infers missing type arguments as needed and\n    instantiates the function x. The returned results are nil.\n\n 2. If infer == false and inst provides all type arguments, funcInst\n    instantiates the function x. The returned results are nil.\n    If inst doesn't provide enough type arguments, funcInst returns the\n    available arguments; x remains unchanged.\n\nIf an error (other than a version error) occurs in any case, it is reported\nand x.mode is set to invalid.\n" ^{:tag (slice Type)} [^{:tag (* Checker)} check ^{:tag (* target)} T ^syntax/Pos pos ^{:tag (* operand)} x ^{:tag (* syntax/IndexExpr)} inst ^bool infer]
+  (go/call assert (or (!= T nil) (!= inst nil)))
+
+  (let [^poser instErrPos (zero poser)]
+    (if (!= inst nil) (do
+        (set! instErrPos ^{:go/via [expr node]} (.Pos inst))
+        (set! (.-expr x) inst)) ; if we don't have an index expression, keep the existing expression of x
+
+      (set! instErrPos pos))
+
+    (let [versionErr (not (.verifyVersionf check instErrPos go1_18 "function instantiation"))
+
+        ;; targs and xlist are the type arguments and corresponding type expressions, or nil.
+        ^{:line 46 :tag (slice Type)} targs (zero (slice Type))
+        ^{:line 47 :tag (slice syntax/Expr)} xlist (zero (slice syntax/Expr))]
+      (when (!= inst nil)
+        (set! xlist (syntax/UnpackListExpr (.-Index inst)))
+        (set! targs (.typeList check xlist))
+        (when (== targs nil)
+          (.invalidate x)
+          (return nil))
+
+        (go/call assert (== (len targs) (len xlist))))
+
+
+      ;; Check the number of type arguments (got) vs number of type parameters (want).
+      ;; Note that x is a function value, not a type expression, so we don't need to
+      ;; call Underlying below.
+      ^{:go/breaks [8]} (let [sig (assert (* Signature) (.typ x))
+          (values got want) (values (len targs) (.Len (.TypeParams sig)))]
+        (when (> got want)
+          ;; Providing too many type arguments is always an error.
+          (.errorf check (aget xlist (- got 1)) WrongTypeArgCount "got %d type arguments but want %d" got want)
+          (.invalidate x)
+          (return nil))
+
+
+        (when (< got want)
+          (when (not infer)
+            (return targs))
+
+
+          ;; If the uninstantiated or partially instantiated function x is used in
+          ;; an assignment (tsig != nil), infer missing type arguments by treating
+          ;; the assignment
+          ;;
+          ;;    var tvar tsig = x
+          ;;
+          ;; like a call g(tvar) of the synthetic generic function g
+          ;;
+          ;;    func g[type_parameters_of_x](func_type_of_x)
+          ;;
+          (let [^{:tag (slice (* operand))} args (zero (slice (* operand)))
+              ^{:line 86 :tag (slice (* Var))} params (zero (slice (* Var)))
+              ^{:line 87 :tag bool} reverse (zero bool)]
+            (when (and (!= T nil) (!= (.-tparams sig) nil))
+              (when (and (not versionErr) (not (.allowVersion check go1_21)))
+                (if (!= inst nil)
+                  (.versionErrorf check instErrPos go1_21 "partially instantiated function in assignment")
+
+                  (.versionErrorf check instErrPos go1_21 "implicitly instantiated function in assignment")))
+
+
+              (let [gsig (NewSignatureType nil nil nil (.-params sig) (.-results sig) (.-variadic sig))]
+                (set! params (lit (slice (* Var)) (NewParam (.Pos x) (.-pkg check) "" gsig)))
+                ;; The type of the argument operand is tsig, which is the type of the LHS in an assignment
+                ;; or the result type in a return statement. Create a pseudo-expression for that operand
+                ;; that makes sense when reported in error messages from infer, below.
+                (let [expr (syntax/NewName (.Pos x) (.-desc T))]
+                  (set! args (lit (slice (* operand)) (lit _ :mode_ value :expr expr :typ_ (.-sig T))))
+                  (set! reverse true))))
+
+
+            ;; Rename type parameters to avoid problems with recursive instantiations.
+            ;; Note that NewTuple(params...) below is (*Tuple)(nil) if len(params) == 0, as desired.
+            (let [(values tparams params2) (.renameTParams check pos (.list (.TypeParams sig)) (NewTuple (spread params)))
+
+                ^{:line 110} err (.newError check CannotInferTypeArgs)]
+              (set! targs (.infer check pos tparams targs (assert (* Tuple) params2) args reverse err))
+              (when (== targs nil)
+                (when (not (.empty err))
+                  (.report err))
+
+                (.invalidate x)
+                (return nil))
+
+              (set! got (len targs)))))
+
+        (go/call assert (== got want))
+
+        ;; instantiate function signature
+        (set! sig (.instantiateSignature check (.Pos x) (.-expr x) sig targs xlist))
+
+        (set! (.-typ_ x) sig)
+        (set! (.-mode_ x) value)
+        nil))))
+
+
+^{:go/end 169} (go/method instantiateSignature [^{:tag (* Checker)} check ^syntax/Pos pos ^syntax/Expr expr ^{:tag (* Signature)} typ ^{:tag (slice Type)} targs ^{:tag (slice syntax/Expr)} xlist] :results [^{:tag (* Signature)} res]
+  (go/call assert (!= check nil))
+  (go/call assert (== (len targs) (.Len (.TypeParams typ))))
+
+  (when (.-Trace (.-conf check))
+    (.trace check pos "-- instantiating signature %s with %s" typ targs)
+    (inc! (.-indent check))
+    (defer (^{:go/end 141} (fn []
+          (dec! (.-indent check))
+          (.trace check pos "=> %s (under = %s)" res (.Underlying res))))))
+
+
+
+  ;; For signatures, Checker.instance will always succeed because the type argument
+  ;; count is correct at this point (see assertion above); hence the type assertion
+  ;; to *Signature will always succeed.
+  (let [inst (assert (* Signature) (.instance check pos typ targs nil (.context check)))]
+    (go/call assert (== (.Len (.TypeParams inst)) 0)) ; signature is not generic anymore
+    (.recordInstance check expr targs inst)
+    (go/call assert (<= (len xlist) (len targs)))
+
+    ;; verify instantiation lazily (was go.dev/issue/50450)
+    (.describef (.later check ^{:go/end 166} (fn []
+          (let [tparams (.list (.TypeParams typ))]
+            ;; check type constraints
+            (if [(values i err) (.verify check pos tparams targs (.context check))] (!= err nil)
+              ;; best position for error reporting
+              (let [pos pos]
+                (when (< i (len xlist))
+                  (set! pos (syntax/StartPos (aget xlist i))))
+
+                (.softErrorf check pos InvalidTypeArg "%s" err))
+
+              (.recordInstance (.-mono check) (.-pkg check) pos tparams targs xlist)))))
+
+      ^{:line 166} pos "verify instantiation")
+
+    ^{:line 168} inst))
+
+
+^{:go/end 349} (go/method callExpr ^exprKind [^{:tag (* Checker)} check ^{:tag (* operand)} x ^{:tag (* syntax/CallExpr)} call]
+  (let [^{:tag (* syntax/IndexExpr)} inst (zero (* syntax/IndexExpr))] ; function instantiation, if any
+    (if [(values iexpr _) (assert (* syntax/IndexExpr) (.-Fun call))] (!= iexpr nil) (do
+        (when (.indexExpr check x iexpr)
+          ;; Delay function instantiation to argument checking,
+          ;; where we combine type and value arguments for type
+          ;; inference.
+          (go/call assert (== (.mode x) value))
+          (set! inst iexpr))
+
+        (set! (.-expr x) iexpr)
+        (.record check x))
+
+      (.exprOrType check x (.-Fun call) true))
+
+    ;; x.typ may be generic
+
+    (switch (.mode x)
+      (case [invalid]
+        (.use check (spread (.-ArgList call)))
+        (set! (.-expr x) call)
+        (return statement))
+
+      (case [typexpr]
+        ;; conversion
+        (.nonGeneric check nil x)
+        (when (not (.isValid x))
+          (return conversion))
+
+        (let [T (.typ x)]
+          (.invalidate x)
+          ;; We cannot convert a value to an incomplete type; make sure it's complete.
+          (when (not (.isComplete check T))
+            (set! (.-expr x) call)
+            (return conversion))
+
+          (switch [n (len (.-ArgList call))] n
+            (case [0]
+              (.errorf check call WrongArgCount "missing argument in conversion to %s" T))
+            (case [1]
+              (.expr check (newTarget T "conversion") x (aget (.-ArgList call) 0))
+              (when (.isValid x)
+                (when [(values t _) (assert (* Interface) (.Underlying T))] (and (!= t nil) (not (isTypeParam T)))
+                  (when (not (.IsMethodSet t))
+                    (.errorf check call MisplacedConstraintIface "cannot use interface %s in conversion (contains specific type constraints or is comparable)" T)
+                    (break)))
+
+
+                (when (hasDots call)
+                  (.errorf check (aget (.-ArgList call) 0) BadDotDotDotSyntax "invalid use of ... in conversion to %s" T)
+                  (break))
+
+                (.conversion check x T)))
+
+            (default
+              (.use check (spread (.-ArgList call)))
+              (.errorf check (aget (.-ArgList call) (- n 1)) WrongArgCount "too many arguments in conversion to %s" T)))
+
+          (set! (.-expr x) call)
+          (return conversion)))
+
+      (case [builtin]
+        ;; no need to check for non-genericity here
+        (let [id (.-id x)]
+          (when (not (.builtin check x call id))
+            (.invalidate x))
+
+          (set! (.-expr x) call)
+          ;; a non-constant result implies a function call
+          (when (and (.isValid x) (!= (.mode x) constant_))
+            (set! ^{:go/via [environment]} (.-hasCallOrRecv check) true))
+
+          (return (.-kind (aget predeclaredFuncs id))))))
+
+
+    ;; ordinary function/method call
+    ;; signature may be generic
+    (let [cgocall (== (.mode x) cgofunc)
+
+        ;; If the operand type is a type parameter, all types in its type set
+        ;; must have a common underlying type, which must be a signature.
+        (values u err) (commonUnder (.typ x) ^{:go/breaks [[3 256]] :go/end 257} (fn ^{:tag (* typeError)} [^Type t ^Type u]
+            (when [(values _ ok) (assert (* Signature) u)] (and (!= u nil) (not ok))
+              (return (typeErrorf "%s is not a function" t)))
+
+            nil))]
+
+      (when (!= err nil)
+        (.errorf check x InvalidCall (+ invalidOp "cannot call %s: %s") x (.format err check))
+        (.invalidate x)
+        (set! (.-expr x) call)
+        (return statement))
+
+      (let [sig (assert (* Signature) u) ; u must be a signature per the commonUnder condition
+
+          ;; Capture wasGeneric before sig is potentially instantiated below.
+          ^{:line 267} wasGeneric (> (.Len (.TypeParams sig)) 0)
+
+          ;; evaluate type arguments, if any
+          ^{:line 270 :tag (slice syntax/Expr)} xlist (zero (slice syntax/Expr))
+          ^{:line 271 :tag (slice Type)} targs (zero (slice Type))]
+        (when (!= inst nil)
+          (set! xlist (syntax/UnpackListExpr (.-Index inst)))
+          (set! targs (.typeList check xlist))
+          (when (== targs nil)
+            (.use check (spread (.-ArgList call)))
+            (.invalidate x)
+            (set! (.-expr x) call)
+            (return statement))
+
+          (go/call assert (== (len targs) (len xlist)))
+
+          ;; check number of type arguments (got) vs number of type parameters (want)
+          (let [(values got want) (values (len targs) (.Len (.TypeParams sig)))]
+            (when (> got want)
+              (.errorf check (aget xlist want) WrongTypeArgCount "got %d type arguments but want %d" got want)
+              (.use check (spread (.-ArgList call)))
+              (.invalidate x)
+              (set! (.-expr x) call)
+              (return statement))
+
+
+            ;; If sig is generic and all type arguments are provided, preempt function
+            ;; argument type inference by explicitly instantiating the signature. This
+            ;; ensures that we record accurate type information for sig, even if there
+            ;; is an error checking its arguments (for example, if an incorrect number
+            ;; of arguments is supplied).
+            (when (and (== got want) (> want 0))
+              (.verifyVersionf check inst go1_18 "function instantiation")
+              (set! sig (.instantiateSignature check ^{:go/via [expr node]} (.Pos inst) inst sig targs xlist))
+              ;; targs have been consumed; proceed with checking arguments of the
+              ;; non-generic signature.
+              (set! targs nil)
+              (set! xlist nil))))
+
+
+
+        ;; evaluate arguments
+        (let [(values args atargs) (.genericExprList check (.-ArgList call))]
+          (set! sig (.arguments check call sig targs xlist args atargs))
+
+          (when (and wasGeneric (== (.Len (.TypeParams sig)) 0))
+            ;; update the recorded type of call.Fun to its instantiated type
+            (.recordTypeAndValue check (.-Fun call) value sig nil))
+
+
+          ;; determine result
+          (switch (.Len (.-results sig))
+            (case [0]
+              (set! (.-mode_ x) novalue))
+            (case [1]
+              (if cgocall
+                (set! (.-mode_ x) commaerr)
+
+                (set! (.-mode_ x) value))
+
+              (let [typ ^{:go/via [object]} (.-typ (aget (.-vars (.-results sig)) 0))] ; unpack tuple
+                ;; We cannot return a value of an incomplete type; make sure it's complete.
+                (when (not (.isComplete check typ))
+                  (.invalidate x)
+                  (set! (.-expr x) call)
+                  (return statement))
+
+                (set! (.-typ_ x) typ)))
+            (default
+              (set! (.-mode_ x) value)
+              (set! (.-typ_ x) (.-results sig))))
+
+          (set! (.-expr x) call)
+          (set! ^{:go/via [environment]} (.-hasCallOrRecv check) true)
+
+          ;; if type inference failed, a parameterized result must be invalidated
+          ;; (operands cannot have a parameterized type)
+          (when (and (== (.mode x) value) (> (.Len (.TypeParams sig)) 0) (isParameterized (.list (.TypeParams sig)) (.typ x)))
+            (.invalidate x))
+
+
+          ^{:line 348} statement)))))
+
+
+
+
+^{:go/end 366} (go/method exprList "exprList evaluates a list of expressions and returns the corresponding operands.\nA single-element expression list may evaluate to multiple operands.\n" [^{:tag (* Checker)} check ^{:tag (slice syntax/Expr)} elist] :results [^{:tag (slice (* operand))} xlist]
+  (if [n (len elist)] (== n 1)
+    (set! (values xlist _) (.multiExpr check (aget elist 0) false))
+    (when (> n 1)
+      ;; multiple (possibly invalid) values
+      (set! xlist (make (slice (* operand)) n))
+      (range [i e elist]
+        (let [^operand x (zero operand)]
+          (.expr check nil (addr x) e)
+          (aset xlist i (addr x))))))
+
+
+  (return))
+
+
+
+
+
+
+
+
+
+^{:go/end 459} (go/method genericExprList "genericExprList is like exprList but result operands may be uninstantiated or partially\ninstantiated generic functions (where constraint information is insufficient to infer\nthe missing type arguments) for Go 1.21 and later.\nFor each non-generic or uninstantiated generic operand, the corresponding targsList and\nelements do not exist (targsList is nil) or the elements are nil.\nFor each partially instantiated generic function operand, the corresponding\ntargsList elements are the operand's partial type arguments.\n" [^{:tag (* Checker)} check ^{:tag (slice syntax/Expr)} elist] :results [^{:tag (slice (* operand))} resList ^{:tag (slice (slice Type))} targsList]
+  (when debug
+    (defer (^{:go/end 387} (fn []
+          ;; type arguments must only exist for partially instantiated functions
+          (range [i x resList]
+            (when (< i (len targsList))
+              (when [n (len (aget targsList i))] (> n 0)
+                ;; x must be a partially instantiated function
+                (go/call assert (< n (.Len (.TypeParams (assert (* Signature) (.typ x)))))))))))))
+
+
+
+
+
+
+  ;; Before Go 1.21, uninstantiated or partially instantiated argument functions are
+  ;; not permitted. Checker.funcInst must infer missing type arguments in that case.
+  (let [infer true ; for -lang < go1.21
+      ^{:line 393} n (len elist)]
+    (when (and (> n 0) (.allowVersion check go1_21))
+      (set! infer false))
+
+
+    (cond (== n 1)
+      ;; single value (possibly a partially instantiated function), or a multi-valued expression
+      (let [e (aget elist 0)
+          ^{:line 401 :tag operand} x (zero operand)]
+        (if [(values inst _) (assert (* syntax/IndexExpr) e)] (and (!= inst nil) (.indexExpr check (addr x) inst))
+          ;; x is a generic function.
+          (let [targs (.funcInst check nil (.Pos x) (addr x) inst infer)]
+            (if (!= targs nil) (do
+                ;; x was not instantiated: collect the (partial) type arguments.
+                (set! targsList (lit (slice (slice Type)) targs))
+                ;; Update x.expr so that we can record the partially instantiated function.
+                (set! (.-expr x) inst))
+
+              ;; x was instantiated: we must record it here because we didn't
+              ;; use the usual expression evaluators.
+              (.record check (addr x)))
+
+            (set! resList (lit (slice (* operand)) (addr x))))
+          (do
+            ;; x is not a function instantiation (it may still be a generic function).
+            (.rawExpr check nil (addr x) e nil true)
+            (.exclude check (addr x) (bit-or (<< 1 novalue) (<< 1 builtin) (<< 1 typexpr)))
+            (if [(values t ok) (assert (* Tuple) (.typ x))] (and ok (.isValid x)) (do
+                ;; x is a function call returning multiple values; it cannot be generic.
+                (set! resList (make (slice (* operand)) (.Len t)))
+                (range [i v (.-vars t)]
+                  (aset resList i (addr (lit operand :mode_ value :expr e :typ_ ^{:go/via [object]} (.-typ v))))))
+
+
+              ;; x is exactly one value (possibly invalid or uninstantiated generic function).
+              (set! resList (lit (slice (* operand)) (addr x)))))))
+
+
+      (> n 1) (do
+        ;; multiple values
+        (set! resList (make (slice (* operand)) n))
+        (set! targsList (make (slice (slice Type)) n))
+        (range [i e elist]
+          (let [^operand x (zero operand)]
+            (if [(values inst _) (assert (* syntax/IndexExpr) e)] (and (!= inst nil) (.indexExpr check (addr x) inst))
+              ;; x is a generic function.
+              (let [targs (.funcInst check nil (.Pos x) (addr x) inst infer)]
+                (if (!= targs nil) (do
+                    ;; x was not instantiated: collect the (partial) type arguments.
+                    (aset targsList i targs)
+                    ;; Update x.expr so that we can record the partially instantiated function.
+                    (set! (.-expr x) inst))
+
+                  ;; x was instantiated: we must record it here because we didn't
+                  ;; use the usual expression evaluators.
+                  (.record check (addr x))))
+
+
+              ;; x is exactly one value (possibly invalid or uninstantiated generic function).
+              (.genericExpr check (addr x) e nil))
+
+            (aset resList i (addr x))))))
+
+
+
+    (return)))
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 671} (go/method arguments "arguments type-checks arguments passed to a function call with the given signature.\nThe function and its arguments may be generic, and possibly partially instantiated.\ntargs and xlist are the function's type arguments (and corresponding expressions).\nargs are the function arguments. If an argument args[i] is a partially instantiated\ngeneric function, atargs[i] are the corresponding type arguments.\nIf the callee is variadic, arguments adjusts its signature to match the provided\narguments. The type parameters and arguments of the callee and all its arguments\nare used together to infer any missing type arguments, and the callee and argument\nfunctions are instantiated as necessary.\nThe result signature is the (possibly adjusted and instantiated) function signature.\nIf an error occurred, the result signature is the incoming sig.\n" [^{:tag (* Checker)} check ^{:tag (* syntax/CallExpr)} call ^{:tag (* Signature)} sig ^{:tag (slice Type)} targs ^{:tag (slice syntax/Expr)} xlist ^{:tag (slice (* operand))} args ^{:tag (slice (slice Type))} atargs] :results [^{:tag (* Signature)} rsig]
+  (set! rsig sig)
+
+  ;; Function call argument/parameter count requirements
+  ;;
+  ;;               | standard call    | dotdotdot call |
+  ;; --------------+------------------+----------------+
+  ;; standard func | nargs == npars   | invalid        |
+  ;; --------------+------------------+----------------+
+  ;; variadic func | nargs >= npars-1 | nargs == npars |
+  ;; --------------+------------------+----------------+
+
+  (let [nargs (len args)
+      ^{:line 485} npars (.Len (.-params sig))
+      ^{:line 486} ddd (hasDots call)
+
+      ;; set up parameters
+      ^{:line 489} sigParams (.-params sig) ; adjusted for variadic functions (may be nil for empty parameter lists!)
+      ^{:line 490} adjusted false] ; indicates if sigParams is different from sig.params
+    (if (.-variadic sig)
+      (if ddd
+        ;; variadic_func(a, b, c...)
+        (when (and (== (len (.-ArgList call)) 1) (> nargs 1))
+          ;; f()... is not permitted if f() is multi-valued
+          ;;check.errorf(call.Ellipsis, "cannot use ... with %d-valued %s", nargs, call.ArgList[0])
+          (.errorf check call InvalidDotDotDot "cannot use ... with %d-valued %s" nargs (aget (.-ArgList call) 0))
+          (return))
+
+        (do
+          ;; variadic_func(a, b, c)
+          (if (>= nargs (- npars 1))
+            ;; Create custom parameters for arguments: keep
+            ;; the first npars-1 parameters and add one for
+            ;; each argument mapping to the ... parameter.
+            (let [vars (make (slice (* Var)) (- npars 1))] ; npars > 0 for variadic functions
+              (copy vars (.-vars (.-params sig)))
+              (let [last (aget (.-vars (.-params sig)) (- npars 1))
+                  ^{:line 509} typ (.-elem (assert (* Slice) ^{:go/via [object]} (.-typ last)))]
+                (while (< (len vars) nargs)
+                  (set! vars (append vars (NewParam ^{:go/via [object]} (.-pos last) ^{:go/via [object]} (.-pkg last) ^{:go/via [object]} (.-name last) typ))))
+
+                (set! sigParams (NewTuple (spread vars))) ; possibly nil!
+                (set! adjusted true)
+                (set! npars nargs)))
+
+            ;; nargs < npars-1
+            (dec! npars)))) ; for correct error message below
+
+
+      (do
+        (when ddd
+          ;; standard_func(a, b, c...)
+          ;;check.errorf(call.Ellipsis, "cannot use ... in call to non-variadic %s", call.Fun)
+          (.errorf check call NonVariadicDotDotDot "cannot use ... in call to non-variadic %s" (.-Fun call))
+          (return))))
+
+    ;; standard_func(a, b, c)
+
+
+    ;; check argument count
+    (when (!= nargs npars)
+      (let [^poser at call
+          ^{:line 534} qualifier "not enough"]
+        (cond (> nargs npars) (do
+            (set! at (.-expr (aget args npars))) ; report at first extra argument
+            (set! qualifier "too many"))
+          (> nargs 0)
+          (set! at (.-expr (aget args (- nargs 1))))) ; report at last argument
+
+        ;; take care of empty parameter lists represented by nil tuples
+        (let [^{:tag (slice (* Var))} params (zero (slice (* Var)))]
+          (when (!= (.-params sig) nil)
+            (set! params (.-vars (.-params sig))))
+
+          (let [err (.newError check WrongArgCount)]
+            (.addf err at "%s arguments in call to %s" qualifier (.-Fun call))
+            (.addf err nopos "have %s" (.typesSummary check (operandTypes args) false ddd))
+            (.addf err nopos "want %s" (.typesSummary check (varTypes params) (.-variadic sig) false))
+            (.report err)
+            (return)))))
+
+
+    ;; collect type parameters of callee and generic function arguments
+    (let [^{:tag (slice (* TypeParam))} tparams (zero (slice (* TypeParam)))
+
+        ;; collect type parameters of callee
+        ^{:line 558} n (.Len (.TypeParams sig))]
+      (when (> n 0)
+        (when (not (.allowVersion check go1_18))
+          (if [(values iexpr _) (assert (* syntax/IndexExpr) (.-Fun call))] (!= iexpr nil)
+            (.versionErrorf check iexpr go1_18 "function instantiation")
+
+            (.versionErrorf check call go1_18 "implicit function instantiation")))
+
+
+        ;; rename type parameters to avoid problems with recursive calls
+        (let [^Type tmp (zero Type)]
+          (set! (values tparams tmp) (.renameTParams check ^{:go/via [expr node]} (.Pos call) (.list (.TypeParams sig)) sigParams))
+          (set! sigParams (assert (* Tuple) tmp))
+          ;; make sure targs and tparams have the same length
+          (while (< (len targs) (len tparams))
+            (set! targs (append targs nil)))))
+
+
+      (go/call assert (== (len tparams) (len targs)))
+
+      ;; collect type parameters from generic function arguments
+      (let [^{:tag (slice int)} genericArgs (zero (slice int))] ; indices of generic function arguments
+        (when enableReverseTypeInference
+          (range [i arg args]
+            ;; generic arguments cannot have a defined (*Named) type - no need for underlying type below
+            (when [(values asig _) (assert (* Signature) (.typ arg))] (and (!= asig nil) (> (.Len (.TypeParams asig)) 0))
+              ;; The argument type is a generic function signature. This type is
+              ;; pointer-identical with (it's copied from) the type of the generic
+              ;; function argument and thus the function object.
+              ;; Before we change the type (type parameter renaming, below), make
+              ;; a clone of it as otherwise we implicitly modify the object's type
+              ;; (go.dev/issues/63260).
+              (set! asig (^{:inst [(* Signature) Signature]} clone asig))
+              ;; Rename type parameters for cases like f(g, g); this gives each
+              ;; generic function argument a unique type identity (go.dev/issues/59956).
+              ;; TODO(gri) Consider only doing this if a function argument appears
+              ;;           multiple times, which is rare (possible optimization).
+              (let [(values atparams tmp) (.renameTParams check ^{:go/via [expr node]} (.Pos call) (.list (.TypeParams asig)) asig)]
+                (set! asig (assert (* Signature) tmp))
+                (set! (.-tparams asig) (addr (lit TypeParamList atparams))) ; renameTParams doesn't touch associated type parameters
+                (set! (.-typ_ arg) asig) ; new type identity for the function argument
+                (set! tparams (append tparams (spread atparams)))
+                ;; add partial list of type arguments, if any
+                (when (< i (len atargs))
+                  (set! targs (append targs (spread (aget atargs i)))))
+
+                ;; make sure targs and tparams have the same length
+                (while (< (len targs) (len tparams))
+                  (set! targs (append targs nil)))
+
+                (set! genericArgs (append genericArgs i))))))
+
+
+
+        (go/call assert (== (len tparams) (len targs)))
+
+        ;; at the moment we only support implicit instantiations of argument functions
+        (set! _ (and (> (len genericArgs) 0) (.verifyVersionf check (aget args (aget genericArgs 0)) go1_21 "implicitly instantiated function as argument")))
+
+        ;; tparams holds the type parameters of the callee and generic function arguments, if any:
+        ;; the first n type parameters belong to the callee, followed by mi type parameters for each
+        ;; of the generic function arguments, where mi = args[i].typ.(*Signature).TypeParams().Len().
+
+        ;; infer missing type arguments of callee and function arguments
+        (when (> (len tparams) 0)
+          (let [err (.newError check CannotInferTypeArgs)]
+            (set! targs (.infer check ^{:go/via [expr node]} (.Pos call) tparams targs sigParams args false err))
+            (when (== targs nil)
+              ;; TODO(gri) If infer inferred the first targs[:n], consider instantiating
+              ;;           the call signature for better error messages/gopls behavior.
+              ;;           Perhaps instantiate as much as we can, also for arguments.
+              ;;           This will require changes to how infer returns its results.
+              (when (not (.empty err))
+                (.errorf check (.pos err) CannotInferTypeArgs "in call to %s, %s" (.-Fun call) (.msg err)))
+
+              (return))
+
+
+            ;; update result signature: instantiate if needed
+            (when (> n 0)
+              (set! rsig (.instantiateSignature check ^{:go/via [expr node]} (.Pos call) (.-Fun call) sig (subslice targs _ n) xlist))
+              ;; If the callee's parameter list was adjusted we need to update (instantiate)
+              ;; it separately. Otherwise we can simply use the result signature's parameter
+              ;; list.
+              (if adjusted
+                (set! sigParams (assert (* Tuple) (.subst check ^{:go/via [expr node]} (.Pos call) sigParams (makeSubstMap (subslice tparams _ n) (subslice targs _ n)) nil (.context check))))
+
+                (set! sigParams (.-params rsig))))
+
+
+
+            ;; compute argument signatures: instantiate if needed
+            (let [j n]
+              (range [_ i genericArgs]
+                (let [arg (aget args i)
+                    ^{:line 653} asig (assert (* Signature) (.typ arg))
+                    ^{:line 654} k (+ j (.Len (.TypeParams asig)))]
+                  ;; targs[j:k] are the inferred type arguments for asig
+                  (set! (.-typ_ arg) (.instantiateSignature check ^{:go/via [expr node]} (.Pos call) (.-expr arg) asig (subslice targs j k) nil)) ; TODO(gri) provide xlist if possible (partial instantiations)
+                  (.record check arg) ; record here because we didn't use the usual expr evaluators
+                  (set! j k))))))
+
+
+
+        ;; check arguments
+        (when (> (len args) 0)
+          (let [context (.sprintf check "argument to %s" (.-Fun call))]
+            (range [i a args]
+              (.assignment check a ^{:go/via [object]} (.-typ (aget (.-vars sigParams) i)) context))))
+
+
+
+        (return)))))
+
+
+(go/var cgoPrefixes ^{:go/breaks [2 3 4 5 6 7 8 9]} (lit (array ... string)
+    "_Ciconst_"
+    "_Cfconst_"
+    "_Csconst_"
+    "_Ctype_"
+    "_Cvar_" ; actually a pointer to the var
+    "_Cfpvar_fp_"
+    "_Cfunc_"
+    "_Cmacro_")) ; function to evaluate the expanded expression
+
+
+^{:go/end 947} (go/method selector [^{:tag (* Checker)} check ^{:tag (* operand)} x ^{:tag (* syntax/SelectorExpr)} e ^bool wantType]
+  ;; these must be declared before the "goto Error" statements
+  (let [
+      ^{:line 687 :tag Object} obj (zero Object)
+      ^{:line 688 :tag (slice int)} index (zero (slice int))
+      ^{:line 689 :tag bool} indirect (zero bool)
+
+
+      ^{:line 692} sel (.-Value (.-Sel e))]
+    ;; If the identifier refers to a package, handle everything here
+    ;; so we don't need a "package" mode for operands: package names
+    ;; can only appear in qualified identifiers which are mapped to
+    ;; selector expressions.
+    (when [(values ident ok) (assert (* syntax/Name) (.-X e))] ok
+      (let [obj ^{:go/via [environment]} (.lookup check (.-Value ident))]
+        (when [(values pname _) (assert (* PkgName) obj)] (!= pname nil)
+          (go/call assert (== ^{:go/via [object]} (.-pkg pname) (.-pkg check)))
+          (.recordUse check ident pname)
+          (aset (.-usedPkgNames check) pname true)
+          (let [pkg (.-imported pname)
+
+              ^{:line 705 :tag Object} exp (zero Object)
+              ^{:line 706} funcMode value]
+            (if (.-cgo pkg) (do
+                ;; cgo special cases C.malloc: it's
+                ;; rewritten to _CMalloc and does not
+                ;; support two-result calls.
+                (if (== sel "malloc")
+                  (set! sel "_CMalloc")
+
+                  (set! funcMode cgofunc))
+
+                (range [_ prefix cgoPrefixes]
+                  ;; cgo objects are part of the current package (in file
+                  ;; _cgo_gotypes.go). Use regular lookup.
+                  (set! exp ^{:go/via [environment]} (.lookup check (+ prefix sel)))
+                  (when (!= exp nil)
+                    (break)))
+
+
+                (when (== exp nil)
+                  (when (isValidName sel)
+                    (.errorf check (.-Sel e) UndeclaredImportedName "undefined: %s" (conv syntax/Expr e))) ; cast to syntax.Expr to silence vet
+
+                  (goto :Error))
+
+                (.objDecl check exp))
+              (do
+                (set! exp (.Lookup (.-scope pkg) sel))
+                (when (== exp nil)
+                  (when (and (not (.-fake pkg)) (isValidName sel))
+                    ;; Try to give a better error message when selector matches an object name ignoring case.
+                    (let [exps (.lookupIgnoringCase (.-scope pkg) sel true)]
+                      (if (>= (len exps) 1)
+                        ;; report just the first one
+                        (.errorf check (.-Sel e) UndeclaredImportedName "undefined: %s (but have %s)" (conv syntax/Expr e) (.Name (aget exps 0)))
+
+                        (.errorf check (.-Sel e) UndeclaredImportedName "undefined: %s" (conv syntax/Expr e)))))
+
+
+                  (goto :Error))
+
+                (when (not (.Exported exp))
+                  (.errorf check (.-Sel e) UnexportedName "name %s not exported by package %s" sel (.-name pkg)))))
+            ;; ok to continue
+
+
+            (.recordUse check (.-Sel e) exp)
+
+            ;; Simplified version of the code for *syntax.Names:
+            ;; - imported objects are always fully initialized
+            (type-switch [exp exp]
+              (case [(* Const)]
+                (go/call assert (!= (.Val exp) nil))
+                (set! (.-mode_ x) constant_)
+                (set! (.-typ_ x) ^{:go/via [object]} (.-typ exp))
+                (set! (.-val x) (.-val exp)))
+              (case [(* TypeName)]
+                (set! (.-mode_ x) typexpr)
+                (set! (.-typ_ x) ^{:go/via [object]} (.-typ exp)))
+              (case [(* Var)]
+                (set! (.-mode_ x) variable)
+                (set! (.-typ_ x) ^{:go/via [object]} (.-typ exp))
+                (when (and (.-cgo pkg) (strings/HasPrefix ^{:go/via [object]} (.-name exp) "_Cvar_"))
+                  (set! (.-typ_ x) (.-base (assert (* Pointer) (.typ x))))))
+
+              (case [(* Func)]
+                (set! (.-mode_ x) funcMode)
+                (set! (.-typ_ x) ^{:go/via [object]} (.-typ exp))
+                (when (and (.-cgo pkg) (strings/HasPrefix ^{:go/via [object]} (.-name exp) "_Cmacro_"))
+                  (set! (.-mode_ x) value)
+                  (set! (.-typ_ x) ^{:go/via [object]} (.-typ (aget (.-vars (.-results (assert (* Signature) (.typ x)))) 0)))))
+
+              (case [(* Builtin)]
+                (set! (.-mode_ x) builtin)
+                (set! (.-typ_ x) ^{:go/via [object]} (.-typ exp))
+                (set! (.-id x) (.-id exp)))
+              (default
+                (.dump check "%v: unexpected object %v" (atPos (.-Sel e)) exp)
+                (panic "unreachable")))
+
+            (set! (.-expr x) e)
+            (return)))))
+
+
+
+    (.exprOrType check x (.-X e) false)
+    (switch (.mode x)
+      (case [builtin]
+        (.errorf check ^{:go/via [expr node]} (.Pos e) UncalledBuiltin "invalid use of %s in selector expression" x)
+        (goto :Error))
+      (case [invalid]
+        (goto :Error)))
+
+
+    ;; We cannot select on an incomplete type; make sure it's complete.
+    (when (not (.isComplete check (.typ x)))
+      (goto :Error))
+
+
+    ;; Avoid crashing when checking an invalid selector in a method declaration.
+    ;;
+    ;;   type S[T any] struct{}
+    ;;   type V = S[any]
+    ;;   func (fs *S[T]) M(x V.M) {}
+    ;;
+    ;; All codepaths below return a non-type expression. If we get here while
+    ;; expecting a type expression, it is an error.
+    ;;
+    ;; See go.dev/issue/57522 for more details.
+    (when wantType
+      (.errorf check (.-Sel e) NotAType "%s is not a type" (conv syntax/Expr e))
+      (goto :Error))
+
+
+    ;; Additionally, if x.typ is a pointer type, selecting implicitly dereferences the value, meaning
+    ;; its base type must also be complete.
+    (when [(values p ok) (assert (* Pointer) (.Underlying (.typ x)))] (and ok (not (.isComplete check (.-base p))))
+      (goto :Error))
+
+
+    (set! (values obj index indirect) (lookupFieldOrMethod (.typ x) (== (.mode x) variable) (.-pkg check) sel false))
+    (when (== obj nil)
+      ;; Don't report another error if the underlying type was invalid (go.dev/issue/49541).
+      (when (not (isValid (.Underlying (.typ x))))
+        (goto :Error))
+
+
+      (when (!= index nil)
+        ;; TODO(gri) should provide actual type where the conflict happens
+        (.errorf check (.-Sel e) AmbiguousSelector "ambiguous selector %s.%s" (.-expr x) sel)
+        (goto :Error))
+
+
+      (when indirect
+        (if (== (.mode x) typexpr)
+          (.errorf check (.-Sel e) InvalidMethodExpr "invalid method expression %s.%s (needs pointer receiver (*%s).%s)" (.typ x) sel (.typ x) sel)
+
+          (.errorf check (.-Sel e) InvalidMethodExpr "cannot call pointer method %s on %s" sel (.typ x)))
+
+        (goto :Error))
+
+
+      (let [^string why (zero string)]
+        (if (isInterfacePtr (.typ x))
+          (set! why (.interfacePtrError check (.typ x)))
+
+          (let [(values alt _ _) (lookupFieldOrMethod (.typ x) (== (.mode x) variable) (.-pkg check) sel true)]
+            (set! why (.lookupError check (.typ x) sel alt false))))
+
+        (.errorf check (.-Sel e) MissingFieldOrMethod "%s.%s undefined (%s)" (.-expr x) sel why)
+        (goto :Error)))
+
+    ;; obj != nil
+
+    (type-switch [obj obj]
+      (case [(* Var)]
+        (when (== (.mode x) typexpr)
+          (.errorf check (.-X e) MissingFieldOrMethod "operand for field selector %s must be value of type %s" sel (.typ x))
+          (goto :Error))
+
+
+        ;; field value
+        (.recordSelection check e FieldVal (.typ x) obj index indirect)
+        (if (or (== (.mode x) variable) indirect)
+          (set! (.-mode_ x) variable)
+
+          (set! (.-mode_ x) value))
+
+        (set! (.-typ_ x) ^{:go/via [object]} (.-typ obj)))
+
+      (case [(* Func)]
+        (.objDecl check obj) ; ensure fully set-up signature
+        (.addDeclDep check obj)
+        ;; TODO(mark): Assert that sig.rparams is nil here?
+
+        (if (== (.mode x) typexpr) (do
+            ;; method expression
+            (.recordSelection check e MethodExpr (.typ x) obj index indirect)
+
+            (let [sig (assert (* Signature) ^{:go/via [object]} (.-typ obj))]
+              (when (== (.-recv sig) nil)
+                (.error check e InvalidDeclCycle "illegal cycle in method declaration")
+                (goto :Error))
+
+
+              ;; The receiver type becomes the type of the first function
+              ;; argument of the method expression's function type.
+              (let [^{:tag (slice (* Var))} params (zero (slice (* Var)))]
+                (when (!= (.-params sig) nil)
+                  (set! params (.-vars (.-params sig))))
+
+                ;; Be consistent about named/unnamed parameters. This is not needed
+                ;; for type-checking, but the newly constructed signature may appear
+                ;; in an error message and then have mixed named/unnamed parameters.
+                ;; (An alternative would be to not print parameter names in errors,
+                ;; but it's useful to see them; this is cheap and method expressions
+                ;; are rare.)
+                (let [name ""]
+                  (when (and (> (len params) 0) (!= ^{:go/via [object]} (.-name (aget params 0)) ""))
+                    ;; name needed
+                    (set! name ^{:go/via [object]} (.-name (.-recv sig)))
+                    (when (== name "")
+                      (set! name "_")))
+
+
+                  (set! params (append (lit (slice (* Var)) (NewParam ^{:go/via [object]} (.-pos (.-recv sig)) ^{:go/via [object]} (.-pkg (.-recv sig)) name (.typ x))) (spread params)))
+                  (set! (.-mode_ x) value)
+                  (set! (.-typ_ x) (addr ^{:go/breaks [2 4 6 8 10]} (lit Signature
+                        :tparams (.-tparams sig)
+                        :recvold methodExprSentinel
+                        :params (NewTuple (spread params))
+                        :results (.-results sig)
+                        :variadic (.-variadic sig))))))))
+
+          (do
+            ;; method value
+
+            ;; TODO(gri) If we needed to take into account the receiver's
+            ;; addressability, should we report the type &(x.typ) instead?
+            (.recordSelection check e MethodVal (.typ x) obj index indirect)
+
+            (set! (.-mode_ x) value)
+
+            ;; remove/stash receiver
+            (let [sig @(assert (* Signature) ^{:go/via [object]} (.-typ obj))]
+              (set! (.-recvold sig) (.-recv sig))
+              (set! (.-recv sig) nil)
+              (set! (.-typ_ x) (addr sig))))))
+
+
+      (default
+        (panic "unreachable")))
+
+
+    ;; everything went well
+    (set! (.-expr x) e)
+    (return)
+
+    (label :Error
+      (.invalidate x))
+    (set! (.-typ_ x) (aget Typ Invalid))
+    (set! (.-expr x) e)))
+
+
+
+
+
+
+
+^{:go/end 954} (go/method use "use type-checks each argument.\nUseful to make sure expressions are evaluated\n(and variables are \"used\") in the presence of\nother errors. Arguments may be nil.\nReports if all arguments evaluated without error.\n" ^bool [^{:tag (* Checker)} check & ^{:tag (slice syntax/Expr)} args] (.useN check args false))
+
+
+
+
+^{:go/end 959} (go/method useLHS "useLHS is like use, but doesn't \"use\" top-level identifiers.\nIt should be called instead of use if the arguments are\nexpressions on the lhs of an assignment.\n" ^bool [^{:tag (* Checker)} check & ^{:tag (slice syntax/Expr)} args] (.useN check args true))
+
+^{:go/end 969} (go/method useN ^bool [^{:tag (* Checker)} check ^{:tag (slice syntax/Expr)} args ^bool lhs]
+  (let [ok true]
+    (range [_ e args]
+      (when (not (.use1 check e lhs))
+        (set! ok false)))
+
+
+    ^{:line 968} ok))
+
+
+^{:go/end 1008} (go/method use1 ^bool [^{:tag (* Checker)} check ^syntax/Expr e ^bool lhs]
+  (let [^operand x (zero operand)]
+    (set! (.-mode_ x) value) ; anything but invalid
+    (type-switch [n (syntax/Unparen e)]
+      (case [nil])
+      ;; nothing to do
+      (case [(* syntax/Name)]
+        ;; don't report an error evaluating blank
+        (when (== (.-Value n) "_")
+          (break))
+
+        ;; If the lhs is an identifier denoting a variable v, this assignment
+        ;; is not a 'use' of v. Remember current value of v.used and restore
+        ;; after evaluating the lhs via check.rawExpr.
+        (let [^{:tag (* Var)} v (zero (* Var))
+            ^{:line 986 :tag bool} v_used (zero bool)]
+          (when lhs
+            (when [obj ^{:go/via [environment]} (.lookup check (.-Value n))] (!= obj nil)
+              ;; It's ok to mark non-local variables, but ignore variables
+              ;; from other packages to avoid potential race conditions with
+              ;; dot-imported variables.
+              (when [(values w _) (assert (* Var) obj)] (and (!= w nil) (== ^{:go/via [object]} (.-pkg w) (.-pkg check)))
+                (set! v w)
+                (set! v_used (aget (.-usedVars check) v)))))
+
+
+
+          (.exprOrType check (addr x) n true)
+          (when (!= v nil)
+            (aset (.-usedVars check) v v_used)))) ; restore v.used
+
+      (case [(* syntax/ListExpr)]
+        (return (.useN check (.-ElemList n) lhs)))
+      (default
+        (.rawExpr check nil (addr x) e nil true)))
+
+    (.isValid x)))

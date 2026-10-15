@@ -1,0 +1,461 @@
+;; Copyright 2015 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.cmd.internal.objabi) (go/file "flag.go" :imports [
+
+
+    ^{:line 8} [flag "flag"]
+    ^{:line 9} [fmt "fmt"]
+    ^{:line 10} [bisect "internal/bisect"]
+    ^{:line 11} [buildcfg "internal/buildcfg"]
+    ^{:line 12} [io "io"]
+    ^{:line 13} [log "log"]
+    ^{:line 14} [os "os"]
+    ^{:line 15} [reflect "reflect"]
+    ^{:line 16} [sort "sort"]
+    ^{:line 17} [strconv "strconv"]
+    ^{:line 18} [strings "strings"]])
+
+
+^{:go/end 23} (go/func Flagcount [^string name ^string usage ^{:tag (* int)} val]
+  (flag/Var (conv (* count) val) name usage))
+
+
+^{:go/end 27} (go/func Flagfn1 [^string name ^string usage ^{:tag (func [string])} f]
+  (flag/Var (conv fn1 f) name usage))
+
+
+^{:go/end 32} (go/func Flagprint [^io/Writer w]
+  (.SetOutput flag/CommandLine w)
+  (flag/PrintDefaults))
+
+
+^{:go/end 38} (go/func Flagparse [^{:tag (func [])} usage]
+  (set! flag/Usage usage)
+  (set! os/Args (expandArgs os/Args))
+  (flag/Parse))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 75} (go/func expandArgs "expandArgs expands \"response files\" arguments in the provided slice.\n\nA \"response file\" argument starts with '@' and the rest of that\nargument is a filename with arguments. Arguments are separated by\nwhitespace, and can use single quotes (literal) or double quotes\n(with escape sequences). Each argument in the named files can also\ncontain response file arguments. See Issue 77177.\n\nThe returned slice 'out' aliases 'in' if the input did not contain\nany response file arguments.\n\nTODO: handle relative paths of recursive expansions in different directories?\nIs there a spec for this? Are relative paths allowed?\n" [^{:tag (slice string)} in] :results [^{:tag (slice string)} out]
+  ;; out is nil until we see a "@" argument.
+  (range [i s in]
+    (cond (strings/HasPrefix s "@") (do
+        (when (== out nil)
+          (set! out (make (slice string) 0 (* (len in) 2)))
+          (set! out (append out (spread (subslice in _ i)))))
+
+        (let [(values slurp err) (os/ReadFile (subslice s 1))]
+          (when (!= err nil)
+            (log/Fatal err))
+
+          (let [args (ParseArgs slurp)]
+            (set! out (append out (spread (expandArgs args)))))))
+      (!= out nil)
+      (set! out (append out s))))
+
+
+  (when (== out nil)
+    (return in))
+
+  (return))
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 199} (go/func ParseArgs "ParseArgs parses response file content into arguments using GCC-compatible rules.\nArguments are separated by whitespace. Single quotes preserve content literally.\nDouble quotes allow escape sequences: \\\\, \\\", \\$, \\`, and backslash-newline\nfor line continuation (both LF and CRLF). Outside quotes, backslash escapes the\nnext character, backslash-newline is line continuation (both LF and CRLF).\nWe aim to follow GCC's buildargv implementation.\nSource code: https://github.com/gcc-mirror/gcc/blob/releases/gcc-15.2.0/libiberty/argv.c#L167\nKnown deviations from GCC:\n- CRLF is treated as line continuation to be Windows-friendly; GCC only recognizes LF.\n- Obsolete \\f and \\v are not treated as whitespaces\nThis function is public to test with cmd/go/internal/work.encodeArg\n" ^{:tag (slice string)} [^{:tag (slice byte)} s]
+  (let [^{:tag (slice string)} args (zero (slice string))
+      ^{:line 90 :tag strings/Builder} arg (zero strings/Builder)
+      ^{:line 91} hasArg false ; tracks if we've started an argument (for empty quotes)
+      ^{:line 92} inSingleQuote false
+      ^{:line 93} inDoubleQuote false
+      ^{:line 94} i 0]
+
+    (while (< i (len s))
+      (let [c (aget s i)]
+
+        (when inSingleQuote
+          (if (== c \')
+            (set! inSingleQuote false)
+
+            (.WriteByte arg c)) ; No escape processing in single quotes
+
+          (inc! i)
+          (continue))
+
+
+        (when inDoubleQuote
+          (cond (and (== c \\) (< (+ i 1) (len s)))
+            (let [next (aget s (+ i 1))]
+              (switch next
+                (case [\\]
+                  (.WriteByte arg \\)
+                  (set! i + 2))
+                (case [\"]
+                  (.WriteByte arg \")
+                  (set! i + 2))
+                (case [\$]
+                  (.WriteByte arg \$)
+                  (set! i + 2))
+                (case [\`]
+                  (.WriteByte arg \`)
+                  (set! i + 2))
+                (case [\newline]
+                  ;; Line continuation - skip backslash and newline
+                  (set! i + 2))
+                (case [\return]
+                  ;; Line continuation for CRLF - skip backslash, CR, and LF
+                  (if (and (< (+ i 2) (len s)) (== (aget s (+ i 2)) \newline))
+                    (set! i + 3)
+                    (do
+                      (.WriteByte arg c)
+                      (inc! i))))
+
+                (default
+                  ;; Unknown escape - keep backslash and char
+                  (.WriteByte arg c)
+                  (inc! i))))
+
+            (== c \") (do
+              (set! inDoubleQuote false)
+              (inc! i)) :else
+            (do
+              (.WriteByte arg c)
+              (inc! i)))
+
+          (continue))
+
+
+        ;; Normal mode (outside quotes)
+        (switch c
+          (case [\space \tab \newline \return]
+            (when (or (> (.Len arg) 0) hasArg)
+              (set! args (append args (.String arg)))
+              (.Reset arg)
+              (set! hasArg false)))
+
+          (case [\']
+            (set! inSingleQuote true)
+            (set! hasArg true)) ; Empty quotes still produce an arg
+          (case [\"]
+            (set! inDoubleQuote true)
+            (set! hasArg true)) ; Empty quotes still produce an arg
+          (case [\\]
+            ;; Backslash escapes the next character outside quotes.
+            ;; Backslash-newline is line continuation (handles both LF and CRLF).
+            (when (< (+ i 1) (len s))
+              (let [next (aget s (+ i 1))]
+                (when (== next \newline)
+                  (set! i + 2)
+                  (continue))
+
+                (when (and (== next \return) (< (+ i 2) (len s)) (== (aget s (+ i 2)) \newline))
+                  (set! i + 3)
+                  (continue))
+
+                ;; Backslash escapes the next character
+                (.WriteByte arg next)
+                (set! hasArg true)
+                (set! i + 2)
+                (continue)))
+
+            ;; Trailing backslash at end of input — consumed and discarded
+            (inc! i)
+            (continue))
+          (default
+            (.WriteByte arg c)))
+
+        (inc! i)))
+
+
+    ;; Don't forget the last argument
+    (when (or (> (.Len arg) 0) hasArg)
+      (set! args (append args (.String arg))))
+
+
+    ^{:line 198} args))
+
+
+^{:go/end 203} (go/func AddVersionFlag []
+  (flag/Var (lit versionFlag) "V" "print version and exit"))
+
+
+(go/var ^string buildID) ; filled in by linker
+
+(go/type versionFlag (struct))
+
+^{:go/end 209} (go/method IsBoolFlag ^bool [versionFlag] true)
+^{:go/end 210} (go/method Get ^any [versionFlag] nil)
+^{:go/end 211} (go/method String ^string [versionFlag] "")
+^{:go/end 240} (go/method Set ^error [versionFlag ^string s]
+  (let [name (aget os/Args 0)]
+    (set! name (subslice name (+ (strings/LastIndex name "/") 1)))
+    (set! name (subslice name (+ (strings/LastIndex name "\\") 1)))
+    (set! name (strings/TrimSuffix name ".exe"))
+
+    ^{:go/breaks [6]} (let [p ""]
+
+      ;; If the enabled experiments differ from the baseline,
+      ;; include that difference.
+      (when [goexperiment (.String buildcfg/Experiment)] (!= goexperiment "")
+        (set! p (+ " X:" goexperiment)))
+
+
+      ;; The go command invokes -V=full to get a unique identifier
+      ;; for this tool. It is assumed that the release version is sufficient
+      ;; for releases, but during development we include the full
+      ;; build ID of the binary, so that if the compiler is changed and
+      ;; rebuilt, we notice and rebuild all packages.
+      (when (== s "full")
+        (when (strings/Contains buildcfg/Version "devel")
+          (set! p + (+ " buildID=" buildID))))
+
+
+
+      (fmt/Printf "%s version %s%s\n" name buildcfg/Version p)
+      (os/Exit 0)
+      nil)))
+
+
+
+
+
+(go/type count "count is a flag.Value that is like a flag.Bool and a flag.Int.\nIf used as -name, it increments the count, but -name=x sets the count.\nUsed for verbose flag -v.\n" int)
+
+^{:go/end 249} (go/method String ^string [^{:tag (* count)} c]
+  (fmt/Sprint (conv int @c)))
+
+
+^{:go/breaks [[4 264]] :go/end 265} (go/method Set ^error [^{:tag (* count)} c ^string s]
+  (switch s
+    (case ["true"]
+      (inc! @c))
+    (case ["false"]
+      (set! @c 0))
+    (default
+      (let [(values n err) (strconv/Atoi s)]
+        (when (!= err nil)
+          (return (fmt/Errorf "invalid count %q" s)))
+
+        (set! @c (conv count n)))))
+
+  nil)
+
+
+^{:go/end 269} (go/method Get ^any [^{:tag (* count)} c]
+  (conv int @c))
+
+
+^{:go/breaks [3] :go/end 273} (go/method IsBoolFlag ^bool [^{:tag (* count)} c]
+  true)
+
+
+^{:go/breaks [3] :go/end 277} (go/method IsCountFlag ^bool [^{:tag (* count)} c]
+  true)
+
+
+(go/type fn1 (func [string]))
+
+^{:go/breaks [4] :go/end 284} (go/method Set ^error [^fn1 f ^string s]
+  (f s)
+  nil)
+
+
+^{:go/end 286} (go/method String ^string [^fn1 f] "")
+
+(go/type debugField (struct
+    ^{:line 289 :tag string} name
+    ^{:line 290 :tag string} help
+    ^{:line 291 :tag bool} concurrentOk ; true if this field/flag is compatible with concurrent compilation
+    ^{:line 292 :tag any} val)) ; *int or *string
+
+
+(go/type DebugFlag (struct
+    ^{:line 296 :tag (map string debugField)} tab
+    ^{:line 297 :tag (* bool)} concurrentOk ; this is non-nil only for compiler's DebugFlags, but only compiler has concurrent:ok fields
+    ^{:line 298 :tag DebugSSA} debugSSA)) ; this is non-nil only for compiler's DebugFlags.
+
+
+
+
+
+
+(go/type DebugSSA "A DebugSSA function is called to set a -d ssa/... option.\nIf nil, those options are reported as invalid options.\nIf DebugSSA returns a non-empty string, that text is reported as a compiler error.\nIf phase is \"help\", it should print usage information and terminate the process.\n" (func [^string phase ^string flag ^int val ^string valString] [string]))
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 356} (go/func NewDebugFlag "NewDebugFlag constructs a DebugFlag for the fields of debug, which\nmust be a pointer to a struct.\n\nEach field of *debug is a different value, named for the lower-case of the field name.\nEach field must be an int or string and must have a `help` struct tag.\nThere may be an \"Any bool\" field, which will be set if any debug flags are set.\n\nThe returned flag takes a comma-separated list of settings.\nEach setting is name=value; for ints, name is short for name=1.\n\nIf debugSSA is non-nil, any debug flags of the form ssa/... will be\npassed to debugSSA for processing.\n" ^{:tag (* DebugFlag)} [^any debug ^DebugSSA debugSSA]
+  (let [flag (addr ^{:go/breaks [2 4]} (lit DebugFlag
+          :tab (make (map string debugField))
+          :debugSSA debugSSA))
+
+
+      ^{:line 325} v (.Elem (reflect/ValueOf debug))
+      ^{:line 326} t (.Type v)]
+    (for [i 0] (< i (.NumField t)) (inc! i)
+      (let [f (.Field t i)
+          ^{:line 329} ptr (.Interface (.Addr (.Field v i)))]
+        (when (== (.-Name f) "ConcurrentOk")
+          (type-switch [ptr ptr]
+            (default
+              (panic "debug.ConcurrentOk must have type bool"))
+            (case [(* bool)]
+              (set! (.-concurrentOk flag) ptr)))
+
+          (continue))
+
+        (let [name (strings/ToLower (.-Name f))
+            ^{:line 340} help (.Get (.-Tag f) "help")]
+          (when (== help "")
+            (panic (fmt/Sprintf "debug.%s is missing help text" (.-Name f))))
+
+          (let [concurrent (.Get (.-Tag f) "concurrent")]
+
+            (type-switch ptr
+              (default
+                (panic (fmt/Sprintf "debug.%s has invalid type %v (must be int, string, or *bisect.Matcher)" (.-Name f) (.-Type f))))
+              (case [(* int) (* string) (* (* bisect/Matcher))]))
+            ;; ok
+
+            (aset (.-tab flag) name (lit debugField name help (== concurrent "ok") ptr))))))
+
+
+    ^{:line 355} flag))
+
+
+^{:go/breaks [[5 451]] :go/end 452} (go/method Set ^error [^{:tag (* DebugFlag)} f ^string debugstr]
+  (when (== debugstr "")
+    (return nil))
+
+  (range [name (strings/SplitSeq debugstr ",")]
+    (when (== name "")
+      (continue))
+
+    ;; display help about the debug option itself and quit
+    (when (== name "help")
+      (fmt/Print debugHelpHeader)
+      (let [(values maxLen names) (values 0 (lit (slice string)))]
+        (when (!= (.-debugSSA f) nil)
+          (set! maxLen (len "ssa/help")))
+
+        (range [name (.-tab f)]
+          (when (> (len name) maxLen)
+            (set! maxLen (len name)))
+
+          (set! names (append names name)))
+
+        (sort/Strings names)
+        ;; Indent multi-line help messages.
+        (let [nl (fmt/Sprintf "\n\t%-*s\t" maxLen "")]
+          (range [_ name names]
+            (let [help (.-help (aget (.-tab f) name))]
+              (fmt/Printf "\t%-*s\t%s\n" maxLen name (strings/ReplaceAll help "\n" nl))))
+
+          (when (!= (.-debugSSA f) nil)
+            ;; ssa options have their own help
+            (fmt/Printf "\t%-*s\t%s\n" maxLen "ssa/help" "print help about SSA debugging"))
+
+          (os/Exit 0))))
+
+
+    (let [(values val valstring haveInt) (values 1 "" true)]
+      (when [i (strings/IndexAny name "=:")] (>= i 0)
+        (let [^error err (zero error)]
+          (set! (values name valstring) (values (subslice name _ i) (subslice name (+ i 1))))
+          (set! (values val err) (strconv/Atoi valstring))
+          (when (!= err nil)
+            (set! (values val haveInt) (values 1 false)))))
+
+
+
+      (if [(values t ok) (aget (.-tab f) name)] ok (do
+          (type-switch [vp (.-val t)]
+            (case [nil])
+            ;; Ignore
+            (case [(* string)]
+              (set! @vp valstring))
+            (case [(* int)]
+              (when (not haveInt)
+                (log/Fatalf "invalid debug value %v" name))
+
+              (set! @vp val))
+            (case [(* (* bisect/Matcher))]
+              (let [^error err (zero error)]
+                (set! (values @vp err) (bisect/New valstring))
+                (when (!= err nil)
+                  (log/Fatalf "debug flag %v: %v" name err))))
+
+            (default
+              (panic "bad debugtab type")))
+
+          ;; assembler DebugFlags don't have a ConcurrentOk field to reset, so check against that.
+          (when (and (not (.-concurrentOk t)) (!= (.-concurrentOk f) nil))
+            (set! @(.-concurrentOk f) false)))
+
+        (if (and (!= (.-debugSSA f) nil) (strings/HasPrefix name "ssa/"))
+          ;; expect form ssa/phase/flag
+          ;; e.g. -d=ssa/generic_cse/time
+          ;; _ in phase name also matches space
+          (let [phase (subslice name 4)
+              ^{:line 432} flag "debug"] ; default flag is debug
+            (when [i (strings/Index phase "/")] (>= i 0)
+              (set! flag (subslice phase (+ i 1)))
+              (set! phase (subslice phase _ i)))
+
+            (let [err ((.-debugSSA f) phase flag val valstring)]
+              (when (!= err "")
+                (log/Fatal err))
+
+              ;; Setting this false for -d=ssa/... preserves old behavior
+              ;; of turning off concurrency for any debug flags.
+              ;; It's not known for sure if this is necessary, but it is safe.
+              (set! @(.-concurrentOk f) false)))
+
+
+          (return (fmt/Errorf "unknown debug key %s\n" name))))))
+
+
+
+  nil)
+
+
+(go/const ^{:val "usage: -d arg[,arg]* and arg is <key>[=<value>]\n\n<key> is one of:\n\n"} debugHelpHeader "usage: -d arg[,arg]* and arg is <key>[=<value>]\n\n<key> is one of:\n\n")
+
+
+
+
+
+^{:go/breaks [3] :go/end 462} (go/method String ^string [^{:tag (* DebugFlag)} f]
+  "")

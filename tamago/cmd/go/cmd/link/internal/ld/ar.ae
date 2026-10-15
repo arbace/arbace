@@ -1,0 +1,246 @@
+;; Inferno utils/include/ar.h
+;; https://bitbucket.org/inferno-os/inferno-os/src/master/utils/include/ar.h
+;;
+;;	Copyright © 1994-1999 Lucent Technologies Inc.  All rights reserved.
+;;	Portions Copyright © 1995-1997 C H Forsyth (forsyth@terzarima.net)
+;;	Portions Copyright © 1997-1999 Vita Nuova Limited
+;;	Portions Copyright © 2000-2007 Vita Nuova Holdings Limited (www.vitanuova.com)
+;;	Portions Copyright © 2004,2006 Bruce Ellis
+;;	Portions Copyright © 2005-2007 C H Forsyth (forsyth@terzarima.net)
+;;	Revisions Copyright © 2000-2007 Lucent Technologies Inc. and others
+;;	Portions Copyright © 2009 The Go Authors. All rights reserved.
+;;
+;; Permission is hereby granted, free of charge, to any person obtaining a copy
+;; of this software and associated documentation files (the "Software"), to deal
+;; in the Software without restriction, including without limitation the rights
+;; to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+;; copies of the Software, and to permit persons to whom the Software is
+;; furnished to do so, subject to the following conditions:
+;;
+;; The above copyright notice and this permission notice shall be included in
+;; all copies or substantial portions of the Software.
+;;
+;; THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+;; IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+;; FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL THE
+;; AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+;; LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+;; OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+;; THE SOFTWARE.
+
+(in-ns 'go.cmd.link.internal.ld) (go/file "ar.go" :imports [
+
+
+    ^{:line 34} [bio "cmd/internal/bio"]
+    ^{:line 35} [loader "cmd/link/internal/loader"]
+    ^{:line 36} [sym "cmd/link/internal/sym"]
+    ^{:line 37} [binary "encoding/binary"]
+    ^{:line 38} [fmt "fmt"]
+    ^{:line 39} [buildcfg "internal/buildcfg"]
+    ^{:line 40} [io "io"]
+    ^{:line 41} [os "os"]
+    ^{:line 42} [filepath "path/filepath"]
+    ^{:line 43} [strings "strings"]])
+
+
+(go/const
+  ^{:line 47} [^{:val 8} SARMAG 8]
+  ^{:line 48} [^{:val 60} SAR_HDR (+ 16 44)])
+
+
+(go/const
+  ^{:line 52} [^{:val "!<arch>\n"} ARMAG "!<arch>\n"])
+
+
+(go/type ArHdr (struct
+    ^{:line 56 :tag string} name
+    ^{:line 57 :tag string} date
+    ^{:line 58 :tag string} uid
+    ^{:line 59 :tag string} gid
+    ^{:line 60 :tag string} mode
+    ^{:line 61 :tag string} size
+    ^{:line 62 :tag string} fmag))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 96} (go/func pruneUndefsForWindows "pruneUndefsForWindows trims the list \"undefs\" of currently\noutstanding unresolved symbols to remove references to DLL import\nsymbols (e.g. \"__imp_XXX\"). In older versions of the linker, we\nwould just immediately forward references from the import sym\n(__imp_XXX) to the DLL sym (XXX), but with newer compilers this\nstrategy falls down in certain cases. We instead now do this\nforwarding later on as a post-processing step, and meaning that\nduring the middle part of host object loading we can see a lot of\nunresolved (SXREF) import symbols. We do not, however, want to\ntrigger the inclusion of an object from a host archive if the\nreference is going to be eventually forwarded to the corresponding\nSDYNIMPORT symbol, so here we strip out such refs from the undefs\nlist.\n" [^{:tag (* loader/Loader)} ldr ^{:tag (slice loader/Sym)} undefs ^{:tag (slice loader/Sym)} froms] :results [(slice loader/Sym) (slice loader/Sym)]
+  (let [^{:tag (slice loader/Sym)} newundefs (zero (slice loader/Sym))
+      ^{:line 80 :tag (slice loader/Sym)} newfroms (zero (slice loader/Sym))]
+    (range [_ s undefs]
+      (let [sname (.SymName ldr s)]
+        (when (strings/HasPrefix sname "__imp_")
+          (let [dname (subslice sname (len "__imp_"))
+              ^{:line 85} ds (.Lookup ldr dname 0)]
+            (when (and (!= ds 0) (== (.SymType ldr ds) sym/SDYNIMPORT))
+              ;; Don't try to pull things out of a host archive to
+              ;; satisfy this symbol.
+              (continue))))
+
+
+        (set! newundefs (append newundefs s))
+        (set! newfroms (append newfroms s))))
+
+    (return newundefs newfroms)))
+
+
+
+
+
+
+
+^{:go/end 189} (go/func hostArchive "hostArchive reads an archive file holding host objects and links in\nrequired objects. The general format is the same as a Go archive\nfile, but it has an armap listing symbols and the objects that\ndefine them. This is used for the compiler support library\nlibgcc.a.\n" [^{:tag (* Link)} ctxt ^string name]
+  (when (> (.-Debugvlog ctxt) 1)
+    (.Logf ctxt "hostArchive(%s)\n" name))
+
+  (let [(values f err) (bio/Open name)]
+    (when (!= err nil)
+      (when (os/IsNotExist err)
+        ;; It's OK if we don't have a libgcc file at all.
+        (when (!= (.-Debugvlog ctxt) 0)
+          (.Logf ctxt "skipping libgcc file: %v\n" err))
+
+        (return))
+
+      (Exitf "cannot open file %s: %v" name err))
+
+    (defer (.Close f))
+
+    (let [^{:tag (array (len ARMAG) byte)} magbuf (zero (array (len ARMAG) byte))]
+      (when [(values _ err) (io/ReadFull f (subslice magbuf))] (!= err nil)
+        (Exitf "file %s too short" name))
+
+
+      (when (!= (conv string (subslice magbuf)) ARMAG)
+        (Exitf "%s is not an archive file" name))
+
+
+      (let [^ArHdr arhdr (zero ArHdr)
+          ^{:line 130} l (nextar f (.Offset f) (addr arhdr))]
+        (when (<= l 0)
+          (Exitf "%s missing armap" name))
+
+
+        (let [^archiveMap armap (zero archiveMap)]
+          (if (or (== (.-name arhdr) "/") (== (.-name arhdr) "/SYM64/"))
+            (set! armap (readArmap name f arhdr))
+
+            (Exitf "%s missing armap" name))
+
+
+          (let [loaded (make (map uint64 bool))
+              ^{:line 143} any true]
+            (while any
+              (let [^{:tag (slice uint64)} load (zero (slice uint64))
+                  ^{:line 146} returnAllUndefs -1
+                  (values undefs froms) (.UndefinedRelocTargets (.-loader ctxt) returnAllUndefs)]
+                (when (== buildcfg/GOOS "windows")
+                  (set! (values undefs froms) (pruneUndefsForWindows (.-loader ctxt) undefs froms)))
+
+                (range [k symIdx undefs]
+                  (let [sname (.SymName (.-loader ctxt) symIdx)]
+                    (when [off (aget armap sname)] (and (!= off 0) (not (aget loaded off)))
+                      (set! load (append load off))
+                      (aset loaded off true)
+                      (when (> (.-Debugvlog ctxt) 1)
+                        (.Logf ctxt "hostArchive(%s): selecting object at offset %x to resolve %s [%d] reference from %s [%d]\n" name off sname symIdx (.SymName (.-loader ctxt) (aget froms k)) (aget froms k))))))
+
+
+
+
+                (range [_ off load]
+                  (let [l (nextar f (conv int64 off) (addr arhdr))]
+                    (when (<= l 0)
+                      (Exitf "%s missing archive entry at offset %d" name off))
+
+                    (let [pname (fmt/Sprintf "%s(%s)" name (.-name arhdr))]
+                      (set! l (atolwhex (.-size arhdr)))
+
+                      (let [pkname (filepath/Base name)]
+                        (when [i (strings/LastIndex pkname ".a")] (>= i 0)
+                          (set! pkname (subslice pkname _ i)))
+
+                        (let [libar (lit sym/Library :Pkg pkname)
+                            ^{:line 175} h (ldobj ctxt f (addr libar) l pname name)]
+                          (when (== (.-ld h) nil)
+                            (Errorf "%s unrecognized object file at offset %d" name off)
+                            (continue))
+
+                          (.MustSeek f (.-off h) 0)
+                          ((.-ld h) ctxt f (.-pkg h) (.-length h) (.-pn h))
+                          (when (!= @flagCaptureHostObjs "")
+                            (captureHostObj h)))))))
+
+
+
+                (set! any (> (len load) 0))))))))))
+
+
+
+
+
+(go/type archiveMap "archiveMap is an archive symbol map: a mapping from symbol name to\noffset within the archive file.\n" (map string uint64))
+
+
+^{:go/end 247} (go/func readArmap "readArmap reads the archive symbol map.\n" ^archiveMap [^string filename ^{:tag (* bio/Reader)} f ^ArHdr arhdr]
+  (let [is64 (== (.-name arhdr) "/SYM64/")
+      ^{:line 198} wordSize 4]
+    (when is64
+      (set! wordSize 8))
+
+
+    (let [contents (make (slice byte) (atolwhex (.-size arhdr)))]
+      (when [(values _ err) (io/ReadFull f contents)] (!= err nil)
+        (Exitf "short read from %s" filename))
+
+
+      (let [^uint64 c (zero uint64)]
+        (if is64
+          (set! c (.Uint64 binary/BigEndian contents))
+
+          (set! c (conv uint64 (.Uint32 binary/BigEndian contents))))
+
+        (set! contents (subslice contents wordSize))
+
+        (let [ret (make archiveMap)
+
+            ^{:line 218} names (subslice contents (* c (conv uint64 wordSize)))]
+          (for [i (conv uint64 0)] (< i c) (inc! i)
+            (let [n 0]
+              (while (!= (aget names n) 0)
+                (inc! n))
+
+              (let [name (conv string (subslice names _ n))]
+                (set! names (subslice names (+ n 1)))
+
+                ;; For Mach-O and PE/386 files we strip a leading
+                ;; underscore from the symbol name.
+                (when (or (== buildcfg/GOOS "darwin") (== buildcfg/GOOS "ios") ^:go/paren (and (== buildcfg/GOOS "windows") (== buildcfg/GOARCH "386")))
+                  (when (and (== (aget name 0) \_) (> (len name) 1))
+                    (set! name (subslice name 1))))
+
+
+
+                (let [^uint64 off (zero uint64)]
+                  (if is64
+                    (set! off (.Uint64 binary/BigEndian contents))
+
+                    (set! off (conv uint64 (.Uint32 binary/BigEndian contents))))
+
+                  (set! contents (subslice contents wordSize))
+
+                  (aset ret name off)))))
+
+
+          ^{:line 246} ret)))))

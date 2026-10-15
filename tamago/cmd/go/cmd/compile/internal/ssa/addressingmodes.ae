@@ -1,0 +1,517 @@
+;; Copyright 2020 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.cmd.compile.internal.ssa) (go/file "addressingmodes.go" :imports [])
+
+
+
+^{:go/end 101} (go/func addressingModes "addressingModes combines address calculations into memory operations\nthat can perform complicated addressing modes.\n" [^{:tag (* Func)} f]
+  (let [isInImmediateRange is32Bit]
+    (switch (.-arch (.-Config f))
+      (default
+        ;; Most architectures can't do this.
+        (return))
+      (case ["amd64" "386"])
+      (case ["s390x"]
+        (set! isInImmediateRange is20Bit)))
+
+
+    (let [^{:tag (slice (* Value))} tmp (zero (slice (* Value)))]
+      (range [_ b (.-Blocks f)]
+        (range [_ v (.-Values b)]
+          (when (not (aget combineFirst (.-Op v)))
+            (continue))
+
+          ;; All matched operations have the pointer in arg[0].
+          ;; All results have the pointer in arg[0] and the index in arg[1].
+          ;; *Except* for operations which update a register,
+          ;; which are marked with resultInArg0. Those have
+          ;; the pointer in arg[1], and the corresponding result op
+          ;; has the pointer in arg[1] and the index in arg[2].
+          (let [ptrIndex 0]
+            (when (.-resultInArg0 (aget opcodeTable (.-Op v)))
+              (set! ptrIndex 1))
+
+            (let [p (aget (.-Args v) ptrIndex)
+                (values c ok) (aget combine (lit (array 2 Op) (.-Op v) (.-Op p)))]
+              (when (not ok)
+                (continue))
+
+              ;; See if we can combine the Aux/AuxInt values.
+              (switch (lit (array 2 auxType) (.-auxType (aget opcodeTable (.-Op v))) (.-auxType (aget opcodeTable (.-Op p))))
+                (case [(lit (array 2 auxType) auxSymOff auxInt32)]
+                  ;; TODO: introduce auxSymOff32
+                  (when (not (isInImmediateRange (+ (.-AuxInt v) (.-AuxInt p))))
+                    (continue))
+
+                  (set! (.-AuxInt v) + (.-AuxInt p)))
+                (case [(lit (array 2 auxType) auxSymOff auxSymOff)]
+                  (when (and (!= (.-Aux v) nil) (!= (.-Aux p) nil))
+                    (continue))
+
+                  (when (not (isInImmediateRange (+ (.-AuxInt v) (.-AuxInt p))))
+                    (continue))
+
+                  (when (!= (.-Aux p) nil)
+                    (set! (.-Aux v) (.-Aux p)))
+
+                  (set! (.-AuxInt v) + (.-AuxInt p)))
+                (case [(lit (array 2 auxType) auxSymValAndOff auxInt32)]
+                  (let [vo (conv ValAndOff (.-AuxInt v))]
+                    (when (not (.canAdd64 vo (.-AuxInt p)))
+                      (continue))
+
+                    (set! (.-AuxInt v) (conv int64 (.addOffset64 vo (.-AuxInt p))))))
+                (case [(lit (array 2 auxType) auxSymValAndOff auxSymOff)]
+                  (let [vo (conv ValAndOff (.-AuxInt v))]
+                    (when (and (!= (.-Aux v) nil) (!= (.-Aux p) nil))
+                      (continue))
+
+                    (when (not (.canAdd64 vo (.-AuxInt p)))
+                      (continue))
+
+                    (when (!= (.-Aux p) nil)
+                      (set! (.-Aux v) (.-Aux p)))
+
+                    (set! (.-AuxInt v) (conv int64 (.addOffset64 vo (.-AuxInt p))))))
+                (case [(lit (array 2 auxType) auxSymOff auxNone)])
+                ;; nothing to do
+                (case [(lit (array 2 auxType) auxSymValAndOff auxNone)])
+                ;; nothing to do
+                (default
+                  (.Fatalf f "unknown aux combining for %s and %s\n" (.-Op v) (.-Op p))))
+
+              ;; Combine the operations.
+              (set! tmp (append (subslice tmp _ 0) (spread (subslice (.-Args v) _ ptrIndex))))
+              (set! tmp (append tmp (spread (.-Args p))))
+              (set! tmp (append tmp (spread (subslice (.-Args v) (+ ptrIndex 1)))))
+              (.resetArgs v)
+              (set! (.-Op v) c)
+              (.AddArgs v (spread tmp))
+              (when (aget needSplit c)
+                ;; It turns out that some of the combined instructions have faster two-instruction equivalents,
+                ;; but not the two instructions that led to them being combined here.  For example
+                ;; (CMPBconstload c (ADDQ x y)) -> (CMPBconstloadidx1 c x y) -> (CMPB c (MOVBloadidx1 x y))
+                ;; The final pair of instructions turns out to be notably faster, at least in some benchmarks.
+                ((.-splitLoad (.-Config f)) v)))))))))
+
+
+
+
+
+
+
+(go/var ^{:doc "combineFirst contains ops which appear in combine as the\nfirst part of the key.\n"} combineFirst (lit (map Op bool)))
+
+^{:go/end 111} (go/func init []
+  (range [k combine]
+    (aset combineFirst (aget k 0) true)))
+
+
+
+
+
+(go/var ^{:doc "needSplit contains instructions that should be postprocessed by splitLoad\ninto a more-efficient two-instruction form.\n"} needSplit (lit (map Op bool)
+    ^{:line 116} [OpAMD64CMPBloadidx1 true]
+    ^{:line 117} [OpAMD64CMPWloadidx1 true]
+    ^{:line 118} [OpAMD64CMPLloadidx1 true]
+    ^{:line 119} [OpAMD64CMPQloadidx1 true]
+    ^{:line 120} [OpAMD64CMPWloadidx2 true]
+    ^{:line 121} [OpAMD64CMPLloadidx4 true]
+    ^{:line 122} [OpAMD64CMPQloadidx8 true]
+
+    ^{:line 124} [OpAMD64CMPBconstloadidx1 true]
+    ^{:line 125} [OpAMD64CMPWconstloadidx1 true]
+    ^{:line 126} [OpAMD64CMPLconstloadidx1 true]
+    ^{:line 127} [OpAMD64CMPQconstloadidx1 true]
+    ^{:line 128} [OpAMD64CMPWconstloadidx2 true]
+    ^{:line 129} [OpAMD64CMPLconstloadidx4 true]
+    ^{:line 130} [OpAMD64CMPQconstloadidx8 true]))
+
+
+
+
+
+
+
+
+
+
+
+
+(go/var ^{:doc "For each entry k, v in this map, if we have a value x with:\n\n\tx.Op == k[0]\n\tx.Args[0].Op == k[1]\n\nthen we can set x.Op to v and set x.Args like this:\n\n\tx.Args[0].Args + x.Args[1:]\n\nAdditionally, the Aux/AuxInt from x.Args[0] is merged into x.\n"} combine (lit (map (array 2 Op) Op)
+    ;; amd64
+    ^{:line 145} [(lit (array 2 Op) OpAMD64MOVBload OpAMD64ADDQ) OpAMD64MOVBloadidx1]
+    ^{:line 146} [(lit (array 2 Op) OpAMD64MOVWload OpAMD64ADDQ) OpAMD64MOVWloadidx1]
+    ^{:line 147} [(lit (array 2 Op) OpAMD64MOVLload OpAMD64ADDQ) OpAMD64MOVLloadidx1]
+    ^{:line 148} [(lit (array 2 Op) OpAMD64MOVQload OpAMD64ADDQ) OpAMD64MOVQloadidx1]
+    ^{:line 149} [(lit (array 2 Op) OpAMD64MOVSSload OpAMD64ADDQ) OpAMD64MOVSSloadidx1]
+    ^{:line 150} [(lit (array 2 Op) OpAMD64MOVSDload OpAMD64ADDQ) OpAMD64MOVSDloadidx1]
+
+    ^{:line 152} [(lit (array 2 Op) OpAMD64MOVBstore OpAMD64ADDQ) OpAMD64MOVBstoreidx1]
+    ^{:line 153} [(lit (array 2 Op) OpAMD64MOVWstore OpAMD64ADDQ) OpAMD64MOVWstoreidx1]
+    ^{:line 154} [(lit (array 2 Op) OpAMD64MOVLstore OpAMD64ADDQ) OpAMD64MOVLstoreidx1]
+    ^{:line 155} [(lit (array 2 Op) OpAMD64MOVQstore OpAMD64ADDQ) OpAMD64MOVQstoreidx1]
+    ^{:line 156} [(lit (array 2 Op) OpAMD64MOVSSstore OpAMD64ADDQ) OpAMD64MOVSSstoreidx1]
+    ^{:line 157} [(lit (array 2 Op) OpAMD64MOVSDstore OpAMD64ADDQ) OpAMD64MOVSDstoreidx1]
+
+    ^{:line 159} [(lit (array 2 Op) OpAMD64MOVBstoreconst OpAMD64ADDQ) OpAMD64MOVBstoreconstidx1]
+    ^{:line 160} [(lit (array 2 Op) OpAMD64MOVWstoreconst OpAMD64ADDQ) OpAMD64MOVWstoreconstidx1]
+    ^{:line 161} [(lit (array 2 Op) OpAMD64MOVLstoreconst OpAMD64ADDQ) OpAMD64MOVLstoreconstidx1]
+    ^{:line 162} [(lit (array 2 Op) OpAMD64MOVQstoreconst OpAMD64ADDQ) OpAMD64MOVQstoreconstidx1]
+
+    ^{:line 164} [(lit (array 2 Op) OpAMD64MOVBload OpAMD64LEAQ1) OpAMD64MOVBloadidx1]
+    ^{:line 165} [(lit (array 2 Op) OpAMD64MOVWload OpAMD64LEAQ1) OpAMD64MOVWloadidx1]
+    ^{:line 166} [(lit (array 2 Op) OpAMD64MOVWload OpAMD64LEAQ2) OpAMD64MOVWloadidx2]
+    ^{:line 167} [(lit (array 2 Op) OpAMD64MOVLload OpAMD64LEAQ1) OpAMD64MOVLloadidx1]
+    ^{:line 168} [(lit (array 2 Op) OpAMD64MOVLload OpAMD64LEAQ4) OpAMD64MOVLloadidx4]
+    ^{:line 169} [(lit (array 2 Op) OpAMD64MOVLload OpAMD64LEAQ8) OpAMD64MOVLloadidx8]
+    ^{:line 170} [(lit (array 2 Op) OpAMD64MOVQload OpAMD64LEAQ1) OpAMD64MOVQloadidx1]
+    ^{:line 171} [(lit (array 2 Op) OpAMD64MOVQload OpAMD64LEAQ8) OpAMD64MOVQloadidx8]
+    ^{:line 172} [(lit (array 2 Op) OpAMD64MOVSSload OpAMD64LEAQ1) OpAMD64MOVSSloadidx1]
+    ^{:line 173} [(lit (array 2 Op) OpAMD64MOVSSload OpAMD64LEAQ4) OpAMD64MOVSSloadidx4]
+    ^{:line 174} [(lit (array 2 Op) OpAMD64MOVSDload OpAMD64LEAQ1) OpAMD64MOVSDloadidx1]
+    ^{:line 175} [(lit (array 2 Op) OpAMD64MOVSDload OpAMD64LEAQ8) OpAMD64MOVSDloadidx8]
+
+    ^{:line 177} [(lit (array 2 Op) OpAMD64MOVBstore OpAMD64LEAQ1) OpAMD64MOVBstoreidx1]
+    ^{:line 178} [(lit (array 2 Op) OpAMD64MOVWstore OpAMD64LEAQ1) OpAMD64MOVWstoreidx1]
+    ^{:line 179} [(lit (array 2 Op) OpAMD64MOVWstore OpAMD64LEAQ2) OpAMD64MOVWstoreidx2]
+    ^{:line 180} [(lit (array 2 Op) OpAMD64MOVLstore OpAMD64LEAQ1) OpAMD64MOVLstoreidx1]
+    ^{:line 181} [(lit (array 2 Op) OpAMD64MOVLstore OpAMD64LEAQ4) OpAMD64MOVLstoreidx4]
+    ^{:line 182} [(lit (array 2 Op) OpAMD64MOVLstore OpAMD64LEAQ8) OpAMD64MOVLstoreidx8]
+    ^{:line 183} [(lit (array 2 Op) OpAMD64MOVQstore OpAMD64LEAQ1) OpAMD64MOVQstoreidx1]
+    ^{:line 184} [(lit (array 2 Op) OpAMD64MOVQstore OpAMD64LEAQ8) OpAMD64MOVQstoreidx8]
+    ^{:line 185} [(lit (array 2 Op) OpAMD64MOVSSstore OpAMD64LEAQ1) OpAMD64MOVSSstoreidx1]
+    ^{:line 186} [(lit (array 2 Op) OpAMD64MOVSSstore OpAMD64LEAQ4) OpAMD64MOVSSstoreidx4]
+    ^{:line 187} [(lit (array 2 Op) OpAMD64MOVSDstore OpAMD64LEAQ1) OpAMD64MOVSDstoreidx1]
+    ^{:line 188} [(lit (array 2 Op) OpAMD64MOVSDstore OpAMD64LEAQ8) OpAMD64MOVSDstoreidx8]
+
+    ^{:line 190} [(lit (array 2 Op) OpAMD64MOVBstoreconst OpAMD64LEAQ1) OpAMD64MOVBstoreconstidx1]
+    ^{:line 191} [(lit (array 2 Op) OpAMD64MOVWstoreconst OpAMD64LEAQ1) OpAMD64MOVWstoreconstidx1]
+    ^{:line 192} [(lit (array 2 Op) OpAMD64MOVWstoreconst OpAMD64LEAQ2) OpAMD64MOVWstoreconstidx2]
+    ^{:line 193} [(lit (array 2 Op) OpAMD64MOVLstoreconst OpAMD64LEAQ1) OpAMD64MOVLstoreconstidx1]
+    ^{:line 194} [(lit (array 2 Op) OpAMD64MOVLstoreconst OpAMD64LEAQ4) OpAMD64MOVLstoreconstidx4]
+    ^{:line 195} [(lit (array 2 Op) OpAMD64MOVQstoreconst OpAMD64LEAQ1) OpAMD64MOVQstoreconstidx1]
+    ^{:line 196} [(lit (array 2 Op) OpAMD64MOVQstoreconst OpAMD64LEAQ8) OpAMD64MOVQstoreconstidx8]
+
+    ^{:line 198} [(lit (array 2 Op) OpAMD64SETEQstore OpAMD64LEAQ1) OpAMD64SETEQstoreidx1]
+    ^{:line 199} [(lit (array 2 Op) OpAMD64SETNEstore OpAMD64LEAQ1) OpAMD64SETNEstoreidx1]
+    ^{:line 200} [(lit (array 2 Op) OpAMD64SETLstore OpAMD64LEAQ1) OpAMD64SETLstoreidx1]
+    ^{:line 201} [(lit (array 2 Op) OpAMD64SETLEstore OpAMD64LEAQ1) OpAMD64SETLEstoreidx1]
+    ^{:line 202} [(lit (array 2 Op) OpAMD64SETGstore OpAMD64LEAQ1) OpAMD64SETGstoreidx1]
+    ^{:line 203} [(lit (array 2 Op) OpAMD64SETGEstore OpAMD64LEAQ1) OpAMD64SETGEstoreidx1]
+    ^{:line 204} [(lit (array 2 Op) OpAMD64SETBstore OpAMD64LEAQ1) OpAMD64SETBstoreidx1]
+    ^{:line 205} [(lit (array 2 Op) OpAMD64SETBEstore OpAMD64LEAQ1) OpAMD64SETBEstoreidx1]
+    ^{:line 206} [(lit (array 2 Op) OpAMD64SETAstore OpAMD64LEAQ1) OpAMD64SETAstoreidx1]
+    ^{:line 207} [(lit (array 2 Op) OpAMD64SETAEstore OpAMD64LEAQ1) OpAMD64SETAEstoreidx1]
+
+    ;; These instructions are re-split differently for performance, see needSplit above.
+    ;; TODO if 386 versions are created, also update needSplit and _gen/386splitload.rules
+    ^{:line 211} [(lit (array 2 Op) OpAMD64CMPBload OpAMD64ADDQ) OpAMD64CMPBloadidx1]
+    ^{:line 212} [(lit (array 2 Op) OpAMD64CMPWload OpAMD64ADDQ) OpAMD64CMPWloadidx1]
+    ^{:line 213} [(lit (array 2 Op) OpAMD64CMPLload OpAMD64ADDQ) OpAMD64CMPLloadidx1]
+    ^{:line 214} [(lit (array 2 Op) OpAMD64CMPQload OpAMD64ADDQ) OpAMD64CMPQloadidx1]
+
+    ^{:line 216} [(lit (array 2 Op) OpAMD64CMPBload OpAMD64LEAQ1) OpAMD64CMPBloadidx1]
+    ^{:line 217} [(lit (array 2 Op) OpAMD64CMPWload OpAMD64LEAQ1) OpAMD64CMPWloadidx1]
+    ^{:line 218} [(lit (array 2 Op) OpAMD64CMPWload OpAMD64LEAQ2) OpAMD64CMPWloadidx2]
+    ^{:line 219} [(lit (array 2 Op) OpAMD64CMPLload OpAMD64LEAQ1) OpAMD64CMPLloadidx1]
+    ^{:line 220} [(lit (array 2 Op) OpAMD64CMPLload OpAMD64LEAQ4) OpAMD64CMPLloadidx4]
+    ^{:line 221} [(lit (array 2 Op) OpAMD64CMPQload OpAMD64LEAQ1) OpAMD64CMPQloadidx1]
+    ^{:line 222} [(lit (array 2 Op) OpAMD64CMPQload OpAMD64LEAQ8) OpAMD64CMPQloadidx8]
+
+    ^{:line 224} [(lit (array 2 Op) OpAMD64CMPBconstload OpAMD64ADDQ) OpAMD64CMPBconstloadidx1]
+    ^{:line 225} [(lit (array 2 Op) OpAMD64CMPWconstload OpAMD64ADDQ) OpAMD64CMPWconstloadidx1]
+    ^{:line 226} [(lit (array 2 Op) OpAMD64CMPLconstload OpAMD64ADDQ) OpAMD64CMPLconstloadidx1]
+    ^{:line 227} [(lit (array 2 Op) OpAMD64CMPQconstload OpAMD64ADDQ) OpAMD64CMPQconstloadidx1]
+
+    ^{:line 229} [(lit (array 2 Op) OpAMD64CMPBconstload OpAMD64LEAQ1) OpAMD64CMPBconstloadidx1]
+    ^{:line 230} [(lit (array 2 Op) OpAMD64CMPWconstload OpAMD64LEAQ1) OpAMD64CMPWconstloadidx1]
+    ^{:line 231} [(lit (array 2 Op) OpAMD64CMPWconstload OpAMD64LEAQ2) OpAMD64CMPWconstloadidx2]
+    ^{:line 232} [(lit (array 2 Op) OpAMD64CMPLconstload OpAMD64LEAQ1) OpAMD64CMPLconstloadidx1]
+    ^{:line 233} [(lit (array 2 Op) OpAMD64CMPLconstload OpAMD64LEAQ4) OpAMD64CMPLconstloadidx4]
+    ^{:line 234} [(lit (array 2 Op) OpAMD64CMPQconstload OpAMD64LEAQ1) OpAMD64CMPQconstloadidx1]
+    ^{:line 235} [(lit (array 2 Op) OpAMD64CMPQconstload OpAMD64LEAQ8) OpAMD64CMPQconstloadidx8]
+
+    ^{:line 237} [(lit (array 2 Op) OpAMD64ADDLload OpAMD64ADDQ) OpAMD64ADDLloadidx1]
+    ^{:line 238} [(lit (array 2 Op) OpAMD64ADDQload OpAMD64ADDQ) OpAMD64ADDQloadidx1]
+    ^{:line 239} [(lit (array 2 Op) OpAMD64SUBLload OpAMD64ADDQ) OpAMD64SUBLloadidx1]
+    ^{:line 240} [(lit (array 2 Op) OpAMD64SUBQload OpAMD64ADDQ) OpAMD64SUBQloadidx1]
+    ^{:line 241} [(lit (array 2 Op) OpAMD64ANDLload OpAMD64ADDQ) OpAMD64ANDLloadidx1]
+    ^{:line 242} [(lit (array 2 Op) OpAMD64ANDQload OpAMD64ADDQ) OpAMD64ANDQloadidx1]
+    ^{:line 243} [(lit (array 2 Op) OpAMD64ORLload OpAMD64ADDQ) OpAMD64ORLloadidx1]
+    ^{:line 244} [(lit (array 2 Op) OpAMD64ORQload OpAMD64ADDQ) OpAMD64ORQloadidx1]
+    ^{:line 245} [(lit (array 2 Op) OpAMD64XORLload OpAMD64ADDQ) OpAMD64XORLloadidx1]
+    ^{:line 246} [(lit (array 2 Op) OpAMD64XORQload OpAMD64ADDQ) OpAMD64XORQloadidx1]
+
+    ^{:line 248} [(lit (array 2 Op) OpAMD64ADDLload OpAMD64LEAQ1) OpAMD64ADDLloadidx1]
+    ^{:line 249} [(lit (array 2 Op) OpAMD64ADDLload OpAMD64LEAQ4) OpAMD64ADDLloadidx4]
+    ^{:line 250} [(lit (array 2 Op) OpAMD64ADDLload OpAMD64LEAQ8) OpAMD64ADDLloadidx8]
+    ^{:line 251} [(lit (array 2 Op) OpAMD64ADDQload OpAMD64LEAQ1) OpAMD64ADDQloadidx1]
+    ^{:line 252} [(lit (array 2 Op) OpAMD64ADDQload OpAMD64LEAQ8) OpAMD64ADDQloadidx8]
+    ^{:line 253} [(lit (array 2 Op) OpAMD64SUBLload OpAMD64LEAQ1) OpAMD64SUBLloadidx1]
+    ^{:line 254} [(lit (array 2 Op) OpAMD64SUBLload OpAMD64LEAQ4) OpAMD64SUBLloadidx4]
+    ^{:line 255} [(lit (array 2 Op) OpAMD64SUBLload OpAMD64LEAQ8) OpAMD64SUBLloadidx8]
+    ^{:line 256} [(lit (array 2 Op) OpAMD64SUBQload OpAMD64LEAQ1) OpAMD64SUBQloadidx1]
+    ^{:line 257} [(lit (array 2 Op) OpAMD64SUBQload OpAMD64LEAQ8) OpAMD64SUBQloadidx8]
+    ^{:line 258} [(lit (array 2 Op) OpAMD64ANDLload OpAMD64LEAQ1) OpAMD64ANDLloadidx1]
+    ^{:line 259} [(lit (array 2 Op) OpAMD64ANDLload OpAMD64LEAQ4) OpAMD64ANDLloadidx4]
+    ^{:line 260} [(lit (array 2 Op) OpAMD64ANDLload OpAMD64LEAQ8) OpAMD64ANDLloadidx8]
+    ^{:line 261} [(lit (array 2 Op) OpAMD64ANDQload OpAMD64LEAQ1) OpAMD64ANDQloadidx1]
+    ^{:line 262} [(lit (array 2 Op) OpAMD64ANDQload OpAMD64LEAQ8) OpAMD64ANDQloadidx8]
+    ^{:line 263} [(lit (array 2 Op) OpAMD64ORLload OpAMD64LEAQ1) OpAMD64ORLloadidx1]
+    ^{:line 264} [(lit (array 2 Op) OpAMD64ORLload OpAMD64LEAQ4) OpAMD64ORLloadidx4]
+    ^{:line 265} [(lit (array 2 Op) OpAMD64ORLload OpAMD64LEAQ8) OpAMD64ORLloadidx8]
+    ^{:line 266} [(lit (array 2 Op) OpAMD64ORQload OpAMD64LEAQ1) OpAMD64ORQloadidx1]
+    ^{:line 267} [(lit (array 2 Op) OpAMD64ORQload OpAMD64LEAQ8) OpAMD64ORQloadidx8]
+    ^{:line 268} [(lit (array 2 Op) OpAMD64XORLload OpAMD64LEAQ1) OpAMD64XORLloadidx1]
+    ^{:line 269} [(lit (array 2 Op) OpAMD64XORLload OpAMD64LEAQ4) OpAMD64XORLloadidx4]
+    ^{:line 270} [(lit (array 2 Op) OpAMD64XORLload OpAMD64LEAQ8) OpAMD64XORLloadidx8]
+    ^{:line 271} [(lit (array 2 Op) OpAMD64XORQload OpAMD64LEAQ1) OpAMD64XORQloadidx1]
+    ^{:line 272} [(lit (array 2 Op) OpAMD64XORQload OpAMD64LEAQ8) OpAMD64XORQloadidx8]
+
+    ^{:line 274} [(lit (array 2 Op) OpAMD64ADDLmodify OpAMD64ADDQ) OpAMD64ADDLmodifyidx1]
+    ^{:line 275} [(lit (array 2 Op) OpAMD64ADDQmodify OpAMD64ADDQ) OpAMD64ADDQmodifyidx1]
+    ^{:line 276} [(lit (array 2 Op) OpAMD64SUBLmodify OpAMD64ADDQ) OpAMD64SUBLmodifyidx1]
+    ^{:line 277} [(lit (array 2 Op) OpAMD64SUBQmodify OpAMD64ADDQ) OpAMD64SUBQmodifyidx1]
+    ^{:line 278} [(lit (array 2 Op) OpAMD64ANDLmodify OpAMD64ADDQ) OpAMD64ANDLmodifyidx1]
+    ^{:line 279} [(lit (array 2 Op) OpAMD64ANDQmodify OpAMD64ADDQ) OpAMD64ANDQmodifyidx1]
+    ^{:line 280} [(lit (array 2 Op) OpAMD64ORLmodify OpAMD64ADDQ) OpAMD64ORLmodifyidx1]
+    ^{:line 281} [(lit (array 2 Op) OpAMD64ORQmodify OpAMD64ADDQ) OpAMD64ORQmodifyidx1]
+    ^{:line 282} [(lit (array 2 Op) OpAMD64XORLmodify OpAMD64ADDQ) OpAMD64XORLmodifyidx1]
+    ^{:line 283} [(lit (array 2 Op) OpAMD64XORQmodify OpAMD64ADDQ) OpAMD64XORQmodifyidx1]
+
+    ^{:line 285} [(lit (array 2 Op) OpAMD64ADDLmodify OpAMD64LEAQ1) OpAMD64ADDLmodifyidx1]
+    ^{:line 286} [(lit (array 2 Op) OpAMD64ADDLmodify OpAMD64LEAQ4) OpAMD64ADDLmodifyidx4]
+    ^{:line 287} [(lit (array 2 Op) OpAMD64ADDLmodify OpAMD64LEAQ8) OpAMD64ADDLmodifyidx8]
+    ^{:line 288} [(lit (array 2 Op) OpAMD64ADDQmodify OpAMD64LEAQ1) OpAMD64ADDQmodifyidx1]
+    ^{:line 289} [(lit (array 2 Op) OpAMD64ADDQmodify OpAMD64LEAQ8) OpAMD64ADDQmodifyidx8]
+    ^{:line 290} [(lit (array 2 Op) OpAMD64SUBLmodify OpAMD64LEAQ1) OpAMD64SUBLmodifyidx1]
+    ^{:line 291} [(lit (array 2 Op) OpAMD64SUBLmodify OpAMD64LEAQ4) OpAMD64SUBLmodifyidx4]
+    ^{:line 292} [(lit (array 2 Op) OpAMD64SUBLmodify OpAMD64LEAQ8) OpAMD64SUBLmodifyidx8]
+    ^{:line 293} [(lit (array 2 Op) OpAMD64SUBQmodify OpAMD64LEAQ1) OpAMD64SUBQmodifyidx1]
+    ^{:line 294} [(lit (array 2 Op) OpAMD64SUBQmodify OpAMD64LEAQ8) OpAMD64SUBQmodifyidx8]
+    ^{:line 295} [(lit (array 2 Op) OpAMD64ANDLmodify OpAMD64LEAQ1) OpAMD64ANDLmodifyidx1]
+    ^{:line 296} [(lit (array 2 Op) OpAMD64ANDLmodify OpAMD64LEAQ4) OpAMD64ANDLmodifyidx4]
+    ^{:line 297} [(lit (array 2 Op) OpAMD64ANDLmodify OpAMD64LEAQ8) OpAMD64ANDLmodifyidx8]
+    ^{:line 298} [(lit (array 2 Op) OpAMD64ANDQmodify OpAMD64LEAQ1) OpAMD64ANDQmodifyidx1]
+    ^{:line 299} [(lit (array 2 Op) OpAMD64ANDQmodify OpAMD64LEAQ8) OpAMD64ANDQmodifyidx8]
+    ^{:line 300} [(lit (array 2 Op) OpAMD64ORLmodify OpAMD64LEAQ1) OpAMD64ORLmodifyidx1]
+    ^{:line 301} [(lit (array 2 Op) OpAMD64ORLmodify OpAMD64LEAQ4) OpAMD64ORLmodifyidx4]
+    ^{:line 302} [(lit (array 2 Op) OpAMD64ORLmodify OpAMD64LEAQ8) OpAMD64ORLmodifyidx8]
+    ^{:line 303} [(lit (array 2 Op) OpAMD64ORQmodify OpAMD64LEAQ1) OpAMD64ORQmodifyidx1]
+    ^{:line 304} [(lit (array 2 Op) OpAMD64ORQmodify OpAMD64LEAQ8) OpAMD64ORQmodifyidx8]
+    ^{:line 305} [(lit (array 2 Op) OpAMD64XORLmodify OpAMD64LEAQ1) OpAMD64XORLmodifyidx1]
+    ^{:line 306} [(lit (array 2 Op) OpAMD64XORLmodify OpAMD64LEAQ4) OpAMD64XORLmodifyidx4]
+    ^{:line 307} [(lit (array 2 Op) OpAMD64XORLmodify OpAMD64LEAQ8) OpAMD64XORLmodifyidx8]
+    ^{:line 308} [(lit (array 2 Op) OpAMD64XORQmodify OpAMD64LEAQ1) OpAMD64XORQmodifyidx1]
+    ^{:line 309} [(lit (array 2 Op) OpAMD64XORQmodify OpAMD64LEAQ8) OpAMD64XORQmodifyidx8]
+
+    ^{:line 311} [(lit (array 2 Op) OpAMD64ADDLconstmodify OpAMD64ADDQ) OpAMD64ADDLconstmodifyidx1]
+    ^{:line 312} [(lit (array 2 Op) OpAMD64ADDQconstmodify OpAMD64ADDQ) OpAMD64ADDQconstmodifyidx1]
+    ^{:line 313} [(lit (array 2 Op) OpAMD64ANDLconstmodify OpAMD64ADDQ) OpAMD64ANDLconstmodifyidx1]
+    ^{:line 314} [(lit (array 2 Op) OpAMD64ANDQconstmodify OpAMD64ADDQ) OpAMD64ANDQconstmodifyidx1]
+    ^{:line 315} [(lit (array 2 Op) OpAMD64ORLconstmodify OpAMD64ADDQ) OpAMD64ORLconstmodifyidx1]
+    ^{:line 316} [(lit (array 2 Op) OpAMD64ORQconstmodify OpAMD64ADDQ) OpAMD64ORQconstmodifyidx1]
+    ^{:line 317} [(lit (array 2 Op) OpAMD64XORLconstmodify OpAMD64ADDQ) OpAMD64XORLconstmodifyidx1]
+    ^{:line 318} [(lit (array 2 Op) OpAMD64XORQconstmodify OpAMD64ADDQ) OpAMD64XORQconstmodifyidx1]
+
+    ^{:line 320} [(lit (array 2 Op) OpAMD64ADDLconstmodify OpAMD64LEAQ1) OpAMD64ADDLconstmodifyidx1]
+    ^{:line 321} [(lit (array 2 Op) OpAMD64ADDLconstmodify OpAMD64LEAQ4) OpAMD64ADDLconstmodifyidx4]
+    ^{:line 322} [(lit (array 2 Op) OpAMD64ADDLconstmodify OpAMD64LEAQ8) OpAMD64ADDLconstmodifyidx8]
+    ^{:line 323} [(lit (array 2 Op) OpAMD64ADDQconstmodify OpAMD64LEAQ1) OpAMD64ADDQconstmodifyidx1]
+    ^{:line 324} [(lit (array 2 Op) OpAMD64ADDQconstmodify OpAMD64LEAQ8) OpAMD64ADDQconstmodifyidx8]
+    ^{:line 325} [(lit (array 2 Op) OpAMD64ANDLconstmodify OpAMD64LEAQ1) OpAMD64ANDLconstmodifyidx1]
+    ^{:line 326} [(lit (array 2 Op) OpAMD64ANDLconstmodify OpAMD64LEAQ4) OpAMD64ANDLconstmodifyidx4]
+    ^{:line 327} [(lit (array 2 Op) OpAMD64ANDLconstmodify OpAMD64LEAQ8) OpAMD64ANDLconstmodifyidx8]
+    ^{:line 328} [(lit (array 2 Op) OpAMD64ANDQconstmodify OpAMD64LEAQ1) OpAMD64ANDQconstmodifyidx1]
+    ^{:line 329} [(lit (array 2 Op) OpAMD64ANDQconstmodify OpAMD64LEAQ8) OpAMD64ANDQconstmodifyidx8]
+    ^{:line 330} [(lit (array 2 Op) OpAMD64ORLconstmodify OpAMD64LEAQ1) OpAMD64ORLconstmodifyidx1]
+    ^{:line 331} [(lit (array 2 Op) OpAMD64ORLconstmodify OpAMD64LEAQ4) OpAMD64ORLconstmodifyidx4]
+    ^{:line 332} [(lit (array 2 Op) OpAMD64ORLconstmodify OpAMD64LEAQ8) OpAMD64ORLconstmodifyidx8]
+    ^{:line 333} [(lit (array 2 Op) OpAMD64ORQconstmodify OpAMD64LEAQ1) OpAMD64ORQconstmodifyidx1]
+    ^{:line 334} [(lit (array 2 Op) OpAMD64ORQconstmodify OpAMD64LEAQ8) OpAMD64ORQconstmodifyidx8]
+    ^{:line 335} [(lit (array 2 Op) OpAMD64XORLconstmodify OpAMD64LEAQ1) OpAMD64XORLconstmodifyidx1]
+    ^{:line 336} [(lit (array 2 Op) OpAMD64XORLconstmodify OpAMD64LEAQ4) OpAMD64XORLconstmodifyidx4]
+    ^{:line 337} [(lit (array 2 Op) OpAMD64XORLconstmodify OpAMD64LEAQ8) OpAMD64XORLconstmodifyidx8]
+    ^{:line 338} [(lit (array 2 Op) OpAMD64XORQconstmodify OpAMD64LEAQ1) OpAMD64XORQconstmodifyidx1]
+    ^{:line 339} [(lit (array 2 Op) OpAMD64XORQconstmodify OpAMD64LEAQ8) OpAMD64XORQconstmodifyidx8]
+
+    ^{:line 341} [(lit (array 2 Op) OpAMD64ADDSSload OpAMD64LEAQ1) OpAMD64ADDSSloadidx1]
+    ^{:line 342} [(lit (array 2 Op) OpAMD64ADDSSload OpAMD64LEAQ4) OpAMD64ADDSSloadidx4]
+    ^{:line 343} [(lit (array 2 Op) OpAMD64ADDSDload OpAMD64LEAQ1) OpAMD64ADDSDloadidx1]
+    ^{:line 344} [(lit (array 2 Op) OpAMD64ADDSDload OpAMD64LEAQ8) OpAMD64ADDSDloadidx8]
+    ^{:line 345} [(lit (array 2 Op) OpAMD64SUBSSload OpAMD64LEAQ1) OpAMD64SUBSSloadidx1]
+    ^{:line 346} [(lit (array 2 Op) OpAMD64SUBSSload OpAMD64LEAQ4) OpAMD64SUBSSloadidx4]
+    ^{:line 347} [(lit (array 2 Op) OpAMD64SUBSDload OpAMD64LEAQ1) OpAMD64SUBSDloadidx1]
+    ^{:line 348} [(lit (array 2 Op) OpAMD64SUBSDload OpAMD64LEAQ8) OpAMD64SUBSDloadidx8]
+    ^{:line 349} [(lit (array 2 Op) OpAMD64MULSSload OpAMD64LEAQ1) OpAMD64MULSSloadidx1]
+    ^{:line 350} [(lit (array 2 Op) OpAMD64MULSSload OpAMD64LEAQ4) OpAMD64MULSSloadidx4]
+    ^{:line 351} [(lit (array 2 Op) OpAMD64MULSDload OpAMD64LEAQ1) OpAMD64MULSDloadidx1]
+    ^{:line 352} [(lit (array 2 Op) OpAMD64MULSDload OpAMD64LEAQ8) OpAMD64MULSDloadidx8]
+    ^{:line 353} [(lit (array 2 Op) OpAMD64DIVSSload OpAMD64LEAQ1) OpAMD64DIVSSloadidx1]
+    ^{:line 354} [(lit (array 2 Op) OpAMD64DIVSSload OpAMD64LEAQ4) OpAMD64DIVSSloadidx4]
+    ^{:line 355} [(lit (array 2 Op) OpAMD64DIVSDload OpAMD64LEAQ1) OpAMD64DIVSDloadidx1]
+    ^{:line 356} [(lit (array 2 Op) OpAMD64DIVSDload OpAMD64LEAQ8) OpAMD64DIVSDloadidx8]
+
+    ^{:line 358} [(lit (array 2 Op) OpAMD64SARXLload OpAMD64ADDQ) OpAMD64SARXLloadidx1]
+    ^{:line 359} [(lit (array 2 Op) OpAMD64SARXQload OpAMD64ADDQ) OpAMD64SARXQloadidx1]
+    ^{:line 360} [(lit (array 2 Op) OpAMD64SHLXLload OpAMD64ADDQ) OpAMD64SHLXLloadidx1]
+    ^{:line 361} [(lit (array 2 Op) OpAMD64SHLXQload OpAMD64ADDQ) OpAMD64SHLXQloadidx1]
+    ^{:line 362} [(lit (array 2 Op) OpAMD64SHRXLload OpAMD64ADDQ) OpAMD64SHRXLloadidx1]
+    ^{:line 363} [(lit (array 2 Op) OpAMD64SHRXQload OpAMD64ADDQ) OpAMD64SHRXQloadidx1]
+
+    ^{:line 365} [(lit (array 2 Op) OpAMD64SARXLload OpAMD64LEAQ1) OpAMD64SARXLloadidx1]
+    ^{:line 366} [(lit (array 2 Op) OpAMD64SARXLload OpAMD64LEAQ4) OpAMD64SARXLloadidx4]
+    ^{:line 367} [(lit (array 2 Op) OpAMD64SARXLload OpAMD64LEAQ8) OpAMD64SARXLloadidx8]
+    ^{:line 368} [(lit (array 2 Op) OpAMD64SARXQload OpAMD64LEAQ1) OpAMD64SARXQloadidx1]
+    ^{:line 369} [(lit (array 2 Op) OpAMD64SARXQload OpAMD64LEAQ8) OpAMD64SARXQloadidx8]
+    ^{:line 370} [(lit (array 2 Op) OpAMD64SHLXLload OpAMD64LEAQ1) OpAMD64SHLXLloadidx1]
+    ^{:line 371} [(lit (array 2 Op) OpAMD64SHLXLload OpAMD64LEAQ4) OpAMD64SHLXLloadidx4]
+    ^{:line 372} [(lit (array 2 Op) OpAMD64SHLXLload OpAMD64LEAQ8) OpAMD64SHLXLloadidx8]
+    ^{:line 373} [(lit (array 2 Op) OpAMD64SHLXQload OpAMD64LEAQ1) OpAMD64SHLXQloadidx1]
+    ^{:line 374} [(lit (array 2 Op) OpAMD64SHLXQload OpAMD64LEAQ8) OpAMD64SHLXQloadidx8]
+    ^{:line 375} [(lit (array 2 Op) OpAMD64SHRXLload OpAMD64LEAQ1) OpAMD64SHRXLloadidx1]
+    ^{:line 376} [(lit (array 2 Op) OpAMD64SHRXLload OpAMD64LEAQ4) OpAMD64SHRXLloadidx4]
+    ^{:line 377} [(lit (array 2 Op) OpAMD64SHRXLload OpAMD64LEAQ8) OpAMD64SHRXLloadidx8]
+    ^{:line 378} [(lit (array 2 Op) OpAMD64SHRXQload OpAMD64LEAQ1) OpAMD64SHRXQloadidx1]
+    ^{:line 379} [(lit (array 2 Op) OpAMD64SHRXQload OpAMD64LEAQ8) OpAMD64SHRXQloadidx8]
+
+    ;; amd64/v3
+    ^{:line 382} [(lit (array 2 Op) OpAMD64MOVBELload OpAMD64ADDQ) OpAMD64MOVBELloadidx1]
+    ^{:line 383} [(lit (array 2 Op) OpAMD64MOVBEQload OpAMD64ADDQ) OpAMD64MOVBEQloadidx1]
+    ^{:line 384} [(lit (array 2 Op) OpAMD64MOVBELload OpAMD64LEAQ1) OpAMD64MOVBELloadidx1]
+    ^{:line 385} [(lit (array 2 Op) OpAMD64MOVBELload OpAMD64LEAQ4) OpAMD64MOVBELloadidx4]
+    ^{:line 386} [(lit (array 2 Op) OpAMD64MOVBELload OpAMD64LEAQ8) OpAMD64MOVBELloadidx8]
+    ^{:line 387} [(lit (array 2 Op) OpAMD64MOVBEQload OpAMD64LEAQ1) OpAMD64MOVBEQloadidx1]
+    ^{:line 388} [(lit (array 2 Op) OpAMD64MOVBEQload OpAMD64LEAQ8) OpAMD64MOVBEQloadidx8]
+
+    ^{:line 390} [(lit (array 2 Op) OpAMD64MOVBEWstore OpAMD64ADDQ) OpAMD64MOVBEWstoreidx1]
+    ^{:line 391} [(lit (array 2 Op) OpAMD64MOVBELstore OpAMD64ADDQ) OpAMD64MOVBELstoreidx1]
+    ^{:line 392} [(lit (array 2 Op) OpAMD64MOVBEQstore OpAMD64ADDQ) OpAMD64MOVBEQstoreidx1]
+    ^{:line 393} [(lit (array 2 Op) OpAMD64MOVBEWstore OpAMD64LEAQ1) OpAMD64MOVBEWstoreidx1]
+    ^{:line 394} [(lit (array 2 Op) OpAMD64MOVBEWstore OpAMD64LEAQ2) OpAMD64MOVBEWstoreidx2]
+    ^{:line 395} [(lit (array 2 Op) OpAMD64MOVBELstore OpAMD64LEAQ1) OpAMD64MOVBELstoreidx1]
+    ^{:line 396} [(lit (array 2 Op) OpAMD64MOVBELstore OpAMD64LEAQ4) OpAMD64MOVBELstoreidx4]
+    ^{:line 397} [(lit (array 2 Op) OpAMD64MOVBELstore OpAMD64LEAQ8) OpAMD64MOVBELstoreidx8]
+    ^{:line 398} [(lit (array 2 Op) OpAMD64MOVBEQstore OpAMD64LEAQ1) OpAMD64MOVBEQstoreidx1]
+    ^{:line 399} [(lit (array 2 Op) OpAMD64MOVBEQstore OpAMD64LEAQ8) OpAMD64MOVBEQstoreidx8]
+
+    ;; 386
+    ^{:line 402} [(lit (array 2 Op) Op386MOVBload Op386ADDL) Op386MOVBloadidx1]
+    ^{:line 403} [(lit (array 2 Op) Op386MOVWload Op386ADDL) Op386MOVWloadidx1]
+    ^{:line 404} [(lit (array 2 Op) Op386MOVLload Op386ADDL) Op386MOVLloadidx1]
+    ^{:line 405} [(lit (array 2 Op) Op386MOVSSload Op386ADDL) Op386MOVSSloadidx1]
+    ^{:line 406} [(lit (array 2 Op) Op386MOVSDload Op386ADDL) Op386MOVSDloadidx1]
+
+    ^{:line 408} [(lit (array 2 Op) Op386MOVBstore Op386ADDL) Op386MOVBstoreidx1]
+    ^{:line 409} [(lit (array 2 Op) Op386MOVWstore Op386ADDL) Op386MOVWstoreidx1]
+    ^{:line 410} [(lit (array 2 Op) Op386MOVLstore Op386ADDL) Op386MOVLstoreidx1]
+    ^{:line 411} [(lit (array 2 Op) Op386MOVSSstore Op386ADDL) Op386MOVSSstoreidx1]
+    ^{:line 412} [(lit (array 2 Op) Op386MOVSDstore Op386ADDL) Op386MOVSDstoreidx1]
+
+    ^{:line 414} [(lit (array 2 Op) Op386MOVBstoreconst Op386ADDL) Op386MOVBstoreconstidx1]
+    ^{:line 415} [(lit (array 2 Op) Op386MOVWstoreconst Op386ADDL) Op386MOVWstoreconstidx1]
+    ^{:line 416} [(lit (array 2 Op) Op386MOVLstoreconst Op386ADDL) Op386MOVLstoreconstidx1]
+
+    ^{:line 418} [(lit (array 2 Op) Op386MOVBload Op386LEAL1) Op386MOVBloadidx1]
+    ^{:line 419} [(lit (array 2 Op) Op386MOVWload Op386LEAL1) Op386MOVWloadidx1]
+    ^{:line 420} [(lit (array 2 Op) Op386MOVWload Op386LEAL2) Op386MOVWloadidx2]
+    ^{:line 421} [(lit (array 2 Op) Op386MOVLload Op386LEAL1) Op386MOVLloadidx1]
+    ^{:line 422} [(lit (array 2 Op) Op386MOVLload Op386LEAL4) Op386MOVLloadidx4]
+    ^{:line 423} [(lit (array 2 Op) Op386MOVSSload Op386LEAL1) Op386MOVSSloadidx1]
+    ^{:line 424} [(lit (array 2 Op) Op386MOVSSload Op386LEAL4) Op386MOVSSloadidx4]
+    ^{:line 425} [(lit (array 2 Op) Op386MOVSDload Op386LEAL1) Op386MOVSDloadidx1]
+    ^{:line 426} [(lit (array 2 Op) Op386MOVSDload Op386LEAL8) Op386MOVSDloadidx8]
+
+    ^{:line 428} [(lit (array 2 Op) Op386MOVBstore Op386LEAL1) Op386MOVBstoreidx1]
+    ^{:line 429} [(lit (array 2 Op) Op386MOVWstore Op386LEAL1) Op386MOVWstoreidx1]
+    ^{:line 430} [(lit (array 2 Op) Op386MOVWstore Op386LEAL2) Op386MOVWstoreidx2]
+    ^{:line 431} [(lit (array 2 Op) Op386MOVLstore Op386LEAL1) Op386MOVLstoreidx1]
+    ^{:line 432} [(lit (array 2 Op) Op386MOVLstore Op386LEAL4) Op386MOVLstoreidx4]
+    ^{:line 433} [(lit (array 2 Op) Op386MOVSSstore Op386LEAL1) Op386MOVSSstoreidx1]
+    ^{:line 434} [(lit (array 2 Op) Op386MOVSSstore Op386LEAL4) Op386MOVSSstoreidx4]
+    ^{:line 435} [(lit (array 2 Op) Op386MOVSDstore Op386LEAL1) Op386MOVSDstoreidx1]
+    ^{:line 436} [(lit (array 2 Op) Op386MOVSDstore Op386LEAL8) Op386MOVSDstoreidx8]
+
+    ^{:line 438} [(lit (array 2 Op) Op386MOVBstoreconst Op386LEAL1) Op386MOVBstoreconstidx1]
+    ^{:line 439} [(lit (array 2 Op) Op386MOVWstoreconst Op386LEAL1) Op386MOVWstoreconstidx1]
+    ^{:line 440} [(lit (array 2 Op) Op386MOVWstoreconst Op386LEAL2) Op386MOVWstoreconstidx2]
+    ^{:line 441} [(lit (array 2 Op) Op386MOVLstoreconst Op386LEAL1) Op386MOVLstoreconstidx1]
+    ^{:line 442} [(lit (array 2 Op) Op386MOVLstoreconst Op386LEAL4) Op386MOVLstoreconstidx4]
+
+    ^{:line 444} [(lit (array 2 Op) Op386ADDLload Op386LEAL4) Op386ADDLloadidx4]
+    ^{:line 445} [(lit (array 2 Op) Op386SUBLload Op386LEAL4) Op386SUBLloadidx4]
+    ^{:line 446} [(lit (array 2 Op) Op386MULLload Op386LEAL4) Op386MULLloadidx4]
+    ^{:line 447} [(lit (array 2 Op) Op386ANDLload Op386LEAL4) Op386ANDLloadidx4]
+    ^{:line 448} [(lit (array 2 Op) Op386ORLload Op386LEAL4) Op386ORLloadidx4]
+    ^{:line 449} [(lit (array 2 Op) Op386XORLload Op386LEAL4) Op386XORLloadidx4]
+
+    ^{:line 451} [(lit (array 2 Op) Op386ADDLmodify Op386LEAL4) Op386ADDLmodifyidx4]
+    ^{:line 452} [(lit (array 2 Op) Op386SUBLmodify Op386LEAL4) Op386SUBLmodifyidx4]
+    ^{:line 453} [(lit (array 2 Op) Op386ANDLmodify Op386LEAL4) Op386ANDLmodifyidx4]
+    ^{:line 454} [(lit (array 2 Op) Op386ORLmodify Op386LEAL4) Op386ORLmodifyidx4]
+    ^{:line 455} [(lit (array 2 Op) Op386XORLmodify Op386LEAL4) Op386XORLmodifyidx4]
+
+    ^{:line 457} [(lit (array 2 Op) Op386ADDLconstmodify Op386LEAL4) Op386ADDLconstmodifyidx4]
+    ^{:line 458} [(lit (array 2 Op) Op386ANDLconstmodify Op386LEAL4) Op386ANDLconstmodifyidx4]
+    ^{:line 459} [(lit (array 2 Op) Op386ORLconstmodify Op386LEAL4) Op386ORLconstmodifyidx4]
+    ^{:line 460} [(lit (array 2 Op) Op386XORLconstmodify Op386LEAL4) Op386XORLconstmodifyidx4]
+
+    ;; s390x
+    ^{:line 463} [(lit (array 2 Op) OpS390XMOVDload OpS390XADD) OpS390XMOVDloadidx]
+    ^{:line 464} [(lit (array 2 Op) OpS390XMOVWload OpS390XADD) OpS390XMOVWloadidx]
+    ^{:line 465} [(lit (array 2 Op) OpS390XMOVHload OpS390XADD) OpS390XMOVHloadidx]
+    ^{:line 466} [(lit (array 2 Op) OpS390XMOVBload OpS390XADD) OpS390XMOVBloadidx]
+
+    ^{:line 468} [(lit (array 2 Op) OpS390XMOVWZload OpS390XADD) OpS390XMOVWZloadidx]
+    ^{:line 469} [(lit (array 2 Op) OpS390XMOVHZload OpS390XADD) OpS390XMOVHZloadidx]
+    ^{:line 470} [(lit (array 2 Op) OpS390XMOVBZload OpS390XADD) OpS390XMOVBZloadidx]
+
+    ^{:line 472} [(lit (array 2 Op) OpS390XMOVDBRload OpS390XADD) OpS390XMOVDBRloadidx]
+    ^{:line 473} [(lit (array 2 Op) OpS390XMOVWBRload OpS390XADD) OpS390XMOVWBRloadidx]
+    ^{:line 474} [(lit (array 2 Op) OpS390XMOVHBRload OpS390XADD) OpS390XMOVHBRloadidx]
+
+    ^{:line 476} [(lit (array 2 Op) OpS390XFMOVDload OpS390XADD) OpS390XFMOVDloadidx]
+    ^{:line 477} [(lit (array 2 Op) OpS390XFMOVSload OpS390XADD) OpS390XFMOVSloadidx]
+
+    ^{:line 479} [(lit (array 2 Op) OpS390XMOVDstore OpS390XADD) OpS390XMOVDstoreidx]
+    ^{:line 480} [(lit (array 2 Op) OpS390XMOVWstore OpS390XADD) OpS390XMOVWstoreidx]
+    ^{:line 481} [(lit (array 2 Op) OpS390XMOVHstore OpS390XADD) OpS390XMOVHstoreidx]
+    ^{:line 482} [(lit (array 2 Op) OpS390XMOVBstore OpS390XADD) OpS390XMOVBstoreidx]
+
+    ^{:line 484} [(lit (array 2 Op) OpS390XMOVDBRstore OpS390XADD) OpS390XMOVDBRstoreidx]
+    ^{:line 485} [(lit (array 2 Op) OpS390XMOVWBRstore OpS390XADD) OpS390XMOVWBRstoreidx]
+    ^{:line 486} [(lit (array 2 Op) OpS390XMOVHBRstore OpS390XADD) OpS390XMOVHBRstoreidx]
+
+    ^{:line 488} [(lit (array 2 Op) OpS390XFMOVDstore OpS390XADD) OpS390XFMOVDstoreidx]
+    ^{:line 489} [(lit (array 2 Op) OpS390XFMOVSstore OpS390XADD) OpS390XFMOVSstoreidx]
+
+    ^{:line 491} [(lit (array 2 Op) OpS390XMOVDload OpS390XMOVDaddridx) OpS390XMOVDloadidx]
+    ^{:line 492} [(lit (array 2 Op) OpS390XMOVWload OpS390XMOVDaddridx) OpS390XMOVWloadidx]
+    ^{:line 493} [(lit (array 2 Op) OpS390XMOVHload OpS390XMOVDaddridx) OpS390XMOVHloadidx]
+    ^{:line 494} [(lit (array 2 Op) OpS390XMOVBload OpS390XMOVDaddridx) OpS390XMOVBloadidx]
+
+    ^{:line 496} [(lit (array 2 Op) OpS390XMOVWZload OpS390XMOVDaddridx) OpS390XMOVWZloadidx]
+    ^{:line 497} [(lit (array 2 Op) OpS390XMOVHZload OpS390XMOVDaddridx) OpS390XMOVHZloadidx]
+    ^{:line 498} [(lit (array 2 Op) OpS390XMOVBZload OpS390XMOVDaddridx) OpS390XMOVBZloadidx]
+
+    ^{:line 500} [(lit (array 2 Op) OpS390XMOVDBRload OpS390XMOVDaddridx) OpS390XMOVDBRloadidx]
+    ^{:line 501} [(lit (array 2 Op) OpS390XMOVWBRload OpS390XMOVDaddridx) OpS390XMOVWBRloadidx]
+    ^{:line 502} [(lit (array 2 Op) OpS390XMOVHBRload OpS390XMOVDaddridx) OpS390XMOVHBRloadidx]
+
+    ^{:line 504} [(lit (array 2 Op) OpS390XFMOVDload OpS390XMOVDaddridx) OpS390XFMOVDloadidx]
+    ^{:line 505} [(lit (array 2 Op) OpS390XFMOVSload OpS390XMOVDaddridx) OpS390XFMOVSloadidx]
+
+    ^{:line 507} [(lit (array 2 Op) OpS390XMOVDstore OpS390XMOVDaddridx) OpS390XMOVDstoreidx]
+    ^{:line 508} [(lit (array 2 Op) OpS390XMOVWstore OpS390XMOVDaddridx) OpS390XMOVWstoreidx]
+    ^{:line 509} [(lit (array 2 Op) OpS390XMOVHstore OpS390XMOVDaddridx) OpS390XMOVHstoreidx]
+    ^{:line 510} [(lit (array 2 Op) OpS390XMOVBstore OpS390XMOVDaddridx) OpS390XMOVBstoreidx]
+
+    ^{:line 512} [(lit (array 2 Op) OpS390XMOVDBRstore OpS390XMOVDaddridx) OpS390XMOVDBRstoreidx]
+    ^{:line 513} [(lit (array 2 Op) OpS390XMOVWBRstore OpS390XMOVDaddridx) OpS390XMOVWBRstoreidx]
+    ^{:line 514} [(lit (array 2 Op) OpS390XMOVHBRstore OpS390XMOVDaddridx) OpS390XMOVHBRstoreidx]
+
+    ^{:line 516} [(lit (array 2 Op) OpS390XFMOVDstore OpS390XMOVDaddridx) OpS390XFMOVDstoreidx]
+    ^{:line 517} [(lit (array 2 Op) OpS390XFMOVSstore OpS390XMOVDaddridx) OpS390XFMOVSstoreidx]))

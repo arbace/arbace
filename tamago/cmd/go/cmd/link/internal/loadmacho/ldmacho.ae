@@ -1,0 +1,809 @@
+;; Copyright 2017 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; Package loadmacho implements a Mach-O file reader.
+(in-ns 'go.cmd.link.internal.loadmacho) (go/file "ldmacho.go" :doc "Package loadmacho implements a Mach-O file reader.\n" :imports [
+
+
+    ^{:line 9} [bytes "bytes"]
+    ^{:line 10} [bio "cmd/internal/bio"]
+    ^{:line 11} [objabi "cmd/internal/objabi"]
+    ^{:line 12} [sys "cmd/internal/sys"]
+    ^{:line 13} [loader "cmd/link/internal/loader"]
+    ^{:line 14} [sym "cmd/link/internal/sym"]
+    ^{:line 15} [binary "encoding/binary"]
+    ^{:line 16} [fmt "fmt"]])
+
+
+;; /*
+;; Derived from Plan 9 from User Space's src/libmach/elf.h, elf.c
+;; https://github.com/9fans/plan9port/tree/master/src/libmach/
+;; 
+;; Copyright © 2004 Russ Cox.
+;; Portions Copyright © 2008-2010 Google Inc.
+;; Portions Copyright © 2010 The Go Authors.
+;; 
+;; Permission is hereby granted, free of charge, to any person obtaining a copy
+;; of this software and associated documentation files (the "Software"), to deal
+;; in the Software without restriction, including without limitation the rights
+;; to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+;; copies of the Software, and to permit persons to whom the Software is
+;; furnished to do so, subject to the following conditions:
+;; 
+;; The above copyright notice and this permission notice shall be included in
+;; all copies or substantial portions of the Software.
+;; 
+;; THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+;; IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+;; FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL THE
+;; AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+;; LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+;; OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+;; THE SOFTWARE.
+;; */
+
+
+(go/const "TODO(crawshaw): de-duplicate these symbols with cmd/link/internal/ld\n"
+  ^{:line 48} [^{:val 0} MACHO_X86_64_RELOC_UNSIGNED 0]
+  ^{:line 49} [^{:val 1} MACHO_X86_64_RELOC_SIGNED 1]
+  ^{:line 50} [^{:val 10} MACHO_ARM64_RELOC_ADDEND 10])
+
+
+(go/type ldMachoObj (struct
+    ^{:line 54 :tag (* bio/Reader)} f
+    ^{:line 55 :tag int64} base ; off in f where Mach-O begins
+    ^{:line 56 :tag int64} length ; length of Mach-O
+    ^{:line 57 :tag bool} is64
+    ^{:line 58 :tag string} name
+    ^{:line 59 :tag binary/ByteOrder} e
+    ^{:line 60 :tag uint} cputype
+    ^{:line 61 :tag uint} subcputype
+    ^{:line 62 :tag uint32} filetype
+    ^{:line 63 :tag uint32} flags
+    ^{:line 64 :tag (slice ldMachoCmd)} cmd
+    ^{:line 65 :tag uint} ncmd))
+
+
+(go/type ldMachoCmd (struct
+    ^{:line 69 :tag int} type_
+    ^{:line 70 :tag uint32} off
+    ^{:line 71 :tag uint32} size
+    ^{:line 72 :tag ldMachoSeg} seg
+    ^{:line 73 :tag ldMachoSymtab} sym
+    ^{:line 74 :tag ldMachoDysymtab} dsym))
+
+
+(go/type ldMachoSeg (struct
+    ^{:line 78 :tag string} name
+    ^{:line 79 :tag uint64} vmaddr
+    ^{:line 80 :tag uint64} vmsize
+    ^{:line 81 :tag uint32} fileoff
+    ^{:line 82 :tag uint32} filesz
+    ^{:line 83 :tag uint32} maxprot
+    ^{:line 84 :tag uint32} initprot
+    ^{:line 85 :tag uint32} nsect
+    ^{:line 86 :tag uint32} flags
+    ^{:line 87 :tag (slice ldMachoSect)} sect))
+
+
+(go/type ldMachoSect (struct
+    ^{:line 91 :tag string} name
+    ^{:line 92 :tag string} segname
+    ^{:line 93 :tag uint64} addr
+    ^{:line 94 :tag uint64} size
+    ^{:line 95 :tag uint32} off
+    ^{:line 96 :tag uint32} align
+    ^{:line 97 :tag uint32} reloff
+    ^{:line 98 :tag uint32} nreloc
+    ^{:line 99 :tag uint32} flags
+    ^{:line 100 :tag uint32} res1
+    ^{:line 101 :tag uint32} res2
+    ^{:line 102 :tag loader/Sym} sym
+    ^{:line 103 :tag (slice ldMachoRel)} rel))
+
+
+(go/type ldMachoRel (struct
+    ^{:line 107 :tag uint32} addr
+    ^{:line 108 :tag uint32} symnum
+    ^{:line 109 :tag uint8} pcrel
+    ^{:line 110 :tag uint8} length
+    ^{:line 111 :tag uint8} extrn
+    ^{:line 112 :tag uint8} type_
+    ^{:line 113 :tag uint8} scattered
+    ^{:line 114 :tag uint32} value))
+
+
+(go/type ldMachoSymtab (struct
+    ^{:line 118 :tag uint32} symoff
+    ^{:line 119 :tag uint32} nsym
+    ^{:line 120 :tag uint32} stroff
+    ^{:line 121 :tag uint32} strsize
+    ^{:line 122 :tag (slice byte)} str
+    ^{:line 123 :tag (slice ldMachoSym)} sym))
+
+
+(go/type ldMachoSym (struct
+    ^{:line 127 :tag string} name
+    ^{:line 128 :tag uint8} type_
+    ^{:line 129 :tag uint8} sectnum
+    ^{:line 130 :tag uint16} desc
+    ^{:line 131 :tag int8} kind
+    ^{:line 132 :tag uint64} value
+    ^{:line 133 :tag loader/Sym} sym))
+
+
+(go/type ldMachoDysymtab (struct
+    ^{:line 137 :tag uint32} ilocalsym
+    ^{:line 138 :tag uint32} nlocalsym
+    ^{:line 139 :tag uint32} iextdefsym
+    ^{:line 140 :tag uint32} nextdefsym
+    ^{:line 141 :tag uint32} iundefsym
+    ^{:line 142 :tag uint32} nundefsym
+    ^{:line 143 :tag uint32} tocoff
+    ^{:line 144 :tag uint32} ntoc
+    ^{:line 145 :tag uint32} modtaboff
+    ^{:line 146 :tag uint32} nmodtab
+    ^{:line 147 :tag uint32} extrefsymoff
+    ^{:line 148 :tag uint32} nextrefsyms
+    ^{:line 149 :tag uint32} indirectsymoff
+    ^{:line 150 :tag uint32} nindirectsyms
+    ^{:line 151 :tag uint32} extreloff
+    ^{:line 152 :tag uint32} nextrel
+    ^{:line 153 :tag uint32} locreloff
+    ^{:line 154 :tag uint32} nlocrel
+    ^{:line 155 :tag (slice uint32)} indir))
+
+
+
+(go/const "ldMachoSym.type_\n"
+  ^{:line 160} [^{:val 1} N_EXT 0x01]
+  ^{:line 161} [^{:val 30} N_TYPE 0x1e]
+  ^{:line 162} [^{:val 224} N_STAB 0xe0])
+
+
+
+(go/const "ldMachoSym.desc\n"
+  ^{:line 167} [^{:val 64} N_WEAK_REF 0x40]
+  ^{:line 168} [^{:val 128} N_WEAK_DEF 0x80])
+
+
+(go/const
+  ^{:line 172} [^{:val 1} LdMachoCpuVax 1]
+  ^{:line 173} [^{:val 6} LdMachoCpu68000 6]
+  ^{:line 174} [^{:val 7} LdMachoCpu386 7]
+  ^{:line 175} [^{:val 16777223} LdMachoCpuAmd64 (bit-or (<< 1 24) 7)]
+  ^{:line 176} [^{:val 8} LdMachoCpuMips 8]
+  ^{:line 177} [^{:val 10} LdMachoCpu98000 10]
+  ^{:line 178} [^{:val 11} LdMachoCpuHppa 11]
+  ^{:line 179} [^{:val 12} LdMachoCpuArm 12]
+  ^{:line 180} [^{:val 16777228} LdMachoCpuArm64 (bit-or (<< 1 24) 12)]
+  ^{:line 181} [^{:val 13} LdMachoCpu88000 13]
+  ^{:line 182} [^{:val 14} LdMachoCpuSparc 14]
+  ^{:line 183} [^{:val 15} LdMachoCpu860 15]
+  ^{:line 184} [^{:val 16} LdMachoCpuAlpha 16]
+  ^{:line 185} [^{:val 18} LdMachoCpuPower 18]
+  ^{:line 186} [^{:val 1} LdMachoCmdSegment 1]
+  ^{:line 187} [^{:val 2} LdMachoCmdSymtab 2]
+  ^{:line 188} [^{:val 3} LdMachoCmdSymseg 3]
+  ^{:line 189} [^{:val 4} LdMachoCmdThread 4]
+  ^{:line 190} [^{:val 11} LdMachoCmdDysymtab 11]
+  ^{:line 191} [^{:val 25} LdMachoCmdSegment64 25]
+  ^{:line 192} [^{:val 1} LdMachoFileObject 1]
+  ^{:line 193} [^{:val 2} LdMachoFileExecutable 2]
+  ^{:line 194} [^{:val 3} LdMachoFileFvmlib 3]
+  ^{:line 195} [^{:val 4} LdMachoFileCore 4]
+  ^{:line 196} [^{:val 5} LdMachoFilePreload 5])
+
+
+^{:go/end 315} (go/func unpackcmd ^int [^{:tag (slice byte)} p ^{:tag (* ldMachoObj)} m ^{:tag (* ldMachoCmd)} c ^uint type_ ^uint sz]
+  ^{:go/breaks [[5 314]]} (let [e4 (.-Uint32 (.-e m))
+      ^{:line 201} e8 (.-Uint64 (.-e m))]
+
+    (set! (.-type_ c) (conv int type_))
+    (set! (.-size c) (conv uint32 sz))
+    (switch type_
+      (default
+        (return -1))
+
+      (case [LdMachoCmdSegment]
+        (when (< sz 56)
+          (return -1))
+
+        (set! (.-name (.-seg c)) (cstring (subslice p 8 24)))
+        (set! (.-vmaddr (.-seg c)) (conv uint64 (e4 (subslice p 24))))
+        (set! (.-vmsize (.-seg c)) (conv uint64 (e4 (subslice p 28))))
+        (set! (.-fileoff (.-seg c)) (e4 (subslice p 32)))
+        (set! (.-filesz (.-seg c)) (e4 (subslice p 36)))
+        (set! (.-maxprot (.-seg c)) (e4 (subslice p 40)))
+        (set! (.-initprot (.-seg c)) (e4 (subslice p 44)))
+        (set! (.-nsect (.-seg c)) (e4 (subslice p 48)))
+        (set! (.-flags (.-seg c)) (e4 (subslice p 52)))
+        (set! (.-sect (.-seg c)) (make (slice ldMachoSect) (.-nsect (.-seg c))))
+        (when (< (conv uint32 sz) (+ 56 (* (.-nsect (.-seg c)) 68)))
+          (return -1))
+
+        (set! p (subslice p 56))
+        (let [^{:tag (* ldMachoSect)} s (zero (* ldMachoSect))]
+          (for [i 0] (< (conv uint32 i) (.-nsect (.-seg c))) (inc! i)
+            (set! s (addr (aget (.-sect (.-seg c)) i)))
+            (set! (.-name s) (cstring (subslice p 0 16)))
+            (set! (.-segname s) (cstring (subslice p 16 32)))
+            (set! (.-addr s) (conv uint64 (e4 (subslice p 32))))
+            (set! (.-size s) (conv uint64 (e4 (subslice p 36))))
+            (set! (.-off s) (e4 (subslice p 40)))
+            (set! (.-align s) (e4 (subslice p 44)))
+            (set! (.-reloff s) (e4 (subslice p 48)))
+            (set! (.-nreloc s) (e4 (subslice p 52)))
+            (set! (.-flags s) (e4 (subslice p 56)))
+            (set! (.-res1 s) (e4 (subslice p 60)))
+            (set! (.-res2 s) (e4 (subslice p 64)))
+            (set! p (subslice p 68)))))
+
+
+      (case [LdMachoCmdSegment64]
+        (when (< sz 72)
+          (return -1))
+
+        (set! (.-name (.-seg c)) (cstring (subslice p 8 24)))
+        (set! (.-vmaddr (.-seg c)) (e8 (subslice p 24)))
+        (set! (.-vmsize (.-seg c)) (e8 (subslice p 32)))
+        (set! (.-fileoff (.-seg c)) (conv uint32 (e8 (subslice p 40))))
+        (set! (.-filesz (.-seg c)) (conv uint32 (e8 (subslice p 48))))
+        (set! (.-maxprot (.-seg c)) (e4 (subslice p 56)))
+        (set! (.-initprot (.-seg c)) (e4 (subslice p 60)))
+        (set! (.-nsect (.-seg c)) (e4 (subslice p 64)))
+        (set! (.-flags (.-seg c)) (e4 (subslice p 68)))
+        (set! (.-sect (.-seg c)) (make (slice ldMachoSect) (.-nsect (.-seg c))))
+        (when (< (conv uint32 sz) (+ 72 (* (.-nsect (.-seg c)) 80)))
+          (return -1))
+
+        (set! p (subslice p 72))
+        (let [^{:tag (* ldMachoSect)} s (zero (* ldMachoSect))]
+          (for [i 0] (< (conv uint32 i) (.-nsect (.-seg c))) (inc! i)
+            (set! s (addr (aget (.-sect (.-seg c)) i)))
+            (set! (.-name s) (cstring (subslice p 0 16)))
+            (set! (.-segname s) (cstring (subslice p 16 32)))
+            (set! (.-addr s) (e8 (subslice p 32)))
+            (set! (.-size s) (e8 (subslice p 40)))
+            (set! (.-off s) (e4 (subslice p 48)))
+            (set! (.-align s) (e4 (subslice p 52)))
+            (set! (.-reloff s) (e4 (subslice p 56)))
+            (set! (.-nreloc s) (e4 (subslice p 60)))
+            (set! (.-flags s) (e4 (subslice p 64)))
+            (set! (.-res1 s) (e4 (subslice p 68)))
+            (set! (.-res2 s) (e4 (subslice p 72)))
+
+            ;; p+76 is reserved
+            (set! p (subslice p 80)))))
+
+
+      (case [LdMachoCmdSymtab]
+        (when (< sz 24)
+          (return -1))
+
+        (set! (.-symoff (.-sym c)) (e4 (subslice p 8)))
+        (set! (.-nsym (.-sym c)) (e4 (subslice p 12)))
+        (set! (.-stroff (.-sym c)) (e4 (subslice p 16)))
+        (set! (.-strsize (.-sym c)) (e4 (subslice p 20))))
+
+      (case [LdMachoCmdDysymtab]
+        (when (< sz 80)
+          (return -1))
+
+        (set! (.-ilocalsym (.-dsym c)) (e4 (subslice p 8)))
+        (set! (.-nlocalsym (.-dsym c)) (e4 (subslice p 12)))
+        (set! (.-iextdefsym (.-dsym c)) (e4 (subslice p 16)))
+        (set! (.-nextdefsym (.-dsym c)) (e4 (subslice p 20)))
+        (set! (.-iundefsym (.-dsym c)) (e4 (subslice p 24)))
+        (set! (.-nundefsym (.-dsym c)) (e4 (subslice p 28)))
+        (set! (.-tocoff (.-dsym c)) (e4 (subslice p 32)))
+        (set! (.-ntoc (.-dsym c)) (e4 (subslice p 36)))
+        (set! (.-modtaboff (.-dsym c)) (e4 (subslice p 40)))
+        (set! (.-nmodtab (.-dsym c)) (e4 (subslice p 44)))
+        (set! (.-extrefsymoff (.-dsym c)) (e4 (subslice p 48)))
+        (set! (.-nextrefsyms (.-dsym c)) (e4 (subslice p 52)))
+        (set! (.-indirectsymoff (.-dsym c)) (e4 (subslice p 56)))
+        (set! (.-nindirectsyms (.-dsym c)) (e4 (subslice p 60)))
+        (set! (.-extreloff (.-dsym c)) (e4 (subslice p 64)))
+        (set! (.-nextrel (.-dsym c)) (e4 (subslice p 68)))
+        (set! (.-locreloff (.-dsym c)) (e4 (subslice p 72)))
+        (set! (.-nlocrel (.-dsym c)) (e4 (subslice p 76)))))
+
+
+    0))
+
+
+^{:go/end 361} (go/func macholoadrel ^int [^{:tag (* ldMachoObj)} m ^{:tag (* ldMachoSect)} sect]
+  (when (or (!= (.-rel sect) nil) (== (.-nreloc sect) 0))
+    (return 0))
+
+  (let [rel (make (slice ldMachoRel) (.-nreloc sect))]
+    (.MustSeek (.-f m) (+ (.-base m) (conv int64 (.-reloff sect))) 0)
+    ^{:go/breaks [5]} (let [(values buf _ err) (.Slice (.-f m) (conv uint64 (* (.-nreloc sect) 8)))]
+      (when (!= err nil)
+        (return -1))
+
+      (for [i (conv uint32 0)] (< i (.-nreloc sect)) (inc! i)
+        (let [r (addr (aget rel i))
+            ^{:line 329} p (subslice buf (* i 8))]
+          (set! (.-addr r) (.Uint32 (.-e m) p))
+
+          ;; TODO(rsc): Wrong interpretation for big-endian bitfields?
+          (if (!= (bit-and (.-addr r) 0x80000000) 0) (do
+              ;; scatterbrained relocation
+              (set! (.-scattered r) 1)
+
+              (let [v (>> (.-addr r) 24)]
+                (set! (.-addr r) bit-and 0xFFFFFF)
+                (set! (.-type_ r) (conv uint8 (bit-and v 0xF)))
+                (set! v >> 4)
+                (set! (.-length r) ^uint8 (<< 1 (bit-and v 3)))
+                (set! v >> 2)
+                (set! (.-pcrel r) (conv uint8 (bit-and v 1)))
+                (set! (.-value r) (.Uint32 (.-e m) (subslice p 4)))))
+
+            (let [v (.Uint32 (.-e m) (subslice p 4))]
+              (set! (.-symnum r) (bit-and v 0xFFFFFF))
+              (set! v >> 24)
+              (set! (.-pcrel r) (conv uint8 (bit-and v 1)))
+              (set! v >> 1)
+              (set! (.-length r) ^uint8 (<< 1 (bit-and v 3)))
+              (set! v >> 2)
+              (set! (.-extrn r) (conv uint8 (bit-and v 1)))
+              (set! v >> 1)
+              (set! (.-type_ r) (conv uint8 v))))))
+
+
+
+      (set! (.-rel sect) rel)
+      0)))
+
+
+^{:go/end 376} (go/func macholoaddsym ^int [^{:tag (* ldMachoObj)} m ^{:tag (* ldMachoDysymtab)} d]
+  (let [n (conv int (.-nindirectsyms d))]
+    (.MustSeek (.-f m) (+ (.-base m) (conv int64 (.-indirectsymoff d))) 0)
+    ^{:go/breaks [[5 375]]} (let [(values p _ err) (.Slice (.-f m) (conv uint64 (* n 4)))]
+      (when (!= err nil)
+        (return -1))
+
+
+      (set! (.-indir d) (make (slice uint32) n))
+      (for [i 0] (< i n) (inc! i)
+        (aset (.-indir d) i (.Uint32 (.-e m) (subslice p (* 4 i)))))
+
+      0)))
+
+
+^{:go/end 422} (go/func macholoadsym ^int [^{:tag (* ldMachoObj)} m ^{:tag (* ldMachoSymtab)} symtab]
+  (when (!= (.-sym symtab) nil)
+    (return 0))
+
+
+  (.MustSeek (.-f m) (+ (.-base m) (conv int64 (.-stroff symtab))) 0)
+  (let [(values strbuf _ err) (.Slice (.-f m) (conv uint64 (.-strsize symtab)))]
+    (when (!= err nil)
+      (return -1))
+
+
+    (let [symsize 12]
+      (when (.-is64 m)
+        (set! symsize 16))
+
+      (let [n (conv int (* (.-nsym symtab) (conv uint32 symsize)))]
+        (.MustSeek (.-f m) (+ (.-base m) (conv int64 (.-symoff symtab))) 0)
+        (let [(values symbuf _ ^:assign err) (.Slice (.-f m) (conv uint64 n))]
+          (when (!= err nil)
+            (return -1))
+
+          ^{:go/breaks [5]} (let [sym (make (slice ldMachoSym) (.-nsym symtab))
+              ^{:line 400} p symbuf]
+            (for [i (conv uint32 0)] (< i (.-nsym symtab)) (inc! i)
+              (let [s (addr (aget sym i))
+                  ^{:line 403} v (.Uint32 (.-e m) p)]
+                (when (>= v (.-strsize symtab))
+                  (return -1))
+
+                (set! (.-name s) (cstring (subslice strbuf v)))
+                (set! (.-type_ s) (aget p 4))
+                (set! (.-sectnum s) (aget p 5))
+                (set! (.-desc s) (.Uint16 (.-e m) (subslice p 6)))
+                (if (.-is64 m)
+                  (set! (.-value s) (.Uint64 (.-e m) (subslice p 8)))
+
+                  (set! (.-value s) (conv uint64 (.Uint32 (.-e m) (subslice p 8)))))
+
+                (set! p (subslice p symsize))))
+
+
+            (set! (.-str symtab) strbuf)
+            (set! (.-sym symtab) sym)
+            0))))))
+
+
+
+
+^{:go/end 802} (go/func Load "Load the Mach-O file pn from f.\nSymbols are written into syms, and a slice of the text symbols is returned.\n" [^{:tag (* loader/Loader)} l ^{:tag (* sys/Arch)} arch ^int localSymVersion ^{:tag (* bio/Reader)} f ^string pkg ^int64 length ^string pn] :results [^{:tag (slice loader/Sym)} textp ^error err]
+  (let [errorf ^{:go/end 429} (fn [^string str & ^{:tag (slice any)} args] :results [(slice loader/Sym) error]
+        (return nil (fmt/Errorf "loadmacho: %v: %v" pn (fmt/Sprintf str (spread args)))))
+
+
+      ^{:line 431} base (.Offset f)
+
+      (values hdr _ ^:assign err) (.Slice f (* 7 4))]
+    (when (!= err nil)
+      (return (errorf "reading hdr: %v" err)))
+
+
+    (let [^binary/ByteOrder e (zero binary/ByteOrder)]
+      (cond (== (bit-and-not (.Uint32 binary/BigEndian (subslice hdr)) 1) 0xFEEDFACE)
+        (set! e binary/BigEndian)
+        (== (bit-and-not (.Uint32 binary/LittleEndian (subslice hdr)) 1) 0xFEEDFACE)
+        (set! e binary/LittleEndian) :else
+
+        (return (errorf "bad magic - not mach-o file")))
+
+
+      (let [is64 (== (.Uint32 e (subslice hdr)) 0xFEEDFACF)
+          ^{:line 448} ncmd (.Uint32 e (subslice hdr (* 4 4)))
+          ^{:line 449} cmdsz (.Uint32 e (subslice hdr (* 5 4)))]
+        (when (or (> ncmd 0x10000) (>= cmdsz 0x01000000))
+          (return (errorf "implausible mach-o header ncmd=%d cmdsz=%d" ncmd cmdsz)))
+
+
+        (when is64
+          (.MustSeek f 4 1)) ; skip reserved word in header
+
+
+        (let [m (addr ^{:go/breaks [2 4 6 8 10 12 14 16 18 20 22]} (lit ldMachoObj
+                :f f
+                :e e
+                :cputype (conv uint (.Uint32 e (subslice hdr (* 1 4))))
+                :subcputype (conv uint (.Uint32 e (subslice hdr (* 2 4))))
+                :filetype (.Uint32 e (subslice hdr (* 3 4)))
+                :ncmd (conv uint ncmd)
+                :flags (.Uint32 e (subslice hdr (* 6 4)))
+                :is64 is64
+                :base base
+                :length length
+                :name pn))]
+
+
+          (switch (.-Family arch)
+            (default
+              (return (errorf "mach-o %s unimplemented" (.-Name arch))))
+            (case [sys/AMD64]
+              (when (or (!= e binary/LittleEndian) (!= (.-cputype m) LdMachoCpuAmd64))
+                (return (errorf "mach-o object but not amd64"))))
+
+            (case [sys/ARM64]
+              (when (or (!= e binary/LittleEndian) (!= (.-cputype m) LdMachoCpuArm64))
+                (return (errorf "mach-o object but not arm64")))))
+
+
+
+          (set! (.-cmd m) (make (slice ldMachoCmd) ncmd))
+          (let [(values cmdp _ ^:assign err) (.Slice f (conv uint64 cmdsz))]
+            (when (!= err nil)
+              (return (errorf "reading cmds: %v" err)))
+
+
+            ;; read and parse load commands
+            (let [^{:tag (* ldMachoCmd)} c (zero (* ldMachoCmd))
+
+                ^{:line 494 :tag (* ldMachoSymtab)} symtab (zero (* ldMachoSymtab))
+                ^{:line 495 :tag (* ldMachoDysymtab)} dsymtab (zero (* ldMachoDysymtab))
+
+                ^{:line 497} off (conv uint32 (len hdr))]
+              (for [i (conv uint32 0)] (< i ncmd) (inc! i)
+                (let [ty (.Uint32 e cmdp)
+                    ^{:line 500} sz (.Uint32 e (subslice cmdp 4))]
+                  (set! (.-off (aget (.-cmd m) i)) off)
+                  (unpackcmd cmdp m (addr (aget (.-cmd m) i)) (conv uint ty) (conv uint sz))
+                  (set! cmdp (subslice cmdp sz))
+                  (set! off + sz)
+                  (when (== ty LdMachoCmdSymtab)
+                    (when (!= symtab nil)
+                      (return (errorf "multiple symbol tables")))
+
+
+                    (set! symtab (addr (.-sym (aget (.-cmd m) i))))
+                    (macholoadsym m symtab))
+
+
+                  (when (== ty LdMachoCmdDysymtab)
+                    (set! dsymtab (addr (.-dsym (aget (.-cmd m) i))))
+                    (macholoaddsym m dsymtab))
+
+
+                  (when (or ^:go/paren (and is64 (== ty LdMachoCmdSegment64)) ^:go/paren (and (not is64) (== ty LdMachoCmdSegment)))
+                    (when (!= c nil)
+                      (return (errorf "multiple load commands")))
+
+
+                    (set! c (addr (aget (.-cmd m) i))))))
+
+
+
+              ;; load text and data segments into memory.
+              ;; they are not as small as the load commands, but we'll need
+              ;; the memory anyway for the symbol images, so we might
+              ;; as well use one large chunk.
+              (when (== c nil)
+                (return (errorf "no load command")))
+
+
+              (when (== symtab nil)
+                ;; our work is done here - no symbols means nothing can refer to this file
+                (return))
+
+
+              (when (>= (conv int64 (+ (.-fileoff (.-seg c)) (.-filesz (.-seg c)))) length)
+                (return (errorf "load segment out of range")))
+
+
+              (.MustSeek f (+ (.-base m) (conv int64 (.-fileoff (.-seg c)))) 0)
+              (let [(values dat readOnly ^:assign err) (.Slice f (conv uint64 (.-filesz (.-seg c))))]
+                (when (!= err nil)
+                  (return (errorf "cannot load object data: %v" err)))
+
+
+                (for [i (conv uint32 0)] (< i (.-nsect (.-seg c))) (inc! i)
+                  (let [sect (addr (aget (.-sect (.-seg c)) i))]
+                    (when (and (!= (.-segname sect) "__TEXT") (!= (.-segname sect) "__DATA"))
+                      (continue))
+
+                    (when (== (.-name sect) "__eh_frame")
+                      (continue))
+
+                    (let [name (fmt/Sprintf "%s(%s/%s)" pkg (.-segname sect) (.-name sect))
+                        ^{:line 560} s (.LookupOrCreateSym l name localSymVersion)
+                        ^{:line 561} bld (.MakeSymbolUpdater l s)]
+                      (when (!= (.Type bld) 0)
+                        (return (errorf "duplicate %s/%s" (.-segname sect) (.-name sect))))
+
+
+                      (if (== (bit-and (.-flags sect) 0xff) 1) ; S_ZEROFILL
+                        (.SetData bld (make (slice byte) (.-size sect)))
+                        (do
+                          (.SetReadOnly bld readOnly)
+                          (.SetData bld (subslice (subslice dat (- (.-addr sect) (.-vmaddr (.-seg c)))) _ (.-size sect)))))
+
+                      (.SetSize bld (conv int64 (len (.Data bld))))
+                      (when (!= (.-align sect) 0)
+                        (.SetAlign bld ^int32 (<< 1 (.-align sect))))
+
+
+                      (if (== (.-segname sect) "__TEXT")
+                        (if (== (.-name sect) "__text")
+                          (.SetType bld sym/STEXT)
+
+                          (.SetType bld sym/SRODATA))
+
+                        (do
+                          (if (== (.-name sect) "__bss") (do
+                              (.SetType bld sym/SNOPTRBSS)
+                              (.SetData bld nil))
+
+                            (.SetType bld sym/SNOPTRDATA))))
+
+
+
+                      (set! (.-sym sect) s))))
+
+
+                ;; enter sub-symbols into symbol table.
+                ;; have to guess sizes from next symbol.
+                (for [i (conv uint32 0)] (< i (.-nsym symtab)) (inc! i)
+                  (let [machsym (addr (aget (.-sym symtab) i))]
+                    (when (!= (bit-and (.-type_ machsym) N_STAB) 0)
+                      (continue))
+
+
+                    ;; TODO: check sym->type against outer->type.
+                    (let [name (.-name machsym)]
+
+                      (when (and (== (aget name 0) \_) (!= (aget name 1) \u0000))
+                        (set! name (subslice name 1)))
+
+                      (let [v 0]
+                        (when (== (bit-and (.-type_ machsym) N_EXT) 0)
+                          (set! v localSymVersion))
+
+                        (let [s (.LookupOrCreateCgoExport l name v)]
+                          (when (== (bit-and (.-type_ machsym) N_EXT) 0)
+                            (.SetAttrDuplicateOK l s true))
+
+                          (when (!= (bit-and (.-desc machsym) (bit-or N_WEAK_REF N_WEAK_DEF)) 0)
+                            (.SetAttrDuplicateOK l s true)
+                            (when (!= (bit-and (.-desc machsym) N_WEAK_REF) 0)
+                              (.SetSymWeakBinding l s true)))
+
+
+                          (set! (.-sym machsym) s)
+                          (when (== (.-sectnum machsym) 0) ; undefined
+                            (continue))
+
+                          (when (> (conv uint32 (.-sectnum machsym)) (.-nsect (.-seg c)))
+                            (return (errorf "reference to invalid section %d" (.-sectnum machsym))))
+
+
+                          (let [sect (addr (aget (.-sect (.-seg c)) (- (.-sectnum machsym) 1)))
+                              ^{:line 632} bld (.MakeSymbolUpdater l s)
+                              ^{:line 633} outer (.-sym sect)]
+                            (when (== outer 0)
+                              (continue)) ; ignore reference to invalid section
+
+
+                            (when [osym (.OuterSym l s)] (!= osym 0)
+                              (when (.AttrDuplicateOK l s)
+                                (continue))
+
+                              (return (errorf "duplicate symbol reference: %s in both %s and %s" (.SymName l s) (.SymName l osym) (.SymName l (.-sym sect)))))
+
+
+                            (.SetType bld (.SymType l outer))
+                            (when (!= (.SymSize l outer) 0) ; skip empty section (0-sized symbol)
+                              (.AddInteriorSym l outer s))
+
+
+                            (.SetValue bld (conv int64 (- (.-value machsym) (.-addr sect))))
+                            (when (not (.AttrCgoExportDynamic l s))
+                              (.SetDynimplib bld "")) ; satisfy dynimport
+
+                            (when (.IsText (.SymType l outer))
+                              (when (and (.External bld) (not (.DuplicateOK bld)))
+                                (return (errorf "%v: duplicate symbol definition" s)))
+
+                              (.SetExternal bld true))))))))
+
+
+
+                ;; Sort outer lists by address, adding to textp.
+                ;; This keeps textp in increasing address order.
+                (for [i 0] (< (conv uint32 i) (.-nsect (.-seg c))) (inc! i)
+                  (let [sect (addr (aget (.-sect (.-seg c)) i))
+                      ^{:line 666} s (.-sym sect)]
+                    (when (== s 0)
+                      (continue))
+
+                    (let [bld (.MakeSymbolUpdater l s)]
+                      (when (!= (.SubSym bld) 0)
+
+                        (.SortSub bld)
+
+                        ;; assign sizes, now that we know symbols in sorted order.
+                        (for [s1 (.Sub bld)] (!= s1 0) (set! s1 (.SubSym l s1))
+                          (let [s1Bld (.MakeSymbolUpdater l s1)]
+                            (if [sub (.SubSym l s1)] (!= sub 0)
+                              (.SetSize s1Bld (- (.SymValue l sub) (.SymValue l s1)))
+
+                              (let [dlen (conv int64 (len (.Data l s)))]
+                                (.SetSize s1Bld (- (+ (.SymValue l s) dlen) (.SymValue l s1))))))))
+
+
+
+
+                      (when (.IsText (.Type bld))
+                        (when (.OnList bld)
+                          (return (errorf "symbol %s listed multiple times" (.Name bld))))
+
+                        (.SetOnList bld true)
+                        (set! textp (append textp s))
+                        (for [s1 (.Sub bld)] (!= s1 0) (set! s1 (.SubSym l s1))
+                          (when (.AttrOnList l s1)
+                            (return (errorf "symbol %s listed multiple times" (.SymName l s1))))
+
+                          (.SetAttrOnList l s1 true)
+                          (set! textp (append textp s1)))))))
+
+
+
+
+                ;; load relocations
+                (for [i 0] (< (conv uint32 i) (.-nsect (.-seg c))) (inc! i)
+                  (let [sect (addr (aget (.-sect (.-seg c)) i))
+                      ^{:line 706} s (.-sym sect)]
+                    (when (== s 0)
+                      (continue))
+
+                    (macholoadrel m sect)
+                    (when (== (.-rel sect) nil)
+                      (continue))
+
+
+                    (let [sb (.MakeSymbolUpdater l (.-sym sect))
+                        ^{:line 716 :tag int64} rAdd (zero int64)]
+                      (for [j (conv uint32 0)] (< j (.-nreloc sect)) (inc! j)
+                        (let [
+                            ^{:line 719 :tag int32} rOff (zero int32)
+                            ^{:line 720 :tag uint8} rSize (zero uint8)
+                            ^{:line 721 :tag objabi/RelocType} rType (zero objabi/RelocType)
+                            ^{:line 722 :tag loader/Sym} rSym (zero loader/Sym)
+
+                            ^{:line 724} rel (addr (aget (.-rel sect) j))]
+                          (when (!= (.-scattered rel) 0)
+                            ;; mach-o only uses scattered relocation on 32-bit platforms,
+                            ;; which are no longer supported.
+                            (return (errorf "%v: unexpected scattered relocation" s)))
+
+
+                          (when (and (== (.-Family arch) sys/ARM64) (== (.-type_ rel) MACHO_ARM64_RELOC_ADDEND))
+                            ;; Two relocations. This addend will be applied to the next one.
+                            (set! rAdd (>> (<< (conv int64 (.-symnum rel)) 40) 40)) ; convert unsigned 24-bit to signed 24-bit
+                            (continue))
+
+
+                          (set! rSize (.-length rel))
+                          (set! rType (+ objabi/MachoRelocOffset (<< (conv objabi/RelocType (.-type_ rel)) 1) (conv objabi/RelocType (.-pcrel rel))))
+                          (set! rOff (conv int32 (.-addr rel)))
+
+                          ;; Handle X86_64_RELOC_SIGNED referencing a section (rel.extrn == 0).
+                          (let [p (.Data l s)]
+                            (when (== (.-Family arch) sys/AMD64)
+                              (if (and (== (.-extrn rel) 0) (== (.-type_ rel) MACHO_X86_64_RELOC_SIGNED))
+                                ;; Calculate the addend as the offset into the section.
+                                ;;
+                                ;; The rip-relative offset stored in the object file is encoded
+                                ;; as follows:
+                                ;;
+                                ;;    movsd	0x00000360(%rip),%xmm0
+                                ;;
+                                ;; To get the absolute address of the value this rip-relative address is pointing
+                                ;; to, we must add the address of the next instruction to it. This is done by
+                                ;; taking the address of the relocation and adding 4 to it (since the rip-relative
+                                ;; offset can at most be 32 bits long).  To calculate the offset into the section the
+                                ;; relocation is referencing, we subtract the vaddr of the start of the referenced
+                                ;; section found in the original object file.
+                                ;;
+                                ;; [For future reference, see Darwin's /usr/include/mach-o/x86_64/reloc.h]
+                                (let [secaddr (.-addr (aget (.-sect (.-seg c)) (- (.-symnum rel) 1)))]
+                                  (set! rAdd (conv int64 (- (conv uint64 (+ (conv int64 (conv int32 (.Uint32 e (subslice p rOff)))) (conv int64 rOff) 4)) secaddr))))
+
+                                (set! rAdd (conv int64 (conv int32 (.Uint32 e (subslice p rOff)))))))
+
+
+
+                            ;; An unsigned internal relocation has a value offset
+                            ;; by the section address.
+                            (when (and (== (.-Family arch) sys/AMD64) (== (.-extrn rel) 0) (== (.-type_ rel) MACHO_X86_64_RELOC_UNSIGNED))
+                              (let [secaddr (.-addr (aget (.-sect (.-seg c)) (- (.-symnum rel) 1)))]
+                                (set! rAdd - (conv int64 secaddr))))
+
+
+                            (if (== (.-extrn rel) 0) (do
+                                (when (or (< (.-symnum rel) 1) (> (.-symnum rel) (.-nsect (.-seg c))))
+                                  (return (errorf "invalid relocation: section reference out of range %d vs %d" (.-symnum rel) (.-nsect (.-seg c)))))
+
+
+                                (set! rSym (.-sym (aget (.-sect (.-seg c)) (- (.-symnum rel) 1))))
+                                (when (== rSym 0)
+                                  (return (errorf "invalid relocation: %s" (.-name (aget (.-sect (.-seg c)) (- (.-symnum rel) 1)))))))
+
+                              (do
+                                (when (>= (.-symnum rel) (.-nsym symtab))
+                                  (return (errorf "invalid relocation: symbol reference out of range")))
+
+
+                                (set! rSym (.-sym (aget (.-sym symtab) (.-symnum rel))))))
+
+
+                            (let [(values r _) (.AddRel sb rType)]
+                              ^{:go/via [Reloc]} (.SetOff r rOff)
+                              ^{:go/via [Reloc]} (.SetSiz r rSize)
+                              (.SetSym r rSym)
+                              ^{:go/via [Reloc]} (.SetAdd r rAdd)
+
+                              (set! rAdd 0)))))))) ; clear rAdd for next iteration
+
+
+
+                (return textp nil)))))))))
+
+
+^{:go/end 810} (go/func cstring ^string [^{:tag (slice byte)} x]
+  (let [i (bytes/IndexByte x \u0000)]
+    (when (>= i 0)
+      (set! x (subslice x _ i)))
+
+    (conv string x)))

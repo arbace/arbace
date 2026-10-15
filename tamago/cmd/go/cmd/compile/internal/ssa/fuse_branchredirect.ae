@@ -1,0 +1,111 @@
+;; Copyright 2021 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.cmd.compile.internal.ssa) (go/file "fuse_branchredirect.go" :imports [])
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 112} (go/func fuseBranchRedirect "fuseBranchRedirect checks for a CFG in which the outbound branch\nof an If block can be derived from its predecessor If block, in\nsome such cases, we can redirect the predecessor If block to the\ncorresponding successor block directly. For example:\n\n\tp:\n\t  v11 = Less64 <bool> v10 v8\n\t  If v11 goto b else u\n\tb: <- p ...\n\t  v17 = Leq64 <bool> v10 v8\n\t  If v17 goto s else o\n\nWe can redirect p to s directly.\n\nThe implementation here borrows the framework of the prove pass.\n\n\t1, Traverse all blocks of function f to find If blocks.\n\t2,   For any If block b, traverse all its predecessors to find If blocks.\n\t3,     For any If block predecessor p, update relationship p->b.\n\t4,     Traverse all successors of b.\n\t5,       For any successor s of b, try to update relationship b->s, if a\n\t         contradiction is found then redirect p to another successor of b.\n" ^bool [^{:tag (* Func)} f]
+  (let [ft (newFactsTable f)]
+    (.checkpoint ft)
+
+    (let [changed false]
+      (for [i (- (len (.-Blocks f)) 1)] (>= i 0) (dec! i)
+        (let [b (aget (.-Blocks f) i)]
+          (when (!= (.-Kind b) BlockIf)
+            (continue))
+
+          ;; b is either empty or only contains the control value.
+          ;; TODO: if b contains only OpCopy or OpNot related to b.Controls,
+          ;; such as Copy(Not(Copy(Less64(v1, v2)))), perhaps it can be optimized.
+          (let [bCtl (aget (.-Controls b) 0)]
+            (when (or (and (!= (.-Block bCtl) b) (!= (len (.-Values b)) 0)) (and ^:go/paren (or (!= (len (.-Values b)) 1) (!= (.-Uses bCtl) 1)) (== (.-Block bCtl) b)))
+              (continue))
+
+
+            (for [k 0] (< k (len (.-Preds b))) (inc! k)
+              (let [pk (aget (.-Preds b) k)
+                  ^{:line 49} p (.-b pk)]
+                (when (or (!= (.-Kind p) BlockIf) (== p b))
+                  (continue))
+
+                (let [pbranch positive]
+                  (when (== (.-i pk) 1)
+                    (set! pbranch negative))
+
+                  (.checkpoint ft)
+                  ;; Assume branch p->b is taken.
+                  (addBranchRestrictions ft p pbranch)
+                  ;; Check if any outgoing branch is unreachable based on the above condition.
+                  (let [parent b]
+                    (range [j bbranch (lit (array ... branch) positive negative)]
+                      (.checkpoint ft)
+                      ;; Try to update relationship b->child, and check if the contradiction occurs.
+                      (addBranchRestrictions ft parent bbranch)
+                      (let [unsat (.-unsat ft)]
+                        (.restore ft)
+                        (when (not unsat)
+                          (continue))
+
+                        ;; This branch is impossible,so redirect p directly to another branch.
+                        (let [out (bit-xor 1 j)
+                            ^{:line 73} child (.-b (aget (.-Succs parent) out))]
+                          (when (== child b)
+                            (continue))
+
+                          (.removePred b k)
+                          (aset (.-Succs p) (.-i pk) (lit Edge child (len (.-Preds child))))
+                          ;; Fix up Phi value in b to have one less argument.
+                          (range [_ v (.-Values b)]
+                            (when (!= (.-Op v) OpPhi)
+                              (continue))
+
+                            (.removePhiArg b v k))
+
+                          ;; Fix up child to have one more predecessor.
+                          (set! (.-Preds child) (append (.-Preds child) (lit Edge p (.-i pk))))
+                          (let [ai (.-i (aget (.-Succs b) out))]
+                            (range [_ v (.-Values child)]
+                              (when (!= (.-Op v) OpPhi)
+                                (continue))
+
+                              (.AddArg v (aget (.-Args v) ai)))
+
+                            (when (> (.-debug (.-pass (.-Func b))) 0)
+                              (.Warnl (.-Func b) (.-Pos (aget (.-Controls b) 0)) "Redirect %s based on %s" (.-Op (aget (.-Controls b) 0)) (.-Op (aget (.-Controls p) 0))))
+
+                            (set! changed true)
+                            (dec! k)
+                            (break)))))
+
+                    (.restore ft)))))
+
+            (when (and (== (len (.-Preds b)) 0) (!= b (.-Entry f)))
+              ;; Block is now dead.
+              (set! (.-Kind b) BlockInvalid)))))
+
+
+      (.restore ft)
+      (.cleanup ft f)
+      ^{:line 111} changed)))

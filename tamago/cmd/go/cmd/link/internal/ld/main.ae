@@ -1,0 +1,547 @@
+;; Inferno utils/6l/obj.c
+;; https://bitbucket.org/inferno-os/inferno-os/src/master/utils/6l/obj.c
+;;
+;;	Copyright © 1994-1999 Lucent Technologies Inc.  All rights reserved.
+;;	Portions Copyright © 1995-1997 C H Forsyth (forsyth@terzarima.net)
+;;	Portions Copyright © 1997-1999 Vita Nuova Limited
+;;	Portions Copyright © 2000-2007 Vita Nuova Holdings Limited (www.vitanuova.com)
+;;	Portions Copyright © 2004,2006 Bruce Ellis
+;;	Portions Copyright © 2005-2007 C H Forsyth (forsyth@terzarima.net)
+;;	Revisions Copyright © 2000-2007 Lucent Technologies Inc. and others
+;;	Portions Copyright © 2009 The Go Authors. All rights reserved.
+;;
+;; Permission is hereby granted, free of charge, to any person obtaining a copy
+;; of this software and associated documentation files (the "Software"), to deal
+;; in the Software without restriction, including without limitation the rights
+;; to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+;; copies of the Software, and to permit persons to whom the Software is
+;; furnished to do so, subject to the following conditions:
+;;
+;; The above copyright notice and this permission notice shall be included in
+;; all copies or substantial portions of the Software.
+;;
+;; THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+;; IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+;; FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL THE
+;; AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+;; LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+;; OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+;; THE SOFTWARE.
+
+(in-ns 'go.cmd.link.internal.ld) (go/file "main.go" :imports [
+
+
+    ^{:line 34} [bufio "bufio"]
+    ^{:line 35} [goobj "cmd/internal/goobj"]
+    ^{:line 36} [objabi "cmd/internal/objabi"]
+    ^{:line 37} [quoted "cmd/internal/quoted"]
+    ^{:line 38} [sys "cmd/internal/sys"]
+    ^{:line 39} [counter "cmd/internal/telemetry/counter"]
+    ^{:line 40} [benchmark "cmd/link/internal/benchmark"]
+    ^{:line 41} [flag "flag"]
+    ^{:line 42} [buildcfg "internal/buildcfg"]
+    ^{:line 43} [log "log"]
+    ^{:line 44} [os "os"]
+    ^{:line 45} [runtime "runtime"]
+    ^{:line 46} [pprof "runtime/pprof"]
+    ^{:line 47} [strconv "strconv"]
+    ^{:line 48} [strings "strings"]])
+
+
+(go/var
+  ^{:line 52} [^{:tag (slice byte)} pkglistfornote]
+  ^{:line 53} [^bool windowsgui] ; writes a "GUI binary" instead of a "console binary"
+  ^{:line 54} [^bool ownTmpDir]) ; set to true if tmp dir created by linker (e.g. no -tmpdir)
+
+
+^{:go/end 64} (go/func init []
+  (flag/Var (addr flagExtld) "extld" "use `linker` when linking in external mode")
+  (flag/Var (addr flagExtldflags) "extldflags" "pass `flags` to external linker")
+  (flag/Var (addr macOS) "macos" "mac OS version to write in build info (only used in internal linking)")
+  (flag/Var (addr macSDK) "macsdk" "mac SDK version to write in build info (only used in internal linking)")
+  (flag/Var (addr rpath) "r" "set the ELF dynamic linker search `path` to dir1:dir2:...")
+  (flag/Var (addr flagW) "w" "disable DWARF generation"))
+
+
+
+(go/var "Flags used by the linker. The exported flags are used by the architecture-specific packages.\n"
+  ^{:line 68} [flagBuildid (flag/String "buildid" "" "record `id` as Go toolchain build id")]
+  ^{:line 69} [flagBindNow (flag/Bool "bindnow" false "mark a dynamically linked ELF object for immediate function binding")]
+
+  ^{:line 71} [flagOutfile (flag/String "o" "" "write output to `file`")]
+  ^{:line 72} [flagPluginPath (flag/String "pluginpath" "" "full path name for plugin")]
+  ^{:line 73} [flagFipso (flag/String "fipso" "" "write fips module to `file`")]
+
+  ^{:line 75} [flagInstallSuffix (flag/String "installsuffix" "" "set package directory `suffix`")]
+  ^{:line 76} [flagDumpDep (flag/Bool "dumpdep" false "dump symbol dependency graph")]
+  ^{:line 77} [flagRace (flag/Bool "race" false "enable race detector")]
+  ^{:line 78} [flagMsan (flag/Bool "msan" false "enable MSan interface")]
+  ^{:line 79} [flagAsan (flag/Bool "asan" false "enable ASan interface")]
+  ^{:line 80} [flagAslr (flag/Bool "aslr" true "enable ASLR for buildmode=c-shared on windows")]
+
+  ^{:line 82} [flagFieldTrack (flag/String "k" "" "set field tracking `symbol`")]
+  ^{:line 83} [flagLibGCC (flag/String "libgcc" "" "compiler support lib for internal linking; use \"none\" to disable")]
+  ^{:line 84} [flagTmpdir (flag/String "tmpdir" "" "use `directory` for temporary files")]
+
+  ^{:line 86} [^quoted/Flag flagExtld]
+  ^{:line 87} [^quoted/Flag flagExtldflags]
+  ^{:line 88} [flagExtar (flag/String "extar" "" "archive program for buildmode=c-archive")]
+
+  ^{:line 90} [flagCaptureHostObjs (flag/String "capturehostobjs" "" "capture host object files loaded during internal linking to specified dir")]
+
+  ^{:line 92} [flagA (flag/Bool "a" false "no-op (deprecated)")]
+  ^{:line 93} [FlagC (flag/Bool "c" false "dump call graph")]
+  ^{:line 94} [FlagD (flag/Bool "d" false "disable dynamic executable")]
+  ^{:line 95} [flagF (flag/Bool "f" false "ignore version mismatch")]
+  ^{:line 96} [flagG (flag/Bool "g" false "disable go package data checks")]
+  ^{:line 97} [flagH (flag/Bool "h" false "halt on error")]
+  ^{:line 98} [flagN (flag/Bool "n" false "no-op (deprecated)")]
+  ^{:line 99} [FlagS (flag/Bool "s" false "disable symbol table")]
+  ^{:line 100} [^bool flag8] ; use 64-bit addresses in symbol table
+  ^{:line 101} [flagHostBuildid (flag/String "B" "" "set ELF NT_GNU_BUILD_ID `note` or Mach-O UUID; use \"gobuildid\" to generate it from the Go build ID; \"none\" to disable")]
+  ^{:line 102} [flagInterpreter (flag/String "I" "" "use `linker` as ELF dynamic linker")]
+  ^{:line 103} [flagCheckLinkname (flag/Bool "checklinkname" true "check linkname symbol references")]
+  ^{:line 104} [FlagDebugTramp (flag/Int "debugtramp" 0 "debug trampolines")]
+  ^{:line 105} [FlagDebugTextSize (flag/Int "debugtextsize" 0 "debug text section max size")]
+  ^{:line 106} [flagDebugNosplit (flag/Bool "debugnosplit" false "dump nosplit call graph")]
+  ^{:line 107} [FlagStrictDups (flag/Int "strictdups" 0 "sanity check duplicate symbol contents during object file reading (1=warn 2=err).")]
+  ^{:line 108} [FlagRound (flag/Int64 "R" -1 "set address rounding `quantum`")]
+  ^{:line 109} [FlagTextAddr (flag/Int64 "T" -1 "set the start address of text symbols")]
+  ^{:line 110} [FlagDataAddr (flag/Int64 "D" -1 "set the start address of data symbols")]
+  ^{:line 111} [FlagFuncAlign (flag/Int "funcalign" 0 "set function align to `N` bytes")]
+  ^{:line 112} [flagEntrySymbol (flag/String "E" "" "set `entry` symbol name")]
+  ^{:line 113} [flagPruneWeakMap (flag/Bool "pruneweakmap" true "prune weak mapinit refs")]
+  ^{:line 114} [flagRandLayout (flag/Int64 "randlayout" 0 "randomize function layout")]
+  ^{:line 115} [flagAllErrors (flag/Bool "e" false "no limit on number of errors reported")]
+  ^{:line 116} [cpuprofile (flag/String "cpuprofile" "" "write cpu profile to `file`")]
+  ^{:line 117} [memprofile (flag/String "memprofile" "" "write memory profile to `file`")]
+  ^{:line 118} [memprofilerate (flag/Int64 "memprofilerate" 0 "set runtime.MemProfileRate to `rate`")]
+  ^{:line 119} [benchmarkFlag (flag/String "benchmark" "" "set to 'mem' or 'cpu' to enable phase benchmarking")]
+  ^{:line 120} [benchmarkFileFlag (flag/String "benchmarkprofile" "" "emit phase profiles to `base`_phase.{cpu,mem}prof")]
+
+  ^{:line 122} [^ternaryFlag flagW]
+  ^{:line 123} [FlagW (new bool)]) ; the -w flag, computed in main from flagW
+
+
+
+
+
+
+(go/type ternaryFlag "ternaryFlag is like a boolean flag, but has a default value that is\nneither true nor false, allowing it to be set from context (e.g. from another\nflag).\n*ternaryFlag implements flag.Value.\n" int)
+
+(go/const
+  ^{:line 133} [^{:tag ternaryFlag :val 0} ternaryFlagUnset iota]
+  ^{:line 134} [^{:val 1} ternaryFlagFalse]
+  ^{:line 135} [^{:val 2} ternaryFlagTrue])
+
+
+^{:go/end 149} (go/method Set ^error [^{:tag (* ternaryFlag)} t ^string s]
+  ^{:go/breaks [[4 148]]} (let [(values v err) (strconv/ParseBool s)]
+    (when (!= err nil)
+      (return err))
+
+    (if v
+      (set! @t ternaryFlagTrue)
+
+      (set! @t ternaryFlagFalse))
+
+    nil))
+
+
+^{:go/breaks [[4 158]] :go/end 159} (go/method String ^string [^{:tag (* ternaryFlag)} t]
+  (switch @t
+    (case [ternaryFlagFalse]
+      (return "false"))
+    (case [ternaryFlagTrue]
+      (return "true")))
+
+  "unset")
+
+
+^{:go/end 161} (go/method IsBoolFlag ^bool [^{:tag (* ternaryFlag)} t] true) ; parse like a boolean flag
+
+
+^{:go/end 494} (go/func Main "Main is the main entry point for the linker code.\n" [^{:tag (* sys/Arch)} arch ^Arch theArch]
+  (log/SetPrefix "link: ")
+  (log/SetFlags 0)
+  (counter/Open)
+  (counter/Inc "link/invocations")
+
+  (set! thearch theArch)
+  (let [ctxt (linknew arch)]
+    (set! (.-Bso ctxt) (bufio/NewWriter os/Stdout))
+
+    ;; For testing behavior of go command when tools crash silently.
+    ;; Undocumented, not in standard flag parser to avoid
+    ;; exposing in usage message.
+    (range [_ arg os/Args]
+      (when (== arg "-crash_for_testing")
+        (os/Exit 2)))
+
+
+
+    (if (== buildcfg/GOROOT "") (do)
+      ;; cmd/go clears the GOROOT variable when -trimpath is set,
+      ;; so omit it from the binary even if cmd/link itself has an
+      ;; embedded GOROOT value reported by runtime.GOROOT.
+
+      (addstrdata1 ctxt (+ "runtime.defaultGOROOT=" buildcfg/GOROOT)))
+
+
+    (let [buildVersion buildcfg/Version]
+      (when [goexperiment (.String buildcfg/Experiment)] (!= goexperiment "")
+        (let [sep " "]
+          (when (not (strings/Contains buildVersion "-")) ; See go.dev/issue/75953.
+            (set! sep "-"))
+
+          (set! buildVersion + (+ sep "X:" goexperiment))))
+
+      (addstrdata1 ctxt (+ "runtime.buildVersion=" buildVersion))
+
+      ;; TODO(matloob): define these above and then check flag values here
+      (when (and (== (.-Family ^{:go/via [Target]} (.-Arch ctxt)) sys/AMD64) (== buildcfg/GOOS "plan9"))
+        (flag/BoolVar (addr flag8) "8" false "use 64-bit addresses in symbol table"))
+
+      (let [flagHeadType (flag/String "H" "" "set header `type`")]
+        (flag/BoolVar (addr ^{:go/via [Target]} (.-linkShared ctxt)) "linkshared" false "link against installed Go shared libraries")
+        (flag/Var (addr ^{:go/via [Target]} (.-LinkMode ctxt)) "linkmode" "set link `mode`")
+        (flag/Var (addr ^{:go/via [Target]} (.-BuildMode ctxt)) "buildmode" "set build `mode`")
+        (flag/BoolVar (addr (.-compressDWARF ctxt)) "compressdwarf" true "compress DWARF if possible")
+        (objabi/Flagfn1 "L" "add specified `directory` to library path" ^{:go/end 210} (fn [^string a] (Lflag ctxt a)))
+        (objabi/AddVersionFlag) ; -V
+        (objabi/Flagfn1 "X" "add string value `definition` of the form importpath.name=value" ^{:go/end 212} (fn [^string s] (addstrdata1 ctxt s)))
+        (objabi/Flagcount "v" "print link trace" (addr (.-Debugvlog ctxt)))
+        (objabi/Flagfn1 "importcfg" "read import configuration from `file`" (.-readImportCfg ctxt))
+
+        (objabi/Flagparse usage)
+        (counter/CountFlags "link/flag:" @flag/CommandLine)
+
+        (when (> (.-Debugvlog ctxt) 0)
+          ;; dump symbol info on crash
+          (defer (^{:go/end 221} (fn [] (.Dump (.-loader ctxt))))))
+
+        (when (> (.-Debugvlog ctxt) 1)
+          ;; dump symbol info on error
+          (AtExit ^{:go/end 229} (fn []
+              (when (> nerrors 0)
+                (.Dump (.-loader ctxt))))))
+
+
+
+
+        (switch @flagHeadType
+          (case [""])
+          (case ["windowsgui"]
+            (set! ^{:go/via [Target]} (.-HeadType ctxt) objabi/Hwindows)
+            (set! windowsgui true))
+          (default
+            (when [err (.Set ^{:go/via [Target]} (.-HeadType ctxt) @flagHeadType)] (!= err nil)
+              (Errorf "%v" err)
+              (usage))))
+
+
+        (when (== ^{:go/via [Target]} (.-HeadType ctxt) objabi/Hunknown)
+          (.Set ^{:go/via [Target]} (.-HeadType ctxt) buildcfg/GOOS))
+
+
+        (when (and (not @flagAslr) (!= ^{:go/via [Target]} (.-BuildMode ctxt) BuildModeCShared))
+          (Errorf "-aslr=false is only allowed for -buildmode=c-shared")
+          (usage))
+
+
+        (when (and @FlagD ^{:go/via [Target]} (.UsesLibc ctxt))
+          (Exitf "dynamic linking required on %s; -d flag cannot be used" buildcfg/GOOS))
+
+
+        (let [isPowerOfTwo ^{:go/end 258} (fn ^bool [^int64 n]
+              (and (> n 0) (== (bit-and n (- n 1)) 0)))]
+
+          (when (and (!= @FlagRound -1) ^:go/paren (or (< @FlagRound 4096) (not (isPowerOfTwo @FlagRound))))
+            (Exitf "invalid -R value 0x%x" @FlagRound))
+
+          (when (and (!= @FlagFuncAlign 0) (not (isPowerOfTwo (conv int64 @FlagFuncAlign))))
+            (Exitf "invalid -funcalign value %d" @FlagFuncAlign))
+
+
+          (set! checkStrictDups @FlagStrictDups)
+
+          (switch flagW
+            (case [ternaryFlagFalse]
+              (set! @FlagW false))
+            (case [ternaryFlagTrue]
+              (set! @FlagW true))
+            (case [ternaryFlagUnset]
+              (set! @FlagW @FlagS) ; -s implies -w if not explicitly set
+              (when (and ^{:go/via [Target]} (.IsDarwin ctxt) (== ^{:go/via [Target]} (.-BuildMode ctxt) BuildModeCShared))
+                (set! @FlagW true)))) ; default to -w in c-shared mode on darwin, see #61229
+
+
+
+          (when (not ^{:go/via [Flags]} (.-RegabiWrappers buildcfg/Experiment))
+            (set! abiInternalVer 0))
+
+
+          (startProfile)
+          (when (== ^{:go/via [Target]} (.-BuildMode ctxt) BuildModeUnset)
+            (.Set ^{:go/via [Target]} (.-BuildMode ctxt) "exe"))
+
+
+          (when (and (!= ^{:go/via [Target]} (.-BuildMode ctxt) BuildModeShared) (!= (flag/NArg) 1))
+            (usage))
+
+
+          (when (== @flagOutfile "")
+            (set! @flagOutfile "a.out")
+            (when (== ^{:go/via [Target]} (.-HeadType ctxt) objabi/Hwindows)
+              (set! @flagOutfile + ".exe")))
+
+
+
+          (set! interpreter @flagInterpreter)
+
+          (when (and (== @flagHostBuildid "") (!= @flagBuildid ""))
+            (set! @flagHostBuildid "gobuildid"))
+
+          (addbuildinfo ctxt)
+
+          ;; enable benchmarking
+          (let [^{:tag (* benchmark/Metrics)} bench (zero (* benchmark/Metrics))]
+            (when (!= (len @benchmarkFlag) 0)
+              (cond (== @benchmarkFlag "mem")
+                (set! bench (benchmark/New benchmark/GC @benchmarkFileFlag))
+                (== @benchmarkFlag "cpu")
+                (set! bench (benchmark/New benchmark/NoGC @benchmarkFileFlag)) :else
+                (do
+                  (Errorf "unknown benchmark flag: %q" @benchmarkFlag)
+                  (usage))))
+
+
+
+            (.Start bench "libinit")
+            (libinit ctxt) ; creates outfile
+            (.Start bench "computeTLSOffset")
+            (.computeTLSOffset ctxt)
+            (.Start bench "Archinit")
+            ((.-Archinit thearch) ctxt)
+
+            (when (and (!= @FlagDataAddr -1) (!= (% @FlagDataAddr @FlagRound) 0))
+              (Exitf "invalid -D value 0x%x: not aligned to rounding quantum 0x%x" @FlagDataAddr @FlagRound))
+
+
+            (when (and ^{:go/via [Target]} (.-linkShared ctxt) (not ^{:go/via [Target]} (.-IsELF ctxt)))
+              (Exitf "-linkshared can only be used on elf systems"))
+
+
+            (when (!= (.-Debugvlog ctxt) 0)
+              (let [onOff ^{:go/breaks [[3 340]] :go/end 341} (fn ^string [^bool b]
+                    (when b
+                      (return "on"))
+
+                    "off")]
+
+                (.Logf ctxt "build mode: %s, symbol table: %s, DWARF: %s\n" ^{:go/via [Target]} (.-BuildMode ctxt) (onOff (not @FlagS)) (onOff (dwarfEnabled ctxt)))
+                (.Logf ctxt "HEADER = -H%d -T0x%x -R0x%x\n" ^{:go/via [Target]} (.-HeadType ctxt) (conv uint64 @FlagTextAddr) (conv uint32 @FlagRound))))
+
+
+            (let [zerofp (lit goobj/FingerprintType)]
+              (switch ^{:go/via [Target]} (.-BuildMode ctxt)
+                (case [BuildModeShared]
+                  (for [i 0] (< i (flag/NArg)) (inc! i)
+                    (let [arg (flag/Arg i)
+                        ^{:line 351} parts (strings/SplitN arg "=" 2)
+                        (values ^string pkgpath ^string file) (zero string)]
+                      (if (== (len parts) 1)
+                        (set! (values pkgpath file) (values "main" arg))
+
+                        (set! (values pkgpath file) (values (aget parts 0) (aget parts 1))))
+
+                      (set! pkglistfornote (append pkglistfornote (spread pkgpath)))
+                      (set! pkglistfornote (append pkglistfornote \newline))
+                      (addlibpath ctxt "command line" "command line" file pkgpath "" zerofp))))
+
+                (case [BuildModePlugin]
+                  (addlibpath ctxt "command line" "command line" (flag/Arg 0) @flagPluginPath "" zerofp))
+                (default
+                  (addlibpath ctxt "command line" "command line" (flag/Arg 0) "main" "" zerofp)))
+
+              (.Start bench "loadlib")
+              (.loadlib ctxt)
+
+              (.Start bench "inittasks")
+              (.inittasks ctxt)
+
+              (.Start bench "deadcode")
+              (deadcode ctxt)
+
+              (.Start bench "linksetup")
+              (.linksetup ctxt)
+
+              (.Start bench "dostrdata")
+              (.dostrdata ctxt)
+              (when ^{:go/via [Flags]} (.-FieldTrack buildcfg/Experiment)
+                (.Start bench "fieldtrack")
+                (fieldtrack ^{:go/via [Target]} (.-Arch ctxt) (.-loader ctxt)))
+
+
+              (.Start bench "dwarfGenerateDebugInfo")
+              (dwarfGenerateDebugInfo ctxt)
+
+              (.Start bench "callgraph")
+              (.callgraph ctxt)
+
+              (.Start bench "doStackCheck")
+              (.doStackCheck ctxt)
+
+              (.Start bench "mangleTypeSym")
+              (.mangleTypeSym ctxt)
+
+              (when ^{:go/via [Target]} (.-IsELF ctxt)
+                (.Start bench "doelf")
+                (.doelf ctxt))
+
+              (when ^{:go/via [Target]} (.IsDarwin ctxt)
+                (.Start bench "domacho")
+                (.domacho ctxt))
+
+              (when ^{:go/via [Target]} (.IsWindows ctxt)
+                (.Start bench "dope")
+                (.dope ctxt)
+                (.Start bench "windynrelocsyms")
+                (.windynrelocsyms ctxt))
+
+              (when ^{:go/via [Target]} (.IsAIX ctxt)
+                (.Start bench "doxcoff")
+                (.doxcoff ctxt))
+
+
+              (.Start bench "textbuildid")
+              (.textbuildid ctxt)
+              (.Start bench "addexport")
+              (.setArchSyms ctxt)
+              (.addexport ctxt)
+              (.Start bench "Gentext")
+              ((.-Gentext thearch) ctxt (.-loader ctxt)) ; trampolines, call stubs, etc.
+
+              (.Start bench "textaddress")
+              (.textaddress ctxt)
+              (.Start bench "buildinfo")
+              (.buildinfo ctxt)
+              (.Start bench "pclntab")
+              (let [containers (.findContainerSyms ctxt)
+                  ^{:line 431} pclnState (.pclntab ctxt containers)]
+                (.Start bench "findfunctab")
+                (.findfunctab ctxt pclnState containers)
+                (.Start bench "dwarfGenerateDebugSyms")
+                (dwarfGenerateDebugSyms ctxt)
+                (.Start bench "symtab")
+                (let [symGroupType (.symtab ctxt pclnState)]
+                  (.Start bench "dodata")
+                  (.dodata ctxt symGroupType)
+                  (.Start bench "address")
+                  (let [order (.address ctxt)]
+                    (.Start bench "dwarfcompress")
+                    (dwarfcompress ctxt)
+                    (.Start bench "layout")
+                    (let [filesize (.layout ctxt order)]
+
+                      ;; Write out the output file.
+                      ;; It is split into two parts (Asmb and Asmb2). The first
+                      ;; part writes most of the content (sections and segments),
+                      ;; for which we have computed the size and offset, in a
+                      ;; mmap'd region. The second part writes more content, for
+                      ;; which we don't know the size.
+                      (when (!= (.-Family ^{:go/via [Target]} (.-Arch ctxt)) sys/Wasm)
+                        ;; Don't mmap if we're building for Wasm. Wasm file
+                        ;; layout is very different so filesize is meaningless.
+                        (when [err (.Mmap (.-Out ctxt) filesize)] (!= err nil)
+                          (Exitf "mapping output file failed: %v" err)))
+
+
+                      ;; asmb will redirect symbols to the output file mmap, and relocations
+                      ;; will be applied directly there.
+                      (.Start bench "Asmb")
+                      (asmb ctxt)
+                      (exitIfErrors)
+
+                      ;; Generate additional symbols for the native symbol table just prior
+                      ;; to code generation.
+                      (.Start bench "GenSymsLate")
+                      (when (!= (.-GenSymsLate thearch) nil)
+                        ((.-GenSymsLate thearch) ctxt (.-loader ctxt)))
+
+
+                      (asmbfips ctxt @flagFipso)
+
+                      (.Start bench "Asmb2")
+                      (asmb2 ctxt)
+
+                      (.Start bench "Munmap")
+                      (.Close (.-Out ctxt)) ; Close handles Munmapping if necessary.
+
+                      (.Start bench "hostlink")
+                      (.hostlink ctxt)
+                      (when (!= (.-Debugvlog ctxt) 0)
+                        (.Logf ctxt "%s" (.Stat (.-loader ctxt)))
+                        (.Logf ctxt "%d liveness data\n" liveness))
+
+                      (.Start bench "Flush")
+                      (.Flush (.-Bso ctxt))
+                      (.Start bench "archive")
+                      (.archive ctxt)
+                      (.Report bench os/Stdout)
+
+                      (errorexit))))))))))))
+
+
+(go/type Rpath (struct
+    ^{:line 497 :tag bool} set
+    ^{:line 498 :tag string} val))
+
+
+^{:go/breaks [5] :go/end 505} (go/method Set ^error [^{:tag (* Rpath)} r ^string val]
+  (set! (.-set r) true)
+  (set! (.-val r) val)
+  nil)
+
+
+^{:go/end 509} (go/method String ^string [^{:tag (* Rpath)} r]
+  (.-val r))
+
+
+^{:go/end 551} (go/func startProfile []
+  (when (!= @cpuprofile "")
+    (let [(values f err) (os/Create @cpuprofile)]
+      (when (!= err nil)
+        (log/Fatalf "%v" err))
+
+      (when [err (pprof/StartCPUProfile f)] (!= err nil)
+        (log/Fatalf "%v" err))
+
+      (AtExit ^{:go/end 525} (fn []
+          (pprof/StopCPUProfile)
+          (when [(set! err (.Close f))] (!= err nil)
+            (log/Fatalf "error closing cpu profile: %v" err))))))
+
+
+
+  (when (!= @memprofile "")
+    (when (!= @memprofilerate 0)
+      (set! runtime/MemProfileRate (conv int @memprofilerate)))
+
+    (let [(values f err) (os/Create @memprofile)]
+      (when (!= err nil)
+        (log/Fatalf "%v" err))
+
+      (AtExit ^{:go/end 549} (fn []
+          ;; Profile all outstanding allocations.
+          (runtime/GC)
+          ;; compilebench parses the memory profile to extract memstats,
+          ;; which are only written in the legacy pprof format.
+          ;; See golang.org/issue/18641 and runtime/pprof/pprof.go:writeHeap.
+          (let [^:const ^{:val 1} writeLegacyFormat 1]
+            (when [err (.WriteTo (pprof/Lookup "heap") f writeLegacyFormat)] (!= err nil)
+              (log/Fatalf "%v" err))
+
+            ;; Close the file after writing the profile.
+            (when [err (.Close f)] (!= err nil)
+              (log/Fatalf "could not close %v: %v" @memprofile err))))))))

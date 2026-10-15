@@ -1,0 +1,164 @@
+;; Copyright 2026 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.cmd.compile.internal.ssa) (go/file "downward_counting_loop.go" :imports [
+
+    ^{:line 7} [fmt "fmt"]])
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 166} (go/func maybeRewriteLoopToDownwardCountingLoop "maybeRewriteLoopToDownwardCountingLoop tries to rewrite the loop to a\ndownward counting loop checking against start if the loop body does\nnot depend on ind or nxt and end is known before the loop.\nThat means this code:\n\n\tloop:\n\t\tind = (Phi (Const [x]) nxt),\n\t\tif ind < end\n\t\tthen goto enter_loop\n\t\telse goto exit_loop\n\n\tenter_loop:\n\t\tdo something without using ind nor nxt\n\t\tnxt = inc + ind\n\t\tgoto loop\n\n\texit_loop:\n\nis rewritten to:\n\n\tloop:\n\t\tind = (Phi end nxt)\n\t\tif (Const [x]) < ind\n\t\tthen goto enter_loop\n\t\telse goto exit_loop\n\n\tenter_loop:\n\t\tdo something without using ind nor nxt\n\t\tnxt = ind - inc\n\t\tgoto loop\n\n\texit_loop:\n\nThis is better because it only requires to keep ind then nxt alive while looping,\nwhile the original form keeps ind then nxt and end alive.\n\nIf the loop could not be rewritten, it is left unchanged.\n" [^{:tag (* Func)} f ^indVar v]
+  (let [ind (.-ind v)
+      ^{:line 48} nxt (.-nxt v)]
+    (when (not (and (== (.-Uses ind) 2) ; 2 used by comparison and next
+          (== (.-Uses nxt) 1))) ; 1 used by induction
+      (return))
+
+
+    (let [(values start end) (values (.-min v) (.-max v))]
+
+      (when (not (.isGenericIntConst start))
+        ;; if start is not a constant we would be winning nothing from inverting the loop
+        (return))
+
+      (when (.isGenericIntConst end)
+        ;; TODO: if both start and end are constants we should rewrite such that the comparison
+        ;; is against zero and nxt is ++ or -- operation
+        ;; That means:
+        ;;	for i := 2; i < 11; i += 2 {
+        ;; should be rewritten to:
+        ;;	for i := 5; 0 < i; i-- {
+        (return))
+
+
+      (when (== (.-Block end) (.-Block ind))
+        ;; we can't rewrite loops where the condition depends on the loop body
+        ;; this simple check is forced to work because if this is true a Phi in ind.Block must exist
+        (return))
+
+
+      (let [check (aget (.-Controls (.-b (aget (.-Preds (.-entry v)) 0))) 0)
+
+          ^{:line 78} neededRoom (- (.-step v))]
+
+        ;; The whole range of safe numbers to land in to stop the loop is shifted by one if the bounds are exclusive.
+        (when (and (< neededRoom 0) (== (bit-and (.-flags v) indVarMinExc) 1))
+          (inc! neededRoom)) ; safe because it is always against the number's sign
+
+        (when (and (> neededRoom 0) (== (bit-and (.-flags v) indVarMaxInc) 0))
+          (dec! neededRoom)) ; safe because it is always against the number's sign
+
+
+        (switch (.-Op check)
+          (case [OpLess8 OpLess16 OpLess32 OpLess64 OpLeq8 OpLeq16 OpLeq32 OpLeq64]
+            (when [(values _ ok) (safeAdd (.-AuxInt start) neededRoom (* (conv uint (.Size (.-Type start))) 8))] (not ok)
+              ;; We lack sufficient room after start to safely land without an overflow.
+              ;; See go.dev/issue/78303
+              (return)))
+
+          (case [OpLess8U OpLess16U OpLess32U OpLess64U OpLeq8U OpLeq16U OpLeq32U OpLeq64U]
+            (panic "parseIndVar didn't yet support unsigned induction variables, this code doesn't yet support them either.\nIf you are seeing this it is probably because you've fixed https://go.dev/issue/65918.\nYou need to update this code and add tests then."))
+
+
+          (case [OpEq8 OpEq16 OpEq32 OpEq64 OpNeq8 OpNeq16 OpNeq32 OpNeq64]
+            (panic "parseIndVar didn't yet support induction variables using == or !=.\nIf you are seeing this it is probably because you've added support for them.\nYou need to update this code and add tests then."))
+
+
+          (default
+            (panic (fmt/Sprintf "unreachable; unexpected induction variable comparator %v %v" check (.-Op check)))))
+
+
+        (let [(values idxEnd idxStart) (values -1 -1)]
+          (range [i v (.-Args check)]
+            (when (== v end)
+              (set! idxEnd i)
+              (break)))
+
+
+          (range [i v (.-Args ind)]
+            (when (== v start)
+              (set! idxStart i)
+              (break)))
+
+
+          (when (or (< idxEnd 0) (< idxStart 0))
+            (return))
+
+
+          (let [sdom (.Sdom f)]
+            ;; the end may not dominate the ind after rewrite, check it first
+            (when (not (.IsAncestorEq sdom (.-Block end) (.-Block ind)))
+              (return))
+
+
+            ;; swap start and end in the loop
+            (.SetArg check idxEnd start)
+            (.SetArg ind idxStart end)
+
+            ;; invert the check
+            (set! (values (aget (.-Args check) 0) (aget (.-Args check) 1)) (values (aget (.-Args check) 1) (aget (.-Args check) 0)))
+
+            (when (!= (aget (.-Args nxt) 0) ind)
+              ;; unlike additions subtractions are not commutative so be sure we get it right
+              (set! (values (aget (.-Args nxt) 0) (aget (.-Args nxt) 1)) (values (aget (.-Args nxt) 1) (aget (.-Args nxt) 0))))
+
+
+            (switch (.-Op nxt)
+              (case [OpAdd8]
+                (set! (.-Op nxt) OpSub8))
+              (case [OpAdd16]
+                (set! (.-Op nxt) OpSub16))
+              (case [OpAdd32]
+                (set! (.-Op nxt) OpSub32))
+              (case [OpAdd64]
+                (set! (.-Op nxt) OpSub64))
+              (case [OpSub8]
+                (set! (.-Op nxt) OpAdd8))
+              (case [OpSub16]
+                (set! (.-Op nxt) OpAdd16))
+              (case [OpSub32]
+                (set! (.-Op nxt) OpAdd32))
+              (case [OpSub64]
+                (set! (.-Op nxt) OpAdd64))
+              (default
+                (panic "unreachable")))
+
+
+            (when (> (.-debug (.-pass f)) 0)
+              (.Warnl f (.-Pos ind) "Inverted loop iteration"))))))))

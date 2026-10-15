@@ -1,0 +1,1107 @@
+;; Copyright 2013 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.cmd.link.internal.ld) (go/file "pcln.go" :imports [
+
+
+    ^{:line 8} [goobj "cmd/internal/goobj"]
+    ^{:line 9} [objabi "cmd/internal/objabi"]
+    ^{:line 10} [sys "cmd/internal/sys"]
+    ^{:line 11} [loader "cmd/link/internal/loader"]
+    ^{:line 12} [sym "cmd/link/internal/sym"]
+    ^{:line 13} [cmp "cmp"]
+    ^{:line 14} [fmt "fmt"]
+    ^{:line 15} [abi "internal/abi"]
+    ^{:line 16} [buildcfg "internal/buildcfg"]
+    ^{:line 17} [filepath "path/filepath"]
+    ^{:line 18} [slices "slices"]
+    ^{:line 19} [strings "strings"]])
+
+
+(go/const ^{:val 44} funcSize (* 11 4)) ; funcSize is the size of the _func object in runtime/runtime2.go
+
+
+(go/type pclntab "pclntab holds the state needed for pclntab generation.\n" (struct
+
+    ^{:line 27 :tag loader/Sym :doc "The first and last functions found.\n"} firstFunc ^{:tag loader/Sym :doc "The first and last functions found.\n"} lastFunc
+
+
+    ^{:line 30 :tag int64 :doc "Running total size of pclntab.\n"} size
+
+
+    ^{:line 33 :tag loader/Sym :doc "runtime.pclntab's symbols\n"} carrier
+    ^{:line 34 :tag loader/Sym} pclntab
+    ^{:line 35 :tag loader/Sym} pcheader
+    ^{:line 36 :tag loader/Sym} funcnametab
+    ^{:line 37 :tag loader/Sym} findfunctab
+    ^{:line 38 :tag loader/Sym} cutab
+    ^{:line 39 :tag loader/Sym} filetab
+    ^{:line 40 :tag loader/Sym} pctab
+    ^{:line 41 :tag loader/Sym} funcdata
+
+
+
+
+
+
+
+
+    ^{:line 50 :tag int32 :doc "The number of functions + number of TEXT sections - 1. This is such an\nunexpected value because platforms that have more than one TEXT section\nget a dummy function inserted between because the external linker can place\nfunctions in those areas. We mark those areas as not covered by the Go\nruntime.\n\nOn most platforms this is the number of reachable functions.\n"} nfunc
+
+
+    ^{:line 53 :tag uint32 :doc "The number of filenames in runtime.filetab.\n"} nfiles))
+
+
+
+
+^{:go/end 73} (go/method addGeneratedSym "addGeneratedSym adds a generator symbol to pclntab, returning the new Sym.\nIt is the caller's responsibility to save the symbol in state.\n" ^loader/Sym [^{:tag (* pclntab)} state ^{:tag (* Link)} ctxt ^string name ^int64 size ^int32 align ^generatorFunc f]
+  (set! size (Rnd size (conv int64 (.-PtrSize ^{:go/via [Target]} (.-Arch ctxt)))))
+  (set! (.-size state) + size)
+  (let [s (.createGeneratorSymbol ctxt name 0 sym/SPCLNTAB size f)
+      ^{:line 62} ldr (.-loader ctxt)]
+    (.SetSymAlign ldr s align)
+    (.SetAttrReachable ldr s true)
+    (.SetCarrierSym ldr s (.-carrier state))
+    (.SetAttrNotInSymbolTable ldr s true)
+
+    (when (> align (.SymAlign ldr (.-carrier state)))
+      (.SetSymAlign ldr (.-carrier state) align))
+
+
+    ^{:line 72} s))
+
+
+
+
+
+
+^{:go/end 109} (go/func makePclntab "makePclntab makes a pclntab object, and assembles all the compilation units\nwe'll need to write pclntab. Returns the pclntab structure, a slice of the\nCompilationUnits we need, and a slice of the function symbols we need to\ngenerate pclntab.\n" [^{:tag (* Link)} ctxt ^loader/Bitmap container] :results [(* pclntab) (slice (* sym/CompilationUnit)) (slice loader/Sym)]
+  (let [ldr (.-loader ctxt)
+      ^{:line 81} state (new pclntab)
+
+      ;; Gather some basic stats and info.
+      ^{:line 84} seenCUs (make (map (* sym/CompilationUnit) (struct)))
+      ^{:line 85} compUnits (lit (slice (* sym/CompilationUnit)))
+      ^{:line 86} funcs (lit (slice loader/Sym))]
+
+    (range [_ s (.-Textp ctxt)]
+      (when (not (emitPcln ctxt s container))
+        (continue))
+
+      (set! funcs (append funcs s))
+      (inc! (.-nfunc state))
+      (when (== (.-firstFunc state) 0)
+        (set! (.-firstFunc state) s))
+
+      (set! (.-lastFunc state) s)
+
+      ;; We need to keep track of all compilation units we see. Some symbols
+      ;; (eg, go.buildid, _cgoexp_, etc) won't have a compilation unit.
+      (let [cu (.SymUnit ldr s)]
+        (when [(values _ ok) (aget seenCUs cu)] (and (!= cu nil) (not ok))
+          (aset seenCUs cu (lit (struct)))
+          (set! (.-PclnIndex cu) (len compUnits))
+          (set! compUnits (append compUnits cu)))))
+
+
+    (return state compUnits funcs)))
+
+
+^{:go/end 128} (go/func emitPcln ^bool [^{:tag (* Link)} ctxt ^loader/Sym s ^loader/Bitmap container]
+  (when (.IsRISCV64 (.-Target ctxt))
+    ;; Avoid adding local symbols to the pcln table - RISC-V
+    ;; linking generates a very large number of these, particularly
+    ;; for HI20 symbols (which we need to load in order to be able
+    ;; to resolve relocations). Unnecessarily including all of
+    ;; these symbols quickly blows out the size of the pcln table
+    ;; and overflows hash buckets.
+    (let [symName (.SymName (.-loader ctxt) s)]
+      (when (or (== symName "") (strings/HasPrefix symName ".L"))
+        (return false))))
+
+
+
+  ;; We want to generate func table entries only for the "lowest
+  ;; level" symbols, not containers of subsymbols.
+  (not (.Has container s)))
+
+
+^{:go/end 184} (go/func computeDeferReturn ^uint32 [^{:tag (* Link)} ctxt ^loader/Sym deferReturnSym ^loader/Sym s]
+  (let [ldr (.-loader ctxt)
+      ^{:line 132} target (.-Target ctxt)
+      ^{:line 133} deferreturn (conv uint32 0)
+      ^{:line 134} lastWasmAddr (conv uint32 0)
+
+      ^{:line 136} relocs (.Relocs ldr s)]
+    (for [ri 0] (< ri (.Count relocs)) (inc! ri)
+      (let [r (.At relocs ri)]
+        (when (and (.IsWasm target) (== (.Type r) objabi/R_ADDR))
+          ;; wasm/ssa.go generates an ARESUMEPOINT just
+          ;; before the deferreturn call. The "PC" of
+          ;; the deferreturn call is stored in the
+          ;; R_ADDR relocation on the ARESUMEPOINT.
+          (set! lastWasmAddr (conv uint32 ^{:go/via [Reloc]} (.Add r))))
+
+        (when (and (.IsDirectCall (.Type r)) ^:go/paren (or (== (.Sym r) deferReturnSym) (.IsDeferReturnTramp ldr (.Sym r))))
+          (if (.IsWasm target)
+            (set! deferreturn (- lastWasmAddr 1))
+            (do
+              ;; Note: the relocation target is in the call instruction, but
+              ;; is not necessarily the whole instruction (for instance, on
+              ;; x86 the relocation applies to bytes [1:5] of the 5 byte call
+              ;; instruction).
+              (set! deferreturn (conv uint32 ^{:go/via [Reloc]} (.Off r)))
+              (switch (.-Family (.-Arch target))
+                (case [sys/I386]
+                  (dec! deferreturn)
+                  (when (or (== ^{:go/via [Target]} (.-BuildMode ctxt) BuildModeShared) ^{:go/via [Target]} (.-linkShared ctxt) (== ^{:go/via [Target]} (.-BuildMode ctxt) BuildModePlugin))
+                    ;; In this mode, we need to get the address from GOT,
+                    ;; with two additional instructions like
+                    ;;
+                    ;; CALL    __x86.get_pc_thunk.bx(SB)       // 5 bytes
+                    ;; LEAL    _GLOBAL_OFFSET_TABLE_<>(BX), BX // 6 bytes
+                    ;;
+                    ;; We need to back off to the get_pc_thunk call.
+                    ;; (See progedit in cmd/internal/obj/x86/obj6.go)
+                    (set! deferreturn - 11)))
+
+                (case [sys/AMD64]
+                  (dec! deferreturn))
+
+                (case [sys/ARM sys/ARM64 sys/Loong64 sys/MIPS sys/MIPS64 sys/PPC64 sys/RISCV64])
+                ;; no change
+                (case [sys/S390X]
+                  (set! deferreturn - 2))
+                (default
+                  (panic (fmt/Sprint "Unhandled architecture:" (.-Family (.-Arch target))))))))
+
+
+          (break)))) ; only need one
+
+
+    ^{:line 183} deferreturn))
+
+
+
+
+^{:go/end 234} (go/func genInlTreeSym "genInlTreeSym generates the InlTree sym for a function with the\nspecified FuncInfo.\n" ^loader/Sym [^{:tag (* Link)} ctxt ^{:tag (* sym/CompilationUnit)} cu ^loader/FuncInfo fi ^{:tag (* sys/Arch)} arch ^{:tag (map loader/Sym uint32)} nameOffsets]
+  (let [ldr (.-loader ctxt)
+      ^{:line 190} its (.CreateExtSym ldr "" 0)
+      ^{:line 191} inlTreeSym (.MakeSymbolUpdater ldr its)]
+    ;; Note: the generated symbol is given a type of sym.SGOFUNC, as a
+    ;; signal to the symtab() phase that it needs to be grouped in with
+    ;; other similar symbols (gcdata, etc); the dodata() phase will
+    ;; eventually switch the type back to SRODATA.
+    (.SetType inlTreeSym sym/SPCLNTAB)
+    (.SetAttrReachable ldr its true)
+    (.SetSymAlign ldr its 4) ; it has 32-bit fields
+    (let [ninl (.NumInlTree fi)]
+      (for [i 0] (< i (conv int ninl)) (inc! i)
+        (let [call (.InlTree fi i)
+            (values nameOff ok) (aget nameOffsets (.-Func call))]
+          (when (not ok)
+            (panic "couldn't find function name offset"))
+
+
+          (let [inlFunc (.FuncInfo ldr (.-Func call))
+              ^{:line 208 :tag abi/FuncID} funcID (zero abi/FuncID)
+              ^{:line 209} startLine (conv int32 0)]
+            (cond (.Valid inlFunc) (do
+                (set! funcID (.FuncID inlFunc))
+                (set! startLine (.StartLine inlFunc)))
+              (not ^{:go/via [Target]} (.-linkShared ctxt))
+              ;; Inlined functions are always Go functions, and thus
+              ;; must have FuncInfo.
+              ;;
+              ;; Unfortunately, with -linkshared, the inlined
+              ;; function may be external symbols (from another
+              ;; shared library), and we don't load FuncInfo from the
+              ;; shared library. We will report potentially incorrect
+              ;; FuncID in this case. See https://go.dev/issue/55954.
+              (panic (fmt/Sprintf "inlined function %s missing func info" (.SymName ldr (.-Func call)))))
+
+
+            ;; Construct runtime.inlinedCall value.
+            (let [^:const ^{:val 16} size 16]
+              (.SetUint8 inlTreeSym arch (conv int64 (+ (* i size) 0)) (conv uint8 funcID))
+              ;; Bytes 1-3 are unused.
+              (.SetUint32 inlTreeSym arch (conv int64 (+ (* i size) 4)) nameOff)
+              (.SetUint32 inlTreeSym arch (conv int64 (+ (* i size) 8)) (conv uint32 (.-ParentPC call)))
+              (.SetUint32 inlTreeSym arch (conv int64 (+ (* i size) 12)) (conv uint32 startLine))))))
+
+      ^{:line 233} its)))
+
+
+
+^{:go/end 250} (go/func makeInlSyms "makeInlSyms returns a map of loader.Sym that are created inlSyms.\n" ^{:tag (map loader/Sym loader/Sym)} [^{:tag (* Link)} ctxt ^{:tag (slice loader/Sym)} funcs ^{:tag (map loader/Sym uint32)} nameOffsets]
+  (let [ldr (.-loader ctxt)
+      ;; Create the inline symbols we need.
+      ^{:line 240} inlSyms (make (map loader/Sym loader/Sym))]
+    (range [_ s funcs]
+      (when [fi (.FuncInfo ldr s)] (.Valid fi)
+        (.Preload fi)
+        (when (> (.NumInlTree fi) 0)
+          (aset inlSyms s (genInlTreeSym ctxt (.SymUnit ldr s) fi ^{:go/via [Target]} (.-Arch ctxt) nameOffsets)))))
+
+
+
+    ^{:line 249} inlSyms))
+
+
+
+
+^{:go/end 288} (go/method generatePCHeader "generatePCHeader creates the runtime.pcheader symbol, setting it up as a\ngenerator to fill in its data later.\n" [^{:tag (* pclntab)} state ^{:tag (* Link)} ctxt]
+  (let [ldr (.-loader ctxt)
+      ^{:line 256} size (conv int64 (+ 8 (* 8 (.-PtrSize ^{:go/via [Target]} (.-Arch ctxt)))))
+      ^{:line 257} writeHeader ^{:go/end 285} (fn [^{:tag (* Link)} ctxt ^loader/Sym s]
+        (let [header (.MakeSymbolUpdater (.-loader ctxt) s)
+
+            ^{:line 260} writeSymOffset ^{:go/end 267} (fn ^int64 [^int64 off ^loader/Sym ws]
+              (let [diff (- (.SymValue ldr ws) (.SymValue ldr s))]
+                (when (<= diff 0)
+                  (let [name (.SymName ldr ws)]
+                    (panic (fmt/Sprintf "expected runtime.pcheader(%x) to be placed before %s(%x)" (.SymValue ldr s) name (.SymValue ldr ws)))))
+
+                (.SetUintptr header ^{:go/via [Target]} (.-Arch ctxt) off (conv uintptr diff))))]
+
+
+          ;; Write header.
+          ;; Keep in sync with runtime/symtab.go:pcHeader and package debug/gosym.
+          (.SetUint32 header ^{:go/via [Target]} (.-Arch ctxt) 0 (conv uint32 abi/CurrentPCLnTabMagic))
+          (.SetUint8 header ^{:go/via [Target]} (.-Arch ctxt) 6 (conv uint8 (.-MinLC ^{:go/via [Target]} (.-Arch ctxt))))
+          (.SetUint8 header ^{:go/via [Target]} (.-Arch ctxt) 7 (conv uint8 (.-PtrSize ^{:go/via [Target]} (.-Arch ctxt))))
+          (let [off (.SetUint header ^{:go/via [Target]} (.-Arch ctxt) 8 (conv uint64 (.-nfunc state)))]
+            (set! off (.SetUint header ^{:go/via [Target]} (.-Arch ctxt) off (conv uint64 (.-nfiles state))))
+            (set! off (.SetUintptr header ^{:go/via [Target]} (.-Arch ctxt) off 0)) ; unused
+            (set! off (writeSymOffset off (.-funcnametab state)))
+            (set! off (writeSymOffset off (.-cutab state)))
+            (set! off (writeSymOffset off (.-filetab state)))
+            (set! off (writeSymOffset off (.-pctab state)))
+            (set! off (writeSymOffset off (.-pclntab state)))
+            (when (!= off size)
+              (panic (fmt/Sprintf "pcHeader size: %d != %d" off size))))))]
+
+
+
+    (set! (.-pcheader state) (.addGeneratedSym state ctxt "runtime.pcheader" size (conv int32 (.-PtrSize ^{:go/via [Target]} (.-Arch ctxt))) writeHeader))))
+
+
+
+
+^{:go/end 314} (go/func walkFuncs "walkFuncs iterates over the funcs, calling a function for each unique\nfunction and inlined function.\n" [^{:tag (* Link)} ctxt ^{:tag (slice loader/Sym)} funcs ^{:tag (func [loader/Sym])} f]
+  (let [ldr (.-loader ctxt)
+      ^{:line 294} seen (make (map loader/Sym (struct)))]
+    (range [_ s funcs]
+      (when [(values _ ok) (aget seen s)] (not ok)
+        (f s)
+        (aset seen s (lit (struct))))
+
+
+      (let [fi (.FuncInfo ldr s)]
+        (when (not (.Valid fi))
+          (continue))
+
+        (.Preload fi)
+        (for [(values i ni) (values 0 (.NumInlTree fi))] (< i (conv int ni)) (inc! i)
+          (let [call (.-Func (.InlTree fi i))]
+            (when [(values _ ok) (aget seen call)] (not ok)
+              (f call)
+              (aset seen call (lit (struct))))))))))
+
+
+
+
+
+
+
+^{:go/end 338} (go/method generateFuncnametab "generateFuncnametab creates the function name table. Returns a map of\nfunc symbol to the name offset in runtime.funcnamtab.\n" ^{:tag (map loader/Sym uint32)} [^{:tag (* pclntab)} state ^{:tag (* Link)} ctxt ^{:tag (slice loader/Sym)} funcs]
+  (let [nameOffsets (make (map loader/Sym uint32) (.-nfunc state))
+
+      ;; Write the null terminated strings.
+      ^{:line 322} writeFuncNameTab ^{:go/end 327} (fn [^{:tag (* Link)} ctxt ^loader/Sym s]
+        (let [symtab (.MakeSymbolUpdater (.-loader ctxt) s)]
+          (range [s off nameOffsets]
+            (.AddCStringAt symtab (conv int64 off) (.SymName (.-loader ctxt) s)))))
+
+
+
+      ;; Loop through the CUs, and calculate the size needed.
+      ^{:line 330 :tag int64} size (zero int64)]
+    (walkFuncs ctxt funcs ^{:go/end 334} (fn [^loader/Sym s]
+        (aset nameOffsets s (conv uint32 size))
+        (set! size + (conv int64 (+ (len (.SymName (.-loader ctxt) s)) 1))))) ; NULL terminate
+
+
+    (set! (.-funcnametab state) (.addGeneratedSym state ctxt "runtime.funcnametab" size 1 writeFuncNameTab))
+    ^{:line 337} nameOffsets))
+
+
+
+
+^{:go/end 362} (go/func walkFilenames "walkFilenames walks funcs, calling a function for each filename used in each\nfunction's line table.\n" [^{:tag (* Link)} ctxt ^{:tag (slice loader/Sym)} funcs ^{:tag (func [(* sym/CompilationUnit) goobj/CUFileIndex])} f]
+  (let [ldr (.-loader ctxt)]
+
+    ;; Loop through all functions, finding the filenames we need.
+    (range [_ s funcs]
+      (let [fi (.FuncInfo ldr s)]
+        (when (not (.Valid fi))
+          (continue))
+
+        (.Preload fi)
+
+        (let [cu (.SymUnit ldr s)]
+          (for [(values i nf) (values 0 (conv int (.NumFile fi)))] (< i nf) (inc! i)
+            (f cu (.File fi i)))
+
+          (for [(values i ninl) (values 0 (conv int (.NumInlTree fi)))] (< i ninl) (inc! i)
+            (let [call (.InlTree fi i)]
+              (f cu (.-File call)))))))))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 467} (go/method generateFilenameTabs "generateFilenameTabs creates LUTs needed for filename lookup. Returns a slice\nof the index at which each CU begins in runtime.cutab.\n\nFunction objects keep track of the files they reference to print the stack.\nThis function creates a per-CU list of filenames if CU[M] references\nfiles[1-N], the following is generated:\n\n\truntime.cutab:\n\t  CU[M]\n\t   offsetToFilename[0]\n\t   offsetToFilename[1]\n\t   ..\n\n\truntime.filetab\n\t   filename[0]\n\t   filename[1]\n\nLooking up a filename then becomes:\n 0. Given a func, and filename index [K]\n 1. Get Func.CUIndex:       M := func.cuOffset\n 2. Find filename offset:   fileOffset := runtime.cutab[M+K]\n 3. Get the filename:       getcstring(runtime.filetab[fileOffset])\n" ^{:tag (slice uint32)} [^{:tag (* pclntab)} state ^{:tag (* Link)} ctxt ^{:tag (slice (* sym/CompilationUnit))} compUnits ^{:tag (slice loader/Sym)} funcs]
+  ;; On a per-CU basis, keep track of all the filenames we need.
+  ;;
+  ;; Note, that we store the filenames in a separate section in the object
+  ;; files, and deduplicate based on the actual value. It would be better to
+  ;; store the filenames as symbols, using content addressable symbols (and
+  ;; then not loading extra filenames), and just use the hash value of the
+  ;; symbol name to do this cataloging.
+  ;;
+  ;; TODO: Store filenames as symbols. (Note this would be easiest if you
+  ;; also move strings to ALWAYS using the larger content addressable hash
+  ;; function, and use that hash value for uniqueness testing.)
+  (let [cuEntries (make (slice goobj/CUFileIndex) (len compUnits))
+      ^{:line 399} fileOffsets (make (map string uint32))
+
+      ;; Walk the filenames.
+      ;; We store the total filename string length we need to load, and the max
+      ;; file index we've seen per CU so we can calculate how large the
+      ;; CU->global table needs to be.
+      ^{:line 405 :tag int64} fileSize (zero int64)]
+    (walkFilenames ctxt funcs ^{:go/end 419} (fn [^{:tag (* sym/CompilationUnit)} cu ^goobj/CUFileIndex i]
+        ;; Note we use the raw filename for lookup, but use the expanded filename
+        ;; when we save the size.
+        (let [filename (aget (.-FileTable cu) i)]
+          (when [(values _ ok) (aget fileOffsets filename)] (not ok)
+            (aset fileOffsets filename (conv uint32 fileSize))
+            (set! fileSize + (conv int64 (+ (len (expandFile filename)) 1)))) ; NULL terminate
+
+
+          ;; Find the maximum file index we've seen.
+          (when (< (aget cuEntries (.-PclnIndex cu)) (+ i 1))
+            (aset cuEntries (.-PclnIndex cu) (+ i 1)))))) ; Store max + 1
+
+
+
+    ;; Calculate the size of the runtime.cutab variable.
+    (let [^uint32 totalEntries (zero uint32)
+        ^{:line 423} cuOffsets (make (slice uint32) (len cuEntries))]
+      (range [i entries cuEntries]
+        ;; Note, cutab is a slice of uint32, so an offset to a cu's entry is just the
+        ;; running total of all cu indices we've needed to store so far, not the
+        ;; number of bytes we've stored so far.
+        (aset cuOffsets i totalEntries)
+        (set! totalEntries + (conv uint32 entries)))
+
+
+      ;; Write cutab.
+      (let [writeCutab ^{:go/end 451} (fn [^{:tag (* Link)} ctxt ^loader/Sym s]
+            (let [sb (.MakeSymbolUpdater (.-loader ctxt) s)
+
+                ^{:line 436 :tag int64} off (zero int64)]
+              (range [i max cuEntries]
+                ;; Write the per CU LUT.
+                (let [cu (aget compUnits i)]
+                  (for [j (conv goobj/CUFileIndex 0)] (< j max) (inc! j)
+                    (let [(values fileOffset ok) (aget fileOffsets (aget (.-FileTable cu) j))]
+                      (when (not ok)
+                        ;; We're looping through all possible file indices. It's possible a file's
+                        ;; been deadcode eliminated, and although it's a valid file in the CU, it's
+                        ;; not needed in this binary. When that happens, use an invalid offset.
+                        (set! fileOffset (bit-not (conv uint32 0))))
+
+                      (set! off (.SetUint32 sb ^{:go/via [Target]} (.-Arch ctxt) off fileOffset))))))))]
+
+
+
+        (set! (.-cutab state) (.addGeneratedSym state ctxt "runtime.cutab" (conv int64 (* totalEntries 4)) 4 writeCutab))
+
+        ;; Write filetab.
+        (let [writeFiletab ^{:go/end 462} (fn [^{:tag (* Link)} ctxt ^loader/Sym s]
+              (let [sb (.MakeSymbolUpdater (.-loader ctxt) s)]
+
+                ;; Write the strings.
+                (range [filename loc fileOffsets]
+                  (.AddStringAt sb (conv int64 loc) (expandFile filename)))))]
+
+
+          (set! (.-nfiles state) (conv uint32 (len fileOffsets)))
+          (set! (.-filetab state) (.addGeneratedSym state ctxt "runtime.filetab" fileSize 1 writeFiletab))
+
+          ^{:line 466} cuOffsets)))))
+
+
+
+
+^{:go/end 529} (go/method generatePctab "generatePctab creates the runtime.pctab variable, holding all the\ndeduplicated pcdata.\n" [^{:tag (* pclntab)} state ^{:tag (* Link)} ctxt ^{:tag (slice loader/Sym)} funcs]
+  (let [ldr (.-loader ctxt)
+
+      ;; Pctab offsets of 0 are considered invalid in the runtime. We respect
+      ;; that by just padding a single byte at the beginning of runtime.pctab,
+      ;; that way no real offsets can be zero.
+      ^{:line 477} size (conv int64 1)
+
+      ;; Walk the functions, finding offset to store each pcdata.
+      ^{:line 480} seen (make (map loader/Sym (struct)))
+      ^{:line 481} saveOffset ^{:go/end 493} (fn [^loader/Sym pcSym]
+        (when [(values _ ok) (aget seen pcSym)] (not ok)
+          (let [datSize (.SymSize ldr pcSym)]
+            (if (!= datSize 0)
+              (.SetSymValue ldr pcSym size)
+
+              ;; Invalid PC data, record as zero.
+              (.SetSymValue ldr pcSym 0))
+
+            (set! size + datSize)
+            (aset seen pcSym (lit (struct))))))
+
+
+      (values ^loader/Sym pcsp ^loader/Sym pcline ^loader/Sym pcfile ^loader/Sym pcinline) (zero loader/Sym)
+      ^{:line 495 :tag (slice loader/Sym)} pcdata (zero (slice loader/Sym))]
+    (range [_ s funcs]
+      (let [fi (.FuncInfo ldr s)]
+        (when (not (.Valid fi))
+          (continue))
+
+        (.Preload fi)
+        (set! (values pcsp pcfile pcline pcinline pcdata) (.PcdataAuxs ldr s pcdata))
+
+        (let [pcSyms (lit (slice loader/Sym) pcsp pcfile pcline)]
+          (range [_ pcSym pcSyms]
+            (saveOffset pcSym))
+
+          (range [_ pcSym pcdata]
+            (saveOffset pcSym))
+
+          (when (> (.NumInlTree fi) 0)
+            (saveOffset pcinline)))))
+
+
+
+    ;; TODO: There is no reason we need a generator for this variable, and it
+    ;; could be moved to a carrier symbol. However, carrier symbols containing
+    ;; carrier symbols don't work yet (as of Aug 2020). Once this is fixed,
+    ;; runtime.pctab could just be a carrier sym.
+    (let [writePctab ^{:go/end 526} (fn [^{:tag (* Link)} ctxt ^loader/Sym s]
+          (let [ldr (.-loader ctxt)
+              ^{:line 522} sb (.MakeSymbolUpdater ldr s)]
+            (range [sym seen]
+              (.SetBytesAt sb (.SymValue ldr sym) (.Data ldr sym)))))]
+
+
+
+      (set! (.-pctab state) (.addGeneratedSym state ctxt "runtime.pctab" size 1 writePctab)))))
+
+
+
+^{:go/end 662} (go/method generateFuncdata "generateFuncdata writes out the funcdata information.\n" [^{:tag (* pclntab)} state ^{:tag (* Link)} ctxt ^{:tag (slice loader/Sym)} funcs ^{:tag (map loader/Sym loader/Sym)} inlsyms]
+  (let [ldr (.-loader ctxt)
+
+      ;; Walk the functions and collect the funcdata.
+      ^{:line 536} seen (make (map loader/Sym (struct)) (len funcs))
+      ^{:line 537} fdSyms (make (slice loader/Sym) 0 (len funcs))
+      ^{:line 538} fd (lit (slice loader/Sym))]
+    (range [_ s funcs]
+      (let [fi (.FuncInfo ldr s)]
+        (when (not (.Valid fi))
+          (continue))
+
+        (.Preload fi)
+        (let [fd (funcData ldr s fi (aget inlsyms s) fd)]
+          (range [j fdSym fd]
+            (when (ignoreFuncData ldr s j fdSym)
+              (continue))
+
+
+            (when [(values _ ok) (aget seen fdSym)] (not ok)
+              (set! fdSyms (append fdSyms fdSym))
+              (aset seen fdSym (lit (struct))))))))
+
+
+
+    (set! seen nil)
+
+    ;; Sort the funcdata in reverse order by alignment
+    ;; to minimize alignment gaps. Use a stable sort
+    ;; for reproducible results.
+    (let [^int32 maxAlign (zero int32)]
+      (^{:inst [(slice loader/Sym) loader/Sym]} slices/SortStableFunc fdSyms ^{:go/end 572} (fn ^int [^loader/Sym a ^loader/Sym b]
+          (let [aAlign (symalign ldr a)
+              ^{:line 565} bAlign (symalign ldr b)]
+
+            ;; Remember maximum alignment.
+            (set! maxAlign (max maxAlign aAlign bAlign))
+
+            ;; Negate to sort by decreasing alignment.
+            (- (^{:inst [int32]} cmp/Compare aAlign bAlign)))))
+
+
+      ;; We will output the symbols in the order of fdSyms.
+      ;; Set the value of each symbol to its offset in the funcdata.
+      ;; This way when writeFuncs writes out the funcdata offset,
+      ;; it can simply write out the symbol value.
+
+      ;; Accumulated size of funcdata info.
+      (let [size (conv int64 0)]
+
+        (range [_ fdSym fdSyms]
+          (let [datSize (.SymSize ldr fdSym)]
+            (when (== datSize 0)
+              (.Errorf ctxt fdSym "zero size funcdata")
+              (continue))
+
+
+            (set! size (Rnd size (conv int64 (symalign ldr fdSym))))
+            (.SetSymValue ldr fdSym size)
+            (set! size + datSize)
+
+            ;; We do not put the funcdata symbols in the symbol table.
+            (.SetAttrNotInSymbolTable ldr fdSym true)
+
+            ;; Mark the symbol as special so that it does not get
+            ;; adjusted by the section offset.
+            (.SetAttrSpecial ldr fdSym true)))
+
+
+        ;; Funcdata symbols are permitted to have R_ADDROFF relocations,
+        ;; which the linker can fully resolve.
+        (let [resolveRelocs ^{:go/end 643} (fn [^{:tag (* loader/Loader)} ldr ^loader/Sym fdSym ^{:tag (slice byte)} data]
+              (let [relocs (.Relocs ldr fdSym)]
+                (for [i 0] (< i (.Count relocs)) (inc! i)
+                  (let [r (.At relocs i)]
+                    (when (!= (.Type r) objabi/R_ADDROFF)
+                      (.Errorf ctxt fdSym "unsupported reloc %d (%s) for funcdata symbol" (.Type r) (sym/RelocName (.-Arch (.-Target ctxt)) (.Type r)))
+                      (return))
+
+                    (when (!= ^{:go/via [Reloc]} (.Siz r) 4)
+                      (.Errorf ctxt fdSym "unsupported ADDROFF reloc size %d for funcdata symbol" ^{:go/via [Reloc]} (.Siz r))
+                      (return))
+
+                    (let [rs (.Sym r)]
+                      (when (and (.Weak r) (not (.AttrReachable ldr rs)))
+                        (return))
+
+                      (let [sect (.SymSect ldr rs)]
+                        (when (== sect nil)
+                          (.Errorf ctxt fdSym "missing section for relocation target %s for funcdata symbol" (.SymName ldr rs)))
+
+                        (let [o (.SymValue ldr rs)]
+                          (if (!= (.-Name sect) ".text")
+                            (set! o - (conv int64 (.-Vaddr sect)))
+                            (do
+                              ;; With multiple .text sections the offset
+                              ;; is from the start of the first one.
+                              (set! o - (conv int64 (.-Vaddr (aget (.-Sections Segtext) 0))))
+                              (when (.IsWasm (.-Target ctxt))
+                                (when (!= (bit-and o (- (<< 1 16) 1)) 0)
+                                  (.Errorf ctxt fdSym "textoff relocation does not target function entry for funcdata symbol: %s %#x" (.SymName ldr rs) o))
+
+                                (set! o >> 16))))
+
+
+                          (set! o + ^{:go/via [Reloc]} (.Add r))
+                          (when (and (!= o (conv int64 (conv int32 o))) (!= o (conv int64 (conv uint32 o))))
+                            (.Errorf ctxt fdSym "ADDROFF relocation out of range for funcdata symbol: %#x" o))
+
+                          (.PutUint32 (.-ByteOrder (.-Arch (.-Target ctxt))) (subslice data ^{:go/via [Reloc]} (.Off r)) (conv uint32 o)))))))))
+
+
+
+            ^{:line 645} writeFuncData ^{:go/end 655} (fn [^{:tag (* Link)} ctxt ^loader/Sym s]
+              (let [ldr (.-loader ctxt)
+                  ^{:line 647} sb (.MakeSymbolUpdater ldr s)]
+                (range [_ fdSym fdSyms]
+                  (let [off (.SymValue ldr fdSym)
+                      ^{:line 650} fdSymData (.Data ldr fdSym)]
+                    (.SetBytesAt sb off fdSymData)
+                    ;; Resolve any R_ADDROFF relocations.
+                    (resolveRelocs ldr fdSym (subslice (.Data sb) off (+ off (conv int64 (len fdSymData)))))))))]
+
+
+
+          (set! (.-funcdata state) (.addGeneratedSym state ctxt "go:func.*" size maxAlign writeFuncData))
+
+          ;; Because the funcdata previously was not in pclntab,
+          ;; we need to keep the visible symbol so that tools can find it.
+          (.SetAttrNotInSymbolTable ldr (.-funcdata state) false))))))
+
+
+
+
+
+
+
+
+
+
+^{:go/breaks [[6 679]] :go/end 680} (go/func ignoreFuncData "ignoreFuncData reports whether we should ignore a funcdata symbol.\n\ncmd/internal/obj optimistically populates ArgsPointerMaps and\nArgInfo for assembly functions, hoping that the compiler will\nemit appropriate symbols from their Go stub declarations. If\nit didn't though, just ignore it.\n\nTODO(cherryyz): Fix arg map generation (see discussion on CL 523335).\n" ^bool [^{:tag (* loader/Loader)} ldr ^loader/Sym s ^int j ^loader/Sym fdSym]
+  (when (== fdSym 0)
+    (return true))
+
+  (when (and ^:go/paren (or (== j abi/FUNCDATA_ArgsPointerMaps) (== j abi/FUNCDATA_ArgInfo)) (.IsFromAssembly ldr s) (== (.Data ldr fdSym) nil))
+    (return true))
+
+  false)
+
+
+
+
+^{:go/end 695} (go/func numPCData "numPCData returns the number of PCData syms for the FuncInfo.\nNB: Preload must be called on valid FuncInfos before calling this function.\n" ^uint32 [^{:tag (* loader/Loader)} ldr ^loader/Sym s ^loader/FuncInfo fi]
+  (when (not (.Valid fi))
+    (return 0))
+
+  (let [numPCData (conv uint32 (.NumPcdata ldr s))]
+    (when (> (.NumInlTree fi) 0)
+      (when (< numPCData (+ abi/PCDATA_InlTreeIndex 1))
+        (set! numPCData (+ abi/PCDATA_InlTreeIndex 1))))
+
+
+    ^{:line 694} numPCData))
+
+
+
+
+
+
+
+
+^{:go/end 714} (go/method generateFunctab "generateFunctab creates the runtime.functab\n\nruntime.functab contains two things:\n\n  - pc->func look up table.\n  - array of func objects, interleaved with pcdata and funcdata\n" [^{:tag (* pclntab)} state ^{:tag (* Link)} ctxt ^{:tag (slice loader/Sym)} funcs ^{:tag (map loader/Sym loader/Sym)} inlSyms ^{:tag (slice uint32)} cuOffsets ^{:tag (map loader/Sym uint32)} nameOffsets]
+  ;; Calculate the size of the table.
+  (let [(values size startLocations) (.calculateFunctabSize state ctxt funcs)
+      ^{:line 706} writePcln ^{:go/end 712} (fn [^{:tag (* Link)} ctxt ^loader/Sym s]
+        (let [ldr (.-loader ctxt)
+            ^{:line 708} sb (.MakeSymbolUpdater ldr s)]
+          ;; Write the data.
+          (writePCToFunc ctxt sb funcs startLocations)
+          (writeFuncs ctxt sb funcs inlSyms startLocations cuOffsets nameOffsets)))]
+
+    (set! (.-pclntab state) (.addGeneratedSym state ctxt "runtime.functab" size 4 writePcln))))
+
+
+
+
+
+
+
+
+
+^{:go/end 735} (go/func funcData "funcData returns the funcdata and offsets for the FuncInfo.\nThe funcdata are written into runtime.functab after each func\nobject. This is a helper function to make querying the FuncInfo object\ncleaner.\n\nNB: Preload must be called on the FuncInfo before calling.\nNB: fdSyms is used as scratch space.\n" ^{:tag (slice loader/Sym)} [^{:tag (* loader/Loader)} ldr ^loader/Sym s ^loader/FuncInfo fi ^loader/Sym inlSym ^{:tag (slice loader/Sym)} fdSyms]
+  (set! fdSyms (subslice fdSyms _ 0))
+  (when (.Valid fi)
+    (set! fdSyms (.Funcdata ldr s fdSyms))
+    (when (> (.NumInlTree fi) 0)
+      (when (< (len fdSyms) (+ abi/FUNCDATA_InlTree 1))
+        (set! fdSyms (append fdSyms (spread (make (slice loader/Sym) (- (+ abi/FUNCDATA_InlTree 1) (len fdSyms)))))))
+
+      (aset fdSyms abi/FUNCDATA_InlTree inlSym)))
+
+
+  ^{:line 734} fdSyms)
+
+
+
+
+^{:go/end 769} (go/method calculateFunctabSize "calculateFunctabSize calculates the size of the pclntab, and the offsets in\nthe output buffer for individual func entries.\n" [^pclntab state ^{:tag (* Link)} ctxt ^{:tag (slice loader/Sym)} funcs] :results [int64 (slice uint32)]
+  (let [ldr (.-loader ctxt)
+      ^{:line 741} startLocations (make (slice uint32) (len funcs))
+
+      ;; Allocate space for the pc->func table. This structure consists of a pc offset
+      ;; and an offset to the func structure. After that, we have a single pc
+      ;; value that marks the end of the last function in the binary.
+      ^{:line 746} size (conv int64 (+ (* (conv int (.-nfunc state)) 2 4) 4))]
+
+    ;; Now find the space for the func objects. We do this in a running manner,
+    ;; so that we can find individual starting locations.
+    (range [i s funcs]
+      (set! size (Rnd size (conv int64 (.-PtrSize ^{:go/via [Target]} (.-Arch ctxt)))))
+      (aset startLocations i (conv uint32 size))
+      (let [fi (.FuncInfo ldr s)]
+        (set! size + funcSize)
+        (when (.Valid fi)
+          (.Preload fi)
+          (let [numFuncData (.NumFuncdata ldr s)]
+            (when (> (.NumInlTree fi) 0)
+              (when (< numFuncData (+ abi/FUNCDATA_InlTree 1))
+                (set! numFuncData (+ abi/FUNCDATA_InlTree 1))))
+
+
+            (set! size + (conv int64 (* (numPCData ldr s fi) 4)))
+            (set! size + (conv int64 (* numFuncData 4)))))))
+
+
+
+    (return size startLocations)))
+
+
+
+
+
+^{:go/end 793} (go/func textOff "textOff computes the offset of a text symbol, relative to textStart,\nsimilar to an R_ADDROFF relocation,  for various runtime metadata and\ntables (see runtime/symtab.go:(*moduledata).textAddr).\n" ^uint32 [^{:tag (* Link)} ctxt ^loader/Sym s ^int64 textStart]
+  (let [ldr (.-loader ctxt)
+      ^{:line 776} off (- (.SymValue ldr s) textStart)]
+    (when (< off 0)
+      (panic (fmt/Sprintf "expected func %s(%x) to be placed at or after textStart (%x)" (.SymName ldr s) (.SymValue ldr s) textStart)))
+
+    (when ^{:go/via [Target]} (.IsWasm ctxt)
+      ;; On Wasm, the function table contains just the function index, whereas
+      ;; the "PC" (s's Value) is function index << 16 + block index (see
+      ;; ../wasm/asm.go:assignAddress).
+      (when (!= (bit-and off (- (<< 1 16) 1)) 0)
+        (.Errorf ctxt s "nonzero PC_B at function entry: %#x" off))
+
+      (set! off >> 16))
+
+    (when (!= (conv int64 (conv uint32 off)) off)
+      (.Errorf ctxt s "textOff overflow: %#x" off))
+
+    (conv uint32 off)))
+
+
+
+^{:go/end 814} (go/func writePCToFunc "writePCToFunc writes the PC->func lookup table.\n" [^{:tag (* Link)} ctxt ^{:tag (* loader/SymbolBuilder)} sb ^{:tag (slice loader/Sym)} funcs ^{:tag (slice uint32)} startLocations]
+  (let [ldr (.-loader ctxt)
+      ^{:line 798} textStart (.SymValue ldr (.Lookup ldr "runtime.text" 0))
+      ^{:line 799} pcOff ^{:go/end 801} (fn ^uint32 [^loader/Sym s]
+        (textOff ctxt s textStart))]
+
+    (range [i s funcs]
+      (.SetUint32 sb ^{:go/via [Target]} (.-Arch ctxt) (conv int64 (* i 2 4)) (pcOff s))
+      (.SetUint32 sb ^{:go/via [Target]} (.-Arch ctxt) (conv int64 (* (+ (* i 2) 1) 4)) (aget startLocations i)))
+
+
+    ;; Final entry of table is just end pc offset.
+    (let [lastFunc (aget funcs (- (len funcs) 1))
+        ^{:line 809} lastPC (+ (pcOff lastFunc) (conv uint32 (.SymSize ldr lastFunc)))]
+      (when ^{:go/via [Target]} (.IsWasm ctxt)
+        (set! lastPC (+ (pcOff lastFunc) 1))) ; On Wasm it is function index (see above)
+
+      (.SetUint32 sb ^{:go/via [Target]} (.-Arch ctxt) (* (conv int64 (len funcs)) 2 4) lastPC))))
+
+
+
+^{:go/end 925} (go/func writeFuncs "writeFuncs writes the func structures and pcdata to runtime.functab.\n" [^{:tag (* Link)} ctxt ^{:tag (* loader/SymbolBuilder)} sb ^{:tag (slice loader/Sym)} funcs ^{:tag (map loader/Sym loader/Sym)} inlSyms ^{:tag (slice uint32)} startLocations ^{:tag (slice uint32)} cuOffsets ^{:tag (map loader/Sym uint32)} nameOffsets]
+  (let [ldr (.-loader ctxt)
+      ^{:line 819} deferReturnSym (.Lookup ldr "runtime.deferreturn" abiInternalVer)
+      ^{:line 820} textStart (.SymValue ldr (.Lookup ldr "runtime.text" 0))
+      ^{:line 821} funcdata (lit (slice loader/Sym))
+      (values ^loader/Sym pcsp ^loader/Sym pcfile ^loader/Sym pcline ^loader/Sym pcinline) (zero loader/Sym)
+      ^{:line 823 :tag (slice loader/Sym)} pcdata (zero (slice loader/Sym))]
+
+    ;; Write the individual func objects (runtime._func struct).
+    (range [i s funcs]
+      (let [startLine (conv int32 0)
+          ^{:line 828} fi (.FuncInfo ldr s)]
+        (when (.Valid fi)
+          (.Preload fi)
+          (set! (values pcsp pcfile pcline pcinline pcdata) (.PcdataAuxs ldr s pcdata))
+          (set! startLine (.StartLine fi)))
+
+
+        (let [off (conv int64 (aget startLocations i))
+            ;; entryOff uint32 (offset of func entry PC from textStart)
+            ^{:line 837} entryOff (textOff ctxt s textStart)]
+          (set! off (.SetUint32 sb ^{:go/via [Target]} (.-Arch ctxt) off entryOff))
+
+          ;; nameOff int32
+          (let [(values nameOff ok) (aget nameOffsets s)]
+            (when (not ok)
+              (panic "couldn't find function name offset"))
+
+            (set! off (.SetUint32 sb ^{:go/via [Target]} (.-Arch ctxt) off nameOff))
+
+            ;; args int32
+            ;; TODO: Move into funcinfo.
+            (let [args (conv uint32 0)]
+              (when (.Valid fi)
+                (set! args (conv uint32 (.Args fi))))
+
+              (set! off (.SetUint32 sb ^{:go/via [Target]} (.-Arch ctxt) off args))
+
+              ;; deferreturn
+              (let [deferreturn (computeDeferReturn ctxt deferReturnSym s)]
+                (set! off (.SetUint32 sb ^{:go/via [Target]} (.-Arch ctxt) off deferreturn))
+
+                ;; pcdata
+                (if (.Valid fi) (do
+                    (set! off (.SetUint32 sb ^{:go/via [Target]} (.-Arch ctxt) off (conv uint32 (.SymValue ldr pcsp))))
+                    (set! off (.SetUint32 sb ^{:go/via [Target]} (.-Arch ctxt) off (conv uint32 (.SymValue ldr pcfile))))
+                    (set! off (.SetUint32 sb ^{:go/via [Target]} (.-Arch ctxt) off (conv uint32 (.SymValue ldr pcline)))))
+
+                  (set! off + 12))
+
+                (set! off (.SetUint32 sb ^{:go/via [Target]} (.-Arch ctxt) off (numPCData ldr s fi)))
+
+                ;; Store the offset to compilation unit's file table.
+                (let [cuIdx (bit-not (conv uint32 0))]
+                  (when [cu (.SymUnit ldr s)] (!= cu nil)
+                    (set! cuIdx (aget cuOffsets (.-PclnIndex cu))))
+
+                  (set! off (.SetUint32 sb ^{:go/via [Target]} (.-Arch ctxt) off cuIdx))
+
+                  ;; startLine int32
+                  (set! off (.SetUint32 sb ^{:go/via [Target]} (.-Arch ctxt) off (conv uint32 startLine)))
+
+                  ;; funcID uint8
+                  (let [^abi/FuncID funcID (zero abi/FuncID)]
+                    (when (.Valid fi)
+                      (set! funcID (.FuncID fi)))
+
+                    (set! off (.SetUint8 sb ^{:go/via [Target]} (.-Arch ctxt) off (conv uint8 funcID)))
+
+                    ;; flag uint8
+                    (let [^abi/FuncFlag flag (zero abi/FuncFlag)]
+                      (when (.Valid fi)
+                        (set! flag (.FuncFlag fi)))
+
+                      (set! off (.SetUint8 sb ^{:go/via [Target]} (.-Arch ctxt) off (conv uint8 flag)))
+
+                      (set! off + 1) ; pad
+
+                      ;; nfuncdata must be the final entry.
+                      (set! funcdata (funcData ldr s fi 0 funcdata))
+                      (set! off (.SetUint8 sb ^{:go/via [Target]} (.-Arch ctxt) off (conv uint8 (len funcdata))))
+
+                      ;; Output the pcdata.
+                      (when (.Valid fi)
+                        (range [j pcSym pcdata]
+                          (.SetUint32 sb ^{:go/via [Target]} (.-Arch ctxt) (+ off (conv int64 (* j 4))) (conv uint32 (.SymValue ldr pcSym))))
+
+                        (when (> (.NumInlTree fi) 0)
+                          (.SetUint32 sb ^{:go/via [Target]} (.-Arch ctxt) (+ off (* abi/PCDATA_InlTreeIndex 4)) (conv uint32 (.SymValue ldr pcinline)))))
+
+
+
+                      ;; Write funcdata refs as offsets from go:func.* and go:funcrel.*.
+                      (set! funcdata (funcData ldr s fi (aget inlSyms s) funcdata))
+                      ;; Missing funcdata will be ^0. See runtime/symtab.go:funcdata.
+                      (set! off (conv int64 (+ (aget startLocations i) funcSize (* (numPCData ldr s fi) 4))))
+                      (range [j funcdata]
+                        (let [dataoff (+ off (conv int64 (* 4 j)))
+                            ^{:line 915} fdsym (aget funcdata j)]
+
+                          (when (ignoreFuncData ldr s j fdsym)
+                            (.SetUint32 sb ^{:go/via [Target]} (.-Arch ctxt) dataoff (bit-not (conv uint32 0))) ; ^0 is a sentinel for "no value"
+                            (continue))
+
+
+                          (.SetUint32 sb ^{:go/via [Target]} (.-Arch ctxt) dataoff (conv uint32 (.SymValue ldr fdsym))))))))))))))))
+
+
+
+
+;; pclntab initializes the pclntab symbol with
+;; runtime function and file name information.
+
+
+^{:go/end 990} (go/method pclntab "pclntab generates the pcln table for the link output.\n" ^{:tag (* pclntab)} [^{:tag (* Link)} ctxt ^loader/Bitmap container]
+  ;; Go 1.2's symtab layout is documented in golang.org/s/go12symtab, but the
+  ;; layout and data has changed since that time.
+  ;;
+  ;; As of August 2020, here's the layout of pclntab:
+  ;;
+  ;;  .gopclntab/__gopclntab [elf/macho section]
+  ;;    runtime.pclntab
+  ;;      Carrier symbol for the entire pclntab section.
+  ;;
+  ;;      runtime.pcheader  (see: runtime/symtab.go:pcHeader)
+  ;;        8-byte magic
+  ;;        nfunc [thearch.ptrsize bytes]
+  ;;        offset to runtime.funcnametab from the beginning of runtime.pcheader
+  ;;        offset to runtime.pclntab_old from beginning of runtime.pcheader
+  ;;
+  ;;      runtime.funcnametab
+  ;;        []list of null terminated function names
+  ;;
+  ;;      runtime.cutab
+  ;;        for i=0..#CUs
+  ;;          for j=0..#max used file index in CU[i]
+  ;;            uint32 offset into runtime.filetab for the filename[j]
+  ;;
+  ;;      runtime.filetab
+  ;;        []null terminated filename strings
+  ;;
+  ;;      runtime.pctab
+  ;;        []byte of deduplicated pc data.
+  ;;
+  ;;      runtime.functab
+  ;;        function table, alternating PC and offset to func struct [each entry thearch.ptrsize bytes]
+  ;;        end PC [thearch.ptrsize bytes]
+  ;;        func structures, pcdata offsets, func data.
+  ;;
+  ;;      runtime.funcdata
+  ;;        []byte of deduplicated funcdata
+
+  (let [(values state compUnits funcs) (makePclntab ctxt container)
+
+      ^{:line 971} ldr (.-loader ctxt)]
+    (set! (.-carrier state) (.LookupOrCreateSym ldr "runtime.pclntab" 0))
+    (.SetType (.MakeSymbolUpdater ldr (.-carrier state)) sym/SPCLNTAB)
+    (.SetAttrReachable ldr (.-carrier state) true)
+    (setCarrierSym sym/SPCLNTAB (.-carrier state))
+
+    ;; Aign pclntab to at least a pointer boundary,
+    ;; for pcHeader. This may be raised further by subsymbols.
+    (.SetSymAlign ldr (.-carrier state) (conv int32 (.-PtrSize ^{:go/via [Target]} (.-Arch ctxt))))
+
+    (.generatePCHeader state ctxt)
+    (let [nameOffsets (.generateFuncnametab state ctxt funcs)
+        ^{:line 983} cuOffsets (.generateFilenameTabs state ctxt compUnits funcs)]
+      (.generatePctab state ctxt funcs)
+      (let [inlSyms (makeInlSyms ctxt funcs nameOffsets)]
+        (.generateFunctab state ctxt funcs inlSyms cuOffsets nameOffsets)
+        (.generateFuncdata state ctxt funcs inlSyms)
+
+        ^{:line 989} state))))
+
+
+^{:go/end 1000} (go/func expandGoroot ^string [^string s]
+  (let [^:const ^{:val 7} n (len "$GOROOT")]
+    (when (and (>= (len s) (+ n 1)) (== (subslice s _ n) "$GOROOT") ^:go/paren (or (== (aget s n) \/) (== (aget s n) \\)))
+      (when [final buildcfg/GOROOT] (!= final "")
+        (return (filepath/ToSlash (filepath/Join final (subslice s n))))))
+
+
+    ^{:line 999} s))
+
+
+(go/const
+  ^{:line 1003} [^{:val 16} SUBBUCKETS 16]
+  ^{:line 1004} [^{:val 256} SUBBUCKETSIZE (/ abi/FuncTabBucketSize SUBBUCKETS)]
+  ^{:line 1005} [^{:val 2147483647} NOIDX 0x7fffffff])
+
+
+
+
+^{:go/end 1093} (go/method findfunctab "findfunctab generates a lookup table to quickly find the containing\nfunction for a pc. See src/runtime/symtab.go:findfunc for details.\n" [^{:tag (* Link)} ctxt ^{:tag (* pclntab)} state ^loader/Bitmap container]
+  (let [ldr (.-loader ctxt)
+
+      ;; find min and max address
+      ^{:line 1014} min (.SymValue ldr (aget (.-Textp ctxt) 0))
+      ^{:line 1015} lastp (aget (.-Textp ctxt) (- (len (.-Textp ctxt)) 1))
+      ^{:line 1016} max (+ (.SymValue ldr lastp) (.SymSize ldr lastp))
+
+      ;; for each subbucket, compute the minimum of all symbol indexes
+      ;; that map to that subbucket.
+      ^{:line 1020} n (conv int32 (/ (- (+ (- max min) SUBBUCKETSIZE) 1) SUBBUCKETSIZE))
+
+      ^{:line 1022} nbuckets (conv int32 (/ (- (+ (- max min) abi/FuncTabBucketSize) 1) abi/FuncTabBucketSize))
+
+      ^{:line 1024} size (+ (* 4 (conv int64 nbuckets)) (conv int64 n))
+
+      ^{:line 1026} writeFindFuncTab ^{:go/end 1087} (fn [^{:tag (* Link)} _ ^loader/Sym s]
+        (let [t (.MakeSymbolUpdater ldr s)
+
+            ^{:line 1029} indexes (make (slice int32) n)]
+          (for [i (conv int32 0)] (< i n) (inc! i)
+            (aset indexes i NOIDX))
+
+          (let [idx (conv int32 0)]
+            (range [i s (.-Textp ctxt)]
+              (when (not (emitPcln ctxt s container))
+                (continue))
+
+              (let [p (.SymValue ldr s)
+                  ^{:line 1039 :tag loader/Sym} e (zero loader/Sym)]
+                (inc! i)
+                (when (< i (len (.-Textp ctxt)))
+                  (set! e (aget (.-Textp ctxt) i)))
+
+                (while (and (!= e 0) (not (emitPcln ctxt e container)) (< i (len (.-Textp ctxt))))
+                  (set! e (aget (.-Textp ctxt) i))
+                  (inc! i))
+
+                (let [q max]
+                  (when (!= e 0)
+                    (set! q (.SymValue ldr e)))
+
+
+                  ;;fmt.Printf("%d: [%x %x] %s\n", idx, p, q, ldr.SymName(s))
+                  (for [] (< p q) (set! p + SUBBUCKETSIZE)
+                    (set! i (conv int (/ (- p min) SUBBUCKETSIZE)))
+                    (when (> (aget indexes i) idx)
+                      (aset indexes i idx)))
+
+
+
+                  (set! i (conv int (/ (- q 1 min) SUBBUCKETSIZE)))
+                  (when (> (aget indexes i) idx)
+                    (aset indexes i idx))
+
+                  (inc! idx))))
+
+
+            ;; fill in table
+            (for [i (conv int32 0)] (< i nbuckets) (inc! i)
+              (let [base (aget indexes (* i SUBBUCKETS))]
+                (when (== base NOIDX)
+                  (Errorf "hole in findfunctab"))
+
+                (.SetUint32 t ^{:go/via [Target]} (.-Arch ctxt) (* (conv int64 i) (+ 4 SUBBUCKETS)) (conv uint32 base))
+                (for [j (conv int32 0)] (and (< j SUBBUCKETS) (< (+ (* i SUBBUCKETS) j) n)) (inc! j)
+                  (set! idx (aget indexes (+ (* i SUBBUCKETS) j)))
+                  (when (== idx NOIDX)
+                    (Errorf "hole in findfunctab"))
+
+                  (when (>= (- idx base) 256)
+                    (Errorf "too many functions in a findfunc bucket! %d/%d %d %d" i nbuckets j (- idx base)))
+
+
+                  (.SetUint8 t ^{:go/via [Target]} (.-Arch ctxt) (+ (* (conv int64 i) (+ 4 SUBBUCKETS)) 4 (conv int64 j)) (conv uint8 (- idx base)))))))))]
+
+
+
+
+    (set! (.-findfunctab state) (.createGeneratorSymbol ctxt "runtime.findfunctab" 0 sym/SPCLNTAB size writeFindFuncTab))
+    (.SetSymAlign ldr (.-findfunctab state) 4)
+    (.SetAttrReachable ldr (.-findfunctab state) true)
+    (.SetAttrLocal ldr (.-findfunctab state) true)))
+
+
+
+
+^{:go/end 1108} (go/method findContainerSyms "findContainerSyms returns a bitmap, indexed by symbol number, where there's\na 1 for every container symbol.\n" ^loader/Bitmap [^{:tag (* Link)} ctxt]
+  (let [ldr (.-loader ctxt)
+      ^{:line 1099} container (loader/MakeBitmap (.NSym ldr))]
+    ;; Find container symbols and mark them as such.
+    (range [_ s (.-Textp ctxt)]
+      (let [outer (.OuterSym ldr s)]
+        (when (!= outer 0)
+          (.Set container outer))))
+
+
+    ^{:line 1107} container))

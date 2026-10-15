@@ -1,0 +1,404 @@
+;; Copyright 2021 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; This file implements instantiation of generic types
+;; through substitution of type parameters by type arguments.
+
+(in-ns 'go.cmd.compile.internal.types2) (go/file "instantiate.go" :imports [
+
+
+    ^{:line 11} [syntax "cmd/compile/internal/syntax"]
+    ^{:line 12} [errors "errors"]
+    ^{:line 13} [fmt "fmt"]
+    ^{:line 14} [. "internal/types/errors"]])
+
+
+
+(go/type genericType "A genericType implements access to its type parameters.\n" (interface
+    ^{:line 19} Type
+    (TypeParams ^{:tag (* TypeParamList)} [])))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 78} (go/func Instantiate "Instantiate instantiates the type orig with the given type arguments targs.\norig must be a generic *Alias, *Named, or *Signature type. If there is no error,\nthe resulting Type is an instantiated type of the same kind (*Alias, *Named\nor *Signature, respectively).\n\nMethods attached to a *Named type are also instantiated, and associated with\na new *Func that has the same position as the original method, but nil function\nscope.\n\nIf ctxt is non-nil, it may be used to de-duplicate the instance against\nprevious instances with the same identity. As a special case, generic\n*Signature origin types are only considered identical if they are pointer\nequivalent, so that instantiating distinct (but possibly identical)\nsignatures will yield different instances. The use of a shared context does\nnot guarantee that identical instances are deduplicated in all cases.\n\nIf validate is set, Instantiate verifies that the type orig is in fact generic,\nthat the number of type arguments and parameters match, and that the type arguments\nsatisfy their respective type constraints.\nIf verification fails, the resulting error may wrap an *ArgumentError indicating\nwhich type argument did not satisfy its type parameter constraint, and why.\n\nIf validate is not set, Instantiate does not check if orig is generic, verify the\ntype argument count, or check whether the type arguments satisfy their constraints.\nInstantiate is guaranteed to not return an error, but may panic. Specifically,\nfor *Signature types, Instantiate will panic immediately if the type argument\ncount is incorrect; for *Named types, a panic may occur later inside the\n*Named API.\n" [^{:tag (* Context)} ctxt ^Type orig ^{:tag (slice Type)} targs ^bool validate] :results [Type error]
+  (when (== ctxt nil)
+    (set! ctxt (NewContext)))
+
+  (let [(values orig_ ok) (assert genericType orig)] ; signature of Instantiate must not change for backward-compatibility
+    (when (not ok)
+      (panic (sprintf nil false "cannot instantiate non-generic %s: expected *Named, *Alias, or *Signature" orig)))
+
+    (when (== (len targs) 0)
+      (panic (sprintf nil false "cannot instantiate %s: empty type argument list" orig)))
+
+
+    (when validate
+      (let [tparams (.list (.TypeParams orig_))]
+        (when (== (len tparams) 0)
+          (return nil (fmt/Errorf "cannot instantiate non-generic %s: has no type parameters" orig)))
+
+        (when (!= (len targs) (len tparams))
+          (return nil (fmt/Errorf "cannot instantiate %s: got %d type arguments but have %d type parameters" orig (len targs) (len tparams))))
+
+        (when [(values i err) (.verify (conv (* Checker) nil) nopos tparams targs ctxt)] (!= err nil)
+          (return nil (addr (lit ArgumentError i err))))))
+
+
+
+    (let [inst (.instance (conv (* Checker) nil) nopos orig_ targs nil ctxt)]
+      (return inst nil))))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 190} (go/method instance "instance instantiates the given original (generic) function or type with the\nprovided type arguments and returns the resulting instance. If an identical\ninstance exists already in the given contexts, it returns that instance,\notherwise it creates a new one. If there is an error (such as wrong number\nof type arguments), the result is Typ[Invalid].\n\nIf expanding is non-nil, it is the Named instance type currently being\nexpanded. If ctxt is non-nil, it is the context associated with the current\ntype-checking pass or call to Instantiate. At least one of expanding or ctxt\nmust be non-nil.\n\nFor Named types the resulting instance may be unexpanded.\n\ncheck may be nil (when not type-checking syntax); pos is used only if check is non-nil.\n" [^{:tag (* Checker)} check ^syntax/Pos pos ^genericType orig ^{:tag (slice Type)} targs ^{:tag (* Named)} expanding ^{:tag (* Context)} ctxt] :results [^Type res]
+  ;; The order of the contexts below matters: we always prefer instances in the
+  ;; expanding instance context in order to preserve reference cycles.
+  ;;
+  ;; Invariant: if expanding != nil, the returned instance will be the instance
+  ;; recorded in expanding.inst.ctxt.
+  (let [^{:tag (slice (* Context))} ctxts (zero (slice (* Context)))]
+    (when (!= expanding nil)
+      (set! ctxts (append ctxts (.-ctxt (.-inst expanding)))))
+
+    (when (!= ctxt nil)
+      (set! ctxts (append ctxts ctxt)))
+
+    (go/call assert (> (len ctxts) 0))
+
+    ;; Compute all hashes; hashes may differ across contexts due to different
+    ;; unique IDs for Named types within the hasher.
+    (let [hashes (make (slice string) (len ctxts))]
+      (range [i ctxt ctxts]
+        (aset hashes i (.instanceHash ctxt orig targs)))
+
+
+      ;; Record the result in all contexts.
+      ;; Prefer to re-use existing types from expanding context, if it exists, to reduce
+      ;; the memory pinned by the Named type.
+      (let [updateContexts ^{:go/end 124} (fn ^Type [^Type res]
+            (for [i (- (len ctxts) 1)] (>= i 0) (dec! i)
+              (set! res (.update (aget ctxts i) (aget hashes i) orig targs res)))
+
+            ^{:line 123} res)]
+
+
+        ;; typ may already have been instantiated with identical type arguments. In
+        ;; that case, re-use the existing instance.
+        (range [i ctxt ctxts]
+          (when [inst (.lookup ctxt (aget hashes i) orig targs)] (!= inst nil)
+            (return (updateContexts inst))))
+
+
+
+        (type-switch [orig orig]
+          (case [(* Named)]
+            (set! res (.newNamedInstance check pos orig targs expanding))) ; substituted lazily
+
+          (case [(* Alias)]
+            ;; verify type parameter count (see go.dev/issue/71198 for a test case)
+            (let [tparams (.TypeParams orig)]
+              (when (not (.validateTArgLen check pos ^{:go/via [object]} (.Name (.-obj orig)) (.Len tparams) (len targs)))
+                ;; TODO(gri) Consider returning a valid alias instance with invalid
+                ;;           underlying (aliased) type to match behavior of *Named
+                ;;           types. Then this function will never return an invalid
+                ;;           result.
+                (return (aget Typ Invalid)))
+
+              (when (== (.Len tparams) 0)
+                (return orig)) ; nothing to do (minor optimization)
+
+
+              (set! res (.newAliasInstance check pos orig targs expanding ctxt))))
+
+          (case [(* Signature)]
+            (go/call assert (== expanding nil)) ; function instances cannot be reached from Named types
+            ;; Note that orig may be a generic method on a generic type. In that case, orig
+            ;; is an instantiated type. It will not have receiver type parameters, but will
+            ;; still have ordinary type parameters.
+            (go/call assert (== (.RecvTypeParams orig) nil))
+            (go/call assert (!= (.TypeParams orig) nil))
+
+            (let [tparams (.TypeParams orig)]
+              ;; TODO(gri) investigate if this is needed (type argument and parameter count seem to be correct here)
+              (when (not (.validateTArgLen check pos (.String orig) (.Len tparams) (len targs)))
+                (return (aget Typ Invalid)))
+
+              (when (== (.Len tparams) 0)
+                (return orig)) ; nothing to do (minor optimization)
+
+              (let [sig (assert (* Signature) (.subst check pos orig (makeSubstMap (.list tparams) targs) nil ctxt))]
+                ;; If the signature doesn't use its type parameters, subst
+                ;; will not make a copy. In that case, make a copy now (so
+                ;; we can set tparams to nil w/o causing side-effects).
+                (when (== sig orig)
+                  (let [copy @sig]
+                    (set! sig (addr copy))))
+
+                ;; After instantiating a generic signature, it is not generic
+                ;; anymore; we need to set tparams to nil.
+                (set! (.-tparams sig) nil)
+                (set! res sig))))
+
+          (default
+            ;; only types and functions can be generic
+            (panic (fmt/Sprintf "%v: cannot instantiate %v" pos orig))))
+
+
+        ;; Update all contexts; it's possible that we've lost a race.
+        (updateContexts res)))))
+
+
+
+
+
+^{:go/end 213} (go/method validateTArgLen "validateTArgLen checks that the number of type arguments (got) matches the\nnumber of type parameters (want); if they don't match an error is reported.\nIf validation fails and check is nil, validateTArgLen panics.\n" ^bool [^{:tag (* Checker)} check ^syntax/Pos pos ^string name ^int want ^int got]
+  (let [^string qual (zero string)]
+    (switch
+      (case [(< got want)]
+        (set! qual "not enough"))
+      (case [(> got want)]
+        (set! qual "too many"))
+      (default
+        (return true)))
+
+
+    (let [msg (.sprintf check "%s type arguments for type %s: have %d, want %d" qual name got want)]
+      (when (!= check nil)
+        (.error check (atPos pos) WrongTypeArgCount msg)
+        (return false))
+
+
+      (panic (fmt/Sprintf "%v: %s" pos msg)))))
+
+
+
+^{:go/end 232} (go/method verify "check may be nil; pos is used only if check is non-nil.\n" [^{:tag (* Checker)} check ^syntax/Pos pos ^{:tag (slice (* TypeParam))} tparams ^{:tag (slice Type)} targs ^{:tag (* Context)} ctxt] :results [int error]
+  (let [smap (makeSubstMap tparams targs)]
+    (range [i tpar tparams]
+      ;; Ensure that we have a (possibly implicit) interface as type bound (go.dev/issue/51048).
+      (.iface tpar)
+      ;; The type parameter bound is parameterized with the same type parameters
+      ;; as the instantiated type; before we can use it for bounds checking we
+      ;; need to instantiate it with the type arguments with which we instantiated
+      ;; the parameterized type.
+      (let [bound (.subst check pos (.-bound tpar) smap nil ctxt)
+          ^{:line 226 :tag string} cause (zero string)]
+        (when (not (.implements check (aget targs i) bound true (addr cause)))
+          (return i (errors/New cause)))))
+
+
+    (return -1 nil)))
+
+
+
+
+
+
+
+
+^{:go/end 381} (go/method implements "implements checks if V implements T. The receiver may be nil if implements\nis called through an exported API call such as AssignableTo. If constraint\nis set, T is a type constraint.\n\nIf the provided cause is non-nil, it may be set to an error string\nexplaining why V does not implement (or satisfy, for constraints) T.\n" ^bool [^{:tag (* Checker)} check ^Type V ^Type T ^bool constraint ^{:tag (* string)} cause]
+  (let [Vu (.Underlying V)
+      ^{:line 242} Tu (.Underlying T)]
+    (when (or (not (isValid Vu)) (not (isValid Tu)))
+      (return true)) ; avoid follow-on errors
+
+    (when [(values p _) (assert (* Pointer) Vu)] (and (!= p nil) (not (isValid (.Underlying (.-base p)))))
+      (return true)) ; avoid follow-on errors (see go.dev/issue/49541 for an example)
+
+
+    (let [verb "implement"]
+      (when constraint
+        (set! verb "satisfy"))
+
+
+      (let [(values Ti _) (assert (* Interface) Tu)]
+        (when (== Ti nil)
+          (when (!= cause nil)
+            (let [^string detail (zero string)]
+              (if (isInterfacePtr Tu)
+                (set! detail (.interfacePtrError check T))
+
+                (set! detail (.sprintf check "%s is not an interface" T)))
+
+              (set! @cause (.sprintf check "%s does not %s %s (%s)" V verb T detail))))
+
+          (return false))
+
+
+        ;; Every type satisfies the empty interface.
+        (when (.Empty Ti)
+          (return true))
+
+        ;; T is not the empty interface (i.e., the type set of T is restricted)
+
+        ;; An interface V with an empty type set satisfies any interface.
+        ;; (The empty set is a subset of any set.)
+        (let [(values Vi _) (assert (* Interface) Vu)]
+          (when (and (!= Vi nil) (.IsEmpty (.typeSet Vi)))
+            (return true))
+
+          ;; type set of V is not empty
+
+          ;; No type with non-empty type set satisfies the empty type set.
+          (when (.IsEmpty (.typeSet Ti))
+            (when (!= cause nil)
+              (set! @cause (.sprintf check "cannot %s %s (empty type set)" verb T)))
+
+            (return false))
+
+
+          ;; V must implement T's methods, if any.
+          (when (not (.hasAllMethods check V T true Identical cause)) ; /* !Implements(V, T) */
+            (when (!= cause nil)
+              (set! @cause (.sprintf check "%s does not %s %s %s" V verb T @cause)))
+
+            (return false))
+
+
+          ;; Only check comparability if we don't have a more specific error.
+          (let [checkComparability ^{:go/breaks [[6 324]] :go/end 325} (fn ^bool []
+                (when (not (.IsComparable Ti))
+                  (return true))
+
+                ;; If T is comparable, V must be comparable.
+                ;; If V is strictly comparable, we're done.
+                (when (== (comparableType V false nil) nil) ; /* strict comparability */
+                  (return true))
+
+                ;; For constraint satisfaction, use dynamic (spec) comparability
+                ;; so that ordinary, non-type parameter interfaces implement comparable.
+                (when (and constraint (== (comparableType V true nil) nil)) ; /* spec comparability */
+                  ;; V is comparable if we are at Go 1.20 or higher.
+                  (when (or (== check nil) (.allowVersion check go1_20))
+                    (return true))
+
+                  (when (!= cause nil)
+                    (set! @cause (.sprintf check "%s to %s comparable requires go1.20 or later" V verb)))
+
+                  (return false))
+
+                (when (!= cause nil)
+                  (set! @cause (.sprintf check "%s does not %s comparable" V verb)))
+
+                false)]
+
+
+            ;; V must also be in the set of types of T, if any.
+            ;; Constraints with empty type sets were already excluded above.
+            (when (not (.hasTerms (.typeSet Ti)))
+              (return (checkComparability))) ; nothing to do
+
+
+            ;; If V is itself an interface, each of its possible types must be in the set
+            ;; of T types (i.e., the V type set must be a subset of the T type set).
+            ;; Interfaces V with empty type sets were already excluded above.
+            (when (!= Vi nil)
+              (when (not (.subsetOf (.typeSet Vi) (.typeSet Ti)))
+                ;; TODO(gri) report which type is missing
+                (when (!= cause nil)
+                  (set! @cause (.sprintf check "%s does not %s %s" V verb T)))
+
+                (return false))
+
+              (return (checkComparability)))
+
+
+            ;; Otherwise, V's type must be included in the iface type set.
+            (let [^Type alt (zero Type)]
+              (when (.is (.typeSet Ti) ^{:go/breaks [[3 363]] :go/end 364} (fn ^bool [^{:tag (* term)} t]
+                    (when (not (.includes t V))
+                      ;; If V ∉ t.typ but V ∈ ~t.typ then remember this type
+                      ;; so we can suggest it as an alternative in the error
+                      ;; message.
+                      (when (and (== alt nil) (not (.-tilde t)) (Identical (.-typ t) (.Underlying (.-typ t))))
+                        (let [tt @t]
+                          (set! (.-tilde tt) true)
+                          (when (.includes tt V)
+                            (set! alt (.-typ t)))))
+
+
+                      (return true))
+
+                    false))
+
+                (when (!= cause nil)
+                  (let [^string detail (zero string)]
+                    (switch
+                      (case [(!= alt nil)]
+                        (set! detail (.sprintf check "possibly missing ~ for %s in %s" alt T)))
+                      (case [(mentions Ti V)]
+                        (set! detail (.sprintf check "%s mentions %s, but %s is not in the type set of %s" T V V T)))
+                      (default
+                        (set! detail (.sprintf check "%s missing in %s" V (.-terms (.typeSet Ti))))))
+
+                    (set! @cause (.sprintf check "%s does not %s %s (%s)" V verb T detail))))
+
+                (return false))
+
+
+              (checkComparability))))))))
+
+
+
+
+^{:go/breaks [[5 404]] :go/end 405} (go/func mentions "mentions reports whether type T \"mentions\" typ in an (embedded) element or term\nof T (whether typ is in the type set of T or not). For better error messages.\n" ^bool [^Type T ^Type typ]
+  (type-switch [T T]
+    (case [(* Interface)]
+      (range [_ e (.-embeddeds T)]
+        (when (mentions e typ)
+          (return true))))
+
+
+    (case [(* Union)]
+      (range [_ t (.-terms T)]
+        (when (mentions (.-typ t) typ)
+          (return true))))
+
+
+    (default
+      (when (Identical T typ)
+        (return true))))
+
+
+  false)

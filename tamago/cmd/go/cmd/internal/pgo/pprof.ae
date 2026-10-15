@@ -1,0 +1,145 @@
+;; Copyright 2024 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; Package pgo contains the compiler-agnostic portions of PGO profile handling.
+;; Notably, parsing pprof profiles and serializing/deserializing from a custom
+;; intermediate representation.
+(in-ns 'go.cmd.internal.pgo) (go/file "pprof.go" :doc "Package pgo contains the compiler-agnostic portions of PGO profile handling.\nNotably, parsing pprof profiles and serializing/deserializing from a custom\nintermediate representation.\n" :imports [
+
+
+    ^{:line 11} [errors "errors"]
+    ^{:line 12} [fmt "fmt"]
+    ^{:line 13} [profile "internal/profile"]
+    ^{:line 14} [io "io"]
+    ^{:line 15} [sort "sort"]])
+
+
+
+^{:go/end 72} (go/func FromPProf "FromPProf parses Profile from a pprof profile.\n" [^io/Reader r] :results [(* Profile) error]
+  (let [(values p err) (profile/Parse r)]
+    (cond (errors/Is err profile/ErrNoData)
+      ;; Treat a completely empty file the same as a profile with no
+      ;; samples: nothing to do.
+      (return (emptyProfile) nil)
+      (!= err nil)
+      (return nil (fmt/Errorf "error parsing profile: %w" err)))
+
+
+    (when (== (len (.-Sample p)) 0)
+      ;; We accept empty profiles, but there is nothing to do.
+      (return (emptyProfile) nil))
+
+
+    (let [valueIndex -1]
+      (range [i s (.-SampleType p)]
+        ;; Samples count is the raw data collected, and CPU nanoseconds is just
+        ;; a scaled version of it, so either one we can find is fine.
+        (when (or ^:go/paren (and (== (.-Type s) "samples") (== (.-Unit s) "count"))
+            ^:go/paren (and (== (.-Type s) "cpu") (== (.-Unit s) "nanoseconds")))
+          (set! valueIndex i)
+          (break)))
+
+
+
+      (when (== valueIndex -1)
+        (return nil (fmt/Errorf "profile does not contain a sample index with value/type \"samples/count\" or cpu/nanoseconds\"")))
+
+
+      (let [g (profile/NewGraph p (addr ^{:go/breaks [2]} (lit profile/Options
+                :SampleValue ^{:go/end 50} (fn ^int64 [^{:tag (slice int64)} v] (aget v valueIndex)))))]
+
+
+        (when (== (len (.-Nodes g)) 0)
+          ;; If all sample values are 0, the graph will have no nodes.
+          ;; In this case, treat it as an empty profile.
+          (return (emptyProfile) nil))
+
+
+        (let [(values namedEdgeMap totalWeight ^:assign err) (createNamedEdgeMap g)]
+          (when (!= err nil)
+            (return nil err))
+
+
+          (when (== totalWeight 0)
+            (return (emptyProfile) nil)) ; accept but ignore profile with no samples.
+
+
+          ^{:go/breaks [2]} (return (addr ^{:go/breaks [2 4]} (lit Profile
+                :TotalWeight totalWeight
+                :NamedEdgeMap namedEdgeMap))
+            nil))))))
+
+
+
+
+
+
+^{:go/end 109} (go/func createNamedEdgeMap "createNamedEdgeMap builds a map of callsite-callee edge weights from the\nprofile-graph.\n\nCaller should ignore the profile if totalWeight == 0.\n" [^{:tag (* profile/Graph)} g] :results [^NamedEdgeMap edgeMap ^int64 totalWeight ^error err]
+  (let [seenStartLine false
+
+      ;; Process graph and build various node and edge maps which will
+      ;; be consumed by AST walk.
+      ^{:line 83} weight (make (map NamedCallEdge int64))]
+    (range [_ n (.-Nodes g)]
+      (set! seenStartLine (or seenStartLine (!= (.-StartLine (.-Info n)) 0)))
+
+      (let [canonicalName (.-Name (.-Info n))
+          ;; Create the key to the nodeMapKey.
+          ^{:line 89} namedEdge ^{:go/breaks [2 4]} (lit NamedCallEdge
+            :CallerName canonicalName
+            :CallSiteOffset (- (.-Lineno (.-Info n)) (.-StartLine (.-Info n))))]
+
+
+        (range [_ e (.-Out n)]
+          (set! totalWeight + (.WeightValue e))
+          (set! (.-CalleeName namedEdge) (.-Name (.-Info (.-Dest e))))
+          ;; Create new entry or increment existing entry.
+          (set! (aget weight namedEdge) + (.WeightValue e)))))
+
+
+
+    (when (not seenStartLine)
+      ;; TODO(prattmic): If Function.start_line is missing we could
+      ;; fall back to using absolute line numbers, which is better
+      ;; than nothing.
+      (return (lit NamedEdgeMap) 0 (fmt/Errorf "profile missing Function.start_line data (Go version of profiled application too old? Go 1.20+ automatically adds this to profiles)")))
+
+    (postProcessNamedEdgeMap weight totalWeight)))
+
+
+^{:go/end 126} (go/func sortByWeight [^{:tag (slice NamedCallEdge)} edges ^{:tag (map NamedCallEdge int64)} weight]
+  (sort/Slice edges ^{:go/end 125} (fn ^bool [^int i ^int j]
+      (let [(values ei ej) (values (aget edges i) (aget edges j))]
+        (when [(values wi wj) (values (aget weight ei) (aget weight ej))] (!= wi wj)
+          (return (> wi wj))) ; want larger weight first
+
+        ;; same weight, order by name/line number
+        (when (!= (.-CallerName ei) (.-CallerName ej))
+          (return (< (.-CallerName ei) (.-CallerName ej))))
+
+        (when (!= (.-CalleeName ei) (.-CalleeName ej))
+          (return (< (.-CalleeName ei) (.-CalleeName ej))))
+
+        (< (.-CallSiteOffset ei) (.-CallSiteOffset ej))))))
+
+
+
+^{:go/end 146} (go/func postProcessNamedEdgeMap [^{:tag (map NamedCallEdge int64)} weight ^int64 weightVal] :results [^NamedEdgeMap edgeMap ^int64 totalWeight ^error err]
+  (when (== weightVal 0)
+    (return (lit NamedEdgeMap) 0 nil)) ; accept but ignore profile with no samples.
+
+  (let [byWeight (make (slice NamedCallEdge) 0 (len weight))]
+    (range [namedEdge weight]
+      (set! byWeight (append byWeight namedEdge)))
+
+    (sortByWeight byWeight weight)
+
+    (set! edgeMap ^{:go/breaks [2 4]} (lit NamedEdgeMap
+        :Weight weight
+        :ByWeight byWeight))
+
+
+    (set! totalWeight weightVal)
+
+    (return edgeMap totalWeight nil)))

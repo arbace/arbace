@@ -1,0 +1,985 @@
+;; Copyright 2009 The Go Authors. All rights reserved.walk/bui
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.cmd.compile.internal.walk) (go/file "builtin.go" :imports [
+
+
+    ^{:line 8} [fmt "fmt"]
+    ^{:line 9} [constant "go/constant"]
+    ^{:line 10} [token "go/token"]
+    ^{:line 11} [abi "internal/abi"]
+    ^{:line 12} [strings "strings"]
+
+    ^{:line 14} [base "cmd/compile/internal/base"]
+    ^{:line 15} [escape "cmd/compile/internal/escape"]
+    ^{:line 16} [ir "cmd/compile/internal/ir"]
+    ^{:line 17} [reflectdata "cmd/compile/internal/reflectdata"]
+    ^{:line 18} [typecheck "cmd/compile/internal/typecheck"]
+    ^{:line 19} [types "cmd/compile/internal/types"]])
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 128} (go/func walkAppend "Rewrite append(src, x, y, z) so that any side effects in\nx, y, z (including runtime panics) are evaluated in\ninitialization statements before the append.\nFor normal code generation, stop there and leave the\nrest to ssagen.\n\nFor race detector, expand append(src, a [, b]* ) to\n\n\tinit {\n\t  s := src\n\t  const argc = len(args) - 1\n\t  newLen := s.len + argc\n\t  if uint(newLen) <= uint(s.cap) {\n\t    s = s[:newLen]\n\t  } else {\n\t    s = growslice(s.ptr, newLen, s.cap, argc, elemType)\n\t  }\n\t  s[s.len - argc] = a\n\t  s[s.len - argc + 1] = b\n\t  ...\n\t}\n\ts\n" ^ir/Node [^{:tag (* ir/CallExpr)} n ^{:tag (* ir/Nodes)} init ^ir/Node dst]
+  (when (not (ir/SameSafeExpr dst (aget (.-Args n) 0)))
+    (aset (.-Args n) 0 (safeExpr (aget (.-Args n) 0) init))
+    (aset (.-Args n) 0 (walkExpr (aget (.-Args n) 0) init)))
+
+  (walkExprListSafe (subslice (.-Args n) 1) init)
+
+  (let [nsrc (aget (.-Args n) 0)
+
+      ;; walkExprListSafe will leave OINDEX (s[n]) alone if both s
+      ;; and n are name or literal, but those may index the slice we're
+      ;; modifying here. Fix explicitly.
+      ;; Using cheapExpr also makes sure that the evaluation
+      ;; of all arguments (and especially any panics) happen
+      ;; before we begin to modify the slice in a visible way.
+      ^{:line 59} ls (subslice (.-Args n) 1)]
+    (range [i n ls]
+      (set! n (cheapExpr n init))
+      (when (not (types/Identical (.Type n) (.Elem (.Type nsrc))))
+        (set! n (typecheck/AssignConv n (.Elem (.Type nsrc)) "append"))
+        (set! n (walkExpr n init)))
+
+      (aset ls i n))
+
+
+    (let [argc (- (len (.-Args n)) 1)]
+      (when (< argc 1)
+        (return nsrc))
+
+
+      ;; General case, with no function calls left as arguments.
+      ;; Leave for ssagen, except that instrumentation requires the old form.
+      (when (or (not (.-Instrumenting (.-Cfg base/Flag))) (.-CompilingRuntime base/Flag))
+        (return n))
+
+
+      (let [^{:tag (slice ir/Node)} l (zero (slice ir/Node))
+
+          ;; s = slice to append to
+          ^{:line 83} s (typecheck/TempAt base/Pos ir/CurFunc (.Type nsrc))]
+        (set! l (append l (ir/NewAssignStmt base/Pos s nsrc)))
+
+        ;; num = number of things to append
+        (let [num (ir/NewInt base/Pos (conv int64 argc))
+
+            ;; newLen := s.len + num
+            ^{:line 90} newLen (typecheck/TempAt base/Pos ir/CurFunc (aget types/Types types/TINT))]
+          (set! l (append l (ir/NewAssignStmt base/Pos newLen (ir/NewBinaryExpr base/Pos ir/OADD (ir/NewUnaryExpr base/Pos ir/OLEN s) num))))
+
+          ;; if uint(newLen) <= uint(s.cap)
+          (let [nif (ir/NewIfStmt base/Pos nil nil nil)]
+            (set! (.-Cond nif) (ir/NewBinaryExpr base/Pos ir/OLE (typecheck/Conv newLen (aget types/Types types/TUINT)) (typecheck/Conv (ir/NewUnaryExpr base/Pos ir/OCAP s) (aget types/Types types/TUINT))))
+            (set! (.-Likely nif) true)
+
+            ;; then { s = s[:n] }
+            (let [slice (ir/NewSliceExpr base/Pos ir/OSLICE s nil newLen nil)]
+              ^{:go/via [miniExpr]} (.SetBounded slice true)
+              (set! (.-Body nif) (lit (slice ir/Node)
+                  (ir/NewAssignStmt base/Pos s slice)))
+
+
+              ;; else { s = growslice(s.ptr, n, s.cap, a, T) }
+              (set! (.-Else nif) (lit (slice ir/Node)
+                  (ir/NewAssignStmt base/Pos s (walkGrowslice s ^{:go/via [miniStmt]} (.PtrInit nif)
+                      (ir/NewUnaryExpr base/Pos ir/OSPTR s)
+                      ^{:line 109} newLen
+                      (ir/NewUnaryExpr base/Pos ir/OCAP s)
+                      ^{:line 111} num))))
+
+
+              (set! l (append l nif))
+
+              (set! ls (subslice (.-Args n) 1))
+              (range [i n ls]
+                ;; s[s.len-argc+i] = arg
+                (let [ix (ir/NewIndexExpr base/Pos s (ir/NewBinaryExpr base/Pos ir/OSUB newLen (ir/NewInt base/Pos (conv int64 (- argc i)))))]
+                  ^{:go/via [miniExpr]} (.SetBounded ix true)
+                  (set! l (append l (ir/NewAssignStmt base/Pos ix n)))))
+
+
+              (typecheck/Stmts l)
+              (walkStmtList l)
+              (.Append init (spread l))
+              ^{:line 127} s)))))))
+
+
+
+^{:go/end 136} (go/func walkGrowslice "growslice(ptr *T, newLen, oldCap, num int, <type>) (ret []T)\n" ^{:tag (* ir/CallExpr)} [^{:tag (* ir/Name)} slice ^{:tag (* ir/Nodes)} init ^ir/Node oldPtr ^ir/Node newLen ^ir/Node oldCap ^ir/Node num]
+  (let [elemtype (.Elem ^{:go/via [miniExpr]} (.Type slice))
+      ^{:line 133} fn (typecheck/LookupRuntime "growslice" elemtype elemtype)
+      ^{:line 134} elemtypeptr (reflectdata/TypePtrAt base/Pos elemtype)]
+    (mkcall1 fn ^{:go/via [miniExpr]} (.Type slice) init oldPtr newLen oldCap num elemtypeptr)))
+
+
+
+^{:go/end 153} (go/func walkClear "walkClear walks an OCLEAR node.\n" ^ir/Node [^{:tag (* ir/UnaryExpr)} n ^{:tag (* ir/Nodes)} init]
+  (let [x (walkExpr (.-X n) init)
+      ^{:line 141} typ (.Type (.-X n))]
+    (switch
+      (case [(.IsSlice typ)]
+        (when [n (arrayClear (.Pos x) x nil)] (!= n nil)
+          (return n))
+
+        ;; If n == nil, we are clearing an array which takes zero memory, do nothing.
+        (return (ir/NewBlockStmt ^{:go/via [miniExpr miniNode]} (.Pos n) nil)))
+      (case [(.IsMap typ)]
+        (return (mapClear x (reflectdata/TypePtrAt (.Pos x) typ)))))
+
+    (panic "unreachable")))
+
+
+
+^{:go/end 158} (go/func walkClose "walkClose walks an OCLOSE node.\n" ^ir/Node [^{:tag (* ir/UnaryExpr)} n ^{:tag (* ir/Nodes)} init]
+  (mkcall1 (chanfn "closechan" 1 (.Type (.-X n))) nil init (.-X n)))
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 236} (go/func walkCopy "Lower copy(a, b) to a memmove call or a runtime call.\n\n\tinit {\n\t  n := len(a)\n\t  if n > len(b) { n = len(b) }\n\t  if a.ptr != b.ptr { memmove(a.ptr, b.ptr, n*sizeof(elem(a))) }\n\t}\n\tn;\n\nAlso works if b is a string.\n" ^ir/Node [^{:tag (* ir/BinaryExpr)} n ^{:tag (* ir/Nodes)} init ^bool runtimecall]
+  (when (.HasPointers (.Elem (.Type (.-X n))))
+    (.SetWBPos ir/CurFunc ^{:go/via [miniExpr miniNode]} (.Pos n))
+    (let [fn (writebarrierfn "typedslicecopy" (.Elem (.Type (.-X n))) (.Elem (.Type (.-Y n))))]
+      (set! (.-X n) (cheapExpr (.-X n) init))
+      (let [(values ptrL lenL) (backingArrayPtrLen (.-X n))]
+        (set! (.-Y n) (cheapExpr (.-Y n) init))
+        (let [(values ptrR lenR) (backingArrayPtrLen (.-Y n))]
+          (return (mkcall1 fn ^{:go/via [miniExpr]} (.Type n) init (reflectdata/CopyElemRType base/Pos n) ptrL lenL ptrR lenR))))))
+
+
+  (when runtimecall
+    ;; rely on runtime to instrument:
+    ;;  copy(n.Left, n.Right)
+    ;; n.Right can be a slice or string.
+
+    (set! (.-X n) (cheapExpr (.-X n) init))
+    (let [(values ptrL lenL) (backingArrayPtrLen (.-X n))]
+      (set! (.-Y n) (cheapExpr (.-Y n) init))
+      (let [(values ptrR lenR) (backingArrayPtrLen (.-Y n))
+
+          ^{:line 191} fn (typecheck/LookupRuntime "slicecopy" (.Elem (.Type ptrL)) (.Elem (.Type ptrR)))]
+
+        (return (mkcall1 fn ^{:go/via [miniExpr]} (.Type n) init ptrL lenL ptrR lenR (ir/NewInt base/Pos (.Size (.Elem (.Type (.-X n))))))))))
+
+
+  (set! (.-X n) (walkExpr (.-X n) init))
+  (set! (.-Y n) (walkExpr (.-Y n) init))
+  (let [nl (typecheck/TempAt base/Pos ir/CurFunc (.Type (.-X n)))
+      ^{:line 199} nr (typecheck/TempAt base/Pos ir/CurFunc (.Type (.-Y n)))
+      ^{:line 200 :tag (slice ir/Node)} l (zero (slice ir/Node))]
+    (set! l (append l (ir/NewAssignStmt base/Pos nl (.-X n))))
+    (set! l (append l (ir/NewAssignStmt base/Pos nr (.-Y n))))
+
+    (let [nfrm (ir/NewUnaryExpr base/Pos ir/OSPTR nr)
+        ^{:line 205} nto (ir/NewUnaryExpr base/Pos ir/OSPTR nl)
+
+        ^{:line 207} nlen (typecheck/TempAt base/Pos ir/CurFunc (aget types/Types types/TINT))]
+
+      ;; n = len(to)
+      (set! l (append l (ir/NewAssignStmt base/Pos nlen (ir/NewUnaryExpr base/Pos ir/OLEN nl))))
+
+      ;; if n > len(frm) { n = len(frm) }
+      (let [nif (ir/NewIfStmt base/Pos nil nil nil)]
+
+        (set! (.-Cond nif) (ir/NewBinaryExpr base/Pos ir/OGT nlen (ir/NewUnaryExpr base/Pos ir/OLEN nr)))
+        (.Append (.-Body nif) (ir/NewAssignStmt base/Pos nlen (ir/NewUnaryExpr base/Pos ir/OLEN nr)))
+        (set! l (append l nif))
+
+        ;; if to.ptr != frm.ptr { memmove( ... ) }
+        (let [ne (ir/NewIfStmt base/Pos (ir/NewBinaryExpr base/Pos ir/ONE nto nfrm) nil nil)]
+          (set! (.-Likely ne) true)
+          (set! l (append l ne))
+
+          (let [fn (typecheck/LookupRuntime "memmove" (.Elem ^{:go/via [miniExpr]} (.Type nl)) (.Elem ^{:go/via [miniExpr]} (.Type nl)))
+              ^{:line 225} nwid (conv ir/Node (typecheck/TempAt base/Pos ir/CurFunc (aget types/Types types/TUINTPTR)))
+              ^{:line 226} setwid (ir/NewAssignStmt base/Pos nwid (typecheck/Conv nlen (aget types/Types types/TUINTPTR)))]
+            (.Append (.-Body ne) setwid)
+            (set! nwid (ir/NewBinaryExpr base/Pos ir/OMUL nwid (ir/NewInt base/Pos (.Size (.Elem ^{:go/via [miniExpr]} (.Type nl))))))
+            (let [call (mkcall1 fn nil init nto nfrm nwid)]
+              (.Append (.-Body ne) call)
+
+              (typecheck/Stmts l)
+              (walkStmtList l)
+              (.Append init (spread l))
+              ^{:line 235} nlen)))))))
+
+
+
+^{:go/end 250} (go/func walkDelete "walkDelete walks an ODELETE node.\n" ^ir/Node [^{:tag (* ir/Nodes)} init ^{:tag (* ir/CallExpr)} n]
+  (.Append init (spread (ir/TakeInit n)))
+  (let [map_ (aget (.-Args n) 0)
+      ^{:line 242} key (aget (.-Args n) 1)]
+    (set! map_ (walkExpr map_ init))
+    (set! key (walkExpr key init))
+
+    (let [t (.Type map_)
+        ^{:line 247} fast (mapfast t)]
+      (set! key (mapKeyArg fast n key false))
+      (mkcall1 (mapfndel (aget mapdelete fast) t) nil init (reflectdata/DeleteMapRType base/Pos n) map_ key))))
+
+
+
+^{:go/end 293} (go/func walkLenCap "walkLenCap walks an OLEN or OCAP node.\n" ^ir/Node [^{:tag (* ir/UnaryExpr)} n ^{:tag (* ir/Nodes)} init]
+  (when (isRuneCount n)
+    ;; Replace len([]rune(string)) with runtime.countrunes(string).
+    (return (mkcall "countrunes" ^{:go/via [miniExpr]} (.Type n) init (typecheck/Conv (.-X (assert (* ir/ConvExpr) (.-X n))) (aget types/Types types/TSTRING)))))
+
+  (when (isByteCount n)
+    (let [conv (assert (* ir/ConvExpr) (.-X n))]
+      (walkStmtList ^{:go/via [miniExpr]} (.Init conv))
+      (.Append init (spread (ir/TakeInit conv)))
+      (let [(values _ len) (backingArrayPtrLen (cheapExpr (.-X conv) init))]
+        (return len))))
+
+  (when (isChanLenCap n)
+    (let [name "chanlen"]
+      (when (== ^{:go/via [miniExpr miniNode]} (.Op n) ir/OCAP)
+        (set! name "chancap"))
+
+      ;; cannot use chanfn - closechan takes any, not chan any,
+      ;; because it accepts both send-only and recv-only channels.
+      (let [fn (typecheck/LookupRuntime name (.Type (.-X n)))]
+        (return (mkcall1 fn ^{:go/via [miniExpr]} (.Type n) init (.-X n))))))
+
+
+  (set! (.-X n) (walkExpr (.-X n) init))
+
+  ;; replace len(*[10]int) with 10.
+  ;; delayed until now to preserve side effects.
+  (let [t (.Type (.-X n))]
+    (when (.IsPtr t)
+      (set! t (.Elem t)))
+
+    (when (.IsArray t)
+      ;; evaluate any side effects in n.X. See issue 72844.
+      (appendWalkStmt init (ir/NewAssignStmt base/Pos ir/BlankNode (.-X n)))
+
+      (let [con (ir/NewConstExpr (constant/MakeInt64 (.NumElem t)) n)]
+        (.SetTypecheck con 1)
+        (return con)))
+
+    ^{:line 292} n))
+
+
+
+^{:go/end 312} (go/func walkMakeChan "walkMakeChan walks an OMAKECHAN node.\n" ^ir/Node [^{:tag (* ir/MakeExpr)} n ^{:tag (* ir/Nodes)} init]
+  ;; When size fits into int, use makechan instead of
+  ;; makechan64, which is faster and shorter on 32 bit platforms.
+  (let [size (.-Len n)
+      ^{:line 300} fnname "makechan64"
+      ^{:line 301} argtype (aget types/Types types/TINT64)]
+
+    ;; Type checking guarantees that TIDEAL size is positive and fits in an int.
+    ;; The case of size overflow when converting TUINT or TUINTPTR to TINT
+    ;; will be handled by the negative range checks in makechan during runtime.
+    (when (or (.IsKind (.Type size) types/TIDEAL) (<= (.Size (.Type size)) (.Size (aget types/Types types/TUINT))))
+      (set! fnname "makechan")
+      (set! argtype (aget types/Types types/TINT)))
+
+
+    (mkcall1 (chanfn fnname 1 ^{:go/via [miniExpr]} (.Type n)) ^{:go/via [miniExpr]} (.Type n) init (reflectdata/MakeChanRType base/Pos n) (typecheck/Conv size argtype))))
+
+
+
+^{:go/end 422} (go/func walkMakeMap "walkMakeMap walks an OMAKEMAP node.\n" ^ir/Node [^{:tag (* ir/MakeExpr)} n ^{:tag (* ir/Nodes)} init]
+  (let [t ^{:go/via [miniExpr]} (.Type n)
+      ^{:line 317} mapType (reflectdata/MapType)
+      ^{:line 318} hint (.-Len n)
+
+      ;; var m *Map
+      ^{:line 321 :tag ir/Node} m (zero ir/Node)]
+    (when (== ^{:go/via [miniExpr miniNode]} (.Esc n) ir/EscNone)
+      ;; Allocate hmap on stack.
+
+      ;; var mv Map
+      ;; m = &mv
+      (set! m (stackTempAddr init mapType))
+
+      ;; Allocate one group pointed to by m.dirPtr on stack if hint
+      ;; is not larger than MapGroupSlots. In case hint is
+      ;; larger, runtime.makemap will allocate on the heap.
+      ;; Maximum key and elem size is 128 bytes, larger objects
+      ;; are stored with an indirection. So max bucket size is 2048+eps.
+      (when (or (not (ir/IsConst hint constant/Int))
+          (constant/Compare (.Val hint) token/LEQ (constant/MakeInt64 abi/MapGroupSlots)))
+
+        ;; In case hint is larger than MapGroupSlots
+        ;; runtime.makemap will allocate on the heap, see
+        ;; #20184
+        ;;
+        ;; if hint <= abi.MapGroupSlots {
+        ;;     var gv group
+        ;;     g = &gv
+        ;;     g.ctrl = abi.MapCtrlEmpty
+        ;;     m.dirPtr = g
+        ;; }
+
+        (let [nif (ir/NewIfStmt base/Pos (ir/NewBinaryExpr base/Pos ir/OLE hint (ir/NewInt base/Pos abi/MapGroupSlots)) nil nil)]
+          (set! (.-Likely nif) true)
+
+          (let [groupType (reflectdata/MapGroupType t)
+
+              ;; var gv group
+              ;; g = &gv
+              ^{:line 355} g (stackTempAddr (addr (.-Body nif)) groupType)
+
+              ;; Can't use ir.NewInt because bit 63 is set, which
+              ;; makes conversion to uint64 upset.
+              ^{:line 359} empty (ir/NewBasicLit base/Pos types/UntypedInt (constant/MakeUint64 abi/MapCtrlEmpty))
+
+              ;; g.ctrl = abi.MapCtrlEmpty
+              ^{:line 362} csym (.-Sym (.Field groupType 0)) ; g.ctrl see reflectdata/map.go
+              ^{:line 363} ca (ir/NewAssignStmt base/Pos (ir/NewSelectorExpr base/Pos ir/ODOT g csym) empty)]
+            (.Append (.-Body nif) ca)
+
+            ;; m.dirPtr = g
+            (let [dsym (.-Sym (.Field mapType 2)) ; m.dirPtr see reflectdata/map.go
+                ^{:line 368} na (ir/NewAssignStmt base/Pos (ir/NewSelectorExpr base/Pos ir/ODOT m dsym) (typecheck/ConvNop g (aget types/Types types/TUNSAFEPTR)))]
+              (.Append (.-Body nif) na)
+              (appendWalkStmt init nif))))))
+
+
+
+    (when (and (ir/IsConst hint constant/Int) (constant/Compare (.Val hint) token/LEQ (constant/MakeInt64 abi/MapGroupSlots)))
+      ;; Handling make(map[any]any) and
+      ;; make(map[any]any, hint) where hint <= abi.MapGroupSlots
+      ;; specially allows for faster map initialization and
+      ;; improves binary size by using calls with fewer arguments.
+      ;; For hint <= abi.MapGroupSlots no groups will be
+      ;; allocated by makemap. Therefore, no groups need to be
+      ;; allocated in this code path.
+      (when (== ^{:go/via [miniExpr miniNode]} (.Esc n) ir/EscNone)
+        ;; Only need to initialize m.seed since
+        ;; m map has been allocated on the stack already.
+        ;; m.seed = uintptr(rand())
+        (let [rand (mkcall "rand" (aget types/Types types/TUINT64) init)
+            ^{:line 387} seedSym (.-Sym (.Field mapType 1))] ; m.seed see reflectdata/map.go
+          (appendWalkStmt init (ir/NewAssignStmt base/Pos (ir/NewSelectorExpr base/Pos ir/ODOT m seedSym) (typecheck/Conv rand (aget types/Types types/TUINTPTR))))
+          (return (typecheck/ConvNop m t))))
+
+      ;; Call runtime.makemap_small to allocate a
+      ;; map on the heap and initialize the map's seed field.
+      (let [fn (typecheck/LookupRuntime "makemap_small" (.Key t) (.Elem t))]
+        (return (mkcall1 fn ^{:go/via [miniExpr]} (.Type n) init))))
+
+
+    (when (!= ^{:go/via [miniExpr miniNode]} (.Esc n) ir/EscNone)
+      (set! m (typecheck/NodNil)))
+
+
+    ;; Map initialization with a variable or large hint is
+    ;; more complicated. We therefore generate a call to
+    ;; runtime.makemap to initialize hmap and allocate the
+    ;; map buckets.
+
+    ;; When hint fits into int, use makemap instead of
+    ;; makemap64, which is faster and shorter on 32 bit platforms.
+    (let [fnname "makemap64"
+        ^{:line 409} argtype (aget types/Types types/TINT64)]
+
+      ;; Type checking guarantees that TIDEAL hint is positive and fits in an int.
+      ;; See checkmake call in TMAP case of OMAKE case in OpSwitch in typecheck1 function.
+      ;; The case of hint overflow when converting TUINT or TUINTPTR to TINT
+      ;; will be handled by the negative range checks in makemap during runtime.
+      (when (or (.IsKind (.Type hint) types/TIDEAL) (<= (.Size (.Type hint)) (.Size (aget types/Types types/TUINT))))
+        (set! fnname "makemap")
+        (set! argtype (aget types/Types types/TINT)))
+
+
+      (let [fn (typecheck/LookupRuntime fnname mapType (.Key t) (.Elem t))]
+        (mkcall1 fn ^{:go/via [miniExpr]} (.Type n) init (reflectdata/MakeMapRType base/Pos n) (typecheck/Conv hint argtype) m)))))
+
+
+
+^{:go/end 549} (go/func walkMakeSlice "walkMakeSlice walks an OMAKESLICE node.\n" ^ir/Node [^{:tag (* ir/MakeExpr)} n ^{:tag (* ir/Nodes)} init]
+  (let [len (.-Len n)
+      ^{:line 427} cap (.-Cap n)]
+    (set! len (safeExpr len init))
+    (if (!= cap nil)
+      (set! cap (safeExpr cap init))
+
+      (set! cap len))
+
+    (let [t ^{:go/via [miniExpr]} (.Type n)]
+      (when (.NotInHeap (.Elem t))
+        (base/Errorf "%v can't be allocated in Go; it is incomplete (or unallocatable)" (.Elem t)))
+
+
+      (let [tryStack false]
+        (when (== ^{:go/via [miniExpr miniNode]} (.Esc n) ir/EscNone)
+          (when [why (escape/HeapAllocReason n)] (!= why "")
+            (base/Fatalf "%v has EscNone, but %v" n why))
+
+          (when (ir/IsSmallIntConst cap)
+            ;; Constant backing array - allocate it and slice it.
+            (let [cap (typecheck/IndexConst cap)
+                ;; Note that len might not be constant. If it isn't, check for panics.
+                ;; cap is constrained to [0,2^31) or [0,2^63) depending on whether
+                ;; we're in 32-bit or 64-bit systems. So it's safe to do:
+                ;;
+                ;; if uint64(len) > cap {
+                ;;     if len < 0 { panicmakeslicelen() }
+                ;;     panicmakeslicecap()
+                ;; }
+                ^{:line 455} nif (ir/NewIfStmt base/Pos (ir/NewBinaryExpr base/Pos ir/OGT (typecheck/Conv len (aget types/Types types/TUINT64)) (ir/NewInt base/Pos cap)) nil nil)
+                ^{:line 456} niflen (ir/NewIfStmt base/Pos (ir/NewBinaryExpr base/Pos ir/OLT len (ir/NewInt base/Pos 0)) nil nil)]
+              (set! (.-Body niflen) (lit (slice ir/Node) (mkcall "panicmakeslicelen" nil init)))
+              (.Append (.-Body nif) niflen (mkcall "panicmakeslicecap" nil init))
+              (appendWalkStmt init nif)
+
+              ;; var arr [cap]E
+              ;; s = arr[:len]
+              (let [t (types/NewArray (.Elem t) cap) ; [cap]E
+                  ^{:line 464} arr (typecheck/TempAt base/Pos ir/CurFunc t)]
+                (appendWalkStmt init (ir/NewAssignStmt base/Pos arr nil)) ; zero temp
+                (let [s (ir/NewSliceExpr base/Pos ir/OSLICE arr nil len nil)] ; arr[:len]
+                  ;; The conv is necessary in case n.Type is named.
+                  (return (walkExpr (typecheck/Expr (typecheck/Conv s ^{:go/via [miniExpr]} (.Type n))) init))))))
+
+          ;; Check that this optimization is enabled in general and for this node.
+          (set! tryStack (and (== (.-N base/Flag) 0) (.MatchPos base/VariableMakeHash ^{:go/via [miniExpr miniNode]} (.Pos n) nil))))
+
+
+        ;; The final result is assigned to this variable.
+        (let [slice (typecheck/TempAt base/Pos ir/CurFunc ^{:go/via [miniExpr]} (.Type n))] ; []E result (possibly named)
+
+          (when tryStack
+            ;; K := maxStackSize/sizeof(E)
+            ;; if cap <= K {
+            ;;     var arr [K]E
+            ;;     slice = arr[:len:cap]
+            ;; } else {
+            ;;     slice = makeslice(elemType, len, cap)
+            ;; }
+            (let [maxStackSize (conv int64 (.-VariableMakeThreshold base/Debug))
+                ^{:line 486} K (/ maxStackSize (.Size (.Elem t)))] ; rounds down
+              (when (> K 0) ; skip if elem size is too big.
+                (let [nif (ir/NewIfStmt base/Pos (ir/NewBinaryExpr base/Pos ir/OLE (typecheck/Conv cap (aget types/Types types/TUINT64)) (ir/NewInt base/Pos K)) nil nil)
+
+                    ;; cap is in bounds after the K check, but len might not be.
+                    ;; (Note that the slicing below would generate a panic for
+                    ;; the same bad cases, but we want makeslice panics, not
+                    ;; regular slicing panics.)
+                    ^{:line 494} lenCap (ir/NewIfStmt base/Pos (ir/NewBinaryExpr base/Pos ir/OGT (typecheck/Conv len (aget types/Types types/TUINT64)) (typecheck/Conv cap (aget types/Types types/TUINT64))) nil nil)
+                    ^{:line 495} lenZero (ir/NewIfStmt base/Pos (ir/NewBinaryExpr base/Pos ir/OLT len (ir/NewInt base/Pos 0)) nil nil)]
+                  (.Append (.-Body lenZero) (mkcall "panicmakeslicelen" nil (addr (.-Body lenZero))))
+                  (.Append (.-Body lenCap) lenZero)
+                  (.Append (.-Body lenCap) (mkcall "panicmakeslicecap" nil (addr (.-Body lenCap))))
+                  (.Append (.-Body nif) lenCap)
+
+                  (let [t (types/NewArray (.Elem t) K) ; [K]E
+                      ;; Wrap in a struct containing a [0]uintptr field to force
+                      ;; pointer alignment. Some user code expects higher alignment
+                      ;; than what is guaranteed by the element type, because that's
+                      ;; the behavior they observed of mallocgc, and then relied upon.
+                      ;; See issue 73199.
+                      ^{:line 507} field (typecheck/Lookup "arr")]
+                    (set! t (types/NewStruct (lit (slice (* types/Field))
+                          (lit _ :Sym types/BlankSym :Type (types/NewArray (aget types/Types types/TUINTPTR) 0))
+                          (lit _ :Sym field :Type t))))
+
+                    (.SetNoalg t true)
+                    (let [store (typecheck/TempAt base/Pos ir/CurFunc t)] ; var store struct{_ uintptr[0]; arr [K]E}
+                      (.Append (.-Body nif) (ir/NewAssignStmt base/Pos store nil)) ; store = {} (zero it)
+                      (let [arr (ir/NewSelectorExpr base/Pos ir/ODOT store field) ; arr = store.arr
+                          ^{:line 516} s (ir/NewSliceExpr base/Pos ir/OSLICE arr nil len cap)] ; store.arr[:len:cap]
+                        (.Append (.-Body nif) (ir/NewAssignStmt base/Pos slice s)) ; slice = store.arr[:len:cap]
+
+                        (appendWalkStmt init (typecheck/Stmt nif))
+
+                        ;; Put makeslice call below in the else branch.
+                        (set! init (addr (.-Else nif))))))))))
+
+
+
+          ;; Set up a call to makeslice.
+          ;; When len and cap can fit into int, use makeslice instead of
+          ;; makeslice64, which is faster and shorter on 32 bit platforms.
+          (let [fnname "makeslice64"
+              ^{:line 530} argtype (aget types/Types types/TINT64)]
+
+            ;; Type checking guarantees that TIDEAL len/cap are positive and fit in an int.
+            ;; The case of len or cap overflow when converting TUINT or TUINTPTR to TINT
+            ;; will be handled by the negative range checks in makeslice during runtime.
+            (when (and ^:go/paren (or (.IsKind (.Type len) types/TIDEAL) (<= (.Size (.Type len)) (.Size (aget types/Types types/TUINT))))
+                ^:go/paren (or (.IsKind (.Type cap) types/TIDEAL) (<= (.Size (.Type cap)) (.Size (aget types/Types types/TUINT)))))
+              (set! fnname "makeslice")
+              (set! argtype (aget types/Types types/TINT)))
+
+            (let [fn (typecheck/LookupRuntime fnname)
+                ^{:line 541} ptr (mkcall1 fn (aget types/Types types/TUNSAFEPTR) init (reflectdata/MakeSliceElemRType base/Pos n) (typecheck/Conv len argtype) (typecheck/Conv cap argtype))]
+              ^{:go/via [miniExpr]} (.MarkNonNil ptr)
+              (set! len (typecheck/Conv len (aget types/Types types/TINT)))
+              (set! cap (typecheck/Conv cap (aget types/Types types/TINT)))
+              (let [s (ir/NewSliceHeaderExpr base/Pos t ptr len cap)]
+                (appendWalkStmt init (ir/NewAssignStmt base/Pos slice s))
+
+                ^{:line 548} slice))))))))
+
+
+
+^{:go/end 600} (go/func walkMakeSliceCopy "walkMakeSliceCopy walks an OMAKESLICECOPY node.\n" ^ir/Node [^{:tag (* ir/MakeExpr)} n ^{:tag (* ir/Nodes)} init]
+  (when (== ^{:go/via [miniExpr miniNode]} (.Esc n) ir/EscNone)
+    (base/Fatalf "OMAKESLICECOPY with EscNone: %v" n))
+
+
+  (let [t ^{:go/via [miniExpr]} (.Type n)]
+    (when (.NotInHeap (.Elem t))
+      (base/Errorf "%v can't be allocated in Go; it is incomplete (or unallocatable)" (.Elem t)))
+
+
+    (let [length (typecheck/Conv (.-Len n) (aget types/Types types/TINT))
+        ^{:line 563} copylen (ir/NewUnaryExpr base/Pos ir/OLEN (.-Cap n))
+        ^{:line 564} copyptr (ir/NewUnaryExpr base/Pos ir/OSPTR (.-Cap n))]
+
+      (when (and (not (.HasPointers (.Elem t))) ^{:go/via [miniExpr]} (.Bounded n))
+        ;; When len(to)==len(from) and elements have no pointers:
+        ;; replace make+copy with runtime.mallocgc+runtime.memmove.
+
+        ;; We do not check for overflow of len(to)*elem.Width here
+        ;; since len(from) is an existing checked slice capacity
+        ;; with same elem.Width for the from slice.
+        (let [size (ir/NewBinaryExpr base/Pos ir/OMUL (typecheck/Conv length (aget types/Types types/TUINTPTR)) (typecheck/Conv (ir/NewInt base/Pos (.Size (.Elem t))) (aget types/Types types/TUINTPTR)))
+
+            ;; instantiate mallocgc(size uintptr, typ *byte, needszero bool) unsafe.Pointer
+            ^{:line 576} fn (typecheck/LookupRuntime "mallocgc")
+            ^{:line 577} ptr (mkcall1 fn (aget types/Types types/TUNSAFEPTR) init size (typecheck/NodNil) (ir/NewBool base/Pos false))]
+          ^{:go/via [miniExpr]} (.MarkNonNil ptr)
+          (let [sh (ir/NewSliceHeaderExpr base/Pos t ptr length length)
+
+              ^{:line 581} s (typecheck/TempAt base/Pos ir/CurFunc t)
+              ^{:line 582} r (typecheck/Stmt (ir/NewAssignStmt base/Pos s sh))]
+            (set! r (walkExpr r init))
+            (.Append init r)
+
+            ;; instantiate memmove(to *any, frm *any, size uintptr)
+            (set! fn (typecheck/LookupRuntime "memmove" (.Elem t) (.Elem t)))
+            (let [ncopy (mkcall1 fn nil init (ir/NewUnaryExpr base/Pos ir/OSPTR s) copyptr size)]
+              (.Append init (walkExpr (typecheck/Stmt ncopy) init))
+
+              (return s)))))
+
+      ;; Replace make+copy with runtime.makeslicecopy.
+      ;; instantiate makeslicecopy(typ *byte, tolen int, fromlen int, from unsafe.Pointer) unsafe.Pointer
+      (let [fn (typecheck/LookupRuntime "makeslicecopy")
+          ^{:line 596} ptr (mkcall1 fn (aget types/Types types/TUNSAFEPTR) init (reflectdata/MakeSliceElemRType base/Pos n) length copylen (typecheck/Conv copyptr (aget types/Types types/TUNSAFEPTR)))]
+        ^{:go/via [miniExpr]} (.MarkNonNil ptr)
+        (let [sh (ir/NewSliceHeaderExpr base/Pos t ptr length length)]
+          (walkExpr (typecheck/Expr sh) init))))))
+
+
+
+^{:go/end 617} (go/func walkNew "walkNew walks an ONEW node.\n" ^ir/Node [^{:tag (* ir/UnaryExpr)} n ^{:tag (* ir/Nodes)} init]
+  (let [t (.Elem ^{:go/via [miniExpr]} (.Type n))]
+    (when (.NotInHeap t)
+      (base/Errorf "%v can't be allocated in Go; it is incomplete (or unallocatable)" (.Elem ^{:go/via [miniExpr]} (.Type n))))
+
+    (when (== ^{:go/via [miniExpr miniNode]} (.Esc n) ir/EscNone)
+      (when (> (.Size t) ir/MaxImplicitStackVarSize)
+        (base/Fatalf "large ONEW with EscNone: %v" n))
+
+      (return (stackTempAddr init t)))
+
+    (types/CalcSize t)
+    ^{:go/via [miniExpr]} (.MarkNonNil n)
+    ^{:line 616} n))
+
+
+^{:go/end 623} (go/func walkMinMax ^ir/Node [^{:tag (* ir/CallExpr)} n ^{:tag (* ir/Nodes)} init]
+  (.Append init (spread (ir/TakeInit n)))
+  (walkExprList (.-Args n) init)
+  ^{:line 622} n)
+
+
+
+^{:go/end 768} (go/func walkPrint "generate code for print.\n" ^ir/Node [^{:tag (* ir/CallExpr)} nn ^{:tag (* ir/Nodes)} init]
+  ;; Hoist all the argument evaluation up before the lock.
+  (walkExprListCheap (.-Args nn) init)
+
+  ;; For println, add " " between elements and "\n" at the end.
+  (when (== ^{:go/via [miniExpr miniNode]} (.Op nn) ir/OPRINTLN)
+    (let [s (.-Args nn)
+        ^{:line 633} t (make (slice ir/Node) 0 (* (len s) 2))]
+      (range [i n s]
+        (when (!= i 0)
+          (set! t (append t (ir/NewString base/Pos " "))))
+
+        (set! t (append t n)))
+
+      (set! t (append t (ir/NewString base/Pos "\n")))
+      (set! (.-Args nn) t)))
+
+
+  ;; Collapse runs of constant strings.
+  (let [s (.-Args nn)
+      ^{:line 646} t (make (slice ir/Node) 0 (len s))]
+    (for [i 0] (< i (len s)) _
+      (let [^{:tag (slice string)} strs (zero (slice string))]
+        (while (and (< i (len s)) (ir/IsConst (aget s i) constant/String))
+          (set! strs (append strs (ir/StringVal (aget s i))))
+          (inc! i))
+
+        (when (> (len strs) 0)
+          (set! t (append t (ir/NewString base/Pos (strings/Join strs "")))))
+
+        (when (< i (len s))
+          (set! t (append t (aget s i)))
+          (inc! i))))
+
+
+    (set! (.-Args nn) t)
+
+    (let [calls (lit (slice ir/Node) (mkcall "printlock" nil init))]
+      (range [i n (.-Args nn)]
+        (when (== (.Op n) ir/OLITERAL)
+          (when (== (.Type n) types/UntypedRune)
+            (set! n (typecheck/DefaultLit n types/RuneType)))
+
+
+          (switch (.Kind (.Val n))
+            (case [constant/Int]
+              (set! n (typecheck/DefaultLit n (aget types/Types types/TINT64))))
+
+            (case [constant/Float]
+              (set! n (typecheck/DefaultLit n (aget types/Types types/TFLOAT64))))))
+
+
+
+        (when (and (!= (.Op n) ir/OLITERAL) (!= (.Type n) nil) (== (.Kind (.Type n)) types/TIDEAL))
+          (set! n (typecheck/DefaultLit n (aget types/Types types/TINT64))))
+
+        (set! n (typecheck/DefaultLit n nil))
+        (aset (.-Args nn) i n)
+        (when (or (== (.Type n) nil) (== (.Kind (.Type n)) types/TFORW))
+          (continue))
+
+
+        (let [^{:tag (* ir/Name)} on (zero (* ir/Name))]
+          (switch (.Kind (.Type n))
+            (case [types/TINTER]
+              (if (.IsEmptyInterface (.Type n))
+                (set! on (typecheck/LookupRuntime "printeface" (.Type n)))
+
+                (set! on (typecheck/LookupRuntime "printiface" (.Type n)))))
+
+            (case [types/TPTR]
+              (when (.NotInHeap (.Elem (.Type n)))
+                (set! on (typecheck/LookupRuntime "printuintptr"))
+                (set! n (ir/NewConvExpr base/Pos ir/OCONV nil n))
+                (.SetType n (aget types/Types types/TUNSAFEPTR))
+                (set! n (ir/NewConvExpr base/Pos ir/OCONV nil n))
+                (.SetType n (aget types/Types types/TUINTPTR))
+                (break))
+
+              (fallthrough))
+            (case [types/TCHAN types/TMAP types/TFUNC types/TUNSAFEPTR]
+              (set! on (typecheck/LookupRuntime "printpointer" (.Type n))))
+            (case [types/TSLICE]
+              (set! on (typecheck/LookupRuntime "printslice" (.Type n))))
+            (case [types/TUINT types/TUINT8 types/TUINT16 types/TUINT32 types/TUINT64 types/TUINTPTR]
+              (if (== (types/RuntimeSymName (.Sym (.Type n))) "hex")
+                (set! on (typecheck/LookupRuntime "printhex"))
+
+                (set! on (typecheck/LookupRuntime "printuint"))))
+
+            (case [types/TINT types/TINT8 types/TINT16 types/TINT32 types/TINT64]
+              (set! on (typecheck/LookupRuntime "printint")))
+            (case [types/TFLOAT32]
+              (set! on (typecheck/LookupRuntime "printfloat32")))
+            (case [types/TFLOAT64]
+              (set! on (typecheck/LookupRuntime "printfloat64")))
+            (case [types/TCOMPLEX64]
+              (set! on (typecheck/LookupRuntime "printcomplex64")))
+            (case [types/TCOMPLEX128]
+              (set! on (typecheck/LookupRuntime "printcomplex128")))
+            (case [types/TBOOL]
+              (set! on (typecheck/LookupRuntime "printbool")))
+            (case [types/TSTRING]
+              (let [cs ""]
+                (when (ir/IsConst n constant/String)
+                  (set! cs (ir/StringVal n)))
+
+                ;; Print values of the named type `quoted` using printquoted.
+                (if (== (types/RuntimeSymName (.Sym (.Type n))) "quoted")
+                  (set! on (typecheck/LookupRuntime "printquoted"))
+
+                  (switch cs
+                    (case [" "]
+                      (set! on (typecheck/LookupRuntime "printsp")))
+                    (case ["\n"]
+                      (set! on (typecheck/LookupRuntime "printnl")))
+                    (default
+                      (set! on (typecheck/LookupRuntime "printstring")))))))
+
+
+            (default
+              (badtype ^{:go/via [miniExpr miniNode]} (.Op nn) (.Type n) nil)
+              (continue)))
+
+
+          (let [r (ir/NewCallExpr base/Pos ir/OCALL on nil)]
+            (when [params (.Params ^{:go/via [miniExpr]} (.Type on))] (> (len params) 0)
+              (let [t (.-Type (aget params 0))]
+                (set! n (typecheck/Conv n t))
+                (.Append (.-Args r) n)))
+
+            (set! calls (append calls r)))))
+
+
+      (set! calls (append calls (mkcall "printunlock" nil init)))
+
+      (typecheck/Stmts calls)
+      (walkExprList calls init)
+
+      (let [r (ir/NewBlockStmt base/Pos nil)]
+        (set! (.-List r) calls)
+        (walkStmt (typecheck/Stmt r))))))
+
+
+
+^{:go/end 773} (go/func walkRecover "walkRecover walks an ORECOVER node.\n" ^ir/Node [^{:tag (* ir/CallExpr)} nn ^{:tag (* ir/Nodes)} init]
+  (mkcall "gorecover" ^{:go/via [miniExpr]} (.Type nn) init))
+
+
+
+^{:go/end 781} (go/func walkUnsafeData "walkUnsafeData walks an OUNSAFESLICEDATA or OUNSAFESTRINGDATA expression.\n" ^ir/Node [^{:tag (* ir/UnaryExpr)} n ^{:tag (* ir/Nodes)} init]
+  (let [slice (walkExpr (.-X n) init)
+      ^{:line 778} res (typecheck/Expr (ir/NewUnaryExpr ^{:go/via [miniExpr miniNode]} (.Pos n) ir/OSPTR slice))]
+    (.SetType res ^{:go/via [miniExpr]} (.Type n))
+    (walkExpr res init)))
+
+
+^{:go/end 882} (go/func walkUnsafeSlice ^ir/Node [^{:tag (* ir/BinaryExpr)} n ^{:tag (* ir/Nodes)} init]
+  (let [ptr (safeExpr (.-X n) init)
+      ^{:line 785} len (safeExpr (.-Y n) init)
+      ^{:line 786} sliceType ^{:go/via [miniExpr]} (.Type n)
+
+      ^{:line 788} lenType (aget types/Types types/TINT64)
+      ^{:line 789} unsafePtr (typecheck/Conv ptr (aget types/Types types/TUNSAFEPTR))]
+
+    ;; If checkptr enabled, call runtime.unsafeslicecheckptr to check ptr and len.
+    ;; for simplicity, unsafeslicecheckptr always uses int64.
+    ;; Type checking guarantees that TIDEAL len/cap are positive and fit in an int.
+    ;; The case of len or cap overflow when converting TUINT or TUINTPTR to TINT
+    ;; will be handled by the negative range checks in unsafeslice during runtime.
+    (if (ir/ShouldCheckPtr ir/CurFunc 1)
+      (let [fnname "unsafeslicecheckptr"
+          ^{:line 798} fn (typecheck/LookupRuntime fnname)]
+        (.Append init (mkcall1 fn nil init (reflectdata/UnsafeSliceElemRType base/Pos n) unsafePtr (typecheck/Conv len lenType))))
+      (do
+        ;; Otherwise, open code unsafe.Slice to prevent runtime call overhead.
+        ;; Keep this code in sync with runtime.unsafeslice{,64}
+        (if (or (.IsKind (.Type len) types/TIDEAL) (<= (.Size (.Type len)) (.Size (aget types/Types types/TUINT))))
+          (set! lenType (aget types/Types types/TINT))
+
+          ;; len64 := int64(len)
+          ;; if int64(int(len64)) != len64 {
+          ;;     panicunsafeslicelen()
+          ;; }
+          (let [len64 (typecheck/Conv len lenType)
+              ^{:line 811} nif (ir/NewIfStmt base/Pos nil nil nil)]
+            (set! (.-Cond nif) (ir/NewBinaryExpr base/Pos ir/ONE (typecheck/Conv (typecheck/Conv len64 (aget types/Types types/TINT)) lenType) len64))
+            (.Append (.-Body nif) (mkcall "panicunsafeslicelen" nil (addr (.-Body nif))))
+            (appendWalkStmt init nif)))
+
+
+        ;; if len < 0 { panicunsafeslicelen() }
+        (let [nif (ir/NewIfStmt base/Pos nil nil nil)]
+          (set! (.-Cond nif) (ir/NewBinaryExpr base/Pos ir/OLT (typecheck/Conv len lenType) (ir/NewInt base/Pos 0)))
+          (.Append (.-Body nif) (mkcall "panicunsafeslicelen" nil (addr (.-Body nif))))
+          (appendWalkStmt init nif)
+
+          (when (== (.Size (.Elem sliceType)) 0)
+            ;; if ptr == nil && len > 0  {
+            ;;      panicunsafesliceptrnil()
+            ;; }
+            (let [nifPtr (ir/NewIfStmt base/Pos nil nil nil)
+                ^{:line 828} isNil (ir/NewBinaryExpr base/Pos ir/OEQ unsafePtr (typecheck/NodNil))
+                ^{:line 829} gtZero (ir/NewBinaryExpr base/Pos ir/OGT (typecheck/Conv len lenType) (ir/NewInt base/Pos 0))]
+              (set! (.-Cond nifPtr)
+                (ir/NewLogicalExpr base/Pos ir/OANDAND isNil gtZero))
+              (.Append (.-Body nifPtr) (mkcall "panicunsafeslicenilptr" nil (addr (.-Body nifPtr))))
+              (appendWalkStmt init nifPtr)
+
+              (let [h (ir/NewSliceHeaderExpr ^{:go/via [miniExpr miniNode]} (.Pos n) sliceType
+                    (typecheck/Conv ptr (aget types/Types types/TUNSAFEPTR))
+                    (typecheck/Conv len (aget types/Types types/TINT))
+                    (typecheck/Conv len (aget types/Types types/TINT)))]
+                (return (walkExpr (typecheck/Expr h) init)))))
+
+
+          ;; mem, overflow := math.mulUintptr(et.size, len)
+          (let [mem (typecheck/TempAt base/Pos ir/CurFunc (aget types/Types types/TUINTPTR))
+              ^{:line 844} overflow (typecheck/TempAt base/Pos ir/CurFunc (aget types/Types types/TBOOL))
+
+              ^{:line 846} decl (types/NewSignature nil
+                (lit (slice (* types/Field))
+                  (types/NewField base/Pos nil (aget types/Types types/TUINTPTR))
+                  (types/NewField base/Pos nil (aget types/Types types/TUINTPTR)))
+
+                (lit (slice (* types/Field))
+                  (types/NewField base/Pos nil (aget types/Types types/TUINTPTR))
+                  (types/NewField base/Pos nil (aget types/Types types/TBOOL))))
+
+
+              ^{:line 856} fn (ir/NewFunc ^{:go/via [miniExpr miniNode]} (.Pos n) ^{:go/via [miniExpr miniNode]} (.Pos n) math_MulUintptr decl)
+
+              ^{:line 858} call (mkcall1 (.-Nname fn) (.ResultsTuple (.Type fn)) init (ir/NewInt base/Pos (.Size (.Elem sliceType))) (typecheck/Conv (typecheck/Conv len lenType) (aget types/Types types/TUINTPTR)))]
+            (appendWalkStmt init (ir/NewAssignListStmt base/Pos ir/OAS2 (lit (slice ir/Node) mem overflow) (lit (slice ir/Node) call)))
+
+            ;; if overflow || mem > -uintptr(ptr) {
+            ;;     if ptr == nil {
+            ;;         panicunsafesliceptrnil()
+            ;;     }
+            ;;     panicunsafeslicelen()
+            ;; }
+            (set! nif (ir/NewIfStmt base/Pos nil nil nil))
+            (let [memCond (ir/NewBinaryExpr base/Pos ir/OGT mem (ir/NewUnaryExpr base/Pos ir/ONEG (typecheck/Conv unsafePtr (aget types/Types types/TUINTPTR))))]
+              (set! (.-Cond nif) (ir/NewLogicalExpr base/Pos ir/OOROR overflow memCond))
+              (let [nifPtr (ir/NewIfStmt base/Pos nil nil nil)]
+                (set! (.-Cond nifPtr) (ir/NewBinaryExpr base/Pos ir/OEQ unsafePtr (typecheck/NodNil)))
+                (.Append (.-Body nifPtr) (mkcall "panicunsafeslicenilptr" nil (addr (.-Body nifPtr))))
+                (.Append (.-Body nif) nifPtr (mkcall "panicunsafeslicelen" nil (addr (.-Body nif))))
+                (appendWalkStmt init nif)))))))
+
+
+    (let [h (ir/NewSliceHeaderExpr ^{:go/via [miniExpr miniNode]} (.Pos n) sliceType
+          (typecheck/Conv ptr (aget types/Types types/TUNSAFEPTR))
+          (typecheck/Conv len (aget types/Types types/TINT))
+          (typecheck/Conv len (aget types/Types types/TINT)))]
+      (walkExpr (typecheck/Expr h) init))))
+
+
+(go/var math_MulUintptr (addr (lit types/Sym :Pkg (types/NewPkg "internal/runtime/math" "math") :Name "MulUintptr")))
+
+^{:go/end 942} (go/func walkUnsafeString ^ir/Node [^{:tag (* ir/BinaryExpr)} n ^{:tag (* ir/Nodes)} init]
+  (let [ptr (safeExpr (.-X n) init)
+      ^{:line 888} len (safeExpr (.-Y n) init)
+
+      ^{:line 890} lenType (aget types/Types types/TINT64)
+      ^{:line 891} unsafePtr (typecheck/Conv ptr (aget types/Types types/TUNSAFEPTR))]
+
+    ;; If checkptr enabled, call runtime.unsafestringcheckptr to check ptr and len.
+    ;; for simplicity, unsafestringcheckptr always uses int64.
+    ;; Type checking guarantees that TIDEAL len are positive and fit in an int.
+    (if (ir/ShouldCheckPtr ir/CurFunc 1)
+      (let [fnname "unsafestringcheckptr"
+          ^{:line 898} fn (typecheck/LookupRuntime fnname)]
+        (.Append init (mkcall1 fn nil init unsafePtr (typecheck/Conv len lenType))))
+      (do
+        ;; Otherwise, open code unsafe.String to prevent runtime call overhead.
+        ;; Keep this code in sync with runtime.unsafestring{,64}
+        (if (or (.IsKind (.Type len) types/TIDEAL) (<= (.Size (.Type len)) (.Size (aget types/Types types/TUINT))))
+          (set! lenType (aget types/Types types/TINT))
+
+          ;; len64 := int64(len)
+          ;; if int64(int(len64)) != len64 {
+          ;;     panicunsafestringlen()
+          ;; }
+          (let [len64 (typecheck/Conv len lenType)
+              ^{:line 911} nif (ir/NewIfStmt base/Pos nil nil nil)]
+            (set! (.-Cond nif) (ir/NewBinaryExpr base/Pos ir/ONE (typecheck/Conv (typecheck/Conv len64 (aget types/Types types/TINT)) lenType) len64))
+            (.Append (.-Body nif) (mkcall "panicunsafestringlen" nil (addr (.-Body nif))))
+            (appendWalkStmt init nif)))
+
+
+        ;; if len < 0 { panicunsafestringlen() }
+        (let [nif (ir/NewIfStmt base/Pos nil nil nil)]
+          (set! (.-Cond nif) (ir/NewBinaryExpr base/Pos ir/OLT (typecheck/Conv len lenType) (ir/NewInt base/Pos 0)))
+          (.Append (.-Body nif) (mkcall "panicunsafestringlen" nil (addr (.-Body nif))))
+          (appendWalkStmt init nif)
+
+          ;; if uintpr(len) > -uintptr(ptr) {
+          ;;    if ptr == nil {
+          ;;       panicunsafestringnilptr()
+          ;;    }
+          ;;    panicunsafeslicelen()
+          ;; }
+          (let [nifLen (ir/NewIfStmt base/Pos nil nil nil)]
+            (set! (.-Cond nifLen) (ir/NewBinaryExpr base/Pos ir/OGT (typecheck/Conv len (aget types/Types types/TUINTPTR)) (ir/NewUnaryExpr base/Pos ir/ONEG (typecheck/Conv unsafePtr (aget types/Types types/TUINTPTR)))))
+            (let [nifPtr (ir/NewIfStmt base/Pos nil nil nil)]
+              (set! (.-Cond nifPtr) (ir/NewBinaryExpr base/Pos ir/OEQ unsafePtr (typecheck/NodNil)))
+              (.Append (.-Body nifPtr) (mkcall "panicunsafestringnilptr" nil (addr (.-Body nifPtr))))
+              (.Append (.-Body nifLen) nifPtr (mkcall "panicunsafestringlen" nil (addr (.-Body nifLen))))
+              (appendWalkStmt init nifLen))))))
+
+    (let [h (ir/NewStringHeaderExpr ^{:go/via [miniExpr miniNode]} (.Pos n)
+          (typecheck/Conv ptr (aget types/Types types/TUNSAFEPTR))
+          (typecheck/Conv len (aget types/Types types/TINT)))]
+
+      (walkExpr (typecheck/Expr h) init))))
+
+
+^{:go/end 963} (go/func badtype [^ir/Op op ^{:tag (* types/Type)} tl ^{:tag (* types/Type)} tr]
+  (let [^string s (zero string)]
+    (when (!= tl nil)
+      (set! s + (fmt/Sprintf "\n\t%v" tl)))
+
+    (when (!= tr nil)
+      (set! s + (fmt/Sprintf "\n\t%v" tr)))
+
+
+    ;; common mistake: *struct and *interface.
+    (when (and (!= tl nil) (!= tr nil) (.IsPtr tl) (.IsPtr tr))
+      (cond (and (.IsStruct (.Elem tl)) (.IsInterface (.Elem tr)))
+        (set! s + "\n\t(*struct vs *interface)")
+        (and (.IsInterface (.Elem tl)) (.IsStruct (.Elem tr)))
+        (set! s + "\n\t(*interface vs *struct)")))
+
+
+
+    (base/Errorf "illegal types for operand: %v%s" op s)))
+
+
+^{:go/end 967} (go/func writebarrierfn ^ir/Node [^string name ^{:tag (* types/Type)} l ^{:tag (* types/Type)} r]
+  (typecheck/LookupRuntime name l r))
+
+
+
+
+^{:go/end 973} (go/func isRuneCount "isRuneCount reports whether n is of the form len([]rune(string)).\nThese are optimized into a call to runtime.countrunes.\n" ^bool [^ir/Node n]
+  (and (== (.-N base/Flag) 0) (not (.-Instrumenting (.-Cfg base/Flag))) (== (.Op n) ir/OLEN) (== (.Op (.-X (assert (* ir/UnaryExpr) n))) ir/OSTR2RUNES)))
+
+
+
+^{:go/end 979} (go/func isByteCount "isByteCount reports whether n is of the form len(string([]byte)).\n" ^bool [^ir/Node n]
+  (and (== (.-N base/Flag) 0) (not (.-Instrumenting (.-Cfg base/Flag))) (== (.Op n) ir/OLEN)
+    ^:go/paren (or (== (.Op (.-X (assert (* ir/UnaryExpr) n))) ir/OBYTES2STR) (== (.Op (.-X (assert (* ir/UnaryExpr) n))) ir/OBYTES2STRTMP))))
+
+
+
+
+
+^{:go/end 986} (go/func isChanLenCap "isChanLenCap reports whether n is of the form len(c) or cap(c) for a channel c.\nNote that this does not check for -n or instrumenting because this\nis a correctness rewrite, not an optimization.\n" ^bool [^ir/Node n]
+  (and ^:go/paren (or (== (.Op n) ir/OLEN) (== (.Op n) ir/OCAP)) (.IsChan (.Type (.-X (assert (* ir/UnaryExpr) n))))))

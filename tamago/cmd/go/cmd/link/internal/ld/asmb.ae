@@ -1,0 +1,212 @@
+;; Copyright 2020 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.cmd.link.internal.ld) (go/file "asmb.go" :imports [
+
+
+    ^{:line 8} [objabi "cmd/internal/objabi"]
+    ^{:line 9} [loader "cmd/link/internal/loader"]
+    ^{:line 10} [sym "cmd/link/internal/sym"]
+    ^{:line 11} [fmt "fmt"]
+    ^{:line 12} [runtime "runtime"]
+    ^{:line 13} [sync "sync"]])
+
+
+
+
+
+
+
+^{:go/end 71} (go/func asmb "Assembling the binary is broken into two steps:\n  - writing out the code/data/dwarf Segments, applying relocations on the fly\n  - writing out the architecture specific pieces.\n\nThis function handles the first part.\n" [^{:tag (* Link)} ctxt]
+  ;; TODO(jfaller): delete me.
+  (when (!= (.-Asmb thearch) nil)
+    ((.-Asmb thearch) ctxt (.-loader ctxt))
+    (return))
+
+
+  (when ^{:go/via [Target]} (.-IsELF ctxt)
+    (Asmbelfsetup))
+
+
+  (let [^sync/WaitGroup wg (zero sync/WaitGroup)
+      ^{:line 33} f ^{:go/end 39} (fn [^{:tag (* Link)} ctxt ^{:tag (* OutBuf)} out ^int64 start ^int64 length]
+        (let [pad (.-CodePad thearch)]
+          (when (== pad nil)
+            (set! pad (subslice zeros)))
+
+          (CodeblkPad ctxt out start length pad)))]
+
+
+    (range [_ sect (.-Sections Segtext)]
+      (let [offset (+ (- (.-Vaddr sect) (.-Vaddr Segtext)) (.-Fileoff Segtext))]
+        ;; Handle text sections with Codeblk
+        (if (== (.-Name sect) ".text")
+          (writeParallel (addr wg) f ctxt offset (.-Vaddr sect) (.-Length sect))
+
+          (writeParallel (addr wg) datblk ctxt offset (.-Vaddr sect) (.-Length sect)))))
+
+
+
+    (when (> (.-Filelen Segrodata) 0)
+      (writeParallel (addr wg) datblk ctxt (.-Fileoff Segrodata) (.-Vaddr Segrodata) (.-Filelen Segrodata)))
+
+
+    (when (> (.-Filelen Segrelrodata) 0)
+      (writeParallel (addr wg) datblk ctxt (.-Fileoff Segrelrodata) (.-Vaddr Segrelrodata) (.-Filelen Segrelrodata)))
+
+
+    (writeParallel (addr wg) datblk ctxt (.-Fileoff Segdata) (.-Vaddr Segdata) (.-Filelen Segdata))
+
+    (writeParallel (addr wg) dwarfblk ctxt (.-Fileoff Segdwarf) (.-Vaddr Segdwarf) (.-Filelen Segdwarf))
+
+    (when (> (.-Filelen Segpdata) 0)
+      (writeParallel (addr wg) pdatablk ctxt (.-Fileoff Segpdata) (.-Vaddr Segpdata) (.-Filelen Segpdata)))
+
+    (when (> (.-Filelen Segxdata) 0)
+      (writeParallel (addr wg) xdatablk ctxt (.-Fileoff Segxdata) (.-Vaddr Segxdata) (.-Filelen Segxdata)))
+
+
+    (.Wait wg)))
+
+
+
+
+
+
+
+^{:go/end 127} (go/func asmb2 "Assembling the binary is broken into two steps:\n  - writing out the code/data/dwarf Segments\n  - writing out the architecture specific pieces.\n\nThis function handles the second part.\n" [^{:tag (* Link)} ctxt]
+  (when (!= (.-Asmb2 thearch) nil)
+    ((.-Asmb2 thearch) ctxt (.-loader ctxt))
+    (return))
+
+
+  (set! symSize 0)
+  (set! spSize 0)
+  (set! lcSize 0)
+
+  (switch ^{:go/via [Target]} (.-HeadType ctxt)
+    (default
+      (panic "unknown platform"))
+
+    ;; Macho
+    (case [objabi/Hdarwin]
+      (asmbMacho ctxt))
+
+    ;; Plan9
+    (case [objabi/Hplan9]
+      (asmbPlan9 ctxt))
+
+    ;; PE
+    (case [objabi/Hwindows]
+      (asmbPe ctxt))
+
+    ;; Xcoff
+    (case [objabi/Haix]
+      (asmbXcoff ctxt))
+
+    ;; Elf
+    (case [objabi/Hdragonfly
+        ^{:line 110} objabi/Hfreebsd
+        ^{:line 111} objabi/Hlinux
+        ^{:line 112} objabi/Hnetbsd
+        ^{:line 113} objabi/Hopenbsd
+        ^{:line 114} objabi/Hsolaris
+        ^{:line 115} objabi/Htamago]
+      (asmbElf ctxt)))
+
+
+  (when @FlagC
+    (fmt/Printf "textsize=%d\n" (.-Filelen Segtext))
+    (fmt/Printf "datsize=%d\n" (.-Filelen Segdata))
+    (fmt/Printf "bsssize=%d\n" (- (.-Length Segdata) (.-Filelen Segdata)))
+    (fmt/Printf "symsize=%d\n" symSize)
+    (fmt/Printf "lcsize=%d\n" lcSize)
+    (fmt/Printf "total=%d\n" (+ (.-Filelen Segtext) (.-Length Segdata) (conv uint64 symSize) (conv uint64 lcSize)))))
+
+
+
+
+^{:go/end 150} (go/func writePlan9Header "writePlan9Header writes out the plan9 header at the present position in the OutBuf.\n" [^{:tag (* OutBuf)} buf ^uint32 magic ^int64 entry ^bool is64Bit]
+  (when is64Bit
+    (set! magic bit-or 0x00008000))
+
+  (.Write32b buf magic)
+  (.Write32b buf (conv uint32 (.-Filelen Segtext)))
+  (.Write32b buf (conv uint32 (.-Filelen Segdata)))
+  (.Write32b buf (conv uint32 (- (.-Length Segdata) (.-Filelen Segdata))))
+  (.Write32b buf (conv uint32 symSize))
+  (if is64Bit
+    (.Write32b buf (conv uint32 (bit-and-not entry 0x80000000)))
+
+    (.Write32b buf (conv uint32 entry)))
+
+  (.Write32b buf (conv uint32 spSize))
+  (.Write32b buf (conv uint32 lcSize))
+  ;; amd64 includes the entry at the beginning of the symbol table.
+  (when is64Bit
+    (.Write64b buf (conv uint64 entry))))
+
+
+
+
+^{:go/end 162} (go/func asmbPlan9 "asmbPlan9 assembles a plan 9 binary.\n" [^{:tag (* Link)} ctxt]
+  (when (not @FlagS)
+    (set! @FlagS true)
+    (let [symo (conv int64 (+ (.-Fileoff Segdata) (.-Filelen Segdata)))]
+      (.SeekSet (.-Out ctxt) symo)
+      (asmbPlan9Sym ctxt)))
+
+  (.SeekSet (.-Out ctxt) 0)
+  (writePlan9Header (.-Out ctxt) (.-Plan9Magic thearch) (Entryvalue ctxt) (.-Plan9_64Bit thearch)))
+
+
+
+
+
+^{:go/end 184} (go/func sizeExtRelocs "sizeExtRelocs precomputes the size needed for the reloc records,\nsets the size and offset for relocation records in each section,\nand mmap the output buffer with the proper size.\n" [^{:tag (* Link)} ctxt ^uint32 relsize]
+  (when (== relsize 0)
+    (panic "sizeExtRelocs: relocation size not set"))
+
+  (let [^int64 sz (zero int64)]
+    (range [_ seg Segments]
+      (range [_ sect (.-Sections seg)]
+        (set! (.-Reloff sect) (conv uint64 (+ (.Offset (.-Out ctxt)) sz)))
+        (set! (.-Rellen sect) (conv uint64 (* relsize (.-Relcount sect))))
+        (set! sz + (conv int64 (.-Rellen sect)))))
+
+
+    (let [filesz (+ (.Offset (.-Out ctxt)) sz)
+        ^{:line 180} err (.Mmap (.-Out ctxt) (conv uint64 filesz))]
+      (when (!= err nil)
+        (Exitf "mapping output file failed: %v" err)))))
+
+
+
+
+
+
+^{:go/end 213} (go/func relocSectFn "relocSectFn wraps the function writing relocations of a section\nfor parallel execution. Returns the wrapped function and a wait\ngroup for which the caller should wait.\n" [^{:tag (* Link)} ctxt ^{:tag (func [(* Link) (* OutBuf) (* sym/Section) (slice loader/Sym)])} relocSect] :results [(func [(* Link) (* sym/Section) (slice loader/Sym)]) (* sync/WaitGroup)]
+  (let [^{:tag (func [^{:tag (* Link)} ctxt ^{:tag (* sym/Section)} sect ^{:tag (slice loader/Sym)} syms])} fn (zero (func [^{:tag (* Link)} ctxt ^{:tag (* sym/Section)} sect ^{:tag (slice loader/Sym)} syms]))
+      ^{:line 191 :tag sync/WaitGroup} wg (zero sync/WaitGroup)
+      ^{:line 192 :tag (chan int)} sem (zero (chan int))]
+    (if (.isMmapped (.-Out ctxt)) (do
+        ;; Write sections in parallel.
+        (set! sem (make (chan int) (* 2 (runtime/GOMAXPROCS 0))))
+        (set! fn ^{:go/end 205} (fn [^{:tag (* Link)} ctxt ^{:tag (* sym/Section)} sect ^{:tag (slice loader/Sym)} syms]
+            (.Add wg 1)
+            (>! sem 1)
+            (let [out (.View (.-Out ctxt) (.-Reloff sect))]
+              (go (^{:go/end 204} (fn []
+                    (relocSect ctxt out sect syms)
+                    (.Done wg)
+                    (<! sem))))))))
+
+
+
+      ;; We cannot Mmap. Write sequentially.
+      (set! fn ^{:go/end 210} (fn [^{:tag (* Link)} ctxt ^{:tag (* sym/Section)} sect ^{:tag (slice loader/Sym)} syms]
+          (relocSect ctxt (.-Out ctxt) sect syms))))
+
+
+    (return fn (addr wg))))

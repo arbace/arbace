@@ -1,0 +1,94 @@
+;; Copyright 2013 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.cmd.compile.internal.typebits) (go/file "typebits.go" :imports [
+
+
+    ^{:line 8} [base "cmd/compile/internal/base"]
+    ^{:line 9} [bitvec "cmd/compile/internal/bitvec"]
+    ^{:line 10} [types "cmd/compile/internal/types"]])
+
+
+
+
+
+^{:go/end 18} (go/func Set "NOTE: The bitmap for a specific type t could be cached in t after\nthe first run and then simply copied into bv at the correct offset\non future calls with the same type t.\n" [^{:tag (* types/Type)} t ^int64 off ^bitvec/BitVec bv]
+  (set t off bv false))
+
+
+
+^{:go/end 23} (go/func SetNoCheck "SetNoCheck is like Set, but do not check for alignment.\n" [^{:tag (* types/Type)} t ^int64 off ^bitvec/BitVec bv]
+  (set t off bv true))
+
+
+^{:go/end 96} (go/func set [^{:tag (* types/Type)} t ^int64 off ^bitvec/BitVec bv ^bool skip]
+  (when (and (not skip) (> (conv uint8 (.Alignment t)) 0) (!= (bit-and off (conv int64 (- (conv uint8 (.Alignment t)) 1))) 0))
+    (base/Fatalf "typebits.Set: invalid initial alignment: type %v has alignment %d, but offset is %v" t (conv uint8 (.Alignment t)) off))
+
+  (when (not (.HasPointers t))
+    ;; Note: this case ensures that pointers to not-in-heap types
+    ;; are not considered pointers by garbage collection and stack copying.
+    (return))
+
+
+  (switch (.Kind t)
+    (case [types/TPTR types/TUNSAFEPTR types/TFUNC types/TCHAN types/TMAP]
+      (when (!= (bit-and off (conv int64 (- types/PtrSize 1))) 0)
+        (base/Fatalf "typebits.Set: invalid alignment, %v" t))
+
+      (.Set bv (conv int32 (/ off (conv int64 types/PtrSize))))) ; pointer
+
+    (case [types/TSTRING]
+      ;; struct { byte *str; intgo len; }
+      (when (!= (bit-and off (conv int64 (- types/PtrSize 1))) 0)
+        (base/Fatalf "typebits.Set: invalid alignment, %v" t))
+
+      (.Set bv (conv int32 (/ off (conv int64 types/PtrSize))))) ;pointer in first slot
+
+    (case [types/TINTER]
+      ;; struct { Itab *tab;	void *data; }
+      ;; or, when isnilinter(t)==true:
+      ;; struct { Type *type; void *data; }
+      (when (!= (bit-and off (conv int64 (- types/PtrSize 1))) 0)
+        (base/Fatalf "typebits.Set: invalid alignment, %v" t))
+
+      ;; The first word of an interface is a pointer, but we don't
+      ;; treat it as such.
+      ;; 1. If it is a non-empty interface, the pointer points to an itab
+      ;;    which is always in persistentalloc space.
+      ;; 2. If it is an empty interface, the pointer points to a _type.
+      ;;   a. If it is a compile-time-allocated type, it points into
+      ;;      the read-only data section.
+      ;;   b. If it is a reflect-allocated type, it points into the Go heap.
+      ;;      Reflect is responsible for keeping a reference to
+      ;;      the underlying type so it won't be GCd.
+      ;; If we ever have a moving GC, we need to change this for 2b (as
+      ;; well as scan itabs to update their itab._type fields).
+      (.Set bv (conv int32 (+ (/ off (conv int64 types/PtrSize)) 1)))) ; pointer in second slot
+
+    (case [types/TSLICE]
+      ;; struct { byte *array; uintgo len; uintgo cap; }
+      (when (!= (bit-and off (conv int64 (- types/PtrSize 1))) 0)
+        (base/Fatalf "typebits.Set: invalid TARRAY alignment, %v" t))
+
+      (.Set bv (conv int32 (/ off (conv int64 types/PtrSize))))) ; pointer in first slot (BitsPointer)
+
+    (case [types/TARRAY]
+      (let [elt (.Elem t)]
+        (when (== (.Size elt) 0)
+          ;; Short-circuit for #20739.
+          (break))
+
+        (for [i (conv int64 0)] (< i (.NumElem t)) (inc! i)
+          (set elt off bv skip)
+          (set! off + (.Size elt)))))
+
+
+    (case [types/TSTRUCT]
+      (range [_ f (.Fields t)]
+        (set (.-Type f) (+ off (.-Offset f)) bv skip)))
+
+
+    (default
+      (base/Fatalf "typebits.Set: unexpected type, %v" t))))

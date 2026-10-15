@@ -1,0 +1,474 @@
+;; Copyright 2018 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.cmd.compile.internal.escape) (go/file "call.go" :imports [
+
+
+    ^{:line 8} [base "cmd/compile/internal/base"]
+    ^{:line 9} [ir "cmd/compile/internal/ir"]
+    ^{:line 10} [typecheck "cmd/compile/internal/typecheck"]
+    ^{:line 11} [types "cmd/compile/internal/types"]
+    ^{:line 12} [src "cmd/internal/src"]
+    ^{:line 13} [strings "strings"]])
+
+
+
+
+
+^{:go/end 235} (go/method call "call evaluates a call expressions, including builtin calls. ks\nshould contain the holes representing where the function callee's\nresults flows.\n" [^{:tag (* escape)} e ^{:tag (slice hole)} ks ^ir/Node call]
+  (let [argument ^{:go/end 23} (fn [^hole k ^ir/Node arg]
+        ;; TODO(mdempsky): Should be "call argument".
+        (.expr e (.note k call "call parameter") arg))]
+
+
+    (switch (.Op call)
+      (default
+        (ir/Dump "esc" call)
+        (base/Fatalf "unexpected call op: %v" (.Op call)))
+
+      (case [ir/OCALLFUNC ir/OCALLINTER]
+        (let [call (assert (* ir/CallExpr) call)]
+          (typecheck/AssertFixedCall call)
+
+          ;; Pick out the function callee(s), if statically known.
+          ;; fns collects all known callees; for a single static callee
+          ;; it has one element. For unknown callees fns is nil.
+          ;;
+          ;; TODO(mdempsky): Change fns from []*ir.Name to []*ir.Func,
+          ;; but some functions (e.g., runtime builtins, method wrappers,
+          ;; generated eq/hash functions) don't have it set. Investigate
+          ;; whether that's a concern.
+          (let [^{:tag (slice (* ir/Name))} fns (zero (slice (* ir/Name)))]
+            (switch ^{:go/via [miniExpr miniNode]} (.Op call)
+              (case [ir/OCALLFUNC]
+                (let [ro ^{:go/via [batch]} (.reassignOracle e (.-curfn e))
+                    ^{:line 46} v (.StaticValue ro (.-Fun call))]
+                  (if [fn (ir/StaticCalleeName v)] (!= fn nil)
+                    (set! fns (lit (slice (* ir/Name)) fn))
+                    (when [(values name ok) (assert (* ir/Name) v)] ok
+                      (set! fns (resolveAssignedCallees (.FuncAssignments ro (.Canonical name)))))))))
+
+
+
+            (let [fntype (.Type (.-Fun call))]
+              (when (== (len fns) 1)
+                (set! fntype ^{:go/via [miniExpr]} (.Type (aget fns 0))))
+
+
+              ;; Wire result flows for in-batch callees.
+              (when (!= ks nil)
+                (range [_ f fns]
+                  (when ^{:go/via [batch]} (.inMutualBatch e f)
+                    (range [i result (.Results ^{:go/via [miniExpr]} (.Type f))]
+                      (.expr e (aget ks i) (assert (* ir/Name) (.-Nname result)))))))
+
+
+
+
+
+              (let [^ir/Node recvArg (zero ir/Node)]
+                (if (== ^{:go/via [miniExpr miniNode]} (.Op call) ir/OCALLFUNC)
+                  ;; Evaluate callee function expression.
+                  (let [calleeK ^{:go/via [batch]} (.discardHole e)]
+                    (when (== (len fns) 0) ; unknown callee
+                      (range [_ k ks]
+                        (when (!= (.-dst k) (addr ^{:go/via [batch]} (.-blankLoc e)))
+                          ;; The results flow somewhere, but we don't statically
+                          ;; know the callee function. If a closure flows here, we
+                          ;; need to conservatively assume its results might flow to
+                          ;; the heap.
+                          (set! calleeK (.note ^{:go/via [batch]} (.calleeHole e) call "callee operand"))
+                          (break))))
+
+
+
+                    (.expr e calleeK (.-Fun call)))
+
+                  (set! recvArg (.-X (assert (* ir/SelectorExpr) (.-Fun call)))))
+
+
+                (let [args (.-Args call)]
+                  (when (!= (.Recv fntype) nil)
+                    (when (== recvArg nil)
+                      ;; Function call using method expression. Receiver argument is
+                      ;; at the front of the regular arguments list.
+                      (set! (values recvArg args) (values (aget args 0) (subslice args 1)))))
+
+
+
+                  (cond (.-IsCompilerVarLive call) (do
+                      ;; Don't escape compiler-inserted KeepAlive.
+                      (when (!= recvArg nil)
+                        (argument ^{:go/via [batch]} (.discardHole e) recvArg))
+
+                      (range [_ arg args]
+                        (argument ^{:go/via [batch]} (.discardHole e) arg)))
+
+                    (isEscapeNonString fns fntype)
+                    ;; internal/abi.EscapeNonString forces its argument to
+                    ;; the heap if it contains a non-string pointer. This is
+                    ;; used in hash/maphash.Comparable (where we cannot hash
+                    ;; pointers to locals whose address may change on stack
+                    ;; growth) and unique.clone (to model the data flow edge
+                    ;; with strings excluded, because strings are cloned by
+                    ;; content). The actual call we match is:
+                    ;;   internal/abi.EscapeNonString[go.shape.T](dict, go.shape.T)
+                    (let [k ^{:go/via [batch]} (.heapHole e)]
+                      (when (not (hasNonStringPointers (.-Type (aget (.Params fntype) 1))))
+                        (set! k ^{:go/via [batch]} (.discardHole e)))
+
+                      (range [_ arg args]
+                        (argument k arg))) :else
+
+                    (do
+                      (when (!= recvArg nil)
+                        (.rewriteArgument e recvArg call fns)
+                        (argument (.mergedTagHole e ks fns -1 (len (.Params fntype))) recvArg))
+
+                      (range [i (.Params fntype)]
+                        (.rewriteArgument e (aget args i) call fns)
+                        (argument (.mergedTagHole e ks fns i (len (.Params fntype))) (aget args i)))))))))))
+
+
+
+      (case [ir/OINLCALL]
+        (let [call (assert (* ir/InlinedCallExpr) call)]
+          (.stmts e (.-Body call))
+          (range [i result (.-ReturnVars call)]
+            (let [k ^{:go/via [batch]} (.discardHole e)]
+              (when (!= ks nil)
+                (set! k (aget ks i)))
+
+              (.expr e k result)))))
+
+
+      (case [ir/OAPPEND]
+        (let [call (assert (* ir/CallExpr) call)
+            ^{:line 148} args (.-Args call)
+
+            ;; Appendee slice may flow directly to the result, if
+            ;; it has enough capacity. Alternatively, a new heap
+            ;; slice might be allocated, and all slice elements
+            ;; might flow to heap.
+            ^{:line 154} appendeeK (.teeHole e (aget ks 0) ^{:go/via [batch]} (.mutatorHole e))]
+          (when (.HasPointers (.Elem (.Type (aget args 0))))
+            (set! appendeeK (.teeHole e appendeeK (.deref ^{:go/via [batch]} (.heapHole e) call "appendee slice"))))
+
+          (argument appendeeK (aget args 0))
+
+          (if (.-IsDDD call)
+            (let [appendedK ^{:go/via [batch]} (.discardHole e)]
+              (when (and (.IsSlice (.Type (aget args 1))) (.HasPointers (.Elem (.Type (aget args 1)))))
+                (set! appendedK (.deref ^{:go/via [batch]} (.heapHole e) call "appended slice...")))
+
+              (argument appendedK (aget args 1)))
+
+            (for [i 1] (< i (len args)) (inc! i)
+              (argument ^{:go/via [batch]} (.heapHole e) (aget args i))))
+
+
+          (.discard e (.-RType call))
+
+          ;; Model the new backing store that might be allocated by append.
+          ;; Its address flows to the result.
+          ;; Users of escape analysis can look at the escape information for OAPPEND
+          ;; and use that to decide where to allocate the backing store.
+          (let [backingStore (.spill e (aget ks 0) call)]
+            ;; As we have a boolean to prevent reuse, we can treat these allocations as outside any loops.
+            (set! (.-loopDepth (.-dst backingStore)) 0))))
+
+      (case [ir/OCOPY]
+        (let [call (assert (* ir/BinaryExpr) call)]
+          (argument ^{:go/via [batch]} (.mutatorHole e) (.-X call))
+
+          (let [copiedK ^{:go/via [batch]} (.discardHole e)]
+            (when (and (.IsSlice (.Type (.-Y call))) (.HasPointers (.Elem (.Type (.-Y call)))))
+              (set! copiedK (.deref ^{:go/via [batch]} (.heapHole e) call "copied slice")))
+
+            (argument copiedK (.-Y call))
+            (.discard e (.-RType call)))))
+
+      (case [ir/OPANIC]
+        (let [call (assert (* ir/UnaryExpr) call)]
+          (argument ^{:go/via [batch]} (.heapHole e) (.-X call))))
+
+      (case [ir/OCOMPLEX]
+        (let [call (assert (* ir/BinaryExpr) call)]
+          (.discard e (.-X call))
+          (.discard e (.-Y call))))
+
+      (case [ir/ODELETE ir/OPRINT ir/OPRINTLN ir/ORECOVER]
+        (let [call (assert (* ir/CallExpr) call)]
+          (range [_ arg (.-Args call)]
+            (.discard e arg))
+
+          (.discard e (.-RType call))))
+      ;; Note: keys used in map deletes do not need to escape.
+      ;; See "Hashing Pointers" doc in internal/runtime/maps/map.go.
+
+      (case [ir/OMIN ir/OMAX]
+        (let [call (assert (* ir/CallExpr) call)]
+          (range [_ arg (.-Args call)]
+            (argument (aget ks 0) arg))
+
+          (.discard e (.-RType call))))
+
+      (case [ir/OLEN ir/OCAP ir/OREAL ir/OIMAG ir/OCLOSE]
+        (let [call (assert (* ir/UnaryExpr) call)]
+          (.discard e (.-X call))))
+
+      (case [ir/OCLEAR]
+        (let [call (assert (* ir/UnaryExpr) call)]
+          (argument ^{:go/via [batch]} (.mutatorHole e) (.-X call))))
+
+      (case [ir/OUNSAFESTRINGDATA ir/OUNSAFESLICEDATA]
+        (let [call (assert (* ir/UnaryExpr) call)]
+          (argument (aget ks 0) (.-X call))))
+
+      (case [ir/OUNSAFEADD ir/OUNSAFESLICE ir/OUNSAFESTRING]
+        (let [call (assert (* ir/BinaryExpr) call)]
+          (argument (aget ks 0) (.-X call))
+          (.discard e (.-Y call))
+          (.discard e (.-RType call)))))))
+
+
+
+
+^{:go/end 270} (go/method goDeferStmt "goDeferStmt analyzes a \"go\" or \"defer\" statement.\n" [^{:tag (* escape)} e ^{:tag (* ir/GoDeferStmt)} n]
+  (let [k ^{:go/via [batch]} (.heapHole e)]
+    (when (and (== ^{:go/via [miniStmt miniNode]} (.Op n) ir/ODEFER) (== (.-loopDepth e) 1) (== (.-DeferAt n) nil))
+      ;; Top-level defer arguments don't escape to the heap,
+      ;; but they do need to last until they're invoked.
+      (set! k (.later e ^{:go/via [batch]} (.discardHole e)))
+
+      ;; force stack allocation of defer record, unless
+      ;; open-coded defers are used (see ssa.go)
+      ^{:go/via [miniStmt miniNode]} (.SetEsc n ir/EscNever))
+
+
+    ;; If the function is already a zero argument/result function call,
+    ;; just escape analyze it normally.
+    ;;
+    ;; Note that the runtime is aware of this optimization for
+    ;; "go" statements that start in reflect.makeFuncStub or
+    ;; reflect.methodValueCall.
+
+    (let [(values call ok) (assert (* ir/CallExpr) (.-Call n))]
+      (when (or (not ok) (!= ^{:go/via [miniExpr miniNode]} (.Op call) ir/OCALLFUNC))
+        (base/FatalfAt ^{:go/via [miniStmt miniNode]} (.Pos n) "expected function call: %v" (.-Call n)))
+
+      (when [sig (.Type (.-Fun call))] (!= (+ (.NumParams sig) (.NumResults sig)) 0)
+        (base/FatalfAt ^{:go/via [miniStmt miniNode]} (.Pos n) "expected signature without parameters or results: %v" sig))
+
+
+      (when [(values clo ok) (assert (* ir/ClosureExpr) (.-Fun call))] (and ok (== ^{:go/via [miniStmt miniNode]} (.Op n) ir/OGO))
+        (set! (.-IsGoWrap clo) true))
+
+
+      (.expr e k (.-Fun call)))))
+
+
+
+
+^{:go/end 342} (go/method rewriteArgument "rewriteArgument rewrites the argument arg of the given call expression.\nfns is the list of statically known callees, if any.\n" [^{:tag (* escape)} e ^ir/Node arg ^{:tag (* ir/CallExpr)} call ^{:tag (slice (* ir/Name))} fns]
+  (let [^ir/PragmaFlag pragma (zero ir/PragmaFlag)]
+    (range [_ fn fns]
+      (when (!= (.-Func fn) nil)
+        (set! pragma bit-or (.-Pragma (.-Func fn)))))
+
+
+    (when (== (bit-and pragma (bit-or ir/UintptrKeepAlive ir/UintptrEscapes)) 0)
+      (return))
+
+
+    ;; unsafeUintptr rewrites "uintptr(ptr)" arguments to syscall-like
+    ;; functions, so that ptr is kept alive and/or escaped as
+    ;; appropriate. unsafeUintptr also reports whether it modified arg0.
+    (let [unsafeUintptr ^{:go/end 319} (fn [^ir/Node arg]
+          ;; If the argument is really a pointer being converted to uintptr,
+          ;; arrange for the pointer to be kept alive until the call
+          ;; returns, by copying it into a temp and marking that temp still
+          ;; alive when we pop the temp stack.
+          (let [(values conv ok) (assert (* ir/ConvExpr) arg)]
+            (when (or (not ok) (!= ^{:go/via [miniExpr miniNode]} (.Op conv) ir/OCONVNOP))
+              (return)) ; not a conversion
+
+            (when (or (not (.IsUnsafePtr (.Type (.-X conv)))) (not (.IsUintptr ^{:go/via [miniExpr]} (.Type conv))))
+              (return)) ; not an unsafe.Pointer->uintptr conversion
+
+
+            ;; Create and declare a new pointer-typed temp variable.
+            ;;
+            ;; TODO(mdempsky): This potentially violates the Go spec's order
+            ;; of evaluations, by evaluating arg.X before any other
+            ;; operands.
+            (let [tmp (.copyExpr e ^{:go/via [miniExpr miniNode]} (.Pos conv) (.-X conv) ^{:go/via [miniExpr]} (.PtrInit call))]
+              (set! (.-X conv) tmp)
+
+              (let [k ^{:go/via [batch]} (.mutatorHole e)]
+                (when (!= (bit-and pragma ir/UintptrEscapes) 0)
+                  (set! k (.note ^{:go/via [batch]} (.heapHole e) conv "//go:uintptrescapes")))
+
+                ^{:go/via [batch]} (.flow e k ^{:go/via [batch]} (.oldLoc e tmp))
+
+                (when (!= (bit-and pragma ir/UintptrKeepAlive) 0)
+                  (.SetAddrtaken tmp true) ; ensure SSA keeps the tmp variable
+                  (set! (.-KeepAlive call) (append (.-KeepAlive call) tmp)))))))]
+
+
+
+      ;; For variadic functions, the compiler has already rewritten:
+      ;;
+      ;;     f(a, b, c)
+      ;;
+      ;; to:
+      ;;
+      ;;     f([]T{a, b, c}...)
+      ;;
+      ;; So we need to look into slice elements to handle uintptr(ptr)
+      ;; arguments to variadic syscall-like functions correctly.
+      (if (== (.Op arg) ir/OSLICELIT)
+        (let [list (.-List (assert (* ir/CompLitExpr) arg))]
+          (range [_ el list]
+            (when (== (.Op el) ir/OKEY)
+              (set! el (.-Value (assert (* ir/KeyExpr) el))))
+
+            (unsafeUintptr el)))
+
+
+        (unsafeUintptr arg)))))
+
+
+
+
+
+
+^{:go/end 365} (go/method copyExpr "copyExpr creates and returns a new temporary variable within fn;\nappends statements to init to declare and initialize it to expr;\nand escape analyzes the data flow.\n" ^{:tag (* ir/Name)} [^{:tag (* escape)} e ^src/XPos pos ^ir/Node expr ^{:tag (* ir/Nodes)} init]
+  (when (ir/HasUniquePos expr)
+    (set! pos (.Pos expr)))
+
+
+  (let [tmp (typecheck/TempAt pos (.-curfn e) (.Type expr))
+
+      ^{:line 354} stmts (lit (slice ir/Node)
+        (ir/NewDecl pos ir/ODCL tmp)
+        (ir/NewAssignStmt pos tmp expr))]
+
+    (typecheck/Stmts stmts)
+    (.Append init (spread stmts))
+
+    (.newLoc e tmp true)
+    (.stmts e stmts)
+
+    ^{:line 364} tmp))
+
+
+^{:go/end 384} (go/method mergedTagHole ^hole [^{:tag (* escape)} e ^{:tag (slice hole)} ks ^{:tag (slice (* ir/Name))} fns ^int paramIdx ^int nParams]
+  (when (== (len fns) 0)
+    (return ^{:go/via [batch]} (.heapHole e)))
+
+  (let [holes (make (slice hole) 0 (len fns))]
+    (range [_ f fns]
+      (let [offset (- nParams (len (.Params ^{:go/via [miniExpr]} (.Type f))))
+          ^{:line 374} j (- paramIdx offset)
+          ^{:line 375 :tag (* types/Field)} p (zero (* types/Field))]
+        (if (>= j 0)
+          (set! p (aget (.Params ^{:go/via [miniExpr]} (.Type f)) j))
+
+          (set! p (.Recv ^{:go/via [miniExpr]} (.Type f))))
+
+        (set! holes (append holes (.tagHole e ks f p)))))
+
+    (.teeHole e (spread holes))))
+
+
+
+
+
+
+^{:go/end 427} (go/method tagHole "tagHole returns a hole for evaluating an argument passed to param.\nks should contain the holes representing where the function\ncallee's results flows. fn is the statically-known callee function,\nif any.\n" ^hole [^{:tag (* escape)} e ^{:tag (slice hole)} ks ^{:tag (* ir/Name)} fn ^{:tag (* types/Field)} param]
+  ;; If this is a dynamic call, we can't rely on param.Note.
+  (when (== fn nil)
+    (return ^{:go/via [batch]} (.heapHole e)))
+
+
+  (when ^{:go/via [batch]} (.inMutualBatch e fn)
+    (when (== (.-Nname param) nil)
+      (return ^{:go/via [batch]} (.discardHole e)))
+
+    (return (.addr e (assert (* ir/Name) (.-Nname param)))))
+
+
+  ;; Call to previously tagged function.
+
+  (let [^{:tag (slice hole)} tagKs (zero (slice hole))
+      ^{:line 406} esc (parseLeaks (.-Note param))]
+
+    (when [x (.Heap esc)] (>= x 0)
+      (set! tagKs (append tagKs (.shift ^{:go/via [batch]} (.heapHole e) x))))
+
+    (when [x (.Mutator esc)] (>= x 0)
+      (set! tagKs (append tagKs (.shift ^{:go/via [batch]} (.mutatorHole e) x))))
+
+    (when [x (.Callee esc)] (>= x 0)
+      (set! tagKs (append tagKs (.shift ^{:go/via [batch]} (.calleeHole e) x))))
+
+
+    (when (!= ks nil)
+      (for [i 0] (< i numEscResults) (inc! i)
+        (when [x (.Result esc i)] (>= x 0)
+          (set! tagKs (append tagKs (.shift (aget ks i) x))))))
+
+
+
+
+    (.teeHole e (spread tagKs))))
+
+
+
+
+
+^{:go/end 448} (go/func resolveAssignedCallees "resolveAssignedCallees resolves all assignment RHS values to static\ncallee names, skipping zero-value assignments since nil panics on\ncall and can't cause escape.\n" ^{:tag (slice (* ir/Name))} [^{:tag (slice (* ir/AssignStmt))} assigns]
+  (let [fns (make (slice (* ir/Name)) 0 (len assigns))]
+    (range [_ as assigns]
+      (when (ir/IsZero (.-Y as))
+        (continue)) ; zero value panics on call; skip
+
+      (let [callee (ir/StaticCalleeName (.-Y as))]
+        (when (== callee nil)
+          (return nil))
+
+        (when (and (!= (.-Func callee) nil) (!= (bit-and (.-Pragma (.-Func callee)) (bit-or ir/UintptrKeepAlive ir/UintptrEscapes)) 0))
+          (return nil))
+
+        (set! fns (append fns callee))))
+
+    ^{:line 447} fns))
+
+
+^{:go/end 455} (go/func isEscapeNonString ^bool [^{:tag (slice (* ir/Name))} fns ^{:tag (* types/Type)} fntype]
+  (and (== (len fns) 1)
+    (== (.-Path (.-Pkg (.Sym (aget fns 0)))) "internal/abi")
+    (strings/HasPrefix (.-Name (.Sym (aget fns 0))) "EscapeNonString[")
+    (== (len (.Params fntype)) 2) (.IsShape (.-Type (aget (.Params fntype) 1)))))
+
+
+^{:go/breaks [[5 474]] :go/end 475} (go/func hasNonStringPointers ^bool [^{:tag (* types/Type)} t]
+  (when (not (.HasPointers t))
+    (return false))
+
+  (switch (.Kind t)
+    (case [types/TSTRING]
+      (return false))
+    (case [types/TSTRUCT]
+      (range [_ f (.Fields t)]
+        (when (hasNonStringPointers (.-Type f))
+          (return true)))
+
+
+      (return false))
+    (case [types/TARRAY]
+      (return (hasNonStringPointers (.Elem t)))))
+
+  true)

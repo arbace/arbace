@@ -1,0 +1,355 @@
+;; Copyright 2023 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.cmd.compile.internal.inline.inlheur) (go/file "analyze_func_flags.go" :imports [
+
+
+    ^{:line 8} [base "cmd/compile/internal/base"]
+    ^{:line 9} [ir "cmd/compile/internal/ir"]
+    ^{:line 10} [types "cmd/compile/internal/types"]
+    ^{:line 11} [fmt "fmt"]
+    ^{:line 12} [os "os"]])
+
+
+
+
+
+
+(go/type funcFlagsAnalyzer "funcFlagsAnalyzer computes the \"Flags\" value for the FuncProps\nobject we're computing. The main item of interest here is \"nstate\",\nwhich stores the disposition of a given ir Node with respect to the\nflags/properties we're trying to compute.\n" (struct
+    ^{:line 20 :tag (* ir/Func)} fn
+    ^{:line 21 :tag (map ir/Node pstate)} nstate
+    ^{:line 22 :tag bool} noInfo)) ; set if we see something inscrutable/un-analyzable
+
+
+
+
+(go/type pstate "pstate keeps track of the disposition of a given node and its\nchildren with respect to panic/exit calls.\n" int)
+
+(go/const
+  ^{:line 30} [^{:tag pstate :val 0} psNoInfo iota] ; nothing interesting about this node
+  ^{:line 31} [^{:val 1} psCallsPanic] ; node causes call to panic or os.Exit
+  ^{:line 32} [^{:val 2} psMayReturn] ; executing node may trigger a "return" stmt
+  ^{:line 33} [^{:val 3} psTop]) ; dataflow lattice "top" element
+
+
+^{:go/end 41} (go/func makeFuncFlagsAnalyzer ^{:tag (* funcFlagsAnalyzer)} [^{:tag (* ir/Func)} fn]
+  (addr ^{:go/breaks [2 4]} (lit funcFlagsAnalyzer
+      :fn fn
+      :nstate (make (map ir/Node pstate)))))
+
+
+
+
+^{:go/end 67} (go/method setResults "setResults transfers func flag results to 'funcProps'.\n" [^{:tag (* funcFlagsAnalyzer)} ffa ^{:tag (* FuncProps)} funcProps]
+  (let [^FuncPropBits rv (zero FuncPropBits)]
+    (when (and (not (.-noInfo ffa)) (== (.stateForList ffa (.-Body (.-fn ffa))) psCallsPanic))
+      (set! rv FuncPropNeverReturns))
+
+    ;; This is slightly hacky and not at all required, but include a
+    ;; special case for main.main, which often ends in a call to
+    ;; os.Exit. People who write code like this (very common I
+    ;; imagine)
+    ;;
+    ;;   func main() {
+    ;;     rc = perform()
+    ;;     ...
+    ;;     foo()
+    ;;     os.Exit(rc)
+    ;;   }
+    ;;
+    ;; will be constantly surprised when foo() is inlined in many
+    ;; other spots in the program but not in main().
+    (when (isMainMain (.-fn ffa))
+      (set! rv bit-and-not FuncPropNeverReturns))
+
+    (set! (.-Flags funcProps) rv)))
+
+
+^{:go/end 71} (go/method getState ^pstate [^{:tag (* funcFlagsAnalyzer)} ffa ^ir/Node n]
+  (aget (.-nstate ffa) n))
+
+
+^{:go/end 77} (go/method setState [^{:tag (* funcFlagsAnalyzer)} ffa ^ir/Node n ^pstate st]
+  (when (!= st psNoInfo)
+    (aset (.-nstate ffa) n st)))
+
+
+
+^{:go/end 85} (go/method updateState [^{:tag (* funcFlagsAnalyzer)} ffa ^ir/Node n ^pstate st]
+  (if (== st psNoInfo)
+    (delete (.-nstate ffa) n)
+
+    (aset (.-nstate ffa) n st)))
+
+
+
+^{:go/end 89} (go/method panicPathTable ^{:tag (map ir/Node pstate)} [^{:tag (* funcFlagsAnalyzer)} ffa]
+  (.-nstate ffa))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 122} (go/func blockCombine "blockCombine merges together states as part of a linear sequence of\nstatements, where 'pred' and 'succ' are analysis results for a pair\nof consecutive statements. Examples:\n\n\tcase 1:             case 2:\n\t    panic(\"foo\")      if q { return x }        <-pred\n\t    return x          panic(\"boo\")             <-succ\n\nIn case 1, since the pred state is \"always panic\" it doesn't matter\nwhat the succ state is, hence the state for the combination of the\ntwo blocks is \"always panics\". In case 2, because there is a path\nto return that avoids the panic in succ, the state for the\ncombination of the two statements is \"may return\".\n" ^pstate [^pstate pred ^pstate succ]
+  (switch succ
+    (case [psTop]
+      (return pred))
+    (case [psMayReturn]
+      (when (== pred psCallsPanic)
+        (return psCallsPanic))
+
+      (return psMayReturn))
+    (case [psNoInfo]
+      (return pred))
+    (case [psCallsPanic]
+      (when (== pred psMayReturn)
+        (return psMayReturn))
+
+      (return psCallsPanic)))
+
+  (panic "should never execute"))
+
+
+
+
+^{:go/end 134} (go/func branchCombine "branchCombine combines two states at a control flow branch point where\neither p1 or p2 executes (as in an \"if\" statement).\n" ^pstate [^pstate p1 ^pstate p2]
+  (when (and (== p1 psCallsPanic) (== p2 psCallsPanic))
+    (return psCallsPanic))
+
+  (when (or (== p1 psMayReturn) (== p2 psMayReturn))
+    (return psMayReturn))
+
+  ^{:line 133} psNoInfo)
+
+
+
+
+
+^{:go/end 169} (go/method stateForList "stateForList walks through a list of statements and computes the\nstate/disposition for the entire list as a whole, as well\nas updating disposition of intermediate nodes.\n" ^pstate [^{:tag (* funcFlagsAnalyzer)} ffa ^ir/Nodes list]
+  (let [st psTop]
+    ;; Walk the list backwards so that we can update the state for
+    ;; earlier list elements based on what we find out about their
+    ;; successors. Example:
+    ;;
+    ;;        if ... {
+    ;;  L10:    foo()
+    ;;  L11:    <stmt>
+    ;;  L12:    panic(...)
+    ;;        }
+    ;;
+    ;; After combining the dispositions for line 11 and 12, we want to
+    ;; update the state for the call at line 10 based on that combined
+    ;; disposition (if L11 has no path to "return", then the call at
+    ;; line 10 will be on a panic path).
+    (for [i (- (len list) 1)] (>= i 0) (dec! i)
+      (let [n (aget list i)
+          ^{:line 157} psi (.getState ffa n)]
+        (when (!= (bit-and debugTrace debugTraceFuncFlags) 0)
+          (fmt/Fprintf os/Stderr "=-= %v: stateForList n=%s ps=%s\n"
+            (ir/Line n) (.String (.Op n)) (.String psi)))
+
+        (set! st (blockCombine psi st))
+        (.updateState ffa n st)))
+
+    (when (== st psTop)
+      (set! st psNoInfo))
+
+    ^{:line 168} st))
+
+
+^{:go/end 174} (go/func isMainMain ^bool [^{:tag (* ir/Func)} fn]
+  (let [s (.Sym fn)]
+    (and (== (.-Name (.-Pkg s)) "main") (== (.-Name s) "main"))))
+
+
+^{:go/end 178} (go/func isWellKnownFunc ^bool [^{:tag (* types/Sym)} s ^string pkg ^string name]
+  (and (== (.-Path (.-Pkg s)) pkg) (== (.-Name s) name)))
+
+
+
+
+^{:go/end 202} (go/func isExitCall "isExitCall reports TRUE if the node itself is an unconditional\ncall to os.Exit(), a panic, or a function that does likewise.\n" ^bool [^ir/Node n]
+  (when (!= (.Op n) ir/OCALLFUNC)
+    (return false))
+
+  (let [cx (assert (* ir/CallExpr) n)
+      ^{:line 187} name (ir/StaticCalleeName (.-Fun cx))]
+    (when (== name nil)
+      (return false))
+
+    (let [s (.Sym name)]
+      (when (or (isWellKnownFunc s "os" "Exit")
+          (isWellKnownFunc s "runtime" "throw"))
+        (return true))
+
+      (when [funcProps (propsForFunc (.-Func name))] (!= funcProps nil)
+        (when (!= (bit-and (.-Flags funcProps) FuncPropNeverReturns) 0)
+          (return true)))
+
+
+      (.NeverReturns (.-Func name)))))
+
+
+
+
+^{:go/end 208} (go/method pessimize "pessimize is called to record the fact that we saw something in the\nfunction that renders it entirely impossible to analyze.\n" [^{:tag (* funcFlagsAnalyzer)} ffa]
+  (set! (.-noInfo ffa) true))
+
+
+
+
+
+
+
+^{:go/end 219} (go/func shouldVisit "shouldVisit reports TRUE if this is an interesting node from the\nperspective of computing function flags. NB: due to the fact that\nir.CallExpr implements the Stmt interface, we wind up visiting\na lot of nodes that we don't really need to, but these can\nsimply be screened out as part of the visit.\n" ^bool [^ir/Node n]
+  (let [(values _ isStmt) (assert ir/Stmt n)]
+    (and (!= (.Op n) ir/ODCL)
+      ^:go/paren (or isStmt (== (.Op n) ir/OCALLFUNC) (== (.Op n) ir/OPANIC)))))
+
+
+
+
+
+^{:go/end 353} (go/method nodeVisitPost "nodeVisitPost helps implement the propAnalyzer interface; when\ncalled on a given node, it decides the disposition of that node\nbased on the state(s) of the node's children.\n" [^{:tag (* funcFlagsAnalyzer)} ffa ^ir/Node n]
+  (when (!= (bit-and debugTrace debugTraceFuncFlags) 0)
+    (fmt/Fprintf os/Stderr "=+= nodevis %v %s should=%v\n"
+      (ir/Line n) (.String (.Op n)) (shouldVisit n)))
+
+  (when (not (shouldVisit n))
+    (return))
+
+  (let [^pstate st (zero pstate)]
+    (switch (.Op n)
+      (case [ir/OCALLFUNC]
+        (when (isExitCall n)
+          (set! st psCallsPanic)))
+
+      (case [ir/OPANIC]
+        (set! st psCallsPanic))
+      (case [ir/ORETURN]
+        (set! st psMayReturn))
+      (case [ir/OBREAK ir/OCONTINUE]
+        ;; FIXME: this handling of break/continue is sub-optimal; we
+        ;; have them as "mayReturn" in order to help with this case:
+        ;;
+        ;;   for {
+        ;;     if q() { break }
+        ;;     panic(...)
+        ;;   }
+        ;;
+        ;; where the effect of the 'break' is to cause the subsequent
+        ;; panic to be skipped. One possible improvement would be to
+        ;; track whether the currently enclosing loop is a "for {" or
+        ;; a for/range with condition, then use mayReturn only for the
+        ;; former. Note also that "break X" or "continue X" is treated
+        ;; the same as "goto", since we don't have a good way to track
+        ;; the target of the branch.
+        (set! st psMayReturn)
+        (let [n (assert (* ir/BranchStmt) n)]
+          (when (!= (.-Label n) nil)
+            (.pessimize ffa))))
+
+      (case [ir/OBLOCK]
+        (let [n (assert (* ir/BlockStmt) n)]
+          (set! st (.stateForList ffa (.-List n)))))
+      (case [ir/OCASE]
+        (if [(values ccst ok) (assert (* ir/CaseClause) n)] ok
+          (set! st (.stateForList ffa (.-Body ccst)))
+          (if [(values ccst ok) (assert (* ir/CommClause) n)] ok
+            (set! st (.stateForList ffa (.-Body ccst)))
+
+            (panic "unexpected"))))
+
+      (case [ir/OIF]
+        (let [n (assert (* ir/IfStmt) n)]
+          (set! st (branchCombine (.stateForList ffa (.-Body n)) (.stateForList ffa (.-Else n))))))
+      (case [ir/OFOR]
+        ;; Treat for { XXX } like a block.
+        ;; Treat for <cond> { XXX } like an if statement with no else.
+        (let [n (assert (* ir/ForStmt) n)
+            ^{:line 281} bst (.stateForList ffa (.-Body n))]
+          (if (== (.-Cond n) nil)
+            (set! st bst)
+            (do
+              (when (== bst psMayReturn)
+                (set! st psMayReturn))))))
+
+
+      (case [ir/ORANGE]
+        ;; Treat for range { XXX } like an if statement with no else.
+        (let [n (assert (* ir/RangeStmt) n)]
+          (when (== (.stateForList ffa (.-Body n)) psMayReturn)
+            (set! st psMayReturn))))
+
+      (case [ir/OGOTO]
+        ;; punt if we see even one goto. if we built a control
+        ;; flow graph we could do more, but this is just a tree walk.
+        (.pessimize ffa))
+      (case [ir/OSELECT]
+        ;; process selects for "may return" but not "always panics",
+        ;; the latter case seems very improbable.
+        (let [n (assert (* ir/SelectStmt) n)]
+          (when (!= (len (.-Cases n)) 0)
+            (set! st psTop)
+            (range [_ c (.-Cases n)]
+              (set! st (branchCombine (.stateForList ffa (.-Body c)) st))))))
+
+
+      (case [ir/OSWITCH]
+        (let [n (assert (* ir/SwitchStmt) n)]
+          (when (!= (len (.-Cases n)) 0)
+            (set! st psTop)
+            (range [_ c (.-Cases n)]
+              (set! st (branchCombine (.stateForList ffa (.-Body c)) st))))
+
+
+
+          (let [(values st fall) (values psTop psNoInfo)]
+            (for [i (- (len (.-Cases n)) 1)] (>= i 0) (dec! i)
+              (let [cas (aget (.-Cases n) i)
+                  ^{:line 321} cst (.stateForList ffa (.-Body cas))
+                  ^{:line 322} endsInFallthrough false]
+                (when (!= (len (.-Body cas)) 0)
+                  (set! endsInFallthrough (== (.Op (aget (.-Body cas) 0)) ir/OFALL)))
+
+                (when endsInFallthrough
+                  (set! cst (blockCombine cst fall)))
+
+                (set! st (branchCombine st cst))
+                (set! fall cst))))))
+
+      (case [ir/OFALL])
+      ;; Not important.
+      (case [ir/ODCLFUNC ir/ORECOVER ir/OAS ir/OAS2 ir/OAS2FUNC ir/OASOP
+          ^{:line 335} ir/OPRINTLN ir/OPRINT ir/OLABEL ir/OCALLINTER ir/ODEFER
+          ^{:line 336} ir/OSEND ir/ORECV ir/OSELRECV2 ir/OGO ir/OAPPEND ir/OAS2DOTTYPE
+          ^{:line 337} ir/OAS2MAPR ir/OGETG ir/ODELETE ir/OINLMARK ir/OAS2RECV
+          ^{:line 338} ir/OMIN ir/OMAX ir/OMAKE ir/OGETCALLERSP])
+      ;; these should all be benign/uninteresting
+      (case [ir/OTAILCALL ir/OJUMPTABLE ir/OTYPESW]
+        ;; don't expect to see these at all.
+        (base/Fatalf "unexpected op %s in func %s"
+          (.String (.Op n)) (ir/FuncName (.-fn ffa))))
+      (default
+        (base/Fatalf "%v: unhandled op %s in func %v"
+          (ir/Line n) (.String (.Op n)) (ir/FuncName (.-fn ffa)))))
+
+    (when (!= (bit-and debugTrace debugTraceFuncFlags) 0)
+      (fmt/Fprintf os/Stderr "=-= %v: visit n=%s returns %s\n"
+        (ir/Line n) (.String (.Op n)) (.String st)))
+
+    (.setState ffa n st)))
+
+
+^{:go/end 356} (go/method nodeVisitPre [^{:tag (* funcFlagsAnalyzer)} ffa ^ir/Node n])

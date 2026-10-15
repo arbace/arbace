@@ -1,0 +1,145 @@
+;; Copyright 2023 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.cmd.link.internal.loadpe) (go/file "seh.go" :imports [
+
+
+    ^{:line 8} [objabi "cmd/internal/objabi"]
+    ^{:line 9} [sys "cmd/internal/sys"]
+    ^{:line 10} [loader "cmd/link/internal/loader"]
+    ^{:line 11} [sym "cmd/link/internal/sym"]
+    ^{:line 12} [fmt "fmt"]
+    ^{:line 13} [sort "sort"]])
+
+
+(go/const
+  ^{:line 17} [^{:val 8} UNW_FLAG_EHANDLER (<< 1 3)]
+  ^{:line 18} [^{:val 16} UNW_FLAG_UHANDLER (<< 2 3)]
+  ^{:line 19} [^{:val 32} UNW_FLAG_CHAININFO (<< 4 3)]
+  ^{:line 20} [^{:val 4} unwStaticDataSize 4] ; Bytes of unwind data before the variable length part.
+  ^{:line 21} [^{:val 2} unwCodeSize 2]) ; Bytes per unwind code.
+
+
+
+
+^{:go/end 34} (go/func processSEH "processSEH walks host-object pdata relocations and returns the set of\nper-entry pdata symbols created from the input section.\n" [^{:tag (* loader/Loader)} ldr ^{:tag (* sys/Arch)} arch ^sym/LoaderSym pdata] :results [(slice loader/Sym) error]
+  (switch (.-Family arch)
+    (case [sys/AMD64]
+      (return (processSEHAMD64 ldr pdata)))
+    (default
+      ;; TODO: support SEH on other architectures.
+      (return nil (fmt/Errorf "unsupported architecture for SEH: %v" (.-Family arch))))))
+
+
+
+^{:go/end 98} (go/func processSEHAMD64 [^{:tag (* loader/Loader)} ldr ^sym/LoaderSym pdata] :results [(slice loader/Sym) error]
+  ;; The following loop traverses a list of pdata entries,
+  ;; each entry being 3 relocations long. The first relocation
+  ;; is a pointer to the function symbol to which the pdata entry
+  ;; corresponds. The third relocation is a pointer to the
+  ;; corresponding .xdata entry.
+  ;; Reference:
+  ;; https://learn.microsoft.com/en-us/cpp/build/exception-handling-x64#struct-runtime_function
+  (let [rels (.Relocs ldr pdata)]
+    (when (!= (% (.Count rels) 3) 0)
+      (return nil (fmt/Errorf ".pdata symbol %q has invalid relocation count" (.SymName ldr pdata))))
+
+    (let [data (.Data ldr pdata)
+        ^{:line 49} entries (make (slice loader/Sym) 0 (/ (.Count rels) 3))]
+
+      (for [i 0] (< i (.Count rels)) (set! i + 3)
+        ;; Create a new symbol for the pdata entry.
+        (let [entry (.MakeSymbolBuilder ldr "")]
+          (.SetType entry sym/SSEHSECT)
+          (.SetAlign entry 4)
+          (.SetSize entry 12)
+          (let [entryOff (conv int ^{:go/via [Reloc]} (.Off (.At rels i)))
+              ^{:line 58} entryEnd (+ entryOff (* 4 3))]
+            (.SetData entry (subslice data entryOff entryEnd entryEnd))
+
+            ;; Add a relocation from the target function to the pdata entry
+            ;; and to the exception handler, if present, to ensure they are
+            ;; retained by dead code elimination.
+            (when [targetFunc (.Sym (.At rels i))] (!= targetFunc 0)
+              (let [sb (.MakeSymbolUpdater ldr targetFunc)
+                  (values r _) (.AddRel sb objabi/R_KEEP)]
+                (.SetSym r (.Sym entry))
+                (let [xrel (.At rels (+ i 2))]
+                  (when (!= (.Sym xrel) 0)
+                    (set! (values r _) (.AddRel sb objabi/R_KEEP))
+                    (.SetSym r (.Sym xrel)))
+
+                  (let [handler (findHandlerInXDataAMD64 ldr (.Sym xrel) ^{:go/via [Reloc]} (.Add xrel))]
+                    (when (!= handler 0)
+                      (set! (values r _) (.AddRel sb objabi/R_KEEP))
+                      (.SetSym r handler))))))
+
+
+
+            ;; Copy the relocations from the original .pdata entry to the new symbol,
+            ;; adjusting the offsets.
+            (range [j 3]
+              (let [rOld (.At rels (+ i j))
+                  ^{:line 84} typ (.Type rOld)]
+                (when (.Weak rOld)
+                  (set! typ bit-or objabi/R_WEAK))
+
+                (let [(values rel _) (.AddRel entry typ)]
+                  ^{:go/via [Reloc]} (.SetOff rel (conv int32 (* j 4)))
+                  ^{:go/via [Reloc]} (.SetSiz rel ^{:go/via [Reloc]} (.Siz rOld))
+                  (.SetSym rel (.Sym rOld))
+                  ^{:go/via [Reloc]} (.SetAdd rel ^{:go/via [Reloc]} (.Add rOld)))))
+
+
+            (set! entries (append entries (.Sym entry))))))
+
+      (return entries nil))))
+
+
+
+
+
+
+^{:go/end 146} (go/func findHandlerInXDataAMD64 "findHandlerInXDataAMD64 finds the symbol in the .xdata section that\ncorresponds to the exception handler.\nReference:\nhttps://learn.microsoft.com/en-us/cpp/build/exception-handling-x64#struct-unwind_info\n" ^loader/Sym [^{:tag (* loader/Loader)} ldr ^sym/LoaderSym xsym ^int64 add]
+  (let [data (.Data ldr xsym)]
+    (when (or (< add 0) (> (+ add unwStaticDataSize) (conv int64 (len data))))
+      (return 0))
+
+    (set! data (subslice data add))
+    (let [^bool isChained (zero bool)]
+      (switch [flag (aget data 0)]
+        (case [(or (!= (bit-and flag UNW_FLAG_EHANDLER) 0) (!= (bit-and flag UNW_FLAG_UHANDLER) 0))])
+        ;; Exception handler.
+        (case [(!= (bit-and flag UNW_FLAG_CHAININFO) 0)]
+          (set! isChained true))
+        (default
+          ;; Nothing to do.
+          (return 0)))
+
+      (let [codes (aget data 2)]
+        (when (!= (% codes 2) 0)
+          ;; There are always an even number of unwind codes, even if the last one is unused.
+          (set! codes + 1))
+
+        ;; The exception handler relocation is the first relocation after the unwind codes,
+        ;; unless it is chained, but we will handle this case later.
+        (let [targetOff (+ add unwStaticDataSize (* unwCodeSize (conv int64 codes)))
+            ^{:line 128} xrels (.Relocs ldr xsym)
+            ^{:line 129} xrelsCount (.Count xrels)
+            ^{:line 130} idx (sort/Search xrelsCount ^{:go/end 132} (fn ^bool [^int i]
+                (>= (conv int64 ^{:go/via [Reloc]} (.Off (.At xrels i))) targetOff)))]
+
+          (when (== idx xrelsCount)
+            (return 0))
+
+          (when isChained
+            ;; The third relocations references the next .xdata entry in the chain, recurse.
+            (set! idx + 2)
+            (when (>= idx xrelsCount)
+              (return 0))
+
+            (let [r (.At xrels idx)]
+              (return (findHandlerInXDataAMD64 ldr (.Sym r) ^{:go/via [Reloc]} (.Add r)))))
+
+          (.Sym (.At xrels idx)))))))

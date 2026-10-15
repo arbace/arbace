@@ -1,0 +1,3197 @@
+;; Inferno utils/8l/asm.c
+;; https://bitbucket.org/inferno-os/inferno-os/src/master/utils/8l/asm.c
+;;
+;;	Copyright © 1994-1999 Lucent Technologies Inc.  All rights reserved.
+;;	Portions Copyright © 1995-1997 C H Forsyth (forsyth@terzarima.net)
+;;	Portions Copyright © 1997-1999 Vita Nuova Limited
+;;	Portions Copyright © 2000-2007 Vita Nuova Holdings Limited (www.vitanuova.com)
+;;	Portions Copyright © 2004,2006 Bruce Ellis
+;;	Portions Copyright © 2005-2007 C H Forsyth (forsyth@terzarima.net)
+;;	Revisions Copyright © 2000-2007 Lucent Technologies Inc. and others
+;;	Portions Copyright © 2009 The Go Authors. All rights reserved.
+;;
+;; Permission is hereby granted, free of charge, to any person obtaining a copy
+;; of this software and associated documentation files (the "Software"), to deal
+;; in the Software without restriction, including without limitation the rights
+;; to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+;; copies of the Software, and to permit persons to whom the Software is
+;; furnished to do so, subject to the following conditions:
+;;
+;; The above copyright notice and this permission notice shall be included in
+;; all copies or substantial portions of the Software.
+;;
+;; THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+;; IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+;; FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL THE
+;; AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+;; LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+;; OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+;; THE SOFTWARE.
+
+(in-ns 'go.cmd.link.internal.ld) (go/file "lib.go" :imports [
+
+
+    ^{:line 34} [bytes "bytes"]
+    ^{:line 35} [elf "debug/elf"]
+    ^{:line 36} [macho "debug/macho"]
+    ^{:line 37} [pe "debug/pe"]
+    ^{:line 38} [base64 "encoding/base64"]
+    ^{:line 39} [binary "encoding/binary"]
+    ^{:line 40} [fmt "fmt"]
+    ^{:line 41} [buildcfg "internal/buildcfg"]
+    ^{:line 42} [platform "internal/platform"]
+    ^{:line 43} [io "io"]
+    ^{:line 44} [log "log"]
+    ^{:line 45} [os "os"]
+    ^{:line 46} [exec "os/exec"]
+    ^{:line 47} [filepath "path/filepath"]
+    ^{:line 48} [runtime "runtime"]
+    ^{:line 49} [slices "slices"]
+    ^{:line 50} [sort "sort"]
+    ^{:line 51} [strings "strings"]
+    ^{:line 52} [sync "sync"]
+    ^{:line 53} [time "time"]
+
+    ^{:line 55} [bio "cmd/internal/bio"]
+    ^{:line 56} [goobj "cmd/internal/goobj"]
+    ^{:line 57} [hash "cmd/internal/hash"]
+    ^{:line 58} [objabi "cmd/internal/objabi"]
+    ^{:line 59} [sys "cmd/internal/sys"]
+    ^{:line 60} [loadelf "cmd/link/internal/loadelf"]
+    ^{:line 61} [loader "cmd/link/internal/loader"]
+    ^{:line 62} [loadmacho "cmd/link/internal/loadmacho"]
+    ^{:line 63} [loadpe "cmd/link/internal/loadpe"]
+    ^{:line 64} [loadxcoff "cmd/link/internal/loadxcoff"]
+    ^{:line 65} [sym "cmd/link/internal/sym"]])
+
+
+;; Data layout and relocation.
+
+;; Derived from Inferno utils/6l/l.h
+;; https://bitbucket.org/inferno-os/inferno-os/src/master/utils/6l/l.h
+;;
+;;	Copyright © 1994-1999 Lucent Technologies Inc.  All rights reserved.
+;;	Portions Copyright © 1995-1997 C H Forsyth (forsyth@terzarima.net)
+;;	Portions Copyright © 1997-1999 Vita Nuova Limited
+;;	Portions Copyright © 2000-2007 Vita Nuova Holdings Limited (www.vitanuova.com)
+;;	Portions Copyright © 2004,2006 Bruce Ellis
+;;	Portions Copyright © 2005-2007 C H Forsyth (forsyth@terzarima.net)
+;;	Revisions Copyright © 2000-2007 Lucent Technologies Inc. and others
+;;	Portions Copyright © 2009 The Go Authors. All rights reserved.
+;;
+;; Permission is hereby granted, free of charge, to any person obtaining a copy
+;; of this software and associated documentation files (the "Software"), to deal
+;; in the Software without restriction, including without limitation the rights
+;; to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+;; copies of the Software, and to permit persons to whom the Software is
+;; furnished to do so, subject to the following conditions:
+;;
+;; The above copyright notice and this permission notice shall be included in
+;; all copies or substantial portions of the Software.
+;;
+;; THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+;; IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+;; FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL THE
+;; AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+;; LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+;; OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+;; THE SOFTWARE.
+
+
+
+
+(go/type ArchSyms "ArchSyms holds a number of architecture specific symbols used during\nrelocation.  Rather than allowing them universal access to all symbols,\nwe keep a subset for relocation application.\n" (struct
+    ^{:line 104 :tag loader/Sym} Rel
+    ^{:line 105 :tag loader/Sym} Rela
+    ^{:line 106 :tag loader/Sym} RelPLT
+    ^{:line 107 :tag loader/Sym} RelaPLT
+
+    ^{:line 109 :tag loader/Sym} LinkEditGOT
+    ^{:line 110 :tag loader/Sym} LinkEditPLT
+
+    ^{:line 112 :tag loader/Sym} TOC
+    ^{:line 113 :tag (slice loader/Sym)} DotTOC ; for each version
+
+    ^{:line 115 :tag loader/Sym} GOT
+    ^{:line 116 :tag loader/Sym} PLT
+    ^{:line 117 :tag loader/Sym} GOTPLT
+
+    ^{:line 119 :tag loader/Sym} Tlsg
+    ^{:line 120 :tag int} Tlsoffset
+
+    ^{:line 122 :tag loader/Sym} Dynamic
+    ^{:line 123 :tag loader/Sym} DynSym
+    ^{:line 124 :tag loader/Sym} DynStr
+
+    ^{:line 126 :tag loader/Sym} unreachableMethod
+
+
+
+    ^{:line 130 :tag loader/Sym :doc "Symbol containing a list of all the inittasks that need\nto be run at startup.\n"} mainInittasks))
+
+
+
+^{:go/end 137} (go/method mkArchSym "mkArchSym is a helper for setArchSyms, to set up a special symbol.\n" [^{:tag (* Link)} ctxt ^string name ^int ver ^{:tag (* loader/Sym)} ls]
+  (set! @ls (.LookupOrCreateSym (.-loader ctxt) name ver))
+  (.SetAttrReachable (.-loader ctxt) @ls true))
+
+
+
+
+^{:go/end 144} (go/method mkArchSymVec "mkArchSymVec is similar to  setArchSyms, but operates on elements within\na slice, where each element corresponds to some symbol version.\n" [^{:tag (* Link)} ctxt ^string name ^int ver ^{:tag (slice loader/Sym)} ls]
+  (aset ls ver (.LookupOrCreateSym (.-loader ctxt) name ver))
+  (.SetAttrReachable (.-loader ctxt) (aget ls ver) true))
+
+
+
+
+^{:go/end 178} (go/method setArchSyms "setArchSyms sets up the ArchSyms structure, and must be called before\nrelocations are applied.\n" [^{:tag (* Link)} ctxt]
+  (.mkArchSym ctxt ".got" 0 (addr ^{:go/via [ArchSyms]} (.-GOT ctxt)))
+  (.mkArchSym ctxt ".plt" 0 (addr ^{:go/via [ArchSyms]} (.-PLT ctxt)))
+  (.mkArchSym ctxt ".got.plt" 0 (addr ^{:go/via [ArchSyms]} (.-GOTPLT ctxt)))
+  (.mkArchSym ctxt ".dynamic" 0 (addr ^{:go/via [ArchSyms]} (.-Dynamic ctxt)))
+  (.mkArchSym ctxt ".dynsym" 0 (addr ^{:go/via [ArchSyms]} (.-DynSym ctxt)))
+  (.mkArchSym ctxt ".dynstr" 0 (addr ^{:go/via [ArchSyms]} (.-DynStr ctxt)))
+  (.mkArchSym ctxt "runtime.unreachableMethod" abiInternalVer (addr ^{:go/via [ArchSyms]} (.-unreachableMethod ctxt)))
+
+  (when ^{:go/via [Target]} (.IsPPC64 ctxt)
+    (.mkArchSym ctxt "TOC" 0 (addr ^{:go/via [ArchSyms]} (.-TOC ctxt)))
+
+    (set! ^{:go/via [ArchSyms]} (.-DotTOC ctxt) (make (slice loader/Sym) (+ (.MaxVersion ctxt) 1)))
+    (for [i 0] (<= i (.MaxVersion ctxt)) (inc! i)
+      (when (and (>= i sym/SymVerABICount) (< i sym/SymVerStatic)) ; these versions are not used currently
+        (continue))
+
+      (.mkArchSymVec ctxt ".TOC." i ^{:go/via [ArchSyms]} (.-DotTOC ctxt))))
+
+
+  (when ^{:go/via [Target]} (.IsElf ctxt)
+    (.mkArchSym ctxt ".rel" 0 (addr ^{:go/via [ArchSyms]} (.-Rel ctxt)))
+    (.mkArchSym ctxt ".rela" 0 (addr ^{:go/via [ArchSyms]} (.-Rela ctxt)))
+    (.mkArchSym ctxt ".rel.plt" 0 (addr ^{:go/via [ArchSyms]} (.-RelPLT ctxt)))
+    (.mkArchSym ctxt ".rela.plt" 0 (addr ^{:go/via [ArchSyms]} (.-RelaPLT ctxt))))
+
+  (when ^{:go/via [Target]} (.IsDarwin ctxt)
+    (.mkArchSym ctxt ".linkedit.got" 0 (addr ^{:go/via [ArchSyms]} (.-LinkEditGOT ctxt)))
+    (.mkArchSym ctxt ".linkedit.plt" 0 (addr ^{:go/via [ArchSyms]} (.-LinkEditPLT ctxt)))))
+
+
+
+(go/type Arch (struct
+    ^{:line 181 :tag int} Funcalign
+    ^{:line 182 :tag int} Maxalign
+    ^{:line 183 :tag int} Minalign
+    ^{:line 184 :tag int} Dwarfregsp
+    ^{:line 185 :tag int} Dwarfreglr
+
+
+
+
+
+    ^{:line 191 :tag uint64 :doc "Threshold of total text size, used for trampoline insertion. If the total\ntext size is smaller than TrampLimit, we won't need to insert trampolines.\nIt is pretty close to the offset range of a direct CALL machine instruction.\nWe leave some room for extra stuff like PLT stubs.\n"} TrampLimit
+
+
+
+
+
+    ^{:line 197 :tag (slice byte) :doc "Empty spaces between codeblocks will be padded with this value.\nFor example an architecture might want to pad with a trap instruction to\ncatch wayward programs. Architectures that do not define a padding value\nare padded with zeros.\n"} CodePad
+
+
+    ^{:line 200 :tag uint32 :doc "Plan 9 variables.\n"} Plan9Magic
+    ^{:line 201 :tag bool} Plan9_64Bit
+
+    ^{:line 203 :tag (func [(* Target) (* loader/Loader) (* ArchSyms) loader/Sym loader/Reloc int] [bool])} Adddynrel
+    ^{:line 204 :tag (func [(* Link)])} Archinit
+
+
+
+
+
+
+
+
+
+
+    ^{:line 215 :tag (func [(* Target) (* loader/Loader) (* ArchSyms) loader/Reloc loader/Sym int64] [^int64 relocatedOffset ^int nExtReloc ^bool ok]) :doc "Archreloc is an arch-specific hook that assists in relocation processing\n(invoked by 'relocsym'); it handles target-specific relocation tasks.\nHere \"rel\" is the current relocation being examined, \"sym\" is the symbol\ncontaining the chunk of data to which the relocation applies, and \"off\"\nis the contents of the to-be-relocated data item (from sym.P). Return\nvalue is the appropriately relocated value (to be written back to the\nsame spot in sym.P), number of external _host_ relocations needed (i.e.\nELF/Mach-O/etc. relocations, not Go relocations, this must match ELF.Reloc1,\netc.), and a boolean indicating success/failure (a failing value indicates\na fatal error).\n"} Archreloc
+
+
+
+
+
+
+
+
+
+    ^{:line 225 :tag (func [^{:tag (* Target)} target ^{:tag (* loader/Loader)} ldr ^loader/Reloc rel ^sym/RelocVariant rv ^loader/Sym sym ^int64 offset ^{:tag (slice byte)} data] [^int64 relocatedOffset]) :doc "Archrelocvariant is a second arch-specific hook used for\nrelocation processing; it handles relocations where r.Type is\ninsufficient to describe the relocation (r.Variant !=\nsym.RV_NONE). Here \"rel\" is the relocation being applied, \"sym\"\nis the symbol containing the chunk of data to which the\nrelocation applies, and \"off\" is the contents of the\nto-be-relocated data item (from sym.P). Return is an updated\noffset value.\n"} Archrelocvariant
+
+
+
+
+    ^{:line 230 :tag (func [^{:tag (* Link)} ctxt ^{:tag (* loader/Loader)} ldr ^int ri ^loader/Sym rs ^loader/Sym s]) :doc "Generate a trampoline for a call from s to rs if necessary. ri is\nindex of the relocation.\n"} Trampoline
+
+
+
+
+
+
+
+
+    ^{:line 239 :tag (func [(* Link) (* loader/Loader)]) :doc "Assembling the binary breaks into two phases, writing the code/data/\ndwarf information (which is rather generic), and some more architecture\nspecific work like setting up the elf headers/dynamic relocations, etc.\nThe phases are called \"Asmb\" and \"Asmb2\". Asmb2 needs to be defined for\nevery architecture, but only if architecture has an Asmb function will\nit be used for assembly.  Otherwise a generic assembly Asmb function is\nused.\n"} Asmb
+    ^{:line 240 :tag (func [(* Link) (* loader/Loader)])} Asmb2
+
+
+
+
+    ^{:line 245 :tag (func [(* Target) (* loader/Loader) loader/Reloc loader/Sym] [loader/ExtReloc bool]) :doc "Extreloc is an arch-specific hook that converts a Go relocation to an\nexternal relocation. Return the external relocation and whether it is\nneeded.\n"} Extreloc
+
+    ^{:line 247 :tag (func [(* Link) (* loader/Loader)])} Gentext ; Generate text before addressing has been performed.
+    ^{:line 248 :tag (func [(* sys/Arch) (* OutBuf) (* loader/Loader) loader/Sym loader/ExtReloc int64] [bool])} Machoreloc1
+    ^{:line 249 :tag uint32} MachorelocSize ; size of an Mach-O relocation record, must match Machoreloc1.
+    ^{:line 250 :tag (func [(* sys/Arch) (* OutBuf) (* loader/Loader) loader/Sym loader/ExtReloc int64] [bool])} PEreloc1
+    ^{:line 251 :tag (func [(* sys/Arch) (* OutBuf) (* loader/Loader) loader/Sym loader/ExtReloc int64] [bool])} Xcoffreloc1
+
+
+
+    ^{:line 255 :tag (func [(* Link) (* loader/Loader)]) :doc "Generate additional symbols for the native symbol table just prior to\ncode generation.\n"} GenSymsLate
+
+
+
+
+
+
+
+    ^{:line 263 :tag (func [^{:tag (slice byte)} P ^int off ^int size]) :doc "TLSIEtoLE converts a TLS Initial Executable relocation to\na TLS Local Executable relocation.\n\nThis is possible when a TLS IE relocation refers to a local\nsymbol in an executable, which is typical when internally\nlinking PIE binaries.\n"} TLSIEtoLE
+
+
+    ^{:line 266 :tag (func [^{:tag (* loader/Loader)} ldr ^{:tag (* sym/Section)} sect ^int n ^loader/Sym s ^uint64 va ^bool isTramp] [(* sym/Section) int uint64]) :doc "optional override for assignAddress\n"} AssignAddress
+
+
+    ^{:line 269 :tag ELFArch :doc "ELF specific information.\n"} ELF))
+
+
+(go/var
+  ^{:line 273} [^Arch thearch]
+  ^{:line 274} [^int32 lcSize]
+  ^{:line 275} [^Rpath rpath]
+  ^{:line 276} [^int32 spSize]
+  ^{:line 277} [^int32 symSize])
+
+
+
+
+(go/var ^{:doc "Symbol version of ABIInternal symbols. It is sym.SymVerABIInternal if ABI wrappers\nare used, 0 otherwise.\n"} abiInternalVer sym/SymVerABIInternal)
+
+
+
+^{:go/end 291} (go/method DynlinkingGo "DynlinkingGo reports whether we are producing Go code that can live\nin separate shared libraries linked together at runtime.\n" ^bool [^{:tag (* Link)} ctxt]
+  (when (not (.-Loaded ctxt))
+    (panic "DynlinkingGo called before all symbols loaded"))
+
+  (or (== ^{:go/via [Target]} (.-BuildMode ctxt) BuildModeShared) ^{:go/via [Target]} (.-linkShared ctxt) (== ^{:go/via [Target]} (.-BuildMode ctxt) BuildModePlugin) ^{:go/via [Target]} (.-canUsePlugins ctxt)))
+
+
+
+^{:go/end 299} (go/method CanUsePlugins "CanUsePlugins reports whether a plugins can be used\n" ^bool [^{:tag (* Link)} ctxt]
+  (when (not (.-Loaded ctxt))
+    (panic "CanUsePlugins called before all symbols loaded"))
+
+  ^{:go/via [Target]} (.-canUsePlugins ctxt))
+
+
+
+^{:go/end 304} (go/method NeedCodeSign "NeedCodeSign reports whether we need to code-sign the output binary.\n" ^bool [^{:tag (* Link)} ctxt]
+  (and ^{:go/via [Target]} (.IsDarwin ctxt) ^{:go/via [Target]} (.IsARM64 ctxt)))
+
+
+(go/var
+  ^{:line 307} [^{:tag (slice string)} dynlib]
+  ^{:line 308} [^{:tag (slice string)} ldflag]
+  ^{:line 309} [^int havedynamic]
+  ^{:line 310} [^int Funcalign]
+  ^{:line 311} [^bool iscgo]
+  ^{:line 312} [^int elfglobalsymndx]
+  ^{:line 313} [^string interpreter]
+
+  ^{:line 315} [^bool debug_s] ; backup old value of debug['s']
+  ^{:line 316} [^int32 HEADR]
+
+  ^{:line 318} [^int nerrors]
+  ^{:line 319} [^int64 liveness] ; size of liveness data (funcdata), printed if -v
+
+
+  ^{:line 322} [^{:tag int :doc "See -strictdups command line flag.\n"} checkStrictDups] ; 0=off 1=warning 2=error
+  ^{:line 323} [^int strictDupMsgCount])
+
+
+(go/var
+  ^{:line 327} [^sym/Segment Segtext]
+  ^{:line 328} [^sym/Segment Segrodata]
+  ^{:line 329} [^sym/Segment Segrelrodata]
+  ^{:line 330} [^sym/Segment Segdata]
+  ^{:line 331} [^sym/Segment Segdwarf]
+  ^{:line 332} [^sym/Segment Segpdata] ; windows-only
+  ^{:line 333} [^sym/Segment Segxdata] ; windows-only
+
+  ^{:line 335} [Segments (lit (slice (* sym/Segment)) (addr Segtext) (addr Segrodata) (addr Segrelrodata) (addr Segdata) (addr Segdwarf) (addr Segpdata) (addr Segxdata))])
+
+
+(go/const ^{:val "__.PKGDEF"} pkgdef "__.PKGDEF")
+
+(go/var
+
+
+
+  ^{:line 344} [^{:doc "externalobj is set to true if we see an object compiled by\nthe host compiler that is not from a package that is known\nto support internal linking mode.\n"} externalobj false]
+
+
+
+
+  ^{:line 349} [^{:tag (slice string) :doc "dynimportfail is a list of packages for which generating\nthe dynimport file, _cgo_import.go, failed. If there are\nany of these objects, we must link externally. Issue 52863.\n"} dynimportfail]
+
+
+
+
+
+  ^{:line 355} [^{:tag (slice string) :doc "preferlinkext is a list of packages for which the Go command\nnoticed use of peculiar C flags. If we see any of these,\ndefault to linking externally unless overridden by the\nuser. See issues #58619, #58620, and #58848.\n"} preferlinkext]
+
+
+
+  ^{:line 359} [^{:doc "unknownObjFormat is set to true if we see an object whose\nformat we don't recognize.\n"} unknownObjFormat false]
+
+  ^{:line 361} [^string theline])
+
+
+^{:go/end 366} (go/func Lflag [^{:tag (* Link)} ctxt ^string arg]
+  (set! (.-Libdir ctxt) (append (.-Libdir ctxt) arg)))
+
+
+
+
+
+
+
+
+^{:go/end 379} (go/func mayberemoveoutfile " * Unix doesn't like it when we write to a running (or, sometimes,\n * recently run) binary, so remove the output file before writing it.\n * On Windows 7, remove() can force a subsequent create() to fail.\n * S_ISREG() does not exist on Plan 9.\n" []
+  (when [(values fi err) (os/Lstat @flagOutfile)] (and (== err nil) (not (.IsRegular (.Mode fi))))
+    (return))
+
+  (os/Remove @flagOutfile))
+
+
+^{:go/end 428} (go/func libinit [^{:tag (* Link)} ctxt]
+  (if (!= @FlagFuncAlign 0)
+    (set! Funcalign @FlagFuncAlign)
+
+    (set! Funcalign (.-Funcalign thearch)))
+
+
+  ;; add goroot to the end of the libdir list.
+  (let [suffix ""
+
+      ^{:line 391} suffixsep ""]
+    (cond (!= @flagInstallSuffix "") (do
+        (set! suffixsep "_")
+        (set! suffix @flagInstallSuffix))
+      ^{:line 395} @flagRace (do
+        (set! suffixsep "_")
+        (set! suffix "race"))
+      ^{:line 398} @flagMsan (do
+        (set! suffixsep "_")
+        (set! suffix "msan"))
+      ^{:line 401} @flagAsan (do
+        (set! suffixsep "_")
+        (set! suffix "asan")))
+
+
+    (when (!= buildcfg/GOROOT "")
+      (Lflag ctxt (filepath/Join buildcfg/GOROOT "pkg" (fmt/Sprintf "%s_%s%s%s" buildcfg/GOOS buildcfg/GOARCH suffixsep suffix))))
+
+
+    (mayberemoveoutfile)
+
+    (when [err (.Open (.-Out ctxt) @flagOutfile)] (!= err nil)
+      (Exitf "cannot create %s: %v" @flagOutfile err))
+
+
+    (when (== @flagEntrySymbol "")
+      (switch ^{:go/via [Target]} (.-BuildMode ctxt)
+        (case [BuildModeCShared BuildModeCArchive]
+          (set! @flagEntrySymbol (fmt/Sprintf "_rt0_%s_%s_lib" buildcfg/GOARCH buildcfg/GOOS)))
+        (case [BuildModeExe BuildModePIE]
+          (set! @flagEntrySymbol (fmt/Sprintf "_rt0_%s_%s" buildcfg/GOARCH buildcfg/GOOS)))
+        (case [BuildModeShared BuildModePlugin])
+        ;; No *flagEntrySymbol for -buildmode=shared and plugin
+        (default
+          (Errorf "unknown *flagEntrySymbol for buildmode %v" ^{:go/via [Target]} (.-BuildMode ctxt)))))))
+
+
+
+
+^{:go/end 436} (go/func exitIfErrors []
+  (when (or (!= nerrors 0) (and (> checkStrictDups 1) (> strictDupMsgCount 0)))
+    (mayberemoveoutfile)
+    (Exit 2)))
+
+
+
+
+^{:go/end 441} (go/func errorexit []
+  (exitIfErrors)
+  (Exit 0))
+
+
+^{:go/end 482} (go/func loadinternal ^{:tag (* sym/Library)} [^{:tag (* Link)} ctxt ^string name]
+  ^{:go/breaks [7]} (let [zerofp (lit goobj/FingerprintType)]
+    (when (and ^{:go/via [Target]} (.-linkShared ctxt) (!= (.-PackageShlib ctxt) nil))
+      (when [shlib (aget (.-PackageShlib ctxt) name)] (!= shlib "")
+        (return (addlibpath ctxt "internal" "internal" "" name shlib zerofp))))
+
+
+    (when (!= (.-PackageFile ctxt) nil)
+      (when [pname (aget (.-PackageFile ctxt) name)] (!= pname "")
+        (return (addlibpath ctxt "internal" "internal" pname name "" zerofp)))
+
+      (.Logf ctxt "loadinternal: cannot find %s\n" name)
+      (return nil))
+
+
+    (range [_ libdir (.-Libdir ctxt)]
+      (when ^{:go/via [Target]} (.-linkShared ctxt)
+        (let [shlibname (filepath/Join libdir (+ name ".shlibname"))]
+          (when (!= (.-Debugvlog ctxt) 0)
+            (.Logf ctxt "searching for %s.a in %s\n" name shlibname))
+
+          (when [(values _ err) (os/Stat shlibname)] (== err nil)
+            (return (addlibpath ctxt "internal" "internal" "" name shlibname zerofp)))))
+
+
+      (let [pname (filepath/Join libdir (+ name ".a"))]
+        (when (!= (.-Debugvlog ctxt) 0)
+          (.Logf ctxt "searching for %s.a in %s\n" name pname))
+
+        (when [(values _ err) (os/Stat pname)] (== err nil)
+          (return (addlibpath ctxt "internal" "internal" pname name "" zerofp)))))
+
+
+
+    (when (== name "runtime")
+      (Exitf "error: unable to find runtime.a"))
+
+    (.Logf ctxt "warning: unable to find %s.a\n" name)
+    nil))
+
+
+
+^{:go/end 498} (go/method extld "extld returns the current external linker.\n" ^{:tag (slice string)} [^{:tag (* Link)} ctxt]
+  (when (== (len flagExtld) 0)
+    ;; Return the default external linker for the platform.
+    ;; This only matters when link tool is called directly without explicit -extld,
+    ;; go tool already passes the correct linker in other cases.
+    (switch buildcfg/GOOS
+      (case ["darwin" "freebsd" "openbsd"]
+        (set! flagExtld (lit (slice string) "clang")))
+      (default
+        (set! flagExtld (lit (slice string) "gcc")))))
+
+
+  ^{:line 497} flagExtld)
+
+
+
+
+^{:go/end 518} (go/method findLibPathCmd "findLibPathCmd uses cmd command to find gcc library libname.\nIt returns library full path if found, or \"none\" if not found.\n" ^string [^{:tag (* Link)} ctxt ^string cmd ^string libname]
+  (let [extld (.extld ctxt)
+      (values name args) (values (aget extld 0) (subslice extld 1))]
+    (set! args (append args (spread (hostlinkArchArgs ^{:go/via [Target]} (.-Arch ctxt)))))
+    (set! args (append args cmd))
+    (when (!= (.-Debugvlog ctxt) 0)
+      (.Logf ctxt "%s %v\n" extld args))
+
+    (let [(values out err) (.Output (exec/Command name (spread args)))]
+      (when (!= err nil)
+        (when (!= (.-Debugvlog ctxt) 0)
+          (.Logf ctxt "not using a %s file because compiler failed\n%v\n%s\n" libname err out))
+
+        (return "none"))
+
+      (strings/TrimSpace (conv string out)))))
+
+
+
+
+^{:go/end 524} (go/method findLibPath "findLibPath searches for library libname.\nIt returns library full path if found, or \"none\" if not found.\n" ^string [^{:tag (* Link)} ctxt ^string libname]
+  (.findLibPathCmd ctxt (+ "--print-file-name=" libname) libname))
+
+
+^{:go/end 695} (go/method loadlib [^{:tag (* Link)} ctxt]
+  (let [^uint32 flags (zero uint32)]
+    (when @flagCheckLinkname
+      (set! flags bit-or loader/FlagCheckLinkname))
+
+    (switch @FlagStrictDups
+      (case [0])
+      ;; nothing to do
+      (case [1 2]
+        (set! flags bit-or loader/FlagStrictDups))
+      (default
+        (log/Fatalf "invalid -strictdups flag value %d" @FlagStrictDups)))
+
+    (set! (.-loader ctxt) (loader/NewLoader flags (addr (.-ErrorReporter (.-ErrorReporter ctxt)))))
+    (set! (.-SymName (.-ErrorReporter ctxt)) ^{:go/end 542} (fn ^string [^loader/Sym s]
+        (.SymName (.-loader ctxt) s)))
+
+
+    ;; ctxt.Library grows during the loop, so not a range loop.
+    (let [i 0]
+      (for [] (< i (len (.-Library ctxt))) (inc! i)
+        (let [lib (aget (.-Library ctxt) i)]
+          (when (== (.-Shlib lib) "")
+            (when (> (.-Debugvlog ctxt) 1)
+              (.Logf ctxt "autolib: %s (from %s)\n" (.-File lib) (.-Objref lib)))
+
+            (loadobjfile ctxt lib))))
+
+
+
+      ;; load internal packages, if not already
+      (when @flagRace
+        (loadinternal ctxt "runtime/race"))
+
+      (when @flagMsan
+        (loadinternal ctxt "runtime/msan"))
+
+      (when @flagAsan
+        (loadinternal ctxt "runtime/asan"))
+
+      (loadinternal ctxt "runtime")
+      (for [] (< i (len (.-Library ctxt))) (inc! i)
+        (let [lib (aget (.-Library ctxt) i)]
+          (when (== (.-Shlib lib) "")
+            (loadobjfile ctxt lib))))
+
+
+      ;; At this point, the Go objects are "preloaded". Not all the symbols are
+      ;; added to the symbol table (only defined package symbols are). Looking
+      ;; up symbol by name may not get expected result.
+
+      (set! iscgo (!= (aget (.-LibraryByPkg ctxt) "runtime/cgo") nil))
+
+      ;; Plugins a require cgo support to function. Similarly, plugins may require additional
+      ;; internal linker support on some platforms which may not be implemented.
+      (set! ^{:go/via [Target]} (.-canUsePlugins ctxt) (and (!= (aget (.-LibraryByPkg ctxt) "plugin") nil) iscgo
+          (platform/BuildModeSupported "gc" "plugin" buildcfg/GOOS buildcfg/GOARCH)))
+
+      ;; We now have enough information to determine the link mode.
+      (determineLinkMode ctxt)
+
+      (when (and (== ^{:go/via [Target]} (.-LinkMode ctxt) LinkExternal) (not iscgo) (not (and (== buildcfg/GOOS "darwin") (!= ^{:go/via [Target]} (.-BuildMode ctxt) BuildModePlugin) (== (.-Family ^{:go/via [Target]} (.-Arch ctxt)) sys/AMD64))))
+        ;; This indicates a user requested -linkmode=external.
+        ;; The startup code uses an import of runtime/cgo to decide
+        ;; whether to initialize the TLS.  So give it one. This could
+        ;; be handled differently but it's an unusual case.
+        (when [lib (loadinternal ctxt "runtime/cgo")] (and (!= lib nil) (== (.-Shlib lib) ""))
+          (when (or (== ^{:go/via [Target]} (.-BuildMode ctxt) BuildModeShared) ^{:go/via [Target]} (.-linkShared ctxt))
+            (Exitf "cannot implicitly include runtime/cgo in a shared library"))
+
+          (for [] (< i (len (.-Library ctxt))) (inc! i)
+            (let [lib (aget (.-Library ctxt) i)]
+              (when (== (.-Shlib lib) "")
+                (loadobjfile ctxt lib))))))
+
+
+
+
+
+      ;; Add non-package symbols and references of externally defined symbols.
+      (.LoadSyms (.-loader ctxt) ^{:go/via [Target]} (.-Arch ctxt))
+
+      ;; Load symbols from shared libraries, after all Go object symbols are loaded.
+      (range [_ lib (.-Library ctxt)]
+        (when (!= (.-Shlib lib) "")
+          (when (> (.-Debugvlog ctxt) 1)
+            (.Logf ctxt "autolib: %s (from %s)\n" (.-Shlib lib) (.-Objref lib)))
+
+          (ldshlibsyms ctxt (.-Shlib lib))))
+
+
+
+      ;; Process cgo directives (has to be done before host object loading).
+      (.loadcgodirectives ctxt)
+
+      ;; Conditionally load host objects, or setup for external linking.
+      (hostobjs ctxt)
+      (hostlinksetup ctxt)
+
+      (when (and (== ^{:go/via [Target]} (.-LinkMode ctxt) LinkInternal) (!= (len hostobj) 0))
+        ;; If we have any undefined symbols in external
+        ;; objects, try to read them from the libgcc file.
+        (let [any false
+            (values undefs froms) (.UndefinedRelocTargets (.-loader ctxt) 1)]
+          (when (> (len undefs) 0)
+            (set! any true)
+            (when (> (.-Debugvlog ctxt) 1)
+              (.Logf ctxt "loadlib: first unresolved is %s [%d] from %s [%d]\n"
+                (.SymName (.-loader ctxt) (aget undefs 0)) (aget undefs 0)
+                (.SymName (.-loader ctxt) (aget froms 0)) (aget froms 0))))
+
+
+          (when any
+            (when (== @flagLibGCC "")
+              (set! @flagLibGCC (.findLibPathCmd ctxt "--print-libgcc-file-name" "libgcc")))
+
+            (when (and (== runtime/GOOS "freebsd") (strings/HasPrefix (filepath/Base @flagLibGCC) "libclang_rt.builtins"))
+              ;; On newer versions of FreeBSD, libgcc is returned as something like
+              ;; /usr/lib/clang/18/lib/freebsd/libclang_rt.builtins-x86_64.a.
+              ;; Unfortunately this ends up missing a bunch of symbols we need from
+              ;; libcompiler_rt.
+              (set! @flagLibGCC (.findLibPathCmd ctxt "--print-file-name=libcompiler_rt.a" "libcompiler_rt")))
+
+            (when (and (== runtime/GOOS "openbsd") (== @flagLibGCC "libgcc.a"))
+              ;; On OpenBSD `clang --print-libgcc-file-name` returns "libgcc.a".
+              ;; In this case we fail to load libgcc.a and can encounter link
+              ;; errors - see if we can find libcompiler_rt.a instead.
+              (set! @flagLibGCC (.findLibPathCmd ctxt "--print-file-name=libcompiler_rt.a" "libcompiler_rt")))
+
+            (when (== ^{:go/via [Target]} (.-HeadType ctxt) objabi/Hwindows)
+              (loadWindowsHostArchives ctxt))
+
+            (when (!= @flagLibGCC "none")
+              (hostArchive ctxt @flagLibGCC))
+
+            ;; For glibc systems, the linker setup used by GCC
+            ;; looks like
+            ;;
+            ;;  GROUP ( /lib/x86_64-linux-gnu/libc.so.6
+            ;;      /usr/lib/x86_64-linux-gnu/libc_nonshared.a
+            ;;      AS_NEEDED ( /lib64/ld-linux-x86-64.so.2 ) )
+            ;;
+            ;; where libc_nonshared.a contains a small set of
+            ;; symbols including "__stack_chk_fail_local" and a
+            ;; few others. Thus if we are doing internal linking
+            ;; and "__stack_chk_fail_local" is unresolved (most
+            ;; likely due to the use of -fstack-protector), try
+            ;; loading libc_nonshared.a to resolve it.
+            ;;
+            ;; On Alpine Linux (musl-based), the library providing
+            ;; this symbol is called libssp_nonshared.a.
+            (let [isunresolved (symbolsAreUnresolved ctxt (lit (slice string) "__stack_chk_fail_local"))]
+              (when (aget isunresolved 0)
+                (when [p (.findLibPath ctxt "libc_nonshared.a")] (!= p "none")
+                  (hostArchive ctxt p))
+
+                (when [p (.findLibPath ctxt "libssp_nonshared.a")] (!= p "none")
+                  (hostArchive ctxt p)))))))
+
+
+
+
+
+      (loadfips ctxt)
+
+      ;; We've loaded all the code now.
+      (set! (.-Loaded ctxt) true)
+
+      (set! strictDupMsgCount (.NStrictDupMsgs (.-loader ctxt))))))
+
+
+
+
+
+
+
+
+
+^{:go/end 773} (go/func loadWindowsHostArchives "loadWindowsHostArchives loads in host archives and objects when\ndoing internal linking on windows. Older toolchains seem to require\njust a single pass through the various archives, but some modern\ntoolchains when linking a C program with mingw pass library paths\nmultiple times to the linker, e.g. \"... -lmingwex -lmingw32 ...\n-lmingwex -lmingw32 ...\". To accommodate this behavior, we make two\npasses over the host archives below.\n" [^{:tag (* Link)} ctxt]
+  (let [any true]
+    (for [i 0] (and any (< i 2)) (inc! i)
+      ;; Link crt2.o (if present) to resolve "atexit" when
+      ;; using LLVM-based compilers.
+      (let [isunresolved (symbolsAreUnresolved ctxt (lit (slice string) "atexit"))]
+        (when (aget isunresolved 0)
+          (when [p (.findLibPath ctxt "crt2.o")] (!= p "none")
+            (hostObject ctxt "crt2" p)))
+
+
+        (when @flagRace
+          (when [p (.findLibPath ctxt "libsynchronization.a")] (!= p "none")
+            (hostArchive ctxt p)))
+
+
+        (when [p (.findLibPath ctxt "libmingwex.a")] (!= p "none")
+          (hostArchive ctxt p))
+
+        (when [p (.findLibPath ctxt "libmingw32.a")] (!= p "none")
+          (hostArchive ctxt p))
+
+        ;; Link libmsvcrt.a to resolve '__acrt_iob_func' symbol
+        ;; (see https://golang.org/issue/23649 for details).
+        (when [p (.findLibPath ctxt "libmsvcrt.a")] (!= p "none")
+          (hostArchive ctxt p))
+
+        (set! any false)
+        (let [(values undefs froms) (.UndefinedRelocTargets (.-loader ctxt) 1)]
+          (when (> (len undefs) 0)
+            (set! any true)
+            (when (> (.-Debugvlog ctxt) 1)
+              (.Logf ctxt "loadWindowsHostArchives: remaining unresolved is %s [%d] from %s [%d]\n"
+                (.SymName (.-loader ctxt) (aget undefs 0)) (aget undefs 0)
+                (.SymName (.-loader ctxt) (aget froms 0)) (aget froms 0)))))))
+
+
+
+    ;; If needed, create the __CTOR_LIST__ and __DTOR_LIST__
+    ;; symbols (referenced by some of the mingw support library
+    ;; routines). Creation of these symbols is normally done by the
+    ;; linker if not already present.
+    (let [want (lit (slice string) "__CTOR_LIST__" "__DTOR_LIST__")
+        ^{:line 747} isunresolved (symbolsAreUnresolved ctxt want)]
+      (range [k w want]
+        (when (aget isunresolved k)
+          (let [sb (.CreateSymForUpdate (.-loader ctxt) w 0)]
+            (.SetType sb sym/SDATA)
+            (.AddUint64 sb ^{:go/via [Target]} (.-Arch ctxt) 0)
+            (.SetReachable sb true)
+            (.SetAttrSpecial (.-loader ctxt) (.Sym sb) true))))
+
+
+
+      ;; Fix up references to DLL import symbols now that we're done
+      ;; pulling in new objects.
+      (when [err (loadpe/PostProcessImports)] (!= err nil)
+        (Errorf "%v" err)))))
+
+
+;; TODO: maybe do something similar to peimporteddlls to collect
+;; all lib names and try link them all to final exe just like
+;; libmingwex.a and libmingw32.a:
+;; /*
+;; for:
+;; #cgo windows LDFLAGS: -lmsvcrt -lm
+;; import:
+;; libmsvcrt.a libm.a
+;; */
+
+
+
+
+^{:go/end 803} (go/method loadcgodirectives "loadcgodirectives reads the previously discovered cgo directives, creating\nsymbols in preparation for host object loading or use later in the link.\n" [^{:tag (* Link)} ctxt]
+  (let [l (.-loader ctxt)
+      ^{:line 779} hostObjSyms (make (map loader/Sym (struct)))]
+    (range [_ d (.-cgodata ctxt)]
+      (setCgoAttr ctxt (.-file d) (.-pkg d) (.-directives d) hostObjSyms))
+
+    (set! (.-cgodata ctxt) nil)
+
+    (when (== ^{:go/via [Target]} (.-LinkMode ctxt) LinkInternal)
+      ;; Drop all the cgo_import_static declarations.
+      ;; Turns out we won't be needing them.
+      (range [symIdx hostObjSyms]
+        (when (== (.SymType l symIdx) sym/SHOSTOBJ)
+          ;; If a symbol was marked both
+          ;; cgo_import_static and cgo_import_dynamic,
+          ;; then we want to make it cgo_import_dynamic
+          ;; now.
+          (let [su (.MakeSymbolUpdater l symIdx)]
+            (if (and (!= (.SymExtname l symIdx) "") (!= (.SymDynimplib l symIdx) "") (not (or (.AttrCgoExportStatic l symIdx) (.AttrCgoExportDynamic l symIdx))))
+              (.SetType su sym/SDYNIMPORT)
+
+              (.SetType su 0))))))))
+
+
+
+
+
+
+
+
+^{:go/end 954} (go/method linksetup "Set up flags and special symbols depending on the platform build mode.\nThis version works with loader.Loader.\n" [^{:tag (* Link)} ctxt]
+  (switch ^{:go/via [Target]} (.-BuildMode ctxt)
+    (case [BuildModeCShared BuildModePlugin]
+      (let [symIdx (.LookupOrCreateSym (.-loader ctxt) "runtime.islibrary" 0)
+          ^{:line 811} sb (.MakeSymbolUpdater (.-loader ctxt) symIdx)]
+        (.SetType sb sym/SNOPTRDATA)
+        (.AddUint8 sb 1)))
+    (case [BuildModeCArchive]
+      (let [symIdx (.LookupOrCreateSym (.-loader ctxt) "runtime.isarchive" 0)
+          ^{:line 816} sb (.MakeSymbolUpdater (.-loader ctxt) symIdx)]
+        (.SetType sb sym/SNOPTRDATA)
+        (.AddUint8 sb 1))))
+
+
+  ;; Recalculate pe parameters now that we have ctxt.LinkMode set.
+  (when (== ^{:go/via [Target]} (.-HeadType ctxt) objabi/Hwindows)
+    (Peinit ctxt))
+
+
+  (when (== ^{:go/via [Target]} (.-LinkMode ctxt) LinkExternal)
+    ;; When external linking, we are creating an object file. The
+    ;; absolute address is irrelevant.
+    (set! @FlagTextAddr 0))
+
+
+  ;; If there are no dynamic libraries needed, gcc disables dynamic linking.
+  ;; Because of this, glibc's dynamic ELF loader occasionally (like in version 2.13)
+  ;; assumes that a dynamic binary always refers to at least one dynamic library.
+  ;; Rather than be a source of test cases for glibc, disable dynamic linking
+  ;; the same way that gcc would.
+  ;;
+  ;; Exception: on OS X, programs such as Shark only work with dynamic
+  ;; binaries, so leave it enabled on OS X (Mach-O) binaries.
+  ;; Also leave it enabled on Solaris which doesn't support
+  ;; statically linked binaries.
+  (when (== ^{:go/via [Target]} (.-BuildMode ctxt) BuildModeExe)
+    (when (and (== havedynamic 0) (!= ^{:go/via [Target]} (.-HeadType ctxt) objabi/Hdarwin) (!= ^{:go/via [Target]} (.-HeadType ctxt) objabi/Hsolaris))
+      (set! @FlagD true)))
+
+
+
+  (when (and (== ^{:go/via [Target]} (.-LinkMode ctxt) LinkExternal) (== (.-Family ^{:go/via [Target]} (.-Arch ctxt)) sys/PPC64) (!= buildcfg/GOOS "aix"))
+    (let [toc (.LookupOrCreateSym (.-loader ctxt) ".TOC." 0)
+        ^{:line 850} sb (.MakeSymbolUpdater (.-loader ctxt) toc)]
+      (.SetType sb sym/SDYNIMPORT)))
+
+
+  ;; The Android Q linker started to complain about underalignment of the our TLS
+  ;; section. We don't actually use the section on android, so don't
+  ;; generate it.
+  (when (!= buildcfg/GOOS "android")
+    (let [tlsg (.LookupOrCreateSym (.-loader ctxt) "runtime.tlsg" 0)
+        ^{:line 859} sb (.MakeSymbolUpdater (.-loader ctxt) tlsg)]
+
+      ;; runtime.tlsg is used for external linking on platforms that do not define
+      ;; a variable to hold g in assembly (currently only intel).
+      (cond (== (.Type sb) 0) (do
+          (.SetType sb sym/STLSBSS)
+          (.SetSize sb (conv int64 (.-PtrSize ^{:go/via [Target]} (.-Arch ctxt)))))
+        (!= (.Type sb) sym/SDYNIMPORT)
+        (Errorf "runtime declared tlsg variable %v" (.Type sb)))
+
+      (.SetAttrReachable (.-loader ctxt) tlsg true)
+      (set! ^{:go/via [ArchSyms]} (.-Tlsg ctxt) tlsg)))
+
+
+  (let [^loader/Sym moduledata (zero loader/Sym)
+      ^{:line 874 :tag (* loader/SymbolBuilder)} mdsb (zero (* loader/SymbolBuilder))]
+    (if (== ^{:go/via [Target]} (.-BuildMode ctxt) BuildModePlugin) (do
+        (set! moduledata (.LookupOrCreateSym (.-loader ctxt) "local.pluginmoduledata" 0))
+        (set! mdsb (.MakeSymbolUpdater (.-loader ctxt) moduledata))
+        (.SetAttrLocal (.-loader ctxt) moduledata true))
+      (do
+        (set! moduledata (.LookupOrCreateSym (.-loader ctxt) "runtime.firstmoduledata" 0))
+        (set! mdsb (.MakeSymbolUpdater (.-loader ctxt) moduledata))))
+
+    (if (and (!= (.Type mdsb) 0) (!= (.Type mdsb) sym/SDYNIMPORT)) (do
+        ;; If the module (toolchain-speak for "executable or shared
+        ;; library") we are linking contains the runtime package, it
+        ;; will define the runtime.firstmoduledata symbol and we
+        ;; truncate it back to 0 bytes so we can define its entire
+        ;; contents in symtab.go:symtab().
+        (.SetSize mdsb 0)
+
+        ;; In addition, on ARM, the runtime depends on the linker
+        ;; recording the value of GOARM.
+        (when (== (.-Family ^{:go/via [Target]} (.-Arch ctxt)) sys/ARM)
+          (let [goarm (.LookupOrCreateSym (.-loader ctxt) "runtime.goarm" 0)
+              ^{:line 895} sb (.MakeSymbolUpdater (.-loader ctxt) goarm)]
+            (.SetType sb sym/SNOPTRDATA)
+            (.SetSize sb 0)
+            (.AddUint8 sb (conv uint8 (.-Version buildcfg/GOARM)))
+
+            (let [goarmsoftfp (.LookupOrCreateSym (.-loader ctxt) "runtime.goarmsoftfp" 0)
+                ^{:line 901} sb2 (.MakeSymbolUpdater (.-loader ctxt) goarmsoftfp)]
+              (.SetType sb2 sym/SNOPTRDATA)
+              (.SetSize sb2 0)
+              (if (.-SoftFloat buildcfg/GOARM)
+                (.AddUint8 sb2 1)
+
+                (.AddUint8 sb2 0)))))
+
+
+
+        ;; Set runtime.disableMemoryProfiling bool if
+        ;; runtime.memProfileInternal is not retained in the binary after
+        ;; deadcode (and we're not dynamically linking).
+        (let [memProfile (.Lookup (.-loader ctxt) "runtime.memProfileInternal" abiInternalVer)]
+          (when (and (!= memProfile 0) (not (.AttrReachable (.-loader ctxt) memProfile)) (not (.DynlinkingGo ctxt)))
+            (let [memProfSym (.LookupOrCreateSym (.-loader ctxt) "runtime.disableMemoryProfiling" 0)
+                ^{:line 917} sb (.MakeSymbolUpdater (.-loader ctxt) memProfSym)]
+              (.SetType sb sym/SNOPTRDATA)
+              (.SetSize sb 0)
+              (.AddUint8 sb 1))))) ; true bool
+
+      (do
+        ;; If OTOH the module does not contain the runtime package,
+        ;; create a local symbol for the moduledata.
+        (set! moduledata (.LookupOrCreateSym (.-loader ctxt) "local.moduledata" 0))
+        (set! mdsb (.MakeSymbolUpdater (.-loader ctxt) moduledata))
+        (.SetAttrLocal (.-loader ctxt) moduledata true)))
+
+    (.SetType mdsb sym/SMODULEDATA)
+    (.SetAttrReachable (.-loader ctxt) moduledata true)
+    (set! (.-Moduledata ctxt) moduledata)
+
+    (when (and (== ^{:go/via [Target]} (.-Arch ctxt) sys/Arch386) (!= ^{:go/via [Target]} (.-HeadType ctxt) objabi/Hwindows))
+      (when (or ^:go/paren (and (== ^{:go/via [Target]} (.-BuildMode ctxt) BuildModeCArchive) ^{:go/via [Target]} (.-IsELF ctxt)) (== ^{:go/via [Target]} (.-BuildMode ctxt) BuildModeCShared) (== ^{:go/via [Target]} (.-BuildMode ctxt) BuildModePIE) (.DynlinkingGo ctxt))
+        (let [got (.LookupOrCreateSym (.-loader ctxt) "_GLOBAL_OFFSET_TABLE_" 0)
+            ^{:line 936} sb (.MakeSymbolUpdater (.-loader ctxt) got)]
+          (.SetType sb sym/SDYNIMPORT)
+          (.SetAttrReachable (.-loader ctxt) got true))))
+
+
+
+    ;; DWARF-gen and other phases require that the unit Textp slices
+    ;; be populated, so that it can walk the functions in each unit.
+    ;; Call into the loader to do this (requires that we collect the
+    ;; set of internal libraries first). NB: might be simpler if we
+    ;; moved isRuntimeDepPkg to cmd/internal and then did the test in
+    ;; loader.AssignTextSymbolOrder.
+    (set! (.-Library ctxt) (postorder (.-Library ctxt)))
+    (let [intlibs (lit (slice bool))]
+      (range [_ lib (.-Library ctxt)]
+        (set! intlibs (append intlibs (isRuntimeDepPkg (.-Pkg lib)))))
+
+      (set! (.-Textp ctxt) (.AssignTextSymbolOrder (.-loader ctxt) (.-Library ctxt) intlibs (.-Textp ctxt))))))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 1004} (go/method mangleTypeSym "mangleTypeSym shortens the names of symbols that represent Go types\nif they are visible in the symbol table.\n\nAs the names of these symbols are derived from the string of\nthe type, they can run to many kilobytes long. So we shorten\nthem using a SHA-1 when the name appears in the final binary.\nThis also removes characters that upset external linkers.\n\nThese are the symbols that begin with the prefix 'type.' and\ncontain run-time type information used by the runtime and reflect\npackages. All Go binaries contain these symbols, but only\nthose programs loaded dynamically in multiple parts need these\nsymbols to have entries in the symbol table.\n" [^{:tag (* Link)} ctxt]
+  (when (and (!= ^{:go/via [Target]} (.-BuildMode ctxt) BuildModeShared) (not ^{:go/via [Target]} (.-linkShared ctxt)) (!= ^{:go/via [Target]} (.-BuildMode ctxt) BuildModePlugin) (not (.CanUsePlugins ctxt)))
+    (return))
+
+
+  (let [ldr (.-loader ctxt)]
+    (for [s (conv loader/Sym 1)] (< s (conv loader/Sym (.NSym ldr))) (inc! s)
+      (when (and (not (.AttrReachable ldr s)) (not ^{:go/via [Target]} (.-linkShared ctxt)))
+        ;; If -linkshared, the gc mask generation code may need to reach
+        ;; out to the shared library for the type descriptor's data, even
+        ;; the type descriptor itself is not actually needed at run time
+        ;; (therefore not reachable). We still need to mangle its name,
+        ;; so it is consistent with the one stored in the shared library.
+        (continue))
+
+      (let [name (.SymName ldr s)
+          ^{:line 985} newName (typeSymbolMangle name)]
+        (when (!= newName name)
+          (.SetSymExtname ldr s newName)
+
+          ;; When linking against a shared library, the Go object file may
+          ;; have reference to the original symbol name whereas the shared
+          ;; library provides a symbol with the mangled name. We need to
+          ;; copy the payload of mangled to original.
+          ;; XXX maybe there is a better way to do this.
+          (let [dup (.Lookup ldr newName (.SymVersion ldr s))]
+            (when (!= dup 0)
+              (let [st (.SymType ldr s)
+                  ^{:line 997} dt (.SymType ldr dup)]
+                (when (and (== st sym/Sxxx) (!= dt sym/Sxxx))
+                  (.CopySym ldr dup s))))))))))
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 1045} (go/func typeSymbolMangle "typeSymbolMangle mangles the given symbol name into something shorter.\n\nKeep the type:. prefix, which parts of the linker (like the\nDWARF generator) know means the symbol is not decodable.\nLeave type:runtime. symbols alone, because other parts of\nthe linker manipulates them.\n" ^string [^string name]
+  (let [isType (strings/HasPrefix name "type:")]
+    (when (and (not isType) (not (strings/Contains name "@")))
+      ;; Issue 58800: instantiated symbols may include a type name, which may contain "@"
+      (return name))
+
+    (when (strings/HasPrefix name "type:runtime.")
+      (return name))
+
+    (when (strings/HasPrefix name "go:string.")
+      ;; String symbols will be grouped to a single go:string.* symbol.
+      ;; No need to mangle individual symbol names.
+      (return name))
+
+    (when (and (<= (len name) 14) (not (strings/Contains name "@"))) ; Issue 19529
+      (return name))
+
+    (when isType
+      (let [hb (hash/Sum32 (conv (slice byte) (subslice name 5)))
+          ^{:line 1031} prefix "type:"]
+        (when (== (aget name 5) \.)
+          (set! prefix "type:."))
+
+        (return (+ prefix (.EncodeToString base64/StdEncoding (subslice hb _ 6))))))
+
+    ;; instantiated symbol, replace type name in []
+    (let [i (strings/IndexByte name \[)
+        ^{:line 1039} j (strings/LastIndexByte name \])]
+      (when (or (== j -1) (<= j i))
+        (set! j (len name)))
+
+      (let [hb (hash/Sum32 (conv (slice byte) (subslice name (+ i 1) j)))]
+        (+ (subslice name _ (+ i 1)) (.EncodeToString base64/StdEncoding (subslice hb _ 6)) (subslice name j))))))
+
+
+
+
+
+
+^{:go/end 1077} (go/func nextar " * look for the next file in an archive.\n * adapted from libmach.\n" ^int64 [^{:tag (* bio/Reader)} bp ^int64 off ^{:tag (* ArHdr)} a]
+  (when (!= (bit-and off 1) 0)
+    (inc! off))
+
+  (.MustSeek bp off 0)
+  (let [^{:tag (array SAR_HDR byte)} buf (zero (array SAR_HDR byte))]
+    (when [(values n err) (io/ReadFull bp (subslice buf))] (!= err nil)
+      (when (and (== n 0) (!= err io/EOF))
+        (return -1))
+
+      (return 0))
+
+
+    (set! (.-name a) (artrim (subslice buf 0 16)))
+    (set! (.-date a) (artrim (subslice buf 16 28)))
+    (set! (.-uid a) (artrim (subslice buf 28 34)))
+    (set! (.-gid a) (artrim (subslice buf 34 40)))
+    (set! (.-mode a) (artrim (subslice buf 40 48)))
+    (set! (.-size a) (artrim (subslice buf 48 58)))
+    (set! (.-fmag a) (artrim (subslice buf 58 60)))
+
+    (let [arsize (atolwhex (.-size a))]
+      (when (!= (bit-and arsize 1) 0)
+        (inc! arsize))
+
+      (+ arsize SAR_HDR))))
+
+
+^{:go/end 1164} (go/func loadobjfile [^{:tag (* Link)} ctxt ^{:tag (* sym/Library)} lib]
+  (let [pkg (objabi/PathToPrefix (.-Pkg lib))]
+
+    (when (> (.-Debugvlog ctxt) 1)
+      (.Logf ctxt "ldobj: %s (%s)\n" (.-File lib) pkg))
+
+    (let [(values f err) (bio/Open (.-File lib))]
+      (when (!= err nil)
+        (Exitf "cannot open file %s: %v" (.-File lib) err))
+
+      (defer (.Close f))
+      (defer (^{:go/end 1094} (fn []
+            (when (and (== pkg "main") (not (.-Main lib)))
+              (Exitf "%s: not package main" (.-File lib))))))
+
+
+
+      (for [i 0] (< i (len ARMAG)) (inc! i)
+        (when [(values c err) ^{:go/via [Reader]} (.ReadByte f)] (and (== err nil) (== c (aget ARMAG i)))
+          (continue))
+
+
+        ;; /* load it as a regular file */
+        (let [l (.MustSeek f 0 2)]
+          (.MustSeek f 0 0)
+          (ldobj ctxt f lib l (.-File lib) (.-File lib))
+          (return)))
+
+
+      ;; /*
+      ;; * load all the object files from the archive now.
+      ;; * this gives us sequential file access and keeps us
+      ;; * from needing to come back later to pick up more
+      ;; * objects.  it breaks the usual C archive model, but
+      ;; * this is Go, not C.  the common case in Go is that
+      ;; * we need to load all the objects, and then we throw away
+      ;; * the individual symbols that are unused.
+      ;; *
+      ;; * loading every object will also make it possible to
+      ;; * load foreign objects not referenced by __.PKGDEF.
+      ;; */
+      (let [^ArHdr arhdr (zero ArHdr)
+          ^{:line 1121} off (.Offset f)]
+        (while true
+          (let [l (nextar f off (addr arhdr))]
+            (when (== l 0)
+              (break))
+
+            (when (< l 0)
+              (Exitf "%s: malformed archive" (.-File lib)))
+
+            (set! off + l)
+
+            ;; __.PKGDEF isn't a real Go object file, and it's
+            ;; absent in -linkobj builds anyway. Skipping it
+            ;; ensures consistency between -linkobj and normal
+            ;; build modes.
+            (when (== (.-name arhdr) pkgdef)
+              (continue))
+
+
+            (when (== (.-name arhdr) "dynimportfail")
+              (set! dynimportfail (append dynimportfail (.-Pkg lib))))
+
+            (when (== (.-name arhdr) "preferlinkext")
+              ;; Ignore this directive if -linkmode has been
+              ;; set explicitly.
+              (when (== ^{:go/via [Target]} (.-LinkMode ctxt) LinkAuto)
+                (set! preferlinkext (append preferlinkext (.-Pkg lib)))))
+
+
+
+            ;; Skip other special (non-object-file) sections that
+            ;; build tools may have added. Such sections must have
+            ;; short names so that the suffix is not truncated.
+            (when (< (len (.-name arhdr)) 16)
+              (when [ext (filepath/Ext (.-name arhdr))] (and (!= ext ".o") (!= ext ".syso"))
+                (continue)))
+
+
+
+            (let [pname (fmt/Sprintf "%s(%s)" (.-File lib) (.-name arhdr))]
+              (set! l (atolwhex (.-size arhdr)))
+              (ldobj ctxt f lib l pname (.-File lib)))))))))
+
+
+
+(go/type Hostobj (struct
+    ^{:line 1167 :tag (func [(* Link) (* bio/Reader) string int64 string])} ld
+    ^{:line 1168 :tag string} pkg
+    ^{:line 1169 :tag string} pn
+    ^{:line 1170 :tag string} file
+    ^{:line 1171 :tag int64} off
+    ^{:line 1172 :tag int64} length))
+
+
+(go/var ^{:tag (slice Hostobj)} hostobj)
+
+
+
+(go/var ^{:doc "These packages can use internal linking mode.\nOthers trigger external mode.\n"} internalpkg ^{:go/breaks [2 3 4 5 6 7 8 9 10 11 12]} (lit (slice string)
+    "crypto/internal/boring"
+    "crypto/internal/boring/syso"
+    "crypto/x509"
+    "net"
+    "os/user"
+    "runtime/cgo"
+    "runtime/race"
+    "runtime/race/internal/amd64v1"
+    "runtime/race/internal/amd64v3"
+    "runtime/msan"
+    "runtime/asan"))
+
+
+^{:go/end 1227} (go/func ldhostobj ^{:tag (* Hostobj)} [^{:tag (func [(* Link) (* bio/Reader) string int64 string])} ld ^objabi/HeadType headType ^{:tag (* bio/Reader)} f ^string pkg ^int64 length ^string pn ^string file]
+  (let [isinternal false]
+    (range [_ intpkg internalpkg]
+      (when (== pkg intpkg)
+        (set! isinternal true)
+        (break)))
+
+
+
+    ;; DragonFly declares errno with __thread, which results in a symbol
+    ;; type of R_386_TLS_GD or R_X86_64_TLSGD. The Go linker does not
+    ;; currently know how to handle TLS relocations, hence we have to
+    ;; force external linking for any libraries that link in code that
+    ;; uses errno. This can be removed if the Go linker ever supports
+    ;; these relocation types.
+    (when (== headType objabi/Hdragonfly)
+      (when (or (== pkg "net") (== pkg "os/user"))
+        (set! isinternal false)))
+
+
+
+    (when (not isinternal)
+      (set! externalobj true))
+
+
+    (set! hostobj (append hostobj (lit Hostobj)))
+    (let [h (addr (aget hostobj (- (len hostobj) 1)))]
+      (set! (.-ld h) ld)
+      (set! (.-pkg h) pkg)
+      (set! (.-pn h) pn)
+      (set! (.-file h) file)
+      (set! (.-off h) (.Offset f))
+      (set! (.-length h) length)
+      ^{:line 1226} h)))
+
+
+^{:go/end 1252} (go/func hostobjs [^{:tag (* Link)} ctxt]
+  (when (!= ^{:go/via [Target]} (.-LinkMode ctxt) LinkInternal)
+    (return))
+
+  (let [^{:tag (* Hostobj)} h (zero (* Hostobj))]
+
+    (for [i 0] (< i (len hostobj)) (inc! i)
+      (set! h (addr (aget hostobj i)))
+      (let [(values f err) (bio/Open (.-file h))]
+        (when (!= err nil)
+          (Exitf "cannot reopen %s: %v" (.-pn h) err))
+
+        (.MustSeek f (.-off h) 0)
+        (when (== (.-ld h) nil)
+          (Errorf "%s: unrecognized object file format" (.-pn h))
+          (continue))
+
+        ((.-ld h) ctxt f (.-pkg h) (.-length h) (.-pn h))
+        (when (!= @flagCaptureHostObjs "")
+          (captureHostObj h))
+
+        (.Close f)))))
+
+
+
+^{:go/end 1288} (go/func hostlinksetup [^{:tag (* Link)} ctxt]
+  (when (!= ^{:go/via [Target]} (.-LinkMode ctxt) LinkExternal)
+    (return))
+
+
+  ;; For external link, record that we need to tell the external linker -s,
+  ;; and turn off -s internally: the external linker needs the symbol
+  ;; information for its final link.
+  (set! debug_s @FlagS)
+  (set! @FlagS false)
+
+  ;; create temporary directory and arrange cleanup
+  (when (== @flagTmpdir "")
+    (let [(values dir err) (os/MkdirTemp "" "go-link-")]
+      (when (!= err nil)
+        (log/Fatal err))
+
+      (set! @flagTmpdir dir)
+      (set! ownTmpDir true)
+      (AtExit ^{:go/end 1275} (fn []
+          (os/RemoveAll @flagTmpdir)))))
+
+
+
+  ;; change our output to temporary object file
+  (when [err (.Close (.-Out ctxt))] (!= err nil)
+    (Exitf "error closing output file"))
+
+  (mayberemoveoutfile)
+
+  (let [p (filepath/Join @flagTmpdir "go.o")]
+    (when [err (.Open (.-Out ctxt) p)] (!= err nil)
+      (Exitf "cannot create %s: %v" p err))))
+
+
+
+
+
+
+
+
+
+
+^{:go/end 1304} (go/func cleanTimeStamps "cleanTimeStamps resets the timestamps for the specified list of\nexisting files to the Unix epoch (1970-01-01 00:00:00 +0000 UTC).\nWe take this step in order to help preserve reproducible builds;\nthis seems to be primarily needed for external linking on Darwin\nwith later versions of xcode, which (unfortunately) seem to want to\nincorporate object file times into the final output file's build\nID. See issue 64947 for the unpleasant details.\n" [^{:tag (slice string)} files]
+  (let [epocht (time/Unix 0 0)]
+    (range [_ f files]
+      (when [err (os/Chtimes f epocht epocht)] (!= err nil)
+        (Exitf "cannot chtimes %s: %v" f err)))))
+
+
+
+
+
+
+^{:go/end 1349} (go/method hostobjCopy "hostobjCopy creates a copy of the object files in hostobj in a\ntemporary directory.\n" [^{:tag (* Link)} ctxt] :results [^{:tag (slice string)} paths]
+  (let [^sync/WaitGroup wg (zero sync/WaitGroup)
+      ^{:line 1310} sema (make (chan (struct)) (runtime/NumCPU))] ; limit open file descriptors
+    (range [i h hostobj]
+      (let [h h
+          ^{:line 1313} dst (filepath/Join @flagTmpdir (fmt/Sprintf "%06d.o" i))]
+        (set! paths (append paths dst))
+        (when (!= (.-Debugvlog ctxt) 0)
+          (.Logf ctxt "host obj copy: %s from pkg %s -> %s\n" (.-pn h) (.-pkg h) dst))
+
+
+        (.Add wg 1)
+        (go (^{:go/end 1345} (fn []
+              (>! sema (lit (struct)))
+              (defer (^{:go/end 1325} (fn []
+                    (<! sema)
+                    (.Done wg))))
+
+              (let [(values f err) (os/Open (.-file h))]
+                (when (!= err nil)
+                  (Exitf "cannot reopen %s: %v" (.-pn h) err))
+
+                (defer (.Close f))
+                (when [(values _ err) (.Seek f (.-off h) 0)] (!= err nil)
+                  (Exitf "cannot seek %s: %v" (.-pn h) err))
+
+
+                (let [(values w ^:assign err) (os/Create dst)]
+                  (when (!= err nil)
+                    (Exitf "cannot create %s: %v" dst err))
+
+                  (when [(values _ err) (io/CopyN w f (.-length h))] (!= err nil)
+                    (Exitf "cannot write %s: %v" dst err))
+
+                  (when [err (.Close w)] (!= err nil)
+                    (Exitf "cannot close %s: %v" dst err)))))))))
+
+
+
+    (.Wait wg)
+    ^{:line 1348} paths))
+
+
+
+
+
+
+^{:go/end 1372} (go/func writeGDBLinkerScript "writeGDBLinkerScript creates gcc linker script file in temp\ndirectory. writeGDBLinkerScript returns created file path.\nThe script is used to work around gcc bug\n(see https://golang.org/issue/20183 for details).\n" ^string []
+  (let [name "fix_debug_gdb_scripts.ld"
+      ^{:line 1357} path (filepath/Join @flagTmpdir name)
+      ^{:line 1358} src "SECTIONS\n{\n  .debug_gdb_scripts BLOCK(__section_alignment__) (NOLOAD) :\n  {\n    *(.debug_gdb_scripts)\n  }\n}\nINSERT AFTER .debug_types;\n"
+
+
+
+
+
+
+
+
+      ^{:line 1367} err (os/WriteFile path (conv (slice byte) src) 0666)]
+    (when (!= err nil)
+      (Errorf "WriteFile %s failed: %v" name err))
+
+    ^{:line 1371} path))
+
+
+(go/type machoUpdateFunc (func [^{:tag (* Link)} ctxt ^{:tag (* os/File)} exef ^{:tag (* macho/File)} exem ^string outexe] [error]))
+
+
+^{:go/end 1433} (go/method archive "archive builds a .a archive from the hostobj object files.\n" [^{:tag (* Link)} ctxt]
+  (when (!= ^{:go/via [Target]} (.-BuildMode ctxt) BuildModeCArchive)
+    (return))
+
+
+  (exitIfErrors)
+
+  (when (== @flagExtar "")
+    (let [^:const ^{:val "--print-prog-name=ar"} printProgName "--print-prog-name=ar"
+        ^{:line 1386} cc (.extld ctxt)]
+      (set! @flagExtar "ar")
+      (when (linkerFlagSupported ^{:go/via [Target]} (.-Arch ctxt) (aget cc 0) "" printProgName)
+        (set! @flagExtar (.findExtLinkTool ctxt "ar")))))
+
+
+
+  (mayberemoveoutfile)
+
+  ;; Force the buffer to flush here so that external
+  ;; tools will see a complete file.
+  (when [err (.Close (.-Out ctxt))] (!= err nil)
+    (Exitf "error closing %v" @flagOutfile))
+
+
+  (let [argv (lit (slice string) @flagExtar "-q" "-c" "-s")]
+    (when (== ^{:go/via [Target]} (.-HeadType ctxt) objabi/Haix)
+      (set! argv (append argv "-X64")))
+
+    (let [godotopath (filepath/Join @flagTmpdir "go.o")]
+      (cleanTimeStamps (lit (slice string) godotopath))
+      (let [hostObjCopyPaths (.hostobjCopy ctxt)]
+        (cleanTimeStamps hostObjCopyPaths)
+
+        (set! argv (append argv @flagOutfile))
+        (set! argv (append argv godotopath))
+        (set! argv (append argv (spread hostObjCopyPaths)))
+
+        (when (!= (.-Debugvlog ctxt) 0)
+          (.Logf ctxt "archive: %s\n" (strings/Join argv " ")))
+
+
+        ;; If supported, use syscall.Exec() to invoke the archive command,
+        ;; which should be the final remaining step needed for the link.
+        ;; This will reduce peak RSS for the link (and speed up linking of
+        ;; large applications), since when the archive command runs we
+        ;; won't be holding onto all of the linker's live memory.
+        (when (and syscallExecSupported (not ownTmpDir))
+          (runAtExitFuncs)
+          (.execArchive ctxt argv)
+          (panic "should not get here"))
+
+
+        ;; Otherwise invoke 'ar' in the usual way (fork + exec).
+        (when [(values out err) (.CombinedOutput (exec/Command (aget argv 0) (spread (subslice argv 1))))] (!= err nil)
+          (Exitf "running %s failed: %v\n%s" (aget argv 0) err out))))))
+
+
+
+^{:go/end 2164} (go/method hostlink [^{:tag (* Link)} ctxt]
+  (when (or (!= ^{:go/via [Target]} (.-LinkMode ctxt) LinkExternal) (> nerrors 0))
+    (return))
+
+  (when (== ^{:go/via [Target]} (.-BuildMode ctxt) BuildModeCArchive)
+    (return))
+
+
+  (let [^{:tag (slice string)} argv (zero (slice string))]
+    (set! argv (append argv (spread (.extld ctxt))))
+    (set! argv (append argv (spread (hostlinkArchArgs ^{:go/via [Target]} (.-Arch ctxt)))))
+
+    (cond (or @FlagS debug_s)
+      (if (== ^{:go/via [Target]} (.-HeadType ctxt) objabi/Hdarwin) (do)
+        ;; Recent versions of macOS print
+        ;;	ld: warning: option -s is obsolete and being ignored
+        ;; so do not pass any arguments (but we strip symbols below).
+
+        (set! argv (append argv "-s")))
+
+      ^{:line 1455} @FlagW
+      (when (and (not ^{:go/via [Target]} (.IsAIX ctxt)) (not ^{:go/via [Target]} (.IsSolaris ctxt))) ; The AIX and Solaris linkers' -S has different meaning
+        (set! argv (append argv "-Wl,-S")))) ; suppress debugging symbols
+
+
+
+    ;; On darwin, whether to combine DWARF into executable.
+    ;; Only macOS supports unmapped segments such as our __DWARF segment.
+    (let [combineDwarf (and ^{:go/via [Target]} (.IsDarwin ctxt) (not @FlagW) (== machoPlatform PLATFORM_MACOS))
+
+        (values ^bool isMSVC ^bool isLLD) (zero bool) ; used on Windows
+        ^{:line 1466} wlPrefix "-Wl,--"]
+
+      (switch ^{:go/via [Target]} (.-HeadType ctxt)
+        (case [objabi/Hdarwin]
+          (when combineDwarf
+            ;; Leave room for DWARF combining.
+            ;; -headerpad is incompatible with -fembed-bitcode.
+            (set! argv (append argv "-Wl,-headerpad,1144")))
+
+          (when (and (.DynlinkingGo ctxt) (!= buildcfg/GOOS "ios"))
+            ;; -flat_namespace is deprecated on iOS.
+            ;; It is useful for supporting plugins. We don't support plugins on iOS.
+            ;; -flat_namespace may cause the dynamic linker to hang at forkExec when
+            ;; resolving a lazy binding. See issue 38824.
+            ;; Force eager resolution to work around.
+            (set! argv (append argv "-Wl,-flat_namespace" "-Wl,-bind_at_load")))
+
+          (when (not combineDwarf)
+            (set! argv (append argv "-Wl,-S")) ; suppress STAB (symbolic debugging) symbols
+            (when debug_s
+              ;; We are generating a binary with symbol table suppressed.
+              ;; Suppress local symbols. We need to keep dynamically exported
+              ;; and referenced symbols so the dynamic linker can resolve them.
+              (set! argv (append argv "-Wl,-x"))))
+
+
+          (when @flagRace
+            ;; With https://github.com/llvm/llvm-project/pull/182943, the race object
+            ;; has a weak import of __dyld_get_dyld_header, which is only defined on
+            ;; newer macOS (26.4+).
+            (set! argv (append argv "-Wl,-U,__dyld_get_dyld_header")))
+
+          (when (== @flagHostBuildid "none")
+            (set! argv (append argv "-Wl,-no_uuid"))))
+
+        (case [objabi/Hopenbsd]
+          (set! argv (append argv "-pthread"))
+          (when (!= ^{:go/via [Target]} (.-BuildMode ctxt) BuildModePIE)
+            (set! argv (append argv "-Wl,-nopie")))
+
+          (when (linkerFlagSupported ^{:go/via [Target]} (.-Arch ctxt) (aget argv 0) "" "-Wl,-z,nobtcfi")
+            ;; -Wl,-z,nobtcfi is only supported on OpenBSD 7.4+, remove guard
+            ;; when OpenBSD 7.5 is released and 7.3 is no longer supported.
+            (set! argv (append argv "-Wl,-z,nobtcfi")))
+
+          (when (.InFamily ^{:go/via [Target]} (.-Arch ctxt) sys/ARM64)
+            ;; Disable execute-only on openbsd/arm64 - the Go arm64 assembler
+            ;; currently stores constants in the text section rather than in rodata.
+            ;; See issue #59615.
+            (set! argv (append argv "-Wl,--no-execute-only"))))
+
+        (case [objabi/Hwindows]
+          (set! isMSVC (.isMSVC ctxt))
+          (set! isLLD (.isLLD ctxt))
+          (when isMSVC
+            ;; For various options, MSVC lld-link only accepts one dash.
+            ;; TODO: It seems mingw clang supports one or two dashes,
+            ;; maybe we can always use one dash,  but I'm not sure about
+            ;; legacy compilers that currently work.
+            (set! wlPrefix "-Wl,-"))
+
+
+          (if windowsgui
+            (set! argv (append argv "-mwindows"))
+
+            (set! argv (append argv "-mconsole")))
+
+          ;; Mark as having awareness of terminal services, to avoid
+          ;; ancient compatibility hacks.
+
+          (set! argv (append argv (+ wlPrefix "tsaware")))
+
+          ;; Enable DEP
+          (set! argv (append argv (+ wlPrefix "nxcompat")))
+
+          (when (not isMSVC)
+            (let [peMajorVersion PeMinimumTargetMajorVersion
+                ^{:line 1543} peMinorVersion PeMinimumTargetMinorVersion]
+              (when (and (>= peMajorVersion 10) (not isLLD)
+                  (not (peHasLoadConfigDirectorySupport ^{:go/via [Target]} (.-Arch ctxt) (aget argv 0))))
+                ;; The external linker doesn't support wiring up
+                ;; _load_config_used to the PE Load Configuration
+                ;; Directory. Windows 10+ validates this directory,
+                ;; so fall back to an older version to avoid
+                ;; load failures.
+                (set! peMajorVersion 6)
+                (set! peMinorVersion 1))
+
+              (set! argv (append argv (fmt/Sprintf "-Wl,--major-os-version=%d" peMajorVersion)))
+              (set! argv (append argv (fmt/Sprintf "-Wl,--minor-os-version=%d" peMinorVersion)))
+              (set! argv (append argv (fmt/Sprintf "-Wl,--major-subsystem-version=%d" peMajorVersion)))
+              (set! argv (append argv (fmt/Sprintf "-Wl,--minor-subsystem-version=%d" peMinorVersion))))))
+
+        (case [objabi/Haix]
+          (set! argv (append argv "-pthread"))
+          ;; prevent ld to reorder .text functions to keep the same
+          ;; first/last functions for moduledata.
+          (set! argv (append argv "-Wl,-bnoobjreorder"))
+          ;; mcmodel=large is needed for every gcc generated files, but
+          ;; ld still need -bbigtoc in order to allow larger TOC.
+          (set! argv (append argv "-mcmodel=large"))
+          (set! argv (append argv "-Wl,-bbigtoc"))))
+
+
+      ;; On PPC64, verify the external toolchain supports Power10. This is needed when
+      ;; PC relative relocations might be generated by Go. Only targets compiling ELF
+      ;; binaries might generate these relocations.
+      (when (and ^{:go/via [Target]} (.IsPPC64 ctxt) ^{:go/via [Target]} (.IsElf ctxt) (>= buildcfg/GOPPC64 10))
+        (when (not (linkerFlagSupported ^{:go/via [Target]} (.-Arch ctxt) (aget argv 0) "" "-mcpu=power10"))
+          (Exitf ^{:go/breaks [2]} (+ "The external toolchain does not support -mcpu=power10. "
+              " This is required to externally link GOPPC64 >= power10"))))
+
+
+
+      ;; Enable/disable ASLR on Windows.
+      (let [addASLRargs ^{:go/end 1633} (fn ^{:tag (slice string)} [^{:tag (slice string)} argv ^bool val]
+            ;; Old/ancient versions of GCC support "--dynamicbase" and
+            ;; "--high-entropy-va" but don't enable it by default. In
+            ;; addition, they don't accept "--disable-dynamicbase" or
+            ;; "--no-dynamicbase", so the only way to disable ASLR is to
+            ;; not pass any flags at all.
+            ;;
+            ;; More modern versions of GCC (and also clang) enable ASLR
+            ;; by default. With these compilers, however you can turn it
+            ;; off if you want using "--disable-dynamicbase" or
+            ;; "--no-dynamicbase".
+            ;;
+            ;; The strategy below is to try using "--disable-dynamicbase";
+            ;; if this succeeds, then assume we're working with more
+            ;; modern compilers and act accordingly. If it fails, assume
+            ;; an ancient compiler with ancient defaults.
+            (let [^string dbopt (zero string)
+                ^{:line 1598 :tag string} heopt (zero string)
+                ^{:line 1599} dbon (+ wlPrefix "dynamicbase")
+                ^{:line 1600} heon (+ wlPrefix "high-entropy-va")
+                ^{:line 1601} dboff (+ wlPrefix "disable-dynamicbase")
+                ^{:line 1602} heoff (+ wlPrefix "disable-high-entropy-va")]
+              (when isMSVC
+                (set! heon (+ wlPrefix "highentropyva"))
+                (set! heoff (+ wlPrefix "highentropyva:no"))
+                (set! dboff (+ wlPrefix "dynamicbase:no")))
+
+              (if val (do
+                  (set! dbopt dbon)
+                  (set! heopt heon))
+
+                ;; Test to see whether "--disable-dynamicbase" works.
+                (let [newer (linkerFlagSupported ^{:go/via [Target]} (.-Arch ctxt) (aget argv 0) "" dboff)]
+                  (if newer (do
+                      ;; Newer compiler, which supports both on/off options.
+                      (set! dbopt dboff)
+                      (set! heopt heoff))
+                    (do
+                      ;; older toolchain: we have to say nothing in order to
+                      ;; get a no-ASLR binary.
+                      (set! dbopt "")
+                      (set! heopt "")))))
+
+
+              (when (!= dbopt "")
+                (set! argv (append argv dbopt)))
+
+              ;; enable high-entropy ASLR on 64-bit.
+              (when (and (>= (.-PtrSize ^{:go/via [Target]} (.-Arch ctxt)) 8) (!= heopt ""))
+                (set! argv (append argv heopt)))
+
+              ^{:line 1632} argv))]
+
+
+        (switch ^{:go/via [Target]} (.-BuildMode ctxt)
+          (case [BuildModeExe]
+            (when (== ^{:go/via [Target]} (.-HeadType ctxt) objabi/Hdarwin)
+              (when (and (== machoPlatform PLATFORM_MACOS) ^{:go/via [Target]} (.IsAMD64 ctxt))
+                (set! argv (append argv "-Wl,-no_pie"))))
+
+
+            (when (and @flagRace (== ^{:go/via [Target]} (.-HeadType ctxt) objabi/Hwindows))
+              ;; Current windows/amd64 race detector tsan support
+              ;; library can't handle PIE mode (see #53539 for more details).
+              ;; For now, explicitly disable PIE (since some compilers
+              ;; default to it) if -race is in effect.
+              (set! argv (addASLRargs argv false))))
+
+          (case [BuildModePIE]
+            (switch ^{:go/via [Target]} (.-HeadType ctxt)
+              (case [objabi/Hdarwin objabi/Haix])
+              (case [objabi/Hwindows]
+                (when (and @flagAslr @flagRace)
+                  ;; Current windows/amd64 race detector tsan support
+                  ;; library can't handle PIE mode (see #53539 for more details).
+                  ;; Disable alsr if -race in effect.
+                  (set! @flagAslr false))
+
+                (set! argv (addASLRargs argv @flagAslr)))
+              (default
+                ;; ELF.
+                (when ^{:go/via [Target]} (.UseRelro ctxt)
+                  (set! argv (append argv "-Wl,-z,relro")))
+
+                (set! argv (append argv "-pie")))))
+
+          (case [BuildModeCShared]
+            (if (== ^{:go/via [Target]} (.-HeadType ctxt) objabi/Hdarwin)
+              (set! argv (append argv "-dynamiclib"))
+              (do
+                (when ^{:go/via [Target]} (.UseRelro ctxt)
+                  (set! argv (append argv "-Wl,-z,relro")))
+
+                (set! argv (append argv "-shared"))
+                (if (== ^{:go/via [Target]} (.-HeadType ctxt) objabi/Hwindows)
+                  (set! argv (addASLRargs argv @flagAslr))
+                  (do
+                    ;; Pass -z nodelete to mark the shared library as
+                    ;; non-closeable: a dlclose will do nothing.
+                    (set! argv (append argv "-Wl,-z,nodelete"))
+                    ;; Only pass Bsymbolic on non-Windows.
+                    (set! argv (append argv "-Wl,-Bsymbolic")))))))
+
+
+          (case [BuildModeShared]
+            (when ^{:go/via [Target]} (.UseRelro ctxt)
+              (set! argv (append argv "-Wl,-z,relro")))
+
+            (set! argv (append argv "-shared")))
+          (case [BuildModePlugin]
+            (if (== ^{:go/via [Target]} (.-HeadType ctxt) objabi/Hdarwin)
+              (set! argv (append argv "-dynamiclib"))
+              (do
+                (when ^{:go/via [Target]} (.UseRelro ctxt)
+                  (set! argv (append argv "-Wl,-z,relro")))
+
+                (set! argv (append argv "-shared"))))))
+
+
+
+        (let [^string altLinker (zero string)]
+          (when (and ^{:go/via [Target]} (.-IsELF ctxt) ^:go/paren (or (.DynlinkingGo ctxt) @flagBindNow))
+            ;; For ELF targets, when producing dynamically linked Go code
+            ;; or when immediate binding is explicitly requested,
+            ;; we force all symbol resolution to be done at program startup
+            ;; because lazy PLT resolution can use large amounts of stack at
+            ;; times we cannot allow it to do so.
+            (set! argv (append argv "-Wl,-z,now")))
+
+
+          (when (and ^{:go/via [Target]} (.-IsELF ctxt) (.DynlinkingGo ctxt))
+            ;; Do not let the host linker generate COPY relocations. These
+            ;; can move symbols out of sections that rely on stable offsets
+            ;; from the beginning of the section (like sym.STYPE).
+            (set! argv (append argv "-Wl,-z,nocopyreloc"))
+
+            (when (== buildcfg/GOOS "android")
+              ;; Use lld to avoid errors from default linker (issue #38838)
+              (set! altLinker "lld"))
+
+
+            (when (and (.InFamily ^{:go/via [Target]} (.-Arch ctxt) sys/ARM64) (== buildcfg/GOOS "linux"))
+              ;; On ARM64, the GNU linker had issues with -znocopyreloc
+              ;; and COPY relocations. This was fixed in GNU ld 2.36+.
+              ;; https://sourceware.org/bugzilla/show_bug.cgi?id=19962
+              ;; https://go.dev/issue/22040
+              ;; And newer gold is deprecated, may lack new features/flags, or even missing
+
+              ;; If the default linker is GNU ld 2.35 or older, use gold
+              (let [useGold false
+                  (values name args) (values (aget flagExtld 0) (subslice flagExtld 1))]
+                (set! args (append args "-Wl,--version"))
+                (let [cmd (exec/Command name (spread args))]
+                  (when [(values out err) (.CombinedOutput cmd)] (== err nil)
+                    ;; Parse version from output like "GNU ld (GNU Binutils for Distro) 2.36.1"
+                    (range [line (strings/Lines (conv string out))]
+                      (when (not (strings/HasPrefix line "GNU ld "))
+                        (continue))
+
+                      (let [fields (strings/Fields (subslice line (len "GNU ld ")))
+                          (values ^int major ^int minor) (zero int)]
+                        (when [(values ret err) (fmt/Sscanf (aget fields (- (len fields) 1)) "%d.%d" (addr major) (addr minor))] (and (== ret 2) (== err nil))
+                          (when (and (== major 2) (<= minor 35))
+                            (set! useGold true))
+
+                          (break)))))
+
+
+
+
+                  (when useGold
+                    ;; Use gold for older linkers
+                    (set! altLinker "gold")
+
+                    ;; If gold is not installed, gcc will silently switch
+                    ;; back to ld.bfd. So we parse the version information
+                    ;; and provide a useful error if gold is missing.
+                    (set! args (subslice flagExtld 1))
+                    (set! args (append args "-fuse-ld=gold" "-Wl,--version"))
+                    (set! cmd (exec/Command name (spread args)))
+                    (when [(values out err) (.CombinedOutput cmd)] (== err nil)
+                      (when (not (bytes/Contains out (conv (slice byte) "GNU gold")))
+                        (log/Fatalf "ARM64 external linker must be ld>=2.36 or gold (issue #15696, 22040), but is not: %s" out))))))))
+
+
+
+
+
+          (when (and (== (.-Family ^{:go/via [Target]} (.-Arch ctxt)) sys/ARM64) (== buildcfg/GOOS "freebsd"))
+            ;; Switch to ld.bfd on freebsd/arm64.
+            (set! altLinker "bfd")
+
+            ;; Provide a useful error if ld.bfd is missing.
+            (let [(values name args) (values (aget flagExtld 0) (subslice flagExtld 1))]
+              (set! args (append args "-fuse-ld=bfd" "-Wl,--version"))
+              (let [cmd (exec/Command name (spread args))]
+                (when [(values out err) (.CombinedOutput cmd)] (== err nil)
+                  (when (not (bytes/Contains out (conv (slice byte) "GNU ld")))
+                    (log/Fatalf "ARM64 external linker must be ld.bfd (issue #35197), please install devel/binutils"))))))
+
+
+
+          (when (!= altLinker "")
+            (set! argv (append argv (+ "-fuse-ld=" altLinker))))
+
+
+          (when (and ^{:go/via [Target]} (.-IsELF ctxt) (linkerFlagSupported ^{:go/via [Target]} (.-Arch ctxt) (aget argv 0) "" "-Wl,--build-id=0x1234567890abcdef")) ; Solaris ld doesn't support --build-id.
+            (cond (> (len buildinfo) 0)
+              (set! argv (append argv (fmt/Sprintf "-Wl,--build-id=0x%x" buildinfo)))
+              (== @flagHostBuildid "none")
+              (set! argv (append argv "-Wl,--build-id=none"))))
+
+
+
+          ;; On Windows, given -o foo, GCC will append ".exe" to produce
+          ;; "foo.exe".  We have decided that we want to honor the -o
+          ;; option. To make this work, we append a '.' so that GCC
+          ;; will decide that the file already has an extension. We
+          ;; only want to do this when producing a Windows output file
+          ;; on a Windows host.
+          (let [outopt @flagOutfile]
+            (when (and (== buildcfg/GOOS "windows") (== runtime/GOOS "windows") (== (filepath/Ext outopt) ""))
+              (set! outopt + "."))
+
+            (set! argv (append argv "-o"))
+            (set! argv (append argv outopt))
+
+            (when (!= (.-val rpath) "")
+              (set! argv (append argv (fmt/Sprintf "-Wl,-rpath,%s" (.-val rpath)))))
+
+
+            (when (!= @flagInterpreter "")
+              ;; Many linkers support both -I and the --dynamic-linker flags
+              ;; to set the ELF interpreter, but lld only supports
+              ;; --dynamic-linker so prefer that (ld on very old Solaris only
+              ;; supports -I but that seems less important).
+              (set! argv (append argv (fmt/Sprintf "-Wl,--dynamic-linker,%s" @flagInterpreter))))
+
+
+            ;; Force global symbols to be exported for dlopen, etc.
+            (switch
+              (case [^{:go/via [Target]} (.-IsELF ctxt)]
+                (if (or (.DynlinkingGo ctxt) (== ^{:go/via [Target]} (.-BuildMode ctxt) BuildModeCShared) (not (linkerFlagSupported ^{:go/via [Target]} (.-Arch ctxt) (aget argv 0) altLinker "-Wl,--export-dynamic-symbol=main")))
+                  (set! argv (append argv "-rdynamic"))
+
+                  (let [^{:tag (slice string)} exports (zero (slice string))]
+                    (.ForAllCgoExportDynamic (.-loader ctxt) ^{:go/end 1829} (fn [^loader/Sym s]
+                        (set! exports (append exports (+ "-Wl,--export-dynamic-symbol=" (.SymExtname (.-loader ctxt) s))))))
+
+                    (sort/Strings exports)
+                    (set! argv (append argv (spread exports))))))
+
+              (case [^{:go/via [Target]} (.IsAIX ctxt)]
+                (let [fileName (xcoffCreateExportFile ctxt)]
+                  (set! argv (append argv (+ "-Wl,-bE:" fileName)))))
+              (case [(and ^{:go/via [Target]} (.IsWindows ctxt) (not (^{:inst [go.cmd.internal.quoted/Flag string]} slices/Contains flagExtldflags (+ wlPrefix "export-all-symbols"))))]
+                (let [fileName (peCreateExportFile ctxt (filepath/Base outopt))
+                    ^{:line 1838} prefix ""]
+                  (when isMSVC
+                    (set! prefix "-Wl,-def:"))
+
+                  (set! argv (append argv (+ prefix fileName))))))
+
+
+            (let [^:const ^{:val "-Qunused-arguments"} unusedArguments "-Qunused-arguments"]
+              (when (linkerFlagSupported ^{:go/via [Target]} (.-Arch ctxt) (aget argv 0) altLinker unusedArguments)
+                (set! argv (append argv unusedArguments)))
+
+
+              (when ^{:go/via [Target]} (.IsWindows ctxt)
+                ;; Suppress generation of the PE file header timestamp,
+                ;; so as to avoid spurious build ID differences between
+                ;; linked binaries that are otherwise identical other than
+                ;; the date/time they were linked.
+                (let [^:const ^{:val "-Wl,--no-insert-timestamp"} noTimeStamp "-Wl,--no-insert-timestamp"]
+                  (when (linkerFlagSupported ^{:go/via [Target]} (.-Arch ctxt) (aget argv 0) altLinker noTimeStamp)
+                    (set! argv (append argv noTimeStamp)))))
+
+
+
+              (let [^:const ^{:val "-Wl,--compress-debug-sections=zlib"} compressDWARF "-Wl,--compress-debug-sections=zlib"]
+                (when (and (.-compressDWARF ctxt) (linkerFlagSupported ^{:go/via [Target]} (.-Arch ctxt) (aget argv 0) altLinker compressDWARF))
+                  (set! argv (append argv compressDWARF)))
+
+
+                (let [hostObjCopyPaths (.hostobjCopy ctxt)]
+                  (cleanTimeStamps hostObjCopyPaths)
+                  (let [godotopath (filepath/Join @flagTmpdir "go.o")]
+                    (cleanTimeStamps (lit (slice string) godotopath))
+
+                    (set! argv (append argv godotopath))
+                    (set! argv (append argv (spread hostObjCopyPaths)))
+                    (when (== ^{:go/via [Target]} (.-HeadType ctxt) objabi/Haix)
+                      ;; We want to have C files after Go files to remove
+                      ;; trampolines csects made by ld.
+                      (set! argv (append argv "-nostartfiles"))
+                      (set! argv (append argv "/lib/crt0_64.o"))
+
+                      (let [extld (.extld ctxt)
+                          (values name args) (values (aget extld 0) (subslice extld 1))
+                          ;; Get starting files.
+                          ^{:line 1882} getPathFile ^{:go/end 1889} (fn ^string [^string file]
+                            (let [args (append args "-maix64" (+ "--print-file-name=" file))
+                                (values out err) (.CombinedOutput (exec/Command name (spread args)))]
+                              (when (!= err nil)
+                                (log/Fatalf "running %s failed: %v\n%s" extld err out))
+
+                              (strings/Trim (conv string out) "\n")))
+
+                          ;; Since GCC version 11, the 64-bit version of GCC starting files
+                          ;; are now suffixed by "_64". Even under "-maix64" multilib directory
+                          ;; "crtcxa.o" is 32-bit.
+                          ^{:line 1893} crtcxa (getPathFile "crtcxa_64.o")]
+                        (when (not (filepath/IsAbs crtcxa))
+                          (set! crtcxa (getPathFile "crtcxa.o")))
+
+                        (let [crtdbase (getPathFile "crtdbase_64.o")]
+                          (when (not (filepath/IsAbs crtdbase))
+                            (set! crtdbase (getPathFile "crtdbase.o")))
+
+                          (set! argv (append argv crtcxa))
+                          (set! argv (append argv crtdbase)))))
+
+
+                    (when ^{:go/via [Target]} (.-linkShared ctxt)
+                      (let [seenDirs (make (map string bool))
+                          ^{:line 1907} seenLibs (make (map string bool))
+                          ^{:line 1908} addshlib ^{:go/end 1923} (fn [^string path]
+                            (let [(values dir base) (filepath/Split path)]
+                              (when (not (aget seenDirs dir))
+                                (set! argv (append argv (+ "-L" dir)))
+                                (when (not (.-set rpath))
+                                  (set! argv (append argv (+ "-Wl,-rpath=" dir))))
+
+                                (aset seenDirs dir true))
+
+                              (set! base (strings/TrimSuffix base ".so"))
+                              (set! base (strings/TrimPrefix base "lib"))
+                              (when (not (aget seenLibs base))
+                                (set! argv (append argv (+ "-l" base)))
+                                (aset seenLibs base true))))]
+
+
+                        (range [_ shlib (.-Shlibs ctxt)]
+                          (addshlib (.-Path shlib))
+                          (range [_ dep (.-Deps shlib)]
+                            (when (== dep "")
+                              (continue))
+
+                            (let [libpath (findshlib ctxt dep)]
+                              (when (!= libpath "")
+                                (addshlib libpath)))))))
+
+
+
+
+
+                    ;; clang, unlike GCC, passes -rdynamic to the linker
+                    ;; even when linking with -static, causing a linker
+                    ;; error when using GNU ld. So take out -rdynamic if
+                    ;; we added it. We do it in this order, rather than
+                    ;; only adding -rdynamic later, so that -extldflags
+                    ;; can override -rdynamic without using -static.
+                    ;; Similarly for -Wl,--dynamic-linker.
+                    (let [checkStatic ^{:go/end 1953} (fn [^string arg]
+                          (when (and ^{:go/via [Target]} (.-IsELF ctxt) (== arg "-static"))
+                            (range [i argv]
+                              (when (or (== (aget argv i) "-rdynamic") (strings/HasPrefix (aget argv i) "-Wl,--dynamic-linker,"))
+                                (aset argv i "-static")))))]
+
+
+
+
+
+                      (range [_ p ldflag]
+                        (set! argv (append argv p))
+                        (checkStatic p))
+
+
+                      ;; When building a program with the default -buildmode=exe the
+                      ;; gc compiler generates code requires DT_TEXTREL in a
+                      ;; position independent executable (PIE). On systems where the
+                      ;; toolchain creates PIEs by default, and where DT_TEXTREL
+                      ;; does not work, the resulting programs will not run. See
+                      ;; issue #17847. To avoid this problem pass -no-pie to the
+                      ;; toolchain if it is supported.
+                      (when (and (== ^{:go/via [Target]} (.-BuildMode ctxt) BuildModeExe) (not ^{:go/via [Target]} (.-linkShared ctxt)) (not (and ^{:go/via [Target]} (.IsDarwin ctxt) ^{:go/via [Target]} (.IsARM64 ctxt))))
+                        ;; GCC uses -no-pie, clang uses -nopie.
+                        (range [_ nopie (lit (slice string) "-no-pie" "-nopie")]
+                          (when (linkerFlagSupported ^{:go/via [Target]} (.-Arch ctxt) (aget argv 0) altLinker nopie)
+                            (set! argv (append argv nopie))
+                            (break))))
+
+
+
+
+                      (range [_ p flagExtldflags]
+                        (set! argv (append argv p))
+                        (checkStatic p))
+
+                      (when (== ^{:go/via [Target]} (.-HeadType ctxt) objabi/Hwindows)
+                        ;; use gcc linker script to work around gcc bug
+                        ;; (see https://golang.org/issue/20183 for details).
+                        (when (not isLLD)
+                          (let [p (writeGDBLinkerScript)]
+                            (set! argv (append argv (+ "-Wl,-T," p)))))
+
+                        (when @flagRace
+                          ;; Apparently --print-file-name doesn't work with -msvc clang.
+                          ;; (The library name is synchronization.lib, but even with that
+                          ;; name it still doesn't print the full path.) Assume it always
+                          ;; it.
+                          (when (or isMSVC (!= (.findLibPath ctxt "libsynchronization.a") "libsynchronization.a"))
+                            (set! argv (append argv "-lsynchronization"))))
+
+
+                        (when (not isMSVC)
+                          ;; libmingw32 and libmingwex have some inter-dependencies,
+                          ;; so must use linker groups.
+                          (set! argv (append argv "-Wl,--start-group" "-lmingwex" "-lmingw32" "-Wl,--end-group")))
+
+                        (set! argv (append argv (spread (peimporteddlls)))))
+
+
+                      (set! argv (.passLongArgsInResponseFile ctxt argv altLinker))
+
+                      (when (!= (.-Debugvlog ctxt) 0)
+                        (.Logf ctxt "host link:")
+                        (range [_ v argv]
+                          (.Logf ctxt " %q" v))
+
+                        (.Logf ctxt "\n"))
+
+
+                      (let [cmd (exec/Command (aget argv 0) (spread (subslice argv 1)))
+                          (values out err) (.CombinedOutput cmd)]
+                        (when (!= err nil)
+                          (Exitf "running %s failed: %v\n%s\n%s" (aget argv 0) err cmd out))
+
+
+                        ;; Filter out useless linker warnings caused by bugs outside Go.
+                        ;; See also cmd/go/internal/work/exec.go's gccld method.
+                        (let [^{:tag (slice (slice byte))} save (zero (slice (slice byte)))
+                            ^{:line 2024 :tag int} skipLines (zero int)]
+                          (range [_ line (bytes/SplitAfter out (conv (slice byte) "\n"))]
+                            ;; golang.org/issue/26073 - Apple Xcode bug
+                            (when (bytes/Contains line (conv (slice byte) "ld: warning: text-based stub file"))
+                              (continue))
+
+
+                            (when (> skipLines 0)
+                              (dec! skipLines)
+                              (continue))
+
+
+                            ;; Remove TOC overflow warning on AIX.
+                            (when (bytes/Contains line (conv (slice byte) "ld: 0711-783"))
+                              (set! skipLines 2)
+                              (continue))
+
+
+                            (set! save (append save line)))
+
+                          (set! out (bytes/Join save nil))
+
+                          (when (> (len out) 0)
+                            ;; always print external output even if the command is successful, so that we don't
+                            ;; swallow linker warnings (see https://golang.org/issue/17935).
+                            (when (and ^{:go/via [Target]} (.IsDarwin ctxt) ^{:go/via [Target]} (.IsAMD64 ctxt))
+                              (let [^:const ^{:val "ld: warning: -no_pie is deprecated when targeting new OS versions\n"} noPieWarning "ld: warning: -no_pie is deprecated when targeting new OS versions\n"]
+                                (when [i (bytes/Index out (conv (slice byte) noPieWarning))] (>= i 0)
+                                  ;; swallow -no_pie deprecation warning, issue 54482
+                                  (set! out (append (subslice out _ i) (spread (subslice out (+ i (len noPieWarning)))))))))
+
+
+                            (when ^{:go/via [Target]} (.IsDarwin ctxt)
+                              (let [^:const ^{:val "ld: warning: -bind_at_load is deprecated on macOS\n"} bindAtLoadWarning "ld: warning: -bind_at_load is deprecated on macOS\n"]
+                                (when [i (bytes/Index out (conv (slice byte) bindAtLoadWarning))] (>= i 0)
+                                  ;; -bind_at_load is deprecated with ld-prime, but needed for
+                                  ;; correctness with older versions of ld64. Swallow the warning.
+                                  ;; TODO: maybe pass -bind_at_load conditionally based on C
+                                  ;; linker version.
+                                  (set! out (append (subslice out _ i) (spread (subslice out (+ i (len bindAtLoadWarning)))))))))
+
+
+                            (.Logf ctxt "%s" out))
+
+
+                          ;; Helper for updating a Macho binary in some way (shared between
+                          ;; dwarf combining and UUID update).
+                          (let [updateMachoOutFile ^{:go/end 2090} (fn [^string op ^machoUpdateFunc updateFunc]
+                                ;; For os.Rename to work reliably, must be in same directory as outfile.
+                                (let [rewrittenOutput (+ @flagOutfile "~")
+                                    (values exef err) (os/Open @flagOutfile)]
+                                  (when (!= err nil)
+                                    (Exitf "%s: %s failed: %v" (aget os/Args 0) op err))
+
+                                  (defer (.Close exef))
+                                  (let [(values exem ^:assign err) (macho/NewFile exef)]
+                                    (when (!= err nil)
+                                      (Exitf "%s: parsing Mach-O header failed: %v" (aget os/Args 0) err))
+
+                                    (when [err (updateFunc ctxt exef exem rewrittenOutput)] (!= err nil)
+                                      (Exitf "%s: %s failed: %v" (aget os/Args 0) op err))
+
+                                    (os/Remove @flagOutfile)
+                                    (when [err (os/Rename rewrittenOutput @flagOutfile)] (!= err nil)
+                                      (Exitf "%s: %v" (aget os/Args 0) err)))))
+
+
+
+                              ^{:line 2092} uuidUpdated false]
+                            (when combineDwarf
+                              ;; Find "dsymutils" and "strip" tools using CC --print-prog-name.
+                              (let [dsymutilCmd (.findExtLinkTool ctxt "dsymutil")
+                                  ^{:line 2096} stripCmd (.findExtLinkTool ctxt "strip")
+
+                                  ^{:line 2098} dsym (filepath/Join @flagTmpdir "go.dwarf")
+                                  ^{:line 2099} cmd (exec/Command dsymutilCmd "-f" @flagOutfile "-o" dsym)
+                                  ;; dsymutil may not clean up its temp directory at exit.
+                                  ;; Set DSYMUTIL_REPRODUCER_PATH to work around. see issue 59026.
+                                  ;; dsymutil (Apple LLVM version 16.0.0) deletes the directory
+                                  ;; even if it is not empty. We still need our tmpdir, so give a
+                                  ;; subdirectory to dsymutil.
+                                  ^{:line 2105} dsymDir (filepath/Join @flagTmpdir "dsymutil")
+                                  ^{:line 2106} err (os/MkdirAll dsymDir 0777)]
+                                (when (!= err nil)
+                                  (Exitf "fail to create temp dir: %v" err))
+
+                                (set! (.-Env cmd) (append (os/Environ) (+ "DSYMUTIL_REPRODUCER_PATH=" dsymDir)))
+                                (when (!= (.-Debugvlog ctxt) 0)
+                                  (.Logf ctxt "host link dsymutil:")
+                                  (range [_ v (.-Args cmd)]
+                                    (.Logf ctxt " %q" v))
+
+                                  (.Logf ctxt "\n"))
+
+                                (when [(values out err) (.CombinedOutput cmd)] (!= err nil)
+                                  (Exitf "%s: running dsymutil failed: %v\n%s\n%s" (aget os/Args 0) err cmd out))
+
+                                ;; Remove STAB (symbolic debugging) symbols after we are done with them (by dsymutil).
+                                ;; They contain temporary file paths and make the build not reproducible.
+                                (let [^:var stripArgs (lit (slice string) "-S")]
+                                  (when debug_s
+                                    ;; We are generating a binary with symbol table suppressed.
+                                    ;; Suppress local symbols. We need to keep dynamically exported
+                                    ;; and referenced symbols so the dynamic linker can resolve them.
+                                    (set! stripArgs (append stripArgs "-x")))
+
+                                  (set! stripArgs (append stripArgs @flagOutfile))
+                                  (when (!= (.-Debugvlog ctxt) 0)
+                                    (.Logf ctxt "host link strip: %q" stripCmd)
+                                    (range [_ v stripArgs]
+                                      (.Logf ctxt " %q" v))
+
+                                    (.Logf ctxt "\n"))
+
+                                  (set! cmd (exec/Command stripCmd (spread stripArgs)))
+                                  (when [(values out err) (.CombinedOutput cmd)] (!= err nil)
+                                    (Exitf "%s: running strip failed: %v\n%s\n%s" (aget os/Args 0) err cmd out))
+
+                                  ;; Skip combining if `dsymutil` didn't generate a file. See #11994.
+                                  (when [(values _ err) (os/Stat dsym)] (== err nil)
+                                    (updateMachoOutFile "combining dwarf"
+                                      ^{:go/end 2147} (fn ^error [^{:tag (* Link)} ctxt ^{:tag (* os/File)} exef ^{:tag (* macho/File)} exem ^string outexe]
+                                        (machoCombineDwarf ctxt exef exem dsym outexe)))
+
+                                    (set! uuidUpdated true)))))
+
+
+                            (when (and ^{:go/via [Target]} (.IsDarwin ctxt) (not uuidUpdated) (> (len buildinfo) 0))
+                              (updateMachoOutFile "rewriting uuid"
+                                ^{:go/end 2155} (fn ^error [^{:tag (* Link)} ctxt ^{:tag (* os/File)} exef ^{:tag (* macho/File)} exem ^string outexe]
+                                  (machoRewriteUuid ctxt exef exem outexe))))
+
+
+                            (hostlinkfips ctxt @flagOutfile @flagFipso)
+                            (when (.NeedCodeSign ctxt)
+                              (let [err (machoCodeSign ctxt @flagOutfile)]
+                                (when (!= err nil)
+                                  (Exitf "%s: code signing failed: %v" (aget os/Args 0) err))))))))))))))))))
+
+
+
+
+
+
+^{:go/end 2205} (go/method passLongArgsInResponseFile "passLongArgsInResponseFile writes the arguments into a file if they\nare very long.\n" ^{:tag (slice string)} [^{:tag (* Link)} ctxt ^{:tag (slice string)} argv ^string altLinker]
+  (let [c 0]
+    (range [_ arg argv]
+      (set! c + (len arg)))
+
+
+    (when (< c sys/ExecArgLengthLimit)
+      (return argv))
+
+
+    ;; Only use response files if they are supported.
+    (let [response (filepath/Join @flagTmpdir "response")]
+      (when [err (os/WriteFile response nil 0644)] (!= err nil)
+        (log/Fatalf "failed while testing response file: %v" err))
+
+      (when (not (linkerFlagSupported ^{:go/via [Target]} (.-Arch ctxt) (aget argv 0) altLinker (+ "@" response)))
+        (when (!= (.-Debugvlog ctxt) 0)
+          (.Logf ctxt "not using response file because linker does not support one"))
+
+        (return argv))
+
+
+      (let [^bytes/Buffer buf (zero bytes/Buffer)]
+        (range [_ arg (subslice argv 1)]
+          ;; The external linker response file supports quoted strings.
+          (fmt/Fprintf (addr buf) "%q\n" arg))
+
+        (when [err (os/WriteFile response (.Bytes buf) 0644)] (!= err nil)
+          (log/Fatalf "failed while writing response file: %v" err))
+
+        (when (!= (.-Debugvlog ctxt) 0)
+          (.Logf ctxt "response file %s contents:\n%s" response (.Bytes buf)))
+
+        (lit (slice string)
+          (aget argv 0)
+          (+ "@" response))))))
+
+
+
+(go/var ^sync/Once createTrivialCOnce)
+
+^{:go/end 2235} (go/func linkerFlagSupported ^bool [^{:tag (* sys/Arch)} arch ^string linker ^string altLinker ^string flag]
+  (.Do createTrivialCOnce ^{:go/end 2215} (fn []
+      (let [src (filepath/Join @flagTmpdir "trivial.c")]
+        (when [err (os/WriteFile src (conv (slice byte) "int main() { return 0; }") 0666)] (!= err nil)
+          (Errorf "WriteFile trivial.c failed: %v" err)))))
+
+
+
+  (let [flags (hostlinkArchArgs arch)
+
+      ^{:line 2219} moreFlags (trimLinkerArgv (append ldflag (spread flagExtldflags)))]
+    (set! flags (append flags (spread moreFlags)))
+
+    (when (!= altLinker "")
+      (set! flags (append flags (+ "-fuse-ld=" altLinker))))
+
+    (let [trivialPath (filepath/Join @flagTmpdir "trivial.c")
+        ^{:line 2226} outPath (filepath/Join @flagTmpdir "a.out")]
+      (set! flags (append flags "-o" outPath flag trivialPath))
+
+      (let [cmd (exec/Command linker (spread flags))]
+        (set! (.-Env cmd) (append (lit (slice string) "LC_ALL=C") (spread (os/Environ))))
+        (let [(values out err) (.CombinedOutput cmd)]
+          ;; GCC says "unrecognized command line option ‘-no-pie’"
+          ;; clang says "unknown argument: '-no-pie'"
+          (and (== err nil) (not (bytes/Contains out (conv (slice byte) "unrecognized"))) (not (bytes/Contains out (conv (slice byte) "unknown")))))))))
+
+
+
+
+
+
+
+
+^{:go/end 2283} (go/func peHasLoadConfigDirectorySupport "peHasLoadConfigDirectorySupport checks whether the external linker\npopulates the PE Load Configuration Directory data directory entry\nwhen it encounters a _load_config_used symbol.\n\nGNU ld gained this support in binutils 2.45. MSVC link.exe and\nLLVM lld-link have always supported it.\n" ^bool [^{:tag (* sys/Arch)} arch ^string linker]
+  (let [src (filepath/Join @flagTmpdir "loadcfg_test.c")]
+    (when [err ^{:go/breaks [[3 2253]]} (os/WriteFile src (conv (slice byte) "\n#ifdef _WIN64\ntypedef unsigned long long uintptr;\n#else\ntypedef unsigned long uintptr;\n#endif\nconst uintptr _load_config_used[2] = { sizeof(_load_config_used), 0 };\nint main() { return 0; }\n")
+
+
+
+
+
+
+
+          0666)] (!= err nil)
+      (return false))
+
+
+    (let [outPath (filepath/Join @flagTmpdir "loadcfg_test.exe")
+        ^{:line 2258} flags (hostlinkArchArgs arch)]
+      (set! flags (append flags "-o" outPath src))
+      (let [cmd (exec/Command linker (spread flags))]
+        (set! (.-Env cmd) (append (lit (slice string) "LC_ALL=C") (spread (os/Environ))))
+        (when [err (.Run cmd)] (!= err nil)
+          (return false))
+
+
+        ^{:go/breaks [[5 2282]]} (let [(values f err) (pe/Open outPath)]
+          (when (!= err nil)
+            (return false))
+
+          (defer (.Close f))
+
+          (type-switch [oh (.-OptionalHeader f)]
+            (case [(* pe/OptionalHeader64)]
+              (when (< (conv int pe/IMAGE_DIRECTORY_ENTRY_LOAD_CONFIG) (len (.-DataDirectory oh)))
+                (return (!= (.-VirtualAddress (aget (.-DataDirectory oh) pe/IMAGE_DIRECTORY_ENTRY_LOAD_CONFIG)) 0))))
+
+            (case [(* pe/OptionalHeader32)]
+              (when (< (conv int pe/IMAGE_DIRECTORY_ENTRY_LOAD_CONFIG) (len (.-DataDirectory oh)))
+                (return (!= (.-VirtualAddress (aget (.-DataDirectory oh) pe/IMAGE_DIRECTORY_ENTRY_LOAD_CONFIG)) 0)))))
+
+
+          false)))))
+
+
+
+
+^{:go/end 2365} (go/func trimLinkerArgv "trimLinkerArgv returns a new copy of argv that does not include flags\nthat are not relevant for testing whether some linker option works.\n" ^{:tag (slice string)} [^{:tag (slice string)} argv]
+  (let [flagsWithNextArgSkip ^{:go/breaks [2 3 4 5 6 7]} (lit (slice string)
+        "-F"
+        "-l"
+        "-framework"
+        "-Wl,-framework"
+        "-Wl,-rpath"
+        "-Wl,-undefined")
+
+      ^{:line 2296} flagsWithNextArgKeep ^{:go/breaks [2 3 4 5 6 7 8 9 10 11 12 13 14 15]} (lit (slice string)
+        "-B"
+        "-L"
+        "-arch"
+        "-isysroot"
+        "--sysroot"
+        "-target"
+        "--target"
+        "-resource-dir"
+        "-rtlib"
+        "--rtlib"
+        "-stdlib"
+        "--stdlib"
+        "-unwindlib"
+        "--unwindlib")
+
+      ^{:line 2312} prefixesToKeep ^{:go/breaks [2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26]} (lit (slice string)
+        "-B"
+        "-L"
+        "-f"
+        "-m"
+        "-p"
+        "-Wl,"
+        "-arch"
+        "-isysroot"
+        "--sysroot"
+        "-target"
+        "--target"
+        "-resource-dir"
+        "-rtlib"
+        "--rtlib"
+        "-stdlib"
+        "--stdlib"
+        "-unwindlib"
+        "--unwindlib"
+        "-nostdlib++"
+        "-nostdlib"
+        "-nodefaultlibs"
+        "-nostartfiles"
+        "-nostdinc++"
+        "-nostdinc"
+        "-nobuiltininc")
+
+
+      ^{:line 2340 :tag (slice string)} flags (zero (slice string))
+      ^{:line 2341} keep false
+      ^{:line 2342} skip false]
+    (range [_ f argv]
+      (cond keep (do
+          (set! flags (append flags f))
+          (set! keep false))
+        ^{:line 2347} skip
+        (set! skip false)
+        (or (== f "") (!= (aget f 0) \-)) (do)
+        (^{:inst [(slice string) string]} slices/Contains flagsWithNextArgSkip f)
+        (set! skip true)
+        (^{:inst [(slice string) string]} slices/Contains flagsWithNextArgKeep f) (do
+          (set! flags (append flags f))
+          (set! keep true)) :else
+
+        (range [_ p prefixesToKeep]
+          (when (strings/HasPrefix f p)
+            (set! flags (append flags f))
+            (break)))))
+
+
+
+
+    ^{:line 2364} flags))
+
+
+
+
+^{:go/breaks [[5 2400]] :go/end 2401} (go/func hostlinkArchArgs "hostlinkArchArgs returns arguments to pass to the external linker\nbased on the architecture.\n" ^{:tag (slice string)} [^{:tag (* sys/Arch)} arch]
+  (switch (.-Family arch)
+    (case [sys/I386]
+      (return (lit (slice string) "-m32")))
+    (case [sys/AMD64]
+      (when (== buildcfg/GOOS "darwin")
+        (return (lit (slice string) "-arch" "x86_64" "-m64")))
+
+      (return (lit (slice string) "-m64")))
+    (case [sys/S390X]
+      (return (lit (slice string) "-m64")))
+    (case [sys/ARM]
+      (return (lit (slice string) "-marm")))
+    (case [sys/ARM64]
+      (when (== buildcfg/GOOS "darwin")
+        (return (lit (slice string) "-arch" "arm64"))))
+
+    (case [sys/Loong64]
+      (return (lit (slice string) "-mabi=lp64d")))
+    (case [sys/MIPS64]
+      (return (lit (slice string) "-mabi=64")))
+    (case [sys/MIPS]
+      (return (lit (slice string) "-mabi=32")))
+    (case [sys/PPC64]
+      (if (== buildcfg/GOOS "aix")
+        (return (lit (slice string) "-maix64"))
+
+        (return (lit (slice string) "-m64")))))
+
+
+
+  nil)
+
+
+(go/var wantHdr (objabi/HeaderString))
+
+
+
+
+^{:go/end 2572} (go/func ldobj "ldobj loads an input object. If it is a host object (an object\ncompiled by a non-Go compiler) it returns the Hostobj pointer. If\nit is a Go object, it returns nil.\n" ^{:tag (* Hostobj)} [^{:tag (* Link)} ctxt ^{:tag (* bio/Reader)} f ^{:tag (* sym/Library)} lib ^int64 length ^string pn ^string file]
+  (let [pkg (objabi/PathToPrefix (.-Pkg lib))
+
+      ^{:line 2411} eof (+ (.Offset f) length)
+      ^{:line 2412} start (.Offset f)
+      ^{:line 2413} c1 (bgetc f)
+      ^{:line 2414} c2 (bgetc f)
+      ^{:line 2415} c3 (bgetc f)
+      ^{:line 2416} c4 (bgetc f)]
+    (.MustSeek f start 0)
+
+    (let [unit (addr (lit sym/CompilationUnit :Lib lib))]
+      (set! (.-Units lib) (append (.-Units lib) unit))
+
+      (let [magic (bit-or (<< (conv uint32 c1) 24) (<< (conv uint32 c2) 16) (<< (conv uint32 c3) 8) (conv uint32 c4))]
+        (when (== magic 0x7f454c46) ; \x7F E L F
+          (let [ldelf ^{:go/end 2432} (fn [^{:tag (* Link)} ctxt ^{:tag (* bio/Reader)} f ^string pkg ^int64 length ^string pn]
+                (let [(values textp flags err) (loadelf/Load (.-loader ctxt) ^{:go/via [Target]} (.-Arch ctxt) (.IncVersion ctxt) f pkg length pn (.-Flags ehdr))]
+                  (when (!= err nil)
+                    (Errorf "%v" err)
+                    (return))
+
+                  (set! (.-Flags ehdr) flags)
+                  (set! (.-Textp ctxt) (append (.-Textp ctxt) (spread textp)))))]
+
+            (return (ldhostobj ldelf ^{:go/via [Target]} (.-HeadType ctxt) f pkg length pn file))))
+
+
+        (when (or (== (bit-and-not magic 1) 0xfeedface) (== (bit-and-not magic 0x01000000) 0xcefaedfe))
+          (let [ldmacho ^{:go/end 2444} (fn [^{:tag (* Link)} ctxt ^{:tag (* bio/Reader)} f ^string pkg ^int64 length ^string pn]
+                (let [(values textp err) (loadmacho/Load (.-loader ctxt) ^{:go/via [Target]} (.-Arch ctxt) (.IncVersion ctxt) f pkg length pn)]
+                  (when (!= err nil)
+                    (Errorf "%v" err)
+                    (return))
+
+                  (set! (.-Textp ctxt) (append (.-Textp ctxt) (spread textp)))))]
+
+            (return (ldhostobj ldmacho ^{:go/via [Target]} (.-HeadType ctxt) f pkg length pn file))))
+
+
+        (switch (bit-or (<< c1 8) c2)
+          (case ^{:go/breaks [1 2 3]} [0x4c01 ; 386
+              0x6486 ; amd64
+              0xc401 ; arm
+              0x64aa] ; arm64
+            (let [ldpe ^{:go/end 2467} (fn [^{:tag (* Link)} ctxt ^{:tag (* bio/Reader)} f ^string pkg ^int64 length ^string pn]
+                  (let [(values ls err) (loadpe/Load (.-loader ctxt) ^{:go/via [Target]} (.-Arch ctxt) (.IncVersion ctxt) f pkg length pn)]
+                    (when (!= err nil)
+                      (Errorf "%v" err)
+                      (return))
+
+                    (when (!= (len (.-Resources ls)) 0)
+                      (setpersrc ctxt (.-Resources ls)))
+
+                    (set! (.-pdata sehp) (append (.-pdata sehp) (spread (.-PData ls))))
+                    (when (!= (.-XData ls) 0)
+                      (set! (.-xdata sehp) (append (.-xdata sehp) (.-XData ls))))
+
+                    (set! (.-Textp ctxt) (append (.-Textp ctxt) (spread (.-Textp ls))))))]
+
+              (return (ldhostobj ldpe ^{:go/via [Target]} (.-HeadType ctxt) f pkg length pn file)))))
+
+
+        (when (and (== c1 0x01) ^:go/paren (or (== c2 0xD7) (== c2 0xF7)))
+          (let [ldxcoff ^{:go/end 2479} (fn [^{:tag (* Link)} ctxt ^{:tag (* bio/Reader)} f ^string pkg ^int64 length ^string pn]
+                (let [(values textp err) (loadxcoff/Load (.-loader ctxt) ^{:go/via [Target]} (.-Arch ctxt) (.IncVersion ctxt) f pkg length pn)]
+                  (when (!= err nil)
+                    (Errorf "%v" err)
+                    (return))
+
+                  (set! (.-Textp ctxt) (append (.-Textp ctxt) (spread textp)))))]
+
+            (return (ldhostobj ldxcoff ^{:go/via [Target]} (.-HeadType ctxt) f pkg length pn file))))
+
+
+        (when (or (!= c1 \g) (!= c2 \o) (!= c3 \space) (!= c4 \o))
+          ;; An unrecognized object is just passed to the external linker.
+          ;; If we try to read symbols from this object, we will
+          ;; report an error at that time.
+          (set! unknownObjFormat true)
+          (return (ldhostobj nil ^{:go/via [Target]} (.-HeadType ctxt) f pkg length pn file)))
+
+
+        ;; /* check the header */
+        (let [(values line err) ^{:go/via [Reader]} (.ReadString f \newline)]
+          (when (!= err nil)
+            (Errorf "truncated object file: %s: %v" pn err)
+            (return nil))
+
+
+          (when (not (strings/HasPrefix line "go object "))
+            (when (strings/HasSuffix pn ".go")
+              (Exitf "%s: uncompiled .go source file" pn)
+              (return nil))
+
+
+            (when (== line (.-Name ^{:go/via [Target]} (.-Arch ctxt)))
+              ;; old header format: just $GOOS
+              (Errorf "%s: stale object file" pn)
+              (return nil))
+
+
+            (Errorf "%s: not an object file: @%d %q" pn start line)
+            (return nil))
+
+
+          ;; First, check that the basic GOOS, GOARCH, and Version match.
+          (when (and (!= line wantHdr) (not @flagF))
+            (Errorf "%s: linked object header mismatch:\nhave %q\nwant %q\n" pn line wantHdr))
+
+
+          ;; Skip over exports and other info -- ends with \n!\n.
+          ;;
+          ;; Note: It's possible for "\n!\n" to appear within the binary
+          ;; package export data format. To avoid truncating the package
+          ;; definition prematurely (issue 21703), we keep track of
+          ;; how many "$$" delimiters we've seen.
+
+          (let [import0 (.Offset f)]
+
+            (set! c1 \newline) ; the last line ended in \n
+            (set! c2 (bgetc f))
+            (set! c3 (bgetc f))
+            (let [markers 0]
+              (while true
+                (when (== c1 \newline)
+                  (when (and (== (% markers 2) 0) (== c2 \!) (== c3 \newline))
+                    (break))
+
+                  (when (and (== c2 \$) (== c3 \$))
+                    (inc! markers)))
+
+
+
+                (set! c1 c2)
+                (set! c2 c3)
+                (set! c3 (bgetc f))
+                (when (== c3 -1)
+                  (Errorf "truncated object file: %s" pn)
+                  (return nil)))
+
+
+
+              (let [import1 (.Offset f)]
+
+                (.MustSeek f import0 0)
+                (ldpkg ctxt f lib (- import1 import0 2) pn) ; -2 for !\n
+                (.MustSeek f import1 0)
+
+                ^{:go/breaks [4]} (let [fingerprint (.Preload (.-loader ctxt) (.IncVersion ctxt) f lib unit (- eof (.Offset f)))]
+                  (when (not (.IsZero fingerprint)) ; Assembly objects don't have fingerprints. Ignore them.
+                    ;; Check fingerprint, to ensure the importing and imported packages
+                    ;; have consistent view of symbol indices.
+                    ;; Normally the go command should ensure this. But in case something
+                    ;; goes wrong, it could lead to obscure bugs like run-time crash.
+                    ;; Check it here to be sure.
+                    (when (.IsZero (.-Fingerprint lib)) ; Not yet imported. Update its fingerprint.
+                      (set! (.-Fingerprint lib) fingerprint))
+
+                    (checkFingerprint lib fingerprint (.-Srcref lib) (.-Fingerprint lib)))
+
+
+                  (addImports ctxt lib pn)
+                  nil)))))))))
+
+
+
+
+
+
+^{:go/end 2602} (go/func symbolsAreUnresolved "symbolsAreUnresolved scans through the loader's list of unresolved\nsymbols and checks to see whether any of them match the names of the\nsymbols in 'want'. Return value is a list of bools, with list[K] set\nto true if there is an unresolved reference to the symbol in want[K].\n" ^{:tag (slice bool)} [^{:tag (* Link)} ctxt ^{:tag (slice string)} want]
+  (let [returnAllUndefs -1
+      (values undefs _) (.UndefinedRelocTargets (.-loader ctxt) returnAllUndefs)
+      ^{:line 2581} seen (make (map loader/Sym (struct)))
+      ^{:line 2582} rval (make (slice bool) (len want))
+      ^{:line 2583} wantm (make (map string int))]
+    (range [k w want]
+      (aset wantm w k))
+
+    (let [count 0]
+      (range [_ s undefs]
+        (when [(values _ ok) (aget seen s)] ok
+          (continue))
+
+        (aset seen s (lit (struct)))
+        (when [(values k ok) (aget wantm (.SymName (.-loader ctxt) s))] ok
+          (aset rval k true)
+          (inc! count)
+          (when (== count (len want))
+            (return rval))))
+
+
+
+      ^{:line 2601} rval)))
+
+
+
+
+
+^{:go/end 2630} (go/func hostObject "hostObject reads a single host object file (compare to \"hostArchive\").\nThis is used as part of internal linking when we need to pull in\nfiles such as \"crt?.o\".\n" [^{:tag (* Link)} ctxt ^string objname ^string path]
+  (when (> (.-Debugvlog ctxt) 1)
+    (.Logf ctxt "hostObject(%s)\n" path))
+
+  (let [objlib ^{:go/breaks [2]} (lit sym/Library
+        :Pkg objname)
+
+      (values f err) (bio/Open path)]
+    (when (!= err nil)
+      (Exitf "cannot open host object %q file %s: %v" objname path err))
+
+    (defer (.Close f))
+    (let [h (ldobj ctxt f (addr objlib) 0 path path)]
+      (when (== (.-ld h) nil)
+        (Exitf "unrecognized object file format in %s" path))
+
+      (set! (.-file h) path)
+      (set! (.-length h) (.MustSeek f 0 2))
+      (.MustSeek f (.-off h) 0)
+      ((.-ld h) ctxt f (.-pkg h) (.-length h) (.-pn h))
+      (when (!= @flagCaptureHostObjs "")
+        (captureHostObj h)))))
+
+
+
+^{:go/end 2636} (go/func checkFingerprint [^{:tag (* sym/Library)} lib ^goobj/FingerprintType libfp ^string src ^goobj/FingerprintType srcfp]
+  (when (!= libfp srcfp)
+    (Exitf "fingerprint mismatch: %s has %x, import from %s expecting %x" lib libfp src srcfp)))
+
+
+
+^{:go/end 2649} (go/func readelfsymboldata ^{:tag (slice byte)} [^{:tag (* Link)} ctxt ^{:tag (* elf/File)} f ^{:tag (* elf/Symbol)} sym]
+  (let [data (make (slice byte) (.-Size sym))
+      ^{:line 2640} sect (aget (.-Sections f) (.-Section sym))]
+    (when (and (!= ^{:go/via [SectionHeader]} (.-Type sect) elf/SHT_PROGBITS) (!= ^{:go/via [SectionHeader]} (.-Type sect) elf/SHT_NOTE))
+      (Errorf "reading %s from non-data section" (.-Name sym)))
+
+    (let [(values n err) ^{:go/via [ReaderAt]} (.ReadAt sect data (conv int64 (- (.-Value sym) ^{:go/via [SectionHeader]} (.-Addr sect))))]
+      (when (!= (conv uint64 n) (.-Size sym))
+        (Errorf "reading contents of %s: %v" (.-Name sym) err))
+
+      ^{:line 2648} data)))
+
+
+^{:go/end 2659} (go/func readwithpad [^io/Reader r ^int32 sz] :results [(slice byte) error]
+  (let [data (make (slice byte) (Rnd (conv int64 sz) 4))
+      (values _ err) (io/ReadFull r data)]
+    (when (!= err nil)
+      (return nil err))
+
+    (set! data (subslice data _ sz))
+    (return data nil)))
+
+
+^{:go/end 2698} (go/func readnote [^{:tag (* elf/File)} f ^{:tag (slice byte)} name ^int32 typ] :results [(slice byte) error]
+  (range [_ sect (.-Sections f)]
+    (when (!= ^{:go/via [SectionHeader]} (.-Type sect) elf/SHT_NOTE)
+      (continue))
+
+    (let [r (.Open sect)]
+      (while true
+        (let [(values ^int32 namesize ^int32 descsize ^int32 noteType) (zero int32)
+            ^{:line 2669} err (binary/Read r ^{:go/via [FileHeader]} (.-ByteOrder f) (addr namesize))]
+          (when (!= err nil)
+            (when (== err io/EOF)
+              (break))
+
+            (return nil (fmt/Errorf "read namesize failed: %v" err)))
+
+          (set! err (binary/Read r ^{:go/via [FileHeader]} (.-ByteOrder f) (addr descsize)))
+          (when (!= err nil)
+            (return nil (fmt/Errorf "read descsize failed: %v" err)))
+
+          (set! err (binary/Read r ^{:go/via [FileHeader]} (.-ByteOrder f) (addr noteType)))
+          (when (!= err nil)
+            (return nil (fmt/Errorf "read type failed: %v" err)))
+
+          (let [(values noteName ^:assign err) (readwithpad r namesize)]
+            (when (!= err nil)
+              (return nil (fmt/Errorf "read name failed: %v" err)))
+
+            (let [(values desc ^:assign err) (readwithpad r descsize)]
+              (when (!= err nil)
+                (return nil (fmt/Errorf "read desc failed: %v" err)))
+
+              (when (and (== (conv string name) (conv string noteName)) (== typ noteType))
+                (return desc nil))))))))
+
+
+
+  (return nil nil))
+
+
+^{:go/breaks [6] :go/end 2712} (go/func findshlib ^string [^{:tag (* Link)} ctxt ^string shlib]
+  (when (filepath/IsAbs shlib)
+    (return shlib))
+
+  (range [_ libdir (.-Libdir ctxt)]
+    (let [libpath (filepath/Join libdir shlib)]
+      (when [(values _ err) (os/Stat libpath)] (== err nil)
+        (return libpath))))
+
+
+  (Errorf "cannot find shared library: %s" shlib)
+  "")
+
+
+^{:go/end 2905} (go/func ldshlibsyms [^{:tag (* Link)} ctxt ^string shlib]
+  (let [^string libpath (zero string)]
+    (if (filepath/IsAbs shlib) (do
+        (set! libpath shlib)
+        (set! shlib (filepath/Base shlib)))
+      (do
+        (set! libpath (findshlib ctxt shlib))
+        (when (== libpath "")
+          (return))))
+
+
+    (range [_ processedlib (.-Shlibs ctxt)]
+      (when (== (.-Path processedlib) libpath)
+        (return)))
+
+
+    (when (> (.-Debugvlog ctxt) 1)
+      (.Logf ctxt "ldshlibsyms: found library with name %s at %s\n" shlib libpath))
+
+
+    (let [(values f err) (elf/Open libpath)]
+      (when (!= err nil)
+        (Errorf "cannot open shared library: %s" libpath)
+        (return))
+
+      ;; Keep the file open as decodetypeGcprog needs to read from it.
+      ;; TODO: fix. Maybe mmap the file.
+      ;;defer f.Close()
+
+      (let [(values hash ^:assign err) (readnote f ELF_NOTE_GO_NAME ELF_NOTE_GOABIHASH_TAG)]
+        (when (!= err nil)
+          (Errorf "cannot read ABI hash from shared library %s: %v" libpath err)
+          (return))
+
+
+        (let [(values depsbytes ^:assign err) (readnote f ELF_NOTE_GO_NAME ELF_NOTE_GODEPS_TAG)]
+          (when (!= err nil)
+            (Errorf "cannot read dep list from shared library %s: %v" libpath err)
+            (return))
+
+          (let [^{:tag (slice string)} deps (zero (slice string))]
+            (range [_ dep (strings/Split (conv string depsbytes) "\n")]
+              (when (== dep "")
+                (continue))
+
+              (when (not (filepath/IsAbs dep))
+                ;; If the dep can be interpreted as a path relative to the shlib
+                ;; in which it was found, do that. Otherwise, we will leave it
+                ;; to be resolved by libdir lookup.
+                (let [abs (filepath/Join (filepath/Dir libpath) dep)]
+                  (when [(values _ err) (os/Stat abs)] (== err nil)
+                    (set! dep abs))))
+
+
+              (set! deps (append deps dep)))
+
+
+            (let [(values syms ^:assign err) (.DynamicSymbols f)]
+              (when (!= err nil)
+                (Errorf "cannot read symbols from shared library: %s" libpath)
+                (return))
+
+
+              (let [symAddr (lit (map string uint64))]
+                (range [_ elfsym syms]
+                  (when (or (== (elf/ST_TYPE (.-Info elfsym)) elf/STT_NOTYPE) (== (elf/ST_TYPE (.-Info elfsym)) elf/STT_SECTION))
+                    (continue))
+
+
+                  ;; Symbols whose names start with "type:" are compiler generated,
+                  ;; so make functions with that prefix internal.
+                  (let [ver 0
+                      ^{:line 2786} symname (.-Name elfsym)] ; (unmangled) symbol name
+                    (cond (and (== (elf/ST_TYPE (.-Info elfsym)) elf/STT_FUNC) (strings/HasPrefix (.-Name elfsym) "type:"))
+                      (set! ver abiInternalVer)
+                      (and ^{:go/via [Flags]} (.-RegabiWrappers buildcfg/Experiment) (== (elf/ST_TYPE (.-Info elfsym)) elf/STT_FUNC))
+                      ;; Demangle the ABI name. Keep in sync with symtab.go:mangleABIName.
+                      (cond (strings/HasSuffix (.-Name elfsym) ".abiinternal") (do
+                          (set! ver sym/SymVerABIInternal)
+                          (set! symname (strings/TrimSuffix (.-Name elfsym) ".abiinternal")))
+                        (strings/HasSuffix (.-Name elfsym) ".abi0") (do
+                          (set! ver 0)
+                          (set! symname (strings/TrimSuffix (.-Name elfsym) ".abi0")))))
+
+
+
+                    (let [l (.-loader ctxt)
+                        ^{:line 2801} s (.LookupOrCreateSym l symname ver)]
+
+                      ;; Because loadlib above loads all .a files before loading
+                      ;; any shared libraries, any non-dynimport symbols we find
+                      ;; that duplicate symbols already loaded should be ignored
+                      ;; (the symbols from the .a files "win").
+                      (when (and (!= (.SymType l s) 0) (!= (.SymType l s) sym/SDYNIMPORT))
+                        (continue))
+
+                      (let [su (.MakeSymbolUpdater l s)]
+                        (.SetType su sym/SDYNIMPORT)
+                        (.SetSymElfType l s (elf/ST_TYPE (.-Info elfsym)))
+                        (.SetSize su (conv int64 (.-Size elfsym)))
+                        (when (!= (.-Section elfsym) elf/SHN_UNDEF)
+                          ;; Set .File for the library that actually defines the symbol.
+                          (.SetSymPkg l s libpath)
+
+                          ;; The decodetype_* functions in decodetype.go need access to
+                          ;; the type data.
+                          (let [sname (.SymName l s)]
+                            (when (and (strings/HasPrefix sname "type:") (not (strings/HasPrefix sname "type:.")))
+                              (.SetData su (readelfsymboldata ctxt f (addr elfsym))))))
+
+
+
+                        (when (!= symname (.-Name elfsym))
+                          (.SetSymExtname l s (.-Name elfsym)))
+
+                        (aset symAddr (.-Name elfsym) (.-Value elfsym))))))
+
+
+                ;; Load relocations.
+                ;; We only really need these for grokking the links between type descriptors
+                ;; when dynamic linking.
+                (let [relocTarget (lit (map uint64 string))
+                    ^{:line 2836} addends false
+                    ^{:line 2837} sect (.SectionByType f elf/SHT_REL)]
+                  (when (== sect nil)
+                    (set! sect (.SectionByType f elf/SHT_RELA))
+                    (when (== sect nil)
+                      (log/Fatalf "can't find SHT_REL or SHT_RELA section of %s" shlib))
+
+                    (set! addends true))
+
+                  ;; TODO: Multiple SHT_RELA/SHT_REL sections?
+                  (let [(values data ^:assign err) (.Data sect)]
+                    (when (!= err nil)
+                      (log/Fatalf "can't read relocation section of %s: %v" shlib err))
+
+                    (let [bo ^{:go/via [FileHeader]} (.-ByteOrder f)]
+                      (while (> (len data) 0)
+                        (let [(values ^uint64 off ^uint64 idx) (zero uint64)
+                            ^{:line 2853 :tag int64} addend (zero int64)]
+                          (switch ^{:go/via [FileHeader]} (.-Class f)
+                            (case [elf/ELFCLASS64]
+                              (set! off (.Uint64 bo data))
+                              (let [info (.Uint64 bo (subslice data 8))]
+                                (set! data (subslice data 16))
+                                (when addends
+                                  (set! addend (conv int64 (.Uint64 bo data)))
+                                  (set! data (subslice data 8)))
+
+
+                                (set! idx (>> info 32))
+                                (let [typ (bit-and info 0xffff)]
+                                  ;; buildmode=shared is only supported for amd64,arm64,loong64,s390x,ppc64le.
+                                  ;; (List found by looking at the translation of R_ADDR by ../$ARCH/asm.go:elfreloc1)
+                                  (switch typ
+                                    (case [(conv uint64 elf/R_X86_64_64)])
+                                    (case [(conv uint64 elf/R_AARCH64_ABS64)])
+                                    (case [(conv uint64 elf/R_LARCH_64)])
+                                    (case [(conv uint64 elf/R_390_64)])
+                                    (case [(conv uint64 elf/R_PPC64_ADDR64)])
+                                    (default
+                                      (continue))))))
+
+                            (case [elf/ELFCLASS32]
+                              (set! off (conv uint64 (.Uint32 bo data)))
+                              (let [info (.Uint32 bo (subslice data 4))]
+                                (set! data (subslice data 8))
+                                (when addends
+                                  (set! addend (conv int64 (conv int32 (.Uint32 bo data))))
+                                  (set! data (subslice data 4)))
+
+
+                                (set! idx (conv uint64 (>> info 8)))
+                                (let [typ (bit-and info 0xff)]
+                                  ;; buildmode=shared is only supported for 386,arm.
+                                  (switch typ
+                                    (case [(conv uint32 elf/R_386_32)])
+                                    (case [(conv uint32 elf/R_ARM_ABS32)])
+                                    (default
+                                      (continue))))))
+
+                            (default
+                              (log/Fatalf "unknown bit size %s" ^{:go/via [FileHeader]} (.-Class f))))
+
+                          (when (!= addend 0)
+                            (continue))
+
+                          (aset relocTarget off (.-Name (aget syms (- idx 1))))))
+
+
+                      (set! (.-Shlibs ctxt) (append (.-Shlibs ctxt) (lit Shlib :Path libpath :Hash hash :Deps deps :File f :symAddr symAddr :relocTarget relocTarget))))))))))))))
+
+
+^{:go/end 2915} (go/func addsection ^{:tag (* sym/Section)} [^{:tag (* loader/Loader)} ldr ^{:tag (* sys/Arch)} arch ^{:tag (* sym/Segment)} seg ^string name ^int rwx]
+  (let [sect (.NewSection ldr)]
+    (set! (.-Rwx sect) (conv uint8 rwx))
+    (set! (.-Name sect) name)
+    (set! (.-Seg sect) seg)
+    (set! (.-Align sect) (conv int32 (.-PtrSize arch))) ; everything is at least pointer-aligned
+    (set! (.-Sections seg) (append (.-Sections seg) sect))
+    ^{:line 2914} sect))
+
+
+^{:go/end 2921} (go/func usage []
+  (fmt/Fprintf os/Stderr "usage: link [options] main.o\n")
+  (objabi/Flagprint os/Stderr)
+  (Exit 2))
+
+
+(go/type SymbolType int8) ; TODO: after genasmsym is gone, maybe rename to plan9typeChar or something
+
+(go/const
+
+  ^{:line 2927} [^{:tag SymbolType :val 84 :doc "see also https://9p.io/magic/man2html/1/nm\n"} TextSym \T]
+  ^{:line 2928} [^{:tag SymbolType :val 68} DataSym \D]
+  ^{:line 2929} [^{:tag SymbolType :val 66} BSSSym \B]
+  ^{:line 2930} [^{:tag SymbolType :val 85} UndefinedSym \U]
+  ^{:line 2931} [^{:tag SymbolType :val 116} TLSSym \t]
+  ^{:line 2932} [^{:tag SymbolType :val 109} FrameSym \m]
+  ^{:line 2933} [^{:tag SymbolType :val 112} ParamSym \p]
+  ^{:line 2934} [^{:tag SymbolType :val 97} AutoSym \a]
+
+
+  ^{:line 2937} [^{:val \x :doc "Deleted auto (not a real sym, just placeholder for type)\n"} DeletedAutoSym \x])
+
+
+
+^{:go/end 2947} (go/method defineInternal "defineInternal defines a symbol used internally by the go runtime.\n" ^loader/Sym [^{:tag (* Link)} ctxt ^string p ^sym/SymKind t]
+  (let [s (.CreateSymForUpdate (.-loader ctxt) p 0)]
+    (.SetType s t)
+    (.SetSpecial s true)
+    (.SetLocal s true)
+    (.Sym s)))
+
+
+^{:go/end 2953} (go/method xdefine ^loader/Sym [^{:tag (* Link)} ctxt ^string p ^sym/SymKind t ^int64 v]
+  (let [s (.defineInternal ctxt p t)]
+    (.SetSymValue (.-loader ctxt) s v)
+    ^{:line 2952} s))
+
+
+^{:go/breaks [6] :go/end 2964} (go/func datoff ^int64 [^{:tag (* loader/Loader)} ldr ^loader/Sym s ^int64 addr]
+  (when (>= (conv uint64 addr) (.-Vaddr Segdata))
+    (return (conv int64 (+ (- (conv uint64 addr) (.-Vaddr Segdata)) (.-Fileoff Segdata)))))
+
+  (when (>= (conv uint64 addr) (.-Vaddr Segtext))
+    (return (conv int64 (+ (- (conv uint64 addr) (.-Vaddr Segtext)) (.-Fileoff Segtext)))))
+
+  (.Errorf ldr s "invalid datoff %#x" addr)
+  0)
+
+
+^{:go/end 2985} (go/func Entryvalue ^int64 [^{:tag (* Link)} ctxt]
+  (let [a @flagEntrySymbol]
+    (when (and (>= (aget a 0) \0) (<= (aget a 0) \9))
+      (return (atolwhex a)))
+
+    (let [ldr (.-loader ctxt)
+        ^{:line 2972} s (.Lookup ldr a 0)]
+      (when (== s 0)
+        (Errorf "missing entry symbol %q" a)
+        (return 0))
+
+      (let [st (.SymType ldr s)]
+        (when (== st 0)
+          (return @FlagTextAddr))
+
+        (when (and (not ^{:go/via [Target]} (.IsAIX ctxt)) (not (.IsText st)))
+          (.Errorf ldr s "entry not text"))
+
+        (.SymValue ldr s)))))
+
+
+^{:go/end 3006} (go/method callgraph [^{:tag (* Link)} ctxt]
+  (when (not @FlagC)
+    (return))
+
+
+  (let [ldr (.-loader ctxt)]
+    (range [_ s (.-Textp ctxt)]
+      (let [relocs (.Relocs ldr s)]
+        (for [i 0] (< i (.Count relocs)) (inc! i)
+          (let [r (.At relocs i)
+              ^{:line 2997} rs (.Sym r)]
+            (when (== rs 0)
+              (continue))
+
+            (when (and (.IsDirectCall (.Type r)) (.IsText (.SymType ldr rs)))
+              (.Logf ctxt "%s calls %s\n" (.SymName ldr s) (.SymName ldr rs)))))))))
+
+
+
+
+
+^{:go/end 3019} (go/func Rnd ^int64 [^int64 v ^int64 r]
+  (when (<= r 0)
+    (return v))
+
+  (set! v + (- r 1))
+  (let [c (% v r)]
+    (when (< c 0)
+      (set! c + r))
+
+    (set! v - c)
+    ^{:line 3018} v))
+
+
+^{:go/end 3030} (go/func bgetc ^int [^{:tag (* bio/Reader)} r]
+  (let [(values c err) ^{:go/via [Reader]} (.ReadByte r)]
+    (when (!= err nil)
+      (when (!= err io/EOF)
+        (log/Fatalf "reading input: %v" err))
+
+      (return -1))
+
+    (conv int c)))
+
+
+(go/type markKind uint8) ; for postorder traversal
+(go/const
+  ^{:line 3034} [^{:tag markKind :val 0} _ iota]
+  ^{:line 3035} [^{:val 1} visiting]
+  ^{:line 3036} [^{:val 2} visited])
+
+
+^{:go/end 3046} (go/func postorder ^{:tag (slice (* sym/Library))} [^{:tag (slice (* sym/Library))} libs]
+  (let [order (make (slice (* sym/Library)) 0 (len libs)) ; hold the result
+      ^{:line 3041} mark (make (map (* sym/Library) markKind) (len libs))]
+    (range [_ lib libs]
+      (dfs lib mark (addr order)))
+
+    ^{:line 3045} order))
+
+
+^{:go/end 3061} (go/func dfs [^{:tag (* sym/Library)} lib ^{:tag (map (* sym/Library) markKind)} mark ^{:tag (* (slice (* sym/Library)))} order]
+  (when (== (aget mark lib) visited)
+    (return))
+
+  (when (== (aget mark lib) visiting)
+    (panic (+ "found import cycle while visiting " (.-Pkg lib))))
+
+  (aset mark lib visiting)
+  (range [_ i (.-Imports lib)]
+    (dfs i mark order))
+
+  (aset mark lib visited)
+  (set! @order (append @order lib)))
+
+
+^{:go/end 3072} (go/func ElfSymForReloc ^int32 [^{:tag (* Link)} ctxt ^loader/Sym s]
+  ;; If putelfsym created a local version of this symbol, use that in all
+  ;; relocations.
+  (let [les (.SymLocalElfSym (.-loader ctxt) s)]
+    (if (!= les 0)
+      (return les)
+
+      (return (.SymElfSym (.-loader ctxt) s)))))
+
+
+
+^{:go/end 3107} (go/func AddGotSym [^{:tag (* Target)} target ^{:tag (* loader/Loader)} ldr ^{:tag (* ArchSyms)} syms ^loader/Sym s ^uint32 elfRelocTyp]
+  (when (>= (.SymGot ldr s) 0)
+    (return))
+
+
+  (Adddynsym ldr target syms s)
+  (let [got (.MakeSymbolUpdater ldr (.-GOT syms))]
+    (.SetGot ldr s (conv int32 (.Size got)))
+    (.AddUint got (.-Arch target) 0)
+
+    (cond (.IsElf target)
+      (if (== (.-PtrSize (.-Arch target)) 8)
+        (let [rela (.MakeSymbolUpdater ldr (.-Rela syms))]
+          (.AddAddrPlus rela (.-Arch target) (.Sym got) (conv int64 (.SymGot ldr s)))
+          (.AddUint64 rela (.-Arch target) (elf/R_INFO (conv uint32 (.SymDynid ldr s)) elfRelocTyp))
+          (.AddUint64 rela (.-Arch target) 0))
+
+        (let [rel (.MakeSymbolUpdater ldr (.-Rel syms))]
+          (.AddAddrPlus rel (.-Arch target) (.Sym got) (conv int64 (.SymGot ldr s)))
+          (.AddUint32 rel (.-Arch target) (elf/R_INFO32 (conv uint32 (.SymDynid ldr s)) elfRelocTyp))))
+
+      (.IsDarwin target)
+      (let [leg (.MakeSymbolUpdater ldr (.-LinkEditGOT syms))]
+        (.AddUint32 leg (.-Arch target) (conv uint32 (.SymDynid ldr s)))
+        (when (and (.IsPIE target) (.IsInternal target))
+          ;; Mach-O relocations are a royal pain to lay out.
+          ;; They use a compact stateful bytecode representation.
+          ;; Here we record what are needed and encode them later.
+          (MachoAddBind (.-GOT syms) (conv int64 (.SymGot ldr s)) s))) :else
+
+
+      (.Errorf ldr s "addgotsym: unsupported binary format"))))
+
+
+
+(go/var ^int hostobjcounter)
+
+
+
+
+
+
+^{:go/end 3151} (go/func captureHostObj "captureHostObj writes out the content of a host object (pulled from\nan archive or loaded from a *.o file directly) to a directory\nspecified via the linker's \"-capturehostobjs\" debugging flag. This\nis intended to make it easier for a developer to inspect the actual\nobject feeding into \"CGO internal\" link step.\n" [^{:tag (* Hostobj)} h]
+  ;; Form paths for info file and obj file.
+  (let [ofile (fmt/Sprintf "captured-obj-%d.o" hostobjcounter)
+      ^{:line 3119} ifile (fmt/Sprintf "captured-obj-%d.txt" hostobjcounter)]
+    (inc! hostobjcounter)
+    (let [opath (filepath/Join @flagCaptureHostObjs ofile)
+        ^{:line 3122} ipath (filepath/Join @flagCaptureHostObjs ifile)
+
+        ;; Write the info file.
+        ^{:line 3125} info (fmt/Sprintf "pkg: %s\npn: %s\nfile: %s\noff: %d\nlen: %d\n"
+          (.-pkg h) (.-pn h) (.-file h) (.-off h) (.-length h))]
+      (when [err (os/WriteFile ipath (conv (slice byte) info) 0666)] (!= err nil)
+        (log/Fatalf "error writing captured host obj info %s: %v" ipath err))
+
+
+      (let [readObjData ^{:go/end 3142} (fn ^{:tag (slice byte)} []
+            (let [(values inf err) (os/Open (.-file h))]
+              (when (!= err nil)
+                (log/Fatalf "capturing host obj: open failed on %s: %v" (.-pn h) err))
+
+              (defer (.Close inf))
+              (let [res (make (slice byte) (.-length h))]
+                (when [(values n err) (.ReadAt inf res (.-off h))] (or (!= err nil) (!= n (conv int (.-length h))))
+                  (log/Fatalf "capturing host obj: readat failed on %s: %v" (.-pn h) err))
+
+                ^{:line 3141} res)))]
+
+
+        ;; Write the object file.
+        (when [err (os/WriteFile opath (readObjData) 0666)] (!= err nil)
+          (log/Fatalf "error writing captured host object %s: %v" opath err))
+
+
+        (fmt/Fprintf os/Stderr "link: info: captured host object %s to %s\n"
+          (.-file h) opath)))))
+
+
+
+
+
+^{:go/end 3167} (go/method findExtLinkTool "findExtLinkTool invokes the external linker CC with --print-prog-name\npassing the name of the tool we're interested in, such as \"strip\",\n\"ar\", or \"dsymutil\", and returns the path passed back from the command.\n" ^string [^{:tag (* Link)} ctxt ^string toolname]
+  (let [^{:tag (slice string)} cc (zero (slice string))]
+    (set! cc (append cc (spread (.extld ctxt))))
+    (set! cc (append cc (spread (hostlinkArchArgs ^{:go/via [Target]} (.-Arch ctxt)))))
+    (set! cc (append cc "--print-prog-name" toolname))
+    (let [(values out err) (.CombinedOutput (exec/Command (aget cc 0) (spread (subslice cc 1))))]
+      (when (!= err nil)
+        (Exitf "%s: finding %s failed: %v\n%s" (aget os/Args 0) toolname err out))
+
+      (let [cmdpath (strings/TrimRight (conv string out) "\r\n")]
+        ^{:line 3166} cmdpath))))
+
+
+
+
+^{:go/end 3183} (go/method isMSVC "isMSVC reports whether the C toolchain is clang with a -msvc target,\ne.g. the clang bundled in MSVC.\n" ^bool [^{:tag (* Link)} ctxt]
+  (let [extld (.extld ctxt)
+      (values name args) (values (aget extld 0) (subslice extld 1))]
+    (set! args (append args (spread (trimLinkerArgv flagExtldflags))))
+    (set! args (append args "--version"))
+    ^{:go/breaks [[3 3182]]} (let [cmd (exec/Command name (spread args))]
+      (when [(values out err) (.CombinedOutput cmd)] (== err nil)
+        (when (or (bytes/Contains out (conv (slice byte) "-msvc\n")) (bytes/Contains out (conv (slice byte) "-msvc\r")))
+          (return true)))
+
+
+      false)))
+
+
+
+^{:go/end 3198} (go/method isLLD "isLLD reports whether the C toolchain is using LLD as the linker.\n" ^bool [^{:tag (* Link)} ctxt]
+  (let [extld (.extld ctxt)
+      (values name args) (values (aget extld 0) (subslice extld 1))]
+    (set! args (append args (spread (trimLinkerArgv flagExtldflags))))
+    (set! args (append args "-Wl,--version"))
+    ^{:go/breaks [[3 3197]]} (let [cmd (exec/Command name (spread args))]
+      (when [(values out err) (.CombinedOutput cmd)] (== err nil)
+        (when (bytes/Contains out (conv (slice byte) "LLD "))
+          (return true)))
+
+
+      false)))

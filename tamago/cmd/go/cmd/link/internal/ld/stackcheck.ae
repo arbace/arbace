@@ -1,0 +1,418 @@
+;; Copyright 2022 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.cmd.link.internal.ld) (go/file "stackcheck.go" :imports [
+
+
+    ^{:line 8} [obj "cmd/internal/obj"]
+    ^{:line 9} [objabi "cmd/internal/objabi"]
+    ^{:line 10} [loader "cmd/link/internal/loader"]
+    ^{:line 11} [fmt "fmt"]
+    ^{:line 12} [buildcfg "internal/buildcfg"]
+    ^{:line 13} [sort "sort"]
+    ^{:line 14} [strings "strings"]])
+
+
+(go/type stackCheck (struct
+    ^{:line 18 :tag (* Link)} ctxt
+    ^{:line 19 :tag (* loader/Loader)} ldr
+    ^{:line 20 :tag loader/Sym} morestack
+    ^{:line 21 :tag int} callSize ; The number of bytes added by a CALL
+
+
+
+    ^{:line 25 :tag (map loader/Sym int16) :doc "height records the maximum number of bytes a function and\nits callees can add to the stack without a split check.\n"} height
+
+
+
+
+    ^{:line 30 :tag (map loader/Sym (slice stackCheckEdge)) :doc "graph records the out-edges from each symbol. This is only\npopulated on a second pass if the first pass reveals an\nover-limit function.\n"} graph))
+
+
+(go/type stackCheckEdge (struct
+    ^{:line 34 :tag int} growth ; Stack growth in bytes at call to target
+    ^{:line 35 :tag loader/Sym} target)) ; 0 for stack growth without a call
+
+
+
+
+
+(go/const ^{:tag int16 :val 32767 :doc "stackCheckCycle is a sentinel stored in the height map to detect if\nwe've found a cycle. This is effectively an \"infinite\" stack\nheight, so we use the closest value to infinity that we can.\n"} stackCheckCycle (- (<< 1 15) 1))
+
+
+
+(go/const ^{:tag loader/Sym :val 4294967295 :doc "stackCheckIndirect is a sentinel Sym value used to represent the\ntarget of an indirect/closure call.\n"} stackCheckIndirect (bit-not (conv loader/Sym 0)))
+
+
+
+
+
+
+
+
+^{:go/end 109} (go/method doStackCheck "doStackCheck walks the call tree to check that there is always\nenough stack space for call frames, especially for a chain of\nnosplit functions.\n\nIt walks all functions to accumulate the number of bytes they can\ngrow the stack by without a split check and checks this against the\nlimit.\n" [^{:tag (* Link)} ctxt]
+  (let [sc (newStackCheck ctxt false)
+
+      ;; limit is number of bytes a splittable function ensures are
+      ;; available on the stack. If any call chain exceeds this
+      ;; depth, the stack check test fails.
+      ;;
+      ;; The call to morestack in every splittable function ensures
+      ;; that there are at least StackLimit bytes available below SP
+      ;; when morestack returns.
+      ^{:line 64} limit (- (objabi/StackNosplit @flagRace) (.-callSize sc))]
+    (when (== buildcfg/GOARCH "arm64")
+      ;; Need an extra 8 bytes below SP to save FP.
+      (set! limit - 8))
+
+
+    ;; Compute stack heights without any back-tracking information.
+    ;; This will almost certainly succeed and we can simply
+    ;; return. If it fails, we do a second pass with back-tracking
+    ;; to produce a good error message.
+    ;;
+    ;; This accumulates stack heights bottom-up so it only has to
+    ;; visit every function once.
+    (let [^{:tag (slice loader/Sym)} failed (zero (slice loader/Sym))]
+      (range [_ s (.-Textp ctxt)]
+        (when (> (.check sc s) limit)
+          (set! failed (append failed s))))
+
+
+
+      (when (> (len failed) 0)
+        ;; Something was over-limit, so now we do the more
+        ;; expensive work to report a good error. First, for
+        ;; the over-limit functions, redo the stack check but
+        ;; record the graph this time.
+        (set! sc (newStackCheck ctxt true))
+        (range [_ s failed]
+          (.check sc s))
+
+
+        ;; Find the roots of the graph (functions that are not
+        ;; called by any other function).
+        (let [roots (.findRoots sc)]
+
+          ;; Find and report all paths that go over the limit.
+          ;; This accumulates stack depths top-down. This is
+          ;; much less efficient because we may have to visit
+          ;; the same function multiple times at different
+          ;; depths, but lets us find all paths.
+          (range [_ root roots]
+            (.Errorf ctxt root "nosplit stack over %d byte limit" limit)
+            (let [chain (lit (slice stackCheckChain) (lit _ (lit stackCheckEdge 0 root) false))]
+              (.report sc root limit (addr chain)))))))))
+
+
+
+
+^{:go/end 130} (go/func newStackCheck ^{:tag (* stackCheck)} [^{:tag (* Link)} ctxt ^bool graph]
+  (let [sc (addr ^{:go/breaks [2 4 6 8]} (lit stackCheck
+          :ctxt ctxt
+          :ldr (.-loader ctxt)
+          :morestack (.Lookup (.-loader ctxt) "runtime.morestack" 0)
+          :height (make (map loader/Sym int16) (len (.-Textp ctxt)))))]
+
+    ;; Compute stack effect of a CALL operation. 0 on LR machines.
+    ;; 1 register pushed on non-LR machines.
+    (when (not (.-HasLR ^{:go/via [Target]} (.-Arch ctxt)))
+      (set! (.-callSize sc) (.-RegSize ^{:go/via [Target]} (.-Arch ctxt))))
+
+
+    (when graph
+      ;; We're going to record the call graph.
+      (set! (.-graph sc) (make (map loader/Sym (slice stackCheckEdge)))))
+
+
+    ^{:line 129} sc))
+
+
+^{:go/end 140} (go/method symName ^string [^{:tag (* stackCheck)} sc ^loader/Sym sym]
+  (switch sym
+    (case [stackCheckIndirect]
+      (return "indirect"))
+    (case [0]
+      (return "leaf")))
+
+  (fmt/Sprintf "%s<%d>" (.SymName (.-ldr sc) sym) (.SymVersion (.-ldr sc) sym)))
+
+
+
+
+^{:go/end 174} (go/method check "check returns the stack height of sym. It populates sc.height and\nsc.graph for sym and every function in its call tree.\n" ^int [^{:tag (* stackCheck)} sc ^loader/Sym sym]
+  (when [(values h ok) (aget (.-height sc) sym)] ok
+    ;; We've already visited this symbol or we're in a cycle.
+    (return (conv int h)))
+
+  ;; Store the sentinel so we can detect cycles.
+  (aset (.-height sc) sym stackCheckCycle)
+  ;; Compute and record the height and optionally edges.
+  (let [(values h edges) (.computeHeight sc sym (or @flagDebugNosplit (!= (.-graph sc) nil)))]
+    (when (> h (conv int stackCheckCycle)) ; Prevent integer overflow
+      (set! h (conv int stackCheckCycle)))
+
+    (aset (.-height sc) sym (conv int16 h))
+    (when (!= (.-graph sc) nil)
+      (aset (.-graph sc) sym edges))
+
+
+    (when @flagDebugNosplit
+      (range [_ edge edges]
+        (fmt/Printf "nosplit: %s +%d" (.symName sc sym) (.-growth edge))
+        (if (== (.-target edge) 0)
+          ;; Local stack growth or leaf function.
+          (fmt/Printf "\n")
+
+          (fmt/Printf " -> %s\n" (.symName sc (.-target edge))))))
+
+
+
+
+    ^{:line 173} h))
+
+
+
+
+
+
+
+^{:go/end 282} (go/method computeHeight "computeHeight returns the stack height of sym. If graph is true, it\nalso returns the out-edges of sym.\n\nCaching is applied to this in check. Call check instead of calling\nthis directly.\n" [^{:tag (* stackCheck)} sc ^loader/Sym sym ^bool graph] :results [int (slice stackCheckEdge)]
+  (let [ldr (.-ldr sc)]
+
+    ;; Check special cases.
+    (when (== sym (.-morestack sc))
+      ;; morestack looks like it calls functions, but they
+      ;; either happen only when already on the system stack
+      ;; (where there is ~infinite space), or after
+      ;; switching to the system stack. Hence, its stack
+      ;; height on the user stack is 0.
+      (return 0 nil))
+
+    (when (== sym stackCheckIndirect)
+      ;; Assume that indirect/closure calls are always to
+      ;; splittable functions, so they just need enough room
+      ;; to call morestack.
+      (return (.-callSize sc) (lit (slice stackCheckEdge) (lit _ (.-callSize sc) (.-morestack sc)))))
+
+
+    ;; Ignore calls to external functions. Assume that these calls
+    ;; are only ever happening on the system stack, where there's
+    ;; plenty of room.
+    (when (.AttrExternal ldr sym)
+      (return 0 nil))
+
+    (when [info (.FuncInfo ldr sym)] (not (.Valid info)) ; also external
+      (return 0 nil))
+
+
+    ;; Track the maximum height of this function and, if we're
+    ;; recording the graph, its out-edges.
+    (let [^{:tag (slice stackCheckEdge)} edges (zero (slice stackCheckEdge))
+        ^{:line 213} maxHeight 0
+        ^{:line 214} ctxt (.-ctxt sc)
+        ;; addEdge adds a stack growth out of this function to
+        ;; function "target" or, if target == 0, a local stack growth
+        ;; within the function.
+        ^{:line 218} addEdge ^{:go/end 229} (fn [^int growth ^loader/Sym target]
+          (when graph
+            (set! edges (append edges (lit stackCheckEdge growth target))))
+
+          (let [height growth]
+            (when (!= target 0) ; Don't walk into the leaf "edge"
+              (set! height + (.check sc target)))
+
+            (when (> height maxHeight)
+              (set! maxHeight height))))]
+
+
+
+      (when (not (.IsNoSplit ldr sym))
+        ;; Splittable functions start with a call to
+        ;; morestack, after which their height is 0. Account
+        ;; for the height of the call to morestack.
+        (addEdge (.-callSize sc) (.-morestack sc))
+        (return maxHeight edges))
+
+
+      ;; This function is nosplit, so it adjusts SP without a split
+      ;; check.
+      ;;
+      ;; Walk through SP adjustments in function, consuming relocs
+      ;; and following calls.
+      (let [maxLocalHeight 0
+          (values relocs ri) (values (.Relocs ldr sym) 0)
+          ^{:line 246} pcsp (obj/NewPCIter (conv uint32 (.-MinLC ^{:go/via [Target]} (.-Arch ctxt))))]
+        (for [(.Init pcsp (.Data ldr (.Pcsp ldr sym)))] (not (.-Done pcsp)) (.Next pcsp)
+          ;; pcsp.value is in effect for [pcsp.pc, pcsp.nextpc).
+          (let [height (conv int (.-Value pcsp))]
+            (when (> height maxLocalHeight)
+              (set! maxLocalHeight height))
+
+
+            ;; Process calls in this span.
+            (for [] (< ri (.Count relocs)) (inc! ri)
+              (let [r (.At relocs ri)]
+                (when (>= (conv uint32 ^{:go/via [Reloc]} (.Off r)) (.-NextPC pcsp))
+                  (break))
+
+                (let [t (.Type r)]
+                  (when (or (.IsDirectCall t) (== t objabi/R_CALLIND))
+                    (let [growth (+ height (.-callSize sc))
+                        ^{:line 263 :tag loader/Sym} target (zero loader/Sym)]
+                      (if (== t objabi/R_CALLIND)
+                        (set! target stackCheckIndirect)
+
+                        (set! target (.Sym r)))
+
+                      (addEdge growth target))))))))
+
+
+
+        (when (> maxLocalHeight maxHeight)
+          ;; This is either a leaf function, or the function
+          ;; grew its stack to larger than the maximum call
+          ;; height between calls. Either way, record that local
+          ;; stack growth.
+          (addEdge maxLocalHeight 0))
+
+
+        (return maxHeight edges)))))
+
+
+^{:go/end 356} (go/method findRoots ^{:tag (slice loader/Sym)} [^{:tag (* stackCheck)} sc]
+  ;; Collect all nodes.
+  (let [nodes (make (map loader/Sym (struct)))]
+    (range [k (.-graph sc)]
+      (aset nodes k (lit (struct))))
+
+
+    ;; Start a DFS from each node and delete all reachable
+    ;; children. If we encounter an unrooted cycle, this will
+    ;; delete everything in that cycle, so we detect this case and
+    ;; track the lowest-numbered node encountered in the cycle and
+    ;; put that node back as a root.
+    (let [^{:tag (func [^loader/Sym origin ^loader/Sym sym] [^bool cycle ^loader/Sym lowest])} walk (zero (func [^loader/Sym origin ^loader/Sym sym] [^bool cycle ^loader/Sym lowest]))]
+      (set! walk ^{:go/end 328} (fn [^loader/Sym origin ^loader/Sym sym] :results [^bool cycle ^loader/Sym lowest]
+          (when [(values _ ok) (aget nodes sym)] (not ok)
+            ;; We already deleted this node.
+            (return false 0))
+
+          (delete nodes sym)
+
+          (when (== origin sym)
+            ;; We found an unrooted cycle. We already
+            ;; deleted all children of this node. Walk
+            ;; back up, tracking the lowest numbered
+            ;; symbol in this cycle.
+            (return true sym))
+
+
+          ;; Delete children of this node.
+          (range [_ out (aget (.-graph sc) sym)]
+            (when [(values c l) (walk origin (.-target out))] c
+              (set! cycle true)
+              (when (== lowest 0)
+                ;; On first cycle detection,
+                ;; add sym to the set of
+                ;; lowest-numbered candidates.
+                (set! lowest sym))
+
+              (when (< l lowest)
+                (set! lowest l))))
+
+
+
+          (return)))
+
+      (range [k nodes]
+        ;; Delete all children of k.
+        (range [_ out (aget (.-graph sc) k)]
+          (when [(values cycle lowest) (walk k (.-target out))] cycle
+            ;; This is an unrooted cycle so we
+            ;; just deleted everything. Put back
+            ;; the lowest-numbered symbol.
+            (aset nodes lowest (lit (struct))))))
+
+
+
+
+      ;; Sort roots by height. This makes the result deterministic
+      ;; and also improves the error reporting.
+      (let [^{:tag (slice loader/Sym)} roots (zero (slice loader/Sym))]
+        (range [k nodes]
+          (set! roots (append roots k)))
+
+        (sort/Slice roots ^{:go/end 354} (fn ^bool [^int i ^int j]
+            (let [(values h1 h2) (values (aget (.-height sc) (aget roots i)) (aget (.-height sc) (aget roots j)))]
+              (when (!= h1 h2)
+                (return (> h1 h2)))
+
+              ;; Secondary sort by Sym.
+              (< (aget roots i) (aget roots j)))))
+
+        ^{:line 355} roots))))
+
+
+(go/type stackCheckChain (struct
+    ^{:line 359} stackCheckEdge
+    ^{:line 360 :tag bool} printed))
+
+
+^{:go/end 421} (go/method report [^{:tag (* stackCheck)} sc ^loader/Sym sym ^int depth ^{:tag (* (slice stackCheckChain))} chain]
+  ;; Walk the out-edges of sym. We temporarily pull the edges
+  ;; out of the graph to detect cycles and prevent infinite
+  ;; recursion.
+  (let [(values edges ok) (aget (.-graph sc) sym)
+      ^{:line 368} isCycle (not (or ok (== sym 0)))]
+    (delete (.-graph sc) sym)
+    (range [_ out edges]
+      (set! @chain (append @chain (lit stackCheckChain out false)))
+      (.report sc (.-target out) (- depth (.-growth out)) chain)
+      (set! @chain (subslice @chain _ (- (len @chain) 1))))
+
+    (aset (.-graph sc) sym edges)
+
+    ;; If we've reached the end of a chain and it went over the
+    ;; stack limit or was a cycle that would eventually go over,
+    ;; print the whole chain.
+    ;;
+    ;; We should either be in morestack (which has no out-edges)
+    ;; or the sentinel 0 Sym "called" from a leaf function (which
+    ;; has no out-edges), or we came back around a cycle (possibly
+    ;; to ourselves) and edges was temporarily nil'd.
+    (when (and (== (len edges) 0) ^:go/paren (or (< depth 0) isCycle))
+      (let [^string indent (zero string)]
+        (range [i @chain]
+          (let [ent (addr (aget @chain i))]
+            (when (.-printed ent)
+              ;; Already printed on an earlier part
+              ;; of this call tree.
+              (continue))
+
+            (set! (.-printed ent) true)
+
+            (when (== i 0)
+              ;; chain[0] is just the root function,
+              ;; not a stack growth.
+              (fmt/Printf "%s\n" (.symName sc ^{:go/via [stackCheckEdge]} (.-target ent)))
+              (continue))
+
+
+            (set! indent (strings/Repeat "    " i))
+            (fmt/Print indent)
+            ;; Grows the stack X bytes and (maybe) calls Y.
+            (fmt/Printf "grows %d bytes" ^{:go/via [stackCheckEdge]} (.-growth ent))
+            (if (== ^{:go/via [stackCheckEdge]} (.-target ent) 0) (do)
+              ;; Not a call, just a leaf. Print nothing.
+
+              (fmt/Printf ", calls %s" (.symName sc ^{:go/via [stackCheckEdge]} (.-target ent))))
+
+            (fmt/Printf "\n")))
+
+        ;; Print how far over this chain went.
+        (if isCycle
+          (fmt/Printf "%sinfinite cycle\n" indent)
+
+          (fmt/Printf "%s%d bytes over limit\n" indent (- depth)))))))

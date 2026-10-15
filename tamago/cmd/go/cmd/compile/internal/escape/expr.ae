@@ -1,0 +1,342 @@
+;; Copyright 2018 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.cmd.compile.internal.escape) (go/file "expr.go" :imports [
+
+
+    ^{:line 8} [base "cmd/compile/internal/base"]
+    ^{:line 9} [ir "cmd/compile/internal/ir"]
+    ^{:line 10} [types "cmd/compile/internal/types"]])
+
+
+
+
+^{:go/end 21} (go/method expr "expr models evaluating an expression n and flowing the result into\nhole k.\n" [^{:tag (* escape)} e ^hole k ^ir/Node n]
+  (when (== n nil)
+    (return))
+
+  (.stmts e (.Init n))
+  (.exprSkipInit e k n))
+
+
+^{:go/end 277} (go/method exprSkipInit [^{:tag (* escape)} e ^hole k ^ir/Node n]
+  (when (== n nil)
+    (return))
+
+
+  (let [lno (ir/SetPos n)]
+    (defer (^{:go/end 31} (fn []
+          (set! base/Pos lno))))
+
+
+    (when (and (>= (.-derefs k) 0) (not (.IsUntyped (.Type n))) (not (.HasPointers (.Type n))))
+      (set! (.-dst k) (addr ^{:go/via [batch]} (.-blankLoc e))))
+
+
+    (switch (.Op n)
+      (default
+        (base/Fatalf "unexpected expr: %s %v" (.String (.Op n)) n))
+
+      (case [ir/OLITERAL ir/ONIL ir/OGETG ir/OGETCALLERSP ir/OTYPE ir/OMETHEXPR ir/OLINKSYMOFFSET])
+      ;; nop
+
+      (case [ir/ONAME]
+        (let [n (assert (* ir/Name) n)]
+          (when (or (== (.-Class n) ir/PFUNC) (== (.-Class n) ir/PEXTERN))
+            (return))
+
+          ^{:go/via [batch]} (.flow e k ^{:go/via [batch]} (.oldLoc e n))))
+
+      (case [ir/OPLUS ir/ONEG ir/OBITNOT ir/ONOT]
+        (let [n (assert (* ir/UnaryExpr) n)]
+          (.discard e (.-X n))))
+      (case [ir/OADD ir/OSUB ir/OOR ir/OXOR ir/OMUL ir/ODIV ir/OMOD ir/OLSH ir/ORSH ir/OAND ir/OANDNOT ir/OEQ ir/ONE ir/OLT ir/OLE ir/OGT ir/OGE]
+        (let [n (assert (* ir/BinaryExpr) n)]
+          (.discard e (.-X n))
+          (.discard e (.-Y n))))
+      (case [ir/OANDAND ir/OOROR]
+        (let [n (assert (* ir/LogicalExpr) n)]
+          (.discard e (.-X n))
+          (.discard e (.-Y n))))
+      (case [ir/OADDR]
+        (let [n (assert (* ir/AddrExpr) n)]
+          (.expr e (.addr k n "address-of") (.-X n)))) ; "address-of"
+      (case [ir/ODEREF]
+        (let [n (assert (* ir/StarExpr) n)]
+          (.expr e (.deref k n "indirection") (.-X n)))) ; "indirection"
+      (case [ir/ODOT ir/ODOTMETH ir/ODOTINTER]
+        (let [n (assert (* ir/SelectorExpr) n)]
+          (.expr e (.note k n "dot") (.-X n))))
+      (case [ir/ODOTPTR]
+        (let [n (assert (* ir/SelectorExpr) n)]
+          (.expr e (.deref k n "dot of pointer") (.-X n)))) ; "dot of pointer"
+      (case [ir/ODOTTYPE ir/ODOTTYPE2]
+        (let [n (assert (* ir/TypeAssertExpr) n)]
+          (.expr e (.dotType k ^{:go/via [miniExpr]} (.Type n) n "dot") (.-X n))))
+      (case [ir/ODYNAMICDOTTYPE ir/ODYNAMICDOTTYPE2]
+        (let [n (assert (* ir/DynamicTypeAssertExpr) n)]
+          (.expr e (.dotType k ^{:go/via [miniExpr]} (.Type n) n "dot") (.-X n))))
+      ;; n.T doesn't need to be tracked; it always points to read-only storage.
+      (case [ir/OINDEX]
+        (let [n (assert (* ir/IndexExpr) n)]
+          (if (.IsArray (.Type (.-X n)))
+            (.expr e (.note k n "fixed-array-index-of") (.-X n))
+
+            ;; TODO(mdempsky): Fix why reason text.
+            (.expr e (.deref k n "dot of pointer") (.-X n)))
+
+          (.discard e (.-Index n))))
+      (case [ir/OINDEXMAP]
+        (let [n (assert (* ir/IndexExpr) n)]
+          (.discard e (.-X n))
+          ;; Keys used in map lookups do not need to escape.
+          ;; See "Hashing Pointers" doc in internal/runtime/maps/map.go.
+          (.discard e (.-Index n))))
+      (case [ir/OSLICE ir/OSLICEARR ir/OSLICE3 ir/OSLICE3ARR ir/OSLICESTR]
+        (let [n (assert (* ir/SliceExpr) n)]
+          (.expr e (.note k n "slice") (.-X n))
+          (.discard e (.-Low n))
+          (.discard e (.-High n))
+          (.discard e (.-Max n))))
+
+      (case [ir/OCONV ir/OCONVNOP]
+        (let [n (assert (* ir/ConvExpr) n)]
+          (cond (and ^:go/paren (or (ir/ShouldCheckPtr (.-curfn e) 2) (ir/ShouldAsanCheckPtr (.-curfn e))) (.IsUnsafePtr ^{:go/via [miniExpr]} (.Type n)) (.IsPtr (.Type (.-X n))))
+            ;; When -d=checkptr=2 or -asan is enabled,
+            ;; treat conversions to unsafe.Pointer as an
+            ;; escaping operation. This allows better
+            ;; runtime instrumentation, since we can more
+            ;; easily detect object boundaries on the heap
+            ;; than the stack.
+            (.assignHeap e (.-X n) "conversion to unsafe.Pointer" n)
+            (and (.IsUnsafePtr ^{:go/via [miniExpr]} (.Type n)) (.IsUintptr (.Type (.-X n))))
+            (.unsafeValue e k (.-X n)) :else
+
+            (.expr e k (.-X n)))))
+
+      (case [ir/OCONVIFACE]
+        (let [n (assert (* ir/ConvExpr) n)]
+          (when (and (not (.IsInterface (.Type (.-X n)))) (not (types/IsDirectIface (.Type (.-X n)))))
+            (set! k (.spill e k n)))
+
+          (.expr e (.note k n "interface-converted") (.-X n))))
+      (case [ir/OMAKEFACE]
+        (let [n (assert (* ir/BinaryExpr) n)]
+          ;; Note: n.X is not needed because it can never point to memory that might escape.
+          (.expr e k (.-Y n))))
+      (case [ir/OITAB ir/OIDATA ir/OSPTR]
+        (let [n (assert (* ir/UnaryExpr) n)]
+          (.expr e k (.-X n))))
+      (case [ir/OSLICE2ARR]
+        ;; Converting a slice to array is effectively a deref.
+        (let [n (assert (* ir/ConvExpr) n)]
+          (.expr e (.deref k n "slice-to-array") (.-X n))))
+      (case [ir/OSLICE2ARRPTR]
+        ;; the slice pointer flows directly to the result
+        (let [n (assert (* ir/ConvExpr) n)]
+          (.expr e k (.-X n))))
+      (case [ir/ORECV]
+        (let [n (assert (* ir/UnaryExpr) n)]
+          (.discard e (.-X n))))
+
+      (case [ir/OCALLMETH ir/OCALLFUNC ir/OCALLINTER ir/OINLCALL
+          ^{:line 144} ir/OLEN ir/OCAP ir/OMIN ir/OMAX ir/OCOMPLEX ir/OREAL ir/OIMAG ir/OAPPEND ir/OCOPY ir/ORECOVER
+          ^{:line 145} ir/OUNSAFEADD ir/OUNSAFESLICE ir/OUNSAFESTRING ir/OUNSAFESTRINGDATA ir/OUNSAFESLICEDATA]
+        (.call e (lit (slice hole) k) n))
+
+      (case [ir/ONEW]
+        (let [n (assert (* ir/UnaryExpr) n)]
+          (.spill e k n)))
+
+      (case [ir/OMAKESLICE]
+        (let [n (assert (* ir/MakeExpr) n)]
+          (.spill e k n)
+          (.discard e (.-Len n))
+          (.discard e (.-Cap n))))
+      (case [ir/OMAKECHAN]
+        (let [n (assert (* ir/MakeExpr) n)]
+          (.discard e (.-Len n))))
+      (case [ir/OMAKEMAP]
+        (let [n (assert (* ir/MakeExpr) n)]
+          (.spill e k n)
+          (.discard e (.-Len n))))
+
+      (case [ir/OMETHVALUE]
+        ;; Flow the receiver argument to both the closure and
+        ;; to the receiver parameter.
+
+        (let [n (assert (* ir/SelectorExpr) n)
+            ^{:line 170} closureK (.spill e k n)
+
+            ^{:line 172} m (.-Selection n)
+
+            ;; We don't know how the method value will be called
+            ;; later, so conservatively assume the result
+            ;; parameters all flow to the heap.
+            ;;
+            ;; TODO(mdempsky): Change ks into a callback, so that
+            ;; we don't have to create this slice?
+            ^{:line 180 :tag (slice hole)} ks (zero (slice hole))]
+          (for [i (.NumResults (.-Type m))] (> i 0) (dec! i)
+            (set! ks (append ks ^{:go/via [batch]} (.heapHole e))))
+
+          (let [(values name _) (assert (* ir/Name) (.-Nname m))
+              ^{:line 185} paramK (.tagHole e ks name (.Recv (.-Type m)))]
+
+            (.expr e (.teeHole e paramK closureK) (.-X n)))))
+
+      (case [ir/OPTRLIT]
+        (let [n (assert (* ir/AddrExpr) n)]
+          (.expr e (.spill e k n) (.-X n))))
+
+      (case [ir/OARRAYLIT]
+        (let [n (assert (* ir/CompLitExpr) n)]
+          (range [_ elt (.-List n)]
+            (when (== (.Op elt) ir/OKEY)
+              (set! elt (.-Value (assert (* ir/KeyExpr) elt))))
+
+            (.expr e (.note k n "array literal element") elt))))
+
+
+      (case [ir/OSLICELIT]
+        (let [n (assert (* ir/CompLitExpr) n)]
+          (set! k (.spill e k n))
+
+          (range [_ elt (.-List n)]
+            (when (== (.Op elt) ir/OKEY)
+              (set! elt (.-Value (assert (* ir/KeyExpr) elt))))
+
+            (.expr e (.note k n "slice-literal-element") elt))))
+
+
+      (case [ir/OSTRUCTLIT]
+        (let [n (assert (* ir/CompLitExpr) n)]
+          (range [_ elt (.-List n)]
+            (.expr e (.note k n "struct literal element") (.-Value (assert (* ir/StructKeyExpr) elt))))))
+
+
+      (case [ir/OMAPLIT]
+        (let [n (assert (* ir/CompLitExpr) n)]
+          (.spill e k n)
+
+          ;; Map keys and values are always stored in the heap.
+          (range [_ elt (.-List n)]
+            (let [elt (assert (* ir/KeyExpr) elt)]
+              (.assignHeap e (.-Key elt) "map literal key" n)
+              (.assignHeap e (.-Value elt) "map literal value" n)))))
+
+
+      (case [ir/OCLOSURE]
+        (let [n (assert (* ir/ClosureExpr) n)]
+          (set! k (.spill e k n))
+          (set! ^{:go/via [batch]} (.-closures e) (append ^{:go/via [batch]} (.-closures e) (lit closure k n)))
+
+          (when [fn (.-Func n)] (.IsClosure fn)
+            (range [_ cv (.-ClosureVars fn)]
+              (when [loc ^{:go/via [batch]} (.oldLoc e cv)] (not (.-captured loc))
+                (set! (.-captured loc) true)
+
+                ;; Ignore reassignments to the variable in straightline code
+                ;; preceding the first capture by a closure.
+                (when (== (.-loopDepth loc) (.-loopDepth e))
+                  (set! (.-reassigned loc) false))))
+
+
+
+
+            (range [_ n (.-Dcl fn)]
+              ;; Add locations for local variables of the
+              ;; closure, if needed, in case we're not including
+              ;; the closure func in the batch for escape
+              ;; analysis (happens for escape analysis called
+              ;; from reflectdata.methodWrapper)
+              (when (and (== ^{:go/via [miniExpr miniNode]} (.Op n) ir/ONAME) (== (.-Opt n) nil))
+                (.newLoc ^{:go/via [batch]} (.with e fn) n true)))
+
+
+            ^{:go/via [batch]} (.walkFunc e fn))))
+
+
+      (case [ir/ORUNES2STR ir/OBYTES2STR ir/OSTR2RUNES ir/OSTR2BYTES ir/ORUNESTR]
+        (let [n (assert (* ir/ConvExpr) n)]
+          (.spill e k n)
+          (.discard e (.-X n))))
+
+      (case [ir/OADDSTR]
+        (let [n (assert (* ir/AddStringExpr) n)]
+          (.spill e k n)
+
+          ;; Arguments of OADDSTR never escape;
+          ;; runtime.concatstrings makes sure of that.
+          (.discards e (.-List n))))
+
+      (case [ir/ODYNAMICTYPE]))))
+;; Nothing to do - argument is a *runtime._type (+ maybe a *runtime.itab) pointing to static data section
+
+
+
+
+
+^{:go/end 322} (go/method unsafeValue "unsafeValue evaluates a uintptr-typed arithmetic expression looking\nfor conversions from an unsafe.Pointer.\n" [^{:tag (* escape)} e ^hole k ^ir/Node n]
+  (when (!= (.Kind (.Type n)) types/TUINTPTR)
+    (base/Fatalf "unexpected type %v for %v" (.Type n) n))
+
+  (when (.-addrtaken k)
+    (base/Fatalf "unexpected addrtaken"))
+
+
+  (.stmts e (.Init n))
+
+  (switch (.Op n)
+    (case [ir/OCONV ir/OCONVNOP]
+      (let [n (assert (* ir/ConvExpr) n)]
+        (if (.IsUnsafePtr (.Type (.-X n)))
+          (.expr e k (.-X n))
+
+          (.discard e (.-X n)))))
+
+    (case [ir/ODOTPTR]
+      (let [n (assert (* ir/SelectorExpr) n)]
+        (if (ir/IsReflectHeaderDataField n)
+          (.expr e (.deref k n "reflect.Header.Data") (.-X n))
+
+          (.discard e (.-X n)))))
+
+    (case [ir/OPLUS ir/ONEG ir/OBITNOT]
+      (let [n (assert (* ir/UnaryExpr) n)]
+        (.unsafeValue e k (.-X n))))
+    (case [ir/OADD ir/OSUB ir/OOR ir/OXOR ir/OMUL ir/ODIV ir/OMOD ir/OAND ir/OANDNOT]
+      (let [n (assert (* ir/BinaryExpr) n)]
+        (.unsafeValue e k (.-X n))
+        (.unsafeValue e k (.-Y n))))
+    (case [ir/OLSH ir/ORSH]
+      (let [n (assert (* ir/BinaryExpr) n)]
+        (.unsafeValue e k (.-X n))
+        ;; RHS need not be uintptr-typed (#32959) and can't meaningfully
+        ;; flow pointers anyway.
+        (.discard e (.-Y n))))
+    (default
+      (.exprSkipInit e ^{:go/via [batch]} (.discardHole e) n))))
+
+
+
+
+
+^{:go/end 328} (go/method discard "discard evaluates an expression n for side-effects, but discards\nits value.\n" [^{:tag (* escape)} e ^ir/Node n]
+  (.expr e ^{:go/via [batch]} (.discardHole e) n))
+
+
+^{:go/end 334} (go/method discards [^{:tag (* escape)} e ^ir/Nodes l]
+  (range [_ n l]
+    (.discard e n)))
+
+
+
+
+
+
+^{:go/end 343} (go/method spill "spill allocates a new location associated with expression n, flows\nits address to k, and returns a hole that flows values to it. It's\nintended for use with most expressions that allocate storage.\n" ^hole [^{:tag (* escape)} e ^hole k ^ir/Node n]
+  (let [loc (.newLoc e n false)]
+    ^{:go/via [batch]} (.flow e (.addr k n "spill") loc)
+    (.asHole loc)))

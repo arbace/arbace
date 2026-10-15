@@ -129,6 +129,13 @@ covers what.
     `h1:Zl4w3hu5DaogGvcLzunS4gjwNEqdjFFJedMO3pDQa5k=`), its packages that build for
     `tamago/amd64` or `tamago/arm64` and its `go.mod`: Copyright (c) The TamaGo Authors, under the BSD 3-Clause
     License (text below).
+  - `tamago/cmd/` (tamago/cmd/README.md, doc/STANDALONE-NOTES.md, S9): Go's toolchain, the 105
+    packages of the same tree's `src/cmd/` that `cmd/compile`, `cmd/link` and `cmd/asm` build
+    from (with `cmd/vendor/golang.org/x/telemetry/...`, vendored there from
+    https://go.googlesource.com/telemetry at the version `src/cmd/go.mod` names), their
+    assembly, and `src/cmd/go.mod`, `go.sum`, `vendor/modules.txt` and
+    `compile/default.pgo`: Copyright The Go Authors, under Go's BSD 3-Clause License (text
+    below).
   Each Go file's notice is kept, as `;;` lines of its forms.
 - `x509roots/` (`x509roots/go/arbace/x509roots/fallback/bundle.ae` and `bundle/`, with
   `bundle/bundle.der`; x509roots/README.md, doc/go/BOX-NOTES.md "TLS (option 2)"): the package

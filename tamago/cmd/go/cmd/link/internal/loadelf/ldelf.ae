@@ -1,0 +1,1232 @@
+;; Copyright 2019 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; Package loadelf implements an ELF file reader.
+(in-ns 'go.cmd.link.internal.loadelf) (go/file "ldelf.go" :doc "Package loadelf implements an ELF file reader.\n" :imports [
+
+
+    ^{:line 9} [bytes "bytes"]
+    ^{:line 10} [bio "cmd/internal/bio"]
+    ^{:line 11} [objabi "cmd/internal/objabi"]
+    ^{:line 12} [sys "cmd/internal/sys"]
+    ^{:line 13} [loader "cmd/link/internal/loader"]
+    ^{:line 14} [sym "cmd/link/internal/sym"]
+    ^{:line 15} [elf "debug/elf"]
+    ^{:line 16} [binary "encoding/binary"]
+    ^{:line 17} [fmt "fmt"]
+    ^{:line 18} [io "io"]
+    ^{:line 19} [log "log"]
+    ^{:line 20} [strings "strings"]])
+
+
+;; /*
+;; Derived from Plan 9 from User Space's src/libmach/elf.h, elf.c
+;; https://github.com/9fans/plan9port/tree/master/src/libmach/
+;; 
+;; Copyright © 2004 Russ Cox.
+;; Portions Copyright © 2008-2010 Google Inc.
+;; Portions Copyright © 2010 The Go Authors.
+;; 
+;; Permission is hereby granted, free of charge, to any person obtaining a copy
+;; of this software and associated documentation files (the "Software"), to deal
+;; in the Software without restriction, including without limitation the rights
+;; to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+;; copies of the Software, and to permit persons to whom the Software is
+;; furnished to do so, subject to the following conditions:
+;; 
+;; The above copyright notice and this permission notice shall be included in
+;; all copies or substantial portions of the Software.
+;; 
+;; THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+;; IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+;; FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL THE
+;; AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+;; LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+;; OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+;; THE SOFTWARE.
+;; */
+
+(go/const
+  ^{:line 51} [^{:val 1879048195} SHT_ARM_ATTRIBUTES 0x70000003])
+
+
+(go/type ElfSect (struct
+    ^{:line 55 :tag string} name
+    ^{:line 56 :tag uint32} nameoff
+    ^{:line 57 :tag elf/SectionType} type_
+    ^{:line 58 :tag elf/SectionFlag} flags
+    ^{:line 59 :tag uint64} addr
+    ^{:line 60 :tag uint64} off
+    ^{:line 61 :tag uint64} size
+    ^{:line 62 :tag uint32} link
+    ^{:line 63 :tag uint32} info
+    ^{:line 64 :tag uint64} align
+    ^{:line 65 :tag uint64} entsize
+    ^{:line 66 :tag (slice byte)} base
+    ^{:line 67 :tag bool} readOnlyMem ; Is this section in readonly memory?
+    ^{:line 68 :tag loader/Sym} sym))
+
+
+(go/type ElfObj (struct
+    ^{:line 72 :tag (* bio/Reader)} f
+    ^{:line 73 :tag int64} base ; offset in f where ELF begins
+    ^{:line 74 :tag int64} length ; length of ELF
+    ^{:line 75 :tag int} is64
+    ^{:line 76 :tag string} name
+    ^{:line 77 :tag binary/ByteOrder} e
+    ^{:line 78 :tag (slice ElfSect)} sect
+    ^{:line 79 :tag uint} nsect
+    ^{:line 80 :tag int} nsymtab
+    ^{:line 81 :tag (* ElfSect)} symtab
+    ^{:line 82 :tag (* ElfSect)} symstr
+    ^{:line 83 :tag uint32} type_
+    ^{:line 84 :tag uint32} machine
+    ^{:line 85 :tag uint32} version
+    ^{:line 86 :tag uint64} entry
+    ^{:line 87 :tag uint64} phoff
+    ^{:line 88 :tag uint64} shoff
+    ^{:line 89 :tag uint32} flags
+    ^{:line 90 :tag uint32} ehsize
+    ^{:line 91 :tag uint32} phentsize
+    ^{:line 92 :tag uint32} phnum
+    ^{:line 93 :tag uint32} shentsize
+    ^{:line 94 :tag uint32} shnum
+    ^{:line 95 :tag uint32} shstrndx))
+
+
+(go/type ElfSym (struct
+    ^{:line 99 :tag string} name
+    ^{:line 100 :tag uint64} value
+    ^{:line 101 :tag uint64} size
+    ^{:line 102 :tag elf/SymBind} bind
+    ^{:line 103 :tag elf/SymType} type_
+    ^{:line 104 :tag uint8} other
+    ^{:line 105 :tag elf/SectionIndex} shndx
+    ^{:line 106 :tag loader/Sym} sym))
+
+
+(go/const
+  ^{:line 110} [^{:val 1} TagFile 1]
+  ^{:line 111} [^{:val 4} TagCPUName 4]
+  ^{:line 112} [^{:val 5} TagCPURawName 5]
+  ^{:line 113} [^{:val 32} TagCompatibility 32]
+  ^{:line 114} [^{:val 64} TagNoDefaults 64]
+  ^{:line 115} [^{:val 65} TagAlsoCompatibleWith 65]
+  ^{:line 116} [^{:val 28} TagABIVFPArgs 28])
+
+
+(go/type elfAttribute (struct
+    ^{:line 120 :tag uint64} tag
+    ^{:line 121 :tag string} sval
+    ^{:line 122 :tag uint64} ival))
+
+
+(go/type elfAttributeList (struct
+    ^{:line 126 :tag (slice byte)} data
+    ^{:line 127 :tag error} err))
+
+
+^{:go/end 142} (go/method string ^string [^{:tag (* elfAttributeList)} a]
+  (when (!= (.-err a) nil)
+    (return ""))
+
+  (let [nul (bytes/IndexByte (.-data a) 0)]
+    (when (< nul 0)
+      (set! (.-err a) io/EOF)
+      (return ""))
+
+    (let [s (conv string (subslice (.-data a) _ nul))]
+      (set! (.-data a) (subslice (.-data a) (+ nul 1)))
+      ^{:line 141} s)))
+
+
+^{:go/end 151} (go/method uleb128 ^uint64 [^{:tag (* elfAttributeList)} a]
+  (when (!= (.-err a) nil)
+    (return 0))
+
+  (let [(values v size) (binary/Uvarint (.-data a))]
+    (set! (.-data a) (subslice (.-data a) size))
+    ^{:line 150} v))
+
+
+
+^{:go/end 175} (go/method armAttr "Read an elfAttribute from the list following the rules used on ARM systems.\n" ^elfAttribute [^{:tag (* elfAttributeList)} a]
+  (let [attr (lit elfAttribute :tag (.uleb128 a))]
+    (switch
+      (case [(== (.-tag attr) TagCompatibility)]
+        (set! (.-ival attr) (.uleb128 a))
+        (set! (.-sval attr) (.string a)))
+
+      (case [(== (.-tag attr) TagNoDefaults)]) ; Tag_nodefaults has no argument
+
+      (case [(== (.-tag attr) TagAlsoCompatibleWith)]
+        ;; Not really, but we don't actually care about this tag.
+        (set! (.-sval attr) (.string a)))
+
+      ;; Tag with string argument
+      (case [(or (== (.-tag attr) TagCPUName) (== (.-tag attr) TagCPURawName) ^:go/paren (and (>= (.-tag attr) 32) (!= (bit-and (.-tag attr) 1) 0)))]
+        (set! (.-sval attr) (.string a)))
+
+      (default ; Tag with integer argument
+        (set! (.-ival attr) (.uleb128 a))))
+
+    ^{:line 174} attr))
+
+
+^{:go/breaks [[4 181]] :go/end 182} (go/method done ^bool [^{:tag (* elfAttributeList)} a]
+  (when (or (!= (.-err a) nil) (== (len (.-data a)) 0))
+    (return true))
+
+  false)
+
+
+
+
+
+
+
+
+^{:go/end 234} (go/func parseArmAttributes "Look for the attribute that indicates the object uses the hard-float ABI (a\nfile-level attribute with tag Tag_VFP_arch and value 1). Unfortunately the\nformat used means that we have to parse all of the file-level attributes to\nfind the one we are looking for. This format is slightly documented in \"ELF\nfor the ARM Architecture\" but mostly this is derived from reading the source\nto gold and readelf.\n" [^binary/ByteOrder e ^{:tag (slice byte)} data] :results [^bool found ^uint32 ehdrFlags ^error err]
+  (set! found false)
+  (when (!= (aget data 0) \A)
+    (return false 0 (fmt/Errorf ".ARM.attributes has unexpected format %c\n" (aget data 0))))
+
+  (set! data (subslice data 1))
+  (while (!= (len data) 0)
+    (let [sectionlength (.Uint32 e data)
+        ^{:line 198} sectiondata (subslice data 4 sectionlength)]
+      (set! data (subslice data sectionlength))
+
+      (let [nulIndex (bytes/IndexByte sectiondata 0)]
+        (when (< nulIndex 0)
+          (return false 0 (fmt/Errorf "corrupt .ARM.attributes (section name not NUL-terminated)\n")))
+
+        (let [name (conv string (subslice sectiondata _ nulIndex))]
+          (set! sectiondata (subslice sectiondata (+ nulIndex 1)))
+
+          (when (!= name "aeabi")
+            (continue))
+
+          (while (!= (len sectiondata) 0)
+            (let [(values subsectiontag sz) (binary/Uvarint sectiondata)
+                ^{:line 213} subsectionsize (.Uint32 e (subslice sectiondata sz))
+                ^{:line 214} subsectiondata (subslice sectiondata (+ sz 4) subsectionsize)]
+              (set! sectiondata (subslice sectiondata subsectionsize))
+
+              (when (!= subsectiontag TagFile)
+                (continue))
+
+              (let [attrList (lit elfAttributeList :data subsectiondata)]
+                (while (not (.done attrList))
+                  (let [attr (.armAttr attrList)]
+                    (when (and (== (.-tag attr) TagABIVFPArgs) (== (.-ival attr) 1))
+                      (set! found true)
+                      (set! ehdrFlags 0x5000402)))) ; has entry point, Version5 EABI, hard-float ABI
+
+
+                (when (!= (.-err attrList) nil)
+                  (return false 0 (fmt/Errorf "could not parse .ARM.attributes\n"))))))))))
+
+
+
+  (return found ehdrFlags nil))
+
+
+
+
+
+
+
+
+
+
+^{:go/end 843} (go/func Load "Load loads the ELF file pn from f.\nSymbols are installed into the loader, and a slice of the text symbols is returned.\n\nOn ARM systems, Load will attempt to determine what ELF header flags to\nemit by scanning the attributes in the ELF file being loaded. The\nparameter initEhdrFlags contains the current header flags for the output\nobject, and the returned ehdrFlags contains what this Load function computes.\nTODO: find a better place for this logic.\n" [^{:tag (* loader/Loader)} l ^{:tag (* sys/Arch)} arch ^int localSymVersion ^{:tag (* bio/Reader)} f ^string pkg ^int64 length ^string pn ^uint32 initEhdrFlags] :results [^{:tag (slice loader/Sym)} textp ^uint32 ehdrFlags ^error err]
+  (let [errorf ^{:go/end 247} (fn [^string str & ^{:tag (slice any)} args] :results [(slice loader/Sym) uint32 error]
+        (return nil 0 (fmt/Errorf "loadelf: %s: %v" pn (fmt/Sprintf str (spread args)))))]
+
+
+    (set! ehdrFlags initEhdrFlags)
+
+    (let [base (.Offset f)
+
+        ^{:line 253 :tag (array 64 byte)} hdrbuf (zero (array 64 byte))]
+      (when [(values _ err) (io/ReadFull f (subslice hdrbuf))] (!= err nil)
+        (return (errorf "malformed elf file: %v" err)))
+
+
+      (let [^binary/ByteOrder e (zero binary/ByteOrder)]
+        (switch (conv elf/Data (aget hdrbuf elf/EI_DATA))
+          (case [elf/ELFDATA2LSB]
+            (set! e binary/LittleEndian))
+
+          (case [elf/ELFDATA2MSB]
+            (set! e binary/BigEndian))
+
+          (default
+            (return (errorf "malformed elf file, unknown header"))))
+
+
+        (let [hdr (new elf/Header32)]
+          (binary/Read (bytes/NewReader (subslice hdrbuf)) e hdr)
+
+          (when (!= (conv string (subslice (.-Ident hdr) _ elf/EI_CLASS)) elf/ELFMAG)
+            (return (errorf "malformed elf file, bad header")))
+
+
+          ;; read header
+          (let [elfobj (new ElfObj)]
+
+            (set! (.-e elfobj) e)
+            (set! (.-f elfobj) f)
+            (set! (.-base elfobj) base)
+            (set! (.-length elfobj) length)
+            (set! (.-name elfobj) pn)
+
+            (let [is64 0
+                ^{:line 287} class (conv elf/Class (aget hdrbuf elf/EI_CLASS))]
+              (if (== class elf/ELFCLASS64) (do
+                  (set! is64 1)
+                  (let [hdr (new elf/Header64)]
+                    (binary/Read (bytes/NewReader (subslice hdrbuf)) e hdr)
+                    (set! (.-type_ elfobj) (conv uint32 (.-Type hdr)))
+                    (set! (.-machine elfobj) (conv uint32 (.-Machine hdr)))
+                    (set! (.-version elfobj) (.-Version hdr))
+                    (set! (.-entry elfobj) (.-Entry hdr))
+                    (set! (.-phoff elfobj) (.-Phoff hdr))
+                    (set! (.-shoff elfobj) (.-Shoff hdr))
+                    (set! (.-flags elfobj) (.-Flags hdr))
+                    (set! (.-ehsize elfobj) (conv uint32 (.-Ehsize hdr)))
+                    (set! (.-phentsize elfobj) (conv uint32 (.-Phentsize hdr)))
+                    (set! (.-phnum elfobj) (conv uint32 (.-Phnum hdr)))
+                    (set! (.-shentsize elfobj) (conv uint32 (.-Shentsize hdr)))
+                    (set! (.-shnum elfobj) (conv uint32 (.-Shnum hdr)))
+                    (set! (.-shstrndx elfobj) (conv uint32 (.-Shstrndx hdr)))))
+                (do
+                  (set! (.-type_ elfobj) (conv uint32 (.-Type hdr)))
+                  (set! (.-machine elfobj) (conv uint32 (.-Machine hdr)))
+                  (set! (.-version elfobj) (.-Version hdr))
+                  (set! (.-entry elfobj) (conv uint64 (.-Entry hdr)))
+                  (set! (.-phoff elfobj) (conv uint64 (.-Phoff hdr)))
+                  (set! (.-shoff elfobj) (conv uint64 (.-Shoff hdr)))
+                  (set! (.-flags elfobj) (.-Flags hdr))
+                  (set! (.-ehsize elfobj) (conv uint32 (.-Ehsize hdr)))
+                  (set! (.-phentsize elfobj) (conv uint32 (.-Phentsize hdr)))
+                  (set! (.-phnum elfobj) (conv uint32 (.-Phnum hdr)))
+                  (set! (.-shentsize elfobj) (conv uint32 (.-Shentsize hdr)))
+                  (set! (.-shnum elfobj) (conv uint32 (.-Shnum hdr)))
+                  (set! (.-shstrndx elfobj) (conv uint32 (.-Shstrndx hdr)))))
+
+
+              (set! (.-is64 elfobj) is64)
+
+              (when [v (conv uint32 (aget hdrbuf elf/EI_VERSION))] (!= v (.-version elfobj))
+                (return (errorf "malformed elf version: got %d, want %d" v (.-version elfobj))))
+
+
+              (when (!= (conv elf/Type (.-type_ elfobj)) elf/ET_REL)
+                (return (errorf "elf but not elf relocatable object")))
+
+
+              (let [mach (conv elf/Machine (.-machine elfobj))]
+                (switch (.-Family arch)
+                  (default
+                    (return (errorf "elf %s unimplemented" (.-Name arch))))
+
+                  (case [sys/MIPS]
+                    (when (or (!= mach elf/EM_MIPS) (!= class elf/ELFCLASS32))
+                      (return (errorf "elf object but not mips"))))
+
+
+                  (case [sys/MIPS64]
+                    (when (or (!= mach elf/EM_MIPS) (!= class elf/ELFCLASS64))
+                      (return (errorf "elf object but not mips64"))))
+
+                  (case [sys/Loong64]
+                    (when (or (!= mach elf/EM_LOONGARCH) (!= class elf/ELFCLASS64))
+                      (return (errorf "elf object but not loong64"))))
+
+
+                  (case [sys/ARM]
+                    (when (or (!= e binary/LittleEndian) (!= mach elf/EM_ARM) (!= class elf/ELFCLASS32))
+                      (return (errorf "elf object but not arm"))))
+
+
+                  (case [sys/AMD64]
+                    (when (or (!= e binary/LittleEndian) (!= mach elf/EM_X86_64) (!= class elf/ELFCLASS64))
+                      (return (errorf "elf object but not amd64"))))
+
+
+                  (case [sys/ARM64]
+                    (when (or (!= e binary/LittleEndian) (!= mach elf/EM_AARCH64) (!= class elf/ELFCLASS64))
+                      (return (errorf "elf object but not arm64"))))
+
+
+                  (case [sys/I386]
+                    (when (or (!= e binary/LittleEndian) (!= mach elf/EM_386) (!= class elf/ELFCLASS32))
+                      (return (errorf "elf object but not 386"))))
+
+
+                  (case [sys/PPC64]
+                    (when (or (!= mach elf/EM_PPC64) (!= class elf/ELFCLASS64))
+                      (return (errorf "elf object but not ppc64"))))
+
+
+                  (case [sys/RISCV64]
+                    (when (or (!= mach elf/EM_RISCV) (!= class elf/ELFCLASS64))
+                      (return (errorf "elf object but not riscv64"))))
+
+
+                  (case [sys/S390X]
+                    (when (or (!= mach elf/EM_S390) (!= class elf/ELFCLASS64))
+                      (return (errorf "elf object but not s390x")))))
+
+
+
+                ;; load section list into memory.
+                (set! (.-sect elfobj) (make (slice ElfSect) (.-shnum elfobj)))
+
+                (set! (.-nsect elfobj) (conv uint (.-shnum elfobj)))
+                (for [i 0] (< (conv uint i) (.-nsect elfobj)) (inc! i)
+                  (.MustSeek f (conv int64 (+ (conv uint64 base) (.-shoff elfobj) (conv uint64 (* (conv int64 i) (conv int64 (.-shentsize elfobj)))))) 0)
+                  (let [sect (addr (aget (.-sect elfobj) i))]
+                    (if (!= is64 0)
+                      (let [^elf/Section64 b (zero elf/Section64)]
+                        (when [err (binary/Read f e (addr b))] (!= err nil)
+                          (return (errorf "malformed elf file: %v" err)))
+
+
+                        (set! (.-nameoff sect) (.-Name b))
+                        (set! (.-type_ sect) (conv elf/SectionType (.-Type b)))
+                        (set! (.-flags sect) (conv elf/SectionFlag (.-Flags b)))
+                        (set! (.-addr sect) (.-Addr b))
+                        (set! (.-off sect) (.-Off b))
+                        (set! (.-size sect) (.-Size b))
+                        (set! (.-link sect) (.-Link b))
+                        (set! (.-info sect) (.-Info b))
+                        (set! (.-align sect) (.-Addralign b))
+                        (set! (.-entsize sect) (.-Entsize b)))
+
+                      (let [^elf/Section32 b (zero elf/Section32)]
+
+                        (when [err (binary/Read f e (addr b))] (!= err nil)
+                          (return (errorf "malformed elf file: %v" err)))
+
+                        (set! (.-nameoff sect) (.-Name b))
+                        (set! (.-type_ sect) (conv elf/SectionType (.-Type b)))
+                        (set! (.-flags sect) (conv elf/SectionFlag (.-Flags b)))
+                        (set! (.-addr sect) (conv uint64 (.-Addr b)))
+                        (set! (.-off sect) (conv uint64 (.-Off b)))
+                        (set! (.-size sect) (conv uint64 (.-Size b)))
+                        (set! (.-link sect) (.-Link b))
+                        (set! (.-info sect) (.-Info b))
+                        (set! (.-align sect) (conv uint64 (.-Addralign b)))
+                        (set! (.-entsize sect) (conv uint64 (.-Entsize b)))))))
+
+
+
+                ;; read section string table and translate names
+                (when (>= (.-shstrndx elfobj) (conv uint32 (.-nsect elfobj)))
+                  (return (errorf "malformed elf file: shstrndx out of range %d >= %d" (.-shstrndx elfobj) (.-nsect elfobj))))
+
+
+                (let [sect (addr (aget (.-sect elfobj) (.-shstrndx elfobj)))]
+                  (when [err (elfmap elfobj sect)] (!= err nil)
+                    (return (errorf "malformed elf file: %v" err)))
+
+                  (for [i 0] (< (conv uint i) (.-nsect elfobj)) (inc! i)
+                    (when (!= (.-nameoff (aget (.-sect elfobj) i)) 0)
+                      (set! (.-name (aget (.-sect elfobj) i)) (cstring (subslice (.-base sect) (.-nameoff (aget (.-sect elfobj) i)))))))
+
+
+
+                  ;; load string table for symbols into memory.
+                  (set! (.-symtab elfobj) (section elfobj ".symtab"))
+
+                  (when (== (.-symtab elfobj) nil)
+                    ;; our work is done here - no symbols means nothing can refer to this file
+                    (return))
+
+
+                  (when (or (<= (.-link (.-symtab elfobj)) 0) (>= (.-link (.-symtab elfobj)) (conv uint32 (.-nsect elfobj))))
+                    (return (errorf "elf object has symbol table with invalid string table link")))
+
+
+                  (set! (.-symstr elfobj) (addr (aget (.-sect elfobj) (.-link (.-symtab elfobj)))))
+                  (if (!= is64 0)
+                    (set! (.-nsymtab elfobj) (conv int (/ (.-size (.-symtab elfobj)) elf/Sym64Size)))
+
+                    (set! (.-nsymtab elfobj) (conv int (/ (.-size (.-symtab elfobj)) elf/Sym32Size))))
+
+
+                  (when [err (elfmap elfobj (.-symtab elfobj))] (!= err nil)
+                    (return (errorf "malformed elf file: %v" err)))
+
+                  (when [err (elfmap elfobj (.-symstr elfobj))] (!= err nil)
+                    (return (errorf "malformed elf file: %v" err)))
+
+
+                  ;; load text and data segments into memory.
+                  ;; they are not as small as the section lists, but we'll need
+                  ;; the memory anyway for the symbol images, so we might
+                  ;; as well use one large chunk.
+
+                  ;; create symbols for elfmapped sections
+                  (let [sectsymNames (make (map string bool))
+                      ^{:line 476} counter 0]
+                    (for [i 0] (< (conv uint i) (.-nsect elfobj)) (inc! i)
+                      (set! sect (addr (aget (.-sect elfobj) i)))
+                      (when (and (== (.-type_ sect) SHT_ARM_ATTRIBUTES) (== (.-name sect) ".ARM.attributes"))
+                        (when [err (elfmap elfobj sect)] (!= err nil)
+                          (return (errorf "%s: malformed elf file: %v" pn err)))
+
+                        ;; We assume the soft-float ABI unless we see a tag indicating otherwise.
+                        (if (== initEhdrFlags 0x5000002)
+                          (set! ehdrFlags 0x5000202)
+
+                          (set! ehdrFlags initEhdrFlags))
+
+                        (let [(values found newEhdrFlags err) (parseArmAttributes e (subslice (.-base sect) _ (.-size sect)))]
+                          (when (!= err nil)
+                            ;; TODO(dfc) should this return an error?
+                            (log/Printf "%s: %v" pn err))
+
+                          (when found
+                            (set! ehdrFlags newEhdrFlags))))
+
+
+                      (when (or ^:go/paren (and (!= (.-type_ sect) elf/SHT_PROGBITS) (!= (.-type_ sect) elf/SHT_NOBITS)) (== (bit-and (.-flags sect) elf/SHF_ALLOC) 0))
+                        (continue))
+
+                      (when (!= (.-type_ sect) elf/SHT_NOBITS)
+                        (when [err (elfmap elfobj sect)] (!= err nil)
+                          (return (errorf "%s: malformed elf file: %v" pn err))))
+
+
+
+                      (let [name (fmt/Sprintf "%s(%s)" pkg (.-name sect))]
+                        (while (aget sectsymNames name)
+                          (inc! counter)
+                          (set! name (fmt/Sprintf "%s(%s%d)" pkg (.-name sect) counter)))
+
+                        (aset sectsymNames name true)
+
+                        (let [sb (.MakeSymbolUpdater l (.LookupOrCreateCgoExport l name localSymVersion))]
+
+                          (switch (bit-and (.-flags sect) (bit-or elf/SHF_ALLOC elf/SHF_WRITE elf/SHF_EXECINSTR))
+                            (default
+                              (return (errorf "%s: unexpected flags for ELF section %s" pn (.-name sect))))
+
+                            (case [elf/SHF_ALLOC]
+                              (.SetType sb sym/SRODATA))
+
+                            (case [(+ elf/SHF_ALLOC elf/SHF_WRITE)]
+                              (if (== (.-type_ sect) elf/SHT_NOBITS)
+                                (.SetType sb sym/SNOPTRBSS)
+
+                                (.SetType sb sym/SNOPTRDATA)))
+
+
+                            (case [(+ elf/SHF_ALLOC elf/SHF_EXECINSTR)]
+                              (.SetType sb sym/STEXT)))
+
+
+                          (when (or (== (.-name sect) ".got") (== (.-name sect) ".toc"))
+                            (.SetType sb sym/SELFGOT))
+
+                          (when (== (.-type_ sect) elf/SHT_PROGBITS)
+                            (.SetData sb (subslice (.-base sect) _ (.-size sect)))
+                            (.SetExternal sb true))
+
+
+                          (.SetSize sb (conv int64 (.-size sect)))
+                          (.SetAlign sb (conv int32 (.-align sect)))
+                          (.SetReadOnly sb (.-readOnlyMem sect))
+
+                          (set! (.-sym sect) (.Sym sb)))))
+
+
+                    ;; enter sub-symbols into symbol table.
+                    ;; symbol 0 is the null symbol.
+                    (let [symbols (make (slice loader/Sym) (.-nsymtab elfobj))]
+
+                      (for [i 1] (< i (.-nsymtab elfobj)) (inc! i)
+                        (let [^ElfSym elfsym (zero ElfSym)]
+                          (when [err (readelfsym l arch elfobj i (addr elfsym) 1 localSymVersion)] (!= err nil)
+                            (return (errorf "%s: malformed elf file: %v" pn err)))
+
+                          (aset symbols i (.-sym elfsym))
+                          (when (and (!= (.-type_ elfsym) elf/STT_FUNC) (!= (.-type_ elfsym) elf/STT_OBJECT) (!= (.-type_ elfsym) elf/STT_NOTYPE) (!= (.-type_ elfsym) elf/STT_COMMON))
+                            (continue))
+
+                          (when (or (== (.-shndx elfsym) elf/SHN_COMMON) (== (.-type_ elfsym) elf/STT_COMMON))
+                            (let [sb (.MakeSymbolUpdater l (.-sym elfsym))]
+                              (when (< (conv uint64 (.Size sb)) (.-size elfsym))
+                                (.SetSize sb (conv int64 (.-size elfsym))))
+
+                              (when (or (== (.Type sb) 0) (== (.Type sb) sym/SXREF))
+                                (.SetType sb sym/SNOPTRBSS))
+
+                              (continue)))
+
+
+                          (when (or (>= (conv uint (.-shndx elfsym)) (.-nsect elfobj)) (== (.-shndx elfsym) 0))
+                            (continue))
+
+
+                          ;; even when we pass needSym == 1 to readelfsym, it might still return nil to skip some unwanted symbols
+                          (when (== (.-sym elfsym) 0)
+                            (continue))
+
+                          (set! sect (addr (aget (.-sect elfobj) (.-shndx elfsym))))
+                          (when (== (.-sym sect) 0)
+                            (when (== (.-type_ elfsym) 0)
+                              (when (and (strings/HasPrefix (.-name sect) ".debug_") (== (.-name elfsym) ""))
+                                ;; clang on arm and riscv64.
+                                ;; This reportedly happens with clang 3.7 on ARM.
+                                ;; See issue 13139.
+                                (continue))
+
+                              (when (or (strings/HasPrefix (.-name elfsym) ".Ldebug_") (== (.-name elfsym) ".L0 "))
+                                ;; gcc on riscv64.
+                                (continue))
+
+                              (when (== (.-name elfsym) ".Lline_table_start0")
+                                ;; clang on riscv64.
+                                (continue))
+
+
+                              (when (and (strings/HasPrefix (.-name elfsym) "$d") (== (.-name sect) ".debug_frame"))
+                                ;; "$d" is a marker, not a real symbol.
+                                ;; This happens with gcc on ARM64.
+                                ;; See https://sourceware.org/bugzilla/show_bug.cgi?id=21809
+                                (continue))
+
+
+                              (when (and (== (.-Family arch) sys/RISCV64)
+                                  ^:go/paren (or (strings/HasPrefix (.-name elfsym) "$d") (strings/HasPrefix (.-name elfsym) "$x")))
+                                ;; Ignore RISC-V mapping symbols, which
+                                ;; are similar to ARM64's case.
+                                ;; See issue 73591.
+                                (continue))
+
+
+                              (when (and (== (.-Family arch) sys/Loong64) ^:go/paren (or (strings/HasPrefix (.-name elfsym) ".L") (== (.-name elfsym) "L0\u0001")))
+                                ;; Symbols generated by the relax feature of gcc and binutils on loong64.
+                                (continue))
+
+
+                              (when (or (strings/HasPrefix (.-name elfsym) "wm4.") (strings/HasPrefix (.-name elfsym) "wm8."))
+                                ;; Symbols generated by GCC as
+                                ;; group symbols to eliminate
+                                ;; duplicate debug info for
+                                ;; preprocessor symbols.
+                                (continue)))
+
+
+
+                            (when (strings/HasPrefix (.-name elfsym) ".Linfo_string")
+                              ;; clang does this
+                              (continue))
+
+
+                            (when (or (strings/HasPrefix (.-name elfsym) ".LASF") (strings/HasPrefix (.-name elfsym) ".LLRL") (strings/HasPrefix (.-name elfsym) ".LLST") (strings/HasPrefix (.-name elfsym) ".LVUS"))
+                              ;; gcc on s390x and riscv64 does this.
+                              (continue))
+
+
+                            (return (errorf "%v: sym#%d (%q): unrecognized symbol in section %d (%q) (type %d)" (.-sym elfsym) i (.-name elfsym) (.-shndx elfsym) (.-name sect) (.-type_ elfsym))))
+
+
+                          (let [s (.-sym elfsym)]
+                            (when (!= (.OuterSym l s) 0)
+                              (when (.AttrDuplicateOK l s)
+                                (continue))
+
+                              (return (errorf "duplicate symbol reference: %s in both %s and %s"
+                                  (.SymName l s) (.SymName l (.OuterSym l s)) (.SymName l (.-sym sect)))))
+
+
+                            (let [sectsb (.MakeSymbolUpdater l (.-sym sect))
+                                ^{:line 651} sb (.MakeSymbolUpdater l s)]
+
+                              (.SetType sb (.Type sectsb))
+                              (.AddInteriorSym sectsb s)
+                              (when (not (.AttrCgoExportDynamic l s))
+                                (.SetDynimplib sb "")) ; satisfy dynimport
+
+                              (.SetValue sb (conv int64 (.-value elfsym)))
+                              (.SetSize sb (conv int64 (.-size elfsym)))
+                              (when (.IsText (.Type sectsb))
+                                (when (and (.AttrExternal l s) (not (.AttrDuplicateOK l s)))
+                                  (return (errorf "%s: duplicate symbol definition" (.Name sb))))
+
+                                (.SetAttrExternal l s true))
+
+
+                              (when (== (conv elf/Machine (.-machine elfobj)) elf/EM_PPC64)
+                                (let [flag (>> (conv int (.-other elfsym)) 5)]
+                                  (switch flag
+                                    (case [0])
+                                    ;; No local entry. R2 is preserved.
+                                    (case [1]
+                                      ;; This is kind of a hack, but pass the hint about this symbol's
+                                      ;; usage of R2 (R2 is a caller-save register not a TOC pointer, and
+                                      ;; this function does not have a distinct local entry) by setting
+                                      ;; its SymLocalentry to 1.
+                                      (.SetSymLocalentry l s 1))
+                                    (case [7]
+                                      (return (errorf "%s: invalid sym.other 0x%x" (.Name sb) (.-other elfsym))))
+                                    (default
+                                      ;; Convert the word sized offset into bytes.
+                                      (.SetSymLocalentry l s ^uint8 (<< 4 (conv uint (- flag 2))))))))))))
+
+
+
+
+                      ;; Sort outer lists by address, adding to textp.
+                      ;; This keeps textp in increasing address order.
+                      (for [i (conv uint 0)] (< i (.-nsect elfobj)) (inc! i)
+                        (let [s (.-sym (aget (.-sect elfobj) i))]
+                          (when (== s 0)
+                            (continue))
+
+                          (let [sb (.MakeSymbolUpdater l s)]
+                            (when (!= (.SubSym l s) 0)
+                              (.SortSub sb))
+
+                            (when (.IsText (.Type sb))
+                              (when (.AttrOnList l s)
+                                (return (errorf "symbol %s listed multiple times"
+                                    (.SymName l s))))
+
+                              (.SetAttrOnList l s true)
+                              (set! textp (append textp s))
+                              (for [ss (.SubSym l s)] (!= ss 0) (set! ss (.SubSym l ss))
+                                (when (and (== (.-Family arch) sys/Loong64) ^:go/paren (or (strings/HasPrefix (.SymName l ss) ".L") (== (.SymName l ss) "L0\u0001")))
+                                  ;; Symbols generated by the relax feature of gcc and binutils on loong64.
+                                  ;; We ignore them here because there are too many symbols of this type,
+                                  ;; resulting in insufficient space in findfunctable.
+                                  (continue))
+
+                                (when (.AttrOnList l ss)
+                                  (return (errorf "symbol %s listed multiple times"
+                                      (.SymName l ss))))
+
+                                (.SetAttrOnList l ss true)
+                                (set! textp (append textp ss)))))))
+
+
+
+
+                      ;; load relocations
+                      (for [i (conv uint 0)] (< i (.-nsect elfobj)) (inc! i)
+                        (let [rsect (addr (aget (.-sect elfobj) i))]
+                          (when (and (!= (.-type_ rsect) elf/SHT_RELA) (!= (.-type_ rsect) elf/SHT_REL))
+                            (continue))
+
+                          (when (or (>= (.-info rsect) (conv uint32 (.-nsect elfobj))) (== (.-base (aget (.-sect elfobj) (.-info rsect))) nil))
+                            (continue))
+
+                          (set! sect (addr (aget (.-sect elfobj) (.-info rsect))))
+                          (when [err (elfmap elfobj rsect)] (!= err nil)
+                            (return (errorf "malformed elf file: %v" err)))
+
+                          (let [rela 0]
+                            (when (== (.-type_ rsect) elf/SHT_RELA)
+                              (set! rela 1))
+
+                            (let [n (conv int (/ (.-size rsect) (conv uint64 (+ 4 (* 4 is64))) (conv uint64 (+ 2 rela))))
+                                ^{:line 740} p (.-base rsect)
+                                ^{:line 741} sb (.MakeSymbolUpdater l (.-sym sect))]
+                              (for [j 0] (< j n) (inc! j)
+                                (let [^uint64 add (zero uint64)
+                                    ^{:line 744 :tag int} symIdx (zero int)
+                                    ^{:line 745 :tag uint64} relocType (zero uint64)
+                                    ^{:line 746 :tag int32} rOff (zero int32)
+                                    ^{:line 747 :tag int64} rAdd (zero int64)
+                                    ^{:line 748 :tag loader/Sym} rSym (zero loader/Sym)]
+
+                                  (if (!= is64 0) (do
+                                      ;; 64-bit rel/rela
+                                      (set! rOff (conv int32 (.Uint64 e p)))
+
+                                      (set! p (subslice p 8))
+                                      (switch (.-Family arch)
+                                        (case [sys/MIPS64]
+                                          ;; https://www.linux-mips.org/pub/linux/mips/doc/ABI/elf64-2.4.pdf
+                                          ;; The doc shows it's different with general Linux ELF
+                                          (set! symIdx (conv int (.Uint32 e p)))
+                                          (set! relocType (conv uint64 (aget p 7))))
+                                        (default
+                                          (let [info (.Uint64 e p)]
+                                            (set! relocType (bit-and info 0xffffffff))
+                                            (set! symIdx (conv int (>> info 32))))))
+
+                                      (set! p (subslice p 8))
+                                      (when (!= rela 0)
+                                        (set! add (.Uint64 e p))
+                                        (set! p (subslice p 8))))
+
+                                    (do
+                                      ;; 32-bit rel/rela
+                                      (set! rOff (conv int32 (.Uint32 e p)))
+
+                                      (set! p (subslice p 4))
+                                      (let [info (.Uint32 e p)]
+                                        (set! relocType (conv uint64 (bit-and info 0xff)))
+                                        (set! symIdx (conv int (>> info 8)))
+                                        (set! p (subslice p 4))
+                                        (when (!= rela 0)
+                                          (set! add (conv uint64 (.Uint32 e p)))
+                                          (set! p (subslice p 4))))))
+
+
+
+                                  (when (== relocType 0) ; skip R_*_NONE relocation
+                                    (dec! j)
+                                    (dec! n)
+                                    (continue))
+
+
+                                  (if (== symIdx 0) ; absolute relocation, don't bother reading the null symbol
+                                    (set! rSym 0)
+
+                                    (let [^ElfSym elfsym (zero ElfSym)]
+                                      (when [err (readelfsym l arch elfobj symIdx (addr elfsym) 0 0)] (!= err nil)
+                                        (return (errorf "malformed elf file: %v" err)))
+
+                                      (set! (.-sym elfsym) (aget symbols symIdx))
+                                      (when (== (.-sym elfsym) 0)
+                                        (return (errorf "malformed elf file: %s#%d: reloc of invalid sym #%d %s shndx=%d type=%d" (.SymName l (.-sym sect)) j symIdx (.-name elfsym) (.-shndx elfsym) (.-type_ elfsym))))
+
+
+                                      (set! rSym (.-sym elfsym))))
+
+
+                                  (let [rType (+ objabi/ElfRelocOffset (conv objabi/RelocType relocType))
+                                      (values rSize addendSize err) (relSize arch pn (conv uint32 relocType))]
+                                    (when (!= err nil)
+                                      (return nil 0 err))
+
+                                    (if (!= rela 0)
+                                      (set! rAdd (conv int64 add))
+                                      (do
+                                        ;; load addend from image
+                                        (cond (== rSize 4)
+                                          (set! rAdd (conv int64 (.Uint32 e (subslice (.-base sect) rOff))))
+                                          (== rSize 8)
+                                          (set! rAdd (conv int64 (.Uint64 e (subslice (.-base sect) rOff)))) :else
+
+                                          (return (errorf "invalid rela size %d" rSize)))))
+
+
+
+                                    (when (== addendSize 2)
+                                      (set! rAdd (conv int64 (conv int16 rAdd))))
+
+                                    (when (== addendSize 4)
+                                      (set! rAdd (conv int64 (conv int32 rAdd))))
+
+
+                                    (let [(values r _) (.AddRel sb rType)]
+                                      ^{:go/via [Reloc]} (.SetOff r rOff)
+                                      ^{:go/via [Reloc]} (.SetSiz r rSize)
+                                      (.SetSym r rSym)
+                                      ^{:go/via [Reloc]} (.SetAdd r rAdd)))))
+
+
+                              (.SortRelocs sb))))) ; just in case
+
+
+                      (return textp ehdrFlags nil))))))))))))
+
+
+^{:go/breaks [[4 851]] :go/end 852} (go/func section ^{:tag (* ElfSect)} [^{:tag (* ElfObj)} elfobj ^string name]
+  (for [i 0] (< (conv uint i) (.-nsect elfobj)) (inc! i)
+    (when (and (!= (.-name (aget (.-sect elfobj) i)) "") (!= name "") (== (.-name (aget (.-sect elfobj) i)) name))
+      (return (addr (aget (.-sect elfobj) i)))))
+
+
+  nil)
+
+
+^{:go/breaks [[10 870]] :go/end 871} (go/func elfmap [^{:tag (* ElfObj)} elfobj ^{:tag (* ElfSect)} sect] :results [^error err]
+  (when (!= (.-base sect) nil)
+    (return nil))
+
+
+  (when (> (+ (.-off sect) (.-size sect)) (conv uint64 (.-length elfobj)))
+    (set! err (fmt/Errorf "elf section past end of file"))
+    (return err))
+
+
+  (.MustSeek (.-f elfobj) (conv int64 (+ (conv uint64 (.-base elfobj)) (.-off sect))) 0)
+  (set! (values (.-base sect) (.-readOnlyMem sect) err) (.Slice (.-f elfobj) (.-size sect)))
+  (when (!= err nil)
+    (return (fmt/Errorf "short read: %v" err)))
+
+
+  nil)
+
+
+^{:go/end 996} (go/func readelfsym [^{:tag (* loader/Loader)} l ^{:tag (* sys/Arch)} arch ^{:tag (* ElfObj)} elfobj ^int i ^{:tag (* ElfSym)} elfsym ^int needSym ^int localSymVersion] :results [^error err]
+  (when (or (>= i (.-nsymtab elfobj)) (< i 0))
+    (set! err (fmt/Errorf "invalid elf symbol index"))
+    (return err))
+
+
+  (when (== i 0)
+    (return (fmt/Errorf "readym: read null symbol!")))
+
+
+  (if (!= (.-is64 elfobj) 0)
+    (let [b (new elf/Sym64)]
+      (binary/Read (bytes/NewReader (subslice (.-base (.-symtab elfobj)) (* i elf/Sym64Size) (* (+ i 1) elf/Sym64Size))) (.-e elfobj) b)
+      (set! (.-name elfsym) (cstring (subslice (.-base (.-symstr elfobj)) (.-Name b))))
+      (set! (.-value elfsym) (.-Value b))
+      (set! (.-size elfsym) (.-Size b))
+      (set! (.-shndx elfsym) (conv elf/SectionIndex (.-Shndx b)))
+      (set! (.-bind elfsym) (elf/ST_BIND (.-Info b)))
+      (set! (.-type_ elfsym) (elf/ST_TYPE (.-Info b)))
+      (set! (.-other elfsym) (.-Other b)))
+
+    (let [b (new elf/Sym32)]
+      (binary/Read (bytes/NewReader (subslice (.-base (.-symtab elfobj)) (* i elf/Sym32Size) (* (+ i 1) elf/Sym32Size))) (.-e elfobj) b)
+      (set! (.-name elfsym) (cstring (subslice (.-base (.-symstr elfobj)) (.-Name b))))
+      (set! (.-value elfsym) (conv uint64 (.-Value b)))
+      (set! (.-size elfsym) (conv uint64 (.-Size b)))
+      (set! (.-shndx elfsym) (conv elf/SectionIndex (.-Shndx b)))
+      (set! (.-bind elfsym) (elf/ST_BIND (.-Info b)))
+      (set! (.-type_ elfsym) (elf/ST_TYPE (.-Info b)))
+      (set! (.-other elfsym) (.-Other b))))
+
+
+  ^{:go/breaks [[7 995]]} (let [^loader/Sym s (zero loader/Sym)]
+
+    (when (== (.-name elfsym) "_GLOBAL_OFFSET_TABLE_")
+      (set! (.-name elfsym) ".got"))
+
+    (when (== (.-name elfsym) ".TOC.")
+      ;; Magic symbol on ppc64.  Will be set to this object
+      ;; file's .got+0x8000.
+      (set! (.-bind elfsym) elf/STB_LOCAL))
+
+
+    (switch (.-type_ elfsym)
+      (case [elf/STT_SECTION]
+        (set! s (.-sym (aget (.-sect elfobj) (.-shndx elfsym)))))
+
+      (case [elf/STT_OBJECT elf/STT_FUNC elf/STT_NOTYPE elf/STT_COMMON]
+        (switch (.-bind elfsym)
+          (case [elf/STB_GLOBAL]
+            (when (!= needSym 0)
+              (set! s (.LookupOrCreateCgoExport l (.-name elfsym) 0))
+
+              ;; for global scoped hidden symbols we should insert it into
+              ;; symbol hash table, but mark them as hidden.
+              ;; __i686.get_pc_thunk.bx is allowed to be duplicated, to
+              ;; workaround that we set dupok.
+              ;; TODO(minux): correctly handle __i686.get_pc_thunk.bx without
+              ;; set dupok generally. See https://golang.org/cl/5823055
+              ;; comment #5 for details.
+              (when (and (!= s 0) (== (.-other elfsym) 2))
+                (when (not (.IsExternal l s))
+                  (.MakeSymbolUpdater l s))
+
+                (.SetAttrDuplicateOK l s true)
+                (.SetAttrVisibilityHidden l s true))))
+
+
+
+          (case [elf/STB_LOCAL]
+            (when (and ^:go/paren (or (== (.-Family arch) sys/ARM) (== (.-Family arch) sys/ARM64)) ^:go/paren (or (strings/HasPrefix (.-name elfsym) "$a") (strings/HasPrefix (.-name elfsym) "$d") (strings/HasPrefix (.-name elfsym) "$x")))
+              ;; binutils for arm and arm64 generate these mapping
+              ;; symbols, ignore these
+              (break))
+
+
+            (when (== (.-name elfsym) ".TOC.")
+              ;; We need to be able to look this up,
+              ;; so put it in the hash table.
+              (when (!= needSym 0)
+                (set! s (.LookupOrCreateCgoExport l (.-name elfsym) localSymVersion))
+                (.SetAttrVisibilityHidden l s true))
+
+              (break))
+
+
+            (when (!= needSym 0)
+              ;; local names and hidden global names are unique
+              ;; and should only be referenced by their index, not name, so we
+              ;; don't bother to add them into the hash table
+              ;; FIXME: pass empty string here for name? This would
+              ;; reduce mem use, but also (possibly) make it harder
+              ;; to debug problems.
+              (set! s (.CreateStaticSym l (.-name elfsym)))
+              (.SetAttrVisibilityHidden l s true)))
+
+
+          (case [elf/STB_WEAK]
+            (when (!= needSym 0)
+              (set! s (.LookupOrCreateCgoExport l (.-name elfsym) 0))
+              (when (== (.-other elfsym) 2)
+                (.SetAttrVisibilityHidden l s true))
+
+
+              ;; Allow weak symbols to be duplicated when already defined.
+              (when (!= (.OuterSym l s) 0)
+                (.SetAttrDuplicateOK l s true))))
+
+
+
+          (default
+            (set! err (fmt/Errorf "%s: invalid symbol binding %d" (.-name elfsym) (.-bind elfsym)))
+            (return err)))))
+
+
+
+    (when (and (!= s 0) (== (.SymType l s) 0) (!= (.-type_ elfsym) elf/STT_SECTION))
+      (let [sb (.MakeSymbolUpdater l s)]
+        (.SetType sb sym/SXREF)))
+
+    (set! (.-sym elfsym) s)
+
+    nil))
+
+
+
+
+
+^{:go/end 1225} (go/func relSize "Return the size of the relocated field, and the size of the addend as the first\nand second values. Note, the addend may be larger than the relocation field in\nsome cases when a relocated value is split across multiple relocations.\n" [^{:tag (* sys/Arch)} arch ^string pn ^uint32 elftype] :results [uint8 uint8 error]
+  ;; TODO(mdempsky): Replace this with a struct-valued switch statement
+  ;; once golang.org/issue/15164 is fixed or found to not impair cmd/link
+  ;; performance.
+
+  (let [
+      ^:const ^{:line 1007 :val 0} AMD64 (conv uint32 sys/AMD64)
+      ^:const ^:go/grouped ^{:line 1008 :val 1} ARM (conv uint32 sys/ARM)
+      ^:const ^:go/grouped ^{:line 1009 :val 2} ARM64 (conv uint32 sys/ARM64)
+      ^:const ^:go/grouped ^{:line 1010 :val 3} I386 (conv uint32 sys/I386)
+      ^:const ^:go/grouped ^{:line 1011 :val 4} LOONG64 (conv uint32 sys/Loong64)
+      ^:const ^:go/grouped ^{:line 1012 :val 5} MIPS (conv uint32 sys/MIPS)
+      ^:const ^:go/grouped ^{:line 1013 :val 6} MIPS64 (conv uint32 sys/MIPS64)
+      ^:const ^:go/grouped ^{:line 1014 :val 7} PPC64 (conv uint32 sys/PPC64)
+      ^:const ^:go/grouped ^{:line 1015 :val 8} RISCV64 (conv uint32 sys/RISCV64)
+      ^:const ^:go/grouped ^{:line 1016 :val 9} S390X (conv uint32 sys/S390X)]
+
+
+    (switch (bit-or (conv uint32 (.-Family arch)) (<< elftype 16))
+      (default
+        (return 0 0 (fmt/Errorf "%s: unknown relocation type %d; compiled without -fpic?" pn elftype)))
+
+      (case [(bit-or MIPS (<< (conv uint32 elf/R_MIPS_HI16) 16))
+          (bit-or MIPS (<< (conv uint32 elf/R_MIPS_LO16) 16))
+          (bit-or MIPS (<< (conv uint32 elf/R_MIPS_GOT16) 16))
+          (bit-or MIPS (<< (conv uint32 elf/R_MIPS_GOT_HI16) 16))
+          (bit-or MIPS (<< (conv uint32 elf/R_MIPS_GOT_LO16) 16))
+          (bit-or MIPS (<< (conv uint32 elf/R_MIPS_GPREL16) 16))
+          (bit-or MIPS (<< (conv uint32 elf/R_MIPS_GOT_PAGE) 16))
+          (bit-or MIPS (<< (conv uint32 elf/R_MIPS_JALR) 16))
+          (bit-or MIPS (<< (conv uint32 elf/R_MIPS_GOT_OFST) 16))
+          (bit-or MIPS64 (<< (conv uint32 elf/R_MIPS_HI16) 16))
+          (bit-or MIPS64 (<< (conv uint32 elf/R_MIPS_LO16) 16))
+          (bit-or MIPS64 (<< (conv uint32 elf/R_MIPS_GOT16) 16))
+          (bit-or MIPS64 (<< (conv uint32 elf/R_MIPS_GOT_HI16) 16))
+          (bit-or MIPS64 (<< (conv uint32 elf/R_MIPS_GOT_LO16) 16))
+          (bit-or MIPS64 (<< (conv uint32 elf/R_MIPS_GPREL16) 16))
+          (bit-or MIPS64 (<< (conv uint32 elf/R_MIPS_GOT_PAGE) 16))
+          (bit-or MIPS64 (<< (conv uint32 elf/R_MIPS_JALR) 16))
+          (bit-or MIPS64 (<< (conv uint32 elf/R_MIPS_GOT_OFST) 16))
+          (bit-or MIPS64 (<< (conv uint32 elf/R_MIPS_CALL16) 16))
+          (bit-or MIPS64 (<< (conv uint32 elf/R_MIPS_GPREL32) 16))
+          (bit-or MIPS64 (<< (conv uint32 elf/R_MIPS_64) 16))
+          (bit-or MIPS64 (<< (conv uint32 elf/R_MIPS_GOT_DISP) 16))
+          (bit-or MIPS64 (<< (conv uint32 elf/R_MIPS_PC32) 16))]
+        (return 4 4 nil))
+
+      ;; These are informational annotations to assist linker optimizations.
+      (case [(bit-or LOONG64 (<< (conv uint32 elf/R_LARCH_ALIGN) 16))
+          (bit-or LOONG64 (<< (conv uint32 elf/R_LARCH_RELAX) 16))]
+        (return 0 0 nil))
+
+      (case [(bit-or LOONG64 (<< (conv uint32 elf/R_LARCH_ADD8) 16))
+          (bit-or LOONG64 (<< (conv uint32 elf/R_LARCH_ADD6) 16))
+          (bit-or LOONG64 (<< (conv uint32 elf/R_LARCH_SUB6) 16))
+          (bit-or LOONG64 (<< (conv uint32 elf/R_LARCH_SUB8) 16))]
+        (return 1 1 nil))
+
+      (case [(bit-or LOONG64 (<< (conv uint32 elf/R_LARCH_ADD16) 16))
+          (bit-or LOONG64 (<< (conv uint32 elf/R_LARCH_SUB16) 16))]
+        (return 2 2 nil))
+
+      (case [(bit-or LOONG64 (<< (conv uint32 elf/R_LARCH_MARK_LA) 16))
+          (bit-or LOONG64 (<< (conv uint32 elf/R_LARCH_MARK_PCREL) 16))
+          (bit-or LOONG64 (<< (conv uint32 elf/R_LARCH_ADD24) 16))
+          (bit-or LOONG64 (<< (conv uint32 elf/R_LARCH_ADD32) 16))
+          (bit-or LOONG64 (<< (conv uint32 elf/R_LARCH_SUB24) 16))
+          (bit-or LOONG64 (<< (conv uint32 elf/R_LARCH_SUB32) 16))
+          (bit-or LOONG64 (<< (conv uint32 elf/R_LARCH_B16) 16))
+          (bit-or LOONG64 (<< (conv uint32 elf/R_LARCH_B21) 16))
+          (bit-or LOONG64 (<< (conv uint32 elf/R_LARCH_B26) 16))
+          (bit-or LOONG64 (<< (conv uint32 elf/R_LARCH_PCALA_HI20) 16))
+          (bit-or LOONG64 (<< (conv uint32 elf/R_LARCH_PCALA_LO12) 16))
+          (bit-or LOONG64 (<< (conv uint32 elf/R_LARCH_PCALA64_HI12) 16))
+          (bit-or LOONG64 (<< (conv uint32 elf/R_LARCH_PCALA64_LO20) 16))
+          (bit-or LOONG64 (<< (conv uint32 elf/R_LARCH_GOT_PC_HI20) 16))
+          (bit-or LOONG64 (<< (conv uint32 elf/R_LARCH_GOT_PC_LO12) 16))
+          (bit-or LOONG64 (<< (conv uint32 elf/R_LARCH_GOT64_PC_LO20) 16))
+          (bit-or LOONG64 (<< (conv uint32 elf/R_LARCH_GOT64_PC_HI12) 16))
+          (bit-or LOONG64 (<< (conv uint32 elf/R_LARCH_32_PCREL) 16))
+          (bit-or LOONG64 (<< (conv uint32 elf/R_LARCH_PCREL20_S2) 16))]
+        (return 4 4 nil))
+
+      (case [(bit-or LOONG64 (<< (conv uint32 elf/R_LARCH_64) 16))
+          (bit-or LOONG64 (<< (conv uint32 elf/R_LARCH_ADD64) 16))
+          (bit-or LOONG64 (<< (conv uint32 elf/R_LARCH_SUB64) 16))
+          (bit-or LOONG64 (<< (conv uint32 elf/R_LARCH_64_PCREL) 16))
+          (bit-or LOONG64 (<< (conv uint32 elf/R_LARCH_CALL36) 16))]
+        (return 8 8 nil))
+
+      (case [(bit-or S390X (<< (conv uint32 elf/R_390_8) 16))]
+        (return 1 1 nil))
+
+      (case [(bit-or PPC64 (<< (conv uint32 elf/R_PPC64_TOC16) 16))
+          (bit-or S390X (<< (conv uint32 elf/R_390_16) 16))
+          (bit-or S390X (<< (conv uint32 elf/R_390_GOT16) 16))
+          (bit-or S390X (<< (conv uint32 elf/R_390_PC16) 16))
+          (bit-or S390X (<< (conv uint32 elf/R_390_PC16DBL) 16))
+          (bit-or S390X (<< (conv uint32 elf/R_390_PLT16DBL) 16))]
+        (return 2 2 nil))
+
+      (case [(bit-or ARM (<< (conv uint32 elf/R_ARM_ABS32) 16))
+          (bit-or ARM (<< (conv uint32 elf/R_ARM_GOT32) 16))
+          (bit-or ARM (<< (conv uint32 elf/R_ARM_PLT32) 16))
+          (bit-or ARM (<< (conv uint32 elf/R_ARM_GOTOFF) 16))
+          (bit-or ARM (<< (conv uint32 elf/R_ARM_GOTPC) 16))
+          (bit-or ARM (<< (conv uint32 elf/R_ARM_THM_PC22) 16))
+          (bit-or ARM (<< (conv uint32 elf/R_ARM_REL32) 16))
+          (bit-or ARM (<< (conv uint32 elf/R_ARM_CALL) 16))
+          (bit-or ARM (<< (conv uint32 elf/R_ARM_V4BX) 16))
+          (bit-or ARM (<< (conv uint32 elf/R_ARM_GOT_PREL) 16))
+          (bit-or ARM (<< (conv uint32 elf/R_ARM_PC24) 16))
+          (bit-or ARM (<< (conv uint32 elf/R_ARM_JUMP24) 16))
+          (bit-or ARM64 (<< (conv uint32 elf/R_AARCH64_CALL26) 16))
+          (bit-or ARM64 (<< (conv uint32 elf/R_AARCH64_ADR_GOT_PAGE) 16))
+          (bit-or ARM64 (<< (conv uint32 elf/R_AARCH64_LD64_GOT_LO12_NC) 16))
+          (bit-or ARM64 (<< (conv uint32 elf/R_AARCH64_ADR_PREL_PG_HI21) 16))
+          (bit-or ARM64 (<< (conv uint32 elf/R_AARCH64_ADD_ABS_LO12_NC) 16))
+          (bit-or ARM64 (<< (conv uint32 elf/R_AARCH64_LDST8_ABS_LO12_NC) 16))
+          (bit-or ARM64 (<< (conv uint32 elf/R_AARCH64_LDST16_ABS_LO12_NC) 16))
+          (bit-or ARM64 (<< (conv uint32 elf/R_AARCH64_LDST32_ABS_LO12_NC) 16))
+          (bit-or ARM64 (<< (conv uint32 elf/R_AARCH64_LDST64_ABS_LO12_NC) 16))
+          (bit-or ARM64 (<< (conv uint32 elf/R_AARCH64_LDST128_ABS_LO12_NC) 16))
+          (bit-or ARM64 (<< (conv uint32 elf/R_AARCH64_PREL32) 16))
+          (bit-or ARM64 (<< (conv uint32 elf/R_AARCH64_JUMP26) 16))
+          (bit-or AMD64 (<< (conv uint32 elf/R_X86_64_PC32) 16))
+          (bit-or AMD64 (<< (conv uint32 elf/R_X86_64_PLT32) 16))
+          (bit-or AMD64 (<< (conv uint32 elf/R_X86_64_GOTPCREL) 16))
+          (bit-or AMD64 (<< (conv uint32 elf/R_X86_64_GOTPCRELX) 16))
+          (bit-or AMD64 (<< (conv uint32 elf/R_X86_64_REX_GOTPCRELX) 16))
+          (bit-or I386 (<< (conv uint32 elf/R_386_32) 16))
+          (bit-or I386 (<< (conv uint32 elf/R_386_PC32) 16))
+          (bit-or I386 (<< (conv uint32 elf/R_386_GOT32) 16))
+          (bit-or I386 (<< (conv uint32 elf/R_386_PLT32) 16))
+          (bit-or I386 (<< (conv uint32 elf/R_386_GOTOFF) 16))
+          (bit-or I386 (<< (conv uint32 elf/R_386_GOTPC) 16))
+          (bit-or I386 (<< (conv uint32 elf/R_386_GOT32X) 16))
+          (bit-or PPC64 (<< (conv uint32 elf/R_PPC64_REL24) 16))
+          (bit-or PPC64 (<< (conv uint32 elf/R_PPC64_REL24_NOTOC) 16))
+          (bit-or PPC64 (<< (conv uint32 elf/R_PPC64_REL24_P9NOTOC) 16))
+          (bit-or PPC64 (<< (conv uint32 elf/R_PPC_REL32) 16))
+          (bit-or S390X (<< (conv uint32 elf/R_390_32) 16))
+          (bit-or S390X (<< (conv uint32 elf/R_390_PC32) 16))
+          (bit-or S390X (<< (conv uint32 elf/R_390_GOT32) 16))
+          (bit-or S390X (<< (conv uint32 elf/R_390_PLT32) 16))
+          (bit-or S390X (<< (conv uint32 elf/R_390_PC32DBL) 16))
+          (bit-or S390X (<< (conv uint32 elf/R_390_PLT32DBL) 16))
+          (bit-or S390X (<< (conv uint32 elf/R_390_GOTPCDBL) 16))
+          (bit-or S390X (<< (conv uint32 elf/R_390_GOTENT) 16))]
+        (return 4 4 nil))
+
+      (case [(bit-or AMD64 (<< (conv uint32 elf/R_X86_64_64) 16))
+          (bit-or AMD64 (<< (conv uint32 elf/R_X86_64_PC64) 16))
+          (bit-or ARM64 (<< (conv uint32 elf/R_AARCH64_ABS64) 16))
+          (bit-or ARM64 (<< (conv uint32 elf/R_AARCH64_PREL64) 16))
+          (bit-or PPC64 (<< (conv uint32 elf/R_PPC64_ADDR64) 16))
+          (bit-or PPC64 (<< (conv uint32 elf/R_PPC64_PCREL34) 16))
+          (bit-or PPC64 (<< (conv uint32 elf/R_PPC64_GOT_PCREL34) 16))
+          (bit-or PPC64 (<< (conv uint32 elf/R_PPC64_PLT_PCREL34_NOTOC) 16))
+          (bit-or S390X (<< (conv uint32 elf/R_390_GLOB_DAT) 16))
+          (bit-or S390X (<< (conv uint32 elf/R_390_RELATIVE) 16))
+          (bit-or S390X (<< (conv uint32 elf/R_390_GOTOFF) 16))
+          (bit-or S390X (<< (conv uint32 elf/R_390_GOTPC) 16))
+          (bit-or S390X (<< (conv uint32 elf/R_390_64) 16))
+          (bit-or S390X (<< (conv uint32 elf/R_390_PC64) 16))
+          (bit-or S390X (<< (conv uint32 elf/R_390_GOT64) 16))
+          (bit-or S390X (<< (conv uint32 elf/R_390_PLT64) 16))]
+        (return 8 8 nil))
+
+      (case [(bit-or RISCV64 (<< (conv uint32 elf/R_RISCV_SET6) 16))
+          (bit-or RISCV64 (<< (conv uint32 elf/R_RISCV_SUB6) 16))
+          (bit-or RISCV64 (<< (conv uint32 elf/R_RISCV_SET8) 16))
+          (bit-or RISCV64 (<< (conv uint32 elf/R_RISCV_SUB8) 16))]
+        (return 1 1 nil))
+
+      (case [(bit-or RISCV64 (<< (conv uint32 elf/R_RISCV_RVC_BRANCH) 16))
+          (bit-or RISCV64 (<< (conv uint32 elf/R_RISCV_RVC_JUMP) 16))
+          (bit-or RISCV64 (<< (conv uint32 elf/R_RISCV_SET16) 16))
+          (bit-or RISCV64 (<< (conv uint32 elf/R_RISCV_SUB16) 16))]
+        (return 2 2 nil))
+
+      (case [(bit-or RISCV64 (<< (conv uint32 elf/R_RISCV_32) 16))
+          (bit-or RISCV64 (<< (conv uint32 elf/R_RISCV_BRANCH) 16))
+          (bit-or RISCV64 (<< (conv uint32 elf/R_RISCV_HI20) 16))
+          (bit-or RISCV64 (<< (conv uint32 elf/R_RISCV_LO12_I) 16))
+          (bit-or RISCV64 (<< (conv uint32 elf/R_RISCV_LO12_S) 16))
+          (bit-or RISCV64 (<< (conv uint32 elf/R_RISCV_GOT_HI20) 16))
+          (bit-or RISCV64 (<< (conv uint32 elf/R_RISCV_PCREL_HI20) 16))
+          (bit-or RISCV64 (<< (conv uint32 elf/R_RISCV_PCREL_LO12_I) 16))
+          (bit-or RISCV64 (<< (conv uint32 elf/R_RISCV_PCREL_LO12_S) 16))
+          (bit-or RISCV64 (<< (conv uint32 elf/R_RISCV_ADD32) 16))
+          (bit-or RISCV64 (<< (conv uint32 elf/R_RISCV_SET32) 16))
+          (bit-or RISCV64 (<< (conv uint32 elf/R_RISCV_SUB32) 16))
+          (bit-or RISCV64 (<< (conv uint32 elf/R_RISCV_32_PCREL) 16))
+          (bit-or RISCV64 (<< (conv uint32 elf/R_RISCV_JAL) 16))
+          (bit-or RISCV64 (<< (conv uint32 elf/R_RISCV_RELAX) 16))]
+        (return 4 4 nil))
+
+      (case [(bit-or RISCV64 (<< (conv uint32 elf/R_RISCV_64) 16))
+          (bit-or RISCV64 (<< (conv uint32 elf/R_RISCV_CALL) 16))
+          (bit-or RISCV64 (<< (conv uint32 elf/R_RISCV_CALL_PLT) 16))]
+        (return 8 8 nil))
+
+      (case [(bit-or PPC64 (<< (conv uint32 elf/R_PPC64_TOC16_LO) 16))
+          (bit-or PPC64 (<< (conv uint32 elf/R_PPC64_TOC16_HI) 16))
+          (bit-or PPC64 (<< (conv uint32 elf/R_PPC64_TOC16_HA) 16))
+          (bit-or PPC64 (<< (conv uint32 elf/R_PPC64_TOC16_DS) 16))
+          (bit-or PPC64 (<< (conv uint32 elf/R_PPC64_TOC16_LO_DS) 16))
+          (bit-or PPC64 (<< (conv uint32 elf/R_PPC64_REL16_LO) 16))
+          (bit-or PPC64 (<< (conv uint32 elf/R_PPC64_REL16_HI) 16))
+          (bit-or PPC64 (<< (conv uint32 elf/R_PPC64_REL16_HA) 16))
+          (bit-or PPC64 (<< (conv uint32 elf/R_PPC64_PLT16_HA) 16))
+          (bit-or PPC64 (<< (conv uint32 elf/R_PPC64_PLT16_LO_DS) 16))]
+        (return 2 4 nil))
+
+      ;; PPC64 inline PLT sequence hint relocations (-fno-plt)
+      ;; These are informational annotations to assist linker optimizations.
+      (case [(bit-or PPC64 (<< (conv uint32 elf/R_PPC64_PLTSEQ) 16))
+          (bit-or PPC64 (<< (conv uint32 elf/R_PPC64_PLTCALL) 16))
+          (bit-or PPC64 (<< (conv uint32 elf/R_PPC64_PLTCALL_NOTOC) 16))
+          (bit-or PPC64 (<< (conv uint32 elf/R_PPC64_PLTSEQ_NOTOC) 16))]
+        (return 0 0 nil)))))
+
+
+
+
+^{:go/end 1233} (go/func cstring ^string [^{:tag (slice byte)} x]
+  (let [i (bytes/IndexByte x \u0000)]
+    (when (>= i 0)
+      (set! x (subslice x _ i)))
+
+    (conv string x)))

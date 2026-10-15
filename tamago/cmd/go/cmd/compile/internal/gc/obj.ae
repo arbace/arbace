@@ -1,0 +1,294 @@
+;; Copyright 2009 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.cmd.compile.internal.gc) (go/file "obj.go" :imports [
+
+
+    ^{:line 8} [base "cmd/compile/internal/base"]
+    ^{:line 9} [ir "cmd/compile/internal/ir"]
+    ^{:line 10} [noder "cmd/compile/internal/noder"]
+    ^{:line 11} [objw "cmd/compile/internal/objw"]
+    ^{:line 12} [pkginit "cmd/compile/internal/pkginit"]
+    ^{:line 13} [reflectdata "cmd/compile/internal/reflectdata"]
+    ^{:line 14} [staticdata "cmd/compile/internal/staticdata"]
+    ^{:line 15} [typecheck "cmd/compile/internal/typecheck"]
+    ^{:line 16} [types "cmd/compile/internal/types"]
+    ^{:line 17} [archive "cmd/internal/archive"]
+    ^{:line 18} [bio "cmd/internal/bio"]
+    ^{:line 19} [obj "cmd/internal/obj"]
+    ^{:line 20} [objabi "cmd/internal/objabi"]
+    ^{:line 21} [json "encoding/json"]
+    ^{:line 22} [fmt "fmt"]
+    ^{:line 23} [strings "strings"]])
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+(go/const "These modes say which kind of object file to generate.\nThe default use of the toolchain is to set both bits,\ngenerating a combined compiler+linker object, one that\nserves to describe the package to both the compiler and the linker.\nIn fact the compiler and linker read nearly disjoint sections of\nthat file, though, so in a distributed build setting it can be more\nefficient to split the output into two files, supplying the compiler\nobject only to future compilations and the linker object only to\nfuture links.\n\nBy default a combined object is written, but if -linkobj is specified\non the command line then the default -o output is a compiler object\nand the -linkobj output is a linker object.\n"
+  ^{:line 40} [^{:val 1} modeCompilerObj (<< 1 iota)]
+  ^{:line 41} [^{:val 2} modeLinkerObj])
+
+
+^{:go/end 51} (go/func dumpobj []
+  (when (== (.-LinkObj base/Flag) "")
+    (dumpobj1 (.-LowerO base/Flag) (bit-or modeCompilerObj modeLinkerObj))
+    (return))
+
+  (dumpobj1 (.-LowerO base/Flag) modeCompilerObj)
+  (dumpobj1 (.-LinkObj base/Flag) modeLinkerObj))
+
+
+^{:go/end 79} (go/func dumpobj1 [^string outfile ^int mode]
+  (let [(values bout err) (bio/Create outfile)]
+    (when (!= err nil)
+      (base/FlushErrors)
+      (fmt/Printf "can't create %s: %v\n" outfile err)
+      (base/ErrorExit))
+
+
+    ^{:go/via [Writer]} (.WriteString bout "!<arch>\n")
+
+    (when (!= (bit-and mode modeCompilerObj) 0)
+      (let [start (startArchiveEntry bout)]
+        (dumpCompilerObj bout)
+        (finishArchiveEntry bout start "__.PKGDEF")))
+
+    (when (!= (bit-and mode modeLinkerObj) 0)
+      (let [start (startArchiveEntry bout)]
+        (dumpLinkerObj bout)
+        (finishArchiveEntry bout start "_go_.o")))
+
+
+    (when [err (.Close bout)] (!= err nil)
+      (base/FlushErrors)
+      (fmt/Printf "error while writing to file %s: %v\n" outfile err)
+      (base/ErrorExit))))
+
+
+
+^{:go/end 90} (go/func printObjHeader [^{:tag (* bio/Writer)} bout]
+  ^{:go/via [Writer]} (.WriteString bout (objabi/HeaderString))
+  (when (!= (.-BuildID base/Flag) "")
+    (fmt/Fprintf bout "build id %q\n" (.-BuildID base/Flag)))
+
+  (when (== (.-Name types/LocalPkg) "main")
+    (fmt/Fprintf bout "main\n"))
+
+  (fmt/Fprintf bout "\n")) ; header ends with blank line
+
+
+^{:go/end 96} (go/func startArchiveEntry ^int64 [^{:tag (* bio/Writer)} bout]
+  (let [^{:tag (array archive/HeaderSize byte)} arhdr (zero (array archive/HeaderSize byte))]
+    ^{:go/via [Writer]} (.Write bout (subslice arhdr))
+    (.Offset bout)))
+
+
+^{:go/end 111} (go/func finishArchiveEntry [^{:tag (* bio/Writer)} bout ^int64 start ^string name]
+  ^{:go/via [Writer]} (.Flush bout)
+  (let [size (- (.Offset bout) start)]
+    (when (!= (bit-and size 1) 0)
+      ^{:go/via [Writer]} (.WriteByte bout 0))
+
+    (.MustSeek bout (- start archive/HeaderSize) 0)
+
+    (let [^{:tag (array archive/HeaderSize byte)} arhdr (zero (array archive/HeaderSize byte))]
+      (archive/FormatHeader (subslice arhdr) name size)
+      ^{:go/via [Writer]} (.Write bout (subslice arhdr))
+      ^{:go/via [Writer]} (.Flush bout)
+      (.MustSeek bout (+ start size (bit-and size 1)) 0))))
+
+
+^{:go/end 116} (go/func dumpCompilerObj [^{:tag (* bio/Writer)} bout]
+  (printObjHeader bout)
+  (noder/WriteExports bout))
+
+
+^{:go/end 131} (go/func dumpdata []
+  (reflectdata/WriteGCSymbols)
+  (reflectdata/WritePluginTable)
+  (dumpembeds)
+
+  (when (> reflectdata/ZeroSize 0)
+    (let [zero (base/PkgLinksym "go:map" "zero" obj/ABI0)]
+      (objw/Global zero (conv int32 reflectdata/ZeroSize) (bit-or obj/DUPOK obj/RODATA))
+      ^{:go/via [Attribute]} (.Set zero obj/AttrStatic true)))
+
+
+  (staticdata/WriteFuncSyms)
+  (addGCLocals))
+
+
+^{:go/end 149} (go/func dumpLinkerObj [^{:tag (* bio/Writer)} bout]
+  (printObjHeader bout)
+
+  (when (!= (len (.-CgoPragmas typecheck/Target)) 0)
+    ;; write empty export section; must be before cgo section
+    (fmt/Fprintf bout "\n$$\n\n$$\n\n")
+    (fmt/Fprintf bout "\n$$  // cgo\n")
+    (when [err (.Encode (json/NewEncoder bout) (.-CgoPragmas typecheck/Target))] (!= err nil)
+      (base/Fatalf "serializing pragcgobuf: %v" err))
+
+    (fmt/Fprintf bout "\n$$\n\n"))
+
+
+  (fmt/Fprintf bout "\n!\n")
+
+  (obj/WriteObjFile base/Ctxt bout))
+
+
+^{:go/end 167} (go/func dumpGlobal [^{:tag (* ir/Name)} n]
+  (when (== ^{:go/via [miniExpr]} (.Type n) nil)
+    (base/Fatalf "external %v nil type\n" n))
+
+  (when (== (.-Class n) ir/PFUNC)
+    (return))
+
+  (when (!= (.-Pkg (.Sym n)) types/LocalPkg)
+    (return))
+
+  (types/CalcSize ^{:go/via [miniExpr]} (.Type n))
+  (ggloblnod n)
+  (when (or (.CoverageAuxVar n) ^{:go/via [Attribute]} (.Static (.Linksym n)))
+    (return))
+
+  (.DwarfGlobal base/Ctxt (types/TypeSymName ^{:go/via [miniExpr]} (.Type n)) (.Linksym n)))
+
+
+^{:go/end 195} (go/func dumpGlobalConst [^{:tag (* ir/Name)} n]
+  ;; only export typed constants
+  (let [t ^{:go/via [miniExpr]} (.Type n)]
+    (when (== t nil)
+      (return))
+
+    (when (!= (.-Pkg (.Sym n)) types/LocalPkg)
+      (return))
+
+    ;; only export integer constants for now
+    (when (not (.IsInteger t))
+      (return))
+
+    (let [v (.Val n)]
+      (if (.IsUntyped t) (do
+          ;; Export untyped integers as int (if they fit).
+          (set! t (aget types/Types types/TINT))
+          (when (ir/ConstOverflow v t)
+            (return)))
+
+
+        ;; If the type of the constant is an instantiated generic, we need to emit
+        ;; that type so the linker knows about it. See issue 51245.
+        (set! _ (reflectdata/TypeLinksym t)))
+
+      (.DwarfIntConst base/Ctxt (.-Name (.Sym n)) (types/TypeSymName t) (ir/IntVal t v)))))
+
+
+
+
+
+
+^{:go/end 235} (go/func addGCLocals "addGCLocals adds gcargs, gclocals, gcregs, and stack object symbols to Ctxt.Data.\n\nThis is done during the sequential phase after compilation, since\nglobal symbols can't be declared during parallel compilation.\n" []
+  (range [_ s (.-Text base/Ctxt)]
+    (let [fn (.Func s)]
+      (when (== fn nil)
+        (continue))
+
+      (range [_ gcsym (lit (slice (* obj/LSym)) (.-GCArgs fn) (.-GCLocals fn))]
+        (when (and (!= gcsym nil) (not ^{:go/via [Attribute]} (.OnList gcsym)))
+          (objw/Global gcsym (conv int32 (len (.-P gcsym))) (bit-or obj/RODATA obj/DUPOK))))
+
+
+      (when [x (.-StackObjects fn)] (!= x nil)
+        (objw/Global x (conv int32 (len (.-P x))) obj/RODATA)
+        ^{:go/via [Attribute]} (.Set x obj/AttrStatic true))
+
+      (when [x (.-OpenCodedDeferInfo fn)] (!= x nil)
+        (objw/Global x (conv int32 (len (.-P x))) (bit-or obj/RODATA obj/DUPOK)))
+
+      (when [x (.-ArgInfo fn)] (!= x nil)
+        (objw/Global x (conv int32 (len (.-P x))) (bit-or obj/RODATA obj/DUPOK))
+        ^{:go/via [Attribute]} (.Set x obj/AttrStatic true))
+
+      (when [x (.-ArgLiveInfo fn)] (!= x nil)
+        (objw/Global x (conv int32 (len (.-P x))) (bit-or obj/RODATA obj/DUPOK))
+        ^{:go/via [Attribute]} (.Set x obj/AttrStatic true))
+
+      (when [x (.-WrapInfo fn)] (and (!= x nil) (not ^{:go/via [Attribute]} (.OnList x)))
+        (objw/Global x (conv int32 (len (.-P x))) (bit-or obj/RODATA obj/DUPOK))
+        ^{:go/via [Attribute]} (.Set x obj/AttrStatic true))
+
+      (range [_ jt (.-JumpTables fn)]
+        (objw/Global (.-Sym jt) (conv int32 (* (len (.-Targets jt)) ^{:go/via [Arch]} (.-PtrSize (.-Arch base/Ctxt)))) obj/RODATA)))))
+
+
+
+
+^{:go/end 290} (go/func ggloblnod [^{:tag (* ir/Name)} nam]
+  (let [s (.Linksym nam)]
+
+    ;; main_inittask and runtime_inittask in package runtime (and in
+    ;; test/initempty.go) aren't real variable declarations, but
+    ;; linknamed variables pointing to the compiler's generated
+    ;; .inittask symbol. The real symbol was already written out in
+    ;; pkginit.Task, so we need to avoid writing them out a second time
+    ;; here, otherwise base.Ctxt.Globl will fail.
+    (when (and (strings/HasSuffix (.-Name s) "..inittask") ^{:go/via [Attribute]} (.OnList s))
+      (return))
+
+
+    (set! (.-Gotype s) (reflectdata/TypeLinksym ^{:go/via [miniExpr]} (.Type nam)))
+    (let [flags 0]
+      (when (.Readonly nam)
+        (set! flags obj/RODATA))
+
+      (when (and (!= ^{:go/via [miniExpr]} (.Type nam) nil) (not (.HasPointers ^{:go/via [miniExpr]} (.Type nam))))
+        (set! flags bit-or obj/NOPTR))
+
+      (let [size (.Size ^{:go/via [miniExpr]} (.Type nam))
+          ^{:line 259} linkname (.-Linkname (.Sym nam))
+          ^{:line 260} name (.-Name (.Sym nam))
+
+          ^{:line 262 :tag objabi/SymKind} saveType (zero objabi/SymKind)]
+        (when (.CoverageAuxVar nam)
+          (set! saveType (.-Type s)))
+
+
+        ;; We've skipped linkname'd globals's instrument, so we can skip them here as well.
+        (if (and (.-ASan base/Flag) (== linkname "") (!= (aget pkginit/InstrumentGlobalsMap name) nil))
+          ;; Write the new size of instrumented global variables that have
+          ;; trailing redzones into object file.
+          (let [rzSize (pkginit/GetRedzoneSizeForGlobal size)
+              ^{:line 272} sizeWithRZ (+ rzSize size)]
+            (.Globl base/Ctxt s sizeWithRZ flags))
+
+          (.Globl base/Ctxt s size flags))
+
+        (when (.Libfuzzer8BitCounter nam)
+          (set! (.-Type s) objabi/SLIBFUZZER_8BIT_COUNTER))
+
+        (when (and (.CoverageAuxVar nam) (== saveType objabi/SCOVERAGE_COUNTER))
+          ;; restore specialized counter type (which Globl call above overwrote)
+          (set! (.-Type s) saveType))
+
+        (when (!= (.-Linkname (.Sym nam)) "")
+          ;; Make sure linkname'd symbol is non-package. When a symbol is
+          ;; both imported and linkname'd, s.Pkg may not set to "_" in
+          ;; types.Sym.Linksym because LSym already exists. Set it here.
+          (set! (.-Pkg s) "_"))))))
+
+
+
+^{:go/end 296} (go/func dumpembeds []
+  (range [_ v (.-Embeds typecheck/Target)]
+    (staticdata/WriteEmbed v)))

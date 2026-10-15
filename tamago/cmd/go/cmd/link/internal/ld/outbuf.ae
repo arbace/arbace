@@ -1,0 +1,321 @@
+;; Copyright 2017 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.cmd.link.internal.ld) (go/file "outbuf.go" :imports [
+
+
+    ^{:line 8} [sys "cmd/internal/sys"]
+    ^{:line 9} [loader "cmd/link/internal/loader"]
+    ^{:line 10} [binary "encoding/binary"]
+    ^{:line 11} [errors "errors"]
+    ^{:line 12} [log "log"]
+    ^{:line 13} [os "os"]])
+
+
+
+
+(go/var ^{:doc "If fallocate is not supported on this platform, return this error. The error\nis ignored where needed, and OutBuf writes to heap memory.\n"} errNoFallocate (errors/New "operation not supported"))
+
+(go/const ^{:val 509} outbufMode 0775)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+(go/type OutBuf "OutBuf is a buffered file writer.\n\nIt is similar to the Writer in cmd/internal/bio with a few small differences.\n\nFirst, it tracks the output architecture and uses it to provide\nendian helpers.\n\nSecond, it provides a very cheap offset counter that doesn't require\nany system calls to read the value.\n\nThird, it also mmaps the output file (if available). The intended usage is:\n  - Mmap the output file\n  - Write the content\n  - possibly apply any edits in the output buffer\n  - possibly write more content to the file. These writes take place in a heap\n    backed buffer that will get synced to disk.\n  - Munmap the output file\n\nAnd finally, it provides a mechanism by which you can multithread the\nwriting of output files. This mechanism is accomplished by copying a OutBuf,\nand using it in the thread/goroutine.\n\nParallel OutBuf is intended to be used like:\n\n\tfunc write(out *OutBuf) {\n\t  var wg sync.WaitGroup\n\t  for i := 0; i < 10; i++ {\n\t    wg.Add(1)\n\t    view, err := out.View(start[i])\n\t    if err != nil {\n\t       // handle output\n\t       continue\n\t    }\n\t    go func(out *OutBuf, i int) {\n\t      // do output\n\t      wg.Done()\n\t    }(view, i)\n\t  }\n\t  wg.Wait()\n\t}\n" (struct
+    ^{:line 63 :tag (* sys/Arch)} arch
+    ^{:line 64 :tag int64} off
+
+    ^{:line 66 :tag (slice byte)} buf ; backing store of mmap'd output file
+    ^{:line 67 :tag (slice byte)} heap ; backing store for non-mmapped data
+
+    ^{:line 69 :tag string} name
+    ^{:line 70 :tag (* os/File)} f
+    ^{:line 71 :tag (array 8 byte)} encbuf ; temp buffer used by WriteN methods
+    ^{:line 72 :tag bool} isView)) ; true if created from View()
+
+
+^{:go/end 87} (go/method Open ^error [^{:tag (* OutBuf)} out ^string name]
+  (when (!= (.-f out) nil)
+    (return (errors/New "cannot open more than one file")))
+
+  ^{:go/breaks [6]} (let [(values f err) (os/OpenFile name (bit-or os/O_RDWR os/O_CREATE os/O_TRUNC) outbufMode)]
+    (when (!= err nil)
+      (return err))
+
+    (set! (.-off out) 0)
+    (set! (.-name out) name)
+    (set! (.-f out) f)
+    nil))
+
+
+^{:go/end 93} (go/func NewOutBuf ^{:tag (* OutBuf)} [^{:tag (* sys/Arch)} arch]
+  (addr ^{:go/breaks [2]} (lit OutBuf
+      :arch arch)))
+
+
+
+^{:go/end 104} (go/method View ^{:tag (* OutBuf)} [^{:tag (* OutBuf)} out ^uint64 start]
+  (addr ^{:go/breaks [2 4 6 8 10 12]} (lit OutBuf
+      :arch (.-arch out)
+      :name (.-name out)
+      :buf (.-buf out)
+      :heap (.-heap out)
+      :off (conv int64 start)
+      :isView true)))
+
+
+
+(go/var viewCloseError (errors/New "cannot Close OutBuf from View"))
+
+^{:go/breaks [9] :go/end 130} (go/method Close ^error [^{:tag (* OutBuf)} out]
+  (when (.-isView out)
+    (return viewCloseError))
+
+  (when (.isMmapped out)
+    (.copyHeap out)
+    (.purgeSignatureCache out)
+    (.munmap out))
+
+  (when (== (.-f out) nil)
+    (return nil))
+
+  (when (!= (len (.-heap out)) 0)
+    (when [(values _ err) (.Write (.-f out) (.-heap out))] (!= err nil)
+      (return err)))
+
+
+  (when [err (.Close (.-f out))] (!= err nil)
+    (return err))
+
+  (set! (.-f out) nil)
+  nil)
+
+
+
+
+
+^{:go/end 144} (go/method ErrorClose "ErrorClose closes the output file (if any).\nIt is supposed to be called only at exit on error, so it doesn't do\nany clean up or buffer flushing, just closes the file.\n" [^{:tag (* OutBuf)} out]
+  (when (.-isView out)
+    (panic viewCloseError))
+
+  (when (== (.-f out) nil)
+    (return))
+
+  (.Close (.-f out)) ; best effort, ignore error
+  (set! (.-f out) nil))
+
+
+
+^{:go/end 149} (go/method isMmapped "isMmapped returns true if the OutBuf is mmaped.\n" ^bool [^{:tag (* OutBuf)} out]
+  (!= (len (.-buf out)) 0))
+
+
+
+^{:go/end 158} (go/method Data "Data returns the whole written OutBuf as a byte slice.\n" ^{:tag (slice byte)} [^{:tag (* OutBuf)} out]
+  (when (.isMmapped out)
+    (.copyHeap out)
+    (return (.-buf out)))
+
+  (.-heap out))
+
+
+
+
+^{:go/end 179} (go/method copyHeap "copyHeap copies the heap to the mmapped section of memory, returning true if\na copy takes place.\n" ^bool [^{:tag (* OutBuf)} out]
+  (when (not (.isMmapped out)) ; only valuable for mmapped OutBufs.
+    (return false))
+
+  (when (.-isView out)
+    (panic "can't copyHeap a view"))
+
+
+  ^{:go/breaks [[3 178]]} (let [bufLen (len (.-buf out))
+      ^{:line 171} heapLen (len (.-heap out))
+      ^{:line 172} total (conv uint64 (+ bufLen heapLen))]
+    (when (!= heapLen 0)
+      (when [err (.Mmap out total)] (!= err nil) ; Mmap will copy out.heap over to out.buf
+        (Exitf "mapping output file failed: %v" err)))
+
+
+    true))
+
+
+
+(go/const ^{:val 10485760 :doc "maxOutBufHeapLen limits the growth of the heap area.\n"} maxOutBufHeapLen (<< 10 20))
+
+
+
+
+
+^{:go/end 215} (go/method writeLoc "writeLoc determines the write location if a buffer is mmaped.\nWe maintain two write buffers, an mmapped section, and a heap section for\nwriting. When the mmapped section is full, we switch over the heap memory\nfor writing.\n" [^{:tag (* OutBuf)} out ^int64 lenToWrite] :results [int64 (slice byte)]
+  ;; See if we have enough space in the mmaped area.
+  (let [bufLen (conv int64 (len (.-buf out)))]
+    (when (<= (+ (.-off out) lenToWrite) bufLen)
+      (return (.-off out) (.-buf out)))
+
+
+    ;; Not enough space in the mmaped area, write to heap area instead.
+    (let [heapPos (- (.-off out) bufLen)
+        ^{:line 197} heapLen (conv int64 (len (.-heap out)))
+        ^{:line 198} lenNeeded (+ heapPos lenToWrite)]
+      (when (> lenNeeded heapLen) ; do we need to grow the heap storage?
+        ;; The heap variables aren't protected by a mutex. For now, just bomb if you
+        ;; try to use OutBuf in parallel. (Note this probably could be fixed.)
+        (when (.-isView out)
+          (panic "cannot write to heap in parallel"))
+
+        ;; See if our heap would grow to be too large, and if so, copy it to the end
+        ;; of the mmapped area.
+        (when (and (> heapLen maxOutBufHeapLen) (.copyHeap out))
+          (set! heapPos - heapLen)
+          (set! lenNeeded (+ heapPos lenToWrite))
+          (set! heapLen 0))
+
+        (set! (.-heap out) (append (.-heap out) (spread (make (slice byte) (- lenNeeded heapLen))))))
+
+      (return heapPos (.-heap out)))))
+
+
+^{:go/end 219} (go/method SeekSet [^{:tag (* OutBuf)} out ^int64 p]
+  (set! (.-off out) p))
+
+
+^{:go/end 223} (go/method Offset ^int64 [^{:tag (* OutBuf)} out]
+  (.-off out))
+
+
+
+^{:go/end 232} (go/method Write "Write writes the contents of v to the buffer.\n" [^{:tag (* OutBuf)} out ^{:tag (slice byte)} v] :results [int error]
+  (let [n (len v)
+      (values pos buf) (.writeLoc out (conv int64 n))]
+    (copy (subslice buf pos) v)
+    (set! (.-off out) + (conv int64 n))
+    (return n nil)))
+
+
+^{:go/end 238} (go/method Write8 [^{:tag (* OutBuf)} out ^uint8 v]
+  (let [(values pos buf) (.writeLoc out 1)]
+    (aset buf pos v)
+    (inc! (.-off out))))
+
+
+
+^{:go/breaks [5] :go/end 244} (go/method WriteByte "WriteByte is an alias for Write8 to fulfill the io.ByteWriter interface.\n" ^error [^{:tag (* OutBuf)} out ^byte v]
+  (.Write8 out v)
+  nil)
+
+
+^{:go/end 249} (go/method Write16 [^{:tag (* OutBuf)} out ^uint16 v]
+  (.PutUint16 (.-ByteOrder (.-arch out)) (subslice (.-encbuf out)) v)
+  (.Write out (subslice (.-encbuf out) _ 2)))
+
+
+^{:go/end 254} (go/method Write32 [^{:tag (* OutBuf)} out ^uint32 v]
+  (.PutUint32 (.-ByteOrder (.-arch out)) (subslice (.-encbuf out)) v)
+  (.Write out (subslice (.-encbuf out) _ 4)))
+
+
+^{:go/end 259} (go/method Write32b [^{:tag (* OutBuf)} out ^uint32 v]
+  (.PutUint32 binary/BigEndian (subslice (.-encbuf out)) v)
+  (.Write out (subslice (.-encbuf out) _ 4)))
+
+
+^{:go/end 264} (go/method Write64 [^{:tag (* OutBuf)} out ^uint64 v]
+  (.PutUint64 (.-ByteOrder (.-arch out)) (subslice (.-encbuf out)) v)
+  (.Write out (subslice (.-encbuf out) _ 8)))
+
+
+^{:go/end 269} (go/method Write64b [^{:tag (* OutBuf)} out ^uint64 v]
+  (.PutUint64 binary/BigEndian (subslice (.-encbuf out)) v)
+  (.Write out (subslice (.-encbuf out) _ 8)))
+
+
+^{:go/end 278} (go/method WriteString [^{:tag (* OutBuf)} out ^string s]
+  (let [(values pos buf) (.writeLoc out (conv int64 (len s)))
+      ^{:line 273} n (copy (subslice buf pos) s)]
+    (when (!= n (len s))
+      (log/Fatalf "WriteString truncated. buffer size: %d, offset: %d, len(s)=%d" (len (.-buf out)) (.-off out) (len s)))
+
+    (set! (.-off out) + (conv int64 n))))
+
+
+
+
+^{:go/end 284} (go/method WriteStringN "WriteStringN writes the first n bytes of s.\nIf n is larger than len(s) then it is padded with zero bytes.\n" [^{:tag (* OutBuf)} out ^string s ^int n]
+  (.WriteStringPad out s n (subslice zeros)))
+
+
+
+
+^{:go/end 301} (go/method WriteStringPad "WriteStringPad writes the first n bytes of s.\nIf n is larger than len(s) then it is padded with the bytes in pad (repeated as needed).\n" [^{:tag (* OutBuf)} out ^string s ^int n ^{:tag (slice byte)} pad]
+  (if (>= (len s) n)
+    (.WriteString out (subslice s _ n))
+    (do
+      (.WriteString out s)
+      (set! n - (len s))
+      (while (> n (len pad))
+        (.Write out pad)
+        (set! n - (len pad)))
+
+
+      (.Write out (subslice pad _ n)))))
+
+
+
+
+
+
+
+^{:go/end 323} (go/method WriteSym "WriteSym writes the content of a Symbol, and returns the output buffer\nthat we just wrote, so we can apply further edit to the symbol content.\nFor generator symbols, it also sets the symbol's Data to the output\nbuffer.\n" ^{:tag (slice byte)} [^{:tag (* OutBuf)} out ^{:tag (* loader/Loader)} ldr ^loader/Sym s]
+  (if (not (.IsGeneratedSym ldr s))
+    (let [P (.Data ldr s)
+        ^{:line 310} n (conv int64 (len P))
+        (values pos buf) (.writeLoc out n)]
+      (copy (subslice buf pos) P)
+      (set! (.-off out) + n)
+      (.FreeData ldr s)
+      (return (subslice buf pos (+ pos n))))
+
+    (let [n (.SymSize ldr s)
+        (values pos buf) (.writeLoc out n)]
+      (set! (.-off out) + n)
+      (.SetData (.MakeSymbolUpdater ldr s) (subslice buf pos (+ pos n)))
+      (return (subslice buf pos (+ pos n))))))

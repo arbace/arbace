@@ -1,0 +1,280 @@
+;; Copyright 2020 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; Package codesign provides basic functionalities for
+;; ad-hoc code signing of Mach-O files.
+;;
+;; This is not a general tool for code-signing. It is made
+;; specifically for the Go toolchain. It uses the same
+;; ad-hoc signing algorithm as the Darwin linker.
+(in-ns 'go.cmd.internal.codesign) (go/file "codesign.go" :doc "Package codesign provides basic functionalities for\nad-hoc code signing of Mach-O files.\n\nThis is not a general tool for code-signing. It is made\nspecifically for the Go toolchain. It uses the same\nad-hoc signing algorithm as the Darwin linker.\n" :imports [
+
+
+    ^{:line 14} [bytes "bytes"]
+    ^{:line 15} [sha256 "crypto/sha256"]
+    ^{:line 16} [macho "debug/macho"]
+    ^{:line 17} [binary "encoding/binary"]
+    ^{:line 18} [io "io"]
+
+    ^{:line 20} [hash "cmd/internal/hash"]])
+
+
+;; Code signature layout.
+;;
+;; The code signature is a block of bytes that contains
+;; a SuperBlob, which contains one or more Blobs. For ad-hoc
+;; signing, a single CodeDirectory Blob suffices.
+;;
+;; A SuperBlob starts with its header (the binary representation
+;; of the SuperBlob struct), followed by a list of (in our case,
+;; one) Blobs (offset and size). A CodeDirectory Blob starts
+;; with its head (the binary representation of CodeDirectory struct),
+;; followed by the identifier (as a C string) and the hashes, at
+;; the corresponding offsets.
+;;
+;; The signature data must be included in the __LINKEDIT segment.
+;; In the Mach-O file header, an LC_CODE_SIGNATURE load command
+;; points to the data.
+
+(go/const
+  ^{:line 41} [^{:val 12} pageSizeBits 12]
+  ^{:line 42} [^{:val 4096} pageSize (<< 1 pageSizeBits)])
+
+
+(go/const ^{:val 29} LC_CODE_SIGNATURE 0x1d)
+
+;; Constants and struct layouts are from
+;; https://opensource.apple.com/source/xnu/xnu-4903.270.47/osfmk/kern/cs_blobs.h
+
+(go/const
+  ^{:line 51} [^{:val 4208856064} CSMAGIC_REQUIREMENT 0xfade0c00] ; single Requirement blob
+  ^{:line 52} [^{:val 4208856065} CSMAGIC_REQUIREMENTS 0xfade0c01] ; Requirements vector (internal requirements)
+  ^{:line 53} [^{:val 4208856066} CSMAGIC_CODEDIRECTORY 0xfade0c02] ; CodeDirectory blob
+  ^{:line 54} [^{:val 4208856256} CSMAGIC_EMBEDDED_SIGNATURE 0xfade0cc0] ; embedded form of signature data
+  ^{:line 55} [^{:val 4208856257} CSMAGIC_DETACHED_SIGNATURE 0xfade0cc1] ; multi-arch collection of embedded signatures
+
+  ^{:line 57} [^{:val 0} CSSLOT_CODEDIRECTORY 0]) ; slot index for CodeDirectory
+
+
+(go/const
+  ^{:line 61} [^{:val 1} CS_HASHTYPE_SHA1 1]
+  ^{:line 62} [^{:val 2} CS_HASHTYPE_SHA256 2]
+  ^{:line 63} [^{:val 3} CS_HASHTYPE_SHA256_TRUNCATED 3]
+  ^{:line 64} [^{:val 4} CS_HASHTYPE_SHA384 4])
+
+
+(go/const
+  ^{:line 68} [^{:val 1} CS_EXECSEG_MAIN_BINARY 0x1] ; executable segment denotes main binary
+  ^{:line 69} [^{:val 16} CS_EXECSEG_ALLOW_UNSIGNED 0x10] ; allow unsigned pages (for debugging)
+  ^{:line 70} [^{:val 32} CS_EXECSEG_DEBUGGER 0x20] ; main binary is debugger
+  ^{:line 71} [^{:val 64} CS_EXECSEG_JIT 0x40] ; JIT enabled
+  ^{:line 72} [^{:val 128} CS_EXECSEG_SKIP_LV 0x80] ; skip library validation
+  ^{:line 73} [^{:val 256} CS_EXECSEG_CAN_LOAD_CDHASH 0x100] ; can bless cdhash for execution
+  ^{:line 74} [^{:val 512} CS_EXECSEG_CAN_EXEC_CDHASH 0x200]) ; can execute blessed cdhash
+
+
+(go/type Blob (struct
+    ^{:line 78 :tag uint32} typ ; type of entry
+    ^{:line 79 :tag uint32} offset)) ; offset of entry
+;; data follows
+
+
+^{:go/end 87} (go/method put ^{:tag (slice byte)} [^{:tag (* Blob)} b ^{:tag (slice byte)} out]
+  (set! out (put32be out (.-typ b)))
+  (set! out (put32be out (.-offset b)))
+  ^{:line 86} out)
+
+
+(go/const ^{:val 8} blobSize (* 2 4))
+
+(go/type SuperBlob (struct
+    ^{:line 92 :tag uint32} magic ; magic number
+    ^{:line 93 :tag uint32} length ; total length of SuperBlob
+    ^{:line 94 :tag uint32} count)) ; number of index entries following
+;; blobs []Blob
+
+
+^{:go/end 103} (go/method put ^{:tag (slice byte)} [^{:tag (* SuperBlob)} s ^{:tag (slice byte)} out]
+  (set! out (put32be out (.-magic s)))
+  (set! out (put32be out (.-length s)))
+  (set! out (put32be out (.-count s)))
+  ^{:line 102} out)
+
+
+(go/const ^{:val 12} superBlobSize (* 3 4))
+
+(go/type CodeDirectory (struct
+    ^{:line 108 :tag uint32} magic ; magic number (CSMAGIC_CODEDIRECTORY)
+    ^{:line 109 :tag uint32} length ; total length of CodeDirectory blob
+    ^{:line 110 :tag uint32} version ; compatibility version
+    ^{:line 111 :tag uint32} flags ; setup and mode flags
+    ^{:line 112 :tag uint32} hashOffset ; offset of hash slot element at index zero
+    ^{:line 113 :tag uint32} identOffset ; offset of identifier string
+    ^{:line 114 :tag uint32} nSpecialSlots ; number of special hash slots
+    ^{:line 115 :tag uint32} nCodeSlots ; number of ordinary (code) hash slots
+    ^{:line 116 :tag uint32} codeLimit ; limit to main image signature range
+    ^{:line 117 :tag uint8} hashSize ; size of each hash in bytes
+    ^{:line 118 :tag uint8} hashType ; type of hash (cdHashType* constants)
+    ^{:line 119 :tag uint8} _pad1 ; unused (must be zero)
+    ^{:line 120 :tag uint8} pageSize ; log2(page size in bytes); 0 => infinite
+    ^{:line 121 :tag uint32} _pad2 ; unused (must be zero)
+    ^{:line 122 :tag uint32} scatterOffset
+    ^{:line 123 :tag uint32} teamOffset
+    ^{:line 124 :tag uint32} _pad3
+    ^{:line 125 :tag uint64} codeLimit64
+    ^{:line 126 :tag uint64} execSegBase
+    ^{:line 127 :tag uint64} execSegLimit
+    ^{:line 128 :tag uint64} execSegFlags))
+;; data follows
+
+
+^{:go/end 155} (go/method put ^{:tag (slice byte)} [^{:tag (* CodeDirectory)} c ^{:tag (slice byte)} out]
+  (set! out (put32be out (.-magic c)))
+  (set! out (put32be out (.-length c)))
+  (set! out (put32be out (.-version c)))
+  (set! out (put32be out (.-flags c)))
+  (set! out (put32be out (.-hashOffset c)))
+  (set! out (put32be out (.-identOffset c)))
+  (set! out (put32be out (.-nSpecialSlots c)))
+  (set! out (put32be out (.-nCodeSlots c)))
+  (set! out (put32be out (.-codeLimit c)))
+  (set! out (put8 out (.-hashSize c)))
+  (set! out (put8 out (.-hashType c)))
+  (set! out (put8 out (.-_pad1 c)))
+  (set! out (put8 out (.-pageSize c)))
+  (set! out (put32be out (.-_pad2 c)))
+  (set! out (put32be out (.-scatterOffset c)))
+  (set! out (put32be out (.-teamOffset c)))
+  (set! out (put32be out (.-_pad3 c)))
+  (set! out (put64be out (.-codeLimit64 c)))
+  (set! out (put64be out (.-execSegBase c)))
+  (set! out (put64be out (.-execSegLimit c)))
+  (set! out (put64be out (.-execSegFlags c)))
+  ^{:line 154} out)
+
+
+(go/const ^{:val 88} codeDirectorySize (+ (* 13 4) 4 (* 4 8)))
+
+
+(go/type CodeSigCmd "CodeSigCmd is Mach-O LC_CODE_SIGNATURE load command.\n" (struct
+    ^{:line 161 :tag uint32} Cmd ; LC_CODE_SIGNATURE
+    ^{:line 162 :tag uint32} Cmdsize ; sizeof this command (16)
+    ^{:line 163 :tag uint32} Dataoff ; file offset of data in __LINKEDIT segment
+    ^{:line 164 :tag uint32} Datasize)) ; file size of data in __LINKEDIT segment
+
+
+^{:go/end 182} (go/func FindCodeSigCmd [^{:tag (* macho/File)} f] :results [CodeSigCmd bool]
+  (let [get32 (.-Uint32 (.-ByteOrder f))]
+    (range [_ l (.-Loads f)]
+      (let [data (.Raw l)
+          ^{:line 171} cmd (get32 data)]
+        (when (== cmd LC_CODE_SIGNATURE)
+          ^{:go/breaks [2]} (return (lit CodeSigCmd
+              ^{:line 174} cmd
+              (get32 (subslice data 4))
+              (get32 (subslice data 8))
+              (get32 (subslice data 12)))
+            true))))
+
+
+    (return (lit CodeSigCmd) false)))
+
+
+^{:go/end 184} (go/func put32be ^{:tag (slice byte)} [^{:tag (slice byte)} b ^uint32 x] (.PutUint32 binary/BigEndian b x) (subslice b 4))
+^{:go/end 185} (go/func put64be ^{:tag (slice byte)} [^{:tag (slice byte)} b ^uint64 x] (.PutUint64 binary/BigEndian b x) (subslice b 8))
+^{:go/end 186} (go/func put8 ^{:tag (slice byte)} [^{:tag (slice byte)} b ^uint8 x] (aset b 0 x) (subslice b 1))
+^{:go/end 187} (go/func puts ^{:tag (slice byte)} [^{:tag (slice byte)} b ^{:tag (slice byte)} s] (let [n (copy b s)] (subslice b n)))
+
+
+
+
+^{:go/end 198} (go/func Size "Size computes the size of the code signature.\nid is the identifier used for signing (a field in CodeDirectory blob, which\nhas no significance in ad-hoc signing).\n" ^int64 [^int64 codeSize ^string id]
+  (let [nhashes (/ (- (+ codeSize pageSize) 1) pageSize)
+      ^{:line 194} idOff (conv int64 codeDirectorySize)
+      ^{:line 195} hashOff (+ idOff (conv int64 (+ (len id) 1)))
+      ^{:line 196} cdirSz (+ hashOff (* nhashes hash/Size32))]
+    (+ (conv int64 (+ superBlobSize blobSize)) cdirSz)))
+
+
+
+
+
+
+
+
+
+^{:go/end 282} (go/func Sign "Sign generates an ad-hoc code signature and writes it to out.\nout must have length at least Size(codeSize, id).\ndata is the file content without the signature, of size codeSize.\ntextOff and textSize is the file offset and size of the text segment.\nisMain is true if this is a main executable.\nid is the identifier used for signing (a field in CodeDirectory blob, which\nhas no significance in ad-hoc signing).\n" [^{:tag (slice byte)} out ^io/Reader data ^string id ^int64 codeSize ^int64 textOff ^int64 textSize ^bool isMain]
+  (let [nhashes (/ (- (+ codeSize pageSize) 1) pageSize)
+      ^{:line 209} idOff (conv int64 codeDirectorySize)
+      ^{:line 210} hashOff (+ idOff (conv int64 (+ (len id) 1)))
+      ^{:line 211} sz (Size codeSize id)
+
+      ;; emit blob headers
+      ^{:line 214} sb ^{:go/breaks [2 4 6]} (lit SuperBlob
+        :magic CSMAGIC_EMBEDDED_SIGNATURE
+        :length (conv uint32 sz)
+        :count 1)
+
+      ^{:line 219} blob ^{:go/breaks [2 4]} (lit Blob
+        :typ CSSLOT_CODEDIRECTORY
+        :offset (+ superBlobSize blobSize))
+
+      ^{:line 223} cdir ^{:go/breaks [2 4 6 8 10 12 14 16 18 20 22 24 26]} (lit CodeDirectory
+        :magic CSMAGIC_CODEDIRECTORY
+        :length (- (conv uint32 sz) (+ superBlobSize blobSize))
+        :version 0x20400
+        :flags 0x20002 ; adhoc | linkerSigned
+        :hashOffset (conv uint32 hashOff)
+        :identOffset (conv uint32 idOff)
+        :nCodeSlots (conv uint32 nhashes)
+        :codeLimit (conv uint32 codeSize)
+        :hashSize hash/Size32
+        :hashType CS_HASHTYPE_SHA256
+        :pageSize (conv uint8 pageSizeBits)
+        :execSegBase (conv uint64 textOff)
+        :execSegLimit (conv uint64 textSize))]
+
+    (when isMain
+      (set! (.-execSegFlags cdir) CS_EXECSEG_MAIN_BINARY))
+
+
+    (let [outp out]
+      (set! outp (.put sb outp))
+      (set! outp (.put blob outp))
+      (set! outp (.put cdir outp))
+
+      ;; emit the identifier
+      (set! outp (puts outp (conv (slice byte) (+ id "\u0000"))))
+
+      ;; emit hashes
+      (let [(values datab isBytes) (assert (* bytes/Buffer) data)
+          ^{:line 252 :tag (array pageSize byte)} buf (zero (array pageSize byte))
+          ^{:line 253} p 0]
+        (while (< p (conv int codeSize))
+          (let [^{:tag (slice byte)} chunk (zero (slice byte))]
+            (if isBytes (do
+                ;; If it is already a byte slice, we can read without copying
+                (set! chunk (.Next datab pageSize))
+                (when (== (len chunk) 0)
+                  (break)))
+
+
+              (let [(values n err) (io/ReadFull data (subslice buf))]
+                (when (== err io/EOF)
+                  (break))
+
+                (when (and (!= err nil) (!= err io/ErrUnexpectedEOF))
+                  (panic err))
+
+                (set! chunk (subslice buf _ n))))
+
+
+            (let [n (len chunk)]
+              (when (> (+ p n) (conv int codeSize))
+                (set! n (- (conv int codeSize) p))
+                (set! chunk (subslice chunk _ n)))
+
+              (set! p + n)
+              (let [b (sha256/Sum256 chunk)]
+                (set! outp (puts outp (subslice b)))))))))))

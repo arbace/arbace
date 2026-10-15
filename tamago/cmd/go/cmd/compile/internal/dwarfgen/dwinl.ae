@@ -1,0 +1,439 @@
+;; Copyright 2017 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.cmd.compile.internal.dwarfgen) (go/file "dwinl.go" :imports [
+
+
+    ^{:line 8} [fmt "fmt"]
+    ^{:line 9} [strings "strings"]
+
+    ^{:line 11} [base "cmd/compile/internal/base"]
+    ^{:line 12} [ir "cmd/compile/internal/ir"]
+    ^{:line 13} [dwarf "cmd/internal/dwarf"]
+    ^{:line 14} [obj "cmd/internal/obj"]
+    ^{:line 15} [src "cmd/internal/src"]])
+
+
+
+(go/type varPos "To identify variables by original source position.\n" (struct
+    ^{:line 20 :tag string} DeclName
+    ^{:line 21 :tag string} DeclFile
+    ^{:line 22 :tag uint} DeclLine
+    ^{:line 23 :tag uint} DeclCol))
+
+
+
+
+
+^{:go/end 202} (go/func assembleInlines "This is the main entry point for collection of raw material to\ndrive generation of DWARF \"inlined subroutine\" DIEs. See proposal\n22080 for more details and background info.\n" ^dwarf/InlCalls [^{:tag (* obj/LSym)} fnsym ^{:tag (slice (* dwarf/Var))} dwVars]
+  (let [^dwarf/InlCalls inlcalls (zero dwarf/InlCalls)]
+
+    (when (!= (.-DwarfInl base/Debug) 0)
+      (.Logf base/Ctxt "assembling DWARF inlined routine info for %v\n" (.-Name fnsym)))
+
+
+    ;; This maps inline index (from Ctxt.InlTree) to index in inlcalls.Calls
+    (let [imap (make (map int int))
+
+        ;; Walk progs to build up the InlCalls data structure
+        ^{:line 40 :tag src/XPos} prevpos (zero src/XPos)]
+      (for [p (.-Text (.Func fnsym))] (!= p nil) (set! p (.-Link p))
+        (when (== (.-Pos p) prevpos)
+          (continue))
+
+        (let [ii (posInlIndex (.-Pos p))]
+          (when (>= ii 0)
+            (insertInlCall (addr inlcalls) ii imap))
+
+          (set! prevpos (.-Pos p))))
+
+
+      ;; This is used to partition DWARF vars by inline index. Vars not
+      ;; produced by the inliner will wind up in the vmap[0] entry.
+      (let [vmap (make (map int32 (slice (* dwarf/Var))))]
+
+        ;; Now walk the dwarf vars and partition them based on whether they
+        ;; were produced by the inliner (dwv.InlIndex > 0) or were original
+        ;; vars/params from the function (dwv.InlIndex == 0).
+        (range [_ dwv dwVars]
+
+          (aset vmap (.-InlIndex dwv) (append (aget vmap (.-InlIndex dwv)) dwv))
+
+          ;; Zero index => var was not produced by an inline
+          (when (== (.-InlIndex dwv) 0)
+            (continue))
+
+
+          ;; Look up index in our map, then tack the var in question
+          ;; onto the vars list for the correct inlined call.
+          (let [ii (- (conv int (.-InlIndex dwv)) 1)
+              (values idx ok) (aget imap ii)]
+            (when (not ok)
+              ;; We can occasionally encounter a var produced by the
+              ;; inliner for which there is no remaining prog; add a new
+              ;; entry to the call list in this scenario.
+              (set! idx (insertInlCall (addr inlcalls) ii imap)))
+
+            (set! (.-InlVars (aget (.-Calls inlcalls) idx))
+              (append (.-InlVars (aget (.-Calls inlcalls) idx)) dwv))))
+
+
+        ;; Post process the map above to assign child indices to vars.
+        ;;
+        ;; A given variable is treated differently depending on whether it
+        ;; is part of the top-level function (ii == 0) or if it was
+        ;; produced as a result of an inline (ii != 0).
+        ;;
+        ;; If a variable was not produced by an inline and its containing
+        ;; function was not inlined, then we just assign an ordering of
+        ;; based on variable name.
+        ;;
+        ;; If a variable was not produced by an inline and its containing
+        ;; function was inlined, then we need to assign a child index
+        ;; based on the order of vars in the abstract function (in
+        ;; addition, those vars that don't appear in the abstract
+        ;; function, such as "~r1", are flagged as such).
+        ;;
+        ;; If a variable was produced by an inline, then we locate it in
+        ;; the pre-inlining decls for the target function and assign child
+        ;; index accordingly.
+        (range [ii sl vmap]
+          (let [^{:tag (map varPos int)} m (zero (map varPos int))]
+            (if (== ii 0) (do
+                (when (not ^{:go/via [Attribute]} (.WasInlined fnsym))
+                  (range [j v sl]
+                    (set! (.-ChildIndex v) (conv int32 j)))
+
+                  (continue))
+
+                (set! m (makePreinlineDclMap fnsym)))
+
+              (let [ifnlsym (.InlinedFunction (.-InlTree base/Ctxt) (conv int (- ii 1)))]
+                (set! m (makePreinlineDclMap ifnlsym))))
+
+
+            ;; Here we assign child indices to variables based on
+            ;; pre-inlined decls, and set the "IsInAbstract" flag
+            ;; appropriately. In addition: parameter and local variable
+            ;; names are given "middle dot" version numbers as part of the
+            ;; writing them out to export data (see issue 4326). If DWARF
+            ;; inlined routine generation is turned on, we want to undo
+            ;; this versioning, since DWARF variables in question will be
+            ;; parented by the inlined routine and not the top-level
+            ;; caller.
+            (let [synthCount (len m)]
+              (range [_ v sl]
+                (let [vp ^{:go/breaks [2 4 6 8]} (lit varPos
+                      :DeclName (.-Name v)
+                      :DeclFile (.-DeclFile v)
+                      :DeclLine (.-DeclLine v)
+                      :DeclCol (.-DeclCol v))
+
+                    ^{:line 133} synthesized (or (strings/HasPrefix (.-Name v) "~") (== (.-Name v) "_"))]
+                  (if [(values idx found) (aget m vp)] found (do
+                      (set! (.-ChildIndex v) (conv int32 idx))
+                      (set! (.-IsInAbstract v) (not synthesized)))
+                    (do
+                      ;; Variable can't be found in the pre-inline dcl list.
+                      ;; In the top-level case (ii=0) this can happen
+                      ;; because a composite variable was split into pieces,
+                      ;; and we're looking at a piece. We can also see
+                      ;; return temps (~r%d) that were created during
+                      ;; lowering, or unnamed params ("_").
+                      (set! (.-ChildIndex v) (conv int32 synthCount))
+                      (inc! synthCount))))))))
+
+
+
+
+        ;; Make a second pass through the progs to compute PC ranges for
+        ;; the various inlined calls.
+        (let [start (conv int64 -1)
+            ^{:line 153} curii -1
+            ^{:line 154 :tag (* obj/Prog)} prevp (zero (* obj/Prog))]
+          (for [p (.-Text (.Func fnsym))] (!= p nil) (set! (values prevp p) (values p (.-Link p)))
+            (when (and (!= prevp nil) (== (.-Pos p) (.-Pos prevp)))
+              (continue))
+
+            (let [ii (posInlIndex (.-Pos p))]
+              (when (== ii curii)
+                (continue))
+
+              ;; Close out the current range
+              (when (!= start -1)
+                (addRange (.-Calls inlcalls) start (.-Pc p) curii imap))
+
+              ;; Begin new range
+              (set! start (.-Pc p))
+              (set! curii ii)))
+
+          (when (!= start -1)
+            (addRange (.-Calls inlcalls) start (.-Size fnsym) curii imap))
+
+
+          ;; Issue 33188: if II foo is a child of II bar, then ensure that
+          ;; bar's ranges include the ranges of foo (the loop above will produce
+          ;; disjoint ranges).
+          (range [k c (.-Calls inlcalls)]
+            (when (.-Root c)
+              (unifyCallRanges inlcalls k)))
+
+
+
+          ;; Debugging
+          (when (!= (.-DwarfInl base/Debug) 0)
+            (dumpInlCalls inlcalls)
+            (dumpInlVars dwVars))
+
+
+          ;; Perform a consistency check on inlined routine PC ranges
+          ;; produced by unifyCallRanges above. In particular, complain in
+          ;; cases where you have A -> B -> C (e.g. C is inlined into B, and
+          ;; B is inlined into A) and the ranges for B are not enclosed
+          ;; within the ranges for A, or C within B.
+          (range [k c (.-Calls inlcalls)]
+            (when (.-Root c)
+              (checkInlCall (.-Name fnsym) inlcalls (.-Size fnsym) k -1)))
+
+
+
+          ^{:line 201} inlcalls)))))
+
+
+
+
+
+
+^{:go/end 219} (go/func AbstractFunc "Secondary hook for DWARF inlined subroutine generation. This is called\nlate in the compilation when it is determined that we need an\nabstract function DIE for an inlined routine imported from a\npreviously compiled package.\n" [^{:tag (* obj/LSym)} fn]
+  (let [ifn (.GetPrecursorFunc (.-DwFixups base/Ctxt) fn)]
+    (when (== ifn nil)
+      (.Diag base/Ctxt "failed to locate precursor fn for %v" fn)
+      (return))
+
+    (set! _ (assert (* ir/Func) ifn))
+    (when (!= (.-DwarfInl base/Debug) 0)
+      (.Logf base/Ctxt "DwarfAbstractFunc(%v)\n" (.-Name fn)))
+
+    (.DwarfAbstractFunc base/Ctxt ifn fn)))
+
+
+
+
+
+
+
+
+^{:go/end 245} (go/func makePreinlineDclMap "Given a function that was inlined as part of the compilation, dig\nup the pre-inlining DCL list for the function and create a map that\nsupports lookup of pre-inline dcl index, based on variable\nposition/name. NB: the recipe for computing variable pos/file/line\nneeds to be kept in sync with the similar code in gc.createSimpleVars\nand related functions.\n" ^{:tag (map varPos int)} [^{:tag (* obj/LSym)} fnsym]
+  (let [dcl (preInliningDcls fnsym)
+      ^{:line 229} m (make (map varPos int))]
+    (range [i n dcl]
+      (let [pos (.InnermostPos base/Ctxt ^{:go/via [miniExpr miniNode]} (.Pos n))
+          ^{:line 232} vp ^{:go/breaks [2 4 6 8]} (lit varPos
+            :DeclName (.-Name (.Sym n))
+            :DeclFile (.RelFilename pos)
+            :DeclLine (.RelLine pos)
+            :DeclCol (.RelCol pos))]
+
+        (when [(values _ found) (aget m vp)] found
+          ;; We can see collisions (variables with the same name/file/line/col) in obfuscated or machine-generated code -- see issue 44378 for an example. Skip duplicates in such cases, since it is unlikely that a human will be debugging such code.
+          (continue))
+
+        (aset m vp i)))
+
+    ^{:line 244} m))
+
+
+^{:go/end 283} (go/func insertInlCall ^int [^{:tag (* dwarf/InlCalls)} dwcalls ^int inlIdx ^{:tag (map int int)} imap]
+  (let [(values callIdx found) (aget imap inlIdx)]
+    (when found
+      (return callIdx))
+
+
+    ;; Haven't seen this inline yet. Visit parent of inline if there
+    ;; is one. We do this first so that parents appear before their
+    ;; children in the resulting table.
+    (let [parCallIdx -1
+        ^{:line 257} parInlIdx (.Parent (.-InlTree base/Ctxt) inlIdx)]
+      (when (>= parInlIdx 0)
+        (set! parCallIdx (insertInlCall dwcalls parInlIdx imap)))
+
+
+      ;; Create new entry for this inline
+      (let [inlinedFn (.InlinedFunction (.-InlTree base/Ctxt) inlIdx)
+          ^{:line 264} callXPos (.CallPos (.-InlTree base/Ctxt) inlIdx)
+          ^{:line 265} callPos (.InnermostPos base/Ctxt callXPos)
+          ^{:line 266} absFnSym (.AbsFuncDwarfSym (.-DwFixups base/Ctxt) inlinedFn)
+          ^{:line 267} ic ^{:go/breaks [2 4 6 8]} (lit dwarf/InlCall
+            :InlIndex inlIdx
+            :CallPos callPos
+            :AbsFunSym absFnSym
+            :Root (== parCallIdx -1))]
+
+        (set! (.-Calls dwcalls) (append (.-Calls dwcalls) ic))
+        (set! callIdx (- (len (.-Calls dwcalls)) 1))
+        (aset imap inlIdx callIdx)
+
+        (when (!= parCallIdx -1)
+          ;; Add this inline to parent's child list
+          (set! (.-Children (aget (.-Calls dwcalls) parCallIdx)) (append (.-Children (aget (.-Calls dwcalls) parCallIdx)) callIdx)))
+
+
+        ^{:line 282} callIdx))))
+
+
+
+
+
+
+
+
+
+^{:go/end 301} (go/func posInlIndex "Given a src.XPos, return its associated inlining index if it\ncorresponds to something created as a result of an inline, or -1 if\nthere is no inline info. Note that the index returned will refer to\nthe deepest call in the inlined stack, e.g. if you have \"A calls B\ncalls C calls D\" and all three callees are inlined (B, C, and D),\nthe index for a node from the inlined body of D will refer to the\ncall to D from C. Whew.\n" ^int [^src/XPos xpos]
+  ^{:go/breaks [[3 300]]} (let [pos (.Pos (.-PosTable base/Ctxt) xpos)]
+    (when [b (.Base pos)] (!= b nil)
+      (let [ii (.InliningIndex b)]
+        (when (>= ii 0)
+          (return ii))))
+
+
+    -1))
+
+
+^{:go/end 323} (go/func addRange [^{:tag (slice dwarf/InlCall)} calls ^int64 start ^int64 end ^int ii ^{:tag (map int int)} imap]
+  (when (== start -1)
+    (panic "bad range start"))
+
+  (when (== end -1)
+    (panic "bad range end"))
+
+  (when (== ii -1)
+    (return))
+
+  (when (== start end)
+    (return))
+
+  ;; Append range to correct inlined call
+  (let [(values callIdx found) (aget imap ii)]
+    (when (not found)
+      (base/Fatalf "can't find inlIndex %d in imap for prog at %d\n" ii start))
+
+    (let [call (addr (aget calls callIdx))]
+      (set! (.-Ranges call) (append (.-Ranges call) (lit dwarf/Range :Start start :End end))))))
+
+
+^{:go/end 348} (go/func dumpInlCall [^dwarf/InlCalls inlcalls ^int idx ^int ilevel]
+  (for [i 0] (< i ilevel) (inc! i)
+    (.Logf base/Ctxt "  "))
+
+  (let [ic (aget (.-Calls inlcalls) idx)
+      ^{:line 330} callee (.InlinedFunction (.-InlTree base/Ctxt) (.-InlIndex ic))]
+    (.Logf base/Ctxt "  %d: II:%d (%s) V: (" idx (.-InlIndex ic) (.-Name callee))
+    (range [_ f (.-InlVars ic)]
+      (.Logf base/Ctxt " %v" (.-Name f)))
+
+    (.Logf base/Ctxt " ) C: (")
+    (range [_ k (.-Children ic)]
+      (.Logf base/Ctxt " %v" k))
+
+    (.Logf base/Ctxt " ) R:")
+    (range [_ r (.-Ranges ic)]
+      (.Logf base/Ctxt " [%d,%d)" (.-Start r) (.-End r)))
+
+    (.Logf base/Ctxt "\n")
+    (range [_ k (.-Children ic)]
+      (dumpInlCall inlcalls k (+ ilevel 1)))))
+
+
+
+
+^{:go/end 356} (go/func dumpInlCalls [^dwarf/InlCalls inlcalls]
+  (range [k c (.-Calls inlcalls)]
+    (when (.-Root c)
+      (dumpInlCall inlcalls k 0))))
+
+
+
+
+^{:go/end 370} (go/func dumpInlVars [^{:tag (slice (* dwarf/Var))} dwvars]
+  (range [i dwv dwvars]
+    (let [typ "local"]
+      (when (== (.-Tag dwv) dwarf/DW_TAG_formal_parameter)
+        (set! typ "param"))
+
+      (let [ia 0]
+        (when (.-IsInAbstract dwv)
+          (set! ia 1))
+
+        (.Logf base/Ctxt "V%d: %s CI:%d II:%d IA:%d %s\n" i (.-Name dwv) (.-ChildIndex dwv) (- (.-InlIndex dwv) 1) ia typ)))))
+
+
+
+^{:go/end 384} (go/func rangesContains [^{:tag (slice dwarf/Range)} par ^dwarf/Range rng] :results [bool string]
+  (range [_ r par]
+    (when (and (>= (.-Start rng) (.-Start r)) (<= (.-End rng) (.-End r)))
+      (return true "")))
+
+
+  (let [msg (fmt/Sprintf "range [%d,%d) not contained in {" (.-Start rng) (.-End rng))]
+    (range [_ r par]
+      (set! msg + (fmt/Sprintf " [%d,%d)" (.-Start r) (.-End r))))
+
+    (set! msg + " }")
+    (return false msg)))
+
+
+^{:go/end 394} (go/func rangesContainsAll [^{:tag (slice dwarf/Range)} parent ^{:tag (slice dwarf/Range)} child] :results [bool string]
+  (range [_ r child]
+    (let [(values c m) (rangesContains parent r)]
+      (when (not c)
+        (return false m))))
+
+
+  (return true ""))
+
+
+
+
+
+
+
+^{:go/end 427} (go/func checkInlCall "checkInlCall verifies that the PC ranges for inline info 'idx' are\nenclosed/contained within the ranges of its parent inline (or if\nthis is a root/toplevel inline, checks that the ranges fall within\nthe extent of the top level function). A panic is issued if a\nmalformed range is found.\n" [^string funcName ^dwarf/InlCalls inlCalls ^int64 funcSize ^int idx ^int parentIdx]
+
+  ;; Callee
+  (let [ic (aget (.-Calls inlCalls) idx)
+      ^{:line 405} callee (.-Name (.InlinedFunction (.-InlTree base/Ctxt) (.-InlIndex ic)))
+      ^{:line 406} calleeRanges (.-Ranges ic)
+
+      ;; Caller
+      ^{:line 409} caller funcName
+      ^{:line 410} parentRanges (lit (slice dwarf/Range) (lit dwarf/Range :Start (conv int64 0) :End funcSize))]
+    (when (!= parentIdx -1)
+      (let [pic (aget (.-Calls inlCalls) parentIdx)]
+        (set! caller (.-Name (.InlinedFunction (.-InlTree base/Ctxt) (.-InlIndex pic))))
+        (set! parentRanges (.-Ranges pic))))
+
+
+    ;; Callee ranges contained in caller ranges?
+    (let [(values c m) (rangesContainsAll parentRanges calleeRanges)]
+      (when (not c)
+        (base/Fatalf "** malformed inlined routine range in %s: caller %s callee %s II=%d %s\n" funcName caller callee idx m))
+
+
+      ;; Now visit kids
+      (range [_ k (.-Children ic)]
+        (checkInlCall funcName inlCalls funcSize k idx)))))
+
+
+
+
+
+^{:go/end 441} (go/func unifyCallRanges "unifyCallRanges ensures that the ranges for a given inline\ntransitively include all of the ranges for its child inlines.\n" [^dwarf/InlCalls inlcalls ^int idx]
+  (let [ic (addr (aget (.-Calls inlcalls) idx))]
+    (range [_ childIdx (.-Children ic)]
+      ;; First make sure child ranges are unified.
+      (unifyCallRanges inlcalls childIdx)
+
+      ;; Then merge child ranges into ranges for this inline.
+      (let [cic (aget (.-Calls inlcalls) childIdx)]
+        (set! (.-Ranges ic) (dwarf/MergeRanges (.-Ranges ic) (.-Ranges cic)))))))

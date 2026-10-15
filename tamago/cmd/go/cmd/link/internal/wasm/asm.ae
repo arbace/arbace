@@ -1,0 +1,708 @@
+;; Copyright 2018 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.cmd.link.internal.wasm) (go/file "asm.go" :imports [
+
+
+    ^{:line 8} [bytes "bytes"]
+    ^{:line 9} [obj "cmd/internal/obj"]
+    ^{:line 10} [wasm "cmd/internal/obj/wasm"]
+    ^{:line 11} [objabi "cmd/internal/objabi"]
+    ^{:line 12} [ld "cmd/link/internal/ld"]
+    ^{:line 13} [loader "cmd/link/internal/loader"]
+    ^{:line 14} [sym "cmd/link/internal/sym"]
+    ^{:line 15} [fmt "fmt"]
+    ^{:line 16} [abi "internal/abi"]
+    ^{:line 17} [buildcfg "internal/buildcfg"]
+    ^{:line 18} [io "io"]
+    ^{:line 19} [regexp "regexp"]])
+
+
+(go/const
+  ^{:line 23} [^{:val 127} I32 0x7F]
+  ^{:line 24} [^{:val 126} I64 0x7E]
+  ^{:line 25} [^{:val 125} F32 0x7D]
+  ^{:line 26} [^{:val 124} F64 0x7C]
+  ^{:line 27} [^{:val 123} V128 0x7B])
+
+
+(go/const
+  ^{:line 31} [^{:val 0} sectionCustom 0]
+  ^{:line 32} [^{:val 1} sectionType 1]
+  ^{:line 33} [^{:val 2} sectionImport 2]
+  ^{:line 34} [^{:val 3} sectionFunction 3]
+  ^{:line 35} [^{:val 4} sectionTable 4]
+  ^{:line 36} [^{:val 5} sectionMemory 5]
+  ^{:line 37} [^{:val 6} sectionGlobal 6]
+  ^{:line 38} [^{:val 7} sectionExport 7]
+  ^{:line 39} [^{:val 8} sectionStart 8]
+  ^{:line 40} [^{:val 9} sectionElement 9]
+  ^{:line 41} [^{:val 10} sectionCode 10]
+  ^{:line 42} [^{:val 11} sectionData 11])
+
+
+
+(go/const ^{:val 4096 :doc "funcValueOffset is the offset between the PC_F value of a function and the index of the function in WebAssembly\n"} funcValueOffset 0x1000) ; TODO(neelance): make function addresses play nice with heap addresses
+
+^{:go/end 49} (go/func gentext [^{:tag (* ld/Link)} ctxt ^{:tag (* loader/Loader)} ldr])
+
+
+(go/type wasmFunc (struct
+    ^{:line 52 :tag string} Module
+    ^{:line 53 :tag string} Name
+    ^{:line 54 :tag uint32} Type
+    ^{:line 55 :tag (slice byte)} Code))
+
+
+(go/type wasmFuncType (struct
+    ^{:line 59 :tag (slice byte)} Params
+    ^{:line 60 :tag (slice byte)} Results))
+
+
+^{:go/end 67} (go/func readWasmImport ^obj/WasmImport [^{:tag (* loader/Loader)} ldr ^loader/Sym s]
+  (let [^obj/WasmImport wi (zero obj/WasmImport)]
+    (.Read wi (.Data ldr s))
+    ^{:line 66} wi))
+
+
+(go/var wasmFuncTypes (lit (map string (* wasmFuncType))
+    ^{:line 70} ["_rt0_wasm_js" (lit _ :Params (lit (slice byte)))] ;
+    ^{:line 71} ["_rt0_wasm_wasip1" (lit _ :Params (lit (slice byte)))] ;
+    ^{:line 72} ["_rt0_wasm_wasip1_lib" (lit _ :Params (lit (slice byte)))] ;
+    ^{:line 73} ["wasm_export__start" (lit _)] ;
+    ^{:line 74} ["wasm_export_run" (lit _ :Params (lit (slice byte) I32 I32))] ; argc, argv
+    ^{:line 75} ["wasm_export_resume" (lit _ :Params (lit (slice byte)))] ;
+    ^{:line 76} ["wasm_export_getsp" (lit _ :Results (lit (slice byte) I32))] ; sp
+    ^{:line 77} ["wasm_pc_f_loop" (lit _ :Params (lit (slice byte)))] ;
+    ^{:line 78} ["wasm_pc_f_loop_export" (lit _ :Params (lit (slice byte) I32))] ; pc_f
+    ^{:line 79} ["runtime.wasmDiv" (lit _ :Params (lit (slice byte) I64 I64) :Results (lit (slice byte) I64))] ; x, y -> x/y
+    ^{:line 80} ["runtime.wasmTruncS" (lit _ :Params (lit (slice byte) F64) :Results (lit (slice byte) I64))] ; x -> int(x)
+    ^{:line 81} ["runtime.wasmTruncU" (lit _ :Params (lit (slice byte) F64) :Results (lit (slice byte) I64))] ; x -> uint(x)
+    ^{:line 82} ["gcWriteBarrier" (lit _ :Params (lit (slice byte) I64) :Results (lit (slice byte) I64))] ; #bytes -> bufptr
+    ^{:line 83} ["runtime.gcWriteBarrier1" (lit _ :Results (lit (slice byte) I64))] ; -> bufptr
+    ^{:line 84} ["runtime.gcWriteBarrier2" (lit _ :Results (lit (slice byte) I64))] ; -> bufptr
+    ^{:line 85} ["runtime.gcWriteBarrier3" (lit _ :Results (lit (slice byte) I64))] ; -> bufptr
+    ^{:line 86} ["runtime.gcWriteBarrier4" (lit _ :Results (lit (slice byte) I64))] ; -> bufptr
+    ^{:line 87} ["runtime.gcWriteBarrier5" (lit _ :Results (lit (slice byte) I64))] ; -> bufptr
+    ^{:line 88} ["runtime.gcWriteBarrier6" (lit _ :Results (lit (slice byte) I64))] ; -> bufptr
+    ^{:line 89} ["runtime.gcWriteBarrier7" (lit _ :Results (lit (slice byte) I64))] ; -> bufptr
+    ^{:line 90} ["runtime.gcWriteBarrier8" (lit _ :Results (lit (slice byte) I64))] ; -> bufptr
+    ^{:line 91} ["runtime.notInitialized" (lit _)] ;
+    ^{:line 92} ["cmpbody" (lit _ :Params (lit (slice byte) I64 I64 I64 I64) :Results (lit (slice byte) I64))] ; a, alen, b, blen -> -1/0/1
+    ^{:line 93} ["memeqbody" (lit _ :Params (lit (slice byte) I64 I64 I64) :Results (lit (slice byte) I64))] ; a, b, len -> 0/1
+    ^{:line 94} ["memcmp" (lit _ :Params (lit (slice byte) I32 I32 I32) :Results (lit (slice byte) I32))] ; a, b, len -> <0/0/>0
+    ^{:line 95} ["memchr" (lit _ :Params (lit (slice byte) I32 I32 I32) :Results (lit (slice byte) I32))])) ; s, c, len -> index
+
+
+^{:go/end 117} (go/func assignAddress [^{:tag (* loader/Loader)} ldr ^{:tag (* sym/Section)} sect ^int n ^loader/Sym s ^uint64 va ^bool isTramp] :results [(* sym/Section) int uint64]
+  ;; WebAssembly functions do not live in the same address space as the linear memory.
+  ;; Instead, WebAssembly automatically assigns indices. Imported functions (section "import")
+  ;; have indices 0 to n. They are followed by native functions (sections "function" and "code")
+  ;; with indices n+1 and following.
+  ;;
+  ;; The following rules describe how wasm handles function indices and addresses:
+  ;;   PC_F = funcValueOffset + WebAssembly function index (not including the imports)
+  ;;   s.Value = PC = PC_F<<16 + PC_B
+  ;;
+  ;; The funcValueOffset is necessary to avoid conflicts with expectations
+  ;; that the Go runtime has about function addresses.
+  ;; The field "s.Value" corresponds to the concept of PC at runtime.
+  ;; However, there is no PC register, only PC_F and PC_B. PC_F denotes the function,
+  ;; PC_B the resume point inside of that function. The entry of the function has PC_B = 0.
+  (.SetSymSect ldr s sect)
+  (.SetSymValue ldr s (<< (conv int64 (+ funcValueOffset (/ va abi/MINFUNC))) 16)) ; va starts at zero
+  (set! va + (conv uint64 abi/MINFUNC))
+  (return sect n va))
+
+
+(go/type wasmDataSect (struct
+    ^{:line 120 :tag (* sym/Section)} sect
+    ^{:line 121 :tag (slice byte)} data))
+
+
+(go/var ^{:tag (slice wasmDataSect)} dataSects)
+
+^{:go/end 142} (go/func asmb [^{:tag (* ld/Link)} ctxt ^{:tag (* loader/Loader)} ldr]
+  (let [sections (lit (slice (* sym/Section))
+        (.SymSect ldr (.Lookup ldr "runtime.rodata" 0))
+        (.SymSect ldr (.Lookup ldr "runtime.types" 0))
+        (.SymSect ldr (.Lookup ldr "go:funcdesc" 0))
+        (.SymSect ldr (.Lookup ldr "runtime.firstmoduledata" 0))
+        (.SymSect ldr (.Lookup ldr "runtime.pclntab" 0))
+        (.SymSect ldr (.Lookup ldr "runtime.noptrdata" 0))
+        (.SymSect ldr (.Lookup ldr "runtime.data" 0)))]
+
+
+    (set! dataSects (make (slice wasmDataSect) (len sections)))
+    (range [i sect sections]
+      (let [data (ld/DatblkBytes ctxt (conv int64 (.-Vaddr sect)) (conv int64 (.-Length sect)))]
+        (aset dataSects i (lit wasmDataSect sect data))))))
+
+
+
+
+
+^{:go/end 262} (go/func asmb2 "asmb writes the final WebAssembly module binary.\nSpec: https://webassembly.github.io/spec/core/binary/modules.html\n" [^{:tag (* ld/Link)} ctxt ^{:tag (* loader/Loader)} ldr]
+  (let [types (lit (slice (* wasmFuncType))
+        ;; For normal Go functions, the single parameter is PC_B,
+        ;; the return value is
+        ;; 0 if the function returned normally or
+        ;; 1 if the stack needs to be unwound.
+        (lit _ :Params (lit (slice byte) I32) :Results (lit (slice byte) I32)))
+
+
+      ;; collect host imports (functions that get imported from the WebAssembly host, usually JavaScript)
+      ;; we store the import index of each imported function, so the R_WASMIMPORT relocation
+      ;; can write the correct index after a "call" instruction
+      ;; these are added as import statements to the top of the WebAssembly binary
+      ^{:line 159 :tag (slice (* wasmFunc))} hostImports (zero (slice (* wasmFunc)))
+      ^{:line 160} hostImportMap (make (map loader/Sym int64))]
+    (range [_ fn (.-Textp ctxt)]
+      (let [relocs (.Relocs ldr fn)]
+        (for [ri 0] (< ri (.Count relocs)) (inc! ri)
+          (let [r (.At relocs ri)]
+            (when (== (.Type r) objabi/R_WASMIMPORT)
+              (if [wsym (.WasmImportSym ldr fn)] (!= wsym 0)
+                (let [wi (readWasmImport ldr wsym)]
+                  (aset hostImportMap fn (conv int64 (len hostImports)))
+                  (set! hostImports (append hostImports (addr ^{:go/breaks [2 4 6]} (lit wasmFunc
+                          :Module (.-Module wi)
+                          :Name (.-Name wi)
+                          :Type (lookupType (addr ^{:go/breaks [2 4]} (lit wasmFuncType
+                                :Params (fieldsToTypes ^{:go/via [WasmFuncType]} (.-Params wi))
+                                :Results (fieldsToTypes ^{:go/via [WasmFuncType]} (.-Results wi))))
+                            (addr types)))))))
+
+
+                (panic (fmt/Sprintf "missing wasm symbol for %s" (.SymName ldr (.Sym r))))))))))
+
+
+
+
+
+    ;; collect functions with WebAssembly body
+    (let [^{:tag (slice byte)} buildid (zero (slice byte))
+        ^{:line 186} fns (make (slice (* wasmFunc)) (len (.-Textp ctxt)))]
+      (range [i fn (.-Textp ctxt)]
+        (let [wfn (new bytes/Buffer)]
+          (if (== (.SymName ldr fn) "go:buildid") (do
+              (writeUleb128 wfn 0) ; number of sets of locals
+              (writeI32Const wfn 0)
+              (.WriteByte wfn 0x0b) ; end
+              (set! buildid (.Data ldr fn)))
+
+            ;; Relocations have variable length, handle them here.
+            (let [relocs (.Relocs ldr fn)
+                ^{:line 197} P (.Data ldr fn)
+                ^{:line 198} off (conv int32 0)]
+              (for [ri 0] (< ri (.Count relocs)) (inc! ri)
+                (let [r (.At relocs ri)]
+                  (when (== ^{:go/via [Reloc]} (.Siz r) 0)
+                    (continue)) ; skip marker relocations
+
+                  (.Write wfn (subslice P off ^{:go/via [Reloc]} (.Off r)))
+                  (set! off ^{:go/via [Reloc]} (.Off r))
+                  (let [rs (.Sym r)]
+                    (switch (.Type r)
+                      (case [objabi/R_ADDR]
+                        (writeSleb128 wfn (+ (.SymValue ldr rs) ^{:go/via [Reloc]} (.Add r))))
+                      (case [objabi/R_CALL]
+                        (writeSleb128 wfn (- (+ (conv int64 (len hostImports)) (>> (.SymValue ldr rs) 16)) funcValueOffset)))
+                      (case [objabi/R_WASMIMPORT]
+                        (writeSleb128 wfn (aget hostImportMap rs)))
+                      (default
+                        (.Errorf ldr fn "bad reloc type %d (%s)" (.Type r) (sym/RelocName ^{:go/via [Target]} (.-Arch ctxt) (.Type r)))
+                        (continue))))))
+
+
+              (.Write wfn (subslice P off))))
+
+
+          (let [typ (conv uint32 0)]
+            (when [(values sig ok) (aget wasmFuncTypes (.SymName ldr fn))] ok
+              (set! typ (lookupType sig (addr types))))
+
+            (when [s (.WasmTypeSym ldr fn)] (!= s 0)
+              (let [^obj/WasmFuncType o (zero obj/WasmFuncType)]
+                (.Read o (.Data ldr s))
+                (let [t (addr ^{:go/breaks [2 4]} (lit wasmFuncType
+                        :Params (fieldsToTypes (.-Params o))
+                        :Results (fieldsToTypes (.-Results o))))]
+
+                  (set! typ (lookupType t (addr types))))))
+
+
+            (let [name (.ReplaceAllString nameRegexp (.SymName ldr fn) "_")]
+              (aset fns i (addr (lit wasmFunc :Name name :Type typ :Code (.Bytes wfn))))))))
+
+
+      (.Write (.-Out ctxt) (lit (slice byte) 0x00 0x61 0x73 0x6d)) ; magic
+      (.Write (.-Out ctxt) (lit (slice byte) 0x01 0x00 0x00 0x00)) ; version
+
+      ;; Add any buildid early in the binary:
+      (when (!= (len buildid) 0)
+        (writeBuildID ctxt buildid))
+
+
+      (writeTypeSec ctxt types)
+      (writeImportSec ctxt hostImports)
+      (writeFunctionSec ctxt fns)
+      (writeTableSec ctxt fns)
+      (writeMemorySec ctxt ldr)
+      (writeGlobalSec ctxt)
+      (writeExportSec ctxt ldr (len hostImports))
+      (writeElementSec ctxt (conv uint64 (len hostImports)) (conv uint64 (len fns)))
+      (writeCodeSec ctxt fns)
+      (writeDataSec ctxt)
+      (writeProducerSec ctxt)
+      (when (not @ld/FlagS)
+        (writeNameSec ctxt (len hostImports) fns)))))
+
+
+
+^{:go/end 272} (go/func lookupType ^uint32 [^{:tag (* wasmFuncType)} sig ^{:tag (* (slice (* wasmFuncType)))} types]
+  (range [i t @types]
+    (when (and (bytes/Equal (.-Params sig) (.-Params t)) (bytes/Equal (.-Results sig) (.-Results t)))
+      (return (conv uint32 i))))
+
+
+  (set! @types (append @types sig))
+  (conv uint32 (- (len @types) 1)))
+
+
+^{:go/end 279} (go/func writeSecHeader ^int64 [^{:tag (* ld/Link)} ctxt ^uint8 id]
+  (.WriteByte (.-Out ctxt) id)
+  (let [sizeOffset (.Offset (.-Out ctxt))]
+    (.Write (.-Out ctxt) (make (slice byte) 5)) ; placeholder for length
+    ^{:line 278} sizeOffset))
+
+
+^{:go/end 286} (go/func writeSecSize [^{:tag (* ld/Link)} ctxt ^int64 sizeOffset]
+  (let [endOffset (.Offset (.-Out ctxt))]
+    (.SeekSet (.-Out ctxt) sizeOffset)
+    (writeUleb128FixedLength (.-Out ctxt) (conv uint64 (- endOffset sizeOffset 5)) 5)
+    (.SeekSet (.-Out ctxt) endOffset)))
+
+
+^{:go/end 293} (go/func writeBuildID [^{:tag (* ld/Link)} ctxt ^{:tag (slice byte)} buildid]
+  (let [sizeOffset (writeSecHeader ctxt sectionCustom)]
+    (writeName (.-Out ctxt) "go:buildid")
+    (.Write (.-Out ctxt) buildid)
+    (writeSecSize ctxt sizeOffset)))
+
+
+
+
+^{:go/end 315} (go/func writeTypeSec "writeTypeSec writes the section that declares all function types\nso they can be referenced by index.\n" [^{:tag (* ld/Link)} ctxt ^{:tag (slice (* wasmFuncType))} types]
+  (let [sizeOffset (writeSecHeader ctxt sectionType)]
+
+    (writeUleb128 (.-Out ctxt) (conv uint64 (len types)))
+
+    (range [_ t types]
+      (.WriteByte (.-Out ctxt) 0x60) ; functype
+      (writeUleb128 (.-Out ctxt) (conv uint64 (len (.-Params t))))
+      (range [_ v (.-Params t)]
+        (.WriteByte (.-Out ctxt) v))
+
+      (writeUleb128 (.-Out ctxt) (conv uint64 (len (.-Results t))))
+      (range [_ v (.-Results t)]
+        (.WriteByte (.-Out ctxt) v)))
+
+
+
+    (writeSecSize ctxt sizeOffset)))
+
+
+
+
+^{:go/end 335} (go/func writeImportSec "writeImportSec writes the section that lists the functions that get\nimported from the WebAssembly host, usually JavaScript.\n" [^{:tag (* ld/Link)} ctxt ^{:tag (slice (* wasmFunc))} hostImports]
+  (let [sizeOffset (writeSecHeader ctxt sectionImport)]
+
+    (writeUleb128 (.-Out ctxt) (conv uint64 (len hostImports))) ; number of imports
+    (range [_ fn hostImports]
+      (if (!= (.-Module fn) "")
+        (writeName (.-Out ctxt) (.-Module fn))
+
+        (writeName (.-Out ctxt) wasm/GojsModule)) ; provided by the import object in wasm_exec.js
+
+      (writeName (.-Out ctxt) (.-Name fn))
+      (.WriteByte (.-Out ctxt) 0x00) ; func import
+      (writeUleb128 (.-Out ctxt) (conv uint64 (.-Type fn))))
+
+
+    (writeSecSize ctxt sizeOffset)))
+
+
+
+
+^{:go/end 348} (go/func writeFunctionSec "writeFunctionSec writes the section that declares the types of functions.\nThe bodies of these functions will later be provided in the \"code\" section.\n" [^{:tag (* ld/Link)} ctxt ^{:tag (slice (* wasmFunc))} fns]
+  (let [sizeOffset (writeSecHeader ctxt sectionFunction)]
+
+    (writeUleb128 (.-Out ctxt) (conv uint64 (len fns)))
+    (range [_ fn fns]
+      (writeUleb128 (.-Out ctxt) (conv uint64 (.-Type fn))))
+
+
+    (writeSecSize ctxt sizeOffset)))
+
+
+
+
+
+^{:go/end 363} (go/func writeTableSec "writeTableSec writes the section that declares tables. Currently there is only a single table\nthat is used by the CallIndirect operation to dynamically call any function.\nThe contents of the table get initialized by the \"element\" section.\n" [^{:tag (* ld/Link)} ctxt ^{:tag (slice (* wasmFunc))} fns]
+  (let [sizeOffset (writeSecHeader ctxt sectionTable)
+
+      ^{:line 356} numElements (conv uint64 (+ funcValueOffset (len fns)))]
+    (writeUleb128 (.-Out ctxt) 1) ; number of tables
+    (.WriteByte (.-Out ctxt) 0x70) ; type: anyfunc
+    (.WriteByte (.-Out ctxt) 0x00) ; no max
+    (writeUleb128 (.-Out ctxt) numElements) ; min
+
+    (writeSecSize ctxt sizeOffset)))
+
+
+
+
+^{:go/end 380} (go/func writeMemorySec "writeMemorySec writes the section that declares linear memories. Currently one linear memory is being used.\nLinear memory always starts at address zero. More memory can be requested with the GrowMemory instruction.\n" [^{:tag (* ld/Link)} ctxt ^{:tag (* loader/Loader)} ldr]
+  (let [sizeOffset (writeSecHeader ctxt sectionMemory)
+
+      ^{:line 370} dataEnd (conv uint64 (.SymValue ldr (.Lookup ldr "runtime.end" 0)))
+      ^:var ^{:line 371} initialSize (+ dataEnd (<< 1 20)) ; 1 MB, for runtime init allocating a few pages
+
+      ^:const ^{:line 373 :val 65536} wasmPageSize (<< 64 10)] ; 64KB
+
+    (writeUleb128 (.-Out ctxt) 1) ; number of memories
+    (.WriteByte (.-Out ctxt) 0x00) ; no maximum memory size
+    (writeUleb128 (.-Out ctxt) (/ initialSize wasmPageSize)) ; minimum (initial) memory size
+
+    (writeSecSize ctxt sizeOffset)))
+
+
+
+^{:go/end 412} (go/func writeGlobalSec "writeGlobalSec writes the section that declares global variables.\n" [^{:tag (* ld/Link)} ctxt]
+  (let [sizeOffset (writeSecHeader ctxt sectionGlobal)
+
+      ^{:line 386} globalRegs (lit (slice byte)
+        ^{:line 387} I32 ; 0: SP
+        ^{:line 388} I64 ; 1: CTXT
+        ^{:line 389} I64 ; 2: g
+        ^{:line 390} I64 ; 3: RET0
+        ^{:line 391} I64 ; 4: RET1
+        ^{:line 392} I64 ; 5: RET2
+        ^{:line 393} I64 ; 6: RET3
+        ^{:line 394} I32)] ; 7: PAUSE
+
+
+    (writeUleb128 (.-Out ctxt) (conv uint64 (len globalRegs))) ; number of globals
+
+    (range [_ typ globalRegs]
+      (.WriteByte (.-Out ctxt) typ)
+      (.WriteByte (.-Out ctxt) 0x01) ; var
+      (switch typ
+        (case [I32]
+          (writeI32Const (.-Out ctxt) 0))
+        (case [I64]
+          (writeI64Const (.-Out ctxt) 0)))
+
+      (.WriteByte (.-Out ctxt) 0x0b)) ; end
+
+
+    (writeSecSize ctxt sizeOffset)))
+
+
+
+
+
+^{:go/end 475} (go/func writeExportSec "writeExportSec writes the section that declares exports.\nExports can be accessed by the WebAssembly host, usually JavaScript.\nThe wasm_export_* functions and the linear memory get exported.\n" [^{:tag (* ld/Link)} ctxt ^{:tag (* loader/Loader)} ldr ^int lenHostImports]
+  (let [sizeOffset (writeSecHeader ctxt sectionExport)]
+
+    (switch buildcfg/GOOS
+      (case ["wasip1"]
+        (writeUleb128 (.-Out ctxt) (conv uint64 (+ 2 (len (.-WasmExports ldr))))) ; number of exports
+        (let [(values ^string entry ^string entryExpName) (zero string)]
+          (switch ^{:go/via [Target]} (.-BuildMode ctxt)
+            (case [ld/BuildModeExe]
+              (set! entry "_rt0_wasm_wasip1")
+              (set! entryExpName "_start"))
+            (case [ld/BuildModeCShared]
+              (set! entry "_rt0_wasm_wasip1_lib")
+              (set! entryExpName "_initialize")))
+
+          (let [s (.Lookup ldr entry 0)]
+            (when (== s 0)
+              (ld/Errorf "export symbol %s not defined" entry))
+
+            (let [idx (- (+ (conv uint32 lenHostImports) (conv uint32 (>> (.SymValue ldr s) 16))) funcValueOffset)]
+              (writeName (.-Out ctxt) entryExpName) ; the wasi entrypoint
+              (.WriteByte (.-Out ctxt) 0x00) ; func export
+              (writeUleb128 (.-Out ctxt) (conv uint64 idx)) ; funcidx
+              (range [_ s (.-WasmExports ldr)]
+                (let [idx (- (+ (conv uint32 lenHostImports) (conv uint32 (>> (.SymValue ldr s) 16))) funcValueOffset)]
+                  (writeName (.-Out ctxt) (.SymName ldr s))
+                  (.WriteByte (.-Out ctxt) 0x00) ; func export
+                  (writeUleb128 (.-Out ctxt) (conv uint64 idx)))) ; funcidx
+
+              (writeName (.-Out ctxt) "memory") ; memory in wasi
+              (.WriteByte (.-Out ctxt) 0x02) ; mem export
+              (writeUleb128 (.-Out ctxt) 0))))) ; memidx
+      (case ["js"]
+        (writeUleb128 (.-Out ctxt) (conv uint64 (+ 4 (len (.-WasmExports ldr))))) ; number of exports
+        (range [_ name (lit (slice string) "run" "resume" "getsp")]
+          (let [s (.Lookup ldr (+ "wasm_export_" name) 0)]
+            (when (== s 0)
+              (ld/Errorf "export symbol %s not defined" (+ "wasm_export_" name)))
+
+            (let [idx (- (+ (conv uint32 lenHostImports) (conv uint32 (>> (.SymValue ldr s) 16))) funcValueOffset)]
+              (writeName (.-Out ctxt) name) ; inst.exports.run/resume/getsp in wasm_exec.js
+              (.WriteByte (.-Out ctxt) 0x00) ; func export
+              (writeUleb128 (.-Out ctxt) (conv uint64 idx))))) ; funcidx
+
+        (range [_ s (.-WasmExports ldr)]
+          (let [idx (- (+ (conv uint32 lenHostImports) (conv uint32 (>> (.SymValue ldr s) 16))) funcValueOffset)]
+            (writeName (.-Out ctxt) (.SymName ldr s))
+            (.WriteByte (.-Out ctxt) 0x00) ; func export
+            (writeUleb128 (.-Out ctxt) (conv uint64 idx)))) ; funcidx
+
+        (writeName (.-Out ctxt) "mem") ; inst.exports.mem in wasm_exec.js
+        (.WriteByte (.-Out ctxt) 0x02) ; mem export
+        (writeUleb128 (.-Out ctxt) 0)) ; memidx
+      (default
+        (ld/Exitf "internal error: writeExportSec: unrecognized GOOS %s" buildcfg/GOOS)))
+
+
+    (writeSecSize ctxt sizeOffset)))
+
+
+
+
+
+^{:go/end 495} (go/func writeElementSec "writeElementSec writes the section that initializes the tables declared by the \"table\" section.\nThe table for CallIndirect gets initialized in a very simple way so that each table index (PC_F value)\nmaps linearly to the function index (numImports + PC_F).\n" [^{:tag (* ld/Link)} ctxt ^uint64 numImports ^uint64 numFns]
+  (let [sizeOffset (writeSecHeader ctxt sectionElement)]
+
+    (writeUleb128 (.-Out ctxt) 1) ; number of element segments
+
+    (writeUleb128 (.-Out ctxt) 0) ; tableidx
+    (writeI32Const (.-Out ctxt) funcValueOffset)
+    (.WriteByte (.-Out ctxt) 0x0b) ; end
+
+    (writeUleb128 (.-Out ctxt) numFns) ; number of entries
+    (for [i (conv uint64 0)] (< i numFns) (inc! i)
+      (writeUleb128 (.-Out ctxt) (+ numImports i)))
+
+
+    (writeSecSize ctxt sizeOffset)))
+
+
+
+
+^{:go/end 509} (go/func writeCodeSec "writeCodeSec writes the section that provides the function bodies for the functions\ndeclared by the \"func\" section.\n" [^{:tag (* ld/Link)} ctxt ^{:tag (slice (* wasmFunc))} fns]
+  (let [sizeOffset (writeSecHeader ctxt sectionCode)]
+
+    (writeUleb128 (.-Out ctxt) (conv uint64 (len fns))) ; number of code entries
+    (range [_ fn fns]
+      (writeUleb128 (.-Out ctxt) (conv uint64 (len (.-Code fn))))
+      (.Write (.-Out ctxt) (.-Code fn)))
+
+
+    (writeSecSize ctxt sizeOffset)))
+
+
+
+^{:go/end 583} (go/func writeDataSec "writeDataSec writes the section that provides data that will be used to initialize the linear memory.\n" [^{:tag (* ld/Link)} ctxt]
+  (let [sizeOffset (writeSecHeader ctxt sectionData)]
+
+    (let-type [dataSegment (struct
+          ^{:line 516 :tag int32} offset
+          ^{:line 517 :tag (slice byte)} data)]
+
+
+      ;; Omit blocks of zeroes and instead emit data segments with offsets skipping the zeroes.
+      ;; This reduces the size of the WebAssembly binary. We use 8 bytes as an estimate for the
+      ;; overhead of adding a new segment (same as wasm-opt's memory-packing optimization uses).
+      (let [^:const ^{:val 8} segmentOverhead 8
+
+          ;; Generate at most this many segments. A higher number of segments gets rejected by some WebAssembly runtimes.
+          ^:const ^{:line 526 :val 100000} maxNumSegments 100000
+
+          ^{:line 528 :tag (slice (* dataSegment))} segments (zero (slice (* dataSegment)))]
+        (range [secIndex ds dataSects]
+          (let [data (.-data ds)
+              ^{:line 531} offset (conv int32 (.-Vaddr (.-sect ds)))]
+
+            ;; skip leading zeroes
+            (while (and (> (len data) 0) (== (aget data 0) 0))
+              (set! data (subslice data 1))
+              (inc! offset))
+
+
+            (while (> (len data) 0)
+              (let [dataLen (conv int32 (len data))
+                  (values ^int32 segmentEnd ^int32 zeroEnd) (zero int32)]
+                (if (== (+ (len segments) (- (len dataSects) secIndex)) maxNumSegments) (do
+                    (set! segmentEnd dataLen)
+                    (set! zeroEnd dataLen))
+
+                  (while true
+                    ;; look for beginning of zeroes
+                    (while (and (< segmentEnd dataLen) (!= (aget data segmentEnd) 0))
+                      (inc! segmentEnd))
+
+                    ;; look for end of zeroes
+                    (set! zeroEnd segmentEnd)
+                    (while (and (< zeroEnd dataLen) (== (aget data zeroEnd) 0))
+                      (inc! zeroEnd))
+
+                    ;; emit segment if omitting zeroes reduces the output size
+                    (when (or (>= (- zeroEnd segmentEnd) segmentOverhead) (== zeroEnd dataLen))
+                      (break))
+
+                    (set! segmentEnd zeroEnd)))
+
+
+
+                (set! segments (append segments (addr ^{:go/breaks [2 4]} (lit dataSegment
+                        :offset offset
+                        :data (subslice data _ segmentEnd)))))
+
+                (set! data (subslice data zeroEnd))
+                (set! offset + zeroEnd)))))
+
+
+
+        (writeUleb128 (.-Out ctxt) (conv uint64 (len segments))) ; number of data entries
+        (range [_ seg segments]
+          (writeUleb128 (.-Out ctxt) 0) ; memidx
+          (writeI32Const (.-Out ctxt) (.-offset seg))
+          (.WriteByte (.-Out ctxt) 0x0b) ; end
+          (writeUleb128 (.-Out ctxt) (conv uint64 (len (.-data seg))))
+          (.Write (.-Out ctxt) (.-data seg)))
+
+
+        (writeSecSize ctxt sizeOffset)))))
+
+
+
+^{:go/end 603} (go/func writeProducerSec "writeProducerSec writes an optional section that reports the source language and compiler version.\n" [^{:tag (* ld/Link)} ctxt]
+  (let [sizeOffset (writeSecHeader ctxt sectionCustom)]
+    (writeName (.-Out ctxt) "producers")
+
+    (writeUleb128 (.-Out ctxt) 2) ; number of fields
+
+    (writeName (.-Out ctxt) "language") ; field name
+    (writeUleb128 (.-Out ctxt) 1) ; number of values
+    (writeName (.-Out ctxt) "Go") ; value: name
+    (writeName (.-Out ctxt) buildcfg/Version) ; value: version
+
+    (writeName (.-Out ctxt) "processed-by") ; field name
+    (writeUleb128 (.-Out ctxt) 1) ; number of values
+    (writeName (.-Out ctxt) "Go cmd/compile") ; value: name
+    (writeName (.-Out ctxt) buildcfg/Version) ; value: version
+
+    (writeSecSize ctxt sizeOffset)))
+
+
+(go/var nameRegexp (regexp/MustCompile "[^\\w.]"))
+
+
+
+
+^{:go/end 623} (go/func writeNameSec "writeNameSec writes an optional section that assigns names to the functions declared by the \"func\" section.\nThe names are only used by WebAssembly stack traces, debuggers and decompilers.\nTODO(neelance): add symbol table of DATA symbols\n" [^{:tag (* ld/Link)} ctxt ^int firstFnIndex ^{:tag (slice (* wasmFunc))} fns]
+  (let [sizeOffset (writeSecHeader ctxt sectionCustom)]
+    (writeName (.-Out ctxt) "name")
+
+    (let [sizeOffset2 (writeSecHeader ctxt 0x01)] ; function names
+      (writeUleb128 (.-Out ctxt) (conv uint64 (len fns)))
+      (range [i fn fns]
+        (writeUleb128 (.-Out ctxt) (conv uint64 (+ firstFnIndex i)))
+        (writeName (.-Out ctxt) (.-Name fn)))
+
+      (writeSecSize ctxt sizeOffset2)
+
+      (writeSecSize ctxt sizeOffset))))
+
+
+(go/type nameWriter (interface
+    ^{:line 626} io/ByteWriter
+    ^{:line 627} io/Writer))
+
+
+^{:go/end 633} (go/func writeI32Const [^io/ByteWriter w ^int32 v]
+  (.WriteByte w 0x41) ; i32.const
+  (writeSleb128 w (conv int64 v)))
+
+
+^{:go/end 638} (go/func writeI64Const [^io/ByteWriter w ^int64 v]
+  (.WriteByte w 0x42) ; i64.const
+  (writeSleb128 w v))
+
+
+^{:go/end 643} (go/func writeName [^nameWriter w ^string name]
+  (writeUleb128 w (conv uint64 (len name)))
+  (.Write w (conv (slice byte) name)))
+
+
+^{:go/end 660} (go/func writeUleb128 [^io/ByteWriter w ^uint64 v]
+  (when (< v 128)
+    (.WriteByte w (conv uint8 v))
+    (return))
+
+  (let [more true]
+    (while more
+      (let [c (conv uint8 (bit-and v 0x7f))]
+        (set! v >> 7)
+        (set! more (!= v 0))
+        (when more
+          (set! c bit-or 0x80))
+
+        (.WriteByte w c)))))
+
+
+
+^{:go/end 674} (go/func writeUleb128FixedLength [^io/ByteWriter w ^uint64 v ^int length]
+  (for [i 0] (< i length) (inc! i)
+    (let [c (conv uint8 (bit-and v 0x7f))]
+      (set! v >> 7)
+      (when (< i (- length 1))
+        (set! c bit-or 0x80))
+
+      (.WriteByte w c)))
+
+  (when (!= v 0)
+    (panic "writeUleb128FixedLength: length too small")))
+
+
+
+^{:go/end 688} (go/func writeSleb128 [^io/ByteWriter w ^int64 v]
+  (let [more true]
+    (while more
+      (let [c (conv uint8 (bit-and v 0x7f))
+          ^{:line 680} s (conv uint8 (bit-and v 0x40))]
+        (set! v >> 7)
+        (set! more (not (or ^:go/paren (and (== v 0) (== s 0)) ^:go/paren (and (== v -1) (!= s 0)))))
+        (when more
+          (set! c bit-or 0x80))
+
+        (.WriteByte w c)))))
+
+
+
+^{:go/end 709} (go/func fieldsToTypes ^{:tag (slice byte)} [^{:tag (slice obj/WasmField)} fields]
+  (let [b (make (slice byte) (len fields))]
+    (range [i f fields]
+      (switch (.-Type f)
+        (case [obj/WasmI32 obj/WasmPtr obj/WasmBool]
+          (aset b i I32))
+        (case [obj/WasmI64]
+          (aset b i I64))
+        (case [obj/WasmF32]
+          (aset b i F32))
+        (case [obj/WasmF64]
+          (aset b i F64))
+        (case [obj/WasmV128]
+          (aset b i V128))
+        (default
+          (panic (fmt/Sprintf "fieldsToTypes: unknown field type: %d" (.-Type f))))))
+
+
+    ^{:line 708} b))

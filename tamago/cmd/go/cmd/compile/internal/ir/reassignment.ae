@@ -1,0 +1,265 @@
+;; Copyright 2023 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.cmd.compile.internal.ir) (go/file "reassignment.go" :imports [
+
+
+    ^{:line 8} [base "cmd/compile/internal/base"]
+    ^{:line 9} [types "cmd/compile/internal/types"]])
+
+
+
+
+
+
+
+
+
+
+(go/type ReassignOracle "A ReassignOracle efficiently answers queries about whether local\nvariables are reassigned. This helper works by looking for function\nparams and short variable declarations (e.g.\nhttps://go.dev/ref/spec#Short_variable_declarations) that are\nneither address taken nor subsequently re-assigned. It is intended\nto operate much like \"ir.StaticValue\" and \"ir.Reassigned\", but in a\nway that does just a single walk of the containing function (as\nopposed to a new walk on every call).\n" (struct
+    ^{:line 21 :tag (* Func)} fn
+
+
+    ^{:line 24 :tag (map (* Name) Node) :doc "maps candidate name to its defining assignment (or\nfor params, defining func).\n"} singleDef
+
+
+
+
+
+
+
+
+    ^{:line 33 :tag (map (* Name) (slice (* AssignStmt))) :doc "funcAssigns tracks all known simple assignments (OAS) to\nfunc-typed PAUTO variables. Only func-typed variables are\ntracked because this data is used exclusively for callee\nresolution in escape analysis. Deletion means the candidate was\ninvalidated (e.g., addr-taken, non-simple assignment form, or too\nmany assignments). Assignments inside nested closures are accepted\nbecause the only alternative value is nil, which panics on call.\n"} funcAssigns))
+
+
+
+
+
+
+^{:go/end 158} (go/method Init "Init initializes the oracle based on the IR in function fn, laying\nthe groundwork for future calls to the StaticValue and Reassigned\nmethods. If the fn's IR is subsequently modified, Init must be\ncalled again.\n" [^{:tag (* ReassignOracle)} ro ^{:tag (* Func)} fn]
+  (set! (.-fn ro) fn)
+
+  ;; Collect candidate map. Start by adding function parameters
+  ;; explicitly.
+  (set! (.-singleDef ro) (make (map (* Name) Node)))
+  (set! (.-funcAssigns ro) (make (map (* Name) (slice (* AssignStmt)))))
+  (let [sig (.Type fn)
+      ^{:line 48} numParams (+ (.NumRecvs sig) (.NumParams sig))]
+    (range [_ param (subslice (.-Dcl fn) _ numParams)]
+      (when (IsBlank param)
+        (continue))
+
+      ;; For params, use func itself as defining node.
+      (aset (.-singleDef ro) param fn))
+
+
+    ;; Walk the function body to discover any locals assigned
+    ;; via ":=" syntax (e.g. "a := <expr>").
+    (let [^{:tag (func [^Node n] [bool])} findLocals (zero (func [^Node n] [bool]))]
+      (set! findLocals ^{:go/breaks [[3 81]] :go/end 82} (fn ^bool [^Node n]
+          (if [(values nn ok) (assert (* Name) n)] ok
+            (when (and (== (.-Class nn) PAUTO) (not (.Addrtaken nn)))
+              (let [isFunc (== (.Kind ^{:go/via [miniExpr]} (.Type nn)) types/TFUNC)]
+                (if (== (.-Defn nn) nil)
+                  ;; Bare declaration (e.g., "var f func()").
+                  (when isFunc
+                    (aset (.-funcAssigns ro) nn nil))
+
+                  (if [(values _ ok) (assert (* AssignStmt) (.-Defn nn))] ok (do
+                      (aset (.-singleDef ro) nn (.-Defn nn))
+                      (when isFunc
+                        (aset (.-funcAssigns ro) nn nil)))
+
+
+                    (aset (.-singleDef ro) nn (.-Defn nn))))))
+
+
+            (when [(values nn ok) (assert (* ClosureExpr) n)] ok
+              (Any (.-Func nn) findLocals)))
+
+          false))
+
+      (Any fn findLocals)
+
+      (let [outerName ^{:go/end 94} (fn ^{:tag (* Name)} [^Node x]
+            (when (== x nil)
+              (return nil))
+
+            ^{:go/breaks [[3 93]]} (let [(values n ok) (assert (* Name) (OuterValue x))]
+              (when ok
+                (return (.Canonical n)))
+
+              nil))
+
+
+          ;; pruneIfNeeded examines node nn appearing on the left hand side
+          ;; of assignment statement asn to see if it contains a reassignment
+          ;; to any nodes in our candidate maps; if a reassignment is found,
+          ;; the corresponding name is deleted.
+          ^{:line 100} pruneIfNeeded ^{:go/end 128} (fn [^Node nn ^Node asn]
+            (let [oname (outerName nn)]
+              (when (== oname nil)
+                (return))
+
+              (when [(values defn ok) (aget (.-singleDef ro) oname)] ok
+                ;; any assignment to a param invalidates the entry.
+                (let [paramAssigned (== (.-Class oname) PPARAM)
+                    ;; assignment to local ok iff assignment is its orig def.
+                    ^{:line 109} localAssigned (and (== (.-Class oname) PAUTO) (!= asn defn))]
+                  (when (or paramAssigned localAssigned)
+                    ;; We found an assignment to name N that doesn't
+                    ;; correspond to its original definition; remove
+                    ;; from candidates.
+                    (delete (.-singleDef ro) oname))))
+
+
+              (when [(values _ ok) (aget (.-funcAssigns ro) oname)] ok
+                (let [(values as isOAS) (assert (* AssignStmt) asn)]
+                  (cond (and isOAS (isNilAssign as)) (do)
+                    ;; Zero-value assignment (nil, bare decl), skip.
+                    (not isOAS)
+                    ;; Not a simple assignment: invalidate.
+                    (delete (.-funcAssigns ro) oname) :else
+
+                    (aset (.-funcAssigns ro) oname (append (aget (.-funcAssigns ro) oname) as)))))))
+
+
+
+
+          ;; Prune away anything that looks assigned. This code modeled after
+          ;; similar code in ir.Reassigned; any changes there should be made
+          ;; here as well.
+          ^{:line 133 :tag (func [^Node n] [bool])} do (zero (func [^Node n] [bool]))]
+        (set! do ^{:go/breaks [[3 155]] :go/end 156} (fn ^bool [^Node n]
+            (switch (.Op n)
+              (case [OAS]
+                (let [asn (assert (* AssignStmt) n)]
+                  (pruneIfNeeded (.-X asn) n)))
+              (case [OAS2 OAS2FUNC OAS2MAPR OAS2DOTTYPE OAS2RECV OSELRECV2]
+                (let [asn (assert (* AssignListStmt) n)]
+                  (range [_ p (.-Lhs asn)]
+                    (pruneIfNeeded p n))))
+
+              (case [OASOP]
+                (let [asn (assert (* AssignOpStmt) n)]
+                  (pruneIfNeeded (.-X asn) n)))
+              (case [ORANGE]
+                (let [rs (assert (* RangeStmt) n)]
+                  (pruneIfNeeded (.-Key rs) n)
+                  (pruneIfNeeded (.-Value rs) n)))
+              (case [OCLOSURE]
+                (let [n (assert (* ClosureExpr) n)]
+                  (Any (.-Func n) do))))
+
+            false))
+
+        (Any fn do)))))
+
+
+
+
+^{:go/end 189} (go/method StaticValue "StaticValue method has the same semantics as the ir package function\nof the same name; see comments on [StaticValue].\n" ^Node [^{:tag (* ReassignOracle)} ro ^Node n]
+  (let [arg n]
+    (while true
+      (when (== (.Op n) OCONVNOP)
+        (set! n (.-X (assert (* ConvExpr) n)))
+        (continue))
+
+
+      (when (== (.Op n) OINLCALL)
+        (set! n (.SingleResult (assert (* InlinedCallExpr) n)))
+        (continue))
+
+
+      (when (== (.Op n) OPAREN)
+        (set! n (.-X (assert (* ParenExpr) n)))
+        (continue))
+
+
+      (let [n1 (.staticValue1 ro n)]
+        (when (== n1 nil)
+          (when consistencyCheckEnabled
+            (checkStaticValueResult arg n))
+
+          (return n))
+
+        (set! n n1)))))
+
+
+
+^{:go/end 232} (go/method staticValue1 ^Node [^{:tag (* ReassignOracle)} ro ^Node nn]
+  (when (!= (.Op nn) ONAME)
+    (return nil))
+
+  (let [n (.Canonical (assert (* Name) nn))]
+    (when (!= (.-Class n) PAUTO)
+      (return nil))
+
+
+    (let [defn (.-Defn n)]
+      (when (== defn nil)
+        (return nil))
+
+
+      (let [^Node rhs (zero Node)]
+        (label :FindRHS
+          (switch (.Op defn)
+            (case [OAS]
+              (let [defn (assert (* AssignStmt) defn)]
+                (set! rhs (.-Y defn))))
+            (case [OAS2]
+              (let [defn (assert (* AssignListStmt) defn)]
+                (range [i lhs (.-Lhs defn)]
+                  (when (== lhs n)
+                    (set! rhs (aget (.-Rhs defn) i))
+                    (break :FindRHS)))
+
+
+                (base/FatalfAt ^{:go/via [miniStmt miniNode]} (.Pos defn) "%v missing from LHS of %v" n defn)))
+            (default
+              (return nil))))
+
+        (when (== rhs nil)
+          (base/FatalfAt (.Pos defn) "RHS is nil: %v" defn))
+
+
+        (when [(values _ ok) (aget (.-singleDef ro) n)] (not ok)
+          (return nil))
+
+
+        ^{:line 231} rhs))))
+
+
+
+
+^{:go/end 243} (go/method Reassigned "Reassigned method has the same semantics as the ir package function\nof the same name; see comments on [Reassigned] for more info.\n" ^bool [^{:tag (* ReassignOracle)} ro ^{:tag (* Name)} n]
+  (let [(values _ ok) (aget (.-singleDef ro) n)
+      ^{:line 238} result (not ok)]
+    (when consistencyCheckEnabled
+      (checkReassignedResult n result))
+
+    ^{:line 242} result))
+
+
+
+
+
+
+
+
+
+^{:go/end 254} (go/method FuncAssignments "FuncAssignments returns all known simple assignments to a func-typed\nvariable. For variables defined with := and a non-zero value, the\ndefining assignment is included. Returns nil if the variable is not\nfunc-typed, was invalidated (addr-taken, non-simple assignment,\ntoo many assignments), or has no tracked assignments. Assignments\ninside nested closures are accepted because the only alternative\nvalue is nil, which panics on call.\n" ^{:tag (slice (* AssignStmt))} [^{:tag (* ReassignOracle)} ro ^{:tag (* Name)} name]
+  (aget (.-funcAssigns ro) (.Canonical name)))
+
+
+
+^{:go/end 266} (go/func isNilAssign "isNilAssign reports whether as has a nil or absent RHS.\n" ^bool [^{:tag (* AssignStmt)} as]
+  (when (== (.-Y as) nil)
+    (return true))
+
+  (let [y (.-Y as)]
+    (while (== (.Op y) OCONVNOP)
+      (set! y (.-X (assert (* ConvExpr) y))))
+
+    (IsNil y)))

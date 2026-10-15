@@ -1,0 +1,613 @@
+;; Copyright 2020 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; Package devirtualize implements two "devirtualization" optimization passes:
+;;
+;;   - "Static" devirtualization which replaces interface method calls with
+;;     direct concrete-type method calls where possible.
+;;   - "Profile-guided" devirtualization which replaces indirect calls with a
+;;     conditional direct call to the hottest concrete callee from a profile, as
+;;     well as a fallback using the original indirect call.
+(in-ns 'go.cmd.compile.internal.devirtualize) (go/file "devirtualize.go" :doc "Package devirtualize implements two \"devirtualization\" optimization passes:\n\n  - \"Static\" devirtualization which replaces interface method calls with\n    direct concrete-type method calls where possible.\n  - \"Profile-guided\" devirtualization which replaces indirect calls with a\n    conditional direct call to the hottest concrete callee from a profile, as\n    well as a fallback using the original indirect call.\n" :imports [
+
+
+    ^{:line 15} [base "cmd/compile/internal/base"]
+    ^{:line 16} [ir "cmd/compile/internal/ir"]
+    ^{:line 17} [typecheck "cmd/compile/internal/typecheck"]
+    ^{:line 18} [types "cmd/compile/internal/types"]])
+
+
+(go/const ^{:val true} go126ImprovedConcreteTypeAnalysis true)
+
+
+
+^{:go/end 177} (go/func StaticCall "StaticCall devirtualizes the given call if possible when the concrete callee\nis available statically.\n" [^{:tag (* State)} s ^{:tag (* ir/CallExpr)} call]
+  ;; For promoted methods (including value-receiver methods promoted
+  ;; to pointer-receivers), the interface method wrapper may contain
+  ;; expressions that can panic (e.g., ODEREF, ODOTPTR,
+  ;; ODOTINTER). Devirtualization involves inlining these expressions
+  ;; (and possible panics) to the call site. This normally isn't a
+  ;; problem, but for go/defer statements it can move the panic from
+  ;; when/where the call executes to the go/defer statement itself,
+  ;; which is a visible change in semantics (e.g., #52072). To prevent
+  ;; this, we skip devirtualizing calls within go/defer statements
+  ;; altogether.
+  (when (.-GoDefer call)
+    (return))
+
+
+  (when (!= ^{:go/via [miniExpr miniNode]} (.Op call) ir/OCALLINTER)
+    (return))
+
+
+  (let [sel (assert (* ir/SelectorExpr) (.-Fun call))
+      ^{:line 45 :tag (* types/Type)} typ (zero (* types/Type))]
+    (if go126ImprovedConcreteTypeAnalysis (do
+        (set! typ (concreteType s (.-X sel)))
+        (when (== typ nil)
+          (return))
+
+
+        ;; Don't create type-assertions that would be impossible at compile-time.
+        ;; This can happen in such case: any(0).(interface {A()}).A(), this typechecks without
+        ;; any errors, but will cause a runtime panic. We statically know that int(0) does not
+        ;; implement that interface, thus we skip the devirtualization, as it is not possible
+        ;; to make an assertion: any(0).(interface{A()}).(int) (int does not implement interface{A()}).
+        (when (not (typecheck/Implements typ (.Type (.-X sel))))
+          (return)))
+
+
+      (let [r (ir/StaticValue (.-X sel))]
+        (when (!= (.Op r) ir/OCONVIFACE)
+          (return))
+
+        (let [recv (assert (* ir/ConvExpr) r)]
+          (set! typ (.Type (.-X recv)))
+          (when (.IsInterface typ)
+            (return)))))
+
+
+
+    ;; If typ is a shape type, then it was a type argument originally
+    ;; and we'd need an indirect call through the dictionary anyway.
+    ;; We're unable to devirtualize this call.
+    (when (.IsShape typ)
+      (return))
+
+
+    ;; If typ *has* a shape type, then it's a shaped, instantiated
+    ;; type like T[go.shape.int], and its methods (may) have an extra
+    ;; dictionary parameter. We could devirtualize this call if we
+    ;; could derive an appropriate dictionary argument.
+    ;;
+    ;; TODO(mdempsky): If typ has a promoted non-generic method,
+    ;; then that method won't require a dictionary argument. We could
+    ;; still devirtualize those calls.
+    ;;
+    ;; TODO(mdempsky): We have the *runtime.itab in recv.TypeWord. It
+    ;; should be possible to compute the represented type's runtime
+    ;; dictionary from this (e.g., by adding a pointer from T[int]'s
+    ;; *runtime._type to .dict.T[int]; or by recognizing static
+    ;; references to go:itab.T[int],iface and constructing a direct
+    ;; reference to .dict.T[int]).
+    (when (.HasShape typ)
+      (when (!= (.-LowerM base/Flag) 0)
+        (base/WarnfAt ^{:go/via [miniExpr miniNode]} (.Pos call) "cannot devirtualize %v: shaped receiver %v" call typ))
+
+      (return))
+
+
+    ;; Further, if sel.X's type has a shape type, then it's a shaped
+    ;; interface type. In this case, the (non-dynamic) TypeAssertExpr
+    ;; we construct below would attempt to create an itab
+    ;; corresponding to this shaped interface type; but the actual
+    ;; itab pointer in the interface value will correspond to the
+    ;; original (non-shaped) interface type instead. These are
+    ;; functionally equivalent, but they have distinct pointer
+    ;; identities, which leads to the type assertion failing.
+    ;;
+    ;; TODO(mdempsky): We know the type assertion here is safe, so we
+    ;; could instead set a flag so that walk skips the itab check. For
+    ;; now, punting is easy and safe.
+    (when (.HasShape (.Type (.-X sel)))
+      (when (!= (.-LowerM base/Flag) 0)
+        (base/WarnfAt ^{:go/via [miniExpr miniNode]} (.Pos call) "cannot devirtualize %v: shaped interface %v" call (.Type (.-X sel))))
+
+      (return))
+
+
+    (let [dt (ir/NewTypeAssertExpr ^{:go/via [miniExpr miniNode]} (.Pos sel) (.-X sel) typ)]
+
+      (when go126ImprovedConcreteTypeAnalysis
+        ;; Consider:
+        ;;
+        ;;	var v Iface
+        ;;	v.A()
+        ;;	v = &Impl{}
+        ;;
+        ;; Here in the devirtualizer, we determine the concrete type of v as being an *Impl,
+        ;; but it can still be a nil interface, we have not detected that. The v.(*Impl)
+        ;; type assertion that we make here would also have failed, but with a different
+        ;; panic "pkg.Iface is nil, not *pkg.Impl", where previously we would get a nil panic.
+        ;; We fix this, by introducing an additional nilcheck on the itab.
+        ;; Calling a method on a nil interface (in most cases) is a bug in a program, so it is fine
+        ;; to devirtualize and further (possibly) inline them, even though we would never reach
+        ;; the called function.
+        (set! (.-UseNilPanic dt) true)
+        ^{:go/via [miniExpr miniNode]} (.SetPos dt ^{:go/via [miniExpr miniNode]} (.Pos call)))
+
+
+      (let [x (typecheck/XDotMethod ^{:go/via [miniExpr miniNode]} (.Pos sel) dt (.-Sel sel) true)]
+        (switch ^{:go/via [miniExpr miniNode]} (.Op x)
+          (case [ir/ODOTMETH]
+            (when (!= (.-LowerM base/Flag) 0)
+              (base/WarnfAt ^{:go/via [miniExpr miniNode]} (.Pos call) "devirtualizing %v to %v" sel typ))
+
+            (.SetOp call ir/OCALLMETH)
+            (set! (.-Fun call) x))
+          (case [ir/ODOTINTER]
+            ;; Promoted method from embedded interface-typed field (#42279).
+            (when (!= (.-LowerM base/Flag) 0)
+              (base/WarnfAt ^{:go/via [miniExpr miniNode]} (.Pos call) "partially devirtualizing %v to %v" sel typ))
+
+            (.SetOp call ir/OCALLINTER)
+            (set! (.-Fun call) x))
+          (default
+            (base/FatalfAt ^{:go/via [miniExpr miniNode]} (.Pos call) "failed to devirtualize %v (%v)" x ^{:go/via [miniExpr miniNode]} (.Op x))))
+
+
+        ;; Duplicated logic from typecheck for function call return
+        ;; value types.
+        ;;
+        ;; Receiver parameter size may have changed; need to update
+        ;; call.Type to get correct stack offsets for result
+        ;; parameters.
+        (types/CheckSize ^{:go/via [miniExpr]} (.Type x))
+        (switch [ft ^{:go/via [miniExpr]} (.Type x)] (.NumResults ft)
+          (case [0])
+          (case [1]
+            ^{:go/via [miniExpr]} (.SetType call (.-Type (.Result ft 0))))
+          (default
+            ^{:go/via [miniExpr]} (.SetType call (.ResultsTuple ft))))
+
+
+        ;; Desugar OCALLMETH, if we created one (#57309).
+        (typecheck/FixMethodCall call)))))
+
+
+(go/const ^{:val false} concreteTypeDebug false)
+
+
+
+
+^{:go/end 204} (go/func concreteType "concreteType determines the concrete type of n, following OCONVIFACEs and type asserts.\nReturns nil when the concrete type could not be determined, or when there are multiple\n(different) types assigned to an interface.\n" [^{:tag (* State)} s ^ir/Node n] :results [^{:tag (* types/Type)} typ]
+  (when concreteTypeDebug
+    (base/Warn "concreteType(%v) - analyzing" n)
+    (defer (^{:go/end 193} (fn []
+          (let [t (.String typ)]
+            (when (== typ nil)
+              (set! t "<nil> (unknown static type)"))
+
+            (base/Warn "concreteType(%v) -> %v" n t))))))
+
+
+
+  (set! typ (concreteType1 s n (make (map (* ir/Name) (struct)))))
+  (when (== typ (addr noType))
+    (return nil))
+
+  (when (and (!= typ nil) (.IsInterface typ))
+    (base/FatalfAt (.Pos n) "typ.IsInterface() = true; want = false; typ = %v" typ))
+
+  ^{:line 203} typ)
+
+
+
+(go/var ^{:tag types/Type :doc "noType is a sentinel value returned by [concreteType1].\n"} noType)
+
+
+
+
+^{:go/end 335} (go/func concreteType1 "concreteType1 analyzes the node n and returns its concrete type if it is statically known.\nOtherwise, it returns a nil Type, indicating that a concrete type was not determined.\nWhen n is known to be statically nil or a self-assignment is detected, it returns a sentinel [noType] type instead.\n" [^{:tag (* State)} s ^ir/Node n ^{:tag (map (* ir/Name) (struct))} seen] :results [^{:tag (* types/Type)} outT]
+  (let [nn n] ; for debug messages
+
+    (when concreteTypeDebug
+      (defer (^{:go/end 225} (fn []
+            (let [t "&noType"]
+              (when (!= outT (addr noType))
+                (set! t (.String outT)))
+
+              (when (== outT nil)
+                (set! t "<nil> (unknown static type)"))
+
+              (base/Warn "concreteType1(%v) -> %v" nn t))))))
+
+
+
+    (while true
+      (when concreteTypeDebug
+        (base/Warn "concreteType1(%v): analyzing %v" nn n))
+
+
+      (when (not (.IsInterface (.Type n)))
+        (return (.Type n)))
+
+
+      (type-switch [n1 n]
+        (case [(* ir/ConvExpr)]
+          (when (== ^{:go/via [miniExpr miniNode]} (.Op n1) ir/OCONVNOP)
+            (when (or (not (.IsInterface ^{:go/via [miniExpr]} (.Type n1))) (not (types/Identical (.Underlying ^{:go/via [miniExpr]} (.Type n1)) (.Underlying (.Type (.-X n1))))))
+              ;; As we check (directly before this switch) whether n is an interface, thus we should only reach
+              ;; here for iface conversions where both operands are the same.
+              (base/FatalfAt ^{:go/via [miniExpr miniNode]} (.Pos n1) "not identical/interface types found n1.Type = %v; n1.X.Type = %v" ^{:go/via [miniExpr]} (.Type n1) (.Type (.-X n1))))
+
+            (set! n (.-X n1))
+            (continue))
+
+          (when (== ^{:go/via [miniExpr miniNode]} (.Op n1) ir/OCONVIFACE)
+            (set! n (.-X n1))
+            (continue)))
+
+        (case [(* ir/InlinedCallExpr)]
+          (when (== ^{:go/via [miniExpr miniNode]} (.Op n1) ir/OINLCALL)
+            (set! n (.SingleResult n1))
+            (continue)))
+
+        (case [(* ir/ParenExpr)]
+          (set! n (.-X n1))
+          (continue))
+        (case [(* ir/TypeAssertExpr)]
+          (set! n (.-X n1))
+          (continue)))
+
+      (break))
+
+
+    (when (!= (.Op n) ir/ONAME)
+      (return nil))
+
+
+    (let [name (.Canonical (assert (* ir/Name) n))]
+      (when (!= (.-Class name) ir/PAUTO)
+        (return nil))
+
+
+      (when (!= ^{:go/via [miniExpr miniNode]} (.Op name) ir/ONAME)
+        (base/FatalfAt ^{:go/via [miniExpr miniNode]} (.Pos name) "name.Op = %v; want = ONAME" (.Op n)))
+
+
+      ;; name.Curfn must be set, as we checked name.Class != ir.PAUTO before.
+      (when (== (.-Curfn name) nil)
+        (base/FatalfAt ^{:go/via [miniExpr miniNode]} (.Pos name) "name.Curfn = nil; want not nil"))
+
+
+      (when (.Addrtaken name)
+        (return nil)) ; conservatively assume it's reassigned with a different type indirectly
+
+
+      (when [(values _ ok) (aget seen name)] ok
+        (return (addr noType))) ; Already analyzed assignments to name, no need to do that twice.
+
+      (aset seen name (lit (struct)))
+
+      (when concreteTypeDebug
+        (base/Warn "concreteType1(%v): analyzing assignments to %v" nn name))
+
+
+      (let [^{:tag (* types/Type)} typ (zero (* types/Type))]
+        (range [_ v (.assignments s name)]
+          (let [^{:tag (* types/Type)} t (zero (* types/Type))]
+            (type-switch [v v]
+              (case [(* types/Type)]
+                (set! t v))
+              (case [ir/Node]
+                (set! t (concreteType1 s v seen))
+                (when (== t (addr noType))
+                  (continue))))
+
+
+            (when (== t nil)
+              (return nil)) ; unknown concrete type
+
+
+            ;; Methods are only declared on named types, and each named type
+            ;; is represented by a unique [*types.Type], thus pointer comparison
+            ;; is fine here.
+            ;;
+            ;; The only scenario where [types.IdenticalStrict] could help here is with
+            ;; unnamed struct types that embed another type (e.g. foo = struct { Impl }{}).
+            ;; However, such patterns are uncommon and not worth the additional complexity
+            ;; in the devirtualizer.
+            (when (and (!= typ nil) (!= typ t))
+              (return nil)) ; assigned with a different type
+
+
+            (set! typ t)))
+
+
+        (when (== typ nil)
+          ;; Variable either declared with zero value, or only assigned with nil.
+          (return (addr noType)))
+
+
+        ^{:line 334} typ))))
+
+
+
+
+
+
+
+
+
+
+
+
+(go/type assignment "assignment can be one of:\n- nil - assignment from an interface type.\n- *types.Type - assignment from a concrete type (non-interface).\n- ir.Node - assignment from an ir.Node.\n\nIn most cases assignment should be an [ir.Node], but in cases where we\ndo not follow the data-flow, we return either a concrete type (*types.Type) or a nil.\nFor example in range over a slice, if the slice elem is of an interface type, then we return\na nil, otherwise the elem's concrete type (We do so because we do not analyze assignment to the\nslice being ranged-over).\n" any)
+
+
+(go/type State "State holds precomputed state for use in [StaticCall].\n" (struct
+
+
+
+    ^{:line 354 :tag (map (* ir/Name) (slice assignment)) :doc "ifaceAssignments maps interface variables to all their assignments\ndefined inside functions stored in the analyzedFuncs set.\nNote: it does not include direct assignments to nil.\n"} ifaceAssignments
+
+
+
+    ^{:line 358 :tag (map (* ir/CallExpr) (slice ifaceAssignRef)) :doc "ifaceCallExprAssigns stores every [*ir.CallExpr], which has an interface\nresult, that is assigned to a variable.\n"} ifaceCallExprAssigns
+
+
+    ^{:line 361 :tag (map (* ir/Func) (struct)) :doc "analyzedFuncs is a set of Funcs that were analyzed for iface assignments.\n"} analyzedFuncs))
+
+
+(go/type ifaceAssignRef (struct
+    ^{:line 365 :tag (* ir/Name)} name ; ifaceAssignments[name]
+    ^{:line 366 :tag int} assignmentIndex ; ifaceAssignments[name][assignmentIndex]
+    ^{:line 367 :tag int} returnIndex)) ; (*ir.CallExpr).Result(returnIndex)
+
+
+
+^{:go/end 409} (go/method InlinedCall "InlinedCall updates the [State] to take into account a newly inlined call.\n" [^{:tag (* State)} s ^{:tag (* ir/Func)} fun ^{:tag (* ir/CallExpr)} origCall ^{:tag (* ir/InlinedCallExpr)} inlinedCall]
+  (when [(values _ ok) (aget (.-analyzedFuncs s) fun)] (not ok)
+    ;; Full analyze has not been yet executed for the provided function, so we can skip it for now.
+    ;; When no devirtualization happens in a function, it is unnecessary to analyze it.
+    (return))
+
+
+  ;; Analyze assignments in the newly inlined function.
+  (.analyze s ^{:go/via [miniExpr]} (.Init inlinedCall))
+  (.analyze s (.-Body inlinedCall))
+
+  (let [(values refs ok) (aget (.-ifaceCallExprAssigns s) origCall)]
+    (when (not ok)
+      (return))
+
+    (delete (.-ifaceCallExprAssigns s) origCall)
+
+    ;; Update assignments to reference the new ReturnVars of the inlined call.
+    (range [_ ref refs]
+      (let [vt (addr (aget (aget (.-ifaceAssignments s) (.-name ref)) (.-assignmentIndex ref)))]
+        (when (!= @vt nil)
+          (base/Fatalf "unexpected non-nil assignment"))
+
+        (when concreteTypeDebug
+          ^{:go/breaks [1]} (base/Warn
+            "InlinedCall(%v, %v): replacing interface node in (%v,%v) to %v (typ %v)"
+            ^{:line 397} origCall inlinedCall (.-name ref) (.-assignmentIndex ref)
+            (aget (.-ReturnVars inlinedCall) (.-returnIndex ref))
+            (.Type (aget (.-ReturnVars inlinedCall) (.-returnIndex ref)))))
+
+
+
+        ;; Update ifaceAssignments with an ir.Node from the inlined function’s ReturnVars.
+        ;; This may enable future devirtualization of calls that reference ref.name.
+        ;; We will get calls to [StaticCall] from the interleaved package,
+        ;; to try devirtualize such calls afterwards.
+        (set! @vt (aget (.-ReturnVars inlinedCall) (.-returnIndex ref)))))))
+
+
+
+
+^{:go/end 441} (go/method assignments "assignments returns all assignments to n.\n" ^{:tag (slice assignment)} [^{:tag (* State)} s ^{:tag (* ir/Name)} n]
+  (let [fun (.-Curfn n)]
+    (when (== fun nil)
+      (base/FatalfAt ^{:go/via [miniExpr miniNode]} (.Pos n) "n.Curfn = <nil>"))
+
+    (when (!= (.-Class n) ir/PAUTO)
+      (base/FatalfAt ^{:go/via [miniExpr miniNode]} (.Pos n) "n.Class = %v; want = PAUTO" (.-Class n)))
+
+
+    (when (not (.IsInterface ^{:go/via [miniExpr]} (.Type n)))
+      (base/FatalfAt ^{:go/via [miniExpr miniNode]} (.Pos n) "name passed to assignments is not of an interface type: %v" ^{:go/via [miniExpr]} (.Type n)))
+
+
+    ;; Analyze assignments in func, if not analyzed before.
+    (when [(values _ ok) (aget (.-analyzedFuncs s) fun)] (not ok)
+      (when concreteTypeDebug
+        (base/Warn "assignments(): analyzing assignments in %v func" fun))
+
+      (when (== (.-analyzedFuncs s) nil)
+        (set! (.-ifaceAssignments s) (make (map (* ir/Name) (slice assignment))))
+        (set! (.-ifaceCallExprAssigns s) (make (map (* ir/CallExpr) (slice ifaceAssignRef))))
+        (set! (.-analyzedFuncs s) (make (map (* ir/Func) (struct)))))
+
+      (aset (.-analyzedFuncs s) fun (lit (struct)))
+      (.analyze s ^{:go/via [miniNode]} (.Init fun))
+      (.analyze s (.-Body fun)))
+
+
+    (aget (.-ifaceAssignments s) n)))
+
+
+
+^{:go/end 614} (go/method analyze "analyze analyzes every assignment to interface variables in nodes, updating [State].\n" [^{:tag (* State)} s ^ir/Nodes nodes]
+  (let [assign ^{:go/end 490} (fn [^ir/Node name ^assignment assignment] :results [(* ir/Name) int]
+        (when (or (== name nil) (!= (.Op name) ir/ONAME) (ir/IsBlank name))
+          (return nil -1))
+
+
+        (let [(values n ok) (assert (* ir/Name) (ir/OuterValue name))]
+          (when (or (not ok) (== (.-Curfn n) nil))
+            (return nil -1))
+
+
+          ;; Do not track variables that are not of interface types.
+          ;; For devirtualization they are unnecessary, we will not even look them up.
+          (when (not (.IsInterface ^{:go/via [miniExpr]} (.Type n)))
+            (return nil -1))
+
+
+          (set! n (.Canonical n))
+          (when (!= ^{:go/via [miniExpr miniNode]} (.Op n) ir/ONAME)
+            (base/FatalfAt ^{:go/via [miniExpr miniNode]} (.Pos n) "n.Op = %v; want = ONAME" ^{:go/via [miniExpr miniNode]} (.Op n)))
+
+          (when (!= (.-Class n) ir/PAUTO)
+            (return nil -1))
+
+
+          (type-switch [a assignment]
+            (case [nil])
+            (case [(* types/Type)]
+              (when (and (!= a nil) (.IsInterface a))
+                (set! assignment nil))) ; non-concrete type
+
+            (case [ir/Node]
+              ;; nil assignment, we can safely ignore them, see [StaticCall].
+              (when (ir/IsNil a)
+                (return nil -1)))
+
+            (default
+              (base/Fatalf "unexpected type: %v" assignment)))
+
+
+          (when concreteTypeDebug
+            (base/Warn "analyze(): assignment found %v = %v" name assignment))
+
+
+          (aset (.-ifaceAssignments s) n (append (aget (.-ifaceAssignments s) n) assignment))
+          (return n (- (len (aget (.-ifaceAssignments s) n)) 1))))
+
+
+      ^{:line 492 :tag (func [^ir/Node n])} do (zero (func [^ir/Node n]))]
+    (set! do ^{:go/end 612} (fn [^ir/Node n]
+        (switch (.Op n)
+          (case [ir/OAS]
+            (let [n (assert (* ir/AssignStmt) n)]
+              (when [rhs (.-Y n)] (!= rhs nil)
+                (while true
+                  (when [(values r ok) (assert (* ir/ParenExpr) rhs)] ok
+                    (set! rhs (.-X r))
+                    (continue))
+
+                  (break))
+
+                (if [(values call ok) (assert (* ir/CallExpr) rhs)] (and ok (!= (.-Fun call) nil))
+                  (let [retTyp (.-Type (aget (.Results (.Type (.-Fun call))) 0))
+                      (values n idx) (assign (.-X n) retTyp)]
+                    (when (and (!= n nil) (.IsInterface retTyp))
+                      ;; We have a call expression, that returns an interface, store it for later evaluation.
+                      ;; In case this func gets inlined later, we will update the assignment (added before)
+                      ;; with a reference to ReturnVars, see [State.InlinedCall], which might allow for future devirtualizing of n.X.
+                      (aset (.-ifaceCallExprAssigns s) call (append (aget (.-ifaceCallExprAssigns s) call) (lit ifaceAssignRef n idx 0)))))
+
+
+                  (assign (.-X n) rhs)))))
+
+
+          (case [ir/OAS2]
+            (let [n (assert (* ir/AssignListStmt) n)]
+              (range [i p (.-Lhs n)]
+                (when (!= (aget (.-Rhs n) i) nil)
+                  (assign p (aget (.-Rhs n) i))))))
+
+
+          (case [ir/OAS2DOTTYPE]
+            (let [n (assert (* ir/AssignListStmt) n)]
+              (when (== (aget (.-Rhs n) 0) nil)
+                (base/FatalfAt ^{:go/via [miniStmt miniNode]} (.Pos n) "n.Rhs[0] == nil; n = %v" n))
+
+              (assign (aget (.-Lhs n) 0) (aget (.-Rhs n) 0))
+              (assign (aget (.-Lhs n) 1) nil))) ; boolean does not have methods to devirtualize
+          (case [ir/OAS2MAPR ir/OAS2RECV ir/OSELRECV2]
+            (let [n (assert (* ir/AssignListStmt) n)]
+              (when (== (aget (.-Rhs n) 0) nil)
+                (base/FatalfAt ^{:go/via [miniStmt miniNode]} (.Pos n) "n.Rhs[0] == nil; n = %v" n))
+
+              (assign (aget (.-Lhs n) 0) (.Type (aget (.-Rhs n) 0)))
+              (assign (aget (.-Lhs n) 1) nil))) ; boolean does not have methods to devirtualize
+          (case [ir/OAS2FUNC]
+            (let [n (assert (* ir/AssignListStmt) n)
+                ^{:line 541} rhs (aget (.-Rhs n) 0)]
+              (while true
+                (when [(values r ok) (assert (* ir/ParenExpr) rhs)] ok
+                  (set! rhs (.-X r))
+                  (continue))
+
+                (break))
+
+              (if [(values call ok) (assert (* ir/CallExpr) rhs)] ok
+                (range [i p (.-Lhs n)]
+                  (let [retTyp (.-Type (aget (.Results (.Type (.-Fun call))) i))
+                      (values n idx) (assign p retTyp)]
+                    (when (and (!= n nil) (.IsInterface retTyp))
+                      ;; We have a call expression, that returns an interface, store it for later evaluation.
+                      ;; In case this func gets inlined later, we will update the assignment (added before)
+                      ;; with a reference to ReturnVars, see [State.InlinedCall], which might allow for future devirtualizing of n.X.
+                      (aset (.-ifaceCallExprAssigns s) call (append (aget (.-ifaceCallExprAssigns s) call) (lit ifaceAssignRef n idx i))))))
+
+
+                (if [(values call ok) (assert (* ir/InlinedCallExpr) rhs)] ok
+                  (range [i p (.-Lhs n)]
+                    (assign p (aget (.-ReturnVars call) i)))
+
+
+                  (base/FatalfAt ^{:go/via [miniStmt miniNode]} (.Pos n) "unexpected type %T in OAS2FUNC Rhs[0]" call)))))
+
+          (case [ir/ORANGE]
+            (let [n (assert (* ir/RangeStmt) n)
+                ^{:line 569} xTyp (.Type (.-X n))]
+
+              ;; Range over an array pointer.
+              (when (and (.IsPtr xTyp) (.IsArray (.Elem xTyp)))
+                (set! xTyp (.Elem xTyp)))
+
+
+              (cond (or (.IsArray xTyp) (.IsSlice xTyp)) (do
+                  (assign (.-Key n) nil) ; integer does not have methods to devirtualize
+                  (assign (.-Value n) (.Elem xTyp)))
+                (.IsChan xTyp) (do
+                  (assign (.-Key n) (.Elem xTyp))
+                  (base/AssertfAt (== (.-Value n) nil) ^{:go/via [miniStmt miniNode]} (.Pos n) "n.Value != nil in range over chan"))
+                (.IsMap xTyp) (do
+                  (assign (.-Key n) (.Key xTyp))
+                  (assign (.-Value n) (.Elem xTyp)))
+                (or (.IsInteger xTyp) (.IsString xTyp)) (do
+                  ;; Range over int/string, results do not have methods, so nothing to devirtualize.
+                  (assign (.-Key n) nil)
+                  (assign (.-Value n) nil)) :else
+
+                ;; We will not reach here in case of a range-over-func, as it is
+                ;; rewritten to function calls in the noder package.
+                (base/FatalfAt ^{:go/via [miniStmt miniNode]} (.Pos n) "range over unexpected type %v" (.Type (.-X n))))))
+
+          (case [ir/OSWITCH]
+            (let [n (assert (* ir/SwitchStmt) n)]
+              (when [(values guard ok) (assert (* ir/TypeSwitchGuard) (.-Tag n))] ok
+                (range [_ v (.-Cases n)]
+                  (when (== (.-Var v) nil)
+                    (base/Assert (== (.-Tag guard) nil))
+                    (continue))
+
+                  (assign (.-Var v) (.-X guard))))))
+
+
+          (case [ir/OCLOSURE]
+            (let [n (assert (* ir/ClosureExpr) n)]
+              (when [(values _ ok) (aget (.-analyzedFuncs s) (.-Func n))] (not ok)
+                (aset (.-analyzedFuncs s) (.-Func n) (lit (struct)))
+                (ir/Visit (.-Func n) do)))))))
+
+
+
+    (ir/VisitList nodes do)))

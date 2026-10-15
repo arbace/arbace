@@ -1,0 +1,424 @@
+;; Copyright 2013 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.cmd.internal.obj) (go/file "pcln.go" :imports [
+
+
+    ^{:line 8} [goobj "cmd/internal/goobj"]
+    ^{:line 9} [objabi "cmd/internal/objabi"]
+    ^{:line 10} [binary "encoding/binary"]
+    ^{:line 11} [fmt "fmt"]
+    ^{:line 12} [log "log"]])
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 136} (go/func funcpctab "funcpctab writes to dst a pc-value table mapping the code in func to the values\nreturned by valfunc parameterized by arg. The invocation of valfunc to update the\ncurrent value is, for each p,\n\n\tsym = valfunc(func, p, 0, arg);\n\trecord sym.P as value at p->pc;\n\tsym = valfunc(func, p, 1, arg);\n\nwhere func is the function, val is the current value, p is the instruction being\nconsidered, and arg can be used to further parameterize valfunc.\n" ^{:tag (* LSym)} [^{:tag (* Link)} ctxt ^{:tag (* LSym)} func_ ^string desc ^{:tag (func [(* Link) (* LSym) int32 (* Prog) int32 any] [int32])} valfunc ^any arg]
+  (let [dbg (== desc (.-Debugpcln ctxt))
+      ^{:line 27} dst (lit (slice byte))
+      ^{:line 28} sym (addr ^{:go/breaks [2 4 6]} (lit LSym
+          :Type objabi/SRODATA
+          :Attribute (bit-or AttrContentAddressable AttrPcdata)
+          :Align 1))]
+
+
+    (when dbg
+      (.Logf ctxt "funcpctab %s [valfunc=%s]\n" (.-Name func_) desc))
+
+
+    (let [val (conv int32 -1)
+        ^{:line 39} oldval val
+        ^{:line 40} fn (.Func func_)]
+      (when (== (.-Text fn) nil)
+        ;; Return the empty symbol we've built so far.
+        (return sym))
+
+
+      (let [pc (.-Pc (.-Text fn))]
+
+        (when dbg
+          (.Logf ctxt "%6x %6d %v\n" (conv uint64 pc) val (.-Text fn)))
+
+
+        (let [buf (make (slice byte) binary/MaxVarintLen32)
+            ^{:line 53} started false]
+          (for [p (.-Text fn)] (!= p nil) (set! p (.-Link p))
+            ;; Update val. If it's not changing, keep going.
+            (set! val (valfunc ctxt func_ val p 0 arg))
+
+            (when (and (== val oldval) started)
+              (set! val (valfunc ctxt func_ val p 1 arg))
+              (when dbg
+                (.Logf ctxt "%6x %6s %v\n" (conv uint64 (.-Pc p)) "" p))
+
+              (continue))
+
+
+            ;; If the pc of the next instruction is the same as the
+            ;; pc of this instruction, this instruction is not a real
+            ;; instruction. Keep going, so that we only emit a delta
+            ;; for a true instruction boundary in the program.
+            (when (and (!= (.-Link p) nil) (== (.-Pc (.-Link p)) (.-Pc p)))
+              (set! val (valfunc ctxt func_ val p 1 arg))
+              (when dbg
+                (.Logf ctxt "%6x %6s %v\n" (conv uint64 (.-Pc p)) "" p))
+
+              (continue))
+
+
+            ;; The table is a sequence of (value, pc) pairs, where each
+            ;; pair states that the given value is in effect from the current position
+            ;; up to the given pc, which becomes the new current position.
+            ;; To generate the table as we scan over the program instructions,
+            ;; we emit a "(value" when pc == func->value, and then
+            ;; each time we observe a change in value we emit ", pc) (value".
+            ;; When the scan is over, we emit the closing ", pc)".
+            ;;
+            ;; The table is delta-encoded. The value deltas are signed and
+            ;; transmitted in zig-zag form, where a complement bit is placed in bit 0,
+            ;; and the pc deltas are unsigned. Both kinds of deltas are sent
+            ;; as variable-length little-endian base-128 integers,
+            ;; where the 0x80 bit indicates that the integer continues.
+
+            (when dbg
+              (.Logf ctxt "%6x %6d %v\n" (conv uint64 (.-Pc p)) val p))
+
+
+            (when started
+              (let [pcdelta (/ (- (.-Pc p) pc) (conv int64 ^{:go/via [Arch]} (.-MinLC (.-Arch ctxt))))
+                  ^{:line 98} n (binary/PutUvarint buf (conv uint64 pcdelta))]
+                (set! dst (append dst (spread (subslice buf _ n))))
+                (set! pc (.-Pc p))))
+
+
+            (let [delta (- val oldval)
+                ^{:line 104} n (binary/PutVarint buf (conv int64 delta))]
+              (set! dst (append dst (spread (subslice buf _ n))))
+              (set! oldval val)
+              (set! started true)
+              (set! val (valfunc ctxt func_ val p 1 arg))))
+
+
+          (when started
+            (when dbg
+              (.Logf ctxt "%6x done\n" (conv uint64 (+ (.-Pc (.-Text fn)) (.-Size func_)))))
+
+            (let [v (/ (- (.-Size func_) pc) (conv int64 ^{:go/via [Arch]} (.-MinLC (.-Arch ctxt))))]
+              (when (< v 0)
+                (.Diag ctxt "negative pc offset: %v" v))
+
+              (let [n (binary/PutUvarint buf (conv uint64 v))]
+                (set! dst (append dst (spread (subslice buf _ n))))
+                ;; add terminating varint-encoded 0, which is just 0
+                (set! dst (append dst 0)))))
+
+
+          (when dbg
+            (.Logf ctxt "wrote %d bytes to %p\n" (len dst) dst)
+            (range [_ p dst]
+              (.Logf ctxt " %02x" p))
+
+            (.Logf ctxt "\n"))
+
+
+          (set! (.-Size sym) (conv int64 (len dst)))
+          (set! (.-P sym) dst)
+          ^{:line 135} sym)))))
+
+
+
+
+
+
+^{:go/end 153} (go/func pctofileline "pctofileline computes either the file number (arg == 0)\nor the line number (arg == 1) to use at p.\nBecause p.Pos applies to p, phase == 0 (before p)\ntakes care of the update.\n" ^int32 [^{:tag (* Link)} ctxt ^{:tag (* LSym)} sym ^int32 oldval ^{:tag (* Prog)} p ^int32 phase ^any arg]
+  (when (or (== (.-As p) ATEXT) (== (.-As p) ANOP) (== ^{:go/via [lico]} (.Line (.-Pos p)) 0) (== phase 1))
+    (return oldval))
+
+  (let [(values f l) (.getFileIndexAndLine ctxt (.-Pos p))]
+    (when (== arg nil)
+      (return l))
+
+    (let [pcln (assert (* Pcln) arg)]
+      (aset (.-UsedFiles pcln) (conv goobj/CUFileIndex f) (lit (struct)))
+      (conv int32 f))))
+
+
+
+
+(go/type pcinlineState "pcinlineState holds the state used to create a function's inlining\ntree and the PC-value table that maps PCs to nodes in that tree.\n" (struct
+    ^{:line 158 :tag (map int int)} globalToLocal
+    ^{:line 159 :tag InlTree} localTree))
+
+
+
+
+^{:go/end 184} (go/method addBranch "addBranch adds a branch from the global inlining tree in ctxt to\nthe function's local inlining tree, returning the index in the local tree.\n" ^int [^{:tag (* pcinlineState)} s ^{:tag (* Link)} ctxt ^int globalIndex]
+  (when (< globalIndex 0)
+    (return -1))
+
+
+  (let [(values localIndex ok) (aget (.-globalToLocal s) globalIndex)]
+    (when ok
+      (return localIndex))
+
+
+    ;; Since tracebacks don't include column information, we could
+    ;; use one node for multiple calls of the same function on the
+    ;; same line (e.g., f(x) + f(y)). For now, we use one node for
+    ;; each inlined call.
+    (let [call (aget (.-nodes (.-InlTree ctxt)) globalIndex)]
+      (set! (.-Parent call) (.addBranch s ctxt (.-Parent call)))
+      (set! localIndex (len (.-nodes (.-localTree s))))
+      (set! (.-nodes (.-localTree s)) (append (.-nodes (.-localTree s)) call))
+      (aset (.-globalToLocal s) globalIndex localIndex)
+      ^{:line 183} localIndex)))
+
+
+^{:go/end 197} (go/method setParentPC [^{:tag (* pcinlineState)} s ^{:tag (* Link)} ctxt ^int globalIndex ^int32 pc]
+  (let [(values localIndex ok) (aget (.-globalToLocal s) globalIndex)]
+    (when (not ok)
+      ;; We know where to unwind to when we need to unwind a body identified
+      ;; by globalIndex. But there may be no instructions generated by that
+      ;; body (it's empty, or its instructions were CSEd with other things, etc.).
+      ;; In that case, we don't need an unwind entry.
+      ;; TODO: is this really right? Seems to happen a whole lot...
+      (return))
+
+    (.setParentPC (.-localTree s) localIndex pc)))
+
+
+
+
+
+^{:go/end 222} (go/method pctoinline "pctoinline computes the index into the local inlining tree to use at p.\nIf p is not the result of inlining, pctoinline returns -1. Because p.Pos\napplies to p, phase == 0 (before p) takes care of the update.\n" ^int32 [^{:tag (* pcinlineState)} s ^{:tag (* Link)} ctxt ^{:tag (* LSym)} sym ^int32 oldval ^{:tag (* Prog)} p ^int32 phase ^any arg]
+  (when (== phase 1)
+    (return oldval))
+
+
+  (let [posBase (.Base (.Pos (.-PosTable ctxt) (.-Pos p)))]
+    (when (== posBase nil)
+      (return -1))
+
+
+    (let [globalIndex (.InliningIndex posBase)]
+      (when (< globalIndex 0)
+        (return -1))
+
+
+      (when (== (.-globalToLocal s) nil)
+        (set! (.-globalToLocal s) (make (map int int))))
+
+
+      (conv int32 (.addBranch s ctxt globalIndex)))))
+
+
+
+
+
+
+^{:go/end 242} (go/func pctospadj "pctospadj computes the sp adjustment in effect.\nIt is oldval plus any adjustment made by p itself.\nThe adjustment by p takes effect only after p, so we\napply the change during phase == 1.\n" ^int32 [^{:tag (* Link)} ctxt ^{:tag (* LSym)} sym ^int32 oldval ^{:tag (* Prog)} p ^int32 phase ^any arg]
+  (when (== oldval -1) ; starting
+    (set! oldval 0))
+
+  (when (== phase 0)
+    (return oldval))
+
+  (when (or (< (+ oldval (.-Spadj p)) -10000) (> (+ oldval (.-Spadj p)) 1100000000))
+    (.Diag ctxt "overflow in spadj: %d + %d = %d" oldval (.-Spadj p) (+ oldval (.-Spadj p)))
+    ((.-DiagFlush ctxt))
+    (log/Fatalf "bad code"))
+
+
+  (+ oldval (.-Spadj p)))
+
+
+
+
+
+
+
+^{:go/end 260} (go/func pctopcdata "pctopcdata computes the pcdata value in effect at p.\nA PCDATA instruction sets the value in effect at future\nnon-PCDATA instructions.\nSince PCDATA instructions have no width in the final code,\nit does not matter which phase we use for the update.\n" ^int32 [^{:tag (* Link)} ctxt ^{:tag (* LSym)} sym ^int32 oldval ^{:tag (* Prog)} p ^int32 phase ^any arg]
+  (when (or (== phase 0) (!= (.-As p) APCDATA) (!= (.-Offset (.-From p)) (conv int64 (assert uint32 arg))))
+    (return oldval))
+
+  (when (!= (conv int64 (conv int32 (.-Offset (.-To p)))) (.-Offset (.-To p)))
+    (.Diag ctxt "overflow in PCDATA instruction: %v" p)
+    ((.-DiagFlush ctxt))
+    (log/Fatalf "bad code"))
+
+
+  (conv int32 (.-Offset (.-To p))))
+
+
+^{:go/end 359} (go/func linkpcln [^{:tag (* Link)} ctxt ^{:tag (* LSym)} cursym]
+  (let [pcln (addr (.-Pcln (.Func cursym)))]
+    (set! (.-UsedFiles pcln) (make (map goobj/CUFileIndex (struct))))
+
+    (let [npcdata 0
+        ^{:line 267} nfuncdata 0]
+      (for [p (.-Text (.Func cursym))] (!= p nil) (set! p (.-Link p))
+        ;; Find the highest ID of any used PCDATA table. This ignores PCDATA table
+        ;; that consist entirely of "-1", since that's the assumed default value.
+        ;;   From.Offset is table ID
+        ;;   To.Offset is data
+        (when (and (== (.-As p) APCDATA) (>= (.-Offset (.-From p)) (conv int64 npcdata)) (!= (.-Offset (.-To p)) -1)) ; ignore -1 as we start at -1, if we only see -1, nothing changed
+          (set! npcdata (conv int (+ (.-Offset (.-From p)) 1))))
+
+        ;; Find the highest ID of any FUNCDATA table.
+        ;;   From.Offset is table ID
+        (when (and (== (.-As p) AFUNCDATA) (>= (.-Offset (.-From p)) (conv int64 nfuncdata)))
+          (set! nfuncdata (conv int (+ (.-Offset (.-From p)) 1)))))
+
+
+
+      (set! (.-Pcdata pcln) (make (slice (* LSym)) npcdata))
+      (set! (.-Funcdata pcln) (make (slice (* LSym)) nfuncdata))
+
+      (set! (.-Pcsp pcln) (funcpctab ctxt cursym "pctospadj" pctospadj nil))
+      (set! (.-Pcfile pcln) (funcpctab ctxt cursym "pctofile" pctofileline pcln))
+      (set! (.-Pcline pcln) (funcpctab ctxt cursym "pctoline" pctofileline nil))
+
+      ;; Check that all the Progs used as inline markers are still reachable.
+      ;; See issue #40473.
+      (let [fn (.Func cursym)
+          ^{:line 293} inlMarkProgs (make (map (* Prog) (struct)) (len (.-InlMarks fn)))]
+        (range [_ inlMark (.-InlMarks fn)]
+          (aset inlMarkProgs (.-p inlMark) (lit (struct))))
+
+        (for [p (.-Text fn)] (!= p nil) (set! p (.-Link p))
+          (delete inlMarkProgs p))
+
+        (when (> (len inlMarkProgs) 0)
+          (.Diag ctxt "one or more instructions used as inline markers are no longer reachable"))
+
+
+        (let [pcinlineState (new pcinlineState)]
+          (set! (.-Pcinline pcln) (funcpctab ctxt cursym "pctoinline" (.-pctoinline pcinlineState) nil))
+          (range [_ inlMark (.-InlMarks fn)]
+            (.setParentPC pcinlineState ctxt (conv int (.-id inlMark)) (conv int32 (.-Pc (.-p inlMark)))))
+
+          (set! (.-InlTree pcln) (.-localTree pcinlineState))
+          (when (and (== (.-Debugpcln ctxt) "pctoinline") (> (len (.-nodes (.-InlTree pcln))) 0))
+            (.Logf ctxt "-- inlining tree for %s:\n" cursym)
+            (dumpInlTree ctxt (.-InlTree pcln))
+            (.Logf ctxt "--\n"))
+
+
+          ;; tabulate which pc and func data we have.
+          (let [havepc (make (slice uint32) (/ (+ npcdata 31) 32))
+              ^{:line 318} havefunc (make (slice uint32) (/ (+ nfuncdata 31) 32))]
+            (for [p (.-Text fn)] (!= p nil) (set! p (.-Link p))
+              (when (== (.-As p) AFUNCDATA)
+                (when (!= (bit-and (>> (aget havefunc (/ (.-Offset (.-From p)) 32)) (conv uint64 (% (.-Offset (.-From p)) 32))) 1) 0)
+                  (.Diag ctxt "multiple definitions for FUNCDATA $%d" (.-Offset (.-From p))))
+
+                (set! (aget havefunc (/ (.-Offset (.-From p)) 32)) bit-or ^uint32 (<< 1 (conv uint64 (% (.-Offset (.-From p)) 32)))))
+
+
+              (when (and (== (.-As p) APCDATA) (!= (.-Offset (.-To p)) -1))
+                (set! (aget havepc (/ (.-Offset (.-From p)) 32)) bit-or ^uint32 (<< 1 (conv uint64 (% (.-Offset (.-From p)) 32))))))
+
+
+
+            ;; pcdata.
+            (for [i 0] (< i npcdata) (inc! i)
+              (if (== (bit-and (>> (aget havepc (/ i 32)) (conv uint (% i 32))) 1) 0)
+                ;; use an empty symbol.
+                (aset (.-Pcdata pcln) i (addr ^{:go/breaks [2 4 6]} (lit LSym
+                      :Type objabi/SRODATA
+                      :Attribute (bit-or AttrContentAddressable AttrPcdata)
+                      :Align 1)))
+
+
+                (aset (.-Pcdata pcln) i (funcpctab ctxt cursym "pctopcdata" pctopcdata (conv any (conv uint32 i))))))
+
+
+
+            ;; funcdata
+            (when (> nfuncdata 0)
+              (for [p (.-Text fn)] (!= p nil) (set! p (.-Link p))
+                (when (!= (.-As p) AFUNCDATA)
+                  (continue))
+
+                (let [i (conv int (.-Offset (.-From p)))]
+                  (when (or (!= (.-Type (.-To p)) TYPE_MEM) (!= (.-Offset (.-To p)) 0))
+                    (panic (fmt/Sprintf "bad funcdata: %v" p)))
+
+                  (aset (.-Funcdata pcln) i (.-Sym (.-To p))))))))))))
+
+
+
+
+
+(go/type PCIter "PCIter iterates over encoded pcdata tables.\n" (struct
+    ^{:line 363 :tag (slice byte)} p
+    ^{:line 364 :tag uint32} PC
+    ^{:line 365 :tag uint32} NextPC
+    ^{:line 366 :tag uint32} PCScale
+    ^{:line 367 :tag int32} Value
+    ^{:line 368 :tag bool} start
+    ^{:line 369 :tag bool} Done))
+
+
+
+^{:go/end 377} (go/func NewPCIter "NewPCIter creates a PCIter with a scale factor for the PC step size.\n" ^{:tag (* PCIter)} [^uint32 pcScale]
+  (let [it (new PCIter)]
+    (set! (.-PCScale it) pcScale)
+    ^{:line 376} it))
+
+
+
+^{:go/end 413} (go/method Next "Next advances it to the Next pc.\n" [^{:tag (* PCIter)} it]
+  (set! (.-PC it) (.-NextPC it))
+  (when (.-Done it)
+    (return))
+
+  (when (== (len (.-p it)) 0)
+    (set! (.-Done it) true)
+    (return))
+
+
+  ;; Value delta
+  (let [(values val n) (binary/Varint (.-p it))]
+    (when (<= n 0)
+      (log/Fatalf "bad Value varint in pciterNext: read %v" n))
+
+    (set! (.-p it) (subslice (.-p it) n))
+
+    (when (and (== val 0) (not (.-start it)))
+      (set! (.-Done it) true)
+      (return))
+
+
+    (set! (.-start it) false)
+    (set! (.-Value it) + (conv int32 val))
+
+    ;; pc delta
+    (let [(values pc ^:assign n) (binary/Uvarint (.-p it))]
+      (when (<= n 0)
+        (log/Fatalf "bad pc varint in pciterNext: read %v" n))
+
+      (set! (.-p it) (subslice (.-p it) n))
+
+      (set! (.-NextPC it) (+ (.-PC it) (* (conv uint32 pc) (.-PCScale it)))))))
+
+
+
+
+^{:go/end 425} (go/method Init "init prepares it to iterate over p,\nand advances it to the first pc.\n" [^{:tag (* PCIter)} it ^{:tag (slice byte)} p]
+  (set! (.-p it) p)
+  (set! (.-PC it) 0)
+  (set! (.-NextPC it) 0)
+  (set! (.-Value it) -1)
+  (set! (.-start it) true)
+  (set! (.-Done it) false)
+  (.Next it))

@@ -1,0 +1,397 @@
+;; Copyright 2018 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.cmd.compile.internal.escape) (go/file "solve.go" :imports [
+
+
+    ^{:line 8} [base "cmd/compile/internal/base"]
+    ^{:line 9} [ir "cmd/compile/internal/ir"]
+    ^{:line 10} [logopt "cmd/compile/internal/logopt"]
+    ^{:line 11} [src "cmd/internal/src"]
+    ^{:line 12} [fmt "fmt"]
+    ^{:line 13} [bits "math/bits"]
+    ^{:line 14} [strings "strings"]])
+
+
+
+
+^{:go/end 66} (go/method walkAll "walkAll computes the minimal dereferences between all pairs of\nlocations.\n" [^{:tag (* batch)} b]
+  ;; We use a work queue to keep track of locations that we need
+  ;; to visit, and repeatedly walk until we reach a fixed point.
+  ;;
+  ;; We walk once from each location (including the heap), and
+  ;; then re-enqueue each location on its transition from
+  ;; !persists->persists and !escapes->escapes, which can each
+  ;; happen at most once. So we take Θ(len(e.allLocs)) walks.
+
+  ;; Queue of locations to walk. Has enough room for b.allLocs
+  ;; plus b.heapLoc, b.mutatorLoc, b.calleeLoc.
+  (let [todo (newQueue (+ (len (.-allLocs b)) 3))
+
+      ^{:line 32} enqueue ^{:go/end 44} (fn [^{:tag (* location)} loc]
+        (when (not (.-queuedWalkAll loc))
+          (set! (.-queuedWalkAll loc) true)
+          (if (.hasAttr loc attrEscapes)
+            ;; Favor locations that escape to the heap,
+            ;; which in some cases allows attrEscape to
+            ;; propagate faster.
+            (.pushFront todo loc)
+
+            (.pushBack todo loc))))]
+
+
+
+
+    (range [_ loc (.-allLocs b)]
+      (.pushFront todo loc)
+      ;; TODO(thepudds): clean up setting queuedWalkAll.
+      (set! (.-queuedWalkAll loc) true))
+
+    (.pushFront todo (addr (.-mutatorLoc b)))
+    (.pushFront todo (addr (.-calleeLoc b)))
+    (.pushFront todo (addr (.-heapLoc b)))
+
+    (set! (.-queuedWalkAll (.-mutatorLoc b)) true)
+    (set! (.-queuedWalkAll (.-calleeLoc b)) true)
+    (set! (.-queuedWalkAll (.-heapLoc b)) true)
+
+    (let [^uint32 walkgen (zero uint32)]
+      (while (> (.len todo) 0)
+        (let [root (.popFront todo)]
+          (set! (.-queuedWalkAll root) false)
+          (inc! walkgen)
+          (.walkOne b root walkgen enqueue))))))
+
+
+
+
+
+^{:go/end 197} (go/method walkOne "walkOne computes the minimal number of dereferences from root to\nall other locations.\n" [^{:tag (* batch)} b ^{:tag (* location)} root ^uint32 walkgen ^{:tag (func [(* location)])} enqueue]
+  ;; The data flow graph has negative edges (from addressing
+  ;; operations), so we use the Bellman-Ford algorithm. However,
+  ;; we don't have to worry about infinite negative cycles since
+  ;; we bound intermediate dereference counts to 0.
+
+  (set! (.-walkgen root) walkgen)
+  (set! (.-derefs root) 0)
+  (set! (.-dst root) nil)
+
+  (when (.hasAttr root attrCalls)
+    (when [(values clo ok) (assert (* ir/ClosureExpr) (.-n root))] ok
+      (when [fn (.-Func clo)] (and (.inMutualBatch b (.-Nname fn)) (not (.ClosureResultsLost fn)))
+        (.SetClosureResultsLost fn true)
+
+        ;; Re-flow from the closure's results, now that we're aware
+        ;; we lost track of them.
+        (range [_ result (.Results (.Type fn))]
+          (enqueue (.oldLoc b (assert (* ir/Name) (.-Nname result))))))))
+
+
+
+
+
+  (let [todo (newQueue 1)]
+    (.pushFront todo root)
+
+    (while (> (.len todo) 0)
+      (let [l (.popFront todo)]
+        (set! (.-queuedWalkOne l) 0) ; no longer queued for walkOne
+
+        (let [derefs (.-derefs l)
+            ^{:line 102 :tag locAttr} newAttrs (zero locAttr)
+
+            ;; If l.derefs < 0, then l's address flows to root.
+            ^{:line 105} addressOf (< derefs 0)]
+          (when addressOf
+            ;; For a flow path like "root = &l; l = x",
+            ;; l's address flows to root, but x's does
+            ;; not. We recognize this by lower bounding
+            ;; derefs at 0.
+            (set! derefs 0)
+
+            ;; If l's address flows somewhere that
+            ;; outlives it, then l needs to be heap
+            ;; allocated.
+            (cond (.outlives b root l) (do
+                (when (and (not (.hasAttr l attrEscapes)) ^:go/paren (or (logopt/Enabled) (>= (.-LowerM base/Flag) 2)))
+                  (when (>= (.-LowerM base/Flag) 2)
+                    (fmt/Printf "%s: %v escapes to heap in %v:\n" (base/FmtPos (.Pos (.-n l))) (.-n l) (ir/FuncName (.-curfn l))))
+
+                  (let [explanation (.explainPath b root l)]
+                    (when (logopt/Enabled)
+                      (let [^{:tag (* ir/Func)} e_curfn (zero (* ir/Func))] ; TODO(mdempsky): Fix.
+                        (logopt/LogOpt (.Pos (.-n l)) "escape" "escape" (ir/FuncName e_curfn) (fmt/Sprintf "%v escapes to heap" (.-n l)) explanation)))))
+
+
+                (set! newAttrs bit-or (bit-or attrEscapes attrPersists attrMutates attrCalls)))
+
+              ;; If l's address flows to a persistent location, then l needs
+              ;; to persist too.
+              (.hasAttr root attrPersists)
+              (set! newAttrs bit-or attrPersists)))
+
+
+
+          (when (== derefs 0)
+            (set! newAttrs bit-or (bit-and (.-attrs root) (bit-or attrMutates attrCalls))))
+
+
+          ;; l's value flows to root. If l is a function
+          ;; parameter and root is the heap or a
+          ;; corresponding result parameter, then record
+          ;; that value flow for tagging the function
+          ;; later.
+          (when (.-param l)
+            (when (.outlives b root l)
+              (when (and (not (.hasAttr l attrEscapes)) ^:go/paren (or (logopt/Enabled) (>= (.-LowerM base/Flag) 2)))
+                (when (>= (.-LowerM base/Flag) 2)
+                  (fmt/Printf "%s: parameter %v leaks to %s for %v with derefs=%d:\n" (base/FmtPos (.Pos (.-n l))) (.-n l) (.explainLoc b root) (ir/FuncName (.-curfn l)) derefs))
+
+                (let [explanation (.explainPath b root l)]
+                  (when (logopt/Enabled)
+                    (let [^{:tag (* ir/Func)} e_curfn (zero (* ir/Func))] ; TODO(mdempsky): Fix.
+                      (logopt/LogOpt (.Pos (.-n l)) "leak" "escape" (ir/FuncName e_curfn)
+                        (fmt/Sprintf "parameter %v leaks to %s with derefs=%d" (.-n l) (.explainLoc b root) derefs) explanation)))))
+
+
+              (.leakTo l root derefs))
+
+            (when (.hasAttr root attrMutates)
+              (.AddMutator (.-paramEsc l) derefs))
+
+            (when (.hasAttr root attrCalls)
+              (.AddCallee (.-paramEsc l) derefs)))
+
+
+
+          (when (!= (bit-and-not newAttrs (.-attrs l)) 0)
+            (set! (.-attrs l) bit-or newAttrs)
+            (enqueue l)
+            (when (!= (bit-and (.-attrs l) attrEscapes) 0)
+              (continue)))
+
+
+
+          (range [i edge (.-edges l)]
+            (when (.hasAttr (.-src edge) attrEscapes)
+              (continue))
+
+            (let [d (+ derefs (.-derefs edge))]
+              (when (or (!= (.-walkgen (.-src edge)) walkgen) (> (.-derefs (.-src edge)) d))
+                (set! (.-walkgen (.-src edge)) walkgen)
+                (set! (.-derefs (.-src edge)) d)
+                (set! (.-dst (.-src edge)) l)
+                (set! (.-dstEdgeIdx (.-src edge)) i)
+                ;; Check if already queued in todo.
+                (when (!= (.-queuedWalkOne (.-src edge)) walkgen)
+                  (set! (.-queuedWalkOne (.-src edge)) walkgen) ; Mark queued for this walkgen.
+
+                  ;; Place at the back to possibly give time for
+                  ;; other possible attribute changes to src.
+                  (.pushBack todo (.-src edge)))))))))))
+
+
+
+
+
+
+
+^{:go/end 228} (go/method explainPath "explainPath prints an explanation of how src flows to the walk root.\n" ^{:tag (slice (* logopt/LoggedOpt))} [^{:tag (* batch)} b ^{:tag (* location)} root ^{:tag (* location)} src]
+  (let [visited (make (map (* location) bool))
+      ^{:line 202} pos (base/FmtPos (.Pos (.-n src)))
+      ^{:line 203 :tag (slice (* logopt/LoggedOpt))} explanation (zero (slice (* logopt/LoggedOpt)))]
+    (while true
+      ;; Prevent infinite loop.
+      (when (aget visited src)
+        (when (>= (.-LowerM base/Flag) 2)
+          (fmt/Printf "%s:   warning: truncated explanation due to assignment cycle; see golang.org/issue/35518\n" pos))
+
+        (break))
+
+      (aset visited src true)
+      (let [dst (.-dst src)
+          ^{:line 214} edge (addr (aget (.-edges dst) (.-dstEdgeIdx src)))]
+        (when (!= (.-src edge) src)
+          (base/Fatalf "path inconsistency: %v != %v" (.-src edge) src))
+
+
+        (set! explanation (.explainFlow b pos dst src (.-derefs edge) (.-notes edge) explanation))
+
+        (when (== dst root)
+          (break))
+
+        (set! src dst)))
+
+
+    ^{:line 227} explanation))
+
+
+^{:go/end 264} (go/method explainFlow ^{:tag (slice (* logopt/LoggedOpt))} [^{:tag (* batch)} b ^string pos ^{:tag (* location)} dst ^{:tag (* location)} srcloc ^int derefs ^{:tag (* note)} notes ^{:tag (slice (* logopt/LoggedOpt))} explanation]
+  (let [ops "&"]
+    (when (>= derefs 0)
+      (set! ops (strings/Repeat "*" derefs)))
+
+    (let [print (>= (.-LowerM base/Flag) 2)
+
+        ^{:line 237} flow (fmt/Sprintf "   flow: %s ← %s%v:" (.explainLoc b dst) ops (.explainLoc b srcloc))]
+      (when print
+        (fmt/Printf "%s:%s\n" pos flow))
+
+      (when (logopt/Enabled)
+        (let [^src/XPos epos (zero src/XPos)]
+          (cond (!= notes nil)
+            (set! epos (.Pos (.-where notes)))
+            (and (!= srcloc nil) (!= (.-n srcloc) nil))
+            (set! epos (.Pos (.-n srcloc))))
+
+          (let [^{:tag (* ir/Func)} e_curfn (zero (* ir/Func))] ; TODO(mdempsky): Fix.
+            (set! explanation (append explanation (logopt/NewLoggedOpt epos epos "escflow" "escape" (ir/FuncName e_curfn) flow))))))
+
+
+      (for [note notes] (!= note nil) (set! note (.-next note))
+        (when print
+          (fmt/Printf "%s:     from %v (%v) at %s\n" pos (.-where note) (.-why note) (base/FmtPos (.Pos (.-where note)))))
+
+        (when (logopt/Enabled)
+          (let [^{:tag (* ir/Func)} e_curfn (zero (* ir/Func)) ; TODO(mdempsky): Fix.
+              ^{:line 258} notePos (.Pos (.-where note))]
+            (set! explanation (append explanation (logopt/NewLoggedOpt notePos notePos "escflow" "escape" (ir/FuncName e_curfn)
+                  (fmt/Sprintf "     from %v (%v)" (.-where note) (.-why note))))))))
+
+
+      ^{:line 263} explanation)))
+
+
+^{:go/end 278} (go/method explainLoc ^string [^{:tag (* batch)} b ^{:tag (* location)} l]
+  (when (== l (addr (.-heapLoc b)))
+    (return "{heap}"))
+
+  (when (== (.-n l) nil)
+    ;; TODO(mdempsky): Omit entirely.
+    (return "{temp}"))
+
+  (when (== (.Op (.-n l)) ir/ONAME)
+    (return (fmt/Sprintf "%v" (.-n l))))
+
+  (fmt/Sprintf "{storage for %v}" (.-n l)))
+
+
+
+
+^{:go/breaks [[9 334]] :go/end 335} (go/method outlives "outlives reports whether values stored in l may survive beyond\nother's lifetime if stack allocated.\n" ^bool [^{:tag (* batch)} b ^{:tag (* location)} l ^{:tag (* location)} other]
+  ;; The heap outlives everything.
+  (when (.hasAttr l attrEscapes)
+    (return true))
+
+
+  ;; Pseudo-locations that don't really exist.
+  (when (or (== l (addr (.-mutatorLoc b))) (== l (addr (.-calleeLoc b))))
+    (return false))
+
+
+  ;; We don't know what callers do with returned values, so
+  ;; pessimistically we need to assume they flow to the heap and
+  ;; outlive everything too.
+  (when (.-paramOut l)
+    ;; Exception: Closures can return locations allocated outside of
+    ;; them without forcing them to the heap, if we can statically
+    ;; identify all call sites. For example:
+    ;;
+    ;;	var u int  // okay to stack allocate
+    ;;	fn := func() *int { return &u }()
+    ;;	*fn() = 42
+    (when (and (ir/ContainsClosure (.-curfn other) (.-curfn l)) (not (.ClosureResultsLost (.-curfn l))))
+      (return false))
+
+
+    (return true))
+
+
+  ;; If l and other are within the same function, then l
+  ;; outlives other if it was declared outside other's loop
+  ;; scope. For example:
+  ;;
+  ;;	var l *int
+  ;;	for {
+  ;;		l = new(int) // must heap allocate: outlives for loop
+  ;;	}
+  (when (and (== (.-curfn l) (.-curfn other)) (< (.-loopDepth l) (.-loopDepth other)))
+    (return true))
+
+
+  ;; If other is declared within a child closure of where l is
+  ;; declared, then l outlives it. For example:
+  ;;
+  ;;	var l *int
+  ;;	func() {
+  ;;		l = new(int) // must heap allocate: outlives call frame (if not inlined)
+  ;;	}()
+  (when (ir/ContainsClosure (.-curfn l) (.-curfn other))
+    (return true))
+
+
+  false)
+
+
+
+
+
+(go/type queue "queue implements a queue of locations for use in WalkAll and WalkOne.\nIt supports pushing to front & back, and popping from front.\nTODO(thepudds): does cmd/compile have a deque or similar somewhere?\n" (struct
+    ^{:line 341 :tag (slice (* location))} locs
+    ^{:line 342 :tag int} head ; index of front element
+    ^{:line 343 :tag int} tail ; next back element
+    ^{:line 344 :tag int} elems))
+
+
+^{:go/end 351} (go/func newQueue ^{:tag (* queue)} [^int capacity]
+  (set! capacity (max capacity 2))
+  (set! capacity ^int (<< 1 (bits/Len64 (conv uint64 (- capacity 1))))) ; round up to a power of 2
+  (addr (lit queue :locs (make (slice (* location)) capacity))))
+
+
+
+^{:go/end 361} (go/method pushFront "pushFront adds an element to the front of the queue.\n" [^{:tag (* queue)} q ^{:tag (* location)} loc]
+  (when (== (.-elems q) (len (.-locs q)))
+    (.grow q))
+
+  (set! (.-head q) (.wrap q (- (.-head q) 1)))
+  (aset (.-locs q) (.-head q) loc)
+  (inc! (.-elems q)))
+
+
+
+^{:go/end 371} (go/method pushBack "pushBack adds an element to the back of the queue.\n" [^{:tag (* queue)} q ^{:tag (* location)} loc]
+  (when (== (.-elems q) (len (.-locs q)))
+    (.grow q))
+
+  (aset (.-locs q) (.-tail q) loc)
+  (set! (.-tail q) (.wrap q (+ (.-tail q) 1)))
+  (inc! (.-elems q)))
+
+
+
+^{:go/end 382} (go/method popFront "popFront removes the front of the queue.\n" ^{:tag (* location)} [^{:tag (* queue)} q]
+  (when (== (.-elems q) 0)
+    (return nil))
+
+  (let [loc (aget (.-locs q) (.-head q))]
+    (set! (.-head q) (.wrap q (+ (.-head q) 1)))
+    (dec! (.-elems q))
+    ^{:line 381} loc))
+
+
+
+^{:go/end 394} (go/method grow "grow doubles the capacity.\n" [^{:tag (* queue)} q]
+  (let [newLocs (make (slice (* location)) (* (len (.-locs q)) 2))]
+    (range [i (.-elems q)]
+      ;; Copy over our elements in order.
+      (aset newLocs i (aget (.-locs q) (.wrap q (+ (.-head q) i)))))
+
+    (set! (.-locs q) newLocs)
+    (set! (.-head q) 0)
+    (set! (.-tail q) (.-elems q))))
+
+
+^{:go/end 396} (go/method len ^int [^{:tag (* queue)} q] (.-elems q))
+^{:go/end 397} (go/method wrap ^int [^{:tag (* queue)} q ^int i] (bit-and i (- (len (.-locs q)) 1)))

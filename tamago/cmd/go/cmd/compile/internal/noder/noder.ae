@@ -1,0 +1,479 @@
+;; Copyright 2016 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.cmd.compile.internal.noder) (go/file "noder.go" :imports [
+
+
+    ^{:line 8} [errors "errors"]
+    ^{:line 9} [fmt "fmt"]
+    ^{:line 10} [buildcfg "internal/buildcfg"]
+    ^{:line 11} [os "os"]
+    ^{:line 12} [filepath "path/filepath"]
+    ^{:line 13} [runtime "runtime"]
+    ^{:line 14} [strconv "strconv"]
+    ^{:line 15} [strings "strings"]
+    ^{:line 16} [unicode "unicode"]
+    ^{:line 17} [utf8 "unicode/utf8"]
+
+    ^{:line 19} [base "cmd/compile/internal/base"]
+    ^{:line 20} [ir "cmd/compile/internal/ir"]
+    ^{:line 21} [syntax "cmd/compile/internal/syntax"]
+    ^{:line 22} [typecheck "cmd/compile/internal/typecheck"]
+    ^{:line 23} [types "cmd/compile/internal/types"]
+    ^{:line 24} [objabi "cmd/internal/objabi"]])
+
+
+^{:go/end 77} (go/func LoadPackage [^{:tag (slice string)} filenames]
+  (.Start base/Timer "fe" "parse")
+
+  ;; Limit the number of simultaneously open files.
+  (let [sem (make (chan (struct)) (+ (runtime/GOMAXPROCS 0) 10))
+
+      ^{:line 33} noders (make (slice (* noder)) (len filenames))]
+    (range [i noders]
+      (let [p ^{:go/breaks [2]} (lit noder
+            :err (make (chan syntax/Error)))]
+
+        (aset noders i (addr p))))
+
+
+    ;; Move the entire syntax processing logic into a separate goroutine to avoid blocking on the "sem".
+    (go (^{:go/end 61} (fn []
+          (range [i filename filenames]
+            (let [p (aget noders i)]
+              (>! sem (lit (struct)))
+              (go (^{:go/end 59} (fn []
+                    (defer (^{:go/end 47} (fn [] (<! sem))))
+                    (defer (close (.-err p)))
+                    (let [fbase (syntax/NewFileBase filename)
+
+                        (values f err) (os/Open filename)]
+                      (when (!= err nil)
+                        (.error p (lit syntax/Error :Msg (.Error err)))
+                        (return))
+
+                      (defer (.Close f))
+
+                      (set! (values (.-file p) _) (syntax/Parse fbase f (.-error p) (.-pragma p) syntax/CheckBranches))))))))))) ; errors are tracked via p.error
+
+
+
+
+    (let [^uint lines (zero uint)
+        ^{:line 64 :tag posMap} m (zero posMap)]
+      (range [_ p noders]
+        (range [e (.-err p)]
+          (base/ErrorfAt (.makeXPos m (.-Pos e)) 0 "%s" (.-Msg e)))
+
+        (when (== (.-file p) nil)
+          (base/ErrorExit))
+
+        (set! lines + (.Line (.-EOF (.-file p)))))
+
+      (.AddEvent base/Timer (conv int64 lines) "lines")
+
+      (unified m noders))))
+
+
+
+
+
+
+
+
+
+^{:go/end 96} (go/func trimFilename "trimFilename returns the \"trimmed\" filename of b, which is the\nabsolute filename after applying -trimpath processing. This\nfilename form is suitable for use in object files and export data.\n\nIf b's filename has already been trimmed (i.e., because it was read\nin from an imported package's export data), then the filename is\nreturned unchanged.\n" ^string [^{:tag (* syntax/PosBase)} b]
+  (let [filename (.Filename b)]
+    (when (not (.Trimmed b))
+      (let [dir ""]
+        (when (.IsFileBase b)
+          (set! dir (.-Pathname base/Ctxt)))
+
+        (set! filename (objabi/AbsFile dir filename (.-TrimPath base/Flag)))))
+
+    ^{:line 95} filename))
+
+
+
+(go/type noder "noder transforms package syntax's AST into a Node tree.\n" (struct
+    ^{:line 100 :tag (* syntax/File)} file
+    ^{:line 101 :tag (slice linkname)} linknames
+    ^{:line 102 :tag (slice (slice string))} pragcgobuf
+    ^{:line 103 :tag (chan syntax/Error)} err))
+
+
+
+(go/type linkname "linkname records a //go:linkname or //go:linknamestd directive.\n" (struct
+    ^{:line 108 :tag syntax/Pos} pos
+    ^{:line 109 :tag bool} std
+    ^{:line 110 :tag string} local
+    ^{:line 111 :tag string} remote))
+
+
+(go/var unOps (lit (array ... ir/Op)
+    ^{:line 115} [syntax/Recv ir/ORECV]
+    ^{:line 116} [syntax/Mul ir/ODEREF]
+    ^{:line 117} [syntax/And ir/OADDR]
+
+    ^{:line 119} [syntax/Not ir/ONOT]
+    ^{:line 120} [syntax/Xor ir/OBITNOT]
+    ^{:line 121} [syntax/Add ir/OPLUS]
+    ^{:line 122} [syntax/Sub ir/ONEG]))
+
+
+(go/var binOps (lit (array ... ir/Op)
+    ^{:line 126} [syntax/OrOr ir/OOROR]
+    ^{:line 127} [syntax/AndAnd ir/OANDAND]
+
+    ^{:line 129} [syntax/Eql ir/OEQ]
+    ^{:line 130} [syntax/Neq ir/ONE]
+    ^{:line 131} [syntax/Lss ir/OLT]
+    ^{:line 132} [syntax/Leq ir/OLE]
+    ^{:line 133} [syntax/Gtr ir/OGT]
+    ^{:line 134} [syntax/Geq ir/OGE]
+
+    ^{:line 136} [syntax/Add ir/OADD]
+    ^{:line 137} [syntax/Sub ir/OSUB]
+    ^{:line 138} [syntax/Or ir/OOR]
+    ^{:line 139} [syntax/Xor ir/OXOR]
+
+    ^{:line 141} [syntax/Mul ir/OMUL]
+    ^{:line 142} [syntax/Div ir/ODIV]
+    ^{:line 143} [syntax/Rem ir/OMOD]
+    ^{:line 144} [syntax/And ir/OAND]
+    ^{:line 145} [syntax/AndNot ir/OANDNOT]
+    ^{:line 146} [syntax/Shl ir/OLSH]
+    ^{:line 147} [syntax/Shr ir/ORSH]))
+
+
+
+^{:go/end 153} (go/method error "error is called concurrently if files are parsed concurrently.\n" [^{:tag (* noder)} p ^error err]
+  (>! (.-err p) (assert syntax/Error err)))
+
+
+
+
+(go/var ^{:doc "pragmas that are allowed in the std lib, but don't have\na syntax.Pragma value (see lex.go) associated with them.\n"} allowedStdPragmas (lit (map string bool)
+    ^{:line 158} ["go:cgo_export_static" true]
+    ^{:line 159} ["go:cgo_export_dynamic" true]
+    ^{:line 160} ["go:cgo_import_static" true]
+    ^{:line 161} ["go:cgo_import_dynamic" true]
+    ^{:line 162} ["go:cgo_ldflag" true]
+    ^{:line 163} ["go:cgo_dynamic_linker" true]
+    ^{:line 164} ["go:embed" true]
+    ^{:line 165} ["go:fix" true]
+    ^{:line 166} ["go:generate" true]))
+
+
+
+(go/type pragmas "*pragmas is the value stored in a syntax.pragmas during parsing.\n" (struct
+    ^{:line 171 :tag ir/PragmaFlag} Flag ; collected bits
+    ^{:line 172 :tag (slice pragmaPos)} Pos ; position of each individual flag
+    ^{:line 173 :tag (slice pragmaEmbed)} Embeds
+    ^{:line 174 :tag (* WasmImport)} WasmImport
+    ^{:line 175 :tag (* WasmExport)} WasmExport))
+
+
+^{:go/end 180} (go/method Nointerface ^bool [^{:tag (* pragmas)} p]
+  (!= (bit-and (.-Flag p) ir/Nointerface) 0))
+
+
+
+(go/type WasmImport "WasmImport stores metadata associated with the //go:wasmimport pragma\n" (struct
+    ^{:line 184 :tag syntax/Pos} Pos
+    ^{:line 185 :tag string} Module
+    ^{:line 186 :tag string} Name))
+
+
+
+(go/type WasmExport "WasmExport stores metadata associated with the //go:wasmexport pragma\n" (struct
+    ^{:line 191 :tag syntax/Pos} Pos
+    ^{:line 192 :tag string} Name))
+
+
+(go/type pragmaPos (struct
+    ^{:line 196 :tag ir/PragmaFlag} Flag
+    ^{:line 197 :tag syntax/Pos} Pos))
+
+
+(go/type pragmaEmbed (struct
+    ^{:line 201 :tag syntax/Pos} Pos
+    ^{:line 202 :tag (slice string)} Patterns))
+
+
+^{:go/end 222} (go/method checkUnusedDuringParse [^{:tag (* noder)} p ^{:tag (* pragmas)} pragma]
+  (range [_ pos (.-Pos pragma)]
+    (when (!= (bit-and (.-Flag pos) (.-Flag pragma)) 0)
+      (.error p (lit syntax/Error :Pos (.-Pos pos) :Msg "misplaced compiler directive"))))
+
+
+  (when (> (len (.-Embeds pragma)) 0)
+    (range [_ e (.-Embeds pragma)]
+      (.error p (lit syntax/Error :Pos (.-Pos e) :Msg "misplaced go:embed directive"))))
+
+
+  (when (!= (.-WasmImport pragma) nil)
+    (.error p (lit syntax/Error :Pos (.-Pos (.-WasmImport pragma)) :Msg "misplaced go:wasmimport directive")))
+
+  (when (!= (.-WasmExport pragma) nil)
+    (.error p (lit syntax/Error :Pos (.-Pos (.-WasmExport pragma)) :Msg "misplaced go:wasmexport directive"))))
+
+
+
+
+^{:go/end 359} (go/method pragma "pragma is called concurrently if files are parsed concurrently.\n" ^syntax/Pragma [^{:tag (* noder)} p ^syntax/Pos pos ^bool blankLine ^string text ^syntax/Pragma old]
+  (let [(values pragma _) (assert (* pragmas) old)]
+    (when (== pragma nil)
+      (set! pragma (new pragmas)))
+
+
+    (when (== text "")
+      ;; unused pragma; only called with old != nil.
+      (.checkUnusedDuringParse p pragma)
+      (return nil))
+
+
+    (when (strings/HasPrefix text "line ")
+      ;; line directives are handled by syntax package
+      (panic "unreachable"))
+
+
+    (when (not blankLine)
+      ;; directive must be on line by itself
+      (.error p (lit syntax/Error :Pos pos :Msg "misplaced compiler directive"))
+      (return pragma))
+
+
+    (switch
+      (case [(strings/HasPrefix text "go:wasmimport ")]
+        (let [f (strings/Fields text)]
+          (when (!= (len f) 3)
+            (.error p (lit syntax/Error :Pos pos :Msg "usage: //go:wasmimport importmodule importname"))
+            (break))
+
+
+          (when (== buildcfg/GOARCH "wasm")
+            ;; Only actually use them if we're compiling to WASM though.
+            (set! (.-WasmImport pragma) (addr ^{:go/breaks [2 4 6]} (lit WasmImport
+                  :Pos pos
+                  :Module (aget f 1)
+                  :Name (aget f 2)))))))
+
+
+
+      (case [(strings/HasPrefix text "go:wasmexport ")]
+        (let [f (strings/Fields text)]
+          (when (!= (len f) 2)
+            ;; TODO: maybe make the name optional? It was once mentioned on proposal 65199.
+            (.error p (lit syntax/Error :Pos pos :Msg "usage: //go:wasmexport exportname"))
+            (break))
+
+
+          (when (== buildcfg/GOARCH "wasm")
+            ;; Only actually use them if we're compiling to WASM though.
+            (set! (.-WasmExport pragma) (addr ^{:go/breaks [2 4]} (lit WasmExport
+                  :Pos pos
+                  :Name (aget f 1)))))))
+
+
+
+      (case [(strings/HasPrefix text "go:linkname ") (strings/HasPrefix text "go:linknamestd ")]
+        (let [f (strings/Fields text)]
+          (when (not (and (<= 2 (len f)) (<= (len f) 3)))
+            (.error p (lit syntax/Error :Pos pos :Msg (fmt/Sprintf "usage: //%s localname [linkname]" (aget f 0))))
+            (break))
+
+          ;; The second argument is optional. If omitted, we use
+          ;; the default object symbol name for this and
+          ;; linkname only serves to mark this symbol as
+          ;; something that may be referenced via the object
+          ;; symbol name from another package.
+          (let [^string target (zero string)]
+            (cond (== (len f) 3)
+              (set! target (aget f 2))
+              (!= (.-Pkgpath base/Ctxt) "")
+              ;; Use the default object symbol name if the
+              ;; user didn't provide one.
+              (set! target (+ (objabi/PathToPrefix (.-Pkgpath base/Ctxt)) "." (aget f 1))) :else
+
+              (panic "missing pkgpath"))
+
+            (set! (.-linknames p) (append (.-linknames p) (lit linkname pos (== (aget f 0) "go:linknamestd") (aget f 1) target))))))
+
+      (case [(== text "go:embed") (strings/HasPrefix text "go:embed ")]
+        (let [(values args err) (parseGoEmbed (subslice text (len "go:embed")))]
+          (when (!= err nil)
+            (.error p (lit syntax/Error :Pos pos :Msg (.Error err))))
+
+          (when (== (len args) 0)
+            (.error p (lit syntax/Error :Pos pos :Msg "usage: //go:embed pattern..."))
+            (break))
+
+          (set! (.-Embeds pragma) (append (.-Embeds pragma) (lit pragmaEmbed pos args)))))
+
+      (case [(strings/HasPrefix text "go:cgo_import_dynamic ")]
+        ;; This is permitted for general use because Solaris
+        ;; code relies on it in golang.org/x/sys/unix and others.
+        (let [fields (pragmaFields text)]
+          (when (>= (len fields) 4)
+            (let [lib (strings/Trim (aget fields 3) "\"")]
+              (when (and (!= lib "") (not (safeArg lib)) (not (isCgoGeneratedFile pos)))
+                (.error p (lit syntax/Error :Pos pos :Msg (fmt/Sprintf "invalid library name %q in cgo_import_dynamic directive" lib))))
+
+              (.pragcgo p pos text)
+              (set! (.-Flag pragma) bit-or (pragmaFlag "go:cgo_import_dynamic"))
+              (break)))
+
+          (fallthrough)))
+      (case [(strings/HasPrefix text "go:cgo_")]
+        ;; For security, we disallow //go:cgo_* directives other
+        ;; than cgo_import_dynamic outside cgo-generated files.
+        ;; Exception: they are allowed in the standard library, for runtime and syscall.
+        (when (and (not (isCgoGeneratedFile pos)) (not (.-Std base/Flag)))
+          (.error p (lit syntax/Error :Pos pos :Msg (fmt/Sprintf "//%s only allowed in cgo-generated code" text))))
+
+        (.pragcgo p pos text)
+        (fallthrough)) ; because of //go:cgo_unsafe_args
+      (default
+        (let [verb text]
+          (when [i (strings/Index text " ")] (>= i 0)
+            (set! verb (subslice verb _ i)))
+
+          (let [flag (pragmaFlag verb)
+              ^:const ^{:line 344 :val 7680} runtimePragmas (bit-or ir/Systemstack ir/Nowritebarrier ir/Nowritebarrierrec ir/Yeswritebarrierrec)]
+            (when (and (not (.-CompilingRuntime base/Flag)) (!= (bit-and flag runtimePragmas) 0))
+              (.error p (lit syntax/Error :Pos pos :Msg (fmt/Sprintf "//%s only allowed in runtime" verb))))
+
+            (when (and (== flag ir/UintptrKeepAlive) (not (.-Std base/Flag)))
+              (.error p (lit syntax/Error :Pos pos :Msg (fmt/Sprintf "//%s is only allowed in the standard library" verb))))
+
+            (when (and (== flag 0) (not (aget allowedStdPragmas verb)) (.-Std base/Flag))
+              (.error p (lit syntax/Error :Pos pos :Msg (fmt/Sprintf "//%s is not allowed in the standard library" verb))))
+
+            (set! (.-Flag pragma) bit-or flag)
+            (set! (.-Pos pragma) (append (.-Pos pragma) (lit pragmaPos flag pos)))))))
+
+
+    ^{:line 358} pragma))
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 375} (go/func isCgoGeneratedFile "isCgoGeneratedFile reports whether pos is in a file\ngenerated by cgo, which is to say a file with name\nbeginning with \"_cgo_\". Such files are allowed to\ncontain cgo directives, and for security reasons\n(primarily misuse of linker flags), other files are not.\nSee golang.org/issue/23672.\nNote that cmd/go ignores files whose names start with underscore,\nso the only _cgo_ files we will see from cmd/go are generated by cgo.\nIt's easy to bypass this check by calling the compiler directly;\nwe only protect against uses by cmd/go.\n" ^bool [^syntax/Pos pos]
+  ;; We need the absolute file, independent of //line directives,
+  ;; so we call pos.Base().Pos().
+  (strings/HasPrefix (filepath/Base (trimFilename (.Base (.Pos (.Base pos))))) "_cgo_"))
+
+
+
+
+
+
+^{:go/end 387} (go/func safeArg "safeArg reports whether arg is a \"safe\" command-line argument,\nmeaning that when it appears in a command-line, it probably\ndoesn't have some special meaning other than its own name.\nThis is copied from SafeArg in cmd/go/internal/load/pkg.go.\n" ^bool [^string name]
+  (when (== name "")
+    (return false))
+
+  (let [c (aget name 0)]
+    (or (and (<= \0 c) (<= c \9)) (and (<= \A c) (<= c \Z)) (and (<= \a c) (<= c \z)) (== c \.) (== c \_) (== c \/) (>= c utf8/RuneSelf))))
+
+
+
+
+
+^{:go/end 448} (go/func parseGoEmbed "parseGoEmbed parses the text following \"//go:embed\" to extract the glob patterns.\nIt accepts unquoted space-separated patterns as well as double-quoted and back-quoted Go strings.\ngo/build/read.go also processes these strings and contains similar logic.\n" [^string args] :results [(slice string) error]
+  (let [^{:tag (slice string)} list (zero (slice string))]
+    (for [(set! args (strings/TrimSpace args))] (!= args "") (set! args (strings/TrimSpace args))
+      (let [^string path (zero string)]
+        (label :Switch
+          (switch (aget args 0)
+            (default
+              (let [i (len args)]
+                (range [j c args]
+                  (when (unicode/IsSpace c)
+                    (set! i j)
+                    (break)))
+
+
+                (set! path (subslice args _ i))
+                (set! args (subslice args i))))
+
+            (case [\`]
+              (let [i (strings/Index (subslice args 1) "`")]
+                (when (< i 0)
+                  (return nil (fmt/Errorf "invalid quoted string in //go:embed: %s" args)))
+
+                (set! path (subslice args 1 (+ 1 i)))
+                (set! args (subslice args (+ 1 i 1)))))
+
+            (case [\"]
+              (let [i 1]
+                (for [] (< i (len args)) (inc! i)
+                  (when (== (aget args i) \\)
+                    (inc! i)
+                    (continue))
+
+                  (when (== (aget args i) \")
+                    (let [(values q err) (strconv/Unquote (subslice args _ (+ i 1)))]
+                      (when (!= err nil)
+                        (return nil (fmt/Errorf "invalid quoted string in //go:embed: %s" (subslice args _ (+ i 1)))))
+
+                      (set! path q)
+                      (set! args (subslice args (+ i 1)))
+                      (break :Switch))))
+
+
+                (when (>= i (len args))
+                  (return nil (fmt/Errorf "invalid quoted string in //go:embed: %s" args)))))))
+
+
+
+        (when (!= args "")
+          (let [(values r _) (utf8/DecodeRuneInString args)]
+            (when (not (unicode/IsSpace r))
+              (return nil (fmt/Errorf "invalid quoted string in //go:embed: %s" args)))))
+
+
+        (set! list (append list path))))
+
+    (return list nil)))
+
+
+
+
+
+
+(go/var ^{:tag int :doc "A function named init is a special case.\nIt is called by the initialization before main is run.\nTo make it unique within a package and also uncallable,\nthe name, normally \"pkg.init\", is altered to \"pkg.init.0\".\n"} renameinitgen)
+
+^{:go/end 460} (go/func Renameinit ^{:tag (* types/Sym)} []
+  (let [s (typecheck/LookupNum "init." renameinitgen)]
+    (inc! renameinitgen)
+    ^{:line 459} s))
+
+
+^{:go/end 481} (go/func checkEmbed ^error [^{:tag (* syntax/VarDecl)} decl ^bool haveEmbed ^bool withinFunc]
+  (switch
+    (case [(not haveEmbed)]
+      (return (errors/New "go:embed requires import \"embed\" (or import _ \"embed\", if package is not used)")))
+    (case [(> (len (.-NameList decl)) 1)]
+      (return (errors/New "go:embed cannot apply to multiple vars")))
+    (case [(!= (.-Values decl) nil)]
+      (return (errors/New "go:embed cannot apply to var with initializer")))
+    (case [(== (.-Type decl) nil)]
+      ;; Should not happen, since Values == nil now.
+      (return (errors/New "go:embed cannot apply to var without type")))
+    (case [withinFunc]
+      (return (errors/New "go:embed cannot apply to var inside func")))
+    (case [(not (types/AllowsGoVersion 1 16))]
+      (return (fmt/Errorf "go:embed requires go1.16 or later (-lang was set to %s; check go.mod)" (.-Lang base/Flag))))
+
+    (default
+      (return nil))))

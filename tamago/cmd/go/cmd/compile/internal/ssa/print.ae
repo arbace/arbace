@@ -1,0 +1,190 @@
+;; Copyright 2015 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.cmd.compile.internal.ssa) (go/file "print.go" :imports [
+
+
+    ^{:line 8} [fmt "fmt"]
+    ^{:line 9} [io "io"]
+    ^{:line 10} [strings "strings"]
+
+    ^{:line 12} [hash "cmd/internal/hash"]
+    ^{:line 13} [src "cmd/internal/src"]])
+
+
+^{:go/end 18} (go/func printFunc [^{:tag (* Func)} f]
+  (.Logf f "%s" f))
+
+
+^{:go/end 25} (go/func hashFunc ^{:tag (slice byte)} [^{:tag (* Func)} f]
+  (let [h (hash/New32)
+      ^{:line 22} p (lit stringFuncPrinter :w h :printDead true)]
+    (fprintFunc p f)
+    (.Sum h nil)))
+
+
+^{:go/end 32} (go/method String ^string [^{:tag (* Func)} f]
+  (let [^strings/Builder buf (zero strings/Builder)
+      ^{:line 29} p (lit stringFuncPrinter :w (addr buf) :printDead true)]
+    (fprintFunc p f)
+    (.String buf)))
+
+
+
+^{:go/end 40} (go/method rewriteHash "rewriteHash returns a hash of f suitable for detecting rewrite cycles.\n" ^string [^{:tag (* Func)} f]
+  (let [h (hash/New32)
+      ^{:line 37} p (lit stringFuncPrinter :w h :printDead false)]
+    (fprintFunc p f)
+    (fmt/Sprintf "%x" (.Sum h nil))))
+
+
+(go/type funcPrinter (interface
+    (header [^{:tag (* Func)} f])
+    (startBlock [^{:tag (* Block)} b ^bool reachable])
+    (endBlock [^{:tag (* Block)} b ^bool reachable])
+    (value [^{:tag (* Value)} v ^bool live])
+    (startDepCycle [])
+    (endDepCycle [])
+    (named [^LocalSlot n ^{:tag (slice (* Value))} vals])))
+
+
+(go/type stringFuncPrinter (struct
+    ^{:line 53 :tag io/Writer} w
+    ^{:line 54 :tag bool} printDead))
+
+
+^{:go/end 61} (go/method header [^stringFuncPrinter p ^{:tag (* Func)} f]
+  (fmt/Fprint (.-w p) (.-Name f))
+  (fmt/Fprint (.-w p) " ")
+  (fmt/Fprintln (.-w p) (.-Type f)))
+
+
+^{:go/end 79} (go/method startBlock [^stringFuncPrinter p ^{:tag (* Block)} b ^bool reachable]
+  (when (and (not (.-printDead p)) (not reachable))
+    (return))
+
+  (fmt/Fprintf (.-w p) "  b%d:" (.-ID b))
+  (when (> (len (.-Preds b)) 0)
+    (io/WriteString (.-w p) " <-")
+    (range [_ e (.-Preds b)]
+      (let [pred (.-b e)]
+        (fmt/Fprintf (.-w p) " b%d" (.-ID pred)))))
+
+
+  (when (not reachable)
+    (fmt/Fprint (.-w p) " DEAD"))
+
+  (io/WriteString (.-w p) "\n"))
+
+
+^{:go/end 86} (go/method endBlock [^stringFuncPrinter p ^{:tag (* Block)} b ^bool reachable]
+  (when (and (not (.-printDead p)) (not reachable))
+    (return))
+
+  (fmt/Fprintln (.-w p) (+ "    " (.LongString b))))
+
+
+^{:go/end 101} (go/func StmtString ^string [^src/XPos p]
+  (let [linenumber "(?) "]
+    (when (.IsKnown p)
+      (let [pfx ""]
+        (when (== ^{:go/via [lico]} (.IsStmt p) src/PosIsStmt)
+          (set! pfx "+"))
+
+        (when (== ^{:go/via [lico]} (.IsStmt p) src/PosNotStmt)
+          (set! pfx "-"))
+
+        (set! linenumber (fmt/Sprintf "(%s%d) " pfx ^{:go/via [lico]} (.Line p)))))
+
+    ^{:line 100} linenumber))
+
+
+^{:go/end 113} (go/method value [^stringFuncPrinter p ^{:tag (* Value)} v ^bool live]
+  (when (and (not (.-printDead p)) (not live))
+    (return))
+
+  (fmt/Fprintf (.-w p) "    %s" (StmtString (.-Pos v)))
+  (fmt/Fprint (.-w p) (.LongString v))
+  (when (not live)
+    (fmt/Fprint (.-w p) " DEAD"))
+
+  (fmt/Fprintln (.-w p)))
+
+
+^{:go/end 117} (go/method startDepCycle [^stringFuncPrinter p]
+  (fmt/Fprintln (.-w p) "dependency cycle!"))
+
+
+^{:go/end 119} (go/method endDepCycle [^stringFuncPrinter p])
+
+^{:go/end 123} (go/method named [^stringFuncPrinter p ^LocalSlot n ^{:tag (slice (* Value))} vals]
+  (fmt/Fprintf (.-w p) "name %s: %v\n" n vals))
+
+
+^{:go/end 192} (go/func fprintFunc [^funcPrinter p ^{:tag (* Func)} f]
+  (let [(values reachable live) (findlive f)]
+    (defer (.freeBoolSlice (.-Cache f) live))
+    (.header p f)
+    (let [printed (make (slice bool) (.NumValues f))]
+      (range [_ b (.-Blocks f)]
+        (.startBlock p b (aget reachable (.-ID b)))
+
+        (when (.-scheduled f)
+          ;; Order of Values has been decided - print in that order.
+          (range [_ v (.-Values b)]
+            (.value p v (aget live (.-ID v)))
+            (aset printed (.-ID v) true))
+
+          (.endBlock p b (aget reachable (.-ID b)))
+          (continue))
+
+
+        ;; print phis first since all value cycles contain a phi
+        (let [n 0]
+          (range [_ v (.-Values b)]
+            (when (!= (.-Op v) OpPhi)
+              (continue))
+
+            (.value p v (aget live (.-ID v)))
+            (aset printed (.-ID v) true)
+            (inc! n))
+
+
+          ;; print rest of values in dependency order
+          (while (< n (len (.-Values b)))
+            (let [m n]
+              (label :outer
+                (range [_ v (.-Values b)]
+                  (when (aget printed (.-ID v))
+                    (continue))
+
+                  (range [_ w (.-Args v)]
+                    ;; w == nil shouldn't happen, but if it does,
+                    ;; don't panic; we'll get a better diagnosis later.
+                    (when (and (!= w nil) (== (.-Block w) b) (not (aget printed (.-ID w))))
+                      (continue :outer)))
+
+
+                  (.value p v (aget live (.-ID v)))
+                  (aset printed (.-ID v) true)
+                  (inc! n)))
+
+              (when (== m n)
+                (.startDepCycle p)
+                (range [_ v (.-Values b)]
+                  (when (aget printed (.-ID v))
+                    (continue))
+
+                  (.value p v (aget live (.-ID v)))
+                  (aset printed (.-ID v) true)
+                  (inc! n))
+
+                (.endDepCycle p))))
+
+
+
+          (.endBlock p b (aget reachable (.-ID b)))))
+
+      (range [_ name (.-Names f)]
+        (.named p @name (aget (.-NamedValues f) @name))))))

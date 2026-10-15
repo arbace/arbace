@@ -1,0 +1,107 @@
+;; Copyright 2015 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.cmd.compile.internal.ssa) (go/file "critical.go" :imports [])
+
+
+
+
+^{:go/end 111} (go/func critical "critical splits critical edges (those that go from a block with\nmore than one outedge to a block with more than one inedge).\nRegalloc wants a critical-edge-free CFG so it can implement phi values.\n" [^{:tag (* Func)} f]
+  ;; maps from phi arg ID to the new block created for that argument
+  (let [blocks (.allocBlockSlice (.-Cache f) (.NumValues f))]
+    (defer (.freeBlockSlice (.-Cache f) blocks))
+    ;; need to iterate over f.Blocks without range, as we might
+    ;; need to split critical edges on newly constructed blocks
+    (for [j 0] (< j (len (.-Blocks f))) (inc! j)
+      (let [b (aget (.-Blocks f) j)]
+        (when (<= (len (.-Preds b)) 1)
+          (continue))
+
+
+        (let [^{:tag (* Value)} phi (zero (* Value))]
+          ;; determine if we've only got a single phi in this
+          ;; block, this is easier to handle than the general
+          ;; case of a block with multiple phi values.
+          (range [_ v (.-Values b)]
+            (when (== (.-Op v) OpPhi)
+              (when (!= phi nil)
+                (set! phi nil)
+                (break))
+
+              (set! phi v)))
+
+
+
+          ;; reset our block map
+          (when (!= phi nil)
+            (range [_ v (.-Args phi)]
+              (aset blocks (.-ID v) nil)))
+
+
+
+          ;; split input edges coming from multi-output blocks.
+          (for [i 0] (< i (len (.-Preds b))) _
+            (let [e (aget (.-Preds b) i)
+                ^{:line 46} p (.-b e)
+                ^{:line 47} pi (.-i e)]
+              (when (== (.-Kind p) BlockPlain)
+                (inc! i)
+                (continue)) ; only single output block
+
+
+              (let [^{:tag (* Block)} d (zero (* Block)) ; new block used to remove critical edge
+                  ^{:line 54} reusedBlock false] ; if true, then this is not the first use of this block
+                (if (!= phi nil)
+                  (let [argID (.-ID (aget (.-Args phi) i))]
+                    ;; find or record the block that we used to split
+                    ;; critical edges for this argument
+                    (if [(set! d (aget blocks argID))] (== d nil) (do
+                        ;; splitting doesn't necessarily remove the critical edge,
+                        ;; since we're iterating over len(f.Blocks) above, this forces
+                        ;; the new blocks to be re-examined.
+                        (set! d (.NewBlock f BlockPlain))
+                        (set! (.-Pos d) (.-Pos p))
+                        (aset blocks argID d)
+                        (when (> (.-debug (.-pass f)) 0)
+                          (.Warnl f (.-Pos p) "split critical edge")))
+
+
+                      (set! reusedBlock true)))
+
+                  (do
+                    ;; no existing block, so allocate a new block
+                    ;; to place on the edge
+                    (set! d (.NewBlock f BlockPlain))
+                    (set! (.-Pos d) (.-Pos p))
+                    (when (> (.-debug (.-pass f)) 0)
+                      (.Warnl f (.-Pos p) "split critical edge"))))
+
+
+
+                ;; if this not the first argument for the
+                ;; block, then we need to remove the
+                ;; corresponding elements from the block
+                ;; predecessors and phi args
+                (if reusedBlock (do
+                    ;; Add p->d edge
+                    (aset (.-Succs p) pi (lit Edge d (len (.-Preds d))))
+                    (set! (.-Preds d) (append (.-Preds d) (lit Edge p pi)))
+
+                    ;; Remove p as a predecessor from b.
+                    (.removePred b i)
+
+                    ;; Update corresponding phi args
+                    (.removePhiArg b phi i))
+
+                  ;; splitting occasionally leads to a phi having
+                  ;; a single argument (occurs with -N)
+                  ;; Don't increment i in this case because we moved
+                  ;; an unprocessed predecessor down into slot i.
+                  (do
+                    ;; splice it in
+                    (aset (.-Succs p) pi (lit Edge d 0))
+                    (aset (.-Preds b) i (lit Edge d 0))
+                    (set! (.-Preds d) (append (.-Preds d) (lit Edge p pi)))
+                    (set! (.-Succs d) (append (.-Succs d) (lit Edge b i)))
+                    (inc! i)))))))))))

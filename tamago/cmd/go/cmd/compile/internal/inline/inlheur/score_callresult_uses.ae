@@ -1,0 +1,412 @@
+;; Copyright 2023 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.cmd.compile.internal.inline.inlheur) (go/file "score_callresult_uses.go" :imports [
+
+
+    ^{:line 8} [ir "cmd/compile/internal/ir"]
+    ^{:line 9} [fmt "fmt"]
+    ^{:line 10} [os "os"]])
+
+
+;; This file contains code to re-score callsites based on how the
+;; results of the call were used.  Example:
+;;
+;;    func foo() {
+;;       x, fptr := bar()
+;;       switch x {
+;;         case 10: fptr = baz()
+;;         default: blix()
+;;       }
+;;       fptr(100)
+;;     }
+;;
+;; The initial scoring pass will assign a score to "bar()" based on
+;; various criteria, however once the first pass of scoring is done,
+;; we look at the flags on the result from bar, and check to see
+;; how those results are used. If bar() always returns the same constant
+;; for its first result, and if the variable receiving that result
+;; isn't redefined, and if that variable feeds into an if/switch
+;; condition, then we will try to adjust the score for "bar" (on the
+;; theory that if we inlined, we can constant fold / deadcode).
+
+(go/type resultPropAndCS (struct
+    ^{:line 35 :tag (* CallSite)} defcs
+    ^{:line 36 :tag ResultPropBits} props))
+
+
+(go/type resultUseAnalyzer (struct
+    ^{:line 40 :tag (map (* ir/Name) resultPropAndCS)} resultNameTab
+    ^{:line 41 :tag (* ir/Func)} fn
+    ^{:line 42 :tag CallSiteTab} cstab
+    (* condLevelTracker)))
+
+
+
+
+
+^{:go/end 66} (go/method rescoreBasedOnCallResultUses "rescoreBasedOnCallResultUses examines how call results are used,\nand tries to update the scores of calls based on how their results\nare used in the function.\n" [^{:tag (* callSiteAnalyzer)} csa ^{:tag (* ir/Func)} fn ^{:tag (map (* ir/Name) resultPropAndCS)} resultNameTab ^CallSiteTab cstab]
+  (enableDebugTraceIfEnv)
+  (let [rua (addr ^{:go/breaks [2 4 6 8]} (lit resultUseAnalyzer
+          :resultNameTab resultNameTab
+          :fn fn
+          :cstab cstab
+          :condLevelTracker (new condLevelTracker)))
+
+      ^{:line 57 :tag (func [ir/Node] [bool])} doNode (zero (func [ir/Node] [bool]))]
+    (set! doNode ^{:go/breaks [5] :go/end 63} (fn ^bool [^ir/Node n]
+        (.nodeVisitPre rua n)
+        (ir/DoChildren n doNode)
+        (.nodeVisitPost rua n)
+        false))
+
+    (doNode fn)
+    (disableDebugTrace)))
+
+
+^{:go/end 127} (go/method examineCallResults ^{:tag (map (* ir/Name) resultPropAndCS)} [^{:tag (* callSiteAnalyzer)} csa ^{:tag (* CallSite)} cs ^{:tag (map (* ir/Name) resultPropAndCS)} resultNameTab]
+  (when (!= (bit-and debugTrace debugTraceScoring) 0)
+    (fmt/Fprintf os/Stderr "=-= examining call results for %q\n"
+      (EncodeCallSiteKey cs)))
+
+
+  ;; Invoke a helper to pick out the specific ir.Name's the results
+  ;; from this call are assigned into, e.g. "x, y := fooBar()". If
+  ;; the call is not part of an assignment statement, or if the
+  ;; variables in question are not newly defined, then we'll receive
+  ;; an empty list here.
+  ;;
+  (let [(values names autoTemps props) (namesDefined cs)]
+    (when (== (len names) 0)
+      (return resultNameTab))
+
+
+    (when (!= (bit-and debugTrace debugTraceScoring) 0)
+      (fmt/Fprintf os/Stderr "=-= %d names defined\n" (len names)))
+
+
+    ;; For each returned value, if the value has interesting
+    ;; properties (ex: always returns the same constant), and the name
+    ;; in question is never redefined, then make an entry in the
+    ;; result table for it.
+    (let [^:const ^{:val 60} interesting (bit-or ResultIsConcreteTypeConvertedToInterface
+          ^{:line 94} ResultAlwaysSameConstant ResultAlwaysSameInlinableFunc ResultAlwaysSameFunc)]
+      (range [idx n names]
+        (let [rprop (aget (.-ResultFlags props) idx)]
+
+          (when (!= (bit-and debugTrace debugTraceScoring) 0)
+            (fmt/Fprintf os/Stderr "=-= props for ret %d %q: %s\n"
+              ^{:line 100} idx (.-Name (.Sym n)) (.String rprop)))
+
+
+          (when (== (bit-and rprop interesting) 0)
+            (continue))
+
+          (when (.reassigned (.-nameFinder csa) n)
+            (continue))
+
+          (if (== resultNameTab nil)
+            (set! resultNameTab (make (map (* ir/Name) resultPropAndCS)))
+            (when [(values _ ok) (aget resultNameTab n)] ok
+              (panic "should never happen")))
+
+          (let [entry ^{:go/breaks [2 4]} (lit resultPropAndCS
+                :defcs cs
+                :props rprop)]
+
+            (aset resultNameTab n entry)
+            (when (!= (aget autoTemps idx) nil)
+              (aset resultNameTab (aget autoTemps idx) entry))
+
+            (when (!= (bit-and debugTrace debugTraceScoring) 0)
+              (fmt/Fprintf os/Stderr "=-= add resultNameTab table entry n=%v autotemp=%v props=%s\n" n (aget autoTemps idx) (.String rprop))))))
+
+
+      ^{:line 126} resultNameTab)))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 202} (go/func namesDefined "namesDefined returns a list of ir.Name's corresponding to locals\nthat receive the results from the call at site 'cs', plus the\nproperties object for the called function. If a given result\nisn't cleanly assigned to a newly defined local, the\nslot for that result in the returned list will be nil. Example:\n\n\tcall                             returned name list\n\n\tx := foo()                       [ x ]\n\tz, y := bar()                    [ nil, nil ]\n\t_, q := baz()                    [ nil, q ]\n\nIn the case of a multi-return call, such as \"x, y := foo()\",\nthe pattern we see from the front end will be a call op\nassigning to auto-temps, and then an assignment of the auto-temps\nto the user-level variables. In such cases we return\nfirst the user-level variable (in the first func result)\nand then the auto-temp name in the second result.\n" [^{:tag (* CallSite)} cs] :results [(slice (* ir/Name)) (slice (* ir/Name)) (* FuncProps)]
+  ;; If this call doesn't feed into an assignment (and of course not
+  ;; all calls do), then we don't have anything to work with here.
+  (when (== (.-Assign cs) nil)
+    (return nil nil nil))
+
+  (let [(values funcInlHeur ok) (aget fpmap (.-Callee cs))]
+    (when (not ok)
+      ;; TODO: add an assert/panic here.
+      (return nil nil nil))
+
+    (when (== (len (.-ResultFlags (.-props funcInlHeur))) 0)
+      (return nil nil nil))
+
+
+    ;; Single return case.
+    (when (== (len (.-ResultFlags (.-props funcInlHeur))) 1)
+      (let [(values asgn ok) (assert (* ir/AssignStmt) (.-Assign cs))]
+        (when (not ok)
+          (return nil nil nil))
+
+        ;; locate name being assigned
+        (let [(values aname ^:assign ok) (assert (* ir/Name) (.-X asgn))]
+          (when (not ok)
+            (return nil nil nil))
+
+          (return (lit (slice (* ir/Name)) aname) (lit (slice (* ir/Name)) nil) (.-props funcInlHeur)))))
+
+
+    ;; Multi-return case
+    (let [(values asgn ^:assign ok) (assert (* ir/AssignListStmt) (.-Assign cs))]
+      (when (or (not ok) (not (.-Def asgn)))
+        (return nil nil nil))
+
+      (let [userVars (make (slice (* ir/Name)) (len (.-ResultFlags (.-props funcInlHeur))))
+          ^{:line 182} autoTemps (make (slice (* ir/Name)) (len (.-ResultFlags (.-props funcInlHeur))))]
+        (range [idx x (.-Lhs asgn)]
+          (if [(values n ok) (assert (* ir/Name) x)] ok (do
+              (aset userVars idx n)
+              (let [r (aget (.-Rhs asgn) idx)]
+                (when (== (.Op r) ir/OCONVNOP)
+                  (set! r (.-X (assert (* ir/ConvExpr) r))))
+
+                (when (ir/IsAutoTmp r)
+                  (aset autoTemps idx (assert (* ir/Name) r)))
+
+                (when (!= (bit-and debugTrace debugTraceScoring) 0)
+                  (fmt/Fprintf os/Stderr "=-= multi-ret namedef uv=%v at=%v\n"
+                    ^{:line 195} x (aget autoTemps idx)))))
+
+
+            (return nil nil nil)))
+
+
+        (return userVars autoTemps (.-props funcInlHeur))))))
+
+
+^{:go/end 206} (go/method nodeVisitPost [^{:tag (* resultUseAnalyzer)} rua ^ir/Node n]
+  (.post (.-condLevelTracker rua) n))
+
+
+^{:go/end 231} (go/method nodeVisitPre [^{:tag (* resultUseAnalyzer)} rua ^ir/Node n]
+  (.pre (.-condLevelTracker rua) n)
+  (switch (.Op n)
+    (case [ir/OCALLINTER]
+      (when (!= (bit-and debugTrace debugTraceScoring) 0)
+        (fmt/Fprintf os/Stderr "=-= rescore examine iface call %v:\n" n))
+
+      (.callTargetCheckResults rua n))
+    (case [ir/OCALLFUNC]
+      (when (!= (bit-and debugTrace debugTraceScoring) 0)
+        (fmt/Fprintf os/Stderr "=-= rescore examine call %v:\n" n))
+
+      (.callTargetCheckResults rua n))
+    (case [ir/OIF]
+      (let [ifst (assert (* ir/IfStmt) n)]
+        (.foldCheckResults rua (.-Cond ifst))))
+    (case [ir/OSWITCH]
+      (let [swst (assert (* ir/SwitchStmt) n)]
+        (when (!= (.-Tag swst) nil)
+          (.foldCheckResults rua (.-Tag swst)))))))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 294} (go/method callTargetCheckResults "callTargetCheckResults examines a given call to see whether the\ncallee expression is potentially an inlinable function returned\nfrom a potentially inlinable call. Examples:\n\n\tScenario 1: named intermediate\n\n\t   fn1 := foo()         conc := bar()\n\t   fn1(\"blah\")          conc.MyMethod()\n\n\tScenario 2: returned func or concrete object feeds directly to call\n\n\t   foo()(\"blah\")        bar().MyMethod()\n\nIn the second case although at the source level the result of the\ndirect call feeds right into the method call or indirect call,\nwe're relying on the front end having inserted an auto-temp to\ncapture the value.\n" [^{:tag (* resultUseAnalyzer)} rua ^ir/Node call]
+  (let [ce (assert (* ir/CallExpr) call)
+      ^{:line 252} rname (.getCallResultName rua ce)]
+    (when (== rname nil)
+      (return))
+
+    (when (!= (bit-and debugTrace debugTraceScoring) 0)
+      (fmt/Fprintf os/Stderr "=-= staticvalue returns %v:\n"
+        ^{:line 258} rname))
+
+    (when (!= (.-Class rname) ir/PAUTO)
+      (return))
+
+    (switch (.Op call)
+      (case [ir/OCALLINTER]
+        (when (!= (bit-and debugTrace debugTraceScoring) 0)
+          (fmt/Fprintf os/Stderr "=-= in %s checking %v for cci prop:\n"
+            (.-Name (.Sym (.-fn rua))) rname))
+
+        (when [cs (.returnHasProp rua rname ResultIsConcreteTypeConvertedToInterface)] (!= cs nil)
+
+          (let [adj returnFeedsConcreteToInterfaceCallAdj]
+            (set! (values (.-Score cs) (.-ScoreMask cs)) (adjustScore adj (.-Score cs) (.-ScoreMask cs))))))
+
+      (case [ir/OCALLFUNC]
+        (when (!= (bit-and debugTrace debugTraceScoring) 0)
+          (fmt/Fprintf os/Stderr "=-= in %s checking %v for samefunc props:\n"
+            (.-Name (.Sym (.-fn rua))) rname)
+          (let [(values v ok) (aget (.-resultNameTab rua) rname)]
+            (if (not ok)
+              (fmt/Fprintf os/Stderr "=-= no entry for %v in rt\n" rname)
+
+              (fmt/Fprintf os/Stderr "=-= props for %v: %q\n" rname (.String (.-props v))))))
+
+
+        (if [cs (.returnHasProp rua rname ResultAlwaysSameInlinableFunc)] (!= cs nil)
+          (let [adj returnFeedsInlinableFuncToIndCallAdj]
+            (set! (values (.-Score cs) (.-ScoreMask cs)) (adjustScore adj (.-Score cs) (.-ScoreMask cs))))
+          (when [cs (.returnHasProp rua rname ResultAlwaysSameFunc)] (!= cs nil)
+            (let [adj returnFeedsFuncToIndCallAdj]
+              (set! (values (.-Score cs) (.-ScoreMask cs)) (adjustScore adj (.-Score cs) (.-ScoreMask cs))))))))))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 349} (go/method foldCheckResults "foldCheckResults examines the specified if/switch condition 'cond'\nto see if it refers to locals defined by a (potentially inlinable)\nfunction call at call site C, and if so, whether 'cond' contains\nonly combinations of simple references to all of the names in\n'names' with selected constants + operators. If these criteria are\nmet, then we adjust the score for call site C to reflect the\nfact that inlining will enable deadcode and/or constant propagation.\nNote: for this heuristic to kick in, the names in question have to\nbe all from the same callsite. Examples:\n\n\t  q, r := baz()\t    x, y := foo()\n\t  switch q+r {\t\ta, b, c := bar()\n\t\t...\t\t\t    if x && y && a && b && c {\n\t  }\t\t\t\t\t   ...\n\t\t\t\t\t    }\n\nFor the call to \"baz\" above we apply a score adjustment, but not\nfor the calls to \"foo\" or \"bar\".\n" [^{:tag (* resultUseAnalyzer)} rua ^ir/Node cond]
+  (let [namesUsed (collectNamesUsed cond)]
+    (when (== (len namesUsed) 0)
+      (return))
+
+    (let [^{:tag (* CallSite)} cs (zero (* CallSite))]
+      (range [_ n namesUsed]
+        (let [(values rpcs found) (aget (.-resultNameTab rua) n)]
+          (when (not found)
+            (return))
+
+          (when (and (!= cs nil) (!= (.-defcs rpcs) cs))
+            (return))
+
+          (set! cs (.-defcs rpcs))
+          (when (== (bit-and (.-props rpcs) ResultAlwaysSameConstant) 0)
+            (return))))
+
+
+      (when (!= (bit-and debugTrace debugTraceScoring) 0)
+        (let [nls ^{:go/end 340} (fn ^string [^{:tag (slice (* ir/Name))} nl]
+              (let [r ""]
+                (range [_ n nl]
+                  (set! r + (+ " " (.-Name (.Sym n)))))
+
+                ^{:line 339} r))]
+
+          (fmt/Fprintf os/Stderr "=-= calling ShouldFoldIfNameConstant on names={%s} cond=%v\n" (nls namesUsed) cond)))
+
+
+      (when (not (ShouldFoldIfNameConstant cond namesUsed))
+        (return))
+
+      (let [adj returnFeedsConstToIfAdj]
+        (set! (values (.-Score cs) (.-ScoreMask cs)) (adjustScore adj (.-Score cs) (.-ScoreMask cs)))))))
+
+
+^{:go/end 364} (go/func collectNamesUsed ^{:tag (slice (* ir/Name))} [^ir/Node expr]
+  (let [res (lit (slice (* ir/Name)))]
+    (ir/Visit expr ^{:go/end 362} (fn [^ir/Node n]
+        (when (!= (.Op n) ir/ONAME)
+          (return))
+
+        (let [nn (assert (* ir/Name) n)]
+          (when (!= (.-Class nn) ir/PAUTO)
+            (return))
+
+          (set! res (append res nn)))))
+
+    ^{:line 363} res))
+
+
+^{:go/end 375} (go/method returnHasProp ^{:tag (* CallSite)} [^{:tag (* resultUseAnalyzer)} rua ^{:tag (* ir/Name)} name ^ResultPropBits prop]
+  (let [(values v ok) (aget (.-resultNameTab rua) name)]
+    (when (not ok)
+      (return nil))
+
+    (when (== (bit-and (.-props v) prop) 0)
+      (return nil))
+
+    (.-defcs v)))
+
+
+^{:go/end 413} (go/method getCallResultName ^{:tag (* ir/Name)} [^{:tag (* resultUseAnalyzer)} rua ^{:tag (* ir/CallExpr)} ce]
+  (let [^ir/Node callTarg (zero ir/Node)]
+    (if [(values sel ok) (assert (* ir/SelectorExpr) (.-Fun ce))] ok
+      ;; method call
+      (set! callTarg (.-X sel))
+      (if [(values ctarg ok) (assert (* ir/Name) (.-Fun ce))] ok
+        ;; regular call
+        (set! callTarg ctarg)
+
+        (return nil)))
+
+    ^{:go/breaks [[4 412]]} (let [r (ir/StaticValue callTarg)]
+      (when (!= (bit-and debugTrace debugTraceScoring) 0)
+        (fmt/Fprintf os/Stderr "=-= staticname on %v returns %v:\n"
+          ^{:line 391} callTarg r))
+
+      (cond (== (.Op r) ir/OCALLFUNC)
+        ;; This corresponds to the "x := foo()" case; here
+        ;; ir.StaticValue has brought us all the way back to
+        ;; the call expression itself. We need to back off to
+        ;; the name defined by the call; do this by looking up
+        ;; the callsite.
+        (let [ce (assert (* ir/CallExpr) r)
+            (values cs ok) (aget (.-cstab rua) ce)]
+          (when (not ok)
+            (return nil))
+
+          (let [(values names _ _) (namesDefined cs)]
+            (when (== (len names) 0)
+              (return nil))
+
+            (return (aget names 0))))
+        (== (.Op r) ir/ONAME)
+        (return (assert (* ir/Name) r)))
+
+      nil)))

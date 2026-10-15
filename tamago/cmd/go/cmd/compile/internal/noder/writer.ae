@@ -1,0 +1,3399 @@
+;; Copyright 2021 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.cmd.compile.internal.noder) (go/file "writer.go" :imports [
+
+
+    ^{:line 8} [fmt "fmt"]
+    ^{:line 9} [constant "go/constant"]
+    ^{:line 10} [token "go/token"]
+    ^{:line 11} [version "go/version"]
+    ^{:line 12} [buildcfg "internal/buildcfg"]
+    ^{:line 13} [pkgbits "internal/pkgbits"]
+    ^{:line 14} [os "os"]
+    ^{:line 15} [slices "slices"]
+    ^{:line 16} [strings "strings"]
+
+    ^{:line 18} [base "cmd/compile/internal/base"]
+    ^{:line 19} [ir "cmd/compile/internal/ir"]
+    ^{:line 20} [syntax "cmd/compile/internal/syntax"]
+    ^{:line 21} [types "cmd/compile/internal/types"]
+    ^{:line 22} [types2 "cmd/compile/internal/types2"]])
+
+
+;; This file implements the Unified IR package writer and defines the
+;; Unified IR export data format.
+;;
+;; Low-level coding details (e.g., byte-encoding of individual
+;; primitive values, or handling element bitstreams and
+;; cross-references) are handled by internal/pkgbits, so here we only
+;; concern ourselves with higher-level worries like mapping Go
+;; language constructs into elements.
+
+;; There are two central types in the writing process: the "writer"
+;; type handles writing out individual elements, while the "pkgWriter"
+;; type keeps track of which elements have already been created.
+;;
+;; For each sort of "thing" (e.g., position, package, object, type)
+;; that can be written into the export data, there are generally
+;; several methods that work together:
+;;
+;; - writer.thing handles writing out a *use* of a thing, which often
+;;   means writing a relocation to that thing's encoded index.
+;;
+;; - pkgWriter.thingIdx handles reserving an index for a thing, and
+;;   writing out any elements needed for the thing.
+;;
+;; - writer.doThing handles writing out the *definition* of a thing,
+;;   which in general is a mix of low-level coding primitives (e.g.,
+;;   ints and strings) or uses of other things.
+;;
+;; A design goal of Unified IR is to have a single, canonical writer
+;; implementation, but multiple reader implementations each tailored
+;; to their respective needs. For example, within cmd/compile's own
+;; backend, inlining is implemented largely by just re-running the
+;; function body reading code.
+
+;; TODO(mdempsky): Add an importer for Unified IR to the x/tools repo,
+;; and better document the file format boundary between public and
+;; private data.
+
+(go/type ^:alias index pkgbits/Index)
+
+^{:go/end 64} (go/func assert [^bool p] (base/Assert p))
+
+
+
+(go/type pkgWriter "A pkgWriter constructs Unified IR export data from the results of\nrunning the types2 type checker on a Go compilation unit.\n" (struct
+    ^{:line 69} pkgbits/PkgEncoder
+
+    ^{:line 71 :tag posMap} m
+    ^{:line 72 :tag (* types2/Package)} curpkg
+    ^{:line 73 :tag (* types2/Info)} info
+    ^{:line 74 :tag (map (* syntax/FuncLit) bool)} rangeFuncBodyClosures ; non-public information, e.g., which functions are closures range function bodies?
+
+    ;; Indices for previously written syntax and types2 things.
+
+    ^{:line 78 :tag (map (* syntax/PosBase) index)} posBasesIdx
+    ^{:line 79 :tag (map (* types2/Package) index)} pkgsIdx
+    ^{:line 80 :tag (map types2/Type index)} typsIdx
+    ^{:line 81 :tag (map types2/Object index)} objsIdx
+
+    ;; Maps from types2.Objects back to their syntax.Decl.
+
+    ^{:line 85 :tag (map (* types2/Func) (* syntax/FuncDecl))} funDecls
+    ^{:line 86 :tag (map (* types2/TypeName) typeDeclGen)} typDecls
+
+
+
+    ^{:line 90 :tag (map types2/Object (struct ^string remote ^bool std)) :doc "linknames maps package-scope objects to their linker symbol name,\nif specified by a //go:linkname or //go:linknamestd directive.\n"} linknames
+
+
+
+
+
+
+    ^{:line 97 :tag (slice (slice string)) :doc "cgoPragmas accumulates any //go:cgo_* pragmas that need to be\npassed through to cmd/link.\n"} cgoPragmas))
+
+
+
+
+^{:go/end 125} (go/func newPkgWriter "newPkgWriter returns an initialized pkgWriter for the specified\npackage.\n" ^{:tag (* pkgWriter)} [^posMap m ^{:tag (* types2/Package)} pkg ^{:tag (* types2/Info)} info ^{:tag (map (* syntax/FuncLit) bool)} otherInfo]
+  (addr ^{:go/breaks [2 [4 106] 6 8 10 [12 111] 14 16 [18 115] [20 117] 22 [24 120]]} (lit pkgWriter
+      :PkgEncoder (pkgbits/NewPkgEncoder uirVersion (.-SyncFrames base/Debug))
+
+      :m m
+      :curpkg pkg
+      :info info
+      :rangeFuncBodyClosures otherInfo
+
+      :pkgsIdx (make (map (* types2/Package) index))
+      :objsIdx (make (map types2/Object index))
+      :typsIdx (make (map types2/Type index))
+
+      :posBasesIdx (make (map (* syntax/PosBase) index))
+
+      :funDecls (make (map (* types2/Func) (* syntax/FuncDecl)))
+      :typDecls (make (map (* types2/TypeName) typeDeclGen))
+
+      :linknames (make (map types2/Object (struct
+            ^{:line 121 :tag string} remote
+            ^{:line 122 :tag bool} std))))))
+
+
+
+
+
+^{:go/end 130} (go/method errorf "errorf reports a user error about thing p.\n" [^{:tag (* pkgWriter)} pw ^poser p ^string msg & ^{:tag (slice any)} args]
+  (base/ErrorfAt (.pos (.-m pw) p) 0 msg (spread args)))
+
+
+
+^{:go/end 135} (go/method fatalf "fatalf reports an internal compiler error about thing p.\n" [^{:tag (* pkgWriter)} pw ^poser p ^string msg & ^{:tag (slice any)} args]
+  (base/FatalfAt (.pos (.-m pw) p) msg (spread args)))
+
+
+
+
+^{:go/end 141} (go/method unexpected "unexpected reports a fatal error about a thing of unexpected\ndynamic type.\n" [^{:tag (* pkgWriter)} pw ^string what ^poser p]
+  (.fatalf pw p "unexpected %s: %v (%T)" what p p))
+
+
+^{:go/end 149} (go/method typeAndValue ^syntax/TypeAndValue [^{:tag (* pkgWriter)} pw ^syntax/Expr x]
+  (let [(values tv ok) (.maybeTypeAndValue pw x)]
+    (when (not ok)
+      (.fatalf pw x "missing Types entry: %v" (syntax/String x)))
+
+    ^{:line 148} tv))
+
+
+^{:go/end 164} (go/method maybeTypeAndValue [^{:tag (* pkgWriter)} pw ^syntax/Expr x] :results [syntax/TypeAndValue bool]
+  (let [tv (.GetTypeInfo x)]
+
+    ;; If x is a generic function whose type arguments are inferred
+    ;; from assignment context, then we need to find its inferred type
+    ;; in Info.Instances instead.
+    (when [(values name ok) (assert (* syntax/Name) x)] ok
+      (when [(values inst ok) (aget (.-Instances (.-info pw)) name)] ok
+        (set! (.-Type tv) (.-Type inst))))
+
+
+
+    (return tv (!= (.-Type tv) nil))))
+
+
+
+^{:go/end 173} (go/method typeOf "typeOf returns the Type of the given value expression.\n" ^types2/Type [^{:tag (* pkgWriter)} pw ^syntax/Expr expr]
+  (let [tv (.typeAndValue pw expr)]
+    (when (not ^{:go/via [exprFlags]} (.IsValue tv))
+      (.fatalf pw expr "expected value: %v" (syntax/String expr)))
+
+    (.-Type tv)))
+
+
+
+(go/type writer "A writer provides APIs for writing out an individual element.\n" (struct
+    ^{:line 177 :tag (* pkgWriter)} p
+
+    (* pkgbits/Encoder)
+
+
+    ^{:line 182 :tag (* types2/Signature) :doc "sig holds the signature for the current function body, if any.\n"} sig
+
+    ;; TODO(mdempsky): We should be able to prune localsIdx whenever a
+    ;; scope closes, and then maybe we can just use the same map for
+    ;; storing the TypeParams too (as their TypeName instead).
+
+
+
+    ^{:line 190 :tag (map (* types2/Var) int) :doc "localsIdx tracks any local variables declared within this\nfunction body. It's unused for writing out non-body things.\n"} localsIdx
+
+
+
+    ^{:line 194 :tag (slice posVar) :doc "closureVars tracks any free variables that are referenced by this\nfunction body. It's unused for writing out non-body things.\n"} closureVars
+    ^{:line 195 :tag (map (* types2/Var) int)} closureVarsIdx ; index of previously seen free variables
+
+    ^{:line 197 :tag (* writerDict)} dict
+
+
+
+    ^{:line 201 :tag bool :doc "derived tracks whether the type being written out references any\ntype parameters. It's unused for writing non-type things.\n"} derived))
+
+
+
+(go/type writerDict "A writerDict tracks types and objects that are used by a declaration.\n" (struct
+
+    ^{:line 207 :tag (slice (* types2/TypeParam)) :doc "implicits contains type parameters from enclosing declarations.\n"} implicits
+
+    ^{:line 209 :tag (slice (* types2/TypeParam)) :doc "receivers contains receiver type parameters of the declaration.\n"} receivers
+
+
+
+    ^{:line 213 :tag (slice derivedInfo) :doc "derived is a slice of type indices for computing derived types\n(i.e., types that depend on the declaration's type parameters).\n"} derived
+
+
+
+    ^{:line 217 :tag (map types2/Type index) :doc "derivedIdx maps a Type to its corresponding index within the\nderived slice, if present.\n"} derivedIdx
+
+
+    ^{:line 220 :tag (slice writerMethodExprInfo) :doc "These slices correspond to entries in the runtime dictionary.\n"} typeParamMethodExprs
+    ^{:line 221 :tag (slice objInfo)} subdicts
+    ^{:line 222 :tag (slice typeInfo)} rtypes
+    ^{:line 223 :tag (slice itabInfo)} itabs))
+
+
+(go/type itabInfo (struct
+    ^{:line 227 :tag typeInfo} typ
+    ^{:line 228 :tag typeInfo} iface))
+
+
+
+
+
+^{:go/end 248} (go/method typeParamIndex "typeParamIndex returns the index of the given type parameter within\nthe dictionary. This may differ from typ.Index() when there are\nimplicit or receiver type parameters.\n" ^int [^{:tag (* writerDict)} dict ^{:tag (* types2/TypeParam)} typ]
+  (range [idx implicit (.-implicits dict)]
+    (when (== implicit typ)
+      (return idx)))
+
+
+
+  (range [idx receiver (.-receivers dict)]
+    (when (== receiver typ)
+      (return (+ (len (.-implicits dict)) idx))))
+
+
+
+  (+ (len (.-implicits dict)) (len (.-receivers dict)) (.Index typ)))
+
+
+
+(go/type derivedInfo "A derivedInfo represents a reference to an encoded generic Go type.\n" (struct
+    ^{:line 252 :tag index} idx))
+
+
+
+
+
+
+
+
+
+
+(go/type typeInfo "A typeInfo represents a reference to an encoded Go type.\n\nIf derived is true, then the typeInfo represents a generic Go type\nthat contains type parameters. In this case, idx is an index into\nthe readerDict.derived{,Types} arrays.\n\nOtherwise, the typeInfo represents a non-generic Go type, and idx\nis an index into the reader.typs array instead.\n" (struct
+    ^{:line 264 :tag index} idx
+    ^{:line 265 :tag bool} derived))
+
+
+
+
+(go/type objInfo "An objInfo represents a reference to an encoded, instantiated (if\napplicable) Go object.\n" (struct
+    ^{:line 271 :tag index} idx ; index for the generic function declaration
+    ^{:line 272 :tag (slice typeInfo)} explicits)) ; info for the type arguments
+
+
+
+
+
+(go/type selectorInfo "A selectorInfo represents a reference to an encoded field or method\nname (i.e., objects that can only be accessed using selector\nexpressions).\n" (struct
+    ^{:line 279 :tag index} pkgIdx
+    ^{:line 280 :tag index} nameIdx))
+
+
+
+
+^{:go/breaks [[5 291]] :go/end 292} (go/method anyDerived "anyDerived reports whether any of info's explicit type arguments\nare derived types.\n" ^bool [^objInfo info]
+  (range [_ explicit (.-explicits info)]
+    (when (.-derived explicit)
+      (return true)))
+
+
+  false)
+
+
+
+
+^{:go/breaks [[7 306]] :go/end 307} (go/method equals "equals reports whether info and other represent the same Go object\n(i.e., same base object and identical type arguments, if any).\n" ^bool [^objInfo info ^objInfo other]
+  (when (!= (.-idx info) (.-idx other))
+    (return false))
+
+  (go/call assert (== (len (.-explicits info)) (len (.-explicits other))))
+  (range [i targ (.-explicits info)]
+    (when (!= targ (aget (.-explicits other) i))
+      (return false)))
+
+
+  true)
+
+
+(go/type writerMethodExprInfo (struct
+    ^{:line 310 :tag int} typeParamIdx
+    ^{:line 311 :tag selectorInfo} methodInfo))
+
+
+
+
+
+^{:go/end 329} (go/method typeParamMethodExprIdx "typeParamMethodExprIdx returns the index where the given encoded\nmethod expression function pointer appears within this dictionary's\ntype parameters method expressions section, adding it if necessary.\n" ^int [^{:tag (* writerDict)} dict ^int typeParamIdx ^selectorInfo methodInfo]
+  (let [newInfo (lit writerMethodExprInfo typeParamIdx methodInfo)]
+
+    (range [idx oldInfo (.-typeParamMethodExprs dict)]
+      (when (== oldInfo newInfo)
+        (return idx)))
+
+
+
+    (let [idx (len (.-typeParamMethodExprs dict))]
+      (set! (.-typeParamMethodExprs dict) (append (.-typeParamMethodExprs dict) newInfo))
+      ^{:line 328} idx)))
+
+
+
+
+
+^{:go/end 344} (go/method subdictIdx "subdictIdx returns the index where the given encoded object's\nruntime dictionary appears within this dictionary's subdictionary\nsection, adding it if necessary.\n" ^int [^{:tag (* writerDict)} dict ^objInfo newInfo]
+  (range [idx oldInfo (.-subdicts dict)]
+    (when (.equals oldInfo newInfo)
+      (return idx)))
+
+
+
+  (let [idx (len (.-subdicts dict))]
+    (set! (.-subdicts dict) (append (.-subdicts dict) newInfo))
+    ^{:line 343} idx))
+
+
+
+
+
+^{:go/end 359} (go/method rtypeIdx "rtypeIdx returns the index where the given encoded type's\n*runtime._type value appears within this dictionary's rtypes\nsection, adding it if necessary.\n" ^int [^{:tag (* writerDict)} dict ^typeInfo newInfo]
+  (range [idx oldInfo (.-rtypes dict)]
+    (when (== oldInfo newInfo)
+      (return idx)))
+
+
+
+  (let [idx (len (.-rtypes dict))]
+    (set! (.-rtypes dict) (append (.-rtypes dict) newInfo))
+    ^{:line 358} idx))
+
+
+
+
+
+^{:go/end 376} (go/method itabIdx "itabIdx returns the index where the given encoded type pair's\n*runtime.itab value appears within this dictionary's itabs section,\nadding it if necessary.\n" ^int [^{:tag (* writerDict)} dict ^typeInfo typInfo ^typeInfo ifaceInfo]
+  (let [newInfo (lit itabInfo typInfo ifaceInfo)]
+
+    (range [idx oldInfo (.-itabs dict)]
+      (when (== oldInfo newInfo)
+        (return idx)))
+
+
+
+    (let [idx (len (.-itabs dict))]
+      (set! (.-itabs dict) (append (.-itabs dict) newInfo))
+      ^{:line 375} idx)))
+
+
+^{:go/end 383} (go/method newWriter ^{:tag (* writer)} [^{:tag (* pkgWriter)} pw ^pkgbits/SectionKind k ^pkgbits/SyncMarker marker]
+  (addr ^{:go/breaks [2 4]} (lit writer
+      :Encoder ^{:go/via [PkgEncoder]} (.NewEncoder pw k marker)
+      :p pw)))
+
+
+
+;; @@@ Positions
+
+
+^{:go/end 401} (go/method pos "pos writes the position of p into the element bitstream.\n" [^{:tag (* writer)} w ^poser p]
+  ^{:go/via [Encoder]} (.Sync w pkgbits/SyncPos)
+  (let [pos (.Pos p)]
+
+    ;; TODO(mdempsky): Track down the remaining cases here and fix them.
+    (when (not ^{:go/via [Encoder]} (.Bool w (.IsKnown pos)))
+      (return))
+
+
+    ;; TODO(mdempsky): Delta encoding.
+    (.posBase w (.Base pos))
+    ^{:go/via [Encoder]} (.Uint w (.Line pos))
+    ^{:go/via [Encoder]} (.Uint w (.Col pos))))
+
+
+
+
+^{:go/end 407} (go/method posBase "posBase writes a reference to the given PosBase into the element\nbitstream.\n" [^{:tag (* writer)} w ^{:tag (* syntax/PosBase)} b]
+  ^{:go/via [Encoder]} (.Reloc w pkgbits/SectionPosBase (.posBaseIdx (.-p w) b)))
+
+
+
+^{:go/end 427} (go/method posBaseIdx "posBaseIdx returns the index for the given PosBase.\n" ^index [^{:tag (* pkgWriter)} pw ^{:tag (* syntax/PosBase)} b]
+  (when [(values idx ok) (aget (.-posBasesIdx pw) b)] ok
+    (return idx))
+
+
+  (let [w (.newWriter pw pkgbits/SectionPosBase pkgbits/SyncPosBase)]
+    (aset (.-posBasesIdx (.-p w)) b ^{:go/via [Encoder]} (.-Idx w))
+
+    ^{:go/via [Encoder]} (.String w (trimFilename b))
+
+    (when (not ^{:go/via [Encoder]} (.Bool w (.IsFileBase b)))
+      (.pos w b)
+      ^{:go/via [Encoder]} (.Uint w (.Line b))
+      ^{:go/via [Encoder]} (.Uint w (.Col b)))
+
+
+    ^{:go/via [Encoder]} (.Flush w)))
+
+
+;; @@@ Packages
+
+
+^{:go/end 434} (go/method pkg "pkg writes a use of the given Package into the element bitstream.\n" [^{:tag (* writer)} w ^{:tag (* types2/Package)} pkg]
+  (.pkgRef w (.pkgIdx (.-p w) pkg)))
+
+
+^{:go/end 439} (go/method pkgRef [^{:tag (* writer)} w ^index idx]
+  ^{:go/via [Encoder]} (.Sync w pkgbits/SyncPkg)
+  ^{:go/via [Encoder]} (.Reloc w pkgbits/SectionPkg idx))
+
+
+
+
+^{:go/end 477} (go/method pkgIdx "pkgIdx returns the index for the given package, adding it to the\npackage export data if needed.\n" ^index [^{:tag (* pkgWriter)} pw ^{:tag (* types2/Package)} pkg]
+  (when [(values idx ok) (aget (.-pkgsIdx pw) pkg)] ok
+    (return idx))
+
+
+  (let [w (.newWriter pw pkgbits/SectionPkg pkgbits/SyncPkgDef)]
+    (aset (.-pkgsIdx pw) pkg ^{:go/via [Encoder]} (.-Idx w))
+
+    ;; The universe and package unsafe need to be handled specially by
+    ;; importers anyway, so we serialize them using just their package
+    ;; path. This ensures that readers don't confuse them for
+    ;; user-defined packages.
+    (switch pkg
+      (case [nil] ; universe
+        ^{:go/via [Encoder]} (.String w "builtin")) ; same package path used by godoc
+      (case [types2/Unsafe]
+        ^{:go/via [Encoder]} (.String w "unsafe"))
+      (default
+        ;; TODO(mdempsky): Write out pkg.Path() for curpkg too.
+        (let [^string path (zero string)]
+          (when (!= pkg (.-curpkg (.-p w)))
+            (set! path (.Path pkg)))
+
+          (base/Assertf (and (!= path "builtin") (!= path "unsafe")) "unexpected path for user-defined package: %q" path)
+          ^{:go/via [Encoder]} (.String w path)
+          ^{:go/via [Encoder]} (.String w (.Name pkg))
+
+          ^{:go/via [Encoder]} (.Len w (len (.Imports pkg)))
+          (range [_ imp (.Imports pkg)]
+            (.pkg w imp)))))
+
+
+
+    ^{:go/via [Encoder]} (.Flush w)))
+
+
+;; @@@ Types
+
+(go/var
+  ^{:line 482} [anyTypeName (assert (* types2/TypeName) (.Lookup types2/Universe "any"))]
+  ^{:line 483} [comparableTypeName (assert (* types2/TypeName) (.Lookup types2/Universe "comparable"))]
+  ^{:line 484} [runeTypeName (assert (* types2/TypeName) (.Lookup types2/Universe "rune"))])
+
+
+
+^{:go/end 490} (go/method typ "typ writes a use of the given type into the bitstream.\n" [^{:tag (* writer)} w ^types2/Type typ]
+  (.typInfo w (.typIdx (.-p w) typ (.-dict w))))
+
+
+
+
+^{:go/end 502} (go/method typInfo "typInfo writes a use of the given type (specified as a typeInfo\ninstead) into the bitstream.\n" [^{:tag (* writer)} w ^typeInfo info]
+  ^{:go/via [Encoder]} (.Sync w pkgbits/SyncType)
+  (if ^{:go/via [Encoder]} (.Bool w (.-derived info)) (do
+      ^{:go/via [Encoder]} (.Len w (conv int (.-idx info)))
+      (set! (.-derived w) true))
+
+    ^{:go/via [Encoder]} (.Reloc w pkgbits/SectionType (.-idx info))))
+
+
+
+
+
+
+
+
+^{:go/end 629} (go/method typIdx "typIdx returns the index where the export data description of type\ncan be read back in. If no such index exists yet, it's created.\n\ntypIdx also reports whether typ is a derived type; that is, whether\nits identity depends on type parameters.\n" ^typeInfo [^{:tag (* pkgWriter)} pw ^types2/Type typ ^{:tag (* writerDict)} dict]
+  ;; Strip non-global aliases, because they only appear in inline
+  ;; bodies anyway. Otherwise, they can cause types.Sym collisions
+  ;; (e.g., "main.C" for both of the local type aliases in
+  ;; test/fixedbugs/issue50190.go).
+  (while true
+    (if [(values alias ok) (assert (* types2/Alias) typ)] (and ok (not (isGlobal (.Obj alias))))
+      (set! typ (.Rhs alias))
+
+      (break)))
+
+
+
+  (when [(values idx ok) (aget (.-typsIdx pw) typ)] ok
+    (return (lit typeInfo :idx idx :derived false)))
+
+  (when (!= dict nil)
+    (when [(values idx ok) (aget (.-derivedIdx dict) typ)] ok
+      (return (lit typeInfo :idx idx :derived true))))
+
+
+
+  (let [w (.newWriter pw pkgbits/SectionType pkgbits/SyncTypeIdx)]
+    (set! (.-dict w) dict)
+
+    (type-switch [typ typ]
+      (default
+        (base/Fatalf "unexpected type: %v (%T)" typ typ))
+
+      (case [(* types2/Basic)]
+        (switch [kind (.Kind typ)]
+          (case [(== kind types2/Invalid)]
+            (base/Fatalf "unexpected types2.Invalid"))
+
+          (case [(== (aget types2/Typ kind) typ)]
+            ^{:go/via [Encoder]} (.Code w pkgbits/TypeBasic)
+            ^{:go/via [Encoder]} (.Len w (conv int kind)))
+
+          (default
+            ;; Handle "byte" and "rune" as references to their TypeNames.
+            (let [obj (assert (* types2/TypeName) (.Lookup types2/Universe (.Name typ)))]
+              (go/call assert (== ^{:go/via [object]} (.Type obj) typ))
+
+              ^{:go/via [Encoder]} (.Code w pkgbits/TypeNamed)
+              (.namedType w obj nil)))))
+
+
+      (case [(* types2/Named)]
+        ^{:go/via [Encoder]} (.Code w pkgbits/TypeNamed)
+        (.namedType w (splitNamed typ)))
+
+      (case [(* types2/Alias)]
+        ^{:go/via [Encoder]} (.Code w pkgbits/TypeNamed)
+        (.namedType w (splitAlias typ)))
+
+      (case [(* types2/TypeParam)]
+        (set! (.-derived w) true)
+        ^{:go/via [Encoder]} (.Code w pkgbits/TypeTypeParam)
+        ^{:go/via [Encoder]} (.Len w (.typeParamIndex (.-dict w) typ)))
+
+      (case [(* types2/Array)]
+        ^{:go/via [Encoder]} (.Code w pkgbits/TypeArray)
+        ^{:go/via [Encoder]} (.Uint64 w (conv uint64 (.Len typ)))
+        (.typ w (.Elem typ)))
+
+      (case [(* types2/Chan)]
+        ^{:go/via [Encoder]} (.Code w pkgbits/TypeChan)
+        ^{:go/via [Encoder]} (.Len w (conv int (.Dir typ)))
+        (.typ w (.Elem typ)))
+
+      (case [(* types2/Map)]
+        ^{:go/via [Encoder]} (.Code w pkgbits/TypeMap)
+        (.typ w (.Key typ))
+        (.typ w (.Elem typ)))
+
+      (case [(* types2/Pointer)]
+        ^{:go/via [Encoder]} (.Code w pkgbits/TypePointer)
+        (.typ w (.Elem typ)))
+
+      (case [(* types2/Signature)]
+        (base/Assertf (== (.TypeParams typ) nil) "unexpected type params: %v" typ)
+        ^{:go/via [Encoder]} (.Code w pkgbits/TypeSignature)
+        (.signature w typ))
+
+      (case [(* types2/Slice)]
+        ^{:go/via [Encoder]} (.Code w pkgbits/TypeSlice)
+        (.typ w (.Elem typ)))
+
+      (case [(* types2/Struct)]
+        ^{:go/via [Encoder]} (.Code w pkgbits/TypeStruct)
+        (.structType w typ))
+
+      (case [(* types2/Interface)]
+        ;; Handle "any" as reference to its TypeName.
+        ;; The underlying "any" interface is canonical, so this logic handles both
+        ;; GODEBUG=gotypesalias=1 (when any is represented as a types2.Alias), and
+        ;; gotypesalias=0.
+        (when (== (types2/Unalias typ) (types2/Unalias ^{:go/via [object]} (.Type anyTypeName)))
+          ^{:go/via [Encoder]} (.Code w pkgbits/TypeNamed)
+          (.obj w anyTypeName nil)
+          (break))
+
+
+        ^{:go/via [Encoder]} (.Code w pkgbits/TypeInterface)
+        (.interfaceType w typ))
+
+      (case [(* types2/Union)]
+        ^{:go/via [Encoder]} (.Code w pkgbits/TypeUnion)
+        (.unionType w typ)))
+
+
+    (when (.-derived w)
+      (let [idx (conv index (len (.-derived dict)))]
+        (set! (.-derived dict) (append (.-derived dict) (lit derivedInfo :idx ^{:go/via [Encoder]} (.Flush w))))
+        (aset (.-derivedIdx dict) typ idx)
+        (return (lit typeInfo :idx idx :derived true))))
+
+
+    (aset (.-typsIdx pw) typ ^{:go/via [Encoder]} (.-Idx w))
+    (lit typeInfo :idx ^{:go/via [Encoder]} (.Flush w) :derived false)))
+
+
+
+^{:go/end 640} (go/method namedType "namedType writes a use of the given named type into the bitstream.\n" [^{:tag (* writer)} w ^{:tag (* types2/TypeName)} obj ^{:tag (slice types2/Type)} targs]
+  ;; Named types that are declared within a generic function (and
+  ;; thus have implicit type parameters) are always derived types.
+  (when (.hasImplicitTypeParams (.-p w) obj)
+    (set! (.-derived w) true))
+
+
+  (.obj w obj targs))
+
+
+^{:go/end 652} (go/method structType [^{:tag (* writer)} w ^{:tag (* types2/Struct)} typ]
+  ^{:go/via [Encoder]} (.Len w (.NumFields typ))
+  (for [i 0] (< i (.NumFields typ)) (inc! i)
+    (let [f (.Field typ i)]
+      (.pos w f)
+      (.selector w f)
+      (.typ w ^{:go/via [object]} (.Type f))
+      ^{:go/via [Encoder]} (.String w (.Tag typ i))
+      ^{:go/via [Encoder]} (.Bool w (.Embedded f)))))
+
+
+
+^{:go/end 661} (go/method unionType [^{:tag (* writer)} w ^{:tag (* types2/Union)} typ]
+  ^{:go/via [Encoder]} (.Len w (.Len typ))
+  (for [i 0] (< i (.Len typ)) (inc! i)
+    (let [t (.Term typ i)]
+      ^{:go/via [Encoder]} (.Bool w (.Tilde t))
+      (.typ w (.Type t)))))
+
+
+
+^{:go/end 706} (go/method interfaceType [^{:tag (* writer)} w ^{:tag (* types2/Interface)} typ]
+  ;; If typ has no embedded types but it's not a basic interface, then
+  ;; the natural description we write out below will fail to
+  ;; reconstruct it.
+  (when (and (== (.NumEmbeddeds typ) 0) (not (.IsMethodSet typ)))
+    ;; Currently, this can only happen for the underlying Interface of
+    ;; "comparable", which is needed to handle type declarations like
+    ;; "type C comparable".
+    (go/call assert (== typ (.Underlying (assert (* types2/Named) ^{:go/via [object]} (.Type comparableTypeName)))))
+
+    ;; Export as "interface{ comparable }".
+    ^{:go/via [Encoder]} (.Len w 0) ; NumExplicitMethods
+    ^{:go/via [Encoder]} (.Len w 1) ; NumEmbeddeds
+    ^{:go/via [Encoder]} (.Bool w false) ; IsImplicit
+    (.typ w ^{:go/via [object]} (.Type comparableTypeName)) ; EmbeddedType(0)
+    (return))
+
+
+  ^{:go/via [Encoder]} (.Len w (.NumExplicitMethods typ))
+  ^{:go/via [Encoder]} (.Len w (.NumEmbeddeds typ))
+
+  (if (and (== (.NumExplicitMethods typ) 0) (== (.NumEmbeddeds typ) 1))
+    ^{:go/via [Encoder]} (.Bool w (.IsImplicit typ))
+
+    ;; Implicit interfaces always have 0 explicit methods and 1
+    ;; embedded type, so we skip writing out the implicit flag
+    ;; otherwise as a space optimization.
+    (go/call assert (not (.IsImplicit typ))))
+
+
+  (for [i 0] (< i (.NumExplicitMethods typ)) (inc! i)
+    (let [m (.ExplicitMethod typ i)
+        ^{:line 695} sig (assert (* types2/Signature) ^{:go/via [object]} (.Type m))]
+      (go/call assert (== (.TypeParams sig) nil))
+
+      (.pos w m)
+      (.selector w m)
+      (.signature w sig)))
+
+
+  (for [i 0] (< i (.NumEmbeddeds typ)) (inc! i)
+    (.typ w (.EmbeddedType typ i))))
+
+
+
+^{:go/end 713} (go/method signature [^{:tag (* writer)} w ^{:tag (* types2/Signature)} sig]
+  ^{:go/via [Encoder]} (.Sync w pkgbits/SyncSignature)
+  (.params w (.Params sig))
+  (.params w (.Results sig))
+  ^{:go/via [Encoder]} (.Bool w (.Variadic sig)))
+
+
+^{:go/end 721} (go/method params [^{:tag (* writer)} w ^{:tag (* types2/Tuple)} typ]
+  ^{:go/via [Encoder]} (.Sync w pkgbits/SyncParams)
+  ^{:go/via [Encoder]} (.Len w (.Len typ))
+  (for [i 0] (< i (.Len typ)) (inc! i)
+    (.param w (.At typ i))))
+
+
+
+^{:go/end 728} (go/method param [^{:tag (* writer)} w ^{:tag (* types2/Var)} param]
+  ^{:go/via [Encoder]} (.Sync w pkgbits/SyncParam)
+  (.pos w param)
+  (.localIdent w param)
+  (.typ w ^{:go/via [object]} (.Type param)))
+
+
+;; @@@ Objects
+
+
+
+
+
+
+^{:go/end 739} (go/method obj "obj writes a use of the given object into the bitstream.\n\nIf obj is a generic object, then explicits are the explicit type\narguments used to instantiate it (i.e., used to substitute the\nobject's own declared type parameters).\n" [^{:tag (* writer)} w ^types2/Object obj ^{:tag (slice types2/Type)} explicits]
+  (.objInfo w (.objInstIdx (.-p w) obj explicits (.-dict w))))
+
+
+
+
+^{:go/end 754} (go/method objInfo "objInfo writes a use of the given encoded object into the\nbitstream.\n" [^{:tag (* writer)} w ^objInfo info]
+  ^{:go/via [Encoder]} (.Sync w pkgbits/SyncObject)
+  (when (.Has ^{:go/via [Encoder]} (.Version w) pkgbits/DerivedFuncInstance)
+    ^{:go/via [Encoder]} (.Bool w false))
+
+  ^{:go/via [Encoder]} (.Reloc w pkgbits/SectionObj (.-idx info))
+
+  ^{:go/via [Encoder]} (.Len w (len (.-explicits info)))
+  (range [_ info (.-explicits info)]
+    (.typInfo w info)))
+
+
+
+
+
+
+^{:go/end 765} (go/method objInstIdx "objInstIdx returns the indices for an object and a corresponding\nlist of type arguments used to instantiate it, adding them to the\nexport data as needed.\n" ^objInfo [^{:tag (* pkgWriter)} pw ^types2/Object obj ^{:tag (slice types2/Type)} explicits ^{:tag (* writerDict)} dict]
+  (let [explicitInfos (make (slice typeInfo) (len explicits))]
+    (range [i explicitInfos]
+      (aset explicitInfos i (.typIdx pw (aget explicits i) dict)))
+
+    (lit objInfo :idx (.objIdx pw obj) :explicits explicitInfos)))
+
+
+
+
+^{:go/end 841} (go/method objIdx "objIdx returns the index for the given Object, adding it to the\nexport data as needed.\n" ^index [^{:tag (* pkgWriter)} pw ^types2/Object obj]
+  ;; TODO(mdempsky): Validate that obj is a global object (or a local
+  ;; defined type, which we hoist to global scope anyway).
+
+  (when [(values idx ok) (aget (.-objsIdx pw) obj)] ok
+    (return idx))
+
+
+  (let [dict (addr ^{:go/breaks [2]} (lit writerDict
+          :derivedIdx (make (map types2/Type index))))]
+
+
+    (when (and (isDefinedType obj) (== (.Pkg obj) (.-curpkg pw)))
+      (let [(values decl ok) (aget (.-typDecls pw) (assert (* types2/TypeName) obj))]
+        (when (not ok)
+          (base/Fatalf "%v not in pw.typDecls" (assert (* types2/TypeName) obj)))
+
+        (set! (.-implicits dict) (.-implicits decl))))
+
+
+    (when (isGenericMethod (.Type obj))
+      (set! (.-receivers dict) (asTypeParamSlice (.RecvTypeParams (assert (* types2/Signature) (.Type obj))))))
+
+
+    ;; We encode objects into 4 elements across different sections, all
+    ;; sharing the same index:
+    ;;
+    ;; - RelocName has just the object's qualified name (i.e.,
+    ;;   Object.Pkg and Object.Name) and the CodeObj indicating what
+    ;;   specific type of Object it is (Var, Func, etc).
+    ;;
+    ;; - RelocObj has the remaining public details about the object,
+    ;;   relevant to go/types importers.
+    ;;
+    ;; - RelocObjExt has additional private details about the object,
+    ;;   which are only relevant to cmd/compile itself. This is
+    ;;   separated from RelocObj so that go/types importers are
+    ;;   unaffected by internal compiler changes.
+    ;;
+    ;; - RelocObjDict has public details about the object's type
+    ;;   parameters and derived type's used by the object. This is
+    ;;   separated to facilitate the eventual introduction of
+    ;;   shape-based stenciling.
+    ;;
+    ;; TODO(mdempsky): Re-evaluate whether RelocName still makes sense
+    ;; to keep separate from RelocObj.
+
+    (let [w (.newWriter pw pkgbits/SectionObj pkgbits/SyncObject1)
+        ^{:line 817} wext (.newWriter pw pkgbits/SectionObjExt pkgbits/SyncObject1)
+        ^{:line 818} wname (.newWriter pw pkgbits/SectionName pkgbits/SyncObject1)
+        ^{:line 819} wdict (.newWriter pw pkgbits/SectionObjDict pkgbits/SyncObject1)]
+
+      (aset (.-objsIdx pw) obj ^{:go/via [Encoder]} (.-Idx w)) ; break cycles
+      (go/call assert (== ^{:go/via [Encoder]} (.-Idx wext) ^{:go/via [Encoder]} (.-Idx w)))
+      (go/call assert (== ^{:go/via [Encoder]} (.-Idx wname) ^{:go/via [Encoder]} (.-Idx w)))
+      (go/call assert (== ^{:go/via [Encoder]} (.-Idx wdict) ^{:go/via [Encoder]} (.-Idx w)))
+
+      (set! (.-dict w) dict)
+      (set! (.-dict wext) dict)
+
+      (let [code (.doObj w wext obj)]
+        ^{:go/via [Encoder]} (.Flush w)
+        ^{:go/via [Encoder]} (.Flush wext)
+
+        (.qualifiedIdent wname obj)
+        ^{:go/via [Encoder]} (.Code wname code)
+        ^{:go/via [Encoder]} (.Flush wname)
+
+        (.objDict wdict obj (.-dict w))
+        ^{:go/via [Encoder]} (.Flush wdict)
+
+        ^{:go/via [Encoder]} (.-Idx w)))))
+
+
+
+
+^{:go/end 953} (go/method doObj "doObj writes the RelocObj definition for obj to w, and the\nRelocObjExt definition to wext.\n" ^pkgbits/CodeObj [^{:tag (* writer)} w ^{:tag (* writer)} wext ^types2/Object obj]
+  (when (!= (.Pkg obj) (.-curpkg (.-p w)))
+    (return pkgbits/ObjStub))
+
+
+  (type-switch [obj obj]
+    (default
+      (.unexpected (.-p w) "object" obj)
+      (panic "unreachable"))
+
+    (case [(* types2/Const)]
+      (.pos w obj)
+      (.typ w ^{:go/via [object]} (.Type obj))
+      ^{:go/via [Encoder]} (.Value w (.Val obj))
+      (return pkgbits/ObjConst))
+
+    (case [(* types2/Func)]
+      (when (> (.-LowerH base/Flag) 0)
+        ;; Unified IR panics are the worst; this is a huge help in debugging them.
+        (defer (^{:go/end 869} (fn []
+              (when [p (recover)] (!= p nil)
+                (fmt/Printf "Intercepted unified IR writer panic for function %s, repanicking" (.FullName obj))
+                (panic p))))))
+
+
+
+      (let [(values decl ok) (aget (.-funDecls (.-p w)) obj)]
+        (go/call assert ok)
+        (let [sig (assert (* types2/Signature) ^{:go/via [object]} (.Type obj))]
+
+          (.pos w obj)
+          (if (isGenericMethod sig) (do
+              ^{:go/via [Encoder]} (.Bool w true) ; generic method
+
+              (.selector w obj)
+              (.typeParamNames w (.RecvTypeParams sig))
+              (.param w (.Recv sig)))
+            (do
+              (when (.Has ^{:go/via [Encoder]} (.Version w) pkgbits/GenericMethods)
+                ^{:go/via [Encoder]} (.Bool w false)))) ; function
+
+
+          (.typeParamNames w (.TypeParams sig))
+          (.signature w sig)
+          (.pos w decl)
+          (.funcExt wext obj)
+          (return pkgbits/ObjFunc))))
+
+    (case [(* types2/TypeName)]
+      (when (.IsAlias obj)
+        (.pos w obj)
+        (let [rhs ^{:go/via [object]} (.Type obj)
+            ^{:line 897 :tag (* types2/TypeParamList)} tparams (zero (* types2/TypeParamList))]
+          (when [(values alias ok) (assert (* types2/Alias) rhs)] ok ; materialized alias
+            (go/call assert (== (.TypeArgs alias) nil))
+            (set! tparams (.TypeParams alias))
+            (set! rhs (.Rhs alias)))
+
+          (when (.Has ^{:go/via [Encoder]} (.Version w) pkgbits/AliasTypeParamNames)
+            (.typeParamNames w tparams))
+
+          (go/call assert (or (.Has ^{:go/via [Encoder]} (.Version w) pkgbits/AliasTypeParamNames) (== (.Len tparams) 0)))
+          (.typ w rhs)
+          (return pkgbits/ObjAlias)))
+
+
+      (let [named (assert (* types2/Named) ^{:go/via [object]} (.Type obj))]
+        (go/call assert (== (.TypeArgs named) nil))
+
+        (.pos w obj)
+        (.typeParamNames w (.TypeParams named))
+        (.typeExt wext obj)
+        (.typ w (.Underlying named))
+
+        ;; separate generic and non-generic methods
+        (let [(values ^{:tag (slice (* types2/Func))} methods ^{:tag (slice (* types2/Func))} gmethods) (zero (slice (* types2/Func)))]
+          (range [i (.NumMethods named)]
+            (let [m (.Method named i)]
+              (if (isGenericMethod ^{:go/via [object]} (.Type m))
+                (set! gmethods (append gmethods m))
+
+                (set! methods (append methods m)))))
+
+
+          ;; encode non-generic methods inline
+          ^{:go/via [Encoder]} (.Len w (len methods))
+          (range [_ m methods]
+            (.method w wext m))
+
+          (when (> (len gmethods) 0)
+            (go/call assert (.Has ^{:go/via [Encoder]} (.Version w) pkgbits/GenericMethods)))
+
+          ;; encode a pointer to each generic method
+          (when (.Has ^{:go/via [Encoder]} (.Version w) pkgbits/GenericMethods)
+            ^{:go/via [Encoder]} (.Len w (len gmethods))
+            (range [_ m gmethods]
+              ^{:go/via [Encoder]} (.Reloc w pkgbits/SectionObj (.objIdx (.-p w) m))))
+
+
+
+          (return pkgbits/ObjType))))
+
+    (case [(* types2/Var)]
+      (.pos w obj)
+      (.typ w ^{:go/via [object]} (.Type obj))
+      (.varExt wext obj)
+      (return pkgbits/ObjVar))))
+
+
+
+
+^{:go/end 1038} (go/method objDict "objDict writes the dictionary needed for reading the given object.\n" [^{:tag (* writer)} w ^types2/Object obj ^{:tag (* writerDict)} dict]
+  ;; TODO(mdempsky): Split objDict into multiple entries? reader.go
+  ;; doesn't care about the type parameter bounds, and reader2.go
+  ;; doesn't care about referenced functions.
+
+  (set! (.-dict w) dict) ; TODO(mdempsky): This is a bit sketchy.
+  ^{:go/via [Encoder]} (.Len w (len (.-implicits dict)))
+
+  (let [rtparams (objRecvTypeParams obj)
+      ^{:line 965} tparams (objTypeParams obj)]
+
+    (if (.Has ^{:go/via [Encoder]} (.Version w) pkgbits/GenericMethods)
+      ^{:go/via [Encoder]} (.Len w (len rtparams))
+
+      (go/call assert (== (len rtparams) 0)))
+
+    ^{:go/via [Encoder]} (.Len w (len tparams))
+
+    (range [_ rtparam rtparams]
+      (.typ w (.Constraint rtparam)))
+
+    (range [_ tparam tparams]
+      (.typ w (.Constraint tparam)))
+
+
+    (let [nderived (len (.-derived dict))]
+      ^{:go/via [Encoder]} (.Len w nderived)
+      (range [_ typ (.-derived dict)]
+        ^{:go/via [Encoder]} (.Reloc w pkgbits/SectionType (.-idx typ))
+        (when (.Has ^{:go/via [Encoder]} (.Version w) pkgbits/DerivedInfoNeeded)
+          ^{:go/via [Encoder]} (.Bool w false)))
+
+
+
+      ;; Write runtime dictionary information.
+      ;;
+      ;; N.B., the go/types importer reads up to the section, but doesn't
+      ;; read any further, so it's safe to change. (See TODO above.)
+
+      ;; For each type parameter, write out whether the constraint is a
+      ;; basic interface. This is used to determine how aggressively we
+      ;; can shape corresponding type arguments.
+      ;;
+      ;; This is somewhat redundant with writing out the full type
+      ;; parameter constraints above, but the compiler currently skips
+      ;; over those. Also, we don't care about the *declared* constraints,
+      ;; but how the type parameters are actually *used*. E.g., if a type
+      ;; parameter is constrained to `int | uint` but then never used in
+      ;; arithmetic/conversions/etc, we could shape those together.
+      (range [_ implicit (.-implicits dict)]
+        ^{:go/via [Encoder]} (.Bool w (.IsMethodSet (assert (* types2/Interface) (.Underlying implicit)))))
+
+      (range [_ rtparam rtparams]
+        ^{:go/via [Encoder]} (.Bool w (.IsMethodSet (assert (* types2/Interface) (.Underlying rtparam)))))
+
+      (range [_ tparam tparams]
+        ^{:go/via [Encoder]} (.Bool w (.IsMethodSet (assert (* types2/Interface) (.Underlying tparam)))))
+
+
+      ^{:go/via [Encoder]} (.Len w (len (.-typeParamMethodExprs dict)))
+      (range [_ info (.-typeParamMethodExprs dict)]
+        ^{:go/via [Encoder]} (.Len w (.-typeParamIdx info))
+        (.selectorInfo w (.-methodInfo info)))
+
+
+      ^{:go/via [Encoder]} (.Len w (len (.-subdicts dict)))
+      (range [_ info (.-subdicts dict)]
+        (.objInfo w info))
+
+
+      ^{:go/via [Encoder]} (.Len w (len (.-rtypes dict)))
+      (range [_ info (.-rtypes dict)]
+        (.typInfo w info))
+
+
+      ^{:go/via [Encoder]} (.Len w (len (.-itabs dict)))
+      (range [_ info (.-itabs dict)]
+        (.typInfo w (.-typ info))
+        (.typInfo w (.-iface info)))
+
+
+      (go/call assert (== (len (.-derived dict)) nderived)))))
+
+
+^{:go/end 1049} (go/method typeParamNames [^{:tag (* writer)} w ^{:tag (* types2/TypeParamList)} tparams]
+  ^{:go/via [Encoder]} (.Sync w pkgbits/SyncTypeParamNames)
+
+  (let [ntparams (.Len tparams)]
+    (for [i 0] (< i ntparams) (inc! i)
+      (let [tparam (.Obj (.At tparams i))]
+        (.pos w tparam)
+        (.localIdent w tparam)))))
+
+
+
+^{:go/end 1065} (go/method method [^{:tag (* writer)} w ^{:tag (* writer)} wext ^{:tag (* types2/Func)} meth]
+  (let [(values decl ok) (aget (.-funDecls (.-p w)) meth)]
+    (go/call assert ok)
+    (let [sig (assert (* types2/Signature) ^{:go/via [object]} (.Type meth))]
+
+      ^{:go/via [Encoder]} (.Sync w pkgbits/SyncMethod)
+      (.pos w meth)
+      (.selector w meth)
+      (.typeParamNames w (.RecvTypeParams sig))
+      (.param w (.Recv sig))
+      (.signature w sig)
+
+      (.pos w decl) ; XXX: Hack to workaround linker limitations.
+      (.funcExt wext meth))))
+
+
+
+
+^{:go/end 1099} (go/method qualifiedIdent "qualifiedIdent writes out the name of an object typically declared at package\nscope. It's also used to refer to generic methods and locally defined types.\n" [^{:tag (* writer)} w ^types2/Object obj]
+  ^{:go/via [Encoder]} (.Sync w pkgbits/SyncSym)
+
+  (let [name (.Name obj)]
+    (when (and (isDefinedType obj) (== (.Pkg obj) (.-curpkg (.-p w))))
+      (let [(values decl ok) (aget (.-typDecls (.-p w)) (assert (* types2/TypeName) obj))]
+        (go/call assert ok)
+        (when (!= (.-gen decl) 0)
+          ;; For local defined types, we embed a scope-disambiguation
+          ;; number directly into their name. types.SplitVargenSuffix then
+          ;; knows to look for this.
+          ;;
+          ;; TODO(mdempsky): Find a better solution; this is terrible.
+          (set! name (fmt/Sprintf "%s·%v" name (.-gen decl))))))
+
+
+
+    ;; Generic methods are promoted to objects and thus need qualified identifiers.
+    ;; They must be contextualized by their defining type.
+    (when (isGenericMethod (.Type obj))
+      (let [recv ^{:go/via [object]} (.Type (.Recv (assert (* types2/Signature) (.Type obj))))
+          ^{:line 1090} fstr "%s.%s"]
+        (when [(values _ ok) (assert (* types2/Pointer) (types2/Unalias recv))] ok
+          (set! fstr "(*%s).%s"))
+
+        (set! name (fmt/Sprintf fstr ^{:go/via [object]} (.Name (.Obj (assert (* types2/Named) (types2/Unalias (deref2 recv))))) name))))
+
+
+    (.pkg w (.Pkg obj))
+    ^{:go/via [Encoder]} (.String w name)))
+
+
+;; TODO(mdempsky): We should be able to omit pkg from both localIdent
+;; and selector, because they should always be known from context.
+;; However, past frustrations with this optimization in iexport make
+;; me a little nervous to try it again.
+
+
+
+
+^{:go/end 1114} (go/method localIdent "localIdent writes the name of a locally declared object (i.e.,\nobjects that can only be accessed by non-qualified name, within the\ncontext of a particular function).\n" [^{:tag (* writer)} w ^types2/Object obj]
+  (go/call assert (not (isGlobal obj)))
+  ^{:go/via [Encoder]} (.Sync w pkgbits/SyncLocalIdent)
+  (.pkg w (.Pkg obj))
+  ^{:go/via [Encoder]} (.String w (.Name obj)))
+
+
+
+
+^{:go/end 1120} (go/method selector "selector writes the name of a field or method (i.e., objects that\ncan only be accessed using selector expressions).\n" [^{:tag (* writer)} w ^types2/Object obj]
+  (.selectorInfo w (.selectorIdx (.-p w) obj)))
+
+
+^{:go/end 1126} (go/method selectorInfo [^{:tag (* writer)} w ^selectorInfo info]
+  ^{:go/via [Encoder]} (.Sync w pkgbits/SyncSelector)
+  (.pkgRef w (.-pkgIdx info))
+  ^{:go/via [Encoder]} (.StringRef w (.-nameIdx info)))
+
+
+^{:go/end 1132} (go/method selectorIdx ^selectorInfo [^{:tag (* pkgWriter)} pw ^types2/Object obj]
+  (let [pkgIdx (.pkgIdx pw (.Pkg obj))
+      ^{:line 1130} nameIdx ^{:go/via [PkgEncoder]} (.StringIdx pw (.Name obj))]
+    (lit selectorInfo :pkgIdx pkgIdx :nameIdx nameIdx)))
+
+
+;; @@@ Compiler extensions
+
+^{:go/end 1214} (go/method funcExt [^{:tag (* writer)} w ^{:tag (* types2/Func)} obj]
+  (let [(values decl ok) (aget (.-funDecls (.-p w)) obj)]
+    (go/call assert ok)
+
+    ;; TODO(mdempsky): Extend these pragma validation flags to account
+    ;; for generics. E.g., linkname probably doesn't make sense at
+    ;; least.
+
+    (let [pragma (asPragmaFlag (.-Pragma decl))]
+      (when (and (!= (bit-and pragma ir/Systemstack) 0) (!= (bit-and pragma ir/Nosplit) 0))
+        (.errorf (.-p w) decl "go:nosplit and go:systemstack cannot be combined"))
+
+      (let [wi (asWasmImport (.-Pragma decl))
+          ^{:line 1149} we (asWasmExport (.-Pragma decl))]
+
+        (if (!= (.-Body decl) nil) (do
+            (when (!= (bit-and pragma ir/Noescape) 0)
+              (.errorf (.-p w) decl "can only use //go:noescape with external func implementations"))
+
+            (when (!= wi nil)
+              (.errorf (.-p w) decl "can only use //go:wasmimport with external func implementations"))
+
+            (when (and ^:go/paren (and (!= (bit-and pragma ir/UintptrKeepAlive) 0) (== (bit-and pragma ir/UintptrEscapes) 0)) (== (bit-and pragma ir/Nosplit) 0))
+              ;; Stack growth can't handle uintptr arguments that may
+              ;; be pointers (as we don't know which are pointers
+              ;; when creating the stack map). Thus uintptrkeepalive
+              ;; functions (and all transitive callees) must be
+              ;; nosplit.
+              ;;
+              ;; N.B. uintptrescapes implies uintptrkeepalive but it
+              ;; is OK since the arguments must escape to the heap.
+              ;;
+              ;; TODO(prattmic): Add recursive nosplit check of callees.
+              ;; TODO(prattmic): Functions with no body (i.e.,
+              ;; assembly) must also be nosplit, but we can't check
+              ;; that here.
+              (.errorf (.-p w) decl "go:uintptrkeepalive requires go:nosplit")))
+
+          (do
+            (when (or (.-Complete base/Flag) (== (.-Value (.-Name decl)) "init"))
+              ;; Linknamed functions are allowed to have no body. Hopefully
+              ;; the linkname target has a body. See issue 23311.
+              ;; Wasmimport functions are also allowed to have no body.
+              (when [(values _ ok) (aget (.-linknames (.-p w)) obj)] (and (not ok) (== wi nil))
+                (.errorf (.-p w) decl "missing function body")))))
+
+
+
+
+        (let [(values sig block) (values (assert (* types2/Signature) ^{:go/via [object]} (.Type obj)) (.-Body decl))
+            (values body closureVars) (.bodyIdx (.-p w) sig block (.-dict w))]
+          (when (> (len closureVars) 0)
+            (fmt/Fprintln os/Stderr "CLOSURE" closureVars))
+
+          (go/call assert (== (len closureVars) 0))
+
+          ^{:go/via [Encoder]} (.Sync w pkgbits/SyncFuncExt)
+          (.pragmaFlag w pragma)
+          (.linkname w obj)
+
+          (when (== buildcfg/GOARCH "wasm")
+            (if (!= wi nil) (do
+                ^{:go/via [Encoder]} (.String w (.-Module wi))
+                ^{:go/via [Encoder]} (.String w (.-Name wi)))
+              (do
+                ^{:go/via [Encoder]} (.String w "")
+                ^{:go/via [Encoder]} (.String w "")))
+
+            (if (!= we nil)
+              ^{:go/via [Encoder]} (.String w (.-Name we))
+
+              ^{:go/via [Encoder]} (.String w "")))
+
+
+
+          ^{:go/via [Encoder]} (.Bool w false) ; stub extension
+          ^{:go/via [Encoder]} (.Reloc w pkgbits/SectionBody body)
+          ^{:go/via [Encoder]} (.Sync w pkgbits/SyncEOF))))))
+
+
+^{:go/end 1227} (go/method typeExt [^{:tag (* writer)} w ^{:tag (* types2/TypeName)} obj]
+  (let [(values decl ok) (aget (.-typDecls (.-p w)) obj)]
+    (go/call assert ok)
+
+    ^{:go/via [Encoder]} (.Sync w pkgbits/SyncTypeExt)
+
+    (.pragmaFlag w (asPragmaFlag ^{:go/via [TypeDecl]} (.-Pragma decl)))
+
+    ;; No LSym.SymIdx info yet.
+    ^{:go/via [Encoder]} (.Int64 w -1)
+    ^{:go/via [Encoder]} (.Int64 w -1)))
+
+
+^{:go/end 1232} (go/method varExt [^{:tag (* writer)} w ^{:tag (* types2/Var)} obj]
+  ^{:go/via [Encoder]} (.Sync w pkgbits/SyncVarExt)
+  (.linkname w obj))
+
+
+^{:go/end 1240} (go/method linkname [^{:tag (* writer)} w ^types2/Object obj]
+  ^{:go/via [Encoder]} (.Sync w pkgbits/SyncLinkname)
+  ^{:go/via [Encoder]} (.Int64 w -1)
+  (let [info (aget (.-linknames (.-p w)) obj)]
+    ^{:go/via [Encoder]} (.String w (.-remote info))
+    ^{:go/via [Encoder]} (.Bool w (.-std info))))
+
+
+^{:go/end 1245} (go/method pragmaFlag [^{:tag (* writer)} w ^ir/PragmaFlag p]
+  ^{:go/via [Encoder]} (.Sync w pkgbits/SyncPragma)
+  ^{:go/via [Encoder]} (.Int w (conv int p)))
+
+
+;; @@@ Function bodies
+
+
+
+^{:go/end 1263} (go/method bodyIdx "bodyIdx returns the index for the given function body (specified by\nblock), adding it to the export data\n" [^{:tag (* pkgWriter)} pw ^{:tag (* types2/Signature)} sig ^{:tag (* syntax/BlockStmt)} block ^{:tag (* writerDict)} dict] :results [^index idx ^{:tag (slice posVar)} closureVars]
+  (let [w (.newWriter pw pkgbits/SectionBody pkgbits/SyncFuncBody)]
+    (set! (.-sig w) sig)
+    (set! (.-dict w) dict)
+
+    (.declareParams w sig)
+    (when ^{:go/via [Encoder]} (.Bool w (!= block nil))
+      (.stmts w (.-List block))
+      (.pos w (.-Rbrace block)))
+
+
+    (return ^{:go/via [Encoder]} (.Flush w) (.-closureVars w))))
+
+
+^{:go/end 1277} (go/method declareParams [^{:tag (* writer)} w ^{:tag (* types2/Signature)} sig]
+  (let [addLocals ^{:go/end 1270} (fn [^{:tag (* types2/Tuple)} params]
+        (for [i 0] (< i (.Len params)) (inc! i)
+          (.addLocal w (.At params i))))]
+
+
+
+    (when [recv (.Recv sig)] (!= recv nil)
+      (.addLocal w recv))
+
+    (addLocals (.Params sig))
+    (addLocals (.Results sig))))
+
+
+
+^{:go/end 1293} (go/method addLocal "addLocal records the declaration of a new local variable.\n" [^{:tag (* writer)} w ^{:tag (* types2/Var)} obj]
+  (let [idx (len (.-localsIdx w))]
+
+    ^{:go/via [Encoder]} (.Sync w pkgbits/SyncAddLocal)
+    (when ^{:go/via [PkgEncoder]} (.SyncMarkers (.-p w))
+      ^{:go/via [Encoder]} (.Int w idx))
+
+    (.varDictIndex w obj)
+
+    (when (== (.-localsIdx w) nil)
+      (set! (.-localsIdx w) (make (map (* types2/Var) int))))
+
+    (aset (.-localsIdx w) obj idx)))
+
+
+
+
+^{:go/end 1315} (go/method useLocal "useLocal writes a reference to the given local or free variable\ninto the bitstream.\n" [^{:tag (* writer)} w ^syntax/Pos pos ^{:tag (* types2/Var)} obj]
+  ^{:go/via [Encoder]} (.Sync w pkgbits/SyncUseObjLocal)
+
+  (when [(values idx ok) (aget (.-localsIdx w) obj)] ^{:go/via [Encoder]} (.Bool w ok)
+    ^{:go/via [Encoder]} (.Len w idx)
+    (return))
+
+
+  (let [(values idx ok) (aget (.-closureVarsIdx w) obj)]
+    (when (not ok)
+      (when (== (.-closureVarsIdx w) nil)
+        (set! (.-closureVarsIdx w) (make (map (* types2/Var) int))))
+
+      (set! idx (len (.-closureVars w)))
+      (set! (.-closureVars w) (append (.-closureVars w) (lit posVar pos obj)))
+      (aset (.-closureVarsIdx w) obj idx))
+
+    ^{:go/via [Encoder]} (.Len w idx)))
+
+
+^{:go/end 1320} (go/method openScope [^{:tag (* writer)} w ^syntax/Pos pos]
+  ^{:go/via [Encoder]} (.Sync w pkgbits/SyncOpenScope)
+  (.pos w pos))
+
+
+^{:go/end 1326} (go/method closeScope [^{:tag (* writer)} w ^syntax/Pos pos]
+  ^{:go/via [Encoder]} (.Sync w pkgbits/SyncCloseScope)
+  (.pos w pos)
+  (.closeAnotherScope w))
+
+
+^{:go/end 1330} (go/method closeAnotherScope [^{:tag (* writer)} w]
+  ^{:go/via [Encoder]} (.Sync w pkgbits/SyncCloseAnotherScope))
+
+
+;; @@@ Statements
+
+
+^{:go/end 1341} (go/method stmt "stmt writes the given statement into the function body bitstream.\n" [^{:tag (* writer)} w ^syntax/Stmt stmt]
+  (let [^{:tag (slice syntax/Stmt)} stmts (zero (slice syntax/Stmt))]
+    (when (!= stmt nil)
+      (set! stmts (lit (slice syntax/Stmt) stmt)))
+
+    (.stmts w stmts)))
+
+
+^{:go/end 1366} (go/method stmts [^{:tag (* writer)} w ^{:tag (slice syntax/Stmt)} stmts]
+  (let [dead false]
+    ^{:go/via [Encoder]} (.Sync w pkgbits/SyncStmts)
+    (let [^:var lastLabel -1]
+      (range [i stmt stmts]
+        (when [(values _ ok) (assert (* syntax/LabeledStmt) stmt)] ok
+          (set! lastLabel i)))
+
+
+      (range [i stmt stmts]
+        (when (and dead (> i lastLabel))
+          ;; Any statements after a terminating and last label statement are safe to omit.
+          ;; Otherwise, code after label statement may refer to dead stmts between terminating
+          ;; and label statement, see issue #65593.
+          (when [(values _ ok) (assert (* syntax/LabeledStmt) stmt)] (not ok)
+            (continue)))
+
+
+        (.stmt1 w stmt)
+        (set! dead (.terminates (.-p w) stmt)))
+
+      ^{:go/via [Encoder]} (.Code w stmtEnd)
+      ^{:go/via [Encoder]} (.Sync w pkgbits/SyncStmtsEnd))))
+
+
+^{:go/end 1486} (go/method stmt1 [^{:tag (* writer)} w ^syntax/Stmt stmt]
+  (type-switch [stmt stmt]
+    (default
+      (.unexpected (.-p w) "statement" stmt))
+
+    (case [nil (* syntax/EmptyStmt)]
+      (return))
+
+    (case [(* syntax/AssignStmt)]
+      (switch
+        (case [(== (.-Rhs stmt) nil)]
+          ^{:go/via [Encoder]} (.Code w stmtIncDec)
+          (.op w (aget binOps (.-Op stmt)))
+          (.expr w (.-Lhs stmt))
+          (.pos w stmt))
+
+        (case [(and (!= (.-Op stmt) 0) (!= (.-Op stmt) syntax/Def))]
+          ^{:go/via [Encoder]} (.Code w stmtAssignOp)
+          (.op w (aget binOps (.-Op stmt)))
+          (.expr w (.-Lhs stmt))
+          (.pos w stmt)
+
+          (let [^types2/Type typ (zero types2/Type)]
+            (when (and (!= (.-Op stmt) syntax/Shl) (!= (.-Op stmt) syntax/Shr))
+              (set! typ (.typeOf (.-p w) (.-Lhs stmt))))
+
+            (.implicitConvExpr w typ (.-Rhs stmt))))
+
+        (default
+          (.assignStmt w stmt (.-Lhs stmt) (.-Rhs stmt)))))
+
+
+    (case [(* syntax/BlockStmt)]
+      ^{:go/via [Encoder]} (.Code w stmtBlock)
+      (.blockStmt w stmt))
+
+    (case [(* syntax/BranchStmt)]
+      ^{:go/via [Encoder]} (.Code w stmtBranch)
+      (.pos w stmt)
+      (let [^ir/Op op (zero ir/Op)]
+        (switch (.-Tok stmt)
+          (case [syntax/Break]
+            (set! op ir/OBREAK))
+          (case [syntax/Continue]
+            (set! op ir/OCONTINUE))
+          (case [syntax/Fallthrough]
+            (set! op ir/OFALL))
+          (case [syntax/Goto]
+            (set! op ir/OGOTO)))
+
+        (.op w op)
+        (.optLabel w (.-Label stmt))))
+
+    (case [(* syntax/CallStmt)]
+      ^{:go/via [Encoder]} (.Code w stmtCall)
+      (.pos w stmt)
+      (let [^ir/Op op (zero ir/Op)]
+        (switch (.-Tok stmt)
+          (case [syntax/Defer]
+            (set! op ir/ODEFER))
+          (case [syntax/Go]
+            (set! op ir/OGO)))
+
+        (.op w op)
+        (.expr w (.-Call stmt))
+        (when (== (.-Tok stmt) syntax/Defer)
+          (.optExpr w (.-DeferAt stmt)))))
+
+
+    (case [(* syntax/DeclStmt)]
+      (range [_ decl (.-DeclList stmt)]
+        (.declStmt w decl)))
+
+
+    (case [(* syntax/ExprStmt)]
+      ^{:go/via [Encoder]} (.Code w stmtExpr)
+      (.expr w (.-X stmt)))
+
+    (case [(* syntax/ForStmt)]
+      ^{:go/via [Encoder]} (.Code w stmtFor)
+      (.forStmt w stmt))
+
+    (case [(* syntax/IfStmt)]
+      ^{:go/via [Encoder]} (.Code w stmtIf)
+      (.ifStmt w stmt))
+
+    (case [(* syntax/LabeledStmt)]
+      ^{:go/via [Encoder]} (.Code w stmtLabel)
+      (.pos w stmt)
+      (.label w (.-Label stmt))
+      (.stmt1 w (.-Stmt stmt)))
+
+    (case [(* syntax/ReturnStmt)]
+      ^{:go/via [Encoder]} (.Code w stmtReturn)
+      (.pos w stmt)
+
+      (let [resultTypes (.Results (.-sig w))
+          ^{:line 1465} dstType ^{:go/end 1467} (fn ^types2/Type [^int i]
+            ^{:go/via [object]} (.Type (.At resultTypes i)))]
+
+        (.multiExpr w stmt dstType (syntax/UnpackListExpr (.-Results stmt)))))
+
+    (case [(* syntax/SelectStmt)]
+      ^{:go/via [Encoder]} (.Code w stmtSelect)
+      (.selectStmt w stmt))
+
+    (case [(* syntax/SendStmt)]
+      (let [chanType (assert (* types2/Chan) (types2/CoreType (.typeOf (.-p w) (.-Chan stmt))))]
+
+        ^{:go/via [Encoder]} (.Code w stmtSend)
+        (.pos w stmt)
+        (.expr w (.-Chan stmt))
+        (.implicitConvExpr w (.Elem chanType) (.-Value stmt))))
+
+    (case [(* syntax/SwitchStmt)]
+      ^{:go/via [Encoder]} (.Code w stmtSwitch)
+      (.switchStmt w stmt))))
+
+
+
+^{:go/end 1495} (go/method assignList [^{:tag (* writer)} w ^syntax/Expr expr]
+  (let [exprs (syntax/UnpackListExpr expr)]
+    ^{:go/via [Encoder]} (.Len w (len exprs))
+
+    (range [_ expr exprs]
+      (.assign w expr))))
+
+
+
+^{:go/end 1523} (go/method assign [^{:tag (* writer)} w ^syntax/Expr expr]
+  (set! expr (syntax/Unparen expr))
+
+  (when [(values name ok) (assert (* syntax/Name) expr)] ok
+    (when (== (.-Value name) "_")
+      ^{:go/via [Encoder]} (.Code w assignBlank)
+      (return))
+
+
+    (when [(values obj ok) (aget (.-Defs (.-info (.-p w))) name)] ok
+      (let [obj (assert (* types2/Var) obj)]
+
+        ^{:go/via [Encoder]} (.Code w assignDef)
+        (.pos w obj)
+        (.localIdent w obj)
+        (.typ w ^{:go/via [object]} (.Type obj))
+
+        ;; TODO(mdempsky): Minimize locals index size by deferring
+        ;; this until the variables actually come into scope.
+        (.addLocal w obj)
+        (return))))
+
+
+
+  ^{:go/via [Encoder]} (.Code w assignExpr)
+  (.expr w expr))
+
+
+^{:go/end 1535} (go/method declStmt [^{:tag (* writer)} w ^syntax/Decl decl]
+  (type-switch [decl decl]
+    (default
+      (.unexpected (.-p w) "declaration" decl))
+
+    (case [(* syntax/ConstDecl) (* syntax/TypeDecl)])
+
+    (case [(* syntax/VarDecl)]
+      (.assignStmt w decl (namesAsExpr (.-NameList decl)) (.-Values decl)))))
+
+
+
+
+^{:go/end 1573} (go/method assignStmt "assignStmt writes out an assignment for \"lhs = rhs\".\n" [^{:tag (* writer)} w ^poser pos ^syntax/Expr lhs0 ^syntax/Expr rhs0]
+  (let [lhs (syntax/UnpackListExpr lhs0)
+      ^{:line 1540} rhs (syntax/UnpackListExpr rhs0)]
+
+    ^{:go/via [Encoder]} (.Code w stmtAssign)
+    (.pos w pos)
+
+    ;; As if w.assignList(lhs0).
+    ^{:go/via [Encoder]} (.Len w (len lhs))
+    (range [_ expr lhs]
+      (.assign w expr))
+
+
+    (let [dstType ^{:go/end 1570} (fn ^types2/Type [^int i]
+          (let [dst (aget lhs i)]
+
+            ;; Finding dstType is somewhat involved, because for VarDecl
+            ;; statements, the Names are only added to the info.{Defs,Uses}
+            ;; maps, not to info.Types.
+            (when [(values name ok) (assert (* syntax/Name) (syntax/Unparen dst))] ok
+              (if (== (.-Value name) "_")
+                (return nil) ; ok: no implicit conversion
+                (if [(values def ok) (assert (* types2/Var) (aget (.-Defs (.-info (.-p w))) name))] ok
+                  (return ^{:go/via [object]} (.Type def))
+                  (if [(values use ok) (assert (* types2/Var) (aget (.-Uses (.-info (.-p w))) name))] ok
+                    (return ^{:go/via [object]} (.Type use))
+
+                    (.fatalf (.-p w) dst "cannot find type of destination object: %v" dst)))))
+
+
+
+            (.typeOf (.-p w) dst)))]
+
+
+      (.multiExpr w pos dstType rhs))))
+
+
+^{:go/end 1580} (go/method blockStmt [^{:tag (* writer)} w ^{:tag (* syntax/BlockStmt)} stmt]
+  ^{:go/via [Encoder]} (.Sync w pkgbits/SyncBlockStmt)
+  (.openScope w ^{:go/via [stmt node]} (.Pos stmt))
+  (.stmts w (.-List stmt))
+  (.closeScope w (.-Rbrace stmt)))
+
+
+^{:go/end 1638} (go/method forStmt [^{:tag (* writer)} w ^{:tag (* syntax/ForStmt)} stmt]
+  ^{:go/via [Encoder]} (.Sync w pkgbits/SyncForStmt)
+  (.openScope w ^{:go/via [stmt node]} (.Pos stmt))
+
+  (if [(values rang ok) (assert (* syntax/RangeClause) (.-Init stmt))] ^{:go/via [Encoder]} (.Bool w ok) (do
+      (.pos w rang)
+      (.assignList w (.-Lhs rang))
+      (.expr w (.-X rang))
+
+      (let [xtyp (.typeOf (.-p w) (.-X rang))]
+        (when [(values _ isMap) (assert (* types2/Map) (types2/CoreType xtyp))] isMap
+          (.rtype w xtyp))
+
+        (do
+          (let [lhs (syntax/UnpackListExpr (.-Lhs rang))
+              ^{:line 1597} assign ^{:go/end 1616} (fn [^int i ^types2/Type src]
+                (when (>= i (len lhs))
+                  (return))
+
+                (let [dst (syntax/Unparen (aget lhs i))]
+                  (when [(values name ok) (assert (* syntax/Name) dst)] (and ok (== (.-Value name) "_"))
+                    (return))
+
+
+                  (let [^types2/Type dstType (zero types2/Type)]
+                    (if (.-Def rang)
+                      ;; For `:=` assignments, the LHS names only appear in Defs,
+                      ;; not Types (as used by typeOf).
+                      (set! dstType ^{:go/via [object]} (.Type (assert (* types2/Var) (aget (.-Defs (.-info (.-p w))) (assert (* syntax/Name) dst)))))
+
+                      (set! dstType (.typeOf (.-p w) dst)))
+
+
+                    (.convRTTI w src dstType))))
+
+
+              (values keyType valueType) (types2/RangeKeyVal (.typeOf (.-p w) (.-X rang)))]
+            (assign 0 keyType)
+            (assign 1 valueType)))))
+
+
+    (do
+      (when (and (!= (.-Cond stmt) nil) (< (.staticBool (.-p w) (addr (.-Cond stmt))) 0)) ; always false
+        (set! (.-Post stmt) nil)
+        (set! (.-List (.-Body stmt)) nil))
+
+
+      (.pos w stmt)
+      (.stmt w (.-Init stmt))
+      (.optExpr w (.-Cond stmt))
+      (.stmt w (.-Post stmt))))
+
+
+  (.blockStmt w (.-Body stmt))
+  ^{:go/via [Encoder]} (.Bool w (.distinctVars w stmt))
+  (.closeAnotherScope w))
+
+
+^{:go/end 1657} (go/method distinctVars ^bool [^{:tag (* writer)} w ^{:tag (* syntax/ForStmt)} stmt]
+  (let [lv (.-LoopVar base/Debug)
+      ^{:line 1642} fileVersion (aget (.-FileVersions (.-info (.-p w))) (.FileBase ^{:go/via [stmt node]} (.Pos stmt)))
+      ^{:line 1643} is122 (or (== fileVersion "") (>= (version/Compare fileVersion "go1.22") 0))]
+
+    ;; Turning off loopvar for 1.22 is only possible with loopvarhash=qn
+    ;;
+    ;; Debug.LoopVar values to be preserved for 1.21 compatibility are 1 and 2,
+    ;; which are also set (=1) by GOEXPERIMENT=loopvar.  The knobs for turning on
+    ;; the new, unshared, loopvar behavior apply to versions less than 1.21 because
+    ;; (1) 1.21 also did that and (2) this is believed to be the likely use case;
+    ;; anyone checking to see if it affects their code will just run the GOEXPERIMENT
+    ;; but will not also update all their go.mod files to 1.21.
+    ;;
+    ;; -gcflags=-d=loopvar=3 enables logging for 1.22 but does not turn loopvar on for <= 1.21.
+
+    (or is122 (and (> lv 0) (!= lv 3)))))
+
+
+^{:go/end 1677} (go/method ifStmt [^{:tag (* writer)} w ^{:tag (* syntax/IfStmt)} stmt]
+  (let [cond (.staticBool (.-p w) (addr (.-Cond stmt)))]
+
+    ^{:go/via [Encoder]} (.Sync w pkgbits/SyncIfStmt)
+    (.openScope w ^{:go/via [stmt node]} (.Pos stmt))
+    (.pos w stmt)
+    (.stmt w (.-Init stmt))
+    (.expr w (.-Cond stmt))
+    ^{:go/via [Encoder]} (.Int w cond)
+    (if (>= cond 0)
+      (.blockStmt w (.-Then stmt))
+
+      (.pos w (.-Rbrace (.-Then stmt))))
+
+    (when (<= cond 0)
+      (.stmt w (.-Else stmt)))
+
+    (.closeAnotherScope w)))
+
+
+^{:go/end 1697} (go/method selectStmt [^{:tag (* writer)} w ^{:tag (* syntax/SelectStmt)} stmt]
+  ^{:go/via [Encoder]} (.Sync w pkgbits/SyncSelectStmt)
+
+  (.pos w stmt)
+  ^{:go/via [Encoder]} (.Len w (len (.-Body stmt)))
+  (range [i clause (.-Body stmt)]
+    (when (> i 0)
+      (.closeScope w ^{:go/via [node]} (.Pos clause)))
+
+    (.openScope w ^{:go/via [node]} (.Pos clause))
+
+    (.pos w clause)
+    (.stmt w (.-Comm clause))
+    (.stmts w (.-Body clause)))
+
+  (when (> (len (.-Body stmt)) 0)
+    (.closeScope w (.-Rbrace stmt))))
+
+
+
+^{:go/end 1861} (go/method switchStmt [^{:tag (* writer)} w ^{:tag (* syntax/SwitchStmt)} stmt]
+  ^{:go/via [Encoder]} (.Sync w pkgbits/SyncSwitchStmt)
+
+  (.openScope w ^{:go/via [stmt node]} (.Pos stmt))
+  (.pos w stmt)
+  (.stmt w (.-Init stmt))
+
+  (let [(values ^types2/Type iface ^types2/Type tagType) (zero types2/Type)
+      ^{:line 1707 :tag bool} tagTypeIsChan (zero bool)]
+    (if [(values guard ok) (assert (* syntax/TypeSwitchGuard) (.-Tag stmt))] ^{:go/via [Encoder]} (.Bool w ok) (do
+        (set! iface (.typeOf (.-p w) (.-X guard)))
+
+        (.pos w guard)
+        (when [tag (.-Lhs guard)] ^{:go/via [Encoder]} (.Bool w (!= tag nil))
+          (.pos w tag)
+
+          ;; Like w.localIdent, but we don't have a types2.Object.
+          ^{:go/via [Encoder]} (.Sync w pkgbits/SyncLocalIdent)
+          (.pkg w (.-curpkg (.-p w)))
+          ^{:go/via [Encoder]} (.String w (.-Value tag)))
+
+        (.expr w (.-X guard)))
+
+      (let [tag (.-Tag stmt)
+
+          ^{:line 1724 :tag constant/Value} tagValue (zero constant/Value)]
+        (if (!= tag nil)
+          (let [tv (.typeAndValue (.-p w) tag)]
+            (set! tagType (.-Type tv))
+            (set! tagValue (.-Value tv))
+            (set! (values _ tagTypeIsChan) (assert (* types2/Chan) (.Underlying tagType))))
+          (do
+            (set! tagType (aget types2/Typ types2/Bool))
+            (set! tagValue (constant/MakeBool true))))
+
+
+        (when (!= tagValue nil)
+          ;; If the switch tag has a constant value, look for a case
+          ;; clause that we always branch to.
+          (^{:go/end 1774} (fn []
+              (let [^{:tag (* syntax/CaseClause)} target (zero (* syntax/CaseClause))]
+                (label :Outer
+                  (range [_ clause (.-Body stmt)]
+                    (when (== (.-Cases clause) nil)
+                      (set! target clause))
+
+                    (range [_ cas (syntax/UnpackListExpr (.-Cases clause))]
+                      (let [tv (.typeAndValue (.-p w) cas)]
+                        (when (== (.-Value tv) nil)
+                          (return)) ; non-constant case; give up
+
+                        (when (constant/Compare tagValue token/EQL (.-Value tv))
+                          (set! target clause)
+                          (break :Outer))))))
+
+
+
+                ;; We've found the target clause, if any.
+
+                (if (!= target nil) (do
+                    (when (hasFallthrough (.-Body target))
+                      (return)) ; fallthrough is tricky; give up
+
+
+                    ;; Rewrite as single "default" case.
+                    (set! (.-Cases target) nil)
+                    (set! (.-Body stmt) (lit (slice (* syntax/CaseClause)) target)))
+
+                  (set! (.-Body stmt) nil))
+
+
+                ;; Clear switch tag (i.e., replace with implicit "true").
+                (set! tag nil)
+                (set! (.-Tag stmt) nil)
+                (set! tagType (aget types2/Typ types2/Bool))))))
+
+
+
+        ;; Walk is going to emit comparisons between the tag value and
+        ;; each case expression, and we want these comparisons to always
+        ;; have the same type. If there are any case values that can't be
+        ;; converted to the tag value's type, then convert everything to
+        ;; `any` instead.
+        ;;
+        ;; Except that we need to keep comparisons of channel values from
+        ;; being wrapped in any(). See issue #67190.
+
+        (when (not tagTypeIsChan)
+          (label :Outer
+            (range [_ clause (.-Body stmt)]
+              (range [_ cas (syntax/UnpackListExpr (.-Cases clause))]
+                (when [casType (.typeOf (.-p w) cas)] (and (not (types2/AssignableTo casType tagType)) ^:go/paren (or (types2/IsInterface casType) (types2/IsInterface tagType)))
+                  (set! tagType (types2/NewInterfaceType nil nil))
+                  (break :Outer))))))
+
+
+
+
+
+        (when ^{:go/via [Encoder]} (.Bool w (!= tag nil))
+          (.implicitConvExpr w tagType tag))))
+
+
+
+    ^{:go/via [Encoder]} (.Len w (len (.-Body stmt)))
+    (range [i clause (.-Body stmt)]
+      (when (> i 0)
+        (.closeScope w ^{:go/via [node]} (.Pos clause)))
+
+      (.openScope w ^{:go/via [node]} (.Pos clause))
+
+      (.pos w clause)
+
+      (let [cases (syntax/UnpackListExpr (.-Cases clause))]
+        (if (!= iface nil) (do
+            ^{:go/via [Encoder]} (.Len w (len cases))
+            (range [_ cas cases]
+              (when ^{:go/via [Encoder]} (.Bool w (isNil (.-p w) cas))
+                (continue))
+
+              (.exprType w iface cas)))
+
+          (do
+            ;; As if w.exprList(clause.Cases),
+            ;; but with implicit conversions to tagType.
+
+            ^{:go/via [Encoder]} (.Sync w pkgbits/SyncExprList)
+            ^{:go/via [Encoder]} (.Sync w pkgbits/SyncExprs)
+            ^{:go/via [Encoder]} (.Len w (len cases))
+            (range [_ cas cases]
+              (let [typ tagType]
+                (when tagTypeIsChan
+                  (set! typ nil))
+
+                (.implicitConvExpr w typ cas)))))
+
+
+
+        (when [(values obj ok) (aget (.-Implicits (.-info (.-p w))) clause)] ok
+          ;; TODO(mdempsky): These pos details are quirkish, but also
+          ;; necessary so the variable's position is correct for DWARF
+          ;; scope assignment later. It would probably be better for us to
+          ;; instead just set the variable's DWARF scoping info earlier so
+          ;; we can give it the correct position information.
+          (let [pos ^{:go/via [node]} (.Pos clause)]
+            (when [typs (syntax/UnpackListExpr (.-Cases clause))] (!= (len typs) 0)
+              (set! pos (typeExprEndPos (aget typs (- (len typs) 1)))))
+
+            (.pos w pos)
+
+            (let [obj (assert (* types2/Var) obj)]
+              (.typ w ^{:go/via [object]} (.Type obj))
+              (.addLocal w obj))))
+
+
+        (.stmts w (.-Body clause))))
+
+    (when (> (len (.-Body stmt)) 0)
+      (.closeScope w (.-Rbrace stmt)))
+
+
+    (.closeScope w (.-Rbrace stmt))))
+
+
+^{:go/end 1868} (go/method label [^{:tag (* writer)} w ^{:tag (* syntax/Name)} label]
+  ^{:go/via [Encoder]} (.Sync w pkgbits/SyncLabel)
+
+  ;; TODO(mdempsky): Replace label strings with dense indices.
+  ^{:go/via [Encoder]} (.String w (.-Value label)))
+
+
+^{:go/end 1875} (go/method optLabel [^{:tag (* writer)} w ^{:tag (* syntax/Name)} label]
+  ^{:go/via [Encoder]} (.Sync w pkgbits/SyncOptLabel)
+  (when ^{:go/via [Encoder]} (.Bool w (!= label nil))
+    (.label w label)))
+
+
+
+;; @@@ Expressions
+
+
+^{:go/end 2222} (go/method expr "expr writes the given expression into the function body bitstream.\n" [^{:tag (* writer)} w ^syntax/Expr expr]
+  (base/Assertf (!= expr nil) "missing expression")
+
+  (set! expr (syntax/Unparen expr)) ; skip parens; unneeded after typecheck
+
+  (let [(values obj inst) (lookupObj (.-p w) expr)
+      ^{:line 1886} targs (asTypeSlice (.-TypeArgs inst))]
+
+    (when [(values tv ok) (.maybeTypeAndValue (.-p w) expr)] ok
+      (when ^{:go/via [exprFlags]} (.IsRuntimeHelper tv)
+        (when [pkg (.Pkg obj)] (and (!= pkg nil) (== (.Name pkg) "runtime"))
+          (let [objName (.Name obj)]
+            ^{:go/via [Encoder]} (.Code w exprRuntimeBuiltin)
+            ^{:go/via [Encoder]} (.String w objName)
+            (return))))
+
+
+
+      (when ^{:go/via [exprFlags]} (.IsType tv)
+        (.fatalf (.-p w) expr "unexpected type expression %v" (syntax/String expr)))
+
+
+      (when (!= (.-Value tv) nil)
+        ^{:go/via [Encoder]} (.Code w exprConst)
+        (.pos w expr)
+        (let [typ (idealType tv)]
+          (go/call assert (!= typ nil))
+          (.typ w typ)
+          ^{:go/via [Encoder]} (.Value w (.-Value tv))
+          (return)))
+
+
+      (when [(values _ isNil) (assert (* types2/Nil) obj)] isNil
+        ^{:go/via [Encoder]} (.Code w exprZero)
+        (.pos w expr)
+        (.typ w (.-Type tv))
+        (return))
+
+
+      ;; With shape types (and particular pointer shaping), we may have
+      ;; an expression of type "go.shape.*uint8", but need to reshape it
+      ;; to another shape-identical type to allow use in field
+      ;; selection, indexing, etc.
+      (when [typ (.-Type tv)] (and (not ^{:go/via [exprFlags]} (.IsBuiltin tv)) (not (isTuple typ)) (not (isUntyped typ)))
+        ^{:go/via [Encoder]} (.Code w exprReshape)
+        (.typ w typ)))
+    ;; fallthrough
+
+
+
+    (when (!= obj nil)
+      (when (!= (len targs) 0)
+        (let [obj (assert (* types2/Func) obj)]
+
+          ^{:go/via [Encoder]} (.Code w exprFuncInst)
+          (.pos w expr)
+          (.funcInst w obj targs)
+          (return)))
+
+
+      (when (isGlobal obj)
+        ^{:go/via [Encoder]} (.Code w exprGlobal)
+        (.obj w obj nil)
+        (return))
+
+
+      (let [obj (assert (* types2/Var) obj)]
+        (go/call assert (not (.IsField obj)))
+
+        ^{:go/via [Encoder]} (.Code w exprLocal)
+        (.useLocal w (.Pos expr) obj)
+        (return)))
+
+
+    (type-switch [expr expr]
+      (default
+        (.unexpected (.-p w) "expression" expr))
+
+      (case [(* syntax/CompositeLit)]
+        ^{:go/via [Encoder]} (.Code w exprCompLit)
+        (.compLit w expr))
+
+      (case [(* syntax/FuncLit)]
+        ^{:go/via [Encoder]} (.Code w exprFuncLit)
+        (.funcLit w expr))
+
+      (case [(* syntax/SelectorExpr)]
+        (let [(values sel ok) (aget (.-Selections (.-info (.-p w))) expr)]
+          (go/call assert ok)
+
+          (switch (.Kind sel)
+            (default
+              (.fatalf (.-p w) expr "unexpected selection kind: %v" (.Kind sel)))
+
+            (case [types2/FieldVal]
+              ^{:go/via [Encoder]} (.Code w exprFieldVal)
+              (.expr w (.-X expr))
+              (.pos w expr)
+              (.selector w (.Obj sel)))
+
+            (case [types2/MethodVal]
+              (.methVal w expr sel))
+
+            (case [types2/MethodExpr]
+              (.methExpr w expr sel)))))
+
+
+      (case [(* syntax/IndexExpr)]
+        ;; might be explicit instantiation of a generic method
+        (when [(values selector ok) (assert (* syntax/SelectorExpr) (.-X expr))] ok
+          (when [(values sel ok) (aget (.-Selections (.-info (.-p w))) selector)] ok
+            (switch (.Kind sel)
+              (default
+                (.fatalf (.-p w) selector "unexpected selection kind: %v" (.Kind sel)))
+              (case [types2/FieldVal])
+              ;; not a method
+              (case [types2/MethodVal]
+                (.methVal w selector sel)
+                (return))
+              (case [types2/MethodExpr]
+                (.methExpr w selector sel)
+                (return)))))
+
+
+
+        (set! _ (.typeOf (.-p w) (.-Index expr))) ; ensure this is an index expression, not an instantiation
+
+        (let [xtyp (.typeOf (.-p w) (.-X expr))
+
+            ^{:line 2009 :tag types2/Type} keyType (zero types2/Type)]
+          (when [(values mapType ok) (assert (* types2/Map) (types2/CoreType xtyp))] ok
+            (set! keyType (.Key mapType)))
+
+
+          ^{:go/via [Encoder]} (.Code w exprIndex)
+          (.expr w (.-X expr))
+          (.pos w expr)
+          (.implicitConvExpr w keyType (.-Index expr))
+          (when (!= keyType nil)
+            (.rtype w xtyp))))
+
+
+      (case [(* syntax/SliceExpr)]
+        ^{:go/via [Encoder]} (.Code w exprSlice)
+        (.expr w (.-X expr))
+        (.pos w expr)
+        (range [_ n (addr (.-Index expr))]
+          (.optExpr w n)))
+
+
+      (case [(* syntax/AssertExpr)]
+        (let [iface (.typeOf (.-p w) (.-X expr))]
+
+          ^{:go/via [Encoder]} (.Code w exprAssert)
+          (.expr w (.-X expr))
+          (.pos w expr)
+          (.exprType w iface (.-Type expr))
+          (.rtype w iface)))
+
+      (case [(* syntax/Operation)]
+        (when (== (.-Y expr) nil)
+          ^{:go/via [Encoder]} (.Code w exprUnaryOp)
+          (.op w (aget unOps (.-Op expr)))
+          (.pos w expr)
+          (.expr w (.-X expr))
+          (break))
+
+
+        (let [^types2/Type commonType (zero types2/Type)]
+          (switch (.-Op expr)
+            (case [syntax/Shl syntax/Shr])
+            ;; ok: operands are allowed to have different types
+            (default
+              (let [xtyp (.typeOf (.-p w) (.-X expr))
+                  ^{:line 2054} ytyp (.typeOf (.-p w) (.-Y expr))]
+                (switch
+                  (case [(types2/AssignableTo xtyp ytyp)]
+                    (set! commonType ytyp))
+                  (case [(types2/AssignableTo ytyp xtyp)]
+                    (set! commonType xtyp))
+                  (default
+                    (.fatalf (.-p w) expr "failed to find common type between %v and %v" xtyp ytyp))))))
+
+
+
+          ^{:go/via [Encoder]} (.Code w exprBinaryOp)
+          (.op w (aget binOps (.-Op expr)))
+          (.implicitConvExpr w commonType (.-X expr))
+          (.pos w expr)
+          (.implicitConvExpr w commonType (.-Y expr))))
+
+      (case [(* syntax/CallExpr)]
+        (let [tv (.typeAndValue (.-p w) (.-Fun expr))]
+          (when ^{:go/via [exprFlags]} (.IsType tv)
+            (go/call assert (== (len (.-ArgList expr)) 1))
+            (go/call assert (not (.-HasDots expr)))
+            (.convertExpr w (.-Type tv) (aget (.-ArgList expr) 0) false)
+            (break))
+
+
+          (let [^types2/Type rtype (zero types2/Type)]
+            (when ^{:go/via [exprFlags]} (.IsBuiltin tv)
+              (switch [(values obj _) (lookupObj (.-p w) (syntax/Unparen (.-Fun expr)))] (.Name obj)
+                (case ["make"]
+                  (go/call assert (>= (len (.-ArgList expr)) 1))
+                  (go/call assert (not (.-HasDots expr)))
+
+                  ^{:go/via [Encoder]} (.Code w exprMake)
+                  (.pos w expr)
+                  (.exprType w nil (aget (.-ArgList expr) 0))
+                  (.exprs w (subslice (.-ArgList expr) 1))
+
+                  (let [typ (.typeOf (.-p w) expr)]
+                    (type-switch [coreType (types2/CoreType typ)]
+                      (default
+                        (.fatalf (.-p w) expr "unexpected core type: %v" coreType))
+                      (case [(* types2/Chan)]
+                        (.rtype w typ))
+                      (case [(* types2/Map)]
+                        (.rtype w typ))
+                      (case [(* types2/Slice)]
+                        (.rtype w (sliceElem typ))))
+
+
+                    (return)))
+
+                (case ["new"]
+                  (go/call assert (== (len (.-ArgList expr)) 1))
+                  (go/call assert (not (.-HasDots expr)))
+                  (let [arg (aget (.-ArgList expr) 0)]
+
+                    ^{:go/via [Encoder]} (.Code w exprNew)
+                    (.pos w expr)
+                    (let [tv (.typeAndValue (.-p w) arg)]
+                      (if ^{:go/via [Encoder]} (.Bool w (not ^{:go/via [exprFlags]} (.IsType tv)))
+                        (.expr w arg) ; new(expr), go1.26
+
+                        (.exprType w nil arg)) ; new(T)
+
+                      (return))))
+
+                (case ["Sizeof"]
+                  (go/call assert (== (len (.-ArgList expr)) 1))
+                  (go/call assert (not (.-HasDots expr)))
+
+                  ^{:go/via [Encoder]} (.Code w exprSizeof)
+                  (.pos w expr)
+                  (.typ w (.typeOf (.-p w) (aget (.-ArgList expr) 0)))
+                  (return))
+
+                (case ["Alignof"]
+                  (go/call assert (== (len (.-ArgList expr)) 1))
+                  (go/call assert (not (.-HasDots expr)))
+
+                  ^{:go/via [Encoder]} (.Code w exprAlignof)
+                  (.pos w expr)
+                  (.typ w (.typeOf (.-p w) (aget (.-ArgList expr) 0)))
+                  (return))
+
+                (case ["Offsetof"]
+                  (go/call assert (== (len (.-ArgList expr)) 1))
+                  (go/call assert (not (.-HasDots expr)))
+                  (let [selector (assert (* syntax/SelectorExpr) (syntax/Unparen (aget (.-ArgList expr) 0)))
+                      ^{:line 2143} index (.Index (aget (.-Selections (.-info (.-p w))) selector))]
+
+                    ^{:go/via [Encoder]} (.Code w exprOffsetof)
+                    (.pos w expr)
+                    (.typ w (deref2 (.typeOf (.-p w) (.-X selector))))
+                    ^{:go/via [Encoder]} (.Len w (- (len index) 1))
+                    (range [_ idx index]
+                      ^{:go/via [Encoder]} (.Len w idx))
+
+                    (return)))
+
+                (case ["append"]
+                  (set! rtype (sliceElem (.typeOf (.-p w) expr))))
+                (case ["copy"]
+                  (let [typ (.typeOf (.-p w) (aget (.-ArgList expr) 0))]
+                    (when [(values tuple ok) (assert (* types2/Tuple) typ)] ok ; "copy(g())"
+                      (set! typ ^{:go/via [object]} (.Type (.At tuple 0))))
+
+                    (set! rtype (sliceElem typ))))
+                (case ["delete"]
+                  (let [typ (.typeOf (.-p w) (aget (.-ArgList expr) 0))]
+                    (when [(values tuple ok) (assert (* types2/Tuple) typ)] ok ; "delete(g())"
+                      (set! typ ^{:go/via [object]} (.Type (.At tuple 0))))
+
+                    (set! rtype typ)))
+                (case ["Slice"]
+                  (set! rtype (sliceElem (.typeOf (.-p w) expr))))))
+
+
+
+            (let [writeFunExpr ^{:go/end 2200} (fn []
+                  (let [fun (syntax/Unparen (.-Fun expr))
+
+                      ^{:line 2176} expr fun]
+                    (when [(values idx ok) (assert (* syntax/IndexExpr) expr)] ok
+                      (set! expr (.-X idx)))
+
+                    (when [(values selector ok) (assert (* syntax/SelectorExpr) expr)] ok
+                      (when [(values sel ok) (aget (.-Selections (.-info (.-p w))) selector)] (and ok (== (.Kind sel) types2/MethodVal))
+                        ^{:go/via [Encoder]} (.Bool w true) ; method call
+                        (let [typ (.recvExpr w selector sel)]
+                          (.methodExpr w selector typ sel)
+                          (return))))
+
+
+
+                    ^{:go/via [Encoder]} (.Bool w false) ; not a method call (i.e., normal function call)
+
+                    (when [(values obj inst) (lookupObj (.-p w) fun)] ^{:go/via [Encoder]} (.Bool w (and (!= obj nil) (!= (.Len (.-TypeArgs inst)) 0)))
+                      (let [obj (assert (* types2/Func) obj)]
+
+                        (.pos w fun)
+                        (.funcInst w obj (asTypeSlice (.-TypeArgs inst)))
+                        (return)))
+
+
+                    (.expr w fun)))
+
+
+                ^{:line 2202} sigType (assert (* types2/Signature) (types2/CoreType (.-Type tv)))
+                ^{:line 2203} paramTypes (.Params sigType)]
+
+              ^{:go/via [Encoder]} (.Code w exprCall)
+              (writeFunExpr)
+              (.pos w expr)
+
+              (let [paramType ^{:go/end 2214} (fn ^types2/Type [^int i]
+                    (when (and (.Variadic sigType) (not (.-HasDots expr)) (>= i (- (.Len paramTypes) 1)))
+                      (return (.Elem (assert (* types2/Slice) ^{:go/via [object]} (.Type (.At paramTypes (- (.Len paramTypes) 1)))))))
+
+                    ^{:go/via [object]} (.Type (.At paramTypes i)))]
+
+
+                (.multiExpr w expr paramType (.-ArgList expr))
+                ^{:go/via [Encoder]} (.Bool w (.-HasDots expr))
+                (when (!= rtype nil)
+                  (.rtype w rtype))))))))))
+
+
+
+
+^{:go/end 2226} (go/func sliceElem ^types2/Type [^types2/Type typ]
+  (.Elem (assert (* types2/Slice) (types2/CoreType typ))))
+
+
+^{:go/end 2232} (go/method optExpr [^{:tag (* writer)} w ^syntax/Expr expr]
+  (when ^{:go/via [Encoder]} (.Bool w (!= expr nil))
+    (.expr w expr)))
+
+
+
+^{:go/end 2239} (go/method methVal [^{:tag (* writer)} w ^{:tag (* syntax/SelectorExpr)} expr ^{:tag (* types2/Selection)} sel]
+  ^{:go/via [Encoder]} (.Code w exprMethodVal)
+  (let [typ (.recvExpr w expr sel)]
+    (.pos w expr)
+    (.methodExpr w expr typ sel)))
+
+
+^{:go/end 2268} (go/method methExpr [^{:tag (* writer)} w ^{:tag (* syntax/SelectorExpr)} expr ^{:tag (* types2/Selection)} sel]
+  ^{:go/via [Encoder]} (.Code w exprMethodExpr)
+
+  (let [tv (.typeAndValue (.-p w) (.-X expr))]
+    (go/call assert ^{:go/via [exprFlags]} (.IsType tv))
+
+    (let [index (.Index sel)
+        ^{:line 2248} implicits (subslice index _ (- (len index) 1))
+
+        ^{:line 2250} typ (.-Type tv)]
+      (.typ w typ)
+
+      ^{:go/via [Encoder]} (.Len w (len implicits))
+      (range [_ ix implicits]
+        ^{:go/via [Encoder]} (.Len w ix)
+        (set! typ ^{:go/via [object]} (.Type (.Field (assert (* types2/Struct) (.Underlying (deref2 typ))) ix))))
+
+
+      (let [recv ^{:go/via [object]} (.Type (.Recv (assert (* types2/Signature) ^{:go/via [object]} (.Type (assert (* types2/Func) (.Obj sel))))))]
+        (cond ^{:go/via [Encoder]} (.Bool w (isPtrTo typ recv)) ; need deref
+          (set! typ recv)
+          ^{:go/via [Encoder]} (.Bool w (isPtrTo recv typ)) ; need addr
+          (set! typ recv))
+
+
+        (.pos w expr)
+        (.methodExpr w expr typ sel)))))
+
+
+
+
+
+^{:go/end 2296} (go/method recvExpr "recvExpr writes out expr.X, but handles any implicit addressing,\ndereferencing, and field selections appropriate for the method\nselection.\n" ^types2/Type [^{:tag (* writer)} w ^{:tag (* syntax/SelectorExpr)} expr ^{:tag (* types2/Selection)} sel]
+  (let [index (.Index sel)
+      ^{:line 2275} implicits (subslice index _ (- (len index) 1))]
+
+    ^{:go/via [Encoder]} (.Code w exprRecv)
+    (.expr w (.-X expr))
+    (.pos w expr)
+    ^{:go/via [Encoder]} (.Len w (len implicits))
+
+    (let [typ (.typeOf (.-p w) (.-X expr))]
+      (range [_ ix implicits]
+        (set! typ ^{:go/via [object]} (.Type (.Field (assert (* types2/Struct) (.Underlying (deref2 typ))) ix)))
+        ^{:go/via [Encoder]} (.Len w ix))
+
+
+      (let [recv ^{:go/via [object]} (.Type (.Recv (assert (* types2/Signature) ^{:go/via [object]} (.Type (assert (* types2/Func) (.Obj sel))))))]
+        (cond ^{:go/via [Encoder]} (.Bool w (isPtrTo typ recv)) ; needs deref
+          (set! typ recv)
+          ^{:go/via [Encoder]} (.Bool w (isPtrTo recv typ)) ; needs addr
+          (set! typ recv))
+
+
+        ^{:line 2295} typ))))
+
+
+
+^{:go/end 2314} (go/method funcInst "funcInst writes a reference to an instantiated function.\n" [^{:tag (* writer)} w ^{:tag (* types2/Func)} obj ^{:tag (slice types2/Type)} targs]
+  (let [info (.objInstIdx (.-p w) obj targs (.-dict w))]
+
+    ;; Type arguments list contains derived types; we can emit a static
+    ;; call to the shaped function, but need to dynamically compute the
+    ;; runtime dictionary pointer.
+    (when ^{:go/via [Encoder]} (.Bool w (.anyDerived info))
+      ^{:go/via [Encoder]} (.Len w (.subdictIdx (.-dict w) info))
+      (return))
+
+
+    ;; Type arguments list is statically known; we can emit a static
+    ;; call with a statically reference to the respective runtime
+    ;; dictionary.
+    (.objInfo w info)))
+
+
+
+
+
+
+
+
+^{:go/end 2391} (go/method methodExpr "methodExpr writes out a reference to the method selected by\nexpr. sel should be the corresponding types2.Selection, and recv\nthe type produced after any implicit addressing, dereferencing, and\nfield selection. (Note: recv might differ from sel.Obj()'s receiver\nparameter in the case of interface types, and is needed for\nhandling type parameter methods.)\n" [^{:tag (* writer)} w ^{:tag (* syntax/SelectorExpr)} expr ^types2/Type recv ^{:tag (* types2/Selection)} sel]
+  (let [fun (assert (* types2/Func) (.Obj sel))
+      ^{:line 2324} sig (assert (* types2/Signature) ^{:go/via [object]} (.Type fun))]
+
+    (.typ w recv)
+
+    ;; only pass the signature if it's not a generic method
+    (if (isGenericMethod sig) (do
+        (go/call assert (.Has ^{:go/via [Encoder]} (.Version w) pkgbits/GenericMethods))
+        ^{:go/via [Encoder]} (.Bool w true))
+      (do
+        (when (.Has ^{:go/via [Encoder]} (.Version w) pkgbits/GenericMethods)
+          ^{:go/via [Encoder]} (.Bool w false))
+
+        (.typ w sig)))
+
+
+    (.pos w expr)
+    (.selector w fun)
+
+    ;; Method on a type parameter. These require an indirect call
+    ;; through the current function's runtime dictionary.
+    (when [(values typeParam ok) (assert (* types2/TypeParam) (types2/Unalias recv))] ^{:go/via [Encoder]} (.Bool w ok)
+      (let [typeParamIdx (.typeParamIndex (.-dict w) typeParam)
+          ^{:line 2346} methodInfo (.selectorIdx (.-p w) fun)]
+
+        ^{:go/via [Encoder]} (.Len w (.typeParamMethodExprIdx (.-dict w) typeParamIdx methodInfo))
+        (return)))
+
+
+    (when (!= (isInterface recv) (isInterface ^{:go/via [object]} (.Type (.Recv sig))))
+      (.fatalf (.-p w) expr "isInterface inconsistency: %v and %v" recv ^{:go/via [object]} (.Type (.Recv sig))))
+
+
+    (when (isConcreteMethod sig)
+      (let [(values tname tExplicits) (splitNamed (assert (* types2/Named) (types2/Unalias (deref2 recv))))
+          ^{:line 2358 :tag objInfo} info (zero objInfo)]
+        (if (isGenericMethod sig)
+          ;; For generic methods, the shaped object is the method itself.
+          (let [mExplicits (asTypeSlice (.-TypeArgs (aget (.-Instances (.-info (.-p w))) (.-Sel expr))))]
+            (set! info (.objInstIdx (.-p w) (.Origin fun) (^{:inst [(slice types2/Type) types2/Type]} slices/Concat tExplicits mExplicits) (.-dict w))))
+
+          ;; For non-generic concrete methods on generic types, the shaped object
+          ;; is the type. The method must be looked up on the type by name.
+          (set! info (.objInstIdx (.-p w) tname tExplicits (.-dict w))))
+
+        ;; We don't know all of the type arguments statically. These can be
+        ;; handled by a static call to the shaped method, but require
+        ;; dynamically looking up the appropriate dictionary argument
+        ;; in the current function's runtime dictionary.
+        (when (.anyDerived info)
+          ^{:go/via [Encoder]} (.Bool w true) ; dynamic subdictionary
+          ^{:go/via [Encoder]} (.Len w (.subdictIdx (.-dict w) info))
+          (return))
+
+        ;; We know all of the type arguments statically. These can be handled
+        ;; by a static call to the shaped method, and with a static reference
+        ;; to either the receiver type's or method's dictionary (see above).
+        (when (> (len (.-explicits info)) 0)
+          ^{:go/via [Encoder]} (.Bool w false) ; no dynamic subdictionary
+          ^{:go/via [Encoder]} (.Bool w true) ; static dictionary
+          (.objInfo w info)
+          (return))))
+
+    ;; no type arguments
+
+
+    ^{:go/via [Encoder]} (.Bool w false) ; no dynamic subdictionary
+    ^{:go/via [Encoder]} (.Bool w false))) ; no static dictionary
+
+
+
+
+
+
+^{:go/end 2434} (go/method multiExpr "multiExpr writes a sequence of expressions, where the i'th value is\nimplicitly converted to dstType(i). It also handles when exprs is a\nsingle, multi-valued expression (e.g., the multi-valued argument in\nan f(g()) call, or the RHS operand in a comma-ok assignment).\n" [^{:tag (* writer)} w ^poser pos ^{:tag (func [int] [types2/Type])} dstType ^{:tag (slice syntax/Expr)} exprs]
+  ^{:go/via [Encoder]} (.Sync w pkgbits/SyncMultiExpr)
+
+  (when (== (len exprs) 1)
+    (let [expr (aget exprs 0)]
+      (when [(values tuple ok) (assert (* types2/Tuple) (.typeOf (.-p w) expr))] ok
+        (go/call assert (> (.Len tuple) 1))
+        ^{:go/via [Encoder]} (.Bool w true) ; N:1 assignment
+        (.pos w pos)
+        (.expr w expr)
+
+        ^{:go/via [Encoder]} (.Len w (.Len tuple))
+        (for [i 0] (< i (.Len tuple)) (inc! i)
+          (let [src ^{:go/via [object]} (.Type (.At tuple i))]
+            ;; TODO(mdempsky): Investigate not writing src here. I think
+            ;; the reader should be able to infer it from expr anyway.
+            (.typ w src)
+            (when [dst (dstType i)] ^{:go/via [Encoder]} (.Bool w (and (!= dst nil) (not (types2/Identical src dst))))
+              (when (or (== src nil) (== dst nil))
+                (.fatalf (.-p w) pos "src is %v, dst is %v" src dst))
+
+              (when (not (types2/AssignableTo src dst))
+                (.fatalf (.-p w) pos "%v is not assignable to %v" src dst))
+
+              (.typ w dst)
+              (.convRTTI w src dst))))
+
+
+        (return))))
+
+
+
+  ^{:go/via [Encoder]} (.Bool w false) ; N:N assignment
+  ^{:go/via [Encoder]} (.Len w (len exprs))
+  (range [i expr exprs]
+    (.implicitConvExpr w (dstType i) expr)))
+
+
+
+
+
+
+^{:go/end 2441} (go/method implicitConvExpr "implicitConvExpr is like expr, but if dst is non-nil and different\nfrom expr's type, then an implicit conversion operation is inserted\nat expr's position.\n" [^{:tag (* writer)} w ^types2/Type dst ^syntax/Expr expr]
+  (.convertExpr w dst expr true))
+
+
+^{:go/end 2465} (go/method convertExpr [^{:tag (* writer)} w ^types2/Type dst ^syntax/Expr expr ^bool implicit]
+  (let [src (.typeOf (.-p w) expr)
+
+      ;; Omit implicit no-op conversions.
+      ^{:line 2447} identical (or (== dst nil) (types2/Identical src dst))]
+    (when (and implicit identical)
+      (.expr w expr)
+      (return))
+
+
+    (when (and implicit (not (types2/AssignableTo src dst)))
+      (.fatalf (.-p w) expr "%v is not assignable to %v" src dst))
+
+
+    ^{:go/via [Encoder]} (.Code w exprConvert)
+    ^{:go/via [Encoder]} (.Bool w implicit)
+    (.typ w dst)
+    (.pos w expr)
+    (.convRTTI w src dst)
+    ^{:go/via [Encoder]} (.Bool w (isTypeParam dst))
+    ^{:go/via [Encoder]} (.Bool w identical)
+    (.expr w expr)))
+
+
+^{:go/end 2536} (go/method compLit [^{:tag (* writer)} w ^{:tag (* syntax/CompositeLit)} lit]
+  (let [typ (.typeOf (.-p w) lit)]
+
+    ^{:go/via [Encoder]} (.Sync w pkgbits/SyncCompLit)
+    (.pos w lit)
+    (.typ w typ)
+
+    (when [(values ptr ok) (assert (* types2/Pointer) (types2/CoreType typ))] ok
+      (set! typ (.Elem ptr)))
+
+
+    (when (.Has ^{:go/via [Encoder]} (.Version w) pkgbits/CompactCompLiterals)
+      (type-switch [typ0 typ] [typ (types2/CoreType typ)]
+        (default
+          (.fatalf (.-p w) lit "unexpected composite literal type: %v" typ))
+        (case [(* types2/Array)]
+          (.arrayElems w (.Elem typ) (.-ElemList lit)))
+        (case [(* types2/Map)]
+          (.rtype w typ0)
+          (.mapElems w (.Key typ) (.Elem typ) (.-ElemList lit)))
+        (case [(* types2/Slice)]
+          (.arrayElems w (.Elem typ) (.-ElemList lit)))
+        (case [(* types2/Struct)]
+          (.structElems w typ (== (.-NKeys lit) 0) (.-ElemList lit))))
+
+      (return))
+
+
+    ;; old format
+    (let [(values ^types2/Type keyType ^types2/Type elemType) (zero types2/Type)
+        ^{:line 2497 :tag (* types2/Struct)} structType (zero (* types2/Struct))]
+      (type-switch [typ0 typ] [typ (types2/CoreType typ)]
+        (default
+          (.fatalf (.-p w) lit "unexpected composite literal type: %v" typ))
+        (case [(* types2/Array)]
+          (set! elemType (.Elem typ)))
+        (case [(* types2/Map)]
+          (.rtype w typ0)
+          (set! (values keyType elemType) (values (.Key typ) (.Elem typ))))
+        (case [(* types2/Slice)]
+          (set! elemType (.Elem typ)))
+        (case [(* types2/Struct)]
+          (set! structType typ)))
+
+
+      ^{:go/via [Encoder]} (.Len w (len (.-ElemList lit)))
+      (range [i elem (.-ElemList lit)]
+        (let [elemType elemType]
+          (if (!= structType nil) (do
+              (if [(values kv ok) (assert (* syntax/KeyValueExpr) elem)] ok (do
+                  ;; use position of expr.Key rather than of elem (which has position of ':')
+                  (.pos w (.-Key kv))
+                  (set! i (fieldIndex (.-info (.-p w)) structType (assert (* syntax/Name) (.-Key kv))))
+                  (set! elem (.-Value kv)))
+
+                (.pos w elem))
+
+              (set! elemType ^{:go/via [object]} (.Type (.Field structType i)))
+              ^{:go/via [Encoder]} (.Len w i))
+            (do
+              (when [(values kv ok) (assert (* syntax/KeyValueExpr) elem)] ^{:go/via [Encoder]} (.Bool w ok)
+                ;; use position of expr.Key rather than of elem (which has position of ':')
+                (.pos w (.-Key kv))
+                (.implicitConvExpr w keyType (.-Key kv))
+                (set! elem (.-Value kv)))))
+
+
+          (.implicitConvExpr w elemType elem))))))
+
+
+
+^{:go/end 2564} (go/method arrayElems [^{:tag (* writer)} w ^types2/Type elemType ^{:tag (slice syntax/Expr)} elems]
+  (let [valuesOnly true]
+    (range [_ elem elems]
+      (when [(values _ ok) (assert (* syntax/KeyValueExpr) elem)] ok
+        (set! valuesOnly false)
+        (break)))
+
+
+
+    (when valuesOnly
+      ^{:go/via [Encoder]} (.Int w (len elems))
+      (range [_ elem elems]
+        (.implicitConvExpr w elemType elem))
+
+      (return))
+
+    ;; some elements may have a key
+    ^{:go/via [Encoder]} (.Int w (- (len elems)))
+    (range [_ elem elems]
+      (when [(values kv ok) (assert (* syntax/KeyValueExpr) elem)] ^{:go/via [Encoder]} (.Bool w ok)
+        (.pos w (.-Key kv)) ; use position of Key rather than of elem (which has position of ':')
+        (.implicitConvExpr w nil (.-Key kv))
+        (set! elem (.-Value kv)))
+
+      (.implicitConvExpr w elemType elem))))
+
+
+
+^{:go/end 2575} (go/method mapElems [^{:tag (* writer)} w ^types2/Type keyType ^types2/Type valueType ^{:tag (slice syntax/Expr)} elems]
+  ;; all elements have a key
+  ^{:go/via [Encoder]} (.Int w (- (len elems)))
+  (range [_ elem elems]
+    (let [kv (assert (* syntax/KeyValueExpr) elem)]
+      (.pos w (.-Key kv)) ; use position of Key rather than of elem (which has position of ':')
+      (.implicitConvExpr w keyType (.-Key kv))
+      (.implicitConvExpr w valueType (.-Value kv)))))
+
+
+
+^{:go/end 2606} (go/method structElems [^{:tag (* writer)} w ^{:tag (* types2/Struct)} typ ^bool valuesOnly ^{:tag (slice syntax/Expr)} elems]
+  (let [n (len elems)]
+    (when valuesOnly
+      ;; no element has a key
+      ^{:go/via [Encoder]} (.Int w n)
+      (range [i elem elems]
+        (.pos w elem)
+        (.implicitConvExpr w ^{:go/via [object]} (.Type (.Field typ i)) elem))
+
+      (return))
+
+    ;; all elements have a key
+    ^{:go/via [Encoder]} (.Int w (- n))
+    (range [_ elem elems]
+      (let [kv (assert (* syntax/KeyValueExpr) elem)]
+        (.pos w (.-Key kv)) ; use position of Key rather than of elem (which has position of ':')
+        ;; TODO(gri): rather than doing this lookup again, perhaps the index should be recorded by types2
+        (let [(values fld index _) (types2/LookupFieldOrMethod typ false (.-curpkg (.-p w)) (.-Value (assert (* syntax/Name) (.-Key kv))))]
+          (if [n (len index)] (> n 1) (do
+              ;; embedded field
+              ^{:go/via [Encoder]} (.Int w (- n))
+              (range [_ i index]
+                ^{:go/via [Encoder]} (.Int w i)))
+
+            ;; n == 1
+            ^{:go/via [Encoder]} (.Int w (aget index 0)))
+
+          (.implicitConvExpr w (.Type fld) (.-Value kv)))))))
+
+
+
+^{:go/end 2625} (go/method funcLit [^{:tag (* writer)} w ^{:tag (* syntax/FuncLit)} expr]
+  (let [sig (assert (* types2/Signature) (.typeOf (.-p w) expr))
+
+      (values body closureVars) (.bodyIdx (.-p w) sig (.-Body expr) (.-dict w))]
+
+    ^{:go/via [Encoder]} (.Sync w pkgbits/SyncFuncLit)
+    (.pos w expr)
+    (.signature w sig)
+    ^{:go/via [Encoder]} (.Bool w (aget (.-rangeFuncBodyClosures (.-p w)) expr))
+
+    ^{:go/via [Encoder]} (.Len w (len closureVars))
+    (range [_ cv closureVars]
+      (.pos w (.-pos cv))
+      (.useLocal w (.-pos cv) (.-var_ cv)))
+
+
+    ^{:go/via [Encoder]} (.Reloc w pkgbits/SectionBody body)))
+
+
+(go/type posVar (struct
+    ^{:line 2628 :tag syntax/Pos} pos
+    ^{:line 2629 :tag (* types2/Var)} var_))
+
+
+^{:go/end 2634} (go/method String ^string [^posVar p]
+  (+ (.String (.-pos p)) ":" (.String (.-var_ p))))
+
+
+^{:go/end 2642} (go/method exprs [^{:tag (* writer)} w ^{:tag (slice syntax/Expr)} exprs]
+  ^{:go/via [Encoder]} (.Sync w pkgbits/SyncExprs)
+  ^{:go/via [Encoder]} (.Len w (len exprs))
+  (range [_ expr exprs]
+    (.expr w expr)))
+
+
+
+
+
+^{:go/end 2651} (go/method rtype "rtype writes information so that the reader can construct an\nexpression of type *runtime._type representing typ.\n" [^{:tag (* writer)} w ^types2/Type typ]
+  (set! typ (types2/Default typ))
+
+  (let [info (.typIdx (.-p w) typ (.-dict w))]
+    (.rtypeInfo w info)))
+
+
+^{:go/end 2661} (go/method rtypeInfo [^{:tag (* writer)} w ^typeInfo info]
+  ^{:go/via [Encoder]} (.Sync w pkgbits/SyncRType)
+
+  (if ^{:go/via [Encoder]} (.Bool w (.-derived info))
+    ^{:go/via [Encoder]} (.Len w (.rtypeIdx (.-dict w) info))
+
+    (.typInfo w info)))
+
+
+
+
+
+^{:go/end 2670} (go/method varDictIndex "varDictIndex writes out information for populating DictIndex for\nthe ir.Name that will represent obj.\n" [^{:tag (* writer)} w ^{:tag (* types2/Var)} obj]
+  (let [info (.typIdx (.-p w) ^{:go/via [object]} (.Type obj) (.-dict w))]
+    (when ^{:go/via [Encoder]} (.Bool w (.-derived info))
+      ^{:go/via [Encoder]} (.Len w (.rtypeIdx (.-dict w) info)))))
+
+
+
+
+^{:go/end 2677} (go/func isUntyped "isUntyped reports whether typ is an untyped type.\n" ^bool [^types2/Type typ]
+  ;; Note: types2.Unalias is unnecessary here, since untyped types can't be aliased.
+  (let [(values basic ok) (assert (* types2/Basic) typ)]
+    (and ok (!= (bit-and (.Info basic) types2/IsUntyped) 0))))
+
+
+
+^{:go/end 2684} (go/func isTuple "isTuple reports whether typ is a tuple type.\n" ^bool [^types2/Type typ]
+  ;; Note: types2.Unalias is unnecessary here, since tuple types can't be aliased.
+  (let [(values _ ok) (assert (* types2/Tuple) typ)]
+    ^{:line 2683} ok))
+
+
+^{:go/end 2698} (go/method itab [^{:tag (* writer)} w ^types2/Type typ ^types2/Type iface]
+  (set! typ (types2/Default typ))
+  (set! iface (types2/Default iface))
+
+  (let [typInfo (.typIdx (.-p w) typ (.-dict w))
+      ^{:line 2691} ifaceInfo (.typIdx (.-p w) iface (.-dict w))]
+
+    (.rtypeInfo w typInfo)
+    (.rtypeInfo w ifaceInfo)
+    (when ^{:go/via [Encoder]} (.Bool w (or (.-derived typInfo) (.-derived ifaceInfo)))
+      ^{:go/via [Encoder]} (.Len w (.itabIdx (.-dict w) typInfo ifaceInfo)))))
+
+
+
+
+
+^{:go/end 2705} (go/method convRTTI "convRTTI writes information so that the reader can construct\nexpressions for converting from src to dst.\n" [^{:tag (* writer)} w ^types2/Type src ^types2/Type dst]
+  ^{:go/via [Encoder]} (.Sync w pkgbits/SyncConvRTTI)
+  (.itab w src dst))
+
+
+^{:go/end 2724} (go/method exprType [^{:tag (* writer)} w ^types2/Type iface ^syntax/Expr typ]
+  (base/Assertf (or (== iface nil) (isInterface iface)) "%v must be nil or an interface type" iface)
+
+  (let [tv (.typeAndValue (.-p w) typ)]
+    (go/call assert ^{:go/via [exprFlags]} (.IsType tv))
+
+    ^{:go/via [Encoder]} (.Sync w pkgbits/SyncExprType)
+    (.pos w typ)
+
+    (if ^{:go/via [Encoder]} (.Bool w (and (!= iface nil) (not (.Empty (assert (* types2/Interface) (.Underlying iface))))))
+      (.itab w (.-Type tv) iface)
+      (do
+        (.rtype w (.-Type tv))
+
+        (let [info (.typIdx (.-p w) (.-Type tv) (.-dict w))]
+          ^{:go/via [Encoder]} (.Bool w (.-derived info)))))))
+
+
+
+
+
+
+^{:go/end 2739} (go/func isInterface "isInterface reports whether typ is known to be an interface type.\nIf typ is a type parameter, then isInterface reports an internal\ncompiler error instead.\n" ^bool [^types2/Type typ]
+  (when [(values _ ok) (assert (* types2/TypeParam) (types2/Unalias typ))] ok
+    ;; typ is a type parameter and may be instantiated as either a
+    ;; concrete or interface type, so the writer can't depend on
+    ;; knowing this.
+    (base/Fatalf "%v is a type parameter" typ))
+
+
+  (let [(values _ ok) (assert (* types2/Interface) (.Underlying typ))]
+    ^{:line 2738} ok))
+
+
+
+
+^{:go/end 2746} (go/func isConcreteMethod "isConcreteMethod reports whether typ is a concrete method. That is,\nit's a method with a receiver that isn't an interface type.\n" ^bool [^types2/Type typ]
+  (let [(values sig ok) (assert (* types2/Signature) typ)]
+    (and ok (!= (.Recv sig) nil) (not (isInterface ^{:go/via [object]} (.Type (.Recv sig)))))))
+
+
+;; TODO(mark): Use isGenericMethod. It is included now to help justify
+;; the existence of isConcreteMethod.
+
+
+
+
+
+
+^{:go/end 2759} (go/func isGenericMethod "isGenericMethod reports whether typ is a generic method. That is,\nit's a method with type parameters apart from those which may or\nmay not appear on the receiver type.\n\nNote that generic methods are always concrete methods.\n" ^bool [^types2/Type typ]
+  (let [(values sig ok) (assert (* types2/Signature) typ)]
+    (and ok (!= (.Recv sig) nil) (> (.Len (.TypeParams sig)) 0))))
+
+
+
+^{:go/end 2769} (go/method op "op writes an Op into the bitstream.\n" [^{:tag (* writer)} w ^ir/Op op]
+  ;; TODO(mdempsky): Remove in favor of explicit codes? Would make
+  ;; export data more stable against internal refactorings, but low
+  ;; priority at the moment.
+  (go/call assert (!= op 0))
+  ^{:go/via [Encoder]} (.Sync w pkgbits/SyncOp)
+  ^{:go/via [Encoder]} (.Len w (conv int op)))
+
+
+;; @@@ Package initialization
+
+;; Caution: This code is still clumsy, because toolstash -cmp is
+;; particularly sensitive to it.
+
+(go/type typeDeclGen (struct
+    (* syntax/TypeDecl)
+    ^{:line 2778 :tag int} gen
+
+
+    ^{:line 2781 :tag (slice (* types2/TypeParam)) :doc "Implicit type parameters in scope at this type declaration.\n"} implicits))
+
+
+(go/type fileImports (struct
+    ^{:line 2785 :tag bool} importedEmbed ^bool importedUnsafe))
+
+
+
+
+
+
+
+
+(go/type declCollector "declCollector is a visitor type that collects compiler-needed\ninformation about declarations that types2 doesn't track.\n\nNotably, it maps declared types and functions back to their\ndeclaration statement, keeps track of implicit type parameters, and\nassigns unique type \"generation\" numbers to local defined types.\n" (struct
+    ^{:line 2795 :tag (* pkgWriter)} pw
+    ^{:line 2796 :tag (* int)} typegen
+    ^{:line 2797 :tag (* fileImports)} file
+    ^{:line 2798 :tag bool} withinFunc
+    ^{:line 2799 :tag (slice (* types2/TypeParam))} implicits))
+
+
+^{:go/end 2814} (go/method withTParams ^{:tag (* declCollector)} [^{:tag (* declCollector)} c ^types2/Object obj]
+  (let [tparams (^{:inst [(slice (* types2/TypeParam)) (* types2/TypeParam)]} slices/Concat (objRecvTypeParams obj) (objTypeParams obj))]
+    (when (== (len tparams) 0)
+      (return c))
+
+
+    (let [copy @c]
+      (set! (.-implicits copy) (subslice (.-implicits copy) _ (len (.-implicits copy)) (len (.-implicits copy))))
+      (range [_ tparam tparams]
+        (set! (.-implicits copy) (append (.-implicits copy) tparam)))
+
+      (addr copy))))
+
+
+^{:go/end 2886} (go/method Visit ^syntax/Visitor [^{:tag (* declCollector)} c ^syntax/Node n]
+  (let [pw (.-pw c)]
+
+    (type-switch [n n]
+      (case [(* syntax/File)]
+        (.checkPragmas pw (.-Pragma n) ir/GoBuildPragma false))
+
+      (case [(* syntax/ImportDecl)]
+        (.checkPragmas pw (.-Pragma n) 0 false)
+
+        (switch (.Path (.Imported (.PkgNameOf (.-info pw) n)))
+          (case ["embed"]
+            (set! (.-importedEmbed (.-file c)) true))
+          (case ["unsafe"]
+            (set! (.-importedUnsafe (.-file c)) true))))
+
+
+      (case [(* syntax/ConstDecl)]
+        (.checkPragmas pw (.-Pragma n) 0 false))
+
+      (case [(* syntax/FuncDecl)]
+        (.checkPragmas pw (.-Pragma n) funcPragmas false)
+
+        (let [obj (assert (* types2/Func) (aget (.-Defs (.-info pw)) (.-Name n)))]
+          (aset (.-funDecls pw) obj n)
+
+          (return (.withTParams c obj))))
+
+      (case [(* syntax/TypeDecl)]
+        (let [obj (assert (* types2/TypeName) (aget (.-Defs (.-info pw)) (.-Name n)))
+            ^{:line 2846} d (lit typeDeclGen :TypeDecl n :implicits (.-implicits c))]
+
+          (if (.-Alias n)
+            (.checkPragmas pw (.-Pragma n) 0 false)
+            (do
+              (.checkPragmas pw (.-Pragma n) 0 false)
+
+              ;; Assign a unique ID to function-scoped defined types.
+              (when (.-withinFunc c)
+                (inc! @(.-typegen c))
+                (set! (.-gen d) @(.-typegen c)))))
+
+
+
+          (aset (.-typDecls pw) obj d)
+
+          ;; TODO(mdempsky): Omit? Not strictly necessary; only matters for
+          ;; type declarations within function literals within parameterized
+          ;; type declarations, but types2 the function literals will be
+          ;; constant folded away.
+          (return (.withTParams c obj))))
+
+      (case [(* syntax/VarDecl)]
+        (.checkPragmas pw (.-Pragma n) 0 true)
+
+        (when [(values p ok) (assert (* pragmas) (.-Pragma n))] (and ok (> (len (.-Embeds p)) 0))
+          (when [err (checkEmbed n (.-importedEmbed (.-file c)) (.-withinFunc c))] (!= err nil)
+            (.errorf pw (.-Pos (aget (.-Embeds p) 0)) "%s" err))))
+
+
+
+      (case [(* syntax/BlockStmt)]
+        (when (not (.-withinFunc c))
+          (let [copy @c]
+            (set! (.-withinFunc copy) true)
+            (return (addr copy))))))
+
+
+
+    ^{:line 2885} c))
+
+
+^{:go/end 2933} (go/method collectDecls [^{:tag (* pkgWriter)} pw ^{:tag (slice (* noder))} noders]
+  (let [^int typegen (zero int)]
+    (range [_ p noders]
+      (let [^fileImports file (zero fileImports)]
+
+        (syntax/Walk (.-file p) (addr ^{:go/breaks [2 4 6]} (lit declCollector
+              :pw pw
+              :typegen (addr typegen)
+              :file (addr file))))
+
+
+        (set! (.-cgoPragmas pw) (append (.-cgoPragmas pw) (spread (.-pragcgobuf p))))
+
+        (range [_ l (.-linknames p)]
+          (let [directive "go:linkname"]
+            (when (.-std l)
+              (set! directive "go:linknamestd"))
+
+            (when (not (.-importedUnsafe file))
+              (.errorf pw (.-pos l) "//%s only allowed in Go files that import \"unsafe\"" directive)
+              (continue))
+
+            (when (and (strings/Contains (.-remote l) "[") (strings/Contains (.-remote l) "]"))
+              (.errorf pw (.-pos l) "//%s reference of an instantiation is not allowed" directive)
+              (continue))
+
+
+            (type-switch [obj (.Lookup (.Scope (.-curpkg pw)) (.-local l))]
+              (case [(* types2/Func) (* types2/Var)]
+                (if [(values _ ok) (aget (.-linknames pw) obj)] (not ok)
+                  (aset (.-linknames pw) obj (lit (struct
+                        ^{:line 2919 :tag string} remote
+                        ^{:line 2920 :tag bool} std)
+                      (.-remote l) (.-std l)))
+
+                  (.errorf pw (.-pos l) "duplicate //%s for %s" directive (.-local l))))
+
+
+              (default
+                (when (types/AllowsGoVersion 1 18)
+                  (.errorf pw (.-pos l) "//%s must refer to declared function or variable" directive))))))))))
+
+
+
+
+
+
+^{:go/end 2952} (go/method checkPragmas [^{:tag (* pkgWriter)} pw ^syntax/Pragma p ^ir/PragmaFlag allowed ^bool embedOK]
+  (when (== p nil)
+    (return))
+
+  (let [pragma (assert (* pragmas) p)]
+
+    (range [_ pos (.-Pos pragma)]
+      (when (!= (bit-and-not (.-Flag pos) allowed) 0)
+        (.errorf pw (.-Pos pos) "misplaced compiler directive")))
+
+
+
+    (when (not embedOK)
+      (range [_ e (.-Embeds pragma)]
+        (.errorf pw (.-Pos e) "misplaced go:embed directive")))))
+
+
+
+
+^{:go/end 2971} (go/method pkgInit [^{:tag (* writer)} w ^{:tag (slice (* noder))} noders]
+  ^{:go/via [Encoder]} (.Len w (len (.-cgoPragmas (.-p w))))
+  (range [_ cgoPragma (.-cgoPragmas (.-p w))]
+    ^{:go/via [Encoder]} (.Strings w cgoPragma))
+
+
+  (.pkgInitOrder w)
+
+  ^{:go/via [Encoder]} (.Sync w pkgbits/SyncDecls)
+  (range [_ p noders]
+    (range [_ decl (.-DeclList (.-file p))]
+      (.pkgDecl w decl)))
+
+
+  ^{:go/via [Encoder]} (.Code w declEnd)
+
+  ^{:go/via [Encoder]} (.Sync w pkgbits/SyncEOF))
+
+
+^{:go/end 2983} (go/method pkgInitOrder [^{:tag (* writer)} w]
+  ;; TODO(mdempsky): Write as a function body instead?
+  ^{:go/via [Encoder]} (.Len w (len (.-InitOrder (.-info (.-p w)))))
+  (range [_ init (.-InitOrder (.-info (.-p w)))]
+    ^{:go/via [Encoder]} (.Len w (len (.-Lhs init)))
+    (range [_ v (.-Lhs init)]
+      (.obj w v nil))
+
+    (.expr w (.-Rhs init))))
+
+
+
+^{:go/end 3051} (go/method pkgDecl [^{:tag (* writer)} w ^syntax/Decl decl]
+  (type-switch [decl decl]
+    (default
+      (.unexpected (.-p w) "declaration" decl))
+
+    (case [(* syntax/ImportDecl)])
+
+    (case [(* syntax/ConstDecl)]
+      ^{:go/via [Encoder]} (.Code w declOther)
+      (.pkgObjs w (spread (.-NameList decl))))
+
+    (case [(* syntax/FuncDecl)]
+      (when (== (.-Value (.-Name decl)) "_")
+        (break)) ; skip blank functions
+
+
+      (let [obj (assert (* types2/Func) (aget (.-Defs (.-info (.-p w))) (.-Name decl)))
+          ^{:line 3002} sig (assert (* types2/Signature) ^{:go/via [object]} (.Type obj))]
+
+        (when (or (!= (.RecvTypeParams sig) nil) (!= (.TypeParams sig) nil))
+          (break)) ; skip generic functions
+
+
+        (when [recv (.Recv sig)] (!= recv nil)
+          ^{:go/via [Encoder]} (.Code w declMethod)
+          (.typ w (recvBase recv))
+          (.selector w obj)
+          (break))
+
+
+        ^{:go/via [Encoder]} (.Code w declFunc)
+        (.pkgObjs w (.-Name decl))))
+
+    (case [(* syntax/TypeDecl)]
+      (when (!= (len (.-TParamList decl)) 0)
+        (break)) ; skip generic type decls
+
+
+      (when (== (.-Value (.-Name decl)) "_")
+        (break)) ; skip blank type decls
+
+
+      (let [name (assert (* types2/TypeName) (aget (.-Defs (.-info (.-p w))) (.-Name decl)))]
+        ;; Skip type declarations for interfaces that are only usable as
+        ;; type parameter bounds.
+        (when [(values iface ok) (assert (* types2/Interface) (.Underlying ^{:go/via [object]} (.Type name)))] (and ok (not (.IsMethodSet iface)))
+          (break))
+
+
+        ^{:go/via [Encoder]} (.Code w declOther)
+        (.pkgObjs w (.-Name decl))))
+
+    (case [(* syntax/VarDecl)]
+      ^{:go/via [Encoder]} (.Code w declVar)
+      (.pkgObjs w (spread (.-NameList decl)))
+
+      (let [^{:tag (slice pragmaEmbed)} embeds (zero (slice pragmaEmbed))]
+        (when [(values p ok) (assert (* pragmas) (.-Pragma decl))] ok
+          (set! embeds (.-Embeds p)))
+
+        ^{:go/via [Encoder]} (.Len w (len embeds))
+        (range [_ embed embeds]
+          (.pos w (.-Pos embed))
+          ^{:go/via [Encoder]} (.Strings w (.-Patterns embed)))))))
+
+
+
+
+^{:go/end 3064} (go/method pkgObjs [^{:tag (* writer)} w & ^{:tag (slice (* syntax/Name))} names]
+  ^{:go/via [Encoder]} (.Sync w pkgbits/SyncDeclNames)
+  ^{:go/via [Encoder]} (.Len w (len names))
+
+  (range [_ name names]
+    (let [(values obj ok) (aget (.-Defs (.-info (.-p w))) name)]
+      (go/call assert ok)
+
+      ^{:go/via [Encoder]} (.Sync w pkgbits/SyncDeclName)
+      (.obj w obj nil))))
+
+
+
+;; @@@ Helpers
+
+
+
+
+
+
+
+^{:go/breaks [[6 3120]] :go/end 3121} (go/method staticBool "staticBool analyzes a boolean expression and reports whether it's\nalways true (positive result), always false (negative result), or\nunknown (zero).\n\nIt also simplifies the expression while preserving semantics, if\npossible.\n" ^int [^{:tag (* pkgWriter)} pw ^{:tag (* syntax/Expr)} ep]
+  (when [val (.-Value (.typeAndValue pw @ep))] (!= val nil)
+    (if (constant/BoolVal val)
+      (return (+ 1))
+
+      (return -1)))
+
+
+
+  (when [(values e ok) (assert (* syntax/Operation) @ep)] ok
+    (switch (.-Op e)
+      (case [syntax/Not]
+        (return (.staticBool pw (addr (.-X e)))))
+
+      (case [syntax/AndAnd]
+        (let [x (.staticBool pw (addr (.-X e)))]
+          (when (< x 0)
+            (set! @ep (.-X e))
+            (return x))
+
+
+          (let [y (.staticBool pw (addr (.-Y e)))]
+            (when (or (> x 0) (< y 0))
+              (when (!= (.-Value (.typeAndValue pw (.-X e))) nil)
+                (set! @ep (.-Y e)))
+
+              (return y)))))
+
+
+      (case [syntax/OrOr]
+        (let [x (.staticBool pw (addr (.-X e)))]
+          (when (> x 0)
+            (set! @ep (.-X e))
+            (return x))
+
+
+          (let [y (.staticBool pw (addr (.-Y e)))]
+            (when (or (< x 0) (> y 0))
+              (when (!= (.-Value (.typeAndValue pw (.-X e))) nil)
+                (set! @ep (.-Y e)))
+
+              (return y)))))))
+
+
+
+
+  0)
+
+
+
+
+
+^{:go/breaks [[5 3134]] :go/end 3135} (go/method hasImplicitTypeParams "hasImplicitTypeParams reports whether obj is a defined type with\nimplicit type parameters (e.g., declared within a generic function\nor method).\n" ^bool [^{:tag (* pkgWriter)} pw ^{:tag (* types2/TypeName)} obj]
+  (when (== ^{:go/via [object]} (.Pkg obj) (.-curpkg pw))
+    (let [(values decl ok) (aget (.-typDecls pw) obj)]
+      (go/call assert ok)
+      (when (!= (len (.-implicits decl)) 0)
+        (return true))))
+
+
+  false)
+
+
+
+^{:go/breaks [[5 3142]] :go/end 3143} (go/func isDefinedType "isDefinedType reports whether obj is a defined type.\n" ^bool [^types2/Object obj]
+  (when [(values obj ok) (assert (* types2/TypeName) obj)] ok
+    (return (not (.IsAlias obj))))
+
+  false)
+
+
+
+
+
+^{:go/end 3150} (go/func isGlobal "isGlobal reports whether obj was declared at package scope.\n\nCaveat: blank objects are not declared.\n" ^bool [^types2/Object obj]
+  (== (.Parent obj) (.Scope (.Pkg obj))))
+
+
+
+
+
+^{:go/end 3181} (go/func lookupObj "lookupObj returns the object that expr refers to, if any. If expr\nis an explicit instantiation of a generic object, then the instance\nobject is returned as well.\n" [^{:tag (* pkgWriter)} p ^syntax/Expr expr] :results [^types2/Object obj ^types2/Instance inst]
+  (when [(values index ok) (assert (* syntax/IndexExpr) expr)] ok
+    (let [args (syntax/UnpackListExpr (.-Index index))]
+      (when (== (len args) 1)
+        (let [tv (.typeAndValue p (aget args 0))]
+          (when ^{:go/via [exprFlags]} (.IsValue tv)
+            (return)))) ; normal index expression
+
+
+
+      (set! expr (.-X index))))
+
+
+  ;; Strip package qualifier, if present.
+  (when [(values sel ok) (assert (* syntax/SelectorExpr) expr)] ok
+    (when (not (isPkgQual (.-info p) sel))
+      (return)) ; normal selector expression
+
+    (set! expr (.-Sel sel)))
+
+
+  (when [(values name ok) (assert (* syntax/Name) expr)] ok
+    (set! obj (aget (.-Uses (.-info p)) name))
+    (set! inst (aget (.-Instances (.-info p)) name)))
+
+  (return))
+
+
+
+
+^{:go/breaks [[5 3190]] :go/end 3191} (go/func isPkgQual "isPkgQual reports whether the given selector expression is a\npackage-qualified identifier.\n" ^bool [^{:tag (* types2/Info)} info ^{:tag (* syntax/SelectorExpr)} sel]
+  (when [(values name ok) (assert (* syntax/Name) (.-X sel))] ok
+    (let [(values _ isPkgName) (assert (* types2/PkgName) (aget (.-Uses info) name))]
+      (return isPkgName)))
+
+  false)
+
+
+
+
+^{:go/end 3198} (go/func isNil "isNil reports whether expr is a (possibly parenthesized) reference\nto the predeclared nil value.\n" ^bool [^{:tag (* pkgWriter)} p ^syntax/Expr expr]
+  (let [tv (.typeAndValue p expr)]
+    ^{:go/via [exprFlags]} (.IsNil tv)))
+
+
+
+
+^{:go/breaks [[5 3206]] :go/end 3207} (go/method isBuiltin "isBuiltin reports whether expr is a (possibly parenthesized)\nreferenced to the specified built-in function.\n" ^bool [^{:tag (* pkgWriter)} pw ^syntax/Expr expr ^string builtin]
+  (when [(values name ok) (assert (* syntax/Name) (syntax/Unparen expr))] (and ok (== (.-Value name) builtin))
+    (return ^{:go/via [exprFlags]} (.IsBuiltin (.typeAndValue pw name))))
+
+  false)
+
+
+
+^{:go/end 3216} (go/func recvBase "recvBase returns the base type for the given receiver parameter.\n" ^{:tag (* types2/Named)} [^{:tag (* types2/Var)} recv]
+  (let [typ (types2/Unalias ^{:go/via [object]} (.Type recv))]
+    (when [(values ptr ok) (assert (* types2/Pointer) typ)] ok
+      (set! typ (types2/Unalias (.Elem ptr))))
+
+    (assert (* types2/Named) typ)))
+
+
+
+^{:go/end 3229} (go/func namesAsExpr "namesAsExpr returns a list of names as a syntax.Expr.\n" ^syntax/Expr [^{:tag (slice (* syntax/Name))} names]
+  (when (== (len names) 1)
+    (return (aget names 0)))
+
+
+  (let [exprs (make (slice syntax/Expr) (len names))]
+    (range [i name names]
+      (aset exprs i name))
+
+    (addr (lit syntax/ListExpr :ElemList exprs))))
+
+
+
+^{:go/end 3242} (go/func fieldIndex "fieldIndex returns the index of the struct field named by key.\n" ^int [^{:tag (* types2/Info)} info ^{:tag (* types2/Struct)} str ^{:tag (* syntax/Name)} key]
+  (let [field (assert (* types2/Var) (aget (.-Uses info) key))]
+
+    (for [i 0] (< i (.NumFields str)) (inc! i)
+      (when (== (.Field str i) field)
+        (return i)))
+
+
+
+    (panic (fmt/Sprintf "%s: %v is not a field of %v" ^{:go/via [expr node]} (.Pos key) field str))))
+
+
+
+^{:go/breaks [[5 3249]] :go/end 3250} (go/func objRecvTypeParams "objRecvTypeParams returns the receiver type parameters on the given object.\n" ^{:tag (slice (* types2/TypeParam))} [^types2/Object obj]
+  (when [(values f ok) (assert (* types2/Func) obj)] ok
+    (return (asTypeParamSlice (.RecvTypeParams (.Signature f)))))
+
+  nil)
+
+
+
+^{:go/breaks [[5 3265]] :go/end 3266} (go/func objTypeParams "objTypeParams returns the type parameters on the given object.\n" ^{:tag (slice (* types2/TypeParam))} [^types2/Object obj]
+  (type-switch [t obj]
+    (case [(* types2/Func)]
+      (return (asTypeParamSlice (.TypeParams (.Signature t)))))
+    (case [(* types2/TypeName)]
+      (type-switch [t (.Type obj)]
+        (case [(* types2/Named)]
+          (return (asTypeParamSlice (.TypeParams t))))
+        (case [(* types2/Alias)]
+          (return (asTypeParamSlice (.TypeParams t)))))))
+
+
+  nil)
+
+
+
+^{:go/end 3278} (go/func asTypeParamSlice "asTypeParamSlice unpacks a types2.TypeParamList to a []types2.TypeParam\n" ^{:tag (slice (* types2/TypeParam))} [^{:tag (* types2/TypeParamList)} l]
+  (when (== (.Len l) 0)
+    (return nil))
+
+  (let [s (make (slice (* types2/TypeParam)) (.Len l))]
+    (range [i (.Len l)]
+      (aset s i (.At l i)))
+
+    ^{:line 3277} s))
+
+
+
+
+^{:go/end 3290} (go/func splitNamed "splitNamed decomposes a use of a defined type into its original\ntype definition and the type arguments used to instantiate it.\n" [^{:tag (* types2/Named)} typ] :results [(* types2/TypeName) (slice types2/Type)]
+  (base/Assertf (== (.Len (.TypeParams typ)) (.Len (.TypeArgs typ))) "use of uninstantiated type: %v" typ)
+
+  (let [orig (.Origin typ)]
+    (base/Assertf (== (.TypeArgs orig) nil) "origin %v of %v has type arguments" orig typ)
+    (base/Assertf (== (.Obj typ) (.Obj orig)) "%v has object %v, but %v has object %v" typ (.Obj typ) orig (.Obj orig))
+
+    (return (.Obj typ) (asTypeSlice (.TypeArgs typ)))))
+
+
+
+^{:go/end 3298} (go/func splitAlias "splitAlias is like splitNamed, but for an alias type.\n" [^{:tag (* types2/Alias)} typ] :results [(* types2/TypeName) (slice types2/Type)]
+  (let [orig (.Origin typ)]
+    (base/Assertf (== (.Obj typ) (.Obj orig)) "alias type %v has object %v, but %v has object %v" typ (.Obj typ) orig (.Obj orig))
+
+    (return (.Obj typ) (asTypeSlice (.TypeArgs typ)))))
+
+
+
+^{:go/end 3310} (go/func asTypeSlice "asTypeSlice unpacks a types2.TypeList to a []types2.Type\n" ^{:tag (slice types2/Type)} [^{:tag (* types2/TypeList)} l]
+  (when (== (.Len l) 0)
+    (return nil))
+
+  (let [s (make (slice types2/Type) (.Len l))]
+    (range [i (.Len l)]
+      (aset s i (.At l i)))
+
+    ^{:line 3309} s))
+
+
+^{:go/end 3317} (go/func asPragmaFlag ^ir/PragmaFlag [^syntax/Pragma p]
+  (when (== p nil)
+    (return 0))
+
+  (.-Flag (assert (* pragmas) p)))
+
+
+^{:go/end 3324} (go/func asWasmImport ^{:tag (* WasmImport)} [^syntax/Pragma p]
+  (when (== p nil)
+    (return nil))
+
+  (.-WasmImport (assert (* pragmas) p)))
+
+
+^{:go/end 3331} (go/func asWasmExport ^{:tag (* WasmExport)} [^syntax/Pragma p]
+  (when (== p nil)
+    (return nil))
+
+  (.-WasmExport (assert (* pragmas) p)))
+
+
+
+^{:go/end 3337} (go/func isPtrTo "isPtrTo reports whether from is the type *to.\n" ^bool [^types2/Type from ^types2/Type to]
+  (let [(values ptr ok) (assert (* types2/Pointer) (types2/Unalias from))]
+    (and ok (types2/Identical (.Elem ptr) to))))
+
+
+
+
+^{:go/end 3354} (go/func hasFallthrough "hasFallthrough reports whether stmts ends in a fallthrough\nstatement.\n" ^bool [^{:tag (slice syntax/Stmt)} stmts]
+  ;; From spec: the last non-empty statement may be a (possibly labeled) "fallthrough" statement
+  ;; Stripping (possible nested) labeled statement if any.
+  (let [stmt (lastNonEmptyStmt stmts)]
+    (while true
+      (let [(values ls ok) (assert (* syntax/LabeledStmt) stmt)]
+        (when (not ok)
+          (break))
+
+        (set! stmt (.-Stmt ls))))
+
+    (let [(values last ok) (assert (* syntax/BranchStmt) stmt)]
+      (and ok (== (.-Tok last) syntax/Fallthrough)))))
+
+
+
+
+^{:go/breaks [[5 3365]] :go/end 3366} (go/func lastNonEmptyStmt "lastNonEmptyStmt returns the last non-empty statement in list, if\nany.\n" ^syntax/Stmt [^{:tag (slice syntax/Stmt)} stmts]
+  (for [i (- (len stmts) 1)] (>= i 0) (dec! i)
+    (let [stmt (aget stmts i)]
+      (when [(values _ ok) (assert (* syntax/EmptyStmt) stmt)] (not ok)
+        (return stmt))))
+
+
+  nil)
+
+
+
+
+^{:go/breaks [[5 3399]] :go/end 3400} (go/method terminates "terminates reports whether stmt terminates normal control flow\n(i.e., does not merely advance to the following statement).\n" ^bool [^{:tag (* pkgWriter)} pw ^syntax/Stmt stmt]
+  (type-switch [stmt stmt]
+    (case [(* syntax/BranchStmt)]
+      (when (== (.-Tok stmt) syntax/Goto)
+        (return true)))
+
+    (case [(* syntax/ReturnStmt)]
+      (return true))
+    (case [(* syntax/ExprStmt)]
+      (when [(values call ok) (assert (* syntax/CallExpr) (syntax/Unparen (.-X stmt)))] ok
+        (when (.isBuiltin pw (.-Fun call) "panic")
+          (return true))))
+
+
+
+    ;; The handling of BlockStmt here is approximate, but it serves to
+    ;; allow dead-code elimination for:
+    ;;
+    ;;	if true {
+    ;;		return x
+    ;;	}
+    ;;	unreachable
+    (case [(* syntax/IfStmt)]
+      (let [cond (.staticBool pw (addr (.-Cond stmt)))]
+        (return (and ^:go/paren (or (< cond 0) (.terminates pw (.-Then stmt))) ^:go/paren (or (> cond 0) (.terminates pw (.-Else stmt)))))))
+    (case [(* syntax/BlockStmt)]
+      (return (.terminates pw (lastNonEmptyStmt (.-List stmt))))))
+
+
+  false)

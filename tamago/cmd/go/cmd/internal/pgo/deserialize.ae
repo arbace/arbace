@@ -1,0 +1,100 @@
+;; Copyright 2024 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.cmd.internal.pgo) (go/file "deserialize.go" :imports [
+
+
+    ^{:line 8} [bufio "bufio"]
+    ^{:line 9} [fmt "fmt"]
+    ^{:line 10} [io "io"]
+    ^{:line 11} [strconv "strconv"]
+    ^{:line 12} [strings "strings"]])
+
+
+
+
+
+
+^{:go/end 29} (go/func IsSerialized "IsSerialized returns true if r is a serialized Profile.\n\nIsSerialized only peeks at r, so seeking back after calling is not\nnecessary.\n" [^{:tag (* bufio/Reader)} r] :results [bool error]
+  (let [(values hdr err) (.Peek r (len serializationHeader))]
+    (cond (== err io/EOF)
+      ;; Empty file.
+      (return false nil)
+      (!= err nil)
+      (return false (fmt/Errorf "error reading profile header: %w" err)))
+
+
+    (return (== (conv string hdr) serializationHeader) nil)))
+
+
+
+^{:go/end 102} (go/func FromSerialized "FromSerialized parses a profile from serialization output of Profile.WriteTo.\n" [^io/Reader r] :results [(* Profile) error]
+  (let [d (emptyProfile)
+
+      ^{:line 35} scanner (bufio/NewScanner r)]
+    (.Split scanner bufio/ScanLines)
+
+    (when (not (.Scan scanner))
+      (when [err (.Err scanner)] (!= err nil)
+        (return nil (fmt/Errorf "error reading preprocessed profile: %w" err)))
+
+      (return nil (fmt/Errorf "preprocessed profile missing header")))
+
+    (when [gotHdr (+ (.Text scanner) "\n")] (!= gotHdr serializationHeader)
+      (return nil (fmt/Errorf "preprocessed profile malformed header; got %q want %q" gotHdr serializationHeader)))
+
+
+    (while (.Scan scanner)
+      (let [readStr (.Text scanner)
+
+          ^{:line 51} callerName readStr]
+
+        (when (not (.Scan scanner))
+          (when [err (.Err scanner)] (!= err nil)
+            (return nil (fmt/Errorf "error reading preprocessed profile: %w" err)))
+
+          (return nil (fmt/Errorf "preprocessed profile entry missing callee")))
+
+        (let [calleeName (.Text scanner)]
+
+          (when (not (.Scan scanner))
+            (when [err (.Err scanner)] (!= err nil)
+              (return nil (fmt/Errorf "error reading preprocessed profile: %w" err)))
+
+            (return nil (fmt/Errorf "preprocessed profile entry missing weight")))
+
+          (set! readStr (.Text scanner))
+
+          (let [split (strings/Split readStr " ")]
+
+            (when (!= (len split) 2)
+              (return nil (fmt/Errorf "preprocessed profile entry got %v want 2 fields" split)))
+
+
+            (let [(values co err) (strconv/Atoi (aget split 0))]
+              (when (!= err nil)
+                (return nil (fmt/Errorf "preprocessed profile error processing call line: %w" err)))
+
+
+              (let [edge ^{:go/breaks [2 4 6]} (lit NamedCallEdge
+                    :CallerName callerName
+                    :CalleeName calleeName
+                    :CallSiteOffset co)
+
+
+                  (values weight ^:assign err) (strconv/ParseInt (aget split 1) 10 64)]
+                (when (!= err nil)
+                  (return nil (fmt/Errorf "preprocessed profile error processing call weight: %w" err)))
+
+
+                (when [(values _ ok) (aget (.-Weight (.-NamedEdgeMap d)) edge)] ok
+                  (return nil (fmt/Errorf "preprocessed profile contains duplicate edge %+v" edge)))
+
+
+                (set! (.-ByWeight (.-NamedEdgeMap d)) (append (.-ByWeight (.-NamedEdgeMap d)) edge)) ; N.B. serialization is ordered.
+                (set! (aget (.-Weight (.-NamedEdgeMap d)) edge) + weight)
+                (set! (.-TotalWeight d) + weight)))))))
+
+
+    (return d nil)))

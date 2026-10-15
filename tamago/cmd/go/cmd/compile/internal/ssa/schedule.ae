@@ -1,0 +1,598 @@
+;; Copyright 2015 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.cmd.compile.internal.ssa) (go/file "schedule.go" :imports [
+
+
+    ^{:line 8} [base "cmd/compile/internal/base"]
+    ^{:line 9} [types "cmd/compile/internal/types"]
+    ^{:line 10} [cmp "cmp"]
+    ^{:line 11} [heap "container/heap"]
+    ^{:line 12} [slices "slices"]
+    ^{:line 13} [sort "sort"]])
+
+
+(go/const
+  ^{:line 17} [^{:val 0} ScorePhi iota] ; towards top of block
+  ^{:line 18} [^{:val 1} ScoreArg] ; must occur at the top of the entry block
+  ^{:line 19} [^{:val 2} ScoreInitMem] ; after the args - used as mark by debug info generation
+  ^{:line 20} [^{:val 3} ScoreReadTuple] ; must occur immediately after tuple-generating insn (or call)
+  ^{:line 21} [^{:val 4} ScoreNilCheck]
+  ^{:line 22} [^{:val 5} ScoreMemory]
+  ^{:line 23} [^{:val 6} ScoreReadFlags]
+  ^{:line 24} [^{:val 7} ScoreDefault]
+  ^{:line 25} [^{:val 8} ScoreFlags]
+  ^{:line 26} [^{:val 9} ScoreInductionInc] ; an increment of an induction variable
+  ^{:line 27} [^{:val 10} ScoreControl]) ; towards bottom of block
+
+
+(go/type ValHeap (struct
+    ^{:line 31 :tag (slice (* Value))} a
+    ^{:line 32 :tag (slice int8)} score
+    ^{:line 33 :tag (slice bool)} inBlockUses))
+
+
+^{:go/end 36} (go/method Len ^int [^ValHeap h] (len (.-a h)))
+^{:go/end 37} (go/method Swap [^ValHeap h ^int i ^int j] (let [a (.-a h)] (set! (values (aget a i) (aget a j)) (values (aget a j) (aget a i)))))
+
+^{:go/end 44} (go/method Push [^{:tag (* ValHeap)} h ^any x]
+  ;; Push and Pop use pointer receivers because they modify the slice's length,
+  ;; not just its contents.
+  (let [v (assert (* Value) x)]
+    (set! (.-a h) (append (.-a h) v))))
+
+^{:go/end 51} (go/method Pop ^any [^{:tag (* ValHeap)} h]
+  (let [old (.-a h)
+      ^{:line 47} n (len old)
+      ^{:line 48} x (aget old (- n 1))]
+    (set! (.-a h) (subslice old 0 (- n 1)))
+    ^{:line 50} x))
+
+^{:go/end 90} (go/method Less ^bool [^ValHeap h ^int i ^int j]
+  (let [x (aget (.-a h) i)
+      ^{:line 54} y (aget (.-a h) j)
+      ^{:line 55} sx (aget (.-score h) (.-ID x))
+      ^{:line 56} sy (aget (.-score h) (.-ID y))]
+    (when [c (- sx sy)] (!= c 0)
+      (return (< c 0))) ; lower scores come earlier.
+
+    ;; Note: only scores are required for correct scheduling.
+    ;; Everything else is just heuristics.
+
+    (let [ix (aget (.-inBlockUses h) (.-ID x))
+        ^{:line 64} iy (aget (.-inBlockUses h) (.-ID y))]
+      (when (!= ix iy)
+        (return ix)) ; values with in-block uses come earlier
+
+
+      (when (!= (.-Pos x) (.-Pos y)) ; Favor in-order line stepping
+        (return (.Before (.-Pos x) (.-Pos y))))
+
+      (when (!= (.-Op x) OpPhi)
+        (when [c (- (len (.-Args x)) (len (.-Args y)))] (!= c 0)
+          (return (> c 0)))) ; smaller args come later
+
+
+      (when [c (- (.-Uses x) (.-Uses y))] (!= c 0)
+        (return (> c 0))) ; smaller uses come later
+
+      ;; These comparisons are fairly arbitrary.
+      ;; The goal here is stability in the face
+      ;; of unrelated changes elsewhere in the compiler.
+      (when [c (- (.-AuxInt x) (.-AuxInt y))] (!= c 0)
+        (return (< c 0)))
+
+      (when [cmp (.Compare (.-Type x) (.-Type y))] (!= cmp types/CMPeq)
+        (return (== cmp types/CMPlt)))
+
+      (< (.-ID x) (.-ID y)))))
+
+
+^{:go/breaks [[4 99]] :go/end 100} (go/method isLoweredGetClosurePtr ^bool [^Op op]
+  (switch op
+    (case [OpAMD64LoweredGetClosurePtr OpPPC64LoweredGetClosurePtr OpARMLoweredGetClosurePtr OpARM64LoweredGetClosurePtr
+        ^{:line 95} Op386LoweredGetClosurePtr OpMIPS64LoweredGetClosurePtr OpLOONG64LoweredGetClosurePtr OpS390XLoweredGetClosurePtr OpMIPSLoweredGetClosurePtr
+        ^{:line 96} OpRISCV64LoweredGetClosurePtr OpWasmLoweredGetClosurePtr]
+      (return true)))
+
+  false)
+
+
+
+
+
+
+
+^{:go/end 374} (go/func schedule "Schedule the Values in each Block. After this phase returns, the\norder of b.Values matters and is the order in which those values\nwill appear in the assembly output. For now it generates a\nreasonable valid schedule using a priority queue. TODO(khr):\nschedule smarter.\n" [^{:tag (* Func)} f]
+  ;; reusable priority queue
+  (let [priq (new ValHeap)
+
+      ;; "priority" for a value
+      ^{:line 112} score (.allocInt8Slice (.-Cache f) (.NumValues f))]
+    (defer (.freeInt8Slice (.-Cache f) score))
+
+    ;; maps mem values to the next live memory value
+    (let [nextMem (.allocValueSlice (.-Cache f) (.NumValues f))]
+      (defer (.freeValueSlice (.-Cache f) nextMem))
+
+      ;; inBlockUses records whether a value is used in the block
+      ;; in which it lives. (block control values don't count as uses.)
+      (let [inBlockUses (.allocBoolSlice (.-Cache f) (.NumValues f))]
+        (defer (.freeBoolSlice (.-Cache f) inBlockUses))
+        (when (.-optimize (.-Config f))
+          (range [_ b (.-Blocks f)]
+            (range [_ v (.-Values b)]
+              (range [_ a (.-Args v)]
+                (when (== (.-Block a) b)
+                  (aset inBlockUses (.-ID a) true))))))
+
+
+
+
+
+        (set! (.-inBlockUses priq) inBlockUses)
+
+        (range [_ b (.-Blocks f)]
+          ;; Compute score. Larger numbers are scheduled closer to the end of the block.
+          (range [_ v (.-Values b)]
+            (switch
+              (case [(.isLoweredGetClosurePtr (.-Op v))]
+                ;; We also score GetLoweredClosurePtr as early as possible to ensure that the
+                ;; context register is not stomped. GetLoweredClosurePtr should only appear
+                ;; in the entry block where there are no phi functions, so there is no
+                ;; conflict or ambiguity here.
+                (when (!= b (.-Entry f))
+                  (.Fatalf f "LoweredGetClosurePtr appeared outside of entry block, b=%s" (.String b)))
+
+                (aset score (.-ID v) ScorePhi))
+              (case [(.-nilCheck (aget opcodeTable (.-Op v)))]
+                ;; Nil checks must come before loads from the same address.
+                (aset score (.-ID v) ScoreNilCheck))
+              (case [(== (.-Op v) OpPhi)]
+                ;; We want all the phis first.
+                (aset score (.-ID v) ScorePhi))
+              (case [(or (== (.-Op v) OpArgIntReg) (== (.-Op v) OpArgFloatReg))]
+                ;; In-register args must be scheduled as early as possible to ensure that they
+                ;; are not stomped (similar to the closure pointer above).
+                ;; In particular, they need to come before regular OpArg operations because
+                ;; of how regalloc places spill code (see regalloc.go:placeSpills:mustBeFirst).
+                (when (!= b (.-Entry f))
+                  (.Fatalf f "%s appeared outside of entry block, b=%s" (.-Op v) (.String b)))
+
+                (aset score (.-ID v) ScorePhi))
+              (case [(or (== (.-Op v) OpArg) (== (.-Op v) OpSP) (== (.-Op v) OpSB))]
+                ;; We want all the args as early as possible, for better debugging.
+                (aset score (.-ID v) ScoreArg))
+              (case [(== (.-Op v) OpInitMem)]
+                ;; Early, but after args. See debug.go:buildLocationLists
+                (aset score (.-ID v) ScoreInitMem))
+              (case [(.IsMemory (.-Type v))]
+                ;; Schedule stores as early as possible. This tends to
+                ;; reduce register pressure.
+                (aset score (.-ID v) ScoreMemory))
+              (case [(or (== (.-Op v) OpSelect0) (== (.-Op v) OpSelect1) (== (.-Op v) OpSelectN))]
+                ;; Tuple selectors need to appear immediately after the instruction
+                ;; that generates the tuple.
+                (aset score (.-ID v) ScoreReadTuple))
+              (case [(.hasFlagInput v)]
+                ;; Schedule flag-reading ops earlier, to minimize the lifetime
+                ;; of flag values.
+                (aset score (.-ID v) ScoreReadFlags))
+              (case [(.isFlagOp v)]
+                ;; Schedule flag register generation as late as possible.
+                ;; This makes sure that we only have one live flags
+                ;; value at a time.
+                ;; Note that this case is after the case above, so values
+                ;; which both read and generate flags are given ScoreReadFlags.
+                (aset score (.-ID v) ScoreFlags))
+              (case [(and (== (len (.-Args v)) 1)
+                    (== (.-Op (aget (.-Args v) 0)) OpPhi)
+                    (> (.-Uses (aget (.-Args v) 0)) 1)
+                    (== (len (.-Succs b)) 1)
+                    (== (.-b (aget (.-Succs b) 0)) (.-Block (aget (.-Args v) 0)))
+                    (== (aget (.-Args (aget (.-Args v) 0)) (.-i (aget (.-Succs b) 0))) v))]
+                ;; This is a value computing v++ (or similar) in a loop.
+                ;; Try to schedule it later, so we issue all uses of v before the v++.
+                ;; If we don't, then we need an additional move.
+                ;; loop:
+                ;;     p = (PHI v ...)
+                ;;     ... ok other uses of p ...
+                ;;     v = (ADDQconst [1] p)
+                ;;     ... troublesome other uses of p ...
+                ;;     goto loop
+                ;; We want to allocate p and v to the same register so when we get to
+                ;; the end of the block we don't have to move v back to p's register.
+                ;; But we can only do that if v comes after all the other uses of p.
+                ;; Any "troublesome" use means we have to reg-reg move either p or v
+                ;; somewhere in the loop.
+                (aset score (.-ID v) ScoreInductionInc))
+              (default
+                (aset score (.-ID v) ScoreDefault))))
+
+
+          (range [_ c (.ControlValues b)]
+            ;; Force the control values to be scheduled at the end,
+            ;; unless they have other special priority.
+            (when (or (!= (.-Block c) b) (< (aget score (.-ID c)) ScoreReadTuple))
+              (continue))
+
+            (when (== (aget score (.-ID c)) ScoreReadTuple)
+              (aset score (.-ID (aget (.-Args c) 0)) ScoreControl)
+              (continue))
+
+            (aset score (.-ID c) ScoreControl)))
+
+
+        (set! (.-score priq) score)
+
+        ;; An edge represents a scheduling constraint that x must appear before y in the schedule.
+        (let-type [edge (struct
+              ^{:line 231 :tag (* Value)} x ^{:tag (* Value)} y)]
+
+          (let [edges (make (slice edge) 0 64)
+
+              ;; inEdges is the number of scheduling edges incoming from values that haven't been scheduled yet.
+              ;; i.e. inEdges[y.ID] = |e in edges where e.y == y and e.x is not in the schedule yet|.
+              ^{:line 237} inEdges (.allocInt32Slice (.-Cache f) (.NumValues f))]
+            (defer (.freeInt32Slice (.-Cache f) inEdges))
+
+            (range [_ b (.-Blocks f)]
+              (set! edges (subslice edges _ 0))
+              ;; Standard edges: from the argument of a value to that value.
+              (range [_ v (.-Values b)]
+                (when (== (.-Op v) OpPhi)
+                  ;; If a value is used by a phi, it does not induce
+                  ;; a scheduling edge because that use is from the
+                  ;; previous iteration.
+                  (continue))
+
+                (range [_ a (.-Args v)]
+                  (when (== (.-Block a) b)
+                    (set! edges (append edges (lit edge a v))))))
+
+
+
+
+              ;; Find store chain for block.
+              ;; Store chains for different blocks overwrite each other, so
+              ;; the calculated store chain is good only for this block.
+              (range [_ v (.-Values b)]
+                (when (and (!= (.-Op v) OpPhi) (!= (.-Op v) OpInitMem) (.IsMemory (.-Type v)))
+                  (aset nextMem (.-ID (.MemoryArg v)) v)))
+
+
+
+              ;; Add edges to enforce that any load must come before the following store.
+              (range [_ v (.-Values b)]
+                (when (or (== (.-Op v) OpPhi) (.IsMemory (.-Type v)))
+                  (continue))
+
+                (let [w (.MemoryArg v)]
+                  (when (== w nil)
+                    (continue))
+
+                  (when [s (aget nextMem (.-ID w))] (and (!= s nil) (== (.-Block s) b))
+                    (set! edges (append edges (lit edge v s))))))
+
+
+
+              ;; Sort all the edges by source Value ID.
+              (^{:inst [(slice edge) edge]} slices/SortFunc edges ^{:go/end 283} (fn ^int [^edge a ^edge b]
+                  (^{:inst [ID]} cmp/Compare (.-ID (.-x a)) (.-ID (.-x b)))))
+
+              ;; Compute inEdges for values in this block.
+              (range [_ e edges]
+                (inc! (aget inEdges (.-ID (.-y e)))))
+
+
+              ;; Initialize priority queue with schedulable values.
+              (set! (.-a priq) (subslice (.-a priq) _ 0))
+              (range [_ v (.-Values b)]
+                (when (== (aget inEdges (.-ID v)) 0)
+                  (heap/Push priq v)))
+
+
+
+              ;; Produce the schedule. Pick the highest priority scheduleable value,
+              ;; add it to the schedule, add any of its uses that are now scheduleable
+              ;; to the queue, and repeat.
+              (let [nv (len (.-Values b))]
+                (set! (.-Values b) (subslice (.-Values b) _ 0))
+                (while (> (.Len priq) 0)
+                  ;; Schedule the next schedulable value in priority order.
+                  (let [v (assert (* Value) (heap/Pop priq))]
+                    (set! (.-Values b) (append (.-Values b) v))
+
+                    ;; Find all the scheduling edges out from this value.
+                    (let [i (sort/Search (len edges) ^{:go/end 310} (fn ^bool [^int i]
+                            (>= (.-ID (.-x (aget edges i))) (.-ID v))))
+
+                        ^{:line 311} j (sort/Search (len edges) ^{:go/end 313} (fn ^bool [^int i]
+                            (> (.-ID (.-x (aget edges i))) (.-ID v))))]
+
+                      ;; Decrement inEdges for each target of edges from v.
+                      (range [_ e (subslice edges i j)]
+                        (dec! (aget inEdges (.-ID (.-y e))))
+                        (when (== (aget inEdges (.-ID (.-y e))) 0)
+                          (heap/Push priq (.-y e)))))))
+
+
+
+                (when (!= (len (.-Values b)) nv)
+                  (.Fatalf f "schedule does not include all values in block %s" b))))
+
+
+
+            ;; Remove SPanchored now that we've scheduled.
+            ;; Also unlink nil checks now that ordering is assured
+            ;; between the nil check and the uses of the nil-checked pointer.
+            (range [_ b (.-Blocks f)]
+              (range [_ v (.-Values b)]
+                (range [i a (.-Args v)]
+                  (while (or (== (.-Op a) OpSPanchored) (.-nilCheck (aget opcodeTable (.-Op a))))
+                    (set! a (aget (.-Args a) 0))
+                    (.SetArg v i a))))
+
+
+
+              (range [i c (.ControlValues b)]
+                (while (or (== (.-Op c) OpSPanchored) (.-nilCheck (aget opcodeTable (.-Op c))))
+                  (set! c (aget (.-Args c) 0))
+                  (.ReplaceControl b i c))))
+
+
+
+            (range [_ b (.-Blocks f)]
+              (let [i 0]
+                (range [_ v (.-Values b)]
+                  (if (== (.-Op v) OpSPanchored) (do
+                      ;; Free this value
+                      (when (!= (.-Uses v) 0)
+                        (base/Fatalf "SPAnchored still has %d uses" (.-Uses v)))
+
+                      (.resetArgs v)
+                      (.freeValue f v))
+                    (do
+                      (when (.-nilCheck (aget opcodeTable (.-Op v)))
+                        (when (!= (.-Uses v) 0)
+                          (base/Fatalf "nilcheck still has %d uses" (.-Uses v)))
+
+                        ;; We can't delete the nil check, but we mark
+                        ;; it as having void type so regalloc won't
+                        ;; try to allocate a register for it.
+                        (set! (.-Type v) types/TypeVoid))
+
+                      (aset (.-Values b) i v)
+                      (inc! i))))
+
+
+                (.truncateValues b i)))
+
+
+            (set! (.-scheduled f) true)))))))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 559} (go/func storeOrder "storeOrder orders values with respect to stores. That is,\nif v transitively depends on store s, v is ordered after s,\notherwise v is ordered before s.\nSpecifically, values are ordered like\n\n\tstore1\n\tNilCheck that depends on store1\n\tother values that depends on store1\n\tstore2\n\tNilCheck that depends on store2\n\tother values that depends on store2\n\t...\n\nThe order of non-store and non-NilCheck values are undefined\n(not necessarily dependency order). This should be cheaper\nthan a full scheduling as done above.\nNote that simple dependency order won't work: there is no\ndependency between NilChecks and values like IsNonNil.\nAuxiliary data structures are passed in as arguments, so\nthat they can be allocated in the caller and be reused.\nThis function takes care of reset them.\n" ^{:tag (slice (* Value))} [^{:tag (slice (* Value))} values ^{:tag (* sparseSet)} sset ^{:tag (slice int32)} storeNumber]
+  (when (== (len values) 0)
+    (return values))
+
+
+  (let [f (.-Func (.-Block (aget values 0)))
+
+      ;; find all stores
+
+      ;; Members of values that are store values.
+      ;; A constant bound allows this to be stack-allocated. 64 is
+      ;; enough to cover almost every storeOrder call.
+      ^{:line 409} stores (make (slice (* Value)) 0 64)
+      ^{:line 410} hasNilCheck false]
+    (.clear sset) ; sset is the set of stores that are used in other values
+    (range [_ v values]
+      (when (.IsMemory (.-Type v))
+        (set! stores (append stores v))
+        (when (or (== (.-Op v) OpInitMem) (== (.-Op v) OpPhi))
+          (continue))
+
+        (.add sset (.-ID (.MemoryArg v)))) ; record that v's memory arg is used
+
+      (when (== (.-Op v) OpNilCheck)
+        (set! hasNilCheck true)))
+
+
+    (when (or (== (len stores) 0) (and (not hasNilCheck) (== (.-name (.-pass f)) "nilcheckelim")))
+      ;; there is no store, the order does not matter
+      (return values))
+
+
+    ;; find last store, which is the one that is not used by other stores
+    (let [^{:tag (* Value)} last (zero (* Value))]
+      (range [_ v stores]
+        (when (not (.contains sset (.-ID v)))
+          (when (!= last nil)
+            (.Fatalf f "two stores live simultaneously: %v and %v" v last))
+
+          (set! last v)))
+
+
+
+      ;; We assign a store number to each value. Store number is the
+      ;; index of the latest store that this value transitively depends.
+      ;; The i-th store in the current block gets store number 3*i. A nil
+      ;; check that depends on the i-th store gets store number 3*i+1.
+      ;; Other values that depends on the i-th store gets store number 3*i+2.
+      ;; Special case: 0 -- unassigned, 1 or 2 -- the latest store it depends
+      ;; is in the previous block (or no store at all, e.g. value is Const).
+      ;; First we assign the number to all stores by walking back the store chain,
+      ;; then assign the number to other values in DFS order.
+      (let [count (make (slice int32) (* 3 (+ (len stores) 1)))]
+        (.clear sset) ; reuse sparse set to ensure that a value is pushed to stack only once
+        (for [(values n w) (values (len stores) last)] (> n 0) (dec! n)
+          (aset storeNumber (.-ID w) (conv int32 (* 3 n)))
+          (inc! (aget count (* 3 n)))
+          (.add sset (.-ID w))
+          (when (or (== (.-Op w) OpInitMem) (== (.-Op w) OpPhi))
+            (when (!= n 1)
+              (.Fatalf f "store order is wrong: there are stores before %v" w))
+
+            (break))
+
+          (set! w (.MemoryArg w)))
+
+        (let [^{:tag (slice (* Value))} stack (zero (slice (* Value)))]
+          (range [_ v values]
+            (when (.contains sset (.-ID v))
+              ;; in sset means v is a store, or already pushed to stack, or already assigned a store number
+              (continue))
+
+            (set! stack (append stack v))
+            (.add sset (.-ID v))
+
+            (while (> (len stack) 0)
+              (let [w (aget stack (- (len stack) 1))]
+                (when (!= (aget storeNumber (.-ID w)) 0)
+                  (set! stack (subslice stack _ (- (len stack) 1)))
+                  (continue))
+
+                (when (== (.-Op w) OpPhi)
+                  ;; Phi value doesn't depend on store in the current block.
+                  ;; Do this early to avoid dependency cycle.
+                  (aset storeNumber (.-ID w) 2)
+                  (inc! (aget count 2))
+                  (set! stack (subslice stack _ (- (len stack) 1)))
+                  (continue))
+
+
+                (let [max (conv int32 0) ; latest store dependency
+                    ^{:line 488} argsdone true]
+                  (range [_ a (.-Args w)]
+                    (when (!= (.-Block a) (.-Block w))
+                      (continue))
+
+                    (when (not (.contains sset (.-ID a)))
+                      (set! stack (append stack a))
+                      (.add sset (.-ID a))
+                      (set! argsdone false)
+                      (break))
+
+                    (when (> (/ (aget storeNumber (.-ID a)) 3) max)
+                      (set! max (/ (aget storeNumber (.-ID a)) 3))))
+
+
+                  (when (not argsdone)
+                    (continue))
+
+
+                  (let [n (+ (* 3 max) 2)]
+                    (when (== (.-Op w) OpNilCheck)
+                      (set! n (+ (* 3 max) 1)))
+
+                    (aset storeNumber (.-ID w) n)
+                    (inc! (aget count n))
+                    (set! stack (subslice stack _ (- (len stack) 1))))))))
+
+
+
+          ;; convert count to prefix sum of counts: count'[i] = sum_{j<=i} count[i]
+          (range [i count]
+            (when (== i 0)
+              (continue))
+
+            (set! (aget count i) + (aget count (- i 1))))
+
+          (when (!= (aget count (- (len count) 1)) (conv int32 (len values)))
+            (.Fatalf f "storeOrder: value is missing, total count = %d, values = %v" (aget count (- (len count) 1)) values))
+
+
+          ;; place values in count-indexed bins, which are in the desired store order
+          (let [order (make (slice (* Value)) (len values))]
+            (range [_ v values]
+              (let [s (aget storeNumber (.-ID v))]
+                (aset order (aget count (- s 1)) v)
+                (inc! (aget count (- s 1)))))
+
+
+            ;; Order nil checks in source order. We want the first in source order to trigger.
+            ;; If two are on the same line, we don't really care which happens first.
+            ;; See issue 18169.
+            (when hasNilCheck
+              (let [start -1]
+                (range [i v order]
+                  (if (== (.-Op v) OpNilCheck)
+                    (when (== start -1)
+                      (set! start i))
+
+                    (do
+                      (when (!= start -1)
+                        (^{:inst [(slice (* Value)) (* Value)]} slices/SortFunc (subslice order start i) valuePosCmp)
+                        (set! start -1)))))
+
+
+
+                (when (!= start -1)
+                  (^{:inst [(slice (* Value)) (* Value)]} slices/SortFunc (subslice order start) valuePosCmp))))
+
+
+
+            ^{:line 558} order))))))
+
+
+
+^{:go/breaks [[6 572]] :go/end 573} (go/method isFlagOp "isFlagOp reports if v is an OP with the flag type.\n" ^bool [^{:tag (* Value)} v]
+  (when (or (.IsFlags (.-Type v)) (and (.IsTuple (.-Type v)) (.IsFlags (.FieldType (.-Type v) 1))))
+    (return true))
+
+  ;; PPC64 carry generators put their carry in a non-flag-typed register
+  ;; in their output.
+  (switch (.-Op v)
+    (case [OpPPC64SUBC OpPPC64ADDC OpPPC64SUBCconst OpPPC64ADDCconst]
+      (return true)))
+
+  false)
+
+
+
+^{:go/breaks [[6 588]] :go/end 589} (go/method hasFlagInput "hasFlagInput reports whether v has a flag value as any of its inputs.\n" ^bool [^{:tag (* Value)} v]
+  (range [_ a (.-Args v)]
+    (when (.isFlagOp a)
+      (return true)))
+
+
+  ;; PPC64 carry dependencies are conveyed through their final argument,
+  ;; so we treat those operations as taking flags as well.
+  (switch (.-Op v)
+    (case [OpPPC64SUBE OpPPC64ADDE OpPPC64SUBZEzero OpPPC64ADDZE OpPPC64ADDZEzero]
+      (return true)))
+
+  false)
+
+
+^{:go/breaks [[5 598]] :go/end 599} (go/func valuePosCmp ^int [^{:tag (* Value)} a ^{:tag (* Value)} b]
+  (when (.Before (.-Pos a) (.-Pos b))
+    (return -1))
+
+  (when (.After (.-Pos a) (.-Pos b))
+    (return (+ 1)))
+
+  0)

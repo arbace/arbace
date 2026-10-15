@@ -1,0 +1,1363 @@
+;; Copyright 2011 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+;;
+;; The inlining facility makes 2 passes: first CanInline determines which
+;; functions are suitable for inlining, and for those that are it
+;; saves a copy of the body. Then InlineCalls walks each function body to
+;; expand calls to inlinable functions.
+;;
+;; The Debug.l flag controls the aggressiveness. Note that main() swaps level 0 and 1,
+;; making 1 the default and -l disable. Additional levels (beyond -l) may be buggy and
+;; are not supported.
+;;      0: disabled
+;;      1: 80-nodes leaf functions, oneliners, panic, lazy typechecking (default)
+;;      2: (unassigned)
+;;      3: (unassigned)
+;;      4: allow non-leaf functions
+;;
+;; At some point this may get another default and become switch-offable with -N.
+;;
+;; The -d typcheckinl flag enables early typechecking of all imported bodies,
+;; which is useful to flush out bugs.
+;;
+;; The Debug.m flag enables diagnostic output.  a single -m is useful for verifying
+;; which calls get inlined or not, more is for debugging, and may go away at any point.
+
+(in-ns 'go.cmd.compile.internal.inline) (go/file "inl.go" :imports [
+
+
+    ^{:line 30} [fmt "fmt"]
+    ^{:line 31} [constant "go/constant"]
+    ^{:line 32} [buildcfg "internal/buildcfg"]
+    ^{:line 33} [strconv "strconv"]
+    ^{:line 34} [strings "strings"]
+
+    ^{:line 36} [base "cmd/compile/internal/base"]
+    ^{:line 37} [inlheur "cmd/compile/internal/inline/inlheur"]
+    ^{:line 38} [ir "cmd/compile/internal/ir"]
+    ^{:line 39} [logopt "cmd/compile/internal/logopt"]
+    ^{:line 40} [pgoir "cmd/compile/internal/pgoir"]
+    ^{:line 41} [typecheck "cmd/compile/internal/typecheck"]
+    ^{:line 42} [types "cmd/compile/internal/types"]
+    ^{:line 43} [obj "cmd/internal/obj"]
+    ^{:line 44} [pgo "cmd/internal/pgo"]
+    ^{:line 45} [src "cmd/internal/src"]])
+
+
+
+(go/const "Inlining budget parameters, gathered in one place\n"
+  ^{:line 50} [^{:val 80} inlineMaxBudget 80]
+  ^{:line 51} [^{:val 0} inlineExtraAppendCost 0]
+
+  ^{:line 53} [^{:val 57 :doc "default is to inline if there's at most one call. -l=4 overrides this by using 1 instead.\n"} inlineExtraCallCost 57] ; 57 was benchmarked to provided most benefit with no bad surprises; see https://github.com/golang/go/issues/19348#issuecomment-439370742
+  ^{:line 54} [^{:val 17} inlineParamCallCost 17] ; calling a parameter only costs this much extra (inlining might expose a constant function)
+  ^{:line 55} [^{:val 1} inlineExtraPanicCost 1] ; do not penalize inlining panics.
+  ^{:line 56} [^{:val 80} inlineExtraThrowCost inlineMaxBudget] ; with current (2018-05/1.11) code, inlining runtime.throw does not help.
+
+  ^{:line 58} [^{:val 5000} inlineBigFunctionNodes 5000] ; Functions with this many nodes are considered "big".
+  ^{:line 59} [^{:val 20} inlineBigFunctionMaxCost 20] ; Max cost of inlinee when inlining into a "big" function.
+  ^{:line 60} [^{:val 800} inlineClosureCalledOnceCost (* 10 inlineMaxBudget)]) ; if a closure is just called once, inline it.
+
+
+(go/var
+
+
+  ^{:line 66} [^{:doc "List of all hot callee nodes.\nTODO(prattmic): Make this non-global.\n"} candHotCalleeMap (make (map (* pgoir/IRNode) (struct)))]
+
+
+  ^{:line 69} [^{:doc "Set of functions that contain hot call sites.\n"} hasHotCall (make (map (* ir/Func) (struct)))]
+
+
+
+  ^{:line 73} [^{:doc "List of all hot call sites. CallSiteInfo.Callee is always nil.\nTODO(prattmic): Make this non-global.\n"} candHotEdgeMap (make (map pgoir/CallSiteInfo (struct)))]
+
+
+  ^{:line 76} [^{:tag float64 :doc "Threshold in percentage for hot callsite inlining.\n"} inlineHotCallSiteThresholdPercent]
+
+
+
+
+
+  ^{:line 82} [^{:doc "Threshold in CDF percentage for hot callsite inlining,\nthat is, for a threshold of X the hottest callsites that\nmake up the top X% of total edge weight will be\nconsidered hot for inlining candidates.\n"} inlineCDFHotCallSiteThresholdPercent (conv float64 99)]
+
+
+  ^{:line 85} [^{:tag int32 :doc "Budget increased due to hotness.\n"} inlineHotMaxBudget 2000])
+
+
+^{:go/breaks [[5 96]] :go/end 97} (go/func IsPgoHotFunc ^bool [^{:tag (* ir/Func)} fn ^{:tag (* pgoir/Profile)} profile]
+  (when (== profile nil)
+    (return false))
+
+  (when [(values n ok) (aget (.-IRNodes (.-WeightedCG profile)) (ir/LinkFuncName fn))] ok
+    (let [(values _ ok) (aget candHotCalleeMap n)]
+      (return ok)))
+
+  false)
+
+
+^{:go/end 102} (go/func HasPgoHotInline ^bool [^{:tag (* ir/Func)} fn]
+  (let [(values _ has) (aget hasHotCall fn)]
+    ^{:line 101} has))
+
+
+
+^{:go/end 139} (go/func PGOInlinePrologue "PGOInlinePrologue records the hot callsites from ir-graph.\n" [^{:tag (* pgoir/Profile)} p]
+  (when (!= (.-PGOInlineCDFThreshold base/Debug) "")
+    (if [(values s err) (strconv/ParseFloat (.-PGOInlineCDFThreshold base/Debug) 64)] (and (== err nil) (>= s 0) (<= s 100))
+      (set! inlineCDFHotCallSiteThresholdPercent s)
+
+      (base/Fatalf "invalid PGOInlineCDFThreshold, must be between 0 and 100")))
+
+
+  (let [^{:tag (slice pgo/NamedCallEdge)} hotCallsites (zero (slice pgo/NamedCallEdge))]
+    (set! (values inlineHotCallSiteThresholdPercent hotCallsites) (hotNodesFromCDF p))
+    (when (> (.-PGODebug base/Debug) 0)
+      (fmt/Printf "hot-callsite-thres-from-CDF=%v\n" inlineHotCallSiteThresholdPercent))
+
+
+    (when [x (.-PGOInlineBudget base/Debug)] (!= x 0)
+      (set! inlineHotMaxBudget (conv int32 x)))
+
+
+    (range [_ n hotCallsites]
+      ;; mark inlineable callees from hot edges
+      (when [callee (aget (.-IRNodes (.-WeightedCG p)) (.-CalleeName n))] (!= callee nil)
+        (aset candHotCalleeMap callee (lit (struct))))
+
+      ;; mark hot call sites
+      (when [caller (aget (.-IRNodes (.-WeightedCG p)) (.-CallerName n))] (and (!= caller nil) (!= (.-AST caller) nil))
+        (let [csi (lit pgoir/CallSiteInfo :LineOffset (.-CallSiteOffset n) :Caller (.-AST caller))]
+          (aset candHotEdgeMap csi (lit (struct))))))
+
+
+
+    (when (>= (.-PGODebug base/Debug) 3)
+      (fmt/Printf "hot-cg before inline in dot format:")
+      (.PrintWeightedCallGraphDOT p inlineHotCallSiteThresholdPercent))))
+
+
+
+
+
+
+
+
+
+^{:go/end 160} (go/func hotNodesFromCDF "hotNodesFromCDF computes an edge weight threshold and the list of hot\nnodes that make up the given percentage of the CDF. The threshold, as\na percent, is the lower bound of weight for nodes to be considered hot\n(currently only used in debug prints) (in case of equal weights,\ncomparing with the threshold may not accurately reflect which nodes are\nconsidered hot).\n" [^{:tag (* pgoir/Profile)} p] :results [float64 (slice pgo/NamedCallEdge)]
+  (let [cum (conv int64 0)]
+    (range [i n (.-ByWeight ^{:go/via [Profile]} (.-NamedEdgeMap p))]
+      (let [w (aget (.-Weight ^{:go/via [Profile]} (.-NamedEdgeMap p)) n)]
+        (set! cum + w)
+        (when (> (pgo/WeightInPercentage cum ^{:go/via [Profile]} (.-TotalWeight p)) inlineCDFHotCallSiteThresholdPercent)
+          ;; nodes[:i+1] to include the very last node that makes it to go over the threshold.
+          ;; (Say, if the CDF threshold is 50% and one hot node takes 60% of weight, we want to
+          ;; include that node instead of excluding it.)
+          (return (pgo/WeightInPercentage w ^{:go/via [Profile]} (.-TotalWeight p)) (subslice (.-ByWeight ^{:go/via [Profile]} (.-NamedEdgeMap p)) _ (+ i 1))))))
+
+
+    (return 0 (.-ByWeight ^{:go/via [Profile]} (.-NamedEdgeMap p)))))
+
+
+
+^{:go/end 180} (go/func CanInlineFuncs "CanInlineFuncs computes whether a batch of functions are inlinable.\n" [^{:tag (slice (* ir/Func))} funcs ^{:tag (* pgoir/Profile)} profile]
+  (when (!= profile nil)
+    (PGOInlinePrologue profile))
+
+
+  (when (== (.-LowerL base/Flag) 0)
+    (return))
+
+
+  (ir/VisitFuncsBottomUp funcs ^{:go/end 179} (fn [^{:tag (slice (* ir/Func))} funcs ^bool recursive]
+      (range [_ fn funcs]
+        (CanInline fn profile)
+        (when (inlheur/Enabled)
+          (analyzeFuncProps fn profile))))))
+
+
+
+
+
+^{:go/breaks [[5 198]] :go/end 199} (go/func simdCreditMultiplier ^int32 [^{:tag (* ir/Func)} fn]
+  (range [_ field (.RecvParamsResults (.Type fn))]
+    (when (.IsSIMD (.-Type field))
+      (return 3)))
+
+
+  ;; Sometimes code uses closures, that do not take simd
+  ;; parameters, to perform repetitive SIMD operations.
+  ;; fn.  These really need to be inlined, or the anticipated
+  ;; awesome SIMD performance will be missed.
+  (range [_ v (.-ClosureVars fn)]
+    (when (.IsSIMD ^{:go/via [miniExpr]} (.Type v))
+      (return 16))) ; <strike>11</strike> 16 ought to be enough.
+
+
+
+  1)
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 231} (go/func inlineBudget "inlineBudget determines the max budget for function 'fn' prior to\nanalyzing the hairiness of the body of 'fn'. We pass in the pgo\nprofile if available (which can change the budget), also a\n'relaxed' flag, which expands the budget slightly to allow for the\npossibility that a call to the function might have its score\nadjusted downwards. If 'verbose' is set, then print a remark where\nwe boost the budget due to PGO.\nNote that inlineCostOk has the final say on whether an inline will\nhappen; changes here merely make inlines possible.\n" ^int32 [^{:tag (* ir/Func)} fn ^{:tag (* pgoir/Profile)} profile ^bool relaxed ^bool verbose]
+  ;; Update the budget for profile-guided inlining.
+  (let [budget (conv int32 inlineMaxBudget)]
+
+    (set! budget * (simdCreditMultiplier fn))
+
+    (when (IsPgoHotFunc fn profile)
+      (set! budget inlineHotMaxBudget)
+      (when verbose
+        (fmt/Printf "hot-node enabled increased budget=%v for func=%v\n" budget (ir/PkgFuncName fn))))
+
+
+    (when relaxed
+      (set! budget + (inlheur/BudgetExpansion inlineMaxBudget)))
+
+    (when (!= (.-ClosureParent fn) nil)
+      ;; be very liberal here, if the closure is only called once, the budget is large
+      (set! budget (max budget inlineClosureCalledOnceCost)))
+
+
+    ^{:line 230} budget))
+
+
+
+
+
+^{:go/end 321} (go/func CanInline "CanInline determines whether fn is inlineable.\nIf so, CanInline saves copies of fn.Body and fn.Dcl in fn.Inl.\nfn and fn.Body will already have been typechecked.\n" [^{:tag (* ir/Func)} fn ^{:tag (* pgoir/Profile)} profile]
+  (when (== (.-Nname fn) nil)
+    (base/Fatalf "CanInline no nname %+v" fn))
+
+
+  (let [^string reason (zero string)] ; reason, if any, that the function was not inlined
+    (when (or (> (.-LowerM base/Flag) 1) (logopt/Enabled))
+      (defer (^{:go/end 252} (fn []
+            (when (!= reason "")
+              (when (> (.-LowerM base/Flag) 1)
+                (fmt/Printf "%v: cannot inline %v: %s\n" (ir/Line fn) (.-Nname fn) reason))
+
+              (when (logopt/Enabled)
+                (logopt/LogOpt ^{:go/via [miniNode]} (.Pos fn) "cannotInlineFunction" "inline" (ir/FuncName fn) reason)))))))
+
+
+
+
+
+    (set! reason (InlineImpossible fn))
+    (when (!= reason "")
+      (return))
+
+    (when (== ^{:go/via [miniNode]} (.Typecheck fn) 0)
+      (base/Fatalf "CanInline on non-typechecked function %v" fn))
+
+
+    (let [n (.-Nname fn)]
+      (when (.InlinabilityChecked (.-Func n))
+        (return))
+
+      (defer (.SetInlinabilityChecked (.-Func n) true))
+
+      (let [cc (conv int32 inlineExtraCallCost)]
+        (when (== (.-LowerL base/Flag) 4)
+          (set! cc 1)) ; this appears to yield better performance than 0.
+
+
+        ;; Used a "relaxed" inline budget if the new inliner is enabled.
+        (let [relaxed (inlheur/Enabled)
+
+            ;; Compute the inline budget for this func.
+            ^{:line 278} budget (inlineBudget fn profile relaxed (> (.-PGODebug base/Debug) 0))
+
+            ;; At this point in the game the function we're looking at may
+            ;; have "stale" autos, vars that still appear in the Dcl list, but
+            ;; which no longer have any uses in the function body (due to
+            ;; elimination by deadcode). We'd like to exclude these dead vars
+            ;; when creating the "Inline.Dcl" field below; to accomplish this,
+            ;; the hairyVisitor below builds up a map of used/referenced
+            ;; locals, and we use this map to produce a pruned Inline.Dcl
+            ;; list. See issue 25459 for more context.
+
+            ^{:line 289} dbg (ir/MatchAstDump fn "inline")
+
+            ^{:line 291} visitor ^{:go/breaks [2 4 6 8 10 12 14 16]} (lit hairyVisitor
+              :curFunc fn
+              :debug (isDebugFn fn)
+              :isBigFunc (IsBigFunc fn)
+              :budget budget
+              :maxBudget budget
+              :extraCallCost cc
+              :profile profile
+              :dbg dbg)] ; Useful for downstream debugging
+
+
+          (cond (.tooHairy visitor fn) (do
+              (set! reason (.-reason visitor))
+              (when dbg
+                (ir/AstDump fn (+ "inline, too hairy because " (.-reason visitor) ", " (ir/FuncName fn))))
+
+              (return))
+            ^{:line 308} dbg
+            (ir/AstDump fn (+ "inline, OK, " (ir/FuncName fn))))
+
+
+          (set! (.-Inl (.-Func n)) (addr ^{:go/breaks [2 4 6 8]} (lit ir/Inline
+                :Cost (- budget (.-budget visitor))
+                :Dcl (pruneUnusedAutos (.-Dcl (.-Func n)) (addr visitor))
+                :HaveDcl true
+                :CanDelayResults (canDelayResults fn))))
+
+          (when (or (!= (.-LowerM base/Flag) 0) (logopt/Enabled))
+            (noteInlinableFunc n fn (- budget (.-budget visitor)))))))))
+
+
+
+
+
+^{:go/end 335} (go/func noteInlinableFunc "noteInlinableFunc issues a message to the user that the specified\nfunction is inlinable.\n" [^{:tag (* ir/Name)} n ^{:tag (* ir/Func)} fn ^int32 cost]
+  (cond (> (.-LowerM base/Flag) 1)
+    (fmt/Printf "%v: can inline %v with cost %d as: %v { %v }\n" (ir/Line fn) (.DiagName n) cost (.Type fn) (.-Body fn))
+    (!= (.-LowerM base/Flag) 0)
+    (fmt/Printf "%v: can inline %v\n" (ir/Line fn) (.DiagName n)))
+
+  ;; JSON optimization log output.
+  (when (logopt/Enabled)
+    (logopt/LogOpt ^{:go/via [miniNode]} (.Pos fn) "canInlineFunction" "inline" (ir/FuncName fn) (fmt/Sprintf "cost: %d" cost))))
+
+
+
+
+
+^{:go/end 405} (go/func InlineImpossible "InlineImpossible returns a non-empty reason string if fn is impossible to\ninline regardless of cost or contents.\n" ^string [^{:tag (* ir/Func)} fn]
+  ^{:go/breaks [[11 404]]} (let [^string reason (zero string)] ; reason, if any, that the function can not be inlined.
+    (when (== (.-Nname fn) nil)
+      (set! reason "no name")
+      (return reason))
+
+
+    ;; If marked "go:noinline", don't inline.
+    (when (!= (bit-and (.-Pragma fn) ir/Noinline) 0)
+      (set! reason "marked go:noinline")
+      (return reason))
+
+
+    ;; If marked "go:norace" and -race compilation, don't inline.
+    (when (and (.-Race base/Flag) (!= (bit-and (.-Pragma fn) ir/Norace) 0))
+      (set! reason "marked go:norace with -race compilation")
+      (return reason))
+
+
+    ;; If marked "go:nocheckptr" and -d checkptr compilation, don't inline.
+    (when (and (!= (.-Checkptr base/Debug) 0) (!= (bit-and (.-Pragma fn) ir/NoCheckPtr) 0))
+      (set! reason "marked go:nocheckptr")
+      (return reason))
+
+
+    ;; If marked "go:cgo_unsafe_args", don't inline, since the function
+    ;; makes assumptions about its argument frame layout.
+    (when (!= (bit-and (.-Pragma fn) ir/CgoUnsafeArgs) 0)
+      (set! reason "marked go:cgo_unsafe_args")
+      (return reason))
+
+
+    ;; If marked as "go:uintptrkeepalive", don't inline, since the keep
+    ;; alive information is lost during inlining.
+    ;;
+    ;; TODO(prattmic): This is handled on calls during escape analysis,
+    ;; which is after inlining. Move prior to inlining so the keep-alive is
+    ;; maintained after inlining.
+    (when (!= (bit-and (.-Pragma fn) ir/UintptrKeepAlive) 0)
+      (set! reason "marked as having a keep-alive uintptr argument")
+      (return reason))
+
+
+    ;; If marked as "go:uintptrescapes", don't inline, since the escape
+    ;; information is lost during inlining.
+    (when (!= (bit-and (.-Pragma fn) ir/UintptrEscapes) 0)
+      (set! reason "marked as having an escaping uintptr argument")
+      (return reason))
+
+
+    ;; The nowritebarrierrec checker currently works at function
+    ;; granularity, so inlining yeswritebarrierrec functions can confuse it
+    ;; (#22342). As a workaround, disallow inlining them for now.
+    (when (!= (bit-and (.-Pragma fn) ir/Yeswritebarrierrec) 0)
+      (set! reason "marked go:yeswritebarrierrec")
+      (return reason))
+
+
+    ;; If a local function has no fn.Body (is defined outside of Go), cannot inline it.
+    ;; Imported functions don't have fn.Body but might have inline body in fn.Inl.
+    (when (and (== (len (.-Body fn)) 0) (not (typecheck/HaveInlineBody fn)))
+      (set! reason "no function body")
+      (return reason))
+
+
+    ""))
+
+
+
+
+^{:go/end 437} (go/func canDelayResults "canDelayResults reports whether inlined calls to fn can delay\ndeclaring the result parameter until the \"return\" statement.\n" ^bool [^{:tag (* ir/Func)} fn]
+  ;; We can delay declaring+initializing result parameters if:
+  ;; (1) there's exactly one "return" statement in the inlined function;
+  ;; (2) it's not an empty return statement (#44355); and
+  ;; (3) the result parameters aren't named.
+
+  ^{:go/breaks [[5 436]]} (let [nreturns 0]
+    (ir/VisitList (.-Body fn) ^{:go/end 423} (fn [^ir/Node n]
+        (when [(values n ok) (assert (* ir/ReturnStmt) n)] ok
+          (inc! nreturns)
+          (when (== (len (.-Results n)) 0)
+            (inc! nreturns))))) ; empty return statement (case 2)
+
+
+
+
+    (when (!= nreturns 1)
+      (return false)) ; not exactly one return statement (case 1)
+
+
+    ;; temporaries for return values.
+    (range [_ param (.Results (.Type fn))]
+      (when [sym (.-Sym param)] (and (!= sym nil) (not (.IsBlank sym)))
+        (return false))) ; found a named result parameter (case 3)
+
+
+
+    true))
+
+
+
+
+(go/type hairyVisitor "hairyVisitor visits a function body to determine its inlining\nhairiness and whether or not it can be inlined.\n" (struct
+
+    ^{:line 443 :tag (* ir/Func) :doc "This is needed to access the current caller in the doNode function.\n"} curFunc
+    ^{:line 444 :tag bool} isBigFunc
+    ^{:line 445 :tag bool} debug
+    ^{:line 446 :tag int32} budget
+    ^{:line 447 :tag int32} maxBudget
+    ^{:line 448 :tag string} reason
+    ^{:line 449 :tag int32} extraCallCost
+    ^{:line 450 :tag ir/NameSet} usedLocals
+    ^{:line 451 :tag (func [ir/Node] [bool])} do
+    ^{:line 452 :tag (* pgoir/Profile)} profile
+    ^{:line 453 :tag bool} dbg))
+
+
+^{:go/breaks [[3 463]] :go/end 464} (go/func isDebugFn ^bool [^{:tag (* ir/Func)} fn]
+  ;; if n := fn.Nname; n != nil {
+  ;; 	if n.Sym().Name == "Int32x8.Transpose8" && n.Sym().Pkg.Path == "simd/archsimd" {
+  ;; 		fmt.Printf("isDebugFn '%s' DOT '%s'\n", n.Sym().Pkg.Path, n.Sym().Name)
+  ;; 		return true
+  ;; 	}
+  ;; }
+  false)
+
+
+^{:go/breaks [[6 475]] :go/end 476} (go/method tooHairy ^bool [^{:tag (* hairyVisitor)} v ^{:tag (* ir/Func)} fn]
+  (set! (.-do v) (.-doNode v)) ; cache closure
+  (when (ir/DoChildren fn (.-do v))
+    (return true))
+
+  (when (< (.-budget v) 0)
+    (set! (.-reason v) (fmt/Sprintf "function too complex: cost %d exceeds budget %d" (- (.-maxBudget v) (.-budget v)) (.-maxBudget v)))
+    (return true))
+
+  false)
+
+
+
+
+^{:go/end 830} (go/method doNode "doNode visits n and its children, updates the state in v, and returns true if\nn makes the current function too hairy for inlining.\n" ^bool [^{:tag (* hairyVisitor)} v ^ir/Node n]
+  (when (== n nil)
+    (return false))
+
+  (when (.-debug v)
+    (fmt/Printf "%v: doNode %v budget is %d\n" (ir/Line n) (.Op n) (.-budget v)))
+
+  (label :opSwitch
+    (switch (.Op n)
+      ;; Call is okay if inlinable and we have the budget for the body.
+      (case [ir/OCALLFUNC]
+        (let [n (assert (* ir/CallExpr) n)
+            ^{:line 492 :tag bool} cheap (zero bool)]
+          (when (== (.Op (.-Fun n)) ir/ONAME)
+            (let [name (assert (* ir/Name) (.-Fun n))]
+              (when (== (.-Class name) ir/PFUNC)
+                (let [s (.Sym name)
+                    ^{:line 497} fn (.-Name s)]
+                  (switch (.-Path (.-Pkg s))
+                    (case ["internal/abi"]
+                      (switch fn
+                        (case ["NoEscape"]
+                          ;; Special case for internal/abi.NoEscape. It does just type
+                          ;; conversions to appease the escape analysis, and doesn't
+                          ;; generate code.
+                          (set! cheap true)))
+
+                      (when (strings/HasPrefix fn "EscapeNonString[")
+                        ;; internal/abi.EscapeNonString[T] is a compiler intrinsic
+                        ;; implemented in the escape analysis phase.
+                        (set! cheap true)))
+
+                    (case ["internal/runtime/sys"]
+                      (switch fn
+                        (case ["GetCallerPC" "GetCallerSP"]
+                          ;; Functions that call GetCallerPC/SP can not be inlined
+                          ;; because users expect the PC/SP of the logical caller,
+                          ;; but GetCallerPC/SP returns the physical caller.
+                          (set! (.-reason v) (+ "call to " fn))
+                          (return true))))
+
+                    (case ["go.runtime"]
+                      (switch fn
+                        (case ["throw"]
+                          ;; runtime.throw is a "cheap call" like panic in normal code.
+                          (set! (.-budget v) - inlineExtraThrowCost)
+                          (break :opSwitch))
+                        (case ["panicrangestate"]
+                          (set! cheap true))
+                        (case ["deferrangefunc"]
+                          (set! (.-reason v) "defer call in range func")
+                          (return true)))))))
+
+
+
+              ;; Special case for coverage counter updates; although
+              ;; these correspond to real operations, we treat them as
+              ;; zero cost for the moment. This is due to the existence
+              ;; of tests that are sensitive to inlining-- if the
+              ;; insertion of coverage instrumentation happens to tip a
+              ;; given function over the threshold and move it from
+              ;; "inlinable" to "not-inlinable", this can cause changes
+              ;; in allocation behavior, which can then result in test
+              ;; failures (a good example is the TestAllocations in
+              ;; crypto/ed25519).
+              (when (isAtomicCoverageCounterUpdate n)
+                (return false))))
+
+
+          (when (== (.Op (.-Fun n)) ir/OMETHEXPR)
+            (when [meth (ir/MethodExprName (.-Fun n))] (!= meth nil)
+              (when [fn (.-Func meth)] (!= fn nil)
+                (let [s (.Sym fn)]
+                  (when (== (types/RuntimeSymName s) "heapBits.nextArena")
+                    ;; Special case: explicitly allow mid-stack inlining of
+                    ;; runtime.heapBits.next even though it calls slow-path
+                    ;; runtime.heapBits.nextArena.
+                    (set! cheap true))
+
+                  ;; Special case: on architectures that can do unaligned loads,
+                  ;; explicitly mark encoding/binary methods as cheap,
+                  ;; because in practice they are, even though our inlining
+                  ;; budgeting system does not see that. See issue 42958.
+                  (when (and ^{:go/via [Arch]} (.-CanMergeLoads (.-Arch base/Ctxt)) (== (.-Path (.-Pkg s)) "encoding/binary"))
+                    (switch (.-Name s)
+                      (case ^{:go/breaks [3 6 9 12 15]} ["littleEndian.Uint64" "littleEndian.Uint32" "littleEndian.Uint16"
+                          "bigEndian.Uint64" "bigEndian.Uint32" "bigEndian.Uint16"
+                          "littleEndian.PutUint64" "littleEndian.PutUint32" "littleEndian.PutUint16"
+                          "bigEndian.PutUint64" "bigEndian.PutUint32" "bigEndian.PutUint16"
+                          "littleEndian.AppendUint64" "littleEndian.AppendUint32" "littleEndian.AppendUint16"
+                          "bigEndian.AppendUint64" "bigEndian.AppendUint32" "bigEndian.AppendUint16"]
+                        (set! cheap true))))))))
+
+
+
+
+
+
+          ;; A call to a parameter is optimistically a cheap call, if it's a constant function
+          ;; perhaps it will inline, it also can simplify escape analysis.
+          (let [extraCost (.-extraCallCost v)]
+
+            (when (== (.Op (.-Fun n)) ir/ONAME)
+              (let [name (assert (* ir/Name) (.-Fun n))]
+                (when (== (.-Class name) ir/PFUNC)
+                  ;; Special case: on architectures that can do unaligned loads,
+                  ;; explicitly mark internal/byteorder methods as cheap,
+                  ;; because in practice they are, even though our inlining
+                  ;; budgeting system does not see that. See issue 42958.
+                  (when (and ^{:go/via [Arch]} (.-CanMergeLoads (.-Arch base/Ctxt)) (== (.-Path (.-Pkg (.Sym name))) "internal/byteorder"))
+                    (switch (.-Name (.Sym name))
+                      (case ^{:go/breaks [3 6 9 12 15]} ["LEUint64" "LEUint32" "LEUint16"
+                          "BEUint64" "BEUint32" "BEUint16"
+                          "LEPutUint64" "LEPutUint32" "LEPutUint16"
+                          "BEPutUint64" "BEPutUint32" "BEPutUint16"
+                          "LEAppendUint64" "LEAppendUint32" "LEAppendUint16"
+                          "BEAppendUint64" "BEAppendUint32" "BEAppendUint16"]
+                        (set! cheap true)))))
+
+
+
+                (when (or (== (.-Class name) ir/PPARAM) (and (== (.-Class name) ir/PAUTOHEAP) (.IsClosureVar name)))
+                  (set! extraCost (min extraCost inlineParamCallCost)))))
+
+
+
+            (when cheap
+              (when (.-debug v)
+                (when (ir/IsIntrinsicCall n)
+                  (fmt/Printf "%v: cheap call is also intrinsic, %v\n" (ir/Line n) n)))
+
+
+              (break)) ; treat like any other node, that is, cost of 1
+
+
+            (when (ir/IsIntrinsicCall n)
+              (when (.-debug v)
+                (fmt/Printf "%v: intrinsic call, %v\n" (ir/Line n) n))
+
+              (break)) ; Treat like any other node.
+
+
+            (when [callee (inlCallee (.-curFunc v) (.-Fun n) (.-profile v) false)] (and (!= callee nil) (typecheck/HaveInlineBody callee))
+              ;; Check whether we'd actually inline this call. Set
+              ;; log == false since we aren't actually doing inlining
+              ;; yet.
+              (when [(values ok _ _) (canInlineCallExpr (.-curFunc v) n callee (.-isBigFunc v) false false)] ok
+                ;; mkinlcall would inline this call [1], so use
+                ;; the cost of the inline body as the cost of
+                ;; the call, as that is what will actually
+                ;; appear in the code.
+                ;;
+                ;; [1] This is almost a perfect match to the
+                ;; mkinlcall logic, except that
+                ;; canInlineCallExpr considers inlining cycles
+                ;; by looking at what has already been inlined.
+                ;; Since we haven't done any inlining yet we
+                ;; will miss those.
+                ;;
+                ;; TODO: in the case of a single-call closure, the inlining budget here is potentially much, much larger.
+                ;;
+                (set! (.-budget v) - (.-Cost (.-Inl callee)))
+                (break)))
+
+
+
+            (when (.-debug v)
+              (fmt/Printf "%v: costly OCALLFUNC %v\n" (ir/Line n) n))
+
+
+            ;; Call cost for non-leaf inlining.
+            (set! (.-budget v) - extraCost))))
+
+      (case [ir/OCALLMETH]
+        (base/FatalfAt (.Pos n) "OCALLMETH missed by typecheck"))
+
+      ;; Things that are too hairy, irrespective of the budget
+      (case [ir/OCALL ir/OCALLINTER]
+        ;; Call cost for non-leaf inlining.
+        (when (.-debug v)
+          (fmt/Printf "%v: costly OCALL %v\n" (ir/Line n) n))
+
+        (set! (.-budget v) - (.-extraCallCost v)))
+
+      (case [ir/OPANIC]
+        (let [n (assert (* ir/UnaryExpr) n)]
+          (when (and (== (.Op (.-X n)) ir/OCONVIFACE) (.Implicit (assert (* ir/ConvExpr) (.-X n))))
+            ;; Hack to keep reflect.flag.mustBe inlinable for TestIntendedInlining.
+            ;; Before CL 284412, these conversions were introduced later in the
+            ;; compiler, so they didn't count against inlining budget.
+            (inc! (.-budget v)))
+
+          (set! (.-budget v) - inlineExtraPanicCost)))
+
+      (case [ir/ORECOVER]
+        ;; TODO: maybe we could allow inlining of recover() now?
+        (set! (.-reason v) "call to recover")
+        (return true))
+
+      (case [ir/OCLOSURE]
+        (when (== (.-InlFuncsWithClosures base/Debug) 0)
+          (set! (.-reason v) "not inlining functions with closures")
+          (return true))
+
+
+        ;; TODO(danscales): Maybe make budget proportional to number of closure
+        ;; variables, e.g.:
+        ;;v.budget -= int32(len(n.(*ir.ClosureExpr).Func.ClosureVars) * 3)
+        ;; TODO(austin): However, if we're able to inline this closure into
+        ;; v.curFunc, then we actually pay nothing for the closure captures. We
+        ;; should try to account for that if we're going to account for captures.
+        (set! (.-budget v) - 15))
+
+      (case [ir/OGO ir/ODEFER ir/OTAILCALL]
+        (set! (.-reason v) (+ "unhandled op " (.String (.Op n))))
+        (return true))
+
+      (case [ir/OAPPEND]
+        (set! (.-budget v) - inlineExtraAppendCost))
+
+      (case [ir/OADDR]
+        (let [n (assert (* ir/AddrExpr) n)]
+          ;; Make "&s.f" cost 0 when f's offset is zero.
+          (when [(values dot ok) (assert (* ir/SelectorExpr) (.-X n))] (and ok ^:go/paren (or (== ^{:go/via [miniExpr miniNode]} (.Op dot) ir/ODOT) (== ^{:go/via [miniExpr miniNode]} (.Op dot) ir/ODOTPTR)))
+            (when [(values _ ok) (assert (* ir/Name) (.-X dot))] (and ok (== (.-Offset (.-Selection dot)) 0))
+              (set! (.-budget v) + 2))))) ; undo ir.OADDR+ir.ODOT/ir.ODOTPTR
+
+
+
+      (case [ir/ODEREF]
+        ;; *(*X)(unsafe.Pointer(&x)) is low-cost
+        (let [n (assert (* ir/StarExpr) n)
+
+            ^{:line 713} ptr (.-X n)]
+          (while (== (.Op ptr) ir/OCONVNOP)
+            (set! ptr (.-X (assert (* ir/ConvExpr) ptr))))
+
+          (when (== (.Op ptr) ir/OADDR)
+            (set! (.-budget v) + 1)))) ; undo half of default cost of ir.ODEREF+ir.OADDR
+
+
+      (case [ir/OCONVNOP]
+        ;; This doesn't produce code, but the children might.
+        (inc! (.-budget v))) ; undo default cost
+
+      (case [ir/OFALL ir/OTYPE]
+        ;; These nodes don't produce code; omit from inlining budget.
+        (return false))
+
+      (case [ir/OIF]
+        (let [n (assert (* ir/IfStmt) n)]
+          (when (ir/IsConst (.-Cond n) constant/Bool)
+            ;; This if and the condition cost nothing.
+            (when (doList ^{:go/via [miniStmt]} (.Init n) (.-do v))
+              (return true))
+
+            (if (ir/BoolVal (.-Cond n))
+              (return (doList (.-Body n) (.-do v)))
+
+              (return (doList (.-Else n) (.-do v)))))))
+
+
+
+      (case [ir/ONAME]
+        (let [n (assert (* ir/Name) n)]
+          (when (== (.-Class n) ir/PAUTO)
+            (.Add (.-usedLocals v) n))))
+
+
+      (case [ir/OBLOCK]
+        ;; The only OBLOCK we should see at this point is an empty one.
+        ;; In any event, let the visitList(n.List()) below take care of the statements,
+        ;; and don't charge for the OBLOCK itself. The ++ undoes the -- below.
+        (inc! (.-budget v)))
+
+      (case [ir/OMETHVALUE ir/OSLICELIT]
+        (dec! (.-budget v))) ; Hack for toolstash -cmp.
+
+      (case [ir/OMETHEXPR]
+        (inc! (.-budget v))) ; Hack for toolstash -cmp.
+
+      (case [ir/OAS2]
+        (let [n (assert (* ir/AssignListStmt) n)]
+
+          ;; Unified IR unconditionally rewrites:
+          ;;
+          ;;	a, b = f()
+          ;;
+          ;; into:
+          ;;
+          ;;	DCL tmp1
+          ;;	DCL tmp2
+          ;;	tmp1, tmp2 = f()
+          ;;	a, b = tmp1, tmp2
+          ;;
+          ;; so that it can insert implicit conversions as necessary. To
+          ;; minimize impact to the existing inlining heuristics (in
+          ;; particular, to avoid breaking the existing inlinability regress
+          ;; tests), we need to compensate for this here.
+          ;;
+          ;; See also identical logic in IsBigFunc.
+          (when (> (len (.-Rhs n)) 0)
+            (when [init (.Init (aget (.-Rhs n) 0))] (== (len init) 1)
+              (when [(values _ ok) (assert (* ir/AssignListStmt) (aget init 0))] ok
+                ;; 4 for each value, because each temporary variable now
+                ;; appears 3 times (DCL, LHS, RHS), plus an extra DCL node.
+                ;;
+                ;; 1 for the extra "tmp1, tmp2 = f()" assignment statement.
+                (set! (.-budget v) + (+ (* 4 (conv int32 (len (.-Lhs n)))) 1)))))))
+
+
+
+
+      (case [ir/OAS]
+        ;; Special case for coverage counter updates and coverage
+        ;; function registrations. Although these correspond to real
+        ;; operations, we treat them as zero cost for the moment. This
+        ;; is primarily due to the existence of tests that are
+        ;; sensitive to inlining-- if the insertion of coverage
+        ;; instrumentation happens to tip a given function over the
+        ;; threshold and move it from "inlinable" to "not-inlinable",
+        ;; this can cause changes in allocation behavior, which can
+        ;; then result in test failures (a good example is the
+        ;; TestAllocations in crypto/ed25519).
+        (let [n (assert (* ir/AssignStmt) n)]
+          (when (and (== (.Op (.-X n)) ir/OINDEX) (isIndexingCoverageCounter (.-X n)))
+            (return false))))
+
+
+      (case [ir/OSLICE ir/OSLICEARR ir/OSLICESTR ir/OSLICE3 ir/OSLICE3ARR]
+        (let [n (assert (* ir/SliceExpr) n)]
+
+          ;; Ignore superfluous slicing.
+          (when (and (!= (.-Low n) nil) (== (.Op (.-Low n)) ir/OLITERAL) (== (ir/Int64Val (.-Low n)) 0))
+            (inc! (.-budget v)))
+
+          (when (and (!= (.-High n) nil) (== (.Op (.-High n)) ir/OLEN) (== (.-X (assert (* ir/UnaryExpr) (.-High n))) (.-X n)))
+            (set! (.-budget v) + 2))))))
+
+
+
+  (dec! (.-budget v))
+
+  ;; When debugging, don't stop early, to get full cost of inlining this function
+  (when (and (< (.-budget v) 0) (< (.-LowerM base/Flag) 2) (not (logopt/Enabled)) (not (.-debug v)))
+    (set! (.-reason v) "too expensive")
+    (return true))
+
+
+  (ir/DoChildren n (.-do v)))
+
+
+
+
+
+^{:go/end 851} (go/func IsBigFunc "IsBigFunc reports whether fn is a \"big\" function.\n\nNote: The criteria for \"big\" is heuristic and subject to change.\n" ^bool [^{:tag (* ir/Func)} fn]
+  (let [budget inlineBigFunctionNodes]
+    (ir/Any fn ^{:go/end 850} (fn ^bool [^ir/Node n]
+        ;; See logic in hairyVisitor.doNode, explaining unified IR's
+        ;; handling of "a, b = f()" assignments.
+        (when [(values n ok) (assert (* ir/AssignListStmt) n)] (and ok (== ^{:go/via [miniStmt miniNode]} (.Op n) ir/OAS2) (> (len (.-Rhs n)) 0))
+          (when [init (.Init (aget (.-Rhs n) 0))] (== (len init) 1)
+            (when [(values _ ok) (assert (* ir/AssignListStmt) (aget init 0))] ok
+              (set! budget + (+ (* 4 (len (.-Lhs n))) 1)))))
+
+
+
+
+        (dec! budget)
+        (<= budget 0)))))
+
+
+
+
+
+
+^{:go/end 889} (go/func inlineCallCheck "inlineCallCheck returns whether a call will never be inlineable\nfor basic reasons, and whether the call is an intrinisic call.\nThe intrinsic result singles out intrinsic calls for debug logging.\n" [^{:tag (* ir/Func)} callerfn ^{:tag (* ir/CallExpr)} call] :results [bool bool]
+  (when (== (.-LowerL base/Flag) 0)
+    (return false false))
+
+  (when (!= ^{:go/via [miniExpr miniNode]} (.Op call) ir/OCALLFUNC)
+    (return false false))
+
+  (when (or (.-GoDefer call) (.-NoInline call))
+    (return false false))
+
+
+  ;; Prevent inlining some reflect.Value methods when using checkptr,
+  ;; even when package reflect was compiled without it (#35073).
+  (when (and (!= (.-Checkptr base/Debug) 0) (== (.Op (.-Fun call)) ir/OMETHEXPR))
+    (when [method (ir/MethodExprName (.-Fun call))] (!= method nil)
+      (switch (types/ReflectSymName (.Sym method))
+        (case ["Value.UnsafeAddr" "Value.Pointer"]
+          (return false false)))))
+
+
+
+
+  ;; internal/abi.EscapeNonString[T] is a compiler intrinsic implemented
+  ;; in the escape analysis phase.
+  (when [fn (ir/StaticCalleeName (.-Fun call))] (and (!= fn nil) (== (.-Path (.-Pkg (.Sym fn))) "internal/abi")
+      (strings/HasPrefix (.-Name (.Sym fn)) "EscapeNonString["))
+    (return false true))
+
+
+  (when (ir/IsIntrinsicCall call)
+    (return false true))
+
+  (return true false))
+
+
+
+
+
+^{:go/end 899} (go/func InlineCallTarget "InlineCallTarget returns the resolved-for-inlining target of a call.\nIt does not necessarily guarantee that the target can be inlined, though\nobvious exclusions are applied.\n" ^{:tag (* ir/Func)} [^{:tag (* ir/Func)} callerfn ^{:tag (* ir/CallExpr)} call ^{:tag (* pgoir/Profile)} profile]
+  (when [(values mightInline _) (inlineCallCheck callerfn call)] (not mightInline)
+    (return nil))
+
+  (inlCallee callerfn (.-Fun call) profile true))
+
+
+
+
+^{:go/end 918} (go/func TryInlineCall "TryInlineCall returns an inlined call expression for call, or nil\nif inlining is not possible.\n" ^{:tag (* ir/InlinedCallExpr)} [^{:tag (* ir/Func)} callerfn ^{:tag (* ir/CallExpr)} call ^bool bigCaller ^{:tag (* pgoir/Profile)} profile ^bool closureCalledOnce]
+  ^{:go/breaks [[5 917]]} (let [(values mightInline isIntrinsic) (inlineCallCheck callerfn call)]
+
+    ;; Preserve old logging behavior
+    (when (and ^:go/paren (or mightInline isIntrinsic) (> (.-LowerM base/Flag) 3))
+      (fmt/Printf "%v:call to func %+v\n" (ir/Line call) (.-Fun call)))
+
+    (when (not mightInline)
+      (return nil))
+
+
+    (when [fn (inlCallee callerfn (.-Fun call) profile false)] (and (!= fn nil) (typecheck/HaveInlineBody fn))
+      (return (mkinlcall callerfn call fn bigCaller closureCalledOnce profile)))
+
+    nil))
+
+
+
+
+
+^{:go/breaks [[8 952]] :go/end 953} (go/func inlCallee "inlCallee takes a function-typed expression and returns the underlying function ONAME\nthat it refers to if statically known. Otherwise, it returns nil.\nresolveOnly skips cost-based inlineability checks for closures; the result may not actually be inlineable.\n" [^{:tag (* ir/Func)} caller ^ir/Node fn ^{:tag (* pgoir/Profile)} profile ^bool resolveOnly] :results [^{:tag (* ir/Func)} res]
+  (set! fn (ir/StaticValue fn))
+  (switch (.Op fn)
+    (case [ir/OMETHEXPR]
+      (let [fn (assert (* ir/SelectorExpr) fn)
+          ^{:line 928} n (ir/MethodExprName fn)]
+        ;; Check that receiver type matches fn.X.
+        ;; TODO(mdempsky): Handle implicit dereference
+        ;; of pointer receiver argument?
+        (when (or (== n nil) (not (types/Identical (.-Type (.Recv ^{:go/via [miniExpr]} (.Type n))) (.Type (.-X fn)))))
+          (return nil))
+
+        (return (.-Func n))))
+    (case [ir/ONAME]
+      (let [fn (assert (* ir/Name) fn)]
+        (when (== (.-Class fn) ir/PFUNC)
+          (return (.-Func fn)))))
+
+    (case [ir/OCLOSURE]
+      (let [fn (assert (* ir/ClosureExpr) fn)
+          ^{:line 943} c (.-Func fn)]
+        (when (and (!= (len (.-ClosureVars c)) 0) (!= (.-Curfn (.-Outer (aget (.-ClosureVars c) 0))) caller))
+          (return nil)) ; inliner doesn't support inlining across closure frames
+
+        (when (not resolveOnly)
+          (CanInline c profile))
+
+        (return c))))
+
+  nil)
+
+
+(go/var ^int inlgen)
+
+
+
+(go/var ^{:doc "SSADumpInline gives the SSA back end a chance to dump the function\nwhen producing output for debugging the compiler itself.\n"} SSADumpInline ^{:go/end 959} (fn [(* ir/Func)]))
+
+
+
+(go/var ^{:doc "InlineCall allows the inliner implementation to be overridden.\nIf it returns nil, the function will not be inlined.\n"} InlineCall ^{:go/end 966} (fn ^{:tag (* ir/InlinedCallExpr)} [^{:tag (* ir/Func)} callerfn ^{:tag (* ir/CallExpr)} call ^{:tag (* ir/Func)} fn ^int inlIndex ^{:tag (* pgoir/Profile)} profile]
+    (base/Fatalf "inline.InlineCall not overridden")
+    (panic "unreachable")))
+
+
+
+
+
+
+
+
+
+^{:go/end 1043} (go/func inlineCostOK "inlineCostOK returns true if call n from caller to callee is cheap enough to\ninline. bigCaller indicates that caller is a big function.\n\nIn addition to the \"cost OK\" boolean, it also returns\n  - the \"max cost\" limit used to make the decision (which may differ depending on func size)\n  - the score assigned to this specific callsite\n  - whether the inlined function is \"hot\" according to PGO.\n" [^{:tag (* ir/CallExpr)} n ^{:tag (* ir/Func)} caller ^{:tag (* ir/Func)} callee ^bool bigCaller ^bool closureCalledOnce] :results [bool int32 int32 bool]
+  (let [maxCost (conv int32 inlineMaxBudget)]
+
+    (when bigCaller
+      ;; We use this to restrict inlining into very big functions.
+      ;; See issue 26546 and 17566.
+      (set! maxCost inlineBigFunctionMaxCost))
+
+
+    (let [simdMaxCost (* (simdCreditMultiplier callee) maxCost)]
+
+      (when (!= (.-ClosureParent callee) nil)
+        (set! maxCost * 2) ; favor inlining closures
+        (when closureCalledOnce ; really favor inlining the one call to this closure
+          (set! maxCost (max maxCost inlineClosureCalledOnceCost))))
+
+
+
+      (set! maxCost (max maxCost simdMaxCost))
+
+      (let [metric (.-Cost (.-Inl callee))]
+        (when (inlheur/Enabled)
+          (let [(values score ok) (inlheur/GetCallSiteScore caller n)]
+            (when ok
+              (set! metric (conv int32 score)))))
+
+
+
+        (let [lineOffset (pgoir/NodeLineOffset n caller)
+            ^{:line 1004} csi (lit pgoir/CallSiteInfo :LineOffset lineOffset :Caller caller)
+            (values _ hot) (aget candHotEdgeMap csi)]
+
+          (when (<= metric maxCost)
+            ;; Simple case. Function is already cheap enough.
+            (return true 0 metric hot))
+
+
+          ;; We'll also allow inlining of hot functions below inlineHotMaxBudget,
+          ;; but only in small functions.
+
+          (when (not hot)
+            ;; Cold
+            (return false maxCost metric false))
+
+
+          ;; Hot
+
+          (when bigCaller
+            (when (> (.-PGODebug base/Debug) 0)
+              (fmt/Printf "hot-big check disallows inlining for call %s (cost %d) at %v in big function %s\n" (ir/PkgFuncName callee) (.-Cost (.-Inl callee)) (ir/Line n) (ir/PkgFuncName caller)))
+
+            (return false maxCost metric false))
+
+
+          (when (> metric inlineHotMaxBudget)
+            (return false inlineHotMaxBudget metric false))
+
+
+          (when (not (.MatchPosWithInfo base/PGOHash ^{:go/via [miniExpr miniNode]} (.Pos n) "inline" nil))
+            ;; De-selected by PGO Hash.
+            (return false maxCost metric false))
+
+
+          (when (> (.-PGODebug base/Debug) 0)
+            (fmt/Printf "hot-budget check allows inlining for call %s (cost %d) at %v in function %s\n" (ir/PkgFuncName callee) (.-Cost (.-Inl callee)) (ir/Line n) (ir/PkgFuncName caller)))
+
+
+          (return true 0 metric hot))))))
+
+
+
+^{:go/end 1053} (go/func parsePos "parsePos returns all the inlining positions and the innermost position.\n" [^src/XPos pos ^{:tag (slice src/Pos)} posTmp] :results [(slice src/Pos) src/Pos]
+  (let [ctxt base/Ctxt]
+    (.AllPos ctxt pos ^{:go/end 1050} (fn [^src/Pos p]
+        (set! posTmp (append posTmp p))))
+
+    (let [l (- (len posTmp) 1)]
+      (return (subslice posTmp _ l) (aget posTmp l)))))
+
+
+
+
+
+
+
+
+
+^{:go/end 1149} (go/func canInlineCallExpr "canInlineCallExpr returns true if the call n from caller to callee\ncan be inlined, plus the score computed for the call expr in question,\nand whether the callee is hot according to PGO.\nbigCaller indicates that caller is a big function. log\nindicates that the 'cannot inline' reason should be logged.\n\nPreconditions: CanInline(callee) has already been called.\n" [^{:tag (* ir/Func)} callerfn ^{:tag (* ir/CallExpr)} n ^{:tag (* ir/Func)} callee ^bool bigCaller ^bool closureCalledOnce ^bool log] :results [bool int32 bool]
+  (when (== (.-Inl callee) nil)
+    ;; callee is never inlinable.
+    (when (and log (logopt/Enabled))
+      (logopt/LogOpt ^{:go/via [miniExpr miniNode]} (.Pos n) "cannotInlineCall" "inline" (ir/FuncName callerfn)
+        (fmt/Sprintf "%s cannot be inlined" (ir/PkgFuncName callee))))
+
+    (return false 0 false))
+
+
+  (let [(values ok maxCost callSiteScore hot) (inlineCostOK n callerfn callee bigCaller closureCalledOnce)]
+    (when (not ok)
+      ;; callee cost too high for this call site.
+      (when (and log (logopt/Enabled))
+        (logopt/LogOpt ^{:go/via [miniExpr miniNode]} (.Pos n) "cannotInlineCall" "inline" (ir/FuncName callerfn)
+          (fmt/Sprintf "cost %d of %s exceeds max caller cost %d" (.-Cost (.-Inl callee)) (ir/PkgFuncName callee) maxCost)))
+
+      (return false 0 false))
+
+
+    (let [(values callees calleeInner) (parsePos ^{:go/via [miniExpr miniNode]} (.Pos n) (make (slice src/Pos) 0 10))]
+
+      (range [_ p callees]
+        (when (and (== ^{:go/via [lico]} (.Line p) ^{:go/via [lico]} (.Line calleeInner)) (== ^{:go/via [lico]} (.Col p) ^{:go/via [lico]} (.Col calleeInner)) (== (.AbsFilename p) (.AbsFilename calleeInner)))
+          (when (and log (logopt/Enabled))
+            (logopt/LogOpt ^{:go/via [miniExpr miniNode]} (.Pos n) "cannotInlineCall" "inline" (fmt/Sprintf "recursive call to %s" (ir/FuncName callerfn))))
+
+          (return false 0 false)))
+
+
+
+      (when (and (.-Instrumenting (.-Cfg base/Flag)) (types/IsNoInstrumentPkg (.-Pkg (.Sym callee))))
+        ;; Runtime package must not be instrumented.
+        ;; Instrument skips runtime package. However, some runtime code can be
+        ;; inlined into other packages and instrumented there. To avoid this,
+        ;; we disable inlining of runtime functions when instrumenting.
+        ;; The example that we observed is inlining of LockOSThread,
+        ;; which lead to false race reports on m contents.
+        (when (and log (logopt/Enabled))
+          (logopt/LogOpt ^{:go/via [miniExpr miniNode]} (.Pos n) "cannotInlineCall" "inline" (ir/FuncName callerfn)
+            (fmt/Sprintf "call to runtime function %s in instrumented build" (ir/PkgFuncName callee))))
+
+        (return false 0 false))
+
+
+      (when (and (.-Race base/Flag) (types/IsNoRacePkg (.-Pkg (.Sym callee))))
+        (when (and log (logopt/Enabled))
+          (logopt/LogOpt ^{:go/via [miniExpr miniNode]} (.Pos n) "cannotInlineCall" "inline" (ir/FuncName callerfn)
+            (fmt/Sprintf "call to into \"no-race\" package function %s in race build" (ir/PkgFuncName callee))))
+
+        (return false 0 false))
+
+
+      (when (and (!= (.-Checkptr base/Debug) 0) (types/IsRuntimePkg (.-Pkg (.Sym callee))))
+        ;; We don't instrument runtime packages for checkptr (see base/flag.go).
+        (when (and log (logopt/Enabled))
+          (logopt/LogOpt ^{:go/via [miniExpr miniNode]} (.Pos n) "cannotInlineCall" "inline" (ir/FuncName callerfn)
+            (fmt/Sprintf "call to into runtime package function %s in -d=checkptr build" (ir/PkgFuncName callee))))
+
+        (return false 0 false))
+
+
+      ;; Check if we've already inlined this function at this particular
+      ;; call site, in order to stop inlining when we reach the beginning
+      ;; of a recursion cycle again. We don't inline immediately recursive
+      ;; functions, but allow inlining if there is a recursion cycle of
+      ;; many functions. Most likely, the inlining will stop before we
+      ;; even hit the beginning of the cycle again, but this catches the
+      ;; unusual case.
+      (let [parent (.InliningIndex (.Base (.Pos (.-PosTable base/Ctxt) ^{:go/via [miniExpr miniNode]} (.Pos n))))
+          ^{:line 1132} sym (.Linksym callee)]
+        (for [inlIndex parent] (>= inlIndex 0) (set! inlIndex (.Parent (.-InlTree base/Ctxt) inlIndex))
+          (when (== (.InlinedFunction (.-InlTree base/Ctxt) inlIndex) sym)
+            (when log
+              (when (> (.-LowerM base/Flag) 1)
+                (fmt/Printf "%v: cannot inline %v into %v: repeated recursive cycle\n" (ir/Line n) callee (ir/FuncName callerfn)))
+
+              (when (logopt/Enabled)
+                (logopt/LogOpt ^{:go/via [miniExpr miniNode]} (.Pos n) "cannotInlineCall" "inline" (ir/FuncName callerfn)
+                  (fmt/Sprintf "repeated recursive cycle to %s" (ir/PkgFuncName callee)))))
+
+
+            (return false 0 false)))
+
+
+
+        (return true callSiteScore hot)))))
+
+
+
+
+
+
+
+
+
+^{:go/end 1254} (go/func mkinlcall "mkinlcall returns an OINLCALL node that can replace OCALLFUNC n, or\nnil if it cannot be inlined. callerfn is the function that contains\nn, and fn is the function being called.\n\nThe result of mkinlcall MUST be assigned back to n, e.g.\n\n\tn.Left = mkinlcall(n.Left, fn, isddd)\n" ^{:tag (* ir/InlinedCallExpr)} [^{:tag (* ir/Func)} callerfn ^{:tag (* ir/CallExpr)} n ^{:tag (* ir/Func)} fn ^bool bigCaller ^bool closureCalledOnce ^{:tag (* pgoir/Profile)} profile]
+  (let [(values ok score hot) (canInlineCallExpr callerfn n fn bigCaller closureCalledOnce true)]
+    (when (not ok)
+      (return nil))
+
+    (when hot
+      (aset hasHotCall callerfn (lit (struct))))
+
+    (typecheck/AssertFixedCall n)
+
+    (let [parent (.InliningIndex (.Base (.Pos (.-PosTable base/Ctxt) ^{:go/via [miniExpr miniNode]} (.Pos n))))
+        ^{:line 1169} sym (.Linksym fn)
+        ^{:line 1170} inlIndex (.Add (.-InlTree base/Ctxt) parent ^{:go/via [miniExpr miniNode]} (.Pos n) sym (ir/FuncName fn))
+
+        ^{:line 1172} closureInitLSym ^{:go/end 1216} (fn [^{:tag (* ir/CallExpr)} n ^{:tag (* ir/Func)} fn]
+          ;; The linker needs FuncInfo metadata for all inlined
+          ;; functions. This is typically handled by gc.enqueueFunc
+          ;; calling ir.InitLSym for all function declarations in
+          ;; typecheck.Target.Decls (ir.UseClosure adds all closures to
+          ;; Decls).
+          ;;
+          ;; However, closures in Decls are ignored, and are
+          ;; instead enqueued when walk of the calling function
+          ;; discovers them.
+          ;;
+          ;; This presents a problem for direct calls to closures.
+          ;; Inlining will replace the entire closure definition with its
+          ;; body, which hides the closure from walk and thus suppresses
+          ;; symbol creation.
+          ;;
+          ;; Explicitly create a symbol early in this edge case to ensure
+          ;; we keep this metadata.
+          ;;
+          ;; TODO: Refactor to keep a reference so this can all be done
+          ;; by enqueueFunc.
+
+          (when (!= ^{:go/via [miniExpr miniNode]} (.Op n) ir/OCALLFUNC)
+            ;; Not a standard call.
+            (return))
+
+
+          (let [^:var nf (.-Fun n)]
+            ;; Skips ir.OCONVNOPs, see issue #73716.
+            (while (== (.Op nf) ir/OCONVNOP)
+              (set! nf (.-X (assert (* ir/ConvExpr) nf))))
+
+            (when (!= (.Op nf) ir/OCLOSURE)
+              ;; Not a direct closure call or one with type conversion.
+              (return))
+
+
+            (let [clo (assert (* ir/ClosureExpr) nf)]
+              (when (not (.IsClosure (.-Func clo)))
+                ;; enqueueFunc will handle non closures anyways.
+                (return))
+
+
+              (ir/InitLSym fn true))))]
+
+
+      (closureInitLSym n fn)
+
+      (when (> (.-GenDwarfInl base/Flag) 0)
+        (when (not ^{:go/via [Attribute]} (.WasInlined sym))
+          (.SetPrecursorFunc (.-DwFixups base/Ctxt) sym fn)
+          ^{:go/via [Attribute]} (.Set sym obj/AttrWasInlined true)))
+
+
+
+      (when (!= (.-LowerM base/Flag) 0)
+        (if ^{:go/via [Flags]} (.-NewInliner buildcfg/Experiment)
+          (fmt/Printf "%v: inlining call to %v with score %d\n"
+            (ir/Line n) (.DiagName (.-Nname fn)) score)
+
+          (fmt/Printf "%v: inlining call to %v\n" (ir/Line n) (.DiagName (.-Nname fn)))))
+
+
+      (when (> (.-LowerM base/Flag) 2)
+        (fmt/Printf "%v: Before inlining: %+v\n" (ir/Line n) n))
+
+
+      (let [res (InlineCall callerfn n fn inlIndex profile)]
+
+        (when (== res nil)
+          (base/FatalfAt ^{:go/via [miniExpr miniNode]} (.Pos n) "inlining call to %v failed" (.DiagName (.-Nname fn))))
+
+
+        (when (> (.-LowerM base/Flag) 2)
+          (fmt/Printf "%v: After inlining %+v\n\n" (ir/Line res) res))
+
+
+        (when (inlheur/Enabled)
+          (inlheur/UpdateCallsiteTable callerfn n res))
+
+
+        ^{:line 1253} res))))
+
+
+
+^{:go/end 1278} (go/func CalleeEffects "CalleeEffects appends any side effects from evaluating callee to init.\n" [^{:tag (* ir/Nodes)} init ^ir/Node callee]
+  (while true
+    (.Append init (spread (ir/TakeInit callee)))
+
+    (switch (.Op callee)
+      (case [ir/ONAME ir/OCLOSURE ir/OMETHEXPR]
+        (return)) ; done
+
+      (case [ir/OCONVNOP]
+        (let [conv (assert (* ir/ConvExpr) callee)]
+          (set! callee (.-X conv))))
+
+      (case [ir/OINLCALL]
+        (let [ic (assert (* ir/InlinedCallExpr) callee)]
+          (.Append init (spread (.Take (.-Body ic))))
+          (set! callee (.SingleResult ic))))
+
+      (default
+        (base/FatalfAt (.Pos callee) "unexpected callee expression: %v" callee)))))
+
+
+
+
+^{:go/end 1294} (go/func pruneUnusedAutos ^{:tag (slice (* ir/Name))} [^{:tag (slice (* ir/Name))} ll ^{:tag (* hairyVisitor)} vis]
+  (let [s (make (slice (* ir/Name)) 0 (len ll))]
+    (range [_ n ll]
+      (when (== (.-Class n) ir/PAUTO)
+        (when (not (.Has (.-usedLocals vis) n))
+          ;; TODO(mdempsky): Simplify code after confident that this
+          ;; never happens anymore.
+          (base/FatalfAt ^{:go/via [miniExpr miniNode]} (.Pos n) "unused auto: %v" n)
+          (continue)))
+
+
+      (set! s (append s n)))
+
+    ^{:line 1293} s))
+
+
+^{:go/breaks [[4 1304]] :go/end 1305} (go/func doList ^bool [^{:tag (slice ir/Node)} list ^{:tag (func [ir/Node] [bool])} do]
+  (range [_ x list]
+    (when (!= x nil)
+      (when (go/call do x)
+        (return true))))
+
+
+
+  false)
+
+
+
+
+^{:go/end 1322} (go/func isIndexingCoverageCounter "isIndexingCoverageCounter returns true if the specified node 'n' is indexing\ninto a coverage counter array.\n" ^bool [^ir/Node n]
+  (when (!= (.Op n) ir/OINDEX)
+    (return false))
+
+  (let [ixn (assert (* ir/IndexExpr) n)]
+    (when (or (!= (.Op (.-X ixn)) ir/ONAME) (not (.IsArray (.Type (.-X ixn)))))
+      (return false))
+
+    (let [nn (assert (* ir/Name) (.-X ixn))]
+      ;; CoverageAuxVar implies either a coverage counter or a package
+      ;; ID; since the cover tool never emits code to index into ID vars
+      ;; this is effectively testing whether nn is a coverage counter.
+      (.CoverageAuxVar nn))))
+
+
+
+
+
+^{:go/end 1346} (go/func isAtomicCoverageCounterUpdate "isAtomicCoverageCounterUpdate examines the specified node to\ndetermine whether it represents a call to sync/atomic.AddUint32 to\nincrement a coverage counter.\n" ^bool [^{:tag (* ir/CallExpr)} cn]
+  (when (!= (.Op (.-Fun cn)) ir/ONAME)
+    (return false))
+
+  (let [name (assert (* ir/Name) (.-Fun cn))]
+    (when (!= (.-Class name) ir/PFUNC)
+      (return false))
+
+    (let [fn (.-Name (.Sym name))]
+      (when (or (!= (.-Path (.-Pkg (.Sym name))) "sync/atomic")
+          ^:go/paren (and (!= fn "AddUint32") (!= fn "StoreUint32")))
+        (return false))
+
+      (when (or (!= (len (.-Args cn)) 2) (!= (.Op (aget (.-Args cn) 0)) ir/OADDR))
+        (return false))
+
+      (let [adn (assert (* ir/AddrExpr) (aget (.-Args cn) 0))
+          ^{:line 1344} v (isIndexingCoverageCounter (.-X adn))]
+        ^{:line 1345} v))))
+
+
+^{:go/end 1356} (go/func PostProcessCallSites [^{:tag (* pgoir/Profile)} profile]
+  (when (!= (.-DumpInlCallSiteScores base/Debug) 0)
+    (let [budgetCallback ^{:go/end 1353} (fn [^{:tag (* ir/Func)} fn ^{:tag (* pgoir/Profile)} prof] :results [int32 bool]
+          (let [v (inlineBudget fn prof false false)]
+            (return v (== v inlineHotMaxBudget))))]
+
+      (inlheur/DumpInlCallSiteScores profile budgetCallback))))
+
+
+
+^{:go/end 1364} (go/func analyzeFuncProps [^{:tag (* ir/Func)} fn ^{:tag (* pgoir/Profile)} p]
+  (let [canInline ^{:go/end 1359} (fn [^{:tag (* ir/Func)} fn] (CanInline fn p))
+      ^{:line 1360} budgetForFunc ^{:go/end 1362} (fn ^int32 [^{:tag (* ir/Func)} fn]
+        (inlineBudget fn p true false))]
+
+    (inlheur/AnalyzeFunc fn canInline budgetForFunc inlineMaxBudget)))

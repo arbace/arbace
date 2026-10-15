@@ -1,0 +1,336 @@
+;; Copyright 2015 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.cmd.compile.internal.ssa) (go/file "nilcheck.go" :imports [
+
+
+    ^{:line 8} [ir "cmd/compile/internal/ir"]
+    ^{:line 9} [src "cmd/internal/src"]
+    ^{:line 10} [buildcfg "internal/buildcfg"]])
+
+
+
+
+^{:go/end 187} (go/func nilcheckelim "nilcheckelim eliminates unnecessary nil checks.\nruns on machine-independent code.\n" [^{:tag (* Func)} f]
+  ;; A nil check is redundant if the same nil check was successful in a
+  ;; dominating block. The efficacy of this pass depends heavily on the
+  ;; efficacy of the cse pass.
+  (let [sdom (.Sdom f)]
+
+    ;; TODO: Eliminate more nil checks.
+    ;; We can recursively remove any chain of fixed offset calculations,
+    ;; i.e. struct fields and array elements, even with non-constant
+    ;; indices: x is non-nil iff x.a.b[i].c is.
+
+    (let-type [walkState int]
+      (let [
+          ^:const ^{:line 28 :tag walkState :val 0} Work iota ; process nil checks and traverse to dominees
+          ^:const ^:go/grouped ^:go/implicit ^{:line 29 :tag walkState :val 1} ClearPtr iota] ; forget the fact that ptr is nil
+
+
+        (let-type [bp (struct
+              ^{:line 33 :tag (* Block)} block ; block, or nil in ClearPtr state
+              ^{:line 34 :tag (* Value)} ptr ; if non-nil, ptr that is to be cleared in ClearPtr state
+              ^{:line 35 :tag walkState} op)]
+
+
+          (let [work (make (slice bp) 0 256)]
+            (set! work (append work (lit bp :block (.-Entry f))))
+
+            ;; map from value ID to known non-nil version of that value ID
+            ;; (in the current dominator path being walked). This slice is updated by
+            ;; walkStates to maintain the known non-nil values.
+            ;; If there is extrinsic information about non-nil-ness, this map
+            ;; points a value to itself. If a value is known non-nil because we
+            ;; already did a nil check on it, it points to the nil check operation.
+            (let [nonNilValues (.allocValueSlice (.-Cache f) (.NumValues f))]
+              (defer (.freeValueSlice (.-Cache f) nonNilValues))
+
+              ;; make an initial pass identifying any non-nil values
+              (range [_ b (.-Blocks f)]
+                (range [_ v (.-Values b)]
+                  ;; a value resulting from taking the address of a
+                  ;; value, or a value constructed from an offset of a
+                  ;; non-nil ptr (OpAddPtr) implies it is non-nil
+                  ;; We also assume unsafe pointer arithmetic generates non-nil pointers. See #27180.
+                  ;; We assume that SlicePtr is non-nil because we do a bounds check
+                  ;; before the slice access (and all cap>0 slices have a non-nil ptr). See #30366.
+                  (when (or (== (.-Op v) OpAddr) (== (.-Op v) OpLocalAddr) (== (.-Op v) OpAddPtr) (== (.-Op v) OpOffPtr) (== (.-Op v) OpAdd32) (== (.-Op v) OpAdd64) (== (.-Op v) OpSub32) (== (.-Op v) OpSub64) (== (.-Op v) OpSlicePtr))
+                    (aset nonNilValues (.-ID v) v))))
+
+
+
+
+              (for [changed true] changed _
+                (set! changed false)
+                (range [_ b (.-Blocks f)]
+                  (range [_ v (.-Values b)]
+                    ;; phis whose arguments are all non-nil
+                    ;; are non-nil
+                    (when (== (.-Op v) OpPhi)
+                      (let [argsNonNil true]
+                        (range [_ a (.-Args v)]
+                          (when (== (aget nonNilValues (.-ID a)) nil)
+                            (set! argsNonNil false)
+                            (break)))
+
+
+                        (when argsNonNil
+                          (when (== (aget nonNilValues (.-ID v)) nil)
+                            (set! changed true))
+
+                          (aset nonNilValues (.-ID v) v)))))))
+
+
+
+
+
+
+              ;; allocate auxiliary date structures for computing store order
+              (let [sset (.newSparseSet f (.NumValues f))]
+                (defer (.retSparseSet f sset))
+                (let [storeNumber (.allocInt32Slice (.-Cache f) (.NumValues f))]
+                  (defer (.freeInt32Slice (.-Cache f) storeNumber))
+
+                  ;; perform a depth first walk of the dominee tree
+                  (while (> (len work) 0)
+                    (let [node (aget work (- (len work) 1))]
+                      (set! work (subslice work _ (- (len work) 1)))
+
+                      (switch (.-op node)
+                        (case [Work]
+                          (let [b (.-block node)]
+
+                            ;; First, see if we're dominated by an explicit nil check.
+                            (when (== (len (.-Preds b)) 1)
+                              (let [p (.-b (aget (.-Preds b) 0))]
+                                (when (and (== (.-Kind p) BlockIf) (== (.-Op (aget (.-Controls p) 0)) OpIsNonNil) (== (.-b (aget (.-Succs p) 0)) b))
+                                  (when [ptr (aget (.-Args (aget (.-Controls p) 0)) 0)] (== (aget nonNilValues (.-ID ptr)) nil)
+                                    (aset nonNilValues (.-ID ptr) ptr)
+                                    (set! work (append work (lit bp :op ClearPtr :ptr ptr)))))))
+
+
+
+
+                            ;; Next, order values in the current block w.r.t. stores.
+                            (set! (.-Values b) (storeOrder (.-Values b) sset storeNumber))
+
+                            (let [pendingLines (.-cachedLineStarts f)] ; Holds statement boundaries that need to be moved to a new value/block
+                              (.clear pendingLines)
+
+                              ;; Next, process values in the block.
+                              (range [_ v (.-Values b)]
+                                (switch (.-Op v)
+                                  (case [OpIsNonNil]
+                                    (let [ptr (aget (.-Args v) 0)]
+                                      (when (!= (aget nonNilValues (.-ID ptr)) nil)
+                                        (when (== ^{:go/via [lico]} (.IsStmt (.-Pos v)) src/PosIsStmt) ; Boolean true is a terrible statement boundary.
+                                          (.add pendingLines (.-Pos v))
+                                          (set! (.-Pos v) (.WithNotStmt (.-Pos v))))
+
+                                        ;; This is a redundant explicit nil check.
+                                        (.reset v OpConstBool)
+                                        (set! (.-AuxInt v) 1)))) ; true
+
+                                  (case [OpNilCheck]
+                                    (let [ptr (aget (.-Args v) 0)]
+                                      (when [nilCheck (aget nonNilValues (.-ID ptr))] (!= nilCheck nil)
+                                        ;; This is a redundant implicit nil check.
+                                        ;; Logging in the style of the former compiler -- and omit line 1,
+                                        ;; which is usually in generated code.
+                                        (when (and (.Debug_checknil (.-fe f)) (> ^{:go/via [lico]} (.Line (.-Pos v)) 1))
+                                          (.Warnl f (.-Pos v) "removed nil check"))
+
+                                        (when (== ^{:go/via [lico]} (.IsStmt (.-Pos v)) src/PosIsStmt) ; About to lose a statement boundary
+                                          (.add pendingLines (.-Pos v)))
+
+                                        (set! (.-Op v) OpCopy)
+                                        (.SetArgs1 v nilCheck)
+                                        (continue))
+
+                                      ;; Record the fact that we know ptr is non nil, and remember to
+                                      ;; undo that information when this dominator subtree is done.
+                                      (aset nonNilValues (.-ID ptr) v)
+                                      (set! work (append work (lit bp :op ClearPtr :ptr ptr)))
+                                      (fallthrough))) ; a non-eliminated nil check might be a good place for a statement boundary.
+                                  (default
+                                    (when (and (!= ^{:go/via [lico]} (.IsStmt (.-Pos v)) src/PosNotStmt) (not (isPoorStatementOp (.-Op v))) (.contains pendingLines (.-Pos v)))
+                                      (set! (.-Pos v) (.WithIsStmt (.-Pos v)))
+                                      (.remove pendingLines (.-Pos v))))))
+
+
+
+                              ;; This reduces the lost statement count in "go" by 5 (out of 500 total).
+                              (range [j (.-Values b)] ; is this an ordering problem?
+                                (let [v (aget (.-Values b) j)]
+                                  (when (and (!= ^{:go/via [lico]} (.IsStmt (.-Pos v)) src/PosNotStmt) (not (isPoorStatementOp (.-Op v))) (.contains pendingLines (.-Pos v)))
+                                    (set! (.-Pos v) (.WithIsStmt (.-Pos v)))
+                                    (.remove pendingLines (.-Pos v)))))
+
+
+                              (when (.contains pendingLines (.-Pos b))
+                                (set! (.-Pos b) (.WithIsStmt (.-Pos b)))
+                                (.remove pendingLines (.-Pos b)))
+
+
+                              ;; Add all dominated blocks to the work list.
+                              (for [w (.-child (aget sdom (.-ID (.-block node))))] (!= w nil) (set! w (.-sibling (aget sdom (.-ID w))))
+                                (set! work (append work (lit bp :op Work :block w)))))))
+
+
+                        (case [ClearPtr]
+                          (aset nonNilValues (.-ID (.-ptr node)) nil)
+                          (continue))))))))))))))
+
+
+
+
+
+
+
+(go/const ^{:val 4096 :doc "All platforms are guaranteed to fault if we load/store to anything smaller than this address.\n\nThis should agree with minLegalPointer in the runtime.\n"} minZeroPage 4096)
+
+
+(go/var ^{:doc "faultOnLoad is true if a load to an address below minZeroPage will trigger a SIGSEGV.\n"} faultOnLoad (!= buildcfg/GOOS "aix"))
+
+
+
+^{:go/end 338} (go/func nilcheckelim2 "nilcheckelim2 eliminates unnecessary nil checks.\nRuns after lowering and scheduling.\n" [^{:tag (* Func)} f]
+  (let [unnecessary (.newSparseMap f (.NumValues f))] ; map from pointer that will be dereferenced to index of dereferencing value in b.Values[]
+    (defer (.retSparseMap f unnecessary))
+
+    (let [pendingLines (.-cachedLineStarts f)] ; Holds statement boundaries that need to be moved to a new value/block
+
+      (range [_ b (.-Blocks f)]
+        ;; Walk the block backwards. Find instructions that will fault if their
+        ;; input pointer is nil. Remove nil checks on those pointers, as the
+        ;; faulting instruction effectively does the nil check for free.
+        (.clear unnecessary)
+        (.clear pendingLines)
+        ;; Optimization: keep track of removed nilcheck with smallest index
+        (let [firstToRemove (len (.-Values b))]
+          (for [i (- (len (.-Values b)) 1)] (>= i 0) (dec! i)
+            (let [v (aget (.-Values b) i)]
+              (when (and (.-nilCheck (aget opcodeTable (.-Op v))) (.contains unnecessary (.-ID (aget (.-Args v) 0))))
+                (when (and (.Debug_checknil (.-fe f)) (> ^{:go/via [lico]} (.Line (.-Pos v)) 1))
+                  (.Warnl f (.-Pos v) "removed nil check"))
+
+                ;; For bug 33724, policy is that we might choose to bump an existing position
+                ;; off the faulting load/store in favor of the one from the nil check.
+
+                ;; Iteration order means that first nilcheck in the chain wins, others
+                ;; are bumped into the ordinary statement preservation algorithm.
+                (let [(values uid _) (.get unnecessary (.-ID (aget (.-Args v) 0)))
+                    ^{:line 225} u (aget (.-Values b) uid)]
+                  (cond (not (.SameFileAndLine (.-Pos u) (.-Pos v))) (do
+                      (when (== ^{:go/via [lico]} (.IsStmt (.-Pos u)) src/PosIsStmt)
+                        (.add pendingLines (.-Pos u)))
+
+                      (set! (.-Pos u) (.-Pos v)))
+                    (== ^{:go/via [lico]} (.IsStmt (.-Pos v)) src/PosIsStmt)
+                    (.add pendingLines (.-Pos v)))
+
+
+                  (.reset v OpUnknown)
+                  (set! firstToRemove i)
+                  (continue)))
+
+              (when (or (.IsMemory (.-Type v)) (and (.IsTuple (.-Type v)) (.IsMemory (.FieldType (.-Type v) 1))))
+                (when (or (== (.-Op v) OpVarLive) ^:go/paren (and (== (.-Op v) OpVarDef) (not (.HasPointers ^{:go/via [miniExpr]} (.Type (assert (* ir/Name) (.-Aux v)))))))
+                  ;; These ops don't really change memory.
+                  (continue))
+                ;; Note: OpVarDef requires that the defined variable not have pointers.
+                ;; We need to make sure that there's no possible faulting
+                ;; instruction between a VarDef and that variable being
+                ;; fully initialized. If there was, then anything scanning
+                ;; the stack during the handling of that fault will see
+                ;; a live but uninitialized pointer variable on the stack.
+                ;;
+                ;; If we have:
+                ;;
+                ;;   NilCheck p
+                ;;   VarDef x
+                ;;   x = *p
+                ;;
+                ;; We can't rewrite that to
+                ;;
+                ;;   VarDef x
+                ;;   NilCheck p
+                ;;   x = *p
+                ;;
+                ;; Particularly, even though *p faults on p==nil, we still
+                ;; have to do the explicit nil check before the VarDef.
+                ;; See issue #32288.
+
+                ;; This op changes memory.  Any faulting instruction after v that
+                ;; we've recorded in the unnecessary map is now obsolete.
+                (.clear unnecessary))
+
+
+              ;; Find any pointers that this op is guaranteed to fault on if nil.
+              (let [^{:tag (array 2 (* Value))} ptrstore (zero (array 2 (* Value)))
+                  ^{:line 273} ptrs (subslice ptrstore _ 0)]
+                (when (and (.-faultOnNilArg0 (aget opcodeTable (.-Op v))) ^:go/paren (or faultOnLoad (.IsMemory (.-Type v))))
+                  ;; On AIX, only writing will fault.
+                  (set! ptrs (append ptrs (aget (.-Args v) 0))))
+
+                (when (and (.-faultOnNilArg1 (aget opcodeTable (.-Op v))) ^:go/paren (or faultOnLoad ^:go/paren (and (.IsMemory (.-Type v)) (!= (.-Op v) OpPPC64LoweredMove))))
+                  ;; On AIX, only writing will fault.
+                  ;; LoweredMove is a special case because it's considered as a "mem" as it stores on arg0 but arg1 is accessed as a load and should be checked.
+                  (set! ptrs (append ptrs (aget (.-Args v) 1))))
+
+
+                (range [_ ptr ptrs]
+                  ;; Check to make sure the offset is small.
+                  (switch (.-auxType (aget opcodeTable (.-Op v)))
+                    (case [auxSym]
+                      (when (!= (.-Aux v) nil)
+                        (continue)))
+
+                    (case [auxSymOff]
+                      (when (or (!= (.-Aux v) nil) (< (.-AuxInt v) 0) (>= (.-AuxInt v) minZeroPage))
+                        (continue)))
+
+                    (case [auxSymValAndOff]
+                      (let [off (.Off (conv ValAndOff (.-AuxInt v)))]
+                        (when (or (!= (.-Aux v) nil) (< off 0) (>= off minZeroPage))
+                          (continue))))
+
+                    (case [auxInt32])
+                    ;; Mips uses this auxType for atomic add constant. It does not affect the effective address.
+                    (case [auxInt64])
+                    ;; ARM uses this auxType for duffcopy/duffzero/alignment info.
+                    ;; It does not affect the effective address.
+                    (case [auxNone])
+                    ;; offset is zero.
+                    (default
+                      (.Fatalf v "can't handle aux %s (type %d) yet\n" (.auxString v) (conv int (.-auxType (aget opcodeTable (.-Op v)))))))
+
+                  ;; This instruction is guaranteed to fault if ptr is nil.
+                  ;; Any previous nil check op is unnecessary.
+                  (.set unnecessary (.-ID ptr) (conv int32 i))))))
+
+
+          ;; Remove values we've clobbered with OpUnknown.
+          (let [i firstToRemove]
+            (for [j i] (< j (len (.-Values b))) (inc! j)
+              (let [v (aget (.-Values b) j)]
+                (when (!= (.-Op v) OpUnknown)
+                  (when (and (not (notStmtBoundary (.-Op v))) (.contains pendingLines (.-Pos v))) ; Late in compilation, so any remaining NotStmt values are probably okay now.
+                    (set! (.-Pos v) (.WithIsStmt (.-Pos v)))
+                    (.remove pendingLines (.-Pos v)))
+
+                  (aset (.-Values b) i v)
+                  (inc! i))))
+
+
+
+            (when (.contains pendingLines (.-Pos b))
+              (set! (.-Pos b) (.WithIsStmt (.-Pos b))))
+
+
+            (.truncateValues b i)))))))
+
+;; TODO: if b.Kind == BlockPlain, start the analysis in the subsequent block to find
+;; more unnecessary nil checks.  Would fix test/nilptr3.go:159.

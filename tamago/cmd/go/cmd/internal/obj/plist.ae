@@ -1,0 +1,404 @@
+;; Copyright 2013 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.cmd.internal.obj) (go/file "plist.go" :imports [
+
+
+    ^{:line 8} [objabi "cmd/internal/objabi"]
+    ^{:line 9} [src "cmd/internal/src"]
+    ^{:line 10} [fmt "fmt"]
+    ^{:line 11} [abi "internal/abi"]
+    ^{:line 12} [strings "strings"]])
+
+
+(go/type Plist (struct
+    ^{:line 16 :tag (* Prog)} Firstpc
+    ^{:line 17 :tag Func} Curfn))
+
+
+
+
+(go/type ProgAlloc "ProgAlloc is a function that allocates Progs.\nIt is used to provide access to cached/bulk-allocated Progs to the assemblers.\n" (func [] [(* Prog)]))
+
+^{:go/end 178} (go/func Flushplist [^{:tag (* Link)} ctxt ^{:tag (* Plist)} plist ^ProgAlloc newprog]
+  (when (== (.-Pkgpath ctxt) "")
+    (panic "Flushplist called without Pkgpath"))
+
+
+  ;; Build list of symbols, and assign instructions to lists.
+  (let [^{:tag (* LSym)} curtext (zero (* LSym))
+      ^{:line 31 :tag (* Prog)} etext (zero (* Prog))
+      ^{:line 32 :tag (slice (* LSym))} text (zero (slice (* LSym)))
+
+      ^{:line 34 :tag (* Prog)} plink (zero (* Prog))]
+    (for [p (.-Firstpc plist)] (!= p nil) (set! p plink)
+      (when (and (> (.-Debugasm ctxt) 0) (.-Debugvlog ctxt))
+        (fmt/Printf "obj: %v\n" p))
+
+      (set! plink (.-Link p))
+      (set! (.-Link p) nil)
+
+      (switch (.-As p)
+        (case [AEND]
+          (continue))
+
+        (case [ATEXT]
+          (let [s (.-Sym (.-From p))]
+            (when (== s nil)
+              ;; func _() { }
+              (set! curtext nil)
+              (continue))
+
+            (set! text (append text s))
+            (set! etext p)
+            (set! curtext s)
+            (continue)))
+
+        (case [AFUNCDATA]
+          ;; Rewrite reference to go_args_stackmap(SB) to the Go-provided declaration information.
+          (when (== curtext nil) ; func _() {}
+            (continue))
+
+          (switch (.-Name (.-Sym (.-To p)))
+            (case ["go_args_stackmap"]
+              (when (or (!= (.-Type (.-From p)) TYPE_CONST) (!= (.-Offset (.-From p)) abi/FUNCDATA_ArgsPointerMaps))
+                (.Diag ctxt "%v: FUNCDATA use of go_args_stackmap(SB) without FUNCDATA_ArgsPointerMaps" p))
+
+              (set! (.-Sym (.-To p)) (.LookupDerived ctxt curtext (+ (.-Name curtext) ".args_stackmap"))))
+            (case ["no_pointers_stackmap"]
+              (when (or (!= (.-Type (.-From p)) TYPE_CONST) (!= (.-Offset (.-From p)) abi/FUNCDATA_LocalsPointerMaps))
+                (.Diag ctxt "%v: FUNCDATA use of no_pointers_stackmap(SB) without FUNCDATA_LocalsPointerMaps" p))
+
+              ;; funcdata for functions with no local variables in frame.
+              ;; Define two zero-length bitmaps, because the same index is used
+              ;; for the local variables as for the argument frame, and assembly
+              ;; frames have two argument bitmaps, one without results and one with results.
+              ;; Write []uint32{2, 0}.
+              (let [b (make (slice byte) 8)]
+                (.PutUint32 ^{:go/via [Arch]} (.-ByteOrder (.-Arch ctxt)) b 2)
+                (let [s (.GCLocalsSym ctxt b)]
+                  (when (not ^{:go/via [Attribute]} (.OnList s))
+                    (.Globl ctxt s (conv int64 (len (.-P s))) (conv int (bit-or RODATA DUPOK))))
+
+                  (set! (.-Sym (.-To p)) s)))))))
+
+
+
+
+      (when (== curtext nil)
+        (set! etext nil)
+        (continue))
+
+      (set! (.-Link etext) p)
+      (set! etext p))
+
+
+    (when (== newprog nil)
+      (set! newprog (.-NewProg ctxt)))
+
+
+    ;; Add reference to Go arguments for assembly functions without them.
+    (when (.-IsAsm ctxt)
+      (let [pkgPrefix (+ (objabi/PathToPrefix (.-Pkgpath ctxt)) ".")]
+        (range [_ s text]
+          (when (not (strings/HasPrefix (.-Name s) pkgPrefix))
+            (continue))
+
+          ;; The current args_stackmap generation in the compiler assumes
+          ;; that the function in question is ABI0, so avoid introducing
+          ;; an args_stackmap reference if the func is not ABI0 (better to
+          ;; have no stackmap than an incorrect/lying stackmap).
+          (when (!= ^{:go/via [Attribute]} (.ABI s) ABI0)
+            (continue))
+
+          ;; runtime.addmoduledata is a host ABI function, so it doesn't
+          ;; need FUNCDATA anyway. Moreover, cmd/link has special logic
+          ;; for linking it in eccentric build modes, which breaks if it
+          ;; has FUNCDATA references (e.g., cmd/cgo/internal/testplugin).
+          ;;
+          ;; TODO(cherryyz): Fix cmd/link's handling of plugins (see
+          ;; discussion on CL 523355).
+          (when (== (.-Name s) "runtime.addmoduledata")
+            (continue))
+
+          (let [(values foundArgMap foundArgInfo) (values false false)]
+            (for [p (.-Text (.Func s))] (!= p nil) (set! p (.-Link p))
+              (when (and (== (.-As p) AFUNCDATA) (== (.-Type (.-From p)) TYPE_CONST))
+                (when (== (.-Offset (.-From p)) abi/FUNCDATA_ArgsPointerMaps)
+                  (set! foundArgMap true))
+
+                (when (== (.-Offset (.-From p)) abi/FUNCDATA_ArgInfo)
+                  (set! foundArgInfo true))
+
+                (when (and foundArgMap foundArgInfo)
+                  (break))))
+
+
+
+            (when (not foundArgMap)
+              (let [p (Appendp (.-Text (.Func s)) newprog)]
+                (set! (.-As p) AFUNCDATA)
+                (set! (.-Type (.-From p)) TYPE_CONST)
+                (set! (.-Offset (.-From p)) abi/FUNCDATA_ArgsPointerMaps)
+                (set! (.-Type (.-To p)) TYPE_MEM)
+                (set! (.-Name (.-To p)) NAME_EXTERN)
+                (set! (.-Sym (.-To p)) (.LookupDerived ctxt s (+ (.-Name s) ".args_stackmap")))))
+
+            (when (not foundArgInfo)
+              (let [p (Appendp (.-Text (.Func s)) newprog)]
+                (set! (.-As p) AFUNCDATA)
+                (set! (.-Type (.-From p)) TYPE_CONST)
+                (set! (.-Offset (.-From p)) abi/FUNCDATA_ArgInfo)
+                (set! (.-Type (.-To p)) TYPE_MEM)
+                (set! (.-Name (.-To p)) NAME_EXTERN)
+                (set! (.-Sym (.-To p)) (.LookupDerived ctxt s (fmt/Sprintf "%s.arginfo%d" (.-Name s) ^{:go/via [Attribute]} (.ABI s))))))))))
+
+
+
+
+    ;; Turn functions into machine code images.
+    (range [_ s text]
+      (mkfwd s)
+      (when (!= (.-ErrorCheck (.-Arch ctxt)) nil)
+        ((.-ErrorCheck (.-Arch ctxt)) ctxt s))
+
+      (linkpatch ctxt s newprog)
+      ((.-Preprocess (.-Arch ctxt)) ctxt s newprog)
+      ((.-Assemble (.-Arch ctxt)) ctxt s newprog)
+      (when (> (.-Errors ctxt) 0)
+        (continue))
+
+      (linkpcln ctxt s)
+      (.populateDWARF ctxt (.-Curfn plist) s)
+      (when (and (== (.-Headtype ctxt) objabi/Hwindows) (!= (.-SEH (.-Arch ctxt)) nil))
+        (set! (.-sehUnwindInfoSym (.Func s)) ((.-SEH (.-Arch ctxt)) ctxt s))))))
+
+
+
+
+^{:go/end 225} (go/method InitTextSym [^{:tag (* Link)} ctxt ^{:tag (* LSym)} s ^int flag ^src/XPos start]
+  (when (== s nil)
+    ;; func _() { }
+    (return))
+
+  (when (!= (.Func s) nil)
+    (let [otherPos src/NoPos]
+      (when (!= (.-Text (.Func s)) nil)
+        (set! otherPos (.Pos (.-PosTable ctxt) (.-Pos (.-Text (.Func s))))))
+
+      (.Diag ctxt "%s: symbol %s redeclared\n\t%s: other declaration of symbol %s" (.Pos (.-PosTable ctxt) start) (.-Name s) otherPos (.-Name s))
+      (return)))
+
+  (.NewFuncInfo s)
+  (when ^{:go/via [Attribute]} (.OnList s)
+    (.Diag ctxt "%s: symbol %s redeclared" (.Pos (.-PosTable ctxt) start) (.-Name s))
+    (return))
+
+  (when (strings/HasPrefix (.-Name s) "\"\".")
+    (.Diag ctxt "%s: unqualified symbol name: %s" (.Pos (.-PosTable ctxt) start) (.-Name s)))
+
+
+  ;; startLine should be the same line number that would be displayed via
+  ;; pcln, etc for the declaration (i.e., relative line number, as
+  ;; adjusted by //line).
+  (let [(values _ startLine) (.getFileIndexAndLine ctxt start)]
+
+    (set! (.-FuncID (.Func s)) (objabi/GetFuncID (.-Name s) (or (!= (bit-and flag WRAPPER) 0) (!= (bit-and flag ABIWRAPPER) 0))))
+    (set! (.-FuncFlag (.Func s)) (.toFuncFlag ctxt flag))
+    (set! (.-StartLine (.Func s)) startLine)
+    ^{:go/via [Attribute]} (.Set s AttrOnList true)
+    ^{:go/via [Attribute]} (.Set s AttrDuplicateOK (!= (bit-and flag DUPOK) 0))
+    ^{:go/via [Attribute]} (.Set s AttrNoSplit (!= (bit-and flag NOSPLIT) 0))
+    ^{:go/via [Attribute]} (.Set s AttrReflectMethod (!= (bit-and flag REFLECTMETHOD) 0))
+    ^{:go/via [Attribute]} (.Set s AttrWrapper (!= (bit-and flag WRAPPER) 0))
+    ^{:go/via [Attribute]} (.Set s AttrABIWrapper (!= (bit-and flag ABIWRAPPER) 0))
+    ^{:go/via [Attribute]} (.Set s AttrNeedCtxt (!= (bit-and flag NEEDCTXT) 0))
+    ^{:go/via [Attribute]} (.Set s AttrNoFrame (!= (bit-and flag NOFRAME) 0))
+    ^{:go/via [Attribute]} (.Set s AttrPkgInit (!= (bit-and flag PKGINIT) 0))
+    (set! (.-Type s) objabi/STEXT)
+    (.setFIPSType s ctxt)
+    (set! (.-Text ctxt) (append (.-Text ctxt) s))
+
+    ;; Set up DWARF entries for s
+    (.dwarfSym ctxt s)))
+
+
+^{:go/end 236} (go/method toFuncFlag ^abi/FuncFlag [^{:tag (* Link)} ctxt ^int flag]
+  (let [^abi/FuncFlag out (zero abi/FuncFlag)]
+    (when (!= (bit-and flag TOPFRAME) 0)
+      (set! out bit-or abi/FuncFlagTopFrame))
+
+    (when (.-IsAsm ctxt)
+      (set! out bit-or abi/FuncFlagAsm))
+
+    ^{:line 235} out))
+
+
+^{:go/end 240} (go/method Globl [^{:tag (* Link)} ctxt ^{:tag (* LSym)} s ^int64 size ^int flag]
+  (.GloblPos ctxt s size flag src/NoXPos))
+
+^{:go/end 267} (go/method GloblPos [^{:tag (* Link)} ctxt ^{:tag (* LSym)} s ^int64 size ^int flag ^src/XPos pos]
+  (when ^{:go/via [Attribute]} (.OnList s)
+    ;; TODO: print where the first declaration was.
+    (.Diag ctxt "%s: symbol %s redeclared" (.Pos (.-PosTable ctxt) pos) (.-Name s)))
+
+  ^{:go/via [Attribute]} (.Set s AttrOnList true)
+  (set! (.-Data ctxt) (append (.-Data ctxt) s))
+  (set! (.-Size s) size)
+  (when (== (.-Type s) 0)
+    (set! (.-Type s) objabi/SBSS))
+
+  (when (!= (bit-and flag DUPOK) 0)
+    ^{:go/via [Attribute]} (.Set s AttrDuplicateOK true))
+
+  (cond (!= (bit-and flag RODATA) 0)
+    (set! (.-Type s) objabi/SRODATA)
+    (!= (bit-and flag NOPTR) 0)
+    (if (.IsDATA (.-Type s))
+      (set! (.-Type s) objabi/SNOPTRDATA)
+
+      (set! (.-Type s) objabi/SNOPTRBSS))
+
+    (!= (bit-and flag TLSBSS) 0)
+    (set! (.-Type s) objabi/STLSBSS))
+
+  (.setFIPSType s ctxt))
+
+
+
+
+
+^{:go/end 276} (go/method EmitEntryLiveness "EmitEntryLiveness generates PCDATA Progs after p to switch to the\nliveness map active at the entry of function s. It returns the last\nProg generated.\n" ^{:tag (* Prog)} [^{:tag (* Link)} ctxt ^{:tag (* LSym)} s ^{:tag (* Prog)} p ^ProgAlloc newprog]
+  (let [pcdata (.EmitEntryStackMap ctxt s p newprog)]
+    (set! pcdata (.EmitEntryUnsafePoint ctxt s pcdata newprog))
+    ^{:line 275} pcdata))
+
+
+
+^{:go/end 289} (go/method EmitEntryStackMap "Similar to EmitEntryLiveness, but just emit stack map.\n" ^{:tag (* Prog)} [^{:tag (* Link)} ctxt ^{:tag (* LSym)} s ^{:tag (* Prog)} p ^ProgAlloc newprog]
+  (let [pcdata (Appendp p newprog)]
+    (set! (.-Pos pcdata) (.-Pos (.-Text (.Func s))))
+    (set! (.-As pcdata) APCDATA)
+    (set! (.-Type (.-From pcdata)) TYPE_CONST)
+    (set! (.-Offset (.-From pcdata)) abi/PCDATA_StackMapIndex)
+    (set! (.-Type (.-To pcdata)) TYPE_CONST)
+    (set! (.-Offset (.-To pcdata)) -1) ; pcdata starts at -1 at function entry
+
+    ^{:line 288} pcdata))
+
+
+
+^{:go/end 302} (go/method EmitEntryUnsafePoint "Similar to EmitEntryLiveness, but just emit unsafe point map.\n" ^{:tag (* Prog)} [^{:tag (* Link)} ctxt ^{:tag (* LSym)} s ^{:tag (* Prog)} p ^ProgAlloc newprog]
+  (let [pcdata (Appendp p newprog)]
+    (set! (.-Pos pcdata) (.-Pos (.-Text (.Func s))))
+    (set! (.-As pcdata) APCDATA)
+    (set! (.-Type (.-From pcdata)) TYPE_CONST)
+    (set! (.-Offset (.-From pcdata)) abi/PCDATA_UnsafePoint)
+    (set! (.-Type (.-To pcdata)) TYPE_CONST)
+    (set! (.-Offset (.-To pcdata)) -1)
+
+    ^{:line 301} pcdata))
+
+
+
+
+
+
+^{:go/end 317} (go/method StartUnsafePoint "StartUnsafePoint generates PCDATA Progs after p to mark the\nbeginning of an unsafe point. The unsafe point starts immediately\nafter p.\nIt returns the last Prog generated.\n" ^{:tag (* Prog)} [^{:tag (* Link)} ctxt ^{:tag (* Prog)} p ^ProgAlloc newprog]
+  (let [pcdata (Appendp p newprog)]
+    (set! (.-As pcdata) APCDATA)
+    (set! (.-Type (.-From pcdata)) TYPE_CONST)
+    (set! (.-Offset (.-From pcdata)) abi/PCDATA_UnsafePoint)
+    (set! (.-Type (.-To pcdata)) TYPE_CONST)
+    (set! (.-Offset (.-To pcdata)) abi/UnsafePointUnsafe)
+
+    ^{:line 316} pcdata))
+
+
+
+
+
+
+^{:go/end 332} (go/method EndUnsafePoint "EndUnsafePoint generates PCDATA Progs after p to mark the end of an\nunsafe point, restoring the register map index to oldval.\nThe unsafe point ends right after p.\nIt returns the last Prog generated.\n" ^{:tag (* Prog)} [^{:tag (* Link)} ctxt ^{:tag (* Prog)} p ^ProgAlloc newprog ^int64 oldval]
+  (let [pcdata (Appendp p newprog)]
+    (set! (.-As pcdata) APCDATA)
+    (set! (.-Type (.-From pcdata)) TYPE_CONST)
+    (set! (.-Offset (.-From pcdata)) abi/PCDATA_UnsafePoint)
+    (set! (.-Type (.-To pcdata)) TYPE_CONST)
+    (set! (.-Offset (.-To pcdata)) oldval)
+
+    ^{:line 331} pcdata))
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 407} (go/func MarkUnsafePoints "MarkUnsafePoints inserts PCDATAs to mark nonpreemptible and restartable\ninstruction sequences, based on isUnsafePoint and isRestartable predicate.\np0 is the start of the instruction stream.\nisUnsafePoint(p) returns true if p is not safe for async preemption.\nisRestartable(p) returns true if we can restart at the start of p (this Prog)\nupon async preemption. (Currently multi-Prog restartable sequence is not\nsupported.)\nisRestartable can be nil. In this case it is treated as always returning false.\nIf isUnsafePoint(p) and isRestartable(p) are both true, it is treated as\nan unsafe point.\n" [^{:tag (* Link)} ctxt ^{:tag (* Prog)} p0 ^ProgAlloc newprog ^{:tag (func [(* Prog)] [bool])} isUnsafePoint ^{:tag (func [(* Prog)] [bool])} isRestartable]
+  (when (== isRestartable nil)
+    ;; Default implementation: nothing is restartable.
+    (set! isRestartable ^{:go/end 347} (fn ^bool [(* Prog)] false)))
+
+  (let [prev p0
+      ^{:line 350} prevPcdata (conv int64 -1) ; entry PC data value
+      ^{:line 351} prevRestart (conv int64 0)]
+    (for [p (.-Link prev)] (!= p nil) (set! (values p prev) (values (.-Link p) p))
+      (when (and (== (.-As p) APCDATA) (== (.-Offset (.-From p)) abi/PCDATA_UnsafePoint))
+        (set! prevPcdata (.-Offset (.-To p)))
+        (continue))
+
+      (when (== prevPcdata abi/UnsafePointUnsafe)
+        (continue)) ; already unsafe
+
+      (when (isUnsafePoint p)
+        (let [q (.StartUnsafePoint ctxt prev newprog)]
+          (set! (.-Pc q) (.-Pc p))
+          (set! (.-Link q) p)
+          ;; Advance to the end of unsafe point.
+          (while (and (!= (.-Link p) nil) (isUnsafePoint (.-Link p)))
+            (set! p (.-Link p)))
+
+          (when (== (.-Link p) nil)
+            (break)) ; Reached the end, don't bother marking the end
+
+          (set! p (.EndUnsafePoint ctxt p newprog prevPcdata))
+          (set! (.-Pc p) (.-Pc (.-Link p)))
+          (continue)))
+
+      (when (isRestartable p)
+        (let [val (conv int64 abi/UnsafePointRestart1)]
+          (when (== val prevRestart)
+            (set! val abi/UnsafePointRestart2))
+
+          (set! prevRestart val)
+          (let [q (Appendp prev newprog)]
+            (set! (.-As q) APCDATA)
+            (set! (.-Type (.-From q)) TYPE_CONST)
+            (set! (.-Offset (.-From q)) abi/PCDATA_UnsafePoint)
+            (set! (.-Type (.-To q)) TYPE_CONST)
+            (set! (.-Offset (.-To q)) val)
+            (set! (.-Pc q) (.-Pc p))
+            (set! (.-Link q) p)
+
+            (when (== (.-Link p) nil)
+              (break)) ; Reached the end, don't bother marking the end
+
+            (when (isRestartable (.-Link p))
+              ;; Next Prog is also restartable. No need to mark the end
+              ;; of this sequence. We'll just go ahead mark the next one.
+              (continue))
+
+            (set! p (Appendp p newprog))
+            (set! (.-As p) APCDATA)
+            (set! (.-Type (.-From p)) TYPE_CONST)
+            (set! (.-Offset (.-From p)) abi/PCDATA_UnsafePoint)
+            (set! (.-Type (.-To p)) TYPE_CONST)
+            (set! (.-Offset (.-To p)) prevPcdata)
+            (set! (.-Pc p) (.-Pc (.-Link p)))))))))

@@ -1,0 +1,527 @@
+;; Copyright 2025 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.cmd.compile.internal.escape) (go/file "alias.go" :imports [
+
+
+    ^{:line 8} [base "cmd/compile/internal/base"]
+    ^{:line 9} [ir "cmd/compile/internal/ir"]
+    ^{:line 10} [src "cmd/internal/src"]
+    ^{:line 11} [fmt "fmt"]
+    ^{:line 12} [maps "maps"]
+    ^{:line 13} [filepath "path/filepath"]])
+
+
+(go/type aliasAnalysis (struct
+
+    ^{:line 18 :tag (* ir/Func) :doc "fn is the function being analyzed.\n"} fn
+
+
+
+    ^{:line 22 :tag (map (* ir/Name) candidateSlice) :doc "candidateSlices are declared slices that\nstart unaliased and might still be unaliased.\n"} candidateSlices
+
+
+
+    ^{:line 26 :tag (slice (* ir/CallExpr)) :doc "noAliasAppends are appends that have been\nproven to use an unaliased slice.\n"} noAliasAppends
+
+
+
+    ^{:line 30 :tag (slice (slice candidateAppend)) :doc "loops is a stack of observed loops,\neach with a list of candidate appends.\n"} loops
+
+
+    ^{:line 33 :tag (map ir/Node int) :doc "State for optional validation checking (doubleCheck mode):\n"} processed ; count of times each node was processed, for doubleCheck mode
+    ^{:line 34 :tag bool} doubleCheck)) ; whether to do doubleCheck mode
+
+
+
+
+(go/type candidateSlice "candidateSlice tracks information about a declared slice\nthat might be unaliased.\n" (struct
+    ^{:line 40 :tag int} loopDepth)) ; depth of loop when slice was declared
+
+
+
+
+(go/type candidateAppend "candidateAppend tracks information about an OAPPEND that\nmight be using an unaliased slice.\n" (struct
+    ^{:line 46 :tag (* ir/Name)} s ; the slice argument in 's = append(s, ...)'
+    ^{:line 47 :tag (* ir/CallExpr)} call)) ; the append call
+
+
+
+
+
+
+
+
+
+
+^{:go/end 193} (go/method analyze "aliasAnalysis looks for specific patterns of slice usage and proves\nthat certain appends are operating on non-aliased slices.\n\nThis allows us to emit calls to free the backing arrays for certain\nnon-aliased slices at runtime when we know the memory is logically dead.\n\nThe analysis is conservative, giving up on any operation we do not\nexplicitly understand.\n" [^{:tag (* aliasAnalysis)} aa ^{:tag (* ir/Func)} fn]
+  ;; Walk the function body to discover slice declarations, their uses,
+  ;; and any append that we can prove is using an unaliased slice.
+  ;;
+  ;; An example is:
+  ;;
+  ;;   var s []T
+  ;;   for _, v := range input {
+  ;;      f()
+  ;;      s = append(s, g(v))	   // s cannot be aliased here
+  ;;      h()
+  ;;   }
+  ;;   return s
+  ;;
+  ;; Here, we can prove that the append to s is operating on an unaliased slice,
+  ;; and that conclusion is unaffected by s later being returned and escaping.
+  ;;
+  ;; In contrast, in this example, the aliasing of s in the loop body means the
+  ;; append can be operating on an aliased slice, so we do not record s as unaliased:
+  ;;
+  ;;   var s []T
+  ;;   var alias []T
+  ;;   for _, v := range input {
+  ;;      s = append(s, v)	   // s is aliased on second pass through loop body
+  ;;      alias = s
+  ;;   }
+  ;;
+  ;; Arbitrary uses of s after an append do not affect the aliasing conclusion
+  ;; for that append, but only if the append cannot be revisited at execution time
+  ;; via a loop or goto.
+  ;;
+  ;; We track the loop depth when a slice was declared and verify all uses of a slice
+  ;; are non-aliasing until we return to that depth. In other words, we make sure
+  ;; we have processed any possible execution-time revisiting of the slice prior
+  ;; to making our final determination.
+  ;;
+  ;; This approach helps for example with nested loops, such as:
+  ;;
+  ;;   var s []int
+  ;;   for range 10 {
+  ;;       for range 10 {
+  ;;           s = append(s, 0)  // s is proven as non-aliased here
+  ;;       }
+  ;;   }
+  ;;   alias = s                 // both loops are complete
+  ;;
+  ;; Or in contrast:
+  ;;
+  ;;   var s []int
+  ;;   for range 10 {
+  ;;       for range 10 {
+  ;;           s = append(s, 0)  // s is treated as aliased here
+  ;;       }
+  ;;       alias = s             // aliased, and outermost loop cycles back
+  ;;   }
+  ;;
+  ;; As we walk the function, we look for things like:
+  ;;
+  ;; 1. Slice declarations (currently supporting 'var s []T', 's := make([]T, ...)',
+  ;;    and 's := []T{...}').
+  ;; 2. Appends to a slice of the form 's = append(s, ...)'.
+  ;; 3. Other uses of the slice, which we treat as potential aliasing outside
+  ;;    of a few known safe cases.
+  ;; 4. A start of a loop, which we track in a stack so that
+  ;;    any uses of a slice within a loop body are treated as potential
+  ;;    aliasing, including statements in the loop body after an append.
+  ;;    Candidate appends are stored in the loop stack at the loop depth of their
+  ;;    corresponding slice declaration (rather than the loop depth of the append),
+  ;;    which essentially postpones a decision about the candidate append.
+  ;; 5. An end of a loop, which pops the loop stack and allows us to
+  ;;    conclusively treat candidate appends from the loop body based
+  ;;    on the loop depth of the slice declaration.
+  ;;
+  ;; Note that as we pop a candidate append at the end of a loop, we know
+  ;; its corresponding slice was unaliased throughout the loop being popped
+  ;; if the slice is still in the candidate slice map (without having been
+  ;; removed for potential aliasing), and we know we can make a final decision
+  ;; about a candidate append if we have returned to the loop depth
+  ;; where its slice was declared. In other words, there is no unanalyzed
+  ;; control flow that could take us back at execution-time to the
+  ;; candidate append in the now analyzed loop. This helps for example
+  ;; with nested loops, such as in our examples just above.
+  ;;
+  ;; We give up on a particular candidate slice if we see any use of it
+  ;; that we don't explicitly understand, and we give up on all of
+  ;; our candidate slices if we see any goto or label, which could be
+  ;; unstructured control flow. (TODO(thepudds): we remove the goto/label
+  ;; restriction in a subsequent CL.)
+  ;;
+  ;; Note that the intended use is to indicate that a slice is safe to pass
+  ;; to runtime.freegc, which currently requires that the passed pointer
+  ;; point to the base of its heap object.
+  ;;
+  ;; Therefore, we currently do not allow any re-slicing of the slice, though we could
+  ;; potentially allow s[0:x] or s[:x] or similar. (Slice expressions that alter
+  ;; the capacity might be possible to allow with freegc changes, though they are
+  ;; currently disallowed here like all slice expressions).
+  ;;
+  ;; TODO(thepudds): we could support the slice being used as non-escaping function call parameter
+  ;; but to do that, we need to verify any creation of specials via user code triggers an escape,
+  ;; or mail better runtime.freegc support for specials, or have a temporary compile-time solution
+  ;; for specials. (Currently, this analysis side-steps specials because any use of a slice
+  ;; that might cause a user-created special will cause it to be treated as aliased, and
+  ;; separately, runtime.freegc handles profiling-related specials).
+
+  ;; Initialize.
+  (set! (.-fn aa) fn)
+  (set! (.-candidateSlices aa) (make (map (* ir/Name) candidateSlice))) ; slices that might be unaliased
+
+  ;; doubleCheck controls whether we do a sanity check of our processing logic
+  ;; by counting each node visited in our main pass, and then comparing those counts
+  ;; against a simple walk at the end. The main intent is to help catch missing
+  ;; any nodes squirreled away in some spot we forgot to examine in our main pass.
+  (set! (.-doubleCheck aa) (> (.-EscapeAliasCheck base/Debug) 0))
+  (set! (.-processed aa) (make (map ir/Node int)))
+
+  (when (>= (.-EscapeAlias base/Debug) 2)
+    (.diag aa ^{:go/via [miniNode]} (.Pos fn) fn "====== starting func" "======"))
+
+
+  (ir/DoChildren fn (.-visit aa))
+
+  (range [_ call (.-noAliasAppends aa)]
+    (when (>= (.-EscapeAlias base/Debug) 1)
+      (base/WarnfAt ^{:go/via [miniExpr miniNode]} (.Pos call) "alias analysis: append using non-aliased slice: %v in func %v"
+        ^{:line 183} call fn))
+
+    (when (> (.-FreeAppend base/Debug) 0)
+      (set! (.-AppendNoAlias call) true)))
+
+
+
+  (when (.-doubleCheck aa)
+    (doubleCheckProcessed fn (.-processed aa))))
+
+
+
+^{:go/end 361} (go/method visit ^bool [^{:tag (* aliasAnalysis)} aa ^ir/Node n]
+  (when (== n nil)
+    (return false))
+
+
+  (when (>= (.-EscapeAlias base/Debug) 3)
+    (fmt/Printf "%-25s alias analysis: visiting node: %12s  %-18T  %v\n"
+      (+ (fmtPosShort (.Pos n)) ":") (.String (.Op n)) n n))
+
+
+  ;; As we visit nodes, we want to ensure we handle all children
+  ;; without missing any (through ignorance or future changes).
+  ;; We do this by counting nodes as we visit them or otherwise
+  ;; declare a node to be fully processed.
+  ;;
+  ;; In particular, we want to ensure we don't miss the use
+  ;; of a slice in some expression that might be an aliasing usage.
+  ;;
+  ;; When doubleCheck is enabled, we compare the counts
+  ;; accumulated in our analysis against counts from a trivial walk,
+  ;; failing if there is any mismatch.
+  ;;
+  ;; This call here counts that we have visited this node n
+  ;; via our main visit method. (In contrast, some nodes won't
+  ;; be visited by the main visit method, but instead will be
+  ;; manually marked via countProcessed when we believe we have fully
+  ;; dealt with the node).
+  (.countProcessed aa n)
+
+  (switch (.Op n)
+    (case [ir/ODCL]
+      (let [decl (assert (* ir/Decl) n)]
+
+        (when (and (!= (.-X decl) nil) (.IsSlice ^{:go/via [miniExpr]} (.Type (.-X decl))) (== (.-Class (.-X decl)) ir/PAUTO))
+          (let [s (.-X decl)]
+            (when [(values _ ok) (aget (.-candidateSlices aa) s)] ok
+              (base/FatalfAt (.Pos n) "candidate slice already tracked as candidate: %v" s))
+
+            (when (>= (.-EscapeAlias base/Debug) 2)
+              (.diag aa (.Pos n) s "adding candidate slice" "(loop depth: %d)" (len (.-loops aa))))
+
+            (aset (.-candidateSlices aa) s (lit candidateSlice :loopDepth (len (.-loops aa))))))
+
+        ;; No children aside from the declared ONAME.
+        (.countProcessed aa (.-X decl))
+        (return false)))
+
+    (case [ir/ONAME]
+
+      ;; We are seeing a name we have not already handled in another case,
+      ;; so remove any corresponding candidate slice.
+      (when (.IsSlice (.Type n))
+        (let [name (assert (* ir/Name) n)
+            (values _ ok) (aget (.-candidateSlices aa) name)]
+          (when ok
+            (delete (.-candidateSlices aa) name)
+            (when (>= (.-EscapeAlias base/Debug) 2)
+              (.diag aa (.Pos n) name "removing candidate slice" "")))))
+
+
+
+      ;; No children.
+      (return false))
+
+    (case [ir/OAS2]
+      (let [n (assert (* ir/AssignListStmt) n)]
+        (.analyzeAssign aa n (.-Lhs n) (.-Rhs n))
+        (return false)))
+
+    (case [ir/OAS]
+      (let [assign (assert (* ir/AssignStmt) n)]
+        (.analyzeAssign aa n (lit (slice ir/Node) (.-X assign)) (lit (slice ir/Node) (.-Y assign)))
+        (return false)))
+
+    (case [ir/OFOR ir/ORANGE]
+      (.visitList aa (.Init n))
+
+      (when (== (.Op n) ir/ORANGE)
+        ;; TODO(thepudds): previously we visited this range expression
+        ;; in the switch just below, after pushing the loop. This current placement
+        ;; is more correct, but generate a test or find an example in stdlib or similar
+        ;; where it matters. (Our current tests do not complain.)
+        (.visit aa (.-X (assert (* ir/RangeStmt) n))))
+
+
+      ;; Push a new loop.
+      (set! (.-loops aa) (append (.-loops aa) nil))
+
+      ;; Process the loop.
+      (switch (.Op n)
+        (case [ir/OFOR]
+          (let [forstmt (assert (* ir/ForStmt) n)]
+            (.visit aa (.-Cond forstmt))
+            (.visitList aa (.-Body forstmt))
+            (.visit aa (.-Post forstmt))))
+        (case [ir/ORANGE]
+          (let [rangestmt (assert (* ir/RangeStmt) n)]
+            (.visit aa (.-Key rangestmt))
+            (.visit aa (.-Value rangestmt))
+            (.visitList aa (.-Body rangestmt))))
+        (default
+          (base/Fatalf "loop not OFOR or ORANGE: %v" n)))
+
+
+      ;; Pop the loop.
+      (let [^{:tag (slice candidateAppend)} candidateAppends (zero (slice candidateAppend))]
+        (set! (values candidateAppends (.-loops aa)) (values (aget (.-loops aa) (- (len (.-loops aa)) 1)) (subslice (.-loops aa) _ (- (len (.-loops aa)) 1))))
+        (range [_ a candidateAppends]
+          ;; We are done with the loop, so we can validate any candidate appends
+          ;; that have not had their slice removed yet. We know a slice is unaliased
+          ;; throughout the loop if the slice is still in the candidate slice map.
+          (when [(values cs ok) (aget (.-candidateSlices aa) (.-s a))] ok
+            (cond (== (.-loopDepth cs) (len (.-loops aa))) (do
+                ;; We've returned to the loop depth where the slice was declared and
+                ;; hence made it all the way through any loops that started after
+                ;; that declaration.
+                (when (>= (.-EscapeAlias base/Debug) 2)
+                  ^{:go/breaks [5]} (.diag aa (.Pos n) (.-s a) "proved non-aliased append"
+                    "(completed loop, decl at depth: %d)" (.-loopDepth cs)))
+
+                (set! (.-noAliasAppends aa) (append (.-noAliasAppends aa) (.-call a))))
+              (< (.-loopDepth cs) (len (.-loops aa)))
+              (when (>= (.-EscapeAlias base/Debug) 2)
+                ^{:go/breaks [5]} (.diag aa (.Pos n) (.-s a) "cannot prove non-aliased append"
+                  "(completed loop, decl at depth: %d)" (.-loopDepth cs))) :else
+
+
+              (panic "impossible: candidate slice loopDepth > current loop depth"))))
+
+
+
+        (return false)))
+
+    (case [ir/OLEN ir/OCAP]
+      (let [n (assert (* ir/UnaryExpr) n)]
+        (if (== (.Op (.-X n)) ir/ONAME) (do
+            ;; This does not disqualify a candidate slice.
+            (.visitList aa ^{:go/via [miniExpr]} (.Init n))
+            (.countProcessed aa (.-X n)))
+
+          (ir/DoChildren n (.-visit aa)))
+
+        (return false)))
+
+    (case [ir/OCLOSURE]
+      ;; Give up on all our in-progress slices.
+      (let [closure (assert (* ir/ClosureExpr) n)]
+        (when (>= (.-EscapeAlias base/Debug) 2)
+          ^{:go/breaks [5]} (.diag aa (.Pos n) (.-Func closure) "clearing all in-progress slices due to OCLOSURE"
+            "(was %d in-progress slices)" (len (.-candidateSlices aa))))
+
+        (clear (.-candidateSlices aa))
+        (return (ir/DoChildren n (.-visit aa)))))
+
+    (case [ir/OLABEL ir/OGOTO]
+      ;; Give up on all our in-progress slices.
+      (when (>= (.-EscapeAlias base/Debug) 2)
+        ^{:go/breaks [5]} (.diag aa (.Pos n) n "clearing all in-progress slices due to label or goto"
+          "(was %d in-progress slices)" (len (.-candidateSlices aa))))
+
+      (clear (.-candidateSlices aa))
+      (return false))
+
+    (default
+      (return (ir/DoChildren n (.-visit aa))))))
+
+
+
+^{:go/end 367} (go/method visitList [^{:tag (* aliasAnalysis)} aa ^{:tag (slice ir/Node)} nodes]
+  (range [_ n nodes]
+    (.visit aa n)))
+
+
+
+
+
+
+^{:go/end 476} (go/method analyzeAssign "analyzeAssign evaluates the assignment dsts... = srcs...\n\nassign is an *ir.AssignStmt or *ir.AssignListStmt.\n" [^{:tag (* aliasAnalysis)} aa ^ir/Node assign ^{:tag (slice ir/Node)} dsts ^{:tag (slice ir/Node)} srcs]
+  (.visitList aa (.Init assign))
+  (range [i dsts]
+    (let [dst (aget dsts i)
+        ^{:line 376} src (aget srcs i)]
+
+      (when (or (!= (.Op dst) ir/ONAME) (not (.IsSlice (.Type dst))))
+        ;; Nothing for us to do aside from visiting the remaining children.
+        (.visit aa dst)
+        (.visit aa src)
+        (continue))
+
+
+      ;; We have a slice being assigned to an ONAME.
+
+      ;; Check for simple zero value assignments to an ONAME, which we ignore.
+      (when (== src nil)
+        (.countProcessed aa dst)
+        (continue))
+
+
+      (when (>= (.-EscapeAlias base/Debug) 4)
+        (let [srcfn ""]
+          (when (== (.Op src) ir/ONAME)
+            (set! srcfn (fmt/Sprintf "%v." (.-Curfn (.Name src)))))
+
+          (.diag aa (.Pos assign) assign "visiting slice assignment" "%v.%v = %s%v (%s %T = %s %T)"
+            (.-Curfn (.Name dst)) dst srcfn src (.String (.Op dst)) dst (.String (.Op src)) src)))
+
+
+      ;; Now check what we have on the RHS.
+      (switch (.Op src)
+        ;; Cases:
+
+        ;; Check for s := make([]T, ...) or s := []T{...}, along with the '=' version
+        ;; of those which does not alias s as long as s is not used in the make.
+        ;;
+        ;; TODO(thepudds): we need to be sure that 's := []T{1,2,3}' does not end up backed by a
+        ;; global static. Ad-hoc testing indicates that example and similar seem to be
+        ;; stack allocated, but that was not exhaustive testing. We do have runtime.freegc
+        ;; able to throw if it finds a global static, but should test more.
+        ;;
+        ;; TODO(thepudds): could also possibly allow 's := append([]T(nil), ...)'
+        ;; and 's := append([]T{}, ...)'.
+        (case [ir/OMAKESLICE ir/OSLICELIT]
+          (let [name (assert (* ir/Name) dst)]
+            (when (== (.-Class name) ir/PAUTO)
+              (when (> (.-EscapeAlias base/Debug) 1)
+                (.diag aa (.Pos assign) assign "assignment from make or slice literal" ""))
+
+              ;; If this is Def=true, the ODCL in the init will causes this to be tracked
+              ;; as a candidate slice. We walk the init and RHS but avoid visiting the name
+              ;; in the LHS, which would remove the slice from the candidate list after it
+              ;; was just added.
+              (.visit aa src)
+              (.countProcessed aa name)
+              (continue))))
+
+
+        ;; Check for s = append(s, <...>).
+        (case [ir/OAPPEND]
+          (let [s (assert (* ir/Name) dst)
+              ^{:line 434} call (assert (* ir/CallExpr) src)]
+            (when (== (aget (.-Args call) 0) s)
+              ;; Matches s = append(s, <...>).
+              ;; First visit other arguments in case they use s.
+              (.visitList aa (subslice (.-Args call) 1))
+              ;; Mark the call as processed, and s twice.
+              (.countProcessed aa s call s)
+
+              ;; We have now examined all non-ONAME children of assign.
+
+              ;; This is now the heart of the analysis.
+              ;; Check to see if this slice is a live candidate.
+              (let [(values cs ok) (aget (.-candidateSlices aa) s)]
+                (when ok
+                  (cond (== (.-loopDepth cs) (len (.-loops aa))) (do
+                      ;; No new loop has started after the declaration of s,
+                      ;; so this is definitive.
+                      (when (>= (.-EscapeAlias base/Debug) 2)
+                        ^{:go/breaks [5]} (.diag aa (.Pos assign) assign "proved non-aliased append"
+                          "(loop depth: %d, equals decl depth)" (len (.-loops aa))))
+
+                      (set! (.-noAliasAppends aa) (append (.-noAliasAppends aa) call)))
+                    (< (.-loopDepth cs) (len (.-loops aa)))
+                    ;; A new loop has started since the declaration of s,
+                    ;; so we can't validate this append yet, but
+                    ;; remember it in case we can validate it later when
+                    ;; all loops using s are done.
+                    (aset (.-loops aa) (.-loopDepth cs) (append (aget (.-loops aa) (.-loopDepth cs))
+                        (lit candidateAppend :s s :call call))) :else
+
+                    (panic "impossible: candidate slice loopDepth > current loop depth")))
+
+
+                (continue))))))
+
+      ;; End of switch on src.Op().
+
+      ;; Reached bottom of the loop over assignments.
+      ;; If we get here, we need to visit the dst and src normally.
+      (.visit aa dst)
+      (.visit aa src))))
+
+
+
+^{:go/end 484} (go/method countProcessed [^{:tag (* aliasAnalysis)} aa & ^{:tag (slice ir/Node)} nodes]
+  (when (.-doubleCheck aa)
+    (range [_ n nodes]
+      (inc! (aget (.-processed aa) n)))))
+
+
+
+
+^{:go/end 492} (go/method diag [^{:tag (* aliasAnalysis)} aa ^src/XPos pos ^ir/Node n ^string what ^string format & ^{:tag (slice any)} args]
+  (fmt/Printf "%-25s alias analysis: %-30s  %-20s  %s\n"
+    (+ (fmtPosShort pos) ":")
+    (+ what ":")
+    (fmt/Sprintf "%v" n)
+    (fmt/Sprintf format (spread args))))
+
+
+
+^{:go/end 520} (go/func doubleCheckProcessed "doubleCheckProcessed does a sanity check for missed nodes in our visit.\n" [^{:tag (* ir/Func)} fn ^{:tag (map ir/Node int)} processed]
+  ;; Do a trivial walk while counting the nodes
+  ;; to compare against the counts in processed.
+
+  (let [observed (make (map ir/Node int))
+      ^{:line 500 :tag (func [^ir/Node n] [bool])} walk (zero (func [^ir/Node n] [bool]))]
+    (set! walk ^{:go/end 504} (fn ^bool [^ir/Node n]
+        (inc! (aget observed n))
+        (ir/DoChildren n walk)))
+
+    (ir/DoChildren fn walk)
+
+    (when (not (^{:inst [(map ir/Node int) (map ir/Node int) ir/Node int]} maps/Equal processed observed))
+      ;; The most likely mistake might be something was missed while building processed,
+      ;; so print extra details in that direction.
+      (range [n observedCount observed]
+        (let [(values processedCount ok) (aget processed n)]
+          (when (or (!= processedCount observedCount) (not ok))
+            ^{:go/breaks [2]} (base/WarnfAt (.Pos n)
+              "alias analysis: mismatch for %T: %v: processed %d times, observed %d times"
+              ^{:line 515} n n processedCount observedCount))))
+
+
+      (base/FatalfAt ^{:go/via [miniNode]} (.Pos fn) "alias analysis: mismatch in visited nodes"))))
+
+
+
+^{:go/end 528} (go/func fmtPosShort ^string [^src/XPos xpos]
+  ;; TODO(thepudds): I think I did this a simpler way a while ago? Or maybe add base.FmtPosShort
+  ;; or similar? Or maybe just use base.FmtPos and give up on nicely aligned log messages?
+  (let [pos (.Pos (.-PosTable base/Ctxt) xpos)
+      ^{:line 526} shortLine (+ (filepath/Base (.AbsFilename pos)) ":" (.LineNumber pos))]
+    ^{:line 527} shortLine))

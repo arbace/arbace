@@ -1,0 +1,129 @@
+;; Copyright 2014 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.cmd.asm) (go/file "main.go" :imports [
+
+
+    ^{:line 8} [bufio "bufio"]
+    ^{:line 9} [flag "flag"]
+    ^{:line 10} [fmt "fmt"]
+    ^{:line 11} [buildcfg "internal/buildcfg"]
+    ^{:line 12} [log "log"]
+    ^{:line 13} [os "os"]
+
+    ^{:line 15} [arch "cmd/asm/internal/arch"]
+    ^{:line 16} [asm "cmd/asm/internal/asm"]
+    ^{:line 17} [flags "cmd/asm/internal/flags"]
+    ^{:line 18} [lex "cmd/asm/internal/lex"]
+
+    ^{:line 20} [bio "cmd/internal/bio"]
+    ^{:line 21} [obj "cmd/internal/obj"]
+    ^{:line 22} [objabi "cmd/internal/objabi"]
+    ^{:line 23} [counter "cmd/internal/telemetry/counter"]])
+
+
+^{:go/end 131} (go/func main []
+  (log/SetFlags 0)
+  (log/SetPrefix "asm: ")
+  (counter/Open)
+
+  (buildcfg/Check)
+  (let [GOARCH buildcfg/GOARCH]
+
+    (flags/Parse)
+    (counter/Inc "asm/invocations")
+    (counter/CountFlags "asm/flag:" @flag/CommandLine)
+
+    (let [architecture (arch/Set GOARCH (or @flags/Shared @flags/Dynlink))]
+      (when (== architecture nil)
+        (log/Fatalf "unrecognized architecture %s" GOARCH))
+
+      (let [ctxt (obj/Linknew (.-LinkArch architecture))]
+        (set! (.-CompressInstructions ctxt) (!= (.-CompressInstructions flags/DebugFlags) 0))
+        (set! (.-Debugasm ctxt) flags/PrintOut)
+        (set! (.-Debugvlog ctxt) flags/DebugV)
+        (set! (.-Flag_dynlink ctxt) @flags/Dynlink)
+        (set! (.-Flag_linkshared ctxt) @flags/Linkshared)
+        (set! (.-Flag_shared ctxt) (or @flags/Shared @flags/Dynlink))
+        (set! (.-Flag_maymorestack ctxt) (.-MayMoreStack flags/DebugFlags))
+        (set! (.-Debugpcln ctxt) (.-PCTab flags/DebugFlags))
+        (set! (.-IsAsm ctxt) true)
+        (set! (.-Pkgpath ctxt) @flags/Importpath)
+        (set! (.-Std ctxt) @flags/Std)
+        (set! (.-DwTextCount ctxt) (objabi/DummyDwarfFunctionCountForAssembler))
+        (switch @flags/Spectre
+          (default
+            (log/Printf "unknown setting -spectre=%s" @flags/Spectre)
+            (os/Exit 2))
+          (case [""])
+          ;; nothing
+          (case ["index"])
+          ;; known to compiler; ignore here so people can use
+          ;; the same list with -gcflags=-spectre=LIST and -asmflags=-spectre=LIST
+          (case ["all" "ret"]
+            (set! (.-Retpoline ctxt) true)))
+
+
+        (set! (.-Bso ctxt) (bufio/NewWriter os/Stdout))
+        (defer (.Flush (.-Bso ctxt)))
+
+        (^{:go/via [LinkArch]} (.-Init architecture) ctxt)
+
+        ;; Create object file, write header.
+        (let [(values buf err) (bio/Create @flags/OutputFile)]
+          (when (!= err nil)
+            (log/Fatal err))
+
+          (defer (.Close buf))
+
+          (when (not @flags/SymABIs)
+            ^{:go/via [Writer]} (.WriteString buf (objabi/HeaderString))
+            (fmt/Fprintf buf "!\n"))
+
+
+          ;; Set macros for GOEXPERIMENTs so we can easily switch
+          ;; runtime assembly code based on them.
+          (when (.-AllowAsmABI (objabi/LookupPkgSpecial (.-Pkgpath ctxt)))
+            (range [_ exp (.Enabled buildcfg/Experiment)]
+              (set! flags/D (append flags/D (+ "GOEXPERIMENT_" exp)))))
+
+
+
+          (let [(values ^bool ok ^bool diag) (zero bool)
+              ^{:line 94 :tag string} failedFile (zero string)]
+            (range [_ f (flag/Args)]
+              (let [lexer (lex/NewLexer f)
+                  ^{:line 97} parser (asm/NewParser ctxt architecture lexer)]
+                (set! (.-DiagFunc ctxt) ^{:go/end 101} (fn [^string format & ^{:tag (slice any)} args]
+                    (set! diag true)
+                    (log/Printf format (spread args))))
+
+                (if @flags/SymABIs
+                  (set! ok (.ParseSymABIs parser buf))
+
+                  (let [pList (new obj/Plist)]
+                    (set! (values (.-Firstpc pList) ok) (.Parse parser))
+                    ;; reports errors to parser.Errorf
+                    (when ok
+                      (obj/Flushplist ctxt pList nil))))
+
+
+                (when (not ok)
+                  (set! failedFile f)
+                  (break))))
+
+
+            (when (and ok (not @flags/SymABIs))
+              (.NumberSyms ctxt)
+              (obj/WriteObjFile ctxt buf))
+
+            (when (or (not ok) diag)
+              (if (!= failedFile "")
+                (log/Printf "assembly of %s failed" failedFile)
+
+                (log/Print "assembly failed"))
+
+              (.Close buf)
+              (os/Remove @flags/OutputFile)
+              (os/Exit 1))))))))

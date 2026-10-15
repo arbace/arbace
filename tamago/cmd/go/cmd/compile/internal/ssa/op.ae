@@ -1,0 +1,547 @@
+;; Copyright 2015 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.cmd.compile.internal.ssa) (go/file "op.go" :imports [
+
+
+    ^{:line 8} [abi "cmd/compile/internal/abi"]
+    ^{:line 9} [base "cmd/compile/internal/base"]
+    ^{:line 10} [ir "cmd/compile/internal/ir"]
+    ^{:line 11} [types "cmd/compile/internal/types"]
+    ^{:line 12} [obj "cmd/internal/obj"]
+    ^{:line 13} [fmt "fmt"]
+    ^:alias ^{:line 14} [rtabi "internal/abi"]
+    ^{:line 15} [strings "strings"]])
+
+
+
+
+
+
+
+
+(go/type Op "An Op encodes the specific operation that a Value performs.\nOpcodes' semantics can be modified by the type and aux fields of the Value.\nFor instance, OpAdd can be 32 or 64 bit, signed or unsigned, float or complex, depending on Value.Type.\nSemantics of each op are described in the opcode files in _gen/*Ops.go.\nThere is one file for generic (architecture-independent) ops and one file\nfor each architecture.\n" int32)
+
+(go/type opInfo (struct
+    ^{:line 27 :tag string} name
+    ^{:line 28 :tag regInfo} reg
+    ^{:line 29 :tag auxType} auxType
+    ^{:line 30 :tag int32} argLen ; the number of arguments, -1 if variable length
+    ^{:line 31 :tag obj/As} asm
+    ^{:line 32 :tag bool} generic ; this is a generic (arch-independent) opcode
+    ^{:line 33 :tag bool} rematerializeable ; this op is rematerializeable
+    ^{:line 34 :tag bool} commutative ; this operation is commutative (e.g. addition)
+    ^{:line 35 :tag bool} resultInArg0 ; (first, if a tuple) output of v and v.Args[0] must be allocated to the same register
+    ^{:line 36 :tag bool} resultNotInArgs ; outputs must not be allocated to the same registers as inputs
+    ^{:line 37 :tag bool} clobberFlags ; this op clobbers flags register
+    ^{:line 38 :tag bool} needIntTemp ; need a temporary free integer register
+    ^{:line 39 :tag bool} call ; is a function call
+    ^{:line 40 :tag bool} tailCall ; is a tail call
+    ^{:line 41 :tag bool} nilCheck ; this op is a nil check on arg0
+    ^{:line 42 :tag bool} faultOnNilArg0 ; this op will fault if arg0 is nil (and aux encodes a small offset)
+    ^{:line 43 :tag bool} faultOnNilArg1 ; this op will fault if arg1 is nil (and aux encodes a small offset)
+    ^{:line 44 :tag bool} usesScratch ; this op requires scratch memory space
+    ^{:line 45 :tag bool} hasSideEffects ; for "reasons", not to be eliminated.  E.g., atomic store, #19182.
+    ^{:line 46 :tag bool} zeroWidth ; op never translates into any machine code. example: copy, which may sometimes translate to machine code, is not zero-width.
+    ^{:line 47 :tag bool} unsafePoint ; this op is an unsafe point, i.e. not safe for async preemption
+    ^{:line 48 :tag bool} fixedReg ; this op will be assigned a fixed register
+    ^{:line 49 :tag bool} earlyOk ; executing this op in an earlier block is ok
+    ^{:line 50 :tag bool} addrSinkArg0 ; the address in arg0 does not propagate to the result
+    ^{:line 51 :tag bool} addrSinkArg1 ; the address in arg1 does not propagate to the result
+    ^{:line 52 :tag SymEffect} symEffect ; effect this op has on symbol in aux
+    ^{:line 53 :tag uint8} scale)) ; amd64/386 indexed load scale
+
+
+(go/type inputInfo (struct
+    ^{:line 57 :tag int} idx ; index in Args array
+    ^{:line 58 :tag regMask} regs)) ; allowed input registers
+
+
+(go/type outputInfo (struct
+    ^{:line 62 :tag int} idx ; index in output tuple
+    ^{:line 63 :tag regMask} regs)) ; allowed output registers
+
+
+(go/type regInfo (struct
+
+
+
+
+
+    ^{:line 72 :tag (slice inputInfo) :doc "inputs encodes the register restrictions for an instruction's inputs.\nEach entry specifies an allowed register set for a particular input.\nThey are listed in the order in which regalloc should pick a register\nfrom the register set (most constrained first).\nInputs which do not need registers are not listed.\n"} inputs
+
+
+    ^{:line 75 :tag regMask :doc "clobbers encodes the set of registers that are overwritten by\nthe instruction (other than the output registers).\n"} clobbers
+
+    ^{:line 77 :tag bool :doc "Instruction clobbers the register containing input 0.\n"} clobbersArg0
+
+    ^{:line 79 :tag bool :doc "Instruction clobbers the register containing input 1.\n"} clobbersArg1
+
+    ^{:line 81 :tag (slice outputInfo) :doc "outputs is the same as inputs, but for the outputs of the instruction.\n"} outputs))
+
+
+^{:go/end 103} (go/method String ^string [^{:tag (* regInfo)} r]
+  (let [s ""]
+    (set! s + "INS:\n")
+    (range [_ i (.-inputs r)]
+      (let [mask (fmt/Sprintf "%64b" (.-regs i))]
+        (set! mask (strings/ReplaceAll mask "0" "."))
+        (set! s + (fmt/Sprintf "%2d |%s|\n" (.-idx i) mask))))
+
+    (set! s + "OUTS:\n")
+    (range [_ i (.-outputs r)]
+      (let [mask (fmt/Sprintf "%64b" (.-regs i))]
+        (set! mask (strings/ReplaceAll mask "0" "."))
+        (set! s + (fmt/Sprintf "%2d |%s|\n" (.-idx i) mask))))
+
+    (set! s + "CLOBBERS:\n")
+    (let [mask (fmt/Sprintf "%64b" (.-clobbers r))]
+      (set! mask (strings/ReplaceAll mask "0" "."))
+      (set! s + (fmt/Sprintf "   |%s|\n" mask))
+      ^{:line 102} s)))
+
+
+(go/type auxType int8)
+
+(go/type AuxNameOffset (struct
+    ^{:line 108 :tag (* ir/Name)} Name
+    ^{:line 109 :tag int64} Offset))
+
+
+^{:go/end 112} (go/method CanBeAnSSAAux [^{:tag (* AuxNameOffset)} a])
+^{:go/end 115} (go/method String ^string [^{:tag (* AuxNameOffset)} a]
+  (fmt/Sprintf "%s+%d" (.-Name (.Sym (.-Name a))) (.-Offset a)))
+
+
+^{:go/end 119} (go/method FrameOffset ^int64 [^{:tag (* AuxNameOffset)} a]
+  (+ (.FrameOffset (.-Name a)) (.-Offset a)))
+
+
+(go/type AuxCall (struct
+    ^{:line 122 :tag (* obj/LSym)} Fn
+    ^{:line 123 :tag (* regInfo)} reg ; regInfo for this call
+    ^{:line 124 :tag (* abi/ABIParamResultInfo)} abiInfo))
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 168} (go/method Reg "Reg returns the regInfo for a given call, combining the derived in/out register masks\nwith the machine-specific register information in the input i.  (The machine-specific\nregInfo is much handier at the call site than it is when the AuxCall is being constructed,\ntherefore do this lazily).\n\nTODO: there is a Clever Hack that allows pre-generation of a small-ish number of the slices\nof inputInfo and outputInfo used here, provided that we are willing to reorder the inputs\nand outputs from calls, so that all integer registers come first, then all floating registers.\nAt this point (active development of register ABI) that is very premature,\nbut if this turns out to be a cost, we could do it.\n" ^{:tag (* regInfo)} [^{:tag (* AuxCall)} a ^{:tag (* regInfo)} i ^{:tag (* Config)} c]
+  (when (not (.empty (.-clobbers (.-reg a))))
+    ;; Already updated
+    (return (.-reg a)))
+
+  (when (== (+ (.InRegistersUsed (.-abiInfo a)) (.OutRegistersUsed (.-abiInfo a))) 0)
+    ;; Shortcut for zero case, also handles old ABI.
+    (set! (.-reg a) i)
+    (return (.-reg a)))
+
+
+  (let [k (len (.-inputs i))]
+    (range [_ p (.InParams (.-abiInfo a))]
+      (range [_ r (.-Registers p)]
+        (let [m (archRegForAbiReg r c)]
+          (set! (.-inputs (.-reg a)) (append (.-inputs (.-reg a)) (lit inputInfo :idx k :regs (regMaskAt (conv register m)))))
+          (inc! k))))
+
+
+    (set! (.-inputs (.-reg a)) (append (.-inputs (.-reg a)) (spread (.-inputs i)))) ; These are less constrained, thus should come last
+    (set! k (len (.-outputs i)))
+    (range [_ p (.OutParams (.-abiInfo a))]
+      (range [_ r (.-Registers p)]
+        (let [m (archRegForAbiReg r c)]
+          (set! (.-outputs (.-reg a)) (append (.-outputs (.-reg a)) (lit outputInfo :idx k :regs (regMaskAt (conv register m)))))
+          (inc! k))))
+
+
+    (set! (.-outputs (.-reg a)) (append (.-outputs (.-reg a)) (spread (.-outputs i))))
+    (set! (.-clobbers (.-reg a)) (.-clobbers i))
+    (.-reg a)))
+
+^{:go/end 171} (go/method ABI ^{:tag (* abi/ABIConfig)} [^{:tag (* AuxCall)} a]
+  (.Config (.-abiInfo a)))
+
+^{:go/end 174} (go/method ABIInfo ^{:tag (* abi/ABIParamResultInfo)} [^{:tag (* AuxCall)} a]
+  (.-abiInfo a))
+
+^{:go/end 191} (go/method ResultReg ^{:tag (* regInfo)} [^{:tag (* AuxCall)} a ^{:tag (* Config)} c]
+  (when (== (.OutRegistersUsed (.-abiInfo a)) 0)
+    (return (.-reg a)))
+
+  (when (> (len (.-inputs (.-reg a))) 0)
+    (return (.-reg a)))
+
+  (let [k 0]
+    (range [_ p (.OutParams (.-abiInfo a))]
+      (range [_ r (.-Registers p)]
+        (let [m (archRegForAbiReg r c)]
+          (set! (.-inputs (.-reg a)) (append (.-inputs (.-reg a)) (lit inputInfo :idx k :regs (regMaskAt (conv register m)))))
+          (inc! k))))
+
+
+    (.-reg a)))
+
+
+
+
+^{:go/end 203} (go/func archRegForAbiReg "For ABI register index r, returns the (dense) register number used in\nSSA backend.\n" ^uint8 [^abi/RegIndex r ^{:tag (* Config)} c]
+  (let [^int8 m (zero int8)]
+    (if (< (conv int r) (len (.-intParamRegs c)))
+      (set! m (aget (.-intParamRegs c) r))
+
+      (set! m (aget (.-floatParamRegs c) (- (conv int r) (len (.-intParamRegs c))))))
+
+    (conv uint8 m)))
+
+
+
+
+^{:go/end 210} (go/func ObjRegForAbiReg "For ABI register index r, returns the register number used in the obj\npackage (assembler).\n" ^int16 [^abi/RegIndex r ^{:tag (* Config)} c]
+  (let [m (archRegForAbiReg r c)]
+    (.-objNum (aget (.-registers c) m))))
+
+
+
+
+
+
+
+
+^{:go/end 220} (go/method ArgWidth "ArgWidth returns the amount of stack needed for all the inputs\nand outputs of a function or method, including ABI-defined parameter\nslots and ABI-defined spill slots for register-resident parameters.\n\nThe name is taken from the types package's ArgWidth(<function type>),\nwhich predated changes to the ABI; this version handles those changes.\n" ^int64 [^{:tag (* AuxCall)} a]
+  (.ArgWidth (.-abiInfo a)))
+
+
+
+^{:go/end 225} (go/method ParamAssignmentForResult "ParamAssignmentForResult returns the ABI Parameter assignment for result which (indexed 0, 1, etc).\n" ^{:tag (* abi/ABIParamAssignment)} [^{:tag (* AuxCall)} a ^int64 which]
+  (.OutParam (.-abiInfo a) (conv int which)))
+
+
+
+^{:go/end 231} (go/method OffsetOfResult "OffsetOfResult returns the SP offset of result which (indexed 0, 1, etc).\n" ^int64 [^{:tag (* AuxCall)} a ^int64 which]
+  (let [n (conv int64 (.Offset (.OutParam (.-abiInfo a) (conv int which))))]
+    ^{:line 230} n))
+
+
+
+
+^{:go/end 238} (go/method OffsetOfArg "OffsetOfArg returns the SP offset of argument which (indexed 0, 1, etc).\nIf the call is to a method, the receiver is the first argument (i.e., index 0)\n" ^int64 [^{:tag (* AuxCall)} a ^int64 which]
+  (let [n (conv int64 (.Offset (.InParam (.-abiInfo a) (conv int which))))]
+    ^{:line 237} n))
+
+
+
+^{:go/end 243} (go/method RegsOfResult "RegsOfResult returns the register(s) used for result which (indexed 0, 1, etc).\n" ^{:tag (slice abi/RegIndex)} [^{:tag (* AuxCall)} a ^int64 which]
+  (.-Registers (.OutParam (.-abiInfo a) (conv int which))))
+
+
+
+
+^{:go/end 249} (go/method RegsOfArg "RegsOfArg returns the register(s) used for argument which (indexed 0, 1, etc).\nIf the call is to a method, the receiver is the first argument (i.e., index 0)\n" ^{:tag (slice abi/RegIndex)} [^{:tag (* AuxCall)} a ^int64 which]
+  (.-Registers (.InParam (.-abiInfo a) (conv int which))))
+
+
+
+^{:go/end 254} (go/method NameOfResult "NameOfResult returns the ir.Name of result which (indexed 0, 1, etc).\n" ^{:tag (* ir/Name)} [^{:tag (* AuxCall)} a ^int64 which]
+  (.-Name (.OutParam (.-abiInfo a) (conv int which))))
+
+
+
+^{:go/end 259} (go/method TypeOfResult "TypeOfResult returns the type of result which (indexed 0, 1, etc).\n" ^{:tag (* types/Type)} [^{:tag (* AuxCall)} a ^int64 which]
+  (.-Type (.OutParam (.-abiInfo a) (conv int which))))
+
+
+
+
+^{:go/end 265} (go/method TypeOfArg "TypeOfArg returns the type of argument which (indexed 0, 1, etc).\nIf the call is to a method, the receiver is the first argument (i.e., index 0)\n" ^{:tag (* types/Type)} [^{:tag (* AuxCall)} a ^int64 which]
+  (.-Type (.InParam (.-abiInfo a) (conv int which))))
+
+
+
+^{:go/end 270} (go/method SizeOfResult "SizeOfResult returns the size of result which (indexed 0, 1, etc).\n" ^int64 [^{:tag (* AuxCall)} a ^int64 which]
+  (.Size (.TypeOfResult a which)))
+
+
+
+
+^{:go/end 276} (go/method SizeOfArg "SizeOfArg returns the size of argument which (indexed 0, 1, etc).\nIf the call is to a method, the receiver is the first argument (i.e., index 0)\n" ^int64 [^{:tag (* AuxCall)} a ^int64 which]
+  (.Size (.TypeOfArg a which)))
+
+
+
+^{:go/end 281} (go/method NResults "NResults returns the number of results.\n" ^int64 [^{:tag (* AuxCall)} a]
+  (conv int64 (len (.OutParams (.-abiInfo a)))))
+
+
+
+
+^{:go/end 292} (go/method LateExpansionResultType "LateExpansionResultType returns the result type (including trailing mem)\nfor a call that will be expanded later in the SSA phase.\n" ^{:tag (* types/Type)} [^{:tag (* AuxCall)} a]
+  (let [^{:tag (slice (* types/Type))} tys (zero (slice (* types/Type)))]
+    (for [i (conv int64 0)] (< i (.NResults a)) (inc! i)
+      (set! tys (append tys (.TypeOfResult a i))))
+
+    (set! tys (append tys types/TypeMem))
+    (types/NewResults tys)))
+
+
+
+^{:go/end 297} (go/method NArgs "NArgs returns the number of arguments (including receiver, if there is one).\n" ^int64 [^{:tag (* AuxCall)} a]
+  (conv int64 (len (.InParams (.-abiInfo a)))))
+
+
+
+^{:go/end 310} (go/method String "String returns \"AuxCall{<fn>}\"\n" ^string [^{:tag (* AuxCall)} a]
+  (let [^string fn (zero string)]
+    (if (== (.-Fn a) nil)
+      (set! fn "AuxCall{nil") ; could be interface/closure etc.
+
+      (set! fn (fmt/Sprintf "AuxCall{%v" (.-Fn a))))
+
+    ;; TODO how much of the ABI should be printed?
+
+    (+ fn "}")))
+
+
+
+^{:go/end 322} (go/func StaticAuxCall "StaticAuxCall returns an AuxCall for a static call.\n" ^{:tag (* AuxCall)} [^{:tag (* obj/LSym)} sym ^{:tag (* abi/ABIParamResultInfo)} paramResultInfo]
+  (when (== paramResultInfo nil)
+    (panic (fmt/Errorf "Nil paramResultInfo, sym=%v" sym)))
+
+  (let [^{:tag (* regInfo)} reg (zero (* regInfo))]
+    (when (> (+ (.InRegistersUsed paramResultInfo) (.OutRegistersUsed paramResultInfo)) 0)
+      (set! reg (addr (lit regInfo))))
+
+    (addr (lit AuxCall :Fn sym :abiInfo paramResultInfo :reg reg))))
+
+
+
+^{:go/end 331} (go/func InterfaceAuxCall "InterfaceAuxCall returns an AuxCall for an interface call.\n" ^{:tag (* AuxCall)} [^{:tag (* abi/ABIParamResultInfo)} paramResultInfo]
+  (let [^{:tag (* regInfo)} reg (zero (* regInfo))]
+    (when (> (+ (.InRegistersUsed paramResultInfo) (.OutRegistersUsed paramResultInfo)) 0)
+      (set! reg (addr (lit regInfo))))
+
+    (addr (lit AuxCall :Fn nil :abiInfo paramResultInfo :reg reg))))
+
+
+
+^{:go/end 340} (go/func ClosureAuxCall "ClosureAuxCall returns an AuxCall for a closure call.\n" ^{:tag (* AuxCall)} [^{:tag (* abi/ABIParamResultInfo)} paramResultInfo]
+  (let [^{:tag (* regInfo)} reg (zero (* regInfo))]
+    (when (> (+ (.InRegistersUsed paramResultInfo) (.OutRegistersUsed paramResultInfo)) 0)
+      (set! reg (addr (lit regInfo))))
+
+    (addr (lit AuxCall :Fn nil :abiInfo paramResultInfo :reg reg))))
+
+
+^{:go/end 342} (go/method CanBeAnSSAAux [(* AuxCall)])
+
+
+^{:go/end 352} (go/func OwnAuxCall "OwnAuxCall returns a function's own AuxCall.\n" ^{:tag (* AuxCall)} [^{:tag (* obj/LSym)} fn ^{:tag (* abi/ABIParamResultInfo)} paramResultInfo]
+  ;; TODO if this remains identical to ClosureAuxCall above after new ABI is done, should deduplicate.
+  (let [^{:tag (* regInfo)} reg (zero (* regInfo))]
+    (when (> (+ (.InRegistersUsed paramResultInfo) (.OutRegistersUsed paramResultInfo)) 0)
+      (set! reg (addr (lit regInfo))))
+
+    (addr (lit AuxCall :Fn fn :abiInfo paramResultInfo :reg reg))))
+
+
+(go/const
+  ^{:line 355} [^{:tag auxType :val 0} auxNone iota]
+  ^{:line 356} [^{:val 1} auxBool] ; auxInt is 0/1 for false/true
+  ^{:line 357} [^{:val 2} auxInt8] ; auxInt is an 8-bit integer
+  ^{:line 358} [^{:val 3} auxInt16] ; auxInt is a 16-bit integer
+  ^{:line 359} [^{:val 4} auxInt32] ; auxInt is a 32-bit integer
+  ^{:line 360} [^{:val 5} auxInt64] ; auxInt is a 64-bit integer
+  ^{:line 361} [^{:val 6} auxInt128] ; auxInt represents a 128-bit integer.  Always 0.
+  ^{:line 362} [^{:val 7} auxUInt8] ; auxInt is an 8-bit unsigned integer
+  ^{:line 363} [^{:val 8} auxFloat32] ; auxInt is a float32 (encoded with math.Float64bits)
+  ^{:line 364} [^{:val 9} auxFloat64] ; auxInt is a float64 (encoded with math.Float64bits)
+  ^{:line 365} [^{:val 10} auxFlagConstant] ; auxInt is a flagConstant
+  ^{:line 366} [^{:val 11} auxCCop] ; auxInt is a ssa.Op that represents a flags-to-bool conversion (e.g. LessThan)
+  ^{:line 367} [^{:val 12} auxNameOffsetInt8] ; aux is a &struct{Name ir.Name, Offset int64}; auxInt is index in parameter registers array
+  ^{:line 368} [^{:val 13} auxString] ; aux is a string
+  ^{:line 369} [^{:val 14} auxSym] ; aux is a symbol (a *ir.Name for locals, an *obj.LSym for globals, or nil for none)
+  ^{:line 370} [^{:val 15} auxSymOff] ; aux is a symbol, auxInt is an offset
+  ^{:line 371} [^{:val 16} auxSymValAndOff] ; aux is a symbol, auxInt is a ValAndOff
+  ^{:line 372} [^{:val 17} auxTyp] ; aux is a type
+  ^{:line 373} [^{:val 18} auxTypSize] ; aux is a type, auxInt is a size, must have Aux.(Type).Size() == AuxInt
+  ^{:line 374} [^{:val 19} auxCall] ; aux is a *ssa.AuxCall
+  ^{:line 375} [^{:val 20} auxCallOff] ; aux is a *ssa.AuxCall, AuxInt is int64 param (in+out) size
+
+  ^{:line 377} [^{:val 21} auxPanicBoundsC] ; constant for a bounds failure
+  ^{:line 378} [^{:val 22} auxPanicBoundsCC] ; two constants for a bounds failure
+
+
+  ^{:line 381} [^{:val 23 :doc "architecture specific aux types\n"} auxARM64BitField] ; aux is an arm64 bitfield lsb and width packed into auxInt
+  ^{:line 382} [^{:val 24} auxARM64ConditionalParams] ; aux is a structure, which contains condition, NZCV flags and constant with indicator of using it
+  ^{:line 383} [^{:val 25} auxS390XRotateParams] ; aux is a s390x rotate parameters object encoding start bit, end bit and rotate amount
+  ^{:line 384} [^{:val 26} auxS390XCCMask] ; aux is a s390x 4-bit condition code mask
+  ^{:line 385} [^{:val 27} auxS390XCCMaskInt8] ; aux is a s390x 4-bit condition code mask, auxInt is an int8 immediate
+  ^{:line 386} [^{:val 28} auxS390XCCMaskUint8]) ; aux is a s390x 4-bit condition code mask, auxInt is a uint8 immediate
+
+
+
+
+(go/type SymEffect "A SymEffect describes the effect that an SSA Value has on the variable\nidentified by the symbol in its Aux field.\n" int8)
+
+(go/const
+  ^{:line 394} [^{:tag SymEffect :val 1} SymRead (<< 1 iota)]
+  ^{:line 395} [^{:val 2} SymWrite]
+  ^{:line 396} [^{:val 4} SymAddr]
+
+  ^{:line 398} [^{:val 3} SymRdWr (bit-or SymRead SymWrite)]
+
+  ^{:line 400} [^{:tag SymEffect :val 0} SymNone 0])
+
+
+
+
+
+
+
+(go/type Sym "A Sym represents a symbolic offset from a base register.\nCurrently a Sym can be one of 3 things:\n  - a *ir.Name, for an offset from SP (the stack pointer)\n  - a *obj.LSym, for an offset from SB (the global pointer)\n  - nil, for no offset\n" (interface
+    ^{:line 409} Aux
+    (CanBeAnSSASym [])))
+
+
+
+
+
+
+
+
+(go/type ValAndOff "A ValAndOff is used by the several opcodes. It holds\nboth a value and a pointer offset.\nA ValAndOff is intended to be encoded into an AuxInt field.\nThe zero ValAndOff encodes a value of 0 and an offset of 0.\nThe high 32 bits hold a value.\nThe low 32 bits hold a pointer offset.\n" int64)
+
+^{:go/end 421} (go/method Val ^int32 [^ValAndOff x] (conv int32 (>> (conv int64 x) 32)))
+^{:go/end 422} (go/method Val64 ^int64 [^ValAndOff x] (>> (conv int64 x) 32))
+^{:go/end 423} (go/method Val16 ^int16 [^ValAndOff x] (conv int16 (>> (conv int64 x) 32)))
+^{:go/end 424} (go/method Val8 ^int8 [^ValAndOff x] (conv int8 (>> (conv int64 x) 32)))
+
+^{:go/end 426} (go/method Off64 ^int64 [^ValAndOff x] (conv int64 (conv int32 x)))
+^{:go/end 427} (go/method Off ^int32 [^ValAndOff x] (conv int32 x))
+
+^{:go/end 431} (go/method String ^string [^ValAndOff x]
+  (fmt/Sprintf "val=%d,off=%d" (.Val x) (.Off x)))
+
+
+
+
+^{:go/end 437} (go/func validVal "validVal reports whether the value can be used\nas an argument to makeValAndOff.\n" ^bool [^int64 val]
+  (== val (conv int64 (conv int32 val))))
+
+
+^{:go/end 441} (go/func makeValAndOff ^ValAndOff [^int32 val ^int32 off]
+  (conv ValAndOff (+ (<< (conv int64 val) 32) (conv int64 (conv uint32 off)))))
+
+
+^{:go/end 446} (go/method canAdd32 ^bool [^ValAndOff x ^int32 off]
+  (let [newoff (+ (.Off64 x) (conv int64 off))]
+    (== newoff (conv int64 (conv int32 newoff)))))
+
+^{:go/end 450} (go/method canAdd64 ^bool [^ValAndOff x ^int64 off]
+  (let [newoff (+ (.Off64 x) off)]
+    (== newoff (conv int64 (conv int32 newoff)))))
+
+
+^{:go/end 457} (go/method addOffset32 ^ValAndOff [^ValAndOff x ^int32 off]
+  (when (not (.canAdd32 x off))
+    (panic "invalid ValAndOff.addOffset32"))
+
+  (makeValAndOff (.Val x) (+ (.Off x) off)))
+
+^{:go/end 463} (go/method addOffset64 ^ValAndOff [^ValAndOff x ^int64 off]
+  (when (not (.canAdd64 x off))
+    (panic "invalid ValAndOff.addOffset64"))
+
+  (makeValAndOff (.Val x) (+ (.Off x) (conv int32 off))))
+
+
+
+
+(go/type int128 "int128 is a type that stores a 128-bit constant.\nThe only allowed constant right now is 0, so we can cheat quite a bit.\n" int64)
+
+(go/type BoundsKind uint8)
+
+(go/const
+  ^{:line 472} [^{:tag BoundsKind :val 0} BoundsIndex iota] ; indexing operation, 0 <= idx < len failed
+  ^{:line 473} [^{:val 1} BoundsIndexU] ; ... with unsigned idx
+  ^{:line 474} [^{:val 2} BoundsSliceAlen] ; 2-arg slicing operation, 0 <= high <= len failed
+  ^{:line 475} [^{:val 3} BoundsSliceAlenU] ; ... with unsigned high
+  ^{:line 476} [^{:val 4} BoundsSliceAcap] ; 2-arg slicing operation, 0 <= high <= cap failed
+  ^{:line 477} [^{:val 5} BoundsSliceAcapU] ; ... with unsigned high
+  ^{:line 478} [^{:val 6} BoundsSliceB] ; 2-arg slicing operation, 0 <= low <= high failed
+  ^{:line 479} [^{:val 7} BoundsSliceBU] ; ... with unsigned low
+  ^{:line 480} [^{:val 8} BoundsSlice3Alen] ; 3-arg slicing operation, 0 <= max <= len failed
+  ^{:line 481} [^{:val 9} BoundsSlice3AlenU] ; ... with unsigned max
+  ^{:line 482} [^{:val 10} BoundsSlice3Acap] ; 3-arg slicing operation, 0 <= max <= cap failed
+  ^{:line 483} [^{:val 11} BoundsSlice3AcapU] ; ... with unsigned max
+  ^{:line 484} [^{:val 12} BoundsSlice3B] ; 3-arg slicing operation, 0 <= high <= max failed
+  ^{:line 485} [^{:val 13} BoundsSlice3BU] ; ... with unsigned high
+  ^{:line 486} [^{:val 14} BoundsSlice3C] ; 3-arg slicing operation, 0 <= low <= high failed
+  ^{:line 487} [^{:val 15} BoundsSlice3CU] ; ... with unsigned low
+  ^{:line 488} [^{:val 16} BoundsConvert] ; conversion to array pointer failed
+  ^{:line 489} [^{:val 17} BoundsKindCount])
+
+
+
+
+^{:go/end 534} (go/method Code "Returns the bounds error code needed by the runtime, and\nwhether the x field is signed.\n" [^BoundsKind b] :results [rtabi/BoundsErrorCode bool]
+  (switch b
+    (case [BoundsIndex]
+      (return rtabi/BoundsIndex true))
+    (case [BoundsIndexU]
+      (return rtabi/BoundsIndex false))
+    (case [BoundsSliceAlen]
+      (return rtabi/BoundsSliceAlen true))
+    (case [BoundsSliceAlenU]
+      (return rtabi/BoundsSliceAlen false))
+    (case [BoundsSliceAcap]
+      (return rtabi/BoundsSliceAcap true))
+    (case [BoundsSliceAcapU]
+      (return rtabi/BoundsSliceAcap false))
+    (case [BoundsSliceB]
+      (return rtabi/BoundsSliceB true))
+    (case [BoundsSliceBU]
+      (return rtabi/BoundsSliceB false))
+    (case [BoundsSlice3Alen]
+      (return rtabi/BoundsSlice3Alen true))
+    (case [BoundsSlice3AlenU]
+      (return rtabi/BoundsSlice3Alen false))
+    (case [BoundsSlice3Acap]
+      (return rtabi/BoundsSlice3Acap true))
+    (case [BoundsSlice3AcapU]
+      (return rtabi/BoundsSlice3Acap false))
+    (case [BoundsSlice3B]
+      (return rtabi/BoundsSlice3B true))
+    (case [BoundsSlice3BU]
+      (return rtabi/BoundsSlice3B false))
+    (case [BoundsSlice3C]
+      (return rtabi/BoundsSlice3C true))
+    (case [BoundsSlice3CU]
+      (return rtabi/BoundsSlice3C false))
+    (case [BoundsConvert]
+      (return rtabi/BoundsConvert false))
+    (default
+      (base/Fatalf "bad bounds kind %d" b)
+      (return 0 false))))
+
+
+
+
+
+
+
+(go/type arm64BitField "arm64BitField is the GO type of ARM64BitField auxInt.\nif x is an ARM64BitField, then width=x&0xff, lsb=(x>>8)&0xff, and\nwidth+lsb<64 for 64-bit variant, width+lsb<32 for 32-bit variant.\nthe meaning of width and lsb are instruction-dependent.\n" int16)
+
+
+(go/type arm64ConditionalParams "arm64ConditionalParams is the GO type of ARM64ConditionalParams auxInt.\n" (struct
+    ^{:line 544 :tag Op} cond ; Condition code to evaluate
+    ^{:line 545 :tag uint8} nzcv ; Fallback NZCV flags value when condition is false
+    ^{:line 546 :tag uint8} constValue ; Immediate value for constant comparisons
+    ^{:line 547 :tag bool} ind)) ; Constant comparison indicator

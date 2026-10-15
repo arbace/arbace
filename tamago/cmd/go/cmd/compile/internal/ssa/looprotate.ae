@@ -1,0 +1,190 @@
+;; Copyright 2017 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.cmd.compile.internal.ssa) (go/file "looprotate.go" :imports [
+
+
+    ^{:line 8} [slices "slices"]])
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 192} (go/func loopRotate "loopRotate converts loops with a check-loop-condition-at-beginning\nto loops with a check-loop-condition-at-end.\nThis helps loops avoid extra unnecessary jumps.\n\n\t loop:\n\t   CMPQ ...\n\t   JGE exit\n\t   ...\n\t   JMP loop\n\t exit:\n\n\t  JMP entry\n\tloop:\n\t  ...\n\tentry:\n\t  CMPQ ...\n\t  JLT loop\n" [^{:tag (* Func)} f]
+  (let [loopnest (.loopnest f)]
+    (when (.-hasIrreducible loopnest)
+      (return))
+
+    (when (== (len (.-loops loopnest)) 0)
+      (return))
+
+
+    (let [idToIdx (.allocIntSlice (.-Cache f) (.NumBlocks f))]
+      (defer (.freeIntSlice (.-Cache f) idToIdx))
+      (range [i b (.-Blocks f)]
+        (aset idToIdx (.-ID b) i))
+
+
+      ;; Set of blocks we're moving, by ID.
+      (let [move (lit (map ID (struct)))
+
+          ;; Map from block ID to the moving blocks that should
+          ;; come right after it.
+          ;; If a block, which has its ID present in keys of the 'after' map,
+          ;; occurs in some other block's 'after' list, that represents whole
+          ;; nested loop, e.g. consider an inner loop I nested into an outer
+          ;; loop O. It and Ot are corresponding top block for these loops
+          ;; chosen by our algorithm, and It is in the Ot's 'after' list.
+          ;;
+          ;;    Before:                     After:
+          ;;
+          ;;       e                       e
+          ;;       │                       │
+          ;;       │                       │Ot ◄───┐
+          ;;       ▼                       ▼▼      │
+          ;;   ┌───Oh ◄────┐           ┌─┬─Oh      │
+          ;;   │   │       │           │ │         │
+          ;;   │   │       │           │ │ It◄───┐ │
+          ;;   │   ▼       │           │ │ ▼     │ │
+          ;;   │ ┌─Ih◄───┐ │           │ └►Ih    │ │
+          ;;   │ │ │     │ │           │ ┌─┤     │ │
+          ;;   │ │ ▼     │ │           │ │ ▼     │ │
+          ;;   │ │ Ib    │ │           │ │ Ib    │ │
+          ;;   │ │ └─►It─┘ │           │ │ └─────┘ │
+          ;;   │ │         │           │ │         │
+          ;;   │ └►Ie      │           │ └►Ie      │
+          ;;   │   └─►Ot───┘           │   └───────┘
+          ;;   │                       │
+          ;;   └──►Oe                  └──►Oe
+          ;;
+          ;; We build the 'after' lists for each of the top blocks Ot and It:
+          ;;   after[Ot]: Oh, It, Ie
+          ;;   after[It]: Ih, Ib
+          ^{:line 78} after (lit (map ID (slice (* Block))))
+
+          ;; Map from loop header ID to the new top block for the loop.
+          ^{:line 81} tops (lit (map ID (* Block)))
+
+          ;; Order loops to rotate any child loop before adding its top block
+          ;; to the parent loop's 'after' list.
+          ^{:line 85} loopOrder (.allocIntSlice (.-Cache f) (len (.-loops loopnest)))]
+        (range [i loopOrder]
+          (aset loopOrder i i))
+
+        (defer (.freeIntSlice (.-Cache f) loopOrder))
+        (^{:inst [(slice int) int]} slices/SortFunc loopOrder ^{:go/end 101} (fn ^int [^int i ^int j]
+            (let [di (.-depth (aget (.-loops loopnest) i))
+                ^{:line 92} dj (.-depth (aget (.-loops loopnest) j))]
+              (switch
+                (case [(> di dj)]
+                  (return -1))
+                (case [(< di dj)]
+                  (return 1))
+                (default
+                  (return 0))))))
+
+
+
+        ;; Check each loop header and decide if we want to move it.
+        (range [_ loopIdx loopOrder]
+          (let [loop (aget (.-loops loopnest) loopIdx)
+              ^{:line 106} b (.-header loop)
+              ^{:line 107 :tag (* Block)} p (zero (* Block))] ; b's in-loop predecessor
+            (range [_ e (.-Preds b)]
+              (when (!= (.-Kind (.-b e)) BlockPlain)
+                (continue))
+
+              (when (!= (aget (.-b2l loopnest) (.-ID (.-b e))) loop)
+                (continue))
+
+              (set! p (.-b e)))
+
+            (when (== p nil)
+              (continue))
+
+            (aset tops (.-ID (.-header loop)) p)
+            (set! (.-Hotness p) bit-or HotInitial)
+            (when (.-IsPgoHot f)
+              (set! (.-Hotness p) bit-or HotPgo))
+
+            ;; blocks will be arranged so that p is ordered first, if it isn't already.
+            (when (== p b) ; p is header, already first (and also, only block in the loop)
+              (continue))
+
+            (set! (.-Hotness p) bit-or HotNotFlowIn)
+
+            ;; the loop header b follows p
+            (aset after (.-ID p) (lit (slice (* Block)) b))
+            (while true
+              (let [nextIdx (+ (aget idToIdx (.-ID b)) 1)]
+                (when (>= nextIdx (len (.-Blocks f))) ; reached end of function (maybe impossible?)
+                  (break))
+
+                (let [nextb (aget (.-Blocks f) nextIdx)]
+                  (when (== nextb p) ; original loop predecessor is next
+                    (break))
+
+                  (when [bloop (aget (.-b2l loopnest) (.-ID nextb))] (!= bloop nil)
+                    (when (or (== bloop loop) (and (== (.-outer bloop) loop) (== (aget tops (.-ID (.-header bloop))) nextb)))
+                      (aset after (.-ID p) (append (aget after (.-ID p)) nextb))))
+
+
+                  (set! b nextb))))
+
+            ;; Swap b and p so that we'll handle p before b when moving blocks.
+            (aset (.-Blocks f) (aget idToIdx (.-ID (.-header loop))) p)
+            (aset (.-Blocks f) (aget idToIdx (.-ID p)) (.-header loop))
+            (set! (values (aget idToIdx (.-ID (.-header loop))) (aget idToIdx (.-ID p))) (values (aget idToIdx (.-ID p)) (aget idToIdx (.-ID (.-header loop)))))
+
+            ;; Place loop blocks after p.
+            (range [_ b (aget after (.-ID p))]
+              (aset move (.-ID b) (lit (struct))))))
+
+
+
+        ;; Move blocks to their destinations in a single pass.
+        ;; We rely here on the fact that loop headers must come
+        ;; before the rest of the loop.  And that relies on the
+        ;; fact that we only identify reducible loops.
+        (let [j 0
+            ;; Some blocks that are not part of a loop may be placed
+            ;; between loop blocks. In order to avoid these blocks from
+            ;; being overwritten, use a temporary slice.
+            ^{:line 168} oldOrder (.allocBlockSlice (.-Cache f) (len (.-Blocks f)))]
+          (defer (.freeBlockSlice (.-Cache f) oldOrder))
+          (copy oldOrder (.-Blocks f))
+          (let [^{:tag (func [^{:tag (slice (* Block))} bs])} moveBlocks (zero (func [^{:tag (slice (* Block))} bs]))]
+            (set! moveBlocks ^{:go/end 180} (fn [^{:tag (slice (* Block))} blocks]
+                (range [_ a blocks]
+                  (aset (.-Blocks f) j a)
+                  (inc! j)
+                  (when [(values nextBlocks ok) (aget after (.-ID a))] ok
+                    (moveBlocks nextBlocks)))))
+
+
+
+            (range [_ b oldOrder]
+              (when [(values _ ok) (aget move (.-ID b))] ok
+                (continue))
+
+              (aset (.-Blocks f) j b)
+              (inc! j)
+              (moveBlocks (aget after (.-ID b))))
+
+            (when (!= j (len oldOrder))
+              (.Fatalf f "bad reordering in looprotate"))))))))

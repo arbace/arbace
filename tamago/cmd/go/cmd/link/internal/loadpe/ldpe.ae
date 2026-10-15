@@ -1,0 +1,830 @@
+;; Copyright 2010 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; Package loadpe implements a PE/COFF file reader.
+(in-ns 'go.cmd.link.internal.loadpe) (go/file "ldpe.go" :doc "Package loadpe implements a PE/COFF file reader.\n" :imports [
+
+
+    ^{:line 9} [bytes "bytes"]
+    ^{:line 10} [bio "cmd/internal/bio"]
+    ^{:line 11} [objabi "cmd/internal/objabi"]
+    ^{:line 12} [sys "cmd/internal/sys"]
+    ^{:line 13} [loader "cmd/link/internal/loader"]
+    ^{:line 14} [sym "cmd/link/internal/sym"]
+    ^{:line 15} [pe "debug/pe"]
+    ^{:line 16} [binary "encoding/binary"]
+    ^{:line 17} [errors "errors"]
+    ^{:line 18} [fmt "fmt"]
+    ^{:line 19} [io "io"]
+    ^{:line 20} [strconv "strconv"]
+    ^{:line 21} [strings "strings"]])
+
+
+(go/const
+  ^{:line 25} [^{:val 0} IMAGE_SYM_UNDEFINED 0]
+  ^{:line 26} [^{:val -1} IMAGE_SYM_ABSOLUTE -1]
+  ^{:line 27} [^{:val -2} IMAGE_SYM_DEBUG -2]
+  ^{:line 28} [^{:val 0} IMAGE_SYM_TYPE_NULL 0]
+  ^{:line 29} [^{:val 1} IMAGE_SYM_TYPE_VOID 1]
+  ^{:line 30} [^{:val 2} IMAGE_SYM_TYPE_CHAR 2]
+  ^{:line 31} [^{:val 3} IMAGE_SYM_TYPE_SHORT 3]
+  ^{:line 32} [^{:val 4} IMAGE_SYM_TYPE_INT 4]
+  ^{:line 33} [^{:val 5} IMAGE_SYM_TYPE_LONG 5]
+  ^{:line 34} [^{:val 6} IMAGE_SYM_TYPE_FLOAT 6]
+  ^{:line 35} [^{:val 7} IMAGE_SYM_TYPE_DOUBLE 7]
+  ^{:line 36} [^{:val 8} IMAGE_SYM_TYPE_STRUCT 8]
+  ^{:line 37} [^{:val 9} IMAGE_SYM_TYPE_UNION 9]
+  ^{:line 38} [^{:val 10} IMAGE_SYM_TYPE_ENUM 10]
+  ^{:line 39} [^{:val 11} IMAGE_SYM_TYPE_MOE 11]
+  ^{:line 40} [^{:val 12} IMAGE_SYM_TYPE_BYTE 12]
+  ^{:line 41} [^{:val 13} IMAGE_SYM_TYPE_WORD 13]
+  ^{:line 42} [^{:val 14} IMAGE_SYM_TYPE_UINT 14]
+  ^{:line 43} [^{:val 15} IMAGE_SYM_TYPE_DWORD 15]
+  ^{:line 44} [^{:val 32768} IMAGE_SYM_TYPE_PCODE 32768]
+  ^{:line 45} [^{:val 0} IMAGE_SYM_DTYPE_NULL 0]
+  ^{:line 46} [^{:val 1} IMAGE_SYM_DTYPE_POINTER 1]
+  ^{:line 47} [^{:val 2} IMAGE_SYM_DTYPE_FUNCTION 2]
+  ^{:line 48} [^{:val 3} IMAGE_SYM_DTYPE_ARRAY 3]
+  ^{:line 49} [^{:val -1} IMAGE_SYM_CLASS_END_OF_FUNCTION -1]
+  ^{:line 50} [^{:val 0} IMAGE_SYM_CLASS_NULL 0]
+  ^{:line 51} [^{:val 1} IMAGE_SYM_CLASS_AUTOMATIC 1]
+  ^{:line 52} [^{:val 2} IMAGE_SYM_CLASS_EXTERNAL 2]
+  ^{:line 53} [^{:val 3} IMAGE_SYM_CLASS_STATIC 3]
+  ^{:line 54} [^{:val 4} IMAGE_SYM_CLASS_REGISTER 4]
+  ^{:line 55} [^{:val 5} IMAGE_SYM_CLASS_EXTERNAL_DEF 5]
+  ^{:line 56} [^{:val 6} IMAGE_SYM_CLASS_LABEL 6]
+  ^{:line 57} [^{:val 7} IMAGE_SYM_CLASS_UNDEFINED_LABEL 7]
+  ^{:line 58} [^{:val 8} IMAGE_SYM_CLASS_MEMBER_OF_STRUCT 8]
+  ^{:line 59} [^{:val 9} IMAGE_SYM_CLASS_ARGUMENT 9]
+  ^{:line 60} [^{:val 10} IMAGE_SYM_CLASS_STRUCT_TAG 10]
+  ^{:line 61} [^{:val 11} IMAGE_SYM_CLASS_MEMBER_OF_UNION 11]
+  ^{:line 62} [^{:val 12} IMAGE_SYM_CLASS_UNION_TAG 12]
+  ^{:line 63} [^{:val 13} IMAGE_SYM_CLASS_TYPE_DEFINITION 13]
+  ^{:line 64} [^{:val 14} IMAGE_SYM_CLASS_UNDEFINED_STATIC 14]
+  ^{:line 65} [^{:val 15} IMAGE_SYM_CLASS_ENUM_TAG 15]
+  ^{:line 66} [^{:val 16} IMAGE_SYM_CLASS_MEMBER_OF_ENUM 16]
+  ^{:line 67} [^{:val 17} IMAGE_SYM_CLASS_REGISTER_PARAM 17]
+  ^{:line 68} [^{:val 18} IMAGE_SYM_CLASS_BIT_FIELD 18]
+  ^{:line 69} [^{:val 68} IMAGE_SYM_CLASS_FAR_EXTERNAL 68] ; /* Not in PECOFF v8 spec */
+  ^{:line 70} [^{:val 100} IMAGE_SYM_CLASS_BLOCK 100]
+  ^{:line 71} [^{:val 101} IMAGE_SYM_CLASS_FUNCTION 101]
+  ^{:line 72} [^{:val 102} IMAGE_SYM_CLASS_END_OF_STRUCT 102]
+  ^{:line 73} [^{:val 103} IMAGE_SYM_CLASS_FILE 103]
+  ^{:line 74} [^{:val 104} IMAGE_SYM_CLASS_SECTION 104]
+  ^{:line 75} [^{:val 105} IMAGE_SYM_CLASS_WEAK_EXTERNAL 105]
+  ^{:line 76} [^{:val 107} IMAGE_SYM_CLASS_CLR_TOKEN 107]
+  ^{:line 77} [^{:val 0} IMAGE_REL_I386_ABSOLUTE 0x0000]
+  ^{:line 78} [^{:val 1} IMAGE_REL_I386_DIR16 0x0001]
+  ^{:line 79} [^{:val 2} IMAGE_REL_I386_REL16 0x0002]
+  ^{:line 80} [^{:val 6} IMAGE_REL_I386_DIR32 0x0006]
+  ^{:line 81} [^{:val 7} IMAGE_REL_I386_DIR32NB 0x0007]
+  ^{:line 82} [^{:val 9} IMAGE_REL_I386_SEG12 0x0009]
+  ^{:line 83} [^{:val 10} IMAGE_REL_I386_SECTION 0x000A]
+  ^{:line 84} [^{:val 11} IMAGE_REL_I386_SECREL 0x000B]
+  ^{:line 85} [^{:val 12} IMAGE_REL_I386_TOKEN 0x000C]
+  ^{:line 86} [^{:val 13} IMAGE_REL_I386_SECREL7 0x000D]
+  ^{:line 87} [^{:val 20} IMAGE_REL_I386_REL32 0x0014]
+  ^{:line 88} [^{:val 0} IMAGE_REL_AMD64_ABSOLUTE 0x0000]
+  ^{:line 89} [^{:val 1} IMAGE_REL_AMD64_ADDR64 0x0001]
+  ^{:line 90} [^{:val 2} IMAGE_REL_AMD64_ADDR32 0x0002]
+  ^{:line 91} [^{:val 3} IMAGE_REL_AMD64_ADDR32NB 0x0003]
+  ^{:line 92} [^{:val 4} IMAGE_REL_AMD64_REL32 0x0004]
+  ^{:line 93} [^{:val 5} IMAGE_REL_AMD64_REL32_1 0x0005]
+  ^{:line 94} [^{:val 6} IMAGE_REL_AMD64_REL32_2 0x0006]
+  ^{:line 95} [^{:val 7} IMAGE_REL_AMD64_REL32_3 0x0007]
+  ^{:line 96} [^{:val 8} IMAGE_REL_AMD64_REL32_4 0x0008]
+  ^{:line 97} [^{:val 9} IMAGE_REL_AMD64_REL32_5 0x0009]
+  ^{:line 98} [^{:val 10} IMAGE_REL_AMD64_SECTION 0x000A]
+  ^{:line 99} [^{:val 11} IMAGE_REL_AMD64_SECREL 0x000B]
+  ^{:line 100} [^{:val 12} IMAGE_REL_AMD64_SECREL7 0x000C]
+  ^{:line 101} [^{:val 13} IMAGE_REL_AMD64_TOKEN 0x000D]
+  ^{:line 102} [^{:val 14} IMAGE_REL_AMD64_SREL32 0x000E]
+  ^{:line 103} [^{:val 15} IMAGE_REL_AMD64_PAIR 0x000F]
+  ^{:line 104} [^{:val 16} IMAGE_REL_AMD64_SSPAN32 0x0010]
+  ^{:line 105} [^{:val 0} IMAGE_REL_ARM_ABSOLUTE 0x0000]
+  ^{:line 106} [^{:val 1} IMAGE_REL_ARM_ADDR32 0x0001]
+  ^{:line 107} [^{:val 2} IMAGE_REL_ARM_ADDR32NB 0x0002]
+  ^{:line 108} [^{:val 3} IMAGE_REL_ARM_BRANCH24 0x0003]
+  ^{:line 109} [^{:val 4} IMAGE_REL_ARM_BRANCH11 0x0004]
+  ^{:line 110} [^{:val 14} IMAGE_REL_ARM_SECTION 0x000E]
+  ^{:line 111} [^{:val 15} IMAGE_REL_ARM_SECREL 0x000F]
+  ^{:line 112} [^{:val 16} IMAGE_REL_ARM_MOV32 0x0010]
+  ^{:line 113} [^{:val 17} IMAGE_REL_THUMB_MOV32 0x0011]
+  ^{:line 114} [^{:val 18} IMAGE_REL_THUMB_BRANCH20 0x0012]
+  ^{:line 115} [^{:val 20} IMAGE_REL_THUMB_BRANCH24 0x0014]
+  ^{:line 116} [^{:val 21} IMAGE_REL_THUMB_BLX23 0x0015]
+  ^{:line 117} [^{:val 22} IMAGE_REL_ARM_PAIR 0x0016]
+  ^{:line 118} [^{:val 0} IMAGE_REL_ARM64_ABSOLUTE 0x0000]
+  ^{:line 119} [^{:val 1} IMAGE_REL_ARM64_ADDR32 0x0001]
+  ^{:line 120} [^{:val 2} IMAGE_REL_ARM64_ADDR32NB 0x0002]
+  ^{:line 121} [^{:val 3} IMAGE_REL_ARM64_BRANCH26 0x0003]
+  ^{:line 122} [^{:val 4} IMAGE_REL_ARM64_PAGEBASE_REL21 0x0004]
+  ^{:line 123} [^{:val 5} IMAGE_REL_ARM64_REL21 0x0005]
+  ^{:line 124} [^{:val 6} IMAGE_REL_ARM64_PAGEOFFSET_12A 0x0006]
+  ^{:line 125} [^{:val 7} IMAGE_REL_ARM64_PAGEOFFSET_12L 0x0007]
+  ^{:line 126} [^{:val 8} IMAGE_REL_ARM64_SECREL 0x0008]
+  ^{:line 127} [^{:val 9} IMAGE_REL_ARM64_SECREL_LOW12A 0x0009]
+  ^{:line 128} [^{:val 10} IMAGE_REL_ARM64_SECREL_HIGH12A 0x000A]
+  ^{:line 129} [^{:val 11} IMAGE_REL_ARM64_SECREL_LOW12L 0x000B]
+  ^{:line 130} [^{:val 12} IMAGE_REL_ARM64_TOKEN 0x000C]
+  ^{:line 131} [^{:val 13} IMAGE_REL_ARM64_SECTION 0x000D]
+  ^{:line 132} [^{:val 14} IMAGE_REL_ARM64_ADDR64 0x000E]
+  ^{:line 133} [^{:val 15} IMAGE_REL_ARM64_BRANCH19 0x000F]
+  ^{:line 134} [^{:val 16} IMAGE_REL_ARM64_BRANCH14 0x0010]
+  ^{:line 135} [^{:val 17} IMAGE_REL_ARM64_REL32 0x0011])
+
+
+(go/const
+
+
+
+
+  ^{:line 143} [^{:val -2 :doc "When stored into the PLT value for a symbol, this token tells\nwindynrelocsym to redirect direct references to this symbol to a stub\nthat loads from the corresponding import symbol and then does\na jump to the loaded value.\n"} CreateImportStubPltToken -2]
+
+
+
+
+  ^{:line 148} [^{:val -2 :doc "When stored into the GOT value for an import symbol __imp_X this\ntoken tells windynrelocsym to redirect references to the\nunderlying DYNIMPORT symbol X.\n"} RedirectToDynImportGotToken -2])
+
+
+;; TODO(brainman): maybe just add ReadAt method to bio.Reader instead of creating peBiobuf
+
+
+(go/type peBiobuf "peBiobuf makes bio.Reader look like io.ReaderAt.\n" bio/Reader)
+
+^{:go/end 166} (go/method ReadAt [^{:tag (* peBiobuf)} f ^{:tag (slice byte)} p ^int64 off] :results [int error]
+  (let [ret (.MustSeek (conv (* bio/Reader) f) off 0)]
+    (when (< ret 0)
+      (return 0 (errors/New "fail to seek")))
+
+    (let [(values n err) ^{:go/via [Reader]} (.Read f p)]
+      (when (!= err nil)
+        (return 0 err))
+
+      (return n nil))))
+
+
+
+
+^{:go/end 176} (go/func makeUpdater "makeUpdater creates a loader.SymbolBuilder if one hasn't been created previously.\nWe use this to lazily make SymbolBuilders as we don't always need a builder, and creating them for all symbols might be an error.\n" ^{:tag (* loader/SymbolBuilder)} [^{:tag (* loader/Loader)} l ^{:tag (* loader/SymbolBuilder)} bld ^loader/Sym s]
+  (when (!= bld nil)
+    (return bld))
+
+  (set! bld (.MakeSymbolUpdater l s))
+  ^{:line 175} bld)
+
+
+
+
+
+(go/type peImportSymsState "peImportSymsState tracks the set of DLL import symbols we've seen\nwhile reading host objects. We create a singleton instance of this\ntype, which will persist across multiple host objects.\n" (struct
+
+
+    ^{:line 184 :tag (slice loader/Sym) :doc "Text and non-text sections read in by the host object loader.\n"} secSyms
+
+
+    ^{:line 187 :tag (* loader/Loader) :doc "Loader and arch, for use in postprocessing.\n"} l
+    ^{:line 188 :tag (* sys/Arch)} arch))
+
+
+(go/var ^{:tag (* peImportSymsState)} importSymsState)
+
+^{:go/end 201} (go/func createImportSymsState [^{:tag (* loader/Loader)} l ^{:tag (* sys/Arch)} arch]
+  (when (!= importSymsState nil)
+    (return))
+
+  (set! importSymsState (addr ^{:go/breaks [2 4]} (lit peImportSymsState
+        :l l
+        :arch arch))))
+
+
+
+
+
+(go/type peLoaderState "peLoaderState holds various bits of useful state information needed\nwhile loading a single PE object file.\n" (struct
+    ^{:line 206 :tag (* loader/Loader)} l
+    ^{:line 207 :tag (* sys/Arch)} arch
+    ^{:line 208 :tag (* pe/File)} f
+    ^{:line 209 :tag string} pn
+    ^{:line 210 :tag (map (* pe/Section) loader/Sym)} sectsyms
+    ^{:line 211 :tag (map uint16 int64)} comdats ; key is section index, val is size
+    ^{:line 212 :tag (map (* pe/Section) (slice byte))} sectdata
+    ^{:line 213 :tag int} localSymVersion))
+
+
+
+
+
+(go/var ^{:tag (map string int64) :doc "comdatDefinitions records the names of symbols for which we've\npreviously seen a definition in COMDAT. Key is symbol name, value\nis symbol size (or -1 if we're using the \"any\" strategy).\n"} comdatDefinitions)
+
+
+(go/type Symbols "Symbols contains the symbols that can be loaded from a PE file.\n" (struct
+    ^{:line 223 :tag (slice loader/Sym)} Textp ; text symbols
+    ^{:line 224 :tag (slice loader/Sym)} Resources ; .rsrc section or set of .rsrc$xx sections
+    ^{:line 225 :tag (slice loader/Sym)} PData
+    ^{:line 226 :tag loader/Sym} XData))
+
+
+
+
+^{:go/end 611} (go/func Load "Load loads the PE file pn from input.\nSymbols from the object file are created via the loader 'l'.\n" [^{:tag (* loader/Loader)} l ^{:tag (* sys/Arch)} arch ^int localSymVersion ^{:tag (* bio/Reader)} input ^string pkg ^int64 length ^string pn] :results [(* Symbols) error]
+  (let [state (addr ^{:go/breaks [2 4 6 8 10 12]} (lit peLoaderState
+          :l l
+          :arch arch
+          :sectsyms (make (map (* pe/Section) loader/Sym))
+          :sectdata (make (map (* pe/Section) (slice byte)))
+          :localSymVersion localSymVersion
+          :pn pn))]
+
+    (createImportSymsState (.-l state) (.-arch state))
+    (when (== comdatDefinitions nil)
+      (set! comdatDefinitions (make (map string int64))))
+
+
+    ;; Some input files are archives containing multiple of
+    ;; object files, and pe.NewFile seeks to the start of
+    ;; input file and get confused. Create section reader
+    ;; to stop pe.NewFile looking before current position.
+    (let [sr (io/NewSectionReader (conv (* peBiobuf) input) (.Offset input) (- (<< 1 63) 1))
+
+        ;; TODO: replace pe.NewFile with pe.Load (grep for "add Load function" in debug/pe for details)
+        (values f err) (pe/NewFile sr)]
+      (when (!= err nil)
+        (return nil err))
+
+      (defer (.Close f))
+      (set! (.-f state) f)
+
+      (let [
+          ^{:line 260 :tag Symbols} ls (zero Symbols)
+          ^{:line 261 :tag loader/Sym} pdata (zero loader/Sym)]
+
+
+        ;; TODO return error if found .cormeta
+
+        ;; create symbols for mapped sections
+        (range [_ sect (.-Sections f)]
+          (when (!= (bit-and ^{:go/via [SectionHeader]} (.-Characteristics sect) pe/IMAGE_SCN_MEM_DISCARDABLE) 0)
+            (continue))
+
+
+          (when (== (bit-and ^{:go/via [SectionHeader]} (.-Characteristics sect) (bit-or pe/IMAGE_SCN_CNT_CODE pe/IMAGE_SCN_CNT_INITIALIZED_DATA pe/IMAGE_SCN_CNT_UNINITIALIZED_DATA)) 0)
+            ;; This has been seen for .idata sections, which we
+            ;; want to ignore. See issues 5106 and 5273.
+            (continue))
+
+
+          (let [name (fmt/Sprintf "%s(%s)" pkg ^{:go/via [SectionHeader]} (.-Name sect))
+              ^{:line 279} s (.LookupOrCreateCgoExport (.-l state) name localSymVersion)
+              ^{:line 280} bld (.MakeSymbolUpdater l s)]
+
+            (switch (bit-and ^{:go/via [SectionHeader]} (.-Characteristics sect) (bit-or pe/IMAGE_SCN_CNT_UNINITIALIZED_DATA pe/IMAGE_SCN_CNT_INITIALIZED_DATA pe/IMAGE_SCN_MEM_READ pe/IMAGE_SCN_MEM_WRITE pe/IMAGE_SCN_CNT_CODE pe/IMAGE_SCN_MEM_EXECUTE))
+              (case [(bit-or pe/IMAGE_SCN_CNT_INITIALIZED_DATA pe/IMAGE_SCN_MEM_READ)] ;.rdata
+                (if (issehsect arch sect) (do
+                    (.SetType bld sym/SSEHSECT)
+                    (.SetAlign bld 4))
+
+                  (.SetType bld sym/SRODATA)))
+
+
+              (case [(bit-or pe/IMAGE_SCN_CNT_UNINITIALIZED_DATA pe/IMAGE_SCN_MEM_READ pe/IMAGE_SCN_MEM_WRITE)] ;.bss
+                (.SetType bld sym/SNOPTRBSS))
+
+              (case [(bit-or pe/IMAGE_SCN_CNT_INITIALIZED_DATA pe/IMAGE_SCN_MEM_READ pe/IMAGE_SCN_MEM_WRITE)] ;.data
+                (.SetType bld sym/SNOPTRDATA))
+
+              (case [(bit-or pe/IMAGE_SCN_CNT_CODE pe/IMAGE_SCN_MEM_EXECUTE pe/IMAGE_SCN_MEM_READ)] ;.text
+                (.SetType bld sym/STEXT))
+
+              (default
+                (return nil (fmt/Errorf "unexpected flags %#06x for PE section %s" ^{:go/via [SectionHeader]} (.-Characteristics sect) ^{:go/via [SectionHeader]} (.-Name sect)))))
+
+
+            (when (!= (.Type bld) sym/SNOPTRBSS)
+              (let [(values data err) (.Data sect)]
+                (when (!= err nil)
+                  (return nil err))
+
+                (aset (.-sectdata state) sect data)
+                (.SetData bld data)))
+
+            (.SetSize bld (conv int64 ^{:go/via [SectionHeader]} (.-Size sect)))
+            (aset (.-sectsyms state) sect s)
+            (cond (or (== ^{:go/via [SectionHeader]} (.-Name sect) ".rsrc") (strings/HasPrefix ^{:go/via [SectionHeader]} (.-Name sect) ".rsrc$"))
+              (set! (.-Resources ls) (append (.-Resources ls) s))
+              (== (.Type bld) sym/SSEHSECT)
+              (cond (== ^{:go/via [SectionHeader]} (.-Name sect) ".pdata")
+                (set! pdata s)
+                (== ^{:go/via [SectionHeader]} (.-Name sect) ".xdata")
+                (set! (.-XData ls) s)))))
+
+
+
+
+        ;; Make a prepass over the symbols to collect info about COMDAT symbols.
+        (when [err (.preprocessSymbols state)] (!= err nil)
+          (return nil err))
+
+
+        ;; load relocations
+        (range [_ rsect (.-Sections f)]
+          (when [(values _ found) (aget (.-sectsyms state) rsect)] (not found)
+            (continue))
+
+          (when (== ^{:go/via [SectionHeader]} (.-NumberOfRelocations rsect) 0)
+            (continue))
+
+          (when (!= (bit-and ^{:go/via [SectionHeader]} (.-Characteristics rsect) pe/IMAGE_SCN_MEM_DISCARDABLE) 0)
+            (continue))
+
+          (when (== (bit-and ^{:go/via [SectionHeader]} (.-Characteristics rsect) (bit-or pe/IMAGE_SCN_CNT_CODE pe/IMAGE_SCN_CNT_INITIALIZED_DATA pe/IMAGE_SCN_CNT_UNINITIALIZED_DATA)) 0)
+            ;; This has been seen for .idata sections, which we
+            ;; want to ignore. See issues 5106 and 5273.
+            (continue))
+
+
+          (let [splitResources (strings/HasPrefix ^{:go/via [SectionHeader]} (.-Name rsect) ".rsrc$")
+              ^{:line 348} issehsect (issehsect arch rsect)
+              ^{:line 349} sb (.MakeSymbolUpdater l (aget (.-sectsyms state) rsect))]
+            (range [j r (.-Relocs rsect)]
+              (when (>= (conv int (.-SymbolTableIndex r)) (len (.-COFFSymbols f)))
+                (return nil (fmt/Errorf "relocation number %d symbol index idx=%d cannot be large then number of symbols %d" j (.-SymbolTableIndex r) (len (.-COFFSymbols f)))))
+
+              (let [pesym (addr (aget (.-COFFSymbols f) (.-SymbolTableIndex r)))
+                  (values _ rSym err) (.readpesym state pesym)]
+                (when (!= err nil)
+                  (return nil err))
+
+                (when (== rSym 0)
+                  (let [(values name err) (.FullName pesym (.-StringTable f))]
+                    (when (!= err nil)
+                      (set! name (conv string (subslice (.-Name pesym)))))
+
+                    (return nil (fmt/Errorf "reloc of invalid sym %s idx=%d type=%d" name (.-SymbolTableIndex r) (.-Type pesym)))))
+
+
+                (let [rSize (conv uint8 4)
+                    ^{:line 368} rOff (conv int32 (.-VirtualAddress r))
+                    ^{:line 369 :tag objabi/RelocType} rType (zero objabi/RelocType)]
+                  (switch (.-Family arch)
+                    (default
+                      (return nil (fmt/Errorf "%s: unsupported arch %v" pn (.-Family arch))))
+                    (case [sys/I386]
+                      (switch (.-Type r)
+                        (case [IMAGE_REL_I386_REL32]
+                          (set! rType objabi/R_PCREL))
+                        (case [IMAGE_REL_I386_DIR32]
+                          (set! rType objabi/R_ADDR))
+                        (case [IMAGE_REL_I386_DIR32NB]
+                          (set! rType objabi/R_PEIMAGEOFF))))
+
+                    (case [sys/AMD64]
+                      (switch (.-Type r)
+                        (case [IMAGE_REL_AMD64_REL32]
+                          (set! rType objabi/R_PCREL))
+                        (case [IMAGE_REL_AMD64_ADDR32]
+                          (set! rType objabi/R_ADDR))
+                        (case [IMAGE_REL_AMD64_ADDR64]
+                          (set! rType objabi/R_ADDR)
+                          (set! rSize 8))
+                        (case [IMAGE_REL_AMD64_ADDR32NB]
+                          (set! rType objabi/R_PEIMAGEOFF))))
+
+                    (case [sys/ARM64]
+                      (switch (.-Type r)
+                        (case [IMAGE_REL_ARM64_ADDR32]
+                          (set! rType objabi/R_ADDR))
+                        (case [IMAGE_REL_ARM64_ADDR64]
+                          (set! rType objabi/R_ADDR)
+                          (set! rSize 8))
+                        (case [IMAGE_REL_ARM64_ADDR32NB]
+                          (set! rType objabi/R_PEIMAGEOFF))
+                        (case [IMAGE_REL_ARM64_BRANCH26]
+                          (set! rType objabi/R_CALLARM64))
+                        (case [IMAGE_REL_ARM64_PAGEBASE_REL21
+                            ^{:line 406} IMAGE_REL_ARM64_PAGEOFFSET_12A
+                            ^{:line 407} IMAGE_REL_ARM64_PAGEOFFSET_12L]
+                          (set! rType objabi/R_ARM64_PCREL)))))
+
+
+                  (when (== rType 0)
+                    (return nil (fmt/Errorf "%s: %v: unknown relocation type %v" pn (aget (.-sectsyms state) rsect) (.-Type r))))
+
+                  (let [^int64 val (zero int64)]
+                    (switch rSize
+                      (default
+                        (panic (+ "unexpected relocation size " (strconv/Itoa (conv int rSize)))))
+                      (case [4]
+                        (set! val (conv int64 (conv int32 (.Uint32 binary/LittleEndian (subslice (aget (.-sectdata state) rsect) rOff))))))
+                      (case [8]
+                        (set! val (conv int64 (.Uint64 binary/LittleEndian (subslice (aget (.-sectdata state) rsect) rOff))))))
+
+                    (let [^int64 rAdd (zero int64)]
+                      (if (== (.-Family arch) sys/ARM64)
+                        (switch (.-Type r)
+                          (case [IMAGE_REL_ARM64_BRANCH26])
+                          ;; This instruction doesn't support an addend.
+                          (case [IMAGE_REL_ARM64_PAGEOFFSET_12A]
+                            ;; The addend is stored in the immediate field of the instruction.
+                            ;; Get the addend from the instruction.
+                            (set! rAdd (bit-and (>> val 10) 0xfff)))
+                          (case [IMAGE_REL_ARM64_PAGEOFFSET_12L]
+                            ;; Same as IMAGE_REL_ARM64_PAGEOFFSET_12A, but taking into account the shift.
+                            (let [shift (>> (conv uint32 val) 30)]
+                              (when (and (== shift 0) (== (bit-and (>> val 20) 0x048) 0x048)) ; 128-bit vector load
+                                (set! shift 4))
+
+                              (set! rAdd (<< (bit-and (>> val 10) 0xfff) shift))))
+                          (case [IMAGE_REL_ARM64_PAGEBASE_REL21]
+                            ;; The addend is stored in the immediate field of the instruction
+                            ;; as a byte offset. Get the addend from the instruction and clear
+                            ;; the immediate bits.
+                            (let [immlo (bit-and (>> val 29) 3)
+                                ^{:line 444} immhi (bit-and (>> val 5) 0x7ffff)]
+                              (set! rAdd (bit-or (<< immhi 2) immlo))))
+                          (default
+                            (set! rAdd val)))
+
+
+                        (set! rAdd val))
+
+                      ;; ld -r could generate multiple section symbols for the
+                      ;; same section but with different values, we have to take
+                      ;; that into account, or in the case of split resources,
+                      ;; the section and its symbols are split into two sections.
+                      (when (or (issect pesym) splitResources)
+                        (set! rAdd + (conv int64 (.-Value pesym))))
+
+                      (when issehsect
+                        ;; .pdata and .xdata sections can contain records
+                        ;; associated to functions that won't be used in
+                        ;; the final binary, in which case the relocation
+                        ;; target symbol won't be reachable.
+                        (set! rType bit-or objabi/R_WEAK))
+
+
+                      (let [(values rel _) (.AddRel sb rType)]
+                        ^{:go/via [Reloc]} (.SetOff rel rOff)
+                        ^{:go/via [Reloc]} (.SetSiz rel rSize)
+                        (.SetSym rel rSym)
+                        ^{:go/via [Reloc]} (.SetAdd rel rAdd)))))))
+
+
+
+            (.SortRelocs sb)))
+
+
+        ;; enter sub-symbols into symbol table.
+        (for [(values i numaux) (values 0 0)] (< i (len (.-COFFSymbols f))) (set! i + (+ numaux 1))
+          (let [pesym (addr (aget (.-COFFSymbols f) i))]
+
+            (set! numaux (conv int (.-NumberOfAuxSymbols pesym)))
+
+            (let [(values name err) (.FullName pesym (.-StringTable f))]
+              (when (!= err nil)
+                (return nil err))
+
+              (when (== name "")
+                (continue))
+
+              (when (issect pesym)
+                (continue))
+
+              (when (> (conv int (.-SectionNumber pesym)) (len (.-Sections f)))
+                (continue))
+
+              (when (== (.-SectionNumber pesym) IMAGE_SYM_DEBUG)
+                (continue))
+
+              (when (and (== (.-SectionNumber pesym) IMAGE_SYM_ABSOLUTE) (bytes/Equal (subslice (.-Name pesym)) (conv (slice byte) "@feat.00")))
+                ;; The PE documentation says that, on x86 platforms, the absolute symbol named @feat.00
+                ;; is used to indicate that the COFF object supports SEH.
+                ;; Go doesn't support SEH on windows/386, so we can ignore this symbol.
+                ;; See https://learn.microsoft.com/en-us/windows/win32/debug/pe-format#the-sxdata-section
+                (continue))
+
+              (let [^{:tag (* pe/Section)} sect (zero (* pe/Section))]
+                (when (> (.-SectionNumber pesym) 0)
+                  (set! sect (aget (.-Sections f) (- (.-SectionNumber pesym) 1)))
+                  (when [(values _ found) (aget (.-sectsyms state) sect)] (not found)
+                    (continue)))
+
+
+
+                (let [(values bld s ^:assign err) (.readpesym state pesym)]
+                  (when (!= err nil)
+                    (return nil err))
+
+
+                  (cond (== (.-SectionNumber pesym) 0) (do ; extern
+                      (when (and (== (.SymType l s) sym/SXREF) (> (.-Value pesym) 0)) ; global data
+                        (set! bld (makeUpdater l bld s))
+                        (.SetType bld sym/SNOPTRDATA)
+                        (.SetSize bld (conv int64 (.-Value pesym))))
+
+
+                      (continue))
+                    (and (> (.-SectionNumber pesym) 0) (<= (conv int (.-SectionNumber pesym)) (len (.-Sections f)))) (do
+                      (set! sect (aget (.-Sections f) (- (.-SectionNumber pesym) 1)))
+                      (when [(values _ found) (aget (.-sectsyms state) sect)] (not found)
+                        (return nil (fmt/Errorf "%s: %v: missing sect.sym" pn s)))) :else
+
+
+                    (return nil (fmt/Errorf "%s: %v: sectnum < 0!" pn s)))
+
+
+                  (when (== sect nil)
+                    (return nil nil))
+
+
+                  ;; Check for COMDAT symbol.
+                  (when [(values sz ok1) (aget (.-comdats state) (conv uint16 (- (.-SectionNumber pesym) 1)))] ok1
+                    (when [(values psz ok2) (aget comdatDefinitions (.SymName l s))] ok2
+                      (when (== sz psz)
+                        ;;  OK to discard, we've seen an instance
+                        ;; already.
+                        (continue))))
+
+
+
+                  (when (!= (.OuterSym l s) 0)
+                    (when (.AttrDuplicateOK l s)
+                      (continue))
+
+                    (let [outerName (.SymName l (.OuterSym l s))
+                        ^{:line 556} sectName (.SymName l (aget (.-sectsyms state) sect))]
+                      (return nil (fmt/Errorf "%s: duplicate symbol reference: %s in both %s and %s" pn (.SymName l s) outerName sectName))))
+
+
+                  (set! bld (makeUpdater l bld s))
+                  (let [sectsym (aget (.-sectsyms state) sect)]
+                    (.SetType bld (.SymType l sectsym))
+                    (.AddInteriorSym l sectsym s)
+                    (.SetValue bld (conv int64 (.-Value pesym)))
+                    (.SetSize bld 4)
+                    (when (.IsText (.SymType l sectsym))
+                      (when (and (.External bld) (not (.DuplicateOK bld)))
+                        (return nil (fmt/Errorf "%s: duplicate symbol definition" (.SymName l s))))
+
+                      (.SetExternal bld true))
+
+                    (when [(values sz ok) (aget (.-comdats state) (conv uint16 (- (.-SectionNumber pesym) 1)))] ok
+                      ;; This is a COMDAT definition. Record that we're picking
+                      ;; this instance so that we can ignore future defs.
+                      (when [(values _ ok) (aget comdatDefinitions (.SymName l s))] ok
+                        (return nil (fmt/Errorf "internal error: preexisting COMDAT definition for %q" name)))
+
+                      (aset comdatDefinitions (.SymName l s) sz))))))))
+
+
+
+        ;; Sort outer lists by address, adding to textp.
+        ;; This keeps textp in increasing address order.
+        (range [_ sect (.-Sections f)]
+          (let [s (aget (.-sectsyms state) sect)]
+            (when (== s 0)
+              (continue))
+
+            (.SortSub l s)
+            (set! (.-secSyms importSymsState) (append (.-secSyms importSymsState) s))
+            (when (.IsText (.SymType l s))
+              (for [] (!= s 0) (set! s (.SubSym l s))
+                (when (.AttrOnList l s)
+                  (return nil (fmt/Errorf "symbol %s listed multiple times" (.SymName l s))))
+
+                (.SetAttrOnList l s true)
+                (set! (.-Textp ls) (append (.-Textp ls) s))))))
+
+
+
+
+        (when (!= pdata 0)
+          (let [(values subs err) (processSEH l arch pdata)]
+            (when (!= err nil)
+              (return nil err))
+
+            (set! (.-PData ls) subs)))
+
+
+        (return (addr ls) nil)))))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 689} (go/func PostProcessImports "PostProcessImports works to resolve inconsistencies with DLL import\nsymbols; it is needed when building with more \"modern\" C compilers\nwith internal linkage.\n\nBackground: DLL import symbols are data (SNOPTRDATA) symbols whose\nname is of the form \"__imp_XXX\", which contain a pointer/reference\nto symbol XXX. It's possible to have import symbols for both data\nsymbols (\"__imp__fmode\") and text symbols (\"__imp_CreateEventA\").\nIn some case import symbols are just references to some external\nthing, and in other cases we see actual definitions of import\nsymbols when reading host objects.\n\nPrevious versions of the linker would in most cases immediately\n\"forward\" import symbol references, e.g. treat a references to\n\"__imp_XXX\" a references to \"XXX\", however this doesn't work well\nwith more modern compilers, where you can sometimes see import\nsymbols that are defs (as opposed to external refs).\n\nThe main actions taken below are to search for references to\nSDYNIMPORT symbols in host object text/data sections and flag the\nsymbols for later fixup. When we see a reference to an import\nsymbol __imp_XYZ where XYZ corresponds to some SDYNIMPORT symbol,\nwe flag the symbol (via GOT setting) so that it can be redirected\nto XYZ later in windynrelocsym. When we see a direct reference to\nan SDYNIMPORT symbol XYZ, we also flag the symbol (via PLT setting)\nto indicated that the reference will need to be redirected to a\nstub.\n" ^error []
+  ^{:go/breaks [5]} (let [ldr (.-l importSymsState)
+      ^{:line 642} arch (.-arch importSymsState)
+      ^{:line 643} keeprelocneeded (make (map loader/Sym loader/Sym))]
+    (range [_ s (.-secSyms importSymsState)]
+      (let [isText (.IsText (.SymType ldr s))
+          ^{:line 646} relocs (.Relocs ldr s)]
+        (for [i 0] (< i (.Count relocs)) (inc! i)
+          (let [r (.At relocs i)
+              ^{:line 649} rs (.Sym r)]
+            (when (== (.SymType ldr rs) sym/SDYNIMPORT)
+              ;; Tag the symbol for later stub generation.
+              (.SetPlt ldr rs CreateImportStubPltToken)
+              (continue))
+
+            (let [(values isym err) (LookupBaseFromImport rs ldr arch)]
+              (when (!= err nil)
+                (return err))
+
+              (when (== isym 0)
+                (continue))
+
+              (when (!= (.SymType ldr isym) sym/SDYNIMPORT)
+                (continue))
+
+              ;; For non-text symbols, forward the reference from __imp_X to
+              ;; X immediately.
+              (when (not isText)
+                (.SetSym r isym)
+                (continue))
+
+              ;; Flag this imp symbol to be processed later in windynrelocsym.
+              (.SetGot ldr rs RedirectToDynImportGotToken)
+              ;; Consistency check: should be no PLT token here.
+              (let [splt (.SymPlt ldr rs)]
+                (when (!= splt -1)
+                  (return (fmt/Errorf "internal error: import symbol %q has invalid PLT setting %d" (.SymName ldr rs) splt)))
+
+                ;; Flag for dummy relocation.
+                (aset keeprelocneeded rs isym)))))))
+
+
+    (range [k v keeprelocneeded]
+      (let [sb (.MakeSymbolUpdater ldr k)
+          (values r _) (.AddRel sb objabi/R_KEEP)]
+        (.SetSym r v)))
+
+    (set! importSymsState nil)
+    nil))
+
+
+^{:go/end 693} (go/func issehsect ^bool [^{:tag (* sys/Arch)} arch ^{:tag (* pe/Section)} s]
+  (and (== (.-Family arch) sys/AMD64) ^:go/paren (or (== ^{:go/via [SectionHeader]} (.-Name s) ".pdata") (== ^{:go/via [SectionHeader]} (.-Name s) ".xdata"))))
+
+
+^{:go/end 697} (go/func issect ^bool [^{:tag (* pe/COFFSymbol)} s]
+  (and (== (.-StorageClass s) IMAGE_SYM_CLASS_STATIC) (== (.-Type s) 0) (== (aget (.-Name s) 0) \.)))
+
+
+^{:go/end 755} (go/method readpesym [^{:tag (* peLoaderState)} state ^{:tag (* pe/COFFSymbol)} pesym] :results [(* loader/SymbolBuilder) loader/Sym error]
+  (let [(values symname err) (.FullName pesym (.-StringTable (.-f state)))]
+    (when (!= err nil)
+      (return nil 0 err))
+
+    (let [^string name (zero string)]
+      (if (issect pesym)
+        (set! name (.SymName (.-l state) (aget (.-sectsyms state) (aget (.-Sections (.-f state)) (- (.-SectionNumber pesym) 1)))))
+        (do
+          (set! name symname)
+          ;; A note on the "_main" exclusion below: the main routine
+          ;; defined by the Go runtime is named "_main", not "main", so
+          ;; when reading references to _main from a host object we want
+          ;; to avoid rewriting "_main" to "main" in this specific
+          ;; instance. See #issuecomment-1143698749 on #35006 for more
+          ;; details on this problem.
+          (when (and (== (.-Family (.-arch state)) sys/I386) (== (aget name 0) \_) (!= name "_main") (not (strings/HasPrefix name "__imp_")))
+            (set! name (subslice name 1))))) ; _Name => Name
+
+
+
+      ;; remove last @XXX
+      (when [i (strings/LastIndex name "@")] (>= i 0)
+        (set! name (subslice name _ i)))
+
+
+      (let [^loader/Sym s (zero loader/Sym)
+          ^{:line 726 :tag (* loader/SymbolBuilder)} bld (zero (* loader/SymbolBuilder))]
+        ;; Microsoft's PE documentation is contradictory. It says that the symbol's complex type
+        ;; is stored in the pesym.Type most significant byte, but MSVC, LLVM, and mingw store it
+        ;; in the 4 high bits of the less significant byte.
+        (switch (>> (conv uint8 (bit-and (.-Type pesym) 0xf0)) 4)
+          (default
+            (return nil 0 (fmt/Errorf "%s: invalid symbol type %d" symname (.-Type pesym))))
+
+          (case [IMAGE_SYM_DTYPE_FUNCTION IMAGE_SYM_DTYPE_NULL]
+            (switch (.-StorageClass pesym)
+              (case [IMAGE_SYM_CLASS_EXTERNAL] ;global
+                (set! s (.LookupOrCreateCgoExport (.-l state) name 0)))
+
+              (case [IMAGE_SYM_CLASS_NULL IMAGE_SYM_CLASS_STATIC IMAGE_SYM_CLASS_LABEL]
+                (set! s (.LookupOrCreateCgoExport (.-l state) name (.-localSymVersion state)))
+                (set! bld (makeUpdater (.-l state) bld s))
+                (.SetDuplicateOK bld true))
+
+              (default
+                (return nil 0 (fmt/Errorf "%s: invalid symbol binding %d" symname (.-StorageClass pesym)))))))
+
+
+
+        (when (and (!= s 0) (== (.SymType (.-l state) s) 0) ^:go/paren (or (!= (.-StorageClass pesym) IMAGE_SYM_CLASS_STATIC) (!= (.-Value pesym) 0)))
+          (set! bld (makeUpdater (.-l state) bld s))
+          (.SetType bld sym/SXREF))
+
+
+        (return bld s nil)))))
+
+
+
+
+
+
+
+
+
+^{:go/breaks [[7 809]] :go/end 810} (go/method preprocessSymbols "preprocessSymbols walks the COFF symbols for the PE file we're\nreading and looks for cases where we have both a symbol definition\nfor \"XXX\" and an \"__imp_XXX\" symbol, recording these cases in a map\nin the state struct. This information will be used in readpesym()\nabove to give such symbols special treatment. This function also\ngathers information about COMDAT sections/symbols for later use\nin readpesym().\n" ^error [^{:tag (* peLoaderState)} state]
+
+  ;; Locate comdat sections.
+  (set! (.-comdats state) (make (map uint16 int64)))
+  (range [i s (.-Sections (.-f state))]
+    (when (!= (bit-and ^{:go/via [SectionHeader]} (.-Characteristics s) (conv uint32 pe/IMAGE_SCN_LNK_COMDAT)) 0)
+      (aset (.-comdats state) (conv uint16 i) (conv int64 ^{:go/via [SectionHeader]} (.-Size s)))))
+
+
+
+  ;; Examine symbol defs.
+  (for [(values i numaux) (values 0 0)] (< i (len (.-COFFSymbols (.-f state)))) (set! i + (+ numaux 1))
+    (let [pesym (addr (aget (.-COFFSymbols (.-f state)) i))]
+      (set! numaux (conv int (.-NumberOfAuxSymbols pesym)))
+      (when (== (.-SectionNumber pesym) 0) ; extern
+        (continue))
+
+      (let [(values symname err) (.FullName pesym (.-StringTable (.-f state)))]
+        (when (!= err nil)
+          (return err))
+
+        (when [(values _ isc) (aget (.-comdats state) (conv uint16 (- (.-SectionNumber pesym) 1)))] (not isc)
+          (continue))
+
+        (when (!= (.-StorageClass pesym) (conv uint8 IMAGE_SYM_CLASS_STATIC))
+          (continue))
+
+        ;; This symbol corresponds to a COMDAT section. Read the
+        ;; aux data for it.
+        (let [(values auxsymp ^:assign err) (.COFFSymbolReadSectionDefAux (.-f state) i)]
+          (when (!= err nil)
+            (return (fmt/Errorf "unable to read aux info for section def symbol %d %s: pe.COFFSymbolReadComdatInfo returns %v" i symname err)))
+
+          (cond (== (.-Selection auxsymp) pe/IMAGE_COMDAT_SELECT_SAME_SIZE) (do)
+            ;; This is supported.
+            (== (.-Selection auxsymp) pe/IMAGE_COMDAT_SELECT_ANY)
+            ;; Also supported.
+            (aset (.-comdats state) (conv uint16 (- (.-SectionNumber pesym) 1)) (conv int64 -1)) :else
+
+            ;; We don't support any of the other strategies at the
+            ;; moment. I suspect that we may need to also support
+            ;; "associative", we'll see.
+            (return (fmt/Errorf "internal error: unsupported COMDAT selection strategy found in path=%s sec=%d strategy=%d idx=%d, please file a bug" (.-pn state) (.-SecNum auxsymp) (.-Selection auxsymp) i)))))))
+
+
+  nil)
+
+
+
+
+
+
+
+^{:go/end 831} (go/func LookupBaseFromImport "LookupBaseFromImport examines the symbol \"s\" to see if it\ncorresponds to an import symbol (name of the form \"__imp_XYZ\") and\nif so, it looks up the underlying target of the import symbol and\nreturns it. An error is returned if the symbol is of the form\n\"__imp_XYZ\" but no XYZ can be found.\n" [^loader/Sym s ^{:tag (* loader/Loader)} ldr ^{:tag (* sys/Arch)} arch] :results [loader/Sym error]
+  (let [sname (.SymName ldr s)]
+    (when (not (strings/HasPrefix sname "__imp_"))
+      (return 0 nil))
+
+    (let [basename (subslice sname (len "__imp_"))]
+      (when (and (== (.-Family arch) sys/I386) (== (aget basename 0) \_))
+        (set! basename (subslice basename 1))) ; _Name => Name
+
+      (let [isym (.Lookup ldr basename 0)]
+        (when (== isym 0)
+          (return 0 (fmt/Errorf "internal error: import symbol %q with no underlying sym" sname)))
+
+        (return isym nil)))))

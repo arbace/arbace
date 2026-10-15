@@ -1,0 +1,430 @@
+;; Copyright 2009 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.cmd.compile.internal.gc) (go/file "main.go" :imports [
+
+
+    ^{:line 8} [bufio "bufio"]
+    ^{:line 9} [bytes "bytes"]
+    ^{:line 10} [base "cmd/compile/internal/base"]
+    ^{:line 11} [bloop "cmd/compile/internal/bloop"]
+    ^{:line 12} [coverage "cmd/compile/internal/coverage"]
+    ^{:line 13} [deadlocals "cmd/compile/internal/deadlocals"]
+    ^{:line 14} [dwarfgen "cmd/compile/internal/dwarfgen"]
+    ^{:line 15} [escape "cmd/compile/internal/escape"]
+    ^{:line 16} [inline "cmd/compile/internal/inline"]
+    ^{:line 17} [interleaved "cmd/compile/internal/inline/interleaved"]
+    ^{:line 18} [ir "cmd/compile/internal/ir"]
+    ^{:line 19} [logopt "cmd/compile/internal/logopt"]
+    ^{:line 20} [loopvar "cmd/compile/internal/loopvar"]
+    ^{:line 21} [noder "cmd/compile/internal/noder"]
+    ^{:line 22} [pgoir "cmd/compile/internal/pgoir"]
+    ^{:line 23} [pkginit "cmd/compile/internal/pkginit"]
+    ^{:line 24} [reflectdata "cmd/compile/internal/reflectdata"]
+    ^{:line 25} [rttype "cmd/compile/internal/rttype"]
+    ^{:line 26} [slice "cmd/compile/internal/slice"]
+    ^{:line 27} [ssa "cmd/compile/internal/ssa"]
+    ^{:line 28} [ssagen "cmd/compile/internal/ssagen"]
+    ^{:line 29} [staticinit "cmd/compile/internal/staticinit"]
+    ^{:line 30} [typecheck "cmd/compile/internal/typecheck"]
+    ^{:line 31} [types "cmd/compile/internal/types"]
+    ^{:line 32} [dwarf "cmd/internal/dwarf"]
+    ^{:line 33} [obj "cmd/internal/obj"]
+    ^{:line 34} [objabi "cmd/internal/objabi"]
+    ^{:line 35} [src "cmd/internal/src"]
+    ^{:line 36} [counter "cmd/internal/telemetry/counter"]
+    ^{:line 37} [flag "flag"]
+    ^{:line 38} [fmt "fmt"]
+    ^{:line 39} [buildcfg "internal/buildcfg"]
+    ^{:line 40} [log "log"]
+    ^{:line 41} [os "os"]
+    ^{:line 42} [runtime "runtime"]])
+
+
+
+
+
+
+^{:go/end 60} (go/func handlePanic "handlePanic ensures that we print out an \"internal compiler error\" for any panic\nor runtime exception during front-end compiler processing (unless there have\nalready been some compiler errors). It may also be invoked from the explicit panic in\nhcrash(), in which case, we pass the panic on through.\n" []
+  (ir/CloseHTMLWriters)
+  (noder/CloseHTMLWriters)
+  (when [err (recover)] (!= err nil)
+    (when (== err "-h")
+      ;; Force real panic now with -h option (hcrash) - the error
+      ;; information will have already been printed.
+      (panic err))
+
+    (base/Fatalf "panic: %v" err)))
+
+
+
+
+
+
+^{:go/end 404} (go/func Main "Main parses flags and Go source files specified in the command-line\narguments, type-checks the parsed Go package, compiles functions to machine\ncode, and finally writes the compiled package definition to disk.\n" [^{:tag (func [(* ssagen/ArchInfo)])} archInit]
+  (.Start base/Timer "fe" "init")
+  (counter/Open)
+  (counter/Inc "compile/invocations")
+
+  (defer (handlePanic))
+
+  (archInit (addr ssagen/Arch))
+
+  (set! base/Ctxt (obj/Linknew (.-LinkArch ssagen/Arch)))
+  (set! (.-DiagFunc base/Ctxt) base/Errorf)
+  (set! (.-DiagFlush base/Ctxt) base/FlushErrors)
+  (set! (.-Bso base/Ctxt) (bufio/NewWriter os/Stdout))
+
+  ;; UseBASEntries is preferred because it shaves about 2% off build time, but LLDB, dsymutil, and dwarfdump
+  ;; on Darwin don't support it properly, especially since macOS 10.14 (Mojave).  This is exposed as a flag
+  ;; to allow testing with LLVM tools on Linux, and to help with reporting this bug to the LLVM project.
+  ;; See bugs 31188 and 21945 (CLs 170638, 98075, 72371).
+  (set! (.-UseBASEntries base/Ctxt) (!= (.-Headtype base/Ctxt) objabi/Hdarwin))
+
+  (set! base/DebugSSA ssa/PhaseOption)
+  (base/ParseFlags)
+
+  (when [flagGCStart (.-GCStart base/Debug)] (or (> flagGCStart 0) ; explicit flags overrides environment variable disable of GC boost
+      (and (== (os/Getenv "GOGC") "") (== (os/Getenv "GOMEMLIMIT") "") (!= (.-LowerC base/Flag) 1))) ; explicit GC knobs or no concurrency implies default heap
+    (let [startHeapMB (conv int64 128)]
+      (when (> flagGCStart 0)
+        (set! startHeapMB (conv int64 flagGCStart)))
+
+      (base/AdjustStartingHeap (<< (conv uint64 startHeapMB) 20) 0 0 0 (== (.-GCAdjust base/Debug) 1))))
+
+
+  (set! types/LocalPkg (types/NewPkg (.-Pkgpath base/Ctxt) ""))
+
+  ;; pseudo-package, for scoping
+  (set! types/BuiltinPkg (types/NewPkg "go.builtin" "")) ; TODO(gri) name this package go.builtin?
+  (set! (.-Prefix types/BuiltinPkg) "go:builtin")
+
+  ;; pseudo-package, accessed by import "unsafe"
+  (set! types/UnsafePkg (types/NewPkg "unsafe" "unsafe"))
+
+  ;; Pseudo-package that contains the compiler's builtin
+  ;; declarations for package runtime. These are declared in a
+  ;; separate package to avoid conflicts with package runtime's
+  ;; actual declarations, which may differ intentionally but
+  ;; insignificantly.
+  (set! (.-Runtime ir/Pkgs) (types/NewPkg "go.runtime" "runtime"))
+  (set! (.-Prefix (.-Runtime ir/Pkgs)) "runtime")
+
+  ;; Pseudo-package that contains the compiler's builtin
+  ;; declarations for maps.
+  (set! (.-InternalMaps ir/Pkgs) (types/NewPkg "go.internal/runtime/maps" "internal/runtime/maps"))
+  (set! (.-Prefix (.-InternalMaps ir/Pkgs)) "internal/runtime/maps")
+
+  ;; pseudo-packages used in symbol tables
+  (set! (.-Itab ir/Pkgs) (types/NewPkg "go.itab" "go.itab"))
+  (set! (.-Prefix (.-Itab ir/Pkgs)) "go:itab")
+
+  ;; pseudo-package used for methods with anonymous receivers
+  (set! (.-Go ir/Pkgs) (types/NewPkg "go" ""))
+
+  ;; pseudo-package for use with code coverage instrumentation.
+  (set! (.-Coverage ir/Pkgs) (types/NewPkg "go.coverage" "runtime/coverage"))
+  (set! (.-Prefix (.-Coverage ir/Pkgs)) "runtime/coverage")
+
+  ;; Record flags that affect the build result. (And don't
+  ;; record flags that don't, since that would cause spurious
+  ;; changes in the binary.)
+  (dwarfgen/RecordFlags "B" "N" "l" "msan" "race" "asan" "shared" "dynlink" "dwarf" "dwarflocationlists" "dwarfbasentries" "smallframes" "spectre")
+
+  (when (and (not base/EnableTrace) (.-LowerT base/Flag))
+    (log/Fatalf "compiler not built with support for -t"))
+
+
+  ;; Enable inlining (after RecordFlags, to avoid recording the rewritten -l).  For now:
+  ;;	default: inlining on.  (Flag.LowerL == 1)
+  ;;	-l: inlining off  (Flag.LowerL == 0)
+  ;;	-l=2, -l=3: inlining on again, with extra debugging (Flag.LowerL > 1)
+  (when (<= (.-LowerL base/Flag) 1)
+    (set! (.-LowerL base/Flag) (- 1 (.-LowerL base/Flag))))
+
+
+  (when (.-SmallFrames base/Flag)
+    (set! ir/MaxStackVarSize (* 64 1024))
+    (set! ir/MaxImplicitStackVarSize (* 16 1024)))
+
+
+  (if (.-Dwarf base/Flag) (do
+      (set! (.-DebugInfo base/Ctxt) dwarfgen/Info)
+      (set! (.-GenAbstractFunc base/Ctxt) dwarfgen/AbstractFunc)
+      (set! (.-DwFixups base/Ctxt) (obj/NewDwarfFixupTable base/Ctxt)))
+    (do
+      ;; turn off inline generation if no dwarf at all
+      (set! (.-GenDwarfInl base/Flag) 0)
+      (set! (.-Flag_locationlists base/Ctxt) false)))
+
+  (when (and (.-Flag_locationlists base/Ctxt) (== (len (.-DWARFRegisters (.-Arch base/Ctxt))) 0))
+    (log/Fatalf "location lists requested but register mapping not available on %v" ^{:go/via [Arch]} (.-Name (.-Arch base/Ctxt))))
+
+
+  (types/ParseLangFlag)
+
+  (let [symABIs (ssagen/NewSymABIs)]
+    (when (!= (.-SymABIs base/Flag) "")
+      (.ReadSymABIs symABIs (.-SymABIs base/Flag)))
+
+
+    (when (.-NoInstrument (objabi/LookupPkgSpecial (.-Pkgpath base/Ctxt)))
+      (set! (.-Race base/Flag) false)
+      (set! (.-MSan base/Flag) false)
+      (set! (.-ASan base/Flag) false))
+
+
+    ((.-Init (.-LinkArch ssagen/Arch)) base/Ctxt)
+    (startProfile)
+    (when (or (.-Race base/Flag) (.-MSan base/Flag) (.-ASan base/Flag))
+      (set! (.-Instrumenting (.-Cfg base/Flag)) true))
+
+    (when (.-Dwarf base/Flag)
+      (dwarf/EnableLogging (!= (.-DwarfInl base/Debug) 0)))
+
+    (when (!= (.-SoftFloat base/Debug) 0)
+      (set! (.-SoftFloat ssagen/Arch) true))
+
+
+    (when (!= (.-JSON base/Flag) "") ; parse version,destination from json logging optimization.
+      (logopt/LogJsonOption (.-JSON base/Flag)))
+
+
+    (set! ir/EscFmt escape/Fmt)
+    (set! ir/IsIntrinsicCall ssagen/IsIntrinsicCall)
+    (set! ir/IsIntrinsicSym ssagen/IsIntrinsicSym)
+    (set! inline/SSADumpInline ssagen/DumpInline)
+    (ssagen/InitEnv)
+
+    (set! types/PtrSize ^{:go/via [Arch]} (.-PtrSize (.-LinkArch ssagen/Arch)))
+    (set! types/RegSize ^{:go/via [Arch]} (.-RegSize (.-LinkArch ssagen/Arch)))
+    (set! types/MaxWidth (.-MAXWIDTH ssagen/Arch))
+
+    (set! typecheck/Target (new ir/Package))
+
+    (set! base/AutogeneratedPos (makePos (src/NewFileBase "<autogenerated>" "<autogenerated>") 1 0))
+
+    (typecheck/InitUniverse)
+    (typecheck/InitRuntime)
+    (rttype/Init)
+
+    ;; Some intrinsics (notably, the simd intrinsics) mention
+    ;; types "eagerly", thus ssagen must be initialized AFTER
+    ;; the type system is ready.
+    (ssagen/InitTables)
+
+    ;; Parse and typecheck input.
+    (noder/LoadPackage (flag/Args))
+
+    ;; As a convenience to users (toolchain maintainers, in particular),
+    ;; when compiling a package named "main", we default the package
+    ;; path to "main" if the -p flag was not specified.
+    (when (and (== (.-Pkgpath base/Ctxt) obj/UnlinkablePkg) (== (.-Name types/LocalPkg) "main"))
+      (set! (.-Pkgpath base/Ctxt) "main")
+      (set! (.-Path types/LocalPkg) "main")
+      (set! (.-Prefix types/LocalPkg) "main"))
+
+
+    (dwarfgen/RecordPackageName)
+
+    ;; Prepare for backend processing.
+    (ssagen/InitConfig)
+
+    ;; Apply coverage fixups, if applicable.
+    (coverage/Fixup)
+
+    ;; Read profile file and build profile-graph and weighted-call-graph.
+    (.Start base/Timer "fe" "pgo-load-profile")
+    (let [^{:tag (* pgoir/Profile)} profile (zero (* pgoir/Profile))]
+      (when (!= (.-PgoProfile base/Flag) "")
+        (let [^error err (zero error)]
+          (set! (values profile err) (pgoir/New (.-PgoProfile base/Flag)))
+          (when (!= err nil)
+            (log/Fatalf "%s: PGO error: %v" (.-PgoProfile base/Flag) err))))
+
+
+
+      (range [_ fn (.-Funcs typecheck/Target)]
+        (when (ir/MatchAstDump fn "start")
+          (ir/AstDump fn (+ "start, " (ir/FuncName fn)))))
+
+
+
+      ;; Apply bloop markings.
+      (bloop/Walk typecheck/Target)
+
+      ;; Interleaved devirtualization and inlining.
+      (.Start base/Timer "fe" "devirtualize-and-inline")
+      (interleaved/DevirtualizeAndInlinePackage typecheck/Target profile)
+
+      (range [_ fn (.-Funcs typecheck/Target)]
+        (when (ir/MatchAstDump fn "devirtualize-and-inline")
+          (ir/AstDump fn (+ "devirtualize-and-inline, " (ir/FuncName fn)))))
+
+
+
+      (noder/MakeWrappers typecheck/Target) ; must happen after inlining
+
+      ;; Get variable capture right in for loops.
+      (let [^{:tag (slice loopvar/VarAndLoop)} transformed (zero (slice loopvar/VarAndLoop))]
+        (range [_ fn (.-Funcs typecheck/Target)]
+          (set! transformed (append transformed (spread (loopvar/ForCapture fn)))))
+
+        (set! ir/CurFunc nil)
+
+        ;; Build init task, if needed.
+        (pkginit/MakeTask)
+
+        ;; Generate ABI wrappers. Must happen before escape analysis
+        ;; and doesn't benefit from dead-coding or inlining.
+        (.GenABIWrappers symABIs)
+
+        (deadlocals/Funcs (.-Funcs typecheck/Target))
+
+        ;; Escape analysis.
+        ;; Required for moving heap allocations onto stack,
+        ;; which in turn is required by the closure implementation,
+        ;; which stores the addresses of stack variables into the closure.
+        ;; If the closure does not escape, it needs to be on the stack
+        ;; or else the stack copier will not update it.
+        ;; Large values are also moved off stack in escape analysis;
+        ;; because large values may contain pointers, it must happen early.
+        (.Start base/Timer "fe" "escapes")
+        (escape/Funcs (.-Funcs typecheck/Target))
+
+        (slice/Funcs (.-Funcs typecheck/Target))
+
+        (loopvar/LogTransformations transformed)
+
+        ;; Collect information for go:nowritebarrierrec
+        ;; checking. This must happen before transforming closures during Walk
+        ;; We'll do the final check after write barriers are
+        ;; inserted.
+        (when (.-CompilingRuntime base/Flag)
+          (ssagen/EnableNoWriteBarrierRecCheck))
+
+
+        (set! ir/CurFunc nil)
+
+        (reflectdata/WriteBasicTypes)
+
+        ;; Compile top-level declarations.
+        ;;
+        ;; There are cyclic dependencies between all of these phases, so we
+        ;; need to iterate all of them until we reach a fixed point.
+        (.Start base/Timer "be" "compilefuncs")
+        (for [(values nextFunc nextExtern) (values 0 0)] _ _
+          (reflectdata/WriteRuntimeTypes)
+
+          (when (< nextExtern (len (.-Externs typecheck/Target)))
+            (switch [n (aget (.-Externs typecheck/Target) nextExtern)] ^{:go/via [miniExpr miniNode]} (.Op n)
+              (case [ir/ONAME]
+                (dumpGlobal n))
+              (case [ir/OLITERAL]
+                (dumpGlobalConst n))
+              (case [ir/OTYPE]
+                (reflectdata/NeedRuntimeType ^{:go/via [miniExpr]} (.Type n))))
+
+            (inc! nextExtern)
+            (continue))
+
+
+          (when (< nextFunc (len (.-Funcs typecheck/Target)))
+            (enqueueFunc (aget (.-Funcs typecheck/Target) nextFunc) symABIs)
+            (inc! nextFunc)
+            (continue))
+
+
+          ;; The SSA backend supports using multiple goroutines, so keep it
+          ;; as late as possible to maximize how much work we can batch and
+          ;; process concurrently.
+          (when (!= (len compilequeue) 0)
+            (compileFunctions profile)
+            (continue))
+
+
+          ;; Finalize DWARF inline routine DIEs, then explicitly turn off
+          ;; further DWARF inlining generation to avoid problems with
+          ;; generated method wrappers.
+          ;;
+          ;; Note: The DWARF fixup code for inlined calls currently doesn't
+          ;; allow multiple invocations, so we intentionally run it just
+          ;; once after everything else. Worst case, some generated
+          ;; functions have slightly larger DWARF DIEs.
+          (when (!= (.-DwFixups base/Ctxt) nil)
+            (.Finalize (.-DwFixups base/Ctxt) (.-Pkgpath base/Ctxt) (!= (.-DwarfInl base/Debug) 0))
+            (set! (.-DwFixups base/Ctxt) nil)
+            (set! (.-GenDwarfInl base/Flag) 0)
+            (continue)) ; may have called reflectdata.TypeLinksym (#62156)
+
+
+          (break))
+
+
+        (.AddEvent base/Timer (conv int64 (len (.-Funcs typecheck/Target))) "funcs")
+
+        (when (.-CompilingRuntime base/Flag)
+          ;; Write barriers are now known. Check the call graph.
+          (ssagen/NoWriteBarrierRecCheck))
+
+
+        ;; Add keep relocations for global maps.
+        (when (!= (.-WrapGlobalMapCtl base/Debug) 1)
+          (staticinit/AddKeepRelocations))
+
+
+        ;; Write object data to disk.
+        (.Start base/Timer "be" "dumpobj")
+        (dumpdata)
+        (.NumberSyms base/Ctxt)
+        (dumpobj)
+        (when (!= (.-AsmHdr base/Flag) "")
+          (dumpasmhdr))
+
+
+        (ssagen/CheckLargeStacks)
+        (typecheck/CheckFuncStack)
+
+        (when (!= (len compilequeue) 0)
+          (base/Fatalf "%d uncompiled functions" (len compilequeue)))
+
+
+        (logopt/FlushLoggedOpts base/Ctxt (.-Pkgpath base/Ctxt))
+        (base/ExitIfErrors)
+
+        (base/FlushErrors)
+        (.Stop base/Timer)
+
+        (when (!= (.-Bench base/Flag) "")
+          (when [err (writebench (.-Bench base/Flag))] (!= err nil)
+            (log/Fatalf "cannot write benchmark data: %v" err)))))))
+
+
+
+
+^{:go/end 427} (go/func writebench ^error [^string filename]
+  (let [(values f err) (os/OpenFile filename (bit-or os/O_WRONLY os/O_CREATE os/O_APPEND) 0666)]
+    (when (!= err nil)
+      (return err))
+
+
+    (let [^bytes/Buffer buf (zero bytes/Buffer)]
+      (fmt/Fprintln (addr buf) "commit:" buildcfg/Version)
+      (fmt/Fprintln (addr buf) "goos:" runtime/GOOS)
+      (fmt/Fprintln (addr buf) "goarch:" runtime/GOARCH)
+      (.Write base/Timer (addr buf) (+ "BenchmarkCompile:" (.-Pkgpath base/Ctxt) ":"))
+
+      (let [(values n ^:assign err) (.Write f (.Bytes buf))]
+        (when (!= err nil)
+          (return err))
+
+        (when (!= n (.Len buf))
+          (panic "bad writer"))
+
+
+        (.Close f)))))
+
+
+^{:go/end 431} (go/func makePos ^src/XPos [^{:tag (* src/PosBase)} b ^uint line ^uint col]
+  (.XPos (.-PosTable base/Ctxt) (src/MakePos b line col)))

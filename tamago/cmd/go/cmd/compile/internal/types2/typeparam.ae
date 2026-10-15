@@ -1,0 +1,163 @@
+;; Copyright 2011 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.cmd.compile.internal.types2) (go/file "typeparam.go" :imports [
+
+    ^{:line 7} [atomic "sync/atomic"]])
+
+
+
+
+(go/var ^{:tag atomic/Uint32 :doc "Note: This is a uint32 rather than a uint64 because the\nrespective 64 bit atomic instructions are not available\non all platforms.\n"} lastID)
+
+
+
+^{:go/end 16} (go/func nextID "nextID returns a value increasing monotonically by 1 with\neach call, starting with 1. It may be called concurrently.\n" ^uint64 [] (conv uint64 (.Add lastID 1)))
+
+
+
+
+
+(go/type TypeParam "A TypeParam represents the type of a type parameter in a generic declaration.\n\nA TypeParam has a name; use the [TypeParam.Obj] method to access\nits [TypeName] object.\n" (struct
+    ^{:line 23 :tag (* Checker)} check ; for lazy type bound completion
+    ^{:line 24 :tag uint64} id ; unique id, for debugging only
+    ^{:line 25 :tag (* TypeName)} obj ; corresponding type name
+    ^{:line 26 :tag int} index ; type parameter index in source order, starting at 0
+    ^{:line 27 :tag Type} bound)) ; any type, but underlying is eventually *Interface for correct programs (see TypeParam.iface)
+
+
+
+
+
+
+
+
+^{:go/end 38} (go/func NewTypeParam "NewTypeParam returns a new TypeParam. Type parameters may be set on a Named\ntype by calling SetTypeParams. Setting a type parameter on more than one type\nwill result in a panic.\n\nThe constraint argument can be nil, and set later via SetConstraint. If the\nconstraint is non-nil, it must be fully defined.\n" ^{:tag (* TypeParam)} [^{:tag (* TypeName)} obj ^Type constraint]
+  (.newTypeParam (conv (* Checker) nil) obj constraint))
+
+
+
+^{:go/end 60} (go/method newTypeParam "check may be nil\n" ^{:tag (* TypeParam)} [^{:tag (* Checker)} check ^{:tag (* TypeName)} obj ^Type constraint]
+  ;; Always increment lastID, even if it is not used.
+  (let [id (nextID)]
+    (when (!= check nil)
+      (inc! (.-nextID check))
+      (set! id (.-nextID check)))
+
+    (let [typ (addr (lit TypeParam :check check :id id :obj obj :index -1 :bound constraint))]
+      (when (== ^{:go/via [object]} (.-typ obj) nil)
+        (set! ^{:go/via [object]} (.-typ obj) typ))
+
+      ;; iface may mutate typ.bound, so we must ensure that iface() is called
+      ;; at least once before the resulting TypeParam escapes.
+      (cond (!= check nil)
+        (.needsCleanup check typ)
+        (!= constraint nil)
+        (.iface typ))
+
+      ^{:line 59} typ)))
+
+
+
+^{:go/end 63} (go/method Obj "Obj returns the type name for the type parameter t.\n" ^{:tag (* TypeName)} [^{:tag (* TypeParam)} t] (.-obj t))
+
+
+
+^{:go/end 69} (go/method Index "Index returns the index of the type param within its param list, or -1 if\nthe type parameter has not yet been bound to a type.\n" ^int [^{:tag (* TypeParam)} t]
+  (.-index t))
+
+
+
+^{:go/end 74} (go/method Constraint "Constraint returns the type constraint specified for t.\n" ^Type [^{:tag (* TypeParam)} t]
+  (.-bound t))
+
+
+
+
+
+
+
+
+^{:go/end 90} (go/method SetConstraint "SetConstraint sets the type constraint for t.\n\nIt must be called by users of NewTypeParam after the bound's underlying is\nfully defined, and before using the type parameter in any way other than to\nform other types. Once SetConstraint returns the receiver, t is safe for\nconcurrent use.\n" [^{:tag (* TypeParam)} t ^Type bound]
+  (when (== bound nil)
+    (panic "nil constraint"))
+
+  (set! (.-bound t) bound)
+  ;; iface may mutate t.bound (if bound is not an interface), so ensure that
+  ;; this is done before returning.
+  (.iface t))
+
+
+
+
+
+
+^{:go/end 98} (go/method Underlying "Underlying returns the [underlying type] of the type parameter t, which is\nthe underlying type of its constraint. This type is always an interface.\n\n[underlying type]: https://go.dev/ref/spec#Underlying_types.\n" ^Type [^{:tag (* TypeParam)} t]
+  (.iface t))
+
+
+^{:go/end 100} (go/method String ^string [^{:tag (* TypeParam)} t] (TypeString t nil))
+
+;; ----------------------------------------------------------------------------
+;; Implementation
+
+^{:go/end 108} (go/method cleanup [^{:tag (* TypeParam)} t]
+  (.iface t)
+  (set! (.-check t) nil))
+
+
+
+^{:go/end 149} (go/method iface "iface returns the constraint interface of t.\n" ^{:tag (* Interface)} [^{:tag (* TypeParam)} t]
+  (let [bound (.-bound t)
+
+      ;; determine constraint interface
+      ^{:line 115 :tag (* Interface)} ityp (zero (* Interface))]
+    (type-switch [u (.Underlying bound)]
+      (case [(* Basic)]
+        (when (not (isValid u))
+          ;; error is reported elsewhere
+          (return (addr emptyInterface))))
+
+      (case [(* Interface)]
+        (when (isTypeParam bound)
+          ;; error is reported in Checker.collectTypeParams
+          (return (addr emptyInterface)))
+
+        (set! ityp u)))
+
+
+    ;; If we don't have an interface, wrap constraint into an implicit interface.
+    (when (== ityp nil)
+      (set! ityp (NewInterfaceType nil (lit (slice Type) bound)))
+      (set! (.-implicit ityp) true)
+      (set! (.-bound t) ityp)) ; update t.bound for next time (optimization)
+
+
+    ;; compute type set if necessary
+    (when (== (.-tset ityp) nil)
+      ;; pos is used for tracing output; start with the type parameter position.
+      (let [pos ^{:go/via [object]} (.-pos (.-obj t))]
+        ;; use the (original or possibly instantiated) type bound position if we have one
+        (when [n (asNamed bound)] (!= n nil)
+          (set! pos ^{:go/via [object]} (.-pos (.-obj n))))
+
+        (computeInterfaceTypeSet (.-check t) pos ityp)))
+
+
+    ^{:line 148} ityp))
+
+
+
+
+
+^{:go/end 156} (go/method is "is calls f with the specific type terms of t's constraint and reports whether\nall calls to f returned true. If there are no specific terms, is\nreturns the result of f(nil).\n" ^bool [^{:tag (* TypeParam)} t ^{:tag (func [(* term)] [bool])} f]
+  (.is (.typeSet (.iface t)) f))
+
+
+
+
+
+
+^{:go/end 164} (go/method typeset "typeset reports whether f(t, y) is true for all (type/underlying type) pairs of the\nspecific type terms of t's constraint.\nIf there are no specific terms, typeset returns f(nil, nil).\nIn any case, typeset is guaranteed to call f at least once.\n" ^bool [^{:tag (* TypeParam)} t ^{:tag (func [^Type t ^Type u] [bool])} f]
+  (.all (.typeSet (.iface t)) f))

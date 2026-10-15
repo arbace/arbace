@@ -1,0 +1,301 @@
+;; Copyright 2009 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.cmd.compile.internal.walk) (go/file "select.go" :imports [
+
+
+    ^{:line 8} [base "cmd/compile/internal/base"]
+    ^{:line 9} [ir "cmd/compile/internal/ir"]
+    ^{:line 10} [typecheck "cmd/compile/internal/typecheck"]
+    ^{:line 11} [types "cmd/compile/internal/types"]
+    ^{:line 12} [src "cmd/internal/src"]])
+
+
+^{:go/end 31} (go/func walkSelect [^{:tag (* ir/SelectStmt)} sel]
+  (let [lno (ir/SetPos sel)]
+    (when ^{:go/via [miniStmt miniNode]} (.Walked sel)
+      (base/Fatalf "double walkSelect"))
+
+    ^{:go/via [miniStmt miniNode]} (.SetWalked sel true)
+
+    (let [init (ir/TakeInit sel)]
+
+      (set! init (append init (spread (walkSelectCases (.-Cases sel)))))
+      (set! (.-Cases sel) nil)
+
+      (set! (.-Compiled sel) init)
+      (walkStmtList (.-Compiled sel))
+
+      (set! base/Pos lno))))
+
+
+^{:go/end 277} (go/func walkSelectCases ^{:tag (slice ir/Node)} [^{:tag (slice (* ir/CommClause))} cases]
+  (let [ncas (len cases)
+      ^{:line 35} sellineno base/Pos]
+
+    ;; optimization: zero-case select
+    (when (== ncas 0)
+      (return (lit (slice ir/Node) (mkcallstmt "block"))))
+
+
+    ;; optimization: one-case select: single op.
+    (when (== ncas 1)
+      (let [cas (aget cases 0)]
+        (ir/SetPos cas)
+        (let [l ^{:go/via [miniStmt]} (.Init cas)]
+          (when (!= (.-Comm cas) nil) ; not default:
+            (let [n (.-Comm cas)]
+              (set! l (append l (spread (ir/TakeInit n))))
+              (switch (.Op n)
+                (default
+                  (base/Fatalf "select %v" (.Op n)))
+
+                (case [ir/OSEND])
+                ;; already ok
+
+                (case [ir/OSELRECV2]
+                  (let [r (assert (* ir/AssignListStmt) n)]
+                    (when (and (ir/IsBlank (aget (.-Lhs r) 0)) (ir/IsBlank (aget (.-Lhs r) 1)))
+                      (set! n (aget (.-Rhs r) 0))
+                      (break))
+
+                    (.SetOp r ir/OAS2RECV))))
+
+
+              (set! l (append l n))))
+
+
+          (set! l (append l (spread (.-Body cas))))
+          (set! l (append l (ir/NewBranchStmt base/Pos ir/OBREAK nil)))
+          (return l))))
+
+
+    ;; convert case value arguments to addresses.
+    ;; this rewrite is used by both the general code and the next optimization.
+    (let [^{:tag (* ir/CommClause)} dflt (zero (* ir/CommClause))]
+      (range [_ cas cases]
+        (ir/SetPos cas)
+        (let [n (.-Comm cas)]
+          (when (== n nil)
+            (set! dflt cas)
+            (continue))
+
+          (switch (.Op n)
+            (case [ir/OSEND]
+              (let [n (assert (* ir/SendStmt) n)]
+                (set! (.-Value n) (typecheck/NodAddr (.-Value n)))
+                (set! (.-Value n) (typecheck/Expr (.-Value n)))))
+
+            (case [ir/OSELRECV2]
+              (let [n (assert (* ir/AssignListStmt) n)]
+                (when (not (ir/IsBlank (aget (.-Lhs n) 0)))
+                  (aset (.-Lhs n) 0 (typecheck/NodAddr (aget (.-Lhs n) 0)))
+                  (aset (.-Lhs n) 0 (typecheck/Expr (aget (.-Lhs n) 0)))))))))
+
+
+
+
+      ;; optimization: two-case select but one is default: single non-blocking op.
+      (when (and (== ncas 2) (!= dflt nil))
+        (let [cas (aget cases 0)]
+          (when (== cas dflt)
+            (set! cas (aget cases 1)))
+
+
+          (let [n (.-Comm cas)]
+            (ir/SetPos n)
+            (let [r (ir/NewIfStmt base/Pos nil nil nil)]
+              ^{:go/via [miniStmt]} (.SetInit r ^{:go/via [miniStmt]} (.Init cas))
+              (let [^ir/Node cond (zero ir/Node)]
+                (switch (.Op n)
+                  (default
+                    (base/Fatalf "select %v" (.Op n)))
+
+                  (case [ir/OSEND]
+                    ;; if selectnbsend(c, v) { body } else { default body }
+                    (let [n (assert (* ir/SendStmt) n)
+                        ^{:line 118} ch (.-Chan n)]
+                      (set! cond (mkcall1 (chanfn "selectnbsend" 2 (.Type ch)) (aget types/Types types/TBOOL) ^{:go/via [miniStmt]} (.PtrInit r) ch (.-Value n)))))
+
+                  (case [ir/OSELRECV2]
+                    (let [n (assert (* ir/AssignListStmt) n)
+                        ^{:line 123} recv (assert (* ir/UnaryExpr) (aget (.-Rhs n) 0))
+                        ^{:line 124} ch (.-X recv)
+                        ^{:line 125} elem (aget (.-Lhs n) 0)]
+                      (when (ir/IsBlank elem)
+                        (set! elem (typecheck/NodNil)))
+
+                      (set! cond (typecheck/TempAt base/Pos ir/CurFunc (aget types/Types types/TBOOL)))
+                      (let [fn (chanfn "selectnbrecv" 2 (.Type ch))
+                          ^{:line 131} call (mkcall1 fn (.ResultsTuple (.Type fn)) ^{:go/via [miniStmt]} (.PtrInit r) elem ch)
+                          ^{:line 132} as (ir/NewAssignListStmt ^{:go/via [miniStmt miniNode]} (.Pos r) ir/OAS2 (lit (slice ir/Node) cond (aget (.-Lhs n) 1)) (lit (slice ir/Node) call))]
+                        (.Append ^{:go/via [miniStmt]} (.PtrInit r) (typecheck/Stmt as))))))
+
+
+                (set! (.-Cond r) (typecheck/Expr cond))
+                (set! (.-Body r) (.-Body cas))
+                (set! (.-Else r) (append ^{:go/via [miniStmt]} (.Init dflt) (spread (.-Body dflt))))
+                (return (lit (slice ir/Node) r (ir/NewBranchStmt base/Pos ir/OBREAK nil))))))))
+
+
+      (when (!= dflt nil)
+        (dec! ncas))
+
+      (let [casorder (make (slice (* ir/CommClause)) ncas)
+          (values nsends nrecvs) (values 0 0)
+
+          ^{:line 148 :tag (slice ir/Node)} init (zero (slice ir/Node))]
+
+        ;; generate sel-struct
+        (set! base/Pos sellineno)
+        (let [selv (typecheck/TempAt base/Pos ir/CurFunc (types/NewArray (scasetype) (conv int64 ncas)))]
+          (set! init (append init (typecheck/Stmt (ir/NewAssignStmt base/Pos selv nil))))
+
+          ;; No initialization for order; runtime.selectgo is responsible for that.
+          (let [order (typecheck/TempAt base/Pos ir/CurFunc (types/NewArray (aget types/Types types/TUINT16) (* 2 (conv int64 ncas))))
+
+              (values ^ir/Node pc0 ^ir/Node pcs) (zero ir/Node)]
+            (if (.-Race base/Flag) (do
+                (set! pcs (typecheck/TempAt base/Pos ir/CurFunc (types/NewArray (aget types/Types types/TUINTPTR) (conv int64 ncas))))
+                (set! pc0 (typecheck/Expr (typecheck/NodAddr (ir/NewIndexExpr base/Pos pcs (ir/NewInt base/Pos 0))))))
+
+              (set! pc0 (typecheck/NodNil)))
+
+
+            ;; register cases
+            (range [_ cas cases]
+              (ir/SetPos cas)
+
+              (set! init (append init (spread (ir/TakeInit cas))))
+
+              (let [n (.-Comm cas)]
+                (when (== n nil) ; default:
+                  (continue))
+
+
+                (let [^int i (zero int)
+                    (values ^ir/Node c ^ir/Node elem) (zero ir/Node)]
+                  (switch (.Op n)
+                    (default
+                      (base/Fatalf "select %v" (.Op n)))
+                    (case [ir/OSEND]
+                      (let [n (assert (* ir/SendStmt) n)]
+                        (set! i nsends)
+                        (inc! nsends)
+                        (set! c (.-Chan n))
+                        (set! elem (.-Value n))))
+                    (case [ir/OSELRECV2]
+                      (let [n (assert (* ir/AssignListStmt) n)]
+                        (inc! nrecvs)
+                        (set! i (- ncas nrecvs))
+                        (let [recv (assert (* ir/UnaryExpr) (aget (.-Rhs n) 0))]
+                          (set! c (.-X recv))
+                          (set! elem (aget (.-Lhs n) 0))))))
+
+
+                  (aset casorder i cas)
+
+                  (let [setField ^{:go/end 202} (fn [^string f ^ir/Node val]
+                        (let [r (ir/NewAssignStmt base/Pos (ir/NewSelectorExpr base/Pos ir/ODOT (ir/NewIndexExpr base/Pos selv (ir/NewInt base/Pos (conv int64 i))) (typecheck/Lookup f)) val)]
+                          (set! init (append init (typecheck/Stmt r)))))]
+
+
+                    (set! c (typecheck/ConvNop c (aget types/Types types/TUNSAFEPTR)))
+                    (setField "c" c)
+                    (when (not (ir/IsBlank elem))
+                      (set! elem (typecheck/ConvNop elem (aget types/Types types/TUNSAFEPTR)))
+                      (setField "elem" elem))
+
+
+                    ;; TODO(mdempsky): There should be a cleaner way to
+                    ;; handle this.
+                    (when (.-Race base/Flag)
+                      (let [r (mkcallstmt "selectsetpc" (typecheck/NodAddr (ir/NewIndexExpr base/Pos pcs (ir/NewInt base/Pos (conv int64 i)))))]
+                        (set! init (append init r))))))))
+
+
+            (when (!= (+ nsends nrecvs) ncas)
+              (base/Fatalf "walkSelectCases: miscount: %v + %v != %v" nsends nrecvs ncas))
+
+
+            ;; run the select
+            (set! base/Pos sellineno)
+            (let [chosen (typecheck/TempAt base/Pos ir/CurFunc (aget types/Types types/TINT))
+                ^{:line 225} recvOK (typecheck/TempAt base/Pos ir/CurFunc (aget types/Types types/TBOOL))
+                ^{:line 226} r (ir/NewAssignListStmt base/Pos ir/OAS2 nil nil)]
+              (set! (.-Lhs r) (lit (slice ir/Node) chosen recvOK))
+              (let [fn (typecheck/LookupRuntime "selectgo")
+                  ^{:line 229 :tag ir/Nodes} fnInit (zero ir/Nodes)]
+                (set! (.-Rhs r) (lit (slice ir/Node) (mkcall1 fn (.ResultsTuple ^{:go/via [miniExpr]} (.Type fn)) (addr fnInit) (bytePtrToIndex selv 0) (bytePtrToIndex order 0) pc0 (ir/NewInt base/Pos (conv int64 nsends)) (ir/NewInt base/Pos (conv int64 nrecvs)) (ir/NewBool base/Pos (== dflt nil)))))
+                (set! init (append init (spread fnInit)))
+                (set! init (append init (typecheck/Stmt r)))
+
+                ;; selv, order, and pcs (if race) are no longer alive after selectgo.
+
+                ;; dispatch cases
+                (let [dispatch ^{:go/end 261} (fn [^ir/Node cond ^{:tag (* ir/CommClause)} cas]
+                      (let [^ir/Nodes list (zero ir/Nodes)]
+
+                        (when [n (.-Comm cas)] (and (!= n nil) (== (.Op n) ir/OSELRECV2))
+                          (let [n (assert (* ir/AssignListStmt) n)]
+                            (when (not (ir/IsBlank (aget (.-Lhs n) 1)))
+                              (let [x (ir/NewAssignStmt base/Pos (aget (.-Lhs n) 1) recvOK)]
+                                (.Append list (typecheck/Stmt x))))))
+
+
+
+                        (.Append list (spread (.Take (.-Body cas))))
+                        (.Append list (ir/NewBranchStmt base/Pos ir/OBREAK nil))
+
+                        (let [^ir/Node r (zero ir/Node)]
+                          (if (!= cond nil) (do
+                              (set! cond (typecheck/Expr cond))
+                              (set! cond (typecheck/DefaultLit cond nil))
+                              (set! r (ir/NewIfStmt base/Pos cond list nil)))
+
+                            (set! r (ir/NewBlockStmt base/Pos list)))
+
+
+                          (set! init (append init r)))))]
+
+
+                  (when (!= dflt nil)
+                    (ir/SetPos dflt)
+                    (dispatch (ir/NewBinaryExpr base/Pos ir/OLT chosen (ir/NewInt base/Pos 0)) dflt))
+
+                  (range [i cas casorder]
+                    (ir/SetPos cas)
+                    (when (== i (- (len casorder) 1))
+                      (dispatch nil cas)
+                      (break))
+
+                    (dispatch (ir/NewBinaryExpr base/Pos ir/OEQ chosen (ir/NewInt base/Pos (conv int64 i))) cas))
+
+
+                  ^{:line 276} init)))))))))
+
+
+
+^{:go/end 284} (go/func bytePtrToIndex "bytePtrToIndex returns a Node representing \"(*byte)(&n[i])\".\n" ^ir/Node [^ir/Node n ^int64 i]
+  (let [s (typecheck/NodAddr (ir/NewIndexExpr base/Pos n (ir/NewInt base/Pos i)))
+      ^{:line 282} t (types/NewPtr (aget types/Types types/TUINT8))]
+    (typecheck/ConvNop s t)))
+
+
+(go/var ^{:tag (* types/Type)} scase)
+
+
+^{:go/end 302} (go/func scasetype "Keep in sync with src/runtime/select.go.\n" ^{:tag (* types/Type)} []
+  (when (== scase nil)
+    (let [n (ir/NewDeclNameAt src/NoXPos ir/OTYPE (.Lookup (.-Runtime ir/Pkgs) "scase"))]
+      (set! scase (types/NewNamed n))
+      ^{:go/via [miniExpr]} (.SetType n scase)
+      ^{:go/via [miniExpr miniNode]} (.SetTypecheck n 1)
+
+      (.SetUnderlying scase (types/NewStruct (lit (slice (* types/Field))
+            (types/NewField base/Pos (typecheck/Lookup "c") (aget types/Types types/TUNSAFEPTR))
+            (types/NewField base/Pos (typecheck/Lookup "elem") (aget types/Types types/TUNSAFEPTR)))))))
+
+
+  ^{:line 301} scase)

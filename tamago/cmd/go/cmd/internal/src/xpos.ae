@@ -1,0 +1,192 @@
+;; Copyright 2016 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; This file implements the compressed encoding of source
+;; positions using a lookup table.
+
+(in-ns 'go.cmd.internal.src) (go/file "xpos.go" :imports [
+
+    ^{:line 10} [fmt "fmt"]])
+
+
+(go/type XPos "XPos is a more compact representation of Pos.\n" (struct
+    ^{:line 14 :tag int32} index
+    ^{:line 15} lico))
+
+
+
+(go/var ^{:tag XPos :doc "NoXPos is a valid unknown position.\n"} NoXPos)
+
+
+
+
+^{:go/end 26} (go/method IsKnown "IsKnown reports whether the position p is known.\nXPos.IsKnown() matches Pos.IsKnown() for corresponding\npositions.\n" ^bool [^XPos p]
+  (or (!= (.-index p) 0) (!= ^{:go/via [lico]} (.Line p) 0)))
+
+
+
+
+^{:go/end 33} (go/method Before "Before reports whether the position p comes before q in the source.\nFor positions with different bases, ordering is by base index.\n" ^bool [^XPos p ^XPos q]
+  (let [(values n m) (values (.-index p) (.-index q))]
+    (or (< n m) (and (== n m) (< (.-lico p) (.-lico q))))))
+
+
+
+^{:go/end 38} (go/method SameFile "SameFile reports whether p and q are positions in the same file.\n" ^bool [^XPos p ^XPos q]
+  (== (.-index p) (.-index q)))
+
+
+
+^{:go/end 43} (go/method SameFileAndLine "SameFileAndLine reports whether p and q are positions on the same line in the same file.\n" ^bool [^XPos p ^XPos q]
+  (and (== (.-index p) (.-index q)) (.SameLine (.-lico p) (.-lico q))))
+
+
+
+
+^{:go/end 50} (go/method After "After reports whether the position p comes after q in the source.\nFor positions with different bases, ordering is by base index.\n" ^bool [^XPos p ^XPos q]
+  (let [(values n m) (values (.-index p) (.-index q))]
+    (or (> n m) (and (== n m) (> (.-lico p) (.-lico q))))))
+
+
+
+^{:go/end 56} (go/method WithNotStmt "WithNotStmt returns the same location to be marked with DWARF is_stmt=0\n" ^XPos [^XPos p]
+  (set! (.-lico p) (.withNotStmt (.-lico p)))
+  ^{:line 55} p)
+
+
+
+^{:go/end 62} (go/method WithDefaultStmt "WithDefaultStmt returns the same location with undetermined is_stmt\n" ^XPos [^XPos p]
+  (set! (.-lico p) (.withDefaultStmt (.-lico p)))
+  ^{:line 61} p)
+
+
+
+^{:go/end 68} (go/method WithIsStmt "WithIsStmt returns the same location to be marked with DWARF is_stmt=1\n" ^XPos [^XPos p]
+  (set! (.-lico p) (.withIsStmt (.-lico p)))
+  ^{:line 67} p)
+
+
+
+
+
+
+
+^{:go/end 82} (go/method WithBogusLine "WithBogusLine returns a bogus line that won't match any recorded for the source code.\nIts use is to disrupt the statements within an infinite loop so that the debugger\nwill not itself loop infinitely waiting for the line number to change.\ngdb chooses not to display the bogus line; delve shows it with a complaint, but the\nalternative behavior is to hang.\n" ^XPos [^XPos p]
+  (when (== (.-index p) 0)
+    ;; See #35652
+    (panic "Assigning a bogus line to XPos with no file will cause mysterious downstream failures."))
+
+  (set! (.-lico p) (makeBogusLico))
+  ^{:line 81} p)
+
+
+
+^{:go/end 88} (go/method WithXlogue "WithXlogue returns the same location but marked with DWARF function prologue/epilogue\n" ^XPos [^XPos p ^PosXlogue x]
+  (set! (.-lico p) (.withXlogue (.-lico p) x))
+  ^{:line 87} p)
+
+
+
+^{:go/end 96} (go/method LineNumber "LineNumber returns a string for the line number, \"?\" if it is not known.\n" ^string [^XPos p]
+  (when (not (.IsKnown p))
+    (return "?"))
+
+  (.lineNumber (.-lico p)))
+
+
+
+^{:go/end 104} (go/method ColumnNumber "ColumnNumber returns a string for the column number, \"?\" if it is not known.\n" ^string [^XPos p]
+  (when (not (.IsKnown p))
+    (return "?"))
+
+  (fmt/Sprintf "%d" (.Col (.-lico p))))
+
+
+
+
+
+^{:go/end 111} (go/method FileIndex "FileIndex returns a smallish non-negative integer corresponding to the\nfile for this source position.  Smallish is relative; it can be thousands\nlarge, but not millions.\n" ^int32 [^XPos p]
+  (.-index p))
+
+
+^{:go/end 118} (go/method LineNumberHTML ^string [^XPos p]
+  (when (not (.IsKnown p))
+    (return "?"))
+
+  (.lineNumberHTML (.-lico p)))
+
+
+
+^{:go/end 124} (go/method AtColumn1 "AtColumn1 returns the same location but shifted to column 1.\n" ^XPos [^XPos p]
+  (set! (.-lico p) (.atColumn1 (.-lico p)))
+  ^{:line 123} p)
+
+
+
+
+(go/type PosTable "A PosTable tracks Pos -> XPos conversions and vice versa.\nIts zero value is a ready-to-use PosTable.\n" (struct
+    ^{:line 129 :tag (slice (* PosBase))} baseList
+    ^{:line 130 :tag (map (* PosBase) int)} indexMap
+    ^{:line 131 :tag (map string int)} nameMap)) ; Maps file symbol name to index for debug information.
+
+
+
+
+^{:go/end 138} (go/method XPos "XPos returns the corresponding XPos for the given pos,\nadding pos to t if necessary.\n" ^XPos [^{:tag (* PosTable)} t ^Pos pos]
+  (lit XPos (.baseIndex t (.-base pos)) (.-lico pos)))
+
+
+^{:go/end 171} (go/method baseIndex ^int32 [^{:tag (* PosTable)} t ^{:tag (* PosBase)} base]
+  (when (== base nil)
+    (return 0))
+
+
+  (when [(values i ok) (aget (.-indexMap t) base)] ok
+    (return (conv int32 i)))
+
+
+  (when (>= (.-fileIndex base) 0)
+    (panic "PosBase already registered with a PosTable"))
+
+
+  (when (== (.-indexMap t) nil)
+    (set! (.-baseList t) (append (.-baseList t) nil))
+    (set! (.-indexMap t) (make (map (* PosBase) int)))
+    (set! (.-nameMap t) (make (map string int))))
+
+
+  (let [i (len (.-baseList t))]
+    (aset (.-indexMap t) base i)
+    (set! (.-baseList t) (append (.-baseList t) base))
+
+    (let [(values fileIndex ok) (aget (.-nameMap t) (.-absFilename base))]
+      (when (not ok)
+        (set! fileIndex (len (.-nameMap t)))
+        (aset (.-nameMap t) (.-absFilename base) fileIndex))
+
+      (set! (.-fileIndex base) fileIndex)
+
+      (conv int32 i))))
+
+
+
+
+^{:go/end 181} (go/method Pos "Pos returns the corresponding Pos for the given p.\nIf p cannot be translated via t, the function panics.\n" ^Pos [^{:tag (* PosTable)} t ^XPos p]
+  (let [^{:tag (* PosBase)} base (zero (* PosBase))]
+    (when (!= (.-index p) 0)
+      (set! base (aget (.-baseList t) (.-index p))))
+
+    (lit Pos base (.-lico p))))
+
+
+
+^{:go/end 193} (go/method FileTable "FileTable returns a slice of all files used to build this package.\n" ^{:tag (slice string)} [^{:tag (* PosTable)} t]
+  ;; Create a LUT of the global package level file indices. This table is what
+  ;; is written in the debug_lines header, the file[N] will be referenced as
+  ;; N+1 in the debug_lines table.
+  (let [fileLUT (make (slice string) (len (.-nameMap t)))]
+    (range [str i (.-nameMap t)]
+      (aset fileLUT i str))
+
+    ^{:line 192} fileLUT))

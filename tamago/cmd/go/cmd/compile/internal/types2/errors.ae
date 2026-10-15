@@ -1,0 +1,255 @@
+;; Copyright 2012 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; This file implements error reporting.
+
+(in-ns 'go.cmd.compile.internal.types2) (go/file "errors.go" :imports [
+
+
+    ^{:line 10} [syntax "cmd/compile/internal/syntax"]
+    ^{:line 11} [fmt "fmt"]
+    ^{:line 12} [. "internal/types/errors"]
+    ^{:line 13} [runtime "runtime"]
+    ^{:line 14} [strings "strings"]])
+
+
+^{:go/end 27} (go/func assert [^bool p]
+  (when (not p)
+    (let [msg "assertion failed"]
+      ;; Include information about the assertion location. Due to panic recovery,
+      ;; this location is otherwise buried in the middle of the panicking stack.
+      (when [(values _ file line ok) (runtime/Caller 1)] ok
+        (set! msg (fmt/Sprintf "%s:%d: %s" file line msg)))
+
+      (panic msg))))
+
+
+
+
+(go/type errorDesc "An errorDesc describes part of a type-checking error.\n" (struct
+    ^{:line 31 :tag syntax/Pos} pos
+    ^{:line 32 :tag string} msg))
+
+
+
+
+
+(go/type error_ "An error_ represents a type-checking error.\nA new error_ is created with Checker.newError.\nTo report an error_, call error_.report.\n" (struct
+    ^{:line 39 :tag (* Checker)} check
+    ^{:line 40 :tag (slice errorDesc)} desc
+    ^{:line 41 :tag Code} code
+    ^{:line 42 :tag bool} soft)) ; TODO(gri) eventually determine this from an error code
+
+
+
+^{:go/end 51} (go/method newError "newError returns a new error_ with the given error code.\n" ^{:tag (* error_)} [^{:tag (* Checker)} check ^Code code]
+  (when (== code 0)
+    (panic "error code must not be 0"))
+
+  (addr (lit error_ :check check :code code)))
+
+
+
+
+
+
+
+
+^{:go/end 61} (go/method addf "addf adds formatted error information to err.\nIt may be called multiple times to provide additional information.\nThe position of the first call to addf determines the position of the reported Error.\nSubsequent calls to addf provide additional information in the form of additional lines\nin the error message (types2) or continuation errors identified by a tab-indented error\nmessage (go/types).\n" [^{:tag (* error_)} err ^poser at ^string format & ^{:tag (slice any)} args]
+  (set! (.-desc err) (append (.-desc err) (lit errorDesc (atPos at) (.sprintf (.-check err) format (spread args))))))
+
+
+
+^{:go/end 71} (go/method addAltDecl "addAltDecl is a specialized form of addf reporting another declaration of obj.\n" [^{:tag (* error_)} err ^Object obj]
+  (when [pos (.Pos obj)] (.IsKnown pos)
+    ;; We use "other" rather than "previous" here because
+    ;; the first declaration seen may not be textually
+    ;; earlier in the source.
+    (.addf err obj "other declaration of %s" (.Name obj))))
+
+
+
+^{:go/end 75} (go/method empty ^bool [^{:tag (* error_)} err]
+  (== (.-desc err) nil))
+
+
+^{:go/end 82} (go/method pos ^syntax/Pos [^{:tag (* error_)} err]
+  (when (.empty err)
+    (return nopos))
+
+  (.-pos (aget (.-desc err) 0)))
+
+
+
+^{:go/end 102} (go/method msg "msg returns the formatted error message without the primary error position pos().\n" ^string [^{:tag (* error_)} err]
+  (when (.empty err)
+    (return "no error"))
+
+
+  (let [^strings/Builder buf (zero strings/Builder)]
+    (range [i (.-desc err)]
+      (let [p (addr (aget (.-desc err) i))]
+        (when (> i 0)
+          (fmt/Fprint (addr buf) "\n\t")
+          (when (.IsKnown (.-pos p))
+            (fmt/Fprintf (addr buf) "%s: " (.-pos p))))
+
+
+        (.WriteString buf (.-msg p))))
+
+    (.String buf)))
+
+
+
+^{:go/end 152} (go/method report "report reports the error err, setting check.firstError if necessary.\n" [^{:tag (* error_)} err]
+  (when (.empty err)
+    (panic "no error"))
+
+
+  ;; Cheap trick: Don't report errors with messages containing
+  ;; "invalid operand" or "invalid type" as those tend to be
+  ;; follow-on errors which don't add useful information. Only
+  ;; exclude them if these strings are not at the beginning,
+  ;; and only if we have at least one error already reported.
+  (let [check (.-check err)]
+    (when (!= (.-firstErr check) nil)
+      ;; It is sufficient to look at the first sub-error only.
+      (let [msg (.-msg (aget (.-desc err) 0))]
+        (when (or (> (strings/Index msg "invalid operand") 0) (> (strings/Index msg "invalid type") 0))
+          (return))))
+
+
+
+    (when (.-Trace (.-conf check))
+      (.trace check (.pos err) "ERROR: %s (code = %d)" (.-msg (aget (.-desc err) 0)) (.-code err)))
+
+
+    ;; In go/types, if there is a sub-error with a valid position,
+    ;; call the typechecker error handler for each sub-error.
+    ;; Otherwise, call it once, with a single combined message.
+    (let [multiError false]
+      (when (not isTypes2)
+        (for [i 1] (< i (len (.-desc err))) (inc! i)
+          (when (.IsKnown (.-pos (aget (.-desc err) i)))
+            (set! multiError true)
+            (break))))
+
+
+
+
+      (if multiError
+        (range [i (.-desc err)]
+          (let [p (addr (aget (.-desc err) i))]
+            (.handleError check i (.-pos p) (.-code err) (.-msg p) (.-soft err))))
+
+
+        (.handleError check 0 (.pos err) (.-code err) (.msg err) (.-soft err)))
+
+
+      ;; make sure the error is not reported twice
+      (set! (.-desc err) nil))))
+
+
+
+^{:go/end 207} (go/method handleError "handleError should only be called by error_.report.\n" [^{:tag (* Checker)} check ^int index ^syntax/Pos pos ^Code code ^string msg ^bool soft]
+  (go/call assert (!= code 0))
+
+  (if (== index 0) (do
+      ;; If we are encountering an error while evaluating an inherited
+      ;; constant initialization expression, pos is the position of
+      ;; the original expression, and not of the currently declared
+      ;; constant identifier. Use the provided errpos instead.
+      ;; TODO(gri) We may also want to augment the error message and
+      ;; refer to the position (pos) in the original expression.
+      (when (.IsKnown (.Pos ^{:go/via [environment]} (.-errpos check)))
+        (go/call assert (!= ^{:go/via [environment]} (.-iota check) nil))
+        (set! pos ^{:go/via [environment]} (.-errpos check)))
+
+
+      ;; Report invalid syntax trees explicitly.
+      (when (== code InvalidSyntaxTree)
+        (set! msg (+ "invalid syntax tree: " msg)))
+
+
+      ;; If we have a URL for error codes, add a link to the first line.
+      (when (!= (.-ErrorURL (.-conf check)) "")
+        (let [url (fmt/Sprintf (.-ErrorURL (.-conf check)) code)]
+          (if [i (strings/Index msg "\n")] (>= i 0)
+            (set! msg (+ (subslice msg _ i) url (subslice msg i)))
+
+            (set! msg + url)))))
+
+
+
+    ;; Indent sub-error.
+    ;; Position information is passed explicitly to Error, below.
+    (set! msg (+ "\t" msg)))
+
+
+  (let [e ^{:go/breaks [2 4 6 8 10]} (lit Error
+        :Pos pos
+        :Msg (stripAnnotations msg)
+        :Full msg
+        :Soft soft
+        :Code code)]
+
+
+    (when (== (.-firstErr check) nil)
+      (set! (.-firstErr check) e))
+
+
+    (let [f (.-Error (.-conf check))]
+      (when (== f nil)
+        (panic (lit bailout))) ; record first error and exit
+
+      (f e))))
+
+
+(go/const
+  ^{:line 210} [^{:val "invalid argument: "} invalidArg "invalid argument: "]
+  ^{:line 211} [^{:val "invalid operation: "} invalidOp "invalid operation: "])
+
+
+
+(go/type poser "The poser interface is used to extract the position of type-checker errors.\n" (interface
+    (Pos ^syntax/Pos [])))
+
+
+^{:go/end 223} (go/method error [^{:tag (* Checker)} check ^poser at ^Code code ^string msg]
+  (let [err (.newError check code)]
+    (.addf err at "%s" msg)
+    (.report err)))
+
+
+^{:go/end 229} (go/method errorf [^{:tag (* Checker)} check ^poser at ^Code code ^string format & ^{:tag (slice any)} args]
+  (let [err (.newError check code)]
+    (.addf err at format (spread args))
+    (.report err)))
+
+
+^{:go/end 236} (go/method softErrorf [^{:tag (* Checker)} check ^poser at ^Code code ^string format & ^{:tag (slice any)} args]
+  (let [err (.newError check code)]
+    (.addf err at format (spread args))
+    (set! (.-soft err) true)
+    (.report err)))
+
+
+^{:go/end 243} (go/method versionErrorf [^{:tag (* Checker)} check ^poser at ^goVersion v ^string format & ^{:tag (slice any)} args]
+  (let [msg (.sprintf check format (spread args))
+      ^{:line 240} err (.newError check UnsupportedFeature)]
+    (.addf err at "%s requires %s or later" msg v)
+    (.report err)))
+
+
+
+^{:go/end 256} (go/func atPos "atPos reports the left (= start) position of at.\n" ^syntax/Pos [^poser at]
+  (type-switch [x at]
+    (case [(* operand)]
+      (when (!= (.-expr x) nil)
+        (return (syntax/StartPos (.-expr x)))))
+
+    (case [syntax/Node]
+      (return (syntax/StartPos x))))
+
+  (.Pos at))

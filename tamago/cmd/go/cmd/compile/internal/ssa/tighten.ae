@@ -1,0 +1,273 @@
+;; Copyright 2015 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.cmd.compile.internal.ssa) (go/file "tighten.go" :imports [
+
+    ^{:line 7} [base "cmd/compile/internal/base"]])
+
+
+
+
+
+
+^{:go/end 176} (go/func tighten "tighten moves Values closer to the Blocks in which they are used.\nThis can reduce the amount of register spilling required,\nif it doesn't also create more live values.\nA Value can be moved to any block that\ndominates all blocks in which it is used.\n" [^{:tag (* Func)} f]
+  (when (and (!= (.-N base/Flag) 0) (< (len (.-Blocks f)) 10000))
+    ;; Skip the optimization in -N mode, except for huge functions.
+    ;; Too many values live across blocks can cause pathological
+    ;; behavior in the register allocator (see issue 52180).
+    (return))
+
+
+  (let [canMove (.allocBoolSlice (.-Cache f) (.NumValues f))]
+    (defer (.freeBoolSlice (.-Cache f) canMove))
+
+    ;; Compute the memory states of each block.
+    (let [startMem (.allocValueSlice (.-Cache f) (.NumBlocks f))]
+      (defer (.freeValueSlice (.-Cache f) startMem))
+      (let [endMem (.allocValueSlice (.-Cache f) (.NumBlocks f))]
+        (defer (.freeValueSlice (.-Cache f) endMem))
+        (let [distinctArgs (.newSparseSet f (.NumValues f))]
+          (defer (.retSparseSet f distinctArgs))
+          (memState f startMem endMem)
+
+          (range [_ b (.-Blocks f)]
+            (range [_ v (.-Values b)]
+              (when (.isLoweredGetClosurePtr (.-Op v))
+                ;; Must stay in the entry block.
+                (continue))
+
+              (switch (.-Op v)
+                (case [OpPhi OpArg OpArgIntReg OpArgFloatReg OpSelect0 OpSelect1 OpSelectN]
+                  ;; Phis need to stay in their block.
+                  ;; Arg must stay in the entry block.
+                  ;; Tuple selectors must stay with the tuple generator.
+                  ;; SelectN is typically, ultimately, a register.
+                  (continue)))
+
+              (when (.-nilCheck (aget opcodeTable (.-Op v)))
+                ;; Nil checks need to stay in their block. See issue 72860.
+                (continue))
+
+              ;; Count distinct arguments which will need a register.
+              (.clear distinctArgs)
+
+              (range [_ a (.-Args v)]
+                ;; SP and SB are special registers and have no effect on
+                ;; the allocation of general-purpose registers.
+                (when (and (.needRegister a) (!= (.-Op a) OpSB) (!= (.-Op a) OpSP))
+                  (.add distinctArgs (.-ID a))))
+
+
+
+              (when (and (>= (.size distinctArgs) 2) (not (.IsFlags (.-Type v))))
+                ;; Don't move values with more than one input, as that may
+                ;; increase register pressure.
+                ;; We make an exception for flags, as we want flag generators
+                ;; moved next to uses (because we only have 1 flag register).
+                (continue))
+
+              (aset canMove (.-ID v) true)))
+
+
+
+          ;; Build data structure for fast least-common-ancestor queries.
+          (let [lca (makeLCArange f)
+
+              ;; For each moveable value, record the block that dominates all uses found so far.
+              ^{:line 78} target (.allocBlockSlice (.-Cache f) (.NumValues f))]
+            (defer (.freeBlockSlice (.-Cache f) target))
+
+            ;; Grab loop information.
+            ;; We use this to make sure we don't tighten a value into a (deeper) loop.
+            (let [idom (.Idom f)
+                ^{:line 84} loops (.loopnest f)
+
+                ^{:line 86} changed true]
+              (while changed
+                (set! changed false)
+
+                ;; Reset target
+                (clear target)
+
+                ;; Compute target locations (for moveable values only).
+                ;; target location = the least common ancestor of all uses in the dominator tree.
+                (range [_ b (.-Blocks f)]
+                  (range [_ v (.-Values b)]
+                    (range [i a (.-Args v)]
+                      (when (not (aget canMove (.-ID a)))
+                        (continue))
+
+                      (let [use b]
+                        (when (== (.-Op v) OpPhi)
+                          (set! use (.-b (aget (.-Preds b) i))))
+
+                        (if (== (aget target (.-ID a)) nil)
+                          (aset target (.-ID a) use)
+
+                          (aset target (.-ID a) (.find lca (aget target (.-ID a)) use))))))
+
+
+
+                  (range [_ c (.ControlValues b)]
+                    (when (not (aget canMove (.-ID c)))
+                      (continue))
+
+                    (if (== (aget target (.-ID c)) nil)
+                      (aset target (.-ID c) b)
+
+                      (aset target (.-ID c) (.find lca (aget target (.-ID c)) b)))))
+
+
+
+
+                ;; If the target location is inside a loop,
+                ;; move the target location up to just before the loop head.
+                (when (not (.-hasIrreducible loops))
+                  ;; Loop info might not be correct for irreducible loops. See issue 75569.
+                  (range [_ b (.-Blocks f)]
+                    (let [origloop (aget (.-b2l loops) (.-ID b))]
+                      (range [_ v (.-Values b)]
+                        (let [t (aget target (.-ID v))]
+                          (when (== t nil)
+                            (continue))
+
+                          (let [targetloop (aget (.-b2l loops) (.-ID t))]
+                            (while (and (!= targetloop nil) ^:go/paren (or (== origloop nil) (> (.-depth targetloop) (.-depth origloop))))
+                              (set! t (aget idom (.-ID (.-header targetloop))))
+                              (aset target (.-ID v) t)
+                              (set! targetloop (aget (.-b2l loops) (.-ID t))))))))))
+
+
+
+
+
+                ;; Move values to target locations.
+                (range [_ b (.-Blocks f)]
+                  (for [i 0] (< i (len (.-Values b))) (inc! i)
+                    (let [v (aget (.-Values b) i)
+                        ^{:line 149} t (aget target (.-ID v))]
+                      (when (or (== t nil) (== t b))
+                        ;; v is not moveable, or is already in correct place.
+                        (continue))
+
+                      (when [mem (.MemoryArg v)] (!= mem nil)
+                        (when (!= (aget startMem (.-ID t)) mem)
+                          ;; We can't move a value with a memory arg unless the target block
+                          ;; has that memory arg as its starting memory.
+                          (continue)))
+
+
+                      (when (> (.-debug (.-pass f)) 0)
+                        (.Warnl (.-Func b) (.-Pos v) "%v is moved" (.-Op v)))
+
+                      ;; Move v to the block which dominates its uses.
+                      (set! (.-Values t) (append (.-Values t) v))
+                      (set! (.-Block v) t)
+                      (let [last (- (len (.-Values b)) 1)]
+                        (aset (.-Values b) i (aget (.-Values b) last))
+                        (aset (.-Values b) last nil)
+                        (set! (.-Values b) (subslice (.-Values b) _ last))
+                        (set! changed true)
+                        (dec! i)))))))))))))
+
+
+
+
+
+
+
+
+^{:go/end 199} (go/func phiTighten "phiTighten moves constants closer to phi users.\nThis pass avoids having lots of constants live for lots of the program.\nSee issue 16407.\n" [^{:tag (* Func)} f]
+  (range [_ b (.-Blocks f)]
+    (range [_ v (.-Values b)]
+      (when (!= (.-Op v) OpPhi)
+        (continue))
+
+      (range [i a (.-Args v)]
+        (when (not (.rematerializeable a))
+          (continue)) ; not a constant we can move around
+
+        (when (== (.-Block a) (.-b (aget (.-Preds b) i)))
+          (continue)) ; already in the right place
+
+        ;; Make a copy of a, put in predecessor block.
+        (.SetArg v i (.copyInto a (.-b (aget (.-Preds b) i))))))))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 277} (go/func memState "memState computes the memory state at the beginning and end of each block of\nthe function. The memory state is represented by a value of mem type.\nThe returned result is stored in startMem and endMem, and endMem is nil for\nblocks with no successors (Exit,Ret,RetJmp blocks). This algorithm is not\nsuitable for infinite loop blocks that do not contain any mem operations.\nFor example:\nb1:\n\n\t(some values)\n\nplain -> b2\nb2: <- b1 b2\nPlain -> b2\n\nAlgorithm introduction:\n 1. The start memory state of a block is InitMem, a Phi node of type mem or\n    an incoming memory value.\n 2. The start memory state of a block is consistent with the end memory state\n    of its parent nodes. If the start memory state of a block is a Phi value,\n    then the end memory state of its parent nodes is consistent with the\n    corresponding argument value of the Phi node.\n 3. The algorithm first obtains the memory state of some blocks in the tree\n    in the first step. Then floods the known memory state to other nodes in\n    the second step.\n" [^{:tag (* Func)} f ^{:tag (slice (* Value))} startMem ^{:tag (slice (* Value))} endMem]
+  ;; This slice contains the set of blocks that have had their startMem set but this
+  ;; startMem value has not yet been propagated to the endMem of its predecessors
+  (let [changed (make (slice (* Block)) 0)]
+    ;; First step, init the memory state of some blocks.
+    (range [_ b (.-Blocks f)]
+      (range [_ v (.-Values b)]
+        (let [^{:tag (* Value)} mem (zero (* Value))]
+          (if (== (.-Op v) OpPhi)
+            (when (.IsMemory (.-Type v))
+              (set! mem v))
+
+            (if (== (.-Op v) OpInitMem)
+              (set! mem v) ; This is actually not needed.
+              (when [a (.MemoryArg v)] (and (!= a nil) (!= (.-Block a) b))
+                ;; The only incoming memory value doesn't belong to this block.
+                (set! mem a))))
+
+          (when (!= mem nil)
+            (when [old (aget startMem (.-ID b))] (!= old nil)
+              (when (== old mem)
+                (continue))
+
+              (.Fatalf f "func %s, startMem[%v] has different values, old %v, new %v" (.-Name f) b old mem))
+
+            (aset startMem (.-ID b) mem)
+            (set! changed (append changed b))))))
+
+
+
+
+    ;; Second step, floods the known memory state of some blocks to others.
+    (while (!= (len changed) 0)
+      (let [top (aget changed 0)]
+        (set! changed (subslice changed 1))
+        (let [mem (aget startMem (.-ID top))]
+          (range [i p (.-Preds top)]
+            (let [pb (.-b p)]
+              (when (!= (aget endMem (.-ID pb)) nil)
+                (continue))
+
+              (if (and (== (.-Op mem) OpPhi) (== (.-Block mem) top))
+                (aset endMem (.-ID pb) (aget (.-Args mem) i))
+
+                (aset endMem (.-ID pb) mem))
+
+              (when (== (aget startMem (.-ID pb)) nil)
+                (aset startMem (.-ID pb) (aget endMem (.-ID pb)))
+                (set! changed (append changed pb))))))))))

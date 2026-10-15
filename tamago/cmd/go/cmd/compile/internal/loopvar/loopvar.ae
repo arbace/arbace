@@ -1,0 +1,613 @@
+;; Copyright 2023 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; Package loopvar applies the proper variable capture, according
+;; to experiment, flags, language version, etc.
+(in-ns 'go.cmd.compile.internal.loopvar) (go/file "loopvar.go" :doc "Package loopvar applies the proper variable capture, according\nto experiment, flags, language version, etc.\n" :imports [
+
+
+    ^{:line 10} [base "cmd/compile/internal/base"]
+    ^{:line 11} [ir "cmd/compile/internal/ir"]
+    ^{:line 12} [logopt "cmd/compile/internal/logopt"]
+    ^{:line 13} [typecheck "cmd/compile/internal/typecheck"]
+    ^{:line 14} [types "cmd/compile/internal/types"]
+    ^{:line 15} [src "cmd/internal/src"]
+    ^{:line 16} [fmt "fmt"]])
+
+
+(go/type VarAndLoop (struct
+    ^{:line 20 :tag (* ir/Name)} Name
+    ^{:line 21 :tag ir/Node} Loop ; the *ir.RangeStmt or *ir.ForStmt. Used for identity and position
+    ^{:line 22 :tag src/XPos} LastPos)) ; the last position observed within Loop
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 457} (go/func ForCapture "ForCapture transforms for and range loops that declare variables that might be\ncaptured by a closure or escaped to the heap, using a syntactic check that\nconservatively overestimates the loops where capture occurs, but still avoids\ntransforming the (large) majority of loops. It returns the list of names\nsubject to this change, that may (once transformed) be heap allocated in the\nprocess. (This allows checking after escape analysis to call out any such\nvariables, in case it causes allocation/performance problems).\n\nThe decision to transform loops is normally encoded in the For/Range loop node\nfield DistinctVars but is also dependent on base.LoopVarHash, and some values\nof base.Debug.LoopVar (which is set per-package).  Decisions encoded in DistinctVars\nare preserved across inlining, so if package a calls b.F and loops in b.F are\ntransformed, then they are always transformed, whether b.F is inlined or not.\n\nPer-package, the debug flag settings that affect this transformer:\n\nbase.LoopVarHash != nil => use hash setting to govern transformation.\nnote that LoopVarHash != nil sets base.Debug.LoopVar to 1 (unless it is >= 11, for testing/debugging).\n\nbase.Debug.LoopVar == 11 => transform ALL loops ignoring syntactic/potential escape. Do not log, can be in addition to GOEXPERIMENT.\n\nThe effect of GOEXPERIMENT=loopvar is to change the default value (0) of base.Debug.LoopVar to 1 for all packages.\n" ^{:tag (slice VarAndLoop)} [^{:tag (* ir/Func)} fn]
+  ;; if a loop variable is transformed it is appended to this slice for later logging
+  (let [^{:tag (slice VarAndLoop)} transformed (zero (slice VarAndLoop))
+
+      ^{:line 51} describe ^{:go/end 59} (fn ^string [^{:tag (* ir/Name)} n]
+        (let [pos ^{:go/via [miniExpr miniNode]} (.Pos n)
+            ^{:line 53} inner (.InnermostPos base/Ctxt pos)
+            ^{:line 54} outer (.OutermostPos base/Ctxt pos)]
+          (when (== inner outer)
+            (return (fmt/Sprintf "loop variable %v now per-iteration" n)))
+
+          (fmt/Sprintf "loop variable %v now per-iteration (loop inlined into %s:%d)" n (.Filename outer) ^{:go/via [lico]} (.Line outer))))
+
+
+      ^{:line 61} forCapture ^{:go/end 449} (fn []
+        (let [seq 1
+
+            ^{:line 64} dclFixups (make (map (* ir/Name) ir/Stmt))
+
+            ;; possibly leaked includes names of declared loop variables that may be leaked;
+            ;; the mapped value is true if the name is *syntactically* leaked, and those loops
+            ;; will be transformed.
+            ^{:line 69} possiblyLeaked (make (map (* ir/Name) bool))
+
+            ;; these enable an optimization of "escape" under return statements
+            ^{:line 72} loopDepth 0
+            ^{:line 73} returnInLoopDepth 0
+
+            ;; noteMayLeak is called for candidate variables in for range/3-clause, and
+            ;; adds them (mapped to false) to possiblyLeaked.
+            ^{:line 77} noteMayLeak ^{:go/end 85} (fn [^ir/Node x]
+              (when [(values n ok) (assert (* ir/Name) x)] ok
+                (when (== (.Kind ^{:go/via [miniExpr]} (.Type n)) types/TBLANK)
+                  (return))
+
+                ;; default is false (leak candidate, not yet known to leak), but flag can make all variables "leak"
+                (aset possiblyLeaked n (>= (.-LoopVar base/Debug) 11))))
+
+
+
+            ;; For reporting, keep track of the last position within any loop.
+            ;; Loops nest, also need to be sensitive to inlining.
+            ^{:line 89 :tag src/XPos} lastPos (zero src/XPos)
+
+            ^{:line 91} updateLastPos ^{:go/end 97} (fn [^src/XPos p]
+              (let [(values pl ll) (values ^{:go/via [lico]} (.Line p) ^{:go/via [lico]} (.Line lastPos))]
+                (when (and (.SameFile p lastPos)
+                    ^:go/paren (or (> pl ll) (and (== pl ll) (> ^{:go/via [lico]} (.Col p) ^{:go/via [lico]} (.Col lastPos)))))
+                  (set! lastPos p))))
+
+
+
+            ;; maybeReplaceVar unshares an iteration variable for a range loop,
+            ;; if that variable was actually (syntactically) leaked,
+            ;; subject to hash-variable debugging.
+            ^{:line 102} maybeReplaceVar ^{:go/end 121} (fn ^ir/Node [^ir/Node k ^{:tag (* ir/RangeStmt)} x]
+              (when [(values n ok) (assert (* ir/Name) k)] (and ok (aget possiblyLeaked n))
+                (let [desc ^{:go/end 106} (fn ^string []
+                      (describe n))]
+
+                  (when (.MatchPos base/LoopVarHash ^{:go/via [miniExpr miniNode]} (.Pos n) desc)
+                    ;; Rename the loop key, prefix body with assignment from loop key
+                    (set! transformed (append transformed (lit VarAndLoop n x lastPos)))
+                    (let [tk (typecheck/TempAt base/Pos fn ^{:go/via [miniExpr]} (.Type n))]
+                      ^{:go/via [miniExpr miniNode]} (.SetTypecheck tk 1)
+                      (let [as (ir/NewAssignStmt ^{:go/via [miniStmt miniNode]} (.Pos x) n tk)]
+                        (set! (.-Def as) true)
+                        ^{:go/via [miniStmt miniNode]} (.SetTypecheck as 1)
+                        (.Prepend (.-Body x) as)
+                        (aset dclFixups n as)
+                        (return tk))))))
+
+
+              ^{:line 120} k)
+
+
+            ;; scanChildrenThenTransform processes node x to:
+            ;;  1. if x is a for/range w/ DistinctVars, note declared iteration variables possiblyLeaked (PL)
+            ;;  2. search all of x's children for syntactically escaping references to v in PL,
+            ;;     meaning either address-of-v or v-captured-by-a-closure
+            ;;  3. for all v in PL that had a syntactically escaping reference, transform the declaration
+            ;;     and (in case of 3-clause loop) the loop to the unshared loop semantics.
+            ;;  This is all much simpler for range loops; 3-clause loops can have an arbitrary number
+            ;;  of iteration variables and the transformation is more involved, range loops have at most 2.
+            ^{:line 131 :tag (func [^ir/Node x] [bool])} scanChildrenThenTransform (zero (func [^ir/Node x] [bool]))]
+          (set! scanChildrenThenTransform ^{:go/breaks [[5 415]] :go/end 416} (fn ^bool [^ir/Node n]
+
+              (when (> loopDepth 0)
+                (updateLastPos (.Pos n)))
+
+
+              (type-switch [x n]
+                (case [(* ir/ClosureExpr)]
+                  (when (>= returnInLoopDepth loopDepth)
+                    ;; This expression is a child of a return, which escapes all loops above
+                    ;; the return, but not those between this expression and the return.
+                    (break))
+
+                  (range [_ cv (.-ClosureVars (.-Func x))]
+                    (let [v (.Canonical cv)]
+                      (when [(values _ ok) (aget possiblyLeaked v)] ok
+                        (aset possiblyLeaked v true)))))
+
+
+
+                (case [(* ir/AddrExpr)]
+                  (when (>= returnInLoopDepth loopDepth)
+                    ;; This expression is a child of a return, which escapes all loops above
+                    ;; the return, but not those between this expression and the return.
+                    (break))
+
+                  ;; Explicitly note address-taken so that return-statements can be excluded
+                  (let [y (ir/OuterValue (.-X x))]
+                    (when (!= (.Op y) ir/ONAME)
+                      (break))
+
+                    (let [(values z ok) (assert (* ir/Name) y)]
+                      (when (not ok)
+                        (break))
+
+                      (switch (.-Class z)
+                        (case [ir/PAUTO ir/PPARAM ir/PPARAMOUT ir/PAUTOHEAP]
+                          (when [(values _ ok) (aget possiblyLeaked z)] ok
+                            (aset possiblyLeaked z true)))))))
+
+
+
+                (case [(* ir/ReturnStmt)]
+                  (let [savedRILD returnInLoopDepth]
+                    (set! returnInLoopDepth loopDepth)
+                    (defer (^{:go/end 177} (fn [] (set! returnInLoopDepth savedRILD))))))
+
+                (case [(* ir/RangeStmt)]
+                  (when (not (and (.-Def x) (.-DistinctVars x)))
+                    ;; range loop must define its iteration variables AND have distinctVars.
+                    (set! (.-DistinctVars x) false)
+                    (break))
+
+                  (noteMayLeak (.-Key x))
+                  (noteMayLeak (.-Value x))
+                  (inc! loopDepth)
+                  (let [savedLastPos lastPos]
+                    (set! lastPos ^{:go/via [miniStmt miniNode]} (.Pos x)) ; this sets the file.
+                    (ir/DoChildren n scanChildrenThenTransform)
+                    (dec! loopDepth)
+                    (set! (.-Key x) (maybeReplaceVar (.-Key x) x))
+                    (set! (.-Value x) (maybeReplaceVar (.-Value x) x))
+                    (let [thisLastPos lastPos]
+                      (set! lastPos savedLastPos)
+                      (updateLastPos thisLastPos) ; this will propagate lastPos if in the same file.
+                      (set! (.-DistinctVars x) false)
+                      (return false))))
+
+                (case [(* ir/ForStmt)]
+                  (when (not (.-DistinctVars x))
+                    (break))
+
+                  (forAllDefInInit x noteMayLeak)
+                  (inc! loopDepth)
+                  (let [savedLastPos lastPos]
+                    (set! lastPos ^{:go/via [miniStmt miniNode]} (.Pos x)) ; this sets the file.
+                    (ir/DoChildren n scanChildrenThenTransform)
+                    (dec! loopDepth)
+                    (let [^{:tag (slice (* ir/Name))} leaked (zero (slice (* ir/Name)))]
+                      ;; Collect the leaking variables for the much-more-complex transformation.
+                      (forAllDefInInit x ^{:go/end 222} (fn [^ir/Node z]
+                          (when [(values n ok) (assert (* ir/Name) z)] (and ok (aget possiblyLeaked n))
+                            (let [desc ^{:go/end 216} (fn ^string []
+                                  (describe n))]
+
+                              ;; Hash on n.Pos() for most precise failure location.
+                              (when (.MatchPos base/LoopVarHash ^{:go/via [miniExpr miniNode]} (.Pos n) desc)
+                                (set! leaked (append leaked n)))))))
+
+
+
+
+                      (when (> (len leaked) 0)
+                        ;; need to transform the for loop just so.
+
+                        ;; /* Contrived example, w/ numbered comments from the transformation:
+                        ;; BEFORE:
+                        ;; var escape []*int
+                        ;; for z := 0; z < n; z++ {
+                        ;; if reason() {
+                        ;; escape = append(escape, &z)
+                        ;; continue
+                        ;; }
+                        ;; z = z + z
+                        ;; stuff
+                        ;; }
+                        ;; AFTER:
+                        ;; for z', tmp_first := 0, true; ; { // (4)
+                        ;; // (5) body' follows:
+                        ;; z := z'                       // (1)
+                        ;; if tmp_first {tmp_first = false} else {z++} // (6)
+                        ;; if ! (z < n) { break }        // (7)
+                        ;; // (3, 8) body_continue
+                        ;; if reason() {
+                        ;; escape = append(escape, &z)
+                        ;; goto next                 // rewritten continue
+                        ;; }
+                        ;; z = z + z
+                        ;; stuff
+                        ;; next:                             // (9)
+                        ;; z' = z                       // (2)
+                        ;; }
+                        ;; 
+                        ;; In the case that the loop contains no increment (z++),
+                        ;; there is no need for step 6,
+                        ;; and thus no need to test, update, or declare tmp_first (part of step 4).
+                        ;; Similarly if the loop contains no exit test (z < n),
+                        ;; then there is no need for step 7.
+                        ;; */
+
+                        ;; Expressed in terms of the input ForStmt
+                        ;;
+                        ;; 	type ForStmt struct {
+                        ;; 	init     Nodes
+                        ;; 	Label    *types.Sym
+                        ;; 	Cond     Node  // empty if OFORUNTIL
+                        ;; 	Post     Node
+                        ;; 	Body     Nodes
+                        ;; 	HasBreak bool
+                        ;; }
+
+                        ;; OFOR: init; loop: if !Cond {break}; Body; Post; goto loop
+
+                        ;; (1) prebody = {z := z' for z in leaked}
+                        ;; (2) postbody = {z' = z for z in leaked}
+                        ;; (3) body_continue = {body : s/continue/goto next}
+                        ;; (4) init' = (init : s/z/z' for z in leaked) + tmp_first := true
+                        ;; (5) body' = prebody +        // appears out of order below
+                        ;; (6)         if tmp_first {tmp_first = false} else {Post} +
+                        ;; (7)         if !cond {break} +
+                        ;; (8)         body_continue (3) +
+                        ;; (9)         next: postbody (2)
+                        ;; (10) cond' = {}
+                        ;; (11) post' = {}
+
+                        ;; minor optimizations:
+                        ;;   if Post is empty, tmp_first and step 6 can be skipped.
+                        ;;   if Cond is empty, that code can also be skipped.
+
+                        (let [(values ^ir/Nodes preBody ^ir/Nodes postBody) (zero ir/Nodes)
+
+                            ;; Given original iteration variable z, what is the corresponding z'
+                            ;; that carries the value from iteration to iteration?
+                            ^{:line 295} zPrimeForZ (make (map (* ir/Name) (* ir/Name)))]
+
+                          ;; (1,2) initialize preBody and postBody
+                          (range [_ z leaked]
+                            (set! transformed (append transformed (lit VarAndLoop z x lastPos)))
+
+                            (let [tz (typecheck/TempAt base/Pos fn ^{:go/via [miniExpr]} (.Type z))]
+                              ^{:go/via [miniExpr miniNode]} (.SetTypecheck tz 1)
+                              (aset zPrimeForZ z tz)
+
+                              (let [as (ir/NewAssignStmt ^{:go/via [miniStmt miniNode]} (.Pos x) z tz)]
+                                (set! (.-Def as) true)
+                                ^{:go/via [miniStmt miniNode]} (.SetTypecheck as 1)
+                                (set! (.-Defn z) as)
+                                (.Append preBody as)
+                                (aset dclFixups z as)
+
+                                (set! as (ir/NewAssignStmt ^{:go/via [miniStmt miniNode]} (.Pos x) tz z))
+                                ^{:go/via [miniStmt miniNode]} (.SetTypecheck as 1)
+                                (.Append postBody as))))
+
+
+
+                          ;; (3) rewrite continues in body -- rewrite is inplace, so works for top level visit, too.
+                          (let [label (typecheck/Lookup (fmt/Sprintf ".3clNext_%d" seq))]
+                            (inc! seq)
+                            (let [labelStmt (ir/NewLabelStmt ^{:go/via [miniStmt miniNode]} (.Pos x) label)]
+                              ^{:go/via [miniStmt miniNode]} (.SetTypecheck labelStmt 1)
+
+                              (let [loopLabel (.-Label x)
+                                  ^{:line 325} loopDepth 0
+                                  ^{:line 326 :tag (func [^ir/Node x] [bool])} editContinues (zero (func [^ir/Node x] [bool]))]
+                                (set! editContinues ^{:go/breaks [4] :go/end 344} (fn ^bool [^ir/Node x]
+
+                                    (type-switch [c x]
+                                      (case [(* ir/BranchStmt)]
+                                        ;; If this is a continue targeting the loop currently being rewritten, transform it to an appropriate GOTO
+                                        (when (and (== ^{:go/via [miniStmt miniNode]} (.Op c) ir/OCONTINUE) ^:go/paren (or (and (== loopDepth 0) (== (.-Label c) nil)) (and (!= loopLabel nil) (== (.-Label c) loopLabel))))
+                                          (set! (.-Label c) label)
+                                          (.SetOp c ir/OGOTO)))
+
+                                      (case [(* ir/RangeStmt) (* ir/ForStmt)]
+                                        (inc! loopDepth)
+                                        (ir/DoChildren x editContinues)
+                                        (dec! loopDepth)
+                                        (return false)))
+
+                                    (ir/DoChildren x editContinues)
+                                    false))
+
+                                (range [_ y (.-Body x)]
+                                  (editContinues y))
+
+                                (let [bodyContinue (.-Body x)]
+
+                                  ;; (4) rewrite init
+                                  (forAllDefInInitUpdate x ^{:go/end 356} (fn [^ir/Node z ^{:tag (* ir/Node)} pz]
+                                      ;; note tempFor[n] can be nil if hash searching.
+                                      (when [(values n ok) (assert (* ir/Name) z)] (and ok (aget possiblyLeaked n) (!= (aget zPrimeForZ n) nil))
+                                        (set! @pz (aget zPrimeForZ n)))))
+
+
+
+                                  (let [postNotNil (!= (.-Post x) nil)
+                                      ^{:line 359 :tag ir/Node} tmpFirstDcl (zero ir/Node)]
+                                    (when postNotNil
+                                      ;; body' = prebody +
+                                      ;; (6)     if tmp_first {tmp_first = false} else {Post} +
+                                      ;;         if !cond {break} + ...
+                                      (let [tmpFirst (typecheck/TempAt base/Pos fn (aget types/Types types/TBOOL))]
+                                        (set! tmpFirstDcl (typecheck/Stmt (ir/NewAssignStmt ^{:go/via [miniStmt miniNode]} (.Pos x) tmpFirst (ir/NewBool base/Pos true))))
+                                        (let [tmpFirstSetFalse (typecheck/Stmt (ir/NewAssignStmt ^{:go/via [miniStmt miniNode]} (.Pos x) tmpFirst (ir/NewBool base/Pos false)))
+                                            ^{:line 367} ifTmpFirst (ir/NewIfStmt ^{:go/via [miniStmt miniNode]} (.Pos x) tmpFirst (lit ir/Nodes tmpFirstSetFalse) (lit ir/Nodes (.-Post x)))]
+                                          (.Append ^{:go/via [miniStmt]} (.PtrInit ifTmpFirst) (typecheck/Stmt (ir/NewDecl base/Pos ir/ODCL tmpFirst))) ; declares tmpFirst
+                                          (.Append preBody (typecheck/Stmt ifTmpFirst)))))
+
+
+                                    ;; body' = prebody +
+                                    ;;         if tmp_first {tmp_first = false} else {Post} +
+                                    ;; (7)     if !cond {break} + ...
+                                    (when (!= (.-Cond x) nil)
+                                      (let [notCond (ir/NewUnaryExpr (.Pos (.-Cond x)) ir/ONOT (.-Cond x))]
+                                        ^{:go/via [miniExpr]} (.SetType notCond (.Type (.-Cond x)))
+                                        ^{:go/via [miniExpr miniNode]} (.SetTypecheck notCond 1)
+                                        (let [newBreak (ir/NewBranchStmt ^{:go/via [miniStmt miniNode]} (.Pos x) ir/OBREAK nil)]
+                                          ^{:go/via [miniStmt miniNode]} (.SetTypecheck newBreak 1)
+                                          (let [ifNotCond (ir/NewIfStmt ^{:go/via [miniStmt miniNode]} (.Pos x) notCond (lit ir/Nodes newBreak) nil)]
+                                            ^{:go/via [miniStmt miniNode]} (.SetTypecheck ifNotCond 1)
+                                            (.Append preBody ifNotCond)))))
+
+
+                                    (when postNotNil
+                                      (.Append ^{:go/via [miniStmt]} (.PtrInit x) tmpFirstDcl))
+
+
+                                    ;; (8)
+                                    (.Append preBody (spread bodyContinue))
+                                    ;; (9)
+                                    (.Append preBody labelStmt)
+                                    (.Append preBody (spread postBody))
+
+                                    ;; (5) body' = prebody + ...
+                                    (set! (.-Body x) preBody)
+
+                                    ;; (10) cond' = {}
+                                    (set! (.-Cond x) nil)
+
+                                    ;; (11) post' = {}
+                                    (set! (.-Post x) nil))))))))
+
+                      (let [thisLastPos lastPos]
+                        (set! lastPos savedLastPos)
+                        (updateLastPos thisLastPos) ; this will propagate lastPos if in the same file.
+                        (set! (.-DistinctVars x) false)
+
+                        (return false))))))
+
+
+              (ir/DoChildren n scanChildrenThenTransform)
+
+              false))
+
+          (scanChildrenThenTransform fn)
+          (when (> (len transformed) 0)
+            ;; editNodes scans a slice C of ir.Node, looking for declarations that
+            ;; appear in dclFixups.  Any declaration D whose "fixup" is an assignmnt
+            ;; statement A is removed from the C and relocated to the Init
+            ;; of A.  editNodes returns the modified slice of ir.Node.
+            (let [editNodes ^{:go/end 445} (fn ^ir/Nodes [^ir/Nodes c]
+                  (let [j 0]
+                    (range [_ n c]
+                      (when [(values d ok) (assert (* ir/Decl) n)] ok
+                        (when [s (aget dclFixups (.-X d))] (!= s nil)
+                          (type-switch [a s]
+                            (case [(* ir/AssignStmt)]
+                              (.Prepend ^{:go/via [miniStmt]} (.PtrInit a) d)
+                              (delete dclFixups (.-X d))) ; can't be sure of visit order, wouldn't want to visit twice.
+                            (default
+                              (base/Fatalf "not implemented yet for node type %v" (.Op s))))
+
+                          (continue))) ; do not copy this node, and do not increment j
+
+
+                      (aset c j n)
+                      (inc! j))
+
+                    (for [k j] (< k (len c)) (inc! k)
+                      (aset c k nil))
+
+                    (subslice c _ j)))]
+
+              ;; fixup all tagged declarations in all the statements lists in fn.
+              (rewriteNodes fn editNodes)))))]
+
+
+    (ir/WithFunc fn forCapture)
+
+    (when (ir/MatchAstDump fn "loopvar")
+      (ir/AstDump fn (+ "loopvar, " (ir/FuncName fn))))
+
+
+    ^{:line 456} transformed))
+
+
+
+
+^{:go/end 478} (go/func forAllDefInInitUpdate "forAllDefInInitUpdate applies \"do\" to all the defining assignments in the Init clause of a ForStmt.\nThis abstracts away some of the boilerplate from the already complex and verbose for-3-clause case.\n" [^{:tag (* ir/ForStmt)} x ^{:tag (func [^ir/Node z ^{:tag (* ir/Node)} update])} do]
+  (range [_ s ^{:go/via [miniStmt]} (.Init x)]
+    (type-switch [y s]
+      (case [(* ir/AssignListStmt)]
+        (when (not (.-Def y))
+          (continue))
+
+        (range [i z (.-Lhs y)]
+          (go/call do z (addr (aget (.-Lhs y) i)))))
+
+      (case [(* ir/AssignStmt)]
+        (when (not (.-Def y))
+          (continue))
+
+        (go/call do (.-X y) (addr (.-X y)))))))
+
+
+
+
+
+^{:go/end 483} (go/func forAllDefInInit "forAllDefInInit is forAllDefInInitUpdate without the update option.\n" [^{:tag (* ir/ForStmt)} x ^{:tag (func [^ir/Node z])} do]
+  (forAllDefInInitUpdate x ^{:go/end 482} (fn [^ir/Node z ^{:tag (* ir/Node)} _] (go/call do z))))
+
+
+
+^{:go/end 523} (go/func rewriteNodes "rewriteNodes applies editNodes to all statement lists in fn.\n" [^{:tag (* ir/Func)} fn ^{:tag (func [^ir/Nodes c] [ir/Nodes])} editNodes]
+  (let [^{:tag (func [^ir/Node x] [bool])} forNodes (zero (func [^ir/Node x] [bool]))]
+    (set! forNodes ^{:go/breaks [5] :go/end 521} (fn ^bool [^ir/Node n]
+        (when [(values stmt ok) (assert ir/InitNode n)] ok
+          ;; process init list
+          (.SetInit stmt (editNodes (.Init stmt))))
+
+        (type-switch [x n]
+          (case [(* ir/Func)]
+            (set! (.-Body x) (editNodes (.-Body x))))
+          (case [(* ir/InlinedCallExpr)]
+            (set! (.-Body x) (editNodes (.-Body x))))
+
+          (case [(* ir/CaseClause)]
+            (set! (.-Body x) (editNodes (.-Body x))))
+          (case [(* ir/CommClause)]
+            (set! (.-Body x) (editNodes (.-Body x))))
+
+          (case [(* ir/BlockStmt)]
+            (set! (.-List x) (editNodes (.-List x))))
+
+          (case [(* ir/ForStmt)]
+            (set! (.-Body x) (editNodes (.-Body x))))
+          (case [(* ir/RangeStmt)]
+            (set! (.-Body x) (editNodes (.-Body x))))
+          (case [(* ir/IfStmt)]
+            (set! (.-Body x) (editNodes (.-Body x)))
+            (set! (.-Else x) (editNodes (.-Else x))))
+          (case [(* ir/SelectStmt)]
+            (set! (.-Compiled x) (editNodes (.-Compiled x))))
+          (case [(* ir/SwitchStmt)]
+            (set! (.-Compiled x) (editNodes (.-Compiled x)))))
+
+        (ir/DoChildren n forNodes)
+        false))
+
+    (forNodes fn)))
+
+
+^{:go/end 618} (go/func LogTransformations [^{:tag (slice VarAndLoop)} transformed]
+  (let [print (and (<= 2 (.-LoopVar base/Debug)) (!= (.-LoopVar base/Debug) 11))]
+
+    (when (or print (logopt/Enabled)) ; 11 is do them all, quietly, 12 includes debugging.
+      (let [fileToPosBase (make (map string (* src/PosBase))) ; used to remove inline context for innermost reporting.
+
+          ;; trueInlinedPos rebases inner w/o inline context so that it prints correctly in WarnfAt; otherwise it prints as outer.
+          ^{:line 532} trueInlinedPos ^{:go/end 541} (fn ^src/XPos [^src/Pos inner]
+            (let [afn (.AbsFilename inner)
+                (values pb ok) (aget fileToPosBase afn)]
+              (when (not ok)
+                (set! pb (src/NewFileBase (.Filename inner) afn))
+                (aset fileToPosBase afn pb))
+
+              (.SetBase inner pb)
+              (.XPos (.-PosTable base/Ctxt) inner)))]
+
+
+        (let-type [unit (struct)]
+          (let [loopsSeen (make (map ir/Node unit))]
+            (let-type [loopPos (struct
+                  ^{:line 546 :tag ir/Node} loop
+                  ^{:line 547 :tag src/XPos} last
+                  ^{:line 548 :tag (* ir/Func)} curfn)]
+
+              (let [^{:tag (slice loopPos)} loops (zero (slice loopPos))]
+                (range [_ lv transformed]
+                  (let [n (.-Name lv)]
+                    (when [(values _ ok) (aget loopsSeen (.-Loop lv))] (not ok)
+                      (let [l (.-Loop lv)]
+                        (aset loopsSeen l (lit unit))
+                        (set! loops (append loops (lit loopPos l (.-LastPos lv) (.-Curfn n))))))
+
+                    (let [pos ^{:go/via [miniExpr miniNode]} (.Pos n)
+
+                        ^{:line 560} inner (.InnermostPos base/Ctxt pos)
+                        ^{:line 561} outer (.OutermostPos base/Ctxt pos)]
+
+                      (when (logopt/Enabled)
+                        ;; For automated checking of coverage of this transformation, include this in the JSON information.
+                        (let [^any nString n]
+                          (when (!= inner outer)
+                            (set! nString (fmt/Sprintf "%v (from inline)" n)))
+
+                          (if (== ^{:go/via [miniExpr miniNode]} (.Esc n) ir/EscHeap)
+                            (logopt/LogOpt pos "iteration-variable-to-heap" "loopvar" (ir/FuncName (.-Curfn n)) nString)
+
+                            (logopt/LogOpt pos "iteration-variable-to-stack" "loopvar" (ir/FuncName (.-Curfn n)) nString))))
+
+
+                      (when print
+                        (if (== inner outer)
+                          (if (== ^{:go/via [miniExpr miniNode]} (.Esc n) ir/EscHeap)
+                            (base/WarnfAt pos "loop variable %v now per-iteration, heap-allocated" n)
+
+                            (base/WarnfAt pos "loop variable %v now per-iteration, stack-allocated" n))
+
+
+                          (let [innerXPos (trueInlinedPos inner)]
+                            (if (== ^{:go/via [miniExpr miniNode]} (.Esc n) ir/EscHeap)
+                              (base/WarnfAt innerXPos "loop variable %v now per-iteration, heap-allocated (loop inlined into %s:%d)" n (.Filename outer) ^{:go/via [lico]} (.Line outer))
+
+                              (base/WarnfAt innerXPos "loop variable %v now per-iteration, stack-allocated (loop inlined into %s:%d)" n (.Filename outer) ^{:go/via [lico]} (.Line outer)))))))))
+
+
+
+
+                (range [_ l loops]
+                  (let [pos (.Pos (.-loop l))
+                      ^{:line 594} last (.-last l)
+                      ^{:line 595} loopKind "range"]
+                    (when [(values _ ok) (assert (* ir/ForStmt) (.-loop l))] ok
+                      (set! loopKind "for"))
+
+                    (when (logopt/Enabled)
+                      ;; Intended to help with performance debugging, we record whole loop ranges
+                      (logopt/LogOptRange pos last (+ "loop-modified-" loopKind) "loopvar" (ir/FuncName (.-curfn l))))
+
+                    (when (and print (<= 4 (.-LoopVar base/Debug)))
+                      ;; TODO decide if we want to keep this, or not.  It was helpful for validating logopt, otherwise, eh.
+                      (let [inner (.InnermostPos base/Ctxt pos)
+                          ^{:line 606} outer (.OutermostPos base/Ctxt pos)]
+
+                        (if (== inner outer)
+                          (base/WarnfAt pos "%s loop ending at %d:%d was modified" loopKind ^{:go/via [lico]} (.Line last) ^{:go/via [lico]} (.Col last))
+                          (do
+                            (set! pos (trueInlinedPos inner))
+                            (set! last (trueInlinedPos (.InnermostPos base/Ctxt last)))
+                            (base/WarnfAt pos "%s loop ending at %d:%d was modified (loop inlined into %s:%d)" loopKind ^{:go/via [lico]} (.Line last) ^{:go/via [lico]} (.Col last) (.Filename outer) ^{:go/via [lico]} (.Line outer))))))))))))))))

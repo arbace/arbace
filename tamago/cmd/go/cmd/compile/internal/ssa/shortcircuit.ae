@@ -1,0 +1,595 @@
+;; Copyright 2016 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.cmd.compile.internal.ssa) (go/file "shortcircuit.go" :imports [])
+
+
+
+
+
+^{:go/end 62} (go/func shortcircuit "shortcircuit finds situations where branch directions\nare always correlated and rewrites the CFG to take\nadvantage of that fact.\nThis optimization is useful for compiling && and || expressions.\n" [^{:tag (* Func)} f]
+  ;; Step 1: Replace a phi arg with a constant if that arg
+  ;; is the control value of a preceding If block.
+  ;; b1:
+  ;;    If a goto b2 else b3
+  ;; b2: <- b1 ...
+  ;;    x = phi(a, ...)
+  ;;
+  ;; We can replace the "a" in the phi with the constant true.
+  (let [(values ^{:tag (* Value)} ct ^{:tag (* Value)} cf) (zero (* Value))]
+    (range [_ b (.-Blocks f)]
+      (range [_ v (.-Values b)]
+        (when (!= (.-Op v) OpPhi)
+          (continue))
+
+        (when (not (.IsBoolean (.-Type v)))
+          (continue))
+
+        (range [i a (.-Args v)]
+          (let [e (aget (.-Preds b) i)
+              ^{:line 31} p (.-b e)]
+            (when (!= (.-Kind p) BlockIf)
+              (continue))
+
+            (when (!= (aget (.-Controls p) 0) a)
+              (continue))
+
+            (if (== (.-i e) 0) (do
+                (when (== ct nil)
+                  (set! ct (.ConstBool f (.-Bool (.-Types (.-Config f))) true)))
+
+                (.SetArg v i ct))
+              (do
+                (when (== cf nil)
+                  (set! cf (.ConstBool f (.-Bool (.-Types (.-Config f))) false)))
+
+                (.SetArg v i cf)))))))
+
+
+
+
+
+    ;; Step 2: Redirect control flow around known branches.
+    ;; p:
+    ;;   ... goto b ...
+    ;; b: <- p ...
+    ;;   v = phi(true, ...)
+    ;;   if v goto t else u
+    ;; We can redirect p to go directly to t instead of b.
+    ;; (If v is not live after b).
+    (fuse f (bit-or fuseTypePlain fuseTypeShortCircuit))))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 267} (go/func shortcircuitBlock "shortcircuitBlock checks for a CFG in which an If block\nhas as its control value a Phi that has a ConstBool arg.\nIn some such cases, we can rewrite the CFG into a flatter form.\n\n(1) Look for a CFG of the form\n\n\tp   other pred(s)\n\t \\ /\n\t  b\n\t / \\\n\tt   other succ\n\nin which b is an If block containing a single phi value with a single use (b's Control),\nwhich has a ConstBool arg.\np is the predecessor corresponding to the argument slot in which the ConstBool is found.\nt is the successor corresponding to the value of the ConstBool arg.\n\nRewrite this into\n\n\tp   other pred(s)\n\t|  /\n\t| b\n\t|/ \\\n\tt   u\n\nand remove the appropriate phi arg(s).\n\n(2) Look for a CFG of the form\n\n\tp   q\n\t \\ /\n\t  b\n\t / \\\n\tt   u\n\nin which b is as described in (1).\nHowever, b may also contain other phi values.\nThe CFG will be modified as described in (1).\nHowever, in order to handle those other phi values,\nfor each other phi value w, we must be able to eliminate w from b.\nWe can do that though a combination of moving w to a different block\nand rewriting uses of w to use a different value instead.\nSee shortcircuitPhiPlan for details.\n" ^bool [^{:tag (* Block)} b]
+  (when (!= (.-Kind b) BlockIf)
+    (return false))
+
+  ;; Look for control values of the form Copy(Not(Copy(Phi(const, ...)))).
+  ;; Those must be the only values in the b, and they each must be used only by b.
+  ;; Track the negations so that we can swap successors as needed later.
+  (let [ctl (aget (.-Controls b) 0)
+      ^{:line 115} nval 1 ; the control value
+      ^{:line 116 :tag int64} swap (zero int64)]
+    (while (and (== (.-Uses ctl) 1) (== (.-Block ctl) b) ^:go/paren (or (== (.-Op ctl) OpCopy) (== (.-Op ctl) OpNot)))
+      (when (== (.-Op ctl) OpNot)
+        (set! swap (bit-xor 1 swap)))
+
+      (set! ctl (aget (.-Args ctl) 0))
+      (inc! nval)) ; wrapper around control value
+
+    (when (or (!= (.-Op ctl) OpPhi) (!= (.-Block ctl) b) (!= (.-Uses ctl) 1))
+      (return false))
+
+    (let [nOtherPhi 0]
+      (range [_ w (.-Values b)]
+        (when (and (== (.-Op w) OpPhi) (!= w ctl))
+          (inc! nOtherPhi)))
+
+
+      (when (and (> nOtherPhi 0) (!= (len (.-Preds b)) 2))
+        ;; We rely on b having exactly two preds in shortcircuitPhiPlan
+        ;; to reason about the values of phis.
+        (return false))
+
+      ;; We only process blocks with only phi values except for control
+      ;; value and its wrappers.
+      (when (!= (len (.-Values b)) (+ nval nOtherPhi))
+        (return false))
+
+      (when (> nOtherPhi 0)
+        ;; Check for any phi which is the argument of another phi.
+        ;; These cases are tricky, as substitutions done by replaceUses
+        ;; are no longer trivial to do in any ordering. See issue 45175.
+        (let [m (make (map (* Value) bool) (+ 1 nOtherPhi))]
+          (range [_ v (.-Values b)]
+            (when (== (.-Op v) OpPhi)
+              (aset m v true)))
+
+
+          (range [v m]
+            (range [_ a (.-Args v)]
+              (when (and (!= a v) (aget m a))
+                (return false))))))
+
+
+
+
+
+      ;; Locate index of first const phi arg.
+      (let [cidx -1]
+        (range [i a (.-Args ctl)]
+          (when (== (.-Op a) OpConstBool)
+            (set! cidx i)
+            (break)))
+
+
+        (when (== cidx -1)
+          (return false))
+
+
+        ;; p is the predecessor corresponding to cidx.
+        (let [pe (aget (.-Preds b) cidx)
+            ^{:line 176} p (.-b pe)
+            ^{:line 177} pi (.-i pe)
+
+            ;; t is the "taken" branch: the successor we always go to when coming in from p.
+            ^{:line 180} ti (bit-xor 1 (.-AuxInt (aget (.-Args ctl) cidx)) swap)
+            ^{:line 181} te (aget (.-Succs b) ti)
+            ^{:line 182} t (.-b te)]
+          (when (or (== p b) (== t b))
+            ;; This is an infinite loop; we can't remove it. See issue 33903.
+            (return false))
+
+
+          ^{:go/breaks [11]} (let [^{:tag (func [(* Value) int])} fixPhi (zero (func [(* Value) int]))]
+            (when (> nOtherPhi 0)
+              (set! fixPhi (shortcircuitPhiPlan b ctl cidx ti))
+              (when (== fixPhi nil)
+                (return false)))
+
+
+
+            ;; We're committed. Update CFG and Phis.
+            ;; If you modify this section, update shortcircuitPhiPlan corresponding.
+
+            ;; Remove b's incoming edge from p.
+            (.removePred b cidx)
+            (.removePhiArg b ctl cidx)
+
+            ;; Redirect p's outgoing edge to t.
+            (aset (.-Succs p) pi (lit Edge t (len (.-Preds t))))
+
+            ;; Fix up t to have one more predecessor.
+            (set! (.-Preds t) (append (.-Preds t) (lit Edge p pi)))
+            (range [_ v (.-Values t)]
+              (when (!= (.-Op v) OpPhi)
+                (continue))
+
+              (.AddArg v (aget (.-Args v) (.-i te))))
+
+
+            (when (!= nOtherPhi 0)
+              ;; Adjust all other phis as necessary.
+              ;; Use a plain for loop instead of range because fixPhi may move phis,
+              ;; thus modifying b.Values.
+              (for [i 0] (< i (len (.-Values b))) (inc! i)
+                (let [phi (aget (.-Values b) i)]
+                  (when (or (== (.-Uses phi) 0) (== phi ctl) (!= (.-Op phi) OpPhi))
+                    (continue))
+
+                  (fixPhi phi i)
+                  (when (== (.-Block phi) b)
+                    (continue))
+
+                  ;; phi got moved to a different block with v.moveTo.
+                  ;; Adjust phi values in this new block that refer
+                  ;; to phi to refer to the corresponding phi arg instead.
+                  ;; phi used to be evaluated prior to this block,
+                  ;; and now it is evaluated in this block.
+                  (range [_ v (.-Values (.-Block phi))]
+                    (when (or (!= (.-Op v) OpPhi) (== v phi))
+                      (continue))
+
+                    (range [j a (.-Args v)]
+                      (when (== a phi)
+                        (.SetArg v j (aget (.-Args phi) j)))))
+
+
+
+                  (if (!= (.-Uses phi) 0)
+                    (phielimValue phi)
+
+                    (.reset phi OpInvalid))
+
+                  (dec! i))) ; v.moveTo put a new value at index i; reprocess
+
+
+              ;; We may have left behind some phi values with no uses
+              ;; but the wrong number of arguments. Eliminate those.
+              (range [_ v (.-Values b)]
+                (when (== (.-Uses v) 0)
+                  (.reset v OpInvalid))))
+
+
+
+
+            (when (== (len (.-Preds b)) 0)
+              ;; Block is now dead.
+              (set! (.-Kind b) BlockInvalid))
+
+
+            (phielimValue ctl)
+            true))))))
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 484} (go/func shortcircuitPhiPlan "shortcircuitPhiPlan returns a function to handle non-ctl phi values in b,\nwhere b is as described in shortcircuitBlock.\nThe returned function accepts a value v\nand the index i of v in v.Block: v.Block.Values[i] == v.\nIf the returned function moves v to a different block, it will use v.moveTo.\ncidx is the index in ctl of the ConstBool arg.\nti is the index in b.Succs of the always taken branch when arriving from p.\nIf shortcircuitPhiPlan returns nil, there is no plan available,\nand the CFG modifications must not proceed.\nThe returned function assumes that shortcircuitBlock has completed its CFG modifications.\n" ^{:tag (func [(* Value) int])} [^{:tag (* Block)} b ^{:tag (* Value)} ctl ^int cidx ^int64 ti]
+  ;; t is the "taken" branch: the successor we always go to when coming in from p.
+  ^{:go/breaks [[8 483]]} (let [t (.-b (aget (.-Succs b) ti))
+      ;; u is the "untaken" branch: the successor we never go to when coming in from p.
+      ^{:line 283} u (.-b (aget (.-Succs b) (bit-xor 1 ti)))]
+
+    ;; In the following CFG matching, ensure that b's preds are entirely distinct from b's succs.
+    ;; This is probably a stronger condition than required, but this happens extremely rarely,
+    ;; and it makes it easier to avoid getting deceived by pretty ASCII charts. See #44465.
+    (when [(values p0 p1) (values (.-b (aget (.-Preds b) 0)) (.-b (aget (.-Preds b) 1)))] (or (== p0 t) (== p1 t) (== p0 u) (== p1 u))
+      (return nil))
+
+
+    ;; Look for some common CFG structures
+    ;; in which the outbound paths from b merge,
+    ;; with no other preds joining them.
+    ;; In these cases, we can reconstruct what the value
+    ;; of any phi in b must be in the successor blocks.
+
+    (when (and (== (len (.-Preds t)) 1) (== (len (.-Succs t)) 1) (== (len (.-Preds u)) 1)
+        (== (len (.-Preds (.-b (aget (.-Succs t) 0)))) 2))
+      (let [m (.-b (aget (.-Succs t) 0))]
+        (when [visited (.flowsTo u m 5)] (!= visited nil)
+          ;; p   q
+          ;;  \ /
+          ;;   b
+          ;;  / \
+          ;; t   U (sub graph that satisfy condition in flowsTo)
+          ;;  \ /
+          ;;   m
+          ;;
+          ;; After the CFG modifications, this will look like
+          ;;
+          ;; p   q
+          ;; |  /
+          ;; | b
+          ;; |/ \
+          ;; t   U
+          ;;  \ /
+          ;;   m
+          ;;
+          ;; NB: t.Preds is (b, p), not (p, b).
+          (return ^{:go/end 343} (fn [^{:tag (* Value)} v ^int i]
+              ;; Replace any uses of v in t and u with the value v must have,
+              ;; given that we have arrived at that block.
+              ;; Then move v to m and adjust its value accordingly;
+              ;; this handles all other uses of v.
+              (let [(values argP argQ) (values (aget (.-Args v) cidx) (aget (.-Args v) (bit-xor 1 cidx)))
+                  ^{:line 327} phi (.newValue (.-Func t) OpPhi (.-Type v) t (.-Pos v))]
+                (.AddArg2 phi argQ argP)
+                (.replaceUses t v phi)
+                (range [bb visited]
+                  (.replaceUses bb v argQ))
+
+                (when (== (.-Uses v) 0)
+                  (return))
+
+                (.moveTo v m i)
+                ;; The phi in m belongs to whichever pred idx corresponds to t.
+                (if (== (.-b (aget (.-Preds m) 0)) t)
+                  (.SetArgs2 v phi argQ)
+
+                  (.SetArgs2 v argQ phi))))))))
+
+
+
+
+
+    (when (and (== (len (.-Preds t)) 2) (== (len (.-Preds u)) 1))
+      (when [visited (.flowsTo u t 5)] (!= visited nil)
+        ;; p   q
+        ;;  \ /
+        ;;   b
+        ;;   |\
+        ;;   | U ((sub graph that satisfy condition in flowsTo))
+        ;;   |/
+        ;;   t
+        ;;
+        ;; After the CFG modifications, this will look like
+        ;;
+        ;;     q
+        ;;    /
+        ;;   b
+        ;;   |\
+        ;; p | U
+        ;;  \|/
+        ;;   t
+        ;;
+        ;; NB: t.Preds is (b or U, b or U, p).
+        (return ^{:go/end 376} (fn [^{:tag (* Value)} v ^int i]
+            ;; Replace any uses of v in U. Then move v to t.
+            (let [(values argP argQ) (values (aget (.-Args v) cidx) (aget (.-Args v) (bit-xor 1 cidx)))]
+              (range [bb visited]
+                (.replaceUses bb v argQ))
+
+              (.moveTo v t i)
+              (.SetArgs3 v argQ argQ argP))))))
+
+
+
+
+    (when (and (== (len (.-Preds u)) 2) (== (len (.-Preds t)) 1) (== (len (.-Succs t)) 1) (== (.-b (aget (.-Succs t) 0)) u))
+      ;; p   q
+      ;;  \ /
+      ;;   b
+      ;;  /|
+      ;; t |
+      ;;  \|
+      ;;   u
+      ;;
+      ;; After the CFG modifications, this will look like
+      ;;
+      ;; p   q
+      ;; |  /
+      ;; | b
+      ;; |/|
+      ;; t |
+      ;;  \|
+      ;;   u
+      ;;
+      ;; NB: t.Preds is (b, p), not (p, b).
+      (return ^{:go/end 411} (fn [^{:tag (* Value)} v ^int i]
+          ;; Replace any uses of v in t. Then move v to u.
+          (let [(values argP argQ) (values (aget (.-Args v) cidx) (aget (.-Args v) (bit-xor 1 cidx)))
+              ^{:line 403} phi (.newValue (.-Func t) OpPhi (.-Type v) t (.-Pos v))]
+            (.AddArg2 phi argQ argP)
+            (.replaceUses t v phi)
+            (when (== (.-Uses v) 0)
+              (return))
+
+            (.moveTo v u i)
+            (.SetArgs2 v argQ phi)))))
+
+
+
+    ;; Look for some common CFG structures
+    ;; in which one outbound path from b exits,
+    ;; with no other preds joining.
+    ;; In these cases, we can reconstruct what the value
+    ;; of any phi in b must be in the path leading to exit,
+    ;; and move the phi to the non-exit path.
+
+    (when (and (== (len (.-Preds t)) 1) (== (len (.-Preds u)) 1) (== (len (.-Succs t)) 0))
+      ;; p   q
+      ;;  \ /
+      ;;   b
+      ;;  / \
+      ;; t   u
+      ;;
+      ;; where t is an Exit/Ret block.
+      ;;
+      ;; After the CFG modifications, this will look like
+      ;;
+      ;; p   q
+      ;; |  /
+      ;; | b
+      ;; |/ \
+      ;; t   u
+      ;;
+      ;; NB: t.Preds is (b, p), not (p, b).
+      (return ^{:go/end 452} (fn [^{:tag (* Value)} v ^int i]
+          ;; Replace any uses of v in t and x. Then move v to u.
+          (let [(values argP argQ) (values (aget (.-Args v) cidx) (aget (.-Args v) (bit-xor 1 cidx)))
+              ;; If there are no uses of v in t or x, this phi will be unused.
+              ;; That's OK; it's not worth the cost to prevent that.
+              ^{:line 444} phi (.newValue (.-Func t) OpPhi (.-Type v) t (.-Pos v))]
+            (.AddArg2 phi argQ argP)
+            (.replaceUses t v phi)
+            (when (== (.-Uses v) 0)
+              (return))
+
+            (.moveTo v u i)
+            (.SetArgs1 v argQ)))))
+
+
+
+    (when (and (== (len (.-Preds u)) 1) (== (len (.-Preds t)) 1) (== (len (.-Succs u)) 0))
+      ;; p   q
+      ;;  \ /
+      ;;   b
+      ;;  / \
+      ;; t   u
+      ;;
+      ;; where u is an Exit/Ret block.
+      ;;
+      ;; After the CFG modifications, this will look like
+      ;;
+      ;; p   q
+      ;; |  /
+      ;; | b
+      ;; |/ \
+      ;; t   u
+      ;;
+      ;; NB: t.Preds is (b, p), not (p, b).
+      (return ^{:go/end 479} (fn [^{:tag (* Value)} v ^int i]
+          ;; Replace any uses of v in u (and x). Then move v to t.
+          (let [(values argP argQ) (values (aget (.-Args v) cidx) (aget (.-Args v) (bit-xor 1 cidx)))]
+            (.replaceUses u v argQ)
+            (.moveTo v t i)
+            (.SetArgs2 v argQ argP)))))
+
+
+
+    ;; TODO: handle more cases; shortcircuit optimizations turn out to be reasonably high impact
+    nil))
+
+
+
+^{:go/end 500} (go/method replaceUses "replaceUses replaces all uses of old in b with new.\n" [^{:tag (* Block)} b ^{:tag (* Value)} old ^{:tag (* Value)} new]
+  (range [_ v (.-Values b)]
+    (range [i a (.-Args v)]
+      (when (== a old)
+        (.SetArg v i new))))
+
+
+
+  (range [i v (.ControlValues b)]
+    (when (== v old)
+      (.ReplaceControl b i new))))
+
+
+
+
+
+
+
+^{:go/end 522} (go/method moveTo "moveTo moves v to dst, adjusting the appropriate Block.Values slices.\nThe caller is responsible for ensuring that this is safe.\ni is the index of v in v.Block.Values.\n" [^{:tag (* Value)} v ^{:tag (* Block)} dst ^int i]
+  (when (.-scheduled (.-Func dst))
+    (.Fatalf v "moveTo after scheduling"))
+
+  (let [src (.-Block v)]
+    (when (!= (aget (.-Values src) i) v)
+      (.Fatalf v "moveTo bad index %d" v i))
+
+    (when (== src dst)
+      (return))
+
+    (set! (.-Block v) dst)
+    (set! (.-Values dst) (append (.-Values dst) v))
+    (let [last (- (len (.-Values src)) 1)]
+      (aset (.-Values src) i (aget (.-Values src) last))
+      (aset (.-Values src) last nil)
+      (set! (.-Values src) (subslice (.-Values src) _ last)))))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 596} (go/method flowsTo "flowsTo checks that the subgraph starting from v and ends at t is a DAG, with\nthe following constraints:\n\n\t(1) v can reach t.\n\t(2) v's connected component removing the paths containing t is a DAG.\n\t(3) The blocks in the subgraph G defined in (2) has all their preds also in G,\n\t    except v.\n\t(4) The subgraph defined in (2) has a size smaller than cap.\n\n\tWe know that the subgraph G defined in constraint (2)(3) has the property that v\n\tdominates all the blocks in G:\n\t\tIf there exist a block x in G that is not dominated by v, then there exist a\n\t\tpath P from entry to x that does not contain v. Denote x's predecessor in P\n\t\tas x', then x' must also be in G given constraint (3), same to its pred x''\n\t\tin P. Given constraint (2), by going back in P we will in the end reach v,\n\t\twhich conflicts with the definition of P.\n\nConstraint (2)'s DAG requirement could be further relaxed to contain \"internal\"\nloops that doesn't change the dominance relation of v. But that is more subtle\nand requires another constraint on the source block v, and a more complex proof.\nFurthermore optimizing the branch guarding a loop might bring less gains as the\nloop itself might be the bottleneck.\n" ^{:tag (map (* Block) (struct))} [^{:tag (* Block)} v ^{:tag (* Block)} t ^int cap]
+  ^{:go/breaks [[5 595]]} (let [seen (lit (map (* Block) (struct)))
+      ^{:line 548 :tag (func [^{:tag (* Block)} b])} boundedDFS (zero (func [^{:tag (* Block)} b]))
+      ^{:line 549} hasPathToT false
+      ^{:line 550} fullyExplored true
+      ^{:line 551} isDAG true
+      ^{:line 552} visited (lit (map (* Block) (struct)))]
+    (set! boundedDFS ^{:go/end 581} (fn [^{:tag (* Block)} b]
+        (when [(values _ ok) (aget seen b)] ok
+          (return))
+
+        (when [(values _ ok) (aget visited b)] ok
+          (set! isDAG false)
+          (return))
+
+        (when (== b t)
+          ;; do not put t into seen, this way
+          ;; if v can reach t's connected component without going through t,
+          ;; it will fail the pred check after boundedDFSUntil.
+          (set! hasPathToT true)
+          (return))
+
+        (when (> (len seen) cap)
+          (set! fullyExplored false)
+          (return))
+
+        (aset seen b (lit (struct)))
+        (aset visited b (lit (struct)))
+        (range [_ se (.-Succs b)]
+          (boundedDFS (.-b se))
+          (when (not (and isDAG fullyExplored))
+            (return)))
+
+
+        (delete visited b)))
+
+    (boundedDFS v)
+    (when (and hasPathToT fullyExplored isDAG)
+      (range [b seen]
+        (when (!= b v)
+          (range [_ se (.-Preds b)]
+            (when [(values _ ok) (aget seen (.-b se))] (not ok)
+              (return nil)))))
+
+
+
+
+      (return seen))
+
+    nil))

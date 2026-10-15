@@ -1,0 +1,269 @@
+;; Copyright 2015 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.cmd.compile.internal.ssa) (go/file "flagalloc.go" :imports [])
+
+
+
+
+^{:go/end 241} (go/func flagalloc "flagalloc allocates the flag register among all the flag-generating\ninstructions. Flag values are recomputed if they need to be\nspilled/restored.\n" [^{:tag (* Func)} f]
+  ;; Compute the in-register flag value we want at the end of
+  ;; each block. This is basically a best-effort live variable
+  ;; analysis, so it can be much simpler than a full analysis.
+  (let [end (.allocValueSlice (.-Cache f) (.NumBlocks f))]
+    (defer (.freeValueSlice (.-Cache f) end))
+    (let [po (.postorder f)]
+      (for [n 0] (< n 2) (inc! n)
+        (range [_ b po]
+          ;; Walk values backwards to figure out what flag
+          ;; value we want in the flag register at the start
+          ;; of the block.
+          (let [^{:tag (* Value)} flag (zero (* Value))]
+            (range [_ c (.ControlValues b)]
+              (when (.IsFlags (.-Type c))
+                (when (!= flag nil)
+                  (panic "cannot have multiple controls using flags"))
+
+                (set! flag c)))
+
+
+            (when (== flag nil)
+              (set! flag (aget end (.-ID b))))
+
+            (for [j (- (len (.-Values b)) 1)] (>= j 0) (dec! j)
+              (let [v (aget (.-Values b) j)]
+                (when (== v flag)
+                  (set! flag nil))
+
+                (when (.clobbersFlags v)
+                  (set! flag nil))
+
+                (range [_ a (.-Args v)]
+                  (when (.IsFlags (.-Type a))
+                    (set! flag a)))))
+
+
+
+            (when (!= flag nil)
+              (range [_ e (.-Preds b)]
+                (let [p (.-b e)]
+                  (aset end (.-ID p) flag)))))))
+
+
+
+
+
+      ;; For blocks which have a flags control value, that's the only value
+      ;; we can leave in the flags register at the end of the block. (There
+      ;; is no place to put a flag regeneration instruction.)
+      (range [_ b (.-Blocks f)]
+        (when (== (.-Kind b) BlockDefer)
+          ;; Defer blocks internally use/clobber the flags value.
+          (aset end (.-ID b) nil)
+          (continue))
+
+        (range [_ v (.ControlValues b)]
+          (when (and (.IsFlags (.-Type v)) (!= (aget end (.-ID b)) v))
+            (aset end (.-ID b) nil))))
+
+
+
+
+      ;; Compute which flags values will need to be spilled.
+      (let [spill (lit (map ID bool))]
+        (range [_ b (.-Blocks f)]
+          (let [^{:tag (* Value)} flag (zero (* Value))]
+            (when (> (len (.-Preds b)) 0)
+              (set! flag (aget end (.-ID (.-b (aget (.-Preds b) 0))))))
+
+            (range [_ v (.-Values b)]
+              (range [_ a (.-Args v)]
+                (when (not (.IsFlags (.-Type a)))
+                  (continue))
+
+                (when (== a flag)
+                  (continue))
+
+                ;; a will need to be restored here.
+                (aset spill (.-ID a) true)
+                (set! flag a))
+
+              (when (.clobbersFlags v)
+                (set! flag nil))
+
+              (when (.IsFlags (.-Type v))
+                (set! flag v)))
+
+
+            (range [_ v (.ControlValues b)]
+              (when (and (!= v flag) (.IsFlags (.-Type v)))
+                (aset spill (.-ID v) true)))
+
+
+            (when [v (aget end (.-ID b))] (and (!= v nil) (!= v flag))
+              (aset spill (.-ID v) true))))
+
+
+
+        ;; Add flag spill and recomputation where they are needed.
+        (let [^{:tag (slice (* Value))} remove (zero (slice (* Value))) ; values that should be checked for possible removal
+            ^{:line 111 :tag (slice (* Value))} oldSched (zero (slice (* Value)))]
+          (range [_ b (.-Blocks f)]
+            (set! oldSched (append (subslice oldSched _ 0) (spread (.-Values b))))
+            (set! (.-Values b) (subslice (.-Values b) _ 0))
+            ;; The current live flag value (the pre-flagalloc copy).
+            (let [^{:tag (* Value)} flag (zero (* Value))]
+              (when (> (len (.-Preds b)) 0)
+                (set! flag (aget end (.-ID (.-b (aget (.-Preds b) 0)))))
+                ;; Note: the following condition depends on the lack of critical edges.
+                (range [_ e (subslice (.-Preds b) 1)]
+                  (let [p (.-b e)]
+                    (when (!= (aget end (.-ID p)) flag)
+                      (.Fatalf f "live flag in %s's predecessors not consistent" b)))))
+
+
+
+              (range [_ v oldSched]
+                (when (and (== (.-Op v) OpPhi) (.IsFlags (.-Type v)))
+                  (.Fatalf f "phi of flags not supported: %s" (.LongString v)))
+
+
+                ;; If v will be spilled, and v uses memory, then we must split it
+                ;; into a load + a flag generator.
+                (when (and (aget spill (.-ID v)) (!= (.MemoryArg v) nil))
+                  (set! remove (append remove v))
+                  (when (not ((.-splitLoad (.-Config f)) v))
+                    (.Fatalf f "can't split flag generator: %s" (.LongString v))))
+
+
+
+                ;; Make sure any flag arg of v is in the flags register.
+                ;; If not, recompute it.
+                (range [i a (.-Args v)]
+                  (when (not (.IsFlags (.-Type a)))
+                    (continue))
+
+                  (when (== a flag)
+                    (continue))
+
+                  ;; Recalculate a
+                  (let [c (copyFlags a b)]
+                    ;; Update v.
+                    (.SetArg v i c)
+                    ;; Remember the most-recently computed flag value.
+                    (set! flag a)))
+
+                ;; Issue v.
+                (set! (.-Values b) (append (.-Values b) v))
+                (when (.clobbersFlags v)
+                  (set! flag nil))
+
+                (when (.IsFlags (.-Type v))
+                  (set! flag v)))
+
+
+              (range [i v (.ControlValues b)]
+                (when (and (!= v flag) (.IsFlags (.-Type v)))
+                  ;; Recalculate control value.
+                  (set! remove (append remove v))
+                  (let [c (copyFlags v b)]
+                    (.ReplaceControl b i c)
+                    (set! flag v))))
+
+
+              (when [v (aget end (.-ID b))] (and (!= v nil) (!= v flag))
+                ;; Need to reissue flag generator for use by
+                ;; subsequent blocks.
+                (set! remove (append remove v))
+                (copyFlags v b))))
+          ;; Note: this flag generator is not properly linked up
+          ;; with the flag users. This breaks the SSA representation.
+          ;; We could fix up the users with another pass, but for now
+          ;; we'll just leave it. (Regalloc has the same issue for
+          ;; standard regs, and it runs next.)
+          ;; For this reason, take care not to add this flag
+          ;; generator to the remove list.
+
+
+
+          ;; Save live flag state for later.
+          (range [_ b (.-Blocks f)]
+            (set! (.-FlagsLiveAtEnd b) (!= (aget end (.-ID b)) nil)))
+
+
+          ;; Remove any now-dead values.
+          ;; The number of values to remove is likely small,
+          ;; and removing them requires processing all values in a block,
+          ;; so minimize the number of blocks that we touch.
+
+          ;; Shrink remove to contain only dead values, and clobber those dead values.
+          (for [i 0] (< i (len remove)) (inc! i)
+            (let [v (aget remove i)]
+              (when (== (.-Uses v) 0)
+                (.reset v OpInvalid)
+                (continue))
+
+              ;; Remove v.
+              (let [last (- (len remove) 1)]
+                (aset remove i (aget remove last))
+                (aset remove last nil)
+                (set! remove (subslice remove _ last))
+                (dec! i)))) ; reprocess value at i
+
+
+          (when (== (len remove) 0)
+            (return))
+
+
+          (let [removeBlocks (.newSparseSet f (.NumBlocks f))]
+            (defer (.retSparseSet f removeBlocks))
+            (range [_ v remove]
+              (.add removeBlocks (.-ID (.-Block v))))
+
+
+            ;; Process affected blocks, preserving value order.
+            (range [_ b (.-Blocks f)]
+              (when (not (.contains removeBlocks (.-ID b)))
+                (continue))
+
+              (let [i 0]
+                (for [j 0] (< j (len (.-Values b))) (inc! j)
+                  (let [v (aget (.-Values b) j)]
+                    (when (== (.-Op v) OpInvalid)
+                      (continue))
+
+                    (aset (.-Values b) i v)
+                    (inc! i)))
+
+                (.truncateValues b i)))))))))
+
+
+
+^{:go/breaks [[5 253]] :go/end 254} (go/method clobbersFlags ^bool [^{:tag (* Value)} v]
+  (when (.-clobberFlags (aget opcodeTable (.-Op v)))
+    (return true))
+
+  (when (and (.IsTuple (.-Type v)) ^:go/paren (or (.IsFlags (.FieldType (.-Type v) 0)) (.IsFlags (.FieldType (.-Type v) 1))))
+    ;; This case handles the possibility where a flag value is generated but never used.
+    ;; In that case, there's no corresponding Select to overwrite the flags value,
+    ;; so we must consider flags clobbered by the tuple-generating instruction.
+    (return true))
+
+  false)
+
+
+
+
+^{:go/end 270} (go/func copyFlags "copyFlags copies v (flag generator) into b, returns the copy.\nIf v's arg is also flags, copy recursively.\n" ^{:tag (* Value)} [^{:tag (* Value)} v ^{:tag (* Block)} b]
+  (let [flagsArgs (make (map int (* Value)))]
+    (range [i a (.-Args v)]
+      (when (or (.IsFlags (.-Type a)) (.IsTuple (.-Type a)))
+        (aset flagsArgs i (copyFlags a b))))
+
+
+    (let [c (.copyInto v b)]
+      (range [i a flagsArgs]
+        (.SetArg c i a))
+
+      ^{:line 269} c)))

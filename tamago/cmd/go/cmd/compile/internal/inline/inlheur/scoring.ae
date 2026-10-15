@@ -1,0 +1,739 @@
+;; Copyright 2023 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.cmd.compile.internal.inline.inlheur) (go/file "scoring.go" :imports [
+
+
+    ^{:line 8} [base "cmd/compile/internal/base"]
+    ^{:line 9} [ir "cmd/compile/internal/ir"]
+    ^{:line 10} [pgoir "cmd/compile/internal/pgoir"]
+    ^{:line 11} [types "cmd/compile/internal/types"]
+    ^{:line 12} [cmp "cmp"]
+    ^{:line 13} [fmt "fmt"]
+    ^{:line 14} [os "os"]
+    ^{:line 15} [slices "slices"]
+    ^{:line 16} [strconv "strconv"]
+    ^{:line 17} [strings "strings"]])
+
+
+
+
+(go/type scoreAdjustTyp "These constants enumerate the set of possible ways/scenarios\nin which we'll adjust the score of a given callsite.\n" uint)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+(go/const "These constants capture the various ways in which the inliner's\nscoring phase can adjust a callsite score based on heuristics. They\nfall broadly into three categories:\n\n1) adjustments based solely on the callsite context (ex: call\nappears on panic path)\n\n2) adjustments that take into account specific interesting values\npassed at a call site (ex: passing a constant that could result in\ncprop/deadcode in the caller)\n\n3) adjustments that take into account values returned from the call\nat a callsite (ex: call always returns the same inlinable function,\nand return value flows unmodified into an indirect call)\n\nFor categories 2 and 3 above, each adjustment can have either a\n\"must\" version and a \"may\" version (but not both). Here the idea is\nthat in the \"must\" version the value flow is unconditional: if the\ncallsite executes, then the condition we're interested in (ex:\nparam feeding call) is guaranteed to happen. For the \"may\" version,\nthere may be control flow that could cause the benefit to be\nbypassed.\n"
+
+  ^{:line 48} [^{:tag scoreAdjustTyp :val 1 :doc "Category 1 adjustments (see above)\n"} panicPathAdj (<< 1 iota)]
+  ^{:line 49} [^{:val 2} initFuncAdj]
+  ^{:line 50} [^{:val 4} inLoopAdj]
+
+
+  ^{:line 53} [^{:val 8 :doc "Category 2 adjustments (see above).\n"} passConstToIfAdj]
+  ^{:line 54} [^{:val 16} passConstToNestedIfAdj]
+  ^{:line 55} [^{:val 32} passConcreteToItfCallAdj]
+  ^{:line 56} [^{:val 64} passConcreteToNestedItfCallAdj]
+  ^{:line 57} [^{:val 128} passFuncToIndCallAdj]
+  ^{:line 58} [^{:val 256} passFuncToNestedIndCallAdj]
+  ^{:line 59} [^{:val 512} passInlinableFuncToIndCallAdj]
+  ^{:line 60} [^{:val 1024} passInlinableFuncToNestedIndCallAdj]
+
+
+  ^{:line 63} [^{:val 2048 :doc "Category 3 adjustments.\n"} returnFeedsConstToIfAdj]
+  ^{:line 64} [^{:val 4096} returnFeedsFuncToIndCallAdj]
+  ^{:line 65} [^{:val 8192} returnFeedsInlinableFuncToIndCallAdj]
+  ^{:line 66} [^{:val 16384} returnFeedsConcreteToInterfaceCallAdj]
+
+  ^{:line 68} [^{:val 32768} sentinelScoreAdj]) ; sentinel; not a real adjustment
+
+
+;; This table records the specific values we use to adjust call
+;; site scores in a given scenario.
+;; NOTE: these numbers are chosen very arbitrarily; ideally
+;; we will go through some sort of turning process to decide
+;; what value for each one produces the best performance.
+
+(go/var adjValues (lit (map scoreAdjustTyp int)
+    ^{:line 78} [panicPathAdj 40]
+    ^{:line 79} [initFuncAdj 20]
+    ^{:line 80} [inLoopAdj -5]
+    ^{:line 81} [passConstToIfAdj -20]
+    ^{:line 82} [passConstToNestedIfAdj -15]
+    ^{:line 83} [passConcreteToItfCallAdj -30]
+    ^{:line 84} [passConcreteToNestedItfCallAdj -25]
+    ^{:line 85} [passFuncToIndCallAdj -25]
+    ^{:line 86} [passFuncToNestedIndCallAdj -20]
+    ^{:line 87} [passInlinableFuncToIndCallAdj -45]
+    ^{:line 88} [passInlinableFuncToNestedIndCallAdj -40]
+    ^{:line 89} [returnFeedsConstToIfAdj -15]
+    ^{:line 90} [returnFeedsFuncToIndCallAdj -25]
+    ^{:line 91} [returnFeedsInlinableFuncToIndCallAdj -40]
+    ^{:line 92} [returnFeedsConcreteToInterfaceCallAdj -25]))
+
+
+
+
+
+
+^{:go/end 107} (go/func SetupScoreAdjustments "SetupScoreAdjustments interprets the value of the -d=inlscoreadj\ndebugging option, if set. The value of this flag is expected to be\na series of \"/\"-separated clauses of the form adj1:value1. Example:\n-d=inlscoreadj=inLoopAdj=0/passConstToIfAdj=-99\n" []
+  (when (== (.-InlScoreAdj base/Debug) "")
+    (return))
+
+  (when [err (parseScoreAdj (.-InlScoreAdj base/Debug))] (!= err nil)
+    (base/Fatalf "malformed -d=inlscoreadj argument %q: %v"
+      (.-InlScoreAdj base/Debug) err)))
+
+
+
+^{:go/end 116} (go/func adjStringToVal [^string s] :results [scoreAdjustTyp bool]
+  (for [adj (conv scoreAdjustTyp 1)] (< adj sentinelScoreAdj) (set! adj << 1)
+    (when (== (.String adj) s)
+      (return adj true)))
+
+
+  (return 0 false))
+
+
+^{:go/end 143} (go/func parseScoreAdj ^error [^string val]
+  ^{:go/breaks [[4 142]]} (let [clauses (strings/Split val "/")]
+    (when (== (len clauses) 0)
+      (return (fmt/Errorf "no clauses")))
+
+    (range [_ clause clauses]
+      (let [elems (strings/Split clause ":")]
+        (when (< (len elems) 2)
+          (return (fmt/Errorf "clause %q: expected colon" clause)))
+
+        (when (!= (len elems) 2)
+          (return (fmt/Errorf "clause %q has %d elements, wanted 2" clause
+              (len elems))))
+
+        (let [(values adj ok) (adjStringToVal (aget elems 0))]
+          (when (not ok)
+            (return (fmt/Errorf "clause %q: unknown adjustment" clause)))
+
+          (let [(values val err) (strconv/Atoi (aget elems 1))]
+            (when (!= err nil)
+              (return (fmt/Errorf "clause %q: malformed value: %v" clause err)))
+
+            (aset adjValues adj val)))))
+
+    nil))
+
+
+^{:go/end 151} (go/func adjValue ^int [^scoreAdjustTyp x]
+  (if [(values val ok) (aget adjValues x)] ok
+    (return val)
+
+    (panic "internal error unregistered adjustment type")))
+
+
+
+(go/var mayMustAdj (lit (array ... (struct ^scoreAdjustTyp may ^scoreAdjustTyp must))
+    (lit _ :may passConstToNestedIfAdj :must passConstToIfAdj)
+    (lit _ :may passConcreteToNestedItfCallAdj :must passConcreteToItfCallAdj)
+    (lit _ :may passFuncToNestedIndCallAdj :must passFuncToNestedIndCallAdj)
+    (lit _ :may passInlinableFuncToNestedIndCallAdj :must passInlinableFuncToIndCallAdj)))
+
+
+^{:go/end 162} (go/func isMay ^bool [^scoreAdjustTyp x]
+  (!= (mayToMust x) 0))
+
+
+^{:go/end 166} (go/func isMust ^bool [^scoreAdjustTyp x]
+  (!= (mustToMay x) 0))
+
+
+^{:go/breaks [[4 174]] :go/end 175} (go/func mayToMust ^scoreAdjustTyp [^scoreAdjustTyp x]
+  (range [_ v mayMustAdj]
+    (when (== x (.-may v))
+      (return (.-must v))))
+
+
+  0)
+
+
+^{:go/breaks [[4 183]] :go/end 184} (go/func mustToMay ^scoreAdjustTyp [^scoreAdjustTyp x]
+  (range [_ v mayMustAdj]
+    (when (== x (.-must v))
+      (return (.-may v))))
+
+
+  0)
+
+
+
+
+
+
+
+
+
+^{:go/end 310} (go/method computeCallSiteScore "computeCallSiteScore takes a given call site whose ir node is\n'call' and callee function is 'callee' and with previously computed\ncall site properties 'csflags', then computes a score for the\ncallsite that combines the size cost of the callee with heuristics\nbased on previously computed argument and function properties,\nthen stores the score and the adjustment mask in the appropriate\nfields in 'cs'\n" [^{:tag (* CallSite)} cs ^{:tag (* callSiteAnalyzer)} csa ^{:tag (* FuncProps)} calleeProps]
+  (let [callee (.-Callee cs)
+      ^{:line 195} csflags (.-Flags cs)
+      ^{:line 196} call (.-Call cs)
+
+      ;; Start with the size-based score for the callee.
+      ^{:line 199} score (conv int (.-Cost (.-Inl callee)))
+      ^{:line 200 :tag scoreAdjustTyp} tmask (zero scoreAdjustTyp)]
+
+    (when (!= (bit-and debugTrace debugTraceScoring) 0)
+      (fmt/Fprintf os/Stderr "=-= scoring call to %s at %s , initial=%d\n"
+        (.-Name (.Sym callee)) (fmtFullPos ^{:go/via [miniExpr miniNode]} (.Pos call)) score))
+
+
+    ;; First some score adjustments to discourage inlining in selected cases.
+    (when (!= (bit-and csflags CallSiteOnPanicPath) 0)
+      (set! (values score tmask) (adjustScore panicPathAdj score tmask)))
+
+    (when (!= (bit-and csflags CallSiteInInitFunc) 0)
+      (set! (values score tmask) (adjustScore initFuncAdj score tmask)))
+
+
+    ;; Then adjustments to encourage inlining in selected cases.
+    (when (!= (bit-and csflags CallSiteInLoop) 0)
+      (set! (values score tmask) (adjustScore inLoopAdj score tmask)))
+
+
+    ;; Stop here if no callee props.
+    (when (== calleeProps nil)
+      (set! (values (.-Score cs) (.-ScoreMask cs)) (values score tmask))
+      (return))
+
+
+    ;; Walk through the actual expressions being passed at the call.
+    (let [calleeRecvrParms (.RecvParams (.Type callee))]
+      (range [idx (.-Args call)]
+        ;; ignore blanks
+        (when (or (== (.-Sym (aget calleeRecvrParms idx)) nil)
+            (.IsBlank (.-Sym (aget calleeRecvrParms idx))))
+          (continue))
+
+        (let [arg (aget (.-Args call) idx)
+            ^{:line 235} pflag (aget (.-ParamFlags calleeProps) idx)]
+          (when (!= (bit-and debugTrace debugTraceScoring) 0)
+            (fmt/Fprintf os/Stderr "=-= arg %d of %d: val %v flags=%s\n"
+              ^{:line 238} idx (len (.-Args call)) arg (.String pflag)))
+
+
+          (when (== (len (.-ArgProps cs)) 0)
+            (continue))
+
+          (let [argProps (aget (.-ArgProps cs) idx)]
+
+            (when (!= (bit-and debugTrace debugTraceScoring) 0)
+              (fmt/Fprintf os/Stderr "=-= arg %d props %s value %v\n"
+                ^{:line 248} idx (.String argProps) arg))
+
+
+            (when (!= (bit-and argProps ActualExprConstant) 0)
+              (when (!= (bit-and pflag ParamMayFeedIfOrSwitch) 0)
+                (set! (values score tmask) (adjustScore passConstToNestedIfAdj score tmask)))
+
+              (when (!= (bit-and pflag ParamFeedsIfOrSwitch) 0)
+                (set! (values score tmask) (adjustScore passConstToIfAdj score tmask))))
+
+
+
+            (when (!= (bit-and argProps ActualExprIsConcreteConvIface) 0)
+              ;; FIXME: ideally here it would be nice to make a
+              ;; distinction between the inlinable case and the
+              ;; non-inlinable case, but this is hard to do. Example:
+              ;;
+              ;;    type I interface { Tiny() int; Giant() }
+              ;;    type Conc struct { x int }
+              ;;    func (c *Conc) Tiny() int { return 42 }
+              ;;    func (c *Conc) Giant() { <huge amounts of code> }
+              ;;
+              ;;    func passConcToItf(c *Conc) {
+              ;;        makesItfMethodCall(c)
+              ;;    }
+              ;;
+              ;; In the code above, function properties will only tell
+              ;; us that 'makesItfMethodCall' invokes a method on its
+              ;; interface parameter, but we don't know whether it calls
+              ;; "Tiny" or "Giant". If we knew if called "Tiny", then in
+              ;; theory in addition to converting the interface call to
+              ;; a direct call, we could also inline (in which case
+              ;; we'd want to decrease the score even more).
+              ;;
+              ;; One thing we could do (not yet implemented) is iterate
+              ;; through all of the methods of "*Conc" that allow it to
+              ;; satisfy I, and if all are inlinable, then exploit that.
+              (when (!= (bit-and pflag ParamMayFeedInterfaceMethodCall) 0)
+                (set! (values score tmask) (adjustScore passConcreteToNestedItfCallAdj score tmask)))
+
+              (when (!= (bit-and pflag ParamFeedsInterfaceMethodCall) 0)
+                (set! (values score tmask) (adjustScore passConcreteToItfCallAdj score tmask))))
+
+
+
+            (when (!= (bit-and argProps (bit-or ActualExprIsFunc ActualExprIsInlinableFunc)) 0)
+              (let [mayadj passFuncToNestedIndCallAdj
+                  ^{:line 295} mustadj passFuncToIndCallAdj]
+                (when (!= (bit-and argProps ActualExprIsInlinableFunc) 0)
+                  (set! mayadj passInlinableFuncToNestedIndCallAdj)
+                  (set! mustadj passInlinableFuncToIndCallAdj))
+
+                (when (!= (bit-and pflag ParamMayFeedIndirectCall) 0)
+                  (set! (values score tmask) (adjustScore mayadj score tmask)))
+
+                (when (!= (bit-and pflag ParamFeedsIndirectCall) 0)
+                  (set! (values score tmask) (adjustScore mustadj score tmask))))))))
+
+
+
+
+      (set! (values (.-Score cs) (.-ScoreMask cs)) (values score tmask)))))
+
+
+^{:go/end 339} (go/func adjustScore [^scoreAdjustTyp typ ^int score ^scoreAdjustTyp mask] :results [int scoreAdjustTyp]
+
+  (cond (isMust typ) (do
+      (when (!= (bit-and mask typ) 0)
+        (return score mask))
+
+      (let [may (mustToMay typ)]
+        (when (!= (bit-and mask may) 0)
+          ;; promote may to must, so undo may
+          (set! score - (adjValue may))
+          (set! mask bit-and-not may))))
+
+    (isMay typ)
+    (let [must (mayToMust typ)]
+      (when (!= (bit-and mask (bit-or must typ)) 0)
+        (return score mask))))
+
+
+  (when (== (bit-and mask typ) 0)
+    (when (!= (bit-and debugTrace debugTraceScoring) 0)
+      (fmt/Fprintf os/Stderr "=-= applying adj %d for %s\n"
+        (adjValue typ) (.String typ)))
+
+    (set! score + (adjValue typ))
+    (set! mask bit-or typ))
+
+  (return score mask))
+
+
+(go/var ^{:tag (map ResultPropBits scoreAdjustTyp)} resultFlagToPositiveAdj)
+(go/var ^{:tag (map ParamPropBits scoreAdjustTyp)} paramFlagToPositiveAdj)
+
+^{:go/end 356} (go/func setupFlagToAdjMaps []
+  (set! resultFlagToPositiveAdj (lit (map ResultPropBits scoreAdjustTyp)
+      ^{:line 346} [ResultIsAllocatedMem returnFeedsConcreteToInterfaceCallAdj]
+      ^{:line 347} [ResultAlwaysSameFunc returnFeedsFuncToIndCallAdj]
+      ^{:line 348} [ResultAlwaysSameConstant returnFeedsConstToIfAdj]))
+
+  (set! paramFlagToPositiveAdj (lit (map ParamPropBits scoreAdjustTyp)
+      ^{:line 351} [ParamMayFeedInterfaceMethodCall passConcreteToNestedItfCallAdj]
+      ^{:line 352} [ParamFeedsInterfaceMethodCall passConcreteToItfCallAdj]
+      ^{:line 353} [ParamMayFeedIndirectCall passInlinableFuncToNestedIndCallAdj]
+      ^{:line 354} [ParamFeedsIndirectCall passInlinableFuncToIndCallAdj])))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 400} (go/func LargestNegativeScoreAdjustment "LargestNegativeScoreAdjustment tries to estimate the largest possible\nnegative score adjustment that could be applied to a call of the\nfunction with the specified props. Example:\n\n\tfunc foo() {                  func bar(x int, p *int) int {\n\t   ...                          if x < 0 { *p = x }\n\t}                               return 99\n\t                              }\n\nFunction 'foo' above on the left has no interesting properties,\nthus as a result the most we'll adjust any call to is the value for\n\"call in loop\". If the calculated cost of the function is 150, and\nthe in-loop adjustment is 5 (for example), then there is not much\npoint treating it as inlinable. On the other hand \"bar\" has a param\nproperty (parameter \"x\" feeds unmodified to an \"if\" statement) and\na return property (always returns same constant) meaning that a\ngiven call _could_ be rescored down as much as -35 points-- thus if\nthe size of \"bar\" is 100 (for example) then there is at least a\nchance that scoring will enable inlining.\n" ^int [^{:tag (* ir/Func)} fn ^{:tag (* FuncProps)} props]
+  (when (== resultFlagToPositiveAdj nil)
+    (setupFlagToAdjMaps))
+
+  (let [^scoreAdjustTyp tmask (zero scoreAdjustTyp)
+      ^{:line 382} score (aget adjValues inLoopAdj)] ; any call can be in a loop
+    (range [_ pf (.-ParamFlags props)]
+      (when [(values adj ok) (aget paramFlagToPositiveAdj pf)] ok
+        (set! (values score tmask) (adjustScore adj score tmask))))
+
+
+    (range [_ rf (.-ResultFlags props)]
+      (when [(values adj ok) (aget resultFlagToPositiveAdj rf)] ok
+        (set! (values score tmask) (adjustScore adj score tmask))))
+
+
+
+    (when (!= (bit-and debugTrace debugTraceScoring) 0)
+      (fmt/Fprintf os/Stderr "=-= largestScore(%v) is %d\n"
+        ^{:line 396} fn score))
+
+
+    ^{:line 399} score))
+
+
+
+
+
+
+
+
+
+
+
+
+(go/var ^{:tag CallSiteTab :doc "callSiteTab contains entries for each call in the function\ncurrently being processed by InlineCalls; this variable will either\nbe set to 'cstabCache' below (for non-inlinable routines) or to the\nlocal 'cstab' entry in the fnInlHeur object for inlinable routines.\n\nNOTE: this assumes that inlining operations are happening in a serial,\nsingle-threaded fashion,f which is true today but probably won't hold\nin the future (for example, we might want to score the callsites\nin multiple functions in parallel); if the inliner evolves in this\ndirection we'll need to come up with a different approach here.\n"} callSiteTab)
+
+
+
+
+(go/var ^{:tag scoreCallsCacheType :doc "scoreCallsCache caches a call site table and call site list between\ninvocations of ScoreCalls so that we can reuse previously allocated\nstorage.\n"} scoreCallsCache)
+
+(go/type scoreCallsCacheType (struct
+    ^{:line 420 :tag CallSiteTab} tab
+    ^{:line 421 :tag (slice (* CallSite))} csl))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 480} (go/func ScoreCalls "ScoreCalls assigns numeric scores to each of the callsites in\nfunction 'fn'; the lower the score, the more helpful we think it\nwill be to inline.\n\nUnlike a lot of the other inline heuristics machinery, callsite\nscoring can't be done as part of the CanInline call for a function,\ndue to fact that we may be working on a non-trivial SCC. So for\nexample with this SCC:\n\n\tfunc foo(x int) {           func bar(x int, f func()) {\n\t  if x != 0 {                  f()\n\t    bar(x, func(){})           foo(x-1)\n\t  }                         }\n\t}\n\nWe don't want to perform scoring for the 'foo' call in \"bar\" until\nafter foo has been analyzed, but it's conceivable that CanInline\nmight visit bar before foo for this SCC.\n" [^{:tag (* ir/Func)} fn]
+  (when (== (len (.-Body fn)) 0)
+    (return))
+
+  (enableDebugTraceIfEnv)
+
+  (let [nameFinder (newNameFinder fn)]
+
+    (when (!= (bit-and debugTrace debugTraceScoring) 0)
+      (fmt/Fprintf os/Stderr "=-= ScoreCalls(%v)\n" (ir/FuncName fn)))
+
+
+    ;; If this is an inlinable function, use the precomputed
+    ;; call site table for it. If the function wasn't an inline
+    ;; candidate, collect a callsite table for it now.
+    (let [^CallSiteTab cstab (zero CallSiteTab)]
+      (if [(values funcInlHeur ok) (aget fpmap fn)] ok
+        (set! cstab (.-cstab funcInlHeur))
+        (do
+          (when (!= (len (.-tab scoreCallsCache)) 0)
+            (panic "missing call to ScoreCallsCleanup"))
+
+          (when (== (.-tab scoreCallsCache) nil)
+            (set! (.-tab scoreCallsCache) (make CallSiteTab)))
+
+          (when (!= (bit-and debugTrace debugTraceScoring) 0)
+            (fmt/Fprintf os/Stderr "=-= building cstab for non-inl func %s\n"
+              (ir/FuncName fn)))
+
+          (set! cstab (computeCallSiteTable fn (.-Body fn) (.-tab scoreCallsCache) nil 0
+              ^{:line 472} nameFinder))))
+
+
+      (let [csa (makeCallSiteAnalyzer fn)
+          ^:const ^{:line 476 :val true} doCallResults true]
+        (.scoreCallsRegion csa fn (.-Body fn) cstab doCallResults nil)
+
+        (disableDebugTrace)))))
+
+
+
+
+
+
+^{:go/end 552} (go/method scoreCallsRegion "scoreCallsRegion assigns numeric scores to each of the callsites in\nregion 'region' within function 'fn'. This can be called on\nan entire function, or with 'region' set to a chunk of\ncode corresponding to an inlined call.\n" [^{:tag (* callSiteAnalyzer)} csa ^{:tag (* ir/Func)} fn ^ir/Nodes region ^CallSiteTab cstab ^bool doCallResults ^{:tag (* ir/InlinedCallExpr)} ic]
+  (when (!= (bit-and debugTrace debugTraceScoring) 0)
+    (fmt/Fprintf os/Stderr "=-= scoreCallsRegion(%v, %s) len(cstab)=%d\n"
+      (ir/FuncName fn) (.String (.Op (aget region 0))) (len cstab)))
+
+
+  ;; Sort callsites to avoid any surprises with non deterministic
+  ;; map iteration order (this is probably not needed, but here just
+  ;; in case).
+  (let [csl (subslice (.-csl scoreCallsCache) _ 0)]
+    (range [_ cs cstab]
+      (set! csl (append csl cs)))
+
+    (set! (.-csl scoreCallsCache) (subslice csl _ 0))
+    (^{:inst [(slice (* CallSite)) (* CallSite)]} slices/SortFunc csl ^{:go/end 502} (fn ^int [^{:tag (* CallSite)} a ^{:tag (* CallSite)} b]
+        (^{:inst [uint]} cmp/Compare (.-ID a) (.-ID b))))
+
+
+    ;; Score each call site.
+    (let [^{:tag (map (* ir/Name) resultPropAndCS)} resultNameTab (zero (map (* ir/Name) resultPropAndCS))]
+      (range [_ cs csl]
+        (let [^{:tag (* FuncProps)} cprops (zero (* FuncProps))
+            ^{:line 508} fihcprops false
+            ^{:line 509} desercprops false]
+          (if [(values funcInlHeur ok) (aget fpmap (.-Callee cs))] ok (do
+              (set! cprops (.-props funcInlHeur))
+              (set! fihcprops true))
+            (if (!= (.-Inl (.-Callee cs)) nil) (do
+                (set! cprops (DeserializeFromString (.-Properties (.-Inl (.-Callee cs)))))
+                (set! desercprops true))
+              (do
+                (if (!= (.-DumpInlFuncProps base/Debug) "") (do
+                    (fmt/Fprintf os/Stderr "=-= *** unable to score call to %s from %s\n" (.-Name (.Sym (.-Callee cs))) (fmtFullPos ^{:go/via [miniExpr miniNode]} (.Pos (.-Call cs))))
+                    (panic "should never happen"))
+
+                  (continue)))))
+
+
+          (.computeCallSiteScore cs csa cprops)
+
+          (when doCallResults
+            (when (!= (bit-and debugTrace debugTraceScoring) 0)
+              (fmt/Fprintf os/Stderr "=-= examineCallResults at %s: flags=%d score=%d funcInlHeur=%v deser=%v\n" (fmtFullPos ^{:go/via [miniExpr miniNode]} (.Pos (.-Call cs))) (.-Flags cs) (.-Score cs) fihcprops desercprops))
+
+            (set! resultNameTab (.examineCallResults csa cs resultNameTab)))
+
+
+          (when (!= (bit-and debugTrace debugTraceScoring) 0)
+            (fmt/Fprintf os/Stderr "=-= scoring call at %s: flags=%d score=%d funcInlHeur=%v deser=%v\n" (fmtFullPos ^{:go/via [miniExpr miniNode]} (.Pos (.-Call cs))) (.-Flags cs) (.-Score cs) fihcprops desercprops))))
+
+
+
+      (when (!= resultNameTab nil)
+        (.rescoreBasedOnCallResultUses csa fn resultNameTab cstab))
+
+
+      (disableDebugTrace)
+
+      (if (and (!= ic nil) (!= callSiteTab nil))
+        ;; Integrate the calls from this cstab into the table for the caller.
+        (when [err (.merge callSiteTab cstab)] (!= err nil)
+          (base/FatalfAt ^{:go/via [miniExpr miniNode]} (.Pos ic) "%v" err))
+
+
+        (set! callSiteTab cstab)))))
+
+
+
+
+
+^{:go/end 566} (go/func ScoreCallsCleanup "ScoreCallsCleanup resets the state of the callsite cache\nonce ScoreCalls is done with a function.\n" []
+  (when (!= (.-DumpInlCallSiteScores base/Debug) 0)
+    (when (== allCallSites nil)
+      (set! allCallSites (make CallSiteTab)))
+
+    (range [call cs callSiteTab]
+      (aset allCallSites call cs)))
+
+
+  (clear (.-tab scoreCallsCache)))
+
+
+
+
+^{:go/end 580} (go/func GetCallSiteScore "GetCallSiteScore returns the previously calculated score for call\nwithin fn.\n" [^{:tag (* ir/Func)} fn ^{:tag (* ir/CallExpr)} call] :results [int bool]
+  (when [(values funcInlHeur ok) (aget fpmap fn)] ok
+    (when [(values cs ok) (aget (.-cstab funcInlHeur) call)] ok
+      (return (.-Score cs) true)))
+
+
+  (when [(values cs ok) (aget callSiteTab call)] ok
+    (return (.-Score cs) true))
+
+  (return 0 false))
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 601} (go/func BudgetExpansion "BudgetExpansion returns the amount to relax/expand the base\ninlining budget when the new inliner is turned on; the inliner\nwill add the returned value to the hairiness budget.\n\nBackground: with the new inliner, the score for a given callsite\ncan be adjusted down by some amount due to heuristics, however we\nwon't know whether this is going to happen until much later after\nthe CanInline call. This function returns the amount to relax the\nbudget initially (to allow for a large score adjustment); later on\nin RevisitInlinability we'll look at each individual function to\ndemote it if needed.\n" ^int32 [^int32 maxBudget]
+  (when (!= (.-InlBudgetSlack base/Debug) 0)
+    (return (conv int32 (.-InlBudgetSlack base/Debug))))
+
+  ;; In the default case, return maxBudget, which will effectively
+  ;; double the budget from 80 to 160; this should be good enough
+  ;; for most cases.
+  ^{:line 600} maxBudget)
+
+
+(go/var ^CallSiteTab allCallSites)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 742} (go/func DumpInlCallSiteScores "DumpInlCallSiteScores is invoked by the inliner if the debug flag\n\"-d=dumpinlcallsitescores\" is set; it dumps out a human-readable\nsummary of all (potentially) inlinable callsites in the package,\nalong with info on call site scoring and the adjustments made to a\ngiven score. Here profile is the PGO profile in use (may be\nnil), budgetCallback is a callback that can be invoked to find out\nthe original pre-adjustment hairiness limit for the function, and\ninlineHotMaxBudget is the constant of the same name used in the\ninliner. Sample output lines:\n\nScore  Adjustment  Status  Callee  CallerPos ScoreFlags\n115    40          DEMOTED cmd/compile/internal/abi.(*ABIParamAssignment).Offset     expand_calls.go:1679:14|6       panicPathAdj\n76     -5n         PROMOTED runtime.persistentalloc   mcheckmark.go:48:45|3   inLoopAdj\n201    0           --- PGO  unicode.DecodeRuneInString        utf8.go:312:30|1\n7      -5          --- PGO  internal/abi.Name.DataChecked     type.go:625:22|0        inLoopAdj\n\nIn the dump above, \"Score\" is the final score calculated for the\ncallsite, \"Adjustment\" is the amount added to or subtracted from\nthe original hairiness estimate to form the score. \"Status\" shows\nwhether anything changed with the site -- did the adjustment bump\nit down just below the threshold (\"PROMOTED\") or instead bump it\nabove the threshold (\"DEMOTED\"); this will be blank (\"---\") if no\nthreshold was crossed as a result of the heuristics. Note that\n\"Status\" also shows whether PGO was involved. \"Callee\" is the name\nof the function called, \"CallerPos\" is the position of the\ncallsite, and \"ScoreFlags\" is a digest of the specific properties\nwe used to make adjustments to callsite score via heuristics.\n" [^{:tag (* pgoir/Profile)} profile ^{:tag (func [^{:tag (* ir/Func)} fn ^{:tag (* pgoir/Profile)} profile] [int32 bool])} budgetCallback]
+
+  (let [^{:tag (func [^{:tag (* CallSite)} cs] [bool])} indirectlyDueToPromotion (zero (func [^{:tag (* CallSite)} cs] [bool]))]
+    (set! indirectlyDueToPromotion ^{:go/end 646} (fn ^bool [^{:tag (* CallSite)} cs]
+        ^{:go/breaks [[4 645]]} (let [(values bud _) (budgetCallback (.-Callee cs) profile)
+            ^{:line 637} hairyval (.-Cost (.-Inl (.-Callee cs)))
+            ^{:line 638} score (conv int32 (.-Score cs))]
+          (when (and (> hairyval bud) (<= score bud))
+            (return true))
+
+          (when (!= (.-parent cs) nil)
+            (return (indirectlyDueToPromotion (.-parent cs))))
+
+          false)))
+
+
+    (let [genstatus ^{:go/end 689} (fn ^string [^{:tag (* CallSite)} cs]
+          (let [hairyval (.-Cost (.-Inl (.-Callee cs)))
+              (values bud isPGO) (budgetCallback (.-Callee cs) profile)
+              ^{:line 651} score (conv int32 (.-Score cs))
+              ^{:line 652} st "---"
+              ^{:line 653} expinl false]
+            (switch
+              (case [(and (<= hairyval bud) (<= score bud))]
+                ;; "Normal" inlined case: hairy val sufficiently low that
+                ;; it would have been inlined anyway without heuristics.
+                (set! expinl true))
+              (case [(and (> hairyval bud) (> score bud))])
+              ;; "Normal" not inlined case: hairy val sufficiently high
+              ;; and scoring didn't lower it.
+              (case [(and (> hairyval bud) (<= score bud))]
+                ;; Promoted: we would not have inlined it before, but
+                ;; after score adjustment we decided to inline.
+                (set! st "PROMOTED")
+                (set! expinl true))
+              (case [(and (<= hairyval bud) (> score bud))]
+                ;; Demoted: we would have inlined it before, but after
+                ;; score adjustment we decided not to inline.
+                (set! st "DEMOTED")))
+
+            (let [inlined (!= (bit-and (.-aux cs) csAuxInlined) 0)
+                ^{:line 673} indprom false]
+              (when (!= (.-parent cs) nil)
+                (set! indprom (indirectlyDueToPromotion (.-parent cs))))
+
+              (when (and inlined indprom)
+                (set! st + "|INDPROM"))
+
+              (cond (and inlined (not expinl))
+                (set! st + "|[NI?]")
+                (and (not inlined) expinl)
+                (set! st + "|[IN?]"))
+
+              (when isPGO
+                (set! st + "|PGO"))
+
+              ^{:line 688} st)))]
+
+
+      (when (!= (.-DumpInlCallSiteScores base/Debug) 0)
+        (let [^{:tag (slice (* CallSite))} sl (zero (slice (* CallSite)))]
+          (range [_ cs allCallSites]
+            (set! sl (append sl cs)))
+
+          (^{:inst [(slice (* CallSite)) (* CallSite)]} slices/SortFunc sl ^{:go/end 708} (fn ^int [^{:tag (* CallSite)} a ^{:tag (* CallSite)} b]
+              (when (!= (.-Score a) (.-Score b))
+                (return (^{:inst [int]} cmp/Compare (.-Score a) (.-Score b))))
+
+              (let [fni (ir/PkgFuncName (.-Callee a))
+                  ^{:line 701} fnj (ir/PkgFuncName (.-Callee b))]
+                (when (!= fni fnj)
+                  (return (^{:inst [string]} cmp/Compare fni fnj)))
+
+                (let [ecsi (EncodeCallSiteKey a)
+                    ^{:line 706} ecsj (EncodeCallSiteKey b)]
+                  (^{:inst [string]} cmp/Compare ecsi ecsj)))))
+
+
+          (let [mkname ^{:go/end 725} (fn ^string [^{:tag (* ir/Func)} fn]
+                (let [^string n (zero string)]
+                  (when (or (== fn nil) (== (.-Nname fn) nil))
+                    (return "<nil>"))
+
+                  (if (== (.-Pkg (.Sym fn)) types/LocalPkg)
+                    (set! n (+ "·" (.-Name (.Sym fn))))
+
+                    (set! n (ir/PkgFuncName fn)))
+
+                  ;; don't try to print super-long names
+                  (when (<= (len n) 64)
+                    (return n))
+
+                  (+ (subslice n _ 32) "..." (subslice n (- (len n) 32) (len n)))))]
+
+
+            (when (!= (len sl) 0)
+              (fmt/Fprintf os/Stdout "# scores for package %s\n" (.-Path types/LocalPkg))
+              (fmt/Fprintf os/Stdout "# Score  Adjustment  Status  Callee  CallerPos Flags ScoreFlags\n"))
+
+            (range [_ cs sl]
+              (let [hairyval (.-Cost (.-Inl (.-Callee cs)))
+                  ^{:line 733} adj (- (conv int32 (.-Score cs)) hairyval)
+                  ^{:line 734} nm (mkname (.-Callee cs))
+                  ^{:line 735} ecc (EncodeCallSiteKey cs)]
+                (fmt/Fprintf os/Stdout "%d  %d\t%s\t%s\t%s\t%s\n"
+                  (.-Score cs) adj (genstatus cs)
+                  ^{:line 738} nm ecc
+                  (.String (.-ScoreMask cs)))))))))))

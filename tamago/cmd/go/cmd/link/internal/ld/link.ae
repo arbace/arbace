@@ -1,0 +1,188 @@
+;; Derived from Inferno utils/6l/l.h and related files.
+;; https://bitbucket.org/inferno-os/inferno-os/src/master/utils/6l/l.h
+;;
+;;	Copyright © 1994-1999 Lucent Technologies Inc.  All rights reserved.
+;;	Portions Copyright © 1995-1997 C H Forsyth (forsyth@terzarima.net)
+;;	Portions Copyright © 1997-1999 Vita Nuova Limited
+;;	Portions Copyright © 2000-2007 Vita Nuova Holdings Limited (www.vitanuova.com)
+;;	Portions Copyright © 2004,2006 Bruce Ellis
+;;	Portions Copyright © 2005-2007 C H Forsyth (forsyth@terzarima.net)
+;;	Revisions Copyright © 2000-2007 Lucent Technologies Inc. and others
+;;	Portions Copyright © 2009 The Go Authors. All rights reserved.
+;;
+;; Permission is hereby granted, free of charge, to any person obtaining a copy
+;; of this software and associated documentation files (the "Software"), to deal
+;; in the Software without restriction, including without limitation the rights
+;; to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+;; copies of the Software, and to permit persons to whom the Software is
+;; furnished to do so, subject to the following conditions:
+;;
+;; The above copyright notice and this permission notice shall be included in
+;; all copies or substantial portions of the Software.
+;;
+;; THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+;; IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+;; FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL THE
+;; AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+;; LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+;; OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+;; THE SOFTWARE.
+
+(in-ns 'go.cmd.link.internal.ld) (go/file "link.go" :imports [
+
+
+    ^{:line 34} [bufio "bufio"]
+    ^{:line 35} [objabi "cmd/internal/objabi"]
+    ^{:line 36} [loader "cmd/link/internal/loader"]
+    ^{:line 37} [sym "cmd/link/internal/sym"]
+    ^{:line 38} [elf "debug/elf"]
+    ^{:line 39} [fmt "fmt"]])
+
+
+(go/type Shlib (struct
+    ^{:line 43 :tag string} Path
+    ^{:line 44 :tag (slice byte)} Hash
+    ^{:line 45 :tag (slice string)} Deps
+    ^{:line 46 :tag (* elf/File)} File
+
+
+    ^{:line 49 :tag (map string uint64) :doc "For every symbol defined in the shared library, record its address\nin the original shared library address space.\n"} symAddr
+
+
+
+
+
+
+    ^{:line 56 :tag (map uint64 string) :doc "For relocations in the shared library, map from the address\n(in the shared library address space) at which that\nrelocation applies to the target symbol.  We only keep\ntrack of a single kind of relocation: a standard absolute\naddress relocation with no addend. These were R_ADDR\nrelocations when the shared library was built.\n"} relocTarget))
+
+
+
+(go/type shlibReloc "A relocation that applies to part of the shared library.\n" (struct
+
+    ^{:line 62 :tag uint64 :doc "Address (in the shared library address space) the relocation applies to.\n"} addr
+
+    ^{:line 64 :tag string :doc "Target symbol name.\n"} target))
+
+
+(go/type shlibRelocs (slice shlibReloc))
+
+^{:go/end 69} (go/method Len ^int [^shlibRelocs s] (len s))
+^{:go/end 70} (go/method Swap [^shlibRelocs s ^int i ^int j] (set! (values (aget s i) (aget s j)) (values (aget s j) (aget s i))))
+^{:go/end 71} (go/method Less ^bool [^shlibRelocs s ^int i ^int j] (< (.-addr (aget s i)) (.-addr (aget s j))))
+
+
+
+(go/type Link "Link holds the context for writing object code from a compiler\nor for reading that input into the linker.\n" (struct
+    ^{:line 76} Target
+    ^{:line 77} ErrorReporter
+    ^{:line 78} ArchSyms
+
+    ^{:line 80 :tag (chan int)} outSem ; limits the number of output writers
+    ^{:line 81 :tag (* OutBuf)} Out
+
+    ^{:line 83 :tag int} version ; current version number for static/file-local symbols
+
+    ^{:line 85 :tag int} Debugvlog
+    ^{:line 86 :tag (* bufio/Writer)} Bso
+
+    ^{:line 88 :tag bool} Loaded ; set after all inputs have been loaded as symbols
+
+    ^{:line 90 :tag bool} compressDWARF
+
+    ^{:line 92 :tag (slice string)} Libdir
+    ^{:line 93 :tag (slice (* sym/Library))} Library
+    ^{:line 94 :tag (map string (* sym/Library))} LibraryByPkg
+    ^{:line 95 :tag (slice Shlib)} Shlibs
+    ^{:line 96 :tag (slice loader/Sym)} Textp
+    ^{:line 97 :tag loader/Sym} Moduledata
+
+    ^{:line 99 :tag int64} moduledataTypeDescOffset
+    ^{:line 100 :tag int64} moduledataItabOffset
+    ^{:line 101 :tag int64} moduledataItabSizeOffset
+
+    ^{:line 103 :tag (map string string)} PackageFile
+    ^{:line 104 :tag (map string string)} PackageShlib
+
+    ^{:line 106 :tag (slice loader/Sym)} tramps ; trampolines
+
+    ^{:line 108 :tag (slice (* sym/CompilationUnit))} compUnits ; DWARF compilation units
+    ^{:line 109 :tag (* sym/CompilationUnit)} runtimeCU ; One of the runtime CUs, the last one seen.
+
+    ^{:line 111 :tag (* loader/Loader)} loader
+    ^{:line 112 :tag (slice cgodata)} cgodata ; cgo directives to load, three strings are args for loadcgo
+
+    ^{:line 114 :tag (slice loader/Sym)} datap
+    ^{:line 115 :tag (slice loader/Sym)} dynexp
+
+
+    ^{:line 118 :tag int :doc "Elf symtab variables.\n"} numelfsym ; starts at 0, 1 is reserved
+
+
+
+
+
+    ^{:line 124 :tag (map loader/Sym generatorFunc) :doc "These are symbols that created and written by the linker.\nRather than creating a symbol, and writing all its data into the heap,\nyou can create a symbol, and just a generation function will be called\nafter the symbol's been created in the output mmap.\n"} generatorSyms))
+
+
+(go/type cgodata (struct
+    ^{:line 128 :tag string} file
+    ^{:line 129 :tag string} pkg
+    ^{:line 130 :tag (slice (slice string))} directives))
+
+
+^{:go/end 136} (go/method Logf [^{:tag (* Link)} ctxt ^string format & ^{:tag (slice any)} args]
+  (fmt/Fprintf (.-Bso ctxt) format (spread args))
+  (.Flush (.-Bso ctxt)))
+
+
+^{:go/end 147} (go/func addImports [^{:tag (* Link)} ctxt ^{:tag (* sym/Library)} l ^string pn]
+  (let [pkg (objabi/PathToPrefix (.-Pkg l))]
+    (range [_ imp (.-Autolib l)]
+      (let [lib (addlib ctxt pkg pn (.-Pkg imp) (.-Fingerprint imp))]
+        (when (!= lib nil)
+          (set! (.-Imports l) (append (.-Imports l) lib)))))
+
+
+    (set! (.-Autolib l) nil)))
+
+
+
+^{:go/end 153} (go/method IncVersion "Allocate a new version (i.e. symbol namespace).\n" ^int [^{:tag (* Link)} ctxt]
+  (inc! (.-version ctxt))
+  (- (.-version ctxt) 1))
+
+
+
+^{:go/end 158} (go/method MaxVersion "returns the maximum version number\n" ^int [^{:tag (* Link)} ctxt]
+  (.-version ctxt))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+(go/type generatorFunc "generatorFunc is a convenience type.\nSome linker-created Symbols are large and shouldn't really live in the heap.\nSuch Symbols can define a generator function. Their bytes can be generated\ndirectly in the output mmap.\n\nRelocations are applied prior to emitting generator Symbol contents.\nGenerator Symbols that require relocations can be written in two passes.\nThe first pass, at Symbol creation time, adds only relocations.\nThe second pass, at content generation time, adds the rest.\nSee generateFunctab for an example.\n\nGenerator functions shouldn't grow the Symbol size.\nGenerator functions must be safe for concurrent use.\n\nGenerator Symbols have their Data set to the mmapped area when the\ngenerator is called.\n" (func [(* Link) loader/Sym]))
+
+
+
+^{:go/end 189} (go/method createGeneratorSymbol "createGeneratorSymbol is a convenience method for creating a generator\nsymbol.\n" ^loader/Sym [^{:tag (* Link)} ctxt ^string name ^int version ^sym/SymKind t ^int64 size ^generatorFunc gen]
+  (let [ldr (.-loader ctxt)
+      ^{:line 182} s (.LookupOrCreateSym ldr name version)]
+    (.SetIsGeneratedSym ldr s true)
+    (let [sb (.MakeSymbolUpdater ldr s)]
+      (.SetType sb t)
+      (.SetSize sb size)
+      (aset (.-generatorSyms ctxt) s gen)
+      ^{:line 188} s)))

@@ -1,0 +1,156 @@
+;; Copyright 2018 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.cmd.compile.internal.types) (go/file "identity.go" :imports [])
+
+(go/const
+  ^{:line 8} [^{:val 1} identIgnoreTags (<< 1 iota)]
+  ^{:line 9} [^{:val 2} identStrict])
+
+
+
+
+
+
+
+^{:go/end 19} (go/func Identical "Identical reports whether t1 and t2 are identical types, following the spec rules.\nReceiver parameter types are ignored. Named (defined) types are only equal if they\nare pointer-equal - i.e. there must be a unique types.Type for each specific named\ntype. Also, a type containing a shape type is considered identical to another type\n(shape or not) if their underlying types are the same, or they are both pointers.\n" ^bool [^{:tag (* Type)} t1 ^{:tag (* Type)} t2]
+  (identical t1 t2 0 nil))
+
+
+
+
+^{:go/end 25} (go/func IdenticalIgnoreTags "IdenticalIgnoreTags is like Identical, but it ignores struct tags\nfor struct identity.\n" ^bool [^{:tag (* Type)} t1 ^{:tag (* Type)} t2]
+  (identical t1 t2 identIgnoreTags nil))
+
+
+
+
+^{:go/end 31} (go/func IdenticalStrict "IdenticalStrict is like Identical, but matches types exactly, without the\nexception for shapes.\n" ^bool [^{:tag (* Type)} t1 ^{:tag (* Type)} t2]
+  (identical t1 t2 identStrict nil))
+
+
+(go/type typePair (struct
+    ^{:line 34 :tag (* Type)} t1
+    ^{:line 35 :tag (* Type)} t2))
+
+
+^{:go/end 157} (go/func identical ^bool [^{:tag (* Type)} t1 ^{:tag (* Type)} t2 ^int flags ^{:tag (map typePair (struct))} assumedEqual]
+  (when (== t1 t2)
+    (return true))
+
+  (when (or (== t1 nil) (== t2 nil) (!= (.-kind t1) (.-kind t2)))
+    (return false))
+
+  (when (or (!= (.-obj t1) nil) (!= (.-obj t2) nil))
+    (when (and (== (bit-and flags identStrict) 0) ^:go/paren (or (.HasShape t1) (.HasShape t2)))
+      (switch (.-kind t1)
+        (case [TINT8 TUINT8 TINT16 TUINT16 TINT32 TUINT32 TINT64 TUINT64 TINT TUINT TUINTPTR TCOMPLEX64 TCOMPLEX128 TFLOAT32 TFLOAT64 TBOOL TSTRING TPTR TUNSAFEPTR]
+          (return true)))
+
+      ;; fall through to unnamed type comparison for complex types.
+      (goto :cont))
+
+    ;; Special case: we keep byte/uint8 and rune/int32
+    ;; separate for error messages. Treat them as equal.
+    (switch (.-kind t1)
+      (case [TUINT8]
+        (return (and ^:go/paren (or (== t1 (aget Types TUINT8)) (== t1 ByteType)) ^:go/paren (or (== t2 (aget Types TUINT8)) (== t2 ByteType)))))
+      (case [TINT32]
+        (return (and ^:go/paren (or (== t1 (aget Types TINT32)) (== t1 RuneType)) ^:go/paren (or (== t2 (aget Types TINT32)) (== t2 RuneType)))))
+      (case [TINTER]
+        ;; Make sure named any type matches any unnamed empty interface
+        ;; (but not a shape type, if identStrict).
+        (let [isUnnamedEface ^{:go/end 64} (fn ^bool [^{:tag (* Type)} t] (and (.IsEmptyInterface t) (== (.Sym t) nil)))]
+          (when (!= (bit-and flags identStrict) 0)
+            (return (or (and (== t1 AnyType) (isUnnamedEface t2) (not (.HasShape t2))) (and (== t2 AnyType) (isUnnamedEface t1) (not (.HasShape t1))))))
+
+          (return (or (and (== t1 AnyType) (isUnnamedEface t2)) (and (== t2 AnyType) (isUnnamedEface t1))))))
+      (default
+        (return false))))
+
+
+  (label :cont
+
+    ;; Any cyclic type must go through a named type, and if one is
+    ;; named, it is only identical to the other if they are the
+    ;; same pointer (t1 == t2), so there's no chance of chasing
+    ;; cycles ad infinitum, so no need for a depth counter.
+    (if (== assumedEqual nil)
+      (set! assumedEqual (make (map typePair (struct))))
+      (when [(values _ ok) (aget assumedEqual (lit typePair t1 t2))] ok
+        (return true))))
+
+  (aset assumedEqual (lit typePair t1 t2) (lit (struct)))
+
+  (switch (.-kind t1)
+    (case [TIDEAL]
+      ;; Historically, cmd/compile used a single "untyped
+      ;; number" type, so all untyped number types were
+      ;; identical. Match this behavior.
+      ;; TODO(mdempsky): Revisit this.
+      (return true))
+
+    (case [TINTER]
+      (when (!= (len (.AllMethods t1)) (len (.AllMethods t2)))
+        (return false))
+
+      (range [i f1 (.AllMethods t1)]
+        (let [f2 (aget (.AllMethods t2) i)]
+          (when (or (!= (.-Sym f1) (.-Sym f2)) (not (identical (.-Type f1) (.-Type f2) flags assumedEqual)))
+            (return false))))
+
+
+      (return true))
+
+    (case [TSTRUCT]
+      (when (!= (.NumFields t1) (.NumFields t2))
+        (return false))
+
+      (range [i f1 (.Fields t1)]
+        (let [f2 (.Field t2 i)]
+          (when (or (!= (.-Sym f1) (.-Sym f2)) (!= (.-Embedded f1) (.-Embedded f2)) (not (identical (.-Type f1) (.-Type f2) flags assumedEqual)))
+            (return false))
+
+          (when (and (== (bit-and flags identIgnoreTags) 0) (!= (.-Note f1) (.-Note f2)))
+            (return false))))
+
+
+      (return true))
+
+    (case [TFUNC]
+      ;; Check parameters and result parameters for type equality.
+      ;; We intentionally ignore receiver parameters for type
+      ;; equality, because they're never relevant.
+      (when (or (!= (.NumParams t1) (.NumParams t2))
+          (!= (.NumResults t1) (.NumResults t2))
+          (!= (.IsVariadic t1) (.IsVariadic t2)))
+        (return false))
+
+
+      (let [fs1 (.ParamsResults t1)
+          ^{:line 132} fs2 (.ParamsResults t2)]
+        (range [i f1 fs1]
+          (when (not (identical (.-Type f1) (.-Type (aget fs2 i)) flags assumedEqual))
+            (return false)))
+
+
+        (return true)))
+
+    (case [TARRAY]
+      (when (!= (.NumElem t1) (.NumElem t2))
+        (return false)))
+
+
+    (case [TCHAN]
+      (when (!= (.ChanDir t1) (.ChanDir t2))
+        (return false)))
+
+
+    (case [TMAP]
+      (when (not (identical (.Key t1) (.Key t2) flags assumedEqual))
+        (return false))))
+
+
+
+  (identical (.Elem t1) (.Elem t2) flags assumedEqual))

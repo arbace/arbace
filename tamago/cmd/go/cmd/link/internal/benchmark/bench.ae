@@ -1,0 +1,194 @@
+;; Copyright 2020 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; Package benchmark provides a Metrics object that enables memory and CPU
+;; profiling for the linker. The Metrics objects can be used to mark stages
+;; of the code, and name the measurements during that stage. There is also
+;; optional GCs that can be performed at the end of each stage, so you
+;; can get an accurate measurement of how each stage changes live memory.
+(in-ns 'go.cmd.link.internal.benchmark) (go/file "bench.go" :doc "Package benchmark provides a Metrics object that enables memory and CPU\nprofiling for the linker. The Metrics objects can be used to mark stages\nof the code, and name the measurements during that stage. There is also\noptional GCs that can be performed at the end of each stage, so you\ncan get an accurate measurement of how each stage changes live memory.\n" :imports [
+
+
+    ^{:line 13} [fmt "fmt"]
+    ^{:line 14} [io "io"]
+    ^{:line 15} [os "os"]
+    ^{:line 16} [runtime "runtime"]
+    ^{:line 17} [pprof "runtime/pprof"]
+    ^{:line 18} [time "time"]
+    ^{:line 19} [unicode "unicode"]])
+
+
+(go/type Flags int)
+
+(go/const
+  ^{:line 25} [^{:val 1} GC (<< 1 iota)]
+  ^{:line 26} [^{:tag Flags :val 0} NoGC 0])
+
+
+(go/type Metrics (struct
+    ^{:line 30 :tag Flags} gc
+    ^{:line 31 :tag (slice (* mark))} marks
+    ^{:line 32 :tag (* mark)} curMark
+    ^{:line 33 :tag string} filebase
+    ^{:line 34 :tag (* os/File)} pprofFile))
+
+
+(go/type mark (struct
+    ^{:line 38 :tag string} name
+    ^{:line 39 :tag runtime/MemStats} startM ^runtime/MemStats endM ^runtime/MemStats gcM
+    ^{:line 40 :tag time/Time} startT ^time/Time endT))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 76} (go/func New "New creates a new Metrics object.\n\nTypical usage should look like:\n\n\tfunc main() {\n\t  filename := \"\" // Set to enable per-phase pprof file output.\n\t  bench := benchmark.New(benchmark.GC, filename)\n\t  defer bench.Report(os.Stdout)\n\t  // etc\n\t  bench.Start(\"foo\")\n\t  foo()\n\t  bench.Start(\"bar\")\n\t  bar()\n\t}\n\nNote that a nil Metrics object won't cause any errors, so one could write\ncode like:\n\n\tfunc main() {\n\t  enableBenchmarking := flag.Bool(\"enable\", true, \"enables benchmarking\")\n\t  flag.Parse()\n\t  var bench *benchmark.Metrics\n\t  if *enableBenchmarking {\n\t    bench = benchmark.New(benchmark.GC)\n\t  }\n\t  bench.Start(\"foo\")\n\t  // etc.\n\t}\n" ^{:tag (* Metrics)} [^Flags gc ^string filebase]
+  (when (== gc GC)
+    (runtime/GC))
+
+  (addr (lit Metrics :gc gc :filebase filebase)))
+
+
+
+
+^{:go/end 107} (go/method Report "Report reports the metrics.\nCloses the currently Start(ed) range, and writes the report to the given io.Writer.\n" [^{:tag (* Metrics)} m ^io/Writer w]
+  (when (== m nil)
+    (return))
+
+
+  (.closeMark m)
+
+  (let [gcString ""]
+    (when (== (.-gc m) GC)
+      (set! gcString "_GC"))
+
+
+    (let [^time/Duration totTime (zero time/Duration)]
+      (range [_ curMark (.-marks m)]
+        (let [dur (.Sub (.-endT curMark) (.-startT curMark))]
+          (set! totTime + dur)
+          (fmt/Fprintf w "%s 1 %d ns/op" (makeBenchString (+ (.-name curMark) gcString)) (.Nanoseconds dur))
+          (fmt/Fprintf w "\t%d B/op" (- (.-TotalAlloc (.-endM curMark)) (.-TotalAlloc (.-startM curMark))))
+          (fmt/Fprintf w "\t%d allocs/op" (- (.-Mallocs (.-endM curMark)) (.-Mallocs (.-startM curMark))))
+          (if (== (.-gc m) GC)
+            (fmt/Fprintf w "\t%d live-B" (.-HeapAlloc (.-gcM curMark)))
+
+            (fmt/Fprintf w "\t%d heap-B" (.-HeapAlloc (.-endM curMark))))
+
+          (fmt/Fprintf w "\n")))
+
+      (fmt/Fprintf w "%s 1 %d ns/op\n" (makeBenchString (+ "total time" gcString)) (.Nanoseconds totTime)))))
+
+
+
+
+^{:go/end 130} (go/method Start "Start marks the beginning of a new measurement phase.\nOnce a metric is started, it continues until either a Report is issued, or another Start is called.\n" [^{:tag (* Metrics)} m ^string name]
+  (when (== m nil)
+    (return))
+
+  (.closeMark m)
+  (set! (.-curMark m) (addr (lit mark :name name)))
+  ;; Unlikely we need to a GC here, as one was likely just done in closeMark.
+  (when (.shouldPProf m)
+    (let [(values f err) (os/Create (makePProfFilename (.-filebase m) name "cpuprof"))]
+      (when (!= err nil)
+        (panic err))
+
+      (set! (.-pprofFile m) f)
+      (when [(set! err (pprof/StartCPUProfile (.-pprofFile m)))] (!= err nil)
+        (panic err))))
+
+
+  (runtime/ReadMemStats (addr (.-startM (.-curMark m))))
+  (set! (.-startT (.-curMark m)) (time/Now)))
+
+
+^{:go/end 168} (go/method closeMark [^{:tag (* Metrics)} m]
+  (when (or (== m nil) (== (.-curMark m) nil))
+    (return))
+
+  (set! (.-endT (.-curMark m)) (time/Now))
+  (when (.shouldPProf m)
+    (pprof/StopCPUProfile)
+    (.Close (.-pprofFile m))
+    (set! (.-pprofFile m) nil))
+
+  (runtime/ReadMemStats (addr (.-endM (.-curMark m))))
+  (when (== (.-gc m) GC)
+    (runtime/GC)
+    (runtime/ReadMemStats (addr (.-gcM (.-curMark m))))
+    (when (.shouldPProf m)
+      ;; Collect a profile of the live heap. Do a
+      ;; second GC to force sweep completion so we
+      ;; get a complete snapshot of the live heap at
+      ;; the end of this phase.
+      (runtime/GC)
+      (let [(values f err) (os/Create (makePProfFilename (.-filebase m) (.-name (.-curMark m)) "memprof"))]
+        (when (!= err nil)
+          (panic err))
+
+        (set! err (pprof/WriteHeapProfile f))
+        (when (!= err nil)
+          (panic err))
+
+        (set! err (.Close f))
+        (when (!= err nil)
+          (panic err)))))
+
+
+
+  (set! (.-marks m) (append (.-marks m) (.-curMark m)))
+  (set! (.-curMark m) nil))
+
+
+
+^{:go/end 173} (go/method shouldPProf "shouldPProf returns true if we should be doing pprof runs.\n" ^bool [^{:tag (* Metrics)} m]
+  (and (!= m nil) (> (len (.-filebase m)) 0)))
+
+
+
+^{:go/end 191} (go/func makeBenchString "makeBenchString makes a benchmark string consumable by Go's benchmarking tools.\n" ^string [^string name]
+  (let [needCap true
+      ^{:line 178} ret (conv (slice rune) "Benchmark")]
+    (range [_ r name]
+      (when (unicode/IsSpace r)
+        (set! needCap true)
+        (continue))
+
+      (when needCap
+        (set! r (unicode/ToUpper r))
+        (set! needCap false))
+
+      (set! ret (append ret r)))
+
+    (conv string ret)))
+
+
+^{:go/end 195} (go/func makePProfFilename ^string [^string filebase ^string name ^string typ]
+  (fmt/Sprintf "%s_%s.%s" filebase (makeBenchString name) typ))

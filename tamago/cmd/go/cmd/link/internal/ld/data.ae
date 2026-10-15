@@ -1,0 +1,3460 @@
+;; Derived from Inferno utils/6l/obj.c and utils/6l/span.c
+;; https://bitbucket.org/inferno-os/inferno-os/src/master/utils/6l/obj.c
+;; https://bitbucket.org/inferno-os/inferno-os/src/master/utils/6l/span.c
+;;
+;;	Copyright © 1994-1999 Lucent Technologies Inc.  All rights reserved.
+;;	Portions Copyright © 1995-1997 C H Forsyth (forsyth@terzarima.net)
+;;	Portions Copyright © 1997-1999 Vita Nuova Limited
+;;	Portions Copyright © 2000-2007 Vita Nuova Holdings Limited (www.vitanuova.com)
+;;	Portions Copyright © 2004,2006 Bruce Ellis
+;;	Portions Copyright © 2005-2007 C H Forsyth (forsyth@terzarima.net)
+;;	Revisions Copyright © 2000-2007 Lucent Technologies Inc. and others
+;;	Portions Copyright © 2009 The Go Authors. All rights reserved.
+;;
+;; Permission is hereby granted, free of charge, to any person obtaining a copy
+;; of this software and associated documentation files (the "Software"), to deal
+;; in the Software without restriction, including without limitation the rights
+;; to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+;; copies of the Software, and to permit persons to whom the Software is
+;; furnished to do so, subject to the following conditions:
+;;
+;; The above copyright notice and this permission notice shall be included in
+;; all copies or substantial portions of the Software.
+;;
+;; THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+;; IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+;; FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL THE
+;; AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+;; LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+;; OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+;; THE SOFTWARE.
+
+(in-ns 'go.cmd.link.internal.ld) (go/file "data.go" :imports [
+
+
+    ^{:line 35} [bytes "bytes"]
+    ^{:line 36} [gcprog "cmd/internal/gcprog"]
+    ^{:line 37} [objabi "cmd/internal/objabi"]
+    ^{:line 38} [sys "cmd/internal/sys"]
+    ^{:line 39} [loader "cmd/link/internal/loader"]
+    ^{:line 40} [loadpe "cmd/link/internal/loadpe"]
+    ^{:line 41} [sym "cmd/link/internal/sym"]
+    ^{:line 42} [zlib "compress/zlib"]
+    ^{:line 43} [elf "debug/elf"]
+    ^{:line 44} [binary "encoding/binary"]
+    ^{:line 45} [fmt "fmt"]
+    ^{:line 46} [abi "internal/abi"]
+    ^{:line 47} [log "log"]
+    ^{:line 48} [rand "math/rand"]
+    ^{:line 49} [os "os"]
+    ^{:line 50} [sort "sort"]
+    ^{:line 51} [strconv "strconv"]
+    ^{:line 52} [strings "strings"]
+    ^{:line 53} [sync "sync"]
+    ^{:line 54} [atomic "sync/atomic"]])
+
+
+
+^{:go/end 60} (go/func isRuntimeDepPkg "isRuntimeDepPkg reports whether pkg is the runtime package or its dependency.\n" ^bool [^string pkg]
+  (.-Runtime (objabi/LookupPkgSpecial pkg)))
+
+
+
+
+
+^{:go/end 94} (go/func maxSizeTrampolines "Estimate the max size needed to hold any new trampolines created for this function. This\nis used to determine when the section can be split if it becomes too large, to ensure that\nthe trampolines are in the same section as the function that uses them.\n" ^uint64 [^{:tag (* Link)} ctxt ^{:tag (* loader/Loader)} ldr ^loader/Sym s ^bool isTramp]
+  ;; If thearch.Trampoline is nil, then trampoline support is not available on this arch.
+  ;; A trampoline does not need any dependent trampolines.
+  (when (or (== (.-Trampoline thearch) nil) isTramp)
+    (return 0))
+
+
+  (let [n (conv uint64 0)
+      ^{:line 73} relocs (.Relocs ldr s)]
+    (for [ri 0] (< ri (.Count relocs)) (inc! ri)
+      (let [r (.At relocs ri)]
+        (when (.IsDirectCallOrJump (.Type r))
+          (inc! n))))
+
+
+
+    (switch
+      (case [^{:go/via [Target]} (.IsARM ctxt)]
+        (return (* n 20))) ; Trampolines in ARM range from 3 to 5 instructions.
+      (case [^{:go/via [Target]} (.IsARM64 ctxt)]
+        (return (* n 12))) ; Trampolines in ARM64 are 3 instructions.
+      (case [^{:go/via [Target]} (.IsLOONG64 ctxt)]
+        (return (* n 12))) ; Trampolines in LOONG64 are 3 instructions.
+      (case [^{:go/via [Target]} (.IsPPC64 ctxt)]
+        (return (* n 16))) ; Trampolines in PPC64 are 4 instructions.
+      (case [^{:go/via [Target]} (.IsRISCV64 ctxt)]
+        (return (* n 8)))) ; Trampolines in RISCV64 are 2 instructions.
+
+    (panic "unreachable")))
+
+
+
+
+
+
+^{:go/end 138} (go/func trampoline "Detect too-far jumps in function s, and add trampolines if necessary.\nARM, LOONG64, PPC64, PPC64LE and RISCV64 support trampoline insertion for internal\nand external linking. On PPC64 and PPC64LE the text sections might be split\nbut will still insert trampolines where necessary.\n" [^{:tag (* Link)} ctxt ^loader/Sym s]
+  (when (== (.-Trampoline thearch) nil)
+    (return)) ; no need or no support of trampolines on this arch
+
+
+  (let [ldr (.-loader ctxt)
+      ^{:line 106} relocs (.Relocs ldr s)]
+    (for [ri 0] (< ri (.Count relocs)) (inc! ri)
+      (let [r (.At relocs ri)
+          ^{:line 109} rt (.Type r)]
+        (when (and (not (.IsDirectCallOrJump rt)) (not (isPLTCall ^{:go/via [Target]} (.-Arch ctxt) rt)))
+          (continue))
+
+        (let [rs (.Sym r)]
+          (when (or (not (.AttrReachable ldr rs)) (== (.SymType ldr rs) sym/Sxxx))
+            (continue)) ; something is wrong. skip it here and we'll emit a better error later
+
+
+          (when (and (== (.SymValue ldr rs) 0) (!= (.SymType ldr rs) sym/SDYNIMPORT) (!= (.SymType ldr rs) sym/SUNDEFEXT))
+            ;; Symbols in the same package are laid out together (if we
+            ;; don't randomize the function order).
+            ;; Except that if SymPkg(s) == "", it is a host object symbol
+            ;; which may call an external symbol via PLT.
+            (when (and (!= (.SymPkg ldr s) "") (== (.SymPkg ldr rs) (.SymPkg ldr s)) (== (.SymType ldr rs) (.SymType ldr s)) (== @flagRandLayout 0))
+              ;; RISC-V is only able to reach +/-1MiB via a JAL instruction.
+              ;; We need to generate a trampoline when an address is
+              ;; currently unknown.
+              (when (not (.IsRISCV64 (.-Target ctxt)))
+                (continue)))
+
+
+            ;; Runtime packages are laid out together.
+            (when (and (isRuntimeDepPkg (.SymPkg ldr s)) (isRuntimeDepPkg (.SymPkg ldr rs)) (== @flagRandLayout 0))
+              (continue)))
+
+
+          ((.-Trampoline thearch) ctxt ldr ri rs s))))))
+
+
+
+
+
+^{:go/end 163} (go/func isPLTCall "whether rt is a (host object) relocation that will be turned into\na call to PLT.\n" ^bool [^{:tag (* sys/Arch)} arch ^objabi/RelocType rt]
+  ^{:go/breaks [[3 162]]} (let [^:const ^{:val 1} pcrel 1]
+    (switch (bit-or (conv uint32 (.-Family arch)) (<< (conv uint32 rt) 8))
+      ;; ARM64
+      (case [(bit-or (conv uint32 sys/ARM64) (<< (conv uint32 (+ objabi/ElfRelocOffset (conv objabi/RelocType elf/R_AARCH64_CALL26))) 8))
+          (bit-or (conv uint32 sys/ARM64) (<< (conv uint32 (+ objabi/ElfRelocOffset (conv objabi/RelocType elf/R_AARCH64_JUMP26))) 8))
+          (bit-or (conv uint32 sys/ARM64) (<< (conv uint32 (+ objabi/MachoRelocOffset (* MACHO_ARM64_RELOC_BRANCH26 2) pcrel)) 8))]
+        (return true))
+
+      ;; ARM
+      (case [(bit-or (conv uint32 sys/ARM) (<< (conv uint32 (+ objabi/ElfRelocOffset (conv objabi/RelocType elf/R_ARM_CALL))) 8))
+          (bit-or (conv uint32 sys/ARM) (<< (conv uint32 (+ objabi/ElfRelocOffset (conv objabi/RelocType elf/R_ARM_PC24))) 8))
+          (bit-or (conv uint32 sys/ARM) (<< (conv uint32 (+ objabi/ElfRelocOffset (conv objabi/RelocType elf/R_ARM_JUMP24))) 8))]
+        (return true))
+
+      ;; Loong64
+      (case [(bit-or (conv uint32 sys/Loong64) (<< (conv uint32 (+ objabi/ElfRelocOffset (conv objabi/RelocType elf/R_LARCH_B26))) 8))]
+        (return true)))
+
+    ;; TODO: other architectures.
+    false))
+
+
+
+
+
+^{:go/end 176} (go/func FoldSubSymbolOffset "FoldSubSymbolOffset computes the offset of symbol s to its top-level outer\nsymbol. Returns the top-level symbol and the offset.\nThis is used in generating external relocations.\n" [^{:tag (* loader/Loader)} ldr ^loader/Sym s] :results [loader/Sym int64]
+  (let [outer (.OuterSym ldr s)
+      ^{:line 170} off (conv int64 0)]
+    (when (!= outer 0)
+      (set! off + (- (.SymValue ldr s) (.SymValue ldr outer)))
+      (set! s outer))
+
+    (return s off)))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 639} (go/method relocsym "relocsym resolve relocations in \"s\", updating the symbol's content\nin \"P\".\nThe main loop walks through the list of relocations attached to \"s\"\nand resolves them where applicable. Relocations are often\narchitecture-specific, requiring calls into the 'archreloc' and/or\n'archrelocvariant' functions for the architecture. When external\nlinking is in effect, it may not be  possible to completely resolve\nthe address/offset for a symbol, in which case the goal is to lay\nthe groundwork for turning a given relocation into an external reloc\n(to be applied by the external linker). For more on how relocations\nwork in general, see\n\n\t\"Linkers and Loaders\", by John R. Levine (Morgan Kaufmann, 1999), ch. 7\n\nThis is a performance-critical function for the linker; be careful\nto avoid introducing unnecessary allocations in the main loop.\n" [^{:tag (* relocSymState)} st ^loader/Sym s ^{:tag (slice byte)} P]
+  (let [ldr (.-ldr st)
+      ^{:line 196} relocs (.Relocs ldr s)]
+    (when (== (.Count relocs) 0)
+      (return))
+
+    (let [target (.-target st)
+        ^{:line 201} syms (.-syms st)
+        ^{:line 202} nExtReloc 0] ; number of external relocations
+      (for [ri 0] (< ri (.Count relocs)) (inc! ri)
+        (let [r (.At relocs ri)
+            ^{:line 205} off ^{:go/via [Reloc]} (.Off r)
+            ^{:line 206} siz (conv int32 ^{:go/via [Reloc]} (.Siz r))
+            ^{:line 207} rs (.Sym r)
+            ^{:line 208} rt (.Type r)
+            ^{:line 209} weak (.Weak r)]
+          (when (or (< off 0) (> (+ off siz) (conv int32 (len P))))
+            (let [rname ""]
+              (when (!= rs 0)
+                (set! rname (.SymName ldr rs)))
+
+              ^{:go/via [ErrorReporter]} (.Errorf (.-err st) s "invalid relocation %s: %d+%d not in [%d,%d)" rname off siz 0 (len P))
+              (continue)))
+
+          (when (== siz 0) ; informational relocation - no work to do
+            (continue))
+
+
+          (let [^sym/SymKind rst (zero sym/SymKind)]
+            (when (!= rs 0)
+              (set! rst (.SymType ldr rs)))
+
+
+            (when (and (!= rs 0) ^:go/paren (or (== rst sym/Sxxx) (== rst sym/SXREF)))
+              ;; When putting the runtime but not main into a shared library
+              ;; these symbols are undefined and that's OK.
+              (cond (or (.IsShared target) (.IsPlugin target))
+                (cond (or (== (.SymName ldr rs) "main.main") ^:go/paren (and (not (.IsPlugin target)) (== (.SymName ldr rs) "main..inittask")))
+                  (let [sb (.MakeSymbolUpdater ldr rs)]
+                    (.SetType sb sym/SDYNIMPORT))
+                  (strings/HasPrefix (.SymName ldr rs) "go:info.")
+                  ;; Skip go.info symbols. They are only needed to communicate
+                  ;; DWARF info between the compiler and linker.
+                  (continue))
+
+                (and (.IsPPC64 target) (== (.SymName ldr rs) ".TOC.")) (do) :else
+                ;; TOC symbol doesn't have a type but we do assign a value
+                ;; (see the address pass) and we can resolve it.
+                ;; TODO: give it a type.
+                (do
+                  (.errorUnresolved (.-err st) ldr s rs)
+                  (continue))))
+
+
+
+            (when (>= rt objabi/ElfRelocOffset)
+              (continue))
+
+
+            ;; We need to be able to reference dynimport symbols when linking against
+            ;; shared libraries, and AIX, Darwin, OpenBSD and Solaris always need it.
+            (when (and (not (.IsAIX target)) (not (.IsDarwin target)) (not (.IsSolaris target)) (not (.IsOpenbsd target)) (!= rs 0) (== rst sym/SDYNIMPORT) (not (.IsDynlinkingGo target)) (not (.AttrSubSymbol ldr rs)))
+              (when (not (and (.IsPPC64 target) (.IsExternal target) (== (.SymName ldr rs) ".TOC.")))
+                ^{:go/via [ErrorReporter]} (.Errorf (.-err st) s "unhandled relocation for %s (type %d (%s) rtype %d (%s))" (.SymName ldr rs) rst rst rt (sym/RelocName (.-Arch target) rt))))
+
+
+            (when (and (!= rs 0) (!= rst sym/STLSBSS) (not weak) (!= rt objabi/R_METHODOFF) (not (.AttrReachable ldr rs)))
+              ^{:go/via [ErrorReporter]} (.Errorf (.-err st) s "unreachable sym in relocation: %s" (.SymName ldr rs)))
+
+
+            (let [^sym/RelocVariant rv (zero sym/RelocVariant)]
+              (when (or (.IsPPC64 target) (.IsS390X target))
+                (set! rv (.RelocVariant ldr s ri)))
+
+
+              ;; TODO(mundaym): remove this special case - see issue 14218.
+              (when (.IsS390X target)
+                (switch rt
+                  (case [objabi/R_PCRELDBL]
+                    (set! rt objabi/R_PCREL)
+                    (set! rv sym/RV_390_DBL))
+                  (case [objabi/R_CALL]
+                    (set! rv sym/RV_390_DBL))))
+
+
+
+              (let [^int64 o (zero int64)]
+                (switch rt
+                  (default
+                    (switch siz
+                      (default
+                        ^{:go/via [ErrorReporter]} (.Errorf (.-err st) s "bad reloc size %#x for %s" (conv uint32 siz) (.SymName ldr rs)))
+                      (case [1]
+                        (set! o (conv int64 (aget P off))))
+                      (case [2]
+                        (set! o (conv int64 (.Uint16 (.-ByteOrder (.-Arch target)) (subslice P off)))))
+                      (case [4]
+                        (set! o (conv int64 (.Uint32 (.-ByteOrder (.-Arch target)) (subslice P off)))))
+                      (case [8]
+                        (set! o (conv int64 (.Uint64 (.-ByteOrder (.-Arch target)) (subslice P off))))))
+
+                    (let [(values out n ok) ((.-Archreloc thearch) target ldr syms r s o)]
+                      (when (.IsExternal target)
+                        (set! nExtReloc + n))
+
+                      (if ok
+                        (set! o out)
+
+                        ^{:go/via [ErrorReporter]} (.Errorf (.-err st) s "unknown reloc to %v: %d (%s)" (.SymName ldr rs) rt (sym/RelocName (.-Arch target) rt)))))
+
+                  (case [objabi/R_TLS_LE]
+                    (when (and (.IsExternal target) (.IsElf target))
+                      (inc! nExtReloc)
+                      (set! o 0)
+                      (when (not (.IsAMD64 target))
+                        (set! o ^{:go/via [Reloc]} (.Add r)))
+
+                      (break))
+
+
+                    (cond (and (.IsElf target) (.IsARM target))
+                      ;; On ELF ARM, the thread pointer is 8 bytes before
+                      ;; the start of the thread-local data block, so add 8
+                      ;; to the actual TLS offset (r->sym->value).
+                      ;; This 8 seems to be a fundamental constant of
+                      ;; ELF on ARM (or maybe Glibc on ARM); it is not
+                      ;; related to the fact that our own TLS storage happens
+                      ;; to take up 8 bytes.
+                      (set! o (+ 8 (.SymValue ldr rs)))
+                      (or (.IsElf target) (.IsPlan9 target) (.IsDarwin target))
+                      (set! o (+ (conv int64 (.-Tlsoffset syms)) ^{:go/via [Reloc]} (.Add r)))
+                      (.IsWindows target)
+                      (set! o ^{:go/via [Reloc]} (.Add r)) :else
+
+                      (log/Fatalf "unexpected R_TLS_LE relocation for %v" (.-HeadType target))))
+
+                  (case [objabi/R_TLS_IE]
+                    (when (and (.IsExternal target) (.IsElf target))
+                      (inc! nExtReloc)
+                      (set! o 0)
+                      (when (not (.IsAMD64 target))
+                        (set! o ^{:go/via [Reloc]} (.Add r)))
+
+                      (when (.Is386 target)
+                        (inc! nExtReloc)) ; need two ELF relocations on 386, see ../x86/asm.go:elfreloc1
+
+                      (break))
+
+                    (if (and (.IsPIE target) (.IsElf target)) (do
+                        ;; We are linking the final executable, so we
+                        ;; can optimize any TLS IE relocation to LE.
+                        (when (== (.-TLSIEtoLE thearch) nil)
+                          (log/Fatalf "internal linking of TLS IE not supported on %v" (.-Family (.-Arch target))))
+
+                        ((.-TLSIEtoLE thearch) P (conv int off) (conv int siz))
+                        (set! o (conv int64 (.-Tlsoffset syms))))
+
+                      (log/Fatalf "cannot handle R_TLS_IE (sym %s) when linking internally" (.SymName ldr s))))
+
+                  (case [objabi/R_ADDR objabi/R_PEIMAGEOFF]
+                    (when (and weak (not (.AttrReachable ldr rs)))
+                      ;; Redirect it to runtime.unreachableMethod, which will throw if called.
+                      (set! rs (.-unreachableMethod syms)))
+
+                    (when (.IsExternal target)
+                      (inc! nExtReloc)
+
+                      ;; set up addend for eventual relocation via outer symbol.
+                      (let [rs rs
+                          (values ^:assign rs off) (FoldSubSymbolOffset ldr rs)
+                          ^{:line 364} xadd (+ ^{:go/via [Reloc]} (.Add r) off)
+                          ^{:line 365} rst (.SymType ldr rs)]
+                        (when (and (!= rst sym/SHOSTOBJ) (!= rst sym/SDYNIMPORT) (!= rst sym/SUNDEFEXT) (== (.SymSect ldr rs) nil))
+                          ^{:go/via [ErrorReporter]} (.Errorf (.-err st) s "missing section for relocation target %s" (.SymName ldr rs)))
+
+
+                        (set! o xadd)
+                        (cond (.IsElf target)
+                          (when (.IsAMD64 target)
+                            (set! o 0))
+
+                          (.IsDarwin target)
+                          (when (.IsDWARF (.SymType ldr s))
+                            ;; We generally use symbol-targeted relocations.
+                            ;; DWARF tools seem to only handle section-targeted relocations,
+                            ;; so generate section-targeted relocations in DWARF sections.
+                            ;; See also machoreloc1.
+                            (set! o + (.SymValue ldr rs)))
+
+                          (.IsWindows target) (do)
+                          ;; nothing to do
+                          (.IsAIX target)
+                          (set! o (+ (.SymValue ldr rs) xadd)) :else
+
+                          ^{:go/via [ErrorReporter]} (.Errorf (.-err st) s "unhandled pcrel relocation to %s on %v" (.SymName ldr rs) (.-HeadType target)))
+
+
+                        (break)))
+
+
+                    ;; On AIX, a second relocation must be done by the loader,
+                    ;; as section addresses can change once loaded.
+                    ;; The "default" symbol address is still needed by the loader so
+                    ;; the current relocation can't be skipped.
+                    (when (and (.IsAIX target) (!= rst sym/SDYNIMPORT))
+                      ;; It's not possible to make a loader relocation in a
+                      ;; symbol which is not inside .data section.
+                      ;; FIXME: It should be forbidden to have R_ADDR from a
+                      ;; symbol which isn't in .data. However, as .text has the
+                      ;; same address once loaded, this is possible.
+                      ;; TODO: .text (including rodata) to .data relocation
+                      ;; doesn't work correctly, so we should really disallow it.
+                      ;; See also aixStaticDataBase in symtab.go and in runtime.
+                      (when (== (.-Seg (.SymSect ldr s)) (addr Segdata))
+                        (Xcoffadddynrel target ldr syms s r ri)))
+
+
+
+                    (set! o (+ (.SymValue ldr rs) ^{:go/via [Reloc]} (.Add r)))
+                    (when (== rt objabi/R_PEIMAGEOFF)
+                      ;; The R_PEIMAGEOFF offset is a RVA, so subtract
+                      ;; the base address for the executable.
+                      (set! o - PEBASE))
+
+
+                    ;; On amd64, 4-byte offsets will be sign-extended, so it is impossible to
+                    ;; access more than 2GB of static data; fail at link time is better than
+                    ;; fail at runtime. See https://golang.org/issue/7980.
+                    ;; Instead of special casing only amd64, we treat this as an error on all
+                    ;; 64-bit architectures so as to be future-proof.
+                    (when (and (< (conv int32 o) 0) (> (.-PtrSize (.-Arch target)) 4) (== siz 4))
+                      ^{:go/via [ErrorReporter]} (.Errorf (.-err st) s "non-pc-relative relocation address for %s is too big: %#x (%#x + %#x)" (.SymName ldr rs) (conv uint64 o) (.SymValue ldr rs) ^{:go/via [Reloc]} (.Add r))
+                      (errorexit)))
+
+                  (case [objabi/R_DWTXTADDR_U1 objabi/R_DWTXTADDR_U2 objabi/R_DWTXTADDR_U3 objabi/R_DWTXTADDR_U4]
+                    (let [unit (.SymUnit ldr rs)]
+                      (if [(values idx ok) (aget (.-Addrs unit) rs)] ok
+                        (set! o (conv int64 idx))
+
+                        ^{:go/via [ErrorReporter]} (.Errorf (.-err st) s "missing .debug_addr index relocation target %s" (.SymName ldr rs)))
+
+
+                      ;; For these relocations we write a ULEB128, but using a
+                      ;; cooked/hacked recipe that ensures the result has a
+                      ;; fixed length. That is, if we're writing a value of 1
+                      ;; with length requirement 3, we'll actually emit three
+                      ;; bytes, 0x81 0x80 0x0.
+                      (let [(values _ leb128len) (.DwTxtAddrRelocParams rt)]
+                        (when [err (writeUleb128FixedLength (subslice P off) (conv uint64 o) leb128len)] (!= err nil)
+                          ^{:go/via [ErrorReporter]} (.Errorf (.-err st) s "internal error: %v applying %s to DWARF sym with reloc target %s" err (.String rt) (.SymName ldr rs)))
+
+                        (continue))))
+
+                  (case [objabi/R_DWARFSECREF]
+                    (when (== (.SymSect ldr rs) nil)
+                      ^{:go/via [ErrorReporter]} (.Errorf (.-err st) s "missing DWARF section for relocation target %s" (.SymName ldr rs)))
+
+
+                    (when (.IsExternal target)
+                      ;; On most platforms, the external linker needs to adjust DWARF references
+                      ;; as it combines DWARF sections. However, on Darwin, dsymutil does the
+                      ;; DWARF linking, and it understands how to follow section offsets.
+                      ;; Leaving in the relocation records confuses it (see
+                      ;; https://golang.org/issue/22068) so drop them for Darwin.
+                      (when (not (.IsDarwin target))
+                        (inc! nExtReloc))
+
+
+                      (let [xadd (- (+ ^{:go/via [Reloc]} (.Add r) (.SymValue ldr rs)) (conv int64 (.-Vaddr (.SymSect ldr rs))))]
+
+                        (set! o xadd)
+                        (when (and (.IsElf target) (.IsAMD64 target))
+                          (set! o 0))
+
+                        (break)))
+
+                    (set! o (- (+ (.SymValue ldr rs) ^{:go/via [Reloc]} (.Add r)) (conv int64 (.-Vaddr (.SymSect ldr rs))))))
+                  (case [objabi/R_METHODOFF]
+                    (when (not (.AttrReachable ldr rs))
+                      ;; Set it to a sentinel value. The runtime knows this is not pointing to
+                      ;; anything valid.
+                      (set! o -1)
+                      (break))
+
+                    (fallthrough))
+                  (case [objabi/R_ADDROFF]
+                    (when (and weak (not (.AttrReachable ldr rs)))
+                      (continue))
+
+                    (let [sect (.SymSect ldr rs)]
+                      (when (== sect nil)
+                        (cond (== rst sym/SDYNIMPORT)
+                          ^{:go/via [ErrorReporter]} (.Errorf (.-err st) s "cannot target DYNIMPORT sym in section-relative reloc: %s" (.SymName ldr rs))
+                          (== rst sym/SUNDEFEXT)
+                          ^{:go/via [ErrorReporter]} (.Errorf (.-err st) s "undefined symbol in relocation: %s" (.SymName ldr rs)) :else
+
+                          ^{:go/via [ErrorReporter]} (.Errorf (.-err st) s "missing section for relocation target %s" (.SymName ldr rs)))
+
+                        (continue))
+
+
+                      ;; The method offset tables using this relocation expect the offset to be relative
+                      ;; to the start of the first text section, even if there are multiple.
+                      (if (== (.-Name sect) ".text") (do
+                          (set! o (+ (- (.SymValue ldr rs) (conv int64 (.-Vaddr (aget (.-Sections Segtext) 0)))) ^{:go/via [Reloc]} (.Add r)))
+                          (when (.IsWasm target)
+                            ;; On Wasm, textoff (e.g. in the method table) is just the function index,
+                            ;; whereas the "PC" (rs's Value) is function index << 16 + block index (see
+                            ;; ../wasm/asm.go:assignAddress).
+                            (when (!= (bit-and o (- (<< 1 16) 1)) 0)
+                              ^{:go/via [ErrorReporter]} (.Errorf (.-err st) s "textoff relocation %s does not target function entry: %s %#x" rt (.SymName ldr rs) o))
+
+                            (set! o >> 16)))
+
+
+                        (set! o (+ (- (.SymValue ldr rs) (conv int64 (.-Vaddr (.SymSect ldr rs)))) ^{:go/via [Reloc]} (.Add r))))))
+
+
+                  (case [objabi/R_ADDRCUOFF]
+                    ;; debug_range and debug_loc elements use this relocation type to get an
+                    ;; offset from the start of the compile unit.
+                    (set! o (- (+ (.SymValue ldr rs) ^{:go/via [Reloc]} (.Add r)) (.SymValue ldr (aget (.-Textp (.SymUnit ldr rs)) 0)))))
+
+                  ;; r.Sym() can be 0 when CALL $(constant) is transformed from absolute PC to relative PC call.
+                  (case [objabi/R_GOTPCREL]
+                    (when (and (.IsDynlinkingGo target) (.IsDarwin target) (!= rs 0))
+                      (inc! nExtReloc)
+                      (set! o ^{:go/via [Reloc]} (.Add r))
+                      (break))
+
+                    (when (and (.Is386 target) (.IsExternal target) (.-IsELF target))
+                      (inc! nExtReloc)) ; need two ELF relocations on 386, see ../x86/asm.go:elfreloc1
+
+                    (fallthrough))
+                  (case [objabi/R_CALL objabi/R_PCREL]
+                    (when (and (.IsExternal target) (!= rs 0) (== rst sym/SUNDEFEXT))
+                      ;; pass through to the external linker.
+                      (inc! nExtReloc)
+                      (set! o 0)
+                      (break))
+
+                    (when (and (.IsExternal target) (!= rs 0) ^:go/paren (or (!= (.SymSect ldr rs) (.SymSect ldr s)) (== rt objabi/R_GOTPCREL)))
+                      (inc! nExtReloc)
+
+                      ;; set up addend for eventual relocation via outer symbol.
+                      (let [rs rs
+                          (values ^:assign rs off) (FoldSubSymbolOffset ldr rs)
+                          ^{:line 541} xadd (- (+ ^{:go/via [Reloc]} (.Add r) off) (conv int64 siz)) ; relative to address after the relocated chunk
+                          ^{:line 542} rst (.SymType ldr rs)]
+                        (when (and (!= rst sym/SHOSTOBJ) (!= rst sym/SDYNIMPORT) (== (.SymSect ldr rs) nil))
+                          ^{:go/via [ErrorReporter]} (.Errorf (.-err st) s "missing section for relocation target %s" (.SymName ldr rs)))
+
+
+                        (set! o xadd)
+                        (cond (.IsElf target)
+                          (when (.IsAMD64 target)
+                            (set! o 0))
+
+                          (.IsDarwin target)
+                          (if (== rt objabi/R_CALL)
+                            (if (and (.IsExternal target) (== rst sym/SDYNIMPORT))
+                              (when (.IsAMD64 target)
+                                ;; AMD64 dynamic relocations are relative to the end of the relocation.
+                                (set! o + (conv int64 siz)))
+
+                              (do
+                                (when (!= rst sym/SHOSTOBJ)
+                                  (set! o + (conv int64 (- (conv uint64 (.SymValue ldr rs)) (.-Vaddr (.SymSect ldr rs))))))
+
+                                (set! o - off))) ; relative to section offset, not symbol
+
+
+                            (set! o + (conv int64 siz)))
+
+                          (and (.IsWindows target) (.IsAMD64 target)) ; only amd64 needs PCREL
+                          ;; PE/COFF's PC32 relocation uses the address after the relocated
+                          ;; bytes as the base. Compensate by skewing the addend.
+                          (set! o + (conv int64 siz)) :else
+
+                          ^{:go/via [ErrorReporter]} (.Errorf (.-err st) s "unhandled pcrel relocation to %s on %v" (.SymName ldr rs) (.-HeadType target)))
+
+
+                        (break)))
+
+
+                    (set! o 0)
+                    (when (!= rs 0)
+                      (set! o (.SymValue ldr rs)))
+
+
+                    (set! o + (- ^{:go/via [Reloc]} (.Add r) (+ (.SymValue ldr s) (conv int64 off) (conv int64 siz)))))
+                  (case [objabi/R_SIZE]
+                    (set! o (+ (.SymSize ldr rs) ^{:go/via [Reloc]} (.Add r))))
+
+                  (case [objabi/R_XCOFFREF]
+                    (when (not (.IsAIX target))
+                      ^{:go/via [ErrorReporter]} (.Errorf (.-err st) s "find XCOFF R_REF on non-XCOFF files"))
+
+                    (when (not (.IsExternal target))
+                      ^{:go/via [ErrorReporter]} (.Errorf (.-err st) s "find XCOFF R_REF with internal linking"))
+
+                    (inc! nExtReloc)
+                    (continue))
+
+                  (case [objabi/R_CONST]
+                    (set! o ^{:go/via [Reloc]} (.Add r)))
+
+                  (case [objabi/R_GOTOFF]
+                    (set! o (- (+ (.SymValue ldr rs) ^{:go/via [Reloc]} (.Add r)) (.SymValue ldr (.-GOT syms))))))
+
+
+                (when (or (.IsPPC64 target) (.IsS390X target))
+                  (when (!= rv sym/RV_NONE)
+                    (set! o ((.-Archrelocvariant thearch) target ldr r rv s o P))))
+
+
+
+                (switch siz
+                  (default
+                    ^{:go/via [ErrorReporter]} (.Errorf (.-err st) s "bad reloc size %#x for %s" (conv uint32 siz) (.SymName ldr rs)))
+                  (case [1]
+                    (aset P off (conv byte (conv int8 o))))
+                  (case [2]
+                    (cond (and ^:go/paren (or (== rt objabi/R_PCREL) (== rt objabi/R_CALL)) (!= o (conv int64 (conv int16 o))))
+                      ^{:go/via [ErrorReporter]} (.Errorf (.-err st) s "pc-relative relocation %s address for %s is too big: %#x" rt (.SymName ldr rs) o)
+                      (and (!= o (conv int64 (conv int16 o))) (!= o (conv int64 (conv uint16 o))))
+                      ^{:go/via [ErrorReporter]} (.Errorf (.-err st) s "non-pc-relative relocation %s address for %s is too big: %#x" rt (.SymName ldr rs) (conv uint64 o)))
+
+                    (.PutUint16 (.-ByteOrder (.-Arch target)) (subslice P off) (conv uint16 o)))
+                  (case [4]
+                    (cond (and ^:go/paren (or (== rt objabi/R_PCREL) (== rt objabi/R_CALL)) (!= o (conv int64 (conv int32 o))))
+                      ^{:go/via [ErrorReporter]} (.Errorf (.-err st) s "pc-relative relocation %s address for %s is too big: %#x" rt (.SymName ldr rs) o)
+                      (and (!= o (conv int64 (conv int32 o))) (!= o (conv int64 (conv uint32 o))))
+                      ^{:go/via [ErrorReporter]} (.Errorf (.-err st) s "non-pc-relative relocation %s address for %s is too big: %#x" rt (.SymName ldr rs) (conv uint64 o)))
+
+                    (.PutUint32 (.-ByteOrder (.-Arch target)) (subslice P off) (conv uint32 o)))
+                  (case [8]
+                    (.PutUint64 (.-ByteOrder (.-Arch target)) (subslice P off) (conv uint64 o)))))))))
+
+
+      (when (.IsExternal target)
+        ;; We'll stream out the external relocations in asmb2 (e.g. elfrelocsect)
+        ;; and we only need the count here.
+        (atomic/AddUint32 (addr (.-Relcount (.SymSect ldr s))) (conv uint32 nExtReloc))))))
+
+
+
+
+^{:go/end 744} (go/func extreloc "Convert a Go relocation to an external relocation.\n" [^{:tag (* Link)} ctxt ^{:tag (* loader/Loader)} ldr ^loader/Sym s ^loader/Reloc r] :results [loader/ExtReloc bool]
+  (let [^loader/ExtReloc rr (zero loader/ExtReloc)
+      ^{:line 644} target (addr (.-Target ctxt))
+      ^{:line 645} siz (conv int32 ^{:go/via [Reloc]} (.Siz r))]
+    (when (== siz 0) ; informational relocation - no work to do
+      (return rr false))
+
+
+    (let [rt (.Type r)]
+      (when (>= rt objabi/ElfRelocOffset)
+        (return rr false))
+
+      (set! (.-Type rr) rt)
+      (set! (.-Size rr) (conv uint8 siz))
+
+      ;; TODO(mundaym): remove this special case - see issue 14218.
+      (when (.IsS390X target)
+        (switch rt
+          (case [objabi/R_PCRELDBL]
+            (set! rt objabi/R_PCREL))))
+
+
+
+      (switch rt
+        (default
+          (return ((.-Extreloc thearch) target ldr r s)))
+
+        (case [objabi/R_TLS_LE objabi/R_TLS_IE]
+          (when (.IsElf target)
+            (let [rs (.Sym r)]
+              (set! (.-Xsym rr) rs)
+              (when (== (.-Xsym rr) 0)
+                (set! (.-Xsym rr) ^{:go/via [ArchSyms]} (.-Tlsg ctxt)))
+
+              (set! (.-Xadd rr) ^{:go/via [Reloc]} (.Add r))
+              (break)))
+
+          (return rr false))
+
+        (case [objabi/R_ADDR objabi/R_PEIMAGEOFF]
+          ;; set up addend for eventual relocation via outer symbol.
+          (let [rs (.Sym r)]
+            (when (and (.Weak r) (not (.AttrReachable ldr rs)))
+              (set! rs (.-unreachableMethod (.-ArchSyms ctxt))))
+
+            (let [(values ^:assign rs off) (FoldSubSymbolOffset ldr rs)]
+              (set! (.-Xadd rr) (+ ^{:go/via [Reloc]} (.Add r) off))
+              (set! (.-Xsym rr) rs))))
+
+        (case [objabi/R_DWARFSECREF]
+          ;; On most platforms, the external linker needs to adjust DWARF references
+          ;; as it combines DWARF sections. However, on Darwin, dsymutil does the
+          ;; DWARF linking, and it understands how to follow section offsets.
+          ;; Leaving in the relocation records confuses it (see
+          ;; https://golang.org/issue/22068) so drop them for Darwin.
+          (when (.IsDarwin target)
+            (return rr false))
+
+          (let [rs (.Sym r)]
+            (set! (.-Xsym rr) (.-Sym (.SymSect ldr rs)))
+            (set! (.-Xadd rr) (- (+ ^{:go/via [Reloc]} (.Add r) (.SymValue ldr rs)) (conv int64 (.-Vaddr (.SymSect ldr rs)))))))
+
+        ;; r.Sym() can be 0 when CALL $(constant) is transformed from absolute PC to relative PC call.
+        (case [objabi/R_GOTPCREL objabi/R_CALL objabi/R_PCREL]
+          (let [rs (.Sym r)]
+            (when (and (== rt objabi/R_GOTPCREL) (.IsDynlinkingGo target) (.IsDarwin target) (!= rs 0))
+              (set! (.-Xadd rr) ^{:go/via [Reloc]} (.Add r))
+              (set! (.-Xadd rr) - (conv int64 siz)) ; relative to address after the relocated chunk
+              (set! (.-Xsym rr) rs)
+              (break))
+
+            (when (and (!= rs 0) (== (.SymType ldr rs) sym/SUNDEFEXT))
+              ;; pass through to the external linker.
+              (set! (.-Xadd rr) 0)
+              (when (.IsElf target)
+                (set! (.-Xadd rr) - (conv int64 siz)))
+
+              (set! (.-Xsym rr) rs)
+              (break))
+
+            (when (and (!= rs 0) ^:go/paren (or (!= (.SymSect ldr rs) (.SymSect ldr s)) (== rt objabi/R_GOTPCREL)))
+              ;; set up addend for eventual relocation via outer symbol.
+              (let [rs rs
+                  (values ^:assign rs off) (FoldSubSymbolOffset ldr rs)]
+                (set! (.-Xadd rr) (+ ^{:go/via [Reloc]} (.Add r) off))
+                (set! (.-Xadd rr) - (conv int64 siz)) ; relative to address after the relocated chunk
+                (set! (.-Xsym rr) rs)
+                (break)))
+
+            (return rr false)))
+
+        (case [objabi/R_XCOFFREF]
+          (return (ExtrelocSimple ldr r) true))
+
+        ;; These reloc types don't need external relocations.
+        (case [objabi/R_ADDROFF objabi/R_METHODOFF objabi/R_ADDRCUOFF
+            ^{:line 738} objabi/R_SIZE objabi/R_CONST objabi/R_GOTOFF
+            ^{:line 739} objabi/R_DWTXTADDR_U1 objabi/R_DWTXTADDR_U2
+            ^{:line 740} objabi/R_DWTXTADDR_U3 objabi/R_DWTXTADDR_U4]
+          (return rr false)))
+
+      (return rr true))))
+
+
+
+
+^{:go/end 756} (go/func ExtrelocSimple "ExtrelocSimple creates a simple external relocation from r, with the same\nsymbol and addend.\n" ^loader/ExtReloc [^{:tag (* loader/Loader)} ldr ^loader/Reloc r]
+  (let [^loader/ExtReloc rr (zero loader/ExtReloc)
+      ^{:line 750} rs (.Sym r)]
+    (set! (.-Xsym rr) rs)
+    (set! (.-Xadd rr) ^{:go/via [Reloc]} (.Add r))
+    (set! (.-Type rr) (.Type r))
+    (set! (.-Size rr) ^{:go/via [Reloc]} (.Siz r))
+    ^{:line 755} rr))
+
+
+
+
+^{:go/end 774} (go/func ExtrelocViaOuterSym "ExtrelocViaOuterSym creates an external relocation from r targeting the\nouter symbol and folding the subsymbol's offset into the addend.\n" ^loader/ExtReloc [^{:tag (* loader/Loader)} ldr ^loader/Reloc r ^loader/Sym s]
+  ;; set up addend for eventual relocation via outer symbol.
+  (let [^loader/ExtReloc rr (zero loader/ExtReloc)
+      ^{:line 763} rs (.Sym r)
+      (values ^:assign rs off) (FoldSubSymbolOffset ldr rs)]
+    (set! (.-Xadd rr) (+ ^{:go/via [Reloc]} (.Add r) off))
+    (let [rst (.SymType ldr rs)]
+      (when (and (!= rst sym/SHOSTOBJ) (!= rst sym/SDYNIMPORT) (!= rst sym/SUNDEFEXT) (== (.SymSect ldr rs) nil))
+        (.Errorf ldr s "missing section for %s" (.SymName ldr rs)))
+
+      (set! (.-Xsym rr) rs)
+      (set! (.-Type rr) (.Type r))
+      (set! (.-Size rr) ^{:go/via [Reloc]} (.Siz r))
+      ^{:line 773} rr)))
+
+
+
+
+
+
+
+
+
+(go/type relocSymState "relocSymState hold state information needed when making a series of\nsuccessive calls to relocsym(). The items here are invariant\n(meaning that they are set up once initially and then don't change\nduring the execution of relocsym), with the exception of a slice\nused to facilitate batch allocation of external relocations. Calls\nto relocsym happen in parallel; the assumption is that each\nparallel thread will have its own state object.\n" (struct
+    ^{:line 784 :tag (* Target)} target
+    ^{:line 785 :tag (* loader/Loader)} ldr
+    ^{:line 786 :tag (* ErrorReporter)} err
+    ^{:line 787 :tag (* ArchSyms)} syms))
+
+
+
+
+
+^{:go/end 800} (go/method makeRelocSymState "makeRelocSymState creates a relocSymState container object to\npass to relocsym(). If relocsym() calls happen in parallel,\neach parallel thread should have its own state object.\n" ^{:tag (* relocSymState)} [^{:tag (* Link)} ctxt]
+  (addr ^{:go/breaks [2 4 6 8]} (lit relocSymState
+      :target (addr (.-Target ctxt))
+      :ldr (.-loader ctxt)
+      :err (addr (.-ErrorReporter ctxt))
+      :syms (addr (.-ArchSyms ctxt)))))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 943} (go/func windynrelocsym "windynrelocsym examines a text symbol 's' and looks for relocations\nfrom it that correspond to references to symbols defined in DLLs,\nthen fixes up those relocations as needed. A reference to a symbol\nXYZ from some DLL will fall into one of two categories: an indirect\nref via \"__imp_XYZ\", or a direct ref to \"XYZ\". Here's an example of\nan indirect ref (this is an excerpt from objdump -ldr):\n\n\t     1c1: 48 89 c6                     \tmovq\t%rax, %rsi\n\t     1c4: ff 15 00 00 00 00            \tcallq\t*(%rip)\n\t\t\t00000000000001c6:  IMAGE_REL_AMD64_REL32\t__imp__errno\n\nIn the assembly above, the code loads up the value of __imp_errno\nand then does an indirect call to that value.\n\nHere is what a direct reference might look like:\n\n\t     137: e9 20 06 00 00               \tjmp\t0x75c <pow+0x75c>\n\t     13c: e8 00 00 00 00               \tcallq\t0x141 <pow+0x141>\n\t\t\t000000000000013d:  IMAGE_REL_AMD64_REL32\t_errno\n\nThe assembly below dispenses with the import symbol and just makes\na direct call to _errno.\n\nThe code below handles indirect refs by redirecting the target of\nthe relocation from \"__imp_XYZ\" to \"XYZ\" (since the latter symbol\nis what the Windows loader is expected to resolve). For direct refs\nthe call is redirected to a stub, where the stub first loads the\nsymbol and then direct an indirect call to that value.\n\nNote that for a given symbol (as above) it is perfectly legal to\nhave both direct and indirect references.\n" ^error [^{:tag (* Link)} ctxt ^{:tag (* loader/SymbolBuilder)} rel ^loader/Sym s]
+  ^{:go/breaks [[3 942]]} (let [^{:tag (* loader/SymbolBuilder)} su (zero (* loader/SymbolBuilder))
+      ^{:line 835} relocs (.Relocs (.-loader ctxt) s)]
+    (for [ri 0] (< ri (.Count relocs)) (inc! ri)
+      (let [r (.At relocs ri)]
+        (when (.IsMarker r)
+          (continue)) ; skip marker relocations
+
+        (let [targ (.Sym r)]
+          (when (== targ 0)
+            (continue))
+
+          (when (not (.AttrReachable (.-loader ctxt) targ))
+            (when (.Weak r)
+              (continue))
+
+            (return (fmt/Errorf "dynamic relocation to unreachable symbol %s"
+                (.SymName (.-loader ctxt) targ))))
+
+          (let [tgot (.SymGot (.-loader ctxt) targ)]
+            (when (== tgot loadpe/RedirectToDynImportGotToken)
+
+              ;; Consistency check: name should be __imp_X
+              (let [sname (.SymName (.-loader ctxt) targ)]
+                (when (not (strings/HasPrefix sname "__imp_"))
+                  (return (fmt/Errorf "internal error in windynrelocsym: redirect GOT token applied to non-import symbol %s" sname)))
+
+
+                ;; Locate underlying symbol (which originally had type
+                ;; SDYNIMPORT but has since been retyped to SWINDOWS).
+                (let [(values ds err) (loadpe/LookupBaseFromImport targ (.-loader ctxt) ^{:go/via [Target]} (.-Arch ctxt))]
+                  (when (!= err nil)
+                    (return err))
+
+                  (let [dstyp (.SymType (.-loader ctxt) ds)]
+                    (when (!= dstyp sym/SWINDOWS)
+                      (return (fmt/Errorf "internal error in windynrelocsym: underlying sym for %q has wrong type %s" sname (.String dstyp))))
+
+
+                    ;; Redirect relocation to the dynimport.
+                    (.SetSym r ds)
+                    (continue)))))
+
+
+            (let [tplt (.SymPlt (.-loader ctxt) targ)]
+              (cond (== tplt loadpe/CreateImportStubPltToken) (do
+
+                  ;; Consistency check: don't want to see both PLT and GOT tokens.
+                  (when (!= tgot -1)
+                    (return (fmt/Errorf "internal error in windynrelocsym: invalid GOT setting %d for reloc to %s" tgot (.SymName (.-loader ctxt) targ))))
+
+
+                  ;; make dynimport JMP table for PE object files.
+                  (let [tplt (conv int32 (.Size rel))]
+                    (.SetPlt (.-loader ctxt) targ tplt)
+
+                    (when (== su nil)
+                      (set! su (.MakeSymbolUpdater (.-loader ctxt) s)))
+
+                    (.SetSym r (.Sym rel))
+                    ^{:go/via [Reloc]} (.SetAdd r (conv int64 tplt))
+
+                    ;; jmp *addr
+                    (switch (.-Family ^{:go/via [Target]} (.-Arch ctxt))
+                      (default
+                        (return (fmt/Errorf "internal error in windynrelocsym: unsupported arch %v" (.-Family ^{:go/via [Target]} (.-Arch ctxt)))))
+                      (case [sys/I386]
+                        (.AddUint8 rel 0xff)
+                        (.AddUint8 rel 0x25)
+                        (.AddAddrPlus rel ^{:go/via [Target]} (.-Arch ctxt) targ 0)
+                        (.AddUint8 rel 0x90)
+                        (.AddUint8 rel 0x90))
+                      (case [sys/AMD64]
+                        ;; The relocation symbol might be at an absolute offset
+                        ;; higher than 32 bits, but the jump instruction can't
+                        ;; encode more than 32 bit offsets. We use a jump
+                        ;; relative to the instruction pointer to get around this
+                        ;; limitation.
+                        (.AddUint8 rel 0xff)
+                        (.AddUint8 rel 0x25)
+                        (.AddPCRelPlus rel ^{:go/via [Target]} (.-Arch ctxt) targ 0)
+                        (.AddUint8 rel 0x90)
+                        (.AddUint8 rel 0x90))
+                      (case [sys/ARM64]
+                        ;; adrp x16, addr
+                        (.AddUint32 rel ^{:go/via [Target]} (.-Arch ctxt) 0x90000010)
+                        (let [(values r _) (.AddRel rel objabi/R_ARM64_PCREL)]
+                          ^{:go/via [Reloc]} (.SetOff r (conv int32 (- (.Size rel) 4)))
+                          ^{:go/via [Reloc]} (.SetSiz r 4)
+                          (.SetSym r targ)
+
+                          ;; ldr x17, [x16, <offset>]
+                          (.AddUint32 rel ^{:go/via [Target]} (.-Arch ctxt) 0xf9400211)
+                          (set! (values r _) (.AddRel rel objabi/R_ARM64_PCREL))
+                          ^{:go/via [Reloc]} (.SetOff r (conv int32 (- (.Size rel) 4)))
+                          ^{:go/via [Reloc]} (.SetSiz r 4)
+                          (.SetSym r targ)
+
+                          ;; br x17
+                          (.AddUint32 rel ^{:go/via [Target]} (.-Arch ctxt) 0xd61f0220))))))
+
+                (>= tplt 0) (do
+                  (when (== su nil)
+                    (set! su (.MakeSymbolUpdater (.-loader ctxt) s)))
+
+                  (.SetSym r (.Sym rel))
+                  ^{:go/via [Reloc]} (.SetAdd r (conv int64 tplt)))))))))
+
+
+    nil))
+
+
+
+
+^{:go/end 962} (go/method windynrelocsyms "windynrelocsyms generates jump table to C library functions that will be\nadded later. windynrelocsyms writes the table into .rel symbol.\n" [^{:tag (* Link)} ctxt]
+  (when (not (and ^{:go/via [Target]} (.IsWindows ctxt) iscgo ^{:go/via [Target]} (.IsInternal ctxt)))
+    (return))
+
+
+  (let [rel (.CreateSymForUpdate (.-loader ctxt) ".rel" 0)]
+    (.SetType rel sym/STEXT)
+
+    (range [_ s (.-Textp ctxt)]
+      (when [err (windynrelocsym ctxt rel s)] (!= err nil)
+        (.Errorf ctxt s "%v" err)))
+
+
+
+    (set! (.-Textp ctxt) (append (.-Textp ctxt) (.Sym rel)))))
+
+
+^{:go/end 995} (go/func dynrelocsym [^{:tag (* Link)} ctxt ^loader/Sym s]
+  (let [target (addr (.-Target ctxt))
+      ^{:line 966} ldr (.-loader ctxt)
+      ^{:line 967} syms (addr (.-ArchSyms ctxt))
+      ^{:line 968} relocs (.Relocs ldr s)]
+    (for [ri 0] (< ri (.Count relocs)) (inc! ri)
+      (let [r (.At relocs ri)]
+        (when (.IsMarker r)
+          (continue)) ; skip marker relocations
+
+        (let [rSym (.Sym r)]
+          (when (and (.Weak r) (not (.AttrReachable ldr rSym)))
+            (continue))
+
+          (when (and (== ^{:go/via [Target]} (.-BuildMode ctxt) BuildModePIE) (== ^{:go/via [Target]} (.-LinkMode ctxt) LinkInternal))
+            ;; It's expected that some relocations will be done
+            ;; later by relocsym (R_TLS_LE, R_ADDROFF), so
+            ;; don't worry if Adddynrel returns false.
+            ((.-Adddynrel thearch) target ldr syms s r ri)
+            (continue))
+
+
+          (when (or (and (!= rSym 0) (== (.SymType ldr rSym) sym/SDYNIMPORT)) (>= (.Type r) objabi/ElfRelocOffset))
+            (when (and (!= rSym 0) (not (.AttrReachable ldr rSym)))
+              (.Errorf ctxt s "dynamic relocation to unreachable symbol %s" (.SymName ldr rSym)))
+
+            (when (not ((.-Adddynrel thearch) target ldr syms s r ri))
+              (.Errorf ctxt s "unsupported dynamic relocation for symbol %s (type=%d (%s) stype=%d (%s))" (.SymName ldr rSym) (.Type r) (sym/RelocName ^{:go/via [Target]} (.-Arch ctxt) (.Type r)) (.SymType ldr rSym) (.SymType ldr rSym)))))))))
+
+
+
+
+
+^{:go/end 1018} (go/method dynreloc [^{:tag (* dodataState)} state ^{:tag (* Link)} ctxt]
+  (when (== ^{:go/via [Target]} (.-HeadType ctxt) objabi/Hwindows)
+    (return))
+
+  ;; -d suppresses dynamic loader format, so we may as well not
+  ;; compute these sections or mark their symbols as reachable.
+  (when @FlagD
+    (return))
+
+
+  (range [_ s (.-Textp ctxt)]
+    (dynrelocsym ctxt s))
+
+  (range [_ syms (.-data state)]
+    (range [_ s syms]
+      (dynrelocsym ctxt s)))
+
+
+  (when ^{:go/via [Target]} (.-IsELF ctxt)
+    (elfdynhash ctxt)))
+
+
+
+^{:go/end 1022} (go/func CodeblkPad [^{:tag (* Link)} ctxt ^{:tag (* OutBuf)} out ^int64 addr ^int64 size ^{:tag (slice byte)} pad]
+  (writeBlocks ctxt out (.-outSem ctxt) (.-loader ctxt) (.-Textp ctxt) addr size pad))
+
+
+(go/const ^{:val 1048576} blockSize (<< 1 20)) ; 1MB chunks written at a time.
+
+
+
+
+
+
+^{:go/end 1113} (go/func writeBlocks "writeBlocks writes a specified chunk of symbols to the output buffer. It\nbreaks the write up into ≥blockSize chunks to write them out, and schedules\nas many goroutines as necessary to accomplish this task. This call then\nblocks, waiting on the writes to complete. Note that we use the sem parameter\nto limit the number of concurrent writes taking place.\n" [^{:tag (* Link)} ctxt ^{:tag (* OutBuf)} out ^{:tag (chan int)} sem ^{:tag (* loader/Loader)} ldr ^{:tag (slice loader/Sym)} syms ^int64 addr ^int64 size ^{:tag (slice byte)} pad]
+  (range [i s syms]
+    (when (and (>= (.SymValue ldr s) addr) (not (.AttrSubSymbol ldr s)))
+      (set! syms (subslice syms i))
+      (break)))
+
+
+
+  (let [^sync/WaitGroup wg (zero sync/WaitGroup)
+      (values max lastAddr written) (values (conv int64 blockSize) (+ addr size) (conv int64 0))]
+    (while (< addr lastAddr)
+      ;; Find the last symbol we'd write.
+      (let [idx -1]
+        (range [i s syms]
+          (when (.AttrSubSymbol ldr s)
+            (continue))
+
+
+          ;; If the next symbol's size would put us out of bounds on the total length,
+          ;; stop looking.
+          (let [end (+ (.SymValue ldr s) (.SymSize ldr s))]
+            (when (> end lastAddr)
+              (break))
+
+
+            ;; We're gonna write this symbol.
+            (set! idx i)
+
+            ;; If we cross over the max size, we've got enough symbols.
+            (when (> end (+ addr max))
+              (break))))
+
+
+
+        ;; If we didn't find any symbols to write, we're done here.
+        (when (< idx 0)
+          (break))
+
+
+        ;; Compute the length to write, including padding.
+        ;; We need to write to the end address (lastAddr), or the next symbol's
+        ;; start address, whichever comes first. If there is no more symbols,
+        ;; just write to lastAddr. This ensures we don't leave holes between the
+        ;; blocks or at the end.
+        (let [length (conv int64 0)]
+          (when (< (+ idx 1) (len syms))
+            ;; Find the next top-level symbol.
+            ;; Skip over sub symbols so we won't split a container symbol
+            ;; into two blocks.
+            (let [next (aget syms (+ idx 1))]
+              (while (.AttrSubSymbol ldr next)
+                (inc! idx)
+                (set! next (aget syms (+ idx 1))))
+
+              (set! length (- (.SymValue ldr next) addr))))
+
+          (when (or (== length 0) (> length (- lastAddr addr)))
+            (set! length (- lastAddr addr)))
+
+
+          ;; Start the block output operator.
+          (if (.isMmapped (.-Out ctxt))
+            (let [o (.View out (conv uint64 (+ (.Offset out) written)))]
+              (>! sem 1)
+              (.Add wg 1)
+              (go (^{:go/end 1100} (fn [^{:tag (* OutBuf)} o ^{:tag (* loader/Loader)} ldr ^{:tag (slice loader/Sym)} syms ^int64 addr ^int64 size ^{:tag (slice byte)} pad]
+                    (writeBlock ctxt o ldr syms addr size pad)
+                    (.Done wg)
+                    (<! sem))
+                  ^{:line 1100} o ldr syms addr length pad)))
+            ;; output not mmaped, don't parallelize.
+            (writeBlock ctxt out ldr syms addr length pad))
+
+
+          ;; Prepare for the next loop.
+          (when (!= idx -1)
+            (set! syms (subslice syms (+ idx 1))))
+
+          (set! written + length)
+          (set! addr + length))))
+
+    (.Wait wg)))
+
+
+^{:go/end 1166} (go/func writeBlock [^{:tag (* Link)} ctxt ^{:tag (* OutBuf)} out ^{:tag (* loader/Loader)} ldr ^{:tag (slice loader/Sym)} syms ^int64 addr ^int64 size ^{:tag (slice byte)} pad]
+
+  (let [st (.makeRelocSymState ctxt)
+
+      ;; This doesn't distinguish the memory size from the file
+      ;; size, and it lays out the file based on Symbol.Value, which
+      ;; is the virtual address. DWARF compression changes file sizes,
+      ;; so dwarfcompress will fix this up later if necessary.
+      ^{:line 1123} eaddr (+ addr size)
+      ^{:line 1124 :tag loader/Sym} prev (zero loader/Sym)]
+    (range [_ s syms]
+      (when (.AttrSubSymbol ldr s)
+        (continue))
+
+      (let [val (.SymValue ldr s)]
+        (when (>= val eaddr)
+          (break))
+
+        (when (< val addr)
+          (.Errorf ldr s "phase error: addr=%#x but val=%#x sym=%s type=%v sect=%v sect.addr=%#x prev=%s" addr val (.SymName ldr s) (.SymType ldr s) (.-Name (.SymSect ldr s)) (.-Vaddr (.SymSect ldr s)) (.SymName ldr prev))
+          (errorexit))
+
+        (set! prev s)
+        (when (< addr val)
+          (.WriteStringPad out "" (conv int (- val addr)) pad)
+          (set! addr val))
+
+        (let [P (.WriteSym out ldr s)]
+          (.relocsym st s P)
+          (when (.IsGeneratedSym ldr s)
+            (let [f (aget (.-generatorSyms ctxt) s)]
+              (f ctxt s)))
+
+          (set! addr + (conv int64 (len P)))
+          (let [siz (.SymSize ldr s)]
+            (when (< addr (+ val siz))
+              (.WriteStringPad out "" (conv int (- (+ val siz) addr)) pad)
+              (set! addr (+ val siz)))
+
+            (when (!= addr (+ val siz))
+              (.Errorf ldr s "phase error: addr=%#x value+size=%#x" addr (+ val siz))
+              (errorexit))
+
+            (when (>= (+ val siz) eaddr)
+              (break))))))
+
+
+
+    (when (< addr eaddr)
+      (.WriteStringPad out "" (conv int (- eaddr addr)) pad))))
+
+
+
+(go/type writeFn (func [(* Link) (* OutBuf) int64 int64]))
+
+
+^{:go/end 1183} (go/func writeParallel "writeParallel handles scheduling parallel execution of data write functions.\n" [^{:tag (* sync/WaitGroup)} wg ^writeFn fn ^{:tag (* Link)} ctxt ^uint64 seek ^uint64 vaddr ^uint64 length]
+  (if (.isMmapped (.-Out ctxt))
+    (let [out (.View (.-Out ctxt) seek)]
+      (.Add wg 1)
+      (go (^{:go/end 1178} (fn []
+            (defer (.Done wg))
+            (go/call fn ctxt out (conv int64 vaddr) (conv int64 length))))))
+
+    (do
+      (.SeekSet (.-Out ctxt) (conv int64 seek))
+      (go/call fn ctxt (.-Out ctxt) (conv int64 vaddr) (conv int64 length)))))
+
+
+
+^{:go/end 1187} (go/func datblk [^{:tag (* Link)} ctxt ^{:tag (* OutBuf)} out ^int64 addr ^int64 size]
+  (writeDatblkToOutBuf ctxt out addr size))
+
+
+
+^{:go/end 1195} (go/func DatblkBytes "Used only on Wasm for now.\n" ^{:tag (slice byte)} [^{:tag (* Link)} ctxt ^int64 addr ^int64 size]
+  (let [buf (make (slice byte) size)
+      ^{:line 1192} out (addr (lit OutBuf :heap buf))]
+    (writeDatblkToOutBuf ctxt out addr size)
+    ^{:line 1194} buf))
+
+
+^{:go/end 1199} (go/func writeDatblkToOutBuf [^{:tag (* Link)} ctxt ^{:tag (* OutBuf)} out ^int64 addr ^int64 size]
+  (writeBlocks ctxt out (.-outSem ctxt) (.-loader ctxt) (.-datap ctxt) addr size (subslice zeros)))
+
+
+^{:go/end 1217} (go/func dwarfblk [^{:tag (* Link)} ctxt ^{:tag (* OutBuf)} out ^int64 addr ^int64 size]
+  ;; Concatenate the section symbol lists into a single list to pass
+  ;; to writeBlocks.
+  ;;
+  ;; NB: ideally we would do a separate writeBlocks call for each
+  ;; section, but this would run the risk of undoing any file offset
+  ;; adjustments made during layout.
+  (let [n 0]
+    (range [i dwarfp]
+      (set! n + (len (.-syms (aget dwarfp i)))))
+
+    (let [syms (make (slice loader/Sym) 0 n)]
+      (range [i dwarfp]
+        (set! syms (append syms (spread (.-syms (aget dwarfp i))))))
+
+      (writeBlocks ctxt out (.-outSem ctxt) (.-loader ctxt) syms addr size (subslice zeros)))))
+
+
+^{:go/end 1221} (go/func pdatablk [^{:tag (* Link)} ctxt ^{:tag (* OutBuf)} out ^int64 addr ^int64 size]
+  (writeBlocks ctxt out (.-outSem ctxt) (.-loader ctxt) (.-pdata sehp) addr size (subslice zeros)))
+
+
+^{:go/end 1225} (go/func xdatablk [^{:tag (* Link)} ctxt ^{:tag (* OutBuf)} out ^int64 addr ^int64 size]
+  (writeBlocks ctxt out (.-outSem ctxt) (.-loader ctxt) (.-xdata sehp) addr size (subslice zeros)))
+
+
+(go/var (values ^uint64 covCounterDataStartOff ^uint64 covCounterDataLen))
+
+(go/var ^{:tag (array 512 byte)} zeros)
+
+(go/var
+  ^{:line 1232} [strdata (make (map string string))]
+  ^{:line 1233} [^{:tag (slice string)} strnames])
+
+
+^{:go/end 1253} (go/func addstrdata1 [^{:tag (* Link)} ctxt ^string arg]
+  (let [eq (strings/Index arg "=")
+      ^{:line 1238} dot (strings/LastIndex (subslice arg _ (+ eq 1)) ".")]
+    (when (or (< eq 0) (< dot 0))
+      (Exitf "-X flag requires argument of the form importpath.name=value"))
+
+    (let [pkg (subslice arg _ dot)]
+      (when (and (== ^{:go/via [Target]} (.-BuildMode ctxt) BuildModePlugin) (== pkg "main"))
+        (set! pkg @flagPluginPath))
+
+      (set! pkg (objabi/PathToPrefix pkg))
+      (let [name (+ pkg (subslice arg dot eq))
+          ^{:line 1248} value (subslice arg (+ eq 1))]
+        (when [(values _ ok) (aget strdata name)] (not ok)
+          (set! strnames (append strnames name)))
+
+        (aset strdata name value)))))
+
+
+
+^{:go/end 1288} (go/func addstrdata "addstrdata sets the initial value of the string variable name to value.\n" [^{:tag (* sys/Arch)} arch ^{:tag (* loader/Loader)} l ^string name ^string value]
+  (let [s (.Lookup l name 0)]
+    (when (== s 0)
+      (return))
+
+    (if [goType (.SymGoType l s)] (== goType 0)
+      (return)
+      (when [typeName (.SymName l goType)] (!= typeName "type:string")
+        (Errorf "%s: cannot set with -X: not a var of type string (%s)" name typeName)
+        (return)))
+
+    (when (not (.AttrReachable l s))
+      (return)) ; don't bother setting unreachable variable
+
+    (let [bld (.MakeSymbolUpdater l s)]
+      (when (== (.Type bld) sym/SBSS)
+        (.SetType bld sym/SDATA))
+
+
+      (let [p (fmt/Sprintf "%s.str" name)
+          ^{:line 1276} sbld (.CreateSymForUpdate l p 0)]
+        (.Addstring sbld value)
+        (.SetType sbld sym/SRODATA)
+
+        ;; Don't reset the variable's size. String variable usually has size of
+        ;; 2*PtrSize, but in ASAN build it can be larger due to red zone.
+        ;; (See issue 56175.)
+        (.SetData bld (make (slice byte) (* (.-PtrSize arch) 2)))
+        (.SetReadOnly bld false)
+        (.ResetRelocs bld)
+        (.SetAddrPlus bld arch 0 (.Sym sbld) 0)
+        (.SetUint bld arch (conv int64 (.-PtrSize arch)) (conv uint64 (len value)))))))
+
+
+^{:go/end 1294} (go/method dostrdata [^{:tag (* Link)} ctxt]
+  (range [_ name strnames]
+    (addstrdata ^{:go/via [Target]} (.-Arch ctxt) (.-loader ctxt) name (aget strdata name))))
+
+
+
+
+
+^{:go/end 1309} (go/func addgostring "addgostring adds str, as a Go string value, to s. symname is the name of the\nsymbol used to define the string data and must be unique per linked object.\n" [^{:tag (* Link)} ctxt ^{:tag (* loader/Loader)} ldr ^{:tag (* loader/SymbolBuilder)} s ^string symname ^string str]
+  (let [sdata (.CreateSymForUpdate ldr symname 0)]
+    (when (!= (.Type sdata) sym/Sxxx)
+      (.Errorf ctxt (.Sym s) "duplicate symname in addgostring: %s" symname))
+
+    (.SetLocal sdata true)
+    (.SetType sdata sym/SRODATA)
+    (.SetSize sdata (conv int64 (len str)))
+    (.SetData sdata (conv (slice byte) str))
+    (.AddAddr s ^{:go/via [Target]} (.-Arch ctxt) (.Sym sdata))
+    (.AddUint s ^{:go/via [Target]} (.-Arch ctxt) (conv uint64 (len str)))))
+
+
+^{:go/end 1318} (go/func addinitarrdata [^{:tag (* Link)} ctxt ^{:tag (* loader/Loader)} ldr ^loader/Sym s]
+  (let [p (+ (.SymName ldr s) ".ptr")
+      ^{:line 1313} sp (.CreateSymForUpdate ldr p 0)]
+    (.SetType sp sym/SINITARR)
+    (.SetSize sp 0)
+    (.SetDuplicateOK sp true)
+    (.AddAddr sp ^{:go/via [Target]} (.-Arch ctxt) s)))
+
+
+
+^{:go/end 1336} (go/func symalign "symalign returns the required alignment for the given symbol s.\n" ^int32 [^{:tag (* loader/Loader)} ldr ^loader/Sym s]
+  (let [min (conv int32 (.-Minalign thearch))
+      ^{:line 1323} align (.SymAlign ldr s)]
+    (cond (>= align min)
+      (return align)
+      (!= align 0)
+      (return min))
+
+    (set! align (conv int32 (.-Maxalign thearch)))
+    (let [ssz (.SymSize ldr s)]
+      (while (and (> (conv int64 align) ssz) (> align min))
+        (set! align >> 1))
+
+      (.SetSymAlign ldr s align)
+      ^{:line 1335} align)))
+
+
+^{:go/end 1340} (go/func aligndatsize ^int64 [^{:tag (* dodataState)} state ^int64 datsize ^loader/Sym s]
+  (Rnd datsize (conv int64 (symalign (.-loader (.-ctxt state)) s))))
+
+
+(go/const ^{:val false} debugGCProg false)
+
+(go/type GCProg (struct
+    ^{:line 1345 :tag (* Link)} ctxt
+    ^{:line 1346 :tag (* loader/SymbolBuilder)} sym
+    ^{:line 1347 :tag gcprog/Writer} w))
+
+
+^{:go/end 1358} (go/method Init [^{:tag (* GCProg)} p ^{:tag (* Link)} ctxt ^string name]
+  (set! (.-ctxt p) ctxt)
+  (set! (.-sym p) (.CreateSymForUpdate (.-loader ctxt) name 0))
+  (.Init (.-w p) (.writeByte p))
+  (when debugGCProg
+    (fmt/Fprintf os/Stderr "ld: start GCProg %s\n" name)
+    (.Debug (.-w p) os/Stderr)))
+
+
+
+^{:go/end 1364} (go/method writeByte ^{:tag (func [^byte x])} [^{:tag (* GCProg)} p]
+  ^{:go/end 1363} (fn [^byte x]
+    (.AddUint8 (.-sym p) x)))
+
+
+
+^{:go/end 1372} (go/method End [^{:tag (* GCProg)} p ^int64 size]
+  (.ZeroUntil (.-w p) (/ size (conv int64 (.-PtrSize ^{:go/via [Target]} (.-Arch (.-ctxt p))))))
+  (.End (.-w p))
+  (when debugGCProg
+    (fmt/Fprintf os/Stderr "ld: end GCProg\n")))
+
+
+
+^{:go/end 1398} (go/method AddSym [^{:tag (* GCProg)} p ^loader/Sym s]
+  (let [ldr (.-loader (.-ctxt p))
+      ^{:line 1376} typ (.SymGoType ldr s)]
+
+    ;; Things without pointers should be in sym.SNOPTRDATA or sym.SNOPTRBSS;
+    ;; everything we see should have pointers and should therefore have a type.
+    (when (== typ 0)
+      (switch (.SymName ldr s)
+        (case ["runtime.data" "runtime.edata" "runtime.bss" "runtime.ebss" "runtime.gcdata" "runtime.gcbss"]
+          ;; Ignore special symbols that are sometimes laid out
+          ;; as real symbols. See comment about dyld on darwin in
+          ;; the address function.
+          (return)))
+
+      (.Errorf (.-ctxt p) (.Sym (.-sym p)) "missing Go type information for global symbol %s: size %d" (.SymName ldr s) (.SymSize ldr s))
+      (return))
+
+
+    (when debugGCProg
+      (fmt/Fprintf os/Stderr "gcprog sym: %s at %d (ptr=%d)\n" (.SymName ldr s) (.SymValue ldr s) (/ (.SymValue ldr s) (conv int64 (.-PtrSize ^{:go/via [Target]} (.-Arch (.-ctxt p)))))))
+
+
+    (let [sval (.SymValue ldr s)]
+      (.AddType p sval typ))))
+
+
+
+
+
+^{:go/end 1448} (go/method AddType "Add to the gc program the ptr bits for the type typ at\nbyte offset off in the region being described.\nThe type must have a pointer in it.\n" [^{:tag (* GCProg)} p ^int64 off ^loader/Sym typ]
+  (let [ldr (.-loader (.-ctxt p))
+      ^{:line 1405} typData (.Data ldr typ)
+      ^{:line 1406} ptrdata (decodetypePtrdata ^{:go/via [Target]} (.-Arch (.-ctxt p)) typData)]
+    (when (== ptrdata 0)
+      (.Errorf (.-ctxt p) (.Sym (.-sym p)) "has no pointers but in data section"))
+    ;; TODO: just skip these? They might occur in assembly
+    ;; that doesn't know to use NOPTR? But there must have been
+    ;; a Go declaration somewhere.
+
+    (switch (decodetypeKind ^{:go/via [Target]} (.-Arch (.-ctxt p)) typData)
+      (default
+        (when (decodetypeGCMaskOnDemand ^{:go/via [Target]} (.-Arch (.-ctxt p)) typData)
+          (.Errorf (.-ctxt p) (.Sym (.-sym p)) "GC mask not available"))
+
+        ;; Copy pointers from mask into program.
+        (let [ptrsize (conv int64 (.-PtrSize ^{:go/via [Target]} (.-Arch (.-ctxt p))))
+            ^{:line 1420} mask (decodetypeGcmask (.-ctxt p) typ)]
+          (for [i (conv int64 0)] (< i (/ ptrdata ptrsize)) (inc! i)
+            (when (!= (bit-and (>> (aget mask (/ i 8)) (conv uint (% i 8))) 1) 0)
+              (.Ptr (.-w p) (+ (/ off ptrsize) i))))))
+
+
+      (case [abi/Array]
+        (let [elem (decodetypeArrayElem (.-ctxt p) ^{:go/via [Target]} (.-Arch (.-ctxt p)) typ)
+            ^{:line 1428} n (decodetypeArrayLen ldr ^{:go/via [Target]} (.-Arch (.-ctxt p)) typ)]
+          (.AddType p off elem)
+          (when (> n 1)
+            ;; Issue repeat for subsequent n-1 instances.
+            (let [elemSize (decodetypeSize ^{:go/via [Target]} (.-Arch (.-ctxt p)) (.Data ldr elem))
+                ^{:line 1433} ptrsize (conv int64 (.-PtrSize ^{:go/via [Target]} (.-Arch (.-ctxt p))))]
+              (.ZeroUntil (.-w p) (/ (+ off elemSize) ptrsize))
+              (.Repeat (.-w p) (/ elemSize ptrsize) (- n 1))))))
+
+      (case [abi/Struct]
+        (let [nField (decodetypeStructFieldCount ldr ^{:go/via [Target]} (.-Arch (.-ctxt p)) typ)]
+          (for [i 0] (< i nField) (inc! i)
+            (let [fTyp (decodetypeStructFieldType (.-ctxt p) ^{:go/via [Target]} (.-Arch (.-ctxt p)) typ i)]
+              (when (== (decodetypePtrdata ^{:go/via [Target]} (.-Arch (.-ctxt p)) (.Data ldr fTyp)) 0)
+                (continue))
+
+              (let [fOff (decodetypeStructFieldOffset ldr ^{:go/via [Target]} (.-Arch (.-ctxt p)) typ i)]
+                (.AddType p (+ off fOff) fTyp)))))))))
+
+
+
+
+
+
+(go/const ^{:val 2.0E9 :doc "cutoff is the maximum data section size permitted by the linker\n(see issue #9862).\n"} cutoff 2.0E9) ; 2 GB (or so; looks better in errors than 2^31)
+
+
+^{:go/end 1459} (go/method checkdatsize "check accumulated size of data sections\n" [^{:tag (* dodataState)} state ^sym/SymKind symn]
+  (when (> (.-datsize state) cutoff)
+    (Errorf "too much data, last section %v (%d, over %v bytes)" symn (.-datsize state) cutoff)))
+
+
+
+^{:go/end 1468} (go/func checkSectSize [^{:tag (* sym/Section)} sect]
+  ;; TODO: consider using 4 GB size limit for DWARF sections, and
+  ;; make sure we generate unsigned offset in relocations and check
+  ;; for overflow.
+  (when (> (.-Length sect) cutoff)
+    (Errorf "too much data in section %s (%d, over %v bytes)" (.-Name sect) (.-Length sect) cutoff)))
+
+
+
+
+^{:go/end 1568} (go/func fixZeroSizedSymbols "fixZeroSizedSymbols gives a few special symbols with zero size some space.\n" [^{:tag (* Link)} ctxt]
+  (let [ldr (.-loader ctxt)
+
+      ;; The values in moduledata are filled out by relocations
+      ;; pointing to the addresses of these special symbols.
+      ;; Typically these symbols have no size and are not laid
+      ;; out with their matching section.
+      ;;
+      ;; However on darwin, dyld will find the special symbol
+      ;; in the first loaded module, even though it is local.
+      ;;
+      ;; (An hypothesis, formed without looking in the dyld sources:
+      ;; these special symbols have no size, so their address
+      ;; matches a real symbol. The dynamic linker assumes we
+      ;; want the normal symbol with the same address and finds
+      ;; it in the other module.)
+      ;;
+      ;; To work around this we lay out the symbls whose
+      ;; addresses are vital for multi-module programs to work
+      ;; as normal symbols, and give them a little size.
+      ;;
+      ;; On AIX, as all DATA sections are merged together, ld might not put
+      ;; these symbols at the beginning of their respective section if there
+      ;; aren't real symbols, their alignment might not match the
+      ;; first symbol alignment. Therefore, there are explicitly put at the
+      ;; beginning of their section with the same alignment.
+
+      ^{:line 1498} defineRuntimeTypes ^{:go/end 1504} (fn []
+        (let [types (.CreateSymForUpdate ldr "runtime.types" 0)]
+          (.SetType types sym/STYPE)
+          (.SetSize types (conv int64 (.-PtrSize ^{:go/via [Target]} (.-Arch ctxt))))
+          (.SetAlign types (conv int32 (.-PtrSize ^{:go/via [Target]} (.-Arch ctxt))))
+          (.SetAttrSpecial ldr (.Sym types) false)))]
+
+
+    (when (and (not (and (.DynlinkingGo ctxt) (== ^{:go/via [Target]} (.-HeadType ctxt) objabi/Hdarwin))) (not (and (== ^{:go/via [Target]} (.-HeadType ctxt) objabi/Haix) (== ^{:go/via [Target]} (.-LinkMode ctxt) LinkExternal))))
+
+      ;; On AIX, below, we give runtime.types a size.
+      ;; That means that the type descriptors will actually
+      ;; follow runtime.types plus that size.
+      ;; To simplify matters for the runtime,
+      ;; always give runtime.types a size.
+      (when (== ^{:go/via [Target]} (.-HeadType ctxt) objabi/Haix)
+        (defineRuntimeTypes))
+
+
+      (return))
+
+
+    (let [bss (.CreateSymForUpdate ldr "runtime.bss" 0)]
+      (.SetSize bss 8)
+      (.SetAttrSpecial ldr (.Sym bss) false)
+
+      (let [ebss (.CreateSymForUpdate ldr "runtime.ebss" 0)]
+        (.SetAttrSpecial ldr (.Sym ebss) false)
+
+        (let [data (.CreateSymForUpdate ldr "runtime.data" 0)]
+          (.SetSize data 8)
+          (.SetAttrSpecial ldr (.Sym data) false)
+
+          (let [edata (.CreateSymForUpdate ldr "runtime.edata" 0)]
+            (.SetAttrSpecial ldr (.Sym edata) false)
+
+            (when (== ^{:go/via [Target]} (.-HeadType ctxt) objabi/Haix)
+              ;; XCOFFTOC symbols are part of .data section.
+              (.SetType edata sym/SXCOFFTOC))
+
+
+            (let [noptrbss (.CreateSymForUpdate ldr "runtime.noptrbss" 0)]
+              (.SetSize noptrbss 8)
+              (.SetAttrSpecial ldr (.Sym noptrbss) false)
+
+              (let [enoptrbss (.CreateSymForUpdate ldr "runtime.enoptrbss" 0)]
+                (.SetAttrSpecial ldr (.Sym enoptrbss) false)
+
+                (let [noptrdata (.CreateSymForUpdate ldr "runtime.noptrdata" 0)]
+                  (.SetSize noptrdata 8)
+                  (.SetAttrSpecial ldr (.Sym noptrdata) false)
+
+                  (let [enoptrdata (.CreateSymForUpdate ldr "runtime.enoptrdata" 0)]
+                    (.SetAttrSpecial ldr (.Sym enoptrdata) false)
+
+                    (defineRuntimeTypes)
+
+                    (let [etypes (.CreateSymForUpdate ldr "runtime.etypes" 0)]
+                      (.SetType etypes sym/STYPE)
+                      (.SetAttrSpecial ldr (.Sym etypes) false)
+
+                      (when (== ^{:go/via [Target]} (.-HeadType ctxt) objabi/Haix)
+                        (let [rodata (.CreateSymForUpdate ldr "runtime.rodata" 0)]
+                          (.SetType rodata sym/SSTRING)
+                          (.SetSize rodata 8)
+                          (.SetAttrSpecial ldr (.Sym rodata) false)
+
+                          (let [erodata (.CreateSymForUpdate ldr "runtime.erodata" 0)]
+                            (.SetAttrSpecial ldr (.Sym erodata) false)))))))))))))))
+
+
+
+
+^{:go/end 1612} (go/method makeRelroForSharedLib "makeRelroForSharedLib creates a section of readonly data if necessary.\n" [^{:tag (* dodataState)} state ^{:tag (* Link)} target]
+  (when (not ^{:go/via [Target]} (.UseRelro target))
+    (return))
+
+
+  ;; "read only" data with relocations needs to go in its own section
+  ;; when building a shared library. We do this by boosting objects of
+  ;; type SRODATA with relocations to type SRODATARELRO.
+  (let [ldr (.-loader target)
+      ^{:line 1580} ro (lit (slice loader/Sym))
+      ^{:line 1581} relro (aget (.-data state) sym/SRODATARELRO)]
+    (range [_ s (aget (.-data state) sym/SRODATA)]
+      (let [relocs (.Relocs ldr s)]
+        (if (== (.Count relocs) 0)
+          (set! ro (append ro s))
+          (do
+            (.setSymType state s sym/SRODATARELRO)
+            (when [outer (.OuterSym ldr s)] (!= outer 0)
+              (.setSymType state outer sym/SRODATARELRO))
+
+            (set! relro (append relro s))))))
+
+
+
+    ;; Check that we haven't made two symbols with the same .Outer into
+    ;; different types (because references two symbols with non-nil Outer
+    ;; become references to the outer symbol + offset it's vital that the
+    ;; symbol and the outer end up in the same section).
+    (range [_ s relro]
+      (when [outer (.OuterSym ldr s)] (!= outer 0)
+        (let [st (.symType state s)
+            ^{:line 1602} ost (.symType state outer)]
+          (when (!= st ost)
+            (.Errorf (.-ctxt state) s "inconsistent types for symbol and its Outer %s (%v != %v)"
+              (.SymName ldr outer) st ost)))))
+
+
+
+
+    (aset (.-data state) sym/SRODATA ro)
+    (aset (.-data state) sym/SRODATARELRO relro)))
+
+
+
+
+
+(go/type dodataState "dodataState holds bits of state information needed by dodata() and the\nvarious helpers it calls. The lifetime of these items should not extend\npast the end of dodata().\n" (struct
+
+    ^{:line 1619 :tag (* Link) :doc "Link context\n"} ctxt
+
+    ^{:line 1621 :tag (array sym/SFirstUnallocated (slice loader/Sym)) :doc "Data symbols bucketed by type.\n"} data
+
+    ^{:line 1623 :tag (array sym/SFirstUnallocated int32) :doc "Max alignment for each flavor of data symbol.\n"} dataMaxAlign
+
+    ^{:line 1625 :tag (slice sym/SymKind) :doc "Overridden sym type\n"} symGroupType
+
+    ^{:line 1627 :tag int64 :doc "Current data size so far.\n"} datsize))
+
+
+;; A note on symType/setSymType below:
+;;
+;; In the legacy linker, the types of symbols (notably data symbols) are
+;; changed during the symtab() phase so as to insure that similar symbols
+;; are bucketed together, then their types are changed back again during
+;; dodata. Symbol to section assignment also plays tricks along these lines
+;; in the case where a relro segment is needed.
+;;
+;; The value returned from setType() below reflects the effects of
+;; any overrides made by symtab and/or dodata.
+
+
+^{:go/end 1649} (go/method symType "symType returns the (possibly overridden) type of 's'.\n" ^sym/SymKind [^{:tag (* dodataState)} state ^loader/Sym s]
+  (when (< (conv int s) (len (.-symGroupType state)))
+    (when [override (aget (.-symGroupType state) s)] (!= override 0)
+      (return override)))
+
+
+  (.SymType (.-loader (.-ctxt state)) s))
+
+
+
+^{:go/end 1662} (go/method setSymType "setSymType sets a new override type for 's'.\n" [^{:tag (* dodataState)} state ^loader/Sym s ^sym/SymKind kind]
+  (when (== s 0)
+    (panic "bad"))
+
+  (if (< (conv int s) (len (.-symGroupType state)))
+    (aset (.-symGroupType state) s kind)
+
+    (let [su (.MakeSymbolUpdater (.-loader (.-ctxt state)) s)]
+      (.SetType su kind))))
+
+
+
+^{:go/end 1822} (go/method dodata [^{:tag (* Link)} ctxt ^{:tag (slice sym/SymKind)} symGroupType]
+
+  ;; Give zeros sized symbols space if necessary.
+  (fixZeroSizedSymbols ctxt)
+
+  ;; Collect data symbols by type into data.
+  (let [state (lit dodataState :ctxt ctxt :symGroupType symGroupType)
+      ^{:line 1671} ldr (.-loader ctxt)]
+    (for [s (conv loader/Sym 1)] (< s (conv loader/Sym (.NSym ldr))) (inc! s)
+      (when (or (not (.AttrReachable ldr s)) (.AttrSpecial ldr s) (.AttrSubSymbol ldr s)
+          (not (.TopLevelSym ldr s)))
+        (continue))
+
+
+      (let [st (.symType state s)]
+
+        (when (or (<= st sym/STEXTEND) (>= st sym/SFirstUnallocated))
+          (continue))
+
+        (aset (.-data state) st (append (aget (.-data state) st) s))
+
+        ;; Similarly with checking the onlist attr.
+        (when (.AttrOnList ldr s)
+          (log/Fatalf "symbol %s listed multiple times" (.SymName ldr s)))
+
+        (.SetAttrOnList ldr s true)))
+
+
+    ;; SEH symbols are tracked in side lists (sehp.pdata/xdata), so make
+    ;; them follow the same reachability decision used for all other data.
+    (let [filterReachableSEH ^{:go/end 1702} (fn ^{:tag (slice loader/Sym)} [^{:tag (slice loader/Sym)} syms]
+          (let [out (subslice syms _ 0)]
+            (range [_ s syms]
+              (when (.AttrReachable ldr s)
+                (set! out (append out s))))
+
+
+            ^{:line 1701} out))]
+
+      (set! (.-pdata sehp) (filterReachableSEH (.-pdata sehp)))
+      (set! (.-xdata sehp) (filterReachableSEH (.-xdata sehp)))
+
+      ;; Now that we have the data symbols, but before we start
+      ;; to assign addresses, record all the necessary
+      ;; dynamic relocations. These will grow the relocation
+      ;; symbol, which is itself data.
+      ;;
+      ;; On darwin, we need the symbol table numbers for dynreloc.
+      (when (== ^{:go/via [Target]} (.-HeadType ctxt) objabi/Hdarwin)
+        (machosymorder ctxt))
+
+      (.dynreloc state ctxt)
+
+      ;; Move any RO data with relocations to a separate section.
+      (.makeRelroForSharedLib state ctxt)
+
+      ;; Set alignment for the symbol with the largest known index,
+      ;; so as to trigger allocation of the loader's internal
+      ;; alignment array. This will avoid data races in the parallel
+      ;; section below.
+      (let [lastSym (conv loader/Sym (- (.NSym ldr) 1))]
+        (.SetSymAlign ldr lastSym (.SymAlign ldr lastSym))
+
+        ;; Sort symbols.
+        (let [^sync/WaitGroup wg (zero sync/WaitGroup)]
+          (range [symn (.-data state)]
+            (let [symn (conv sym/SymKind symn)]
+              (.Add wg 1)
+              (go (^{:go/end 1735} (fn []
+                    (set! (values (aget (.-data state) symn) (aget (.-dataMaxAlign state) symn)) (.dodataSect state ctxt symn (aget (.-data state) symn)))
+                    (.Done wg))))))
+
+
+          (.Wait wg)
+
+          (when ^{:go/via [Target]} (.-IsELF ctxt)
+            ;; Make .rela and .rela.plt contiguous, the ELF ABI requires this
+            ;; and Solaris actually cares.
+            (let [syms (aget (.-data state) sym/SELFROSECT)
+                (values reli plti) (values -1 -1)]
+              (range [i s syms]
+                (switch (.SymName ldr s)
+                  (case [".rel.plt" ".rela.plt"]
+                    (set! plti i))
+                  (case [".rel" ".rela"]
+                    (set! reli i))))
+
+
+              (when (and (>= reli 0) (>= plti 0) (!= plti (+ reli 1)))
+                (let [(values ^int first ^int second) (zero int)]
+                  (if (> plti reli)
+                    (set! (values first second) (values reli plti))
+
+                    (set! (values first second) (values plti reli)))
+
+                  (let [(values rel plt) (values (aget syms reli) (aget syms plti))]
+                    (copy (subslice syms (+ first 2)) (subslice syms (+ first 1) second))
+                    (aset syms (+ first 0) rel)
+                    (aset syms (+ first 1) plt)
+
+                    ;; Make sure alignment doesn't introduce a gap.
+                    ;; Setting the alignment explicitly prevents
+                    ;; symalign from basing it on the size and
+                    ;; getting it wrong.
+                    (.SetSymAlign ldr rel (conv int32 (.-RegSize ^{:go/via [Target]} (.-Arch ctxt))))
+                    (.SetSymAlign ldr plt (conv int32 (.-RegSize ^{:go/via [Target]} (.-Arch ctxt)))))))
+
+              (aset (.-data state) sym/SELFROSECT syms)))
+
+
+          (when (and (== ^{:go/via [Target]} (.-HeadType ctxt) objabi/Haix) (== ^{:go/via [Target]} (.-LinkMode ctxt) LinkExternal))
+            ;; These symbols must have the same alignment as their section.
+            ;; Otherwise, ld might change the layout of Go sections.
+            (.SetSymAlign ldr (.Lookup ldr "runtime.data" 0) (aget (.-dataMaxAlign state) sym/SDATA))
+            (.SetSymAlign ldr (.Lookup ldr "runtime.bss" 0) (aget (.-dataMaxAlign state) sym/SBSS)))
+
+
+          ;; Create *sym.Section objects and assign symbols to sections for
+          ;; data/rodata (and related) symbols.
+          (.allocateDataSections state ctxt)
+
+          (.allocateSEHSections state ctxt)
+
+          ;; Create *sym.Section objects and assign symbols to sections for
+          ;; DWARF symbols.
+          (.allocateDwarfSections state ctxt)
+
+          ;; /* number the sections */
+          (let [n (conv int16 1)]
+
+            (range [_ sect (.-Sections Segtext)]
+              (set! (.-Extnum sect) n)
+              (inc! n))
+
+            (range [_ sect (.-Sections Segrodata)]
+              (set! (.-Extnum sect) n)
+              (inc! n))
+
+            (range [_ sect (.-Sections Segrelrodata)]
+              (set! (.-Extnum sect) n)
+              (inc! n))
+
+            (range [_ sect (.-Sections Segdata)]
+              (set! (.-Extnum sect) n)
+              (inc! n))
+
+            (range [_ sect (.-Sections Segdwarf)]
+              (set! (.-Extnum sect) n)
+              (inc! n))
+
+            (range [_ sect (.-Sections Segpdata)]
+              (set! (.-Extnum sect) n)
+              (inc! n))
+
+            (range [_ sect (.-Sections Segxdata)]
+              (set! (.-Extnum sect) n)
+              (inc! n))))))))
+
+
+
+
+
+
+
+^{:go/end 1839} (go/method allocateDataSectionForSym "allocateDataSectionForSym creates a new sym.Section into which a\nsingle symbol will be placed. Here \"seg\" is the segment into which\nthe section will go, \"s\" is the symbol to be placed into the new\nsection, and \"rwx\" contains permissions for the section.\n" ^{:tag (* sym/Section)} [^{:tag (* dodataState)} state ^{:tag (* sym/Segment)} seg ^loader/Sym s ^int rwx]
+  (let [ldr (.-loader (.-ctxt state))
+      ^{:line 1830} sname (.SymName ldr s)]
+    (when (strings/HasPrefix sname "go:")
+      (set! sname (+ ".go." (subslice sname (len "go:")))))
+
+    (let [sect (addsection ldr ^{:go/via [Target]} (.-Arch (.-ctxt state)) seg sname rwx)]
+      (set! (.-Align sect) (symalign ldr s))
+      (set! (.-datsize state) (Rnd (.-datsize state) (conv int64 (.-Align sect))))
+      (set! (.-Vaddr sect) (conv uint64 (.-datsize state)))
+      ^{:line 1838} sect)))
+
+
+
+
+
+
+
+^{:go/end 1863} (go/method allocateNamedDataSection "allocateNamedDataSection creates a new sym.Section for a category\nof data symbols. Here \"seg\" is the segment into which the section\nwill go, \"sName\" is the name to give to the section, \"types\" is a\nrange of symbol types to be put into the section, and \"rwx\"\ncontains permissions for the section.\n" ^{:tag (* sym/Section)} [^{:tag (* dodataState)} state ^{:tag (* sym/Segment)} seg ^string sName ^{:tag (slice sym/SymKind)} types ^int rwx]
+  (let [sect (addsection (.-loader (.-ctxt state)) ^{:go/via [Target]} (.-Arch (.-ctxt state)) seg sName rwx)]
+    (cond (== (len types) 0)
+      (set! (.-Align sect) 1)
+      (== (len types) 1)
+      (set! (.-Align sect) (aget (.-dataMaxAlign state) (aget types 0))) :else
+
+      (range [_ symn types]
+        (let [align (aget (.-dataMaxAlign state) symn)]
+          (when (< (.-Align sect) align)
+            (set! (.-Align sect) align)))))
+
+
+
+    (set! (.-datsize state) (Rnd (.-datsize state) (conv int64 (.-Align sect))))
+    (set! (.-Vaddr sect) (conv uint64 (.-datsize state)))
+    ^{:line 1862} sect))
+
+
+
+
+
+
+
+
+^{:go/end 1883} (go/method assignDsymsToSection "assignDsymsToSection assigns a collection of data symbols to a\nnewly created section. \"sect\" is the section into which to place\nthe symbols, \"syms\" holds the list of symbols to assign,\n\"forceType\" (if non-zero) contains a new sym type to apply to each\nsym during the assignment, and \"aligner\" is a hook to call to\nhandle alignment during the assignment process.\n" [^{:tag (* dodataState)} state ^{:tag (* sym/Section)} sect ^{:tag (slice loader/Sym)} syms ^sym/SymKind forceType ^{:tag (func [^{:tag (* dodataState)} state ^int64 datsize ^loader/Sym s] [int64])} aligner]
+  (let [ldr (.-loader (.-ctxt state))]
+    (range [_ s syms]
+      (set! (.-datsize state) (aligner state (.-datsize state) s))
+      (.SetSymSect ldr s sect)
+      (when (!= forceType sym/Sxxx)
+        (.setSymType state s forceType))
+
+      (.SetSymValue ldr s (conv int64 (- (conv uint64 (.-datsize state)) (.-Vaddr sect))))
+      (set! (.-datsize state) + (.SymSize ldr s)))
+
+    (set! (.-Length sect) (- (conv uint64 (.-datsize state)) (.-Vaddr sect)))))
+
+
+^{:go/end 1888} (go/method assignToSection [^{:tag (* dodataState)} state ^{:tag (* sym/Section)} sect ^sym/SymKind symn ^sym/SymKind forceType]
+  (.assignDsymsToSection state sect (aget (.-data state) symn) forceType aligndatsize)
+  (.checkdatsize state symn))
+
+
+
+
+
+
+
+
+^{:go/end 1907} (go/method allocateSingleSymSections "allocateSingleSymSections walks through the bucketed data symbols\nwith type 'symn', creates a new section for each sym, and assigns\nthe sym to a newly created section. Section name is set from the\nsymbol name. \"Seg\" is the segment into which to place the new\nsection, \"forceType\" is the new sym.SymKind to assign to the symbol\nwithin the section, and \"rwx\" holds section permissions.\n" [^{:tag (* dodataState)} state ^{:tag (* sym/Segment)} seg ^sym/SymKind symn ^sym/SymKind forceType ^int rwx]
+  (let [ldr (.-loader (.-ctxt state))]
+    (range [_ s (aget (.-data state) symn)]
+      (let [sect (.allocateDataSectionForSym state seg s rwx)]
+        (.SetSymSect ldr s sect)
+        (.setSymType state s forceType)
+        (.SetSymValue ldr s (conv int64 (- (conv uint64 (.-datsize state)) (.-Vaddr sect))))
+        (set! (.-datsize state) + (.SymSize ldr s))
+        (set! (.-Length sect) (- (conv uint64 (.-datsize state)) (.-Vaddr sect)))))
+
+    (.checkdatsize state symn)))
+
+
+
+
+
+
+
+
+
+^{:go/end 1921} (go/method allocateNamedSectionAndAssignSyms "allocateNamedSectionAndAssignSyms creates a new section with the\nspecified name, then walks through the bucketed data symbols with\ntype 'symn' and assigns each of them to this new section. \"Seg\" is\nthe segment into which to place the new section, \"secName\" is the\nname to give to the new section, \"forceType\" (if non-zero) contains\na new sym type to apply to each sym during the assignment, and\n\"rwx\" holds section permissions.\n" ^{:tag (* sym/Section)} [^{:tag (* dodataState)} state ^{:tag (* sym/Segment)} seg ^string secName ^sym/SymKind symn ^sym/SymKind forceType ^int rwx]
+
+  (let [sect (.allocateNamedDataSection state seg secName (lit (slice sym/SymKind) symn) rwx)]
+    (.assignDsymsToSection state sect (aget (.-data state) symn) forceType aligndatsize)
+    ^{:line 1920} sect))
+
+
+
+
+^{:go/end 2292} (go/method allocateDataSections "allocateDataSections allocates sym.Section objects for data/rodata\n(and related) symbols, and then assigns symbols to those sections.\n" [^{:tag (* dodataState)} state ^{:tag (* Link)} ctxt]
+  ;; Allocate sections.
+  ;; Data is processed before segtext, because we need
+  ;; to see all symbols in the .data and .bss sections in order
+  ;; to generate garbage collection information.
+
+  ;; Writable data sections that do not need any specialized handling.
+  (let [writable (lit (slice sym/SymKind)
+        ^{:line 1933} sym/SBUILDINFO
+        ^{:line 1934} sym/SFIPSINFO
+        ^{:line 1935} sym/SELFSECT
+        ^{:line 1936} sym/SMACHO
+        ^{:line 1937} sym/SWINDOWS)]
+
+    (range [_ symn writable]
+      (.allocateSingleSymSections state (addr Segdata) symn sym/SDATA 06))
+
+    (let [ldr (.-loader ctxt)]
+
+      ;; SMODULEDATA needs to be writable, but the GC doesn't need to
+      ;; look at it. We don't use allocateSingleSymSections because
+      ;; the name of the section is not the name of the symbol.
+      (when (> (len (aget (.-data state) sym/SMODULEDATA)) 0)
+        (when (!= (len (aget (.-data state) sym/SMODULEDATA)) 1)
+          (Errorf "internal error: more than one SMODULEDATA symbol"))
+
+        (let [s (aget (aget (.-data state) sym/SMODULEDATA) 0)
+            ^{:line 1952} sect (addsection ldr ^{:go/via [Target]} (.-Arch ctxt) (addr Segdata) ".go.module" 06)]
+          (set! (.-Align sect) (symalign ldr s))
+          (set! (.-datsize state) (Rnd (.-datsize state) (conv int64 (.-Align sect))))
+          (set! (.-Vaddr sect) (conv uint64 (.-datsize state)))
+          (.SetSymSect ldr s sect)
+          (.setSymType state s sym/SDATA)
+          (.SetSymValue ldr s (conv int64 (- (conv uint64 (.-datsize state)) (.-Vaddr sect))))
+          (set! (.-datsize state) + (.SymSize ldr s))
+          (set! (.-Length sect) (- (conv uint64 (.-datsize state)) (.-Vaddr sect)))
+          (.checkdatsize state sym/SMODULEDATA)))
+
+
+      ;; writable .got (note that for PIE binaries .got goes in relro)
+      (when (> (len (aget (.-data state) sym/SELFGOT)) 0)
+        (.allocateNamedSectionAndAssignSyms state (addr Segdata) ".got" sym/SELFGOT sym/SDATA 06))
+
+      (when (> (len (aget (.-data state) sym/SMACHOGOT)) 0)
+        (.allocateNamedSectionAndAssignSyms state (addr Segdata) ".got" sym/SMACHOGOT sym/SDATA 06))
+
+
+      ;; /* pointer-free data */
+      (let [sect (.allocateNamedSectionAndAssignSyms state (addr Segdata) ".noptrdata" sym/SNOPTRDATA sym/SDATA 06)]
+        (.SetSymSect ldr (.LookupOrCreateSym ldr "runtime.noptrdata" 0) sect)
+        (.SetSymSect ldr (.LookupOrCreateSym ldr "runtime.enoptrdata" 0) sect)
+
+        (.assignToSection state sect sym/SNOPTRDATAFIPSSTART sym/SDATA)
+        (.assignToSection state sect sym/SNOPTRDATAFIPS sym/SDATA)
+        (.assignToSection state sect sym/SNOPTRDATAFIPSEND sym/SDATA)
+        (.assignToSection state sect sym/SNOPTRDATAEND sym/SDATA)
+
+        (let [hasinitarr ^{:go/via [Target]} (.-linkShared ctxt)]
+
+          ;; /* shared library initializer */
+          (switch ^{:go/via [Target]} (.-BuildMode ctxt)
+            (case [BuildModeCArchive BuildModeCShared BuildModeShared BuildModePlugin]
+              (set! hasinitarr true)))
+
+
+          (when (== ^{:go/via [Target]} (.-HeadType ctxt) objabi/Haix)
+            (when (> (len (aget (.-data state) sym/SINITARR)) 0)
+              (Errorf "XCOFF format doesn't allow .init_array section")))
+
+
+
+          (when (and hasinitarr (> (len (aget (.-data state) sym/SINITARR)) 0))
+            (.allocateNamedSectionAndAssignSyms state (addr Segdata) ".init_array" sym/SINITARR sym/Sxxx 06))
+
+
+          ;; /* data */
+          (set! sect (.allocateNamedSectionAndAssignSyms state (addr Segdata) ".data" sym/SDATA sym/SDATA 06))
+          (.SetSymSect ldr (.LookupOrCreateSym ldr "runtime.data" 0) sect)
+          (.SetSymSect ldr (.LookupOrCreateSym ldr "runtime.edata" 0) sect)
+
+          (.assignToSection state sect sym/SDATAFIPSSTART sym/SDATA)
+          (.assignToSection state sect sym/SDATAFIPS sym/SDATA)
+          (.assignToSection state sect sym/SDATAFIPSEND sym/SDATA)
+          (.assignToSection state sect sym/SDATAEND sym/SDATA)
+
+          (let [dataGcEnd (- (.-datsize state) (conv int64 (.-Vaddr sect)))]
+
+            ;; On AIX, TOC entries must be the last of .data
+            ;; These aren't part of gc as they won't change during the runtime.
+            (.assignToSection state sect sym/SXCOFFTOC sym/SDATA)
+            (.checkdatsize state sym/SDATA)
+            (set! (.-Length sect) (- (conv uint64 (.-datsize state)) (.-Vaddr sect)))
+
+            ;; /* bss */
+            (set! sect (.allocateNamedSectionAndAssignSyms state (addr Segdata) ".bss" sym/SBSS sym/Sxxx 06))
+            (.SetSymSect ldr (.LookupOrCreateSym ldr "runtime.bss" 0) sect)
+            (.SetSymSect ldr (.LookupOrCreateSym ldr "runtime.ebss" 0) sect)
+            (let [bssGcEnd (- (.-datsize state) (conv int64 (.-Vaddr sect)))
+
+                ;; Emit gcdata for bss symbols now that symbol values have been assigned.
+                ^{:line 2025} gcsToEmit (lit (slice (struct
+                      ^{:line 2026 :tag string} symName
+                      ^{:line 2027 :tag sym/SymKind} symKind
+                      ^{:line 2028 :tag int64} gcEnd))
+
+                  (lit _ "runtime.gcdata" sym/SDATA dataGcEnd)
+                  (lit _ "runtime.gcbss" sym/SBSS bssGcEnd))]
+
+              (range [_ g gcsToEmit]
+                (let [^GCProg gc (zero GCProg)]
+                  (.Init gc ctxt (.-symName g))
+                  (range [_ s (aget (.-data state) (.-symKind g))]
+                    (.AddSym gc s))
+
+                  (.End gc (.-gcEnd g))))
+
+
+              ;; /* pointer-free bss */
+              (set! sect (.allocateNamedSectionAndAssignSyms state (addr Segdata) ".noptrbss" sym/SNOPTRBSS sym/Sxxx 06))
+              (.SetSymSect ldr (.LookupOrCreateSym ldr "runtime.noptrbss" 0) sect)
+              (.SetSymSect ldr (.LookupOrCreateSym ldr "runtime.enoptrbss" 0) sect)
+
+              ;; Put gcmask symbols together.
+              (let [gcmaskSym (.LookupOrCreateSym ldr "runtime.gcmask.*" 0)]
+                (.SetSymValue ldr gcmaskSym (conv int64 (.-Length sect)))
+                (.SetSymSect ldr gcmaskSym sect)
+                (.assignToSection state sect sym/SGCMASK sym/SNOPTRBSS)
+                (when (== ^{:go/via [Target]} (.-HeadType ctxt) objabi/Haix)
+                  (xcoffUpdateOuterSize ctxt (- (conv int64 (.-Length sect)) (.SymValue ldr gcmaskSym)) sym/SGCMASK))
+
+
+                ;; Code coverage counters are assigned to the .noptrbss section.
+                ;; We assign them in a separate pass so that they stay aggregated
+                ;; together in a single blob (coverage runtime depends on this).
+                (set! covCounterDataStartOff (.-Length sect))
+                (.assignToSection state sect sym/SCOVERAGE_COUNTER sym/SNOPTRBSS)
+                (set! covCounterDataLen (- (.-Length sect) covCounterDataStartOff))
+                (.SetSymSect ldr (.LookupOrCreateSym ldr "runtime.covctrs" 0) sect)
+                (.SetSymSect ldr (.LookupOrCreateSym ldr "runtime.ecovctrs" 0) sect)
+
+                ;; If we started this blob at an odd alignment, then covctrs will
+                ;; not be correctly aligned. Each individual entry is aligned properly,
+                ;; but the start marker may be before any padding inserted to enforce
+                ;; that alignment. Fix that here. See issue 58936.
+                (set! covCounterDataStartOff + (% covCounterDataLen 4))
+                (set! covCounterDataLen - (% covCounterDataLen 4))
+
+                ;; Coverage instrumentation counters for libfuzzer.
+                (when (> (len (aget (.-data state) sym/SLIBFUZZER_8BIT_COUNTER)) 0)
+                  (let [sect (.allocateNamedSectionAndAssignSyms state (addr Segdata) ".go.fuzzcntrs" sym/SLIBFUZZER_8BIT_COUNTER sym/Sxxx 06)]
+                    (.SetSymSect ldr (.LookupOrCreateSym ldr "runtime.__start___sancov_cntrs" 0) sect)
+                    (.SetSymSect ldr (.LookupOrCreateSym ldr "runtime.__stop___sancov_cntrs" 0) sect)
+                    (.SetSymSect ldr (.LookupOrCreateSym ldr "internal/fuzz._counters" 0) sect)
+                    (.SetSymSect ldr (.LookupOrCreateSym ldr "internal/fuzz._ecounters" 0) sect)))
+
+
+                ;; Assign runtime.end to the last section of data segment.
+                (.SetSymSect ldr (.LookupOrCreateSym ldr "runtime.end" 0) (aget (.-Sections Segdata) (- (len (.-Sections Segdata)) 1)))
+
+                (when (> (len (aget (.-data state) sym/STLSBSS)) 0)
+                  (let [^{:tag (* sym/Section)} sect (zero (* sym/Section))]
+                    ;; FIXME: not clear why it is sometimes necessary to suppress .tbss section creation.
+                    (when (and ^:go/paren (or ^{:go/via [Target]} (.-IsELF ctxt) (== ^{:go/via [Target]} (.-HeadType ctxt) objabi/Haix)) ^:go/paren (or (== ^{:go/via [Target]} (.-LinkMode ctxt) LinkExternal) (not @FlagD)))
+                      (set! sect (addsection ldr ^{:go/via [Target]} (.-Arch ctxt) (addr Segdata) ".tbss" 06))
+                      (set! (.-Align sect) (conv int32 (.-PtrSize ^{:go/via [Target]} (.-Arch ctxt))))
+                      ;; FIXME: why does this need to be set to zero?
+                      (set! (.-Vaddr sect) 0))
+
+                    (set! (.-datsize state) 0)
+
+                    (range [_ s (aget (.-data state) sym/STLSBSS)]
+                      (set! (.-datsize state) (aligndatsize state (.-datsize state) s))
+                      (when (!= sect nil)
+                        (.SetSymSect ldr s sect))
+
+                      (.SetSymValue ldr s (.-datsize state))
+                      (set! (.-datsize state) + (.SymSize ldr s)))
+
+                    (.checkdatsize state sym/STLSBSS)
+
+                    (when (!= sect nil)
+                      (set! (.-Length sect) (conv uint64 (.-datsize state))))))
+
+
+
+                ;; /*
+                ;; * We finished data, begin read-only data.
+                ;; * Not all systems support a separate read-only non-executable data section.
+                ;; * ELF and Windows PE systems do.
+                ;; * OS X and Plan 9 do not.
+                ;; * And if we're using external linking mode, the point is moot,
+                ;; * since it's not our decision; that code expects the sections in
+                ;; * segtext.
+                ;; */
+                (let [^{:tag (* sym/Segment)} segro (zero (* sym/Segment))]
+                  (cond (and ^{:go/via [Target]} (.-IsELF ctxt) (== ^{:go/via [Target]} (.-LinkMode ctxt) LinkInternal))
+                    (set! segro (addr Segrodata))
+                    (== ^{:go/via [Target]} (.-HeadType ctxt) objabi/Hwindows)
+                    (set! segro (addr Segrodata)) :else
+
+                    (set! segro (addr Segtext)))
+
+
+                  (set! (.-datsize state) 0)
+
+                  ;; /* read-only executable ELF, Mach-O sections */
+                  (when (!= (len (aget (.-data state) sym/STEXT)) 0)
+                    (let [culprit (.SymName ldr (aget (aget (.-data state) sym/STEXT) 0))]
+                      (Errorf "dodata found an sym.STEXT symbol: %s" culprit)))
+
+                  (.allocateSingleSymSections state (addr Segtext) sym/SELFRXSECT sym/SRODATA 05)
+                  (.allocateSingleSymSections state (addr Segtext) sym/SMACHOPLT sym/SRODATA 05)
+
+                  ;; /* read-only data */
+                  (set! sect (.allocateNamedDataSection state segro ".rodata" sym/ReadOnly 04))
+                  (.SetSymSect ldr (.LookupOrCreateSym ldr "runtime.rodata" 0) sect)
+                  (.SetSymSect ldr (.LookupOrCreateSym ldr "runtime.erodata" 0) sect)
+                  (range [_ symn sym/ReadOnly]
+                    (let [symnStartValue (.-datsize state)]
+                      (when (!= (len (aget (.-data state) symn)) 0)
+                        (set! symnStartValue (aligndatsize state symnStartValue (aget (aget (.-data state) symn) 0))))
+
+                      (.assignToSection state sect symn sym/SRODATA)
+                      (setCarrierSize symn (- (.-datsize state) symnStartValue))
+                      (when (== ^{:go/via [Target]} (.-HeadType ctxt) objabi/Haix)
+                        ;; Read-only symbols might be wrapped inside their outer
+                        ;; symbol.
+                        ;; XCOFF symbol table needs to know the size of
+                        ;; these outer symbols.
+                        (xcoffUpdateOuterSize ctxt (- (.-datsize state) symnStartValue) symn))))
+
+
+
+                  ;; /* gopclntab */
+                  (set! sect (.allocateNamedSectionAndAssignSyms state segro ".gopclntab" sym/SPCLNTAB sym/SRODATA 04))
+                  (.SetSymSect ldr (.LookupOrCreateSym ldr "runtime.pclntab" 0) sect)
+                  (.SetSymSect ldr (.LookupOrCreateSym ldr "runtime.pcheader" 0) sect)
+                  (.SetSymSect ldr (.LookupOrCreateSym ldr "runtime.funcnametab" 0) sect)
+                  (.SetSymSect ldr (.LookupOrCreateSym ldr "runtime.cutab" 0) sect)
+                  (.SetSymSect ldr (.LookupOrCreateSym ldr "runtime.filetab" 0) sect)
+                  (.SetSymSect ldr (.LookupOrCreateSym ldr "runtime.pctab" 0) sect)
+                  (.SetSymSect ldr (.LookupOrCreateSym ldr "runtime.functab" 0) sect)
+                  (.SetSymSect ldr (.LookupOrCreateSym ldr "go:func.*" 0) sect)
+                  (.SetSymSect ldr (.LookupOrCreateSym ldr "runtime.epclntab" 0) sect)
+                  (setCarrierSize sym/SPCLNTAB (conv int64 (.-Length sect)))
+                  (when (== ^{:go/via [Target]} (.-HeadType ctxt) objabi/Haix)
+                    (xcoffUpdateOuterSize ctxt (conv int64 (.-Length sect)) sym/SPCLNTAB))
+
+
+                  ;; /* read-only ELF, Mach-O sections */
+                  (.allocateSingleSymSections state segro sym/SELFROSECT sym/SRODATA 04)
+
+                  ;; Read-only data that may require dynamic relocations at run time.
+                  ;;
+                  ;; On GNU systems, we can arrange for the dynamic linker to
+                  ;; mprotect sections after relocations are applied by giving them write
+                  ;; permissions in the object file and calling them ".data.rel.ro.FOO".
+
+                  (let [relroPerm 04
+                      ^{:line 2184} genrelrosecname ^{:go/end 2189} (fn ^string [^string suffix]
+                        (when (== suffix "")
+                          (return ".rodata"))
+
+                        ^{:line 2188} suffix)
+
+                      ^{:line 2190} segRelro segro]
+
+                    (when ^{:go/via [Target]} (.UseRelro ctxt)
+                      (if (and (== ^{:go/via [Target]} (.-LinkMode ctxt) LinkExternal) (not ^{:go/via [Target]} (.IsAIX ctxt)) (not ^{:go/via [Target]} (.IsDarwin ctxt))) (do)
+                        ;; Using a separate segment with an external
+                        ;; linker results in some programs moving
+                        ;; their data sections unexpectedly, which
+                        ;; corrupts the moduledata. So we use the
+                        ;; rodata segment and let the external linker
+                        ;; sort out a rel.ro segment.
+                        (do
+                          (set! segRelro (addr Segrelrodata))
+                          ;; Reset datsize for new segment.
+                          (set! (.-datsize state) 0)))
+
+
+                      (set! relroPerm 06)
+
+                      (when (not ^{:go/via [Target]} (.IsDarwin ctxt)) ; We don't need the special names on darwin.
+                        (set! genrelrosecname ^{:go/end 2211} (fn ^string [^string suffix]
+                            (+ ".data.rel.ro" suffix)))))
+
+
+
+
+                    ;; checkOuter is a sanity check that for all the symbols of some kind,
+                    ;; which are in a given section, any carrier symbol is also in
+                    ;; that section.
+                    (let [checkOuter ^{:go/end 2225} (fn [^{:tag (* sym/Section)} sect ^sym/SymKind symn]
+                          (range [_ s (aget (.-data state) symn)]
+                            (let [outer (.OuterSym ldr s)]
+                              (when (and (!= s 0) (!= (.SymSect ldr outer) nil) (!= (.SymSect ldr outer) sect))
+                                (.Errorf ctxt s "s.Outer (%s) in different section from s, %s != %s" (.SymName ldr outer) (.-Name (.SymSect ldr outer)) (.-Name sect))))))
+
+
+
+
+                        ;; createRelroSect will create a section that wil be a relro
+                        ;; section if this link is using relro.
+                        ^{:line 2229} createRelroSect ^{:go/end 2264} (fn ^{:tag (* sym/Section)} [^string name ^sym/SymKind symn]
+                          (let [sect (.allocateNamedDataSection state segRelro (genrelrosecname name) (lit (slice sym/SymKind) symn) relroPerm)]
+
+                            (when (== symn sym/STYPE)
+                              ;; Increment state.datsize so that no type
+                              ;; reference uses a zero offset.
+                              ;; This is unlikely but possible in small
+                              ;; programs with no other read-only data.
+                              ;;
+                              ;; But don't skip ahead if there is a runtime.types
+                              ;; symbol with non-zero size. That can be created
+                              ;; in fixZeroSizedSymbols. In that case the
+                              ;; runtime.types symbol itself serves as the skip.
+                              (let [typesSym (.Lookup ldr "runtime.types" 0)]
+                                (when (or (== typesSym 0) (== (.SymSize ldr typesSym) 0))
+                                  (set! (.-datsize state) + (conv int64 (.-PtrSize ^{:go/via [Target]} (.-Arch ctxt)))))))
+
+
+
+                            ;; Align to first symbol.
+                            (let [symnStartValue (.-datsize state)]
+                              (when (> (len (aget (.-data state) symn)) 0)
+                                (set! symnStartValue (aligndatsize state (.-datsize state) (aget (aget (.-data state) symn) 0))))
+
+
+                              (checkOuter sect symn)
+                              (.assignToSection state sect symn sym/SRODATA)
+                              (setCarrierSize symn (- (.-datsize state) symnStartValue))
+                              (when (== ^{:go/via [Target]} (.-HeadType ctxt) objabi/Haix)
+                                ;; XCOFF symbol table needs to know the size
+                                ;; of outer symbols.
+                                (xcoffUpdateOuterSize ctxt (- (.-datsize state) symnStartValue) symn))
+
+                              (set! (.-Length sect) (- (conv uint64 (.-datsize state)) (.-Vaddr sect)))
+                              ^{:line 2263} sect)))]
+
+
+                      (when (> (len (aget (.-data state) sym/SRODATARELRO)) 0)
+                        (createRelroSect "" sym/SRODATARELRO))
+
+
+                      (set! sect (createRelroSect ".go.type" sym/STYPE))
+                      (.SetSymSect ldr (.LookupOrCreateSym ldr "runtime.types" 0) sect)
+                      (.SetSymSect ldr (.LookupOrCreateSym ldr "runtime.etypes" 0) sect)
+
+                      (set! sect (createRelroSect ".go.func" sym/SGOFUNC))
+
+                      (.allocateSingleSymSections state segRelro sym/SELFRELROSECT sym/SRODATA relroPerm)
+                      (.allocateSingleSymSections state segRelro sym/SMACHORELROSECT sym/SRODATA relroPerm)
+
+                      ;; 6g uses 4-byte relocation offsets, so the entire segment must fit in 32 bits.
+                      (when (!= (.-datsize state) (conv int64 (conv uint32 (.-datsize state))))
+                        (Errorf "read-only data segment too large: %d" (.-datsize state)))
+
+
+                      (let [siz 0]
+                        (for [symn sym/SELFRXSECT] (< symn sym/SFirstUnallocated) (inc! symn)
+                          (set! siz + (len (aget (.-data state) symn))))
+
+                        (set! (.-datap ctxt) (make (slice loader/Sym) 0 siz))
+                        (for [symn sym/SELFRXSECT] (< symn sym/SFirstUnallocated) (inc! symn)
+                          (set! (.-datap ctxt) (append (.-datap ctxt) (spread (aget (.-data state) symn)))))))))))))))))
+
+
+
+
+
+^{:go/end 2327} (go/method allocateDwarfSections "allocateDwarfSections allocates sym.Section objects for DWARF\nsymbols, and assigns symbols to sections.\n" [^{:tag (* dodataState)} state ^{:tag (* Link)} ctxt]
+
+  (let [alignOne ^{:go/end 2298} (fn ^int64 [^{:tag (* dodataState)} state ^int64 datsize ^loader/Sym s] datsize)
+
+      ^{:line 2300} ldr (.-loader ctxt)]
+    (for [i 0] (< i (len dwarfp)) (inc! i)
+      ;; First the section symbol.
+      (let [s (.secSym (aget dwarfp i))
+          ^{:line 2304} sect (.allocateNamedDataSection state (addr Segdwarf) (.SymName ldr s) (lit (slice sym/SymKind)) 04)]
+        (.SetSymSect ldr s sect)
+        (set! (.-Sym sect) s)
+        (let [curType (.SymType ldr s)]
+          (.setSymType state s sym/SRODATA)
+          (.SetSymValue ldr s (conv int64 (- (conv uint64 (.-datsize state)) (.-Vaddr sect))))
+          (set! (.-datsize state) + (.SymSize ldr s))
+
+          ;; Then any sub-symbols for the section symbol.
+          (let [subSyms (.subSyms (aget dwarfp i))]
+            (.assignDsymsToSection state sect subSyms sym/SRODATA alignOne)
+
+            (for [j 0] (< j (len subSyms)) (inc! j)
+              (let [s (aget subSyms j)]
+                (when (and (== ^{:go/via [Target]} (.-HeadType ctxt) objabi/Haix) (== curType sym/SDWARFLOC))
+                  ;; Update the size of .debug_loc for this symbol's
+                  ;; package.
+                  (addDwsectCUSize ".debug_loc" (.SymPkg ldr s) (conv uint64 (.SymSize ldr s))))))
+
+
+            (set! (.-Length sect) (- (conv uint64 (.-datsize state)) (.-Vaddr sect)))
+            (checkSectSize sect)))))))
+
+
+
+
+
+^{:go/end 2342} (go/method allocateSEHSections "allocateSEHSections allocate a sym.Section object for SEH\nsymbols, and assigns symbols to sections.\n" [^{:tag (* dodataState)} state ^{:tag (* Link)} ctxt]
+  (when (> (len (.-pdata sehp)) 0)
+    (let [sect (.allocateNamedDataSection state (addr Segpdata) ".pdata" (lit (slice sym/SymKind)) 04)]
+      (.assignDsymsToSection state sect (.-pdata sehp) sym/SRODATA aligndatsize)
+      (.checkdatsize state sym/SSEHSECT)))
+
+  (when (> (len (.-xdata sehp)) 0)
+    (let [sect (.allocateNamedDataSection state (addr Segxdata) ".xdata" (lit (slice sym/SymKind)) 04)]
+      (.assignDsymsToSection state sect (.-xdata sehp) sym/SRODATA aligndatsize)
+      (.checkdatsize state sym/SSEHSECT))))
+
+
+
+(go/type symNameSize (struct
+    ^{:line 2345 :tag string} name
+    ^{:line 2346 :tag int64} sz
+    ^{:line 2347 :tag int64} val
+    ^{:line 2348 :tag loader/Sym} sym
+    ^{:line 2349 :tag bool} isTypelink
+    ^{:line 2350 :tag bool} isItab
+    ^{:line 2351 :tag string} typeStr))
+
+
+^{:go/end 2595} (go/method dodataSect [^{:tag (* dodataState)} state ^{:tag (* Link)} ctxt ^sym/SymKind symn ^{:tag (slice loader/Sym)} syms] :results [^{:tag (slice loader/Sym)} result ^int32 maxAlign]
+  (let [(values ^loader/Sym head ^loader/Sym tail ^loader/Sym zerobase) (zero loader/Sym)
+      ^{:line 2356} ldr (.-loader ctxt)
+      ^{:line 2357} sl (make (slice symNameSize) (len syms))
+
+      ;; For ppc64, we want to interleave the .got and .toc sections
+      ;; from input files. Both are type sym.SELFGOT, so in that case
+      ;; we skip size comparison and do the name comparison instead
+      ;; (conveniently, .got sorts before .toc).
+      ^{:line 2363} sortBySize (!= symn sym/SELFGOT)]
+
+    (range [k s syms]
+      (let [ss (.SymSize ldr s)]
+        (aset sl k (lit symNameSize :sz ss :sym s))
+        (when (not sortBySize)
+          (set! (.-name (aget sl k)) (.SymName ldr s)))
+
+        (let [ds (conv int64 (len (.Data ldr s)))]
+          (switch
+            (case [(< ss ds)]
+              (.Errorf ctxt s "initialize bounds (%d < %d)" ss ds))
+            (case [(< ss 0)]
+              (.Errorf ctxt s "negative size (%d bytes)" ss))
+            (case [(> ss cutoff)]
+              (.Errorf ctxt s "symbol too large (%d bytes)" ss)))
+
+
+          ;; If the usually-special section-marker symbols are being laid
+          ;; out as regular symbols, put them either at the beginning or
+          ;; end of their section.
+          (cond (or ^:go/paren (and (.DynlinkingGo ctxt) (== ^{:go/via [Target]} (.-HeadType ctxt) objabi/Hdarwin)) ^:go/paren (and (== ^{:go/via [Target]} (.-HeadType ctxt) objabi/Haix) (== ^{:go/via [Target]} (.-LinkMode ctxt) LinkExternal)))
+            (switch (.SymName ldr s)
+              (case ^{:go/breaks [5]} ["runtime.text" "runtime.bss" "runtime.data" "runtime.types" "runtime.rodata"
+                  "runtime.noptrdata" "runtime.noptrbss"]
+                (set! head s)
+                (continue))
+              (case ^{:go/breaks [5]} ["runtime.etext" "runtime.ebss" "runtime.edata" "runtime.etypes" "runtime.erodata"
+                  "runtime.enoptrdata" "runtime.enoptrbss"]
+                (set! tail s)
+                (continue)))
+
+            (and (== ^{:go/via [Target]} (.-HeadType ctxt) objabi/Haix) (== (.SymName ldr s) "runtime.types"))
+            ;; We always use runtime.types on AIX.
+            ;; See the comment in fixZeroSizedSymbols.
+            (set! head s)))))
+
+
+    (set! zerobase (.Lookup ldr "runtime.zerobase" 0))
+
+    (let [sortHeadTail ^{:go/end 2411} (fn [^loader/Sym si ^loader/Sym sj] :results [^bool less ^bool matched]
+          (switch
+            (case [(== si head) (== sj tail)]
+              (return true true))
+            (case [(== sj head) (== si tail)]
+              (return false true)))
+
+          (return false false))
+
+
+        ^{:line 2413} sortFn ^{:go/end 2438} (fn ^bool [^int i ^int j]
+          (let [(values si sj) (values (.-sym (aget sl i)) (.-sym (aget sl j)))
+              (values isz jsz) (values (.-sz (aget sl i)) (.-sz (aget sl j)))]
+            (when [(values ret matched) (sortHeadTail si sj)] matched
+              (return ret))
+
+            (if sortBySize
+              (switch
+                ;; put zerobase right after all the zero-sized symbols,
+                ;; so zero-sized symbols have the same address as zerobase.
+                (case [(== si zerobase)]
+                  (return (!= jsz 0))) ; zerobase < nonzero-sized, zerobase > zero-sized
+                (case [(== sj zerobase)]
+                  (return (== isz 0))) ; 0-sized < zerobase, nonzero-sized > zerobase
+                (case [(!= isz jsz)]
+                  (return (< isz jsz))))
+
+
+              (let [iname (.-name (aget sl i))
+                  ^{:line 2432} jname (.-name (aget sl j))]
+                (when (!= iname jname)
+                  (return (< iname jname)))))
+
+
+            (< si sj)))] ; break ties by symbol number
+
+
+      ;; Perform the sort.
+      (switch symn
+        (case [sym/SPCLNTAB])
+        ;; PCLNTAB was built internally, and already has the proper order.
+
+        (case [sym/STYPE]
+          ;; Sort type descriptors with the typelink flag first,
+          ;; sorted by type string. The reflect package will use
+          ;; this to ensure that type descriptor pointers are unique.
+          ;; Sort itabs after type descriptors.
+
+          ;; We define type:* for some links.
+          (let [typeStar (.Lookup ldr "type:*" 0)]
+
+            ;; Pre-compute per-symbol sort keys into sl so the comparison
+            ;; function does only field reads instead of map lookups and
+            ;; loader dispatches on every call.
+            (range [k sl]
+              (let [s (.-sym (aget sl k))]
+                (set! (.-isItab (aget sl k)) (.IsItab ldr s))
+                (when (not (.-isItab (aget sl k)))
+                  (set! (.-isTypelink (aget sl k)) (.IsTypelink ldr s))
+                  (when (.-isTypelink (aget sl k))
+                    (set! (.-typeStr (aget sl k)) (decodetypeStr ldr ^{:go/via [Target]} (.-Arch ctxt) s))))))
+
+
+
+
+            (sort/Slice sl ^{:go/end 2511} (fn ^bool [^int i ^int j]
+                (let [(values si sj) (values (.-sym (aget sl i)) (.-sym (aget sl j)))]
+
+                  ;; Sort head and tail regardless of typelink.
+                  (when [(values ret matched) (sortHeadTail si sj)] matched
+                    (return ret))
+
+                  (when (!= typeStar 0)
+                    ;; type:* comes first, after runtime.types
+                    (cond (== si typeStar)
+                      (return true)
+                      (== sj typeStar)
+                      (return false)))
+
+
+
+                  (let [iIsType (not (.-isItab (aget sl i)))
+                      ^{:line 2485} jIsType (not (.-isItab (aget sl j)))]
+                    (cond (and iIsType jIsType)
+                      (let [iIsTypelink (.-isTypelink (aget sl i))
+                          ^{:line 2488} jIsTypelink (.-isTypelink (aget sl j))]
+
+                        (cond (and iIsTypelink jIsTypelink)
+                          ;; typelink symbols sort by type string
+                          (return (< (.-typeStr (aget sl i)) (.-typeStr (aget sl j))))
+                          ^{:line 2493} iIsTypelink
+                          ;; typelink < non-typelink
+                          (return true)
+                          ^{:line 2496} jIsTypelink
+                          ;; non-typelink > typelink
+                          (return false)))
+
+                      ^{:line 2500} iIsType
+                      ;; type < itab
+                      (return true)
+                      ^{:line 2503} jIsType
+                      ;; itab > type
+                      (return false))
+
+
+                    ;; Otherwise, within non-typelink types and itabs,
+                    ;; sort by size as usual.
+                    (sortFn i j)))))
+
+
+            ;; Find the end of the typelink descriptors.
+            ;; The size starts at PtrSize to match the value in
+            ;; createRelroSect in allocateDataSections.
+            ;; Note that we skip runtime.types in the loop,
+            ;; so we don't need to worry about that case;
+            ;; there will be an increment either way.
+            ;; TODO: This wastes some space.
+            (let [typeLinkSize (conv int64 (.-PtrSize ^{:go/via [Target]} (.-Arch ctxt)))
+                ^{:line 2521} i 0]
+              (for [] (< i (len sl)) (inc! i)
+                (let [si (.-sym (aget sl i))]
+                  (when (or (== si head) (== si typeStar))
+                    (continue))
+
+                  (when (not (.-isTypelink (aget sl i)))
+                    (break))
+
+                  (set! typeLinkSize (Rnd typeLinkSize (conv int64 (symalign ldr si))))
+                  (set! typeLinkSize + (.-sz (aget sl i)))))
+
+
+              ;; Store the length of the typelink descriptors
+              ;; in the typedesclen field of moduledata.
+              (if (== (.-moduledataTypeDescOffset ctxt) 0)
+                (Errorf "internal error: phase error: moduledataTypeDescOffset not set in dodataSect")
+
+                (let [su (.MakeSymbolUpdater ldr (.-Moduledata ctxt))]
+                  (.SetUint su ^{:go/via [Target]} (.-Arch ctxt) (.-moduledataTypeDescOffset ctxt) (conv uint64 typeLinkSize))))
+
+
+              ;; Find the end of the type descriptors.
+              (let [typeSize typeLinkSize]
+                (for [] (< i (len sl)) (inc! i)
+                  (when (.-isItab (aget sl i))
+                    (break))
+
+                  (set! typeSize (Rnd typeSize (conv int64 (symalign ldr (.-sym (aget sl i))))))
+                  (set! typeSize + (.-sz (aget sl i))))
+
+
+                (when (< i (len sl))
+                  (set! typeSize (Rnd typeSize (conv int64 (symalign ldr (.-sym (aget sl i)))))))
+
+
+                (if (== (.-moduledataItabOffset ctxt) 0)
+                  (Errorf "internal error: phase error: moduledataItabOffset not set in dodataSect")
+
+                  (let [su (.MakeSymbolUpdater ldr (.-Moduledata ctxt))]
+                    (.SetUint su ^{:go/via [Target]} (.-Arch ctxt) (.-moduledataItabOffset ctxt) (conv uint64 typeSize))))
+
+
+                (let [itabSize (conv int64 0)]
+                  (for [] (< i (len sl)) (inc! i)
+                    (set! itabSize (Rnd itabSize (conv int64 (symalign ldr (.-sym (aget sl i))))))
+                    (set! itabSize + (.-sz (aget sl i))))
+
+
+                  (if (== (.-moduledataItabSizeOffset ctxt) 0)
+                    (Errorf "internal error: phase error: moduledataItabSizeOffset not set in dodataSect")
+
+                    (let [su (.MakeSymbolUpdater ldr (.-Moduledata ctxt))]
+                      (.SetUint su ^{:go/via [Target]} (.-Arch ctxt) (.-moduledataItabSizeOffset ctxt) (conv uint64 itabSize)))))))))
+
+
+        (default
+          (sort/Slice sl sortFn)))
+
+
+      ;; Set alignment, construct result
+      (set! syms (subslice syms _ 0))
+      (range [k sl]
+        (let [s (.-sym (aget sl k))]
+          (when (and (!= s head) (!= s tail))
+            (let [align (symalign ldr s)]
+              (when (< maxAlign align)
+                (set! maxAlign align))))
+
+
+          (set! syms (append syms s))))
+
+
+      (return syms maxAlign))))
+
+
+
+
+
+
+
+^{:go/end 2619} (go/method textbuildid "Add buildid to beginning of text segment, on non-ELF systems.\nNon-ELF binary formats are not always flexible enough to\ngive us a place to put the Go build ID. On those systems, we put it\nat the very beginning of the text segment.\nThis “header” is read by cmd/go.\n" [^{:tag (* Link)} ctxt]
+  (when (or ^{:go/via [Target]} (.-IsELF ctxt) (== @flagBuildid ""))
+    (return))
+
+
+  (let [ldr (.-loader ctxt)
+      ^{:line 2608} s (.CreateSymForUpdate ldr "go:buildid" 0)
+      ;; The \xff is invalid UTF-8, meant to make it less likely
+      ;; to find one of these accidentally.
+      ^{:line 2611} data (+ (byte-string 0xff " Go build ID: ") (strconv/Quote @flagBuildid) (byte-string "\n " 0xff))]
+    (.SetType s sym/STEXT)
+    (.SetData s (conv (slice byte) data))
+    (.SetSize s (conv int64 (len data)))
+
+    (set! (.-Textp ctxt) (append (.-Textp ctxt) 0))
+    (copy (subslice (.-Textp ctxt) 1) (.-Textp ctxt))
+    (aset (.-Textp ctxt) 0 (.Sym s))))
+
+
+^{:go/end 2659} (go/method buildinfo [^{:tag (* Link)} ctxt]
+  ;; Write the buildinfo symbol, which go version looks for.
+  ;; The code reading this data is in package debug/buildinfo.
+  (let [ldr (.-loader ctxt)
+      ^{:line 2625} s (.CreateSymForUpdate ldr "go:buildinfo" 0)]
+    (.SetType s sym/SBUILDINFO)
+    (.SetAlign s 16)
+
+    ;; The \xff is invalid UTF-8, meant to make it less likely
+    ;; to find one of these accidentally.
+    (let [^:const ^{:val (byte-string 0xff " Go buildinf:")} prefix (byte-string 0xff " Go buildinf:") ; 14 bytes, plus 1 data byte filled in below
+
+        ;; Header is always 32-bytes, a hold-over from before
+        ;; https://go.dev/cl/369977.
+        ^{:line 2635} data (make (slice byte) 32)]
+      (copy data prefix)
+      (aset data (len prefix) (conv byte (.-PtrSize ^{:go/via [Target]} (.-Arch ctxt))))
+      (aset data (+ (len prefix) 1) 0)
+      (when (== (.-ByteOrder ^{:go/via [Target]} (.-Arch ctxt)) binary/BigEndian)
+        (aset data (+ (len prefix) 1) 1))
+
+      (set! (aget data (+ (len prefix) 1)) bit-or 2) ; signals new pointer-free format
+      (set! data (appendString data (aget strdata "runtime.buildVersion")))
+      (set! data (appendString data (aget strdata "runtime.modinfo")))
+      ;; MacOS linker gets very upset if the size is not a multiple of alignment.
+      (while (!= (% (len data) 16) 0)
+        (set! data (append data 0)))
+
+      (.SetData s data)
+      (.SetSize s (conv int64 (len data)))
+
+      ;; Add reference to go:buildinfo from the rodata section,
+      ;; so that external linking with -Wl,--gc-sections does not
+      ;; delete the build info.
+      (let [sr (.CreateSymForUpdate ldr "go:buildinfo.ref" 0)]
+        (.SetType sr sym/SRODATA)
+        (.SetAlign sr (conv int32 (.-PtrSize ^{:go/via [Target]} (.-Arch ctxt))))
+        (.AddAddr sr ^{:go/via [Target]} (.-Arch ctxt) (.Sym s))))))
+
+
+
+^{:go/end 2668} (go/func appendString "appendString appends s to data, prefixed by its varint-encoded length.\n" ^{:tag (slice byte)} [^{:tag (slice byte)} data ^string s]
+  (let [^{:tag (array binary/MaxVarintLen64 byte)} v (zero (array binary/MaxVarintLen64 byte))
+      ^{:line 2664} n (binary/PutUvarint (subslice v) (conv uint64 (len s)))]
+    (set! data (append data (spread (subslice v _ n))))
+    (set! data (append data (spread s)))
+    ^{:line 2667} data))
+
+
+
+^{:go/end 2852} (go/method textaddress "assign addresses to text\n" [^{:tag (* Link)} ctxt]
+  (addsection (.-loader ctxt) ^{:go/via [Target]} (.-Arch ctxt) (addr Segtext) ".text" 05)
+
+  ;; Assign PCs in text segment.
+  ;; Could parallelize, by assigning to text
+  ;; and then letting threads copy down, but probably not worth it.
+  (let [sect (aget (.-Sections Segtext) 0)]
+
+    (set! (.-Align sect) (conv int32 Funcalign))
+
+    (let [ldr (.-loader ctxt)]
+
+      (when (!= @flagRandLayout 0)
+        (let [r (rand/New (rand/NewSource @flagRandLayout))
+            ^{:line 2685} textp (.-Textp ctxt)
+            ^{:line 2686} i 0]
+          ;; don't move the buildid symbol
+          (when (and (> (len textp) 0) (== (.SymName ldr (aget textp 0)) "go:buildid"))
+            (inc! i))
+
+          ;; Skip over C symbols, as functions in a (C object) section must stay together.
+          ;; TODO: maybe we can move a section as a whole.
+          ;; Note: we load C symbols before Go symbols, so we can scan from the start.
+          (while (and (< i (len textp)) ^:go/paren (or (!= (.SubSym ldr (aget textp i)) 0) (.AttrSubSymbol ldr (aget textp i))))
+            (inc! i))
+
+          (set! textp (subslice textp i))
+          (.Shuffle r (len textp) ^{:go/end 2700} (fn [^int i ^int j]
+              (set! (values (aget textp i) (aget textp j)) (values (aget textp j) (aget textp i)))))))
+
+
+
+      ;; Sort the text symbols by type, so that FIPS symbols are
+      ;; gathered together, with the FIPS start and end symbols
+      ;; bracketing them , even if we've randomized the overall order.
+      (sort/SliceStable (.-Textp ctxt) ^{:go/end 2708} (fn ^bool [^int i ^int j]
+          (< (.SymType ldr (aget (.-Textp ctxt) i)) (.SymType ldr (aget (.-Textp ctxt) j)))))
+
+
+      (let [text (.xdefine ctxt "runtime.text" sym/STEXT 0)
+          ^{:line 2711} etext (.xdefine ctxt "runtime.etext" sym/STEXTEND 0)]
+        (.SetSymSect ldr text sect)
+        (when (and ^{:go/via [Target]} (.IsAIX ctxt) ^{:go/via [Target]} (.IsExternal ctxt))
+          ;; Setting runtime.text has a real symbol prevents ld to
+          ;; change its base address resulting in wrong offsets for
+          ;; reflect methods.
+          (let [u (.MakeSymbolUpdater ldr text)]
+            (.SetAlign u (.-Align sect))
+            (.SetSize u 8)))
+
+
+        (when (or ^:go/paren (and (.DynlinkingGo ctxt) ^{:go/via [Target]} (.IsDarwin ctxt)) ^:go/paren (and ^{:go/via [Target]} (.IsAIX ctxt) ^{:go/via [Target]} (.IsExternal ctxt)))
+          (.SetSymSect ldr etext sect)
+          (set! (.-Textp ctxt) (append (.-Textp ctxt) etext 0))
+          (copy (subslice (.-Textp ctxt) 1) (.-Textp ctxt))
+          (aset (.-Textp ctxt) 0 text))
+
+
+        (let [start (conv uint64 (Rnd @FlagTextAddr (conv int64 Funcalign)))
+            ^{:line 2730} va start
+            ^{:line 2731} n 1]
+          (set! (.-Vaddr sect) va)
+
+          (let [limit (.-TrampLimit thearch)]
+            (when (== limit 0)
+              (set! limit (<< 1 63))) ; unlimited
+
+            (when (!= @FlagDebugTextSize 0)
+              (set! limit (conv uint64 @FlagDebugTextSize)))
+
+            (when (> @FlagDebugTramp 1)
+              (set! limit 1)) ; debug mode, force generating trampolines for everything
+
+
+            (when (and ^{:go/via [Target]} (.IsAIX ctxt) ^{:go/via [Target]} (.IsExternal ctxt))
+              ;; On AIX, normally we won't generate direct calls to external symbols,
+              ;; except in one test, cmd/go/testdata/script/link_syso_issue33139.txt.
+              ;; That test doesn't make much sense, and I'm not sure it ever works.
+              ;; Just generate trampoline for now (which will turn a direct call to
+              ;; an indirect call, which at least builds).
+              (set! limit 1))
+
+
+            ;; First pass: assign addresses assuming the program is small and will
+            ;; not require trampoline generation.
+            (let [big false]
+              (range [_ s (.-Textp ctxt)]
+                (set! (values sect n va) (assignAddress ctxt sect n s va false big))
+                (when (>= (- va start) limit)
+                  (set! big true)
+                  (break)))
+
+
+
+              ;; Second pass: only if it is too big, insert trampolines for too-far
+              ;; jumps and targets with unknown addresses.
+              (when big
+                ;; reset addresses
+                (range [_ s (.-Textp ctxt)]
+                  (when (!= s text)
+                    (resetAddress ctxt s)))
+
+
+                (set! va start)
+
+                (let [ntramps 0
+                    ^{:line 2777 :tag string} curPkg (zero string)]
+                  (range [i s (.-Textp ctxt)]
+                    ;; When we find the first symbol in a package, perform a
+                    ;; single iteration that assigns temporary addresses to all
+                    ;; of the text in the same package, using the maximum possible
+                    ;; number of trampolines. This allows for better decisions to
+                    ;; be made regarding reachability and the need for trampolines.
+                    (when [symPkg (.SymPkg ldr s)] (and (!= symPkg "") (!= curPkg symPkg))
+                      (set! curPkg symPkg)
+                      (let [vaTmp va]
+                        (for [j i] (< j (len (.-Textp ctxt))) (inc! j)
+                          (let [curSym (aget (.-Textp ctxt) j)]
+                            (when [symPkg (.SymPkg ldr curSym)] (or (== symPkg "") (!= curPkg symPkg))
+                              (break))
+
+                            ;; We do not pass big to assignAddress here, as this
+                            ;; can result in side effects such as section splitting.
+                            (set! (values sect n vaTmp) (assignAddress ctxt sect n curSym vaTmp false false))
+                            (set! vaTmp + (maxSizeTrampolines ctxt ldr curSym false))))))
+
+
+
+                    ;; Reset address for current symbol.
+                    (when (!= s text)
+                      (resetAddress ctxt s))
+
+
+                    ;; Assign actual address for current symbol.
+                    (set! (values sect n va) (assignAddress ctxt sect n s va false big))
+
+                    ;; Resolve jumps, adding trampolines if they are needed.
+                    (trampoline ctxt s)
+
+                    ;; lay down trampolines after each function
+                    (for [] (< ntramps (len (.-tramps ctxt))) (inc! ntramps)
+                      (let [tramp (aget (.-tramps ctxt) ntramps)]
+                        (when (and ^{:go/via [Target]} (.IsAIX ctxt) (strings/HasPrefix (.SymName ldr tramp) "runtime.text."))
+                          ;; Already set in assignAddress
+                          (continue))
+
+                        (set! (values sect n va) (assignAddress ctxt sect n tramp va true big)))))
+
+
+
+                  ;; merge tramps into Textp, keeping Textp in address order
+                  (when (!= ntramps 0)
+                    (let [newtextp (make (slice loader/Sym) 0 (+ (len (.-Textp ctxt)) ntramps))
+                        ^{:line 2824} i 0]
+                      (range [_ s (.-Textp ctxt)]
+                        (for [] (and (< i ntramps) (< (.SymValue ldr (aget (.-tramps ctxt) i)) (.SymValue ldr s))) (inc! i)
+                          (set! newtextp (append newtextp (aget (.-tramps ctxt) i))))
+
+                        (set! newtextp (append newtextp s)))
+
+                      (set! newtextp (append newtextp (spread (subslice (.-tramps ctxt) i ntramps))))
+
+                      (set! (.-Textp ctxt) newtextp)))))
+
+
+
+              ;; Add MinLC size after etext, so it won't collide with the next symbol
+              ;; (which may confuse some symbolizer).
+              (set! (.-Length sect) (+ (- va (.-Vaddr sect)) (conv uint64 (.-MinLC ^{:go/via [Target]} (.-Arch ctxt)))))
+              (.SetSymSect ldr etext sect)
+              (when (== (.SymValue ldr etext) 0)
+                ;; Set the address of the start/end symbols, if not already
+                ;; (i.e. not darwin+dynlink or AIX+external, see above).
+                (.SetSymValue ldr etext (conv int64 va))
+                (.SetSymValue ldr text (conv int64 (.-Vaddr (aget (.-Sections Segtext) 0)))))
+
+              (when ^{:go/via [Target]} (.IsWindows ctxt)
+                ;; .pdata entries should be sorted by address, so process them now
+                ;; that we have final addresses for the text symbols.
+                (collectSEH ctxt)))))))))
+
+
+
+
+^{:go/end 2957} (go/func assignAddress "assigns address for a text symbol, returns (possibly new) section, its number, and the address.\n" [^{:tag (* Link)} ctxt ^{:tag (* sym/Section)} sect ^int n ^loader/Sym s ^uint64 va ^bool isTramp ^bool big] :results [(* sym/Section) int uint64]
+  (let [ldr (.-loader ctxt)]
+    (when (!= (.-AssignAddress thearch) nil)
+      (return ((.-AssignAddress thearch) ldr sect n s va isTramp)))
+
+
+    (.SetSymSect ldr s sect)
+    (when (.AttrSubSymbol ldr s)
+      (return sect n va))
+
+
+    (let [align (.SymAlign ldr s)]
+      (set! align (max align (conv int32 Funcalign)))
+      (set! va (conv uint64 (Rnd (conv int64 va) (conv int64 align))))
+      (when (< (.-Align sect) align)
+        (set! (.-Align sect) align))
+
+
+      (let [funcsize (conv uint64 abi/MINFUNC)] ; spacing required for findfunctab
+        (when (> (.SymSize ldr s) abi/MINFUNC)
+          (set! funcsize (conv uint64 (.SymSize ldr s))))
+
+
+        ;; If we need to split text sections, and this function doesn't fit in the current
+        ;; section, then create a new one.
+        ;;
+        ;; Only break at outermost syms.
+        (when (and big (splitTextSections ctxt) (== (.OuterSym ldr s) 0))
+          ;; For debugging purposes, allow text size limit to be cranked down,
+          ;; so as to stress test the code that handles multiple text sections.
+          (let [^uint64 textSizelimit (.-TrampLimit thearch)]
+            (when (!= @FlagDebugTextSize 0)
+              (set! textSizelimit (conv uint64 @FlagDebugTextSize)))
+
+
+            ;; Sanity check: make sure the limit is larger than any
+            ;; individual text symbol.
+            (when (> funcsize textSizelimit)
+              (panic (fmt/Sprintf "error: text size limit %d less than text symbol %s size of %d" textSizelimit (.SymName ldr s) funcsize)))
+
+
+            (when (> (+ (- va (.-Vaddr sect)) funcsize (maxSizeTrampolines ctxt ldr s isTramp)) textSizelimit)
+              (let [sectAlign (conv int32 (.-Funcalign thearch))]
+                (when ^{:go/via [Target]} (.IsPPC64 ctxt)
+                  ;; Align the next text section to the worst case function alignment likely
+                  ;; to be encountered when processing function symbols. The start address
+                  ;; is rounded against the final alignment of the text section later on in
+                  ;; (*Link).address. This may happen due to usage of PCALIGN directives
+                  ;; larger than Funcalign, or usage of ISA 3.1 prefixed instructions
+                  ;; (see ISA 3.1 Book I 1.9).
+                  (let [^:const ^{:val 64} ppc64maxFuncalign 64]
+                    (set! sectAlign ppc64maxFuncalign)
+                    (set! va (conv uint64 (Rnd (conv int64 va) ppc64maxFuncalign)))))
+
+
+                ;; Set the length for the previous text section
+                (set! (.-Length sect) (- va (.-Vaddr sect)))
+
+                ;; Create new section, set the starting Vaddr
+                (set! sect (addsection (.-loader ctxt) ^{:go/via [Target]} (.-Arch ctxt) (addr Segtext) ".text" 05))
+
+                (set! (.-Vaddr sect) va)
+                (set! (.-Align sect) sectAlign)
+                (.SetSymSect ldr s sect)
+
+                ;; Create a symbol for the start of the secondary text sections
+                (let [ntext (.CreateSymForUpdate ldr (fmt/Sprintf "runtime.text.%d" n) 0)]
+                  (.SetSect ntext sect)
+                  (when ^{:go/via [Target]} (.IsAIX ctxt)
+                    ;; runtime.text.X must be a real symbol on AIX.
+                    ;; Assign its address directly in order to be the
+                    ;; first symbol of this new section.
+                    (.SetType ntext sym/STEXT)
+                    (.SetSize ntext (conv int64 abi/MINFUNC))
+                    (.SetOnList ntext true)
+                    (.SetAlign ntext sectAlign)
+                    (set! (.-tramps ctxt) (append (.-tramps ctxt) (.Sym ntext)))
+
+                    (.SetValue ntext (conv int64 va))
+                    (set! va + (conv uint64 (.Size ntext)))
+
+                    (if [align (.SymAlign ldr s)] (!= align 0)
+                      (set! va (conv uint64 (Rnd (conv int64 va) (conv int64 align))))
+
+                      (set! va (conv uint64 (Rnd (conv int64 va) (conv int64 Funcalign))))))
+
+
+                  (inc! n))))))
+
+
+
+        (.SetSymValue ldr s 0)
+        (for [sub s] (!= sub 0) (set! sub (.SubSym ldr sub))
+          (.SetSymValue ldr sub (+ (.SymValue ldr sub) (conv int64 va)))
+          (when (> (.-Debugvlog ctxt) 2)
+            (fmt/Println "assign text address:" (.SymName ldr sub) (.SymValue ldr sub))))
+
+
+
+        (set! va + funcsize)
+
+        (return sect n va)))))
+
+
+^{:go/end 2968} (go/func resetAddress [^{:tag (* Link)} ctxt ^loader/Sym s]
+  (let [ldr (.-loader ctxt)]
+    (when (!= (.OuterSym ldr s) 0)
+      (return))
+
+    (let [oldv (.SymValue ldr s)]
+      (for [sub s] (!= sub 0) (set! sub (.SubSym ldr sub))
+        (.SetSymValue ldr sub (- (.SymValue ldr sub) oldv))))))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 2988} (go/func splitTextSections "Return whether we may need to split text sections.\n\nOn PPC64x, when external linking, a text section should not be\nlarger than 2^25 bytes due to the size of call target offset field\nin the 'bl' instruction. Splitting into smaller text sections\nsmaller than this limit allows the system linker to modify the long\ncalls appropriately. The limit allows for the space needed for\ntables inserted by the linker.\n\nThe same applies to Darwin/ARM64, with 2^27 byte threshold.\n\nSimilarly for ARM, we split sections (at 2^25 bytes) to avoid\ninconsistencies between the Go linker's reachability calculations\n(e.g. will direct call from X to Y need a trampoline) and similar\nmachinery in the external linker; see #58425 for more on the\nhistory here.\n" ^bool [^{:tag (* Link)} ctxt]
+  (and ^:go/paren (or ^{:go/via [Target]} (.IsARM ctxt) ^{:go/via [Target]} (.IsPPC64 ctxt) ^:go/paren (and ^{:go/via [Target]} (.IsARM64 ctxt) ^{:go/via [Target]} (.IsDarwin ctxt))) ^{:go/via [Target]} (.IsExternal ctxt)))
+
+
+
+
+
+
+(go/const ^{:val 12288 :doc "On Wasm, we reserve 4096 bytes for zero page, then 8192 bytes for wasm_exec.js\nto store command line args and environment variables.\nData sections starts from at least address 12288.\nKeep in sync with wasm_exec.js.\n"} wasmMinDataAddr (+ 4096 8192))
+
+
+
+^{:go/end 3313} (go/method address "address assigns virtual addresses to all segments and sections and\nreturns all segments in file order.\n" ^{:tag (slice (* sym/Segment))} [^{:tag (* Link)} ctxt]
+  (let [^{:tag (slice (* sym/Segment))} order (zero (slice (* sym/Segment))) ; Layout order
+
+      ^{:line 3001} va (conv uint64 @FlagTextAddr)]
+    (set! order (append order (addr Segtext)))
+    (set! (.-Rwx Segtext) 05)
+    (set! (.-Vaddr Segtext) va)
+    (range [i s (.-Sections Segtext)]
+      (set! va (conv uint64 (Rnd (conv int64 va) (conv int64 (.-Align s)))))
+      (set! (.-Vaddr s) va)
+      (set! va + (.-Length s))
+
+      (when (and ^{:go/via [Target]} (.IsWasm ctxt) (== i 0) (< va wasmMinDataAddr))
+        (set! va wasmMinDataAddr)))
+
+
+
+    (set! (.-Length Segtext) (- va (conv uint64 @FlagTextAddr)))
+
+    (when (> (len (.-Sections Segrodata)) 0)
+      ;; align to page boundary so as not to mix
+      ;; rodata and executable text.
+      ;;
+      ;; Note: gold or GNU ld will reduce the size of the executable
+      ;; file by arranging for the relro segment to end at a page
+      ;; boundary, and overlap the end of the text segment with the
+      ;; start of the relro segment in the file.  The PT_LOAD segments
+      ;; will be such that the last page of the text segment will be
+      ;; mapped twice, once r-x and once starting out rw- and, after
+      ;; relocation processing, changed to r--.
+      (set! va (conv uint64 (Rnd (conv int64 va) @FlagRound)))
+
+      (set! order (append order (addr Segrodata)))
+      (set! (.-Rwx Segrodata) 04)
+      (set! (.-Vaddr Segrodata) va)
+      (range [_ s (.-Sections Segrodata)]
+        (set! va (conv uint64 (Rnd (conv int64 va) (conv int64 (.-Align s)))))
+        (set! (.-Vaddr s) va)
+        (set! va + (.-Length s)))
+
+
+      (set! (.-Length Segrodata) (- va (.-Vaddr Segrodata))))
+
+    (when (> (len (.-Sections Segrelrodata)) 0)
+      ;; align to page boundary so as not to mix
+      ;; rodata, rel-ro data, and executable text.
+      (set! va (conv uint64 (Rnd (conv int64 va) @FlagRound)))
+      (when (== ^{:go/via [Target]} (.-HeadType ctxt) objabi/Haix)
+        ;; Relro data are inside data segment on AIX.
+        (set! va + (- (conv uint64 XCOFFDATABASE) (conv uint64 XCOFFTEXTBASE))))
+
+
+      (set! order (append order (addr Segrelrodata)))
+      (set! (.-Rwx Segrelrodata) 06)
+      (set! (.-Vaddr Segrelrodata) va)
+      (range [_ s (.-Sections Segrelrodata)]
+        (set! va (conv uint64 (Rnd (conv int64 va) (conv int64 (.-Align s)))))
+        (set! (.-Vaddr s) va)
+        (set! va + (.-Length s)))
+
+
+      (set! (.-Length Segrelrodata) (- va (.-Vaddr Segrelrodata))))
+
+
+    (set! va (conv uint64 (Rnd (conv int64 va) @FlagRound)))
+    (when (and (== ^{:go/via [Target]} (.-HeadType ctxt) objabi/Haix) (== (len (.-Sections Segrelrodata)) 0))
+      ;; Data sections are moved to an unreachable segment
+      ;; to ensure that they are position-independent.
+      ;; Already done if relro sections exist.
+      (set! va + (- (conv uint64 XCOFFDATABASE) (conv uint64 XCOFFTEXTBASE))))
+
+    (set! order (append order (addr Segdata)))
+    (set! (.-Rwx Segdata) 06)
+    (if (!= @FlagDataAddr -1) (do
+        (set! (.-Vaddr Segdata) (conv uint64 @FlagDataAddr))
+        (set! va (.-Vaddr Segdata)))
+
+      (set! (.-Vaddr Segdata) va))
+
+    (let [^{:tag (* sym/Section)} data (zero (* sym/Section))
+        ^{:line 3078 :tag (* sym/Section)} noptr (zero (* sym/Section))
+        ^{:line 3079 :tag (* sym/Section)} bss (zero (* sym/Section))
+        ^{:line 3080 :tag (* sym/Section)} noptrbss (zero (* sym/Section))
+        ^{:line 3081 :tag (* sym/Section)} fuzzCounters (zero (* sym/Section))]
+      (range [i s (.-Sections Segdata)]
+        (when (and ^:go/paren (or ^{:go/via [Target]} (.-IsELF ctxt) (== ^{:go/via [Target]} (.-HeadType ctxt) objabi/Haix)) (== (.-Name s) ".tbss"))
+          (continue))
+
+        (let [vlen (conv int64 (.-Length s))]
+          (when (and (< (+ i 1) (len (.-Sections Segdata))) (not (and ^:go/paren (or ^{:go/via [Target]} (.-IsELF ctxt) (== ^{:go/via [Target]} (.-HeadType ctxt) objabi/Haix)) (== (.-Name (aget (.-Sections Segdata) (+ i 1))) ".tbss"))))
+            (set! vlen (conv int64 (- (.-Vaddr (aget (.-Sections Segdata) (+ i 1))) (.-Vaddr s)))))
+
+          (set! (.-Vaddr s) va)
+          (set! va + (conv uint64 vlen))
+          (set! (.-Length Segdata) (- va (.-Vaddr Segdata)))
+          (switch (.-Name s)
+            (case [".data"]
+              (set! data s))
+            (case [".noptrdata"]
+              (set! noptr s))
+            (case [".bss"]
+              (set! bss s))
+            (case [".noptrbss"]
+              (set! noptrbss s))
+            (case [".go.fuzzcntrs"]
+              (set! fuzzCounters s)))))
+
+
+
+      ;; Assign Segdata's Filelen omitting the BSS. We do this here
+      ;; simply because right now we know where the BSS starts.
+      (set! (.-Filelen Segdata) (- (.-Vaddr bss) (.-Vaddr Segdata)))
+
+      (when (> (len (.-Sections Segpdata)) 0)
+        (set! va (conv uint64 (Rnd (conv int64 va) @FlagRound)))
+        (set! order (append order (addr Segpdata)))
+        (set! (.-Rwx Segpdata) 04)
+        (set! (.-Vaddr Segpdata) va)
+        ;; Segpdata.Sections is intended to contain just one section.
+        ;; Loop through the slice anyway for consistency.
+        (range [_ s (.-Sections Segpdata)]
+          (set! va (conv uint64 (Rnd (conv int64 va) (conv int64 (.-Align s)))))
+          (set! (.-Vaddr s) va)
+          (set! va + (.-Length s)))
+
+        (set! (.-Length Segpdata) (- va (.-Vaddr Segpdata))))
+
+
+      (when (> (len (.-Sections Segxdata)) 0)
+        (set! va (conv uint64 (Rnd (conv int64 va) @FlagRound)))
+        (set! order (append order (addr Segxdata)))
+        (set! (.-Rwx Segxdata) 04)
+        (set! (.-Vaddr Segxdata) va)
+        ;; Segxdata.Sections is intended to contain just one section.
+        ;; Loop through the slice anyway for consistency.
+        (range [_ s (.-Sections Segxdata)]
+          (set! va (conv uint64 (Rnd (conv int64 va) (conv int64 (.-Align s)))))
+          (set! (.-Vaddr s) va)
+          (set! va + (.-Length s)))
+
+        (set! (.-Length Segxdata) (- va (.-Vaddr Segxdata))))
+
+
+      (set! va (conv uint64 (Rnd (conv int64 va) @FlagRound)))
+      (set! order (append order (addr Segdwarf)))
+      (set! (.-Rwx Segdwarf) 06)
+      (set! (.-Vaddr Segdwarf) va)
+      (range [i s (.-Sections Segdwarf)]
+        (let [vlen (conv int64 (.-Length s))]
+          (when (< (+ i 1) (len (.-Sections Segdwarf)))
+            (set! vlen (conv int64 (- (.-Vaddr (aget (.-Sections Segdwarf) (+ i 1))) (.-Vaddr s)))))
+
+          (set! (.-Vaddr s) va)
+          (set! va + (conv uint64 vlen))
+          (when (== ^{:go/via [Target]} (.-HeadType ctxt) objabi/Hwindows)
+            (set! va (conv uint64 (Rnd (conv int64 va) PEFILEALIGN))))
+
+          (set! (.-Length Segdwarf) (- va (.-Vaddr Segdwarf)))))
+
+
+      (let [ldr (.-loader ctxt)
+
+          ^:var ^{:line 3160} rodata (.SymSect ldr (.LookupOrCreateSym ldr "runtime.rodata" 0))
+          ^:var ^{:line 3161} pclntab (.SymSect ldr (.LookupOrCreateSym ldr "runtime.pclntab" 0))
+          ^:var ^{:line 3162} types (.SymSect ldr (.LookupOrCreateSym ldr "runtime.types" 0))]
+
+
+        (range [_ s (.-datap ctxt)]
+          (when [sect (.SymSect ldr s)] (!= sect nil)
+            (.AddToSymValue ldr s (conv int64 (.-Vaddr sect))))
+
+          (let [v (.SymValue ldr s)]
+            (for [sub (.SubSym ldr s)] (!= sub 0) (set! sub (.SubSym ldr sub))
+              (.AddToSymValue ldr sub v))))
+
+
+
+        (range [_ si dwarfp]
+          (range [_ s (.-syms si)]
+            (when [sect (.SymSect ldr s)] (!= sect nil)
+              (.AddToSymValue ldr s (conv int64 (.-Vaddr sect))))
+
+            (let [sub (.SubSym ldr s)]
+              (when (!= sub 0)
+                (panic (fmt/Sprintf "unexpected sub-sym for %s %s" (.SymName ldr s) (.String (.SymType ldr s)))))
+
+              (let [v (.SymValue ldr s)]
+                (for [] (!= sub 0) (set! sub (.SubSym ldr sub))
+                  (.AddToSymValue ldr s v))))))
+
+
+
+
+        (range [_ s (.-pdata sehp)]
+          (when [sect (.SymSect ldr s)] (!= sect nil)
+            (.AddToSymValue ldr s (conv int64 (.-Vaddr sect)))))
+
+
+        (range [_ s (.-xdata sehp)]
+          (when [sect (.SymSect ldr s)] (!= sect nil)
+            (.AddToSymValue ldr s (conv int64 (.-Vaddr sect)))))
+
+
+
+        (when (== ^{:go/via [Target]} (.-BuildMode ctxt) BuildModeShared)
+          (let [s (.LookupOrCreateSym ldr "go:link.abihashbytes" 0)
+              ^{:line 3204} sect (.SymSect ldr (.LookupOrCreateSym ldr ".note.go.abihash" 0))]
+            (.SetSymSect ldr s sect)
+            (.SetSymValue ldr s (conv int64 (+ (.-Vaddr sect) 16)))))
+
+
+        ;; If there are multiple text sections, create runtime.text.n for
+        ;; their section Vaddr, using n for index
+        (let [n 1]
+          (range [_ sect (subslice (.-Sections Segtext) 1)]
+            (when (!= (.-Name sect) ".text")
+              (break))
+
+            (let [symname (fmt/Sprintf "runtime.text.%d" n)]
+              (when (or (!= ^{:go/via [Target]} (.-HeadType ctxt) objabi/Haix) (!= ^{:go/via [Target]} (.-LinkMode ctxt) LinkExternal))
+                ;; Addresses are already set on AIX with external linker
+                ;; because these symbols are part of their sections.
+                (.xdefine ctxt symname sym/STEXT (conv int64 (.-Vaddr sect))))
+
+              (inc! n)))
+
+
+          (.xdefine ctxt "runtime.rodata" sym/SRODATA (conv int64 (.-Vaddr rodata)))
+          (.xdefine ctxt "runtime.erodata" sym/SRODATA (conv int64 (+ (.-Vaddr rodata) (.-Length rodata))))
+          (.xdefine ctxt "runtime.types" sym/SRODATA (conv int64 (.-Vaddr types)))
+          (.xdefine ctxt "runtime.etypes" sym/SRODATA (conv int64 (+ (.-Vaddr types) (.-Length types))))
+
+          (let [s (.Lookup ldr "runtime.gcdata" 0)]
+            (.SetAttrLocal ldr s true)
+            (.xdefine ctxt "runtime.egcdata" sym/SRODATA (+ (.SymAddr ldr s) (.SymSize ldr s)))
+            (.SetSymSect ldr (.LookupOrCreateSym ldr "runtime.egcdata" 0) (.SymSect ldr s))
+
+            (set! s (.LookupOrCreateSym ldr "runtime.gcbss" 0))
+            (.SetAttrLocal ldr s true)
+            (.xdefine ctxt "runtime.egcbss" sym/SRODATA (+ (.SymAddr ldr s) (.SymSize ldr s)))
+            (.SetSymSect ldr (.LookupOrCreateSym ldr "runtime.egcbss" 0) (.SymSect ldr s))
+
+            (.xdefine ctxt "runtime.pclntab" sym/SRODATA (conv int64 (.-Vaddr pclntab)))
+            (.defineInternal ctxt "runtime.pcheader" sym/SRODATA)
+            (.defineInternal ctxt "runtime.funcnametab" sym/SRODATA)
+            (.defineInternal ctxt "runtime.cutab" sym/SRODATA)
+            (.defineInternal ctxt "runtime.filetab" sym/SRODATA)
+            (.defineInternal ctxt "runtime.pctab" sym/SRODATA)
+            (.defineInternal ctxt "runtime.functab" sym/SRODATA)
+            (.defineInternal ctxt "go:func.*" sym/SRODATA)
+            (.xdefine ctxt "runtime.epclntab" sym/SRODATA (conv int64 (+ (.-Vaddr pclntab) (.-Length pclntab))))
+            (.xdefine ctxt "runtime.noptrdata" sym/SNOPTRDATA (conv int64 (.-Vaddr noptr)))
+            (.xdefine ctxt "runtime.enoptrdata" sym/SNOPTRDATAEND (conv int64 (+ (.-Vaddr noptr) (.-Length noptr))))
+            (.xdefine ctxt "runtime.bss" sym/SBSS (conv int64 (.-Vaddr bss)))
+            (.xdefine ctxt "runtime.ebss" sym/SBSS (conv int64 (+ (.-Vaddr bss) (.-Length bss))))
+            (.xdefine ctxt "runtime.data" sym/SDATA (conv int64 (.-Vaddr data)))
+            (.xdefine ctxt "runtime.edata" sym/SDATAEND (conv int64 (+ (.-Vaddr data) (.-Length data))))
+            (.xdefine ctxt "runtime.noptrbss" sym/SNOPTRBSS (conv int64 (.-Vaddr noptrbss)))
+            (.xdefine ctxt "runtime.enoptrbss" sym/SNOPTRBSS (conv int64 (+ (.-Vaddr noptrbss) (.-Length noptrbss))))
+            (set! s (.Lookup ldr "runtime.gcmask.*" 0))
+            (.xdefine ctxt "runtime.gcmask.*" sym/SGCMASK (conv int64 (+ (.-Vaddr noptrbss) (conv uint64 (.SymValue ldr s)))))
+            (.xdefine ctxt "runtime.covctrs" sym/SCOVERAGE_COUNTER (conv int64 (+ (.-Vaddr noptrbss) covCounterDataStartOff)))
+            (.xdefine ctxt "runtime.ecovctrs" sym/SCOVERAGE_COUNTER (conv int64 (+ (.-Vaddr noptrbss) covCounterDataStartOff covCounterDataLen)))
+            (.xdefine ctxt "runtime.end" sym/SBSS (conv int64 (+ (.-Vaddr Segdata) (.-Length Segdata))))
+
+            (when (!= fuzzCounters nil)
+              (when @flagAsan
+                ;; ASAN requires that the symbol marking the end
+                ;; of the section be aligned on an 8 byte boundary.
+                ;; See issue #66966.
+                (set! (.-Length fuzzCounters) (conv uint64 (Rnd (conv int64 (.-Length fuzzCounters)) 8))))
+
+              (.xdefine ctxt "runtime.__start___sancov_cntrs" sym/SLIBFUZZER_8BIT_COUNTER (conv int64 (.-Vaddr fuzzCounters)))
+              (.xdefine ctxt "runtime.__stop___sancov_cntrs" sym/SLIBFUZZER_8BIT_COUNTER (conv int64 (+ (.-Vaddr fuzzCounters) (.-Length fuzzCounters))))
+              (.xdefine ctxt "internal/fuzz._counters" sym/SLIBFUZZER_8BIT_COUNTER (conv int64 (.-Vaddr fuzzCounters)))
+              (.xdefine ctxt "internal/fuzz._ecounters" sym/SLIBFUZZER_8BIT_COUNTER (conv int64 (+ (.-Vaddr fuzzCounters) (.-Length fuzzCounters)))))
+
+
+            (when ^{:go/via [Target]} (.IsSolaris ctxt)
+              ;; On Solaris, in the runtime it sets the external names of the
+              ;; end symbols. Unset them and define separate symbols, so we
+              ;; keep both.
+              (let [etext (.Lookup ldr "runtime.etext" 0)
+                  ^{:line 3281} edata (.Lookup ldr "runtime.edata" 0)
+                  ^{:line 3282} end (.Lookup ldr "runtime.end" 0)]
+                (.SetSymExtname ldr etext "runtime.etext")
+                (.SetSymExtname ldr edata "runtime.edata")
+                (.SetSymExtname ldr end "runtime.end")
+                (.xdefine ctxt "_etext" (.SymType ldr etext) (.SymValue ldr etext))
+                (.xdefine ctxt "_edata" (.SymType ldr edata) (.SymValue ldr edata))
+                (.xdefine ctxt "_end" (.SymType ldr end) (.SymValue ldr end))
+                (.SetSymSect ldr (.Lookup ldr "_etext" 0) (.SymSect ldr etext))
+                (.SetSymSect ldr (.Lookup ldr "_edata" 0) (.SymSect ldr edata))
+                (.SetSymSect ldr (.Lookup ldr "_end" 0) (.SymSect ldr end))))
+
+
+            (when (and ^{:go/via [Target]} (.IsPPC64 ctxt) ^{:go/via [Target]} (.IsElf ctxt))
+              ;; Resolve .TOC. symbols for all objects. Only one TOC region is supported. If a
+              ;; GOT section is present, compute it as suggested by the ELFv2 ABI. Otherwise,
+              ;; choose a similar offset from the start of the data segment.
+              (let [tocAddr (+ (conv int64 (.-Vaddr Segdata)) 0x8000)]
+                (when [gotAddr (.SymValue ldr ^{:go/via [ArchSyms]} (.-GOT ctxt))] (!= gotAddr 0)
+                  (set! tocAddr (+ gotAddr 0x8000)))
+
+                (range [i ^{:go/via [ArchSyms]} (.-DotTOC ctxt)]
+                  (when (and (>= i sym/SymVerABICount) (< i sym/SymVerStatic)) ; these versions are not used currently
+                    (continue))
+
+                  (when [toc (.Lookup ldr ".TOC." i)] (!= toc 0)
+                    (.SetSymValue ldr toc tocAddr)))))
+
+
+
+
+            ^{:line 3312} order))))))
+
+
+
+
+^{:go/end 3347} (go/method layout "layout assigns file offsets and lengths to the segments in order.\nReturns the file size containing all the segments.\n" ^uint64 [^{:tag (* Link)} ctxt ^{:tag (slice (* sym/Segment))} order]
+  (let [^{:tag (* sym/Segment)} prev (zero (* sym/Segment))]
+    (range [_ seg order]
+      (if (== prev nil)
+        (set! (.-Fileoff seg) (conv uint64 HEADR))
+
+        (switch ^{:go/via [Target]} (.-HeadType ctxt)
+          (default
+            ;; Assuming the previous segment was
+            ;; aligned, the following rounding
+            ;; should ensure that this segment's
+            ;; VA ≡ Fileoff mod FlagRound.
+            (set! (.-Fileoff seg) (conv uint64 (Rnd (conv int64 (+ (.-Fileoff prev) (.-Filelen prev))) @FlagRound)))
+            (when (!= (% (.-Vaddr seg) (conv uint64 @FlagRound)) (% (.-Fileoff seg) (conv uint64 @FlagRound)))
+              (Exitf "bad segment rounding (Vaddr=%#x Fileoff=%#x FlagRound=%#x)" (.-Vaddr seg) (.-Fileoff seg) @FlagRound)))
+
+          (case [objabi/Hwindows]
+            (set! (.-Fileoff seg) (+ (.-Fileoff prev) (conv uint64 (Rnd (conv int64 (.-Filelen prev)) PEFILEALIGN)))))
+          (case [objabi/Hplan9]
+            (set! (.-Fileoff seg) (+ (.-Fileoff prev) (.-Filelen prev))))))
+
+
+      (when (!= seg (addr Segdata))
+        ;; Link.address already set Segdata.Filelen to
+        ;; account for BSS.
+        (set! (.-Filelen seg) (.-Length seg)))
+
+      (set! prev seg))
+
+    (+ (.-Fileoff prev) (.-Filelen prev))))
+
+
+
+^{:go/end 3358} (go/method AddTramp "add a trampoline with symbol s (to be laid down after the current function)\n" [^{:tag (* Link)} ctxt ^{:tag (* loader/SymbolBuilder)} s ^sym/SymKind typ]
+  (.SetType s typ)
+  (.SetReachable s true)
+  (.SetOnList s true)
+  (set! (.-tramps ctxt) (append (.-tramps ctxt) (.Sym s)))
+  (when (and (> @FlagDebugTramp 0) (> (.-Debugvlog ctxt) 0))
+    (.Logf ctxt "trampoline %s inserted\n" (.Name s))))
+
+
+
+
+
+^{:go/end 3438} (go/func compressSyms "compressSyms compresses syms and returns the contents of the\ncompressed section. If the section would get larger, it returns nil.\n" ^{:tag (slice byte)} [^{:tag (* Link)} ctxt ^{:tag (slice loader/Sym)} syms]
+  (let [ldr (.-loader ctxt)
+      ^{:line 3364 :tag int64} total (zero int64)]
+    (range [_ sym syms]
+      (set! total + (.SymSize ldr sym)))
+
+
+    (let [^bytes/Buffer buf (zero bytes/Buffer)]
+      (if ^{:go/via [Target]} (.-IsELF ctxt)
+        (switch (.-PtrSize ^{:go/via [Target]} (.-Arch ctxt))
+          (case [8]
+            (binary/Write (addr buf) (.-ByteOrder ^{:go/via [Target]} (.-Arch ctxt)) ^{:go/breaks [2 4 6]} (lit elf/Chdr64
+                :Type (conv uint32 elf/COMPRESS_ZLIB)
+                :Size (conv uint64 total)
+                :Addralign (conv uint64 (.-Alignment ^{:go/via [Target]} (.-Arch ctxt))))))
+
+          (case [4]
+            (binary/Write (addr buf) (.-ByteOrder ^{:go/via [Target]} (.-Arch ctxt)) ^{:go/breaks [2 4 6]} (lit elf/Chdr32
+                :Type (conv uint32 elf/COMPRESS_ZLIB)
+                :Size (conv uint32 total)
+                :Addralign (conv uint32 (.-Alignment ^{:go/via [Target]} (.-Arch ctxt))))))
+
+          (default
+            (log/Fatalf "can't compress header size:%d" (.-PtrSize ^{:go/via [Target]} (.-Arch ctxt)))))
+
+        (do
+          (.Write buf (conv (slice byte) "ZLIB"))
+          (let [^{:tag (array 8 byte)} sizeBytes (zero (array 8 byte))]
+            (.PutUint64 binary/BigEndian (subslice sizeBytes) (conv uint64 total))
+            (.Write buf (subslice sizeBytes)))))
+
+
+      (let [^{:tag (slice byte)} relocbuf (zero (slice byte)) ; temporary buffer for applying relocations
+
+          ;; Using zlib.BestSpeed achieves very nearly the same
+          ;; compression levels of zlib.DefaultCompression, but takes
+          ;; substantially less time. This is important because DWARF
+          ;; compression can be a significant fraction of link time.
+          (values z err) (zlib/NewWriterLevel (addr buf) zlib/BestSpeed)]
+        (when (!= err nil)
+          (log/Fatalf "NewWriterLevel failed: %s" err))
+
+        (let [st (.makeRelocSymState ctxt)]
+          (range [_ s syms]
+            ;; Symbol data may be read-only. Apply relocations in a
+            ;; temporary buffer, and immediately write it out.
+            (let [P (.Data ldr s)
+                ^{:line 3409} relocs (.Relocs ldr s)]
+              (when (!= (.Count relocs) 0)
+                (set! relocbuf (append (subslice relocbuf _ 0) (spread P)))
+                (set! P relocbuf)
+                (.relocsym st s P))
+
+              (when [(values _ err) (.Write z P)] (!= err nil)
+                (log/Fatalf "compression failed: %s" err))
+
+              (for [i (- (.SymSize ldr s) (conv int64 (len P)))] (> i 0) _
+                (let [b (subslice zeros)]
+                  (when (< i (conv int64 (len b)))
+                    (set! b (subslice b _ i)))
+
+                  (let [(values n err) (.Write z b)]
+                    (when (!= err nil)
+                      (log/Fatalf "compression failed: %s" err))
+
+                    (set! i - (conv int64 n)))))))
+
+
+          (when [err (.Close z)] (!= err nil)
+            (log/Fatalf "compression failed: %s" err))
+
+          (when (>= (conv int64 (.Len buf)) total)
+            ;; Compression didn't save any space.
+            (return nil))
+
+          (.Bytes buf))))))
+
+
+
+
+
+
+
+
+
+
+^{:go/breaks [[6 3460]] :go/end 3461} (go/func writeUleb128FixedLength "writeUleb128FixedLength writes out value v in LEB128 encoded\nformat, ensuring that the space written takes up length bytes. When\nextra space is needed, we write initial bytes with just the\ncontinuation bit set. For example, if val is 1 and length is 3,\nwe'll write 0x80 0x80 0x1 (first two bytes with zero val but\ncontinuation bit set). NB: this function adapted from a similar\nfunction in cmd/link/internal/wasm, they could be commoned up if\nneeded.\n" ^error [^{:tag (slice byte)} b ^uint64 v ^int length]
+  (for [i 0] (< i length) (inc! i)
+    (let [c (conv uint8 (bit-and v 0x7f))]
+      (set! v >> 7)
+      (when (< i (- length 1))
+        (set! c bit-or 0x80))
+
+      (aset b i c)))
+
+  (when (!= v 0)
+    (return (fmt/Errorf "writeUleb128FixedLength: length too small")))
+
+  nil)

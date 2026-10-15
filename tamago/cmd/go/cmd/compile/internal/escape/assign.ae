@@ -1,0 +1,128 @@
+;; Copyright 2018 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.cmd.compile.internal.escape) (go/file "assign.go" :imports [
+
+
+    ^{:line 8} [base "cmd/compile/internal/base"]
+    ^{:line 9} [ir "cmd/compile/internal/ir"]])
+
+
+
+
+^{:go/end 59} (go/method addr "addr evaluates an addressable expression n and returns a hole\nthat represents storing into the represented location.\n" ^hole [^{:tag (* escape)} e ^ir/Node n]
+  (when (or (== n nil) (ir/IsBlank n))
+    ;; Can happen in select case, range, maybe others.
+    (return ^{:go/via [batch]} (.discardHole e)))
+
+
+  (let [k ^{:go/via [batch]} (.heapHole e)]
+
+    (switch (.Op n)
+      (default
+        (base/Fatalf "unexpected addr: %v" n))
+      (case [ir/ONAME]
+        (let [n (assert (* ir/Name) n)]
+          (when (== (.-Class n) ir/PEXTERN)
+            (break))
+
+          (set! k (.asHole ^{:go/via [batch]} (.oldLoc e n)))))
+      (case [ir/OLINKSYMOFFSET]
+        (break))
+      (case [ir/ODOT]
+        (let [n (assert (* ir/SelectorExpr) n)]
+          (set! k (.addr e (.-X n)))))
+      (case [ir/OINDEX]
+        (let [n (assert (* ir/IndexExpr) n)]
+          (.discard e (.-Index n))
+          (if (.IsArray (.Type (.-X n)))
+            (set! k (.addr e (.-X n)))
+
+            (.mutate e (.-X n)))))
+
+      (case [ir/ODEREF]
+        (let [n (assert (* ir/StarExpr) n)]
+          (.mutate e (.-X n))))
+      (case [ir/ODOTPTR]
+        (let [n (assert (* ir/SelectorExpr) n)]
+          (.mutate e (.-X n))))
+      (case [ir/OINDEXMAP]
+        (let [n (assert (* ir/IndexExpr) n)]
+          (.discard e (.-X n))
+          ;; Keys used in map assignments must escape.
+          ;; See "Hashing Pointers" doc in internal/runtime/maps/map.go.
+          (.assignHeap e (.-Index n) "key of map put" n))))
+
+
+    ^{:line 58} k))
+
+
+^{:go/end 63} (go/method mutate [^{:tag (* escape)} e ^ir/Node n]
+  (.expr e ^{:go/via [batch]} (.mutatorHole e) n))
+
+
+^{:go/end 71} (go/method addrs ^{:tag (slice hole)} [^{:tag (* escape)} e ^ir/Nodes l]
+  (let [^{:tag (slice hole)} ks (zero (slice hole))]
+    (range [_ n l]
+      (set! ks (append ks (.addr e n))))
+
+    ^{:line 70} ks))
+
+
+^{:go/end 75} (go/method assignHeap [^{:tag (* escape)} e ^ir/Node src ^string why ^ir/Node where]
+  (.expr e (.note ^{:go/via [batch]} (.heapHole e) where why) src))
+
+
+
+^{:go/end 107} (go/method assignList "assignList evaluates the assignment dsts... = srcs....\n" [^{:tag (* escape)} e ^{:tag (slice ir/Node)} dsts ^{:tag (slice ir/Node)} srcs ^string why ^ir/Node where]
+  (let [ks (.addrs e dsts)]
+    (range [i k ks]
+      (let [^ir/Node src (zero ir/Node)]
+        (when (< i (len srcs))
+          (set! src (aget srcs i)))
+
+
+        (when [dst (aget dsts i)] (!= dst nil)
+          ;; Detect implicit conversion of uintptr to unsafe.Pointer when
+          ;; storing into reflect.{Slice,String}Header.
+          (when (and (== (.Op dst) ir/ODOTPTR) (ir/IsReflectHeaderDataField dst))
+            (.unsafeValue e (.note ^{:go/via [batch]} (.heapHole e) where why) src)
+            (continue))
+
+
+          ;; Filter out some no-op assignments for escape analysis.
+          (when (and (!= src nil) (isSelfAssign dst src))
+            (when (!= (.-LowerM base/Flag) 0)
+              (base/WarnfAt (.Pos where) "%v ignoring self-assignment in %v" (.-curfn e) where))
+
+            (set! k ^{:go/via [batch]} (.discardHole e))))
+
+
+
+        (.expr e (.note k where why) src)))
+
+
+    (.reassigned e ks where)))
+
+
+
+
+
+^{:go/end 130} (go/method reassigned "reassigned marks the locations associated with the given holes as\nreassigned, unless the location represents a variable declared and\nassigned exactly once by where.\n" [^{:tag (* escape)} e ^{:tag (slice hole)} ks ^ir/Node where]
+  (when [(values as ok) (assert (* ir/AssignStmt) where)] (and ok (== ^{:go/via [miniStmt miniNode]} (.Op as) ir/OAS) (== (.-Y as) nil))
+    (when [(values dst ok) (assert (* ir/Name) (.-X as))] (and ok (== ^{:go/via [miniExpr miniNode]} (.Op dst) ir/ONAME) (== (.-Defn dst) nil))
+      ;; Zero-value assignment for variable declared without an
+      ;; explicit initial value. Assume this is its initialization
+      ;; statement.
+      (return)))
+
+
+
+  (range [_ k ks]
+    (let [loc (.-dst k)]
+      ;; Variables declared by range statements are assigned on every iteration.
+      (when [(values n ok) (assert (* ir/Name) (.-n loc))] (and ok (== (.-Defn n) where) (!= (.Op where) ir/ORANGE))
+        (continue))
+
+      (set! (.-reassigned loc) true))))

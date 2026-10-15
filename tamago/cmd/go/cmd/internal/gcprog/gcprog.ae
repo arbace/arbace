@@ -1,0 +1,246 @@
+;; Copyright 2015 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; Package gcprog implements an encoder for packed GC pointer bitmaps,
+;; known as GC programs.
+;;
+;; # Program Format
+;;
+;; The GC program encodes a sequence of 0 and 1 bits indicating scalar or pointer words in an object.
+;; The encoding is a simple Lempel-Ziv program, with codes to emit literal bits and to repeat the
+;; last n bits c times.
+;;
+;; The possible codes are:
+;;
+;;	00000000: stop
+;;	0nnnnnnn: emit n bits copied from the next (n+7)/8 bytes, least significant bit first
+;;	10000000 n c: repeat the previous n bits c times; n, c are varints
+;;	1nnnnnnn c: repeat the previous n bits c times; c is a varint
+;;
+;; The numbers n and c, when they follow a code, are encoded as varints
+;; using the same encoding as encoding/binary's Uvarint.
+(in-ns 'go.cmd.internal.gcprog) (go/file "gcprog.go" :doc "Package gcprog implements an encoder for packed GC pointer bitmaps,\nknown as GC programs.\n\n# Program Format\n\nThe GC program encodes a sequence of 0 and 1 bits indicating scalar or pointer words in an object.\nThe encoding is a simple Lempel-Ziv program, with codes to emit literal bits and to repeat the\nlast n bits c times.\n\nThe possible codes are:\n\n\t00000000: stop\n\t0nnnnnnn: emit n bits copied from the next (n+7)/8 bytes, least significant bit first\n\t10000000 n c: repeat the previous n bits c times; n, c are varints\n\t1nnnnnnn c: repeat the previous n bits c times; c is a varint\n\nThe numbers n and c, when they follow a code, are encoded as varints\nusing the same encoding as encoding/binary's Uvarint.\n" :imports [
+
+
+    ^{:line 26} [fmt "fmt"]
+    ^{:line 27} [io "io"]])
+
+
+(go/const ^{:val 127} progMaxLiteral 127) ; maximum n for literal n bit code
+
+
+
+
+
+
+(go/type Writer "A Writer is an encoder for GC programs.\n\nThe typical use of a Writer is to call Init, maybe call Debug,\nmake a sequence of Ptr, Advance, Repeat, and Append calls\nto describe the data type, and then finally call End.\n" (struct
+    ^{:line 38 :tag (func [byte])} writeByte
+    ^{:line 39 :tag int64} index
+    ^{:line 40 :tag (array progMaxLiteral byte)} b
+    ^{:line 41 :tag int} nb
+    ^{:line 42 :tag io/Writer} debug
+    ^{:line 43 :tag (slice byte)} debugBuf))
+
+
+
+
+^{:go/end 50} (go/method Init "Init initializes w to write a new GC program\nby calling writeByte for each byte in the program.\n" [^{:tag (* Writer)} w ^{:tag (func [byte])} writeByte]
+  (set! (.-writeByte w) writeByte))
+
+
+
+
+
+^{:go/end 57} (go/method Debug "Debug causes the writer to print a debugging trace to out\nduring future calls to methods like Ptr, Advance, and End.\nIt also enables debugging checks during the encoding.\n" [^{:tag (* Writer)} w ^io/Writer out]
+  (set! (.-debug w) out))
+
+
+
+^{:go/end 65} (go/method byte "byte writes the byte x to the output.\n" [^{:tag (* Writer)} w ^byte x]
+  (when (!= (.-debug w) nil)
+    (set! (.-debugBuf w) (append (.-debugBuf w) x)))
+
+  ((.-writeByte w) x))
+
+
+
+^{:go/end 78} (go/method End "End marks the end of the program, writing any remaining bytes.\n" [^{:tag (* Writer)} w]
+  (.flushlit w)
+  (.byte w 0)
+  (when (!= (.-debug w) nil)
+    (let [index (progbits (.-debugBuf w))]
+      (when (!= index (.-index w))
+        (println "gcprog: End wrote program for" index "bits, but current index is" (.-index w))
+        (panic "gcprog: out of sync")))))
+
+
+
+
+
+
+
+
+^{:go/end 94} (go/method Ptr "Ptr emits a 1 into the bit stream at the given bit index.\nthat is, it records that the index'th word in the object memory is a pointer.\nAny bits between the current index and the new index\nare set to zero, meaning the corresponding words are scalars.\n" [^{:tag (* Writer)} w ^int64 index]
+  (when (< index (.-index w))
+    (println "gcprog: Ptr at index" index "but current index is" (.-index w))
+    (panic "gcprog: invalid Ptr index"))
+
+  (.ZeroUntil w index)
+  (when (!= (.-debug w) nil)
+    (fmt/Fprintf (.-debug w) "gcprog: ptr at %d\n" index))
+
+  (.lit w 1))
+
+
+
+
+^{:go/end 114} (go/method Repeat "Repeat emits an instruction to repeat the description\nof the last n words c times (including the initial description, c+1 times in total).\n" [^{:tag (* Writer)} w ^int64 n ^int64 c]
+  (when (or (== n 0) (== c 0))
+    (return))
+
+  (.flushlit w)
+  (when (!= (.-debug w) nil)
+    (fmt/Fprintf (.-debug w) "gcprog: repeat %d × %d\n" n c))
+
+  (if (< n 128)
+    (.byte w (bit-or 0x80 (conv byte n)))
+    (do
+      (.byte w 0x80)
+      (.varint w n)))
+
+  (.varint w c)
+  (set! (.-index w) + (* n c)))
+
+
+
+
+
+
+^{:go/end 145} (go/method ZeroUntil "ZeroUntil adds zeros to the bit stream until reaching the given index;\nthat is, it records that the words from the most recent pointer until\nthe index'th word are scalars.\nZeroUntil is usually called in preparation for a call to Repeat, Append, or End.\n" [^{:tag (* Writer)} w ^int64 index]
+  (when (< index (.-index w))
+    (println "gcprog: Advance" index "but index is" (.-index w))
+    (panic "gcprog: invalid Advance index"))
+
+  (let [skip (- index (.-index w))]
+    (when (== skip 0)
+      (return))
+
+    (when (< skip (* 4 8))
+      (when (!= (.-debug w) nil)
+        (fmt/Fprintf (.-debug w) "gcprog: advance to %d by literals\n" index))
+
+      (for [i (conv int64 0)] (< i skip) (inc! i)
+        (.lit w 0))
+
+      (return))
+
+
+    (when (!= (.-debug w) nil)
+      (fmt/Fprintf (.-debug w) "gcprog: advance to %d by repeat\n" index))
+
+    (.lit w 0)
+    (.flushlit w)
+    (.Repeat w 1 (- skip 1))))
+
+
+
+^{:go/end 175} (go/func progbits "progbits returns the length of the bit stream encoded by the program p.\n" ^int64 [^{:tag (slice byte)} p]
+  (let [^int64 n (zero int64)]
+    (while (> (len p) 0)
+      (let [x (aget p 0)]
+        (set! p (subslice p 1))
+        (when (== x 0)
+          (break))
+
+        (when (== (bit-and x 0x80) 0)
+          (let [count (bit-and-not x 0x80)]
+            (set! n + (conv int64 count))
+            (set! p (subslice p (/ (+ count 7) 8)))
+            (continue)))
+
+        (let [nbit (conv int64 (bit-and-not x 0x80))]
+          (when (== nbit 0)
+            (set! (values nbit p) (readvarint p)))
+
+          (let [^int64 count (zero int64)]
+            (set! (values count p) (readvarint p))
+            (set! n + (* nbit count))))))
+
+    (when (> (len p) 0)
+      (println "gcprog: found end instruction after" n "ptrs, with" (len p) "bytes remaining")
+      (panic "gcprog: extra data at end of program"))
+
+    ^{:line 174} n))
+
+
+
+^{:go/end 191} (go/func readvarint "readvarint reads a varint from p, returning the value and the remainder of p.\n" [^{:tag (slice byte)} p] :results [int64 (slice byte)]
+  (let [^int64 v (zero int64)
+      ^{:line 180 :tag uint} nb (zero uint)]
+    (while true
+      (let [c (aget p 0)]
+        (set! p (subslice p 1))
+        (set! v bit-or (<< (conv int64 (bit-and-not c 0x80)) nb))
+        (set! nb + 7)
+        (when (== (bit-and c 0x80) 0)
+          (break))))
+
+
+    (return v p)))
+
+
+
+^{:go/end 201} (go/method lit "lit adds a single literal bit to w.\n" [^{:tag (* Writer)} w ^byte x]
+  (when (== (.-nb w) progMaxLiteral)
+    (.flushlit w))
+
+  (aset (.-b w) (.-nb w) x)
+  (inc! (.-nb w))
+  (inc! (.-index w)))
+
+
+
+^{:go/end 213} (go/method varint "varint emits the varint encoding of x.\n" [^{:tag (* Writer)} w ^int64 x]
+  (when (< x 0)
+    (panic "gcprog: negative varint"))
+
+  (while (>= x 0x80)
+    (.byte w (conv byte (bit-or 0x80 x)))
+    (set! x >> 7))
+
+  (.byte w (conv byte x)))
+
+
+
+^{:go/end 247} (go/method flushlit "flushlit flushes any pending literal bits.\n" [^{:tag (* Writer)} w]
+  (when (== (.-nb w) 0)
+    (return))
+
+  (when (!= (.-debug w) nil)
+    (fmt/Fprintf (.-debug w) "gcprog: flush %d literals\n" (.-nb w))
+    (fmt/Fprintf (.-debug w) "\t%v\n" (subslice (.-b w) _ (.-nb w)))
+    (fmt/Fprintf (.-debug w) "\t%02x" (conv byte (.-nb w))))
+
+  (.byte w (conv byte (.-nb w)))
+  (let [^uint8 bits (zero uint8)]
+    (for [i 0] (< i (.-nb w)) (inc! i)
+      (set! bits bit-or (<< (aget (.-b w) i) (conv uint (% i 8))))
+      (when (== (% (+ i 1) 8) 0)
+        (when (!= (.-debug w) nil)
+          (fmt/Fprintf (.-debug w) " %02x" bits))
+
+        (.byte w bits)
+        (set! bits 0)))
+
+
+    (when (!= (% (.-nb w) 8) 0)
+      (when (!= (.-debug w) nil)
+        (fmt/Fprintf (.-debug w) " %02x" bits))
+
+      (.byte w bits))
+
+    (when (!= (.-debug w) nil)
+      (fmt/Fprintf (.-debug w) "\n"))
+
+    (set! (.-nb w) 0)))

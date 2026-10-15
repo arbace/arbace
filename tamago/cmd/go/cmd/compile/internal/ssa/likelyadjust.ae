@@ -1,0 +1,423 @@
+;; Copyright 2016 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.cmd.compile.internal.ssa) (go/file "likelyadjust.go" :imports [
+
+
+    ^{:line 8} [fmt "fmt"]])
+
+
+(go/type loop (struct
+    ^{:line 12 :tag (* Block)} header ; The header node of this (reducible) loop
+    ^{:line 13 :tag (* loop)} outer ; loop containing this loop
+
+
+
+    ^{:line 17 :tag int32 :doc "Next three fields used by regalloc and/or\naid in computation of inner-ness and list of blocks.\n"} nBlocks ; Number of blocks in this loop but not within inner loops
+    ^{:line 18 :tag int16} depth ; Nesting depth of the loop; 1 is outermost.
+    ^{:line 19 :tag bool} isInner ; True if never discovered to contain a loop
+
+
+
+    ^{:line 23 :tag bool :doc "True if all paths through the loop have a call.\nComputed and used by regalloc; stored here for convenience.\n"} containsUnavoidableCall))
+
+
+
+^{:go/end 47} (go/method outerinner "outerinner records that outer contains inner\n" [^SparseTree sdom ^{:tag (* loop)} outer ^{:tag (* loop)} inner]
+  ;; There could be other outer loops found in some random order,
+  ;; locate the new outer loop appropriately among them.
+
+  ;; Outer loop headers dominate inner loop headers.
+  ;; Use this to put the "new" "outer" loop in the right place.
+  (let [oldouter (.-outer inner)]
+    (while (and (!= oldouter nil) (.isAncestor sdom (.-header outer) (.-header oldouter)))
+      (set! inner oldouter)
+      (set! oldouter (.-outer inner)))
+
+    (when (== outer oldouter)
+      (return))
+
+    (when (!= oldouter nil)
+      (.outerinner sdom oldouter outer))
+
+
+    (set! (.-outer inner) outer)
+    (set! (.-isInner outer) false)))
+
+
+(go/type loopnest (struct
+    ^{:line 50 :tag (* Func)} f
+    ^{:line 51 :tag (slice (* loop))} b2l
+    ^{:line 52 :tag (slice (* Block))} po
+    ^{:line 53 :tag SparseTree} sdom
+    ^{:line 54 :tag (slice (* loop))} loops
+    ^{:line 55 :tag bool} hasIrreducible)) ; TODO current treatment of irreducible loops is very flaky, if accurate loops are needed, must punt at function level.
+
+
+(go/const
+  ^{:line 59} [^{:val 0} blDEFAULT 0]
+  ^{:line 60} [^{:val 0} blMin blDEFAULT]
+  ^{:line 61} [^{:val 1} blCALL 1]
+  ^{:line 62} [^{:val 2} blRET 2]
+  ^{:line 63} [^{:val 3} blEXIT 3])
+
+
+(go/var bllikelies (lit (array 4 string) "default" "call" "ret" "exit"))
+
+^{:go/end 76} (go/func describePredictionAgrees ^string [^{:tag (* Block)} b ^BranchPrediction prediction]
+  (let [s ""]
+    (cond (== prediction (.-Likely b))
+      (set! s " (agrees with previous)")
+      (!= (.-Likely b) BranchUnknown)
+      (set! s " (disagrees with previous, ignored)"))
+
+    ^{:line 75} s))
+
+
+^{:go/end 81} (go/func describeBranchPrediction [^{:tag (* Func)} f ^{:tag (* Block)} b ^int8 likely ^int8 not ^BranchPrediction prediction]
+  (.Warnl f (.-Pos b) "Branch prediction rule %s < %s%s"
+    (aget bllikelies (- likely blMin)) (aget bllikelies (- not blMin)) (describePredictionAgrees b prediction)))
+
+
+^{:go/end 204} (go/func likelyadjust [^{:tag (* Func)} f]
+  ;; The values assigned to certain and local only matter
+  ;; in their rank order.  0 is default, more positive
+  ;; is less likely. It's possible to assign a negative
+  ;; unlikeliness (though not currently the case).
+  (let [certain (.allocInt8Slice (.-Cache f) (.NumBlocks f))] ; In the long run, all outcomes are at least this bad. Mainly for Exit
+    (defer (.freeInt8Slice (.-Cache f) certain))
+    (let [local (.allocInt8Slice (.-Cache f) (.NumBlocks f))] ; for our immediate predecessors.
+      (defer (.freeInt8Slice (.-Cache f) local))
+
+      (let [po (.postorder f)
+          ^{:line 94} nest (.loopnest f)
+          ^{:line 95} b2l (.-b2l nest)]
+
+        (range [_ b po]
+          (switch (.-Kind b)
+            (case [BlockExit]
+              ;; Very unlikely.
+              (aset local (.-ID b) blEXIT)
+              (aset certain (.-ID b) blEXIT))
+
+            ;; Ret, it depends.
+            (case [BlockRet BlockRetJmp]
+              (aset local (.-ID b) blRET)
+              (aset certain (.-ID b) blRET))
+
+            ;; Calls. TODO not all calls are equal, names give useful clues.
+            ;; Any name-based heuristics are only relative to other calls,
+            ;; and less influential than inferences from loop structure.
+            (case [BlockDefer]
+              (aset local (.-ID b) blCALL)
+              (aset certain (.-ID b) (max blCALL (aget certain (.-ID (.-b (aget (.-Succs b) 0)))))))
+
+            (default
+              (cond (== (len (.-Succs b)) 1)
+                (aset certain (.-ID b) (aget certain (.-ID (.-b (aget (.-Succs b) 0)))))
+                (== (len (.-Succs b)) 2)
+                ;; If successor is an unvisited backedge, it's in loop and we don't care.
+                ;; Its default unlikely is also zero which is consistent with favoring loop edges.
+                ;; Notice that this can act like a "reset" on unlikeliness at loops; the
+                ;; default "everything returns" unlikeliness is erased by min with the
+                ;; backedge likeliness; however a loop with calls on every path will be
+                ;; tagged with call cost. Net effect is that loop entry is favored.
+                (let [b0 (.-ID (.-b (aget (.-Succs b) 0)))
+                    ^{:line 127} b1 (.-ID (.-b (aget (.-Succs b) 1)))]
+                  (aset certain (.-ID b) (min (aget certain b0) (aget certain b1)))
+
+                  (let [l (aget b2l (.-ID b))
+                      ^{:line 131} l0 (aget b2l b0)
+                      ^{:line 132} l1 (aget b2l b1)
+
+                      ^{:line 134} prediction (.-Likely b)]
+                    ;; Weak loop heuristic -- both source and at least one dest are in loops,
+                    ;; and there is a difference in the destinations.
+                    ;; TODO what is best arrangement for nested loops?
+                    (if (and (!= l nil) (!= l0 l1))
+                      (let [noprediction false]
+                        (switch
+                          ;; prefer not to exit loops
+                          (case [(== l1 nil)]
+                            (set! prediction BranchLikely))
+                          (case [(== l0 nil)]
+                            (set! prediction BranchUnlikely))
+
+                          ;; prefer to stay in loop, not exit to outer.
+                          (case [(== l l0)]
+                            (set! prediction BranchLikely))
+                          (case [(== l l1)]
+                            (set! prediction BranchUnlikely))
+                          (default
+                            (set! noprediction true)))
+
+                        (when (and (> (.-debug (.-pass f)) 0) (not noprediction))
+                          (.Warnl f (.-Pos b) "Branch prediction rule stay in loop%s"
+                            (describePredictionAgrees b prediction))))
+
+
+                      (do
+                        ;; Lacking loop structure, fall back on heuristics.
+                        (cond (> (aget certain b1) (aget certain b0)) (do
+                            (set! prediction BranchLikely)
+                            (when (> (.-debug (.-pass f)) 0)
+                              (describeBranchPrediction f b (aget certain b0) (aget certain b1) prediction)))
+
+                          (> (aget certain b0) (aget certain b1)) (do
+                            (set! prediction BranchUnlikely)
+                            (when (> (.-debug (.-pass f)) 0)
+                              (describeBranchPrediction f b (aget certain b1) (aget certain b0) prediction)))
+
+                          (> (aget local b1) (aget local b0)) (do
+                            (set! prediction BranchLikely)
+                            (when (> (.-debug (.-pass f)) 0)
+                              (describeBranchPrediction f b (aget local b0) (aget local b1) prediction)))
+
+                          (> (aget local b0) (aget local b1)) (do
+                            (set! prediction BranchUnlikely)
+                            (when (> (.-debug (.-pass f)) 0)
+                              (describeBranchPrediction f b (aget local b1) (aget local b0) prediction))))))
+
+
+
+                    (when (!= (.-Likely b) prediction)
+                      (when (== (.-Likely b) BranchUnknown)
+                        (set! (.-Likely b) prediction))))))
+
+
+
+              ;; Look for calls in the block.  If there is one, make this block unlikely.
+              (range [_ v (.-Values b)]
+                (when (.-call (aget opcodeTable (.-Op v)))
+                  (aset local (.-ID b) blCALL)
+                  (aset certain (.-ID b) (max blCALL (aget certain (.-ID (.-b (aget (.-Succs b) 0))))))
+                  (break)))))
+
+
+
+          (when (> (.-debug (.-pass f)) 2)
+            (.Warnl f (.-Pos b) "BP: Block %s, local=%s, certain=%s" b (aget bllikelies (- (aget local (.-ID b)) blMin)) (aget bllikelies (- (aget certain (.-ID b)) blMin)))))))))
+
+
+
+
+
+^{:go/end 208} (go/method String ^string [^{:tag (* loop)} l]
+  (fmt/Sprintf "hdr:%s" (.-header l)))
+
+
+^{:go/end 220} (go/method LongString ^string [^{:tag (* loop)} l]
+  (let [i ""
+      ^{:line 212} o ""]
+    (when (.-isInner l)
+      (set! i ", INNER"))
+
+    (when (!= (.-outer l) nil)
+      (set! o (+ ", o=" (.String (.-header (.-outer l))))))
+
+    (fmt/Sprintf "hdr:%s%s%s" (.-header l) i o)))
+
+
+^{:go/breaks [[5 231]] :go/end 232} (go/method isWithinOrEq ^bool [^{:tag (* loop)} l ^{:tag (* loop)} ll]
+  (when (== ll nil) ; nil means whole program
+    (return true))
+
+  (for [] (!= l nil) (set! l (.-outer l))
+    (when (== l ll)
+      (return true)))
+
+
+  false)
+
+
+
+
+
+
+^{:go/end 243} (go/method nearestOuterLoop "nearestOuterLoop returns the outer loop of loop most nearly\ncontaining block b; the header must dominate b.  loop itself\nis assumed to not be that loop. For acceptable performance,\nwe're relying on loop nests to not be terribly deep.\n" ^{:tag (* loop)} [^{:tag (* loop)} l ^SparseTree sdom ^{:tag (* Block)} b]
+  (let [^{:tag (* loop)} o (zero (* loop))]
+    (for [(set! o (.-outer l))] (and (!= o nil) (not (.IsAncestorEq sdom (.-header o) b))) (set! o (.-outer o)))
+
+    ^{:line 242} o))
+
+
+^{:go/end 416} (go/func loopnestfor ^{:tag (* loopnest)} [^{:tag (* Func)} f]
+  (let [po (.postorder f)
+      ^{:line 247} sdom (.Sdom f)
+      ^{:line 248} b2l (make (slice (* loop)) (.NumBlocks f))
+      ^{:line 249} loops (make (slice (* loop)) 0)
+      ^{:line 250} visited (.allocBoolSlice (.-Cache f) (.NumBlocks f))]
+    (defer (.freeBoolSlice (.-Cache f) visited))
+    (let [sawIrred false]
+
+      (when (> (.-debug (.-pass f)) 2)
+        (fmt/Printf "loop finding in %s\n" (.-Name f)))
+
+
+      ;; Reducible-loop-nest-finding.
+      (range [_ b po]
+        (when (and (!= (.-pass f) nil) (> (.-debug (.-pass f)) 3))
+          (fmt/Printf "loop finding at %s\n" b))
+
+
+        (let [^{:tag (* loop)} innermost (zero (* loop))] ; innermost header reachable from this block
+
+          ;; IF any successor s of b is in a loop headed by h
+          ;; AND h dominates b
+          ;; THEN b is in the loop headed by h.
+          ;;
+          ;; Choose the first/innermost such h.
+          ;;
+          ;; IF s itself dominates b, then s is a loop header;
+          ;; and there may be more than one such s.
+          ;; Since there's at most 2 successors, the inner/outer ordering
+          ;; between them can be established with simple comparisons.
+          (range [_ e (.-Succs b)]
+            (let [bb (.-b e)
+                ^{:line 278} l (aget b2l (.-ID bb))]
+
+              (cond (.IsAncestorEq sdom bb b) (do ; Found a loop header
+                  (when (and (!= (.-pass f) nil) (> (.-debug (.-pass f)) 4))
+                    (fmt/Printf "loop finding    succ %s of %s is header\n" (.String bb) (.String b)))
+
+                  (when (== l nil)
+                    (set! l (addr (lit loop :header bb :isInner true)))
+                    (set! loops (append loops l))
+                    (aset b2l (.-ID bb) l)))
+
+                (not (aget visited (.-ID bb))) (do ; Found an irreducible loop
+                  (set! sawIrred true)
+                  (when (and (!= (.-pass f) nil) (> (.-debug (.-pass f)) 4))
+                    (fmt/Printf "loop finding    succ %s of %s is IRRED, in %s\n" (.String bb) (.String b) (.-Name f))))
+
+                (!= l nil) (do
+                  ;; TODO handle case where l is irreducible.
+                  ;; Perhaps a loop header is inherited.
+                  ;; is there any loop containing our successor whose
+                  ;; header dominates b?
+                  (when (not (.IsAncestorEq sdom (.-header l) b))
+                    (set! l (.nearestOuterLoop l sdom b)))
+
+                  (when (and (!= (.-pass f) nil) (> (.-debug (.-pass f)) 4))
+                    (if (== l nil)
+                      (fmt/Printf "loop finding    succ %s of %s has no loop\n" (.String bb) (.String b))
+
+                      (fmt/Printf "loop finding    succ %s of %s provides loop with header %s\n" (.String bb) (.String b) (.String (.-header l)))))) :else
+
+
+                (do ; No loop
+                  (when (and (!= (.-pass f) nil) (> (.-debug (.-pass f)) 4))
+                    (fmt/Printf "loop finding    succ %s of %s has no loop\n" (.String bb) (.String b)))))
+
+
+
+
+              (when (or (== l nil) (== innermost l))
+                (continue))
+
+
+              (when (== innermost nil)
+                (set! innermost l)
+                (continue))
+
+
+              (cond (.isAncestor sdom (.-header innermost) (.-header l)) (do
+                  (.outerinner sdom innermost l)
+                  (set! innermost l))
+                (.isAncestor sdom (.-header l) (.-header innermost))
+                (.outerinner sdom l innermost))))
+
+
+
+          (when (!= innermost nil)
+            (aset b2l (.-ID b) innermost)
+            (inc! (.-nBlocks innermost)))
+
+          (aset visited (.-ID b) true)))
+
+
+      ;; Compute depths.
+      (range [_ l loops]
+        (when (!= (.-depth l) 0)
+          ;; Already computed because it is an ancestor of
+          ;; a previous loop.
+          (continue))
+
+        ;; Find depth by walking up the loop tree.
+        (let [d (conv int16 0)]
+          (for [x l] (!= x nil) (set! x (.-outer x))
+            (when (!= (.-depth x) 0)
+              (set! d + (.-depth x))
+              (break))
+
+            (inc! d))
+
+          ;; Set depth for every ancestor.
+          (for [x l] (!= x nil) (set! x (.-outer x))
+            (when (!= (.-depth x) 0)
+              (break))
+
+            (set! (.-depth x) d)
+            (dec! d))))
+
+
+      ;; Double-check depths.
+      (range [_ l loops]
+        (let [want (conv int16 1)]
+          (when (!= (.-outer l) nil)
+            (set! want (+ (.-depth (.-outer l)) 1)))
+
+          (when (!= (.-depth l) want)
+            (.Fatalf (.-header l) "bad depth calculation for loop %s: got %d want %d" (.-header l) (.-depth l) want))))
+
+
+
+      (let [ln (addr (lit loopnest :f f :b2l b2l :po po :sdom sdom :loops loops :hasIrreducible sawIrred))]
+
+        ;; Curious about the loopiness? "-d=ssa/likelyadjust/stats"
+        (when (and (!= (.-pass f) nil) (> (.-stats (.-pass f)) 0) (> (len loops) 0))
+
+          ;; Note stats for non-innermost loops are slightly flawed because
+          ;; they don't account for inner loop exits that span multiple levels.
+
+          (range [_ l loops]
+            (let [inner 0]
+              (when (.-isInner l)
+                (inc! inner))
+
+
+              (.LogStat f (+ "loopstats in " (.-Name f) ":")
+                (.-depth l) "depth"
+                ^{:line 392} inner "is_inner" (.-nBlocks l) "n_blocks"))))
+
+
+
+        (when (and (!= (.-pass f) nil) (> (.-debug (.-pass f)) 1) (> (len loops) 0))
+          (fmt/Printf "Loops in %s:\n" (.-Name f))
+          (range [_ l loops]
+            (fmt/Printf "%s, b=" (.LongString l))
+            (range [_ b (.-Blocks f)]
+              (when (== (aget b2l (.-ID b)) l)
+                (fmt/Printf " %s" b)))
+
+
+            (fmt/Print "\n"))
+
+          (fmt/Printf "Nonloop blocks in %s:" (.-Name f))
+          (range [_ b (.-Blocks f)]
+            (when (== (aget b2l (.-ID b)) nil)
+              (fmt/Printf " %s" b)))
+
+
+          (fmt/Print "\n"))
+
+        ^{:line 415} ln))))
+
+
+
+^{:go/breaks [[5 423]] :go/end 424} (go/method depth "depth returns the loop nesting level of block b.\n" ^int16 [^{:tag (* loopnest)} ln ^ID b]
+  (when [l (aget (.-b2l ln) b)] (!= l nil)
+    (return (.-depth l)))
+
+  0)

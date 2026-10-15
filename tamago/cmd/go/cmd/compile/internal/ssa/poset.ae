@@ -1,0 +1,1149 @@
+;; Copyright 2018 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.cmd.compile.internal.ssa) (go/file "poset.go" :imports [
+
+
+    ^{:line 8} [fmt "fmt"]
+    ^{:line 9} [os "os"]
+    ^{:line 10} [slices "slices"]])
+
+
+
+(go/var ^{:doc "If true, check poset integrity after every mutation\n"} debugPoset false)
+
+(go/const ^{:val 64} uintSize (<< 32 (>> (bit-not (conv uint 0)) 63))) ; 32 or 64
+
+
+(go/type bitset "bitset is a bit array for dense indexes.\n" (slice uint))
+
+^{:go/end 23} (go/func computeBitsetSize ^int [^int n]
+  (/ (- (+ n uintSize) 1) uintSize))
+
+
+^{:go/end 27} (go/func newBitset ^bitset [^int n]
+  (make bitset (computeBitsetSize n)))
+
+
+^{:go/end 31} (go/method allocBitset ^bitset [^{:tag (* Cache)} c ^int n]
+  (conv bitset (.allocUintSlice c (computeBitsetSize n))))
+
+
+^{:go/end 35} (go/method freeBitset [^{:tag (* Cache)} c ^bitset bs]
+  (.freeUintSlice c (conv (slice uint) bs)))
+
+
+^{:go/end 39} (go/method Reset [^bitset bs]
+  (clear bs))
+
+
+^{:go/end 43} (go/method Set [^bitset bs ^uint32 idx]
+  (set! (aget bs (/ idx uintSize)) bit-or ^uint (<< 1 (% idx uintSize))))
+
+
+^{:go/end 47} (go/method Clear [^bitset bs ^uint32 idx]
+  (set! (aget bs (/ idx uintSize)) bit-and-not ^uint (<< 1 (% idx uintSize))))
+
+
+^{:go/end 51} (go/method Test ^bool [^bitset bs ^uint32 idx]
+  (!= (bit-and (aget bs (/ idx uintSize)) ^uint (<< 1 (% idx uintSize))) 0))
+
+
+(go/type undoType uint8)
+
+(go/const
+  ^{:line 56} [^{:tag undoType :val 0} undoInvalid iota]
+  ^{:line 57} [^{:val 1} undoCheckpoint] ; a checkpoint to group undo passes
+  ^{:line 58} [^{:val 2} undoSetChl] ; change back left child of undo.idx to undo.edge
+  ^{:line 59} [^{:val 3} undoSetChr] ; change back right child of undo.idx to undo.edge
+  ^{:line 60} [^{:val 4} undoNonEqual] ; forget that SSA value undo.ID is non-equal to undo.idx (another ID)
+  ^{:line 61} [^{:val 5} undoNewNode] ; remove new node created for SSA value undo.ID
+  ^{:line 62} [^{:val 6} undoAliasNode] ; unalias SSA value undo.ID so that it points back to node index undo.idx
+  ^{:line 63} [^{:val 7} undoNewRoot] ; remove node undo.idx from root list
+  ^{:line 64} [^{:val 8} undoChangeRoot] ; remove node undo.idx from root list, and put back undo.edge.Target instead
+  ^{:line 65} [^{:val 9} undoMergeRoot]) ; remove node undo.idx from root list, and put back its children instead
+
+
+
+
+
+
+(go/type posetUndo "posetUndo represents an undo pass to be performed.\nIt's a union of fields that can be used to store information,\nand typ is the discriminant, that specifies which kind\nof operation must be performed. Not all fields are always used.\n" (struct
+    ^{:line 73 :tag undoType} typ
+    ^{:line 74 :tag uint32} idx
+    ^{:line 75 :tag ID} ID
+    ^{:line 76 :tag posetEdge} edge))
+
+
+(go/const
+
+
+  ^{:line 82} [^{:val 1 :doc "Make poset handle values as unsigned numbers.\n(TODO: remove?)\n"} posetFlagUnsigned (<< 1 iota)])
+
+
+
+
+(go/type posetEdge "A poset edge. The zero value is the null/empty edge.\nPacks target node index (31 bits) and strict flag (1 bit).\n" uint32)
+
+^{:go/end 95} (go/func newedge ^posetEdge [^uint32 t ^bool strict]
+  (let [s (conv uint32 0)]
+    (when strict
+      (set! s 1))
+
+    (conv posetEdge (bit-or (<< t 1) s))))
+
+^{:go/end 96} (go/method Target ^uint32 [^posetEdge e] (>> (conv uint32 e) 1))
+^{:go/end 97} (go/method Strict ^bool [^posetEdge e] (!= (bit-and (conv uint32 e) 1) 0))
+^{:go/end 104} (go/method String ^string [^posetEdge e]
+  (let [s (fmt/Sprint (.Target e))]
+    (when (.Strict e)
+      (set! s + "*"))
+
+    ^{:line 103} s))
+
+
+
+(go/type posetNode "posetNode is a node of a DAG within the poset.\n" (struct
+    ^{:line 108 :tag posetEdge} l ^posetEdge r))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+(go/type poset "poset is a union-find data structure that can represent a partially ordered set\nof SSA values. Given a binary relation that creates a partial order (eg: '<'),\nclients can record relations between SSA values using SetOrder, and later\ncheck relations (in the transitive closure) with Ordered. For instance,\nif SetOrder is called to record that A<B and B<C, Ordered will later confirm\nthat A<C.\n\nIt is possible to record equality relations between SSA values with SetEqual and check\nequality with Equal. Equality propagates into the transitive closure for the partial\norder so that if we know that A<B<C and later learn that A==D, Ordered will return\ntrue for D<C.\n\nIt is also possible to record inequality relations between nodes with SetNonEqual;\nnon-equality relations are not transitive, but they can still be useful: for instance\nif we know that A<=B and later we learn that A!=B, we can deduce that A<B.\nNonEqual can be used to check whether it is known that the nodes are different, either\nbecause SetNonEqual was called before, or because we know that they are strictly ordered.\n\nposet will refuse to record new relations that contradict existing relations:\nfor instance if A<B<C, calling SetOrder for C<A will fail returning false; also\ncalling SetEqual for C==A will fail.\n\nposet is implemented as a forest of DAGs; in each DAG, if there is a path (directed)\nfrom node A to B, it means that A<B (or A<=B). Equality is represented by mapping\ntwo SSA values to the same DAG node; when a new equality relation is recorded\nbetween two existing nodes, the nodes are merged, adjusting incoming and outgoing edges.\n\nposet is designed to be memory efficient and do little allocations during normal usage.\nMost internal data structures are pre-allocated and flat, so for instance adding a\nnew relation does not cause any allocation. For performance reasons,\neach node has only up to two outgoing edges (like a binary tree), so intermediate\n\"extra\" nodes are required to represent more than two relations. For instance,\nto record that A<I, A<J, A<K (with no known relation between I,J,K), we create the\nfollowing DAG:\n\n\t  A\n\t / \\\n\tI  extra\n\t    /  \\\n\t   J    K\n" (struct
+    ^{:line 152 :tag uint32} lastidx ; last generated dense index
+    ^{:line 153 :tag uint8} flags ; internal flags
+    ^{:line 154 :tag (map ID uint32)} values ; map SSA values to dense indexes
+    ^{:line 155 :tag (slice posetNode)} nodes ; nodes (in all DAGs)
+    ^{:line 156 :tag (slice uint32)} roots ; list of root nodes (forest)
+    ^{:line 157 :tag (map uint32 bitset)} noneq ; non-equal relations
+    ^{:line 158 :tag (slice posetUndo)} undo)) ; undo chain
+
+
+^{:go/end 169} (go/func newPoset ^{:tag (* poset)} []
+  (addr ^{:go/breaks [2 4 6 8 10]} (lit poset
+      :values (make (map ID uint32))
+      :nodes (make (slice posetNode) 1 16)
+      :roots (make (slice uint32) 0 4)
+      :noneq (make (map uint32 bitset))
+      :undo (make (slice posetUndo) 0 4))))
+
+
+
+^{:go/end 177} (go/method SetUnsigned [^{:tag (* poset)} po ^bool uns]
+  (if uns
+    (set! (.-flags po) bit-or posetFlagUnsigned)
+
+    (set! (.-flags po) bit-and-not posetFlagUnsigned)))
+
+
+
+
+^{:go/end 180} (go/method setchl "Handle children\n" [^{:tag (* poset)} po ^uint32 i ^posetEdge l] (set! (.-l (aget (.-nodes po) i)) l))
+^{:go/end 181} (go/method setchr [^{:tag (* poset)} po ^uint32 i ^posetEdge r] (set! (.-r (aget (.-nodes po) i)) r))
+^{:go/end 182} (go/method chl ^uint32 [^{:tag (* poset)} po ^uint32 i] (.Target (.-l (aget (.-nodes po) i))))
+^{:go/end 183} (go/method chr ^uint32 [^{:tag (* poset)} po ^uint32 i] (.Target (.-r (aget (.-nodes po) i))))
+^{:go/end 186} (go/method children [^{:tag (* poset)} po ^uint32 i] :results [posetEdge posetEdge]
+  (return (.-l (aget (.-nodes po) i)) (.-r (aget (.-nodes po) i))))
+
+
+
+
+^{:go/end 192} (go/method upush "upush records a new undo step. It can be used for simple\nundo passes that record up to one index and one edge.\n" [^{:tag (* poset)} po ^undoType typ ^uint32 p ^posetEdge e]
+  (set! (.-undo po) (append (.-undo po) (lit posetUndo :typ typ :idx p :edge e))))
+
+
+
+^{:go/end 197} (go/method upushnew "upushnew pushes an undo pass for a new node\n" [^{:tag (* poset)} po ^ID id ^uint32 idx]
+  (set! (.-undo po) (append (.-undo po) (lit posetUndo :typ undoNewNode :ID id :idx idx))))
+
+
+
+^{:go/end 202} (go/method upushneq "upushneq pushes a new undo pass for a nonequal relation\n" [^{:tag (* poset)} po ^uint32 idx1 ^uint32 idx2]
+  (set! (.-undo po) (append (.-undo po) (lit posetUndo :typ undoNonEqual :ID (conv ID idx1) :idx idx2))))
+
+
+
+^{:go/end 207} (go/method upushalias "upushalias pushes a new undo pass for aliasing two nodes\n" [^{:tag (* poset)} po ^ID id ^uint32 i2]
+  (set! (.-undo po) (append (.-undo po) (lit posetUndo :typ undoAliasNode :ID id :idx i2))))
+
+
+
+^{:go/end 246} (go/method addchild "addchild adds i2 as direct child of i1.\n" [^{:tag (* poset)} po ^uint32 i1 ^uint32 i2 ^bool strict]
+  (let [(values i1l i1r) (.children po i1)
+      ^{:line 212} e2 (newedge i2 strict)]
+
+    (cond (== i1l 0) (do
+        (.setchl po i1 e2)
+        (.upush po undoSetChl i1 0))
+      (== i1r 0) (do
+        (.setchr po i1 e2)
+        (.upush po undoSetChr i1 0)) :else
+
+      ;; If n1 already has two children, add an intermediate extra
+      ;; node to record the relation correctly (without relating
+      ;; n2 to other existing nodes). Use a non-deterministic value
+      ;; to decide whether to append on the left or the right, to avoid
+      ;; creating degenerated chains.
+      ;;
+      ;;      n1
+      ;;     /  \
+      ;;   i1l  extra
+      ;;        /   \
+      ;;      i1r   n2
+      ;;
+      (let [extra (.newnode po nil)]
+        (if (!= (bit-and (bit-xor i1 i2) 1) 0) (do ; non-deterministic
+            (.setchl po extra i1r)
+            (.setchr po extra e2)
+            (.setchr po i1 (newedge extra false))
+            (.upush po undoSetChr i1 i1r))
+          (do
+            (.setchl po extra i1l)
+            (.setchr po extra e2)
+            (.setchl po i1 (newedge extra false))
+            (.upush po undoSetChl i1 i1l)))))))
+
+
+
+
+
+
+^{:go/end 264} (go/method newnode "newnode allocates a new node bound to SSA value n.\nIf n is nil, this is an extra node (= only used internally).\n" ^uint32 [^{:tag (* poset)} po ^{:tag (* Value)} n]
+  (let [i (+ (.-lastidx po) 1)]
+    (inc! (.-lastidx po))
+    (set! (.-nodes po) (append (.-nodes po) (lit posetNode)))
+    (if (!= n nil) (do
+        (when (!= (aget (.-values po) (.-ID n)) 0)
+          (panic "newnode for Value already inserted"))
+
+        (aset (.-values po) (.-ID n) i)
+        (.upushnew po (.-ID n) i))
+
+      (.upushnew po 0 i))
+
+    ^{:line 263} i))
+
+
+
+^{:go/end 270} (go/method lookup "lookup searches for a SSA value into the forest of DAGS, and return its node.\n" [^{:tag (* poset)} po ^{:tag (* Value)} n] :results [uint32 bool]
+  (let [(values i f) (aget (.-values po) (.-ID n))]
+    (return i f)))
+
+
+
+
+^{:go/end 282} (go/method aliasnewnode "aliasnewnode records that a single node n2 (not in the poset yet) is an alias\nof the master node n1.\n" [^{:tag (* poset)} po ^{:tag (* Value)} n1 ^{:tag (* Value)} n2]
+  (let [(values i1 i2) (values (aget (.-values po) (.-ID n1)) (aget (.-values po) (.-ID n2)))]
+    (when (or (== i1 0) (!= i2 0))
+      (panic "aliasnewnode invalid arguments"))
+
+
+    (aset (.-values po) (.-ID n2) i1)
+    (.upushalias po (.-ID n2) 0)))
+
+
+
+
+
+
+
+^{:go/end 340} (go/method aliasnodes "aliasnodes records that all the nodes i2s are aliases of a single master node n1.\naliasnodes takes care of rearranging the DAG, changing references of parent/children\nof nodes in i2s, so that they point to n1 instead.\nComplexity is O(n) (with n being the total number of nodes in the poset, not just\nthe number of nodes being aliased).\n" [^{:tag (* poset)} po ^{:tag (* Value)} n1 ^bitset i2s]
+  (let [i1 (aget (.-values po) (.-ID n1))]
+    (when (== i1 0)
+      (panic "aliasnode for non-existing node"))
+
+    (when (.Test i2s i1)
+      (panic "aliasnode i2s contains n1 node"))
+
+
+    ;; Go through all the nodes to adjust parent/chidlren of nodes in i2s
+    (range [idx n (.-nodes po)]
+      ;; Do not touch i1 itself, otherwise we can create useless self-loops
+      (when (== (conv uint32 idx) i1)
+        (continue))
+
+      (let [(values l r) (values (.-l n) (.-r n))]
+
+        ;; Rename all references to i2s into i1
+        (when (.Test i2s (.Target l))
+          (.setchl po (conv uint32 idx) (newedge i1 (.Strict l)))
+          (.upush po undoSetChl (conv uint32 idx) l))
+
+        (when (.Test i2s (.Target r))
+          (.setchr po (conv uint32 idx) (newedge i1 (.Strict r)))
+          (.upush po undoSetChr (conv uint32 idx) r))
+
+
+        ;; Connect all children of i2s to i1 (unless those children
+        ;; are in i2s as well, in which case it would be useless)
+        (when (.Test i2s (conv uint32 idx))
+          (when (and (!= l 0) (not (.Test i2s (.Target l))))
+            (.addchild po i1 (.Target l) (.Strict l)))
+
+          (when (and (!= r 0) (not (.Test i2s (.Target r))))
+            (.addchild po i1 (.Target r) (.Strict r)))
+
+          (.setchl po (conv uint32 idx) 0)
+          (.setchr po (conv uint32 idx) 0)
+          (.upush po undoSetChl (conv uint32 idx) l)
+          (.upush po undoSetChr (conv uint32 idx) r))))
+
+
+
+    ;; Reassign all existing IDs that point to i2 to i1.
+    ;; This includes n2.ID.
+    (range [k v (.-values po)]
+      (when (.Test i2s v)
+        (aset (.-values po) k i1)
+        (.upushalias po k v)))))
+
+
+
+
+^{:go/breaks [[4 348]] :go/end 349} (go/method isroot ^bool [^{:tag (* poset)} po ^uint32 r]
+  (range [i (.-roots po)]
+    (when (== (aget (.-roots po) i) r)
+      (return true)))
+
+
+  false)
+
+
+^{:go/end 359} (go/method changeroot [^{:tag (* poset)} po ^uint32 oldr ^uint32 newr]
+  (range [i (.-roots po)]
+    (when (== (aget (.-roots po) i) oldr)
+      (aset (.-roots po) i newr)
+      (return)))
+
+
+  (panic "changeroot on non-root"))
+
+
+^{:go/end 369} (go/method removeroot [^{:tag (* poset)} po ^uint32 r]
+  (range [i (.-roots po)]
+    (when (== (aget (.-roots po) i) r)
+      (set! (.-roots po) (^{:inst [(slice uint32) uint32]} slices/Delete (.-roots po) i (+ i 1)))
+      (return)))
+
+
+  (panic "removeroot on non-root"))
+
+
+
+
+
+
+
+
+
+
+^{:go/end 441} (go/method dfs "dfs performs a depth-first search within the DAG whose root is r.\nf is the visit function called for each node; if it returns true,\nthe search is aborted and true is returned. The root node is\nvisited too.\nIf strict, ignore edges across a path until at least one\nstrict edge is found. For instance, for a chain A<=B<=C<D<=E<F,\na strict walk visits D,E,F.\nIf the visit ends, false is returned.\n" ^bool [^{:tag (* poset)} po ^uint32 r ^bool strict ^{:tag (func [^uint32 i] [bool])} f]
+  ^{:go/breaks [[5 440]]} (let [closed (newBitset (conv int (+ (.-lastidx po) 1)))
+      ^{:line 381} open (make (slice uint32) 1 64)]
+    (aset open 0 r)
+
+    (when strict
+      ;; Do a first DFS; walk all paths and stop when we find a strict
+      ;; edge, building a "next" list of nodes reachable through strict
+      ;; edges. This will be the bootstrap open list for the real DFS.
+      (let [next (make (slice uint32) 0 64)]
+
+        (while (> (len open) 0)
+          (let [i (aget open (- (len open) 1))]
+            (set! open (subslice open _ (- (len open) 1)))
+
+            ;; Don't visit the same node twice. Notice that all nodes
+            ;; across non-strict paths are still visited at least once, so
+            ;; a non-strict path can never obscure a strict path to the
+            ;; same node.
+            (when (not (.Test closed i))
+              (.Set closed i)
+
+              (let [(values l r) (.children po i)]
+                (when (!= l 0)
+                  (if (.Strict l)
+                    (set! next (append next (.Target l)))
+
+                    (set! open (append open (.Target l)))))
+
+
+                (when (!= r 0)
+                  (if (.Strict r)
+                    (set! next (append next (.Target r)))
+
+                    (set! open (append open (.Target r)))))))))
+
+
+
+
+        (set! open next)
+        (.Reset closed)))
+
+
+    (while (> (len open) 0)
+      (let [i (aget open (- (len open) 1))]
+        (set! open (subslice open _ (- (len open) 1)))
+
+        (when (not (.Test closed i))
+          (when (f i)
+            (return true))
+
+          (.Set closed i)
+          (let [(values l r) (.children po i)]
+            (when (!= l 0)
+              (set! open (append open (.Target l))))
+
+            (when (!= r 0)
+              (set! open (append open (.Target r))))))))
+
+
+
+    false))
+
+
+
+
+
+
+^{:go/end 451} (go/method reaches "Returns true if there is a path from i1 to i2.\nIf strict ==  true: if the function returns true, then i1 <  i2.\nIf strict == false: if the function returns true, then i1 <= i2.\nIf the function returns false, no relation is known.\n" ^bool [^{:tag (* poset)} po ^uint32 i1 ^uint32 i2 ^bool strict]
+  (.dfs po i1 strict ^{:go/end 450} (fn ^bool [^uint32 n]
+      (== n i2))))
+
+
+
+
+
+
+^{:go/end 466} (go/method findroot "findroot finds i's root, that is which DAG contains i.\nReturns the root; if i is itself a root, it is returned.\nPanic if i is not in any DAG.\n" ^uint32 [^{:tag (* poset)} po ^uint32 i]
+  ;; TODO(rasky): if needed, a way to speed up this search is
+  ;; storing a bitset for each root using it as a mini bloom filter
+  ;; of nodes present under that root.
+  (range [_ r (.-roots po)]
+    (when (.reaches po r i false)
+      (return r)))
+
+
+  (panic "findroot didn't find any root"))
+
+
+
+^{:go/end 477} (go/method mergeroot "mergeroot merges two DAGs into one DAG by creating a new extra root\n" ^uint32 [^{:tag (* poset)} po ^uint32 r1 ^uint32 r2]
+  (let [r (.newnode po nil)]
+    (.setchl po r (newedge r1 false))
+    (.setchr po r (newedge r2 false))
+    (.changeroot po r1 r)
+    (.removeroot po r2)
+    (.upush po undoMergeRoot r 0)
+    ^{:line 476} r))
+
+
+
+
+
+
+^{:go/end 496} (go/method collapsepath "collapsepath marks n1 and n2 as equal and collapses as equal all\nnodes across all paths between n1 and n2. If a strict edge is\nfound, the function does not modify the DAG and returns false.\nComplexity is O(n).\n" ^bool [^{:tag (* poset)} po ^{:tag (* Value)} n1 ^{:tag (* Value)} n2]
+  (let [(values i1 i2) (values (aget (.-values po) (.-ID n1)) (aget (.-values po) (.-ID n2)))]
+    (when (.reaches po i1 i2 true)
+      (return false))
+
+
+    ;; Find all the paths from i1 to i2
+    ^{:go/breaks [4]} (let [paths (.findpaths po i1 i2)]
+      ;; Mark all nodes in all the paths as aliases of n1
+      ;; (excluding n1 itself)
+      (.Clear paths i1)
+      (.aliasnodes po n1 paths)
+      true)))
+
+
+
+
+
+
+
+
+^{:go/end 510} (go/method findpaths "findpaths is a recursive function that calculates all paths from cur to dst\nand return them as a bitset (the index of a node is set in the bitset if\nthat node is on at least one path from cur to dst).\nWe do a DFS from cur (stopping going deep any time we reach dst, if ever),\nand mark as part of the paths any node that has a children which is already\npart of the path (or is dst itself).\n" ^bitset [^{:tag (* poset)} po ^uint32 cur ^uint32 dst]
+  (let [seen (newBitset (conv int (+ (.-lastidx po) 1)))
+      ^{:line 506} path (newBitset (conv int (+ (.-lastidx po) 1)))]
+    (.Set path dst)
+    (.findpaths1 po cur dst seen path)
+    ^{:line 509} path))
+
+
+^{:go/end 527} (go/method findpaths1 [^{:tag (* poset)} po ^uint32 cur ^uint32 dst ^bitset seen ^bitset path]
+  (when (== cur dst)
+    (return))
+
+  (.Set seen cur)
+  (let [(values l r) (values (.chl po cur) (.chr po cur))]
+    (when (not (.Test seen l))
+      (.findpaths1 po l dst seen path))
+
+    (when (not (.Test seen r))
+      (.findpaths1 po r dst seen path))
+
+    (when (or (.Test path l) (.Test path r))
+      (.Set path cur))))
+
+
+
+
+^{:go/breaks [[7 542]] :go/end 543} (go/method isnoneq "Check whether it is recorded that i1!=i2\n" ^bool [^{:tag (* poset)} po ^uint32 i1 ^uint32 i2]
+  (when (== i1 i2)
+    (return false))
+
+  (when (< i1 i2)
+    (set! (values i1 i2) (values i2 i1)))
+
+
+  ;; Check if we recorded a non-equal relation before
+  (when [(values bs ok) (aget (.-noneq po) i1)] (and ok (.Test bs i2))
+    (return true))
+
+  false)
+
+
+
+^{:go/end 584} (go/method setnoneq "Record that i1!=i2\n" [^{:tag (* poset)} po ^{:tag (* Value)} n1 ^{:tag (* Value)} n2]
+  (let [(values i1 f1) (.lookup po n1)
+      (values i2 f2) (.lookup po n2)]
+
+    ;; If any of the nodes do not exist in the poset, allocate them. Since
+    ;; we don't know any relation (in the partial order) about them, they must
+    ;; become independent roots.
+    (when (not f1)
+      (set! i1 (.newnode po n1))
+      (set! (.-roots po) (append (.-roots po) i1))
+      (.upush po undoNewRoot i1 0))
+
+    (when (not f2)
+      (set! i2 (.newnode po n2))
+      (set! (.-roots po) (append (.-roots po) i2))
+      (.upush po undoNewRoot i2 0))
+
+
+    (when (== i1 i2)
+      (panic "setnoneq on same node"))
+
+    (when (< i1 i2)
+      (set! (values i1 i2) (values i2 i1)))
+
+    (let [bs (aget (.-noneq po) i1)]
+      (cond (== bs nil) (do
+          ;; Given that we record non-equality relations using the
+          ;; higher index as a key, the bitsize will never change size.
+          ;; TODO(rasky): if memory is a problem, consider allocating
+          ;; a small bitset and lazily grow it when higher indices arrive.
+          (set! bs (newBitset (conv int i1)))
+          (aset (.-noneq po) i1 bs))
+        (.Test bs i2)
+        ;; Already recorded
+        (return))
+
+      (.Set bs i2)
+      (.upushneq po i1 i2))))
+
+
+
+
+^{:go/end 623} (go/method CheckIntegrity "CheckIntegrity verifies internal integrity of a poset. It is intended\nfor debugging purposes.\n" [^{:tag (* poset)} po]
+  ;; Verify that each node appears in a single DAG
+  (let [seen (newBitset (conv int (+ (.-lastidx po) 1)))]
+    (range [_ r (.-roots po)]
+      (when (== r 0)
+        (panic "empty root"))
+
+
+      (.dfs po r false ^{:go/breaks [4] :go/end 602} (fn ^bool [^uint32 i]
+          (when (.Test seen i)
+            (panic "duplicate node"))
+
+          (.Set seen i)
+          false)))
+
+
+
+    ;; Verify that values contain the minimum set
+    (range [id idx (.-values po)]
+      (when (not (.Test seen idx))
+        (panic (fmt/Errorf "spurious value [%d]=%d" id idx))))
+
+
+
+    ;; Verify that only existing nodes have non-zero children
+    (range [i n (.-nodes po)]
+      (when (!= (bit-or (.-l n) (.-r n)) 0)
+        (when (not (.Test seen (conv uint32 i)))
+          (panic (fmt/Errorf "children of unknown node %d->%v" i n)))
+
+        (when (or (== (.Target (.-l n)) (conv uint32 i)) (== (.Target (.-r n)) (conv uint32 i)))
+          (panic (fmt/Errorf "self-loop on node %d" i)))))))
+
+
+
+
+
+
+
+
+^{:go/breaks [[10 651]] :go/end 652} (go/method CheckEmpty "CheckEmpty checks that a poset is completely empty.\nIt can be used for debugging purposes, as a poset is supposed to\nbe empty after it's fully rolled back through Undo.\n" ^error [^{:tag (* poset)} po]
+  (when (!= (len (.-nodes po)) 1)
+    (return (fmt/Errorf "non-empty nodes list: %v" (.-nodes po))))
+
+  (when (!= (len (.-values po)) 0)
+    (return (fmt/Errorf "non-empty value map: %v" (.-values po))))
+
+  (when (!= (len (.-roots po)) 0)
+    (return (fmt/Errorf "non-empty root list: %v" (.-roots po))))
+
+  (when (!= (len (.-undo po)) 0)
+    (return (fmt/Errorf "non-empty undo list: %v" (.-undo po))))
+
+  (when (!= (.-lastidx po) 0)
+    (return (fmt/Errorf "lastidx index is not zero: %v" (.-lastidx po))))
+
+  (range [_ bs (.-noneq po)]
+    (range [_ x bs]
+      (when (!= x 0)
+        (return (fmt/Errorf "non-empty noneq map")))))
+
+
+
+  nil)
+
+
+
+^{:go/end 699} (go/method DotDump "DotDump dumps the poset in graphviz format to file fn, with the specified title.\n" ^error [^{:tag (* poset)} po ^string fn ^string title]
+  (let [(values f err) (os/Create fn)]
+    (when (!= err nil)
+      (return err))
+
+    (defer (.Close f))
+
+    ;; Create reverse index mapping (taking aliases into account)
+    ^{:go/breaks [10]} (let [names (make (map uint32 string))]
+      (range [id i (.-values po)]
+        (let [s (aget names i)]
+          (if (== s "")
+            (set! s (fmt/Sprintf "v%d" id))
+
+            (set! s + (fmt/Sprintf ", v%d" id)))
+
+          (aset names i s)))
+
+
+      (fmt/Fprintf f "digraph poset {\n")
+      (fmt/Fprintf f "\tedge [ fontsize=10 ]\n")
+      (range [ridx r (.-roots po)]
+        (fmt/Fprintf f "\tsubgraph root%d {\n" ridx)
+        (.dfs po r false ^{:go/end 691} (fn ^bool [^uint32 i]
+            (fmt/Fprintf f "\t\tnode%d [label=<%s <font point-size=\"6\">[%d]</font>>]\n" i (aget names i) i)
+            ^{:go/breaks [[3 690]]} (let [(values chl chr) (.children po i)]
+              (range [_ ch (lit (slice posetEdge) chl chr)]
+                (when (!= ch 0)
+                  (if (.Strict ch)
+                    (fmt/Fprintf f "\t\tnode%d -> node%d [label=\" <\" color=\"red\"]\n" i (.Target ch))
+
+                    (fmt/Fprintf f "\t\tnode%d -> node%d [label=\" <=\" color=\"green\"]\n" i (.Target ch)))))
+
+
+
+              false)))
+
+        (fmt/Fprintf f "\t}\n"))
+
+      (fmt/Fprintf f "\tlabelloc=\"t\"\n")
+      (fmt/Fprintf f "\tlabeldistance=\"3.0\"\n")
+      (fmt/Fprintf f "\tlabel=%q\n" title)
+      (fmt/Fprintf f "}\n")
+      nil)))
+
+
+
+
+
+
+^{:go/end 720} (go/method Ordered "Ordered reports whether n1<n2. It returns false either when it is\ncertain that n1<n2 is false, or if there is not enough information\nto tell.\nComplexity is O(n).\n" ^bool [^{:tag (* poset)} po ^{:tag (* Value)} n1 ^{:tag (* Value)} n2]
+  (when debugPoset
+    (defer (.CheckIntegrity po)))
+
+  (when (== (.-ID n1) (.-ID n2))
+    (panic "should not call Ordered with n1==n2"))
+
+
+  (let [(values i1 f1) (.lookup po n1)
+      (values i2 f2) (.lookup po n2)]
+    (when (or (not f1) (not f2))
+      (return false))
+
+
+    (and (!= i1 i2) (.reaches po i1 i2 true))))
+
+
+
+
+
+
+^{:go/end 741} (go/method OrderedOrEqual "OrderedOrEqual reports whether n1<=n2. It returns false either when it is\ncertain that n1<=n2 is false, or if there is not enough information\nto tell.\nComplexity is O(n).\n" ^bool [^{:tag (* poset)} po ^{:tag (* Value)} n1 ^{:tag (* Value)} n2]
+  (when debugPoset
+    (defer (.CheckIntegrity po)))
+
+  (when (== (.-ID n1) (.-ID n2))
+    (panic "should not call Ordered with n1==n2"))
+
+
+  (let [(values i1 f1) (.lookup po n1)
+      (values i2 f2) (.lookup po n2)]
+    (when (or (not f1) (not f2))
+      (return false))
+
+
+    (or (== i1 i2) (.reaches po i1 i2 false))))
+
+
+
+
+
+
+^{:go/end 758} (go/method Equal "Equal reports whether n1==n2. It returns false either when it is\ncertain that n1==n2 is false, or if there is not enough information\nto tell.\nComplexity is O(1).\n" ^bool [^{:tag (* poset)} po ^{:tag (* Value)} n1 ^{:tag (* Value)} n2]
+  (when debugPoset
+    (defer (.CheckIntegrity po)))
+
+  (when (== (.-ID n1) (.-ID n2))
+    (panic "should not call Equal with n1==n2"))
+
+
+  (let [(values i1 f1) (.lookup po n1)
+      (values i2 f2) (.lookup po n2)]
+    (and f1 f2 (== i1 i2))))
+
+
+
+
+
+
+
+^{:go/end 792} (go/method NonEqual "NonEqual reports whether n1!=n2. It returns false either when it is\ncertain that n1!=n2 is false, or if there is not enough information\nto tell.\nComplexity is O(n) (because it internally calls Ordered to see if we\ncan infer n1!=n2 from n1<n2 or n2<n1).\n" ^bool [^{:tag (* poset)} po ^{:tag (* Value)} n1 ^{:tag (* Value)} n2]
+  (when debugPoset
+    (defer (.CheckIntegrity po)))
+
+  (when (== (.-ID n1) (.-ID n2))
+    (panic "should not call NonEqual with n1==n2"))
+
+
+  ;; If we never saw the nodes before, we don't
+  ;; have a recorded non-equality.
+  ^{:go/breaks [[5 791]]} (let [(values i1 f1) (.lookup po n1)
+      (values i2 f2) (.lookup po n2)]
+    (when (or (not f1) (not f2))
+      (return false))
+
+
+    ;; Check if we recorded inequality
+    (when (.isnoneq po i1 i2)
+      (return true))
+
+
+    ;; Check if n1<n2 or n2<n1, in which case we can infer that n1!=n2
+    (when (or (.Ordered po n1 n2) (.Ordered po n2 n1))
+      (return true))
+
+
+    false))
+
+
+
+
+
+^{:go/end 921} (go/method setOrder "setOrder records that n1<n2 or n1<=n2 (depending on strict). Returns false\nif this is a contradiction.\nImplements SetOrder() and SetOrderOrEqual()\n" ^bool [^{:tag (* poset)} po ^{:tag (* Value)} n1 ^{:tag (* Value)} n2 ^bool strict]
+  ^{:go/breaks [[3 920]]} (let [(values i1 f1) (.lookup po n1)
+      (values i2 f2) (.lookup po n2)]
+
+    (switch
+      (case [(and (not f1) (not f2))]
+        ;; Neither n1 nor n2 are in the poset, so they are not related
+        ;; in any way to existing nodes.
+        ;; Create a new DAG to record the relation.
+        (set! (values i1 i2) (values (.newnode po n1) (.newnode po n2)))
+        (set! (.-roots po) (append (.-roots po) i1))
+        (.upush po undoNewRoot i1 0)
+        (.addchild po i1 i2 strict))
+
+      (case [(and f1 (not f2))]
+        ;; n1 is in one of the DAGs, while n2 is not. Add n2 as children
+        ;; of n1.
+        (set! i2 (.newnode po n2))
+        (.addchild po i1 i2 strict))
+
+      (case [(and (not f1) f2)]
+        ;; n1 is not in any DAG but n2 is. If n2 is a root, we can put
+        ;; n1 in its place as a root; otherwise, we need to create a new
+        ;; extra root to record the relation.
+        (set! i1 (.newnode po n1))
+
+        (when (.isroot po i2)
+          (.changeroot po i2 i1)
+          (.upush po undoChangeRoot i1 (newedge i2 strict))
+          (.addchild po i1 i2 strict)
+          (return true))
+
+
+        ;; Search for i2's root; this requires a O(n) search on all
+        ;; DAGs
+        (let [r (.findroot po i2)
+
+            ;; Re-parent as follows:
+            ;;
+            ;;                  extra
+            ;;     r            /   \
+            ;;      \   ===>   r    i1
+            ;;      i2          \   /
+            ;;                    i2
+            ;;
+            ^{:line 842} extra (.newnode po nil)]
+          (.changeroot po r extra)
+          (.upush po undoChangeRoot extra (newedge r false))
+          (.addchild po extra r false)
+          (.addchild po extra i1 false)
+          (.addchild po i1 i2 strict)))
+
+      (case [(and f1 f2)]
+        ;; If the nodes are aliased, fail only if we're setting a strict order
+        ;; (that is, we cannot set n1<n2 if n1==n2).
+        (when (== i1 i2)
+          (return (not strict)))
+
+
+        ;; If we are trying to record n1<=n2 but we learned that n1!=n2,
+        ;; record n1<n2, as it provides more information.
+        (when (and (not strict) (.isnoneq po i1 i2))
+          (set! strict true))
+
+
+        ;; Both n1 and n2 are in the poset. This is the complex part of the algorithm
+        ;; as we need to find many different cases and DAG shapes.
+
+        ;; Check if n1 somehow reaches n2
+        (when (.reaches po i1 i2 false)
+          ;; This is the table of all cases we need to handle:
+          ;;
+          ;;      DAG          New      Action
+          ;;      ---------------------------------------------------
+          ;; #1:  N1<=X<=N2 |  N1<=N2 | do nothing
+          ;; #2:  N1<=X<=N2 |  N1<N2  | add strict edge (N1<N2)
+          ;; #3:  N1<X<N2   |  N1<=N2 | do nothing (we already know more)
+          ;; #4:  N1<X<N2   |  N1<N2  | do nothing
+
+          ;; Check if we're in case #2
+          (when (and strict (not (.reaches po i1 i2 true)))
+            (.addchild po i1 i2 true)
+            (return true))
+
+
+          ;; Case #1, #3, or #4: nothing to do
+          (return true))
+
+
+        ;; Check if n2 somehow reaches n1
+        (when (.reaches po i2 i1 false)
+          ;; This is the table of all cases we need to handle:
+          ;;
+          ;;      DAG           New      Action
+          ;;      ---------------------------------------------------
+          ;; #5:  N2<=X<=N1  |  N1<=N2 | collapse path (learn that N1=X=N2)
+          ;; #6:  N2<=X<=N1  |  N1<N2  | contradiction
+          ;; #7:  N2<X<N1    |  N1<=N2 | contradiction in the path
+          ;; #8:  N2<X<N1    |  N1<N2  | contradiction
+
+          (when strict
+            ;; Cases #6 and #8: contradiction
+            (return false))
+
+
+          ;; We're in case #5 or #7. Try to collapse path, and that will
+          ;; fail if it realizes that we are in case #7.
+          (return (.collapsepath po n2 n1)))
+
+
+        ;; We don't know of any existing relation between n1 and n2. They could
+        ;; be part of the same DAG or not.
+        ;; Find their roots to check whether they are in the same DAG.
+        (let [(values r1 r2) (values (.findroot po i1) (.findroot po i2))]
+          (when (!= r1 r2)
+            ;; We need to merge the two DAGs to record a relation between the nodes
+            (.mergeroot po r1 r2))
+
+
+          ;; Connect n1 and n2
+          (.addchild po i1 i2 strict))))
+
+
+    true))
+
+
+
+
+^{:go/end 933} (go/method SetOrder "SetOrder records that n1<n2. Returns false if this is a contradiction\nComplexity is O(1) if n2 was never seen before, or O(n) otherwise.\n" ^bool [^{:tag (* poset)} po ^{:tag (* Value)} n1 ^{:tag (* Value)} n2]
+  (when debugPoset
+    (defer (.CheckIntegrity po)))
+
+  (when (== (.-ID n1) (.-ID n2))
+    (panic "should not call SetOrder with n1==n2"))
+
+  (.setOrder po n1 n2 true))
+
+
+
+
+^{:go/end 945} (go/method SetOrderOrEqual "SetOrderOrEqual records that n1<=n2. Returns false if this is a contradiction\nComplexity is O(1) if n2 was never seen before, or O(n) otherwise.\n" ^bool [^{:tag (* poset)} po ^{:tag (* Value)} n1 ^{:tag (* Value)} n2]
+  (when debugPoset
+    (defer (.CheckIntegrity po)))
+
+  (when (== (.-ID n1) (.-ID n2))
+    (panic "should not call SetOrder with n1==n2"))
+
+  (.setOrder po n1 n2 false))
+
+
+
+
+
+^{:go/end 1005} (go/method SetEqual "SetEqual records that n1==n2. Returns false if this is a contradiction\n(that is, if it is already recorded that n1<n2 or n2<n1).\nComplexity is O(1) if n2 was never seen before, or O(n) otherwise.\n" ^bool [^{:tag (* poset)} po ^{:tag (* Value)} n1 ^{:tag (* Value)} n2]
+  (when debugPoset
+    (defer (.CheckIntegrity po)))
+
+  (when (== (.-ID n1) (.-ID n2))
+    (panic "should not call Add with n1==n2"))
+
+
+  ^{:go/breaks [[3 1004]]} (let [(values i1 f1) (.lookup po n1)
+      (values i2 f2) (.lookup po n2)]
+
+    (switch
+      (case [(and (not f1) (not f2))]
+        (set! i1 (.newnode po n1))
+        (set! (.-roots po) (append (.-roots po) i1))
+        (.upush po undoNewRoot i1 0)
+        (.aliasnewnode po n1 n2))
+      (case [(and f1 (not f2))]
+        (.aliasnewnode po n1 n2))
+      (case [(and (not f1) f2)]
+        (.aliasnewnode po n2 n1))
+      (case [(and f1 f2)]
+        (when (== i1 i2)
+          ;; Already aliased, ignore
+          (return true))
+
+
+        ;; If we recorded that n1!=n2, this is a contradiction.
+        (when (.isnoneq po i1 i2)
+          (return false))
+
+
+        ;; If we already knew that n1<=n2, we can collapse the path to
+        ;; record n1==n2 (and vice versa).
+        (when (.reaches po i1 i2 false)
+          (return (.collapsepath po n1 n2)))
+
+        (when (.reaches po i2 i1 false)
+          (return (.collapsepath po n2 n1)))
+
+
+        (let [r1 (.findroot po i1)
+            ^{:line 992} r2 (.findroot po i2)]
+          (when (!= r1 r2)
+            ;; Merge the two DAGs so we can record relations between the nodes
+            (.mergeroot po r1 r2))
+
+
+          ;; Set n2 as alias of n1. This will also update all the references
+          ;; to n2 to become references to n1
+          (let [i2s (newBitset (+ (conv int (.-lastidx po)) 1))]
+            (.Set i2s i2)
+            (.aliasnodes po n1 i2s)))))
+
+    true))
+
+
+
+
+
+^{:go/end 1054} (go/method SetNonEqual "SetNonEqual records that n1!=n2. Returns false if this is a contradiction\n(that is, if it is already recorded that n1==n2).\nComplexity is O(n).\n" ^bool [^{:tag (* poset)} po ^{:tag (* Value)} n1 ^{:tag (* Value)} n2]
+  (when debugPoset
+    (defer (.CheckIntegrity po)))
+
+  (when (== (.-ID n1) (.-ID n2))
+    (panic "should not call SetNonEqual with n1==n2"))
+
+
+  ;; Check whether the nodes are already in the poset
+  ^{:go/breaks [[8 1053]]} (let [(values i1 f1) (.lookup po n1)
+      (values i2 f2) (.lookup po n2)]
+
+    ;; If either node wasn't present, we just record the new relation
+    ;; and exit.
+    (when (or (not f1) (not f2))
+      (.setnoneq po n1 n2)
+      (return true))
+
+
+    ;; See if we already know this, in which case there's nothing to do.
+    (when (.isnoneq po i1 i2)
+      (return true))
+
+
+    ;; Check if we're contradicting an existing equality relation
+    (when (.Equal po n1 n2)
+      (return false))
+
+
+    ;; Record non-equality
+    (.setnoneq po n1 n2)
+
+    ;; If we know that i1<=i2 but not i1<i2, learn that as we
+    ;; now know that they are not equal. Do the same for i2<=i1.
+    ;; Do this check only if both nodes were already in the DAG,
+    ;; otherwise there cannot be an existing relation.
+    (when (and (.reaches po i1 i2 false) (not (.reaches po i1 i2 true)))
+      (.addchild po i1 i2 true))
+
+    (when (and (.reaches po i2 i1 false) (not (.reaches po i2 i1 true)))
+      (.addchild po i2 i1 true))
+
+
+    true))
+
+
+
+
+
+^{:go/end 1061} (go/method Checkpoint "Checkpoint saves the current state of the DAG so that it's possible\nto later undo this state.\nComplexity is O(1).\n" [^{:tag (* poset)} po]
+  (set! (.-undo po) (append (.-undo po) (lit posetUndo :typ undoCheckpoint))))
+
+
+
+
+
+
+^{:go/end 1151} (go/method Undo "Undo restores the state of the poset to the previous checkpoint.\nComplexity depends on the type of operations that were performed\nsince the last checkpoint; each Set* operation creates an undo\npass which Undo has to revert with a worst-case complexity of O(n).\n" [^{:tag (* poset)} po]
+  (when (== (len (.-undo po)) 0)
+    (panic "empty undo stack"))
+
+  (when debugPoset
+    (defer (.CheckIntegrity po)))
+
+
+  (while (> (len (.-undo po)) 0)
+    (let [pass (aget (.-undo po) (- (len (.-undo po)) 1))]
+      (set! (.-undo po) (subslice (.-undo po) _ (- (len (.-undo po)) 1)))
+
+      (switch (.-typ pass)
+        (case [undoCheckpoint]
+          (return))
+
+        (case [undoSetChl]
+          (.setchl po (.-idx pass) (.-edge pass)))
+
+        (case [undoSetChr]
+          (.setchr po (.-idx pass) (.-edge pass)))
+
+        (case [undoNonEqual]
+          (.Clear (aget (.-noneq po) (conv uint32 (.-ID pass))) (.-idx pass)))
+
+        (case [undoNewNode]
+          (when (!= (.-idx pass) (.-lastidx po))
+            (panic "invalid newnode index"))
+
+          (when (!= (.-ID pass) 0)
+            (when (!= (aget (.-values po) (.-ID pass)) (.-idx pass))
+              (panic "invalid newnode undo pass"))
+
+            (delete (.-values po) (.-ID pass)))
+
+          (.setchl po (.-idx pass) 0)
+          (.setchr po (.-idx pass) 0)
+          (set! (.-nodes po) (subslice (.-nodes po) _ (.-idx pass)))
+          (dec! (.-lastidx po)))
+
+        (case [undoAliasNode]
+          (let [(values ID prev) (values (.-ID pass) (.-idx pass))
+              ^{:line 1109} cur (aget (.-values po) ID)]
+            (if (== prev 0)
+              ;; Born as an alias, die as an alias
+              (delete (.-values po) ID)
+              (do
+                (when (== cur prev)
+                  (panic "invalid aliasnode undo pass"))
+
+                ;; Give it back previous value
+                (aset (.-values po) ID prev)))))
+
+
+        (case [undoNewRoot]
+          (let [i (.-idx pass)
+              (values l r) (.children po i)]
+            (when (!= (bit-or l r) 0)
+              (panic "non-empty root in undo newroot"))
+
+            (.removeroot po i)))
+
+        (case [undoChangeRoot]
+          (let [i (.-idx pass)
+              (values l r) (.children po i)]
+            (when (!= (bit-or l r) 0)
+              (panic "non-empty root in undo changeroot"))
+
+            (.changeroot po i (.Target (.-edge pass)))))
+
+        (case [undoMergeRoot]
+          (let [i (.-idx pass)
+              (values l r) (.children po i)]
+            (.changeroot po i (.Target l))
+            (set! (.-roots po) (append (.-roots po) (.Target r)))))
+
+        (default
+          (panic (.-typ pass))))))
+
+
+
+  (when (and debugPoset (!= (.CheckEmpty po) nil))
+    (panic "poset not empty at the end of undo")))

@@ -1,0 +1,384 @@
+;; Copyright 2022 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; Package compare contains code for generating comparison
+;; routines for structs, strings and interfaces.
+(in-ns 'go.cmd.compile.internal.compare) (go/file "compare.go" :doc "Package compare contains code for generating comparison\nroutines for structs, strings and interfaces.\n" :imports [
+
+
+    ^{:line 10} [base "cmd/compile/internal/base"]
+    ^{:line 11} [ir "cmd/compile/internal/ir"]
+    ^{:line 12} [typecheck "cmd/compile/internal/typecheck"]
+    ^{:line 13} [types "cmd/compile/internal/types"]
+    ^{:line 14} [fmt "fmt"]
+    ^{:line 15} [bits "math/bits"]
+    ^{:line 16} [sort "sort"]])
+
+
+
+^{:go/end 22} (go/func IsRegularMemory "IsRegularMemory reports whether t can be compared/hashed as regular memory.\n" ^bool [^{:tag (* types/Type)} t]
+  (== (types/AlgType t) types/AMEM))
+
+
+
+
+
+
+^{:go/end 59} (go/func Memrun "Memrun finds runs of struct fields for which memory-only algs are appropriate.\nt is the parent struct type, and start is the field index at which to start the run.\nsize is the length in bytes of the memory included in the run.\nnext is the index just after the end of the memory run.\n" [^{:tag (* types/Type)} t ^int start] :results [^int64 size ^int next]
+  (set! next start)
+  (while true
+    (inc! next)
+    (when (== next (.NumFields t))
+      (break))
+
+    ;; Stop run after a padded field.
+    (when (types/IsPaddedField t (- next 1))
+      (break))
+
+    ;; Also, stop before a blank or non-memory field.
+    (when [f (.Field t next)] (or (.IsBlank (.-Sym f)) (not (IsRegularMemory (.-Type f))))
+      (break))
+
+    ;; For issue 46283, don't combine fields if the resulting load would
+    ;; require a larger alignment than the component fields.
+    (when (> ^{:go/via [Arch]} (.-Alignment (.-Arch base/Ctxt)) 1)
+      (let [align (.Alignment t)]
+        (when [off (.-Offset (.Field t start))] (!= (bit-and off (- align 1)) 0)
+          ;; Offset is less aligned than the containing type.
+          ;; Use offset to determine alignment.
+          (set! align ^int64 (<< 1 (conv uint (bits/TrailingZeros64 (conv uint64 off))))))
+
+        (let [size (- (.End (.Field t next)) (.-Offset (.Field t start)))]
+          (when (> size align)
+            (break))))))
+
+
+
+  (return (- (.End (.Field t (- next 1))) (.-Offset (.Field t start))) next))
+
+
+
+
+^{:go/end 79} (go/func EqCanPanic "EqCanPanic reports whether == on type t could panic (has an interface somewhere).\nt must be comparable.\n" ^bool [^{:tag (* types/Type)} t]
+  (switch (.Kind t)
+    (default
+      (return false))
+    (case [types/TINTER]
+      (return true))
+    (case [types/TARRAY]
+      (return (EqCanPanic (.Elem t))))
+    (case [types/TSTRUCT]
+      (range [_ f (.Fields t)]
+        (when (and (not (.IsBlank (.-Sym f))) (EqCanPanic (.-Type f)))
+          (return true)))
+
+
+      (return false))))
+
+
+
+
+
+
+
+
+^{:go/end 105} (go/func EqStructCost "EqStructCost returns the cost of an equality comparison of two structs.\n\nThe cost is determined using an algorithm which takes into consideration\nthe size of the registers in the current architecture and the size of the\nmemory-only fields in the struct.\n" ^int64 [^{:tag (* types/Type)} t]
+  (let [cost (conv int64 0)]
+
+    (for [(values i fields) (values 0 (.Fields t))] (< i (len fields)) _
+      (let [f (aget fields i)]
+
+        ;; Skip blank-named fields.
+        (when (.IsBlank (.-Sym f))
+          (inc! i)
+          (continue))
+
+
+        (let [(values n _ next) (eqStructFieldCost t i)]
+
+          (set! cost + n)
+          (set! i next))))
+
+
+    ^{:line 104} cost))
+
+
+
+
+
+
+
+
+^{:go/end 141} (go/func eqStructFieldCost "eqStructFieldCost returns the cost of an equality comparison of two struct fields.\nt is the parent struct type, and i is the index of the field in the parent struct type.\neqStructFieldCost may compute the cost of several adjacent fields at once. It returns\nthe cost, the size of the set of fields it computed the cost for (in bytes), and the\nindex of the first field not part of the set of fields for which the cost\nhas already been calculated.\n" [^{:tag (* types/Type)} t ^int i] :results [int64 int64 int]
+  (let [
+      ^:var ^{:line 115} cost (conv int64 0)
+      ^:var ^{:line 116} regSize (conv int64 types/RegSize)
+
+      ^{:line 118 :tag int64} size (zero int64)
+      ^{:line 119 :tag int} next (zero int)]
+
+
+    (when ^{:go/via [Arch]} (.-CanMergeLoads (.-Arch base/Ctxt))
+      ;; If we can merge adjacent loads then we can calculate the cost of the
+      ;; comparison using the size of the memory run and the size of the registers.
+      (set! (values size next) (Memrun t i))
+      (set! cost (/ size regSize))
+      (when (!= (% size regSize) 0)
+        (inc! cost))
+
+      (return cost size next))
+
+
+    ;; If we cannot merge adjacent loads then we have to use the size of the
+    ;; field and take into account the type to determine how many loads and compares
+    ;; are needed.
+    (let [ft (.-Type (.Field t i))]
+      (set! size (.Size ft))
+      (set! next (+ i 1))
+
+      (return (calculateCostForType ft) size next))))
+
+
+^{:go/end 162} (go/func calculateCostForType ^int64 [^{:tag (* types/Type)} t]
+  (let [^int64 cost (zero int64)]
+    (switch (.Kind t)
+      (case [types/TSTRUCT]
+        (return (EqStructCost t)))
+      (case [types/TSLICE]
+        ;; Slices are not comparable.
+        (base/Fatalf "calculateCostForType: unexpected slice type"))
+      (case [types/TARRAY]
+        (let [elemCost (calculateCostForType (.Elem t))]
+          (set! cost (* (.NumElem t) elemCost))))
+      (case [types/TSTRING types/TINTER types/TCOMPLEX64 types/TCOMPLEX128]
+        (set! cost 2))
+      (case [types/TINT64 types/TUINT64]
+        (set! cost (/ 8 (conv int64 types/RegSize))))
+      (default
+        (set! cost 1)))
+
+    ^{:line 161} cost))
+
+
+
+
+
+
+
+
+
+^{:go/end 245} (go/func EqStruct "EqStruct compares two structs np and nq for equality.\nIt works by building a list of boolean conditions to satisfy.\nConditions must be evaluated in the returned order and\nproperly short-circuited by the caller.\nThe first return value is the flattened list of conditions,\nthe second value is a boolean indicating whether any of the\ncomparisons could panic.\n" [^{:tag (* types/Type)} t ^ir/Node np ^ir/Node nq] :results [(slice ir/Node) bool]
+  ;; The conditions are a list-of-lists. Conditions are reorderable
+  ;; within each inner list. The outer lists must be evaluated in order.
+  (let [^{:tag (slice (slice ir/Node))} conds (zero (slice (slice ir/Node)))]
+    (set! conds (append conds (lit (slice ir/Node))))
+    (let [and ^{:go/end 179} (fn [^ir/Node n]
+          (let [i (- (len conds) 1)]
+            (aset conds i (append (aget conds i) n))))]
+
+
+      ;; Walk the struct using memequal for runs of AMEM
+      ;; and calling specific equality tests for the others.
+      (for [(values i fields) (values 0 (.Fields t))] (< i (len fields)) _
+        (let [f (aget fields i)]
+
+          ;; Skip blank-named fields.
+          (when (.IsBlank (.-Sym f))
+            (inc! i)
+            (continue))
+
+
+          (let [typeCanPanic (EqCanPanic (.-Type f))]
+
+            ;; Compare non-memory fields with field equality.
+            (when (not (IsRegularMemory (.-Type f)))
+              (when typeCanPanic
+                ;; Enforce ordering by starting a new set of reorderable conditions.
+                (set! conds (append conds (lit (slice ir/Node)))))
+
+              (switch
+                (case [(.IsString (.-Type f))]
+                  (let [p (typecheck/DotField base/Pos (typecheck/Expr np) i)
+                      ^{:line 203} q (typecheck/DotField base/Pos (typecheck/Expr nq) i)
+                      (values eqlen eqmem) (EqString p q)]
+                    (go/call and eqlen)
+                    (go/call and eqmem)))
+                (default
+                  (go/call and (eqfield np nq i))))
+
+              (when typeCanPanic
+                ;; Also enforce ordering after something that can panic.
+                (set! conds (append conds (lit (slice ir/Node)))))
+
+              (inc! i)
+              (continue))
+
+
+            (let [(values cost size next) (eqStructFieldCost t i)]
+              (if (<= cost 4)
+                ;; Cost of 4 or less: use plain field equality.
+                (for [j i] (< j next) (inc! j)
+                  (go/call and (eqfield np nq j)))
+
+
+                ;; Higher cost: use memequal.
+                (let [cc (eqmem np nq i size)]
+                  (go/call and cc)))
+
+              (set! i next)))))
+
+
+      ;; Sort conditions to put runtime calls last.
+      ;; Preserve the rest of the ordering.
+      (let [^{:tag (slice ir/Node)} flatConds (zero (slice ir/Node))]
+        (range [_ c conds]
+          (let [isCall ^{:go/end 238} (fn ^bool [^ir/Node n]
+                (or (== (.Op n) ir/OCALL) (== (.Op n) ir/OCALLFUNC)))]
+
+            (sort/SliceStable c ^{:go/end 241} (fn ^bool [^int i ^int j]
+                (and (not (isCall (aget c i))) (isCall (aget c j)))))
+
+            (set! flatConds (append flatConds (spread c)))))
+
+        (return flatConds (> (len conds) 1))))))
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 303} (go/func EqString "EqString returns the nodes\n\n\tlen(s) == len(t)\n\nand\n\n\tmemequal(s.ptr, t.ptr, len(s))\n\nwhich can be used to construct string equality comparison.\neqlen must be evaluated before eqmem, and shortcircuiting is required.\n" [^ir/Node s ^ir/Node t] :results [^{:tag (* ir/BinaryExpr)} eqlen ^{:tag (* ir/CallExpr)} eqmem]
+  (set! s (typecheck/Conv s (aget types/Types types/TSTRING)))
+  (set! t (typecheck/Conv t (aget types/Types types/TSTRING)))
+  (let [sptr (ir/NewConvExpr base/Pos ir/OCONVNOP (aget types/Types types/TUNSAFEPTR) (ir/NewUnaryExpr base/Pos ir/OSPTR s))
+      ^{:line 261} tptr (ir/NewConvExpr base/Pos ir/OCONVNOP (aget types/Types types/TUNSAFEPTR) (ir/NewUnaryExpr base/Pos ir/OSPTR t))
+      ^{:line 262} slen (typecheck/Conv (ir/NewUnaryExpr base/Pos ir/OLEN s) (aget types/Types types/TUINTPTR))
+      ^{:line 263} tlen (typecheck/Conv (ir/NewUnaryExpr base/Pos ir/OLEN t) (aget types/Types types/TUINTPTR))
+
+      ;; Pick the 3rd arg to memequal. Both slen and tlen are fine to use, because we short
+      ;; circuit the memequal call if they aren't the same. But if one is a constant some
+      ;; memequal optimizations are easier to apply.
+      ^{:line 268} probablyConstant ^{:go/end 290} (fn ^bool [^ir/Node n]
+        (when (== (.Op n) ir/OCONVNOP)
+          (set! n (.-X (assert (* ir/ConvExpr) n))))
+
+        (when (== (.Op n) ir/OLITERAL)
+          (return true))
+
+        (when (!= (.Op n) ir/ONAME)
+          (return false))
+
+        ^{:go/breaks [[4 289]]} (let [name (assert (* ir/Name) n)]
+          (when (!= (.-Class name) ir/PAUTO)
+            (return false))
+
+          (if [def (.-Defn name)] (== def nil)
+            ;; n starts out as the empty string
+            (return true)
+            (when (and (== (.Op def) ir/OAS) ^:go/paren (or (== (.-Y (assert (* ir/AssignStmt) def)) nil) (== (.Op (.-Y (assert (* ir/AssignStmt) def))) ir/OLITERAL)))
+              ;; n starts out as a constant string
+              (return true)))
+
+          false))
+
+      ^{:line 291} cmplen slen]
+    (when (and (probablyConstant t) (not (probablyConstant s)))
+      (set! cmplen tlen))
+
+
+    (let [fn (typecheck/LookupRuntime "memequal")
+        ^{:line 297} call (assert (* ir/CallExpr) (typecheck/Call base/Pos fn (lit (slice ir/Node) sptr tptr (ir/Copy cmplen)) false))
+
+        ^{:line 299} cmp (ir/NewBinaryExpr base/Pos ir/OEQ slen tlen)]
+      (set! cmp (assert (* ir/BinaryExpr) (typecheck/Expr cmp)))
+      ^{:go/via [miniExpr]} (.SetType cmp (aget types/Types types/TBOOL))
+      (return cmp call))))
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 343} (go/func EqInterface "EqInterface returns the nodes\n\n\ts.tab == t.tab (or s.typ == t.typ, as appropriate)\n\nand\n\n\tifaceeq(s.tab, s.data, t.data) (or efaceeq(s.typ, s.data, t.data), as appropriate)\n\nwhich can be used to construct interface equality comparison.\neqtab must be evaluated before eqdata, and shortcircuiting is required.\n" [^ir/Node s ^ir/Node t] :results [^{:tag (* ir/BinaryExpr)} eqtab ^{:tag (* ir/CallExpr)} eqdata]
+  (when (not (types/Identical (.Type s) (.Type t)))
+    (base/Fatalf "EqInterface %v %v" (.Type s) (.Type t)))
+
+  ;; func ifaceeq(tab *uintptr, x, y unsafe.Pointer) (ret bool)
+  ;; func efaceeq(typ *uintptr, x, y unsafe.Pointer) (ret bool)
+  (let [^ir/Node fn (zero ir/Node)]
+    (if (.IsEmptyInterface (.Type s))
+      (set! fn (typecheck/LookupRuntime "efaceeq"))
+
+      (set! fn (typecheck/LookupRuntime "ifaceeq")))
+
+
+    (let [stab (ir/NewUnaryExpr base/Pos ir/OITAB s)
+        ^{:line 329} ttab (ir/NewUnaryExpr base/Pos ir/OITAB t)
+        ^{:line 330} sdata (ir/NewUnaryExpr base/Pos ir/OIDATA s)
+        ^{:line 331} tdata (ir/NewUnaryExpr base/Pos ir/OIDATA t)]
+      ^{:go/via [miniExpr]} (.SetType sdata (aget types/Types types/TUNSAFEPTR))
+      ^{:go/via [miniExpr]} (.SetType tdata (aget types/Types types/TUNSAFEPTR))
+      ^{:go/via [miniExpr miniNode]} (.SetTypecheck sdata 1)
+      ^{:go/via [miniExpr miniNode]} (.SetTypecheck tdata 1)
+
+      (let [call (assert (* ir/CallExpr) (typecheck/Call base/Pos fn (lit (slice ir/Node) stab sdata tdata) false))
+
+          ^{:line 339} cmp (ir/NewBinaryExpr base/Pos ir/OEQ stab ttab)]
+        (set! cmp (assert (* ir/BinaryExpr) (typecheck/Expr cmp)))
+        ^{:go/via [miniExpr]} (.SetType cmp (aget types/Types types/TBOOL))
+        (return cmp call)))))
+
+
+
+
+
+^{:go/end 352} (go/func eqfield "eqfield returns the node\n\n\tp.field == q.field\n" ^ir/Node [^ir/Node p ^ir/Node q ^int field]
+  (let [nx (typecheck/DotField base/Pos (typecheck/Expr p) field)
+      ^{:line 350} ny (typecheck/DotField base/Pos (typecheck/Expr q) field)]
+    (typecheck/Expr (ir/NewBinaryExpr base/Pos ir/OEQ nx ny))))
+
+
+
+
+
+^{:go/end 370} (go/func eqmem "eqmem returns the node\n\n\tmemequal(&p.field, &q.field, size)\n" ^ir/Node [^ir/Node p ^ir/Node q ^int field ^int64 size]
+  (let [nx (typecheck/Expr (typecheck/NodAddr (typecheck/DotField base/Pos p field)))
+      ^{:line 359} ny (typecheck/Expr (typecheck/NodAddr (typecheck/DotField base/Pos q field)))
+
+      (values fn needsize) (eqmemfunc size (.Elem (.Type nx)))
+      ^{:line 362} call (ir/NewCallExpr base/Pos ir/OCALL fn nil)]
+    (.Append (.-Args call) nx)
+    (.Append (.-Args call) ny)
+    (when needsize
+      (.Append (.-Args call) (ir/NewInt base/Pos size)))
+
+
+    ^{:line 369} call))
+
+
+^{:go/end 385} (go/func eqmemfunc [^int64 size ^{:tag (* types/Type)} t] :results [^{:tag (* ir/Name)} fn ^bool needsize]
+  (when (and (not ^{:go/via [Arch]} (.-CanMergeLoads (.-Arch base/Ctxt))) (< (.Alignment t) (conv int64 ^{:go/via [Arch]} (.-Alignment (.-Arch base/Ctxt)))) (< (.Alignment t) (.Size t)))
+    ;; We can't use larger comparisons if the value might not be aligned
+    ;; enough for the larger comparison. See issues 46283 and 67160.
+    (set! size 0))
+
+  (switch size
+    (case [1 2 4 8 16]
+      (let [buf (fmt/Sprintf "memequal%d" (* (conv int size) 8))]
+        (return (typecheck/LookupRuntime buf t t) false))))
+
+
+  (return (typecheck/LookupRuntime "memequal" t t) true))

@@ -1,0 +1,1297 @@
+;; Copyright 2009 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.cmd.compile.internal.walk) (go/file "switch.go" :imports [
+
+
+    ^{:line 8} [cmp "cmp"]
+    ^{:line 9} [fmt "fmt"]
+    ^{:line 10} [constant "go/constant"]
+    ^{:line 11} [token "go/token"]
+    ^{:line 12} [math "math"]
+    ^{:line 13} [bits "math/bits"]
+    ^{:line 14} [slices "slices"]
+    ^{:line 15} [sort "sort"]
+    ^{:line 16} [strings "strings"]
+
+    ^{:line 18} [base "cmd/compile/internal/base"]
+    ^{:line 19} [ir "cmd/compile/internal/ir"]
+    ^{:line 20} [objw "cmd/compile/internal/objw"]
+    ^{:line 21} [reflectdata "cmd/compile/internal/reflectdata"]
+    ^{:line 22} [rttype "cmd/compile/internal/rttype"]
+    ^{:line 23} [ssagen "cmd/compile/internal/ssagen"]
+    ^{:line 24} [staticdata "cmd/compile/internal/staticdata"]
+    ^{:line 25} [typecheck "cmd/compile/internal/typecheck"]
+    ^{:line 26} [types "cmd/compile/internal/types"]
+    ^{:line 27} [obj "cmd/internal/obj"]
+    ^{:line 28} [src "cmd/internal/src"]])
+
+
+
+^{:go/end 44} (go/func walkSwitch "walkSwitch walks a switch statement.\n" [^{:tag (* ir/SwitchStmt)} sw]
+  ;; Guard against double walk, see #25776.
+  (when ^{:go/via [miniStmt miniNode]} (.Walked sw)
+    (return)) ; Was fatal, but eliminating every possible source of double-walking is hard
+
+  ^{:go/via [miniStmt miniNode]} (.SetWalked sw true)
+
+  (if (and (!= (.-Tag sw) nil) (== (.Op (.-Tag sw)) ir/OTYPESW))
+    (walkSwitchType sw)
+
+    (walkSwitchExpr sw)))
+
+
+
+
+
+^{:go/end 130} (go/func walkSwitchExpr "walkSwitchExpr generates an AST implementing sw.  sw is an\nexpression switch.\n" [^{:tag (* ir/SwitchStmt)} sw]
+  (let [lno (ir/SetPos sw)
+
+      ^{:line 51} cond (.-Tag sw)]
+    (set! (.-Tag sw) nil)
+
+    ;; convert switch {...} to switch true {...}
+    (when (== cond nil)
+      (set! cond (ir/NewBool base/Pos true))
+      (set! cond (typecheck/Expr cond))
+      (set! cond (typecheck/DefaultLit cond nil)))
+
+
+    ;; Given "switch string(byteslice)",
+    ;; with all cases being side-effect free,
+    ;; use a zero-cost alias of the byte slice.
+    ;; Do this before calling walkExpr on cond,
+    ;; because walkExpr will lower the string
+    ;; conversion into a runtime call.
+    ;; See issue 24937 for more discussion.
+    (when (and (== (.Op cond) ir/OBYTES2STR) (allCaseExprsAreSideEffectFree sw))
+      (let [cond (assert (* ir/ConvExpr) cond)]
+        (.SetOp cond ir/OBYTES2STRTMP)))
+
+
+    (set! cond (walkExpr cond ^{:go/via [miniStmt]} (.PtrInit sw)))
+    (when (and (!= (.Op cond) ir/OLITERAL) (!= (.Op cond) ir/ONIL))
+      (set! cond (copyExpr cond (.Type cond) (addr (.-Compiled sw)))))
+
+
+    (set! base/Pos lno)
+
+    (tryLookupTable sw cond)
+
+    (let [s ^{:go/breaks [2 4]} (lit exprSwitch
+          :pos lno
+          :exprname cond)
+
+
+        ^{:line 87 :tag ir/Node} defaultGoto (zero ir/Node)
+        ^{:line 88 :tag ir/Nodes} body (zero ir/Nodes)]
+      (range [_ ncase (.-Cases sw)]
+        (let [label (typecheck/AutoLabel ".s")
+            ^{:line 91} jmp (ir/NewBranchStmt ^{:go/via [miniStmt miniNode]} (.Pos ncase) ir/OGOTO label)]
+
+          ;; Process case dispatch.
+          (when (== (len (.-List ncase)) 0)
+            (when (!= defaultGoto nil)
+              (base/Fatalf "duplicate default case not detected during typechecking"))
+
+            (set! defaultGoto jmp))
+
+
+          (range [i n1 (.-List ncase)]
+            (let [^ir/Node rtype (zero ir/Node)]
+              (when (< i (len (.-RTypes ncase)))
+                (set! rtype (aget (.-RTypes ncase) i)))
+
+              (.Add s ^{:go/via [miniStmt miniNode]} (.Pos ncase) n1 rtype jmp)))
+
+
+          ;; Process body.
+          (.Append body (ir/NewLabelStmt ^{:go/via [miniStmt miniNode]} (.Pos ncase) label))
+          (.Append body (spread (.-Body ncase)))
+          (when [(values fall pos) (endsInFallthrough (.-Body ncase))] (not fall)
+            (let [br (ir/NewBranchStmt base/Pos ir/OBREAK nil)]
+              ^{:go/via [miniStmt miniNode]} (.SetPos br pos)
+              (.Append body br)))))
+
+
+      (set! (.-Cases sw) nil)
+
+      (when (== defaultGoto nil)
+        (let [br (ir/NewBranchStmt base/Pos ir/OBREAK nil)]
+          ^{:go/via [miniStmt miniNode]} (.SetPos br (.WithNotStmt ^{:go/via [miniStmt miniNode]} (.Pos br)))
+          (set! defaultGoto br)))
+
+
+      (.Emit s (addr (.-Compiled sw)))
+      (.Append (.-Compiled sw) defaultGoto)
+      (.Append (.-Compiled sw) (spread (.Take body)))
+      (walkStmtList (.-Compiled sw)))))
+
+
+
+(go/type exprSwitch "An exprSwitch walks an expression switch.\n" (struct
+    ^{:line 134 :tag src/XPos} pos
+    ^{:line 135 :tag ir/Node} exprname ; value being switched on
+
+    ^{:line 137 :tag ir/Nodes} done
+    ^{:line 138 :tag (slice exprClause)} clauses))
+
+
+(go/type exprClause (struct
+    ^{:line 142 :tag src/XPos} pos
+    ^{:line 143 :tag ir/Node} lo ^ir/Node hi
+    ^{:line 144 :tag ir/Node} rtype ; *runtime._type for OEQ node
+    ^{:line 145 :tag ir/Node} jmp))
+
+
+^{:go/end 158} (go/method Add [^{:tag (* exprSwitch)} s ^src/XPos pos ^ir/Node expr ^ir/Node rtype ^ir/Node jmp]
+  (let [c (lit exprClause :pos pos :lo expr :hi expr :rtype rtype :jmp jmp)]
+    (when (and (aget types/IsOrdered (.Kind (.Type (.-exprname s)))) (== (.Op expr) ir/OLITERAL))
+      (set! (.-clauses s) (append (.-clauses s) c))
+      (return))
+
+
+    (.flush s)
+    (set! (.-clauses s) (append (.-clauses s) c))
+    (.flush s)))
+
+
+^{:go/end 163} (go/method Emit [^{:tag (* exprSwitch)} s ^{:tag (* ir/Nodes)} out]
+  (.flush s)
+  (.Append out (spread (.Take (.-done s)))))
+
+
+^{:go/end 282} (go/method flush [^{:tag (* exprSwitch)} s]
+  (let [cc (.-clauses s)]
+    (set! (.-clauses s) nil)
+    (when (== (len cc) 0)
+      (return))
+
+
+    ;; Caution: If len(cc) == 1, then cc[0] might not an OLITERAL.
+    ;; The code below is structured to implicitly handle this case
+    ;; (e.g., sort.Slice doesn't need to invoke the less function
+    ;; when there's only a single slice element).
+
+    (when (and (.IsString (.Type (.-exprname s))) (>= (len cc) 2))
+      ;; Sort strings by length and then by value. It is
+      ;; much cheaper to compare lengths than values, and
+      ;; all we need here is consistency. We respect this
+      ;; sorting below.
+      (^{:inst [(slice exprClause) exprClause]} slices/SortFunc cc ^{:go/end 189} (fn ^int [^exprClause a ^exprClause b]
+          (let [si (ir/StringVal (.-lo a))
+              ^{:line 184} sj (ir/StringVal (.-lo b))]
+            (when (!= (len si) (len sj))
+              (return (^{:inst [int]} cmp/Compare (len si) (len sj))))
+
+            (strings/Compare si sj))))
+
+
+      ;; runLen returns the string length associated with a
+      ;; particular run of exprClauses.
+      (let [runLen ^{:go/end 193} (fn ^int64 [^{:tag (slice exprClause)} run] (conv int64 (len (ir/StringVal (.-lo (aget run 0))))))
+
+          ;; Collapse runs of consecutive strings with the same length.
+          ^{:line 196 :tag (slice (slice exprClause))} runs (zero (slice (slice exprClause)))
+          ^{:line 197} start 0]
+        (for [i 1] (< i (len cc)) (inc! i)
+          (when (!= (runLen (subslice cc start)) (runLen (subslice cc i)))
+            (set! runs (append runs (subslice cc start i)))
+            (set! start i)))
+
+
+        (set! runs (append runs (subslice cc start)))
+
+        ;; We have strings of more than one length. Generate an
+        ;; outer switch which switches on the length of the string
+        ;; and an inner switch in each case which resolves all the
+        ;; strings of the same length. The code looks something like this:
+
+        ;; goto outerLabel
+        ;; len5:
+        ;;   ... search among length 5 strings ...
+        ;;   goto endLabel
+        ;; len8:
+        ;;   ... search among length 8 strings ...
+        ;;   goto endLabel
+        ;; ... other lengths ...
+        ;; outerLabel:
+        ;; switch len(s) {
+        ;;   case 5: goto len5
+        ;;   case 8: goto len8
+        ;;   ... other lengths ...
+        ;; }
+        ;; endLabel:
+
+        (let [outerLabel (typecheck/AutoLabel ".s")
+            ^{:line 228} endLabel (typecheck/AutoLabel ".s")]
+
+          ;; Jump around all the individual switches for each length.
+          (.Append (.-done s) (ir/NewBranchStmt (.-pos s) ir/OGOTO outerLabel))
+
+          (let [^exprSwitch outer (zero exprSwitch)]
+            (set! (.-exprname outer) (ir/NewUnaryExpr (.-pos s) ir/OLEN (.-exprname s)))
+            (.SetType (.-exprname outer) (aget types/Types types/TINT))
+
+            (range [_ run runs]
+              ;; Target label to jump to when we match this length.
+              (let [label (typecheck/AutoLabel ".s")
+
+                  ;; Search within this run of same-length strings.
+                  ^{:line 242} pos (.-pos (aget run 0))]
+                (.Append (.-done s) (ir/NewLabelStmt pos label))
+                (stringSearch (.-exprname s) run (addr (.-done s)))
+                (.Append (.-done s) (ir/NewBranchStmt pos ir/OGOTO endLabel))
+
+                ;; Add length case to outer switch.
+                (let [cas (ir/NewInt pos (runLen run))
+                    ^{:line 249} jmp (ir/NewBranchStmt pos ir/OGOTO label)]
+                  (.Add outer pos cas nil jmp))))
+
+            (.Append (.-done s) (ir/NewLabelStmt (.-pos s) outerLabel))
+            (.Emit outer (addr (.-done s)))
+            (.Append (.-done s) (ir/NewLabelStmt (.-pos s) endLabel))
+            (return)))))
+
+
+    (sort/Slice cc ^{:go/end 260} (fn ^bool [^int i ^int j]
+        (constant/Compare (.Val (.-lo (aget cc i))) token/LSS (.Val (.-lo (aget cc j))))))
+
+
+    ;; Merge consecutive integer cases.
+    (when (.IsInteger (.Type (.-exprname s)))
+      (let [consecutive ^{:go/end 267} (fn ^bool [^constant/Value last ^constant/Value next]
+            (let [delta (constant/BinaryOp next token/SUB last)]
+              (constant/Compare delta token/EQL (constant/MakeInt64 1))))
+
+
+          ^{:line 269} merged (subslice cc _ 1)]
+        (range [_ c (subslice cc 1)]
+          (let [last (addr (aget merged (- (len merged) 1)))]
+            (if (and (== (.-jmp last) (.-jmp c)) (consecutive (.Val (.-hi last)) (.Val (.-lo c))))
+              (set! (.-hi last) (.-lo c))
+
+              (set! merged (append merged c)))))
+
+
+        (set! cc merged)))
+
+
+    (.search s cc (addr (.-done s)))))
+
+
+^{:go/end 298} (go/method search [^{:tag (* exprSwitch)} s ^{:tag (slice exprClause)} cc ^{:tag (* ir/Nodes)} out]
+  (when (.tryJumpTable s cc out)
+    (return))
+
+  (binarySearch (len cc) out
+    ^{:go/end 291} (fn ^ir/Node [^int i]
+      (ir/NewBinaryExpr base/Pos ir/OLE (.-exprname s) (.-hi (aget cc (- i 1)))))
+
+    ^{:go/end 296} (fn [^int i ^{:tag (* ir/IfStmt)} nif]
+      (let [c (addr (aget cc i))]
+        (set! (.-Cond nif) (.test c (.-exprname s)))
+        (set! (.-Body nif) (lit (slice ir/Node) (.-jmp c)))))))
+
+
+
+
+
+^{:go/end 339} (go/method tryJumpTable "Try to implement the clauses with a jump table. Returns true if successful.\n" ^bool [^{:tag (* exprSwitch)} s ^{:tag (slice exprClause)} cc ^{:tag (* ir/Nodes)} out]
+  (let [^:const ^{:val 8} minCases 8 ; have at least minCases cases in the switch
+      ^:const ^{:line 303 :val 4} minDensity 4] ; use at least 1 out of every minDensity entries
+
+    (when (or (!= (.-N base/Flag) 0) (not ^{:go/via [Arch]} (.-CanJumpTable (.-LinkArch ssagen/Arch))) (.-Retpoline base/Ctxt))
+      (return false))
+
+    (when (< (len cc) minCases)
+      (return false)) ; not enough cases for it to be worth it
+
+    (when (!= (.Kind (.Val (.-lo (aget cc 0)))) constant/Int)
+      (return false)) ; e.g. float
+
+    (when (> (.Size (.Type (.-exprname s))) (conv int64 types/PtrSize))
+      (return false)) ; 64-bit switches on 32-bit archs
+
+    (let [min (.Val (.-lo (aget cc 0)))
+        ^{:line 318} max (.Val (.-hi (aget cc (- (len cc) 1))))
+        ^{:line 319} width (constant/BinaryOp (constant/BinaryOp max token/SUB min) token/ADD (constant/MakeInt64 1))
+        ^{:line 320} limit (constant/MakeInt64 (* (conv int64 (len cc)) minDensity))]
+      (when (constant/Compare width token/GTR limit)
+        ;; We disable jump tables if we use less than a minimum fraction of the entries.
+        ;; i.e. for switch x {case 0: case 1000: case 2000:} we don't want to use a jump table.
+        (return false))
+
+      ^{:go/breaks [4]} (let [jt (ir/NewJumpTableStmt base/Pos (.-exprname s))]
+        (range [_ c cc]
+          (let [jmp (assert (* ir/BranchStmt) (.-jmp c))]
+            (when (or (!= ^{:go/via [miniStmt miniNode]} (.Op jmp) ir/OGOTO) (== (.-Label jmp) nil))
+              (panic "bad switch case body"))
+
+            (for [i (.Val (.-lo c))] (constant/Compare i token/LEQ (.Val (.-hi c))) (set! i (constant/BinaryOp i token/ADD (constant/MakeInt64 1)))
+              (set! (.-Cases jt) (append (.-Cases jt) i))
+              (set! (.-Targets jt) (append (.-Targets jt) (.-Label jmp))))))
+
+
+        (.Append out jt)
+        true))))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 609} (go/func tryLookupTable "tryLookupTable attempts to replace constant-returning cases of an integer\nswitch with a static lookup table. Cases whose bodies are a single \"return\n<int constant>\" are served from a read-only array, eliminating branching.\nRemaining cases (non-constant bodies, default) are left in sw.Cases for\nnormal switch compilation.\n\nFor example:\n\n\tswitch x {\n\tcase 0: return 10\n\tcase 1: return 20\n\tcase 2, 3: return 30\n\tdefault: return -1\n\t}\n\nBecomes:\n\n\tvar table = [4]int{10, 20, 30, 30}\n\tif uint(x) < 4 { return table[x] }\n\t// remaining switch for default\n\nPartial optimization also works when some cases have non-constant bodies:\n\n\tswitch x {\n\tcase 1: return 1\n\tcase 2: return 4\n\tcase 3: sideEffect(); return 9\n\t...\n\tdefault: return x * x\n\t}\n\nBecomes:\n\n\tvar table = [8]int{1, 4, 0, ...}\n\tvar mask  = [8]uint8{1, 1, 0, ...}\n\tif uint(x-1) <= 7 && mask[x-1] != 0 { return table[x-1] }\n\t// remaining switch for case 3 + default\n" [^{:tag (* ir/SwitchStmt)} sw ^ir/Node cond]
+  (let [^:const ^{:val 4} minCases 4] ; need enough cases to justify a table
+
+    (when (!= (.-N base/Flag) 0)
+      (return)) ; optimizations disabled
+
+    (when (not (.IsInteger (.Type cond)))
+      (return))
+
+    (when (> (.Size (.Type cond)) (conv int64 types/PtrSize))
+      (return)) ; 64-bit switches on 32-bit archs
+
+
+    (let [fn ir/CurFunc]
+      (when (or (== fn nil) (!= (.NumResults (.Type fn)) 1))
+        (return)) ; only handle single return value
+
+      (let [resultType (.-Type (aget (.Results (.Type fn)) 0))
+
+          ;; Classify each case as const-returning or not.
+          ;; TODO: support more complex bodies, like local variable assignments.
+          ;; For example:
+          ;;
+          ;;   var n int
+          ;;   switch x {
+          ;;   case 1: n = 1
+          ;;   case 2: n = 4
+          ;;   case 3: n = 9
+          ;;   case 4: n = 16
+          ;;   }
+          ;;   return n
+          ;;
+          ;; Could be optimized to:
+          ;;
+          ;;   var table = [4]int{1, 4, 9, 16}
+          ;;   var n int
+          ;;   if uint(x-1) < 4 { n = table[x-1] }
+          ;;   return n
+          ^{:line 416} constSet (make (map int64 ir/Node)) ; case value → return constant literal
+          ^{:line 417} constCaseSet (make (map int bool)) ; indices of const-returning non-default cases
+          ^{:line 418} excludeSet (make (map int64 bool)) ; case values with non-const bodies
+          ^{:line 419 :tag ir/Node} defaultVal (zero ir/Node) ; non-nil if default returns a constant
+          (values minVal maxVal) (values (conv int64 math/MaxInt64) (conv int64 math/MinInt64))
+          ^{:line 421 :tag bool} excludeNextCase (zero bool)] ; true if the previous case ends in fallthrough
+
+        (range [i ncase (.-Cases sw)]
+          ;; A case that is the target of a fallthrough must be excluded,
+          ;; since removing it would break the fallthrough chain.
+          (let [isFallthroughTarget excludeNextCase]
+            (set! (values excludeNextCase _) (endsInFallthrough (.-Body ncase)))
+
+            (when (== (len (.-List ncase)) 0)
+              ;; Default case: check if it returns a constant (for gap filling).
+              (when (and (isConstReturn ncase) (not isFallthroughTarget))
+                (set! defaultVal (aget (.-Results (assert (* ir/ReturnStmt) (aget (.-Body ncase) 0))) 0)))
+
+              (continue))
+
+
+            (let [(values vals ok) (constIntCaseVals ncase)]
+              (when (not ok)
+                ;; Case has a non-constant case expression (e.g. a variable).
+                ;; Bail out: we can't determine overlap with the table range.
+                ;; For example:
+                ;;   case 1: return 1  // const → would go to table
+                ;;   case c: return 9  // c is a variable, not a constant
+                ;;   case 3: return 3  // const → would go to table
+                ;; At runtime, if c==3 then Go evaluates case c before case 3,
+                ;; returning 9. But if we put cases 1 and 3 in a table, n==3
+                ;; would return 3 from the table, skipping the case c check.
+                (return))
+
+
+              (when (or (not (isConstReturn ncase)) isFallthroughTarget excludeNextCase)
+                ;; Non-const body, fallthrough source, or fallthrough target:
+                ;; exclude these values from the table so the mask redirects
+                ;; them to the normal switch, preserving Go's top-to-bottom
+                ;; case evaluation order.
+                (range [_ v vals]
+                  (aset excludeSet v true))
+
+                (continue)) ; will be handled by normal switch
+
+
+              (let [retVal (aget (.-Results (assert (* ir/ReturnStmt) (aget (.-Body ncase) 0))) 0)]
+                (range [_ v vals]
+                  (aset constSet v retVal)
+                  (set! minVal (min minVal v))
+                  (set! maxVal (max maxVal v)))
+
+                (aset constCaseSet i true)))))
+
+
+        (when (< (len constSet) minCases)
+          (return))
+
+
+        (let [tableSize (+ (- maxVal minVal) 1)]
+          (when (or (<= tableSize 0) (not (isSwitchDense (conv int64 (len constSet)) tableSize)))
+            (return)) ; too sparse
+
+
+          ;; Build static lookup table and determine which slots are valid.
+          ;; Also build the bitmask inline if the table is small enough.
+          (let [tabType (types/NewArray resultType tableSize)
+              ^{:line 483} tabName (readonlystaticname tabType)
+              ^{:line 484} elemSize (conv int (.Size resultType))
+              ^{:line 485} maxBitmaskSize (conv int64 (* types/PtrSize 8)) ; 32 or 64
+
+              ^{:line 487 :tag bool} needMask (zero bool)
+              ^{:line 488 :tag uint64} bitmask (zero uint64)
+              ^{:line 489} validSlots (make (slice bool) tableSize)]
+            ;; Pre-size the symbol to cover the full table.
+            (.WriteInt (.Linksym tabName) base/Ctxt (- (* tableSize (conv int64 elemSize)) 1) 1 0)
+            (range [i tableSize]
+              (let [caseVal (+ minVal i)]
+                (if (aget excludeSet caseVal)
+                  ;; Non-const case in range: must fall through to normal switch.
+                  (set! needMask true)
+
+                  (let [val (aget constSet caseVal)]
+                    (when (== val nil)
+                      (when (== defaultVal nil)
+                        ;; Gap with no const default: must fall through to normal switch.
+                        (set! needMask true)
+                        (continue))
+
+                      (set! val defaultVal)) ; gap filled with default constant value
+
+                    (staticdata/InitConst tabName (* i (conv int64 elemSize)) val elemSize)
+                    (aset validSlots i true)
+                    (set! bitmask bit-or ^uint64 (<< 1 (conv uint i)))))))
+
+
+
+            ;; Build mask if some slots must fall through to normal switch.
+            ;; When the table fits in a register-width bitmask (≤32 entries on 32-bit,
+            ;; ≤64 on 64-bit), use the bitmask computed above. For larger tables,
+            ;; fall back to a byte array.
+            (let [^{:tag (* ir/Name)} maskName (zero (* ir/Name))
+                ^{:line 518} useBitmask (and needMask (<= tableSize maxBitmaskSize))]
+              (when (and needMask (not useBitmask))
+                (let [maskType (types/NewArray (aget types/Types types/TUINT8) tableSize)]
+                  (set! maskName (readonlystaticname maskType))
+                  (let [maskSym (.Linksym maskName)]
+                    (range [i tableSize]
+                      (let [^uint8 v (zero uint8)]
+                        (when (aget validSlots i)
+                          (set! v 1))
+
+                        (.WriteInt maskSym base/Ctxt i 1 (conv int64 v)))))))
+
+
+
+              ;; Generate code:
+              ;;   idx := uint(int(cond) - minVal)
+              ;;   if idx <= uint(maxVal-minVal) [&& bitmask>>idx&1 != 0] { return table[idx] }
+              (let [pos ^{:go/via [miniStmt miniNode]} (.Pos sw)
+
+                  ;; Widen cond to int to avoid overflow in small integer types.
+                  ^{:line 538} intType (aget types/Types types/TINT)
+                  ^{:line 539} wideCond (typecheck/Conv cond intType)
+
+                  ;; Compute idx = int(cond) - minVal.
+                  ^{:line 542 :tag ir/Node} idx (zero ir/Node)]
+                (if (!= minVal 0)
+                  (let [minLit (ir/NewBasicLit pos intType (constant/MakeInt64 minVal))]
+                    (set! idx (typecheck/Expr (ir/NewBinaryExpr pos ir/OSUB wideCond minLit))))
+
+                  (set! idx wideCond))
+
+
+                ;; Convert to uint for the one-sided bounds check and store in a temp
+                ;; so the index can be shared across the bounds check, table, and mask.
+                (let [uintType (aget types/Types types/TUINT)
+                    ^{:line 553} uidx (typecheck/Conv idx uintType)]
+                  (set! uidx (copyExpr uidx uintType (addr (.-Compiled sw))))
+
+                  ;; Bounds check: uint(idx) <= uint(maxVal - minVal).
+                  (let [rangeLit (ir/NewBasicLit pos uintType (constant/MakeUint64 (conv uint64 (- maxVal minVal))))
+                      ^{:line 558} boundsCheck (typecheck/Expr (ir/NewBinaryExpr pos ir/OLE uidx rangeLit))]
+                    (set! boundsCheck (typecheck/DefaultLit boundsCheck nil))
+
+                    ;; Table lookup: table[idx] with bounds elided (already checked).
+                    (let [lookup (ir/NewIndexExpr pos tabName uidx)]
+                      ^{:go/via [miniExpr]} (.SetBounded lookup true)
+                      (set! lookup (assert (* ir/IndexExpr) (typecheck/Expr lookup)))
+
+                      (let [retStmt (ir/NewReturnStmt pos (lit (slice ir/Node) lookup))
+
+                          ^{:line 568 :tag (slice ir/Node)} ifBody (zero (slice ir/Node))]
+                        (if needMask
+                          (let [^ir/Node maskCheck (zero ir/Node)]
+                            (if useBitmask
+                              ;; Bitmask check: (bitmask >> idx) & 1 != 0.
+                              ;; Use uintptr so the operation is register-width on all architectures.
+                              (let [bitmaskType (aget types/Types types/TUINTPTR)
+                                  ^{:line 575} bitmaskLit (ir/NewBasicLit pos bitmaskType (constant/MakeUint64 bitmask))
+                                  ^{:line 576} shifted (typecheck/Expr (ir/NewBinaryExpr pos ir/ORSH bitmaskLit uidx))
+                                  ^{:line 577} one (ir/NewBasicLit pos bitmaskType (constant/MakeUint64 1))
+                                  ^{:line 578} masked (typecheck/Expr (ir/NewBinaryExpr pos ir/OAND shifted one))
+                                  ^{:line 579} zero (ir/NewBasicLit pos bitmaskType (constant/MakeUint64 0))]
+                                (set! maskCheck (typecheck/Expr (ir/NewBinaryExpr pos ir/ONE masked zero))))
+
+                              ;; Mask array check: mask[idx] != 0.
+                              (let [maskLookup (ir/NewIndexExpr pos maskName uidx)]
+                                ^{:go/via [miniExpr]} (.SetBounded maskLookup true)
+                                (set! maskLookup (assert (* ir/IndexExpr) (typecheck/Expr maskLookup)))
+                                (let [zero (ir/NewBasicLit pos (aget types/Types types/TUINT8) (constant/MakeInt64 0))]
+                                  (set! maskCheck (typecheck/Expr (ir/NewBinaryExpr pos ir/ONE maskLookup zero))))))
+
+                            (set! maskCheck (typecheck/DefaultLit maskCheck nil))
+
+                            (let [innerIf (ir/NewIfStmt pos maskCheck (lit (slice ir/Node) retStmt) nil)]
+                              (set! ifBody (lit (slice ir/Node) innerIf))))
+
+                          (set! ifBody (lit (slice ir/Node) retStmt)))
+
+
+                        (let [outerIf (ir/NewIfStmt pos boundsCheck ifBody nil)]
+                          (.Append (.-Compiled sw) outerIf)
+
+                          ;; Remove handled const cases from sw.Cases.
+                          ;; Keep default and non-const cases for normal switch processing.
+                          (let [newCases (make (slice (* ir/CaseClause)) 0 (- (len (.-Cases sw)) (len constCaseSet)))]
+                            (range [i ncase (.-Cases sw)]
+                              (when (not (aget constCaseSet i))
+                                (set! newCases (append newCases ncase))))
+
+
+                            (set! (.-Cases sw) newCases)))))))))))))))
+
+
+
+
+
+
+^{:go/end 621} (go/func isSwitchDense "isSwitchDense reports whether a lookup table with tableSize entries\nfor numCases cases is dense enough to be worth building.\nIt requires at least 40% of table slots to be used, matching the\ndensity threshold used by LLVM's SimplifyCFG.\n" ^bool [^int64 numCases ^int64 tableSize]
+  (let [^:const ^{:val 40} minDensity 40]
+    (when (>= tableSize (/ math/MaxInt64 100))
+      (return false)) ; avoid multiplication overflow below
+
+    (>= (* numCases 100) (* tableSize minDensity))))
+
+
+
+
+^{:go/end 634} (go/func isConstReturn "isConstReturn reports whether ncase has a body that is a single\nreturn statement returning one constant.\n" ^bool [^{:tag (* ir/CaseClause)} ncase]
+  (when (!= (len (.-Body ncase)) 1)
+    (return false))
+
+  (let [(values ret ok) (assert (* ir/ReturnStmt) (aget (.-Body ncase) 0))]
+    (when (or (not ok) (!= (len (.-Results ret)) 1))
+      (return false))
+
+    (== (.Op (aget (.-Results ret) 0)) ir/OLITERAL)))
+
+
+
+
+
+^{:go/end 651} (go/func constIntCaseVals "constIntCaseVals returns the int64 values of all case expressions in\nncase, if they are all integer constants. Returns ok=false if any\ncase expression is not a constant integer.\n" [^{:tag (* ir/CaseClause)} ncase] :results [^{:tag (slice int64)} vals ^bool ok]
+  (range [_ n1 (.-List ncase)]
+    (when (or (!= (.Op n1) ir/OLITERAL) (!= (.Kind (.Val n1)) constant/Int))
+      (return nil false))
+
+    (let [(values v fit) (constant/Int64Val (.Val n1))]
+      (when (not fit)
+        (return nil false))
+
+      (set! vals (append vals v))))
+
+  (return vals true))
+
+
+^{:go/end 673} (go/method test ^ir/Node [^{:tag (* exprClause)} c ^ir/Node exprname]
+  ;; Integer range.
+  (when (!= (.-hi c) (.-lo c))
+    (let [low (ir/NewBinaryExpr (.-pos c) ir/OGE exprname (.-lo c))
+        ^{:line 657} high (ir/NewBinaryExpr (.-pos c) ir/OLE exprname (.-hi c))]
+      (return (ir/NewLogicalExpr (.-pos c) ir/OANDAND low high))))
+
+
+  ;; Optimize "switch true { ...}" and "switch false { ... }".
+  (when (and (ir/IsConst exprname constant/Bool) (not (.IsInterface (.Type (.-lo c)))))
+    (if (ir/BoolVal exprname)
+      (return (.-lo c))
+
+      (return (ir/NewUnaryExpr (.-pos c) ir/ONOT (.-lo c)))))
+
+
+
+  (let [n (ir/NewBinaryExpr (.-pos c) ir/OEQ exprname (.-lo c))]
+    (set! (.-RType n) (.-rtype c))
+    ^{:line 672} n))
+
+
+^{:go/breaks [[4 690]] :go/end 691} (go/func allCaseExprsAreSideEffectFree ^bool [^{:tag (* ir/SwitchStmt)} sw]
+  ;; In theory, we could be more aggressive, allowing any
+  ;; side-effect-free expressions in cases, but it's a bit
+  ;; tricky because some of that information is unavailable due
+  ;; to the introduction of temporaries during order.
+  ;; Restricting to constants is simple and probably powerful
+  ;; enough.
+
+  (range [_ ncase (.-Cases sw)]
+    (range [_ v (.-List ncase)]
+      (when (!= (.Op v) ir/OLITERAL)
+        (return false))))
+
+
+
+  true)
+
+
+
+^{:go/end 700} (go/func endsInFallthrough "endsInFallthrough reports whether stmts ends with a \"fallthrough\" statement.\n" [^{:tag (slice ir/Node)} stmts] :results [bool src/XPos]
+  (when (== (len stmts) 0)
+    (return false src/NoXPos))
+
+  (let [i (- (len stmts) 1)]
+    (return (== (.Op (aget stmts i)) ir/OFALL) (.Pos (aget stmts i)))))
+
+
+
+
+^{:go/end 1016} (go/func walkSwitchType "walkSwitchType generates an AST that implements sw, where sw is a\ntype switch.\n" [^{:tag (* ir/SwitchStmt)} sw]
+  (let [^typeSwitch s (zero typeSwitch)
+      ^{:line 706} origSrc (.-X (assert (* ir/TypeSwitchGuard) (.-Tag sw)))]
+    (set! (.-srcName s) origSrc)
+    (set! (.-srcName s) (walkExpr (.-srcName s) ^{:go/via [miniStmt]} (.PtrInit sw)))
+    (set! (.-srcName s) (copyExpr (.-srcName s) (.Type (.-srcName s)) (addr (.-Compiled sw))))
+    (set! (.-okName s) (typecheck/TempAt base/Pos ir/CurFunc (aget types/Types types/TBOOL)))
+    (set! (.-itabName s) (typecheck/TempAt base/Pos ir/CurFunc (.PtrTo (aget types/Types types/TUINT8))))
+
+    ;; Get interface descriptor word.
+    ;; For empty interfaces this will be the type.
+    ;; For non-empty interfaces this will be the itab.
+    (let [srcItab (ir/NewUnaryExpr base/Pos ir/OITAB (.-srcName s))
+        ^{:line 717} srcData (ir/NewUnaryExpr base/Pos ir/OIDATA (.-srcName s))]
+      ^{:go/via [miniExpr]} (.SetType srcData (.PtrTo (aget types/Types types/TUINT8)))
+      ^{:go/via [miniExpr miniNode]} (.SetTypecheck srcData 1)
+
+      ;; For empty interfaces, do:
+      ;;     if e._type == nil {
+      ;;         do nil case if it exists, otherwise default
+      ;;     }
+      ;;     h := e._type.hash
+      ;; Use a similar strategy for non-empty interfaces.
+      (let [ifNil (ir/NewIfStmt base/Pos nil nil nil)]
+        (set! (.-Cond ifNil) (ir/NewBinaryExpr base/Pos ir/OEQ srcItab (typecheck/NodNil)))
+        (set! base/Pos (.WithNotStmt base/Pos)) ; disable statement marks after the first check.
+        (set! (.-Cond ifNil) (typecheck/Expr (.-Cond ifNil)))
+        (set! (.-Cond ifNil) (typecheck/DefaultLit (.-Cond ifNil) nil))
+        ;; ifNil.Nbody assigned later.
+        (.Append (.-Compiled sw) ifNil)
+
+        ;; Load hash from type or itab.
+        (let [dotHash (typeHashFieldOf base/Pos srcItab)]
+          (set! (.-hashName s) (copyExpr dotHash ^{:go/via [miniExpr]} (.Type dotHash) (addr (.-Compiled sw))))
+
+          ;; Make a label for each case body.
+          (let [labels (make (slice (* types/Sym)) (len (.-Cases sw)))]
+            (range [i (.-Cases sw)]
+              (aset labels i (typecheck/AutoLabel ".s")))
+
+
+            ;; "jump" to execute if no case matches.
+            (let [br (ir/NewBranchStmt base/Pos ir/OBREAK nil)]
+
+              ;; Assemble a list of all the types we're looking for.
+              ;; This pass flattens the case lists, as well as handles
+              ;; some unusual cases, like default and nil cases.
+              (let-type [oneCase (struct
+                    ^{:line 752 :tag src/XPos} pos
+                    ^{:line 753 :tag ir/Node} jmp ; jump to body of selected case
+
+
+
+
+
+                    ^{:line 759 :tag ir/Node :doc "The case we're matching. Normally the type we're looking for\nis typ.Type(), but when typ is ODYNAMICTYPE the actual type\nwe're looking for is not a compile-time constant (typ.Type()\nwill be its shape).\n"} typ
+
+
+
+
+
+                    ^{:line 765 :tag ir/Node :doc "For a single runtime known type with a case var, create a\ntemporary variable to hold the value returned by the dynamic\ntype assert expr, so that we do not need one more dynamic\ntype assert expr later.\n"} val
+                    ^{:line 766 :tag int} idx)] ; index of the single runtime known type in sw.Cases
+
+                (let [^{:tag (slice oneCase)} cases (zero (slice oneCase))
+                    (values ^ir/Node defaultGoto ^ir/Node nilGoto) (zero ir/Node)]
+                  (range [i ncase (.-Cases sw)]
+                    (let [jmp (ir/NewBranchStmt ^{:go/via [miniStmt miniNode]} (.Pos ncase) ir/OGOTO (aget labels i))]
+                      (when (== (len (.-List ncase)) 0) ; default:
+                        (when (!= defaultGoto nil)
+                          (base/Fatalf "duplicate default case not detected during typechecking"))
+
+                        (set! defaultGoto jmp))
+
+                      (range [_ n1 (.-List ncase)]
+                        (when (ir/IsNil n1) ; case nil:
+                          (when (!= nilGoto nil)
+                            (base/Fatalf "duplicate nil case not detected during typechecking"))
+
+                          (set! nilGoto jmp)
+                          (continue))
+
+                        (let [idx -1
+                            ^{:line 787 :tag ir/Node} val (zero ir/Node)]
+                          ;; for a single runtime known type with a case var, create the tmpVar
+                          (when (and (== (len (.-List ncase)) 1) (== (.Op (aget (.-List ncase) 0)) ir/ODYNAMICTYPE) (!= (.-Var ncase) nil))
+                            (set! val (typecheck/TempAt ^{:go/via [miniStmt miniNode]} (.Pos ncase) ir/CurFunc ^{:go/via [miniExpr]} (.Type (.-Var ncase))))
+                            (set! idx i))
+
+                          (set! cases (append cases ^{:go/breaks [2 4 6 8 10]} (lit oneCase
+                                :pos ^{:go/via [miniStmt miniNode]} (.Pos ncase)
+                                :typ n1
+                                :jmp jmp
+                                :val val
+                                :idx idx)))))))
+
+
+
+                  (when (== defaultGoto nil)
+                    (set! defaultGoto br))
+
+                  (when (== nilGoto nil)
+                    (set! nilGoto defaultGoto))
+
+                  (set! (.-Body ifNil) (lit (slice ir/Node) nilGoto))
+
+                  ;; Now go through the list of cases, processing groups as we find them.
+                  (let [^{:tag (slice oneCase)} concreteCases (zero (slice oneCase))
+                      ^{:line 812 :tag (slice oneCase)} interfaceCases (zero (slice oneCase))
+                      ^{:line 813} flush ^{:go/end 893} (fn []
+                        ;; Process all the concrete types first. Because we handle shadowing
+                        ;; below, it is correct to do all the concrete types before all of
+                        ;; the interface types.
+                        ;; The concrete cases can all be handled without a runtime call.
+                        (when (> (len concreteCases) 0)
+                          (let [^{:tag (slice typeClause)} clauses (zero (slice typeClause))]
+                            (range [_ c concreteCases]
+                              (let [as (ir/NewAssignListStmt (.-pos c) ir/OAS2
+                                    (lit (slice ir/Node) ir/BlankNode (.-okName s)) ; _, ok =
+                                    (lit (slice ir/Node) (ir/NewTypeAssertExpr (.-pos c) (.-srcName s) (.Type (.-typ c))))) ; iface.(type)
+                                  ^{:line 824} nif (ir/NewIfStmt (.-pos c) (.-okName s) (lit (slice ir/Node) (.-jmp c)) nil)]
+                                (set! clauses (append clauses ^{:go/breaks [2 4]} (lit typeClause
+                                      :hash (types/TypeHash (.Type (.-typ c)))
+                                      :body (lit (slice ir/Node) (typecheck/Stmt as) (typecheck/Stmt nif)))))))
+
+
+                            (.flush s clauses (addr (.-Compiled sw)))
+                            (set! concreteCases (subslice concreteCases _ 0))))
+
+
+                        ;; The "any" case, if it exists, must be the last interface case, because
+                        ;; it would shadow all subsequent cases. Strip it off here so the runtime
+                        ;; call only needs to handle non-empty interfaces.
+                        (let [^ir/Node anyGoto (zero ir/Node)]
+                          (when (and (> (len interfaceCases) 0) (.IsEmptyInterface (.Type (.-typ (aget interfaceCases (- (len interfaceCases) 1))))))
+                            (set! anyGoto (.-jmp (aget interfaceCases (- (len interfaceCases) 1))))
+                            (set! interfaceCases (subslice interfaceCases _ (- (len interfaceCases) 1))))
+
+
+                          ;; Next, process all the interface types with a single call to the runtime.
+                          (when (> (len interfaceCases) 0)
+
+                            ;; Build an internal/abi.InterfaceSwitch descriptor to pass to the runtime.
+                            (let [lsym (.LinksymABI (.Lookup types/LocalPkg (fmt/Sprintf ".interfaceSwitch.%d" interfaceSwitchGen)) obj/ABI0)]
+                              (inc! interfaceSwitchGen)
+                              (let [c (rttype/NewCursor lsym 0 rttype/InterfaceSwitch)]
+                                (.WritePtr (.Field c "Cache") (typecheck/LookupRuntimeVar "emptyInterfaceSwitchCache"))
+                                (.WriteInt (.Field c "NCases") (conv int64 (len interfaceCases)))
+                                (let [(values array sizeDelta) (.ModifyArray (.Field c "Cases") (len interfaceCases))]
+                                  (range [i c interfaceCases]
+                                    (.WritePtr (.Elem array i) (reflectdata/TypeLinksym (.Type (.-typ c)))))
+
+                                  (objw/Global lsym (conv int32 (+ (.Size rttype/InterfaceSwitch) sizeDelta)) obj/LOCAL)
+                                  ;; The GC only needs to see the first pointer in the structure (all the others
+                                  ;; are to static locations). So the InterfaceSwitch type itself is fine, even
+                                  ;; though it might not cover the whole array we wrote above.
+                                  (set! (.-Gotype lsym) (reflectdata/TypeLinksym rttype/InterfaceSwitch))
+
+                                  ;; Call runtime to do switch
+                                  ;; case, itab = runtime.interfaceSwitch(&descriptor, typeof(arg))
+                                  (let [^ir/Node typeArg (zero ir/Node)]
+                                    (if (.IsEmptyInterface (.Type (.-srcName s)))
+                                      (set! typeArg (ir/NewConvExpr base/Pos ir/OCONVNOP (.PtrTo (aget types/Types types/TUINT8)) srcItab))
+
+                                      (set! typeArg (itabType srcItab)))
+
+                                    (let [caseVar (typecheck/TempAt base/Pos ir/CurFunc (aget types/Types types/TINT))
+                                        ^{:line 871} isw (ir/NewInterfaceSwitchStmt base/Pos caseVar (.-itabName s) typeArg dotHash lsym)]
+                                      (.Append (.-Compiled sw) isw)
+
+                                      ;; Switch on the result of the call (or cache lookup).
+                                      (let [^{:tag (slice (* ir/CaseClause))} newCases (zero (slice (* ir/CaseClause)))]
+                                        (range [i c interfaceCases]
+                                          (set! newCases (append newCases (addr ^{:go/breaks [2 4]} (lit ir/CaseClause
+                                                  :List (lit (slice ir/Node) (ir/NewInt base/Pos (conv int64 i)))
+                                                  :Body (lit (slice ir/Node) (.-jmp c)))))))
+
+
+                                        ;; TODO: add len(newCases) case, mark switch as bounded
+                                        (let [sw2 (ir/NewSwitchStmt base/Pos caseVar newCases)]
+                                          (.Append (.-Compiled sw) (typecheck/Stmt sw2))
+                                          (set! interfaceCases (subslice interfaceCases _ 0))))))))))
+
+
+                          (when (!= anyGoto nil)
+                            ;; We've already handled the nil case, so everything
+                            ;; that reaches here matches the "any" case.
+                            (.Append (.-Compiled sw) anyGoto))))]
+
+
+                    (label :caseLoop
+                      (range [_ c cases]
+                        (when (== (.Op (.-typ c)) ir/ODYNAMICTYPE)
+                          (flush) ; process all previous cases
+                          (let [dt (assert (* ir/DynamicType) (.-typ c))
+                              ^{:line 899} dot (ir/NewDynamicTypeAssertExpr (.-pos c) ir/ODYNAMICDOTTYPE (.-srcName s) (.-RType dt))]
+                            (set! (.-ITab dot) (.-ITab dt))
+                            ^{:go/via [miniExpr]} (.SetType dot (.Type (.-typ c)))
+                            ^{:go/via [miniExpr miniNode]} (.SetTypecheck dot 1)
+
+                            (let [as (ir/NewAssignListStmt (.-pos c) ir/OAS2 nil nil)]
+                              (set! (.-Lhs as) (lit (slice ir/Node) ir/BlankNode (.-okName s))) ; _, ok =
+                              (when (!= (.-val c) nil)
+                                (aset (.-Lhs as) 0 (.-val c))) ; tmpVar, ok =
+
+                              (set! (.-Rhs as) (lit (slice ir/Node) dot))
+                              (typecheck/Stmt as)
+
+                              (let [nif (ir/NewIfStmt (.-pos c) (.-okName s) (lit (slice ir/Node) (.-jmp c)) nil)]
+                                (.Append (.-Compiled sw) as nif)
+                                (continue)))))
+
+
+                        ;; Check for shadowing (a case that will never fire because
+                        ;; a previous case would have always fired first). This check
+                        ;; allows us to reorder concrete and interface cases.
+                        ;; (TODO: these should be vet failures, maybe?)
+                        (range [_ ic interfaceCases]
+                          ;; An interface type case will shadow all
+                          ;; subsequent types that implement that interface.
+                          (when (typecheck/Implements (.Type (.-typ c)) (.Type (.-typ ic)))
+                            (continue :caseLoop)))
+
+                        ;; Note that we don't need to worry about:
+                        ;; 1. Two concrete types shadowing each other. That's
+                        ;;    disallowed by the spec.
+                        ;; 2. A concrete type shadowing an interface type.
+                        ;;    That can never happen, as interface types can
+                        ;;    be satisfied by an infinite set of concrete types.
+                        ;; The correctness of this step also depends on handling
+                        ;; the dynamic type cases separately, as we do above.
+
+
+                        (when (shapeTypeAssertImpossible origSrc (.Type (.-typ c)))
+                          (continue))
+
+
+                        (if (.IsInterface (.Type (.-typ c)))
+                          (set! interfaceCases (append interfaceCases c))
+
+                          (set! concreteCases (append concreteCases c)))))
+
+
+                    (flush)
+
+                    (.Append (.-Compiled sw) defaultGoto) ; if none of the cases matched
+
+                    ;; Now generate all the case bodies
+                    (range [i ncase (.-Cases sw)]
+                      (.Append (.-Compiled sw) (ir/NewLabelStmt ^{:go/via [miniStmt miniNode]} (.Pos ncase) (aget labels i)))
+                      (when [caseVar (.-Var ncase)] (!= caseVar nil)
+                        (let [val (.-srcName s)]
+                          (when (== (len (.-List ncase)) 1)
+                            ;; single type. We have to downcast the input value to the target type.
+                            (cond (== (.Op (aget (.-List ncase) 0)) ir/OTYPE) ; single compile-time known type
+                              (let [t (.Type (aget (.-List ncase) 0))]
+                                (if (.IsInterface t)
+                                  ;; This case is an interface. Build case value from input interface.
+                                  ;; The data word will always be the same, but the itab/type changes.
+                                  (if (.IsEmptyInterface t)
+                                    (let [^ir/Node typ (zero ir/Node)]
+                                      (if (.IsEmptyInterface (.Type (.-srcName s)))
+                                        ;; E->E, nothing to do, type is already correct.
+                                        (set! typ srcItab)
+                                        (do
+                                          ;; I->E, load type out of itab
+                                          (set! typ (itabType srcItab))
+                                          (.SetPos typ ^{:go/via [miniStmt miniNode]} (.Pos ncase))))
+
+                                      (set! val (ir/NewBinaryExpr ^{:go/via [miniStmt miniNode]} (.Pos ncase) ir/OMAKEFACE typ srcData)))
+
+                                    ;; The itab we need was returned by a runtime.interfaceSwitch call.
+                                    (set! val (ir/NewBinaryExpr ^{:go/via [miniStmt miniNode]} (.Pos ncase) ir/OMAKEFACE (.-itabName s) srcData)))
+
+
+                                  ;; This case is a concrete type, just read its value out of the interface.
+                                  (set! val (ifaceData ^{:go/via [miniStmt miniNode]} (.Pos ncase) (.-srcName s) t))))
+
+                              (== (.Op (aget (.-List ncase) 0)) ir/ODYNAMICTYPE) ; single runtime known type
+                              (let [^bool found (zero bool)]
+                                (range [_ c cases]
+                                  (when (== (.-idx c) i)
+                                    (set! val (.-val c))
+                                    (set! found (!= val nil))
+                                    (break)))
+
+
+                                ;; the tmpVar must always be found
+                                (when (not found)
+                                  (base/Fatalf "an error occurred when processing type switch case %v" (aget (.-List ncase) 0))))
+
+                              (ir/IsNil (aget (.-List ncase) 0)) (do) :else
+
+                              (base/Fatalf "unhandled type switch case %v" (aget (.-List ncase) 0)))
+
+                            (.SetType val ^{:go/via [miniExpr]} (.Type caseVar))
+                            (.SetTypecheck val 1))
+
+                          (let [l (lit (slice ir/Node)
+                                (ir/NewDecl ^{:go/via [miniStmt miniNode]} (.Pos ncase) ir/ODCL caseVar)
+                                (ir/NewAssignStmt ^{:go/via [miniStmt miniNode]} (.Pos ncase) caseVar val))]
+
+                            (typecheck/Stmts l)
+                            (.Append (.-Compiled sw) (spread l)))))
+
+                      (.Append (.-Compiled sw) (spread (.-Body ncase)))
+                      (.Append (.-Compiled sw) br))
+
+
+                    (walkStmtList (.-Compiled sw))
+                    (set! (.-Tag sw) nil)
+                    (set! (.-Cases sw) nil)))))))))))
+
+
+(go/var ^int interfaceSwitchGen)
+
+
+
+
+^{:go/end 1042} (go/func typeHashFieldOf "typeHashFieldOf returns an expression to select the type hash field\nfrom an interface's descriptor word (whether a *runtime._type or\n*runtime.itab pointer).\n" ^{:tag (* ir/SelectorExpr)} [^src/XPos pos ^{:tag (* ir/UnaryExpr)} itab]
+  (when (!= ^{:go/via [miniExpr miniNode]} (.Op itab) ir/OITAB)
+    (base/Fatalf "expected OITAB, got %v" ^{:go/via [miniExpr miniNode]} (.Op itab)))
+
+  (let [^{:tag (* types/Field)} hashField (zero (* types/Field))]
+    (if (.IsEmptyInterface (.Type (.-X itab))) (do
+        ;; runtime._type's hash field
+        (when (== rtypeHashField nil)
+          (set! rtypeHashField (runtimeField "hash" (.OffsetOf rttype/Type "Hash") (aget types/Types types/TUINT32))))
+
+        (set! hashField rtypeHashField))
+      (do
+        ;; runtime.itab's hash field
+        (when (== itabHashField nil)
+          (set! itabHashField (runtimeField "hash" (.OffsetOf rttype/ITab "Hash") (aget types/Types types/TUINT32))))
+
+        (set! hashField itabHashField)))
+
+    (boundedDotPtr pos itab hashField)))
+
+
+(go/var (values ^{:tag (* types/Field)} rtypeHashField ^{:tag (* types/Field)} itabHashField))
+
+
+(go/type typeSwitch "A typeSwitch walks a type switch.\n" (struct
+
+    ^{:line 1049 :tag ir/Node :doc "Temporary variables (i.e., ONAMEs) used by type switch dispatch logic:\n"} srcName ; value being type-switched on
+    ^{:line 1050 :tag ir/Node} hashName ; type hash of the value being type-switched on
+    ^{:line 1051 :tag ir/Node} okName ; boolean used for comma-ok type assertions
+    ^{:line 1052 :tag ir/Node} itabName)) ; itab value to use for first word of non-empty interface
+
+
+(go/type typeClause (struct
+    ^{:line 1056 :tag uint32} hash
+    ^{:line 1057 :tag ir/Nodes} body))
+
+
+^{:go/end 1094} (go/method flush [^{:tag (* typeSwitch)} s ^{:tag (slice typeClause)} cc ^{:tag (* ir/Nodes)} compiled]
+  (when (== (len cc) 0)
+    (return))
+
+
+  (^{:inst [(slice typeClause) typeClause]} slices/SortFunc cc ^{:go/end 1065} (fn ^int [^typeClause a ^typeClause b] (^{:inst [uint32]} cmp/Compare (.-hash a) (.-hash b))))
+
+  ;; Combine adjacent cases with the same hash.
+  (let [merged (subslice cc _ 1)]
+    (range [_ c (subslice cc 1)]
+      (let [last (addr (aget merged (- (len merged) 1)))]
+        (if (== (.-hash last) (.-hash c))
+          (.Append (.-body last) (spread (.Take (.-body c))))
+
+          (set! merged (append merged c)))))
+
+
+    (set! cc merged)
+
+    (when (.tryJumpTable s cc compiled)
+      (return))
+
+    (binarySearch (len cc) compiled
+      ^{:go/end 1085} (fn ^ir/Node [^int i]
+        (ir/NewBinaryExpr base/Pos ir/OLE (.-hashName s) (ir/NewInt base/Pos (conv int64 (.-hash (aget cc (- i 1)))))))
+
+      ^{:go/end 1092} (fn [^int i ^{:tag (* ir/IfStmt)} nif]
+        ;; TODO(mdempsky): Omit hash equality check if
+        ;; there's only one type.
+        (let [c (aget cc i)]
+          (set! (.-Cond nif) (ir/NewBinaryExpr base/Pos ir/OEQ (.-hashName s) (ir/NewInt base/Pos (conv int64 (.-hash c)))))
+          (.Append (.-Body nif) (spread (.Take (.-body c)))))))))
+
+
+
+
+
+^{:go/end 1169} (go/method tryJumpTable "Try to implement the clauses with a jump table. Returns true if successful.\n" ^bool [^{:tag (* typeSwitch)} s ^{:tag (slice typeClause)} cc ^{:tag (* ir/Nodes)} out]
+  (let [^:const ^{:val 5} minCases 5] ; have at least minCases cases in the switch
+    (when (or (!= (.-N base/Flag) 0) (not ^{:go/via [Arch]} (.-CanJumpTable (.-LinkArch ssagen/Arch))) (.-Retpoline base/Ctxt))
+      (return false))
+
+    (when (< (len cc) minCases)
+      (return false)) ; not enough cases for it to be worth it
+
+    ^{:go/breaks [[3 1168]]} (let [hashes (make (slice uint32) (len cc))
+        ;; b = # of bits to use. Start with the minimum number of
+        ;; bits possible, but try a few larger sizes if needed.
+        ^{:line 1108} b0 (bits/Len (conv uint (- (len cc) 1)))]
+      (for [b b0] (< b (+ b0 3)) (inc! b)
+        (label :pickI
+          (for [i 0] (<= i (- 32 b)) (inc! i) ; starting bit position
+            ;; Compute the hash we'd get from all the cases,
+            ;; selecting b bits starting at bit i.
+            (set! hashes (subslice hashes _ 0))
+            (range [_ c cc]
+              (let [h (bit-and (>> (.-hash c) i) (- ^uint32 (<< 1 b) 1))]
+                (set! hashes (append hashes h))))
+
+            ;; Order by increasing hash.
+            (^{:inst [(slice uint32) uint32]} slices/Sort hashes)
+            (for [j 1] (< j (len hashes)) (inc! j)
+              (when (== (aget hashes j) (aget hashes (- j 1)))
+                ;; There is a duplicate hash; try a different b/i pair.
+                (continue :pickI)))
+
+
+
+            ;; All hashes are distinct. Use these values of b and i.
+            (let [h (.-hashName s)]
+              (when (!= i 0)
+                (set! h (ir/NewBinaryExpr base/Pos ir/ORSH h (ir/NewInt base/Pos (conv int64 i)))))
+
+              (set! h (ir/NewBinaryExpr base/Pos ir/OAND h (ir/NewInt base/Pos (conv int64 (- ^int64 (<< 1 b) 1)))))
+              (set! h (typecheck/Expr h))
+
+              ;; Build jump table.
+              (let [jt (ir/NewJumpTableStmt base/Pos h)]
+                (set! (.-Cases jt) (make (slice constant/Value) ^int (<< 1 b)))
+                (set! (.-Targets jt) (make (slice (* types/Sym)) ^int (<< 1 b)))
+                (.Append out jt)
+
+                ;; Start with all hashes going to the didn't-match target.
+                (let [noMatch (typecheck/AutoLabel ".s")]
+                  (for [j 0] (< j ^int (<< 1 b)) (inc! j)
+                    (aset (.-Cases jt) j (constant/MakeInt64 (conv int64 j)))
+                    (aset (.-Targets jt) j noMatch))
+
+                  ;; This statement is not reachable, but it will make it obvious that we don't
+                  ;; fall through to the first case.
+                  (.Append out (ir/NewBranchStmt base/Pos ir/OGOTO noMatch))
+
+                  ;; Emit each of the actual cases.
+                  (range [_ c cc]
+                    (let [h (bit-and (>> (.-hash c) i) (- ^uint32 (<< 1 b) 1))
+                        ^{:line 1155} label (typecheck/AutoLabel ".s")]
+                      (aset (.-Targets jt) h label)
+                      (.Append out (ir/NewLabelStmt base/Pos label))
+                      (.Append out (spread (.-body c)))
+                      ;; We reach here if the hash matches but the type equality test fails.
+                      (.Append out (ir/NewBranchStmt base/Pos ir/OGOTO noMatch))))
+
+                  ;; Emit point to go to if type doesn't match any case.
+                  (.Append out (ir/NewLabelStmt base/Pos noMatch))
+                  (return true)))))))
+
+
+      ;; Couldn't find a perfect hash. Fall back to binary search.
+      false)))
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 1211} (go/func binarySearch "binarySearch constructs a binary search tree for handling n cases,\nand appends it to out. It's used for efficiently implementing\nswitch statements.\n\nless(i) should return a boolean expression. If it evaluates true,\nthen cases before i will be tested; otherwise, cases i and later.\n\nleaf(i, nif) should setup nif (an OIF node) to test case i. In\nparticular, it should set nif.Cond and nif.Body.\n" [^int n ^{:tag (* ir/Nodes)} out ^{:tag (func [^int i] [ir/Node])} less ^{:tag (func [^int i ^{:tag (* ir/IfStmt)} nif])} leaf]
+  (let [^:const ^{:val 4} binarySearchMin 4 ; minimum number of cases for binary search
+
+      ^{:line 1183 :tag (func [^int lo ^int hi ^{:tag (* ir/Nodes)} out])} do (zero (func [^int lo ^int hi ^{:tag (* ir/Nodes)} out]))]
+    (set! do ^{:go/end 1208} (fn [^int lo ^int hi ^{:tag (* ir/Nodes)} out]
+        (let [n (- hi lo)]
+          (when (< n binarySearchMin)
+            (for [i lo] (< i hi) (inc! i)
+              (let [nif (ir/NewIfStmt base/Pos nil nil nil)]
+                (leaf i nif)
+                (set! base/Pos (.WithNotStmt base/Pos))
+                (set! (.-Cond nif) (typecheck/Expr (.-Cond nif)))
+                (set! (.-Cond nif) (typecheck/DefaultLit (.-Cond nif) nil))
+                (.Append out nif)
+                (set! out (addr (.-Else nif)))))
+
+            (return))
+
+
+          (let [half (+ lo (/ n 2))
+              ^{:line 1200} nif (ir/NewIfStmt base/Pos nil nil nil)]
+            (set! (.-Cond nif) (less half))
+            (set! base/Pos (.WithNotStmt base/Pos))
+            (set! (.-Cond nif) (typecheck/Expr (.-Cond nif)))
+            (set! (.-Cond nif) (typecheck/DefaultLit (.-Cond nif) nil))
+            (go/call do lo half (addr (.-Body nif)))
+            (go/call do half hi (addr (.-Else nif)))
+            (.Append out nif)))))
+
+
+    (go/call do 0 n out)))
+
+
+^{:go/end 1298} (go/func stringSearch [^ir/Node expr ^{:tag (slice exprClause)} cc ^{:tag (* ir/Nodes)} out]
+  (when (< (len cc) 4)
+    ;; Short list, just do brute force equality checks.
+    (range [_ c cc]
+      (let [nif (ir/NewIfStmt (.WithNotStmt base/Pos) (typecheck/DefaultLit (typecheck/Expr (.test c expr)) nil) (lit (slice ir/Node) (.-jmp c)) nil)]
+        (.Append out nif)
+        (set! out (addr (.-Else nif)))))
+
+    (return))
+
+
+  ;; The strategy here is to find a simple test to divide the set of possible strings
+  ;; that might match expr approximately in half.
+  ;; The test we're going to use is to do an ordered comparison of a single byte
+  ;; of expr to a constant. We will pick the index of that byte and the value we're
+  ;; comparing against to make the split as even as possible.
+  ;;   if expr[3] <= 'd' { ... search strings with expr[3] at 'd' or lower  ... }
+  ;;   else              { ... search strings with expr[3] at 'e' or higher ... }
+  ;;
+  ;; To add complication, we will do the ordered comparison in the signed domain.
+  ;; The reason for this is to prevent CSE from merging the load used for the
+  ;; ordered comparison with the load used for the later equality check.
+  ;;   if expr[3] <= 'd' { ... if expr[0] == 'f' && expr[1] == 'o' && expr[2] == 'o' && expr[3] == 'd' { ... } }
+  ;; If we did both expr[3] loads in the unsigned domain, they would be CSEd, and that
+  ;; would in turn defeat the combining of expr[0]...expr[3] into a single 4-byte load.
+  ;; See issue 48222.
+  ;; By using signed loads for the ordered comparison and unsigned loads for the
+  ;; equality comparison, they don't get CSEd and the equality comparisons will be
+  ;; done using wider loads.
+
+  (let [n (len (ir/StringVal (.-lo (aget cc 0)))) ; Length of the constant strings.
+      ^{:line 1244} bestScore (conv int64 0) ; measure of how good the split is.
+      ^{:line 1245} bestIdx 0 ; split using expr[bestIdx]
+      ^{:line 1246} bestByte (conv int8 0)] ; compare expr[bestIdx] against bestByte
+    (for [idx 0] (< idx n) (inc! idx)
+      (for [b (conv int8 -128)] (< b 127) (inc! b)
+        (let [le 0]
+          (range [_ c cc]
+            (let [s (ir/StringVal (.-lo c))]
+              (when (<= (conv int8 (aget s idx)) b)
+                (inc! le))))
+
+
+          (let [score (* (conv int64 le) (conv int64 (- (len cc) le)))]
+            (when (> score bestScore)
+              (set! bestScore score)
+              (set! bestIdx idx)
+              (set! bestByte b))))))
+
+
+
+
+    ;; The split must be at least 1:n-1 because we have at least 2 distinct strings; they
+    ;; have to be different somewhere.
+    ;; TODO: what if the best split is still pretty bad?
+    (when (== bestScore 0)
+      (base/Fatalf "unable to split string set"))
+
+
+    ;; Convert expr to a []int8
+    (let [slice (ir/NewConvExpr base/Pos ir/OSTR2BYTESTMP (types/NewSlice (aget types/Types types/TINT8)) expr)]
+      ^{:go/via [miniExpr miniNode]} (.SetTypecheck slice 1) ; legacy typechecker doesn't handle this op
+      ^{:go/via [miniExpr]} (.MarkNonNil slice)
+      ;; Load the byte we're splitting on.
+      (let [load (ir/NewIndexExpr base/Pos slice (ir/NewInt base/Pos (conv int64 bestIdx)))
+          ;; Compare with the value we're splitting on.
+          ^{:line 1279} cmp (conv ir/Node (ir/NewBinaryExpr base/Pos ir/OLE load (ir/NewInt base/Pos (conv int64 bestByte))))]
+        (set! cmp (typecheck/DefaultLit (typecheck/Expr cmp) nil))
+        (let [nif (ir/NewIfStmt base/Pos cmp nil nil)
+
+            ^{:line 1283 :tag (slice exprClause)} le (zero (slice exprClause))
+            ^{:line 1284 :tag (slice exprClause)} gt (zero (slice exprClause))]
+          (range [_ c cc]
+            (let [s (ir/StringVal (.-lo c))]
+              (if (<= (conv int8 (aget s bestIdx)) bestByte)
+                (set! le (append le c))
+
+                (set! gt (append gt c)))))
+
+
+          (stringSearch expr le (addr (.-Body nif)))
+          (stringSearch expr gt (addr (.-Else nif)))
+          (.Append out nif))))))
+
+;; TODO: if expr[bestIdx] has enough different possible values, use a jump table.

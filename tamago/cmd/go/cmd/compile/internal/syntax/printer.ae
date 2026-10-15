@@ -1,0 +1,1018 @@
+;; Copyright 2016 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; This file implements printing of syntax trees in source format.
+
+(in-ns 'go.cmd.compile.internal.syntax) (go/file "printer.go" :imports [
+
+
+    ^{:line 10} [fmt "fmt"]
+    ^{:line 11} [io "io"]
+    ^{:line 12} [strings "strings"]])
+
+
+
+(go/type Form "Form controls print formatting.\n" uint)
+
+(go/const
+  ^{:line 19} [^{:tag Form :val 0} _ iota] ; default
+  ^{:line 20} [^{:val 1} LineForm] ; use spaces instead of linebreaks where possible
+  ^{:line 21} [^{:val 2} ShortForm]) ; like LineForm but print "…" for non-empty function or composite literal bodies
+
+
+
+
+^{:go/end 44} (go/func Fprint "Fprint prints node x to w in the specified form.\nIt returns the number of bytes written, and whether there was an error.\n" [^io/Writer w ^Node x ^Form form] :results [^int n ^error err]
+  (let [p ^{:go/breaks [2 4 6]} (lit printer
+        :output w
+        :form form
+        :linebreaks (== form 0))]
+
+
+    (defer (^{:go/end 38} (fn []
+          (set! n (.-written p))
+          (when [e (recover)] (!= e nil)
+            (set! err (.-err (assert writeError e))))))) ; re-panics if it's not a writeError
+
+
+
+    (.print p x)
+    (.flush p _EOF)
+
+    (return)))
+
+
+
+
+^{:go/end 55} (go/func String "String is a convenience function that prints n in ShortForm\nand returns the printed string.\n" ^string [^Node n]
+  (let [^strings/Builder buf (zero strings/Builder)
+      (values _ err) (Fprint (addr buf) n ShortForm)]
+    (when (!= err nil)
+      (fmt/Fprintf (addr buf) "<<< ERROR: %s" err))
+
+    (.String buf)))
+
+
+(go/type ctrlSymbol int)
+
+(go/const
+  ^{:line 60} [^{:tag ctrlSymbol :val 0} none iota]
+  ^{:line 61} [^{:val 1} semi]
+  ^{:line 62} [^{:val 2} blank]
+  ^{:line 63} [^{:val 3} newline]
+  ^{:line 64} [^{:val 4} indent]
+  ^{:line 65} [^{:val 5} outdent])
+;; comment
+;; eolComment
+
+
+(go/type whitespace (struct
+    ^{:line 71 :tag token} last
+    ^{:line 72 :tag ctrlSymbol} kind))
+;;text string // comment text (possibly ""); valid if kind == comment
+
+
+(go/type printer (struct
+    ^{:line 77 :tag io/Writer} output
+    ^{:line 78 :tag int} written ; number of bytes written
+    ^{:line 79 :tag Form} form
+    ^{:line 80 :tag bool} linebreaks ; print linebreaks instead of semis
+
+    ^{:line 82 :tag int} indent ; current indentation level
+    ^{:line 83 :tag int} nlcount ; number of consecutive newlines
+
+    ^{:line 85 :tag (slice whitespace)} pending ; pending whitespace
+    ^{:line 86 :tag token} lastTok)) ; last token (after any pending semi) processed by print
+
+
+
+
+^{:go/end 97} (go/method write "write is a thin wrapper around p.output.Write\nthat takes care of accounting and error handling.\n" [^{:tag (* printer)} p ^{:tag (slice byte)} data]
+  (let [(values n err) (.Write (.-output p) data)]
+    (set! (.-written p) + n)
+    (when (!= err nil)
+      (panic (lit writeError err)))))
+
+
+
+(go/var
+  ^{:line 100} [tabBytes (conv (slice byte) "\t\t\t\t\t\t\t\t")]
+  ^{:line 101} [newlineByte (conv (slice byte) "\n")]
+  ^{:line 102} [blankByte (conv (slice byte) " ")])
+
+
+^{:go/end 120} (go/method writeBytes [^{:tag (* printer)} p ^{:tag (slice byte)} data]
+  (when (== (len data) 0)
+    (panic "expected non-empty []byte"))
+
+  (when (and (> (.-nlcount p) 0) (> (.-indent p) 0))
+    ;; write indentation
+    (let [n (.-indent p)]
+      (while (> n (len tabBytes))
+        (.write p tabBytes)
+        (set! n - (len tabBytes)))
+
+      (.write p (subslice tabBytes _ n))))
+
+  (.write p data)
+  (set! (.-nlcount p) 0))
+
+
+^{:go/end 124} (go/method writeString [^{:tag (* printer)} p ^string s]
+  (.writeBytes p (conv (slice byte) s)))
+
+
+
+
+
+^{:go/breaks [[5 136]] :go/end 137} (go/func impliesSemi "If impliesSemi returns true for a non-blank line's final token tok,\na semicolon is automatically inserted. Vice versa, a semicolon may\nbe omitted in those cases.\n" ^bool [^token tok]
+  (switch tok
+    (case [_Name
+        ^{:line 132} _Break _Continue _Fallthrough _Return
+        ^{:line 133} _Rparen _Rbrack _Rbrace] ; /*_Inc, _Dec,*/ ; TODO(gri) fix this
+      (return true)))
+
+  false)
+
+
+;; TODO(gri) provide table of []byte values for all tokens to avoid repeated string conversion
+
+^{:go/end 150} (go/method addWhitespace [^{:tag (* printer)} p ^ctrlSymbol kind ^string text]
+  (set! (.-pending p) (append (.-pending p) (lit whitespace (.-lastTok p) kind))) ; /*text*/
+  (switch kind
+    (case [semi]
+      (set! (.-lastTok p) _Semi))
+    (case [newline]
+      (set! (.-lastTok p) 0))))
+;; TODO(gri) do we need to handle /*-style comments containing newlines here?
+
+
+
+^{:go/end 229} (go/method flush [^{:tag (* printer)} p ^token next]
+  ;; eliminate semis and redundant whitespace
+  (let [sawNewline (== next _EOF)
+      ^{:line 155} sawParen (or (== next _Rparen) (== next _Rbrace))]
+    (for [i (- (len (.-pending p)) 1)] (>= i 0) (dec! i)
+      (switch (.-kind (aget (.-pending p) i))
+        (case [semi]
+          (let [k semi]
+            (cond sawParen (do
+                (set! sawParen false)
+                (set! k none)) ; eliminate semi
+              (and sawNewline (impliesSemi (.-last (aget (.-pending p) i)))) (do
+                (set! sawNewline false)
+                (set! k none))) ; eliminate semi
+
+            (set! (.-kind (aget (.-pending p) i)) k)))
+        (case [newline]
+          (set! sawNewline true))
+        (case [blank indent outdent])
+        ;; nothing to do
+        ;; case comment:
+        ;; 	// A multi-line comment acts like a newline; and a ""
+        ;; 	// comment implies by definition at least one newline.
+        ;; 	if text := p.pending[i].text; strings.HasPrefix(text, "/*") && strings.ContainsRune(text, '\n') {
+        ;; 		sawNewline = true
+        ;; 	}
+        ;; case eolComment:
+        ;; 	// TODO(gri) act depending on sawNewline
+        (default
+          (panic "unreachable"))))
+
+
+
+    ;; print pending
+    (let [prev none]
+      (range [i (.-pending p)]
+        (switch (.-kind (aget (.-pending p) i))
+          (case [none])
+          ;; nothing to do
+          (case [semi]
+            (.writeString p ";")
+            (set! (.-nlcount p) 0)
+            (set! prev semi))
+          (case [blank]
+            (when (!= prev blank)
+              ;; at most one blank
+              (.writeBytes p blankByte)
+              (set! (.-nlcount p) 0)
+              (set! prev blank)))
+
+          (case [newline]
+            (let [^:const ^{:val 1} maxEmptyLines 1]
+              (when (<= (.-nlcount p) maxEmptyLines)
+                (.write p newlineByte)
+                (inc! (.-nlcount p))
+                (set! prev newline))))
+
+          (case [indent]
+            (inc! (.-indent p)))
+          (case [outdent]
+            (dec! (.-indent p))
+            (when (< (.-indent p) 0)
+              (panic "negative indentation")))
+
+          ;; case comment:
+          ;; 	if text := p.pending[i].text; text != "" {
+          ;; 		p.writeString(text)
+          ;; 		p.nlcount = 0
+          ;; 		prev = comment
+          ;; 	}
+          ;; 	// TODO(gri) should check that line comments are always followed by newline
+          (default
+            (panic "unreachable"))))
+
+
+
+      (set! (.-pending p) (subslice (.-pending p) _ 0))))) ; re-use underlying array
+
+
+^{:go/end 248} (go/func mayCombine [^token prev ^byte next] :results [^bool b]
+  (return)) ; for now
+;; switch prev {
+;; case lexical.Int:
+;; 	b = next == '.' // 1.
+;; case lexical.Add:
+;; 	b = next == '+' // ++
+;; case lexical.Sub:
+;; 	b = next == '-' // --
+;; case lexical.Quo:
+;; 	b = next == '*' // /*
+;; case lexical.Lss:
+;; 	b = next == '-' || next == '<' // <- or <<
+;; case lexical.And:
+;; 	b = next == '&' || next == '^' // && or &^
+;; }
+;; return
+
+
+^{:go/end 314} (go/method print [^{:tag (* printer)} p & ^{:tag (slice any)} args]
+  (for [i 0] (< i (len args)) (inc! i)
+    (type-switch [x (aget args i)]
+      (case [nil])
+      ;; we should not reach here but don't crash
+
+      (case [Node]
+        (.printNode p x))
+
+      (case [token]
+        ;; _Name implies an immediately following string
+        ;; argument which is the actual value to print.
+        (let [^string s (zero string)]
+          (if (== x _Name) (do
+              (inc! i)
+              (when (>= i (len args))
+                (panic "missing string argument after _Name"))
+
+              (set! s (assert string (aget args i))))
+
+            (set! s (.String x)))
+
+
+          ;; TODO(gri) This check seems at the wrong place since it doesn't
+          ;;           take into account pending white space.
+          (when (mayCombine (.-lastTok p) (aget s 0))
+            (panic "adjacent tokens combine without whitespace"))
+
+
+          (if (== x _Semi)
+            ;; delay printing of semi
+            (.addWhitespace p semi "")
+            (do
+              (.flush p x)
+              (.writeString p s)
+              (set! (.-nlcount p) 0)
+              (set! (.-lastTok p) x)))))
+
+
+      (case [Operator]
+        (when (!= x 0)
+          (.flush p _Operator)
+          (.writeString p (.String x))))
+
+
+      (case [ctrlSymbol]
+        (switch x
+          (case [none semi] ; /*, comment*/
+            (panic "unreachable"))
+          (case [newline]
+            ;; TODO(gri) need to handle mandatory newlines after a //-style comment
+            (when (not (.-linebreaks p))
+              (set! x blank))))
+
+
+        (.addWhitespace p x ""))
+
+      ;; case *Comment: // comments are not Nodes
+      ;; 	p.addWhitespace(comment, x.Text)
+
+      (default
+        (panic (fmt/Sprintf "unexpected argument %v (%T)" x x))))))
+
+
+
+
+^{:go/end 347} (go/method printNode [^{:tag (* printer)} p ^Node n]
+  ;; ncom := *n.Comments()
+  ;; if ncom != nil {
+  ;; 	// TODO(gri) in general we cannot make assumptions about whether
+  ;; 	// a comment is a /*- or a //-style comment since the syntax
+  ;; 	// tree may have been manipulated. Need to make sure the correct
+  ;; 	// whitespace is emitted.
+  ;; 	for _, c := range ncom.Alone {
+  ;; 		p.print(c, newline)
+  ;; 	}
+  ;; 	for _, c := range ncom.Before {
+  ;; 		if c.Text == "" || lineComment(c.Text) {
+  ;; 			panic("unexpected empty line or //-style 'before' comment")
+  ;; 		}
+  ;; 		p.print(c, blank)
+  ;; 	}
+  ;; }
+
+  (.printRawNode p n))
+
+;; if ncom != nil && len(ncom.After) > 0 {
+;; 	for i, c := range ncom.After {
+;; 		if i+1 < len(ncom.After) {
+;; 			if c.Text == "" || lineComment(c.Text) {
+;; 				panic("unexpected empty line or //-style non-final 'after' comment")
+;; 			}
+;; 		}
+;; 		p.print(blank, c)
+;; 	}
+;; 	//p.print(newline)
+;; }
+
+
+^{:go/end 726} (go/method printRawNode [^{:tag (* printer)} p ^Node n]
+  (type-switch [n n]
+    (case [nil])
+    ;; we should not reach here but don't crash
+
+    ;; expressions and types
+    (case [(* BadExpr)]
+      (.print p _Name "<bad expr>"))
+
+    (case [(* Name)]
+      (.print p _Name (.-Value n))) ; _Name requires actual value following immediately
+
+    (case [(* BasicLit)]
+      (.print p _Name (.-Value n))) ; _Name requires actual value following immediately
+
+    (case [(* FuncLit)]
+      (.print p (.-Type n) blank)
+      (when (!= (.-Body n) nil)
+        (if (== (.-form p) ShortForm) (do
+            (.print p _Lbrace)
+            (when (> (len (.-List (.-Body n))) 0)
+              (.print p _Name "…"))
+
+            (.print p _Rbrace))
+
+          (.print p (.-Body n)))))
+
+
+
+    (case [(* CompositeLit)]
+      (when (!= (.-Type n) nil)
+        (.print p (.-Type n)))
+
+      (.print p _Lbrace)
+      (if (== (.-form p) ShortForm)
+        (when (> (len (.-ElemList n)) 0)
+          (.print p _Name "…"))
+
+        (do
+          (if (and (> (.-NKeys n) 0) (== (.-NKeys n) (len (.-ElemList n))))
+            (.printExprLines p (.-ElemList n))
+
+            (.printExprList p (.-ElemList n)))))
+
+
+      (.print p _Rbrace))
+
+    (case [(* ParenExpr)]
+      (.print p _Lparen (.-X n) _Rparen))
+
+    (case [(* SelectorExpr)]
+      (.print p (.-X n) _Dot (.-Sel n)))
+
+    (case [(* IndexExpr)]
+      (.print p (.-X n) _Lbrack (.-Index n) _Rbrack))
+
+    (case [(* SliceExpr)]
+      (.print p (.-X n) _Lbrack)
+      (when [i (aget (.-Index n) 0)] (!= i nil)
+        (.printNode p i))
+
+      (.print p _Colon)
+      (when [j (aget (.-Index n) 1)] (!= j nil)
+        (.printNode p j))
+
+      (when [k (aget (.-Index n) 2)] (!= k nil)
+        (.print p _Colon k))
+
+      (.print p _Rbrack))
+
+    (case [(* AssertExpr)]
+      (.print p (.-X n) _Dot _Lparen (.-Type n) _Rparen))
+
+    (case [(* TypeSwitchGuard)]
+      (when (!= (.-Lhs n) nil)
+        (.print p (.-Lhs n) blank _Define blank))
+
+      (.print p (.-X n) _Dot _Lparen _Type _Rparen))
+
+    (case [(* CallExpr)]
+      (.print p (.-Fun n) _Lparen)
+      (.printExprList p (.-ArgList n))
+      (when (.-HasDots n)
+        (.print p _DotDotDot))
+
+      (.print p _Rparen))
+
+    (case [(* Operation)]
+      (if (== (.-Y n) nil) (do
+          ;; unary expr
+          (.print p (.-Op n))
+          ;; if n.Op == lexical.Range {
+          ;; 	p.print(blank)
+          ;; }
+          (.print p (.-X n)))
+
+        ;; binary expr
+        ;; TODO(gri) eventually take precedence into account
+        ;; to control possibly missing parentheses
+        (.print p (.-X n) blank (.-Op n) blank (.-Y n))))
+
+
+    (case [(* KeyValueExpr)]
+      (.print p (.-Key n) _Colon blank (.-Value n)))
+
+    (case [(* ListExpr)]
+      (.printExprList p (.-ElemList n)))
+
+    (case [(* ArrayType)]
+      (let [^any len _DotDotDot]
+        (when (!= (.-Len n) nil)
+          (set! len (.-Len n)))
+
+        (.print p _Lbrack len _Rbrack (.-Elem n))))
+
+    (case [(* SliceType)]
+      (.print p _Lbrack _Rbrack (.-Elem n)))
+
+    (case [(* DotsType)]
+      (.print p _DotDotDot (.-Elem n)))
+
+    (case [(* StructType)]
+      (.print p _Struct)
+      (when (and (> (len (.-FieldList n)) 0) (.-linebreaks p))
+        (.print p blank))
+
+      (.print p _Lbrace)
+      (when (> (len (.-FieldList n)) 0)
+        (if (.-linebreaks p) (do
+            (.print p newline indent)
+            (.printFieldList p (.-FieldList n) (.-TagList n) _Semi)
+            (.print p outdent newline))
+
+          (.printFieldList p (.-FieldList n) (.-TagList n) _Semi)))
+
+
+      (.print p _Rbrace))
+
+    (case [(* FuncType)]
+      (.print p _Func)
+      (.printSignature p n))
+
+    (case [(* InterfaceType)]
+      (.print p _Interface)
+      (if (and (.-linebreaks p) (> (len (.-MethodList n)) 1)) (do
+          (.print p blank)
+          (.print p _Lbrace)
+          (.print p newline indent)
+          (.printMethodList p (.-MethodList n))
+          (.print p outdent newline))
+        (do
+          (.print p _Lbrace)
+          (.printMethodList p (.-MethodList n))))
+
+      (.print p _Rbrace))
+
+    (case [(* MapType)]
+      (.print p _Map _Lbrack (.-Key n) _Rbrack (.-Value n)))
+
+    (case [(* ChanType)]
+      (when (== (.-Dir n) RecvOnly)
+        (.print p _Arrow))
+
+      (.print p _Chan)
+      (when (== (.-Dir n) SendOnly)
+        (.print p _Arrow))
+
+      (.print p blank)
+      (if [(values e _) (assert (* ChanType) (.-Elem n))] (and (== (.-Dir n) 0) (!= e nil) (== (.-Dir e) RecvOnly)) (do
+          ;; don't print chan (<-chan T) as chan <-chan T
+          (.print p _Lparen)
+          (.print p (.-Elem n))
+          (.print p _Rparen))
+
+        (.print p (.-Elem n))))
+
+
+    ;; statements
+    (case [(* DeclStmt)]
+      (.printDecl p (.-DeclList n)))
+
+    (case [(* EmptyStmt)])
+    ;; nothing to print
+
+    (case [(* LabeledStmt)]
+      (.print p outdent (.-Label n) _Colon indent newline (.-Stmt n)))
+
+    (case [(* ExprStmt)]
+      (.print p (.-X n)))
+
+    (case [(* SendStmt)]
+      (.print p (.-Chan n) blank _Arrow blank (.-Value n)))
+
+    (case [(* AssignStmt)]
+      (.print p (.-Lhs n))
+      (if (== (.-Rhs n) nil)
+        ;; TODO(gri) This is going to break the mayCombine
+        ;;           check once we enable that again.
+        (.print p (.-Op n) (.-Op n)) ; ++ or --
+        (do
+          (.print p blank (.-Op n) _Assign blank)
+          (.print p (.-Rhs n)))))
+
+
+    (case [(* CallStmt)]
+      (.print p (.-Tok n) blank (.-Call n)))
+
+    (case [(* ReturnStmt)]
+      (.print p _Return)
+      (when (!= (.-Results n) nil)
+        (.print p blank (.-Results n))))
+
+
+    (case [(* BranchStmt)]
+      (.print p (.-Tok n))
+      (when (!= (.-Label n) nil)
+        (.print p blank (.-Label n))))
+
+
+    (case [(* BlockStmt)]
+      (.print p _Lbrace)
+      (when (> (len (.-List n)) 0)
+        (.print p newline indent)
+        (.printStmtList p (.-List n) true)
+        (.print p outdent newline))
+
+      (.print p _Rbrace))
+
+    (case [(* IfStmt)]
+      (.print p _If blank)
+      (when (!= (.-Init n) nil)
+        (.print p (.-Init n) _Semi blank))
+
+      (.print p (.-Cond n) blank (.-Then n))
+      (when (!= (.-Else n) nil)
+        (.print p blank _Else blank (.-Else n))))
+
+
+    (case [(* SwitchStmt)]
+      (.print p _Switch blank)
+      (when (!= (.-Init n) nil)
+        (.print p (.-Init n) _Semi blank))
+
+      (when (!= (.-Tag n) nil)
+        (.print p (.-Tag n) blank))
+
+      (.printSwitchBody p (.-Body n)))
+
+    (case [(* SelectStmt)]
+      (.print p _Select blank) ; for now
+      (.printSelectBody p (.-Body n)))
+
+    (case [(* RangeClause)]
+      (when (!= (.-Lhs n) nil)
+        (let [tok _Assign]
+          (when (.-Def n)
+            (set! tok _Define))
+
+          (.print p (.-Lhs n) blank tok blank)))
+
+      (.print p _Range blank (.-X n)))
+
+    (case [(* ForStmt)]
+      (.print p _For blank)
+      (if (and (== (.-Init n) nil) (== (.-Post n) nil))
+        (when (!= (.-Cond n) nil)
+          (.print p (.-Cond n) blank))
+
+        (do
+          (when (!= (.-Init n) nil)
+            (.print p (.-Init n))
+            ;; TODO(gri) clean this up
+            (when [(values _ ok) (assert (* RangeClause) (.-Init n))] ok
+              (.print p blank (.-Body n))
+              (break)))
+
+
+          (.print p _Semi blank)
+          (when (!= (.-Cond n) nil)
+            (.print p (.-Cond n)))
+
+          (.print p _Semi blank)
+          (when (!= (.-Post n) nil)
+            (.print p (.-Post n) blank))))
+
+
+      (.print p (.-Body n)))
+
+    (case [(* ImportDecl)]
+      (when (== (.-Group n) nil)
+        (.print p _Import blank))
+
+      (when (!= (.-LocalPkgName n) nil)
+        (.print p (.-LocalPkgName n) blank))
+
+      (.print p (.-Path n)))
+
+    (case [(* ConstDecl)]
+      (when (== (.-Group n) nil)
+        (.print p _Const blank))
+
+      (.printNameList p (.-NameList n))
+      (when (!= (.-Type n) nil)
+        (.print p blank (.-Type n)))
+
+      (when (!= (.-Values n) nil)
+        (.print p blank _Assign blank (.-Values n))))
+
+
+    (case [(* TypeDecl)]
+      (when (== (.-Group n) nil)
+        (.print p _Type blank))
+
+      (.print p (.-Name n))
+      (when (!= (.-TParamList n) nil)
+        (.printParameterList p (.-TParamList n) _Type))
+
+      (.print p blank)
+      (when (.-Alias n)
+        (.print p _Assign blank))
+
+      (.print p (.-Type n)))
+
+    (case [(* VarDecl)]
+      (when (== (.-Group n) nil)
+        (.print p _Var blank))
+
+      (.printNameList p (.-NameList n))
+      (when (!= (.-Type n) nil)
+        (.print p blank (.-Type n)))
+
+      (when (!= (.-Values n) nil)
+        (.print p blank _Assign blank (.-Values n))))
+
+
+    (case [(* FuncDecl)]
+      (.print p _Func blank)
+      (when [r (.-Recv n)] (!= r nil)
+        (.print p _Lparen)
+        (when (!= (.-Name r) nil)
+          (.print p (.-Name r) blank))
+
+        (.printNode p (.-Type r))
+        (.print p _Rparen blank))
+
+      (.print p (.-Name n))
+      (when (!= (.-TParamList n) nil)
+        (.printParameterList p (.-TParamList n) _Func))
+
+      (.printSignature p (.-Type n))
+      (when (!= (.-Body n) nil)
+        (.print p blank (.-Body n))))
+
+
+    (case [(* printGroup)]
+      (.print p (.-Tok n) blank _Lparen)
+      (when (> (len (.-Decls n)) 0)
+        (.print p newline indent)
+        (range [_ d (.-Decls n)]
+          (.printNode p d)
+          (.print p _Semi newline))
+
+        (.print p outdent))
+
+      (.print p _Rparen))
+
+    ;; files
+    (case [(* File)]
+      (.print p _Package blank (.-PkgName n))
+      (when (> (len (.-DeclList n)) 0)
+        (.print p _Semi newline newline)
+        (.printDeclList p (.-DeclList n))))
+
+
+    (default
+      (panic (fmt/Sprintf "syntax.Iterate: unexpected node type %T" n)))))
+
+
+
+^{:go/end 746} (go/method printFields [^{:tag (* printer)} p ^{:tag (slice (* Field))} fields ^{:tag (slice (* BasicLit))} tags ^int i ^int j]
+  (if (and (== (+ i 1) j) (== (.-Name (aget fields i)) nil))
+    ;; anonymous field
+    (.printNode p (.-Type (aget fields i)))
+    (do
+      (range [k f (subslice fields i j)]
+        (when (> k 0)
+          (.print p _Comma blank))
+
+        (.printNode p (.-Name f)))
+
+      (.print p blank)
+      (.printNode p (.-Type (aget fields i)))))
+
+  (when (and (< i (len tags)) (!= (aget tags i) nil))
+    (.print p blank)
+    (.printNode p (aget tags i))))
+
+
+
+^{:go/end 762} (go/method printFieldList [^{:tag (* printer)} p ^{:tag (slice (* Field))} fields ^{:tag (slice (* BasicLit))} tags ^token sep]
+  (let [i0 0
+      ^{:line 750 :tag Expr} typ (zero Expr)]
+    (range [i f fields]
+      (when (or (== (.-Name f) nil) (!= (.-Type f) typ))
+        (when (< i0 i)
+          (.printFields p fields tags i0 i)
+          (.print p sep newline)
+          (set! i0 i))
+
+        (set! typ (.-Type f))))
+
+
+    (.printFields p fields tags i0 (len fields))))
+
+
+^{:go/end 776} (go/method printMethodList [^{:tag (* printer)} p ^{:tag (slice (* Field))} methods]
+  (range [i m methods]
+    (when (> i 0)
+      (.print p _Semi newline))
+
+    (if (!= (.-Name m) nil) (do
+        (.printNode p (.-Name m))
+        (.printSignature p (assert (* FuncType) (.-Type m))))
+
+      (.printNode p (.-Type m)))))
+
+
+
+
+^{:go/end 785} (go/method printNameList [^{:tag (* printer)} p ^{:tag (slice (* Name))} list]
+  (range [i x list]
+    (when (> i 0)
+      (.print p _Comma blank))
+
+    (.printNode p x)))
+
+
+
+^{:go/end 794} (go/method printExprList [^{:tag (* printer)} p ^{:tag (slice Expr)} list]
+  (range [i x list]
+    (when (> i 0)
+      (.print p _Comma blank))
+
+    (.printNode p x)))
+
+
+
+^{:go/end 804} (go/method printExprLines [^{:tag (* printer)} p ^{:tag (slice Expr)} list]
+  (when (> (len list) 0)
+    (.print p newline indent)
+    (range [_ x list]
+      (.print p x _Comma newline))
+
+    (.print p outdent)))
+
+
+
+^{:go/end 821} (go/func groupFor [^Decl d] :results [token (* Group)]
+  (type-switch [d d]
+    (case [(* ImportDecl)]
+      (return _Import (.-Group d)))
+    (case [(* ConstDecl)]
+      (return _Const (.-Group d)))
+    (case [(* TypeDecl)]
+      (return _Type (.-Group d)))
+    (case [(* VarDecl)]
+      (return _Var (.-Group d)))
+    (case [(* FuncDecl)]
+      (return _Func nil))
+    (default
+      (panic "unreachable"))))
+
+
+
+(go/type printGroup (struct
+    ^{:line 824} node
+    ^{:line 825 :tag token} Tok
+    ^{:line 826 :tag (slice Decl)} Decls))
+
+
+^{:go/end 856} (go/method printDecl [^{:tag (* printer)} p ^{:tag (slice Decl)} list]
+  (let [(values tok group) (groupFor (aget list 0))]
+
+    (when (== group nil)
+      (when (!= (len list) 1)
+        (panic "unreachable"))
+
+      (.printNode p (aget list 0))
+      (return))
+
+
+    ;; if _, ok := list[0].(*EmptyDecl); ok {
+    ;; 	if len(list) != 1 {
+    ;; 		panic("unreachable")
+    ;; 	}
+    ;; 	// TODO(gri) if there are comments inside the empty
+    ;; 	// group, we may need to keep the list non-nil
+    ;; 	list = nil
+    ;; }
+
+    ;; printGroup is here for consistent comment handling
+    ;; (this is not yet used)
+    (let [^printGroup pg (zero printGroup)]
+      ;; *pg.Comments() = *group.Comments()
+      (set! (.-Tok pg) tok)
+      (set! (.-Decls pg) list)
+      (.printNode p (addr pg)))))
+
+
+^{:go/end 878} (go/method printDeclList [^{:tag (* printer)} p ^{:tag (slice Decl)} list]
+  (let [i0 0
+      ^{:line 860 :tag token} tok (zero token)
+      ^{:line 861 :tag (* Group)} group (zero (* Group))]
+    (range [i x list]
+      (when [(values s g) (groupFor x)] (or (== g nil) (!= g group))
+        (when (< i0 i)
+          (.printDecl p (subslice list i0 i))
+          (.print p _Semi newline)
+          ;; print empty line between different declaration groups,
+          ;; different kinds of declarations, or between functions
+          (when (or (!= g group) (!= s tok) (== s _Func))
+            (.print p newline))
+
+          (set! i0 i))
+
+        (set! (values tok group) (values s g))))
+
+
+    (.printDecl p (subslice list i0))))
+
+
+^{:go/end 890} (go/method printSignature [^{:tag (* printer)} p ^{:tag (* FuncType)} sig]
+  (.printParameterList p (.-ParamList sig) 0)
+  (when [list (.-ResultList sig)] (!= list nil)
+    (.print p blank)
+    (if (and (== (len list) 1) (== (.-Name (aget list 0)) nil))
+      (.printNode p (.-Type (aget list 0)))
+
+      (.printParameterList p list 0))))
+
+
+
+
+
+
+
+^{:go/end 925} (go/method printParameterList "If tok != 0 print a type parameter list: tok == _Type means\na type parameter list for a type, tok == _Func means a type\nparameter list for a func.\n" [^{:tag (* printer)} p ^{:tag (slice (* Field))} list ^token tok]
+  (let [(values open close) (values _Lparen _Rparen)]
+    (when (!= tok 0)
+      (set! (values open close) (values _Lbrack _Rbrack)))
+
+    (.print p open)
+    (range [i f list]
+      (when (> i 0)
+        (.print p _Comma blank))
+
+      (when (!= (.-Name f) nil)
+        (.printNode p (.-Name f))
+        (when (< (+ i 1) (len list))
+          (let [f1 (aget list (+ i 1))]
+            (when (and (!= (.-Name f1) nil) (== (.-Type f1) (.-Type f)))
+              (continue)))) ; no need to print type
+
+
+        (.print p blank))
+
+      (.printNode p (.-Type f)))
+
+    ;; A type parameter list [P T] where the name P and the type expression T syntactically
+    ;; combine to another valid (value) expression requires a trailing comma, as in [P *T,]
+    ;; (or an enclosing interface as in [P interface(*T)]), so that the type parameter list
+    ;; is not parsed as an array length [P*T].
+    (when (and (== tok _Type) (== (len list) 1) (combinesWithName (.-Type (aget list 0))))
+      (.print p _Comma))
+
+    (.print p close)))
+
+
+
+
+
+
+
+^{:go/breaks [[5 950]] :go/end 951} (go/func combinesWithName "combinesWithName reports whether a name followed by the expression x\nsyntactically combines to another valid (value) expression. For instance\nusing *T for x, \"name *T\" syntactically appears as the expression x*T.\nOn the other hand, using  P|Q or *P|~Q for x, \"name P|Q\" or \"name *P|~Q\"\ncannot be combined into a valid (value) expression.\n" ^bool [^Expr x]
+  (type-switch [x x]
+    (case [(* Operation)]
+      (when (== (.-Y x) nil)
+        ;; name *x.X combines to name*x.X if x.X is not a type element
+        (return (and (== (.-Op x) Mul) (not (isTypeElem (.-X x))))))
+
+      ;; binary expressions
+      (return (and (combinesWithName (.-X x)) (not (isTypeElem (.-Y x))))))
+    (case [(* ParenExpr)]
+      ;; Note that the parser strips parentheses in these cases
+      ;; (see extractName, parser.typeOrNil) unless keep_parens
+      ;; is set, so we should never reach here.
+      ;; Do the right thing (rather than panic) for testing and
+      ;; in case we change parser behavior.
+      ;; See also go.dev/issues/69206.
+      (return (not (isTypeElem (.-X x))))))
+
+  false)
+
+
+^{:go/end 967} (go/method printStmtList [^{:tag (* printer)} p ^{:tag (slice Stmt)} list ^bool braces]
+  (range [i x list]
+    (.print p x _Semi)
+    (cond (< (+ i 1) (len list))
+      (.print p newline)
+      ^{:line 958} braces
+      ;; Print an extra semicolon if the last statement is
+      ;; an empty statement and we are in a braced block
+      ;; because one semicolon is automatically removed.
+      (when [(values _ ok) (assert (* EmptyStmt) x)] ok
+        (.print p x _Semi)))))
+
+
+
+
+
+^{:go/end 979} (go/method printSwitchBody [^{:tag (* printer)} p ^{:tag (slice (* CaseClause))} list]
+  (.print p _Lbrace)
+  (when (> (len list) 0)
+    (.print p newline)
+    (range [i c list]
+      (.printCaseClause p c (== (+ i 1) (len list)))
+      (.print p newline)))
+
+
+  (.print p _Rbrace))
+
+
+^{:go/end 991} (go/method printSelectBody [^{:tag (* printer)} p ^{:tag (slice (* CommClause))} list]
+  (.print p _Lbrace)
+  (when (> (len list) 0)
+    (.print p newline)
+    (range [i c list]
+      (.printCommClause p c (== (+ i 1) (len list)))
+      (.print p newline)))
+
+
+  (.print p _Rbrace))
+
+
+^{:go/end 1005} (go/method printCaseClause [^{:tag (* printer)} p ^{:tag (* CaseClause)} c ^bool braces]
+  (if (!= (.-Cases c) nil)
+    (.print p _Case blank (.-Cases c))
+
+    (.print p _Default))
+
+  (.print p _Colon)
+  (when (> (len (.-Body c)) 0)
+    (.print p newline indent)
+    (.printStmtList p (.-Body c) braces)
+    (.print p outdent)))
+
+
+
+^{:go/end 1020} (go/method printCommClause [^{:tag (* printer)} p ^{:tag (* CommClause)} c ^bool braces]
+  (if (!= (.-Comm c) nil) (do
+      (.print p _Case blank)
+      (.print p (.-Comm c)))
+
+    (.print p _Default))
+
+  (.print p _Colon)
+  (when (> (len (.-Body c)) 0)
+    (.print p newline indent)
+    (.printStmtList p (.-Body c) braces)
+    (.print p outdent)))

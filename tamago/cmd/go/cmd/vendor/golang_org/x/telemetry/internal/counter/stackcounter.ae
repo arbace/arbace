@@ -1,0 +1,211 @@
+;; Copyright 2023 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.cmd.vendor.golang_org.x.telemetry.internal.counter) (go/file "stackcounter.go" :imports [
+
+
+    ^{:line 8} [fmt "fmt"]
+    ^{:line 9} [runtime "runtime"]
+    ^{:line 10} [strings "strings"]
+    ^{:line 11} [sync "sync"]])
+
+
+;; On the disk, and upstream, stack counters look like sets of
+;; regular counters with names that include newlines.
+
+
+
+
+(go/type StackCounter "a StackCounter is the in-memory knowledge about a stack counter.\nStackCounters are more expensive to use than regular Counters,\nrequiring, at a minimum, a call to runtime.Callers.\n" (struct
+    ^{:line 21 :tag string} name
+    ^{:line 22 :tag int} depth
+    ^{:line 23 :tag (* file)} file
+
+    ^{:line 25 :tag sync/Mutex} mu
+
+
+    ^{:line 28 :tag (slice stack) :doc "as this is a detail of the implementation, it could be replaced\nby a more efficient mechanism\n"} stacks))
+
+
+(go/type stack (struct
+    ^{:line 32 :tag (slice uintptr)} pcs
+    ^{:line 33 :tag (* Counter)} counter))
+
+
+^{:go/end 38} (go/func NewStack ^{:tag (* StackCounter)} [^string name ^int depth]
+  (addr (lit StackCounter :name name :depth depth :file (addr defaultFile))))
+
+
+
+
+
+^{:go/end 72} (go/method Inc "Inc increments a stack counter. It computes the caller's stack and\nlooks up the corresponding counter. It then increments that counter,\ncreating it if necessary.\n" [^{:tag (* StackCounter)} c]
+  (let [pcs (make (slice uintptr) (.-depth c))
+      ^{:line 45} n (runtime/Callers 2 pcs)] ; caller of Inc
+    (set! pcs (subslice pcs _ n))
+
+    (.Lock (.-mu c))
+    (defer (.Unlock (.-mu c)))
+
+    ;; Existing counter?
+    (let [^{:tag (* Counter)} ctr (zero (* Counter))]
+      (range [_ s (.-stacks c)]
+        (when (eq (.-pcs s) pcs)
+          (when (!= (.-counter s) nil)
+            (set! ctr (.-counter s))
+            (break))))
+
+
+
+
+      (when (== ctr nil)
+        ;; Create new counter.
+        (set! ctr (addr ^{:go/breaks [2 4]} (lit Counter
+              :name (EncodeStack pcs (.-name c))
+              :file (.-file c))))
+
+        (set! (.-stacks c) (append (.-stacks c) (lit stack :pcs pcs :counter ctr))))
+
+
+      (.Inc ctr))))
+
+
+
+
+
+^{:go/end 125} (go/func EncodeStack "EncodeStack returns the name of the counter to\nuse for the given stack of program counters.\nThe name encodes the stack.\n" ^string [^{:tag (slice uintptr)} pcs ^string prefix]
+  (let [^{:tag (slice string)} locs (zero (slice string))
+      ^{:line 79} lastImport ""
+      ^{:line 80} frs (runtime/CallersFrames pcs)]
+    (while true
+      (let [(values fr more) (.Next frs)
+          ;; TODO(adonovan): this CutLast(".") operation isn't
+          ;; appropriate for generic function symbols.
+          (values path fname) (cutLastDot (.-Function fr))]
+        (if (== path lastImport)
+          (set! path "\"") ; (a ditto mark)
+
+          (set! lastImport path))
+
+        (let [^string loc (zero string)]
+          (if (!= (.-Func fr) nil)
+            ;; Use function-relative line numbering.
+            ;; f:+2 means two lines into function f.
+            ;; f:-1 should never happen, but be conservative.
+            ;;
+            ;; An inlined call is replaced by a NOP instruction
+            ;; with the correct pclntab information.
+            (let [(values _ entryLine) (.FileLine (.-Func fr) (.-Entry fr))]
+              (set! loc (fmt/Sprintf "%s.%s:%+d,+0x%x" path fname (- (.-Line fr) entryLine) (- (.-PC fr) (.-Entry fr)))))
+
+            ;; The function is non-Go code or is fully inlined:
+            ;; use absolute line number within enclosing file.
+            ;;
+            ;; For inlined calls, the PC and Entry values
+            ;; both refer to the enclosing combined function.
+            ;; For example, both these PCs are relative to "caller":
+            ;;
+            ;;   callee:=1,+0x12        ('=' means inlined)
+            ;;   caller:+2,+0x34
+            (set! loc (fmt/Sprintf "%s.%s:=%d,+0x%x" path fname (.-Line fr) (- (.-PC fr) (.-Entry fr)))))
+
+          (set! locs (append locs loc))
+          (when (not more)
+            (break)))))
+
+
+
+    (let [name (+ prefix "\n" (strings/Join locs "\n"))]
+      (when (> (len name) maxNameLen)
+        (let [^:const ^{:val "\ntruncated\n"} bad "\ntruncated\n"]
+          (set! name (+ (subslice name _ (- maxNameLen (len bad))) bad))))
+
+      ^{:line 124} name)))
+
+
+
+^{:go/end 147} (go/func DecodeStack "DecodeStack expands the (compressed) stack encoded in the counter name.\n" ^string [^string ename]
+  (when (not (strings/Contains ename "\n"))
+    (return ename)) ; not a stack counter
+
+  (let [lines (strings/Split ename "\n")
+      ^{:line 133 :tag string} lastPath (zero string)] ; empty or ends with .
+    (range [i line lines]
+      (let [(values path rest) (cutLastDot line)]
+        (when (== (len path) 0)
+          (continue)) ; unchanged
+
+        (if (and (== (len path) 1) (== (aget path 0) \"))
+          (aset lines i (+ lastPath rest))
+
+          (set! lastPath (+ path ".")))))
+    ;; line unchanged
+
+
+    (strings/Join lines "\n"))) ; trailing \n?
+
+
+
+
+^{:go/end 157} (go/func cutLastDot "input is <import path>.<function name>\noutput is (import path, function name)\n" [^string x] :results [^string before ^string after]
+  (let [i (strings/LastIndex x ".")]
+    (when (< i 0)
+      (return "" x))
+
+    (return (subslice x _ i) (subslice x (+ i 1)))))
+
+
+
+^{:go/end 168} (go/method Names "Names reports all the counter names associated with a StackCounter.\n" ^{:tag (slice string)} [^{:tag (* StackCounter)} c]
+  (.Lock (.-mu c))
+  (defer (.Unlock (.-mu c)))
+  (let [names (make (slice string) (len (.-stacks c)))]
+    (range [i s (.-stacks c)]
+      (aset names i (.Name (.-counter s))))
+
+    ^{:line 167} names))
+
+
+
+
+^{:go/end 180} (go/method Counters "Counters returns the known Counters for a StackCounter.\nThere may be more in the count file.\n" ^{:tag (slice (* Counter))} [^{:tag (* StackCounter)} c]
+  (.Lock (.-mu c))
+  (defer (.Unlock (.-mu c)))
+  (let [counters (make (slice (* Counter)) (len (.-stacks c)))]
+    (range [i s (.-stacks c)]
+      (aset counters i (.-counter s)))
+
+    ^{:line 179} counters))
+
+
+^{:go/breaks [[5 191]] :go/end 192} (go/func eq ^bool [^{:tag (slice uintptr)} a ^{:tag (slice uintptr)} b]
+  (when (!= (len a) (len b))
+    (return false))
+
+  (range [i a]
+    (when (!= (aget a i) (aget b i))
+      (return false)))
+
+
+  true)
+
+
+
+
+
+^{:go/end 207} (go/func ReadStack "ReadStack reads the given stack counter.\nThis is the implementation of\ngolang.org/x/telemetry/counter/countertest.ReadStackCounter.\n" [^{:tag (* StackCounter)} c] :results [(map string uint64) error]
+  (let [ret (lit (map string uint64))]
+    (range [_ ctr (.Counters c)]
+      (let [(values v err) (Read ctr)]
+        (when (!= err nil)
+          (return nil err))
+
+        (aset ret (DecodeStack (.Name ctr)) v)))
+
+    (return ret nil)))
+
+
+
+^{:go/end 212} (go/func IsStackCounter "IsStackCounter reports whether the counter name is for a stack counter.\n" ^bool [^string name]
+  (strings/Contains name "\n"))

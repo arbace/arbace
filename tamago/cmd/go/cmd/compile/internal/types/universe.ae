@@ -1,0 +1,153 @@
+;; Copyright 2009 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.cmd.compile.internal.types) (go/file "universe.go" :imports [
+
+
+    ^{:line 8} [base "cmd/compile/internal/base"]
+    ^{:line 9} [src "cmd/internal/src"]])
+
+
+(go/var basicTypes (lit (array ... (struct
+        ^{:line 13 :tag string} name
+        ^{:line 14 :tag Kind} etype))
+
+    (lit _ "int8" TINT8)
+    (lit _ "int16" TINT16)
+    (lit _ "int32" TINT32)
+    (lit _ "int64" TINT64)
+    (lit _ "uint8" TUINT8)
+    (lit _ "uint16" TUINT16)
+    (lit _ "uint32" TUINT32)
+    (lit _ "uint64" TUINT64)
+    (lit _ "float32" TFLOAT32)
+    (lit _ "float64" TFLOAT64)
+    (lit _ "complex64" TCOMPLEX64)
+    (lit _ "complex128" TCOMPLEX128)
+    (lit _ "bool" TBOOL)
+    (lit _ "string" TSTRING)))
+
+
+(go/var typedefs (lit (array ... (struct
+        ^{:line 33 :tag string} name
+        ^{:line 34 :tag Kind} etype
+        ^{:line 35 :tag Kind} sameas32
+        ^{:line 36 :tag Kind} sameas64))
+
+    (lit _ "int" TINT TINT32 TINT64)
+    (lit _ "uint" TUINT TUINT32 TUINT64)
+    (lit _ "uintptr" TUINTPTR TUINT32 TUINT64)))
+
+
+^{:go/end 140} (go/func InitTypes [^{:tag (func [^{:tag (* Sym)} sym ^{:tag (* Type)} typ] [Object])} defTypeName]
+  (when (== PtrSize 0)
+    (base/Fatalf "InitTypes called before PtrSize was set"))
+
+
+  (set! SlicePtrOffset 0)
+  (set! SliceLenOffset (RoundUp (+ SlicePtrOffset (conv int64 PtrSize)) (conv int64 PtrSize)))
+  (set! SliceCapOffset (RoundUp (+ SliceLenOffset (conv int64 PtrSize)) (conv int64 PtrSize)))
+  (set! SliceSize (RoundUp (+ SliceCapOffset (conv int64 PtrSize)) (conv int64 PtrSize)))
+
+  ;; string is same as slice wo the cap
+  (set! StringSize (RoundUp (+ SliceLenOffset (conv int64 PtrSize)) (conv int64 PtrSize)))
+
+  (for [et (conv Kind 0)] (< et NTYPE) (inc! et)
+    (aset SimType et et))
+
+
+  (aset Types TANY (newType TANY)) ; note: an old placeholder type, NOT the new builtin 'any' alias for interface{}
+  (aset Types TINTER (NewInterface nil))
+  (CheckSize (aget Types TINTER))
+
+  (let [defBasic ^{:go/end 72} (fn ^{:tag (* Type)} [^Kind kind ^{:tag (* Pkg)} pkg ^string name]
+        (let [typ (newType kind)
+            ^{:line 66} obj (defTypeName (.Lookup pkg name) typ)]
+          (set! (.-obj typ) obj)
+          (when (!= kind TANY)
+            (CheckSize typ))
+
+          ^{:line 71} typ))]
+
+
+    (range [_ s (addr basicTypes)]
+      (aset Types (.-etype s) (defBasic (.-etype s) BuiltinPkg (.-name s))))
+
+
+    (range [_ s (addr typedefs)]
+      (let [sameas (.-sameas32 s)]
+        (when (== PtrSize 8)
+          (set! sameas (.-sameas64 s)))
+
+        (aset SimType (.-etype s) sameas)
+
+        (aset Types (.-etype s) (defBasic (.-etype s) BuiltinPkg (.-name s)))))
+
+
+    ;; We create separate byte and rune types for better error messages
+    ;; rather than just creating type alias *Sym's for the uint8 and
+    ;; int32  Hence, (bytetype|runtype).Sym.isAlias() is false.
+    ;; TODO(gri) Should we get rid of this special case (at the cost
+    ;; of less informative error messages involving bytes and runes)?
+    ;; NOTE(rsc): No, the error message quality is important.
+    ;; (Alternatively, we could introduce an OTALIAS node representing
+    ;; type aliases, albeit at the cost of having to deal with it everywhere).
+    (set! ByteType (defBasic TUINT8 BuiltinPkg "byte"))
+    (set! RuneType (defBasic TINT32 BuiltinPkg "rune"))
+
+    ;; error type
+    (DeferCheckSize)
+    (set! ErrorType (defBasic TFORW BuiltinPkg "error"))
+    (.SetUnderlying ErrorType (makeErrorInterface))
+    (ResumeCheckSize)
+
+    ;; comparable type (interface)
+    (DeferCheckSize)
+    (set! ComparableType (defBasic TFORW BuiltinPkg "comparable"))
+    (.SetUnderlying ComparableType (makeComparableInterface))
+    (ResumeCheckSize)
+
+    ;; any type (interface)
+    (DeferCheckSize)
+    (set! AnyType (defBasic TFORW BuiltinPkg "any"))
+    (.SetUnderlying AnyType (NewInterface nil))
+    (ResumeCheckSize)
+
+    (aset Types TUNSAFEPTR (defBasic TUNSAFEPTR UnsafePkg "Pointer"))
+
+    (aset Types TBLANK (newType TBLANK))
+    (aset Types TNIL (newType TNIL))
+
+    ;; simple aliases
+    (aset SimType TMAP TPTR)
+    (aset SimType TCHAN TPTR)
+    (aset SimType TFUNC TPTR)
+    (aset SimType TUNSAFEPTR TPTR)
+
+    (for [et TINT8] (<= et TUINT64) (inc! et)
+      (aset IsInt et true))
+
+    (aset IsInt TINT true)
+    (aset IsInt TUINT true)
+    (aset IsInt TUINTPTR true)
+
+    (aset IsFloat TFLOAT32 true)
+    (aset IsFloat TFLOAT64 true)
+
+    (aset IsComplex TCOMPLEX64 true)
+    (aset IsComplex TCOMPLEX128 true)))
+
+
+^{:go/end 148} (go/func makeErrorInterface ^{:tag (* Type)} []
+  (let [sig (NewSignature (FakeRecv) nil (lit (slice (* Field))
+          (NewField src/NoXPos nil (aget Types TSTRING))))
+
+      ^{:line 146} method (NewField src/NoXPos (.Lookup LocalPkg "Error") sig)]
+    (NewInterface (lit (slice (* Field)) method))))
+
+
+
+
+^{:go/end 154} (go/func makeComparableInterface "makeComparableInterface makes the predefined \"comparable\" interface in the\nbuilt-in package. It has a unique name, but no methods.\n" ^{:tag (* Type)} []
+  (NewInterface nil))

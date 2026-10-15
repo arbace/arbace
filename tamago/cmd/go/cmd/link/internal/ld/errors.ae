@@ -1,0 +1,64 @@
+;; Copyright 2020 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.cmd.link.internal.ld) (go/file "errors.go" :imports [
+
+
+    ^{:line 8} [obj "cmd/internal/obj"]
+    ^{:line 9} [loader "cmd/link/internal/loader"]
+    ^{:line 10} [sym "cmd/link/internal/sym"]
+    ^{:line 11} [sync "sync"]])
+
+
+(go/type unresolvedSymKey (struct
+    ^{:line 15 :tag loader/Sym} from ; Symbol that referenced unresolved "to"
+    ^{:line 16 :tag loader/Sym} to)) ; Unresolved symbol referenced by "from"
+
+
+(go/type symNameFn (func [^loader/Sym s] [string]))
+
+
+(go/type ErrorReporter "ErrorReporter is used to make error reporting thread safe.\n" (struct
+    ^{:line 23} loader/ErrorReporter
+    ^{:line 24 :tag (map unresolvedSymKey bool)} unresSyms
+    ^{:line 25 :tag sync/Mutex} unresMutex
+    ^{:line 26 :tag symNameFn} SymName))
+
+
+
+^{:go/end 67} (go/method errorUnresolved "errorUnresolved prints unresolved symbol error for rs that is referenced from s.\n" [^{:tag (* ErrorReporter)} reporter ^{:tag (* loader/Loader)} ldr ^loader/Sym s ^loader/Sym rs]
+  (.Lock (.-unresMutex reporter))
+  (defer (.Unlock (.-unresMutex reporter)))
+
+  (when (== (.-unresSyms reporter) nil)
+    (set! (.-unresSyms reporter) (make (map unresolvedSymKey bool))))
+
+  (let [k (lit unresolvedSymKey :from s :to rs)]
+    (when (not (aget (.-unresSyms reporter) k))
+      (aset (.-unresSyms reporter) k true)
+      (let [name (.SymName ldr rs)
+
+          ;; Try to find symbol under another ABI.
+          (values ^obj/ABI reqABI ^obj/ABI haveABI) (zero obj/ABI)]
+        (set! haveABI (bit-not (conv obj/ABI 0)))
+        (let [(values ^:assign reqABI ok) (sym/VersionToABI (.SymVersion ldr rs))]
+          (when ok
+            (for [abi (conv obj/ABI 0)] (< abi obj/ABICount) (inc! abi)
+              (let [v (sym/ABIToVersion abi)]
+                (when (== v -1)
+                  (continue))
+
+                (when [rs1 (.Lookup ldr name v)] (and (!= rs1 0) (!= (.SymType ldr rs1) sym/Sxxx) (!= (.SymType ldr rs1) sym/SXREF))
+                  (set! haveABI abi)))))
+
+
+
+
+          ;; Give a special error message for main symbol (see #24809).
+          (cond (== name "main.main")
+            ^{:go/via [ErrorReporter]} (.Errorf reporter s "function main is undeclared in the main package")
+            (!= haveABI (bit-not (conv obj/ABI 0)))
+            ^{:go/via [ErrorReporter]} (.Errorf reporter s "relocation target %s not defined for %s (but is defined for %s)" name reqABI haveABI) :else
+
+            ^{:go/via [ErrorReporter]} (.Errorf reporter s "relocation target %s not defined" name)))))))

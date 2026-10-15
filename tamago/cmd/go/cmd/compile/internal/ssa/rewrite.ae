@@ -1,0 +1,2892 @@
+;; Copyright 2015 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.cmd.compile.internal.ssa) (go/file "rewrite.go" :imports [
+
+
+    ^{:line 8} [base "cmd/compile/internal/base"]
+    ^{:line 9} [ir "cmd/compile/internal/ir"]
+    ^{:line 10} [logopt "cmd/compile/internal/logopt"]
+    ^{:line 11} [reflectdata "cmd/compile/internal/reflectdata"]
+    ^{:line 12} [rttype "cmd/compile/internal/rttype"]
+    ^{:line 13} [typecheck "cmd/compile/internal/typecheck"]
+    ^{:line 14} [types "cmd/compile/internal/types"]
+    ^{:line 15} [obj "cmd/internal/obj"]
+    ^{:line 16} [s390x "cmd/internal/obj/s390x"]
+    ^{:line 17} [objabi "cmd/internal/objabi"]
+    ^{:line 18} [src "cmd/internal/src"]
+    ^{:line 19} [binary "encoding/binary"]
+    ^{:line 20} [fmt "fmt"]
+    ^{:line 21} [buildcfg "internal/buildcfg"]
+    ^{:line 22} [io "io"]
+    ^{:line 23} [math "math"]
+    ^{:line 24} [bits "math/bits"]
+    ^{:line 25} [os "os"]
+    ^{:line 26} [filepath "path/filepath"]
+    ^{:line 27} [strings "strings"]])
+
+
+(go/type deadValueChoice bool)
+
+(go/const
+  ^{:line 33} [^{:tag deadValueChoice :val false} leaveDeadValues false]
+  ^{:line 34} [^{:val true} removeDeadValues true]
+
+  ^{:line 36} [^{:val 1408} repZeroThreshold 1408] ; size beyond which we use REP STOS for zeroing
+  ^{:line 37} [^{:val 1408} repMoveThreshold 1408]) ; size beyond which we use REP MOVS for copying
+
+
+
+^{:go/end 232} (go/func applyRewrite "deadcode indicates whether rewrite should try to remove any values that become dead.\n" [^{:tag (* Func)} f ^blockRewriter rb ^valueRewriter rv ^deadValueChoice deadcode]
+  ;; repeat rewrites until we find no more rewrites
+  (let [pendingLines (.-cachedLineStarts f)] ; Holds statement boundaries that need to be moved to a new value/block
+    (.clear pendingLines)
+    (let [debug (.-debug (.-pass f))]
+      (when (> debug 1)
+        (fmt/Printf "%s: rewriting for %s\n" (.-name (.-pass f)) (.-Name f)))
+
+      ;; if the number of rewrite iterations reaches itersLimit we will
+      ;; at that point turn on cycle detection. Instead of a fixed limit,
+      ;; size the limit according to func size to allow for cases such
+      ;; as the one in issue #66773.
+      (let [itersLimit (.NumBlocks f)]
+        (when (< itersLimit 20)
+          (set! itersLimit 20))
+
+        (let [^int iters (zero int)
+            ^{:line 58 :tag (map string bool)} states (zero (map string bool))]
+          (while true
+            (when (> debug 1)
+              (fmt/Printf "%s: iter %d\n" (.-name (.-pass f)) iters))
+
+            (let [change false
+                ^{:line 64} deadChange false]
+              (range [_ b (.-Blocks f)]
+                (let [^{:tag (* Block)} b0 (zero (* Block))]
+                  (when (> debug 1)
+                    (fmt/Printf "%s: start block\n" (.-name (.-pass f)))
+                    (set! b0 (new Block))
+                    (set! @b0 @b)
+                    (set! (.-Succs b0) (append (lit (slice Edge)) (spread (.-Succs b))))) ; make a new copy, not aliasing
+
+                  (range [i c (.ControlValues b)]
+                    (while (== (.-Op c) OpCopy)
+                      (set! c (aget (.-Args c) 0))
+                      (.ReplaceControl b i c)))
+
+
+                  (when (rb b)
+                    (set! change true)
+                    (when (> debug 1)
+                      (fmt/Printf "rewriting %s  ->  %s\n" (.LongString b0) (.LongString b))))
+
+
+                  (range [j v (.-Values b)]
+                    (when (> debug 1)
+                      (fmt/Printf "%s: consider %v\n" (.-name (.-pass f)) (.LongString v)))
+
+                    (let [^{:tag (* Value)} v0 (zero (* Value))]
+                      (when (> debug 1)
+                        (set! v0 (new Value))
+                        (set! @v0 @v)
+                        (set! (.-Args v0) (append (lit (slice (* Value))) (spread (.-Args v))))) ; make a new copy, not aliasing
+
+                      (when (and (== (.-Uses v) 0) (.removeable v))
+                        (when (and (!= (.-Op v) OpInvalid) (== deadcode removeDeadValues))
+                          ;; Reset any values that are now unused, so that we decrement
+                          ;; the use count of all of its arguments.
+                          ;; Not quite a deadcode pass, because it does not handle cycles.
+                          ;; But it should help Uses==1 rules to fire.
+                          (.reset v OpInvalid)
+                          (set! deadChange true))
+
+                        ;; No point rewriting values which aren't used.
+                        (continue))
+
+
+                      (let [vchange (phielimValue v)]
+                        (when (and vchange (> debug 1))
+                          (fmt/Printf "rewriting %s  ->  %s\n" (.LongString v0) (.LongString v)))
+
+
+                        ;; Eliminate copy inputs.
+                        ;; If any copy input becomes unused, mark it
+                        ;; as invalid and discard its argument. Repeat
+                        ;; recursively on the discarded argument.
+                        ;; This phase helps remove phantom "dead copy" uses
+                        ;; of a value so that a x.Uses==1 rule condition
+                        ;; fires reliably.
+                        (range [i a (.-Args v)]
+                          (when (!= (.-Op a) OpCopy)
+                            (continue))
+
+                          (let [aa (copySource a)]
+                            (.SetArg v i aa)
+                            ;; If a, a copy, has a line boundary indicator, attempt to find a new value
+                            ;; to hold it.  The first candidate is the value that will replace a (aa),
+                            ;; if it shares the same block and line and is eligible.
+                            ;; The second option is v, which has a as an input.  Because aa is earlier in
+                            ;; the data flow, it is the better choice.
+                            (when (== ^{:go/via [lico]} (.IsStmt (.-Pos a)) src/PosIsStmt)
+                              (cond (and (== (.-Block aa) (.-Block a)) (== ^{:go/via [lico]} (.Line (.-Pos aa)) ^{:go/via [lico]} (.Line (.-Pos a))) (!= ^{:go/via [lico]} (.IsStmt (.-Pos aa)) src/PosNotStmt))
+                                (set! (.-Pos aa) (.WithIsStmt (.-Pos aa)))
+                                (and (== (.-Block v) (.-Block a)) (== ^{:go/via [lico]} (.Line (.-Pos v)) ^{:go/via [lico]} (.Line (.-Pos a))) (!= ^{:go/via [lico]} (.IsStmt (.-Pos v)) src/PosNotStmt))
+                                (set! (.-Pos v) (.WithIsStmt (.-Pos v))) :else
+
+                                ;; Record the lost line and look for a new home after all rewrites are complete.
+                                ;; TODO: it's possible (in FOR loops, in particular) for statement boundaries for the same
+                                ;; line to appear in more than one block, but only one block is stored, so if both end
+                                ;; up here, then one will be lost.
+                                (.set pendingLines (.-Pos a) (conv int32 (.-ID (.-Block a)))))
+
+                              (set! (.-Pos a) (.WithNotStmt (.-Pos a))))
+
+                            (set! vchange true)
+                            (while (== (.-Uses a) 0)
+                              (let [b (aget (.-Args a) 0)]
+                                (.reset a OpInvalid)
+                                (set! a b)))))
+
+
+                        (when (and vchange (> debug 1))
+                          (fmt/Printf "rewriting %s  ->  %s\n" (.LongString v0) (.LongString v)))
+
+
+                        ;; apply rewrite function
+                        (when (rv v)
+                          (set! vchange true)
+                          ;; If value changed to a poor choice for a statement boundary, move the boundary
+                          (when (== ^{:go/via [lico]} (.IsStmt (.-Pos v)) src/PosIsStmt)
+                            (when [k (nextGoodStatementIndex v j b)] (!= k j)
+                              (set! (.-Pos v) (.WithNotStmt (.-Pos v)))
+                              (set! (.-Pos (aget (.-Values b) k)) (.WithIsStmt (.-Pos (aget (.-Values b) k)))))))
+
+
+
+
+                        (set! change (or change vchange))
+                        (when (and vchange (> debug 1))
+                          (fmt/Printf "rewriting %s  ->  %s\n" (.LongString v0) (.LongString v))))))))
+
+
+
+              (when (and (not change) (not deadChange))
+                (break))
+
+              (inc! iters)
+              (when (and ^:go/paren (or (> iters itersLimit) (>= debug 2)) change)
+                ;; We've done a suspiciously large number of rewrites (or we're in debug mode).
+                ;; As of Sep 2021, 90% of rewrites complete in 4 iterations or fewer
+                ;; and the maximum value encountered during make.bash is 12.
+                ;; Start checking for cycles. (This is too expensive to do routinely.)
+                ;; Note: we avoid this path for deadChange-only iterations, to fix #51639.
+                (when (== states nil)
+                  (set! states (make (map string bool))))
+
+                (let [h (.rewriteHash f)]
+                  (when [(values _ ok) (aget states h)] ok
+                    ;; We've found a cycle.
+                    ;; To diagnose it, set debug to 2 and start again,
+                    ;; so that we'll print all rules applied until we complete another cycle.
+                    ;; If debug is already >= 2, we've already done that, so it's time to crash.
+                    (if (< debug 2) (do
+                        (set! debug 2)
+                        (set! states (make (map string bool))))
+
+                      (.Fatalf f "rewrite cycle detected")))
+
+
+                  (aset states h true)))))
+
+
+          ;; remove clobbered values
+          (range [_ b (.-Blocks f)]
+            (let [j 0]
+              (range [i v (.-Values b)]
+                (let [vl (.-Pos v)]
+                  (when (== (.-Op v) OpInvalid)
+                    (when (== ^{:go/via [lico]} (.IsStmt (.-Pos v)) src/PosIsStmt)
+                      (.set pendingLines vl (conv int32 (.-ID b))))
+
+                    (.freeValue f v)
+                    (continue))
+
+                  (when (and (!= ^{:go/via [lico]} (.IsStmt (.-Pos v)) src/PosNotStmt) (not (notStmtBoundary (.-Op v))))
+                    (when [(values pl ok) (.get pendingLines vl)] (and ok (== pl (conv int32 (.-ID b))))
+                      (.remove pendingLines vl)
+                      (set! (.-Pos v) (.WithIsStmt (.-Pos v)))))
+
+
+                  (when (!= i j)
+                    (aset (.-Values b) j v))
+
+                  (inc! j)))
+
+              (when [(values pl ok) (.get pendingLines (.-Pos b))] (and ok (== pl (conv int32 (.-ID b))))
+                (set! (.-Pos b) (.WithIsStmt (.-Pos b)))
+                (.remove pendingLines (.-Pos b)))
+
+              (.truncateValues b j))))))))
+
+
+
+;; Common functions called from rewriting rules
+
+^{:go/end 238} (go/func is64BitFloat ^bool [^{:tag (* types/Type)} t]
+  (and (== (.Size t) 8) (.IsFloat t)))
+
+
+^{:go/end 242} (go/func is32BitFloat ^bool [^{:tag (* types/Type)} t]
+  (and (== (.Size t) 4) (.IsFloat t)))
+
+
+^{:go/end 246} (go/func is64BitInt ^bool [^{:tag (* types/Type)} t]
+  (and (== (.Size t) 8) (.IsInteger t)))
+
+
+^{:go/end 250} (go/func is32BitInt ^bool [^{:tag (* types/Type)} t]
+  (and (== (.Size t) 4) (.IsInteger t)))
+
+
+^{:go/end 254} (go/func is16BitInt ^bool [^{:tag (* types/Type)} t]
+  (and (== (.Size t) 2) (.IsInteger t)))
+
+
+^{:go/end 258} (go/func is8BitInt ^bool [^{:tag (* types/Type)} t]
+  (and (== (.Size t) 1) (.IsInteger t)))
+
+
+^{:go/end 262} (go/func isPtr ^bool [^{:tag (* types/Type)} t]
+  (.IsPtrShaped t))
+
+
+^{:go/end 275} (go/func copyCompatibleType ^bool [^{:tag (* types/Type)} t1 ^{:tag (* types/Type)} t2]
+  (when (!= (.Size t1) (.Size t2))
+    (return false))
+
+  (when (.IsInteger t1)
+    (return (.IsInteger t2)))
+
+  (when (isPtr t1)
+    (return (isPtr t2)))
+
+  (== (.Compare t1 t2) types/CMPeq))
+
+
+
+
+^{:go/end 287} (go/func mergeSym "mergeSym merges two symbolic offsets. There is no real merging of\noffsets, we just pick the non-nil one.\n" ^Sym [^Sym x ^Sym y]
+  (when (== x nil)
+    (return y))
+
+  (when (== y nil)
+    (return x))
+
+  (panic (fmt/Sprintf "mergeSym with two non-nil syms %v %v" x y)))
+
+
+^{:go/end 291} (go/func canMergeSym ^bool [^Sym x ^Sym y]
+  (or (== x nil) (== y nil)))
+
+
+
+
+
+
+^{:go/end 323} (go/func canMergeLoadClobber "canMergeLoadClobber reports whether the load can be merged into target without\ninvalidating the schedule.\nIt also checks that the other non-load argument x is something we\nare ok with clobbering.\n" ^bool [^{:tag (* Value)} target ^{:tag (* Value)} load ^{:tag (* Value)} x]
+  ;; The register containing x is going to get clobbered.
+  ;; Don't merge if we still need the value of x.
+  ;; We don't have liveness information here, but we can
+  ;; approximate x dying with:
+  ;;  1) target is x's only use.
+  ;;  2) target is not in a deeper loop than x.
+  (switch
+    (case [(and (== (.-Uses x) 2) (== (.-Op x) OpPhi) (== (len (.-Args x)) 2) ^:go/paren (or (== (aget (.-Args x) 0) target) (== (aget (.-Args x) 1) target)) (== (.-Uses target) 1))])
+    ;; This is a simple detector to determine that x is probably
+    ;; not live after target. (It does not need to be perfect,
+    ;; regalloc will issue a reg-reg move to save it if we are wrong.)
+    ;; We have:
+    ;;   x = Phi(?, target)
+    ;;   target = Op(load, x)
+    ;; Because target has only one use as a Phi argument, we can schedule it
+    ;; very late. Hopefully, later than the other use of x. (The other use died
+    ;; between x and target, or exists on another branch entirely).
+    (case [(> (.-Uses x) 1)]
+      (return false)))
+
+  (let [loopnest (.loopnest (.-Func (.-Block x)))]
+    (when (> (.depth loopnest (.-ID (.-Block target))) (.depth loopnest (.-ID (.-Block x))))
+      (return false))
+
+    (canMergeLoad target load)))
+
+
+
+
+^{:go/end 458} (go/func canMergeLoad "canMergeLoad reports whether the load can be merged into target without\ninvalidating the schedule.\n" ^bool [^{:tag (* Value)} target ^{:tag (* Value)} load]
+  (when (!= (.-ID (.-Block target)) (.-ID (.-Block load)))
+    ;; If the load is in a different block do not merge it.
+    (return false))
+
+
+  ;; We can't merge the load into the target if the load
+  ;; has more than one use.
+  (when (!= (.-Uses load) 1)
+    (return false))
+
+
+  (let [mem (.MemoryArg load)
+
+      ;; We need the load's memory arg to still be alive at target. That
+      ;; can't be the case if one of target's args depends on a memory
+      ;; state that is a successor of load's memory arg.
+      ;;
+      ;; For example, it would be invalid to merge load into target in
+      ;; the following situation because newmem has killed oldmem
+      ;; before target is reached:
+      ;;     load = read ... oldmem
+      ;;   newmem = write ... oldmem
+      ;;     arg0 = read ... newmem
+      ;;   target = add arg0 load
+      ;;
+      ;; If the argument comes from a different block then we can exclude
+      ;; it immediately because it must dominate load (which is in the
+      ;; same block as target).
+      ^{:line 356 :tag (slice (* Value))} args (zero (slice (* Value)))]
+    (range [_ a (.-Args target)]
+      (when (and (!= a load) (== (.-ID (.-Block a)) (.-ID (.-Block target))))
+        (set! args (append args a))))
+
+
+
+    ;; memPreds contains memory states known to be predecessors of load's
+    ;; memory state. It is lazily initialized.
+    ^{:go/breaks [[3 457]]} (let [^{:tag (map (* Value) bool)} memPreds (zero (map (* Value) bool))]
+      (for [i 0] (> (len args) 0) (inc! i)
+        (let [^:const ^{:val 100} limit 100]
+          (when (>= i limit)
+            ;; Give up if we have done a lot of iterations.
+            (return false))
+
+          (let [v (aget args (- (len args) 1))]
+            (set! args (subslice args _ (- (len args) 1)))
+            (when (!= (.-ID (.-Block target)) (.-ID (.-Block v)))
+              ;; Since target and load are in the same block
+              ;; we can stop searching when we leave the block.
+              (continue))
+
+            (when (== (.-Op v) OpPhi)
+              ;; A Phi implies we have reached the top of the block.
+              ;; The memory phi, if it exists, is always
+              ;; the first logical store in the block.
+              (continue))
+
+            (when (and (.IsTuple (.-Type v)) (.IsMemory (.FieldType (.-Type v) 1)))
+              ;; We could handle this situation however it is likely
+              ;; to be very rare.
+              (return false))
+
+            (when (!= (bit-and (.SymEffect (.-Op v)) SymAddr) 0)
+              ;; This case prevents an operation that calculates the
+              ;; address of a local variable from being forced to schedule
+              ;; before its corresponding VarDef.
+              ;; See issue 28445.
+              ;;   v1 = LOAD ...
+              ;;   v2 = VARDEF
+              ;;   v3 = LEAQ
+              ;;   v4 = CMPQ v1 v3
+              ;; We don't want to combine the CMPQ with the load, because
+              ;; that would force the CMPQ to schedule before the VARDEF, which
+              ;; in turn requires the LEAQ to schedule before the VARDEF.
+              (return false))
+
+            (when (.IsMemory (.-Type v))
+              (when (== memPreds nil)
+                ;; Initialise a map containing memory states
+                ;; known to be predecessors of load's memory
+                ;; state.
+                (set! memPreds (make (map (* Value) bool)))
+                (let [m mem
+                    ^:const ^{:line 411 :val 50} limit 50]
+                  (for [i 0] (< i limit) (inc! i)
+                    (when (== (.-Op m) OpPhi)
+                      ;; The memory phi, if it exists, is always
+                      ;; the first logical store in the block.
+                      (break))
+
+                    (when (!= (.-ID (.-Block m)) (.-ID (.-Block target)))
+                      (break))
+
+                    (when (not (.IsMemory (.-Type m)))
+                      (break))
+
+                    (aset memPreds m true)
+                    (when (== (len (.-Args m)) 0)
+                      (break))
+
+                    (set! m (.MemoryArg m)))))
+
+
+
+              ;; We can merge if v is a predecessor of mem.
+              ;;
+              ;; For example, we can merge load into target in the
+              ;; following scenario:
+              ;;      x = read ... v
+              ;;    mem = write ... v
+              ;;   load = read ... mem
+              ;; target = add x load
+              (when (aget memPreds v)
+                (continue))
+
+              (return false))
+
+            (when (and (> (len (.-Args v)) 0) (== (aget (.-Args v) (- (len (.-Args v)) 1)) mem))
+              ;; If v takes mem as an input then we know mem
+              ;; is valid at this point.
+              (continue))
+
+            (range [_ a (.-Args v)]
+              (when (== (.-ID (.-Block target)) (.-ID (.-Block a)))
+                (set! args (append args a)))))))
+
+
+
+
+      true)))
+
+
+
+^{:go/end 464} (go/func isSameCall "isSameCall reports whether aux is the same as the given named symbol.\n" ^bool [^Aux aux ^string name]
+  (let [fn (.-Fn (assert (* AuxCall) aux))]
+    (and (!= fn nil) (== (.String fn) name))))
+
+
+^{:go/end 468} (go/func isMalloc ^bool [^Aux aux]
+  (or (isNewObject aux) (isSpecializedMalloc aux)))
+
+
+^{:go/end 473} (go/func isNewObject ^bool [^Aux aux]
+  (let [fn (.-Fn (assert (* AuxCall) aux))]
+    (and (!= fn nil) (== (.String fn) "runtime.newobject"))))
+
+
+^{:go/end 484} (go/func isSpecializedMalloc ^bool [^Aux aux]
+  (let [fn (.-Fn (assert (* AuxCall) aux))]
+    (when (== fn nil)
+      (return false))
+
+    (let [name (.String fn)]
+      (or (strings/HasPrefix name "runtime.mallocgcSmallNoScanSC")
+        (strings/HasPrefix name "runtime.mallocgcSmallScanNoHeaderSC")
+        (strings/HasPrefix name "runtime.mallocgcTinySC")))))
+
+
+
+^{:go/end 489} (go/func canLoadUnaligned "canLoadUnaligned reports if the architecture supports unaligned load operations.\n" ^bool [^{:tag (* Config)} c]
+  (== ^{:go/via [Arch]} (.-Alignment (.-Arch (.-ctxt c))) 1))
+
+
+
+^{:go/end 492} (go/func nlz64 "nlzX returns the number of leading zeros.\n" ^int [^int64 x] (bits/LeadingZeros64 (conv uint64 x)))
+^{:go/end 493} (go/func nlz32 ^int [^int32 x] (bits/LeadingZeros32 (conv uint32 x)))
+^{:go/end 494} (go/func nlz16 ^int [^int16 x] (bits/LeadingZeros16 (conv uint16 x)))
+^{:go/end 495} (go/func nlz8 ^int [^int8 x] (bits/LeadingZeros8 (conv uint8 x)))
+
+
+^{:go/end 498} (go/func ntz64 "ntzX returns the number of trailing zeros.\n" ^int [^int64 x] (bits/TrailingZeros64 (conv uint64 x)))
+^{:go/end 499} (go/func ntz32 ^int [^int32 x] (bits/TrailingZeros32 (conv uint32 x)))
+^{:go/end 500} (go/func ntz16 ^int [^int16 x] (bits/TrailingZeros16 (conv uint16 x)))
+^{:go/end 501} (go/func ntz8 ^int [^int8 x] (bits/TrailingZeros8 (conv uint8 x)))
+
+
+^{:go/end 506} (go/func oneBit "oneBit reports whether x contains exactly one set bit.\n" :type-params [^{:tag (| int8 int16 int32 int64)} T] ^bool [^T x]
+  (and (== (bit-and x (- x 1)) 0) (!= x 0)))
+
+
+
+^{:go/end 511} (go/func nto "nto returns the number of trailing ones.\n" ^int64 [^int64 x]
+  (conv int64 (ntz64 (bit-not x))))
+
+
+
+
+^{:go/end 515} (go/func log8 "logX returns logarithm of n base 2.\nn must be a positive power of 2 (isPowerOfTwoX returns true).\n" ^int64 [^int8 n] (log8u (conv uint8 n)))
+^{:go/end 516} (go/func log16 ^int64 [^int16 n] (log16u (conv uint16 n)))
+^{:go/end 517} (go/func log32 ^int64 [^int32 n] (log32u (conv uint32 n)))
+^{:go/end 518} (go/func log64 ^int64 [^int64 n] (log64u (conv uint64 n)))
+
+
+
+^{:go/end 522} (go/func log8u "logXu returns the logarithm of n base 2.\nn must be a power of 2 (isPowerOfTwo returns true)\n" ^int64 [^uint8 n] (- (conv int64 (bits/Len8 n)) 1))
+^{:go/end 523} (go/func log16u ^int64 [^uint16 n] (- (conv int64 (bits/Len16 n)) 1))
+^{:go/end 524} (go/func log32u ^int64 [^uint32 n] (- (conv int64 (bits/Len32 n)) 1))
+^{:go/end 525} (go/func log64u ^int64 [^uint64 n] (- (conv int64 (bits/Len64 n)) 1))
+
+
+^{:go/end 530} (go/func isPowerOfTwo "isPowerOfTwoX functions report whether n is a power of 2.\n" :type-params [^{:tag (| int8 int16 int32 int64 uint8 uint16 uint32 uint64)} T] ^bool [^T n]
+  (and (> n 0) (== (bit-and n (- n 1)) 0)))
+
+
+
+^{:go/end 535} (go/func is32Bit "is32Bit reports whether n can be represented as a signed 32 bit integer.\n" ^bool [^int64 n]
+  (== n (conv int64 (conv int32 n))))
+
+
+
+^{:go/end 540} (go/func is16Bit "is16Bit reports whether n can be represented as a signed 16 bit integer.\n" ^bool [^int64 n]
+  (== n (conv int64 (conv int16 n))))
+
+
+
+^{:go/end 545} (go/func is8Bit "is8Bit reports whether n can be represented as a signed 8 bit integer.\n" ^bool [^int64 n]
+  (== n (conv int64 (conv int8 n))))
+
+
+
+^{:go/end 550} (go/func isU8Bit "isU8Bit reports whether n can be represented as an unsigned 8 bit integer.\n" ^bool [^int64 n]
+  (== n (conv int64 (conv uint8 n))))
+
+
+
+^{:go/end 555} (go/func is12Bit "is12Bit reports whether n can be represented as a signed 12 bit integer.\n" ^bool [^int64 n]
+  (and (<= (- (<< 1 11)) n) (< n (<< 1 11))))
+
+
+
+^{:go/end 560} (go/func isU12Bit "isU12Bit reports whether n can be represented as an unsigned 12 bit integer.\n" ^bool [^int64 n]
+  (and (<= 0 n) (< n (<< 1 12))))
+
+
+
+^{:go/end 565} (go/func isU16Bit "isU16Bit reports whether n can be represented as an unsigned 16 bit integer.\n" ^bool [^int64 n]
+  (== n (conv int64 (conv uint16 n))))
+
+
+
+^{:go/end 570} (go/func isU32Bit "isU32Bit reports whether n can be represented as an unsigned 32 bit integer.\n" ^bool [^int64 n]
+  (== n (conv int64 (conv uint32 n))))
+
+
+
+^{:go/end 575} (go/func is20Bit "is20Bit reports whether n can be represented as a signed 20 bit integer.\n" ^bool [^int64 n]
+  (and (<= (- (<< 1 19)) n) (< n (<< 1 19))))
+
+
+
+^{:go/breaks [[5 582]] :go/end 583} (go/func b2i "b2i translates a boolean value to 0 or 1 for assigning to auxInt.\n" ^int64 [^bool b]
+  (when b
+    (return 1))
+
+  0)
+
+
+
+^{:go/breaks [[5 590]] :go/end 591} (go/func b2i32 "b2i32 translates a boolean value to 0 or 1.\n" ^int32 [^bool b]
+  (when b
+    (return 1))
+
+  0)
+
+
+^{:go/end 596} (go/func canMulStrengthReduce ^bool [^{:tag (* Config)} config ^int64 x]
+  (let [(values _ ok) (aget (.-mulRecipes config) x)]
+    ^{:line 595} ok))
+
+^{:go/end 600} (go/func canMulStrengthReduce32 ^bool [^{:tag (* Config)} config ^int32 x]
+  (let [(values _ ok) (aget (.-mulRecipes config) (conv int64 x))]
+    ^{:line 599} ok))
+
+
+
+
+
+^{:go/end 607} (go/func mulStrengthReduce "mulStrengthReduce returns v*x evaluated at the location\n(block and source position) of m.\ncanMulStrengthReduce must have returned true.\n" ^{:tag (* Value)} [^{:tag (* Value)} m ^{:tag (* Value)} v ^int64 x]
+  ((.-build (aget (.-mulRecipes (.-Config (.-Func (.-Block v)))) x)) m v))
+
+
+
+
+
+
+^{:go/end 615} (go/func mulStrengthReduce32 "mulStrengthReduce32 returns v*x evaluated at the location\n(block and source position) of m.\ncanMulStrengthReduce32 must have returned true.\nThe upper 32 bits of m might be set to junk.\n" ^{:tag (* Value)} [^{:tag (* Value)} m ^{:tag (* Value)} v ^int32 x]
+  ((.-build (aget (.-mulRecipes (.-Config (.-Func (.-Block v)))) (conv int64 x))) m v))
+
+
+
+
+^{:go/end 621} (go/func shiftIsBounded "shiftIsBounded reports whether (left/right) shift Value v is known to be bounded.\nA shift is bounded if it is shifting by less than the width of the shifted value.\n" ^bool [^{:tag (* Value)} v]
+  (!= (.-AuxInt v) 0))
+
+
+
+
+^{:go/end 633} (go/func canonLessThan "canonLessThan returns whether x is \"ordered\" less than y, for purposes of normalizing\ngenerated code as much as possible.\n" ^bool [^{:tag (* Value)} x ^{:tag (* Value)} y]
+  (when (!= (.-Op x) (.-Op y))
+    (return (< (.-Op x) (.-Op y))))
+
+  (when (not (.SameFileAndLine (.-Pos x) (.-Pos y)))
+    (return (.Before (.-Pos x) (.-Pos y))))
+
+  (< (.-ID x) (.-ID y)))
+
+
+
+
+^{:go/end 651} (go/func truncate64Fto32F "truncate64Fto32F converts a float64 value to a float32 preserving the bit pattern\nof the mantissa. It will panic if the truncation results in lost information.\n" ^float32 [^float64 f]
+  (when (not (isExactFloat32 f))
+    (panic "truncate64Fto32F: truncation is not exact"))
+
+  (when (not (math/IsNaN f))
+    (return (conv float32 f)))
+
+  ;; NaN bit patterns aren't necessarily preserved across conversion
+  ;; instructions so we need to do the conversion manually.
+  (let [b (math/Float64bits f)
+      ^{:line 647} m (bit-and b (- (<< 1 52) 1)) ; mantissa (a.k.a. significand)
+      ;;          | sign                  | exponent   | mantissa       |
+      ^{:line 649} r (conv uint32 (bit-or (bit-and (>> b 32) (<< 1 31)) 0x7f800000 (>> m (- 52 23))))]
+    (math/Float32frombits r)))
+
+
+
+^{:go/end 656} (go/func DivisionNeedsFixUp "DivisionNeedsFixUp reports whether the division needs fix-up code.\n" ^bool [^{:tag (* Value)} v]
+  (== (.-AuxInt v) 0))
+
+
+
+^{:go/end 661} (go/func auxTo32F "auxTo32F decodes a float32 from the AuxInt value provided.\n" ^float32 [^int64 i]
+  (truncate64Fto32F (math/Float64frombits (conv uint64 i))))
+
+
+^{:go/breaks [[4 667]] :go/end 668} (go/func auxIntToBool ^bool [^int64 i]
+  (when (== i 0)
+    (return false))
+
+  true)
+
+^{:go/end 671} (go/func auxIntToInt8 ^int8 [^int64 i]
+  (conv int8 i))
+
+^{:go/end 674} (go/func auxIntToInt16 ^int16 [^int64 i]
+  (conv int16 i))
+
+^{:go/end 677} (go/func auxIntToInt32 ^int32 [^int64 i]
+  (conv int32 i))
+
+^{:go/end 680} (go/func auxIntToInt64 ^int64 [^int64 i]
+  ^{:line 679} i)
+
+^{:go/end 683} (go/func auxIntToUint8 ^uint8 [^int64 i]
+  (conv uint8 i))
+
+^{:go/end 686} (go/func auxIntToUint64 ^uint64 [^int64 i]
+  (conv uint64 i))
+
+^{:go/end 689} (go/func auxIntToFloat32 ^float32 [^int64 i]
+  (conv float32 (math/Float64frombits (conv uint64 i))))
+
+^{:go/end 692} (go/func auxIntToFloat64 ^float64 [^int64 i]
+  (math/Float64frombits (conv uint64 i)))
+
+^{:go/end 695} (go/func auxIntToValAndOff ^ValAndOff [^int64 i]
+  (conv ValAndOff i))
+
+^{:go/end 698} (go/func auxIntToArm64BitField ^arm64BitField [^int64 i]
+  (conv arm64BitField i))
+
+^{:go/end 709} (go/func auxIntToArm64ConditionalParams ^arm64ConditionalParams [^int64 i]
+  (let [^arm64ConditionalParams params (zero arm64ConditionalParams)]
+    (set! (.-cond params) (conv Op (bit-and i 0xffff)))
+    (set! i >> 16)
+    (set! (.-nzcv params) (conv uint8 (bit-and i 0x0f)))
+    (set! i >> 4)
+    (set! (.-constValue params) (conv uint8 (bit-and i 0x1f)))
+    (set! i >> 5)
+    (set! (.-ind params) (== i 1))
+    ^{:line 708} params))
+
+^{:go/end 712} (go/func auxIntToFlagConstant ^flagConstant [^int64 x]
+  (conv flagConstant x))
+
+
+^{:go/end 716} (go/func auxIntToOp ^Op [^int64 cc]
+  (conv Op cc))
+
+
+^{:go/breaks [[4 722]] :go/end 723} (go/func boolToAuxInt ^int64 [^bool b]
+  (when b
+    (return 1))
+
+  0)
+
+^{:go/end 726} (go/func int8ToAuxInt ^int64 [^int8 i]
+  (conv int64 i))
+
+^{:go/end 729} (go/func int16ToAuxInt ^int64 [^int16 i]
+  (conv int64 i))
+
+^{:go/end 732} (go/func int32ToAuxInt ^int64 [^int32 i]
+  (conv int64 i))
+
+^{:go/end 735} (go/func int64ToAuxInt ^int64 [^int64 i]
+  ^{:line 734} i)
+
+^{:go/end 738} (go/func uint8ToAuxInt ^int64 [^uint8 i]
+  (conv int64 (conv int8 i)))
+
+^{:go/end 741} (go/func uint64ToAuxInt ^int64 [^uint64 i]
+  (conv int64 i))
+
+^{:go/end 744} (go/func float32ToAuxInt ^int64 [^float32 f]
+  (conv int64 (math/Float64bits (conv float64 f))))
+
+^{:go/end 747} (go/func float64ToAuxInt ^int64 [^float64 f]
+  (conv int64 (math/Float64bits f)))
+
+^{:go/end 750} (go/func valAndOffToAuxInt ^int64 [^ValAndOff v]
+  (conv int64 v))
+
+^{:go/end 753} (go/func arm64BitFieldToAuxInt ^int64 [^arm64BitField v]
+  (conv int64 v))
+
+^{:go/end 767} (go/func arm64ConditionalParamsToAuxInt ^int64 [^arm64ConditionalParams v]
+  (when (!= (bit-and-not (.-cond v) 0xffff) 0)
+    (panic "condition value exceeds 16 bits"))
+
+
+  (let [^int64 i (zero int64)]
+    (when (.-ind v)
+      (set! i (<< 1 25)))
+
+    (set! i bit-or (<< (conv int64 (.-constValue v)) 20))
+    (set! i bit-or (<< (conv int64 (.-nzcv v)) 16))
+    (set! i bit-or (conv int64 (.-cond v)))
+    ^{:line 766} i))
+
+
+^{:go/end 771} (go/func flagConstantToAuxInt ^int64 [^flagConstant x]
+  (conv int64 x))
+
+
+^{:go/end 775} (go/func opToAuxInt ^int64 [^Op o]
+  (conv int64 o))
+
+
+
+(go/type Aux "Aux is an interface to hold miscellaneous data in Blocks and Values.\n" (interface
+    (CanBeAnSSAAux [])))
+
+
+
+(go/type auxMark "for now only used to mark moves that need to avoid clobbering flags\n" bool)
+
+^{:go/end 785} (go/method CanBeAnSSAAux [auxMark])
+
+(go/var ^auxMark AuxMark)
+
+
+(go/type stringAux "stringAux wraps string values for use in Aux.\n" string)
+
+^{:go/end 792} (go/method CanBeAnSSAAux [stringAux])
+
+^{:go/end 796} (go/func auxToString ^string [^Aux i]
+  (conv string (assert stringAux i)))
+
+^{:go/end 801} (go/func auxToSym ^Sym [^Aux i]
+  ;; TODO: kind of a hack - allows nil interface through
+  (let [(values s _) (assert Sym i)]
+    ^{:line 800} s))
+
+^{:go/end 804} (go/func auxToType ^{:tag (* types/Type)} [^Aux i]
+  (assert (* types/Type) i))
+
+^{:go/end 807} (go/func auxToCall ^{:tag (* AuxCall)} [^Aux i]
+  (assert (* AuxCall) i))
+
+^{:go/end 810} (go/func auxToS390xCCMask ^s390x/CCMask [^Aux i]
+  (assert s390x/CCMask i))
+
+^{:go/end 813} (go/func auxToS390xRotateParams ^s390x/RotateParams [^Aux i]
+  (assert s390x/RotateParams i))
+
+
+^{:go/end 817} (go/func StringToAux ^Aux [^string s]
+  (conv stringAux s))
+
+^{:go/end 820} (go/func symToAux ^Aux [^Sym s]
+  ^{:line 819} s)
+
+^{:go/end 823} (go/func callToAux ^Aux [^{:tag (* AuxCall)} s]
+  ^{:line 822} s)
+
+^{:go/end 826} (go/func typeToAux ^Aux [^{:tag (* types/Type)} t]
+  ^{:line 825} t)
+
+^{:go/end 829} (go/func s390xCCMaskToAux ^Aux [^s390x/CCMask c]
+  ^{:line 828} c)
+
+^{:go/end 832} (go/func s390xRotateParamsToAux ^Aux [^s390x/RotateParams r]
+  ^{:line 831} r)
+
+
+
+^{:go/end 837} (go/func uaddOvf "uaddOvf reports whether unsigned a+b would overflow.\n" ^bool [^int64 a ^int64 b]
+  (< (+ (conv uint64 a) (conv uint64 b)) (conv uint64 a)))
+
+
+^{:go/end 852} (go/func devirtLECall ^{:tag (* Value)} [^{:tag (* Value)} v ^{:tag (* obj/LSym)} sym]
+  (set! (.-Op v) OpStaticLECall)
+  (let [auxcall (assert (* AuxCall) (.-Aux v))]
+    (set! (.-Fn auxcall) sym)
+    ;; Remove first arg
+    (dec! (.-Uses (aget (.-Args v) 0)))
+    (copy (subslice (.-Args v) 0) (subslice (.-Args v) 1))
+    (aset (.-Args v) (- (len (.-Args v)) 1) nil) ; aid GC
+    (set! (.-Args v) (subslice (.-Args v) _ (- (len (.-Args v)) 1)))
+    (when [f (.-Func (.-Block v))] (> (.-debug (.-pass f)) 0)
+      (.Warnl f (.-Pos v) "de-virtualizing call"))
+
+    ^{:line 851} v))
+
+
+
+^{:go/breaks [[7 881]] :go/end 882} (go/func isSamePtr "isSamePtr reports whether p1 and p2 point to the same address.\n" ^bool [^{:tag (* Value)} p1 ^{:tag (* Value)} p2]
+  (when (== p1 p2)
+    (return true))
+
+  (when (!= (.-Op p1) (.-Op p2))
+    (while (and (== (.-Op p1) OpOffPtr) (== (.-AuxInt p1) 0))
+      (set! p1 (aget (.-Args p1) 0)))
+
+    (while (and (== (.-Op p2) OpOffPtr) (== (.-AuxInt p2) 0))
+      (set! p2 (aget (.-Args p2) 0)))
+
+    (when (== p1 p2)
+      (return true))
+
+    (when (!= (.-Op p1) (.-Op p2))
+      (return false)))
+
+
+  (switch (.-Op p1)
+    (case [OpOffPtr]
+      (return (and (== (.-AuxInt p1) (.-AuxInt p2)) (isSamePtr (aget (.-Args p1) 0) (aget (.-Args p2) 0)))))
+    (case [OpAddr OpLocalAddr]
+      (return (== (.-Aux p1) (.-Aux p2))))
+    (case [OpAddPtr]
+      (return (and (== (aget (.-Args p1) 1) (aget (.-Args p2) 1)) (isSamePtr (aget (.-Args p1) 0) (aget (.-Args p2) 0))))))
+
+  false)
+
+
+^{:go/end 889} (go/func isStackPtr ^bool [^{:tag (* Value)} v]
+  (while (or (== (.-Op v) OpOffPtr) (== (.-Op v) OpAddPtr))
+    (set! v (aget (.-Args v) 0)))
+
+  (or (== (.-Op v) OpSP) (== (.-Op v) OpLocalAddr)))
+
+
+
+
+
+^{:go/end 941} (go/func disjoint "disjoint reports whether the memory region specified by [p1:p1+n1)\ndoes not overlap with [p2:p2+n2).\nA return value of false does not imply the regions overlap.\n" ^bool [^{:tag (* Value)} p1 ^int64 n1 ^{:tag (* Value)} p2 ^int64 n2]
+  (when (or (== n1 0) (== n2 0))
+    (return true))
+
+  (when (== p1 p2)
+    (return false))
+
+  (let [baseAndOffset ^{:go/end 911} (fn [^{:tag (* Value)} ptr] :results [^{:tag (* Value)} base ^int64 offset]
+        (set! (values base offset) (values ptr 0))
+        (while (== (.-Op base) OpOffPtr)
+          (set! offset + (.-AuxInt base))
+          (set! base (aget (.-Args base) 0)))
+
+        (when (.-nilCheck (aget opcodeTable (.-Op base)))
+          (set! base (aget (.-Args base) 0)))
+
+        (return base offset))]
+
+
+    ;; Run types-based analysis
+    (when (disjointTypes (.-Type p1) (.-Type p2))
+      (return true))
+
+
+    ^{:go/breaks [[4 940]]} (let [(values ^:assign p1 off1) (baseAndOffset p1)
+        (values ^:assign p2 off2) (baseAndOffset p2)]
+      (when (isSamePtr p1 p2)
+        (return (not (overlap off1 n1 off2 n2))))
+
+      ;; p1 and p2 are not the same, so if they are both OpAddrs then
+      ;; they point to different variables.
+      ;; If one pointer is on the stack and the other is an argument
+      ;; then they can't overlap.
+      (switch (.-Op p1)
+        (case [OpAddr OpLocalAddr]
+          (when (or (== (.-Op p2) OpAddr) (== (.-Op p2) OpLocalAddr) (== (.-Op p2) OpSP))
+            (return true))
+
+          (return (and ^:go/paren (or (== (.-Op p2) OpArg) (== (.-Op p2) OpArgIntReg)) (== (.-Op (aget (.-Args p1) 0)) OpSP))))
+        (case [OpArg OpArgIntReg]
+          (when (or (== (.-Op p2) OpSP) (== (.-Op p2) OpLocalAddr))
+            (return true)))
+
+        (case [OpSP]
+          (return (or (== (.-Op p2) OpAddr) (== (.-Op p2) OpLocalAddr) (== (.-Op p2) OpArg) (== (.-Op p2) OpArgIntReg) (== (.-Op p2) OpSP)))))
+
+      false)))
+
+
+
+
+
+^{:go/end 975} (go/func disjointTypes "disjointTypes reports whether a memory region pointed to by a pointer of type\nt1 does not overlap with a memory region pointed to by a pointer of type t2 --\nbased on type aliasing rules.\n" ^bool [^{:tag (* types/Type)} t1 ^{:tag (* types/Type)} t2]
+  ;; Unsafe pointer can alias with anything.
+  (when (or (.IsUnsafePtr t1) (.IsUnsafePtr t2))
+    (return false))
+
+
+  (when (or (not (.IsPtr t1)) (not (.IsPtr t2)))
+    ;; Treat non-pointer types (such as TFUNC, TMAP, uintptr) conservatively.
+    (return false))
+
+
+  (set! t1 (.Elem t1))
+  (set! t2 (.Elem t2))
+
+  ;; Not-in-heap types are not supported -- they are rare and non-important; also,
+  ;; type.HasPointers check doesn't work for them correctly.
+  (when (or (.NotInHeap t1) (.NotInHeap t2))
+    (return false))
+
+
+  ^{:go/breaks [[3 974]]} (let [isPtrShaped ^{:go/end 966} (fn ^bool [^{:tag (* types/Type)} t] (and (== (conv int (.Size t)) types/PtrSize) (.HasPointers t)))]
+
+    ;; Pointers and non-pointers are disjoint (https://pkg.go.dev/unsafe#Pointer).
+    (when (or ^:go/paren (and (isPtrShaped t1) (not (.HasPointers t2)))
+        ^:go/paren (and (isPtrShaped t2) (not (.HasPointers t1))))
+      (return true))
+
+
+    false))
+
+
+
+^{:go/breaks [[5 987]] :go/end 988} (go/func moveSize "moveSize returns the number of bytes an aligned MOV instruction moves.\n" ^int64 [^int64 align ^{:tag (* Config)} c]
+  (switch
+    (case [(and (== (% align 8) 0) (== (.-PtrSize c) 8))]
+      (return 8))
+    (case [(== (% align 4) 0)]
+      (return 4))
+    (case [(== (% align 2) 0)]
+      (return 2)))
+
+  1)
+
+
+
+
+
+^{:go/end 1038} (go/func mergePoint "mergePoint finds a block among a's blocks which dominates b and is itself\ndominated by all of a's blocks. Returns nil if it can't find one.\nMight return nil even if one does exist.\n" ^{:tag (* Block)} [^{:tag (* Block)} b & ^{:tag (slice (* Value))} a]
+  ;; Walk backward from b looking for one of the a's blocks.
+
+  ;; Max distance
+  (let [d 100]
+
+    (while (> d 0)
+      (range [_ x a]
+        (when (== b (.-Block x))
+          (goto :found)))
+
+
+      (when (> (len (.-Preds b)) 1)
+        ;; Don't know which way to go back. Abort.
+        (return nil))
+
+      (set! b (.-b (aget (.-Preds b) 0)))
+      (dec! d))
+
+    (return nil) ; too far away
+    ^{:go/breaks [[3 1037]]} (let [
+        ;; At this point, r is the first value in a that we find by walking backwards.
+        ;; if we return anything, r will be it.
+        ^{:line 1016 :go/label :found :go/label-line 1013} r b
+
+        ;; Keep going, counting the other a's that we find. They must all dominate r.
+        ^{:line 1019} na 0]
+      (while (> d 0)
+        (range [_ x a]
+          (when (== b (.-Block x))
+            (inc! na)))
+
+
+        (when (== na (len a))
+          ;; Found all of a in a backwards walk. We can return r.
+          (return r))
+
+        (when (> (len (.-Preds b)) 1)
+          (return nil))
+
+        (set! b (.-b (aget (.-Preds b) 0)))
+        (dec! d))
+
+
+      nil))) ; too far away
+
+
+
+
+
+
+
+^{:go/breaks [[5 1050]] :go/end 1051} (go/func clobber "clobber invalidates values. Returns true.\nclobber is used by rewrite rules to:\n\n\tA) make sure the values are really dead and never used again.\n\tB) decrement use counts of the values' args.\n" ^bool [& ^{:tag (slice (* Value))} vv]
+  (range [_ v vv]
+    (.reset v OpInvalid))
+  ;; Note: leave v.Block intact.  The Block field is used after clobber.
+
+  true)
+
+
+
+
+^{:go/breaks [6] :go/end 1059} (go/func resetCopy "resetCopy resets v to be a copy of arg.\nAlways returns true.\n" ^bool [^{:tag (* Value)} v ^{:tag (* Value)} arg]
+  (.reset v OpCopy)
+  (.AddArg v arg)
+  true)
+
+
+
+
+
+^{:go/breaks [[5 1069]] :go/end 1070} (go/func clobberIfDead "clobberIfDead resets v when use count is 1. Returns true.\nclobberIfDead is used by rewrite rules to decrement\nuse counts of v's args when v is dead and never used.\n" ^bool [^{:tag (* Value)} v]
+  (when (== (.-Uses v) 1)
+    (.reset v OpInvalid))
+
+  ;; Note: leave v.Block intact.  The Block field is used after clobberIfDead.
+  true)
+
+
+
+
+
+
+
+
+^{:go/breaks [5] :go/end 1081} (go/func noteRule "noteRule is an easy way to track if a rule is matched when writing\nnew ones.  Make the rule of interest also conditional on\n\n\tnoteRule(\"note to self: rule of interest matched\")\n\nand that message will print when the rule matches.\n" ^bool [^string s]
+  (fmt/Println s)
+  true)
+
+
+
+
+
+
+
+^{:go/end 1095} (go/func countRule "countRule increments Func.ruleMatches[key].\nIf Func.ruleMatches is non-nil at the end\nof compilation, it will be printed to stdout.\nThis is intended to make it easier to find which functions\nwhich contain lots of rules matches when developing new rules.\n" ^bool [^{:tag (* Value)} v ^string key]
+  ^{:go/breaks [4]} (let [f (.-Func (.-Block v))]
+    (when (== (.-ruleMatches f) nil)
+      (set! (.-ruleMatches f) (make (map string int))))
+
+    (inc! (aget (.-ruleMatches f) key))
+    true))
+
+
+
+
+^{:go/breaks [[5 1103]] :go/end 1104} (go/func warnRule "warnRule generates compiler debug output with string s when\nv is not in autogenerated code, cond is true and the rule has fired.\n" ^bool [^bool cond ^{:tag (* Value)} v ^string s]
+  (when [pos (.-Pos v)] (and (> ^{:go/via [lico]} (.Line pos) 1) cond)
+    (.Warnl (.-Func (.-Block v)) pos s))
+
+  true)
+
+
+
+^{:go/end 1112} (go/func flagArg "for a pseudo-op like (LessThan x), extract x.\n" ^{:tag (* Value)} [^{:tag (* Value)} v]
+  (when (or (!= (len (.-Args v)) 1) (not (.IsFlags (.-Type (aget (.-Args v) 0)))))
+    (return nil))
+
+  (aget (.-Args v) 0))
+
+
+
+
+
+
+
+
+^{:go/end 1126} (go/func amd64CapAVXShift "amd64CapAVXShift caps an AMD64 AVX vector shift amount c so that over-shifts\nalways result in 0.\n\nThese instructions have room for an 8-bit immediate and any value larger than\nthe element width will result in 0 or -1 (for an arithmetic right shift).\nThus, we simply cap this at 255.\n" ^uint8 [^int64 auxInt]
+  (let [u (auxIntToUint64 auxInt)]
+    (when (> u 255)
+      (return 255))
+
+    (conv uint8 u)))
+
+
+
+
+
+
+
+^{:go/end 1174} (go/func arm64Negate "arm64Negate finds the complement to an ARM64 condition code,\nfor example !Equal -> NotEqual or !LessThan -> GreaterEqual\n\nFor floating point, it's more subtle because NaN is unordered. We do\n!LessThanF -> NotLessThanF, the latter takes care of NaNs.\n" ^Op [^Op op]
+  (switch op
+    (case [OpARM64LessThan]
+      (return OpARM64GreaterEqual))
+    (case [OpARM64LessThanU]
+      (return OpARM64GreaterEqualU))
+    (case [OpARM64GreaterThan]
+      (return OpARM64LessEqual))
+    (case [OpARM64GreaterThanU]
+      (return OpARM64LessEqualU))
+    (case [OpARM64LessEqual]
+      (return OpARM64GreaterThan))
+    (case [OpARM64LessEqualU]
+      (return OpARM64GreaterThanU))
+    (case [OpARM64GreaterEqual]
+      (return OpARM64LessThan))
+    (case [OpARM64GreaterEqualU]
+      (return OpARM64LessThanU))
+    (case [OpARM64Equal]
+      (return OpARM64NotEqual))
+    (case [OpARM64NotEqual]
+      (return OpARM64Equal))
+    (case [OpARM64LessThanF]
+      (return OpARM64NotLessThanF))
+    (case [OpARM64NotLessThanF]
+      (return OpARM64LessThanF))
+    (case [OpARM64LessEqualF]
+      (return OpARM64NotLessEqualF))
+    (case [OpARM64NotLessEqualF]
+      (return OpARM64LessEqualF))
+    (case [OpARM64GreaterThanF]
+      (return OpARM64NotGreaterThanF))
+    (case [OpARM64NotGreaterThanF]
+      (return OpARM64GreaterThanF))
+    (case [OpARM64GreaterEqualF]
+      (return OpARM64NotGreaterEqualF))
+    (case [OpARM64NotGreaterEqualF]
+      (return OpARM64GreaterEqualF))
+    (default
+      (panic "unreachable"))))
+
+
+
+
+
+
+
+
+^{:go/end 1220} (go/func arm64Invert "arm64Invert evaluates (InvertFlags op), which\nis the same as altering the condition codes such\nthat the same result would be produced if the arguments\nto the flag-generating instruction were reversed, e.g.\n(InvertFlags (CMP x y)) -> (CMP y x)\n" ^Op [^Op op]
+  (switch op
+    (case [OpARM64LessThan]
+      (return OpARM64GreaterThan))
+    (case [OpARM64LessThanU]
+      (return OpARM64GreaterThanU))
+    (case [OpARM64GreaterThan]
+      (return OpARM64LessThan))
+    (case [OpARM64GreaterThanU]
+      (return OpARM64LessThanU))
+    (case [OpARM64LessEqual]
+      (return OpARM64GreaterEqual))
+    (case [OpARM64LessEqualU]
+      (return OpARM64GreaterEqualU))
+    (case [OpARM64GreaterEqual]
+      (return OpARM64LessEqual))
+    (case [OpARM64GreaterEqualU]
+      (return OpARM64LessEqualU))
+    (case [OpARM64Equal OpARM64NotEqual]
+      (return op))
+    (case [OpARM64LessThanF]
+      (return OpARM64GreaterThanF))
+    (case [OpARM64GreaterThanF]
+      (return OpARM64LessThanF))
+    (case [OpARM64LessEqualF]
+      (return OpARM64GreaterEqualF))
+    (case [OpARM64GreaterEqualF]
+      (return OpARM64LessEqualF))
+    (case [OpARM64NotLessThanF]
+      (return OpARM64NotGreaterThanF))
+    (case [OpARM64NotGreaterThanF]
+      (return OpARM64NotLessThanF))
+    (case [OpARM64NotLessEqualF]
+      (return OpARM64NotGreaterEqualF))
+    (case [OpARM64NotGreaterEqualF]
+      (return OpARM64NotLessEqualF))
+    (default
+      (panic "unreachable"))))
+
+
+
+
+
+
+^{:go/end 1263} (go/func ccARM64Eval "evaluate an ARM64 op against a flags value\nthat is potentially constant; return 1 for true,\n-1 for false, and 0 for not constant.\n" ^int [^Op op ^{:tag (* Value)} flags]
+  (let [fop (.-Op flags)]
+    (when (== fop OpARM64InvertFlags)
+      (return (- (ccARM64Eval op (aget (.-Args flags) 0)))))
+
+    (when (!= fop OpARM64FlagConstant)
+      (return 0))
+
+    ^{:go/breaks [[3 1262]]} (let [fc (conv flagConstant (.-AuxInt flags))
+        ^{:line 1234} b2i ^{:go/breaks [[3 1238]] :go/end 1239} (fn ^int [^bool b]
+          (when b
+            (return 1))
+
+          -1)]
+
+      (switch op
+        (case [OpARM64Equal]
+          (return (b2i (.eq fc))))
+        (case [OpARM64NotEqual]
+          (return (b2i (.ne fc))))
+        (case [OpARM64LessThan]
+          (return (b2i (.lt fc))))
+        (case [OpARM64LessThanU]
+          (return (b2i (.ult fc))))
+        (case [OpARM64GreaterThan]
+          (return (b2i (.gt fc))))
+        (case [OpARM64GreaterThanU]
+          (return (b2i (.ugt fc))))
+        (case [OpARM64LessEqual]
+          (return (b2i (.le fc))))
+        (case [OpARM64LessEqualU]
+          (return (b2i (.ule fc))))
+        (case [OpARM64GreaterEqual]
+          (return (b2i (.ge fc))))
+        (case [OpARM64GreaterEqualU]
+          (return (b2i (.uge fc)))))
+
+      0)))
+
+
+
+
+^{:go/end 1284} (go/func logRule "logRule logs the use of the rule s. This will only be enabled if\nrewrite rules were generated with the -log option, see _gen/rulegen.go.\n" [^string s]
+  (when (== ruleFile nil)
+    ;; Open a log file to write log to. We open in append
+    ;; mode because all.bash runs the compiler lots of times,
+    ;; and we want the concatenation of all of those logs.
+    ;; This means, of course, that users need to rm the old log
+    ;; to get fresh data.
+    ;; TODO: all.bash runs compilers in parallel. Need to synchronize logging somehow?
+    (let [(values w err) (os/OpenFile (filepath/Join (os/Getenv "GOROOT") "src" "rulelog")
+          (bit-or os/O_CREATE os/O_WRONLY os/O_APPEND) 0666)]
+      (when (!= err nil)
+        (panic err))
+
+      (set! ruleFile w)))
+
+  ;; Ignore errors in case of multiple processes fighting over the file.
+  (fmt/Fprintln ruleFile s))
+
+
+(go/var ^io/Writer ruleFile)
+
+^{:go/breaks [[4 1301]] :go/end 1302} (go/func isConstZero ^bool [^{:tag (* Value)} v]
+  (switch (.-Op v)
+    (case [OpConstNil]
+      (return true))
+    (case [OpConst64 OpConst32 OpConst16 OpConst8 OpConstBool OpConst32F OpConst64F]
+      (return (== (.-AuxInt v) 0)))
+    (case [OpStringMake OpIMake OpComplexMake]
+      (return (and (isConstZero (aget (.-Args v) 0)) (isConstZero (aget (.-Args v) 1)))))
+    (case [OpSliceMake]
+      (return (and (isConstZero (aget (.-Args v) 0)) (isConstZero (aget (.-Args v) 1)) (isConstZero (aget (.-Args v) 2)))))
+    (case [OpStringPtr OpStringLen OpSlicePtr OpSliceLen OpSliceCap OpITab OpIData OpComplexReal OpComplexImag]
+      (return (isConstZero (aget (.-Args v) 0)))))
+
+  false)
+
+
+
+^{:go/end 1324} (go/func reciprocalExact64 "reciprocalExact64 reports whether 1/c is exactly representable.\n" ^bool [^float64 c]
+  (let [b (math/Float64bits c)
+      ^{:line 1307} man (bit-and b (- (<< 1 52) 1))]
+    (when (!= man 0)
+      (return false)) ; not a power of 2, denormal, or NaN
+
+    (let [exp (bit-and (>> b 52) (- (<< 1 11) 1))]
+      ;; exponent bias is 0x3ff.  So taking the reciprocal of a number
+      ;; changes the exponent to 0x7fe-exp.
+      (switch exp
+        (case [0]
+          (return false)) ; ±0
+        (case [0x7ff]
+          (return false)) ; ±inf
+        (case [0x7fe]
+          (return false)) ; exponent is not representable
+        (default
+          (return true))))))
+
+
+
+
+^{:go/end 1346} (go/func reciprocalExact32 "reciprocalExact32 reports whether 1/c is exactly representable.\n" ^bool [^float32 c]
+  (let [b (math/Float32bits c)
+      ^{:line 1329} man (bit-and b (- (<< 1 23) 1))]
+    (when (!= man 0)
+      (return false)) ; not a power of 2, denormal, or NaN
+
+    (let [exp (bit-and (>> b 23) (- (<< 1 8) 1))]
+      ;; exponent bias is 0x7f.  So taking the reciprocal of a number
+      ;; changes the exponent to 0xfe-exp.
+      (switch exp
+        (case [0]
+          (return false)) ; ±0
+        (case [0xff]
+          (return false)) ; ±inf
+        (case [0xfe]
+          (return false)) ; exponent is not representable
+        (default
+          (return true))))))
+
+
+
+
+^{:go/breaks [[5 1357]] :go/end 1358} (go/func isARMImmRot "check if an immediate can be directly encoded into an ARM's instruction.\n" ^bool [^uint32 v]
+  (for [i 0] (< i 16) (inc! i)
+    (when (== (bit-and-not v 0xff) 0)
+      (return true))
+
+    (set! v (bit-or (<< v 2) (>> v 30))))
+
+
+  false)
+
+
+
+
+^{:go/breaks [[6 1369]] :go/end 1370} (go/func overlap "overlap reports whether the ranges given by the given offset and\nsize pairs overlap.\n" ^bool [^int64 offset1 ^int64 size1 ^int64 offset2 ^int64 size2]
+  (when (and (>= offset1 offset2) (> (+ offset2 size2) offset1))
+    (return true))
+
+  (when (and (>= offset2 offset1) (> (+ offset1 size1) offset2))
+    (return true))
+
+  false)
+
+
+
+
+
+^{:go/breaks [[6 1416]] :go/end 1417} (go/func ZeroUpper32Bits "check if value zeroes out upper 32-bit of 64-bit register.\ndepth limits recursion depth. In AMD64.rules 3 is used as limit,\nbecause it catches same amount of cases as 4.\n" ^bool [^{:tag (* Value)} x ^int depth]
+  (when (and (.IsSigned (.-Type x)) (< (.Size (.-Type x)) 8))
+    ;; If the value is signed, it might get re-sign-extended
+    ;; during spill and restore. See issue 68227.
+    (return false))
+
+  (switch (.-Op x)
+    (case [OpAMD64MOVLconst OpAMD64MOVLload OpAMD64MOVLQZX OpAMD64MOVLloadidx1
+        ^{:line 1383} OpAMD64MOVWload OpAMD64MOVWloadidx1 OpAMD64MOVBload OpAMD64MOVBloadidx1
+        ^{:line 1384} OpAMD64MOVLloadidx4 OpAMD64ADDLload OpAMD64SUBLload OpAMD64ANDLload
+        ^{:line 1385} OpAMD64ORLload OpAMD64XORLload OpAMD64CVTTSD2SL
+        ^{:line 1386} OpAMD64ADDL OpAMD64ADDLconst OpAMD64SUBL OpAMD64SUBLconst
+        ^{:line 1387} OpAMD64ANDL OpAMD64ANDLconst OpAMD64ORL OpAMD64ORLconst
+        ^{:line 1388} OpAMD64XORL OpAMD64XORLconst OpAMD64NEGL OpAMD64NOTL
+        ^{:line 1389} OpAMD64SHRL OpAMD64SHRLconst OpAMD64SARL OpAMD64SARLconst
+        ^{:line 1390} OpAMD64SHLL OpAMD64SHLLconst]
+      (return true))
+    (case [OpAMD64MOVQconst]
+      (return (== (conv uint64 (conv uint32 (.-AuxInt x))) (conv uint64 (.-AuxInt x)))))
+    (case [OpARM64REV16W OpARM64REVW OpARM64RBITW OpARM64CLZW OpARM64EXTRWconst
+        ^{:line 1395} OpARM64MULW OpARM64MNEGW OpARM64UDIVW OpARM64DIVW OpARM64UMODW
+        ^{:line 1396} OpARM64MADDW OpARM64MSUBW OpARM64RORW OpARM64RORWconst]
+      (return true))
+    (case [OpArg] ; note: but not ArgIntReg
+      ;; amd64 always loads args from the stack unsigned.
+      ;; most other architectures load them sign/zero extended based on the type.
+      (return (and (== (.Size (.-Type x)) 4) (== (.-arch (.-Config (.-Func (.-Block x)))) "amd64"))))
+    (case [OpPhi OpSelect0 OpSelect1]
+      ;; Phis can use each-other as an arguments, instead of tracking visited values,
+      ;; just limit recursion depth.
+      (when (<= depth 0)
+        (return false))
+
+      (range [i (.-Args x)]
+        (when (not (ZeroUpper32Bits (aget (.-Args x) i) (- depth 1)))
+          (return false)))
+
+
+      (return true)))
+
+
+  false)
+
+
+
+^{:go/breaks [[6 1445]] :go/end 1446} (go/func ZeroUpper48Bits "ZeroUpper48Bits is similar to ZeroUpper32Bits, but for upper 48 bits.\n" ^bool [^{:tag (* Value)} x ^int depth]
+  (when (and (.IsSigned (.-Type x)) (< (.Size (.-Type x)) 8))
+    (return false))
+
+  (switch (.-Op x)
+    (case [OpAMD64MOVWQZX OpAMD64MOVWload OpAMD64MOVWloadidx1 OpAMD64MOVWloadidx2]
+      (return true))
+    (case [OpAMD64MOVQconst OpAMD64MOVLconst]
+      (return (== (conv uint64 (conv uint16 (.-AuxInt x))) (conv uint64 (.-AuxInt x)))))
+    (case [OpArg] ; note: but not ArgIntReg
+      (return (and (== (.Size (.-Type x)) 2) (== (.-arch (.-Config (.-Func (.-Block x)))) "amd64"))))
+    (case [OpPhi OpSelect0 OpSelect1]
+      ;; Phis can use each-other as an arguments, instead of tracking visited values,
+      ;; just limit recursion depth.
+      (when (<= depth 0)
+        (return false))
+
+      (range [i (.-Args x)]
+        (when (not (ZeroUpper48Bits (aget (.-Args x) i) (- depth 1)))
+          (return false)))
+
+
+      (return true)))
+
+
+  false)
+
+
+
+^{:go/breaks [[6 1474]] :go/end 1475} (go/func ZeroUpper56Bits "ZeroUpper56Bits is similar to ZeroUpper32Bits, but for upper 56 bits.\n" ^bool [^{:tag (* Value)} x ^int depth]
+  (when (and (.IsSigned (.-Type x)) (< (.Size (.-Type x)) 8))
+    (return false))
+
+  (switch (.-Op x)
+    (case [OpAMD64MOVBQZX OpAMD64MOVBload OpAMD64MOVBloadidx1]
+      (return true))
+    (case [OpAMD64MOVQconst OpAMD64MOVLconst]
+      (return (== (conv uint64 (conv uint8 (.-AuxInt x))) (conv uint64 (.-AuxInt x)))))
+    (case [OpArg] ; note: but not ArgIntReg
+      (return (and (== (.Size (.-Type x)) 1) (== (.-arch (.-Config (.-Func (.-Block x)))) "amd64"))))
+    (case [OpPhi OpSelect0 OpSelect1]
+      ;; Phis can use each-other as an arguments, instead of tracking visited values,
+      ;; just limit recursion depth.
+      (when (<= depth 0)
+        (return false))
+
+      (range [i (.-Args x)]
+        (when (not (ZeroUpper56Bits (aget (.-Args x) i) (- depth 1)))
+          (return false)))
+
+
+      (return true)))
+
+
+  false)
+
+
+^{:go/breaks [[5 1489]] :go/end 1490} (go/func isInlinableMemclr ^bool [^{:tag (* Config)} c ^int64 sz]
+  (when (< sz 0)
+    (return false))
+
+  ;; TODO: expand this check to allow other architectures
+  ;; see CL 454255 and issue 56997
+  (switch (.-arch c)
+    (case ["amd64" "arm64"]
+      (return true))
+    (case ["ppc64le" "ppc64" "loong64"]
+      (return (< sz 512))))
+
+  false)
+
+
+
+
+
+
+
+^{:go/breaks [[5 1516]] :go/end 1517} (go/func isInlinableMemmove "isInlinableMemmove reports whether the given arch performs a Move of the given size\nfaster than memmove. It will only return true if replacing the memmove with a Move is\nsafe, either because Move will do all of its loads before any of its stores, or\nbecause the arguments are known to be disjoint.\nThis is used as a check for replacing memmove with Move ops.\n" ^bool [^{:tag (* Value)} dst ^{:tag (* Value)} src ^int64 sz ^{:tag (* Config)} c]
+  ;; It is always safe to convert memmove into Move when its arguments are disjoint.
+  ;; Move ops may or may not be faster for large sizes depending on how the platform
+  ;; lowers them, so we only perform this optimization on platforms that we know to
+  ;; have fast Move ops.
+  (switch (.-arch c)
+    (case ["amd64"]
+      (return (or (<= sz 16) ^:go/paren (and (< sz 1024) (disjoint dst sz src sz)))))
+    (case ["arm64"]
+      (return (or (<= sz 64) ^:go/paren (and (<= sz 1024) (disjoint dst sz src sz)))))
+    (case ["loong64"]
+      (return (or (<= sz 16) ^:go/paren (and (<= sz 64) (disjoint dst sz src sz)))))
+    (case ["386"]
+      (return (<= sz 8)))
+    (case ["s390x" "ppc64" "ppc64le"]
+      (return (or (<= sz 8) (disjoint dst sz src sz))))
+    (case ["arm" "mips" "mips64" "mipsle" "mips64le"]
+      (return (<= sz 4))))
+
+  false)
+
+^{:go/end 1520} (go/func IsInlinableMemmove ^bool [^{:tag (* Value)} dst ^{:tag (* Value)} src ^int64 sz ^{:tag (* Config)} c]
+  (isInlinableMemmove dst src sz c))
+
+
+
+
+
+^{:go/breaks [[6 1532]] :go/end 1533} (go/func logLargeCopy "logLargeCopy logs the occurrence of a large copy.\nThe best place to do this is in the rewrite rules where the size of the move is easy to find.\n\"Large\" is arbitrarily chosen to be 128 bytes; this may change.\n" ^bool [^{:tag (* Value)} v ^int64 s]
+  (when (< s 128)
+    (return true))
+
+  (when (logopt/Enabled)
+    (logopt/LogOpt (.-Pos v) "copy" "lower" (.-Name (.-Func (.-Block v))) (fmt/Sprintf "%d bytes" s)))
+
+  true)
+
+^{:go/end 1541} (go/func LogLargeCopy [^string funcName ^src/XPos pos ^int64 s]
+  (when (< s 128)
+    (return))
+
+  (when (logopt/Enabled)
+    (logopt/LogOpt pos "copy" "lower" funcName (fmt/Sprintf "%d bytes" s))))
+
+
+
+
+
+^{:go/end 1552} (go/func hasSmallRotate "hasSmallRotate reports whether the architecture has rotate instructions\nfor sizes < 32-bit.  This is used to decide whether to promote some rotations.\n" ^bool [^{:tag (* Config)} c]
+  (switch (.-arch c)
+    (case ["amd64" "386"]
+      (return true))
+    (default
+      (return false))))
+
+
+
+^{:go/end 1558} (go/func supportsPPC64PCRel ^bool []
+  ;; PCRel is currently supported for >= power10, linux only
+  ;; Internal and external linking supports this on ppc64le; internal linking on ppc64.
+  (and (>= buildcfg/GOPPC64 10) (== buildcfg/GOOS "linux")))
+
+
+^{:go/end 1571} (go/func newPPC64ShiftAuxInt ^int32 [^int64 sh ^int64 mb ^int64 me ^int64 sz]
+  (when (or (< sh 0) (>= sh sz))
+    (panic "PPC64 shift arg sh out of range"))
+
+  (when (or (< mb 0) (>= mb sz))
+    (panic "PPC64 shift arg mb out of range"))
+
+  (when (or (< me 0) (>= me sz))
+    (panic "PPC64 shift arg me out of range"))
+
+  (conv int32 (bit-or (<< sh 16) (<< mb 8) me)))
+
+
+^{:go/end 1575} (go/func GetPPC64Shiftsh ^int64 [^int64 auxint]
+  (conv int64 (conv int8 (>> auxint 16))))
+
+
+^{:go/end 1579} (go/func GetPPC64Shiftmb ^int64 [^int64 auxint]
+  (conv int64 (conv int8 (>> auxint 8))))
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 1598} (go/func isPPC64WordRotateMask "Test if this value can encoded as a mask for a rlwinm like\noperation.  Masks can also extend from the msb and wrap to\nthe lsb too.  That is, the valid masks are 32 bit strings\nof the form: 0..01..10..0 or 1..10..01..1 or 1...1\n\nNote: This ignores the upper 32 bits of the input. When a\nzero extended result is desired (e.g a 64 bit result), the\nuser must verify the upper 32 bits are 0 and the mask is\ncontiguous (that is, non-wrapping).\n" ^bool [^int64 v64]
+  ;; Isolate rightmost 1 (if none 0) and add.
+  (let [v (conv uint32 v64)
+      ^{:line 1593} vp (+ (bit-and v (- v)) v)
+      ;; Likewise, for the wrapping case.
+      ^{:line 1595} vn (bit-not v)
+      ^{:line 1596} vpn (+ (bit-and vn (- vn)) vn)]
+    (and ^:go/paren (or (== (bit-and v vp) 0) (== (bit-and vn vpn) 0)) (!= v 0))))
+
+
+
+
+
+^{:go/end 1608} (go/func isPPC64WordRotateMaskNonWrapping "Test if this mask is a valid, contiguous bitmask which can be\nrepresented by a RLWNM mask and also clears the upper 32 bits\nof the register.\n" ^bool [^int64 v64]
+  ;; Isolate rightmost 1 (if none 0) and add.
+  (let [v (conv uint32 v64)
+      ^{:line 1606} vp (+ (bit-and v (- v)) v)]
+    (and ^:go/paren (== (bit-and v vp) 0) (!= v 0) (== (conv uint64 (conv uint32 v64)) (conv uint64 v64)))))
+
+
+
+
+
+^{:go/end 1637} (go/func encodePPC64RotateMask "Compress mask and shift into single value of the form\nme | mb<<8 | rotate<<16 | nbits<<24 where me and mb can\nbe used to regenerate the input mask.\n" ^int64 [^int64 rotate ^int64 mask ^int64 nbits]
+  (let [(values ^int mb ^int me ^int mbn ^int men) (zero int)]
+
+    ;; Determine boundaries and then decode them
+    (cond (or (== mask 0) (== (bit-not mask) 0) (>= rotate nbits))
+      (panic (fmt/Sprintf "invalid PPC64 rotate mask: %x %d %d" (conv uint64 mask) rotate nbits))
+      (== nbits 32) (do
+        (set! mb (bits/LeadingZeros32 (conv uint32 mask)))
+        (set! me (- 32 (bits/TrailingZeros32 (conv uint32 mask))))
+        (set! mbn (bits/LeadingZeros32 (bit-not (conv uint32 mask))))
+        (set! men (- 32 (bits/TrailingZeros32 (bit-not (conv uint32 mask)))))) :else
+      (do
+        (set! mb (bits/LeadingZeros64 (conv uint64 mask)))
+        (set! me (- 64 (bits/TrailingZeros64 (conv uint64 mask))))
+        (set! mbn (bits/LeadingZeros64 (bit-not (conv uint64 mask))))
+        (set! men (- 64 (bits/TrailingZeros64 (bit-not (conv uint64 mask)))))))
+
+    ;; Check for a wrapping mask (e.g bits at 0 and 63)
+    (when (and (== mb 0) (== me (conv int nbits)))
+      ;; swap the inverted values
+      (set! (values mb me) (values men mbn)))
+
+
+    (bit-or (conv int64 me) (conv int64 (<< mb 8)) (<< rotate 16) (<< nbits 24))))
+
+
+
+
+
+
+
+^{:go/end 1656} (go/func mergePPC64RLDICLandSRDconst "Merge (RLDICL [encoded] (SRDconst [s] x)) into (RLDICL [new_encoded] x)\nSRDconst on PPC64 is an extended mnemonic of RLDICL. If the input to an\nRLDICL is an SRDconst, and the RLDICL does not rotate its value, the two\noperations can be combined. This functions assumes the two opcodes can\nbe merged, and returns an encoded rotate+mask value of the combined RLDICL.\n" ^int64 [^int64 encoded ^int64 s]
+  (let [mb s
+      ^{:line 1646} r (- 64 s)]
+    ;; A larger mb is a smaller mask.
+    (when (< (bit-and (>> encoded 8) 0xFF) mb)
+      (set! encoded (bit-or (bit-and-not encoded 0xFF00) (<< mb 8))))
+
+    ;; The rotate is expected to be 0.
+    (when (!= (bit-and encoded 0xFF0000) 0)
+      (panic "non-zero rotate"))
+
+    (bit-or encoded (<< r 16))))
+
+
+
+
+^{:go/end 1678} (go/func DecodePPC64RotateMask "DecodePPC64RotateMask is the inverse operation of encodePPC64RotateMask.  The values returned as\nmb and me satisfy the POWER ISA definition of MASK(x,y) where MASK(mb,me) = mask.\n" [^int64 sauxint] :results [^int64 rotate ^int64 mb ^int64 me ^uint64 mask]
+  (let [auxint (conv uint64 sauxint)]
+    (set! rotate (conv int64 (bit-and (>> auxint 16) 0xFF)))
+    (set! mb (conv int64 (bit-and (>> auxint 8) 0xFF)))
+    (set! me (conv int64 (bit-and (>> auxint 0) 0xFF)))
+    (let [nbits (conv int64 (bit-and (>> auxint 24) 0xFF))]
+      (set! mask (bit-xor (- ^uint64 (<< 1 (conv uint (- nbits mb))) 1) (- ^uint64 (<< 1 (conv uint (- nbits me))) 1)))
+      (when (> mb me)
+        (set! mask (bit-not mask)))
+
+      (when (== nbits 32)
+        (set! mask (conv uint64 (conv uint32 mask))))
+
+
+      ;; Fixup ME to match ISA definition.  The second argument to MASK(..,me)
+      ;; is inclusive.
+      (set! me (bit-and (- me 1) (- nbits 1)))
+      (return))))
+
+
+
+
+
+^{:go/breaks [[5 1687]] :go/end 1688} (go/func isPPC64ValidShiftMask "This verifies that the mask is a set of\nconsecutive bits including the least\nsignificant bit.\n" ^bool [^int64 v]
+  (when (and ^:go/paren (!= v 0) (== (bit-and (+ v 1) v) 0))
+    (return true))
+
+  false)
+
+
+^{:go/end 1692} (go/func getPPC64ShiftMaskLength ^int64 [^int64 v]
+  (conv int64 (bits/Len64 (conv uint64 v))))
+
+
+
+
+^{:go/end 1699} (go/func mergePPC64RShiftMask "Decompose a shift right into an equivalent rotate/mask,\nand return mask & m.\n" ^int64 [^int64 m ^int64 s ^int64 nbits]
+  (let [smask (>> (conv uint64 (- ^uint64 (<< 1 (conv uint nbits)) 1)) (conv uint s))]
+    (bit-and m (conv int64 smask))))
+
+
+
+^{:go/end 1708} (go/func mergePPC64AndSrwi "Combine (ANDconst [m] (SRWconst [s])) into (RLWINM [y]) or return 0\n" ^int64 [^int64 m ^int64 s]
+  (let [mask (mergePPC64RShiftMask m s 32)]
+    (when (not (isPPC64WordRotateMask mask))
+      (return 0))
+
+    (encodePPC64RotateMask (bit-and (- 32 s) 31) mask 32)))
+
+
+
+^{:go/end 1723} (go/func mergePPC64AndSrdi "Combine (ANDconst [m] (SRDconst [s])) into (RLWINM [y]) or return 0\n" ^int64 [^int64 m ^int64 s]
+  (let [mask (mergePPC64RShiftMask m s 64)
+
+      ;; Verify the rotate and mask result only uses the lower 32 bits.
+      ^{:line 1715} rv (bits/RotateLeft64 0xFFFFFFFF00000000 (- (conv int s)))]
+    (when (!= (bit-and rv (conv uint64 mask)) 0)
+      (return 0))
+
+    (when (not (isPPC64WordRotateMaskNonWrapping mask))
+      (return 0))
+
+    (encodePPC64RotateMask (bit-and (- 32 s) 31) mask 32)))
+
+
+
+^{:go/end 1738} (go/func mergePPC64AndSldi "Combine (ANDconst [m] (SLDconst [s])) into (RLWINM [y]) or return 0\n" ^int64 [^int64 m ^int64 s]
+  (let [mask (bit-and ^int64 (<< -1 s) m)
+
+      ;; Verify the rotate and mask result only uses the lower 32 bits.
+      ^{:line 1730} rv (bits/RotateLeft64 0xFFFFFFFF00000000 (conv int s))]
+    (when (!= (bit-and rv (conv uint64 mask)) 0)
+      (return 0))
+
+    (when (not (isPPC64WordRotateMaskNonWrapping mask))
+      (return 0))
+
+    (encodePPC64RotateMask (bit-and s 31) mask 32)))
+
+
+
+
+^{:go/end 1758} (go/func mergePPC64ClrlsldiSrw "Test if a word shift right feeding into a CLRLSLDI can be merged into RLWINM.\nReturn the encoded RLWINM constant, or 0 if they cannot be merged.\n" ^int64 [^int64 sld ^int64 srw]
+  (let [mask_1 (conv uint64 ^uint64 (>> 0xFFFFFFFF (conv uint srw)))
+      ;; for CLRLSLDI, it's more convenient to think of it as a mask left bits then rotate left.
+      ^{:line 1745} mask_2 (>> (conv uint64 0xFFFFFFFFFFFFFFFF) (conv uint (GetPPC64Shiftmb sld)))
+
+      ;; Rewrite mask to apply after the final left shift.
+      ^{:line 1748} mask_3 (<< (bit-and mask_1 mask_2) (conv uint (GetPPC64Shiftsh sld)))
+
+      ^{:line 1750} r_1 (- 32 srw)
+      ^{:line 1751} r_2 (GetPPC64Shiftsh sld)
+      ^{:line 1752} r_3 (bit-and (+ r_1 r_2) 31)] ; This can wrap.
+
+    (when (or (!= (conv uint64 (conv uint32 mask_3)) mask_3) (== mask_3 0))
+      (return 0))
+
+    (encodePPC64RotateMask r_3 (conv int64 mask_3) 32)))
+
+
+
+
+^{:go/end 1783} (go/func mergePPC64ClrlsldiSrd "Test if a doubleword shift right feeding into a CLRLSLDI can be merged into RLWINM.\nReturn the encoded RLWINM constant, or 0 if they cannot be merged.\n" ^int64 [^int64 sld ^int64 srd]
+  (let [mask_1 (>> (conv uint64 0xFFFFFFFFFFFFFFFF) (conv uint srd))
+      ;; for CLRLSLDI, it's more convenient to think of it as a mask left bits then rotate left.
+      ^{:line 1765} mask_2 (>> (conv uint64 0xFFFFFFFFFFFFFFFF) (conv uint (GetPPC64Shiftmb sld)))
+
+      ;; Rewrite mask to apply after the final left shift.
+      ^{:line 1768} mask_3 (<< (bit-and mask_1 mask_2) (conv uint (GetPPC64Shiftsh sld)))
+
+      ^{:line 1770} r_1 (- 64 srd)
+      ^{:line 1771} r_2 (GetPPC64Shiftsh sld)
+      ^{:line 1772} r_3 (bit-and (+ r_1 r_2) 63)] ; This can wrap.
+
+    (when (or (!= (conv uint64 (conv uint32 mask_3)) mask_3) (== mask_3 0))
+      (return 0))
+
+    ;; This combine only works when selecting and shifting the lower 32 bits.
+    (let [v1 (bits/RotateLeft64 0xFFFFFFFF00000000 (conv int r_3))]
+      (when (!= (bit-and v1 mask_3) 0)
+        (return 0))
+
+      (encodePPC64RotateMask (bit-and r_3 31) (conv int64 mask_3) 32))))
+
+
+
+
+^{:go/end 1802} (go/func mergePPC64ClrlsldiRlwinm "Test if a RLWINM feeding into a CLRLSLDI can be merged into RLWINM.  Return\nthe encoded RLWINM constant, or 0 if they cannot be merged.\n" ^int64 [^int32 sld ^int64 rlw]
+  (let [(values r_1 _ _ mask_1) (DecodePPC64RotateMask rlw)
+      ;; for CLRLSLDI, it's more convenient to think of it as a mask left bits then rotate left.
+      ^{:line 1790} mask_2 (>> (conv uint64 0xFFFFFFFFFFFFFFFF) (conv uint (GetPPC64Shiftmb (conv int64 sld))))
+
+      ;; combine the masks, and adjust for the final left shift.
+      ^{:line 1793} mask_3 (<< (bit-and mask_1 mask_2) (conv uint (GetPPC64Shiftsh (conv int64 sld))))
+      ^{:line 1794} r_2 (GetPPC64Shiftsh (conv int64 sld))
+      ^{:line 1795} r_3 (bit-and (+ r_1 r_2) 31)] ; This can wrap.
+
+    ;; Verify the result is still a valid bitmask of <= 32 bits.
+    (when (or (not (isPPC64WordRotateMask (conv int64 mask_3))) (!= (conv uint64 (conv uint32 mask_3)) mask_3))
+      (return 0))
+
+    (encodePPC64RotateMask r_3 (conv int64 mask_3) 32)))
+
+
+
+
+^{:go/end 1815} (go/func mergePPC64AndRlwinm "Test if RLWINM feeding into an ANDconst can be merged. Return the encoded RLWINM constant,\nor 0 if they cannot be merged.\n" ^int64 [^uint32 mask ^int64 rlw]
+  (let [(values r _ _ mask_rlw) (DecodePPC64RotateMask rlw)
+      ^{:line 1808} mask_out (bit-and mask_rlw (conv uint64 mask))]
+
+    ;; Verify the result is still a valid bitmask of <= 32 bits.
+    (when (not (isPPC64WordRotateMask (conv int64 mask_out)))
+      (return 0))
+
+    (encodePPC64RotateMask r (conv int64 mask_out) 32)))
+
+
+
+
+^{:go/end 1825} (go/func mergePPC64MovwzregRlwinm "Test if RLWINM opcode rlw clears the upper 32 bits of the\nresult. Return rlw if it does, 0 otherwise.\n" ^int64 [^int64 rlw]
+  (let [(values _ mb me _) (DecodePPC64RotateMask rlw)]
+    (when (> mb me)
+      (return 0))
+
+    ^{:line 1824} rlw))
+
+
+
+
+^{:go/end 1842} (go/func mergePPC64RlwinmAnd "Test if AND feeding into an ANDconst can be merged. Return the encoded RLWINM constant,\nor 0 if they cannot be merged.\n" ^int64 [^int64 rlw ^uint32 mask]
+  (let [(values r _ _ mask_rlw) (DecodePPC64RotateMask rlw)
+
+      ;; Rotate the input mask, combine with the rlwnm mask, and test if it is still a valid rlwinm mask.
+      ^{:line 1833} r_mask (bits/RotateLeft32 mask (conv int r))
+
+      ^{:line 1835} mask_out (bit-and mask_rlw (conv uint64 r_mask))]
+
+    ;; Verify the result is still a valid bitmask of <= 32 bits.
+    (when (not (isPPC64WordRotateMask (conv int64 mask_out)))
+      (return 0))
+
+    (encodePPC64RotateMask r (conv int64 mask_out) 32)))
+
+
+
+
+^{:go/end 1862} (go/func mergePPC64SldiRlwinm "Test if RLWINM feeding into SRDconst can be merged. Return the encoded RLIWNM constant,\nor 0 if they cannot be merged.\n" ^int64 [^int64 sldi ^int64 rlw]
+  (let [(values r_1 mb me mask_1) (DecodePPC64RotateMask rlw)]
+    (when (or (> mb me) (< mb sldi))
+      ;; Wrapping masks cannot be merged as the upper 32 bits are effectively undefined in this case.
+      ;; Likewise, if mb is less than the shift amount, it cannot be merged.
+      (return 0))
+
+    ;; combine the masks, and adjust for the final left shift.
+    (let [mask_3 (<< mask_1 sldi)
+        ^{:line 1855} r_3 (bit-and (+ r_1 sldi) 31)] ; This can wrap.
+
+      ;; Verify the result is still a valid bitmask of <= 32 bits.
+      (when (!= (conv uint64 (conv uint32 mask_3)) mask_3)
+        (return 0))
+
+      (encodePPC64RotateMask r_3 (conv int64 mask_3) 32))))
+
+
+
+
+^{:go/end 1874} (go/func mergePPC64SldiSrw "Compute the encoded RLWINM constant from combining (SLDconst [sld] (SRWconst [srw] x)),\nor return 0 if they cannot be combined.\n" ^int64 [^int64 sld ^int64 srw]
+  (when (or (> sld srw) (>= srw 32))
+    (return 0))
+
+  (let [mask_r (>> (conv uint32 0xFFFFFFFF) (conv uint srw))
+      ^{:line 1871} mask_l (>> (conv uint32 0xFFFFFFFF) (conv uint sld))
+      ^{:line 1872} mask (<< (bit-and mask_r mask_l) (conv uint sld))]
+    (encodePPC64RotateMask (bit-and (+ (- 32 srw) sld) 31) (conv int64 mask) 32)))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 1923} (go/func convertPPC64OpToOpCC "Convert a PPC64 opcode from the Op to OpCC form. This converts (op x y)\nto (Select0 (opCC x y)) without having to explicitly fixup every user\nof op.\n\nE.g consider the case:\na = (ADD x y)\nb = (CMPconst [0] a)\nc = (OR a z)\n\nA rule like (CMPconst [0] (ADD x y)) => (CMPconst [0] (Select0 (ADDCC x y)))\nwould produce:\na  = (ADD x y)\na' = (ADDCC x y)\na” = (Select0 a')\nb  = (CMPconst [0] a”)\nc  = (OR a z)\n\nwhich makes it impossible to rewrite the second user. Instead the result\nof this conversion is:\na' = (ADDCC x y)\na  = (Select0 a')\nb  = (CMPconst [0] a)\nc  = (OR a z)\n\nWhich makes it trivial to rewrite b using a lowering rule.\n" ^{:tag (* Value)} [^{:tag (* Value)} op]
+  (let [ccOpMap (lit (map Op Op)
+        ^{:line 1903} [OpPPC64ADD OpPPC64ADDCC]
+        ^{:line 1904} [OpPPC64ADDconst OpPPC64ADDCCconst]
+        ^{:line 1905} [OpPPC64AND OpPPC64ANDCC]
+        ^{:line 1906} [OpPPC64ANDN OpPPC64ANDNCC]
+        ^{:line 1907} [OpPPC64ANDconst OpPPC64ANDCCconst]
+        ^{:line 1908} [OpPPC64CNTLZD OpPPC64CNTLZDCC]
+        ^{:line 1909} [OpPPC64MULHDU OpPPC64MULHDUCC]
+        ^{:line 1910} [OpPPC64NEG OpPPC64NEGCC]
+        ^{:line 1911} [OpPPC64NOR OpPPC64NORCC]
+        ^{:line 1912} [OpPPC64OR OpPPC64ORCC]
+        ^{:line 1913} [OpPPC64RLDICL OpPPC64RLDICLCC]
+        ^{:line 1914} [OpPPC64SUB OpPPC64SUBCC]
+        ^{:line 1915} [OpPPC64XOR OpPPC64XORCC])
+
+      ^{:line 1917} b (.-Block op)
+      ^{:line 1918} opCC (.NewValue0I b (.-Pos op) (aget ccOpMap (.-Op op)) (types/NewTuple (.-Type op) types/TypeFlags) (.-AuxInt op))]
+    (.AddArgs opCC (spread (.-Args op)))
+    (.reset op OpSelect0)
+    (.AddArgs op opCC)
+    ^{:line 1922} op))
+
+
+
+^{:go/end 1932} (go/func convertPPC64RldiclAndccconst "Try converting a RLDICL to ANDCC. If successful, return the mask otherwise 0.\n" ^int64 [^int64 sauxint]
+  (let [(values r _ _ mask) (DecodePPC64RotateMask sauxint)]
+    (when (or (!= r 0) (!= (bit-and mask 0xFFFF) mask))
+      (return 0))
+
+    (conv int64 mask)))
+
+
+
+^{:go/end 1937} (go/func rotateLeft32 "Convenience function to rotate a 32 bit constant value by another constant.\n" ^int64 [^int64 v ^int64 rotate]
+  (conv int64 (bits/RotateLeft32 (conv uint32 v) (conv int rotate))))
+
+
+^{:go/end 1941} (go/func rotateRight64 ^int64 [^int64 v ^int64 rotate]
+  (conv int64 (bits/RotateLeft64 (conv uint64 v) (conv int (- rotate)))))
+
+
+
+^{:go/end 1952} (go/func armBFAuxInt "encodes the lsb and width for arm(64) bitfield ops into the expected auxInt format.\n" ^arm64BitField [^int64 lsb ^int64 width]
+  (when (or (< lsb 0) (> lsb 63))
+    (panic "ARM(64) bit field lsb constant out of range"))
+
+  (when (or (< width 1) (> (+ lsb width) 64))
+    (panic "ARM(64) bit field width constant out of range"))
+
+  (conv arm64BitField (bit-or width (<< lsb 8))))
+
+
+
+^{:go/end 1957} (go/method lsb "returns the lsb part of the auxInt field of arm64 bitfield ops.\n" ^int64 [^arm64BitField bfc]
+  (conv int64 (>> (conv uint64 bfc) 8)))
+
+
+
+^{:go/end 1962} (go/method width "returns the width part of the auxInt field of arm64 bitfield ops.\n" ^int64 [^arm64BitField bfc]
+  (bit-and (conv int64 bfc) 0xff))
+
+
+
+^{:go/end 1968} (go/func isARM64BFMask "checks if mask >> rshift applied at lsb is a valid arm64 bitfield op mask.\n" ^bool [^int64 lsb ^int64 mask ^int64 rshift]
+  (let [shiftedMask (conv int64 (>> (conv uint64 mask) (conv uint64 rshift)))]
+    (and (!= shiftedMask 0) (^{:inst [int64]} isPowerOfTwo (+ shiftedMask 1)) (< (+ (nto shiftedMask) lsb) 64))))
+
+
+
+^{:go/end 1977} (go/func arm64BFWidth "returns the bitfield width of mask >> rshift for arm64 bitfield ops.\n" ^int64 [^int64 mask ^int64 rshift]
+  (let [shiftedMask (conv int64 (>> (conv uint64 mask) (conv uint64 rshift)))]
+    (when (== shiftedMask 0)
+      (panic "ARM64 BF mask is zero"))
+
+    (nto shiftedMask)))
+
+
+
+^{:go/end 1988} (go/func arm64ConditionalParamsAuxInt "encodes condition code and NZCV flags into result.\n" ^arm64ConditionalParams [^Op cond ^uint8 nzcv]
+  (when (or (< cond OpARM64Equal) (> cond OpARM64GreaterEqualU))
+    (panic "Wrong conditional operation"))
+
+  (when (!= (bit-and nzcv 0x0f) nzcv)
+    (panic "Wrong value of NZCV flag"))
+
+  (lit arm64ConditionalParams cond nzcv 0 false))
+
+
+
+^{:go/end 1999} (go/func arm64ConditionalParamsAuxIntWithValue "encodes condition code, NZCV flags and constant value into auxint.\n" ^arm64ConditionalParams [^Op cond ^uint8 nzcv ^uint8 value]
+  (when (!= (bit-and value 0x1f) value)
+    (panic "Wrong value of constant"))
+
+  (let [params (arm64ConditionalParamsAuxInt cond nzcv)]
+    (set! (.-constValue params) value)
+    (set! (.-ind params) true)
+    ^{:line 1998} params))
+
+
+
+^{:go/end 2004} (go/method Cond "extracts condition code from auxint.\n" ^Op [^arm64ConditionalParams condParams]
+  (.-cond condParams))
+
+
+
+^{:go/end 2009} (go/method Nzcv "extracts NZCV flags from auxint.\n" ^int64 [^arm64ConditionalParams condParams]
+  (conv int64 (.-nzcv condParams)))
+
+
+
+^{:go/end 2014} (go/method ConstValue "extracts constant value from auxint if present.\n" [^arm64ConditionalParams condParams] :results [int64 bool]
+  (return (conv int64 (.-constValue condParams)) (.-ind condParams)))
+
+
+
+
+
+^{:go/breaks [[6 2026]] :go/end 2027} (go/func registerizable "registerizable reports whether t is a primitive type that fits in\na register. It assumes float64 values will always fit into registers\neven if that isn't strictly true.\n" ^bool [^{:tag (* Block)} b ^{:tag (* types/Type)} typ]
+  (when (or (.IsPtrShaped typ) (.IsFloat typ) (.IsBoolean typ))
+    (return true))
+
+  (when (.IsInteger typ)
+    (return (<= (.Size typ) (.-RegSize (.-Config (.-Func b))))))
+
+  false)
+
+
+
+^{:go/end 2077} (go/func needRaceCleanup "needRaceCleanup reports whether this call to racefuncenter/exit isn't needed.\n" ^bool [^{:tag (* AuxCall)} sym ^{:tag (* Value)} v]
+  ^{:go/breaks [[6 2076]]} (let [f (.-Func (.-Block v))]
+    (when (not (.-Race (.-Config f)))
+      (return false))
+
+    (when (and (not (isSameCall sym "runtime.racefuncenter")) (not (isSameCall sym "runtime.racefuncexit")))
+      (return false))
+
+    (range [_ b (.-Blocks f)]
+      (range [_ v (.-Values b)]
+        (switch (.-Op v)
+          (case [OpStaticCall OpStaticLECall]
+            ;; Check for racefuncenter will encounter racefuncexit and vice versa.
+            ;; Allow calls to panic*
+            (let [s (.String (.-Fn (assert (* AuxCall) (.-Aux v))))]
+              (switch s
+                (case ^{:go/breaks [2 4]} ["runtime.racefuncenter" "runtime.racefuncexit"
+                    "runtime.panicdivide" "runtime.panicwrap"
+                    "runtime.panicshift"]
+                  (continue)))
+
+              ;; If we encountered any call, we need to keep racefunc*,
+              ;; for accurate stacktraces.
+              (return false)))
+          (case [OpPanicBounds OpPanicExtend])
+          ;; Note: these are panic generators that are ok (like the static calls above).
+          (case [OpClosureCall OpInterCall OpClosureLECall OpInterLECall]
+            ;; We must keep the race functions if there are any other call types.
+            (return false)))))
+
+
+
+    (when (isSameCall sym "runtime.racefuncenter")
+      ;; TODO REGISTER ABI this needs to be cleaned up.
+      ;; If we're removing racefuncenter, remove its argument as well.
+      (when (!= (.-Op (aget (.-Args v) 0)) OpStore)
+        (when (== (.-Op v) OpStaticLECall)
+          ;; there is no store, yet.
+          (return true))
+
+        (return false))
+
+      (let [mem (aget (.-Args (aget (.-Args v) 0)) 2)]
+        (.reset (aget (.-Args v) 0) OpCopy)
+        (.AddArg (aget (.-Args v) 0) mem)))
+
+    true))
+
+
+
+^{:go/end 2083} (go/func symIsRO "symIsRO reports whether sym is a read-only global.\n" ^bool [^Sym sym]
+  (let [lsym (assert (* obj/LSym) sym)]
+    (and (== (.-Type lsym) objabi/SRODATA) (== (len (.-R lsym)) 0))))
+
+
+
+^{:go/end 2097} (go/func symIsROZero "symIsROZero reports whether sym is a read-only global whose data contains all zeros.\n" ^bool [^Sym sym]
+  ^{:go/breaks [[4 2096]]} (let [lsym (assert (* obj/LSym) sym)]
+    (when (or (!= (.-Type lsym) objabi/SRODATA) (!= (len (.-R lsym)) 0))
+      (return false))
+
+    (range [_ b (.-P lsym)]
+      (when (!= b 0)
+        (return false)))
+
+
+    true))
+
+
+
+
+^{:go/end 2139} (go/func isFixedLoad "isFixedLoad returns true if the load can be resolved to fixed address or constant,\nand can be rewritten by rewriteFixedLoad.\n" ^bool [^{:tag (* Value)} v ^Sym sym ^int64 off]
+  ^{:go/breaks [[4 2138]]} (let [lsym (assert (* obj/LSym) sym)]
+    (when (and ^:go/paren (or (.IsPtrShaped (.-Type v)) (.IsUintptr (.-Type v))) (== (.-Type lsym) objabi/SRODATA))
+      (range [_ r (.-R lsym)]
+        (when (and ^:go/paren (or (== (.-Type r) objabi/R_ADDR) (== (.-Type r) objabi/R_WEAKADDR)) (== (conv int64 (.-Off r)) off) (== (.-Add r) 0))
+          (return true)))
+
+
+      (return false))
+
+
+    (when [ti (.TypeInfo lsym)] (!= ti nil)
+      ;; Type symbols do not contain information about their fields, unlike the cases above.
+      ;; Hand-implement field accesses.
+      ;; TODO: can this be replaced with reflectdata.writeType and just use the code above?
+
+      (let [t (assert (* types/Type) (.-Type ti))]
+
+        (range [_ f (.Fields rttype/Type)]
+          (when (and (== (.-Offset f) off) (copyCompatibleType (.-Type v) (.-Type f)))
+            (switch (.-Name (.-Sym f))
+              (case ["Size_" "PtrBytes" "Hash" "Kind_" "GCData"]
+                (return true))
+              (default
+                ;; fmt.Println("unknown field", f.Sym.Name)
+                (return false)))))
+
+
+
+
+        (when (and (.IsPtr t) (== off (.OffsetOf rttype/PtrType "Elem")))
+          (return true))
+
+
+        (return false)))
+
+
+    false))
+
+
+
+^{:go/end 2228} (go/func rewriteFixedLoad "rewriteFixedLoad rewrites a load to a fixed address or constant, if isFixedLoad returns true.\n" ^{:tag (* Value)} [^{:tag (* Value)} v ^Sym sym ^{:tag (* Value)} sb ^int64 off]
+  ^{:go/breaks [5]} (let [b (.-Block v)
+      ^{:line 2144} f (.-Func b)
+
+      ^{:line 2146} lsym (assert (* obj/LSym) sym)]
+    (when (and ^:go/paren (or (.IsPtrShaped (.-Type v)) (.IsUintptr (.-Type v))) (== (.-Type lsym) objabi/SRODATA))
+      (range [_ r (.-R lsym)]
+        (when (and ^:go/paren (or (== (.-Type r) objabi/R_ADDR) (== (.-Type r) objabi/R_WEAKADDR)) (== (conv int64 (.-Off r)) off) (== (.-Add r) 0))
+          (cond (strings/HasPrefix (.-Name (.-Sym r)) "type:")
+            ;; In case we're loading a type out of a dictionary, we need to record
+            ;; that the containing function might put that type in an interface.
+            ;; That information is currently recorded in relocations in the dictionary,
+            ;; but if we perform this load at compile time then the dictionary
+            ;; might be dead.
+            (reflectdata/MarkTypeSymUsedInInterface (.-Sym r) (.Linksym (.Func (.-fe f))))
+            (strings/HasPrefix (.-Name (.-Sym r)) "go:itab")
+            ;; Same, but if we're using an itab we need to record that the
+            ;; itab._type might be put in an interface.
+            (reflectdata/MarkTypeSymUsedInInterface (.-Sym r) (.Linksym (.Func (.-fe f)))))
+
+          (.reset v OpAddr)
+          (set! (.-Aux v) (symToAux (.-Sym r)))
+          (.AddArg v sb)
+          (return v)))
+
+
+      (base/Fatalf "fixedLoad data not known for %s:%d" sym off))
+
+
+    (when [ti (.TypeInfo lsym)] (!= ti nil)
+      ;; Type symbols do not contain information about their fields, unlike the cases above.
+      ;; Hand-implement field accesses.
+      ;; TODO: can this be replaced with reflectdata.writeType and just use the code above?
+
+      (let [t (assert (* types/Type) (.-Type ti))
+
+          ^{:line 2178} ptrSizedOpConst OpConst64]
+        (when (== (.-PtrSize (.-Config f)) 4)
+          (set! ptrSizedOpConst OpConst32))
+
+
+        (range [_ f (.Fields rttype/Type)]
+          (when (and (== (.-Offset f) off) (copyCompatibleType (.-Type v) (.-Type f)))
+            (switch (.-Name (.-Sym f))
+              (case ["Size_"]
+                (.reset v ptrSizedOpConst)
+                (set! (.-AuxInt v) (.Size t))
+                (return v))
+              (case ["PtrBytes"]
+                (.reset v ptrSizedOpConst)
+                (set! (.-AuxInt v) (types/PtrDataSize t))
+                (return v))
+              (case ["Hash"]
+                (.reset v OpConst32)
+                (set! (.-AuxInt v) (conv int64 (conv int32 (types/TypeHash t))))
+                (return v))
+              (case ["Kind_"]
+                (.reset v OpConst8)
+                (set! (.-AuxInt v) (conv int64 (conv int8 (reflectdata/ABIKindOfType t))))
+                (return v))
+              (case ["GCData"]
+                (let [(values gcdata _) (reflectdata/GCSym t true)]
+                  (.reset v OpAddr)
+                  (set! (.-Aux v) (symToAux gcdata))
+                  (.AddArg v sb)
+                  (return v)))
+              (default
+                (base/Fatalf "unknown field %s for fixedLoad of %s at offset %d" (.-Name (.-Sym f)) (.-Name lsym) off)))))
+
+
+
+
+        (when (and (.IsPtr t) (== off (.OffsetOf rttype/PtrType "Elem")))
+          (let [elemSym (reflectdata/TypeLinksym (.Elem t))]
+            (reflectdata/MarkTypeSymUsedInInterface elemSym (.Linksym (.Func (.-fe f))))
+            (.reset v OpAddr)
+            (set! (.-Aux v) (symToAux elemSym))
+            (.AddArg v sb)
+            (return v)))
+
+
+        (base/Fatalf "fixedLoad data not known for %s:%d" sym off)))
+
+
+    (base/Fatalf "fixedLoad data not known for %s:%d" sym off)
+    nil))
+
+
+
+^{:go/end 2241} (go/func read8 "read8 reads one byte from the read-only global sym at offset off.\n" ^uint8 [^Sym sym ^int64 off]
+  (let [lsym (assert (* obj/LSym) sym)]
+    (when (or (>= off (conv int64 (len (.-P lsym)))) (< off 0))
+      ;; Invalid index into the global sym.
+      ;; This can happen in dead code, so we don't want to panic.
+      ;; Just return any value, it will eventually get ignored.
+      ;; See issue 29215.
+      (return 0))
+
+    (aget (.-P lsym) off)))
+
+
+
+^{:go/end 2255} (go/func read16 "read16 reads two bytes from the read-only global sym at offset off.\n" ^uint16 [^Sym sym ^int64 off ^binary/ByteOrder byteorder]
+  (let [lsym (assert (* obj/LSym) sym)
+      ;; lsym.P is written lazily.
+      ;; Bytes requested after the end of lsym.P are 0.
+      ^{:line 2248 :tag (slice byte)} src (zero (slice byte))]
+    (when (and (<= 0 off) (< off (conv int64 (len (.-P lsym)))))
+      (set! src (subslice (.-P lsym) off)))
+
+    (let [buf (make (slice byte) 2)]
+      (copy buf src)
+      (.Uint16 byteorder buf))))
+
+
+
+^{:go/end 2267} (go/func read32 "read32 reads four bytes from the read-only global sym at offset off.\n" ^uint32 [^Sym sym ^int64 off ^binary/ByteOrder byteorder]
+  (let [lsym (assert (* obj/LSym) sym)
+      ^{:line 2260 :tag (slice byte)} src (zero (slice byte))]
+    (when (and (<= 0 off) (< off (conv int64 (len (.-P lsym)))))
+      (set! src (subslice (.-P lsym) off)))
+
+    (let [buf (make (slice byte) 4)]
+      (copy buf src)
+      (.Uint32 byteorder buf))))
+
+
+
+^{:go/end 2279} (go/func read64 "read64 reads eight bytes from the read-only global sym at offset off.\n" ^uint64 [^Sym sym ^int64 off ^binary/ByteOrder byteorder]
+  (let [lsym (assert (* obj/LSym) sym)
+      ^{:line 2272 :tag (slice byte)} src (zero (slice byte))]
+    (when (and (<= 0 off) (< off (conv int64 (len (.-P lsym)))))
+      (set! src (subslice (.-P lsym) off)))
+
+    (let [buf (make (slice byte) 8)]
+      (copy buf src)
+      (.Uint64 byteorder buf))))
+
+
+
+^{:go/breaks [[9 2306]] :go/end 2307} (go/func sequentialAddresses "sequentialAddresses reports true if it can prove that x + n == y\n" ^bool [^{:tag (* Value)} x ^{:tag (* Value)} y ^int64 n]
+  (when (and (== x y) (== n 0))
+    (return true))
+
+  (when (and (== (.-Op x) Op386ADDL) (== (.-Op y) Op386LEAL1) (== (.-AuxInt y) n) (== (.-Aux y) nil)
+      ^:go/paren (or (and (== (aget (.-Args x) 0) (aget (.-Args y) 0)) (== (aget (.-Args x) 1) (aget (.-Args y) 1)))
+        (and (== (aget (.-Args x) 0) (aget (.-Args y) 1)) (== (aget (.-Args x) 1) (aget (.-Args y) 0)))))
+    (return true))
+
+  (when (and (== (.-Op x) Op386LEAL1) (== (.-Op y) Op386LEAL1) (== (.-AuxInt y) (+ (.-AuxInt x) n)) (== (.-Aux x) (.-Aux y))
+      ^:go/paren (or (and (== (aget (.-Args x) 0) (aget (.-Args y) 0)) (== (aget (.-Args x) 1) (aget (.-Args y) 1)))
+        (and (== (aget (.-Args x) 0) (aget (.-Args y) 1)) (== (aget (.-Args x) 1) (aget (.-Args y) 0)))))
+    (return true))
+
+  (when (and (== (.-Op x) OpAMD64ADDQ) (== (.-Op y) OpAMD64LEAQ1) (== (.-AuxInt y) n) (== (.-Aux y) nil)
+      ^:go/paren (or (and (== (aget (.-Args x) 0) (aget (.-Args y) 0)) (== (aget (.-Args x) 1) (aget (.-Args y) 1)))
+        (and (== (aget (.-Args x) 0) (aget (.-Args y) 1)) (== (aget (.-Args x) 1) (aget (.-Args y) 0)))))
+    (return true))
+
+  (when (and (== (.-Op x) OpAMD64LEAQ1) (== (.-Op y) OpAMD64LEAQ1) (== (.-AuxInt y) (+ (.-AuxInt x) n)) (== (.-Aux x) (.-Aux y))
+      ^:go/paren (or (and (== (aget (.-Args x) 0) (aget (.-Args y) 0)) (== (aget (.-Args x) 1) (aget (.-Args y) 1)))
+        (and (== (aget (.-Args x) 0) (aget (.-Args y) 1)) (== (aget (.-Args x) 1) (aget (.-Args y) 0)))))
+    (return true))
+
+  false)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+(go/type flagConstant "flagConstant represents the result of a compile-time comparison.\nThe sense of these flags does not necessarily represent the hardware's notion\nof a flags register - these are just a compile-time construct.\nWe happen to match the semantics to those of arm/arm64.\nNote that these semantics differ from x86: the carry flag has the opposite\nsense on a subtraction!\n\n\tOn amd64, C=1 represents a borrow, e.g. SBB on amd64 does x - y - C.\n\tOn arm64, C=0 represents a borrow, e.g. SBC on arm64 does x - y - ^C.\n\t (because it does x + ^y + C).\n\nSee https://en.wikipedia.org/wiki/Carry_flag#Vs._borrow_flag\n" uint8)
+
+
+^{:go/end 2326} (go/method N "N reports whether the result of an operation is negative (high bit set).\n" ^bool [^flagConstant fc]
+  (!= (bit-and fc 1) 0))
+
+
+
+^{:go/end 2331} (go/method Z "Z reports whether the result of an operation is 0.\n" ^bool [^flagConstant fc]
+  (!= (bit-and fc 2) 0))
+
+
+
+
+^{:go/end 2337} (go/method C "C reports whether an unsigned add overflowed (carry), or an\nunsigned subtract did not underflow (borrow).\n" ^bool [^flagConstant fc]
+  (!= (bit-and fc 4) 0))
+
+
+
+^{:go/end 2342} (go/method V "V reports whether a signed operation overflowed or underflowed.\n" ^bool [^flagConstant fc]
+  (!= (bit-and fc 8) 0))
+
+
+^{:go/end 2346} (go/method eq ^bool [^flagConstant fc]
+  (.Z fc))
+
+^{:go/end 2349} (go/method ne ^bool [^flagConstant fc]
+  (not (.Z fc)))
+
+^{:go/end 2352} (go/method lt ^bool [^flagConstant fc]
+  (!= (.N fc) (.V fc)))
+
+^{:go/end 2355} (go/method le ^bool [^flagConstant fc]
+  (or (.Z fc) (.lt fc)))
+
+^{:go/end 2358} (go/method gt ^bool [^flagConstant fc]
+  (and (not (.Z fc)) (.ge fc)))
+
+^{:go/end 2361} (go/method ge ^bool [^flagConstant fc]
+  (== (.N fc) (.V fc)))
+
+^{:go/end 2364} (go/method ult ^bool [^flagConstant fc]
+  (not (.C fc)))
+
+^{:go/end 2367} (go/method ule ^bool [^flagConstant fc]
+  (or (.Z fc) (.ult fc)))
+
+^{:go/end 2370} (go/method ugt ^bool [^flagConstant fc]
+  (and (not (.Z fc)) (.uge fc)))
+
+^{:go/end 2373} (go/method uge ^bool [^flagConstant fc]
+  (.C fc))
+
+
+^{:go/end 2377} (go/method ltNoov ^bool [^flagConstant fc]
+  (and (.lt fc) (not (.V fc))))
+
+^{:go/end 2380} (go/method leNoov ^bool [^flagConstant fc]
+  (and (.le fc) (not (.V fc))))
+
+^{:go/end 2383} (go/method gtNoov ^bool [^flagConstant fc]
+  (and (.gt fc) (not (.V fc))))
+
+^{:go/end 2386} (go/method geNoov ^bool [^flagConstant fc]
+  (and (.ge fc) (not (.V fc))))
+
+
+^{:go/end 2390} (go/method String ^string [^flagConstant fc]
+  (fmt/Sprintf "N=%v,Z=%v,C=%v,V=%v" (.N fc) (.Z fc) (.C fc) (.V fc)))
+
+
+(go/type flagConstantBuilder (struct
+    ^{:line 2393 :tag bool} N
+    ^{:line 2394 :tag bool} Z
+    ^{:line 2395 :tag bool} C
+    ^{:line 2396 :tag bool} V))
+
+
+^{:go/end 2414} (go/method encode ^flagConstant [^flagConstantBuilder fcs]
+  (let [^flagConstant fc (zero flagConstant)]
+    (when (.-N fcs)
+      (set! fc bit-or 1))
+
+    (when (.-Z fcs)
+      (set! fc bit-or 2))
+
+    (when (.-C fcs)
+      (set! fc bit-or 4))
+
+    (when (.-V fcs)
+      (set! fc bit-or 8))
+
+    ^{:line 2413} fc))
+
+
+;; Note: addFlags(x,y) != subFlags(x,-y) in some situations:
+;;  - the results of the C flag are different
+;;  - the results of the V flag when y==minint are different
+
+
+^{:go/end 2428} (go/func addFlags64 "addFlags64 returns the flags that would be set from computing x+y.\n" ^flagConstant [^int64 x ^int64 y]
+  (let [^flagConstantBuilder fcb (zero flagConstantBuilder)]
+    (set! (.-Z fcb) (== (+ x y) 0))
+    (set! (.-N fcb) (< (+ x y) 0))
+    (set! (.-C fcb) (< (conv uint64 (+ x y)) (conv uint64 x)))
+    (set! (.-V fcb) (or (and (>= x 0) (>= y 0) (< (+ x y) 0)) (and (< x 0) (< y 0) (>= (+ x y) 0))))
+    (.encode fcb)))
+
+
+
+^{:go/end 2438} (go/func subFlags64 "subFlags64 returns the flags that would be set from computing x-y.\n" ^flagConstant [^int64 x ^int64 y]
+  (let [^flagConstantBuilder fcb (zero flagConstantBuilder)]
+    (set! (.-Z fcb) (== (- x y) 0))
+    (set! (.-N fcb) (< (- x y) 0))
+    (set! (.-C fcb) (<= (conv uint64 y) (conv uint64 x))) ; This code follows the arm carry flag model.
+    (set! (.-V fcb) (or (and (>= x 0) (< y 0) (< (- x y) 0)) (and (< x 0) (>= y 0) (>= (- x y) 0))))
+    (.encode fcb)))
+
+
+
+^{:go/end 2448} (go/func addFlags32 "addFlags32 returns the flags that would be set from computing x+y.\n" ^flagConstant [^int32 x ^int32 y]
+  (let [^flagConstantBuilder fcb (zero flagConstantBuilder)]
+    (set! (.-Z fcb) (== (+ x y) 0))
+    (set! (.-N fcb) (< (+ x y) 0))
+    (set! (.-C fcb) (< (conv uint32 (+ x y)) (conv uint32 x)))
+    (set! (.-V fcb) (or (and (>= x 0) (>= y 0) (< (+ x y) 0)) (and (< x 0) (< y 0) (>= (+ x y) 0))))
+    (.encode fcb)))
+
+
+
+^{:go/end 2458} (go/func subFlags32 "subFlags32 returns the flags that would be set from computing x-y.\n" ^flagConstant [^int32 x ^int32 y]
+  (let [^flagConstantBuilder fcb (zero flagConstantBuilder)]
+    (set! (.-Z fcb) (== (- x y) 0))
+    (set! (.-N fcb) (< (- x y) 0))
+    (set! (.-C fcb) (<= (conv uint32 y) (conv uint32 x))) ; This code follows the arm carry flag model.
+    (set! (.-V fcb) (or (and (>= x 0) (< y 0) (< (- x y) 0)) (and (< x 0) (>= y 0) (>= (- x y) 0))))
+    (.encode fcb)))
+
+
+
+
+^{:go/end 2467} (go/func logicFlags64 "logicFlags64 returns flags set to the sign/zeroness of x.\nC and V are set to false.\n" ^flagConstant [^int64 x]
+  (let [^flagConstantBuilder fcb (zero flagConstantBuilder)]
+    (set! (.-Z fcb) (== x 0))
+    (set! (.-N fcb) (< x 0))
+    (.encode fcb)))
+
+
+
+
+^{:go/end 2476} (go/func logicFlags32 "logicFlags32 returns flags set to the sign/zeroness of x.\nC and V are set to false.\n" ^flagConstant [^int32 x]
+  (let [^flagConstantBuilder fcb (zero flagConstantBuilder)]
+    (set! (.-Z fcb) (== x 0))
+    (set! (.-N fcb) (< x 0))
+    (.encode fcb)))
+
+
+^{:go/end 2483} (go/func makeJumpTableSym ^{:tag (* obj/LSym)} [^{:tag (* Block)} b]
+  (let [s (.Lookup base/Ctxt (fmt/Sprintf "%s.jump%d" (.-Name (.-LSym (.Func (.-fe (.-Func b))))) (.-ID b)))]
+    ;; The jump table symbol is accessed only from the function symbol.
+    ^{:go/via [Attribute]} (.Set s obj/AttrStatic true)
+    ^{:line 2482} s))
+
+
+
+
+^{:go/end 2500} (go/func canRotate "canRotate reports whether the architecture supports\nrotates of integer registers with the given number of bits.\n" ^bool [^{:tag (* Config)} c ^int64 bits]
+  (when (> bits (* (.-PtrSize c) 8))
+    ;; Don't rewrite to rotates bigger than the machine word.
+    (return false))
+
+  (switch (.-arch c)
+    (case ["386" "amd64" "arm64" "loong64" "riscv64"]
+      (return true))
+    (case ["arm" "s390x" "ppc64" "ppc64le" "wasm"]
+      (return (>= bits 32)))
+    (default
+      (return false))))
+
+
+
+
+^{:go/end 2530} (go/func isARM64bitcon "isARM64bitcon reports whether a constant can be encoded into a logical instruction.\n" ^bool [^uint64 x]
+  (when (or (== x (- (<< 1 64) 1)) (== x 0))
+    (return false))
+
+  ;; determine the period and sign-extend a unit to 64 bits
+  (switch
+    (case [(!= x (bit-or (>> x 32) (<< x 32)))])
+    ;; period is 64
+    ;; nothing to do
+    (case [(!= x (bit-or (>> x 16) (<< x 48)))]
+      ;; period is 32
+      (set! x (conv uint64 (conv int64 (conv int32 x)))))
+    (case [(!= x (bit-or (>> x 8) (<< x 56)))]
+      ;; period is 16
+      (set! x (conv uint64 (conv int64 (conv int16 x)))))
+    (case [(!= x (bit-or (>> x 4) (<< x 60)))]
+      ;; period is 8
+      (set! x (conv uint64 (conv int64 (conv int8 x)))))
+    (default
+      ;; period is 4 or 2, always true
+      ;; 0001, 0010, 0100, 1000 -- 0001 rotate
+      ;; 0011, 0110, 1100, 1001 -- 0011 rotate
+      ;; 0111, 1011, 1101, 1110 -- 0111 rotate
+      ;; 0101, 1010             -- 01   rotate, repeat
+      (return true)))
+
+  (or (sequenceOfOnes x) (sequenceOfOnes (bit-not x))))
+
+
+
+^{:go/end 2537} (go/func sequenceOfOnes "sequenceOfOnes tests whether a constant is a sequence of ones in binary, with leading and trailing zeros.\n" ^bool [^uint64 x]
+  (let [y (bit-and x (- x))] ; lowest set bit of x. x is good iff x+y is a power of 2
+    (set! y + x)
+    (== (bit-and (- y 1) y) 0)))
+
+
+
+^{:go/end 2549} (go/func isARM64addcon "isARM64addcon reports whether x can be encoded as the immediate value in an ADD or SUB instruction.\n" ^bool [^int64 v]
+  ;; /* uimm12 or uimm24? */
+  (when (< v 0)
+    (return false))
+
+  (when (== (bit-and v 0xFFF) 0)
+    (set! v >> 12))
+
+  (<= v 0xFFF))
+
+
+
+
+
+^{:go/breaks [5] :go/end 2557} (go/func setPos "setPos sets the position of v to pos, then returns true.\nUseful for setting the result of a rewrite's position to\nsomething other than the default.\n" ^bool [^{:tag (* Value)} v ^src/XPos pos]
+  (set! (.-Pos v) pos)
+  true)
+
+
+
+
+
+^{:go/breaks [[6 2611]] :go/end 2612} (go/func isNonNegative "isNonNegative reports whether v is known to be greater or equal to zero.\nNote that this is pretty simplistic. The prove pass generates more detailed\nnonnegative information about values.\n" ^bool [^{:tag (* Value)} v]
+  (when (not (.IsInteger (.-Type v)))
+    (.Fatalf v "isNonNegative bad type: %v" (.-Type v)))
+
+  ;; TODO: return true if !v.Type.IsSigned()
+  ;; SSA isn't type-safe enough to do that now (issue 37753).
+  ;; The checks below depend only on the pattern of bits.
+
+  (switch (.-Op v)
+    (case [OpConst64]
+      (return (>= (.-AuxInt v) 0)))
+
+    (case [OpConst32]
+      (return (>= (conv int32 (.-AuxInt v)) 0)))
+
+    (case [OpConst16]
+      (return (>= (conv int16 (.-AuxInt v)) 0)))
+
+    (case [OpConst8]
+      (return (>= (conv int8 (.-AuxInt v)) 0)))
+
+    (case [OpStringLen OpSliceLen OpSliceCap
+        ^{:line 2584} OpZeroExt8to64 OpZeroExt16to64 OpZeroExt32to64
+        ^{:line 2585} OpZeroExt8to32 OpZeroExt16to32 OpZeroExt8to16
+        ^{:line 2586} OpCtz64 OpCtz32 OpCtz16 OpCtz8
+        ^{:line 2587} OpCtz64NonZero OpCtz32NonZero OpCtz16NonZero OpCtz8NonZero
+        ^{:line 2588} OpBitLen64 OpBitLen32 OpBitLen16 OpBitLen8]
+      (return true))
+
+    (case [OpRsh64Ux64 OpRsh32Ux64]
+      (let [by (aget (.-Args v) 1)]
+        (return (and (== (.-Op by) OpConst64) (> (.-AuxInt by) 0)))))
+
+    (case [OpRsh64x64 OpRsh32x64 OpRsh8x64 OpRsh16x64 OpRsh32x32 OpRsh64x32
+        ^{:line 2596} OpSignExt32to64 OpSignExt16to64 OpSignExt8to64 OpSignExt16to32 OpSignExt8to32]
+      (return (isNonNegative (aget (.-Args v) 0))))
+
+    (case [OpAnd64 OpAnd32 OpAnd16 OpAnd8]
+      (return (or (isNonNegative (aget (.-Args v) 0)) (isNonNegative (aget (.-Args v) 1)))))
+
+    (case [OpMod64 OpMod32 OpMod16 OpMod8
+        ^{:line 2603} OpDiv64 OpDiv32 OpDiv16 OpDiv8
+        ^{:line 2604} OpOr64 OpOr32 OpOr16 OpOr8
+        ^{:line 2605} OpXor64 OpXor32 OpXor16 OpXor8]
+      (return (and (isNonNegative (aget (.-Args v) 0)) (isNonNegative (aget (.-Args v) 1))))))
+
+  ;; We could handle OpPhi here, but the improvements from doing
+  ;; so are very minor, and it is neither simple nor cheap.
+
+  false)
+
+
+^{:go/end 2630} (go/func rewriteStructLoad ^{:tag (* Value)} [^{:tag (* Value)} v]
+  (let [b (.-Block v)
+      ^{:line 2616} ptr (aget (.-Args v) 0)
+      ^{:line 2617} mem (aget (.-Args v) 1)
+
+      ^{:line 2619} t (.-Type v)
+      ^{:line 2620} args (make (slice (* Value)) (.NumFields t))]
+    (range [i args]
+      (let [ft (.FieldType t i)
+          ^{:line 2623} addr (.NewValue1I b (.-Pos v) OpOffPtr (.PtrTo ft) (.FieldOff t i) ptr)]
+        (aset args i (.NewValue2 b (.-Pos v) OpLoad ft addr mem))))
+
+
+    (.reset v OpStructMake)
+    (.AddArgs v (spread args))
+    ^{:line 2629} v))
+
+
+^{:go/end 2650} (go/func rewriteStructStore ^{:tag (* Value)} [^{:tag (* Value)} v]
+  (let [b (.-Block v)
+      ^{:line 2634} dst (aget (.-Args v) 0)
+      ^{:line 2635} x (aget (.-Args v) 1)]
+    (when (!= (.-Op x) OpStructMake)
+      (base/Fatalf "invalid struct store: %v" x))
+
+    (let [mem (aget (.-Args v) 2)
+
+        ^{:line 2641} t (.-Type x)]
+      (range [i arg (.-Args x)]
+        (let [ft (.FieldType t i)
+
+            ^{:line 2645} addr (.NewValue1I b (.-Pos v) OpOffPtr (.PtrTo ft) (.FieldOff t i) dst)]
+          (set! mem (.NewValue3A b (.-Pos v) OpStore types/TypeMem (typeToAux ft) addr arg mem))))
+
+
+      ^{:line 2649} mem)))
+
+
+
+
+
+^{:go/end 2657} (go/func isDirectAndComparableType "isDirectAndComparableType reports whether v represents a type\n(a *runtime._type) whose value is stored directly in an\ninterface (i.e., is pointer or pointer-like) and is comparable.\n" ^bool [^{:tag (* Value)} v]
+  (isDirectAndComparableType1 v))
+
+
+
+^{:go/breaks [[5 2671]] :go/end 2672} (go/func isDirectAndComparableType1 "v is a type\n" ^bool [^{:tag (* Value)} v]
+  (switch (.-Op v)
+    (case [OpITab]
+      (return (isDirectAndComparableType2 (aget (.-Args v) 0))))
+    (case [OpAddr]
+      (let [lsym (assert (* obj/LSym) (.-Aux v))]
+        (when [ti (.TypeInfo lsym)] (!= ti nil)
+          (let [t (assert (* types/Type) (.-Type ti))]
+            (return (and (types/IsDirectIface t) (types/IsComparable t))))))))
+
+
+  false)
+
+
+
+^{:go/breaks [[5 2680]] :go/end 2681} (go/func isDirectAndComparableType2 "v is an empty interface\n" ^bool [^{:tag (* Value)} v]
+  (switch (.-Op v)
+    (case [OpIMake]
+      (return (isDirectAndComparableType1 (aget (.-Args v) 0)))))
+
+  false)
+
+
+
+
+
+^{:go/end 2688} (go/func isDirectAndComparableIface "isDirectAndComparableIface reports whether v represents an itab\n(a *runtime._itab) for a type whose value is stored directly\nin an interface (i.e., is pointer or pointer-like) and is comparable.\n" ^bool [^{:tag (* Value)} v]
+  (isDirectAndComparableIface1 v 9))
+
+
+
+^{:go/breaks [[6 2709]] :go/end 2710} (go/func isDirectAndComparableIface1 "v is an itab\n" ^bool [^{:tag (* Value)} v ^int depth]
+  (when (== depth 0)
+    (return false))
+
+  (switch (.-Op v)
+    (case [OpITab]
+      (return (isDirectAndComparableIface2 (aget (.-Args v) 0) (- depth 1))))
+    (case [OpAddr]
+      (let [lsym (assert (* obj/LSym) (.-Aux v))]
+        (when [ii (.ItabInfo lsym)] (!= ii nil)
+          (let [t (assert (* types/Type) (.-Type ii))]
+            (return (and (types/IsDirectIface t) (types/IsComparable t)))))))
+
+    (case [OpConstNil]
+      ;; We can treat this as direct, because if the itab is
+      ;; nil, the data field must be nil also.
+      (return true)))
+
+  false)
+
+
+
+^{:go/breaks [[6 2728]] :go/end 2729} (go/func isDirectAndComparableIface2 "v is an interface\n" ^bool [^{:tag (* Value)} v ^int depth]
+  (when (== depth 0)
+    (return false))
+
+  (switch (.-Op v)
+    (case [OpIMake]
+      (return (isDirectAndComparableIface1 (aget (.-Args v) 0) (- depth 1))))
+    (case [OpPhi]
+      (range [_ a (.-Args v)]
+        (when (not (isDirectAndComparableIface2 a (- depth 1)))
+          (return false)))
+
+
+      (return true)))
+
+  false)
+
+
+^{:go/end 2735} (go/func bitsAdd64 [^int64 x ^int64 y ^int64 carry] :results [^{:tag (struct ^int64 sum ^int64 carry)} r]
+  (let [(values s c) (bits/Add64 (conv uint64 x) (conv uint64 y) (conv uint64 carry))]
+    (set! (values (.-sum r) (.-carry r)) (values (conv int64 s) (conv int64 c)))
+    (return)))
+
+
+^{:go/end 2741} (go/func bitsMulU64 [^int64 x ^int64 y] :results [^{:tag (struct ^int64 hi ^int64 lo)} r]
+  (let [(values hi lo) (bits/Mul64 (conv uint64 x) (conv uint64 y))]
+    (set! (values (.-hi r) (.-lo r)) (values (conv int64 hi) (conv int64 lo)))
+    (return)))
+
+^{:go/end 2746} (go/func bitsMulU32 [^int32 x ^int32 y] :results [^{:tag (struct ^int32 hi ^int32 lo)} r]
+  (let [(values hi lo) (bits/Mul32 (conv uint32 x) (conv uint32 y))]
+    (set! (values (.-hi r) (.-lo r)) (values (conv int32 hi) (conv int32 lo)))
+    (return)))
+
+
+
+^{:go/end 2765} (go/func flagify "flagify rewrites v which is (X ...) to (Select0 (Xflags ...)).\n" ^bool [^{:tag (* Value)} v]
+  (let [^Op flagVersion (zero Op)]
+    (switch (.-Op v)
+      (case [OpAMD64ADDQconst]
+        (set! flagVersion OpAMD64ADDQconstflags))
+      (case [OpAMD64ADDLconst]
+        (set! flagVersion OpAMD64ADDLconstflags))
+      (default
+        (base/Fatalf "can't flagify op %s" (.-Op v))))
+
+    ^{:go/breaks [6]} (let [inner (.copyInto v (.-Block v))]
+      (set! (.-Op inner) flagVersion)
+      (set! (.-Type inner) (types/NewTuple (.-Type v) types/TypeFlags))
+      (.reset v OpSelect0)
+      (.AddArg v inner)
+      true)))
+
+
+
+(go/type PanicBoundsC "PanicBoundsC contains a constant for a bounds failure.\n" (struct
+    ^{:line 2769 :tag int64} C))
+
+
+
+(go/type PanicBoundsCC "PanicBoundsCC contains 2 constants for a bounds failure.\n" (struct
+    ^{:line 2774 :tag int64} Cx
+    ^{:line 2775 :tag int64} Cy))
+
+
+^{:go/end 2779} (go/method CanBeAnSSAAux [^PanicBoundsC p])
+
+^{:go/end 2781} (go/method CanBeAnSSAAux [^PanicBoundsCC p])
+
+
+^{:go/end 2785} (go/func auxToPanicBoundsC ^PanicBoundsC [^Aux i]
+  (assert PanicBoundsC i))
+
+^{:go/end 2788} (go/func auxToPanicBoundsCC ^PanicBoundsCC [^Aux i]
+  (assert PanicBoundsCC i))
+
+^{:go/end 2791} (go/func panicBoundsCToAux ^Aux [^PanicBoundsC p]
+  ^{:line 2790} p)
+
+^{:go/end 2794} (go/func panicBoundsCCToAux ^Aux [^PanicBoundsCC p]
+  ^{:line 2793} p)
+
+
+^{:go/end 2798} (go/func isDictArgSym ^bool [^Sym sym]
+  (== (.-Name (.Sym (assert (* ir/Name) sym))) typecheck/LocalDictName))
+
+
+
+
+
+^{:go/end 2812} (go/func imakeOfStructMake "When v is (IMake typ (StructMake ...)), convert to\n(IMake typ arg) where arg is the pointer-y argument to\nthe StructMake (there must be exactly one).\n" ^{:tag (* Value)} [^{:tag (* Value)} v]
+  (let [^{:tag (* Value)} arg (zero (* Value))]
+    (range [_ a (.-Args (aget (.-Args v) 1))]
+      (when (> (.Size (.-Type a)) 0)
+        (set! arg a)
+        (break)))
+
+
+    (.NewValue2 (.-Block v) (.-Pos v) OpIMake (.-Type v) (aget (.-Args v) 0) arg)))
+
+
+
+^{:go/end 2821} (go/func bool2int "bool2int converts bool to int: true to 1, false to 0\n" ^int [^bool x]
+  (let [^int b (zero int)]
+    (when x
+      (set! b 1))
+
+    ^{:line 2820} b))
+
+
+
+
+^{:go/breaks [[5 2861]] :go/end 2862} (go/func rewriteCondSelectIntoMath "rewriteCondSelectIntoMath reports whether x OP (y * constant) should be used instead of a CondSelect.\nx arbitrary, y in [0,1]\n" ^bool [^{:tag (* Config)} config ^Op op ^int64 constant]
+  (switch (.-arch config)
+    (case ["amd64"]
+      (when (== constant 1)
+        (return true))
+
+      (switch op
+        (case [OpAdd64 OpAdd32 OpAdd16 OpAdd8]
+          (switch constant
+            (case [2 4 8]
+              ;; Implemented with LEA a + b * displacement form
+              (return true))))))
+
+
+    (case ["arm64"]
+      (switch op
+        (case [OpAdd64 OpAdd32 OpAdd16 OpAdd8]
+          (when (== constant 1)
+            (return false)) ; better done as CSINC
+
+          (fallthrough))
+        (case [OpSub64 OpSub32 OpSub16 OpSub8
+            ^{:line 2847} OpAnd64 OpAnd32 OpAnd16 OpAnd8
+            ^{:line 2848} OpOr64 OpOr32 OpOr16 OpOr8
+            ^{:line 2849} OpXor64 OpXor32 OpXor16 OpXor8]
+          ;; Implemented using an inline LSL
+          (return (^{:inst [uint64]} isPowerOfTwo (conv uint64 constant))))
+        (default
+          (when (== constant 1)
+            (return true)))))
+
+
+    (default
+      ;; TODO: fine tune for other architectures.
+      (return (== constant 1))))
+
+  false)
+
+
+^{:go/end 2877} (go/func addToSub ^Op [^Op op]
+  (switch op
+    (case [OpAdd64]
+      (return OpSub64))
+    (case [OpAdd32]
+      (return OpSub32))
+    (case [OpAdd16]
+      (return OpSub16))
+    (case [OpAdd8]
+      (return OpSub8))
+    (default
+      (panic (fmt/Sprintf "unexpected op %v" op)))))
+
+
+
+^{:go/end 2893} (go/func modularMultiplicativeInverse [^uint64 x] :results [^uint64 y]
+  (when (!= (% x 2) 1)
+    (panic "even numbers in a power-of-two modulus do not have a multiplicative inverse"))
+
+  ;; we start with 3 bits of precision because each odd number is its own multiplicative inverse mod 8
+  (set! y x) ; 3 bits
+
+  ;; now use the Newton-Raphson method to double the number of correct bits in each iteration.
+  (set! y * (- 2 (* x y))) ; 6 bits
+  (set! y * (- 2 (* x y))) ; 12 bits
+  (set! y * (- 2 (* x y))) ; 24 bits
+  (set! y * (- 2 (* x y))) ; 48 bits
+  (set! y * (- 2 (* x y))) ; 96 bits; good enough
+  (return))

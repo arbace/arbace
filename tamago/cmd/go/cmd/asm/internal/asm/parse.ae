@@ -1,0 +1,1731 @@
+;; Copyright 2015 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; Package asm implements the parser and instruction generator for the assembler.
+;; TODO: Split apart?
+(in-ns 'go.cmd.asm.internal.asm) (go/file "parse.go" :doc "Package asm implements the parser and instruction generator for the assembler.\nTODO: Split apart?\n" :imports [
+
+
+    ^{:line 10} [fmt "fmt"]
+    ^{:line 11} [io "io"]
+    ^{:line 12} [log "log"]
+    ^{:line 13} [os "os"]
+    ^{:line 14} [strconv "strconv"]
+    ^{:line 15} [strings "strings"]
+    ^{:line 16} [scanner "text/scanner"]
+    ^{:line 17} [utf8 "unicode/utf8"]
+
+    ^{:line 19} [arch "cmd/asm/internal/arch"]
+    ^{:line 20} [flags "cmd/asm/internal/flags"]
+    ^{:line 21} [lex "cmd/asm/internal/lex"]
+    ^{:line 22} [obj "cmd/internal/obj"]
+    ^{:line 23} [arm64 "cmd/internal/obj/arm64"]
+    ^{:line 24} [riscv "cmd/internal/obj/riscv"]
+    ^{:line 25} [x86 "cmd/internal/obj/x86"]
+    ^{:line 26} [objabi "cmd/internal/objabi"]
+    ^{:line 27} [src "cmd/internal/src"]
+    ^{:line 28} [sys "cmd/internal/sys"]])
+
+
+(go/type Parser (struct
+    ^{:line 32 :tag lex/TokenReader} lex
+    ^{:line 33 :tag int} lineNum ; Line number in source file.
+    ^{:line 34 :tag int} errorLine ; Line number of last error.
+    ^{:line 35 :tag int} errorCount ; Number of errors.
+    ^{:line 36 :tag bool} sawCode ; saw code in this file (as opposed to comments and blank lines)
+    ^{:line 37 :tag int64} pc ; virtual PC; count of Progs; doesn't advance for GLOBL or DATA.
+    ^{:line 38 :tag (slice lex/Token)} input
+    ^{:line 39 :tag int} inputPos
+    ^{:line 40 :tag (slice string)} pendingLabels ; Labels to attach to next instruction.
+    ^{:line 41 :tag (map string (* obj/Prog))} labels
+    ^{:line 42 :tag (slice Patch)} toPatch
+    ^{:line 43 :tag (slice obj/Addr)} addr
+    ^{:line 44 :tag (* arch/Arch)} arch
+    ^{:line 45 :tag (* obj/Link)} ctxt
+    ^{:line 46 :tag (* obj/Prog)} firstProg
+    ^{:line 47 :tag (* obj/Prog)} lastProg
+    ^{:line 48 :tag (map string int64)} dataAddr ; Most recent address for DATA for this symbol.
+    ^{:line 49 :tag bool} isJump ; Instruction being assembled is a jump.
+    ^{:line 50 :tag bool} allowABI ; Whether ABI selectors are allowed.
+    ^{:line 51 :tag string} pkgPrefix ; Prefix to add to local symbols.
+    ^{:line 52 :tag io/Writer} errorWriter))
+
+
+(go/type Patch (struct
+    ^{:line 56 :tag (* obj/Addr)} addr
+    ^{:line 57 :tag string} label))
+
+
+^{:go/end 75} (go/func NewParser ^{:tag (* Parser)} [^{:tag (* obj/Link)} ctxt ^{:tag (* arch/Arch)} ar ^lex/TokenReader lexer]
+  (let [pkgPrefix obj/UnlinkablePkg]
+    (when (!= ctxt nil)
+      (set! pkgPrefix (objabi/PathToPrefix (.-Pkgpath ctxt))))
+
+    (addr ^{:go/breaks [2 4 6 8 10 12 14 16]} (lit Parser
+        :ctxt ctxt
+        :arch ar
+        :lex lexer
+        :labels (make (map string (* obj/Prog)))
+        :dataAddr (make (map string int64))
+        :errorWriter os/Stderr
+        :allowABI (and (!= ctxt nil) (.-AllowAsmABI (objabi/LookupPkgSpecial (.-Pkgpath ctxt))))
+        :pkgPrefix pkgPrefix))))
+
+
+
+
+
+(go/var ^{:tag bool :doc "panicOnError is enabled when testing to abort execution on the first error\nand turn it into a recoverable panic.\n"} panicOnError)
+
+^{:go/end 100} (go/method errorf [^{:tag (* Parser)} p ^string format & ^{:tag (slice any)} args]
+  (when panicOnError
+    (panic (fmt/Errorf format (spread args))))
+
+  (when (== (.-lineNum p) (.-errorLine p))
+    ;; Only one error per line.
+    (return))
+
+  (set! (.-errorLine p) (.-lineNum p))
+  (when (!= (.-lex p) nil)
+    ;; Put file and line information on head of message.
+    (set! format (+ "%s:%d: " format "\n"))
+    (set! args (append (lit (slice any) (.File (.-lex p)) (.-lineNum p)) (spread args))))
+
+  (fmt/Fprintf (.-errorWriter p) format (spread args))
+  (inc! (.-errorCount p))
+  (when (and (> (.-errorCount p) 10) (not @flags/AllErrors))
+    (log/Fatal "too many errors")))
+
+
+
+^{:go/end 104} (go/method pos ^src/XPos [^{:tag (* Parser)} p]
+  (.XPos (.-PosTable (.-ctxt p)) (src/MakePos (.Base (.-lex p)) (conv uint (.-lineNum p)) 0)))
+
+
+^{:go/end 130} (go/method Parse [^{:tag (* Parser)} p] :results [(* obj/Prog) bool]
+  (let [scratch (make (slice (slice lex/Token)) 0 3)]
+    (while true
+      (let [(values word cond operands ok) (.line p scratch)]
+        (when (not ok)
+          (break))
+
+        (set! scratch operands)
+
+        (when (.pseudo p word operands)
+          (continue))
+
+        (let [(values i present) (aget (.-Instructions (.-arch p)) word)]
+          (when present
+            (.instruction p i word cond operands)
+            (continue))
+
+          (.errorf p "unrecognized instruction %q" word))))
+
+    (when (> (.-errorCount p) 0)
+      (return nil false))
+
+    (.patch p)
+    (return (.-firstProg p) true)))
+
+
+
+
+^{:go/end 146} (go/method ParseSymABIs "ParseSymABIs parses p's assembly code to find text symbol\ndefinitions and references and writes a symabis file to w.\n" ^bool [^{:tag (* Parser)} p ^io/Writer w]
+  (let [operands (make (slice (slice lex/Token)) 0 3)]
+    (while true
+      (let [(values word _ operands1 ok) (.line p operands)]
+        (when (not ok)
+          (break))
+
+        (set! operands operands1)
+
+        (.symDefRef p w word operands)))
+
+    (== (.-errorCount p) 0)))
+
+
+
+
+^{:go/end 170} (go/method nextToken "nextToken returns the next non-build-comment token from the lexer.\nIt reports misplaced //go:build comments but otherwise discards them.\n" ^lex/ScanToken [^{:tag (* Parser)} p]
+  (while true
+    (let [tok (.Next (.-lex p))]
+      (when (== tok lex/BuildComment)
+        (when (.-sawCode p)
+          (.errorf p "misplaced //go:build comment"))
+
+        (continue))
+
+      (when (!= tok \newline)
+        (set! (.-sawCode p) true))
+
+      (when (== tok \#)
+        ;; A leftover wisp of a #include/#define/etc,
+        ;; to let us know that p.sawCode should be true now.
+        ;; Otherwise ignored.
+        (continue))
+
+      (return tok))))
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 275} (go/method line "line consumes a single assembly line from p.lex of the form\n\n\t{label:} WORD[.cond] [ arg {, arg} ] (';' | '\\n')\n\nIt adds any labels to p.pendingLabels and returns the word, cond,\noperand list, and true. If there is an error or EOF, it returns\nok=false.\n\nline may reuse the memory from scratch.\n" [^{:tag (* Parser)} p ^{:tag (slice (slice lex/Token))} scratch] :results [^string word ^string cond ^{:tag (slice (slice lex/Token))} operands ^bool ok]
+  (let [
+      ;; Skip newlines.
+      ^{:line 184 :tag lex/ScanToken :go/label :next :go/label-line 182} tok (zero lex/ScanToken)]
+    (while true
+      (set! tok (.nextToken p))
+      ;; We save the line number here so error messages from this instruction
+      ;; are labeled with this line. Otherwise we complain after we've absorbed
+      ;; the terminating newline and the line numbers are off by one in errors.
+      (set! (.-lineNum p) (.Line (.-lex p)))
+      (switch tok
+        (case [\newline \;]
+          (continue))
+        (case [scanner/EOF]
+          (return "" "" nil false)))
+
+      (break))
+
+    ;; First item must be an identifier.
+    (when (!= tok scanner/Ident)
+      (.errorf p "expected identifier, found %q" (.Text (.-lex p)))
+      (return "" "" nil false)) ; Might as well stop now.
+
+    (set! (values word cond) (values (.Text (.-lex p)) ""))
+    (set! operands (subslice scratch _ 0))
+    ;; Zero or more comma-separated operands, one per loop.
+    (let [nesting 0
+        ^{:line 208} colon -1]
+      (while (and (!= tok \newline) (!= tok \;))
+        ;; Process one operand.
+        (let [^{:tag (slice lex/Token)} items (zero (slice lex/Token))]
+          (if (> (cap operands) (len operands))
+            ;; Reuse scratch items slice.
+            (set! items (subslice (aget (subslice operands _ (cap operands)) (len operands)) _ 0))
+
+            (set! items (make (slice lex/Token) 0 3)))
+
+          (while true
+            (set! tok (.nextToken p))
+            (when (and (== (len operands) 0) (== (len items) 0))
+              (when (and ^{:go/via [LinkArch Arch]} (.InFamily (.-arch p) sys/ARM sys/ARM64 sys/AMD64 sys/I386 sys/Loong64 sys/RISCV64) (== tok \.))
+                ;; Suffixes: ARM conditionals, Loong64 vector instructions, RISCV rounding mode or x86 modifiers.
+                (set! tok (.nextToken p))
+                (let [str (.Text (.-lex p))]
+                  (when (!= tok scanner/Ident)
+                    (.errorf p "instruction suffix expected identifier, found %s" str))
+
+                  (set! cond (+ cond "." str))
+                  (continue)))
+
+              (when (== tok \:)
+                ;; Labels.
+                (set! (.-pendingLabels p) (append (.-pendingLabels p) word))
+                (goto :next)))
+
+
+            (when (== tok scanner/EOF)
+              (.errorf p "unexpected EOF")
+              (return "" "" nil false))
+
+            ;; Split operands on comma. Also, the old syntax on x86 for a "register pair"
+            ;; was AX:DX, for which the new syntax is DX, AX. Note the reordering.
+            (when (or (== tok \newline) (== tok \;) ^:go/paren (and (== nesting 0) ^:go/paren (or (== tok \,) (== tok \:))))
+              (when (== tok \:)
+                ;; Remember this location so we can swap the operands below.
+                (when (>= colon 0)
+                  (.errorf p "invalid ':' in operand")
+                  (return word cond operands true))
+
+                (set! colon (len operands)))
+
+              (break))
+
+            (when (or (== tok \() (== tok \[))
+              (inc! nesting))
+
+            (when (or (== tok \)) (== tok \]))
+              (dec! nesting))
+
+            (set! items (append items (lex/Make tok (.Text (.-lex p))))))
+
+          (cond (> (len items) 0) (do
+              (set! operands (append operands items))
+              (when (and (>= colon 0) (== (len operands) (+ colon 2)))
+                ;; AX:DX becomes DX, AX.
+                (set! (values (aget operands colon) (aget operands (+ colon 1))) (values (aget operands (+ colon 1)) (aget operands colon)))
+                (set! colon -1)))
+
+            (or (> (len operands) 0) (== tok \,) (>= colon 0))
+            ;; Had a separator with nothing after.
+            (.errorf p "missing operand"))))
+
+
+      (return word cond operands true))))
+
+
+^{:go/end 292} (go/method instruction [^{:tag (* Parser)} p ^obj/As op ^string word ^string cond ^{:tag (slice (slice lex/Token))} operands]
+  (set! (.-addr p) (subslice (.-addr p) 0 0))
+  (set! (.-isJump p) ((.-IsJump (.-arch p)) word))
+  (range [_ op operands]
+    (let [addr (.address p op)]
+      (when (and (not (.-isJump p)) (< (.-Reg addr) 0)) ; Jumps refer to PC, a pseudo.
+        (.errorf p "illegal use of pseudo-register in %s" word))
+
+      (set! (.-addr p) (append (.-addr p) addr))))
+
+  (when (.-isJump p)
+    (.asmJump p op cond (.-addr p))
+    (return))
+
+  (.asmInstruction p op cond (.-addr p)))
+
+
+^{:go/breaks [[4 311]] :go/end 312} (go/method pseudo ^bool [^{:tag (* Parser)} p ^string word ^{:tag (slice (slice lex/Token))} operands]
+  (switch word
+    (case ["DATA"]
+      (.asmData p operands))
+    (case ["FUNCDATA"]
+      (.asmFuncData p operands))
+    (case ["GLOBL"]
+      (.asmGlobl p operands))
+    (case ["PCDATA"]
+      (.asmPCData p operands))
+    (case ["PCALIGN"]
+      (.asmPCAlign p operands))
+    (case ["TEXT"]
+      (.asmText p operands))
+    (default
+      (return false)))
+
+  true)
+
+
+
+
+
+
+
+^{:go/end 348} (go/method symDefRef "symDefRef scans a line for potential text symbol definitions and\nreferences and writes symabis information to w.\n\nThe symabis format is documented at\ncmd/compile/internal/ssagen.ReadSymABIs.\n" [^{:tag (* Parser)} p ^io/Writer w ^string word ^{:tag (slice (slice lex/Token))} operands]
+  (switch word
+    (case ["TEXT"]
+      ;; Defines text symbol in operands[0].
+      (when (> (len operands) 0)
+        (.start p (aget operands 0))
+        (when [(values name abi ok) (.funcAddress p)] ok
+          (fmt/Fprintf w "def %s %s\n" name abi)))
+
+
+      (return))
+    (case ["GLOBL" "PCDATA"])
+    ;; No text definitions or symbol references.
+    (case ["DATA" "FUNCDATA"]
+      ;; For DATA, operands[0] is defined symbol.
+      ;; For FUNCDATA, operands[0] is an immediate constant.
+      ;; Remaining operands may have references.
+      (when (< (len operands) 2)
+        (return))
+
+      (set! operands (subslice operands 1))))
+
+  ;; Search for symbol references.
+  (range [_ op operands]
+    (.start p op)
+    (when [(values name abi ok) (.funcAddress p)] ok
+      (fmt/Fprintf w "ref %s %s\n" name abi))))
+
+
+
+
+^{:go/end 353} (go/method start [^{:tag (* Parser)} p ^{:tag (slice lex/Token)} operand]
+  (set! (.-input p) operand)
+  (set! (.-inputPos p) 0))
+
+
+
+^{:go/end 361} (go/method address "address parses the operand into a link address structure.\n" ^obj/Addr [^{:tag (* Parser)} p ^{:tag (slice lex/Token)} operand]
+  (.start p operand)
+  (let [addr (lit obj/Addr)]
+    (.operand p (addr addr))
+    ^{:line 360} addr))
+
+
+
+^{:go/breaks [6] :go/end 371} (go/method parseScale "parseScale converts a decimal string into a valid scale factor.\n" ^int8 [^{:tag (* Parser)} p ^string s]
+  (switch s
+    (case ["1" "2" "4" "8"]
+      (return (conv int8 (- (aget s 0) \0)))))
+
+  (.errorf p "bad scale: %s" s)
+  0)
+
+
+
+^{:go/end 632} (go/method operand "operand parses a general operand and stores the result in *a.\n" [^{:tag (* Parser)} p ^{:tag (* obj/Addr)} a]
+  ;;fmt.Printf("Operand: %v\n", p.input)
+  (when (== (len (.-input p)) 0)
+    (.errorf p "empty operand: cannot happen")
+    (return))
+
+  ;; General address (with a few exceptions) looks like
+  ;;	$sym±offset(SB)(reg)(index*scale)
+  ;; Exceptions are:
+  ;;
+  ;;	R1
+  ;;	offset
+  ;;	$offset
+  ;; Every piece is optional, so we scan left to right and what
+  ;; we discover tells us where we are.
+
+  ;; Prefix: $.
+  (let [^rune prefix (zero rune)]
+    (switch [tok (.peek p)] tok
+      (case [\$ \*]
+        (set! prefix (conv rune tok))
+        (.next p)))
+
+
+    ;; Symbol: sym±offset(SB)
+    (let [tok (.next p)
+        ^{:line 400} name (.String tok)]
+      (when (and (== (.-ScanToken tok) scanner/Ident) (not (.atStartOfRegister p name)))
+        ;; See if this is an architecture specific special operand.
+        (switch ^{:go/via [LinkArch Arch]} (.-Family (.-arch p))
+          (case [sys/ARM64]
+            (when [opd (arch/ARM64SpecialOperand name)] (!= opd arm64/SPOP_END)
+              (set! (.-Type a) obj/TYPE_SPECIAL)
+              (set! (.-Offset a) (conv int64 opd))))
+
+          (case [sys/RISCV64]
+            (when [opd (arch/RISCV64SpecialOperand name)] (!= opd riscv/SPOP_END)
+              (set! (.-Type a) obj/TYPE_SPECIAL)
+              (set! (.-Offset a) (conv int64 opd)))))
+
+
+
+        (when (!= (.-Type a) obj/TYPE_SPECIAL)
+          ;; We have a symbol. Parse $sym±offset(symkind)
+          (.symbolReference p a (.qualifySymbol p name) prefix))
+
+        ;; fmt.Printf("SYM %s\n", obj.Dconv(&emptyProg, 0, a))
+        (when (== (.peek p) scanner/EOF)
+          (return)))
+
+
+
+      ;; Detect AC_PREGSEL operand syntax: [selreg, $idximm](preg.T2)
+      (when (and (== (.-ScanToken tok) \[) (== ^{:go/via [LinkArch Arch]} (.-Family (.-arch p)) sys/ARM64))
+        (let [pos (.-inputPos p)]
+          (when (and (< (+ pos 5) (len (.-input p))) (== (.-ScanToken (aget (.-input p) pos)) scanner/Ident)
+              (== (.-ScanToken (aget (.-input p) (+ pos 1))) \,) (== (.-ScanToken (aget (.-input p) (+ pos 2))) \$)
+              (== (.-ScanToken (aget (.-input p) (+ pos 3))) scanner/Int) (== (.-ScanToken (aget (.-input p) (+ pos 4))) \])
+              (== (.-ScanToken (aget (.-input p) (+ pos 5))) \())
+
+            (let [selregStr (.String (aget (.-input p) pos))
+                ^{:line 435} immStr (.String (aget (.-input p) (+ pos 3)))]
+
+              (set! pos + 6) ; past '('
+              (when (and (< pos (len (.-input p))) (== (.-ScanToken (aget (.-input p) pos)) scanner/Ident))
+                (let [pregStr (.String (aget (.-input p) pos))]
+                  (inc! pos)
+                  (let [ext ""]
+                    (when (and (< pos (len (.-input p))) (== (.-ScanToken (aget (.-input p) pos)) \.))
+                      (inc! pos)
+                      (when (and (< pos (len (.-input p))) (== (.-ScanToken (aget (.-input p) pos)) scanner/Ident))
+                        (set! ext (.String (aget (.-input p) pos)))
+                        (inc! pos)))
+
+
+                    (when (and (< pos (len (.-input p))) (== (.-ScanToken (aget (.-input p) pos)) \)))
+                      ;; Matches AC_PREGSEL syntax!
+                      (set! (.-inputPos p) (+ pos 1)) ; consume the parsed tokens
+
+                      ;; Encode components
+                      (let [(values selreg ok1) (.registerReference p selregStr)
+                          (values preg ok2) (.registerReference p pregStr)
+                          ^{:line 456} idximm (conv int64 (.atoi p immStr))]
+
+                        (when (or (not ok1) (not ok2))
+                          (.errorf p "invalid registers in pregsel operand")
+                          (return))
+
+
+                        (let [^int arng2 (zero int)]
+                          (switch ext
+                            (case ["B"]
+                              (set! arng2 arm64/ARNG_B))
+                            (case ["H"]
+                              (set! arng2 arm64/ARNG_H))
+                            (case ["S"]
+                              (set! arng2 arm64/ARNG_S))
+                            (case ["D"]
+                              (set! arng2 arm64/ARNG_D))
+                            (case ["Q"]
+                              (set! arng2 arm64/ARNG_Q))
+                            (default
+                              (.errorf p "invalid P register arrangement: %s" ext)
+                              (return)))
+
+
+                          ;; Pack values into a.Offset
+                          (set! (.-Type a) obj/TYPE_REG)
+                          (set! (.-Offset a) (bit-or (conv int64 (bit-and preg 31)) (conv int64 (<< (bit-and arng2 15) 5)) (conv int64 (<< (bit-and selreg 31) 9)) (<< idximm 14) (<< (conv int64 1) 62)))
+                          (.expectOperandEnd p)
+                          (return)))))))))))
+
+
+
+
+
+      ;; Special register list syntax for arm: [R1,R3-R7]
+      (when (== (.-ScanToken tok) \[)
+        (when (!= prefix 0)
+          (.errorf p "illegal use of register list"))
+
+        (.registerList p a)
+        (.expectOperandEnd p)
+        (return))
+
+
+      ;; Register: R1
+      (when (and (== (.-ScanToken tok) scanner/Ident) (.atStartOfRegister p name))
+        (if (.atRegisterShift p) (do
+            ;; ARM shifted register such as R1<<R2 or R1>>2.
+            (set! (.-Type a) obj/TYPE_SHIFT)
+            (set! (.-Offset a) (.registerShift p (.String tok) prefix))
+            (when (== (.peek p) \()
+              ;; Can only be a literal register here.
+              (.next p)
+              (let [tok (.next p)
+                  ^{:line 510} name (.String tok)]
+                (when (not (.atStartOfRegister p name))
+                  (.errorf p "expected register; found %s" name))
+
+                (set! (values (.-Reg a) _) (.registerReference p name))
+                (.get p \)))))
+
+          (if (.atRegisterExtension p) (do
+              (set! (.-Type a) obj/TYPE_REG)
+              (.registerExtension p a (.String tok) prefix)
+              (.expectOperandEnd p)
+              (return))
+            (when [(values r1 r2 scale ok) (.register p (.String tok) prefix)] ok
+              (when (!= scale 0)
+                (.errorf p "expected simple register reference"))
+
+              (set! (.-Type a) obj/TYPE_REG)
+              (set! (.-Reg a) r1)
+              (when (!= r2 0)
+                ;; Form is R1:R2. It is on RHS and the second register
+                ;; needs to go into the LHS.
+                (panic "cannot happen (Addr.Reg2)")))))
+
+
+        ;; fmt.Printf("REG %s\n", obj.Dconv(&emptyProg, 0, a))
+        (.expectOperandEnd p)
+        (return))
+
+
+      ;; Detect (VL*imm) or (-VL*imm) pattern in ARM64
+      (when (and (== ^{:go/via [LinkArch Arch]} (.-Family (.-arch p)) sys/ARM64) (>= (len (.-input p)) 5) (== (.-ScanToken (aget (.-input p) 0)) \())
+        (let [pos 1
+            ^{:line 542} sign (conv int64 1)]
+          (cond (== (.-ScanToken (aget (.-input p) pos)) \-) (do
+              (set! sign -1)
+              (inc! pos))
+            (== (.-ScanToken (aget (.-input p) pos)) \+)
+            (inc! pos))
+
+          (when (and (< (+ pos 3) (len (.-input p))) (== (.String (aget (.-input p) pos)) "VL") (== (.-ScanToken (aget (.-input p) (+ pos 1))) \*) (== (.-ScanToken (aget (.-input p) (+ pos 2))) scanner/Int) (== (.-ScanToken (aget (.-input p) (+ pos 3))) \)))
+            (let [imm (conv int64 (.atoi p (.String (aget (.-input p) (+ pos 2)))))]
+              (set! imm * sign)
+              (set! (.-Offset a) imm)
+              (set! (.-Scale a) -32768) ; bit 15 signals multiple of Vector Length
+
+              ;; Remove the (VL*imm) tokens and let operand parse the remaining sequence (reg.T)
+              (set! (.-input p) (subslice (.-input p) (+ pos 4)))
+              (set! (.-inputPos p) 0)
+              (.operand p a)
+              (return)))))
+
+
+
+      ;; Constant.
+      (let [haveConstant false]
+        (switch (.-ScanToken tok)
+          (case [scanner/Int scanner/Float scanner/String scanner/Char \+ \- \~]
+            (set! haveConstant true))
+          (case [\(]
+            ;; Could be parenthesized expression or (R). Must be something, though.
+            (let [tok (.next p)]
+              (when (== (.-ScanToken tok) scanner/EOF)
+                (.errorf p "missing right parenthesis")
+                (return))
+
+              (let [rname (.String tok)]
+                (.back p)
+                (set! haveConstant (not (.atStartOfRegister p rname)))
+                (when (not haveConstant)
+                  (.back p)))))) ; Put back the '('.
+
+
+        (when haveConstant
+          (.back p)
+          (when (.have p scanner/Float)
+            (when (!= prefix \$)
+              (.errorf p "floating-point constant must be an immediate"))
+
+            (set! (.-Type a) obj/TYPE_FCONST)
+            (set! (.-Val a) (.floatExpr p))
+            ;; fmt.Printf("FCONST %s\n", obj.Dconv(&emptyProg, 0, a))
+            (.expectOperandEnd p)
+            (return))
+
+          (when (.have p scanner/String)
+            (when (!= prefix \$)
+              (.errorf p "string constant must be an immediate")
+              (return))
+
+            (let [(values str err) (strconv/Unquote (.String (.get p scanner/String)))]
+              (when (!= err nil)
+                (.errorf p "string parse error: %s" err))
+
+              (set! (.-Type a) obj/TYPE_SCONST)
+              (set! (.-Val a) str)
+              ;; fmt.Printf("SCONST %s\n", obj.Dconv(&emptyProg, 0, a))
+              (.expectOperandEnd p)
+              (return)))
+
+          (set! (.-Offset a) (conv int64 (.expr p)))
+          (when (!= (.peek p) \()
+            (switch prefix
+              (case [\$]
+                (set! (.-Type a) obj/TYPE_CONST))
+              (case [\*]
+                (set! (.-Type a) obj/TYPE_INDIR)) ; Can appear but is illegal, will be rejected by the linker.
+              (default
+                (set! (.-Type a) obj/TYPE_MEM)))
+
+            ;; fmt.Printf("CONST %d %s\n", a.Offset, obj.Dconv(&emptyProg, 0, a))
+            (.expectOperandEnd p)
+            (return)))
+
+        ;; fmt.Printf("offset %d \n", a.Offset)
+
+
+        ;; Register indirection: (reg) or (index*scale). We are on the opening paren.
+        (.registerIndirect p a prefix)
+        ;; fmt.Printf("DONE %s\n", p.arch.Dconv(&emptyProg, 0, a))
+
+        (.expectOperandEnd p)
+        (return)))))
+
+
+
+^{:go/end 643} (go/method atStartOfRegister "atStartOfRegister reports whether the parser is at the start of a register definition.\n" ^bool [^{:tag (* Parser)} p ^string name]
+  ;; Simple register: R10.
+  (let [(values _ present) (aget (.-Register (.-arch p)) name)]
+    (when present
+      (return true))
+
+    ;; Parenthesized register: R(10).
+    (and (aget (.-RegisterPrefix (.-arch p)) name) (== (.peek p) \())))
+
+
+
+
+^{:go/end 662} (go/method atRegisterShift "atRegisterShift reports whether we are at the start of an ARM shifted register.\nWe have consumed the register or R prefix.\n" ^bool [^{:tag (* Parser)} p]
+  ;; ARM only.
+  (when (not ^{:go/via [LinkArch Arch]} (.InFamily (.-arch p) sys/ARM sys/ARM64))
+    (return false))
+
+  ;; R1<<...
+  (when (lex/IsRegisterShift (.peek p))
+    (return true))
+
+  ;; R(1)<<...   Ugly check. TODO: Rethink how we handle ARM register shifts to be
+  ;; less special.
+  (when (or (!= (.peek p) \() (< (- (len (.-input p)) (.-inputPos p)) 4))
+    (return false))
+
+  (and (.at p \( scanner/Int \)) (lex/IsRegisterShift (.-ScanToken (aget (.-input p) (+ (.-inputPos p) 3))))))
+
+
+
+
+^{:go/end 674} (go/method atRegisterExtension "atRegisterExtension reports whether we are at the start of an ARM64 extended register.\nWe have consumed the register or R prefix.\n" ^bool [^{:tag (* Parser)} p]
+  (switch ^{:go/via [LinkArch Arch]} (.-Family (.-arch p))
+    (case [sys/ARM64 sys/Loong64]
+      ;; R1.xxx
+      (return (or (== (.peek p) \.) (== (.peek p) \[))))
+    (default
+      (return false))))
+
+
+
+
+^{:go/end 700} (go/method registerReference "registerReference parses a register given either the name, R10, or a parenthesized form, SPR(10).\n" [^{:tag (* Parser)} p ^string name] :results [int16 bool]
+  (let [(values r present) (aget (.-Register (.-arch p)) name)]
+    (when present
+      (return r true))
+
+    (when (not (aget (.-RegisterPrefix (.-arch p)) name))
+      (.errorf p "expected register; found %s" name)
+      (return 0 false))
+
+    (.get p \()
+    (let [tok (.get p scanner/Int)
+        (values num err) (strconv/ParseInt (.String tok) 10 16)]
+      (.get p \))
+      (when (!= err nil)
+        (.errorf p "parsing register list: %s" err)
+        (return 0 false))
+
+      (let [(values ^:assign r ok) ((.-RegisterNumber (.-arch p)) name (conv int16 num))]
+        (when (not ok)
+          (.errorf p "illegal register %s(%d)" name r)
+          (return 0 false))
+
+        (return r true)))))
+
+
+
+
+^{:go/end 741} (go/method register "register parses a full register reference where there is no symbol present (as in 4(R0) or R(10) but not sym(SB))\nincluding forms involving multiple registers such as R1:R2.\n" [^{:tag (* Parser)} p ^string name ^rune prefix] :results [^int16 r1 ^int16 r2 ^int8 scale ^bool ok]
+  ;; R1 or R(1) R1:R2 R1,R2 R1+R2, or R1*scale.
+  (set! (values r1 ok) (.registerReference p name))
+  (when (not ok)
+    (return))
+
+  (when (and (!= prefix 0) (!= prefix \*)) ; *AX is OK.
+    (.errorf p "prefix %c not allowed for register: %c%s" prefix prefix name))
+
+  (let [c (.peek p)]
+    (when (or (== c \:) (== c \,) (== c \+))
+      ;; 2nd register; syntax (R1+R2) etc. No two architectures agree.
+      ;; Check the architectures match the syntax.
+      (switch (.-ScanToken (.next p))
+        (case [\,]
+          (when (not ^{:go/via [LinkArch Arch]} (.InFamily (.-arch p) sys/ARM sys/ARM64))
+            (.errorf p "(register,register) not supported on this architecture")
+            (return)))
+
+        (case [\+]
+          (when (!= ^{:go/via [LinkArch Arch]} (.-Family (.-arch p)) sys/PPC64)
+            (.errorf p "(register+register) not supported on this architecture")
+            (return))))
+
+
+      (let [name (.String (.next p))]
+        (set! (values r2 ok) (.registerReference p name))
+        (when (not ok)
+          (return))))
+
+
+    (when (== (.peek p) \*)
+      ;; Scale
+      (.next p)
+      (set! scale (.parseScale p (.String (.next p)))))
+
+    (return r1 r2 scale true)))
+
+
+
+
+^{:go/end 812} (go/method registerShift "registerShift parses an ARM/ARM64 shifted register reference and returns the encoded representation.\nThere is known to be a register (current token) and a shift operator (peeked token).\n" ^int64 [^{:tag (* Parser)} p ^string name ^rune prefix]
+  (when (!= prefix 0)
+    (.errorf p "prefix %c not allowed for shifted register: $%s" prefix name))
+
+  ;; R1 op R2 or r1 op constant.
+  ;; op is:
+  ;;	"<<" == 0
+  ;;	">>" == 1
+  ;;	"->" == 2
+  ;;	"@>" == 3
+  (let [(values r1 ok) (.registerReference p name)]
+    (when (not ok)
+      (return 0))
+
+    (let [^int16 op (zero int16)]
+      (switch (.-ScanToken (.next p))
+        (case [lex/LSH]
+          (set! op 0))
+        (case [lex/RSH]
+          (set! op 1))
+        (case [lex/ARR]
+          (set! op 2))
+        (case [lex/ROT]
+          ;; following instructions on ARM64 support rotate right
+          ;; AND, ANDS, TST, BIC, BICS, EON, EOR, ORR, MVN, ORN
+          (set! op 3)))
+
+      (let [tok (.next p)
+          ^{:line 773} str (.String tok)
+          ^{:line 774 :tag int16} count (zero int16)]
+        (switch (.-ScanToken tok)
+          (case [scanner/Ident]
+            (if (== ^{:go/via [LinkArch Arch]} (.-Family (.-arch p)) sys/ARM64)
+              (.errorf p "rhs of shift must be integer: %s" str)
+
+              (let [(values r2 ok) (.registerReference p str)]
+                (when (not ok)
+                  (.errorf p "rhs of shift must be register or integer: %s" str))
+
+                (set! count (bit-or (<< (bit-and r2 15) 8) (<< 1 4))))))
+
+          (case [scanner/Int \(]
+            (.back p)
+            (let [x (conv int64 (.expr p))]
+              (if (== ^{:go/via [LinkArch Arch]} (.-Family (.-arch p)) sys/ARM64) (do
+                  (when (>= x 64)
+                    (.errorf p "register shift count too large: %s" str))
+
+                  (set! count (conv int16 (<< (bit-and x 63) 10))))
+                (do
+                  (when (>= x 32)
+                    (.errorf p "register shift count too large: %s" str))
+
+                  (set! count (conv int16 (<< (bit-and x 31) 7)))))))
+
+          (default
+            (.errorf p "unexpected %s in register shift" (.String tok))))
+
+        (if (== ^{:go/via [LinkArch Arch]} (.-Family (.-arch p)) sys/ARM64)
+          (let [(values off err) (arch/ARM64RegisterShift r1 op count)]
+            (when (!= err nil)
+              (.errorf p "%v" err))
+
+            (return off))
+
+          (return (conv int64 (bit-or (bit-and r1 15) (<< op 5) count))))))))
+
+
+
+
+
+^{:go/end 878} (go/method registerExtension "registerExtension parses a register with extension or arrangement.\nThere is known to be a register (current token) and an extension operator (peeked token).\n" [^{:tag (* Parser)} p ^{:tag (* obj/Addr)} a ^string name ^rune prefix]
+  (when (!= prefix 0)
+    (.errorf p "prefix %c not allowed for shifted register: $%s" prefix name))
+
+
+  (let [(values reg ok) (.registerReference p name)]
+    (when (not ok)
+      (.errorf p "unexpected %s in register extension" name)
+      (return))
+
+
+    (let [isIndex false
+        ^{:line 828} num (conv int16 0)
+        ^{:line 829} isAmount true ; Amount is zero by default
+        ^{:line 830} ext ""]
+      (cond (== (.peek p) lex/LSH)
+        ;; (Rn)(Rm<<2), the shifted offset register.
+        (set! ext "LSL")
+        (== (.peek p) \.) (do
+          ;; (Rn)(Rm.UXTW<1), the extended offset register.
+          ;; Rm.UXTW<<3, the extended register.
+          (.get p \.)
+          (let [tok (.next p)]
+            (set! ext (.String tok)))))
+
+      (cond (== (.peek p) lex/LSH) (do
+          ;; parses left shift amount applied after extension: <<Amount
+          (.get p lex/LSH)
+          (let [tok (.get p scanner/Int)
+              (values amount err) (strconv/ParseInt (.String tok) 10 16)]
+            (when (!= err nil)
+              (.errorf p "parsing left shift amount: %s" err))
+
+            (set! num (conv int16 amount))))
+        (== (.peek p) \[) (do
+          ;; parses an element: [Index]
+          (.get p \[)
+          (let [tok (.get p scanner/Int)
+              (values index err) (strconv/ParseInt (.String tok) 10 16)]
+            (.get p \])
+            (when (!= err nil)
+              (.errorf p "parsing element index: %s" err))
+
+            (set! isIndex true)
+            (set! isAmount false)
+            (set! num (conv int16 index)))))
+
+
+      (switch ^{:go/via [LinkArch Arch]} (.-Family (.-arch p))
+        (case [sys/ARM64]
+          (let [err (arm64/EncodeRegisterExtension a ext reg num isAmount isIndex)]
+            (when (!= err nil)
+              (.errorf p "%v" err))))
+
+        (case [sys/Loong64]
+          (let [err (arch/Loong64RegisterExtension a ext reg num isAmount isIndex)]
+            (when (!= err nil)
+              (.errorf p "%v" err))))
+
+        (default
+          (.errorf p "register extension not supported on this architecture"))))))
+
+
+
+
+
+
+^{:go/end 888} (go/method qualifySymbol "qualifySymbol returns name as a package-qualified symbol name. If\nname starts with a period, qualifySymbol prepends the package\nprefix. Otherwise it returns name unchanged.\n" ^string [^{:tag (* Parser)} p ^string name]
+  (when (strings/HasPrefix name ".")
+    (set! name (+ (.-pkgPrefix p) name)))
+
+  ^{:line 887} name)
+
+
+
+^{:go/end 928} (go/method symbolReference "symbolReference parses a symbol that is known not to be a register.\n" [^{:tag (* Parser)} p ^{:tag (* obj/Addr)} a ^string name ^rune prefix]
+  ;; Identifier is a name.
+  (switch prefix
+    (case [0]
+      (set! (.-Type a) obj/TYPE_MEM))
+    (case [\$]
+      (set! (.-Type a) obj/TYPE_ADDR))
+    (case [\*]
+      (set! (.-Type a) obj/TYPE_INDIR)))
+
+
+  ;; Parse optional <> (indicates a static symbol) or
+  ;; <ABIxxx> (selecting text symbol with specific ABI).
+  (let [doIssueError true
+      (values isStatic abi) (.symRefAttrs p name doIssueError)]
+
+    (when (or (== (.peek p) \+) (== (.peek p) \-))
+      (set! (.-Offset a) (conv int64 (.expr p))))
+
+    (if isStatic
+      (set! (.-Sym a) (.LookupStatic (.-ctxt p) name))
+
+      (set! (.-Sym a) (.LookupABI (.-ctxt p) name abi)))
+
+    (when (== (.peek p) scanner/EOF)
+      (when (and (== prefix 0) (.-isJump p))
+        ;; Symbols without prefix or suffix are jump labels.
+        (return))
+
+      (.errorf p "illegal or missing addressing mode for symbol %s" name)
+      (return))
+
+    ;; Expect (SB), (FP), (PC), or (SP)
+    (.get p \()
+    (let [reg (.String (.get p scanner/Ident))]
+      (.get p \))
+      (.setPseudoRegister p a reg isStatic prefix))))
+
+
+
+^{:go/end 956} (go/method setPseudoRegister "setPseudoRegister sets the NAME field of addr for a pseudo-register reference such as (SB).\n" [^{:tag (* Parser)} p ^{:tag (* obj/Addr)} addr ^string reg ^bool isStatic ^rune prefix]
+  (when (!= (.-Reg addr) 0)
+    (.errorf p "internal error: reg %s already set in pseudo" reg))
+
+  (switch reg
+    (case ["FP"]
+      (set! (.-Name addr) obj/NAME_PARAM))
+    (case ["PC"]
+      (when (!= prefix 0)
+        (.errorf p "illegal addressing mode for PC"))
+
+      (set! (.-Type addr) obj/TYPE_BRANCH)) ; We set the type and leave NAME untouched. See asmJump.
+    (case ["SB"]
+      (set! (.-Name addr) obj/NAME_EXTERN)
+      (when isStatic
+        (set! (.-Name addr) obj/NAME_STATIC)))
+
+    (case ["SP"]
+      (set! (.-Name addr) obj/NAME_AUTO)) ; The pseudo-stack.
+    (default
+      (.errorf p "expected pseudo-register; found %s" reg)))
+
+  (when (== prefix \$)
+    (set! (.-Type addr) obj/TYPE_ADDR)))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 1003} (go/method symRefAttrs "symRefAttrs parses an optional function symbol attribute clause for\nthe function symbol 'name', logging an error for a malformed\nattribute clause if 'issueError' is true. The return value is a\n(boolean, ABI) pair indicating that the named symbol is either\nstatic or a particular ABI specification.\n\nThe expected form of the attribute clause is:\n\nempty,           yielding (false, obj.ABI0)\n\"<>\",            yielding (true,  obj.ABI0)\n\"<ABI0>\"         yielding (false, obj.ABI0)\n\"<ABIInternal>\"  yielding (false, obj.ABIInternal)\n\nAnything else beginning with \"<\" logs an error if issueError is\ntrue, otherwise returns (false, obj.ABI0).\n" [^{:tag (* Parser)} p ^string name ^bool issueError] :results [bool obj/ABI]
+  (let [abi obj/ABI0
+      ^{:line 975} isStatic false]
+    (when (!= (.peek p) \<)
+      (return isStatic abi))
+
+    (.next p)
+    (let [tok (.peek p)]
+      (cond (== tok \>)
+        (set! isStatic true)
+        (== tok scanner/Ident)
+        (let [abistr (.String (.get p scanner/Ident))]
+          (if (not (.-allowABI p))
+            (when issueError
+              (.errorf p "ABI selector only permitted when compiling runtime, reference was to %q" name))
+
+
+            (let [(values theabi valid) (obj/ParseABI abistr)]
+              (if (not valid)
+                (when issueError
+                  (.errorf p "malformed ABI selector %q in reference to %q"
+                    ^{:line 994} abistr name))
+
+
+                (set! abi theabi))))))
+
+
+
+      (.get p \>)
+      (return isStatic abi))))
+
+
+
+
+
+
+
+^{:go/end 1047} (go/method funcAddress "funcAddress parses an external function address. This is a\nconstrained form of the operand syntax that's always SB-based,\nnon-static, and has at most a simple integer offset:\n\n\t[$|*]sym[<abi>][+Int](SB)\n" [^{:tag (* Parser)} p] :results [string obj/ABI bool]
+  (switch (.peek p)
+    (case [\$ \*]
+      ;; Skip prefix.
+      (.next p)))
+
+
+  (let [tok (.next p)
+      ^{:line 1018} name (.String tok)]
+    (when (or (!= (.-ScanToken tok) scanner/Ident) (.atStartOfRegister p name))
+      (return "" obj/ABI0 false))
+
+    (set! name (.qualifySymbol p name))
+    ;; Parse optional <> (indicates a static symbol) or
+    ;; <ABIxxx> (selecting text symbol with specific ABI).
+    (let [noErrMsg false
+        (values isStatic abi) (.symRefAttrs p name noErrMsg)]
+      (when isStatic
+        (return "" obj/ABI0 false)) ; This function rejects static symbols.
+
+      (set! tok (.next p))
+      (when (== (.-ScanToken tok) \+)
+        (when (!= (.-ScanToken (.next p)) scanner/Int)
+          (return "" obj/ABI0 false))
+
+        (set! tok (.next p)))
+
+      (when (!= (.-ScanToken tok) \()
+        (return "" obj/ABI0 false))
+
+      (when [reg (.next p)] (or (!= (.-ScanToken reg) scanner/Ident) (!= (.String reg) "SB"))
+        (return "" obj/ABI0 false))
+
+      (when (or (!= (.-ScanToken (.next p)) \)) (!= (.peek p) scanner/EOF))
+        (return "" obj/ABI0 false))
+
+      (return name abi true))))
+
+
+
+
+
+
+
+^{:go/end 1276} (go/method registerIndirect "registerIndirect parses the general form of a register indirection.\nIt can be (R1), (R2*scale), (R1)(R2*scale), (R1)(R2.SXTX<<3) or (R1)(R2<<3)\nwhere R1 may be a simple register or register pair R:R or (R, R) or (R+R).\nOr it might be a pseudo-indirection like (FP).\nWe are sitting on the opening parenthesis.\n" [^{:tag (* Parser)} p ^{:tag (* obj/Addr)} a ^rune prefix]
+  (.get p \()
+  (let [tok (.next p)
+      ^{:line 1057} name (.String tok)
+      (values r1 r2 scale ok) (.register p name 0)]
+    (when (not ok)
+      (.errorf p "indirect through non-register %s" tok))
+
+    ;; SVE extended addressing support
+    (let [^string ext (zero string)
+        ^{:line 1064 :tag int64} mod (zero int64)
+        ^{:line 1065 :tag int64} amount (zero int64)
+        ^{:line 1066} isSVEMemExt false]
+
+      (when (and (== ^{:go/via [LinkArch Arch]} (.-Family (.-arch p)) sys/ARM64) ^:go/paren (or (== (.peek p) \.) (== (.peek p) lex/LSH)))
+        ;; The index is a vector register, or contains a shift, then this is SVE extended addressing.
+        (set! isSVEMemExt true)
+        (when (== (.peek p) \.)
+          (.get p \.)
+          (let [tok2 (.next p)
+              ^{:line 1074} str (.String tok2)]
+            (if (or (== str "UXTW") (== str "SXTW"))
+              (switch str
+                (case ["UXTW"]
+                  (set! mod 1))
+                (case ["SXTW"]
+                  (set! mod 2)))
+
+              (do
+                (set! ext str)
+                (when (== (.peek p) \.)
+                  (.get p \.)
+                  (let [tok3 (.next p)
+                      ^{:line 1087} modStr (.String tok3)]
+                    (switch modStr
+                      (case ["UXTW"]
+                        (set! mod 1))
+                      (case ["SXTW"]
+                        (set! mod 2))
+                      (default
+                        (.errorf p "unknown modifier %s" modStr)))))))))
+
+
+
+
+        (when (== (.peek p) lex/LSH)
+          (.get p lex/LSH)
+          (let [tok4 (.get p scanner/Int)]
+            (set! (values amount _) (strconv/ParseInt (.String tok4) 10 16)))))
+
+
+      (.get p \))
+      (set! (.-Type a) obj/TYPE_MEM)
+
+      (when isSVEMemExt
+        (let [encodedR1 r1]
+          (when (!= ext "")
+            (if (and (>= r1 arm64/REG_Z0) (<= r1 arm64/REG_Z31))
+              (let [^int arng (zero int)]
+                (switch ext
+                  (case ["B"]
+                    (set! arng arm64/ARNG_B))
+                  (case ["H"]
+                    (set! arng arm64/ARNG_H))
+                  (case ["S"]
+                    (set! arng arm64/ARNG_S))
+                  (case ["D"]
+                    (set! arng arm64/ARNG_D))
+                  (case ["Q"]
+                    (set! arng arm64/ARNG_Q))
+                  (default
+                    (.errorf p "unknown arrangement %s" ext)))
+
+                (when (!= arng 0)
+                  (set! encodedR1 (+ arm64/REG_ZARNG (bit-and r1 31) (conv int16 (<< (bit-and arng 15) 5))))))
+
+
+              (.errorf p "arrangement not allowed for this register")))
+
+
+
+          (when (!= (.peek p) \()
+            (set! (.-Reg a) encodedR1)
+            (return))
+
+          (.get p \()
+          (let [tok5 (.next p)
+              (values r2 ok) (.registerReference p (.String tok5))]
+            (when (not ok)
+              (.errorf p "expected register"))
+
+            (let [^string ext2 (zero string)]
+              (when (== (.peek p) \.)
+                (.get p \.)
+                (let [tok6 (.next p)]
+                  (set! ext2 (.String tok6))))
+
+              (.get p \))
+
+              (let [encodedR2 r2]
+                (when (!= ext2 "")
+                  (if (and (>= r2 arm64/REG_Z0) (<= r2 arm64/REG_Z31))
+                    (let [^int arng (zero int)]
+                      (switch ext2
+                        (case ["B"]
+                          (set! arng arm64/ARNG_B))
+                        (case ["H"]
+                          (set! arng arm64/ARNG_H))
+                        (case ["S"]
+                          (set! arng arm64/ARNG_S))
+                        (case ["D"]
+                          (set! arng arm64/ARNG_D))
+                        (case ["Q"]
+                          (set! arng arm64/ARNG_Q))
+                        (default
+                          (.errorf p "unknown arrangement %s" ext2)))
+
+                      (when (!= arng 0)
+                        (set! encodedR2 (+ arm64/REG_ZARNG (bit-and r2 31) (conv int16 (<< (bit-and arng 15) 5))))))
+
+
+                    (.errorf p "arrangement not allowed for this register")))
+
+
+
+                (set! (.-Index a) encodedR2) ; Base
+                (set! (.-Reg a) encodedR1) ; Index
+                (set! (.-Offset a) 0) ; Ensure offset is 0
+
+                (let [^int16 scaleValue -32768] ; Bit 15 set
+                  (set! scaleValue bit-or (conv int16 (<< amount 12)))
+                  (set! scaleValue bit-or (conv int16 (<< mod 9)))
+                  (set! (.-Scale a) scaleValue)
+                  (return)))))))
+
+      (when (< r1 0)
+        ;; Pseudo-register reference.
+        (when (!= r2 0)
+          (.errorf p "cannot use pseudo-register in pair")
+          (return))
+
+        ;; For SB, SP, and FP, there must be a name here. 0(FP) is not legal.
+        (when (and (!= name "PC") (== (.-Name a) obj/NAME_NONE))
+          (.errorf p "cannot reference %s without a symbol" name))
+
+        (.setPseudoRegister p a name false prefix)
+        (return))
+
+      (set! (.-Reg a) r1)
+      (when (!= r2 0)
+        ;; TODO: Consistency in the encoding would be nice here.
+        (when ^{:go/via [LinkArch Arch]} (.InFamily (.-arch p) sys/ARM sys/ARM64)
+          ;; Special form
+          ;; ARM: destination register pair (R1, R2).
+          ;; ARM64: register pair (R1, R2) for LDP/STP.
+          (when (or (!= prefix 0) (!= scale 0))
+            (.errorf p "illegal address mode for register pair")
+            (return))
+
+          (set! (.-Type a) obj/TYPE_REGREG)
+          (set! (.-Offset a) (conv int64 r2))
+          ;; Nothing may follow
+          (return))
+
+        (when (== ^{:go/via [LinkArch Arch]} (.-Family (.-arch p)) sys/PPC64)
+          ;; Special form for PPC64: (R1+R2); alias for (R1)(R2).
+          (when (or (!= prefix 0) (!= scale 0))
+            (.errorf p "illegal address mode for register+register")
+            (return))
+
+          (set! (.-Type a) obj/TYPE_MEM)
+          (set! (.-Scale a) 0)
+          (set! (.-Index a) r2)
+          ;; Nothing may follow.
+          (return)))
+
+
+      (when (!= r2 0)
+        (.errorf p "indirect through register pair"))
+
+      (when (== prefix \$)
+        (set! (.-Type a) obj/TYPE_ADDR))
+
+      (when (and (== r1 arch/RPC) (!= prefix 0))
+        (.errorf p "illegal addressing mode for PC"))
+
+      (cond (and (== scale 0) (== (.peek p) \()) (do
+          ;; General form (R)(R*scale).
+          (.next p)
+          (let [tok (.next p)]
+            (cond (.atRegisterExtension p)
+              (.registerExtension p a (.String tok) prefix)
+              (.atRegisterShift p)
+              ;; (R1)(R2<<3)
+              (.registerExtension p a (.String tok) prefix) :else
+              (do
+                (set! (values r1 r2 scale ok) (.register p (.String tok) 0))
+                (when (not ok)
+                  (.errorf p "indirect through non-register %s" tok))
+
+                (when (!= r2 0)
+                  (.errorf p "unimplemented two-register form"))
+
+                (set! (.-Index a) r1)
+                (if (and (!= scale 0) (!= scale 1) ^:go/paren (or (== ^{:go/via [LinkArch Arch]} (.-Family (.-arch p)) sys/ARM64)
+                      (== ^{:go/via [LinkArch Arch]} (.-Family (.-arch p)) sys/PPC64)))
+                  ;; Support (R1)(R2) (no scaling) and (R1)(R2*1).
+                  (.errorf p "%s doesn't support scaled register format" ^{:go/via [LinkArch Arch]} (.-Name (.-arch p)))
+
+                  (set! (.-Scale a) (conv int16 scale)))))
+
+
+            (.get p \))))
+        (!= scale 0) (do
+          (when (== ^{:go/via [LinkArch Arch]} (.-Family (.-arch p)) sys/ARM64)
+            (.errorf p "arm64 doesn't support scaled register format"))
+
+          ;; First (R) was missing, all we have is (R*scale).
+          (set! (.-Reg a) 0)
+          (set! (.-Index a) r1)
+          (set! (.-Scale a) (conv int16 scale)))))))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 1303} (go/method registerList "registerList parses an ARM or ARM64 register list expression, a list of\nregisters in []. There may be comma-separated ranges or individual\nregisters, as in [R1,R3-R5] or [V1.S4, V2.S4, V3.S4, V4.S4].\nFor ARM, only R0 through R15 may appear.\nFor ARM64, V0 through V31 with arrangement may appear.\n\nFor 386/AMD64 register list specifies 4VNNIW-style multi-source operand.\nFor range of 4 elements, Intel manual uses \"+3\" notation, for example:\n\n\tVP4DPWSSDS zmm1{k1}{z}, zmm2+3, m128\n\nGiven asm line:\n\n\tVP4DPWSSDS Z5, [Z10-Z13], (AX)\n\nzmm2 is Z10, and Z13 is the only valid value for it (Z10+3).\nOnly simple ranges are accepted, like [Z0-Z3].\n\nThe opening bracket has been consumed.\n" [^{:tag (* Parser)} p ^{:tag (* obj/Addr)} a]
+  (if ^{:go/via [LinkArch Arch]} (.InFamily (.-arch p) sys/I386 sys/AMD64)
+    (.registerListX86 p a)
+
+    (.registerListARM p a)))
+
+
+
+^{:go/end 1436} (go/method registerListARM [^{:tag (* Parser)} p ^{:tag (* obj/Addr)} a]
+  ;; One range per loop.
+  (let [^int maxReg (zero int)
+      ^{:line 1308 :tag uint16} bits (zero uint16)
+      ^{:line 1309 :tag int64} arrangement (zero int64)]
+    (switch ^{:go/via [LinkArch Arch]} (.-Family (.-arch p))
+      (case [sys/ARM]
+        (set! maxReg 16))
+      (case [sys/ARM64]
+        (set! maxReg 32))
+      (default
+        (.errorf p "unexpected register list")))
+
+    (let [firstReg -1
+        ^{:line 1319} nextReg -1
+        ^{:line 1320} regCnt 0]
+      (label :ListLoop
+        (while true
+          (let [tok (.next p)]
+            (switch (.-ScanToken tok)
+              (case [\]]
+                (break :ListLoop))
+              (case [scanner/EOF]
+                (.errorf p "missing ']' in register list")
+                (return)))
+
+            (switch ^{:go/via [LinkArch Arch]} (.-Family (.-arch p))
+              (case [sys/ARM64]
+                ;; Vn.T, Zn.T, Pn.T
+                (let [name (.String tok)
+                    (values r ok) (.registerReference p name)]
+                  (when (not ok)
+                    (.errorf p "invalid register: %s" name))
+
+                  (let [^int16 registerBase (zero int16)
+                      ^{:line 1340} registerCntMask 31]
+                    (switch (aget name 0)
+                      (case [\V]
+                        (set! registerBase (aget (.-Register (.-arch p)) "V0")))
+                      (case [\Z]
+                        (set! registerBase (aget (.-Register (.-arch p)) "Z0")))
+                      (case [\P]
+                        (set! registerBase (aget (.-Register (.-arch p)) "P0"))
+                        (set! registerCntMask 15))
+                      (default
+                        (.errorf p "invalid register in register list: %s" name)))
+
+                    (let [reg (- r registerBase)]
+                      (.get p \.)
+                      (let [tok (.next p)
+                          ^{:line 1355} ext (.String tok)
+                          (values curArrangement err) (arch/ARM64RegisterArrangement reg name ext)]
+                        (when (!= err nil)
+                          (.errorf p "%v" err))
+
+                        (cond (== firstReg -1) (do
+                            ;; only record the first register and arrangement
+                            (set! firstReg (conv int reg))
+                            (set! nextReg firstReg)
+                            (set! arrangement curArrangement))
+                          (!= curArrangement arrangement)
+                          (.errorf p "inconsistent arrangement in ARM64 register list")
+                          (!= nextReg (conv int reg))
+                          (.errorf p "incontiguous register in ARM64 register list: %s" name))
+
+                        (if (and (== (.peek p) \-) (== (aget name 0) \Z)) (do
+                            ;; register range in SVE
+                            (.next p)
+                            (let [nameHi (.String (.next p))]
+                              (when (!= (aget nameHi 0) \Z)
+                                (.errorf p "invalid register in register range: %s" nameHi))
+
+                              (let [(values rHi ok2) (.registerReference p nameHi)]
+                                (when (not ok2)
+                                  (.errorf p "invalid register: %s" nameHi))
+
+                                (let [regHi (- rHi registerBase)]
+                                  (.get p \.)
+                                  (let [extHi (.String (.next p))
+                                      (values hiArrangement err) (arch/ARM64RegisterArrangement regHi nameHi extHi)]
+                                    (when (!= err nil)
+                                      (.errorf p "%v" err))
+
+                                    (when (!= hiArrangement arrangement)
+                                      (.errorf p "inconsistent arrangement in ARM64 register list range"))
+
+                                    ;; Scale stores the range size - 1.
+                                    (set! (.-Scale a) (- regHi reg)))))))
+                          (do
+                            (inc! regCnt)
+                            (set! nextReg (bit-and (+ nextReg 1) registerCntMask)))))))))
+
+              (case [sys/ARM]
+                ;; Parse the upper and lower bounds.
+                (let [lo (.registerNumber p (.String tok))
+                    ^{:line 1400} hi lo]
+                  (when (== (.peek p) \-)
+                    (.next p)
+                    (set! hi (.registerNumber p (.String (.next p)))))
+
+                  (when (< hi lo)
+                    (set! (values lo hi) (values hi lo)))
+
+                  ;; Check there are no duplicates in the register list.
+                  (for [i 0] (and (<= lo hi) (< i maxReg)) (inc! i)
+                    (when (!= (bit-and bits ^uint16 (<< 1 lo)) 0)
+                      (.errorf p "register R%d already in list" lo))
+
+                    (set! bits bit-or ^uint16 (<< 1 lo))
+                    (inc! lo))))
+
+              (default
+                (.errorf p "unexpected register list")))
+
+            (when (!= (.peek p) \])
+              (.get p \,)))))
+
+
+      (set! (.-Type a) obj/TYPE_REGLIST)
+      (switch ^{:go/via [LinkArch Arch]} (.-Family (.-arch p))
+        (case [sys/ARM]
+          (set! (.-Offset a) (conv int64 bits)))
+        (case [sys/ARM64]
+          (let [(values offset err) (arm64/RegisterListOffset firstReg regCnt arrangement (.-Scale a))]
+            (when (!= err nil)
+              (.errorf p "%v" err))
+
+            (set! (.-Offset a) offset)))
+        (default
+          (.errorf p "register list not supported on this architecture"))))))
+
+
+
+^{:go/end 1469} (go/method registerListX86 [^{:tag (* Parser)} p ^{:tag (* obj/Addr)} a]
+  ;; Accept only [RegA-RegB] syntax.
+  ;; Don't use p.get() to provide better error messages.
+
+  (let [loName (.String (.next p))
+      (values lo ok) (aget (.-Register (.-arch p)) loName)]
+    (when (not ok)
+      (if (== loName "EOF")
+        (.errorf p "register list: expected ']', found EOF")
+
+        (.errorf p "register list: bad low register in `[%s`" loName))
+
+      (return))
+
+    (when [tok (.-ScanToken (.next p))] (!= tok \-)
+      (.errorf p "register list: expected '-' after `[%s`, found %s" loName tok)
+      (return))
+
+    (let [hiName (.String (.next p))
+        (values hi ^:assign ok) (aget (.-Register (.-arch p)) hiName)]
+      (when (not ok)
+        (.errorf p "register list: bad high register in `[%s-%s`" loName hiName)
+        (return))
+
+      (when [tok (.-ScanToken (.next p))] (!= tok \])
+        (.errorf p "register list: expected ']' after `[%s-%s`, found %s" loName hiName tok))
+
+
+      (set! (.-Type a) obj/TYPE_REGLIST)
+      (set! (.-Reg a) lo)
+      (set! (.-Offset a) (x86/EncodeRegisterRange lo hi)))))
+
+
+
+^{:go/end 1491} (go/method registerNumber "registerNumber is ARM-specific. It returns the number of the specified register.\n" ^uint16 [^{:tag (* Parser)} p ^string name]
+  (when (and (== ^{:go/via [LinkArch Arch]} (.-Family (.-arch p)) sys/ARM) (== name "g"))
+    (return 10))
+
+  (when (!= (aget name 0) \R)
+    (.errorf p "expected g or R0 through R15; found %s" name)
+    (return 0))
+
+  (let [(values r ok) (.registerReference p name)]
+    (when (not ok)
+      (return 0))
+
+    (let [reg (- r (aget (.-Register (.-arch p)) "R0"))]
+      (when (< reg 0)
+        ;; Could happen for an architecture having other registers prefixed by R
+        (.errorf p "expected g or R0 through R15; found %s" name)
+        (return 0))
+
+      (conv uint16 reg))))
+
+
+;; Note: There are two changes in the expression handling here
+;; compared to the old yacc/C implementations. Neither has
+;; much practical consequence because the expressions we
+;; see in assembly code are simple, but for the record:
+;;
+;; 1) Evaluation uses uint64; the old one used int64.
+;; 2) Precedence uses Go rules not C rules.
+
+
+^{:go/end 1522} (go/method expr "expr = term | term ('+' | '-' | '|' | '^') term.\n" ^uint64 [^{:tag (* Parser)} p]
+  (let [value (.term p)]
+    (while true
+      (switch (.peek p)
+        (case [\+]
+          (.next p)
+          (set! value + (.term p)))
+        (case [\-]
+          (.next p)
+          (set! value - (.term p)))
+        (case [\|]
+          (.next p)
+          (set! value bit-or (.term p)))
+        (case [\^]
+          (.next p)
+          (set! value bit-xor (.term p)))
+        (default
+          (return value))))))
+
+
+
+
+
+^{:go/end 1543} (go/method floatExpr "floatExpr = fconst | '-' floatExpr | '+' floatExpr | '(' floatExpr ')'\n" ^float64 [^{:tag (* Parser)} p]
+  ^{:go/breaks [4]} (let [tok (.next p)]
+    (switch (.-ScanToken tok)
+      (case [\(]
+        (let [v (.floatExpr p)]
+          (when (!= (.-ScanToken (.next p)) \))
+            (.errorf p "missing closing paren"))
+
+          (return v)))
+      (case [\+]
+        (return (+ (.floatExpr p))))
+      (case [\-]
+        (return (- (.floatExpr p))))
+      (case [scanner/Float]
+        (return (.atof p (.String tok)))))
+
+    (.errorf p "unexpected %s evaluating float expression" tok)
+    0))
+
+
+
+^{:go/end 1599} (go/method term "term = factor | factor ('*' | '/' | '%' | '>>' | '<<' | '&') factor\n" ^uint64 [^{:tag (* Parser)} p]
+  (let [value (.factor p)]
+    (while true
+      (switch (.peek p)
+        (case [\*]
+          (.next p)
+          (set! value * (.factor p)))
+        (case [\/]
+          (.next p)
+          (when (< (conv int64 value) 0)
+            (.errorf p "divide of value with high bit set"))
+
+          (let [divisor (.factor p)]
+            (if (== divisor 0)
+              (.errorf p "division by zero")
+
+              (set! value / divisor))))
+
+        (case [\%]
+          (.next p)
+          (let [divisor (.factor p)]
+            (when (< (conv int64 value) 0)
+              (.errorf p "modulo of value with high bit set"))
+
+            (if (== divisor 0)
+              (.errorf p "modulo by zero")
+
+              (set! value % divisor))))
+
+        (case [lex/LSH]
+          (.next p)
+          (let [shift (.factor p)]
+            (when (< (conv int64 shift) 0)
+              (.errorf p "negative left shift count"))
+
+            (return (<< value shift))))
+        (case [lex/RSH]
+          (.next p)
+          (let [shift (.term p)]
+            (when (< (conv int64 shift) 0)
+              (.errorf p "negative right shift count"))
+
+            (when (< (conv int64 value) 0)
+              (.errorf p "right shift of value with high bit set"))
+
+            (set! value >> shift)))
+        (case [\&]
+          (.next p)
+          (set! value bit-and (.factor p)))
+        (default
+          (return value))))))
+
+
+
+
+
+^{:go/end 1632} (go/method factor "factor = const | '+' factor | '-' factor | '~' factor | '(' expr ')'\n" ^uint64 [^{:tag (* Parser)} p]
+  ^{:go/breaks [4]} (let [tok (.next p)]
+    (switch (.-ScanToken tok)
+      (case [scanner/Int]
+        (return (.atoi p (.String tok))))
+      (case [scanner/Char]
+        (let [(values str err) (strconv/Unquote (.String tok))]
+          (when (!= err nil)
+            (.errorf p "%s" err))
+
+          (let [(values r w) (utf8/DecodeRuneInString str)]
+            (when (and (== w 1) (== r utf8/RuneError))
+              (.errorf p "illegal UTF-8 encoding for character constant"))
+
+            (return (conv uint64 r)))))
+      (case [\+]
+        (return (+ (.factor p))))
+      (case [\-]
+        (return (- (.factor p))))
+      (case [\~]
+        (return (bit-not (.factor p))))
+      (case [\(]
+        (let [v (.expr p)]
+          (when (!= (.-ScanToken (.next p)) \))
+            (.errorf p "missing closing paren"))
+
+          (return v))))
+
+    (.errorf p "unexpected %s evaluating expression" tok)
+    0))
+
+
+
+^{:go/end 1644} (go/method positiveAtoi "positiveAtoi returns an int64 that must be >= 0.\n" ^int64 [^{:tag (* Parser)} p ^string str]
+  (let [(values value err) (strconv/ParseInt str 0 64)]
+    (when (!= err nil)
+      (.errorf p "%s" err))
+
+    (when (< value 0)
+      (.errorf p "%s overflows int64" str))
+
+    ^{:line 1643} value))
+
+
+^{:go/end 1652} (go/method atoi ^uint64 [^{:tag (* Parser)} p ^string str]
+  (let [(values value err) (strconv/ParseUint str 0 64)]
+    (when (!= err nil)
+      (.errorf p "%s" err))
+
+    ^{:line 1651} value))
+
+
+^{:go/end 1660} (go/method atof ^float64 [^{:tag (* Parser)} p ^string str]
+  (let [(values value err) (strconv/ParseFloat str 64)]
+    (when (!= err nil)
+      (.errorf p "%s" err))
+
+    ^{:line 1659} value))
+
+
+
+(go/var ^{:doc "EOF represents the end of input.\n"} EOF (lex/Make scanner/EOF "EOF"))
+
+^{:go/end 1672} (go/method next ^lex/Token [^{:tag (* Parser)} p]
+  (when (not (.more p))
+    (return EOF))
+
+  (let [tok (aget (.-input p) (.-inputPos p))]
+    (inc! (.-inputPos p))
+    ^{:line 1671} tok))
+
+
+^{:go/end 1680} (go/method back [^{:tag (* Parser)} p]
+  (if (== (.-inputPos p) 0)
+    (.errorf p "internal error: backing up before BOL")
+
+    (dec! (.-inputPos p))))
+
+
+
+^{:go/end 1687} (go/method peek ^lex/ScanToken [^{:tag (* Parser)} p]
+  (when (.more p)
+    (return (.-ScanToken (aget (.-input p) (.-inputPos p)))))
+
+  ^{:line 1686} scanner/EOF)
+
+
+^{:go/end 1691} (go/method more ^bool [^{:tag (* Parser)} p]
+  (< (.-inputPos p) (len (.-input p))))
+
+
+
+^{:go/end 1697} (go/method get "get verifies that the next item has the expected type and returns it.\n" ^lex/Token [^{:tag (* Parser)} p ^lex/ScanToken expected]
+  (.expect p expected (.String expected))
+  (.next p))
+
+
+
+^{:go/end 1702} (go/method expectOperandEnd "expectOperandEnd verifies that the parsing state is properly at the end of an operand.\n" [^{:tag (* Parser)} p]
+  (.expect p scanner/EOF "end of operand"))
+
+
+
+^{:go/end 1709} (go/method expect "expect verifies that the next item has the expected type. It does not consume it.\n" [^{:tag (* Parser)} p ^lex/ScanToken expectedToken ^string expectedMessage]
+  (when (!= (.peek p) expectedToken)
+    (.errorf p "expected %s, found %s" expectedMessage (.next p))))
+
+
+
+
+^{:go/breaks [[5 1718]] :go/end 1719} (go/method have "have reports whether the remaining tokens (including the current one) contain the specified token.\n" ^bool [^{:tag (* Parser)} p ^lex/ScanToken token]
+  (for [i (.-inputPos p)] (< i (len (.-input p))) (inc! i)
+    (when (== (.-ScanToken (aget (.-input p) i)) token)
+      (return true)))
+
+
+  false)
+
+
+
+^{:go/breaks [[6 1731]] :go/end 1732} (go/method at "at reports whether the next tokens are as requested.\n" ^bool [^{:tag (* Parser)} p & ^{:tag (slice lex/ScanToken)} next]
+  (when (< (- (len (.-input p)) (.-inputPos p)) (len next))
+    (return false))
+
+  (range [i r next]
+    (when (!= (.-ScanToken (aget (.-input p) (+ (.-inputPos p) i))) r)
+      (return false)))
+
+
+  true)

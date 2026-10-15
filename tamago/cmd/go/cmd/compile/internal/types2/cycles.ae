@@ -1,0 +1,138 @@
+;; Copyright 2025 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.cmd.compile.internal.types2) (go/file "cycles.go" :imports [
+
+    ^{:line 7} [syntax "cmd/compile/internal/syntax"]])
+
+
+
+^{:go/end 18} (go/method directCycles "directCycles searches for direct cycles among package level type declarations.\nSee directCycle for details.\n" [^{:tag (* Checker)} check]
+  (let [pathIdx (make (map (* TypeName) int))]
+    (range [_ obj (.-objList check)]
+      (when [(values tname ok) (assert (* TypeName) obj)] ok
+        (.directCycle check tname pathIdx)))))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 104} (go/method directCycle "directCycle checks if the declaration of the type given by tname contains a direct cycle.\nA direct cycle exists if the path from tname's declaration's RHS leads from type name to\ntype name and eventually ends up on that path again, via regular or alias declarations;\nin other words if there are no type literals (or basic types) on the path, and the path\ndoesn't end in an undeclared object.\nIf a cycle is detected, a cycle error is reported and the type at the start of the cycle\nis marked as invalid.\n\nThe pathIdx map tracks which type names have been processed. An entry can be\nin 1 of 3 states as used in a typical 3-state (white/grey/black) graph marking\nalgorithm for cycle detection:\n\n  - entry not found: tname has not been seen before (white)\n  - value is >= 0  : tname has been seen but is not done (grey); the value is the path index\n  - value is <  0  : tname has been seen and is done (black)\n\nWhen directCycle returns, the pathIdx entries for all type names on the path\nthat starts at tname are marked black, regardless of whether there was a cycle.\nThis ensures that a type name is traversed only once.\n" [^{:tag (* Checker)} check ^{:tag (* TypeName)} tname ^{:tag (map (* TypeName) int)} pathIdx]
+  (when (and debug (.-Trace (.-conf check)))
+    (.trace check ^{:go/via [object]} (.Pos tname) "-- check direct cycle for %s" tname))
+
+
+  (let [^{:tag (slice (* TypeName))} path (zero (slice (* TypeName)))]
+    (while true
+      (let [(values start found) (aget pathIdx tname)]
+        (when (< start 0)
+          ;; tname is marked black - do not traverse it again.
+          ;; (start can only be < 0 if it was found in the first place)
+          (break))
+
+
+        (when found
+          ;; tname is marked grey - we have a cycle on the path beginning at start.
+          ;; Mark tname as invalid.
+          ^{:go/via [object]} (.setType tname (aget Typ Invalid))
+
+          ;; collect type names on cycle
+          (let [^{:tag (slice Object)} cycle (zero (slice Object))]
+            (range [_ tname (subslice path start)]
+              (set! cycle (append cycle tname)))
+
+
+            (.cycleError check cycle (firstInSrc cycle))
+            (break)))
+
+
+        ;; tname is marked white - mark it grey and add it to the path.
+        (aset pathIdx tname (len path))
+        (set! path (append path tname))
+
+        ;; For direct cycle detection, we don't care about whether we have an alias or not.
+        ;; If the associated type is not a name, we're at the end of the path and we're done.
+        (let [(values rhs ok) (assert (* syntax/Name) (.-Type (.-tdecl (aget (.-objMap check) tname))))]
+          (when (not ok)
+            (break))
+
+
+          ;; Determine the RHS type. If it is not found in the package scope, we either
+          ;; have an error (which will be reported later), or the type exists elsewhere
+          ;; (universe scope, file scope via dot-import) and a cycle is not possible in
+          ;; the first place. If it is not a type name, we cannot have a direct cycle
+          ;; either. In all these cases we can stop.
+          (let [(values tname1 ^:assign ok) (assert (* TypeName) (.Lookup (.-scope (.-pkg check)) (.-Value rhs)))]
+            (when (not ok)
+              (break))
+
+
+            ;; Otherwise, continue with the RHS.
+            (set! tname tname1)))))
+
+
+    ;; Mark all traversed type names black.
+    ;; (ensure that pathIdx doesn't contain any grey entries upon returning)
+    (range [_ tname path]
+      (aset pathIdx tname -1))
+
+
+    (when debug
+      (range [_ i pathIdx]
+        (go/call assert (< i 0))))))
+
+
+
+
+
+
+^{:go/end 139} (go/method isComplete "isComplete returns whether a type is complete (i.e. up to having an underlying type).\nIncomplete types will panic if [Type.Underlying] is called on them.\n" ^bool [^{:tag (* Checker)} check ^Type t]
+  (let [
+      ^{:line 110 :tag Object} obj (zero Object)
+      ^{:line 111 :tag Type} rhs (zero Type)]
+
+    (type-switch [t t]
+      (case [(* Alias)]
+        (set! obj (.-obj t))
+        (set! rhs (.-fromRHS t)))
+      (case [(* Named)]
+        (set! obj (.-obj t))
+        (set! rhs (.-fromRHS t)))
+      (default
+        (return true)))
+
+
+    (when [(values i found) (aget (.-objPathIdx check) obj)] found
+      (let [cycle (subslice (.-objPath check) i)]
+        (.cycleError check cycle (firstInSrc cycle))
+        (return false)))
+
+
+    ;; We must walk through names because we permit certain cycles of names.
+    ;; Consider:
+    ;;
+    ;;   type A B
+    ;;   type B [unsafe.Sizeof(A{})]int
+    ;;
+    ;; starting at B. At the site of A{}, A has no underlying type, and so a
+    ;; cycle must be reported.
+    (.isComplete check rhs)))

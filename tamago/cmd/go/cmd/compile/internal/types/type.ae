@@ -1,0 +1,1991 @@
+;; Copyright 2017 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.cmd.compile.internal.types) (go/file "type.go" :imports [
+
+
+    ^{:line 8} [base "cmd/compile/internal/base"]
+    ^{:line 9} [objabi "cmd/internal/objabi"]
+    ^{:line 10} [src "cmd/internal/src"]
+    ^{:line 11} [fmt "fmt"]
+    ^{:line 12} [constant "go/constant"]
+    ^{:line 13} [errors "internal/types/errors"]
+    ^{:line 14} [sync "sync"]])
+
+
+
+
+
+(go/type Object "Object represents an ir.Node, but without needing to import cmd/compile/internal/ir,\nwhich would cause an import cycle. The uses in other packages must type assert\nvalues of type Object to ir.Node or a more specific type.\n" (interface
+    (Pos ^src/XPos [])
+    (Sym ^{:tag (* Sym)} [])
+    (Type ^{:tag (* Type)} [])))
+
+
+(go/directive "//go:generate stringer -type Kind -trimprefix T type.go")
+
+
+(go/type Kind "Kind describes a kind of type.\n" uint8)
+
+(go/const
+  ^{:line 32} [^{:tag Kind :val 0} Txxx iota]
+
+  ^{:line 34} [^{:val 1} TINT8]
+  ^{:line 35} [^{:val 2} TUINT8]
+  ^{:line 36} [^{:val 3} TINT16]
+  ^{:line 37} [^{:val 4} TUINT16]
+  ^{:line 38} [^{:val 5} TINT32]
+  ^{:line 39} [^{:val 6} TUINT32]
+  ^{:line 40} [^{:val 7} TINT64]
+  ^{:line 41} [^{:val 8} TUINT64]
+  ^{:line 42} [^{:val 9} TINT]
+  ^{:line 43} [^{:val 10} TUINT]
+  ^{:line 44} [^{:val 11} TUINTPTR]
+
+  ^{:line 46} [^{:val 12} TCOMPLEX64]
+  ^{:line 47} [^{:val 13} TCOMPLEX128]
+
+  ^{:line 49} [^{:val 14} TFLOAT32]
+  ^{:line 50} [^{:val 15} TFLOAT64]
+
+  ^{:line 52} [^{:val 16} TBOOL]
+
+  ^{:line 54} [^{:val 17} TPTR]
+  ^{:line 55} [^{:val 18} TFUNC]
+  ^{:line 56} [^{:val 19} TSLICE]
+  ^{:line 57} [^{:val 20} TARRAY]
+  ^{:line 58} [^{:val 21} TSTRUCT]
+  ^{:line 59} [^{:val 22} TCHAN]
+  ^{:line 60} [^{:val 23} TMAP]
+  ^{:line 61} [^{:val 24} TINTER]
+  ^{:line 62} [^{:val 25} TFORW]
+  ^{:line 63} [^{:val 26} TANY]
+  ^{:line 64} [^{:val 27} TSTRING]
+  ^{:line 65} [^{:val 28} TUNSAFEPTR]
+
+
+  ^{:line 68} [^{:val 29 :doc "pseudo-types for literals\n"} TIDEAL] ; untyped numeric constants
+  ^{:line 69} [^{:val 30} TNIL]
+  ^{:line 70} [^{:val 31} TBLANK]
+
+
+  ^{:line 73} [^{:val 32 :doc "pseudo-types used temporarily only during frame layout (CalcSize())\n"} TFUNCARGS]
+  ^{:line 74} [^{:val 33} TCHANARGS]
+
+
+  ^{:line 77} [^{:val 34 :doc "SSA backend types\n"} TSSA] ; internal types used by SSA backend (flags, memory, etc.)
+  ^{:line 78} [^{:val 35} TTUPLE] ; a pair of types, used by SSA backend
+  ^{:line 79} [^{:val 36} TRESULTS] ; multiple types; the result of calling a function or method, with a memory at the end.
+
+  ^{:line 81} [^{:val 37} NTYPE])
+
+
+
+(go/type ChanDir "ChanDir is whether a channel can send, receive, or both.\n" uint8)
+
+^{:go/end 87} (go/method CanRecv ^bool [^ChanDir c] (!= (bit-and c Crecv) 0))
+^{:go/end 88} (go/method CanSend ^bool [^ChanDir c] (!= (bit-and c Csend) 0))
+
+(go/const
+
+
+  ^{:line 93} [^{:tag ChanDir :val 1 :doc "types of channel\nmust match ../../../../reflect/type.go:/ChanDir\n"} Crecv (<< 1 0)]
+  ^{:line 94} [^{:tag ChanDir :val 2} Csend (<< 1 1)]
+  ^{:line 95} [^{:tag ChanDir :val 3} Cboth (bit-or Crecv Csend)])
+
+
+
+
+
+
+
+
+
+
+(go/var ^{:tag (array NTYPE (* Type)) :doc "Types stores pointers to predeclared named types.\n\nIt also stores pointers to several special types:\n  - Types[TANY] is the placeholder \"any\" type recognized by SubstArgTypes.\n  - Types[TBLANK] represents the blank variable's type.\n  - Types[TINTER] is the canonical \"interface{}\" type.\n  - Types[TNIL] represents the predeclared \"nil\" value's type.\n  - Types[TUNSAFEPTR] is package unsafe's Pointer type.\n"} Types)
+
+(go/var
+
+
+
+  ^{:line 112} [^{:tag (* Type) :doc "Predeclared alias types. These are actually created as distinct\ndefined types for better error messages, but are then specially\ntreated as identical to their respective underlying types.\n"} AnyType]
+  ^{:line 113} [^{:tag (* Type)} ByteType]
+  ^{:line 114} [^{:tag (* Type)} RuneType]
+
+
+  ^{:line 117} [^{:tag (* Type) :doc "Predeclared error interface type.\n"} ErrorType]
+
+  ^{:line 119} [^{:tag (* Type) :doc "Predeclared comparable interface type.\n"} ComparableType]
+
+
+  ^{:line 122} [^{:doc "Types to represent untyped string and boolean constants.\n"} UntypedString (newType TSTRING)]
+  ^{:line 123} [UntypedBool (newType TBOOL)]
+
+
+  ^{:line 126} [^{:doc "Types to represent untyped numeric constants.\n"} UntypedInt (newType TIDEAL)]
+  ^{:line 127} [UntypedRune (newType TIDEAL)]
+  ^{:line 128} [UntypedFloat (newType TIDEAL)]
+  ^{:line 129} [UntypedComplex (newType TIDEAL)])
+
+
+
+
+(go/var ^{:doc "UntypedTypes maps from a constant.Kind to its untyped Type\nrepresentation.\n"} UntypedTypes (lit (array ... (* Type))
+    ^{:line 135} [constant/Bool UntypedBool]
+    ^{:line 136} [constant/String UntypedString]
+    ^{:line 137} [constant/Int UntypedInt]
+    ^{:line 138} [constant/Float UntypedFloat]
+    ^{:line 139} [constant/Complex UntypedComplex]))
+
+
+
+(go/var ^{:doc "DefaultKinds maps from a constant.Kind to its default Kind.\n"} DefaultKinds (lit (array ... Kind)
+    ^{:line 144} [constant/Bool TBOOL]
+    ^{:line 145} [constant/String TSTRING]
+    ^{:line 146} [constant/Int TINT]
+    ^{:line 147} [constant/Float TFLOAT64]
+    ^{:line 148} [constant/Complex TCOMPLEX128]))
+
+
+
+
+
+
+
+
+
+
+
+(go/type Type "A Type represents a Go type.\n\nThere may be multiple unnamed types with identical structure. However, there must\nbe a unique Type object for each unique named (defined) type. After noding, a\npackage-level type can be looked up by building its unique symbol sym (sym =\npackage.Lookup(name)) and checking sym.Def. If sym.Def is non-nil, the type\nalready exists at package scope and is available at sym.Def.(*ir.Name).Type().\nLocal types (which may have the same name as a package-level type) are\ndistinguished by their vargen, which is embedded in their symbol name.\n" (struct
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    ^{:line 177 :tag any :doc "extra contains extra etype-specific fields.\nAs an optimization, those etype-specific structs which contain exactly\none pointer-shaped field are stored as values rather than pointers when possible.\n\nTMAP: *Map\nTFORW: *Forward\nTFUNC: *Func\nTSTRUCT: *Struct\nTINTER: *Interface\nTFUNCARGS: FuncArgs\nTCHANARGS: ChanArgs\nTCHAN: *Chan\nTPTR: Ptr\nTARRAY: *Array\nTSLICE: Slice\nTSSA: string\n"} extra
+
+
+    ^{:line 180 :tag int64 :doc "width is the width of this Type in bytes.\n"} width ; valid if Align > 0
+
+
+    ^{:line 183 :tag fields :doc "list of base methods (excluding embedding)\n"} methods
+
+    ^{:line 185 :tag fields :doc "list of all methods (including embedding)\n"} allMethods
+
+
+    ^{:line 188 :tag Object :doc "canonical OTYPE node for a named type (should be an ir.Name node with same sym)\n"} obj
+
+    ^{:line 190 :tag (* Type) :doc "the underlying type (type literal or predeclared type) for a defined type\n"} underlying
+
+
+    ^{:line 193 :tag (struct ^{:tag (* Type)} ptr ^{:tag (* Type)} slice) :doc "Cache of composite types, with this type being the element type.\n"} cache
+    ;; *T, or nil
+    ;; []T, or nil
+
+
+    ^{:line 198 :tag Kind} kind ; kind of type
+    ^{:line 199 :tag uint8} align ; the required alignment of this type, in bytes (0 means Width and Align have not yet been computed)
+
+    ^{:line 201 :tag uint8} intRegs ^uint8 floatRegs ; registers needed for ABIInternal
+
+    ^{:line 203 :tag bitset8} flags
+    ^{:line 204 :tag AlgKind} alg ; valid if Align > 0
+    ^{:line 205 :tag bool} isSIMDTag ^bool isSIMD ; tag is the marker type, isSIMD means has marker type
+
+
+
+
+    ^{:line 210 :tag int64 :doc "size of prefix of object that contains all pointers. valid if Align > 0.\nNote that for pointers, this is always PtrSize even if the element type\nis NotInHeap. See size.go:PtrDataSize for details.\n"} ptrBytes))
+
+
+
+
+
+
+
+
+^{:go/end 222} (go/method Registers "Registers returns the number of integer and floating-point\nregisters required to represent a parameter of this type under the\nABIInternal calling conventions.\n\nIf t must be passed by memory, Registers returns (math.MaxUint8,\nmath.MaxUint8).\n" [^{:tag (* Type)} t] :results [uint8 uint8]
+  (CalcSize t)
+  (return (.-intRegs t) (.-floatRegs t)))
+
+
+^{:go/end 224} (go/method CanBeAnSSAAux [(* Type)])
+
+(go/const
+  ^{:line 227} [^{:val 1} typeNotInHeap (<< 1 iota)] ; type cannot be heap allocated
+  ^{:line 228} [^{:val 2} typeNoalg] ; suppress hash and eq algorithm generation
+  ^{:line 229} [^{:val 4} typeDeferwidth] ; width computation has been deferred and type is on deferredTypeStack
+  ^{:line 230} [^{:val 8} typeRecur]
+  ^{:line 231} [^{:val 16} typeIsShape] ; represents a set of closely related types, for generics
+  ^{:line 232} [^{:val 32} typeHasShape] ; there is a shape somewhere in the type
+
+
+  ^{:line 235} [^{:val 64 :doc "typeIsFullyInstantiated reports whether a type is fully instantiated generic type; i.e.\nan instantiated generic type where all type arguments are non-generic or fully instantiated generic types.\n"} typeIsFullyInstantiated])
+
+
+^{:go/end 238} (go/method NotInHeap ^bool [^{:tag (* Type)} t] (!= (bit-and (.-flags t) typeNotInHeap) 0))
+^{:go/end 239} (go/method Noalg ^bool [^{:tag (* Type)} t] (!= (bit-and (.-flags t) typeNoalg) 0))
+^{:go/end 240} (go/method Deferwidth ^bool [^{:tag (* Type)} t] (!= (bit-and (.-flags t) typeDeferwidth) 0))
+^{:go/end 241} (go/method Recur ^bool [^{:tag (* Type)} t] (!= (bit-and (.-flags t) typeRecur) 0))
+^{:go/end 242} (go/method IsShape ^bool [^{:tag (* Type)} t] (!= (bit-and (.-flags t) typeIsShape) 0))
+^{:go/end 243} (go/method HasShape ^bool [^{:tag (* Type)} t] (!= (bit-and (.-flags t) typeHasShape) 0))
+^{:go/end 244} (go/method IsFullyInstantiated ^bool [^{:tag (* Type)} t] (!= (bit-and (.-flags t) typeIsFullyInstantiated) 0))
+
+^{:go/end 246} (go/method SetNotInHeap [^{:tag (* Type)} t ^bool b] (.set (.-flags t) typeNotInHeap b))
+^{:go/end 247} (go/method SetNoalg [^{:tag (* Type)} t ^bool b] (.set (.-flags t) typeNoalg b))
+^{:go/end 248} (go/method SetDeferwidth [^{:tag (* Type)} t ^bool b] (.set (.-flags t) typeDeferwidth b))
+^{:go/end 249} (go/method SetRecur [^{:tag (* Type)} t ^bool b] (.set (.-flags t) typeRecur b))
+^{:go/end 250} (go/method SetIsFullyInstantiated [^{:tag (* Type)} t ^bool b] (.set (.-flags t) typeIsFullyInstantiated b))
+
+
+^{:go/end 253} (go/method SetIsShape "Should always do SetHasShape(true) when doing SetIsShape(true).\n" [^{:tag (* Type)} t ^bool b] (.set (.-flags t) typeIsShape b))
+^{:go/end 254} (go/method SetHasShape [^{:tag (* Type)} t ^bool b] (.set (.-flags t) typeHasShape b))
+
+
+^{:go/end 257} (go/method Kind "Kind returns the kind of type t.\n" ^Kind [^{:tag (* Type)} t] (.-kind t))
+
+
+^{:go/breaks [[5 264]] :go/end 265} (go/method Sym "Sym returns the name of type t.\n" ^{:tag (* Sym)} [^{:tag (* Type)} t]
+  (when (!= (.-obj t) nil)
+    (return (.Sym (.-obj t))))
+
+  nil)
+
+
+
+^{:go/end 268} (go/method Underlying "Underlying returns the underlying type of type t.\n" ^{:tag (* Type)} [^{:tag (* Type)} t] (.-underlying t))
+
+
+
+^{:go/end 277} (go/method Pos "Pos returns a position associated with t, if any.\nThis should only be used for diagnostics.\n" ^src/XPos [^{:tag (* Type)} t]
+  (when (!= (.-obj t) nil)
+    (return (.Pos (.-obj t))))
+
+  ^{:line 276} src/NoXPos)
+
+
+
+(go/type Map "Map contains Type fields specific to maps.\n" (struct
+    ^{:line 281 :tag (* Type)} Key ; Key type
+    ^{:line 282 :tag (* Type)} Elem ; Val (elem) type
+
+    ^{:line 284 :tag (* Type)} Group)) ; internal struct type representing a slot group
+
+
+
+^{:go/end 291} (go/method MapType "MapType returns t's extra map-specific fields.\n" ^{:tag (* Map)} [^{:tag (* Type)} t]
+  (.wantEtype t TMAP)
+  (assert (* Map) (.-extra t)))
+
+
+
+(go/type Forward "Forward contains Type fields specific to forward types.\n" (struct
+    ^{:line 295 :tag (slice (* Type))} Copyto ; where to copy the eventual value to
+    ^{:line 296 :tag src/XPos} Embedlineno)) ; first use of this type as an embedded type
+
+
+
+^{:go/end 303} (go/method forwardType "forwardType returns t's extra forward-type-specific fields.\n" ^{:tag (* Forward)} [^{:tag (* Type)} t]
+  (.wantEtype t TFORW)
+  (assert (* Forward) (.-extra t)))
+
+
+
+(go/type Func "Func contains Type fields specific to func types.\n" (struct
+    ^{:line 307 :tag (slice (* Field))} allParams ; slice of all parameters, in receiver/params/results order
+
+    ^{:line 309 :tag int} startParams ; index of the start of the (regular) parameters section
+    ^{:line 310 :tag int} startResults ; index of the start of the results section
+
+    ^{:line 312 :tag (* Type)} resultsTuple ; struct-like type representing multi-value results
+
+
+
+
+    ^{:line 317 :tag int64 :doc "Argwid is the total width of the function receiver, params, and results.\nIt gets calculated via a temporary TFUNCARGS type.\nNote that TFUNC's Width is Widthptr.\n"} Argwid))
+
+
+^{:go/end 320} (go/method recvs ^{:tag (slice (* Field))} [^{:tag (* Func)} ft] (subslice (.-allParams ft) _ (.-startParams ft)))
+^{:go/end 321} (go/method params ^{:tag (slice (* Field))} [^{:tag (* Func)} ft] (subslice (.-allParams ft) (.-startParams ft) (.-startResults ft)))
+^{:go/end 322} (go/method results ^{:tag (slice (* Field))} [^{:tag (* Func)} ft] (subslice (.-allParams ft) (.-startResults ft)))
+^{:go/end 323} (go/method recvParams ^{:tag (slice (* Field))} [^{:tag (* Func)} ft] (subslice (.-allParams ft) _ (.-startResults ft)))
+^{:go/end 324} (go/method paramsResults ^{:tag (slice (* Field))} [^{:tag (* Func)} ft] (subslice (.-allParams ft) (.-startParams ft)))
+
+
+^{:go/end 330} (go/method funcType "funcType returns t's extra func-specific fields.\n" ^{:tag (* Func)} [^{:tag (* Type)} t]
+  (.wantEtype t TFUNC)
+  (assert (* Func) (.-extra t)))
+
+
+
+(go/type Struct "Struct contains Type fields specific to struct types.\n" (struct
+    ^{:line 334 :tag fields} fields
+
+
+
+    ^{:line 338 :tag (* Type) :doc "Maps have three associated internal structs (see struct MapType).\nMap links such structs back to their map type.\n"} Map
+
+    ^{:line 340 :tag bool} ParamTuple)) ; whether this struct is actually a tuple of signature parameters
+
+
+
+^{:go/end 347} (go/method StructType "StructType returns t's extra struct-specific fields.\n" ^{:tag (* Struct)} [^{:tag (* Type)} t]
+  (.wantEtype t TSTRUCT)
+  (assert (* Struct) (.-extra t)))
+
+
+
+(go/type Interface "Interface contains Type fields specific to interface types.\n" (struct))
+
+
+
+(go/type Ptr "Ptr contains Type fields specific to pointer types.\n" (struct
+    ^{:line 355 :tag (* Type)} Elem)) ; element type
+
+
+
+(go/type ChanArgs "ChanArgs contains Type fields specific to TCHANARGS types.\n" (struct
+    ^{:line 360 :tag (* Type)} T)) ; reference to a chan type whose elements need a width check
+
+
+
+(go/type FuncArgs "FuncArgs contains Type fields specific to TFUNCARGS types.\n" (struct
+    ^{:line 365 :tag (* Type)} T)) ; reference to a func type whose elements need a width check
+
+
+
+(go/type Chan "Chan contains Type fields specific to channel types.\n" (struct
+    ^{:line 370 :tag (* Type)} Elem ; element type
+    ^{:line 371 :tag ChanDir} Dir)) ; channel direction
+
+
+
+^{:go/end 378} (go/method chanType "chanType returns t's extra channel-specific fields.\n" ^{:tag (* Chan)} [^{:tag (* Type)} t]
+  (.wantEtype t TCHAN)
+  (assert (* Chan) (.-extra t)))
+
+
+(go/type Tuple (struct
+    ^{:line 381 :tag (* Type)} first
+    ^{:line 382 :tag (* Type)} second))
+;; Any tuple with a memory type must put that memory type second.
+
+
+
+(go/type Results "Results are the output from calls that will be late-expanded.\n" (struct
+    ^{:line 388 :tag (slice (* Type))} Types)) ; Last element is memory output from call.
+
+
+
+(go/type Array "Array contains Type fields specific to array types.\n" (struct
+    ^{:line 393 :tag (* Type)} Elem ; element type
+    ^{:line 394 :tag int64} Bound)) ; number of elements; <0 if unknown yet
+
+
+
+(go/type Slice "Slice contains Type fields specific to slice types.\n" (struct
+    ^{:line 399 :tag (* Type)} Elem)) ; element type
+
+
+
+
+
+
+
+(go/type Field "A Field is a (Sym, Type) pairing along with some other information, and,\ndepending on the context, is used to represent:\n  - a field in a struct\n  - a method in an interface or associated with a named type\n  - a function parameter\n" (struct
+    ^{:line 408 :tag bitset8} flags
+
+    ^{:line 410 :tag uint8} Embedded ; embedded field
+
+    ^{:line 412 :tag src/XPos} Pos
+
+
+
+    ^{:line 416 :tag (* Sym) :doc "Name of field/method/parameter. Can be nil for interface fields embedded\nin interfaces and unnamed parameters.\n"} Sym
+    ^{:line 417 :tag (* Type)} Type ; field type
+    ^{:line 418 :tag string} Note ; literal string annotation
+
+
+
+
+    ^{:line 423 :tag Object :doc "For fields that represent function parameters, Nname points to the\nassociated ONAME Node. For fields that represent methods, Nname points to\nthe function name node.\n"} Nname
+
+
+
+    ^{:line 427 :tag int64 :doc "Offset in bytes of this field or method within its enclosing struct\nor interface Type. For parameters, this is BADWIDTH.\n"} Offset))
+
+
+(go/const
+  ^{:line 431} [^{:val 1} fieldIsDDD (<< 1 iota)] ; field is ... argument
+  ^{:line 432} [^{:val 2} fieldNointerface])
+
+
+^{:go/end 435} (go/method IsDDD ^bool [^{:tag (* Field)} f] (!= (bit-and (.-flags f) fieldIsDDD) 0))
+^{:go/end 436} (go/method Nointerface ^bool [^{:tag (* Field)} f] (!= (bit-and (.-flags f) fieldNointerface) 0))
+
+^{:go/end 438} (go/method SetIsDDD [^{:tag (* Field)} f ^bool b] (.set (.-flags f) fieldIsDDD b))
+^{:go/end 439} (go/method SetNointerface [^{:tag (* Field)} f ^bool b] (.set (.-flags f) fieldNointerface b))
+
+
+^{:go/end 444} (go/method End "End returns the offset of the first byte immediately after this field.\n" ^int64 [^{:tag (* Field)} f]
+  (+ (.-Offset f) (.-width (.-Type f))))
+
+
+
+^{:go/end 449} (go/method IsMethod "IsMethod reports whether f represents a method rather than a struct field.\n" ^bool [^{:tag (* Field)} f]
+  (and (== (.-kind (.-Type f)) TFUNC) (!= (.Recv (.-Type f)) nil)))
+
+
+
+^{:go/end 454} (go/func CompareFields "CompareFields compares two Field values by name.\n" ^int [^{:tag (* Field)} a ^{:tag (* Field)} b]
+  (CompareSyms (.-Sym a) (.-Sym b)))
+
+
+
+
+
+(go/type fields "fields is a pointer to a slice of *Field.\nThis saves space in Types that do not have fields or methods\ncompared to a simple slice of *Field.\n" (struct
+    ^{:line 460 :tag (* (slice (* Field)))} s))
+
+
+
+
+^{:go/end 470} (go/method Slice "Slice returns the entries in f as a slice.\nChanges to the slice entries will be reflected in f.\n" ^{:tag (slice (* Field))} [^{:tag (* fields)} f]
+  (when (== (.-s f) nil)
+    (return nil))
+
+  ^{:line 469} @(.-s f))
+
+
+
+
+^{:go/end 483} (go/method Set "Set sets f to a slice.\nThis takes ownership of the slice.\n" [^{:tag (* fields)} f ^{:tag (slice (* Field))} s]
+  (if (== (len s) 0)
+    (set! (.-s f) nil)
+
+    ;; Copy s and take address of t rather than s to avoid
+    ;; allocation in the case where len(s) == 0.
+    (let [t s]
+      (set! (.-s f) (addr t)))))
+
+
+
+
+^{:go/end 518} (go/func newType "newType returns a new Type of the specified kind.\n" ^{:tag (* Type)} [^Kind et]
+  (let [t (addr ^{:go/breaks [2 4]} (lit Type
+          :kind et
+          :width BADWIDTH))]
+
+    (set! (.-underlying t) t)
+    ;; TODO(josharian): lazily initialize some of these?
+    (switch (.-kind t)
+      (case [TMAP]
+        (set! (.-extra t) (new Map)))
+      (case [TFORW]
+        (set! (.-extra t) (new Forward)))
+      (case [TFUNC]
+        (set! (.-extra t) (new Func)))
+      (case [TSTRUCT]
+        (set! (.-extra t) (new Struct)))
+      (case [TINTER]
+        (set! (.-extra t) (new Interface)))
+      (case [TPTR]
+        (set! (.-extra t) (lit Ptr)))
+      (case [TCHANARGS]
+        (set! (.-extra t) (lit ChanArgs)))
+      (case [TFUNCARGS]
+        (set! (.-extra t) (lit FuncArgs)))
+      (case [TCHAN]
+        (set! (.-extra t) (new Chan)))
+      (case [TTUPLE]
+        (set! (.-extra t) (new Tuple)))
+      (case [TRESULTS]
+        (set! (.-extra t) (new Results))))
+
+    ^{:line 517} t))
+
+
+
+^{:go/end 534} (go/func NewArray "NewArray returns a new fixed-length array Type.\n" ^{:tag (* Type)} [^{:tag (* Type)} elem ^int64 bound]
+  (when (< bound 0)
+    (base/Fatalf "NewArray: invalid bound %v" bound))
+
+  (let [t (newType TARRAY)]
+    (set! (.-extra t) (addr (lit Array :Elem elem :Bound bound)))
+    (when (.HasShape elem)
+      (.SetHasShape t true))
+
+    (when (.NotInHeap elem)
+      (.SetNotInHeap t true))
+
+    ^{:line 533} t))
+
+
+
+^{:go/end 555} (go/func NewSlice "NewSlice returns the slice Type with element type elem.\n" ^{:tag (* Type)} [^{:tag (* Type)} elem]
+  (when [t (.-slice (.-cache elem))] (!= t nil)
+    (when (!= (.Elem t) elem)
+      (base/Fatalf "elem mismatch"))
+
+    (when (!= (.HasShape elem) (.HasShape t))
+      (base/Fatalf "Incorrect HasShape flag for cached slice type"))
+
+    (return t))
+
+
+  (let [t (newType TSLICE)]
+    (set! (.-extra t) (lit Slice :Elem elem))
+    (set! (.-slice (.-cache elem)) t)
+    (when (.HasShape elem)
+      (.SetHasShape t true))
+
+    ^{:line 554} t))
+
+
+
+^{:go/end 567} (go/func NewChan "NewChan returns a new chan Type with direction dir.\n" ^{:tag (* Type)} [^{:tag (* Type)} elem ^ChanDir dir]
+  (let [t (newType TCHAN)
+      ^{:line 560} ct (.chanType t)]
+    (set! (.-Elem ct) elem)
+    (set! (.-Dir ct) dir)
+    (when (.HasShape elem)
+      (.SetHasShape t true))
+
+    ^{:line 566} t))
+
+
+^{:go/end 577} (go/func NewTuple ^{:tag (* Type)} [^{:tag (* Type)} t1 ^{:tag (* Type)} t2]
+  (let [t (newType TTUPLE)]
+    (set! (.-first (assert (* Tuple) (.-extra t))) t1)
+    (set! (.-second (assert (* Tuple) (.-extra t))) t2)
+    (when (or (.HasShape t1) (.HasShape t2))
+      (.SetHasShape t true))
+
+    ^{:line 576} t))
+
+
+^{:go/end 583} (go/func newResults ^{:tag (* Type)} [^{:tag (slice (* Type))} types]
+  (let [t (newType TRESULTS)]
+    (set! (.-Types (assert (* Results) (.-extra t))) types)
+    ^{:line 582} t))
+
+
+^{:go/end 590} (go/func NewResults ^{:tag (* Type)} [^{:tag (slice (* Type))} types]
+  (when (and (== (len types) 1) (== (aget types 0) TypeMem))
+    (return TypeResultMem))
+
+  (newResults types))
+
+
+^{:go/end 596} (go/func newSSA ^{:tag (* Type)} [^string name]
+  (let [t (newType TSSA)]
+    (set! (.-extra t) name)
+    ^{:line 595} t))
+
+
+^{:go/end 602} (go/func newSIMD ^{:tag (* Type)} [^string name]
+  (let [t (newSSA name)]
+    (set! (.-isSIMD t) true)
+    ^{:line 601} t))
+
+
+
+^{:go/end 614} (go/func NewMap "NewMap returns a new map Type with key type k and element (aka value) type v.\n" ^{:tag (* Type)} [^{:tag (* Type)} k ^{:tag (* Type)} v]
+  (let [t (newType TMAP)
+      ^{:line 607} mt (.MapType t)]
+    (set! (.-Key mt) k)
+    (set! (.-Elem mt) v)
+    (when (or (.HasShape k) (.HasShape v))
+      (.SetHasShape t true))
+
+    ^{:line 613} t))
+
+
+
+
+
+(go/var ^{:doc "NewPtrCacheEnabled controls whether *T Types are cached in T.\nCaching is disabled just before starting the backend.\nThis allows the backend to run concurrently.\n"} NewPtrCacheEnabled true)
+
+
+^{:go/end 657} (go/func NewPtr "NewPtr returns the pointer type pointing to t.\n" ^{:tag (* Type)} [^{:tag (* Type)} elem]
+  (when (== elem nil)
+    (base/Fatalf "NewPtr: pointer to elem Type is nil"))
+
+
+  (when [t (.-ptr (.-cache elem))] (!= t nil)
+    (when (!= (.Elem t) elem)
+      (base/Fatalf "NewPtr: elem mismatch"))
+
+    (when (!= (.HasShape elem) (.HasShape t))
+      (base/Fatalf "Incorrect HasShape flag for cached pointer type"))
+
+    (return t))
+
+
+  (let [t (newType TPTR)]
+    (set! (.-extra t) (lit Ptr :Elem elem))
+    (set! (.-width t) (conv int64 PtrSize))
+    (set! (.-align t) (conv uint8 PtrSize))
+    (set! (.-intRegs t) 1)
+    (when NewPtrCacheEnabled
+      (set! (.-ptr (.-cache elem)) t))
+
+    (when (.HasShape elem)
+      (.SetHasShape t true))
+
+    (set! (.-alg t) AMEM)
+    (when (.Noalg elem)
+      (.SetNoalg t true)
+      (set! (.-alg t) ANOALG))
+
+    ;; Note: we can't check elem.NotInHeap here because it might
+    ;; not be set yet. See size.go:PtrDataSize.
+    (set! (.-ptrBytes t) (conv int64 PtrSize))
+    ^{:line 656} t))
+
+
+
+^{:go/end 664} (go/func NewChanArgs "NewChanArgs returns a new TCHANARGS type for channel type c.\n" ^{:tag (* Type)} [^{:tag (* Type)} c]
+  (let [t (newType TCHANARGS)]
+    (set! (.-extra t) (lit ChanArgs :T c))
+    ^{:line 663} t))
+
+
+
+^{:go/end 671} (go/func NewFuncArgs "NewFuncArgs returns a new TFUNCARGS type for func type f.\n" ^{:tag (* Type)} [^{:tag (* Type)} f]
+  (let [t (newType TFUNCARGS)]
+    (set! (.-extra t) (lit FuncArgs :T f))
+    ^{:line 670} t))
+
+
+^{:go/end 684} (go/func NewField ^{:tag (* Field)} [^src/XPos pos ^{:tag (* Sym)} sym ^{:tag (* Type)} typ]
+  (let [f (addr ^{:go/breaks [2 4 6 8]} (lit Field
+          :Pos pos
+          :Sym sym
+          :Type typ
+          :Offset BADWIDTH))]
+
+    (when (== typ nil)
+      (base/Fatalf "typ is nil"))
+
+    ^{:line 683} f))
+
+
+
+
+^{:go/end 764} (go/func SubstAny "SubstAny walks t, replacing instances of \"any\" with successive\nelements removed from types.  It returns the substituted type.\n" ^{:tag (* Type)} [^{:tag (* Type)} t ^{:tag (* (slice (* Type)))} types]
+  (when (== t nil)
+    (return nil))
+
+
+  (switch (.-kind t)
+    (default)
+    ;; Leave the type unchanged.
+
+    (case [TANY]
+      (when (== (len @types) 0)
+        (base/Fatalf "SubstArgTypes: not enough argument types"))
+
+      (set! t (aget @types 0))
+      (set! @types (subslice @types 1)))
+
+    (case [TPTR]
+      (let [elem (SubstAny (.Elem t) types)]
+        (when (!= elem (.Elem t))
+          (set! t (.copy t))
+          (set! (.-extra t) (lit Ptr :Elem elem)))))
+
+
+    (case [TARRAY]
+      (let [elem (SubstAny (.Elem t) types)]
+        (when (!= elem (.Elem t))
+          (set! t (.copy t))
+          (set! (.-Elem (assert (* Array) (.-extra t))) elem))))
+
+
+    (case [TSLICE]
+      (let [elem (SubstAny (.Elem t) types)]
+        (when (!= elem (.Elem t))
+          (set! t (.copy t))
+          (set! (.-extra t) (lit Slice :Elem elem)))))
+
+
+    (case [TCHAN]
+      (let [elem (SubstAny (.Elem t) types)]
+        (when (!= elem (.Elem t))
+          (set! t (.copy t))
+          (set! (.-Elem (assert (* Chan) (.-extra t))) elem))))
+
+
+    (case [TMAP]
+      (let [key (SubstAny (.Key t) types)
+          ^{:line 734} elem (SubstAny (.Elem t) types)]
+        (when (or (!= key (.Key t)) (!= elem (.Elem t)))
+          (set! t (.copy t))
+          (set! (.-Key (assert (* Map) (.-extra t))) key)
+          (set! (.-Elem (assert (* Map) (.-extra t))) elem))))
+
+
+    (case [TFUNC]
+      (let [ft (.funcType t)
+          ^{:line 743} allParams (substFields (.-allParams ft) types)]
+
+        (set! t (.copy t))
+        (set! ft (.funcType t))
+        (set! (.-allParams ft) allParams)
+
+        (let [rt (.-resultsTuple ft)]
+          (set! rt (.copy rt))
+          (set! (.-resultsTuple ft) rt)
+          (.setFields rt (.Results t)))))
+
+    (case [TSTRUCT]
+      ;; Make a copy of all fields, including ones whose type does not change.
+      ;; This prevents aliasing across functions, which can lead to later
+      ;; fields getting their Offset incorrectly overwritten.
+      (let [nfs (substFields (.Fields t) types)]
+        (set! t (.copy t))
+        (.setFields t nfs))))
+
+
+  ^{:line 763} t)
+
+
+^{:go/end 774} (go/func substFields ^{:tag (slice (* Field))} [^{:tag (slice (* Field))} fields ^{:tag (* (slice (* Type)))} types]
+  (let [nfs (make (slice (* Field)) (len fields))]
+    (range [i f fields]
+      (let [nft (SubstAny (.-Type f) types)]
+        (aset nfs i (.Copy f))
+        (set! (.-Type (aget nfs i)) nft)))
+
+    ^{:line 773} nfs))
+
+
+
+^{:go/end 813} (go/method copy "copy returns a shallow copy of the Type.\n" ^{:tag (* Type)} [^{:tag (* Type)} t]
+  (when (== t nil)
+    (return nil))
+
+  (let [nt @t]
+    ;; copy any *T Extra fields, to avoid aliasing
+    (switch (.-kind t)
+      (case [TMAP]
+        (let [x @(assert (* Map) (.-extra t))]
+          (set! (.-extra nt) (addr x))))
+      (case [TFORW]
+        (let [x @(assert (* Forward) (.-extra t))]
+          (set! (.-extra nt) (addr x))))
+      (case [TFUNC]
+        (let [x @(assert (* Func) (.-extra t))]
+          (set! (.-extra nt) (addr x))))
+      (case [TSTRUCT]
+        (let [x @(assert (* Struct) (.-extra t))]
+          (set! (.-extra nt) (addr x))))
+      (case [TINTER]
+        (let [x @(assert (* Interface) (.-extra t))]
+          (set! (.-extra nt) (addr x))))
+      (case [TCHAN]
+        (let [x @(assert (* Chan) (.-extra t))]
+          (set! (.-extra nt) (addr x))))
+      (case [TARRAY]
+        (let [x @(assert (* Array) (.-extra t))]
+          (set! (.-extra nt) (addr x))))
+      (case [TTUPLE TSSA TRESULTS]
+        (base/Fatalf "ssa types cannot be copied")))
+
+    ;; TODO(mdempsky): Find out why this is necessary and explain.
+    (when (== (.-underlying t) t)
+      (set! (.-underlying nt) (addr nt)))
+
+    (addr nt)))
+
+
+^{:go/end 818} (go/method Copy ^{:tag (* Field)} [^{:tag (* Field)} f]
+  (let [nf @f]
+    (addr nf)))
+
+
+^{:go/end 824} (go/method wantEtype [^{:tag (* Type)} t ^Kind et]
+  (when (!= (.-kind t) et)
+    (base/Fatalf "want %v, but have %v" et t)))
+
+
+
+
+
+^{:go/end 828} (go/method ResultsTuple "ResultsTuple returns the result type of signature type t as a tuple.\nThis can be used as the type of multi-valued call expressions.\n" ^{:tag (* Type)} [^{:tag (* Type)} t] (.-resultsTuple (.funcType t)))
+
+
+
+^{:go/end 832} (go/method Recvs "Recvs returns a slice of receiver parameters of signature type t.\nThe returned slice always has length 0 or 1.\n" ^{:tag (slice (* Field))} [^{:tag (* Type)} t] (.recvs (.funcType t)))
+
+
+^{:go/end 835} (go/method Params "Params returns a slice of regular parameters of signature type t.\n" ^{:tag (slice (* Field))} [^{:tag (* Type)} t] (.params (.funcType t)))
+
+
+^{:go/end 838} (go/method Results "Results returns a slice of result parameters of signature type t.\n" ^{:tag (slice (* Field))} [^{:tag (* Type)} t] (.results (.funcType t)))
+
+
+
+
+^{:go/end 843} (go/method RecvParamsResults "RecvParamsResults returns a slice containing all of the\nsignature's parameters in receiver (if any), (normal) parameters,\nand then results.\n" ^{:tag (slice (* Field))} [^{:tag (* Type)} t] (.-allParams (.funcType t)))
+
+
+
+^{:go/end 847} (go/method RecvParams "RecvParams returns a slice containing the signature's receiver (if\nany) followed by its (normal) parameters.\n" ^{:tag (slice (* Field))} [^{:tag (* Type)} t] (.recvParams (.funcType t)))
+
+
+
+^{:go/end 851} (go/method ParamsResults "ParamsResults returns a slice containing the signature's (normal)\nparameters followed by its results.\n" ^{:tag (slice (* Field))} [^{:tag (* Type)} t] (.paramsResults (.funcType t)))
+
+^{:go/end 853} (go/method NumRecvs ^int [^{:tag (* Type)} t] (len (.Recvs t)))
+^{:go/end 854} (go/method NumParams ^int [^{:tag (* Type)} t] (len (.Params t)))
+^{:go/end 855} (go/method NumResults ^int [^{:tag (* Type)} t] (len (.Results t)))
+
+
+^{:go/end 861} (go/method IsVariadic "IsVariadic reports whether function type t is variadic.\n" ^bool [^{:tag (* Type)} t]
+  (let [n (.NumParams t)]
+    (and (> n 0) (.IsDDD (.Param t (- n 1))))))
+
+
+
+^{:go/breaks [[5 868]] :go/end 869} (go/method Recv "Recv returns the receiver of function type t, if any.\n" ^{:tag (* Field)} [^{:tag (* Type)} t]
+  (when [s (.Recvs t)] (== (len s) 1)
+    (return (aget s 0)))
+
+  nil)
+
+
+
+^{:go/end 872} (go/method Param "Param returns the i'th parameter of signature type t.\n" ^{:tag (* Field)} [^{:tag (* Type)} t ^int i] (aget (.Params t) i))
+
+
+^{:go/end 875} (go/method Result "Result returns the i'th result of signature type t.\n" ^{:tag (* Field)} [^{:tag (* Type)} t ^int i] (aget (.Results t) i))
+
+
+^{:go/end 881} (go/method Key "Key returns the key type of map type t.\n" ^{:tag (* Type)} [^{:tag (* Type)} t]
+  (.wantEtype t TMAP)
+  (.-Key (assert (* Map) (.-extra t))))
+
+
+
+
+^{:go/breaks [6] :go/end 900} (go/method Elem "Elem returns the type of elements of t.\nUsable with pointers, channels, arrays, slices, and maps.\n" ^{:tag (* Type)} [^{:tag (* Type)} t]
+  (switch (.-kind t)
+    (case [TPTR]
+      (return (.-Elem (assert Ptr (.-extra t)))))
+    (case [TARRAY]
+      (return (.-Elem (assert (* Array) (.-extra t)))))
+    (case [TSLICE]
+      (return (.-Elem (assert Slice (.-extra t)))))
+    (case [TCHAN]
+      (return (.-Elem (assert (* Chan) (.-extra t)))))
+    (case [TMAP]
+      (return (.-Elem (assert (* Map) (.-extra t))))))
+
+  (base/Fatalf "Type.Elem %s" (.-kind t))
+  nil)
+
+
+
+^{:go/end 906} (go/method ChanArgs "ChanArgs returns the channel type for TCHANARGS type t.\n" ^{:tag (* Type)} [^{:tag (* Type)} t]
+  (.wantEtype t TCHANARGS)
+  (.-T (assert ChanArgs (.-extra t))))
+
+
+
+^{:go/end 912} (go/method FuncArgs "FuncArgs returns the func type for TFUNCARGS type t.\n" ^{:tag (* Type)} [^{:tag (* Type)} t]
+  (.wantEtype t TFUNCARGS)
+  (.-T (assert FuncArgs (.-extra t))))
+
+
+
+^{:go/end 917} (go/method IsFuncArgStruct "IsFuncArgStruct reports whether t is a struct representing function parameters or results.\n" ^bool [^{:tag (* Type)} t]
+  (and (== (.-kind t) TSTRUCT) (.-ParamTuple (assert (* Struct) (.-extra t)))))
+
+
+
+
+
+^{:go/end 924} (go/method Methods "Methods returns a pointer to the base methods (excluding embedding) for type t.\nThese can either be concrete methods (for non-interface types) or interface\nmethods (for interface types).\n" ^{:tag (slice (* Field))} [^{:tag (* Type)} t]
+  (.Slice (.-methods t)))
+
+
+
+
+
+
+^{:go/end 937} (go/method AllMethods "AllMethods returns a pointer to all the methods (including embedding) for type t.\nFor an interface type, this is the set of methods that are typically iterated\nover. For non-interface types, AllMethods() only returns a valid result after\nCalcMethods() has been called at least once.\n" ^{:tag (slice (* Field))} [^{:tag (* Type)} t]
+  (when (== (.-kind t) TINTER)
+    ;; Calculate the full method set of an interface type on the fly
+    ;; now, if not done yet.
+    (CalcSize t))
+
+  (.Slice (.-allMethods t)))
+
+
+
+
+^{:go/end 943} (go/method SetMethods "SetMethods sets the direct method set for type t (i.e., *not*\nincluding promoted methods from embedded types).\n" [^{:tag (* Type)} t ^{:tag (slice (* Field))} fs]
+  (.Set (.-methods t) fs))
+
+
+
+
+^{:go/end 949} (go/method SetAllMethods "SetAllMethods sets the set of all methods for type t (i.e.,\nincluding promoted methods from embedded types).\n" [^{:tag (* Type)} t ^{:tag (slice (* Field))} fs]
+  (.Set (.-allMethods t) fs))
+
+
+
+^{:go/end 955} (go/method fields "fields returns the fields of struct type t.\n" ^{:tag (* fields)} [^{:tag (* Type)} t]
+  (.wantEtype t TSTRUCT)
+  (addr (.-fields (assert (* Struct) (.-extra t)))))
+
+
+
+^{:go/end 958} (go/method Field "Field returns the i'th field of struct type t.\n" ^{:tag (* Field)} [^{:tag (* Type)} t ^int i] (aget (.Fields t) i))
+
+
+
+^{:go/end 962} (go/method Fields "Fields returns a slice of containing all fields of\na struct type t.\n" ^{:tag (slice (* Field))} [^{:tag (* Type)} t] (.Slice (.fields t)))
+
+
+^{:go/end 977} (go/method setFields "setFields sets struct type t's fields to fields.\n" [^{:tag (* Type)} t ^{:tag (slice (* Field))} fields]
+  ;; If we've calculated the width of t before,
+  ;; then some other type such as a function signature
+  ;; might now have the wrong type.
+  ;; Rather than try to track and invalidate those,
+  ;; enforce that SetFields cannot be called once
+  ;; t's width has been calculated.
+  (when (.widthCalculated t)
+    (base/Fatalf "SetFields of %v: width previously calculated" t))
+
+  (.wantEtype t TSTRUCT)
+  (.Set (.fields t) fields))
+
+
+
+^{:go/end 983} (go/method SetInterface "SetInterface sets the base methods of an interface type t.\n" [^{:tag (* Type)} t ^{:tag (slice (* Field))} methods]
+  (.wantEtype t TINTER)
+  (.Set (.-methods t) methods))
+
+
+
+
+^{:go/end 990} (go/method ArgWidth "ArgWidth returns the total aligned argument size for a function.\nIt includes the receiver, parameters, and results.\n" ^int64 [^{:tag (* Type)} t]
+  (.wantEtype t TFUNC)
+  (.-Argwid (assert (* Func) (.-extra t))))
+
+
+
+^{:go/end 999} (go/method Size "Size returns the width of t in bytes.\n" ^int64 [^{:tag (* Type)} t]
+  (when (== (.-kind t) TSSA)
+    (return (.-width t)))
+
+  (CalcSize t)
+  (.-width t))
+
+
+
+^{:go/end 1005} (go/method Alignment "Alignment returns the alignment of t in bytes.\n" ^int64 [^{:tag (* Type)} t]
+  (CalcSize t)
+  (conv int64 (.-align t)))
+
+
+^{:go/end 1009} (go/method SimpleString ^string [^{:tag (* Type)} t]
+  (.String (.-kind t)))
+
+
+
+
+
+
+
+(go/type Cmp "Cmp is a comparison between values a and b.\n\n\t-1 if a < b\n\t 0 if a == b\n\t 1 if a > b\n" int8)
+
+(go/const
+  ^{:line 1019} [^{:val -1} CMPlt (conv Cmp -1)]
+  ^{:line 1020} [^{:val 0} CMPeq (conv Cmp 0)]
+  ^{:line 1021} [^{:val 1} CMPgt (conv Cmp 1)])
+
+
+
+
+
+
+
+
+^{:go/end 1035} (go/method Compare "Compare compares types for purposes of the SSA back\nend, returning a Cmp (one of CMPlt, CMPeq, CMPgt).\nThe answers are correct for an optimizer\nor code generator, but not necessarily typechecking.\nThe order chosen is arbitrary, only consistency and division\ninto equivalence classes (Types that compare CMPeq) matters.\n" ^Cmp [^{:tag (* Type)} t ^{:tag (* Type)} x]
+  (when (== x t)
+    (return CMPeq))
+
+  (.cmp t x))
+
+
+^{:go/end 1042} (go/func cmpForNe ^Cmp [^bool x]
+  (when x
+    (return CMPlt))
+
+  ^{:line 1041} CMPgt)
+
+
+^{:go/end 1070} (go/method cmpsym ^Cmp [^{:tag (* Sym)} r ^{:tag (* Sym)} s]
+  (when (== r s)
+    (return CMPeq))
+
+  (when (== r nil)
+    (return CMPlt))
+
+  (when (== s nil)
+    (return CMPgt))
+
+  ;; Fast sort, not pretty sort
+  (when (!= (len (.-Name r)) (len (.-Name s)))
+    (return (cmpForNe (< (len (.-Name r)) (len (.-Name s))))))
+
+  (when (!= (.-Pkg r) (.-Pkg s))
+    (when (!= (len (.-Prefix (.-Pkg r))) (len (.-Prefix (.-Pkg s))))
+      (return (cmpForNe (< (len (.-Prefix (.-Pkg r))) (len (.-Prefix (.-Pkg s)))))))
+
+    (when (!= (.-Prefix (.-Pkg r)) (.-Prefix (.-Pkg s)))
+      (return (cmpForNe (< (.-Prefix (.-Pkg r)) (.-Prefix (.-Pkg s)))))))
+
+
+  (when (!= (.-Name r) (.-Name s))
+    (return (cmpForNe (< (.-Name r) (.-Name s)))))
+
+  ^{:line 1069} CMPeq)
+
+
+
+
+
+
+
+^{:go/end 1281} (go/method cmp "cmp compares two *Types t and x, returning CMPlt,\nCMPeq, CMPgt as t<x, t==x, t>x, for an arbitrary\nand optimizer-centric notion of comparison.\nTODO(josharian): make this safe for recursive interface types\nand use in signatlist sorting. See issue 19869.\n" ^Cmp [^{:tag (* Type)} t ^{:tag (* Type)} x]
+  ;; This follows the structure of function identical in identity.go
+  ;; with two exceptions.
+  ;; 1. Symbols are compared more carefully because a <,=,> result is desired.
+  ;; 2. Maps are treated specially to avoid endless recursion -- maps
+  ;;    contain an internal data type not expressible in Go source code.
+  (when (== t x)
+    (return CMPeq))
+
+  (when (== t nil)
+    (return CMPlt))
+
+  (when (== x nil)
+    (return CMPgt))
+
+
+  (when (!= (.-kind t) (.-kind x))
+    (return (cmpForNe (< (.-kind t) (.-kind x)))))
+
+
+  (when (or (!= (.-obj t) nil) (!= (.-obj x) nil))
+    ;; Special case: we keep byte and uint8 separate
+    ;; for error messages. Treat them as equal.
+    (switch (.-kind t)
+      (case [TUINT8]
+        (when (and ^:go/paren (or (== t (aget Types TUINT8)) (== t ByteType)) ^:go/paren (or (== x (aget Types TUINT8)) (== x ByteType)))
+          (return CMPeq)))
+
+
+      (case [TINT32]
+        (when (and ^:go/paren (or (== t (aget Types (.-kind RuneType))) (== t RuneType)) ^:go/paren (or (== x (aget Types (.-kind RuneType))) (== x RuneType)))
+          (return CMPeq)))
+
+
+      (case [TINTER]
+        ;; Make sure named any type matches any empty interface.
+        (when (or (and (== t AnyType) (.IsEmptyInterface x)) (and (== x AnyType) (.IsEmptyInterface t)))
+          (return CMPeq)))))
+
+
+
+
+  (when [c (.cmpsym (.Sym t) (.Sym x))] (!= c CMPeq)
+    (return c))
+
+
+  (when (!= (.-obj x) nil)
+    (return CMPeq))
+
+  ;; both syms nil, look at structure below.
+
+  (switch (.-kind t)
+    (case [TBOOL TFLOAT32 TFLOAT64 TCOMPLEX64 TCOMPLEX128 TUNSAFEPTR TUINTPTR
+        ^{:line 1130} TINT8 TINT16 TINT32 TINT64 TINT TUINT8 TUINT16 TUINT32 TUINT64 TUINT]
+      (return CMPeq))
+
+    (case [TSSA]
+      (let [tname (assert string (.-extra t))
+          ^{:line 1135} xname (assert string (.-extra x))]
+        ;; desire fast sorting, not pretty sorting.
+        (when (== (len tname) (len xname))
+          (when (== tname xname)
+            (return CMPeq))
+
+          (when (< tname xname)
+            (return CMPlt))
+
+          (return CMPgt))
+
+        (when (> (len tname) (len xname))
+          (return CMPgt))
+
+        (return CMPlt)))
+
+    (case [TTUPLE]
+      (let [xtup (assert (* Tuple) (.-extra x))
+          ^{:line 1153} ttup (assert (* Tuple) (.-extra t))]
+        (when [c (.Compare (.-first ttup) (.-first xtup))] (!= c CMPeq)
+          (return c))
+
+        (return (.Compare (.-second ttup) (.-second xtup)))))
+
+    (case [TRESULTS]
+      (let [xResults (assert (* Results) (.-extra x))
+          ^{:line 1161} tResults (assert (* Results) (.-extra t))
+          (values xl tl) (values (len (.-Types xResults)) (len (.-Types tResults)))]
+        (when (!= tl xl)
+          (when (< tl xl)
+            (return CMPlt))
+
+          (return CMPgt))
+
+        (for [i 0] (< i tl) (inc! i)
+          (when [c (.Compare (aget (.-Types tResults) i) (aget (.-Types xResults) i))] (!= c CMPeq)
+            (return c)))
+
+
+        (return CMPeq)))
+
+    (case [TMAP]
+      (when [c (.cmp (.Key t) (.Key x))] (!= c CMPeq)
+        (return c))
+
+      (return (.cmp (.Elem t) (.Elem x))))
+
+    (case [TPTR TSLICE])
+    ;; No special cases for these, they are handled
+    ;; by the general code after the switch.
+
+    (case [TSTRUCT]
+      ;; Is this a map group type?
+      (cond (== (.-Map (.StructType t)) nil)
+        (when (!= (.-Map (.StructType x)) nil)
+          (return CMPlt)) ; nil < non-nil
+
+        ;; to the general case
+        (== (.-Map (.StructType x)) nil)
+        (return CMPgt)) ; nil > non-nil
+
+      ;; Both have non-nil Map, fallthrough to the general
+      ;; case. Note that the map type does not directly refer
+      ;; to the group type (it uses unsafe.Pointer). If it
+      ;; did, this would need special handling to avoid
+      ;; infinite recursion.
+
+      (let [tfs (.Fields t)
+          ^{:line 1203} xfs (.Fields x)]
+        (for [i 0] (and (< i (len tfs)) (< i (len xfs))) (inc! i)
+          (let [(values t1 x1) (values (aget tfs i) (aget xfs i))]
+            (when (!= (.-Embedded t1) (.-Embedded x1))
+              (return (cmpForNe (< (.-Embedded t1) (.-Embedded x1)))))
+
+            (when (!= (.-Note t1) (.-Note x1))
+              (return (cmpForNe (< (.-Note t1) (.-Note x1)))))
+
+            (when [c (.cmpsym (.-Sym t1) (.-Sym x1))] (!= c CMPeq)
+              (return c))
+
+            (when [c (.cmp (.-Type t1) (.-Type x1))] (!= c CMPeq)
+              (return c))))
+
+
+        (when (!= (len tfs) (len xfs))
+          (return (cmpForNe (< (len tfs) (len xfs)))))
+
+        (return CMPeq)))
+
+    (case [TINTER]
+      (let [tfs (.AllMethods t)
+          ^{:line 1226} xfs (.AllMethods x)]
+        (for [i 0] (and (< i (len tfs)) (< i (len xfs))) (inc! i)
+          (let [(values t1 x1) (values (aget tfs i) (aget xfs i))]
+            (when [c (.cmpsym (.-Sym t1) (.-Sym x1))] (!= c CMPeq)
+              (return c))
+
+            (when [c (.cmp (.-Type t1) (.-Type x1))] (!= c CMPeq)
+              (return c))))
+
+
+        (when (!= (len tfs) (len xfs))
+          (return (cmpForNe (< (len tfs) (len xfs)))))
+
+        (return CMPeq)))
+
+    (case [TFUNC]
+      (when [(values tn xn) (values (.NumRecvs t) (.NumRecvs x))] (!= tn xn)
+        (return (cmpForNe (< tn xn))))
+
+      (when [(values tn xn) (values (.NumParams t) (.NumParams x))] (!= tn xn)
+        (return (cmpForNe (< tn xn))))
+
+      (when [(values tn xn) (values (.NumResults t) (.NumResults x))] (!= tn xn)
+        (return (cmpForNe (< tn xn))))
+
+      (when [(values tv xv) (values (.IsVariadic t) (.IsVariadic x))] (!= tv xv)
+        (return (cmpForNe (not tv))))
+
+
+      (let [tfs (.RecvParamsResults t)
+          ^{:line 1256} xfs (.RecvParamsResults x)]
+        (range [i tf tfs]
+          (when [c (.cmp (.-Type tf) (.-Type (aget xfs i)))] (!= c CMPeq)
+            (return c)))
+
+
+        (return CMPeq)))
+
+    (case [TARRAY]
+      (when (!= (.NumElem t) (.NumElem x))
+        (return (cmpForNe (< (.NumElem t) (.NumElem x))))))
+
+
+    (case [TCHAN]
+      (when (!= (.ChanDir t) (.ChanDir x))
+        (return (cmpForNe (< (.ChanDir t) (.ChanDir x))))))
+
+
+    (default
+      (let [e (fmt/Sprintf "Do not know how to compare %v with %v" t x)]
+        (panic e))))
+
+
+  ;; Common element type comparison for TARRAY, TCHAN, TPTR, and TSLICE.
+  (.cmp (.Elem t) (.Elem x)))
+
+
+
+^{:go/end 1286} (go/method IsKind "IsKind reports whether t is a Type of the specified kind.\n" ^bool [^{:tag (* Type)} t ^Kind et]
+  (and (!= t nil) (== (.-kind t) et)))
+
+
+^{:go/end 1290} (go/method IsBoolean ^bool [^{:tag (* Type)} t]
+  (== (.-kind t) TBOOL))
+
+
+(go/var unsignedEType (lit (array ... Kind)
+    ^{:line 1293} [TINT8 TUINT8]
+    ^{:line 1294} [TUINT8 TUINT8]
+    ^{:line 1295} [TINT16 TUINT16]
+    ^{:line 1296} [TUINT16 TUINT16]
+    ^{:line 1297} [TINT32 TUINT32]
+    ^{:line 1298} [TUINT32 TUINT32]
+    ^{:line 1299} [TINT64 TUINT64]
+    ^{:line 1300} [TUINT64 TUINT64]
+    ^{:line 1301} [TINT TUINT]
+    ^{:line 1302} [TUINT TUINT]
+    ^{:line 1303} [TUINTPTR TUINTPTR]))
+
+
+
+^{:go/end 1312} (go/method ToUnsigned "ToUnsigned returns the unsigned equivalent of integer type t.\n" ^{:tag (* Type)} [^{:tag (* Type)} t]
+  (when (not (.IsInteger t))
+    (base/Fatalf "unsignedType(%v)" t))
+
+  (aget Types (aget unsignedEType (.-kind t))))
+
+
+^{:go/end 1320} (go/method IsInteger ^bool [^{:tag (* Type)} t]
+  (switch (.-kind t)
+    (case [TINT8 TUINT8 TINT16 TUINT16 TINT32 TUINT32 TINT64 TUINT64 TINT TUINT TUINTPTR]
+      (return true)))
+
+  (or (== t UntypedInt) (== t UntypedRune)))
+
+
+^{:go/breaks [[4 1327]] :go/end 1328} (go/method IsSigned ^bool [^{:tag (* Type)} t]
+  (switch (.-kind t)
+    (case [TINT8 TINT16 TINT32 TINT64 TINT]
+      (return true)))
+
+  false)
+
+
+^{:go/breaks [[4 1335]] :go/end 1336} (go/method IsUnsigned ^bool [^{:tag (* Type)} t]
+  (switch (.-kind t)
+    (case [TUINT8 TUINT16 TUINT32 TUINT64 TUINT TUINTPTR]
+      (return true)))
+
+  false)
+
+
+^{:go/end 1340} (go/method IsFloat ^bool [^{:tag (* Type)} t]
+  (or (== (.-kind t) TFLOAT32) (== (.-kind t) TFLOAT64) (== t UntypedFloat)))
+
+
+^{:go/end 1344} (go/method IsComplex ^bool [^{:tag (* Type)} t]
+  (or (== (.-kind t) TCOMPLEX64) (== (.-kind t) TCOMPLEX128) (== t UntypedComplex)))
+
+
+
+
+^{:go/end 1350} (go/method IsPtr "IsPtr reports whether t is a regular Go pointer type.\nThis does not include unsafe.Pointer.\n" ^bool [^{:tag (* Type)} t]
+  (== (.-kind t) TPTR))
+
+
+
+^{:go/end 1355} (go/method IsPtrElem "IsPtrElem reports whether t is the element of a pointer (to t).\n" ^bool [^{:tag (* Type)} t]
+  (!= (.-ptr (.-cache t)) nil))
+
+
+
+^{:go/end 1360} (go/method IsUnsafePtr "IsUnsafePtr reports whether t is an unsafe pointer.\n" ^bool [^{:tag (* Type)} t]
+  (== (.-kind t) TUNSAFEPTR))
+
+
+
+^{:go/end 1365} (go/method IsUintptr "IsUintptr reports whether t is a uintptr.\n" ^bool [^{:tag (* Type)} t]
+  (== (.-kind t) TUINTPTR))
+
+
+
+
+
+
+
+^{:go/end 1375} (go/method IsPtrShaped "IsPtrShaped reports whether t is represented by a single machine pointer.\nIn addition to regular Go pointer types, this includes map, channel, and\nfunction types and unsafe.Pointer. It does not include array or struct types\nthat consist of a single pointer shaped type.\nTODO(mdempsky): Should it? See golang.org/issue/15028.\n" ^bool [^{:tag (* Type)} t]
+  (or (== (.-kind t) TPTR) (== (.-kind t) TUNSAFEPTR)
+    (== (.-kind t) TMAP) (== (.-kind t) TCHAN) (== (.-kind t) TFUNC)))
+
+
+
+^{:go/breaks [[5 1383]] :go/end 1384} (go/method HasNil "HasNil reports whether the set of values determined by t includes nil.\n" ^bool [^{:tag (* Type)} t]
+  (switch (.-kind t)
+    (case [TCHAN TFUNC TINTER TMAP TNIL TPTR TSLICE TUNSAFEPTR]
+      (return true)))
+
+  false)
+
+
+^{:go/end 1388} (go/method IsString ^bool [^{:tag (* Type)} t]
+  (== (.-kind t) TSTRING))
+
+
+^{:go/end 1392} (go/method IsMap ^bool [^{:tag (* Type)} t]
+  (== (.-kind t) TMAP))
+
+
+^{:go/end 1396} (go/method IsChan ^bool [^{:tag (* Type)} t]
+  (== (.-kind t) TCHAN))
+
+
+^{:go/end 1400} (go/method IsSlice ^bool [^{:tag (* Type)} t]
+  (== (.-kind t) TSLICE))
+
+
+^{:go/end 1404} (go/method IsArray ^bool [^{:tag (* Type)} t]
+  (== (.-kind t) TARRAY))
+
+
+^{:go/end 1408} (go/method IsStruct ^bool [^{:tag (* Type)} t]
+  (== (.-kind t) TSTRUCT))
+
+
+^{:go/end 1412} (go/method IsInterface ^bool [^{:tag (* Type)} t]
+  (== (.-kind t) TINTER))
+
+
+
+^{:go/end 1417} (go/method IsEmptyInterface "IsEmptyInterface reports whether t is an empty interface type.\n" ^bool [^{:tag (* Type)} t]
+  (and (.IsInterface t) (== (len (.AllMethods t)) 0)))
+
+
+
+
+
+
+^{:go/breaks [[5 1430]] :go/end 1431} (go/method IsScalar "IsScalar reports whether 't' is a scalar Go type, e.g.\nbool/int/float/complex. Note that struct and array types consisting\nof a single scalar element are not considered scalar, likewise\npointer types are also not considered scalar.\n" ^bool [^{:tag (* Type)} t]
+  (switch (.-kind t)
+    (case [TBOOL TINT8 TUINT8 TINT16 TUINT16 TINT32
+        ^{:line 1426} TUINT32 TINT64 TUINT64 TINT TUINT
+        ^{:line 1427} TUINTPTR TCOMPLEX64 TCOMPLEX128 TFLOAT32 TFLOAT64]
+      (return true)))
+
+  false)
+
+
+^{:go/end 1435} (go/method PtrTo ^{:tag (* Type)} [^{:tag (* Type)} t]
+  (NewPtr t))
+
+
+^{:go/end 1442} (go/method NumFields ^int [^{:tag (* Type)} t]
+  (when (== (.-kind t) TRESULTS)
+    (return (len (.-Types (assert (* Results) (.-extra t))))))
+
+  (len (.Fields t)))
+
+^{:go/end 1458} (go/method FieldType ^{:tag (* Type)} [^{:tag (* Type)} t ^int i]
+  (when (== (.-kind t) TTUPLE)
+    (switch i
+      (case [0]
+        (return (.-first (assert (* Tuple) (.-extra t)))))
+      (case [1]
+        (return (.-second (assert (* Tuple) (.-extra t)))))
+      (default
+        (panic "bad tuple index"))))
+
+
+  (when (== (.-kind t) TRESULTS)
+    (return (aget (.-Types (assert (* Results) (.-extra t))) i)))
+
+  (.-Type (.Field t i)))
+
+^{:go/end 1461} (go/method FieldOff ^int64 [^{:tag (* Type)} t ^int i]
+  (.-Offset (.Field t i)))
+
+^{:go/end 1464} (go/method FieldName ^string [^{:tag (* Type)} t ^int i]
+  (.-Name (.-Sym (.Field t i))))
+
+
+
+
+^{:go/breaks [7] :go/end 1479} (go/method OffsetOf "OffsetOf reports the offset of the field of a struct.\nThe field is looked up by name.\n" ^int64 [^{:tag (* Type)} t ^string name]
+  (when (!= (.-kind t) TSTRUCT)
+    (base/Fatalf "can't call OffsetOf on non-struct %v" t))
+
+  (range [_ f (.Fields t)]
+    (when (== (.-Name (.-Sym f)) name)
+      (return (.-Offset f))))
+
+
+  (base/Fatalf "couldn't find field %s in %v" name t)
+  -1)
+
+
+^{:go/end 1484} (go/method NumElem ^int64 [^{:tag (* Type)} t]
+  (.wantEtype t TARRAY)
+  (.-Bound (assert (* Array) (.-extra t))))
+
+
+(go/type componentsIncludeBlankFields bool)
+
+(go/const
+  ^{:line 1489} [^{:tag componentsIncludeBlankFields :val false} IgnoreBlankFields false]
+  ^{:line 1490} [^{:tag componentsIncludeBlankFields :val true} CountBlankFields true])
+
+
+
+
+
+
+
+
+^{:go/breaks [[5 1516]] :go/end 1517} (go/method NumComponents "NumComponents returns the number of primitive elements that compose t.\nStruct and array types are flattened for the purpose of counting.\nAll other types (including string, slice, and interface types) count as one element.\nIf countBlank is IgnoreBlankFields, then blank struct fields\n(and their comprised elements) are excluded from the count.\nstruct { x, y [3]int } has six components; [10]struct{ x, y string } has twenty.\n" ^int64 [^{:tag (* Type)} t ^componentsIncludeBlankFields countBlank]
+  (switch (.-kind t)
+    (case [TSTRUCT]
+      (when (.IsFuncArgStruct t)
+        (base/Fatalf "NumComponents func arg struct"))
+
+      (let [^int64 n (zero int64)]
+        (range [_ f (.Fields t)]
+          (when (and (== countBlank IgnoreBlankFields) (.IsBlank (.-Sym f)))
+            (continue))
+
+          (set! n + (.NumComponents (.-Type f) countBlank)))
+
+        (return n)))
+    (case [TARRAY]
+      (return (* (.NumElem t) (.NumComponents (.Elem t) countBlank)))))
+
+  1)
+
+
+
+
+
+
+^{:go/end 1540} (go/method SoleComponent "SoleComponent returns the only primitive component in t,\nif there is exactly one. Otherwise, it returns nil.\nComponents are counted as in NumComponents, including blank fields.\nKeep in sync with cmd/compile/internal/walk/convert.go:soleComponent.\n" ^{:tag (* Type)} [^{:tag (* Type)} t]
+  (switch (.-kind t)
+    (case [TSTRUCT]
+      (when (.IsFuncArgStruct t)
+        (base/Fatalf "SoleComponent func arg struct"))
+
+      (when (!= (.NumFields t) 1)
+        (return nil))
+
+      (return (.SoleComponent (.-Type (.Field t 0)))))
+    (case [TARRAY]
+      (when (!= (.NumElem t) 1)
+        (return nil))
+
+      (return (.SoleComponent (.Elem t)))))
+
+  ^{:line 1539} t)
+
+
+
+
+^{:go/end 1547} (go/method ChanDir "ChanDir returns the direction of a channel type t.\nThe direction will be one of Crecv, Csend, or Cboth.\n" ^ChanDir [^{:tag (* Type)} t]
+  (.wantEtype t TCHAN)
+  (.-Dir (assert (* Chan) (.-extra t))))
+
+
+^{:go/breaks [[5 1558]] :go/end 1559} (go/method IsMemory ^bool [^{:tag (* Type)} t]
+  (when (or (== t TypeMem) (and (== (.-kind t) TTUPLE) (== (.-second (assert (* Tuple) (.-extra t))) TypeMem)))
+    (return true))
+
+  (when (== (.-kind t) TRESULTS)
+    (when [types (.-Types (assert (* Results) (.-extra t)))] (and (> (len types) 0) (== (aget types (- (len types) 1)) TypeMem))
+      (return true)))
+
+
+  false)
+
+^{:go/end 1560} (go/method IsFlags ^bool [^{:tag (* Type)} t] (== t TypeFlags))
+^{:go/end 1561} (go/method IsVoid ^bool [^{:tag (* Type)} t] (== t TypeVoid))
+^{:go/end 1562} (go/method IsTuple ^bool [^{:tag (* Type)} t] (== (.-kind t) TTUPLE))
+^{:go/end 1563} (go/method IsResults ^bool [^{:tag (* Type)} t] (== (.-kind t) TRESULTS))
+
+
+^{:go/breaks [[7 1577]] :go/end 1578} (go/method IsUntyped "IsUntyped reports whether t is an untyped type.\n" ^bool [^{:tag (* Type)} t]
+  (when (== t nil)
+    (return false))
+
+  (when (or (== t UntypedString) (== t UntypedBool))
+    (return true))
+
+  (switch (.-kind t)
+    (case [TNIL TIDEAL]
+      (return true)))
+
+  false)
+
+
+
+
+^{:go/end 1584} (go/method HasPointers "HasPointers reports whether t contains a heap pointer.\nNote that this function ignores pointers to not-in-heap types.\n" ^bool [^{:tag (* Type)} t]
+  (> (PtrDataSize t) 0))
+
+
+(go/var ^{:tag (* Type)} recvType)
+
+
+^{:go/end 1594} (go/func FakeRecvType "FakeRecvType returns the singleton type used for interface method receivers.\n" ^{:tag (* Type)} []
+  (when (== recvType nil)
+    (set! recvType (NewPtr (newType TSTRUCT))))
+
+  ^{:line 1593} recvType)
+
+
+^{:go/end 1598} (go/func FakeRecv ^{:tag (* Field)} []
+  (NewField base/AutogeneratedPos nil (FakeRecvType)))
+
+
+(go/var
+
+  ^{:line 1602} [^{:doc "TSSA types. HasPointers assumes these are pointer-free.\n"} TypeInvalid (newSSA "invalid")]
+  ^{:line 1603} [TypeMem (newSSA "mem")]
+  ^{:line 1604} [TypeFlags (newSSA "flags")]
+  ^{:line 1605} [TypeVoid (newSSA "void")]
+  ^{:line 1606} [TypeInt128 (newSSA "int128")]
+  ^{:line 1607} [TypeVec128 (newSIMD "vec128")]
+  ^{:line 1608} [TypeVec256 (newSIMD "vec256")]
+  ^{:line 1609} [TypeVec512 (newSIMD "vec512")]
+  ^{:line 1610} [TypeMask (newSIMD "mask")] ; not a vector, not 100% sure what this should be.
+  ^{:line 1611} [TypeResultMem (newResults (lit (slice (* Type)) TypeMem))])
+
+
+^{:go/end 1627} (go/func init []
+  (set! (.-width TypeInt128) 16)
+  (set! (.-align TypeInt128) 8)
+
+  (set! (.-width TypeVec128) 16)
+  (set! (.-align TypeVec128) 8)
+  (set! (.-width TypeVec256) 32)
+  (set! (.-align TypeVec256) 8)
+  (set! (.-width TypeVec512) 64)
+  (set! (.-align TypeVec512) 8)
+
+  (set! (.-width TypeMask) 8) ; This will depend on the architecture; spilling will be "interesting".
+  (set! (.-align TypeMask) 8))
+
+
+
+
+
+
+
+^{:go/end 1650} (go/func NewNamed "NewNamed returns a new named type for the given type name. obj should be an\nir.Name. The new type is incomplete (marked as TFORW kind), and the underlying\ntype should be set later via SetUnderlying(). References to the type are\nmaintained until the type is filled in, so those references can be updated when\nthe type is complete.\n" ^{:tag (* Type)} [^Object obj]
+  (let [t (newType TFORW)]
+    (set! (.-obj t) obj)
+    (let [sym (.Sym obj)]
+      (when (== (.-Pkg sym) ShapePkg)
+        (.SetIsShape t true)
+        (.SetHasShape t true))
+
+      (when (and (== (.-Path (.-Pkg sym)) "internal/runtime/sys") (== (.-Name sym) "nih"))
+        ;; Recognize the special not-in-heap type. Any type including
+        ;; this type will also be not-in-heap.
+        ;; This logic is duplicated in go/types and
+        ;; cmd/compile/internal/types2.
+        (.SetNotInHeap t true))
+
+      ^{:line 1649} t)))
+
+
+
+^{:go/end 1655} (go/method Obj "Obj returns the canonical type name node for a named type t, nil for an unnamed type.\n" ^Object [^{:tag (* Type)} t]
+  (.-obj t))
+
+
+
+
+
+^{:go/end 1709} (go/method SetUnderlying "SetUnderlying sets the underlying type of an incomplete type (i.e. type whose kind\nis currently TFORW). SetUnderlying automatically updates any types that were waiting\nfor this type to be completed.\n" [^{:tag (* Type)} t ^{:tag (* Type)} underlying]
+  (when (== (.-kind underlying) TFORW)
+    ;; This type isn't computed yet; when it is, update n.
+    (set! (.-Copyto (.forwardType underlying)) (append (.-Copyto (.forwardType underlying)) t))
+    (return))
+
+
+  (let [ft (.forwardType t)]
+
+    ;; TODO(mdempsky): Fix Type rekinding.
+    (set! (.-kind t) (.-kind underlying))
+    (set! (.-extra t) (.-extra underlying))
+    (set! (.-width t) (.-width underlying))
+    (set! (.-align t) (.-align underlying))
+    (set! (.-alg t) (.-alg underlying))
+    (set! (.-ptrBytes t) (.-ptrBytes underlying))
+    (set! (.-intRegs t) (.-intRegs underlying))
+    (set! (.-floatRegs t) (.-floatRegs underlying))
+    (set! (.-underlying t) (.-underlying underlying))
+
+    (when (.NotInHeap underlying)
+      (.SetNotInHeap t true))
+
+    (when (.HasShape underlying)
+      (.SetHasShape t true))
+
+    (when (.-isSIMD underlying)
+      (simdify t (.-isSIMDTag underlying)))
+
+
+    ;; spec: "The declared type does not inherit any methods bound
+    ;; to the existing type, but the method set of an interface
+    ;; type [...] remains unchanged."
+    (when (.IsInterface t)
+      (set! (.-methods t) (.-methods underlying))
+      (set! (.-allMethods t) (.-allMethods underlying)))
+
+
+    ;; Update types waiting on this type.
+    (range [_ w (.-Copyto ft)]
+      (.SetUnderlying w t))
+
+
+    ;; Double-check use of type as embedded type.
+    (when (.IsKnown (.-Embedlineno ft))
+      (when (or (.IsPtr t) (.IsUnsafePtr t))
+        (base/ErrorfAt (.-Embedlineno ft) errors/InvalidPtrEmbed "embedded type cannot be a pointer")))))
+
+
+
+
+^{:go/breaks [[4 1717]] :go/end 1718} (go/func fieldsHasShape ^bool [^{:tag (slice (* Field))} fields]
+  (range [_ f fields]
+    (when (and (!= (.-Type f) nil) (.HasShape (.-Type f)))
+      (return true)))
+
+
+  false)
+
+
+
+
+^{:go/end 1733} (go/func NewInterface "NewInterface returns a new interface for the given methods and\nembedded types. Embedded types are specified as fields with no Sym.\n" ^{:tag (* Type)} [^{:tag (slice (* Field))} methods]
+  (let [t (newType TINTER)]
+    (.SetInterface t methods)
+    (range [_ f methods]
+      ;; f.Type could be nil for a broken interface declaration
+      (when (and (!= (.-Type f) nil) (.HasShape (.-Type f)))
+        (.SetHasShape t true)
+        (break)))
+
+
+    ^{:line 1732} t))
+
+
+
+
+^{:go/end 1771} (go/func NewSignature "NewSignature returns a new function type for the given receiver,\nparameters, and results, any of which may be nil.\n" ^{:tag (* Type)} [^{:tag (* Field)} recv ^{:tag (slice (* Field))} params ^{:tag (slice (* Field))} results]
+  (let [startParams 0]
+    (when (!= recv nil)
+      (set! startParams 1))
+
+    (let [startResults (+ startParams (len params))
+
+        ^{:line 1744} allParams (make (slice (* Field)) (+ startResults (len results)))]
+      (when (!= recv nil)
+        (aset allParams 0 recv))
+
+      (copy (subslice allParams startParams) params)
+      (copy (subslice allParams startResults) results)
+
+      (let [t (newType TFUNC)
+          ^{:line 1752} ft (.funcType t)
+
+          ^{:line 1754} funargs ^{:go/end 1758} (fn ^{:tag (* Type)} [^{:tag (slice (* Field))} fields]
+            (let [s (NewStruct fields)]
+              (set! (.-ParamTuple (.StructType s)) true)
+              ^{:line 1757} s))]
+
+
+        (set! (.-allParams ft) allParams)
+        (set! (.-startParams ft) startParams)
+        (set! (.-startResults ft) startResults)
+
+        (set! (.-resultsTuple ft) (funargs (subslice allParams startResults)))
+
+        (when (fieldsHasShape allParams)
+          (.SetHasShape t true))
+
+
+        ^{:line 1770} t))))
+
+
+
+^{:go/end 1788} (go/func NewStruct "NewStruct returns a new struct with the given fields.\n" ^{:tag (* Type)} [^{:tag (slice (* Field))} fields]
+  (let [t (newType TSTRUCT)]
+    (.setFields t fields)
+    (when (fieldsHasShape fields)
+      (.SetHasShape t true))
+
+    (range [_ f fields]
+      (when (.NotInHeap (.-Type f))
+        (.SetNotInHeap t true)
+        (break)))
+
+
+
+    ^{:line 1787} t))
+
+
+(go/var
+  ^{:line 1791} [^{:tag (array NTYPE bool)} IsInt]
+  ^{:line 1792} [^{:tag (array NTYPE bool)} IsFloat]
+  ^{:line 1793} [^{:tag (array NTYPE bool)} IsComplex]
+  ^{:line 1794} [^{:tag (array NTYPE bool)} IsSimple])
+
+
+(go/var ^{:tag (array NTYPE bool)} IsOrdered)
+
+
+
+^{:go/end 1843} (go/func IsReflexive "IsReflexive reports whether t has a reflexive equality operator.\nThat is, if x==x for all x of type t.\n" ^bool [^{:tag (* Type)} t]
+  (switch (.Kind t)
+    (case [TBOOL
+        ^{:line 1804} TINT
+        ^{:line 1805} TUINT
+        ^{:line 1806} TINT8
+        ^{:line 1807} TUINT8
+        ^{:line 1808} TINT16
+        ^{:line 1809} TUINT16
+        ^{:line 1810} TINT32
+        ^{:line 1811} TUINT32
+        ^{:line 1812} TINT64
+        ^{:line 1813} TUINT64
+        ^{:line 1814} TUINTPTR
+        ^{:line 1815} TPTR
+        ^{:line 1816} TUNSAFEPTR
+        ^{:line 1817} TSTRING
+        ^{:line 1818} TCHAN]
+      (return true))
+
+    (case [TFLOAT32
+        ^{:line 1822} TFLOAT64
+        ^{:line 1823} TCOMPLEX64
+        ^{:line 1824} TCOMPLEX128
+        ^{:line 1825} TINTER]
+      (return false))
+
+    (case [TARRAY]
+      (return (IsReflexive (.Elem t))))
+
+    (case [TSTRUCT]
+      (range [_ t1 (.Fields t)]
+        (when (not (IsReflexive (.-Type t1)))
+          (return false)))
+
+
+      (return true))
+
+    (default
+      (base/Fatalf "bad type for map key: %v" t)
+      (return false))))
+
+
+
+
+
+^{:go/end 1849} (go/func IsDirectIface "Can this type be stored directly in an interface word?\nYes, if the representation is a single pointer.\n" ^bool [^{:tag (* Type)} t]
+  (and (== (.Size t) (conv int64 PtrSize)) (== (PtrDataSize t) (conv int64 PtrSize))))
+
+
+
+
+
+^{:go/end 1856} (go/func IsInterfaceMethod "IsInterfaceMethod reports whether (field) m is\nan interface method. Such methods have the\nspecial receiver type types.FakeRecvType().\n" ^bool [^{:tag (* Type)} f]
+  (== (.-Type (.Recv f)) (FakeRecvType)))
+
+
+
+
+
+
+^{:go/end 1864} (go/func IsMethodApplicable "IsMethodApplicable reports whether method m can be called on a\nvalue of type t. This is necessary because we compute a single\nmethod set for both T and *T, but some *T methods are not\napplicable to T receivers.\n" ^bool [^{:tag (* Type)} t ^{:tag (* Field)} m]
+  (or (.IsPtr t) (not (.IsPtr (.-Type (.Recv (.-Type m))))) (IsInterfaceMethod (.-Type m)) (== (.-Embedded m) 2)))
+
+
+
+
+^{:go/breaks [[5 1872]] :go/end 1873} (go/func RuntimeSymName "RuntimeSymName returns the name of s if it's in package \"runtime\"; otherwise\nit returns \"\".\n" ^string [^{:tag (* Sym)} s]
+  (when (== (.-Path (.-Pkg s)) "runtime")
+    (return (.-Name s)))
+
+  "")
+
+
+
+
+^{:go/breaks [[5 1881]] :go/end 1882} (go/func ReflectSymName "ReflectSymName returns the name of s if it's in package \"reflect\"; otherwise\nit returns \"\".\n" ^string [^{:tag (* Sym)} s]
+  (when (== (.-Path (.-Pkg s)) "reflect")
+    (return (.-Name s)))
+
+  "")
+
+
+
+
+^{:go/end 1888} (go/func IsNoInstrumentPkg "IsNoInstrumentPkg reports whether p is a package that\nshould not be instrumented.\n" ^bool [^{:tag (* Pkg)} p]
+  (.-NoInstrument (objabi/LookupPkgSpecial (.-Path p))))
+
+
+
+
+^{:go/end 1894} (go/func IsNoRacePkg "IsNoRacePkg reports whether p is a package that\nshould not be race instrumented.\n" ^bool [^{:tag (* Pkg)} p]
+  (.-NoRaceFunc (objabi/LookupPkgSpecial (.-Path p))))
+
+
+
+^{:go/end 1899} (go/func IsRuntimePkg "IsRuntimePkg reports whether p is a runtime package.\n" ^bool [^{:tag (* Pkg)} p]
+  (.-Runtime (objabi/LookupPkgSpecial (.-Path p))))
+
+
+
+
+
+^{:go/breaks [[9 1933]] :go/end 1934} (go/func ReceiverBaseType "ReceiverBaseType returns the underlying type, if any,\nthat owns methods with receiver parameter t.\nThe result is either a named type or an anonymous struct.\n" ^{:tag (* Type)} [^{:tag (* Type)} t]
+  (when (== t nil)
+    (return nil))
+
+
+  ;; Strip away pointer if it's there.
+  (when (.IsPtr t)
+    (when (!= (.Sym t) nil)
+      (return nil))
+
+    (set! t (.Elem t))
+    (when (== t nil)
+      (return nil)))
+
+
+
+  ;; Must be a named type or anonymous struct.
+  (when (and (== (.Sym t) nil) (not (.IsStruct t)))
+    (return nil))
+
+
+  ;; Check types.
+  (when (aget IsSimple (.Kind t))
+    (return t))
+
+  (switch (.Kind t)
+    (case [TARRAY TCHAN TFUNC TMAP TSLICE TSTRING TSTRUCT]
+      (return t)))
+
+  nil)
+
+
+^{:go/breaks [5] :go/end 1945} (go/func FloatForComplex ^{:tag (* Type)} [^{:tag (* Type)} t]
+  (switch (.Kind t)
+    (case [TCOMPLEX64]
+      (return (aget Types TFLOAT32)))
+    (case [TCOMPLEX128]
+      (return (aget Types TFLOAT64))))
+
+  (base/Fatalf "unexpected type: %v" t)
+  nil)
+
+
+^{:go/breaks [5] :go/end 1956} (go/func ComplexForFloat ^{:tag (* Type)} [^{:tag (* Type)} t]
+  (switch (.Kind t)
+    (case [TFLOAT32]
+      (return (aget Types TCOMPLEX64)))
+    (case [TFLOAT64]
+      (return (aget Types TCOMPLEX128))))
+
+  (base/Fatalf "unexpected type: %v" t)
+  nil)
+
+
+^{:go/end 1960} (go/func TypeSym ^{:tag (* Sym)} [^{:tag (* Type)} t]
+  (TypeSymLookup (TypeSymName t)))
+
+
+^{:go/end 1967} (go/func TypeSymLookup ^{:tag (* Sym)} [^string name]
+  (.Lock typepkgmu)
+  (let [s (.Lookup typepkg name)]
+    (.Unlock typepkgmu)
+    ^{:line 1966} s))
+
+
+^{:go/end 1976} (go/func TypeSymName ^string [^{:tag (* Type)} t]
+  (let [name (.LinkString t)]
+    ;; Use a separate symbol name for Noalg types for #17752.
+    (when (TypeHasNoAlg t)
+      (set! name (+ "noalg." name)))
+
+    ^{:line 1975} name))
+
+
+
+
+(go/var "Fake package for runtime type info (headers)\nDon't access directly, use typeLookup below.\n"
+  ^{:line 1981} [^sync/Mutex typepkgmu] ; protects typepkg lookups
+  ^{:line 1982} [typepkg (NewPkg "type" "type")])
+
+
+(go/var ^{:tag (array NTYPE Kind)} SimType)
+
+
+(go/var ^{:doc "Fake package for shape types (see typecheck.Shapify()).\n"} ShapePkg (NewPkg "go.shape" "go.shape"))
+
+^{:go/end 1992} (go/method IsSIMD ^bool [^{:tag (* Type)} t]
+  (.-isSIMD t))

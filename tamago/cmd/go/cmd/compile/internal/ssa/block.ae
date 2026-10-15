@@ -1,0 +1,507 @@
+;; Copyright 2015 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.cmd.compile.internal.ssa) (go/file "block.go" :imports [
+
+
+    ^{:line 8} [src "cmd/internal/src"]
+    ^{:line 9} [fmt "fmt"]])
+
+
+
+(go/type Block "Block represents a basic block in the control flow graph of a function.\n" (struct
+
+
+    ^{:line 16 :tag ID :doc "A unique identifier for the block. The system will attempt to allocate\nthese IDs densely, but no guarantees.\n"} ID
+
+
+    ^{:line 19 :tag src/XPos :doc "Source position for block's control operation\n"} Pos
+
+
+    ^{:line 22 :tag CPUfeatures :doc "What cpu features (AVXnnn, SVEyyy) are implied to reach/execute this block?\n"} CPUfeatures
+
+
+    ^{:line 25 :tag BlockKind :doc "The kind of block this is.\n"} Kind
+
+
+
+
+
+
+    ^{:line 32 :tag BranchPrediction :doc "Likely direction for branches.\nIf BranchLikely, Succs[0] is the most likely branch taken.\nIf BranchUnlikely, Succs[1] is the most likely branch taken.\nIgnored if len(Succs) < 2.\nFatal if not BranchUnknown and len(Succs) > 2.\n"} Likely
+
+
+    ^{:line 35 :tag bool :doc "After flagalloc, records whether flags are live at the end of the block.\n"} FlagsLiveAtEnd
+
+
+    ^{:line 38 :tag Hotness :doc "A block that would be good to align (according to the optimizer's guesses)\n"} Hotness
+
+
+    ^{:line 41 :tag (slice Edge) :doc "Subsequent blocks, if any. The number and order depend on the block kind.\n"} Succs
+
+
+
+
+
+    ^{:line 47 :tag (slice Edge) :doc "Inverse of successors.\nThe order is significant to Phi nodes in the block.\nTODO: predecessors is a pain to maintain. Can we somehow order phi\narguments by block id and have this field computed explicitly when needed?\n"} Preds
+
+
+
+
+
+
+
+
+
+
+    ^{:line 58 :tag (array 2 (* Value)) :doc "A list of values that determine how the block is exited. The number\nand type of control values depends on the Kind of the block. For\ninstance, a BlockIf has a single boolean control value and BlockExit\nhas a single memory control value.\n\nThe ControlValues() method may be used to get a slice with the non-nil\ncontrol values that can be ranged over.\n\nControls[1] must be nil if Controls[0] is nil.\n"} Controls
+
+
+    ^{:line 61 :tag Aux :doc "Auxiliary info for the block. Its value depends on the Kind.\n"} Aux
+    ^{:line 62 :tag int64} AuxInt
+
+
+
+    ^{:line 66 :tag (slice (* Value)) :doc "The unordered set of Values that define the operation of this block.\nAfter the scheduling pass, this list is ordered.\n"} Values
+
+
+    ^{:line 69 :tag (* Func) :doc "The containing function\n"} Func
+
+
+    ^{:line 72 :tag (array 2 Edge) :doc "Storage for Succs, Preds and Values.\n"} succstorage
+    ^{:line 73 :tag (array 4 Edge)} predstorage
+    ^{:line 74 :tag (array 9 (* Value))} valstorage))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+(go/type Edge "Edge represents a CFG edge.\nExample edges for b branching to either c or d.\n(c and d have other predecessors.)\n\n\tb.Succs = [{c,3}, {d,1}]\n\tc.Preds = [?, ?, ?, {b,0}]\n\td.Preds = [?, {b,1}, ?]\n\nThese indexes allow us to edit the CFG in constant time.\nIn addition, it informs phi ops in degenerate cases like:\n\n\tb:\n\t   if k then c else c\n\tc:\n\t   v = Phi(x, y)\n\nThen the indexes tell you whether x is chosen from\nthe if or else branch from b.\n\n\tb.Succs = [{c,0},{c,1}]\n\tc.Preds = [{b,0},{b,1}]\n\nmeans x is chosen if k is true.\n" (struct
+
+    ^{:line 102 :tag (* Block) :doc "block edge goes to (in a Succs list) or from (in a Preds list)\n"} b
+
+
+
+
+    ^{:line 107 :tag int :doc "index of reverse edge.  Invariant:\n  e := x.Succs[idx]\n  e.b.Preds[e.i] = Edge{x,idx}\nand similarly for predecessors.\n"} i))
+
+
+^{:go/end 112} (go/method Block ^{:tag (* Block)} [^Edge e]
+  (.-b e))
+
+^{:go/end 115} (go/method Index ^int [^Edge e]
+  (.-i e))
+
+^{:go/end 118} (go/method String ^string [^Edge e]
+  (fmt/Sprintf "{%v,%d}" (.-b e) (.-i e)))
+
+
+
+(go/type BlockKind "BlockKind is the kind of SSA block.\n" uint8)
+
+
+^{:go/end 126} (go/method String "short form print\n" ^string [^{:tag (* Block)} b]
+  (fmt/Sprintf "b%d" (.-ID b)))
+
+
+
+^{:go/end 153} (go/method LongString "long form print\n" ^string [^{:tag (* Block)} b]
+  (let [s (.String (.-Kind b))]
+    (when (!= (.-Aux b) nil)
+      (set! s + (fmt/Sprintf " {%s}" (.-Aux b))))
+
+    (when [t (.AuxIntString b)] (!= t "")
+      (set! s + (fmt/Sprintf " [%s]" t)))
+
+    (range [_ c (.ControlValues b)]
+      (set! s + (fmt/Sprintf " %s" c)))
+
+    (when (> (len (.-Succs b)) 0)
+      (set! s + " ->")
+      (range [_ c (.-Succs b)]
+        (set! s + (+ " " (.String (.-b c))))))
+
+
+    (switch (.-Likely b)
+      (case [BranchUnlikely]
+        (set! s + " (unlikely)"))
+      (case [BranchLikely]
+        (set! s + " (likely)")))
+
+    ^{:line 152} s))
+
+
+
+
+^{:go/breaks [[6 164]] :go/end 165} (go/method NumControls "NumControls returns the number of non-nil control values the\nblock has.\n" ^int [^{:tag (* Block)} b]
+  (when (== (aget (.-Controls b) 0) nil)
+    (return 0))
+
+  (when (== (aget (.-Controls b) 1) nil)
+    (return 1))
+
+  2)
+
+
+
+
+
+
+^{:go/end 179} (go/method ControlValues "ControlValues returns a slice containing the non-nil control\nvalues of the block. The index of each control value will be\nthe same as it is in the Controls property and can be used\nin ReplaceControl calls.\n" ^{:tag (slice (* Value))} [^{:tag (* Block)} b]
+  (when (== (aget (.-Controls b) 0) nil)
+    (return (subslice (.-Controls b) _ 0)))
+
+  (when (== (aget (.-Controls b) 1) nil)
+    (return (subslice (.-Controls b) _ 1)))
+
+  (subslice (.-Controls b) _ 2))
+
+
+
+
+
+^{:go/end 188} (go/method SetControl "SetControl removes all existing control values and then adds\nthe control value provided. The number of control values after\na call to SetControl will always be 1.\n" [^{:tag (* Block)} b ^{:tag (* Value)} v]
+  (.ResetControls b)
+  (aset (.-Controls b) 0 v)
+  (inc! (.-Uses v)))
+
+
+
+^{:go/end 199} (go/method ResetControls "ResetControls sets the number of controls for the block to 0.\n" [^{:tag (* Block)} b]
+  (when (!= (aget (.-Controls b) 0) nil)
+    (dec! (.-Uses (aget (.-Controls b) 0))))
+
+  (when (!= (aget (.-Controls b) 1) nil)
+    (dec! (.-Uses (aget (.-Controls b) 1))))
+
+  (set! (.-Controls b) (lit (array 2 (* Value))))) ; reset both controls to nil
+
+
+
+^{:go/end 206} (go/method AddControl "AddControl appends a control value to the existing list of control values.\n" [^{:tag (* Block)} b ^{:tag (* Value)} v]
+  (let [i (.NumControls b)]
+    (aset (.-Controls b) i v) ; panics if array is full
+    (inc! (.-Uses v))))
+
+
+
+
+^{:go/end 214} (go/method ReplaceControl "ReplaceControl exchanges the existing control value at the index provided\nfor the new value. The index must refer to a valid control value.\n" [^{:tag (* Block)} b ^int i ^{:tag (* Value)} v]
+  (dec! (.-Uses (aget (.-Controls b) i)))
+  (aset (.-Controls b) i v)
+  (inc! (.-Uses v)))
+
+
+
+
+^{:go/end 226} (go/method CopyControls "CopyControls replaces the controls for this block with those from the\nprovided block. The provided block is not modified.\n" [^{:tag (* Block)} b ^{:tag (* Block)} from]
+  (when (== b from)
+    (return))
+
+  (.ResetControls b)
+  (range [_ c (.ControlValues from)]
+    (.AddControl b c)))
+
+
+
+
+
+
+^{:go/end 236} (go/method Reset "Reset sets the block to the provided kind and clears all the blocks control\nand auxiliary values. Other properties of the block, such as its successors,\npredecessors and values are left unmodified.\n" [^{:tag (* Block)} b ^BlockKind kind]
+  (set! (.-Kind b) kind)
+  (.ResetControls b)
+  (set! (.-Aux b) nil)
+  (set! (.-AuxInt b) 0))
+
+
+
+
+
+
+^{:go/end 249} (go/method resetWithControl "resetWithControl resets b and adds control v.\nIt is equivalent to b.Reset(kind); b.AddControl(v),\nexcept that it is one call instead of two and avoids a bounds check.\nIt is intended for use by rewrite rules, where this matters.\n" [^{:tag (* Block)} b ^BlockKind kind ^{:tag (* Value)} v]
+  (set! (.-Kind b) kind)
+  (.ResetControls b)
+  (set! (.-Aux b) nil)
+  (set! (.-AuxInt b) 0)
+  (aset (.-Controls b) 0 v)
+  (inc! (.-Uses v)))
+
+
+
+
+
+
+^{:go/end 264} (go/method resetWithControl2 "resetWithControl2 resets b and adds controls v and w.\nIt is equivalent to b.Reset(kind); b.AddControl(v); b.AddControl(w),\nexcept that it is one call instead of three and avoids two bounds checks.\nIt is intended for use by rewrite rules, where this matters.\n" [^{:tag (* Block)} b ^BlockKind kind ^{:tag (* Value)} v ^{:tag (* Value)} w]
+  (set! (.-Kind b) kind)
+  (.ResetControls b)
+  (set! (.-Aux b) nil)
+  (set! (.-AuxInt b) 0)
+  (aset (.-Controls b) 0 v)
+  (aset (.-Controls b) 1 w)
+  (inc! (.-Uses v))
+  (inc! (.-Uses w)))
+
+
+
+
+
+^{:go/end 272} (go/method truncateValues "truncateValues truncates b.Values at the ith element, zeroing subsequent elements.\nThe values in b.Values after i must already have had their args reset,\nto maintain correct value uses counts.\n" [^{:tag (* Block)} b ^int i]
+  (clear (subslice (.-Values b) i))
+  (set! (.-Values b) (subslice (.-Values b) _ i)))
+
+
+
+^{:go/end 281} (go/method AddEdgeTo "AddEdgeTo adds an edge from block b to block c.\n" [^{:tag (* Block)} b ^{:tag (* Block)} c]
+  (let [i (len (.-Succs b))
+      ^{:line 277} j (len (.-Preds c))]
+    (set! (.-Succs b) (append (.-Succs b) (lit Edge c j)))
+    (set! (.-Preds c) (append (.-Preds c) (lit Edge b i)))
+    (.invalidateCFG (.-Func b))))
+
+
+
+
+
+
+^{:go/end 298} (go/method removePred "removePred removes the ith input edge from b.\nIt is the responsibility of the caller to remove\nthe corresponding successor edge, and adjust any\nphi values by calling b.removePhiArg(v, i).\n" [^{:tag (* Block)} b ^int i]
+  (let [n (- (len (.-Preds b)) 1)]
+    (when (!= i n)
+      (let [e (aget (.-Preds b) n)]
+        (aset (.-Preds b) i e)
+        ;; Update the other end of the edge we moved.
+        (set! (.-i (aget (.-Succs (.-b e)) (.-i e))) i)))
+
+    (aset (.-Preds b) n (lit Edge))
+    (set! (.-Preds b) (subslice (.-Preds b) _ n))
+    (.invalidateCFG (.-Func b))))
+
+
+
+
+
+
+
+^{:go/end 316} (go/method removeSucc "removeSucc removes the ith output edge from b.\nIt is the responsibility of the caller to remove\nthe corresponding predecessor edge.\nNote that this potentially reorders successors of b, so it\nmust be used very carefully.\n" [^{:tag (* Block)} b ^int i]
+  (let [n (- (len (.-Succs b)) 1)]
+    (when (!= i n)
+      (let [e (aget (.-Succs b) n)]
+        (aset (.-Succs b) i e)
+        ;; Update the other end of the edge we moved.
+        (set! (.-i (aget (.-Preds (.-b e)) (.-i e))) i)))
+
+    (aset (.-Succs b) n (lit Edge))
+    (set! (.-Succs b) (subslice (.-Succs b) _ n))
+    (.invalidateCFG (.-Func b))))
+
+
+^{:go/end 329} (go/method swapSuccessors [^{:tag (* Block)} b]
+  (when (!= (len (.-Succs b)) 2)
+    (.Fatalf b "swapSuccessors with len(Succs)=%d" (len (.-Succs b))))
+
+  (let [e0 (aget (.-Succs b) 0)
+      ^{:line 323} e1 (aget (.-Succs b) 1)]
+    (aset (.-Succs b) 0 e1)
+    (aset (.-Succs b) 1 e0)
+    (set! (.-i (aget (.-Preds (.-b e0)) (.-i e0))) 1)
+    (set! (.-i (aget (.-Preds (.-b e1)) (.-i e1))) 0)
+    (set! (.-Likely b) * -1)))
+
+
+
+^{:go/end 342} (go/method swapSuccessorsByIdx "Swaps b.Succs[x] and b.Succs[y].\n" [^{:tag (* Block)} b ^int x ^int y]
+  (when (== x y)
+    (return))
+
+  (let [ex (aget (.-Succs b) x)
+      ^{:line 337} ey (aget (.-Succs b) y)]
+    (aset (.-Succs b) x ey)
+    (aset (.-Succs b) y ex)
+    (set! (.-i (aget (.-Preds (.-b ex)) (.-i ex))) y)
+    (set! (.-i (aget (.-Preds (.-b ey)) (.-i ey))) x)))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 367} (go/method removePhiArg "removePhiArg removes the ith arg from phi.\nIt must be called after calling b.removePred(i) to\nadjust the corresponding phi value of the block:\n\nb.removePred(i)\nfor _, v := range b.Values {\n\n\tif v.Op != OpPhi {\n\t    continue\n\t}\n\tb.removePhiArg(v, i)\n\n}\n" [^{:tag (* Block)} b ^{:tag (* Value)} phi ^int i]
+  (let [n (len (.-Preds b))]
+    (when [numPhiArgs (len (.-Args phi))] (!= (- numPhiArgs 1) n)
+      (.Fatalf b "inconsistent state for %v, num predecessors: %d, num phi args: %d" phi n numPhiArgs))
+
+    (dec! (.-Uses (aget (.-Args phi) i)))
+    (aset (.-Args phi) i (aget (.-Args phi) n))
+    (aset (.-Args phi) n nil)
+    (set! (.-Args phi) (subslice (.-Args phi) _ n))
+    (phielimValue phi)))
+
+
+
+
+^{:go/end 376} (go/method uniquePred "uniquePred returns the predecessor of b, if there is exactly one.\nReturns nil otherwise.\n" ^{:tag (* Block)} [^{:tag (* Block)} b]
+  (when (!= (len (.-Preds b)) 1)
+    (return nil))
+
+  (.-b (aget (.-Preds b) 0)))
+
+
+
+
+
+
+^{:go/breaks [[7 398]] :go/end 399} (go/method LackingPos "LackingPos indicates whether b is a block whose position should be inherited\nfrom its successors.  This is true if all the values within it have unreliable positions\nand if it is \"plain\", meaning that there is no control flow that is also very likely\nto correspond to a well-understood source position.\n" ^bool [^{:tag (* Block)} b]
+  ;; Non-plain predecessors are If or Defer, which both (1) have two successors,
+  ;; which might have different line numbers and (2) correspond to statements
+  ;; in the source code that have positions, so this case ought not occur anyway.
+  (when (!= (.-Kind b) BlockPlain)
+    (return false))
+
+  (when (!= (.-Pos b) src/NoXPos)
+    (return false))
+
+  (range [_ v (.-Values b)]
+    (when (.LackingPos v)
+      (continue))
+
+    (return false))
+
+  true)
+
+
+^{:go/end 412} (go/method AuxIntString ^string [^{:tag (* Block)} b]
+  (switch (.AuxIntType (.-Kind b))
+    (case ["int8"]
+      (return (fmt/Sprintf "%v" (conv int8 (.-AuxInt b)))))
+    (case ["uint8"]
+      (return (fmt/Sprintf "%v" (conv uint8 (.-AuxInt b)))))
+    (case [""] ; no aux int type
+      (return ""))
+    (default ; type specified but not implemented - print as int64
+      (return (fmt/Sprintf "%v" (.-AuxInt b))))))
+
+
+
+
+^{:go/breaks [[6 427]] :go/end 428} (go/method likelyBranch "likelyBranch reports whether block b is the likely branch of all of its predecessors.\n" ^bool [^{:tag (* Block)} b]
+  (when (== (len (.-Preds b)) 0)
+    (return false))
+
+  (range [_ e (.-Preds b)]
+    (let [p (.-b e)]
+      (when (or (== (len (.-Succs p)) 1) (and (== (len (.-Succs p)) 2) ^:go/paren (or (and (== (.-Likely p) BranchLikely) (== (.-b (aget (.-Succs p) 0)) b))
+              (and (== (.-Likely p) BranchUnlikely) (== (.-b (aget (.-Succs p) 1)) b)))))
+        (continue))
+
+      (return false)))
+
+  true)
+
+
+^{:go/end 430} (go/method Logf [^{:tag (* Block)} b ^string msg & ^{:tag (slice any)} args] (.Logf (.-Func b) msg (spread args)))
+^{:go/end 431} (go/method Log ^bool [^{:tag (* Block)} b] (.Log (.-Func b)))
+^{:go/end 432} (go/method Fatalf [^{:tag (* Block)} b ^string msg & ^{:tag (slice any)} args] (.Fatalf (.-Func b) msg (spread args)))
+
+(go/type BranchPrediction int8)
+
+(go/const
+  ^{:line 437} [^{:val -1} BranchUnlikely (conv BranchPrediction -1)]
+  ^{:line 438} [^{:val 0} BranchUnknown (conv BranchPrediction 0)]
+  ^{:line 439} [^{:val 1} BranchLikely (conv BranchPrediction (+ 1))])
+
+
+(go/type Hotness int8) ; Could use negative numbers for specifically non-hot blocks, but don't, yet.
+(go/const
+
+
+  ^{:line 446} [^{:tag Hotness :val 1 :doc "These values are arranged in what seems to be order of increasing alignment importance.\nCurrently only a few are relevant.  Implicitly, they are all in a loop.\n"} HotNotFlowIn (<< 1 iota)] ; This block is only reached by branches
+  ^{:line 447} [^{:val 2} HotInitial] ; In the block order, the first one for a given loop.  Not necessarily topological header.
+  ^{:line 448} [^{:val 4} HotPgo] ; By PGO-based heuristics, this block occurs in a hot loop
+
+  ^{:line 450} [^{:val 0} HotNot 0]
+  ^{:line 451} [^{:val 3} HotInitialNotFlowIn (bit-or HotInitial HotNotFlowIn)] ; typically first block of a rotated loop, loop is entered with a branch (not to this block).  No PGO
+  ^{:line 452} [^{:val 6} HotPgoInitial (bit-or HotPgo HotInitial)] ; special case; single block loop, initial block is header block has a flow-in entry, but PGO says it is hot
+  ^{:line 453} [^{:val 7} HotPgoInitialNotFLowIn (bit-or HotPgo HotInitial HotNotFlowIn)]) ; PGO says it is hot, and the loop is rotated so flow enters loop with a branch
+
+
+(go/type CPUfeatures uint32)
+
+(go/const
+  ^{:line 459} [^{:tag CPUfeatures :val 0} CPUNone 0]
+  ^{:line 460} [^{:tag CPUfeatures :val 4294967295} CPUAll (bit-not (conv CPUfeatures 0))]
+  ^{:line 461} [^{:tag CPUfeatures :val 4} CPUavx (<< 1 iota)]
+  ^{:line 462} [^{:val 8} CPUavx2]
+  ^{:line 463} [^{:val 16} CPUavxvnni]
+  ^{:line 464} [^{:val 32} CPUavx512]
+  ^{:line 465} [^{:val 64} CPUbitalg]
+  ^{:line 466} [^{:val 128} CPUgfni]
+  ^{:line 467} [^{:val 256} CPUvbmi]
+  ^{:line 468} [^{:val 512} CPUvbmi2]
+  ^{:line 469} [^{:val 1024} CPUvpopcntdq]
+  ^{:line 470} [^{:val 2048} CPUavx512vnni]
+
+  ^{:line 472} [^{:val 4096} CPUneon]
+  ^{:line 473} [^{:val 8192} CPUsve2])
+
+
+^{:go/end 478} (go/method hasFeature ^bool [^CPUfeatures f ^CPUfeatures x]
+  (== (bit-and f x) x))
+
+
+^{:go/end 508} (go/method String ^string [^CPUfeatures f]
+  (when (== f CPUNone)
+    (return "none"))
+
+  (when (== f CPUAll)
+    (return "all"))
+
+  (let [s ""
+      ^{:line 488} foo ^{:go/end 495} (fn [^string what ^CPUfeatures feat]
+        (when (!= (bit-and feat f) 0)
+          (when (!= s "")
+            (set! s + "+"))
+
+          (set! s + what)))]
+
+
+    (foo "avx" CPUavx)
+    (foo "avx2" CPUavx2)
+    (foo "avx512" CPUavx512)
+    (foo "avxvnni" CPUavxvnni)
+    (foo "bitalg" CPUbitalg)
+    (foo "gfni" CPUgfni)
+    (foo "vbmi" CPUvbmi)
+    (foo "vbmi2" CPUvbmi2)
+    (foo "popcntdq" CPUvpopcntdq)
+    (foo "avx512vnni" CPUavx512vnni)
+
+    ^{:line 507} s))

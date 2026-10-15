@@ -1,0 +1,295 @@
+;; Copyright 2026 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.cmd.compile.internal.midway) (go/file "analysis.go" :imports [
+
+
+    ^{:line 8} [base "cmd/compile/internal/base"]
+    ^{:line 9} [syntax "cmd/compile/internal/syntax"]
+    ^{:line 10} [types2 "cmd/compile/internal/types2"]])
+
+
+
+(go/type Analyzer "Analyzer holds the state for SIMD dependency analysis\n" (struct
+    ^{:line 15 :tag (* types2/Package)} pkg
+    ^{:line 16 :tag (* types2/Info)} info
+    ^{:line 17 :tag (map types2/Object bool)} isDependentObj ; does an Object depend on a simd type in some way?
+    ^{:line 18 :tag (map types2/Object bool)} isDependentMethod ; is this dependent Object also a method? (methods are not renamed, their types are)
+    ^{:line 19 :tag (map types2/Type bool)} hasDependentMethod ; is this a type that has a dependent method?
+    ^{:line 20 :tag (map types2/Type bool)} visited ; if in map, type has been visited, and value is whether type is dependent
+    ^{:line 21 :tag bool} inSimd)) ; true if the current package is the simd package (which is a special case)
+
+
+^{:go/end 34} (go/func NewAnalyzer ^{:tag (* Analyzer)} [^{:tag (* types2/Package)} pkg ^{:tag (* types2/Info)} info]
+  (addr ^{:go/breaks [2 4 6 8 10 12 14]} (lit Analyzer
+      :pkg pkg
+      :info info
+      :isDependentObj (make (map types2/Object bool))
+      :isDependentMethod (make (map types2/Object bool))
+      :hasDependentMethod (make (map types2/Type bool))
+      :visited (make (map types2/Type bool))
+      :inSimd (== (.Path pkg) simdPkg))))
+
+
+
+
+^{:go/end 87} (go/method Analyze "Analyze builds the set of SIMD-dependent objects\n" ^bool [^{:tag (* Analyzer)} a ^{:tag (slice (* syntax/File))} files]
+  ;; Phase 1: Seed dependence from types and signatures
+  (let [hdmsize (len (.-hasDependentMethod a))]
+
+    (while true
+      (range [_ obj (.-Defs (.-info a))]
+        (when (!= obj nil)
+          (.markIfDependent a obj)))
+
+
+      (range [_ obj (.-Uses (.-info a))]
+        (when (!= obj nil)
+          (.markIfDependent a obj)))
+
+
+      (when (== hdmsize (len (.-hasDependentMethod a)))
+        (break))
+
+      (when (> (.-Simd base/Debug) 0)
+        (base/Warn "hasDependentMethod increased from %d to %d" hdmsize (len (.-hasDependentMethod a))))
+
+      (set! hdmsize (len (.-hasDependentMethod a)))
+      (clear (.-visited a)))
+
+
+    ;; Phase 2: Transitive closure via function bodies
+    (let [changed true]
+      (while changed
+        (set! changed false)
+        (range [_ file files]
+          (range [_ decl (.-DeclList file)]
+            (when [(values fn ok) (assert (* syntax/FuncDecl) decl)] ok
+              (when (== (.-Name fn) nil)
+                (continue))
+
+              (let [obj (aget (.-Defs (.-info a)) (.-Name fn))]
+                (when (or (== obj nil) (aget (.-isDependentObj a) obj))
+                  (continue))
+
+
+                (when (.hasBodyDependency a fn)
+                  (aset (.-isDependentObj a) obj true)
+                  (set! changed true)))))))
+
+
+
+
+
+
+      (> (len (.-isDependentObj a)) 0))))
+
+
+^{:go/end 136} (go/method hasBodyDependency ^bool [^{:tag (* Analyzer)} a ^{:tag (* syntax/FuncDecl)} fn]
+  (when (== (.-Body fn) nil)
+    (return false))
+
+  ;; Walk the body and check identifiers
+  ;; This will also note any variable references that are dependent.
+  (let [found false]
+    (syntax/Inspect (.-Body fn) ^{:go/breaks [[3 133]] :go/end 134} (fn ^bool [^syntax/Node n]
+        (when [(values id ok) (assert (* syntax/Name) n)] ok
+          (let [obj (aget (.-Uses (.-info a)) id)]
+            (when (== obj nil)
+              (set! obj (aget (.-Defs (.-info a)) id)))
+
+            (when (!= obj nil)
+              (if [(values _ isFunc) (assert (* types2/Func) obj)] (not isFunc)
+                (when (aget (.-isDependentObj a) obj)
+                  (set! found true)
+                  (return false))
+
+
+                (let [sig (assert (* types2/Signature) (.Type obj))]
+                  (when (.HasDependentSignature a sig)
+                    (set! found true)
+                    (return false))))
+
+
+              (when (.isDependentType a (.Type obj))
+                ;; Whatever this is, it makes the outer object dependent.
+                ;; If this is a package variable with dependent type, mark the
+                ;; variable as dependent, so that references to it become dependent.
+                (when [(values obj ok) (assert (* types2/Var) obj)] (and ok (== (.Kind obj) types2/PackageVar))
+                  ;; everything else is nested within a dependent function/struct/scope
+                  ;; and does not need its own renaming
+                  (aset (.-isDependentObj a) obj true))
+
+                (set! found true)
+                (return false))
+
+              (when (isBaseSimdTypeObj obj)
+                (set! found true)
+                (return false)))))
+
+
+
+        true))
+
+    ^{:line 135} found))
+
+
+^{:go/end 188} (go/method markIfDependent ^bool [^{:tag (* Analyzer)} a ^types2/Object obj]
+  (when (aget (.-isDependentObj a) obj)
+    (return true))
+
+
+  (let [isDep false
+      ^{:line 144} isDepMeth false]
+    (type-switch [obj obj]
+      (case [(* types2/Var)]
+        (when (and (== ^{:go/via [object]} (.Pkg obj) (.-pkg a)) (== ^{:go/via [object]} (.Parent obj) (.Scope (.-pkg a))))
+          (set! isDep (.isDependentType a ^{:go/via [object]} (.Type obj)))))
+
+      (case [(* types2/TypeName)]
+        (set! isDep (.isDependentType a ^{:go/via [object]} (.Type obj))))
+      (case [(* types2/Func)]
+        (let [sig (assert (* types2/Signature) ^{:go/via [object]} (.Type obj))]
+          (when (.HasDependentSignature a sig)
+            ;; NOT dependent if it is a method of one of the base SIMD types.
+            ;; TODO: what about aliases of base SIMD types?
+            (if [rcv (.Recv sig)] (== rcv nil)
+              (set! isDep true)
+              (when [(values named ok) (assert (* types2/Named) ^{:go/via [object]} (.Type rcv))] (or (not ok) (not (isBaseSimdType named)))
+                (set! isDep true)
+                (let [t ^{:go/via [object]} (.Type rcv)]
+                  (when (not (.isDependentType a t))
+                    (.markHasMethod a t))
+
+                  (set! isDepMeth true))))))))
+
+
+
+
+    ;; Also check if obj name is "simd.Type" (base case)
+    (when (isBaseSimdTypeObj obj)
+      (set! isDep true))
+
+
+    (when isDep
+      (when (> (.-Simd base/Debug) 0)
+        (base/Warn "%s: %v is simd-dependent" (.String (.Pos obj)) obj))
+
+      (aset (.-isDependentObj a) obj true))
+
+    (when isDepMeth
+      (when (> (.-Simd base/Debug) 0)
+        (base/Warn "%s: %v is simd-dependent method" (.String (.Pos obj)) obj))
+
+      (aset (.-isDependentMethod a) obj true))
+
+    ^{:line 187} isDep))
+
+
+^{:go/end 192} (go/method isDependentType ^bool [^{:tag (* Analyzer)} a ^types2/Type t]
+  (.checkTypeRecursive a t))
+
+
+^{:go/end 253} (go/method checkTypeRecursive ^bool [^{:tag (* Analyzer)} a ^types2/Type t]
+  (when (== t nil)
+    (return false))
+
+  (when (aget (.-hasDependentMethod a) t)
+    (aset (.-visited a) t true))
+
+  (when [(values b ok) (aget (.-visited a) t)] ok
+    (return b)) ; Break cycles
+
+  (aset (.-visited a) t false)
+
+  ^{:go/breaks [[4 252]]} (let [memo ^{:go/end 209} (fn ^bool [^bool b]
+        (aset (.-visited a) t b)
+        ^{:line 208} b)]
+
+
+    ;; Unwrap aliases
+    (when [(values named ok) (assert (* types2/Named) t)] ok
+      (when (isBaseSimdType named)
+        (return (memo true)))
+
+      (when (.checkTypeRecursive a (.Underlying named))
+        (return (memo true))))
+
+
+
+    (type-switch [t t]
+      (case [(* types2/Basic)]
+        (return false))
+      (case [(* types2/Pointer)]
+        (return (memo (.checkTypeRecursive a (.Elem t)))))
+      (case [(* types2/Slice)]
+        (return (memo (.checkTypeRecursive a (.Elem t)))))
+      (case [(* types2/Array)]
+        (return (memo (.checkTypeRecursive a (.Elem t)))))
+      (case [(* types2/Map)]
+        (return (memo (or (.checkTypeRecursive a (.Key t))
+              (.checkTypeRecursive a (.Elem t))))))
+      (case [(* types2/Chan)]
+        (return (memo (.checkTypeRecursive a (.Elem t)))))
+      (case [(* types2/Struct)]
+        (for [i 0] (< i (.NumFields t)) (inc! i)
+          (when (.checkTypeRecursive a ^{:go/via [object]} (.Type (.Field t i)))
+            (return (memo true)))))
+
+
+      (case [(* types2/Signature)]
+        (return (memo (.HasDependentSignature a t))))
+      (case [(* types2/Tuple)]
+        (for [i 0] (< i (.Len t)) (inc! i)
+          (when (.checkTypeRecursive a ^{:go/via [object]} (.Type (.At t i)))
+            (return (memo true)))))
+
+
+      (case [(* types2/Alias)]
+        (return (memo (.checkTypeRecursive a (types2/Unalias t))))))
+
+    false))
+
+
+
+
+
+^{:go/end 275} (go/method markHasMethod "This attempts to mark types that are not otherwise dependent\nas being dependent, if they have a method with a dependent\nsignature.\n" [^{:tag (* Analyzer)} a ^types2/Type t]
+  (when (== t nil)
+    (return))
+
+  (when (aget (.-hasDependentMethod a) t)
+    (return))
+
+
+  (aset (.-hasDependentMethod a) t true)
+
+  (type-switch [t t]
+    (case [(* types2/Pointer)]
+      (.markHasMethod a (.Elem t)))
+    (case [(* types2/Alias)]
+      (.markHasMethod a (.Rhs t))))
+
+  (return))
+
+
+^{:go/end 279} (go/func isBaseSimdType ^bool [^{:tag (* types2/Named)} t]
+  (isBaseSimdTypeObj (.Obj t)))
+
+
+^{:go/end 289} (go/func isBaseSimdTypeObj ^bool [^types2/Object obj]
+  (when (or (== obj nil) (== (.Pkg obj) nil))
+    (return false))
+
+  (when (!= (.Path (.Pkg obj)) simdPkg)
+    (return false))
+
+  (isSimdTypeName (.Name obj)))
+
+
+^{:go/end 296} (go/method HasDependentSignature ^bool [^{:tag (* Analyzer)} a ^{:tag (* types2/Signature)} sig]
+  ;; TODO what about type parameters?  Need to invent a test that provokes that case.
+  (or (.isDependentType a (.Params sig))
+    (.isDependentType a (.Results sig))
+    ^:go/paren (and (!= (.Recv sig) nil) (.isDependentType a ^{:go/via [object]} (.Type (.Recv sig))))))

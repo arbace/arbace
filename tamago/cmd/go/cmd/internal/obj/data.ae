@@ -1,0 +1,228 @@
+;; Derived from Inferno utils/6l/obj.c and utils/6l/span.c
+;; https://bitbucket.org/inferno-os/inferno-os/src/master/utils/6l/obj.c
+;; https://bitbucket.org/inferno-os/inferno-os/src/master/utils/6l/span.c
+;;
+;;	Copyright © 1994-1999 Lucent Technologies Inc.  All rights reserved.
+;;	Portions Copyright © 1995-1997 C H Forsyth (forsyth@terzarima.net)
+;;	Portions Copyright © 1997-1999 Vita Nuova Limited
+;;	Portions Copyright © 2000-2007 Vita Nuova Holdings Limited (www.vitanuova.com)
+;;	Portions Copyright © 2004,2006 Bruce Ellis
+;;	Portions Copyright © 2005-2007 C H Forsyth (forsyth@terzarima.net)
+;;	Revisions Copyright © 2000-2007 Lucent Technologies Inc. and others
+;;	Portions Copyright © 2009 The Go Authors. All rights reserved.
+;;
+;; Permission is hereby granted, free of charge, to any person obtaining a copy
+;; of this software and associated documentation files (the "Software"), to deal
+;; in the Software without restriction, including without limitation the rights
+;; to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+;; copies of the Software, and to permit persons to whom the Software is
+;; furnished to do so, subject to the following conditions:
+;;
+;; The above copyright notice and this permission notice shall be included in
+;; all copies or substantial portions of the Software.
+;;
+;; THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+;; IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+;; FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL THE
+;; AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+;; LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+;; OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+;; THE SOFTWARE.
+
+(in-ns 'go.cmd.internal.obj) (go/file "data.go" :imports [
+
+
+    ^{:line 35} [objabi "cmd/internal/objabi"]
+    ^{:line 36} [log "log"]
+    ^{:line 37} [math "math"]])
+
+
+
+^{:go/end 50} (go/method Grow "Grow increases the length of s.P to lsiz.\n" [^{:tag (* LSym)} s ^int64 lsiz]
+  (let [siz (conv int lsiz)]
+    (when (!= (conv int64 siz) lsiz)
+      (log/Fatalf "LSym.Grow size %d too long" lsiz))
+
+    (when (>= (len (.-P s)) siz)
+      (return))
+
+    (set! (.-P s) (append (.-P s) (spread (make (slice byte) (- siz (len (.-P s)))))))))
+
+
+
+^{:go/end 64} (go/method GrowCap "GrowCap increases the capacity of s.P to c.\n" [^{:tag (* LSym)} s ^int64 c]
+  (when (>= (conv int64 (cap (.-P s))) c)
+    (return))
+
+  (when (== (.-P s) nil)
+    (set! (.-P s) (make (slice byte) 0 c))
+    (return))
+
+  (let [b (make (slice byte) (len (.-P s)) c)]
+    (copy b (.-P s))
+    (set! (.-P s) b)))
+
+
+
+^{:go/end 85} (go/method prepwrite "prepwrite prepares to write data of size siz into s at offset off.\n" [^{:tag (* LSym)} s ^{:tag (* Link)} ctxt ^int64 off ^int siz]
+  (when (or (< off 0) (< siz 0) (>= off (<< 1 30)))
+    (.Diag ctxt "prepwrite: bad off=%d siz=%d s=%v" off siz s))
+
+  (switch (.-Type s)
+    (case [objabi/Sxxx objabi/SBSS]
+      (set! (.-Type s) objabi/SDATA))
+    (case [objabi/SNOPTRBSS]
+      (set! (.-Type s) objabi/SNOPTRDATA))
+    (case [objabi/STLSBSS]
+      (.Diag ctxt "cannot supply data for %v var %v" (.-Type s) (.-Name s))))
+
+  (.setFIPSType s ctxt)
+  (let [l (+ off (conv int64 siz))]
+    (.Grow s l)
+    (when (> l (.-Size s))
+      (set! (.-Size s) l))))
+
+
+
+
+^{:go/end 91} (go/method WriteFloat32 "WriteFloat32 writes f into s at offset off.\n" [^{:tag (* LSym)} s ^{:tag (* Link)} ctxt ^int64 off ^float32 f]
+  (.prepwrite s ctxt off 4)
+  (.PutUint32 ^{:go/via [Arch]} (.-ByteOrder (.-Arch ctxt)) (subslice (.-P s) off) (math/Float32bits f)))
+
+
+
+^{:go/end 97} (go/method WriteFloat64 "WriteFloat64 writes f into s at offset off.\n" [^{:tag (* LSym)} s ^{:tag (* Link)} ctxt ^int64 off ^float64 f]
+  (.prepwrite s ctxt off 8)
+  (.PutUint64 ^{:go/via [Arch]} (.-ByteOrder (.-Arch ctxt)) (subslice (.-P s) off) (math/Float64bits f)))
+
+
+
+^{:go/end 114} (go/method WriteInt "WriteInt writes an integer i of size siz into s at offset off.\n" [^{:tag (* LSym)} s ^{:tag (* Link)} ctxt ^int64 off ^int siz ^int64 i]
+  (.prepwrite s ctxt off siz)
+  (switch siz
+    (default
+      (.Diag ctxt "WriteInt: bad integer size: %d" siz))
+    (case [1]
+      (aset (.-P s) off (conv byte i)))
+    (case [2]
+      (.PutUint16 ^{:go/via [Arch]} (.-ByteOrder (.-Arch ctxt)) (subslice (.-P s) off) (conv uint16 i)))
+    (case [4]
+      (.PutUint32 ^{:go/via [Arch]} (.-ByteOrder (.-Arch ctxt)) (subslice (.-P s) off) (conv uint32 i)))
+    (case [8]
+      (.PutUint64 ^{:go/via [Arch]} (.-ByteOrder (.-Arch ctxt)) (subslice (.-P s) off) (conv uint64 i)))))
+
+
+
+^{:go/end 132} (go/method writeAddr [^{:tag (* LSym)} s ^{:tag (* Link)} ctxt ^int64 off ^int siz ^{:tag (* LSym)} rsym ^int64 roff ^objabi/RelocType rtype]
+  ;; Allow 4-byte addresses for DWARF.
+  (when (and (!= siz ^{:go/via [Arch]} (.-PtrSize (.-Arch ctxt))) (!= siz 4))
+    (.Diag ctxt "WriteAddr: bad address size %d in %s" siz (.-Name s)))
+
+  (.prepwrite s ctxt off siz)
+  (when (!= (conv int64 (conv int32 off)) off)
+    (.Diag ctxt "WriteAddr: off overflow %d in %s" off (.-Name s)))
+
+  (.AddRel s ctxt ^{:go/breaks [2 4 6 8 10]} (lit Reloc
+      :Type rtype
+      :Off (conv int32 off)
+      :Siz (conv uint8 siz)
+      :Sym rsym
+      :Add roff)))
+
+
+
+
+
+^{:go/end 138} (go/method WriteAddr "WriteAddr writes an address of size siz into s at offset off.\nrsym and roff specify the relocation for the address.\n" [^{:tag (* LSym)} s ^{:tag (* Link)} ctxt ^int64 off ^int siz ^{:tag (* LSym)} rsym ^int64 roff]
+  (.writeAddr s ctxt off siz rsym roff objabi/R_ADDR))
+
+
+
+
+
+^{:go/end 145} (go/method WriteWeakAddr "WriteWeakAddr writes an address of size siz into s at offset off.\nrsym and roff specify the relocation for the address.\nThis is a weak reference.\n" [^{:tag (* LSym)} s ^{:tag (* Link)} ctxt ^int64 off ^int siz ^{:tag (* LSym)} rsym ^int64 roff]
+  (.writeAddr s ctxt off siz rsym roff objabi/R_WEAKADDR))
+
+
+
+
+
+
+^{:go/end 153} (go/method WriteCURelativeAddr "WriteCURelativeAddr writes a pointer-sized address into s at offset off.\nrsym and roff specify the relocation for the address which will be\nresolved by the linker to an offset from the DW_AT_low_pc attribute of\nthe DWARF Compile Unit of rsym.\n" [^{:tag (* LSym)} s ^{:tag (* Link)} ctxt ^int64 off ^{:tag (* LSym)} rsym ^int64 roff]
+  (.writeAddr s ctxt off ^{:go/via [Arch]} (.-PtrSize (.-Arch ctxt)) rsym roff objabi/R_ADDRCUOFF))
+
+
+
+
+
+^{:go/end 170} (go/method WriteOff "WriteOff writes a 4 byte offset to rsym+roff into s at offset off.\nAfter linking the 4 bytes stored at s+off will be\nrsym+roff-(start of section that s is in).\n" [^{:tag (* LSym)} s ^{:tag (* Link)} ctxt ^int64 off ^{:tag (* LSym)} rsym ^int64 roff]
+  (.prepwrite s ctxt off 4)
+  (when (!= (conv int64 (conv int32 off)) off)
+    (.Diag ctxt "WriteOff: off overflow %d in %s" off (.-Name s)))
+
+  (.AddRel s ctxt ^{:go/breaks [2 4 6 8 10]} (lit Reloc
+      :Type objabi/R_ADDROFF
+      :Off (conv int32 off)
+      :Siz 4
+      :Sym rsym
+      :Add roff)))
+
+
+
+
+
+
+^{:go/end 187} (go/method WriteWeakOff "WriteWeakOff writes a weak 4 byte offset to rsym+roff into s at offset off.\nAfter linking the 4 bytes stored at s+off will be\nrsym+roff-(start of section that s is in).\n" [^{:tag (* LSym)} s ^{:tag (* Link)} ctxt ^int64 off ^{:tag (* LSym)} rsym ^int64 roff]
+  (.prepwrite s ctxt off 4)
+  (when (!= (conv int64 (conv int32 off)) off)
+    (.Diag ctxt "WriteWeakOff: off overflow %d in %s" off (.-Name s)))
+
+  (.AddRel s ctxt ^{:go/breaks [2 4 6 8 10]} (lit Reloc
+      :Type objabi/R_WEAKADDROFF
+      :Off (conv int32 off)
+      :Siz 4
+      :Sym rsym
+      :Add roff)))
+
+
+
+
+^{:go/end 196} (go/method WriteString "WriteString writes a string of size siz into s at offset off.\n" [^{:tag (* LSym)} s ^{:tag (* Link)} ctxt ^int64 off ^int siz ^string str]
+  (when (< siz (len str))
+    (.Diag ctxt "WriteString: bad string size: %d < %d" siz (len str)))
+
+  (.prepwrite s ctxt off siz)
+  (copy (subslice (.-P s) off (+ off (conv int64 siz))) str))
+
+
+
+^{:go/end 203} (go/method WriteBytes "WriteBytes writes a slice of bytes into s at offset off.\n" ^int64 [^{:tag (* LSym)} s ^{:tag (* Link)} ctxt ^int64 off ^{:tag (slice byte)} b]
+  (.prepwrite s ctxt off (len b))
+  (copy (subslice (.-P s) off) b)
+  (+ off (conv int64 (len b))))
+
+
+
+^{:go/end 211} (go/method AddRel "AddRel adds the relocation rel to s.\n" [^{:tag (* LSym)} s ^{:tag (* Link)} ctxt ^Reloc rel]
+  (when (.IsFIPS (.-Type s))
+    (.checkFIPSReloc s ctxt rel))
+
+  (set! (.-R s) (append (.-R s) rel)))
+
+
+
+
+
+
+
+^{:go/end 230} (go/method WriteDwTxtAddrx "WriteDwTxtAddrx appends a zero blob of the proper size to s at off\nand attaches one of the various R_DWTXTADDR_U* relocations to the\nsymbol. Here size is dependent on the total number of functions in\nthe package (for more on why this is needed, consult the\n.debug_addr generation code in the linker).\n" [^{:tag (* LSym)} s ^{:tag (* Link)} ctxt ^int64 off ^{:tag (* LSym)} rsym ^int maxFuncs]
+  (let [(values rtype sz) (objabi/FuncCountToDwTxtAddrFlavor maxFuncs)]
+    (.prepwrite s ctxt off sz)
+    (when (!= (conv int64 (conv int32 off)) off)
+      (.Diag ctxt "WriteDwTxtAddrx: off overflow %d in %s" off (.-Name s)))
+
+    (.AddRel s ctxt ^{:go/breaks [2 4 6 8]} (lit Reloc
+        :Type rtype
+        :Off (conv int32 off)
+        :Siz (conv uint8 sz)
+        :Sym rsym))))

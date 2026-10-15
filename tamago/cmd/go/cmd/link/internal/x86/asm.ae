@@ -1,0 +1,449 @@
+;; Inferno utils/8l/asm.c
+;; https://bitbucket.org/inferno-os/inferno-os/src/master/utils/8l/asm.c
+;;
+;;	Copyright © 1994-1999 Lucent Technologies Inc.  All rights reserved.
+;;	Portions Copyright © 1995-1997 C H Forsyth (forsyth@terzarima.net)
+;;	Portions Copyright © 1997-1999 Vita Nuova Limited
+;;	Portions Copyright © 2000-2007 Vita Nuova Holdings Limited (www.vitanuova.com)
+;;	Portions Copyright © 2004,2006 Bruce Ellis
+;;	Portions Copyright © 2005-2007 C H Forsyth (forsyth@terzarima.net)
+;;	Revisions Copyright © 2000-2007 Lucent Technologies Inc. and others
+;;	Portions Copyright © 2009 The Go Authors. All rights reserved.
+;;
+;; Permission is hereby granted, free of charge, to any person obtaining a copy
+;; of this software and associated documentation files (the "Software"), to deal
+;; in the Software without restriction, including without limitation the rights
+;; to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+;; copies of the Software, and to permit persons to whom the Software is
+;; furnished to do so, subject to the following conditions:
+;;
+;; The above copyright notice and this permission notice shall be included in
+;; all copies or substantial portions of the Software.
+;;
+;; THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+;; IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+;; FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL THE
+;; AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+;; LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+;; OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+;; THE SOFTWARE.
+
+(in-ns 'go.cmd.link.internal.x86) (go/file "asm.go" :imports [
+
+
+    ^{:line 34} [objabi "cmd/internal/objabi"]
+    ^{:line 35} [sys "cmd/internal/sys"]
+    ^{:line 36} [ld "cmd/link/internal/ld"]
+    ^{:line 37} [loader "cmd/link/internal/loader"]
+    ^{:line 38} [sym "cmd/link/internal/sym"]
+    ^{:line 39} [elf "debug/elf"]
+    ^{:line 40} [log "log"]])
+
+
+^{:go/end 132} (go/func gentext [^{:tag (* ld/Link)} ctxt ^{:tag (* loader/Loader)} ldr]
+  (if (.DynlinkingGo ctxt) (do)
+    ;; We need get_pc_thunk.
+
+    (switch ^{:go/via [Target]} (.-BuildMode ctxt)
+      (case [ld/BuildModeCArchive]
+        (when (not ^{:go/via [Target]} (.-IsELF ctxt))
+          (return)))
+
+      (case [ld/BuildModePIE ld/BuildModeCShared ld/BuildModePlugin])
+      ;; We need get_pc_thunk.
+      (default
+        (return))))
+
+
+
+  ;; Generate little thunks that load the PC of the next instruction into a register.
+  (let [thunks (make (slice loader/Sym) 0 (+ 7 (len (.-Textp ctxt))))]
+    (range [_ r (lit (array ... (struct
+              ^{:line 62 :tag string} name
+              ^{:line 63 :tag uint8} num))
+
+          (lit _ "ax" 0)
+          (lit _ "cx" 1)
+          (lit _ "dx" 2)
+          (lit _ "bx" 3)
+          ;; sp
+          (lit _ "bp" 5)
+          (lit _ "si" 6)
+          (lit _ "di" 7))]
+
+      (let [thunkfunc (.CreateSymForUpdate ldr (+ "__x86.get_pc_thunk." (.-name r)) 0)]
+        (when [t (.Type thunkfunc)] (and (!= t 0) (!= t sym/SXREF) (!= t sym/SDYNIMPORT) (!= t sym/SUNDEFEXT))
+          (continue)) ; symbol already exists, probably loaded from a C object
+
+        (.SetType thunkfunc sym/STEXT)
+        (.SetAttrLocal ldr (.Sym thunkfunc) true)
+        (let [o ^{:go/end 84} (fn [& ^{:tag (slice uint8)} op]
+              (range [_ op1 op]
+                (.AddUint8 thunkfunc op1)))]
+
+
+          ;; 8b 04 24	mov    (%esp),%eax
+          ;; Destination register is in bits 3-5 of the middle byte, so add that in.
+          (o 0x8b (+ 0x04 (<< (.-num r) 3)) 0x24)
+          ;; c3		ret
+          (o 0xc3)
+
+          (set! thunks (append thunks (.Sym thunkfunc))))))
+
+    (set! (.-Textp ctxt) (append thunks (spread (.-Textp ctxt)))) ; keep Textp in dependency order
+
+    (let [(values initfunc addmoduledata) (ld/PrepareAddmoduledata ctxt)]
+      (when (== initfunc nil)
+        (return))
+
+
+      (let [o ^{:go/end 104} (fn [& ^{:tag (slice uint8)} op]
+            (range [_ op1 op]
+              (.AddUint8 initfunc op1)))]
+
+
+
+        ;; go.link.addmoduledata:
+        ;;      53                      push %ebx
+        ;;      e8 00 00 00 00          call __x86.get_pc_thunk.cx + R_CALL __x86.get_pc_thunk.cx
+        ;;      8d 81 00 00 00 00       lea 0x0(%ecx), %eax + R_PCREL ctxt.Moduledata
+        ;;      8d 99 00 00 00 00       lea 0x0(%ecx), %ebx + R_GOTPC _GLOBAL_OFFSET_TABLE_
+        ;;      e8 00 00 00 00          call runtime.addmoduledata@plt + R_CALL runtime.addmoduledata
+        ;;      5b                      pop %ebx
+        ;;      c3                      ret
+
+        (o 0x53)
+
+        (o 0xe8)
+        (.AddSymRef initfunc ^{:go/via [Target]} (.-Arch ctxt) (.Lookup ldr "__x86.get_pc_thunk.cx" 0) 0 objabi/R_CALL 4)
+
+        (o 0x8d 0x81)
+        (.AddPCRelPlus initfunc ^{:go/via [Target]} (.-Arch ctxt) (.-Moduledata ctxt) 6)
+
+        (o 0x8d 0x99)
+        (let [gotsym (.LookupOrCreateSym ldr "_GLOBAL_OFFSET_TABLE_" 0)]
+          (.AddSymRef initfunc ^{:go/via [Target]} (.-Arch ctxt) gotsym 12 objabi/R_PCREL 4)
+          (o 0xe8)
+          (.AddSymRef initfunc ^{:go/via [Target]} (.-Arch ctxt) addmoduledata 0 objabi/R_CALL 4)
+
+          (o 0x5b)
+
+          (o 0xc3))))))
+
+
+^{:go/end 271} (go/func adddynrel ^bool [^{:tag (* ld/Target)} target ^{:tag (* loader/Loader)} ldr ^{:tag (* ld/ArchSyms)} syms ^loader/Sym s ^loader/Reloc r ^int rIdx]
+  (let [targ (.Sym r)
+      ^{:line 136 :tag sym/SymKind} targType (zero sym/SymKind)]
+    (when (!= targ 0)
+      (set! targType (.SymType ldr targ)))
+
+
+    (switch (.Type r)
+      (default
+        (when (>= (.Type r) objabi/ElfRelocOffset)
+          (.Errorf ldr s "unexpected relocation type %d (%s)" (.Type r) (sym/RelocName (.-Arch target) (.Type r)))
+          (return false)))
+
+
+      ;; Handle relocations found in ELF object files.
+      (case [(+ objabi/ElfRelocOffset (conv objabi/RelocType elf/R_386_PC32))]
+        (when (== targType sym/SDYNIMPORT)
+          (.Errorf ldr s "unexpected R_386_PC32 relocation for dynamic symbol %s" (.SymName ldr targ)))
+
+        (when (or (== targType 0) (== targType sym/SXREF))
+          (.Errorf ldr s "unknown symbol %s in pcrel" (.SymName ldr targ)))
+
+        (let [su (.MakeSymbolUpdater ldr s)]
+          (.SetRelocType su rIdx objabi/R_PCREL)
+          (.SetRelocAdd su rIdx (+ ^{:go/via [Reloc]} (.Add r) 4))
+          (return true)))
+
+      (case [(+ objabi/ElfRelocOffset (conv objabi/RelocType elf/R_386_PLT32))]
+        (let [su (.MakeSymbolUpdater ldr s)]
+          (.SetRelocType su rIdx objabi/R_PCREL)
+          (.SetRelocAdd su rIdx (+ ^{:go/via [Reloc]} (.Add r) 4))
+          (when (== targType sym/SDYNIMPORT)
+            (addpltsym target ldr syms targ)
+            (.SetRelocSym su rIdx (.-PLT syms))
+            (.SetRelocAdd su rIdx (+ ^{:go/via [Reloc]} (.Add r) (conv int64 (.SymPlt ldr targ)))))
+
+
+          (return true)))
+
+      (case [(+ objabi/ElfRelocOffset (conv objabi/RelocType elf/R_386_GOT32))
+          (+ objabi/ElfRelocOffset (conv objabi/RelocType elf/R_386_GOT32X))]
+        (let [su (.MakeSymbolUpdater ldr s)]
+          (when (!= targType sym/SDYNIMPORT)
+            ;; have symbol
+            (let [sData (.Data ldr s)]
+
+              (when (and (>= ^{:go/via [Reloc]} (.Off r) 2) (== (aget sData (- ^{:go/via [Reloc]} (.Off r) 2)) 0x8b))
+                (.MakeWritable su)
+
+                ;; turn MOVL of GOT entry into LEAL of symbol address, relative to GOT.
+                (let [writeableData (.Data su)]
+                  (aset writeableData (- ^{:go/via [Reloc]} (.Off r) 2) 0x8d)
+                  (.SetRelocType su rIdx objabi/R_GOTOFF)
+                  (return true)))
+
+
+              (when (and (>= ^{:go/via [Reloc]} (.Off r) 2) (== (aget sData (- ^{:go/via [Reloc]} (.Off r) 2)) 0xff) (== (aget sData (- ^{:go/via [Reloc]} (.Off r) 1)) 0xb3))
+                (.MakeWritable su)
+                ;; turn PUSHL of GOT entry into PUSHL of symbol itself.
+                ;; use unnecessary SS prefix to keep instruction same length.
+                (let [writeableData (.Data su)]
+                  (aset writeableData (- ^{:go/via [Reloc]} (.Off r) 2) 0x36)
+                  (aset writeableData (- ^{:go/via [Reloc]} (.Off r) 1) 0x68)
+                  (.SetRelocType su rIdx objabi/R_ADDR)
+                  (return true)))
+
+
+              (.Errorf ldr s "unexpected GOT reloc for non-dynamic symbol %s" (.SymName ldr targ))
+              (return false)))
+
+
+          (ld/AddGotSym target ldr syms targ (conv uint32 elf/R_386_GLOB_DAT))
+          (.SetRelocType su rIdx objabi/R_CONST) ; write r->add during relocsym
+          (.SetRelocSym su rIdx 0)
+          (.SetRelocAdd su rIdx (+ ^{:go/via [Reloc]} (.Add r) (conv int64 (.SymGot ldr targ))))
+          (return true)))
+
+      (case [(+ objabi/ElfRelocOffset (conv objabi/RelocType elf/R_386_GOTOFF))]
+        (let [su (.MakeSymbolUpdater ldr s)]
+          (.SetRelocType su rIdx objabi/R_GOTOFF)
+          (return true)))
+
+      (case [(+ objabi/ElfRelocOffset (conv objabi/RelocType elf/R_386_GOTPC))]
+        (let [su (.MakeSymbolUpdater ldr s)]
+          (.SetRelocType su rIdx objabi/R_PCREL)
+          (.SetRelocSym su rIdx (.-GOT syms))
+          (.SetRelocAdd su rIdx (+ ^{:go/via [Reloc]} (.Add r) 4))
+          (return true)))
+
+      (case [(+ objabi/ElfRelocOffset (conv objabi/RelocType elf/R_386_32))]
+        (when (== targType sym/SDYNIMPORT)
+          (.Errorf ldr s "unexpected R_386_32 relocation for dynamic symbol %s" (.SymName ldr targ)))
+
+        (let [su (.MakeSymbolUpdater ldr s)]
+          (.SetRelocType su rIdx objabi/R_ADDR)
+          (return true))))
+
+
+    ;; Handle references to ELF symbols from our own object files.
+    (when (!= targType sym/SDYNIMPORT)
+      (return true))
+
+
+    ;; Reread the reloc to incorporate any changes in type above.
+    ^{:go/breaks [[4 270]]} (let [relocs (.Relocs ldr s)]
+      (set! r (.At relocs rIdx))
+
+      (switch (.Type r)
+        (case [objabi/R_CALL
+            ^{:line 243} objabi/R_PCREL]
+          (when (.IsExternal target)
+            ;; External linker will do this relocation.
+            (return true))
+
+          (addpltsym target ldr syms targ)
+          (let [su (.MakeSymbolUpdater ldr s)]
+            (.SetRelocSym su rIdx (.-PLT syms))
+            (.SetRelocAdd su rIdx (conv int64 (.SymPlt ldr targ)))
+            (return true)))
+
+        (case [objabi/R_ADDR]
+          (when (not (.IsDATA (.SymType ldr s)))
+            (break))
+
+          (when (.IsElf target)
+            (ld/Adddynsym ldr target syms targ)
+            (let [rel (.MakeSymbolUpdater ldr (.-Rel syms))]
+              (.AddAddrPlus rel (.-Arch target) s (conv int64 ^{:go/via [Reloc]} (.Off r)))
+              (.AddUint32 rel (.-Arch target) (elf/R_INFO32 (conv uint32 (.SymDynid ldr targ)) (conv uint32 elf/R_386_32)))
+              (let [su (.MakeSymbolUpdater ldr s)]
+                (.SetRelocType su rIdx objabi/R_CONST) ; write r->add during relocsym
+                (.SetRelocSym su rIdx 0)
+                (return true))))))
+
+
+
+      false)))
+
+
+^{:go/end 330} (go/func elfreloc1 ^bool [^{:tag (* ld/Link)} ctxt ^{:tag (* ld/OutBuf)} out ^{:tag (* loader/Loader)} ldr ^loader/Sym s ^loader/ExtReloc r ^int ri ^int64 sectoff]
+  (.Write32 out (conv uint32 sectoff))
+
+  ^{:go/breaks [[3 329]]} (let [elfsym (ld/ElfSymForReloc ctxt (.-Xsym r))
+      ^{:line 277} siz (.-Size r)]
+    (switch (.-Type r)
+      (default
+        (return false))
+      (case [objabi/R_ADDR objabi/R_DWARFSECREF]
+        (if (== siz 4)
+          (.Write32 out (bit-or (conv uint32 elf/R_386_32) (<< (conv uint32 elfsym) 8)))
+
+          (return false)))
+
+      (case [objabi/R_GOTPCREL]
+        (if (== siz 4) (do
+            (.Write32 out (conv uint32 elf/R_386_GOTPC))
+            (when (!= (.SymName ldr (.-Xsym r)) "_GLOBAL_OFFSET_TABLE_")
+              (.Write32 out (conv uint32 sectoff))
+              (.Write32 out (bit-or (conv uint32 elf/R_386_GOT32) (<< (conv uint32 elfsym) 8)))))
+
+
+          (return false)))
+
+      (case [objabi/R_CALL]
+        (if (== siz 4)
+          (if (== (.SymType ldr (.-Xsym r)) sym/SDYNIMPORT)
+            (.Write32 out (bit-or (conv uint32 elf/R_386_PLT32) (<< (conv uint32 elfsym) 8)))
+
+            (.Write32 out (bit-or (conv uint32 elf/R_386_PC32) (<< (conv uint32 elfsym) 8))))
+
+
+          (return false)))
+
+      (case [objabi/R_PCREL]
+        (if (== siz 4)
+          (.Write32 out (bit-or (conv uint32 elf/R_386_PC32) (<< (conv uint32 elfsym) 8)))
+
+          (return false)))
+
+      (case [objabi/R_TLS_LE]
+        (if (== siz 4)
+          (.Write32 out (bit-or (conv uint32 elf/R_386_TLS_LE) (<< (conv uint32 elfsym) 8)))
+
+          (return false)))
+
+      (case [objabi/R_TLS_IE]
+        (if (== siz 4) (do
+            (.Write32 out (conv uint32 elf/R_386_GOTPC))
+            (.Write32 out (conv uint32 sectoff))
+            (.Write32 out (bit-or (conv uint32 elf/R_386_TLS_GOTIE) (<< (conv uint32 elfsym) 8))))
+
+          (return false))))
+
+
+
+    true))
+
+
+^{:go/breaks [3] :go/end 334} (go/func machoreloc1 ^bool [(* sys/Arch) (* ld/OutBuf) (* loader/Loader) loader/Sym loader/ExtReloc int64]
+  false)
+
+
+^{:go/end 371} (go/func pereloc1 ^bool [^{:tag (* sys/Arch)} arch ^{:tag (* ld/OutBuf)} out ^{:tag (* loader/Loader)} ldr ^loader/Sym s ^loader/ExtReloc r ^int64 sectoff]
+  ^{:go/breaks [[7 370]]} (let [^uint32 v (zero uint32)
+
+      ^{:line 339} rs (.-Xsym r)
+      ^{:line 340} rt (.-Type r)]
+
+    (when (< (.SymDynid ldr rs) 0)
+      (.Errorf ldr s "reloc %d (%s) to non-coff symbol %s type=%d (%s)" rt (sym/RelocName arch rt) (.SymName ldr rs) (.SymType ldr rs) (.SymType ldr rs))
+      (return false))
+
+
+    (.Write32 out (conv uint32 sectoff))
+    (.Write32 out (conv uint32 (.SymDynid ldr rs)))
+
+    (switch rt
+      (default
+        (return false))
+
+      (case [objabi/R_DWARFSECREF]
+        (set! v ld/IMAGE_REL_I386_SECREL))
+
+      (case [objabi/R_ADDR]
+        (set! v ld/IMAGE_REL_I386_DIR32))
+
+      (case [objabi/R_PEIMAGEOFF]
+        (set! v ld/IMAGE_REL_I386_DIR32NB))
+
+      (case [objabi/R_CALL
+          ^{:line 364} objabi/R_PCREL]
+        (set! v ld/IMAGE_REL_I386_REL32)))
+
+
+    (.Write16 out (conv uint16 v))
+
+    true))
+
+
+^{:go/end 375} (go/func archreloc [(* ld/Target) (* loader/Loader) (* ld/ArchSyms) loader/Reloc loader/Sym int64] :results [int64 int bool]
+  (return -1 0 false))
+
+
+^{:go/breaks [4] :go/end 380} (go/func archrelocvariant ^int64 [(* ld/Target) (* loader/Loader) loader/Reloc sym/RelocVariant loader/Sym int64 (slice byte)]
+  (log/Fatalf "unexpected relocation variant")
+  -1)
+
+
+^{:go/end 405} (go/func elfsetupplt [^{:tag (* ld/Link)} ctxt ^{:tag (* loader/Loader)} ldr ^{:tag (* loader/SymbolBuilder)} plt ^{:tag (* loader/SymbolBuilder)} got ^loader/Sym dynamic]
+  (when (== (.Size plt) 0)
+    ;; pushl got+4
+    (.AddUint8 plt 0xff)
+
+    (.AddUint8 plt 0x35)
+    (.AddAddrPlus plt ^{:go/via [Target]} (.-Arch ctxt) (.Sym got) 4)
+
+    ;; jmp *got+8
+    (.AddUint8 plt 0xff)
+
+    (.AddUint8 plt 0x25)
+    (.AddAddrPlus plt ^{:go/via [Target]} (.-Arch ctxt) (.Sym got) 8)
+
+    ;; zero pad
+    (.AddUint32 plt ^{:go/via [Target]} (.-Arch ctxt) 0)
+
+    ;; assume got->size == 0 too
+    (.AddAddrPlus got ^{:go/via [Target]} (.-Arch ctxt) dynamic 0)
+
+    (.AddUint32 got ^{:go/via [Target]} (.-Arch ctxt) 0)
+    (.AddUint32 got ^{:go/via [Target]} (.-Arch ctxt) 0)))
+
+
+
+^{:go/end 451} (go/func addpltsym [^{:tag (* ld/Target)} target ^{:tag (* loader/Loader)} ldr ^{:tag (* ld/ArchSyms)} syms ^loader/Sym s]
+  (when (>= (.SymPlt ldr s) 0)
+    (return))
+
+
+  (ld/Adddynsym ldr target syms s)
+
+  (if (.IsElf target)
+    (let [plt (.MakeSymbolUpdater ldr (.-PLT syms))
+        ^{:line 416} got (.MakeSymbolUpdater ldr (.-GOTPLT syms))
+        ^{:line 417} rel (.MakeSymbolUpdater ldr (.-RelPLT syms))]
+      (when (== (.Size plt) 0)
+        (panic "plt is not set up"))
+
+
+      ;; jmpq *got+size
+      (.AddUint8 plt 0xff)
+
+      (.AddUint8 plt 0x25)
+      (.AddAddrPlus plt (.-Arch target) (.Sym got) (.Size got))
+
+      ;; add to got: pointer to current pos in plt
+      (.AddAddrPlus got (.-Arch target) (.Sym plt) (.Size plt))
+
+      ;; pushl $x
+      (.AddUint8 plt 0x68)
+
+      (.AddUint32 plt (.-Arch target) (conv uint32 (.Size rel)))
+
+      ;; jmp .plt
+      (.AddUint8 plt 0xe9)
+
+      (.AddUint32 plt (.-Arch target) (conv uint32 (- (+ (.Size plt) 4))))
+
+      ;; rel
+      (.AddAddrPlus rel (.-Arch target) (.Sym got) (- (.Size got) 4))
+
+      (let [sDynid (.SymDynid ldr s)]
+        (.AddUint32 rel (.-Arch target) (elf/R_INFO32 (conv uint32 sDynid) (conv uint32 elf/R_386_JMP_SLOT)))
+
+        (.SetPlt ldr s (conv int32 (- (.Size plt) 16)))))
+
+    (.Errorf ldr s "addpltsym: unsupported binary format")))

@@ -1,0 +1,751 @@
+;; Copyright 2009 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.cmd.compile.internal.walk) (go/file "assign.go" :imports [
+
+
+    ^{:line 8} [constant "go/constant"]
+    ^{:line 9} [abi "internal/abi"]
+
+    ^{:line 11} [base "cmd/compile/internal/base"]
+    ^{:line 12} [ir "cmd/compile/internal/ir"]
+    ^{:line 13} [reflectdata "cmd/compile/internal/reflectdata"]
+    ^{:line 14} [typecheck "cmd/compile/internal/typecheck"]
+    ^{:line 15} [types "cmd/compile/internal/types"]
+    ^{:line 16} [src "cmd/internal/src"]])
+
+
+
+^{:go/end 118} (go/func walkAssign "walkAssign walks an OAS (AssignExpr) or OASOP (AssignOpExpr) node.\n" ^ir/Node [^{:tag (* ir/Nodes)} init ^ir/Node n]
+  (.Append init (spread (ir/TakeInit n)))
+
+  (let [(values ^ir/Node left ^ir/Node right) (zero ir/Node)]
+    (switch (.Op n)
+      (case [ir/OAS]
+        (let [n (assert (* ir/AssignStmt) n)]
+          (set! (values left right) (values (.-X n) (.-Y n)))))
+      (case [ir/OASOP]
+        (let [n (assert (* ir/AssignOpStmt) n)]
+          (set! (values left right) (values (.-X n) (.-Y n))))))
+
+
+    ;; Recognize m[k] = append(m[k], ...) so we can reuse
+    ;; the mapassign call.
+    (let [^{:tag (* ir/CallExpr)} mapAppend (zero (* ir/CallExpr))]
+      (when (and (== (.Op left) ir/OINDEXMAP) (== (.Op right) ir/OAPPEND))
+        (let [left (assert (* ir/IndexExpr) left)]
+          (set! mapAppend (assert (* ir/CallExpr) right))
+          (when (not (ir/SameSafeExpr left (aget (.-Args mapAppend) 0)))
+            (base/Fatalf "not same expressions: %v != %v" left (aget (.-Args mapAppend) 0)))))
+
+
+
+      (set! left (walkExpr left init))
+      (set! left (safeExpr left init))
+      (when (!= mapAppend nil)
+        (aset (.-Args mapAppend) 0 left))
+
+
+      (if (== (.Op n) ir/OASOP)
+        ;; Rewrite x op= y into x = x op y.
+        (set! n (ir/NewAssignStmt base/Pos left (typecheck/Expr (ir/NewBinaryExpr base/Pos (.-AsOp (assert (* ir/AssignOpStmt) n)) left right))))
+
+        (set! (.-X (assert (* ir/AssignStmt) n)) left))
+
+      (let [as (assert (* ir/AssignStmt) n)]
+
+        (when (oaslit as init)
+          (return (ir/NewBlockStmt ^{:go/via [miniStmt miniNode]} (.Pos as) nil)))
+
+
+        (when (== (.-Y as) nil)
+          ;; TODO(austin): Check all "implicit zeroing"
+          (return as))
+
+
+        (when (and (not (.-Instrumenting (.-Cfg base/Flag))) (ir/IsZero (.-Y as)))
+          (return as))
+
+
+        (switch (.Op (.-Y as))
+          (default
+            (set! (.-Y as) (walkExpr (.-Y as) init)))
+
+          (case [ir/ORECV]
+            ;; x = <-c; as.Left is x, as.Right.Left is c.
+            ;; order.stmt made sure x is addressable.
+            (let [recv (assert (* ir/UnaryExpr) (.-Y as))]
+              (set! (.-X recv) (walkExpr (.-X recv) init))
+
+              (let [n1 (typecheck/NodAddr (.-X as))
+                  ^{:line 82} r (.-X recv)] ; the channel
+                (return (mkcall1 (chanfn "chanrecv1" 2 (.Type r)) nil init r n1)))))
+
+          (case [ir/OAPPEND]
+            ;; x = append(...)
+            (let [call (assert (* ir/CallExpr) (.-Y as))]
+              (when (.NotInHeap (.Elem ^{:go/via [miniExpr]} (.Type call)))
+                (base/Errorf "%v can't be allocated in Go; it is incomplete (or unallocatable)" (.Elem ^{:go/via [miniExpr]} (.Type call))))
+
+              (let [^ir/Node r (zero ir/Node)]
+                (switch
+                  (case [(isAppendOfMake call)]
+                    ;; x = append(y, make([]T, y)...)
+                    (set! r (extendSlice call init)))
+                  (case [(.-IsDDD call)]
+                    (set! r (appendSlice call init))) ; also works for append(slice, string).
+                  (default
+                    (set! r (walkAppend call init as))))
+
+                (set! (.-Y as) r)
+                (when (== (.Op r) ir/OAPPEND)
+                  (let [r (assert (* ir/CallExpr) r)]
+                    ;; Left in place for back end.
+                    ;; Do not add a new write barrier.
+                    ;; Set up address of type for back end.
+                    (set! (.-Fun r) (reflectdata/AppendElemRType base/Pos r))
+                    (return as)))))))
+
+        ;; Otherwise, lowered for race detector.
+        ;; Treat as ordinary assignment.
+
+
+        (when (and (!= (.-X as) nil) (!= (.-Y as) nil))
+          (return (convas as init)))
+
+        ^{:line 117} as))))
+
+
+
+^{:go/end 135} (go/func walkAssignDotType "walkAssignDotType walks an OAS2DOTTYPE node.\n" ^ir/Node [^{:tag (* ir/AssignListStmt)} n ^{:tag (* ir/Nodes)} init]
+  (walkExprListSafe (.-Lhs n) init)
+
+  (when [(values r ok) (assert (* ir/TypeAssertExpr) (aget (.-Rhs n) 0))] (and ok (== ^{:go/via [miniExpr miniNode]} (.Op r) ir/ODOTTYPE2) (not (.IsInterface ^{:go/via [miniExpr]} (.Type r))))
+    (when (shapeTypeAssertImpossible (.-X r) ^{:go/via [miniExpr]} (.Type r))
+      (.Append init (typecheck/Stmt (ir/NewAssignStmt base/Pos ir/BlankNode (walkExpr (.-X r) init))))
+      (.Append init (typecheck/Stmt (ir/NewAssignStmt base/Pos (aget (.-Lhs n) 0) (ir/NewZero base/Pos ^{:go/via [miniExpr]} (.Type r)))))
+      (.Append init (typecheck/Stmt (ir/NewAssignStmt base/Pos (aget (.-Lhs n) 1) (ir/NewBool base/Pos false))))
+      (return (ir/NewBlockStmt base/Pos nil))))
+
+
+
+  (aset (.-Rhs n) 0 (walkExpr (aget (.-Rhs n) 0) init))
+  ^{:line 134} n)
+
+
+
+^{:go/end 153} (go/func walkAssignFunc "walkAssignFunc walks an OAS2FUNC node.\n" ^ir/Node [^{:tag (* ir/Nodes)} init ^{:tag (* ir/AssignListStmt)} n]
+  (.Append init (spread (ir/TakeInit n)))
+
+  (let [r (aget (.-Rhs n) 0)]
+    (walkExprListSafe (.-Lhs n) init)
+    (set! r (walkExpr r init))
+
+    (when (ir/IsIntrinsicCall (assert (* ir/CallExpr) r))
+      (set! (.-Rhs n) (lit (slice ir/Node) r))
+      (return n))
+
+    (.Append init r)
+
+    (let [ll (ascompatet (.-Lhs n) (.Type r))]
+      (ir/NewBlockStmt src/NoXPos ll))))
+
+
+
+^{:go/end 159} (go/func walkAssignList "walkAssignList walks an OAS2 node.\n" ^ir/Node [^{:tag (* ir/Nodes)} init ^{:tag (* ir/AssignListStmt)} n]
+  (.Append init (spread (ir/TakeInit n)))
+  (ir/NewBlockStmt src/NoXPos (ascompatee ir/OAS (.-Lhs n) (.-Rhs n))))
+
+
+
+^{:go/end 214} (go/func walkAssignMapRead "walkAssignMapRead walks an OAS2MAPR node.\n" ^ir/Node [^{:tag (* ir/Nodes)} init ^{:tag (* ir/AssignListStmt)} n]
+  (.Append init (spread (ir/TakeInit n)))
+
+  (let [r (assert (* ir/IndexExpr) (aget (.-Rhs n) 0))]
+    (walkExprListSafe (.-Lhs n) init)
+
+    (set! (.-X r) (walkExpr (.-X r) init))
+    (set! (.-Index r) (walkExpr (.-Index r) init))
+    (let [t (.Type (.-X r))
+        ^{:line 171} fast (mapfast t)
+        ^{:line 172} key (mapKeyArg fast r (.-Index r) false)
+
+        ;; from:
+        ;;   a,b = m[i]
+        ;; to:
+        ;;   var,b = mapaccess2*(t, m, i)
+        ;;   a = *var
+        ^{:line 179} a (aget (.-Lhs n) 0)
+
+        ^{:line 181 :tag (* ir/CallExpr)} call (zero (* ir/CallExpr))]
+      (if [w (.Size (.Elem t))] (<= w abi/ZeroValSize)
+        (let [fn (mapfn (aget mapaccess2 fast) t false)]
+          (set! call (mkcall1 fn (.ResultsTuple (.Type fn)) init (reflectdata/IndexMapRType base/Pos r) (.-X r) key)))
+
+        (let [fn (mapfn "mapaccess2_fat" t true)
+            ^{:line 187} z (reflectdata/ZeroAddr w)]
+          (set! call (mkcall1 fn (.ResultsTuple (.Type fn)) init (reflectdata/IndexMapRType base/Pos r) (.-X r) key z))))
+
+
+      ;; mapaccess2* returns a typed bool, but due to spec changes,
+      ;; the boolean result of i.(T) is now untyped so we make it the
+      ;; same type as the variable on the lhs.
+      (when [ok (aget (.-Lhs n) 1)] (and (not (ir/IsBlank ok)) (.IsBoolean (.Type ok)))
+        (set! (.-Type (.Field ^{:go/via [miniExpr]} (.Type call) 1)) (.Type ok)))
+
+      (set! (.-Rhs n) (lit (slice ir/Node) call))
+      (.SetOp n ir/OAS2FUNC)
+
+      ;; don't generate a = *var if a is _
+      (when (ir/IsBlank a)
+        (return (walkExpr (typecheck/Stmt n) init)))
+
+
+      (let [var_ (typecheck/TempAt base/Pos ir/CurFunc (types/NewPtr (.Elem t)))]
+        ^{:go/via [miniExpr miniNode]} (.SetTypecheck var_ 1)
+        ^{:go/via [miniExpr]} (.MarkNonNil var_) ; mapaccess always returns a non-nil pointer
+
+        (aset (.-Lhs n) 0 var_)
+        (.Append init (walkExpr n init))
+
+        (let [as (ir/NewAssignStmt base/Pos a (ir/NewStarExpr base/Pos var_))]
+          (walkExpr (typecheck/Stmt as) init))))))
+
+
+
+^{:go/end 233} (go/func walkAssignRecv "walkAssignRecv walks an OAS2RECV node.\n" ^ir/Node [^{:tag (* ir/Nodes)} init ^{:tag (* ir/AssignListStmt)} n]
+  (.Append init (spread (ir/TakeInit n)))
+
+  (let [r (assert (* ir/UnaryExpr) (aget (.-Rhs n) 0))] ; recv
+    (walkExprListSafe (.-Lhs n) init)
+    (set! (.-X r) (walkExpr (.-X r) init))
+    (let [^ir/Node n1 (zero ir/Node)]
+      (if (ir/IsBlank (aget (.-Lhs n) 0))
+        (set! n1 (typecheck/NodNil))
+
+        (set! n1 (typecheck/NodAddr (aget (.-Lhs n) 0))))
+
+      (let [fn (chanfn "chanrecv2" 2 (.Type (.-X r)))
+          ^{:line 230} ok (aget (.-Lhs n) 1)
+          ^{:line 231} call (mkcall1 fn (aget types/Types types/TBOOL) init (.-X r) n1)]
+        (walkAssign init (typecheck/Stmt (ir/NewAssignStmt base/Pos ok call)))))))
+
+
+
+^{:go/end 253} (go/func walkReturn "walkReturn walks an ORETURN node.\n" ^ir/Node [^{:tag (* ir/ReturnStmt)} n]
+  (let [fn ir/CurFunc]
+
+    (inc! (.-NumReturns fn))
+    (when (== (len (.-Results n)) 0)
+      (return n))
+
+
+    (let [results (.Results (.Type fn))
+        ^{:line 245} dsts (make (slice ir/Node) (len results))]
+      (range [i v results]
+        ;; TODO(mdempsky): typecheck should have already checked the result variables.
+        (aset dsts i (typecheck/AssignExpr (assert (* ir/Name) (.-Nname v)))))
+
+
+      (set! (.-Results n) (ascompatee ^{:go/via [miniStmt miniNode]} (.Op n) dsts (.-Results n)))
+      ^{:line 252} n)))
+
+
+
+
+
+
+^{:go/end 285} (go/func ascompatet "check assign type list to\nan expression list. called in\n\n\texpr-list = func()\n" ^{:tag (slice ir/Node)} [^ir/Nodes nl ^{:tag (* types/Type)} nr]
+  (when (!= (len nl) (.NumFields nr))
+    (base/Fatalf "ascompatet: assignment count mismatch: %d = %d" (len nl) (.NumFields nr)))
+
+
+  (let [^ir/Nodes nn (zero ir/Nodes)]
+    (range [i l nl]
+      (when (ir/IsBlank l)
+        (continue))
+
+      (let [r (.Field nr i)]
+
+        ;; Order should have created autotemps of the appropriate type for
+        ;; us to store results into.
+        (when [(values tmp ok) (assert (* ir/Name) l)] (or (not ok) (not (.AutoTemp tmp)) (not (types/Identical ^{:go/via [miniExpr]} (.Type tmp) (.-Type r))))
+          (base/FatalfAt (.Pos l) "assigning %v to %+v" (.-Type r) l))
+
+
+        (let [res (ir/NewResultExpr base/Pos nil types/BADWIDTH)]
+          (set! (.-Index res) (conv int64 i))
+          ^{:go/via [miniExpr]} (.SetType res (.-Type r))
+          ^{:go/via [miniExpr miniNode]} (.SetTypecheck res 1)
+
+          (.Append nn (ir/NewAssignStmt base/Pos l res)))))
+
+    ^{:line 284} nn))
+
+
+
+
+
+
+^{:go/end 426} (go/func ascompatee "check assign expression list to\nan expression list. called in\n\n\texpr-list = expr-list\n" ^{:tag (slice ir/Node)} [^ir/Op op ^{:tag (slice ir/Node)} nl ^{:tag (slice ir/Node)} nr]
+  ;; cannot happen: should have been rejected during type checking
+  (when (!= (len nl) (len nr))
+    (base/Fatalf "assignment operands mismatch: %+v / %+v" (conv ir/Nodes nl) (conv ir/Nodes nr)))
+
+
+  (let [^ir/NameSet assigned (zero ir/NameSet)
+      (values ^bool memWrite ^bool deferResultWrite) (zero bool)
+
+      ;; affected reports whether expression n could be affected by
+      ;; the assignments applied so far.
+      ^{:line 302} affected ^{:go/end 315} (fn ^bool [^ir/Node n]
+        (when deferResultWrite
+          (return true))
+
+        (ir/Any n ^{:go/breaks [[4 313]] :go/end 314} (fn ^bool [^ir/Node n]
+            (when (and (== (.Op n) ir/ONAME) (.Has assigned (assert (* ir/Name) n)))
+              (return true))
+
+            (when (and memWrite (readsMemory n))
+              (return true))
+
+            false)))
+
+
+
+      ;; If a needed expression may be affected by an
+      ;; earlier assignment, make an early copy of that
+      ;; expression and use the copy instead.
+      ^{:line 320 :tag ir/Nodes} early (zero ir/Nodes)
+      ^{:line 321} save ^{:go/end 325} (fn [^{:tag (* ir/Node)} np]
+        (when [n @np] (affected n)
+          (set! @np (copyExpr n (.Type n) (addr early)))))
+
+
+
+      ^{:line 327 :tag ir/Nodes} late (zero ir/Nodes)]
+    (range [i lorig nl]
+      (let [(values l r) (values lorig (aget nr i))]
+
+        ;; Do not generate 'x = x' during return. See issue 4014.
+        (when (and (== op ir/ORETURN) (ir/SameSafeExpr l r))
+          (continue))
+
+
+        ;; Save subexpressions needed on left side.
+        ;; Drill through non-dereferences.
+        (while true
+          ;; If an expression has init statements, they must be evaluated
+          ;; before any of its saved sub-operands (#45706).
+          ;; TODO(mdempsky): Disallow init statements on lvalues.
+          (let [init (ir/TakeInit l)]
+            (walkStmtList init)
+            (.Append early (spread init))
+
+            (type-switch [ll l]
+              (case [(* ir/IndexExpr)]
+                (when (.IsArray (.Type (.-X ll)))
+                  (save (addr (.-Index ll)))
+                  (set! l (.-X ll))
+                  (continue)))
+
+              (case [(* ir/ParenExpr)]
+                (set! l (.-X ll))
+                (continue))
+              (case [(* ir/SelectorExpr)]
+                (when (== ^{:go/via [miniExpr miniNode]} (.Op ll) ir/ODOT)
+                  (set! l (.-X ll))
+                  (continue))))
+
+
+            (break)))
+
+
+        (let [^{:tag (* ir/Name)} name (zero (* ir/Name))]
+          (switch (.Op l)
+            (default
+              (base/Fatalf "unexpected lvalue %v" (.Op l)))
+            (case [ir/ONAME]
+              (set! name (assert (* ir/Name) l)))
+            (case [ir/OINDEX ir/OINDEXMAP]
+              (let [l (assert (* ir/IndexExpr) l)]
+                (save (addr (.-X l)))
+                (save (addr (.-Index l)))))
+            (case [ir/ODEREF]
+              (let [l (assert (* ir/StarExpr) l)]
+                (save (addr (.-X l)))))
+            (case [ir/ODOTPTR]
+              (let [l (assert (* ir/SelectorExpr) l)]
+                (save (addr (.-X l))))))
+
+
+          ;; Save expression on right side.
+          (save (addr r))
+
+          (appendWalkStmt (addr late) (convas (ir/NewAssignStmt base/Pos lorig r) (addr late)))
+
+          ;; Check for reasons why we may need to compute later expressions
+          ;; before this assignment happens.
+
+          (when (== name nil)
+            ;; Not a direct assignment to a declared variable.
+            ;; Conservatively assume any memory access might alias.
+            (set! memWrite true)
+            (continue))
+
+
+          (when (and (== (.-Class name) ir/PPARAMOUT) (.HasDefer ir/CurFunc))
+            ;; Assignments to a result parameter in a function with defers
+            ;; becomes visible early if evaluation of any later expression
+            ;; panics (#43835).
+            (set! deferResultWrite true)
+            (continue))
+
+
+          (when (ir/IsBlank name)
+            ;; We can ignore assignments to blank or anonymous result parameters.
+            ;; These can't appear in expressions anyway.
+            (continue))
+
+
+          (when (or (.Addrtaken name) (not (.OnStack name)))
+            ;; Global variable, heap escaped, or just addrtaken.
+            ;; Conservatively assume any memory access might alias.
+            (set! memWrite true)
+            (continue))
+
+
+          ;; Local, non-addrtaken variable.
+          ;; Assignments can only alias with direct uses of this variable.
+          (.Add assigned name))))
+
+
+    (.Append early (spread (.Take late)))
+    ^{:line 425} early))
+
+
+
+
+^{:go/breaks [[5 467]] :go/end 468} (go/func readsMemory "readsMemory reports whether the evaluation n directly reads from\nmemory that might be written to indirectly.\n" ^bool [^ir/Node n]
+  (switch (.Op n)
+    (case [ir/ONAME]
+      (let [n (assert (* ir/Name) n)]
+        (when (== (.-Class n) ir/PFUNC)
+          (return false))
+
+        (return (or (.Addrtaken n) (not (.OnStack n))))))
+
+    (case [ir/OADD
+        ^{:line 440} ir/OAND
+        ^{:line 441} ir/OANDAND
+        ^{:line 442} ir/OANDNOT
+        ^{:line 443} ir/OBITNOT
+        ^{:line 444} ir/OCONV
+        ^{:line 445} ir/OCONVIFACE
+        ^{:line 446} ir/OCONVNOP
+        ^{:line 447} ir/ODIV
+        ^{:line 448} ir/ODOT
+        ^{:line 449} ir/ODOTTYPE
+        ^{:line 450} ir/OLITERAL
+        ^{:line 451} ir/OLSH
+        ^{:line 452} ir/OMOD
+        ^{:line 453} ir/OMUL
+        ^{:line 454} ir/ONEG
+        ^{:line 455} ir/ONIL
+        ^{:line 456} ir/OOR
+        ^{:line 457} ir/OOROR
+        ^{:line 458} ir/OPAREN
+        ^{:line 459} ir/OPLUS
+        ^{:line 460} ir/ORSH
+        ^{:line 461} ir/OSUB
+        ^{:line 462} ir/OXOR]
+      (return false)))
+
+
+  ;; Be conservative.
+  true)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 588} (go/func appendSlice "expand append(l1, l2...) to\n\n\tinit {\n\t  s := l1\n\t  newLen := s.len + l2.len\n\t  // Compare as uint so growslice can panic on overflow.\n\t  if uint(newLen) <= uint(s.cap) {\n\t    s = s[:newLen]\n\t  } else {\n\t    s = growslice(s.ptr, s.len, s.cap, l2.len, T)\n\t  }\n\t  memmove(&s[s.len-l2.len], &l2[0], l2.len*sizeof(T))\n\t}\n\ts\n\nl2 is allowed to be a string.\n" ^ir/Node [^{:tag (* ir/CallExpr)} n ^{:tag (* ir/Nodes)} init]
+  (walkAppendArgs n init)
+
+  (let [l1 (aget (.-Args n) 0)
+      ^{:line 490} l2 (aget (.-Args n) 1)]
+    (set! l2 (cheapExpr l2 init))
+    (aset (.-Args n) 1 l2)
+
+    (let [^ir/Nodes nodes (zero ir/Nodes)
+
+        ;; var s []T
+        ^{:line 497} s (typecheck/TempAt base/Pos ir/CurFunc (.Type l1))]
+      (.Append nodes (ir/NewAssignStmt base/Pos s l1)) ; s = l1
+
+      (let [elemtype (.Elem ^{:go/via [miniExpr]} (.Type s))
+
+          ;; Decompose slice.
+          ^{:line 503} oldPtr (ir/NewUnaryExpr base/Pos ir/OSPTR s)
+          ^{:line 504} oldLen (ir/NewUnaryExpr base/Pos ir/OLEN s)
+          ^{:line 505} oldCap (ir/NewUnaryExpr base/Pos ir/OCAP s)
+
+          ;; Number of elements we are adding
+          ^{:line 508} num (ir/NewUnaryExpr base/Pos ir/OLEN l2)
+
+          ;; newLen := oldLen + num
+          ^{:line 511} newLen (typecheck/TempAt base/Pos ir/CurFunc (aget types/Types types/TINT))]
+        (.Append nodes (ir/NewAssignStmt base/Pos newLen (ir/NewBinaryExpr base/Pos ir/OADD oldLen num)))
+
+        ;; if uint(newLen) <= uint(oldCap)
+        (let [nif (ir/NewIfStmt base/Pos nil nil nil)
+            ^{:line 516} nuint (typecheck/Conv newLen (aget types/Types types/TUINT))
+            ^{:line 517} scapuint (typecheck/Conv oldCap (aget types/Types types/TUINT))]
+          (set! (.-Cond nif) (ir/NewBinaryExpr base/Pos ir/OLE nuint scapuint))
+          (set! (.-Likely nif) true)
+
+          ;; then { s = s[:newLen] }
+          (let [slice (ir/NewSliceExpr base/Pos ir/OSLICE s nil newLen nil)]
+            ^{:go/via [miniExpr]} (.SetBounded slice true)
+            (set! (.-Body nif) (lit (slice ir/Node) (ir/NewAssignStmt base/Pos s slice)))
+
+            ;; else { s = growslice(oldPtr, newLen, oldCap, num, T) }
+            (let [call (walkGrowslice s ^{:go/via [miniStmt]} (.PtrInit nif) oldPtr newLen oldCap num)]
+              (set! (.-Else nif) (lit (slice ir/Node) (ir/NewAssignStmt base/Pos s call)))
+
+              (.Append nodes nif)
+
+              ;; Index to start copying into s.
+              ;;   idx = newLen - len(l2)
+              ;; We use this expression instead of oldLen because it avoids
+              ;; a spill/restore of oldLen.
+              ;; Note: this doesn't work optimally currently because
+              ;; the compiler optimizer undoes this arithmetic.
+              (let [idx (ir/NewBinaryExpr base/Pos ir/OSUB newLen (ir/NewUnaryExpr base/Pos ir/OLEN l2))
+
+                  ^{:line 540 :tag ir/Node} ncopy (zero ir/Node)]
+                (cond (.HasPointers elemtype)
+                  ;; copy(s[idx:], l2)
+                  (let [slice (ir/NewSliceExpr base/Pos ir/OSLICE s idx nil nil)]
+                    ^{:go/via [miniExpr]} (.SetType slice ^{:go/via [miniExpr]} (.Type s))
+                    ^{:go/via [miniExpr]} (.SetBounded slice true)
+
+                    (.SetWBPos ir/CurFunc ^{:go/via [miniExpr miniNode]} (.Pos n))
+
+                    ;; instantiate typedslicecopy(typ *type, dstPtr *any, dstLen int, srcPtr *any, srcLen int) int
+                    (let [fn (typecheck/LookupRuntime "typedslicecopy" (.Elem (.Type l1)) (.Elem (.Type l2)))
+                        (values ptr1 len1) (backingArrayPtrLen (cheapExpr slice (addr nodes)))
+                        (values ptr2 len2) (backingArrayPtrLen l2)]
+                      (set! ncopy (mkcall1 fn (aget types/Types types/TINT) (addr nodes) (reflectdata/AppendElemRType base/Pos n) ptr1 len1 ptr2 len2))))
+                  (and (.-Instrumenting (.-Cfg base/Flag)) (not (.-CompilingRuntime base/Flag)))
+                  ;; rely on runtime to instrument:
+                  ;;  copy(s[idx:], l2)
+                  ;; l2 can be a slice or string.
+                  (let [slice (ir/NewSliceExpr base/Pos ir/OSLICE s idx nil nil)]
+                    ^{:go/via [miniExpr]} (.SetType slice ^{:go/via [miniExpr]} (.Type s))
+                    ^{:go/via [miniExpr]} (.SetBounded slice true)
+
+                    (let [(values ptr1 len1) (backingArrayPtrLen (cheapExpr slice (addr nodes)))
+                        (values ptr2 len2) (backingArrayPtrLen l2)
+
+                        ^{:line 565} fn (typecheck/LookupRuntime "slicecopy" (.Elem (.Type ptr1)) (.Elem (.Type ptr2)))]
+                      (set! ncopy (mkcall1 fn (aget types/Types types/TINT) (addr nodes) ptr1 len1 ptr2 len2 (ir/NewInt base/Pos (.Size elemtype)))))) :else
+
+                  ;; memmove(&s[idx], &l2[0], len(l2)*sizeof(T))
+                  (let [ix (ir/NewIndexExpr base/Pos s idx)]
+                    ^{:go/via [miniExpr]} (.SetBounded ix true)
+                    (let [addr (typecheck/NodAddr ix)
+
+                        ^{:line 573} sptr (ir/NewUnaryExpr base/Pos ir/OSPTR l2)
+
+                        ^{:line 575} nwid (cheapExpr (typecheck/Conv (ir/NewUnaryExpr base/Pos ir/OLEN l2) (aget types/Types types/TUINTPTR)) (addr nodes))]
+                      (set! nwid (ir/NewBinaryExpr base/Pos ir/OMUL nwid (ir/NewInt base/Pos (.Size elemtype))))
+
+                      ;; instantiate func memmove(to *any, frm *any, length uintptr)
+                      (let [fn (typecheck/LookupRuntime "memmove" elemtype elemtype)]
+                        (set! ncopy (mkcall1 fn nil (addr nodes) addr sptr nwid))))))
+
+                (let [ln (append nodes ncopy)]
+
+                  (typecheck/Stmts ln)
+                  (walkStmtList ln)
+                  (.Append init (spread ln))
+                  ^{:line 587} s)))))))))
+
+
+
+
+^{:go/end 626} (go/func isAppendOfMake "isAppendOfMake reports whether n is of the form append(x, make([]T, y)...).\nisAppendOfMake assumes n has already been typechecked.\n" ^bool [^ir/Node n]
+  (when (or (!= (.-N base/Flag) 0) (.-Instrumenting (.-Cfg base/Flag)))
+    (return false))
+
+
+  (when (== (.Typecheck n) 0)
+    (base/Fatalf "missing typecheck: %+v" n))
+
+
+  (when (!= (.Op n) ir/OAPPEND)
+    (return false))
+
+  (let [call (assert (* ir/CallExpr) n)]
+    (when (or (not (.-IsDDD call)) (!= (len (.-Args call)) 2) (!= (.Op (aget (.-Args call) 1)) ir/OMAKESLICE))
+      (return false))
+
+
+    (let [mk (assert (* ir/MakeExpr) (aget (.-Args call) 1))]
+      (when (!= (.-Cap mk) nil)
+        (return false))
+
+
+      ;; y must be either an integer constant or the largest possible positive value
+      ;; of variable y needs to fit into a uint.
+
+      ;; typecheck made sure that constant arguments to make are not negative and fit into an int.
+
+      ;; The care of overflow of the len argument to make will be handled by an explicit check of int(len) < 0 during runtime.
+      ^{:go/breaks [[3 625]]} (let [y (.-Len mk)]
+        (when (and (not (ir/IsConst y constant/Int)) (> (.Size (.Type y)) (.Size (aget types/Types types/TUINT))))
+          (return false))
+
+
+        true))))
+
+
+;; extendSlice rewrites append(l1, make([]T, l2)...) to
+;;
+;;	init {
+;;	  if l2 >= 0 { // Empty if block here for more meaningful node.SetLikely(true)
+;;	  } else {
+;;	    panicmakeslicelen()
+;;	  }
+;;	  s := l1
+;;	  if l2 != 0 {
+;;	    n := len(s) + l2
+;;	    // Compare n and s as uint so growslice can panic on overflow of len(s) + l2.
+;;	    // cap is a positive int and n can become negative when len(s) + l2
+;;	    // overflows int. Interpreting n when negative as uint makes it larger
+;;	    // than cap(s). growslice will check the int n arg and panic if n is
+;;	    // negative. This prevents the overflow from being undetected.
+;;	    if uint(n) <= uint(cap(s)) {
+;;	      s = s[:n]
+;;	    } else {
+;;	      s = growslice(T, s.ptr, n, s.cap, l2, T)
+;;	    }
+;;	    // clear the new portion of the underlying array.
+;;	    hp := &s[len(s)-l2]
+;;	    hn := l2 * sizeof(T)
+;;	    memclr(hp, hn)
+;;	  }
+;;	}
+;;	s
+;;
+;;	if T has pointers, the final memclr can go inside the "then" branch, as
+;;	growslice will have done the clearing for us.
+
+^{:go/end 752} (go/func extendSlice ^ir/Node [^{:tag (* ir/CallExpr)} n ^{:tag (* ir/Nodes)} init]
+  ;; isAppendOfMake made sure all possible positive values of l2 fit into a uint.
+  ;; The case of l2 overflow when converting from e.g. uint to int is handled by an explicit
+  ;; check of l2 < 0 at runtime which is generated below.
+  (let [l2 (typecheck/Conv (.-Len (assert (* ir/MakeExpr) (aget (.-Args n) 1))) (aget types/Types types/TINT))]
+    (set! l2 (typecheck/Expr l2))
+    (aset (.-Args n) 1 l2) ; walkAppendArgs expects l2 in n.List.Second().
+
+    (walkAppendArgs n init)
+
+    (let [l1 (aget (.-Args n) 0)]
+      (set! l2 (aget (.-Args n) 1)) ; re-read l2, as it may have been updated by walkAppendArgs
+
+      (let [^{:tag (slice ir/Node)} nodes (zero (slice ir/Node))
+
+          ;; if l2 >= 0 (likely happens), do nothing
+          ^{:line 675} nifneg (ir/NewIfStmt base/Pos (ir/NewBinaryExpr base/Pos ir/OGE l2 (ir/NewInt base/Pos 0)) nil nil)]
+        (set! (.-Likely nifneg) true)
+
+        ;; else panicmakeslicelen()
+        (set! (.-Else nifneg) (lit (slice ir/Node) (mkcall "panicmakeslicelen" nil init)))
+        (set! nodes (append nodes nifneg))
+
+        ;; s := l1
+        (let [s (typecheck/TempAt base/Pos ir/CurFunc (.Type l1))]
+          (set! nodes (append nodes (ir/NewAssignStmt base/Pos s l1)))
+
+          ;; if l2 != 0 {
+          ;; Avoid work if we're not appending anything. But more importantly,
+          ;; avoid allowing hp to be a past-the-end pointer when clearing. See issue 67255.
+          (let [nifnz (ir/NewIfStmt base/Pos (ir/NewBinaryExpr base/Pos ir/ONE l2 (ir/NewInt base/Pos 0)) nil nil)]
+            (set! (.-Likely nifnz) true)
+            (set! nodes (append nodes nifnz))
+
+            (let [elemtype (.Elem ^{:go/via [miniExpr]} (.Type s))
+
+                ;; n := s.len + l2
+                ^{:line 696} nn (typecheck/TempAt base/Pos ir/CurFunc (aget types/Types types/TINT))]
+              (set! (.-Body nifnz) (append (.-Body nifnz) (ir/NewAssignStmt base/Pos nn (ir/NewBinaryExpr base/Pos ir/OADD (ir/NewUnaryExpr base/Pos ir/OLEN s) l2))))
+
+              ;; if uint(n) <= uint(s.cap)
+              (let [nuint (typecheck/Conv nn (aget types/Types types/TUINT))
+                  ^{:line 701} capuint (typecheck/Conv (ir/NewUnaryExpr base/Pos ir/OCAP s) (aget types/Types types/TUINT))
+                  ^{:line 702} nif (ir/NewIfStmt base/Pos (ir/NewBinaryExpr base/Pos ir/OLE nuint capuint) nil nil)]
+                (set! (.-Likely nif) true)
+
+                ;; then { s = s[:n] }
+                (let [nt (ir/NewSliceExpr base/Pos ir/OSLICE s nil nn nil)]
+                  ^{:go/via [miniExpr]} (.SetBounded nt true)
+                  (set! (.-Body nif) (lit (slice ir/Node) (ir/NewAssignStmt base/Pos s nt)))
+
+                  ;; else { s = growslice(s.ptr, n, s.cap, l2, T) }
+                  (set! (.-Else nif) (lit (slice ir/Node)
+                      (ir/NewAssignStmt base/Pos s (walkGrowslice s ^{:go/via [miniStmt]} (.PtrInit nif)
+                          (ir/NewUnaryExpr base/Pos ir/OSPTR s)
+                          ^{:line 714} nn
+                          (ir/NewUnaryExpr base/Pos ir/OCAP s)
+                          ^{:line 716} l2))))
+
+
+                  (set! (.-Body nifnz) (append (.-Body nifnz) nif))
+
+                  ;; hp := &s[s.len - l2]
+                  ;; TODO: &s[s.len] - hn?
+                  (let [ix (ir/NewIndexExpr base/Pos s (ir/NewBinaryExpr base/Pos ir/OSUB (ir/NewUnaryExpr base/Pos ir/OLEN s) l2))]
+                    ^{:go/via [miniExpr]} (.SetBounded ix true)
+                    (let [hp (typecheck/ConvNop (typecheck/NodAddr ix) (aget types/Types types/TUNSAFEPTR))
+
+                        ;; hn := l2 * sizeof(elem(s))
+                        ^{:line 728} hn (typecheck/Conv (ir/NewBinaryExpr base/Pos ir/OMUL l2 (ir/NewInt base/Pos (.Size elemtype))) (aget types/Types types/TUINTPTR))
+
+                        ^{:line 730} clrname "memclrNoHeapPointers"
+                        ^{:line 731} hasPointers (.HasPointers elemtype)]
+                      (when hasPointers
+                        (set! clrname "memclrHasPointers")
+                        (.SetWBPos ir/CurFunc ^{:go/via [miniExpr miniNode]} (.Pos n)))
+
+
+                      (let [^ir/Nodes clr (zero ir/Nodes)
+                          ^{:line 738} clrfn (mkcall clrname nil (addr clr) hp hn)]
+                        (.Append clr clrfn)
+                        (if hasPointers
+                          ;; growslice will have cleared the new entries, so only
+                          ;; if growslice isn't called do we need to do the zeroing ourselves.
+                          (set! (.-Body nif) (append (.-Body nif) (spread clr)))
+
+                          (set! (.-Body nifnz) (append (.-Body nifnz) (spread clr))))
+
+
+                        (typecheck/Stmts nodes)
+                        (walkStmtList nodes)
+                        (.Append init (spread nodes))
+                        ^{:line 751} s))))))))))))

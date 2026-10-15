@@ -30,7 +30,9 @@ Derived on 2026-10-11 (amd64) and 2026-10-12 (arm64, BX63) by `bin/tamago-vendor
 copy of the module, for each architecture, then merged): each file's forms the converter's
 output as it writes it, the package files merged; Go's comments other than doc comments are `;`
 comments in the forms, which the printer does not reproduce (SPEC §10.4). Not converted: the
-tests (`_test.go`, `testdata/`), `cmd/`, and the files of other configurations.
+tests (`_test.go`, `testdata/`), `cmd/` (Go's toolchain: the part `cmd/compile`, `cmd/link`
+and `cmd/asm` build from is in [cmd/](cmd/README.md) since S9), and the files of other
+configurations.
 
 Checks (`bin/tamago-vendor`): `verify`, a fresh conversion is this tree byte for byte; `check`,
 std printed equals GOROOT/src at gocmp's three levels per package (the round trip's reference),

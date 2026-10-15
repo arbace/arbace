@@ -1,0 +1,1045 @@
+;; Copyright 2024 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.cmd.compile.internal.liveness) (go/file "mergelocals.go" :imports [
+
+
+    ^{:line 8} [base "cmd/compile/internal/base"]
+    ^{:line 9} [bitvec "cmd/compile/internal/bitvec"]
+    ^{:line 10} [ir "cmd/compile/internal/ir"]
+    ^{:line 11} [ssa "cmd/compile/internal/ssa"]
+    ^{:line 12} [src "cmd/internal/src"]
+    ^{:line 13} [fmt "fmt"]
+    ^{:line 14} [os "os"]
+    ^{:line 15} [filepath "path/filepath"]
+    ^{:line 16} [slices "slices"]
+    ^{:line 17} [sort "sort"]
+    ^{:line 18} [strings "strings"]])
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+(go/type MergeLocalsState "MergeLocalsState encapsulates information about which AUTO\n(stack-allocated) variables within a function can be safely\nmerged/overlapped, e.g. share a stack slot with some other auto).\nAn instance of MergeLocalsState is produced by MergeLocals() below\nand then consumed in ssagen.AllocFrame. The map 'partition'\ncontains entries of the form <N,SL> where N is an *ir.Name and SL\nis a slice holding the indices (within 'vars') of other variables\nthat share the same slot, specifically the slot of the first\nelement in the partition, which we'll call the \"leader\". For\nexample, if a function contains five variables where v1/v2/v3 are\nsafe to overlap and v4/v5 are safe to overlap, the MergeLocalsState\ncontent might look like\n\n\tvars: [v1, v2, v3, v4, v5]\n\tpartition: v1 -> [1, 0, 2], v2 -> [1, 0, 2], v3 -> [1, 0, 2]\n\t           v4 -> [3, 4], v5 -> [3, 4]\n\nA nil MergeLocalsState indicates that no local variables meet the\nnecessary criteria for overlap.\n" (struct
+
+    ^{:line 42 :tag (slice (* ir/Name)) :doc "contains auto vars that participate in overlapping\n"} vars
+
+    ^{:line 44 :tag (map (* ir/Name) (slice int)) :doc "maps auto variable to overlap partition\n"} partition))
+
+
+
+
+(go/type candRegion "candRegion is a sub-range (start, end) corresponding to an interval\n[st,en] within the list of candidate variables.\n" (struct
+    ^{:line 50 :tag int} st ^int en))
+
+
+
+
+
+(go/type cstate "cstate holds state information we'll need during the analysis\nphase of stack slot merging but can be discarded when the analysis\nis done.\n" (struct
+    ^{:line 57 :tag (* ir/Func)} fn
+    ^{:line 58 :tag (* ssa/Func)} f
+    ^{:line 59 :tag (* Liveness)} lv
+    ^{:line 60 :tag (slice (* ir/Name))} cands
+    ^{:line 61 :tag (map (* ir/Name) int32)} nameToSlot
+    ^{:line 62 :tag (slice candRegion)} regions
+    ^{:line 63 :tag (map ssa/ID (slice (* ir/Name)))} indirectUE
+    ^{:line 64 :tag (slice Intervals)} ivs
+    ^{:line 65 :tag (map (* ir/Name) bool)} hashDeselected
+    ^{:line 66 :tag int} trace)) ; debug trace level
+
+
+
+
+
+^{:go/end 120} (go/func MergeLocals "MergeLocals analyzes the specified ssa function f to determine which\nof its auto variables can safely share the same stack slot, returning\na state object that describes how the overlap should be done.\n" ^{:tag (* MergeLocalsState)} [^{:tag (* ir/Func)} fn ^{:tag (* ssa/Func)} f]
+
+  ;; Create a container object for useful state info and then
+  ;; call collectMergeCandidates to see if there are vars suitable
+  ;; for stack slot merging.
+  (let [cs (addr ^{:go/breaks [2 4 6]} (lit cstate
+          :fn fn
+          :f f
+          :trace (.-MergeLocalsTrace base/Debug)))]
+
+    (.collectMergeCandidates cs)
+    (when (== (len (.-regions cs)) 0)
+      (return nil))
+
+
+    ;; Kick off liveness analysis.
+    ;;
+    ;; If we have a local variable such as "r2" below that's written
+    ;; but then not read, something like:
+    ;;
+    ;;      vardef r1
+    ;;      r1.x = ...
+    ;;      vardef r2
+    ;;      r2.x = 0
+    ;;      r2.y = ...
+    ;;      <call foo>
+    ;;      // no subsequent use of r2
+    ;;      ... = r1.x
+    ;;
+    ;; then for the purpose of calculating stack maps at the call, we
+    ;; can ignore "r2" completely during liveness analysis for stack
+    ;; maps, however for stack slock merging we most definitely want
+    ;; to treat the writes as "uses".
+    (set! (.-lv cs) (newliveness fn f (.-cands cs) (.-nameToSlot cs) 0))
+    (set! (.-conservativeWrites (.-lv cs)) true)
+    (.prologue (.-lv cs))
+    (.solve (.-lv cs))
+
+    ;; Compute intervals for each candidate based on the liveness and
+    ;; on block effects.
+    (.computeIntervals cs)
+
+    ;; Perform merging within each region of the candidates list.
+    (let [rv (.performMerging cs)]
+      (when [err (.check rv)] (!= err nil)
+        (base/FatalfAt ^{:go/via [miniNode]} (.Pos fn) "invalid mergelocals state: %v" err))
+
+      ^{:line 119} rv)))
+
+
+
+
+^{:go/breaks [[5 128]] :go/end 129} (go/method Subsumed "Subsumed returns whether variable n is subsumed, e.g. appears\nin an overlap position but is not the leader in that partition.\n" ^bool [^{:tag (* MergeLocalsState)} mls ^{:tag (* ir/Name)} n]
+  (when [(values sl ok) (aget (.-partition mls) n)] (and ok (!= (aget (.-vars mls) (aget sl 0)) n))
+    (return true))
+
+  false)
+
+
+
+
+^{:go/breaks [[5 137]] :go/end 138} (go/method IsLeader "IsLeader returns whether a variable n is the leader (first element)\nin a sharing partition.\n" ^bool [^{:tag (* MergeLocalsState)} mls ^{:tag (* ir/Name)} n]
+  (when [(values sl ok) (aget (.-partition mls) n)] (and ok (== (aget (.-vars mls) (aget sl 0)) n))
+    (return true))
+
+  false)
+
+
+
+^{:go/end 149} (go/method Leader "Leader returns the leader variable for subsumed var n.\n" ^{:tag (* ir/Name)} [^{:tag (* MergeLocalsState)} mls ^{:tag (* ir/Name)} n]
+  (when [(values sl ok) (aget (.-partition mls) n)] ok
+    (when (== (aget (.-vars mls) (aget sl 0)) n)
+      (panic "variable is not subsumed"))
+
+    (return (aget (.-vars mls) (aget sl 0))))
+
+  (panic "not a merge candidate"))
+
+
+
+^{:go/end 168} (go/method Followers "Followers writes a list of the followers for leader n into the slice tmp.\n" ^{:tag (slice (* ir/Name))} [^{:tag (* MergeLocalsState)} mls ^{:tag (* ir/Name)} n ^{:tag (slice (* ir/Name))} tmp]
+  (set! tmp (subslice tmp _ 0))
+  (let [(values sl ok) (aget (.-partition mls) n)]
+    (when (not ok)
+      (panic "no entry for leader"))
+
+    (when (!= (aget (.-vars mls) (aget sl 0)) n)
+      (panic "followers invoked on subsumed var"))
+
+    (range [_ k (subslice sl 1)]
+      (set! tmp (append tmp (aget (.-vars mls) k))))
+
+    (^{:inst [(slice (* ir/Name)) (* ir/Name)]} slices/SortStableFunc tmp ^{:go/end 166} (fn ^int [^{:tag (* ir/Name)} a ^{:tag (* ir/Name)} b]
+        (strings/Compare (.-Name (.Sym a)) (.-Name (.Sym b)))))
+
+    ^{:line 167} tmp))
+
+
+
+
+^{:go/end 186} (go/method EstSavings "EstSavings returns the estimated reduction in stack size (number of bytes) for\nthe given merge locals state via a pair of ints, the first for non-pointer types and the second for pointer types.\n" [^{:tag (* MergeLocalsState)} mls] :results [int int]
+  (let [totnp 0
+      ^{:line 174} totp 0]
+    (range [n (.-partition mls)]
+      (when (.Subsumed mls n)
+        (let [sz (conv int (.Size ^{:go/via [miniExpr]} (.Type n)))]
+          (if (.HasPointers ^{:go/via [miniExpr]} (.Type n))
+            (set! totp + sz)
+
+            (set! totnp + sz)))))
+
+
+
+    (return totnp totp)))
+
+
+
+
+^{:go/end 263} (go/method check "check tests for various inconsistencies and problems in mls,\nreturning an error if any problems are found.\n" ^error [^{:tag (* MergeLocalsState)} mls]
+  (when (== mls nil)
+    (return nil))
+
+  ^{:go/breaks [[6 262]]} (let [used (make (map int bool))
+      ^{:line 195} seenv (make (map (* ir/Name) int))]
+    (range [ii v (.-vars mls)]
+      (when [(values prev ok) (aget seenv v)] ok
+        (return (fmt/Errorf "duplicate var %q in vslots: %d and %d\n"
+            (.-Name (.Sym v)) ii prev)))
+
+      (aset seenv v ii))
+
+    (range [k sl (.-partition mls)]
+      ;; length of slice value needs to be more than 1
+      (when (< (len sl) 2)
+        (return (fmt/Errorf "k=%q v=%+v slice len %d invalid"
+            (.-Name (.Sym k)) sl (len sl))))
+
+      ;; values in the slice need to be var indices
+      (range [i v sl]
+        (when (or (< v 0) (> v (- (len (.-vars mls)) 1)))
+          (return (fmt/Errorf "k=%q v=+%v slpos %d vslot %d out of range of m.v" (.-Name (.Sym k)) sl i v)))))
+
+
+
+    (range [k sl (.-partition mls)]
+      (let [foundk false]
+        (range [i v sl]
+          (let [vv (aget (.-vars mls) v)]
+            (if (== i 0)
+              (when (not (.IsLeader mls vv))
+                (return (fmt/Errorf "k=%s v=+%v slpos 0 vslot %d IsLeader(%q) is false should be true" (.-Name (.Sym k)) sl v (.-Name (.Sym vv)))))
+
+              (do
+                (when (not (.Subsumed mls vv))
+                  (return (fmt/Errorf "k=%s v=+%v slpos %d vslot %d Subsumed(%q) is false should be true" (.-Name (.Sym k)) sl i v (.-Name (.Sym vv)))))
+
+                (when (!= (.Leader mls vv) (aget (.-vars mls) (aget sl 0)))
+                  (return (fmt/Errorf "k=%s v=+%v slpos %d vslot %d Leader(%q) got %v want %v" (.-Name (.Sym k)) sl i v (.-Name (.Sym vv)) (.Leader mls vv) (aget (.-vars mls) (aget sl 0)))))))
+
+
+            (when (== vv k)
+              (set! foundk true)
+              (when (aget used v)
+                (return (fmt/Errorf "k=%s v=+%v val slice used violation at slpos %d vslot %d" (.-Name (.Sym k)) sl i v)))
+
+              (aset used v true))))
+
+
+        (when (not foundk)
+          (return (fmt/Errorf "k=%s v=+%v slice value missing k" (.-Name (.Sym k)) sl)))
+
+        (let [vl (aget (.-vars mls) (aget sl 0))]
+          (range [_ v (subslice sl 1)]
+            (let [vv (aget (.-vars mls) v)]
+              (when (> (.Size ^{:go/via [miniExpr]} (.Type vv)) (.Size ^{:go/via [miniExpr]} (.Type vl)))
+                (return (fmt/Errorf "k=%s v=+%v follower %s size %d larger than leader %s size %d" (.-Name (.Sym k)) sl (.-Name (.Sym vv)) (.Size ^{:go/via [miniExpr]} (.Type vv)) (.-Name (.Sym vl)) (.Size ^{:go/via [miniExpr]} (.Type vl)))))
+
+              (when (and (.HasPointers ^{:go/via [miniExpr]} (.Type vv)) (not (.HasPointers ^{:go/via [miniExpr]} (.Type vl))))
+                (return (fmt/Errorf "k=%s v=+%v follower %s hasptr=true but leader %s hasptr=false" (.-Name (.Sym k)) sl (.-Name (.Sym vv)) (.-Name (.Sym vl)))))
+
+              (when (> (.Alignment ^{:go/via [miniExpr]} (.Type vv)) (.Alignment ^{:go/via [miniExpr]} (.Type vl)))
+                (return (fmt/Errorf "k=%s v=+%v follower %s align %d greater than leader %s align %d" (.-Name (.Sym k)) sl (.-Name (.Sym vv)) (.Alignment ^{:go/via [miniExpr]} (.Type vv)) (.-Name (.Sym vl)) (.Alignment ^{:go/via [miniExpr]} (.Type vl))))))))))
+
+
+
+    (range [i used]
+      (when (not (aget used i))
+        (return (fmt/Errorf "pos %d var %q unused" i (aget (.-vars mls) i)))))
+
+
+    nil))
+
+
+^{:go/end 286} (go/method String ^string [^{:tag (* MergeLocalsState)} mls]
+  (let [^{:tag (slice (* ir/Name))} leaders (zero (slice (* ir/Name)))]
+    (range [n sl (.-partition mls)]
+      (when (== n (aget (.-vars mls) (aget sl 0)))
+        (set! leaders (append leaders n))))
+
+
+    (^{:inst [(slice (* ir/Name)) (* ir/Name)]} slices/SortFunc leaders ^{:go/end 274} (fn ^int [^{:tag (* ir/Name)} a ^{:tag (* ir/Name)} b]
+        (strings/Compare (.-Name (.Sym a)) (.-Name (.Sym b)))))
+
+    (let [^strings/Builder sb (zero strings/Builder)]
+      (range [_ n leaders]
+        (.WriteString sb (+ (.-Name (.Sym n)) ":"))
+        (let [sl (aget (.-partition mls) n)]
+          (range [_ k (subslice sl 1)]
+            (let [n (aget (.-vars mls) k)]
+              (.WriteString sb (+ " " (.-Name (.Sym n))))))
+
+          (.WriteString sb "\n")))
+
+      (.String sb))))
+
+
+
+
+
+
+
+
+
+
+^{:go/end 360} (go/method collectMergeCandidates "collectMergeCandidates visits all of the AUTO vars declared in\nfunction fn and identifies a list of candidate variables for\nmerging / overlapping. On return the \"cands\" field of cs will be\nfilled in with our set of potentially overlappable candidate\nvariables, the \"regions\" field will hold regions/sequence of\ncompatible vars within the candidates list, \"nameToSlot\" field will\nbe populated, and the \"indirectUE\" field will be filled in with\ninformation about indirect upwards-exposed uses in the func.\n" [^{:tag (* cstate)} cs]
+  (let [^{:tag (slice (* ir/Name))} cands (zero (slice (* ir/Name)))]
+
+    ;; Collect up the available set of appropriate AUTOs in the
+    ;; function as a first step, and bail if we have fewer than
+    ;; two candidates.
+    (range [_ n (.-Dcl (.-fn cs))]
+      (when (not (.Used n))
+        (continue))
+
+      (when (not (ssa/IsMergeCandidate n))
+        (continue))
+
+      (set! cands (append cands n)))
+
+    (when (< (len cands) 2)
+      (return))
+
+
+    ;; Sort by pointerness, size, and then name.
+    (sort/SliceStable cands ^{:go/end 318} (fn ^bool [^int i ^int j]
+        (nameLess (aget cands i) (aget cands j))))
+
+
+    (when (> (.-trace cs) 1)
+      (fmt/Fprintf os/Stderr "=-= raw cand list for func %v:\n" (.-fn cs))
+      (range [i cands]
+        (dumpCand (aget cands i) i)))
+
+
+
+    ;; Now generate an initial pruned candidate list and regions list.
+    ;; This may be empty if we don't have enough compatible candidates.
+    (let [(values initial _) (.genRegions cs cands)]
+      (when (< (len initial) 2)
+        (return))
+
+
+      ;; Set up for hash bisection if enabled.
+      (.setupHashBisection cs initial)
+
+      ;; Create and populate an indirect use table that we'll use
+      ;; during interval construction. As part of this process we may
+      ;; wind up tossing out additional candidates, so check to make
+      ;; sure we still have something to work with.
+      (set! (values (.-cands cs) (.-regions cs)) (.populateIndirectUseTable cs initial))
+      (when (< (len (.-cands cs)) 2)
+        (return))
+
+
+      ;; At this point we have a final pruned set of candidates and a
+      ;; corresponding set of regions for the candidates. Build a
+      ;; name-to-slot map for the candidates.
+      (set! (.-nameToSlot cs) (make (map (* ir/Name) int32)))
+      (range [i n (.-cands cs)]
+        (aset (.-nameToSlot cs) n (conv int32 i)))
+
+
+      (when (> (.-trace cs) 1)
+        (fmt/Fprintf os/Stderr "=-= pruned candidate list for fn %v:\n" (.-fn cs))
+        (range [i (.-cands cs)]
+          (dumpCand (aget (.-cands cs) i) i))))))
+
+
+
+
+
+
+^{:go/end 393} (go/method genRegions "genRegions generates a set of regions within cands corresponding\nto potentially overlappable/mergeable variables.\n" [^{:tag (* cstate)} cs ^{:tag (slice (* ir/Name))} cands] :results [(slice (* ir/Name)) (slice candRegion)]
+  (let [^{:tag (slice (* ir/Name))} pruned (zero (slice (* ir/Name)))
+      ^{:line 366 :tag (slice candRegion)} regions (zero (slice candRegion))
+      ^{:line 367} st 0]
+    (while true
+      (let [en (nextRegion cands st)]
+        (when (== en -1)
+          (break))
+
+        (when (== st en)
+          ;; region has just one element, we can skip it
+          (inc! st)
+          (continue))
+
+        (let [pst (len pruned)
+            ^{:line 379} pen (+ pst (- en st))]
+          (when (> (.-trace cs) 1)
+            (fmt/Fprintf os/Stderr "=-= addregion st=%d en=%d: add part %d -> %d\n" st en pst pen))
+
+
+          ;; non-empty region, add to pruned
+          (set! pruned (append pruned (spread (subslice cands st (+ en 1)))))
+          (set! regions (append regions (lit candRegion :st pst :en pen)))
+          (set! st (+ en 1)))))
+
+    (when (< (len pruned) 2)
+      (return nil nil))
+
+    (return pruned regions)))
+
+
+^{:go/end 406} (go/method dumpFunc [^{:tag (* cstate)} cs]
+  (fmt/Fprintf os/Stderr "=-= mergelocalsdumpfunc %v:\n" (.-fn cs))
+  (let [ii 0]
+    (range [k b (.-Blocks (.-f cs))]
+      (fmt/Fprintf os/Stderr "b%d:\n" k)
+      (range [_ v (.-Values b)]
+        (let [pos (.Pos (.-PosTable base/Ctxt) (.-Pos v))]
+          (fmt/Fprintf os/Stderr "=-= %d L%d|C%d %s\n" ii (.RelLine pos) (.RelCol pos) (.LongString v))
+          (inc! ii))))))
+
+
+
+
+^{:go/end 417} (go/method dumpFuncIfSelected [^{:tag (* cstate)} cs]
+  (when (== (.-MergeLocalsDumpFunc base/Debug) "")
+    (return))
+
+  (when (not (strings/HasSuffix (fmt/Sprintf "%v" (.-fn cs))
+        (.-MergeLocalsDumpFunc base/Debug)))
+    (return))
+
+  (.dumpFunc cs))
+
+
+
+
+
+
+
+^{:go/end 444} (go/method setupHashBisection "setupHashBisection checks to see if any of the candidate\nvariables have been de-selected by our hash debug. Here\nwe also implement the -d=mergelocalshtrace flag, which turns\non debug tracing only if we have at least two candidates\nselected by the hash debug for this function.\n" [^{:tag (* cstate)} cs ^{:tag (slice (* ir/Name))} cands]
+  (when (== (.-MergeLocalsHash base/Debug) "")
+    (return))
+
+  (let [deselected (make (map (* ir/Name) bool))
+      ^{:line 429} selCount 0]
+    (range [_ cand cands]
+      (if (not (.MatchPosWithInfo base/MergeLocalsHash ^{:go/via [miniExpr miniNode]} (.Pos cand) "mergelocals" nil))
+        (aset deselected cand true)
+        (do
+          (aset deselected cand false)
+          (inc! selCount))))
+
+
+    (when (< selCount (len cands))
+      (set! (.-hashDeselected cs) deselected))
+
+    (when (and (!= (.-MergeLocalsHTrace base/Debug) 0) (>= selCount 2))
+      (set! (.-trace cs) (.-MergeLocalsHTrace base/Debug)))))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 625} (go/method populateIndirectUseTable "populateIndirectUseTable creates and populates the \"indirectUE\" table\nwithin cs by doing some additional analysis of how the vars in\ncands are accessed in the function.\n\nIt is possible to have situations where a given ir.Name is\nnon-address-taken at the source level, but whose address is\nmaterialized in order to accommodate the needs of\narchitecture-dependent operations or one sort or another (examples\ninclude things like LoweredZero/DuffZero, etc). The issue here is\nthat the SymAddr op will show up as touching a variable of\ninterest, but the subsequent memory op will not. This is generally\nnot an issue for computing whether something is live across a call,\nbut it is problematic for collecting the more fine-grained live\ninterval info that drives stack slot merging.\n\nTo handle this problem, make a forward pass over each basic block\nlooking for instructions of the form vK := SymAddr(N) where N is a\nraw candidate. Create an entry in a map at that point from vK to\nits use count. Continue the walk, looking for uses of vK: when we\nsee one, record it in a side table as an upwards exposed use of N.\nEach time we see a use, decrement the use count in the map, and if\nwe hit zero, remove the map entry. If we hit the end of the basic\nblock and we still have map entries, then evict the name in\nquestion from the candidate set.\n" [^{:tag (* cstate)} cs ^{:tag (slice (* ir/Name))} cands] :results [(slice (* ir/Name)) (slice candRegion)]
+
+  ;; main indirect UE table, this is what we're producing in this func
+  (let [indirectUE (make (map ssa/ID (slice (* ir/Name))))
+
+      ;; this map holds the current set of candidates; the set may
+      ;; shrink if we have to evict any candidates.
+      ^{:line 477} rawcands (make (map (* ir/Name) (struct)))
+
+      ;; maps ssa value V to the ir.Name it is taking the addr of,
+      ;; plus a count of the uses we've seen of V during a block walk.
+      ^{:line 481} pendingUses (make (map ssa/ID nameCount))
+
+      ;; A temporary indirect UE tab just for the current block
+      ;; being processed; used to help with evictions.
+      ^{:line 485} blockIndirectUE (make (map ssa/ID (slice (* ir/Name))))
+
+      ;; temporary map used to record evictions in a given block.
+      ^{:line 488} evicted (make (map (* ir/Name) bool))]
+    (range [_ n cands]
+      (aset rawcands n (lit (struct))))
+
+    (for [k 0] (< k (len (.-Blocks (.-f cs)))) (inc! k)
+      (clear pendingUses)
+      (clear blockIndirectUE)
+      (let [b (aget (.-Blocks (.-f cs)) k)]
+        (range [_ v (.-Values b)]
+          (when [(values n e) (affectedVar v)] (!= n nil)
+            (when [(values _ ok) (aget rawcands n)] ok
+              (when (and (!= (bit-and e ssa/SymAddr) 0) (!= (.-Uses v) 0))
+                ;; we're taking the address of candidate var n
+                (when [(values _ ok) (aget pendingUses (.-ID v))] ok
+                  ;; should never happen
+                  (base/FatalfAt (.-Pos v) "internal error: apparent multiple defs for SSA value %d" (.-ID v)))
+
+                ;; Stash an entry in pendingUses recording
+                ;; that we took the address of "n" via this
+                ;; val.
+                (aset pendingUses (.-ID v) (lit nameCount :n n :count (.-Uses v)))
+                (when (> (.-trace cs) 2)
+                  (fmt/Fprintf os/Stderr "=-= SymAddr(%s) on %s\n"
+                    (.-Name (.Sym n)) (.LongString v))))))
+
+
+
+
+          (range [idx arg (.-Args v)]
+            (when [(values nc ok) (aget pendingUses (.-ID arg))] ok
+              (when (not (.AddrSinkArg v idx))
+                ;; If this op may propagate its input address
+                ;; to somewhere else, we must track where that
+                ;; somewhere else might be. See issue 80127.
+                (when (.IsMemory (.-Type v))
+                  ;; Might be stored to memory. Give up.
+                  (continue))
+
+                ;; Some sort of address arithmetic.
+                (when [(values _ ok) (aget pendingUses (.-ID v))] ok
+                  ;; v has used multiple addresses, which is something
+                  ;; we can't keep track of. Give up.
+                  (continue))
+
+                ;; Treat this op as producing the address of the same variable
+                ;; that its argument was the address of.
+                (aset pendingUses (.-ID v) (lit nameCount :n (.-n nc) :count (.-Uses v))))
+
+              ;; We found a use of some value that took the
+              ;; address of nc.n. Record this inst as a
+              ;; potential indirect use.
+              (when (> (.-trace cs) 2)
+                (fmt/Fprintf os/Stderr "=-= add indirectUE(%s) count=%d on %s\n" (.-Name (.Sym (.-n nc))) (.-count nc) (.LongString v)))
+
+              (aset blockIndirectUE (.-ID v) (append (aget blockIndirectUE (.-ID v)) (.-n nc)))
+              (dec! (.-count nc))
+              (if (== (.-count nc) 0) (do
+                  ;; That was the last use of the value. Clean
+                  ;; up the entry in pendingUses.
+                  (when (> (.-trace cs) 2)
+                    (fmt/Fprintf os/Stderr "=-= last use of v%d\n"
+                      (.-ID arg)))
+
+                  (delete pendingUses (.-ID arg)))
+
+                ;; Not the last use; record the decremented
+                ;; use count and move on.
+                (aset pendingUses (.-ID arg) nc)))))
+
+
+
+
+
+        ;; We've reached the end of this basic block: if we have any
+        ;; leftover entries in pendingUses, then evict the
+        ;; corresponding names from the candidate set. The idea here
+        ;; is that if we materialized the address of some local and
+        ;; that value is flowing out of the block off somewhere else,
+        ;; we're going to treat that local as truly address-taken and
+        ;; not have it be a merge candidate.
+        (clear evicted)
+        (when (!= (len pendingUses) 0)
+          (range [id nc pendingUses]
+            (when (> (.-trace cs) 2)
+              (fmt/Fprintf os/Stderr "=-= evicting %q due to pendingUse %d count %d\n" (.-Name (.Sym (.-n nc))) id (.-count nc)))
+
+            (delete rawcands (.-n nc))
+            (aset evicted (.-n nc) true)))
+
+
+        ;; Copy entries from blockIndirectUE into final indirectUE. Skip
+        ;; anything that we evicted in the loop above.
+        (range [id sl blockIndirectUE]
+          (range [_ n sl]
+            (when (aget evicted n)
+              (continue))
+
+            (aset indirectUE id (append (aget indirectUE id) n))
+            (when (> (.-trace cs) 2)
+              (fmt/Fprintf os/Stderr "=-= add final indUE v%d name %s\n" id (.-Name (.Sym n))))))))
+
+
+
+
+    (when (< (len rawcands) 2)
+      (return nil nil))
+
+    (set! (.-indirectUE cs) indirectUE)
+    (when (> (.-trace cs) 2)
+      (fmt/Fprintf os/Stderr "=-= iuetab:\n")
+      (let [ids (make (slice ssa/ID) 0 (len indirectUE))]
+        (range [k indirectUE]
+          (set! ids (append ids k)))
+
+        (^{:inst [(slice ssa/ID) ssa/ID]} slices/Sort ids)
+        (range [_ id ids]
+          (fmt/Fprintf os/Stderr "  v%d:" id)
+          (range [_ n (aget indirectUE id)]
+            (fmt/Fprintf os/Stderr " %s" (.-Name (.Sym n))))
+
+          (fmt/Fprintf os/Stderr "\n"))))
+
+
+
+    (let [pruned (subslice cands _ 0)]
+      (range [k rawcands]
+        (set! pruned (append pruned k)))
+
+      (sort/Slice pruned ^{:go/end 618} (fn ^bool [^int i ^int j]
+          (nameLess (aget pruned i) (aget pruned j))))
+
+      (let [^{:tag (slice candRegion)} regions (zero (slice candRegion))]
+        (set! (values pruned regions) (.genRegions cs pruned))
+        (when (< (len pruned) 2)
+          (return nil nil))
+
+        (return pruned regions)))))
+
+
+(go/type nameCount (struct
+    ^{:line 628 :tag (* ir/Name)} n
+    ^{:line 629 :tag int32} count))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 661} (go/func nameLess "nameLess compares ci with cj to see if ci should be less than cj in\na relative ordering of candidate variables. This is used to sort\nvars by pointerness (variables with pointers first), then in order\nof decreasing alignment, then by decreasing size. We are assuming a\nmerging algorithm that merges later entries in the list into\nearlier entries. An example ordered candidate list produced by\nnameLess:\n\n\tidx   name    type       align    size\n\t0:    abc     [10]*int   8        80\n\t1:    xyz     [9]*int    8        72\n\t2:    qrs     [2]*int    8        16\n\t3:    tuv     [9]int     8        72\n\t4:    wxy     [9]int32   4        36\n\t5:    jkl     [8]int32   4        32\n" ^bool [^{:tag (* ir/Name)} ci ^{:tag (* ir/Name)} cj]
+  (when (!= (.HasPointers ^{:go/via [miniExpr]} (.Type ci)) (.HasPointers ^{:go/via [miniExpr]} (.Type cj)))
+    (return (.HasPointers ^{:go/via [miniExpr]} (.Type ci))))
+
+  (when (!= (.Alignment ^{:go/via [miniExpr]} (.Type ci)) (.Alignment ^{:go/via [miniExpr]} (.Type cj)))
+    (return (< (.Alignment ^{:go/via [miniExpr]} (.Type cj)) (.Alignment ^{:go/via [miniExpr]} (.Type ci)))))
+
+  (when (!= (.Size ^{:go/via [miniExpr]} (.Type ci)) (.Size ^{:go/via [miniExpr]} (.Type cj)))
+    (return (< (.Size ^{:go/via [miniExpr]} (.Type cj)) (.Size ^{:go/via [miniExpr]} (.Type ci)))))
+
+  (when (!= (.-Name (.Sym ci)) (.-Name (.Sym cj)))
+    (return (< (.-Name (.Sym ci)) (.-Name (.Sym cj)))))
+
+  (< (fmt/Sprintf "%v" ^{:go/via [miniExpr miniNode]} (.Pos ci)) (fmt/Sprintf "%v" ^{:go/via [miniExpr miniNode]} (.Pos cj))))
+
+
+
+
+
+
+
+^{:go/end 690} (go/func nextRegion "nextRegion starts at location idx and walks forward in the cands\nslice looking for variables that are \"compatible\" (potentially\noverlappable, in the sense that they could potentially share the\nstack slot of cands[idx]); it returns the end of the new region\n(range of compatible variables starting at idx).\n" ^int [^{:tag (slice (* ir/Name))} cands ^int idx]
+  (let [n (len cands)]
+    (when (>= idx n)
+      (return -1))
+
+    (let [c0 (aget cands idx)
+        ^{:line 674} szprev (.Size ^{:go/via [miniExpr]} (.Type c0))
+        ^{:line 675} alnprev (.Alignment ^{:go/via [miniExpr]} (.Type c0))]
+      (for [j (+ idx 1)] (< j n) (inc! j)
+        (let [cj (aget cands j)
+            ^{:line 678} szj (.Size ^{:go/via [miniExpr]} (.Type cj))]
+          (when (> szj szprev)
+            (return (- j 1)))
+
+          (let [alnj (.Alignment ^{:go/via [miniExpr]} (.Type cj))]
+            (when (> alnj alnprev)
+              (return (- j 1)))
+
+            (set! szprev szj)
+            (set! alnprev alnj))))
+
+      (- n 1))))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 789} (go/method mergeVisitRegion "mergeVisitRegion tries to perform overlapping of variables with a\ngiven subrange of cands described by st and en (indices into our\ncandidate var list), where the variables within this range have\nalready been determined to be compatible with respect to type,\nsize, etc. Overlapping is done in a greedy fashion: we select the\nfirst element in the st->en range, then walk the rest of the\nelements adding in vars whose lifetimes don't overlap with the\nfirst element, then repeat the process until we run out of work.\nOrdering of the candidates within the region [st,en] is important;\nwithin the list the assumption is that if we overlap two variables\nX and Y where X precedes Y in the list, we need to make X the\n\"leader\" (keep X's slot and set Y's frame offset to X's) as opposed\nto the other way around, since it's possible that Y is smaller in\nsize than X.\n" [^{:tag (* cstate)} cs ^{:tag (* MergeLocalsState)} mls ^int st ^int en]
+  (when (> (.-trace cs) 1)
+    (fmt/Fprintf os/Stderr "=-= mergeVisitRegion(st=%d, en=%d)\n" st en))
+
+  (let [n (+ (- en st) 1)
+      ^{:line 711} used (bitvec/New (conv int32 n))
+
+      ^{:line 713} nxt ^{:go/breaks [[3 720]] :go/end 721} (fn ^int [^int slot]
+        (for [c (- slot st)] (< c n) (inc! c)
+          (when (.Get used (conv int32 c))
+            (continue))
+
+          (return (+ c st)))
+
+        -1)
+
+
+      ^{:line 723} navail n
+      ^{:line 724} cands (.-cands cs)
+      ^{:line 725} ivs (.-ivs cs)]
+    (when (> (.-trace cs) 1)
+      (fmt/Fprintf os/Stderr "  =-= navail = %d\n" navail))
+
+    (while (>= navail 2)
+      (let [leader (nxt st)]
+        (.Set used (conv int32 (- leader st)))
+        (dec! navail)
+
+        (when (> (.-trace cs) 1)
+          (fmt/Fprintf os/Stderr "  =-= begin leader %d used=%s\n" leader
+            (.String used)))
+
+        (let [elems (lit (slice int) leader)
+            ^{:line 739} lints (aget ivs leader)]
+
+          (for [succ (nxt (+ leader 1))] (!= succ -1) (set! succ (nxt (+ succ 1)))
+
+            ;; Skip if de-selected by merge locals hash.
+            (when (and (!= (.-hashDeselected cs) nil) (aget (.-hashDeselected cs) (aget cands succ)))
+              (continue))
+
+            ;; Skip if already used.
+            (when (.Get used (conv int32 (- succ st)))
+              (continue))
+
+            (when (> (.-trace cs) 1)
+              (fmt/Fprintf os/Stderr "  =-= overlap of %d[%v] {%s} with %d[%v] {%s} is: %v\n" leader (aget cands leader) (.String lints) succ (aget cands succ) (.String (aget ivs succ)) (.Overlaps lints (aget ivs succ))))
+
+
+            ;; Can we overlap leader with this var?
+            (if (.Overlaps lints (aget ivs succ))
+              (continue)
+              (do
+                ;; Add to overlap set.
+                (set! elems (append elems succ))
+                (set! lints (.Merge lints (aget ivs succ))))))
+
+
+          (when (> (len elems) 1)
+            ;; We found some things to overlap with leader. Add the
+            ;; candidate elements to "vars" and update "partition".
+            (let [off (len (.-vars mls))
+                ^{:line 768} sl (make (slice int) (len elems))]
+              (range [i candslot elems]
+                (aset sl i (+ off i))
+                (set! (.-vars mls) (append (.-vars mls) (aget cands candslot)))
+                (aset (.-partition mls) (aget cands candslot) sl))
+
+              (set! navail - (- (len elems) 1))
+              (range [i elems]
+                (.Set used (conv int32 (- (aget elems i) st))))
+
+              (when (> (.-trace cs) 1)
+                (fmt/Fprintf os/Stderr "=-= overlapping %+v:\n" sl)
+                (range [i sl]
+                  (dumpCand (aget (.-vars mls) (aget sl i)) (aget sl i)))
+
+                (range [i v elems]
+                  (fmt/Fprintf os/Stderr "=-= %d: sl=%d %s\n" i v (aget ivs v)))))))))))
+
+
+
+
+
+
+
+
+
+^{:go/end 825} (go/method performMerging "performMerging carries out variable merging within each of the\ncandidate ranges in regions, returning a state object\nthat describes the variable overlaps.\n" ^{:tag (* MergeLocalsState)} [^{:tag (* cstate)} cs]
+  (let [cands (.-cands cs)
+
+      ^{:line 797} mls (addr ^{:go/breaks [2]} (lit MergeLocalsState
+          :partition (make (map (* ir/Name) (slice int)))))]
+
+
+    ;; Dump state before attempting overlap.
+    (when (> (.-trace cs) 1)
+      (fmt/Fprintf os/Stderr "=-= cands live before overlap:\n")
+      (range [i cands]
+        (let [c (aget cands i)]
+          (fmt/Fprintf os/Stderr "%d: %v sz=%d ivs=%s\n"
+            ^{:line 807} i (.-Name (.Sym c)) (.Size ^{:go/via [miniExpr]} (.Type c)) (.String (aget (.-ivs cs) i)))))
+
+      (fmt/Fprintf os/Stderr "=-= regions (%d): " (len (.-regions cs)))
+      (range [_ cr (.-regions cs)]
+        (fmt/Fprintf os/Stderr " [%d,%d]" (.-st cr) (.-en cr)))
+
+      (fmt/Fprintf os/Stderr "\n"))
+
+
+    ;; Apply a greedy merge/overlap strategy within each region
+    ;; of compatible variables.
+    (range [_ cr (.-regions cs)]
+      (.mergeVisitRegion cs mls (.-st cr) (.-en cr)))
+
+    (when (== (len (.-vars mls)) 0)
+      (return nil))
+
+    ^{:line 824} mls))
+
+
+
+
+
+
+^{:go/end 1019} (go/method computeIntervals "computeIntervals performs a backwards sweep over the instructions\nof the function we're compiling, building up an Intervals object\nfor each candidate variable by looking for upwards exposed uses\nand kills.\n" [^{:tag (* cstate)} cs]
+  (let [lv (.-lv cs)
+      ^{:line 833} ibuilders (make (slice IntervalsBuilder) (len (.-cands cs)))
+      ^{:line 834} nvars (conv int32 (len (.-vars lv)))
+      ^{:line 835} liveout (bitvec/New nvars)]
+
+    (.dumpFuncIfSelected cs)
+
+    ;; Count instructions.
+    (let [ninstr 0]
+      (range [_ b (.-Blocks (.-f lv))]
+        (set! ninstr + (len (.-Values b))))
+
+      ;; current instruction index during backwards walk
+      (let [iidx (- ninstr 1)]
+
+        ;; Make a backwards pass over all blocks
+        (for [k (- (len (.-Blocks (.-f lv))) 1)] (>= k 0) (dec! k)
+          (let [b (aget (.-Blocks (.-f lv)) k)
+              ^{:line 850} be (.blockEffects lv b)]
+
+            (when (> (.-trace cs) 2)
+              (fmt/Fprintf os/Stderr "=-= liveout from tail of b%d: " k)
+              (range [j (.-vars lv)]
+                (when (.Get (.-liveout be) (conv int32 j))
+                  (fmt/Fprintf os/Stderr " %q" (.-Name (.Sym (aget (.-vars lv) j))))))
+
+
+              (fmt/Fprintf os/Stderr "\n"))
+
+
+            ;; Take into account effects taking place at end of this basic
+            ;; block by comparing our current live set with liveout for
+            ;; the block. If a given var was not live before and is now
+            ;; becoming live we need to mark this transition with a
+            ;; builder "Live" call; similarly if a var was live before and
+            ;; is now no longer live, we need a "Kill" call.
+            (range [j (.-vars lv)]
+              (let [isLive (.Get liveout (conv int32 j))
+                  ^{:line 870} blockLiveOut (.Get (.-liveout be) (conv int32 j))]
+                (cond isLive
+                  (when (not blockLiveOut)
+                    (when (> (.-trace cs) 2)
+                      (fmt/Fprintf os/Stderr "=+= at instr %d block boundary kill of %v\n" iidx (aget (.-vars lv) j)))
+
+                    (.Kill (aget ibuilders j) iidx))
+
+                  ^{:line 878} blockLiveOut (do
+                    (when (> (.-trace cs) 2)
+                      (fmt/Fprintf os/Stderr "=+= at block-end instr %d %v becomes live\n"
+                        ^{:line 881} iidx (aget (.-vars lv) j)))
+
+                    (.Live (aget ibuilders j) iidx)))))
+
+
+
+            ;; Set our working "currently live" set to the previously
+            ;; computed live out set for the block.
+            (.Copy liveout (.-liveout be))
+
+            ;; Now walk backwards through this block.
+            (for [i (- (len (.-Values b)) 1)] (>= i 0) (dec! i)
+              (let [v (aget (.-Values b) i)]
+
+                (when (> (.-trace cs) 2)
+                  (fmt/Fprintf os/Stderr "=-= b%d instr %d: %s\n" k iidx (.LongString v)))
+
+
+                ;; Update liveness based on what we see happening in this
+                ;; instruction.
+                (let [(values pos e) (.valueEffects lv v)
+                    ^{:line 902} becomeslive (!= (bit-and e uevar) 0)
+                    ^{:line 903} iskilled (!= (bit-and e varkill) 0)]
+                  (when (and becomeslive iskilled)
+                    ;; we do not ever expect to see both a kill and an
+                    ;; upwards exposed use given our size constraints.
+                    (panic "should never happen"))
+
+                  (cond (and iskilled (.Get liveout pos)) (do
+                      (.Kill (aget ibuilders pos) iidx)
+                      (.Unset liveout pos)
+                      (when (> (.-trace cs) 2)
+                        (fmt/Fprintf os/Stderr "=+= at instr %d kill of %v\n"
+                          ^{:line 914} iidx (aget (.-vars lv) pos))))
+
+                    (and becomeslive (not (.Get liveout pos))) (do
+                      (.Live (aget ibuilders pos) iidx)
+                      (.Set liveout pos)
+                      (when (> (.-trace cs) 2)
+                        (fmt/Fprintf os/Stderr "=+= at instr %d upwards-exposed use of %v\n"
+                          ^{:line 921} iidx (aget (.-vars lv) pos)))))
+
+
+
+                  (when (!= (.-indirectUE cs) nil)
+                    ;; Now handle "indirect" upwards-exposed uses.
+                    (let [ues (aget (.-indirectUE cs) (.-ID v))]
+                      (range [_ n ues]
+                        (when [(values pos ok) (aget (.-idx lv) n)] ok
+                          (when (not (.Get liveout pos))
+                            (.Live (aget ibuilders pos) iidx)
+                            (.Set liveout pos)
+                            (when (> (.-trace cs) 2)
+                              (fmt/Fprintf os/Stderr "=+= at instr %d v%d indirect upwards-exposed use of %v\n" iidx (.-ID v) (aget (.-vars lv) pos))))))))
+
+
+
+
+
+                  (dec! iidx))))
+
+
+            ;; This check disabled for now due to the way scheduling works
+            ;; for ops that materialize values of local variables. For
+            ;; many architecture we have rewrite rules of this form:
+            ;;
+            ;; (LocalAddr <t> {sym} base mem) && t.Elem().HasPointers() => (MOVDaddr {sym} (SPanchored base mem))
+            ;; (LocalAddr <t> {sym} base _)  && !t.Elem().HasPointers() => (MOVDaddr {sym} base)
+            ;;
+            ;; which are designed to ensure that if you have a pointerful
+            ;; variable "abc" sequence
+            ;;
+            ;;    v30 = VarDef <mem> {abc} v21
+            ;;    v31 = LocalAddr <*SB> {abc} v2 v30
+            ;;    v32 = Zero <mem> {SB} [2056] v31 v30
+            ;;
+            ;; this will be lowered into
+            ;;
+            ;;    v30 = VarDef <mem> {sb} v21
+            ;;   v106 = SPanchored <uintptr> v2 v30
+            ;;    v31 = MOVDaddr <*SB> {sb} v106
+            ;;     v3 = DUFFZERO <mem> [2056] v31 v30
+            ;;
+            ;; Note the SPanchored: this ensures that the scheduler won't
+            ;; move the MOVDaddr earlier than the vardef. With a variable
+            ;; "xyz" that has no pointers, however, if we start with
+            ;;
+            ;;    v66 = VarDef <mem> {t2} v65
+            ;;    v67 = LocalAddr <*T> {t2} v2 v66
+            ;;    v68 = Zero <mem> {T} [2056] v67 v66
+            ;;
+            ;; we might lower to
+            ;;
+            ;;    v66 = VarDef <mem> {t2} v65
+            ;;    v29 = MOVDaddr <*T> {t2} [2032] v2
+            ;;    v43 = LoweredZero <mem> v67 v29 v66
+            ;;    v68 = Zero [2056] v2 v43
+            ;;
+            ;; where that MOVDaddr can float around arbitrarily, meaning
+            ;; that we may see an upwards-exposed use to it before the
+            ;; VarDef.
+            ;;
+            ;; One avenue to restoring the check below would be to change
+            ;; the rewrite rules to something like
+            ;;
+            ;; (LocalAddr <t> {sym} base mem) && (t.Elem().HasPointers() || isMergeCandidate(t) => (MOVDaddr {sym} (SPanchored base mem))
+            ;;
+            ;; however that change will have to be carefully evaluated,
+            ;; since it would constrain the scheduler for _all_ LocalAddr
+            ;; ops for potential merge candidates, even if we don't
+            ;; actually succeed in any overlaps. This will be revisitged in
+            ;; a later CL if possible.
+            ;;
+            (let [^:const ^{:val false} checkLiveOnEntry false]
+              (when (and checkLiveOnEntry (== b (.-Entry (.-f lv))))
+                (range [j v (.-vars lv)]
+                  (when (.Get liveout (conv int32 j))
+                    (.Fatalf (.-f lv) "%v %L recorded as live on entry"
+                      (.-Nname (.-fn lv)) v)))))))
+
+
+
+
+        (when (!= iidx -1)
+          (panic "iidx underflow"))
+
+
+        ;; Finish intervals construction.
+        (let [ivs (make (slice Intervals) (len (.-cands cs)))]
+          (range [i (.-cands cs)]
+            (let [^error err (zero error)]
+              (set! (values (aget ivs i) err) (.Finish (aget ibuilders i)))
+              (when (!= err nil)
+                (.dumpFunc cs)
+                (base/FatalfAt ^{:go/via [miniExpr miniNode]} (.Pos (aget (.-cands cs) i)) "interval construct error for var %q in func %q (%d instrs): %v" (.-Name (.Sym (aget (.-cands cs) i))) (ir/FuncName (.-fn cs)) ninstr err))))
+
+
+          (set! (.-ivs cs) ivs))))))
+
+
+^{:go/end 1031} (go/func fmtFullPos ^string [^src/XPos p]
+  (let [^strings/Builder sb (zero strings/Builder)
+      ^{:line 1023} sep ""]
+    (.AllPos base/Ctxt p ^{:go/end 1029} (fn [^src/Pos pos]
+        (.WriteString sb sep)
+        (set! sep "|")
+        (let [file (filepath/Base (.Filename pos))]
+          (fmt/Fprintf (addr sb) "%s:%d:%d" file ^{:go/via [lico]} (.Line pos) ^{:go/via [lico]} (.Col pos)))))
+
+    (.String sb)))
+
+
+^{:go/end 1037} (go/func dumpCand [^{:tag (* ir/Name)} c ^int i]
+  (fmt/Fprintf os/Stderr " %d: %s %q sz=%d hp=%v align=%d t=%v\n"
+    ^{:line 1035} i (fmtFullPos ^{:go/via [miniExpr miniNode]} (.Pos c)) (.-Name (.Sym c)) (.Size ^{:go/via [miniExpr]} (.Type c))
+    (.HasPointers ^{:go/via [miniExpr]} (.Type c)) (.Alignment ^{:go/via [miniExpr]} (.Type c)) ^{:go/via [miniExpr]} (.Type c)))
+
+
+
+^{:go/end 1046} (go/func MakeMergeLocalsState "for unit testing only.\n" [^{:tag (map (* ir/Name) (slice int))} partition ^{:tag (slice (* ir/Name))} vars] :results [(* MergeLocalsState) error]
+  (let [mls (addr (lit MergeLocalsState :partition partition :vars vars))]
+    (when [err (.check mls)] (!= err nil)
+      (return nil err))
+
+    (return mls nil)))

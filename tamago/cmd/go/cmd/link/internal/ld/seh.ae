@@ -1,0 +1,94 @@
+;; Copyright 2023 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.cmd.link.internal.ld) (go/file "seh.go" :imports [
+
+
+    ^{:line 8} [sys "cmd/internal/sys"]
+    ^{:line 9} [loader "cmd/link/internal/loader"]
+    ^{:line 10} [sym "cmd/link/internal/sym"]
+    ^{:line 11} [cmp "cmp"]
+    ^{:line 12} [slices "slices"]])
+
+
+(go/var ^{:tag (struct ^{:tag (slice sym/LoaderSym)} pdata ^{:tag (slice sym/LoaderSym)} xdata)} sehp)
+
+
+
+
+
+
+^{:go/end 27} (go/func collectSEH "collectSEH collects the SEH unwind information for all functions and organizes\nit into .pdata and .xdata sections.\n" [^{:tag (* Link)} ctxt]
+  (switch (.-Family ^{:go/via [Target]} (.-Arch ctxt))
+    (case [sys/AMD64]
+      (collectSEHAMD64 ctxt))))
+
+
+
+^{:go/end 96} (go/func collectSEHAMD64 [^{:tag (* Link)} ctxt]
+  (let [ldr (.-loader ctxt)
+      ^{:line 31} mkSecSym ^{:go/end 36} (fn ^{:tag (* loader/SymbolBuilder)} [^string name ^sym/SymKind kind]
+        (let [s (.CreateSymForUpdate ldr name 0)]
+          (.SetType s kind)
+          (.SetAlign s 4)
+          ^{:line 35} s))
+
+      ^{:line 37} pdata (mkSecSym ".pdata" sym/SSEHSECT)
+      ^{:line 38} xdata (mkSecSym ".xdata" sym/SSEHSECT)
+      ;; The .xdata entries have very low cardinality
+      ;; as it only contains frame pointer operations,
+      ;; which are very similar across functions.
+      ;; These are referenced by .pdata entries using
+      ;; an RVA, so it is possible, and binary-size wise,
+      ;; to deduplicate .xdata entries.
+      ^{:line 45} uwcache (make (map string int64))] ; aux symbol name --> .xdata offset
+    (let-type [pdataEntry (struct
+          ^{:line 47 :tag sym/LoaderSym} start
+          ^{:line 48 :tag int64} xdataOff)]
+
+      (let [^{:tag (slice pdataEntry)} entries (zero (slice pdataEntry))]
+        (range [_ s (.-Textp ctxt)]
+          (when [fi (.FuncInfo ldr s)] (not (.Valid fi))
+            (continue))
+
+          (let [uw (.SEHUnwindSym ldr s)]
+            (when (== uw 0)
+              (continue))
+
+            (let [name (^{:go/via [ErrorReporter]} (.-SymName ctxt) uw)
+                (values off cached) (aget uwcache name)]
+              (when (not cached)
+                (set! off (.Size xdata))
+                (aset uwcache name off)
+                (.AddBytes xdata (.Data ldr uw))
+                ;; The SEH unwind data can contain relocations,
+                ;; make sure those are copied over.
+                (let [rels (.Relocs ldr uw)]
+                  (for [i 0] (< i (.Count rels)) (inc! i)
+                    (let [r (.At rels i)
+                        (values rel _) (.AddRel xdata (.Type r))]
+                      ^{:go/via [Reloc]} (.SetOff rel (+ (conv int32 off) ^{:go/via [Reloc]} (.Off r)))
+                      ^{:go/via [Reloc]} (.SetSiz rel ^{:go/via [Reloc]} (.Siz r))
+                      (.SetSym rel (.Sym r))
+                      ^{:go/via [Reloc]} (.SetAdd rel ^{:go/via [Reloc]} (.Add r))))))
+
+
+
+              (set! entries (append entries (lit pdataEntry :start s :xdataOff off))))))
+
+        (^{:inst [(slice pdataEntry) pdataEntry]} slices/SortFunc entries ^{:go/end 82} (fn ^int [^pdataEntry a ^pdataEntry b]
+            (^{:inst [int64]} cmp/Compare (.SymAddr ldr (.-start a)) (.SymAddr ldr (.-start b)))))
+
+        (range [_ ent entries]
+          ;; Reference:
+          ;; https://learn.microsoft.com/en-us/cpp/build/exception-handling-x64#struct-runtime_function
+          (.AddPEImageRelativeAddrPlus pdata ^{:go/via [Target]} (.-Arch ctxt) (.-start ent) 0) ; function start address
+          (.AddPEImageRelativeAddrPlus pdata ^{:go/via [Target]} (.-Arch ctxt) (.-start ent) (.SymSize ldr (.-start ent))) ; function end address
+          (.AddPEImageRelativeAddrPlus pdata ^{:go/via [Target]} (.-Arch ctxt) (.Sym xdata) (.-xdataOff ent))) ; xdata symbol offset
+
+        (when (> (.Size pdata) 0)
+          (set! (.-pdata sehp) (append (.-pdata sehp) (.Sym pdata))))
+
+        (when (> (.Size xdata) 0)
+          (set! (.-xdata sehp) (append (.-xdata sehp) (.Sym xdata))))))))

@@ -1,0 +1,800 @@
+;; Copyright 2015 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.cmd.internal.obj) (go/file "util.go" :imports [
+
+
+    ^{:line 8} [bytes "bytes"]
+    ^{:line 9} [objabi "cmd/internal/objabi"]
+    ^{:line 10} [fmt "fmt"]
+    ^{:line 11} [abi "internal/abi"]
+    ^{:line 12} [buildcfg "internal/buildcfg"]
+    ^{:line 13} [io "io"]
+    ^{:line 14} [strings "strings"]])
+
+
+(go/const ^{:val 0} REG_NONE 0)
+
+
+^{:go/end 22} (go/method Line "Line returns a string containing the filename and line number for p\n" ^string [^{:tag (* Prog)} p]
+  (.Format (.OutermostPos (.-Ctxt p) (.-Pos p)) false true))
+
+^{:go/end 25} (go/method InnermostLine [^{:tag (* Prog)} p ^io/Writer w]
+  (.WriteTo (.InnermostPos (.-Ctxt p) (.-Pos p)) w false true))
+
+
+
+
+^{:go/end 31} (go/method InnermostLineNumber "InnermostLineNumber returns a string containing the line number for the\ninnermost inlined function (if any inlining) at p's position\n" ^string [^{:tag (* Prog)} p]
+  (.LineNumber (.InnermostPos (.-Ctxt p) (.-Pos p))))
+
+
+
+
+^{:go/end 37} (go/method InnermostLineNumberHTML "InnermostLineNumberHTML returns a string containing the line number for the\ninnermost inlined function (if any inlining) at p's position\n" ^string [^{:tag (* Prog)} p]
+  (.LineNumberHTML (.InnermostPos (.-Ctxt p) (.-Pos p))))
+
+
+
+
+^{:go/end 49} (go/method InnermostFilename "InnermostFilename returns a string containing the innermost\n(in inlining) filename at p's position\n" ^string [^{:tag (* Prog)} p]
+  ;; TODO For now, this is only used for debugging output, and if we need more/better information, it might change.
+  ;; An example of what we might want to see is the full stack of positions for inlined code, so we get some visibility into what is recorded there.
+  (let [pos (.InnermostPos (.-Ctxt p) (.-Pos p))]
+    (when (not (.IsKnown pos))
+      (return "<unknown file name>"))
+
+    (.Filename pos)))
+
+
+(go/var armCondCode ^{:go/breaks [2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17]} (lit (slice string)
+    ".EQ"
+    ".NE"
+    ".CS"
+    ".CC"
+    ".MI"
+    ".PL"
+    ".VS"
+    ".VC"
+    ".HI"
+    ".LS"
+    ".GE"
+    ".LT"
+    ".GT"
+    ".LE"
+    ""
+    ".NV"))
+
+
+
+(go/const " ARM scond byte\n"
+  ^{:line 72} [^{:val 15} C_SCOND (- (<< 1 4) 1)]
+  ^{:line 73} [^{:val 16} C_SBIT (<< 1 4)]
+  ^{:line 74} [^{:val 32} C_PBIT (<< 1 5)]
+  ^{:line 75} [^{:val 64} C_WBIT (<< 1 6)]
+  ^{:line 76} [^{:val 128} C_FBIT (<< 1 7)]
+  ^{:line 77} [^{:val 128} C_UBIT (<< 1 7)]
+  ^{:line 78} [^{:val 14} C_SCOND_XOR 14])
+
+
+
+^{:go/end 93} (go/func CConv "CConv formats opcode suffix bits (Prog.Scond).\n" ^string [^uint8 s]
+  (when (== s 0)
+    (return ""))
+
+  (range [i opSuffixSpace]
+    (let [sset (addr (aget opSuffixSpace i))]
+      (when (== (.-arch sset) buildcfg/GOARCH)
+        (return ((.-cconv sset) s)))))
+
+
+  (fmt/Sprintf "SC???%d" s))
+
+
+
+^{:go/end 115} (go/func CConvARM "CConvARM formats ARM opcode suffix bits (mostly condition codes).\n" ^string [^uint8 s]
+  ;; TODO: could be great to move suffix-related things into
+  ;; ARM asm backends some day.
+  ;; obj/x86 can be used as an example.
+
+  (let [sc (aget armCondCode (bit-xor (bit-and s C_SCOND) C_SCOND_XOR))]
+    (when (!= (bit-and s C_SBIT) 0)
+      (set! sc + ".S"))
+
+    (when (!= (bit-and s C_PBIT) 0)
+      (set! sc + ".P"))
+
+    (when (!= (bit-and s C_WBIT) 0)
+      (set! sc + ".W"))
+
+    (when (!= (bit-and s C_UBIT) 0) ; /* ambiguous with FBIT */
+      (set! sc + ".U"))
+
+    ^{:line 114} sc))
+
+
+^{:go/end 125} (go/method String ^string [^{:tag (* Prog)} p]
+  (when (== p nil)
+    (return "<nil Prog>"))
+
+  (when (== (.-Ctxt p) nil)
+    (return "<Prog without ctxt>"))
+
+  (fmt/Sprintf "%.5d (%v)\t%s" (.-Pc p) (.Line p) (.InstructionString p)))
+
+
+^{:go/end 140} (go/method InnermostString [^{:tag (* Prog)} p ^io/Writer w]
+  (when (== p nil)
+    (io/WriteString w "<nil Prog>")
+    (return))
+
+  (when (== (.-Ctxt p) nil)
+    (io/WriteString w "<Prog without ctxt>")
+    (return))
+
+  (fmt/Fprintf w "%.5d (" (.-Pc p))
+  (.InnermostLine p w)
+  (io/WriteString w ")\t")
+  (.WriteInstructionString p w))
+
+
+
+
+^{:go/end 148} (go/method InstructionString "InstructionString returns a string representation of the instruction without preceding\nprogram counter or file and line number.\n" ^string [^{:tag (* Prog)} p]
+  (let [buf (new bytes/Buffer)]
+    (.WriteInstructionString p buf)
+    (.String buf)))
+
+
+
+
+^{:go/end 213} (go/method WriteInstructionString "WriteInstructionString writes a string representation of the instruction without preceding\nprogram counter or file and line number.\n" [^{:tag (* Prog)} p ^io/Writer w]
+  (when (== p nil)
+    (io/WriteString w "<nil Prog>")
+    (return))
+
+
+  (when (== (.-Ctxt p) nil)
+    (io/WriteString w "<Prog without ctxt>")
+    (return))
+
+
+  (let [sc (CConv (.-Scond p))]
+
+    (io/WriteString w (.String (.-As p)))
+    (io/WriteString w sc)
+    (let [sep "\t"]
+
+      (when (!= (.-Type (.-From p)) TYPE_NONE)
+        (io/WriteString w sep)
+        (WriteDconv w p (addr (.-From p)))
+        (set! sep ", "))
+
+      (when (!= (.-Reg p) REG_NONE)
+        ;; Should not happen but might as well show it if it does.
+        (fmt/Fprintf w "%s%v" sep (Rconv (conv int (.-Reg p))))
+        (set! sep ", "))
+
+      (range [i (.-RestArgs p)]
+        (when (== (.-Pos (aget (.-RestArgs p) i)) Source)
+          (io/WriteString w sep)
+          (WriteDconv w p (addr (.-Addr (aget (.-RestArgs p) i))))
+          (set! sep ", ")))
+
+
+
+      (when (== (.-As p) ATEXT)
+        ;; If there are attributes, print them. Otherwise, skip the comma.
+        ;; In short, print one of these two:
+        ;; TEXT	foo(SB), DUPOK|NOSPLIT, $0
+        ;; TEXT	foo(SB), $0
+        (let [s (.TextAttrString (.-Sym (.-From p)))]
+          (when (!= s "")
+            (fmt/Fprintf w "%s%s" sep s)
+            (set! sep ", "))))
+
+
+      (when (!= (.-Type (.-To p)) TYPE_NONE)
+        (io/WriteString w sep)
+        (WriteDconv w p (addr (.-To p)))
+        (set! sep ", "))
+
+      (when (!= (.-RegTo2 p) REG_NONE)
+        (fmt/Fprintf w "%s%v" sep (Rconv (conv int (.-RegTo2 p)))))
+
+      (range [i (.-RestArgs p)]
+        (when (== (.-Pos (aget (.-RestArgs p) i)) Destination)
+          (io/WriteString w sep)
+          (WriteDconv w p (addr (.-Addr (aget (.-RestArgs p) i))))
+          (set! sep ", "))))))
+
+
+
+
+^{:go/end 219} (go/method NewProg ^{:tag (* Prog)} [^{:tag (* Link)} ctxt]
+  (let [p (new Prog)]
+    (set! (.-Ctxt p) ctxt)
+    ^{:line 218} p))
+
+
+^{:go/end 223} (go/method CanReuseProgs ^bool [^{:tag (* Link)} ctxt]
+  (== (.-Debugasm ctxt) 0))
+
+
+^{:go/end 228} (go/func isZReg ^bool [^int r]
+  (or ^:go/paren (and (>= r (+ RBaseARM64 96)) (<= r (+ RBaseARM64 127)))
+    ^:go/paren (and (>= r (+ RBaseARM64 2048)) (< r (+ RBaseARM64 3072)))))
+
+
+
+
+^{:go/end 236} (go/func Dconv "Dconv accepts an argument 'a' within a prog 'p' and returns a string\nwith a formatted version of the argument.\n" ^string [^{:tag (* Prog)} p ^{:tag (* Addr)} a]
+  (let [buf (new bytes/Buffer)]
+    (writeDconv buf p a false)
+    (.String buf)))
+
+
+
+
+
+^{:go/end 245} (go/func DconvWithABIDetail "DconvWithABIDetail accepts an argument 'a' within a prog 'p'\nand returns a string with a formatted version of the argument, in\nwhich text symbols are rendered with explicit ABI selectors.\n" ^string [^{:tag (* Prog)} p ^{:tag (* Addr)} a]
+  (let [buf (new bytes/Buffer)]
+    (writeDconv buf p a true)
+    (.String buf)))
+
+
+
+
+^{:go/end 251} (go/func WriteDconv "WriteDconv accepts an argument 'a' within a prog 'p'\nand writes a formatted version of the arg to the writer.\n" [^io/Writer w ^{:tag (* Prog)} p ^{:tag (* Addr)} a]
+  (writeDconv w p a false))
+
+
+^{:go/end 432} (go/func writeDconv [^io/Writer w ^{:tag (* Prog)} p ^{:tag (* Addr)} a ^bool abiDetail]
+  (switch (.-Type a)
+    (default
+      (fmt/Fprintf w "type=%d" (.-Type a)))
+
+    (case [TYPE_NONE]
+      (when (or (!= (.-Name a) NAME_NONE) (!= (.-Reg a) 0) (!= (.-Sym a) nil))
+        (.WriteNameTo a w)
+        (fmt/Fprintf w "(%v)(NONE)" (Rconv (conv int (.-Reg a))))))
+
+
+    (case [TYPE_REG]
+      (when (and (== buildcfg/GOARCH "arm64") (!= (bit-and (.-Offset a) (<< (conv int64 1) 62)) 0))
+        (let [preg (+ (conv int (bit-and (.-Offset a) 31)) RBaseARM64 128)
+            ^{:line 267} arng2 (bit-and (>> (.-Offset a) 5) 15)
+            ^{:line 268} selreg (+ (conv int (bit-and (>> (.-Offset a) 9) 31)) RBaseARM64)
+            ^{:line 269} idximm (bit-and (>> (.-Offset a) 14) 63)
+
+            ^{:line 271} arngStr ""]
+          (switch arng2
+            (case [9]
+              (set! arngStr ".B"))
+            (case [10]
+              (set! arngStr ".H"))
+            (case [11]
+              (set! arngStr ".S"))
+            (case [12]
+              (set! arngStr ".D"))
+            (case [13]
+              (set! arngStr ".Q")))
+
+
+          (fmt/Fprintf w "[%s,$%d](%s%s)" (Rconv selreg) idximm (Rconv preg) arngStr)
+          (return)))
+
+
+      ;; TODO(rsc): This special case is for x86 instructions like
+      ;;	PINSRQ	CX,$1,X6
+      ;; where the $1 is included in the p->to Addr.
+      ;; Move into a new field.
+      (when (and (!= (.-Offset a) 0) ^:go/paren (or (< (.-Reg a) RBaseARM64) (>= (.-Reg a) RBaseMIPS)))
+        (fmt/Fprintf w "$%d,%v" (.-Offset a) (Rconv (conv int (.-Reg a))))
+        (return))
+
+
+      (if (or (!= (.-Name a) NAME_NONE) (!= (.-Sym a) nil)) (do
+          (.WriteNameTo a w)
+          (fmt/Fprintf w "(%v)(REG)" (Rconv (conv int (.-Reg a)))))
+
+        (io/WriteString w (Rconv (conv int (.-Reg a)))))
+
+
+      (when (or ^:go/paren (and (<= (+ RBaseARM64 (<< 1 10) (<< 1 9)) (.-Reg a)) (< (.-Reg a) (+ RBaseARM64 (<< 1 11)))) ; /* arm64.REG_ELEM */ ; /* arm64.REG_ZARNG */
+          ^:go/paren (and (<= (+ RBaseARM64 (<< 1 11) (<< 1 9)) (.-Reg a)) (< (.-Reg a) (+ RBaseARM64 (<< 1 11) (<< 1 10) (<< 1 9))))) ; /* arm64.REG_ZARNGELEM */ ; /* arm64.REG_PARNGZM */
+        (fmt/Fprintf w "[%d]" (.-Index a)))
+
+
+      (when (and (<= (+ RBaseLOONG64 (<< 1 10) (<< 1 11)) (.-Reg a)) ; /* loong64.REG_ELEM */
+          (< (.-Reg a) (+ RBaseLOONG64 (<< 1 10) (<< 2 11)))) ; /* loong64.REG_ELEM_END */
+        (fmt/Fprintf w "[%d]" (.-Index a))))
+
+
+    (case [TYPE_BRANCH]
+      (cond (!= (.-Sym a) nil)
+        (fmt/Fprintf w "%s%s(SB)" (.-Name (.-Sym a)) (abiDecorate a abiDetail))
+        (!= (.Target a) nil)
+        (fmt/Fprint w (.-Pc (.Target a))) :else
+
+        (fmt/Fprintf w "%d(PC)" (.-Offset a))))
+
+
+    (case [TYPE_INDIR]
+      (io/WriteString w "*")
+      (.writeNameTo a w abiDetail))
+
+    (case [TYPE_MEM]
+      (if (and (== buildcfg/GOARCH "arm64") ^:go/paren (or (< (.-Scale a) 0) ^:go/paren (and (!= (.-Index a) REG_NONE) ^:go/paren (or (isZReg (conv int (.-Reg a))) (isZReg (conv int (.-Index a)))))))
+        ;; SVE extended addressing pattern
+        (if (== (.-Index a) REG_NONE)
+          (if (< (.-Offset a) 0)
+            (fmt/Fprintf w "(-VL*%d)(%v)" (- (.-Offset a)) (Rconv (conv int (.-Reg a))))
+
+            (fmt/Fprintf w "(VL*%d)(%v)" (.-Offset a) (Rconv (conv int (.-Reg a)))))
+
+
+          (let [amount 0
+              ^{:line 339} mod 0]
+            (when (< (.-Scale a) 0)
+              (set! amount (conv int (bit-and (>> (.-Scale a) 12) 0x7)))
+              (set! mod (conv int (bit-and (>> (.-Scale a) 9) 0x7))))
+
+            (let [modStr ""]
+              (switch mod
+                (case [1]
+                  (set! modStr ".UXTW"))
+                (case [2]
+                  (set! modStr ".SXTW")))
+
+              (let [amountStr ""]
+                (when (!= amount 0)
+                  (set! amountStr (fmt/Sprintf "<<%d" amount)))
+
+                (fmt/Fprintf w "(%v%s%s)(%v)" (Rconv (conv int (.-Reg a))) modStr amountStr (Rconv (conv int (.-Index a))))))))
+
+        (do
+          (.WriteNameTo a w)
+          (when (!= (.-Index a) REG_NONE)
+            (if (== (.-Scale a) 0)
+              ;; arm64 shifted or extended register offset, scale = 0.
+              (fmt/Fprintf w "(%v)" (Rconv (conv int (.-Index a))))
+
+              (fmt/Fprintf w "(%v*%d)" (Rconv (conv int (.-Index a))) (conv int (.-Scale a))))))))
+
+
+
+
+    (case [TYPE_CONST]
+      (io/WriteString w "$")
+      (.WriteNameTo a w)
+      (when (!= (.-Reg a) 0)
+        (fmt/Fprintf w "(%v)" (Rconv (conv int (.-Reg a))))))
+
+
+    (case [TYPE_TEXTSIZE]
+      (if (== (assert int32 (.-Val a)) abi/ArgsSizeUnknown)
+        (fmt/Fprintf w "$%d" (.-Offset a))
+
+        (fmt/Fprintf w "$%d-%d" (.-Offset a) (assert int32 (.-Val a)))))
+
+
+    (case [TYPE_FCONST]
+      (let [str (fmt/Sprintf "%.17g" (assert float64 (.-Val a)))]
+        ;; Make sure 1 prints as 1.0
+        (when (not (strings/ContainsAny str ".e"))
+          (set! str + ".0"))
+
+        (fmt/Fprintf w "$(%s)" str)))
+
+    (case [TYPE_SCONST]
+      (fmt/Fprintf w "$%q" (assert string (.-Val a))))
+
+    (case [TYPE_ADDR]
+      (io/WriteString w "$")
+      (.writeNameTo a w abiDetail))
+
+    (case [TYPE_SHIFT]
+      (let [v (conv int (.-Offset a))
+          ^{:line 400} ops "<<>>->@>"]
+        (switch buildcfg/GOARCH
+          (case ["arm"]
+            (let [op (subslice ops (<< (bit-and (>> v 5) 3) 1))]
+              (if (!= (bit-and v (<< 1 4)) 0)
+                (fmt/Fprintf w "R%d%c%cR%d" (bit-and v 15) (aget op 0) (aget op 1) (bit-and (>> v 8) 15))
+
+                (fmt/Fprintf w "R%d%c%c%d" (bit-and v 15) (aget op 0) (aget op 1) (bit-and (>> v 7) 31)))
+
+              (when (!= (.-Reg a) 0)
+                (fmt/Fprintf w "(%v)" (Rconv (conv int (.-Reg a)))))))
+
+          (case ["arm64"]
+            (let [op (subslice ops (<< (bit-and (>> v 22) 3) 1))
+                ^{:line 414} r (bit-and (>> v 16) 31)]
+              (fmt/Fprintf w "%s%c%c%d" (Rconv (+ r RBaseARM64)) (aget op 0) (aget op 1) (bit-and (>> v 10) 63))))
+          (default
+            (panic (+ "TYPE_SHIFT is not supported on " buildcfg/GOARCH))))))
+
+
+    (case [TYPE_REGREG]
+      (fmt/Fprintf w "(%v, %v)" (Rconv (conv int (.-Reg a))) (Rconv (conv int (.-Offset a)))))
+
+    (case [TYPE_REGREG2]
+      (fmt/Fprintf w "%v, %v" (Rconv (conv int (.-Offset a))) (Rconv (conv int (.-Reg a)))))
+
+    (case [TYPE_REGLIST]
+      (io/WriteString w (RLconv (.-Offset a))))
+
+    (case [TYPE_SPECIAL]
+      (io/WriteString w (SPCconv (.-Offset a))))))
+
+
+
+^{:go/end 436} (go/method WriteNameTo [^{:tag (* Addr)} a ^io/Writer w]
+  (.writeNameTo a w false))
+
+
+^{:go/end 520} (go/method writeNameTo [^{:tag (* Addr)} a ^io/Writer w ^bool abiDetail]
+
+  (switch (.-Name a)
+    (default
+      (fmt/Fprintf w "name=%d" (.-Name a)))
+
+    (case [NAME_NONE]
+      (switch
+        (case [(== (.-Reg a) REG_NONE)]
+          (fmt/Fprint w (.-Offset a)))
+        (case [(== (.-Offset a) 0)]
+          (fmt/Fprintf w "(%v)" (Rconv (conv int (.-Reg a)))))
+        (case [(!= (.-Offset a) 0)]
+          (fmt/Fprintf w "%d(%v)" (.-Offset a) (Rconv (conv int (.-Reg a)))))))
+
+
+    ;; Note: a.Reg == REG_NONE encodes the default base register for the NAME_ type.
+    (case [NAME_EXTERN]
+      (let [reg "SB"]
+        (when (!= (.-Reg a) REG_NONE)
+          (set! reg (Rconv (conv int (.-Reg a)))))
+
+        (if (!= (.-Sym a) nil)
+          (fmt/Fprintf w "%s%s%s(%s)" (.-Name (.-Sym a)) (abiDecorate a abiDetail) (offConv (.-Offset a)) reg)
+
+          (fmt/Fprintf w "%s(%s)" (offConv (.-Offset a)) reg))))
+
+
+    (case [NAME_GOTREF]
+      (let [reg "SB"]
+        (when (!= (.-Reg a) REG_NONE)
+          (set! reg (Rconv (conv int (.-Reg a)))))
+
+        (if (!= (.-Sym a) nil)
+          (fmt/Fprintf w "%s%s@GOT(%s)" (.-Name (.-Sym a)) (offConv (.-Offset a)) reg)
+
+          (fmt/Fprintf w "%s@GOT(%s)" (offConv (.-Offset a)) reg))))
+
+
+    (case [NAME_STATIC]
+      (let [reg "SB"]
+        (when (!= (.-Reg a) REG_NONE)
+          (set! reg (Rconv (conv int (.-Reg a)))))
+
+        (if (!= (.-Sym a) nil)
+          (fmt/Fprintf w "%s<>%s(%s)" (.-Name (.-Sym a)) (offConv (.-Offset a)) reg)
+
+          (fmt/Fprintf w "<>%s(%s)" (offConv (.-Offset a)) reg))))
+
+
+    (case [NAME_AUTO]
+      (let [reg "SP"]
+        (when (!= (.-Reg a) REG_NONE)
+          (set! reg (Rconv (conv int (.-Reg a)))))
+
+        (if (!= (.-Sym a) nil)
+          (fmt/Fprintf w "%s%s(%s)" (.-Name (.-Sym a)) (offConv (.-Offset a)) reg)
+
+          (fmt/Fprintf w "%s(%s)" (offConv (.-Offset a)) reg))))
+
+
+    (case [NAME_PARAM]
+      (let [reg "FP"]
+        (when (!= (.-Reg a) REG_NONE)
+          (set! reg (Rconv (conv int (.-Reg a)))))
+
+        (if (!= (.-Sym a) nil)
+          (fmt/Fprintf w "%s%s(%s)" (.-Name (.-Sym a)) (offConv (.-Offset a)) reg)
+
+          (fmt/Fprintf w "%s(%s)" (offConv (.-Offset a)) reg))))
+
+    (case [NAME_TOCREF]
+      (let [reg "SB"]
+        (when (!= (.-Reg a) REG_NONE)
+          (set! reg (Rconv (conv int (.-Reg a)))))
+
+        (if (!= (.-Sym a) nil)
+          (fmt/Fprintf w "%s%s(%s)" (.-Name (.-Sym a)) (offConv (.-Offset a)) reg)
+
+          (fmt/Fprintf w "%s(%s)" (offConv (.-Offset a)) reg))))))
+
+
+
+
+^{:go/end 527} (go/func offConv ^string [^int64 off]
+  (when (== off 0)
+    (return ""))
+
+  (fmt/Sprintf "%+d" off))
+
+
+
+
+
+
+
+
+(go/type opSuffixSet "opSuffixSet is like regListSet, but for opcode suffixes.\n\nUnlike some other similar structures, uint8 space is not\ndivided by its own values set (because there are only 256 of them).\nInstead, every arch may interpret/format all 8 bits as they like,\nas long as they register proper cconv function for it.\n" (struct
+    ^{:line 536 :tag string} arch
+    ^{:line 537 :tag (func [^uint8 suffix] [string])} cconv))
+
+
+(go/var ^{:tag (slice opSuffixSet)} opSuffixSpace)
+
+
+
+
+
+^{:go/end 551} (go/func RegisterOpSuffix "RegisterOpSuffix assigns cconv function for formatting opcode suffixes\nwhen compiling for GOARCH=arch.\n\ncconv is never called with 0 argument.\n" [^string arch ^{:tag (func [uint8] [string])} cconv]
+  (set! opSuffixSpace (append opSuffixSpace ^{:go/breaks [2 4]} (lit opSuffixSet
+        :arch arch
+        :cconv cconv))))
+
+
+
+(go/type regSet (struct
+    ^{:line 554 :tag int} lo
+    ^{:line 555 :tag int} hi
+    ^{:line 556 :tag (func [int] [string])} Rconv))
+
+
+
+
+(go/var ^{:tag (slice regSet) :doc "Few enough architectures that a linear scan is fastest.\nNot even worth sorting.\n"} regSpace)
+
+;; /*
+;; Each architecture defines a register space as a unique
+;; integer range.
+;; Here is the list of architectures and the base of their register spaces.
+;; */
+
+(go/const
+
+
+  ^{:line 572} [^{:val 1024 :doc "Because of masking operations in the encodings, each register\nspace should start at 0 modulo some power of 2.\n"} RBase386 (* 1 1024)]
+  ^{:line 573} [^{:val 2048} RBaseAMD64 (* 2 1024)]
+  ^{:line 574} [^{:val 3072} RBaseARM (* 3 1024)]
+  ^{:line 575} [^{:val 4096} RBasePPC64 (* 4 1024)] ; range [4k, 8k)
+  ^{:line 576} [^{:val 8192} RBaseARM64 (* 8 1024)] ; range [8k, 18k)
+  ^{:line 577} [^{:val 18432} RBaseMIPS (* 18 1024)] ; range [18k, 19k)
+  ^{:line 578} [^{:val 19456} RBaseS390X (* 19 1024)] ; range [19k, 20k)
+  ^{:line 579} [^{:val 20480} RBaseRISCV (* 20 1024)] ; range [20k, 21k)
+  ^{:line 580} [^{:val 21504} RBaseWasm (* 21 1024)]
+  ^{:line 581} [^{:val 22528} RBaseLOONG64 (* 22 1024)]) ; range [22K, 25k)
+
+
+
+
+
+^{:go/end 589} (go/func RegisterRegister "RegisterRegister binds a pretty-printer (Rconv) for register\nnumbers to a given register number range. Lo is inclusive,\nhi exclusive (valid registers are lo through hi-1).\n" [^int lo ^int hi ^{:tag (func [int] [string])} Rconv]
+  (set! regSpace (append regSpace (lit regSet lo hi Rconv))))
+
+
+^{:go/end 602} (go/func Rconv ^string [^int reg]
+  (when (== reg REG_NONE)
+    (return "NONE"))
+
+  (range [i regSpace]
+    (let [rs (addr (aget regSpace i))]
+      (when (and (<= (.-lo rs) reg) (< reg (.-hi rs)))
+        (return ((.-Rconv rs) reg)))))
+
+
+  (fmt/Sprintf "R???%d" reg))
+
+
+(go/type regListSet (struct
+    ^{:line 605 :tag int64} lo
+    ^{:line 606 :tag int64} hi
+    ^{:line 607 :tag (func [int64] [string])} RLconv))
+
+
+(go/var ^{:tag (slice regListSet)} regListSpace)
+
+
+
+(go/const "Each architecture is allotted a distinct subspace: [Lo, Hi) for declaring its\narch-specific register list numbers.\n"
+  ^{:line 615} [^{:val 0} RegListARMLo 0]
+  ^{:line 616} [^{:val 65536} RegListARMHi (<< 1 16)]
+
+
+  ^{:line 619} [^{:val 1152921504606846976 :doc "arm64 uses the 60th bit to differentiate from other archs\n"} RegListARM64Lo (<< 1 60)]
+  ^{:line 620} [^{:val 2305843009213693951} RegListARM64Hi (- (<< 1 61) 1)]
+
+
+  ^{:line 623} [^{:val 2305843009213693952 :doc "x86 uses the 61th bit to differentiate from other archs\n"} RegListX86Lo (<< 1 61)]
+  ^{:line 624} [^{:val 4611686018427387903} RegListX86Hi (- (<< 1 62) 1)])
+
+
+
+
+
+^{:go/end 632} (go/func RegisterRegisterList "RegisterRegisterList binds a pretty-printer (RLconv) for register list\nnumbers to a given register list number range. Lo is inclusive,\nhi exclusive (valid register list are lo through hi-1).\n" [^int64 lo ^int64 hi ^{:tag (func [int64] [string])} rlconv]
+  (set! regListSpace (append regListSpace (lit regListSet lo hi rlconv))))
+
+
+^{:go/end 642} (go/func RLconv ^string [^int64 list]
+  (range [i regListSpace]
+    (let [rls (addr (aget regListSpace i))]
+      (when (and (<= (.-lo rls) list) (< list (.-hi rls)))
+        (return ((.-RLconv rls) list)))))
+
+
+  (fmt/Sprintf "RL???%d" list))
+
+
+
+(go/type spcSet "Special operands\n" (struct
+    ^{:line 646 :tag int64} lo
+    ^{:line 647 :tag int64} hi
+    ^{:line 648 :tag (func [int64] [string])} SPCconv))
+
+
+(go/var ^{:tag (slice spcSet)} spcSpace)
+
+
+
+(go/const "Each architecture is allotted a distinct subspace: [Lo, Hi) for declaring its\narch-specific special operands.\n"
+  ^{:line 656} [^{:val 0} SpecialOperandARM64Base (<< 0 16)]
+  ^{:line 657} [^{:val 65536} SpecialOperandRISCVBase (<< 1 16)])
+
+
+
+
+
+^{:go/end 665} (go/func RegisterSpecialOperands "RegisterSpecialOperands binds a pretty-printer (SPCconv) for special\noperand numbers to a given special operand number range. Lo is inclusive,\nhi is exclusive (valid special operands are lo through hi-1).\n" [^int64 lo ^int64 hi ^{:tag (func [int64] [string])} rlconv]
+  (set! spcSpace (append spcSpace (lit spcSet lo hi rlconv))))
+
+
+
+^{:go/end 676} (go/func SPCconv "SPCconv returns the string representation of the special operand spc.\n" ^string [^int64 spc]
+  (range [i spcSpace]
+    (let [spcs (addr (aget spcSpace i))]
+      (when (and (<= (.-lo spcs) spc) (< spc (.-hi spcs)))
+        (return ((.-SPCconv spcs) spc)))))
+
+
+  (fmt/Sprintf "SPC???%d" spc))
+
+
+(go/type opSet (struct
+    ^{:line 679 :tag As} lo
+    ^{:line 680 :tag (slice string)} names))
+
+
+
+(go/var ^{:tag (slice opSet) :doc "Not even worth sorting\n"} aSpace)
+
+
+
+^{:go/end 693} (go/func RegisterOpcode "RegisterOpcode binds a list of instruction names\nto a given instruction number range.\n" [^As lo ^{:tag (slice string)} Anames]
+  (when (> (len Anames) AllowedOpCodes)
+    (panic (fmt/Sprintf "too many instructions, have %d max %d" (len Anames) AllowedOpCodes)))
+
+  (set! aSpace (append aSpace (lit opSet lo Anames))))
+
+
+^{:go/end 706} (go/method String ^string [^As a]
+  (when (and (<= 0 a) (< (conv int a) (len Anames)))
+    (return (aget Anames a)))
+
+  (range [i aSpace]
+    (let [as (addr (aget aSpace i))]
+      (when (and (<= (.-lo as) a) (< (conv int (- a (.-lo as))) (len (.-names as))))
+        (return (aget (.-names as) (- a (.-lo as)))))))
+
+
+  (fmt/Sprintf "A???%d" a))
+
+
+(go/var Anames ^{:go/breaks [2 3 4 5 6 7 8 9 10 11 12 13 14 15 16]} (lit (slice string)
+    "XXX"
+    "CALL"
+    "DUFFCOPY"
+    "DUFFZERO"
+    "END"
+    "FUNCDATA"
+    "JMP"
+    "NOP"
+    "PCALIGN"
+    "PCALIGNMAX"
+    "PCDATA"
+    "RET"
+    "GETCALLERPC"
+    "TEXT"
+    "UNDEF"))
+
+
+^{:go/end 736} (go/func Bool2int ^int [^bool b]
+  ;; The compiler currently only optimizes this form.
+  ;; See issue 6011.
+  (let [^int i (zero int)]
+    (if b
+      (set! i 1)
+
+      (set! i 0))
+
+    ^{:line 735} i))
+
+
+^{:go/end 743} (go/func abiDecorate ^string [^{:tag (* Addr)} a ^bool abiDetail]
+  (when (or (not abiDetail) (== (.-Sym a) nil))
+    (return ""))
+
+  (fmt/Sprintf "<%s>" ^{:go/via [Attribute]} (.ABI (.-Sym a))))
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 758} (go/func AlignmentPadding "AlignmentPadding bytes to add to align code as requested.\nAlignment is restricted to powers of 2 between 8 and 2048 inclusive.\n\npc_: current offset in function, in bytes\np:  a PCALIGN or PCALIGNMAX prog\nctxt: the context, for current function\ncursym: current function being assembled\nreturns number of bytes of padding needed,\nupdates minimum alignment for the function.\n" ^int [^int32 pc ^{:tag (* Prog)} p ^{:tag (* Link)} ctxt ^{:tag (* LSym)} cursym]
+  (let [v (AlignmentPaddingLength pc p ctxt)]
+    (requireAlignment (.-Offset (.-From p)) ctxt cursym)
+    ^{:line 757} v))
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 793} (go/func AlignmentPaddingLength "AlignmentPaddingLength is the number of bytes to add to align code as requested.\nAlignment is restricted to powers of 2 between 8 and 2048 inclusive.\nThis only computes the length and does not update the (missing parameter)\ncurrent function's own required alignment.\n\npc: current offset in function, in bytes\np:  a PCALIGN or PCALIGNMAX prog\nctxt: the context, for current function\nreturns number of bytes of padding needed,\n" ^int [^int32 pc ^{:tag (* Prog)} p ^{:tag (* Link)} ctxt]
+  (let [a (.-Offset (.-From p))]
+    (when (not (and ^:go/paren (== (bit-and a (- a 1)) 0) (<= 8 a) (<= a 2048)))
+      (.Diag ctxt "alignment value of an instruction must be a power of two and in the range [8, 2048], got %d\n" a)
+      (return 0))
+
+    (let [pc64 (conv int64 pc)
+        ^{:line 776} lob (bit-and pc64 (- a 1))] ; Low Order Bits -- if not zero, then not aligned
+      (when (== (.-As p) APCALIGN)
+        (when (!= lob 0)
+          (return (conv int (- a lob))))
+
+        (return 0))
+
+      ;; emit as many as s bytes of padding to obtain alignment
+      ^{:go/breaks [[4 792]]} (let [s (.-Offset (.-To p))]
+        (when (or (< s 0) (>= s a))
+          (.Diag ctxt "PCALIGNMAX 'amount' %d must be non-negative and smaller than the alignment %d\n" s a)
+          (return 0))
+
+        (when (>= s (- a lob))
+          (return (conv int (- a lob))))
+
+        0))))
+
+
+
+
+^{:go/end 802} (go/func requireAlignment "requireAlignment ensures that the function is aligned enough to support\nthe required code alignment\n" [^int64 a ^{:tag (* Link)} ctxt ^{:tag (* LSym)} cursym]
+  ;; TODO remove explicit knowledge about AIX.
+  (when (and (!= (.-Headtype ctxt) objabi/Haix) (< (.-Align cursym) (conv int16 a)))
+    (set! (.-Align cursym) (conv int16 a))))

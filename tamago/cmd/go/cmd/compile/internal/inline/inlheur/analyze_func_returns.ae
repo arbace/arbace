@@ -1,0 +1,276 @@
+;; Copyright 2023 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.cmd.compile.internal.inline.inlheur) (go/file "analyze_func_returns.go" :imports [
+
+
+    ^{:line 8} [ir "cmd/compile/internal/ir"]
+    ^{:line 9} [fmt "fmt"]
+    ^{:line 10} [constant "go/constant"]
+    ^{:line 11} [token "go/token"]
+    ^{:line 12} [os "os"]])
+
+
+
+
+
+(go/type resultsAnalyzer "resultsAnalyzer stores state information for the process of\ncomputing flags/properties for the return values of a specific Go\nfunction, as part of inline heuristics synthesis.\n" (struct
+    ^{:line 19 :tag string} fname
+    ^{:line 20 :tag (slice ResultPropBits)} props
+    ^{:line 21 :tag (slice resultVal)} values
+    ^{:line 22 :tag int} inlineMaxBudget
+    (* nameFinder)))
+
+
+
+
+
+
+
+(go/type resultVal "resultVal captures information about a specific result returned from\nthe function we're analyzing; we are interested in cases where\nthe func always returns the same constant, or always returns\nthe same function, etc. This container stores info on a the specific\nscenarios we're looking for.\n" (struct
+    ^{:line 32 :tag constant/Value} cval
+    ^{:line 33 :tag (* ir/Name)} fn
+    ^{:line 34 :tag bool} fnClo
+    ^{:line 35 :tag bool} top
+    ^{:line 36 :tag bool} derived)) ; see deriveReturnFlagsFromCallee below
+
+
+
+
+
+
+
+^{:go/end 52} (go/func addResultsAnalyzer "addResultsAnalyzer creates a new resultsAnalyzer helper object for\nthe function fn, appends it to the analyzers list, and returns the\nnew list. If the function in question doesn't have any returns (or\nany interesting returns) then the analyzer list is left as is, and\nthe result flags in \"fp\" are updated accordingly.\n" ^{:tag (slice propAnalyzer)} [^{:tag (* ir/Func)} fn ^{:tag (slice propAnalyzer)} analyzers ^{:tag (* FuncProps)} fp ^int inlineMaxBudget ^{:tag (* nameFinder)} nf]
+  (let [(values ra props) (makeResultsAnalyzer fn inlineMaxBudget nf)]
+    (if (!= ra nil)
+      (set! analyzers (append analyzers ra))
+
+      (set! (.-ResultFlags fp) props))
+
+    ^{:line 51} analyzers))
+
+
+
+
+
+
+^{:go/end 91} (go/func makeResultsAnalyzer "makeResultsAnalyzer creates a new helper object to analyze results\nin function fn. If the function doesn't have any interesting\nresults, a nil helper is returned along with a set of default\nresult flags for the func.\n" [^{:tag (* ir/Func)} fn ^int inlineMaxBudget ^{:tag (* nameFinder)} nf] :results [(* resultsAnalyzer) (slice ResultPropBits)]
+  (let [results (.Results (.Type fn))]
+    (when (== (len results) 0)
+      (return nil nil))
+
+    (let [props (make (slice ResultPropBits) (len results))]
+      (when (== (.-Inl fn) nil)
+        (return nil props))
+
+      (let [vals (make (slice resultVal) (len results))
+          ^{:line 68} interestingToAnalyze false]
+        (range [i results]
+          (let [rt (.-Type (aget results i))]
+            (when (and (not (.IsScalar rt)) (not (.HasNil rt)))
+              ;; existing properties not applicable here (for things
+              ;; like structs, arrays, slices, etc).
+              (continue))
+
+            ;; set the "top" flag (as in "top element of data flow lattice")
+            ;; meaning "we have no info yet, but we might later on".
+            (set! (.-top (aget vals i)) true)
+            (set! interestingToAnalyze true)))
+
+        (when (not interestingToAnalyze)
+          (return nil props))
+
+        (let [ra (addr ^{:go/breaks [2 4 6 8]} (lit resultsAnalyzer
+                :props props
+                :values vals
+                :inlineMaxBudget inlineMaxBudget
+                :nameFinder nf))]
+
+          (return ra nil))))))
+
+
+
+
+^{:go/end 113} (go/method setResults "setResults transfers the calculated result properties for this\nfunction to 'funcProps'.\n" [^{:tag (* resultsAnalyzer)} ra ^{:tag (* FuncProps)} funcProps]
+  ;; Promote ResultAlwaysSameFunc to ResultAlwaysSameInlinableFunc
+  (range [i (.-values ra)]
+    (when (and (== (aget (.-props ra) i) ResultAlwaysSameFunc) (not (.-derived (aget (.-values ra) i))))
+      (let [f (.-Func (.-fn (aget (.-values ra) i)))]
+        ;; HACK: in order to allow for call site score
+        ;; adjustments, we used a relaxed inline budget in
+        ;; determining inlinability. For the check below, however,
+        ;; we want to know is whether the func in question is
+        ;; likely to be inlined, as opposed to whether it might
+        ;; possibly be inlined if all the right score adjustments
+        ;; happened, so do a simple check based on the cost.
+        (when (and (!= (.-Inl f) nil) (<= (.-Cost (.-Inl f)) (conv int32 (.-inlineMaxBudget ra))))
+          (aset (.-props ra) i ResultAlwaysSameInlinableFunc)))))
+
+
+
+  (set! (.-ResultFlags funcProps) (.-props ra)))
+
+
+^{:go/end 119} (go/method pessimize [^{:tag (* resultsAnalyzer)} ra]
+  (range [i (.-props ra)]
+    (aset (.-props ra) i ResultNoInfo)))
+
+
+
+^{:go/end 122} (go/method nodeVisitPre [^{:tag (* resultsAnalyzer)} ra ^ir/Node n])
+
+
+^{:go/end 146} (go/method nodeVisitPost [^{:tag (* resultsAnalyzer)} ra ^ir/Node n]
+  (when (== (len (.-values ra)) 0)
+    (return))
+
+  (when (!= (.Op n) ir/ORETURN)
+    (return))
+
+  (when (!= (bit-and debugTrace debugTraceResults) 0)
+    (fmt/Fprintf os/Stderr "=+= returns nodevis %v %s\n"
+      (ir/Line n) (.String (.Op n))))
+
+
+  ;; No support currently for named results, so if we see an empty
+  ;; "return" stmt, be conservative.
+  (let [rs (assert (* ir/ReturnStmt) n)]
+    (when (!= (len (.-Results rs)) (len (.-values ra)))
+      (.pessimize ra)
+      (return))
+
+    (range [i r (.-Results rs)]
+      (.analyzeResult ra i r))))
+
+
+
+
+
+
+
+
+
+^{:go/end 235} (go/method analyzeResult "analyzeResult examines the expression 'n' being returned as the\n'ii'th argument in some return statement to see whether has\ninteresting characteristics (for example, returns a constant), then\napplies a dataflow \"meet\" operation to combine this result with any\nprevious result (for the given return slot) that we've already\nprocessed.\n" [^{:tag (* resultsAnalyzer)} ra ^int ii ^ir/Node n]
+  (let [isAllocMem ^{:go/via [nameFinder]} (.isAllocatedMem ra n)
+      ^{:line 156} isConcConvItf ^{:go/via [nameFinder]} (.isConcreteConvIface ra n)
+      ^{:line 157} constVal ^{:go/via [nameFinder]} (.constValue ra n)
+      ^{:line 158} isConst (!= constVal nil)
+      ^{:line 159} isNil ^{:go/via [nameFinder]} (.isNil ra n)
+      ^{:line 160} rfunc ^{:go/via [nameFinder]} (.funcName ra n)
+      ^{:line 161} isFunc (!= rfunc nil)
+      ^{:line 162} isClo (and (!= rfunc nil) (!= (.-OClosure (.-Func rfunc)) nil))
+      ^{:line 163} curp (aget (.-props ra) ii)
+      (values dprops isDerivedFromCall) (.deriveReturnFlagsFromCallee ra n)
+      ^{:line 165} newp ResultNoInfo
+      ^{:line 166 :tag constant/Value} newcval (zero constant/Value)
+      ^{:line 167 :tag (* ir/Name)} newfunc (zero (* ir/Name))]
+
+    (when (!= (bit-and debugTrace debugTraceResults) 0)
+      (fmt/Fprintf os/Stderr "=-= %v: analyzeResult n=%s ismem=%v isconcconv=%v isconst=%v isnil=%v isfunc=%v isclo=%v\n" (ir/Line n) (.String (.Op n)) isAllocMem isConcConvItf isConst isNil isFunc isClo))
+
+
+    (if (.-top (aget (.-values ra) ii)) (do
+        (set! (.-top (aget (.-values ra) ii)) false)
+        ;; this is the first return we've seen; record
+        ;; whatever properties it has.
+        (switch
+          (case [isAllocMem]
+            (set! newp ResultIsAllocatedMem))
+          (case [isConcConvItf]
+            (set! newp ResultIsConcreteTypeConvertedToInterface))
+          (case [isFunc]
+            (set! newp ResultAlwaysSameFunc)
+            (set! newfunc rfunc))
+          (case [isConst]
+            (set! newp ResultAlwaysSameConstant)
+            (set! newcval constVal))
+          (case [isNil]
+            (set! newp ResultAlwaysSameConstant)
+            (set! newcval nil))
+          (case [isDerivedFromCall]
+            (set! newp dprops)
+            (set! (.-derived (aget (.-values ra) ii)) true))))
+
+      (do
+        (when (not (.-derived (aget (.-values ra) ii)))
+          ;; this is not the first return we've seen; apply
+          ;; what amounts of a "meet" operator to combine
+          ;; the properties we see here with what we saw on
+          ;; the previous returns.
+          (switch curp
+            (case [ResultIsAllocatedMem]
+              (when isAllocMem
+                (set! newp ResultIsAllocatedMem)))
+
+            (case [ResultIsConcreteTypeConvertedToInterface]
+              (when isConcConvItf
+                (set! newp ResultIsConcreteTypeConvertedToInterface)))
+
+            (case [ResultAlwaysSameConstant]
+              (cond (and isNil (== (.-cval (aget (.-values ra) ii)) nil)) (do
+                  (set! newp ResultAlwaysSameConstant)
+                  (set! newcval nil))
+                (and isConst (constant/Compare constVal token/EQL (.-cval (aget (.-values ra) ii)))) (do
+                  (set! newp ResultAlwaysSameConstant)
+                  (set! newcval constVal))))
+
+            (case [ResultAlwaysSameFunc]
+              (when (and isFunc (isSameFuncName rfunc (.-fn (aget (.-values ra) ii))))
+                (set! newp ResultAlwaysSameFunc)
+                (set! newfunc rfunc)))))))
+
+
+
+
+    (set! (.-fn (aget (.-values ra) ii)) newfunc)
+    (set! (.-fnClo (aget (.-values ra) ii)) isClo)
+    (set! (.-cval (aget (.-values ra) ii)) newcval)
+    (aset (.-props ra) ii newp)
+
+    (when (!= (bit-and debugTrace debugTraceResults) 0)
+      (fmt/Fprintf os/Stderr "=-= %v: analyzeResult newp=%s\n"
+        (ir/Line n) newp))))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 277} (go/method deriveReturnFlagsFromCallee "deriveReturnFlagsFromCallee tries to set properties for a given\nreturn result where we're returning call expression; return value\nis a return property value and a boolean indicating whether the\nprop is valid. Examples:\n\n\tfunc foo() int { return bar() }\n\tfunc bar() int { return 42 }\n\tfunc blix() int { return 43 }\n\tfunc two(y int) int {\n\t  if y < 0 { return bar() } else { return blix() }\n\t}\n\nSince \"foo\" always returns the result of a call to \"bar\", we can\nset foo's return property to that of bar. In the case of \"two\", however,\neven though each return path returns a constant, we don't know\nwhether the constants are identical, hence we need to be conservative.\n" [^{:tag (* resultsAnalyzer)} ra ^ir/Node n] :results [ResultPropBits bool]
+  (when (!= (.Op n) ir/OCALLFUNC)
+    (return 0 false))
+
+  (let [ce (assert (* ir/CallExpr) n)]
+    (when (!= (.Op (.-Fun ce)) ir/ONAME)
+      (return 0 false))
+
+    (let [called (ir/StaticValue (.-Fun ce))]
+      (when (!= (.Op called) ir/ONAME)
+        (return 0 false))
+
+      (let [cname ^{:go/via [nameFinder]} (.funcName ra called)]
+        (when (== cname nil)
+          (return 0 false))
+
+        (let [calleeProps (propsForFunc (.-Func cname))]
+          (when (== calleeProps nil)
+            (return 0 false))
+
+          (when (!= (len (.-ResultFlags calleeProps)) 1)
+            (return 0 false))
+
+          (return (aget (.-ResultFlags calleeProps) 0) true))))))

@@ -1,0 +1,680 @@
+;; Copyright 2020 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.cmd.compile.internal.abi) (go/file "abiutils.go" :imports [
+
+
+    ^{:line 8} [base "cmd/compile/internal/base"]
+    ^{:line 9} [ir "cmd/compile/internal/ir"]
+    ^{:line 10} [types "cmd/compile/internal/types"]
+    ^{:line 11} [obj "cmd/internal/obj"]
+    ^{:line 12} [src "cmd/internal/src"]
+    ^{:line 13} [fmt "fmt"]
+    ^{:line 14} [math "math"]
+    ^{:line 15} [sync "sync"]])
+
+
+;;......................................................................
+;;
+;; Public/exported bits of the ABI utilities.
+;;
+
+
+
+
+
+
+
+(go/type ABIParamResultInfo "ABIParamResultInfo stores the results of processing a given\nfunction type to compute stack layout and register assignments. For\neach input and output parameter we capture whether the param was\nregister-assigned (and to which register(s)) or the stack offset\nfor the param if is not going to be passed in registers according\nto the rules in the Go internal ABI specification (1.17).\n" (struct
+    ^{:line 30 :tag (slice ABIParamAssignment)} inparams ; Includes receiver for method calls.  Does NOT include hidden closure pointer.
+    ^{:line 31 :tag (slice ABIParamAssignment)} outparams
+    ^{:line 32 :tag int64} offsetToSpillArea
+    ^{:line 33 :tag int64} spillAreaSize
+    ^{:line 34 :tag int} inRegistersUsed
+    ^{:line 35 :tag int} outRegistersUsed
+    ^{:line 36 :tag (* ABIConfig)} config)) ; to enable String() method
+
+
+^{:go/end 41} (go/method Config ^{:tag (* ABIConfig)} [^{:tag (* ABIParamResultInfo)} a]
+  (.-config a))
+
+
+^{:go/end 45} (go/method InParams ^{:tag (slice ABIParamAssignment)} [^{:tag (* ABIParamResultInfo)} a]
+  (.-inparams a))
+
+
+^{:go/end 49} (go/method OutParams ^{:tag (slice ABIParamAssignment)} [^{:tag (* ABIParamResultInfo)} a]
+  (.-outparams a))
+
+
+^{:go/end 53} (go/method InRegistersUsed ^int [^{:tag (* ABIParamResultInfo)} a]
+  (.-inRegistersUsed a))
+
+
+^{:go/end 57} (go/method OutRegistersUsed ^int [^{:tag (* ABIParamResultInfo)} a]
+  (.-outRegistersUsed a))
+
+
+^{:go/end 61} (go/method InParam ^{:tag (* ABIParamAssignment)} [^{:tag (* ABIParamResultInfo)} a ^int i]
+  (addr (aget (.-inparams a) i)))
+
+
+^{:go/end 65} (go/method OutParam ^{:tag (* ABIParamAssignment)} [^{:tag (* ABIParamResultInfo)} a ^int i]
+  (addr (aget (.-outparams a) i)))
+
+
+^{:go/end 69} (go/method SpillAreaOffset ^int64 [^{:tag (* ABIParamResultInfo)} a]
+  (.-offsetToSpillArea a))
+
+
+^{:go/end 73} (go/method SpillAreaSize ^int64 [^{:tag (* ABIParamResultInfo)} a]
+  (.-spillAreaSize a))
+
+
+
+
+
+
+^{:go/end 81} (go/method ArgWidth "ArgWidth returns the amount of stack needed for all the inputs\nand outputs of a function or method, including ABI-defined parameter\nslots and ABI-defined spill slots for register-resident parameters.\nThe name is inherited from (*Type).ArgWidth(), which it replaces.\n" ^int64 [^{:tag (* ABIParamResultInfo)} a]
+  (- (+ (.-spillAreaSize a) (.-offsetToSpillArea a)) (.LocalsOffset (.-config a))))
+
+
+
+
+
+
+
+
+
+
+
+(go/type RegIndex "RegIndex stores the index into the set of machine registers used by\nthe ABI on a specific architecture for parameter passing.  RegIndex\nvalues 0 through N-1 (where N is the number of integer registers\nused for param passing according to the ABI rules) describe integer\nregisters; values N through M (where M is the number of floating\npoint registers used).  Thus if the ABI says there are 5 integer\nregisters and 7 floating point registers, then RegIndex value of 4\nindicates the 5th integer register, and a RegIndex value of 11\nindicates the 7th floating point register.\n" uint8)
+
+
+
+
+
+
+(go/type ABIParamAssignment "ABIParamAssignment holds information about how a specific param or\nresult will be passed: in registers (in which case 'Registers' is\npopulated) or on the stack (in which case 'Offset' is set to a\nnon-negative stack offset). The values in 'Registers' are indices\n(as described above), not architected registers.\n" (struct
+    ^{:line 100 :tag (* types/Type)} Type
+    ^{:line 101 :tag (* ir/Name)} Name
+    ^{:line 102 :tag (slice RegIndex)} Registers
+    ^{:line 103 :tag int32} offset))
+
+
+
+
+^{:go/end 113} (go/method Offset "Offset returns the stack offset for addressing the parameter that \"a\" describes.\nThis will panic if \"a\" describes a register-allocated parameter.\n" ^int32 [^{:tag (* ABIParamAssignment)} a]
+  (when (> (len (.-Registers a)) 0)
+    (base/Fatalf "register allocated parameters have no offset"))
+
+  (.-offset a))
+
+
+
+
+
+^{:go/end 135} (go/func RegisterTypes "RegisterTypes returns a slice of the types of the registers\ncorresponding to a slice of parameters.  The returned slice\nhas capacity for one more, likely a memory type.\n" ^{:tag (slice (* types/Type))} [^{:tag (slice ABIParamAssignment)} apa]
+  (let [rcount 0]
+    (range [_ pa apa]
+      (set! rcount + (len (.-Registers pa))))
+
+    (when (== rcount 0)
+      ;; Note that this catches top-level struct{} and [0]Foo, which are stack allocated.
+      (return (make (slice (* types/Type)) 0 1)))
+
+    (let [rts (make (slice (* types/Type)) 0 (+ rcount 1))]
+      (range [_ pa apa]
+        (when (== (len (.-Registers pa)) 0)
+          (continue))
+
+        (set! rts (appendParamTypes rts (.-Type pa))))
+
+      ^{:line 134} rts)))
+
+
+^{:go/end 146} (go/method RegisterTypesAndOffsets [^{:tag (* ABIParamAssignment)} pa] :results [(slice (* types/Type)) (slice int64)]
+  (let [l (len (.-Registers pa))]
+    (when (== l 0)
+      (return nil nil))
+
+    (let [typs (make (slice (* types/Type)) 0 l)
+        ^{:line 143} offs (make (slice int64) 0 l)]
+      (set! (values offs _) (appendParamOffsets offs 0 (.-Type pa))) ; 0 is aligned for everything.
+      (return (appendParamTypes typs (.-Type pa)) offs))))
+
+
+^{:go/end 192} (go/func appendParamTypes ^{:tag (slice (* types/Type))} [^{:tag (slice (* types/Type))} rts ^{:tag (* types/Type)} t]
+  (let [w (.Size t)]
+    (when (== w 0)
+      (return rts))
+
+    (if (or (.IsScalar t) (.IsPtrShaped t) (.IsSIMD t))
+      (if (.IsComplex t)
+        (let [c (types/FloatForComplex t)]
+          (return (append rts c c)))
+        (do
+          (when (or (<= (conv int (.Size t)) types/RegSize) (.IsSIMD t))
+            (return (append rts t)))
+
+          ;; assume 64bit int on 32-bit machine
+          ;; TODO endianness? Should high-order (sign bits) word come first?
+          (if (.IsSigned t)
+            (set! rts (append rts (aget types/Types types/TINT32)))
+
+            (set! rts (append rts (aget types/Types types/TUINT32))))
+
+          (return (append rts (aget types/Types types/TUINT32)))))
+
+
+      (let [typ (.Kind t)]
+        (switch typ
+          (case [types/TARRAY]
+            (for [i (conv int64 0)] (< i (.NumElem t)) (inc! i) ; 0 gets no registers, plus future-proofing.
+              (set! rts (appendParamTypes rts (.Elem t)))))
+
+          (case [types/TSTRUCT]
+            (range [_ f (.Fields t)]
+              (when (> (.Size (.-Type f)) 0) ; embedded zero-width types receive no registers
+                (set! rts (appendParamTypes rts (.-Type f))))))
+
+
+          (case [types/TSLICE]
+            (return (appendParamTypes rts synthSlice)))
+          (case [types/TSTRING]
+            (return (appendParamTypes rts synthString)))
+          (case [types/TINTER]
+            (return (appendParamTypes rts synthIface))))))
+
+
+    ^{:line 191} rts))
+
+
+
+
+
+^{:go/end 240} (go/func appendParamOffsets "appendParamOffsets appends the offset(s) of type t, starting from \"at\",\nto input offsets, and returns the longer slice and the next unused offset.\nat should already be aligned for t.\n" [^{:tag (slice int64)} offsets ^int64 at ^{:tag (* types/Type)} t] :results [(slice int64) int64]
+  (let [w (.Size t)]
+    (when (== w 0)
+      (return offsets at))
+
+    (when (.IsSIMD t)
+      (return (append offsets at) (+ at w)))
+
+    (if (or (.IsScalar t) (.IsPtrShaped t))
+      (if (or (.IsComplex t) (> (conv int (.Size t)) types/RegSize)) ; complex and *int64 on 32-bit
+        (let [s (/ w 2)]
+          (return (append offsets at (+ at s)) (+ at w)))
+
+        (return (append offsets at) (+ at w)))
+
+
+      (let [typ (.Kind t)]
+        (switch typ
+          (case [types/TARRAY]
+            (let [te (.Elem t)]
+              (for [i (conv int64 0)] (< i (.NumElem t)) (inc! i)
+                (set! at (align at te))
+                (set! (values offsets at) (appendParamOffsets offsets at te)))))
+
+          (case [types/TSTRUCT]
+            (let [at0 at]
+              (range [i f (.Fields t)]
+                (set! at (+ at0 (.-Offset f))) ; Fields may be over-aligned, see wasm32.
+                (set! (values offsets at) (appendParamOffsets offsets at (.-Type f)))
+                (when (and (== (.Size (.-Type f)) 0) (== i (- (.NumFields t) 1)))
+                  (inc! at))) ; last field has zero width
+
+
+              (set! at (align at t)))) ; type size is rounded up to its alignment
+          (case [types/TSLICE]
+            (return (appendParamOffsets offsets at synthSlice)))
+          (case [types/TSTRING]
+            (return (appendParamOffsets offsets at synthString)))
+          (case [types/TINTER]
+            (return (appendParamOffsets offsets at synthIface))))))
+
+
+    (return offsets at)))
+
+
+
+
+
+
+
+
+
+^{:go/end 258} (go/method FrameOffset "FrameOffset returns the frame-pointer-relative location that a function\nwould spill its input or output parameter to, if such a spill slot exists.\nIf there is none defined (e.g., register-allocated outputs) it panics.\nFor register-allocated inputs that is their spill offset reserved for morestack;\nfor stack-allocated inputs and outputs, that is their location on the stack.\n(In a future version of the ABI, register-resident inputs may lose their defined\nspill area to help reduce stack sizes.)\n" ^int64 [^{:tag (* ABIParamAssignment)} a ^{:tag (* ABIParamResultInfo)} i]
+  (when (== (.-offset a) -1)
+    (base/Fatalf "function parameter has no ABI-defined frame-pointer offset"))
+
+  (when (== (len (.-Registers a)) 0) ; passed on stack
+    (return (- (conv int64 (.-offset a)) (.LocalsOffset (.-config i)))))
+
+  ;; spill area for registers
+  (- (+ (conv int64 (.-offset a)) (.SpillAreaOffset i)) (.LocalsOffset (.-config i))))
+
+
+
+(go/type RegAmounts "RegAmounts holds a specified number of integer/float registers.\n" (struct
+    ^{:line 262 :tag int} intRegs
+    ^{:line 263 :tag int} floatRegs))
+
+
+
+
+(go/type ABIConfig "ABIConfig captures the number of registers made available\nby the ABI rules for parameter passing and result returning.\n" (struct
+
+    ^{:line 270 :tag int64 :doc "Do we need anything more than this?\n"} offsetForLocals ; e.g., obj.(*Link).Arch.FixedFrameSize -- extra linkage information on some architectures.
+    ^{:line 271 :tag RegAmounts} regAmounts
+    ^{:line 272 :tag obj/ABI} which))
+
+
+
+
+^{:go/end 279} (go/func NewABIConfig "NewABIConfig returns a new ABI configuration for an architecture with\niRegsCount integer/pointer registers and fRegsCount floating point registers.\n" ^{:tag (* ABIConfig)} [^int iRegsCount ^int fRegsCount ^int64 offsetForLocals ^uint8 which]
+  (addr (lit ABIConfig :offsetForLocals offsetForLocals :regAmounts (lit RegAmounts iRegsCount fRegsCount) :which (conv obj/ABI which))))
+
+
+
+^{:go/end 284} (go/method Which "Which returns the ABI number\n" ^obj/ABI [^{:tag (* ABIConfig)} config]
+  (.-which config))
+
+
+
+
+
+^{:go/end 291} (go/method LocalsOffset "LocalsOffset returns the architecture-dependent offset from SP for args and results.\nIn theory this is only used for debugging; it ought to already be incorporated into\nresults from the ABI-related methods\n" ^int64 [^{:tag (* ABIConfig)} config]
+  (.-offsetForLocals config))
+
+
+
+
+
+^{:go/end 298} (go/method FloatIndexFor "FloatIndexFor translates r into an index in the floating point parameter\nregisters.  If the result is negative, the input index was actually for the\ninteger parameter registers.\n" ^int64 [^{:tag (* ABIConfig)} config ^RegIndex r]
+  (- (conv int64 r) (conv int64 (.-intRegs (.-regAmounts config)))))
+
+
+
+
+
+^{:go/end 309} (go/method NumParamRegs "NumParamRegs returns the total number of registers used to\nrepresent a parameter of the given type, which must be register\nassignable.\n" ^int [^{:tag (* ABIConfig)} config ^{:tag (* types/Type)} typ]
+  (let [(values intRegs floatRegs) (.Registers typ)]
+    (when (and (== intRegs math/MaxUint8) (== floatRegs math/MaxUint8))
+      (base/Fatalf "cannot represent parameters of type %v in registers" typ))
+
+    (+ (conv int intRegs) (conv int floatRegs))))
+
+
+
+
+
+
+^{:go/end 347} (go/method ABIAnalyzeTypes "ABIAnalyzeTypes takes slices of parameter and result types, and returns an ABIParamResultInfo,\nbased on the given configuration.  This is the same result computed by config.ABIAnalyze applied to the\ncorresponding method/function type, except that all the embedded parameter names are nil.\nThis is intended for use by ssagen/ssa.go:(*state).rtcall, for runtime functions that lack a parsed function type.\n" ^{:tag (* ABIParamResultInfo)} [^{:tag (* ABIConfig)} config ^{:tag (slice (* types/Type))} params ^{:tag (slice (* types/Type))} results]
+  (setup)
+  (let [s ^{:go/breaks [2 4]} (lit assignState
+        :stackOffset (.-offsetForLocals config)
+        :rTotal (.-regAmounts config))
+
+
+      ^{:line 322} assignParams ^{:go/end 328} (fn ^{:tag (slice ABIParamAssignment)} [^{:tag (slice (* types/Type))} params ^bool isResult]
+        (let [res (make (slice ABIParamAssignment) (len params))]
+          (range [i param params]
+            (aset res i (.assignParam s param nil isResult)))
+
+          ^{:line 327} res))
+
+
+      ^{:line 330} info (addr (lit ABIParamResultInfo :config config))]
+
+    ;; Inputs
+    (set! (.-inparams info) (assignParams params false))
+    (set! (.-stackOffset s) (types/RoundUp (.-stackOffset s) (conv int64 types/RegSize)))
+    (set! (.-inRegistersUsed info) (+ (.-intRegs (.-rUsed s)) (.-floatRegs (.-rUsed s))))
+
+    ;; Outputs
+    (set! (.-rUsed s) (lit RegAmounts))
+    (set! (.-outparams info) (assignParams results true))
+    ;; The spill area is at a register-aligned offset and its size is rounded up to a register alignment.
+    ;; TODO in theory could align offset only to minimum required by spilled data types.
+    (set! (.-offsetToSpillArea info) (alignTo (.-stackOffset s) types/RegSize))
+    (set! (.-spillAreaSize info) (alignTo (.-spillOffset s) types/RegSize))
+    (set! (.-outRegistersUsed info) (+ (.-intRegs (.-rUsed s)) (.-floatRegs (.-rUsed s))))
+
+    ^{:line 346} info))
+
+
+
+
+
+
+^{:go/end 388} (go/method ABIAnalyzeFuncType "ABIAnalyzeFuncType takes a function type 'ft' and an ABI rules description\n'config' and analyzes the function to determine how its parameters\nand results will be passed (in registers or on the stack), returning\nan ABIParamResultInfo object that holds the results of the analysis.\n" ^{:tag (* ABIParamResultInfo)} [^{:tag (* ABIConfig)} config ^{:tag (* types/Type)} ft]
+  (setup)
+  (let [s ^{:go/breaks [2 4]} (lit assignState
+        :stackOffset (.-offsetForLocals config)
+        :rTotal (.-regAmounts config))
+
+
+      ^{:line 360} assignParams ^{:go/end 370} (fn ^{:tag (slice ABIParamAssignment)} [^{:tag (slice (* types/Field))} params ^bool isResult]
+        (let [res (make (slice ABIParamAssignment) (len params))]
+          (range [i param params]
+            (let [^{:tag (* ir/Name)} name (zero (* ir/Name))]
+              (when (!= (.-Nname param) nil)
+                (set! name (assert (* ir/Name) (.-Nname param))))
+
+              (aset res i (.assignParam s (.-Type param) name isResult))))
+
+          ^{:line 369} res))
+
+
+      ^{:line 372} info (addr (lit ABIParamResultInfo :config config))]
+
+    ;; Inputs
+    (set! (.-inparams info) (assignParams (.RecvParams ft) false))
+    (set! (.-stackOffset s) (types/RoundUp (.-stackOffset s) (conv int64 types/RegSize)))
+    (set! (.-inRegistersUsed info) (+ (.-intRegs (.-rUsed s)) (.-floatRegs (.-rUsed s))))
+
+    ;; Outputs
+    (set! (.-rUsed s) (lit RegAmounts))
+    (set! (.-outparams info) (assignParams (.Results ft) true))
+    ;; The spill area is at a register-aligned offset and its size is rounded up to a register alignment.
+    ;; TODO in theory could align offset only to minimum required by spilled data types.
+    (set! (.-offsetToSpillArea info) (alignTo (.-stackOffset s) types/RegSize))
+    (set! (.-spillAreaSize info) (alignTo (.-spillOffset s) types/RegSize))
+    (set! (.-outRegistersUsed info) (+ (.-intRegs (.-rUsed s)) (.-floatRegs (.-rUsed s))))
+    ^{:line 387} info))
+
+
+
+
+
+
+
+
+
+^{:go/end 408} (go/method ABIAnalyze "ABIAnalyze returns the same result as ABIAnalyzeFuncType, but also\nupdates the offsets of all the receiver, input, and output fields.\nIf setNname is true, it also sets the FrameOffset of the Nname for\nthe field(s); this is for use when compiling a function and figuring out\nspill locations.  Doing this for callers can cause races for register\noutputs because their frame location transitions from BOGUS_FUNARG_OFFSET\nto zero to an as-if-AUTO offset that has no use for callers.\n" ^{:tag (* ABIParamResultInfo)} [^{:tag (* ABIConfig)} config ^{:tag (* types/Type)} t ^bool setNname]
+  (let [result (.ABIAnalyzeFuncType config t)]
+
+    ;; Fill in the frame offsets for receiver, inputs, results
+    (range [i f (.RecvParams t)]
+      (.updateOffset config result f (aget (.-inparams result) i) false setNname))
+
+    (range [i f (.Results t)]
+      (.updateOffset config result f (aget (.-outparams result) i) true setNname))
+
+    ^{:line 407} result))
+
+
+^{:go/end 431} (go/method updateOffset [^{:tag (* ABIConfig)} config ^{:tag (* ABIParamResultInfo)} result ^{:tag (* types/Field)} f ^ABIParamAssignment a ^bool isResult ^bool setNname]
+  (when (!= (.-Offset f) types/BADWIDTH)
+    (base/Fatalf "field offset for %s at %s has been set to %d" (.-Sym f) (base/FmtPos (.-Pos f)) (.-Offset f)))
+
+
+  ;; Everything except return values in registers has either a frame home (if not in a register) or a frame spill location.
+  (if (or (not isResult) (== (len (.-Registers a)) 0))
+    ;; The type frame offset DOES NOT show effects of minimum frame size.
+    ;; Getting this wrong breaks stackmaps, see liveness/plive.go:WriteFuncMap and typebits/typebits.go:Set
+    (let [off (.FrameOffset a result)]
+      (when (and setNname (!= (.-Nname f) nil))
+        (.SetFrameOffset (assert (* ir/Name) (.-Nname f)) off)
+        (.SetIsOutputParamInRegisters (assert (* ir/Name) (.-Nname f)) false)))
+
+    (do
+      (when (and setNname (!= (.-Nname f) nil))
+        (let [fname (assert (* ir/Name) (.-Nname f))]
+          (.SetIsOutputParamInRegisters fname true)
+          (.SetFrameOffset fname 0))))))
+
+
+
+
+;;......................................................................
+;;
+;; Non-public portions.
+
+
+^{:go/end 445} (go/method regString "regString produces a human-readable version of a RegIndex.\n" ^string [^{:tag (* RegAmounts)} c ^RegIndex r]
+  (cond (< (conv int r) (.-intRegs c))
+    (return (fmt/Sprintf "I%d" (conv int r)))
+    (< (conv int r) (+ (.-intRegs c) (.-floatRegs c)))
+    (return (fmt/Sprintf "F%d" (- (conv int r) (.-intRegs c)))))
+
+  (fmt/Sprintf "<?>%d" r))
+
+
+
+
+^{:go/end 465} (go/method ToString "ToString method renders an ABIParamAssignment in human-readable\nform, suitable for debugging or unit testing.\n" ^string [^{:tag (* ABIParamAssignment)} ri ^{:tag (* ABIConfig)} config ^bool extra]
+  (let [regs "R{"
+      ^{:line 451} offname "spilloffset"] ; offset is for spill for register(s)
+    (when (== (len (.-Registers ri)) 0)
+      (set! offname "offset")) ; offset is for memory arg
+
+    (range [_ r (.-Registers ri)]
+      (set! regs + (+ " " (.regString (.-regAmounts config) r)))
+      (when extra
+        (set! regs + (fmt/Sprintf "(%d)" r))))
+
+
+    (when extra
+      (set! regs + (fmt/Sprintf " | #I=%d, #F=%d" (.-intRegs (.-regAmounts config)) (.-floatRegs (.-regAmounts config)))))
+
+    (fmt/Sprintf "%s } %s: %d typ: %v" regs offname (.-offset ri) (.-Type ri))))
+
+
+
+
+^{:go/end 480} (go/method String "String method renders an ABIParamResultInfo in human-readable\nform, suitable for debugging or unit testing.\n" ^string [^{:tag (* ABIParamResultInfo)} ri]
+  (let [res ""]
+    (range [k p (.-inparams ri)]
+      (set! res + (fmt/Sprintf "IN %d: %s\n" k (.ToString p (.-config ri) false))))
+
+    (range [k r (.-outparams ri)]
+      (set! res + (fmt/Sprintf "OUT %d: %s\n" k (.ToString r (.-config ri) false))))
+
+    (set! res + (fmt/Sprintf "offsetToSpillArea: %d spillAreaSize: %d"
+        (.-offsetToSpillArea ri) (.-spillAreaSize ri)))
+    ^{:line 479} res))
+
+
+
+
+(go/type assignState "assignState holds intermediate state during the register assigning process\nfor a given function signature.\n" (struct
+    ^{:line 485 :tag RegAmounts} rTotal ; total reg amounts from ABI rules
+    ^{:line 486 :tag RegAmounts} rUsed ; regs used by params completely assigned so far
+    ^{:line 487 :tag int64} stackOffset ; current stack offset
+    ^{:line 488 :tag int64} spillOffset)) ; current spill offset
+
+
+
+^{:go/end 494} (go/func align "align returns a rounded up to t's alignment.\n" ^int64 [^int64 a ^{:tag (* types/Type)} t]
+  (alignTo a (conv int (conv uint8 (.Alignment t)))))
+
+
+
+^{:go/end 502} (go/func alignTo "alignTo returns a rounded up to t, where t must be 0 or a power of 2.\n" ^int64 [^int64 a ^int t]
+  (when (== t 0)
+    (return a))
+
+  (types/RoundUp a (conv int64 t)))
+
+
+
+^{:go/end 509} (go/func nextSlot "nextSlot allocates the next available slot for typ.\n" ^int64 [^{:tag (* int64)} offsetp ^{:tag (* types/Type)} typ]
+  (let [offset (align @offsetp typ)]
+    (set! @offsetp (+ offset (.Size typ)))
+    ^{:line 508} offset))
+
+
+
+
+
+^{:go/end 560} (go/method allocateRegs "allocateRegs returns an ordered list of register indices for a parameter or result\nthat we've just determined to be register-assignable. The number of registers\nneeded is assumed to be stored in state.pUsed.\n" ^{:tag (slice RegIndex)} [^{:tag (* assignState)} state ^{:tag (slice RegIndex)} regs ^{:tag (* types/Type)} t]
+  (when (== (.Size t) 0)
+    (return regs))
+
+  (let [ri (.-intRegs (.-rUsed state))
+      ^{:line 519} rf (.-floatRegs (.-rUsed state))]
+    (if (or (.IsScalar t) (.IsPtrShaped t) (.IsSIMD t)) (do
+        (cond (.IsComplex t) (do
+            (set! regs (append regs (conv RegIndex (+ rf (.-intRegs (.-rTotal state)))) (conv RegIndex (+ rf 1 (.-intRegs (.-rTotal state))))))
+            (set! rf + 2))
+          (or (.IsFloat t) (.IsSIMD t)) (do
+            (set! regs (append regs (conv RegIndex (+ rf (.-intRegs (.-rTotal state))))))
+            (set! rf + 1)) :else
+
+          (let [n (/ (- (+ (conv int (.Size t)) types/RegSize) 1) types/RegSize)]
+            (for [i 0] (< i n) (inc! i) ; looking ahead to really big integers
+              (set! regs (append regs (conv RegIndex ri)))
+              (set! ri + 1))))
+
+
+        (set! (.-intRegs (.-rUsed state)) ri)
+        (set! (.-floatRegs (.-rUsed state)) rf)
+        (return regs))
+
+      (let [typ (.Kind t)]
+        (switch typ
+          (case [types/TARRAY]
+            (for [i (conv int64 0)] (< i (.NumElem t)) (inc! i)
+              (set! regs (.allocateRegs state regs (.Elem t))))
+
+            (return regs))
+          (case [types/TSTRUCT]
+            (range [_ f (.Fields t)]
+              (set! regs (.allocateRegs state regs (.-Type f))))
+
+            (return regs))
+          (case [types/TSLICE]
+            (return (.allocateRegs state regs synthSlice)))
+          (case [types/TSTRING]
+            (return (.allocateRegs state regs synthString)))
+          (case [types/TINTER]
+            (return (.allocateRegs state regs synthIface))))))
+
+
+    (base/Fatalf "was not expecting type %s" t)
+    (panic "unreachable")))
+
+
+
+(go/var ^{:tag sync/Once :doc "synthOnce ensures that we only create the synth* fake types once.\n"} synthOnce)
+
+
+
+(go/var ^{:tag (* types/Type) :doc "synthSlice, synthString, and syncIface are synthesized struct types\nmeant to capture the underlying implementations of string/slice/interface.\n"} synthSlice)
+(go/var ^{:tag (* types/Type)} synthString)
+(go/var ^{:tag (* types/Type)} synthIface)
+
+
+
+^{:go/end 597} (go/func setup "setup performs setup for the register assignment utilities, manufacturing\na small set of synthesized types that we'll need along the way.\n" []
+  (.Do synthOnce ^{:go/end 596} (fn []
+      (let [fname (.-Lookup types/BuiltinPkg)
+          ^{:line 576} nxp src/NoXPos
+          ^{:line 577} bp (types/NewPtr (aget types/Types types/TUINT8))
+          ^{:line 578} it (aget types/Types types/TINT)]
+        (set! synthSlice (types/NewStruct (lit (slice (* types/Field))
+              (types/NewField nxp (fname "ptr") bp)
+              (types/NewField nxp (fname "len") it)
+              (types/NewField nxp (fname "cap") it))))
+
+        (types/CalcStructSize synthSlice)
+        (set! synthString (types/NewStruct (lit (slice (* types/Field))
+              (types/NewField nxp (fname "data") bp)
+              (types/NewField nxp (fname "len") it))))
+
+        (types/CalcStructSize synthString)
+        (let [unsp (aget types/Types types/TUNSAFEPTR)]
+          (set! synthIface (types/NewStruct (lit (slice (* types/Field))
+                (types/NewField nxp (fname "f1") unsp)
+                (types/NewField nxp (fname "f2") unsp))))
+
+          (types/CalcStructSize synthIface))))))
+
+
+
+
+
+
+
+^{:go/end 619} (go/method assignParam "assignParam processes a given receiver, param, or result\nof field f to determine whether it can be register assigned.\nThe result of the analysis is recorded in the result\nABIParamResultInfo held in 'state'.\n" ^ABIParamAssignment [^{:tag (* assignState)} state ^{:tag (* types/Type)} typ ^{:tag (* ir/Name)} name ^bool isResult]
+  (let [registers (.tryAllocRegs state typ)
+
+      ^{:line 606 :tag int64} offset -1]
+    (cond (== registers nil) ; stack allocated; needs stack slot
+      (set! offset (nextSlot (addr (.-stackOffset state)) typ))
+      (not isResult) ; register-allocated param; needs spill slot
+      (set! offset (nextSlot (addr (.-spillOffset state)) typ)))
+
+
+    ^{:go/breaks [2 4 6 8]} (lit ABIParamAssignment
+      :Type typ
+      :Name name
+      :Registers registers
+      :offset (conv int32 offset))))
+
+
+
+
+
+^{:go/end 635} (go/method tryAllocRegs "tryAllocRegs attempts to allocate registers to represent a\nparameter of the given type. If unsuccessful, it returns nil.\n" ^{:tag (slice RegIndex)} [^{:tag (* assignState)} state ^{:tag (* types/Type)} typ]
+  (when (== (.Size typ) 0)
+    (return nil)) ; zero-size parameters are defined as being stack allocated
+
+
+  (let [(values intRegs floatRegs) (.Registers typ)]
+    (when (or (> (conv int intRegs) (- (.-intRegs (.-rTotal state)) (.-intRegs (.-rUsed state)))) (> (conv int floatRegs) (- (.-floatRegs (.-rTotal state)) (.-floatRegs (.-rUsed state)))))
+      (return nil)) ; too few available registers
+
+
+    (let [regs (make (slice RegIndex) 0 (+ (conv int intRegs) (conv int floatRegs)))]
+      (.allocateRegs state regs typ))))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 681} (go/method ComputePadding "ComputePadding returns a list of \"post element\" padding values in\nthe case where we have a structure being passed in registers. Given\na param assignment corresponding to a struct, it returns a list\ncontaining padding values for each field, e.g. the Kth element in\nthe list is the amount of padding between field K and the following\nfield. For things that are not structs (or structs without padding)\nit returns a list of zeros. Example:\n\n\ttype small struct {\n\t\tx uint16\n\t\ty uint8\n\t\tz int32\n\t\tw int32\n\t}\n\nFor this struct we would return a list [0, 1, 0, 0], meaning that\nwe have one byte of padding after the second field, and no bytes of\npadding after any of the other fields. Input parameter \"storage\" is\na slice with enough capacity to accommodate padding elements for\nthe architected register set in question.\n" ^{:tag (slice uint64)} [^{:tag (* ABIParamAssignment)} pa ^{:tag (slice uint64)} storage]
+  (let [nr (len (.-Registers pa))
+      ^{:line 659} padding (subslice storage _ nr)]
+    (clear padding)
+    (when (or (!= (.Kind (.-Type pa)) types/TSTRUCT) (== nr 0))
+      (return padding))
+
+    (let [types (make (slice (* types/Type)) 0 nr)]
+      (set! types (appendParamTypes types (.-Type pa)))
+      (when (!= (len types) nr)
+        (panic "internal error"))
+
+      (let [(values offsets _) (appendParamOffsets (lit (slice int64)) 0 (.-Type pa))]
+        (range [idx t types]
+          (let [ts (.Size t)
+              ^{:line 672} off (+ (aget offsets idx) ts)]
+            (when (< idx (- (len types) 1))
+              (let [noff (aget offsets (+ idx 1))]
+                (when (!= noff off)
+                  (aset padding idx (conv uint64 (- noff off))))))))
+
+
+
+        ^{:line 680} padding))))

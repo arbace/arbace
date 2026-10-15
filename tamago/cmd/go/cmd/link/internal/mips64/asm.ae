@@ -1,0 +1,328 @@
+;; Inferno utils/5l/asm.c
+;; https://bitbucket.org/inferno-os/inferno-os/src/master/utils/5l/asm.c
+;;
+;;	Copyright © 1994-1999 Lucent Technologies Inc.  All rights reserved.
+;;	Portions Copyright © 1995-1997 C H Forsyth (forsyth@terzarima.net)
+;;	Portions Copyright © 1997-1999 Vita Nuova Limited
+;;	Portions Copyright © 2000-2007 Vita Nuova Holdings Limited (www.vitanuova.com)
+;;	Portions Copyright © 2004,2006 Bruce Ellis
+;;	Portions Copyright © 2005-2007 C H Forsyth (forsyth@terzarima.net)
+;;	Revisions Copyright © 2000-2007 Lucent Technologies Inc. and others
+;;	Portions Copyright © 2009 The Go Authors. All rights reserved.
+;;
+;; Permission is hereby granted, free of charge, to any person obtaining a copy
+;; of this software and associated documentation files (the "Software"), to deal
+;; in the Software without restriction, including without limitation the rights
+;; to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+;; copies of the Software, and to permit persons to whom the Software is
+;; furnished to do so, subject to the following conditions:
+;;
+;; The above copyright notice and this permission notice shall be included in
+;; all copies or substantial portions of the Software.
+;;
+;; THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+;; IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+;; FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL THE
+;; AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+;; LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+;; OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+;; THE SOFTWARE.
+
+(in-ns 'go.cmd.link.internal.mips64) (go/file "asm.go" :imports [
+
+
+    ^{:line 34} [objabi "cmd/internal/objabi"]
+    ^{:line 35} [sys "cmd/internal/sys"]
+    ^{:line 36} [ld "cmd/link/internal/ld"]
+    ^{:line 37} [loader "cmd/link/internal/loader"]
+    ^{:line 38} [sym "cmd/link/internal/sym"]
+    ^{:line 39} [elf "debug/elf"]])
+
+
+(go/var
+
+
+  ^{:line 45} [^{:tag (map elf/DynTag int64) :doc "dtOffsets contains offsets for entries within the .dynamic section.\nThese are used to fix up symbol values once they are known.\n"} dtOffsets]
+
+
+
+
+  ^{:line 50} [^{:tag uint64 :doc "dynSymCount contains the number of entries in the .dynsym section.\nThis is used to populate the DT_MIPS_SYMTABNO entry in the .dynamic\nsection.\n"} dynSymCount]
+
+
+
+
+  ^{:line 55} [^{:tag uint64 :doc "gotLocalCount contains the number of local global offset table\nentries. This is used to populate the DT_MIPS_LOCAL_GOTNO entry in\nthe .dynamic section.\n"} gotLocalCount]
+
+
+
+
+
+  ^{:line 61} [^{:tag uint64 :doc "gotSymIndex contains the index of the first dynamic symbol table\nentry that corresponds to an entry in the global offset table.\nThis is used to populate the DT_MIPS_GOTSYM entry in the .dynamic\nsection.\n"} gotSymIndex])
+
+
+^{:go/end 94} (go/func gentext [^{:tag (* ld/Link)} ctxt ^{:tag (* loader/Loader)} ldr]
+  (when (or @ld/FlagD (.IsExternal (.-Target ctxt)))
+    (return))
+
+
+  (let [dynamic (.MakeSymbolUpdater ldr (.-Dynamic (.-ArchSyms ctxt)))]
+
+    (ld/Elfwritedynent ^{:go/via [Target]} (.-Arch ctxt) dynamic elf/DT_MIPS_RLD_VERSION 1)
+    (ld/Elfwritedynent ^{:go/via [Target]} (.-Arch ctxt) dynamic elf/DT_MIPS_BASE_ADDRESS 0)
+
+    ;; elfsetupplt should have been called and gotLocalCount should now
+    ;; have its correct value.
+    (when (== gotLocalCount 0)
+      (.Errorf ctxt 0 "internal error: elfsetupplt has not been called"))
+
+    (ld/Elfwritedynent ^{:go/via [Target]} (.-Arch ctxt) dynamic elf/DT_MIPS_LOCAL_GOTNO gotLocalCount)
+
+    ;; DT_* entries have to exist prior to elfdynhash(), which finalises the
+    ;; table by adding DT_NULL. However, the values for the following entries
+    ;; are not know until after dynreloc() has completed. Add the symbols now,
+    ;; then update their values prior to code generation.
+    (let [dts (lit (slice elf/DynTag)
+          ^{:line 86} elf/DT_MIPS_SYMTABNO
+          ^{:line 87} elf/DT_MIPS_GOTSYM)]
+
+      (set! dtOffsets (make (map elf/DynTag int64)))
+      (range [_ dt dts]
+        (ld/Elfwritedynent ^{:go/via [Target]} (.-Arch ctxt) dynamic dt 0)
+        (aset dtOffsets dt (- (.Size dynamic) 8))))))
+
+
+
+^{:go/end 132} (go/func adddynrel ^bool [^{:tag (* ld/Target)} target ^{:tag (* loader/Loader)} ldr ^{:tag (* ld/ArchSyms)} syms ^loader/Sym s ^loader/Reloc r ^int rIdx]
+  ^{:go/breaks [[5 131]]} (let [targ (.Sym r)
+      ^{:line 98 :tag sym/SymKind} targType (zero sym/SymKind)]
+    (when (!= targ 0)
+      (set! targType (.SymType ldr targ)))
+
+
+    (when (>= (.Type r) objabi/ElfRelocOffset)
+      (.Errorf ldr s "unexpected relocation type %d (%s)" (.Type r) (sym/RelocName (.-Arch target) (.Type r)))
+      (return false))
+
+
+    (switch (.Type r)
+      (case [objabi/R_CALLMIPS objabi/R_JMPMIPS]
+        (when (!= targType sym/SDYNIMPORT)
+          ;; Nothing to do, the relocation will be laid out in reloc
+          (return true))
+
+        (when (.IsExternal target)
+          ;; External linker will do this relocation.
+          (return true))
+
+
+        ;; Internal linking, build a PLT entry and change the relocation
+        ;; target to that entry.
+        (when (!= ^{:go/via [Reloc]} (.Add r) 0)
+          (.Errorf ldr s "PLT call with non-zero addend (%v)" ^{:go/via [Reloc]} (.Add r)))
+
+        (addpltsym target ldr syms targ)
+        (let [su (.MakeSymbolUpdater ldr s)]
+          (.SetRelocSym su rIdx (.-PLT syms))
+          (.SetRelocAdd su rIdx (conv int64 (.SymPlt ldr targ)))
+          (return true))))
+
+
+    false))
+
+
+^{:go/end 177} (go/func elfreloc1 ^bool [^{:tag (* ld/Link)} ctxt ^{:tag (* ld/OutBuf)} out ^{:tag (* loader/Loader)} ldr ^loader/Sym s ^loader/ExtReloc r ^int ri ^int64 sectoff]
+
+  ;; mips64 ELF relocation (endian neutral)
+  ;;		offset	uint64
+  ;;		sym		uint32
+  ;;		ssym	uint8
+  ;;		type3	uint8
+  ;;		type2	uint8
+  ;;		type	uint8
+  ;;		addend	int64
+
+  (.Write64 out (conv uint64 sectoff))
+
+  ^{:go/breaks [[8 176]]} (let [elfsym (ld/ElfSymForReloc ctxt (.-Xsym r))]
+    (.Write32 out (conv uint32 elfsym))
+    (.Write8 out 0)
+    (.Write8 out 0)
+    (.Write8 out 0)
+    (switch (.-Type r)
+      (default
+        (return false))
+      (case [objabi/R_ADDR objabi/R_DWARFSECREF]
+        (switch (.-Size r)
+          (case [4]
+            (.Write8 out (conv uint8 elf/R_MIPS_32)))
+          (case [8]
+            (.Write8 out (conv uint8 elf/R_MIPS_64)))
+          (default
+            (return false))))
+
+      (case [objabi/R_ADDRMIPS]
+        (.Write8 out (conv uint8 elf/R_MIPS_LO16)))
+      (case [objabi/R_ADDRMIPSU]
+        (.Write8 out (conv uint8 elf/R_MIPS_HI16)))
+      (case [objabi/R_ADDRMIPSTLS]
+        (.Write8 out (conv uint8 elf/R_MIPS_TLS_TPREL_LO16)))
+      (case [objabi/R_CALLMIPS
+          ^{:line 171} objabi/R_JMPMIPS]
+        (.Write8 out (conv uint8 elf/R_MIPS_26))))
+
+    (.Write64 out (conv uint64 (.-Xadd r)))
+
+    true))
+
+
+^{:go/end 214} (go/func elfsetupplt [^{:tag (* ld/Link)} ctxt ^{:tag (* loader/Loader)} ldr ^{:tag (* loader/SymbolBuilder)} plt ^{:tag (* loader/SymbolBuilder)} gotplt ^loader/Sym dynamic]
+  (when (!= (.Size plt) 0)
+    (return))
+
+
+  ;; Load resolver address from got[0] into r25.
+  (.AddSymRef plt ^{:go/via [Target]} (.-Arch ctxt) (.Sym gotplt) 0 objabi/R_ADDRMIPSU 4)
+  (.SetUint32 plt ^{:go/via [Target]} (.-Arch ctxt) (- (.Size plt) 4) 0x3c0e0000) ; lui   $14, %hi(&GOTPLT[0])
+  (.AddSymRef plt ^{:go/via [Target]} (.-Arch ctxt) (.Sym gotplt) 0 objabi/R_ADDRMIPS 4)
+  (.SetUint32 plt ^{:go/via [Target]} (.-Arch ctxt) (- (.Size plt) 4) 0xddd90000) ; ld    $25, %lo(&GOTPLT[0])($14)
+
+  ;; Load return address into r15, the index of the got.plt entry into r24, then
+  ;; JALR to the resolver. The address of the got.plt entry is currently in r24,
+  ;; which we have to turn into an index.
+  (.AddSymRef plt ^{:go/via [Target]} (.-Arch ctxt) (.Sym gotplt) 0 objabi/R_ADDRMIPS 4)
+  (.SetUint32 plt ^{:go/via [Target]} (.-Arch ctxt) (- (.Size plt) 4) 0x25ce0000) ; addiu $14, $14, %lo(&GOTPLT[0])
+  (.AddUint32 plt ^{:go/via [Target]} (.-Arch ctxt) 0x030ec023) ; subu  $24, $24, $14
+  (.AddUint32 plt ^{:go/via [Target]} (.-Arch ctxt) 0x03e07825) ; move  $15, $31
+  (.AddUint32 plt ^{:go/via [Target]} (.-Arch ctxt) 0x0018c0c2) ; srl   $24, $24, 3
+  (.AddUint32 plt ^{:go/via [Target]} (.-Arch ctxt) 0x0320f809) ; jalr  $25
+  (.AddUint32 plt ^{:go/via [Target]} (.-Arch ctxt) 0x2718fffe) ; subu  $24, $24, 2
+
+  (when (!= (.Size gotplt) 0)
+    (.Errorf ctxt (.Sym gotplt) "got.plt is not empty"))
+
+
+  ;; Reserve got[0] for resolver address (populated by dynamic loader).
+  (.AddUint32 gotplt ^{:go/via [Target]} (.-Arch ctxt) 0)
+  (.AddUint32 gotplt ^{:go/via [Target]} (.-Arch ctxt) 0)
+  (inc! gotLocalCount)
+
+  ;; Reserve got[1] for ELF object pointer (populated by dynamic loader).
+  (.AddUint32 gotplt ^{:go/via [Target]} (.-Arch ctxt) 0)
+  (.AddUint32 gotplt ^{:go/via [Target]} (.-Arch ctxt) 0)
+  (inc! gotLocalCount))
+
+
+^{:go/end 264} (go/func addpltsym [^{:tag (* ld/Target)} target ^{:tag (* loader/Loader)} ldr ^{:tag (* ld/ArchSyms)} syms ^loader/Sym s]
+  (when (>= (.SymPlt ldr s) 0)
+    (return))
+
+
+  (let [dynamic (.MakeSymbolUpdater ldr (.-Dynamic syms))
+
+      ^:const ^{:line 223 :val 20} dynSymEntrySize 20]
+    (when (== gotSymIndex 0)
+      ;; Compute and update GOT symbol index.
+      (set! gotSymIndex (conv uint64 (/ (.SymSize ldr (.-DynSym syms)) dynSymEntrySize)))
+      (.SetUint dynamic (.-Arch target) (aget dtOffsets elf/DT_MIPS_GOTSYM) gotSymIndex))
+
+    (when (== dynSymCount 0)
+      (set! dynSymCount (conv uint64 (/ (.SymSize ldr (.-DynSym syms)) dynSymEntrySize))))
+
+
+    (ld/Adddynsym ldr target syms s)
+    (inc! dynSymCount)
+
+    (when (not (.IsElf target))
+      (.Errorf ldr s "addpltsym: unsupported binary format"))
+
+
+    (let [plt (.MakeSymbolUpdater ldr (.-PLT syms))
+        ^{:line 241} gotplt (.MakeSymbolUpdater ldr (.-GOTPLT syms))]
+      (when (== (.Size plt) 0)
+        (panic "plt is not set up"))
+
+
+      ;; Load got.plt entry into r25.
+      (.AddSymRef plt (.-Arch target) (.Sym gotplt) (.Size gotplt) objabi/R_ADDRMIPSU 4)
+      (.SetUint32 plt (.-Arch target) (- (.Size plt) 4) 0x3c0f0000) ; lui   $15, %hi(.got.plt entry)
+      (.AddSymRef plt (.-Arch target) (.Sym gotplt) (.Size gotplt) objabi/R_ADDRMIPS 4)
+      (.SetUint32 plt (.-Arch target) (- (.Size plt) 4) 0xddf90000) ; ld    $25, %lo(.got.plt entry)($15)
+
+      ;; Load address of got.plt entry into r24 and JALR to address in r25.
+      (.AddUint32 plt (.-Arch target) 0x03200008) ; jr  $25
+      (.AddSymRef plt (.-Arch target) (.Sym gotplt) (.Size gotplt) objabi/R_ADDRMIPS 4)
+      (.SetUint32 plt (.-Arch target) (- (.Size plt) 4) 0x65f80000) ; daddiu $24, $15, %lo(.got.plt entry)
+
+      ;; Add pointer to plt[0] to got.plt
+      (.AddAddrPlus gotplt (.-Arch target) (.Sym plt) 0)
+
+      (.SetPlt ldr s (conv int32 (- (.Size plt) 16)))
+
+      ;; Update dynamic symbol count.
+      (.SetUint dynamic (.-Arch target) (aget dtOffsets elf/DT_MIPS_SYMTABNO) dynSymCount))))
+
+
+^{:go/breaks [3] :go/end 268} (go/func machoreloc1 ^bool [(* sys/Arch) (* ld/OutBuf) (* loader/Loader) loader/Sym loader/ExtReloc int64]
+  false)
+
+
+^{:go/end 311} (go/func archreloc [^{:tag (* ld/Target)} target ^{:tag (* loader/Loader)} ldr ^{:tag (* ld/ArchSyms)} syms ^loader/Reloc r ^loader/Sym s ^int64 val] :results [^int64 o ^int nExtReloc ^bool ok]
+  (when (.IsExternal target)
+    (switch (.Type r)
+      (default
+        (return val 0 false))
+
+      (case [objabi/R_ADDRMIPS
+          ^{:line 277} objabi/R_ADDRMIPSU
+          ^{:line 278} objabi/R_ADDRMIPSTLS
+          ^{:line 279} objabi/R_CALLMIPS
+          ^{:line 280} objabi/R_JMPMIPS]
+        (return val 1 true))))
+
+
+
+  (let [^:const ^{:val true} isOk true
+      ^:const ^{:line 286 :val 0} noExtReloc 0
+      ^{:line 287} rs (.Sym r)]
+    (switch (.Type r)
+      (case [objabi/R_ADDRMIPS
+          ^{:line 290} objabi/R_ADDRMIPSU]
+        (let [t (+ (.SymValue ldr rs) ^{:go/via [Reloc]} (.Add r))]
+          (when (== (.Type r) objabi/R_ADDRMIPS)
+            (return (bit-or (bit-and val 0xffff0000) (bit-and t 0xffff)) noExtReloc isOk))
+
+          (return (bit-or (bit-and val 0xffff0000) (bit-and (>> (+ t (<< 1 15)) 16) 0xffff)) noExtReloc isOk)))
+      (case [objabi/R_ADDRMIPSTLS]
+        ;; thread pointer is at 0x7000 offset from the start of TLS data area
+        (let [t (- (+ (.SymValue ldr rs) ^{:go/via [Reloc]} (.Add r)) 0x7000)]
+          (when (or (< t -32768) (>= t 32678))
+            (.Errorf ldr s "TLS offset out of range %d" t))
+
+          (return (bit-or (bit-and val 0xffff0000) (bit-and t 0xffff)) noExtReloc isOk)))
+      (case [objabi/R_CALLMIPS
+          ^{:line 304} objabi/R_JMPMIPS]
+        ;; Low 26 bits = (S + A) >> 2
+        (let [t (+ (.SymValue ldr rs) ^{:go/via [Reloc]} (.Add r))]
+          (return (bit-or (bit-and val 0xfc000000) (bit-and-not (>> t 2) 0xfc000000)) noExtReloc isOk))))
+
+
+    (return val 0 false)))
+
+
+^{:go/breaks [3] :go/end 315} (go/func archrelocvariant ^int64 [(* ld/Target) (* loader/Loader) loader/Reloc sym/RelocVariant loader/Sym int64 (slice byte)]
+  -1)
+
+
+^{:go/end 329} (go/func extreloc [^{:tag (* ld/Target)} target ^{:tag (* loader/Loader)} ldr ^loader/Reloc r ^loader/Sym s] :results [loader/ExtReloc bool]
+  (switch (.Type r)
+    (case [objabi/R_ADDRMIPS
+        ^{:line 320} objabi/R_ADDRMIPSU]
+      (return (ld/ExtrelocViaOuterSym ldr r s) true))
+
+    (case [objabi/R_ADDRMIPSTLS
+        ^{:line 324} objabi/R_CALLMIPS
+        ^{:line 325} objabi/R_JMPMIPS]
+      (return (ld/ExtrelocSimple ldr r) true)))
+
+  (return (lit loader/ExtReloc) false))

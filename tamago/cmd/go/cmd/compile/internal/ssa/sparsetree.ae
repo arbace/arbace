@@ -1,0 +1,227 @@
+;; Copyright 2015 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.cmd.compile.internal.ssa) (go/file "sparsetree.go" :imports [
+
+
+    ^{:line 8} [fmt "fmt"]
+    ^{:line 9} [strings "strings"]])
+
+
+(go/type SparseTreeNode (struct
+    ^{:line 13 :tag (* Block)} child
+    ^{:line 14 :tag (* Block)} sibling
+    ^{:line 15 :tag (* Block)} parent
+
+
+
+
+
+
+
+
+
+    ^{:line 25 :tag int32 :doc "Every block has 6 numbers associated with it:\nentry-1, entry, entry+1, exit-1, and exit, exit+1.\nentry and exit are conceptually the top of the block (phi functions)\nentry+1 and exit-1 are conceptually the bottom of the block (ordinary defs)\nentry-1 and exit+1 are conceptually \"just before\" the block (conditions flowing in)\n\nThis simplifies life if we wish to query information about x\nwhen x is both an input to and output of a block.\n"} entry ^{:tag int32 :doc "Every block has 6 numbers associated with it:\nentry-1, entry, entry+1, exit-1, and exit, exit+1.\nentry and exit are conceptually the top of the block (phi functions)\nentry+1 and exit-1 are conceptually the bottom of the block (ordinary defs)\nentry-1 and exit+1 are conceptually \"just before\" the block (conditions flowing in)\n\nThis simplifies life if we wish to query information about x\nwhen x is both an input to and output of a block.\n"} exit))
+
+
+^{:go/end 30} (go/method String ^string [^{:tag (* SparseTreeNode)} s]
+  (fmt/Sprintf "[%d,%d]" (.-entry s) (.-exit s)))
+
+
+^{:go/end 34} (go/method Entry ^int32 [^{:tag (* SparseTreeNode)} s]
+  (.-entry s))
+
+
+^{:go/end 38} (go/method Exit ^int32 [^{:tag (* SparseTreeNode)} s]
+  (.-exit s))
+
+
+(go/const
+
+
+
+
+
+
+
+  ^{:line 48} [^{:val -1 :doc "When used to lookup up definitions in a sparse tree,\nthese adjustments to a block's entry (+adjust) and\nexit (-adjust) numbers allow a distinction to be made\nbetween assignments (typically branch-dependent\nconditionals) occurring \"before\" the block (e.g., as inputs\nto the block and its phi functions), \"within\" the block,\nand \"after\" the block.\n"} AdjustBefore -1] ; defined before phi
+  ^{:line 49} [^{:val 0} AdjustWithin 0] ; defined by phi
+  ^{:line 50} [^{:val 1} AdjustAfter 1]) ; defined within block
+
+
+
+
+
+(go/type SparseTree "A SparseTree is a tree of Blocks.\nIt allows rapid ancestor queries,\nsuch as whether one block dominates another.\n" (slice SparseTreeNode))
+
+
+
+
+
+^{:go/end 75} (go/func newSparseTree "newSparseTree creates a SparseTree from a block-to-parent map (array indexed by Block.ID).\nThe children of a given node are in reverse postorder.\nThis has the nice property that for a given tree walk, the source block of all\nnon-retreating edges are visited before their destination block.\n" ^SparseTree [^{:tag (* Func)} f ^{:tag (slice (* Block))} parentOf]
+  (let [po (.postorder f)
+      ^{:line 64} t (make SparseTree (.NumBlocks f))]
+    (range [_ b po]
+      (let [n (addr (aget t (.-ID b)))]
+        (when [p (aget parentOf (.-ID b))] (!= p nil)
+          (set! (.-parent n) p)
+          (set! (.-sibling n) (.-child (aget t (.-ID p))))
+          (set! (.-child (aget t (.-ID p))) b))))
+
+
+    (.numberBlock t (.-Entry f) 1)
+    ^{:line 74} t))
+
+
+
+
+
+^{:go/end 82} (go/method treestructure "treestructure provides a string description of the dominator\ntree and flow structure of block b and all blocks that it\ndominates.\n" ^string [^SparseTree t ^{:tag (* Block)} b]
+  (.treestructure1 t b 0))
+
+^{:go/end 103} (go/method treestructure1 ^string [^SparseTree t ^{:tag (* Block)} b ^int i]
+  (let [s (+ "\n" (strings/Repeat "\t" i) (.String b) "->[")]
+    (range [i e (.-Succs b)]
+      (when (> i 0)
+        (set! s + ","))
+
+      (set! s + (.String (.-b e))))
+
+    (set! s + "]")
+    (when [c0 (.-child (aget t (.-ID b)))] (!= c0 nil)
+      (set! s + "(")
+      (for [c c0] (!= c nil) (set! c (.-sibling (aget t (.-ID c))))
+        (when (!= c c0)
+          (set! s + " "))
+
+        (set! s + (.treestructure1 t c (+ i 1))))
+
+      (set! s + ")"))
+
+    ^{:line 102} s))
+
+
+;; numberBlock assigns entry and exit numbers for b and b's
+;; children in an in-order walk from a gappy sequence, where n
+;; is the first number not yet assigned or reserved. N should
+;; be larger than zero. For each entry and exit number, the
+;; values one larger and smaller are reserved to indicate
+;; "strictly above" and "strictly below". numberBlock returns
+;; the smallest number not yet assigned or reserved (i.e., the
+;; exit number of the last block visited, plus two, because
+;; last.exit+1 is a reserved value.)
+;;
+;; examples:
+;;
+;; single node tree Root, call with n=1
+;;         entry=2 Root exit=5; returns 7
+;;
+;; two node tree, Root->Child, call with n=1
+;;         entry=2 Root exit=11; returns 13
+;;         entry=5 Child exit=8
+;;
+;; three node tree, Root->(Left, Right), call with n=1
+;;         entry=2 Root exit=17; returns 19
+;; entry=5 Left exit=8;  entry=11 Right exit=14
+;;
+;; This is the in-order sequence of assigned and reserved numbers
+;; for the last example:
+;;   root     left     left      right       right       root
+;;  1 2e 3 | 4 5e 6 | 7 8x 9 | 10 11e 12 | 13 14x 15 | 16 17x 18
+
+^{:go/end 147} (go/method numberBlock ^int32 [^SparseTree t ^{:tag (* Block)} b ^int32 n]
+  ;; reserve n for entry-1, assign n+1 to entry
+  (inc! n)
+  (set! (.-entry (aget t (.-ID b))) n)
+  ;; reserve n+1 for entry+1, n+2 is next free number
+  (set! n + 2)
+  (for [c (.-child (aget t (.-ID b)))] (!= c nil) (set! c (.-sibling (aget t (.-ID c))))
+    (set! n (.numberBlock t c n))) ; preserves n = next free number
+
+  ;; reserve n for exit-1, assign n+1 to exit
+  (inc! n)
+  (set! (.-exit (aget t (.-ID b))) n)
+  ;; reserve n+1 for exit+1, n+2 is next free number, returned.
+  (+ n 2))
+
+
+
+
+
+
+
+
+
+^{:go/end 158} (go/method Sibling "Sibling returns a sibling of x in the dominator tree (i.e.,\na node with the same immediate dominator) or nil if there\nare no remaining siblings in the arbitrary but repeatable\norder chosen. Because the Child-Sibling order is used\nto assign entry and exit numbers in the treewalk, those\nnumbers are also consistent with this order (i.e.,\nSibling(x) has entry number larger than x's exit number).\n" ^{:tag (* Block)} [^SparseTree t ^{:tag (* Block)} x]
+  (.-sibling (aget t (.-ID x))))
+
+
+
+
+
+^{:go/end 165} (go/method Child "Child returns a child of x in the dominator tree, or\nnil if there are none. The choice of first child is\narbitrary but repeatable.\n" ^{:tag (* Block)} [^SparseTree t ^{:tag (* Block)} x]
+  (.-child (aget t (.-ID x))))
+
+
+
+
+^{:go/end 171} (go/method Parent "Parent returns the parent of x in the dominator tree, or\nnil if x is the function's entry.\n" ^{:tag (* Block)} [^SparseTree t ^{:tag (* Block)} x]
+  (.-parent (aget t (.-ID x))))
+
+
+
+^{:go/end 181} (go/method IsAncestorEq "IsAncestorEq reports whether x is an ancestor of or equal to y.\n" ^bool [^SparseTree t ^{:tag (* Block)} x ^{:tag (* Block)} y]
+  (when (== x y)
+    (return true))
+
+  (let [xx (addr (aget t (.-ID x)))
+      ^{:line 179} yy (addr (aget t (.-ID y)))]
+    (and (<= (.-entry xx) (.-entry yy)) (<= (.-exit yy) (.-exit xx)))))
+
+
+
+^{:go/end 191} (go/method isAncestor "isAncestor reports whether x is a strict ancestor of y.\n" ^bool [^SparseTree t ^{:tag (* Block)} x ^{:tag (* Block)} y]
+  (when (== x y)
+    (return false))
+
+  (let [xx (addr (aget t (.-ID x)))
+      ^{:line 189} yy (addr (aget t (.-ID y)))]
+    (and (< (.-entry xx) (.-entry yy)) (< (.-exit yy) (.-exit xx)))))
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 228} (go/method domorder "domorder returns a value for dominator-oriented sorting.\nBlock domination does not provide a total ordering,\nbut domorder two has useful properties.\n 1. If domorder(x) > domorder(y) then x does not dominate y.\n 2. If domorder(x) < domorder(y) and domorder(y) < domorder(z) and x does not dominate y,\n    then x does not dominate z.\n\nProperty (1) means that blocks sorted by domorder always have a maximal dominant block first.\nProperty (2) allows searches for dominated blocks to exit early.\n" ^int32 [^SparseTree t ^{:tag (* Block)} x]
+  ;; Here is an argument that entry(x) provides the properties documented above.
+  ;;
+  ;; Entry and exit values are assigned in a depth-first dominator tree walk.
+  ;; For all blocks x and y, one of the following holds:
+  ;;
+  ;; (x-dom-y) x dominates y => entry(x) < entry(y) < exit(y) < exit(x)
+  ;; (y-dom-x) y dominates x => entry(y) < entry(x) < exit(x) < exit(y)
+  ;; (x-then-y) neither x nor y dominates the other and x walked before y => entry(x) < exit(x) < entry(y) < exit(y)
+  ;; (y-then-x) neither x nor y dominates the other and y walked before y => entry(y) < exit(y) < entry(x) < exit(x)
+  ;;
+  ;; entry(x) > entry(y) eliminates case x-dom-y. This provides property (1) above.
+  ;;
+  ;; For property (2), assume entry(x) < entry(y) and entry(y) < entry(z) and x does not dominate y.
+  ;; entry(x) < entry(y) allows cases x-dom-y and x-then-y.
+  ;; But by supposition, x does not dominate y. So we have x-then-y.
+  ;;
+  ;; For contradiction, assume x dominates z.
+  ;; Then entry(x) < entry(z) < exit(z) < exit(x).
+  ;; But we know x-then-y, so entry(x) < exit(x) < entry(y) < exit(y).
+  ;; Combining those, entry(x) < entry(z) < exit(z) < exit(x) < entry(y) < exit(y).
+  ;; By supposition, entry(y) < entry(z), which allows cases y-dom-z and y-then-z.
+  ;; y-dom-z requires entry(y) < entry(z), but we have entry(z) < entry(y).
+  ;; y-then-z requires exit(y) < entry(z), but we have entry(z) < exit(y).
+  ;; We have a contradiction, so x does not dominate z, as required.
+  (.-entry (aget t (.-ID x))))

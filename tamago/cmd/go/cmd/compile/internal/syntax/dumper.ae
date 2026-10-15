@@ -1,0 +1,211 @@
+;; Copyright 2016 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; This file implements printing of syntax tree structures.
+
+(in-ns 'go.cmd.compile.internal.syntax) (go/file "dumper.go" :imports [
+
+
+    ^{:line 10} [fmt "fmt"]
+    ^{:line 11} [io "io"]
+    ^{:line 12} [reflect "reflect"]
+    ^{:line 13} [unicode "unicode"]
+    ^{:line 14} [utf8 "unicode/utf8"]])
+
+
+
+
+
+^{:go/end 41} (go/func Fdump "Fdump dumps the structure of the syntax tree rooted at n to w.\nIt is intended for debugging purposes; no specific output format\nis guaranteed.\n" [^io/Writer w ^Node n] :results [^error err]
+  (let [p ^{:go/breaks [2 4 6]} (lit dumper
+        :output w
+        :ptrmap (make (map Node int))
+        :last \newline)] ; force printing of line number on first line
+
+
+    (defer (^{:go/end 31} (fn []
+          (when [e (recover)] (!= e nil)
+            (set! err (.-err (assert writeError e))))))) ; re-panics if it's not a writeError
+
+
+
+    (when (== n nil)
+      (.printf p "nil\n")
+      (return))
+
+    (.dump p (reflect/ValueOf n) n)
+    (.printf p "\n")
+
+    (return)))
+
+
+(go/type dumper (struct
+    ^{:line 44 :tag io/Writer} output
+    ^{:line 45 :tag (map Node int)} ptrmap ; node -> dump line number
+    ^{:line 46 :tag int} indent ; current indentation level
+    ^{:line 47 :tag byte} last ; last byte processed by Write
+    ^{:line 48 :tag int} line)) ; current line number
+
+
+(go/var indentBytes (conv (slice byte) ".  "))
+
+^{:go/end 83} (go/method Write [^{:tag (* dumper)} p ^{:tag (slice byte)} data] :results [^int n ^error err]
+  (let [^int m (zero int)]
+    (range [i b data]
+      ;; invariant: data[0:n] has been written
+      (cond (== b \newline) (do
+          (set! (values m err) (.Write (.-output p) (subslice data n (+ i 1))))
+          (set! n + m)
+          (when (!= err nil)
+            (return)))
+
+        (== (.-last p) \newline) (do
+          (inc! (.-line p))
+          (set! (values _ err) (fmt/Fprintf (.-output p) "%6d  " (.-line p)))
+          (when (!= err nil)
+            (return))
+
+          (for [j (.-indent p)] (> j 0) (dec! j)
+            (set! (values _ err) (.Write (.-output p) indentBytes))
+            (when (!= err nil)
+              (return)))))
+
+
+
+      (set! (.-last p) b))
+
+    (when (> (len data) n)
+      (set! (values m err) (.Write (.-output p) (subslice data n)))
+      (set! n + m))
+
+    (return)))
+
+
+
+
+(go/type writeError "writeError wraps locally caught write errors so we can distinguish\nthem from genuine panics which we don't want to return as errors.\n" (struct
+    ^{:line 88 :tag error} err))
+
+
+
+^{:go/end 96} (go/method printf "printf is a convenience wrapper that takes care of print errors.\n" [^{:tag (* dumper)} p ^string format & ^{:tag (slice any)} args]
+  (when [(values _ err) (fmt/Fprintf p format (spread args))] (!= err nil)
+    (panic (lit writeError err))))
+
+
+
+
+
+
+
+
+
+
+^{:go/end 207} (go/method dump "dump prints the contents of x.\nIf x is the reflect.Value of a struct s, where &s\nimplements Node, then &s should be passed for n -\nthis permits printing of the unexported span and\ncomments fields of the embedded isNode field by\ncalling the Span() and Comment() instead of using\nreflection.\n" [^{:tag (* dumper)} p ^reflect/Value x ^Node n]
+  (switch (.Kind x)
+    (case [reflect/Interface]
+      (when (.IsNil x)
+        (.printf p "nil")
+        (return))
+
+      (.dump p (.Elem x) nil))
+
+    (case [reflect/Ptr]
+      (when (.IsNil x)
+        (.printf p "nil")
+        (return))
+
+
+      ;; special cases for identifiers w/o attached comments (common case)
+      (when [(values x ok) (assert (* Name) (.Interface x))] ok
+        (.printf p "%s @ %v" (.-Value x) ^{:go/via [expr node]} (.Pos x))
+        (return))
+
+
+      (.printf p "*")
+      ;; Fields may share type expressions, and declarations
+      ;; may share the same group - use ptrmap to keep track
+      ;; of nodes that have been printed already.
+      (when [(values ptr ok) (assert Node (.Interface x))] ok
+        (when [(values line exists) (aget (.-ptrmap p) ptr)] exists
+          (.printf p "(Node @ %d)" line)
+          (return))
+
+        (aset (.-ptrmap p) ptr (.-line p))
+        (set! n ptr))
+
+      (.dump p (.Elem x) n))
+
+    (case [reflect/Slice]
+      (when (.IsNil x)
+        (.printf p "nil")
+        (return))
+
+      (.printf p "%s (%d entries) {" (.Type x) (.Len x))
+      (when (> (.Len x) 0)
+        (inc! (.-indent p))
+        (.printf p "\n")
+        (for [(values i n) (values 0 (.Len x))] (< i n) (inc! i)
+          (.printf p "%d: " i)
+          (.dump p (.Index x i) nil)
+          (.printf p "\n"))
+
+        (dec! (.-indent p)))
+
+      (.printf p "}"))
+
+    (case [reflect/Struct]
+      (let [typ (.Type x)]
+
+        ;; if span, ok := x.Interface().(lexical.Span); ok {
+        ;; 	p.printf("%s", &span)
+        ;; 	return
+        ;; }
+
+        (.printf p "%s {" typ)
+        (inc! (.-indent p))
+
+        (let [first true]
+          (when (!= n nil)
+            (.printf p "\n")
+            (set! first false))
+          ;; p.printf("Span: %s\n", n.Span())
+          ;; if c := *n.Comments(); c != nil {
+          ;; 	p.printf("Comments: ")
+          ;; 	p.dump(reflect.ValueOf(c), nil) // a Comment is not a Node
+          ;; 	p.printf("\n")
+          ;; }
+
+
+          (for [(values i n) (values 0 (.NumField typ))] (< i n) (inc! i)
+            ;; Exclude non-exported fields because their
+            ;; values cannot be accessed via reflection.
+            (when [name (.-Name (.Field typ i))] (isExported name)
+              (when first
+                (.printf p "\n")
+                (set! first false))
+
+              (.printf p "%s: " name)
+              (.dump p (.Field x i) nil)
+              (.printf p "\n")))
+
+
+
+          (dec! (.-indent p))
+          (.printf p "}"))))
+
+    (default
+      (type-switch [x (.Interface x)]
+        (case [string]
+          ;; print strings in quotes
+          (.printf p "%q" x))
+        (default
+          (.printf p "%v" x))))))
+
+
+
+
+^{:go/end 212} (go/func isExported ^bool [^string name]
+  (let [(values ch _) (utf8/DecodeRuneInString name)]
+    (unicode/IsUpper ch)))

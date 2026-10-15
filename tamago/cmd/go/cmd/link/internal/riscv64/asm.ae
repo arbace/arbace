@@ -1,0 +1,777 @@
+;; Copyright 2019 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.cmd.link.internal.riscv64) (go/file "asm.go" :imports [
+
+
+    ^{:line 8} [riscv "cmd/internal/obj/riscv"]
+    ^{:line 9} [objabi "cmd/internal/objabi"]
+    ^{:line 10} [sys "cmd/internal/sys"]
+    ^{:line 11} [ld "cmd/link/internal/ld"]
+    ^{:line 12} [loader "cmd/link/internal/loader"]
+    ^{:line 13} [sym "cmd/link/internal/sym"]
+    ^{:line 14} [elf "debug/elf"]
+    ^{:line 15} [fmt "fmt"]
+    ^{:line 16} [log "log"]
+    ^{:line 17} [sort "sort"]])
+
+
+
+(go/const ^{:val ".L0 " :doc "fakeLabelName matches the RISCV_FAKE_LABEL_NAME from binutils.\n"} fakeLabelName ".L0 ")
+
+^{:go/end 42} (go/func gentext [^{:tag (* ld/Link)} ctxt ^{:tag (* loader/Loader)} ldr]
+  (let [(values initfunc addmoduledata) (ld/PrepareAddmoduledata ctxt)]
+    (when (== initfunc nil)
+      (return))
+
+
+    ;; Emit the following function:
+    ;;
+    ;; go.link.addmoduledatainit:
+    ;;      auipc a0, %pcrel_hi(local.moduledata)
+    ;;      addi  a0, %pcrel_lo(local.moduledata)
+    ;;      j     runtime.addmoduledata
+
+    (let [sz (.AddSymRef initfunc ^{:go/via [Target]} (.-Arch ctxt) (.-Moduledata ctxt) 0 objabi/R_RISCV_PCREL_ITYPE 8)]
+      (.SetUint32 initfunc ^{:go/via [Target]} (.-Arch ctxt) (- sz 8) 0x00000517) ; auipc a0, %pcrel_hi(local.moduledata)
+      (.SetUint32 initfunc ^{:go/via [Target]} (.-Arch ctxt) (- sz 4) 0x00050513) ; addi  a0, %pcrel_lo(local.moduledata)
+
+      (set! sz (.AddSymRef initfunc ^{:go/via [Target]} (.-Arch ctxt) addmoduledata 0 objabi/R_RISCV_JAL 4))
+      (.SetUint32 initfunc ^{:go/via [Target]} (.-Arch ctxt) (- sz 4) 0x0000006f)))) ; j runtime.addmoduledata
+
+
+^{:go/end 61} (go/func findHI20Reloc ^{:tag (* loader/Reloc)} [^{:tag (* loader/Loader)} ldr ^loader/Sym s ^int64 val]
+  (let [outer (.OuterSym ldr s)]
+    (when (== outer 0)
+      (return nil))
+
+    ^{:go/breaks [[3 60]]} (let [relocs (.Relocs ldr outer)
+        ^{:line 50} start (sort/Search (.Count relocs) ^{:go/end 50} (fn ^bool [^int i] (>= (+ (.SymValue ldr outer) (conv int64 ^{:go/via [Reloc]} (.Off (.At relocs i)))) val)))]
+      (for [idx start] (< idx (.Count relocs)) (inc! idx)
+        (let [r (.At relocs idx)]
+          (when (!= (+ (.SymValue ldr outer) (conv int64 ^{:go/via [Reloc]} (.Off r))) val)
+            (break))
+
+          (when (or (== (.Type r) objabi/R_RISCV_GOT_HI20) (== (.Type r) objabi/R_RISCV_PCREL_HI20))
+            (return (addr r)))))
+
+
+      nil)))
+
+
+^{:go/end 200} (go/func adddynrel ^bool [^{:tag (* ld/Target)} target ^{:tag (* loader/Loader)} ldr ^{:tag (* ld/ArchSyms)} syms ^loader/Sym s ^loader/Reloc r ^int rIdx]
+  (let [targ (.Sym r)
+
+      ^{:line 66 :tag sym/SymKind} targType (zero sym/SymKind)]
+    (when (!= targ 0)
+      (set! targType (.SymType ldr targ)))
+
+
+    (switch (.Type r)
+      (case [(+ objabi/ElfRelocOffset (conv objabi/RelocType elf/R_RISCV_CALL))
+          (+ objabi/ElfRelocOffset (conv objabi/RelocType elf/R_RISCV_CALL_PLT))]
+
+        (when (== targType sym/SDYNIMPORT)
+          (addpltsym target ldr syms targ)
+          (let [su (.MakeSymbolUpdater ldr s)]
+            (.SetRelocSym su rIdx (.-PLT syms))
+            (.SetRelocAdd su rIdx (+ ^{:go/via [Reloc]} (.Add r) (conv int64 (.SymPlt ldr targ))))))
+
+        (when (or (== targType 0) (== targType sym/SXREF))
+          (.Errorf ldr s "unknown symbol %s in RISCV call" (.SymName ldr targ)))
+
+        (let [su (.MakeSymbolUpdater ldr s)]
+          (.SetRelocType su rIdx objabi/R_RISCV_CALL)
+          (return true)))
+
+      (case [(+ objabi/ElfRelocOffset (conv objabi/RelocType elf/R_RISCV_GOT_HI20))]
+        (when (!= targType sym/SDYNIMPORT))
+        ;; TODO(jsing): Could convert to non-GOT reference.
+
+
+        (ld/AddGotSym target ldr syms targ (conv uint32 elf/R_RISCV_64))
+        (let [su (.MakeSymbolUpdater ldr s)]
+          (.SetRelocType su rIdx objabi/R_RISCV_GOT_HI20)
+          (.SetRelocSym su rIdx (.-GOT syms))
+          (.SetRelocAdd su rIdx (+ ^{:go/via [Reloc]} (.Add r) (conv int64 (.SymGot ldr targ))))
+          (return true)))
+
+      (case [(+ objabi/ElfRelocOffset (conv objabi/RelocType elf/R_RISCV_PCREL_HI20))]
+        (let [su (.MakeSymbolUpdater ldr s)]
+          (.SetRelocType su rIdx objabi/R_RISCV_PCREL_HI20)
+          (return true)))
+
+      (case [(+ objabi/ElfRelocOffset (conv objabi/RelocType elf/R_RISCV_PCREL_LO12_I))]
+        (when (!= ^{:go/via [Reloc]} (.Add r) 0)
+          (.Errorf ldr s "R_RISCV_PCREL_LO12_I with non-zero addend"))
+
+        (let [su (.MakeSymbolUpdater ldr s)]
+          (.SetRelocType su rIdx objabi/R_RISCV_PCREL_LO12_I)
+          (return true)))
+
+      (case [(+ objabi/ElfRelocOffset (conv objabi/RelocType elf/R_RISCV_PCREL_LO12_S))]
+        (when (!= ^{:go/via [Reloc]} (.Add r) 0)
+          (.Errorf ldr s "R_RISCV_PCREL_LO12_S with non-zero addend"))
+
+        (let [su (.MakeSymbolUpdater ldr s)]
+          (.SetRelocType su rIdx objabi/R_RISCV_PCREL_LO12_S)
+          (return true)))
+
+      (case [(+ objabi/ElfRelocOffset (conv objabi/RelocType elf/R_RISCV_32_PCREL))]
+        (let [su (.MakeSymbolUpdater ldr s)]
+          (.SetRelocType su rIdx objabi/R_PCREL)
+          (return true)))
+
+      (case [(+ objabi/ElfRelocOffset (conv objabi/RelocType elf/R_RISCV_64))]
+        (let [su (.MakeSymbolUpdater ldr s)]
+          (.SetRelocType su rIdx objabi/R_ADDR)
+          (return true)))
+
+      (case [(+ objabi/ElfRelocOffset (conv objabi/RelocType elf/R_RISCV_ADD32))]
+        (let [su (.MakeSymbolUpdater ldr s)]
+          (.SetRelocType su rIdx objabi/R_RISCV_ADD32)
+          (return true)))
+
+      (case [(+ objabi/ElfRelocOffset (conv objabi/RelocType elf/R_RISCV_SUB32))]
+        (let [su (.MakeSymbolUpdater ldr s)]
+          (.SetRelocType su rIdx objabi/R_RISCV_SUB32)
+          (return true)))
+
+      (case [(+ objabi/ElfRelocOffset (conv objabi/RelocType elf/R_RISCV_RVC_BRANCH))]
+        (let [su (.MakeSymbolUpdater ldr s)]
+          (.SetRelocType su rIdx objabi/R_RISCV_RVC_BRANCH)
+          (return true)))
+
+      (case [(+ objabi/ElfRelocOffset (conv objabi/RelocType elf/R_RISCV_RVC_JUMP))]
+        (let [su (.MakeSymbolUpdater ldr s)]
+          (.SetRelocType su rIdx objabi/R_RISCV_RVC_JUMP)
+          (return true)))
+
+      (case [(+ objabi/ElfRelocOffset (conv objabi/RelocType elf/R_RISCV_BRANCH))]
+        (let [su (.MakeSymbolUpdater ldr s)]
+          (.SetRelocType su rIdx objabi/R_RISCV_BRANCH)
+          (return true)))
+
+      (case [(+ objabi/ElfRelocOffset (conv objabi/RelocType elf/R_RISCV_RELAX))]
+        ;; Ignore relaxations, at least for now.
+        (return true))
+
+      (case [(+ objabi/ElfRelocOffset (conv objabi/RelocType elf/R_RISCV_JAL))]
+        (let [su (.MakeSymbolUpdater ldr s)]
+          (.SetRelocType su rIdx objabi/R_RISCV_JAL)
+          (return true)))
+
+      (default
+        (when (>= (.Type r) objabi/ElfRelocOffset)
+          (.Errorf ldr s "unexpected relocation type %d (%s)" (.Type r) (sym/RelocName (.-Arch target) (.Type r)))
+          (return false))))
+
+
+
+    ;; Reread the reloc to incorporate any changes in type above.
+    ^{:go/breaks [[4 199]]} (let [relocs (.Relocs ldr s)]
+      (set! r (.At relocs rIdx))
+
+      (switch (.Type r)
+        (case [objabi/R_RISCV_CALL]
+          (when (!= targType sym/SDYNIMPORT)
+            ;; nothing to do, the relocation will be laid out in reloc
+            (return true))
+
+          (when (.IsExternal target)
+            ;; External linker will do this relocation.
+            (return true))
+
+          ;; Internal linking.
+          (when (!= ^{:go/via [Reloc]} (.Add r) 0)
+            (.Errorf ldr s "PLT reference with non-zero addend (%v)" ^{:go/via [Reloc]} (.Add r)))
+
+          ;; Build a PLT entry and change the relocation target to that entry.
+          (addpltsym target ldr syms targ)
+          (let [su (.MakeSymbolUpdater ldr s)]
+            (.SetRelocSym su rIdx (.-PLT syms))
+            (.SetRelocAdd su rIdx (conv int64 (.SymPlt ldr targ)))
+
+            (return true))))
+
+
+      false)))
+
+
+^{:go/end 249} (go/func genSymsLate [^{:tag (* ld/Link)} ctxt ^{:tag (* loader/Loader)} ldr]
+  (when (!= ^{:go/via [Target]} (.-LinkMode ctxt) ld/LinkExternal)
+    (return))
+
+
+  ;; Generate a local text symbol for each relocation target, as the
+  ;; R_RISCV_PCREL_LO12_* relocations generated by elfreloc1 need it.
+  (when (== (.-Textp ctxt) nil)
+    (log/Fatal "genSymsLate called before Textp has been assigned"))
+
+  (let [^{:tag (slice loader/Sym)} hi20Syms (zero (slice loader/Sym))]
+    (range [_ s (.-Textp ctxt)]
+      (let [relocs (.Relocs ldr s)]
+        (for [ri 0] (< ri (.Count relocs)) (inc! ri)
+          (let [r (.At relocs ri)]
+            (when (and (!= (.Type r) objabi/R_RISCV_CALL)
+                (!= (.Type r) objabi/R_RISCV_PCREL_ITYPE)
+                (!= (.Type r) objabi/R_RISCV_PCREL_STYPE)
+                (!= (.Type r) objabi/R_RISCV_TLS_IE)
+                (!= (.Type r) objabi/R_RISCV_GOT_PCREL_ITYPE))
+              (continue))
+
+            (when (and (== ^{:go/via [Reloc]} (.Off r) 0) (.IsText (.SymType ldr s)))
+              ;; Use the symbol for the function instead of creating
+              ;; an overlapping symbol.
+              (continue))
+
+
+            ;; TODO(jsing): Consider generating ELF symbols without needing
+            ;; loader symbols, in order to reduce memory consumption. This
+            ;; would require changes to genelfsym so that it called
+            ;; putelfsym and putelfsyment as appropriate.
+            (let [sb (.MakeSymbolBuilder ldr fakeLabelName)]
+              (.SetType sb sym/STEXT)
+              (.SetValue sb (+ (.SymValue ldr s) (conv int64 ^{:go/via [Reloc]} (.Off r))))
+              (.SetLocal sb true)
+              (.SetReachable sb true)
+              (.SetVisibilityHidden sb true)
+              (.SetSect sb (.SymSect ldr s))
+              (when [outer (.OuterSym ldr s)] (!= outer 0)
+                (.AddInteriorSym ldr outer (.Sym sb)))
+
+              (set! hi20Syms (append hi20Syms (.Sym sb))))))))
+
+
+    (set! (.-Textp ctxt) (append (.-Textp ctxt) (spread hi20Syms)))
+    (.SortSyms ldr (.-Textp ctxt))))
+
+
+^{:go/end 260} (go/func findHI20Symbol ^loader/Sym [^{:tag (* ld/Link)} ctxt ^{:tag (* loader/Loader)} ldr ^int64 val]
+  ^{:go/breaks [[4 259]]} (let [idx (sort/Search (len (.-Textp ctxt)) ^{:go/end 252} (fn ^bool [^int i] (>= (.SymValue ldr (aget (.-Textp ctxt) i)) val)))]
+    (when (>= idx (len (.-Textp ctxt)))
+      (return 0))
+
+    (when [s (aget (.-Textp ctxt) idx)] (and (== (.SymValue ldr s) val) (.IsText (.SymType ldr s)))
+      (return s))
+
+    0))
+
+
+^{:go/end 339} (go/func elfreloc1 ^bool [^{:tag (* ld/Link)} ctxt ^{:tag (* ld/OutBuf)} out ^{:tag (* loader/Loader)} ldr ^loader/Sym s ^loader/ExtReloc r ^int ri ^int64 sectoff]
+  ^{:go/breaks [[3 338]]} (let [elfsym (ld/ElfSymForReloc ctxt (.-Xsym r))]
+    (switch (.-Type r)
+      (case [objabi/R_ADDR objabi/R_DWARFSECREF]
+        (.Write64 out (conv uint64 sectoff))
+        (switch (.-Size r)
+          (case [4]
+            (.Write64 out (bit-or (conv uint64 elf/R_RISCV_32) (<< (conv uint64 elfsym) 32))))
+          (case [8]
+            (.Write64 out (bit-or (conv uint64 elf/R_RISCV_64) (<< (conv uint64 elfsym) 32))))
+          (default
+            (ld/Errorf "unknown size %d for %v relocation" (.-Size r) (.-Type r))
+            (return false)))
+
+        (.Write64 out (conv uint64 (.-Xadd r))))
+
+      (case [objabi/R_RISCV_JAL objabi/R_RISCV_JAL_TRAMP]
+        (.Write64 out (conv uint64 sectoff))
+        (.Write64 out (bit-or (conv uint64 elf/R_RISCV_JAL) (<< (conv uint64 elfsym) 32)))
+        (.Write64 out (conv uint64 (.-Xadd r))))
+
+      (case [objabi/R_RISCV_CALL
+          ^{:line 284} objabi/R_RISCV_PCREL_ITYPE
+          ^{:line 285} objabi/R_RISCV_PCREL_STYPE
+          ^{:line 286} objabi/R_RISCV_TLS_IE
+          ^{:line 287} objabi/R_RISCV_GOT_PCREL_ITYPE]
+        ;; Find the text symbol for the AUIPC instruction targeted
+        ;; by this relocation.
+        (let [relocs (.Relocs ldr s)
+            ^{:line 291} offset (conv int64 ^{:go/via [Reloc]} (.Off (.At relocs ri)))
+            ^{:line 292} hi20Sym (findHI20Symbol ctxt ldr (+ (.SymValue ldr s) offset))]
+          (when (== hi20Sym 0)
+            (ld/Errorf "failed to find text symbol for HI20 relocation at %d (%x)" sectoff (+ (.SymValue ldr s) offset))
+            (return false))
+
+          (let [hi20ElfSym (ld/ElfSymForReloc ctxt hi20Sym)
+
+              ;; Emit two relocations - a R_RISCV_PCREL_HI20 relocation and a
+              ;; corresponding R_RISCV_PCREL_LO12_I or R_RISCV_PCREL_LO12_S relocation.
+              ;; Note that the LO12 relocation must point to a target that has a valid
+              ;; HI20 PC-relative relocation text symbol, which in turn points to the
+              ;; given symbol. For further details see section 8.4.9 of the RISC-V ABIs
+              ;; Specification:
+              ;;
+              ;;  https://github.com/riscv-non-isa/riscv-elf-psabi-doc/releases/download/v1.0/riscv-abi.pdf
+              ;;
+              (values ^elf/R_RISCV hiRel ^elf/R_RISCV loRel) (zero elf/R_RISCV)]
+            (switch (.-Type r)
+              (case [objabi/R_RISCV_CALL objabi/R_RISCV_PCREL_ITYPE]
+                (set! (values hiRel loRel) (values elf/R_RISCV_PCREL_HI20 elf/R_RISCV_PCREL_LO12_I)))
+              (case [objabi/R_RISCV_PCREL_STYPE]
+                (set! (values hiRel loRel) (values elf/R_RISCV_PCREL_HI20 elf/R_RISCV_PCREL_LO12_S)))
+              (case [objabi/R_RISCV_TLS_IE]
+                (set! (values hiRel loRel) (values elf/R_RISCV_TLS_GOT_HI20 elf/R_RISCV_PCREL_LO12_I)))
+              (case [objabi/R_RISCV_GOT_PCREL_ITYPE]
+                (set! (values hiRel loRel) (values elf/R_RISCV_GOT_HI20 elf/R_RISCV_PCREL_LO12_I))))
+
+            (.Write64 out (conv uint64 sectoff))
+            (.Write64 out (bit-or (conv uint64 hiRel) (<< (conv uint64 elfsym) 32)))
+            (.Write64 out (conv uint64 (.-Xadd r)))
+            (.Write64 out (conv uint64 (+ sectoff 4)))
+            (.Write64 out (bit-or (conv uint64 loRel) (<< (conv uint64 hi20ElfSym) 32)))
+            (.Write64 out (conv uint64 0)))))
+
+      (case [objabi/R_RISCV_TLS_LE]
+        (.Write64 out (conv uint64 sectoff))
+        (.Write64 out (bit-or (conv uint64 elf/R_RISCV_TPREL_HI20) (<< (conv uint64 elfsym) 32)))
+        (.Write64 out (conv uint64 (.-Xadd r)))
+        (.Write64 out (conv uint64 (+ sectoff 4)))
+        (.Write64 out (bit-or (conv uint64 elf/R_RISCV_TPREL_LO12_I) (<< (conv uint64 elfsym) 32)))
+        (.Write64 out (conv uint64 (.-Xadd r))))
+
+      (default
+        (return false)))
+
+
+    true))
+
+
+^{:go/end 389} (go/func elfsetupplt [^{:tag (* ld/Link)} ctxt ^{:tag (* loader/Loader)} ldr ^{:tag (* loader/SymbolBuilder)} plt ^{:tag (* loader/SymbolBuilder)} gotplt ^loader/Sym dynamic]
+  (when (!= (.Size plt) 0)
+    (return))
+
+  (when (!= (.Size gotplt) 0)
+    (.Errorf ctxt (.Sym gotplt) "got.plt is not empty"))
+
+
+  ;; See section 8.4.6 of the RISC-V ABIs Specification:
+  ;;
+  ;;  https://github.com/riscv-non-isa/riscv-elf-psabi-doc/releases/download/v1.0/riscv-abi.pdf
+  ;;
+  ;; 1:   auipc  t2, %pcrel_hi(.got.plt)
+  ;;      sub    t1, t1, t3               # shifted .got.plt offset + hdr size + 12
+  ;;      l[w|d] t3, %pcrel_lo(1b)(t2)    # _dl_runtime_resolve
+  ;;      addi   t1, t1, -(hdr size + 12) # shifted .got.plt offset
+  ;;      addi   t0, t2, %pcrel_lo(1b)    # &.got.plt
+  ;;      srli   t1, t1, log2(16/PTRSIZE) # .got.plt offset
+  ;;      l[w|d] t0, PTRSIZE(t0)          # link map
+  ;;      jr     t3
+
+  (.AddSymRef plt ^{:go/via [Target]} (.-Arch ctxt) (.Sym gotplt) 0 objabi/R_RISCV_PCREL_HI20 4)
+  (.SetUint32 plt ^{:go/via [Target]} (.-Arch ctxt) (- (.Size plt) 4) 0x00000397) ; auipc   t2,0x0
+
+  (let [sb (.MakeSymbolBuilder ldr fakeLabelName)]
+    (.SetType sb sym/STEXT)
+    (.SetValue sb (- (+ (.SymValue ldr (.Sym plt)) (.Size plt)) 4))
+    (.SetLocal sb true)
+    (.SetReachable sb true)
+    (.SetVisibilityHidden sb true)
+    (.AddInteriorSym plt (.Sym sb))
+
+    (.AddUint32 plt ^{:go/via [Target]} (.-Arch ctxt) 0x41c30333) ; sub     t1,t1,t3
+
+    (.AddSymRef plt ^{:go/via [Target]} (.-Arch ctxt) (.Sym sb) 0 objabi/R_RISCV_PCREL_LO12_I 4)
+    (.SetUint32 plt ^{:go/via [Target]} (.-Arch ctxt) (- (.Size plt) 4) 0x0003be03) ; ld      t3,0(t2)
+
+    (.AddUint32 plt ^{:go/via [Target]} (.-Arch ctxt) 0xfd430313) ; addi    t1,t1,-44
+
+    (.AddSymRef plt ^{:go/via [Target]} (.-Arch ctxt) (.Sym sb) 0 objabi/R_RISCV_PCREL_LO12_I 4)
+    (.SetUint32 plt ^{:go/via [Target]} (.-Arch ctxt) (- (.Size plt) 4) 0x00038293) ; addi    t0,t2,0
+
+    (.AddUint32 plt ^{:go/via [Target]} (.-Arch ctxt) 0x00135313) ; srli    t1,t1,0x1
+    (.AddUint32 plt ^{:go/via [Target]} (.-Arch ctxt) 0x0082b283) ; ld      t0,8(t0)
+    (.AddUint32 plt ^{:go/via [Target]} (.-Arch ctxt) 0x00008e02) ; jr      t3
+
+    (.AddAddrPlus gotplt ^{:go/via [Target]} (.-Arch ctxt) dynamic 0) ; got.plt[0] = _dl_runtime_resolve
+    (.AddUint64 gotplt ^{:go/via [Target]} (.-Arch ctxt) 0))) ; got.plt[1] = link map
+
+
+^{:go/end 441} (go/func addpltsym [^{:tag (* ld/Target)} target ^{:tag (* loader/Loader)} ldr ^{:tag (* ld/ArchSyms)} syms ^loader/Sym s]
+  (when (>= (.SymPlt ldr s) 0)
+    (return))
+
+
+  (ld/Adddynsym ldr target syms s)
+
+  (let [plt (.MakeSymbolUpdater ldr (.-PLT syms))
+      ^{:line 399} gotplt (.MakeSymbolUpdater ldr (.-GOTPLT syms))
+      ^{:line 400} rela (.MakeSymbolUpdater ldr (.-RelaPLT syms))]
+    (when (== (.Size plt) 0)
+      (panic "plt is not set up"))
+
+
+    ;; See section 8.4.6 of the RISC-V ABIs Specification:
+    ;;
+    ;;  https://github.com/riscv-non-isa/riscv-elf-psabi-doc/releases/download/v1.0/riscv-abi.pdf
+    ;;
+    ;; 1:  auipc   t3, %pcrel_hi(function@.got.plt)
+    ;;     l[w|d]  t3, %pcrel_lo(1b)(t3)
+    ;;     jalr    t1, t3
+    ;;     nop
+
+    (.AddSymRef plt (.-Arch target) (.Sym gotplt) (.Size gotplt) objabi/R_RISCV_PCREL_HI20 4)
+    (.SetUint32 plt (.-Arch target) (- (.Size plt) 4) 0x00000e17) ; auipc   t3,0x0
+
+    (let [sb (.MakeSymbolBuilder ldr fakeLabelName)]
+      (.SetType sb sym/STEXT)
+      (.SetValue sb (- (+ (.SymValue ldr (.Sym plt)) (.Size plt)) 4))
+      (.SetLocal sb true)
+      (.SetReachable sb true)
+      (.SetVisibilityHidden sb true)
+      (.AddInteriorSym plt (.Sym sb))
+
+      (.AddSymRef plt (.-Arch target) (.Sym sb) 0 objabi/R_RISCV_PCREL_LO12_I 4)
+      (.SetUint32 plt (.-Arch target) (- (.Size plt) 4) 0x000e3e03) ; ld      t3,0(t3)
+      (.AddUint32 plt (.-Arch target) 0x000e0367) ; jalr    t1,t3
+      (.AddUint32 plt (.-Arch target) 0x00000001) ; nop
+
+      (.SetPlt ldr s (conv int32 (- (.Size plt) 16)))
+
+      ;; add to got.plt: pointer to plt[0]
+      (.AddAddrPlus gotplt (.-Arch target) (.Sym plt) 0)
+
+      ;; rela
+      (.AddAddrPlus rela (.-Arch target) (.Sym gotplt) (- (.Size gotplt) 8))
+      (let [sDynid (.SymDynid ldr s)]
+
+        (.AddUint64 rela (.-Arch target) (elf/R_INFO (conv uint32 sDynid) (conv uint32 elf/R_RISCV_JUMP_SLOT)))
+        (.AddUint64 rela (.-Arch target) 0)))))
+
+
+^{:go/breaks [4] :go/end 446} (go/func machoreloc1 ^bool [(* sys/Arch) (* ld/OutBuf) (* loader/Loader) loader/Sym loader/ExtReloc int64]
+  (log/Fatalf "machoreloc1 not implemented")
+  false)
+
+
+^{:go/end 678} (go/func archreloc [^{:tag (* ld/Target)} target ^{:tag (* loader/Loader)} ldr ^{:tag (* ld/ArchSyms)} syms ^loader/Reloc r ^loader/Sym s ^int64 val] :results [^int64 o ^int nExtReloc ^bool ok]
+  (let [rs (.Sym r)
+      ^{:line 450} pc (+ (.SymValue ldr s) (conv int64 ^{:go/via [Reloc]} (.Off r)))]
+
+    ;; If the call points to a trampoline, see if we can reach the symbol
+    ;; directly. This situation can occur when the relocation symbol is
+    ;; not assigned an address until after the trampolines are generated.
+    (when (== (.Type r) objabi/R_RISCV_JAL_TRAMP)
+      (let [relocs (.Relocs ldr rs)]
+        (when (!= (.Count relocs) 1)
+          (.Errorf ldr s "trampoline %v has %d relocations" (.SymName ldr rs) (.Count relocs)))
+
+        (let [tr (.At relocs 0)]
+          (when (!= (.Type tr) objabi/R_RISCV_CALL)
+            (.Errorf ldr s "trampoline %v has unexpected relocation %v" (.SymName ldr rs) (.Type tr)))
+
+          (let [trs (.Sym tr)]
+            (when (and (!= (.SymValue ldr trs) 0) (!= (.SymType ldr trs) sym/SDYNIMPORT) (!= (.SymType ldr trs) sym/SUNDEFEXT))
+              (let [trsOff (- (+ (.SymValue ldr trs) ^{:go/via [Reloc]} (.Add tr)) pc)]
+                (when (and (>= trsOff (- (<< 1 20))) (< trsOff (<< 1 20)))
+                  (.SetType r objabi/R_RISCV_JAL)
+                  (.SetSym r trs)
+                  ^{:go/via [Reloc]} (.SetAdd r ^{:go/via [Reloc]} (.Add tr))
+                  (set! rs trs))))))))
+
+
+
+
+
+    (when (.IsExternal target)
+      (switch (.Type r)
+        (case [objabi/R_RISCV_JAL objabi/R_RISCV_JAL_TRAMP]
+          (return val 1 true))
+
+        (case [objabi/R_RISCV_CALL objabi/R_RISCV_PCREL_ITYPE objabi/R_RISCV_PCREL_STYPE objabi/R_RISCV_TLS_IE objabi/R_RISCV_TLS_LE objabi/R_RISCV_GOT_PCREL_ITYPE]
+          (return val 2 true)))
+
+
+      (return val 0 false))
+
+
+    (let [off (- (+ (.SymValue ldr rs) ^{:go/via [Reloc]} (.Add r)) pc)]
+
+      (switch (.Type r)
+        (case [objabi/R_RISCV_JAL objabi/R_RISCV_JAL_TRAMP]
+          ;; Generate instruction immediates.
+          (let [(values imm err) (riscv/EncodeJImmediate off)]
+            (when (!= err nil)
+              (.Errorf ldr s "cannot encode J-type instruction relocation offset for %s: %v" (.SymName ldr rs) err))
+
+            (let [immMask (conv int64 riscv/JTypeImmMask)]
+
+              (set! val (bit-or (bit-and-not val immMask) imm))
+
+              (return val 0 true))))
+
+        (case [objabi/R_RISCV_TLS_IE]
+          (log/Fatalf "cannot handle R_RISCV_TLS_IE (sym %s) when linking internally" (.SymName ldr s))
+          (return val 0 false))
+
+        (case [objabi/R_RISCV_TLS_LE]
+          ;; Generate LUI and ADDIW instruction immediates.
+          (let [off ^{:go/via [Reloc]} (.Add r)
+
+              (values low high err) (riscv/Split32BitImmediate off)]
+            (when (!= err nil)
+              (.Errorf ldr s "relocation does not fit in 32-bits: %d" off))
+
+
+            (let [(values luiImm ^:assign err) (riscv/EncodeUImmediate high)]
+              (when (!= err nil)
+                (.Errorf ldr s "cannot encode R_RISCV_TLS_LE LUI relocation offset for %s: %v" (.SymName ldr rs) err))
+
+
+              (let [(values addiwImm ^:assign err) (riscv/EncodeIImmediate low)]
+                (when (!= err nil)
+                  (.Errorf ldr s "cannot encode R_RISCV_TLS_LE I-type instruction relocation offset for %s: %v" (.SymName ldr rs) err))
+
+
+                (let [lui (conv int64 (conv uint32 val))
+                    ^{:line 528} addiw (conv int64 (conv uint32 (>> val 32)))]
+
+                  (set! lui (bit-or (bit-and-not lui riscv/UTypeImmMask) (conv int64 (conv uint32 luiImm))))
+                  (set! addiw (bit-or (bit-and-not addiw riscv/ITypeImmMask) (conv int64 (conv uint32 addiwImm))))
+
+                  (return (bit-or (<< addiw 32) lui) 0 true))))))
+
+        (case [objabi/R_RISCV_BRANCH]
+          (let [pc (+ (.SymValue ldr s) (conv int64 ^{:go/via [Reloc]} (.Off r)))
+              ^{:line 537} off (- (+ (.SymValue ldr rs) ^{:go/via [Reloc]} (.Add r)) pc)
+
+              (values imm err) (riscv/EncodeBImmediate off)]
+            (when (!= err nil)
+              (.Errorf ldr s "cannot encode B-type instruction relocation offset for %s: %v" (.SymName ldr rs) err))
+
+            (let [ins (bit-or (bit-and-not (conv int64 (conv uint32 val)) riscv/BTypeImmMask) (conv int64 (conv uint32 imm)))]
+
+              (return ins 0 true))))
+
+        (case [objabi/R_RISCV_RVC_BRANCH objabi/R_RISCV_RVC_JUMP]
+          (let [pc (+ (.SymValue ldr s) (conv int64 ^{:go/via [Reloc]} (.Off r)))
+              ^{:line 549} off (- (+ (.SymValue ldr rs) ^{:go/via [Reloc]} (.Add r)) pc)
+
+              ^{:line 551 :tag error} err (zero error)
+              (values ^int64 imm ^int64 immMask) (zero int64)]
+            (switch (.Type r)
+              (case [objabi/R_RISCV_RVC_BRANCH]
+                (set! immMask riscv/CBTypeImmMask)
+                (set! (values imm err) (riscv/EncodeCBImmediate off))
+                (when (!= err nil)
+                  (.Errorf ldr s "cannot encode CB-type instruction relocation offset for %s: %v" (.SymName ldr rs) err)))
+
+              (case [objabi/R_RISCV_RVC_JUMP]
+                (set! immMask riscv/CJTypeImmMask)
+                (set! (values imm err) (riscv/EncodeCJImmediate off))
+                (when (!= err nil)
+                  (.Errorf ldr s "cannot encode CJ-type instruction relocation offset for %s: %v" (.SymName ldr rs) err)))
+
+              (default
+                (panic (fmt/Sprintf "unknown relocation type: %v" (.Type r)))))
+
+
+            (let [ins (bit-or (bit-and-not (conv int64 (conv uint16 val)) immMask) (conv int64 (conv uint16 imm)))]
+
+              (return ins 0 true))))
+
+        (case [objabi/R_RISCV_GOT_HI20 objabi/R_RISCV_PCREL_HI20]
+          (let [pc (+ (.SymValue ldr s) (conv int64 ^{:go/via [Reloc]} (.Off r)))
+              ^{:line 576} off (- (+ (.SymValue ldr rs) ^{:go/via [Reloc]} (.Add r)) pc)
+
+              ;; Generate AUIPC immediates.
+              (values _ high err) (riscv/Split32BitImmediate off)]
+            (when (!= err nil)
+              (.Errorf ldr s "relocation does not fit in 32-bits: %d" off))
+
+
+            (let [(values auipcImm ^:assign err) (riscv/EncodeUImmediate high)]
+              (when (!= err nil)
+                (.Errorf ldr s "cannot encode R_RISCV_PCREL_ AUIPC relocation offset for %s: %v" (.SymName ldr rs) err))
+
+
+              (let [auipc (conv int64 (conv uint32 val))]
+                (set! auipc (bit-or (bit-and-not auipc riscv/UTypeImmMask) (conv int64 (conv uint32 auipcImm))))
+
+                (return auipc 0 true)))))
+
+        (case [objabi/R_RISCV_PCREL_LO12_I objabi/R_RISCV_PCREL_LO12_S]
+          (let [hi20Reloc (findHI20Reloc ldr rs (.SymValue ldr rs))]
+            (when (== hi20Reloc nil)
+              (.Errorf ldr s "missing HI20 relocation for LO12 relocation with %s (%d)" (.SymName ldr rs) rs))
+
+
+            (let [pc (+ (.SymValue ldr s) (conv int64 ^{:go/via [Reloc]} (.Off hi20Reloc)))
+                ^{:line 601} off (- (+ (.SymValue ldr (.Sym hi20Reloc)) ^{:go/via [Reloc]} (.Add hi20Reloc)) pc)
+
+                (values low _ err) (riscv/Split32BitImmediate off)]
+              (when (!= err nil)
+                (.Errorf ldr s "relocation does not fit in 32-bits: %d" off))
+
+
+              (let [(values ^int64 imm ^int64 immMask) (zero int64)]
+                (switch (.Type r)
+                  (case [objabi/R_RISCV_PCREL_LO12_I]
+                    (set! immMask riscv/ITypeImmMask)
+                    (set! (values imm err) (riscv/EncodeIImmediate low))
+                    (when (!= err nil)
+                      (.Errorf ldr s "cannot encode objabi.R_RISCV_PCREL_LO12_I I-type instruction relocation offset for %s: %v" (.SymName ldr rs) err)))
+
+                  (case [objabi/R_RISCV_PCREL_LO12_S]
+                    (set! immMask riscv/STypeImmMask)
+                    (set! (values imm err) (riscv/EncodeSImmediate low))
+                    (when (!= err nil)
+                      (.Errorf ldr s "cannot encode R_RISCV_PCREL_LO12_S S-type instruction relocation offset for %s: %v" (.SymName ldr rs) err)))
+
+                  (default
+                    (panic (fmt/Sprintf "unknown relocation type: %v" (.Type r)))))
+
+
+                (let [ins (conv int64 (conv uint32 val))]
+                  (set! ins (bit-or (bit-and-not ins immMask) (conv int64 (conv uint32 imm))))
+                  (return ins 0 true))))))
+
+        (case [objabi/R_RISCV_CALL objabi/R_RISCV_PCREL_ITYPE objabi/R_RISCV_PCREL_STYPE]
+          ;; Generate AUIPC and second instruction immediates.
+          (let [(values low high err) (riscv/Split32BitImmediate off)]
+            (when (!= err nil)
+              (.Errorf ldr s "pc-relative relocation does not fit in 32 bits: %d" off))
+
+
+            (let [(values auipcImm ^:assign err) (riscv/EncodeUImmediate high)]
+              (when (!= err nil)
+                (.Errorf ldr s "cannot encode AUIPC relocation offset for %s: %v" (.SymName ldr rs) err))
+
+
+              (let [(values ^int64 secondImm ^int64 secondImmMask) (zero int64)]
+                (switch (.Type r)
+                  (case [objabi/R_RISCV_CALL objabi/R_RISCV_PCREL_ITYPE]
+                    (set! secondImmMask riscv/ITypeImmMask)
+                    (set! (values secondImm err) (riscv/EncodeIImmediate low))
+                    (when (!= err nil)
+                      (.Errorf ldr s "cannot encode I-type instruction relocation offset for %s: %v" (.SymName ldr rs) err)))
+
+                  (case [objabi/R_RISCV_PCREL_STYPE]
+                    (set! secondImmMask riscv/STypeImmMask)
+                    (set! (values secondImm err) (riscv/EncodeSImmediate low))
+                    (when (!= err nil)
+                      (.Errorf ldr s "cannot encode S-type instruction relocation offset for %s: %v" (.SymName ldr rs) err)))
+
+                  (default
+                    (panic (fmt/Sprintf "unknown relocation type: %v" (.Type r)))))
+
+
+                (let [auipc (conv int64 (conv uint32 val))
+                    ^{:line 661} second (conv int64 (conv uint32 (>> val 32)))]
+
+                  (set! auipc (bit-or (bit-and-not auipc riscv/UTypeImmMask) (conv int64 (conv uint32 auipcImm))))
+                  (set! second (bit-or (bit-and-not second secondImmMask) (conv int64 (conv uint32 secondImm))))
+
+                  (return (bit-or (<< second 32) auipc) 0 true))))))
+
+        (case [objabi/R_RISCV_ADD32]
+          (let [addr (+ val (.SymValue ldr rs) ^{:go/via [Reloc]} (.Add r))]
+            (return (conv int64 (conv uint32 addr)) 0 true)))
+
+        (case [objabi/R_RISCV_SUB32]
+          (let [addr (- val (.SymValue ldr rs) ^{:go/via [Reloc]} (.Add r))]
+            (return (conv int64 (conv uint32 addr)) 0 true))))
+
+
+      (return val 0 false))))
+
+
+^{:go/breaks [4] :go/end 683} (go/func archrelocvariant ^int64 [(* ld/Target) (* loader/Loader) loader/Reloc sym/RelocVariant loader/Sym int64 (slice byte)]
+  (log/Fatalf "archrelocvariant")
+  -1)
+
+
+^{:go/end 694} (go/func extreloc [^{:tag (* ld/Target)} target ^{:tag (* loader/Loader)} ldr ^loader/Reloc r ^loader/Sym s] :results [loader/ExtReloc bool]
+  (switch (.Type r)
+    (case [objabi/R_RISCV_JAL objabi/R_RISCV_JAL_TRAMP]
+      (return (ld/ExtrelocSimple ldr r) true))
+
+    (case [objabi/R_RISCV_CALL objabi/R_RISCV_PCREL_ITYPE objabi/R_RISCV_PCREL_STYPE objabi/R_RISCV_TLS_IE objabi/R_RISCV_TLS_LE objabi/R_RISCV_GOT_PCREL_ITYPE]
+      (return (ld/ExtrelocViaOuterSym ldr r s) true)))
+
+  (return (lit loader/ExtReloc) false))
+
+
+^{:go/end 768} (go/func trampoline [^{:tag (* ld/Link)} ctxt ^{:tag (* loader/Loader)} ldr ^int ri ^loader/Sym rs ^loader/Sym s]
+  (let [relocs (.Relocs ldr s)
+      ^{:line 698} r (.At relocs ri)]
+
+    (switch (.Type r)
+      (case [objabi/R_RISCV_JAL]
+        (let [pc (+ (.SymValue ldr s) (conv int64 ^{:go/via [Reloc]} (.Off r)))
+            ^{:line 703} off (- (+ (.SymValue ldr rs) ^{:go/via [Reloc]} (.Add r)) pc)]
+
+          ;; Relocation symbol has an address and is directly reachable,
+          ;; therefore there is no need for a trampoline.
+          (when (and (!= (.SymValue ldr rs) 0) (>= off (- (<< 1 20))) (< off (<< 1 20)) ^:go/paren (or (<= @ld/FlagDebugTramp 1) (== (.SymPkg ldr s) (.SymPkg ldr rs))))
+            (break))
+
+
+          ;; Relocation symbol is too far for a direct call or has not
+          ;; yet been given an address. See if an existing trampoline is
+          ;; reachable and if so, reuse it. Otherwise we need to create
+          ;; a new trampoline.
+          (let [^loader/Sym tramp (zero loader/Sym)]
+            (for [i 0] _ (inc! i)
+              (let [oName (.SymName ldr rs)
+                  ^{:line 718} name (fmt/Sprintf "%s-tramp%d" oName i)]
+                (when (!= ^{:go/via [Reloc]} (.Add r) 0)
+                  (set! name (fmt/Sprintf "%s%+x-tramp%d" oName ^{:go/via [Reloc]} (.Add r) i)))
+
+                (set! tramp (.LookupOrCreateSym ldr name (.SymVersion ldr rs)))
+                (.SetAttrReachable ldr tramp true)
+                (when (== (.SymType ldr tramp) sym/SDYNIMPORT)
+                  ;; Do not reuse trampoline defined in other module.
+                  (continue))
+
+                (when (== oName "runtime.deferreturn")
+                  (.SetIsDeferReturnTramp ldr tramp true))
+
+                (when (== (.SymValue ldr tramp) 0)
+                  ;; Either trampoline does not exist or we found one
+                  ;; that does not have an address assigned and will be
+                  ;; laid down immediately after the current function.
+                  (break))
+
+
+                (let [trampOff (- (.SymValue ldr tramp) (+ (.SymValue ldr s) (conv int64 ^{:go/via [Reloc]} (.Off r))))]
+                  (when (and (>= trampOff (- (<< 1 20))) (< trampOff (<< 1 20)))
+                    ;; An existing trampoline that is reachable.
+                    (break)))))
+
+
+            (when (== (.SymType ldr tramp) 0)
+              (let [trampb (.MakeSymbolUpdater ldr tramp)]
+                (.AddTramp ctxt trampb (.SymType ldr s))
+                (genCallTramp ^{:go/via [Target]} (.-Arch ctxt) ^{:go/via [Target]} (.-LinkMode ctxt) ldr trampb rs ^{:go/via [Reloc]} (.Add r))))
+
+            (let [sb (.MakeSymbolUpdater ldr s)]
+              (when (== (.SymValue ldr rs) 0)
+                ;; In this case the target symbol has not yet been assigned an
+                ;; address, so we have to assume a trampoline is required. Mark
+                ;; this as a call via a trampoline so that we can potentially
+                ;; switch to a direct call during relocation.
+                (.SetRelocType sb ri objabi/R_RISCV_JAL_TRAMP))
+
+              (let [relocs (.Relocs sb)
+                  ^{:line 758} r (.At relocs ri)]
+                (.SetSym r tramp)
+                ^{:go/via [Reloc]} (.SetAdd r 0))))))
+
+      (case [objabi/R_RISCV_CALL])
+      ;; Nothing to do, already using AUIPC+JALR.
+
+      (default
+        (.Errorf ctxt s "trampoline called with non-jump reloc: %d (%s)" (.Type r) (sym/RelocName ^{:go/via [Target]} (.-Arch ctxt) (.Type r)))))))
+
+
+
+^{:go/end 778} (go/func genCallTramp [^{:tag (* sys/Arch)} arch ^ld/LinkMode linkmode ^{:tag (* loader/Loader)} ldr ^{:tag (* loader/SymbolBuilder)} tramp ^loader/Sym target ^int64 offset]
+  (.AddUint32 tramp arch 0x00000f97) ; AUIPC	$0, X31
+  (.AddUint32 tramp arch 0x000f8067) ; JALR	X0, (X31)
+
+  (let [(values r _) (.AddRel tramp objabi/R_RISCV_CALL)]
+    ^{:go/via [Reloc]} (.SetSiz r 8)
+    (.SetSym r target)
+    ^{:go/via [Reloc]} (.SetAdd r offset)))

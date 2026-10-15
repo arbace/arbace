@@ -1,0 +1,353 @@
+;; Copyright 2023 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.cmd.compile.internal.inline.inlheur) (go/file "analyze_func_params.go" :imports [
+
+
+    ^{:line 8} [ir "cmd/compile/internal/ir"]
+    ^{:line 9} [fmt "fmt"]
+    ^{:line 10} [os "os"]])
+
+
+
+
+
+(go/type paramsAnalyzer "paramsAnalyzer holds state information for the phase that computes\nflags for a Go functions parameters, for use in inline heuristics.\nNote that the params slice below includes entries for blanks.\n" (struct
+    ^{:line 17 :tag string} fname
+    ^{:line 18 :tag (slice ParamPropBits)} values
+    ^{:line 19 :tag (slice (* ir/Name))} params
+    ^{:line 20 :tag (slice bool)} top
+    (* condLevelTracker)
+    (* nameFinder)))
+
+
+
+
+^{:go/end 31} (go/func getParams "getParams returns an *ir.Name slice containing all params for the\nfunction (plus rcvr as well if applicable).\n" ^{:tag (slice (* ir/Name))} [^{:tag (* ir/Func)} fn]
+  (let [sig (.Type fn)
+      ^{:line 29} numParams (+ (.NumRecvs sig) (.NumParams sig))]
+    (subslice (.-Dcl fn) _ numParams)))
+
+
+
+
+
+
+
+^{:go/end 46} (go/func addParamsAnalyzer "addParamsAnalyzer creates a new paramsAnalyzer helper object for\nthe function fn, appends it to the analyzers list, and returns the\nnew list. If the function in question doesn't have any interesting\nparameters then the analyzer list is returned unchanged, and the\nparams flags in \"fp\" are updated accordingly.\n" ^{:tag (slice propAnalyzer)} [^{:tag (* ir/Func)} fn ^{:tag (slice propAnalyzer)} analyzers ^{:tag (* FuncProps)} fp ^{:tag (* nameFinder)} nf]
+  (let [(values pa props) (makeParamsAnalyzer fn nf)]
+    (if (!= pa nil)
+      (set! analyzers (append analyzers pa))
+
+      (set! (.-ParamFlags fp) props))
+
+    ^{:line 45} analyzers))
+
+
+
+
+
+
+^{:go/end 105} (go/func makeParamsAnalyzer "makeParamsAnalyzer creates a new helper object to analyze parameters\nof function fn. If the function doesn't have any interesting\nparams, a nil helper is returned along with a set of default param\nflags for the func.\n" [^{:tag (* ir/Func)} fn ^{:tag (* nameFinder)} nf] :results [(* paramsAnalyzer) (slice ParamPropBits)]
+  (let [params (getParams fn)] ; includes receiver if applicable
+    (when (== (len params) 0)
+      (return nil nil))
+
+    (let [vals (make (slice ParamPropBits) (len params))]
+      (when (== (.-Inl fn) nil)
+        (return nil vals))
+
+      (let [top (make (slice bool) (len params))
+          ^{:line 62} interestingToAnalyze false]
+        (range [i pn params]
+          (when (== pn nil)
+            (continue))
+
+          (let [pt ^{:go/via [miniExpr]} (.Type pn)]
+            (when (and (not (.IsScalar pt)) (not (.HasNil pt)))
+              ;; existing properties not applicable here (for things
+              ;; like structs, arrays, slices, etc).
+              (continue))
+
+            ;; If param is reassigned, skip it.
+            (when (ir/Reassigned pn)
+              (continue))
+
+            (aset top i true)
+            (set! interestingToAnalyze true)))
+
+        (when (not interestingToAnalyze)
+          (return nil vals))
+
+
+        (when (!= (bit-and debugTrace debugTraceParams) 0)
+          (fmt/Fprintf os/Stderr "=-= param analysis of func %v:\n"
+            (.-Name (.Sym fn)))
+          (range [i vals]
+            (let [n "_"]
+              (when (!= (aget params i) nil)
+                (set! n (.String (.Sym (aget params i)))))
+
+              (fmt/Fprintf os/Stderr "=-=  %d: %q %s top=%v\n"
+                ^{:line 93} i n (.String (aget vals i)) (aget top i)))))
+
+
+        (let [pa (addr ^{:go/breaks [2 4 6 8 10 12]} (lit paramsAnalyzer
+                :fname (.-Name (.Sym fn))
+                :values vals
+                :params params
+                :top top
+                :condLevelTracker (new condLevelTracker)
+                :nameFinder nf))]
+
+          (return pa nil))))))
+
+
+^{:go/end 109} (go/method setResults [^{:tag (* paramsAnalyzer)} pa ^{:tag (* FuncProps)} funcProps]
+  (set! (.-ParamFlags funcProps) (.-values pa)))
+
+
+^{:go/breaks [[5 120]] :go/end 121} (go/method findParamIdx ^int [^{:tag (* paramsAnalyzer)} pa ^{:tag (* ir/Name)} n]
+  (when (== n nil)
+    (panic "bad"))
+
+  (range [i (.-params pa)]
+    (when (== (aget (.-params pa) i) n)
+      (return i)))
+
+
+  -1)
+
+
+(go/type testfType (func [^ir/Node x ^{:tag (* ir/Name)} param ^int idx] [bool bool]))
+
+
+
+
+^{:go/end 146} (go/method checkParams "checkParams invokes function 'testf' on the specified expression 'x'\nfor each parameter. If the result is TRUE, it OR's either 'flag' or 'mayflag'\ninto the flags for that param, depending on whether we are in a conditional context.\n" [^{:tag (* paramsAnalyzer)} pa ^ir/Node x ^ParamPropBits flag ^ParamPropBits mayflag ^testfType testf]
+  (range [idx p (.-params pa)]
+    (when (and (not (aget (.-top pa) idx)) (== (aget (.-values pa) idx) ParamNoInfo))
+      (continue))
+
+    (let [(values result may) (testf x p idx)]
+      (when (!= (bit-and debugTrace debugTraceParams) 0)
+        (fmt/Fprintf os/Stderr "=-= test expr %v param %s result=%v flag=%s\n" x (.-Name (.Sym p)) result (.String flag)))
+
+      (when result
+        (let [v flag]
+          (when (or (!= ^{:go/via [condLevelTracker]} (.-condLevel pa) 0) may)
+            (set! v mayflag))
+
+          (set! (aget (.-values pa) idx) bit-or v)
+          (aset (.-top pa) idx false))))))
+
+
+
+
+
+
+
+^{:go/end 156} (go/method foldCheckParams "foldCheckParams checks expression 'x' (an 'if' condition or\n'switch' stmt expr) to see if the expr would fold away if a\nspecific parameter had a constant value.\n" [^{:tag (* paramsAnalyzer)} pa ^ir/Node x]
+  (.checkParams pa x ParamFeedsIfOrSwitch ParamMayFeedIfOrSwitch
+    ^{:go/end 155} (fn [^ir/Node x ^{:tag (* ir/Name)} p ^int idx] :results [bool bool]
+      (return (ShouldFoldIfNameConstant x (lit (slice (* ir/Name)) p)) false))))
+
+
+
+
+
+^{:go/end 204} (go/method callCheckParams "callCheckParams examines the target of call expression 'ce' to see\nif it is making a call to the value passed in for some parameter.\n" [^{:tag (* paramsAnalyzer)} pa ^{:tag (* ir/CallExpr)} ce]
+  (switch ^{:go/via [miniExpr miniNode]} (.Op ce)
+    (case [ir/OCALLINTER]
+      (when (!= ^{:go/via [miniExpr miniNode]} (.Op ce) ir/OCALLINTER)
+        (return))
+
+      (let [sel (assert (* ir/SelectorExpr) (.-Fun ce))
+          ^{:line 167} r ^{:go/via [nameFinder]} (.staticValue pa (.-X sel))]
+        (when (!= (.Op r) ir/ONAME)
+          (return))
+
+        (let [name (assert (* ir/Name) r)]
+          (when (!= (.-Class name) ir/PPARAM)
+            (return))
+
+          (.checkParams pa r ParamFeedsInterfaceMethodCall
+            ^{:line 176} ParamMayFeedInterfaceMethodCall
+            ^{:go/end 180} (fn [^ir/Node x ^{:tag (* ir/Name)} p ^int idx] :results [bool bool]
+              (let [name (assert (* ir/Name) x)]
+                (return (== name p) false)))))))
+
+    (case [ir/OCALLFUNC]
+      (when (!= (.Op (.-Fun ce)) ir/ONAME)
+        (return))
+
+      (let [called (ir/StaticValue (.-Fun ce))]
+        (when (!= (.Op called) ir/ONAME)
+          (return))
+
+        (let [name (assert (* ir/Name) called)]
+          (if (== (.-Class name) ir/PPARAM)
+            (.checkParams pa called ParamFeedsIndirectCall
+              ^{:line 192} ParamMayFeedIndirectCall
+              ^{:go/end 196} (fn [^ir/Node x ^{:tag (* ir/Name)} p ^int idx] :results [bool bool]
+                (let [name (assert (* ir/Name) x)]
+                  (return (== name p) false))))
+
+
+            (let [cname ^{:go/via [nameFinder]} (.funcName pa called)]
+              (when (!= cname nil)
+                (.deriveFlagsFromCallee pa ce (.-Func cname))))))))))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 280} (go/method deriveFlagsFromCallee "deriveFlagsFromCallee tries to derive flags for the current\nfunction based on a call this function makes to some other\nfunction. Example:\n\n\t/* Simple */                /* Derived from callee */\n\tfunc foo(f func(int)) {     func foo(f func(int)) {\n\t  f(2)                        bar(32, f)\n\t}                           }\n\t                            func bar(x int, f func()) {\n\t                              f(x)\n\t                            }\n\nHere we can set the \"param feeds indirect call\" flag for\nfoo's param 'f' since we know that bar has that flag set for\nits second param, and we're passing that param a function.\n" [^{:tag (* paramsAnalyzer)} pa ^{:tag (* ir/CallExpr)} ce ^{:tag (* ir/Func)} callee]
+  (let [calleeProps (propsForFunc callee)]
+    (when (== calleeProps nil)
+      (return))
+
+    (when (!= (bit-and debugTrace debugTraceParams) 0)
+      (fmt/Fprintf os/Stderr "=-= callee props for %v:\n%s"
+        (.-Name (.Sym callee)) (.String calleeProps)))
+
+
+    (let [must (lit (slice ParamPropBits) ParamFeedsInterfaceMethodCall ParamFeedsIndirectCall ParamFeedsIfOrSwitch)
+        ^{:line 232} may (lit (slice ParamPropBits) ParamMayFeedInterfaceMethodCall ParamMayFeedIndirectCall ParamMayFeedIfOrSwitch)]
+
+      (range [pidx arg (.-Args ce)]
+        ;; Does the callee param have any interesting properties?
+        ;; If not we can skip this one.
+        (let [pflag (aget (.-ParamFlags calleeProps) pidx)]
+          (when (== pflag 0)
+            (continue))
+
+          ;; See if one of the caller's parameters is flowing unmodified
+          ;; into this actual expression.
+          (let [r ^{:go/via [nameFinder]} (.staticValue pa arg)]
+            (when (!= (.Op r) ir/ONAME)
+              (return))
+
+            (let [name (assert (* ir/Name) r)]
+              (when (!= (.-Class name) ir/PPARAM)
+                (return))
+
+              (let [callerParamIdx (.findParamIdx pa name)]
+                ;; note that callerParamIdx may return -1 in the case where
+                ;; the param belongs not to the current closure func we're
+                ;; analyzing but to an outer enclosing func.
+                (when (== callerParamIdx -1)
+                  (return))
+
+                (when (== (aget (.-params pa) callerParamIdx) nil)
+                  (panic "something went wrong"))
+
+                (when (and (not (aget (.-top pa) callerParamIdx))
+                    (== (aget (.-values pa) callerParamIdx) ParamNoInfo))
+                  (continue))
+
+                (when (!= (bit-and debugTrace debugTraceParams) 0)
+                  (fmt/Fprintf os/Stderr "=-= pflag for arg %d is %s\n"
+                    ^{:line 267} pidx (.String pflag)))
+
+                (range [i must]
+                  (let [mayv (aget may i)
+                      ^{:line 271} mustv (aget must i)]
+                    (cond (and (!= (bit-and pflag mustv) 0) (== ^{:go/via [condLevelTracker]} (.-condLevel pa) 0))
+                      (set! (aget (.-values pa) callerParamIdx) bit-or mustv)
+                      (!= (bit-and pflag (bit-or mustv mayv)) 0)
+                      (set! (aget (.-values pa) callerParamIdx) bit-or mayv))))
+
+
+                (aset (.-top pa) callerParamIdx false)))))))))
+
+
+
+^{:go/end 303} (go/method nodeVisitPost [^{:tag (* paramsAnalyzer)} pa ^ir/Node n]
+  (when (== (len (.-values pa)) 0)
+    (return))
+
+  (.post (.-condLevelTracker pa) n)
+  (switch (.Op n)
+    (case [ir/OCALLFUNC]
+      (let [ce (assert (* ir/CallExpr) n)]
+        (.callCheckParams pa ce)))
+    (case [ir/OCALLINTER]
+      (let [ce (assert (* ir/CallExpr) n)]
+        (.callCheckParams pa ce)))
+    (case [ir/OIF]
+      (let [ifst (assert (* ir/IfStmt) n)]
+        (.foldCheckParams pa (.-Cond ifst))))
+    (case [ir/OSWITCH]
+      (let [swst (assert (* ir/SwitchStmt) n)]
+        (when (!= (.-Tag swst) nil)
+          (.foldCheckParams pa (.-Tag swst)))))))
+
+
+
+
+^{:go/end 310} (go/method nodeVisitPre [^{:tag (* paramsAnalyzer)} pa ^ir/Node n]
+  (when (== (len (.-values pa)) 0)
+    (return))
+
+  (.pre (.-condLevelTracker pa) n))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+(go/type condLevelTracker "condLevelTracker helps keeps track very roughly of \"level of conditional\nnesting\", e.g. how many \"if\" statements you have to go through to\nget to the point where a given stmt executes. Example:\n\n\t                      cond nesting level\n\tfunc foo() {\n\t G = 1                   0\n\t if x < 10 {             0\n\t  if y < 10 {            1\n\t   G = 0                 2\n\t  }\n\t }\n\t}\n\nThe intent here is to provide some sort of very abstract relative\nhotness metric, e.g. \"G = 1\" above is expected to be executed more\noften than \"G = 0\" (in the aggregate, across large numbers of\nfunctions).\n" (struct
+    ^{:line 331 :tag int} condLevel))
+
+
+^{:go/end 344} (go/method pre [^{:tag (* condLevelTracker)} c ^ir/Node n]
+  ;; Increment level of "conditional testing" if we see
+  ;; an "if" or switch statement, and decrement if in
+  ;; a loop.
+  (switch (.Op n)
+    (case [ir/OIF ir/OSWITCH]
+      (inc! (.-condLevel c)))
+    (case [ir/OFOR ir/ORANGE]
+      (dec! (.-condLevel c)))))
+
+
+
+^{:go/end 355} (go/method post [^{:tag (* condLevelTracker)} c ^ir/Node n]
+  (switch (.Op n)
+    (case [ir/OFOR ir/ORANGE]
+      (inc! (.-condLevel c)))
+    (case [ir/OIF]
+      (dec! (.-condLevel c)))
+    (case [ir/OSWITCH]
+      (dec! (.-condLevel c)))))

@@ -1,0 +1,888 @@
+;; Copyright 2025 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.cmd.compile.internal.ssa) (go/file "merge_conditional_branches.go" :imports [
+
+
+    ^{:line 8} [types "cmd/compile/internal/types"]])
+
+
+(go/const
+  ^{:line 12} [^{:val -1} InvalidIndex (+ -1 iota)]
+  ^{:line 13} [^{:val 0} TrueConditionSuccIndex] ; Index for true condition successor in block's successor list
+  ^{:line 14} [^{:val 1} FalseConditionSuccIndex]) ; Index for false condition successor in block's successor list
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 81} (go/func mergeConditionalBranches "mergeConditionalBranches performs if-conversion optimization on ARM64 by\ntransforming nested conditional branches into conditional comparison instructions.\n\nThe optimization detects patterns where two consecutive conditional branches\nimplement logical AND/OR operations and replaces them with CCMP/CCMN instructions\nthat execute the second conditionally based on the first comparison result.\n\nTransformation Pattern:\n\nOriginal CFG:\n\n\t  if1 (outer condition)\n\t  /  \\\n\t /    \\\n\t/      if2 (inner condition)\n\t|     /   \\\n\t|    /     \\\n\t|   /       \\\n\tb1 (common)  b2 (target)\n\nTransformed CFG:\n\n\t new_if (conditional comparison)\n\t  /   \\\n\t /     \\\n\t/        p (empty plain block)\n\t|         \\\n\t|          \\\n\t|           \\\n\tb1 (common)  b2 (target)\n\nTransformation Conditions:\n- Both if1 and if2 must be ARM64 conditional blocks\n- if2 must have exactly one predecessor from if1\n- if2 must not contain memory operations or side effects\n- The transformation must preserve phi node consistency in successor blocks\n\nThis optimization eliminates branch mispredictions and improves instruction-level\nparallelism by leveraging ARM64's conditional execution capabilities.\nThe resulting code uses conditional comparison instructions that test the second\ncondition only if the first condition evaluates to a specific value.\n" [^{:tag (* Func)} f]
+  (when (!= (.-arch (.-Config f)) "arm64")
+    (return))
+
+
+  ;; We iterate in postorder to ensure we process inner conditional blocks before
+  ;; their outer counterparts. This is crucial because:
+  ;; 1. Transformations create new conditional comparisons that combine inner and outer conditions
+  ;; 2. Processing inner blocks first ensures we don't miss nested patterns
+  ;; 3. It maintains the integrity of the CFG during transformations
+  ;; Reverse order (from leaves to root) allows safe modification without affecting
+  ;; yet-to-be-processed outer structures.
+  (let [blocks (.postorder f)]
+
+    (range [_ block blocks]
+      ;; outerSuccIndex: index of the outedge from if1 to if2
+      ;; innerSuccIndex: index of the outedge from if2 to b2
+      (let [(values outerSuccIndex innerSuccIndex) (detectNestedIfPattern block)]
+
+        (when (and (!= outerSuccIndex InvalidIndex) (!= innerSuccIndex InvalidIndex))
+          (transformNestedIfPattern block outerSuccIndex innerSuccIndex))))))
+
+
+
+
+
+
+
+^{:go/end 92} (go/func findFirstNonEmptyPlainBlock "findFirstNonEmptyPlainBlock finds the first non-empty block in a chain of empty plain blocks\nstarting from the specified child index of the parent block. It skips over empty blocks\nthat serve only as pass-through nodes in the control flow graph.\n" ^{:tag (* Block)} [^{:tag (* Block)} parentBlock ^int childIndex]
+  (let [childBlock (.Block (aget (.-Succs parentBlock) childIndex))]
+    (while (isEmptyPlainBlock childBlock)
+      (set! childBlock (.Block (aget (.-Succs childBlock) 0))))
+
+    ^{:line 91} childBlock))
+
+
+
+
+
+^{:go/end 101} (go/func isEmptyPlainBlock "isEmptyPlainBlock checks if a block is empty (contains no values), has exactly one\npredecessor and is of kind BlockPlain. Such blocks are typically\nartifacts of previous optimizations and can be safely removed or bypassed.\n" ^bool [^{:tag (* Block)} block]
+  (and (== (.-Kind block) BlockPlain)
+    (== (len (.-Values block)) 0)
+    (== (len (.-Preds block)) 1)))
+
+
+
+
+
+
+^{:go/end 115} (go/func removeEmptyPlainBlockChain "removeEmptyPlainBlockChain removes a chain of empty plain blocks starting from\nthe specified child index of the parent block. It traverses through consecutive\nempty blocks and deletes them from the control flow graph, connecting the parent\ndirectly to the first non-empty block in the chain.\n" ^{:tag (* Block)} [^{:tag (* Block)} parentBlock ^int childIndex]
+  (let [childBlock (.Block (aget (.-Succs parentBlock) childIndex))]
+    (while (isEmptyPlainBlock childBlock)
+      (let [nextBlock (.Block (aget (.-Succs childBlock) 0))]
+        (removeEmptyPlainBlock childBlock)
+        (set! childBlock nextBlock)))
+
+    ^{:line 114} childBlock))
+
+
+
+
+
+^{:go/end 130} (go/func removeEmptyPlainBlock "removeEmptyPlainBlock removes a single empty plain block from the control flow graph.\nIt connects the block's predecessor directly to its successor, effectively bypassing\nthe empty block, and then marks the block as invalid for future cleanup.\n" [^{:tag (* Block)} block]
+  (let [prevEdge (aget (.-Preds block) 0)
+      ^{:line 122} nextEdge (aget (.-Succs block) 0)]
+
+    (aset (.-Succs (.-b prevEdge)) (.-i prevEdge) nextEdge)
+    (aset (.-Preds (.-b nextEdge)) (.-i nextEdge) prevEdge)
+
+    (.removePred block 0)
+    (.removeSucc block 0)
+    (.Reset block BlockInvalid)))
+
+
+
+
+
+
+
+^{:go/end 226} (go/func detectNestedIfPattern "detectNestedIfPattern detects nested if patterns that can be transformed to conditional comparisons.\nIt examines the outer block to see if it contains a nested conditional structure that matches\nthe pattern for if-conversion. Returns the outer successor index (which branch contains the\nnested condition) and internal successor index (which branch of the nested condition leads to\nthe common merge point), or InvalidIndex if no pattern is detected.\n" [^{:tag (* Block)} outerBlock] :results [int int]
+  (when (not (isIfBlock outerBlock))
+    ;; outerBlock doesn't contain comparison
+    (return InvalidIndex InvalidIndex))
+
+
+  ;; Skip empty blocks to find actual conditional targets
+  ;; Empty plain blocks are often inserted by previous optimizations
+  (let [thenBlock (findFirstNonEmptyPlainBlock outerBlock TrueConditionSuccIndex)
+      ^{:line 146} elseBlock (findFirstNonEmptyPlainBlock outerBlock FalseConditionSuccIndex)]
+    (when (== thenBlock elseBlock)
+      ;; Both branches lead to the same block, cannot transform
+      (return InvalidIndex InvalidIndex))
+
+
+    ;; Check for cyclic patterns where a condition refers back to the original block
+    (cond (== thenBlock outerBlock)
+      ;; True branch forms a cycle back to outerBlock
+      (return (detectCyclePattern outerBlock FalseConditionSuccIndex))
+      (== elseBlock outerBlock)
+      ;; False branch forms a cycle back to outerBlock
+      (return (detectCyclePattern outerBlock TrueConditionSuccIndex)))
+
+
+    (let [outerSuccIndex InvalidIndex]
+
+      ;; Check if the true branch contains a nested conditional that can be moved
+      (cond (and (== (len (.-Preds thenBlock)) 1)
+          (isIfBlock thenBlock)
+          (canValuesBeMoved thenBlock))
+        ;; True branch contains a valid nested condition
+        (set! outerSuccIndex TrueConditionSuccIndex)
+        (and (== (len (.-Preds elseBlock)) 1)
+          (isIfBlock elseBlock)
+          (canValuesBeMoved elseBlock))
+        ;; False branch contains a valid nested condition
+        (set! outerSuccIndex FalseConditionSuccIndex) :else
+
+        ;; This chain of blocks is not in pattern.
+        (return InvalidIndex InvalidIndex))
+
+
+      ;; Tree structure:
+      ;;
+      ;;                outerBlock
+      ;;                 /      \
+      ;;                /        \
+      ;;     commonBothBlock   innerBlock
+      ;;                        /     \
+      ;;                       /       \
+      ;;                 thenBlock    elseBlock
+      ;;
+      ;; outerBlock: The outer conditional block being examined
+      ;; innerBlock: The inner conditional block (nested condition)
+      ;; commonBothBlock: The block reached when the outer condition is not met
+      ;; thenBlock/elseBlock: Successors of the inner conditional block
+      (let [innerBlock (findFirstNonEmptyPlainBlock outerBlock outerSuccIndex)
+          ^{:line 194} commonBothBlock (findFirstNonEmptyPlainBlock outerBlock (bit-xor outerSuccIndex 1))]
+        (set! thenBlock (findFirstNonEmptyPlainBlock innerBlock TrueConditionSuccIndex))
+        (set! elseBlock (findFirstNonEmptyPlainBlock innerBlock FalseConditionSuccIndex))
+
+        ;; Determine which inner branch leads to the common merge point
+        ;; This identifies the index to NOT common merge point
+        (let [^:var innerSuccIndex InvalidIndex]
+          (switch commonBothBlock
+            (case [elseBlock]
+              ;; Pattern: (if1 && if2) or (!if1 && if2)
+              ;; False branch of if2 leads to commonBothBlock,
+              ;; that means True branch leads to b2 (target)
+              (set! innerSuccIndex TrueConditionSuccIndex))
+            (case [thenBlock]
+              ;; Pattern: (if1 && !if2) or (!if1 && !if2)
+              ;; True branch of if2 leads to commonBothBlock,
+              ;; that means False branch leads to b2 (target)
+              (set! innerSuccIndex FalseConditionSuccIndex))
+            (default
+              ;; No pattern are matched
+              (return InvalidIndex InvalidIndex)))
+
+
+          ;; Critical check: ensure phi nodes in merge blocks have consistent values
+          ;; This guarantees semantic preservation after transformation
+          (let [outToCommonIndex (bit-xor outerSuccIndex 1) ; index of the outedge from outerBlock to commonBothBlock
+              ^{:line 220} inToCommonIndex (bit-xor innerSuccIndex 1)] ; index of the outedge from innerBlock to commonBothBlock
+            (when (not (checkSameValuesInPhiNodes outerBlock innerBlock outToCommonIndex inToCommonIndex))
+              (return InvalidIndex InvalidIndex))
+
+
+            (return outerSuccIndex innerSuccIndex)))))))
+
+
+
+
+
+^{:go/end 267} (go/func detectCyclePattern "detectCyclePattern detects cyclic patterns where a conditional block's successor\nrefers back to the original block. This handles special cases where the control\nflow forms a loop-like structure that can still be optimized with conditional comparisons.\n" [^{:tag (* Block)} outerBlock ^int outSuccIndex] :results [int int]
+  (let [secondCondBlock (findFirstNonEmptyPlainBlock outerBlock outSuccIndex)]
+
+    (when (or (!= (len (.-Preds secondCondBlock)) 1)
+        (!= (len (.-Succs secondCondBlock)) 2)
+        (not (isIfBlock secondCondBlock))
+        (not (canValuesBeMoved secondCondBlock)))
+      (return InvalidIndex InvalidIndex))
+
+
+    (let [thenBlock (findFirstNonEmptyPlainBlock secondCondBlock TrueConditionSuccIndex)
+        ^{:line 242} elseBlock (findFirstNonEmptyPlainBlock secondCondBlock FalseConditionSuccIndex)]
+
+      (when (== thenBlock elseBlock)
+        ;; Both branches pointing to same block indicates degenerate case
+        (return InvalidIndex InvalidIndex))
+
+
+      ;; Check if the cycle connects back to the original block and verify phi consistency
+      (switch outerBlock
+        (case [thenBlock]
+          ;; True branch of inner condition leads back to outerBlock
+          (when (not (checkSameValuesInPhiNodes outerBlock thenBlock (bit-xor outSuccIndex 1) TrueConditionSuccIndex))
+            (return InvalidIndex InvalidIndex))
+
+          (return outSuccIndex FalseConditionSuccIndex))
+        (case [elseBlock]
+          ;; False branch of inner condition leads back to outerBlock
+          (when (not (checkSameValuesInPhiNodes outerBlock elseBlock (bit-xor outSuccIndex 1) FalseConditionSuccIndex))
+            (return InvalidIndex InvalidIndex))
+
+          (return outSuccIndex TrueConditionSuccIndex))
+        (default
+          ;; Pattern was not found
+          (return InvalidIndex InvalidIndex))))))
+
+
+
+
+
+
+
+^{:go/end 308} (go/func checkSameValuesInPhiNodes "checkSameValuesInPhiNodes checks if phi nodes in merge blocks have the same values\nfor the given successor indices. This ensures that after transformation, phi nodes\nwill receive the correct values from both paths. Returns true if all phi nodes\nhave consistent arguments for the specified paths.\n" ^bool [^{:tag (* Block)} outerBlock ^{:tag (* Block)} innerBlock ^int outToCommonIndex ^int inToCommonIndex]
+  ;; Skip empty blocks to find actual phi-containing merge blocks
+  ;; Empty blocks don't affect phi nodes but complicate path tracking
+  (while (isEmptyPlainBlock (.Block (aget (.-Succs outerBlock) outToCommonIndex)))
+    (set! outerBlock (.Block (aget (.-Succs outerBlock) outToCommonIndex)))
+    (set! outToCommonIndex 0)) ; After empty block, only one path exists
+
+
+  (while (isEmptyPlainBlock (.Block (aget (.-Succs innerBlock) inToCommonIndex)))
+    (set! innerBlock (.Block (aget (.-Succs innerBlock) inToCommonIndex)))
+    (set! inToCommonIndex 0)) ; After empty block, only one path exists
+
+
+  ;; Both paths must lead to the same merge block for transformation to be valid
+  (when (!= (.Block (aget (.-Succs outerBlock) outToCommonIndex)) (.Block (aget (.-Succs innerBlock) inToCommonIndex)))
+    (panic "checkSameValuesInPhiNodes: paths do not lead to the same merge block - invalid CFG pattern for if-conversion"))
+
+
+  ^{:go/breaks [[3 307]]} (let [argIndex1 (.Index (aget (.-Succs outerBlock) outToCommonIndex))
+      ^{:line 292} argIndex2 (.Index (aget (.-Succs innerBlock) inToCommonIndex))
+
+      ^{:line 294} resultBlock (.Block (aget (.-Succs outerBlock) outToCommonIndex))]
+    (range [_ v (.-Values resultBlock)]
+      (when (!= (.-Op v) OpPhi)
+        (continue))
+
+
+      ;; If phi arguments from different paths don't match,
+      ;; merging the conditions would produce wrong values
+      (when (!= (aget (.-Args v) argIndex1) (aget (.-Args v) argIndex2))
+        (return false)))
+
+
+
+    true))
+
+
+
+
+
+
+^{:go/breaks [[5 320]] :go/end 321} (go/func canValuesBeMoved "canValuesBeMoved checks if all values in a block can be safely moved to another block.\nThis is necessary because during transformation, values from the inner conditional\nblock are moved to the outer block. Values with side effects, memory operations,\nor phi nodes cannot be moved.\n" ^bool [^{:tag (* Block)} b]
+  (range [_ v (.-Values b)]
+    (when (not (canValueBeMoved v))
+      (return false)))
+
+
+  true)
+
+
+
+
+
+^{:go/breaks [[9 342]] :go/end 343} (go/func canValueBeMoved "canValueBeMoved checks if a single value can be safely moved to another block.\nReturns false for values that have side effects, are memory operations, phi nodes,\nor nil checks, as moving these could change program semantics.\n" ^bool [^{:tag (* Value)} v]
+  (when (== (.-Op v) OpPhi)
+    (return false))
+
+  (when (.IsMemory (.-Type v))
+    (return false))
+
+  (when (.HasSideEffects (.-Op v))
+    (return false))
+
+  (when (.-nilCheck (aget opcodeTable (.-Op v)))
+    (return false))
+
+  (when (!= (.MemoryArg v) nil)
+    (return false))
+
+  true)
+
+
+
+
+
+^{:go/end 369} (go/func isIfBlock "isIfBlock checks if a block is a conditional block that can participate in\nif-conversion. This includes all ARM64 conditional block kinds (EQ, NE, LT, etc.)\nand zero/non-zero test blocks (Z, NZ, ZW, NZW).\n" ^bool [^{:tag (* Block)} b]
+  (switch (.-Kind b)
+    (case [BlockARM64EQ
+        ^{:line 351} BlockARM64NE
+        ^{:line 352} BlockARM64LT
+        ^{:line 353} BlockARM64LE
+        ^{:line 354} BlockARM64GT
+        ^{:line 355} BlockARM64GE
+        ^{:line 356} BlockARM64ULT
+        ^{:line 357} BlockARM64ULE
+        ^{:line 358} BlockARM64UGT
+        ^{:line 359} BlockARM64UGE]
+      (return (isComparisonOperation (aget (.-Controls b) 0))))
+    (case [BlockARM64Z
+        ^{:line 362} BlockARM64NZ
+        ^{:line 363} BlockARM64ZW
+        ^{:line 364} BlockARM64NZW]
+      (return true))
+    (default
+      (return false))))
+
+
+
+
+
+
+^{:go/end 395} (go/func isComparisonOperation "isComparisonOperation checks if a value represents a comparison operation\nthat can be used in conditional execution. Also ensures the value has only\none use to prevent unexpected side effects from transformation.\n" ^bool [^{:tag (* Value)} value]
+  (when (!= (.-Uses value) 1)
+    ;; This value can be transformed to another value.
+    ;; New value can get another results, not which are expected.
+    ;; That why we need to check this case.
+    (return false))
+
+
+  (switch (.-Op value)
+    (case [OpARM64CMP
+        ^{:line 384} OpARM64CMPconst
+        ^{:line 385} OpARM64CMN
+        ^{:line 386} OpARM64CMNconst
+        ^{:line 387} OpARM64CMPW
+        ^{:line 388} OpARM64CMPWconst
+        ^{:line 389} OpARM64CMNW
+        ^{:line 390} OpARM64CMNWconst]
+      (return true))
+    (default
+      (return false))))
+
+
+
+
+
+
+
+^{:go/end 420} (go/func transformNestedIfPattern "transformNestedIfPattern transforms a detected nested if pattern into a\nconditional comparison. This is the main transformation function that\ncoordinates all the steps needed to convert the nested conditionals into\na single conditional comparison instruction.\n" [^{:tag (* Block)} outerBlock ^int outSuccIndex ^int inSuccIndex]
+  (clearPatternFromEmptyPlainBlocks outerBlock outSuccIndex)
+  (let [innerBlock (.Block (aget (.-Succs outerBlock) outSuccIndex))]
+
+    ;; Transform the control flow step by step:
+    ;; 1. Transform primary comparison to standard form if needed
+    ;; 2. Transform dependent comparison to work with conditional execution
+    ;; 3. Convert to conditional comparison operation (CCMP/CCMN)
+    ;; 4. Fix comparisons with constants to use constant forms when possible
+    ;; 5. Set the new control value for the transformed block
+    ;; 6. Move all values from inner block to outer block
+    ;; 7. Eliminate the now-redundant nested block
+    (transformPrimaryComparisonValue outerBlock)
+    (transformDependentComparisonValue innerBlock)
+    (transformToConditionalComparisonValue outerBlock outSuccIndex inSuccIndex)
+    (fixComparisonWithConstant innerBlock outSuccIndex)
+    (setNewControlValue outerBlock innerBlock outSuccIndex inSuccIndex)
+    (moveAllValues outerBlock innerBlock)
+    (elimNestedBlock innerBlock inSuccIndex)))
+
+
+
+
+^{:go/end 430} (go/func clearPatternFromEmptyPlainBlocks "clearPatternFromEmptyPlainBlocks removes all empty plain blocks from the\ndetected pattern to simplify the control flow graph before transformation.\n" [^{:tag (* Block)} outerBlock ^int outSuccIndex]
+  (let [innerBlock (removeEmptyPlainBlockChain outerBlock outSuccIndex)]
+    (removeEmptyPlainBlockChain outerBlock (bit-xor outSuccIndex 1))
+
+    (removeEmptyPlainBlockChain innerBlock TrueConditionSuccIndex)
+    (removeEmptyPlainBlockChain innerBlock FalseConditionSuccIndex)))
+
+
+
+
+
+^{:go/end 441} (go/func moveAllValues "moveAllValues moves all values from the source block to the destination block.\nThis is used to consolidate the computations from the inner conditional block\ninto the outer block as part of the if-conversion process.\n" [^{:tag (* Block)} dest ^{:tag (* Block)} src]
+  (range [_ value (.-Values src)]
+    (set! (.-Block value) dest)
+    (set! (.-Values dest) (append (.-Values dest) value)))
+
+  (.truncateValues src 0))
+
+
+
+
+
+^{:go/end 464} (go/func elimNestedBlock "elimNestedBlock eliminates a nested block that has been incorporated into\nthe outer block through if-conversion. It removes the specified successor\nedge and updates phi nodes in the target block to remove the corresponding argument.\n" [^{:tag (* Block)} b ^int index]
+  (let [removedEdge (aget (.-Succs b) (bit-xor index 1))
+
+      ^{:line 449} notBothMetBlock (.Block removedEdge)
+      ^{:line 450} i (.Index removedEdge)]
+
+    (.removeSucc b (bit-xor index 1))
+    (.removePred notBothMetBlock i)
+    (range [_ v (.-Values notBothMetBlock)]
+      (when (!= (.-Op v) OpPhi)
+        (continue))
+
+      (.removePhiArg notBothMetBlock v i))
+
+
+    (.invalidateCFG (.-Func b))
+    (.Reset b BlockPlain)
+    (set! (.-Likely b) BranchUnknown)))
+
+
+
+
+
+^{:go/end 475} (go/func setNewControlValue "setNewControlValue sets the new control value for the transformed block\nbased on the inner block's control value. It also updates the branch\nlikelihood based on the original block's branch prediction.\n" [^{:tag (* Block)} outerBlock ^{:tag (* Block)} innerBlock ^int outSuccIndex ^int inSuccIndex]
+  (.resetWithControl outerBlock (.-Kind innerBlock) (aget (.-Controls innerBlock) 0))
+  (when (or (not (isBranchLikelyConsistentWithIndex outerBlock outSuccIndex))
+      (not (isBranchLikelyConsistentWithIndex innerBlock inSuccIndex)))
+    (set! (.-Likely outerBlock) BranchUnknown)))
+
+
+
+
+
+^{:go/breaks [[5 485]] :go/end 486} (go/func isBranchLikelyConsistentWithIndex "isBranchLikelyConsistentWithIndex checks if the branch likelihood matches the expected\nindex. Returns true if the likelihood is consistent with the branch direction.\n" ^bool [^{:tag (* Block)} b ^int index]
+  (cond (and (== index TrueConditionSuccIndex) (== (.-Likely b) BranchLikely))
+    (return true)
+    (and (== index FalseConditionSuccIndex) (== (.-Likely b) BranchUnlikely))
+    (return true))
+
+  false)
+
+
+
+
+
+^{:go/end 512} (go/func transformPrimaryComparisonValue "transformPrimaryComparisonValue transforms special block kinds (Z, NZ, ZW, NZW)\ninto standard comparison operations. These block kinds test for zero/non-zero\nand need to be converted to explicit comparisons with zero for conditional execution.\n" [^{:tag (* Block)} block]
+  (switch (.-Kind block)
+    (case [BlockARM64Z]
+      (let [arg0 (aget (.-Controls block) 0)
+          ^{:line 495} controlValue (.NewValue1I block (.-Pos arg0) OpARM64CMPconst types/TypeFlags 0 arg0)]
+        (.resetWithControl block BlockARM64EQ controlValue)))
+    (case [BlockARM64NZ]
+      (let [arg0 (aget (.-Controls block) 0)
+          ^{:line 499} controlValue (.NewValue1I block (.-Pos arg0) OpARM64CMPconst types/TypeFlags 0 arg0)]
+        (.resetWithControl block BlockARM64NE controlValue)))
+    (case [BlockARM64ZW]
+      (let [arg0 (aget (.-Controls block) 0)
+          ^{:line 503} controlValue (.NewValue1I block (.-Pos arg0) OpARM64CMPWconst types/TypeFlags 0 arg0)]
+        (.resetWithControl block BlockARM64EQ controlValue)))
+    (case [BlockARM64NZW]
+      (let [arg0 (aget (.-Controls block) 0)
+          ^{:line 507} controlValue (.NewValue1I block (.-Pos arg0) OpARM64CMPWconst types/TypeFlags 0 arg0)]
+        (.resetWithControl block BlockARM64NE controlValue)))
+    (default
+      (return))))
+
+
+
+
+
+
+^{:go/end 584} (go/func transformDependentComparisonValue "transformDependentComparisonValue transforms the comparison in the dependent\n(inner) block to prepare it for conditional execution. This involves converting\nconstant comparisons to register comparisons and handling special block kinds.\n" [^{:tag (* Block)} block]
+  (let [typ (addr (.-Types (.-Config (.-Func block))))]
+
+    (switch (.-Kind block)
+      (case [BlockARM64EQ
+          ^{:line 522} BlockARM64NE
+          ^{:line 523} BlockARM64LT
+          ^{:line 524} BlockARM64LE
+          ^{:line 525} BlockARM64GT
+          ^{:line 526} BlockARM64GE
+          ^{:line 527} BlockARM64ULT
+          ^{:line 528} BlockARM64ULE
+          ^{:line 529} BlockARM64UGT
+          ^{:line 530} BlockARM64UGE]
+        (let [value (aget (.-Controls block) 0)]
+
+          (switch (.-Op value)
+            (case [OpARM64CMPconst]
+              (let [arg0 (aget (.-Args value) 0)
+                  ^{:line 536} auxConstant (auxIntToInt64 (.-AuxInt value))]
+                (.reset value OpARM64CMP)
+                (let [constantValue (.constVal (.-Func block) OpARM64MOVDconst (.-UInt64 typ) auxConstant true)]
+                  (.AddArg2 value arg0 constantValue))))
+            (case [OpARM64CMNconst]
+              (let [arg0 (aget (.-Args value) 0)
+                  ^{:line 542} auxConstant (auxIntToInt64 (.-AuxInt value))]
+                (.reset value OpARM64CMN)
+                (let [constantValue (.constVal (.-Func block) OpARM64MOVDconst (.-UInt64 typ) auxConstant true)]
+                  (.AddArg2 value arg0 constantValue))))
+            (case [OpARM64CMPWconst]
+              (let [arg0 (aget (.-Args value) 0)
+                  ^{:line 548} auxConstant (auxIntToInt32 (.-AuxInt value))]
+                (.reset value OpARM64CMPW)
+                (let [constantValue (.constVal (.-Func block) OpARM64MOVDconst (.-UInt64 typ) (conv int64 auxConstant) true)]
+                  (.AddArg2 value arg0 constantValue))))
+            (case [OpARM64CMNWconst]
+              (let [arg0 (aget (.-Args value) 0)
+                  ^{:line 554} auxConstant (auxIntToInt32 (.-AuxInt value))]
+                (.reset value OpARM64CMNW)
+                (let [constantValue (.constVal (.-Func block) OpARM64MOVDconst (.-UInt64 typ) (conv int64 auxConstant) true)]
+                  (.AddArg2 value arg0 constantValue))))
+            (default
+              (return)))))
+
+      (case [BlockARM64Z]
+        (let [arg0 (aget (.-Controls block) 0)
+            ^{:line 563} arg1 (.constVal (.-Func block) OpARM64MOVDconst (.-UInt64 typ) 0 true)
+            ^{:line 564} comparisonValue (.NewValue2 block (.-Pos arg0) OpARM64CMP types/TypeFlags arg0 arg1)]
+          (.resetWithControl block BlockARM64EQ comparisonValue)))
+      (case [BlockARM64NZ]
+        (let [arg0 (aget (.-Controls block) 0)
+            ^{:line 568} arg1 (.constVal (.-Func block) OpARM64MOVDconst (.-UInt64 typ) 0 true)
+            ^{:line 569} comparisonValue (.NewValue2 block (.-Pos arg0) OpARM64CMP types/TypeFlags arg0 arg1)]
+          (.resetWithControl block BlockARM64NE comparisonValue)))
+      (case [BlockARM64ZW]
+        (let [arg0 (aget (.-Controls block) 0)
+            ^{:line 573} arg1 (.constVal (.-Func block) OpARM64MOVDconst (.-UInt64 typ) 0 true)
+            ^{:line 574} comparisonValue (.NewValue2 block (.-Pos arg0) OpARM64CMPW types/TypeFlags arg0 arg1)]
+          (.resetWithControl block BlockARM64EQ comparisonValue)))
+      (case [BlockARM64NZW]
+        (let [arg0 (aget (.-Controls block) 0)
+            ^{:line 578} arg1 (.constVal (.-Func block) OpARM64MOVDconst (.-UInt64 typ) 0 true)
+            ^{:line 579} comparisonValue (.NewValue2 block (.-Pos arg0) OpARM64CMPW types/TypeFlags arg0 arg1)]
+          (.resetWithControl block BlockARM64NE comparisonValue)))
+      (default
+        (panic "Wrong block kind")))))
+
+
+
+
+
+
+^{:go/end 658} (go/func fixComparisonWithConstant "fixComparisonWithConstant optimizes conditional comparisons by converting\nthem to constant forms when one operand is a small constant. This generates\nmore efficient CCMPconst/CCMNconst instructions.\n" [^{:tag (* Block)} block ^int index]
+  ;; Helper function to extract 5-bit immediate from int64 constant (0-31 range)
+  (let [getImm64 ^{:go/end 597} (fn [^int64 auxInt] :results [uint8 bool]
+        (let [imm (auxIntToInt64 auxInt)]
+          (when (== (bit-and-not imm 0x1f) 0)
+            (return (conv uint8 imm) true))
+
+          (return 0 false)))
+
+
+      ;; Helper function to extract 5-bit immediate from int32 constant (0-31 range)
+      ^{:line 600} getImm32 ^{:go/end 606} (fn [^int64 auxInt] :results [uint8 bool]
+        (let [imm (auxIntToInt32 auxInt)]
+          (when (== (bit-and-not imm 0x1f) 0)
+            (return (conv uint8 imm) true))
+
+          (return 0 false)))
+
+
+      ;; Helper function to convert conditional comparison to constant form if possible
+      ;; Algorithm: Check if either operand is a small 5-bit constant (0-31). If found:
+      ;; 1. Convert operation to constant form (CCMP -> CCMPconst, etc.)
+      ;; 2. Set the 'ind' flag for immediate mode
+      ;; 3. When constant is first operand (arg0), swap operands and invert condition
+      ^{:line 613} tryConvertToConstForm ^{:go/end 642} (fn [^{:tag (* Value)} value ^Op newOp ^{:tag (func [int64] [uint8 bool])} getImm]
+        (let [params (.AuxArm64ConditionalParams value)
+            ^{:line 615} arg0 (aget (.-Args value) 0)
+            ^{:line 616} arg1 (aget (.-Args value) 1)
+            ^{:line 617} arg2 (aget (.-Args value) 2)]
+          ;; Check second operand for small constant
+          (when (== (.-Op arg1) OpARM64MOVDconst)
+            (when [(values imm ok) (getImm (.-AuxInt arg1))] ok
+              (.reset value newOp)
+              (set! (.-constValue params) imm)
+              (set! (.-ind params) true)
+              (set! (.-AuxInt value) (arm64ConditionalParamsToAuxInt params))
+              (.AddArg2 value arg0 arg2)
+              (return)))
+
+
+
+          ;; Check first operand for small constant
+          (when (== (.-Op arg0) OpARM64MOVDconst)
+            (when [(values imm ok) (getImm (.-AuxInt arg0))] ok
+              (.reset value newOp)
+              (invertConditionsInBlock block (addr params) index)
+              (set! (.-constValue params) imm)
+              (set! (.-ind params) true)
+              (set! (.-AuxInt value) (arm64ConditionalParamsToAuxInt params))
+              (.AddArg2 value arg1 arg2)
+              (return)))))
+
+
+
+
+      ;; try to convert control value of block to constant form
+      ^{:line 645} controlValue (aget (.-Controls block) 0)]
+    (switch (.-Op controlValue)
+      (case [OpARM64CCMP]
+        (tryConvertToConstForm controlValue OpARM64CCMPconst getImm64))
+      (case [OpARM64CCMN]
+        (tryConvertToConstForm controlValue OpARM64CCMNconst getImm64))
+      (case [OpARM64CCMPW]
+        (tryConvertToConstForm controlValue OpARM64CCMPWconst getImm32))
+      (case [OpARM64CCMNW]
+        (tryConvertToConstForm controlValue OpARM64CCMNWconst getImm32))
+      (default
+        (return)))))
+
+
+
+
+
+
+^{:go/end 670} (go/func invertConditionsInBlock "invertConditionsInBlock inverts the condition in a block and returns updated\nconditional parameters. This is used when swapping operands in constant\noptimizations to maintain correct semantics.\n" [^{:tag (* Block)} block ^{:tag (* arm64ConditionalParams)} params ^int index]
+  (let [invertKind (invertBlockKind (.-Kind block))]
+    (set! (.-Kind block) invertKind)
+    (when (== index FalseConditionSuccIndex)
+      (set! invertKind (negateBlockKind invertKind)))
+
+    (set! (.-nzcv params) (nzcvByBlockKind invertKind))))
+
+
+
+
+
+
+^{:go/end 704} (go/func transformToConditionalComparisonValue "transformToConditionalComparisonValue transforms the comparison operations\nto conditional comparison operations (CCMP/CCMN). This is the core transformation\nthat creates the conditional execution pattern by combining the outer and inner\nconditions into a single conditional comparison instruction.\n" [^{:tag (* Block)} outerBlock ^int outSuccIndex ^int inSuccIndex]
+  (let [innerBlock (.Block (aget (.-Succs outerBlock) outSuccIndex))]
+
+    ;; Adjust block kinds and successors if needed to match expected pattern
+    (when (!= outSuccIndex inSuccIndex)
+      (set! (.-Kind outerBlock) (negateBlockKind (.-Kind outerBlock)))
+      (.swapSuccessors outerBlock)
+      (set! outSuccIndex bit-xor 1))
+
+
+    (let [outerControl (aget (.-Controls outerBlock) 0)
+        ^{:line 687} outerKind (.-Kind outerBlock)
+
+        ^{:line 689} innerControl (aget (.-Controls innerBlock) 0)
+        ^{:line 690} innerKind (.-Kind innerBlock)]
+
+      ;; Adjust conditions based on successor index
+      (when (== outSuccIndex FalseConditionSuccIndex)
+        (set! outerKind (negateBlockKind outerKind))
+        (set! innerKind (negateBlockKind innerKind)))
+
+
+      ;; Get conditional parameters and transform the operation
+      (let [params (createConditionalParamsByBlockKind outerKind innerKind)]
+
+        (.AddArg innerControl outerControl)
+        (set! (.-Op innerControl) (transformOpToConditionalComparisonOperation (.-Op innerControl)))
+        (set! (.-AuxInt innerControl) (arm64ConditionalParamsToAuxInt params))))))
+
+
+
+
+^{:go/end 729} (go/func transformOpToConditionalComparisonOperation "transformOpToConditionalComparisonOperation maps standard comparison operations\nto their conditional comparison counterparts (e.g., CMP -> CCMP, CMN -> CCMN).\n" ^Op [^Op op]
+  (switch op
+    (case [OpARM64CMP]
+      (return OpARM64CCMP))
+    (case [OpARM64CMN]
+      (return OpARM64CCMN))
+    (case [OpARM64CMPconst]
+      (return OpARM64CCMPconst))
+    (case [OpARM64CMNconst]
+      (return OpARM64CCMNconst))
+    (case [OpARM64CMPW]
+      (return OpARM64CCMPW))
+    (case [OpARM64CMNW]
+      (return OpARM64CCMNW))
+    (case [OpARM64CMPWconst]
+      (return OpARM64CCMPWconst))
+    (case [OpARM64CMNWconst]
+      (return OpARM64CCMNWconst))
+    (default
+      (panic "Incorrect operation"))))
+
+
+
+
+
+
+
+
+^{:go/end 740} (go/func createConditionalParamsByBlockKind "createConditionalParamsByBlockKind constructs conditional parameters for ARM64 conditional instructions.\nIt combines two block kinds:\n- outerKind specifies the main condition (e.g., LT, GT) to be evaluated.\n- innerKind determines the NZCV flag pattern to be used when the main condition is FALSE.\nThe resulting parameters are typically used by conditional comparison operations (CCMP, CCMN).\n" ^arm64ConditionalParams [^BlockKind outerKind ^BlockKind innerKind]
+  (let [cond (condByBlockKind outerKind) ; the condition code for the primary comparison
+      ^{:line 738} nzcv (nzcvByBlockKind innerKind)] ; NZCV flags to apply when the condition is false
+    (arm64ConditionalParamsAuxInt cond nzcv)))
+
+
+
+
+^{:go/end 769} (go/func condByBlockKind "condByBlockKind maps block kinds to their corresponding condition codes\nfor ARM64 conditional execution.\n" ^Op [^BlockKind kind]
+  (switch kind
+    (case [BlockARM64EQ]
+      (return OpARM64Equal))
+    (case [BlockARM64NE]
+      (return OpARM64NotEqual))
+    (case [BlockARM64LT]
+      (return OpARM64LessThan))
+    (case [BlockARM64LE]
+      (return OpARM64LessEqual))
+    (case [BlockARM64GT]
+      (return OpARM64GreaterThan))
+    (case [BlockARM64GE]
+      (return OpARM64GreaterEqual))
+    (case [BlockARM64ULT]
+      (return OpARM64LessThanU))
+    (case [BlockARM64ULE]
+      (return OpARM64LessEqualU))
+    (case [BlockARM64UGT]
+      (return OpARM64GreaterThanU))
+    (case [BlockARM64UGE]
+      (return OpARM64GreaterEqualU))
+    (default
+      (panic "Incorrect kind of Block"))))
+
+
+
+
+
+
+
+
+
+
+^{:go/end 813} (go/func nzcvByBlockKind "nzcvByBlockKind returns NZCV flags encoding the *logical opposite* of the specified block condition.\nThe returned flags represent the processor state to be used when the primary comparison condition\nevaluates to false.\n\nEach case constructs the flag pattern for the inverse condition:\n\n\tEQ -> NE, LT -> GE, GT -> LE, etc.\n" ^uint8 [^BlockKind kind]
+  (switch kind
+    (case [BlockARM64EQ]
+      ;; Encode NE : Z == 0
+      (return (packNZCV false false false false))) ; N=0,Z=0,C=0,V=0
+    (case [BlockARM64NE]
+      ;; Encode EQ : Z == 1
+      (return (packNZCV false true false false))) ; N=0,Z=1,C=0,V=0
+    (case [BlockARM64LT]
+      ;; Encode GE : N == V
+      (return (packNZCV false false false false))) ; N=0,Z=0,C=0,V=0
+    (case [BlockARM64LE]
+      ;; Encode GT : (Z == 0) && (N == V)
+      (return (packNZCV false false false false))) ; N=0,Z=0,C=0,V=0
+    (case [BlockARM64GT]
+      ;; Encode LE : (Z == 1) || (N != V)
+      (return (packNZCV false true false false))) ; N=0,Z=1,C=0,V=0
+    (case [BlockARM64GE]
+      ;; Encode LT : N != V
+      (return (packNZCV false false false true))) ; N=0,Z=0,C=0,V=1
+    (case [BlockARM64ULT]
+      ;; Encode UGE : C == 1
+      (return (packNZCV false false true false))) ; N=0,Z=0,C=1,V=0
+    (case [BlockARM64ULE]
+      ;; Encode UGT : (C == 1) && (Z == 0)
+      (return (packNZCV false false true false))) ; N=0,Z=0,C=1,V=0
+    (case [BlockARM64UGT]
+      ;; Encode ULE : (C == 0) || (Z == 1)
+      (return (packNZCV false false false false))) ; N=0,Z=0,C=0,V=0
+    (case [BlockARM64UGE]
+      ;; Encode ULT : C == 0
+      (return (packNZCV false false false false))) ; N=0,Z=0,C=0,V=0
+    (default
+      (panic "Incorrect kind of Block"))))
+
+
+
+
+
+^{:go/end 832} (go/func packNZCV "packNZCV packs boolean condition flags into a single byte representing\nthe ARM64 NZCV condition flags: Negative, Zero, Carry, Overflow.\n" ^uint8 [^bool N ^bool Z ^bool C ^bool V]
+  (let [^uint8 NZCVFlags 0]
+    (when N
+      (set! NZCVFlags bit-or (<< 1 3)))
+
+    (when Z
+      (set! NZCVFlags bit-or (<< 1 2)))
+
+    (when C
+      (set! NZCVFlags bit-or (<< 1 1)))
+
+    (when V
+      (set! NZCVFlags bit-or 1))
+
+    ^{:line 831} NZCVFlags))
+
+
+
+
+^{:go/end 861} (go/func negateBlockKind "negateBlockKind returns the logical negation of a block kind\n(e.g., EQ becomes NE, LT becomes GE).\n" ^BlockKind [^BlockKind kind]
+  (switch kind
+    (case [BlockARM64EQ]
+      (return BlockARM64NE))
+    (case [BlockARM64NE]
+      (return BlockARM64EQ))
+    (case [BlockARM64LT]
+      (return BlockARM64GE))
+    (case [BlockARM64LE]
+      (return BlockARM64GT))
+    (case [BlockARM64GT]
+      (return BlockARM64LE))
+    (case [BlockARM64GE]
+      (return BlockARM64LT))
+    (case [BlockARM64ULT]
+      (return BlockARM64UGE))
+    (case [BlockARM64ULE]
+      (return BlockARM64UGT))
+    (case [BlockARM64UGT]
+      (return BlockARM64ULE))
+    (case [BlockARM64UGE]
+      (return BlockARM64ULT))
+    (default
+      (panic "Incorrect kind of Block"))))
+
+
+
+
+
+^{:go/end 890} (go/func invertBlockKind "invertBlockKind inverts the operands of a comparison block kind\n(e.g., LT becomes GT, LE becomes GE).\n" ^BlockKind [^BlockKind kind]
+  (switch kind
+    (case [BlockARM64EQ]
+      (return BlockARM64EQ))
+    (case [BlockARM64NE]
+      (return BlockARM64NE))
+    (case [BlockARM64LT]
+      (return BlockARM64GT))
+    (case [BlockARM64LE]
+      (return BlockARM64GE))
+    (case [BlockARM64GT]
+      (return BlockARM64LT))
+    (case [BlockARM64GE]
+      (return BlockARM64LE))
+    (case [BlockARM64ULT]
+      (return BlockARM64UGT))
+    (case [BlockARM64ULE]
+      (return BlockARM64UGE))
+    (case [BlockARM64UGT]
+      (return BlockARM64ULT))
+    (case [BlockARM64UGE]
+      (return BlockARM64ULE))
+    (default
+      (panic "Incorrect kind of Block"))))

@@ -1,0 +1,805 @@
+;; Copyright 2020 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; This file implements type unification.
+;;
+;; Type unification attempts to make two types x and y structurally
+;; equivalent by determining the types for a given list of (bound)
+;; type parameters which may occur within x and y. If x and y are
+;; structurally different (say []T vs chan T), or conflicting
+;; types are determined for type parameters, unification fails.
+;; If unification succeeds, as a side-effect, the types of the
+;; bound type parameters may be determined.
+;;
+;; Unification typically requires multiple calls u.unify(x, y) to
+;; a given unifier u, with various combinations of types x and y.
+;; In each call, additional type parameter types may be determined
+;; as a side effect and recorded in u.
+;; If a call fails (returns false), unification fails.
+;;
+;; In the unification context, structural equivalence of two types
+;; ignores the difference between a defined type and its underlying
+;; type if one type is a defined type and the other one is not.
+;; It also ignores the difference between an (external, unbound)
+;; type parameter and its core type.
+;; If two types are not structurally equivalent, they cannot be Go
+;; identical types. On the other hand, if they are structurally
+;; equivalent, they may be Go identical or at least assignable, or
+;; they may be in the type set of a constraint.
+;; Whether they indeed are identical or assignable is determined
+;; upon instantiation and function argument passing.
+
+(in-ns 'go.cmd.compile.internal.types2) (go/file "unify.go" :imports [
+
+
+    ^{:line 36} [bytes "bytes"]
+    ^{:line 37} [fmt "fmt"]
+    ^{:line 38} [sort "sort"]
+    ^{:line 39} [strings "strings"]])
+
+
+(go/const
+
+
+  ^{:line 45} [^{:val 50 :doc "Upper limit for recursion depth. Used to catch infinite recursions\ndue to implementation issues (e.g., see issues go.dev/issue/48619, go.dev/issue/48656).\n"} unificationDepthLimit 50]
+
+
+
+
+  ^{:line 50} [^{:val true :doc "Whether to panic when unificationDepthLimit is reached.\nIf disabled, a recursion depth overflow results in a (quiet)\nunification failure.\n"} panicAtUnificationDepthLimit true]
+
+
+
+  ^{:line 54} [^{:val true :doc "If enableCoreTypeUnification is set, unification will consider\nthe core types, if any, of non-local (unbound) type parameters.\n"} enableCoreTypeUnification true]
+
+
+
+
+
+
+
+
+  ^{:line 63} [^{:val false :doc "If traceInference is set, unification will print a trace of its operation.\nInterpretation of trace:\n  x ≡ y    attempt to unify types x and y\n  p ➞ y    type parameter p is set to type y (p is inferred to be y)\n  p ⇄ q    type parameters p and q match (p is inferred to be q and vice versa)\n  x ≢ y    types x and y cannot be unified\n  [p, q, ...] ➞ [x, y, ...]    mapping from type parameters to types\n"} traceInference false])
+
+
+
+
+
+(go/type unifier "A unifier maintains a list of type parameters and\ncorresponding types inferred for each type parameter.\nA unifier is created by calling newUnifier.\n" (struct
+    ^{:line 70 :tag (* Checker)} check
+
+
+
+
+
+
+
+
+
+    ^{:line 80 :tag (map (* TypeParam) (* Type)) :doc "handles maps each type parameter to its inferred type through\nan indirection *Type called (inferred type) \"handle\".\nInitially, each type parameter has its own, separate handle,\nwith a nil (i.e., not yet inferred) type.\nAfter a type parameter P is unified with a type parameter Q,\nP and Q share the same handle (and thus type). This ensures\nthat inferring the type for a given type parameter P will\nautomatically infer the same type for all other parameters\nunified (joined) with P.\n"} handles
+    ^{:line 81 :tag int} depth ; recursion depth during unification
+    ^{:line 82 :tag bool} enableInterfaceInference)) ; use shared methods for better inference
+
+
+
+
+
+
+^{:go/end 104} (go/func newUnifier "newUnifier returns a new unifier initialized with the given type parameter\nand corresponding type argument lists. The type argument list may be shorter\nthan the type parameter list, and it may contain nil types. Matching type\nparameters and arguments must have the same index.\n" ^{:tag (* unifier)} [^{:tag (* Checker)} check ^{:tag (slice (* TypeParam))} tparams ^{:tag (slice Type)} targs ^bool enableInterfaceInference]
+  (go/call assert (>= (len tparams) (len targs)))
+  (let [handles (make (map (* TypeParam) (* Type)) (len tparams))]
+    ;; Allocate all handles up-front: in a correct program, all type parameters
+    ;; must be resolved and thus eventually will get a handle.
+    ;; Also, sharing of handles caused by unified type parameters is rare and
+    ;; so it's ok to not optimize for that case (and delay handle allocation).
+    (range [i x tparams]
+      (let [^Type t (zero Type)]
+        (when (< i (len targs))
+          (set! t (aget targs i)))
+
+        (aset handles x (addr t))))
+
+    (addr (lit unifier check handles 0 enableInterfaceInference))))
+
+
+
+(go/type unifyMode "unifyMode controls the behavior of the unifier.\n" uint)
+
+(go/const
+
+
+
+  ^{:line 113} [^{:tag unifyMode :val 1 :doc "If assign is set, we are unifying types involved in an assignment:\nthey may match inexactly at the top, but element types must match\nexactly.\n"} assign (<< 1 iota)]
+
+
+
+
+
+
+
+  ^{:line 121} [^{:val 2 :doc "If exact is set, types unify if they are identical (or can be\nmade identical with suitable arguments for type parameters).\nOtherwise, a named type and a type literal unify if their\nunderlying types unify, channel directions are ignored, and\nif there is an interface, the other type must implement the\ninterface.\n"} exact])
+
+
+^{:go/end 136} (go/method String ^string [^unifyMode m]
+  (switch m
+    (case [0]
+      (return "inexact"))
+    (case [assign]
+      (return "assign"))
+    (case [exact]
+      (return "exact"))
+    (case [(bit-or assign exact)]
+      (return "assign, exact")))
+
+  (fmt/Sprintf "mode %d" m))
+
+
+
+
+
+^{:go/end 143} (go/method unify "unify attempts to unify x and y and reports whether it succeeded.\nAs a side-effect, types may be inferred for type parameters.\nThe mode parameter controls how types are compared.\n" ^bool [^{:tag (* unifier)} u ^Type x ^Type y ^unifyMode mode]
+  (.nify u x y mode nil))
+
+
+^{:go/end 148} (go/method tracef [^{:tag (* unifier)} u ^string format & ^{:tag (slice any)} args]
+  ;; TODO(gri) consider adjusting this to use Checker.trace
+  (fmt/Println (+ (strings/Repeat ".  " (.-depth u)) (sprintf nil true format (spread args)))))
+
+
+
+
+^{:go/end 175} (go/method String "String returns a string representation of the current mapping\nfrom type parameters to types.\n" ^string [^{:tag (* unifier)} u]
+  ;; sort type parameters for reproducible strings
+  (let [tparams (make typeParamsById (len (.-handles u)))
+      ^{:line 155} i 0]
+    (range [tpar (.-handles u)]
+      (aset tparams i tpar)
+      (inc! i))
+
+    (sort/Sort tparams)
+
+    (let [^bytes/Buffer buf (zero bytes/Buffer)
+        ^{:line 163} w (newTypeWriter (addr buf) nil)]
+      (.byte w \[)
+      (range [i x tparams]
+        (when (> i 0)
+          (.string w ", "))
+
+        (.typ w x)
+        (.string w ": ")
+        (.typ w (.at u x)))
+
+      (.byte w \])
+      (.String buf))))
+
+
+(go/type typeParamsById (slice (* TypeParam)))
+
+^{:go/end 179} (go/method Len ^int [^typeParamsById s] (len s))
+^{:go/end 180} (go/method Less ^bool [^typeParamsById s ^int i ^int j] (< (.-id (aget s i)) (.-id (aget s j))))
+^{:go/end 181} (go/method Swap [^typeParamsById s ^int i ^int j] (set! (values (aget s i) (aget s j)) (values (aget s j) (aget s i))))
+
+
+
+
+^{:go/breaks [[6 207]] :go/end 208} (go/method join "join unifies the given type parameters x and y.\nIf both type parameters already have a type associated with them\nand they are not joined, join fails and returns false.\n" ^bool [^{:tag (* unifier)} u ^{:tag (* TypeParam)} x ^{:tag (* TypeParam)} y]
+  (when traceInference
+    (.tracef u "%s ⇄ %s" x y))
+
+  (switch [(values hx hy) (values (aget (.-handles u) x) (aget (.-handles u) y))]
+    (case [(== hx hy)])
+    ;; Both type parameters already share the same handle. Nothing to do.
+    (case [(and (!= @hx nil) (!= @hy nil))]
+      ;; Both type parameters have (possibly different) inferred types. Cannot join.
+      (return false))
+    (case [(!= @hx nil)]
+      ;; Only type parameter x has an inferred type. Use handle of x.
+      (.setHandle u y hx))
+    ;; This case is treated like the default case.
+    ;; case *hy != nil:
+    ;; 	// Only type parameter y has an inferred type. Use handle of y.
+    ;;	u.setHandle(x, hy)
+    (default
+      ;; Neither type parameter has an inferred type. Use handle of y.
+      (.setHandle u x hy)))
+
+  true)
+
+
+
+
+^{:go/breaks [[5 218]] :go/end 219} (go/method asBoundTypeParam "asBoundTypeParam returns x.(*TypeParam) if x is a type parameter recorded with u.\nOtherwise, the result is nil.\n" ^{:tag (* TypeParam)} [^{:tag (* unifier)} u ^Type x]
+  (when [(values x _) (assert (* TypeParam) (Unalias x))] (!= x nil)
+    (when [(values _ found) (aget (.-handles u) x)] found
+      (return x)))
+
+
+  nil)
+
+
+
+
+^{:go/end 231} (go/method setHandle "setHandle sets the handle for type parameter x\n(and all its joined type parameters) to h.\n" [^{:tag (* unifier)} u ^{:tag (* TypeParam)} x ^{:tag (* Type)} h]
+  (let [hx (aget (.-handles u) x)]
+    (go/call assert (!= hx nil))
+    (range [y hy (.-handles u)]
+      (when (== hy hx)
+        (aset (.-handles u) y h)))))
+
+
+
+
+
+^{:go/end 236} (go/method at "at returns the (possibly nil) type for type parameter x.\n" ^Type [^{:tag (* unifier)} u ^{:tag (* TypeParam)} x]
+  ^{:line 235} @(aget (.-handles u) x))
+
+
+
+
+^{:go/end 246} (go/method set "set sets the type t for type parameter x;\nt must not be nil.\n" [^{:tag (* unifier)} u ^{:tag (* TypeParam)} x ^Type t]
+  (go/call assert (!= t nil))
+  (when traceInference
+    (.tracef u "%s ➞ %s" x t))
+
+  (set! @(aget (.-handles u) x) t))
+
+
+
+^{:go/end 257} (go/method unknowns "unknowns returns the number of type parameters for which no type has been set yet.\n" ^int [^{:tag (* unifier)} u]
+  (let [n 0]
+    (range [_ h (.-handles u)]
+      (when (== @h nil)
+        (inc! n)))
+
+
+    ^{:line 256} n))
+
+
+
+
+
+
+^{:go/end 269} (go/method inferred "inferred returns the list of inferred types for the given type parameter list.\nThe result is never nil and has the same length as tparams; result types that\ncould not be inferred are nil. Corresponding type parameters and result types\nhave identical indices.\n" ^{:tag (slice Type)} [^{:tag (* unifier)} u ^{:tag (slice (* TypeParam))} tparams]
+  (let [list (make (slice Type) (len tparams))]
+    (range [i x tparams]
+      (aset list i (.at u x)))
+
+    ^{:line 268} list))
+
+
+
+
+^{:go/end 278} (go/func asInterface "asInterface returns the underlying type of x as an interface if\nit is a non-type parameter interface. Otherwise it returns nil.\n" [^Type x] :results [^{:tag (* Interface)} i]
+  (when [(values _ ok) (assert (* TypeParam) (Unalias x))] (not ok)
+    (set! (values i _) (assert (* Interface) (.Underlying x))))
+
+  ^{:line 277} i)
+
+
+
+
+
+
+^{:go/end 806} (go/method nify "nify implements the core unification algorithm which is an\nadapted version of Checker.identical. For changes to that\ncode the corresponding changes should be made here.\nMust not be called directly from outside the unifier.\n" [^{:tag (* unifier)} u ^Type x ^Type y ^unifyMode mode ^{:tag (* ifacePair)} p] :results [^bool result]
+  (inc! (.-depth u))
+  (when traceInference
+    (.tracef u "%s ≡ %s\t// %s" x y mode))
+
+  (defer (^{:go/end 294} (fn []
+        (when (and traceInference (not result))
+          (.tracef u "%s ≢ %s" x y))
+
+        (dec! (.-depth u)))))
+
+
+  ;; nothing to do if x == y
+  (when (or (== x y) (== (Unalias x) (Unalias y)))
+    (return true))
+
+
+  ;; Stop gap for cases where unification fails.
+  (when (> (.-depth u) unificationDepthLimit)
+    (when traceInference
+      (.tracef u "depth %d >= %d" (.-depth u) unificationDepthLimit))
+
+    (when panicAtUnificationDepthLimit
+      (panic "unification reached recursion depth limit"))
+
+    (return false))
+
+
+  ;; Unification is symmetric, so we can swap the operands.
+  ;; Ensure that if we have at least one
+  ;; - defined type, make sure one is in y
+  ;; - type parameter recorded with u, make sure one is in x
+  (when (or (!= (asNamed x) nil) (!= (.asBoundTypeParam u y) nil))
+    (when traceInference
+      (.tracef u "%s ≡ %s\t// swap" y x))
+
+    (set! (values x y) (values y x)))
+
+
+  ;; Unification will fail if we match a defined type against a type literal.
+  ;; If we are matching types in an assignment, at the top-level, types with
+  ;; the same type structure are permitted as long as at least one of them
+  ;; is not a defined type. To accommodate for that possibility, we continue
+  ;; unification with the underlying type of a defined type if the other type
+  ;; is a type literal. This is controlled by the exact unification mode.
+  ;; We also continue if the other type is a basic type because basic types
+  ;; are valid underlying types and may appear as core types of type constraints.
+  ;; If we exclude them, inferred defined types for type parameters may not
+  ;; match against the core types of their constraints (even though they might
+  ;; correctly match against some of the types in the constraint's type set).
+  ;; Finally, if unification (incorrectly) succeeds by matching the underlying
+  ;; type of a defined type against a basic type (because we include basic types
+  ;; as type literals here), and if that leads to an incorrectly inferred type,
+  ;; we will fail at function instantiation or argument assignment time.
+  ;;
+  ;; If we have at least one defined type, there is one in y.
+  (when [ny (asNamed y)] (and (== (bit-and mode exact) 0) (!= ny nil) (isTypeLit x) (not (and (.-enableInterfaceInference u) (IsInterface x))))
+    (when traceInference
+      (.tracef u "%s ≡ under %s" x ny))
+
+    (set! y (.Underlying ny))
+    ;; Per the spec, a defined type cannot have an underlying type
+    ;; that is a type parameter.
+    (go/call assert (not (isTypeParam y)))
+    ;; x and y may be identical now
+    (when (or (== x y) (== (Unalias x) (Unalias y)))
+      (return true)))
+
+
+
+  ;; Cases where at least one of x or y is a type parameter recorded with u.
+  ;; If we have at least one type parameter, there is one in x.
+  ;; If we have exactly one type parameter, because it is in x,
+  ;; isTypeLit(x) is false and y was not changed above. In other
+  ;; words, if y was a defined type, it is still a defined type
+  ;; (relevant for the logic below).
+  (switch [(values px py) (values (.asBoundTypeParam u x) (.asBoundTypeParam u y))]
+    (case [(and (!= px nil) (!= py nil))]
+      ;; both x and y are type parameters
+      (when (.join u px py)
+        (return true))
+
+      ;; both x and y have an inferred type - they must match
+      (return (.nify u (.at u px) (.at u py) mode p)))
+
+    (case [(!= px nil)]
+      ;; x is a type parameter, y is not
+      (when [x (.at u px)] (!= x nil)
+        ;; x has an inferred type which must match y
+        (when (.nify u x y mode p)
+          ;; We have a match, possibly through underlying types.
+          (let [xi (asInterface x)
+              ^{:line 376} yi (asInterface y)
+              ^{:line 377} xn (!= (asNamed x) nil)
+              ^{:line 378} yn (!= (asNamed y) nil)]
+            ;; If we have two interfaces, what to do depends on
+            ;; whether they are named and their method sets.
+            (cond (and (!= xi nil) (!= yi nil)) (do
+                ;; Both types are interfaces.
+                ;; If both types are defined types, they must be identical
+                ;; because unification doesn't know which type has the "right" name.
+                (when (and xn yn)
+                  (return (Identical x y)))
+
+                ;; In all other cases, the method sets must match.
+                ;; The types unified so we know that corresponding methods
+                ;; match and we can simply compare the number of methods.
+                ;; TODO(gri) We may be able to relax this rule and select
+                ;; the more general interface. But if one of them is a defined
+                ;; type, it's not clear how to choose and whether we introduce
+                ;; an order dependency or not. Requiring the same method set
+                ;; is conservative.
+                (when (!= (len (.-methods (.typeSet xi))) (len (.-methods (.typeSet yi))))
+                  (return false)))
+
+              (or (!= xi nil) (!= yi nil))
+              ;; One but not both of them are interfaces.
+              ;; In this case, either x or y could be viable matches for the corresponding
+              ;; type parameter, which means choosing either introduces an order dependence.
+              ;; Therefore, we must fail unification (go.dev/issue/60933).
+              (return false))
+
+            ;; If we have inexact unification and one of x or y is a defined type, select the
+            ;; defined type. This ensures that in a series of types, all matching against the
+            ;; same type parameter, we infer a defined type if there is one, independent of
+            ;; order. Type inference or assignment may fail, which is ok.
+            ;; Selecting a defined type, if any, ensures that we don't lose the type name;
+            ;; and since we have inexact unification, a value of equally named or matching
+            ;; undefined type remains assignable (go.dev/issue/43056).
+            ;;
+            ;; Similarly, if we have inexact unification and there are no defined types but
+            ;; channel types, select a directed channel, if any. This ensures that in a series
+            ;; of unnamed types, all matching against the same type parameter, we infer the
+            ;; directed channel if there is one, independent of order.
+            ;; Selecting a directional channel, if any, ensures that a value of another
+            ;; inexactly unifying channel type remains assignable (go.dev/issue/62157).
+            ;;
+            ;; If we have multiple defined channel types, they are either identical or we
+            ;; have assignment conflicts, so we can ignore directionality in this case.
+            ;;
+            ;; If we have defined and literal channel types, a defined type wins to avoid
+            ;; order dependencies.
+            (when (== (bit-and mode exact) 0)
+              (switch
+                (case [xn])
+                ;; x is a defined type: nothing to do.
+                (case [yn]
+                  ;; x is not a defined type and y is a defined type: select y.
+                  (.set u px y))
+                (default
+                  ;; Neither x nor y are defined types.
+                  (when [(values yc _) (assert (* Chan) (.Underlying y))] (and (!= yc nil) (!= (.-dir yc) SendRecv))
+                    ;; y is a directed channel type: select y.
+                    (.set u px y)))))
+
+
+
+            (return true)))
+
+        (return false))
+
+      ;; otherwise, infer type from y
+      (.set u px y)
+      (return true)))
+
+
+  ;; x != y if we get here
+  (go/call assert (and (!= x y) (!= (Unalias x) (Unalias y))))
+
+  ;; If u.EnableInterfaceInference is set and we don't require exact unification,
+  ;; if both types are interfaces, one interface must have a subset of the
+  ;; methods of the other and corresponding method signatures must unify.
+  ;; If only one type is an interface, all its methods must be present in the
+  ;; other type and corresponding method signatures must unify.
+  (when (and (.-enableInterfaceInference u) (== (bit-and mode exact) 0))
+    ;; One or both interfaces may be defined types.
+    ;; Look under the name, but not under type parameters (go.dev/issue/60564).
+    (let [xi (asInterface x)
+        ^{:line 462} yi (asInterface y)]
+      ;; If we have two interfaces, check the type terms for equivalence,
+      ;; and unify common methods if possible.
+      (when (and (!= xi nil) (!= yi nil))
+        (let [xset (.typeSet xi)
+            ^{:line 467} yset (.typeSet yi)]
+          (when (!= (.-comparable xset) (.-comparable yset))
+            (return false))
+
+          ;; For now we require terms to be equal.
+          ;; We should be able to relax this as well, eventually.
+          (when (not (.equal (.-terms xset) (.-terms yset)))
+            (return false))
+
+          ;; Interface types are the only types where cycles can occur
+          ;; that are not "terminated" via named types; and such cycles
+          ;; can only be created via method parameter types that are
+          ;; anonymous interfaces (directly or indirectly) embedding
+          ;; the current interface. Example:
+          ;;
+          ;;    type T interface {
+          ;;        m() interface{T}
+          ;;    }
+          ;;
+          ;; If two such (differently named) interfaces are compared,
+          ;; endless recursion occurs if the cycle is not detected.
+          ;;
+          ;; If x and y were compared before, they must be equal
+          ;; (if they were not, the recursion would have stopped);
+          ;; search the ifacePair stack for the same pair.
+          ;;
+          ;; This is a quadratic algorithm, but in practice these stacks
+          ;; are extremely short (bounded by the nesting depth of interface
+          ;; type declarations that recur via parameter types, an extremely
+          ;; rare occurrence). An alternative implementation might use a
+          ;; "visited" map, but that is probably less efficient overall.
+          (let [q (addr (lit ifacePair xi yi p))]
+            (while (!= p nil)
+              (when (.identical p q)
+                (return true)) ; same pair was compared before
+
+              (set! p (.-prev p)))
+
+            ;; The method set of x must be a subset of the method set
+            ;; of y or vice versa, and the common methods must unify.
+            (let [xmethods (.-methods xset)
+                ^{:line 508} ymethods (.-methods yset)]
+              ;; The smaller method set must be the subset, if it exists.
+              (when (> (len xmethods) (len ymethods))
+                (set! (values xmethods ymethods) (values ymethods xmethods)))
+
+              ;; len(xmethods) <= len(ymethods)
+              ;; Collect the ymethods in a map for quick lookup.
+              (let [ymap (make (map string (* Func)) (len ymethods))]
+                (range [_ ym ymethods]
+                  (aset ymap ^{:go/via [object]} (.Id ym) ym))
+
+                ;; All xmethods must exist in ymethods and corresponding signatures must unify.
+                (range [_ xm xmethods]
+                  (when [ym (aget ymap ^{:go/via [object]} (.Id xm))] (or (== ym nil) (not (.nify u ^{:go/via [object]} (.-typ xm) ^{:go/via [object]} (.-typ ym) exact p)))
+                    (return false)))
+
+
+                (return true))))))
+
+
+      ;; We don't have two interfaces. If we have one, make sure it's in xi.
+      (when (!= yi nil)
+        (set! xi yi)
+        (set! y x))
+
+
+      ;; If we have one interface, at a minimum each of the interface methods
+      ;; must be implemented and thus unify with a corresponding method from
+      ;; the non-interface type, otherwise unification fails.
+      (when (!= xi nil)
+        ;; All xi methods must exist in y and corresponding signatures must unify.
+        ;; A generic method never satisfies an interface method, so fail rather
+        ;; than unify ym's own type parameter into an inference variable.
+        (let [xmethods (.-methods (.typeSet xi))]
+          (range [_ xm xmethods]
+            (let [(values obj _ _) (LookupFieldOrMethod y false ^{:go/via [object]} (.-pkg xm) ^{:go/via [object]} (.-name xm))
+                (values ym _) (assert (* Func) obj)]
+              (when (== ym nil)
+                (return false))
+
+              (.objDecl (.-check u) ym) ; ensure fully set-up signature
+              (when (or (!= (.TypeParams (.Signature ym)) nil) (not (.nify u ^{:go/via [object]} (.-typ xm) ^{:go/via [object]} (.-typ ym) exact p)))
+                (return false))))
+
+
+          (return true)))))
+
+
+
+  ;; Unless we have exact unification, neither x nor y are interfaces now.
+  ;; Except for unbound type parameters (see below), x and y must be structurally
+  ;; equivalent to unify.
+
+  ;; If we get here and x or y is a type parameter, they are unbound
+  ;; (not recorded with the unifier).
+  ;; Ensure that if we have at least one type parameter, it is in x
+  ;; (the earlier swap checks for _recorded_ type parameters only).
+  ;; This ensures that the switch switches on the type parameter.
+  ;;
+  ;; TODO(gri) Factor out type parameter handling from the switch.
+  (when (isTypeParam y)
+    (when traceInference
+      (.tracef u "%s ≡ %s\t// swap" y x))
+
+    (set! (values x y) (values y x)))
+
+
+  ;; Type elements (array, slice, etc. elements) use emode for unification.
+  ;; Element types must match exactly if the types are used in an assignment.
+  (let [emode mode]
+    (when (!= (bit-and mode assign) 0)
+      (set! emode bit-or exact))
+
+
+    ;; Continue with unaliased types but don't lose original alias names, if any (go.dev/issue/67628).
+    ^{:go/breaks [[3 805]]} (let [(values xorig ^:assign x) (values x (Unalias x))
+        (values yorig ^:assign y) (values y (Unalias y))]
+
+      (type-switch [x x]
+        (case [(* Basic)]
+          ;; Basic types are singletons except for the rune and byte
+          ;; aliases, thus we cannot solely rely on the x == y check
+          ;; above. See also comment in TypeName.IsAlias.
+          (when [(values y ok) (assert (* Basic) y)] ok
+            (return (== (.-kind x) (.-kind y)))))
+
+
+        (case [(* Array)]
+          ;; Two array types unify if they have the same array length
+          ;; and their element types unify.
+          (when [(values y ok) (assert (* Array) y)] ok
+            ;; If one or both array lengths are unknown (< 0) due to some error,
+            ;; assume they are the same to avoid spurious follow-on errors.
+            (return (and ^:go/paren (or (< (.-len x) 0) (< (.-len y) 0) (== (.-len x) (.-len y))) (.nify u (.-elem x) (.-elem y) emode p)))))
+
+
+        (case [(* Slice)]
+          ;; Two slice types unify if their element types unify.
+          (when [(values y ok) (assert (* Slice) y)] ok
+            (return (.nify u (.-elem x) (.-elem y) emode p))))
+
+
+        (case [(* Struct)]
+          ;; Two struct types unify if they have the same sequence of fields,
+          ;; and if corresponding fields have the same names, their (field) types unify,
+          ;; and they have identical tags. Two embedded fields are considered to have the same
+          ;; name. Lower-case field names from different packages are always different.
+          (when [(values y ok) (assert (* Struct) y)] ok
+            (when (== (.NumFields x) (.NumFields y))
+              (range [i f (.-fields x)]
+                (let [g (aget (.-fields y) i)]
+                  (when (or (!= (.-embedded f) (.-embedded g))
+                      (!= (.Tag x i) (.Tag y i))
+                      (not ^{:go/via [object]} (.sameId f ^{:go/via [object]} (.-pkg g) ^{:go/via [object]} (.-name g) false))
+                      (not (.nify u ^{:go/via [object]} (.-typ f) ^{:go/via [object]} (.-typ g) emode p)))
+                    (return false))))
+
+
+              (return true))))
+
+
+
+        (case [(* Pointer)]
+          ;; Two pointer types unify if their base types unify.
+          (when [(values y ok) (assert (* Pointer) y)] ok
+            (return (.nify u (.-base x) (.-base y) emode p))))
+
+
+        (case [(* Tuple)]
+          ;; Two tuples types unify if they have the same number of elements
+          ;; and the types of corresponding elements unify.
+          (when [(values y ok) (assert (* Tuple) y)] ok
+            (when (== (.Len x) (.Len y))
+              (when (!= x nil)
+                (range [i v (.-vars x)]
+                  (let [w (aget (.-vars y) i)]
+                    (when (not (.nify u ^{:go/via [object]} (.-typ v) ^{:go/via [object]} (.-typ w) mode p))
+                      (return false)))))
+
+
+
+              (return true))))
+
+
+
+        (case [(* Signature)]
+          ;; Two function types unify if they have the same number of parameters
+          ;; and result values, corresponding parameter and result types unify,
+          ;; and either both functions are variadic or neither is.
+          ;; Parameter and result names are not required to match.
+          ;; TODO(gri) handle type parameters or document why we can ignore them.
+          (when [(values y ok) (assert (* Signature) y)] ok
+            (return (and (== (.-variadic x) (.-variadic y))
+                (.nify u (.-params x) (.-params y) emode p)
+                (.nify u (.-results x) (.-results y) emode p)))))
+
+
+        (case [(* Interface)]
+          (go/call assert (or (not (.-enableInterfaceInference u)) (!= (bit-and mode exact) 0))) ; handled before this switch
+
+          ;; Two interface types unify if they have the same set of methods with
+          ;; the same names, and corresponding function types unify.
+          ;; Lower-case method names from different packages are always different.
+          ;; The order of the methods is irrelevant.
+          (when [(values y ok) (assert (* Interface) y)] ok
+            (let [xset (.typeSet x)
+                ^{:line 674} yset (.typeSet y)]
+              (when (!= (.-comparable xset) (.-comparable yset))
+                (return false))
+
+              (when (not (.equal (.-terms xset) (.-terms yset)))
+                (return false))
+
+              (let [a (.-methods xset)
+                  ^{:line 682} b (.-methods yset)]
+                (when (== (len a) (len b))
+                  ;; Interface types are the only types where cycles can occur
+                  ;; that are not "terminated" via named types; and such cycles
+                  ;; can only be created via method parameter types that are
+                  ;; anonymous interfaces (directly or indirectly) embedding
+                  ;; the current interface. Example:
+                  ;;
+                  ;;    type T interface {
+                  ;;        m() interface{T}
+                  ;;    }
+                  ;;
+                  ;; If two such (differently named) interfaces are compared,
+                  ;; endless recursion occurs if the cycle is not detected.
+                  ;;
+                  ;; If x and y were compared before, they must be equal
+                  ;; (if they were not, the recursion would have stopped);
+                  ;; search the ifacePair stack for the same pair.
+                  ;;
+                  ;; This is a quadratic algorithm, but in practice these stacks
+                  ;; are extremely short (bounded by the nesting depth of interface
+                  ;; type declarations that recur via parameter types, an extremely
+                  ;; rare occurrence). An alternative implementation might use a
+                  ;; "visited" map, but that is probably less efficient overall.
+                  (let [q (addr (lit ifacePair x y p))]
+                    (while (!= p nil)
+                      (when (.identical p q)
+                        (return true)) ; same pair was compared before
+
+                      (set! p (.-prev p)))
+
+                    (when debug
+                      (assertSortedMethods a)
+                      (assertSortedMethods b))
+
+                    (range [i f a]
+                      (let [g (aget b i)]
+                        (when (or (!= ^{:go/via [object]} (.Id f) ^{:go/via [object]} (.Id g)) (not (.nify u ^{:go/via [object]} (.-typ f) ^{:go/via [object]} (.-typ g) exact q)))
+                          (return false))))
+
+
+                    (return true)))))))
+
+
+
+        (case [(* Map)]
+          ;; Two map types unify if their key and value types unify.
+          (when [(values y ok) (assert (* Map) y)] ok
+            (return (and (.nify u (.-key x) (.-key y) emode p) (.nify u (.-elem x) (.-elem y) emode p)))))
+
+
+        (case [(* Chan)]
+          ;; Two channel types unify if their value types unify
+          ;; and if they have the same direction.
+          ;; The channel direction is ignored for inexact unification.
+          (when [(values y ok) (assert (* Chan) y)] ok
+            (return (and ^:go/paren (or (== (bit-and mode exact) 0) (== (.-dir x) (.-dir y))) (.nify u (.-elem x) (.-elem y) emode p)))))
+
+
+        (case [(* Named)]
+          ;; Two named types unify if their type names originate in the same type declaration.
+          ;; If they are instantiated, their type argument lists must unify.
+          (when [y (asNamed y)] (!= y nil)
+            ;; Check type arguments before origins so they unify
+            ;; even if the origins don't match; for better error
+            ;; messages (see go.dev/issue/53692).
+            (let [xargs (.list (.TypeArgs x))
+                ^{:line 749} yargs (.list (.TypeArgs y))]
+              (when (!= (len xargs) (len yargs))
+                (return false))
+
+              (range [i xarg xargs]
+                (when (not (.nify u xarg (aget yargs i) mode p))
+                  (return false)))
+
+
+              (return (identicalOrigin x y)))))
+
+
+        (case [(* TypeParam)]
+          ;; x must be an unbound type parameter (see comment above).
+          (when debug
+            (go/call assert (== (.asBoundTypeParam u x) nil)))
+
+          ;; By definition, a valid type argument must be in the type set of
+          ;; the respective type constraint. Therefore, the type argument's
+          ;; underlying type must be in the set of underlying types of that
+          ;; constraint. If there is a single such underlying type, it's the
+          ;; constraint's core type. It must match the type argument's under-
+          ;; lying type, irrespective of whether the actual type argument,
+          ;; which may be a defined type, is actually in the type set (that
+          ;; will be determined at instantiation time).
+          ;; Thus, if we have the core type of an unbound type parameter,
+          ;; we know the structure of the possible types satisfying such
+          ;; parameters. Use that core type for further unification
+          ;; (see go.dev/issue/50755 for a test case).
+          (when enableCoreTypeUnification
+            ;; Because the core type is always an underlying type,
+            ;; unification will take care of matching against a
+            ;; defined or literal type automatically.
+            ;; If y is also an unbound type parameter, we will end
+            ;; up here again with x and y swapped, so we don't
+            ;; need to take care of that case separately.
+            (when [(values cx _) (commonUnder x nil)] (!= cx nil)
+              (when traceInference
+                (.tracef u "core %s ≡ %s" xorig yorig))
+
+              ;; If y is a defined type, it may not match against cx which
+              ;; is an underlying type (incl. int, string, etc.). Use assign
+              ;; mode here so that the unifier automatically uses y.Underlying()
+              ;; if necessary.
+              (return (.nify u cx yorig assign p)))))
+
+
+        ;; x != y and there's nothing to do
+
+        (case [nil])
+        ;; avoid a crash in case of nil type
+
+        (default
+          (panic (sprintf nil true "u.nify(%s, %s, %d)" xorig yorig mode))))
+
+
+      false)))

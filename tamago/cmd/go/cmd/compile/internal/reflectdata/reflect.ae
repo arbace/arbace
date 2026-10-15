@@ -1,0 +1,1484 @@
+;; Copyright 2009 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.cmd.compile.internal.reflectdata) (go/file "reflect.go" :imports [
+
+
+    ^{:line 8} [binary "encoding/binary"]
+    ^{:line 9} [fmt "fmt"]
+    ^{:line 10} [abi "internal/abi"]
+    ^{:line 11} [slices "slices"]
+    ^{:line 12} [sort "sort"]
+    ^{:line 13} [strings "strings"]
+    ^{:line 14} [sync "sync"]
+
+    ^{:line 16} [base "cmd/compile/internal/base"]
+    ^{:line 17} [bitvec "cmd/compile/internal/bitvec"]
+    ^{:line 18} [compare "cmd/compile/internal/compare"]
+    ^{:line 19} [ir "cmd/compile/internal/ir"]
+    ^{:line 20} [objw "cmd/compile/internal/objw"]
+    ^{:line 21} [rttype "cmd/compile/internal/rttype"]
+    ^{:line 22} [staticdata "cmd/compile/internal/staticdata"]
+    ^{:line 23} [typebits "cmd/compile/internal/typebits"]
+    ^{:line 24} [typecheck "cmd/compile/internal/typecheck"]
+    ^{:line 25} [types "cmd/compile/internal/types"]
+    ^{:line 26} [obj "cmd/internal/obj"]
+    ^{:line 27} [objabi "cmd/internal/objabi"]
+    ^{:line 28} [src "cmd/internal/src"]])
+
+
+(go/type ptabEntry (struct
+    ^{:line 32 :tag (* types/Sym)} s
+    ^{:line 33 :tag (* types/Type)} t))
+
+
+
+(go/var "runtime interface and reflection data structures\n"
+
+  ^{:line 39} [^{:tag sync/Mutex :doc "protects signatset and signatslice\n"} signatmu]
+
+  ^{:line 41} [^{:doc "Tracking which types need runtime type descriptor\n"} signatset (make (map (* types/Type) (struct)))]
+
+  ^{:line 43} [^{:tag (slice typeAndStr) :doc "Queue of types wait to be generated runtime type descriptor\n"} signatslice]
+
+  ^{:line 45} [^sync/Mutex gcsymmu] ; protects gcsymset and gcsymslice
+  ^{:line 46} [gcsymset (make (map (* types/Type) (struct)))])
+
+
+(go/type typeSig (struct
+    ^{:line 50 :tag (* types/Sym)} name
+    ^{:line 51 :tag (* obj/LSym)} isym
+    ^{:line 52 :tag (* obj/LSym)} tsym
+    ^{:line 53 :tag (* types/Type)} type_
+    ^{:line 54 :tag (* types/Type)} mtype))
+
+
+^{:go/end 57} (go/func commonSize ^int [] (conv int (.Size rttype/Type))) ; Sizeof(runtime._type{})
+
+^{:go/end 64} (go/func uncommonSize ^int [^{:tag (* types/Type)} t] ; Sizeof(runtime.uncommontype{})
+  (when (and (== (.Sym t) nil) (== (len (methods t)) 0))
+    (return 0))
+
+  (conv int (.Size rttype/UncommonType)))
+
+
+^{:go/end 69} (go/func makefield ^{:tag (* types/Field)} [^string name ^{:tag (* types/Type)} t]
+  (let [sym (.Lookup (conv (* types/Pkg) nil) name)]
+    (types/NewField src/NoXPos sym t)))
+
+
+
+
+^{:go/end 131} (go/func methods "methods returns the methods of the non-interface type t, sorted by name.\nGenerates stub functions as needed.\n" ^{:tag (slice (* typeSig))} [^{:tag (* types/Type)} t]
+  (when (.HasShape t)
+    ;; Shape types have no methods.
+    (return nil))
+
+  ;; method type
+  (let [mt (types/ReceiverBaseType t)]
+
+    (when (== mt nil)
+      (return nil))
+
+    (typecheck/CalcMethods mt)
+
+    ;; make list of methods for t,
+    ;; generating code if necessary.
+    (let [^{:tag (slice (* typeSig))} ms (zero (slice (* typeSig)))]
+      (range [_ f (.AllMethods mt)]
+        (when (== (.-Sym f) nil)
+          (base/Fatalf "method with no sym on %v" mt))
+
+        (when (not (.IsMethod f))
+          (base/Fatalf "non-method on %v method %v %v" mt (.-Sym f) f))
+
+        (when (== (.Recv (.-Type f)) nil)
+          (base/Fatalf "receiver with no type on %v method %v %v" mt (.-Sym f) f))
+
+        (when (and (.Nointerface f) (not (.IsFullyInstantiated t)))
+          ;; Skip creating method wrappers if f is nointerface. But, if
+          ;; t is an instantiated type, we still have to call
+          ;; methodWrapper, because methodWrapper generates the actual
+          ;; generic method on the type as well.
+          (continue))
+
+
+        ;; get receiver type for this particular method.
+        ;; if pointer receiver but non-pointer t and
+        ;; this is not an embedded pointer inside a struct,
+        ;; method does not apply.
+        (when (not (types/IsMethodApplicable t f))
+          (continue))
+
+
+        (let [sig (addr ^{:go/breaks [2 4 6 8 10]} (lit typeSig
+                :name (.-Sym f)
+                :isym (methodWrapper t f true)
+                :tsym (methodWrapper t f false)
+                :type_ (typecheck/NewMethodType (.-Type f) t)
+                :mtype (typecheck/NewMethodType (.-Type f) nil)))]
+
+          (when (.Nointerface f)
+            ;; In the case of a nointerface method on an instantiated
+            ;; type, don't actually append the typeSig.
+            (continue))
+
+          (set! ms (append ms sig))))
+
+
+      ^{:line 130} ms)))
+
+
+
+^{:go/end 165} (go/func imethods "imethods returns the methods of the interface type t, sorted by name.\n" ^{:tag (slice (* typeSig))} [^{:tag (* types/Type)} t]
+  (let [^{:tag (slice (* typeSig))} methods (zero (slice (* typeSig)))]
+    (range [_ f (.AllMethods t)]
+      (when (or (!= (.Kind (.-Type f)) types/TFUNC) (== (.-Sym f) nil))
+        (continue))
+
+      (when (.IsBlank (.-Sym f))
+        (base/Fatalf "unexpected blank symbol in interface method set"))
+
+      (when [n (len methods)] (> n 0)
+        (let [last (aget methods (- n 1))]
+          (when (>= (types/CompareSyms (.-name last) (.-Sym f)) 0)
+            (base/Fatalf "sigcmp vs sortinter %v %v" (.-name last) (.-Sym f)))))
+
+
+
+      (let [sig (addr ^{:go/breaks [2 4 6]} (lit typeSig
+              :name (.-Sym f)
+              :mtype (.-Type f)
+              :type_ (typecheck/NewMethodType (.-Type f) nil)))]
+
+        (set! methods (append methods sig))
+
+        ;; NOTE(rsc): Perhaps an oversight that
+        ;; IfaceType.Method is not in the reflect data.
+        ;; Generate the method body, so that compiled
+        ;; code can refer to it.
+        (methodWrapper t f false)))
+
+
+    ^{:line 164} methods))
+
+
+^{:go/end 189} (go/func dimportpath [^{:tag (* types/Pkg)} p]
+  (when (!= (.-Pathsym p) nil)
+    (return))
+
+
+  (when (and (== p types/LocalPkg) (== (.-Pkgpath base/Ctxt) ""))
+    (panic "missing pkgpath"))
+
+
+  ;; If we are compiling the runtime package, there are two runtime packages around
+  ;; -- localpkg and Pkgs.Runtime. We don't want to produce import path symbols for
+  ;; both of them, so just produce one for localpkg.
+  (when (and (== (.-Pkgpath base/Ctxt) "runtime") (== p (.-Runtime ir/Pkgs)))
+    (return))
+
+
+  (let [s (.Lookup base/Ctxt (+ "type:.importpath." (.-Prefix p) "."))
+      ^{:line 184} ot (dnameData s 0 (.-Path p) "" nil false false)]
+    (objw/Global s (conv int32 ot) (bit-or obj/DUPOK obj/RODATA))
+    ^{:go/via [Attribute]} (.Set s obj/AttrContentAddressable true)
+    (set! (.-Align s) 1)
+    (set! (.-Pathsym p) s)))
+
+
+^{:go/end 200} (go/func dgopkgpath [^rttype/Cursor c ^{:tag (* types/Pkg)} pkg]
+  (set! c (.Field c "Bytes"))
+  (when (== pkg nil)
+    (.WritePtr c nil)
+    (return))
+
+
+  (dimportpath pkg)
+  (.WritePtr c (.-Pathsym pkg)))
+
+
+
+^{:go/end 211} (go/func dgopkgpathOff "dgopkgpathOff writes an offset relocation to the pkg path symbol to c.\n" [^rttype/Cursor c ^{:tag (* types/Pkg)} pkg]
+  (when (== pkg nil)
+    (.WriteInt32 c 0)
+    (return))
+
+
+  (dimportpath pkg)
+  (.WriteSymPtrOff c (.-Pathsym pkg) false))
+
+
+
+^{:go/end 220} (go/func dnameField "dnameField dumps a reflect.name for a struct field.\n" [^rttype/Cursor c ^{:tag (* types/Pkg)} spkg ^{:tag (* types/Field)} ft]
+  (when (and (not (types/IsExported (.-Name (.-Sym ft)))) (!= (.-Pkg (.-Sym ft)) spkg))
+    (base/Fatalf "package mismatch for %v" (.-Sym ft)))
+
+  (let [nsym (dname (.-Name (.-Sym ft)) (.-Note ft) nil (types/IsExported (.-Name (.-Sym ft))) (!= (.-Embedded ft) 0))]
+    (.WritePtr (.Field c "Bytes") nsym)))
+
+
+
+^{:go/end 270} (go/func dnameData "dnameData writes the contents of a reflect.name into s at offset ot.\n" ^int [^{:tag (* obj/LSym)} s ^int ot ^string name ^string tag ^{:tag (* types/Pkg)} pkg ^bool exported ^bool embedded]
+  (when (>= (len name) (<< 1 29))
+    (base/Fatalf "name too long: %d %s..." (len name) (subslice name _ 1024)))
+
+  (when (>= (len tag) (<< 1 29))
+    (base/Fatalf "tag too long: %d %s..." (len tag) (subslice tag _ 1024)))
+
+  (let [^{:tag (array binary/MaxVarintLen64 byte)} nameLen (zero (array binary/MaxVarintLen64 byte))
+      ^{:line 231} nameLenLen (binary/PutUvarint (subslice nameLen) (conv uint64 (len name)))
+      ^{:line 232 :tag (array binary/MaxVarintLen64 byte)} tagLen (zero (array binary/MaxVarintLen64 byte))
+      ^{:line 233} tagLenLen (binary/PutUvarint (subslice tagLen) (conv uint64 (len tag)))
+
+      ;; Encode name and tag. See reflect/type.go for details.
+      ^{:line 236 :tag byte} bits (zero byte)
+      ^{:line 237} l (+ 1 nameLenLen (len name))]
+    (when exported
+      (set! bits bit-or (<< 1 0)))
+
+    (when (> (len tag) 0)
+      (set! l + (+ tagLenLen (len tag)))
+      (set! bits bit-or (<< 1 1)))
+
+    (when (!= pkg nil)
+      (set! bits bit-or (<< 1 2)))
+
+    (when embedded
+      (set! bits bit-or (<< 1 3)))
+
+    (let [b (make (slice byte) l)]
+      (aset b 0 bits)
+      (copy (subslice b 1) (subslice nameLen _ nameLenLen))
+      (copy (subslice b (+ 1 nameLenLen)) name)
+      (when (> (len tag) 0)
+        (let [tb (subslice b (+ 1 nameLenLen (len name)))]
+          (copy tb (subslice tagLen _ tagLenLen))
+          (copy (subslice tb tagLenLen) tag)))
+
+
+      (set! ot (conv int (.WriteBytes s base/Ctxt (conv int64 ot) b)))
+
+      (when (!= pkg nil)
+        (let [c (rttype/NewCursor s (conv int64 ot) (aget types/Types types/TUINT32))]
+          (dgopkgpathOff c pkg)
+          (set! ot + 4)))
+
+
+      ^{:line 269} ot)))
+
+
+(go/var ^int dnameCount)
+
+
+^{:go/end 314} (go/func dname "dname creates a reflect.name for a struct field or method.\n" ^{:tag (* obj/LSym)} [^string name ^string tag ^{:tag (* types/Pkg)} pkg ^bool exported ^bool embedded]
+  ;; Write out data as "type:." to signal two things to the
+  ;; linker, first that when dynamically linking, the symbol
+  ;; should be moved to a relro section, and second that the
+  ;; contents should not be decoded as a type.
+  (let [sname "type:.namedata."]
+    (if (== pkg nil)
+      ;; In the common case, share data with other packages.
+      (if (== name "")
+        (if exported
+          (set! sname + (+ "-noname-exported." tag))
+
+          (set! sname + (+ "-noname-unexported." tag)))
+
+        (do
+          (if exported
+            (set! sname + (+ name "." tag))
+
+            (set! sname + (+ name "-" tag)))))
+
+
+      (do
+        ;; TODO(mdempsky): We should be able to share these too (except
+        ;; maybe when dynamic linking).
+        (set! sname (fmt/Sprintf "%s%s.%d" sname (.-Prefix types/LocalPkg) dnameCount))
+        (inc! dnameCount)))
+
+    (when embedded
+      (set! sname + ".embedded"))
+
+    (let [s (.Lookup base/Ctxt sname)]
+      (when (> (len (.-P s)) 0)
+        (return s))
+
+      (let [ot (dnameData s 0 name tag pkg exported embedded)]
+        (objw/Global s (conv int32 ot) (bit-or obj/DUPOK obj/RODATA))
+        ^{:go/via [Attribute]} (.Set s obj/AttrContentAddressable true)
+        (set! (.-Align s) 1)
+        ^{:line 313} s))))
+
+
+
+
+
+^{:go/end 367} (go/func dextratype "dextratype dumps the fields of a runtime.uncommontype.\ndataAdd is the offset in bytes after the header where the\nbacking array of the []method field should be written.\n" [^{:tag (* obj/LSym)} lsym ^int64 off ^{:tag (* types/Type)} t ^int dataAdd]
+  (let [m (methods t)]
+    (when (and (== (.Sym t) nil) (== (len m) 0))
+      (base/Fatalf "extra requested of type with no extra info %v" t))
+
+    (let [noff (types/RoundUp off (conv int64 types/PtrSize))]
+      (when (!= noff off)
+        (base/Fatalf "unexpected alignment in dextratype for %v" t))
+
+
+      (range [_ a m]
+        (writeType (.-type_ a)))
+
+
+      (let [c (rttype/NewCursor lsym off rttype/UncommonType)]
+        (dgopkgpathOff (.Field c "PkgPath") (typePkg t))
+
+        (set! dataAdd + (uncommonSize t))
+        (let [mcount (len m)]
+          (when (!= mcount (conv int (conv uint16 mcount)))
+            (base/Fatalf "too many methods on %v: %d" t mcount))
+
+          (let [xcount (sort/Search mcount ^{:go/end 341} (fn ^bool [^int i] (not (types/IsExported (.-Name (.-name (aget m i)))))))]
+            (when (!= dataAdd (conv int (conv uint32 dataAdd)))
+              (base/Fatalf "methods are too far away on %v: %d" t dataAdd))
+
+
+            (.WriteUint16 (.Field c "Mcount") (conv uint16 mcount))
+            (.WriteUint16 (.Field c "Xcount") (conv uint16 xcount))
+            (.WriteUint32 (.Field c "Moff") (conv uint32 dataAdd))
+            ;; Note: there is an unused uint32 field here.
+
+            ;; Write the backing array for the []method field.
+            (let [array (rttype/NewArrayCursor lsym (+ off (conv int64 dataAdd)) rttype/Method mcount)]
+              (range [i a m]
+                (let [exported (types/IsExported (.-Name (.-name a)))
+                    ^{:line 355 :tag (* types/Pkg)} pkg (zero (* types/Pkg))]
+                  (when (and (not exported) (!= (.-Pkg (.-name a)) (typePkg t)))
+                    (set! pkg (.-Pkg (.-name a))))
+
+                  (let [nsym (dname (.-Name (.-name a)) "" pkg exported false)
+
+                      ^{:line 361} e (.Elem array i)]
+                    (.WriteSymPtrOff (.Field e "Name") nsym false)
+                    (dmethodptrOff (.Field e "Mtyp") (writeType (.-mtype a)))
+                    (dmethodptrOff (.Field e "Ifn") (.-isym a))
+                    (dmethodptrOff (.Field e "Tfn") (.-tsym a))))))))))))
+
+
+
+^{:go/end 383} (go/func typePkg ^{:tag (* types/Pkg)} [^{:tag (* types/Type)} t]
+  ^{:go/breaks [[4 382]]} (let [tsym (.Sym t)]
+    (when (== tsym nil)
+      (switch (.Kind t)
+        (case [types/TARRAY types/TSLICE types/TPTR types/TCHAN]
+          (when (!= (.Elem t) nil)
+            (set! tsym (.Sym (.Elem t)))))))
+
+
+
+    (when (and (!= tsym nil) (!= (.-Pkg tsym) types/BuiltinPkg))
+      (return (.-Pkg tsym)))
+
+    nil))
+
+
+^{:go/end 388} (go/func dmethodptrOff [^rttype/Cursor c ^{:tag (* obj/LSym)} x]
+  (.WriteInt32 c 0)
+  (.Reloc c (lit obj/Reloc :Type objabi/R_METHODOFF :Sym x)))
+
+
+(go/var kinds (lit (slice abi/Kind)
+    ^{:line 391} [types/TINT abi/Int]
+    ^{:line 392} [types/TUINT abi/Uint]
+    ^{:line 393} [types/TINT8 abi/Int8]
+    ^{:line 394} [types/TUINT8 abi/Uint8]
+    ^{:line 395} [types/TINT16 abi/Int16]
+    ^{:line 396} [types/TUINT16 abi/Uint16]
+    ^{:line 397} [types/TINT32 abi/Int32]
+    ^{:line 398} [types/TUINT32 abi/Uint32]
+    ^{:line 399} [types/TINT64 abi/Int64]
+    ^{:line 400} [types/TUINT64 abi/Uint64]
+    ^{:line 401} [types/TUINTPTR abi/Uintptr]
+    ^{:line 402} [types/TFLOAT32 abi/Float32]
+    ^{:line 403} [types/TFLOAT64 abi/Float64]
+    ^{:line 404} [types/TBOOL abi/Bool]
+    ^{:line 405} [types/TSTRING abi/String]
+    ^{:line 406} [types/TPTR abi/Pointer]
+    ^{:line 407} [types/TSTRUCT abi/Struct]
+    ^{:line 408} [types/TINTER abi/Interface]
+    ^{:line 409} [types/TCHAN abi/Chan]
+    ^{:line 410} [types/TMAP abi/Map]
+    ^{:line 411} [types/TARRAY abi/Array]
+    ^{:line 412} [types/TSLICE abi/Slice]
+    ^{:line 413} [types/TFUNC abi/Func]
+    ^{:line 414} [types/TCOMPLEX64 abi/Complex64]
+    ^{:line 415} [types/TCOMPLEX128 abi/Complex128]
+    ^{:line 416} [types/TUNSAFEPTR abi/UnsafePointer]))
+
+
+^{:go/end 421} (go/func ABIKindOfType ^abi/Kind [^{:tag (* types/Type)} t]
+  (aget kinds (.Kind t)))
+
+
+(go/var
+  ^{:line 424} [^{:tag (* obj/LSym)} memhashvarlen]
+  ^{:line 425} [^{:tag (* obj/LSym)} memequalvarlen])
+
+
+
+^{:go/end 529} (go/func dcommontype "dcommontype dumps the contents of a reflect.rtype (runtime._type) to c.\n" [^rttype/Cursor c ^{:tag (* types/Type)} t]
+  (types/CalcSize t)
+  (let [eqfunc (geneq t)
+
+      ^{:line 433} sptrWeak true
+      ^{:line 434 :tag (* obj/LSym)} sptr (zero (* obj/LSym))]
+    (when (or (not (.IsPtr t)) (.IsPtrElem t))
+      (let [tptr (types/NewPtr t)]
+        (when (or (!= (.Sym t) nil) (!= (methods tptr) nil))
+          (set! sptrWeak false))
+
+        (set! sptr (writeType tptr))))
+
+
+    (let [(values gcsym onDemand ptrdata) (dgcsym t true true)]
+      (when (not onDemand)
+        (delete gcsymset t))
+
+
+      ;; ../../../../reflect/type.go:/^type.rtype
+      ;; actual type structure
+      ;;	type rtype struct {
+      ;;		size          uintptr
+      ;;		ptrdata       uintptr
+      ;;		hash          uint32
+      ;;		tflag         tflag
+      ;;		align         uint8
+      ;;		fieldAlign    uint8
+      ;;		kind          uint8
+      ;;		equal         func(unsafe.Pointer, unsafe.Pointer) bool
+      ;;		gcdata        *byte
+      ;;		str           nameOff
+      ;;		ptrToThis     typeOff
+      ;;	}
+      (.WriteUintptr (.Field c "Size_") (conv uint64 (.Size t)))
+      (.WriteUintptr (.Field c "PtrBytes") (conv uint64 ptrdata))
+      (.WriteUint32 (.Field c "Hash") (types/TypeHash t))
+
+      (let [^abi/TFlag tflag (zero abi/TFlag)]
+        (when (!= (uncommonSize t) 0)
+          (set! tflag bit-or abi/TFlagUncommon))
+
+        (when (and (!= (.Sym t) nil) (!= (.-Name (.Sym t)) ""))
+          (set! tflag bit-or abi/TFlagNamed))
+
+        (when (compare/IsRegularMemory t)
+          (set! tflag bit-or abi/TFlagRegularMemory))
+
+        (when onDemand
+          (set! tflag bit-or abi/TFlagGCMaskOnDemand))
+
+
+        (let [exported false
+            ^{:line 482} p (.NameString t)]
+          ;; If we're writing out type T,
+          ;; we are very likely to write out type *T as well.
+          ;; Use the string "*T"[1:] for "T", so that the two
+          ;; share storage. This is a cheap way to reduce the
+          ;; amount of space taken up by reflect strings.
+          (if (not (strings/HasPrefix p "*")) (do
+              (set! p (+ "*" p))
+              (set! tflag bit-or abi/TFlagExtraStar)
+              (when (!= (.Sym t) nil)
+                (set! exported (types/IsExported (.-Name (.Sym t))))))
+
+            (do
+              (when (and (!= (.Elem t) nil) (!= (.Sym (.Elem t)) nil))
+                (set! exported (types/IsExported (.-Name (.Sym (.Elem t))))))))
+
+
+          (when (types/IsDirectIface t)
+            (set! tflag bit-or abi/TFlagDirectIface))
+
+
+          (when (!= tflag (conv abi/TFlag (conv uint8 tflag)))
+            ;; this should optimize away completely
+            (panic "Unexpected change in size of abi.TFlag"))
+
+          (.WriteUint8 (.Field c "TFlag") (conv uint8 tflag))
+
+          ;; runtime (and common sense) expects alignment to be a power of two.
+          (let [i (conv int (conv uint8 (.Alignment t)))]
+
+            (when (== i 0)
+              (set! i 1))
+
+            (when (!= (bit-and i (- i 1)) 0)
+              (base/Fatalf "invalid alignment %d for %v" (conv uint8 (.Alignment t)) t))
+
+            (.WriteUint8 (.Field c "Align_") (conv uint8 (.Alignment t)))
+            (.WriteUint8 (.Field c "FieldAlign_") (conv uint8 (.Alignment t)))
+
+            (.WriteUint8 (.Field c "Kind_") (conv uint8 (ABIKindOfType t)))
+
+            (.WritePtr (.Field c "Equal") eqfunc)
+            (.WritePtr (.Field c "GCData") gcsym)
+
+            (let [nsym (dname p "" nil exported false)]
+              (.WriteSymPtrOff (.Field c "Str") nsym false)
+              (.WriteSymPtrOff (.Field c "PtrToThis") sptr sptrWeak))))))))
+
+
+
+
+^{:go/end 535} (go/func TrackSym "TrackSym returns the symbol for tracking use of field/method f, assumed\nto be a member of struct/interface type t.\n" ^{:tag (* obj/LSym)} [^{:tag (* types/Type)} t ^{:tag (* types/Field)} f]
+  (base/PkgLinksym "go:track" (+ (.LinkString t) "." (.-Name (.-Sym f))) obj/ABI0))
+
+
+^{:go/end 550} (go/func TypeSymPrefix ^{:tag (* types/Sym)} [^string prefix ^{:tag (* types/Type)} t]
+  (let [p (+ prefix "." (.LinkString t))
+      ^{:line 539} s (types/TypeSymLookup p)]
+
+    ;; This function is for looking up type-related generated functions
+    ;; (e.g. eq and hash). Make sure they are indeed generated.
+    (.Lock signatmu)
+    (NeedRuntimeType t)
+    (.Unlock signatmu)
+
+    ;;print("algsym: %s -> %+S\n", p, s);
+
+    ^{:line 549} s))
+
+
+^{:go/end 564} (go/func TypeSym ^{:tag (* types/Sym)} [^{:tag (* types/Type)} t]
+  (when (or (== t nil) ^:go/paren (and (.IsPtr t) (== (.Elem t) nil)) (.IsUntyped t))
+    (base/Fatalf "TypeSym %v" t))
+
+  (when (and (== (.Kind t) types/TFUNC) (!= (.Recv t) nil))
+    (base/Fatalf "misuse of method type: %v" t))
+
+  (let [s (types/TypeSym t)]
+    (.Lock signatmu)
+    (NeedRuntimeType t)
+    (.Unlock signatmu)
+    ^{:line 563} s))
+
+
+^{:go/end 568} (go/func TypeLinksymPrefix ^{:tag (* obj/LSym)} [^string prefix ^{:tag (* types/Type)} t]
+  (.Linksym (TypeSymPrefix prefix t)))
+
+
+^{:go/end 572} (go/func TypeLinksymLookup ^{:tag (* obj/LSym)} [^string name]
+  (.Linksym (types/TypeSymLookup name)))
+
+
+^{:go/end 583} (go/func TypeLinksym ^{:tag (* obj/LSym)} [^{:tag (* types/Type)} t]
+  (let [lsym (.Linksym (TypeSym t))]
+    (.Lock signatmu)
+    (when (== (.-Extra lsym) nil)
+      (let [ti (.NewTypeInfo lsym)]
+        (set! (.-Type ti) t)))
+
+    (.Unlock signatmu)
+    ^{:line 582} lsym))
+
+
+
+
+^{:go/end 589} (go/func TypePtrAt "TypePtrAt returns an expression that evaluates to the\n*runtime._type value for t.\n" ^{:tag (* ir/AddrExpr)} [^src/XPos pos ^{:tag (* types/Type)} t]
+  (typecheck/LinksymAddr pos (TypeLinksym t) (aget types/Types types/TUINT8)))
+
+
+
+
+
+
+
+
+
+^{:go/end 600} (go/func ITabLsym "ITabLsym returns the LSym representing the itab for concrete type typ implementing\ninterface iface. A dummy tab will be created in the unusual case where typ doesn't\nimplement iface. Normally, this wouldn't happen, because the typechecker would\nhave reported a compile-time error. This situation can only happen when the\ndestination type of a type assert or a type in a type switch is parameterized, so\nit may sometimes, but not always, be a type that can't implement the specified\ninterface.\n" ^{:tag (* obj/LSym)} [^{:tag (* types/Type)} typ ^{:tag (* types/Type)} iface]
+  (itabLsym typ iface true))
+
+
+^{:go/end 616} (go/func itabLsym ^{:tag (* obj/LSym)} [^{:tag (* types/Type)} typ ^{:tag (* types/Type)} iface ^bool allowNonImplement]
+  (let [(values s existed) (.LookupOK (.-Itab ir/Pkgs) (+ (.LinkString typ) "," (.LinkString iface)))
+      ^{:line 604} lsym (.Linksym s)]
+    (.Lock signatmu)
+    (when (== (.-Extra lsym) nil)
+      (let [ii (.NewItabInfo lsym)]
+        (set! (.-Type ii) typ)))
+
+    (.Unlock signatmu)
+
+    (when (not existed)
+      (writeITab lsym typ iface allowNonImplement))
+
+    ^{:line 615} lsym))
+
+
+
+
+
+^{:go/end 624} (go/func ITabAddrAt "ITabAddrAt returns an expression that evaluates to the\n*runtime.itab value for concrete type typ implementing interface\niface.\n" ^{:tag (* ir/AddrExpr)} [^src/XPos pos ^{:tag (* types/Type)} typ ^{:tag (* types/Type)} iface]
+  (let [lsym (itabLsym typ iface false)]
+    (typecheck/LinksymAddr pos lsym (aget types/Types types/TUINT8))))
+
+
+
+
+^{:go/end 654} (go/func needkeyupdate "needkeyupdate reports whether map updates with t as a key\nneed the key to be updated.\n" ^bool [^{:tag (* types/Type)} t]
+  (switch (.Kind t)
+    (case [types/TBOOL types/TINT types/TUINT types/TINT8 types/TUINT8 types/TINT16 types/TUINT16 types/TINT32 types/TUINT32
+        ^{:line 631} types/TINT64 types/TUINT64 types/TUINTPTR types/TPTR types/TUNSAFEPTR types/TCHAN]
+      (return false))
+
+    (case [types/TFLOAT32 types/TFLOAT64 types/TCOMPLEX64 types/TCOMPLEX128 ; floats and complex can be +0/-0
+        ^{:line 635} types/TINTER
+        ^{:line 636} types/TSTRING] ; strings might have smaller backing stores
+      (return true))
+
+    (case [types/TARRAY]
+      (return (needkeyupdate (.Elem t))))
+
+    (case [types/TSTRUCT]
+      (range [_ t1 (.Fields t)]
+        (when (needkeyupdate (.-Type t1))
+          (return true)))
+
+
+      (return false))
+
+    (default
+      (base/Fatalf "bad type for map key: %v" t)
+      (return true))))
+
+
+
+
+^{:go/end 676} (go/func hashMightPanic "hashMightPanic reports whether the hash of a map key of type t might panic.\n" ^bool [^{:tag (* types/Type)} t]
+  (switch (.Kind t)
+    (case [types/TINTER]
+      (return true))
+
+    (case [types/TARRAY]
+      (return (hashMightPanic (.Elem t))))
+
+    (case [types/TSTRUCT]
+      (range [_ t1 (.Fields t)]
+        (when (hashMightPanic (.-Type t1))
+          (return true)))
+
+
+      (return false))
+
+    (default
+      (return false))))
+
+
+
+
+
+
+^{:go/end 687} (go/func formalType "formalType replaces predeclared aliases with real types.\nThey've been separate internally to make error messages\nbetter, but we have to merge them in the reflect tables.\n" ^{:tag (* types/Type)} [^{:tag (* types/Type)} t]
+  (switch t
+    (case [types/AnyType types/ByteType types/RuneType]
+      (return (aget types/Types (.Kind t)))))
+
+  ^{:line 686} t)
+
+
+^{:go/end 971} (go/func writeType ^{:tag (* obj/LSym)} [^{:tag (* types/Type)} t]
+  (set! t (formalType t))
+  (when (.IsUntyped t)
+    (base/Fatalf "writeType %v" t))
+
+
+  (let [s (types/TypeSym t)
+      ^{:line 696} lsym (.Linksym s)
+
+      ;; special case (look for runtime below):
+      ;; when compiling package runtime,
+      ;; emit the type structures for int, float, etc.
+      ^{:line 701} tbase t]
+    (when (and (.IsPtr t) (== (.Sym t) nil) (!= (.Sym (.Elem t)) nil))
+      (set! tbase (.Elem t)))
+
+    (when (== (.Kind tbase) types/TFORW)
+      (base/Fatalf "unresolved defined type: %v" tbase))
+
+
+    ;; This is a fake type we generated for our builtin pseudo-runtime
+    ;; package. We'll emit a description for the real type while
+    ;; compiling package runtime, so we don't need or want to emit one
+    ;; from this fake type.
+    (when [sym (.Sym tbase)] (and (!= sym nil) (== (.-Pkg sym) (.-Runtime ir/Pkgs)))
+      (return lsym))
+
+
+    (when (.Siggen s)
+      (return lsym))
+
+    (.SetSiggen s true)
+
+    (when (not (.HasShape tbase))
+      (TypeLinksym t)) ; ensure lsym.Extra is set
+
+
+    (when (not (NeedEmit tbase))
+      (when [i (typecheck/BaseTypeIndex t)] (>= i 0)
+        (set! (.-Pkg lsym) (.-Prefix (.-Pkg (.Sym tbase))))
+        (set! (.-SymIdx lsym) (conv int32 i))
+        ^{:go/via [Attribute]} (.Set lsym obj/AttrIndexed true))
+
+
+      ;; TODO(mdempsky): Investigate whether this still happens.
+      ;; If we know we don't need to emit code for a type,
+      ;; we should have a link-symbol index for it.
+      ;; See also TODO in NeedEmit.
+      (return lsym))
+
+
+    ;; Type layout                          Written by               Marker
+    ;; +--------------------------------+                            - 0
+    ;; | abi/internal.Type              |   dcommontype
+    ;; +--------------------------------+                            - A
+    ;; | additional type-dependent      |   code in the switch below
+    ;; | fields, e.g.                   |
+    ;; | abi/internal.ArrayType.Len     |
+    ;; +--------------------------------+                            - B
+    ;; | internal/abi.UncommonType      |   dextratype
+    ;; | This section is optional,      |
+    ;; | if type has a name or methods  |
+    ;; +--------------------------------+                            - C
+    ;; | variable-length data           |   code in the switch below
+    ;; | referenced by                  |
+    ;; | type-dependent fields, e.g.    |
+    ;; | abi/internal.StructType.Fields |
+    ;; | dataAdd = size of this section |
+    ;; +--------------------------------+                            - D
+    ;; | method list, if any            |   dextratype
+    ;; +--------------------------------+                            - E
+
+    ;; internal/abi.Type.DescriptorSize is aware of this type layout,
+    ;; and must be changed if the layout change.
+
+    ;; UncommonType section is included if we have a name or a method.
+    (let [extra (or (!= (.Sym t) nil) (!= (len (methods t)) 0))
+
+        ;; Decide the underlying type of the descriptor, and remember
+        ;; the size we need for variable-length data.
+        ^{:line 769 :tag (* types/Type)} rt (zero (* types/Type))
+        ^{:line 770} dataAdd 0]
+      (switch (.Kind t)
+        (default
+          (set! rt rttype/Type))
+        (case [types/TARRAY]
+          (set! rt rttype/ArrayType))
+        (case [types/TSLICE]
+          (set! rt rttype/SliceType))
+        (case [types/TCHAN]
+          (set! rt rttype/ChanType))
+        (case [types/TFUNC]
+          (set! rt rttype/FuncType)
+          (set! dataAdd (* (+ (.NumRecvs t) (.NumParams t) (.NumResults t)) types/PtrSize)))
+        (case [types/TINTER]
+          (set! rt rttype/InterfaceType)
+          (set! dataAdd (* (len (imethods t)) (conv int (.Size rttype/IMethod)))))
+        (case [types/TMAP]
+          (set! rt rttype/MapType))
+        (case [types/TPTR]
+          (set! rt rttype/PtrType))
+        ;; TODO: use rttype.Type for Elem() is ANY?
+        (case [types/TSTRUCT]
+          (set! rt rttype/StructType)
+          (set! dataAdd (* (.NumFields t) (conv int (.Size rttype/StructField))))))
+
+
+      ;; Compute offsets of each section.
+      (let [B (.Size rt)
+          ^{:line 798} C B]
+        (when extra
+          (set! C (+ B (.Size rttype/UncommonType))))
+
+        (let [D (+ C (conv int64 dataAdd))
+            ^{:line 803} E (+ D (* (conv int64 (len (methods t))) (.Size rttype/Method)))
+
+            ;; Write the runtime._type
+            ^{:line 806} c (rttype/NewCursor lsym 0 rt)]
+          (if (== rt rttype/Type)
+            (dcommontype c t)
+
+            (dcommontype (.Field c "Type") t))
+
+
+          ;; Write additional type-specific data
+          ;; (Both the fixed size and variable-sized sections.)
+          (switch (.Kind t)
+            (case [types/TARRAY]
+              ;; internal/abi.ArrayType
+              (let [s1 (writeType (.Elem t))
+                  ^{:line 819} t2 (types/NewSlice (.Elem t))
+                  ^{:line 820} s2 (writeType t2)]
+                (.WritePtr (.Field c "Elem") s1)
+                (.WritePtr (.Field c "Slice") s2)
+                (.WriteUintptr (.Field c "Len") (conv uint64 (.NumElem t)))))
+
+            (case [types/TSLICE]
+              ;; internal/abi.SliceType
+              (let [s1 (writeType (.Elem t))]
+                (.WritePtr (.Field c "Elem") s1)))
+
+            (case [types/TCHAN]
+              ;; internal/abi.ChanType
+              (let [s1 (writeType (.Elem t))]
+                (.WritePtr (.Field c "Elem") s1)
+                (.WriteInt (.Field c "Dir") (conv int64 (.ChanDir t)))))
+
+            (case [types/TFUNC]
+              ;; internal/abi.FuncType
+              (range [_ t1 (.RecvParamsResults t)]
+                (writeType (.-Type t1)))
+
+              (let [inCount (+ (.NumRecvs t) (.NumParams t))
+                  ^{:line 842} outCount (.NumResults t)]
+                (when (.IsVariadic t)
+                  (set! outCount bit-or (<< 1 15)))
+
+
+                (.WriteUint16 (.Field c "InCount") (conv uint16 inCount))
+                (.WriteUint16 (.Field c "OutCount") (conv uint16 outCount))
+
+                ;; Array of rtype pointers follows funcType.
+                (let [typs (.RecvParamsResults t)
+                    ^{:line 852} array (rttype/NewArrayCursor lsym C (aget types/Types types/TUNSAFEPTR) (len typs))]
+                  (range [i t1 typs]
+                    (.WritePtr (.Elem array i) (writeType (.-Type t1)))))))
+
+
+            (case [types/TINTER]
+              ;; internal/abi.InterfaceType
+              (let [m (imethods t)
+                  ^{:line 860} n (len m)]
+                (range [_ a m]
+                  (writeType (.-type_ a)))
+
+
+                (let [^{:tag (* types/Pkg)} tpkg (zero (* types/Pkg))]
+                  (when (and (!= (.Sym t) nil) (!= t (aget types/Types (.Kind t))) (!= t types/ErrorType))
+                    (set! tpkg (.-Pkg (.Sym t))))
+
+                  (dgopkgpath (.Field c "PkgPath") tpkg)
+                  (.WriteSlice (.Field c "Methods") lsym C (conv int64 n) (conv int64 n))
+
+                  (let [array (rttype/NewArrayCursor lsym C rttype/IMethod n)]
+                    (range [i a m]
+                      (let [exported (types/IsExported (.-Name (.-name a)))
+                          ^{:line 875 :tag (* types/Pkg)} pkg (zero (* types/Pkg))]
+                        (when (and (not exported) (!= (.-Pkg (.-name a)) tpkg))
+                          (set! pkg (.-Pkg (.-name a))))
+
+                        (let [nsym (dname (.-Name (.-name a)) "" pkg exported false)
+
+                            ^{:line 881} e (.Elem array i)]
+                          (.WriteSymPtrOff (.Field e "Name") nsym false)
+                          (.WriteSymPtrOff (.Field e "Typ") (writeType (.-type_ a)) false))))))))
+
+
+            (case [types/TMAP]
+              (writeMapType t lsym c))
+
+            (case [types/TPTR]
+              ;; internal/abi.PtrType
+              (when (== (.Kind (.Elem t)) types/TANY)
+                (base/Fatalf "bad pointer base type"))
+
+
+              (let [s1 (writeType (.Elem t))]
+                (.WritePtr (.Field c "Elem") s1)))
+
+            (case [types/TSTRUCT]
+              ;; internal/abi.StructType
+              (let [fields (.Fields t)]
+                (range [_ t1 fields]
+                  (writeType (.-Type t1)))
+
+
+                ;; All non-exported struct field names within a struct
+                ;; type must originate from a single package. By
+                ;; identifying and recording that package within the
+                ;; struct type descriptor, we can omit that
+                ;; information from the field descriptors.
+                (let [^{:tag (* types/Pkg)} spkg (zero (* types/Pkg))]
+                  (range [_ f fields]
+                    (when (not (types/IsExported (.-Name (.-Sym f))))
+                      (set! spkg (.-Pkg (.-Sym f)))
+                      (break)))
+
+
+
+                  (dgopkgpath (.Field c "PkgPath") spkg)
+                  (.WriteSlice (.Field c "Fields") lsym C (conv int64 (len fields)) (conv int64 (len fields)))
+
+                  (let [array (rttype/NewArrayCursor lsym C rttype/StructField (len fields))]
+                    (range [i f fields]
+                      (let [e (.Elem array i)]
+                        (dnameField (.Field e "Name") spkg f)
+                        (.WritePtr (.Field e "Typ") (writeType (.-Type f)))
+                        (.WriteUintptr (.Field e "Offset") (conv uint64 (.-Offset f))))))))))
+
+
+
+          ;; Write the extra info, if any.
+          (when extra
+            (dextratype lsym B t dataAdd))
+
+
+          ;; Note: DUPOK is required to ensure that we don't end up with more
+          ;; than one type descriptor for a given type, if the type descriptor
+          ;; can be defined in multiple packages, that is, unnamed types,
+          ;; instantiated types and shape types.
+          (let [dupok 0]
+            (when (or (== (.Sym tbase) nil) (.IsFullyInstantiated tbase) (.HasShape tbase))
+              (set! dupok obj/DUPOK))
+
+
+            (objw/Global lsym (conv int32 E) (conv int16 (bit-or dupok obj/RODATA)))
+
+            ;; The linker will leave a table of all the typelinks for
+            ;; types in the binary, so the runtime can find them.
+            ;;
+            ;; When buildmode=shared, all types are in typelinks so the
+            ;; runtime can deduplicate type pointers.
+            (let [keep (.-Flag_dynlink base/Ctxt)]
+              (when (and (not keep) (== (.Sym t) nil))
+                ;; For an unnamed type, we only need the link if the type can
+                ;; be created at run time by reflect.PointerTo and similar
+                ;; functions. If the type exists in the program, those
+                ;; functions must return the existing type structure rather
+                ;; than creating a new one.
+                (switch (.Kind t)
+                  (case [types/TPTR types/TARRAY types/TCHAN types/TFUNC types/TMAP types/TSLICE types/TSTRUCT]
+                    (set! keep true))))
+
+
+              ;; Do not put Noalg types in typelinks.  See issue #22605.
+              (when (types/TypeHasNoAlg t)
+                (set! keep false))
+
+              ^{:go/via [Attribute]} (.Set lsym obj/AttrMakeTypelink keep)
+              (set! (.-Align lsym) (conv int16 types/PtrSize))
+
+              ^{:line 970} lsym)))))))
+
+
+
+
+^{:go/end 985} (go/func InterfaceMethodOffset "InterfaceMethodOffset returns the offset of the i-th method in the interface\ntype descriptor, ityp.\n" ^int64 [^{:tag (* types/Type)} ityp ^int64 i]
+  ;; interface type descriptor layout is struct {
+  ;;   _type        // commonSize
+  ;;   pkgpath      // 1 word
+  ;;   []imethod    // 3 words (pointing to [...]imethod below)
+  ;;   uncommontype // uncommonSize
+  ;;   [...]imethod
+  ;; }
+  ;; The size of imethod is 8.
+  (+ (conv int64 (+ (commonSize) (* 4 types/PtrSize) (uncommonSize ityp))) (* i 8)))
+
+
+
+^{:go/end 993} (go/func NeedRuntimeType "NeedRuntimeType ensures that a runtime type descriptor is emitted for t.\n" [^{:tag (* types/Type)} t]
+  (when [(values _ ok) (aget signatset t)] (not ok)
+    (aset signatset t (lit (struct)))
+    (set! signatslice (append signatslice (lit typeAndStr :t t :short (types/TypeSymName t) :regular (.String t))))))
+
+
+
+^{:go/end 1011} (go/func WriteRuntimeTypes []
+  ;; Process signatslice. Use a loop, as writeType adds
+  ;; entries to signatslice while it is being processed.
+  (while (> (len signatslice) 0)
+    (let [signats signatslice]
+      ;; Sort for reproducible builds.
+      (^{:inst [(slice typeAndStr) typeAndStr]} slices/SortFunc signats typesStrCmp)
+      (range [_ ts signats]
+        (let [t (.-t ts)]
+          (writeType t)
+          (when (!= (.Sym t) nil)
+            (writeType (types/NewPtr t)))))
+
+
+      (set! signatslice (subslice signatslice (len signats))))))
+
+
+
+^{:go/end 1023} (go/func WriteGCSymbols []
+  ;; Emit GC data symbols.
+  (let [gcsyms (make (slice typeAndStr) 0 (len gcsymset))]
+    (range [t gcsymset]
+      (set! gcsyms (append gcsyms (lit typeAndStr :t t :short (types/TypeSymName t) :regular (.String t)))))
+
+    (^{:inst [(slice typeAndStr) typeAndStr]} slices/SortFunc gcsyms typesStrCmp)
+    (range [_ ts gcsyms]
+      (dgcsym (.-t ts) true false))))
+
+
+
+
+
+
+^{:go/end 1089} (go/func writeITab "writeITab writes the itab for concrete type typ implementing interface iface. If\nallowNonImplement is true, allow the case where typ does not implement iface, and just\ncreate a dummy itab with zeroed-out method entries.\n" [^{:tag (* obj/LSym)} lsym ^{:tag (* types/Type)} typ ^{:tag (* types/Type)} iface ^bool allowNonImplement]
+  ;; TODO(mdempsky): Fix methodWrapper, geneq, and genhash (and maybe
+  ;; others) to stop clobbering these.
+  (let [(values oldpos oldfn) (values base/Pos ir/CurFunc)]
+    (defer (^{:go/end 1032} (fn [] (set! (values base/Pos ir/CurFunc) (values oldpos oldfn)))))
+
+    (when (or (== typ nil) ^:go/paren (and (.IsPtr typ) (== (.Elem typ) nil)) (.IsUntyped typ) (== iface nil) (not (.IsInterface iface)) (.IsEmptyInterface iface))
+      (base/Fatalf "writeITab(%v, %v)" typ iface))
+
+
+    (let [sigs (.AllMethods iface)
+        ^{:line 1039} entries (make (slice (* obj/LSym)) 0 (len sigs))]
+
+      ;; both sigs and methods are sorted by name,
+      ;; so we can find the intersection in a single pass
+      (range [_ m (methods typ)]
+        (when (== (.-name m) (.-Sym (aget sigs 0)))
+          (set! entries (append entries (.-isym m)))
+          (when (== (.-isym m) nil)
+            (panic "NO ISYM"))
+
+          (set! sigs (subslice sigs 1))
+          (when (== (len sigs) 0)
+            (break))))
+
+
+
+      (let [completeItab (== (len sigs) 0)]
+        (when (and (not allowNonImplement) (not completeItab))
+          (base/Fatalf "incomplete itab"))
+
+
+        ;; dump empty itab symbol into i.sym
+        ;; type itab struct {
+        ;;   inter  *interfacetype
+        ;;   _type  *_type
+        ;;   hash   uint32 // copy of _type.hash. Used for type switches.
+        ;;   _      [4]byte
+        ;;   fun    [1]uintptr // variable sized. fun[0]==0 means _type does not implement inter.
+        ;; }
+        (let [c (rttype/NewCursor lsym 0 rttype/ITab)]
+          (.WritePtr (.Field c "Inter") (writeType iface))
+          (.WritePtr (.Field c "Type") (writeType typ))
+          (.WriteUint32 (.Field c "Hash") (types/TypeHash typ)) ; copy of type hash
+
+          (let [^int64 delta (zero int64)]
+            (set! c (.Field c "Fun"))
+            (if (not completeItab)
+              ;; If typ doesn't implement iface, make method entries be zero.
+              (.WriteUintptr (.Elem c 0) 0)
+
+              (let [^rttype/ArrayCursor a (zero rttype/ArrayCursor)]
+                (set! (values a delta) (.ModifyArray c (len entries)))
+                (range [i fn entries]
+                  (.WritePtrWeak (.Elem a i) fn)))) ; method pointer for each method
+
+
+            ;; Nothing writes static itabs, so they are read only.
+            (objw/Global lsym (conv int32 (+ (.Size rttype/ITab) delta)) (conv int16 (bit-or obj/DUPOK obj/RODATA)))
+            ^{:go/via [Attribute]} (.Set lsym obj/AttrContentAddressable true)
+            (set! (.-Align lsym) (conv int16 types/PtrSize))))))))
+
+
+^{:go/end 1126} (go/func WritePluginTable []
+  (let [ptabs (.-PluginExports typecheck/Target)]
+    (when (== (len ptabs) 0)
+      (return))
+
+
+    (let [lsym (.Lookup base/Ctxt "go:plugin.tabs")
+        ^{:line 1098} ot 0]
+      (range [_ p ptabs]
+        ;; Dump ptab symbol into go.pluginsym package.
+        ;;
+        ;; type ptab struct {
+        ;;	name nameOff
+        ;;	typ  typeOff // pointer to symbol
+        ;; }
+        (let [nsym (dname (.-Name (.Sym p)) "" nil true false)
+            ^{:line 1107} t ^{:go/via [miniExpr]} (.Type p)]
+          (when (!= (.-Class p) ir/PFUNC)
+            (set! t (types/NewPtr t)))
+
+          (let [tsym (writeType t)]
+            (set! ot (objw/SymPtrOff lsym ot nsym))
+            (set! ot (objw/SymPtrOff lsym ot tsym))
+            ;; Plugin exports symbols as interfaces. Mark their types
+            ;; as UsedInIface.
+            ^{:go/via [Attribute]} (.Set tsym obj/AttrUsedInIface true))))
+
+      (objw/Global lsym (conv int32 ot) (conv int16 obj/RODATA))
+
+      (set! lsym (.Lookup base/Ctxt "go:plugin.exports"))
+      (set! ot 0)
+      (range [_ p ptabs]
+        (set! ot (objw/SymPtr lsym ot (.Linksym p) 0)))
+
+      (objw/Global lsym (conv int32 ot) (conv int16 obj/RODATA)))))
+
+
+
+
+^{:go/end 1154} (go/func writtenByWriteBasicTypes "writtenByWriteBasicTypes reports whether typ is written by WriteBasicTypes.\nWriteBasicTypes always writes pointer types; any pointer has been stripped off typ already.\n" ^bool [^{:tag (* types/Type)} typ]
+  (when (and (== (.Sym typ) nil) (== (.Kind typ) types/TFUNC))
+    ;; func(error) string
+    (when (and (== (.NumRecvs typ) 0)
+        (== (.NumParams typ) 1) (== (.NumResults typ) 1)
+        (== (.-Type (.Param typ 0)) types/ErrorType)
+        (== (.-Type (.Result typ 0)) (aget types/Types types/TSTRING)))
+      (return true)))
+
+
+
+  ;; Now we have left the basic types plus any and error, plus slices of them.
+  ;; Strip the slice.
+  (when (and (== (.Sym typ) nil) (.IsSlice typ))
+    (set! typ (.Elem typ)))
+
+
+  ;; Basic types.
+  (let [sym (.Sym typ)]
+    (when (and (!= sym nil) ^:go/paren (or (== (.-Pkg sym) types/BuiltinPkg) (== (.-Pkg sym) types/UnsafePkg)))
+      (return true))
+
+    ;; any or error
+    (or ^:go/paren (and (== sym nil) (.IsEmptyInterface typ)) (== typ types/ErrorType))))
+
+
+^{:go/end 1190} (go/func WriteBasicTypes []
+  ;; do basic types if compiling package runtime.
+  ;; they have to be in at least one package,
+  ;; and runtime is always loaded implicitly,
+  ;; so this is as good as any.
+  ;; another possible choice would be package main,
+  ;; but using runtime means fewer copies in object files.
+  ;; The code here needs to be in sync with writtenByWriteBasicTypes above.
+  (when (!= (.-Pkgpath base/Ctxt) "runtime")
+    (return))
+
+
+  ;; Note: always write NewPtr(t) because NeedEmit's caller strips the pointer.
+  (let [^{:tag (slice (* types/Type))} list (zero (slice (* types/Type)))]
+    (for [i (conv types/Kind 1)] (<= i types/TBOOL) (inc! i)
+      (set! list (append list (aget types/Types i))))
+
+    (set! list (append list
+        (aget types/Types types/TSTRING)
+        (aget types/Types types/TUNSAFEPTR)
+        ^{:line 1176} types/AnyType
+        ^{:line 1177} types/ErrorType))
+    (range [_ t list]
+      (writeType (types/NewPtr t))
+      (writeType (types/NewPtr (types/NewSlice t))))
+
+
+    ;; emit type for func(error) string,
+    ;; which is the type of an auto-generated wrapper.
+    (writeType (types/NewPtr (types/NewSignature nil (lit (slice (* types/Field))
+            (types/NewField base/Pos nil types/ErrorType))
+          (lit (slice (* types/Field))
+            (types/NewField base/Pos nil (aget types/Types types/TSTRING))))))))
+
+
+
+(go/type typeAndStr (struct
+    ^{:line 1193 :tag (* types/Type)} t
+    ^{:line 1194 :tag string} short ; "short" here means TypeSymName
+    ^{:line 1195 :tag string} regular))
+
+
+^{:go/breaks [[8 1232]] :go/end 1233} (go/func typesStrCmp ^int [^typeAndStr a ^typeAndStr b]
+  ;; put named types before unnamed types
+  (when (and (!= (.Sym (.-t a)) nil) (== (.Sym (.-t b)) nil))
+    (return -1))
+
+  (when (and (== (.Sym (.-t a)) nil) (!= (.Sym (.-t b)) nil))
+    (return (+ 1)))
+
+
+  (when [r (strings/Compare (.-short a) (.-short b))] (!= r 0)
+    (return r))
+
+  ;; When the only difference between the types is whether
+  ;; they refer to byte or uint8, such as **byte vs **uint8,
+  ;; the types' NameStrings can be identical.
+  ;; To preserve deterministic sort ordering, sort these by String().
+  ;;
+  ;; TODO(mdempsky): This all seems suspect. Using LinkString would
+  ;; avoid naming collisions, and there shouldn't be a reason to care
+  ;; about "byte" vs "uint8": they share the same runtime type
+  ;; descriptor anyway.
+  (when [r (strings/Compare (.-regular a) (.-regular b))] (!= r 0)
+    (return r))
+
+  ;; Identical anonymous interfaces defined in different locations
+  ;; will be equal for the above checks, but different in DWARF output.
+  ;; Sort by source position to ensure deterministic order.
+  ;; See issues 27013 and 30202.
+  (when (and (== (.Kind (.-t a)) types/TINTER) (> (len (.AllMethods (.-t a))) 0))
+    (when (.Before (.-Pos (aget (.AllMethods (.-t a)) 0)) (.-Pos (aget (.AllMethods (.-t b)) 0)))
+      (return -1))
+
+    (return (+ 1)))
+
+  0)
+
+
+
+
+
+
+^{:go/end 1249} (go/func GCSym "GCSym returns a data symbol containing GC information for type t.\nGC information is always a bitmask, never a gc program.\nGCSym may be called in concurrent backend, so it does not emit the symbol\ncontent.\n" [^{:tag (* types/Type)} t ^bool onDemandAllowed] :results [^{:tag (* obj/LSym)} lsym ^int64 ptrdata]
+  ;; Record that we need to emit the GC symbol.
+  (.Lock gcsymmu)
+  (when [(values _ ok) (aget gcsymset t)] (not ok)
+    (aset gcsymset t (lit (struct))))
+
+  (.Unlock gcsymmu)
+
+  (set! (values lsym _ ptrdata) (dgcsym t false onDemandAllowed))
+  (return))
+
+
+
+
+
+
+^{:go/end 1265} (go/func dgcsym "dgcsym returns a data symbol containing GC information for type t, along\nwith a boolean reporting whether the gc mask should be computed on demand\nat runtime, and the ptrdata field to record in the reflect type information.\nWhen write is true, it writes the symbol data.\n" [^{:tag (* types/Type)} t ^bool write ^bool onDemandAllowed] :results [^{:tag (* obj/LSym)} lsym ^bool onDemand ^int64 ptrdata]
+  (set! ptrdata (types/PtrDataSize t))
+  (when (or (not onDemandAllowed) (<= (/ ptrdata (conv int64 types/PtrSize)) (* abi/MaxPtrmaskBytes 8)))
+    (set! lsym (dgcptrmask t write))
+    (return))
+
+
+  (set! onDemand true)
+  (set! lsym (dgcptrmaskOnDemand t write))
+  (return))
+
+
+
+^{:go/end 1289} (go/func dgcptrmask "dgcptrmask emits and returns the symbol containing a pointer mask for type t.\n" ^{:tag (* obj/LSym)} [^{:tag (* types/Type)} t ^bool write]
+  ;; Bytes we need for the ptrmask.
+  (let [n (/ (+ (/ (types/PtrDataSize t) (conv int64 types/PtrSize)) 7) 8)]
+    ;; Runtime wants ptrmasks padded to a multiple of uintptr in size.
+    (set! n (bit-and-not (- (+ n (conv int64 types/PtrSize)) 1) (- (conv int64 types/PtrSize) 1)))
+    (let [ptrmask (make (slice byte) n)]
+      (fillptrmask t ptrmask)
+      (let [p (fmt/Sprintf "runtime.gcbits.%x" ptrmask)
+
+          ^{:line 1277} lsym (.Lookup base/Ctxt p)]
+        (when (and write (not ^{:go/via [Attribute]} (.OnList lsym)))
+          (range [i x ptrmask]
+            (objw/Uint8 lsym i x))
+
+          (objw/Global lsym (conv int32 (len ptrmask)) (bit-or obj/DUPOK obj/RODATA obj/LOCAL))
+          ^{:go/via [Attribute]} (.Set lsym obj/AttrContentAddressable true)
+          ;; The runtime expects ptrmasks to be aligned
+          ;; as a uintptr.
+          (set! (.-Align lsym) (conv int16 types/PtrSize)))
+
+        ^{:line 1288} lsym))))
+
+
+
+
+
+^{:go/end 1308} (go/func fillptrmask "fillptrmask fills in ptrmask with 1s corresponding to the\nword offsets in t that hold pointers.\nptrmask is assumed to fit at least types.PtrDataSize(t)/PtrSize bits.\n" [^{:tag (* types/Type)} t ^{:tag (slice byte)} ptrmask]
+  (when (not (.HasPointers t))
+    (return))
+
+
+  (let [vec (bitvec/New (* 8 (conv int32 (len ptrmask))))]
+    (typebits/Set t 0 vec)
+
+    (let [nptr (/ (types/PtrDataSize t) (conv int64 types/PtrSize))]
+      (for [i (conv int64 0)] (< i nptr) (inc! i)
+        (when (.Get vec (conv int32 i))
+          (set! (aget ptrmask (/ i 8)) bit-or ^byte (<< 1 (% (conv uint i) 8))))))))
+
+
+
+
+
+
+^{:go/end 1321} (go/func dgcptrmaskOnDemand "dgcptrmaskOnDemand emits and returns the symbol that should be referenced by\nthe GCData field of a type, for large types.\n" ^{:tag (* obj/LSym)} [^{:tag (* types/Type)} t ^bool write]
+  (let [lsym (TypeLinksymPrefix ".gcmask" t)]
+    (when (and write (not ^{:go/via [Attribute]} (.OnList lsym)))
+      ;; Note: contains a pointer, but a pointer to a
+      ;; persistentalloc allocation. Starts with nil.
+      ;; Allocated in BSS.
+      (objw/Global lsym (conv int32 types/PtrSize) (bit-or obj/DUPOK obj/NOPTR obj/LOCAL)))
+
+    ^{:line 1320} lsym))
+
+
+
+
+^{:go/end 1335} (go/func ZeroAddr "ZeroAddr returns the address of a symbol with at least\nsize bytes of zeros.\n" ^ir/Node [^int64 size]
+  (when (>= size (<< 1 31))
+    (base/Fatalf "map elem too big %d" size))
+
+  (when (< ZeroSize size)
+    (set! ZeroSize size))
+
+  (let [lsym (base/PkgLinksym "go:map" "zero" obj/ABI0)
+      ^{:line 1333} x (ir/NewLinksymExpr base/Pos lsym (aget types/Types types/TUINT8))]
+    (typecheck/Expr (typecheck/NodAddr x))))
+
+
+
+
+^{:go/end 1376} (go/func NeedEmit "NeedEmit reports whether typ is a type that we need to emit code\nfor (e.g., runtime type descriptors, method wrappers).\n" ^bool [^{:tag (* types/Type)} typ]
+  ;; TODO(mdempsky): Export data should keep track of which anonymous
+  ;; and instantiated types were emitted, so at least downstream
+  ;; packages can skip re-emitting them.
+  ;;
+  ;; Perhaps we can just generalize the linker-symbol indexing to
+  ;; track the index of arbitrary types, not just defined types, and
+  ;; use its presence to detect this. The same idea would work for
+  ;; instantiated generic functions too.
+
+  (switch [sym (.Sym typ)]
+    (case [(writtenByWriteBasicTypes typ)]
+      (return (== (.-Pkgpath base/Ctxt) "runtime")))
+
+    (case [(== sym nil)]
+      ;; Anonymous type; possibly never seen before or ever again.
+      ;; Need to emit to be safe (however, see TODO above).
+      (return true))
+
+    (case [(== (.-Pkg sym) types/LocalPkg)]
+      ;; Local defined type; our responsibility.
+      (return true))
+
+    (case [(.IsFullyInstantiated typ)]
+      ;; Instantiated type; possibly instantiated with unique type arguments.
+      ;; Need to emit to be safe (however, see TODO above).
+      (return true))
+
+    (case [(.HasShape typ)]
+      ;; Shape type; need to emit even though it lives in the .shape package.
+      ;; TODO: make sure the linker deduplicates them (see dupok in writeType above).
+      (return true))
+
+    (default
+      ;; Should have been emitted by an imported package.
+      (return false))))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 1424} (go/func methodWrapper "Generate a wrapper function to convert from\na receiver of type T to a receiver of type U.\nThat is,\n\n\tfunc (t T) M() {\n\t\t...\n\t}\n\nalready exists; this function generates\n\n\tfunc (u U) M() {\n\t\tu.M()\n\t}\n\nwhere the types T and U are such that u.M() is valid\nand calls the T.M method.\nThe resulting function is for use in method tables.\n\n\trcvr - U\n\tmethod - M func (t T)(), a TFIELD type struct\n\nAlso wraps methods on instantiated generic types for use in itab entries.\nFor an instantiated generic type G[int], we generate wrappers like:\nG[int] pointer shaped:\n\n\tfunc (x G[int]) f(arg) {\n\t\t.inst.G[int].f(dictionary, x, arg)\n\t}\n\nG[int] not pointer shaped:\n\n\tfunc (x *G[int]) f(arg) {\n\t\t.inst.G[int].f(dictionary, *x, arg)\n\t}\n\nThese wrappers are always fully stenciled.\n" ^{:tag (* obj/LSym)} [^{:tag (* types/Type)} rcvr ^{:tag (* types/Field)} method ^bool forItab]
+  (when (and forItab (not (types/IsDirectIface rcvr)))
+    (set! rcvr (.PtrTo rcvr)))
+
+
+  (let [newnam (ir/MethodSym rcvr (.-Sym method))
+      ^{:line 1420} lsym (.Linksym newnam)]
+
+    ;; Unified IR creates its own wrappers.
+    ^{:line 1423} lsym))
+
+
+(go/var ^int64 ZeroSize)
+
+
+
+^{:go/end 1436} (go/func MarkTypeUsedInInterface "MarkTypeUsedInInterface marks that type t is converted to an interface.\nThis information is used in the linker in dead method elimination.\n" [^{:tag (* types/Type)} t ^{:tag (* obj/LSym)} from]
+  (when (.HasShape t)
+    ;; Shape types shouldn't be put in interfaces, so we shouldn't ever get here.
+    (base/Fatalf "shape types have no methods %+v" t))
+
+  (MarkTypeSymUsedInInterface (TypeLinksym t) from))
+
+^{:go/end 1441} (go/func MarkTypeSymUsedInInterface [^{:tag (* obj/LSym)} tsym ^{:tag (* obj/LSym)} from]
+  ;; Emit a marker relocation. The linker will know the type is converted
+  ;; to an interface if "from" is reachable.
+  (.AddRel from base/Ctxt (lit obj/Reloc :Type objabi/R_USEIFACE :Sym tsym)))
+
+
+
+
+^{:go/end 1486} (go/func MarkUsedIfaceMethod "MarkUsedIfaceMethod marks that an interface method is used in the current\nfunction. n is OCALLINTER node.\n" [^{:tag (* ir/CallExpr)} n]
+  ;; skip unnamed functions (func _())
+  (when (== (.-LSym ir/CurFunc) nil)
+    (return))
+
+  (let [dot (assert (* ir/SelectorExpr) (.-Fun n))
+      ^{:line 1451} ityp (.Type (.-X dot))]
+    (when (.HasShape ityp)
+      ;; Here we're calling a method on a generic interface. Something like:
+      ;;
+      ;; type I[T any] interface { foo() T }
+      ;; func f[T any](x I[T]) {
+      ;;     ... = x.foo()
+      ;; }
+      ;; f[int](...)
+      ;; f[string](...)
+      ;;
+      ;; In this case, in f we're calling foo on a generic interface.
+      ;; Which method could that be? Normally we could match the method
+      ;; both by name and by type. But in this case we don't really know
+      ;; the type of the method we're calling. It could be func()int
+      ;; or func()string. So we match on just the function name, instead
+      ;; of both the name and the type used for the non-generic case below.
+      ;; TODO: instantiations at least know the shape of the instantiated
+      ;; type, and the linker could do more complicated matching using
+      ;; some sort of fuzzy shape matching. For now, only use the name
+      ;; of the method for matching.
+      (.AddRel (.-LSym ir/CurFunc) base/Ctxt ^{:go/breaks [2 4]} (lit obj/Reloc
+          :Type objabi/R_USENAMEDMETHOD
+          :Sym (staticdata/StringSymNoCommon (.-Name (.-Sel dot)))))
+
+      (return))
+
+
+    ;; dot.Offset() is the method index * PtrSize (the offset of code pointer in itab).
+    (let [midx (/ (.Offset dot) (conv int64 types/PtrSize))]
+      (.AddRel (.-LSym ir/CurFunc) base/Ctxt ^{:go/breaks [2 4 6]} (lit obj/Reloc
+          :Type objabi/R_USEIFACEMETHOD
+          :Sym (TypeLinksym ityp)
+          :Add (InterfaceMethodOffset ityp midx))))))

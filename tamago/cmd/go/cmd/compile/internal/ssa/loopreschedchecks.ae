@@ -1,0 +1,508 @@
+;; Copyright 2016 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.cmd.compile.internal.ssa) (go/file "loopreschedchecks.go" :imports [
+
+
+    ^{:line 8} [types "cmd/compile/internal/types"]
+    ^{:line 9} [fmt "fmt"]])
+
+
+
+
+
+(go/type edgeMem "an edgeMem records a backedge, together with the memory\nphi functions at the target of the backedge that must\nbe updated when a rescheduling check replaces the backedge.\n" (struct
+    ^{:line 16 :tag Edge} e
+    ^{:line 17 :tag (* Value)} m)) ; phi for memory at dest of e
+
+
+
+
+
+
+(go/type rewriteTarget "a rewriteTarget is a value-argindex pair indicating\nwhere a rewrite is applied.  Note that this is for values,\nnot for block controls, because block controls are not targets\nfor the rewrites performed in inserting rescheduling checks.\n" (struct
+    ^{:line 25 :tag (* Value)} v
+    ^{:line 26 :tag int} i))
+
+
+(go/type rewrite (struct
+    ^{:line 30 :tag (* Value)} before ^{:tag (* Value)} after ; before is the expected value before rewrite, after is the new value installed.
+    ^{:line 31 :tag (slice rewriteTarget)} rewrites)) ; all the targets for this rewrite.
+
+
+^{:go/end 41} (go/method String ^string [^{:tag (* rewrite)} r]
+  (let [s (+ "\n\tbefore=" (.String (.-before r)) ", after=" (.String (.-after r)))]
+    (range [_ rw (.-rewrites r)]
+      (set! s + (+ ", (i=" (fmt/Sprint (.-i rw)) ", v=" (.LongString (.-v rw)) ")")))
+
+    (set! s + "\n")
+    ^{:line 40} s))
+
+
+
+^{:go/end 272} (go/func insertLoopReschedChecks "insertLoopReschedChecks inserts rescheduling checks on loop backedges.\n" [^{:tag (* Func)} f]
+  ;; TODO: when split information is recorded in export data, insert checks only on backedges that can be reached on a split-call-free path.
+
+  ;; Loop reschedule checks compare the stack pointer with
+  ;; the per-g stack bound.  If the pointer appears invalid,
+  ;; that means a reschedule check is needed.
+  ;;
+  ;; Steps:
+  ;; 1. locate backedges.
+  ;; 2. Record memory definitions at block end so that
+  ;;    the SSA graph for mem can be properly modified.
+  ;; 3. Ensure that phi functions that will-be-needed for mem
+  ;;    are present in the graph, initially with trivial inputs.
+  ;; 4. Record all to-be-modified uses of mem;
+  ;;    apply modifications (split into two steps to simplify and
+  ;;    avoided nagging order-dependencies).
+  ;; 5. Rewrite backedges to include reschedule check,
+  ;;    and modify destination phi function appropriately with new
+  ;;    definitions for mem.
+
+  (when (.-NoSplit f) ; nosplit functions don't reschedule.
+    (return))
+
+
+  (let [backedges (backedges f)]
+    (when (== (len backedges) 0) ; no backedges means no rescheduling checks.
+      (return))
+
+
+    (let [lastMems (findLastMems f)]
+      (defer (.freeValueSlice (.-Cache f) lastMems))
+
+      (let [idom (.Idom f)
+          ^{:line 77} po (.postorder f)
+          ^{:line 78} sdom (.Sdom f)]
+
+        (when (> (.-debug (.-pass f)) 1)
+          (fmt/Printf "before %s = %s\n" (.-Name f) (.treestructure sdom (.-Entry f))))
+
+
+        (let [tofixBackedges (lit (slice edgeMem))]
+
+          (range [_ e backedges] ; TODO: could filter here by calls in loops, if declared and inferred nosplit are recorded in export data.
+            (set! tofixBackedges (append tofixBackedges (lit edgeMem e nil))))
+
+
+          ;; It's possible that there is no memory state (no global/pointer loads/stores or calls)
+          (when (== (aget lastMems (.-ID (.-Entry f))) nil)
+            (aset lastMems (.-ID (.-Entry f)) (.NewValue0 (.-Entry f) (.-Pos (.-Entry f)) OpInitMem types/TypeMem)))
+
+
+          (let [memDefsAtBlockEnds (.allocValueSlice (.-Cache f) (.NumBlocks f))] ; For each block, the mem def seen at its bottom. Could be from earlier block.
+            (defer (.freeValueSlice (.-Cache f) memDefsAtBlockEnds))
+
+            ;; Propagate last mem definitions forward through successor blocks.
+            (for [i (- (len po) 1)] (>= i 0) (dec! i)
+              (let [b (aget po i)
+                  ^{:line 101} mem (aget lastMems (.-ID b))]
+                (for [j 0] (== mem nil) (inc! j) ; if there's no def, then there's no phi, so the visible mem is identical in all predecessors.
+                  ;; loop because there might be backedges that haven't been visited yet.
+                  (set! mem (aget memDefsAtBlockEnds (.-ID (.-b (aget (.-Preds b) j))))))
+
+                (aset memDefsAtBlockEnds (.-ID b) mem)
+                (when (> (.-debug (.-pass f)) 2)
+                  (fmt/Printf "memDefsAtBlockEnds[%s] = %s\n" b mem))))
+
+
+
+            ;; Maps from block to newly-inserted phi function in block.
+            (let [newmemphis (make (map (* Block) rewrite))]
+
+              ;; Insert phi functions as necessary for future changes to flow graph.
+              (range [i emc tofixBackedges]
+                (let [e (.-e emc)
+                    ^{:line 118} h (.-b e)
+
+                    ;; find the phi function for the memory input at "h", if there is one.
+                    ^{:line 121 :tag (* Value)} headerMemPhi (zero (* Value))] ; look for header mem phi
+
+                  (range [_ v (.-Values h)]
+                    (when (and (== (.-Op v) OpPhi) (.IsMemory (.-Type v)))
+                      (set! headerMemPhi v)))
+
+
+
+                  (when (== headerMemPhi nil)
+                    ;; if the header is nil, make a trivial phi from the dominator
+                    (let [mem0 (aget memDefsAtBlockEnds (.-ID (aget idom (.-ID h))))]
+                      (set! headerMemPhi (newPhiFor h mem0))
+                      (aset newmemphis h (lit rewrite :before mem0 :after headerMemPhi))
+                      (addDFphis mem0 h h f memDefsAtBlockEnds newmemphis sdom)))
+
+
+                  (set! (.-m (aget tofixBackedges i)) headerMemPhi)))
+
+
+              (when (> (.-debug (.-pass f)) 0)
+                (range [b r newmemphis]
+                  (fmt/Printf "before b=%s, rewrite=%s\n" b (.String r))))
+
+
+
+              ;; dfPhiTargets notes inputs to phis in dominance frontiers that should not
+              ;; be rewritten as part of the dominated children of some outer rewrite.
+              (let [dfPhiTargets (make (map rewriteTarget bool))]
+
+                (rewriteNewPhis (.-Entry f) (.-Entry f) f memDefsAtBlockEnds newmemphis dfPhiTargets sdom)
+
+                (when (> (.-debug (.-pass f)) 0)
+                  (range [b r newmemphis]
+                    (fmt/Printf "after b=%s, rewrite=%s\n" b (.String r))))
+
+
+
+                ;; Apply collected rewrites.
+                (range [_ r newmemphis]
+                  (range [_ rw (.-rewrites r)]
+                    (.SetArg (.-v rw) (.-i rw) (.-after r))))
+
+
+
+                ;; Rewrite backedges to include reschedule checks.
+                (range [_ emc tofixBackedges]
+                  (let [e (.-e emc)
+                      ^{:line 168} headerMemPhi (.-m emc)
+                      ^{:line 169} h (.-b e)
+                      ^{:line 170} i (.-i e)
+                      ^{:line 171} p (aget (.-Preds h) i)
+                      ^{:line 172} bb (.-b p)
+                      ^{:line 173} mem0 (aget (.-Args headerMemPhi) i)
+                      ;; bb e->p h,
+                      ;; Because we're going to insert a rare-call, make sure the
+                      ;; looping edge still looks likely.
+                      ^{:line 177} likely BranchLikely]
+                    (when (!= (.-i p) 0)
+                      (set! likely BranchUnlikely))
+
+                    (when (!= (.-Kind bb) BlockPlain) ; backedges can be unconditional. e.g., if x { something; continue }
+                      (set! (.-Likely bb) likely))
+
+
+                    ;; rewrite edge to include reschedule check
+                    ;; existing edges:
+                    ;;
+                    ;; bb.Succs[p.i] == Edge{h, i}
+                    ;; h.Preds[i] == p == Edge{bb,p.i}
+                    ;;
+                    ;; new block(s):
+                    ;; test:
+                    ;;    if sp < g.limit { goto sched }
+                    ;;    goto join
+                    ;; sched:
+                    ;;    mem1 := call resched (mem0)
+                    ;;    goto join
+                    ;; join:
+                    ;;    mem2 := phi(mem0, mem1)
+                    ;;    goto h
+                    ;;
+                    ;; and correct arg i of headerMemPhi and headerCtrPhi
+                    ;;
+                    ;; EXCEPT: join block containing only phi functions is bad
+                    ;; for the register allocator.  Therefore, there is no
+                    ;; join, and branches targeting join must instead target
+                    ;; the header, and the other phi functions within header are
+                    ;; adjusted for the additional input.
+
+                    (let [test (.NewBlock f BlockIf)
+                        ^{:line 211} sched (.NewBlock f BlockPlain)]
+
+                      (set! (.-Pos test) (.-Pos bb))
+                      (set! (.-Pos sched) (.-Pos bb))
+
+                      ;; if sp < g.limit { goto sched }
+                      ;; goto header
+
+                      (let [cfgtypes (addr (.-Types (.-Config f)))
+                          ^{:line 220} pt (.-Uintptr cfgtypes)
+                          ^{:line 221} g (.NewValue1 test (.-Pos bb) OpGetG pt mem0)
+                          ^{:line 222} sp (.NewValue0 test (.-Pos bb) OpSP pt)
+                          ^{:line 223} cmpOp OpLess64U]
+                        (when (== (.Size pt) 4)
+                          (set! cmpOp OpLess32U))
+
+                        (let [limaddr (.NewValue1I test (.-Pos bb) OpOffPtr pt (* 2 (.Size pt)) g)
+                            ^{:line 228} lim (.NewValue2 test (.-Pos bb) OpLoad pt limaddr mem0)
+                            ^{:line 229} cmp (.NewValue2 test (.-Pos bb) cmpOp (.-Bool cfgtypes) sp lim)]
+                          (.SetControl test cmp)
+
+                          ;; if true, goto sched
+                          (.AddEdgeTo test sched)
+
+                          ;; if false, rewrite edge to header.
+                          ;; do NOT remove+add, because that will perturb all the other phi functions
+                          ;; as well as messing up other edges to the header.
+                          (set! (.-Succs test) (append (.-Succs test) (lit Edge h i)))
+                          (aset (.-Preds h) i (lit Edge test 1))
+                          (.SetArg headerMemPhi i mem0)
+
+                          (set! (.-Likely test) BranchUnlikely)
+
+                          ;; sched:
+                          ;;    mem1 := call resched (mem0)
+                          ;;    goto header
+                          (let [resched (.Syslook (.-fe f) "goschedguarded")
+                              ^{:line 248} call (.NewValue1A sched (.-Pos bb) OpStaticCall types/TypeResultMem (StaticAuxCall resched (.ABIAnalyzeTypes (.-ABIDefault (.-Func bb)) nil nil)) mem0)
+                              ^{:line 249} mem1 (.NewValue1I sched (.-Pos bb) OpSelectN types/TypeMem 0 call)]
+                            (.AddEdgeTo sched h)
+                            (.AddArg headerMemPhi mem1)
+
+                            (aset (.-Succs bb) (.-i p) (lit Edge test 0))
+                            (set! (.-Preds test) (append (.-Preds test) (lit Edge bb (.-i p))))
+
+                            ;; Must correct all the other phi functions in the header for new incoming edge.
+                            ;; Except for mem phis, it will be the same value seen on the original
+                            ;; backedge at index i.
+                            (range [_ v (.-Values h)]
+                              (when (and (== (.-Op v) OpPhi) (!= v headerMemPhi))
+                                (.AddArg v (aget (.-Args v) i))))))))))
+
+
+
+
+                (.invalidateCFG f)
+
+                (when (> (.-debug (.-pass f)) 1)
+                  (set! sdom (newSparseTree f (.Idom f)))
+                  (fmt/Printf "after %s = %s\n" (.-Name f) (.treestructure sdom (.-Entry f))))))))))))
+
+
+
+
+
+^{:go/end 283} (go/func newPhiFor "newPhiFor inserts a new Phi function into b,\nwith all inputs set to v.\n" ^{:tag (* Value)} [^{:tag (* Block)} b ^{:tag (* Value)} v]
+  (let [phiV (.NewValue0 b (.-Pos b) OpPhi (.-Type v))]
+
+    (range [(.-Preds b)]
+      (.AddArg phiV v))
+
+    ^{:line 282} phiV))
+
+
+
+
+
+
+
+
+
+
+^{:go/end 358} (go/func rewriteNewPhis "rewriteNewPhis updates newphis[h] to record all places where the new phi function inserted\nin block h will replace a previous definition.  Block b is the block currently being processed;\nif b has its own phi definition then it takes the place of h.\ndefsForUses provides information about other definitions of the variable that are present\n(and if nil, indicates that the variable is no longer live)\nsdom must yield a preorder of the flow graph if recursively walked, root-to-children.\nThe result of newSparseOrderedTree with order supplied by a dfs-postorder satisfies this\nrequirement.\n" [^{:tag (* Block)} h ^{:tag (* Block)} b ^{:tag (* Func)} f ^{:tag (slice (* Value))} defsForUses ^{:tag (map (* Block) rewrite)} newphis ^{:tag (map rewriteTarget bool)} dfPhiTargets ^SparseTree sdom]
+  ;; If b is a block with a new phi, then a new rewrite applies below it in the dominator tree.
+  (when [(values _ ok) (aget newphis b)] ok
+    (set! h b))
+
+  (let [change (aget newphis h)
+      ^{:line 299} x (.-before change)
+      ^{:line 300} y (.-after change)]
+
+    ;; Apply rewrites to this block
+    (when (!= x nil) ; don't waste time on the common case of no definition.
+      (let [p (addr (.-rewrites change))]
+        (range [_ v (.-Values b)]
+          (when (== v y) ; don't rewrite self -- phi inputs are handled below.
+            (continue))
+
+          (range [i w (.-Args v)]
+            (when (!= w x)
+              (continue))
+
+            (let [tgt (lit rewriteTarget v i)]
+
+              ;; It's possible dominated control flow will rewrite this instead.
+              ;; Visiting in preorder (a property of how sdom was constructed)
+              ;; ensures that these are seen in the proper order.
+              (when (aget dfPhiTargets tgt)
+                (continue))
+
+              (set! @p (append @p tgt))
+              (when (> (.-debug (.-pass f)) 1)
+                (fmt/Printf "added block target for h=%v, b=%v, x=%v, y=%v, tgt.v=%s, tgt.i=%d\n"
+                  ^{:line 324} h b x y v i)))))
+
+
+
+
+        ;; Rewrite appropriate inputs of phis reached in successors
+        ;; in dominance frontier, self, and dominated.
+        ;; If the variable def reaching uses in b is itself defined in b, then the new phi function
+        ;; does not reach the successors of b.  (This assumes a bit about the structure of the
+        ;; phi use-def graph, but it's true for memory.)
+        (when [dfu (aget defsForUses (.-ID b))] (and (!= dfu nil) (!= (.-Block dfu) b))
+          (range [_ e (.-Succs b)]
+            (let [s (.-b e)]
+
+              (range [_ v (.-Values s)]
+                (when (and (== (.-Op v) OpPhi) (== (aget (.-Args v) (.-i e)) x))
+                  (let [tgt (lit rewriteTarget v (.-i e))]
+                    (set! @p (append @p tgt))
+                    (aset dfPhiTargets tgt true)
+                    (when (> (.-debug (.-pass f)) 1)
+                      (fmt/Printf "added phi target for h=%v, b=%v, s=%v, x=%v, y=%v, tgt.v=%s, tgt.i=%d\n"
+                        ^{:line 345} h b s x y (.LongString v) (.-i e)))
+
+                    (break)))))))
+
+
+
+
+        (aset newphis h change)))
+
+
+    (for [c (.-child (aget sdom (.-ID b)))] (!= c nil) (set! c (.-sibling (aget sdom (.-ID c))))
+      (rewriteNewPhis h c f defsForUses newphis dfPhiTargets sdom)))) ; TODO: convert to explicit stack from recursion.
+
+
+
+
+
+
+
+
+
+
+^{:go/end 400} (go/func addDFphis "addDFphis creates new trivial phis that are necessary to correctly reflect (within SSA)\na new definition for variable \"x\" inserted at h (usually but not necessarily a phi).\nThese new phis can only occur at the dominance frontier of h; block s is in the dominance\nfrontier of h if h does not strictly dominate s and if s is a successor of a block b where\neither b = h or h strictly dominates b.\nThese newly created phis are themselves new definitions that may require addition of their\nown trivial phi functions in their own dominance frontier, and this is handled recursively.\n" [^{:tag (* Value)} x ^{:tag (* Block)} h ^{:tag (* Block)} b ^{:tag (* Func)} f ^{:tag (slice (* Value))} defForUses ^{:tag (map (* Block) rewrite)} newphis ^SparseTree sdom]
+  (let [oldv (aget defForUses (.-ID b))]
+    (when (!= oldv x) ; either a new definition replacing x, or nil if it is proven that there are no uses reachable from b
+      (return))
+
+    (let [idom (.Idom f)]
+      (label :outer
+        (range [_ e (.-Succs b)]
+          (let [s (.-b e)]
+            ;; check phi functions in the dominance frontier
+            (when (.isAncestor sdom h s)
+              (continue)) ; h dominates s, successor of b, therefore s is not in the frontier.
+
+            (when [(values _ ok) (aget newphis s)] ok
+              (continue)) ; successor s of b already has a new phi function, so there is no need to add another.
+
+            (when (!= x nil)
+              (range [_ v (.-Values s)]
+                (when (and (== (.-Op v) OpPhi) (== (aget (.-Args v) (.-i e)) x))
+                  (continue :outer)))) ; successor s of b has an old phi function, so there is no need to add another.
+
+
+
+
+            (let [old (aget defForUses (.-ID (aget idom (.-ID s)))) ; new phi function is correct-but-redundant, combining value "old" on all inputs.
+                ^{:line 392} headerPhi (newPhiFor s old)]
+              ;; the new phi will replace "old" in block s and all blocks dominated by s.
+              (aset newphis s (lit rewrite :before old :after headerPhi)) ; record new phi, to have inputs labeled "old" rewritten to "headerPhi"
+              (addDFphis old s s f defForUses newphis sdom))))) ; the new definition may also create new phi functions.
+
+      (for [c (.-child (aget sdom (.-ID b)))] (!= c nil) (set! c (.-sibling (aget sdom (.-ID c))))
+        (addDFphis x h c f defForUses newphis sdom))))) ; TODO: convert to explicit stack from recursion.
+
+
+
+
+^{:go/end 463} (go/func findLastMems "findLastMems maps block ids to last memory-output op in a block, if any.\n" ^{:tag (slice (* Value))} [^{:tag (* Func)} f]
+
+  (let [^{:tag (slice (* Value))} stores (zero (slice (* Value)))
+      ^{:line 406} lastMems (.allocValueSlice (.-Cache f) (.NumBlocks f))
+      ^{:line 407} storeUse (.newSparseSet f (.NumValues f))]
+    (defer (.retSparseSet f storeUse))
+    (range [_ b (.-Blocks f)]
+      ;; Find all the stores in this block. Categorize their uses:
+      ;;  storeUse contains stores which are used by a subsequent store.
+      (.clear storeUse)
+      (set! stores (subslice stores _ 0))
+      (let [^{:tag (* Value)} memPhi (zero (* Value))]
+        (range [_ v (.-Values b)]
+          (when (== (.-Op v) OpPhi)
+            (when (.IsMemory (.-Type v))
+              (set! memPhi v))
+
+            (continue))
+
+          (when (.IsMemory (.-Type v))
+            (set! stores (append stores v))
+            (range [_ a (.-Args v)]
+              (when (and (== (.-Block a) b) (.IsMemory (.-Type a)))
+                (.add storeUse (.-ID a))))))
+
+
+
+
+        (when (== (len stores) 0)
+          (aset lastMems (.-ID b) memPhi)
+          (continue))
+
+
+        ;; find last store in the block
+        (let [^{:tag (* Value)} last (zero (* Value))]
+          (range [_ v stores]
+            (when (.contains storeUse (.-ID v))
+              (continue))
+
+            (when (!= last nil)
+              (.Fatalf b "two final stores - simultaneous live stores %s %s" last v))
+
+            (set! last v))
+
+          (when (== last nil)
+            (.Fatalf b "no last store found - cycle?"))
+
+
+          ;; If this is a tuple containing a mem, select just
+          ;; the mem. This will generate ops we don't need, but
+          ;; it's the easiest thing to do.
+          (cond (.IsTuple (.-Type last))
+            (set! last (.NewValue1 b (.-Pos last) OpSelect1 types/TypeMem last))
+            (.IsResults (.-Type last))
+            (set! last (.NewValue1I b (.-Pos last) OpSelectN types/TypeMem (conv int64 (- (.NumFields (.-Type last)) 1)) last)))
+
+
+          (aset lastMems (.-ID b) last))))
+
+    ^{:line 462} lastMems))
+
+
+
+(go/type markKind "mark values\n" uint8)
+
+(go/const
+  ^{:line 469} [^{:tag markKind :val 0} notFound iota] ; block has not been discovered yet
+  ^{:line 470} [^{:val 1} notExplored] ; discovered and in queue, outedges not processed yet
+  ^{:line 471} [^{:val 2} explored] ; discovered and in queue, outedges processed
+  ^{:line 472} [^{:val 3} done]) ; all done, in output ordering
+
+
+(go/type backedgesState (struct
+    ^{:line 476 :tag (* Block)} b
+    ^{:line 477 :tag int} i))
+
+
+
+
+^{:go/end 509} (go/func backedges "backedges returns a slice of successor edges that are back\nedges.  For reducible loops, edge.b is the header.\n" ^{:tag (slice Edge)} [^{:tag (* Func)} f]
+  (let [edges (lit (slice Edge))
+      ^{:line 484} mark (make (slice markKind) (.NumBlocks f))
+      ^{:line 485} stack (lit (slice backedgesState))]
+
+    (aset mark (.-ID (.-Entry f)) notExplored)
+    (set! stack (append stack (lit backedgesState (.-Entry f) 0)))
+
+    (while (> (len stack) 0)
+      (let [l (len stack)
+          ^{:line 492} x (aget stack (- l 1))]
+        (if (< (.-i x) (len (.-Succs (.-b x))))
+          (let [e (aget (.-Succs (.-b x)) (.-i x))]
+            (inc! (.-i (aget stack (- l 1))))
+            (let [s (.-b e)]
+              (cond (== (aget mark (.-ID s)) notFound) (do
+                  (aset mark (.-ID s) notExplored)
+                  (set! stack (append stack (lit backedgesState s 0))))
+                (== (aget mark (.-ID s)) notExplored)
+                (set! edges (append edges e)))))
+
+          (do
+            (aset mark (.-ID (.-b x)) done)
+            (set! stack (subslice stack 0 (- l 1)))))))
+
+
+    ^{:line 508} edges))

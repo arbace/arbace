@@ -1,0 +1,242 @@
+;; Copyright 2018 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.cmd.compile.internal.escape) (go/file "utils.go" :imports [
+
+
+    ^{:line 8} [ir "cmd/compile/internal/ir"]
+    ^{:line 9} [typecheck "cmd/compile/internal/typecheck"]
+    ^{:line 10} [types "cmd/compile/internal/types"]])
+
+
+^{:go/end 82} (go/func isSliceSelfAssign ^bool [^ir/Node dst ^ir/Node src]
+  ;; Detect the following special case.
+  ;;
+  ;;	func (b *Buffer) Foo() {
+  ;;		n, m := ...
+  ;;		b.buf = b.buf[n:m]
+  ;;	}
+  ;;
+  ;; This assignment is a no-op for escape analysis,
+  ;; it does not store any new pointers into b that were not already there.
+  ;; However, without this special case b will escape, because we assign to OIND/ODOTPTR.
+  ;; Here we assume that the statement will not contain calls,
+  ;; that is, that order will move any calls to init.
+  ;; Otherwise base ONAME value could change between the moments
+  ;; when we evaluate it for dst and for src.
+
+  ;; dst is ONAME dereference.
+  (let [^ir/Node dstX (zero ir/Node)]
+    (switch (.Op dst)
+      (default
+        (return false))
+      (case [ir/ODEREF]
+        (let [dst (assert (* ir/StarExpr) dst)]
+          (set! dstX (.-X dst))))
+      (case [ir/ODOTPTR]
+        (let [dst (assert (* ir/SelectorExpr) dst)]
+          (set! dstX (.-X dst)))))
+
+    (when (!= (.Op dstX) ir/ONAME)
+      (return false))
+
+    ;; src is a slice operation.
+    (switch (.Op src)
+      (case [ir/OSLICE ir/OSLICE3 ir/OSLICESTR])
+      ;; OK.
+      (case [ir/OSLICEARR ir/OSLICE3ARR]
+        ;; Since arrays are embedded into containing object,
+        ;; slice of non-pointer array will introduce a new pointer into b that was not already there
+        ;; (pointer to b itself). After such assignment, if b contents escape,
+        ;; b escapes as well. If we ignore such OSLICEARR, we will conclude
+        ;; that b does not escape when b contents do.
+        ;;
+        ;; Pointer to an array is OK since it's not stored inside b directly.
+        ;; For slicing an array (not pointer to array), there is an implicit OADDR.
+        ;; We check that to determine non-pointer array slicing.
+        (let [src (assert (* ir/SliceExpr) src)]
+          (when (== (.Op (.-X src)) ir/OADDR)
+            (return false))))
+
+      (default
+        (return false)))
+
+    ;; slice is applied to ONAME dereference.
+    (let [^ir/Node baseX (zero ir/Node)]
+      (switch [base (.-X (assert (* ir/SliceExpr) src))] (.Op base)
+        (default
+          (return false))
+        (case [ir/ODEREF]
+          (let [base (assert (* ir/StarExpr) base)]
+            (set! baseX (.-X base))))
+        (case [ir/ODOTPTR]
+          (let [base (assert (* ir/SelectorExpr) base)]
+            (set! baseX (.-X base)))))
+
+      (when (!= (.Op baseX) ir/ONAME)
+        (return false))
+
+      ;; dst and src reference the same base ONAME.
+      (== (assert (* ir/Name) dstX) (assert (* ir/Name) baseX)))))
+
+
+
+
+^{:go/end 122} (go/func isSelfAssign "isSelfAssign reports whether assignment from src to dst can\nbe ignored by the escape analysis as it's effectively a self-assignment.\n" ^bool [^ir/Node dst ^ir/Node src]
+  (when (isSliceSelfAssign dst src)
+    (return true))
+
+
+  ;; Detect trivial assignments that assign back to the same object.
+  ;;
+  ;; It covers these cases:
+  ;;	val.x = val.y
+  ;;	val.x[i] = val.y[j]
+  ;;	val.x1.x2 = val.x1.y2
+  ;;	... etc
+  ;;
+  ;; These assignments do not change assigned object lifetime.
+
+  (when (or (== dst nil) (== src nil) (!= (.Op dst) (.Op src)))
+    (return false))
+
+
+  ;; The expression prefix must be both "safe" and identical.
+  (switch (.Op dst)
+    (case [ir/ODOT ir/ODOTPTR]
+      ;; Safe trailing accessors that are permitted to differ.
+      (let [dst (assert (* ir/SelectorExpr) dst)
+          ^{:line 110} src (assert (* ir/SelectorExpr) src)]
+        (return (ir/SameSafeExpr (.-X dst) (.-X src)))))
+    (case [ir/OINDEX]
+      (let [dst (assert (* ir/IndexExpr) dst)
+          ^{:line 114} src (assert (* ir/IndexExpr) src)]
+        (when (or (mayAffectMemory (.-Index dst)) (mayAffectMemory (.-Index src)))
+          (return false))
+
+        (return (ir/SameSafeExpr (.-X dst) (.-X src)))))
+    (default
+      (return false))))
+
+
+
+
+
+
+^{:go/end 169} (go/func mayAffectMemory "mayAffectMemory reports whether evaluation of n may affect the program's\nmemory state. If the expression can't affect memory state, then it can be\nsafely ignored by the escape analysis.\n" ^bool [^ir/Node n]
+  ;; We may want to use a list of "memory safe" ops instead of generally
+  ;; "side-effect free", which would include all calls and other ops that can
+  ;; allocate or change global state. For now, it's safer to start with the latter.
+  ;;
+  ;; We're ignoring things like division by zero, index out of range,
+  ;; and nil pointer dereference here.
+
+  ;; TODO(rsc): It seems like it should be possible to replace this with
+  ;; an ir.Any looking for any op that's not the ones in the case statement.
+  ;; But that produces changes in the compiled output detected by buildall.
+  (switch (.Op n)
+    (case [ir/ONAME ir/OLITERAL ir/ONIL]
+      (return false))
+
+    (case [ir/OADD ir/OSUB ir/OOR ir/OXOR ir/OMUL ir/OLSH ir/ORSH ir/OAND ir/OANDNOT ir/ODIV ir/OMOD]
+      (let [n (assert (* ir/BinaryExpr) n)]
+        (return (or (mayAffectMemory (.-X n)) (mayAffectMemory (.-Y n))))))
+
+    (case [ir/OINDEX]
+      (let [n (assert (* ir/IndexExpr) n)]
+        (return (or (mayAffectMemory (.-X n)) (mayAffectMemory (.-Index n))))))
+
+    (case [ir/OCONVNOP ir/OCONV]
+      (let [n (assert (* ir/ConvExpr) n)]
+        (return (mayAffectMemory (.-X n)))))
+
+    (case [ir/OLEN ir/OCAP ir/ONOT ir/OBITNOT ir/OPLUS ir/ONEG]
+      (let [n (assert (* ir/UnaryExpr) n)]
+        (return (mayAffectMemory (.-X n)))))
+
+    (case [ir/ODOT ir/ODOTPTR]
+      (let [n (assert (* ir/SelectorExpr) n)]
+        (return (mayAffectMemory (.-X n)))))
+
+    (case [ir/ODEREF]
+      (let [n (assert (* ir/StarExpr) n)]
+        (return (mayAffectMemory (.-X n)))))
+
+    (default
+      (return true))))
+
+
+
+
+
+^{:go/breaks [[13 242]] :go/end 243} (go/func HeapAllocReason "HeapAllocReason returns the reason the given Node must be heap\nallocated, or the empty string if it doesn't.\n" ^string [^ir/Node n]
+  (when (or (== n nil) (== (.Type n) nil))
+    (return ""))
+
+
+  ;; Parameters are always passed via the stack.
+  (when (== (.Op n) ir/ONAME)
+    (let [n (assert (* ir/Name) n)]
+      (when (or (== (.-Class n) ir/PPARAM) (== (.-Class n) ir/PPARAMOUT))
+        (return ""))))
+
+
+
+  (when (> (.Size (.Type n)) ir/MaxStackVarSize)
+    (return "too large for stack"))
+
+  (when (> (.Alignment (.Type n)) (conv int64 types/PtrSize))
+    (return "too aligned for stack"))
+
+
+  (when (and ^:go/paren (or (== (.Op n) ir/ONEW) (== (.Op n) ir/OPTRLIT)) (> (.Size (.Elem (.Type n))) ir/MaxImplicitStackVarSize))
+    (return "too large for stack"))
+
+  (when (and ^:go/paren (or (== (.Op n) ir/ONEW) (== (.Op n) ir/OPTRLIT)) (> (.Alignment (.Elem (.Type n))) (conv int64 types/PtrSize)))
+    (return "too aligned for stack"))
+
+
+  (when (and (== (.Op n) ir/OCLOSURE) (> (.Size (typecheck/ClosureType (assert (* ir/ClosureExpr) n))) ir/MaxImplicitStackVarSize))
+    (return "too large for stack"))
+
+  (when (and (== (.Op n) ir/OMETHVALUE) (> (.Size (typecheck/MethodValueType (assert (* ir/SelectorExpr) n))) ir/MaxImplicitStackVarSize))
+    (return "too large for stack"))
+
+
+  (when (== (.Op n) ir/OMAKESLICE)
+    (let [n (assert (* ir/MakeExpr) n)
+
+        ^{:line 210} r (.-Cap n)]
+      (when (== (.-Cap n) nil)
+        (set! r (.-Len n)))
+
+
+      (let [elem (.Elem ^{:go/via [miniExpr]} (.Type n))]
+        (when (== (.Size elem) 0)
+          ;; TODO: stack allocate these? See #65685.
+          (return "zero-sized element"))
+
+        (when (not (ir/IsSmallIntConst r))
+          ;; For non-constant sizes, we do a hybrid approach:
+          ;;
+          ;; if cap <= K {
+          ;;     var backing [K]E
+          ;;     s = backing[:len:cap]
+          ;; } else {
+          ;;     s = makeslice(E, len, cap)
+          ;; }
+          ;;
+          ;; It costs a constant amount of stack space, but may
+          ;; avoid a heap allocation.
+          ;; Note we have to be careful that assigning s[i] = v
+          ;; still escapes v, because we forbid heap->stack pointers.
+          ;; Implementation is in ../walk/builtin.go:walkMakeSlice.
+          (return ""))
+
+        (when (> (ir/Int64Val r) (/ ir/MaxImplicitStackVarSize (.Size elem)))
+          (return "too large for stack")))))
+
+
+
+  "")

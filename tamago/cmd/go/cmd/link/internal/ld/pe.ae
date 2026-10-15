@@ -1,0 +1,1956 @@
+;; Copyright 2009 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; PE (Portable Executable) file writing
+;; https://docs.microsoft.com/en-us/windows/win32/debug/pe-format
+
+(in-ns 'go.cmd.link.internal.ld) (go/file "pe.go" :imports [
+
+
+    ^{:line 11} [bytes "bytes"]
+    ^{:line 12} [objabi "cmd/internal/objabi"]
+    ^{:line 13} [sys "cmd/internal/sys"]
+    ^{:line 14} [loader "cmd/link/internal/loader"]
+    ^{:line 15} [sym "cmd/link/internal/sym"]
+    ^{:line 16} [pe "debug/pe"]
+    ^{:line 17} [binary "encoding/binary"]
+    ^{:line 18} [fmt "fmt"]
+    ^{:line 19} [buildcfg "internal/buildcfg"]
+    ^{:line 20} [math "math"]
+    ^{:line 21} [os "os"]
+    ^{:line 22} [filepath "path/filepath"]
+    ^{:line 23} [slices "slices"]
+    ^{:line 24} [sort "sort"]
+    ^{:line 25} [strconv "strconv"]
+    ^{:line 26} [strings "strings"]])
+
+
+(go/type IMAGE_IMPORT_DESCRIPTOR (struct
+    ^{:line 30 :tag uint32} OriginalFirstThunk
+    ^{:line 31 :tag uint32} TimeDateStamp
+    ^{:line 32 :tag uint32} ForwarderChain
+    ^{:line 33 :tag uint32} Name
+    ^{:line 34 :tag uint32} FirstThunk))
+
+
+(go/type IMAGE_EXPORT_DIRECTORY (struct
+    ^{:line 38 :tag uint32} Characteristics
+    ^{:line 39 :tag uint32} TimeDateStamp
+    ^{:line 40 :tag uint16} MajorVersion
+    ^{:line 41 :tag uint16} MinorVersion
+    ^{:line 42 :tag uint32} Name
+    ^{:line 43 :tag uint32} Base
+    ^{:line 44 :tag uint32} NumberOfFunctions
+    ^{:line 45 :tag uint32} NumberOfNames
+    ^{:line 46 :tag uint32} AddressOfFunctions
+    ^{:line 47 :tag uint32} AddressOfNames
+    ^{:line 48 :tag uint32} AddressOfNameOrdinals))
+
+
+(go/var
+
+
+  ^{:line 54} [^{:tag int64 :doc "PEBASE is the base address for the executable.\nIt is small for 32-bit and large for 64-bit.\n"} PEBASE]
+
+
+
+  ^{:line 58} [^{:tag int64 :doc "SectionAlignment must be greater than or equal to FileAlignment.\nThe default is the page size for the architecture.\n"} PESECTALIGN 0x1000]
+
+
+
+
+  ^{:line 63} [^{:tag int64 :doc "FileAlignment should be a power of 2 between 512 and 64 K, inclusive.\nThe default is 512. If the SectionAlignment is less than\nthe architecture's page size, then FileAlignment must match SectionAlignment.\n"} PEFILEALIGN (<< 2 8)])
+
+
+(go/const
+  ^{:line 67} [^{:val 32} IMAGE_SCN_CNT_CODE 0x00000020]
+  ^{:line 68} [^{:val 64} IMAGE_SCN_CNT_INITIALIZED_DATA 0x00000040]
+  ^{:line 69} [^{:val 128} IMAGE_SCN_CNT_UNINITIALIZED_DATA 0x00000080]
+  ^{:line 70} [^{:val 256} IMAGE_SCN_LNK_OTHER 0x00000100]
+  ^{:line 71} [^{:val 512} IMAGE_SCN_LNK_INFO 0x00000200]
+  ^{:line 72} [^{:val 2048} IMAGE_SCN_LNK_REMOVE 0x00000800]
+  ^{:line 73} [^{:val 4096} IMAGE_SCN_LNK_COMDAT 0x00001000]
+  ^{:line 74} [^{:val 32768} IMAGE_SCN_GPREL 0x00008000]
+  ^{:line 75} [^{:val 131072} IMAGE_SCN_MEM_PURGEABLE 0x00020000]
+  ^{:line 76} [^{:val 131072} IMAGE_SCN_MEM_16BIT 0x00020000]
+  ^{:line 77} [^{:val 262144} IMAGE_SCN_MEM_LOCKED 0x00040000]
+  ^{:line 78} [^{:val 524288} IMAGE_SCN_MEM_PRELOAD 0x00080000]
+  ^{:line 79} [^{:val 1048576} IMAGE_SCN_ALIGN_1BYTES 0x00100000]
+  ^{:line 80} [^{:val 2097152} IMAGE_SCN_ALIGN_2BYTES 0x00200000]
+  ^{:line 81} [^{:val 3145728} IMAGE_SCN_ALIGN_4BYTES 0x00300000]
+  ^{:line 82} [^{:val 4194304} IMAGE_SCN_ALIGN_8BYTES 0x00400000]
+  ^{:line 83} [^{:val 5242880} IMAGE_SCN_ALIGN_16BYTES 0x00500000]
+  ^{:line 84} [^{:val 6291456} IMAGE_SCN_ALIGN_32BYTES 0x00600000]
+  ^{:line 85} [^{:val 7340032} IMAGE_SCN_ALIGN_64BYTES 0x00700000]
+  ^{:line 86} [^{:val 8388608} IMAGE_SCN_ALIGN_128BYTES 0x00800000]
+  ^{:line 87} [^{:val 9437184} IMAGE_SCN_ALIGN_256BYTES 0x00900000]
+  ^{:line 88} [^{:val 10485760} IMAGE_SCN_ALIGN_512BYTES 0x00A00000]
+  ^{:line 89} [^{:val 11534336} IMAGE_SCN_ALIGN_1024BYTES 0x00B00000]
+  ^{:line 90} [^{:val 12582912} IMAGE_SCN_ALIGN_2048BYTES 0x00C00000]
+  ^{:line 91} [^{:val 13631488} IMAGE_SCN_ALIGN_4096BYTES 0x00D00000]
+  ^{:line 92} [^{:val 14680064} IMAGE_SCN_ALIGN_8192BYTES 0x00E00000]
+  ^{:line 93} [^{:val 16777216} IMAGE_SCN_LNK_NRELOC_OVFL 0x01000000]
+  ^{:line 94} [^{:val 33554432} IMAGE_SCN_MEM_DISCARDABLE 0x02000000]
+  ^{:line 95} [^{:val 67108864} IMAGE_SCN_MEM_NOT_CACHED 0x04000000]
+  ^{:line 96} [^{:val 134217728} IMAGE_SCN_MEM_NOT_PAGED 0x08000000]
+  ^{:line 97} [^{:val 268435456} IMAGE_SCN_MEM_SHARED 0x10000000]
+  ^{:line 98} [^{:val 536870912} IMAGE_SCN_MEM_EXECUTE 0x20000000]
+  ^{:line 99} [^{:val 1073741824} IMAGE_SCN_MEM_READ 0x40000000]
+  ^{:line 100} [^{:val 2147483648} IMAGE_SCN_MEM_WRITE 0x80000000])
+
+
+
+
+(go/const "See https://docs.microsoft.com/en-us/windows/win32/debug/pe-format.\nTODO(crawshaw): add these constants to debug/pe.\n"
+  ^{:line 106} [^{:val 0} IMAGE_SYM_TYPE_NULL 0]
+  ^{:line 107} [^{:val 8} IMAGE_SYM_TYPE_STRUCT 8]
+  ^{:line 108} [^{:val 2} IMAGE_SYM_DTYPE_FUNCTION 2]
+  ^{:line 109} [^{:val 3} IMAGE_SYM_DTYPE_ARRAY 3]
+  ^{:line 110} [^{:val 2} IMAGE_SYM_CLASS_EXTERNAL 2]
+  ^{:line 111} [^{:val 3} IMAGE_SYM_CLASS_STATIC 3]
+
+  ^{:line 113} [^{:val 6} IMAGE_REL_I386_DIR32 0x0006]
+  ^{:line 114} [^{:val 7} IMAGE_REL_I386_DIR32NB 0x0007]
+  ^{:line 115} [^{:val 11} IMAGE_REL_I386_SECREL 0x000B]
+  ^{:line 116} [^{:val 20} IMAGE_REL_I386_REL32 0x0014]
+
+  ^{:line 118} [^{:val 1} IMAGE_REL_AMD64_ADDR64 0x0001]
+  ^{:line 119} [^{:val 2} IMAGE_REL_AMD64_ADDR32 0x0002]
+  ^{:line 120} [^{:val 3} IMAGE_REL_AMD64_ADDR32NB 0x0003]
+  ^{:line 121} [^{:val 4} IMAGE_REL_AMD64_REL32 0x0004]
+  ^{:line 122} [^{:val 11} IMAGE_REL_AMD64_SECREL 0x000B]
+
+  ^{:line 124} [^{:val 0} IMAGE_REL_ARM_ABSOLUTE 0x0000]
+  ^{:line 125} [^{:val 1} IMAGE_REL_ARM_ADDR32 0x0001]
+  ^{:line 126} [^{:val 2} IMAGE_REL_ARM_ADDR32NB 0x0002]
+  ^{:line 127} [^{:val 3} IMAGE_REL_ARM_BRANCH24 0x0003]
+  ^{:line 128} [^{:val 4} IMAGE_REL_ARM_BRANCH11 0x0004]
+  ^{:line 129} [^{:val 15} IMAGE_REL_ARM_SECREL 0x000F]
+
+  ^{:line 131} [^{:val 0} IMAGE_REL_ARM64_ABSOLUTE 0x0000]
+  ^{:line 132} [^{:val 1} IMAGE_REL_ARM64_ADDR32 0x0001]
+  ^{:line 133} [^{:val 2} IMAGE_REL_ARM64_ADDR32NB 0x0002]
+  ^{:line 134} [^{:val 3} IMAGE_REL_ARM64_BRANCH26 0x0003]
+  ^{:line 135} [^{:val 4} IMAGE_REL_ARM64_PAGEBASE_REL21 0x0004]
+  ^{:line 136} [^{:val 5} IMAGE_REL_ARM64_REL21 0x0005]
+  ^{:line 137} [^{:val 6} IMAGE_REL_ARM64_PAGEOFFSET_12A 0x0006]
+  ^{:line 138} [^{:val 7} IMAGE_REL_ARM64_PAGEOFFSET_12L 0x0007]
+  ^{:line 139} [^{:val 8} IMAGE_REL_ARM64_SECREL 0x0008]
+  ^{:line 140} [^{:val 9} IMAGE_REL_ARM64_SECREL_LOW12A 0x0009]
+  ^{:line 141} [^{:val 10} IMAGE_REL_ARM64_SECREL_HIGH12A 0x000A]
+  ^{:line 142} [^{:val 11} IMAGE_REL_ARM64_SECREL_LOW12L 0x000B]
+  ^{:line 143} [^{:val 12} IMAGE_REL_ARM64_TOKEN 0x000C]
+  ^{:line 144} [^{:val 13} IMAGE_REL_ARM64_SECTION 0x000D]
+  ^{:line 145} [^{:val 14} IMAGE_REL_ARM64_ADDR64 0x000E]
+  ^{:line 146} [^{:val 15} IMAGE_REL_ARM64_BRANCH19 0x000F]
+  ^{:line 147} [^{:val 16} IMAGE_REL_ARM64_BRANCH14 0x0010]
+  ^{:line 148} [^{:val 17} IMAGE_REL_ARM64_REL32 0x0011]
+
+  ^{:line 150} [^{:val 3} IMAGE_REL_BASED_HIGHLOW 3]
+  ^{:line 151} [^{:val 10} IMAGE_REL_BASED_DIR64 10])
+
+
+
+
+(go/const "IMAGE_LOAD_CONFIG_DIRECTORY64.GuardFlags and IMAGE_LOAD_CONFIG_DIRECTORY32.GuardFlags\nvalues. These can be combined together.\n"
+  ^{:line 157} [^{:val 256} IMAGE_GUARD_CF_INSTRUMENTED 0x00000100] ; Module performs control flow integrity checks using system-supplied support
+  ^{:line 158} [^{:val 512} IMAGE_GUARD_CFW_INSTRUMENTED 0x00000200] ; Module performs control flow and write integrity checks
+  ^{:line 159} [^{:val 1024} IMAGE_GUARD_CF_FUNCTION_TABLE_PRESENT 0x00000400] ; Module contains valid control flow target metadata
+  ^{:line 160} [^{:val 2048} IMAGE_GUARD_SECURITY_COOKIE_UNUSED 0x00000800] ; Module does not make use of the /GS security cookie
+  ^{:line 161} [^{:val 4096} IMAGE_GUARD_PROTECT_DELAYLOAD_IAT 0x00001000] ; Module supports read only delay load IAT
+  ^{:line 162} [^{:val 8192} IMAGE_GUARD_DELAYLOAD_IAT_IN_ITS_OWN_SECTION 0x00002000] ; Delayload import table in its own .didat section (with nothing else in it) that can be freely reprotected
+  ^{:line 163} [^{:val 16384} IMAGE_GUARD_CF_EXPORT_SUPPRESSION_INFO_PRESENT 0x00004000] ; Module contains suppressed export information
+  ^{:line 164} [^{:val 32768} IMAGE_GUARD_CF_ENABLE_EXPORT_SUPPRESSION 0x00008000] ; Module enables suppression of exports
+  ^{:line 165} [^{:val 65536} IMAGE_GUARD_CF_LONGJUMP_TABLE_PRESENT 0x00010000] ; Module contains longjmp target information
+  ^{:line 166} [^{:val 131072} IMAGE_GUARD_RF_INSTRUMENTED 0x00020000] ; Module contains return flow instrumentation and metadata
+  ^{:line 167} [^{:val 262144} IMAGE_GUARD_RF_ENABLE 0x00040000] ; Module requests that the OS enable return flow protection
+  ^{:line 168} [^{:val 524288} IMAGE_GUARD_RF_STRICT 0x00080000] ; Module requests that the OS enable return flow protection in strict mode
+  ^{:line 169} [^{:val 4026531840} IMAGE_GUARD_CF_FUNCTION_TABLE_SIZE_MASK 0xF0000000] ; Stride of Guard CF function table encoded in these bits (additional count of bytes per element)
+  ^{:line 170} [^{:val 28} IMAGE_GUARD_CF_FUNCTION_TABLE_SIZE_SHIFT 28]) ; Shift to right-justify Guard CF function table stride
+
+
+(go/type IMAGE_LOAD_CONFIG_CODE_INTEGRITY (struct
+    ^{:line 174 :tag uint16} Flags
+    ^{:line 175 :tag uint16} Catalog
+    ^{:line 176 :tag uint32} CatalogOffset
+    ^{:line 177 :tag uint32} Reserved))
+
+
+(go/type IMAGE_LOAD_CONFIG_DIRECTORY32 (struct
+    ^{:line 181 :tag uint32} Size
+    ^{:line 182 :tag uint32} TimeDateStamp
+    ^{:line 183 :tag uint16} MajorVersion
+    ^{:line 184 :tag uint16} MinorVersion
+    ^{:line 185 :tag uint32} GlobalFlagsClear
+    ^{:line 186 :tag uint32} GlobalFlagsSet
+    ^{:line 187 :tag uint32} CriticalSectionDefaultTimeout
+    ^{:line 188 :tag uint32} DeCommitFreeBlockThreshold
+    ^{:line 189 :tag uint32} DeCommitTotalFreeThreshold
+    ^{:line 190 :tag uint32} LockPrefixTable
+    ^{:line 191 :tag uint32} MaximumAllocationSize
+    ^{:line 192 :tag uint32} VirtualMemoryThreshold
+    ^{:line 193 :tag uint32} ProcessHeapFlags
+    ^{:line 194 :tag uint32} ProcessAffinityMask
+    ^{:line 195 :tag uint16} CSDVersion
+    ^{:line 196 :tag uint16} DependentLoadFlags
+    ^{:line 197 :tag uint32} EditList
+    ^{:line 198 :tag uint32} SecurityCookie
+    ^{:line 199 :tag uint32} SEHandlerTable
+    ^{:line 200 :tag uint32} SEHandlerCount
+    ^{:line 201 :tag uint32} GuardCFCheckFunctionPointer
+    ^{:line 202 :tag uint32} GuardCFDispatchFunctionPointer
+    ^{:line 203 :tag uint32} GuardCFFunctionTable
+    ^{:line 204 :tag uint32} GuardCFFunctionCount
+    ^{:line 205 :tag uint32} GuardFlags
+    ^{:line 206 :tag IMAGE_LOAD_CONFIG_CODE_INTEGRITY} CodeIntegrity
+    ^{:line 207 :tag uint32} GuardAddressTakenIatEntryTable
+    ^{:line 208 :tag uint32} GuardAddressTakenIatEntryCount
+    ^{:line 209 :tag uint32} GuardLongJumpTargetTable
+    ^{:line 210 :tag uint32} GuardLongJumpTargetCount
+    ^{:line 211 :tag uint32} DynamicValueRelocTable
+    ^{:line 212 :tag uint32} CHPEMetadataPointer
+    ^{:line 213 :tag uint32} GuardRFFailureRoutine
+    ^{:line 214 :tag uint32} GuardRFFailureRoutineFunctionPointer
+    ^{:line 215 :tag uint32} DynamicValueRelocTableOffset
+    ^{:line 216 :tag uint16} DynamicValueRelocTableSection
+    ^{:line 217 :tag uint16} Reserved2
+    ^{:line 218 :tag uint32} GuardRFVerifyStackPointerFunctionPointer
+    ^{:line 219 :tag uint32} HotPatchTableOffset
+    ^{:line 220 :tag uint32} Reserved3
+    ^{:line 221 :tag uint32} EnclaveConfigurationPointer
+    ^{:line 222 :tag uint32} VolatileMetadataPointer
+    ^{:line 223 :tag uint32} GuardEHContinuationTable
+    ^{:line 224 :tag uint32} GuardEHContinuationCount
+    ^{:line 225 :tag uint32} GuardXFGCheckFunctionPointer
+    ^{:line 226 :tag uint32} GuardXFGDispatchFunctionPointer
+    ^{:line 227 :tag uint32} GuardXFGTableDispatchFunctionPointer
+    ^{:line 228 :tag uint32} CastGuardOsDeterminedFailureMode
+    ^{:line 229 :tag uint32} GuardMemcpyFunctionPointer))
+
+
+(go/type IMAGE_LOAD_CONFIG_DIRECTORY64 (struct
+    ^{:line 233 :tag uint32} Size
+    ^{:line 234 :tag uint32} TimeDateStamp
+    ^{:line 235 :tag uint16} MajorVersion
+    ^{:line 236 :tag uint16} MinorVersion
+    ^{:line 237 :tag uint32} GlobalFlagsClear
+    ^{:line 238 :tag uint32} GlobalFlagsSet
+    ^{:line 239 :tag uint32} CriticalSectionDefaultTimeout
+    ^{:line 240 :tag uint64} DeCommitFreeBlockThreshold
+    ^{:line 241 :tag uint64} DeCommitTotalFreeThreshold
+    ^{:line 242 :tag uint64} LockPrefixTable
+    ^{:line 243 :tag uint64} MaximumAllocationSize
+    ^{:line 244 :tag uint64} VirtualMemoryThreshold
+    ^{:line 245 :tag uint64} ProcessAffinityMask
+    ^{:line 246 :tag uint32} ProcessHeapFlags
+    ^{:line 247 :tag uint16} CSDVersion
+    ^{:line 248 :tag uint16} DependentLoadFlags
+    ^{:line 249 :tag uint64} EditList
+    ^{:line 250 :tag uint64} SecurityCookie
+    ^{:line 251 :tag uint64} SEHandlerTable
+    ^{:line 252 :tag uint64} SEHandlerCount
+    ^{:line 253 :tag uint64} GuardCFCheckFunctionPointer
+    ^{:line 254 :tag uint64} GuardCFDispatchFunctionPointer
+    ^{:line 255 :tag uint64} GuardCFFunctionTable
+    ^{:line 256 :tag uint64} GuardCFFunctionCount
+    ^{:line 257 :tag uint32} GuardFlags
+    ^{:line 258 :tag IMAGE_LOAD_CONFIG_CODE_INTEGRITY} CodeIntegrity
+    ^{:line 259 :tag uint64} GuardAddressTakenIatEntryTable
+    ^{:line 260 :tag uint64} GuardAddressTakenIatEntryCount
+    ^{:line 261 :tag uint64} GuardLongJumpTargetTable
+    ^{:line 262 :tag uint64} GuardLongJumpTargetCount
+    ^{:line 263 :tag uint64} DynamicValueRelocTable
+    ^{:line 264 :tag uint64} CHPEMetadataPointer
+    ^{:line 265 :tag uint64} GuardRFFailureRoutine
+    ^{:line 266 :tag uint64} GuardRFFailureRoutineFunctionPointer
+    ^{:line 267 :tag uint32} DynamicValueRelocTableOffset
+    ^{:line 268 :tag uint16} DynamicValueRelocTableSection
+    ^{:line 269 :tag uint16} Reserved2
+    ^{:line 270 :tag uint64} GuardRFVerifyStackPointerFunctionPointer
+    ^{:line 271 :tag uint32} HotPatchTableOffset
+    ^{:line 272 :tag uint32} Reserved3
+    ^{:line 273 :tag uint64} EnclaveConfigurationPointer
+    ^{:line 274 :tag uint64} VolatileMetadataPointer
+    ^{:line 275 :tag uint64} GuardEHContinuationTable
+    ^{:line 276 :tag uint64} GuardEHContinuationCount
+    ^{:line 277 :tag uint64} GuardXFGCheckFunctionPointer
+    ^{:line 278 :tag uint64} GuardXFGDispatchFunctionPointer
+    ^{:line 279 :tag uint64} GuardXFGTableDispatchFunctionPointer
+    ^{:line 280 :tag uint64} CastGuardOsDeterminedFailureMode
+    ^{:line 281 :tag uint64} GuardMemcpyFunctionPointer))
+
+
+(go/const
+  ^{:line 285} [^{:val 10} PeMinimumTargetMajorVersion 10]
+  ^{:line 286} [^{:val 0} PeMinimumTargetMinorVersion 0])
+
+
+
+
+
+(go/var ^{:doc "DOS stub that prints out\n\"This program cannot be run in DOS mode.\"\nSee IMAGE_DOS_HEADER in the Windows SDK for the format of the header used here.\n"} dosstub ^{:go/breaks [2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 37 38 39 40 41 42 43 44 45 46 47 48 49 50 51 52 53 54 55 56 57 58 59 60 61 62 63 64 65 66 67 68 69 70 71 72 73 74 75 76 77 78 79 80 81 82 83 84 85 86 87 88 89 90 91 92 93 94 95 96 97 98 99 100 101 102 103 104 105 106 107 108 109 110 111 112 113 114 115 116 117 118 119 120 121 122 123 124 125 126 127 128 129]} (lit (slice uint8)
+    0x4d
+    0x5a
+    0x90
+    0x00
+    0x03
+    0x00
+    0x00
+    0x00
+    0x04
+    0x00
+    0x00
+    0x00
+    0xff
+    0xff
+    0x00
+    0x00
+    0x8b
+    0x00
+    0x00
+    0x00
+    0x00
+    0x00
+    0x00
+    0x00
+    0x40
+    0x00
+    0x00
+    0x00
+    0x00
+    0x00
+    0x00
+    0x00
+    0x00
+    0x00
+    0x00
+    0x00
+    0x00
+    0x00
+    0x00
+    0x00
+    0x00
+    0x00
+    0x00
+    0x00
+    0x00
+    0x00
+    0x00
+    0x00
+    0x00
+    0x00
+    0x00
+    0x00
+    0x00
+    0x00
+    0x00
+    0x00
+    0x00
+    0x00
+    0x00
+    0x00
+    0x80
+    0x00
+    0x00
+    0x00
+    0x0e
+    0x1f
+    0xba
+    0x0e
+    0x00
+    0xb4
+    0x09
+    0xcd
+    0x21
+    0xb8
+    0x01
+    0x4c
+    0xcd
+    0x21
+    0x54
+    0x68
+    0x69
+    0x73
+    0x20
+    0x70
+    0x72
+    0x6f
+    0x67
+    0x72
+    0x61
+    0x6d
+    0x20
+    0x63
+    0x61
+    0x6e
+    0x6e
+    0x6f
+    0x74
+    0x20
+    0x62
+    0x65
+    0x20
+    0x72
+    0x75
+    0x6e
+    0x20
+    0x69
+    0x6e
+    0x20
+    0x44
+    0x4f
+    0x53
+    0x20
+    0x6d
+    0x6f
+    0x64
+    0x65
+    0x2e
+    0x0d
+    0x0d
+    0x0a
+    0x24
+    0x00
+    0x00
+    0x00
+    0x00
+    0x00
+    0x00
+    0x00))
+
+
+(go/type Imp (struct
+    ^{:line 424 :tag loader/Sym} s
+    ^{:line 425 :tag uint64} off
+    ^{:line 426 :tag (* Imp)} next
+    ^{:line 427 :tag int} argsize))
+
+
+(go/type Dll (struct
+    ^{:line 431 :tag string} name
+    ^{:line 432 :tag uint64} nameoff
+    ^{:line 433 :tag uint64} thunkoff
+    ^{:line 434 :tag (* Imp)} ms
+    ^{:line 435 :tag (* Dll)} next))
+
+
+(go/var
+  ^{:line 439} [^{:tag (slice loader/Sym)} rsrcsyms]
+  ^{:line 440} [^int32 PESECTHEADR]
+  ^{:line 441} [^int32 PEFILEHEADR]
+  ^{:line 442} [^bool pe64]
+  ^{:line 443} [^{:tag (* Dll)} dr]
+
+  ^{:line 445} [^{:tag (slice loader/Sym)} dexport])
+
+
+
+(go/type peStringTable "peStringTable is a COFF string table.\n" (struct
+    ^{:line 450 :tag (slice string)} strings
+    ^{:line 451 :tag int} stringsLen))
+
+
+
+^{:go/end 458} (go/method size "size returns size of string table t.\n" ^int [^{:tag (* peStringTable)} t]
+  ;; string table starts with 4-byte length at the beginning
+  (+ (.-stringsLen t) 4))
+
+
+
+^{:go/end 466} (go/method add "add adds string str to string table t.\n" ^int [^{:tag (* peStringTable)} t ^string str]
+  (let [off (.size t)]
+    (set! (.-strings t) (append (.-strings t) str))
+    (set! (.-stringsLen t) + (+ (len str) 1)) ; each string will have 0 appended to it
+    ^{:line 465} off))
+
+
+
+^{:go/end 475} (go/method write "write writes string table t into the output file.\n" [^{:tag (* peStringTable)} t ^{:tag (* OutBuf)} out]
+  (.Write32 out (conv uint32 (.size t)))
+  (range [_ s (.-strings t)]
+    (.WriteString out s)
+    (.Write8 out 0)))
+
+
+
+
+(go/type peSection "peSection represents section from COFF section table.\n" (struct
+    ^{:line 479 :tag string} name
+    ^{:line 480 :tag string} shortName
+    ^{:line 481 :tag int} index ; one-based index into the Section Table
+    ^{:line 482 :tag uint32} virtualSize
+    ^{:line 483 :tag uint32} virtualAddress
+    ^{:line 484 :tag uint32} sizeOfRawData
+    ^{:line 485 :tag uint32} pointerToRawData
+    ^{:line 486 :tag uint32} pointerToRelocations
+    ^{:line 487 :tag uint16} numberOfRelocations
+    ^{:line 488 :tag uint32} characteristics))
+
+
+
+^{:go/end 497} (go/method checkOffset "checkOffset verifies COFF section sect offset in the file.\n" [^{:tag (* peSection)} sect ^int64 off]
+  (when (!= off (conv int64 (.-pointerToRawData sect)))
+    (Errorf "%s.PointerToRawData = %#x, want %#x" (.-name sect) (conv uint64 (conv int64 (.-pointerToRawData sect))) (conv uint64 off))
+    (errorexit)))
+
+
+
+
+
+^{:go/end 510} (go/method checkSegment "checkSegment verifies COFF section sect matches address\nand file offset provided in segment seg.\n" [^{:tag (* peSection)} sect ^{:tag (* sym/Segment)} seg]
+  (when (!= (- (.-Vaddr seg) (conv uint64 PEBASE)) (conv uint64 (.-virtualAddress sect)))
+    (Errorf "%s.VirtualAddress = %#x, want %#x" (.-name sect) (conv uint64 (conv int64 (.-virtualAddress sect))) (conv uint64 (conv int64 (- (.-Vaddr seg) (conv uint64 PEBASE)))))
+    (errorexit))
+
+  (when (!= (.-Fileoff seg) (conv uint64 (.-pointerToRawData sect)))
+    (Errorf "%s.PointerToRawData = %#x, want %#x" (.-name sect) (conv uint64 (conv int64 (.-pointerToRawData sect))) (conv uint64 (conv int64 (.-Fileoff seg))))
+    (errorexit)))
+
+
+
+
+
+
+^{:go/end 517} (go/method pad "pad adds zeros to the section sect. It writes as many bytes\nas necessary to make section sect.SizeOfRawData bytes long.\nIt assumes that n bytes are already written to the file.\n" [^{:tag (* peSection)} sect ^{:tag (* OutBuf)} out ^uint32 n]
+  (.WriteStringN out "" (conv int (- (.-sizeOfRawData sect) n))))
+
+
+
+^{:go/end 534} (go/method write "write writes COFF section sect into the output file.\n" ^error [^{:tag (* peSection)} sect ^{:tag (* OutBuf)} out ^LinkMode linkmode]
+  (let [h ^{:go/breaks [2 4 6 8 10 12]} (lit pe/SectionHeader32
+        :VirtualSize (.-virtualSize sect)
+        :SizeOfRawData (.-sizeOfRawData sect)
+        :PointerToRawData (.-pointerToRawData sect)
+        :PointerToRelocations (.-pointerToRelocations sect)
+        :NumberOfRelocations (.-numberOfRelocations sect)
+        :Characteristics (.-characteristics sect))]
+
+    (when (!= linkmode LinkExternal)
+      (set! (.-VirtualAddress h) (.-virtualAddress sect)))
+
+    (copy (subslice (.-Name h)) (.-shortName sect))
+    (binary/Write out binary/LittleEndian h)))
+
+
+
+
+
+
+^{:go/end 560} (go/method emitRelocations "emitRelocations emits the relocation entries for the sect.\nThe actual relocations are emitted by relocfn.\nThis updates the corresponding PE section table entry\nwith the relocation offset and count.\n" [^{:tag (* peSection)} sect ^{:tag (* OutBuf)} out ^{:tag (func [] [int])} relocfn]
+  (set! (.-pointerToRelocations sect) (conv uint32 (.Offset out)))
+  ;; first entry: extended relocs
+  (.Write32 out 0) ; placeholder for number of relocation + 1
+  (.Write32 out 0)
+  (.Write16 out 0)
+
+  (let [n (+ (relocfn) 1)
+
+      ^{:line 549} cpos (.Offset out)]
+    (.SeekSet out (conv int64 (.-pointerToRelocations sect)))
+    (.Write32 out (conv uint32 n))
+    (.SeekSet out cpos)
+    (if (> n 0x10000) (do
+        (set! n 0x10000)
+        (set! (.-characteristics sect) bit-or IMAGE_SCN_LNK_NRELOC_OVFL))
+
+      (set! (.-pointerToRelocations sect) + 10)) ; skip the extend reloc entry
+
+    (set! (.-numberOfRelocations sect) (conv uint16 (- n 1)))))
+
+
+
+(go/type peFile "peFile is used to build COFF file.\n" (struct
+    ^{:line 564 :tag (slice (* peSection))} sections
+    ^{:line 565 :tag peStringTable} stringTable
+    ^{:line 566 :tag (* peSection)} textSect
+    ^{:line 567 :tag (* peSection)} rdataSect
+    ^{:line 568 :tag (* peSection)} dataSect
+    ^{:line 569 :tag (* peSection)} bssSect
+    ^{:line 570 :tag (* peSection)} ctorsSect
+    ^{:line 571 :tag (* peSection)} pdataSect
+    ^{:line 572 :tag (* peSection)} xdataSect
+    ^{:line 573 :tag uint32} nextSectOffset
+    ^{:line 574 :tag uint32} nextFileOffset
+    ^{:line 575 :tag int64} symtabOffset ; offset to the start of symbol table
+    ^{:line 576 :tag int} symbolCount ; number of symbol table records written
+    ^{:line 577 :tag (array 16 pe/DataDirectory)} dataDirectory))
+
+
+
+^{:go/end 599} (go/method addSection "addSection adds section to the COFF file f.\n" ^{:tag (* peSection)} [^{:tag (* peFile)} f ^string name ^int sectsize ^int filesize]
+  (let [sect (addr ^{:go/breaks [2 4 6 8 10]} (lit peSection
+          :name name
+          :shortName name
+          :index (+ (len (.-sections f)) 1)
+          :virtualAddress (.-nextSectOffset f)
+          :pointerToRawData (.-nextFileOffset f)))]
+
+    (set! (.-nextSectOffset f) (conv uint32 (Rnd (+ (conv int64 (.-nextSectOffset f)) (conv int64 sectsize)) PESECTALIGN)))
+    (if (> filesize 0) (do
+        (set! (.-virtualSize sect) (conv uint32 sectsize))
+        (set! (.-sizeOfRawData sect) (conv uint32 (Rnd (conv int64 filesize) PEFILEALIGN)))
+        (set! (.-nextFileOffset f) + (.-sizeOfRawData sect)))
+
+      (set! (.-sizeOfRawData sect) (conv uint32 sectsize)))
+
+    (set! (.-sections f) (append (.-sections f) sect))
+    ^{:line 598} sect))
+
+
+
+
+
+^{:go/end 619} (go/method addDWARFSection "addDWARFSection adds DWARF section to the COFF file f.\nThis function is similar to addSection, but DWARF section names are\nlonger than 8 characters, so they need to be stored in the string table.\n" ^{:tag (* peSection)} [^{:tag (* peFile)} f ^string name ^int size]
+  (when (== size 0)
+    (Exitf "DWARF section %q is empty" name))
+
+  ;; DWARF section names are longer than 8 characters.
+  ;; PE format requires such names to be stored in string table,
+  ;; and section names replaced with slash (/) followed by
+  ;; correspondent string table index.
+  ;; see http://www.microsoft.com/whdc/system/platform/firmware/PECOFFdwn.mspx
+  ;; for details
+  (let [off (.add (.-stringTable f) name)
+      ^{:line 615} h (.addSection f name size size)]
+    (set! (.-shortName h) (fmt/Sprintf "/%d" off))
+    (set! (.-characteristics h) (bit-or IMAGE_SCN_ALIGN_1BYTES IMAGE_SCN_MEM_READ IMAGE_SCN_MEM_DISCARDABLE IMAGE_SCN_CNT_INITIALIZED_DATA))
+    ^{:line 618} h))
+
+
+
+^{:go/end 633} (go/method addDWARF "addDWARF adds DWARF information to the COFF file f.\n" [^{:tag (* peFile)} f]
+  (when @FlagW ; disable dwarf
+    (return))
+
+  (range [_ sect (.-Sections Segdwarf)]
+    (let [h (.addDWARFSection f (.-Name sect) (conv int (.-Length sect)))
+        ^{:line 628} fileoff (+ (- (.-Vaddr sect) (.-Vaddr Segdwarf)) (.-Fileoff Segdwarf))]
+      (when (!= (conv uint64 (.-pointerToRawData h)) fileoff)
+        (Exitf "%s.PointerToRawData = %#x, want %#x" (.-Name sect) (.-pointerToRawData h) fileoff)))))
+
+
+
+
+
+^{:go/end 663} (go/method addSEH "addSEH adds SEH information to the COFF file f.\n" [^{:tag (* peFile)} f ^{:tag (* Link)} ctxt]
+  ;; .pdata section can exist without the .xdata section.
+  ;; .xdata section depends on the .pdata section.
+  (when (== (.-Length Segpdata) 0)
+    (return))
+
+  (let [d (.addSection pefile ".pdata" (conv int (.-Length Segpdata)) (conv int (.-Length Segpdata)))]
+    (set! (.-characteristics d) (bit-or IMAGE_SCN_CNT_INITIALIZED_DATA IMAGE_SCN_MEM_READ))
+    (when (== ^{:go/via [Target]} (.-LinkMode ctxt) LinkExternal)
+      ;; Some gcc versions don't honor the default alignment for the .pdata section.
+      (set! (.-characteristics d) bit-or IMAGE_SCN_ALIGN_4BYTES))
+
+    (set! (.-pdataSect pefile) d)
+    (.checkSegment d (addr Segpdata))
+    (set! (.-VirtualAddress (aget (.-dataDirectory pefile) pe/IMAGE_DIRECTORY_ENTRY_EXCEPTION)) (.-virtualAddress d))
+    (set! (.-Size (aget (.-dataDirectory pefile) pe/IMAGE_DIRECTORY_ENTRY_EXCEPTION)) (.-virtualSize d))
+
+    (when (> (.-Length Segxdata) 0)
+      (set! d (.addSection pefile ".xdata" (conv int (.-Length Segxdata)) (conv int (.-Length Segxdata))))
+      (set! (.-characteristics d) (bit-or IMAGE_SCN_CNT_INITIALIZED_DATA IMAGE_SCN_MEM_READ))
+      (when (== ^{:go/via [Target]} (.-LinkMode ctxt) LinkExternal)
+        ;; Some gcc versions don't honor the default alignment for the .xdata section.
+        (set! (.-characteristics d) bit-or IMAGE_SCN_ALIGN_4BYTES))
+
+      (set! (.-xdataSect pefile) d)
+      (.checkSegment d (addr Segxdata)))))
+
+
+
+
+^{:go/end 695} (go/method addInitArray "addInitArray adds .ctors COFF section to the file f.\n" ^{:tag (* peSection)} [^{:tag (* peFile)} f ^{:tag (* Link)} ctxt]
+  ;; The size below was determined by the specification for array relocations,
+  ;; and by observing what GCC writes here. If the initarray section grows to
+  ;; contain more than one constructor entry, the size will need to be 8 * constructor_count.
+  ;; However, the entire Go runtime is initialized from just one function, so it is unlikely
+  ;; that this will need to grow in the future.
+  (let [^int size (zero int)
+      ^{:line 673 :tag uint32} alignment (zero uint32)]
+    (if pe64 (do
+        (set! size 8)
+        (set! alignment IMAGE_SCN_ALIGN_8BYTES))
+      (do
+        (set! size 4)
+        (set! alignment IMAGE_SCN_ALIGN_4BYTES)))
+
+    (let [sect (.addSection f ".ctors" size size)]
+      (set! (.-characteristics sect) (bit-or IMAGE_SCN_CNT_INITIALIZED_DATA IMAGE_SCN_MEM_READ IMAGE_SCN_MEM_WRITE alignment))
+      (set! (.-sizeOfRawData sect) (conv uint32 size))
+      (.SeekSet (.-Out ctxt) (conv int64 (.-pointerToRawData sect)))
+      (.checkOffset sect (.Offset (.-Out ctxt)))
+
+      (let [init_entry (.Lookup (.-loader ctxt) @flagEntrySymbol 0)
+          ^{:line 688} addr (- (conv uint64 (.SymValue (.-loader ctxt) init_entry)) (.-Vaddr (.SymSect (.-loader ctxt) init_entry)))]
+        (if pe64
+          (.Write64 (.-Out ctxt) addr)
+
+          (.Write32 (.-Out ctxt) (conv uint32 addr)))
+
+        ^{:line 694} sect))))
+
+
+
+^{:go/end 823} (go/method emitRelocations "emitRelocations emits relocation entries for go.o in external linking.\n" [^{:tag (* peFile)} f ^{:tag (* Link)} ctxt]
+  (while (!= (bit-and (.Offset (.-Out ctxt)) 7) 0)
+    (.Write8 (.-Out ctxt) 0))
+
+
+  (let [ldr (.-loader ctxt)
+
+      ;; relocsect relocates symbols from first in section sect, and returns
+      ;; the total number of relocations emitted.
+      ^{:line 707} relocsect ^{:go/end 754} (fn ^int [^{:tag (* sym/Section)} sect ^{:tag (slice loader/Sym)} syms ^uint64 base]
+        ;; If main section has no bits, nothing to relocate.
+        (when (>= (.-Vaddr sect) (+ (.-Vaddr (.-Seg sect)) (.-Filelen (.-Seg sect))))
+          (return 0))
+
+        (set! (.-Reloff sect) (conv uint64 (.Offset (.-Out ctxt))))
+        (range [i s syms]
+          (when (not (.AttrReachable ldr s))
+            (continue))
+
+          (when (>= (conv uint64 (.SymValue ldr s)) (.-Vaddr sect))
+            (set! syms (subslice syms i))
+            (break)))
+
+
+        (let [eaddr (conv int64 (+ (.-Vaddr sect) (.-Length sect)))]
+          (range [_ s syms]
+            (when (not (.AttrReachable ldr s))
+              (continue))
+
+            (when (>= (.SymValue ldr s) eaddr)
+              (break))
+
+            ;; Compute external relocations on the go, and pass to PEreloc1
+            ;; to stream out.
+            (let [relocs (.Relocs ldr s)]
+              (for [ri 0] (< ri (.Count relocs)) (inc! ri)
+                (let [r (.At relocs ri)
+                    (values rr ok) (extreloc ctxt ldr s r)]
+                  (when (not ok)
+                    (continue))
+
+                  (when (== (.-Xsym rr) 0)
+                    (.Errorf ctxt s "missing xsym in relocation")
+                    (continue))
+
+                  (when (< (.SymDynid ldr (.-Xsym rr)) 0)
+                    (.Errorf ctxt s "reloc %d to non-coff symbol %s (outer=%s) %d" (.Type r) (.SymName ldr (.Sym r)) (.SymName ldr (.-Xsym rr)) (.SymType ldr (.Sym r))))
+
+                  (when (not ((.-PEreloc1 thearch) ^{:go/via [Target]} (.-Arch ctxt) (.-Out ctxt) ldr s rr (conv int64 (- (conv uint64 (+ (.SymValue ldr s) (conv int64 ^{:go/via [Reloc]} (.Off r)))) base))))
+                    (.Errorf ctxt s "unsupported obj reloc %v/%d to %s" (.Type r) ^{:go/via [Reloc]} (.Siz r) (.SymName ldr (.Sym r))))))))
+
+
+
+          (set! (.-Rellen sect) (- (conv uint64 (.Offset (.-Out ctxt))) (.-Reloff sect)))
+          (let [^:const ^{:val 10} relocLen (+ 4 4 2)]
+            (conv int (/ (.-Rellen sect) relocLen)))))]
+
+
+    (let-type [relsect (struct
+          ^{:line 757 :tag (* peSection)} peSect
+          ^{:line 758 :tag (* sym/Segment)} seg
+          ^{:line 759 :tag (slice loader/Sym)} syms)]
+
+      (let [sects (lit (slice relsect)
+            (lit _ (.-textSect f) (addr Segtext) (.-Textp ctxt))
+            (lit _ (.-rdataSect f) (addr Segrodata) (.-datap ctxt))
+            (lit _ (.-dataSect f) (addr Segdata) (.-datap ctxt)))]
+
+        (when (!= (len (.-pdata sehp)) 0)
+          (set! sects (append sects (lit relsect (.-pdataSect f) (addr Segpdata) (.-pdata sehp)))))
+
+        (when (!= (len (.-xdata sehp)) 0)
+          (set! sects (append sects (lit relsect (.-xdataSect f) (addr Segxdata) (.-xdata sehp)))))
+
+        (range [_ s sects]
+          (.emitRelocations (.-peSect s) (.-Out ctxt) ^{:go/end 779} (fn ^int []
+              (let [^int n (zero int)]
+                (range [_ sect (.-Sections (.-seg s))]
+                  (set! n + (relocsect sect (.-syms s) (.-Vaddr (.-seg s)))))
+
+                ^{:line 778} n))))
+
+
+
+        (label :dwarfLoop
+          (for [i 0] (< i (len (.-Sections Segdwarf))) (inc! i)
+            (let [sect (aget (.-Sections Segdwarf) i)
+                ^{:line 785} si (aget dwarfp i)]
+              (when (or (!= (.secSym si) (.-Sym sect))
+                  (!= (.SymSect ldr (.secSym si)) sect))
+                (panic "inconsistency between dwarfp and Segdwarf"))
+
+              (range [_ pesect (.-sections f)]
+                (when (== (.-Name sect) (.-name pesect))
+                  (.emitRelocations pesect (.-Out ctxt) ^{:go/end 794} (fn ^int []
+                      (relocsect sect (.-syms si) (.-Vaddr sect))))
+
+                  (continue :dwarfLoop)))
+
+
+              (Errorf "emitRelocations: could not find %q section" (.-Name sect)))))
+
+
+        (when (== (.-ctorsSect f) nil)
+          (return))
+
+
+        (.emitRelocations (.-ctorsSect f) (.-Out ctxt) ^{:go/end 822} (fn ^int []
+            ^{:go/breaks [[5 821]]} (let [dottext (.Lookup ldr ".text" 0)]
+              (.Write32 (.-Out ctxt) 0)
+              (.Write32 (.-Out ctxt) (conv uint32 (.SymDynid ldr dottext)))
+              (switch buildcfg/GOARCH
+                (default
+                  (.Errorf ctxt dottext "unknown architecture for PE: %q\n" buildcfg/GOARCH))
+                (case ["386"]
+                  (.Write16 (.-Out ctxt) IMAGE_REL_I386_DIR32))
+                (case ["amd64"]
+                  (.Write16 (.-Out ctxt) IMAGE_REL_AMD64_ADDR64))
+                (case ["arm"]
+                  (.Write16 (.-Out ctxt) IMAGE_REL_ARM_ADDR32))
+                (case ["arm64"]
+                  (.Write16 (.-Out ctxt) IMAGE_REL_ARM64_ADDR64)))
+
+              1)))))))
+
+
+
+
+
+^{:go/end 843} (go/method writeSymbol "writeSymbol appends symbol s to file f symbol table.\nIt also sets s.Dynid to written symbol number.\n" [^{:tag (* peFile)} f ^{:tag (* OutBuf)} out ^{:tag (* loader/Loader)} ldr ^loader/Sym s ^string name ^int64 value ^int sectidx ^uint16 typ ^uint8 class]
+  (if (> (len name) 8) (do
+      (.Write32 out 0)
+      (.Write32 out (conv uint32 (.add (.-stringTable f) name))))
+
+    (.WriteStringN out name 8))
+
+  (.Write32 out (conv uint32 value))
+  (.Write16 out (conv uint16 sectidx))
+  (.Write16 out typ)
+  (.Write8 out class)
+  (.Write8 out 0) ; no aux entries
+
+  (.SetSymDynid ldr s (conv int32 (.-symbolCount f)))
+
+  (inc! (.-symbolCount f)))
+
+
+
+
+^{:go/end 874} (go/method mapToPESection "mapToPESection searches peFile f for s symbol's location.\nIt returns PE section index, and offset within that section.\n" [^{:tag (* peFile)} f ^{:tag (* loader/Loader)} ldr ^loader/Sym s ^LinkMode linkmode] :results [^int pesectidx ^int64 offset ^error err]
+  (let [sect (.SymSect ldr s)]
+    (when (== sect nil)
+      (return 0 0 (fmt/Errorf "could not map %s symbol with no section" (.SymName ldr s))))
+
+    (when (== (.-Seg sect) (addr Segtext))
+      (return (.-index (.-textSect f)) (conv int64 (- (conv uint64 (.SymValue ldr s)) (.-Vaddr Segtext))) nil))
+
+    (when (== (.-Seg sect) (addr Segrodata))
+      (return (.-index (.-rdataSect f)) (conv int64 (- (conv uint64 (.SymValue ldr s)) (.-Vaddr Segrodata))) nil))
+
+    (when (!= (.-Seg sect) (addr Segdata))
+      (return 0 0 (fmt/Errorf "could not map %s symbol with non .text or .rdata or .data section" (.SymName ldr s))))
+
+    (let [v (- (conv uint64 (.SymValue ldr s)) (.-Vaddr Segdata))]
+      (when (!= linkmode LinkExternal)
+        (return (.-index (.-dataSect f)) (conv int64 v) nil))
+
+      (when (.IsDATA (.SymType ldr s))
+        (return (.-index (.-dataSect f)) (conv int64 v) nil))
+
+      ;; Note: although address of runtime.edata (type sym.SDATA) is at the start of .bss section
+      ;; it still belongs to the .data section, not the .bss section.
+      (when (< v (.-Filelen Segdata))
+        (return (.-index (.-dataSect f)) (conv int64 v) nil))
+
+      (return (.-index (.-bssSect f)) (conv int64 (- v (.-Filelen Segdata))) nil))))
+
+
+(go/var isLabel (make (map loader/Sym bool)))
+
+^{:go/end 880} (go/func AddPELabelSym [^{:tag (* loader/Loader)} ldr ^loader/Sym s]
+  (aset isLabel s true))
+
+
+
+^{:go/end 1007} (go/method writeSymbols "writeSymbols writes all COFF symbol table records.\n" [^{:tag (* peFile)} f ^{:tag (* Link)} ctxt]
+  (let [ldr (.-loader ctxt)
+      ^{:line 885} addsym ^{:go/end 945} (fn [^loader/Sym s]
+        (let [t (.SymType ldr s)]
+          (when (and (== (.SymSect ldr s) nil) (!= t sym/SDYNIMPORT) (!= t sym/SHOSTOBJ) (!= t sym/SUNDEFEXT))
+            (return))
+
+
+          (let [name (.SymName ldr s)]
+
+            ;; Only windows/386 requires underscore prefix on external symbols.
+            (when (and ^{:go/via [Target]} (.Is386 ctxt) ^{:go/via [Target]} (.IsExternal ctxt)
+                ^:go/paren (or (== t sym/SHOSTOBJ) (== t sym/SUNDEFEXT) (.AttrCgoExport ldr s)
+                  ;; TODO(cuonglm): remove this hack
+                  ;;
+                  ;; Previously, windows/386 requires underscore prefix on external symbols,
+                  ;; but that's only applied for SHOSTOBJ/SUNDEFEXT or cgo export symbols.
+                  ;; "go.buildid" is STEXT, "type.*" is STYPE, thus they are not prefixed
+                  ;; with underscore.
+                  ;;
+                  ;; In external linking mode, the external linker can't resolve them as
+                  ;; external symbols. But we are lucky that they have "." in their name,
+                  ;; so the external linker see them as Forwarder RVA exports. See:
+                  ;;
+                  ;;  - https://docs.microsoft.com/en-us/windows/win32/debug/pe-format#export-address-table
+                  ;;  - https://sourceware.org/git/?p=binutils-gdb.git;a=blob;f=ld/pe-dll.c;h=e7b82ba6ffadf74dc1b9ee71dc13d48336941e51;hb=HEAD#l972
+                  ;;
+                  ;; CL 317917 changes "." to ":" in symbols name, so these symbols can not be
+                  ;; found by external linker anymore. So a hacky way is adding the
+                  ;; underscore prefix for these 2 symbols. I don't have enough knowledge to
+                  ;; verify whether adding the underscore for all STEXT/STYPE symbols are
+                  ;; fine, even if it could be, that would be done in future CL.
+                  (== name "go:buildid") (== name "type:*")))
+              (set! name (+ "_" name)))
+
+
+            (set! name (mangleABIName ctxt ldr s name))
+
+            (let [^uint16 peSymType IMAGE_SYM_TYPE_NULL]
+              (switch
+                (case [(.IsText t) (== t sym/SDYNIMPORT) (== t sym/SHOSTOBJ) (== t sym/SUNDEFEXT)]
+                  ;; Microsoft's PE documentation is contradictory. It says that the symbol's complex type
+                  ;; is stored in the pesym.Type most significant byte, but MSVC, LLVM, and mingw store it
+                  ;; in the 4 high bits of the less significant byte. Also, the PE documentation says that
+                  ;; the basic type for a function should be IMAGE_SYM_TYPE_VOID,
+                  ;; but the reality is that it uses IMAGE_SYM_TYPE_NULL instead.
+                  (set! peSymType (+ (<< IMAGE_SYM_DTYPE_FUNCTION 4) IMAGE_SYM_TYPE_NULL))))
+
+              (let [(values sect value err) (.mapToPESection f ldr s ^{:go/via [Target]} (.-LinkMode ctxt))]
+                (when (!= err nil)
+                  (switch t
+                    (case [sym/SDYNIMPORT sym/SHOSTOBJ sym/SUNDEFEXT])
+                    (default
+                      (.Errorf ctxt s "addpesym: %v" err))))
+
+
+                (let [class IMAGE_SYM_CLASS_EXTERNAL]
+                  (when (or (.IsFileLocal ldr s) (.AttrVisibilityHidden ldr s) (.AttrLocal ldr s)
+                      ^:go/paren (and (.IsContentHashed ldr s) (.IsText (.SymType ldr s))))
+                    (set! class IMAGE_SYM_CLASS_STATIC))
+
+                  (.writeSymbol f (.-Out ctxt) ldr s name value sect peSymType (conv uint8 class))))))))]
+
+
+    (when (== ^{:go/via [Target]} (.-LinkMode ctxt) LinkExternal)
+      ;; Include section symbols as external, because
+      ;; .ctors and .debug_* section relocations refer to it.
+      (range [_ pesect (.-sections f)]
+        (let [s (.LookupOrCreateSym ldr (.-name pesect) 0)]
+          (.writeSymbol f (.-Out ctxt) ldr s (.-name pesect) 0 (.-index pesect) IMAGE_SYM_TYPE_NULL IMAGE_SYM_CLASS_STATIC))))
+
+
+
+    ;; Add special runtime.text and runtime.etext symbols.
+    (let [s (.Lookup ldr "runtime.text" 0)]
+      (when (.IsText (.SymType ldr s))
+        (addsym s))
+
+      (set! s (.Lookup ldr "runtime.etext" 0))
+      (when (.IsText (.SymType ldr s))
+        (addsym s))
+
+
+      ;; Add text symbols.
+      (range [_ s (.-Textp ctxt)]
+        (addsym s))
+
+
+      (let [shouldBeInSymbolTable ^{:go/end 980} (fn ^bool [^loader/Sym s]
+            (when (.AttrNotInSymbolTable ldr s)
+              (return false))
+
+            ^{:go/breaks [[3 979]]} (let [name (.SymName ldr s)] ; TODO: try not to read the name
+              (when (or (== name "") (== (aget name 0) \.))
+                (return false))
+
+              true))]
+
+
+        ;; Add data symbols and external references.
+        (for [s (conv loader/Sym 1)] (< s (conv loader/Sym (.NSym ldr))) (inc! s)
+          (when (not (.AttrReachable ldr s))
+            (continue))
+
+          (let [t (.SymType ldr s)]
+            (when (and (>= t sym/SELFRXSECT) (< t sym/SFirstUnallocated)) ; data sections handled in dodata
+              (when (== t sym/STLSBSS)
+                (continue))
+
+              (when (not (shouldBeInSymbolTable s))
+                (continue))
+
+              (addsym s))
+
+
+            (switch t
+              (case [sym/SDYNIMPORT sym/SHOSTOBJ sym/SUNDEFEXT]
+                (addsym s))
+              (default
+                (when (and (> (len isLabel) 0) (aget isLabel s))
+                  (addsym s))))))))))
+
+
+
+
+
+
+^{:go/end 1034} (go/method writeSymbolTableAndStringTable "writeSymbolTableAndStringTable writes out symbol and string tables for peFile f.\n" [^{:tag (* peFile)} f ^{:tag (* Link)} ctxt]
+  (set! (.-symtabOffset f) (.Offset (.-Out ctxt)))
+
+  ;; write COFF symbol table
+  (when (or (not @FlagS) (== ^{:go/via [Target]} (.-LinkMode ctxt) LinkExternal))
+    (.writeSymbols f ctxt))
+
+
+  ;; update COFF file header and section table
+  (let [size (+ (.size (.-stringTable f)) (* 18 (.-symbolCount f)))
+      ^{:line 1020 :tag (* peSection)} h (zero (* peSection))]
+    (when (!= ^{:go/via [Target]} (.-LinkMode ctxt) LinkExternal)
+      ;; We do not really need .symtab for go.o, and if we have one, ld
+      ;; will also include it in the exe, and that will confuse windows.
+      (set! h (.addSection f ".symtab" size size))
+      (set! (.-characteristics h) (bit-or IMAGE_SCN_MEM_READ IMAGE_SCN_MEM_DISCARDABLE))
+      (.checkOffset h (.-symtabOffset f)))
+
+
+    ;; write COFF string table
+    (.write (.-stringTable f) (.-Out ctxt))
+    (when (!= ^{:go/via [Target]} (.-LinkMode ctxt) LinkExternal)
+      (.pad h (.-Out ctxt) (conv uint32 size)))))
+
+
+
+
+^{:go/end 1080} (go/method writeFileHeader "writeFileHeader writes COFF file header for peFile f.\n" [^{:tag (* peFile)} f ^{:tag (* Link)} ctxt]
+  (let [^pe/FileHeader fh (zero pe/FileHeader)]
+
+    (switch (.-Family ^{:go/via [Target]} (.-Arch ctxt))
+      (default
+        (Exitf "unknown PE architecture: %v" (.-Family ^{:go/via [Target]} (.-Arch ctxt))))
+      (case [sys/AMD64]
+        (set! (.-Machine fh) pe/IMAGE_FILE_MACHINE_AMD64))
+      (case [sys/I386]
+        (set! (.-Machine fh) pe/IMAGE_FILE_MACHINE_I386))
+      (case [sys/ARM64]
+        (set! (.-Machine fh) pe/IMAGE_FILE_MACHINE_ARM64)))
+
+
+    (set! (.-NumberOfSections fh) (conv uint16 (len (.-sections f))))
+
+    ;; Being able to produce identical output for identical input is
+    ;; much more beneficial than having build timestamp in the header.
+    (set! (.-TimeDateStamp fh) 0)
+
+    (when (!= ^{:go/via [Target]} (.-LinkMode ctxt) LinkExternal)
+      (set! (.-Characteristics fh) pe/IMAGE_FILE_EXECUTABLE_IMAGE)
+      (switch (.-Family ^{:go/via [Target]} (.-Arch ctxt))
+        (case [sys/AMD64 sys/I386]
+          (when (!= ^{:go/via [Target]} (.-BuildMode ctxt) BuildModePIE)
+            (set! (.-Characteristics fh) bit-or pe/IMAGE_FILE_RELOCS_STRIPPED)))))
+
+
+
+    (if pe64
+      (let [^pe/OptionalHeader64 oh64 (zero pe/OptionalHeader64)]
+        (set! (.-SizeOfOptionalHeader fh) (conv uint16 (binary/Size (addr oh64))))
+        (set! (.-Characteristics fh) bit-or pe/IMAGE_FILE_LARGE_ADDRESS_AWARE))
+
+      (let [^pe/OptionalHeader32 oh (zero pe/OptionalHeader32)]
+        (set! (.-SizeOfOptionalHeader fh) (conv uint16 (binary/Size (addr oh))))
+        (set! (.-Characteristics fh) bit-or pe/IMAGE_FILE_32BIT_MACHINE)))
+
+
+    (set! (.-PointerToSymbolTable fh) (conv uint32 (.-symtabOffset f)))
+    (set! (.-NumberOfSymbols fh) (conv uint32 (.-symbolCount f)))
+
+    (binary/Write (.-Out ctxt) binary/LittleEndian (addr fh))))
+
+
+
+^{:go/end 1219} (go/method writeOptionalHeader "writeOptionalHeader writes COFF optional header for peFile f.\n" [^{:tag (* peFile)} f ^{:tag (* Link)} ctxt]
+  (let [^pe/OptionalHeader32 oh (zero pe/OptionalHeader32)
+      ^{:line 1085 :tag pe/OptionalHeader64} oh64 (zero pe/OptionalHeader64)]
+
+    (if pe64
+      (set! (.-Magic oh64) 0x20b) ; PE32+
+      (do
+        (set! (.-Magic oh) 0x10b) ; PE32
+        (set! (.-BaseOfData oh) (.-virtualAddress (.-dataSect f)))))
+
+
+    ;; Fill out both oh64 and oh. We only use one. Oh well.
+    (set! (.-MajorLinkerVersion oh64) 3)
+    (set! (.-MajorLinkerVersion oh) 3)
+    (set! (.-MinorLinkerVersion oh64) 0)
+    (set! (.-MinorLinkerVersion oh) 0)
+    (set! (.-SizeOfCode oh64) (.-sizeOfRawData (.-textSect f)))
+    (set! (.-SizeOfCode oh) (.-sizeOfRawData (.-textSect f)))
+    (set! (.-SizeOfInitializedData oh64) (.-sizeOfRawData (.-dataSect f)))
+    (set! (.-SizeOfInitializedData oh) (.-sizeOfRawData (.-dataSect f)))
+    (set! (.-SizeOfUninitializedData oh64) 0)
+    (set! (.-SizeOfUninitializedData oh) 0)
+    (when (!= ^{:go/via [Target]} (.-LinkMode ctxt) LinkExternal)
+      (set! (.-AddressOfEntryPoint oh64) (conv uint32 (- (Entryvalue ctxt) PEBASE)))
+      (set! (.-AddressOfEntryPoint oh) (conv uint32 (- (Entryvalue ctxt) PEBASE))))
+
+    (set! (.-BaseOfCode oh64) (.-virtualAddress (.-textSect f)))
+    (set! (.-BaseOfCode oh) (.-virtualAddress (.-textSect f)))
+    (set! (.-ImageBase oh64) (conv uint64 PEBASE))
+    (set! (.-ImageBase oh) (conv uint32 PEBASE))
+    (set! (.-SectionAlignment oh64) (conv uint32 PESECTALIGN))
+    (set! (.-SectionAlignment oh) (conv uint32 PESECTALIGN))
+    (set! (.-FileAlignment oh64) (conv uint32 PEFILEALIGN))
+    (set! (.-FileAlignment oh) (conv uint32 PEFILEALIGN))
+    (set! (.-MajorOperatingSystemVersion oh64) PeMinimumTargetMajorVersion)
+    (set! (.-MajorOperatingSystemVersion oh) PeMinimumTargetMajorVersion)
+    (set! (.-MinorOperatingSystemVersion oh64) PeMinimumTargetMinorVersion)
+    (set! (.-MinorOperatingSystemVersion oh) PeMinimumTargetMinorVersion)
+    (set! (.-MajorImageVersion oh64) 1)
+    (set! (.-MajorImageVersion oh) 1)
+    (set! (.-MinorImageVersion oh64) 0)
+    (set! (.-MinorImageVersion oh) 0)
+    (set! (.-MajorSubsystemVersion oh64) PeMinimumTargetMajorVersion)
+    (set! (.-MajorSubsystemVersion oh) PeMinimumTargetMajorVersion)
+    (set! (.-MinorSubsystemVersion oh64) PeMinimumTargetMinorVersion)
+    (set! (.-MinorSubsystemVersion oh) PeMinimumTargetMinorVersion)
+    (set! (.-SizeOfImage oh64) (.-nextSectOffset f))
+    (set! (.-SizeOfImage oh) (.-nextSectOffset f))
+    (set! (.-SizeOfHeaders oh64) (conv uint32 PEFILEHEADR))
+    (set! (.-SizeOfHeaders oh) (conv uint32 PEFILEHEADR))
+    (if windowsgui (do
+        (set! (.-Subsystem oh64) pe/IMAGE_SUBSYSTEM_WINDOWS_GUI)
+        (set! (.-Subsystem oh) pe/IMAGE_SUBSYSTEM_WINDOWS_GUI))
+      (do
+        (set! (.-Subsystem oh64) pe/IMAGE_SUBSYSTEM_WINDOWS_CUI)
+        (set! (.-Subsystem oh) pe/IMAGE_SUBSYSTEM_WINDOWS_CUI)))
+
+
+    ;; Mark as having awareness of terminal services, to avoid ancient compatibility hacks.
+    (set! (.-DllCharacteristics oh64) bit-or pe/IMAGE_DLLCHARACTERISTICS_TERMINAL_SERVER_AWARE)
+    (set! (.-DllCharacteristics oh) bit-or pe/IMAGE_DLLCHARACTERISTICS_TERMINAL_SERVER_AWARE)
+
+    ;; Enable DEP
+    (set! (.-DllCharacteristics oh64) bit-or pe/IMAGE_DLLCHARACTERISTICS_NX_COMPAT)
+    (set! (.-DllCharacteristics oh) bit-or pe/IMAGE_DLLCHARACTERISTICS_NX_COMPAT)
+
+    ;; The DLL can be relocated at load time.
+    (when (needPEBaseReloc ctxt)
+      (set! (.-DllCharacteristics oh64) bit-or pe/IMAGE_DLLCHARACTERISTICS_DYNAMIC_BASE)
+      (set! (.-DllCharacteristics oh) bit-or pe/IMAGE_DLLCHARACTERISTICS_DYNAMIC_BASE))
+
+
+    ;; Image can handle a high entropy 64-bit virtual address space.
+    (when (== ^{:go/via [Target]} (.-BuildMode ctxt) BuildModePIE)
+      (set! (.-DllCharacteristics oh64) bit-or pe/IMAGE_DLLCHARACTERISTICS_HIGH_ENTROPY_VA))
+
+
+    ;; Disable stack growth as we don't want Windows to
+    ;; fiddle with the thread stack limits, which we set
+    ;; ourselves to circumvent the stack checks in the
+    ;; Windows exception dispatcher.
+    ;; Commit size must be strictly less than reserve
+    ;; size otherwise reserve will be rounded up to a
+    ;; larger size, as verified with VMMap.
+
+    ;; On 64-bit, we always reserve 2MB stacks. "Pure" Go code is
+    ;; okay with much smaller stacks, but the syscall package
+    ;; makes it easy to call into arbitrary C code without cgo,
+    ;; and system calls even in "pure" Go code are actually C
+    ;; calls that may need more stack than we think.
+    ;;
+    ;; The default stack reserve size directly affects only the main
+    ;; thread.
+    ;;
+    ;; For other threads, the runtime explicitly asks the kernel
+    ;; to use the default stack size so that all stacks are
+    ;; consistent.
+    ;;
+    ;; At thread start, in minit, the runtime queries the OS for
+    ;; the actual stack bounds so that the stack size doesn't need
+    ;; to be hard-coded into the runtime.
+    (set! (.-SizeOfStackReserve oh64) 0x00200000)
+    (if (not iscgo)
+      (set! (.-SizeOfStackCommit oh64) 0x00001000)
+
+      ;; TODO(brainman): Maybe remove optional header writing altogether for cgo.
+      ;; For cgo it is the external linker that is building final executable.
+      ;; And it probably does not use any information stored in optional header.
+      (set! (.-SizeOfStackCommit oh64) (- 0x00200000 0x2000))) ; account for 2 guard pages
+
+
+    (set! (.-SizeOfStackReserve oh) 0x00100000)
+    (if (not iscgo)
+      (set! (.-SizeOfStackCommit oh) 0x00001000)
+
+      (set! (.-SizeOfStackCommit oh) (- 0x00100000 0x2000))) ; account for 2 guard pages
+
+
+    (set! (.-SizeOfHeapReserve oh64) 0x00100000)
+    (set! (.-SizeOfHeapReserve oh) 0x00100000)
+    (set! (.-SizeOfHeapCommit oh64) 0x00001000)
+    (set! (.-SizeOfHeapCommit oh) 0x00001000)
+    (set! (.-NumberOfRvaAndSizes oh64) 16)
+    (set! (.-NumberOfRvaAndSizes oh) 16)
+
+    (if pe64
+      (set! (.-DataDirectory oh64) (.-dataDirectory f))
+
+      (set! (.-DataDirectory oh) (.-dataDirectory f)))
+
+
+    (if pe64
+      (binary/Write (.-Out ctxt) binary/LittleEndian (addr oh64))
+
+      (binary/Write (.-Out ctxt) binary/LittleEndian (addr oh)))))
+
+
+
+(go/var ^peFile pefile)
+
+^{:go/end 1307} (go/func Peinit [^{:tag (* Link)} ctxt]
+  (let [^int l (zero int)]
+
+    (if (== (.-PtrSize ^{:go/via [Target]} (.-Arch ctxt)) 8) (do
+        ;; 64-bit architectures
+        (set! pe64 true)
+        (let [^pe/OptionalHeader64 oh64 (zero pe/OptionalHeader64)]
+          (set! l (binary/Size (addr oh64)))))
+
+      ;; 32-bit architectures
+      (let [^pe/OptionalHeader32 oh (zero pe/OptionalHeader32)]
+        (set! l (binary/Size (addr oh)))))
+
+
+    (if (== ^{:go/via [Target]} (.-LinkMode ctxt) LinkExternal) (do
+        ;; .rdata section will contain "masks" and "shifts" symbols, and they
+        ;; need to be aligned to 16-bytes. So make all sections aligned
+        ;; to 32-byte and mark them all IMAGE_SCN_ALIGN_32BYTES so external
+        ;; linker will honour that requirement.
+        (set! PESECTALIGN 32)
+        (set! PEFILEALIGN 0)
+        ;; We are creating an object file. The absolute address is irrelevant.
+        (set! PEBASE 0))
+      (do
+        ;; Use the same base image address as MSVC and LLVM.
+        (if pe64
+          (set! PEBASE 0x140000000)
+
+          (set! PEBASE 0x400000))))
+
+
+
+    (let [^{:tag (array 16 pe/SectionHeader32)} sh (zero (array 16 pe/SectionHeader32))
+        ^{:line 1256 :tag pe/FileHeader} fh (zero pe/FileHeader)]
+      (set! PEFILEHEADR (conv int32 (Rnd (conv int64 (+ (len dosstub) (binary/Size (addr fh)) l (binary/Size (addr sh)))) PEFILEALIGN)))
+      (if (!= ^{:go/via [Target]} (.-LinkMode ctxt) LinkExternal)
+        (set! PESECTHEADR (conv int32 (Rnd (conv int64 PEFILEHEADR) PESECTALIGN)))
+
+        (set! PESECTHEADR 0))
+
+      (set! (.-nextSectOffset pefile) (conv uint32 PESECTHEADR))
+      (set! (.-nextFileOffset pefile) (conv uint32 PEFILEHEADR))
+
+      (when (== ^{:go/via [Target]} (.-LinkMode ctxt) LinkInternal)
+        ;; some mingw libs depend on this symbol, for example, FindPESectionByName
+        (range [_ name (lit (array 2 string) "__image_base__" "_image_base__")]
+          (let [sb (.CreateSymForUpdate (.-loader ctxt) name 0)]
+            (.SetType sb sym/SDATA)
+            (.SetValue sb PEBASE)
+            (.SetAttrSpecial (.-loader ctxt) (.Sym sb) true)
+            (.SetAttrLocal (.-loader ctxt) (.Sym sb) true)))
+
+
+        ;; The _load_config_used symbol is required to be present on modern
+        ;; Windows. We later wire this up to the PE data directory.
+        (let [sb (.CreateSymForUpdate (.-loader ctxt) "_load_config_used" 0)]
+          (.SetType sb sym/SRODATA)
+          (.SetAlign sb (conv int32 (.-PtrSize ^{:go/via [Target]} (.-Arch ctxt))))
+          (let [^bytes/Buffer buf (zero bytes/Buffer)]
+            (if pe64
+              (let [lc ^{:go/breaks [2 4]} (lit IMAGE_LOAD_CONFIG_DIRECTORY64
+                    :Size (conv uint32 (binary/Size (addr (lit IMAGE_LOAD_CONFIG_DIRECTORY64))))
+                    :GuardFlags IMAGE_GUARD_SECURITY_COOKIE_UNUSED)]
+
+                (binary/Write (addr buf) binary/LittleEndian (addr lc)))
+
+              (let [lc ^{:go/breaks [2 4]} (lit IMAGE_LOAD_CONFIG_DIRECTORY32
+                    :Size (conv uint32 (binary/Size (addr (lit IMAGE_LOAD_CONFIG_DIRECTORY32))))
+                    :GuardFlags IMAGE_GUARD_SECURITY_COOKIE_UNUSED)]
+
+                (binary/Write (addr buf) binary/LittleEndian (addr lc))))
+
+            (.SetData sb (.Bytes buf))
+            (.SetSize sb (conv int64 (.Len buf)))
+            (.SetAttrReachable (.-loader ctxt) (.Sym sb) true))))
+
+
+      (set! HEADR PEFILEHEADR)
+      (when (== @FlagRound -1)
+        (set! @FlagRound PESECTALIGN))
+
+      (when (== @FlagTextAddr -1)
+        (set! @FlagTextAddr (+ (Rnd PEBASE @FlagRound) (conv int64 PESECTHEADR)))))))
+
+
+
+^{:go/end 1323} (go/func pewrite [^{:tag (* Link)} ctxt]
+  (.SeekSet (.-Out ctxt) 0)
+  (when (!= ^{:go/via [Target]} (.-LinkMode ctxt) LinkExternal)
+    (.Write (.-Out ctxt) dosstub)
+    (.WriteStringN (.-Out ctxt) "PE" 4))
+
+
+  (.writeFileHeader pefile ctxt)
+
+  (.writeOptionalHeader pefile ctxt)
+
+  (range [_ sect (.-sections pefile)]
+    (.write sect (.-Out ctxt) ^{:go/via [Target]} (.-LinkMode ctxt))))
+
+
+
+^{:go/end 1332} (go/func strput [^{:tag (* OutBuf)} out ^string s]
+  (.WriteString out s)
+  (.Write8 out 0)
+  ;; string must be padded to even size
+  (when (!= (% (+ (len s) 1) 2) 0)
+    (.Write8 out 0)))
+
+
+
+^{:go/end 1417} (go/func initdynimport ^{:tag (* Dll)} [^{:tag (* Link)} ctxt]
+  (let [ldr (.-loader ctxt)
+      ^{:line 1336 :tag (* Dll)} d (zero (* Dll))]
+
+    (set! dr nil)
+    (let [^{:tag (* Imp)} m (zero (* Imp))]
+      (for [s (conv loader/Sym 1)] (< s (conv loader/Sym (.NSym ldr))) (inc! s)
+        (when (or (not (.AttrReachable ldr s)) (!= (.SymType ldr s) sym/SDYNIMPORT))
+          (continue))
+
+        (let [dynlib (.SymDynimplib ldr s)]
+          (for [(set! d dr)] (!= d nil) (set! d (.-next d))
+            (when (== (.-name d) dynlib)
+              (set! m (new Imp))
+              (break)))
+
+
+
+          (when (== d nil)
+            (set! d (new Dll))
+            (set! (.-name d) dynlib)
+            (set! (.-next d) dr)
+            (set! dr d)
+            (set! m (new Imp)))
+
+
+          ;; Because external link requires properly stdcall decorated name,
+          ;; all external symbols in runtime use %n to denote that the number
+          ;; of uinptrs this function consumes. Store the argsize and discard
+          ;; the %n suffix if any.
+          (set! (.-argsize m) -1)
+          (let [extName (.SymExtname ldr s)]
+            (when [i (strings/IndexByte extName \%)] (>= i 0)
+              (let [^error err (zero error)]
+                (set! (values (.-argsize m) err) (strconv/Atoi (subslice extName (+ i 1))))
+                (when (!= err nil)
+                  (.Errorf ctxt s "failed to parse stdcall decoration: %v" err))
+
+                (set! (.-argsize m) * (.-PtrSize ^{:go/via [Target]} (.-Arch ctxt)))
+                (.SetSymExtname ldr s (subslice extName _ i))))
+
+
+            (set! (.-s m) s)
+            (set! (.-next m) (.-ms d))
+            (set! (.-ms d) m))))
+
+
+      (if ^{:go/via [Target]} (.IsExternal ctxt)
+        ;; Add real symbol name
+        (for [d dr] (!= d nil) (set! d (.-next d))
+          (for [(set! m (.-ms d))] (!= m nil) (set! m (.-next m))
+            (let [sb (.MakeSymbolUpdater ldr (.-s m))]
+              (.SetType sb sym/SDATA)
+              ^{:go/via [extSymPayload]} (.Grow sb (conv int64 (.-PtrSize ^{:go/via [Target]} (.-Arch ctxt))))
+              (let [dynName (.Extname sb)]
+                ;; only windows/386 requires stdcall decoration
+                (when (and ^{:go/via [Target]} (.Is386 ctxt) (>= (.-argsize m) 0))
+                  (set! dynName + (fmt/Sprintf "@%d" (.-argsize m))))
+
+                (let [dynSym (.CreateSymForUpdate ldr dynName 0)]
+                  (.SetType dynSym sym/SHOSTOBJ)
+                  (let [(values r _) (.AddRel sb objabi/R_ADDR)]
+                    (.SetSym r (.Sym dynSym))
+                    ^{:go/via [Reloc]} (.SetSiz r (conv uint8 (.-PtrSize ^{:go/via [Target]} (.-Arch ctxt))))))))))
+
+
+
+        (let [dynamic (.CreateSymForUpdate ldr ".windynamic" 0)]
+          (.SetType dynamic sym/SWINDOWS)
+          (for [d dr] (!= d nil) (set! d (.-next d))
+            (for [(set! m (.-ms d))] (!= m nil) (set! m (.-next m))
+              (let [sb (.MakeSymbolUpdater ldr (.-s m))]
+                (.SetType sb sym/SWINDOWS)
+                (.SetValue sb (.Size dynamic))
+                (.SetSize dynamic (+ (.Size dynamic) (conv int64 (.-PtrSize ^{:go/via [Target]} (.-Arch ctxt)))))
+                (.AddInteriorSym dynamic (.-s m))))
+
+
+            (.SetSize dynamic (+ (.Size dynamic) (conv int64 (.-PtrSize ^{:go/via [Target]} (.-Arch ctxt))))))))
+
+
+
+      ^{:line 1416} dr)))
+
+
+
+
+^{:go/end 1429} (go/func peimporteddlls "peimporteddlls returns the gcc command line argument to link all imported\nDLLs.\n" ^{:tag (slice string)} []
+  (let [^{:tag (slice string)} dlls (zero (slice string))]
+
+    (for [d dr] (!= d nil) (set! d (.-next d))
+      (set! dlls (append dlls (+ "-l" (strings/TrimSuffix (.-name d) ".dll")))))
+
+
+    ^{:line 1428} dlls))
+
+
+^{:go/end 1534} (go/func addimports [^{:tag (* Link)} ctxt ^{:tag (* peSection)} datsect]
+  (let [ldr (.-loader ctxt)
+      ^{:line 1433} startoff (.Offset (.-Out ctxt))
+      ^{:line 1434} dynamic (.LookupOrCreateSym ldr ".windynamic" 0)
+
+      ;; skip import descriptor table (will write it later)
+      ^{:line 1437} n (conv uint64 0)]
+
+    (for [d dr] (!= d nil) (set! d (.-next d))
+      (inc! n))
+
+    (.SeekSet (.-Out ctxt) (+ startoff (* (conv int64 (binary/Size (addr (lit IMAGE_IMPORT_DESCRIPTOR)))) (conv int64 (+ n 1)))))
+
+    ;; write dll names
+    (for [d dr] (!= d nil) (set! d (.-next d))
+      (set! (.-nameoff d) (- (conv uint64 (.Offset (.-Out ctxt))) (conv uint64 startoff)))
+      (strput (.-Out ctxt) (.-name d)))
+
+
+    ;; write function names
+    (for [d dr] (!= d nil) (set! d (.-next d))
+      (for [m (.-ms d)] (!= m nil) (set! m (.-next m))
+        (set! (.-off m) (- (+ (conv uint64 (.-nextSectOffset pefile)) (conv uint64 (.Offset (.-Out ctxt)))) (conv uint64 startoff)))
+        (.Write16 (.-Out ctxt) 0) ; hint
+        (strput (.-Out ctxt) (.SymExtname ldr (.-s m)))))
+
+
+
+    ;; write OriginalFirstThunks
+    (let [oftbase (- (conv uint64 (.Offset (.-Out ctxt))) (conv uint64 startoff))]
+
+      (set! n (conv uint64 (.Offset (.-Out ctxt))))
+      (for [d dr] (!= d nil) (set! d (.-next d))
+        (set! (.-thunkoff d) (- (conv uint64 (.Offset (.-Out ctxt))) n))
+        (for [m (.-ms d)] (!= m nil) (set! m (.-next m))
+          (if pe64
+            (.Write64 (.-Out ctxt) (.-off m))
+
+            (.Write32 (.-Out ctxt) (conv uint32 (.-off m)))))
+
+
+
+        (if pe64
+          (.Write64 (.-Out ctxt) 0)
+
+          (.Write32 (.-Out ctxt) 0)))
+
+
+
+      ;; add pe section and pad it at the end
+      (set! n (- (conv uint64 (.Offset (.-Out ctxt))) (conv uint64 startoff)))
+
+      (let [isect (.addSection pefile ".idata" (conv int n) (conv int n))]
+        (set! (.-characteristics isect) (bit-or IMAGE_SCN_CNT_INITIALIZED_DATA IMAGE_SCN_MEM_READ IMAGE_SCN_MEM_WRITE))
+        (.checkOffset isect startoff)
+        (.pad isect (.-Out ctxt) (conv uint32 n))
+        (let [endoff (.Offset (.-Out ctxt))
+
+            ;; write FirstThunks (allocated in .data section)
+            ^{:line 1490} ftbase (- (conv uint64 (.SymValue ldr dynamic)) (conv uint64 (.-virtualAddress datsect)) (conv uint64 PEBASE))]
+
+          (.SeekSet (.-Out ctxt) (conv int64 (+ (conv uint64 (.-pointerToRawData datsect)) ftbase)))
+          (for [d dr] (!= d nil) (set! d (.-next d))
+            (for [m (.-ms d)] (!= m nil) (set! m (.-next m))
+              (if pe64
+                (.Write64 (.-Out ctxt) (.-off m))
+
+                (.Write32 (.-Out ctxt) (conv uint32 (.-off m)))))
+
+
+
+            (if pe64
+              (.Write64 (.-Out ctxt) 0)
+
+              (.Write32 (.-Out ctxt) 0)))
+
+
+
+          ;; finally write import descriptor table
+          (let [out (.-Out ctxt)]
+            (.SeekSet out startoff)
+
+            (for [d dr] (!= d nil) (set! d (.-next d))
+              (.Write32 out (conv uint32 (+ (conv uint64 (.-virtualAddress isect)) oftbase (.-thunkoff d))))
+              (.Write32 out 0)
+              (.Write32 out 0)
+              (.Write32 out (conv uint32 (+ (conv uint64 (.-virtualAddress isect)) (.-nameoff d))))
+              (.Write32 out (conv uint32 (+ (conv uint64 (.-virtualAddress datsect)) ftbase (.-thunkoff d)))))
+
+
+            (.Write32 out 0) ;end
+            (.Write32 out 0)
+            (.Write32 out 0)
+            (.Write32 out 0)
+            (.Write32 out 0)
+
+            ;; update data directory
+            (set! (.-VirtualAddress (aget (.-dataDirectory pefile) pe/IMAGE_DIRECTORY_ENTRY_IMPORT)) (.-virtualAddress isect))
+            (set! (.-Size (aget (.-dataDirectory pefile) pe/IMAGE_DIRECTORY_ENTRY_IMPORT)) (.-virtualSize isect))
+            (set! (.-VirtualAddress (aget (.-dataDirectory pefile) pe/IMAGE_DIRECTORY_ENTRY_IAT)) (conv uint32 (- (.SymValue ldr dynamic) PEBASE)))
+            (set! (.-Size (aget (.-dataDirectory pefile) pe/IMAGE_DIRECTORY_ENTRY_IAT)) (conv uint32 (.SymSize ldr dynamic)))
+
+            (.SeekSet out endoff)))))))
+
+
+^{:go/end 1551} (go/func initdynexport [^{:tag (* Link)} ctxt]
+  (let [ldr (.-loader ctxt)]
+    (for [s (conv loader/Sym 1)] (< s (conv loader/Sym (.NSym ldr))) (inc! s)
+      (when (or (not (.AttrReachable ldr s)) (not (.AttrCgoExportDynamic ldr s)))
+        (continue))
+
+      (when (>= (len dexport) math/MaxUint16)
+        (.Errorf ctxt s "pe dynexport table is full")
+        (errorexit))
+
+
+      (set! dexport (append dexport s)))
+
+
+    (sort/Slice dexport ^{:go/end 1550} (fn ^bool [^int i ^int j] (< (.SymExtname ldr (aget dexport i)) (.SymExtname ldr (aget dexport j)))))))
+
+
+^{:go/end 1620} (go/func addexports [^{:tag (* Link)} ctxt]
+  (let [ldr (.-loader ctxt)
+      ^{:line 1555 :tag IMAGE_EXPORT_DIRECTORY} e (zero IMAGE_EXPORT_DIRECTORY)
+
+      ^{:line 1557} nexport (len dexport)
+      ^{:line 1558} size (+ (binary/Size (addr e)) (* 10 nexport) (len @flagOutfile) 1)]
+    (range [_ s dexport]
+      (set! size + (+ (len (.SymExtname ldr s)) 1)))
+
+
+    (when (== nexport 0)
+      (return))
+
+
+    (let [sect (.addSection pefile ".edata" size size)]
+      (set! (.-characteristics sect) (bit-or IMAGE_SCN_CNT_INITIALIZED_DATA IMAGE_SCN_MEM_READ))
+      (.checkOffset sect (.Offset (.-Out ctxt)))
+      (let [va (conv int (.-virtualAddress sect))]
+        (set! (.-VirtualAddress (aget (.-dataDirectory pefile) pe/IMAGE_DIRECTORY_ENTRY_EXPORT)) (conv uint32 va))
+        (set! (.-Size (aget (.-dataDirectory pefile) pe/IMAGE_DIRECTORY_ENTRY_EXPORT)) (.-virtualSize sect))
+
+        (let [vaName (+ va (binary/Size (addr e)) (* nexport 4))
+            ^{:line 1575} vaAddr (+ va (binary/Size (addr e)))
+            ^{:line 1576} vaNa (+ va (binary/Size (addr e)) (* nexport 8))]
+
+          (set! (.-Characteristics e) 0)
+          (set! (.-MajorVersion e) 0)
+          (set! (.-MinorVersion e) 0)
+          (set! (.-NumberOfFunctions e) (conv uint32 nexport))
+          (set! (.-NumberOfNames e) (conv uint32 nexport))
+          (set! (.-Name e) (+ (conv uint32 (+ va (binary/Size (addr e)))) (* (conv uint32 nexport) 10))) ; Program names.
+          (set! (.-Base e) 1)
+          (set! (.-AddressOfFunctions e) (conv uint32 vaAddr))
+          (set! (.-AddressOfNames e) (conv uint32 vaName))
+          (set! (.-AddressOfNameOrdinals e) (conv uint32 vaNa))
+
+          (let [out (.-Out ctxt)]
+
+            ;; put IMAGE_EXPORT_DIRECTORY
+            (binary/Write out binary/LittleEndian (addr e))
+
+            ;; put EXPORT Address Table
+            (range [_ s dexport]
+              (.Write32 out (conv uint32 (- (.SymValue ldr s) PEBASE))))
+
+
+            ;; put EXPORT Name Pointer Table
+            (let [v (conv int (+ (.-Name e) (conv uint32 (len @flagOutfile)) 1))]
+
+              (range [_ s dexport]
+                (.Write32 out (conv uint32 v))
+                (set! v + (+ (len (.SymExtname ldr s)) 1)))
+
+
+              ;; put EXPORT Ordinal Table
+              (for [i 0] (< i nexport) (inc! i)
+                (.Write16 out (conv uint16 i)))
+
+
+              ;; put Names
+              (.WriteStringN out @flagOutfile (+ (len @flagOutfile) 1))
+
+              (range [_ s dexport]
+                (let [name (.SymExtname ldr s)]
+                  (.WriteStringN out name (+ (len name) 1))))
+
+              (.pad sect out (conv uint32 size)))))))))
+
+
+
+(go/type peBaseRelocEntry "peBaseRelocEntry represents a single relocation entry.\n" (struct
+    ^{:line 1624 :tag uint16} typeOff))
+
+
+
+
+
+
+
+(go/type peBaseRelocBlock "peBaseRelocBlock represents a Base Relocation Block. A block\nis a collection of relocation entries in a page, where each\nentry describes a single relocation.\nThe block page RVA (Relative Virtual Address) is the index\ninto peBaseRelocTable.blocks.\n" (struct
+    ^{:line 1633 :tag (slice peBaseRelocEntry)} entries))
+
+
+
+
+
+(go/type pePages "pePages is a type used to store the list of pages for which there\nare base relocation blocks. This is defined as a type so that\nit can be sorted.\n" (slice uint32))
+
+
+
+
+
+(go/type peBaseRelocTable "A PE base relocation table is a list of blocks, where each block\ncontains relocation information for a single page. The blocks\nmust be emitted in order of page virtual address.\nSee https://docs.microsoft.com/en-us/windows/desktop/debug/pe-format#the-reloc-section-image-only\n" (struct
+    ^{:line 1646 :tag (map uint32 peBaseRelocBlock)} blocks
+
+
+
+    ^{:line 1650 :tag pePages :doc "pePages is a list of keys into blocks map.\nIt is stored separately for ease of sorting.\n"} pages))
+
+
+^{:go/end 1655} (go/method init [^{:tag (* peBaseRelocTable)} rt ^{:tag (* Link)} ctxt]
+  (set! (.-blocks rt) (make (map uint32 peBaseRelocBlock))))
+
+
+^{:go/end 1688} (go/method addentry [^{:tag (* peBaseRelocTable)} rt ^{:tag (* loader/Loader)} ldr ^loader/Sym s ^{:tag (* loader/Reloc)} r]
+  ;; pageSize is the size in bytes of a page
+  ;; described by a base relocation block.
+  (let [^:const ^{:val 4096} pageSize 0x1000
+      ^:const ^{:line 1661 :val 4095} pageMask (- pageSize 1)
+
+      ^{:line 1663} addr (- (+ (.SymValue ldr s) (conv int64 ^{:go/via [Reloc]} (.Off r))) PEBASE)
+      ^{:line 1664} page (conv uint32 (bit-and-not addr pageMask))
+      ^{:line 1665} off (conv uint32 (bit-and addr pageMask))
+
+      (values b ok) (aget (.-blocks rt) page)]
+    (when (not ok)
+      (set! (.-pages rt) (append (.-pages rt) page)))
+
+
+    (let [e ^{:go/breaks [2]} (lit peBaseRelocEntry
+          :typeOff (conv uint16 (bit-and off 0xFFF)))]
+
+
+      ;; Set entry type
+      (switch ^{:go/via [Reloc]} (.Siz r)
+        (default
+          (Exitf "unsupported relocation size %d\n" ^{:go/via [Reloc]} (.-Siz r)))
+        (case [4]
+          (set! (.-typeOff e) bit-or (conv uint16 (<< IMAGE_REL_BASED_HIGHLOW 12))))
+        (case [8]
+          (set! (.-typeOff e) bit-or (conv uint16 (<< IMAGE_REL_BASED_DIR64 12)))))
+
+
+      (set! (.-entries b) (append (.-entries b) e))
+      (aset (.-blocks rt) page b))))
+
+
+^{:go/end 1720} (go/method write [^{:tag (* peBaseRelocTable)} rt ^{:tag (* Link)} ctxt]
+  (let [out (.-Out ctxt)]
+
+    ;; sort the pages array
+    (^{:inst [pePages uint32]} slices/Sort (.-pages rt))
+
+    ;; .reloc section must be 32-bit aligned
+    (when (!= (bit-and (.Offset out) 3) 0)
+      (Errorf "internal error, start of .reloc not 32-bit aligned"))
+
+
+    (range [_ p (.-pages rt)]
+      (let [b (aget (.-blocks rt) p)]
+
+        ;; Add a dummy entry at the end of the list if we have an
+        ;; odd number of entries, so as to ensure that the next
+        ;; block starts on a 32-bit boundary (see issue 68260).
+        (when (!= (bit-and (len (.-entries b)) 1) 0)
+          (set! (.-entries b) (append (.-entries b) (lit peBaseRelocEntry))))
+
+
+        (let [^:const ^{:val 8} sizeOfPEbaseRelocBlock 8 ; 2 * sizeof(uint32)
+            ^{:line 1712} blockSize (conv uint32 (+ sizeOfPEbaseRelocBlock (* (len (.-entries b)) 2)))]
+          (.Write32 out p)
+          (.Write32 out blockSize)
+
+          (range [_ e (.-entries b)]
+            (.Write16 out (.-typeOff e))))))))
+
+
+
+
+^{:go/end 1746} (go/func addPEBaseRelocSym [^{:tag (* loader/Loader)} ldr ^loader/Sym s ^{:tag (* peBaseRelocTable)} rt]
+  (let [relocs (.Relocs ldr s)]
+    (for [ri 0] (< ri (.Count relocs)) (inc! ri)
+      (let [r (.At relocs ri)]
+        (when (>= (.Type r) objabi/ElfRelocOffset)
+          (continue))
+
+        (when (== ^{:go/via [Reloc]} (.Siz r) 0) ; informational relocation
+          (continue))
+
+        (let [rs (.Sym r)]
+          (when (== rs 0)
+            (continue))
+
+          (when (not (.AttrReachable ldr s))
+            (continue))
+
+
+          (switch (.Type r)
+            (default)
+            (case [objabi/R_ADDR]
+              (.addentry rt ldr s (addr r)))))))))
+
+
+
+
+^{:go/breaks [[4 1754]] :go/end 1755} (go/func needPEBaseReloc ^bool [^{:tag (* Link)} ctxt]
+  ;; Non-PIE x86 binaries don't need the base relocation table.
+  ;; Everyone else does.
+  (when (and ^:go/paren (or (== (.-Family ^{:go/via [Target]} (.-Arch ctxt)) sys/I386) (== (.-Family ^{:go/via [Target]} (.-Arch ctxt)) sys/AMD64)) (!= ^{:go/via [Target]} (.-BuildMode ctxt) BuildModePIE))
+    (return false))
+
+  true)
+
+
+^{:go/end 1787} (go/func addPEBaseReloc [^{:tag (* Link)} ctxt]
+  (when (not (needPEBaseReloc ctxt))
+    (return))
+
+
+  (let [^peBaseRelocTable rt (zero peBaseRelocTable)]
+    (.init rt ctxt)
+
+    ;; Get relocation information
+    (let [ldr (.-loader ctxt)]
+      (range [_ s (.-Textp ctxt)]
+        (addPEBaseRelocSym ldr s (addr rt)))
+
+      (range [_ s (.-datap ctxt)]
+        (addPEBaseRelocSym ldr s (addr rt)))
+
+
+      ;; Write relocation information
+      (let [startoff (.Offset (.-Out ctxt))]
+        (.write rt ctxt)
+        (let [size (- (.Offset (.-Out ctxt)) startoff)
+
+            ;; Add a PE section and pad it at the end
+            ^{:line 1780} rsect (.addSection pefile ".reloc" (conv int size) (conv int size))]
+          (set! (.-characteristics rsect) (bit-or IMAGE_SCN_CNT_INITIALIZED_DATA IMAGE_SCN_MEM_READ IMAGE_SCN_MEM_DISCARDABLE))
+          (.checkOffset rsect startoff)
+          (.pad rsect (.-Out ctxt) (conv uint32 size))
+
+          (set! (.-VirtualAddress (aget (.-dataDirectory pefile) pe/IMAGE_DIRECTORY_ENTRY_BASERELOC)) (.-virtualAddress rsect))
+          (set! (.-Size (aget (.-dataDirectory pefile) pe/IMAGE_DIRECTORY_ENTRY_BASERELOC)) (.-virtualSize rsect)))))))
+
+
+^{:go/end 1792} (go/method dope [^{:tag (* Link)} ctxt]
+  (initdynimport ctxt)
+  (initdynexport ctxt))
+
+
+^{:go/end 1799} (go/func setpersrc [^{:tag (* Link)} ctxt ^{:tag (slice loader/Sym)} syms]
+  (when (!= (len rsrcsyms) 0)
+    (Errorf "too many .rsrc sections"))
+
+  (set! rsrcsyms syms))
+
+
+^{:go/end 1845} (go/func addpersrc [^{:tag (* Link)} ctxt]
+  (when (== (len rsrcsyms) 0)
+    (return))
+
+
+  (let [^int64 size (zero int64)]
+    (range [_ rsrcsym rsrcsyms]
+      (set! size + (.SymSize (.-loader ctxt) rsrcsym)))
+
+    (let [h (.addSection pefile ".rsrc" (conv int size) (conv int size))]
+      (set! (.-characteristics h) (bit-or IMAGE_SCN_MEM_READ IMAGE_SCN_CNT_INITIALIZED_DATA))
+      (.checkOffset h (.Offset (.-Out ctxt)))
+
+      (range [_ rsrcsym rsrcsyms]
+        ;; A split resource happens when the actual resource data and its relocations are
+        ;; split across multiple sections, denoted by a $01 or $02 at the end of the .rsrc
+        ;; section name.
+        (let [splitResources (strings/Contains (.SymName (.-loader ctxt) rsrcsym) ".rsrc$")
+            ^{:line 1819} relocs (.Relocs (.-loader ctxt) rsrcsym)
+            ^{:line 1820} data (.Data (.-loader ctxt) rsrcsym)]
+          (for [ri 0] (< ri (.Count relocs)) (inc! ri)
+            (let [r (.At relocs ri)
+                ^{:line 1823} p (subslice data ^{:go/via [Reloc]} (.Off r))
+                ^{:line 1824} val (conv uint32 (+ (conv int64 (.-virtualAddress h)) ^{:go/via [Reloc]} (.Add r)))]
+              (when splitResources
+                ;; If we're a split resource section, and that section has relocation
+                ;; symbols, then the data that it points to doesn't actually begin at
+                ;; the virtual address listed in this current section, but rather
+                ;; begins at the section immediately after this one. So, in order to
+                ;; calculate the proper virtual address of the data it's pointing to,
+                ;; we have to add the length of this section to the virtual address.
+                ;; This works because .rsrc sections are divided into two (but not more)
+                ;; of these sections.
+                (set! val + (conv uint32 (len data))))
+
+              (.PutUint32 binary/LittleEndian p val)))
+
+          (.Write (.-Out ctxt) data)))
+
+      (.pad h (.-Out ctxt) (conv uint32 size))
+
+      ;; update data directory
+      (set! (.-VirtualAddress (aget (.-dataDirectory pefile) pe/IMAGE_DIRECTORY_ENTRY_RESOURCE)) (.-virtualAddress h))
+      (set! (.-Size (aget (.-dataDirectory pefile) pe/IMAGE_DIRECTORY_ENTRY_RESOURCE)) (.-virtualSize h)))))
+
+
+^{:go/end 1914} (go/func asmbPe [^{:tag (* Link)} ctxt]
+  (let [t (.addSection pefile ".text" (conv int (.-Length Segtext)) (conv int (.-Length Segtext)))]
+    (set! (.-characteristics t) (bit-or IMAGE_SCN_CNT_CODE IMAGE_SCN_MEM_EXECUTE IMAGE_SCN_MEM_READ))
+    (when (== ^{:go/via [Target]} (.-LinkMode ctxt) LinkExternal)
+      ;; some data symbols (e.g. masks) end up in the .text section, and they normally
+      ;; expect larger alignment requirement than the default text section alignment.
+      (set! (.-characteristics t) bit-or IMAGE_SCN_ALIGN_32BYTES))
+
+    (.checkSegment t (addr Segtext))
+    (set! (.-textSect pefile) t)
+
+    (let [ro (.addSection pefile ".rdata" (conv int (.-Length Segrodata)) (conv int (.-Length Segrodata)))]
+      (set! (.-characteristics ro) (bit-or IMAGE_SCN_CNT_INITIALIZED_DATA IMAGE_SCN_MEM_READ))
+      (when (== ^{:go/via [Target]} (.-LinkMode ctxt) LinkExternal)
+        ;; some data symbols (e.g. masks) end up in the .rdata section, and they normally
+        ;; expect larger alignment requirement than the default text section alignment.
+        (set! (.-characteristics ro) bit-or IMAGE_SCN_ALIGN_32BYTES))
+
+      (.checkSegment ro (addr Segrodata))
+      (set! (.-rdataSect pefile) ro)
+
+      ;; This should have been added in Peinit and by now is part of the
+      ;; just-written .rdata section.
+      (let [s (.Lookup (.-loader ctxt) "_load_config_used" 0)]
+        (when (!= s 0)
+          (set! (.-VirtualAddress (aget (.-dataDirectory pefile) pe/IMAGE_DIRECTORY_ENTRY_LOAD_CONFIG)) (conv uint32 (- (.SymValue (.-loader ctxt) s) PEBASE)))
+          (set! (.-Size (aget (.-dataDirectory pefile) pe/IMAGE_DIRECTORY_ENTRY_LOAD_CONFIG)) (conv uint32 (.SymSize (.-loader ctxt) s))))
+
+
+        (let [^{:tag (* peSection)} d (zero (* peSection))]
+          (if (!= ^{:go/via [Target]} (.-LinkMode ctxt) LinkExternal) (do
+              (set! d (.addSection pefile ".data" (conv int (.-Length Segdata)) (conv int (.-Filelen Segdata))))
+              (set! (.-characteristics d) (bit-or IMAGE_SCN_CNT_INITIALIZED_DATA IMAGE_SCN_MEM_READ IMAGE_SCN_MEM_WRITE))
+              (.checkSegment d (addr Segdata))
+              (set! (.-dataSect pefile) d))
+            (do
+              (set! d (.addSection pefile ".data" (conv int (.-Filelen Segdata)) (conv int (.-Filelen Segdata))))
+              (set! (.-characteristics d) (bit-or IMAGE_SCN_CNT_INITIALIZED_DATA IMAGE_SCN_MEM_READ IMAGE_SCN_MEM_WRITE IMAGE_SCN_ALIGN_32BYTES))
+              (.checkSegment d (addr Segdata))
+              (set! (.-dataSect pefile) d)
+
+              (let [b (.addSection pefile ".bss" (conv int (- (.-Length Segdata) (.-Filelen Segdata))) 0)]
+                (set! (.-characteristics b) (bit-or IMAGE_SCN_CNT_UNINITIALIZED_DATA IMAGE_SCN_MEM_READ IMAGE_SCN_MEM_WRITE IMAGE_SCN_ALIGN_32BYTES))
+                (set! (.-pointerToRawData b) 0)
+                (set! (.-bssSect pefile) b))))
+
+
+          (.addSEH pefile ctxt)
+          (.addDWARF pefile)
+
+          (when (== ^{:go/via [Target]} (.-LinkMode ctxt) LinkExternal)
+            (set! (.-ctorsSect pefile) (.addInitArray pefile ctxt)))
+
+
+          (.SeekSet (.-Out ctxt) (conv int64 (.-nextFileOffset pefile)))
+          (when (!= ^{:go/via [Target]} (.-LinkMode ctxt) LinkExternal)
+            (addimports ctxt d)
+            (addexports ctxt)
+            (addPEBaseReloc ctxt))
+
+          (.writeSymbolTableAndStringTable pefile ctxt)
+          (addpersrc ctxt)
+          (when (== ^{:go/via [Target]} (.-LinkMode ctxt) LinkExternal)
+            (.emitRelocations pefile ctxt))
+
+
+          (pewrite ctxt))))))
+
+
+
+
+^{:go/end 1957} (go/func peCreateExportFile "peCreateExportFile creates a file with exported symbols for Windows .def files.\nld will export all symbols, even those not marked for export, unless a .def file is provided.\n" [^{:tag (* Link)} ctxt ^string libName] :results [^string fname]
+  (set! fname (filepath/Join @flagTmpdir "export_file.def"))
+  (let [^bytes/Buffer buf (zero bytes/Buffer)]
+
+    (when (== ^{:go/via [Target]} (.-BuildMode ctxt) BuildModeCShared)
+      (fmt/Fprintf (addr buf) "LIBRARY %q\n" libName))
+
+    (.WriteString buf "EXPORTS\n")
+
+    (let [ldr (.-loader ctxt)
+        ^{:line 1928 :tag (slice string)} exports (zero (slice string))]
+      (range [s (.ForAllCgoExportStatic ldr)]
+        (let [extname (.SymExtname ldr s)]
+          (when (not (strings/HasPrefix extname "_cgoexp_"))
+            (continue))
+
+          (when (.IsFileLocal ldr s)
+            (continue)) ; Only export non-static symbols
+
+          ;; Retrieve the name of the initial symbol
+          ;; exported by cgo.
+          ;; The corresponding Go symbol is:
+          ;; _cgoexp_hashcode_symname.
+          (let [name (aget (strings/SplitN extname "_" 4) 3)]
+            (set! exports (append exports name)))))
+
+      (when (== (len exports) 0)
+        ;; See runtime/cgo/windows.go for details.
+        (set! exports (append exports "_cgo_stub_export")))
+
+      (sort/Strings exports)
+      (.WriteString buf (strings/Join exports "\n"))
+
+      (let [err (os/WriteFile fname (.Bytes buf) 0666)]
+        (when (!= err nil)
+          (Errorf "WriteFile %s failed: %v" fname err))
+
+
+        ^{:line 1956} fname))))

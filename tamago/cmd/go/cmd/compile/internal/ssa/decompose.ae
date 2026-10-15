@@ -1,0 +1,467 @@
+;; Copyright 2015 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.cmd.compile.internal.ssa) (go/file "decompose.go" :imports [
+
+
+    ^{:line 8} [types "cmd/compile/internal/types"]
+    ^{:line 9} [cmp "cmp"]
+    ^{:line 10} [slices "slices"]])
+
+
+
+
+
+^{:go/end 110} (go/func decomposeBuiltin "decompose converts phi ops on compound builtin types into phi\nops on simple types, then invokes rewrite rules to decompose\nother ops on those types.\n" [^{:tag (* Func)} f]
+  ;; Decompose phis
+  (range [_ b (.-Blocks f)]
+    (range [_ v (.-Values b)]
+      (when (!= (.-Op v) OpPhi)
+        (continue))
+
+      (decomposeBuiltinPhi v)))
+
+
+
+  ;; Decompose other values
+  ;; Note: Leave dead values because we need to keep the original
+  ;; values around so the name component resolution below can still work.
+  (applyRewrite f rewriteBlockdec rewriteValuedec leaveDeadValues)
+  (when (== (.-RegSize (.-Config f)) 4)
+    (applyRewrite f rewriteBlockdec64 rewriteValuedec64 leaveDeadValues))
+
+
+  ;; Split up named values into their components.
+  ;; accumulate old names for aggregates (that are decomposed) in toDelete for efficient bulk deletion,
+  ;; accumulate new LocalSlots in newNames for addition after the iteration.  This decomposition is for
+  ;; builtin types with leaf components, and thus there is no need to reprocess the newly create LocalSlots.
+  (let [^{:tag (slice namedVal)} toDelete (zero (slice namedVal))
+      ^{:line 40 :tag (slice (* LocalSlot))} newNames (zero (slice (* LocalSlot)))]
+    (range [i name (.-Names f)]
+      (let [t (.-Type name)]
+        (switch
+          (case [(and (.IsInteger t) (> (.Size t) (.-RegSize (.-Config f))))]
+            (let [(values hiName loName) (.SplitInt64 f name)]
+              (set! newNames (maybeAppend2 f newNames hiName loName))
+              (range [j v (aget (.-NamedValues f) @name)]
+                (when (!= (.-Op v) OpInt64Make)
+                  (continue))
+
+                (aset (.-NamedValues f) @hiName (append (aget (.-NamedValues f) @hiName) (aget (.-Args v) 0)))
+                (aset (.-NamedValues f) @loName (append (aget (.-NamedValues f) @loName) (aget (.-Args v) 1)))
+                (set! toDelete (append toDelete (lit namedVal i j))))))
+
+          (case [(.IsComplex t)]
+            (let [(values rName iName) (.SplitComplex f name)]
+              (set! newNames (maybeAppend2 f newNames rName iName))
+              (range [j v (aget (.-NamedValues f) @name)]
+                (when (!= (.-Op v) OpComplexMake)
+                  (continue))
+
+                (aset (.-NamedValues f) @rName (append (aget (.-NamedValues f) @rName) (aget (.-Args v) 0)))
+                (aset (.-NamedValues f) @iName (append (aget (.-NamedValues f) @iName) (aget (.-Args v) 1)))
+                (set! toDelete (append toDelete (lit namedVal i j))))))
+
+          (case [(.IsString t)]
+            (let [(values ptrName lenName) (.SplitString f name)]
+              (set! newNames (maybeAppend2 f newNames ptrName lenName))
+              (range [j v (aget (.-NamedValues f) @name)]
+                (when (!= (.-Op v) OpStringMake)
+                  (continue))
+
+                (aset (.-NamedValues f) @ptrName (append (aget (.-NamedValues f) @ptrName) (aget (.-Args v) 0)))
+                (aset (.-NamedValues f) @lenName (append (aget (.-NamedValues f) @lenName) (aget (.-Args v) 1)))
+                (set! toDelete (append toDelete (lit namedVal i j))))))
+
+          (case [(.IsSlice t)]
+            (let [(values ptrName lenName capName) (.SplitSlice f name)]
+              (set! newNames (maybeAppend2 f newNames ptrName lenName))
+              (set! newNames (maybeAppend f newNames capName))
+              (range [j v (aget (.-NamedValues f) @name)]
+                (when (!= (.-Op v) OpSliceMake)
+                  (continue))
+
+                (aset (.-NamedValues f) @ptrName (append (aget (.-NamedValues f) @ptrName) (aget (.-Args v) 0)))
+                (aset (.-NamedValues f) @lenName (append (aget (.-NamedValues f) @lenName) (aget (.-Args v) 1)))
+                (aset (.-NamedValues f) @capName (append (aget (.-NamedValues f) @capName) (aget (.-Args v) 2)))
+                (set! toDelete (append toDelete (lit namedVal i j))))))
+
+          (case [(.IsInterface t)]
+            (let [(values typeName dataName) (.SplitInterface f name)]
+              (set! newNames (maybeAppend2 f newNames typeName dataName))
+              (range [j v (aget (.-NamedValues f) @name)]
+                (when (!= (.-Op v) OpIMake)
+                  (continue))
+
+                (aset (.-NamedValues f) @typeName (append (aget (.-NamedValues f) @typeName) (aget (.-Args v) 0)))
+                (aset (.-NamedValues f) @dataName (append (aget (.-NamedValues f) @dataName) (aget (.-Args v) 1)))
+                (set! toDelete (append toDelete (lit namedVal i j))))))
+
+          (case [(.IsFloat t)])
+          ;; floats are never decomposed, even ones bigger than RegSize
+          (case [(and (> (.Size t) (.-RegSize (.-Config f))) (not (.IsSIMD t)))]
+            (.Fatalf f "undecomposed named type %s %v" name t)))))
+
+
+
+    (deleteNamedVals f toDelete)
+    (set! (.-Names f) (append (.-Names f) (spread newNames)))))
+
+
+^{:go/end 118} (go/func maybeAppend ^{:tag (slice (* LocalSlot))} [^{:tag (* Func)} f ^{:tag (slice (* LocalSlot))} ss ^{:tag (* LocalSlot)} s]
+  (when [(values _ ok) (aget (.-NamedValues f) @s)] (not ok)
+    (aset (.-NamedValues f) @s nil)
+    (return (append ss s)))
+
+  ^{:line 117} ss)
+
+
+^{:go/end 122} (go/func maybeAppend2 ^{:tag (slice (* LocalSlot))} [^{:tag (* Func)} f ^{:tag (slice (* LocalSlot))} ss ^{:tag (* LocalSlot)} s1 ^{:tag (* LocalSlot)} s2]
+  (maybeAppend f (maybeAppend f ss s1) s2))
+
+
+^{:go/end 141} (go/func decomposeBuiltinPhi [^{:tag (* Value)} v]
+  (switch
+    (case [(and (.IsInteger (.-Type v)) (> (.Size (.-Type v)) (.-RegSize (.-Config (.-Func (.-Block v))))))]
+      (decomposeInt64Phi v))
+    (case [(.IsComplex (.-Type v))]
+      (decomposeComplexPhi v))
+    (case [(.IsString (.-Type v))]
+      (decomposeStringPhi v))
+    (case [(.IsSlice (.-Type v))]
+      (decomposeSlicePhi v))
+    (case [(.IsInterface (.-Type v))]
+      (decomposeInterfacePhi v))
+    (case [(.IsFloat (.-Type v))])
+    ;; floats are never decomposed, even ones bigger than RegSize
+    (case [(and (> (.Size (.-Type v)) (.-RegSize (.-Config (.-Func (.-Block v))))) (not (.IsSIMD (.-Type v))))]
+      (.Fatalf v "%v undecomposed type %v" v (.-Type v)))))
+
+
+
+^{:go/end 157} (go/func decomposeStringPhi [^{:tag (* Value)} v]
+  (let [types (addr (.-Types (.-Config (.-Func (.-Block v)))))
+      ^{:line 145} ptrType (.-BytePtr types)
+      ^{:line 146} lenType (.-Int types)
+
+      ^{:line 148} ptr (.NewValue0 (.-Block v) (.-Pos v) OpPhi ptrType)
+      ^{:line 149} len (.NewValue0 (.-Block v) (.-Pos v) OpPhi lenType)]
+    (range [_ a (.-Args v)]
+      (.AddArg ptr (.NewValue1 (.-Block a) (.-Pos v) OpStringPtr ptrType a))
+      (.AddArg len (.NewValue1 (.-Block a) (.-Pos v) OpStringLen lenType a)))
+
+    (.reset v OpStringMake)
+    (.AddArg v ptr)
+    (.AddArg v len)))
+
+
+^{:go/end 176} (go/func decomposeSlicePhi [^{:tag (* Value)} v]
+  (let [types (addr (.-Types (.-Config (.-Func (.-Block v)))))
+      ^{:line 161} ptrType (.PtrTo (.Elem (.-Type v)))
+      ^{:line 162} lenType (.-Int types)
+
+      ^{:line 164} ptr (.NewValue0 (.-Block v) (.-Pos v) OpPhi ptrType)
+      ^{:line 165} len (.NewValue0 (.-Block v) (.-Pos v) OpPhi lenType)
+      ^{:line 166} cap (.NewValue0 (.-Block v) (.-Pos v) OpPhi lenType)]
+    (range [_ a (.-Args v)]
+      (.AddArg ptr (.NewValue1 (.-Block a) (.-Pos v) OpSlicePtr ptrType a))
+      (.AddArg len (.NewValue1 (.-Block a) (.-Pos v) OpSliceLen lenType a))
+      (.AddArg cap (.NewValue1 (.-Block a) (.-Pos v) OpSliceCap lenType a)))
+
+    (.reset v OpSliceMake)
+    (.AddArg v ptr)
+    (.AddArg v len)
+    (.AddArg v cap)))
+
+
+^{:go/end 196} (go/func decomposeInt64Phi [^{:tag (* Value)} v]
+  (let [cfgtypes (addr (.-Types (.-Config (.-Func (.-Block v)))))
+      ^{:line 180 :tag (* types/Type)} partType (zero (* types/Type))]
+    (if (.IsSigned (.-Type v))
+      (set! partType (.-Int32 cfgtypes))
+
+      (set! partType (.-UInt32 cfgtypes)))
+
+
+    (let [hi (.NewValue0 (.-Block v) (.-Pos v) OpPhi partType)
+        ^{:line 188} lo (.NewValue0 (.-Block v) (.-Pos v) OpPhi (.-UInt32 cfgtypes))]
+      (range [_ a (.-Args v)]
+        (.AddArg hi (.NewValue1 (.-Block a) (.-Pos v) OpInt64Hi partType a))
+        (.AddArg lo (.NewValue1 (.-Block a) (.-Pos v) OpInt64Lo (.-UInt32 cfgtypes) a)))
+
+      (.reset v OpInt64Make)
+      (.AddArg v hi)
+      (.AddArg v lo))))
+
+
+^{:go/end 219} (go/func decomposeComplexPhi [^{:tag (* Value)} v]
+  (let [cfgtypes (addr (.-Types (.-Config (.-Func (.-Block v)))))
+      ^{:line 200 :tag (* types/Type)} partType (zero (* types/Type))]
+    (switch [z (.Size (.-Type v))] z
+      (case [8]
+        (set! partType (.-Float32 cfgtypes)))
+      (case [16]
+        (set! partType (.-Float64 cfgtypes)))
+      (default
+        (.Fatalf v "decomposeComplexPhi: bad complex size %d" z)))
+
+
+    (let [real (.NewValue0 (.-Block v) (.-Pos v) OpPhi partType)
+        ^{:line 211} imag (.NewValue0 (.-Block v) (.-Pos v) OpPhi partType)]
+      (range [_ a (.-Args v)]
+        (.AddArg real (.NewValue1 (.-Block a) (.-Pos v) OpComplexReal partType a))
+        (.AddArg imag (.NewValue1 (.-Block a) (.-Pos v) OpComplexImag partType a)))
+
+      (.reset v OpComplexMake)
+      (.AddArg v real)
+      (.AddArg v imag))))
+
+
+^{:go/end 234} (go/func decomposeInterfacePhi [^{:tag (* Value)} v]
+  (let [uintptrType (.-Uintptr (.-Types (.-Config (.-Func (.-Block v)))))
+      ^{:line 223} ptrType (.-BytePtr (.-Types (.-Config (.-Func (.-Block v)))))
+
+      ^{:line 225} itab (.NewValue0 (.-Block v) (.-Pos v) OpPhi uintptrType)
+      ^{:line 226} data (.NewValue0 (.-Block v) (.-Pos v) OpPhi ptrType)]
+    (range [_ a (.-Args v)]
+      (.AddArg itab (.NewValue1 (.-Block a) (.-Pos v) OpITab uintptrType a))
+      (.AddArg data (.NewValue1 (.-Block a) (.-Pos v) OpIData ptrType a)))
+
+    (.reset v OpIMake)
+    (.AddArg v itab)
+    (.AddArg v data)))
+
+
+^{:go/end 262} (go/func decomposeUser [^{:tag (* Func)} f]
+  (range [_ b (.-Blocks f)]
+    (range [_ v (.-Values b)]
+      (when (!= (.-Op v) OpPhi)
+        (continue))
+
+      (decomposeUserPhi v)))
+
+
+  ;; Split up named values into their components.
+  (let [i 0
+      ^{:line 247 :tag (slice (* LocalSlot))} newNames (zero (slice (* LocalSlot)))]
+    (range [_ name (.-Names f)]
+      (let [t (.-Type name)]
+        (switch
+          (case [(isStructNotSIMD t)]
+            (set! newNames (decomposeUserStructInto f name newNames)))
+          (case [(.IsArray t)]
+            (set! newNames (decomposeUserArrayInto f name newNames)))
+          (default
+            (aset (.-Names f) i name)
+            (inc! i)))))
+
+
+    (set! (.-Names f) (subslice (.-Names f) _ i))
+    (set! (.-Names f) (append (.-Names f) (spread newNames)))))
+
+
+
+
+
+^{:go/end 301} (go/func decomposeUserArrayInto "decomposeUserArrayInto creates names for the element(s) of arrays referenced\nby name where possible, and appends those new names to slots, which is then\nreturned.\n" ^{:tag (slice (* LocalSlot))} [^{:tag (* Func)} f ^{:tag (* LocalSlot)} name ^{:tag (slice (* LocalSlot))} slots]
+  (let [t (.-Type name)]
+    (when (== (.Size t) 0)
+      ;; TODO(khr): Not sure what to do here.  Probably nothing.
+      ;; Names for empty arrays aren't important.
+      (return slots))
+
+    (when (!= (.NumElem t) 1)
+      ;; shouldn't get here due to CanSSA
+      (.Fatalf f "array not of size 1"))
+
+    (let [elemName (.SplitArray f name)
+        ^{:line 279 :tag (slice (* Value))} keep (zero (slice (* Value)))]
+      (range [_ v (aget (.-NamedValues f) @name)]
+        (when (!= (.-Op v) OpArrayMake1)
+          (set! keep (append keep v))
+          (continue))
+
+        (aset (.-NamedValues f) @elemName (append (aget (.-NamedValues f) @elemName) (aget (.-Args v) 0))))
+
+      (if (== (len keep) 0)
+        ;; delete the name for the array as a whole
+        (delete (.-NamedValues f) @name)
+
+        (aset (.-NamedValues f) @name keep))
+
+
+      (cond (.IsArray (.Elem t))
+        (return (decomposeUserArrayInto f elemName slots))
+        (isStructNotSIMD (.Elem t))
+        (return (decomposeUserStructInto f elemName slots)))
+
+
+      (append slots elemName))))
+
+
+
+
+
+^{:go/end 351} (go/func decomposeUserStructInto "decomposeUserStructInto creates names for the fields(s) of structs referenced\nby name where possible, and appends those new names to slots, which is then\nreturned.\n" ^{:tag (slice (* LocalSlot))} [^{:tag (* Func)} f ^{:tag (* LocalSlot)} name ^{:tag (slice (* LocalSlot))} slots]
+  (let [fnames (lit (slice (* LocalSlot))) ; slots for struct in name
+      ^{:line 308} t (.-Type name)
+      ^{:line 309} n (.NumFields t)]
+
+    (for [i 0] (< i n) (inc! i)
+      (let [fs (.SplitStruct f name i)]
+        (set! fnames (append fnames fs))
+        ;; arrays and structs will be decomposed further, so
+        ;; there's no need to record a name
+        (when (and (not (.IsArray (.-Type fs))) (not (isStructNotSIMD (.-Type fs))))
+          (set! slots (maybeAppend f slots fs)))))
+
+
+
+    (let [^{:tag (slice (* Value))} keep (zero (slice (* Value)))]
+      ;; create named values for each struct field
+      (range [_ v (aget (.-NamedValues f) @name)]
+        (when (or (!= (.-Op v) OpStructMake) (!= (len (.-Args v)) n))
+          (set! keep (append keep v))
+          (continue))
+
+        (for [i 0] (< i (len fnames)) (inc! i)
+          (aset (.-NamedValues f) @(aget fnames i) (append (aget (.-NamedValues f) @(aget fnames i)) (aget (.-Args v) i)))))
+
+
+      (if (== (len keep) 0)
+        ;; delete the name for the struct as a whole
+        (delete (.-NamedValues f) @name)
+
+        (aset (.-NamedValues f) @name keep))
+
+
+      ;; now that this f.NamedValues contains values for the struct
+      ;; fields, recurse into nested structs
+      (for [i 0] (< i n) (inc! i)
+        (cond (isStructNotSIMD (.FieldType (.-Type name) i)) (do
+            (set! slots (decomposeUserStructInto f (aget fnames i) slots))
+            (delete (.-NamedValues f) @(aget fnames i)))
+          (.IsArray (.FieldType (.-Type name) i)) (do
+            (set! slots (decomposeUserArrayInto f (aget fnames i) slots))
+            (delete (.-NamedValues f) @(aget fnames i)))))
+
+
+      ^{:line 350} slots)))
+
+^{:go/end 359} (go/func decomposeUserPhi [^{:tag (* Value)} v]
+  (switch
+    (case [(isStructNotSIMD (.-Type v))]
+      (decomposeStructPhi v))
+    (case [(.IsArray (.-Type v))]
+      (decomposeArrayPhi v))))
+
+
+
+
+
+^{:go/end 386} (go/func decomposeStructPhi "decomposeStructPhi replaces phi-of-struct with structmake(phi-for-each-field),\nand then recursively decomposes the phis for each field.\n" [^{:tag (* Value)} v]
+  (let [t (.-Type v)]
+    (when (== (.Size t) 0)
+      (.reset v OpEmpty)
+      (return))
+
+    (let [n (.NumFields t)
+        ^{:line 370} fields (make (slice (* Value)) 0 MaxStruct)]
+      (for [i 0] (< i n) (inc! i)
+        (set! fields (append fields (.NewValue0 (.-Block v) (.-Pos v) OpPhi (.FieldType t i)))))
+
+      (range [_ a (.-Args v)]
+        (for [i 0] (< i n) (inc! i)
+          (.AddArg (aget fields i) (.NewValue1I (.-Block a) (.-Pos v) OpStructSelect (.FieldType t i) (conv int64 i) a))))
+
+
+      (.reset v OpStructMake)
+      (.AddArgs v (spread fields))
+
+      ;; Recursively decompose phis for each field.
+      (range [_ f fields]
+        (decomposeUserPhi f)))))
+
+
+
+
+
+^{:go/end 408} (go/func decomposeArrayPhi "decomposeArrayPhi replaces phi-of-array with arraymake(phi-of-array-element),\nand then recursively decomposes the element phi.\n" [^{:tag (* Value)} v]
+  (let [t (.-Type v)]
+    (when (== (.Size t) 0)
+      (.reset v OpEmpty)
+      (return))
+
+    (when (!= (.NumElem t) 1)
+      (.Fatalf v "SSAable array must have no more than 1 element"))
+
+    (let [elem (.NewValue0 (.-Block v) (.-Pos v) OpPhi (.Elem t))]
+      (range [_ a (.-Args v)]
+        (.AddArg elem (.NewValue1I (.-Block a) (.-Pos v) OpArraySelect (.Elem t) 0 a)))
+
+      (.reset v OpArrayMake1)
+      (.AddArg v elem)
+
+      ;; Recursively decompose elem phi.
+      (decomposeUserPhi elem))))
+
+
+
+
+(go/const ^{:val 4 :doc "MaxStruct is the maximum number of fields a struct\ncan have and still be SSAable.\n"} MaxStruct 4)
+
+(go/type namedVal (struct
+    ^{:line 415 :tag int} locIndex ^int valIndex)) ; f.NamedValues[f.Names[locIndex]][valIndex] = key
+
+
+
+
+^{:go/end 464} (go/func deleteNamedVals "deleteNamedVals removes particular values with debugger names from f's naming data structures,\nremoves all values with OpInvalid, and re-sorts the list of Names.\n" [^{:tag (* Func)} f ^{:tag (slice namedVal)} toDelete]
+  ;; Arrange to delete from larger indices to smaller, to ensure swap-with-end deletion does not invalidate pending indices.
+  (^{:inst [(slice namedVal) namedVal]} slices/SortFunc toDelete ^{:go/end 427} (fn ^int [^namedVal a ^namedVal b]
+      (when (!= (.-locIndex a) (.-locIndex b))
+        (return (^{:inst [int]} cmp/Compare (.-locIndex b) (.-locIndex a))))
+
+      (^{:inst [int]} cmp/Compare (.-valIndex b) (.-valIndex a))))
+
+
+  ;; Get rid of obsolete names
+  (range [_ d toDelete]
+    (let [loc (aget (.-Names f) (.-locIndex d))
+        ^{:line 432} vals (aget (.-NamedValues f) @loc)
+        ^{:line 433} l (- (len vals) 1)]
+      (when (> l 0)
+        (aset vals (.-valIndex d) (aget vals l)))
+
+      (aset vals l nil)
+      (aset (.-NamedValues f) @loc (subslice vals _ l))))
+
+  ;; Delete locations with no values attached.
+  (let [end (len (.-Names f))]
+    (for [i (- (len (.-Names f)) 1)] (>= i 0) (dec! i)
+      (let [loc (aget (.-Names f) i)
+          ^{:line 444} vals (aget (.-NamedValues f) @loc)
+          ^{:line 445} last (len vals)]
+        (for [j (- (len vals) 1)] (>= j 0) (dec! j)
+          (when (== (.-Op (aget vals j)) OpInvalid)
+            (dec! last)
+            (aset vals j (aget vals last))
+            (aset vals last nil)))
+
+
+        (when (< last (len vals))
+          (aset (.-NamedValues f) @loc (subslice vals _ last)))
+
+        (when (== (len vals) 0)
+          (delete (.-NamedValues f) @loc)
+          (dec! end)
+          (aset (.-Names f) i (aget (.-Names f) end))
+          (aset (.-Names f) end nil))))
+
+
+    (set! (.-Names f) (subslice (.-Names f) _ end))))
+
+
+^{:go/end 468} (go/func isStructNotSIMD ^bool [^{:tag (* types/Type)} t]
+  (and (.IsStruct t) (not (.IsSIMD t))))

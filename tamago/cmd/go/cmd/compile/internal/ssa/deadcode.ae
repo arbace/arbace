@@ -1,0 +1,358 @@
+;; Copyright 2015 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.cmd.compile.internal.ssa) (go/file "deadcode.go" :imports [
+
+
+    ^{:line 8} [src "cmd/internal/src"]])
+
+
+
+
+^{:go/end 19} (go/func findlive "findlive returns the reachable blocks and live values in f.\nThe caller should call f.Cache.freeBoolSlice(live) when it is done with it.\n" [^{:tag (* Func)} f] :results [^{:tag (slice bool)} reachable ^{:tag (slice bool)} live]
+  (set! reachable (ReachableBlocks f))
+  (let [^{:tag (slice (* Value))} order (zero (slice (* Value)))]
+    (set! (values live order) (liveValues f reachable))
+    (.freeValueSlice (.-Cache f) order)
+    (return)))
+
+
+
+^{:go/end 48} (go/func ReachableBlocks "ReachableBlocks returns the reachable blocks in f.\n" ^{:tag (slice bool)} [^{:tag (* Func)} f]
+  (let [reachable (make (slice bool) (.NumBlocks f))]
+    (aset reachable (.-ID (.-Entry f)) true)
+    (let [p (make (slice (* Block)) 0 64)] ; stack-like worklist
+      (set! p (append p (.-Entry f)))
+      (while (> (len p) 0)
+        ;; Pop a reachable block
+        (let [b (aget p (- (len p) 1))]
+          (set! p (subslice p _ (- (len p) 1)))
+          ;; Mark successors as reachable
+          (let [s (.-Succs b)]
+            (when (== (.-Kind b) BlockFirst)
+              (set! s (subslice s _ 1)))
+
+            (range [_ e s]
+              (let [c (.-b e)]
+                (when (>= (conv int (.-ID c)) (len reachable))
+                  (.Fatalf f "block %s >= f.NumBlocks()=%d?" c (len reachable)))
+
+                (when (not (aget reachable (.-ID c)))
+                  (aset reachable (.-ID c) true)
+                  (set! p (append p c)))))))) ; push
+
+
+
+      ^{:line 47} reachable)))
+
+
+
+
+
+
+
+
+^{:go/end 158} (go/func liveValues "liveValues returns the live values in f and a list of values that are eligible\nto be statements in reversed data flow order.\nThe second result is used to help conserve statement boundaries for debugging.\nreachable is a map from block ID to whether the block is reachable.\nThe caller should call f.Cache.freeBoolSlice(live) and f.Cache.freeValueSlice(liveOrderStmts).\nwhen they are done with the return values.\n" [^{:tag (* Func)} f ^{:tag (slice bool)} reachable] :results [^{:tag (slice bool)} live ^{:tag (slice (* Value))} liveOrderStmts]
+  (set! live (.allocBoolSlice (.-Cache f) (.NumValues f)))
+  (set! liveOrderStmts (subslice (.allocValueSlice (.-Cache f) (.NumValues f)) _ 0))
+
+  ;; After regalloc, consider all values to be live.
+  ;; See the comment at the top of regalloc.go and in deadcode for details.
+  (when (!= (.-RegAlloc f) nil)
+    (range [i live]
+      (aset live i true))
+
+    (return))
+
+
+  ;; Record all the inline indexes we need
+  (let [^{:tag (map int bool)} liveInlIdx (zero (map int bool))
+      ^{:line 71} pt (.-PosTable (.-ctxt (.-Config f)))]
+    (range [_ b (.-Blocks f)]
+      (range [_ v (.-Values b)]
+        (let [i (.InliningIndex (.Base (.Pos pt (.-Pos v))))]
+          (when (< i 0)
+            (continue))
+
+          (when (== liveInlIdx nil)
+            (set! liveInlIdx (lit (map int bool))))
+
+          (aset liveInlIdx i true)))
+
+      (let [i (.InliningIndex (.Base (.Pos pt (.-Pos b))))]
+        (when (< i 0)
+          (continue))
+
+        (when (== liveInlIdx nil)
+          (set! liveInlIdx (lit (map int bool))))
+
+        (aset liveInlIdx i true)))
+
+
+    ;; Find all live values
+    (let [q (subslice (.allocValueSlice (.-Cache f) (.NumValues f)) _ 0)]
+      (defer (.freeValueSlice (.-Cache f) q))
+
+      ;; Starting set: all control values of reachable blocks are live.
+      ;; Calls are live (because callee can observe the memory state).
+      (range [_ b (.-Blocks f)]
+        (when (not (aget reachable (.-ID b)))
+          (continue))
+
+        (range [_ v (.ControlValues b)]
+          (when (not (aget live (.-ID v)))
+            (aset live (.-ID v) true)
+            (set! q (append q v))
+            (when (!= ^{:go/via [lico]} (.IsStmt (.-Pos v)) src/PosNotStmt)
+              (set! liveOrderStmts (append liveOrderStmts v)))))
+
+
+
+        (range [_ v (.-Values b)]
+          (when (and ^:go/paren (or (.-call (aget opcodeTable (.-Op v))) (.-hasSideEffects (aget opcodeTable (.-Op v))) (.-nilCheck (aget opcodeTable (.-Op v)))) (not (aget live (.-ID v))))
+            (aset live (.-ID v) true)
+            (set! q (append q v))
+            (when (!= ^{:go/via [lico]} (.IsStmt (.-Pos v)) src/PosNotStmt)
+              (set! liveOrderStmts (append liveOrderStmts v))))
+
+
+          (when (== (.-Op v) OpInlMark)
+            (when (not (aget liveInlIdx (conv int (.-AuxInt v))))
+              ;; We don't need marks for bodies that
+              ;; have been completely optimized away.
+              ;; TODO: save marks only for bodies which
+              ;; have a faulting instruction or a call?
+              (continue))
+
+            (aset live (.-ID v) true)
+            (set! q (append q v))
+            (when (!= ^{:go/via [lico]} (.IsStmt (.-Pos v)) src/PosNotStmt)
+              (set! liveOrderStmts (append liveOrderStmts v))))))
+
+
+
+
+
+      ;; Compute transitive closure of live values.
+      (while (> (len q) 0)
+        ;; pop a reachable value
+        (let [v (aget q (- (len q) 1))]
+          (aset q (- (len q) 1) nil)
+          (set! q (subslice q _ (- (len q) 1)))
+          (range [i x (.-Args v)]
+            (when (and (== (.-Op v) OpPhi) (not (aget reachable (.-ID (.-b (aget (.-Preds (.-Block v)) i))))))
+              (continue))
+
+            (when (not (aget live (.-ID x)))
+              (aset live (.-ID x) true)
+              (set! q (append q x)) ; push
+              (when (!= ^{:go/via [lico]} (.IsStmt (.-Pos x)) src/PosNotStmt)
+                (set! liveOrderStmts (append liveOrderStmts x)))))))
+
+
+
+
+
+      (return))))
+
+
+
+^{:go/end 305} (go/func deadcode "deadcode removes dead code from f.\n" [^{:tag (* Func)} f]
+  ;; deadcode after regalloc is forbidden for now. Regalloc
+  ;; doesn't quite generate legal SSA which will lead to some
+  ;; required moves being eliminated. See the comment at the
+  ;; top of regalloc.go for details.
+  (when (!= (.-RegAlloc f) nil)
+    (.Fatalf f "deadcode after regalloc"))
+
+
+  ;; Find reachable blocks.
+  (let [reachable (ReachableBlocks f)]
+
+    ;; Get rid of edges from dead to live code.
+    (range [_ b (.-Blocks f)]
+      (when (aget reachable (.-ID b))
+        (continue))
+
+      (for [i 0] (< i (len (.-Succs b))) _
+        (let [e (aget (.-Succs b) i)]
+          (if (aget reachable (.-ID (.-b e)))
+            (.removeEdge b i)
+
+            (inc! i)))))
+
+
+
+
+    ;; Get rid of dead edges from live code.
+    (range [_ b (.-Blocks f)]
+      (when (not (aget reachable (.-ID b)))
+        (continue))
+
+      (when (!= (.-Kind b) BlockFirst)
+        (continue))
+
+      (.removeEdge b 1)
+      (set! (.-Kind b) BlockPlain)
+      (set! (.-Likely b) BranchUnknown))
+
+
+    ;; Splice out any copies introduced during dead block removal.
+    (copyelim f)
+
+    ;; Find live values.
+    (let [(values live order) (liveValues f reachable)]
+      (defer (^{:go/end 206} (fn [] (.freeBoolSlice (.-Cache f) live))))
+      (defer (^{:go/end 207} (fn [] (.freeValueSlice (.-Cache f) order))))
+
+      ;; Remove dead & duplicate entries from namedValues map.
+      (let [s (.newSparseSet f (.NumValues f))]
+        (defer (.retSparseSet f s))
+        (let [i 0]
+          (range [_ name (.-Names f)]
+            (let [j 0]
+              (.clear s)
+              (let [values (aget (.-NamedValues f) @name)]
+                (range [_ v values]
+                  (when (and (aget live (.-ID v)) (not (.contains s (.-ID v))))
+                    (aset values j v)
+                    (inc! j)
+                    (.add s (.-ID v))))
+
+
+                (if (== j 0)
+                  (delete (.-NamedValues f) @name)
+                  (do
+                    (aset (.-Names f) i name)
+                    (inc! i)
+                    (for [k (- (len values) 1)] (>= k j) (dec! k)
+                      (aset values k nil))
+
+                    (aset (.-NamedValues f) @name (subslice values _ j)))))))
+
+
+          (clear (subslice (.-Names f) i))
+          (set! (.-Names f) (subslice (.-Names f) _ i))
+
+          (let [pendingLines (.-cachedLineStarts f)] ; Holds statement boundaries that need to be moved to a new value/block
+            (.clear pendingLines)
+
+            ;; Unlink values and conserve statement boundaries
+            (range [i b (.-Blocks f)]
+              (when (not (aget reachable (.-ID b)))
+                ;; TODO what if control is statement boundary? Too late here.
+                (.ResetControls b))
+
+              (range [_ v (.-Values b)]
+                (when (not (aget live (.-ID v)))
+                  (.resetArgs v)
+                  (when (and (== ^{:go/via [lico]} (.IsStmt (.-Pos v)) src/PosIsStmt) (aget reachable (.-ID b)))
+                    (.set pendingLines (.-Pos v) (conv int32 i)))))) ; TODO could be more than one pos for a line
+
+
+
+
+
+            ;; Find new homes for lost lines -- require earliest in data flow with same line that is also in same block
+            (for [i (- (len order) 1)] (>= i 0) (dec! i)
+              (let [w (aget order i)]
+                (when [(values j ok) (.get pendingLines (.-Pos w))] (and ok (== (aget (.-Blocks f) j) (.-Block w)))
+                  (set! (.-Pos w) (.WithIsStmt (.-Pos w)))
+                  (.remove pendingLines (.-Pos w)))))
+
+
+
+            ;; Any boundary that failed to match a live value can move to a block end
+            (.foreachEntry pendingLines ^{:go/end 272} (fn [^int32 j ^uint l ^int32 bi]
+                (let [b (aget (.-Blocks f) bi)]
+                  (when (and (== ^{:go/via [lico]} (.Line (.-Pos b)) l) (== (.FileIndex (.-Pos b)) j))
+                    (set! (.-Pos b) (.WithIsStmt (.-Pos b)))))))
+
+
+
+            ;; Remove dead values from blocks' value list. Return dead
+            ;; values to the allocator.
+            (range [_ b (.-Blocks f)]
+              (let [i 0]
+                (range [_ v (.-Values b)]
+                  (if (aget live (.-ID v)) (do
+                      (aset (.-Values b) i v)
+                      (inc! i))
+
+                    (.freeValue f v)))
+
+
+                (.truncateValues b i)))
+
+
+            ;; Remove unreachable blocks. Return dead blocks to allocator.
+            (set! i 0)
+            (range [_ b (.-Blocks f)]
+              (if (aget reachable (.-ID b)) (do
+                  (aset (.-Blocks f) i b)
+                  (inc! i))
+                (do
+                  (when (> (len (.-Values b)) 0)
+                    (.Fatalf b "live values in unreachable block %v: %v" b (.-Values b)))
+
+                  (.freeBlock f b))))
+
+
+            ;; zero remainder to help GC
+            (clear (subslice (.-Blocks f) i))
+            (set! (.-Blocks f) (subslice (.-Blocks f) _ i))))))))
+
+
+
+
+
+
+^{:go/end 360} (go/method removeEdge "removeEdge removes the i'th outgoing edge from b (and\nthe corresponding incoming edge from b.Succs[i].b).\nNote that this potentially reorders successors of b, so it\nmust be used very carefully.\n" [^{:tag (* Block)} b ^int i]
+  (let [e (aget (.-Succs b) i)
+      ^{:line 313} c (.-b e)
+      ^{:line 314} j (.-i e)]
+
+    ;; Adjust b.Succs
+    (.removeSucc b i)
+
+    ;; Adjust c.Preds
+    (.removePred c j)
+
+    ;; Remove phi args from c's phis.
+    (range [_ v (.-Values c)]
+      (when (!= (.-Op v) OpPhi)
+        (continue))
+
+      (.removePhiArg c v j))))
+;; Note: this is trickier than it looks. Replacing
+;; a Phi with a Copy can in general cause problems because
+;; Phi and Copy don't have exactly the same semantics.
+;; Phi arguments always come from a predecessor block,
+;; whereas copies don't. This matters in loops like:
+;; 1: x = (Phi y)
+;;    y = (Add x 1)
+;;    goto 1
+;; If we replace Phi->Copy, we get
+;; 1: x = (Copy y)
+;;    y = (Add x 1)
+;;    goto 1
+;; (Phi y) refers to the *previous* value of y, whereas
+;; (Copy y) refers to the *current* value of y.
+;; The modified code has a cycle and the scheduler
+;; will barf on it.
+;;
+;; Fortunately, this situation can only happen for dead
+;; code loops. We know the code we're working with is
+;; not dead, so we're ok.
+;; Proof: If we have a potential bad cycle, we have a
+;; situation like this:
+;;   x = (Phi z)
+;;   y = (op1 x ...)
+;;   z = (op2 y ...)
+;; Where opX are not Phi ops. But such a situation
+;; implies a cycle in the dominator graph. In the
+;; example, x.Block dominates y.Block, y.Block dominates
+;; z.Block, and z.Block dominates x.Block (treating
+;; "dominates" as reflexive).  Cycles in the dominator
+;; graph can only happen in an unreachable cycle.

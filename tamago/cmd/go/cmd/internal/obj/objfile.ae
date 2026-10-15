@@ -1,0 +1,967 @@
+;; Copyright 2013 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; Writing Go object files.
+
+(in-ns 'go.cmd.internal.obj) (go/file "objfile.go" :imports [
+
+
+    ^{:line 10} [bytes "bytes"]
+    ^{:line 11} [bio "cmd/internal/bio"]
+    ^{:line 12} [goobj "cmd/internal/goobj"]
+    ^{:line 13} [hash "cmd/internal/hash"]
+    ^{:line 14} [objabi "cmd/internal/objabi"]
+    ^{:line 15} [sys "cmd/internal/sys"]
+    ^{:line 16} [cmp "cmp"]
+    ^{:line 17} [base64 "encoding/base64"]
+    ^{:line 18} [binary "encoding/binary"]
+    ^{:line 19} [fmt "fmt"]
+    ^{:line 20} [abi "internal/abi"]
+    ^{:line 21} [io "io"]
+    ^{:line 22} [log "log"]
+    ^{:line 23} [os "os"]
+    ^{:line 24} [filepath "path/filepath"]
+    ^{:line 25} [slices "slices"]
+    ^{:line 26} [sort "sort"]
+    ^{:line 27} [strings "strings"]])
+
+
+(go/const ^{:val "<unlinkable>"} UnlinkablePkg "<unlinkable>") ; invalid package path, used when compiled without -p flag
+
+
+^{:go/end 222} (go/func WriteObjFile "Entry point of writing new object file.\n" [^{:tag (* Link)} ctxt ^{:tag (* bio/Writer)} b]
+
+  (debugAsmEmit ctxt)
+
+  (genFuncInfoSyms ctxt)
+
+  (let [w ^{:go/breaks [2 4 6]} (lit writer
+        :Writer (goobj/NewWriter b)
+        :ctxt ctxt
+        :pkgpath (objabi/PathToPrefix (.-Pkgpath ctxt)))
+
+
+      ^{:line 45} start (.Offset b)]
+    (.init w)
+
+    ;; Header
+    ;; We just reserve the space. We'll fill in the offsets later.
+    (let [flags (conv uint32 0)]
+      (when (.-Flag_shared ctxt)
+        (set! flags bit-or goobj/ObjFlagShared))
+
+      (when (== (.-pkgpath w) UnlinkablePkg)
+        (set! flags bit-or goobj/ObjFlagUnlinkable))
+
+      (when (== (.-pkgpath w) "")
+        (log/Fatal "empty package path"))
+
+      (when (.-IsAsm ctxt)
+        (set! flags bit-or goobj/ObjFlagFromAssembly))
+
+      (when (.-Std ctxt)
+        (set! flags bit-or goobj/ObjFlagStd))
+
+      (let [h ^{:go/breaks [2 4 6]} (lit goobj/Header
+            :Magic goobj/Magic
+            :Fingerprint (.-Fingerprint ctxt)
+            :Flags flags)]
+
+        (.Write h (.-Writer w))
+
+        ;; String table
+        (.StringTable w)
+
+        ;; Autolib
+        (aset (.-Offsets h) goobj/BlkAutolib ^{:go/via [Writer]} (.Offset w))
+        (range [i (.-Imports ctxt)]
+          (.Write (aget (.-Imports ctxt) i) (.-Writer w)))
+
+
+        ;; Package references
+        (aset (.-Offsets h) goobj/BlkPkgIdx ^{:go/via [Writer]} (.Offset w))
+        (range [_ pkg (.-pkglist w)]
+          ^{:go/via [Writer]} (.StringRef w pkg))
+
+
+        ;; File table (for DWARF and pcln generation).
+        (aset (.-Offsets h) goobj/BlkFile ^{:go/via [Writer]} (.Offset w))
+        (range [_ f (.FileTable (.-PosTable ctxt))]
+          ^{:go/via [Writer]} (.StringRef w (filepath/ToSlash f)))
+
+
+        ;; Symbol definitions
+        (aset (.-Offsets h) goobj/BlkSymdef ^{:go/via [Writer]} (.Offset w))
+        (range [_ s (.-defs ctxt)]
+          (.Sym w s))
+
+
+        ;; Short hashed symbol definitions
+        (aset (.-Offsets h) goobj/BlkHashed64def ^{:go/via [Writer]} (.Offset w))
+        (range [_ s (.-hashed64defs ctxt)]
+          (.Sym w s))
+
+
+        ;; Hashed symbol definitions
+        (aset (.-Offsets h) goobj/BlkHasheddef ^{:go/via [Writer]} (.Offset w))
+        (range [_ s (.-hasheddefs ctxt)]
+          (.Sym w s))
+
+
+        ;; Non-pkg symbol definitions
+        (aset (.-Offsets h) goobj/BlkNonpkgdef ^{:go/via [Writer]} (.Offset w))
+        (range [_ s (.-nonpkgdefs ctxt)]
+          (.Sym w s))
+
+
+        ;; Non-pkg symbol references
+        (aset (.-Offsets h) goobj/BlkNonpkgref ^{:go/via [Writer]} (.Offset w))
+        (range [_ s (.-nonpkgrefs ctxt)]
+          (.Sym w s))
+
+
+        ;; Referenced package symbol flags
+        (aset (.-Offsets h) goobj/BlkRefFlags ^{:go/via [Writer]} (.Offset w))
+        (.refFlags w)
+
+        ;; Hashes
+        (aset (.-Offsets h) goobj/BlkHash64 ^{:go/via [Writer]} (.Offset w))
+        (range [_ s (.-hashed64defs ctxt)]
+          (.Hash64 w s))
+
+        (aset (.-Offsets h) goobj/BlkHash ^{:go/via [Writer]} (.Offset w))
+        (range [_ s (.-hasheddefs ctxt)]
+          (.Hash w s))
+
+        ;; TODO: hashedrefs unused/unsupported for now
+
+        ;; Reloc indexes
+        (aset (.-Offsets h) goobj/BlkRelocIdx ^{:go/via [Writer]} (.Offset w))
+        (let [nreloc (conv uint32 0)
+            ^{:line 142} lists (lit (slice (slice (* LSym))) (.-defs ctxt) (.-hashed64defs ctxt) (.-hasheddefs ctxt) (.-nonpkgdefs ctxt))]
+          (range [_ list lists]
+            (range [_ s list]
+              ^{:go/via [Writer]} (.Uint32 w nreloc)
+              (set! nreloc + (conv uint32 (len (.-R s))))))
+
+
+          ^{:go/via [Writer]} (.Uint32 w nreloc)
+
+          ;; Symbol Info indexes
+          (aset (.-Offsets h) goobj/BlkAuxIdx ^{:go/via [Writer]} (.Offset w))
+          (let [naux (conv uint32 0)]
+            (range [_ list lists]
+              (range [_ s list]
+                ^{:go/via [Writer]} (.Uint32 w naux)
+                (set! naux + (conv uint32 (nAuxSym s)))))
+
+
+            ^{:go/via [Writer]} (.Uint32 w naux)
+
+            ;; Data indexes
+            (aset (.-Offsets h) goobj/BlkDataIdx ^{:go/via [Writer]} (.Offset w))
+            (let [dataOff (conv int64 0)]
+              (range [_ list lists]
+                (range [_ s list]
+                  ^{:go/via [Writer]} (.Uint32 w (conv uint32 dataOff))
+                  (set! dataOff + (conv int64 (len (.-P s))))
+                  (when [file (.File s)] (!= file nil)
+                    (set! dataOff + (.-Size file)))))
+
+
+
+              (when (!= (conv int64 (conv uint32 dataOff)) dataOff)
+                (log/Fatalf "data too large"))
+
+              ^{:go/via [Writer]} (.Uint32 w (conv uint32 dataOff))
+
+              ;; Relocs
+              (aset (.-Offsets h) goobj/BlkReloc ^{:go/via [Writer]} (.Offset w))
+              (range [_ list lists]
+                (range [_ s list]
+                  (^{:inst [(slice Reloc) Reloc]} slices/SortFunc (.-R s) relocByOffCmp) ; some platforms (e.g. PE) requires relocations in address order
+                  (range [i (.-R s)]
+                    (.Reloc w (addr (aget (.-R s) i))))))
+
+
+
+
+              ;; Aux symbol info
+              (aset (.-Offsets h) goobj/BlkAux ^{:go/via [Writer]} (.Offset w))
+              (range [_ list lists]
+                (range [_ s list]
+                  (.Aux w s)))
+
+
+
+              ;; Data
+              (aset (.-Offsets h) goobj/BlkData ^{:go/via [Writer]} (.Offset w))
+              (range [_ list lists]
+                (range [_ s list]
+                  ^{:go/via [Writer]} (.Bytes w (.-P s))
+                  (when [file (.File s)] (!= file nil)
+                    (.writeFile w ctxt file))))
+
+
+
+
+              ;; Blocks used only by tools (objdump, nm).
+
+              ;; Referenced symbol names from other packages
+              (aset (.-Offsets h) goobj/BlkRefName ^{:go/via [Writer]} (.Offset w))
+              (.refNames w)
+
+              (aset (.-Offsets h) goobj/BlkEnd ^{:go/via [Writer]} (.Offset w))
+
+              ;; Fix up block offsets in the header
+              (let [end (+ start (conv int64 ^{:go/via [Writer]} (.Offset w)))]
+                (.MustSeek b start 0)
+                (.Write h (.-Writer w))
+                (.MustSeek b end 0)))))))))
+
+
+(go/type writer (struct
+    (* goobj/Writer)
+    ^{:line 226 :tag (slice byte)} filebuf
+    ^{:line 227 :tag (* Link)} ctxt
+    ^{:line 228 :tag string} pkgpath ; the package import path (escaped), "" if unknown
+    ^{:line 229 :tag (slice string)} pkglist ; list of packages referenced, indexed by ctxt.pkgIdx
+
+
+
+    ^{:line 233 :tag goobj/Sym :doc "scratch space for writing (the Write methods escape\nas they are interface calls)\n"} tmpSym
+    ^{:line 234 :tag goobj/Reloc} tmpReloc
+    ^{:line 235 :tag goobj/Aux} tmpAux
+    ^{:line 236 :tag goobj/Hash64Type} tmpHash64
+    ^{:line 237 :tag goobj/HashType} tmpHash
+    ^{:line 238 :tag goobj/RefFlags} tmpRefFlags
+    ^{:line 239 :tag goobj/RefName} tmpRefName))
+
+
+
+^{:go/end 249} (go/method init "prepare package index list\n" [^{:tag (* writer)} w]
+  (set! (.-pkglist w) (make (slice string) (+ (len (.-pkgIdx (.-ctxt w))) 1)))
+  (aset (.-pkglist w) 0 "") ; dummy invalid package for index 0
+  (range [pkg i (.-pkgIdx (.-ctxt w))]
+    (aset (.-pkglist w) i pkg)))
+
+
+
+^{:go/end 278} (go/method writeFile [^{:tag (* writer)} w ^{:tag (* Link)} ctxt ^{:tag (* FileInfo)} file]
+  (let [(values f err) (os/Open (.-Name file))]
+    (when (!= err nil)
+      (.Diag ctxt "%v" err)
+      (return))
+
+    (defer (.Close f))
+    (when (== (.-filebuf w) nil)
+      (set! (.-filebuf w) (make (slice byte) 1024)))
+
+    (let [buf (.-filebuf w)
+        ^{:line 262} written (conv int64 0)]
+      (while true
+        (let [(values n err) (.Read f buf)]
+          ^{:go/via [Writer]} (.Bytes w (subslice buf _ n))
+          (set! written + (conv int64 n))
+          (when (== err io/EOF)
+            (break))
+
+          (when (!= err nil)
+            (.Diag ctxt "%v" err)
+            (return))))
+
+
+      (when (!= written (.-Size file))
+        (.Diag ctxt "copy %s: unexpected length %d != %d" (.-Name file) written (.-Size file))))))
+
+
+
+(go/var inlHashLen (.EncodedLen base64/StdEncoding 8))
+
+
+^{:go/end 294} (go/func TrimInlineHash "TrimInlineHash strips the content hash of inlined call stacks from a symbol name.\n" ^string [^string name]
+  ;; The inline hash is in the form of #NNNN#, where NNNN is
+  ;; the base64 encoding of a 8-byte hash value.
+  (let [(values a b ok) (strings/Cut name "#")]
+    (when (not ok)
+      (return name))
+
+    (when (or (< (len b) (+ inlHashLen 1)) (!= (aget b inlHashLen) \#))
+      (return name))
+
+    (+ a (subslice b (+ inlHashLen 1)))))
+
+
+^{:go/end 327} (go/method StringTable [^{:tag (* writer)} w]
+  ^{:go/via [Writer]} (.AddString w "")
+  (range [_ p (.-Imports (.-ctxt w))]
+    ^{:go/via [Writer]} (.AddString w (.-Pkg p)))
+
+  (range [_ pkg (.-pkglist w)]
+    ^{:go/via [Writer]} (.AddString w pkg))
+
+  (.traverseSyms (.-ctxt w) traverseAll ^{:go/end 321} (fn [^{:tag (* LSym)} s]
+      ;; Don't put names of builtins into the string table (to save
+      ;; space).
+      (when (== (.-PkgIdx s) goobj/PkgIdxBuiltin)
+        (return))
+
+      ;; TODO: this includes references of indexed symbols from other packages,
+      ;; for which the linker doesn't need the name. Consider moving them to
+      ;; a separate block (for tools only).
+      (when (and (.-Flag_noRefName (.-ctxt w)) (< (.-PkgIdx s) goobj/PkgIdxSpecial))
+        ;; Don't include them if Flag_noRefName
+        (return))
+
+      (when (strings/HasPrefix (.-Name s) "\"\".")
+        (.Diag (.-ctxt w) "unqualified symbol name: %v" (.-Name s)))
+
+      ^{:go/via [Writer]} (.AddString w (TrimInlineHash (.-Name s)))))
+
+
+  ;; All filenames are in the postable.
+  (range [_ f (.FileTable (.-PosTable (.-ctxt w)))]
+    ^{:go/via [Writer]} (.AddString w (filepath/ToSlash f))))
+
+
+
+
+
+(go/const ^{:val 2000000000 :doc "MaxSymSize is the maximum data section size permitted by the linker\n(see issue #9862).\n"} MaxSymSize (conv int64 2.0E9)) ; 2 GB (or so; looks better in errors than 2^31)
+
+^{:go/end 408} (go/method Sym [^{:tag (* writer)} w ^{:tag (* LSym)} s]
+  (let [name (.-Name s)
+      ^{:line 335} abi (conv uint16 ^{:go/via [Attribute]} (.ABI s))]
+    (when ^{:go/via [Attribute]} (.Static s)
+      (set! abi goobj/SymABIstatic))
+
+    (let [flag (conv uint8 0)]
+      (when ^{:go/via [Attribute]} (.DuplicateOK s)
+        (set! flag bit-or goobj/SymFlagDupok))
+
+      (when ^{:go/via [Attribute]} (.Local s)
+        (set! flag bit-or goobj/SymFlagLocal))
+
+      (when ^{:go/via [Attribute]} (.MakeTypelink s)
+        (set! flag bit-or goobj/SymFlagTypelink))
+
+      (when ^{:go/via [Attribute]} (.Leaf s)
+        (set! flag bit-or goobj/SymFlagLeaf))
+
+      (when ^{:go/via [Attribute]} (.NoSplit s)
+        (set! flag bit-or goobj/SymFlagNoSplit))
+
+      (when ^{:go/via [Attribute]} (.ReflectMethod s)
+        (set! flag bit-or goobj/SymFlagReflectMethod))
+
+      (when (and (strings/HasPrefix (.-Name s) "type:") (!= (aget (.-Name s) 5) \.) (== (.-Type s) objabi/SRODATA))
+        (set! flag bit-or goobj/SymFlagGoType))
+
+      (let [flag2 (conv uint8 0)]
+        (when ^{:go/via [Attribute]} (.UsedInIface s)
+          (set! flag2 bit-or goobj/SymFlagUsedInIface))
+
+        (when (and (strings/HasPrefix (.-Name s) "go:itab.") (== (.-Type s) objabi/SRODATA))
+          (set! flag2 bit-or goobj/SymFlagItab))
+
+        (when (and (strings/HasPrefix (.-Name s) (.-Pkgpath (.-ctxt w))) (strings/HasPrefix (subslice (.-Name s) (len (.-Pkgpath (.-ctxt w)))) ".") (strings/HasPrefix (subslice (.-Name s) (+ (len (.-Pkgpath (.-ctxt w))) 1)) objabi/GlobalDictPrefix))
+          (set! flag2 bit-or goobj/SymFlagDict))
+
+        (when ^{:go/via [Attribute]} (.IsPkgInit s)
+          (set! flag2 bit-or goobj/SymFlagPkgInit))
+
+        (when (or ^{:go/via [Attribute]} (.IsLinkname s) (== name "main.main"))
+          ;; The runtime linknames main.main.
+          (set! flag2 bit-or goobj/SymFlagLinkname))
+
+        (when ^{:go/via [Attribute]} (.IsLinknameStd s)
+          (set! flag2 bit-or goobj/SymFlagLinknameStd))
+
+        (when ^{:go/via [Attribute]} (.ABIWrapper s)
+          (set! flag2 bit-or goobj/SymFlagABIWrapper))
+
+        (when (and (!= (.Func s) nil) (!= (.-WasmExport (.Func s)) nil))
+          (set! flag2 bit-or goobj/SymFlagWasmExport))
+
+        (when (strings/HasPrefix name "gofile..")
+          (set! name (filepath/ToSlash name)))
+
+        (let [align (conv uint32 (.-Align s))]
+          (when (and ^{:go/via [Attribute]} (.ContentAddressable s) (!= (.-Size s) 0) (== align 0) (!= (.-Type s) objabi/STEXT) (!= (.-Type s) objabi/STEXTFIPS))
+            ;; The linker applies a default alignment for text symbols, so they are okay.
+            ;; TODO: Check that alignment is set for all symbols.
+            (.Diag (.-ctxt w) "%s: is content-addressable but alignment is not set (size is %d)" (.-Name s) (.-Size s)))
+
+          (when (> (.-Size s) MaxSymSize)
+            (.Diag (.-ctxt w) "%s: symbol too large (%d bytes > %d bytes)" (.-Name s) (.-Size s) MaxSymSize))
+
+          (let [o (addr (.-tmpSym w))]
+            (.SetName o (TrimInlineHash name) (.-Writer w))
+            (.SetABI o abi)
+            (.SetType o (conv uint8 (.-Type s)))
+            (.SetFlag o flag)
+            (.SetFlag2 o flag2)
+            (.SetSiz o (conv uint32 (.-Size s)))
+            (.SetAlign o align)
+            (.Write o (.-Writer w))))))))
+
+
+^{:go/end 416} (go/method Hash64 [^{:tag (* writer)} w ^{:tag (* LSym)} s]
+  (when (or (not ^{:go/via [Attribute]} (.ContentAddressable s)) (!= (len (.-R s)) 0))
+    (panic "Hash of non-content-addressable symbol"))
+
+  (set! (.-tmpHash64 w) (contentHash64 s))
+  ^{:go/via [Writer]} (.Bytes w (subslice (.-tmpHash64 w))))
+
+
+^{:go/end 424} (go/method Hash [^{:tag (* writer)} w ^{:tag (* LSym)} s]
+  (when (not ^{:go/via [Attribute]} (.ContentAddressable s))
+    (panic "Hash of non-content-addressable symbol"))
+
+  (set! (.-tmpHash w) (.contentHash w s))
+  ^{:go/via [Writer]} (.Bytes w (subslice (.-tmpHash w))))
+
+
+
+
+
+
+
+
+
+
+^{:go/end 461} (go/func contentHashSection "contentHashSection returns a mnemonic for s's section.\nThe goal is to prevent content-addressability from moving symbols between sections.\ncontentHashSection only distinguishes between sets of sections for which this matters.\nAllowing flexibility increases the effectiveness of content-addressability.\nBut in some cases, such as doing addressing based on a base symbol,\nwe need to ensure that a symbol is always in a particular section.\nSome of these conditions are duplicated in cmd/link/internal/ld.(*Link).symtab.\nTODO: instead of duplicating them, have the compiler decide where symbols go.\n" ^byte [^{:tag (* LSym)} s]
+  (when (== (.-Type s) objabi/STEXT)
+    (return \t))
+
+  (when (== (.-Type s) objabi/STEXTFIPS)
+    (return \f))
+
+  (when ^{:go/via [Attribute]} (.IsPcdata s)
+    (return \P))
+
+  ^{:go/breaks [[4 460]]} (let [name (.-Name s)]
+    (when (or (strings/HasPrefix name "gcargs.")
+        (strings/HasPrefix name "gclocals.")
+        (strings/HasPrefix name "gclocals·")
+        (strings/HasSuffix name ".opendefer")
+        (strings/HasSuffix name ".arginfo0")
+        (strings/HasSuffix name ".arginfo1")
+        (strings/HasSuffix name ".argliveinfo")
+        (strings/HasSuffix name ".wrapinfo")
+        (strings/HasSuffix name ".args_stackmap")
+        (strings/HasSuffix name ".stkobj"))
+      (return \F)) ; go:func.* or go:funcrel.*
+
+    (when (strings/HasPrefix name "type:")
+      (return \T))
+
+    0))
+
+
+^{:go/end 470} (go/func contentHash64 ^goobj/Hash64Type [^{:tag (* LSym)} s]
+  (when (!= (contentHashSection s) 0)
+    (panic (+ "short hash of non-default-section sym " (.-Name s))))
+
+  (let [^goobj/Hash64Type b (zero goobj/Hash64Type)]
+    (copy (subslice b) (.-P s))
+    ^{:line 469} b))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 563} (go/method contentHash "Compute the content hash for a content-addressable symbol.\nWe build a content hash based on its content and relocations.\nDepending on the category of the referenced symbol, we choose\ndifferent hash algorithms such that the hash is globally\nconsistent.\n  - For referenced content-addressable symbol, its content hash\n    is globally consistent.\n  - For package symbol and builtin symbol, its local index is\n    globally consistent.\n  - For non-package symbol, its fully-expanded name is globally\n    consistent. For now, we require we know the current package\n    path so we can always expand symbol names. (Otherwise,\n    symbols with relocations are not considered hashable.)\n\nFor now, we assume there is no circular dependencies among\nhashed symbols.\n" ^goobj/HashType [^{:tag (* writer)} w ^{:tag (* LSym)} s]
+  (let [h (hash/New32)
+      ^{:line 490 :tag (array 14 byte)} tmp (zero (array 14 byte))]
+
+    ;; Include the size of the symbol in the hash.
+    ;; This preserves the length of symbols, preventing the following two symbols
+    ;; from hashing the same:
+    ;;
+    ;;    [2]int{1,2} ≠ [10]int{1,2,0,0,0...}
+    ;;
+    ;; In this case, if the smaller symbol is alive, the larger is not kept unless
+    ;; needed.
+    (.PutUint64 binary/LittleEndian (subslice tmp _ 8) (conv uint64 (.-Size s)))
+    ;; Some symbols require being in separate sections.
+    (aset tmp 8 (contentHashSection s))
+    (.Write h (subslice tmp _ 9))
+
+    (when (or (== (.-Type s) objabi/STEXT) (== (.-Type s) objabi/STEXTFIPS))
+      ;; We don't want to combine irrelevant functions.
+      ;; Include the name to distinguish, without the temporary
+      ;; inline hash, so different inlined copies do get a chance
+      ;; to be combined.
+      (io/WriteString h (TrimInlineHash (.-Name s))))
+
+
+    ;; The compiler trims trailing zeros _sometimes_. We just do
+    ;; it always.
+    (.Write h (bytes/TrimRight (.-P s) "\u0000"))
+    (range [i (.-R s)]
+      (let [r (addr (aget (.-R s) i))]
+        (.PutUint32 binary/LittleEndian (subslice tmp _ 4) (conv uint32 (.-Off r)))
+        (aset tmp 4 (.-Siz r))
+        (aset tmp 5 (conv uint8 (.-Type r)))
+        (.PutUint64 binary/LittleEndian (subslice tmp 6 14) (conv uint64 (.-Add r)))
+        (.Write h (subslice tmp))
+        (let [rs (.-Sym r)]
+          (when (== rs nil)
+            ;; marker relocation
+            (io/WriteString h "nil symbol")
+            (continue))
+
+          (when (== rs s)
+            (io/WriteString h "self symbol")
+            (continue))
+          ;; TODO: mutual recursion?
+
+          (switch (.-PkgIdx rs)
+            (case [goobj/PkgIdxHashed64]
+              (.Write h (lit (slice byte) 0))
+              (let [t (contentHash64 rs)]
+                (.Write h (subslice t))))
+            (case [goobj/PkgIdxHashed]
+              (.Write h (lit (slice byte) 1))
+              (let [t (.contentHash w rs)]
+                (.Write h (subslice t))))
+            (case [goobj/PkgIdxNone]
+              (.Write h (lit (slice byte) 2))
+              (io/WriteString h (.-Name rs))) ; name is already expanded at this point
+            (case [goobj/PkgIdxBuiltin]
+              (.Write h (lit (slice byte) 3))
+              (.PutUint32 binary/LittleEndian (subslice tmp _ 4) (conv uint32 (.-SymIdx rs)))
+              (.Write h (subslice tmp _ 4)))
+            (case [goobj/PkgIdxSelf]
+              (io/WriteString h (.-pkgpath w))
+              (.PutUint32 binary/LittleEndian (subslice tmp _ 4) (conv uint32 (.-SymIdx rs)))
+              (.Write h (subslice tmp _ 4)))
+            (default
+              (io/WriteString h (.-Pkg rs))
+              (.PutUint32 binary/LittleEndian (subslice tmp _ 4) (conv uint32 (.-SymIdx rs)))
+              (.Write h (subslice tmp _ 4)))))))
+
+
+    (let [^goobj/HashType b (zero goobj/HashType)]
+      (copy (subslice b) (.Sum h nil))
+      ^{:line 562} b)))
+
+
+^{:go/end 574} (go/func makeSymRef ^goobj/SymRef [^{:tag (* LSym)} s]
+  (when (== s nil)
+    (return (lit goobj/SymRef)))
+
+  (when (or (== (.-PkgIdx s) 0) (not ^{:go/via [Attribute]} (.Indexed s)))
+    (fmt/Printf "unindexed symbol reference: %v\n" s)
+    (panic "unindexed symbol reference"))
+
+  (lit goobj/SymRef :PkgIdx (conv uint32 (.-PkgIdx s)) :SymIdx (conv uint32 (.-SymIdx s))))
+
+
+^{:go/end 584} (go/method Reloc [^{:tag (* writer)} w ^{:tag (* Reloc)} r]
+  (let [o (addr (.-tmpReloc w))]
+    (.SetOff o (.-Off r))
+    (.SetSiz o (.-Siz r))
+    (.SetType o (conv uint16 (.-Type r)))
+    (.SetAdd o (.-Add r))
+    (.SetSym o (makeSymRef (.-Sym r)))
+    (.Write o (.-Writer w))))
+
+
+^{:go/end 591} (go/method aux1 [^{:tag (* writer)} w ^uint8 typ ^{:tag (* LSym)} rs]
+  (let [o (addr (.-tmpAux w))]
+    (.SetType o typ)
+    (.SetSym o (makeSymRef rs))
+    (.Write o (.-Writer w))))
+
+
+^{:go/end 648} (go/method Aux [^{:tag (* writer)} w ^{:tag (* LSym)} s]
+  (when (!= (.-Gotype s) nil)
+    (.aux1 w goobj/AuxGotype (.-Gotype s)))
+
+  (if [fn (.Func s)] (!= fn nil) (do
+      (.aux1 w goobj/AuxFuncInfo (.-FuncInfoSym fn))
+
+      (range [_ d (.-Funcdata (.-Pcln fn))]
+        (.aux1 w goobj/AuxFuncdata d))
+
+
+      (when (and (!= (.-dwarfInfoSym fn) nil) (!= (.-Size (.-dwarfInfoSym fn)) 0))
+        (.aux1 w goobj/AuxDwarfInfo (.-dwarfInfoSym fn)))
+
+      (when (and (!= (.-dwarfLocSym fn) nil) (!= (.-Size (.-dwarfLocSym fn)) 0))
+        (.aux1 w goobj/AuxDwarfLoc (.-dwarfLocSym fn)))
+
+      (when (and (!= (.-dwarfRangesSym fn) nil) (!= (.-Size (.-dwarfRangesSym fn)) 0))
+        (.aux1 w goobj/AuxDwarfRanges (.-dwarfRangesSym fn)))
+
+      (when (and (!= (.-dwarfDebugLinesSym fn) nil) (!= (.-Size (.-dwarfDebugLinesSym fn)) 0))
+        (.aux1 w goobj/AuxDwarfLines (.-dwarfDebugLinesSym fn)))
+
+      (when (and (!= (.-Pcsp (.-Pcln fn)) nil) (!= (.-Size (.-Pcsp (.-Pcln fn))) 0))
+        (.aux1 w goobj/AuxPcsp (.-Pcsp (.-Pcln fn))))
+
+      (when (and (!= (.-Pcfile (.-Pcln fn)) nil) (!= (.-Size (.-Pcfile (.-Pcln fn))) 0))
+        (.aux1 w goobj/AuxPcfile (.-Pcfile (.-Pcln fn))))
+
+      (when (and (!= (.-Pcline (.-Pcln fn)) nil) (!= (.-Size (.-Pcline (.-Pcln fn))) 0))
+        (.aux1 w goobj/AuxPcline (.-Pcline (.-Pcln fn))))
+
+      (when (and (!= (.-Pcinline (.-Pcln fn)) nil) (!= (.-Size (.-Pcinline (.-Pcln fn))) 0))
+        (.aux1 w goobj/AuxPcinline (.-Pcinline (.-Pcln fn))))
+
+      (when (and (!= (.-sehUnwindInfoSym fn) nil) (!= (.-Size (.-sehUnwindInfoSym fn)) 0))
+        (.aux1 w goobj/AuxSehUnwindInfo (.-sehUnwindInfoSym fn)))
+
+      (range [_ pcSym (.-Pcdata (.-Pcln fn))]
+        (.aux1 w goobj/AuxPcdata pcSym))
+
+      (when (!= (.-WasmImport fn) nil)
+        (when (== (.-Size (.-AuxSym (.-WasmImport fn))) 0)
+          (panic "wasmimport aux sym must have non-zero size"))
+
+        (.aux1 w goobj/AuxWasmImport (.-AuxSym (.-WasmImport fn))))
+
+      (when (!= (.-WasmExport fn) nil)
+        (.aux1 w goobj/AuxWasmType (.-AuxSym (.-WasmExport fn)))))
+
+    (when [v (.VarInfo s)] (!= v nil)
+      (when (and (!= (.-dwarfInfoSym v) nil) (!= (.-Size (.-dwarfInfoSym v)) 0))
+        (.aux1 w goobj/AuxDwarfInfo (.-dwarfInfoSym v))))))
+
+
+
+
+
+^{:go/end 677} (go/method refFlags "Emits flags of referenced indexed symbols.\n" [^{:tag (* writer)} w]
+  (let [seen (make (map (* LSym) bool))]
+    (.traverseSyms (.-ctxt w) traverseRefs ^{:go/end 676} (fn [^{:tag (* LSym)} rs] ; only traverse refs, not auxs, as tools don't need auxs
+        (switch (.-PkgIdx rs)
+          (case [goobj/PkgIdxNone goobj/PkgIdxHashed64 goobj/PkgIdxHashed goobj/PkgIdxBuiltin goobj/PkgIdxSelf] ; not an external indexed reference
+            (return))
+          (case [goobj/PkgIdxInvalid]
+            (panic "unindexed symbol reference")))
+
+        (when (aget seen rs)
+          (return))
+
+        (aset seen rs true)
+        (let [symref (makeSymRef rs)
+            ^{:line 665} flag2 (conv uint8 0)]
+          (when ^{:go/via [Attribute]} (.UsedInIface rs)
+            (set! flag2 bit-or goobj/SymFlagUsedInIface))
+
+          (when (== flag2 0)
+            (return)) ; no need to write zero flags
+
+          (let [o (addr (.-tmpRefFlags w))]
+            (.SetSym o symref)
+            (.SetFlag2 o flag2)
+            (.Write o (.-Writer w))))))))
+
+
+
+
+
+^{:go/end 708} (go/method refNames "Emits names of referenced indexed symbols, used by tools (objdump, nm)\nonly.\n" [^{:tag (* writer)} w]
+  (when (.-Flag_noRefName (.-ctxt w))
+    (return))
+
+  (let [seen (make (map (* LSym) bool))]
+    (.traverseSyms (.-ctxt w) traverseRefs ^{:go/end 702} (fn [^{:tag (* LSym)} rs] ; only traverse refs, not auxs, as tools don't need auxs
+        (switch (.-PkgIdx rs)
+          (case [goobj/PkgIdxNone goobj/PkgIdxHashed64 goobj/PkgIdxHashed goobj/PkgIdxBuiltin goobj/PkgIdxSelf] ; not an external indexed reference
+            (return))
+          (case [goobj/PkgIdxInvalid]
+            (panic "unindexed symbol reference")))
+
+        (when (aget seen rs)
+          (return))
+
+        (aset seen rs true)
+        (let [symref (makeSymRef rs)
+            ^{:line 698} o (addr (.-tmpRefName w))]
+          (.SetSym o symref)
+          (.SetName o (.-Name rs) (.-Writer w))
+          (.Write o (.-Writer w)))))))
+
+;; TODO: output in sorted order?
+;; Currently tools (cmd/internal/goobj package) doesn't use mmap,
+;; and it just read it into a map in memory upfront. If it uses
+;; mmap, if the output is sorted, it probably could avoid reading
+;; into memory and just do lookups in the mmap'd object file.
+
+
+
+^{:go/end 762} (go/func nAuxSym "return the number of aux symbols s have.\n" ^int [^{:tag (* LSym)} s]
+  (let [n 0]
+    (when (!= (.-Gotype s) nil)
+      (inc! n))
+
+    (if [fn (.Func s)] (!= fn nil) (do
+        ;; FuncInfo is an aux symbol, each Funcdata is an aux symbol
+        (set! n + (+ 1 (len (.-Funcdata (.-Pcln fn)))))
+        (when (and (!= (.-dwarfInfoSym fn) nil) (!= (.-Size (.-dwarfInfoSym fn)) 0))
+          (inc! n))
+
+        (when (and (!= (.-dwarfLocSym fn) nil) (!= (.-Size (.-dwarfLocSym fn)) 0))
+          (inc! n))
+
+        (when (and (!= (.-dwarfRangesSym fn) nil) (!= (.-Size (.-dwarfRangesSym fn)) 0))
+          (inc! n))
+
+        (when (and (!= (.-dwarfDebugLinesSym fn) nil) (!= (.-Size (.-dwarfDebugLinesSym fn)) 0))
+          (inc! n))
+
+        (when (and (!= (.-Pcsp (.-Pcln fn)) nil) (!= (.-Size (.-Pcsp (.-Pcln fn))) 0))
+          (inc! n))
+
+        (when (and (!= (.-Pcfile (.-Pcln fn)) nil) (!= (.-Size (.-Pcfile (.-Pcln fn))) 0))
+          (inc! n))
+
+        (when (and (!= (.-Pcline (.-Pcln fn)) nil) (!= (.-Size (.-Pcline (.-Pcln fn))) 0))
+          (inc! n))
+
+        (when (and (!= (.-Pcinline (.-Pcln fn)) nil) (!= (.-Size (.-Pcinline (.-Pcln fn))) 0))
+          (inc! n))
+
+        (when (and (!= (.-sehUnwindInfoSym fn) nil) (!= (.-Size (.-sehUnwindInfoSym fn)) 0))
+          (inc! n))
+
+        (set! n + (len (.-Pcdata (.-Pcln fn))))
+        (when (!= (.-WasmImport fn) nil)
+          (when (or (== (.-AuxSym (.-WasmImport fn)) nil) (== (.-Size (.-AuxSym (.-WasmImport fn))) 0))
+            (panic "wasmimport aux sym must exist and have non-zero size"))
+
+          (inc! n))
+
+        (when (!= (.-WasmExport fn) nil)
+          (inc! n)))
+
+      (when [v (.VarInfo s)] (!= v nil)
+        (when (and (!= (.-dwarfInfoSym v) nil) (!= (.-Size (.-dwarfInfoSym v)) 0))
+          (inc! n))))
+
+
+    ^{:line 761} n))
+
+
+
+^{:go/end 839} (go/func genFuncInfoSyms "generate symbols for FuncInfo.\n" [^{:tag (* Link)} ctxt]
+  (let [infosyms (make (slice (* LSym)) 0 (len (.-Text ctxt)))
+      ^{:line 767 :tag bytes/Buffer} b (zero bytes/Buffer)
+      ^{:line 768} symidx (conv int32 (len (.-defs ctxt)))]
+    (range [_ s (.-Text ctxt)]
+      (let [fn (.Func s)]
+        (when (== fn nil)
+          (continue))
+
+        (let [o ^{:go/breaks [2 4 6 8 10]} (lit goobj/FuncInfo
+              :Args (conv uint32 (.-Args fn))
+              :Locals (conv uint32 (.-Locals fn))
+              :FuncID (.-FuncID fn)
+              :FuncFlag (.-FuncFlag fn)
+              :StartLine (.-StartLine fn))
+
+            ^{:line 781} pc (addr (.-Pcln fn))
+            ^{:line 782} i 0]
+          (set! (.-File o) (make (slice goobj/CUFileIndex) (len (.-UsedFiles pc))))
+          (range [f (.-UsedFiles pc)]
+            (aset (.-File o) i f)
+            (inc! i))
+
+          (sort/Slice (.-File o) ^{:go/end 788} (fn ^bool [^int i ^int j] (< (aget (.-File o) i) (aget (.-File o) j))))
+          (set! (.-InlTree o) (make (slice goobj/InlTreeNode) (len (.-nodes (.-InlTree pc)))))
+          (range [i inl (.-nodes (.-InlTree pc))]
+            (let [(values f l) (.getFileIndexAndLine ctxt (.-Pos inl))]
+              (aset (.-InlTree o) i ^{:go/breaks [2 4 6 8 10]} (lit goobj/InlTreeNode
+                  :Parent (conv int32 (.-Parent inl))
+                  :File (conv goobj/CUFileIndex f)
+                  :Line l
+                  :Func (makeSymRef (.-Func inl))
+                  :ParentPC (.-ParentPC inl)))))
+
+
+
+          (.Write o (addr b))
+          (let [p (.Bytes b)
+              ^{:line 803} isym (addr ^{:go/breaks [2 4 6 8 10]} (lit LSym
+                  :Type objabi/SDATA ; for now, I don't think it matters
+                  :PkgIdx goobj/PkgIdxSelf
+                  :SymIdx symidx
+                  :P (append (conv (slice byte) nil) (spread p))
+                  :Size (conv int64 (len p))))]
+
+            ^{:go/via [Attribute]} (.Set isym AttrIndexed true)
+            (inc! symidx)
+            (set! infosyms (append infosyms isym))
+            (set! (.-FuncInfoSym fn) isym)
+            (.Reset b)
+
+            (let [auxsyms (lit (slice (* LSym)) (.-dwarfRangesSym fn) (.-dwarfLocSym fn) (.-dwarfDebugLinesSym fn) (.-dwarfInfoSym fn))]
+              (when [wi (.-WasmImport fn)] (!= wi nil)
+                (set! auxsyms (append auxsyms (.-AuxSym wi))))
+
+              (when [we (.-WasmExport fn)] (!= we nil)
+                (set! auxsyms (append auxsyms (.-AuxSym we))))
+
+              (range [_ s auxsyms]
+                (when (or (== s nil) (== (.-Size s) 0))
+                  (continue))
+
+                (when ^{:go/via [Attribute]} (.OnList s)
+                  (panic "a symbol is added to defs multiple times"))
+
+                (set! (.-PkgIdx s) goobj/PkgIdxSelf)
+                (set! (.-SymIdx s) symidx)
+                ^{:go/via [Attribute]} (.Set s AttrIndexed true)
+                ^{:go/via [Attribute]} (.Set s AttrOnList true)
+                (inc! symidx)
+                (set! infosyms (append infosyms s))))))))
+
+
+    (set! (.-defs ctxt) (append (.-defs ctxt) (spread infosyms)))))
+
+
+^{:go/end 855} (go/func writeAuxSymDebug [^{:tag (* Link)} ctxt ^{:tag (* LSym)} par ^{:tag (* LSym)} aux]
+  ;; Most aux symbols (ex: funcdata) are not interesting--
+  ;; pick out just the DWARF ones for now.
+  (switch (.-Type aux)
+    (case [objabi/SDWARFLOC
+        ^{:line 846} objabi/SDWARFFCN
+        ^{:line 847} objabi/SDWARFABSFCN
+        ^{:line 848} objabi/SDWARFLINES
+        ^{:line 849} objabi/SDWARFRANGE
+        ^{:line 850} objabi/SDWARFVAR])
+    (default
+      (return)))
+
+  (.writeSymDebugNamed ctxt aux (+ "aux for " (.-Name par))))
+
+
+^{:go/end 867} (go/func debugAsmEmit [^{:tag (* Link)} ctxt]
+  (when (> (.-Debugasm ctxt) 0)
+    (.traverseSyms ctxt traverseDefs (.-writeSymDebug ctxt))
+    (when (> (.-Debugasm ctxt) 1)
+      (let [fn ^{:go/end 863} (fn [^{:tag (* LSym)} par ^{:tag (* LSym)} aux]
+            (writeAuxSymDebug ctxt par aux))]
+
+        (.traverseAuxSyms ctxt traverseAux fn)))))
+
+
+
+
+^{:go/end 871} (go/method writeSymDebug [^{:tag (* Link)} ctxt ^{:tag (* LSym)} s]
+  (.writeSymDebugNamed ctxt s (.-Name s)))
+
+
+^{:go/end 963} (go/method writeSymDebugNamed [^{:tag (* Link)} ctxt ^{:tag (* LSym)} s ^string name]
+  (let [ver ""]
+    (when (> (.-Debugasm ctxt) 1)
+      (set! ver (fmt/Sprintf "<%d>" ^{:go/via [Attribute]} (.ABI s)))
+      (when (> (.-Debugasm ctxt) 2)
+        (set! ver + (fmt/Sprintf "<idx %d %d>" (.-PkgIdx s) (.-SymIdx s)))))
+
+
+    (fmt/Fprintf (.-Bso ctxt) "%s%s " name ver)
+    (when (!= (.-Type s) 0)
+      (fmt/Fprintf (.-Bso ctxt) "%v " (.-Type s)))
+
+    (when ^{:go/via [Attribute]} (.Static s)
+      (fmt/Fprint (.-Bso ctxt) "static "))
+
+    (when ^{:go/via [Attribute]} (.DuplicateOK s)
+      (fmt/Fprintf (.-Bso ctxt) "dupok "))
+
+    (when ^{:go/via [Attribute]} (.CFunc s)
+      (fmt/Fprintf (.-Bso ctxt) "cfunc "))
+
+    (when ^{:go/via [Attribute]} (.NoSplit s)
+      (fmt/Fprintf (.-Bso ctxt) "nosplit "))
+
+    (when (and (!= (.Func s) nil) (!= (bit-and (.-FuncFlag (.Func s)) abi/FuncFlagTopFrame) 0))
+      (fmt/Fprintf (.-Bso ctxt) "topframe "))
+
+    (when (and (!= (.Func s) nil) (!= (bit-and (.-FuncFlag (.Func s)) abi/FuncFlagAsm) 0))
+      (fmt/Fprintf (.-Bso ctxt) "asm "))
+
+    (fmt/Fprintf (.-Bso ctxt) "size=%d align=%#x" (.-Size s) (.-Align s))
+    (when (.IsText (.-Type s))
+      (let [fn (.Func s)]
+        (fmt/Fprintf (.-Bso ctxt) " args=%#x locals=%#x funcid=%#x" (conv uint64 (.-Args fn)) (conv uint64 (.-Locals fn)) (conv uint64 (.-FuncID fn)))
+        (when ^{:go/via [Attribute]} (.Leaf s)
+          (fmt/Fprintf (.-Bso ctxt) " leaf"))))
+
+
+    (fmt/Fprintf (.-Bso ctxt) "\n")
+    (when (.IsText (.-Type s))
+      (for [p (.-Text (.Func s))] (!= p nil) (set! p (.-Link p))
+        (fmt/Fprintf (.-Bso ctxt) "\t%#04x " (conv uint (conv int (.-Pc p))))
+        (if (> (.-Debugasm ctxt) 1)
+          (io/WriteString (.-Bso ctxt) (.String p))
+
+          (.InnermostString p (.-Bso ctxt)))
+
+        (fmt/Fprintln (.-Bso ctxt))))
+
+
+    (for [i 0] (< i (len (.-P s))) (set! i + 16)
+      (fmt/Fprintf (.-Bso ctxt) "\t%#04x" (conv uint i))
+      (let [j i]
+        (for [] (and (< j (+ i 16)) (< j (len (.-P s)))) (inc! j)
+          (fmt/Fprintf (.-Bso ctxt) " %02x" (aget (.-P s) j)))
+
+        (for [] (< j (+ i 16)) (inc! j)
+          (fmt/Fprintf (.-Bso ctxt) "   "))
+
+        (fmt/Fprintf (.-Bso ctxt) "  ")
+        (for [(set! j i)] (and (< j (+ i 16)) (< j (len (.-P s)))) (inc! j)
+          (let [c (conv int (aget (.-P s) j))
+              ^{:line 935} b (conv byte \.)]
+            (when (and (<= \space c) (<= c 0x7e))
+              (set! b (conv byte c)))
+
+            (.WriteByte (.-Bso ctxt) b)))
+
+
+        (fmt/Fprintf (.-Bso ctxt) "\n")))
+
+
+    (^{:inst [(slice Reloc) Reloc]} slices/SortFunc (.-R s) relocByOffCmp) ; generate stable output
+    (range [_ r (.-R s)]
+      (let [name ""
+          ^{:line 948} ver ""]
+        (cond (!= (.-Sym r) nil) (do
+            (set! name (.-Name (.-Sym r)))
+            (when (> (.-Debugasm ctxt) 1)
+              (set! ver (fmt/Sprintf "<%d>" ^{:go/via [Attribute]} (.ABI (.-Sym r))))))
+
+          (== (.-Type r) objabi/R_TLS_LE)
+          (set! name "TLS"))
+
+        (if ^{:go/via [Arch]} (.InFamily (.-Arch ctxt) sys/ARM sys/PPC64)
+          (fmt/Fprintf (.-Bso ctxt) "\trel %d+%d t=%v %s%s+%x\n" (conv int (.-Off r)) (.-Siz r) (.-Type r) name ver (conv uint64 (.-Add r)))
+
+          (fmt/Fprintf (.-Bso ctxt) "\trel %d+%d t=%v %s%s+%d\n" (conv int (.-Off r)) (.-Siz r) (.-Type r) name ver (.-Add r)))))))
+
+
+
+
+
+^{:go/end 968} (go/func relocByOffCmp "relocByOffCmp compare relocations by their offsets.\n" ^int [^Reloc x ^Reloc y]
+  (^{:inst [int32]} cmp/Compare (.-Off x) (.-Off y)))

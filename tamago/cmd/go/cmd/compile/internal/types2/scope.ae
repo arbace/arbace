@@ -1,0 +1,211 @@
+;; Copyright 2013 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; This file implements Scopes.
+
+(in-ns 'go.cmd.compile.internal.types2) (go/file "scope.go" :imports [
+
+
+    ^{:line 10} [syntax "cmd/compile/internal/syntax"]
+    ^{:line 11} [fmt "fmt"]
+    ^{:line 12} [io "io"]
+    ^{:line 13} [slices "slices"]
+    ^{:line 14} [strings "strings"]
+    ^{:line 15} [sync "sync"]])
+
+
+
+
+
+
+(go/type Scope "A Scope maintains a set of objects and links to its containing\n(parent) and contained (children) scopes. Objects may be inserted\nand looked up by name. The zero value for Scope is a ready-to-use\nempty scope.\n" (struct
+    ^{:line 23 :tag (* Scope)} parent
+    ^{:line 24 :tag (slice (* Scope))} children
+    ^{:line 25 :tag int} number ; parent.children[number-1] is this scope; 0 if there is no parent
+    ^{:line 26 :tag (map string Object)} elems ; lazily allocated
+    ^{:line 27 :tag syntax/Pos} pos ^syntax/Pos end ; scope extent; may be invalid
+    ^{:line 28 :tag string} comment ; for debugging only
+    ^{:line 29 :tag bool} isFunc)) ; set if this is a function scope (internal use only)
+
+
+
+
+^{:go/end 42} (go/func NewScope "NewScope returns a new, empty scope contained in the given parent\nscope, if any. The comment is for debugging only.\n" ^{:tag (* Scope)} [^{:tag (* Scope)} parent ^syntax/Pos pos ^syntax/Pos end ^string comment]
+  (let [s (addr (lit Scope parent nil 0 nil pos end comment false))]
+    ;; don't add children to Universe scope!
+    (when (and (!= parent nil) (!= parent Universe))
+      (set! (.-children parent) (append (.-children parent) s))
+      (set! (.-number s) (len (.-children parent))))
+
+    ^{:line 41} s))
+
+
+
+^{:go/end 45} (go/method Parent "Parent returns the scope's containing (parent) scope.\n" ^{:tag (* Scope)} [^{:tag (* Scope)} s] (.-parent s))
+
+
+^{:go/end 48} (go/method Len "Len returns the number of scope elements.\n" ^int [^{:tag (* Scope)} s] (len (.-elems s)))
+
+
+^{:go/end 60} (go/method Names "Names returns the scope's element names in sorted order.\n" ^{:tag (slice string)} [^{:tag (* Scope)} s]
+  (let [names (make (slice string) (len (.-elems s)))
+      ^{:line 53} i 0]
+    (range [name (.-elems s)]
+      (aset names i name)
+      (inc! i))
+
+    (^{:inst [(slice string) string]} slices/Sort names)
+    ^{:line 59} names))
+
+
+
+^{:go/end 63} (go/method NumChildren "NumChildren returns the number of scopes nested in s.\n" ^int [^{:tag (* Scope)} s] (len (.-children s)))
+
+
+^{:go/end 66} (go/method Child "Child returns the i'th child scope for 0 <= i < NumChildren().\n" ^{:tag (* Scope)} [^{:tag (* Scope)} s ^int i] (aget (.-children s) i))
+
+
+
+^{:go/end 70} (go/method Lookup "Lookup returns the object in scope s with the given name if such an\nobject exists; otherwise the result is nil.\n" ^Object [^{:tag (* Scope)} s ^string name] (resolve name (aget (.-elems s) name)))
+
+
+
+
+^{:go/end 83} (go/method lookupIgnoringCase "lookupIgnoringCase returns the objects in scope s whose names match\nthe given name ignoring case. If exported is set, only exported names\nare returned.\n" ^{:tag (slice Object)} [^{:tag (* Scope)} s ^string name ^bool exported]
+  (let [^{:tag (slice Object)} matches (zero (slice Object))]
+    (range [_ n (.Names s)]
+      (when (and ^:go/paren (or (not exported) (isExported n)) (strings/EqualFold n name))
+        (set! matches (append matches (.Lookup s n)))))
+
+
+    ^{:line 82} matches))
+
+
+
+
+
+
+
+^{:go/end 105} (go/method Insert "Insert attempts to insert an object obj into scope s.\nIf s already contains an alternative object alt with\nthe same name, Insert leaves s unchanged and returns alt.\nOtherwise it inserts obj, sets the object's parent scope\nif not already set, and returns nil.\n" ^Object [^{:tag (* Scope)} s ^Object obj]
+  ^{:go/breaks [[5 104]]} (let [name (.Name obj)]
+    (when [alt (.Lookup s name)] (!= alt nil)
+      (return alt))
+
+    (.insert s name obj)
+    ;; TODO(gri) Can we always set the parent to s (or is there
+    ;; a need to keep the original parent or some race condition)?
+    ;; If we can, than we may not need environment.lookupScope
+    ;; which is only there so that we get the correct scope for
+    ;; marking "used" dot-imported packages.
+    (when (== (.Parent obj) nil)
+      (.setParent obj s))
+
+    nil))
+
+
+
+
+
+
+
+
+
+^{:go/breaks [6] :go/end 120} (go/method InsertLazy "InsertLazy is like Insert, but allows deferring construction of the\ninserted object until it's accessed with Lookup. The Object\nreturned by resolve must have the same name as given to InsertLazy.\nIf s already contains an alternative object with the same name,\nInsertLazy leaves s unchanged and returns false. Otherwise it\nrecords the binding and returns true. The object's parent scope\nwill be set to s after resolve is called.\n" ^bool [^{:tag (* Scope)} s ^string name ^{:tag (func [] [Object])} resolve]
+  (when (!= (aget (.-elems s) name) nil)
+    (return false))
+
+  (.insert s name (addr (lit lazyObject :parent s :resolve resolve)))
+  true)
+
+
+^{:go/end 127} (go/method insert [^{:tag (* Scope)} s ^string name ^Object obj]
+  (when (== (.-elems s) nil)
+    (set! (.-elems s) (make (map string Object))))
+
+  (aset (.-elems s) name obj))
+
+
+
+
+
+
+
+^{:go/end 152} (go/method WriteTo "WriteTo writes a string representation of the scope to w,\nwith the scope elements sorted by name.\nThe level of indentation is controlled by n >= 0, with\nn == 0 for no indentation.\nIf recurse is set, it also writes nested (children) scopes.\n" [^{:tag (* Scope)} s ^io/Writer w ^int n ^bool recurse]
+  (let [^:const ^{:val ".  "} ind ".  "
+      ^{:line 136} indn (strings/Repeat ind n)]
+
+    (fmt/Fprintf w "%s%s scope %p {\n" indn (.-comment s) s)
+
+    (let [indn1 (+ indn ind)]
+      (range [_ name (.Names s)]
+        (fmt/Fprintf w "%s%s\n" indn1 (.Lookup s name)))
+
+
+      (when recurse
+        (range [_ s (.-children s)]
+          (.WriteTo s w (+ n 1) recurse)))
+
+
+
+      (fmt/Fprintf w "%s}\n" indn))))
+
+
+
+^{:go/end 159} (go/method String "String returns a string representation of the scope, for debugging.\n" ^string [^{:tag (* Scope)} s]
+  (let [^strings/Builder buf (zero strings/Builder)]
+    (.WriteTo s (addr buf) 0 false)
+    (.String buf)))
+
+
+
+
+(go/type lazyObject "A lazyObject represents an imported Object that has not been fully\nresolved yet by its importer.\n" (struct
+    ^{:line 164 :tag (* Scope)} parent
+    ^{:line 165 :tag (func [] [Object])} resolve
+    ^{:line 166 :tag Object} obj
+    ^{:line 167 :tag sync/Once} once))
+
+
+
+
+^{:go/end 193} (go/func resolve "resolve returns the Object represented by obj, resolving lazy\nobjects as appropriate.\n" ^Object [^string name ^Object obj]
+  (when [(values lazy ok) (assert (* lazyObject) obj)] ok
+    (.Do (.-once lazy) ^{:go/end 188} (fn []
+        (let [obj ((.-resolve lazy))]
+
+          (when [(values _ ok) (assert (* lazyObject) obj)] ok
+            (panic "recursive lazy object"))
+
+          (when (!= (.Name obj) name)
+            (panic "lazy object has unexpected name"))
+
+
+          (when (== (.Parent obj) nil)
+            (.setParent obj (.-parent lazy)))
+
+          (set! (.-obj lazy) obj))))
+
+
+    (set! obj (.-obj lazy)))
+
+  ^{:line 192} obj)
+
+
+
+
+^{:go/end 197} (go/method Parent "stub implementations so *lazyObject implements Object and we can\nstore them directly into Scope.elems.\n" ^{:tag (* Scope)} [(* lazyObject)] (panic "unreachable"))
+^{:go/end 198} (go/method Pos ^syntax/Pos [(* lazyObject)] (panic "unreachable"))
+^{:go/end 199} (go/method Pkg ^{:tag (* Package)} [(* lazyObject)] (panic "unreachable"))
+^{:go/end 200} (go/method Name ^string [(* lazyObject)] (panic "unreachable"))
+^{:go/end 201} (go/method Type ^Type [(* lazyObject)] (panic "unreachable"))
+^{:go/end 202} (go/method Exported ^bool [(* lazyObject)] (panic "unreachable"))
+^{:go/end 203} (go/method Id ^string [(* lazyObject)] (panic "unreachable"))
+^{:go/end 204} (go/method String ^string [(* lazyObject)] (panic "unreachable"))
+^{:go/end 205} (go/method order ^uint32 [(* lazyObject)] (panic "unreachable"))
+^{:go/end 206} (go/method setType [(* lazyObject) Type] (panic "unreachable"))
+^{:go/end 207} (go/method setOrder [(* lazyObject) uint32] (panic "unreachable"))
+^{:go/end 208} (go/method setParent [(* lazyObject) (* Scope)] (panic "unreachable"))
+^{:go/end 209} (go/method sameId ^bool [(* lazyObject) (* Package) string bool] (panic "unreachable"))
+^{:go/end 210} (go/method scopePos ^syntax/Pos [(* lazyObject)] (panic "unreachable"))
+^{:go/end 211} (go/method setScopePos [(* lazyObject) syntax/Pos] (panic "unreachable"))

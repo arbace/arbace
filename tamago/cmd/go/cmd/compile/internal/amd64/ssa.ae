@@ -1,0 +1,2625 @@
+;; Copyright 2016 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.cmd.compile.internal.amd64) (go/file "ssa.go" :imports [
+
+
+    ^{:line 8} [fmt "fmt"]
+    ^{:line 9} [math "math"]
+
+    ^{:line 11} [base "cmd/compile/internal/base"]
+    ^{:line 12} [ir "cmd/compile/internal/ir"]
+    ^{:line 13} [logopt "cmd/compile/internal/logopt"]
+    ^{:line 14} [objw "cmd/compile/internal/objw"]
+    ^{:line 15} [ssa "cmd/compile/internal/ssa"]
+    ^{:line 16} [ssagen "cmd/compile/internal/ssagen"]
+    ^{:line 17} [types "cmd/compile/internal/types"]
+    ^{:line 18} [obj "cmd/internal/obj"]
+    ^{:line 19} [x86 "cmd/internal/obj/x86"]
+    ^{:line 20} [abi "internal/abi"]])
+
+
+
+^{:go/end 44} (go/func ssaMarkMoves "ssaMarkMoves marks any MOVXconst ops that need to avoid clobbering flags.\n" [^{:tag (* ssagen/State)} s ^{:tag (* ssa/Block)} b]
+  (let [flive (.-FlagsLiveAtEnd b)]
+    (range [_ c (.ControlValues b)]
+      (set! flive (or (.IsFlags (.-Type c)) flive)))
+
+    (for [i (- (len (.-Values b)) 1)] (>= i 0) (dec! i)
+      (let [v (aget (.-Values b) i)]
+        (when (and flive ^:go/paren (or (== (.-Op v) ssa/OpAMD64MOVLconst) (== (.-Op v) ssa/OpAMD64MOVQconst)))
+          ;; The "mark" is any non-nil Aux value.
+          (set! (.-Aux v) ssa/AuxMark))
+
+        (when (.IsFlags (.-Type v))
+          (set! flive false))
+
+        (range [_ a (.-Args v)]
+          (when (.IsFlags (.-Type a))
+            (set! flive true)))))))
+
+
+
+
+
+^{:go/end 48} (go/func isGPReg ^bool [^int16 r]
+  (and (<= x86/REG_AL r) (<= r x86/REG_R15)))
+
+
+^{:go/end 52} (go/func isFPReg ^bool [^int16 r]
+  (and (<= x86/REG_X0 r) (<= r x86/REG_Z31)))
+
+
+^{:go/end 56} (go/func isKReg ^bool [^int16 r]
+  (and (<= x86/REG_K0 r) (<= r x86/REG_K7)))
+
+
+^{:go/end 60} (go/func isLowFPReg ^bool [^int16 r]
+  (and (<= x86/REG_X0 r) (<= r x86/REG_X15)))
+
+
+^{:go/end 64} (go/func isHighFPReg ^bool [^int16 r]
+  (or (and (<= x86/REG_X16 r) (<= r x86/REG_X31)) (and (<= x86/REG_Y16 r) (<= r x86/REG_Y31)) (and (<= x86/REG_Z16 r) (<= r x86/REG_Z31))))
+
+
+
+^{:go/end 79} (go/func loadByRegWidth "loadByRegWidth returns the load instruction of the given register of a given width.\n" ^obj/As [^int16 r ^int64 width]
+  ;; Avoid partial register write for GPR
+  (when (and (not (isFPReg r)) (not (isKReg r)))
+    (switch width
+      (case [1]
+        (return x86/AMOVBLZX))
+      (case [2]
+        (return x86/AMOVWLZX))))
+
+
+  ;; Otherwise, there's no difference between load and store opcodes.
+  (storeByRegWidth r width))
+
+
+
+
+^{:go/end 118} (go/func storeByRegWidth "storeByRegWidth returns the store instruction of the given register of a given width.\nIt's also used for loading const to a reg.\n" ^obj/As [^int16 r ^int64 width]
+  (when (isHighFPReg r)
+    ;; High registers require AVX512 instruction
+    (return x86/AVMOVDQU64))
+
+  (when (isFPReg r)
+    (switch width
+      (case [4]
+        (return x86/AMOVSS))
+      (case [8]
+        (return x86/AMOVSD))
+      (case [16]
+        ;; int128s are in SSE registers
+        (return x86/AMOVUPS))
+      (case [32]
+        (return x86/AVMOVDQU))
+      (case [64]
+        (return x86/AVMOVDQU64))))
+
+
+  (when (isKReg r)
+    (return x86/AKMOVQ))
+
+  ;; gp
+  (switch width
+    (case [1]
+      (return x86/AMOVB))
+    (case [2]
+      (return x86/AMOVW))
+    (case [4]
+      (return x86/AMOVL))
+    (case [8]
+      (return x86/AMOVQ)))
+
+  (panic (fmt/Sprintf "bad store reg=%v, width=%d" r width)))
+
+
+
+^{:go/end 167} (go/func moveByRegsWidth "moveByRegsWidth returns the reg->reg move instruction of the given dest/src registers of a given width.\n" ^obj/As [^int16 dest ^int16 src ^int64 width]
+  ;; fp -> fp
+  (when (and (isFPReg dest) (isFPReg src))
+    (when (or (isHighFPReg src) (isHighFPReg dest))
+      ;; High registers require AVX512 instruction
+      (return x86/AVMOVDQU64))
+
+    ;; Moving the whole sse2 register is faster
+    ;; than moving just the correct low portion of it.
+    ;; There is no xmm->xmm move with 1 byte opcode,
+    ;; so use movups, which has 2 byte opcode.
+    (when (<= width 16)
+      (return x86/AMOVUPS))
+
+    (when (<= width 32)
+      (return x86/AVMOVDQU))
+
+    (return x86/AVMOVDQU64))
+
+  ;; k -> gp, gp -> k, k -> k
+  (when (or (isKReg dest) (isKReg src))
+    (when (or (isFPReg dest) (isFPReg src))
+      (panic (fmt/Sprintf "bad move, src=%v, dest=%v, width=%d" src dest width)))
+
+    (return x86/AKMOVQ))
+
+  ;; gp -> fp, fp -> gp, gp -> gp
+  (switch width
+    (case [1]
+      ;; Avoids partial register write
+      (return x86/AMOVL))
+    (case [2]
+      (return x86/AMOVL))
+    (case [4]
+      (return x86/AMOVL))
+    (case [8]
+      (return x86/AMOVQ))
+    (case [16]
+      ;; int128s are in SSE registers
+      (return x86/AMOVUPS))
+    (case [32]
+      (return x86/AVMOVDQU))
+    (case [64]
+      (return x86/AVMOVDQU64)))
+
+  (panic (fmt/Sprintf "bad move, src=%v, dest=%v, width=%d" src dest width)))
+
+
+
+
+
+
+
+
+^{:go/end 182} (go/func opregreg "opregreg emits instructions for\n\n\tdest := dest(To) op src(From)\n\nand also returns the created obj.Prog so it\nmay be further adjusted (offset, scale, etc).\n" ^{:tag (* obj/Prog)} [^{:tag (* ssagen/State)} s ^obj/As op ^int16 dest ^int16 src]
+  (let [p (.Prog s op)]
+    (set! (.-Type (.-From p)) obj/TYPE_REG)
+    (set! (.-Type (.-To p)) obj/TYPE_REG)
+    (set! (.-Reg (.-To p)) dest)
+    (set! (.-Reg (.-From p)) src)
+    ^{:line 181} p))
+
+
+
+
+
+
+^{:go/end 197} (go/func memIdx "memIdx fills out a as an indexed memory reference for v.\nIt assumes that the base register and the index register\nare v.Args[0].Reg() and v.Args[1].Reg(), respectively.\nThe caller must still use gc.AddAux/gc.AddAux2 to handle v.Aux as necessary.\n" [^{:tag (* obj/Addr)} a ^{:tag (* ssa/Value)} v]
+  (let [(values r i) (values (.Reg (aget (.-Args v) 0)) (.Reg (aget (.-Args v) 1)))]
+    (set! (.-Type a) obj/TYPE_MEM)
+    (set! (.-Scale a) (.Scale (.-Op v)))
+    (when (and (== (.-Scale a) 1) (== i x86/REG_SP))
+      (set! (values r i) (values i r)))
+
+    (set! (.-Reg a) r)
+    (set! (.-Index a) i)))
+
+
+^{:go/end 225} (go/func getgFromTLS [^{:tag (* ssagen/State)} s ^int16 r]
+  ;; See the comments in cmd/internal/obj/x86/obj6.go
+  ;; near CanUse1InsnTLS for a detailed explanation of these instructions.
+  (if (x86/CanUse1InsnTLS base/Ctxt)
+    ;; MOVQ (TLS), r
+    (let [p (.Prog s x86/AMOVQ)]
+      (set! (.-Type (.-From p)) obj/TYPE_MEM)
+      (set! (.-Reg (.-From p)) x86/REG_TLS)
+      (set! (.-Type (.-To p)) obj/TYPE_REG)
+      (set! (.-Reg (.-To p)) r))
+
+    ;; MOVQ TLS, r
+    ;; MOVQ (r)(TLS*1), r
+    (let [p (.Prog s x86/AMOVQ)]
+      (set! (.-Type (.-From p)) obj/TYPE_REG)
+      (set! (.-Reg (.-From p)) x86/REG_TLS)
+      (set! (.-Type (.-To p)) obj/TYPE_REG)
+      (set! (.-Reg (.-To p)) r)
+      (let [q (.Prog s x86/AMOVQ)]
+        (set! (.-Type (.-From q)) obj/TYPE_MEM)
+        (set! (.-Reg (.-From q)) r)
+        (set! (.-Index (.-From q)) x86/REG_TLS)
+        (set! (.-Scale (.-From q)) 1)
+        (set! (.-Type (.-To q)) obj/TYPE_REG)
+        (set! (.-Reg (.-To q)) r)))))
+
+
+
+^{:go/end 1924} (go/func ssaGenValue [^{:tag (* ssagen/State)} s ^{:tag (* ssa/Value)} v]
+  (switch (.-Op v)
+    (case [ssa/OpAMD64VFMADD231SD ssa/OpAMD64VFMADD231SS]
+      (let [p (.Prog s (.Asm (.-Op v)))]
+        (set! (.-From p) (lit obj/Addr :Type obj/TYPE_REG :Reg (.Reg (aget (.-Args v) 2))))
+        (set! (.-To p) (lit obj/Addr :Type obj/TYPE_REG :Reg (.Reg v)))
+        (.AddRestSourceReg p (.Reg (aget (.-Args v) 1)))))
+    (case [ssa/OpAMD64ADDQ ssa/OpAMD64ADDL]
+      (let [r (.Reg v)
+          ^{:line 236} r1 (.Reg (aget (.-Args v) 0))
+          ^{:line 237} r2 (.Reg (aget (.-Args v) 1))]
+        (switch
+          (case [(== r r1)]
+            (let [p (.Prog s (.Asm (.-Op v)))]
+              (set! (.-Type (.-From p)) obj/TYPE_REG)
+              (set! (.-Reg (.-From p)) r2)
+              (set! (.-Type (.-To p)) obj/TYPE_REG)
+              (set! (.-Reg (.-To p)) r)))
+          (case [(== r r2)]
+            (let [p (.Prog s (.Asm (.-Op v)))]
+              (set! (.-Type (.-From p)) obj/TYPE_REG)
+              (set! (.-Reg (.-From p)) r1)
+              (set! (.-Type (.-To p)) obj/TYPE_REG)
+              (set! (.-Reg (.-To p)) r)))
+          (default
+            (let [^obj/As asm (zero obj/As)]
+              (if (== (.-Op v) ssa/OpAMD64ADDQ)
+                (set! asm x86/ALEAQ)
+
+                (set! asm x86/ALEAL))
+
+              (let [p (.Prog s asm)]
+                (set! (.-Type (.-From p)) obj/TYPE_MEM)
+                (set! (.-Reg (.-From p)) r1)
+                (set! (.-Scale (.-From p)) 1)
+                (set! (.-Index (.-From p)) r2)
+                (set! (.-Type (.-To p)) obj/TYPE_REG)
+                (set! (.-Reg (.-To p)) r)))))))
+
+    ;; 2-address opcode arithmetic
+    (case [ssa/OpAMD64SUBQ ssa/OpAMD64SUBL
+        ^{:line 268} ssa/OpAMD64MULQ ssa/OpAMD64MULL
+        ^{:line 269} ssa/OpAMD64ANDQ ssa/OpAMD64ANDL
+        ^{:line 270} ssa/OpAMD64ORQ ssa/OpAMD64ORL
+        ^{:line 271} ssa/OpAMD64XORQ ssa/OpAMD64XORL
+        ^{:line 272} ssa/OpAMD64SHLQ ssa/OpAMD64SHLL
+        ^{:line 273} ssa/OpAMD64SHRQ ssa/OpAMD64SHRL ssa/OpAMD64SHRW ssa/OpAMD64SHRB
+        ^{:line 274} ssa/OpAMD64SARQ ssa/OpAMD64SARL ssa/OpAMD64SARW ssa/OpAMD64SARB
+        ^{:line 275} ssa/OpAMD64ROLQ ssa/OpAMD64ROLL ssa/OpAMD64ROLW ssa/OpAMD64ROLB
+        ^{:line 276} ssa/OpAMD64RORQ ssa/OpAMD64RORL ssa/OpAMD64RORW ssa/OpAMD64RORB
+        ^{:line 277} ssa/OpAMD64ADDSS ssa/OpAMD64ADDSD ssa/OpAMD64SUBSS ssa/OpAMD64SUBSD
+        ^{:line 278} ssa/OpAMD64MULSS ssa/OpAMD64MULSD ssa/OpAMD64DIVSS ssa/OpAMD64DIVSD
+        ^{:line 279} ssa/OpAMD64MINSS ssa/OpAMD64MINSD
+        ^{:line 280} ssa/OpAMD64POR ssa/OpAMD64PXOR
+        ^{:line 281} ssa/OpAMD64BTSL ssa/OpAMD64BTSQ
+        ^{:line 282} ssa/OpAMD64BTCL ssa/OpAMD64BTCQ
+        ^{:line 283} ssa/OpAMD64BTRL ssa/OpAMD64BTRQ
+        ^{:line 284} ssa/OpAMD64PCMPEQB ssa/OpAMD64PSIGNB
+        ^{:line 285} ssa/OpAMD64PUNPCKLBW]
+      (opregreg s (.Asm (.-Op v)) (.Reg v) (.Reg (aget (.-Args v) 1))))
+
+    (case [ssa/OpAMD64PSHUFLW]
+      (let [p (.Prog s (.Asm (.-Op v)))
+          ^{:line 290} imm (.-AuxInt v)]
+        (when (or (< imm 0) (> imm 255))
+          (.Fatalf v "Invalid source selection immediate"))
+
+        (set! (.-Offset (.-From p)) imm)
+        (set! (.-Type (.-From p)) obj/TYPE_CONST)
+        (.AddRestSourceReg p (.Reg (aget (.-Args v) 0)))
+        (set! (.-Type (.-To p)) obj/TYPE_REG)
+        (set! (.-Reg (.-To p)) (.Reg v))))
+
+    (case [ssa/OpAMD64PSHUFBbroadcast]
+      ;; PSHUFB with a control mask of zero copies byte 0 to all
+      ;; bytes in the register.
+      ;;
+      ;; X15 is always zero with ABIInternal.
+      (when (!= (.-ABI s) obj/ABIInternal)
+        ;; zero X15 manually
+        (opregreg s x86/AXORPS x86/REG_X15 x86/REG_X15))
+
+
+      (let [p (.Prog s (.Asm (.-Op v)))]
+        (set! (.-Type (.-From p)) obj/TYPE_REG)
+        (set! (.-Type (.-To p)) obj/TYPE_REG)
+        (set! (.-Reg (.-To p)) (.Reg v))
+        (set! (.-Reg (.-From p)) x86/REG_X15)))
+
+    (case [ssa/OpAMD64BLSIQ ssa/OpAMD64BLSIL
+        ^{:line 317} ssa/OpAMD64BLSMSKQ ssa/OpAMD64BLSMSKL
+        ^{:line 318} ssa/OpAMD64BLSRQ ssa/OpAMD64BLSRL]
+      (let [p (.Prog s (.Asm (.-Op v)))]
+        (set! (.-Type (.-From p)) obj/TYPE_REG)
+        (set! (.-Reg (.-From p)) (.Reg (aget (.-Args v) 0)))
+        (set! (.-Type (.-To p)) obj/TYPE_REG)
+        (switch (.-Op v)
+          (case [ssa/OpAMD64BLSRQ ssa/OpAMD64BLSRL]
+            (set! (.-Reg (.-To p)) (.Reg0 v)))
+          (default
+            (set! (.-Reg (.-To p)) (.Reg v))))))
+
+
+    (case [ssa/OpAMD64ANDNQ ssa/OpAMD64ANDNL]
+      (let [p (.Prog s (.Asm (.-Op v)))]
+        (set! (.-Type (.-From p)) obj/TYPE_REG)
+        (set! (.-Reg (.-From p)) (.Reg (aget (.-Args v) 0)))
+        (set! (.-Type (.-To p)) obj/TYPE_REG)
+        (set! (.-Reg (.-To p)) (.Reg v))
+        (.AddRestSourceReg p (.Reg (aget (.-Args v) 1)))))
+
+    (case [ssa/OpAMD64SARXL ssa/OpAMD64SARXQ
+        ^{:line 339} ssa/OpAMD64SHLXL ssa/OpAMD64SHLXQ
+        ^{:line 340} ssa/OpAMD64SHRXL ssa/OpAMD64SHRXQ]
+      (let [p (opregreg s (.Asm (.-Op v)) (.Reg v) (.Reg (aget (.-Args v) 1)))]
+        (.AddRestSourceReg p (.Reg (aget (.-Args v) 0)))))
+
+    (case [ssa/OpAMD64SHLXLload ssa/OpAMD64SHLXQload
+        ^{:line 345} ssa/OpAMD64SHRXLload ssa/OpAMD64SHRXQload
+        ^{:line 346} ssa/OpAMD64SARXLload ssa/OpAMD64SARXQload]
+      (let [p (opregreg s (.Asm (.-Op v)) (.Reg v) (.Reg (aget (.-Args v) 1)))
+          ^{:line 348} m (lit obj/Addr :Type obj/TYPE_MEM :Reg (.Reg (aget (.-Args v) 0)))]
+        (ssagen/AddAux (addr m) v)
+        (.AddRestSource p m)))
+
+    (case [ssa/OpAMD64SHLXLloadidx1 ssa/OpAMD64SHLXLloadidx4 ssa/OpAMD64SHLXLloadidx8
+        ^{:line 353} ssa/OpAMD64SHRXLloadidx1 ssa/OpAMD64SHRXLloadidx4 ssa/OpAMD64SHRXLloadidx8
+        ^{:line 354} ssa/OpAMD64SARXLloadidx1 ssa/OpAMD64SARXLloadidx4 ssa/OpAMD64SARXLloadidx8
+        ^{:line 355} ssa/OpAMD64SHLXQloadidx1 ssa/OpAMD64SHLXQloadidx8
+        ^{:line 356} ssa/OpAMD64SHRXQloadidx1 ssa/OpAMD64SHRXQloadidx8
+        ^{:line 357} ssa/OpAMD64SARXQloadidx1 ssa/OpAMD64SARXQloadidx8]
+      (let [p (opregreg s (.Asm (.-Op v)) (.Reg v) (.Reg (aget (.-Args v) 2)))
+          ^{:line 359} m (lit obj/Addr :Type obj/TYPE_MEM)]
+        (memIdx (addr m) v)
+        (ssagen/AddAux (addr m) v)
+        (.AddRestSource p m)))
+
+    (case [ssa/OpAMD64DIVQU ssa/OpAMD64DIVLU ssa/OpAMD64DIVWU]
+      ;; Arg[0] (the dividend) is in AX.
+      ;; Arg[1] (the divisor) can be in any other register.
+      ;; Result[0] (the quotient) is in AX.
+      ;; Result[1] (the remainder) is in DX.
+      (let [r (.Reg (aget (.-Args v) 1))]
+
+        ;; Zero extend dividend.
+        (opregreg s x86/AXORL x86/REG_DX x86/REG_DX)
+
+        ;; Issue divide.
+        (let [p (.Prog s (.Asm (.-Op v)))]
+          (set! (.-Type (.-From p)) obj/TYPE_REG)
+          (set! (.-Reg (.-From p)) r))))
+
+    (case [ssa/OpAMD64DIVQ ssa/OpAMD64DIVL ssa/OpAMD64DIVW]
+      ;; Arg[0] (the dividend) is in AX.
+      ;; Arg[1] (the divisor) can be in any other register.
+      ;; Result[0] (the quotient) is in AX.
+      ;; Result[1] (the remainder) is in DX.
+      (let [r (.Reg (aget (.-Args v) 1))
+
+          (values ^obj/As opCMP ^obj/As opNEG ^obj/As opSXD) (zero obj/As)]
+        (switch (.-Op v)
+          (case [ssa/OpAMD64DIVQ]
+            (set! (values opCMP opNEG opSXD) (values x86/ACMPQ x86/ANEGQ x86/ACQO)))
+          (case [ssa/OpAMD64DIVL]
+            (set! (values opCMP opNEG opSXD) (values x86/ACMPL x86/ANEGL x86/ACDQ)))
+          (case [ssa/OpAMD64DIVW]
+            (set! (values opCMP opNEG opSXD) (values x86/ACMPW x86/ANEGW x86/ACWD))))
+
+
+        ;; CPU faults upon signed overflow, which occurs when the most
+        ;; negative int is divided by -1. Handle divide by -1 as a special case.
+        (let [(values ^{:tag (* obj/Prog)} j1 ^{:tag (* obj/Prog)} j2) (zero (* obj/Prog))]
+          (when (ssa/DivisionNeedsFixUp v)
+            (let [c (.Prog s opCMP)]
+              (set! (.-Type (.-From c)) obj/TYPE_REG)
+              (set! (.-Reg (.-From c)) r)
+              (set! (.-Type (.-To c)) obj/TYPE_CONST)
+              (set! (.-Offset (.-To c)) -1)
+
+              ;; Divisor is not -1, proceed with normal division.
+              (set! j1 (.Prog s x86/AJNE))
+              (set! (.-Type (.-To j1)) obj/TYPE_BRANCH)
+
+              ;; Divisor is -1, manually compute quotient and remainder via fixup code.
+              ;; n / -1 = -n
+              (let [n1 (.Prog s opNEG)]
+                (set! (.-Type (.-To n1)) obj/TYPE_REG)
+                (set! (.-Reg (.-To n1)) x86/REG_AX)
+
+                ;; n % -1 == 0
+                (opregreg s x86/AXORL x86/REG_DX x86/REG_DX)
+
+                ;; TODO(khr): issue only the -1 fixup code we need.
+                ;; For instance, if only the quotient is used, no point in zeroing the remainder.
+
+                ;; Skip over normal division.
+                (set! j2 (.Prog s obj/AJMP))
+                (set! (.-Type (.-To j2)) obj/TYPE_BRANCH))))
+
+
+          ;; Sign extend dividend and perform division.
+          (let [p (.Prog s opSXD)]
+            (when (!= j1 nil)
+              (.SetTarget (.-To j1) p))
+
+            (set! p (.Prog s (.Asm (.-Op v))))
+            (set! (.-Type (.-From p)) obj/TYPE_REG)
+            (set! (.-Reg (.-From p)) r)
+
+            (when (!= j2 nil)
+              (.SetTarget (.-To j2) (.Pc s)))))))
+
+
+    (case [ssa/OpAMD64HMULQ ssa/OpAMD64HMULL ssa/OpAMD64HMULQU ssa/OpAMD64HMULLU]
+      ;; the frontend rewrites constant division by 8/16/32 bit integers into
+      ;; HMUL by a constant
+      ;; SSA rewrites generate the 64 bit versions
+
+      ;; Arg[0] is already in AX as it's the only register we allow
+      ;; and DX is the only output we care about (the high bits)
+      (let [p (.Prog s (.Asm (.-Op v)))]
+        (set! (.-Type (.-From p)) obj/TYPE_REG)
+        (set! (.-Reg (.-From p)) (.Reg (aget (.-Args v) 1)))
+
+        ;; IMULB puts the high portion in AH instead of DL,
+        ;; so move it to DL for consistency
+        (when (== (.Size (.-Type v)) 1)
+          (let [m (.Prog s x86/AMOVB)]
+            (set! (.-Type (.-From m)) obj/TYPE_REG)
+            (set! (.-Reg (.-From m)) x86/REG_AH)
+            (set! (.-Type (.-To m)) obj/TYPE_REG)
+            (set! (.-Reg (.-To m)) x86/REG_DX)))))
+
+
+    (case [ssa/OpAMD64MULQU ssa/OpAMD64MULLU]
+      ;; Arg[0] is already in AX as it's the only register we allow
+      ;; results lo in AX
+      (let [p (.Prog s (.Asm (.-Op v)))]
+        (set! (.-Type (.-From p)) obj/TYPE_REG)
+        (set! (.-Reg (.-From p)) (.Reg (aget (.-Args v) 1)))))
+
+    (case [ssa/OpAMD64MULQU2]
+      ;; Arg[0] is already in AX as it's the only register we allow
+      ;; results hi in DX, lo in AX
+      (let [p (.Prog s (.Asm (.-Op v)))]
+        (set! (.-Type (.-From p)) obj/TYPE_REG)
+        (set! (.-Reg (.-From p)) (.Reg (aget (.-Args v) 1)))))
+
+    (case [ssa/OpAMD64DIVQU2]
+      ;; Arg[0], Arg[1] are already in Dx, AX, as they're the only registers we allow
+      ;; results q in AX, r in DX
+      (let [p (.Prog s (.Asm (.-Op v)))]
+        (set! (.-Type (.-From p)) obj/TYPE_REG)
+        (set! (.-Reg (.-From p)) (.Reg (aget (.-Args v) 2)))))
+
+    (case [ssa/OpAMD64AVGQU]
+      ;; compute (x+y)/2 unsigned.
+      ;; Do a 64-bit add, the overflow goes into the carry.
+      ;; Shift right once and pull the carry back into the 63rd bit.
+      (let [p (.Prog s x86/AADDQ)]
+        (set! (.-Type (.-From p)) obj/TYPE_REG)
+        (set! (.-Type (.-To p)) obj/TYPE_REG)
+        (set! (.-Reg (.-To p)) (.Reg v))
+        (set! (.-Reg (.-From p)) (.Reg (aget (.-Args v) 1)))
+        (set! p (.Prog s x86/ARCRQ))
+        (set! (.-Type (.-From p)) obj/TYPE_CONST)
+        (set! (.-Offset (.-From p)) 1)
+        (set! (.-Type (.-To p)) obj/TYPE_REG)
+        (set! (.-Reg (.-To p)) (.Reg v))))
+
+    (case [ssa/OpAMD64ADDQcarry ssa/OpAMD64ADCQ]
+      (let [r (.Reg0 v)
+          ^{:line 499} r0 (.Reg (aget (.-Args v) 0))
+          ^{:line 500} r1 (.Reg (aget (.-Args v) 1))]
+        (switch r
+          (case [r0]
+            (let [p (.Prog s (.Asm (.-Op v)))]
+              (set! (.-Type (.-From p)) obj/TYPE_REG)
+              (set! (.-Reg (.-From p)) r1)
+              (set! (.-Type (.-To p)) obj/TYPE_REG)
+              (set! (.-Reg (.-To p)) r)))
+          (case [r1]
+            (let [p (.Prog s (.Asm (.-Op v)))]
+              (set! (.-Type (.-From p)) obj/TYPE_REG)
+              (set! (.-Reg (.-From p)) r0)
+              (set! (.-Type (.-To p)) obj/TYPE_REG)
+              (set! (.-Reg (.-To p)) r)))
+          (default
+            (.Fatalf v "output not in same register as an input %s" (.LongString v))))))
+
+
+    (case [ssa/OpAMD64SUBQborrow ssa/OpAMD64SBBQ]
+      (let [p (.Prog s (.Asm (.-Op v)))]
+        (set! (.-Type (.-From p)) obj/TYPE_REG)
+        (set! (.-Reg (.-From p)) (.Reg (aget (.-Args v) 1)))
+        (set! (.-Type (.-To p)) obj/TYPE_REG)
+        (set! (.-Reg (.-To p)) (.Reg0 v))))
+
+    (case [ssa/OpAMD64ADDQconstcarry ssa/OpAMD64ADCQconst ssa/OpAMD64SUBQconstborrow ssa/OpAMD64SBBQconst]
+      (let [p (.Prog s (.Asm (.-Op v)))]
+        (set! (.-Type (.-From p)) obj/TYPE_CONST)
+        (set! (.-Offset (.-From p)) (.-AuxInt v))
+        (set! (.-Type (.-To p)) obj/TYPE_REG)
+        (set! (.-Reg (.-To p)) (.Reg0 v))))
+
+    (case [ssa/OpAMD64ADDQconst ssa/OpAMD64ADDLconst]
+      (let [r (.Reg v)
+          ^{:line 534} a (.Reg (aget (.-Args v) 0))]
+        (when (== r a)
+          (switch (.-AuxInt v)
+            (case [1]
+              (let [^obj/As asm (zero obj/As)]
+                ;; Software optimization manual recommends add $1,reg.
+                ;; But inc/dec is 1 byte smaller. ICC always uses inc
+                ;; Clang/GCC choose depending on flags, but prefer add.
+                ;; Experiments show that inc/dec is both a little faster
+                ;; and make a binary a little smaller.
+                (if (== (.-Op v) ssa/OpAMD64ADDQconst)
+                  (set! asm x86/AINCQ)
+
+                  (set! asm x86/AINCL))
+
+                (let [p (.Prog s asm)]
+                  (set! (.-Type (.-To p)) obj/TYPE_REG)
+                  (set! (.-Reg (.-To p)) r)
+                  (return))))
+            (case [-1]
+              (let [^obj/As asm (zero obj/As)]
+                (if (== (.-Op v) ssa/OpAMD64ADDQconst)
+                  (set! asm x86/ADECQ)
+
+                  (set! asm x86/ADECL))
+
+                (let [p (.Prog s asm)]
+                  (set! (.-Type (.-To p)) obj/TYPE_REG)
+                  (set! (.-Reg (.-To p)) r)
+                  (return))))
+            (case [0x80]
+              ;; 'SUBQ $-0x80, r' is shorter to encode than
+              ;; and functionally equivalent to 'ADDQ $0x80, r'.
+              (let [asm x86/ASUBL]
+                (when (== (.-Op v) ssa/OpAMD64ADDQconst)
+                  (set! asm x86/ASUBQ))
+
+                (let [p (.Prog s asm)]
+                  (set! (.-Type (.-From p)) obj/TYPE_CONST)
+                  (set! (.-Offset (.-From p)) -0x80)
+                  (set! (.-Type (.-To p)) obj/TYPE_REG)
+                  (set! (.-Reg (.-To p)) r)
+                  (return)))))
+
+
+          (let [p (.Prog s (.Asm (.-Op v)))]
+            (set! (.-Type (.-From p)) obj/TYPE_CONST)
+            (set! (.-Offset (.-From p)) (.-AuxInt v))
+            (set! (.-Type (.-To p)) obj/TYPE_REG)
+            (set! (.-Reg (.-To p)) r)
+            (return)))
+
+        (let [^obj/As asm (zero obj/As)]
+          (if (== (.-Op v) ssa/OpAMD64ADDQconst)
+            (set! asm x86/ALEAQ)
+
+            (set! asm x86/ALEAL))
+
+          (let [p (.Prog s asm)]
+            (set! (.-Type (.-From p)) obj/TYPE_MEM)
+            (set! (.-Reg (.-From p)) a)
+            (set! (.-Offset (.-From p)) (.-AuxInt v))
+            (set! (.-Type (.-To p)) obj/TYPE_REG)
+            (set! (.-Reg (.-To p)) r)))))
+
+    (case [ssa/OpAMD64CMOVQEQ ssa/OpAMD64CMOVLEQ ssa/OpAMD64CMOVWEQ
+        ^{:line 600} ssa/OpAMD64CMOVQLT ssa/OpAMD64CMOVLLT ssa/OpAMD64CMOVWLT
+        ^{:line 601} ssa/OpAMD64CMOVQNE ssa/OpAMD64CMOVLNE ssa/OpAMD64CMOVWNE
+        ^{:line 602} ssa/OpAMD64CMOVQGT ssa/OpAMD64CMOVLGT ssa/OpAMD64CMOVWGT
+        ^{:line 603} ssa/OpAMD64CMOVQLE ssa/OpAMD64CMOVLLE ssa/OpAMD64CMOVWLE
+        ^{:line 604} ssa/OpAMD64CMOVQGE ssa/OpAMD64CMOVLGE ssa/OpAMD64CMOVWGE
+        ^{:line 605} ssa/OpAMD64CMOVQHI ssa/OpAMD64CMOVLHI ssa/OpAMD64CMOVWHI
+        ^{:line 606} ssa/OpAMD64CMOVQLS ssa/OpAMD64CMOVLLS ssa/OpAMD64CMOVWLS
+        ^{:line 607} ssa/OpAMD64CMOVQCC ssa/OpAMD64CMOVLCC ssa/OpAMD64CMOVWCC
+        ^{:line 608} ssa/OpAMD64CMOVQCS ssa/OpAMD64CMOVLCS ssa/OpAMD64CMOVWCS
+        ^{:line 609} ssa/OpAMD64CMOVQGTF ssa/OpAMD64CMOVLGTF ssa/OpAMD64CMOVWGTF
+        ^{:line 610} ssa/OpAMD64CMOVQGEF ssa/OpAMD64CMOVLGEF ssa/OpAMD64CMOVWGEF]
+      (let [p (.Prog s (.Asm (.-Op v)))]
+        (set! (.-Type (.-From p)) obj/TYPE_REG)
+        (set! (.-Reg (.-From p)) (.Reg (aget (.-Args v) 1)))
+        (set! (.-Type (.-To p)) obj/TYPE_REG)
+        (set! (.-Reg (.-To p)) (.Reg v))))
+
+    (case [ssa/OpAMD64CMOVQNEF ssa/OpAMD64CMOVLNEF ssa/OpAMD64CMOVWNEF]
+      ;; Flag condition: ^ZERO || PARITY
+      ;; Generate:
+      ;;   CMOV*NE  SRC,DST
+      ;;   CMOV*PS  SRC,DST
+      (let [p (.Prog s (.Asm (.-Op v)))]
+        (set! (.-Type (.-From p)) obj/TYPE_REG)
+        (set! (.-Reg (.-From p)) (.Reg (aget (.-Args v) 1)))
+        (set! (.-Type (.-To p)) obj/TYPE_REG)
+        (set! (.-Reg (.-To p)) (.Reg v))
+        (let [^{:tag (* obj/Prog)} q (zero (* obj/Prog))]
+          (cond (== (.-Op v) ssa/OpAMD64CMOVQNEF)
+            (set! q (.Prog s x86/ACMOVQPS))
+            (== (.-Op v) ssa/OpAMD64CMOVLNEF)
+            (set! q (.Prog s x86/ACMOVLPS)) :else
+
+            (set! q (.Prog s x86/ACMOVWPS)))
+
+          (set! (.-Type (.-From q)) obj/TYPE_REG)
+          (set! (.-Reg (.-From q)) (.Reg (aget (.-Args v) 1)))
+          (set! (.-Type (.-To q)) obj/TYPE_REG)
+          (set! (.-Reg (.-To q)) (.Reg v)))))
+
+    (case [ssa/OpAMD64CMOVQEQF ssa/OpAMD64CMOVLEQF ssa/OpAMD64CMOVWEQF]
+      ;; Flag condition: ZERO && !PARITY
+      ;; Generate:
+      ;;   MOV      SRC,TMP
+      ;;   CMOV*NE  DST,TMP
+      ;;   CMOV*PC  TMP,DST
+      ;;
+      ;; TODO(rasky): we could generate:
+      ;;   CMOV*NE  DST,SRC
+      ;;   CMOV*PC  SRC,DST
+      ;; But this requires a way for regalloc to know that SRC might be
+      ;; clobbered by this instruction.
+      (let [t (.RegTmp v)]
+        (opregreg s (moveByRegsWidth t (.Reg (aget (.-Args v) 1)) (.Size (.-Type v))) t (.Reg (aget (.-Args v) 1)))
+
+        (let [p (.Prog s (.Asm (.-Op v)))]
+          (set! (.-Type (.-From p)) obj/TYPE_REG)
+          (set! (.-Reg (.-From p)) (.Reg v))
+          (set! (.-Type (.-To p)) obj/TYPE_REG)
+          (set! (.-Reg (.-To p)) t)
+          (let [^{:tag (* obj/Prog)} q (zero (* obj/Prog))]
+            (cond (== (.-Op v) ssa/OpAMD64CMOVQEQF)
+              (set! q (.Prog s x86/ACMOVQPC))
+              (== (.-Op v) ssa/OpAMD64CMOVLEQF)
+              (set! q (.Prog s x86/ACMOVLPC)) :else
+
+              (set! q (.Prog s x86/ACMOVWPC)))
+
+            (set! (.-Type (.-From q)) obj/TYPE_REG)
+            (set! (.-Reg (.-From q)) t)
+            (set! (.-Type (.-To q)) obj/TYPE_REG)
+            (set! (.-Reg (.-To q)) (.Reg v))))))
+
+    (case [ssa/OpAMD64MULQconst ssa/OpAMD64MULLconst]
+      (let [r (.Reg v)
+          ^{:line 675} p (.Prog s (.Asm (.-Op v)))]
+        (set! (.-Type (.-From p)) obj/TYPE_CONST)
+        (set! (.-Offset (.-From p)) (.-AuxInt v))
+        (set! (.-Type (.-To p)) obj/TYPE_REG)
+        (set! (.-Reg (.-To p)) r)
+        (.AddRestSourceReg p (.Reg (aget (.-Args v) 0)))))
+
+    (case [ssa/OpAMD64ANDQconst]
+      (let [asm (.Asm (.-Op v))]
+        ;; If the constant is positive and fits into 32 bits, use ANDL.
+        ;; This saves a few bytes of encoding.
+        (when (and (<= 0 (.-AuxInt v)) (<= (.-AuxInt v) (- (<< 1 32) 1)))
+          (set! asm x86/AANDL))
+
+        (let [p (.Prog s asm)]
+          (set! (.-Type (.-From p)) obj/TYPE_CONST)
+          (set! (.-Offset (.-From p)) (.-AuxInt v))
+          (set! (.-Type (.-To p)) obj/TYPE_REG)
+          (set! (.-Reg (.-To p)) (.Reg v)))))
+
+    (case [ssa/OpAMD64SUBQconst ssa/OpAMD64SUBLconst
+        ^{:line 696} ssa/OpAMD64ANDLconst
+        ^{:line 697} ssa/OpAMD64ORQconst ssa/OpAMD64ORLconst
+        ^{:line 698} ssa/OpAMD64XORQconst ssa/OpAMD64XORLconst]
+      (let [p (.Prog s (.Asm (.-Op v)))]
+        (set! (.-Type (.-From p)) obj/TYPE_CONST)
+        (set! (.-Offset (.-From p)) (.-AuxInt v))
+        (set! (.-Type (.-To p)) obj/TYPE_REG)
+        (set! (.-Reg (.-To p)) (.Reg v))))
+
+    (case [ssa/OpAMD64SHLQconst ssa/OpAMD64SHLLconst
+        ^{:line 706} ssa/OpAMD64SHRQconst ssa/OpAMD64SHRLconst ssa/OpAMD64SHRWconst ssa/OpAMD64SHRBconst
+        ^{:line 707} ssa/OpAMD64SARQconst ssa/OpAMD64SARLconst ssa/OpAMD64SARWconst ssa/OpAMD64SARBconst
+        ^{:line 708} ssa/OpAMD64ROLQconst ssa/OpAMD64ROLLconst ssa/OpAMD64ROLWconst ssa/OpAMD64ROLBconst]
+      (let [^int64 maxShift (zero int64)]
+        (switch (.-Op v)
+          (case [ssa/OpAMD64SHLQconst ssa/OpAMD64SHRQconst ssa/OpAMD64SARQconst ssa/OpAMD64ROLQconst]
+            (set! maxShift 63))
+          (case [ssa/OpAMD64SHLLconst ssa/OpAMD64SHRLconst ssa/OpAMD64SARLconst ssa/OpAMD64ROLLconst]
+            (set! maxShift 31))
+          (case [ssa/OpAMD64SHRWconst ssa/OpAMD64SARWconst ssa/OpAMD64ROLWconst]
+            (set! maxShift 15))
+          (case [ssa/OpAMD64SHRBconst ssa/OpAMD64SARBconst ssa/OpAMD64ROLBconst]
+            (set! maxShift 7))
+          (default
+            (panic "unreachable")))
+
+        (when (or (< (.-AuxInt v) 0) (> (.-AuxInt v) maxShift))
+          (.Fatalf v "shift amount out of range [0,%d]: %d" maxShift (.-AuxInt v)))
+
+        (let [p (.Prog s (.Asm (.-Op v)))]
+          (set! (.-Type (.-From p)) obj/TYPE_CONST)
+          (set! (.-Offset (.-From p)) (.-AuxInt v))
+          (set! (.-Type (.-To p)) obj/TYPE_REG)
+          (set! (.-Reg (.-To p)) (.Reg v)))))
+    (case [ssa/OpAMD64SBBQcarrymask ssa/OpAMD64SBBLcarrymask]
+      (let [r (.Reg v)
+          ^{:line 732} p (.Prog s (.Asm (.-Op v)))]
+        (set! (.-Type (.-From p)) obj/TYPE_REG)
+        (set! (.-Reg (.-From p)) r)
+        (set! (.-Type (.-To p)) obj/TYPE_REG)
+        (set! (.-Reg (.-To p)) r)))
+    (case [ssa/OpAMD64LEAQ1 ssa/OpAMD64LEAQ2 ssa/OpAMD64LEAQ4 ssa/OpAMD64LEAQ8
+        ^{:line 738} ssa/OpAMD64LEAL1 ssa/OpAMD64LEAL2 ssa/OpAMD64LEAL4 ssa/OpAMD64LEAL8
+        ^{:line 739} ssa/OpAMD64LEAW1 ssa/OpAMD64LEAW2 ssa/OpAMD64LEAW4 ssa/OpAMD64LEAW8]
+      (let [p (.Prog s (.Asm (.-Op v)))]
+        (memIdx (addr (.-From p)) v)
+        (let [o (.Reg v)]
+          (set! (.-Type (.-To p)) obj/TYPE_REG)
+          (set! (.-Reg (.-To p)) o)
+          (when (and (!= (.-AuxInt v) 0) (== (.-Aux v) nil))
+            ;; Emit an additional LEA to add the displacement instead of creating a slow 3 operand LEA.
+            (switch (.-Op v)
+              (case [ssa/OpAMD64LEAQ1 ssa/OpAMD64LEAQ2 ssa/OpAMD64LEAQ4 ssa/OpAMD64LEAQ8]
+                (set! p (.Prog s x86/ALEAQ)))
+              (case [ssa/OpAMD64LEAL1 ssa/OpAMD64LEAL2 ssa/OpAMD64LEAL4 ssa/OpAMD64LEAL8]
+                (set! p (.Prog s x86/ALEAL)))
+              (case [ssa/OpAMD64LEAW1 ssa/OpAMD64LEAW2 ssa/OpAMD64LEAW4 ssa/OpAMD64LEAW8]
+                (set! p (.Prog s x86/ALEAW))))
+
+            (set! (.-Type (.-From p)) obj/TYPE_MEM)
+            (set! (.-Reg (.-From p)) o)
+            (set! (.-Type (.-To p)) obj/TYPE_REG)
+            (set! (.-Reg (.-To p)) o))
+
+          (ssagen/AddAux (addr (.-From p)) v))))
+    (case [ssa/OpAMD64LEAQ ssa/OpAMD64LEAL ssa/OpAMD64LEAW]
+      (let [p (.Prog s (.Asm (.-Op v)))]
+        (set! (.-Type (.-From p)) obj/TYPE_MEM)
+        (set! (.-Reg (.-From p)) (.Reg (aget (.-Args v) 0)))
+        (ssagen/AddAux (addr (.-From p)) v)
+        (set! (.-Type (.-To p)) obj/TYPE_REG)
+        (set! (.-Reg (.-To p)) (.Reg v))))
+    (case [ssa/OpAMD64CMPQ ssa/OpAMD64CMPL ssa/OpAMD64CMPW ssa/OpAMD64CMPB
+        ^{:line 769} ssa/OpAMD64TESTQ ssa/OpAMD64TESTL ssa/OpAMD64TESTW ssa/OpAMD64TESTB
+        ^{:line 770} ssa/OpAMD64BTL ssa/OpAMD64BTQ]
+      (opregreg s (.Asm (.-Op v)) (.Reg (aget (.-Args v) 1)) (.Reg (aget (.-Args v) 0))))
+    (case [ssa/OpAMD64UCOMISS ssa/OpAMD64UCOMISD]
+      ;; Go assembler has swapped operands for UCOMISx relative to CMP,
+      ;; must account for that right here.
+      (opregreg s (.Asm (.-Op v)) (.Reg (aget (.-Args v) 0)) (.Reg (aget (.-Args v) 1))))
+    (case [ssa/OpAMD64CMPQconst ssa/OpAMD64CMPLconst ssa/OpAMD64CMPWconst ssa/OpAMD64CMPBconst]
+      (let [p (.Prog s (.Asm (.-Op v)))]
+        (set! (.-Type (.-From p)) obj/TYPE_REG)
+        (set! (.-Reg (.-From p)) (.Reg (aget (.-Args v) 0)))
+        (set! (.-Type (.-To p)) obj/TYPE_CONST)
+        (set! (.-Offset (.-To p)) (.-AuxInt v))))
+    (case [ssa/OpAMD64BTLconst ssa/OpAMD64BTQconst
+        ^{:line 783} ssa/OpAMD64TESTQconst ssa/OpAMD64TESTLconst ssa/OpAMD64TESTWconst ssa/OpAMD64TESTBconst
+        ^{:line 784} ssa/OpAMD64BTSQconst
+        ^{:line 785} ssa/OpAMD64BTCQconst
+        ^{:line 786} ssa/OpAMD64BTRQconst]
+      (let [op (.-Op v)]
+        (when (and (== op ssa/OpAMD64BTQconst) (< (.-AuxInt v) 32))
+          ;; Emit 32-bit version because it's shorter
+          (set! op ssa/OpAMD64BTLconst))
+
+        (let [p (.Prog s (.Asm op))]
+          (set! (.-Type (.-From p)) obj/TYPE_CONST)
+          (set! (.-Offset (.-From p)) (.-AuxInt v))
+          (set! (.-Type (.-To p)) obj/TYPE_REG)
+          (set! (.-Reg (.-To p)) (.Reg (aget (.-Args v) 0))))))
+    (case [ssa/OpAMD64CMPQload ssa/OpAMD64CMPLload ssa/OpAMD64CMPWload ssa/OpAMD64CMPBload]
+      (let [p (.Prog s (.Asm (.-Op v)))]
+        (set! (.-Type (.-From p)) obj/TYPE_MEM)
+        (set! (.-Reg (.-From p)) (.Reg (aget (.-Args v) 0)))
+        (ssagen/AddAux (addr (.-From p)) v)
+        (set! (.-Type (.-To p)) obj/TYPE_REG)
+        (set! (.-Reg (.-To p)) (.Reg (aget (.-Args v) 1)))))
+    (case [ssa/OpAMD64CMPQconstload ssa/OpAMD64CMPLconstload ssa/OpAMD64CMPWconstload ssa/OpAMD64CMPBconstload]
+      (let [sc (.AuxValAndOff v)
+          ^{:line 806} p (.Prog s (.Asm (.-Op v)))]
+        (set! (.-Type (.-From p)) obj/TYPE_MEM)
+        (set! (.-Reg (.-From p)) (.Reg (aget (.-Args v) 0)))
+        (ssagen/AddAux2 (addr (.-From p)) v (.Off64 sc))
+        (set! (.-Type (.-To p)) obj/TYPE_CONST)
+        (set! (.-Offset (.-To p)) (.Val64 sc))))
+    (case [ssa/OpAMD64CMPQloadidx8 ssa/OpAMD64CMPQloadidx1 ssa/OpAMD64CMPLloadidx4 ssa/OpAMD64CMPLloadidx1 ssa/OpAMD64CMPWloadidx2 ssa/OpAMD64CMPWloadidx1 ssa/OpAMD64CMPBloadidx1]
+      (let [p (.Prog s (.Asm (.-Op v)))]
+        (memIdx (addr (.-From p)) v)
+        (ssagen/AddAux (addr (.-From p)) v)
+        (set! (.-Type (.-To p)) obj/TYPE_REG)
+        (set! (.-Reg (.-To p)) (.Reg (aget (.-Args v) 2)))))
+    (case [ssa/OpAMD64CMPQconstloadidx8 ssa/OpAMD64CMPQconstloadidx1 ssa/OpAMD64CMPLconstloadidx4 ssa/OpAMD64CMPLconstloadidx1 ssa/OpAMD64CMPWconstloadidx2 ssa/OpAMD64CMPWconstloadidx1 ssa/OpAMD64CMPBconstloadidx1]
+      (let [sc (.AuxValAndOff v)
+          ^{:line 820} p (.Prog s (.Asm (.-Op v)))]
+        (memIdx (addr (.-From p)) v)
+        (ssagen/AddAux2 (addr (.-From p)) v (.Off64 sc))
+        (set! (.-Type (.-To p)) obj/TYPE_CONST)
+        (set! (.-Offset (.-To p)) (.Val64 sc))))
+    (case [ssa/OpAMD64MOVLconst ssa/OpAMD64MOVQconst]
+      (let [x (.Reg v)]
+
+        ;; If flags aren't live (indicated by v.Aux == nil),
+        ;; then we can rewrite MOV $0, AX into XOR AX, AX.
+        (when (and (== (.-AuxInt v) 0) (== (.-Aux v) nil))
+          (opregreg s x86/AXORL x x)
+          (break))
+
+
+        (let [asm (.Asm (.-Op v))]
+          ;; Use MOVL to move a small constant into a register
+          ;; when the constant is positive and fits into 32 bits.
+          (when (and (<= 0 (.-AuxInt v)) (<= (.-AuxInt v) (- (<< 1 32) 1)))
+            ;; The upper 32bit are zeroed automatically when using MOVL.
+            (set! asm x86/AMOVL))
+
+          (let [p (.Prog s asm)]
+            (set! (.-Type (.-From p)) obj/TYPE_CONST)
+            (set! (.-Offset (.-From p)) (.-AuxInt v))
+            (set! (.-Type (.-To p)) obj/TYPE_REG)
+            (set! (.-Reg (.-To p)) x)))))
+
+    (case [ssa/OpAMD64MOVSSconst ssa/OpAMD64MOVSDconst]
+      (let [x (.Reg v)]
+        (when (and (not (isFPReg x)) (== (.-AuxInt v) 0) (== (.-Aux v) nil))
+          (opregreg s x86/AXORL x x)
+          (break))
+
+        (let [p (.Prog s (storeByRegWidth x (.Size (.-Type v))))]
+          (set! (.-Type (.-From p)) obj/TYPE_FCONST)
+          (set! (.-Val (.-From p)) (math/Float64frombits (conv uint64 (.-AuxInt v))))
+          (set! (.-Type (.-To p)) obj/TYPE_REG)
+          (set! (.-Reg (.-To p)) x))))
+    (case [ssa/OpAMD64MOVQload ssa/OpAMD64MOVLload ssa/OpAMD64MOVWload ssa/OpAMD64MOVBload ssa/OpAMD64MOVOload
+        ^{:line 860} ssa/OpAMD64MOVSSload ssa/OpAMD64MOVSDload ssa/OpAMD64MOVBQSXload ssa/OpAMD64MOVWQSXload ssa/OpAMD64MOVLQSXload
+        ^{:line 861} ssa/OpAMD64MOVBEQload ssa/OpAMD64MOVBELload]
+      (let [p (.Prog s (.Asm (.-Op v)))]
+        (set! (.-Type (.-From p)) obj/TYPE_MEM)
+        (set! (.-Reg (.-From p)) (.Reg (aget (.-Args v) 0)))
+        (ssagen/AddAux (addr (.-From p)) v)
+        (set! (.-Type (.-To p)) obj/TYPE_REG)
+        (set! (.-Reg (.-To p)) (.Reg v))))
+    (case [ssa/OpAMD64MOVBloadidx1 ssa/OpAMD64MOVWloadidx1 ssa/OpAMD64MOVLloadidx1 ssa/OpAMD64MOVQloadidx1 ssa/OpAMD64MOVSSloadidx1 ssa/OpAMD64MOVSDloadidx1
+        ^{:line 869} ssa/OpAMD64MOVQloadidx8 ssa/OpAMD64MOVSDloadidx8 ssa/OpAMD64MOVLloadidx8 ssa/OpAMD64MOVLloadidx4 ssa/OpAMD64MOVSSloadidx4 ssa/OpAMD64MOVWloadidx2
+        ^{:line 870} ssa/OpAMD64MOVBELloadidx1 ssa/OpAMD64MOVBELloadidx4 ssa/OpAMD64MOVBELloadidx8 ssa/OpAMD64MOVBEQloadidx1 ssa/OpAMD64MOVBEQloadidx8]
+      (let [p (.Prog s (.Asm (.-Op v)))]
+        (memIdx (addr (.-From p)) v)
+        (ssagen/AddAux (addr (.-From p)) v)
+        (set! (.-Type (.-To p)) obj/TYPE_REG)
+        (set! (.-Reg (.-To p)) (.Reg v))))
+    (case [ssa/OpAMD64MOVQstore ssa/OpAMD64MOVSSstore ssa/OpAMD64MOVSDstore ssa/OpAMD64MOVLstore ssa/OpAMD64MOVWstore ssa/OpAMD64MOVBstore ssa/OpAMD64MOVOstore
+        ^{:line 877} ssa/OpAMD64ADDQmodify ssa/OpAMD64SUBQmodify ssa/OpAMD64ANDQmodify ssa/OpAMD64ORQmodify ssa/OpAMD64XORQmodify
+        ^{:line 878} ssa/OpAMD64ADDLmodify ssa/OpAMD64SUBLmodify ssa/OpAMD64ANDLmodify ssa/OpAMD64ORLmodify ssa/OpAMD64XORLmodify
+        ^{:line 879} ssa/OpAMD64MOVBEQstore ssa/OpAMD64MOVBELstore ssa/OpAMD64MOVBEWstore]
+      (let [p (.Prog s (.Asm (.-Op v)))]
+        (set! (.-Type (.-From p)) obj/TYPE_REG)
+        (set! (.-Reg (.-From p)) (.Reg (aget (.-Args v) 1)))
+        (set! (.-Type (.-To p)) obj/TYPE_MEM)
+        (set! (.-Reg (.-To p)) (.Reg (aget (.-Args v) 0)))
+        (ssagen/AddAux (addr (.-To p)) v)))
+    (case [ssa/OpAMD64MOVBstoreidx1 ssa/OpAMD64MOVWstoreidx1 ssa/OpAMD64MOVLstoreidx1 ssa/OpAMD64MOVQstoreidx1 ssa/OpAMD64MOVSSstoreidx1 ssa/OpAMD64MOVSDstoreidx1
+        ^{:line 887} ssa/OpAMD64MOVQstoreidx8 ssa/OpAMD64MOVSDstoreidx8 ssa/OpAMD64MOVLstoreidx8 ssa/OpAMD64MOVSSstoreidx4 ssa/OpAMD64MOVLstoreidx4 ssa/OpAMD64MOVWstoreidx2
+        ^{:line 888} ssa/OpAMD64ADDLmodifyidx1 ssa/OpAMD64ADDLmodifyidx4 ssa/OpAMD64ADDLmodifyidx8 ssa/OpAMD64ADDQmodifyidx1 ssa/OpAMD64ADDQmodifyidx8
+        ^{:line 889} ssa/OpAMD64SUBLmodifyidx1 ssa/OpAMD64SUBLmodifyidx4 ssa/OpAMD64SUBLmodifyidx8 ssa/OpAMD64SUBQmodifyidx1 ssa/OpAMD64SUBQmodifyidx8
+        ^{:line 890} ssa/OpAMD64ANDLmodifyidx1 ssa/OpAMD64ANDLmodifyidx4 ssa/OpAMD64ANDLmodifyidx8 ssa/OpAMD64ANDQmodifyidx1 ssa/OpAMD64ANDQmodifyidx8
+        ^{:line 891} ssa/OpAMD64ORLmodifyidx1 ssa/OpAMD64ORLmodifyidx4 ssa/OpAMD64ORLmodifyidx8 ssa/OpAMD64ORQmodifyidx1 ssa/OpAMD64ORQmodifyidx8
+        ^{:line 892} ssa/OpAMD64XORLmodifyidx1 ssa/OpAMD64XORLmodifyidx4 ssa/OpAMD64XORLmodifyidx8 ssa/OpAMD64XORQmodifyidx1 ssa/OpAMD64XORQmodifyidx8
+        ^{:line 893} ssa/OpAMD64MOVBEWstoreidx1 ssa/OpAMD64MOVBEWstoreidx2 ssa/OpAMD64MOVBELstoreidx1 ssa/OpAMD64MOVBELstoreidx4 ssa/OpAMD64MOVBELstoreidx8 ssa/OpAMD64MOVBEQstoreidx1 ssa/OpAMD64MOVBEQstoreidx8]
+      (let [p (.Prog s (.Asm (.-Op v)))]
+        (set! (.-Type (.-From p)) obj/TYPE_REG)
+        (set! (.-Reg (.-From p)) (.Reg (aget (.-Args v) 2)))
+        (memIdx (addr (.-To p)) v)
+        (ssagen/AddAux (addr (.-To p)) v)))
+    (case [ssa/OpAMD64ADDQconstmodify ssa/OpAMD64ADDLconstmodify]
+      (let [sc (.AuxValAndOff v)
+          ^{:line 901} off (.Off64 sc)
+          ^{:line 902} val (.Val sc)]
+        (when (or (== val 1) (== val -1))
+          (let [^obj/As asm (zero obj/As)]
+            (if (== (.-Op v) ssa/OpAMD64ADDQconstmodify)
+              (if (== val 1)
+                (set! asm x86/AINCQ)
+
+                (set! asm x86/ADECQ))
+
+              (do
+                (if (== val 1)
+                  (set! asm x86/AINCL)
+
+                  (set! asm x86/ADECL))))
+
+
+            (let [p (.Prog s asm)]
+              (set! (.-Type (.-To p)) obj/TYPE_MEM)
+              (set! (.-Reg (.-To p)) (.Reg (aget (.-Args v) 0)))
+              (ssagen/AddAux2 (addr (.-To p)) v off)
+              (break))))
+
+        (fallthrough)))
+    (case [ssa/OpAMD64ANDQconstmodify ssa/OpAMD64ANDLconstmodify ssa/OpAMD64ORQconstmodify ssa/OpAMD64ORLconstmodify
+        ^{:line 926} ssa/OpAMD64XORQconstmodify ssa/OpAMD64XORLconstmodify
+        ^{:line 927} ssa/OpAMD64BTSQconstmodify ssa/OpAMD64BTRQconstmodify ssa/OpAMD64BTCQconstmodify]
+      (let [sc (.AuxValAndOff v)
+          ^{:line 929} off (.Off64 sc)
+          ^{:line 930} val (.Val64 sc)
+          ^{:line 931} p (.Prog s (.Asm (.-Op v)))]
+        (set! (.-Type (.-From p)) obj/TYPE_CONST)
+        (set! (.-Offset (.-From p)) val)
+        (set! (.-Type (.-To p)) obj/TYPE_MEM)
+        (set! (.-Reg (.-To p)) (.Reg (aget (.-Args v) 0)))
+        (ssagen/AddAux2 (addr (.-To p)) v off)))
+
+    (case [ssa/OpAMD64MOVQstoreconst ssa/OpAMD64MOVLstoreconst ssa/OpAMD64MOVWstoreconst ssa/OpAMD64MOVBstoreconst]
+      (let [p (.Prog s (.Asm (.-Op v)))]
+        (set! (.-Type (.-From p)) obj/TYPE_CONST)
+        (let [sc (.AuxValAndOff v)]
+          (set! (.-Offset (.-From p)) (.Val64 sc))
+          (set! (.-Type (.-To p)) obj/TYPE_MEM)
+          (set! (.-Reg (.-To p)) (.Reg (aget (.-Args v) 0)))
+          (ssagen/AddAux2 (addr (.-To p)) v (.Off64 sc)))))
+    (case [ssa/OpAMD64MOVOstoreconst]
+      (let [sc (.AuxValAndOff v)]
+        (when (!= (.Val sc) 0)
+          (.Fatalf v "MOVO for non zero constants not implemented: %s" (.LongString v)))
+
+
+        (when (!= (.-ABI s) obj/ABIInternal)
+          ;; zero X15 manually
+          (opregreg s x86/AXORPS x86/REG_X15 x86/REG_X15))
+
+        (let [p (.Prog s (.Asm (.-Op v)))]
+          (set! (.-Type (.-From p)) obj/TYPE_REG)
+          (set! (.-Reg (.-From p)) x86/REG_X15)
+          (set! (.-Type (.-To p)) obj/TYPE_MEM)
+          (set! (.-Reg (.-To p)) (.Reg (aget (.-Args v) 0)))
+          (ssagen/AddAux2 (addr (.-To p)) v (.Off64 sc)))))
+
+    (case [ssa/OpAMD64MOVQstoreconstidx1 ssa/OpAMD64MOVQstoreconstidx8 ssa/OpAMD64MOVLstoreconstidx1 ssa/OpAMD64MOVLstoreconstidx4 ssa/OpAMD64MOVWstoreconstidx1 ssa/OpAMD64MOVWstoreconstidx2 ssa/OpAMD64MOVBstoreconstidx1
+        ^{:line 964} ssa/OpAMD64ADDLconstmodifyidx1 ssa/OpAMD64ADDLconstmodifyidx4 ssa/OpAMD64ADDLconstmodifyidx8 ssa/OpAMD64ADDQconstmodifyidx1 ssa/OpAMD64ADDQconstmodifyidx8
+        ^{:line 965} ssa/OpAMD64ANDLconstmodifyidx1 ssa/OpAMD64ANDLconstmodifyidx4 ssa/OpAMD64ANDLconstmodifyidx8 ssa/OpAMD64ANDQconstmodifyidx1 ssa/OpAMD64ANDQconstmodifyidx8
+        ^{:line 966} ssa/OpAMD64ORLconstmodifyidx1 ssa/OpAMD64ORLconstmodifyidx4 ssa/OpAMD64ORLconstmodifyidx8 ssa/OpAMD64ORQconstmodifyidx1 ssa/OpAMD64ORQconstmodifyidx8
+        ^{:line 967} ssa/OpAMD64XORLconstmodifyidx1 ssa/OpAMD64XORLconstmodifyidx4 ssa/OpAMD64XORLconstmodifyidx8 ssa/OpAMD64XORQconstmodifyidx1 ssa/OpAMD64XORQconstmodifyidx8]
+      (let [p (.Prog s (.Asm (.-Op v)))]
+        (set! (.-Type (.-From p)) obj/TYPE_CONST)
+        (let [sc (.AuxValAndOff v)]
+          (set! (.-Offset (.-From p)) (.Val64 sc))
+          (switch
+            (case [(and (== (.-As p) x86/AADDQ) (== (.-Offset (.-From p)) 1))]
+              (set! (.-As p) x86/AINCQ)
+              (set! (.-Type (.-From p)) obj/TYPE_NONE))
+            (case [(and (== (.-As p) x86/AADDQ) (== (.-Offset (.-From p)) -1))]
+              (set! (.-As p) x86/ADECQ)
+              (set! (.-Type (.-From p)) obj/TYPE_NONE))
+            (case [(and (== (.-As p) x86/AADDL) (== (.-Offset (.-From p)) 1))]
+              (set! (.-As p) x86/AINCL)
+              (set! (.-Type (.-From p)) obj/TYPE_NONE))
+            (case [(and (== (.-As p) x86/AADDL) (== (.-Offset (.-From p)) -1))]
+              (set! (.-As p) x86/ADECL)
+              (set! (.-Type (.-From p)) obj/TYPE_NONE)))
+
+          (memIdx (addr (.-To p)) v)
+          (ssagen/AddAux2 (addr (.-To p)) v (.Off64 sc)))))
+    (case [ssa/OpAMD64MOVLQSX ssa/OpAMD64MOVWQSX ssa/OpAMD64MOVBQSX ssa/OpAMD64MOVLQZX ssa/OpAMD64MOVWQZX ssa/OpAMD64MOVBQZX
+        ^{:line 989} ssa/OpAMD64CVTTSS2SL ssa/OpAMD64CVTTSD2SL ssa/OpAMD64CVTTSS2SQ ssa/OpAMD64CVTTSD2SQ
+        ^{:line 990} ssa/OpAMD64CVTSS2SD ssa/OpAMD64CVTSD2SS ssa/OpAMD64VPBROADCASTB ssa/OpAMD64PMOVMSKB]
+      (opregreg s (.Asm (.-Op v)) (.Reg v) (.Reg (aget (.-Args v) 0))))
+    (case [ssa/OpAMD64CVTSL2SD ssa/OpAMD64CVTSQ2SD ssa/OpAMD64CVTSQ2SS ssa/OpAMD64CVTSL2SS]
+      (let [r (.Reg v)]
+        ;; Break false dependency on destination register.
+        (opregreg s x86/AXORPS r r)
+        (opregreg s (.Asm (.-Op v)) r (.Reg (aget (.-Args v) 0)))))
+    (case [ssa/OpAMD64MOVQi2f ssa/OpAMD64MOVQf2i ssa/OpAMD64MOVLi2f ssa/OpAMD64MOVLf2i]
+      (let [^{:tag (* obj/Prog)} p (zero (* obj/Prog))]
+        (switch (.-Op v)
+          (case [ssa/OpAMD64MOVQi2f ssa/OpAMD64MOVQf2i]
+            (set! p (.Prog s x86/AMOVQ)))
+          (case [ssa/OpAMD64MOVLi2f ssa/OpAMD64MOVLf2i]
+            (set! p (.Prog s x86/AMOVL))))
+
+        (set! (.-Type (.-From p)) obj/TYPE_REG)
+        (set! (.-Reg (.-From p)) (.Reg (aget (.-Args v) 0)))
+        (set! (.-Type (.-To p)) obj/TYPE_REG)
+        (set! (.-Reg (.-To p)) (.Reg v))))
+    (case [ssa/OpAMD64ADDQload ssa/OpAMD64ADDLload ssa/OpAMD64SUBQload ssa/OpAMD64SUBLload
+        ^{:line 1010} ssa/OpAMD64ANDQload ssa/OpAMD64ANDLload ssa/OpAMD64ORQload ssa/OpAMD64ORLload
+        ^{:line 1011} ssa/OpAMD64XORQload ssa/OpAMD64XORLload ssa/OpAMD64ADDSDload ssa/OpAMD64ADDSSload
+        ^{:line 1012} ssa/OpAMD64SUBSDload ssa/OpAMD64SUBSSload ssa/OpAMD64MULSDload ssa/OpAMD64MULSSload
+        ^{:line 1013} ssa/OpAMD64DIVSDload ssa/OpAMD64DIVSSload]
+      (let [p (.Prog s (.Asm (.-Op v)))]
+        (set! (.-Type (.-From p)) obj/TYPE_MEM)
+        (set! (.-Reg (.-From p)) (.Reg (aget (.-Args v) 1)))
+        (ssagen/AddAux (addr (.-From p)) v)
+        (set! (.-Type (.-To p)) obj/TYPE_REG)
+        (set! (.-Reg (.-To p)) (.Reg v))))
+    (case [ssa/OpAMD64ADDLloadidx1 ssa/OpAMD64ADDLloadidx4 ssa/OpAMD64ADDLloadidx8 ssa/OpAMD64ADDQloadidx1 ssa/OpAMD64ADDQloadidx8
+        ^{:line 1021} ssa/OpAMD64SUBLloadidx1 ssa/OpAMD64SUBLloadidx4 ssa/OpAMD64SUBLloadidx8 ssa/OpAMD64SUBQloadidx1 ssa/OpAMD64SUBQloadidx8
+        ^{:line 1022} ssa/OpAMD64ANDLloadidx1 ssa/OpAMD64ANDLloadidx4 ssa/OpAMD64ANDLloadidx8 ssa/OpAMD64ANDQloadidx1 ssa/OpAMD64ANDQloadidx8
+        ^{:line 1023} ssa/OpAMD64ORLloadidx1 ssa/OpAMD64ORLloadidx4 ssa/OpAMD64ORLloadidx8 ssa/OpAMD64ORQloadidx1 ssa/OpAMD64ORQloadidx8
+        ^{:line 1024} ssa/OpAMD64XORLloadidx1 ssa/OpAMD64XORLloadidx4 ssa/OpAMD64XORLloadidx8 ssa/OpAMD64XORQloadidx1 ssa/OpAMD64XORQloadidx8
+        ^{:line 1025} ssa/OpAMD64ADDSSloadidx1 ssa/OpAMD64ADDSSloadidx4 ssa/OpAMD64ADDSDloadidx1 ssa/OpAMD64ADDSDloadidx8
+        ^{:line 1026} ssa/OpAMD64SUBSSloadidx1 ssa/OpAMD64SUBSSloadidx4 ssa/OpAMD64SUBSDloadidx1 ssa/OpAMD64SUBSDloadidx8
+        ^{:line 1027} ssa/OpAMD64MULSSloadidx1 ssa/OpAMD64MULSSloadidx4 ssa/OpAMD64MULSDloadidx1 ssa/OpAMD64MULSDloadidx8
+        ^{:line 1028} ssa/OpAMD64DIVSSloadidx1 ssa/OpAMD64DIVSSloadidx4 ssa/OpAMD64DIVSDloadidx1 ssa/OpAMD64DIVSDloadidx8]
+      (let [p (.Prog s (.Asm (.-Op v)))
+
+          (values r i) (values (.Reg (aget (.-Args v) 1)) (.Reg (aget (.-Args v) 2)))]
+        (set! (.-Type (.-From p)) obj/TYPE_MEM)
+        (set! (.-Scale (.-From p)) (.Scale (.-Op v)))
+        (when (and (== (.-Scale (.-From p)) 1) (== i x86/REG_SP))
+          (set! (values r i) (values i r)))
+
+        (set! (.-Reg (.-From p)) r)
+        (set! (.-Index (.-From p)) i)
+
+        (ssagen/AddAux (addr (.-From p)) v)
+        (set! (.-Type (.-To p)) obj/TYPE_REG)
+        (set! (.-Reg (.-To p)) (.Reg v))))
+
+    (case [ssa/OpAMD64LoweredZero]
+      (when (!= (.-ABI s) obj/ABIInternal)
+        ;; zero X15 manually
+        (opregreg s x86/AXORPS x86/REG_X15 x86/REG_X15))
+
+      (let [ptrReg (.Reg (aget (.-Args v) 0))
+          ^{:line 1050} n (.-AuxInt v)]
+        (when (< n 16)
+          (.Fatalf v "Zero too small %d" n))
+
+        (let [zero16 ^{:go/end 1056} (fn [^int64 off]
+              (zero16 s ptrReg off))
+
+
+            ;; Generate zeroing instructions.
+            ^{:line 1059 :tag int64} off (zero int64)]
+          (while (>= n 16)
+            (zero16 off)
+            (set! off + 16)
+            (set! n - 16))
+
+          (when (!= n 0)
+            ;; use partially overlapped write.
+            ;; TODO: n <= 8, use smaller write?
+            (zero16 (- (+ off n) 16))))))
+
+
+    (case [ssa/OpAMD64LoweredZeroLoop]
+      (when (!= (.-ABI s) obj/ABIInternal)
+        ;; zero X15 manually
+        (opregreg s x86/AXORPS x86/REG_X15 x86/REG_X15))
+
+      (let [ptrReg (.Reg (aget (.-Args v) 0))
+          ^{:line 1077} countReg (.RegTmp v)
+          ^{:line 1078} n (.-AuxInt v)
+          ^{:line 1079} loopSize (conv int64 64)]
+        (when (< n (* 3 loopSize))
+          ;; - a loop count of 0 won't work.
+          ;; - a loop count of 1 is useless.
+          ;; - a loop count of 2 is a code size ~tie
+          ;;     4 instructions to implement the loop
+          ;;     4 instructions in the loop body
+          ;;   vs
+          ;;     8 instructions in the straightline code
+          ;;   Might as well use straightline code.
+          (.Fatalf v "ZeroLoop size too small %d" n))
+
+        (let [zero16 ^{:go/end 1093} (fn [^int64 off]
+              (zero16 s ptrReg off))
+
+
+            ;; Put iteration count in a register.
+            ;;   MOVL    $n, countReg
+            ^{:line 1097} p (.Prog s x86/AMOVL)]
+          (set! (.-Type (.-From p)) obj/TYPE_CONST)
+          (set! (.-Offset (.-From p)) (/ n loopSize))
+          (set! (.-Type (.-To p)) obj/TYPE_REG)
+          (set! (.-Reg (.-To p)) countReg)
+          (let [cntInit p]
+
+            ;; Zero loopSize bytes starting at ptrReg.
+            (range [i (/ loopSize 16)]
+              (zero16 (* i 16)))
+
+            ;;   ADDQ    $loopSize, ptrReg
+            (set! p (.Prog s x86/AADDQ))
+            (set! (.-Type (.-From p)) obj/TYPE_CONST)
+            (set! (.-Offset (.-From p)) loopSize)
+            (set! (.-Type (.-To p)) obj/TYPE_REG)
+            (set! (.-Reg (.-To p)) ptrReg)
+            ;;   DECL    countReg
+            (set! p (.Prog s x86/ADECL))
+            (set! (.-Type (.-To p)) obj/TYPE_REG)
+            (set! (.-Reg (.-To p)) countReg)
+            ;; Jump to first instruction in loop if we're not done yet.
+            ;;   JNE     head
+            (set! p (.Prog s x86/AJNE))
+            (set! (.-Type (.-To p)) obj/TYPE_BRANCH)
+            (.SetTarget (.-To p) (.-Link cntInit))
+
+            ;; Multiples of the loop size are now done.
+            (set! n % loopSize)
+
+            ;; Write any fractional portion.
+            (let [^int64 off (zero int64)]
+              (while (>= n 16)
+                (zero16 off)
+                (set! off + 16)
+                (set! n - 16))
+
+              (when (!= n 0)
+                ;; Use partially-overlapping write.
+                ;; TODO: n <= 8, use smaller write?
+                (zero16 (- (+ off n) 16))))))))
+
+
+    (case [ssa/OpAMD64LoweredMove]
+      (let [dstReg (.Reg (aget (.-Args v) 0))
+          ^{:line 1142} srcReg (.Reg (aget (.-Args v) 1))]
+        (when (== dstReg srcReg)
+          (break))
+
+        (let [tmpReg (conv int16 x86/REG_X14)
+            ^{:line 1147} n (.-AuxInt v)]
+          (when (< n 16)
+            (.Fatalf v "Move too small %d" n))
+
+          ;; move 16 bytes from srcReg+off to dstReg+off.
+          (let [move16 ^{:go/end 1154} (fn [^int64 off]
+                (move16 s srcReg dstReg tmpReg off))
+
+
+              ;; Generate copying instructions.
+              ^{:line 1157 :tag int64} off (zero int64)]
+            (while (>= n 16)
+              (move16 off)
+              (set! off + 16)
+              (set! n - 16))
+
+            (when (!= n 0)
+              ;; use partially overlapped read/write.
+              ;; TODO: use smaller operations when we can?
+              (move16 (- (+ off n) 16)))))))
+
+
+    (case [ssa/OpAMD64LoweredMoveLoop]
+      (let [dstReg (.Reg (aget (.-Args v) 0))
+          ^{:line 1171} srcReg (.Reg (aget (.-Args v) 1))]
+        (when (== dstReg srcReg)
+          (break))
+
+        (let [countReg (.RegTmp v)
+            ^{:line 1176} tmpReg (conv int16 x86/REG_X14)
+            ^{:line 1177} n (.-AuxInt v)
+            ^{:line 1178} loopSize (conv int64 64)]
+          (when (< n (* 3 loopSize))
+            ;; - a loop count of 0 won't work.
+            ;; - a loop count of 1 is useless.
+            ;; - a loop count of 2 is a code size ~tie
+            ;;     4 instructions to implement the loop
+            ;;     4 instructions in the loop body
+            ;;   vs
+            ;;     8 instructions in the straightline code
+            ;;   Might as well use straightline code.
+            (.Fatalf v "ZeroLoop size too small %d" n))
+
+          ;; move 16 bytes from srcReg+off to dstReg+off.
+          (let [move16 ^{:go/end 1193} (fn [^int64 off]
+                (move16 s srcReg dstReg tmpReg off))
+
+
+              ;; Put iteration count in a register.
+              ;;   MOVL    $n, countReg
+              ^{:line 1197} p (.Prog s x86/AMOVL)]
+            (set! (.-Type (.-From p)) obj/TYPE_CONST)
+            (set! (.-Offset (.-From p)) (/ n loopSize))
+            (set! (.-Type (.-To p)) obj/TYPE_REG)
+            (set! (.-Reg (.-To p)) countReg)
+            (let [cntInit p]
+
+              ;; Copy loopSize bytes starting at srcReg to dstReg.
+              (range [i (/ loopSize 16)]
+                (move16 (* i 16)))
+
+              ;;   ADDQ    $loopSize, srcReg
+              (set! p (.Prog s x86/AADDQ))
+              (set! (.-Type (.-From p)) obj/TYPE_CONST)
+              (set! (.-Offset (.-From p)) loopSize)
+              (set! (.-Type (.-To p)) obj/TYPE_REG)
+              (set! (.-Reg (.-To p)) srcReg)
+              ;;   ADDQ    $loopSize, dstReg
+              (set! p (.Prog s x86/AADDQ))
+              (set! (.-Type (.-From p)) obj/TYPE_CONST)
+              (set! (.-Offset (.-From p)) loopSize)
+              (set! (.-Type (.-To p)) obj/TYPE_REG)
+              (set! (.-Reg (.-To p)) dstReg)
+              ;;   DECL    countReg
+              (set! p (.Prog s x86/ADECL))
+              (set! (.-Type (.-To p)) obj/TYPE_REG)
+              (set! (.-Reg (.-To p)) countReg)
+              ;; Jump to loop header if we're not done yet.
+              ;;   JNE     head
+              (set! p (.Prog s x86/AJNE))
+              (set! (.-Type (.-To p)) obj/TYPE_BRANCH)
+              (.SetTarget (.-To p) (.-Link cntInit))
+
+              ;; Multiples of the loop size are now done.
+              (set! n % loopSize)
+
+              ;; Copy any fractional portion.
+              (let [^int64 off (zero int64)]
+                (while (>= n 16)
+                  (move16 off)
+                  (set! off + 16)
+                  (set! n - 16))
+
+                (when (!= n 0)
+                  ;; Use partially-overlapping copy.
+                  (move16 (- (+ off n) 16)))))))))
+
+
+    (case [ssa/OpCopy] ; TODO: use MOVQreg for reg->reg copies instead of OpCopy?
+      (when (.IsMemory (.-Type v))
+        (return))
+
+      (let [arg (aget (.-Args v) 0)
+          ^{:line 1250} x (.Reg arg)
+          ^{:line 1251} y (.Reg v)]
+        (when (.IsSIMD (.-Type v))
+          (set! x (simdOrMaskReg arg))
+          (set! y (simdOrMaskReg v)))
+
+        (when (!= x y)
+          (let [width (.Size (.-Type v))]
+            (when (and (== width 8) (isGPReg y) (ssa/ZeroUpper32Bits arg 3))
+              ;; The source was naturally zext-ed from 32 to 64 bits,
+              ;; but we are asked to do a full 64-bit copy.
+              ;; Save the REX prefix byte in I-CACHE by using a 32-bit move,
+              ;; since it zeroes the upper 32 bits anyway.
+              (set! width 4))
+
+            (opregreg s (moveByRegsWidth y x width) y x)))))
+
+    (case [ssa/OpLoadReg]
+      (when (.IsFlags (.-Type v))
+        (.Fatalf v "load flags not implemented: %v" (.LongString v))
+        (return))
+
+      (let [r (.Reg v)
+          ^{:line 1273} p (.Prog s (loadByRegWidth r (.Size (.-Type v))))]
+        (ssagen/AddrAuto (addr (.-From p)) (aget (.-Args v) 0))
+        (set! (.-Type (.-To p)) obj/TYPE_REG)
+        (when (.IsSIMD (.-Type v))
+          (set! r (simdOrMaskReg v)))
+
+        (set! (.-Reg (.-To p)) r)))
+
+    (case [ssa/OpStoreReg]
+      (when (.IsFlags (.-Type v))
+        (.Fatalf v "store flags not implemented: %v" (.LongString v))
+        (return))
+
+      (let [r (.Reg (aget (.-Args v) 0))]
+        (when (.IsSIMD (.-Type v))
+          (set! r (simdOrMaskReg (aget (.-Args v) 0))))
+
+        (let [p (.Prog s (storeByRegWidth r (.Size (.-Type v))))]
+          (set! (.-Type (.-From p)) obj/TYPE_REG)
+          (set! (.-Reg (.-From p)) r)
+          (ssagen/AddrAuto (addr (.-To p)) v))))
+    (case [ssa/OpAMD64LoweredHasCPUFeature]
+      (let [p (.Prog s x86/AMOVBLZX)]
+        (set! (.-Type (.-From p)) obj/TYPE_MEM)
+        (ssagen/AddAux (addr (.-From p)) v)
+        (set! (.-Type (.-To p)) obj/TYPE_REG)
+        (set! (.-Reg (.-To p)) (.Reg v))))
+    (case [ssa/OpArgIntReg ssa/OpArgFloatReg]
+      ;; The assembler needs to wrap the entry safepoint/stack growth code with spill/unspill
+      ;; The loop only runs once.
+      (range [_ ap (.-RegArgs (.-Func (.-Block v)))]
+        ;; Pass the spill/unspill information along to the assembler, offset by size of return PC pushed on stack.
+        (let [addr (ssagen/SpillSlotAddr ap x86/REG_SP (.-PtrSize (.-Config (.-Func (.-Block v)))))
+            ^{:line 1306} reg (.-Reg ap)
+            ^{:line 1307} t (.-Type ap)
+            ^{:line 1308} sz (.Size t)]
+          (when (.IsSIMD t)
+            (set! reg (simdRegBySize reg sz)))
+
+          (.AddSpill (.FuncInfo s)
+            (lit obj/RegSpill :Reg reg :Addr addr :Unspill (loadByRegWidth reg sz) :Spill (storeByRegWidth reg sz)))))
+
+      (set! (.-RegArgs (.-Func (.-Block v))) nil)
+      (ssagen/CheckArgReg v))
+    (case [ssa/OpAMD64LoweredGetClosurePtr]
+      ;; Closure pointer is DX.
+      (ssagen/CheckLoweredGetClosurePtr v))
+    (case [ssa/OpAMD64LoweredGetG]
+      (when (== (.-ABI s) obj/ABIInternal)
+        (.Fatalf v "LoweredGetG should not appear in ABIInternal"))
+
+      (let [r (.Reg v)]
+        (getgFromTLS s r)))
+    (case [ssa/OpAMD64CALLstatic ssa/OpAMD64CALLtail ssa/OpAMD64CALLtailinter]
+      (when (and (== (.-ABI s) obj/ABI0) (== ^{:go/via [Attribute]} (.ABI (.-Fn (assert (* ssa/AuxCall) (.-Aux v)))) obj/ABIInternal))
+        ;; zeroing X15 when entering ABIInternal from ABI0
+        (zeroX15 s)
+        ;; set G register from TLS
+        (getgFromTLS s x86/REG_R14))
+
+      (when (or (== (.-Op v) ssa/OpAMD64CALLtail) (== (.-Op v) ssa/OpAMD64CALLtailinter))
+        (.TailCall s v)
+        (break))
+
+      (.Call s v)
+      (when (and (== (.-ABI s) obj/ABIInternal) (== ^{:go/via [Attribute]} (.ABI (.-Fn (assert (* ssa/AuxCall) (.-Aux v)))) obj/ABI0))
+        ;; zeroing X15 when entering ABIInternal from ABI0
+        (zeroX15 s)
+        ;; set G register from TLS
+        (getgFromTLS s x86/REG_R14)))
+
+    (case [ssa/OpAMD64CALLclosure ssa/OpAMD64CALLinter]
+      (.Call s v))
+
+    (case [ssa/OpAMD64LoweredGetCallerPC]
+      (let [p (.Prog s x86/AMOVQ)]
+        (set! (.-Type (.-From p)) obj/TYPE_MEM)
+        (set! (.-Offset (.-From p)) -8) ; PC is stored 8 bytes below first parameter.
+        (set! (.-Name (.-From p)) obj/NAME_PARAM)
+        (set! (.-Type (.-To p)) obj/TYPE_REG)
+        (set! (.-Reg (.-To p)) (.Reg v))))
+
+    (case [ssa/OpAMD64LoweredGetCallerSP]
+      ;; caller's SP is the address of the first arg
+      (let [mov x86/AMOVQ]
+        (when (== types/PtrSize 4)
+          (set! mov x86/AMOVL))
+
+        (let [p (.Prog s mov)]
+          (set! (.-Type (.-From p)) obj/TYPE_ADDR)
+          (set! (.-Offset (.-From p)) (- ^{:go/via [Arch]} (.-FixedFrameSize (.-Arch base/Ctxt)))) ; 0 on amd64, just to be consistent with other architectures
+          (set! (.-Name (.-From p)) obj/NAME_PARAM)
+          (set! (.-Type (.-To p)) obj/TYPE_REG)
+          (set! (.-Reg (.-To p)) (.Reg v)))))
+
+    (case [ssa/OpAMD64LoweredWB]
+      (let [p (.Prog s obj/ACALL)]
+        (set! (.-Type (.-To p)) obj/TYPE_MEM)
+        (set! (.-Name (.-To p)) obj/NAME_EXTERN)
+        ;; AuxInt encodes how many buffer entries we need.
+        (set! (.-Sym (.-To p)) (aget (.-GCWriteBarrier ir/Syms) (- (.-AuxInt v) 1)))))
+
+    (case [ssa/OpAMD64LoweredPanicBoundsRR ssa/OpAMD64LoweredPanicBoundsRC ssa/OpAMD64LoweredPanicBoundsCR ssa/OpAMD64LoweredPanicBoundsCC]
+      ;; Compute the constant we put in the PCData entry for this call.
+      (let [(values code signed) (.Code (conv ssa/BoundsKind (.-AuxInt v)))
+          ^{:line 1378} xIsReg false
+          ^{:line 1379} yIsReg false
+          ^{:line 1380} xVal 0
+          ^{:line 1381} yVal 0]
+        (switch (.-Op v)
+          (case [ssa/OpAMD64LoweredPanicBoundsRR]
+            (set! xIsReg true)
+            (set! xVal (conv int (- (.Reg (aget (.-Args v) 0)) x86/REG_AX)))
+            (set! yIsReg true)
+            (set! yVal (conv int (- (.Reg (aget (.-Args v) 1)) x86/REG_AX))))
+          (case [ssa/OpAMD64LoweredPanicBoundsRC]
+            (set! xIsReg true)
+            (set! xVal (conv int (- (.Reg (aget (.-Args v) 0)) x86/REG_AX)))
+            (let [c (.-C (assert ssa/PanicBoundsC (.-Aux v)))]
+              (if (and (>= c 0) (<= c abi/BoundsMaxConst))
+                (set! yVal (conv int c))
+                (do
+                  ;; Move constant to a register
+                  (set! yIsReg true)
+                  (when (== yVal xVal)
+                    (set! yVal 1))
+
+                  (let [p (.Prog s x86/AMOVQ)]
+                    (set! (.-Type (.-From p)) obj/TYPE_CONST)
+                    (set! (.-Offset (.-From p)) c)
+                    (set! (.-Type (.-To p)) obj/TYPE_REG)
+                    (set! (.-Reg (.-To p)) (+ x86/REG_AX (conv int16 yVal))))))))
+
+          (case [ssa/OpAMD64LoweredPanicBoundsCR]
+            (set! yIsReg true)
+            (set! yVal (conv int (- (.Reg (aget (.-Args v) 0)) x86/REG_AX)))
+            (let [c (.-C (assert ssa/PanicBoundsC (.-Aux v)))]
+              (if (and (>= c 0) (<= c abi/BoundsMaxConst))
+                (set! xVal (conv int c))
+                (do
+                  ;; Move constant to a register
+                  (set! xIsReg true)
+                  (when (== xVal yVal)
+                    (set! xVal 1))
+
+                  (let [p (.Prog s x86/AMOVQ)]
+                    (set! (.-Type (.-From p)) obj/TYPE_CONST)
+                    (set! (.-Offset (.-From p)) c)
+                    (set! (.-Type (.-To p)) obj/TYPE_REG)
+                    (set! (.-Reg (.-To p)) (+ x86/REG_AX (conv int16 xVal))))))))
+
+          (case [ssa/OpAMD64LoweredPanicBoundsCC]
+            (let [c (.-Cx (assert ssa/PanicBoundsCC (.-Aux v)))]
+              (if (and (>= c 0) (<= c abi/BoundsMaxConst))
+                (set! xVal (conv int c))
+                (do
+                  ;; Move constant to a register
+                  (set! xIsReg true)
+                  (let [p (.Prog s x86/AMOVQ)]
+                    (set! (.-Type (.-From p)) obj/TYPE_CONST)
+                    (set! (.-Offset (.-From p)) c)
+                    (set! (.-Type (.-To p)) obj/TYPE_REG)
+                    (set! (.-Reg (.-To p)) (+ x86/REG_AX (conv int16 xVal))))))
+
+              (set! c (.-Cy (assert ssa/PanicBoundsCC (.-Aux v))))
+              (if (and (>= c 0) (<= c abi/BoundsMaxConst))
+                (set! yVal (conv int c))
+                (do
+                  ;; Move constant to a register
+                  (set! yIsReg true)
+                  (set! yVal 1)
+                  (let [p (.Prog s x86/AMOVQ)]
+                    (set! (.-Type (.-From p)) obj/TYPE_CONST)
+                    (set! (.-Offset (.-From p)) c)
+                    (set! (.-Type (.-To p)) obj/TYPE_REG)
+                    (set! (.-Reg (.-To p)) (+ x86/REG_AX (conv int16 yVal)))))))))
+
+
+        (let [c (abi/BoundsEncode code signed xIsReg yIsReg xVal yVal)
+
+            ^{:line 1453} p (.Prog s obj/APCDATA)]
+          (.SetConst (.-From p) abi/PCDATA_PanicBounds)
+          (.SetConst (.-To p) (conv int64 c))
+          (set! p (.Prog s obj/ACALL))
+          (set! (.-Type (.-To p)) obj/TYPE_MEM)
+          (set! (.-Name (.-To p)) obj/NAME_EXTERN)
+          (set! (.-Sym (.-To p)) (.-PanicBounds ir/Syms)))))
+
+    (case [ssa/OpAMD64NEGQ ssa/OpAMD64NEGL
+        ^{:line 1462} ssa/OpAMD64BSWAPQ ssa/OpAMD64BSWAPL
+        ^{:line 1463} ssa/OpAMD64NOTQ ssa/OpAMD64NOTL]
+      (let [p (.Prog s (.Asm (.-Op v)))]
+        (set! (.-Type (.-To p)) obj/TYPE_REG)
+        (set! (.-Reg (.-To p)) (.Reg v))))
+
+    (case [ssa/OpAMD64NEGLflags]
+      (let [p (.Prog s (.Asm (.-Op v)))]
+        (set! (.-Type (.-To p)) obj/TYPE_REG)
+        (set! (.-Reg (.-To p)) (.Reg0 v))))
+
+    (case [ssa/OpAMD64ADDQconstflags ssa/OpAMD64ADDLconstflags]
+      (let [p (.Prog s (.Asm (.-Op v)))]
+        (set! (.-Type (.-From p)) obj/TYPE_CONST)
+        (set! (.-Offset (.-From p)) (.-AuxInt v))
+        ;; Note: the inc/dec instructions do not modify
+        ;; the carry flag like add$1 / sub$1 do.
+        ;; We currently never use the CF/OF flags from
+        ;; these instructions, so that is ok.
+        (switch
+          (case [(and (== (.-As p) x86/AADDQ) (== (.-Offset (.-From p)) 1))]
+            (set! (.-As p) x86/AINCQ)
+            (set! (.-Type (.-From p)) obj/TYPE_NONE))
+          (case [(and (== (.-As p) x86/AADDQ) (== (.-Offset (.-From p)) -1))]
+            (set! (.-As p) x86/ADECQ)
+            (set! (.-Type (.-From p)) obj/TYPE_NONE))
+          (case [(and (== (.-As p) x86/AADDL) (== (.-Offset (.-From p)) 1))]
+            (set! (.-As p) x86/AINCL)
+            (set! (.-Type (.-From p)) obj/TYPE_NONE))
+          (case [(and (== (.-As p) x86/AADDL) (== (.-Offset (.-From p)) -1))]
+            (set! (.-As p) x86/ADECL)
+            (set! (.-Type (.-From p)) obj/TYPE_NONE)))
+
+        (set! (.-Type (.-To p)) obj/TYPE_REG)
+        (set! (.-Reg (.-To p)) (.Reg0 v))))
+
+    (case [ssa/OpAMD64BSFQ ssa/OpAMD64BSRQ ssa/OpAMD64BSFL ssa/OpAMD64BSRL ssa/OpAMD64SQRTSD ssa/OpAMD64SQRTSS]
+      (let [p (.Prog s (.Asm (.-Op v)))]
+        (set! (.-Type (.-From p)) obj/TYPE_REG)
+        (set! (.-Reg (.-From p)) (.Reg (aget (.-Args v) 0)))
+        (set! (.-Type (.-To p)) obj/TYPE_REG)
+        (switch (.-Op v)
+          (case [ssa/OpAMD64BSFQ ssa/OpAMD64BSRQ]
+            (set! (.-Reg (.-To p)) (.Reg0 v)))
+          (case [ssa/OpAMD64BSFL ssa/OpAMD64BSRL ssa/OpAMD64SQRTSD ssa/OpAMD64SQRTSS]
+            (set! (.-Reg (.-To p)) (.Reg v))))))
+
+    (case [ssa/OpAMD64LoweredRound32F ssa/OpAMD64LoweredRound64F])
+    ;; input is already rounded
+    (case [ssa/OpAMD64ROUNDSD ssa/OpAMD64ROUNDSS]
+      (let [p (.Prog s (.Asm (.-Op v)))
+          ^{:line 1513} val (.-AuxInt v)]
+        ;; 0 means math.RoundToEven, 1 Floor, 2 Ceil, 3 Trunc
+        (when (or (< val 0) (> val 3))
+          (.Fatalf v "Invalid rounding mode"))
+
+        (set! (.-Offset (.-From p)) val)
+        (set! (.-Type (.-From p)) obj/TYPE_CONST)
+        (.AddRestSourceReg p (.Reg (aget (.-Args v) 0)))
+        (set! (.-Type (.-To p)) obj/TYPE_REG)
+        (set! (.-Reg (.-To p)) (.Reg v))))
+    (case [ssa/OpAMD64POPCNTQ ssa/OpAMD64POPCNTL
+        ^{:line 1524} ssa/OpAMD64TZCNTQ ssa/OpAMD64TZCNTL
+        ^{:line 1525} ssa/OpAMD64LZCNTQ ssa/OpAMD64LZCNTL]
+      (when (!= (.Reg (aget (.-Args v) 0)) (.Reg v))
+        ;; POPCNT/TZCNT/LZCNT have a false dependency on the destination register on Intel cpus.
+        ;; TZCNT/LZCNT problem affects pre-Skylake models. See discussion at https://gcc.gnu.org/bugzilla/show_bug.cgi?id=62011#c7.
+        ;; Xor register with itself to break the dependency.
+        (opregreg s x86/AXORL (.Reg v) (.Reg v)))
+
+      (let [p (.Prog s (.Asm (.-Op v)))]
+        (set! (.-Type (.-From p)) obj/TYPE_REG)
+        (set! (.-Reg (.-From p)) (.Reg (aget (.-Args v) 0)))
+        (set! (.-Type (.-To p)) obj/TYPE_REG)
+        (set! (.-Reg (.-To p)) (.Reg v))))
+
+    (case [ssa/OpAMD64SETEQ ssa/OpAMD64SETNE
+        ^{:line 1539} ssa/OpAMD64SETL ssa/OpAMD64SETLE
+        ^{:line 1540} ssa/OpAMD64SETG ssa/OpAMD64SETGE
+        ^{:line 1541} ssa/OpAMD64SETGF ssa/OpAMD64SETGEF
+        ^{:line 1542} ssa/OpAMD64SETB ssa/OpAMD64SETBE
+        ^{:line 1543} ssa/OpAMD64SETORD ssa/OpAMD64SETNAN
+        ^{:line 1544} ssa/OpAMD64SETA ssa/OpAMD64SETAE
+        ^{:line 1545} ssa/OpAMD64SETO]
+      (let [p (.Prog s (.Asm (.-Op v)))]
+        (set! (.-Type (.-To p)) obj/TYPE_REG)
+        (set! (.-Reg (.-To p)) (.Reg v))))
+
+    (case [ssa/OpAMD64SETEQstore ssa/OpAMD64SETNEstore
+        ^{:line 1551} ssa/OpAMD64SETLstore ssa/OpAMD64SETLEstore
+        ^{:line 1552} ssa/OpAMD64SETGstore ssa/OpAMD64SETGEstore
+        ^{:line 1553} ssa/OpAMD64SETBstore ssa/OpAMD64SETBEstore
+        ^{:line 1554} ssa/OpAMD64SETAstore ssa/OpAMD64SETAEstore]
+      (let [p (.Prog s (.Asm (.-Op v)))]
+        (set! (.-Type (.-To p)) obj/TYPE_MEM)
+        (set! (.-Reg (.-To p)) (.Reg (aget (.-Args v) 0)))
+        (ssagen/AddAux (addr (.-To p)) v)))
+
+    (case [ssa/OpAMD64SETEQstoreidx1 ssa/OpAMD64SETNEstoreidx1
+        ^{:line 1561} ssa/OpAMD64SETLstoreidx1 ssa/OpAMD64SETLEstoreidx1
+        ^{:line 1562} ssa/OpAMD64SETGstoreidx1 ssa/OpAMD64SETGEstoreidx1
+        ^{:line 1563} ssa/OpAMD64SETBstoreidx1 ssa/OpAMD64SETBEstoreidx1
+        ^{:line 1564} ssa/OpAMD64SETAstoreidx1 ssa/OpAMD64SETAEstoreidx1]
+      (let [p (.Prog s (.Asm (.-Op v)))]
+        (memIdx (addr (.-To p)) v)
+        (ssagen/AddAux (addr (.-To p)) v)))
+
+    (case [ssa/OpAMD64SETNEF]
+      (let [t (.RegTmp v)
+          ^{:line 1571} p (.Prog s (.Asm (.-Op v)))]
+        (set! (.-Type (.-To p)) obj/TYPE_REG)
+        (set! (.-Reg (.-To p)) (.Reg v))
+        (let [q (.Prog s x86/ASETPS)]
+          (set! (.-Type (.-To q)) obj/TYPE_REG)
+          (set! (.-Reg (.-To q)) t)
+          ;; ORL avoids partial register write and is smaller than ORQ, used by old compiler
+          (opregreg s x86/AORL (.Reg v) t))))
+
+    (case [ssa/OpAMD64SETEQF]
+      (let [t (.RegTmp v)
+          ^{:line 1582} p (.Prog s (.Asm (.-Op v)))]
+        (set! (.-Type (.-To p)) obj/TYPE_REG)
+        (set! (.-Reg (.-To p)) (.Reg v))
+        (let [q (.Prog s x86/ASETPC)]
+          (set! (.-Type (.-To q)) obj/TYPE_REG)
+          (set! (.-Reg (.-To q)) t)
+          ;; ANDL avoids partial register write and is smaller than ANDQ, used by old compiler
+          (opregreg s x86/AANDL (.Reg v) t))))
+
+    (case [ssa/OpAMD64InvertFlags]
+      (.Fatalf v "InvertFlags should never make it to codegen %v" (.LongString v)))
+    (case [ssa/OpAMD64FlagEQ ssa/OpAMD64FlagLT_ULT ssa/OpAMD64FlagLT_UGT ssa/OpAMD64FlagGT_ULT ssa/OpAMD64FlagGT_UGT]
+      (.Fatalf v "Flag* ops should never make it to codegen %v" (.LongString v)))
+    (case [ssa/OpAMD64AddTupleFirst32 ssa/OpAMD64AddTupleFirst64]
+      (.Fatalf v "AddTupleFirst* should never make it to codegen %v" (.LongString v)))
+    (case [ssa/OpAMD64REPSTOSQ]
+      (.Prog s x86/AREP)
+      (.Prog s x86/ASTOSQ))
+    (case [ssa/OpAMD64REPMOVSQ]
+      (.Prog s x86/AREP)
+      (.Prog s x86/AMOVSQ))
+    (case [ssa/OpAMD64LoweredNilCheck]
+      ;; Issue a load which will fault if the input is nil.
+      ;; TODO: We currently use the 2-byte instruction TESTB AX, (reg).
+      ;; Should we use the 3-byte TESTB $0, (reg) instead? It is larger
+      ;; but it doesn't have false dependency on AX.
+      ;; Or maybe allocate an output register and use MOVL (reg),reg2 ?
+      ;; That trades clobbering flags for clobbering a register.
+      (let [p (.Prog s x86/ATESTB)]
+        (set! (.-Type (.-From p)) obj/TYPE_REG)
+        (set! (.-Reg (.-From p)) x86/REG_AX)
+        (set! (.-Type (.-To p)) obj/TYPE_MEM)
+        (set! (.-Reg (.-To p)) (.Reg (aget (.-Args v) 0)))
+        (when (logopt/Enabled)
+          (logopt/LogOpt (.-Pos v) "nilcheck" "genssa" (.-Name (.-Func (.-Block v)))))
+
+        (when (and (!= (.-Nil base/Debug) 0) (> ^{:go/via [lico]} (.Line (.-Pos v)) 1)) ; v.Pos.Line()==1 in generated wrappers
+          (base/WarnfAt (.-Pos v) "generated nil check"))))
+
+    (case [ssa/OpAMD64MOVBatomicload ssa/OpAMD64MOVLatomicload ssa/OpAMD64MOVQatomicload]
+      (let [p (.Prog s (.Asm (.-Op v)))]
+        (set! (.-Type (.-From p)) obj/TYPE_MEM)
+        (set! (.-Reg (.-From p)) (.Reg (aget (.-Args v) 0)))
+        (ssagen/AddAux (addr (.-From p)) v)
+        (set! (.-Type (.-To p)) obj/TYPE_REG)
+        (set! (.-Reg (.-To p)) (.Reg0 v))))
+    (case [ssa/OpAMD64XCHGB ssa/OpAMD64XCHGL ssa/OpAMD64XCHGQ]
+      (let [p (.Prog s (.Asm (.-Op v)))]
+        (set! (.-Type (.-From p)) obj/TYPE_REG)
+        (set! (.-Reg (.-From p)) (.Reg0 v))
+        (set! (.-Type (.-To p)) obj/TYPE_MEM)
+        (set! (.-Reg (.-To p)) (.Reg (aget (.-Args v) 1)))
+        (ssagen/AddAux (addr (.-To p)) v)))
+    (case [ssa/OpAMD64XADDLlock ssa/OpAMD64XADDQlock]
+      (.Prog s x86/ALOCK)
+      (let [p (.Prog s (.Asm (.-Op v)))]
+        (set! (.-Type (.-From p)) obj/TYPE_REG)
+        (set! (.-Reg (.-From p)) (.Reg0 v))
+        (set! (.-Type (.-To p)) obj/TYPE_MEM)
+        (set! (.-Reg (.-To p)) (.Reg (aget (.-Args v) 1)))
+        (ssagen/AddAux (addr (.-To p)) v)))
+    (case [ssa/OpAMD64CMPXCHGLlock ssa/OpAMD64CMPXCHGQlock]
+      (when (!= (.Reg (aget (.-Args v) 1)) x86/REG_AX)
+        (.Fatalf v "input[1] not in AX %s" (.LongString v)))
+
+      (.Prog s x86/ALOCK)
+      (let [p (.Prog s (.Asm (.-Op v)))]
+        (set! (.-Type (.-From p)) obj/TYPE_REG)
+        (set! (.-Reg (.-From p)) (.Reg (aget (.-Args v) 2)))
+        (set! (.-Type (.-To p)) obj/TYPE_MEM)
+        (set! (.-Reg (.-To p)) (.Reg (aget (.-Args v) 0)))
+        (ssagen/AddAux (addr (.-To p)) v)
+        (set! p (.Prog s x86/ASETEQ))
+        (set! (.-Type (.-To p)) obj/TYPE_REG)
+        (set! (.-Reg (.-To p)) (.Reg0 v))))
+    (case [ssa/OpAMD64ANDBlock ssa/OpAMD64ANDLlock ssa/OpAMD64ANDQlock ssa/OpAMD64ORBlock ssa/OpAMD64ORLlock ssa/OpAMD64ORQlock]
+      ;; Atomic memory operations that don't need to return the old value.
+      (.Prog s x86/ALOCK)
+      (let [p (.Prog s (.Asm (.-Op v)))]
+        (set! (.-Type (.-From p)) obj/TYPE_REG)
+        (set! (.-Reg (.-From p)) (.Reg (aget (.-Args v) 1)))
+        (set! (.-Type (.-To p)) obj/TYPE_MEM)
+        (set! (.-Reg (.-To p)) (.Reg (aget (.-Args v) 0)))
+        (ssagen/AddAux (addr (.-To p)) v)))
+    (case [ssa/OpAMD64LoweredAtomicAnd64 ssa/OpAMD64LoweredAtomicOr64 ssa/OpAMD64LoweredAtomicAnd32 ssa/OpAMD64LoweredAtomicOr32]
+      ;; Atomic memory operations that need to return the old value.
+      ;; We need to do these with compare-and-exchange to get access to the old value.
+      ;; loop:
+      ;; MOVQ mask, tmp
+      ;; MOVQ (addr), AX
+      ;; ANDQ AX, tmp
+      ;; LOCK CMPXCHGQ tmp, (addr) : note that AX is implicit old value to compare against
+      ;; JNE loop
+      ;; : result in AX
+      (let [mov x86/AMOVQ
+          ^{:line 1677} op x86/AANDQ
+          ^{:line 1678} cmpxchg x86/ACMPXCHGQ]
+        (switch (.-Op v)
+          (case [ssa/OpAMD64LoweredAtomicOr64]
+            (set! op x86/AORQ))
+          (case [ssa/OpAMD64LoweredAtomicAnd32]
+            (set! mov x86/AMOVL)
+            (set! op x86/AANDL)
+            (set! cmpxchg x86/ACMPXCHGL))
+          (case [ssa/OpAMD64LoweredAtomicOr32]
+            (set! mov x86/AMOVL)
+            (set! op x86/AORL)
+            (set! cmpxchg x86/ACMPXCHGL)))
+
+        (let [addr (.Reg (aget (.-Args v) 0))
+            ^{:line 1692} mask (.Reg (aget (.-Args v) 1))
+            ^{:line 1693} tmp (.RegTmp v)
+            ^{:line 1694} p1 (.Prog s mov)]
+          (set! (.-Type (.-From p1)) obj/TYPE_REG)
+          (set! (.-Reg (.-From p1)) mask)
+          (set! (.-Type (.-To p1)) obj/TYPE_REG)
+          (set! (.-Reg (.-To p1)) tmp)
+          (let [p2 (.Prog s mov)]
+            (set! (.-Type (.-From p2)) obj/TYPE_MEM)
+            (set! (.-Reg (.-From p2)) addr)
+            (ssagen/AddAux (addr (.-From p2)) v)
+            (set! (.-Type (.-To p2)) obj/TYPE_REG)
+            (set! (.-Reg (.-To p2)) x86/REG_AX)
+            (let [p3 (.Prog s op)]
+              (set! (.-Type (.-From p3)) obj/TYPE_REG)
+              (set! (.-Reg (.-From p3)) x86/REG_AX)
+              (set! (.-Type (.-To p3)) obj/TYPE_REG)
+              (set! (.-Reg (.-To p3)) tmp)
+              (.Prog s x86/ALOCK)
+              (let [p5 (.Prog s cmpxchg)]
+                (set! (.-Type (.-From p5)) obj/TYPE_REG)
+                (set! (.-Reg (.-From p5)) tmp)
+                (set! (.-Type (.-To p5)) obj/TYPE_MEM)
+                (set! (.-Reg (.-To p5)) addr)
+                (ssagen/AddAux (addr (.-To p5)) v)
+                (let [p6 (.Prog s x86/AJNE)]
+                  (set! (.-Type (.-To p6)) obj/TYPE_BRANCH)
+                  (.SetTarget (.-To p6) p1))))))))
+    (case [ssa/OpAMD64PrefetchT0 ssa/OpAMD64PrefetchNTA]
+      (let [p (.Prog s (.Asm (.-Op v)))]
+        (set! (.-Type (.-From p)) obj/TYPE_MEM)
+        (set! (.-Reg (.-From p)) (.Reg (aget (.-Args v) 0)))))
+    (case [ssa/OpClobber]
+      (let [p (.Prog s x86/AMOVL)]
+        (set! (.-Type (.-From p)) obj/TYPE_CONST)
+        (set! (.-Offset (.-From p)) 0xdeaddead)
+        (set! (.-Type (.-To p)) obj/TYPE_MEM)
+        (set! (.-Reg (.-To p)) x86/REG_SP)
+        (ssagen/AddAux (addr (.-To p)) v)
+        (set! p (.Prog s x86/AMOVL))
+        (set! (.-Type (.-From p)) obj/TYPE_CONST)
+        (set! (.-Offset (.-From p)) 0xdeaddead)
+        (set! (.-Type (.-To p)) obj/TYPE_MEM)
+        (set! (.-Reg (.-To p)) x86/REG_SP)
+        (ssagen/AddAux (addr (.-To p)) v)
+        (set! (.-Offset (.-To p)) + 4)))
+    (case [ssa/OpClobberReg]
+      (let [x (conv uint64 0xdeaddeaddeaddead)
+          ^{:line 1740} p (.Prog s x86/AMOVQ)]
+        (set! (.-Type (.-From p)) obj/TYPE_CONST)
+        (set! (.-Offset (.-From p)) (conv int64 x))
+        (set! (.-Type (.-To p)) obj/TYPE_REG)
+        (set! (.-Reg (.-To p)) (.Reg v))))
+
+    ;; SIMD ops
+    (case [ssa/OpAMD64VZEROUPPER ssa/OpAMD64VZEROALL]
+      (.Prog s (.Asm (.-Op v))))
+
+    (case [ssa/OpAMD64Zero128]) ; no code emitted
+
+    (case [ssa/OpAMD64Zero256 ssa/OpAMD64Zero512]
+      (let [p (.Prog s (.Asm (.-Op v)))]
+        (set! (.-Type (.-From p)) obj/TYPE_REG)
+        (set! (.-Reg (.-From p)) (simdReg v))
+        (.AddRestSourceReg p (simdReg v))
+        (set! (.-Type (.-To p)) obj/TYPE_REG)
+        (set! (.-Reg (.-To p)) (simdReg v))))
+
+    (case [ssa/OpAMD64VMOVSSf2v ssa/OpAMD64VMOVSDf2v]
+      ;; These are for initializing the least 32/64 bits of a SIMD register from a "float".
+      (let [p (.Prog s (.Asm (.-Op v)))]
+        (set! (.-Type (.-From p)) obj/TYPE_REG)
+        (set! (.-Reg (.-From p)) (.Reg (aget (.-Args v) 0)))
+        (.AddRestSourceReg p x86/REG_X15)
+        (set! (.-Type (.-To p)) obj/TYPE_REG)
+        (set! (.-Reg (.-To p)) (simdReg v))))
+
+    (case [ssa/OpAMD64VMOVQload ssa/OpAMD64VMOVDload
+        ^{:line 1770} ssa/OpAMD64VMOVSSload ssa/OpAMD64VMOVSDload]
+      (let [p (.Prog s (.Asm (.-Op v)))]
+        (set! (.-Type (.-From p)) obj/TYPE_MEM)
+        (set! (.-Reg (.-From p)) (.Reg (aget (.-Args v) 0)))
+        (ssagen/AddAux (addr (.-From p)) v)
+        (set! (.-Type (.-To p)) obj/TYPE_REG)
+        (set! (.-Reg (.-To p)) (simdReg v))))
+
+    (case [ssa/OpAMD64VMOVSSconst ssa/OpAMD64VMOVSDconst]
+      ;; for loading constants directly into SIMD registers
+      (let [x (simdReg v)
+          ^{:line 1781} p (.Prog s (.Asm (.-Op v)))]
+        (set! (.-Type (.-From p)) obj/TYPE_FCONST)
+        (set! (.-Val (.-From p)) (math/Float64frombits (conv uint64 (.-AuxInt v))))
+        (set! (.-Type (.-To p)) obj/TYPE_REG)
+        (set! (.-Reg (.-To p)) x)))
+
+    (case [ssa/OpAMD64VMOVD ssa/OpAMD64VMOVQ]
+      ;; These are for initializing the least 32/64 bits of a SIMD register from an "int".
+      (let [p (.Prog s (.Asm (.-Op v)))]
+        (set! (.-Type (.-From p)) obj/TYPE_REG)
+        (set! (.-Reg (.-From p)) (.Reg (aget (.-Args v) 0)))
+        (set! (.-Type (.-To p)) obj/TYPE_REG)
+        (set! (.-Reg (.-To p)) (simdReg v))))
+
+    (case [ssa/OpAMD64VMOVDQUload128 ssa/OpAMD64VMOVDQUload256 ssa/OpAMD64VMOVDQUload512
+        ^{:line 1796} ssa/OpAMD64KMOVBload ssa/OpAMD64KMOVWload ssa/OpAMD64KMOVDload ssa/OpAMD64KMOVQload]
+      (let [p (.Prog s (.Asm (.-Op v)))]
+        (set! (.-Type (.-From p)) obj/TYPE_MEM)
+        (set! (.-Reg (.-From p)) (.Reg (aget (.-Args v) 0)))
+        (ssagen/AddAux (addr (.-From p)) v)
+        (set! (.-Type (.-To p)) obj/TYPE_REG)
+        (set! (.-Reg (.-To p)) (simdOrMaskReg v))))
+    (case [ssa/OpAMD64VMOVDQUstore128 ssa/OpAMD64VMOVDQUstore256 ssa/OpAMD64VMOVDQUstore512
+        ^{:line 1804} ssa/OpAMD64KMOVBstore ssa/OpAMD64KMOVWstore ssa/OpAMD64KMOVDstore ssa/OpAMD64KMOVQstore]
+      (let [p (.Prog s (.Asm (.-Op v)))]
+        (set! (.-Type (.-From p)) obj/TYPE_REG)
+        (set! (.-Reg (.-From p)) (simdOrMaskReg (aget (.-Args v) 1)))
+        (set! (.-Type (.-To p)) obj/TYPE_MEM)
+        (set! (.-Reg (.-To p)) (.Reg (aget (.-Args v) 0)))
+        (ssagen/AddAux (addr (.-To p)) v)))
+
+    (case [ssa/OpAMD64VPMASK32load128 ssa/OpAMD64VPMASK64load128 ssa/OpAMD64VPMASK32load256 ssa/OpAMD64VPMASK64load256]
+      (let [p (.Prog s (.Asm (.-Op v)))]
+        (set! (.-Type (.-From p)) obj/TYPE_MEM)
+        (set! (.-Reg (.-From p)) (.Reg (aget (.-Args v) 0)))
+        (ssagen/AddAux (addr (.-From p)) v)
+        (set! (.-Type (.-To p)) obj/TYPE_REG)
+        (set! (.-Reg (.-To p)) (simdReg v))
+        (.AddRestSourceReg p (simdReg (aget (.-Args v) 1))))) ; masking simd reg
+
+    (case [ssa/OpAMD64VPMASK32store128 ssa/OpAMD64VPMASK64store128 ssa/OpAMD64VPMASK32store256 ssa/OpAMD64VPMASK64store256]
+      (let [p (.Prog s (.Asm (.-Op v)))]
+        (set! (.-Type (.-From p)) obj/TYPE_REG)
+        (set! (.-Reg (.-From p)) (simdReg (aget (.-Args v) 2)))
+        (set! (.-Type (.-To p)) obj/TYPE_MEM)
+        (set! (.-Reg (.-To p)) (.Reg (aget (.-Args v) 0)))
+        (ssagen/AddAux (addr (.-To p)) v)
+        (.AddRestSourceReg p (simdReg (aget (.-Args v) 1))))) ; masking simd reg
+
+    (case [ssa/OpAMD64VPMASK64load512 ssa/OpAMD64VPMASK32load512 ssa/OpAMD64VPMASK16load512 ssa/OpAMD64VPMASK8load512]
+      (let [p (.Prog s (.Asm (.-Op v)))]
+        (set! (.-Type (.-From p)) obj/TYPE_MEM)
+        (set! (.-Reg (.-From p)) (.Reg (aget (.-Args v) 0)))
+        (ssagen/AddAux (addr (.-From p)) v)
+        (set! (.-Type (.-To p)) obj/TYPE_REG)
+        (set! (.-Reg (.-To p)) (simdReg v))
+        (.AddRestSourceReg p (.Reg (aget (.-Args v) 1))) ; simd mask reg
+        (x86/ParseSuffix p "Z"))) ; must be zero if not in mask
+
+    (case [ssa/OpAMD64KANDB ssa/OpAMD64KANDW ssa/OpAMD64KANDD ssa/OpAMD64KANDQ
+        ^{:line 1841} ssa/OpAMD64KORB ssa/OpAMD64KORW ssa/OpAMD64KORD ssa/OpAMD64KORQ
+        ^{:line 1842} ssa/OpAMD64KXORB ssa/OpAMD64KXORW ssa/OpAMD64KXORD ssa/OpAMD64KXORQ
+        ^{:line 1843} ssa/OpAMD64KXNORB ssa/OpAMD64KXNORW ssa/OpAMD64KXNORD ssa/OpAMD64KXNORQ] ; XNOR == EQ
+      (let [p (.Prog s (.Asm (.-Op v)))]
+        (set! (.-Type (.-From p)) obj/TYPE_REG)
+        (set! (.-Reg (.-From p)) (.Reg (aget (.-Args v) 0)))
+        (set! (.-Type (.-To p)) obj/TYPE_REG)
+        (set! (.-Reg (.-To p)) (.Reg v))
+        (.AddRestSourceReg p (.Reg (aget (.-Args v) 1))))) ; masking simd reg
+
+    (case [ssa/OpAMD64VPMASK64store512 ssa/OpAMD64VPMASK32store512 ssa/OpAMD64VPMASK16store512 ssa/OpAMD64VPMASK8store512]
+      (let [p (.Prog s (.Asm (.-Op v)))]
+        (set! (.-Type (.-From p)) obj/TYPE_REG)
+        (set! (.-Reg (.-From p)) (simdReg (aget (.-Args v) 2)))
+        (set! (.-Type (.-To p)) obj/TYPE_MEM)
+        (set! (.-Reg (.-To p)) (.Reg (aget (.-Args v) 0)))
+        (ssagen/AddAux (addr (.-To p)) v)
+        (.AddRestSourceReg p (.Reg (aget (.-Args v) 1))))) ; simd mask reg
+
+    (case [ssa/OpAMD64VPMOVMToVec8x16
+        ^{:line 1861} ssa/OpAMD64VPMOVMToVec8x32
+        ^{:line 1862} ssa/OpAMD64VPMOVMToVec8x64
+        ^{:line 1863} ssa/OpAMD64VPMOVMToVec16x8
+        ^{:line 1864} ssa/OpAMD64VPMOVMToVec16x16
+        ^{:line 1865} ssa/OpAMD64VPMOVMToVec16x32
+        ^{:line 1866} ssa/OpAMD64VPMOVMToVec32x4
+        ^{:line 1867} ssa/OpAMD64VPMOVMToVec32x8
+        ^{:line 1868} ssa/OpAMD64VPMOVMToVec32x16
+        ^{:line 1869} ssa/OpAMD64VPMOVMToVec64x2
+        ^{:line 1870} ssa/OpAMD64VPMOVMToVec64x4
+        ^{:line 1871} ssa/OpAMD64VPMOVMToVec64x8]
+      (let [p (.Prog s (.Asm (.-Op v)))]
+        (set! (.-Type (.-From p)) obj/TYPE_REG)
+        (set! (.-Reg (.-From p)) (.Reg (aget (.-Args v) 0)))
+        (set! (.-Type (.-To p)) obj/TYPE_REG)
+        (set! (.-Reg (.-To p)) (simdReg v))))
+
+    (case [ssa/OpAMD64VPMOVVec8x16ToM
+        ^{:line 1879} ssa/OpAMD64VPMOVVec8x32ToM
+        ^{:line 1880} ssa/OpAMD64VPMOVVec8x64ToM
+        ^{:line 1881} ssa/OpAMD64VPMOVVec16x8ToM
+        ^{:line 1882} ssa/OpAMD64VPMOVVec16x16ToM
+        ^{:line 1883} ssa/OpAMD64VPMOVVec16x32ToM
+        ^{:line 1884} ssa/OpAMD64VPMOVVec32x4ToM
+        ^{:line 1885} ssa/OpAMD64VPMOVVec32x8ToM
+        ^{:line 1886} ssa/OpAMD64VPMOVVec32x16ToM
+        ^{:line 1887} ssa/OpAMD64VPMOVVec64x2ToM
+        ^{:line 1888} ssa/OpAMD64VPMOVVec64x4ToM
+        ^{:line 1889} ssa/OpAMD64VPMOVVec64x8ToM
+        ^{:line 1890} ssa/OpAMD64VPMOVMSKB128
+        ^{:line 1891} ssa/OpAMD64VPMOVMSKB256
+        ^{:line 1892} ssa/OpAMD64VMOVMSKPS128
+        ^{:line 1893} ssa/OpAMD64VMOVMSKPS256
+        ^{:line 1894} ssa/OpAMD64VMOVMSKPD128
+        ^{:line 1895} ssa/OpAMD64VMOVMSKPD256]
+      (let [p (.Prog s (.Asm (.-Op v)))]
+        (set! (.-Type (.-From p)) obj/TYPE_REG)
+        (set! (.-Reg (.-From p)) (simdReg (aget (.-Args v) 0)))
+        (set! (.-Type (.-To p)) obj/TYPE_REG)
+        (set! (.-Reg (.-To p)) (.Reg v))))
+
+    (case [ssa/OpAMD64KMOVQk ssa/OpAMD64KMOVDk ssa/OpAMD64KMOVWk ssa/OpAMD64KMOVBk
+        ^{:line 1903} ssa/OpAMD64KMOVQi ssa/OpAMD64KMOVDi ssa/OpAMD64KMOVWi ssa/OpAMD64KMOVBi]
+      ;; See also ssa.OpAMD64KMOVQload
+      (let [p (.Prog s (.Asm (.-Op v)))]
+        (set! (.-Type (.-From p)) obj/TYPE_REG)
+        (set! (.-Reg (.-From p)) (.Reg (aget (.-Args v) 0)))
+        (set! (.-Type (.-To p)) obj/TYPE_REG)
+        (set! (.-Reg (.-To p)) (.Reg v))))
+    (case [ssa/OpAMD64VPTEST]
+      ;; Some instructions setting flags put their second operand into the destination reg.
+      ;; See also CMP[BWDQ].
+      (let [p (.Prog s (.Asm (.-Op v)))]
+        (set! (.-Type (.-From p)) obj/TYPE_REG)
+        (set! (.-Reg (.-From p)) (simdReg (aget (.-Args v) 0)))
+        (set! (.-Type (.-To p)) obj/TYPE_REG)
+        (set! (.-Reg (.-To p)) (simdReg (aget (.-Args v) 1)))))
+
+    (default
+      (when (not (ssaGenSIMDValue s v))
+        (.Fatalf v "genValue not implemented: %s" (.LongString v))))))
+
+
+
+
+
+^{:go/end 1929} (go/func zeroX15 "zeroX15 zeroes the X15 register.\n" [^{:tag (* ssagen/State)} s]
+  (opregreg s x86/AXORPS x86/REG_X15 x86/REG_X15))
+
+
+
+^{:go/end 1939} (go/func simdV11 "Example instruction: VRSQRTPS X1, X1\n" ^{:tag (* obj/Prog)} [^{:tag (* ssagen/State)} s ^{:tag (* ssa/Value)} v]
+  (let [p (.Prog s (.Asm (.-Op v)))]
+    (set! (.-Type (.-From p)) obj/TYPE_REG)
+    (set! (.-Reg (.-From p)) (simdReg (aget (.-Args v) 0)))
+    (set! (.-Type (.-To p)) obj/TYPE_REG)
+    (set! (.-Reg (.-To p)) (simdReg v))
+    ^{:line 1938} p))
+
+
+
+^{:go/end 1952} (go/func simdV21 "Example instruction: VPSUBD X1, X2, X3\n" ^{:tag (* obj/Prog)} [^{:tag (* ssagen/State)} s ^{:tag (* ssa/Value)} v]
+  (let [p (.Prog s (.Asm (.-Op v)))]
+    (set! (.-Type (.-From p)) obj/TYPE_REG)
+    ;; Vector registers operands follows a right-to-left order.
+    ;; e.g. VPSUBD X1, X2, X3 means X3 = X2 - X1.
+    (set! (.-Reg (.-From p)) (simdReg (aget (.-Args v) 1)))
+    (.AddRestSourceReg p (simdReg (aget (.-Args v) 0)))
+    (set! (.-Type (.-To p)) obj/TYPE_REG)
+    (set! (.-Reg (.-To p)) (simdReg v))
+    ^{:line 1951} p))
+
+
+
+
+
+^{:go/end 1967} (go/func simdVfpv "This function is to accustomize the shifts.\nThe 2nd arg is an XMM, and this function merely checks that.\nExample instruction: VPSLLQ Z1, X1, Z2\n" ^{:tag (* obj/Prog)} [^{:tag (* ssagen/State)} s ^{:tag (* ssa/Value)} v]
+  (let [p (.Prog s (.Asm (.-Op v)))]
+    (set! (.-Type (.-From p)) obj/TYPE_REG)
+    ;; Vector registers operands follows a right-to-left order.
+    ;; e.g. VPSUBD X1, X2, X3 means X3 = X2 - X1.
+    (set! (.-Reg (.-From p)) (.Reg (aget (.-Args v) 1)))
+    (.AddRestSourceReg p (simdReg (aget (.-Args v) 0)))
+    (set! (.-Type (.-To p)) obj/TYPE_REG)
+    (set! (.-Reg (.-To p)) (simdReg v))
+    ^{:line 1966} p))
+
+
+
+^{:go/end 1978} (go/func simdV2k "Example instruction: VPCMPEQW Z26, Z30, K4\n" ^{:tag (* obj/Prog)} [^{:tag (* ssagen/State)} s ^{:tag (* ssa/Value)} v]
+  (let [p (.Prog s (.Asm (.-Op v)))]
+    (set! (.-Type (.-From p)) obj/TYPE_REG)
+    (set! (.-Reg (.-From p)) (simdReg (aget (.-Args v) 1)))
+    (.AddRestSourceReg p (simdReg (aget (.-Args v) 0)))
+    (set! (.-Type (.-To p)) obj/TYPE_REG)
+    (set! (.-Reg (.-To p)) (maskReg v))
+    ^{:line 1977} p))
+
+
+
+^{:go/end 1995} (go/func simdV2kv "Example instruction: VPMINUQ X21, X3, K3, X31\n" ^{:tag (* obj/Prog)} [^{:tag (* ssagen/State)} s ^{:tag (* ssa/Value)} v]
+  (let [p (.Prog s (.Asm (.-Op v)))]
+    (set! (.-Type (.-From p)) obj/TYPE_REG)
+    (set! (.-Reg (.-From p)) (simdReg (aget (.-Args v) 1)))
+    (.AddRestSourceReg p (simdReg (aget (.-Args v) 0)))
+    ;; These "simd*" series of functions assumes:
+    ;; Any "K" register that serves as the write-mask
+    ;; or "predicate" for "predicated AVX512 instructions"
+    ;; sits right at the end of the operand list.
+    ;; TODO: verify this assumption.
+    (.AddRestSourceReg p (maskReg (aget (.-Args v) 2)))
+    (set! (.-Type (.-To p)) obj/TYPE_REG)
+    (set! (.-Reg (.-To p)) (simdReg v))
+    ^{:line 1994} p))
+
+
+
+^{:go/end 2011} (go/func simdV2kvResultInArg0 "Example instruction: VPABSB X1, X2, K3 (masking merging)\n" ^{:tag (* obj/Prog)} [^{:tag (* ssagen/State)} s ^{:tag (* ssa/Value)} v]
+  (let [p (.Prog s (.Asm (.-Op v)))]
+    (set! (.-Type (.-From p)) obj/TYPE_REG)
+    (set! (.-Reg (.-From p)) (simdReg (aget (.-Args v) 1)))
+    ;; These "simd*" series of functions assumes:
+    ;; Any "K" register that serves as the write-mask
+    ;; or "predicate" for "predicated AVX512 instructions"
+    ;; sits right at the end of the operand list.
+    ;; TODO: verify this assumption.
+    (.AddRestSourceReg p (maskReg (aget (.-Args v) 2)))
+    (set! (.-Type (.-To p)) obj/TYPE_REG)
+    (set! (.-Reg (.-To p)) (simdReg v))
+    ^{:line 2010} p))
+
+
+
+
+
+^{:go/end 2025} (go/func simdVfpkv "This function is to accustomize the shifts.\nThe 2nd arg is an XMM, and this function merely checks that.\nExample instruction: VPSLLQ Z1, X1, K1, Z2\n" ^{:tag (* obj/Prog)} [^{:tag (* ssagen/State)} s ^{:tag (* ssa/Value)} v]
+  (let [p (.Prog s (.Asm (.-Op v)))]
+    (set! (.-Type (.-From p)) obj/TYPE_REG)
+    (set! (.-Reg (.-From p)) (.Reg (aget (.-Args v) 1)))
+    (.AddRestSourceReg p (simdReg (aget (.-Args v) 0)))
+    (.AddRestSourceReg p (maskReg (aget (.-Args v) 2)))
+    (set! (.-Type (.-To p)) obj/TYPE_REG)
+    (set! (.-Reg (.-To p)) (simdReg v))
+    ^{:line 2024} p))
+
+
+
+^{:go/end 2037} (go/func simdV2kk "Example instruction: VPCMPEQW Z26, Z30, K1, K4\n" ^{:tag (* obj/Prog)} [^{:tag (* ssagen/State)} s ^{:tag (* ssa/Value)} v]
+  (let [p (.Prog s (.Asm (.-Op v)))]
+    (set! (.-Type (.-From p)) obj/TYPE_REG)
+    (set! (.-Reg (.-From p)) (simdReg (aget (.-Args v) 1)))
+    (.AddRestSourceReg p (simdReg (aget (.-Args v) 0)))
+    (.AddRestSourceReg p (maskReg (aget (.-Args v) 2)))
+    (set! (.-Type (.-To p)) obj/TYPE_REG)
+    (set! (.-Reg (.-To p)) (maskReg v))
+    ^{:line 2036} p))
+
+
+
+^{:go/end 2048} (go/func simdVkv "Example instruction: VPOPCNTB X14, K4, X16\n" ^{:tag (* obj/Prog)} [^{:tag (* ssagen/State)} s ^{:tag (* ssa/Value)} v]
+  (let [p (.Prog s (.Asm (.-Op v)))]
+    (set! (.-Type (.-From p)) obj/TYPE_REG)
+    (set! (.-Reg (.-From p)) (simdReg (aget (.-Args v) 0)))
+    (.AddRestSourceReg p (maskReg (aget (.-Args v) 1)))
+    (set! (.-Type (.-To p)) obj/TYPE_REG)
+    (set! (.-Reg (.-To p)) (simdReg v))
+    ^{:line 2047} p))
+
+
+
+^{:go/end 2059} (go/func simdV11Imm8 "Example instruction: VROUNDPD $7, X2, X2\n" ^{:tag (* obj/Prog)} [^{:tag (* ssagen/State)} s ^{:tag (* ssa/Value)} v]
+  (let [p (.Prog s (.Asm (.-Op v)))]
+    (set! (.-Offset (.-From p)) (conv int64 (.AuxUInt8 v)))
+    (set! (.-Type (.-From p)) obj/TYPE_CONST)
+    (.AddRestSourceReg p (simdReg (aget (.-Args v) 0)))
+    (set! (.-Type (.-To p)) obj/TYPE_REG)
+    (set! (.-Reg (.-To p)) (simdReg v))
+    ^{:line 2058} p))
+
+
+
+^{:go/end 2071} (go/func simdVkvImm8 "Example instruction: VREDUCEPD $126, X1, K3, X31\n" ^{:tag (* obj/Prog)} [^{:tag (* ssagen/State)} s ^{:tag (* ssa/Value)} v]
+  (let [p (.Prog s (.Asm (.-Op v)))]
+    (set! (.-Offset (.-From p)) (conv int64 (.AuxUInt8 v)))
+    (set! (.-Type (.-From p)) obj/TYPE_CONST)
+    (.AddRestSourceReg p (simdReg (aget (.-Args v) 0)))
+    (.AddRestSourceReg p (maskReg (aget (.-Args v) 1)))
+    (set! (.-Type (.-To p)) obj/TYPE_REG)
+    (set! (.-Reg (.-To p)) (simdReg v))
+    ^{:line 2070} p))
+
+
+
+^{:go/end 2083} (go/func simdV21Imm8 "Example instruction: VCMPPS $7, X2, X9, X2\n" ^{:tag (* obj/Prog)} [^{:tag (* ssagen/State)} s ^{:tag (* ssa/Value)} v]
+  (let [p (.Prog s (.Asm (.-Op v)))]
+    (set! (.-Offset (.-From p)) (conv int64 (.AuxUInt8 v)))
+    (set! (.-Type (.-From p)) obj/TYPE_CONST)
+    (.AddRestSourceReg p (simdReg (aget (.-Args v) 1)))
+    (.AddRestSourceReg p (simdReg (aget (.-Args v) 0)))
+    (set! (.-Type (.-To p)) obj/TYPE_REG)
+    (set! (.-Reg (.-To p)) (simdReg v))
+    ^{:line 2082} p))
+
+
+
+^{:go/end 2095} (go/func simdVgpvImm8 "Example instruction: VPINSRB $3, DX, X0, X0\n" ^{:tag (* obj/Prog)} [^{:tag (* ssagen/State)} s ^{:tag (* ssa/Value)} v]
+  (let [p (.Prog s (.Asm (.-Op v)))]
+    (set! (.-Offset (.-From p)) (conv int64 (.AuxUInt8 v)))
+    (set! (.-Type (.-From p)) obj/TYPE_CONST)
+    (.AddRestSourceReg p (.Reg (aget (.-Args v) 1)))
+    (.AddRestSourceReg p (simdReg (aget (.-Args v) 0)))
+    (set! (.-Type (.-To p)) obj/TYPE_REG)
+    (set! (.-Reg (.-To p)) (simdReg v))
+    ^{:line 2094} p))
+
+^{:go/end 2104} (go/func simdVgpvImm ^{:tag (* obj/Prog)} [^{:tag (* ssagen/State)} s ^{:tag (* ssa/Value)} v]
+  ;; within simdgen, the choice of intrinsic shape and the output
+  ;; intruction format are linked.  In the case of VgpImm, there is
+  ;; a difference in the intrinsic, but no difference in the
+  ;; instruction, it is just like VgpvImm8.
+  ;;
+  ;; See also, simdVgpImm and simdVgpImm8
+  (simdVgpvImm8 s v))
+
+
+
+^{:go/end 2116} (go/func simdV2kImm8 "Example instruction: VPCMPD $1, Z1, Z2, K1\n" ^{:tag (* obj/Prog)} [^{:tag (* ssagen/State)} s ^{:tag (* ssa/Value)} v]
+  (let [p (.Prog s (.Asm (.-Op v)))]
+    (set! (.-Offset (.-From p)) (conv int64 (.AuxUInt8 v)))
+    (set! (.-Type (.-From p)) obj/TYPE_CONST)
+    (.AddRestSourceReg p (simdReg (aget (.-Args v) 1)))
+    (.AddRestSourceReg p (simdReg (aget (.-Args v) 0)))
+    (set! (.-Type (.-To p)) obj/TYPE_REG)
+    (set! (.-Reg (.-To p)) (maskReg v))
+    ^{:line 2115} p))
+
+
+
+^{:go/end 2129} (go/func simdV2kkImm8 "Example instruction: VPCMPD $1, Z1, Z2, K2, K1\n" ^{:tag (* obj/Prog)} [^{:tag (* ssagen/State)} s ^{:tag (* ssa/Value)} v]
+  (let [p (.Prog s (.Asm (.-Op v)))]
+    (set! (.-Offset (.-From p)) (conv int64 (.AuxUInt8 v)))
+    (set! (.-Type (.-From p)) obj/TYPE_CONST)
+    (.AddRestSourceReg p (simdReg (aget (.-Args v) 1)))
+    (.AddRestSourceReg p (simdReg (aget (.-Args v) 0)))
+    (.AddRestSourceReg p (maskReg (aget (.-Args v) 2)))
+    (set! (.-Type (.-To p)) obj/TYPE_REG)
+    (set! (.-Reg (.-To p)) (maskReg v))
+    ^{:line 2128} p))
+
+
+^{:go/end 2141} (go/func simdV2kvImm8 ^{:tag (* obj/Prog)} [^{:tag (* ssagen/State)} s ^{:tag (* ssa/Value)} v]
+  (let [p (.Prog s (.Asm (.-Op v)))]
+    (set! (.-Offset (.-From p)) (conv int64 (.AuxUInt8 v)))
+    (set! (.-Type (.-From p)) obj/TYPE_CONST)
+    (.AddRestSourceReg p (simdReg (aget (.-Args v) 1)))
+    (.AddRestSourceReg p (simdReg (aget (.-Args v) 0)))
+    (.AddRestSourceReg p (maskReg (aget (.-Args v) 2)))
+    (set! (.-Type (.-To p)) obj/TYPE_REG)
+    (set! (.-Reg (.-To p)) (simdReg v))
+    ^{:line 2140} p))
+
+
+
+^{:go/end 2152} (go/func simdV31ResultInArg0 "Example instruction: VFMADD213PD Z2, Z1, Z0\n" ^{:tag (* obj/Prog)} [^{:tag (* ssagen/State)} s ^{:tag (* ssa/Value)} v]
+  (let [p (.Prog s (.Asm (.-Op v)))]
+    (set! (.-Type (.-From p)) obj/TYPE_REG)
+    (set! (.-Reg (.-From p)) (simdReg (aget (.-Args v) 2)))
+    (.AddRestSourceReg p (simdReg (aget (.-Args v) 1)))
+    (set! (.-Type (.-To p)) obj/TYPE_REG)
+    (set! (.-Reg (.-To p)) (simdReg v))
+    ^{:line 2151} p))
+
+
+^{:go/end 2165} (go/func simdV31ResultInArg0Imm8 ^{:tag (* obj/Prog)} [^{:tag (* ssagen/State)} s ^{:tag (* ssa/Value)} v]
+  (let [p (.Prog s (.Asm (.-Op v)))]
+    (set! (.-Offset (.-From p)) (conv int64 (.AuxUInt8 v)))
+    (set! (.-Type (.-From p)) obj/TYPE_CONST)
+
+    (.AddRestSourceReg p (simdReg (aget (.-Args v) 2)))
+    (.AddRestSourceReg p (simdReg (aget (.-Args v) 1)))
+    ;; p.AddRestSourceReg(x86.REG_K0)
+    (set! (.-Type (.-To p)) obj/TYPE_REG)
+    (set! (.-Reg (.-To p)) (simdReg v))
+    ^{:line 2164} p))
+
+
+
+
+
+^{:go/end 2183} (go/func simdV31loadResultInArg0Imm8 "v31loadResultInArg0Imm8\nExample instruction:\nfor (VPTERNLOGD128load {sym} [makeValAndOff(int32(int8(c)),off)]  x y ptr mem)\n" ^{:tag (* obj/Prog)} [^{:tag (* ssagen/State)} s ^{:tag (* ssa/Value)} v]
+  (let [sc (.AuxValAndOff v)
+      ^{:line 2172} p (.Prog s (.Asm (.-Op v)))]
+
+    (set! (.-Type (.-From p)) obj/TYPE_CONST)
+    (set! (.-Offset (.-From p)) (.Val64 sc))
+
+    (let [m (lit obj/Addr :Type obj/TYPE_MEM :Reg (.Reg (aget (.-Args v) 2)))]
+      (ssagen/AddAux2 (addr m) v (.Off64 sc))
+      (.AddRestSource p m)
+
+      (.AddRestSourceReg p (simdReg (aget (.-Args v) 1)))
+      ^{:line 2182} p)))
+
+
+
+^{:go/end 2195} (go/func simdV3kvResultInArg0 "Example instruction: VFMADD213PD Z2, Z1, K1, Z0\n" ^{:tag (* obj/Prog)} [^{:tag (* ssagen/State)} s ^{:tag (* ssa/Value)} v]
+  (let [p (.Prog s (.Asm (.-Op v)))]
+    (set! (.-Type (.-From p)) obj/TYPE_REG)
+    (set! (.-Reg (.-From p)) (simdReg (aget (.-Args v) 2)))
+    (.AddRestSourceReg p (simdReg (aget (.-Args v) 1)))
+    (.AddRestSourceReg p (maskReg (aget (.-Args v) 3)))
+    (set! (.-Type (.-To p)) obj/TYPE_REG)
+    (set! (.-Reg (.-To p)) (simdReg v))
+    ^{:line 2194} p))
+
+
+^{:go/end 2205} (go/func simdVgpImm8 ^{:tag (* obj/Prog)} [^{:tag (* ssagen/State)} s ^{:tag (* ssa/Value)} v]
+  (let [p (.Prog s (.Asm (.-Op v)))]
+    (set! (.-Offset (.-From p)) (conv int64 (.AuxUInt8 v)))
+    (set! (.-Type (.-From p)) obj/TYPE_CONST)
+    (.AddRestSourceReg p (simdReg (aget (.-Args v) 0)))
+    (set! (.-Type (.-To p)) obj/TYPE_REG)
+    (set! (.-Reg (.-To p)) (.Reg v))
+    ^{:line 2204} p))
+
+
+^{:go/end 2213} (go/func simdVgpImm ^{:tag (* obj/Prog)} [^{:tag (* ssagen/State)} s ^{:tag (* ssa/Value)} v]
+  ;; within simdgen, the choice of intrinsic shape and the output
+  ;; intruction format are linked.  In the case of VgpImm, there is
+  ;; a difference in the intrinsic, but no difference in the
+  ;; instruction, it is just like VgpImm8.
+  (simdVgpImm8 s v))
+
+
+
+^{:go/end 2225} (go/func simdV31 "Currently unused\n" ^{:tag (* obj/Prog)} [^{:tag (* ssagen/State)} s ^{:tag (* ssa/Value)} v]
+  (let [p (.Prog s (.Asm (.-Op v)))]
+    (set! (.-Type (.-From p)) obj/TYPE_REG)
+    (set! (.-Reg (.-From p)) (simdReg (aget (.-Args v) 2)))
+    (.AddRestSourceReg p (simdReg (aget (.-Args v) 1)))
+    (.AddRestSourceReg p (simdReg (aget (.-Args v) 0)))
+    (set! (.-Type (.-To p)) obj/TYPE_REG)
+    (set! (.-Reg (.-To p)) (simdReg v))
+    ^{:line 2224} p))
+
+
+
+^{:go/end 2238} (go/func simdV3kv "Currently unused\n" ^{:tag (* obj/Prog)} [^{:tag (* ssagen/State)} s ^{:tag (* ssa/Value)} v]
+  (let [p (.Prog s (.Asm (.-Op v)))]
+    (set! (.-Type (.-From p)) obj/TYPE_REG)
+    (set! (.-Reg (.-From p)) (simdReg (aget (.-Args v) 2)))
+    (.AddRestSourceReg p (simdReg (aget (.-Args v) 1)))
+    (.AddRestSourceReg p (simdReg (aget (.-Args v) 0)))
+    (.AddRestSourceReg p (maskReg (aget (.-Args v) 3)))
+    (set! (.-Type (.-To p)) obj/TYPE_REG)
+    (set! (.-Reg (.-To p)) (simdReg v))
+    ^{:line 2237} p))
+
+
+
+^{:go/end 2250} (go/func simdVkvload "Example instruction: VRCP14PS (DI), K6, X22\n" ^{:tag (* obj/Prog)} [^{:tag (* ssagen/State)} s ^{:tag (* ssa/Value)} v]
+  (let [p (.Prog s (.Asm (.-Op v)))]
+    (set! (.-Type (.-From p)) obj/TYPE_MEM)
+    (set! (.-Reg (.-From p)) (.Reg (aget (.-Args v) 0)))
+    (ssagen/AddAux (addr (.-From p)) v)
+    (.AddRestSourceReg p (maskReg (aget (.-Args v) 1)))
+    (set! (.-Type (.-To p)) obj/TYPE_REG)
+    (set! (.-Reg (.-To p)) (simdReg v))
+    ^{:line 2249} p))
+
+
+
+^{:go/end 2262} (go/func simdV21load "Example instruction: VPSLLVD (DX), X7, X18\n" ^{:tag (* obj/Prog)} [^{:tag (* ssagen/State)} s ^{:tag (* ssa/Value)} v]
+  (let [p (.Prog s (.Asm (.-Op v)))]
+    (set! (.-Type (.-From p)) obj/TYPE_MEM)
+    (set! (.-Reg (.-From p)) (.Reg (aget (.-Args v) 1)))
+    (ssagen/AddAux (addr (.-From p)) v)
+    (.AddRestSourceReg p (simdReg (aget (.-Args v) 0)))
+    (set! (.-Type (.-To p)) obj/TYPE_REG)
+    (set! (.-Reg (.-To p)) (simdReg v))
+    ^{:line 2261} p))
+
+
+
+^{:go/end 2274} (go/func simdV31loadResultInArg0 "Example instruction: VPDPWSSD (SI), X24, X18\n" ^{:tag (* obj/Prog)} [^{:tag (* ssagen/State)} s ^{:tag (* ssa/Value)} v]
+  (let [p (.Prog s (.Asm (.-Op v)))]
+    (set! (.-Type (.-From p)) obj/TYPE_MEM)
+    (set! (.-Reg (.-From p)) (.Reg (aget (.-Args v) 2)))
+    (ssagen/AddAux (addr (.-From p)) v)
+    (.AddRestSourceReg p (simdReg (aget (.-Args v) 1)))
+    (set! (.-Type (.-To p)) obj/TYPE_REG)
+    (set! (.-Reg (.-To p)) (simdReg v))
+    ^{:line 2273} p))
+
+
+
+^{:go/end 2287} (go/func simdV3kvloadResultInArg0 "Example instruction: VPDPWSSD (SI), X24, K1, X18\n" ^{:tag (* obj/Prog)} [^{:tag (* ssagen/State)} s ^{:tag (* ssa/Value)} v]
+  (let [p (.Prog s (.Asm (.-Op v)))]
+    (set! (.-Type (.-From p)) obj/TYPE_MEM)
+    (set! (.-Reg (.-From p)) (.Reg (aget (.-Args v) 2)))
+    (ssagen/AddAux (addr (.-From p)) v)
+    (.AddRestSourceReg p (simdReg (aget (.-Args v) 1)))
+    (.AddRestSourceReg p (maskReg (aget (.-Args v) 3)))
+    (set! (.-Type (.-To p)) obj/TYPE_REG)
+    (set! (.-Reg (.-To p)) (simdReg v))
+    ^{:line 2286} p))
+
+
+
+^{:go/end 2300} (go/func simdV2kvload "Example instruction: VPSLLVD (SI), X1, K1, X2\n" ^{:tag (* obj/Prog)} [^{:tag (* ssagen/State)} s ^{:tag (* ssa/Value)} v]
+  (let [p (.Prog s (.Asm (.-Op v)))]
+    (set! (.-Type (.-From p)) obj/TYPE_MEM)
+    (set! (.-Reg (.-From p)) (.Reg (aget (.-Args v) 1)))
+    (ssagen/AddAux (addr (.-From p)) v)
+    (.AddRestSourceReg p (simdReg (aget (.-Args v) 0)))
+    (.AddRestSourceReg p (maskReg (aget (.-Args v) 2)))
+    (set! (.-Type (.-To p)) obj/TYPE_REG)
+    (set! (.-Reg (.-To p)) (simdReg v))
+    ^{:line 2299} p))
+
+
+
+^{:go/end 2312} (go/func simdV2kload "Example instruction: VPCMPEQD (SI), X1, K1\n" ^{:tag (* obj/Prog)} [^{:tag (* ssagen/State)} s ^{:tag (* ssa/Value)} v]
+  (let [p (.Prog s (.Asm (.-Op v)))]
+    (set! (.-Type (.-From p)) obj/TYPE_MEM)
+    (set! (.-Reg (.-From p)) (.Reg (aget (.-Args v) 1)))
+    (ssagen/AddAux (addr (.-From p)) v)
+    (.AddRestSourceReg p (simdReg (aget (.-Args v) 0)))
+    (set! (.-Type (.-To p)) obj/TYPE_REG)
+    (set! (.-Reg (.-To p)) (maskReg v))
+    ^{:line 2311} p))
+
+
+
+^{:go/end 2323} (go/func simdV11load "Example instruction: VCVTTPS2DQ (BX), X2\n" ^{:tag (* obj/Prog)} [^{:tag (* ssagen/State)} s ^{:tag (* ssa/Value)} v]
+  (let [p (.Prog s (.Asm (.-Op v)))]
+    (set! (.-Type (.-From p)) obj/TYPE_MEM)
+    (set! (.-Reg (.-From p)) (.Reg (aget (.-Args v) 0)))
+    (ssagen/AddAux (addr (.-From p)) v)
+    (set! (.-Type (.-To p)) obj/TYPE_REG)
+    (set! (.-Reg (.-To p)) (simdReg v))
+    ^{:line 2322} p))
+
+
+
+^{:go/end 2337} (go/func simdV11loadImm8 "Example instruction: VPSHUFD $7, (BX), X11\n" ^{:tag (* obj/Prog)} [^{:tag (* ssagen/State)} s ^{:tag (* ssa/Value)} v]
+  (let [sc (.AuxValAndOff v)
+      ^{:line 2328} p (.Prog s (.Asm (.-Op v)))]
+    (set! (.-Type (.-From p)) obj/TYPE_CONST)
+    (set! (.-Offset (.-From p)) (.Val64 sc))
+    (let [m (lit obj/Addr :Type obj/TYPE_MEM :Reg (.Reg (aget (.-Args v) 0)))]
+      (ssagen/AddAux2 (addr m) v (.Off64 sc))
+      (.AddRestSource p m)
+      (set! (.-Type (.-To p)) obj/TYPE_REG)
+      (set! (.-Reg (.-To p)) (simdReg v))
+      ^{:line 2336} p)))
+
+
+
+^{:go/end 2352} (go/func simdVkvloadImm8 "Example instruction: VPRORD $81, -15(R14), K7, Y1\n" ^{:tag (* obj/Prog)} [^{:tag (* ssagen/State)} s ^{:tag (* ssa/Value)} v]
+  (let [sc (.AuxValAndOff v)
+      ^{:line 2342} p (.Prog s (.Asm (.-Op v)))]
+    (set! (.-Type (.-From p)) obj/TYPE_CONST)
+    (set! (.-Offset (.-From p)) (.Val64 sc))
+    (let [m (lit obj/Addr :Type obj/TYPE_MEM :Reg (.Reg (aget (.-Args v) 0)))]
+      (ssagen/AddAux2 (addr m) v (.Off64 sc))
+      (.AddRestSource p m)
+      (.AddRestSourceReg p (maskReg (aget (.-Args v) 1)))
+      (set! (.-Type (.-To p)) obj/TYPE_REG)
+      (set! (.-Reg (.-To p)) (simdReg v))
+      ^{:line 2351} p)))
+
+
+
+^{:go/end 2367} (go/func simdV21loadImm8 "Example instruction: VPSHLDD $82, 7(SI), Y21, Y3\n" ^{:tag (* obj/Prog)} [^{:tag (* ssagen/State)} s ^{:tag (* ssa/Value)} v]
+  (let [sc (.AuxValAndOff v)
+      ^{:line 2357} p (.Prog s (.Asm (.-Op v)))]
+    (set! (.-Type (.-From p)) obj/TYPE_CONST)
+    (set! (.-Offset (.-From p)) (.Val64 sc))
+    (let [m (lit obj/Addr :Type obj/TYPE_MEM :Reg (.Reg (aget (.-Args v) 1)))]
+      (ssagen/AddAux2 (addr m) v (.Off64 sc))
+      (.AddRestSource p m)
+      (.AddRestSourceReg p (simdReg (aget (.-Args v) 0)))
+      (set! (.-Type (.-To p)) obj/TYPE_REG)
+      (set! (.-Reg (.-To p)) (simdReg v))
+      ^{:line 2366} p)))
+
+
+
+^{:go/end 2382} (go/func simdV2kloadImm8 "Example instruction: VCMPPS $81, -7(DI), Y16, K3\n" ^{:tag (* obj/Prog)} [^{:tag (* ssagen/State)} s ^{:tag (* ssa/Value)} v]
+  (let [sc (.AuxValAndOff v)
+      ^{:line 2372} p (.Prog s (.Asm (.-Op v)))]
+    (set! (.-Type (.-From p)) obj/TYPE_CONST)
+    (set! (.-Offset (.-From p)) (.Val64 sc))
+    (let [m (lit obj/Addr :Type obj/TYPE_MEM :Reg (.Reg (aget (.-Args v) 1)))]
+      (ssagen/AddAux2 (addr m) v (.Off64 sc))
+      (.AddRestSource p m)
+      (.AddRestSourceReg p (simdReg (aget (.-Args v) 0)))
+      (set! (.-Type (.-To p)) obj/TYPE_REG)
+      (set! (.-Reg (.-To p)) (maskReg v))
+      ^{:line 2381} p)))
+
+
+
+^{:go/end 2398} (go/func simdV2kkloadImm8 "Example instruction: VCMPPS $81, -7(DI), Y16, K1, K3\n" ^{:tag (* obj/Prog)} [^{:tag (* ssagen/State)} s ^{:tag (* ssa/Value)} v]
+  (let [sc (.AuxValAndOff v)
+      ^{:line 2387} p (.Prog s (.Asm (.-Op v)))]
+    (set! (.-Type (.-From p)) obj/TYPE_CONST)
+    (set! (.-Offset (.-From p)) (.Val64 sc))
+    (let [m (lit obj/Addr :Type obj/TYPE_MEM :Reg (.Reg (aget (.-Args v) 1)))]
+      (ssagen/AddAux2 (addr m) v (.Off64 sc))
+      (.AddRestSource p m)
+      (.AddRestSourceReg p (simdReg (aget (.-Args v) 0)))
+      (.AddRestSourceReg p (maskReg (aget (.-Args v) 2)))
+      (set! (.-Type (.-To p)) obj/TYPE_REG)
+      (set! (.-Reg (.-To p)) (maskReg v))
+      ^{:line 2397} p)))
+
+
+
+^{:go/end 2414} (go/func simdV2kvloadImm8 "Example instruction: VGF2P8AFFINEINVQB $64, -17(BP), X31, K3, X26\n" ^{:tag (* obj/Prog)} [^{:tag (* ssagen/State)} s ^{:tag (* ssa/Value)} v]
+  (let [sc (.AuxValAndOff v)
+      ^{:line 2403} p (.Prog s (.Asm (.-Op v)))]
+    (set! (.-Type (.-From p)) obj/TYPE_CONST)
+    (set! (.-Offset (.-From p)) (.Val64 sc))
+    (let [m (lit obj/Addr :Type obj/TYPE_MEM :Reg (.Reg (aget (.-Args v) 1)))]
+      (ssagen/AddAux2 (addr m) v (.Off64 sc))
+      (.AddRestSource p m)
+      (.AddRestSourceReg p (simdReg (aget (.-Args v) 0)))
+      (.AddRestSourceReg p (maskReg (aget (.-Args v) 2)))
+      (set! (.-Type (.-To p)) obj/TYPE_REG)
+      (set! (.-Reg (.-To p)) (simdReg v))
+      ^{:line 2413} p)))
+
+
+
+^{:go/end 2424} (go/func simdV21ResultInArg0 "Example instruction: SHA1NEXTE X2, X2\n" ^{:tag (* obj/Prog)} [^{:tag (* ssagen/State)} s ^{:tag (* ssa/Value)} v]
+  (let [p (.Prog s (.Asm (.-Op v)))]
+    (set! (.-Type (.-From p)) obj/TYPE_REG)
+    (set! (.-Reg (.-From p)) (simdReg (aget (.-Args v) 1)))
+    (set! (.-Type (.-To p)) obj/TYPE_REG)
+    (set! (.-Reg (.-To p)) (simdReg v))
+    ^{:line 2423} p))
+
+
+
+^{:go/end 2435} (go/func simdV21ResultInArg0Imm8 "Example instruction: SHA1RNDS4 $1, X2, X2\n" ^{:tag (* obj/Prog)} [^{:tag (* ssagen/State)} s ^{:tag (* ssa/Value)} v]
+  (let [p (.Prog s (.Asm (.-Op v)))]
+    (set! (.-Offset (.-From p)) (conv int64 (.AuxUInt8 v)))
+    (set! (.-Type (.-From p)) obj/TYPE_CONST)
+    (.AddRestSourceReg p (simdReg (aget (.-Args v) 1)))
+    (set! (.-Type (.-To p)) obj/TYPE_REG)
+    (set! (.-Reg (.-To p)) (simdReg v))
+    ^{:line 2434} p))
+
+
+
+^{:go/end 2440} (go/func simdV31x0AtIn2ResultInArg0 "Example instruction: SHA256RNDS2 X0, X11, X2\n" ^{:tag (* obj/Prog)} [^{:tag (* ssagen/State)} s ^{:tag (* ssa/Value)} v]
+  (simdV31ResultInArg0 s v))
+
+
+(go/var blockJump (lit (array ... (struct
+        ^{:line 2443 :tag obj/As} asm ^obj/As invasm))
+
+    ^{:line 2445} [ssa/BlockAMD64EQ (lit _ x86/AJEQ x86/AJNE)]
+    ^{:line 2446} [ssa/BlockAMD64NE (lit _ x86/AJNE x86/AJEQ)]
+    ^{:line 2447} [ssa/BlockAMD64LT (lit _ x86/AJLT x86/AJGE)]
+    ^{:line 2448} [ssa/BlockAMD64GE (lit _ x86/AJGE x86/AJLT)]
+    ^{:line 2449} [ssa/BlockAMD64LE (lit _ x86/AJLE x86/AJGT)]
+    ^{:line 2450} [ssa/BlockAMD64GT (lit _ x86/AJGT x86/AJLE)]
+    ^{:line 2451} [ssa/BlockAMD64OS (lit _ x86/AJOS x86/AJOC)]
+    ^{:line 2452} [ssa/BlockAMD64OC (lit _ x86/AJOC x86/AJOS)]
+    ^{:line 2453} [ssa/BlockAMD64ULT (lit _ x86/AJCS x86/AJCC)]
+    ^{:line 2454} [ssa/BlockAMD64UGE (lit _ x86/AJCC x86/AJCS)]
+    ^{:line 2455} [ssa/BlockAMD64UGT (lit _ x86/AJHI x86/AJLS)]
+    ^{:line 2456} [ssa/BlockAMD64ULE (lit _ x86/AJLS x86/AJHI)]
+    ^{:line 2457} [ssa/BlockAMD64ORD (lit _ x86/AJPC x86/AJPS)]
+    ^{:line 2458} [ssa/BlockAMD64NAN (lit _ x86/AJPS x86/AJPC)]))
+
+
+(go/var eqfJumps (lit (array 2 (array 2 ssagen/IndexJump))
+    (lit _ (lit _ :Jump x86/AJNE :Index 1) (lit _ :Jump x86/AJPS :Index 1)) ; next == b.Succs[0]
+    (lit _ (lit _ :Jump x86/AJNE :Index 1) (lit _ :Jump x86/AJPC :Index 0)))) ; next == b.Succs[1]
+
+(go/var nefJumps (lit (array 2 (array 2 ssagen/IndexJump))
+    (lit _ (lit _ :Jump x86/AJNE :Index 0) (lit _ :Jump x86/AJPC :Index 1)) ; next == b.Succs[0]
+    (lit _ (lit _ :Jump x86/AJNE :Index 0) (lit _ :Jump x86/AJPS :Index 0)))) ; next == b.Succs[1]
+
+
+^{:go/end 2523} (go/func ssaGenBlock [^{:tag (* ssagen/State)} s ^{:tag (* ssa/Block)} b ^{:tag (* ssa/Block)} next]
+  (switch (.-Kind b)
+    (case [ssa/BlockPlain ssa/BlockDefer]
+      (when (!= (.Block (aget (.-Succs b) 0)) next)
+        (let [p (.Prog s obj/AJMP)]
+          (set! (.-Type (.-To p)) obj/TYPE_BRANCH)
+          (set! (.-Branches s) (append (.-Branches s) (lit ssagen/Branch :P p :B (.Block (aget (.-Succs b) 0))))))))
+
+    (case [ssa/BlockExit ssa/BlockRetJmp])
+    (case [ssa/BlockRet]
+      (.Prog s obj/ARET))
+
+    (case [ssa/BlockAMD64EQF]
+      (.CombJump s b next (addr eqfJumps)))
+
+    (case [ssa/BlockAMD64NEF]
+      (.CombJump s b next (addr nefJumps)))
+
+    (case [ssa/BlockAMD64EQ ssa/BlockAMD64NE
+        ^{:line 2489} ssa/BlockAMD64LT ssa/BlockAMD64GE
+        ^{:line 2490} ssa/BlockAMD64LE ssa/BlockAMD64GT
+        ^{:line 2491} ssa/BlockAMD64OS ssa/BlockAMD64OC
+        ^{:line 2492} ssa/BlockAMD64ULT ssa/BlockAMD64UGT
+        ^{:line 2493} ssa/BlockAMD64ULE ssa/BlockAMD64UGE]
+      (let [jmp (aget blockJump (.-Kind b))]
+        (switch next
+          (case [(.Block (aget (.-Succs b) 0))]
+            (.Br s (.-invasm jmp) (.Block (aget (.-Succs b) 1))))
+          (case [(.Block (aget (.-Succs b) 1))]
+            (.Br s (.-asm jmp) (.Block (aget (.-Succs b) 0))))
+          (default
+            (if (!= (.-Likely b) ssa/BranchUnlikely) (do
+                (.Br s (.-asm jmp) (.Block (aget (.-Succs b) 0)))
+                (.Br s obj/AJMP (.Block (aget (.-Succs b) 1))))
+              (do
+                (.Br s (.-invasm jmp) (.Block (aget (.-Succs b) 1)))
+                (.Br s obj/AJMP (.Block (aget (.-Succs b) 0)))))))))
+
+
+
+    (case [ssa/BlockAMD64JUMPTABLE]
+      ;; JMP      *(TABLE)(INDEX*8)
+      (let [p (.Prog s obj/AJMP)]
+        (set! (.-Type (.-To p)) obj/TYPE_MEM)
+        (set! (.-Reg (.-To p)) (.Reg (aget (.-Controls b) 1)))
+        (set! (.-Index (.-To p)) (.Reg (aget (.-Controls b) 0)))
+        (set! (.-Scale (.-To p)) 8)
+        ;; Save jump tables for later resolution of the target blocks.
+        (set! (.-JumpTables s) (append (.-JumpTables s) b))))
+
+    (default
+      (.Fatalf b "branch not implemented: %s" (.LongString b)))))
+
+
+
+^{:go/end 2534} (go/func loadRegResult ^{:tag (* obj/Prog)} [^{:tag (* ssagen/State)} s ^{:tag (* ssa/Func)} f ^{:tag (* types/Type)} t ^int16 reg ^{:tag (* ir/Name)} n ^int64 off]
+  (let [p (.Prog s (loadByRegWidth reg (.Size t)))]
+    (set! (.-Type (.-From p)) obj/TYPE_MEM)
+    (set! (.-Name (.-From p)) obj/NAME_AUTO)
+    (set! (.-Sym (.-From p)) (.Linksym n))
+    (set! (.-Offset (.-From p)) (+ (.FrameOffset n) off))
+    (set! (.-Type (.-To p)) obj/TYPE_REG)
+    (set! (.-Reg (.-To p)) reg)
+    ^{:line 2533} p))
+
+
+^{:go/end 2542} (go/func spillArgReg ^{:tag (* obj/Prog)} [^{:tag (* objw/Progs)} pp ^{:tag (* obj/Prog)} p ^{:tag (* ssa/Func)} f ^{:tag (* types/Type)} t ^int16 reg ^{:tag (* ir/Name)} n ^int64 off]
+  (set! p (.Append pp p (storeByRegWidth reg (.Size t)) obj/TYPE_REG reg 0 obj/TYPE_MEM 0 (+ (.FrameOffset n) off)))
+  (set! (.-Name (.-To p)) obj/NAME_PARAM)
+  (set! (.-Sym (.-To p)) (.Linksym n))
+  (set! (.-Pos p) (.WithNotStmt (.-Pos p)))
+  ^{:line 2541} p)
+
+
+
+^{:go/end 2553} (go/func zero16 "zero 16 bytes at reg+off.\n" [^{:tag (* ssagen/State)} s ^int16 reg ^int64 off]
+  ;;   MOVUPS  X15, off(ptrReg)
+  (let [p (.Prog s x86/AMOVUPS)]
+    (set! (.-Type (.-From p)) obj/TYPE_REG)
+    (set! (.-Reg (.-From p)) x86/REG_X15)
+    (set! (.-Type (.-To p)) obj/TYPE_MEM)
+    (set! (.-Reg (.-To p)) reg)
+    (set! (.-Offset (.-To p)) off)))
+
+
+
+^{:go/end 2571} (go/func move16 "move 16 bytes from src+off to dst+off using temporary register tmp.\n" [^{:tag (* ssagen/State)} s ^int16 src ^int16 dst ^int16 tmp ^int64 off]
+  ;;   MOVUPS  off(srcReg), tmpReg
+  ;;   MOVUPS  tmpReg, off(dstReg)
+  (let [p (.Prog s x86/AMOVUPS)]
+    (set! (.-Type (.-From p)) obj/TYPE_MEM)
+    (set! (.-Reg (.-From p)) src)
+    (set! (.-Offset (.-From p)) off)
+    (set! (.-Type (.-To p)) obj/TYPE_REG)
+    (set! (.-Reg (.-To p)) tmp)
+    (set! p (.Prog s x86/AMOVUPS))
+    (set! (.-Type (.-From p)) obj/TYPE_REG)
+    (set! (.-Reg (.-From p)) tmp)
+    (set! (.-Type (.-To p)) obj/TYPE_MEM)
+    (set! (.-Reg (.-To p)) dst)
+    (set! (.-Offset (.-To p)) off)))
+
+
+
+
+^{:go/end 2581} (go/func simdReg "XXX maybe make this part of v.Reg?\nOn the other hand, it is architecture-specific.\n" ^int16 [^{:tag (* ssa/Value)} v]
+  (let [t (.-Type v)]
+    (when (not (.IsSIMD t))
+      (base/Fatalf "simdReg: not a simd type; v=%s, b=b%d, f=%s" (.LongString v) (.-ID (.-Block v)) (.-Name (.-Func (.-Block v)))))
+
+    (simdRegBySize (.Reg v) (.Size t))))
+
+
+^{:go/end 2593} (go/func simdRegBySize ^int16 [^int16 reg ^int64 size]
+  (switch size
+    (case [16]
+      (return reg))
+    (case [32]
+      (return (+ reg (- x86/REG_Y0 x86/REG_X0))))
+    (case [64]
+      (return (+ reg (- x86/REG_Z0 x86/REG_X0)))))
+
+  (panic "simdRegBySize: bad size"))
+
+
+
+^{:go/end 2606} (go/func maskReg "XXX k mask\n" ^int16 [^{:tag (* ssa/Value)} v]
+  (let [t (.-Type v)]
+    (when (not (.IsSIMD t))
+      (base/Fatalf "maskReg: not a simd type; v=%s, b=b%d, f=%s" (.LongString v) (.-ID (.-Block v)) (.-Name (.-Func (.-Block v)))))
+
+    (switch (.Size t)
+      (case [8]
+        (return (.Reg v))))
+
+    (panic "unreachable")))
+
+
+
+^{:go/end 2615} (go/func simdOrMaskReg "XXX k mask + vec\n" ^int16 [^{:tag (* ssa/Value)} v]
+  (let [t (.-Type v)]
+    (when (<= (.Size t) 8)
+      (return (maskReg v)))
+
+    (simdReg v)))
+
+
+
+
+
+
+^{:go/end 2626} (go/func simdCheckRegOnly "XXX this is used for shift operations only.\nregalloc will issue OpCopy with incorrect type, but the assigned\nregister should be correct, and this function is merely checking\nthe sanity of this part.\n" ^int16 [^{:tag (* ssa/Value)} v ^int16 regStart ^int16 regEnd]
+  (when (or (> (.Reg v) regEnd) (< (.Reg v) regStart))
+    (panic "simdCheckRegOnly: not the desired register"))
+
+  (.Reg v))

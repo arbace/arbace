@@ -1,0 +1,2494 @@
+;; Copyright 2024 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.cmd.compile.internal.ssagen) (go/file "intrinsics.go" :imports [
+
+
+    ^{:line 8} [fmt "fmt"]
+    ^{:line 9} [abi "internal/abi"]
+    ^{:line 10} [buildcfg "internal/buildcfg"]
+
+    ^{:line 12} [base "cmd/compile/internal/base"]
+    ^{:line 13} [ir "cmd/compile/internal/ir"]
+    ^{:line 14} [ssa "cmd/compile/internal/ssa"]
+    ^{:line 15} [typecheck "cmd/compile/internal/typecheck"]
+    ^{:line 16} [types "cmd/compile/internal/types"]
+    ^{:line 17} [sys "cmd/internal/sys"]])
+
+
+(go/var ^intrinsicBuilders intrinsics)
+
+
+
+(go/type intrinsicBuilder "An intrinsicBuilder converts a call node n into an ssa value that\nimplements that call as an intrinsic. args is a list of arguments to the func.\n" (func [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args] [(* ssa/Value)]))
+
+(go/type intrinsicKey (struct
+    ^{:line 27 :tag (* sys/Arch)} arch
+    ^{:line 28 :tag string} pkg
+    ^{:line 29 :tag string} fn))
+
+
+
+(go/type intrinsicBuildConfig "intrinsicBuildConfig specifies the config to use for intrinsic building.\n" (struct
+    ^{:line 34 :tag bool} instrumenting
+
+    ^{:line 36 :tag string} go386
+    ^{:line 37 :tag int} goamd64
+    ^{:line 38 :tag buildcfg/GoarmFeatures} goarm
+    ^{:line 39 :tag buildcfg/Goarm64Features} goarm64
+    ^{:line 40 :tag string} gomips
+    ^{:line 41 :tag string} gomips64
+    ^{:line 42 :tag int} goppc64
+    ^{:line 43 :tag int} goriscv64))
+
+
+(go/type intrinsicBuilders (map intrinsicKey intrinsicBuilder))
+
+
+^{:go/end 54} (go/method add "add adds the intrinsic builder b for pkg.fn for the given architecture.\n" [^intrinsicBuilders ib ^{:tag (* sys/Arch)} arch ^string pkg ^string fn ^intrinsicBuilder b]
+  (when [(values _ found) (aget ib (lit intrinsicKey arch pkg fn))] found
+    (panic (fmt/Sprintf "intrinsic already exists for %v.%v on %v" pkg fn (.-Name arch))))
+
+  (aset ib (lit intrinsicKey arch pkg fn) b))
+
+
+
+^{:go/end 61} (go/method addForArchs "addForArchs adds the intrinsic builder b for pkg.fn for the given architectures.\n" [^intrinsicBuilders ib ^string pkg ^string fn ^intrinsicBuilder b & ^{:tag (slice (* sys/Arch))} archs]
+  (range [_ arch archs]
+    (.add ib arch pkg fn b)))
+
+
+
+
+^{:go/end 70} (go/method addForFamilies "addForFamilies does the same as addForArchs but operates on architecture families.\n" [^intrinsicBuilders ib ^string pkg ^string fn ^intrinsicBuilder b & ^{:tag (slice sys/ArchFamily)} archFamilies]
+  (range [_ arch sys/Archs]
+    (when (.InFamily arch (spread archFamilies))
+      (.add intrinsics arch pkg fn b))))
+
+
+
+
+
+
+^{:go/end 87} (go/method alias "alias aliases pkg.fn to targetPkg.targetFn for all architectures in archs\nfor which targetPkg.targetFn already exists.\n" [^intrinsicBuilders ib ^string pkg ^string fn ^string targetPkg ^string targetFn & ^{:tag (slice (* sys/Arch))} archs]
+  ;; TODO(jsing): Consider making this work even if the alias is added
+  ;; before the intrinsic.
+  (let [aliased false]
+    (range [_ arch archs]
+      (when [b (.lookup intrinsics arch targetPkg targetFn)] (!= b nil)
+        (.add intrinsics arch pkg fn b)
+        (set! aliased true)))
+
+
+    (when (not aliased)
+      (panic (fmt/Sprintf "attempted to alias undefined intrinsic: %s.%s" pkg fn)))))
+
+
+
+
+^{:go/end 92} (go/method lookup "lookup looks up the intrinsic for a pkg.fn on the specified architecture.\n" ^intrinsicBuilder [^intrinsicBuilders ib ^{:tag (* sys/Arch)} arch ^string pkg ^string fn]
+  (aget intrinsics (lit intrinsicKey arch pkg fn)))
+
+
+^{:go/end 1767} (go/func initIntrinsics [^{:tag (* intrinsicBuildConfig)} cfg]
+  (when (== cfg nil)
+    (set! cfg (addr ^{:go/breaks [2 4 6 8 10 12 14 16 18]} (lit intrinsicBuildConfig
+          :instrumenting (.-Instrumenting (.-Cfg base/Flag))
+          :go386 buildcfg/GO386
+          :goamd64 buildcfg/GOAMD64
+          :goarm buildcfg/GOARM
+          :goarm64 buildcfg/GOARM64
+          :gomips buildcfg/GOMIPS
+          :gomips64 buildcfg/GOMIPS64
+          :goppc64 buildcfg/GOPPC64
+          :goriscv64 buildcfg/GORISCV64))))
+
+
+  (set! intrinsics (lit intrinsicBuilders))
+
+  (let [^{:tag (slice (* sys/Arch))} p4 (zero (slice (* sys/Arch)))
+      ^{:line 111 :tag (slice (* sys/Arch))} p8 (zero (slice (* sys/Arch)))
+      ^{:line 112 :tag (slice (* sys/Arch))} lwatomics (zero (slice (* sys/Arch)))]
+    (range [_ a sys/Archs]
+      (if (== (.-PtrSize a) 4)
+        (set! p4 (append p4 a))
+
+        (set! p8 (append p8 a)))
+
+      (when (!= (.-Family a) sys/PPC64)
+        (set! lwatomics (append lwatomics a))))
+
+
+    (let [all (subslice sys/Archs)
+
+        ^{:line 125} add ^{:go/end 127} (fn [^string pkg ^string fn ^intrinsicBuilder b & ^{:tag (slice (* sys/Arch))} archs]
+          (.addForArchs intrinsics pkg fn b (spread archs)))
+
+        ^{:line 128} addF ^{:go/end 130} (fn [^string pkg ^string fn ^intrinsicBuilder b & ^{:tag (slice sys/ArchFamily)} archFamilies]
+          (.addForFamilies intrinsics pkg fn b (spread archFamilies)))
+
+        ^{:line 131} alias ^{:go/end 133} (fn [^string pkg ^string fn ^string pkg2 ^string fn2 & ^{:tag (slice (* sys/Arch))} archs]
+          (.alias intrinsics pkg fn pkg2 fn2 (spread archs)))]
+
+
+      ;; /******** runtime ********/
+      (when (not (.-instrumenting cfg))
+        (add "runtime" "slicebytetostringtmp"
+          ^{:go/end 143} (fn ^{:tag (* ssa/Value)} [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args]
+            ;; Compiler frontend optimizations emit OBYTES2STRTMP nodes
+            ;; for the backend instead of slicebytetostringtmp calls
+            ;; when not instrumenting.
+            (.newValue2 s ssa/OpStringMake ^{:go/via [miniExpr]} (.Type n) (aget args 0) (aget args 1)))
+
+          (spread all)))
+
+      (addF "internal/runtime/math" "MulUintptr"
+        ^{:go/end 152} (fn ^{:tag (* ssa/Value)} [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args]
+          (when (== (.-PtrSize (.-config s)) 4)
+            (return (.newValue2 s ssa/OpMul32uover (types/NewTuple (aget types/Types types/TUINT) (aget types/Types types/TUINT)) (aget args 0) (aget args 1))))
+
+          (.newValue2 s ssa/OpMul64uover (types/NewTuple (aget types/Types types/TUINT) (aget types/Types types/TUINT)) (aget args 0) (aget args 1)))
+
+        ^{:line 153} sys/AMD64 sys/I386 sys/Loong64 sys/MIPS64 sys/PPC64 sys/RISCV64 sys/ARM64)
+      (add "runtime" "KeepAlive"
+        ^{:go/end 159} (fn ^{:tag (* ssa/Value)} [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args]
+          ^{:go/breaks [3]} (let [data (.newValue1 s ssa/OpIData (.-BytePtr (.-Types (.-Config (.-f s)))) (aget args 0))]
+            (aset (.-vars s) memVar (.newValue2 s ssa/OpKeepAlive types/TypeMem data (.mem s)))
+            nil))
+
+        (spread all))
+
+      (addF "runtime" "publicationBarrier"
+        ^{:go/breaks [3] :go/end 166} (fn ^{:tag (* ssa/Value)} [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args]
+          (aset (.-vars s) memVar (.newValue1 s ssa/OpPubBarrier types/TypeMem (.mem s)))
+          nil)
+
+        ^{:line 167} sys/ARM64 sys/Loong64 sys/MIPS sys/MIPS64 sys/PPC64 sys/RISCV64)
+
+      ;; /******** internal/runtime/sys ********/
+      (add "internal/runtime/sys" "GetCallerPC"
+        ^{:go/end 173} (fn ^{:tag (* ssa/Value)} [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args]
+          (.newValue0 s ssa/OpGetCallerPC (.-Uintptr (.-Types (.-Config (.-f s))))))
+
+        (spread all))
+
+      (add "internal/runtime/sys" "GetCallerSP"
+        ^{:go/end 179} (fn ^{:tag (* ssa/Value)} [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args]
+          (.newValue1 s ssa/OpGetCallerSP (.-Uintptr (.-Types (.-Config (.-f s)))) (.mem s)))
+
+        (spread all))
+
+      (add "internal/runtime/sys" "GetClosurePtr"
+        ^{:go/end 185} (fn ^{:tag (* ssa/Value)} [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args]
+          (.newValue0 s ssa/OpGetClosurePtr (.-Uintptr (.-Types (.-Config (.-f s))))))
+
+        (spread all))
+
+      (addF "internal/runtime/sys" "Bswap32"
+        ^{:go/end 191} (fn ^{:tag (* ssa/Value)} [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args]
+          (.newValue1 s ssa/OpBswap32 (aget types/Types types/TUINT32) (aget args 0)))
+
+        ^{:line 192} sys/AMD64 sys/I386 sys/ARM64 sys/ARM sys/Loong64 sys/S390X)
+      (addF "internal/runtime/sys" "Bswap64"
+        ^{:go/end 196} (fn ^{:tag (* ssa/Value)} [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args]
+          (.newValue1 s ssa/OpBswap64 (aget types/Types types/TUINT64) (aget args 0)))
+
+        ^{:line 197} sys/AMD64 sys/I386 sys/ARM64 sys/ARM sys/Loong64 sys/S390X)
+
+      (addF "runtime" "memequal"
+        ^{:go/end 202} (fn ^{:tag (* ssa/Value)} [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args]
+          (.newValue4 s ssa/OpMemEq (.-Bool (.-Types (.-Config (.-f s)))) (aget args 0) (aget args 1) (aget args 2) (.mem s)))
+
+        ^{:line 203} sys/ARM64)
+
+      (when (>= (.-goppc64 cfg) 10)
+        ;; Use only on Power10 as the new byte reverse instructions that Power10 provide
+        ;; make it worthwhile as an intrinsic
+        (addF "internal/runtime/sys" "Bswap32"
+          ^{:go/end 211} (fn ^{:tag (* ssa/Value)} [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args]
+            (.newValue1 s ssa/OpBswap32 (aget types/Types types/TUINT32) (aget args 0)))
+
+          ^{:line 212} sys/PPC64)
+        (addF "internal/runtime/sys" "Bswap64"
+          ^{:go/end 216} (fn ^{:tag (* ssa/Value)} [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args]
+            (.newValue1 s ssa/OpBswap64 (aget types/Types types/TUINT64) (aget args 0)))
+
+          ^{:line 217} sys/PPC64))
+
+
+      (when (>= (.-goriscv64 cfg) 22)
+        (addF "internal/runtime/sys" "Bswap32"
+          ^{:go/end 224} (fn ^{:tag (* ssa/Value)} [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args]
+            (.newValue1 s ssa/OpBswap32 (aget types/Types types/TUINT32) (aget args 0)))
+
+          ^{:line 225} sys/RISCV64)
+        (addF "internal/runtime/sys" "Bswap64"
+          ^{:go/end 229} (fn ^{:tag (* ssa/Value)} [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args]
+            (.newValue1 s ssa/OpBswap64 (aget types/Types types/TUINT64) (aget args 0)))
+
+          ^{:line 230} sys/RISCV64))
+
+
+      ;; /****** Prefetch ******/
+      (let [makePrefetchFunc ^{:go/end 239} (fn ^{:tag (func [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args] [(* ssa/Value)])} [^ssa/Op op]
+            ^{:go/breaks [3] :go/end 238} (fn ^{:tag (* ssa/Value)} [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args]
+              (aset (.-vars s) memVar (.newValue2 s op types/TypeMem (aget args 0) (.mem s)))
+              nil))]
+
+
+
+        ;; Make Prefetch intrinsics for supported platforms
+        ;; On the unsupported platforms stub function will be eliminated
+        (addF "internal/runtime/sys" "Prefetch" (makePrefetchFunc ssa/OpPrefetchCache)
+          ^{:line 244} sys/AMD64 sys/ARM64 sys/Loong64 sys/PPC64)
+        (addF "internal/runtime/sys" "PrefetchStreamed" (makePrefetchFunc ssa/OpPrefetchCacheStreamed)
+          ^{:line 246} sys/AMD64 sys/ARM64 sys/Loong64 sys/PPC64)
+
+        ;; /******** internal/runtime/atomic ********/
+        (let-type [atomicOpEmitter (func [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args ^ssa/Op op ^types/Kind typ ^bool needReturn])]
+
+          (addF "internal/runtime/atomic" "Load"
+            ^{:go/end 256} (fn ^{:tag (* ssa/Value)} [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args]
+              (let [v (.newValue2 s ssa/OpAtomicLoad32 (types/NewTuple (aget types/Types types/TUINT32) types/TypeMem) (aget args 0) (.mem s))]
+                (aset (.-vars s) memVar (.newValue1 s ssa/OpSelect1 types/TypeMem v))
+                (.newValue1 s ssa/OpSelect0 (aget types/Types types/TUINT32) v)))
+
+            ^{:line 257} sys/AMD64 sys/ARM64 sys/Loong64 sys/MIPS sys/MIPS64 sys/PPC64 sys/RISCV64 sys/S390X)
+          (addF "internal/runtime/atomic" "Load8"
+            ^{:go/end 263} (fn ^{:tag (* ssa/Value)} [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args]
+              (let [v (.newValue2 s ssa/OpAtomicLoad8 (types/NewTuple (aget types/Types types/TUINT8) types/TypeMem) (aget args 0) (.mem s))]
+                (aset (.-vars s) memVar (.newValue1 s ssa/OpSelect1 types/TypeMem v))
+                (.newValue1 s ssa/OpSelect0 (aget types/Types types/TUINT8) v)))
+
+            ^{:line 264} sys/AMD64 sys/ARM64 sys/Loong64 sys/MIPS sys/MIPS64 sys/PPC64 sys/RISCV64 sys/S390X)
+          (addF "internal/runtime/atomic" "Load64"
+            ^{:go/end 270} (fn ^{:tag (* ssa/Value)} [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args]
+              (let [v (.newValue2 s ssa/OpAtomicLoad64 (types/NewTuple (aget types/Types types/TUINT64) types/TypeMem) (aget args 0) (.mem s))]
+                (aset (.-vars s) memVar (.newValue1 s ssa/OpSelect1 types/TypeMem v))
+                (.newValue1 s ssa/OpSelect0 (aget types/Types types/TUINT64) v)))
+
+            ^{:line 271} sys/AMD64 sys/ARM64 sys/Loong64 sys/MIPS64 sys/PPC64 sys/RISCV64 sys/S390X)
+          (addF "internal/runtime/atomic" "LoadAcq"
+            ^{:go/end 277} (fn ^{:tag (* ssa/Value)} [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args]
+              (let [v (.newValue2 s ssa/OpAtomicLoadAcq32 (types/NewTuple (aget types/Types types/TUINT32) types/TypeMem) (aget args 0) (.mem s))]
+                (aset (.-vars s) memVar (.newValue1 s ssa/OpSelect1 types/TypeMem v))
+                (.newValue1 s ssa/OpSelect0 (aget types/Types types/TUINT32) v)))
+
+            ^{:line 278} sys/PPC64)
+          (addF "internal/runtime/atomic" "LoadAcq64"
+            ^{:go/end 284} (fn ^{:tag (* ssa/Value)} [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args]
+              (let [v (.newValue2 s ssa/OpAtomicLoadAcq64 (types/NewTuple (aget types/Types types/TUINT64) types/TypeMem) (aget args 0) (.mem s))]
+                (aset (.-vars s) memVar (.newValue1 s ssa/OpSelect1 types/TypeMem v))
+                (.newValue1 s ssa/OpSelect0 (aget types/Types types/TUINT64) v)))
+
+            ^{:line 285} sys/PPC64)
+          (addF "internal/runtime/atomic" "Loadp"
+            ^{:go/end 291} (fn ^{:tag (* ssa/Value)} [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args]
+              (let [v (.newValue2 s ssa/OpAtomicLoadPtr (types/NewTuple (.-BytePtr (.-Types (.-Config (.-f s)))) types/TypeMem) (aget args 0) (.mem s))]
+                (aset (.-vars s) memVar (.newValue1 s ssa/OpSelect1 types/TypeMem v))
+                (.newValue1 s ssa/OpSelect0 (.-BytePtr (.-Types (.-Config (.-f s)))) v)))
+
+            ^{:line 292} sys/AMD64 sys/ARM64 sys/Loong64 sys/MIPS sys/MIPS64 sys/PPC64 sys/RISCV64 sys/S390X)
+
+          (addF "internal/runtime/atomic" "Store"
+            ^{:go/breaks [3] :go/end 298} (fn ^{:tag (* ssa/Value)} [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args]
+              (aset (.-vars s) memVar (.newValue3 s ssa/OpAtomicStore32 types/TypeMem (aget args 0) (aget args 1) (.mem s)))
+              nil)
+
+            ^{:line 299} sys/AMD64 sys/ARM64 sys/MIPS sys/MIPS64 sys/PPC64 sys/RISCV64 sys/S390X)
+          (addF "internal/runtime/atomic" "Store8"
+            ^{:go/breaks [3] :go/end 304} (fn ^{:tag (* ssa/Value)} [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args]
+              (aset (.-vars s) memVar (.newValue3 s ssa/OpAtomicStore8 types/TypeMem (aget args 0) (aget args 1) (.mem s)))
+              nil)
+
+            ^{:line 305} sys/AMD64 sys/ARM64 sys/Loong64 sys/MIPS sys/MIPS64 sys/PPC64 sys/RISCV64 sys/S390X)
+          (addF "internal/runtime/atomic" "Store64"
+            ^{:go/breaks [3] :go/end 310} (fn ^{:tag (* ssa/Value)} [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args]
+              (aset (.-vars s) memVar (.newValue3 s ssa/OpAtomicStore64 types/TypeMem (aget args 0) (aget args 1) (.mem s)))
+              nil)
+
+            ^{:line 311} sys/AMD64 sys/ARM64 sys/MIPS64 sys/PPC64 sys/RISCV64 sys/S390X)
+          (addF "internal/runtime/atomic" "StorepNoWB"
+            ^{:go/breaks [3] :go/end 316} (fn ^{:tag (* ssa/Value)} [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args]
+              (aset (.-vars s) memVar (.newValue3 s ssa/OpAtomicStorePtrNoWB types/TypeMem (aget args 0) (aget args 1) (.mem s)))
+              nil)
+
+            ^{:line 317} sys/AMD64 sys/ARM64 sys/Loong64 sys/MIPS sys/MIPS64 sys/RISCV64 sys/S390X)
+          (addF "internal/runtime/atomic" "StoreRel"
+            ^{:go/breaks [3] :go/end 322} (fn ^{:tag (* ssa/Value)} [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args]
+              (aset (.-vars s) memVar (.newValue3 s ssa/OpAtomicStoreRel32 types/TypeMem (aget args 0) (aget args 1) (.mem s)))
+              nil)
+
+            ^{:line 323} sys/PPC64)
+          (addF "internal/runtime/atomic" "StoreRel64"
+            ^{:go/breaks [3] :go/end 328} (fn ^{:tag (* ssa/Value)} [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args]
+              (aset (.-vars s) memVar (.newValue3 s ssa/OpAtomicStoreRel64 types/TypeMem (aget args 0) (aget args 1) (.mem s)))
+              nil)
+
+            ^{:line 329} sys/PPC64)
+
+          (let [makeAtomicStoreGuardedIntrinsicLoong64 ^{:go/end 361} (fn ^intrinsicBuilder [^ssa/Op op0 ^ssa/Op op1 ^types/Kind typ ^atomicOpEmitter emit]
+                ^{:go/end 360} (fn ^{:tag (* ssa/Value)} [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args]
+                  ;; Target Atomic feature is identified by dynamic detection
+                  (let [addr (.entryNewValue1A s ssa/OpAddr (.PtrTo (aget types/Types types/TBOOL)) (.-Loong64HasDBAR_HINTS ir/Syms) (.-sb s))
+                      ^{:line 335} v (.load s (aget types/Types types/TBOOL) addr)
+                      ^{:line 336} b (.endBlock s)]
+                    (set! (.-Kind b) ssa/BlockIf)
+                    (.SetControl b v)
+                    ^{:go/breaks [[12 359]]} (let [bTrue (.NewBlock (.-f s) ssa/BlockPlain)
+                        ^{:line 340} bFalse (.NewBlock (.-f s) ssa/BlockPlain)
+                        ^{:line 341} bEnd (.NewBlock (.-f s) ssa/BlockPlain)]
+                      (.AddEdgeTo b bTrue)
+                      (.AddEdgeTo b bFalse)
+                      (set! (.-Likely b) ssa/BranchLikely)
+
+                      ;; most loong64 machines support the finer-grained DBAR hints
+                      (.startBlock s bTrue)
+                      (emit s n args op0 typ false)
+                      (.AddEdgeTo (.endBlock s) bEnd)
+
+                      ;; Use original instruction sequence.
+                      (.startBlock s bFalse)
+                      (emit s n args op1 typ false)
+                      (.AddEdgeTo (.endBlock s) bEnd)
+
+                      ;; Merge results.
+                      (.startBlock s bEnd)
+
+                      nil))))
+
+
+
+              ^{:line 363} atomicStoreEmitterLoong64 ^{:go/end 369} (fn [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args ^ssa/Op op ^types/Kind typ ^bool needReturn]
+                (let [v (.newValue3 s op (types/NewTuple (aget types/Types typ) types/TypeMem) (aget args 0) (aget args 1) (.mem s))]
+                  (aset (.-vars s) memVar (.newValue1 s ssa/OpSelect1 types/TypeMem v))
+                  (when needReturn
+                    (aset (.-vars s) n (.newValue1 s ssa/OpSelect0 (aget types/Types typ) v)))))]
+
+
+
+            (addF "internal/runtime/atomic" "Store"
+              (makeAtomicStoreGuardedIntrinsicLoong64 ssa/OpAtomicStore32 ssa/OpAtomicStore32Variant types/TUINT8 atomicStoreEmitterLoong64)
+              ^{:line 373} sys/Loong64)
+            (addF "internal/runtime/atomic" "Store64"
+              (makeAtomicStoreGuardedIntrinsicLoong64 ssa/OpAtomicStore64 ssa/OpAtomicStore64Variant types/TUINT8 atomicStoreEmitterLoong64)
+              ^{:line 376} sys/Loong64)
+
+            (addF "internal/runtime/atomic" "Xchg8"
+              ^{:go/end 383} (fn ^{:tag (* ssa/Value)} [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args]
+                (let [v (.newValue3 s ssa/OpAtomicExchange8 (types/NewTuple (aget types/Types types/TUINT8) types/TypeMem) (aget args 0) (aget args 1) (.mem s))]
+                  (aset (.-vars s) memVar (.newValue1 s ssa/OpSelect1 types/TypeMem v))
+                  (.newValue1 s ssa/OpSelect0 (aget types/Types types/TUINT8) v)))
+
+              ^{:line 384} sys/AMD64 sys/PPC64)
+            (addF "internal/runtime/atomic" "Xchg"
+              ^{:go/end 390} (fn ^{:tag (* ssa/Value)} [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args]
+                (let [v (.newValue3 s ssa/OpAtomicExchange32 (types/NewTuple (aget types/Types types/TUINT32) types/TypeMem) (aget args 0) (aget args 1) (.mem s))]
+                  (aset (.-vars s) memVar (.newValue1 s ssa/OpSelect1 types/TypeMem v))
+                  (.newValue1 s ssa/OpSelect0 (aget types/Types types/TUINT32) v)))
+
+              ^{:line 391} sys/AMD64 sys/Loong64 sys/MIPS sys/MIPS64 sys/PPC64 sys/RISCV64 sys/S390X)
+            (addF "internal/runtime/atomic" "Xchg64"
+              ^{:go/end 397} (fn ^{:tag (* ssa/Value)} [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args]
+                (let [v (.newValue3 s ssa/OpAtomicExchange64 (types/NewTuple (aget types/Types types/TUINT64) types/TypeMem) (aget args 0) (aget args 1) (.mem s))]
+                  (aset (.-vars s) memVar (.newValue1 s ssa/OpSelect1 types/TypeMem v))
+                  (.newValue1 s ssa/OpSelect0 (aget types/Types types/TUINT64) v)))
+
+              ^{:line 398} sys/AMD64 sys/Loong64 sys/MIPS64 sys/PPC64 sys/RISCV64 sys/S390X)
+
+            (let [makeAtomicGuardedIntrinsicARM64common ^{:go/end 438} (fn ^intrinsicBuilder [^ssa/Op op0 ^ssa/Op op1 ^types/Kind typ ^atomicOpEmitter emit ^bool needReturn]
+
+                  ^{:go/end 437} (fn ^{:tag (* ssa/Value)} [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args]
+                    (if (.-LSE (.-goarm64 cfg))
+                      (emit s n args op1 typ needReturn)
+
+                      ;; Target Atomic feature is identified by dynamic detection
+                      (let [addr (.entryNewValue1A s ssa/OpAddr (.PtrTo (aget types/Types types/TBOOL)) (.-ARM64HasATOMICS ir/Syms) (.-sb s))
+                          ^{:line 408} v (.load s (aget types/Types types/TBOOL) addr)
+                          ^{:line 409} b (.endBlock s)]
+                        (set! (.-Kind b) ssa/BlockIf)
+                        (.SetControl b v)
+                        (let [bTrue (.NewBlock (.-f s) ssa/BlockPlain)
+                            ^{:line 413} bFalse (.NewBlock (.-f s) ssa/BlockPlain)
+                            ^{:line 414} bEnd (.NewBlock (.-f s) ssa/BlockPlain)]
+                          (.AddEdgeTo b bTrue)
+                          (.AddEdgeTo b bFalse)
+                          (set! (.-Likely b) ssa/BranchLikely)
+
+                          ;; We have atomic instructions - use it directly.
+                          (.startBlock s bTrue)
+                          (emit s n args op1 typ needReturn)
+                          (.AddEdgeTo (.endBlock s) bEnd)
+
+                          ;; Use original instruction sequence.
+                          (.startBlock s bFalse)
+                          (emit s n args op0 typ needReturn)
+                          (.AddEdgeTo (.endBlock s) bEnd)
+
+                          ;; Merge results.
+                          (.startBlock s bEnd))))
+
+                    (if needReturn
+                      (return (.variable s n (aget types/Types typ)))
+
+                      (return nil))))
+
+
+
+                ^{:line 439} makeAtomicGuardedIntrinsicARM64 ^{:go/end 441} (fn ^intrinsicBuilder [^ssa/Op op0 ^ssa/Op op1 ^types/Kind typ ^atomicOpEmitter emit]
+                  (makeAtomicGuardedIntrinsicARM64common op0 op1 typ emit true))
+
+                ^{:line 442} makeAtomicGuardedIntrinsicARM64old ^{:go/end 444} (fn ^intrinsicBuilder [^ssa/Op op0 ^ssa/Op op1 ^types/Kind typ ^atomicOpEmitter emit]
+                  (makeAtomicGuardedIntrinsicARM64common op0 op1 typ emit false))
+
+
+                ^{:line 446} atomicEmitterARM64 ^{:go/end 452} (fn [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args ^ssa/Op op ^types/Kind typ ^bool needReturn]
+                  (let [v (.newValue3 s op (types/NewTuple (aget types/Types typ) types/TypeMem) (aget args 0) (aget args 1) (.mem s))]
+                    (aset (.-vars s) memVar (.newValue1 s ssa/OpSelect1 types/TypeMem v))
+                    (when needReturn
+                      (aset (.-vars s) n (.newValue1 s ssa/OpSelect0 (aget types/Types typ) v)))))]
+
+
+              (addF "internal/runtime/atomic" "Xchg8"
+                (makeAtomicGuardedIntrinsicARM64 ssa/OpAtomicExchange8 ssa/OpAtomicExchange8Variant types/TUINT8 atomicEmitterARM64)
+                ^{:line 455} sys/ARM64)
+              (addF "internal/runtime/atomic" "Xchg"
+                (makeAtomicGuardedIntrinsicARM64 ssa/OpAtomicExchange32 ssa/OpAtomicExchange32Variant types/TUINT32 atomicEmitterARM64)
+                ^{:line 458} sys/ARM64)
+              (addF "internal/runtime/atomic" "Xchg64"
+                (makeAtomicGuardedIntrinsicARM64 ssa/OpAtomicExchange64 ssa/OpAtomicExchange64Variant types/TUINT64 atomicEmitterARM64)
+                ^{:line 461} sys/ARM64)
+
+              (let [makeAtomicXchg8GuardedIntrinsicLoong64 ^{:go/end 493} (fn ^{:tag (func [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args] [(* ssa/Value)])} [^ssa/Op op]
+                    ^{:go/end 492} (fn ^{:tag (* ssa/Value)} [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args]
+                      (let [addr (.entryNewValue1A s ssa/OpAddr (.PtrTo (aget types/Types types/TBOOL)) (.-Loong64HasLAM_BH ir/Syms) (.-sb s))
+                          ^{:line 466} v (.load s (aget types/Types types/TBOOL) addr)
+                          ^{:line 467} b (.endBlock s)]
+                        (set! (.-Kind b) ssa/BlockIf)
+                        (.SetControl b v)
+                        (let [bTrue (.NewBlock (.-f s) ssa/BlockPlain)
+                            ^{:line 471} bFalse (.NewBlock (.-f s) ssa/BlockPlain)
+                            ^{:line 472} bEnd (.NewBlock (.-f s) ssa/BlockPlain)]
+                          (.AddEdgeTo b bTrue)
+                          (.AddEdgeTo b bFalse)
+                          (set! (.-Likely b) ssa/BranchLikely) ; most loong64 machines support the amswapdb.b
+
+                          ;; We have the intrinsic - use it directly.
+                          (.startBlock s bTrue)
+                          (aset (.-vars s) n (.newValue3 s op (types/NewTuple (aget types/Types types/TUINT8) types/TypeMem) (aget args 0) (aget args 1) (.mem s)))
+                          (aset (.-vars s) memVar (.newValue1 s ssa/OpSelect1 types/TypeMem (aget (.-vars s) n)))
+                          (aset (.-vars s) n (.newValue1 s ssa/OpSelect0 (aget types/Types types/TUINT8) (aget (.-vars s) n)))
+                          (.AddEdgeTo (.endBlock s) bEnd)
+
+                          ;; Call the pure Go version.
+                          (.startBlock s bFalse)
+                          (aset (.-vars s) n (.callResult s n callNormal)) ; types.Types[TUINT8]
+                          (.AddEdgeTo (.endBlock s) bEnd)
+
+                          ;; Merge results.
+                          (.startBlock s bEnd)
+                          (.variable s n (aget types/Types types/TUINT8))))))]
+
+
+                (addF "internal/runtime/atomic" "Xchg8"
+                  (makeAtomicXchg8GuardedIntrinsicLoong64 ssa/OpAtomicExchange8Variant)
+                  ^{:line 496} sys/Loong64)
+
+                (addF "internal/runtime/atomic" "Xadd"
+                  ^{:go/end 503} (fn ^{:tag (* ssa/Value)} [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args]
+                    (let [v (.newValue3 s ssa/OpAtomicAdd32 (types/NewTuple (aget types/Types types/TUINT32) types/TypeMem) (aget args 0) (aget args 1) (.mem s))]
+                      (aset (.-vars s) memVar (.newValue1 s ssa/OpSelect1 types/TypeMem v))
+                      (.newValue1 s ssa/OpSelect0 (aget types/Types types/TUINT32) v)))
+
+                  ^{:line 504} sys/AMD64 sys/Loong64 sys/MIPS sys/MIPS64 sys/PPC64 sys/RISCV64 sys/S390X)
+                (addF "internal/runtime/atomic" "Xadd64"
+                  ^{:go/end 510} (fn ^{:tag (* ssa/Value)} [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args]
+                    (let [v (.newValue3 s ssa/OpAtomicAdd64 (types/NewTuple (aget types/Types types/TUINT64) types/TypeMem) (aget args 0) (aget args 1) (.mem s))]
+                      (aset (.-vars s) memVar (.newValue1 s ssa/OpSelect1 types/TypeMem v))
+                      (.newValue1 s ssa/OpSelect0 (aget types/Types types/TUINT64) v)))
+
+                  ^{:line 511} sys/AMD64 sys/Loong64 sys/MIPS64 sys/PPC64 sys/RISCV64 sys/S390X)
+
+                (addF "internal/runtime/atomic" "Xadd"
+                  (makeAtomicGuardedIntrinsicARM64 ssa/OpAtomicAdd32 ssa/OpAtomicAdd32Variant types/TUINT32 atomicEmitterARM64)
+                  ^{:line 515} sys/ARM64)
+                (addF "internal/runtime/atomic" "Xadd64"
+                  (makeAtomicGuardedIntrinsicARM64 ssa/OpAtomicAdd64 ssa/OpAtomicAdd64Variant types/TUINT64 atomicEmitterARM64)
+                  ^{:line 518} sys/ARM64)
+
+                (addF "internal/runtime/atomic" "Cas"
+                  ^{:go/end 525} (fn ^{:tag (* ssa/Value)} [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args]
+                    (let [v (.newValue4 s ssa/OpAtomicCompareAndSwap32 (types/NewTuple (aget types/Types types/TBOOL) types/TypeMem) (aget args 0) (aget args 1) (aget args 2) (.mem s))]
+                      (aset (.-vars s) memVar (.newValue1 s ssa/OpSelect1 types/TypeMem v))
+                      (.newValue1 s ssa/OpSelect0 (aget types/Types types/TBOOL) v)))
+
+                  ^{:line 526} sys/AMD64 sys/MIPS sys/MIPS64 sys/PPC64 sys/RISCV64 sys/S390X)
+                (addF "internal/runtime/atomic" "Cas64"
+                  ^{:go/end 532} (fn ^{:tag (* ssa/Value)} [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args]
+                    (let [v (.newValue4 s ssa/OpAtomicCompareAndSwap64 (types/NewTuple (aget types/Types types/TBOOL) types/TypeMem) (aget args 0) (aget args 1) (aget args 2) (.mem s))]
+                      (aset (.-vars s) memVar (.newValue1 s ssa/OpSelect1 types/TypeMem v))
+                      (.newValue1 s ssa/OpSelect0 (aget types/Types types/TBOOL) v)))
+
+                  ^{:line 533} sys/AMD64 sys/MIPS64 sys/PPC64 sys/RISCV64 sys/S390X)
+                (addF "internal/runtime/atomic" "CasRel"
+                  ^{:go/end 539} (fn ^{:tag (* ssa/Value)} [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args]
+                    (let [v (.newValue4 s ssa/OpAtomicCompareAndSwap32 (types/NewTuple (aget types/Types types/TBOOL) types/TypeMem) (aget args 0) (aget args 1) (aget args 2) (.mem s))]
+                      (aset (.-vars s) memVar (.newValue1 s ssa/OpSelect1 types/TypeMem v))
+                      (.newValue1 s ssa/OpSelect0 (aget types/Types types/TBOOL) v)))
+
+                  ^{:line 540} sys/PPC64)
+
+                (let [atomicCasEmitterARM64 ^{:go/end 548} (fn [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args ^ssa/Op op ^types/Kind typ ^bool needReturn]
+                      (let [v (.newValue4 s op (types/NewTuple (aget types/Types types/TBOOL) types/TypeMem) (aget args 0) (aget args 1) (aget args 2) (.mem s))]
+                        (aset (.-vars s) memVar (.newValue1 s ssa/OpSelect1 types/TypeMem v))
+                        (when needReturn
+                          (aset (.-vars s) n (.newValue1 s ssa/OpSelect0 (aget types/Types typ) v)))))]
+
+
+
+                  (addF "internal/runtime/atomic" "Cas"
+                    (makeAtomicGuardedIntrinsicARM64 ssa/OpAtomicCompareAndSwap32 ssa/OpAtomicCompareAndSwap32Variant types/TBOOL atomicCasEmitterARM64)
+                    ^{:line 552} sys/ARM64)
+                  (addF "internal/runtime/atomic" "Cas64"
+                    (makeAtomicGuardedIntrinsicARM64 ssa/OpAtomicCompareAndSwap64 ssa/OpAtomicCompareAndSwap64Variant types/TBOOL atomicCasEmitterARM64)
+                    ^{:line 555} sys/ARM64)
+
+                  (let [atomicCasEmitterLoong64 ^{:go/end 563} (fn [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args ^ssa/Op op ^types/Kind typ ^bool needReturn]
+                        (let [v (.newValue4 s op (types/NewTuple (aget types/Types types/TBOOL) types/TypeMem) (aget args 0) (aget args 1) (aget args 2) (.mem s))]
+                          (aset (.-vars s) memVar (.newValue1 s ssa/OpSelect1 types/TypeMem v))
+                          (when needReturn
+                            (aset (.-vars s) n (.newValue1 s ssa/OpSelect0 (aget types/Types typ) v)))))
+
+
+
+                      ^{:line 565} makeAtomicCasGuardedIntrinsicLoong64 ^{:go/end 595} (fn ^intrinsicBuilder [^ssa/Op op0 ^ssa/Op op1 ^atomicOpEmitter emit]
+                        ^{:go/end 594} (fn ^{:tag (* ssa/Value)} [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args]
+                          ;; Target Atomic feature is identified by dynamic detection
+                          (let [addr (.entryNewValue1A s ssa/OpAddr (.PtrTo (aget types/Types types/TBOOL)) (.-Loong64HasLAMCAS ir/Syms) (.-sb s))
+                              ^{:line 569} v (.load s (aget types/Types types/TBOOL) addr)
+                              ^{:line 570} b (.endBlock s)]
+                            (set! (.-Kind b) ssa/BlockIf)
+                            (.SetControl b v)
+                            (let [bTrue (.NewBlock (.-f s) ssa/BlockPlain)
+                                ^{:line 574} bFalse (.NewBlock (.-f s) ssa/BlockPlain)
+                                ^{:line 575} bEnd (.NewBlock (.-f s) ssa/BlockPlain)]
+                              (.AddEdgeTo b bTrue)
+                              (.AddEdgeTo b bFalse)
+                              (set! (.-Likely b) ssa/BranchLikely)
+
+                              ;; We have atomic instructions - use it directly.
+                              (.startBlock s bTrue)
+                              (emit s n args op1 types/TBOOL true)
+                              (.AddEdgeTo (.endBlock s) bEnd)
+
+                              ;; Use original instruction sequence.
+                              (.startBlock s bFalse)
+                              (emit s n args op0 types/TBOOL true)
+                              (.AddEdgeTo (.endBlock s) bEnd)
+
+                              ;; Merge results.
+                              (.startBlock s bEnd)
+
+                              (.variable s n (aget types/Types types/TBOOL))))))]
+
+
+
+                    (addF "internal/runtime/atomic" "Cas"
+                      (makeAtomicCasGuardedIntrinsicLoong64 ssa/OpAtomicCompareAndSwap32 ssa/OpAtomicCompareAndSwap32Variant atomicCasEmitterLoong64)
+                      ^{:line 599} sys/Loong64)
+                    (addF "internal/runtime/atomic" "Cas64"
+                      (makeAtomicCasGuardedIntrinsicLoong64 ssa/OpAtomicCompareAndSwap64 ssa/OpAtomicCompareAndSwap64Variant atomicCasEmitterLoong64)
+                      ^{:line 602} sys/Loong64)
+
+                    ;; Old-style atomic logical operation API (all supported archs except arm64).
+                    (addF "internal/runtime/atomic" "And8"
+                      ^{:go/breaks [3] :go/end 609} (fn ^{:tag (* ssa/Value)} [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args]
+                        (aset (.-vars s) memVar (.newValue3 s ssa/OpAtomicAnd8 types/TypeMem (aget args 0) (aget args 1) (.mem s)))
+                        nil)
+
+                      ^{:line 610} sys/AMD64 sys/Loong64 sys/MIPS sys/MIPS64 sys/PPC64 sys/RISCV64 sys/S390X)
+                    (addF "internal/runtime/atomic" "And"
+                      ^{:go/breaks [3] :go/end 615} (fn ^{:tag (* ssa/Value)} [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args]
+                        (aset (.-vars s) memVar (.newValue3 s ssa/OpAtomicAnd32 types/TypeMem (aget args 0) (aget args 1) (.mem s)))
+                        nil)
+
+                      ^{:line 616} sys/AMD64 sys/Loong64 sys/MIPS sys/MIPS64 sys/PPC64 sys/RISCV64 sys/S390X)
+                    (addF "internal/runtime/atomic" "Or8"
+                      ^{:go/breaks [3] :go/end 621} (fn ^{:tag (* ssa/Value)} [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args]
+                        (aset (.-vars s) memVar (.newValue3 s ssa/OpAtomicOr8 types/TypeMem (aget args 0) (aget args 1) (.mem s)))
+                        nil)
+
+                      ^{:line 622} sys/AMD64 sys/Loong64 sys/MIPS sys/MIPS64 sys/PPC64 sys/RISCV64 sys/S390X)
+                    (addF "internal/runtime/atomic" "Or"
+                      ^{:go/breaks [3] :go/end 627} (fn ^{:tag (* ssa/Value)} [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args]
+                        (aset (.-vars s) memVar (.newValue3 s ssa/OpAtomicOr32 types/TypeMem (aget args 0) (aget args 1) (.mem s)))
+                        nil)
+
+                      ^{:line 628} sys/AMD64 sys/Loong64 sys/MIPS sys/MIPS64 sys/PPC64 sys/RISCV64 sys/S390X)
+
+                    ;; arm64 always uses the new-style atomic logical operations, for both the
+                    ;; old and new style API.
+                    (addF "internal/runtime/atomic" "And8"
+                      (makeAtomicGuardedIntrinsicARM64old ssa/OpAtomicAnd8value ssa/OpAtomicAnd8valueVariant types/TUINT8 atomicEmitterARM64)
+                      ^{:line 634} sys/ARM64)
+                    (addF "internal/runtime/atomic" "Or8"
+                      (makeAtomicGuardedIntrinsicARM64old ssa/OpAtomicOr8value ssa/OpAtomicOr8valueVariant types/TUINT8 atomicEmitterARM64)
+                      ^{:line 637} sys/ARM64)
+                    (addF "internal/runtime/atomic" "And64"
+                      (makeAtomicGuardedIntrinsicARM64 ssa/OpAtomicAnd64value ssa/OpAtomicAnd64valueVariant types/TUINT64 atomicEmitterARM64)
+                      ^{:line 640} sys/ARM64)
+                    (addF "internal/runtime/atomic" "And32"
+                      (makeAtomicGuardedIntrinsicARM64 ssa/OpAtomicAnd32value ssa/OpAtomicAnd32valueVariant types/TUINT32 atomicEmitterARM64)
+                      ^{:line 643} sys/ARM64)
+                    (addF "internal/runtime/atomic" "And"
+                      (makeAtomicGuardedIntrinsicARM64old ssa/OpAtomicAnd32value ssa/OpAtomicAnd32valueVariant types/TUINT32 atomicEmitterARM64)
+                      ^{:line 646} sys/ARM64)
+                    (addF "internal/runtime/atomic" "Or64"
+                      (makeAtomicGuardedIntrinsicARM64 ssa/OpAtomicOr64value ssa/OpAtomicOr64valueVariant types/TUINT64 atomicEmitterARM64)
+                      ^{:line 649} sys/ARM64)
+                    (addF "internal/runtime/atomic" "Or32"
+                      (makeAtomicGuardedIntrinsicARM64 ssa/OpAtomicOr32value ssa/OpAtomicOr32valueVariant types/TUINT32 atomicEmitterARM64)
+                      ^{:line 652} sys/ARM64)
+                    (addF "internal/runtime/atomic" "Or"
+                      (makeAtomicGuardedIntrinsicARM64old ssa/OpAtomicOr32value ssa/OpAtomicOr32valueVariant types/TUINT32 atomicEmitterARM64)
+                      ^{:line 655} sys/ARM64)
+
+                    ;; New-style atomic logical operations, which return the old memory value.
+                    (addF "internal/runtime/atomic" "And64"
+                      ^{:go/end 664} (fn ^{:tag (* ssa/Value)} [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args]
+                        (let [v (.newValue3 s ssa/OpAtomicAnd64value (types/NewTuple (aget types/Types types/TUINT64) types/TypeMem) (aget args 0) (aget args 1) (.mem s))
+                            (values p0 p1) (.split s v)]
+                          (aset (.-vars s) memVar p1)
+                          ^{:line 663} p0))
+
+                      ^{:line 665} sys/AMD64 sys/Loong64)
+                    (addF "internal/runtime/atomic" "And32"
+                      ^{:go/end 672} (fn ^{:tag (* ssa/Value)} [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args]
+                        (let [v (.newValue3 s ssa/OpAtomicAnd32value (types/NewTuple (aget types/Types types/TUINT32) types/TypeMem) (aget args 0) (aget args 1) (.mem s))
+                            (values p0 p1) (.split s v)]
+                          (aset (.-vars s) memVar p1)
+                          ^{:line 671} p0))
+
+                      ^{:line 673} sys/AMD64 sys/Loong64)
+                    (addF "internal/runtime/atomic" "Or64"
+                      ^{:go/end 680} (fn ^{:tag (* ssa/Value)} [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args]
+                        (let [v (.newValue3 s ssa/OpAtomicOr64value (types/NewTuple (aget types/Types types/TUINT64) types/TypeMem) (aget args 0) (aget args 1) (.mem s))
+                            (values p0 p1) (.split s v)]
+                          (aset (.-vars s) memVar p1)
+                          ^{:line 679} p0))
+
+                      ^{:line 681} sys/AMD64 sys/Loong64)
+                    (addF "internal/runtime/atomic" "Or32"
+                      ^{:go/end 688} (fn ^{:tag (* ssa/Value)} [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args]
+                        (let [v (.newValue3 s ssa/OpAtomicOr32value (types/NewTuple (aget types/Types types/TUINT32) types/TypeMem) (aget args 0) (aget args 1) (.mem s))
+                            (values p0 p1) (.split s v)]
+                          (aset (.-vars s) memVar p1)
+                          ^{:line 687} p0))
+
+                      ^{:line 689} sys/AMD64 sys/Loong64)
+
+                    ;; Aliases for atomic load operations
+                    (alias "internal/runtime/atomic" "Loadint32" "internal/runtime/atomic" "Load" (spread all))
+                    (alias "internal/runtime/atomic" "Loadint64" "internal/runtime/atomic" "Load64" (spread all))
+                    (alias "internal/runtime/atomic" "Loaduintptr" "internal/runtime/atomic" "Load" (spread p4))
+                    (alias "internal/runtime/atomic" "Loaduintptr" "internal/runtime/atomic" "Load64" (spread p8))
+                    (alias "internal/runtime/atomic" "Loaduint" "internal/runtime/atomic" "Load" (spread p4))
+                    (alias "internal/runtime/atomic" "Loaduint" "internal/runtime/atomic" "Load64" (spread p8))
+                    (alias "internal/runtime/atomic" "LoadAcq" "internal/runtime/atomic" "Load" (spread lwatomics))
+                    (alias "internal/runtime/atomic" "LoadAcq64" "internal/runtime/atomic" "Load64" (spread lwatomics))
+                    (alias "internal/runtime/atomic" "LoadAcquintptr" "internal/runtime/atomic" "LoadAcq" (spread p4))
+                    (alias "internal/runtime/atomic" "LoadAcquintptr" "internal/runtime/atomic" "LoadAcq64" (spread p8))
+
+                    ;; Aliases for atomic store operations
+                    (alias "internal/runtime/atomic" "Storeint32" "internal/runtime/atomic" "Store" (spread all))
+                    (alias "internal/runtime/atomic" "Storeint64" "internal/runtime/atomic" "Store64" (spread all))
+                    (alias "internal/runtime/atomic" "Storeuintptr" "internal/runtime/atomic" "Store" (spread p4))
+                    (alias "internal/runtime/atomic" "Storeuintptr" "internal/runtime/atomic" "Store64" (spread p8))
+                    (alias "internal/runtime/atomic" "StoreRel" "internal/runtime/atomic" "Store" (spread lwatomics))
+                    (alias "internal/runtime/atomic" "StoreRel64" "internal/runtime/atomic" "Store64" (spread lwatomics))
+                    (alias "internal/runtime/atomic" "StoreReluintptr" "internal/runtime/atomic" "StoreRel" (spread p4))
+                    (alias "internal/runtime/atomic" "StoreReluintptr" "internal/runtime/atomic" "StoreRel64" (spread p8))
+
+                    ;; Aliases for atomic swap operations
+                    (alias "internal/runtime/atomic" "Xchgint32" "internal/runtime/atomic" "Xchg" (spread all))
+                    (alias "internal/runtime/atomic" "Xchgint64" "internal/runtime/atomic" "Xchg64" (spread all))
+                    (alias "internal/runtime/atomic" "Xchguintptr" "internal/runtime/atomic" "Xchg" (spread p4))
+                    (alias "internal/runtime/atomic" "Xchguintptr" "internal/runtime/atomic" "Xchg64" (spread p8))
+
+                    ;; Aliases for atomic add operations
+                    (alias "internal/runtime/atomic" "Xaddint32" "internal/runtime/atomic" "Xadd" (spread all))
+                    (alias "internal/runtime/atomic" "Xaddint64" "internal/runtime/atomic" "Xadd64" (spread all))
+                    (alias "internal/runtime/atomic" "Xadduintptr" "internal/runtime/atomic" "Xadd" (spread p4))
+                    (alias "internal/runtime/atomic" "Xadduintptr" "internal/runtime/atomic" "Xadd64" (spread p8))
+
+                    ;; Aliases for atomic CAS operations
+                    (alias "internal/runtime/atomic" "Casint32" "internal/runtime/atomic" "Cas" (spread all))
+                    (alias "internal/runtime/atomic" "Casint64" "internal/runtime/atomic" "Cas64" (spread all))
+                    (alias "internal/runtime/atomic" "Casuintptr" "internal/runtime/atomic" "Cas" (spread p4))
+                    (alias "internal/runtime/atomic" "Casuintptr" "internal/runtime/atomic" "Cas64" (spread p8))
+                    (alias "internal/runtime/atomic" "Casp1" "internal/runtime/atomic" "Cas" (spread p4))
+                    (alias "internal/runtime/atomic" "Casp1" "internal/runtime/atomic" "Cas64" (spread p8))
+                    (alias "internal/runtime/atomic" "CasRel" "internal/runtime/atomic" "Cas" (spread lwatomics))
+
+                    ;; Aliases for atomic And/Or operations
+                    (alias "internal/runtime/atomic" "Anduintptr" "internal/runtime/atomic" "And64" sys/ArchARM64 sys/ArchLoong64)
+                    (alias "internal/runtime/atomic" "Oruintptr" "internal/runtime/atomic" "Or64" sys/ArchARM64 sys/ArchLoong64)
+
+                    ;; /******** math ********/
+                    (addF "math" "sqrt"
+                      ^{:go/end 742} (fn ^{:tag (* ssa/Value)} [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args]
+                        (.newValue1 s ssa/OpSqrt (aget types/Types types/TFLOAT64) (aget args 0)))
+
+                      ^{:line 743} sys/I386 sys/AMD64 sys/ARM sys/ARM64 sys/Loong64 sys/MIPS sys/MIPS64 sys/PPC64 sys/RISCV64 sys/S390X sys/Wasm)
+                    (addF "math" "Trunc"
+                      ^{:go/end 747} (fn ^{:tag (* ssa/Value)} [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args]
+                        (.newValue1 s ssa/OpTrunc (aget types/Types types/TFLOAT64) (aget args 0)))
+
+                      ^{:line 748} sys/ARM64 sys/PPC64 sys/S390X sys/Wasm)
+                    (addF "math" "Ceil"
+                      ^{:go/end 752} (fn ^{:tag (* ssa/Value)} [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args]
+                        (.newValue1 s ssa/OpCeil (aget types/Types types/TFLOAT64) (aget args 0)))
+
+                      ^{:line 753} sys/ARM64 sys/PPC64 sys/S390X sys/Wasm)
+                    (addF "math" "Floor"
+                      ^{:go/end 757} (fn ^{:tag (* ssa/Value)} [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args]
+                        (.newValue1 s ssa/OpFloor (aget types/Types types/TFLOAT64) (aget args 0)))
+
+                      ^{:line 758} sys/ARM64 sys/PPC64 sys/S390X sys/Wasm)
+                    (addF "math" "Round"
+                      ^{:go/end 762} (fn ^{:tag (* ssa/Value)} [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args]
+                        (.newValue1 s ssa/OpRound (aget types/Types types/TFLOAT64) (aget args 0)))
+
+                      ^{:line 763} sys/ARM64 sys/PPC64 sys/S390X)
+                    (addF "math" "RoundToEven"
+                      ^{:go/end 767} (fn ^{:tag (* ssa/Value)} [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args]
+                        (.newValue1 s ssa/OpRoundToEven (aget types/Types types/TFLOAT64) (aget args 0)))
+
+                      ^{:line 768} sys/ARM64 sys/S390X sys/Wasm)
+                    (addF "math" "Abs"
+                      ^{:go/end 772} (fn ^{:tag (* ssa/Value)} [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args]
+                        (.newValue1 s ssa/OpAbs (aget types/Types types/TFLOAT64) (aget args 0)))
+
+                      ^{:line 773} sys/ARM64 sys/ARM sys/Loong64 sys/PPC64 sys/RISCV64 sys/Wasm sys/MIPS sys/MIPS64)
+                    (addF "math" "Copysign"
+                      ^{:go/end 777} (fn ^{:tag (* ssa/Value)} [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args]
+                        (.newValue2 s ssa/OpCopysign (aget types/Types types/TFLOAT64) (aget args 0) (aget args 1)))
+
+                      ^{:line 778} sys/Loong64 sys/PPC64 sys/RISCV64 sys/Wasm)
+                    (addF "math" "FMA"
+                      ^{:go/end 782} (fn ^{:tag (* ssa/Value)} [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args]
+                        (.newValue3 s ssa/OpFMA (aget types/Types types/TFLOAT64) (aget args 0) (aget args 1) (aget args 2)))
+
+                      ^{:line 783} sys/ARM64 sys/Loong64 sys/PPC64 sys/RISCV64 sys/S390X)
+                    (addF "math" "FMA"
+                      ^{:go/end 814} (fn ^{:tag (* ssa/Value)} [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args]
+                        (when (>= (.-goamd64 cfg) 3)
+                          (return (.newValue3 s ssa/OpFMA (aget types/Types types/TFLOAT64) (aget args 0) (aget args 1) (aget args 2))))
+
+
+                        (let [v (.entryNewValue0A s ssa/OpHasCPUFeature (aget types/Types types/TBOOL) (.-X86HasFMA ir/Syms))
+                            ^{:line 791} b (.endBlock s)]
+                          (set! (.-Kind b) ssa/BlockIf)
+                          (.SetControl b v)
+                          (let [bTrue (.NewBlock (.-f s) ssa/BlockPlain)
+                              ^{:line 795} bFalse (.NewBlock (.-f s) ssa/BlockPlain)
+                              ^{:line 796} bEnd (.NewBlock (.-f s) ssa/BlockPlain)]
+                            (.AddEdgeTo b bTrue)
+                            (.AddEdgeTo b bFalse)
+                            (set! (.-Likely b) ssa/BranchLikely) ; >= haswell cpus are common
+
+                            ;; We have the intrinsic - use it directly.
+                            (.startBlock s bTrue)
+                            (aset (.-vars s) n (.newValue3 s ssa/OpFMA (aget types/Types types/TFLOAT64) (aget args 0) (aget args 1) (aget args 2)))
+                            (.AddEdgeTo (.endBlock s) bEnd)
+
+                            ;; Call the pure Go version.
+                            (.startBlock s bFalse)
+                            (aset (.-vars s) n (.callResult s n callNormal)) ; types.Types[TFLOAT64]
+                            (.AddEdgeTo (.endBlock s) bEnd)
+
+                            ;; Merge results.
+                            (.startBlock s bEnd)
+                            (.variable s n (aget types/Types types/TFLOAT64)))))
+
+                      ^{:line 815} sys/AMD64)
+                    (addF "math" "FMA"
+                      ^{:go/end 843} (fn ^{:tag (* ssa/Value)} [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args]
+                        (let [addr (.entryNewValue1A s ssa/OpAddr (.PtrTo (aget types/Types types/TBOOL)) (.-ARMHasVFPv4 ir/Syms) (.-sb s))
+                            ^{:line 819} v (.load s (aget types/Types types/TBOOL) addr)
+                            ^{:line 820} b (.endBlock s)]
+                          (set! (.-Kind b) ssa/BlockIf)
+                          (.SetControl b v)
+                          (let [bTrue (.NewBlock (.-f s) ssa/BlockPlain)
+                              ^{:line 824} bFalse (.NewBlock (.-f s) ssa/BlockPlain)
+                              ^{:line 825} bEnd (.NewBlock (.-f s) ssa/BlockPlain)]
+                            (.AddEdgeTo b bTrue)
+                            (.AddEdgeTo b bFalse)
+                            (set! (.-Likely b) ssa/BranchLikely)
+
+                            ;; We have the intrinsic - use it directly.
+                            (.startBlock s bTrue)
+                            (aset (.-vars s) n (.newValue3 s ssa/OpFMA (aget types/Types types/TFLOAT64) (aget args 0) (aget args 1) (aget args 2)))
+                            (.AddEdgeTo (.endBlock s) bEnd)
+
+                            ;; Call the pure Go version.
+                            (.startBlock s bFalse)
+                            (aset (.-vars s) n (.callResult s n callNormal)) ; types.Types[TFLOAT64]
+                            (.AddEdgeTo (.endBlock s) bEnd)
+
+                            ;; Merge results.
+                            (.startBlock s bEnd)
+                            (.variable s n (aget types/Types types/TFLOAT64)))))
+
+                      ^{:line 844} sys/ARM)
+
+                    (let [makeRoundAMD64 ^{:go/end 877} (fn ^{:tag (func [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args] [(* ssa/Value)])} [^ssa/Op op]
+                          ^{:go/end 876} (fn ^{:tag (* ssa/Value)} [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args]
+                            (when (>= (.-goamd64 cfg) 2)
+                              (return (.newValue1 s op (aget types/Types types/TFLOAT64) (aget args 0))))
+
+
+                            (let [v (.entryNewValue0A s ssa/OpHasCPUFeature (aget types/Types types/TBOOL) (.-X86HasSSE41 ir/Syms))
+                                ^{:line 853} b (.endBlock s)]
+                              (set! (.-Kind b) ssa/BlockIf)
+                              (.SetControl b v)
+                              (let [bTrue (.NewBlock (.-f s) ssa/BlockPlain)
+                                  ^{:line 857} bFalse (.NewBlock (.-f s) ssa/BlockPlain)
+                                  ^{:line 858} bEnd (.NewBlock (.-f s) ssa/BlockPlain)]
+                                (.AddEdgeTo b bTrue)
+                                (.AddEdgeTo b bFalse)
+                                (set! (.-Likely b) ssa/BranchLikely) ; most machines have sse4.1 nowadays
+
+                                ;; We have the intrinsic - use it directly.
+                                (.startBlock s bTrue)
+                                (aset (.-vars s) n (.newValue1 s op (aget types/Types types/TFLOAT64) (aget args 0)))
+                                (.AddEdgeTo (.endBlock s) bEnd)
+
+                                ;; Call the pure Go version.
+                                (.startBlock s bFalse)
+                                (aset (.-vars s) n (.callResult s n callNormal)) ; types.Types[TFLOAT64]
+                                (.AddEdgeTo (.endBlock s) bEnd)
+
+                                ;; Merge results.
+                                (.startBlock s bEnd)
+                                (.variable s n (aget types/Types types/TFLOAT64))))))]
+
+
+                      (addF "math" "RoundToEven"
+                        (makeRoundAMD64 ssa/OpRoundToEven)
+                        ^{:line 880} sys/AMD64)
+                      (addF "math" "Floor"
+                        (makeRoundAMD64 ssa/OpFloor)
+                        ^{:line 883} sys/AMD64)
+                      (addF "math" "Ceil"
+                        (makeRoundAMD64 ssa/OpCeil)
+                        ^{:line 886} sys/AMD64)
+                      (addF "math" "Trunc"
+                        (makeRoundAMD64 ssa/OpTrunc)
+                        ^{:line 889} sys/AMD64)
+
+                      (let [makeRoundLoong64 ^{:go/end 919} (fn ^{:tag (func [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args] [(* ssa/Value)])} [^ssa/Op op]
+                            ^{:go/end 918} (fn ^{:tag (* ssa/Value)} [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args]
+                              (let [addr (.entryNewValue1A s ssa/OpAddr (.PtrTo (aget types/Types types/TBOOL)) (.-Loong64HasLSX ir/Syms) (.-sb s))
+                                  ^{:line 894} v (.load s (aget types/Types types/TBOOL) addr)
+                                  ^{:line 895} b (.endBlock s)]
+                                (set! (.-Kind b) ssa/BlockIf)
+                                (.SetControl b v)
+                                (let [bTrue (.NewBlock (.-f s) ssa/BlockPlain)
+                                    ^{:line 899} bFalse (.NewBlock (.-f s) ssa/BlockPlain)
+                                    ^{:line 900} bEnd (.NewBlock (.-f s) ssa/BlockPlain)]
+                                  (.AddEdgeTo b bTrue)
+                                  (.AddEdgeTo b bFalse)
+                                  (set! (.-Likely b) ssa/BranchLikely) ; most loong64 machines support the LSX
+
+                                  ;; We have the intrinsic - use it directly.
+                                  (.startBlock s bTrue)
+                                  (aset (.-vars s) n (.newValue1 s op (aget types/Types types/TFLOAT64) (aget args 0)))
+                                  (.AddEdgeTo (.endBlock s) bEnd)
+
+                                  ;; Call the pure Go version.
+                                  (.startBlock s bFalse)
+                                  (aset (.-vars s) n (.callResult s n callNormal)) ; types.Types[TFLOAT64]
+                                  (.AddEdgeTo (.endBlock s) bEnd)
+
+                                  ;; Merge results.
+                                  (.startBlock s bEnd)
+                                  (.variable s n (aget types/Types types/TFLOAT64))))))]
+
+
+                        (addF "math" "RoundToEven"
+                          (makeRoundLoong64 ssa/OpRoundToEven)
+                          ^{:line 922} sys/Loong64)
+                        (addF "math" "Floor"
+                          (makeRoundLoong64 ssa/OpFloor)
+                          ^{:line 925} sys/Loong64)
+                        (addF "math" "Ceil"
+                          (makeRoundLoong64 ssa/OpCeil)
+                          ^{:line 928} sys/Loong64)
+                        (addF "math" "Trunc"
+                          (makeRoundLoong64 ssa/OpTrunc)
+                          ^{:line 931} sys/Loong64)
+
+                        ;; /******** math/bits ********/
+                        (addF "math/bits" "TrailingZeros64"
+                          ^{:go/end 937} (fn ^{:tag (* ssa/Value)} [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args]
+                            (.newValue1 s ssa/OpCtz64 (aget types/Types types/TINT) (aget args 0)))
+
+                          ^{:line 938} sys/AMD64 sys/ARM64 sys/ARM sys/Loong64 sys/S390X sys/MIPS sys/PPC64 sys/Wasm)
+                        (addF "math/bits" "TrailingZeros64"
+                          ^{:go/end 944} (fn ^{:tag (* ssa/Value)} [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args]
+                            (let [lo (.newValue1 s ssa/OpInt64Lo (aget types/Types types/TUINT32) (aget args 0))
+                                ^{:line 942} hi (.newValue1 s ssa/OpInt64Hi (aget types/Types types/TUINT32) (aget args 0))]
+                              (.newValue2 s ssa/OpCtz64On32 (aget types/Types types/TINT) lo hi)))
+
+                          ^{:line 945} sys/I386)
+                        (addF "math/bits" "TrailingZeros32"
+                          ^{:go/end 949} (fn ^{:tag (* ssa/Value)} [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args]
+                            (.newValue1 s ssa/OpCtz32 (aget types/Types types/TINT) (aget args 0)))
+
+                          ^{:line 950} sys/AMD64 sys/I386 sys/ARM64 sys/ARM sys/Loong64 sys/S390X sys/MIPS sys/PPC64 sys/Wasm)
+                        (addF "math/bits" "TrailingZeros16"
+                          ^{:go/end 954} (fn ^{:tag (* ssa/Value)} [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args]
+                            (.newValue1 s ssa/OpCtz16 (aget types/Types types/TINT) (aget args 0)))
+
+                          ^{:line 955} sys/AMD64 sys/ARM sys/ARM64 sys/I386 sys/MIPS sys/Loong64 sys/PPC64 sys/S390X sys/Wasm)
+                        (addF "math/bits" "TrailingZeros8"
+                          ^{:go/end 959} (fn ^{:tag (* ssa/Value)} [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args]
+                            (.newValue1 s ssa/OpCtz8 (aget types/Types types/TINT) (aget args 0)))
+
+                          ^{:line 960} sys/AMD64 sys/ARM sys/ARM64 sys/I386 sys/MIPS sys/Loong64 sys/PPC64 sys/S390X sys/Wasm)
+
+                        (when (>= (.-goriscv64 cfg) 22)
+                          (addF "math/bits" "TrailingZeros64"
+                            ^{:go/end 966} (fn ^{:tag (* ssa/Value)} [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args]
+                              (.newValue1 s ssa/OpCtz64 (aget types/Types types/TINT) (aget args 0)))
+
+                            ^{:line 967} sys/RISCV64)
+                          (addF "math/bits" "TrailingZeros32"
+                            ^{:go/end 971} (fn ^{:tag (* ssa/Value)} [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args]
+                              (.newValue1 s ssa/OpCtz32 (aget types/Types types/TINT) (aget args 0)))
+
+                            ^{:line 972} sys/RISCV64)
+                          (addF "math/bits" "TrailingZeros16"
+                            ^{:go/end 976} (fn ^{:tag (* ssa/Value)} [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args]
+                              (.newValue1 s ssa/OpCtz16 (aget types/Types types/TINT) (aget args 0)))
+
+                            ^{:line 977} sys/RISCV64)
+                          (addF "math/bits" "TrailingZeros8"
+                            ^{:go/end 981} (fn ^{:tag (* ssa/Value)} [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args]
+                              (.newValue1 s ssa/OpCtz8 (aget types/Types types/TINT) (aget args 0)))
+
+                            ^{:line 982} sys/RISCV64))
+
+
+                        ;; ReverseBytes inlines correctly, no need to intrinsify it.
+                        (alias "math/bits" "ReverseBytes64" "internal/runtime/sys" "Bswap64" (spread all))
+                        (alias "math/bits" "ReverseBytes32" "internal/runtime/sys" "Bswap32" (spread all))
+                        ;; Nothing special is needed for targets where ReverseBytes16 lowers to a rotate
+                        (addF "math/bits" "ReverseBytes16"
+                          ^{:go/end 992} (fn ^{:tag (* ssa/Value)} [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args]
+                            (.newValue1 s ssa/OpBswap16 (aget types/Types types/TUINT16) (aget args 0)))
+
+                          ^{:line 993} sys/Loong64)
+                        (when (>= (.-goppc64 cfg) 10)
+                          ;; On Power10, 16-bit rotate is not available so use BRH instruction
+                          (addF "math/bits" "ReverseBytes16"
+                            ^{:go/end 999} (fn ^{:tag (* ssa/Value)} [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args]
+                              (.newValue1 s ssa/OpBswap16 (aget types/Types types/TUINT) (aget args 0)))
+
+                            ^{:line 1000} sys/PPC64))
+
+                        (when (>= (.-goriscv64 cfg) 22)
+                          (addF "math/bits" "ReverseBytes16"
+                            ^{:go/end 1006} (fn ^{:tag (* ssa/Value)} [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args]
+                              (.newValue1 s ssa/OpBswap16 (aget types/Types types/TUINT16) (aget args 0)))
+
+                            ^{:line 1007} sys/RISCV64))
+
+
+                        (addF "math/bits" "Len64"
+                          ^{:go/end 1013} (fn ^{:tag (* ssa/Value)} [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args]
+                            (.newValue1 s ssa/OpBitLen64 (aget types/Types types/TINT) (aget args 0)))
+
+                          ^{:line 1014} sys/AMD64 sys/ARM sys/ARM64 sys/Loong64 sys/MIPS sys/PPC64 sys/S390X sys/Wasm)
+                        (addF "math/bits" "Len32"
+                          ^{:go/end 1018} (fn ^{:tag (* ssa/Value)} [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args]
+                            (.newValue1 s ssa/OpBitLen32 (aget types/Types types/TINT) (aget args 0)))
+
+                          ^{:line 1019} sys/AMD64 sys/ARM sys/ARM64 sys/Loong64 sys/MIPS sys/PPC64 sys/S390X sys/Wasm)
+                        (addF "math/bits" "Len16"
+                          ^{:go/end 1023} (fn ^{:tag (* ssa/Value)} [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args]
+                            (.newValue1 s ssa/OpBitLen16 (aget types/Types types/TINT) (aget args 0)))
+
+                          ^{:line 1024} sys/AMD64 sys/ARM sys/ARM64 sys/Loong64 sys/MIPS sys/PPC64 sys/S390X sys/Wasm)
+                        (addF "math/bits" "Len8"
+                          ^{:go/end 1028} (fn ^{:tag (* ssa/Value)} [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args]
+                            (.newValue1 s ssa/OpBitLen8 (aget types/Types types/TINT) (aget args 0)))
+
+                          ^{:line 1029} sys/AMD64 sys/ARM sys/ARM64 sys/Loong64 sys/MIPS sys/PPC64 sys/S390X sys/Wasm)
+
+                        (when (>= (.-goriscv64 cfg) 22)
+                          (addF "math/bits" "Len64"
+                            ^{:go/end 1035} (fn ^{:tag (* ssa/Value)} [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args]
+                              (.newValue1 s ssa/OpBitLen64 (aget types/Types types/TINT) (aget args 0)))
+
+                            ^{:line 1036} sys/RISCV64)
+                          (addF "math/bits" "Len32"
+                            ^{:go/end 1040} (fn ^{:tag (* ssa/Value)} [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args]
+                              (.newValue1 s ssa/OpBitLen32 (aget types/Types types/TINT) (aget args 0)))
+
+                            ^{:line 1041} sys/RISCV64)
+                          (addF "math/bits" "Len16"
+                            ^{:go/end 1045} (fn ^{:tag (* ssa/Value)} [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args]
+                              (.newValue1 s ssa/OpBitLen16 (aget types/Types types/TINT) (aget args 0)))
+
+                            ^{:line 1046} sys/RISCV64)
+                          (addF "math/bits" "Len8"
+                            ^{:go/end 1050} (fn ^{:tag (* ssa/Value)} [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args]
+                              (.newValue1 s ssa/OpBitLen8 (aget types/Types types/TINT) (aget args 0)))
+
+                            ^{:line 1051} sys/RISCV64))
+
+
+                        (alias "math/bits" "Len" "math/bits" "Len64" (spread p8))
+                        (alias "math/bits" "Len" "math/bits" "Len32" (spread p4))
+
+                        ;; LeadingZeros is handled because it trivially calls Len.
+                        (addF "math/bits" "Reverse64"
+                          ^{:go/end 1061} (fn ^{:tag (* ssa/Value)} [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args]
+                            (.newValue1 s ssa/OpBitRev64 (aget types/Types types/TUINT64) (aget args 0)))
+
+                          ^{:line 1062} sys/ARM64 sys/Loong64)
+                        (addF "math/bits" "Reverse32"
+                          ^{:go/end 1066} (fn ^{:tag (* ssa/Value)} [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args]
+                            (.newValue1 s ssa/OpBitRev32 (aget types/Types types/TUINT32) (aget args 0)))
+
+                          ^{:line 1067} sys/ARM64 sys/Loong64)
+                        (addF "math/bits" "Reverse16"
+                          ^{:go/end 1071} (fn ^{:tag (* ssa/Value)} [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args]
+                            (.newValue1 s ssa/OpBitRev16 (aget types/Types types/TUINT16) (aget args 0)))
+
+                          ^{:line 1072} sys/ARM64 sys/Loong64)
+                        (addF "math/bits" "Reverse8"
+                          ^{:go/end 1076} (fn ^{:tag (* ssa/Value)} [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args]
+                            (.newValue1 s ssa/OpBitRev8 (aget types/Types types/TUINT8) (aget args 0)))
+
+                          ^{:line 1077} sys/ARM64 sys/Loong64)
+                        (addF "math/bits" "Reverse"
+                          ^{:go/end 1081} (fn ^{:tag (* ssa/Value)} [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args]
+                            (.newValue1 s ssa/OpBitRev64 (aget types/Types types/TUINT) (aget args 0)))
+
+                          ^{:line 1082} sys/ARM64 sys/Loong64)
+                        (addF "math/bits" "RotateLeft8"
+                          ^{:go/end 1086} (fn ^{:tag (* ssa/Value)} [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args]
+                            (.newValue2 s ssa/OpRotateLeft8 (aget types/Types types/TUINT8) (aget args 0) (aget args 1)))
+
+                          ^{:line 1087} sys/AMD64 sys/RISCV64)
+                        (addF "math/bits" "RotateLeft16"
+                          ^{:go/end 1091} (fn ^{:tag (* ssa/Value)} [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args]
+                            (.newValue2 s ssa/OpRotateLeft16 (aget types/Types types/TUINT16) (aget args 0) (aget args 1)))
+
+                          ^{:line 1092} sys/AMD64 sys/RISCV64)
+                        (addF "math/bits" "RotateLeft32"
+                          ^{:go/end 1096} (fn ^{:tag (* ssa/Value)} [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args]
+                            (.newValue2 s ssa/OpRotateLeft32 (aget types/Types types/TUINT32) (aget args 0) (aget args 1)))
+
+                          ^{:line 1097} sys/AMD64 sys/ARM sys/ARM64 sys/Loong64 sys/PPC64 sys/RISCV64 sys/S390X sys/Wasm)
+                        (addF "math/bits" "RotateLeft64"
+                          ^{:go/end 1101} (fn ^{:tag (* ssa/Value)} [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args]
+                            (.newValue2 s ssa/OpRotateLeft64 (aget types/Types types/TUINT64) (aget args 0) (aget args 1)))
+
+                          ^{:line 1102} sys/AMD64 sys/ARM64 sys/Loong64 sys/PPC64 sys/RISCV64 sys/S390X sys/Wasm)
+                        (alias "math/bits" "RotateLeft" "math/bits" "RotateLeft64" (spread p8))
+
+                        (let [makeOnesCountAMD64 ^{:go/end 1136} (fn ^{:tag (func [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args] [(* ssa/Value)])} [^ssa/Op op]
+                              ^{:go/end 1135} (fn ^{:tag (* ssa/Value)} [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args]
+                                (when (>= (.-goamd64 cfg) 2)
+                                  (return (.newValue1 s op (aget types/Types types/TINT) (aget args 0))))
+
+
+                                (let [v (.entryNewValue0A s ssa/OpHasCPUFeature (aget types/Types types/TBOOL) (.-X86HasPOPCNT ir/Syms))
+                                    ^{:line 1112} b (.endBlock s)]
+                                  (set! (.-Kind b) ssa/BlockIf)
+                                  (.SetControl b v)
+                                  (let [bTrue (.NewBlock (.-f s) ssa/BlockPlain)
+                                      ^{:line 1116} bFalse (.NewBlock (.-f s) ssa/BlockPlain)
+                                      ^{:line 1117} bEnd (.NewBlock (.-f s) ssa/BlockPlain)]
+                                    (.AddEdgeTo b bTrue)
+                                    (.AddEdgeTo b bFalse)
+                                    (set! (.-Likely b) ssa/BranchLikely) ; most machines have popcnt nowadays
+
+                                    ;; We have the intrinsic - use it directly.
+                                    (.startBlock s bTrue)
+                                    (aset (.-vars s) n (.newValue1 s op (aget types/Types types/TINT) (aget args 0)))
+                                    (.AddEdgeTo (.endBlock s) bEnd)
+
+                                    ;; Call the pure Go version.
+                                    (.startBlock s bFalse)
+                                    (aset (.-vars s) n (.callResult s n callNormal)) ; types.Types[TINT]
+                                    (.AddEdgeTo (.endBlock s) bEnd)
+
+                                    ;; Merge results.
+                                    (.startBlock s bEnd)
+                                    (.variable s n (aget types/Types types/TINT))))))
+
+
+
+                            ^{:line 1138} makeOnesCountLoong64 ^{:go/end 1166} (fn ^{:tag (func [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args] [(* ssa/Value)])} [^ssa/Op op]
+                              ^{:go/end 1165} (fn ^{:tag (* ssa/Value)} [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args]
+                                (let [addr (.entryNewValue1A s ssa/OpAddr (.PtrTo (aget types/Types types/TBOOL)) (.-Loong64HasLSX ir/Syms) (.-sb s))
+                                    ^{:line 1141} v (.load s (aget types/Types types/TBOOL) addr)
+                                    ^{:line 1142} b (.endBlock s)]
+                                  (set! (.-Kind b) ssa/BlockIf)
+                                  (.SetControl b v)
+                                  (let [bTrue (.NewBlock (.-f s) ssa/BlockPlain)
+                                      ^{:line 1146} bFalse (.NewBlock (.-f s) ssa/BlockPlain)
+                                      ^{:line 1147} bEnd (.NewBlock (.-f s) ssa/BlockPlain)]
+                                    (.AddEdgeTo b bTrue)
+                                    (.AddEdgeTo b bFalse)
+                                    (set! (.-Likely b) ssa/BranchLikely) ; most loong64 machines support the LSX
+
+                                    ;; We have the intrinsic - use it directly.
+                                    (.startBlock s bTrue)
+                                    (aset (.-vars s) n (.newValue1 s op (aget types/Types types/TINT) (aget args 0)))
+                                    (.AddEdgeTo (.endBlock s) bEnd)
+
+                                    ;; Call the pure Go version.
+                                    (.startBlock s bFalse)
+                                    (aset (.-vars s) n (.callResult s n callNormal)) ; types.Types[TINT]
+                                    (.AddEdgeTo (.endBlock s) bEnd)
+
+                                    ;; Merge results.
+                                    (.startBlock s bEnd)
+                                    (.variable s n (aget types/Types types/TINT))))))
+
+
+
+                            ^{:line 1168} makeOnesCountRISCV64 ^{:go/end 1200} (fn ^{:tag (func [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args] [(* ssa/Value)])} [^ssa/Op op]
+                              ^{:go/end 1199} (fn ^{:tag (* ssa/Value)} [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args]
+                                (when (>= (.-goriscv64 cfg) 22)
+                                  (return (.newValue1 s op (aget types/Types types/TINT) (aget args 0))))
+
+
+                                (let [addr (.entryNewValue1A s ssa/OpAddr (.PtrTo (aget types/Types types/TBOOL)) (.-RISCV64HasZbb ir/Syms) (.-sb s))
+                                    ^{:line 1175} v (.load s (aget types/Types types/TBOOL) addr)
+                                    ^{:line 1176} b (.endBlock s)]
+                                  (set! (.-Kind b) ssa/BlockIf)
+                                  (.SetControl b v)
+                                  (let [bTrue (.NewBlock (.-f s) ssa/BlockPlain)
+                                      ^{:line 1180} bFalse (.NewBlock (.-f s) ssa/BlockPlain)
+                                      ^{:line 1181} bEnd (.NewBlock (.-f s) ssa/BlockPlain)]
+                                    (.AddEdgeTo b bTrue)
+                                    (.AddEdgeTo b bFalse)
+                                    (set! (.-Likely b) ssa/BranchLikely) ; Majority of RISC-V support Zbb.
+
+                                    ;; We have the intrinsic - use it directly.
+                                    (.startBlock s bTrue)
+                                    (aset (.-vars s) n (.newValue1 s op (aget types/Types types/TINT) (aget args 0)))
+                                    (.AddEdgeTo (.endBlock s) bEnd)
+
+                                    ;; Call the pure Go version.
+                                    (.startBlock s bFalse)
+                                    (aset (.-vars s) n (.callResult s n callNormal)) ; types.Types[TINT]
+                                    (.AddEdgeTo (.endBlock s) bEnd)
+
+                                    ;; Merge results.
+                                    (.startBlock s bEnd)
+                                    (.variable s n (aget types/Types types/TINT))))))]
+
+
+
+                          (addF "math/bits" "OnesCount64"
+                            (makeOnesCountAMD64 ssa/OpPopCount64)
+                            ^{:line 1204} sys/AMD64)
+                          (addF "math/bits" "OnesCount64"
+                            (makeOnesCountLoong64 ssa/OpPopCount64)
+                            ^{:line 1207} sys/Loong64)
+                          (addF "math/bits" "OnesCount64"
+                            (makeOnesCountRISCV64 ssa/OpPopCount64)
+                            ^{:line 1210} sys/RISCV64)
+                          (addF "math/bits" "OnesCount64"
+                            ^{:go/end 1214} (fn ^{:tag (* ssa/Value)} [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args]
+                              (.newValue1 s ssa/OpPopCount64 (aget types/Types types/TINT) (aget args 0)))
+
+                            ^{:line 1215} sys/PPC64 sys/ARM64 sys/S390X sys/Wasm)
+                          (addF "math/bits" "OnesCount32"
+                            (makeOnesCountAMD64 ssa/OpPopCount32)
+                            ^{:line 1218} sys/AMD64)
+                          (addF "math/bits" "OnesCount32"
+                            (makeOnesCountLoong64 ssa/OpPopCount32)
+                            ^{:line 1221} sys/Loong64)
+                          (addF "math/bits" "OnesCount32"
+                            (makeOnesCountRISCV64 ssa/OpPopCount32)
+                            ^{:line 1224} sys/RISCV64)
+                          (addF "math/bits" "OnesCount32"
+                            ^{:go/end 1228} (fn ^{:tag (* ssa/Value)} [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args]
+                              (.newValue1 s ssa/OpPopCount32 (aget types/Types types/TINT) (aget args 0)))
+
+                            ^{:line 1229} sys/PPC64 sys/ARM64 sys/S390X sys/Wasm)
+                          (addF "math/bits" "OnesCount16"
+                            (makeOnesCountAMD64 ssa/OpPopCount16)
+                            ^{:line 1232} sys/AMD64)
+                          (addF "math/bits" "OnesCount16"
+                            (makeOnesCountLoong64 ssa/OpPopCount16)
+                            ^{:line 1235} sys/Loong64)
+                          (addF "math/bits" "OnesCount16"
+                            (makeOnesCountRISCV64 ssa/OpPopCount16)
+                            ^{:line 1238} sys/RISCV64)
+                          (addF "math/bits" "OnesCount16"
+                            ^{:go/end 1242} (fn ^{:tag (* ssa/Value)} [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args]
+                              (.newValue1 s ssa/OpPopCount16 (aget types/Types types/TINT) (aget args 0)))
+
+                            ^{:line 1243} sys/ARM64 sys/S390X sys/PPC64 sys/Wasm)
+                          (addF "math/bits" "OnesCount8"
+                            ^{:go/end 1247} (fn ^{:tag (* ssa/Value)} [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args]
+                              (.newValue1 s ssa/OpPopCount8 (aget types/Types types/TINT) (aget args 0)))
+
+                            ^{:line 1248} sys/S390X sys/PPC64 sys/Wasm)
+
+                          (when (>= (.-goriscv64 cfg) 22)
+                            (addF "math/bits" "OnesCount8"
+                              (makeOnesCountRISCV64 ssa/OpPopCount8)
+                              ^{:line 1253} sys/RISCV64))
+
+
+                          (alias "math/bits" "OnesCount" "math/bits" "OnesCount64" (spread p8))
+
+                          (add "math/bits" "Mul64"
+                            ^{:go/end 1261} (fn ^{:tag (* ssa/Value)} [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args]
+                              (.newValue2 s ssa/OpMul64uhilo (types/NewTuple (aget types/Types types/TUINT64) (aget types/Types types/TUINT64)) (aget args 0) (aget args 1)))
+
+                            (spread all))
+                          (alias "math/bits" "Mul" "math/bits" "Mul64" (spread p8))
+                          (addF "math/bits" "Add64"
+                            ^{:go/end 1267} (fn ^{:tag (* ssa/Value)} [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args]
+                              (.newValue3 s ssa/OpAdd64carry (types/NewTuple (aget types/Types types/TUINT64) (aget types/Types types/TUINT64)) (aget args 0) (aget args 1) (aget args 2)))
+
+                            ^{:line 1268} sys/AMD64 sys/ARM64 sys/PPC64 sys/S390X sys/RISCV64 sys/Loong64 sys/MIPS64)
+                          (alias "math/bits" "Add" "math/bits" "Add64" (spread p8))
+                          (alias "internal/runtime/math" "Add64" "math/bits" "Add64" (spread all))
+                          (addF "math/bits" "Sub64"
+                            ^{:go/end 1274} (fn ^{:tag (* ssa/Value)} [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args]
+                              (.newValue3 s ssa/OpSub64borrow (types/NewTuple (aget types/Types types/TUINT64) (aget types/Types types/TUINT64)) (aget args 0) (aget args 1) (aget args 2)))
+
+                            ^{:line 1275} sys/AMD64 sys/ARM64 sys/PPC64 sys/S390X sys/RISCV64 sys/Loong64 sys/MIPS64)
+                          (alias "math/bits" "Sub" "math/bits" "Sub64" (spread p8))
+                          (addF "math/bits" "Div64"
+                            ^{:go/end 1285} (fn ^{:tag (* ssa/Value)} [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args]
+                              ;; check for divide-by-zero/overflow and panic with appropriate message
+                              (let [cmpZero (.newValue2 s (.ssaOp s ir/ONE (aget types/Types types/TUINT64)) (aget types/Types types/TBOOL) (aget args 2) (.zeroVal s (aget types/Types types/TUINT64)))]
+                                (.check s cmpZero (.-Panicdivide ir/Syms))
+                                (let [cmpOverflow (.newValue2 s (.ssaOp s ir/OLT (aget types/Types types/TUINT64)) (aget types/Types types/TBOOL) (aget args 0) (aget args 2))]
+                                  (.check s cmpOverflow (.-Panicoverflow ir/Syms))
+                                  (.newValue3 s ssa/OpDiv128u (types/NewTuple (aget types/Types types/TUINT64) (aget types/Types types/TUINT64)) (aget args 0) (aget args 1) (aget args 2)))))
+
+                            ^{:line 1286} sys/AMD64)
+                          (alias "math/bits" "Div" "math/bits" "Div64" sys/ArchAMD64)
+
+                          (alias "internal/runtime/sys" "TrailingZeros8" "math/bits" "TrailingZeros8" (spread all))
+                          (alias "internal/runtime/sys" "TrailingZeros32" "math/bits" "TrailingZeros32" (spread all))
+                          (alias "internal/runtime/sys" "TrailingZeros64" "math/bits" "TrailingZeros64" (spread all))
+                          (alias "internal/runtime/sys" "Len8" "math/bits" "Len8" (spread all))
+                          (alias "internal/runtime/sys" "Len64" "math/bits" "Len64" (spread all))
+                          (alias "internal/runtime/sys" "OnesCount64" "math/bits" "OnesCount64" (spread all))
+
+                          ;; /******** sync/atomic ********/
+
+                          ;; Note: these are disabled by flag_race in findIntrinsic below.
+                          (alias "sync/atomic" "LoadInt32" "internal/runtime/atomic" "Load" (spread all))
+                          (alias "sync/atomic" "LoadInt64" "internal/runtime/atomic" "Load64" (spread all))
+                          (alias "sync/atomic" "LoadPointer" "internal/runtime/atomic" "Loadp" (spread all))
+                          (alias "sync/atomic" "LoadUint32" "internal/runtime/atomic" "Load" (spread all))
+                          (alias "sync/atomic" "LoadUint64" "internal/runtime/atomic" "Load64" (spread all))
+                          (alias "sync/atomic" "LoadUintptr" "internal/runtime/atomic" "Load" (spread p4))
+                          (alias "sync/atomic" "LoadUintptr" "internal/runtime/atomic" "Load64" (spread p8))
+
+                          (alias "sync/atomic" "StoreInt32" "internal/runtime/atomic" "Store" (spread all))
+                          (alias "sync/atomic" "StoreInt64" "internal/runtime/atomic" "Store64" (spread all))
+                          ;; Note: not StorePointer, that needs a write barrier.  Same below for {CompareAnd}Swap.
+                          (alias "sync/atomic" "StoreUint32" "internal/runtime/atomic" "Store" (spread all))
+                          (alias "sync/atomic" "StoreUint64" "internal/runtime/atomic" "Store64" (spread all))
+                          (alias "sync/atomic" "StoreUintptr" "internal/runtime/atomic" "Store" (spread p4))
+                          (alias "sync/atomic" "StoreUintptr" "internal/runtime/atomic" "Store64" (spread p8))
+
+                          (alias "sync/atomic" "SwapInt32" "internal/runtime/atomic" "Xchg" (spread all))
+                          (alias "sync/atomic" "SwapInt64" "internal/runtime/atomic" "Xchg64" (spread all))
+                          (alias "sync/atomic" "SwapUint32" "internal/runtime/atomic" "Xchg" (spread all))
+                          (alias "sync/atomic" "SwapUint64" "internal/runtime/atomic" "Xchg64" (spread all))
+                          (alias "sync/atomic" "SwapUintptr" "internal/runtime/atomic" "Xchg" (spread p4))
+                          (alias "sync/atomic" "SwapUintptr" "internal/runtime/atomic" "Xchg64" (spread p8))
+
+                          (alias "sync/atomic" "CompareAndSwapInt32" "internal/runtime/atomic" "Cas" (spread all))
+                          (alias "sync/atomic" "CompareAndSwapInt64" "internal/runtime/atomic" "Cas64" (spread all))
+                          (alias "sync/atomic" "CompareAndSwapUint32" "internal/runtime/atomic" "Cas" (spread all))
+                          (alias "sync/atomic" "CompareAndSwapUint64" "internal/runtime/atomic" "Cas64" (spread all))
+                          (alias "sync/atomic" "CompareAndSwapUintptr" "internal/runtime/atomic" "Cas" (spread p4))
+                          (alias "sync/atomic" "CompareAndSwapUintptr" "internal/runtime/atomic" "Cas64" (spread p8))
+
+                          (alias "sync/atomic" "AddInt32" "internal/runtime/atomic" "Xadd" (spread all))
+                          (alias "sync/atomic" "AddInt64" "internal/runtime/atomic" "Xadd64" (spread all))
+                          (alias "sync/atomic" "AddUint32" "internal/runtime/atomic" "Xadd" (spread all))
+                          (alias "sync/atomic" "AddUint64" "internal/runtime/atomic" "Xadd64" (spread all))
+                          (alias "sync/atomic" "AddUintptr" "internal/runtime/atomic" "Xadd" (spread p4))
+                          (alias "sync/atomic" "AddUintptr" "internal/runtime/atomic" "Xadd64" (spread p8))
+
+                          (alias "sync/atomic" "AndInt32" "internal/runtime/atomic" "And32" sys/ArchARM64 sys/ArchAMD64 sys/ArchLoong64)
+                          (alias "sync/atomic" "AndUint32" "internal/runtime/atomic" "And32" sys/ArchARM64 sys/ArchAMD64 sys/ArchLoong64)
+                          (alias "sync/atomic" "AndInt64" "internal/runtime/atomic" "And64" sys/ArchARM64 sys/ArchAMD64 sys/ArchLoong64)
+                          (alias "sync/atomic" "AndUint64" "internal/runtime/atomic" "And64" sys/ArchARM64 sys/ArchAMD64 sys/ArchLoong64)
+                          (alias "sync/atomic" "AndUintptr" "internal/runtime/atomic" "And64" sys/ArchARM64 sys/ArchAMD64 sys/ArchLoong64)
+                          (alias "sync/atomic" "OrInt32" "internal/runtime/atomic" "Or32" sys/ArchARM64 sys/ArchAMD64 sys/ArchLoong64)
+                          (alias "sync/atomic" "OrUint32" "internal/runtime/atomic" "Or32" sys/ArchARM64 sys/ArchAMD64 sys/ArchLoong64)
+                          (alias "sync/atomic" "OrInt64" "internal/runtime/atomic" "Or64" sys/ArchARM64 sys/ArchAMD64 sys/ArchLoong64)
+                          (alias "sync/atomic" "OrUint64" "internal/runtime/atomic" "Or64" sys/ArchARM64 sys/ArchAMD64 sys/ArchLoong64)
+                          (alias "sync/atomic" "OrUintptr" "internal/runtime/atomic" "Or64" sys/ArchARM64 sys/ArchAMD64 sys/ArchLoong64)
+
+                          ;; /******** math/big ********/
+                          (alias "math/big" "mulWW" "math/bits" "Mul64" (spread p8))
+
+                          ;; /******** internal/runtime/maps ********/
+
+                          ;; Important: The intrinsic implementations below return a packed
+                          ;; bitset, while the portable Go implementation uses an unpacked
+                          ;; representation (one bit set in each byte).
+                          ;;
+                          ;; Thus we must replace most bitset methods with implementations that
+                          ;; work with the packed representation.
+                          ;;
+                          ;; TODO(prattmic): The bitset implementations don't use SIMD, so they
+                          ;; could be handled with build tags (though that would break
+                          ;; -d=ssa/intrinsics/off=1).
+
+                          ;; With a packed representation we no longer need to shift the result
+                          ;; of TrailingZeros64.
+                          (alias "internal/runtime/maps" "bitsetFirst" "internal/runtime/sys" "TrailingZeros64" sys/ArchAMD64)
+
+                          (addF "internal/runtime/maps" "bitsetRemoveBelow"
+                            ^{:go/end 1383} (fn ^{:tag (* ssa/Value)} [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args]
+                              (let [b (aget args 0)
+                                  ^{:line 1370} i (aget args 1)
+
+                                  ;; Clear the lower i bits in b.
+                                  ;;
+                                  ;; out = b &^ ((1 << i) - 1)
+
+                                  ^{:line 1376} one (.constInt64 s (aget types/Types types/TUINT64) 1)
+
+                                  ^{:line 1378} mask (.newValue2 s ssa/OpLsh8x8 (aget types/Types types/TUINT64) one i)]
+                                (set! mask (.newValue2 s ssa/OpSub64 (aget types/Types types/TUINT64) mask one))
+                                (set! mask (.newValue1 s ssa/OpCom64 (aget types/Types types/TUINT64) mask))
+
+                                (.newValue2 s ssa/OpAnd64 (aget types/Types types/TUINT64) b mask)))
+
+                            ^{:line 1384} sys/AMD64)
+
+                          (addF "internal/runtime/maps" "bitsetLowestSet"
+                            ^{:go/end 1397} (fn ^{:tag (* ssa/Value)} [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args]
+                              (let [b (aget args 0)
+
+                                  ;; Test the lowest bit in b.
+                                  ;;
+                                  ;; out = (b & 1) == 1
+
+                                  ^{:line 1394} one (.constInt64 s (aget types/Types types/TUINT64) 1)
+                                  ^{:line 1395} and (.newValue2 s ssa/OpAnd64 (aget types/Types types/TUINT64) b one)]
+                                (.newValue2 s ssa/OpEq64 (aget types/Types types/TBOOL) and one)))
+
+                            ^{:line 1398} sys/AMD64)
+
+                          (addF "internal/runtime/maps" "bitsetShiftOutLowest"
+                            ^{:go/end 1410} (fn ^{:tag (* ssa/Value)} [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args]
+                              (let [b (aget args 0)
+
+                                  ;; Right shift out the lowest bit in b.
+                                  ;;
+                                  ;; out = b >> 1
+
+                                  ^{:line 1408} one (.constInt64 s (aget types/Types types/TUINT64) 1)]
+                                (.newValue2 s ssa/OpRsh64Ux64 (aget types/Types types/TUINT64) b one)))
+
+                            ^{:line 1411} sys/AMD64)
+
+                          (addF "internal/runtime/maps" "ctrlGroupMatchH2"
+                            ^{:go/end 1482} (fn ^{:tag (* ssa/Value)} [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args]
+                              (let [g (aget args 0)
+                                  ^{:line 1416} h (aget args 1)
+
+                                  ;; Explicit copies to fp registers. See
+                                  ;; https://go.dev/issue/70451.
+                                  ^{:line 1420} gfp (.newValue1 s ssa/OpAMD64MOVQi2f types/TypeInt128 g)
+                                  ^{:line 1421} hfp (.newValue1 s ssa/OpAMD64MOVQi2f types/TypeInt128 h)
+
+                                  ;; Broadcast h2 into each byte of a word.
+                                  ^{:line 1424 :tag (* ssa/Value)} broadcast (zero (* ssa/Value))]
+                                (cond (>= buildcfg/GOAMD64 4)
+                                  ;; VPBROADCASTB saves 1 instruction vs PSHUFB
+                                  ;; because the input can come from a GP
+                                  ;; register, while PSHUFB requires moving into
+                                  ;; an FP register first.
+                                  ;;
+                                  ;; Nominally PSHUFB would require a second
+                                  ;; additional instruction to load the control
+                                  ;; mask into a FP register. But broadcast uses
+                                  ;; a control mask of 0, and the register ABI
+                                  ;; already defines X15 as a zero register.
+                                  (set! broadcast (.newValue1 s ssa/OpAMD64VPBROADCASTB types/TypeInt128 h)) ; use gp copy of h
+                                  (>= buildcfg/GOAMD64 2)
+                                  ;; PSHUFB performs a byte broadcast when given
+                                  ;; a control input of 0.
+                                  (set! broadcast (.newValue1 s ssa/OpAMD64PSHUFBbroadcast types/TypeInt128 hfp)) :else
+
+                                  ;; No direct byte broadcast. First we must
+                                  ;; duplicate the lower byte and then do a
+                                  ;; 16-bit broadcast.
+
+                                  ;; "Unpack" h2 with itself. This duplicates the
+                                  ;; input, resulting in h2 in the lower two
+                                  ;; bytes.
+                                  (let [unpack (.newValue2 s ssa/OpAMD64PUNPCKLBW types/TypeInt128 hfp hfp)]
+
+                                    ;; Copy the lower 16-bits of unpack into every
+                                    ;; 16-bit slot in the lower 64-bits of the
+                                    ;; output register. Note that immediate 0
+                                    ;; selects the low word as the source for every
+                                    ;; destination slot.
+                                    (set! broadcast (.newValue1I s ssa/OpAMD64PSHUFLW types/TypeInt128 0 unpack))))
+
+                                ;; No need to broadcast into the upper 64-bits,
+                                ;; as we don't use those.
+
+
+                                ;; Compare each byte of the control word with h2. Each
+                                ;; matching byte has every bit set.
+                                (let [eq (.newValue2 s ssa/OpAMD64PCMPEQB types/TypeInt128 broadcast gfp)
+
+                                    ;; Construct a "byte mask": each output bit is equal to
+                                    ;; the sign bit each input byte.
+                                    ;;
+                                    ;; This results in a packed output (bit N set means
+                                    ;; byte N matched).
+                                    ;;
+                                    ;; NOTE: See comment above on bitsetFirst.
+                                    ^{:line 1473} out (.newValue1 s ssa/OpAMD64PMOVMSKB (aget types/Types types/TUINT8) eq)
+
+                                    ;; g is only 64-bits so the upper 64-bits of the
+                                    ;; 128-bit register will be zero. If h2 is also zero,
+                                    ;; then we'll get matches on those bytes. Truncate the
+                                    ;; upper bits to ignore such matches.
+                                    ^{:line 1479} ret (.newValue1 s ssa/OpZeroExt8to64 (aget types/Types types/TUINT64) out)]
+
+                                  ^{:line 1481} ret)))
+
+                            ^{:line 1483} sys/AMD64)
+
+                          (addF "internal/runtime/maps" "ctrlGroupMatchEmpty"
+                            ^{:go/end 1571} (fn ^{:tag (* ssa/Value)} [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args]
+                              ;; An empty slot is   1000 0000
+                              ;; A deleted slot is  1111 1110
+                              ;; A full slot is     0??? ????
+
+                              (let [g (aget args 0)
+
+                                  ;; Explicit copy to fp register. See
+                                  ;; https://go.dev/issue/70451.
+                                  ^{:line 1495} gfp (.newValue1 s ssa/OpAMD64MOVQi2f types/TypeInt128 g)]
+
+                                (when (>= buildcfg/GOAMD64 2)
+                                  ;; "PSIGNB negates each data element of the
+                                  ;; destination operand (the first operand) if
+                                  ;; the signed integer value of the
+                                  ;; corresponding data element in the source
+                                  ;; operand (the second operand) is less than
+                                  ;; zero. If the signed integer value of a data
+                                  ;; element in the source operand is positive,
+                                  ;; the corresponding data element in the
+                                  ;; destination operand is unchanged. If a data
+                                  ;; element in the source operand is zero, the
+                                  ;; corresponding data element in the
+                                  ;; destination operand is set to zero" - Intel SDM
+                                  ;;
+                                  ;; If we pass the group control word as both
+                                  ;; arguments:
+                                  ;; - Full slots are unchanged.
+                                  ;; - Deleted slots are negated, becoming
+                                  ;;   0000 0010.
+                                  ;; - Empty slots are negated, becoming
+                                  ;;   1000 0000 (unchanged!).
+                                  ;;
+                                  ;; The result is that only empty slots have the
+                                  ;; sign bit set. We then use PMOVMSKB to
+                                  ;; extract the sign bits.
+                                  (let [sign (.newValue2 s ssa/OpAMD64PSIGNB types/TypeInt128 gfp gfp)
+
+                                      ;; Construct a "byte mask": each output bit is
+                                      ;; equal to the sign bit each input byte. The
+                                      ;; sign bit is only set for empty or deleted
+                                      ;; slots.
+                                      ;;
+                                      ;; This results in a packed output (bit N set
+                                      ;; means byte N matched).
+                                      ;;
+                                      ;; NOTE: See comment above on bitsetFirst.
+                                      ^{:line 1533} ret (.newValue1 s ssa/OpAMD64PMOVMSKB (aget types/Types types/TUINT64) sign)]
+
+                                    ;; g is only 64-bits so the upper 64-bits of
+                                    ;; the 128-bit register will be zero. PSIGNB
+                                    ;; will keep all of these bytes zero, so no
+                                    ;; need to truncate.
+
+                                    (return ret)))
+
+
+                                ;; No PSIGNB, simply do byte equality with ctrlEmpty.
+
+                                ;; Load ctrlEmpty into each byte of a control word.
+                                (let [^uint64 ctrlsEmpty abi/MapCtrlEmpty
+                                    ^{:line 1547} e (.constInt64 s (aget types/Types types/TUINT64) (conv int64 ctrlsEmpty))
+                                    ;; Explicit copy to fp register. See
+                                    ;; https://go.dev/issue/70451.
+                                    ^{:line 1550} efp (.newValue1 s ssa/OpAMD64MOVQi2f types/TypeInt128 e)
+
+                                    ;; Compare each byte of the control word with ctrlEmpty. Each
+                                    ;; matching byte has every bit set.
+                                    ^{:line 1554} eq (.newValue2 s ssa/OpAMD64PCMPEQB types/TypeInt128 efp gfp)
+
+                                    ;; Construct a "byte mask": each output bit is equal to
+                                    ;; the sign bit each input byte.
+                                    ;;
+                                    ;; This results in a packed output (bit N set means
+                                    ;; byte N matched).
+                                    ;;
+                                    ;; NOTE: See comment above on bitsetFirst.
+                                    ^{:line 1563} out (.newValue1 s ssa/OpAMD64PMOVMSKB (aget types/Types types/TUINT8) eq)]
+
+                                  ;; g is only 64-bits so the upper 64-bits of the
+                                  ;; 128-bit register will be zero. The upper 64-bits of
+                                  ;; efp are also zero, so we'll get matches on those
+                                  ;; bytes. Truncate the upper bits to ignore such
+                                  ;; matches.
+                                  (.newValue1 s ssa/OpZeroExt8to64 (aget types/Types types/TUINT64) out))))
+
+                            ^{:line 1572} sys/AMD64)
+
+                          (addF "internal/runtime/maps" "ctrlGroupMatchEmptyOrDeleted"
+                            ^{:go/end 1604} (fn ^{:tag (* ssa/Value)} [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args]
+                              ;; An empty slot is   1000 0000
+                              ;; A deleted slot is  1111 1110
+                              ;; A full slot is     0??? ????
+                              ;;
+                              ;; A slot is empty or deleted iff bit 7 (sign bit) is
+                              ;; set.
+
+                              (let [g (aget args 0)
+
+                                  ;; Explicit copy to fp register. See
+                                  ;; https://go.dev/issue/70451.
+                                  ^{:line 1587} gfp (.newValue1 s ssa/OpAMD64MOVQi2f types/TypeInt128 g)
+
+                                  ;; Construct a "byte mask": each output bit is equal to
+                                  ;; the sign bit each input byte. The sign bit is only
+                                  ;; set for empty or deleted slots.
+                                  ;;
+                                  ;; This results in a packed output (bit N set means
+                                  ;; byte N matched).
+                                  ;;
+                                  ;; NOTE: See comment above on bitsetFirst.
+                                  ^{:line 1597} ret (.newValue1 s ssa/OpAMD64PMOVMSKB (aget types/Types types/TUINT64) gfp)]
+
+                                ;; g is only 64-bits so the upper 64-bits of the
+                                ;; 128-bit register will be zero. Zero will never match
+                                ;; ctrlEmpty or ctrlDeleted, so no need to truncate.
+
+                                ^{:line 1603} ret))
+
+                            ^{:line 1605} sys/AMD64)
+
+                          (addF "internal/runtime/maps" "ctrlGroupMatchFull"
+                            ^{:go/end 1638} (fn ^{:tag (* ssa/Value)} [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args]
+                              ;; An empty slot is   1000 0000
+                              ;; A deleted slot is  1111 1110
+                              ;; A full slot is     0??? ????
+                              ;;
+                              ;; A slot is full iff bit 7 (sign bit) is unset.
+
+                              (let [g (aget args 0)
+
+                                  ;; Explicit copy to fp register. See
+                                  ;; https://go.dev/issue/70451.
+                                  ^{:line 1619} gfp (.newValue1 s ssa/OpAMD64MOVQi2f types/TypeInt128 g)
+
+                                  ;; Construct a "byte mask": each output bit is equal to
+                                  ;; the sign bit each input byte. The sign bit is only
+                                  ;; set for empty or deleted slots.
+                                  ;;
+                                  ;; This results in a packed output (bit N set means
+                                  ;; byte N matched).
+                                  ;;
+                                  ;; NOTE: See comment above on bitsetFirst.
+                                  ^{:line 1629} mask (.newValue1 s ssa/OpAMD64PMOVMSKB (aget types/Types types/TUINT8) gfp)
+
+                                  ;; Invert the mask to set the bits for the full slots.
+                                  ^{:line 1632} out (.newValue1 s ssa/OpCom8 (aget types/Types types/TUINT8) mask)]
+
+                                ;; g is only 64-bits so the upper 64-bits of the
+                                ;; 128-bit register will be zero, with bit 7 unset.
+                                ;; Truncate the upper bits to ignore these.
+                                (.newValue1 s ssa/OpZeroExt8to64 (aget types/Types types/TUINT64) out)))
+
+                            ^{:line 1639} sys/AMD64)
+
+                          ;; /******** crypto/internal/constanttime ********/
+                          ;; We implement a superset of the Select promise:
+                          ;; Select returns x if v != 0 and y if v == 0.
+                          (let [hasCMOV (lit (slice (* sys/Arch)) sys/ArchAMD64 sys/ArchARM64 sys/ArchLoong64 sys/ArchPPC64 sys/ArchPPC64LE sys/ArchWasm)]
+                            (when (>= (.-goriscv64 cfg) 23)
+                              (set! hasCMOV (append hasCMOV sys/ArchRISCV64)))
+
+                            (add "crypto/internal/constanttime" "Select"
+                              ^{:go/end 1667} (fn ^{:tag (* ssa/Value)} [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args]
+                                (let [(values v x y) (values (aget args 0) (aget args 1) (aget args 2))
+
+                                    ^{:line 1652 :tag ssa/Op} checkOp (zero ssa/Op)
+                                    ^{:line 1653 :tag (* ssa/Value)} zero (zero (* ssa/Value))]
+                                  (switch (.-PtrSize (.-config s))
+                                    (case [8]
+                                      (set! checkOp ssa/OpNeq64)
+                                      (set! zero (.constInt64 s (aget types/Types types/TINT) 0)))
+                                    (case [4]
+                                      (set! checkOp ssa/OpNeq32)
+                                      (set! zero (.constInt32 s (aget types/Types types/TINT) 0)))
+                                    (default
+                                      (panic "unreachable")))
+
+                                  (let [check (.newValue2 s checkOp (aget types/Types types/TBOOL) zero v)]
+
+                                    (.newValue3 s ssa/OpCondSelect (aget types/Types types/TINT) x y check))))
+                              (spread hasCMOV)) ; all with CMOV support.
+                            (add "crypto/internal/constanttime" "boolToUint8"
+                              ^{:go/end 1671} (fn ^{:tag (* ssa/Value)} [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args]
+                                (.newValue1 s ssa/OpCvtBoolToUint8 (aget types/Types types/TUINT8) (aget args 0)))
+
+                              (spread all))
+
+                            (when ^{:go/via [Flags]} (.-SIMD buildcfg/Experiment)
+                              ;; Only enable intrinsics, if SIMD experiment.
+                              (simdAMD64Intrinsics addF)
+                              (simdARM64Intrinsics addF)
+                              (initWasmSIMD)
+
+                              (addF simdPackage "ClearAVXUpperBits"
+                                ^{:go/breaks [3] :go/end 1684} (fn ^{:tag (* ssa/Value)} [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args]
+                                  (aset (.-vars s) memVar (.newValue1 s ssa/OpAMD64VZEROUPPER types/TypeMem (.mem s)))
+                                  nil)
+
+                                ^{:line 1685} sys/AMD64)
+
+                              (addF simdPackage "Int8x16.IsZero" (opLen1 ssa/OpIsZeroVec (aget types/Types types/TBOOL)) sys/AMD64)
+                              (addF simdPackage "Int16x8.IsZero" (opLen1 ssa/OpIsZeroVec (aget types/Types types/TBOOL)) sys/AMD64)
+                              (addF simdPackage "Int32x4.IsZero" (opLen1 ssa/OpIsZeroVec (aget types/Types types/TBOOL)) sys/AMD64)
+                              (addF simdPackage "Int64x2.IsZero" (opLen1 ssa/OpIsZeroVec (aget types/Types types/TBOOL)) sys/AMD64)
+                              (addF simdPackage "Uint8x16.IsZero" (opLen1 ssa/OpIsZeroVec (aget types/Types types/TBOOL)) sys/AMD64)
+                              (addF simdPackage "Uint16x8.IsZero" (opLen1 ssa/OpIsZeroVec (aget types/Types types/TBOOL)) sys/AMD64)
+                              (addF simdPackage "Uint32x4.IsZero" (opLen1 ssa/OpIsZeroVec (aget types/Types types/TBOOL)) sys/AMD64)
+                              (addF simdPackage "Uint64x2.IsZero" (opLen1 ssa/OpIsZeroVec (aget types/Types types/TBOOL)) sys/AMD64)
+                              (addF simdPackage "Int8x32.IsZero" (opLen1 ssa/OpIsZeroVec (aget types/Types types/TBOOL)) sys/AMD64)
+                              (addF simdPackage "Int16x16.IsZero" (opLen1 ssa/OpIsZeroVec (aget types/Types types/TBOOL)) sys/AMD64)
+                              (addF simdPackage "Int32x8.IsZero" (opLen1 ssa/OpIsZeroVec (aget types/Types types/TBOOL)) sys/AMD64)
+                              (addF simdPackage "Int64x4.IsZero" (opLen1 ssa/OpIsZeroVec (aget types/Types types/TBOOL)) sys/AMD64)
+                              (addF simdPackage "Uint8x32.IsZero" (opLen1 ssa/OpIsZeroVec (aget types/Types types/TBOOL)) sys/AMD64)
+                              (addF simdPackage "Uint16x16.IsZero" (opLen1 ssa/OpIsZeroVec (aget types/Types types/TBOOL)) sys/AMD64)
+                              (addF simdPackage "Uint32x8.IsZero" (opLen1 ssa/OpIsZeroVec (aget types/Types types/TBOOL)) sys/AMD64)
+                              (addF simdPackage "Uint64x4.IsZero" (opLen1 ssa/OpIsZeroVec (aget types/Types types/TBOOL)) sys/AMD64)
+                              (addF simdPackage "Float32x4.IsNaN" (opLen1 ssa/OpIsNaNFloat32x4 types/TypeVec128) sys/AMD64)
+                              (addF simdPackage "Float32x8.IsNaN" (opLen1 ssa/OpIsNaNFloat32x8 types/TypeVec256) sys/AMD64)
+                              (addF simdPackage "Float32x16.IsNaN" (opLen1 ssa/OpIsNaNFloat32x16 types/TypeVec512) sys/AMD64)
+                              (addF simdPackage "Float64x2.IsNaN" (opLen1 ssa/OpIsNaNFloat64x2 types/TypeVec128) sys/AMD64)
+                              (addF simdPackage "Float64x4.IsNaN" (opLen1 ssa/OpIsNaNFloat64x4 types/TypeVec256) sys/AMD64)
+                              (addF simdPackage "Float64x8.IsNaN" (opLen1 ssa/OpIsNaNFloat64x8 types/TypeVec512) sys/AMD64)
+
+                              ;; sfp4 is intrinsic-if-constant, but otherwise it's complicated enough to just implement in Go.
+                              (let [sfp4 ^{:go/end 1724} (fn [^string method ^ssa/Op hwop ^{:tag (* types/Type)} vectype]
+                                    (addF simdPackage method
+                                      ^{:go/end 1722} (fn ^{:tag (* ssa/Value)} [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args]
+                                        (let [(values x a b c d y) (values (aget args 0) (aget args 1) (aget args 2) (aget args 3) (aget args 4) (aget args 5))]
+                                          (when (and (== (.-Op a) ssa/OpConst8) (== (.-Op b) ssa/OpConst8) (== (.-Op c) ssa/OpConst8) (== (.-Op d) ssa/OpConst8))
+                                            (let [z (select4FromPair x a b c d y s hwop vectype)]
+                                              (when (!= z nil)
+                                                (return z))))
+
+
+                                          (.callResult s n callNormal)))
+
+                                      ^{:line 1723} sys/AMD64))]
+
+
+                                (sfp4 "Int32x4.ConcatPermuteScalars" ssa/OpconcatSelectedConstantInt32x4 types/TypeVec128)
+                                (sfp4 "Uint32x4.ConcatPermuteScalars" ssa/OpconcatSelectedConstantUint32x4 types/TypeVec128)
+                                (sfp4 "Float32x4.ConcatPermuteScalars" ssa/OpconcatSelectedConstantFloat32x4 types/TypeVec128)
+
+                                (sfp4 "Int32x8.ConcatPermuteScalarsGrouped" ssa/OpconcatSelectedConstantGroupedInt32x8 types/TypeVec256)
+                                (sfp4 "Uint32x8.ConcatPermuteScalarsGrouped" ssa/OpconcatSelectedConstantGroupedUint32x8 types/TypeVec256)
+                                (sfp4 "Float32x8.ConcatPermuteScalarsGrouped" ssa/OpconcatSelectedConstantGroupedFloat32x8 types/TypeVec256)
+
+                                (sfp4 "Int32x16.ConcatPermuteScalarsGrouped" ssa/OpconcatSelectedConstantGroupedInt32x16 types/TypeVec512)
+                                (sfp4 "Uint32x16.ConcatPermuteScalarsGrouped" ssa/OpconcatSelectedConstantGroupedUint32x16 types/TypeVec512)
+                                (sfp4 "Float32x16.ConcatPermuteScalarsGrouped" ssa/OpconcatSelectedConstantGroupedFloat32x16 types/TypeVec512)
+
+                                ;; sfp2 is intrinsic-if-constant, but otherwise it's complicated enough to just implement in Go.
+                                (let [sfp2 ^{:go/end 1752} (fn [^string method ^ssa/Op hwop ^{:tag (* types/Type)} vectype ^{:tag (func [^uint8 i ^uint8 j] [int64])} cscimm]
+                                      (addF simdPackage method
+                                        ^{:go/end 1750} (fn ^{:tag (* ssa/Value)} [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args]
+                                          (let [(values x a b y) (values (aget args 0) (aget args 1) (aget args 2) (aget args 3))]
+                                            (when (and (== (.-Op a) ssa/OpConst8) (== (.-Op b) ssa/OpConst8))
+                                              (let [z (select2FromPair x a b y s hwop vectype cscimm)]
+                                                (when (!= z nil)
+                                                  (return z))))
+
+
+                                            (.callResult s n callNormal)))
+
+                                        ^{:line 1751} sys/AMD64))]
+
+
+                                  (sfp2 "Uint64x2.ConcatPermuteScalars" ssa/OpconcatSelectedConstantUint64x2 types/TypeVec128 cscimm2)
+                                  (sfp2 "Int64x2.ConcatPermuteScalars" ssa/OpconcatSelectedConstantInt64x2 types/TypeVec128 cscimm2)
+                                  (sfp2 "Float64x2.ConcatPermuteScalars" ssa/OpconcatSelectedConstantFloat64x2 types/TypeVec128 cscimm2)
+
+                                  (sfp2 "Uint64x4.ConcatPermuteScalarsGrouped" ssa/OpconcatSelectedConstantGroupedUint64x4 types/TypeVec256 cscimm2g2)
+                                  (sfp2 "Int64x4.ConcatPermuteScalarsGrouped" ssa/OpconcatSelectedConstantGroupedInt64x4 types/TypeVec256 cscimm2g2)
+                                  (sfp2 "Float64x4.ConcatPermuteScalarsGrouped" ssa/OpconcatSelectedConstantGroupedFloat64x4 types/TypeVec256 cscimm2g2)
+
+                                  (sfp2 "Uint64x8.ConcatPermuteScalarsGrouped" ssa/OpconcatSelectedConstantGroupedUint64x8 types/TypeVec512 cscimm2g4)
+                                  (sfp2 "Int64x8.ConcatPermuteScalarsGrouped" ssa/OpconcatSelectedConstantGroupedInt64x8 types/TypeVec512 cscimm2g4)
+                                  (sfp2 "Float64x8.ConcatPermuteScalarsGrouped" ssa/OpconcatSelectedConstantGroupedFloat64x8 types/TypeVec512 cscimm2g4))))))))))))))))))
+
+
+
+
+(go/const ^{:val "simd/archsimd"} simdPackage "simd/archsimd")
+
+^{:go/end 1773} (go/func cscimm4 ^int64 [^uint8 a ^uint8 b ^uint8 c ^uint8 d]
+  (se (+ a (<< b 2) (<< c 4) (<< d 6))))
+
+
+^{:go/end 1777} (go/func cscimm2 ^int64 [^uint8 a ^uint8 b]
+  (se (+ a (<< b 1))))
+
+
+^{:go/end 1782} (go/func cscimm2g2 ^int64 [^uint8 a ^uint8 b]
+  (let [g (cscimm2 a b)]
+    (conv int64 (conv int8 (+ g (<< g 2))))))
+
+
+^{:go/end 1787} (go/func cscimm2g4 ^int64 [^uint8 a ^uint8 b]
+  (let [g (cscimm2g2 a b)]
+    (conv int64 (conv int8 (+ g (<< g 4))))))
+
+
+(go/const
+  ^{:line 1790} [^{:val 0} _LLLL iota]
+  ^{:line 1791} [^{:val 1} _HLLL]
+  ^{:line 1792} [^{:val 2} _LHLL]
+  ^{:line 1793} [^{:val 3} _HHLL]
+  ^{:line 1794} [^{:val 4} _LLHL]
+  ^{:line 1795} [^{:val 5} _HLHL]
+  ^{:line 1796} [^{:val 6} _LHHL]
+  ^{:line 1797} [^{:val 7} _HHHL]
+  ^{:line 1798} [^{:val 8} _LLLH]
+  ^{:line 1799} [^{:val 9} _HLLH]
+  ^{:line 1800} [^{:val 10} _LHLH]
+  ^{:line 1801} [^{:val 11} _HHLH]
+  ^{:line 1802} [^{:val 12} _LLHH]
+  ^{:line 1803} [^{:val 13} _HLHH]
+  ^{:line 1804} [^{:val 14} _LHHH]
+  ^{:line 1805} [^{:val 15} _HHHH])
+
+
+(go/const
+  ^{:line 1809} [^{:val 0} _LL iota]
+  ^{:line 1810} [^{:val 1} _HL]
+  ^{:line 1811} [^{:val 2} _LH]
+  ^{:line 1812} [^{:val 3} _HH])
+
+
+^{:go/end 1834} (go/func select2FromPair ^{:tag (* ssa/Value)} [^{:tag (* ssa/Value)} x ^{:tag (* ssa/Value)} _a ^{:tag (* ssa/Value)} _b ^{:tag (* ssa/Value)} y ^{:tag (* state)} s ^ssa/Op op ^{:tag (* types/Type)} t ^{:tag (func [^uint8 a ^uint8 b] [int64])} csc]
+  (let [(values a b) (values (conv uint8 (.AuxInt8 _a)) (conv uint8 (.AuxInt8 _b)))]
+    (when (or (> a 3) (> b 3))
+      (return nil))
+
+    (let [pattern (+ (>> (bit-and a 2) 1) (bit-and b 2))]
+      (set! (values a b) (values (bit-and a 1) (bit-and b 1)))
+
+      (switch pattern
+        (case [_LL]
+          (return (.newValue2I s op t (csc a b) x x)))
+        (case [_HH]
+          (return (.newValue2I s op t (csc a b) y y)))
+        (case [_LH]
+          (return (.newValue2I s op t (csc a b) x y)))
+        (case [_HL]
+          (return (.newValue2I s op t (csc a b) y x))))
+
+      (panic "The preceding switch should have been exhaustive"))))
+
+
+^{:go/end 1899} (go/func select4FromPair ^{:tag (* ssa/Value)} [^{:tag (* ssa/Value)} x ^{:tag (* ssa/Value)} _a ^{:tag (* ssa/Value)} _b ^{:tag (* ssa/Value)} _c ^{:tag (* ssa/Value)} _d ^{:tag (* ssa/Value)} y ^{:tag (* state)} s ^ssa/Op op ^{:tag (* types/Type)} t]
+  (let [(values a b c d) (values (conv uint8 (.AuxInt8 _a)) (conv uint8 (.AuxInt8 _b)) (conv uint8 (.AuxInt8 _c)) (conv uint8 (.AuxInt8 _d)))]
+    (when (or (> a 7) (> b 7) (> c 7) (> d 7))
+      (return nil))
+
+    (let [pattern (+ (>> a 2) (>> (bit-and b 4) 1) (bit-and c 4) (<< (bit-and d 4) 1))]
+
+      (set! (values a b c d) (values (bit-and a 3) (bit-and b 3) (bit-and c 3) (bit-and d 3)))
+
+      (switch pattern
+        (case [_LLLL]
+          ;; TODO DETECT 0,1,2,3, 0,0,0,0
+          (return (.newValue2I s op t (cscimm4 a b c d) x x)))
+        (case [_HHHH]
+          ;; TODO DETECT 0,1,2,3, 0,0,0,0
+          (return (.newValue2I s op t (cscimm4 a b c d) y y)))
+        (case [_LLHH]
+          (return (.newValue2I s op t (cscimm4 a b c d) x y)))
+        (case [_HHLL]
+          (return (.newValue2I s op t (cscimm4 a b c d) y x)))
+
+        (case [_HLLL]
+          (let [z (.newValue2I s op t (cscimm4 a a b b) y x)]
+            (return (.newValue2I s op t (cscimm4 0 2 c d) z x))))
+        (case [_LHLL]
+          (let [z (.newValue2I s op t (cscimm4 a a b b) x y)]
+            (return (.newValue2I s op t (cscimm4 0 2 c d) z x))))
+        (case [_HLHH]
+          (let [z (.newValue2I s op t (cscimm4 a a b b) y x)]
+            (return (.newValue2I s op t (cscimm4 0 2 c d) z y))))
+        (case [_LHHH]
+          (let [z (.newValue2I s op t (cscimm4 a a b b) x y)]
+            (return (.newValue2I s op t (cscimm4 0 2 c d) z y))))
+
+        (case [_LLLH]
+          (let [z (.newValue2I s op t (cscimm4 c c d d) x y)]
+            (return (.newValue2I s op t (cscimm4 a b 0 2) x z))))
+        (case [_LLHL]
+          (let [z (.newValue2I s op t (cscimm4 c c d d) y x)]
+            (return (.newValue2I s op t (cscimm4 a b 0 2) x z))))
+
+        (case [_HHLH]
+          (let [z (.newValue2I s op t (cscimm4 c c d d) x y)]
+            (return (.newValue2I s op t (cscimm4 a b 0 2) y z))))
+
+        (case [_HHHL]
+          (let [z (.newValue2I s op t (cscimm4 c c d d) y x)]
+            (return (.newValue2I s op t (cscimm4 a b 0 2) y z))))
+
+        (case [_LHLH]
+          (let [z (.newValue2I s op t (cscimm4 a c b d) x y)]
+            (return (.newValue2I s op t (se 2r11011000) z z))))
+        (case [_HLHL]
+          (let [z (.newValue2I s op t (cscimm4 b d a c) x y)]
+            (return (.newValue2I s op t (se 2r01110010) z z))))
+        (case [_HLLH]
+          (let [z (.newValue2I s op t (cscimm4 b c a d) x y)]
+            (return (.newValue2I s op t (se 2r11010010) z z))))
+        (case [_LHHL]
+          (let [z (.newValue2I s op t (cscimm4 a d b c) x y)]
+            (return (.newValue2I s op t (se 2r01111000) z z)))))
+
+      (panic "The preceding switch should have been exhaustive"))))
+
+
+
+
+^{:go/end 1905} (go/func se "se smears the not-really-a-sign bit of a uint8 to conform to the conventions\nfor representing AuxInt in ssa.\n" ^int64 [^uint8 x]
+  (conv int64 (conv int8 x)))
+
+
+^{:go/end 1911} (go/func opLen1 ^{:tag (func [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args] [(* ssa/Value)])} [^ssa/Op op ^{:tag (* types/Type)} t]
+  ^{:go/end 1910} (fn ^{:tag (* ssa/Value)} [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args]
+    (.newValue1 s op t (aget args 0))))
+
+
+
+^{:go/end 1917} (go/func opLen2 ^{:tag (func [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args] [(* ssa/Value)])} [^ssa/Op op ^{:tag (* types/Type)} t]
+  ^{:go/end 1916} (fn ^{:tag (* ssa/Value)} [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args]
+    (.newValue2 s op t (aget args 0) (aget args 1))))
+
+
+
+^{:go/end 1923} (go/func opLen2_21 ^{:tag (func [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args] [(* ssa/Value)])} [^ssa/Op op ^{:tag (* types/Type)} t]
+  ^{:go/end 1922} (fn ^{:tag (* ssa/Value)} [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args]
+    (.newValue2 s op t (aget args 1) (aget args 0))))
+
+
+
+^{:go/end 1929} (go/func opLen3 ^{:tag (func [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args] [(* ssa/Value)])} [^ssa/Op op ^{:tag (* types/Type)} t]
+  ^{:go/end 1928} (fn ^{:tag (* ssa/Value)} [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args]
+    (.newValue3 s op t (aget args 0) (aget args 1) (aget args 2))))
+
+
+
+(go/var ssaVecBySize (lit (map int64 (* types/Type))
+    ^{:line 1932} [16 types/TypeVec128]
+    ^{:line 1933} [32 types/TypeVec256]
+    ^{:line 1934} [64 types/TypeVec512]))
+
+
+^{:go/end 1945} (go/func opLen3_31Zero3 ^{:tag (func [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args] [(* ssa/Value)])} [^ssa/Op op ^{:tag (* types/Type)} t]
+  ^{:go/end 1944} (fn ^{:tag (* ssa/Value)} [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args]
+    (if [(values t ok) (aget ssaVecBySize (.Size (.-Type (aget args 1))))] (not ok)
+      (panic "unknown simd vector size")
+
+      (return (.newValue3 s op t (.newValue0 s ssa/OpZeroSIMD t) (aget args 1) (aget args 0))))))
+
+
+
+
+^{:go/end 1951} (go/func opLen3_21 ^{:tag (func [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args] [(* ssa/Value)])} [^ssa/Op op ^{:tag (* types/Type)} t]
+  ^{:go/end 1950} (fn ^{:tag (* ssa/Value)} [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args]
+    (.newValue3 s op t (aget args 1) (aget args 0) (aget args 2))))
+
+
+
+^{:go/end 1957} (go/func opLen3_231 ^{:tag (func [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args] [(* ssa/Value)])} [^ssa/Op op ^{:tag (* types/Type)} t]
+  ^{:go/end 1956} (fn ^{:tag (* ssa/Value)} [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args]
+    (.newValue3 s op t (aget args 2) (aget args 0) (aget args 1))))
+
+
+
+^{:go/end 1963} (go/func opLen4 ^{:tag (func [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args] [(* ssa/Value)])} [^ssa/Op op ^{:tag (* types/Type)} t]
+  ^{:go/end 1962} (fn ^{:tag (* ssa/Value)} [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args]
+    (.newValue4 s op t (aget args 0) (aget args 1) (aget args 2) (aget args 3))))
+
+
+
+^{:go/end 1969} (go/func opLen4_231 ^{:tag (func [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args] [(* ssa/Value)])} [^ssa/Op op ^{:tag (* types/Type)} t]
+  ^{:go/end 1968} (fn ^{:tag (* ssa/Value)} [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args]
+    (.newValue4 s op t (aget args 2) (aget args 0) (aget args 1) (aget args 3))))
+
+
+
+^{:go/end 1975} (go/func opLen4_31 ^{:tag (func [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args] [(* ssa/Value)])} [^ssa/Op op ^{:tag (* types/Type)} t]
+  ^{:go/end 1974} (fn ^{:tag (* ssa/Value)} [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args]
+    (.newValue4 s op t (aget args 2) (aget args 1) (aget args 0) (aget args 3))))
+
+
+
+^{:go/end 2023} (go/func immJumpTable ^{:tag (* ssa/Value)} [^{:tag (* state)} s ^{:tag (* ssa/Value)} idx ^{:tag (* ir/CallExpr)} intrinsicCall ^{:tag (func [(* state) int])} genOp]
+  (when (and (not (.IsKind (.-Type idx) types/TUINT8)) (not (.IsKind (.-Type idx) types/TUINT64)))
+    (panic "immJumpTable expects uint8 or uint64 value"))
+
+  (when (.IsKind (.-Type idx) types/TUINT64)
+    ;; Match the constant path and keep the jump table index in range.
+    (set! idx (.conv s nil idx (.-Type idx) (aget types/Types types/TUINT8))))
+
+
+  (when (.-Retpoline base/Ctxt)
+    ;; Note spectre=all implies retpoline which requires binary search instead of table switch.
+    (return (branchTableImm8 s idx intrinsicCall genOp)))
+
+
+  ;; Make blocks we'll need.
+  (let [bEnd (.NewBlock (.-f s) ssa/BlockPlain)
+
+      ;; We will exhaust 0-255, so no need to check the bounds.
+      ^{:line 1995} t (aget types/Types types/TUINTPTR)]
+    (set! idx (.conv s nil idx (.-Type idx) t))
+
+    (let [b (.-curBlock s)]
+      (set! (.-Kind b) ssa/BlockJumpTable)
+      (set! (.-Pos b) ^{:go/via [miniExpr miniNode]} (.Pos intrinsicCall))
+
+      (.SetControl b idx)
+      (let [targets (lit (array 256 (* ssa/Block)))]
+        (range [i 256]
+          (let [t (.NewBlock (.-f s) ssa/BlockPlain)]
+            (aset targets i t)
+            (.AddEdgeTo b t)))
+
+        (.endBlock s)
+
+        (range [i t targets]
+          (.startBlock s t)
+          (genOp s i)
+          (when (!= (.-Kind t) ssa/BlockExit)
+            (.AddEdgeTo t bEnd))
+
+          (.endBlock s))
+
+
+        (.startBlock s bEnd)
+        (let [ret (.variable s intrinsicCall ^{:go/via [miniExpr]} (.Type intrinsicCall))]
+          ^{:line 2022} ret)))))
+
+
+^{:go/end 2027} (go/func branchTableImm8 ^{:tag (* ssa/Value)} [^{:tag (* state)} s ^{:tag (* ssa/Value)} idx ^{:tag (* ir/CallExpr)} intrinsicCall ^{:tag (func [(* state) int])} genOp]
+  (branchTableN s idx intrinsicCall genOp 256 true))
+
+
+^{:go/end 2067} (go/func branchTableN ^{:tag (* ssa/Value)} [^{:tag (* state)} s ^{:tag (* ssa/Value)} idx ^{:tag (* ir/CallExpr)} intrinsicCall ^{:tag (func [(* state) int])} genOp ^uint64 immLimit ^bool preChecked]
+  ;; Make blocks we'll need.
+  (let [bEnd (.NewBlock (.-f s) ssa/BlockPlain)
+      ^{:line 2032} bPanic (.NewBlock (.-f s) ssa/BlockPlain)
+
+      ^{:line 2034} jt (.NewBlock (.-f s) ssa/BlockPlain)
+
+      ^{:line 2036} t (aget types/Types types/TUINTPTR)]
+    (set! idx (.conv s nil idx (.-Type idx) t))
+
+    (when (not preChecked)
+      ;; Begin with a bounds check
+      (let [width (.uintptrConstant s immLimit)
+          ^{:line 2042} cmp (.newValue2 s (.ssaOp s ir/OLT t) (aget types/Types types/TBOOL) idx width)
+          ^{:line 2043} bb (.endBlock s)]
+        (set! (.-Kind bb) ssa/BlockIf)
+        (.SetControl bb cmp)
+        (.AddEdgeTo bb jt) ; in range - use jump table
+        (.AddEdgeTo bb bPanic) ; out of range - panic
+        (set! (.-Likely bb) ssa/BranchLikely) ; panic is unlikely
+
+        (.startBlock s bPanic)
+        (.rtcall s (.-PanicSimdImm ir/Syms) false nil)))
+
+    (when (!= (.-curBlock s) nil)
+      (let [bb (.endBlock s)]
+        (.AddEdgeTo bb jt)))
+
+
+    (.startBlock s jt)
+    (set! (.-Kind jt) ssa/BlockPlain)
+    (set! (.-Pos jt) ^{:go/via [miniExpr miniNode]} (.Pos intrinsicCall))
+
+    (branchTableNInner s idx 0 immLimit genOp bEnd)
+
+    (.startBlock s bEnd)
+    (let [ret (.variable s intrinsicCall ^{:go/via [miniExpr]} (.Type intrinsicCall))]
+      ^{:line 2066} ret)))
+
+
+^{:go/end 2098} (go/func branchTableNInner [^{:tag (* state)} s ^{:tag (* ssa/Value)} idx ^uint64 lowInclusive ^uint64 len ^{:tag (func [(* state) int])} genOp ^{:tag (* ssa/Block)} bEnd]
+  (let [t (aget types/Types types/TUINTPTR)]
+    (when (== len 0)
+      (panic "empty branch table"))
+
+    (when (== len 1)
+      (genOp s (conv int (- (+ lowInclusive len) 1)))
+      (when (!= (.-curBlock s) nil) ; if genOp was "panic" then curBlock is already ended and nil
+        (when (!= (.-Kind (.-curBlock s)) ssa/BlockExit)
+          (.AddEdgeTo (.-curBlock s) bEnd))
+
+        (.endBlock s))
+
+      (return))
+
+
+    (set! (.-Kind (.-curBlock s)) ssa/BlockIf)
+    (let [cmp (.newValue2 s (.ssaOp s ir/OLT t) (aget types/Types types/TBOOL) idx (.uintptrConstant s (+ lowInclusive (/ len 2))))
+        ^{:line 2087} bb (.endBlock s)]
+      (set! (.-Kind bb) ssa/BlockIf)
+      (.SetControl bb cmp)
+      (let [bMatch (.NewBlock (.-f s) ssa/BlockPlain)
+          ^{:line 2091} bNext (.NewBlock (.-f s) ssa/BlockPlain)]
+        (.AddEdgeTo bb bMatch)
+        (.AddEdgeTo bb bNext)
+        (.startBlock s bMatch)
+        (branchTableNInner s idx lowInclusive (/ len 2) genOp bEnd)
+        (.startBlock s bNext)
+        (branchTableNInner s idx (+ lowInclusive (/ len 2)) (- len (/ len 2)) genOp bEnd)))))
+
+
+
+
+^{:go/end 2163} (go/func immJumpTableN "immJumpTableN emits a jump table to one of a number of indexed cases, from zero to n-1.\nan index of n or larger will panic\n" ^{:tag (* ssa/Value)} [^{:tag (* state)} s ^{:tag (* ssa/Value)} idx ^{:tag (* ir/CallExpr)} intrinsicCall ^uint64 immLimit ^{:tag (func [(* state) int])} genOp]
+
+  (when (and (not (.IsKind (.-Type idx) types/TUINT8)) (not (.IsKind (.-Type idx) types/TUINT64)))
+    (.Fatalf s "immJumpTable expects uint8 or uint64 value, saw %v instead, val=%s" (.String (.-Type idx)) (.LongString idx)))
+
+
+  (when (or (!= (.-N base/Flag) 0) (not ^{:go/via [Arch]} (.-CanJumpTable (.-LinkArch Arch))) (.-Retpoline base/Ctxt))
+    (return (branchTableN s idx intrinsicCall genOp immLimit false)))
+
+
+  ;; Make blocks we'll need.
+  (let [bEnd (.NewBlock (.-f s) ssa/BlockPlain)
+      ^{:line 2114} bPanic (.NewBlock (.-f s) ssa/BlockPlain)
+
+      ^{:line 2116} jt (.NewBlock (.-f s) ssa/BlockJumpTable)
+
+      ^{:line 2118} t (aget types/Types types/TUINTPTR)]
+    (set! idx (.conv s nil idx (.-Type idx) t))
+    (let [width (.uintptrConstant s immLimit)
+
+        ;; Begin with a bounds check
+        ^{:line 2123} cmp (.newValue2 s (.ssaOp s ir/OLT t) (aget types/Types types/TBOOL) idx width)
+        ^{:line 2124} bb (.endBlock s)]
+      (set! (.-Kind bb) ssa/BlockIf)
+      (.SetControl bb cmp)
+      (.AddEdgeTo bb jt) ; in range - use jump table
+      (.AddEdgeTo bb bPanic) ; out of range - panic
+      (set! (.-Likely bb) ssa/BranchLikely) ; panic is unlikely
+
+      (.startBlock s bPanic)
+      (.rtcall s (.-PanicSimdImm ir/Syms) false nil)
+      (.endBlock s)
+
+      (.startBlock s jt)
+      (set! (.-Kind jt) ssa/BlockJumpTable)
+      (set! (.-Pos jt) ^{:go/via [miniExpr miniNode]} (.Pos intrinsicCall))
+      (when (.-SpectreIndex (.-Cfg base/Flag))
+        ;; Potential Spectre vulnerability hardening?
+        (set! idx (.newValue2 s ssa/OpSpectreSliceIndex t idx (.uintptrConstant s (- immLimit 1)))))
+
+      (.SetControl jt idx)
+      (let [targets (make (slice (* ssa/Block)) immLimit immLimit)]
+        (range [i immLimit]
+          (let [t (.NewBlock (.-f s) ssa/BlockPlain)]
+            (aset targets i t)
+            (.AddEdgeTo jt t)))
+
+        (.endBlock s)
+
+        (range [i t targets]
+          (.startBlock s t)
+          (genOp s i)
+          (when (!= (.-Kind t) ssa/BlockExit)
+            (.AddEdgeTo t bEnd))
+
+          (.endBlock s))
+
+
+        (.startBlock s bEnd)
+        (let [ret (.variable s intrinsicCall ^{:go/via [miniExpr]} (.Type intrinsicCall))]
+          ^{:line 2162} ret)))))
+
+
+^{:go/end 2175} (go/func opLen1Imm8 ^{:tag (func [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args] [(* ssa/Value)])} [^ssa/Op op ^{:tag (* types/Type)} t ^int offset]
+  ^{:go/end 2174} (fn ^{:tag (* ssa/Value)} [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args]
+    (when (or (== (.-Op (aget args 1)) ssa/OpConst8) (== (.-Op (aget args 1)) ssa/OpConst64))
+      (return (.newValue1I s op t (conv int64 (conv int8 (<< (.-AuxInt (aget args 1)) (conv int64 offset)))) (aget args 0))))
+
+    (immJumpTable s (aget args 1) n ^{:go/end 2173} (fn [^{:tag (* state)} sNew ^int idx]
+        ;; Encode as int8 due to requirement of AuxInt, check its comment for details.
+        (aset (.-vars s) n (.newValue1I sNew op t (conv int64 (conv int8 (<< idx offset))) (aget args 0)))))))
+
+
+
+
+^{:go/end 2187} (go/func opLen2Imm8 ^{:tag (func [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args] [(* ssa/Value)])} [^ssa/Op op ^{:tag (* types/Type)} t ^int offset]
+  ^{:go/end 2186} (fn ^{:tag (* ssa/Value)} [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args]
+    (when (or (== (.-Op (aget args 1)) ssa/OpConst8) (== (.-Op (aget args 1)) ssa/OpConst64))
+      (return (.newValue2I s op t (conv int64 (conv int8 (<< (.-AuxInt (aget args 1)) (conv int64 offset)))) (aget args 0) (aget args 2))))
+
+    (immJumpTable s (aget args 1) n ^{:go/end 2185} (fn [^{:tag (* state)} sNew ^int idx]
+        ;; Encode as int8 due to requirement of AuxInt, check its comment for details.
+        (aset (.-vars s) n (.newValue2I sNew op t (conv int64 (conv int8 (<< idx offset))) (aget args 0) (aget args 2)))))))
+
+
+
+
+^{:go/end 2199} (go/func opLen3Imm8 ^{:tag (func [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args] [(* ssa/Value)])} [^ssa/Op op ^{:tag (* types/Type)} t ^int offset]
+  ^{:go/end 2198} (fn ^{:tag (* ssa/Value)} [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args]
+    (when (or (== (.-Op (aget args 1)) ssa/OpConst8) (== (.-Op (aget args 1)) ssa/OpConst64))
+      (return (.newValue3I s op t (conv int64 (conv int8 (<< (.-AuxInt (aget args 1)) (conv int64 offset)))) (aget args 0) (aget args 2) (aget args 3))))
+
+    (immJumpTable s (aget args 1) n ^{:go/end 2197} (fn [^{:tag (* state)} sNew ^int idx]
+        ;; Encode as int8 due to requirement of AuxInt, check its comment for details.
+        (aset (.-vars s) n (.newValue3I sNew op t (conv int64 (conv int8 (<< idx offset))) (aget args 0) (aget args 2) (aget args 3)))))))
+
+
+
+
+^{:go/end 2211} (go/func opLen2Imm8_2I ^{:tag (func [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args] [(* ssa/Value)])} [^ssa/Op op ^{:tag (* types/Type)} t ^int offset]
+  ^{:go/end 2210} (fn ^{:tag (* ssa/Value)} [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args]
+    (when (or (== (.-Op (aget args 2)) ssa/OpConst8) (== (.-Op (aget args 2)) ssa/OpConst64))
+      (return (.newValue2I s op t (conv int64 (conv int8 (<< (.-AuxInt (aget args 2)) (conv int64 offset)))) (aget args 0) (aget args 1))))
+
+    (immJumpTable s (aget args 2) n ^{:go/end 2209} (fn [^{:tag (* state)} sNew ^int idx]
+        ;; Encode as int8 due to requirement of AuxInt, check its comment for details.
+        (aset (.-vars s) n (.newValue2I sNew op t (conv int64 (conv int8 (<< idx offset))) (aget args 0) (aget args 1)))))))
+
+
+
+
+
+^{:go/end 2233} (go/func opLen2Imm8_II "Two immediates instead of just 1.  Offset is ignored, so it is a _ parameter instead.\n" ^{:tag (func [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args] [(* ssa/Value)])} [^ssa/Op op ^{:tag (* types/Type)} t ^int _]
+  ^{:go/end 2232} (fn ^{:tag (* ssa/Value)} [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args]
+    (when (and ^:go/paren (or (== (.-Op (aget args 1)) ssa/OpConst8) (== (.-Op (aget args 1)) ssa/OpConst64)) ^:go/paren (or (== (.-Op (aget args 2)) ssa/OpConst8) (== (.-Op (aget args 2)) ssa/OpConst64)) (== (bit-and (.-AuxInt (aget args 1)) (bit-not 3)) 0) (== (bit-and (.-AuxInt (aget args 2)) (bit-not 3)) 0))
+      (let [(values i1 i2) (values (.-AuxInt (aget args 1)) (.-AuxInt (aget args 2)))]
+        (return (.newValue2I s op t (conv int64 (conv int8 (+ i1 (<< i2 4)))) (aget args 0) (aget args 3)))))
+
+    (let [four (.constInt64 s (aget types/Types types/TUINT8) 4)
+        ^{:line 2221} shifted (.newValue2 s ssa/OpLsh8x8 (aget types/Types types/TUINT8) (aget args 2) four)
+        ^{:line 2222} combined (.newValue2 s ssa/OpAdd8 (aget types/Types types/TUINT8) (aget args 1) shifted)]
+      (immJumpTable s combined n ^{:go/end 2231} (fn [^{:tag (* state)} sNew ^int idx]
+          ;; Encode as int8 due to requirement of AuxInt, check its comment for details.
+          ;; TODO for "zeroing" values, panic instead.
+          (if (== (bit-and idx (bit-not (+ 3 (<< 3 4)))) 0)
+            (aset (.-vars s) n (.newValue2I sNew op t (conv int64 (conv int8 idx)) (aget args 0) (aget args 3)))
+
+            (.rtcall sNew (.-PanicSimdImm ir/Syms) false nil)))))))
+
+
+
+
+
+
+^{:go/end 2246} (go/func opLen2Imm8_SHA1RNDS4 "The assembler requires the imm value of a SHA1RNDS4 instruction to be one of 0,1,2,3...\n" ^{:tag (func [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args] [(* ssa/Value)])} [^ssa/Op op ^{:tag (* types/Type)} t ^int offset]
+  ^{:go/end 2245} (fn ^{:tag (* ssa/Value)} [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args]
+    (when (or (== (.-Op (aget args 1)) ssa/OpConst8) (== (.-Op (aget args 1)) ssa/OpConst64))
+      (return (.newValue2I s op t (conv int64 (conv int8 (bit-and (<< (.-AuxInt (aget args 1)) (conv int64 offset)) 2r11))) (aget args 0) (aget args 2))))
+
+    (immJumpTable s (aget args 1) n ^{:go/end 2244} (fn [^{:tag (* state)} sNew ^int idx]
+        ;; Encode as int8 due to requirement of AuxInt, check its comment for details.
+        (aset (.-vars s) n (.newValue2I sNew op t (bit-and (conv int64 (conv int8 (<< idx offset))) 2r11) (aget args 0) (aget args 2)))))))
+
+
+
+
+^{:go/end 2258} (go/func opLen1Imm ^{:tag (func [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args] [(* ssa/Value)])} [^ssa/Op op ^{:tag (* types/Type)} t ^int offset ^uint64 immMax]
+  ^{:go/end 2257} (fn ^{:tag (* ssa/Value)} [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args]
+    (when (and ^:go/paren (or (== (.-Op (aget args 1)) ssa/OpConst8) (== (.-Op (aget args 1)) ssa/OpConst64)) (<= (conv uint64 (.-AuxInt (aget args 1))) immMax))
+      (return (.newValue1I s op t (conv int64 (conv int8 (<< (.-AuxInt (aget args 1)) (conv int64 offset)))) (aget args 0))))
+
+    (immJumpTableN s (aget args 1) n (+ immMax 1) ^{:go/end 2256} (fn [^{:tag (* state)} sNew ^int idx]
+        ;; Encode as int8 due to requirement of AuxInt, check its comment for details.
+        (aset (.-vars s) n (.newValue1I sNew op t (conv int64 (conv int8 (<< idx offset))) (aget args 0)))))))
+
+
+
+
+^{:go/end 2270} (go/func opLen2Imm ^{:tag (func [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args] [(* ssa/Value)])} [^ssa/Op op ^{:tag (* types/Type)} t ^int offset ^uint64 immMax]
+  ^{:go/end 2269} (fn ^{:tag (* ssa/Value)} [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args]
+    (when (and ^:go/paren (or (== (.-Op (aget args 1)) ssa/OpConst8) (== (.-Op (aget args 1)) ssa/OpConst64)) (<= (conv uint64 (.-AuxInt (aget args 1))) immMax))
+      (return (.newValue2I s op t (conv int64 (conv int8 (<< (.-AuxInt (aget args 1)) (conv int64 offset)))) (aget args 0) (aget args 2))))
+
+    (immJumpTableN s (aget args 1) n (+ immMax 1) ^{:go/end 2268} (fn [^{:tag (* state)} sNew ^int idx]
+        ;; Encode as int8 due to requirement of AuxInt, check its comment for details.
+        (aset (.-vars s) n (.newValue2I sNew op t (conv int64 (conv int8 (<< idx offset))) (aget args 0) (aget args 2)))))))
+
+
+
+
+^{:go/end 2282} (go/func opLen3Imm ^{:tag (func [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args] [(* ssa/Value)])} [^ssa/Op op ^{:tag (* types/Type)} t ^int offset ^uint64 immMax]
+  ^{:go/end 2281} (fn ^{:tag (* ssa/Value)} [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args]
+    (when (and ^:go/paren (or (== (.-Op (aget args 1)) ssa/OpConst8) (== (.-Op (aget args 1)) ssa/OpConst64)) (<= (conv uint64 (.-AuxInt (aget args 1))) immMax))
+      (return (.newValue3I s op t (conv int64 (conv int8 (<< (.-AuxInt (aget args 1)) (conv int64 offset)))) (aget args 0) (aget args 2) (aget args 3))))
+
+    (immJumpTableN s (aget args 1) n (+ immMax 1) ^{:go/end 2280} (fn [^{:tag (* state)} sNew ^int idx]
+        ;; Encode as int8 due to requirement of AuxInt, check its comment for details.
+        (aset (.-vars s) n (.newValue3I sNew op t (conv int64 (conv int8 (<< idx offset))) (aget args 0) (aget args 2) (aget args 3)))))))
+
+
+
+
+^{:go/end 2294} (go/func opLen2Imm_2I ^{:tag (func [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args] [(* ssa/Value)])} [^ssa/Op op ^{:tag (* types/Type)} t ^int offset ^uint64 immMax]
+  ^{:go/end 2293} (fn ^{:tag (* ssa/Value)} [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args]
+    (when (and ^:go/paren (or (== (.-Op (aget args 2)) ssa/OpConst8) (== (.-Op (aget args 2)) ssa/OpConst64)) (<= (conv uint64 (.-AuxInt (aget args 2))) immMax))
+      (return (.newValue2I s op t (conv int64 (conv int8 (<< (.-AuxInt (aget args 2)) (conv int64 offset)))) (aget args 0) (aget args 1))))
+
+    (immJumpTableN s (aget args 2) n (+ immMax 1) ^{:go/end 2292} (fn [^{:tag (* state)} sNew ^int idx]
+        ;; Encode as int8 due to requirement of AuxInt, check its comment for details.
+        (aset (.-vars s) n (.newValue2I sNew op t (conv int64 (conv int8 (<< idx offset))) (aget args 0) (aget args 1)))))))
+
+
+
+
+^{:go/end 2306} (go/func opLen3Imm8_2I ^{:tag (func [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args] [(* ssa/Value)])} [^ssa/Op op ^{:tag (* types/Type)} t ^int offset]
+  ^{:go/end 2305} (fn ^{:tag (* ssa/Value)} [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args]
+    (when (or (== (.-Op (aget args 2)) ssa/OpConst8) (== (.-Op (aget args 2)) ssa/OpConst64))
+      (return (.newValue3I s op t (conv int64 (conv int8 (<< (.-AuxInt (aget args 2)) (conv int64 offset)))) (aget args 0) (aget args 1) (aget args 3))))
+
+    (immJumpTable s (aget args 2) n ^{:go/end 2304} (fn [^{:tag (* state)} sNew ^int idx]
+        ;; Encode as int8 due to requirement of AuxInt, check its comment for details.
+        (aset (.-vars s) n (.newValue3I sNew op t (conv int64 (conv int8 (<< idx offset))) (aget args 0) (aget args 1) (aget args 3)))))))
+
+
+
+
+^{:go/end 2318} (go/func opLen4Imm8 ^{:tag (func [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args] [(* ssa/Value)])} [^ssa/Op op ^{:tag (* types/Type)} t ^int offset]
+  ^{:go/end 2317} (fn ^{:tag (* ssa/Value)} [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args]
+    (when (or (== (.-Op (aget args 1)) ssa/OpConst8) (== (.-Op (aget args 1)) ssa/OpConst64))
+      (return (.newValue4I s op t (conv int64 (conv int8 (<< (.-AuxInt (aget args 1)) (conv int64 offset)))) (aget args 0) (aget args 2) (aget args 3) (aget args 4))))
+
+    (immJumpTable s (aget args 1) n ^{:go/end 2316} (fn [^{:tag (* state)} sNew ^int idx]
+        ;; Encode as int8 due to requirement of AuxInt, check its comment for details.
+        (aset (.-vars s) n (.newValue4I sNew op t (conv int64 (conv int8 (<< idx offset))) (aget args 0) (aget args 2) (aget args 3) (aget args 4)))))))
+
+
+
+
+^{:go/end 2324} (go/func simdBroadcast ^{:tag (func [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args] [(* ssa/Value)])} [^ssa/Op op]
+  ^{:go/end 2323} (fn ^{:tag (* ssa/Value)} [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args]
+    (.newValue2 s op ^{:go/via [miniExpr]} (.Type n) (aget args 0) (.mem s))))
+
+
+
+^{:go/end 2330} (go/func simdLoad ^{:tag (func [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args] [(* ssa/Value)])} []
+  ^{:go/end 2329} (fn ^{:tag (* ssa/Value)} [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args]
+    (.newValue2 s ssa/OpLoad ^{:go/via [miniExpr]} (.Type n) (aget args 0) (.mem s))))
+
+
+
+^{:go/end 2337} (go/func simdStore ^{:tag (func [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args] [(* ssa/Value)])} []
+  ^{:go/breaks [3] :go/end 2336} (fn ^{:tag (* ssa/Value)} [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args]
+    (.store s (.-Type (aget args 0)) (aget args 1) (aget args 0))
+    nil))
+
+
+
+(go/var cvtVToMaskOpcodes (lit (map int (map int ssa/Op))
+    ^{:line 2340} [8 (lit _ [16 ssa/OpCvt16toMask8x16] [32 ssa/OpCvt32toMask8x32] [64 ssa/OpCvt64toMask8x64])]
+    ^{:line 2341} [16 (lit _ [8 ssa/OpCvt8toMask16x8] [16 ssa/OpCvt16toMask16x16] [32 ssa/OpCvt32toMask16x32])]
+    ^{:line 2342} [32 (lit _ [4 ssa/OpCvt8toMask32x4] [8 ssa/OpCvt8toMask32x8] [16 ssa/OpCvt16toMask32x16])]
+    ^{:line 2343} [64 (lit _ [2 ssa/OpCvt8toMask64x2] [4 ssa/OpCvt8toMask64x4] [8 ssa/OpCvt8toMask64x8])]))
+
+
+(go/var cvtMaskToVOpcodes (lit (map int (map int ssa/Op))
+    ^{:line 2347} [8 (lit _ [16 ssa/OpCvtMask8x16to16] [32 ssa/OpCvtMask8x32to32] [64 ssa/OpCvtMask8x64to64])]
+    ^{:line 2348} [16 (lit _ [8 ssa/OpCvtMask16x8to8] [16 ssa/OpCvtMask16x16to16] [32 ssa/OpCvtMask16x32to32])]
+    ^{:line 2349} [32 (lit _ [4 ssa/OpCvtMask32x4to8] [8 ssa/OpCvtMask32x8to8] [16 ssa/OpCvtMask32x16to16])]
+    ^{:line 2350} [64 (lit _ [2 ssa/OpCvtMask64x2to8] [4 ssa/OpCvtMask64x4to8] [8 ssa/OpCvtMask64x8to8])]))
+
+
+^{:go/end 2361} (go/func simdCvtVToMask ^{:tag (func [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args] [(* ssa/Value)])} [^int elemBits ^int lanes]
+  ^{:go/end 2360} (fn ^{:tag (* ssa/Value)} [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args]
+    (let [op (aget (aget cvtVToMaskOpcodes elemBits) lanes)]
+      (when (== op 0)
+        (panic (fmt/Sprintf "Unknown mask shape: Mask%dx%d" elemBits lanes)))
+
+      (.newValue1 s op types/TypeMask (aget args 0)))))
+
+
+
+^{:go/end 2371} (go/func simdCvtMaskToV ^{:tag (func [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args] [(* ssa/Value)])} [^int elemBits ^int lanes]
+  ^{:go/end 2370} (fn ^{:tag (* ssa/Value)} [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args]
+    (let [op (aget (aget cvtMaskToVOpcodes elemBits) lanes)]
+      (when (== op 0)
+        (panic (fmt/Sprintf "Unknown mask shape: Mask%dx%d" elemBits lanes)))
+
+      (.newValue1 s op ^{:go/via [miniExpr]} (.Type n) (aget args 0)))))
+
+
+
+^{:go/end 2377} (go/func simdMaskedLoad ^{:tag (func [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args] [(* ssa/Value)])} [^ssa/Op op]
+  ^{:go/end 2376} (fn ^{:tag (* ssa/Value)} [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args]
+    (.newValue3 s op ^{:go/via [miniExpr]} (.Type n) (aget args 0) (aget args 1) (.mem s))))
+
+
+
+^{:go/end 2384} (go/func simdMaskedStore ^{:tag (func [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args] [(* ssa/Value)])} [^ssa/Op op]
+  ^{:go/breaks [3] :go/end 2383} (fn ^{:tag (* ssa/Value)} [^{:tag (* state)} s ^{:tag (* ir/CallExpr)} n ^{:tag (slice (* ssa/Value))} args]
+    (aset (.-vars s) memVar (.newValue4A s op types/TypeMem (.-Type (aget args 0)) (aget args 1) (aget args 2) (aget args 0) (.mem s)))
+    nil))
+
+
+
+
+
+^{:go/end 2417} (go/func findIntrinsic "findIntrinsic returns a function which builds the SSA equivalent of the\nfunction identified by the symbol sym.  If sym is not an intrinsic call, returns nil.\n" ^intrinsicBuilder [^{:tag (* types/Sym)} sym]
+  (when (or (== sym nil) (== (.-Pkg sym) nil))
+    (return nil))
+
+  (let [pkg (.-Path (.-Pkg sym))]
+    (when (== (.-Pkg sym) (.-Runtime ir/Pkgs))
+      (set! pkg "runtime"))
+
+    (when (and (.-Race base/Flag) (== pkg "sync/atomic"))
+      ;; The race detector needs to be able to intercept these calls.
+      ;; We can't intrinsify them.
+      (return nil))
+
+    ;; Skip intrinsifying math functions (which may contain hard-float
+    ;; instructions) when soft-float
+    (when (and (.-SoftFloat Arch) (== pkg "math"))
+      (return nil))
+
+
+    (let [fn (.-Name sym)]
+      (when ssa/IntrinsicsDisable
+        (if (or (and (== pkg "internal/runtime/sys") ^:go/paren (or (== fn "GetCallerPC") (== fn "GetCallerSP") (== fn "GetClosurePtr")))
+            (== pkg simdPackage)) (do)
+          ;; These runtime functions don't have definitions, must be intrinsics.
+
+          (return nil)))
+
+
+      (.lookup intrinsics (.-Arch (.-LinkArch Arch)) pkg fn))))
+
+
+^{:go/end 2435} (go/func IsIntrinsicCall ^bool [^{:tag (* ir/CallExpr)} n]
+  (when (== n nil)
+    (return false))
+
+  (let [(values name ok) (assert (* ir/Name) (.-Fun n))]
+    (when (not ok)
+      (when (== (.Op (.-Fun n)) ir/OMETHEXPR)
+        (when [meth (ir/MethodExprName (.-Fun n))] (!= meth nil)
+          (when [fn (.-Func meth)] (!= fn nil)
+            (return (IsIntrinsicSym (.Sym fn))))))
+
+
+
+      (return false))
+
+    (IsIntrinsicSym (.Sym name))))
+
+
+^{:go/end 2439} (go/func IsIntrinsicSym ^bool [^{:tag (* types/Sym)} sym]
+  (!= (findIntrinsic sym) nil))
+
+
+
+
+
+
+
+
+
+
+^{:go/end 2495} (go/func GenIntrinsicBody "GenIntrinsicBody generates the function body for a bodyless intrinsic.\nThis is used when the intrinsic is used in a non-call context, e.g.\nas a function pointer, or (for a method) being referenced from the type\ndescriptor.\n\nThe compiler already recognizes a call to fn as an intrinsic and can\ndirectly generate code for it. So we just fill in the body with a call\nto fn.\n" [^{:tag (* ir/Func)} fn]
+  (when (!= ir/CurFunc nil)
+    (base/FatalfAt ^{:go/via [miniNode]} (.Pos fn) "enqueueFunc %v inside %v" fn ir/CurFunc))
+
+
+  (when (!= (.-LowerR base/Flag) 0)
+    (fmt/Println "generate intrinsic for" (ir/FuncName fn)))
+
+
+  (let [pos ^{:go/via [miniNode]} (.Pos fn)
+      ^{:line 2459} ft (.Type fn)
+      ^{:line 2460 :tag ir/Node} ret (zero ir/Node)
+
+      ;; For a method, it usually starts with an ODOTMETH (pre-typecheck) or
+      ;; OMETHEXPR (post-typecheck) referencing the method symbol without the
+      ;; receiver type, and Walk rewrites it to a call directly to the
+      ;; type-qualified method symbol, moving the receiver to an argument.
+      ;; Here fn has already the type-qualified method symbol, and it is hard
+      ;; to get the unqualified symbol. So we just generate the post-Walk form
+      ;; and mark it typechecked and Walked.
+      ^{:line 2469} call (ir/NewCallExpr pos ir/OCALLFUNC (.-Nname fn) nil)]
+    (set! (.-Args call) (ir/RecvParamNames ft))
+    (set! (.-IsDDD call) (.IsVariadic ft))
+    (typecheck/Exprs (.-Args call))
+    ^{:go/via [miniExpr miniNode]} (.SetTypecheck call 1)
+    ^{:go/via [miniExpr miniNode]} (.SetWalked call true)
+    (set! ret call)
+    (when (> (.NumResults ft) 0)
+      (if (== (.NumResults ft) 1)
+        ^{:go/via [miniExpr]} (.SetType call (.-Type (.Result ft 0)))
+
+        ^{:go/via [miniExpr]} (.SetType call (.ResultsTuple ft)))
+
+      (let [n (ir/NewReturnStmt base/Pos nil)]
+        (set! (.-Results n) (lit (slice ir/Node) call))
+        (set! ret n)))
+
+    (.Append (.-Body fn) ret)
+
+    (when (!= (.-LowerR base/Flag) 0)
+      (ir/DumpList "generate intrinsic body" (.-Body fn)))
+
+
+    (set! ir/CurFunc fn)
+    (typecheck/Stmts (.-Body fn))
+    (set! ir/CurFunc nil))) ; we know CurFunc is nil at entry

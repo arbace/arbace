@@ -1,0 +1,126 @@
+;; Copyright 2016 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.cmd.compile.internal.ssa) (go/file "lca.go" :imports [
+
+
+    ^{:line 8} [bits "math/bits"]])
+
+
+;; Code to compute lowest common ancestors in the dominator tree.
+;; https://en.wikipedia.org/wiki/Lowest_common_ancestor
+;; https://en.wikipedia.org/wiki/Range_minimum_query#Solution_using_constant_time_and_linearithmic_space
+
+
+
+(go/type lcaRange "lcaRange is a data structure that can compute lowest common ancestor queries\nin O(n lg n) precomputed space and O(1) time per query.\n" (struct
+
+    ^{:line 19 :tag (slice lcaRangeBlock) :doc "Additional information about each block (indexed by block ID).\n"} blocks
+
+
+
+
+    ^{:line 24 :tag (slice (slice ID)) :doc "Data structure for range minimum queries.\nrangeMin[k][i] contains the ID of the minimum depth block\nin the Euler tour from positions i to i+1<<k-1, inclusive.\n"} rangeMin))
+
+
+(go/type lcaRangeBlock (struct
+    ^{:line 28 :tag (* Block)} b
+    ^{:line 29 :tag ID} parent ; parent in dominator tree.  0 = no parent (entry or unreachable)
+    ^{:line 30 :tag ID} firstChild ; first child in dominator tree
+    ^{:line 31 :tag ID} sibling ; next child of parent
+    ^{:line 32 :tag int32} pos ; an index in the Euler tour where this block appears (any one of its occurrences)
+    ^{:line 33 :tag int32} depth)) ; depth in dominator tree (root=0, its children=1, etc.)
+
+
+^{:go/end 102} (go/func makeLCArange ^{:tag (* lcaRange)} [^{:tag (* Func)} f]
+  (let [dom (.Idom f)
+
+      ;; Build tree
+      ^{:line 40} blocks (make (slice lcaRangeBlock) (.NumBlocks f))]
+    (range [_ b (.-Blocks f)]
+      (set! (.-b (aget blocks (.-ID b))) b)
+      (when (== (aget dom (.-ID b)) nil)
+        (continue)) ; entry or unreachable
+
+      (let [parent (.-ID (aget dom (.-ID b)))]
+        (set! (.-parent (aget blocks (.-ID b))) parent)
+        (set! (.-sibling (aget blocks (.-ID b))) (.-firstChild (aget blocks parent)))
+        (set! (.-firstChild (aget blocks parent)) (.-ID b))))
+
+
+    ;; Compute euler tour ordering.
+    ;; Each reachable block will appear #children+1 times in the tour.
+    (let [tour (make (slice ID) 0 (- (* (.NumBlocks f) 2) 1))]
+      (let-type [queueEntry (struct
+            ^{:line 56 :tag ID} bid ; block to work on
+            ^{:line 57 :tag ID} cid)] ; child we're already working on (0 = haven't started yet)
+
+        (let [q (lit (slice queueEntry) (lit _ (.-ID (.-Entry f)) 0))]
+          (while (> (len q) 0)
+            (let [n (- (len q) 1)
+                ^{:line 62} bid (.-bid (aget q n))
+                ^{:line 63} cid (.-cid (aget q n))]
+              (set! q (subslice q _ n))
+
+              ;; Add block to tour.
+              (set! (.-pos (aget blocks bid)) (conv int32 (len tour)))
+              (set! tour (append tour bid))
+
+              ;; Proceed down next child edge (if any).
+              (if (== cid 0) (do
+                  ;; This is our first visit to b. Set its depth.
+                  (set! (.-depth (aget blocks bid)) (+ (.-depth (aget blocks (.-parent (aget blocks bid)))) 1))
+                  ;; Then explore its first child.
+                  (set! cid (.-firstChild (aget blocks bid))))
+
+                ;; We've seen b before. Explore the next child.
+                (set! cid (.-sibling (aget blocks cid))))
+
+              (when (!= cid 0)
+                (set! q (append q (lit queueEntry bid cid) (lit queueEntry cid 0))))))
+
+
+
+          ;; Compute fast range-minimum query data structure
+          (let [rangeMin (make (slice (slice ID)) 0 (bits/Len64 (conv uint64 (len tour))))]
+            (set! rangeMin (append rangeMin tour)) ; 1-size windows are just the tour itself.
+            (for [(values logS s) (values 1 2)] (< s (len tour)) (set! (values logS s) (values (+ logS 1) (* s 2)))
+              (let [r (make (slice ID) (+ (- (len tour) s) 1))]
+                (for [i 0] (< i (+ (- (len tour) s) 1)) (inc! i)
+                  (let [bid (aget (aget rangeMin (- logS 1)) i)
+                      ^{:line 92} bid2 (aget (aget rangeMin (- logS 1)) (+ i (/ s 2)))]
+                    (when (< (.-depth (aget blocks bid2)) (.-depth (aget blocks bid)))
+                      (set! bid bid2))
+
+                    (aset r i bid)))
+
+                (set! rangeMin (append rangeMin r))))
+
+
+            (addr (lit lcaRange :blocks blocks :rangeMin rangeMin))))))))
+
+
+
+^{:go/end 127} (go/method find "find returns the lowest common ancestor of a and b.\n" ^{:tag (* Block)} [^{:tag (* lcaRange)} lca ^{:tag (* Block)} a ^{:tag (* Block)} b]
+  (when (== a b)
+    (return a))
+
+  ;; Find the positions of a and b in the Euler tour.
+  (let [p1 (.-pos (aget (.-blocks lca) (.-ID a)))
+      ^{:line 111} p2 (.-pos (aget (.-blocks lca) (.-ID b)))]
+    (when (> p1 p2)
+      (set! (values p1 p2) (values p2 p1)))
+
+
+    ;; The lowest common ancestor is the minimum depth block
+    ;; on the tour from p1 to p2.  We've precomputed minimum
+    ;; depth blocks for powers-of-two subsequences of the tour.
+    ;; Combine the right two precomputed values to get the answer.
+    (let [logS (conv uint (log64 (conv int64 (- p2 p1))))
+        ^{:line 121} bid1 (aget (aget (.-rangeMin lca) logS) p1)
+        ^{:line 122} bid2 (aget (aget (.-rangeMin lca) logS) (+ (- p2 ^int32 (<< 1 logS)) 1))]
+      (when (< (.-depth (aget (.-blocks lca) bid1)) (.-depth (aget (.-blocks lca) bid2)))
+        (return (.-b (aget (.-blocks lca) bid1))))
+
+      (.-b (aget (.-blocks lca) bid2)))))

@@ -1,0 +1,339 @@
+;; Copyright 2021 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.cmd.compile.internal.liveness) (go/file "arg.go" :imports [
+
+
+    ^{:line 8} [fmt "fmt"]
+    ^{:line 9} [abi "internal/abi"]
+
+    ^{:line 11} [base "cmd/compile/internal/base"]
+    ^{:line 12} [bitvec "cmd/compile/internal/bitvec"]
+    ^{:line 13} [ir "cmd/compile/internal/ir"]
+    ^{:line 14} [objw "cmd/compile/internal/objw"]
+    ^{:line 15} [ssa "cmd/compile/internal/ssa"]
+    ^{:line 16} [obj "cmd/internal/obj"]])
+
+
+;; Argument liveness tracking.
+;;
+;; For arguments passed in registers, this file tracks if their spill slots
+;; are live for runtime traceback. An argument spill slot is live at a PC
+;; if we know that an actual value has stored into it at or before this point.
+;;
+;; Stack args are always live and not tracked in this code. Stack args are
+;; laid out before register spill slots, so we emit the smallest offset that
+;; needs tracking. Slots before that offset are always live. That offset is
+;; usually the offset of the first spill slot. But if the first spill slot is
+;; always live (e.g. if it is address-taken), it will be the offset of a later
+;; one.
+;;
+;; The liveness information is emitted as a FUNCDATA and a PCDATA.
+;;
+;; FUNCDATA format:
+;; - start (smallest) offset that needs tracking (1 byte)
+;; - a list of bitmaps.
+;;   In a bitmap bit i is set if the i-th spill slot is live.
+;;
+;; At a PC where the liveness info changes, a PCDATA indicates the
+;; byte offset of the liveness map in the FUNCDATA. PCDATA -1 is a
+;; special case indicating all slots are live (for binary size
+;; saving).
+
+(go/const ^{:val -1} allLiveIdx -1)
+
+
+(go/type nameOff "name and offset\n" (struct
+    ^{:line 48 :tag (* ir/Name)} n
+    ^{:line 49 :tag int64} off))
+
+
+^{:go/end 52} (go/method FrameOffset ^int64 [^nameOff a] (+ (.FrameOffset (.-n a)) (.-off a)))
+^{:go/end 53} (go/method String ^string [^nameOff a] (fmt/Sprintf "%v+%d" (.-n a) (.-off a)))
+
+(go/type blockArgEffects (struct
+    ^{:line 56 :tag bitvec/BitVec} livein ; variables live at block entry
+    ^{:line 57 :tag bitvec/BitVec} liveout)) ; variables live at block exit
+
+
+(go/type argLiveness (struct
+    ^{:line 61 :tag (* ir/Func)} fn
+    ^{:line 62 :tag (* ssa/Func)} f
+    ^{:line 63 :tag (slice nameOff)} args ; name and offset of spill slots
+    ^{:line 64 :tag (map nameOff int32)} idx ; index in args
+
+    ^{:line 66 :tag (slice blockArgEffects)} be ; indexed by block ID
+
+    ^{:line 68 :tag bvecSet} bvset ; Set of liveness bitmaps, used for uniquifying.
+
+
+
+
+
+    ^{:line 74 :tag (map ssa/ID int) :doc "Liveness map indices at each Value (where it changes) and Block entry.\nDuring the computation the indices are temporarily index to bvset.\nAt the end they will be index (offset) to the output funcdata (changed\nin (*argLiveness).emit).\n"} blockIdx
+    ^{:line 75 :tag (map ssa/ID int)} valueIdx))
+
+
+
+
+
+
+
+^{:go/end 230} (go/func ArgLiveness "ArgLiveness computes the liveness information of register argument spill slots.\nAn argument's spill slot is \"live\" if we know it contains a meaningful value,\nthat is, we have stored the register value to it.\nReturns the liveness map indices at each Block entry and at each Value (where\nit changes).\n" [^{:tag (* ir/Func)} fn ^{:tag (* ssa/Func)} f ^{:tag (* objw/Progs)} pp] :results [^{:tag (map ssa/ID int)} blockIdx ^{:tag (map ssa/ID int)} valueIdx]
+  (when (or (== (.InRegistersUsed (.ABIInfo (.-OwnAux f))) 0) (!= (.-N base/Flag) 0))
+    ;; No register args. Nothing to emit.
+    ;; Or if -N is used we spill everything upfront so it is always live.
+    (return nil nil))
+
+
+  (let [lv (addr ^{:go/breaks [2 4 6 8 10 12]} (lit argLiveness
+          :fn fn
+          :f f
+          :idx (make (map nameOff int32))
+          :be (make (slice blockArgEffects) (.NumBlocks f))
+          :blockIdx (make (map ssa/ID int))
+          :valueIdx (make (map ssa/ID int))))]
+
+    ;; Gather all register arg spill slots.
+    (range [_ a (.InParams (.ABIInfo (.-OwnAux f)))]
+      (let [n (.-Name a)]
+        (when (or (== n nil) (== (len (.-Registers a)) 0))
+          (continue))
+
+        (let [(values _ offs) (.RegisterTypesAndOffsets a)]
+          (range [_ off offs]
+            (when (> (+ (.FrameOffset n) off) 0xff)
+              ;; We only print a limited number of args, with stack
+              ;; offsets no larger than 255.
+              (continue))
+
+            (set! (.-args lv) (append (.-args lv) (lit nameOff n off)))))))
+
+
+    (when (> (len (.-args lv)) 10)
+      (set! (.-args lv) (subslice (.-args lv) _ 10))) ; We print no more than 10 args.
+
+
+    ;; We spill address-taken or non-SSA-able value upfront, so they are always live.
+    (let [alwaysLive ^{:go/end 119} (fn ^bool [^{:tag (* ir/Name)} n] (or (.Addrtaken n) (not (ssa/CanSSA ^{:go/via [miniExpr]} (.Type n)))))]
+
+      ;; We'll emit the smallest offset for the slots that need liveness info.
+      ;; No need to include a slot with a lower offset if it is always live.
+      (while (and (> (len (.-args lv)) 0) (alwaysLive (.-n (aget (.-args lv) 0))))
+        (set! (.-args lv) (subslice (.-args lv) 1)))
+
+      (when (== (len (.-args lv)) 0)
+        (return)) ; everything is always live
+
+
+      (range [i a (.-args lv)]
+        (aset (.-idx lv) a (conv int32 i)))
+
+
+      (let [nargs (conv int32 (len (.-args lv)))
+          ^{:line 135} bulk (bitvec/NewBulk nargs (conv int32 (* (len (.-Blocks f)) 2)))]
+        (range [_ b (.-Blocks f)]
+          (let [be (addr (aget (.-be lv) (.-ID b)))]
+            (set! (.-livein be) (.Next bulk))
+            (set! (.-liveout be) (.Next bulk))
+
+            ;; initialize to all 1s, so we can AND them
+            (.Not (.-livein be))
+            (.Not (.-liveout be))))
+
+
+        (let [entrybe (addr (aget (.-be lv) (.-ID (.-Entry f))))]
+          (.Clear (.-livein entrybe))
+          (range [i a (.-args lv)]
+            (when (alwaysLive (.-n a))
+              (.Set (.-livein entrybe) (conv int32 i))))
+
+
+
+          ;; Visit blocks in reverse-postorder, compute block effects.
+          (let [po (.Postorder f)]
+            (for [i (- (len po) 1)] (>= i 0) (dec! i)
+              (let [b (aget po i)
+                  ^{:line 158} be (addr (aget (.-be lv) (.-ID b)))]
+
+                ;; A slot is live at block entry if it is live in all predecessors.
+                (range [_ pred (.-Preds b)]
+                  (let [pb (.Block pred)]
+                    (.And (.-livein be) (.-livein be) (.-liveout (aget (.-be lv) (.-ID pb))))))
+
+
+                (.Copy (.-liveout be) (.-livein be))
+                (range [_ v (.-Values b)]
+                  (.valueEffect lv v (.-liveout be)))))
+
+
+
+            ;; Coalesce identical live vectors. Compute liveness indices at each PC
+            ;; where it changes.
+            (let [live (bitvec/New nargs)
+                ^{:line 175} addToSet ^{:go/end 180} (fn [^bitvec/BitVec bv] :results [int bool]
+                  (when (== (.Count bv) (conv int nargs)) ; special case for all live
+                    (return allLiveIdx false))
+
+                  (.add (.-bvset lv) bv))]
+
+              (range [_ b (.-Blocks (.-f lv))]
+                (let [be (addr (aget (.-be lv) (.-ID b)))]
+                  (set! (values (aget (.-blockIdx lv) (.-ID b)) _) (addToSet (.-livein be)))
+
+                  (.Copy live (.-livein be))
+                  (let [^{:tag (* ssa/Value)} lastv (zero (* ssa/Value))]
+                    (range [i v (.-Values b)]
+                      (when (.valueEffect lv v live)
+                        ;; Record that liveness changes but not emit a map now.
+                        ;; For a sequence of StoreRegs we only need to emit one
+                        ;; at last.
+                        (set! lastv v))
+
+                      (when (and (!= lastv nil) ^:go/paren (or (mayFault v) (== i (- (len (.-Values b)) 1))))
+                        ;; Emit the liveness map if it may fault or at the end of
+                        ;; the block. We may need a traceback if the instruction
+                        ;; may cause a panic.
+                        (let [^bool added (zero bool)]
+                          (set! (values (aget (.-valueIdx lv) (.-ID lastv)) added) (addToSet live))
+                          (when added
+                            ;; live is added to bvset and we cannot modify it now.
+                            ;; Make a copy.
+                            (let [t live]
+                              (set! live (bitvec/New nargs))
+                              (.Copy live t)))
+
+                          (set! lastv nil))))
+
+
+
+                    ;; Sanity check.
+                    (when (not (.Eq live (.-liveout be)))
+                      (panic "wrong arg liveness map at block end")))))
+
+
+
+              ;; Emit funcdata symbol, update indices to offsets in the symbol data.
+              (let [lsym (.emit lv)]
+                (set! (.-ArgLiveInfo (.Func (.-LSym fn))) lsym)
+
+                ;;lv.print()
+
+                (let [p (.Prog pp obj/AFUNCDATA)]
+                  (.SetConst (.-From p) abi/FUNCDATA_ArgLiveInfo)
+                  (set! (.-Type (.-To p)) obj/TYPE_MEM)
+                  (set! (.-Name (.-To p)) obj/NAME_EXTERN)
+                  (set! (.-Sym (.-To p)) lsym)
+
+                  (return (.-blockIdx lv) (.-valueIdx lv)))))))))))
+
+
+
+^{:go/end 247} (go/method valueEffect "valueEffect applies the effect of v to live, return whether it is changed.\n" ^bool [^{:tag (* argLiveness)} lv ^{:tag (* ssa/Value)} v ^bitvec/BitVec live]
+  (when (!= (.-Op v) ssa/OpStoreReg) ; TODO: include other store instructions?
+    (return false))
+
+  (let [(values n off) (ssa/AutoVar v)]
+    (when (!= (.-Class n) ir/PPARAM)
+      (return false))
+
+    ^{:go/breaks [4]} (let [(values i ok) (aget (.-idx lv) (lit nameOff n off))]
+      (when (or (not ok) (.Get live i))
+        (return false))
+
+      (.Set live i)
+      true)))
+
+
+^{:go/breaks [[5 260]] :go/end 261} (go/func mayFault ^bool [^{:tag (* ssa/Value)} v]
+  (switch (.-Op v)
+    (case [ssa/OpLoadReg ssa/OpStoreReg ssa/OpCopy ssa/OpPhi
+        ^{:line 252} ssa/OpVarDef ssa/OpVarLive ssa/OpKeepAlive
+        ^{:line 253} ssa/OpSelect0 ssa/OpSelect1 ssa/OpSelectN ssa/OpMakeResult
+        ^{:line 254} ssa/OpConvert ssa/OpInlMark ssa/OpGetG]
+      (return false)))
+
+  (when (== (len (.-Args v)) 0)
+    (return false)) ; assume constant op cannot fault
+
+  true) ; conservatively assume all other ops could fault
+
+
+^{:go/end 292} (go/method print [^{:tag (* argLiveness)} lv]
+  (fmt/Println "argument liveness:" (.-Name (.-f lv)))
+  (let [live (bitvec/New (conv int32 (len (.-args lv))))]
+    (range [_ b (.-Blocks (.-f lv))]
+      (let [be (addr (aget (.-be lv) (.-ID b)))]
+
+        (fmt/Printf "%v: live in: " b)
+        (.printLivenessVec lv (.-livein be))
+        (when [(values idx ok) (aget (.-blockIdx lv) (.-ID b))] ok
+          (fmt/Printf "   #%d" idx))
+
+        (fmt/Println)
+
+        (range [_ v (.-Values b)]
+          (when (.valueEffect lv v live)
+            (fmt/Printf "  %v: " v)
+            (.printLivenessVec lv live)
+            (when [(values idx ok) (aget (.-valueIdx lv) (.-ID v))] ok
+              (fmt/Printf "   #%d" idx))
+
+            (fmt/Println)))
+
+
+
+        (fmt/Printf "%v: live out: " b)
+        (.printLivenessVec lv (.-liveout be))
+        (fmt/Println)))
+
+    (fmt/Println "liveness maps data:" (.-P (.-ArgLiveInfo (.Func (.-LSym (.-fn lv))))))))
+
+
+^{:go/end 300} (go/method printLivenessVec [^{:tag (* argLiveness)} lv ^bitvec/BitVec bv]
+  (range [i a (.-args lv)]
+    (when (.Get bv (conv int32 i))
+      (fmt/Printf "%v " a))))
+
+
+
+
+^{:go/end 340} (go/method emit ^{:tag (* obj/LSym)} [^{:tag (* argLiveness)} lv]
+  (let [livenessMaps (.extractUnique (.-bvset lv))
+
+      ;; stack offsets of register arg spill slots
+      ^{:line 306} argOffsets (make (slice uint8) (len (.-args lv)))]
+    (range [i a (.-args lv)]
+      (let [off (.FrameOffset a)]
+        (when (> off 0xff)
+          (panic "offset too large"))
+
+        (aset argOffsets i (conv uint8 off))))
+
+
+    (let [idx2off (make (slice int) (len livenessMaps))
+
+        ^{:line 317} lsym (.Lookup base/Ctxt (+ (.-Name (.-LSym (.-fn lv))) ".argliveinfo"))]
+      ^{:go/via [Attribute]} (.Set lsym obj/AttrContentAddressable true)
+      (set! (.-Align lsym) 1)
+
+      (let [off (objw/Uint8 lsym 0 (aget argOffsets 0))] ; smallest offset that needs liveness info.
+        (range [idx live livenessMaps]
+          (aset idx2off idx off)
+          (set! off (objw/BitVec lsym off live)))
+
+
+        ;; Update liveness indices to offsets.
+        (range [i x (.-blockIdx lv)]
+          (when (!= x allLiveIdx)
+            (aset (.-blockIdx lv) i (aget idx2off x))))
+
+
+        (range [i x (.-valueIdx lv)]
+          (when (!= x allLiveIdx)
+            (aset (.-valueIdx lv) i (aget idx2off x))))
+
+
+
+        ^{:line 339} lsym))))

@@ -1,0 +1,362 @@
+;; Copyright 2025 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.cmd.compile.internal.bloop) (go/file "bloop.go" :imports [
+
+    ;; This file contains support routines for keeping
+    ;; statements alive
+    ;; in such loops (example):
+    ;;
+    ;;	for b.Loop() {
+    ;;		var a, b int
+    ;;		a = 5
+    ;;		b = 6
+    ;;		f(a, b)
+    ;;	}
+    ;;
+    ;; The results of a, b and f(a, b) will be kept alive.
+    ;;
+    ;; Formally, the lhs (if they are [ir.Name]-s) of
+    ;; [ir.AssignStmt], [ir.AssignListStmt],
+    ;; [ir.AssignOpStmt], and the results of [ir.CallExpr]
+    ;; or its args if it doesn't return a value will be kept
+    ;; alive.
+    ;;
+    ;; The keep alive logic is implemented with as wrapping a
+    ;; runtime.KeepAlive around the Name.
+    ;;
+    ;; TODO: currently this is implemented with KeepAlive
+    ;; because it will prevent DSE and DCE which is probably
+    ;; what we want right now. And KeepAlive takes an ssa
+    ;; value instead of a symbol, which is easier to manage.
+    ;; But since KeepAlive's context was mainly in the runtime
+    ;; and GC, should we implement a new intrinsic that lowers
+    ;; to OpVarLive? Peeling out the symbols is a bit tricky
+    ;; and also VarLive seems to assume that there exists a
+    ;; VarDef on the same symbol that dominates it.
+
+
+    ^{:line 40} [base "cmd/compile/internal/base"]
+    ^{:line 41} [ir "cmd/compile/internal/ir"]
+    ^{:line 42} [typecheck "cmd/compile/internal/typecheck"]
+    ^{:line 43} [types "cmd/compile/internal/types"]
+    ^{:line 44} [src "cmd/internal/src"]])
+
+
+
+
+^{:go/breaks [[5 72]] :go/end 73} (go/func getNameFromNode "getNameFromNode tries to iteratively peel down the node to\nget the name.\n" ^{:tag (* ir/Name)} [^ir/Node n]
+  ;; Tries to iteratively peel down the node to get the names.
+  (while (!= n nil)
+    (switch (.Op n)
+      (case [ir/ONAME]
+        ;; Found the name, stop the loop.
+        (return (assert (* ir/Name) n)))
+      (case [ir/OSLICE ir/OSLICE3]
+        (set! n (.-X (assert (* ir/SliceExpr) n))))
+      (case [ir/ODOT]
+        (set! n (.-X (assert (* ir/SelectorExpr) n))))
+      (case [ir/OCONV ir/OCONVIFACE ir/OCONVNOP]
+        (set! n (.-X (assert (* ir/ConvExpr) n))))
+      (case [ir/OADDR]
+        (set! n (.-X (assert (* ir/AddrExpr) n))))
+      (case [ir/ODOTPTR]
+        (set! n (.-X (assert (* ir/SelectorExpr) n))))
+      (case [ir/OINDEX ir/OINDEXMAP]
+        (set! n (.-X (assert (* ir/IndexExpr) n))))
+      (default
+        (set! n nil))))
+
+
+  nil)
+
+
+
+^{:go/breaks [[5 80]] :go/end 81} (go/func getAddressableNameFromNode "getAddressableNameFromNode is like getNameFromNode but returns nil if the node is not addressable.\n" ^{:tag (* ir/Name)} [^ir/Node n]
+  (when [name (getNameFromNode n)] (and (!= name nil) (ir/IsAddressable name))
+    (return name))
+
+  nil)
+
+
+
+^{:go/end 98} (go/func getKeepAliveNodes "getKeepAliveNodes analyzes an IR node and returns a list of nodes that must be kept alive.\n" ^ir/Nodes [^src/XPos pos ^ir/Node n]
+  ^{:go/breaks [[3 97]]} (let [name (getAddressableNameFromNode n)]
+    (if (!= name nil) (do
+        (debugName name pos)
+        (return (lit ir/Nodes name)))
+      (if [(values deref ok) (assert (* ir/StarExpr) n)] (and ok (!= deref nil)) (do
+          (when (> (.-LowerM base/Flag) 1)
+            (base/WarnfAt pos "dereference will be kept alive"))
+
+          (return (lit ir/Nodes deref)))
+        (when (> (.-LowerM base/Flag) 1)
+          (base/WarnfAt pos "expr is unknown to bloop pass"))))
+
+    nil))
+
+
+
+
+
+
+^{:go/end 126} (go/func keepAliveAt "keepAliveAt returns a statement that is either curNode, or a\nblock containing curNode followed by a call to runtime.KeepAlive for each\nnode in ns. These calls ensure that nodes in ns will be live until\nafter curNode's execution.\n" ^ir/Node [^ir/Nodes ns ^ir/Node curNode]
+  (when (== (len ns) 0)
+    (return curNode))
+
+
+  (let [pos (.Pos curNode)
+      ^{:line 110} calls (lit ir/Nodes curNode)]
+    (range [_ n ns]
+      (when (or (== n nil) (== (.Sym n) nil) (.IsBlank (.Sym n)))
+        (continue))
+
+      (when (not (ir/IsAddressable n))
+        (base/FatalfAt (.Pos n) "keepAliveAt: node %v is not addressable" n))
+
+      (let [arg (ir/NewConvExpr pos ir/OCONV (aget types/Types types/TUNSAFEPTR) (typecheck/NodAddr n))
+          ^{:line 119} callExpr (assert (* ir/CallExpr) (typecheck/Call pos (typecheck/LookupRuntime "KeepAlive") (lit ir/Nodes arg) false))]
+        (set! (.-IsCompilerVarLive callExpr) true)
+        (set! (.-NoInline callExpr) true)
+        (set! calls (append calls callExpr))))
+
+
+    (ir/NewBlockStmt pos calls)))
+
+
+^{:go/end 136} (go/func debugName [^{:tag (* ir/Name)} name ^src/XPos pos]
+  (when (> (.-LowerM base/Flag) 1)
+    (if (!= (.Linksym name) nil)
+      (base/WarnfAt pos "%s will be kept alive" (.-Name (.Linksym name)))
+
+      (base/WarnfAt pos "expr will be kept alive"))))
+
+
+
+
+
+^{:go/end 163} (go/func preserveCallResults "preserveCallResults assigns the results of a call statement to temporary variables to ensure they remain alive.\n" ^ir/Node [^{:tag (* ir/Func)} curFn ^{:tag (* ir/CallExpr)} call]
+  (let [^ir/Nodes ns (zero ir/Nodes)
+      ^{:line 141} lhs (make ir/Nodes (.NumResults (.Type (.-Fun call))))]
+    (range [i res (.Results (.Type (.-Fun call)))]
+      (let [tmp (typecheck/TempAt ^{:go/via [miniExpr miniNode]} (.Pos call) curFn (.-Type res))]
+        (aset lhs i tmp)
+        (set! ns (append ns tmp))))
+
+
+    (when (> (.-LowerM base/Flag) 1)
+      (let [plural ""]
+        (when (> (.NumResults (.Type (.-Fun call))) 1)
+          (set! plural "s"))
+
+        (base/WarnfAt ^{:go/via [miniExpr miniNode]} (.Pos call) "function result%s will be kept alive" plural)))
+
+
+    (let [assign (assert (* ir/AssignListStmt) (typecheck/AssignExpr (ir/NewAssignListStmt ^{:go/via [miniExpr miniNode]} (.Pos call) ir/OAS2 lhs (lit ir/Nodes call))))]
+      (set! (.-Def assign) true)
+      (range [_ tmp lhs]
+        ;; Place temp declarations in the loop body to help escape analysis.
+        (.Append ^{:go/via [miniStmt]} (.PtrInit assign) (typecheck/Stmt (ir/NewDecl ^{:go/via [miniStmt miniNode]} (.Pos assign) ir/ODCL (assert (* ir/Name) tmp)))))
+
+      (keepAliveAt ns assign))))
+
+
+
+^{:go/end 211} (go/func preserveCallArgs "preserveCallArgs ensures the arguments of a call statement are kept alive by transforming them into temporaries if necessary.\n" ^ir/Node [^{:tag (* ir/Func)} curFn ^{:tag (* ir/CallExpr)} call]
+  (let [^ir/Nodes argTmps (zero ir/Nodes)
+      ^{:line 168 :tag ir/Nodes} names (zero ir/Nodes)
+      ^{:line 169} preserveTmp ^{:go/end 181} (fn ^ir/Node [^src/XPos pos ^ir/Node n]
+        (let [tmp (typecheck/TempAt pos curFn (.Type n))
+            ^{:line 171} assign (ir/NewAssignStmt pos tmp n)]
+          (set! (.-Def assign) true)
+          ;; Place temp declarations in the loop body to help escape analysis.
+          (.Append ^{:go/via [miniStmt]} (.PtrInit assign) (typecheck/Stmt (ir/NewDecl ^{:go/via [miniStmt miniNode]} (.Pos assign) ir/ODCL tmp)))
+          (set! argTmps (append argTmps (typecheck/AssignExpr assign)))
+          (set! names (append names tmp))
+          (when (> (.-LowerM base/Flag) 1)
+            (base/WarnfAt ^{:go/via [miniExpr miniNode]} (.Pos call) "function arg will be kept alive"))
+
+          ^{:line 180} tmp))]
+
+    (range [i a (.-Args call)]
+      (if [name (getAddressableNameFromNode a)] (!= name nil) (do
+          ;; If they are name, keep them alive directly.
+          (debugName name ^{:go/via [miniExpr miniNode]} (.Pos call))
+          (set! names (append names name)))
+        (if (== (.Op a) ir/OSLICELIT)
+          ;; variadic args are encoded as slice literal.
+          (let [s (assert (* ir/CompLitExpr) a)
+              ^{:line 190 :tag ir/Nodes} ns (zero ir/Nodes)]
+            (range [i elem (.-List s)]
+              (if [name (getAddressableNameFromNode elem)] (!= name nil) (do
+                  (debugName name ^{:go/via [miniExpr miniNode]} (.Pos call))
+                  (set! ns (append ns name)))
+
+                ;; We need a temporary to save this arg.
+                (aset (.-List s) i (preserveTmp (.Pos elem) elem))))
+
+
+            (set! names (append names (spread ns))))
+
+          ;; expressions, we need to assign them to temps and change the original arg to reference them.
+          (aset (.-Args call) i (preserveTmp ^{:go/via [miniExpr miniNode]} (.Pos call) a)))))
+
+
+    (when (> (len argTmps) 0)
+      (set! argTmps (append argTmps call))
+      (return (keepAliveAt names (ir/NewBlockStmt ^{:go/via [miniExpr miniNode]} (.Pos call) argTmps))))
+
+    (keepAliveAt names call)))
+
+
+
+
+
+^{:go/end 275} (go/func preserveStmt "preserveStmt transforms stmt so that any names defined/assigned within it\nare used after stmt's execution, preventing their dead code elimination\nand dead store elimination. The return value is the transformed statement.\n" ^ir/Node [^{:tag (* ir/Func)} curFn ^ir/Node stmt]
+  (type-switch [n stmt]
+    (case [(* ir/AssignStmt)]
+      ;; If the left hand side is blank, we need to assign it to a temp
+      ;; so that it can be kept alive.
+      (when (ir/IsBlank (.-X n))
+        (let [tmp (typecheck/TempAt ^{:go/via [miniStmt miniNode]} (.Pos n) curFn (.Type (.-Y n)))]
+          (set! (.-X n) tmp)
+          (set! (.-Def n) true)
+          (.Append ^{:go/via [miniStmt]} (.PtrInit n) (typecheck/Stmt (ir/NewDecl ^{:go/via [miniStmt miniNode]} (.Pos n) ir/ODCL tmp)))
+          (set! stmt (typecheck/AssignExpr n))
+          (set! n (assert (* ir/AssignStmt) stmt))))
+
+      (return (keepAliveAt (getKeepAliveNodes ^{:go/via [miniStmt miniNode]} (.Pos n) (.-X n)) n)))
+    (case [(* ir/AssignListStmt)]
+      (let [^ir/Nodes ns (zero ir/Nodes)
+          ^{:line 232} hasBlank false]
+        (range [i lhs (.-Lhs n)]
+          (when (ir/IsBlank lhs)
+            ;; If the left hand side has blanks, we need to assign them to temps
+            ;; so that they can be kept alive.
+            (let [^{:tag (* types/Type)} typ (zero (* types/Type))]
+              ;; AssignListStmt can have tuple or a list of expressions on the right hand side.
+              (cond (and (== (len (.-Rhs n)) 1) (!= (.Type (aget (.-Rhs n) 0)) nil)
+                  (.IsTuple (.Type (aget (.-Rhs n) 0)))
+                  (== (len (.-Lhs n)) (.NumFields (.Type (aget (.-Rhs n) 0)))))
+                (set! typ (.-Type (.Field (.Type (aget (.-Rhs n) 0)) i)))
+                (== (len (.-Rhs n)) (len (.-Lhs n)))
+                (set! typ (.Type (aget (.-Rhs n) i))) :else
+                (do
+                  ;; Unrecognized shapes, skip?
+                  (base/WarnfAt ^{:go/via [miniStmt miniNode]} (.Pos n) "unrecognized shape for assign list stmt for blank assignment")
+                  (continue)))
+
+              (let [tmp (typecheck/TempAt ^{:go/via [miniStmt miniNode]} (.Pos n) curFn typ)]
+                (aset (.-Lhs n) i tmp)
+                (.Append ^{:go/via [miniStmt]} (.PtrInit n) (typecheck/Stmt (ir/NewDecl ^{:go/via [miniStmt miniNode]} (.Pos n) ir/ODCL tmp)))
+                (set! hasBlank true))))
+
+          (set! ns (append ns (spread (getKeepAliveNodes ^{:go/via [miniStmt miniNode]} (.Pos n) (aget (.-Lhs n) i))))))
+
+        (when hasBlank
+          ;; blank nodes are rewritten to temps, we need to typecheck the node again.
+          (set! (.-Def n) true)
+          (set! stmt (typecheck/AssignExpr n))
+          (set! n (assert (* ir/AssignListStmt) stmt)))
+
+        (return (keepAliveAt ns n))))
+    (case [(* ir/AssignOpStmt)]
+      (return (keepAliveAt (getKeepAliveNodes ^{:go/via [miniStmt miniNode]} (.Pos n) (.-X n)) n)))
+    (case [(* ir/CallExpr)]
+      ;; The function's results are not assigned, preserve them.
+      (when (and (!= (.-Fun n) nil) (!= (.Type (.-Fun n)) nil) (!= (.NumResults (.Type (.-Fun n))) 0))
+        (return (preserveCallResults curFn n)))
+
+      ;; This function doesn't return anything, keep its args alive.
+      (return (preserveCallArgs curFn n))))
+
+  ^{:line 274} stmt)
+
+
+^{:go/end 281} (go/func preserveStmts [^{:tag (* ir/Func)} curFn ^ir/Nodes list]
+  (range [i list]
+    (aset list i (preserveStmt curFn (aget list i)))))
+
+
+
+
+
+^{:go/end 307} (go/func isTestingBLoop "isTestingBLoop returns true if it matches the node as a\ntesting.(*B).Loop. See issue #61515.\n" ^bool [^ir/Node t]
+  (when (!= (.Op t) ir/OFOR)
+    (return false))
+
+  (let [(values nFor ok) (assert (* ir/ForStmt) t)]
+    (when (or (not ok) (== (.-Cond nFor) nil) (!= (.Op (.-Cond nFor)) ir/OCALLFUNC))
+      (return false))
+
+    (let [(values n ^:assign ok) (assert (* ir/CallExpr) (.-Cond nFor))]
+      (when (or (not ok) (== (.-Fun n) nil) (!= (.Op (.-Fun n)) ir/OMETHEXPR))
+        (return false))
+
+      ^{:go/breaks [[4 306]]} (let [name (ir/MethodExprName (.-Fun n))]
+        (when (== name nil)
+          (return false))
+
+        (when [fSym (.Sym name)] (and (!= fSym nil) (== (.-Class name) ir/PFUNC) (!= (.-Pkg fSym) nil)
+            (== (.-Name fSym) "(*B).Loop") (== (.-Path (.-Pkg fSym)) "testing"))
+          ;; Attempting to match a function call to testing.(*B).Loop
+          (return true))
+
+        false))))
+
+
+(go/type editor (struct
+    ^{:line 310 :tag bool} inBloop
+    ^{:line 311 :tag (* ir/Func)} curFn))
+
+
+^{:go/end 337} (go/method edit ^ir/Node [^editor e ^ir/Node n]
+  (set! (.-inBloop e) (or (isTestingBLoop n) (.-inBloop e)))
+  ;; It's in bloop, mark the stmts with bodies.
+  (ir/EditChildren n (.-edit e))
+  (when (.-inBloop e)
+    (type-switch [n n]
+      (case [(* ir/ForStmt)]
+        (preserveStmts (.-curFn e) (.-Body n)))
+      (case [(* ir/IfStmt)]
+        (preserveStmts (.-curFn e) (.-Body n))
+        (preserveStmts (.-curFn e) (.-Else n)))
+      (case [(* ir/BlockStmt)]
+        (preserveStmts (.-curFn e) (.-List n)))
+      (case [(* ir/CaseClause)]
+        (preserveStmts (.-curFn e) (.-List n))
+        (preserveStmts (.-curFn e) (.-Body n)))
+      (case [(* ir/CommClause)]
+        (preserveStmts (.-curFn e) (.-Body n)))
+      (case [(* ir/RangeStmt)]
+        (preserveStmts (.-curFn e) (.-Body n)))))
+
+
+  ^{:line 336} n)
+
+
+
+
+
+
+
+
+
+
+^{:go/end 366} (go/func Walk "Walk performs a walk on all functions in the package\nif it imports testing and wrap the results of all qualified\nstatements in a runtime.KeepAlive intrinsic call. See package\ndoc for more details.\n\n\tfor b.Loop() {...}\n\nloop's body.\n" [^{:tag (* ir/Package)} pkg]
+  (let [hasTesting false]
+    (range [_ i (.-Imports pkg)]
+      (when (== (.-Path i) "testing")
+        (set! hasTesting true)
+        (break)))
+
+
+    (when (not hasTesting)
+      (return))
+
+    (range [_ fn (.-Funcs pkg)]
+      (let [e (lit editor false fn)]
+        (ir/EditChildren fn (.-edit e))
+        (when (ir/MatchAstDump fn "bloop")
+          (ir/AstDump fn (+ "bloop, " (ir/FuncName fn))))))))

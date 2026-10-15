@@ -1,0 +1,607 @@
+;; Copyright 2013 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; This file implements initialization and assignment checks.
+
+(in-ns 'go.cmd.compile.internal.types2) (go/file "assignments.go" :imports [
+
+
+    ^{:line 10} [syntax "cmd/compile/internal/syntax"]
+    ^{:line 11} [fmt "fmt"]
+    ^{:line 12} [. "internal/types/errors"]
+    ^{:line 13} [strings "strings"]])
+
+
+
+
+
+
+
+^{:go/end 115} (go/method assignment "assignment reports whether x can be assigned to a variable of type T,\nif necessary by attempting to convert untyped values to the appropriate\ntype. context describes the context in which the assignment takes place.\nUse T == nil to indicate assignment to an untyped blank identifier.\nIf the assignment check fails, x.mode is set to invalid.\n" [^{:tag (* Checker)} check ^{:tag (* operand)} x ^Type T ^string context]
+  (.singleValue check x)
+
+  (switch (.mode x)
+    (case [invalid]
+      (return)) ; error reported before
+    (case [nilvalue]
+      (go/call assert isTypes2))
+    ;; ok
+    (case [constant_ variable mapindex value commaok commaerr])
+    ;; ok
+    (default
+      ;; we may get here because of other problems (go.dev/issue/39634, crash 12)
+      ;; TODO(gri) do we need a new "generic" error code here?
+      (.errorf check x IncompatibleAssign "cannot assign %s to %s in %s" x T context)
+      (.invalidate x)
+      (return)))
+
+
+  (when (isUntyped (.typ x))
+    (let [target T]
+      ;; spec: "If an untyped constant is assigned to a variable of interface
+      ;; type or the blank identifier, the constant is first converted to type
+      ;; bool, rune, int, float64, complex128 or string respectively, depending
+      ;; on whether the value is a boolean, rune, integer, floating-point,
+      ;; complex, or string constant."
+      (if isTypes2
+        (cond (.isNil x)
+          (when (== T nil)
+            (.errorf check x UntypedNilUse "use of untyped nil in %s" context)
+            (.invalidate x)
+            (return))
+
+          (or (== T nil) (isNonTypeParamInterface T))
+          (set! target (Default (.typ x))))
+
+        (do ; go/types
+          (when (or (== T nil) (isNonTypeParamInterface T))
+            (when (and (== T nil) (== (.typ x) (aget Typ UntypedNil)))
+              (.errorf check x UntypedNilUse "use of untyped nil in %s" context)
+              (.invalidate x)
+              (return))
+
+            (set! target (Default (.typ x))))))
+
+
+      (let [(values newType val code) (.implicitTypeAndValue check x target)]
+        (when (!= code 0)
+          (let [msg (.sprintf check "cannot use %s as %s value in %s" x target context)]
+            (switch code
+              (case [TruncatedFloat]
+                (set! msg + " (truncated)"))
+              (case [NumericOverflow]
+                (set! msg + " (overflows)"))
+              (default
+                (set! code IncompatibleAssign)))
+
+            (.error check x code msg)
+            (.invalidate x)
+            (return)))
+
+        (when (!= val nil)
+          (set! (.-val x) val)
+          (.updateExprVal check (.-expr x) val))
+
+        (when (!= newType (.typ x))
+          (set! (.-typ_ x) newType)
+          (.updateExprType check (.-expr x) newType false)))))
+
+
+  ;; x.typ is typed
+
+  ;; A generic (non-instantiated) function value cannot be assigned to a variable.
+  (.nonGeneric check (newTarget T context) x)
+  (when (not (.isValid x))
+    (return))
+
+
+  ;; spec: "If a left-hand side is the blank identifier, any typed or
+  ;; non-constant value except for the predeclared identifier nil may
+  ;; be assigned to it."
+  (when (== T nil)
+    (return))
+
+
+  (let [cause ""]
+    (when [(values ok code) (.assignableTo x check T (addr cause))] (not ok)
+      (if (!= cause "")
+        (.errorf check x code "cannot use %s as %s value in %s: %s" x T context cause)
+
+        (.errorf check x code "cannot use %s as %s value in %s" x T context))
+
+      (.invalidate x))))
+
+
+
+^{:go/end 146} (go/method initConst [^{:tag (* Checker)} check ^{:tag (* Const)} lhs ^{:tag (* operand)} x]
+  (when (or (not (.isValid x)) (not (isValid (.typ x))) (not (isValid ^{:go/via [object]} (.-typ lhs))))
+    (when (== ^{:go/via [object]} (.-typ lhs) nil)
+      (set! ^{:go/via [object]} (.-typ lhs) (aget Typ Invalid)))
+
+    (return))
+
+
+  ;; rhs must be a constant
+  (when (!= (.mode x) constant_)
+    (.errorf check x InvalidConstInit "%s is not constant" x)
+    (when (== ^{:go/via [object]} (.-typ lhs) nil)
+      (set! ^{:go/via [object]} (.-typ lhs) (aget Typ Invalid)))
+
+    (return))
+
+  (go/call assert (isConstType (.typ x)))
+
+  ;; If the lhs doesn't have a type yet, use the type of x.
+  (when (== ^{:go/via [object]} (.-typ lhs) nil)
+    (set! ^{:go/via [object]} (.-typ lhs) (.typ x)))
+
+
+  (.assignment check x ^{:go/via [object]} (.-typ lhs) "constant declaration")
+  (when (not (.isValid x))
+    (return))
+
+
+  (set! (.-val lhs) (.-val x)))
+
+
+
+
+
+
+^{:go/end 178} (go/method initVar "initVar checks the initialization lhs = x in a variable declaration.\nIf lhs doesn't have a type yet, it is given the type of x,\nor Typ[Invalid] in case of an error.\nIf the initialization check fails, x.mode is set to invalid.\n" [^{:tag (* Checker)} check ^{:tag (* Var)} lhs ^{:tag (* operand)} x ^string context]
+  (when (or (not (.isValid x)) (not (isValid (.typ x))) (not (isValid ^{:go/via [object]} (.-typ lhs))))
+    (when (== ^{:go/via [object]} (.-typ lhs) nil)
+      (set! ^{:go/via [object]} (.-typ lhs) (aget Typ Invalid)))
+
+    (.invalidate x)
+    (return))
+
+
+  ;; If lhs doesn't have a type yet, use the type of x.
+  (when (== ^{:go/via [object]} (.-typ lhs) nil)
+    (let [typ (.typ x)]
+      (when (isUntyped typ)
+        ;; convert untyped types to default types
+        (when (== typ (aget Typ UntypedNil))
+          (.errorf check x UntypedNilUse "use of untyped nil in %s" context)
+          (set! ^{:go/via [object]} (.-typ lhs) (aget Typ Invalid))
+          (.invalidate x)
+          (return))
+
+        (set! typ (Default typ)))
+
+      (set! ^{:go/via [object]} (.-typ lhs) typ)))
+
+
+  (.assignment check x ^{:go/via [object]} (.-typ lhs) context))
+
+
+
+
+
+
+^{:go/end 243} (go/method lhsVar "lhsVar checks a lhs variable in an assignment and returns its type.\nlhsVar takes care of not counting a lhs identifier as a \"use\" of\nthat identifier. The result is nil if it is the blank identifier,\nand Typ[Invalid] if it is an invalid lhs expression.\n" ^Type [^{:tag (* Checker)} check ^syntax/Expr lhs]
+  ;; Determine if the lhs is a (possibly parenthesized) identifier.
+  (let [(values ident _) (assert (* syntax/Name) (syntax/Unparen lhs))]
+
+    ;; Don't evaluate lhs if it is the blank identifier.
+    (when (and (!= ident nil) (== (.-Value ident) "_"))
+      (.recordDef check ident nil)
+      (return nil))
+
+
+    ;; If the lhs is an identifier denoting a variable v, this reference
+    ;; is not a 'use' of v. Remember current value of v.used and restore
+    ;; after evaluating the lhs via check.expr.
+    (let [^{:tag (* Var)} v (zero (* Var))
+        ^{:line 198 :tag bool} v_used (zero bool)]
+      (when (!= ident nil)
+        (when [obj ^{:go/via [environment]} (.lookup check (.-Value ident))] (!= obj nil)
+          ;; It's ok to mark non-local variables, but ignore variables
+          ;; from other packages to avoid potential race conditions with
+          ;; dot-imported variables.
+          (when [(values w _) (assert (* Var) obj)] (and (!= w nil) (== ^{:go/via [object]} (.-pkg w) (.-pkg check)))
+            (set! v w)
+            (set! v_used (aget (.-usedVars check) v)))))
+
+
+
+
+      (let [^operand x (zero operand)]
+        (.expr check nil (addr x) lhs)
+
+        (when (!= v nil)
+          (aset (.-usedVars check) v v_used)) ; restore v.used
+
+
+        (when (or (not (.isValid x)) (not (isValid (.typ x))))
+          (return (aget Typ Invalid)))
+
+
+        ;; spec: "Each left-hand side operand must be addressable, a map index
+        ;; expression, or the blank identifier. Operands may be parenthesized."
+        (switch (.mode x)
+          (case [invalid]
+            (return (aget Typ Invalid)))
+          (case [variable mapindex])
+          ;; ok
+          (default
+            (when [(values sel ok) (assert (* syntax/SelectorExpr) (.-expr x))] ok
+              (let [^operand op (zero operand)]
+                (.expr check nil (addr op) (.-X sel))
+                (when (== (.mode op) mapindex)
+                  (.errorf check (addr x) UnaddressableFieldAssign "cannot assign to struct field %s in map" (ExprString (.-expr x)))
+                  (return (aget Typ Invalid)))))
+
+
+            (.errorf check (addr x) UnassignableOperand "cannot assign to %s (neither addressable nor a map index expression)" (.-expr x))
+            (return (aget Typ Invalid))))
+
+
+        (.typ x)))))
+
+
+
+
+
+^{:go/end 275} (go/method assignVar "assignVar checks the assignment lhs = rhs (if x == nil), or lhs = x (if x != nil).\nIf x != nil, it must be the evaluation of rhs (and rhs will be ignored).\nIf the assignment check fails and x != nil, x.mode is set to invalid.\n" [^{:tag (* Checker)} check ^syntax/Expr lhs ^syntax/Expr rhs ^{:tag (* operand)} x ^string context]
+  (let [T (.lhsVar check lhs)] ; nil if lhs is _
+    (when (not (isValid T))
+      (if (!= x nil)
+        (.invalidate x)
+
+        (.use check rhs))
+
+      (return))
+
+
+    (when (== x nil)
+      (let [^{:tag (* target)} target (zero (* target))]
+        ;; avoid calling ExprString if not needed
+        (when (!= T nil)
+          (when [(values _ ok) (assert (* Signature) (.Underlying T))] ok
+            (set! target (newTarget T (ExprString lhs)))))
+
+
+        (set! x (new operand))
+        (.expr check target x rhs)))
+
+
+    (when (and (== T nil) (== context "assignment"))
+      (set! context "assignment to _ identifier"))
+
+    (.assignment check x T context)))
+
+
+
+^{:go/end 283} (go/func operandTypes "operandTypes returns the list of types for the given operands.\n" [^{:tag (slice (* operand))} list] :results [^{:tag (slice Type)} res]
+  (range [_ x list]
+    (set! res (append res (.typ x))))
+
+  ^{:line 282} res)
+
+
+
+^{:go/end 291} (go/func varTypes "varTypes returns the list of types for the given variables.\n" [^{:tag (slice (* Var))} list] :results [^{:tag (slice Type)} res]
+  (range [_ x list]
+    (set! res (append res ^{:go/via [object]} (.-typ x))))
+
+  ^{:line 290} res)
+
+
+
+
+
+
+
+
+
+^{:go/end 341} (go/method typesSummary "typesSummary returns a string of the form \"(t1, t2, ...)\" where the\nti's are user-friendly string representations for the given types.\nIf variadic is set and the last type is a slice, its string is of\nthe form \"...E\" where E is the slice's element type.\nIf hasDots is set, the last argument string is of the form \"T...\"\nwhere T is the last type.\nOnly one of variadic and hasDots may be set.\n" ^string [^{:tag (* Checker)} check ^{:tag (slice Type)} list ^bool variadic ^bool hasDots]
+  (go/call assert (not (and variadic hasDots)))
+  (let [^{:tag (slice string)} res (zero (slice string))]
+    (range [i t list]
+      (let [^string s (zero string)]
+        (switch
+          (case [(== t nil)]
+            (fallthrough)) ; should not happen but be cautious
+          (case [(not (isValid t))]
+            (set! s "unknown type"))
+          (case [(isUntyped t)] ; => *Basic
+            (if (isNumeric t)
+              ;; Do not imply a specific type requirement:
+              ;; "have number, want float64" is better than
+              ;; "have untyped int, want float64" or
+              ;; "have int, want float64".
+              (set! s "number")
+
+              ;; If we don't have a number, omit the "untyped" qualifier
+              ;; for compactness.
+              (set! s (strings/ReplaceAll (.-name (assert (* Basic) t)) "untyped " ""))))
+
+          (default
+            (set! s (.sprintf check "%s" t))))
+
+        ;; handle ... parameters/arguments
+        (when (== i (- (len list) 1))
+          (switch
+            (case [variadic]
+              ;; In correct code, the parameter type is a slice, but be careful.
+              (when [(values t _) (assert (* Slice) t)] (!= t nil)
+                (set! s (.sprintf check "%s" (.-elem t))))
+
+              (set! s (+ "..." s)))
+            (case [hasDots]
+              (set! s + "..."))))
+
+
+        (set! res (append res s))))
+
+    (+ "(" (strings/Join res ", ") ")")))
+
+
+^{:go/end 348} (go/func measure ^string [^int x ^string unit]
+  (when (!= x 1)
+    (set! unit + "s"))
+
+  (fmt/Sprintf "%d %s" x unit))
+
+
+^{:go/end 362} (go/method assignError [^{:tag (* Checker)} check ^{:tag (slice syntax/Expr)} rhs ^int l ^int r]
+  (let [vars (measure l "variable")
+      ^{:line 352} vals (measure r "value")
+      ^{:line 353} rhs0 (aget rhs 0)]
+
+    (when (== (len rhs) 1)
+      (when [(values call _) (assert (* syntax/CallExpr) (syntax/Unparen rhs0))] (!= call nil)
+        (.errorf check rhs0 WrongAssignCount "assignment mismatch: %s but %s returns %s" vars (.-Fun call) vals)
+        (return)))
+
+
+    (.errorf check rhs0 WrongAssignCount "assignment mismatch: %s but %s" vars vals)))
+
+
+^{:go/end 378} (go/method returnError [^{:tag (* Checker)} check ^poser at ^{:tag (slice (* Var))} lhs ^{:tag (slice (* operand))} rhs]
+  (let [(values l r) (values (len lhs) (len rhs))
+      ^{:line 366} qualifier "not enough"]
+    (cond (> r l) (do
+        (set! at (aget rhs l)) ; report at first extra value
+        (set! qualifier "too many"))
+      (> r 0)
+      (set! at (aget rhs (- r 1)))) ; report at last value
+
+    (let [err (.newError check WrongResultCount)]
+      (.addf err at "%s return values" qualifier)
+      (.addf err nopos "have %s" (.typesSummary check (operandTypes rhs) false false))
+      (.addf err nopos "want %s" (.typesSummary check (varTypes lhs) false false))
+      (.report err))))
+
+
+
+
+
+
+^{:go/end 467} (go/method initVars "initVars type-checks assignments of initialization expressions orig_rhs\nto variables lhs.\nIf returnStmt is non-nil, initVars type-checks the implicit assignment\nof result expressions orig_rhs to function result parameters lhs.\n" [^{:tag (* Checker)} check ^{:tag (slice (* Var))} lhs ^{:tag (slice syntax/Expr)} orig_rhs ^syntax/Stmt returnStmt]
+  (let [(values l r) (values (len lhs) (len orig_rhs))
+
+      ^{:line 387} context "assignment"]
+    (cond (!= returnStmt nil)
+      (set! context "return statement")
+      (> l 1)
+      (set! context "multiple assignment"))
+
+
+    ;; If l == 1 and the rhs is a single call, for a better
+    ;; error message don't handle it as n:n mapping below.
+    (let [isCall false]
+      (when (== r 1)
+        (set! (values _ isCall) (assert (* syntax/CallExpr) (syntax/Unparen (aget orig_rhs 0)))))
+
+
+      ;; If we have a n:n mapping from lhs variable to rhs expression,
+      ;; each value can be assigned to its corresponding variable.
+      (when (and (== l r) (not isCall))
+        (let [^operand x (zero operand)]
+          (range [i lhs lhs]
+            (let [desc ^{:go/via [object]} (.-name lhs)]
+              (when (and (!= returnStmt nil) (== desc ""))
+                (set! desc "result variable"))
+
+              (.expr check (newTarget ^{:go/via [object]} (.-typ lhs) desc) (addr x) (aget orig_rhs i))
+              (.initVar check lhs (addr x) context)))
+
+          (return)))
+
+
+      ;; If we don't have an n:n mapping, the rhs must be a single expression
+      ;; resulting in 2 or more values; otherwise we have an assignment mismatch.
+      (when (!= r 1)
+        ;; Only report a mismatch error if there are no other errors on the rhs.
+        (when (.use check (spread orig_rhs))
+          (if (!= returnStmt nil)
+            (let [rhs (.exprList check orig_rhs)]
+              (.returnError check returnStmt lhs rhs))
+
+            (.assignError check orig_rhs l r)))
+
+
+        ;; ensure that LHS variables have a type
+        (range [_ v lhs]
+          (when (== ^{:go/via [object]} (.-typ v) nil)
+            (set! ^{:go/via [object]} (.-typ v) (aget Typ Invalid))))
+
+
+        (return))
+
+
+      (let [(values rhs commaOk) (.multiExpr check (aget orig_rhs 0) (and (== l 2) (== returnStmt nil)))]
+        (set! r (len rhs))
+        (when (== l r)
+          (range [i lhs lhs]
+            (.initVar check lhs (aget rhs i) context))
+
+          ;; Only record comma-ok expression if both initializations succeeded
+          ;; (go.dev/issue/59371).
+          (when (and commaOk (!= (.mode (aget rhs 0)) invalid) (!= (.mode (aget rhs 1)) invalid))
+            (.recordCommaOkTypes check (aget orig_rhs 0) rhs))
+
+          (return))
+
+
+        ;; In all other cases we have an assignment mismatch.
+        ;; Only report a mismatch error if there are no other errors on the rhs.
+        (when (!= (.mode (aget rhs 0)) invalid)
+          (if (!= returnStmt nil)
+            (.returnError check returnStmt lhs rhs)
+
+            (.assignError check orig_rhs l r)))
+
+
+        ;; ensure that LHS variables have a type
+        (range [_ v lhs]
+          (when (== ^{:go/via [object]} (.-typ v) nil)
+            (set! ^{:go/via [object]} (.-typ v) (aget Typ Invalid))))))))
+
+
+;; orig_rhs[0] was already evaluated
+
+
+
+^{:go/end 527} (go/method assignVars "assignVars type-checks assignments of expressions orig_rhs to variables lhs.\n" [^{:tag (* Checker)} check ^{:tag (slice syntax/Expr)} lhs ^{:tag (slice syntax/Expr)} orig_rhs]
+  (let [(values l r) (values (len lhs) (len orig_rhs))
+
+      ^{:line 473} context "assignment"]
+    (when (> l 1)
+      (set! context "multiple assignment"))
+
+
+    ;; If l == 1 and the rhs is a single call, for a better
+    ;; error message don't handle it as n:n mapping below.
+    (let [isCall false]
+      (when (== r 1)
+        (set! (values _ isCall) (assert (* syntax/CallExpr) (syntax/Unparen (aget orig_rhs 0)))))
+
+
+      ;; If we have a n:n mapping from lhs variable to rhs expression,
+      ;; each value can be assigned to its corresponding variable.
+      (when (and (== l r) (not isCall))
+        (range [i lhs lhs]
+          (.assignVar check lhs (aget orig_rhs i) nil context))
+
+        (return))
+
+
+      ;; If we don't have an n:n mapping, the rhs must be a single expression
+      ;; resulting in 2 or more values; otherwise we have an assignment mismatch.
+      (when (!= r 1)
+        ;; Only report a mismatch error if there are no other errors on the lhs or rhs.
+        (let [okLHS (.useLHS check (spread lhs))
+            ^{:line 499} okRHS (.use check (spread orig_rhs))]
+          (when (and okLHS okRHS)
+            (.assignError check orig_rhs l r))
+
+          (return)))
+
+
+      (let [(values rhs commaOk) (.multiExpr check (aget orig_rhs 0) (== l 2))]
+        (set! r (len rhs))
+        (when (== l r)
+          (range [i lhs lhs]
+            (.assignVar check lhs nil (aget rhs i) context))
+
+          ;; Only record comma-ok expression if both assignments succeeded
+          ;; (go.dev/issue/59371).
+          (when (and commaOk (!= (.mode (aget rhs 0)) invalid) (!= (.mode (aget rhs 1)) invalid))
+            (.recordCommaOkTypes check (aget orig_rhs 0) rhs))
+
+          (return))
+
+
+        ;; In all other cases we have an assignment mismatch.
+        ;; Only report a mismatch error if there are no other errors on the rhs.
+        (when (!= (.mode (aget rhs 0)) invalid)
+          (.assignError check orig_rhs l r))
+
+        (.useLHS check (spread lhs))))))
+;; orig_rhs[0] was already evaluated
+
+
+^{:go/end 609} (go/method shortVarDecl [^{:tag (* Checker)} check ^poser pos ^{:tag (slice syntax/Expr)} lhs ^{:tag (slice syntax/Expr)} rhs]
+  (let [top (len (.-delayed check))
+      ^{:line 531} scope ^{:go/via [environment]} (.-scope check)
+
+      ;; collect lhs variables
+      ^{:line 534} seen (make (map string bool) (len lhs))
+      ^{:line 535} lhsVars (make (slice (* Var)) (len lhs))
+      ^{:line 536} newVars (make (slice (* Var)) 0 (len lhs))
+      ^{:line 537} hasErr false]
+    (range [i lhs lhs]
+      (let [(values ident _) (assert (* syntax/Name) lhs)]
+        (when (== ident nil)
+          (.useLHS check lhs)
+          ;; TODO(gri) This is redundant with a go/parser error. Consider omitting in go/types?
+          (.errorf check lhs BadDecl "non-name %s on left side of :=" lhs)
+          (set! hasErr true)
+          (continue))
+
+
+        (let [name (.-Value ident)]
+          (when (!= name "_")
+            (when (aget seen name)
+              (.errorf check lhs RepeatedDecl "%s repeated on left side of :=" lhs)
+              (set! hasErr true)
+              (continue))
+
+            (aset seen name true))
+
+
+          ;; Use the correct obj if the ident is redeclared. The
+          ;; variable's scope starts after the declaration; so we
+          ;; must use Scope.Lookup here and call Scope.Insert
+          ;; (via check.declare) later.
+          (when [alt (.Lookup scope name)] (!= alt nil)
+            (.recordUse check ident alt)
+            ;; redeclared object must be a variable
+            (if [(values obj _) (assert (* Var) alt)] (!= obj nil)
+              (aset lhsVars i obj)
+              (do
+                (.errorf check lhs UnassignableOperand "cannot assign to %s" lhs)
+                (set! hasErr true)))
+
+            (continue))
+
+
+          ;; declare new variable
+          (let [obj (newVar LocalVar ^{:go/via [expr node]} (.Pos ident) (.-pkg check) name nil)]
+            (aset lhsVars i obj)
+            (when (!= name "_")
+              (set! newVars (append newVars obj)))
+
+            (.recordDef check ident obj)))))
+
+
+    ;; create dummy variables where the lhs is invalid
+    (range [i obj lhsVars]
+      (when (== obj nil)
+        (aset lhsVars i (newVar LocalVar (.Pos (aget lhs i)) (.-pkg check) "_" nil))))
+
+
+
+    (.initVars check lhsVars rhs nil)
+
+    ;; process function literals in rhs expressions before scope changes
+    (.processDelayed check top)
+
+    (when (and (== (len newVars) 0) (not hasErr))
+      (.softErrorf check pos NoNewVar "no new variables on left side of :=")
+      (return))
+
+
+    ;; declare new variables
+    ;; spec: "The scope of a constant or variable identifier declared inside
+    ;; a function begins at the end of the ConstSpec or VarSpec (ShortVarDecl
+    ;; for short variable declarations) and ends at the end of the innermost
+    ;; containing block."
+    (let [scopePos (endPos (aget rhs (- (len rhs) 1)))]
+      (range [_ obj newVars]
+        (.declare check scope nil obj scopePos))))) ; id = nil: recordDef already called

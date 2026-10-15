@@ -1,0 +1,813 @@
+;; Copyright 2023 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.cmd.vendor.golang_org.x.telemetry.internal.counter) (go/file "file.go" :imports [
+
+
+    ^{:line 8} [bytes "bytes"]
+    ^{:line 9} [errors "errors"]
+    ^{:line 10} [fmt "fmt"]
+    ^{:line 11} [rand "math/rand"]
+    ^{:line 12} [os "os"]
+    ^{:line 13} [path "path"]
+    ^{:line 14} [filepath "path/filepath"]
+    ^{:line 15} [runtime "runtime"]
+    ^{:line 16} [debug "runtime/debug"]
+    ^{:line 17} [sync "sync"]
+    ^{:line 18} [atomic "sync/atomic"]
+    ^{:line 19} [time "time"]
+    ^{:line 20} [unsafe "unsafe"]
+
+    ^{:line 22} [mmap "golang.org/x/telemetry/internal/mmap"]
+    ^{:line 23} [telemetry "golang.org/x/telemetry/internal/telemetry"]])
+
+
+
+(go/type file "A file is a counter file.\n" (struct
+
+
+
+
+    ^{:line 32 :tag (atomic/Pointer Counter) :doc "Linked list of all known counters.\n(Linked list insertion is easy to make lock-free,\nand we don't want the initial counters incremented\nby a program to cause significant contention.)\n"} counters ; head of list
+    ^{:line 33 :tag Counter} end ; list ends at &end instead of nil
+
+    ^{:line 35 :tag sync/Mutex} mu
+    ^{:line 36 :tag (* debug/BuildInfo)} buildInfo
+    ^{:line 37 :tag time/Time} timeBegin ^time/Time timeEnd
+    ^{:line 38 :tag error} err
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    ^{:line 54 :tag (atomic/Pointer mappedFile) :doc "current holds the current file mapping, which may change when the file is\nrotated or extended.\n\ncurrent may be read without holding mu, but may be nil.\n\nThe cleanup logic for file mappings is complicated, because invalidating\ncounter pointers is reentrant: [file.invalidateCounters] may call\n[file.lookup], which acquires mu. Therefore, writing current must be done\nas follows:\n 1. record the previous value of current\n 2. Store a new value in current\n 3. unlock mu\n 4. call invalidateCounters\n 5. close the previous mapped value from (1)\nTODO(rfindley): simplify\n"} current))
+
+
+(go/var ^file defaultFile)
+
+
+^{:go/end 90} (go/method register "register ensures that the counter c is registered with the file.\n" [^{:tag (* file)} f ^{:tag (* Counter)} c]
+  (debugPrintf "register %s %p\n" (.Name c) c)
+
+  ;; If counter is not registered with file, register it.
+  ;; Doing this lazily avoids init-time work
+  ;; as well as any execution cost at all for counters
+  ;; that are not used in a given program.
+  (let [wroteNext false]
+    (while (or wroteNext (== (.Load (.-next c)) nil))
+      (let [head (.Load (.-counters f))
+          ^{:line 70} next head]
+        (when (== next nil)
+          (set! next (addr (.-end f))))
+
+        (debugPrintf "register %s next %p\n" (.Name c) next)
+        (if (not wroteNext) (do
+            (when (not (.CompareAndSwap (.-next c) nil next))
+              (debugPrintf "register %s cas failed %p\n" (.Name c) (.Load (.-next c)))
+              (continue))
+
+            (set! wroteNext true))
+
+          (.Store (.-next c) next))
+
+        (when (.CompareAndSwap (.-counters f) head c)
+          (debugPrintf "registered %s %p\n" (.Name c) (.Load (.-counters f)))
+          (return))
+
+        (debugPrintf "register %s cas2 failed %p %p\n" (.Name c) (.Load (.-counters f)) head)))))
+
+
+
+
+
+
+
+
+^{:go/end 107} (go/method invalidateCounters "invalidateCounters marks as invalid all the pointers\nheld by f's counters and then refreshes them.\n\ninvalidateCounters cannot be called while holding f.mu,\nbecause a counter refresh may call f.lookup.\n" [^{:tag (* file)} f]
+  ;; Mark every counter as needing to refresh its count pointer.
+  (when [head (.Load (.-counters f))] (!= head nil)
+    (for [c head] (!= c (addr (.-end f))) (set! c (.Load (.-next c)))
+      (.invalidate c))
+
+    (for [c head] (!= c (addr (.-end f))) (set! c (.Load (.-next c)))
+      (.refresh c))))
+
+
+
+
+
+
+
+
+^{:go/end 124} (go/method lookup "lookup looks up the counter with the given name in the file,\nallocating it if needed, and returns a pointer to the atomic.Uint64\ncontaining the counter data.\nIf the file has not been opened yet, lookup returns nil.\n" ^counterPtr [^{:tag (* file)} f ^string name]
+  (let [current (.Load (.-current f))]
+    (when (== current nil)
+      (debugPrintf "lookup %s - no mapped file\n" name)
+      (return (lit counterPtr)))
+
+    (let [ptr (.newCounter f name)]
+      (when (== ptr nil)
+        (return (lit counterPtr)))
+
+      (lit counterPtr current ptr))))
+
+
+
+(go/var ^{:doc "ErrDisabled is the error returned when telemetry is disabled.\n"} ErrDisabled (errors/New "counter: disabled as Go telemetry is off"))
+
+(go/var
+  ^{:line 130} [errNoBuildInfo (errors/New "counter: missing build info")]
+  ^{:line 131} [errCorrupt (errors/New "counter: corrupt counter file")])
+
+
+
+
+
+
+^{:go/end 172} (go/func weekEnd "weekEnd returns the day of the week on which uploads occur (and therefore\ncounters expire).\n\nReads the weekends file, creating one if none exists.\n" [] :results [time/Weekday error]
+  ;; If there is no 'weekends' file create it and initialize it
+  ;; to a random day of the week. There is a short interval for
+  ;; a race.
+  (let [weekends (filepath/Join (.LocalDir telemetry/Default) "weekends")
+      ^{:line 143} day (fmt/Sprintf "%d\n" (rand/Intn 7))]
+    (when [(values _ err) (os/ReadFile weekends)] (!= err nil)
+      (when [err (os/MkdirAll (.LocalDir telemetry/Default) 0777)] (!= err nil)
+        (debugPrintf "%v: could not create telemetry.LocalDir %s" err (.LocalDir telemetry/Default))
+        (return 0 err))
+
+      (when [(set! err (os/WriteFile weekends (conv (slice byte) day) 0666))] (!= err nil)
+        (return 0 err)))
+
+
+
+    ;; race is over, read the file
+    (let [(values buf err) (os/ReadFile weekends)]
+      ;; There is no reasonable way of recovering from errors
+      ;; so we just fail
+      (when (!= err nil)
+        (return 0 err))
+
+      (set! buf (bytes/TrimSpace buf))
+      (when (== (len buf) 0)
+        (return 0 (fmt/Errorf "empty weekends file")))
+
+      (let [weekend (conv time/Weekday (- (aget buf 0) \0))] ; 0 is Sunday
+        ;; paranoia to make sure the value is legal
+        (set! weekend % 7)
+        (when (< weekend 0)
+          (set! weekend + 7))
+
+        (return weekend nil)))))
+
+
+
+
+
+
+
+^{:go/end 194} (go/method rotate "rotate checks to see whether the file f needs to be rotated,\nmeaning to start a new counter file with a different date in the name.\nrotate is also used to open the file initially, meaning f.current can be nil.\nIn general rotate should be called just once for each file.\nrotate will arrange a timer to call itself again when necessary.\n" [^{:tag (* file)} f]
+  (let [expiry (.rotate1 f)]
+    (when (not (.IsZero expiry))
+      (let [delay (time/Until expiry)
+          ;; Some tests set CounterTime to a time in the past, causing delay to be
+          ;; negative. Avoid infinite loops by delaying at least a short interval.
+          ;;
+          ;; TODO(rfindley): instead, just also mock AfterFunc.
+          ^:const ^{:line 187 :val 60000000000} minDelay (* 1 time/Minute)]
+        (when (< delay minDelay)
+          (set! delay minDelay))
+
+        ;; TODO(rsc): Does this do the right thing for laptops closing?
+        (time/AfterFunc delay (.-rotate f))))))
+
+
+
+^{:go/end 196} (go/func nop [])
+
+
+
+(go/var ^{:doc "CounterTime returns the current UTC time.\nMutable for testing.\n"} CounterTime ^{:go/end 202} (fn ^time/Time []
+    (.UTC (time/Now))))
+
+
+
+
+^{:go/end 221} (go/func counterSpan "counterSpan returns the current time span for a counter file, as determined\nby [CounterTime] and the [weekEnd].\n" [] :results [^time/Time begin ^time/Time end ^error _]
+  (let [(values year month day) (.Date (CounterTime))]
+    (set! begin (time/Date year month day 0 0 0 0 time/UTC))
+    ;; files always begin today, but expire on the next day of the week
+    ;; from the 'weekends' file.
+    (let [(values weekend err) (weekEnd)]
+      (when (!= err nil)
+        (return (lit time/Time) (lit time/Time) err))
+
+      (let [incr (conv int (- weekend (.Weekday begin)))]
+        (when (<= incr 0)
+          (set! incr + 7)) ; ensure that end is later than begin
+
+        (set! end (time/Date year month (+ day incr) 0 0 0 0 time/UTC))
+        (return begin end nil)))))
+
+
+
+
+^{:go/end 323} (go/method rotate1 "rotate1 rotates the current counter file, returning its expiry, or the zero\ntime if rotation failed.\n" ^time/Time [^{:tag (* file)} f]
+  ;; Cleanup must be performed while unlocked, since invalidateCounters may
+  ;; involve calls to f.lookup.
+  (let [^{:tag (* mappedFile)} previous (zero (* mappedFile))] ; read below while holding the f.mu.
+    (defer (^{:go/end 238} (fn []
+          ;; Counters must be invalidated whenever the mapped file changes.
+          (when [next (.Load (.-current f))] (!= next previous)
+            (.invalidateCounters f)
+            ;; Ensure that the previous counter mapped file is closed.
+            (when (!= previous nil)
+              (.close previous)))))) ; safe to call multiple times
+
+
+
+
+    (.Lock (.-mu f))
+    (defer (.Unlock (.-mu f)))
+
+    (set! previous (.Load (.-current f)))
+
+    (when (!= (.-err f) nil)
+      (return (lit time/Time))) ; already in failed state; nothing to do
+
+
+    (let [fail ^{:go/end 253} (fn [^error err]
+          (debugPrintf "rotate: %v" err)
+          (set! (.-err f) err)
+          (.Store (.-current f) nil))]
+
+
+      (when [(values mode _) (.Mode telemetry/Default)] (== mode "off")
+        ;; TODO(rfindley): do we ever want to make ErrDisabled recoverable?
+        ;; Specifically, if f.err is ErrDisabled, should we check again during when
+        ;; rotating?
+        (fail ErrDisabled)
+        (return (lit time/Time)))
+
+
+      (when (== (.-buildInfo f) nil)
+        (let [(values bi ok) (debug/ReadBuildInfo)]
+          (when (not ok)
+            (fail errNoBuildInfo)
+            (return (lit time/Time)))
+
+          (set! (.-buildInfo f) bi)))
+
+
+      (let [(values begin end err) (counterSpan)]
+        (when (!= err nil)
+          (fail err)
+          (return (lit time/Time)))
+
+        (when (and (.Equal (.-timeBegin f) begin) (.Equal (.-timeEnd f) end))
+          (return (.-timeEnd f))) ; nothing to do
+
+        (set! (values (.-timeBegin f) (.-timeEnd f)) (values begin end))
+
+        (let [(values goVers progPath progVers) (telemetry/ProgramInfo (.-buildInfo f))
+            ^{:line 283} meta (fmt/Sprintf "TimeBegin: %s\nTimeEnd: %s\nProgram: %s\nVersion: %s\nGoVersion: %s\nGOOS: %s\nGOARCH: %s\n\n"
+              (.Format (.-timeBegin f) time/RFC3339) (.Format (.-timeEnd f) time/RFC3339)
+              ^{:line 285} progPath progVers goVers runtime/GOOS runtime/GOARCH)]
+          (when (> (len meta) maxMetaLen) ; should be impossible for our use
+            (fail (fmt/Errorf "metadata too long"))
+            (return (lit time/Time)))
+
+
+          (when (!= progVers "")
+            (set! progVers (+ "@" progVers)))
+
+          (let [baseName (fmt/Sprintf "%s%s-%s-%s-%s-%s.%s.count"
+                (path/Base progPath)
+                ^{:line 296} progVers
+                ^{:line 297} goVers
+                ^{:line 298} runtime/GOOS
+                ^{:line 299} runtime/GOARCH
+                (.Format (.-timeBegin f) telemetry/DateOnly)
+                ^{:line 301} FileVersion)
+
+              ^{:line 303} dir (.LocalDir telemetry/Default)]
+            (when [err (os/MkdirAll dir 0777)] (!= err nil)
+              (fail (fmt/Errorf "making local dir: %v" err))
+              (return (lit time/Time)))
+
+            (let [name (filepath/Join dir baseName)
+
+                (values m ^:assign err) (openMapped name meta)]
+              (when (!= err nil)
+                ;; Mapping failed:
+                ;; If there used to be a mapped file, after cleanup
+                ;; incrementing counters will only change their internal state.
+                ;; (before cleanup the existing mapped file would be updated)
+                (fail (fmt/Errorf "openMapped: %v" err))
+                (return (lit time/Time)))
+
+
+              (debugPrintf "using %v" (.Name (.-f m)))
+              (.Store (.-current f) m)
+              (.-timeEnd f))))))))
+
+
+^{:go/end 329} (go/method newCounter ^{:tag (* atomic/Uint64)} [^{:tag (* file)} f ^string name]
+  (let [(values v cleanup) (.newCounter1 f name)]
+    (cleanup)
+    ^{:line 328} v))
+
+
+^{:go/end 358} (go/method newCounter1 [^{:tag (* file)} f ^string name] :results [^{:tag (* atomic/Uint64)} v ^{:tag (func [])} cleanup]
+  (.Lock (.-mu f))
+  (defer (.Unlock (.-mu f)))
+
+  (let [current (.Load (.-current f))]
+    (when (== current nil)
+      (return nil nop))
+
+    (debugPrintf "newCounter %s in %s\n" name (.Name (.-f current)))
+    (when [(values v _ _ _) (.lookup current name)] (!= v nil)
+      (return v nop))
+
+    (let [(values ^:assign v newM err) (.newCounter current name)]
+      (when (!= err nil)
+        (debugPrintf "newCounter %s: %v\n" name err)
+        (return nil nop))
+
+
+      (set! cleanup nop)
+      (when (!= newM nil)
+        (.Store (.-current f) newM)
+        (set! cleanup ^{:go/end 355} (fn []
+            (.invalidateCounters f)
+            (.close current))))
+
+
+      (return v cleanup))))
+
+
+(go/var
+  ^{:line 361} [^sync/Once openOnce]
+
+
+
+
+
+
+
+  ^{:line 369} [^{:tag bool :doc "rotating reports whether the call to Open had rotate = true.\n\nIn golang/go#68497, we observed that file rotation can break runtime\ndeadlock detection. To minimize the fix for 1.23, we are splitting the\nOpen API into one version that rotates the counter file, and another that\ndoes not. The rotating variable guards against use of both APIs from the\nsame process.\n"} rotating])
+
+
+
+
+
+
+
+^{:go/end 410} (go/func Open "Open associates counting with the defaultFile.\nThe returned function is for testing only, and should\nbe called after all Inc()s are finished, but before\nany reports are generated.\n(Otherwise expired count files will not be deleted on Windows.)\n" ^{:tag (func [])} [^bool rotate]
+  (when telemetry/DisabledOnPlatform
+    (return ^{:go/end 379} (fn [])))
+
+  (let [close ^{:go/end 381} (fn [])]
+    (.Do openOnce ^{:go/end 405} (fn []
+        (set! rotating rotate)
+        (when [(values mode _) (.Mode telemetry/Default)] (== mode "off")
+          ;; Don't open the file when telemetry is off.
+          (set! (.-err defaultFile) ErrDisabled)
+          ;; No need to clean up.
+          (return))
+
+        (debugPrintf "Open(%v)" rotate)
+        (if rotate
+          (.rotate defaultFile) ; calls rotate1 and schedules a rotation
+
+          (.rotate1 defaultFile))
+
+        (set! close ^{:go/end 404} (fn []
+            ;; Once this has been called, the defaultFile is no longer usable.
+            (let [mf (.Load (.-current defaultFile))]
+              (when (== mf nil)
+                ;; telemetry might have been off
+                (return))
+
+              (.close mf))))))
+
+
+    (when (!= rotating rotate)
+      (panic "BUG: Open called with inconsistent values for 'rotate'"))
+
+    ^{:line 409} close))
+
+
+(go/const
+  ^{:line 413} [^{:val "v1"} FileVersion "v1"]
+  ^{:line 414} [^{:val "# telemetry/counter file v1\n"} hdrPrefix (+ "# telemetry/counter file " FileVersion "\n")]
+  ^{:line 415} [^{:val 32} recordUnit 32]
+  ^{:line 416} [^{:val 512} maxMetaLen 512]
+  ^{:line 417} [^{:val 512} numHash 512] ; 2kB for hash table
+  ^{:line 418} [^{:val 4096} maxNameLen (* 4 1024)]
+  ^{:line 419} [^{:val 0} limitOff 0]
+  ^{:line 420} [^{:val 4} hashOff 4]
+  ^{:line 421} [^{:val 16384} pageSize (* 16 1024)]
+  ^{:line 422} [^{:val 16384} minFileLen (* 16 1024)])
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+(go/type mappedFile "A mappedFile is a counter file mmapped into memory.\n\nThe file layout for a mappedFile m is as follows:\n\n\toffset, byte size:                 description\n\t------------------                 -----------\n\t0, hdrLen:                         header, containing metadata; see [mappedHeader]\n\thdrLen+limitOff, 4:                uint32 allocation limit (byte offset of the end of counter records)\n\thdrLen+hashOff, 4*numHash:         hash table, stores uint32 heads of a linked list of records, keyed by name hash\n\thdrLen+hashOff+4*numHash to limit: counter records: see record syntax below\n\nThe record layout is as follows:\n\n\toffset, byte size: description\n\t------------------ -----------\n\t0, 8:              uint64 counter value\n\t8, 12:             uint32 name length\n\t12, 16:            uint32 offset of next record in linked list\n\t16, name length:   counter name\n" (struct
+    ^{:line 445 :tag string} meta
+    ^{:line 446 :tag uint32} hdrLen
+    ^{:line 447 :tag (array 4 byte)} zero
+    ^{:line 448 :tag sync/Once} closeOnce
+    ^{:line 449 :tag (* os/File)} f
+    ^{:line 450 :tag (* mmap/Data)} mapping))
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 522} (go/func openMapped "openMapped opens and memory maps a file.\n\nname is the path to the file.\n\nmeta is the file metadata, which must match the metadata of the file on disk\nexactly.\n\nexisting should be nil the first time this is called for a file,\nand when remapping, should be the previous mappedFile.\n" [^string name ^string meta] :results [^{:tag (* mappedFile)} _ ^error err]
+  (let [(values hdr ^:assign err) (mappedHeader meta)]
+    (when (!= err nil)
+      (return nil err))
+
+
+    (let [(values f ^:assign err) (os/OpenFile name (bit-or os/O_RDWR os/O_CREATE) 0666)]
+      (when (!= err nil)
+        (return nil err))
+
+      ;; Note: using local variable m here, not return value,
+      ;; so that return nil, err does not set m = nil and break the code in the defer.
+      (let [m (addr ^{:go/breaks [2 4]} (lit mappedFile
+              :f f
+              :meta meta))]
+
+
+        (defer (^{:go/end 483} (fn []
+              (when (!= err nil)
+                (.close m)))))
+
+
+
+        (let [(values info ^:assign err) (.Stat f)]
+          (when (!= err nil)
+            (return nil err))
+
+
+          ;; Establish file header and initial data area if not already present.
+          (when (< (.Size info) minFileLen)
+            (when [(values _ err) (.WriteAt f hdr 0)] (!= err nil)
+              (return nil err))
+
+            ;; Write zeros at the end of the file to extend it to minFileLen.
+            (when [(values _ err) (.WriteAt f (subslice (.-zero m)) (conv int64 (- minFileLen (len (.-zero m)))))] (!= err nil)
+              (return nil err))
+
+            (set! (values info err) (.Stat f))
+            (when (!= err nil)
+              (return nil err))
+
+            (when (< (.Size info) minFileLen)
+              (return nil (fmt/Errorf "counter: writing file did not extend it"))))
+
+
+
+          ;; Map into memory.
+          (let [(values mapping ^:assign err) (memmap f)]
+            (when (!= err nil)
+              (return nil err))
+
+            (set! (.-mapping m) mapping)
+            (when (not (bytes/HasPrefix (.-Data (.-mapping m)) hdr))
+              ;; TODO(rfindley): we can and should do better here, reading the mapped
+              ;; header length and comparing headers exactly.
+              (return nil (fmt/Errorf "counter: header mismatch")))
+
+            (set! (.-hdrLen m) (conv uint32 (len hdr)))
+
+            (return m nil)))))))
+
+
+^{:go/end 535} (go/func mappedHeader [^string meta] :results [(slice byte) error]
+  (when (> (len meta) maxMetaLen)
+    (return nil (fmt/Errorf "counter: metadata too large")))
+
+  (let [np (^{:inst [int]} round (len hdrPrefix) 4)
+      ^{:line 529} n (^{:inst [int]} round (+ np 4 (len meta)) 32)
+      ^{:line 530} hdr (make (slice byte) n)]
+    (copy hdr hdrPrefix)
+    (set! @(conv (* uint32) (conv unsafe/Pointer (addr (aget hdr np)))) (conv uint32 n))
+    (copy (subslice hdr (+ np 4)) meta)
+    (return hdr nil)))
+
+
+^{:go/end 554} (go/method place [^{:tag (* mappedFile)} m ^uint32 limit ^string name] :results [^uint32 start ^uint32 end]
+  (when (== limit 0)
+    ;; first record in file
+    (set! limit (+ (.-hdrLen m) hashOff (* 4 numHash))))
+
+  (let [n (^{:inst [uint32]} round (conv uint32 (+ 16 (len name))) recordUnit)]
+    (set! start (^{:inst [uint32]} round limit recordUnit)) ; should already be rounded but just in case
+    ;; Note: Checking for crossing a page boundary would be
+    ;; start/pageSize != (start+n-1)/pageSize,
+    ;; but we are checking for reaching the page end, so no -1.
+    ;; The page end is reserved for use by extend.
+    ;; See the comment in m.extend.
+    (when (!= (/ start pageSize) (/ (+ start n) pageSize))
+      ;; bump start to next page
+      (set! start (^{:inst [uint32]} round limit pageSize)))
+
+    (return start (+ start n))))
+
+
+(go/var memmap mmap/Mmap)
+(go/var munmap mmap/Munmap)
+
+^{:go/end 570} (go/method close [^{:tag (* mappedFile)} m]
+  (.Do (.-closeOnce m) ^{:go/end 569} (fn []
+      (when (!= (.-mapping m) nil)
+        (munmap (.-mapping m))
+        (set! (.-mapping m) nil))
+
+      (when (!= (.-f m) nil)
+        (.Close (.-f m)) ; best effort
+        (set! (.-f m) nil)))))
+
+
+
+
+
+
+
+
+^{:go/end 587} (go/func hash "hash returns the hash code for name.\nThe implementation is FNV-1a.\nThis hash function is a fixed detail of the file format.\nIt cannot be changed without also changing the file format version.\n" ^uint32 [^string name]
+  (let [
+      ^:const ^{:line 578 :val 2166136261} offset32 2166136261
+      ^:const ^:go/grouped ^{:line 579 :val 16777619} prime32 16777619
+
+      ^{:line 581} h (conv uint32 offset32)]
+    (for [i 0] (< i (len name)) (inc! i)
+      (let [c (aget name i)]
+        (set! h (* (bit-xor h (conv uint32 c)) prime32))))
+
+    (% (bit-xor h (>> h 16)) numHash)))
+
+
+^{:go/end 594} (go/method load32 ^uint32 [^{:tag (* mappedFile)} m ^uint32 off]
+  (when (>= (conv int64 off) (conv int64 (len (.-Data (.-mapping m)))))
+    (return 0))
+
+  (.Load (conv (* atomic/Uint32) (conv unsafe/Pointer (addr (aget (.-Data (.-mapping m)) off))))))
+
+
+^{:go/end 601} (go/method cas32 ^bool [^{:tag (* mappedFile)} m ^uint32 off ^uint32 old ^uint32 new]
+  (when (>= (conv int64 off) (conv int64 (len (.-Data (.-mapping m)))))
+    (panic "bad cas32")) ; return false would probably loop
+
+  (.CompareAndSwap (conv (* atomic/Uint32) (conv unsafe/Pointer (addr (aget (.-Data (.-mapping m)) off)))) old new))
+
+
+
+
+
+^{:go/end 618} (go/method entryAt "entryAt reads a counter record at the given byte offset.\n\nSee the documentation for [mappedFile] for a description of the counter record layout.\n" [^{:tag (* mappedFile)} m ^uint32 off] :results [^{:tag (slice byte)} name ^uint32 next ^{:tag (* atomic/Uint64)} v ^bool ok]
+  (when (or (< off (+ (.-hdrLen m) hashOff)) (> (+ (conv int64 off) 16) (conv int64 (len (.-Data (.-mapping m))))))
+    (return nil 0 nil false))
+
+  (let [nameLen (bit-and (.load32 m (+ off 8)) 0x00ffffff)]
+    (when (or (== nameLen 0) (> (+ (conv int64 off) 16 (conv int64 nameLen)) (conv int64 (len (.-Data (.-mapping m))))))
+      (return nil 0 nil false))
+
+    (set! name (subslice (.-Data (.-mapping m)) (+ off 16) (+ off 16 nameLen)))
+    (set! next (.load32 m (+ off 12)))
+    (set! v (conv (* atomic/Uint64) (conv unsafe/Pointer (addr (aget (.-Data (.-mapping m)) off)))))
+    (return name next v true)))
+
+
+
+
+
+
+
+
+^{:go/end 636} (go/method writeEntryAt "writeEntryAt writes a new counter record at the given offset.\n\nSee the documentation for [mappedFile] for a description of the counter record layout.\n\nwriteEntryAt only returns false in the presence of some form of corruption:\nan offset outside the bounds of the record region in the mapped file.\n" [^{:tag (* mappedFile)} m ^uint32 off ^string name] :results [^{:tag (* atomic/Uint32)} next ^{:tag (* atomic/Uint64)} v ^bool ok]
+  ;; TODO(rfindley): shouldn't this first condition be off < m.hdrLen+hashOff+4*numHash?
+  (when (or (< off (+ (.-hdrLen m) hashOff)) (> (+ (conv int64 off) 16 (conv int64 (len name))) (conv int64 (len (.-Data (.-mapping m))))))
+    (return nil nil false))
+
+  (copy (subslice (.-Data (.-mapping m)) (+ off 16)) name)
+  (atomic/StoreUint32 (conv (* uint32) (conv unsafe/Pointer (addr (aget (.-Data (.-mapping m)) (+ off 8))))) (bit-or (conv uint32 (len name)) 0xff000000))
+  (set! next (conv (* atomic/Uint32) (conv unsafe/Pointer (addr (aget (.-Data (.-mapping m)) (+ off 12))))))
+  (set! v (conv (* atomic/Uint64) (conv unsafe/Pointer (addr (aget (.-Data (.-mapping m)) off)))))
+  (return next v true))
+
+
+
+
+
+
+
+^{:go/end 659} (go/method lookup "lookup searches the mapped file for a counter record with the given name, returning:\n  - v: the mapped counter value\n  - headOff: the offset of the head pointer (see [mappedFile])\n  - head: the value of the head pointer\n  - ok: whether lookup succeeded\n" [^{:tag (* mappedFile)} m ^string name] :results [^{:tag (* atomic/Uint64)} v ^uint32 headOff ^uint32 head ^bool ok]
+  (let [h (hash name)]
+    (set! headOff (+ (.-hdrLen m) hashOff (* h 4)))
+    (set! head (.load32 m headOff))
+    (let [off head]
+      (while (!= off 0)
+        (let [(values ename next v ok) (.entryAt m off)]
+          (when (not ok)
+            (return nil 0 0 false))
+
+          (when (== (conv string ename) name)
+            (return v headOff head true))
+
+          (set! off next)))
+
+      (return nil headOff head true))))
+
+
+
+
+
+^{:go/end 778} (go/method newCounter "newCounter allocates and writes a new counter record with the given name.\n\nIf name is already recorded in the file, newCounter returns the existing counter.\n" [^{:tag (* mappedFile)} m ^string name] :results [^{:tag (* atomic/Uint64)} v ^{:tag (* mappedFile)} m1 ^error err]
+  (when (> (len name) maxNameLen)
+    (return nil nil (fmt/Errorf "counter name too long")))
+
+  (let [orig m]
+    (defer (^{:go/end 677} (fn []
+          (when (!= m orig)
+            (if (!= err nil)
+              (.close m)
+
+              (set! m1 m))))))
+
+
+
+
+    (let [(values ^:assign v headOff head ok) (.lookup m name)]
+      (for [tries 0] (not ok) (inc! tries)
+        (when (>= tries 10)
+          (debugFatalf "corrupt: failed to remap after 10 tries")
+          (return nil nil errCorrupt))
+
+        ;; Lookup found an invalid pointer,
+        ;; perhaps because the file has grown larger than the mapping.
+        (let [limit (.load32 m (+ (.-hdrLen m) limitOff))]
+          (when [(values limit datalen) (values (conv int64 limit) (conv int64 (len (.-Data (.-mapping m)))))] (<= limit datalen)
+            ;; Mapping doesn't need to grow, so lookup found actual corruption,
+            ;; in the form of an entry pointer that exceeds the recorded allocation
+            ;; limit. This should never happen, unless the actual file contents are
+            ;; corrupt.
+            (debugFatalf "corrupt: limit %d is within mapping length %d" limit datalen)
+            (return nil nil errCorrupt))
+
+          ;; That the recorded limit is greater than the mapped data indicates that
+          ;; an external process has extended the file. Re-map to pick up this extension.
+          (let [(values newM err) (openMapped (.Name (.-f m)) (.-meta m))]
+            (when (!= err nil)
+              (return nil nil err))
+
+            (when [(values limit datalen) (values (conv int64 limit) (conv int64 (len (.-Data (.-mapping newM)))))] (> limit datalen)
+              ;; We've re-mapped, yet limit still exceeds the data length. This
+              ;; indicates that the underlying file was somehow truncated, or the
+              ;; recorded limit is corrupt.
+              (debugFatalf "corrupt: limit %d exceeds file size %d" limit datalen)
+              (return nil nil errCorrupt))
+
+            ;; If m != orig, this is at least the second time around the loop
+            ;; trying to open the mapping. Close the previous attempt.
+            (when (!= m orig)
+              (.close m))
+
+            (set! m newM)
+            (set! (values v headOff head ok) (.lookup m name)))))
+
+      (when (!= v nil)
+        (return v nil nil))
+
+
+      ;; Reserve space for new record.
+      ;; We are competing against other programs using the same file,
+      ;; so we use a compare-and-swap on the allocation limit in the header.
+      (let [(values ^uint32 start ^uint32 end) (zero uint32)]
+        (while true
+          ;; Determine where record should end, and grow file if needed.
+          (let [limit (.load32 m (+ (.-hdrLen m) limitOff))]
+            (set! (values start end) (.place m limit name))
+            (debugPrintf "place %s at %#x-%#x\n" name start end)
+            (when (> (conv int64 end) (conv int64 (len (.-Data (.-mapping m)))))
+              (let [(values newM err) (.extend m end)]
+                (when (!= err nil)
+                  (return nil nil err))
+
+                (when (!= m orig)
+                  (.close m))
+
+                (set! m newM)
+                (continue)))
+
+
+            ;; Attempt to reserve that space for our record.
+            (when (.cas32 m (+ (.-hdrLen m) limitOff) limit end)
+              (break))))
+
+
+
+        ;; Write record.
+        (let [(values next ^:assign v ^:assign ok) (.writeEntryAt m start name)]
+          (when (not ok)
+            (debugFatalf "corrupt: failed to write entry: %#x+%d vs %#x\n" start (len name) (len (.-Data (.-mapping m))))
+            (return nil nil errCorrupt)) ; more likely our math is wrong
+
+
+          ;; Link record into hash chain, making sure not to introduce a duplicate.
+          ;; We know name does not appear in the chain starting at head.
+          (while true
+            (.Store next head)
+            (when (.cas32 m headOff head start)
+              (return v nil nil))
+
+
+            ;; Check new elements in chain for duplicates.
+            (let [old head]
+              (set! head (.load32 m headOff))
+              (for [off head] (!= off old) _
+                (let [(values ename enext v ok) (.entryAt m off)]
+                  (when (not ok)
+                    (return nil nil errCorrupt))
+
+                  (when (== (conv string ename) name)
+                    (.Store next (bit-not (conv uint32 0))) ; mark ours as dead
+                    (return v nil nil))
+
+                  (set! off enext))))))))))
+
+
+
+
+^{:go/end 808} (go/method extend [^{:tag (* mappedFile)} m ^uint32 end] :results [(* mappedFile) error]
+  (set! end (^{:inst [uint32]} round end pageSize))
+  (let [(values info err) (.Stat (.-f m))]
+    (when (!= err nil)
+      (return nil err))
+
+    (when (< (.Size info) (conv int64 end))
+      ;; Note: multiple processes could be calling extend at the same time,
+      ;; but this write only writes the last 4 bytes of the page.
+      ;; The last 4 bytes of the page are reserved for this purpose and hold no data.
+      ;; (In m.place, if a new record would extend to the very end of the page,
+      ;; it is placed in the next page instead.)
+      ;; So it is fine if multiple processes extend at the same time.
+      (when [(values _ err) (.WriteAt (.-f m) (subslice (.-zero m)) (- (conv int64 end) (conv int64 (len (.-zero m)))))] (!= err nil)
+        (return nil err)))
+
+
+    (let [(values newM ^:assign err) (openMapped (.Name (.-f m)) (.-meta m))]
+      (when (!= err nil)
+        (return nil err))
+
+      (when (< (conv int64 (len (.-Data (.-mapping newM)))) (conv int64 end))
+        ;; File system or logic bug: new file is somehow not extended.
+        ;; See go.dev/issue/68311, where this appears to have been happening.
+        (.close newM)
+        (return nil errCorrupt))
+
+      (return newM err))))
+
+
+
+
+^{:go/end 814} (go/func round "round returns x rounded up to the next multiple of unit,\nwhich must be a power of two.\n" :type-params [^{:tag (| int uint32)} T] ^T [^T x ^{:go/grouped false :tag T} unit]
+  (bit-and-not (- (+ x unit) 1) (- unit 1)))

@@ -1,0 +1,217 @@
+;; Copyright 2018 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.cmd.compile.internal.escape) (go/file "stmt.go" :imports [
+
+
+    ^{:line 8} [base "cmd/compile/internal/base"]
+    ^{:line 9} [ir "cmd/compile/internal/ir"]
+    ^{:line 10} [fmt "fmt"]])
+
+
+
+^{:go/end 196} (go/method stmt "stmt evaluates a single Go statement.\n" [^{:tag (* escape)} e ^ir/Node n]
+  (when (== n nil)
+    (return))
+
+
+  (let [lno (ir/SetPos n)]
+    (defer (^{:go/end 22} (fn []
+          (set! base/Pos lno))))
+
+
+    (when (> (.-LowerM base/Flag) 2)
+      (fmt/Printf "%v:[%d] %v stmt: %v\n" (base/FmtPos base/Pos) (.-loopDepth e) (.-curfn e) n))
+
+
+    (.stmts e (.Init n))
+
+    (switch (.Op n)
+      (default
+        (base/Fatalf "unexpected stmt: %v" n))
+
+      (case [ir/OFALL ir/OINLMARK])
+      ;; nop
+
+      (case [ir/OBREAK ir/OCONTINUE ir/OGOTO])
+      ;; TODO(mdempsky): Handle dead code?
+
+      (case [ir/OBLOCK]
+        (let [n (assert (* ir/BlockStmt) n)]
+          (.stmts e (.-List n))))
+
+      (case [ir/ODCL]
+        ;; Record loop depth at declaration.
+        (let [n (assert (* ir/Decl) n)]
+          (when (not (ir/IsBlank (.-X n)))
+            (.dcl e (.-X n)))))
+
+
+      (case [ir/OLABEL]
+        (let [n (assert (* ir/LabelStmt) n)]
+          (when (.IsBlank (.-Label n))
+            (break))
+
+          (switch (aget (.-labels e) (.-Label n))
+            (case [nonlooping]
+              (when (> (.-LowerM base/Flag) 2)
+                (fmt/Printf "%v:%v non-looping label\n" (base/FmtPos base/Pos) n)))
+
+            (case [looping]
+              (when (> (.-LowerM base/Flag) 2)
+                (fmt/Printf "%v: %v looping label\n" (base/FmtPos base/Pos) n))
+
+              (inc! (.-loopDepth e)))
+            (default
+              (base/Fatalf "label %v missing tag" (.-Label n))))
+
+          (delete (.-labels e) (.-Label n))))
+
+      (case [ir/OIF]
+        (let [n (assert (* ir/IfStmt) n)]
+          (.discard e (.-Cond n))
+          (.block e (.-Body n))
+          (.block e (.-Else n))))
+
+      (case [ir/OCHECKNIL]
+        (let [n (assert (* ir/UnaryExpr) n)]
+          (.discard e (.-X n))))
+
+      (case [ir/OFOR]
+        (let [n (assert (* ir/ForStmt) n)]
+          (base/Assert (not (.-DistinctVars n))) ; Should all be rewritten before escape analysis
+          (inc! (.-loopDepth e))
+          (.discard e (.-Cond n))
+          (.stmt e (.-Post n))
+          (.block e (.-Body n))
+          (dec! (.-loopDepth e))))
+
+      (case [ir/ORANGE]
+        ;; for Key, Value = range X { Body }
+        (let [n (assert (* ir/RangeStmt) n)]
+          (base/Assert (not (.-DistinctVars n))) ; Should all be rewritten before escape analysis
+
+          ;; X is evaluated outside the loop and persists until the loop
+          ;; terminates.
+          (let [tmp (.newLoc e nil true)]
+            (.expr e (.asHole tmp) (.-X n))
+
+            (inc! (.-loopDepth e))
+            (let [ks (.addrs e (lit (slice ir/Node) (.-Key n) (.-Value n)))]
+              (if (.IsArray (.Type (.-X n)))
+                ^{:go/via [batch]} (.flow e (.note (aget ks 1) n "range") tmp)
+
+                ^{:go/via [batch]} (.flow e (.deref (aget ks 1) n "range-deref") tmp))
+
+              (.reassigned e ks n)
+
+              (.block e (.-Body n))
+              (dec! (.-loopDepth e))))))
+
+      (case [ir/OSWITCH]
+        (let [n (assert (* ir/SwitchStmt) n)]
+
+          (if [(values guard ok) (assert (* ir/TypeSwitchGuard) (.-Tag n))] ok
+            (let [^{:tag (slice hole)} ks (zero (slice hole))]
+              (when (!= (.-Tag guard) nil)
+                (range [_ cas (.-Cases n)]
+                  (let [cv (.-Var cas)
+                      ^{:line 120} k (.dcl e cv)] ; type switch variables have no ODCL.
+                    (when (.HasPointers ^{:go/via [miniExpr]} (.Type cv))
+                      (set! ks (append ks (.dotType k ^{:go/via [miniExpr]} (.Type cv) cas "switch case")))))))
+
+
+
+              (.expr e (.teeHole e (spread ks)) (.-X (assert (* ir/TypeSwitchGuard) (.-Tag n)))))
+
+            (.discard e (.-Tag n)))
+
+
+          (range [_ cas (.-Cases n)]
+            (.discards e (.-List cas))
+            (.block e (.-Body cas)))))
+
+
+      (case [ir/OSELECT]
+        (let [n (assert (* ir/SelectStmt) n)]
+          (range [_ cas (.-Cases n)]
+            (.stmt e (.-Comm cas))
+            (.block e (.-Body cas)))))
+
+      (case [ir/ORECV]
+        ;; TODO(mdempsky): Consider e.discard(n.Left).
+        (let [n (assert (* ir/UnaryExpr) n)]
+          (.exprSkipInit e ^{:go/via [batch]} (.discardHole e) n))) ; already visited n.Ninit
+      (case [ir/OSEND]
+        (let [n (assert (* ir/SendStmt) n)]
+          (.discard e (.-Chan n))
+          (.assignHeap e (.-Value n) "send" n)))
+
+      (case [ir/OAS]
+        (let [n (assert (* ir/AssignStmt) n)]
+          (.assignList e (lit (slice ir/Node) (.-X n)) (lit (slice ir/Node) (.-Y n)) "assign" n)))
+      (case [ir/OASOP]
+        (let [n (assert (* ir/AssignOpStmt) n)]
+          ;; TODO(mdempsky): Worry about OLSH/ORSH?
+          (.assignList e (lit (slice ir/Node) (.-X n)) (lit (slice ir/Node) (.-Y n)) "assign" n)))
+      (case [ir/OAS2]
+        (let [n (assert (* ir/AssignListStmt) n)]
+          (.assignList e (.-Lhs n) (.-Rhs n) "assign-pair" n)))
+
+      (case [ir/OAS2DOTTYPE] ; v, ok = x.(type)
+        (let [n (assert (* ir/AssignListStmt) n)]
+          (.assignList e (.-Lhs n) (.-Rhs n) "assign-pair-dot-type" n)))
+      (case [ir/OAS2MAPR] ; v, ok = m[k]
+        (let [n (assert (* ir/AssignListStmt) n)]
+          (.assignList e (.-Lhs n) (.-Rhs n) "assign-pair-mapr" n)))
+      (case [ir/OAS2RECV ir/OSELRECV2] ; v, ok = <-ch
+        (let [n (assert (* ir/AssignListStmt) n)]
+          (.assignList e (.-Lhs n) (.-Rhs n) "assign-pair-receive" n)))
+
+      (case [ir/OAS2FUNC]
+        (let [n (assert (* ir/AssignListStmt) n)]
+          (.stmts e (.Init (aget (.-Rhs n) 0)))
+          (let [ks (.addrs e (.-Lhs n))]
+            (.call e ks (aget (.-Rhs n) 0))
+            (.reassigned e ks n))))
+      (case [ir/ORETURN]
+        (let [n (assert (* ir/ReturnStmt) n)
+            ^{:line 180} results (.Results (.Type (.-curfn e)))
+            ^{:line 181} dsts (make (slice ir/Node) (len results))]
+          (range [i res results]
+            (aset dsts i (assert (* ir/Name) (.-Nname res))))
+
+          (.assignList e dsts (.-Results n) "return" n)))
+      (case [ir/OCALLFUNC ir/OCALLMETH ir/OCALLINTER ir/OINLCALL ir/OCLEAR ir/OCLOSE ir/OCOPY ir/ODELETE ir/OPANIC ir/OPRINT ir/OPRINTLN ir/ORECOVER]
+        (.call e nil n))
+      (case [ir/OGO ir/ODEFER]
+        (let [n (assert (* ir/GoDeferStmt) n)]
+          (.goDeferStmt e n)))
+
+      (case [ir/OTAILCALL]
+        (let [n (assert (* ir/TailCallStmt) n)]
+          (.call e nil (.-Call n)))))))
+
+
+
+^{:go/end 202} (go/method stmts [^{:tag (* escape)} e ^ir/Nodes l]
+  (range [_ n l]
+    (.stmt e n)))
+
+
+
+
+^{:go/end 209} (go/method block "block is like stmts, but preserves loopDepth.\n" [^{:tag (* escape)} e ^ir/Nodes l]
+  (let [old (.-loopDepth e)]
+    (.stmts e l)
+    (set! (.-loopDepth e) old)))
+
+
+^{:go/end 218} (go/method dcl ^hole [^{:tag (* escape)} e ^{:tag (* ir/Name)} n]
+  (when (or (!= (.-Curfn n) (.-curfn e)) (.IsClosureVar n))
+    (base/Fatalf "bad declaration of %v" n))
+
+  (let [loc ^{:go/via [batch]} (.oldLoc e n)]
+    (set! (.-loopDepth loc) (.-loopDepth e))
+    (.asHole loc)))

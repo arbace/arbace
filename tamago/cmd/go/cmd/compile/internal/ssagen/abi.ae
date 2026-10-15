@@ -1,0 +1,596 @@
+;; Copyright 2009 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.cmd.compile.internal.ssagen) (go/file "abi.go" :imports [
+
+
+    ^{:line 8} [fmt "fmt"]
+    ^{:line 9} [buildcfg "internal/buildcfg"]
+    ^{:line 10} [log "log"]
+    ^{:line 11} [os "os"]
+    ^{:line 12} [strings "strings"]
+
+    ^{:line 14} [abi "cmd/compile/internal/abi"]
+    ^{:line 15} [base "cmd/compile/internal/base"]
+    ^{:line 16} [ir "cmd/compile/internal/ir"]
+    ^{:line 17} [objw "cmd/compile/internal/objw"]
+    ^{:line 18} [typecheck "cmd/compile/internal/typecheck"]
+    ^{:line 19} [types "cmd/compile/internal/types"]
+    ^{:line 20} [obj "cmd/internal/obj"]
+    ^{:line 21} [wasm "cmd/internal/obj/wasm"]
+
+    ^:alias ^{:line 23} [rtabi "internal/abi"]])
+
+
+
+
+(go/type SymABIs "SymABIs records information provided by the assembler about symbol\ndefinition ABIs and reference ABIs.\n" (struct
+    ^{:line 29 :tag (map string obj/ABI)} defs
+    ^{:line 30 :tag (map string obj/ABISet)} refs))
+
+
+^{:go/end 38} (go/func NewSymABIs ^{:tag (* SymABIs)} []
+  (addr ^{:go/breaks [2 4]} (lit SymABIs
+      :defs (make (map string obj/ABI))
+      :refs (make (map string obj/ABISet)))))
+
+
+
+
+
+
+
+
+^{:go/end 50} (go/method canonicalize "canonicalize returns the canonical name used for a linker symbol in\ns's maps. Symbols in this package may be written either as \"\".X or\nwith the package's import path already in the symbol. This rewrites\nboth to use the full path, which matches compiler-generated linker\nsymbol names.\n" ^string [^{:tag (* SymABIs)} s ^string linksym]
+  (when (strings/HasPrefix linksym "\"\".")
+    (panic (+ "non-canonical symbol name: " linksym)))
+
+  ^{:line 49} linksym)
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 100} (go/method ReadSymABIs "ReadSymABIs reads a symabis file that specifies definitions and\nreferences of text symbols by ABI.\n\nThe symabis format is a set of lines, where each line is a sequence\nof whitespace-separated fields. The first field is a verb and is\neither \"def\" for defining a symbol ABI or \"ref\" for referencing a\nsymbol using an ABI. For both \"def\" and \"ref\", the second field is\nthe symbol name and the third field is the ABI name, as one of the\nnamed cmd/internal/obj.ABI constants.\n" [^{:tag (* SymABIs)} s ^string file]
+  (let [(values data err) (os/ReadFile file)]
+    (when (!= err nil)
+      (log/Fatalf "-symabis: %v" err))
+
+
+    (range [lineNum line (strings/Split (conv string data) "\n")]
+      (inc! lineNum) ; 1-based
+      (set! line (strings/TrimSpace line))
+      (when (or (== line "") (strings/HasPrefix line "#"))
+        (continue))
+
+
+      (let [parts (strings/Fields line)]
+        (switch (aget parts 0)
+          (case ["def" "ref"]
+            ;; Parse line.
+            (when (!= (len parts) 3)
+              (log/Fatalf "%s:%d: invalid symabi: syntax is \"%s sym abi\"" file lineNum (aget parts 0)))
+
+            (let [(values sym abistr) (values (aget parts 1) (aget parts 2))
+                (values abi valid) (obj/ParseABI abistr)]
+              (when (not valid)
+                (log/Fatalf "%s:%d: invalid symabi: unknown abi \"%s\"" file lineNum abistr))
+
+
+              (set! sym (.canonicalize s sym))
+
+              ;; Record for later.
+              (if (== (aget parts 0) "def") (do
+                  (aset (.-defs s) sym abi)
+                  (inc! (.-DwTextCount base/Ctxt)))
+
+                (set! (aget (.-refs s) sym) bit-or (obj/ABISetOf abi)))))
+
+          (default
+            (log/Fatalf "%s:%d: invalid symabi type \"%s\"" file lineNum (aget parts 0))))))))
+
+
+
+
+
+^{:go/end 112} (go/method HasDef "HasDef returns whether the given symbol has an assembly definition.\n" ^bool [^{:tag (* SymABIs)} s ^{:tag (* types/Sym)} sym]
+  (let [symName (.-Linkname sym)]
+    (when (== symName "")
+      (set! symName (+ (.-Prefix (.-Pkg sym)) "." (.-Name sym))))
+
+    (set! symName (.canonicalize s symName))
+
+    (let [(values _ hasDefABI) (aget (.-defs s) symName)]
+      ^{:line 111} hasDefABI)))
+
+
+
+
+^{:go/end 234} (go/method GenABIWrappers "GenABIWrappers applies ABI information to Funcs and generates ABI\nwrapper functions where necessary.\n" [^{:tag (* SymABIs)} s]
+  ;; For cgo exported symbols, we tell the linker to export the
+  ;; definition ABI to C. That also means that we don't want to
+  ;; create ABI wrappers even if there's a linkname.
+  ;;
+  ;; TODO(austin): Maybe we want to create the ABI wrappers, but
+  ;; ensure the linker exports the right ABI definition under
+  ;; the unmangled name?
+  (let [cgoExports (make (map string (slice (* (slice string)))))]
+    (range [i prag (.-CgoPragmas typecheck/Target)]
+      (switch (aget prag 0)
+        (case ["cgo_export_static" "cgo_export_dynamic"]
+          (let [symName (.canonicalize s (aget prag 1))
+              ^{:line 129} pprag (addr (aget (.-CgoPragmas typecheck/Target) i))]
+            (aset cgoExports symName (append (aget cgoExports symName) pprag))))))
+
+
+
+    ;; Apply ABI defs and refs to Funcs and generate wrappers.
+    ;;
+    ;; This may generate new decls for the wrappers, but we
+    ;; specifically *don't* want to visit those, lest we create
+    ;; wrappers for wrappers.
+    (range [_ fn (.-Funcs typecheck/Target)]
+      (let [nam (.-Nname fn)]
+        (when (ir/IsBlank nam)
+          (continue))
+
+        (let [sym (.Sym nam)
+
+            ^{:line 146} symName (.-Linkname sym)]
+          (when (== symName "")
+            (set! symName (+ (.-Prefix (.-Pkg sym)) "." (.-Name sym))))
+
+          (set! symName (.canonicalize s symName))
+
+          ;; Apply definitions.
+          (let [(values defABI hasDefABI) (aget (.-defs s) symName)]
+            (when hasDefABI
+              (when (!= (len (.-Body fn)) 0)
+                (base/ErrorfAt ^{:go/via [miniNode]} (.Pos fn) 0 "%v defined in both Go and assembly" fn))
+
+              (set! (.-ABI fn) defABI))
+
+
+            (when (!= (bit-and (.-Pragma fn) ir/CgoUnsafeArgs) 0)
+              ;; CgoUnsafeArgs indicates the function (or its callee) uses
+              ;; offsets to dispatch arguments, which currently using ABI0
+              ;; frame layout. Pin it to ABI0.
+              (set! (.-ABI fn) obj/ABI0)
+              ;; Propagate linkname attribute, which was set on the ABIInternal
+              ;; symbol.
+              (when ^{:go/via [Attribute]} (.IsLinkname (.Linksym sym))
+                ^{:go/via [Attribute]} (.Set (.LinksymABI sym (.-ABI fn)) obj/AttrLinkname true))
+
+              (when ^{:go/via [Attribute]} (.IsLinknameStd (.Linksym sym))
+                ^{:go/via [Attribute]} (.Set (.LinksymABI sym (.-ABI fn)) obj/AttrLinknameStd true)))
+
+
+
+            ;; If cgo-exported, add the definition ABI to the cgo
+            ;; pragmas.
+            (let [cgoExport (aget cgoExports symName)]
+              (range [_ pprag cgoExport]
+                ;; The export pragmas have the form:
+                ;;
+                ;;   cgo_export_* <local> [<remote>]
+                ;;
+                ;; If <remote> is omitted, it's the same as
+                ;; <local>.
+                ;;
+                ;; Expand to
+                ;;
+                ;;   cgo_export_* <local> <remote> <ABI>
+                (when (== (len @pprag) 2)
+                  (set! @pprag (append @pprag (aget @pprag 1))))
+
+                ;; Add the ABI argument.
+                (set! @pprag (append @pprag (.String (.-ABI fn)))))
+
+
+              ;; Apply references.
+              (when [(values abis ok) (aget (.-refs s) symName)] ok
+                (set! (.-ABIRefs fn) bit-or abis))
+
+              ;; Assume all functions are referenced at least as
+              ;; ABIInternal, since they may be referenced from
+              ;; other packages.
+              (.Set (.-ABIRefs fn) obj/ABIInternal true)
+
+              ;; If a symbol is defined in this package (either in
+              ;; Go or assembly) and given a linkname, it may be
+              ;; referenced from another package, so make it
+              ;; callable via any ABI. It's important that we know
+              ;; it's defined in this package since other packages
+              ;; may "pull" symbols using linkname and we don't want
+              ;; to create duplicate ABI wrappers.
+              ;;
+              ;; However, if it's given a linkname for exporting to
+              ;; C, then we don't make ABI wrappers because the cgo
+              ;; tool wants the original definition.
+              (let [hasBody (!= (len (.-Body fn)) 0)]
+                (when (and (!= (.-Linkname sym) "") ^:go/paren (or hasBody hasDefABI) (== (len cgoExport) 0))
+                  (set! (.-ABIRefs fn) bit-or obj/ABISetCallable))
+
+
+                ;; Double check that cgo-exported symbols don't get
+                ;; any wrappers.
+                (when (and (> (len cgoExport) 0) (!= (bit-and-not (.-ABIRefs fn) (obj/ABISetOf (.-ABI fn))) 0))
+                  (base/Fatalf "cgo exported function %v cannot have ABI wrappers" fn))
+
+
+                (when (not ^{:go/via [Flags]} (.-RegabiWrappers buildcfg/Experiment))
+                  (continue))
+
+
+                (forEachWrapperABI fn makeABIWrapper)))))))))
+
+
+
+^{:go/end 248} (go/func forEachWrapperABI [^{:tag (* ir/Func)} fn ^{:tag (func [^{:tag (* ir/Func)} fn ^obj/ABI wrapperABI])} cb]
+  (let [need (bit-and-not (.-ABIRefs fn) (obj/ABISetOf (.-ABI fn)))]
+    (when (== need 0)
+      (return))
+
+
+    (for [wrapperABI (conv obj/ABI 0)] (< wrapperABI obj/ABICount) (inc! wrapperABI)
+      (when (not (.Get need wrapperABI))
+        (continue))
+
+      (cb fn wrapperABI))))
+
+
+
+
+
+^{:go/end 357} (go/func makeABIWrapper "makeABIWrapper creates a new function that will be called with\nwrapperABI and calls \"f\" using f.ABI.\n" [^{:tag (* ir/Func)} f ^obj/ABI wrapperABI]
+  (when (!= (.-ABIWrap base/Debug) 0)
+    (fmt/Fprintf os/Stderr "=-= %v to %v wrapper for %v\n" wrapperABI (.-ABI f) f))
+
+
+  ;; Q: is this needed?
+  (let [savepos base/Pos
+      ^{:line 259} savedcurfn ir/CurFunc
+
+      ^{:line 261} pos base/AutogeneratedPos]
+    (set! base/Pos pos)
+
+    ;; At the moment we don't support wrapping a method, we'd need machinery
+    ;; below to handle the receiver. Panic if we see this scenario.
+    (let [ft ^{:go/via [miniExpr]} (.Type (.-Nname f))]
+      (when (!= (.NumRecvs ft) 0)
+        (base/ErrorfAt ^{:go/via [miniNode]} (.Pos f) 0 "makeABIWrapper support for wrapping methods not implemented")
+        (return))
+
+
+      ;; Reuse f's types.Sym to create a new ODCLFUNC/function.
+      ;; TODO(mdempsky): Means we can't set sym.Def in Declfunc, ugh.
+      (let [fn (ir/NewFunc pos pos (.Sym f) (types/NewSignature nil
+              (typecheck/NewFuncParams (.Params ft))
+              (typecheck/NewFuncParams (.Results ft))))]
+        (set! (.-ABI fn) wrapperABI)
+        (typecheck/DeclFunc fn)
+
+        (.SetABIWrapper fn true)
+        (.SetDupok fn true)
+
+        ;; Propagate linkname attribute.
+        ^{:go/via [Attribute]} (.Set (.LinksymABI fn (.-ABI fn)) obj/AttrLinkname ^{:go/via [Attribute]} (.IsLinkname (.Linksym f)))
+        ^{:go/via [Attribute]} (.Set (.LinksymABI fn (.-ABI fn)) obj/AttrLinknameStd ^{:go/via [Attribute]} (.IsLinknameStd (.Linksym f)))
+
+        ;; ABI0-to-ABIInternal wrappers will be mainly loading params from
+        ;; stack into registers (and/or storing stack locations back to
+        ;; registers after the wrapped call); in most cases they won't
+        ;; need to allocate stack space, so it should be OK to mark them
+        ;; as NOSPLIT in these cases. In addition, my assumption is that
+        ;; functions written in assembly are NOSPLIT in most (but not all)
+        ;; cases. In the case of an ABIInternal target that has too many
+        ;; parameters to fit into registers, the wrapper would need to
+        ;; allocate stack space, but this seems like an unlikely scenario.
+        ;; Hence: mark these wrappers NOSPLIT.
+        ;;
+        ;; ABIInternal-to-ABI0 wrappers on the other hand will be taking
+        ;; things in registers and pushing them onto the stack prior to
+        ;; the ABI0 call, meaning that they will always need to allocate
+        ;; stack space. If the compiler marks them as NOSPLIT this seems
+        ;; as though it could lead to situations where the linker's
+        ;; nosplit-overflow analysis would trigger a link failure. On the
+        ;; other hand if they not tagged NOSPLIT then this could cause
+        ;; problems when building the runtime (since there may be calls to
+        ;; asm routine in cases where it's not safe to grow the stack). In
+        ;; most cases the wrapper would be (in effect) inlined, but are
+        ;; there (perhaps) indirect calls from the runtime that could run
+        ;; into trouble here.
+        ;; FIXME: at the moment all.bash does not pass when I leave out
+        ;; NOSPLIT for these wrappers, so all are currently tagged with NOSPLIT.
+        (set! (.-Pragma fn) bit-or ir/Nosplit)
+
+        ;; Generate call. Use tail call if no params and no returns,
+        ;; but a regular call otherwise.
+        ;;
+        ;; Note: ideally we would be using a tail call in cases where
+        ;; there are params but no returns for ABI0->ABIInternal wrappers,
+        ;; provided that all params fit into registers (e.g. we don't have
+        ;; to allocate any stack space). Doing this will require some
+        ;; extra work in typecheck/walk/ssa, might want to add a new node
+        ;; OTAILCALL or something to this effect.
+        (let [tailcall (and (== (.NumResults (.Type fn)) 0) (== (.NumParams (.Type fn)) 0) (== (.NumRecvs (.Type fn)) 0))]
+          (when (and ^:go/paren (or (== ^{:go/via [Arch]} (.-Name (.-Arch base/Ctxt)) "ppc64le") (== ^{:go/via [Arch]} (.-Name (.-Arch base/Ctxt)) "ppc64")) (.-Flag_dynlink base/Ctxt))
+            ;; cannot tailcall on PPC64 with dynamic linking, as we need
+            ;; to restore R2 after call.
+            (set! tailcall false))
+
+          (when (and (== ^{:go/via [Arch]} (.-Name (.-Arch base/Ctxt)) "amd64") (== wrapperABI obj/ABIInternal))
+            ;; cannot tailcall from ABIInternal to ABI0 on AMD64, as we need
+            ;; to special registers (X15) when returning to ABIInternal.
+            (set! tailcall false))
+
+
+          (let [^ir/Node tail (zero ir/Node)
+              ^{:line 336} call (ir/NewCallExpr base/Pos ir/OCALL (.-Nname f) nil)]
+            (set! (.-Args call) (ir/ParamNames (.Type fn)))
+            (set! (.-IsDDD call) (.IsVariadic (.Type fn)))
+            (set! tail call)
+            (cond tailcall
+              (set! tail (ir/NewTailCallStmt base/Pos call))
+              (> (.NumResults (.Type fn)) 0)
+              (let [n (ir/NewReturnStmt base/Pos nil)]
+                (set! (.-Results n) (lit (slice ir/Node) call))
+                (set! tail n)))
+
+            (.Append (.-Body fn) tail)
+
+            (typecheck/FinishFuncBody)
+
+            (set! ir/CurFunc fn)
+            (typecheck/Stmts (.-Body fn))
+
+            ;; Restore previous context.
+            (set! base/Pos savepos)
+            (set! ir/CurFunc savedcurfn)))))))
+
+
+
+
+
+^{:go/end 383} (go/func CreateWasmImportWrapper "CreateWasmImportWrapper creates a wrapper for imported WASM functions to\nadapt them to the Go calling convention. The body for this function is\ngenerated in cmd/internal/obj/wasm/wasmobj.go\n" ^bool [^{:tag (* ir/Func)} fn]
+  (when (== (.-WasmImport fn) nil)
+    (return false))
+
+  (when (!= buildcfg/GOARCH "wasm")
+    (base/FatalfAt ^{:go/via [miniNode]} (.Pos fn) "CreateWasmImportWrapper call not supported on %s: func was %v" buildcfg/GOARCH fn))
+
+
+  (ir/InitLSym fn true)
+
+  (setupWasmImport fn)
+
+  ^{:go/breaks [[7 382]]} (let [pp (objw/NewProgs fn 0)]
+    (defer (.Free pp))
+    (set! (.-Type (.-To (.-Text pp))) obj/TYPE_TEXTSIZE)
+    (set! (.-Val (.-To (.-Text pp))) (conv int32 (types/RoundUp (.ArgWidth (.Type fn)) (conv int64 types/RegSize))))
+    ;; Wrapper functions never need their own stack frame
+    (set! (.-Offset (.-To (.-Text pp))) 0)
+    (.Flush pp)
+
+    true))
+
+
+^{:go/end 432} (go/func GenWasmExportWrapper [^{:tag (* ir/Func)} wrapped]
+  (when (== (.-WasmExport wrapped) nil)
+    (return))
+
+  (when (!= buildcfg/GOARCH "wasm")
+    (base/FatalfAt ^{:go/via [miniNode]} (.Pos wrapped) "GenWasmExportWrapper call not supported on %s: func was %v" buildcfg/GOARCH wrapped))
+
+
+  (let [pos base/AutogeneratedPos
+      ^{:line 394} sym (addr ^{:go/breaks [2 4]} (lit types/Sym
+          :Name (.-Name (.-WasmExport wrapped))
+          :Linkname (.-Name (.-WasmExport wrapped))))
+
+      ^{:line 398} ft ^{:go/via [miniExpr]} (.Type (.-Nname wrapped))
+      ^{:line 399} fn (ir/NewFunc pos pos sym (types/NewSignature nil
+          (typecheck/NewFuncParams (.Params ft))
+          (typecheck/NewFuncParams (.Results ft))))]
+    (set! (.-ABI fn) obj/ABI0) ; actually wasm ABI
+    ;; The wrapper function has a special calling convention that
+    ;; morestack currently doesn't handle. For now we require that
+    ;; the argument size fits in StackSmall, which we know we have
+    ;; on stack, so we don't need to split stack.
+    ;; cmd/internal/obj/wasm supports only 16 argument "registers"
+    ;; anyway.
+    (when (> (.ArgWidth ft) rtabi/StackSmall)
+      (base/ErrorfAt ^{:go/via [miniNode]} (.Pos wrapped) 0 "wasmexport function argument too large"))
+
+    (set! (.-Pragma fn) bit-or ir/Nosplit)
+
+    (ir/InitLSym fn true)
+
+    (setupWasmExport fn wrapped)
+
+    (let [pp (objw/NewProgs fn 0)]
+      (defer (.Free pp))
+      ;; TEXT. Has a frame to pass args on stack to the Go function.
+      (set! (.-Type (.-To (.-Text pp))) obj/TYPE_TEXTSIZE)
+      (set! (.-Val (.-To (.-Text pp))) (conv int32 0))
+      (set! (.-Offset (.-To (.-Text pp))) (types/RoundUp (.ArgWidth ft) (conv int64 types/RegSize)))
+      ;; No locals. (Callee's args are covered in the callee's stackmap.)
+      (let [p (.Prog pp obj/AFUNCDATA)]
+        (.SetConst (.-From p) rtabi/FUNCDATA_LocalsPointerMaps)
+        (set! (.-Type (.-To p)) obj/TYPE_MEM)
+        (set! (.-Name (.-To p)) obj/NAME_EXTERN)
+        (set! (.-Sym (.-To p)) (.Lookup base/Ctxt "no_pointers_stackmap"))
+        (.Flush pp)))))
+;; Actual code geneneration is in cmd/internal/obj/wasm.
+
+
+^{:go/end 474} (go/func paramsToWasmFields ^{:tag (slice obj/WasmField)} [^{:tag (* ir/Func)} f ^string pragma ^{:tag (* abi/ABIParamResultInfo)} result ^{:tag (slice abi/ABIParamAssignment)} abiParams]
+  (let [wfs (make (slice obj/WasmField) 0 (len abiParams))]
+    (range [_ p abiParams]
+      (let [t (.-Type p)
+          ^{:line 438 :tag obj/WasmFieldType} wt (zero obj/WasmFieldType)]
+        (if (.IsSIMD t)
+          (set! wt obj/WasmV128)
+
+          (switch (.Kind t)
+            (case [types/TINT32 types/TUINT32]
+              (set! wt obj/WasmI32))
+            (case [types/TINT64 types/TUINT64]
+              (set! wt obj/WasmI64))
+            (case [types/TFLOAT32]
+              (set! wt obj/WasmF32))
+            (case [types/TFLOAT64]
+              (set! wt obj/WasmF64))
+            (case [types/TUNSAFEPTR types/TUINTPTR]
+              (set! wt obj/WasmPtr))
+            (case [types/TBOOL]
+              (set! wt obj/WasmBool))
+            (case [types/TSTRING]
+              ;; Two parts, (ptr, len)
+              (set! wt obj/WasmPtr)
+              (set! wfs (append wfs (lit obj/WasmField :Type wt :Offset (.FrameOffset p result))))
+              (set! wfs (append wfs (lit obj/WasmField :Type wt :Offset (+ (.FrameOffset p result) (conv int64 types/PtrSize)))))
+              (continue))
+            (case [types/TPTR]
+              (when (wasmElemTypeAllowed (.Elem t))
+                (set! wt obj/WasmPtr)
+                (break))
+
+              (fallthrough))
+            (default
+              (base/ErrorfAt ^{:go/via [miniNode]} (.Pos f) 0 "%s: unsupported parameter type %s" pragma (.String t)))))
+
+
+        (set! wfs (append wfs (lit obj/WasmField :Type wt :Offset (.FrameOffset p result))))))
+
+    ^{:line 473} wfs))
+
+
+^{:go/end 513} (go/func resultsToWasmFields ^{:tag (slice obj/WasmField)} [^{:tag (* ir/Func)} f ^string pragma ^{:tag (* abi/ABIParamResultInfo)} result ^{:tag (slice abi/ABIParamAssignment)} abiParams]
+  (when (> (len abiParams) 1)
+    (base/ErrorfAt ^{:go/via [miniNode]} (.Pos f) 0 "%s: too many return values" pragma)
+    (return nil))
+
+  (let [wfs (make (slice obj/WasmField) (len abiParams))]
+    (range [i p abiParams]
+      (let [t (.-Type p)]
+        (if (.IsSIMD t)
+          (set! (.-Type (aget wfs i)) obj/WasmV128)
+
+          (switch (.Kind t)
+            (case [types/TINT32 types/TUINT32]
+              (set! (.-Type (aget wfs i)) obj/WasmI32))
+            (case [types/TINT64 types/TUINT64]
+              (set! (.-Type (aget wfs i)) obj/WasmI64))
+            (case [types/TFLOAT32]
+              (set! (.-Type (aget wfs i)) obj/WasmF32))
+            (case [types/TFLOAT64]
+              (set! (.-Type (aget wfs i)) obj/WasmF64))
+            (case [types/TUNSAFEPTR types/TUINTPTR]
+              (set! (.-Type (aget wfs i)) obj/WasmPtr))
+            (case [types/TBOOL]
+              (set! (.-Type (aget wfs i)) obj/WasmBool))
+            (case [types/TPTR]
+              (when (wasmElemTypeAllowed (.Elem t))
+                (set! (.-Type (aget wfs i)) obj/WasmPtr)
+                (break))
+
+              (fallthrough))
+            (default
+              (base/ErrorfAt ^{:go/via [miniNode]} (.Pos f) 0 "%s: unsupported result type %s" pragma (.String t)))))
+
+
+        (set! (.-Offset (aget wfs i)) (.FrameOffset p result))))
+
+    ^{:line 512} wfs))
+
+
+
+
+
+^{:go/breaks [[5 546]] :go/end 547} (go/func wasmElemTypeAllowed "wasmElemTypeAllowed reports whether t is allowed to be passed in memory\n(as a pointer's element type, a field of it, etc.) between the Go wasm\nmodule and the host.\n" ^bool [^{:tag (* types/Type)} t]
+  (switch (.Kind t)
+    (case [types/TINT8 types/TUINT8 types/TINT16 types/TUINT16
+        ^{:line 521} types/TINT32 types/TUINT32 types/TINT64 types/TUINT64
+        ^{:line 522} types/TFLOAT32 types/TFLOAT64 types/TBOOL]
+      (return true))
+    (case [types/TARRAY]
+      (return (wasmElemTypeAllowed (.Elem t))))
+    (case [types/TSTRUCT]
+      (when (== (len (.Fields t)) 0)
+        (return true))
+
+      (let [seenHostLayout false]
+        (range [_ f (.Fields t)]
+          (let [sym (.Sym (.-Type f))]
+            (when (and (!= sym nil) (== (.-Name sym) "HostLayout") (== (.-Path (.-Pkg sym)) "structs"))
+              (set! seenHostLayout true)
+              (continue))
+
+            (when (not (wasmElemTypeAllowed (.-Type f)))
+              (return false))))
+
+
+        (return seenHostLayout))))
+
+  ;; Pointer, and all pointerful types are not allowed, as pointers have
+  ;; different width on the Go side and the host side. (It will be allowed
+  ;; on GOARCH=wasm32.)
+  false)
+
+
+
+
+^{:go/end 584} (go/func setupWasmImport "setupWasmImport calculates the params and results in terms of WebAssembly values for the given function,\nand sets up the wasmimport metadata.\n" [^{:tag (* ir/Func)} f]
+  (let [wi ^{:go/breaks [2 4]} (lit obj/WasmImport
+        :Module (.-Module (.-WasmImport f))
+        :Name (.-Name (.-WasmImport f)))]
+
+    (if (== (.-Module wi) wasm/GojsModule)
+      ;; Functions that are imported from the "gojs" module use a special
+      ;; ABI that just accepts the stack pointer.
+      ;; Example:
+      ;;
+      ;; 	//go:wasmimport gojs add
+      ;; 	func importedAdd(a, b uint) uint
+      ;;
+      ;; will roughly become
+      ;;
+      ;; 	(import "gojs" "add" (func (param i32)))
+      (set! ^{:go/via [WasmFuncType]} (.-Params wi) (lit (slice obj/WasmField) (lit _ :Type obj/WasmI32)))
+
+      ;; All other imported functions use the normal WASM ABI.
+      ;; Example:
+      ;;
+      ;; 	//go:wasmimport a_module add
+      ;; 	func importedAdd(a, b uint) uint
+      ;;
+      ;; will roughly become
+      ;;
+      ;; 	(import "a_module" "add" (func (param i32 i32) (result i32)))
+      (let [abiConfig (AbiForBodylessFuncStackMap f)
+          ^{:line 579} abiInfo (.ABIAnalyzeFuncType abiConfig (.Type f))]
+        (set! ^{:go/via [WasmFuncType]} (.-Params wi) (paramsToWasmFields f "go:wasmimport" abiInfo (.InParams abiInfo)))
+        (set! ^{:go/via [WasmFuncType]} (.-Results wi) (resultsToWasmFields f "go:wasmimport" abiInfo (.OutParams abiInfo)))))
+
+    (set! (.-WasmImport (.Func (.-LSym f))) (addr wi))))
+
+
+
+
+^{:go/end 597} (go/func setupWasmExport "setupWasmExport calculates the params and results in terms of WebAssembly values for the given function,\nand sets up the wasmexport metadata.\n" [^{:tag (* ir/Func)} f ^{:tag (* ir/Func)} wrapped]
+  (let [we ^{:go/breaks [2]} (lit obj/WasmExport
+        :WrappedSym (.-LSym wrapped))
+
+      ^{:line 592} abiConfig (AbiForBodylessFuncStackMap wrapped)
+      ^{:line 593} abiInfo (.ABIAnalyzeFuncType abiConfig (.Type wrapped))]
+    (set! ^{:go/via [WasmFuncType]} (.-Params we) (paramsToWasmFields wrapped "go:wasmexport" abiInfo (.InParams abiInfo)))
+    (set! ^{:go/via [WasmFuncType]} (.-Results we) (resultsToWasmFields wrapped "go:wasmexport" abiInfo (.OutParams abiInfo)))
+    (set! (.-WasmExport (.Func (.-LSym f))) (addr we))))

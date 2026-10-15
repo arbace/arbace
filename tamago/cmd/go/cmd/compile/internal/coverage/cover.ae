@@ -1,0 +1,199 @@
+;; Copyright 2022 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.cmd.compile.internal.coverage) (go/file "cover.go" :imports [
+
+    ;; This package contains support routines for coverage "fixup" in the
+    ;; compiler, which happens when compiling a package whose source code
+    ;; has been run through "cmd/cover" to add instrumentation. The two
+    ;; important entry points are FixupVars (called prior to package init
+    ;; generation) and FixupInit (called following package init
+    ;; generation).
+
+
+    ^{:line 15} [base "cmd/compile/internal/base"]
+    ^{:line 16} [ir "cmd/compile/internal/ir"]
+    ^{:line 17} [typecheck "cmd/compile/internal/typecheck"]
+    ^{:line 18} [types "cmd/compile/internal/types"]
+    ^{:line 19} [objabi "cmd/internal/objabi"]
+    ^{:line 20} [coverage "internal/coverage"]
+    ^{:line 21} [strconv "strconv"]
+    ^{:line 22} [strings "strings"]])
+
+
+
+
+(go/type names "names records state information collected in the first fixup\nphase so that it can be passed to the second fixup phase.\n" (struct
+    ^{:line 28 :tag (* ir/Name)} MetaVar
+    ^{:line 29 :tag (* ir/Name)} PkgIdVar
+    ^{:line 30 :tag (* ir/Func)} InitFn
+    ^{:line 31 :tag coverage/CounterMode} CounterMode
+    ^{:line 32 :tag coverage/CounterGranularity} CounterGran))
+
+
+
+
+
+
+
+
+^{:go/end 123} (go/func Fixup "Fixup adds calls to the pkg init function as appropriate to\nregister coverage-related variables with the runtime.\n\nIt also reclassifies selected variables (for example, tagging\ncoverage counter variables with flags so that they can be handled\nproperly downstream).\n" []
+  (when (== (.-CoverageInfo (.-Cfg base/Flag)) nil)
+    (return)) ; not using coverage
+
+
+  (let [metaVarName (.-MetaVar (.-CoverageInfo (.-Cfg base/Flag)))
+      ^{:line 47} pkgIdVarName (.-PkgIdVar (.-CoverageInfo (.-Cfg base/Flag)))
+      ^{:line 48} counterMode (.-CounterMode (.-CoverageInfo (.-Cfg base/Flag)))
+      ^{:line 49} counterGran (.-CounterGranularity (.-CoverageInfo (.-Cfg base/Flag)))
+      ^{:line 50} counterPrefix (.-CounterPrefix (.-CoverageInfo (.-Cfg base/Flag)))
+      ^{:line 51 :tag (* ir/Name)} metavar (zero (* ir/Name))
+      ^{:line 52 :tag (* ir/Name)} pkgidvar (zero (* ir/Name))
+
+      ^{:line 54} ckTypSanity ^{:go/end 58} (fn [^{:tag (* ir/Name)} nm ^string tag]
+        (when (or (== ^{:go/via [miniExpr]} (.Type nm) nil) (.HasPointers ^{:go/via [miniExpr]} (.Type nm)))
+          (base/Fatalf "unsuitable %s %q mentioned in coveragecfg, improper type '%v'" tag (.-Name (.Sym nm)) ^{:go/via [miniExpr]} (.Type nm))))]
+
+
+
+    (range [_ nm (.-Externs typecheck/Target)]
+      (let [s (.Sym nm)]
+        (switch (.-Name s)
+          (case [metaVarName]
+            (set! metavar nm)
+            (ckTypSanity nm "metavar")
+            (.MarkReadonly nm)
+            (continue))
+          (case [pkgIdVarName]
+            (set! pkgidvar nm)
+            (ckTypSanity nm "pkgidvar")
+            (.SetCoverageAuxVar nm true)
+            (let [s (.Linksym nm)]
+              (set! (.-Type s) objabi/SCOVERAGE_AUXVAR)
+              (continue))))
+
+        (when (strings/HasPrefix (.-Name s) counterPrefix)
+          (ckTypSanity nm "countervar")
+          (.SetCoverageAuxVar nm true)
+          (let [s (.Linksym nm)]
+            (set! (.-Type s) objabi/SCOVERAGE_COUNTER)))))
+
+
+    (let [cm (coverage/ParseCounterMode counterMode)]
+      (when (== cm coverage/CtrModeInvalid)
+        (base/Fatalf "bad setting %q for covermode in coveragecfg:"
+          ^{:line 86} counterMode))
+
+      (let [^coverage/CounterGranularity cg (zero coverage/CounterGranularity)]
+        (switch counterGran
+          (case ["perblock"]
+            (set! cg coverage/CtrGranularityPerBlock))
+          (case ["perfunc"]
+            (set! cg coverage/CtrGranularityPerFunc))
+          (default
+            (base/Fatalf "bad setting %q for covergranularity in coveragecfg:"
+              ^{:line 96} counterGran)))
+
+
+        (let [cnames ^{:go/breaks [2 4 6 8]} (lit names
+              :MetaVar metavar
+              :PkgIdVar pkgidvar
+              :CounterMode cm
+              :CounterGran cg)]
+
+
+          (range [_ fn (.-Funcs typecheck/Target)]
+            (when (== (ir/FuncName fn) "init")
+              (set! (.-InitFn cnames) fn)
+              (break)))
+
+
+          (when (== (.-InitFn cnames) nil)
+            (panic "unexpected (no init func for -cover build)"))
+
+
+          (let [(values hashv len) (metaHashAndLen)]
+            (when (!= (.-CounterMode cnames) coverage/CtrModeTestMain)
+              (registerMeta cnames hashv len))
+
+            (when (== (.-Pkgpath base/Ctxt) "main")
+              (addInitHookCall (.-InitFn cnames) (.-CounterMode cnames)))))))))
+
+
+
+^{:go/end 144} (go/func metaHashAndLen [] :results [(array 16 byte) int]
+
+  ;; Read meta-data hash from config entry.
+  (let [mhash (.-MetaHash (.-CoverageInfo (.-Cfg base/Flag)))]
+    (when (!= (len mhash) 32)
+      (base/Fatalf "unexpected: got metahash length %d want 32" (len mhash)))
+
+    (let [^{:tag (array 16 byte)} hv (zero (array 16 byte))]
+      (for [i 0] (< i 16) (inc! i)
+        (let [nib (subslice mhash (* i 2) (+ (* i 2) 2))
+            (values x err) (strconv/ParseInt nib 16 32)]
+          (when (!= err nil)
+            (base/Fatalf "metahash bad byte %q" nib))
+
+          (aset hv i (conv byte x))))
+
+
+      ;; Return hash and meta-data len
+      (return hv (.-MetaLen (.-CoverageInfo (.-Cfg base/Flag)))))))
+
+
+^{:go/end 185} (go/func registerMeta [^names cnames ^{:tag (array 16 byte)} hashv ^int mdlen]
+  ;; Materialize expression for hash (an array literal)
+  (let [pos ^{:go/via [miniNode]} (.Pos (.-InitFn cnames))
+      ^{:line 149} elist (make (slice ir/Node) 0 16)]
+    (for [i 0] (< i 16) (inc! i)
+      (let [elem (ir/NewInt base/Pos (conv int64 (aget hashv i)))]
+        (set! elist (append elist elem))))
+
+    (let [ht (types/NewArray (aget types/Types types/TUINT8) 16)
+        ^{:line 155} hashx (ir/NewCompLitExpr pos ir/OCOMPLIT ht elist)
+
+        ;; Materalize expression corresponding to address of the meta-data symbol.
+        ^{:line 158} mdax (typecheck/NodAddr (.-MetaVar cnames))
+        ^{:line 159} mdauspx (typecheck/ConvNop mdax (aget types/Types types/TUNSAFEPTR))
+
+        ;; Materialize expression for length.
+        ^{:line 162} lenx (ir/NewInt base/Pos (conv int64 mdlen)) ; untyped
+
+        ;; Generate a call to runtime.addCovMeta, e.g.
+        ;;
+        ;;   pkgIdVar = runtime.addCovMeta(&sym, len, hash, pkgpath, pkid, cmode, cgran)
+        ;;
+        ^{:line 168} fn (typecheck/LookupRuntime "addCovMeta")
+        ^{:line 169} pkid (coverage/HardCodedPkgID (.-Pkgpath base/Ctxt))
+        ^{:line 170} pkIdNode (ir/NewInt base/Pos (conv int64 pkid))
+        ^{:line 171} cmodeNode (ir/NewInt base/Pos (conv int64 (.-CounterMode cnames)))
+        ^{:line 172} cgranNode (ir/NewInt base/Pos (conv int64 (.-CounterGran cnames)))
+        ^{:line 173} pkPathNode (ir/NewString base/Pos (.-Pkgpath base/Ctxt))
+        ^{:line 174} callx (typecheck/Call pos fn (lit (slice ir/Node) mdauspx lenx hashx
+            ^{:line 175} pkPathNode pkIdNode cmodeNode cgranNode) false)
+        ^{:line 176} assign callx]
+      (when (== pkid coverage/NotHardCoded)
+        (set! assign (typecheck/Stmt (ir/NewAssignStmt pos (.-PkgIdVar cnames) callx))))
+
+
+      ;; Tack the call onto the start of our init function. We do this
+      ;; early in the init since it's possible that instrumented function
+      ;; bodies (with counter updates) might be inlined into init.
+      (.Prepend (.-Body (.-InitFn cnames)) assign))))
+
+
+
+
+
+
+^{:go/end 200} (go/func addInitHookCall "addInitHookCall generates a call to runtime/coverage.initHook() and\ninserts it into the package main init function, which will kick off\nthe process for coverage data writing (emit meta data, and register\nan exit hook to emit counter data).\n" [^{:tag (* ir/Func)} initfn ^coverage/CounterMode cmode]
+  (typecheck/InitCoverage)
+  (let [pos ^{:go/via [miniNode]} (.Pos initfn)
+      ^{:line 194} istest (== cmode coverage/CtrModeTestMain)
+      ^{:line 195} initf (typecheck/LookupCoverage "initHook")
+      ^{:line 196} istestNode (ir/NewBool base/Pos istest)
+      ^{:line 197} args (lit (slice ir/Node) istestNode)
+      ^{:line 198} callx (typecheck/Call pos initf args false)]
+    (.Append (.-Body initfn) callx)))

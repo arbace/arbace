@@ -1,0 +1,1134 @@
+;; Copyright 2016 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.cmd.compile.internal.x86) (go/file "ssa.go" :imports [
+
+
+    ^{:line 8} [fmt "fmt"]
+    ^{:line 9} [math "math"]
+
+    ^{:line 11} [base "cmd/compile/internal/base"]
+    ^{:line 12} [ir "cmd/compile/internal/ir"]
+    ^{:line 13} [logopt "cmd/compile/internal/logopt"]
+    ^{:line 14} [ssa "cmd/compile/internal/ssa"]
+    ^{:line 15} [ssagen "cmd/compile/internal/ssagen"]
+    ^{:line 16} [types "cmd/compile/internal/types"]
+    ^{:line 17} [obj "cmd/internal/obj"]
+    ^{:line 18} [x86 "cmd/internal/obj/x86"]
+    ^{:line 19} [abi "internal/abi"]])
+
+
+
+^{:go/end 43} (go/func ssaMarkMoves "ssaMarkMoves marks any MOVXconst ops that need to avoid clobbering flags.\n" [^{:tag (* ssagen/State)} s ^{:tag (* ssa/Block)} b]
+  (let [flive (.-FlagsLiveAtEnd b)]
+    (range [_ c (.ControlValues b)]
+      (set! flive (or (.IsFlags (.-Type c)) flive)))
+
+    (for [i (- (len (.-Values b)) 1)] (>= i 0) (dec! i)
+      (let [v (aget (.-Values b) i)]
+        (when (and flive (== (.-Op v) ssa/Op386MOVLconst))
+          ;; The "mark" is any non-nil Aux value.
+          (set! (.-Aux v) ssa/AuxMark))
+
+        (when (.IsFlags (.-Type v))
+          (set! flive false))
+
+        (range [_ a (.-Args v)]
+          (when (.IsFlags (.-Type a))
+            (set! flive true)))))))
+
+
+
+
+
+
+^{:go/end 58} (go/func loadByType "loadByType returns the load instruction of the given type.\n" ^obj/As [^{:tag (* types/Type)} t]
+  ;; Avoid partial register write
+  (when (not (.IsFloat t))
+    (switch (.Size t)
+      (case [1]
+        (return x86/AMOVBLZX))
+      (case [2]
+        (return x86/AMOVWLZX))))
+
+
+  ;; Otherwise, there's no difference between load and store opcodes.
+  (storeByType t))
+
+
+
+^{:go/end 81} (go/func storeByType "storeByType returns the store instruction of the given type.\n" ^obj/As [^{:tag (* types/Type)} t]
+  (let [width (.Size t)]
+    (if (.IsFloat t)
+      (switch width
+        (case [4]
+          (return x86/AMOVSS))
+        (case [8]
+          (return x86/AMOVSD)))
+
+
+      (switch width
+        (case [1]
+          (return x86/AMOVB))
+        (case [2]
+          (return x86/AMOVW))
+        (case [4]
+          (return x86/AMOVL))))
+
+
+    (panic "bad store type")))
+
+
+
+^{:go/end 107} (go/func moveByType "moveByType returns the reg->reg move instruction of the given type.\n" ^obj/As [^{:tag (* types/Type)} t]
+  (if (.IsFloat t)
+    (switch (.Size t)
+      (case [4]
+        (return x86/AMOVSS))
+      (case [8]
+        (return x86/AMOVSD))
+      (default
+        (panic (fmt/Sprintf "bad float register width %d:%s" (.Size t) t))))
+
+
+    (switch (.Size t)
+      (case [1]
+        ;; Avoids partial register write
+        (return x86/AMOVL))
+      (case [2]
+        (return x86/AMOVL))
+      (case [4]
+        (return x86/AMOVL))
+      (default
+        (panic (fmt/Sprintf "bad int register width %d:%s" (.Size t) t))))))
+
+
+
+
+
+
+
+
+
+
+^{:go/end 122} (go/func opregreg "opregreg emits instructions for\n\n\tdest := dest(To) op src(From)\n\nand also returns the created obj.Prog so it\nmay be further adjusted (offset, scale, etc).\n" ^{:tag (* obj/Prog)} [^{:tag (* ssagen/State)} s ^obj/As op ^int16 dest ^int16 src]
+  (let [p (.Prog s op)]
+    (set! (.-Type (.-From p)) obj/TYPE_REG)
+    (set! (.-Type (.-To p)) obj/TYPE_REG)
+    (set! (.-Reg (.-To p)) dest)
+    (set! (.-Reg (.-From p)) src)
+    ^{:line 121} p))
+
+
+^{:go/end 1064} (go/func ssaGenValue [^{:tag (* ssagen/State)} s ^{:tag (* ssa/Value)} v]
+  (switch (.-Op v)
+    (case [ssa/Op386ADDL]
+      (let [r (.Reg v)
+          ^{:line 128} r1 (.Reg (aget (.-Args v) 0))
+          ^{:line 129} r2 (.Reg (aget (.-Args v) 1))]
+        (switch
+          (case [(== r r1)]
+            (let [p (.Prog s (.Asm (.-Op v)))]
+              (set! (.-Type (.-From p)) obj/TYPE_REG)
+              (set! (.-Reg (.-From p)) r2)
+              (set! (.-Type (.-To p)) obj/TYPE_REG)
+              (set! (.-Reg (.-To p)) r)))
+          (case [(== r r2)]
+            (let [p (.Prog s (.Asm (.-Op v)))]
+              (set! (.-Type (.-From p)) obj/TYPE_REG)
+              (set! (.-Reg (.-From p)) r1)
+              (set! (.-Type (.-To p)) obj/TYPE_REG)
+              (set! (.-Reg (.-To p)) r)))
+          (default
+            (let [p (.Prog s x86/ALEAL)]
+              (set! (.-Type (.-From p)) obj/TYPE_MEM)
+              (set! (.-Reg (.-From p)) r1)
+              (set! (.-Scale (.-From p)) 1)
+              (set! (.-Index (.-From p)) r2)
+              (set! (.-Type (.-To p)) obj/TYPE_REG)
+              (set! (.-Reg (.-To p)) r))))))
+
+
+    ;; 2-address opcode arithmetic
+    (case [ssa/Op386SUBL
+        ^{:line 155} ssa/Op386MULL
+        ^{:line 156} ssa/Op386ANDL
+        ^{:line 157} ssa/Op386ORL
+        ^{:line 158} ssa/Op386XORL
+        ^{:line 159} ssa/Op386SHLL
+        ^{:line 160} ssa/Op386SHRL ssa/Op386SHRW ssa/Op386SHRB
+        ^{:line 161} ssa/Op386SARL ssa/Op386SARW ssa/Op386SARB
+        ^{:line 162} ssa/Op386ROLL ssa/Op386ROLW ssa/Op386ROLB
+        ^{:line 163} ssa/Op386ADDSS ssa/Op386ADDSD ssa/Op386SUBSS ssa/Op386SUBSD
+        ^{:line 164} ssa/Op386MULSS ssa/Op386MULSD ssa/Op386DIVSS ssa/Op386DIVSD
+        ^{:line 165} ssa/Op386PXOR
+        ^{:line 166} ssa/Op386ADCL
+        ^{:line 167} ssa/Op386SBBL]
+      (opregreg s (.Asm (.-Op v)) (.Reg v) (.Reg (aget (.-Args v) 1))))
+
+    (case [ssa/Op386ADDLcarry ssa/Op386ADCLcarry ssa/Op386SUBLcarry]
+      ;; output 0 is carry/borrow, output 1 is the low 32 bits.
+      (opregreg s (.Asm (.-Op v)) (.Reg0 v) (.Reg (aget (.-Args v) 1))))
+
+    (case [ssa/Op386ADDLconstcarry ssa/Op386SUBLconstcarry]
+      ;; output 0 is carry/borrow, output 1 is the low 32 bits.
+      (let [p (.Prog s (.Asm (.-Op v)))]
+        (set! (.-Type (.-From p)) obj/TYPE_CONST)
+        (set! (.-Offset (.-From p)) (.-AuxInt v))
+        (set! (.-Type (.-To p)) obj/TYPE_REG)
+        (set! (.-Reg (.-To p)) (.Reg0 v))))
+
+    (case [ssa/Op386DIVL ssa/Op386DIVW
+        ^{:line 183} ssa/Op386DIVLU ssa/Op386DIVWU
+        ^{:line 184} ssa/Op386MODL ssa/Op386MODW
+        ^{:line 185} ssa/Op386MODLU ssa/Op386MODWU]
+
+      ;; Arg[0] is already in AX as it's the only register we allow
+      ;; and AX is the only output
+      (let [x (.Reg (aget (.-Args v) 1))
+
+          ;; CPU faults upon signed overflow, which occurs when most
+          ;; negative int is divided by -1.
+          ^{:line 193 :tag (* obj/Prog)} j (zero (* obj/Prog))]
+        (when (or (== (.-Op v) ssa/Op386DIVL) (== (.-Op v) ssa/Op386DIVW)
+            (== (.-Op v) ssa/Op386MODL) (== (.-Op v) ssa/Op386MODW))
+
+          (when (ssa/DivisionNeedsFixUp v)
+            (let [^{:tag (* obj/Prog)} c (zero (* obj/Prog))]
+              (switch (.-Op v)
+                (case [ssa/Op386DIVL ssa/Op386MODL]
+                  (set! c (.Prog s x86/ACMPL))
+                  (set! j (.Prog s x86/AJEQ)))
+
+                (case [ssa/Op386DIVW ssa/Op386MODW]
+                  (set! c (.Prog s x86/ACMPW))
+                  (set! j (.Prog s x86/AJEQ))))
+
+              (set! (.-Type (.-From c)) obj/TYPE_REG)
+              (set! (.-Reg (.-From c)) x)
+              (set! (.-Type (.-To c)) obj/TYPE_CONST)
+              (set! (.-Offset (.-To c)) -1)
+
+              (set! (.-Type (.-To j)) obj/TYPE_BRANCH)))
+
+          ;; sign extend the dividend
+          (switch (.-Op v)
+            (case [ssa/Op386DIVL ssa/Op386MODL]
+              (.Prog s x86/ACDQ))
+            (case [ssa/Op386DIVW ssa/Op386MODW]
+              (.Prog s x86/ACWD))))
+
+
+
+        ;; for unsigned ints, we sign extend by setting DX = 0
+        ;; signed ints were sign extended above
+        (when (or (== (.-Op v) ssa/Op386DIVLU) (== (.-Op v) ssa/Op386MODLU)
+            (== (.-Op v) ssa/Op386DIVWU) (== (.-Op v) ssa/Op386MODWU))
+          (let [c (.Prog s x86/AXORL)]
+            (set! (.-Type (.-From c)) obj/TYPE_REG)
+            (set! (.-Reg (.-From c)) x86/REG_DX)
+            (set! (.-Type (.-To c)) obj/TYPE_REG)
+            (set! (.-Reg (.-To c)) x86/REG_DX)))
+
+
+        (let [p (.Prog s (.Asm (.-Op v)))]
+          (set! (.-Type (.-From p)) obj/TYPE_REG)
+          (set! (.-Reg (.-From p)) x)
+
+          ;; signed division, rest of the check for -1 case
+          (when (!= j nil)
+            (let [j2 (.Prog s obj/AJMP)]
+              (set! (.-Type (.-To j2)) obj/TYPE_BRANCH)
+
+              (let [^{:tag (* obj/Prog)} n (zero (* obj/Prog))]
+                (if (or (== (.-Op v) ssa/Op386DIVL) (== (.-Op v) ssa/Op386DIVW)) (do
+                    ;; n * -1 = -n
+                    (set! n (.Prog s x86/ANEGL))
+                    (set! (.-Type (.-To n)) obj/TYPE_REG)
+                    (set! (.-Reg (.-To n)) x86/REG_AX))
+                  (do
+                    ;; n % -1 == 0
+                    (set! n (.Prog s x86/AXORL))
+                    (set! (.-Type (.-From n)) obj/TYPE_REG)
+                    (set! (.-Reg (.-From n)) x86/REG_DX)
+                    (set! (.-Type (.-To n)) obj/TYPE_REG)
+                    (set! (.-Reg (.-To n)) x86/REG_DX)))
+
+
+                (.SetTarget (.-To j) n)
+                (.SetTarget (.-To j2) (.Pc s))))))))
+
+
+    (case [ssa/Op386HMULL ssa/Op386HMULLU]
+      ;; the frontend rewrites constant division by 8/16/32 bit integers into
+      ;; HMUL by a constant
+      ;; SSA rewrites generate the 64 bit versions
+
+      ;; Arg[0] is already in AX as it's the only register we allow
+      ;; and DX is the only output we care about (the high bits)
+      (let [p (.Prog s (.Asm (.-Op v)))]
+        (set! (.-Type (.-From p)) obj/TYPE_REG)
+        (set! (.-Reg (.-From p)) (.Reg (aget (.-Args v) 1)))
+
+        ;; IMULB puts the high portion in AH instead of DL,
+        ;; so move it to DL for consistency
+        (when (== (.Size (.-Type v)) 1)
+          (let [m (.Prog s x86/AMOVB)]
+            (set! (.-Type (.-From m)) obj/TYPE_REG)
+            (set! (.-Reg (.-From m)) x86/REG_AH)
+            (set! (.-Type (.-To m)) obj/TYPE_REG)
+            (set! (.-Reg (.-To m)) x86/REG_DX)))))
+
+
+    (case [ssa/Op386MULLU]
+      ;; Arg[0] is already in AX as it's the only register we allow
+      ;; results lo in AX
+      (let [p (.Prog s (.Asm (.-Op v)))]
+        (set! (.-Type (.-From p)) obj/TYPE_REG)
+        (set! (.-Reg (.-From p)) (.Reg (aget (.-Args v) 1)))))
+
+    (case [ssa/Op386MULLQU]
+      ;; AX * args[1], high 32 bits in DX (result[0]), low 32 bits in AX (result[1]).
+      (let [p (.Prog s (.Asm (.-Op v)))]
+        (set! (.-Type (.-From p)) obj/TYPE_REG)
+        (set! (.-Reg (.-From p)) (.Reg (aget (.-Args v) 1)))))
+
+    (case [ssa/Op386AVGLU]
+      ;; compute (x+y)/2 unsigned.
+      ;; Do a 32-bit add, the overflow goes into the carry.
+      ;; Shift right once and pull the carry back into the 31st bit.
+      (let [p (.Prog s x86/AADDL)]
+        (set! (.-Type (.-From p)) obj/TYPE_REG)
+        (set! (.-Type (.-To p)) obj/TYPE_REG)
+        (set! (.-Reg (.-To p)) (.Reg v))
+        (set! (.-Reg (.-From p)) (.Reg (aget (.-Args v) 1)))
+        (set! p (.Prog s x86/ARCRL))
+        (set! (.-Type (.-From p)) obj/TYPE_CONST)
+        (set! (.-Offset (.-From p)) 1)
+        (set! (.-Type (.-To p)) obj/TYPE_REG)
+        (set! (.-Reg (.-To p)) (.Reg v))))
+
+    (case [ssa/Op386ADDLconst]
+      (let [r (.Reg v)
+          ^{:line 314} a (.Reg (aget (.-Args v) 0))]
+        (when (== r a)
+          (when (== (.-AuxInt v) 1)
+            (let [p (.Prog s x86/AINCL)]
+              (set! (.-Type (.-To p)) obj/TYPE_REG)
+              (set! (.-Reg (.-To p)) r)
+              (return)))
+
+          (when (== (.-AuxInt v) -1)
+            (let [p (.Prog s x86/ADECL)]
+              (set! (.-Type (.-To p)) obj/TYPE_REG)
+              (set! (.-Reg (.-To p)) r)
+              (return)))
+
+          (let [p (.Prog s (.Asm (.-Op v)))]
+            (set! (.-Type (.-From p)) obj/TYPE_CONST)
+            (set! (.-Offset (.-From p)) (.-AuxInt v))
+            (set! (.-Type (.-To p)) obj/TYPE_REG)
+            (set! (.-Reg (.-To p)) r)
+            (return)))
+
+        (let [p (.Prog s x86/ALEAL)]
+          (set! (.-Type (.-From p)) obj/TYPE_MEM)
+          (set! (.-Reg (.-From p)) a)
+          (set! (.-Offset (.-From p)) (.-AuxInt v))
+          (set! (.-Type (.-To p)) obj/TYPE_REG)
+          (set! (.-Reg (.-To p)) r))))
+
+    (case [ssa/Op386MULLconst]
+      (let [r (.Reg v)
+          ^{:line 344} p (.Prog s (.Asm (.-Op v)))]
+        (set! (.-Type (.-From p)) obj/TYPE_CONST)
+        (set! (.-Offset (.-From p)) (.-AuxInt v))
+        (set! (.-Type (.-To p)) obj/TYPE_REG)
+        (set! (.-Reg (.-To p)) r)
+        (.AddRestSourceReg p (.Reg (aget (.-Args v) 0)))))
+
+    (case [ssa/Op386SUBLconst
+        ^{:line 352} ssa/Op386ADCLconst
+        ^{:line 353} ssa/Op386SBBLconst
+        ^{:line 354} ssa/Op386ANDLconst
+        ^{:line 355} ssa/Op386ORLconst
+        ^{:line 356} ssa/Op386XORLconst
+        ^{:line 357} ssa/Op386SHLLconst
+        ^{:line 358} ssa/Op386SHRLconst ssa/Op386SHRWconst ssa/Op386SHRBconst
+        ^{:line 359} ssa/Op386SARLconst ssa/Op386SARWconst ssa/Op386SARBconst
+        ^{:line 360} ssa/Op386ROLLconst ssa/Op386ROLWconst ssa/Op386ROLBconst]
+      (let [p (.Prog s (.Asm (.-Op v)))]
+        (set! (.-Type (.-From p)) obj/TYPE_CONST)
+        (set! (.-Offset (.-From p)) (.-AuxInt v))
+        (set! (.-Type (.-To p)) obj/TYPE_REG)
+        (set! (.-Reg (.-To p)) (.Reg v))))
+    (case [ssa/Op386SBBLcarrymask]
+      (let [r (.Reg v)
+          ^{:line 368} p (.Prog s (.Asm (.-Op v)))]
+        (set! (.-Type (.-From p)) obj/TYPE_REG)
+        (set! (.-Reg (.-From p)) r)
+        (set! (.-Type (.-To p)) obj/TYPE_REG)
+        (set! (.-Reg (.-To p)) r)))
+    (case [ssa/Op386LEAL1 ssa/Op386LEAL2 ssa/Op386LEAL4 ssa/Op386LEAL8]
+      (let [r (.Reg (aget (.-Args v) 0))
+          ^{:line 375} i (.Reg (aget (.-Args v) 1))
+          ^{:line 376} p (.Prog s x86/ALEAL)]
+        (switch (.-Op v)
+          (case [ssa/Op386LEAL1]
+            (set! (.-Scale (.-From p)) 1)
+            (when (== i x86/REG_SP)
+              (set! (values r i) (values i r))))
+
+          (case [ssa/Op386LEAL2]
+            (set! (.-Scale (.-From p)) 2))
+          (case [ssa/Op386LEAL4]
+            (set! (.-Scale (.-From p)) 4))
+          (case [ssa/Op386LEAL8]
+            (set! (.-Scale (.-From p)) 8)))
+
+        (set! (.-Type (.-From p)) obj/TYPE_MEM)
+        (set! (.-Reg (.-From p)) r)
+        (set! (.-Index (.-From p)) i)
+        (ssagen/AddAux (addr (.-From p)) v)
+        (set! (.-Type (.-To p)) obj/TYPE_REG)
+        (set! (.-Reg (.-To p)) (.Reg v))))
+    (case [ssa/Op386LEAL]
+      (let [p (.Prog s x86/ALEAL)]
+        (set! (.-Type (.-From p)) obj/TYPE_MEM)
+        (set! (.-Reg (.-From p)) (.Reg (aget (.-Args v) 0)))
+        (ssagen/AddAux (addr (.-From p)) v)
+        (set! (.-Type (.-To p)) obj/TYPE_REG)
+        (set! (.-Reg (.-To p)) (.Reg v))))
+    (case [ssa/Op386CMPL ssa/Op386CMPW ssa/Op386CMPB
+        ^{:line 404} ssa/Op386TESTL ssa/Op386TESTW ssa/Op386TESTB]
+      (opregreg s (.Asm (.-Op v)) (.Reg (aget (.-Args v) 1)) (.Reg (aget (.-Args v) 0))))
+    (case [ssa/Op386UCOMISS ssa/Op386UCOMISD]
+      ;; Go assembler has swapped operands for UCOMISx relative to CMP,
+      ;; must account for that right here.
+      (opregreg s (.Asm (.-Op v)) (.Reg (aget (.-Args v) 0)) (.Reg (aget (.-Args v) 1))))
+    (case [ssa/Op386CMPLconst ssa/Op386CMPWconst ssa/Op386CMPBconst]
+      (let [p (.Prog s (.Asm (.-Op v)))]
+        (set! (.-Type (.-From p)) obj/TYPE_REG)
+        (set! (.-Reg (.-From p)) (.Reg (aget (.-Args v) 0)))
+        (set! (.-Type (.-To p)) obj/TYPE_CONST)
+        (set! (.-Offset (.-To p)) (.-AuxInt v))))
+    (case [ssa/Op386TESTLconst ssa/Op386TESTWconst ssa/Op386TESTBconst]
+      (let [p (.Prog s (.Asm (.-Op v)))]
+        (set! (.-Type (.-From p)) obj/TYPE_CONST)
+        (set! (.-Offset (.-From p)) (.-AuxInt v))
+        (set! (.-Type (.-To p)) obj/TYPE_REG)
+        (set! (.-Reg (.-To p)) (.Reg (aget (.-Args v) 0)))))
+    (case [ssa/Op386CMPLload ssa/Op386CMPWload ssa/Op386CMPBload]
+      (let [p (.Prog s (.Asm (.-Op v)))]
+        (set! (.-Type (.-From p)) obj/TYPE_MEM)
+        (set! (.-Reg (.-From p)) (.Reg (aget (.-Args v) 0)))
+        (ssagen/AddAux (addr (.-From p)) v)
+        (set! (.-Type (.-To p)) obj/TYPE_REG)
+        (set! (.-Reg (.-To p)) (.Reg (aget (.-Args v) 1)))))
+    (case [ssa/Op386CMPLconstload ssa/Op386CMPWconstload ssa/Op386CMPBconstload]
+      (let [sc (.AuxValAndOff v)
+          ^{:line 431} p (.Prog s (.Asm (.-Op v)))]
+        (set! (.-Type (.-From p)) obj/TYPE_MEM)
+        (set! (.-Reg (.-From p)) (.Reg (aget (.-Args v) 0)))
+        (ssagen/AddAux2 (addr (.-From p)) v (.Off64 sc))
+        (set! (.-Type (.-To p)) obj/TYPE_CONST)
+        (set! (.-Offset (.-To p)) (.Val64 sc))))
+    (case [ssa/Op386MOVLconst]
+      (let [x (.Reg v)]
+
+        ;; If flags aren't live (indicated by v.Aux == nil),
+        ;; then we can rewrite MOV $0, AX into XOR AX, AX.
+        (when (and (== (.-AuxInt v) 0) (== (.-Aux v) nil))
+          (let [p (.Prog s x86/AXORL)]
+            (set! (.-Type (.-From p)) obj/TYPE_REG)
+            (set! (.-Reg (.-From p)) x)
+            (set! (.-Type (.-To p)) obj/TYPE_REG)
+            (set! (.-Reg (.-To p)) x)
+            (break)))
+
+
+        (let [p (.Prog s (.Asm (.-Op v)))]
+          (set! (.-Type (.-From p)) obj/TYPE_CONST)
+          (set! (.-Offset (.-From p)) (.-AuxInt v))
+          (set! (.-Type (.-To p)) obj/TYPE_REG)
+          (set! (.-Reg (.-To p)) x))))
+    (case [ssa/Op386MOVSSconst ssa/Op386MOVSDconst]
+      (let [x (.Reg v)
+          ^{:line 458} p (.Prog s (.Asm (.-Op v)))]
+        (set! (.-Type (.-From p)) obj/TYPE_FCONST)
+        (set! (.-Val (.-From p)) (math/Float64frombits (conv uint64 (.-AuxInt v))))
+        (set! (.-Type (.-To p)) obj/TYPE_REG)
+        (set! (.-Reg (.-To p)) x)))
+    (case [ssa/Op386MOVSSconst1 ssa/Op386MOVSDconst1]
+      (let [p (.Prog s x86/ALEAL)]
+        (set! (.-Type (.-From p)) obj/TYPE_MEM)
+        (set! (.-Name (.-From p)) obj/NAME_EXTERN)
+        (let [f (math/Float64frombits (conv uint64 (.-AuxInt v)))]
+          (if (== (.-Op v) ssa/Op386MOVSDconst1)
+            (set! (.-Sym (.-From p)) (.Float64Sym base/Ctxt f))
+
+            (set! (.-Sym (.-From p)) (.Float32Sym base/Ctxt (conv float32 f))))
+
+          (set! (.-Type (.-To p)) obj/TYPE_REG)
+          (set! (.-Reg (.-To p)) (.Reg v)))))
+    (case [ssa/Op386MOVSSconst2 ssa/Op386MOVSDconst2]
+      (let [p (.Prog s (.Asm (.-Op v)))]
+        (set! (.-Type (.-From p)) obj/TYPE_MEM)
+        (set! (.-Reg (.-From p)) (.Reg (aget (.-Args v) 0)))
+        (set! (.-Type (.-To p)) obj/TYPE_REG)
+        (set! (.-Reg (.-To p)) (.Reg v))))
+
+    (case [ssa/Op386MOVSSload ssa/Op386MOVSDload ssa/Op386MOVLload ssa/Op386MOVWload ssa/Op386MOVBload ssa/Op386MOVBLSXload ssa/Op386MOVWLSXload]
+      (let [p (.Prog s (.Asm (.-Op v)))]
+        (set! (.-Type (.-From p)) obj/TYPE_MEM)
+        (set! (.-Reg (.-From p)) (.Reg (aget (.-Args v) 0)))
+        (ssagen/AddAux (addr (.-From p)) v)
+        (set! (.-Type (.-To p)) obj/TYPE_REG)
+        (set! (.-Reg (.-To p)) (.Reg v))))
+    (case [ssa/Op386MOVBloadidx1 ssa/Op386MOVWloadidx1 ssa/Op386MOVLloadidx1 ssa/Op386MOVSSloadidx1 ssa/Op386MOVSDloadidx1
+        ^{:line 490} ssa/Op386MOVSDloadidx8 ssa/Op386MOVLloadidx4 ssa/Op386MOVSSloadidx4 ssa/Op386MOVWloadidx2]
+      (let [r (.Reg (aget (.-Args v) 0))
+          ^{:line 492} i (.Reg (aget (.-Args v) 1))
+          ^{:line 493} p (.Prog s (.Asm (.-Op v)))]
+        (set! (.-Type (.-From p)) obj/TYPE_MEM)
+        (switch (.-Op v)
+          (case [ssa/Op386MOVBloadidx1 ssa/Op386MOVWloadidx1 ssa/Op386MOVLloadidx1 ssa/Op386MOVSSloadidx1 ssa/Op386MOVSDloadidx1]
+            (when (== i x86/REG_SP)
+              (set! (values r i) (values i r)))
+
+            (set! (.-Scale (.-From p)) 1))
+          (case [ssa/Op386MOVSDloadidx8]
+            (set! (.-Scale (.-From p)) 8))
+          (case [ssa/Op386MOVLloadidx4 ssa/Op386MOVSSloadidx4]
+            (set! (.-Scale (.-From p)) 4))
+          (case [ssa/Op386MOVWloadidx2]
+            (set! (.-Scale (.-From p)) 2)))
+
+        (set! (.-Reg (.-From p)) r)
+        (set! (.-Index (.-From p)) i)
+        (ssagen/AddAux (addr (.-From p)) v)
+        (set! (.-Type (.-To p)) obj/TYPE_REG)
+        (set! (.-Reg (.-To p)) (.Reg v))))
+    (case [ssa/Op386ADDLloadidx4 ssa/Op386SUBLloadidx4 ssa/Op386MULLloadidx4
+        ^{:line 514} ssa/Op386ANDLloadidx4 ssa/Op386ORLloadidx4 ssa/Op386XORLloadidx4]
+      (let [p (.Prog s (.Asm (.-Op v)))]
+        (set! (.-Type (.-From p)) obj/TYPE_MEM)
+        (set! (.-Reg (.-From p)) (.Reg (aget (.-Args v) 1)))
+        (set! (.-Index (.-From p)) (.Reg (aget (.-Args v) 2)))
+        (set! (.-Scale (.-From p)) 4)
+        (ssagen/AddAux (addr (.-From p)) v)
+        (set! (.-Type (.-To p)) obj/TYPE_REG)
+        (set! (.-Reg (.-To p)) (.Reg v))))
+    (case [ssa/Op386ADDLload ssa/Op386SUBLload ssa/Op386MULLload
+        ^{:line 524} ssa/Op386ANDLload ssa/Op386ORLload ssa/Op386XORLload
+        ^{:line 525} ssa/Op386ADDSDload ssa/Op386ADDSSload ssa/Op386SUBSDload ssa/Op386SUBSSload
+        ^{:line 526} ssa/Op386MULSDload ssa/Op386MULSSload ssa/Op386DIVSSload ssa/Op386DIVSDload]
+      (let [p (.Prog s (.Asm (.-Op v)))]
+        (set! (.-Type (.-From p)) obj/TYPE_MEM)
+        (set! (.-Reg (.-From p)) (.Reg (aget (.-Args v) 1)))
+        (ssagen/AddAux (addr (.-From p)) v)
+        (set! (.-Type (.-To p)) obj/TYPE_REG)
+        (set! (.-Reg (.-To p)) (.Reg v))))
+    (case [ssa/Op386MOVSSstore ssa/Op386MOVSDstore ssa/Op386MOVLstore ssa/Op386MOVWstore ssa/Op386MOVBstore
+        ^{:line 534} ssa/Op386ADDLmodify ssa/Op386SUBLmodify ssa/Op386ANDLmodify ssa/Op386ORLmodify ssa/Op386XORLmodify]
+      (let [p (.Prog s (.Asm (.-Op v)))]
+        (set! (.-Type (.-From p)) obj/TYPE_REG)
+        (set! (.-Reg (.-From p)) (.Reg (aget (.-Args v) 1)))
+        (set! (.-Type (.-To p)) obj/TYPE_MEM)
+        (set! (.-Reg (.-To p)) (.Reg (aget (.-Args v) 0)))
+        (ssagen/AddAux (addr (.-To p)) v)))
+    (case [ssa/Op386ADDLconstmodify]
+      (let [sc (.AuxValAndOff v)
+          ^{:line 543} val (.Val sc)]
+        (when (or (== val 1) (== val -1))
+          (let [^{:tag (* obj/Prog)} p (zero (* obj/Prog))]
+            (if (== val 1)
+              (set! p (.Prog s x86/AINCL))
+
+              (set! p (.Prog s x86/ADECL)))
+
+            (let [off (.Off64 sc)]
+              (set! (.-Type (.-To p)) obj/TYPE_MEM)
+              (set! (.-Reg (.-To p)) (.Reg (aget (.-Args v) 0)))
+              (ssagen/AddAux2 (addr (.-To p)) v off)
+              (break))))
+
+        (fallthrough)))
+    (case [ssa/Op386ANDLconstmodify ssa/Op386ORLconstmodify ssa/Op386XORLconstmodify]
+      (let [sc (.AuxValAndOff v)
+          ^{:line 560} off (.Off64 sc)
+          ^{:line 561} val (.Val64 sc)
+          ^{:line 562} p (.Prog s (.Asm (.-Op v)))]
+        (set! (.-Type (.-From p)) obj/TYPE_CONST)
+        (set! (.-Offset (.-From p)) val)
+        (set! (.-Type (.-To p)) obj/TYPE_MEM)
+        (set! (.-Reg (.-To p)) (.Reg (aget (.-Args v) 0)))
+        (ssagen/AddAux2 (addr (.-To p)) v off)))
+    (case [ssa/Op386MOVBstoreidx1 ssa/Op386MOVWstoreidx1 ssa/Op386MOVLstoreidx1 ssa/Op386MOVSSstoreidx1 ssa/Op386MOVSDstoreidx1
+        ^{:line 569} ssa/Op386MOVSDstoreidx8 ssa/Op386MOVSSstoreidx4 ssa/Op386MOVLstoreidx4 ssa/Op386MOVWstoreidx2
+        ^{:line 570} ssa/Op386ADDLmodifyidx4 ssa/Op386SUBLmodifyidx4 ssa/Op386ANDLmodifyidx4 ssa/Op386ORLmodifyidx4 ssa/Op386XORLmodifyidx4]
+      (let [r (.Reg (aget (.-Args v) 0))
+          ^{:line 572} i (.Reg (aget (.-Args v) 1))
+          ^{:line 573} p (.Prog s (.Asm (.-Op v)))]
+        (set! (.-Type (.-From p)) obj/TYPE_REG)
+        (set! (.-Reg (.-From p)) (.Reg (aget (.-Args v) 2)))
+        (set! (.-Type (.-To p)) obj/TYPE_MEM)
+        (switch (.-Op v)
+          (case [ssa/Op386MOVBstoreidx1 ssa/Op386MOVWstoreidx1 ssa/Op386MOVLstoreidx1 ssa/Op386MOVSSstoreidx1 ssa/Op386MOVSDstoreidx1]
+            (when (== i x86/REG_SP)
+              (set! (values r i) (values i r)))
+
+            (set! (.-Scale (.-To p)) 1))
+          (case [ssa/Op386MOVSDstoreidx8]
+            (set! (.-Scale (.-To p)) 8))
+          (case [ssa/Op386MOVSSstoreidx4 ssa/Op386MOVLstoreidx4
+              ^{:line 586} ssa/Op386ADDLmodifyidx4 ssa/Op386SUBLmodifyidx4 ssa/Op386ANDLmodifyidx4 ssa/Op386ORLmodifyidx4 ssa/Op386XORLmodifyidx4]
+            (set! (.-Scale (.-To p)) 4))
+          (case [ssa/Op386MOVWstoreidx2]
+            (set! (.-Scale (.-To p)) 2)))
+
+        (set! (.-Reg (.-To p)) r)
+        (set! (.-Index (.-To p)) i)
+        (ssagen/AddAux (addr (.-To p)) v)))
+    (case [ssa/Op386MOVLstoreconst ssa/Op386MOVWstoreconst ssa/Op386MOVBstoreconst]
+      (let [p (.Prog s (.Asm (.-Op v)))]
+        (set! (.-Type (.-From p)) obj/TYPE_CONST)
+        (let [sc (.AuxValAndOff v)]
+          (set! (.-Offset (.-From p)) (.Val64 sc))
+          (set! (.-Type (.-To p)) obj/TYPE_MEM)
+          (set! (.-Reg (.-To p)) (.Reg (aget (.-Args v) 0)))
+          (ssagen/AddAux2 (addr (.-To p)) v (.Off64 sc)))))
+    (case [ssa/Op386ADDLconstmodifyidx4]
+      (let [sc (.AuxValAndOff v)
+          ^{:line 604} val (.Val sc)]
+        (when (or (== val 1) (== val -1))
+          (let [^{:tag (* obj/Prog)} p (zero (* obj/Prog))]
+            (if (== val 1)
+              (set! p (.Prog s x86/AINCL))
+
+              (set! p (.Prog s x86/ADECL)))
+
+            (let [off (.Off64 sc)]
+              (set! (.-Type (.-To p)) obj/TYPE_MEM)
+              (set! (.-Reg (.-To p)) (.Reg (aget (.-Args v) 0)))
+              (set! (.-Scale (.-To p)) 4)
+              (set! (.-Index (.-To p)) (.Reg (aget (.-Args v) 1)))
+              (ssagen/AddAux2 (addr (.-To p)) v off)
+              (break))))
+
+        (fallthrough)))
+    (case [ssa/Op386MOVLstoreconstidx1 ssa/Op386MOVLstoreconstidx4 ssa/Op386MOVWstoreconstidx1 ssa/Op386MOVWstoreconstidx2 ssa/Op386MOVBstoreconstidx1
+        ^{:line 622} ssa/Op386ANDLconstmodifyidx4 ssa/Op386ORLconstmodifyidx4 ssa/Op386XORLconstmodifyidx4]
+      (let [p (.Prog s (.Asm (.-Op v)))]
+        (set! (.-Type (.-From p)) obj/TYPE_CONST)
+        (let [sc (.AuxValAndOff v)]
+          (set! (.-Offset (.-From p)) (.Val64 sc))
+          (let [r (.Reg (aget (.-Args v) 0))
+              ^{:line 628} i (.Reg (aget (.-Args v) 1))]
+            (switch (.-Op v)
+              (case [ssa/Op386MOVBstoreconstidx1 ssa/Op386MOVWstoreconstidx1 ssa/Op386MOVLstoreconstidx1]
+                (set! (.-Scale (.-To p)) 1)
+                (when (== i x86/REG_SP)
+                  (set! (values r i) (values i r))))
+
+              (case [ssa/Op386MOVWstoreconstidx2]
+                (set! (.-Scale (.-To p)) 2))
+              (case [ssa/Op386MOVLstoreconstidx4
+                  ^{:line 638} ssa/Op386ADDLconstmodifyidx4 ssa/Op386ANDLconstmodifyidx4 ssa/Op386ORLconstmodifyidx4 ssa/Op386XORLconstmodifyidx4]
+                (set! (.-Scale (.-To p)) 4)))
+
+            (set! (.-Type (.-To p)) obj/TYPE_MEM)
+            (set! (.-Reg (.-To p)) r)
+            (set! (.-Index (.-To p)) i)
+            (ssagen/AddAux2 (addr (.-To p)) v (.Off64 sc))))))
+    (case [ssa/Op386MOVWLSX ssa/Op386MOVBLSX ssa/Op386MOVWLZX ssa/Op386MOVBLZX
+        ^{:line 646} ssa/Op386CVTSL2SS ssa/Op386CVTSL2SD
+        ^{:line 647} ssa/Op386CVTTSS2SL ssa/Op386CVTTSD2SL
+        ^{:line 648} ssa/Op386CVTSS2SD ssa/Op386CVTSD2SS]
+      (opregreg s (.Asm (.-Op v)) (.Reg v) (.Reg (aget (.-Args v) 0))))
+    (case [ssa/Op386DUFFZERO]
+      (let [p (.Prog s obj/ADUFFZERO)]
+        (set! (.-Type (.-To p)) obj/TYPE_ADDR)
+        (set! (.-Sym (.-To p)) (.-Duffzero ir/Syms))
+        (set! (.-Offset (.-To p)) (.-AuxInt v))))
+    (case [ssa/Op386DUFFCOPY]
+      (let [p (.Prog s obj/ADUFFCOPY)]
+        (set! (.-Type (.-To p)) obj/TYPE_ADDR)
+        (set! (.-Sym (.-To p)) (.-Duffcopy ir/Syms))
+        (set! (.-Offset (.-To p)) (.-AuxInt v))))
+
+    (case [ssa/OpCopy] ; TODO: use MOVLreg for reg->reg copies instead of OpCopy?
+      (when (.IsMemory (.-Type v))
+        (return))
+
+      (let [x (.Reg (aget (.-Args v) 0))
+          ^{:line 666} y (.Reg v)]
+        (when (!= x y)
+          (opregreg s (moveByType (.-Type v)) y x))))
+
+    (case [ssa/OpLoadReg]
+      (when (.IsFlags (.-Type v))
+        (.Fatalf v "load flags not implemented: %v" (.LongString v))
+        (return))
+
+      (let [p (.Prog s (loadByType (.-Type v)))]
+        (ssagen/AddrAuto (addr (.-From p)) (aget (.-Args v) 0))
+        (set! (.-Type (.-To p)) obj/TYPE_REG)
+        (set! (.-Reg (.-To p)) (.Reg v))))
+
+    (case [ssa/OpStoreReg]
+      (when (.IsFlags (.-Type v))
+        (.Fatalf v "store flags not implemented: %v" (.LongString v))
+        (return))
+
+      (let [p (.Prog s (storeByType (.-Type v)))]
+        (set! (.-Type (.-From p)) obj/TYPE_REG)
+        (set! (.-Reg (.-From p)) (.Reg (aget (.-Args v) 0)))
+        (ssagen/AddrAuto (addr (.-To p)) v)))
+    (case [ssa/Op386LoweredGetClosurePtr]
+      ;; Closure pointer is DX.
+      (ssagen/CheckLoweredGetClosurePtr v))
+    (case [ssa/Op386LoweredGetG]
+      (let [r (.Reg v)]
+        ;; See the comments in cmd/internal/obj/x86/obj6.go
+        ;; near CanUse1InsnTLS for a detailed explanation of these instructions.
+        (if (x86/CanUse1InsnTLS base/Ctxt)
+          ;; MOVL (TLS), r
+          (let [p (.Prog s x86/AMOVL)]
+            (set! (.-Type (.-From p)) obj/TYPE_MEM)
+            (set! (.-Reg (.-From p)) x86/REG_TLS)
+            (set! (.-Type (.-To p)) obj/TYPE_REG)
+            (set! (.-Reg (.-To p)) r))
+
+          ;; MOVL TLS, r
+          ;; MOVL (r)(TLS*1), r
+          (let [p (.Prog s x86/AMOVL)]
+            (set! (.-Type (.-From p)) obj/TYPE_REG)
+            (set! (.-Reg (.-From p)) x86/REG_TLS)
+            (set! (.-Type (.-To p)) obj/TYPE_REG)
+            (set! (.-Reg (.-To p)) r)
+            (let [q (.Prog s x86/AMOVL)]
+              (set! (.-Type (.-From q)) obj/TYPE_MEM)
+              (set! (.-Reg (.-From q)) r)
+              (set! (.-Index (.-From q)) x86/REG_TLS)
+              (set! (.-Scale (.-From q)) 1)
+              (set! (.-Type (.-To q)) obj/TYPE_REG)
+              (set! (.-Reg (.-To q)) r))))))
+
+
+    (case [ssa/Op386LoweredGetCallerPC]
+      (let [p (.Prog s x86/AMOVL)]
+        (set! (.-Type (.-From p)) obj/TYPE_MEM)
+        (set! (.-Offset (.-From p)) -4) ; PC is stored 4 bytes below first parameter.
+        (set! (.-Name (.-From p)) obj/NAME_PARAM)
+        (set! (.-Type (.-To p)) obj/TYPE_REG)
+        (set! (.-Reg (.-To p)) (.Reg v))))
+
+    (case [ssa/Op386LoweredGetCallerSP]
+      ;; caller's SP is the address of the first arg
+      (let [p (.Prog s x86/AMOVL)]
+        (set! (.-Type (.-From p)) obj/TYPE_ADDR)
+        (set! (.-Offset (.-From p)) (- ^{:go/via [Arch]} (.-FixedFrameSize (.-Arch base/Ctxt)))) ; 0 on 386, just to be consistent with other architectures
+        (set! (.-Name (.-From p)) obj/NAME_PARAM)
+        (set! (.-Type (.-To p)) obj/TYPE_REG)
+        (set! (.-Reg (.-To p)) (.Reg v))))
+
+    (case [ssa/Op386LoweredWB]
+      (let [p (.Prog s obj/ACALL)]
+        (set! (.-Type (.-To p)) obj/TYPE_MEM)
+        (set! (.-Name (.-To p)) obj/NAME_EXTERN)
+        ;; AuxInt encodes how many buffer entries we need.
+        (set! (.-Sym (.-To p)) (aget (.-GCWriteBarrier ir/Syms) (- (.-AuxInt v) 1)))))
+
+    (case [ssa/Op386LoweredPanicBoundsRR ssa/Op386LoweredPanicBoundsRC ssa/Op386LoweredPanicBoundsCR ssa/Op386LoweredPanicBoundsCC
+        ^{:line 745} ssa/Op386LoweredPanicExtendRR ssa/Op386LoweredPanicExtendRC]
+      ;; Compute the constant we put in the PCData entry for this call.
+      (let [(values code signed) (.Code (conv ssa/BoundsKind (.-AuxInt v)))
+          ^{:line 748} xIsReg false
+          ^{:line 749} yIsReg false
+          ^{:line 750} xVal 0
+          ^{:line 751} yVal 0
+          ^{:line 752} extend false]
+        (switch (.-Op v)
+          (case [ssa/Op386LoweredPanicBoundsRR]
+            (set! xIsReg true)
+            (set! xVal (conv int (- (.Reg (aget (.-Args v) 0)) x86/REG_AX)))
+            (set! yIsReg true)
+            (set! yVal (conv int (- (.Reg (aget (.-Args v) 1)) x86/REG_AX))))
+          (case [ssa/Op386LoweredPanicExtendRR]
+            (set! extend true)
+            (set! xIsReg true)
+            (let [hi (conv int (- (.Reg (aget (.-Args v) 0)) x86/REG_AX))
+                ^{:line 763} lo (conv int (- (.Reg (aget (.-Args v) 1)) x86/REG_AX))]
+              (set! xVal (+ (<< hi 2) lo)) ; encode 2 register numbers
+              (set! yIsReg true)
+              (set! yVal (conv int (- (.Reg (aget (.-Args v) 2)) x86/REG_AX)))))
+          (case [ssa/Op386LoweredPanicBoundsRC]
+            (set! xIsReg true)
+            (set! xVal (conv int (- (.Reg (aget (.-Args v) 0)) x86/REG_AX)))
+            (let [c (.-C (assert ssa/PanicBoundsC (.-Aux v)))]
+              (if (and (>= c 0) (<= c abi/BoundsMaxConst))
+                (set! yVal (conv int c))
+                (do
+                  ;; Move constant to a register
+                  (set! yIsReg true)
+                  (when (== yVal xVal)
+                    (set! yVal 1))
+
+                  (let [p (.Prog s x86/AMOVL)]
+                    (set! (.-Type (.-From p)) obj/TYPE_CONST)
+                    (set! (.-Offset (.-From p)) c)
+                    (set! (.-Type (.-To p)) obj/TYPE_REG)
+                    (set! (.-Reg (.-To p)) (+ x86/REG_AX (conv int16 yVal))))))))
+
+          (case [ssa/Op386LoweredPanicExtendRC]
+            (set! extend true)
+            (set! xIsReg true)
+            (let [hi (conv int (- (.Reg (aget (.-Args v) 0)) x86/REG_AX))
+                ^{:line 789} lo (conv int (- (.Reg (aget (.-Args v) 1)) x86/REG_AX))]
+              (set! xVal (+ (<< hi 2) lo)) ; encode 2 register numbers
+              (let [c (.-C (assert ssa/PanicBoundsC (.-Aux v)))]
+                (if (and (>= c 0) (<= c abi/BoundsMaxConst))
+                  (set! yVal (conv int c))
+                  (do
+                    ;; Move constant to a register
+                    (while (or (== yVal hi) (== yVal lo))
+                      (inc! yVal))
+
+                    (let [p (.Prog s x86/AMOVL)]
+                      (set! (.-Type (.-From p)) obj/TYPE_CONST)
+                      (set! (.-Offset (.-From p)) c)
+                      (set! (.-Type (.-To p)) obj/TYPE_REG)
+                      (set! (.-Reg (.-To p)) (+ x86/REG_AX (conv int16 yVal)))))))))
+
+          (case [ssa/Op386LoweredPanicBoundsCR]
+            (set! yIsReg true)
+            (set! yVal (conv int (- (.Reg (aget (.-Args v) 0)) x86/REG_AX)))
+            (let [c (.-C (assert ssa/PanicBoundsC (.-Aux v)))]
+              (cond (and (>= c 0) (<= c abi/BoundsMaxConst))
+                (set! xVal (conv int c))
+                (or (and signed (== (conv int64 (conv int32 c)) c)) (and (not signed) (== (conv int64 (conv uint32 c)) c))) (do
+                  ;; Move constant to a register
+                  (set! xIsReg true)
+                  (when (== xVal yVal)
+                    (set! xVal 1))
+
+                  (let [p (.Prog s x86/AMOVL)]
+                    (set! (.-Type (.-From p)) obj/TYPE_CONST)
+                    (set! (.-Offset (.-From p)) c)
+                    (set! (.-Type (.-To p)) obj/TYPE_REG)
+                    (set! (.-Reg (.-To p)) (+ x86/REG_AX (conv int16 xVal))))) :else
+                (do
+                  ;; Move constant to two registers
+                  (set! extend true)
+                  (set! xIsReg true)
+                  (let [hi 0
+                      ^{:line 827} lo 1]
+                    (when (== hi yVal)
+                      (set! hi 2))
+
+                    (when (== lo yVal)
+                      (set! lo 2))
+
+                    (set! xVal (+ (<< hi 2) lo))
+                    (let [p (.Prog s x86/AMOVL)]
+                      (set! (.-Type (.-From p)) obj/TYPE_CONST)
+                      (set! (.-Offset (.-From p)) (>> c 32))
+                      (set! (.-Type (.-To p)) obj/TYPE_REG)
+                      (set! (.-Reg (.-To p)) (+ x86/REG_AX (conv int16 hi)))
+                      (set! p (.Prog s x86/AMOVL))
+                      (set! (.-Type (.-From p)) obj/TYPE_CONST)
+                      (set! (.-Offset (.-From p)) (conv int64 (conv int32 c)))
+                      (set! (.-Type (.-To p)) obj/TYPE_REG)
+                      (set! (.-Reg (.-To p)) (+ x86/REG_AX (conv int16 lo)))))))))
+
+          (case [ssa/Op386LoweredPanicBoundsCC]
+            (let [c (.-Cx (assert ssa/PanicBoundsCC (.-Aux v)))]
+              (cond (and (>= c 0) (<= c abi/BoundsMaxConst))
+                (set! xVal (conv int c))
+                (or (and signed (== (conv int64 (conv int32 c)) c)) (and (not signed) (== (conv int64 (conv uint32 c)) c))) (do
+                  ;; Move constant to a register
+                  (set! xIsReg true)
+                  (let [p (.Prog s x86/AMOVL)]
+                    (set! (.-Type (.-From p)) obj/TYPE_CONST)
+                    (set! (.-Offset (.-From p)) c)
+                    (set! (.-Type (.-To p)) obj/TYPE_REG)
+                    (set! (.-Reg (.-To p)) (+ x86/REG_AX (conv int16 xVal))))) :else
+                (do
+                  ;; Move constant to two registers
+                  (set! extend true)
+                  (set! xIsReg true)
+                  (let [hi 0
+                      ^{:line 863} lo 1]
+                    (set! xVal (+ (<< hi 2) lo))
+                    (let [p (.Prog s x86/AMOVL)]
+                      (set! (.-Type (.-From p)) obj/TYPE_CONST)
+                      (set! (.-Offset (.-From p)) (>> c 32))
+                      (set! (.-Type (.-To p)) obj/TYPE_REG)
+                      (set! (.-Reg (.-To p)) (+ x86/REG_AX (conv int16 hi)))
+                      (set! p (.Prog s x86/AMOVL))
+                      (set! (.-Type (.-From p)) obj/TYPE_CONST)
+                      (set! (.-Offset (.-From p)) (conv int64 (conv int32 c)))
+                      (set! (.-Type (.-To p)) obj/TYPE_REG)
+                      (set! (.-Reg (.-To p)) (+ x86/REG_AX (conv int16 lo)))))))
+
+              (set! c (.-Cy (assert ssa/PanicBoundsCC (.-Aux v))))
+              (if (and (>= c 0) (<= c abi/BoundsMaxConst))
+                (set! yVal (conv int c))
+                (do
+                  ;; Move constant to a register
+                  (set! yIsReg true)
+                  (set! yVal 2)
+                  (let [p (.Prog s x86/AMOVL)]
+                    (set! (.-Type (.-From p)) obj/TYPE_CONST)
+                    (set! (.-Offset (.-From p)) c)
+                    (set! (.-Type (.-To p)) obj/TYPE_REG)
+                    (set! (.-Reg (.-To p)) (+ x86/REG_AX (conv int16 yVal)))))))))
+
+
+        (let [c (abi/BoundsEncode code signed xIsReg yIsReg xVal yVal)
+
+            ^{:line 892} p (.Prog s obj/APCDATA)]
+          (.SetConst (.-From p) abi/PCDATA_PanicBounds)
+          (.SetConst (.-To p) (conv int64 c))
+          (set! p (.Prog s obj/ACALL))
+          (set! (.-Type (.-To p)) obj/TYPE_MEM)
+          (set! (.-Name (.-To p)) obj/NAME_EXTERN)
+          (if extend
+            (set! (.-Sym (.-To p)) (.-PanicExtend ir/Syms))
+
+            (set! (.-Sym (.-To p)) (.-PanicBounds ir/Syms))))))
+
+
+    (case [ssa/Op386CALLstatic ssa/Op386CALLclosure ssa/Op386CALLinter]
+      (.Call s v))
+    (case [ssa/Op386CALLtail ssa/Op386CALLtailinter]
+      (.TailCall s v))
+    (case [ssa/Op386NEGL
+        ^{:line 909} ssa/Op386BSWAPL
+        ^{:line 910} ssa/Op386NOTL]
+      (let [p (.Prog s (.Asm (.-Op v)))]
+        (set! (.-Type (.-To p)) obj/TYPE_REG)
+        (set! (.-Reg (.-To p)) (.Reg v))))
+    (case [ssa/Op386BSFL ssa/Op386BSFW
+        ^{:line 915} ssa/Op386BSRL ssa/Op386BSRW
+        ^{:line 916} ssa/Op386SQRTSS ssa/Op386SQRTSD]
+      (let [p (.Prog s (.Asm (.-Op v)))]
+        (set! (.-Type (.-From p)) obj/TYPE_REG)
+        (set! (.-Reg (.-From p)) (.Reg (aget (.-Args v) 0)))
+        (set! (.-Type (.-To p)) obj/TYPE_REG)
+        (set! (.-Reg (.-To p)) (.Reg v))))
+    (case [ssa/Op386SETEQ ssa/Op386SETNE
+        ^{:line 923} ssa/Op386SETL ssa/Op386SETLE
+        ^{:line 924} ssa/Op386SETG ssa/Op386SETGE
+        ^{:line 925} ssa/Op386SETGF ssa/Op386SETGEF
+        ^{:line 926} ssa/Op386SETB ssa/Op386SETBE
+        ^{:line 927} ssa/Op386SETORD ssa/Op386SETNAN
+        ^{:line 928} ssa/Op386SETA ssa/Op386SETAE
+        ^{:line 929} ssa/Op386SETO]
+      (let [p (.Prog s (.Asm (.-Op v)))]
+        (set! (.-Type (.-To p)) obj/TYPE_REG)
+        (set! (.-Reg (.-To p)) (.Reg v))))
+
+    (case [ssa/Op386SETNEF]
+      (let [p (.Prog s (.Asm (.-Op v)))]
+        (set! (.-Type (.-To p)) obj/TYPE_REG)
+        (set! (.-Reg (.-To p)) (.Reg v))
+        (let [q (.Prog s x86/ASETPS)]
+          (set! (.-Type (.-To q)) obj/TYPE_REG)
+          (set! (.-Reg (.-To q)) x86/REG_AX)
+          (opregreg s x86/AORL (.Reg v) x86/REG_AX))))
+
+    (case [ssa/Op386SETEQF]
+      (let [p (.Prog s (.Asm (.-Op v)))]
+        (set! (.-Type (.-To p)) obj/TYPE_REG)
+        (set! (.-Reg (.-To p)) (.Reg v))
+        (let [q (.Prog s x86/ASETPC)]
+          (set! (.-Type (.-To q)) obj/TYPE_REG)
+          (set! (.-Reg (.-To q)) x86/REG_AX)
+          (opregreg s x86/AANDL (.Reg v) x86/REG_AX))))
+
+    (case [ssa/Op386InvertFlags]
+      (.Fatalf v "InvertFlags should never make it to codegen %v" (.LongString v)))
+    (case [ssa/Op386FlagEQ ssa/Op386FlagLT_ULT ssa/Op386FlagLT_UGT ssa/Op386FlagGT_ULT ssa/Op386FlagGT_UGT]
+      (.Fatalf v "Flag* ops should never make it to codegen %v" (.LongString v)))
+    (case [ssa/Op386REPSTOSL]
+      (.Prog s x86/AREP)
+      (.Prog s x86/ASTOSL))
+    (case [ssa/Op386REPMOVSL]
+      (.Prog s x86/AREP)
+      (.Prog s x86/AMOVSL))
+    (case [ssa/Op386LoweredNilCheck]
+      ;; Issue a load which will fault if the input is nil.
+      ;; TODO: We currently use the 2-byte instruction TESTB AX, (reg).
+      ;; Should we use the 3-byte TESTB $0, (reg) instead? It is larger
+      ;; but it doesn't have false dependency on AX.
+      ;; Or maybe allocate an output register and use MOVL (reg),reg2 ?
+      ;; That trades clobbering flags for clobbering a register.
+      (let [p (.Prog s x86/ATESTB)]
+        (set! (.-Type (.-From p)) obj/TYPE_REG)
+        (set! (.-Reg (.-From p)) x86/REG_AX)
+        (set! (.-Type (.-To p)) obj/TYPE_MEM)
+        (set! (.-Reg (.-To p)) (.Reg (aget (.-Args v) 0)))
+        (ssagen/AddAux (addr (.-To p)) v)
+        (when (logopt/Enabled)
+          (logopt/LogOpt (.-Pos v) "nilcheck" "genssa" (.-Name (.-Func (.-Block v)))))
+
+        (when (and (!= (.-Nil base/Debug) 0) (> ^{:go/via [lico]} (.Line (.-Pos v)) 1)) ; v.Pos.Line()==1 in generated wrappers
+          (base/WarnfAt (.-Pos v) "generated nil check"))))
+
+    (case [ssa/Op386LoweredCtz32]
+      ;; BSFL in, out
+      (let [p (.Prog s x86/ABSFL)]
+        (set! (.-Type (.-From p)) obj/TYPE_REG)
+        (set! (.-Reg (.-From p)) (.Reg (aget (.-Args v) 0)))
+        (set! (.-Type (.-To p)) obj/TYPE_REG)
+        (set! (.-Reg (.-To p)) (.Reg v))
+
+        ;; JNZ 2(PC)
+        (let [p1 (.Prog s x86/AJNE)]
+          (set! (.-Type (.-To p1)) obj/TYPE_BRANCH)
+
+          ;; MOVL $32, out
+          (let [p2 (.Prog s x86/AMOVL)]
+            (set! (.-Type (.-From p2)) obj/TYPE_CONST)
+            (set! (.-Offset (.-From p2)) 32)
+            (set! (.-Type (.-To p2)) obj/TYPE_REG)
+            (set! (.-Reg (.-To p2)) (.Reg v))
+
+            ;; NOP (so the JNZ has somewhere to land)
+            (let [nop (.Prog s obj/ANOP)]
+              (.SetTarget (.-To p1) nop))))))
+    (case [ssa/Op386LoweredCtz64]
+      (when (== (.Reg (aget (.-Args v) 0)) (.Reg v))
+        (.Fatalf v "input[0] and output in the same register %s" (.LongString v)))
+
+      (when (== (.Reg (aget (.-Args v) 1)) (.Reg v))
+        (.Fatalf v "input[1] and output in the same register %s" (.LongString v)))
+
+
+      ;; BSFL arg0, out
+      (let [p (.Prog s x86/ABSFL)]
+        (set! (.-Type (.-From p)) obj/TYPE_REG)
+        (set! (.-Reg (.-From p)) (.Reg (aget (.-Args v) 0)))
+        (set! (.-Type (.-To p)) obj/TYPE_REG)
+        (set! (.-Reg (.-To p)) (.Reg v))
+
+        ;; JNZ 5(PC)
+        (let [p1 (.Prog s x86/AJNE)]
+          (set! (.-Type (.-To p1)) obj/TYPE_BRANCH)
+
+          ;; BSFL arg1, out
+          (let [p2 (.Prog s x86/ABSFL)]
+            (set! (.-Type (.-From p2)) obj/TYPE_REG)
+            (set! (.-Reg (.-From p2)) (.Reg (aget (.-Args v) 1)))
+            (set! (.-Type (.-To p2)) obj/TYPE_REG)
+            (set! (.-Reg (.-To p2)) (.Reg v))
+
+            ;; JNZ 2(PC)
+            (let [p3 (.Prog s x86/AJNE)]
+              (set! (.-Type (.-To p3)) obj/TYPE_BRANCH)
+
+              ;; MOVL $32, out
+              (let [p4 (.Prog s x86/AMOVL)]
+                (set! (.-Type (.-From p4)) obj/TYPE_CONST)
+                (set! (.-Offset (.-From p4)) 32)
+                (set! (.-Type (.-To p4)) obj/TYPE_REG)
+                (set! (.-Reg (.-To p4)) (.Reg v))
+
+                ;; ADDL $32, out
+                (let [p5 (.Prog s x86/AADDL)]
+                  (set! (.-Type (.-From p5)) obj/TYPE_CONST)
+                  (set! (.-Offset (.-From p5)) 32)
+                  (set! (.-Type (.-To p5)) obj/TYPE_REG)
+                  (set! (.-Reg (.-To p5)) (.Reg v))
+                  (.SetTarget (.-To p3) p5)
+
+                  ;; NOP (so the JNZ has somewhere to land)
+                  (let [nop (.Prog s obj/ANOP)]
+                    (.SetTarget (.-To p1) nop)))))))))
+
+    (case [ssa/OpClobber]
+      (let [p (.Prog s x86/AMOVL)]
+        (set! (.-Type (.-From p)) obj/TYPE_CONST)
+        (set! (.-Offset (.-From p)) 0xdeaddead)
+        (set! (.-Type (.-To p)) obj/TYPE_MEM)
+        (set! (.-Reg (.-To p)) x86/REG_SP)
+        (ssagen/AddAux (addr (.-To p)) v)))
+    (case [ssa/OpClobberReg])
+    ;; TODO: implement for clobberdead experiment. Nop is ok for now.
+    (default
+      (.Fatalf v "genValue not implemented: %s" (.LongString v)))))
+
+
+
+(go/var blockJump (lit (array ... (struct
+        ^{:line 1067 :tag obj/As} asm ^obj/As invasm))
+
+    ^{:line 1069} [ssa/Block386EQ (lit _ x86/AJEQ x86/AJNE)]
+    ^{:line 1070} [ssa/Block386NE (lit _ x86/AJNE x86/AJEQ)]
+    ^{:line 1071} [ssa/Block386LT (lit _ x86/AJLT x86/AJGE)]
+    ^{:line 1072} [ssa/Block386GE (lit _ x86/AJGE x86/AJLT)]
+    ^{:line 1073} [ssa/Block386LE (lit _ x86/AJLE x86/AJGT)]
+    ^{:line 1074} [ssa/Block386GT (lit _ x86/AJGT x86/AJLE)]
+    ^{:line 1075} [ssa/Block386OS (lit _ x86/AJOS x86/AJOC)]
+    ^{:line 1076} [ssa/Block386OC (lit _ x86/AJOC x86/AJOS)]
+    ^{:line 1077} [ssa/Block386ULT (lit _ x86/AJCS x86/AJCC)]
+    ^{:line 1078} [ssa/Block386UGE (lit _ x86/AJCC x86/AJCS)]
+    ^{:line 1079} [ssa/Block386UGT (lit _ x86/AJHI x86/AJLS)]
+    ^{:line 1080} [ssa/Block386ULE (lit _ x86/AJLS x86/AJHI)]
+    ^{:line 1081} [ssa/Block386ORD (lit _ x86/AJPC x86/AJPS)]
+    ^{:line 1082} [ssa/Block386NAN (lit _ x86/AJPS x86/AJPC)]))
+
+
+(go/var eqfJumps (lit (array 2 (array 2 ssagen/IndexJump))
+    (lit _ (lit _ :Jump x86/AJNE :Index 1) (lit _ :Jump x86/AJPS :Index 1)) ; next == b.Succs[0]
+    (lit _ (lit _ :Jump x86/AJNE :Index 1) (lit _ :Jump x86/AJPC :Index 0)))) ; next == b.Succs[1]
+
+(go/var nefJumps (lit (array 2 (array 2 ssagen/IndexJump))
+    (lit _ (lit _ :Jump x86/AJNE :Index 0) (lit _ :Jump x86/AJPC :Index 1)) ; next == b.Succs[0]
+    (lit _ (lit _ :Jump x86/AJNE :Index 0) (lit _ :Jump x86/AJPS :Index 0)))) ; next == b.Succs[1]
+
+
+^{:go/end 1136} (go/func ssaGenBlock [^{:tag (* ssagen/State)} s ^{:tag (* ssa/Block)} b ^{:tag (* ssa/Block)} next]
+  (switch (.-Kind b)
+    (case [ssa/BlockPlain ssa/BlockDefer]
+      (when (!= (.Block (aget (.-Succs b) 0)) next)
+        (let [p (.Prog s obj/AJMP)]
+          (set! (.-Type (.-To p)) obj/TYPE_BRANCH)
+          (set! (.-Branches s) (append (.-Branches s) (lit ssagen/Branch :P p :B (.Block (aget (.-Succs b) 0))))))))
+
+    (case [ssa/BlockExit ssa/BlockRetJmp])
+    (case [ssa/BlockRet]
+      (.Prog s obj/ARET))
+
+    (case [ssa/Block386EQF]
+      (.CombJump s b next (addr eqfJumps)))
+
+    (case [ssa/Block386NEF]
+      (.CombJump s b next (addr nefJumps)))
+
+    (case [ssa/Block386EQ ssa/Block386NE
+        ^{:line 1113} ssa/Block386LT ssa/Block386GE
+        ^{:line 1114} ssa/Block386LE ssa/Block386GT
+        ^{:line 1115} ssa/Block386OS ssa/Block386OC
+        ^{:line 1116} ssa/Block386ULT ssa/Block386UGT
+        ^{:line 1117} ssa/Block386ULE ssa/Block386UGE]
+      (let [jmp (aget blockJump (.-Kind b))]
+        (switch next
+          (case [(.Block (aget (.-Succs b) 0))]
+            (.Br s (.-invasm jmp) (.Block (aget (.-Succs b) 1))))
+          (case [(.Block (aget (.-Succs b) 1))]
+            (.Br s (.-asm jmp) (.Block (aget (.-Succs b) 0))))
+          (default
+            (if (!= (.-Likely b) ssa/BranchUnlikely) (do
+                (.Br s (.-asm jmp) (.Block (aget (.-Succs b) 0)))
+                (.Br s obj/AJMP (.Block (aget (.-Succs b) 1))))
+              (do
+                (.Br s (.-invasm jmp) (.Block (aget (.-Succs b) 1)))
+                (.Br s obj/AJMP (.Block (aget (.-Succs b) 0)))))))))
+
+
+    (default
+      (.Fatalf b "branch not implemented: %s" (.LongString b)))))

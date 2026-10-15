@@ -1,0 +1,412 @@
+;; Copyright 2023 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.cmd.compile.internal.inline.inlheur) (go/file "analyze_func_callsites.go" :imports [
+
+
+    ^{:line 8} [ir "cmd/compile/internal/ir"]
+    ^{:line 9} [pgoir "cmd/compile/internal/pgoir"]
+    ^{:line 10} [typecheck "cmd/compile/internal/typecheck"]
+    ^{:line 11} [fmt "fmt"]
+    ^{:line 12} [os "os"]
+    ^{:line 13} [strings "strings"]])
+
+
+(go/type callSiteAnalyzer (struct
+    ^{:line 17 :tag (* ir/Func)} fn
+    (* nameFinder)))
+
+
+(go/type callSiteTableBuilder (struct
+    ^{:line 22 :tag (* ir/Func)} fn
+    (* nameFinder)
+    ^{:line 24 :tag CallSiteTab} cstab
+    ^{:line 25 :tag (map ir/Node pstate)} ptab
+    ^{:line 26 :tag (slice ir/Node)} nstack
+    ^{:line 27 :tag int} loopNest
+    ^{:line 28 :tag bool} isInit))
+
+
+^{:go/end 36} (go/func makeCallSiteAnalyzer ^{:tag (* callSiteAnalyzer)} [^{:tag (* ir/Func)} fn]
+  (addr ^{:go/breaks [2 4]} (lit callSiteAnalyzer
+      :fn fn
+      :nameFinder (newNameFinder fn))))
+
+
+
+^{:go/end 49} (go/func makeCallSiteTableBuilder ^{:tag (* callSiteTableBuilder)} [^{:tag (* ir/Func)} fn ^CallSiteTab cstab ^{:tag (map ir/Node pstate)} ptab ^int loopNestingLevel ^{:tag (* nameFinder)} nf]
+  (let [isInit (or (.IsPackageInit fn) (strings/HasPrefix (.-Name (.Sym fn)) "init."))]
+    (addr ^{:go/breaks [2 4 6 8 10 12 14]} (lit callSiteTableBuilder
+        :fn fn
+        :cstab cstab
+        :ptab ptab
+        :isInit isInit
+        :loopNest loopNestingLevel
+        :nstack (lit (slice ir/Node) fn)
+        :nameFinder nf))))
+
+
+
+
+
+
+
+
+^{:go/end 69} (go/func computeCallSiteTable "computeCallSiteTable builds and returns a table of call sites for\nthe specified region in function fn. A region here corresponds to a\nspecific subtree within the AST for a function. The main intended\nuse cases are for 'region' to be either A) an entire function body,\nor B) an inlined call expression.\n" ^CallSiteTab [^{:tag (* ir/Func)} fn ^ir/Nodes region ^CallSiteTab cstab ^{:tag (map ir/Node pstate)} ptab ^int loopNestingLevel ^{:tag (* nameFinder)} nf]
+  (let [cstb (makeCallSiteTableBuilder fn cstab ptab loopNestingLevel nf)
+      ^{:line 58 :tag (func [ir/Node] [bool])} doNode (zero (func [ir/Node] [bool]))]
+    (set! doNode ^{:go/breaks [5] :go/end 64} (fn ^bool [^ir/Node n]
+        (.nodeVisitPre cstb n)
+        (ir/DoChildren n doNode)
+        (.nodeVisitPost cstb n)
+        false))
+
+    (range [_ n region]
+      (doNode n))
+
+    (.-cstab cstb)))
+
+
+^{:go/end 98} (go/method flagsForNode ^CSPropBits [^{:tag (* callSiteTableBuilder)} cstb ^{:tag (* ir/CallExpr)} call]
+  (let [^CSPropBits r (zero CSPropBits)]
+
+    (when (!= (bit-and debugTrace debugTraceCalls) 0)
+      (fmt/Fprintf os/Stderr "=-= analyzing call at %s\n"
+        (fmtFullPos ^{:go/via [miniExpr miniNode]} (.Pos call))))
+
+
+    ;; Set a bit if this call is within a loop.
+    (when (> (.-loopNest cstb) 0)
+      (set! r bit-or CallSiteInLoop))
+
+
+    ;; Set a bit if the call is within an init function (either
+    ;; compiler-generated or user-written).
+    (when (.-isInit cstb)
+      (set! r bit-or CallSiteInInitFunc))
+
+
+    ;; Decide whether to apply the panic path heuristic. Hack: don't
+    ;; apply this heuristic in the function "main.main" (mostly just
+    ;; to avoid annoying users).
+    (when (not (isMainMain (.-fn cstb)))
+      (set! r (.determinePanicPathBits cstb call r)))
+
+
+    ^{:line 97} r))
+
+
+
+
+
+
+
+^{:go/end 140} (go/method determinePanicPathBits "determinePanicPathBits updates the CallSiteOnPanicPath bit within\n\"r\" if we think this call is on an unconditional path to\npanic/exit. Do this by walking back up the node stack to see if we\ncan find either A) an enclosing panic, or B) a statement node that\nwe've determined leads to a panic/exit.\n" ^CSPropBits [^{:tag (* callSiteTableBuilder)} cstb ^ir/Node call ^CSPropBits r]
+  (set! (.-nstack cstb) (append (.-nstack cstb) call))
+  (defer (^{:go/end 109} (fn []
+        (set! (.-nstack cstb) (subslice (.-nstack cstb) _ (- (len (.-nstack cstb)) 1))))))
+
+
+  (range [ri (subslice (.-nstack cstb) _ (- (len (.-nstack cstb)) 1))]
+    (let [i (- (len (.-nstack cstb)) ri 1)
+        ^{:line 113} n (aget (.-nstack cstb) i)
+        (values _ isCallExpr) (assert (* ir/CallExpr) n)
+        (values _ isStmt) (assert ir/Stmt n)]
+      (when isCallExpr
+        (set! isStmt false))
+
+
+      (when (!= (bit-and debugTrace debugTraceCalls) 0)
+        (let [(values ps inps) (aget (.-ptab cstb) n)]
+          (fmt/Fprintf os/Stderr "=-= callpar %d op=%s ps=%s inptab=%v stmt=%v\n" i (.String (.Op n)) (.String ps) inps isStmt)))
+
+
+      (when (== (.Op n) ir/OPANIC)
+        (set! r bit-or CallSiteOnPanicPath)
+        (break))
+
+      (when [(values v ok) (aget (.-ptab cstb) n)] ok
+        (when (== v psCallsPanic)
+          (set! r bit-or CallSiteOnPanicPath)
+          (break))
+
+        (when isStmt
+          (break)))))
+
+
+
+  ^{:line 139} r)
+
+
+
+^{:go/end 158} (go/method propsForArg "propsForArg returns property bits for a given call argument expression arg.\n" ^ActualExprPropBits [^{:tag (* callSiteTableBuilder)} cstb ^ir/Node arg]
+  (when [cval ^{:go/via [nameFinder]} (.constValue cstb arg)] (!= cval nil)
+    (return ActualExprConstant))
+
+  (when ^{:go/via [nameFinder]} (.isConcreteConvIface cstb arg)
+    (return ActualExprIsConcreteConvIface))
+
+  ^{:go/breaks [[3 157]]} (let [fname ^{:go/via [nameFinder]} (.funcName cstb arg)]
+    (when (!= fname nil)
+      (when [fn (.-Func fname)] (and (!= fn nil) (typecheck/HaveInlineBody fn))
+        (return ActualExprIsInlinableFunc))
+
+      (return ActualExprIsFunc))
+
+    0))
+
+
+
+
+
+
+
+^{:go/end 177} (go/method argPropsForCall "argPropsForCall returns a slice of argument properties for the\nexpressions being passed to the callee in the specific call\nexpression; these will be stored in the CallSite object for a given\ncall and then consulted when scoring. If no arg has any interesting\nproperties we try to save some space and return a nil slice.\n" ^{:tag (slice ActualExprPropBits)} [^{:tag (* callSiteTableBuilder)} cstb ^{:tag (* ir/CallExpr)} ce]
+  (let [rv (make (slice ActualExprPropBits) (len (.-Args ce)))
+      ^{:line 167} somethingInteresting false]
+    (range [idx (.-Args ce)]
+      (let [argProp (.propsForArg cstb (aget (.-Args ce) idx))]
+        (set! somethingInteresting (or somethingInteresting ^:go/paren (!= argProp 0)))
+        (aset rv idx argProp)))
+
+    (when (not somethingInteresting)
+      (return nil))
+
+    ^{:line 176} rv))
+
+
+^{:go/end 213} (go/method addCallSite [^{:tag (* callSiteTableBuilder)} cstb ^{:tag (* ir/Func)} callee ^{:tag (* ir/CallExpr)} call]
+  (let [flags (.flagsForNode cstb call)
+      ^{:line 181} argProps (.argPropsForCall cstb call)]
+    (when (!= (bit-and debugTrace debugTraceCalls) 0)
+      (fmt/Fprintf os/Stderr "=-= props %+v for call %v\n" argProps call))
+
+    ;; FIXME: maybe bulk-allocate these?
+    (let [cs (addr ^{:go/breaks [2 4 6 8 10 12]} (lit CallSite
+            :Call call
+            :Callee callee
+            :Assign (.containingAssignment cstb call)
+            :ArgProps argProps
+            :Flags flags
+            :ID (conv uint (len (.-cstab cstb)))))]
+
+      (when [(values _ ok) (aget (.-cstab cstb) call)] ok
+        (fmt/Fprintf os/Stderr "*** cstab duplicate entry at: %s\n"
+          (fmtFullPos ^{:go/via [miniExpr miniNode]} (.Pos call)))
+        (fmt/Fprintf os/Stderr "*** call: %+v\n" call)
+        (panic "bad"))
+
+      ;; Set initial score for callsite to the cost computed
+      ;; by CanInline; this score will be refined later based
+      ;; on heuristics.
+      (set! (.-Score cs) (conv int (.-Cost (.-Inl callee))))
+
+      (when (== (.-cstab cstb) nil)
+        (set! (.-cstab cstb) (make CallSiteTab)))
+
+      (aset (.-cstab cstb) call cs)
+      (when (!= (bit-and debugTrace debugTraceCalls) 0)
+        (fmt/Fprintf os/Stderr "=-= added callsite: caller=%v callee=%v n=%s\n"
+          (.-fn cstb) callee (fmtFullPos ^{:go/via [miniExpr miniNode]} (.Pos call)))))))
+
+
+
+^{:go/end 229} (go/method nodeVisitPre [^{:tag (* callSiteTableBuilder)} cstb ^ir/Node n]
+  (switch (.Op n)
+    (case [ir/ORANGE ir/OFOR]
+      (when (not (hasTopLevelLoopBodyReturnOrBreak (loopBody n)))
+        (inc! (.-loopNest cstb))))
+
+    (case [ir/OCALLFUNC]
+      (let [ce (assert (* ir/CallExpr) n)
+          ^{:line 223} callee (pgoir/DirectCallee (.-Fun ce))]
+        (when (and (!= callee nil) (!= (.-Inl callee) nil))
+          (.addCallSite cstb callee ce)))))
+
+
+  (set! (.-nstack cstb) (append (.-nstack cstb) n)))
+
+
+^{:go/end 239} (go/method nodeVisitPost [^{:tag (* callSiteTableBuilder)} cstb ^ir/Node n]
+  (set! (.-nstack cstb) (subslice (.-nstack cstb) _ (- (len (.-nstack cstb)) 1)))
+  (switch (.Op n)
+    (case [ir/ORANGE ir/OFOR]
+      (when (not (hasTopLevelLoopBodyReturnOrBreak (loopBody n)))
+        (dec! (.-loopNest cstb))))))
+
+
+
+
+^{:go/breaks [[5 248]] :go/end 249} (go/func loopBody ^ir/Nodes [^ir/Node n]
+  (when [(values forst ok) (assert (* ir/ForStmt) n)] ok
+    (return (.-Body forst)))
+
+  (when [(values rst ok) (assert (* ir/RangeStmt) n)] ok
+    (return (.-Body rst)))
+
+  nil)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/breaks [[5 273]] :go/end 274} (go/func hasTopLevelLoopBodyReturnOrBreak "hasTopLevelLoopBodyReturnOrBreak examines the body of a \"for\" or\n\"range\" loop to try to verify that it is a real loop, as opposed to\na construct that is syntactically loopy but doesn't actually iterate\nmultiple times, like:\n\n\tfor {\n\t  blah()\n\t  return 1\n\t}\n\n[Remark: the pattern above crops up quite a bit in the source code\nfor the compiler itself, e.g. the auto-generated rewrite code]\n\nNote that we don't look for GOTO statements here, so it's possible\nwe'll get the wrong result for a loop with complicated control\njumps via gotos.\n" ^bool [^ir/Nodes loopBody]
+  (range [_ n loopBody]
+    (when (or (== (.Op n) ir/ORETURN) (== (.Op n) ir/OBREAK))
+      (return true)))
+
+
+  false)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 345} (go/method containingAssignment "containingAssignment returns the top-level assignment statement\nfor a statement level function call \"n\". Examples:\n\n\tx := foo()\n\tx, y := bar(z, baz())\n\tif blah() { ...\n\nHere the top-level assignment statement for the foo() call is the\nstatement assigning to \"x\"; the top-level assignment for \"bar()\"\ncall is the assignment to x,y. For the baz() and blah() calls,\nthere is no top level assignment statement.\n\nThe unstated goal here is that we want to use the containing\nassignment to establish a connection between a given call and the\nvariables to which its results/returns are being assigned.\n\nNote that for the \"bar\" command above, the front end sometimes\ndecomposes this into two assignments, the first one assigning the\ncall to a pair of auto-temps, then the second one assigning the\nauto-temps to the user-visible vars. This helper will return the\nsecond (outer) of these two.\n" ^ir/Node [^{:tag (* callSiteTableBuilder)} cstb ^ir/Node n]
+  ^{:go/breaks [[4 344]]} (let [parent (aget (.-nstack cstb) (- (len (.-nstack cstb)) 1))
+
+      ;; assignsOnlyAutoTemps returns TRUE of the specified OAS2FUNC
+      ;; node assigns only auto-temps.
+      ^{:line 302} assignsOnlyAutoTemps ^{:go/end 315} (fn ^bool [^ir/Node x]
+        ^{:go/breaks [[4 314]]} (let [alst (assert (* ir/AssignListStmt) x)
+            ^{:line 304} oa2init ^{:go/via [miniStmt]} (.Init alst)]
+          (when (== (len oa2init) 0)
+            (return false))
+
+          (range [_ v oa2init]
+            (let [d (assert (* ir/Decl) v)]
+              (when (not (ir/IsAutoTmp (.-X d)))
+                (return false))))
+
+
+          true))]
+
+
+    ;; Simple case: x := foo()
+    (when (== (.Op parent) ir/OAS)
+      (return parent))
+
+
+    ;; Multi-return case: x, y := bar()
+    (when (== (.Op parent) ir/OAS2FUNC)
+      ;; Hack city: if the result vars are auto-temps, try looking
+      ;; for an outer assignment in the tree. The code shape we're
+      ;; looking for here is:
+      ;;
+      ;; OAS1({x,y},OCONVNOP(OAS2FUNC({auto1,auto2},OCALLFUNC(bar))))
+      ;;
+      (when (assignsOnlyAutoTemps parent)
+        (let [par2 (aget (.-nstack cstb) (- (len (.-nstack cstb)) 2))]
+          (when (== (.Op par2) ir/OAS2)
+            (return par2))
+
+          (when (== (.Op par2) ir/OCONVNOP)
+            (let [par3 (aget (.-nstack cstb) (- (len (.-nstack cstb)) 3))]
+              (when (== (.Op par3) ir/OAS2)
+                (return par3)))))))
+
+
+
+
+
+    nil))
+
+
+
+
+
+
+
+
+^{:go/end 413} (go/func UpdateCallsiteTable "UpdateCallsiteTable handles updating of callerfn's call site table\nafter an inlined has been carried out, e.g. the call at 'n' as been\nturned into the inlined call expression 'ic' within function\ncallerfn. The chief thing of interest here is to make sure that any\ncall nodes within 'ic' are added to the call site table for\n'callerfn' and scored appropriately.\n" [^{:tag (* ir/Func)} callerfn ^{:tag (* ir/CallExpr)} n ^{:tag (* ir/InlinedCallExpr)} ic]
+  (enableDebugTraceIfEnv)
+  (defer (disableDebugTrace))
+
+  (let [(values funcInlHeur ok) (aget fpmap callerfn)]
+    (when (not ok)
+      ;; This can happen for compiler-generated wrappers.
+      (when (!= (bit-and debugTrace debugTraceCalls) 0)
+        (fmt/Fprintf os/Stderr "=-= early exit, no entry for caller fn %v\n" callerfn))
+
+      (return))
+
+
+    (when (!= (bit-and debugTrace debugTraceCalls) 0)
+      (fmt/Fprintf os/Stderr "=-= UpdateCallsiteTable(caller=%v, cs=%s)\n"
+        ^{:line 368} callerfn (fmtFullPos ^{:go/via [miniExpr miniNode]} (.Pos n))))
+
+
+    ;; Mark the call in question as inlined.
+    (let [(values oldcs ^:assign ok) (aget (.-cstab funcInlHeur) n)]
+      (when (not ok)
+        ;; This can happen for compiler-generated wrappers.
+        (return))
+
+      (set! (.-aux oldcs) bit-or csAuxInlined)
+
+      (when (!= (bit-and debugTrace debugTraceCalls) 0)
+        (fmt/Fprintf os/Stderr "=-= marked as inlined: callee=%v %s\n"
+          (.-Callee oldcs) (EncodeCallSiteKey oldcs)))
+
+
+      ;; Walk the inlined call region to collect new callsites.
+      (let [^pstate icp (zero pstate)]
+        (when (!= (bit-and (.-Flags oldcs) CallSiteOnPanicPath) 0)
+          (set! icp psCallsPanic))
+
+        (let [^int loopNestLevel (zero int)]
+          (when (!= (bit-and (.-Flags oldcs) CallSiteInLoop) 0)
+            (set! loopNestLevel 1))
+
+          (let [ptab (lit (map ir/Node pstate) [ic icp])
+              ^{:line 394} nf (newNameFinder nil)
+              ^{:line 395} icstab (computeCallSiteTable callerfn (.-Body ic) nil ptab loopNestLevel nf)]
+
+            ;; Record parent callsite. This is primarily for debug output.
+            (range [_ cs icstab]
+              (set! (.-parent cs) oldcs))
+
+
+            ;; Score the calls in the inlined body. Note the setting of
+            ;; "doCallResults" to false here: at the moment there isn't any
+            ;; easy way to localize or region-ize the work done by
+            ;; "rescoreBasedOnCallResultUses", which currently does a walk
+            ;; over the entire function to look for uses of a given set of
+            ;; results. Similarly we're passing nil to makeCallSiteAnalyzer,
+            ;; so as to run name finding without the use of static value &
+            ;; friends.
+            (let [csa (makeCallSiteAnalyzer nil)
+                ^:const ^{:line 411 :val false} doCallResults false]
+              (.scoreCallsRegion csa callerfn (.-Body ic) icstab doCallResults ic))))))))

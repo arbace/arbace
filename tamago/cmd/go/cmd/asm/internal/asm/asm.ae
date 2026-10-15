@@ -1,0 +1,1055 @@
+;; Copyright 2014 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.cmd.asm.internal.asm) (go/file "asm.go" :imports [
+
+
+    ^{:line 8} [fmt "fmt"]
+    ^{:line 9} [abi "internal/abi"]
+    ^{:line 10} [strconv "strconv"]
+    ^{:line 11} [strings "strings"]
+    ^{:line 12} [scanner "text/scanner"]
+
+    ^{:line 14} [arch "cmd/asm/internal/arch"]
+    ^{:line 15} [flags "cmd/asm/internal/flags"]
+    ^{:line 16} [lex "cmd/asm/internal/lex"]
+    ^{:line 17} [obj "cmd/internal/obj"]
+    ^{:line 18} [arm64 "cmd/internal/obj/arm64"]
+    ^{:line 19} [ppc64 "cmd/internal/obj/ppc64"]
+    ^{:line 20} [riscv "cmd/internal/obj/riscv"]
+    ^{:line 21} [x86 "cmd/internal/obj/x86"]
+    ^{:line 22} [sys "cmd/internal/sys"]])
+
+
+;; TODO: configure the architecture
+
+(go/var ^{:tag (* strings/Builder)} testOut) ; Gathers output when testing.
+
+
+
+^{:go/end 85} (go/method append "append adds the Prog to the end of the program-thus-far.\nIf doLabel is set, it also defines the labels collect for this Prog.\n" [^{:tag (* Parser)} p ^{:tag (* obj/Prog)} prog ^string cond ^bool doLabel]
+  (when (!= cond "")
+    (switch ^{:go/via [LinkArch Arch]} (.-Family (.-arch p))
+      (case [sys/ARM]
+        (when (not (arch/ARMConditionCodes prog cond))
+          (.errorf p "unrecognized condition code .%q" cond)
+          (return)))
+
+
+      (case [sys/ARM64]
+        (when (not (arch/ARM64Suffix prog cond))
+          (.errorf p "unrecognized suffix .%q" cond)
+          (return)))
+
+
+      (case [sys/AMD64 sys/I386]
+        (when [err (x86/ParseSuffix prog cond)] (!= err nil)
+          (.errorf p "%v" err)
+          (return)))
+
+      (case [sys/RISCV64]
+        (when [err (riscv/ParseSuffix prog cond)] (!= err nil)
+          (.errorf p "unrecognized suffix .%q" cond)
+          (return)))
+
+      (default
+        (.errorf p "unrecognized suffix .%q" cond)
+        (return))))
+
+
+  (if (== (.-firstProg p) nil)
+    (set! (.-firstProg p) prog)
+
+    (set! (.-Link (.-lastProg p)) prog))
+
+  (set! (.-lastProg p) prog)
+  (when doLabel
+    (inc! (.-pc p))
+    (range [_ label (.-pendingLabels p)]
+      (when (!= (aget (.-labels p) label) nil)
+        (.errorf p "label %q multiply defined" label)
+        (return))
+
+      (aset (.-labels p) label prog))
+
+    (set! (.-pendingLabels p) (subslice (.-pendingLabels p) 0 0)))
+
+  (set! (.-Pc prog) (.-pc p))
+  (when @flags/Debug
+    (fmt/Println (.-lineNum p) prog))
+
+  (when (!= testOut nil)
+    (fmt/Fprintln testOut prog)))
+
+
+
+
+^{:go/breaks [[6 97]] :go/end 98} (go/method validSymbol "validSymbol checks that addr represents a valid name for a pseudo-op.\n" ^bool [^{:tag (* Parser)} p ^string pseudo ^{:tag (* obj/Addr)} addr ^bool offsetOk]
+  (when (or (== (.-Sym addr) nil) (and (!= (.-Name addr) obj/NAME_EXTERN) (!= (.-Name addr) obj/NAME_STATIC)) (!= (.-Scale addr) 0) (!= (.-Reg addr) 0))
+    (.errorf p "%s symbol %q must be a symbol(SB)" pseudo (symbolName addr))
+    (return false))
+
+  (when (and (not offsetOk) (!= (.-Offset addr) 0))
+    (.errorf p "%s symbol %q must not be offset from SB" pseudo (symbolName addr))
+    (return false))
+
+  true)
+
+
+
+^{:go/end 104} (go/method evalInteger "evalInteger evaluates an integer constant for a pseudo-op.\n" ^int64 [^{:tag (* Parser)} p ^string pseudo ^{:tag (slice lex/Token)} operands]
+  (let [addr (.address p operands)]
+    (.getConstantPseudo p pseudo (addr addr))))
+
+
+
+^{:go/breaks [[5 112]] :go/end 113} (go/method validImmediate "validImmediate checks that addr represents an immediate constant.\n" ^bool [^{:tag (* Parser)} p ^string pseudo ^{:tag (* obj/Addr)} addr]
+  (when (or (!= (.-Type addr) obj/TYPE_CONST) (!= (.-Name addr) 0) (!= (.-Reg addr) 0) (!= (.-Index addr) 0))
+    (.errorf p "%s: expected immediate constant; found %s" pseudo (obj/Dconv (addr emptyProg) addr))
+    (return false))
+
+  true)
+
+
+
+
+^{:go/end 202} (go/method asmText "asmText assembles a TEXT pseudo-op.\nTEXT runtime·sigtramp(SB),4,$0-0\n" [^{:tag (* Parser)} p ^{:tag (slice (slice lex/Token))} operands]
+  (when (and (!= (len operands) 2) (!= (len operands) 3))
+    (.errorf p "expect two or three operands for TEXT")
+    (return))
+
+
+  ;; Labels are function scoped. Patch existing labels and
+  ;; create a new label space for this TEXT.
+  (.patch p)
+  (set! (.-labels p) (make (map string (* obj/Prog))))
+
+  ;; Operand 0 is the symbol name in the form foo(SB).
+  ;; That means symbol plus indirect on SB and no offset.
+  (let [nameAddr (.address p (aget operands 0))]
+    (when (not (.validSymbol p "TEXT" (addr nameAddr) false))
+      (return))
+
+    (let [name (symbolName (addr nameAddr))
+        ^{:line 135} next 1
+
+        ;; Next operand is the optional text flag, a literal integer.
+        ^:var ^{:line 138} flag (conv int64 0)]
+      (when (== (len operands) 3)
+        (set! flag (.evalInteger p "TEXT" (aget operands 1)))
+        (inc! next))
+
+
+      ;; Issue an error if we see a function defined as ABIInternal
+      ;; without NOSPLIT. In ABIInternal, obj needs to know the function
+      ;; signature in order to construct the morestack path, so this
+      ;; currently isn't supported for asm functions.
+      (when (and (== ^{:go/via [Attribute]} (.ABI (.-Sym nameAddr)) obj/ABIInternal) (== (bit-and flag obj/NOSPLIT) 0))
+        (.errorf p "TEXT %q: ABIInternal requires NOSPLIT" name))
+
+
+      ;; Next operand is the frame and arg size.
+      ;; Bizarre syntax: $frameSize-argSize is two words, not subtraction.
+      ;; Both frameSize and argSize must be simple integers; only frameSize
+      ;; can be negative.
+      ;; The "-argSize" may be missing; if so, set it to objabi.ArgsSizeUnknown.
+      ;; Parse left to right.
+      (let [op (aget operands next)]
+        (when (or (< (len op) 2) (!= (.-ScanToken (aget op 0)) \$))
+          (.errorf p "TEXT %s: frame size must be an immediate constant" name)
+          (return))
+
+        (set! op (subslice op 1))
+        (let [negative false]
+          (when (== (.-ScanToken (aget op 0)) \-)
+            (set! negative true)
+            (set! op (subslice op 1)))
+
+          (when (or (== (len op) 0) (!= (.-ScanToken (aget op 0)) scanner/Int))
+            (.errorf p "TEXT %s: frame size must be an immediate constant" name)
+            (return))
+
+          (let [frameSize (.positiveAtoi p (.String (aget op 0)))]
+            (when negative
+              (set! frameSize (- frameSize)))
+
+            (set! op (subslice op 1))
+            (let [argSize (conv int64 abi/ArgsSizeUnknown)]
+              (when (> (len op) 0)
+                ;; There is an argument size. It must be a minus sign followed by a non-negative integer literal.
+                (when (or (!= (len op) 2) (!= (.-ScanToken (aget op 0)) \-) (!= (.-ScanToken (aget op 1)) scanner/Int))
+                  (.errorf p "TEXT %s: argument size must be of form -integer" name)
+                  (return))
+
+                (set! argSize (.positiveAtoi p (.String (aget op 1)))))
+
+              (.InitTextSym (.-ctxt p) (.-Sym nameAddr) (conv int flag) (.pos p))
+              (let [prog (addr ^{:go/breaks [2 4 6 8 10]} (lit obj/Prog
+                      :Ctxt (.-ctxt p)
+                      :As obj/ATEXT
+                      :Pos (.pos p)
+                      :From nameAddr
+                      :To ^{:go/breaks [2 4]} (lit obj/Addr
+                        :Type obj/TYPE_TEXTSIZE
+                        :Offset frameSize)))]
+                ;; Argsize set below.
+
+
+                (set! (.-Text (.Func (.-Sym nameAddr))) prog)
+                (set! (.-Val (.-To prog)) (conv int32 argSize))
+                (.append p prog "" true)))))))))
+
+
+
+
+^{:go/end 274} (go/method asmData "asmData assembles a DATA pseudo-op.\nDATA masks<>+0x00(SB)/4, $0x00000000\n" [^{:tag (* Parser)} p ^{:tag (slice (slice lex/Token))} operands]
+  (when (!= (len operands) 2)
+    (.errorf p "expect two operands for DATA")
+    (return))
+
+
+  ;; Operand 0 has the general form foo<>+0x04(SB)/4.
+  (let [op (aget operands 0)
+      ^{:line 214} n (len op)]
+    (when (or (< n 3) (!= (.-ScanToken (aget op (- n 2))) \/) (!= (.-ScanToken (aget op (- n 1))) scanner/Int))
+      (.errorf p "expect /size for DATA argument")
+      (return))
+
+    (let [szop (.String (aget op (- n 1)))
+        (values sz err) (strconv/Atoi szop)]
+      (when (!= err nil)
+        (.errorf p "bad size for DATA argument: %q" szop))
+
+      (set! op (subslice op _ (- n 2)))
+      (let [nameAddr (.address p op)]
+        (when (not (.validSymbol p "DATA" (addr nameAddr) true))
+          (return))
+
+        (let [name (symbolName (addr nameAddr))
+
+            ;; Operand 1 is an immediate constant or address.
+            ^{:line 232} valueAddr (.address p (aget operands 1))]
+          (switch (.-Type valueAddr)
+            (case [obj/TYPE_CONST obj/TYPE_FCONST obj/TYPE_SCONST obj/TYPE_ADDR])
+            ;; OK
+            (default
+              (.errorf p "DATA value must be an immediate constant or address")
+              (return)))
+
+
+          ;; The addresses must not overlap. Easiest test: require monotonicity.
+          (when [(values lastAddr ok) (aget (.-dataAddr p) name)] (and ok (< (.-Offset nameAddr) lastAddr))
+            (.errorf p "overlapping DATA entry for %s" name)
+            (return))
+
+          (aset (.-dataAddr p) name (+ (.-Offset nameAddr) (conv int64 sz)))
+
+          (switch (.-Type valueAddr)
+            (case [obj/TYPE_CONST]
+              (switch sz
+                (case [1 2 4 8]
+                  (.WriteInt (.-Sym nameAddr) (.-ctxt p) (.-Offset nameAddr) sz (.-Offset valueAddr)))
+                (default
+                  (.errorf p "bad int size for DATA argument: %d" sz))))
+
+            (case [obj/TYPE_FCONST]
+              (switch sz
+                (case [4]
+                  (.WriteFloat32 (.-Sym nameAddr) (.-ctxt p) (.-Offset nameAddr) (conv float32 (assert float64 (.-Val valueAddr)))))
+                (case [8]
+                  (.WriteFloat64 (.-Sym nameAddr) (.-ctxt p) (.-Offset nameAddr) (assert float64 (.-Val valueAddr))))
+                (default
+                  (.errorf p "bad float size for DATA argument: %d" sz))))
+
+            (case [obj/TYPE_SCONST]
+              (.WriteString (.-Sym nameAddr) (.-ctxt p) (.-Offset nameAddr) sz (assert string (.-Val valueAddr))))
+            (case [obj/TYPE_ADDR]
+              (if (== sz ^{:go/via [LinkArch Arch]} (.-PtrSize (.-arch p)))
+                (.WriteAddr (.-Sym nameAddr) (.-ctxt p) (.-Offset nameAddr) sz (.-Sym valueAddr) (.-Offset valueAddr))
+
+                (.errorf p "bad addr size for DATA argument: %d" sz)))))))))
+
+
+
+
+
+
+
+^{:go/end 307} (go/method asmGlobl "asmGlobl assembles a GLOBL pseudo-op.\nGLOBL shifts<>(SB),8,$256\nGLOBL shifts<>(SB),$256\n" [^{:tag (* Parser)} p ^{:tag (slice (slice lex/Token))} operands]
+  (when (and (!= (len operands) 2) (!= (len operands) 3))
+    (.errorf p "expect two or three operands for GLOBL")
+    (return))
+
+
+  ;; Operand 0 has the general form foo<>+0x04(SB).
+  (let [nameAddr (.address p (aget operands 0))]
+    (when (not (.validSymbol p "GLOBL" (addr nameAddr) false))
+      (return))
+
+    (let [next 1
+
+        ;; Next operand is the optional flag, a literal integer.
+        ^:var ^{:line 293} flag (conv int64 0)]
+      (when (== (len operands) 3)
+        (set! flag (.evalInteger p "GLOBL" (aget operands 1)))
+        (inc! next))
+
+
+      ;; Final operand is an immediate constant.
+      (let [addr (.address p (aget operands next))]
+        (when (not (.validImmediate p "GLOBL" (addr addr)))
+          (return))
+
+
+        ;; log.Printf("GLOBL %s %d, $%d", name, flag, size)
+        (.GloblPos (.-ctxt p) (.-Sym nameAddr) (.-Offset addr) (conv int flag) (.pos p))))))
+
+
+
+
+^{:go/end 338} (go/method asmPCData "asmPCData assembles a PCDATA pseudo-op.\nPCDATA $2, $705\n" [^{:tag (* Parser)} p ^{:tag (slice (slice lex/Token))} operands]
+  (when (!= (len operands) 2)
+    (.errorf p "expect two operands for PCDATA")
+    (return))
+
+
+  ;; Operand 0 must be an immediate constant.
+  (let [key (.address p (aget operands 0))]
+    (when (not (.validImmediate p "PCDATA" (addr key)))
+      (return))
+
+
+    ;; Operand 1 must be an immediate constant.
+    (let [value (.address p (aget operands 1))]
+      (when (not (.validImmediate p "PCDATA" (addr value)))
+        (return))
+
+
+      ;; log.Printf("PCDATA $%d, $%d", key.Offset, value.Offset)
+      (let [prog (addr ^{:go/breaks [2 4 6 8 10]} (lit obj/Prog
+              :Ctxt (.-ctxt p)
+              :As obj/APCDATA
+              :Pos (.pos p)
+              :From key
+              :To value))]
+
+        (.append p prog "" true)))))
+
+
+
+
+^{:go/end 361} (go/method asmPCAlign "asmPCAlign assembles a PCALIGN pseudo-op.\nPCALIGN $16\n" [^{:tag (* Parser)} p ^{:tag (slice (slice lex/Token))} operands]
+  (when (!= (len operands) 1)
+    (.errorf p "expect one operand for PCALIGN")
+    (return))
+
+
+  ;; Operand 0 must be an immediate constant.
+  (let [key (.address p (aget operands 0))]
+    (when (not (.validImmediate p "PCALIGN" (addr key)))
+      (return))
+
+
+    (let [prog (addr ^{:go/breaks [2 4 6 8]} (lit obj/Prog
+            :Ctxt (.-ctxt p)
+            :As obj/APCALIGN
+            :Pos (.pos p)
+            :From key))]
+
+      (.append p prog "" true))))
+
+
+
+
+^{:go/end 391} (go/method asmFuncData "asmFuncData assembles a FUNCDATA pseudo-op.\nFUNCDATA $1, funcdata<>+4(SB)\n" [^{:tag (* Parser)} p ^{:tag (slice (slice lex/Token))} operands]
+  (when (!= (len operands) 2)
+    (.errorf p "expect two operands for FUNCDATA")
+    (return))
+
+
+  ;; Operand 0 must be an immediate constant.
+  (let [valueAddr (.address p (aget operands 0))]
+    (when (not (.validImmediate p "FUNCDATA" (addr valueAddr)))
+      (return))
+
+
+    ;; Operand 1 is a symbol name in the form foo(SB).
+    (let [nameAddr (.address p (aget operands 1))]
+      (when (not (.validSymbol p "FUNCDATA" (addr nameAddr) true))
+        (return))
+
+
+      (let [prog (addr ^{:go/breaks [2 4 6 8 10]} (lit obj/Prog
+              :Ctxt (.-ctxt p)
+              :As obj/AFUNCDATA
+              :Pos (.pos p)
+              :From valueAddr
+              :To nameAddr))]
+
+        (.append p prog "" true)))))
+
+
+
+
+
+
+^{:go/end 575} (go/method asmJump "asmJump assembles a jump instruction.\nJMP\tR1\nJMP\texit\nJMP\t3(PC)\n" [^{:tag (* Parser)} p ^obj/As op ^string cond ^{:tag (slice obj/Addr)} a]
+  (let [^{:tag (* obj/Addr)} target (zero (* obj/Addr))
+      ^{:line 399} prog (addr ^{:go/breaks [2 4 6]} (lit obj/Prog
+          :Ctxt (.-ctxt p)
+          :Pos (.pos p)
+          :As op))
+
+      ^{:line 404} targetAddr (addr (.-To prog))]
+    (switch (len a)
+      (case [0]
+        (when (== ^{:go/via [LinkArch Arch]} (.-Family (.-arch p)) sys/Wasm)
+          (set! target (addr (lit obj/Addr :Type obj/TYPE_NONE)))
+          (break))
+
+        (.errorf p "wrong number of arguments to %s instruction" op)
+        (return))
+      (case [1]
+        (set! target (addr (aget a 0))))
+      (case [2]
+        ;; Special 2-operand jumps.
+        (if (and (== ^{:go/via [LinkArch Arch]} (.-Family (.-arch p)) sys/ARM64) (arch/IsARM64ADR op)) (do
+            ;; ADR label, R. Label is in From.
+            (set! target (addr (aget a 0)))
+            (set! (.-To prog) (aget a 1))
+            (set! targetAddr (addr (.-From prog))))
+          (do
+            (set! target (addr (aget a 1)))
+            (set! (.-From prog) (aget a 0)))))
+
+      (case [3]
+        (when (== ^{:go/via [LinkArch Arch]} (.-Family (.-arch p)) sys/PPC64)
+          ;; Special 3-operand jumps.
+          ;; a[1] is a register number expressed as a constant or register value
+          (set! target (addr (aget a 2)))
+          (set! (.-From prog) (aget a 0))
+          (when (!= (.-Type (aget a 0)) obj/TYPE_CONST)
+            ;; Legacy code may use a plain constant, accept it, and coerce
+            ;; into a constant. E.g:
+            ;;   BC 4,...
+            ;; into
+            ;;   BC $4,...
+            (set! (.-From prog) ^{:go/breaks [2 4]} (lit obj/Addr
+                :Type obj/TYPE_CONST
+                :Offset (.getConstant p prog op (addr (aget a 0))))))
+
+
+
+
+          ;; Likewise, fixup usage like:
+          ;;   BC x,LT,...
+          ;;   BC x,foo+2,...
+          ;;   BC x,4
+          ;;   BC x,$5
+          ;; into
+          ;;   BC x,CR0LT,...
+          ;;   BC x,CR0EQ,...
+          ;;   BC x,CR1LT,...
+          ;;   BC x,CR1GT,...
+          ;; The first and second cases demonstrate a symbol name which is
+          ;; effectively discarded. In these cases, the offset determines
+          ;; the CR bit.
+          (set! (.-Reg prog) (.-Reg (aget a 1)))
+          (when (!= (.-Type (aget a 1)) obj/TYPE_REG)
+            ;; The CR bit is represented as a constant 0-31. Convert it to a Reg.
+            (let [c (.getConstant p prog op (addr (aget a 1)))
+                (values reg success) (ppc64/ConstantToCRbit c)]
+              (when (not success)
+                (.errorf p "invalid CR bit register number %d" c))
+
+              (set! (.-Reg prog) reg)))
+
+          (break))
+
+        (when (or (== ^{:go/via [LinkArch Arch]} (.-Family (.-arch p)) sys/MIPS) (== ^{:go/via [LinkArch Arch]} (.-Family (.-arch p)) sys/MIPS64) (== ^{:go/via [LinkArch Arch]} (.-Family (.-arch p)) sys/RISCV64))
+          ;; 3-operand jumps.
+          ;; First two must be registers
+          (set! target (addr (aget a 2)))
+          (set! (.-From prog) (aget a 0))
+          (set! (.-Reg prog) (.getRegister p prog op (addr (aget a 1))))
+          (break))
+
+        (when (== ^{:go/via [LinkArch Arch]} (.-Family (.-arch p)) sys/Loong64)
+          ;; 3-operand jumps.
+          ;; First two must be registers
+          (set! target (addr (aget a 2)))
+          (set! (.-From prog) (aget a 0))
+          (set! (.-Reg prog) (.getRegister p prog op (addr (aget a 1))))
+          (break))
+
+        (when (== ^{:go/via [LinkArch Arch]} (.-Family (.-arch p)) sys/S390X)
+          ;; 3-operand jumps.
+          (set! target (addr (aget a 2)))
+          (set! (.-From prog) (aget a 0))
+          (if (!= (.-Reg (aget a 1)) 0)
+            ;; Compare two registers and jump.
+            (set! (.-Reg prog) (.getRegister p prog op (addr (aget a 1))))
+
+            ;; Compare register with immediate and jump.
+            (.AddRestSource prog (aget a 1)))
+
+          (break))
+
+        (when (== ^{:go/via [LinkArch Arch]} (.-Family (.-arch p)) sys/ARM64)
+          ;; Special 3-operand jumps.
+          ;; a[0] must be immediate constant; a[1] is a register.
+          (when (!= (.-Type (aget a 0)) obj/TYPE_CONST)
+            (.errorf p "%s: expected immediate constant; found %s" op (obj/Dconv prog (addr (aget a 0))))
+            (return))
+
+          (set! (.-From prog) (aget a 0))
+          (set! (.-Reg prog) (.getRegister p prog op (addr (aget a 1))))
+          (set! target (addr (aget a 2)))
+          (break))
+
+        (.errorf p "wrong number of arguments to %s instruction" op)
+        (return))
+      (case [4]
+        (when (or (== ^{:go/via [LinkArch Arch]} (.-Family (.-arch p)) sys/S390X) (== ^{:go/via [LinkArch Arch]} (.-Family (.-arch p)) sys/PPC64))
+          ;; 4-operand compare-and-branch.
+          (set! (.-From prog) (aget a 0))
+          (set! (.-Reg prog) (.getRegister p prog op (addr (aget a 1))))
+          (.AddRestSource prog (aget a 2))
+          (set! target (addr (aget a 3)))
+          (break))
+
+        (.errorf p "wrong number of arguments to %s instruction" op)
+        (return))
+      (default
+        (.errorf p "wrong number of arguments to %s instruction" op)
+        (return)))
+
+    (switch
+      (case [(== (.-Type target) obj/TYPE_BRANCH)]
+        ;; JMP 4(PC)
+        (set! @targetAddr ^{:go/breaks [2 4]} (lit obj/Addr
+            :Type obj/TYPE_BRANCH
+            :Offset (+ (.-pc p) 1 (.-Offset target))))) ; +1 because p.pc is incremented in append, below.
+
+      (case [(== (.-Type target) obj/TYPE_REG)]
+        ;; JMP R1
+        (set! @targetAddr @target))
+      (case [(and (== (.-Type target) obj/TYPE_MEM) ^:go/paren (or (== (.-Name target) obj/NAME_EXTERN) (== (.-Name target) obj/NAME_STATIC)))]
+        ;; JMP main·morestack(SB)
+        (set! @targetAddr @target))
+      (case [(and (== (.-Type target) obj/TYPE_INDIR) ^:go/paren (or (== (.-Name target) obj/NAME_EXTERN) (== (.-Name target) obj/NAME_STATIC)))]
+        ;; JMP *main·morestack(SB)
+        (set! @targetAddr @target)
+        (set! (.-Type targetAddr) obj/TYPE_INDIR))
+      (case [(and (== (.-Type target) obj/TYPE_MEM) (== (.-Reg target) 0) (== (.-Offset target) 0))]
+        ;; JMP exit
+        (when (== (.-Sym target) nil)
+          ;; Parse error left name unset.
+          (return))
+
+        (let [targetProg (aget (.-labels p) (.-Name (.-Sym target)))]
+          (if (== targetProg nil)
+            (set! (.-toPatch p) (append (.-toPatch p) (lit Patch targetAddr (.-Name (.-Sym target)))))
+
+            (.branch p targetAddr targetProg))))
+
+      (case [(and (== (.-Type target) obj/TYPE_MEM) (== (.-Name target) obj/NAME_NONE))]
+        ;; JMP 4(R0)
+        (set! @targetAddr @target)
+        ;; On the ppc64, 9a encodes BR (CTR) as BR CTR. We do the same.
+        (when (and (== ^{:go/via [LinkArch Arch]} (.-Family (.-arch p)) sys/PPC64) (== (.-Offset target) 0))
+          (set! (.-Type targetAddr) obj/TYPE_REG)))
+
+      (case [(== (.-Type target) obj/TYPE_CONST)]
+        ;; JMP $4
+        (set! @targetAddr (aget a 0)))
+      (case [(== (.-Type target) obj/TYPE_NONE)])
+      ;; JMP
+      (default
+        (.errorf p "cannot assemble jump %+v" target)
+        (return)))
+
+
+    (.append p prog cond true)))
+
+
+^{:go/end 587} (go/method patch [^{:tag (* Parser)} p]
+  (range [_ patch (.-toPatch p)]
+    (let [targetProg (aget (.-labels p) (.-label patch))]
+      (when (== targetProg nil)
+        (.errorf p "undefined label %s" (.-label patch))
+        (return))
+
+      (.branch p (.-addr patch) targetProg)))
+
+  (set! (.-toPatch p) (subslice (.-toPatch p) _ 0)))
+
+
+^{:go/end 595} (go/method branch [^{:tag (* Parser)} p ^{:tag (* obj/Addr)} addr ^{:tag (* obj/Prog)} target]
+  (set! @addr ^{:go/breaks [2 4]} (lit obj/Addr
+      :Type obj/TYPE_BRANCH
+      :Index 0))
+
+  (set! (.-Val addr) target))
+
+
+^{:go/end 599} (go/func isARM64SVE ^bool [^obj/As op]
+  (> op arm64/ASVESTART))
+
+
+
+
+^{:go/end 1014} (go/method asmInstruction "asmInstruction assembles an instruction.\nMOVW R9, (R10)\n" [^{:tag (* Parser)} p ^obj/As op ^string cond ^{:tag (slice obj/Addr)} a]
+  ;; fmt.Printf("%s %+v\n", op, a)
+  (let [prog (addr ^{:go/breaks [2 4 6]} (lit obj/Prog
+          :Ctxt (.-ctxt p)
+          :Pos (.pos p)
+          :As op))]
+
+    (switch (len a)
+      (case [0])
+      ;; Nothing to do.
+      (case [1]
+        (if (or (aget ^{:go/via [LinkArch]} (.-UnaryDst (.-arch p)) op) (== op obj/ARET) (== op obj/AGETCALLERPC))
+          ;; prog.From is no address.
+          (set! (.-To prog) (aget a 0))
+
+          (set! (.-From prog) (aget a 0)))
+        ;; prog.To is no address.
+
+        (when (and (== ^{:go/via [LinkArch Arch]} (.-Family (.-arch p)) sys/PPC64) (arch/IsPPC64NEG op))
+          ;; NEG: From and To are both a[0].
+          (set! (.-To prog) (aget a 0))
+          (set! (.-From prog) (aget a 0))
+          (break)))
+
+      (case [2]
+        (cond (== ^{:go/via [LinkArch Arch]} (.-Family (.-arch p)) sys/ARM) (do
+            (when (arch/IsARMCMP op)
+              (set! (.-From prog) (aget a 0))
+              (set! (.-Reg prog) (.getRegister p prog op (addr (aget a 1))))
+              (break))
+
+            ;; Strange special cases.
+            (when (arch/IsARMFloatCmp op)
+              (set! (.-From prog) (aget a 0))
+              (set! (.-Reg prog) (.getRegister p prog op (addr (aget a 1))))
+              (break)))
+
+          (and (== ^{:go/via [LinkArch Arch]} (.-Family (.-arch p)) sys/ARM64) (arch/IsARM64CMP op)) (do
+            (set! (.-From prog) (aget a 0))
+            (set! (.-Reg prog) (.getRegister p prog op (addr (aget a 1))))
+            (break))
+          (or (== ^{:go/via [LinkArch Arch]} (.-Family (.-arch p)) sys/MIPS) (== ^{:go/via [LinkArch Arch]} (.-Family (.-arch p)) sys/MIPS64))
+          (when (or (arch/IsMIPSCMP op) (arch/IsMIPSMUL op))
+            (set! (.-From prog) (aget a 0))
+            (set! (.-Reg prog) (.getRegister p prog op (addr (aget a 1))))
+            (break))
+
+          (== ^{:go/via [LinkArch Arch]} (.-Family (.-arch p)) sys/Loong64) (do
+            (when (arch/IsLoong64RDTIME op)
+              ;; The Loong64 RDTIME family of instructions is a bit special,
+              ;; in that both its register operands are outputs
+              (set! (.-To prog) (aget a 0))
+              (when (!= (.-Type (aget a 1)) obj/TYPE_REG)
+                (.errorf p "invalid addressing modes for 2nd operand to %s instruction, must be register" op)
+                (return))
+
+              (set! (.-RegTo2 prog) (.-Reg (aget a 1)))
+              (break))
+
+
+            (when (arch/IsLoong64PRELD op)
+              (set! (.-From prog) (aget a 0))
+              (.AddRestSource prog (aget a 1))
+              (break)))
+
+          (== ^{:go/via [LinkArch Arch]} (.-Family (.-arch p)) sys/RISCV64)
+          ;; RISCV64 pseudo instructions that reference CSRs with symbolic names.
+          (when [(values isImm specialIndex ok) (arch/IsRISCV64PseudoCSRO op)] ok
+            (when (and (!= (.-Type (aget a 0)) obj/TYPE_CONST) isImm)
+              (.errorf p "invalid value for first operand to %s instruction, must be a 5 bit unsigned immediate" op)
+              (return))
+
+            (when (!= (.-Type (aget a specialIndex)) obj/TYPE_SPECIAL)
+              (.errorf p "invalid value for first or second operand to %s instruction, must be a CSR name" op)
+              (return))
+
+            (.AddRestSourceArgs prog (lit (slice obj/Addr) (aget a specialIndex)))
+            (if (== specialIndex 0)
+              (set! (.-To prog) (aget a 1))
+
+              (set! (.-From prog) (aget a 0)))
+
+            (break)))
+
+
+        (set! (.-From prog) (aget a 0))
+        (set! (.-To prog) (aget a 1)))
+      (case [3]
+        (switch ^{:go/via [LinkArch Arch]} (.-Family (.-arch p))
+          (case [sys/MIPS sys/MIPS64]
+            (set! (.-From prog) (aget a 0))
+            (set! (.-Reg prog) (.getRegister p prog op (addr (aget a 1))))
+            (set! (.-To prog) (aget a 2)))
+          (case [sys/Loong64]
+            (switch
+              ;; Loong64 atomic instructions with one input and two outputs.
+              (case [(arch/IsLoong64AMO op)]
+                (set! (.-From prog) (aget a 0))
+                (set! (.-To prog) (aget a 1))
+                (set! (.-RegTo2 prog) (.-Reg (aget a 2))))
+
+              (case [(arch/IsLoong64PRELD op)]
+                (set! (.-From prog) (aget a 0))
+                (.AddRestSourceArgs prog (lit (slice obj/Addr) (aget a 1) (aget a 2))))
+
+              (default
+                (set! (.-From prog) (aget a 0))
+                (set! (.-Reg prog) (.getRegister p prog op (addr (aget a 1))))
+                (set! (.-To prog) (aget a 2)))))
+
+          (case [sys/ARM]
+            ;; Special cases.
+            (when (arch/IsARMSTREX op)
+              ;; /*
+              ;; STREX x, (y), z
+              ;; from=(y) reg=x to=z
+              ;; */
+              (set! (.-From prog) (aget a 1))
+              (set! (.-Reg prog) (.getRegister p prog op (addr (aget a 0))))
+              (set! (.-To prog) (aget a 2))
+              (break))
+
+            (when (arch/IsARMBFX op)
+              ;; a[0] and a[1] must be constants, a[2] must be a register
+              (set! (.-From prog) (aget a 0))
+              (.AddRestSource prog (aget a 1))
+              (set! (.-To prog) (aget a 2))
+              (break))
+
+            ;; Otherwise the 2nd operand (a[1]) must be a register.
+            (set! (.-From prog) (aget a 0))
+            (set! (.-Reg prog) (.getRegister p prog op (addr (aget a 1))))
+            (set! (.-To prog) (aget a 2)))
+          (case [sys/AMD64]
+            (set! (.-From prog) (aget a 0))
+            (.AddRestSource prog (aget a 1))
+            (set! (.-To prog) (aget a 2)))
+          (case [sys/ARM64]
+            (switch
+              (case [(arch/IsARM64STLXR op)]
+                ;; ARM64 instructions with one input and two outputs.
+                (set! (.-From prog) (aget a 0))
+                (set! (.-To prog) (aget a 1))
+                (when (!= (.-Type (aget a 2)) obj/TYPE_REG)
+                  (.errorf p "invalid addressing modes for third operand to %s instruction, must be register" op)
+                  (return))
+
+                (set! (.-RegTo2 prog) (.-Reg (aget a 2))))
+              (case [(arch/IsARM64TBL op)]
+                ;; one of its inputs does not fit into prog.Reg.
+                (set! (.-From prog) (aget a 0))
+                (.AddRestSource prog (aget a 1))
+                (set! (.-To prog) (aget a 2)))
+              (case [(arch/IsARM64CASP op)]
+                (set! (.-From prog) (aget a 0))
+                (set! (.-To prog) (aget a 1))
+                ;; both 1st operand and 3rd operand are (Rs, Rs+1) register pair.
+                ;; And the register pair must be contiguous.
+                (when (or ^:go/paren (!= (.-Type (aget a 0)) obj/TYPE_REGREG) ^:go/paren (!= (.-Type (aget a 2)) obj/TYPE_REGREG))
+                  (.errorf p "invalid addressing modes for 1st or 3rd operand to %s instruction, must be register pair" op)
+                  (return))
+
+                ;; For ARM64 CASP-like instructions, its 2nd destination operand is register pair(Rt, Rt+1) that can
+                ;; not fit into prog.RegTo2, so save it to the prog.RestArgs.
+                (.AddRestDest prog (aget a 2)))
+              (case [(isARM64SVE op)]
+                ;; SVE instructions, see arm64/goops_gen.go
+                (set! (.-From prog) (aget a 0))
+                (.AddRestSource prog (aget a 1))
+                (set! (.-To prog) (aget a 2)))
+              (default
+                (set! (.-From prog) (aget a 0))
+                (set! (.-Reg prog) (.getRegister p prog op (addr (aget a 1))))
+                (set! (.-To prog) (aget a 2)))))
+
+          (case [sys/I386]
+            (set! (.-From prog) (aget a 0))
+            (.AddRestSource prog (aget a 1))
+            (set! (.-To prog) (aget a 2)))
+          (case [sys/PPC64]
+            (when (arch/IsPPC64CMP op)
+              ;; CMPW etc.; third argument is a CR register that goes into prog.Reg.
+              (set! (.-From prog) (aget a 0))
+              (set! (.-Reg prog) (.getRegister p prog op (addr (aget a 2))))
+              (set! (.-To prog) (aget a 1))
+              (break))
+
+
+            (set! (.-From prog) (aget a 0))
+            (set! (.-To prog) (aget a 2))
+
+            ;; If the second argument is not a register argument, it must be
+            ;; passed RestArgs/AddRestSource
+            (switch (.-Type (aget a 1))
+              (case [obj/TYPE_REG]
+                (set! (.-Reg prog) (.getRegister p prog op (addr (aget a 1)))))
+              (default
+                (.AddRestSource prog (aget a 1)))))
+
+          (case [sys/RISCV64]
+            ;; RISCV64 instructions with one input and two outputs.
+            (when (arch/IsRISCV64AMO op)
+              (set! (.-From prog) (aget a 0))
+              (set! (.-To prog) (aget a 1))
+              (when (!= (.-Type (aget a 2)) obj/TYPE_REG)
+                (.errorf p "invalid addressing modes for third operand to %s instruction, must be register" op)
+                (return))
+
+              (set! (.-RegTo2 prog) (.-Reg (aget a 2)))
+              (break))
+
+            ;; RISCV64 instructions that reference CSRs with symbolic names.
+            (when [(values isImm ok) (arch/IsRISCV64CSRO op)] ok
+              (when (and (!= (.-Type (aget a 0)) obj/TYPE_CONST) isImm)
+                (.errorf p "invalid value for first operand to %s instruction, must be a 5 bit unsigned immediate" op)
+                (return))
+
+              (when (!= (.-Type (aget a 1)) obj/TYPE_SPECIAL)
+                (.errorf p "invalid value for second operand to %s instruction, must be a CSR name" op)
+                (return))
+
+              (.AddRestSourceArgs prog (lit (slice obj/Addr) (aget a 1)))
+              (set! (.-From prog) (aget a 0))
+              (set! (.-To prog) (aget a 2))
+              (break))
+
+            (set! (.-From prog) (aget a 0))
+            (set! (.-Reg prog) (.getRegister p prog op (addr (aget a 1))))
+            (set! (.-To prog) (aget a 2)))
+          (case [sys/S390X]
+            (set! (.-From prog) (aget a 0))
+            (if (== (.-Type (aget a 1)) obj/TYPE_REG)
+              (set! (.-Reg prog) (.getRegister p prog op (addr (aget a 1))))
+
+              (.AddRestSource prog (aget a 1)))
+
+            (set! (.-To prog) (aget a 2)))
+          (default
+            (.errorf p "TODO: implement three-operand instructions for this architecture")
+            (return))))
+
+      (case [4]
+        (when (== ^{:go/via [LinkArch Arch]} (.-Family (.-arch p)) sys/ARM)
+          (when (arch/IsARMBFX op)
+            ;; a[0] and a[1] must be constants, a[2] and a[3] must be registers
+            (set! (.-From prog) (aget a 0))
+            (.AddRestSource prog (aget a 1))
+            (set! (.-Reg prog) (.getRegister p prog op (addr (aget a 2))))
+            (set! (.-To prog) (aget a 3))
+            (break))
+
+          (when (arch/IsARMMULA op)
+            ;; All must be registers.
+            (.getRegister p prog op (addr (aget a 0)))
+            (let [r1 (.getRegister p prog op (addr (aget a 1)))
+                ^{:line 858} r2 (.getRegister p prog op (addr (aget a 2)))]
+              (.getRegister p prog op (addr (aget a 3)))
+              (set! (.-From prog) (aget a 0))
+              (set! (.-To prog) (aget a 3))
+              (set! (.-Type (.-To prog)) obj/TYPE_REGREG2)
+              (set! (.-Offset (.-To prog)) (conv int64 r2))
+              (set! (.-Reg prog) r1)
+              (break))))
+
+
+        (when (== ^{:go/via [LinkArch Arch]} (.-Family (.-arch p)) sys/AMD64)
+          (set! (.-From prog) (aget a 0))
+          (.AddRestSourceArgs prog (lit (slice obj/Addr) (aget a 1) (aget a 2)))
+          (set! (.-To prog) (aget a 3))
+          (break))
+
+        (when (== ^{:go/via [LinkArch Arch]} (.-Family (.-arch p)) sys/ARM64)
+          (when (isARM64SVE op)
+            ;; SVE instructions, see arm64/goops_gen.go
+            (set! (.-From prog) (aget a 0))
+            (.AddRestSourceArgs prog (lit (slice obj/Addr) (aget a 1) (aget a 2)))
+            (set! (.-To prog) (aget a 3))
+            (break))
+
+          (set! (.-From prog) (aget a 0))
+          (set! (.-Reg prog) (.getRegister p prog op (addr (aget a 1))))
+          (.AddRestSource prog (aget a 2))
+          (set! (.-To prog) (aget a 3))
+          (break))
+
+        (when (== ^{:go/via [LinkArch Arch]} (.-Family (.-arch p)) sys/Loong64)
+          (set! (.-From prog) (aget a 0))
+          (set! (.-Reg prog) (.getRegister p prog op (addr (aget a 1))))
+          (.AddRestSource prog (aget a 2))
+          (set! (.-To prog) (aget a 3))
+          (break))
+
+        (when (== ^{:go/via [LinkArch Arch]} (.-Family (.-arch p)) sys/PPC64)
+          (set! (.-From prog) (aget a 0))
+          (set! (.-To prog) (aget a 3))
+          ;; If the second argument is not a register argument, it must be
+          ;; passed RestArgs/AddRestSource
+          (if (== (.-Type (aget a 1)) obj/TYPE_REG) (do
+              (set! (.-Reg prog) (.getRegister p prog op (addr (aget a 1))))
+              (.AddRestSource prog (aget a 2)))
+
+            ;; Don't set prog.Reg if a1 isn't a reg arg.
+            (.AddRestSourceArgs prog (lit (slice obj/Addr) (aget a 1) (aget a 2))))
+
+          (break))
+
+        (when (== ^{:go/via [LinkArch Arch]} (.-Family (.-arch p)) sys/RISCV64)
+          (set! (.-From prog) (aget a 0))
+          (set! (.-Reg prog) (.getRegister p prog op (addr (aget a 1))))
+          (.AddRestSource prog (aget a 2))
+          (set! (.-To prog) (aget a 3))
+          (break))
+
+        (when (== ^{:go/via [LinkArch Arch]} (.-Family (.-arch p)) sys/S390X)
+          (when (!= (.-Type (aget a 1)) obj/TYPE_REG)
+            (.errorf p "second operand must be a register in %s instruction" op)
+            (return))
+
+          (set! (.-From prog) (aget a 0))
+          (set! (.-Reg prog) (.getRegister p prog op (addr (aget a 1))))
+          (.AddRestSource prog (aget a 2))
+          (set! (.-To prog) (aget a 3))
+          (break))
+
+        (.errorf p "can't handle %s instruction with 4 operands" op)
+        (return))
+      (case [5]
+        (when (and (== ^{:go/via [LinkArch Arch]} (.-Family (.-arch p)) sys/ARM64) (isARM64SVE op))
+          ;; SVE instructions, see arm64/goops_gen.go
+          (set! (.-From prog) (aget a 0))
+          (.AddRestSourceArgs prog (lit (slice obj/Addr) (aget a 1) (aget a 2) (aget a 3)))
+          (set! (.-To prog) (aget a 4))
+          (break))
+
+        (when (== ^{:go/via [LinkArch Arch]} (.-Family (.-arch p)) sys/PPC64)
+          (set! (.-From prog) (aget a 0))
+          ;; Second arg is always a register type on ppc64.
+          (set! (.-Reg prog) (.getRegister p prog op (addr (aget a 1))))
+          (.AddRestSourceArgs prog (lit (slice obj/Addr) (aget a 2) (aget a 3)))
+          (set! (.-To prog) (aget a 4))
+          (break))
+
+        (when (== ^{:go/via [LinkArch Arch]} (.-Family (.-arch p)) sys/AMD64)
+          (set! (.-From prog) (aget a 0))
+          (.AddRestSourceArgs prog (lit (slice obj/Addr) (aget a 1) (aget a 2) (aget a 3)))
+          (set! (.-To prog) (aget a 4))
+          (break))
+
+        (when (== ^{:go/via [LinkArch Arch]} (.-Family (.-arch p)) sys/S390X)
+          (set! (.-From prog) (aget a 0))
+          (.AddRestSourceArgs prog (lit (slice obj/Addr) (aget a 1) (aget a 2) (aget a 3)))
+          (set! (.-To prog) (aget a 4))
+          (break))
+
+        (.errorf p "can't handle %s instruction with 5 operands" op)
+        (return))
+      (case [6]
+        (when (and (== ^{:go/via [LinkArch Arch]} (.-Family (.-arch p)) sys/ARM64) (isARM64SVE op))
+          ;; SVE instructions, see arm64/goops_gen.go
+          (set! (.-From prog) (aget a 0))
+          (.AddRestSourceArgs prog (lit (slice obj/Addr) (aget a 1) (aget a 2) (aget a 3) (aget a 4)))
+          (set! (.-To prog) (aget a 5))
+          (break))
+
+        (when (and (== ^{:go/via [LinkArch Arch]} (.-Family (.-arch p)) sys/ARM) (arch/IsARMMRC op))
+          ;; Strange special case: MCR, MRC.
+          (set! (.-Type (.-To prog)) obj/TYPE_CONST)
+          (let [x0 (.getConstant p prog op (addr (aget a 0)))
+              ^{:line 971} x1 (.getConstant p prog op (addr (aget a 1)))
+              ^{:line 972} x2 (conv int64 (.getRegister p prog op (addr (aget a 2))))
+              ^{:line 973} x3 (conv int64 (.getRegister p prog op (addr (aget a 3))))
+              ^{:line 974} x4 (conv int64 (.getRegister p prog op (addr (aget a 4))))
+              ^{:line 975} x5 (.getConstant p prog op (addr (aget a 5)))
+              ;; Cond is handled specially for this instruction.
+              (values offset MRC ok) (arch/ARMMRCOffset op cond x0 x1 x2 x3 x4 x5)]
+            (when (not ok)
+              (.errorf p "unrecognized condition code .%q" cond))
+
+            (set! (.-Offset (.-To prog)) offset)
+            (set! cond "")
+            (set! (.-As prog) MRC) ; Both instructions are coded as MRC.
+            (break)))
+
+        (when (== ^{:go/via [LinkArch Arch]} (.-Family (.-arch p)) sys/PPC64)
+          (set! (.-From prog) (aget a 0))
+          ;; Second arg is always a register type on ppc64.
+          (set! (.-Reg prog) (.getRegister p prog op (addr (aget a 1))))
+          (.AddRestSourceArgs prog (lit (slice obj/Addr) (aget a 2) (aget a 3) (aget a 4)))
+          (set! (.-To prog) (aget a 5))
+          (break))
+
+        (when (and (== ^{:go/via [LinkArch Arch]} (.-Family (.-arch p)) sys/RISCV64) (arch/IsRISCV64VTypeI op))
+          (set! (.-From prog) (aget a 0))
+          (let [vsew (.getSpecial p prog op (addr (aget a 1)))
+              ^{:line 997} vlmul (.getSpecial p prog op (addr (aget a 2)))
+              ^{:line 998} vtail (.getSpecial p prog op (addr (aget a 3)))
+              ^{:line 999} vmask (.getSpecial p prog op (addr (aget a 4)))]
+            (when [err (arch/RISCV64ValidateVectorType vsew vlmul vtail vmask)] (!= err nil)
+              (.errorf p "invalid vtype: %v" err))
+
+            (.AddRestSourceArgs prog (lit (slice obj/Addr) (aget a 1) (aget a 2) (aget a 3) (aget a 4)))
+            (set! (.-To prog) (aget a 5))
+            (break)))
+
+        (fallthrough))
+      (default
+        (.errorf p "can't handle %s instruction with %d operands" op (len a))
+        (return)))
+
+
+    (.append p prog cond true)))
+
+
+
+^{:go/breaks [[5 1021]] :go/end 1022} (go/func symbolName "symbolName returns the symbol name, or an error string if none is available.\n" ^string [^{:tag (* obj/Addr)} addr]
+  (when (!= (.-Sym addr) nil)
+    (return (.-Name (.-Sym addr))))
+
+  "<erroneous symbol>")
+
+
+(go/var ^obj/Prog emptyProg)
+
+
+^{:go/end 1032} (go/method getConstantPseudo "getConstantPseudo checks that addr represents a plain constant and returns its value.\n" ^int64 [^{:tag (* Parser)} p ^string pseudo ^{:tag (* obj/Addr)} addr]
+  (when (or (!= (.-Type addr) obj/TYPE_MEM) (!= (.-Name addr) 0) (!= (.-Reg addr) 0) (!= (.-Index addr) 0))
+    (.errorf p "%s: expected integer constant; found %s" pseudo (obj/Dconv (addr emptyProg) addr)))
+
+  (.-Offset addr))
+
+
+
+^{:go/end 1040} (go/method getConstant "getConstant checks that addr represents a plain constant and returns its value.\n" ^int64 [^{:tag (* Parser)} p ^{:tag (* obj/Prog)} prog ^obj/As op ^{:tag (* obj/Addr)} addr]
+  (when (or (!= (.-Type addr) obj/TYPE_MEM) (!= (.-Name addr) 0) (!= (.-Reg addr) 0) (!= (.-Index addr) 0))
+    (.errorf p "%s: expected integer constant; found %s" op (obj/Dconv prog addr)))
+
+  (.-Offset addr))
+
+
+
+^{:go/end 1048} (go/method getRegister "getRegister checks that addr represents a register and returns its value.\n" ^int16 [^{:tag (* Parser)} p ^{:tag (* obj/Prog)} prog ^obj/As op ^{:tag (* obj/Addr)} addr]
+  (when (or (!= (.-Type addr) obj/TYPE_REG) (!= (.-Offset addr) 0) (!= (.-Name addr) 0) (!= (.-Index addr) 0))
+    (.errorf p "%s: expected register; found %s" op (obj/Dconv prog addr)))
+
+  (.-Reg addr))
+
+
+
+^{:go/end 1056} (go/method getSpecial "getSpecial checks that addr represents a special operand and returns its value.\n" ^int64 [^{:tag (* Parser)} p ^{:tag (* obj/Prog)} prog ^obj/As op ^{:tag (* obj/Addr)} addr]
+  (when (or (!= (.-Type addr) obj/TYPE_SPECIAL) (!= (.-Name addr) 0) (!= (.-Reg addr) 0) (!= (.-Index addr) 0))
+    (.errorf p "%s: expected special operand; found %s" op (obj/Dconv prog addr)))
+
+  (.-Offset addr))

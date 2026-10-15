@@ -1,0 +1,267 @@
+;; Copyright 2015 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.cmd.compile.internal.ssa) (go/file "dom.go" :imports [])
+
+;; This file contains code to compute the dominator tree
+;; of a control-flow graph.
+
+
+
+^{:go/end 14} (go/func postorder "postorder computes a postorder traversal ordering for the\nbasic blocks in f. Unreachable blocks will not appear.\n" ^{:tag (slice (* Block))} [^{:tag (* Func)} f]
+  (postorderWithNumbering f nil))
+
+
+(go/type blockAndIndex (struct
+    ^{:line 17 :tag (* Block)} b
+    ^{:line 18 :tag int} index)) ; index is the number of successor edges of b that have already been explored.
+
+
+
+
+^{:go/end 56} (go/func postorderWithNumbering "postorderWithNumbering provides a DFS postordering.\nThis seems to make loop-finding more robust.\n" ^{:tag (slice (* Block))} [^{:tag (* Func)} f ^{:tag (slice int32)} ponums]
+  (let [seen (.allocBoolSlice (.-Cache f) (.NumBlocks f))]
+    (defer (.freeBoolSlice (.-Cache f) seen))
+
+    ;; result ordering
+    (let [order (make (slice (* Block)) 0 (len (.-Blocks f)))
+
+        ;; stack of blocks and next child to visit
+        ;; A constant bound allows this to be stack-allocated. 32 is
+        ;; enough to cover almost every postorderWithNumbering call.
+        ^{:line 33} s (make (slice blockAndIndex) 0 32)]
+      (set! s (append s (lit blockAndIndex :b (.-Entry f))))
+      (aset seen (.-ID (.-Entry f)) true)
+      (while (> (len s) 0)
+        (let [tos (- (len s) 1)
+            ^{:line 38} x (aget s tos)
+            ^{:line 39} b (.-b x)]
+          (when [i (.-index x)] (< i (len (.-Succs b)))
+            (inc! (.-index (aget s tos)))
+            (let [bb (.Block (aget (.-Succs b) i))]
+              (when (not (aget seen (.-ID bb)))
+                (aset seen (.-ID bb) true)
+                (set! s (append s (lit blockAndIndex :b bb))))
+
+              (continue)))
+
+          (set! s (subslice s _ tos))
+          (when (!= ponums nil)
+            (aset ponums (.-ID b) (conv int32 (len order))))
+
+          (set! order (append order b))))
+
+      ^{:line 55} order)))
+
+
+^{:go/end 62} (go/func dominators ^{:tag (slice (* Block))} [^{:tag (* Func)} f]
+  ;; TODO: benchmark and try to find criteria for swapping between
+  ;; dominatorsSimple and dominatorsLT
+  (.dominatorsLTOrig f (.-Entry f)))
+
+
+
+^{:go/end 138} (go/method dominatorsLTOrig "dominatorsLTOrig runs Lengauer-Tarjan to compute a dominator tree starting at entry.\n" ^{:tag (slice (* Block))} [^{:tag (* Func)} f ^{:tag (* Block)} entry]
+  ;; Adapted directly from the original TOPLAS article's "simple" algorithm
+
+  (let [maxBlockID (.NumBlocks (.-Func entry))
+      ^{:line 69} scratch (.allocIDSlice (.-Cache f) (* 7 maxBlockID))]
+    (defer (.freeIDSlice (.-Cache f) scratch))
+    (let [semi (subslice scratch (* 0 maxBlockID) (* 1 maxBlockID))
+        ^{:line 72} vertex (subslice scratch (* 1 maxBlockID) (* 2 maxBlockID))
+        ^{:line 73} label (subslice scratch (* 2 maxBlockID) (* 3 maxBlockID))
+        ^{:line 74} parent (subslice scratch (* 3 maxBlockID) (* 4 maxBlockID))
+        ^{:line 75} ancestor (subslice scratch (* 4 maxBlockID) (* 5 maxBlockID))
+        ^{:line 76} bucketHead (subslice scratch (* 5 maxBlockID) (* 6 maxBlockID))
+        ^{:line 77} bucketLink (subslice scratch (* 6 maxBlockID) (* 7 maxBlockID))
+
+        ;; This version uses integers for most of the computation,
+        ;; to make the work arrays smaller and pointer-free.
+        ;; fromID translates from ID to *Block where that is needed.
+        ^{:line 82} fromID (.allocBlockSlice (.-Cache f) maxBlockID)]
+      (defer (.freeBlockSlice (.-Cache f) fromID))
+      (range [_ v (.-Blocks f)]
+        (aset fromID (.-ID v) v))
+
+      (let [idom (make (slice (* Block)) maxBlockID)
+
+          ;; Step 1. Carry out a depth first search of the problem graph. Number
+          ;; the vertices from 1 to n as they are reached during the search.
+          ^{:line 91} n (.dfsOrig f entry semi vertex label parent)]
+
+        (for [i n] (>= i 2) (dec! i)
+          (let [w (aget vertex i)]
+
+            ;; step2 in TOPLAS paper
+            (range [_ e (.-Preds (aget fromID w))]
+              (let [v (.-b e)]
+                (when (== (aget semi (.-ID v)) 0)
+                  ;; skip unreachable predecessor
+                  ;; not in original, but we're using existing pred instead of building one.
+                  (continue))
+
+                (let [u (evalOrig (.-ID v) ancestor semi label)]
+                  (when (< (aget semi u) (aget semi w))
+                    (aset semi w (aget semi u))))))
+
+
+
+            ;; add w to bucket[vertex[semi[w]]]
+            ;; implement bucket as a linked list implemented
+            ;; in a pair of arrays.
+            (let [vsw (aget vertex (aget semi w))]
+              (aset bucketLink w (aget bucketHead vsw))
+              (aset bucketHead vsw w)
+
+              (linkOrig (aget parent w) w ancestor)
+
+              ;; step3 in TOPLAS paper
+              (for [v (aget bucketHead (aget parent w))] (!= v 0) (set! v (aget bucketLink v))
+                (let [u (evalOrig v ancestor semi label)]
+                  (if (< (aget semi u) (aget semi v))
+                    (aset idom v (aget fromID u))
+
+                    (aset idom v (aget fromID (aget parent w)))))))))
+
+
+
+        ;; step 4 in toplas paper
+        (for [i (conv ID 2)] (<= i n) (inc! i)
+          (let [w (aget vertex i)]
+            (when (!= (.-ID (aget idom w)) (aget vertex (aget semi w)))
+              (aset idom w (aget idom (.-ID (aget idom w)))))))
+
+
+
+        ^{:line 137} idom))))
+
+
+
+
+
+
+^{:go/end 173} (go/method dfsOrig "dfsOrig performs a depth first search over the blocks starting at entry block\n(in arbitrary order).  This is a de-recursed version of dfs from the\noriginal Tarjan-Lengauer TOPLAS article.  It's important to return the\nsame values for parent as the original algorithm.\n" ^ID [^{:tag (* Func)} f ^{:tag (* Block)} entry ^{:tag (slice ID)} semi ^{:tag (slice ID)} vertex ^{:tag (slice ID)} label ^{:tag (slice ID)} parent]
+  (let [n (conv ID 0)
+      ^{:line 146} s (make (slice (* Block)) 0 256)]
+    (set! s (append s entry))
+
+    (while (> (len s) 0)
+      (let [v (aget s (- (len s) 1))]
+        (set! s (subslice s _ (- (len s) 1)))
+        ;; recursing on v
+
+        (when (!= (aget semi (.-ID v)) 0)
+          (continue)) ; already visited
+
+        (inc! n)
+        (aset semi (.-ID v) n)
+        (aset vertex n (.-ID v))
+        (aset label (.-ID v) (.-ID v))
+        ;; ancestor[v] already zero
+        (range [_ e (.-Succs v)]
+          (let [w (.-b e)]
+            ;; if it has a dfnum, we've already visited it
+            (when (== (aget semi (.-ID w)) 0)
+              ;; yes, w can be pushed multiple times.
+              (set! s (append s w))
+              (aset parent (.-ID w) (.-ID v))))))) ; keep overwriting this till it is visited.
+
+
+
+    ^{:line 172} n))
+
+
+
+^{:go/end 184} (go/func compressOrig "compressOrig is the \"simple\" compress function from LT paper.\n" [^ID v ^{:tag (slice ID)} ancestor ^{:tag (slice ID)} semi ^{:tag (slice ID)} label]
+  (when (!= (aget ancestor (aget ancestor v)) 0)
+    (compressOrig (aget ancestor v) ancestor semi label)
+    (when (< (aget semi (aget label (aget ancestor v))) (aget semi (aget label v)))
+      (aset label v (aget label (aget ancestor v))))
+
+    (aset ancestor v (aget ancestor (aget ancestor v)))))
+
+
+
+
+^{:go/end 193} (go/func evalOrig "evalOrig is the \"simple\" eval function from LT paper.\n" ^ID [^ID v ^{:tag (slice ID)} ancestor ^{:tag (slice ID)} semi ^{:tag (slice ID)} label]
+  (when (== (aget ancestor v) 0)
+    (return v))
+
+  (compressOrig v ancestor semi label)
+  (aget label v))
+
+
+^{:go/end 197} (go/func linkOrig [^ID v ^ID w ^{:tag (slice ID)} ancestor]
+  (aset ancestor w v))
+
+
+
+
+
+^{:go/end 253} (go/func dominatorsSimple "dominatorsSimple computes the dominator tree for f. It returns a slice\nwhich maps block ID to the immediate dominator of that block.\nUnreachable blocks map to nil. The entry block maps to nil.\n" ^{:tag (slice (* Block))} [^{:tag (* Func)} f]
+  ;; A simple algorithm for now
+  ;; Cooper, Harvey, Kennedy
+  (let [idom (make (slice (* Block)) (.NumBlocks f))
+
+      ;; Compute postorder walk
+      ^{:line 208} post (.postorder f)
+
+      ;; Make map from block id to order index (for intersect call)
+      ^{:line 211} postnum (.allocIntSlice (.-Cache f) (.NumBlocks f))]
+    (defer (.freeIntSlice (.-Cache f) postnum))
+    (range [i b post]
+      (aset postnum (.-ID b) i))
+
+
+    ;; Make the entry block a self-loop
+    (aset idom (.-ID (.-Entry f)) (.-Entry f))
+    (when (!= (aget postnum (.-ID (.-Entry f))) (- (len post) 1))
+      (.Fatalf f "entry block %v not last in postorder" (.-Entry f)))
+
+
+    ;; Compute relaxation of idom entries
+    (while true
+      (let [changed false]
+
+        (for [i (- (len post) 2)] (>= i 0) (dec! i)
+          (let [b (aget post i)
+              ^{:line 229 :tag (* Block)} d (zero (* Block))]
+            (range [_ e (.-Preds b)]
+              (let [p (.-b e)]
+                (when (== (aget idom (.-ID p)) nil)
+                  (continue))
+
+                (when (== d nil)
+                  (set! d p)
+                  (continue))
+
+                (set! d (intersect d p postnum idom))))
+
+            (when (!= d (aget idom (.-ID b)))
+              (aset idom (.-ID b) d)
+              (set! changed true))))
+
+
+        (when (not changed)
+          (break))))
+
+
+    ;; Set idom of entry block to nil instead of itself.
+    (aset idom (.-ID (.-Entry f)) nil)
+    ^{:line 252} idom))
+
+
+
+
+^{:go/end 268} (go/func intersect "intersect finds the closest dominator of both b and c.\nIt requires a postorder numbering of all the blocks.\n" ^{:tag (* Block)} [^{:tag (* Block)} b ^{:tag (* Block)} c ^{:tag (slice int)} postnum ^{:tag (slice (* Block))} idom]
+  ;; TODO: This loop is O(n^2). It used to be used in nilcheck,
+  ;; see BenchmarkNilCheckDeep*.
+  (while (!= b c)
+    (if (< (aget postnum (.-ID b)) (aget postnum (.-ID c)))
+      (set! b (aget idom (.-ID b)))
+
+      (set! c (aget idom (.-ID c)))))
+
+
+  ^{:line 267} b)

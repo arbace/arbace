@@ -1,0 +1,678 @@
+;; Copyright 2020 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.cmd.compile.internal.ir) (go/file "func.go" :imports [
+
+
+    ^{:line 8} [base "cmd/compile/internal/base"]
+    ^{:line 9} [types "cmd/compile/internal/types"]
+    ^{:line 10} [hash "cmd/internal/hash"]
+    ^{:line 11} [obj "cmd/internal/obj"]
+    ^{:line 12} [objabi "cmd/internal/objabi"]
+    ^{:line 13} [src "cmd/internal/src"]
+    ^{:line 14} [base64 "encoding/base64"]
+    ^{:line 15} [fmt "fmt"]
+    ^{:line 16} [utf8 "unicode/utf8"]])
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+(go/type Func "A Func corresponds to a single function in a Go program\n(and vice versa: each function is denoted by exactly one *Func).\n\nThere are multiple nodes that represent a Func in the IR.\n\nThe ONAME node (Func.Nname) is used for plain references to it.\nThe ODCLFUNC node (the Func itself) is used for its declaration code.\nThe OCLOSURE node (Func.OClosure) is used for a reference to a\nfunction literal.\n\nAn imported function will have an ONAME node which points to a Func\nwith an empty body.\nA declared function or method has an ODCLFUNC (the Func itself) and an ONAME.\nA function literal is represented directly by an OCLOSURE, but it also\nhas an ODCLFUNC (and a matching ONAME) representing the compiled\nunderlying form of the closure, which accesses the captured variables\nusing a special data structure passed in a register.\n\nA method declaration is represented like functions, except f.Sym\nwill be the qualified method name (e.g., \"T.m\").\n\nA method expression (T.M) is represented as an OMETHEXPR node,\nin which n.Left and n.Right point to the type and method, respectively.\nEach distinct mention of a method expression in the source code\nconstructs a fresh node.\n\nA method value (t.M) is represented by ODOTMETH/ODOTINTER\nwhen it is called directly and by OMETHVALUE otherwise.\nThese are like method expressions, except that for ODOTMETH/ODOTINTER,\nthe method name is stored in Sym instead of Right.\nEach OMETHVALUE ends up being implemented as a new\nfunction, a bit like a closure, with its own ODCLFUNC.\nThe OMETHVALUE uses n.Func to record the linkage to\nthe generated ODCLFUNC, but there is no\npointer from the Func back to the OMETHVALUE.\n" (struct
+    ;; if you add or remove a field, don't forget to update sizeof_test.go
+
+    ^{:line 57} miniNode
+    ^{:line 58 :tag Nodes} Body
+
+    ^{:line 60 :tag (* Name)} Nname ; ONAME node
+    ^{:line 61 :tag (* ClosureExpr)} OClosure ; OCLOSURE node
+
+
+
+
+
+
+    ^{:line 68 :tag (slice (* Name)) :doc "ONAME nodes for all params/locals for this func/closure, does NOT\ninclude closurevars until transforming closures during walk.\nNames must be listed PPARAMs, PPARAMOUTs, then PAUTOs,\nwith PPARAMs and PPARAMOUTs in order corresponding to the function signature.\nAnonymous and blank params are declared as ~pNN (for PPARAMs) and ~rNN (for PPARAMOUTs).\n"} Dcl
+
+
+
+
+
+
+
+    ^{:line 76 :tag (slice (* Name)) :doc "ClosureVars lists the free variables that are used within a\nfunction literal, but formally declared in an enclosing\nfunction. The variables in this slice are the closure function's\nown copy of the variables, which are used within its function\nbody. They will also each have IsClosureVar set, and will have\nByval set if they're captured by value.\n"} ClosureVars
+
+
+
+    ^{:line 80 :tag (slice (* Func)) :doc "Enclosed functions that need to be compiled.\nPopulated during walk.\n"} Closures
+
+
+    ^{:line 83 :tag (* Func) :doc "Parent of a closure\n"} ClosureParent
+
+
+
+
+    ^{:line 88 :tag (slice ScopeID) :doc "Parents records the parent scope of each scope within a\nfunction. The root scope (0) has no parent, so the i'th\nscope's parent is stored at Parents[i-1].\n"} Parents
+
+
+    ^{:line 91 :tag (slice Mark) :doc "Marks records scope boundary changes.\n"} Marks
+
+    ^{:line 93 :tag (map (* obj/LSym) (struct))} FieldTrack
+    ^{:line 94 :tag any} DebugInfo
+    ^{:line 95 :tag (* obj/LSym)} LSym ; Linker object in this function's native ABI (Func.ABI)
+
+    ^{:line 97 :tag (* Inline)} Inl
+
+
+
+    ^{:line 101 :tag (* Func) :doc "RangeParent, if non-nil, is the first non-range body function containing\nthe closure for the body of a range function.\n"} RangeParent
+
+
+
+
+
+
+
+    ^{:line 109 :tag int32 :doc "funcLitGen, rangeLitGen and goDeferGen track how many closures have been\ncreated in this function for function literals, range-over-func loops,\nand go/defer wrappers, respectively. Used by closureName for creating\nunique function names.\nTracking goDeferGen separately avoids wrappers throwing off\nfunction literal numbering (e.g., runtime/trace_test.TestTraceSymbolize.func11).\n"} funcLitGen
+    ^{:line 110 :tag int32} rangeLitGen
+    ^{:line 111 :tag int32} goDeferGen
+
+    ^{:line 113 :tag int32} Label ; largest auto-generated label in this function
+
+    ^{:line 115 :tag src/XPos} Endlineno
+    ^{:line 116 :tag src/XPos} WBPos ; position of first write barrier; see SetWBPos
+
+    ^{:line 118 :tag PragmaFlag} Pragma ; go:xxx function annotations
+
+    ^{:line 120 :tag bitset16} flags
+
+
+
+
+
+
+
+
+    ^{:line 129 :tag obj/ABI :doc "ABI is a function's \"definition\" ABI. This is the ABI that\nthis function's generated code is expecting to be called by.\n\nFor most functions, this will be obj.ABIInternal. It may be\na different ABI for functions defined in assembly or ABI wrappers.\n\nThis is included in the export data and tracked across packages.\n"} ABI
+
+
+
+
+    ^{:line 134 :tag obj/ABISet :doc "ABIRefs is the set of ABIs by which this function is referenced.\nFor ABIs other than this function's definition ABI, the\ncompiler generates ABI wrapper functions. This is only tracked\nwithin a package.\n"} ABIRefs
+
+    ^{:line 136 :tag int32} NumDefers ; number of defer calls in the function
+    ^{:line 137 :tag int32} NumReturns ; number of explicit returns in the function
+
+
+
+
+    ^{:line 142 :tag (* (slice SymAndPos)) :doc "NWBRCalls records the LSyms of functions called by this\nfunction for go:nowritebarrierrec analysis. Only filled in\nif nowritebarrierrecCheck != nil.\n"} NWBRCalls
+
+
+
+    ^{:line 146 :tag (* Func) :doc "For wrapper functions, WrappedFunc point to the original Func.\nCurrently only used for go/defer wrappers.\n"} WrappedFunc
+
+
+
+    ^{:line 150 :tag (* WasmImport) :doc "WasmImport is used by the //go:wasmimport directive to store info about\na WebAssembly function import.\n"} WasmImport
+
+
+    ^{:line 153 :tag (* WasmExport) :doc "WasmExport is used by the //go:wasmexport directive to store info about\na WebAssembly function export.\n"} WasmExport))
+
+
+
+(go/type WasmImport "WasmImport stores metadata associated with the //go:wasmimport pragma.\n" (struct
+    ^{:line 158 :tag string} Module
+    ^{:line 159 :tag string} Name))
+
+
+
+(go/type WasmExport "WasmExport stores metadata associated with the //go:wasmexport pragma.\n" (struct
+    ^{:line 164 :tag string} Name))
+
+
+
+
+
+
+
+
+
+^{:go/end 190} (go/func NewFunc "NewFunc returns a new Func with the given name and type.\n\nfpos is the position of the \"func\" token, and npos is the position\nof the name identifier.\n\nTODO(mdempsky): I suspect there's no need for separate fpos and\nnpos.\n" ^{:tag (* Func)} [^src/XPos fpos ^src/XPos npos ^{:tag (* types/Sym)} sym ^{:tag (* types/Type)} typ]
+  (let [name (NewNameAt npos sym typ)]
+    (set! (.-Class name) PFUNC)
+    (.SetFunc sym true)
+
+    (let [fn (addr (lit Func :Nname name))]
+      (set! ^{:go/via [miniNode]} (.-pos fn) fpos)
+      (set! ^{:go/via [miniNode]} (.-op fn) ODCLFUNC)
+      ;; Most functions are ABIInternal. The importer or symabis
+      ;; pass may override this.
+      (set! (.-ABI fn) obj/ABIInternal)
+      ^{:go/via [miniNode]} (.SetTypecheck fn 1)
+
+      (set! (.-Func name) fn)
+
+      ^{:line 189} fn)))
+
+
+^{:go/end 192} (go/method isStmt [^{:tag (* Func)} f])
+
+^{:go/end 194} (go/method copy ^Node [^{:tag (* Func)} n] (panic ^{:go/via [miniNode]} (.no n "copy")))
+^{:go/end 195} (go/method doChildren ^bool [^{:tag (* Func)} n ^{:tag (func [Node] [bool])} do] (doNodes (.-Body n) do))
+^{:go/end 196} (go/method doChildrenWithHidden ^bool [^{:tag (* Func)} n ^{:tag (func [Node] [bool])} do] (doNodes (.-Body n) do))
+^{:go/end 197} (go/method editChildren [^{:tag (* Func)} n ^{:tag (func [Node] [Node])} edit] (editNodes (.-Body n) edit))
+^{:go/end 198} (go/method editChildrenWithHidden [^{:tag (* Func)} n ^{:tag (func [Node] [Node])} edit] (editNodes (.-Body n) edit))
+
+^{:go/end 200} (go/method Type ^{:tag (* types/Type)} [^{:tag (* Func)} f] ^{:go/via [miniExpr]} (.Type (.-Nname f)))
+^{:go/end 201} (go/method Sym ^{:tag (* types/Sym)} [^{:tag (* Func)} f] (.Sym (.-Nname f)))
+^{:go/end 202} (go/method Linksym ^{:tag (* obj/LSym)} [^{:tag (* Func)} f] (.Linksym (.-Nname f)))
+^{:go/end 203} (go/method LinksymABI ^{:tag (* obj/LSym)} [^{:tag (* Func)} f ^obj/ABI abi] (.LinksymABI (.-Nname f) abi))
+
+
+(go/type Inline "An Inline holds fields used for function bodies that can be inlined.\n" (struct
+    ^{:line 207 :tag int32} Cost ; heuristic cost of inlining this function
+
+
+
+
+
+    ^{:line 213 :tag (slice (* Name)) :doc "Copy of Func.Dcl for use during inlining. This copy is needed\nbecause the function's Dcl may change from later compiler\ntransformations. This field is also populated when a function\nfrom another package is imported and inlined.\n"} Dcl
+    ^{:line 214 :tag bool} HaveDcl ; whether we've loaded Dcl
+
+
+
+    ^{:line 218 :tag string :doc "Function properties, encoded as a string (these are used for\nmaking inlining decisions). See cmd/compile/internal/inline/inlheur.\n"} Properties
+
+
+
+
+    ^{:line 223 :tag bool :doc "CanDelayResults reports whether it's safe for the inliner to delay\ninitializing the result parameters until immediately before the\n\"return\" statement.\n"} CanDelayResults))
+
+
+
+(go/type Mark "A Mark represents a scope boundary.\n" (struct
+
+
+    ^{:line 230 :tag src/XPos :doc "Pos is the position of the token that marks the scope\nchange.\n"} Pos
+
+
+    ^{:line 233 :tag ScopeID :doc "Scope identifies the innermost scope to the right of Pos.\n"} Scope))
+
+
+
+(go/type ScopeID "A ScopeID represents a lexical scope within a function.\n" int32)
+
+(go/const
+  ^{:line 240} [^{:val 1} funcDupok (<< 1 iota)] ; duplicate definitions ok
+  ^{:line 241} [^{:val 2} funcWrapper] ; hide frame from users (elide in tracebacks, don't count as a frame for recover())
+  ^{:line 242} [^{:val 4} funcABIWrapper] ; is an ABI wrapper (also set flagWrapper)
+  ^{:line 243} [^{:val 8} funcNeedctxt] ; function uses context register (has closure variables)
+  ^{:line 244} [^{:val 16} funcHasDefer] ; contains a defer statement
+  ^{:line 245} [^{:val 32} funcNilCheckDisabled] ; disable nil checks when compiling this function
+  ^{:line 246} [^{:val 64} funcInlinabilityChecked] ; inliner has already determined whether the function is inlinable
+  ^{:line 247} [^{:val 128} funcNeverReturns] ; function never returns (in most cases calls panic(), os.Exit(), or equivalent)
+  ^{:line 248} [^{:val 256} funcOpenCodedDeferDisallowed] ; can't do open-coded defers
+  ^{:line 249} [^{:val 512} funcClosureResultsLost] ; closure is called indirectly and we lost track of its results; used by escape analysis
+  ^{:line 250} [^{:val 1024} funcPackageInit]) ; compiler emitted .init func for package
+
+
+(go/type SymAndPos (struct
+    ^{:line 254 :tag (* obj/LSym)} Sym ; LSym of callee
+    ^{:line 255 :tag src/XPos} Pos)) ; line of call
+
+
+^{:go/end 258} (go/method Dupok ^bool [^{:tag (* Func)} f] (!= (bit-and (.-flags f) funcDupok) 0))
+^{:go/end 259} (go/method Wrapper ^bool [^{:tag (* Func)} f] (!= (bit-and (.-flags f) funcWrapper) 0))
+^{:go/end 260} (go/method ABIWrapper ^bool [^{:tag (* Func)} f] (!= (bit-and (.-flags f) funcABIWrapper) 0))
+^{:go/end 261} (go/method Needctxt ^bool [^{:tag (* Func)} f] (!= (bit-and (.-flags f) funcNeedctxt) 0))
+^{:go/end 262} (go/method HasDefer ^bool [^{:tag (* Func)} f] (!= (bit-and (.-flags f) funcHasDefer) 0))
+^{:go/end 263} (go/method NilCheckDisabled ^bool [^{:tag (* Func)} f] (!= (bit-and (.-flags f) funcNilCheckDisabled) 0))
+^{:go/end 264} (go/method InlinabilityChecked ^bool [^{:tag (* Func)} f] (!= (bit-and (.-flags f) funcInlinabilityChecked) 0))
+^{:go/end 265} (go/method NeverReturns ^bool [^{:tag (* Func)} f] (!= (bit-and (.-flags f) funcNeverReturns) 0))
+^{:go/end 266} (go/method OpenCodedDeferDisallowed ^bool [^{:tag (* Func)} f] (!= (bit-and (.-flags f) funcOpenCodedDeferDisallowed) 0))
+^{:go/end 267} (go/method ClosureResultsLost ^bool [^{:tag (* Func)} f] (!= (bit-and (.-flags f) funcClosureResultsLost) 0))
+^{:go/end 268} (go/method IsPackageInit ^bool [^{:tag (* Func)} f] (!= (bit-and (.-flags f) funcPackageInit) 0))
+
+^{:go/end 270} (go/method SetDupok [^{:tag (* Func)} f ^bool b] (.set (.-flags f) funcDupok b))
+^{:go/end 271} (go/method SetWrapper [^{:tag (* Func)} f ^bool b] (.set (.-flags f) funcWrapper b))
+^{:go/end 272} (go/method SetABIWrapper [^{:tag (* Func)} f ^bool b] (.set (.-flags f) funcABIWrapper b))
+^{:go/end 273} (go/method SetNeedctxt [^{:tag (* Func)} f ^bool b] (.set (.-flags f) funcNeedctxt b))
+^{:go/end 274} (go/method SetHasDefer [^{:tag (* Func)} f ^bool b] (.set (.-flags f) funcHasDefer b))
+^{:go/end 275} (go/method SetNilCheckDisabled [^{:tag (* Func)} f ^bool b] (.set (.-flags f) funcNilCheckDisabled b))
+^{:go/end 276} (go/method SetInlinabilityChecked [^{:tag (* Func)} f ^bool b] (.set (.-flags f) funcInlinabilityChecked b))
+^{:go/end 277} (go/method SetNeverReturns [^{:tag (* Func)} f ^bool b] (.set (.-flags f) funcNeverReturns b))
+^{:go/end 278} (go/method SetOpenCodedDeferDisallowed [^{:tag (* Func)} f ^bool b] (.set (.-flags f) funcOpenCodedDeferDisallowed b))
+^{:go/end 279} (go/method SetClosureResultsLost [^{:tag (* Func)} f ^bool b] (.set (.-flags f) funcClosureResultsLost b))
+^{:go/end 280} (go/method SetIsPackageInit [^{:tag (* Func)} f ^bool b] (.set (.-flags f) funcPackageInit b))
+
+^{:go/end 289} (go/method SetWBPos [^{:tag (* Func)} f ^src/XPos pos]
+  (when (!= (.-WB base/Debug) 0)
+    (base/WarnfAt pos "write barrier"))
+
+  (when (not (.IsKnown (.-WBPos f)))
+    (set! (.-WBPos f) pos)))
+
+
+
+
+^{:go/end 297} (go/method IsClosure "IsClosure reports whether f is a function literal that captures at least one value.\n" ^bool [^{:tag (* Func)} f]
+  (when (== (.-OClosure f) nil)
+    (return false))
+
+  (> (len (.-ClosureVars f)) 0))
+
+
+
+^{:go/end 305} (go/func FuncName "FuncName returns the name (without the package) of the function f.\n" ^string [^{:tag (* Func)} f]
+  (when (or (== f nil) (== (.-Nname f) nil))
+    (return "<nil>"))
+
+  (.-Name (.Sym f)))
+
+
+
+
+
+
+
+
+^{:go/end 323} (go/func PkgFuncName "PkgFuncName returns the name of the function referenced by f, with package\nprepended.\n\nThis differs from the compiler's internal convention where local functions\nlack a package. This is primarily useful when the ultimate consumer of this\nis a human looking at message.\n" ^string [^{:tag (* Func)} f]
+  (when (or (== f nil) (== (.-Nname f) nil))
+    (return "<nil>"))
+
+  (let [s (.Sym f)
+      ^{:line 318} pkg (.-Pkg s)]
+    (when (== pkg nil)
+      (return (+ "<nil>." (.-Name s))))
+
+    (+ (.-Path pkg) "." (.-Name s))))
+
+
+
+
+^{:go/end 335} (go/func LinkFuncName "LinkFuncName returns the name of the function f, as it will appear in the\nsymbol table of the final linked binary.\n" ^string [^{:tag (* Func)} f]
+  (when (or (== f nil) (== (.-Nname f) nil))
+    (return "<nil>"))
+
+  (let [s (.Sym f)
+      ^{:line 332} pkg (.-Pkg s)]
+
+    (+ (objabi/PathToPrefix (.-Path pkg)) "." (.-Name s))))
+
+
+
+
+^{:go/end 351} (go/func ParseLinkFuncName "ParseLinkFuncName parsers a symbol name (as returned from LinkFuncName) back\nto the package path and local symbol name.\n" [^string name] :results [^string pkg ^string sym ^error err]
+  (set! (values pkg sym) (splitPkg name))
+  (when (== pkg "")
+    (return "" "" (fmt/Errorf "no package path in name")))
+
+
+  (set! (values pkg err) (objabi/PrefixToPath pkg)) ; unescape
+  (when (!= err nil)
+    (return "" "" (fmt/Errorf "malformed package path: %v" err)))
+
+
+  (return pkg sym nil))
+
+
+
+^{:go/breaks [[5 361]] :go/end 362} (go/func modPathOK "Borrowed from x/mod.\n" ^bool [^rune r]
+  (when (< r utf8/RuneSelf)
+    (return (or (== r \-) (== r \.) (== r \_) (== r \~)
+        (and (<= \0 r) (<= r \9))
+        (and (<= \A r) (<= r \Z))
+        (and (<= \a r) (<= r \z)))))
+
+  false)
+
+
+^{:go/end 366} (go/func escapedImportPathOK ^bool [^rune r]
+  (or (modPathOK r) (== r \+) (== r \/) (== r \%)))
+
+
+
+
+^{:go/end 396} (go/func splitPkg "splitPkg splits the full linker symbol name into package and local symbol\nname.\n" [^string name] :results [^string pkgpath ^string sym]
+  ;; package-sym split is at first dot after last the / that comes before
+  ;; any characters illegal in a package path.
+
+  (let [lastSlashIdx 0]
+    (range [i r name]
+      ;; Catches cases like:
+      ;; * example.foo[sync/atomic.Uint64].
+      ;; * example%2ecom.foo[sync/atomic.Uint64].
+      ;;
+      ;; Note that name is still escaped; unescape occurs after splitPkg.
+      (when (not (escapedImportPathOK r))
+        (break))
+
+      (when (== r \/)
+        (set! lastSlashIdx i)))
+
+
+    (for [i lastSlashIdx] (< i (len name)) (inc! i)
+      (let [r (aget name i)]
+        (when (== r \.)
+          (return (subslice name _ i) (subslice name (+ i 1))))))
+
+
+
+    (return "" name)))
+
+
+(go/var ^{:tag (* Func)} CurFunc)
+
+
+
+
+^{:go/end 409} (go/func WithFunc "WithFunc invokes do with CurFunc and base.Pos set to curfn and\ncurfn.Pos(), respectively, and then restores their previous values\nbefore returning.\n" [^{:tag (* Func)} curfn ^{:tag (func [])} do]
+  (let [(values oldfn oldpos) (values CurFunc base/Pos)]
+    (defer (^{:go/end 405} (fn [] (set! (values CurFunc base/Pos) (values oldfn oldpos)))))
+
+    (set! (values CurFunc base/Pos) (values curfn ^{:go/via [miniNode]} (.Pos curfn)))
+    (go/call do)))
+
+
+^{:go/end 413} (go/func FuncSymName ^string [^{:tag (* types/Sym)} s]
+  (+ (.-Name s) "·f"))
+
+
+
+
+^{:go/end 428} (go/func ClosureDebugRuntimeCheck "ClosureDebugRuntimeCheck applies boilerplate checks for debug flags\nand compiling runtime.\n" [^{:tag (* ClosureExpr)} clo]
+  (when (> (.-Closure base/Debug) 0)
+    (if (== ^{:go/via [miniExpr miniNode]} (.Esc clo) EscHeap)
+      (base/WarnfAt ^{:go/via [miniExpr miniNode]} (.Pos clo) "heap closure, captured vars = %v" (.-ClosureVars (.-Func clo)))
+
+      (base/WarnfAt ^{:go/via [miniExpr miniNode]} (.Pos clo) "stack closure, captured vars = %v" (.-ClosureVars (.-Func clo)))))
+
+
+  (when (and (.-CompilingRuntime base/Flag) (== ^{:go/via [miniExpr miniNode]} (.Esc clo) EscHeap) (not (.-IsGoWrap clo)))
+    (base/ErrorfAt ^{:go/via [miniExpr miniNode]} (.Pos clo) 0 "heap-allocated closure %s, not allowed in runtime" (FuncName (.-Func clo)))))
+
+
+
+
+(go/var ^{:tag int32 :doc "globClosgen is like Func.Closgen, but for the global scope.\n"} globClosgen)
+
+
+
+
+^{:go/end 514} (go/func closureName "closureName generates a new unique name for a closure within outerfn at pos.\ngen is an optional counter for the closure name. If it is 0, the counter\nwill be computed based on outerfn.\n" ^{:tag (* types/Sym)} [^{:tag (* Func)} outerfn ^src/XPos pos ^Op why ^int gen]
+  (let [pkg types/LocalPkg
+      ^{:line 438} outer "glob."
+      ^{:line 439 :tag string} suffix "."]
+    (switch why
+      (default
+        (base/FatalfAt pos "closureName: bad Op: %v" why))
+      (case [OCLOSURE]
+        (when (== (.-OClosure outerfn) nil)
+          (set! suffix ".func")))
+
+      (case [ORANGE]
+        (set! suffix "-range"))
+      (case [OGO]
+        (set! suffix ".gowrap"))
+      (case [ODEFER]
+        (set! suffix ".deferwrap")))
+
+
+    ;; There may be multiple functions named "_". In those
+    ;; cases, we can't use their individual Closgens as it
+    ;; would lead to name clashes.
+    (when (not (IsBlank (.-Nname outerfn)))
+      (set! pkg (.-Pkg (.Sym outerfn)))
+      (set! outer (FuncName outerfn)))
+
+
+    ;; If this closure was created due to inlining, find the original
+    ;; outer function's name for the closure (#60324).
+    (let [^string inlHash (zero string)]
+      (when [inlIndex (.InliningIndex (.Base (.InnermostPos base/Ctxt pos)))] (>= inlIndex 0)
+        ;; The compiler doesn't like multiple symbols with the same
+        ;; name. We make a unique suffix temporarily for the
+        ;; compiler, and strip it during object file writing, so
+        ;; it will not be the linker symbol name. For linking,
+        ;; we use a content hash to disambiguate instead.
+        ;; We choose the suffix as a hash of the inline call stack.
+        (let [h (hash/New32)]
+          (fmt/Fprint h inlIndex)
+          (.AllParents (.-InlTree base/Ctxt) inlIndex ^{:go/end 479} (fn [^obj/InlinedCall call]
+              (when (>= (.-Parent call) 0)
+                (fmt/Fprint h " " (.-Parent call)))))
+
+
+          (set! inlHash (.EncodeToString base64/StdEncoding (subslice (.Sum h nil) _ 8)))
+
+          (set! outer (.InlinedFuncName (.-InlTree base/Ctxt) inlIndex))
+          (when [pkgPath (.InlinedFuncPkg (.-InlTree base/Ctxt) inlIndex)] (!= pkgPath "")
+            (set! pkg (types/NewPkg pkgPath "")))))
+
+
+
+      (when (== gen 0)
+        (let [p (addr globClosgen)]
+          (when (not (IsBlank (.-Nname outerfn)))
+            (switch why
+              (case [OCLOSURE]
+                (set! p (addr (.-funcLitGen outerfn))))
+              (case [ORANGE]
+                (set! p (addr (.-rangeLitGen outerfn))))
+              (default
+                (set! p (addr (.-goDeferGen outerfn))))))
+
+
+          (inc! @p)
+          (set! gen (conv int @p))))
+
+
+      (let [name (fmt/Sprintf "%s%s%d" outer suffix gen)]
+        (when (!= inlHash "")
+          ;; Attach the inline hash (see the comment above).
+          ;; If it already has a hash, trim it, so we don't include
+          ;; two hashes for nested closures. The new hash should be
+          ;; enough to disambiguate.
+          (set! name (+ (obj/TrimInlineHash name) "#" inlHash "#")))
+
+
+        (.Lookup pkg name)))))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 562} (go/func NewClosureFunc "NewClosureFunc creates a new Func to represent a function literal\nwith the given type.\n\nfpos the position used for the underlying ODCLFUNC and ONAME,\nwhereas cpos is the position used for the OCLOSURE. They're\nseparate because in the presence of inlining, the OCLOSURE node\nshould have an inline-adjusted position, whereas the ODCLFUNC and\nONAME must not.\n\nouterfn is the enclosing function. The returned function is\nappending to pkg.Funcs.\n\nwhy is the reason we're generating this Func. It can be OCLOSURE\n(for a normal function literal) or OGO or ODEFER (for wrapping a\ncall expression that has parameters or results).\n\ngen is an optional counter for the closure name. If it is 0,\nthe counter will be computed based on outerfn.\n" ^{:tag (* Func)} [^src/XPos fpos ^src/XPos cpos ^Op why ^{:tag (* types/Type)} typ ^{:tag (* Func)} outerfn ^{:tag (* Package)} pkg ^int gen]
+  (when (== outerfn nil)
+    (base/FatalfAt fpos "outerfn is nil"))
+
+
+  (let [fn (NewFunc fpos fpos (closureName outerfn cpos why gen) typ)]
+    (.SetDupok fn (.Dupok outerfn)) ; if the outer function is dupok, so is the closure
+
+    ^{:go/via [Attribute]} (.Set (.Linksym fn) obj/AttrContentAddressable true)
+
+    (let [clo (addr (lit ClosureExpr :Func fn))]
+      (set! ^{:go/via [miniExpr miniNode]} (.-op clo) OCLOSURE)
+      (set! ^{:go/via [miniExpr miniNode]} (.-pos clo) cpos)
+      ^{:go/via [miniExpr]} (.SetType clo typ)
+      ^{:go/via [miniExpr miniNode]} (.SetTypecheck clo 1)
+      (when (== why ORANGE)
+        (set! (.-RangeParent (.-Func clo)) outerfn)
+        (when (and (!= (.-OClosure outerfn) nil) (!= (.-RangeParent (.-Func (.-OClosure outerfn))) nil))
+          (set! (.-RangeParent (.-Func clo)) (.-RangeParent (.-Func (.-OClosure outerfn))))))
+
+
+      (set! (.-OClosure fn) clo)
+
+      (set! (.-Defn (.-Nname fn)) fn)
+      (set! (.-Funcs pkg) (append (.-Funcs pkg) fn))
+      (set! (.-ClosureParent fn) outerfn)
+
+      ^{:line 561} fn)))
+
+
+
+^{:go/end 572} (go/func IsFuncPCIntrinsic "IsFuncPCIntrinsic returns whether n is a direct call of internal/abi.FuncPCABIxxx functions.\n" ^bool [^{:tag (* CallExpr)} n]
+  (when (or (!= ^{:go/via [miniExpr miniNode]} (.Op n) OCALLFUNC) (!= (.Op (.-Fun n)) ONAME))
+    (return false))
+
+  (let [fn (.Sym (assert (* Name) (.-Fun n)))]
+    (and ^:go/paren (or (== (.-Name fn) "FuncPCABI0") (== (.-Name fn) "FuncPCABIInternal"))
+      (== (.-Path (.-Pkg fn)) "internal/abi"))))
+
+
+
+
+
+
+
+^{:go/breaks [[5 585]] :go/end 586} (go/func IsIfaceOfFunc "IsIfaceOfFunc inspects whether n is an interface conversion from a direct\nreference of a func. If so, it returns referenced Func; otherwise nil.\n\nThis is only usable before walk.walkConvertInterface, which converts to an\nOMAKEFACE.\n" ^{:tag (* Func)} [^Node n]
+  (when [(values n ok) (assert (* ConvExpr) n)] (and ok (== ^{:go/via [miniExpr miniNode]} (.Op n) OCONVIFACE))
+    (when [(values name ok) (assert (* Name) (.-X n))] (and ok (== ^{:go/via [miniExpr miniNode]} (.Op name) ONAME) (== (.-Class name) PFUNC))
+      (return (.-Func name))))
+
+
+  nil)
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 627} (go/func FuncPC "FuncPC returns a uintptr-typed expression that evaluates to the PC of a\nfunction as uintptr, as returned by internal/abi.FuncPC{ABI0,ABIInternal}.\n\nn should be a Node of an interface type, as is passed to\ninternal/abi.FuncPC{ABI0,ABIInternal}.\n\nTODO(prattmic): Since n is simply an interface{} there is no assertion that\nit is actually a function at all. Perhaps we should emit a runtime type\nassertion?\n" ^Node [^src/XPos pos ^Node n ^obj/ABI wantABI]
+  (when (not (.IsInterface (.Type n)))
+    (base/ErrorfAt pos 0 "internal/abi.FuncPC%s expects an interface value, got %v" wantABI (.Type n)))
+
+
+  (when [fn (IsIfaceOfFunc n)] (!= fn nil)
+    (let [name (.-Nname fn)
+        ^{:line 604} abi (.-ABI fn)]
+      (when (!= abi wantABI)
+        (base/ErrorfAt pos 0 "internal/abi.FuncPC%s expects an %v function, %s is defined as %v" wantABI wantABI (.-Name (.Sym name)) abi))
+
+      (let [^Node e (NewLinksymExpr pos (.LinksymABI name abi) (aget types/Types types/TUINTPTR))]
+        (set! e (NewAddrExpr pos e))
+        (.SetType e (.PtrTo (aget types/Types types/TUINTPTR)))
+        (set! e (NewConvExpr pos OCONVNOP (aget types/Types types/TUINTPTR) e))
+        (.SetTypecheck e 1)
+        (return e))))
+
+  ;; fn is not a defined function. It must be ABIInternal.
+  ;; Read the address from func value, i.e. *(*uintptr)(idata(fn)).
+  (when (!= wantABI obj/ABIInternal)
+    (base/ErrorfAt pos 0 "internal/abi.FuncPC%s does not accept func expression, which is ABIInternal" wantABI))
+
+  (let [^Node e (NewUnaryExpr pos OIDATA n)]
+    (.SetType e (.PtrTo (aget types/Types types/TUINTPTR)))
+    (.SetTypecheck e 1)
+    (set! e (NewStarExpr pos e))
+    (.SetType e (aget types/Types types/TUINTPTR))
+    (.SetTypecheck e 1)
+    ^{:line 626} e))
+
+
+
+
+
+
+
+^{:go/end 664} (go/method DeclareParams "DeclareParams creates Names for all of the parameters in fn's\nsignature and adds them to fn.Dcl.\n\nIf setNname is true, then it also sets types.Field.Nname for each\nparameter.\n" [^{:tag (* Func)} fn ^bool setNname]
+  (when (!= (.-Dcl fn) nil)
+    (base/FatalfAt ^{:go/via [miniNode]} (.Pos fn) "%v already has Dcl" fn))
+
+
+  (let [declareParams ^{:go/end 655} (fn [^{:tag (slice (* types/Field))} params ^Class ctxt ^string prefix ^int offset]
+        (range [i param params]
+          (let [sym (.-Sym param)]
+            (when (or (== sym nil) (.IsBlank sym))
+              (set! sym (.LookupNum (.-Pkg (.Sym fn)) prefix i)))
+
+
+            (let [name (NewNameAt (.-Pos param) sym (.-Type param))]
+              (set! (.-Class name) ctxt)
+              (set! (.-Curfn name) fn)
+              (aset (.-Dcl fn) (+ offset i) name)
+
+              (when setNname
+                (set! (.-Nname param) name))))))
+
+
+
+
+      ^{:line 657} sig (.Type fn)
+      ^{:line 658} params (.RecvParams sig)
+      ^{:line 659} results (.Results sig)]
+
+    (set! (.-Dcl fn) (make (slice (* Name)) (+ (len params) (len results))))
+    (declareParams params PPARAM "~p" 0)
+    (declareParams results PPARAMOUT "~r" (len params))))
+
+
+
+^{:go/breaks [[6 678]] :go/end 679} (go/func ContainsClosure "ContainsClosure reports whether c is a closure contained within f.\n" ^bool [^{:tag (* Func)} f ^{:tag (* Func)} c]
+  ;; Common cases.
+  (when (or (== f c) (== (.-OClosure c) nil))
+    (return false))
+
+
+  (for [p (.-ClosureParent c)] (!= p nil) (set! p (.-ClosureParent p))
+    (when (== p f)
+      (return true)))
+
+
+  false)

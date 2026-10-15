@@ -1,0 +1,597 @@
+;; Copyright 2011 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; This file implements the Check function, which drives type-checking.
+
+(in-ns 'go.cmd.compile.internal.types2) (go/file "check.go" :imports [
+
+
+    ^{:line 10} [syntax "cmd/compile/internal/syntax"]
+    ^{:line 11} [fmt "fmt"]
+    ^{:line 12} [constant "go/constant"]
+    ^{:line 13} [. "internal/types/errors"]
+    ^{:line 14} [os "os"]])
+
+
+
+(go/var ^{:tag syntax/Pos :doc "nopos indicates an unknown position\n"} nopos)
+
+
+(go/const ^{:val false :doc "debugging/development support\n"} debug false) ; leave on during development
+
+
+(go/const ^{:val true :doc "position tracing for panics during type checking\n"} tracePos true)
+
+
+(go/type exprInfo "exprInfo stores information about an untyped expression.\n" (struct
+    ^{:line 28 :tag bool} isLhs ; expression is lhs operand of a shift with delayed type-check
+    ^{:line 29 :tag operandMode} mode
+    ^{:line 30 :tag (* Basic)} typ
+    ^{:line 31 :tag constant/Value} val)) ; constant value; or nil (if not a constant)
+
+
+
+
+(go/type environment "An environment represents the environment within which an object is\ntype-checked.\n" (struct
+    ^{:line 37 :tag (* declInfo)} decl ; package-level declaration whose init expression/function body is checked
+    ^{:line 38 :tag (* Scope)} scope ; top-most scope for lookups
+    ^{:line 39 :tag goVersion} version ; current accepted language version; changes across files
+    ^{:line 40 :tag constant/Value} iota ; value of iota in a constant declaration; nil otherwise
+    ^{:line 41 :tag syntax/Pos} errpos ; if valid, identifier position of a constant with inherited initializer
+    ^{:line 42 :tag bool} inTParamList ; set if inside a type parameter list
+    ^{:line 43 :tag (* Signature)} sig ; function signature if inside a function; nil otherwise
+    ^{:line 44 :tag (map (* syntax/CallExpr) bool)} isPanic ; set of panic call expressions (used for termination check)
+    ^{:line 45 :tag bool} hasLabel ; set if a function makes use of labels (only ~1% of functions); unused outside functions
+    ^{:line 46 :tag bool} hasCallOrRecv)) ; set if an expression contains a function call or channel receive operation
+
+
+
+
+
+
+
+
+
+
+^{:go/end 64} (go/method lookupScope "lookupScope looks up name in the current environment and if an object\nis found it returns the scope containing the object and the object.\nOtherwise it returns (nil, nil).\n\nNote that obj.Parent() may be different from the returned scope if the\nobject was inserted into the scope and already had a parent at that\ntime (see Scope.Insert). This can only happen for dot-imported objects\nwhose parent is the scope of the package that exported them.\n" [^{:tag (* environment)} env ^string name] :results [(* Scope) Object]
+  (for [s (.-scope env)] (!= s nil) (set! s (.-parent s))
+    (when [obj (.Lookup s name)] (!= obj nil)
+      (return s obj)))
+
+
+  (return nil nil))
+
+
+
+^{:go/end 70} (go/method lookup "lookup is like lookupScope but it only returns the object (or nil).\n" ^Object [^{:tag (* environment)} env ^string name]
+  (let [(values _ obj) (.lookupScope env name)]
+    ^{:line 69} obj))
+
+
+
+
+
+
+
+
+(go/type importKey "An importKey identifies an imported package by import path and source directory\n(directory containing the file containing the import). In practice, the directory\nmay always be the same, or may not matter. Given an (import path, directory), an\nimporter must always return the same package (but given two different import paths,\nan importer may still return the same package by mapping them to the same package\npaths).\n" (struct
+    ^{:line 79 :tag string} path ^string dir))
+
+
+
+(go/type dotImportKey "A dotImportKey describes a dot-imported object in the given scope.\n" (struct
+    ^{:line 84 :tag (* Scope)} scope
+    ^{:line 85 :tag string} name))
+
+
+
+(go/type action "An action describes a (delayed) action.\n" (struct
+    ^{:line 90 :tag goVersion} version ; applicable language version
+    ^{:line 91 :tag (func [])} f ; action to be executed
+    ^{:line 92 :tag (* actionDesc)} desc)) ; action description; may be nil, requires debug to be set
+
+
+
+
+^{:go/end 101} (go/method describef "If debug is set, describef sets a printf-formatted description for action a.\nOtherwise, it is a no-op.\n" [^{:tag (* action)} a ^poser pos ^string format & ^{:tag (slice any)} args]
+  (when debug
+    (set! (.-desc a) (addr (lit actionDesc pos format args)))))
+
+
+
+
+
+(go/type actionDesc "An actionDesc provides information on an action.\nFor debugging only.\n" (struct
+    ^{:line 106 :tag poser} pos
+    ^{:line 107 :tag string} format
+    ^{:line 108 :tag (slice any)} args))
+
+
+
+
+(go/type Checker "A Checker maintains the state of the type checker.\nIt must be created with NewChecker.\n" (struct
+
+
+    ^{:line 116 :tag (* Config) :doc "package information\n(initialized by NewChecker, valid for the life-time of checker)\n"} conf
+    ^{:line 117 :tag (* Context)} ctxt ; context for de-duplicating instances
+    ^{:line 118 :tag (* Package)} pkg
+    (* Info)
+    ^{:line 120 :tag uint64} nextID ; unique Id for type parameters (first valid Id is 1)
+    ^{:line 121 :tag (map Object (* declInfo))} objMap ; maps package-level objects and (non-interface) methods to declaration info
+    ^{:line 122 :tag (slice Object)} objList ; source-ordered keys of objMap
+    ^{:line 123 :tag (map importKey (* Package))} impMap ; maps (import path, source directory) to (complete or fake) package
+    ;; see TODO in validtype.go
+    ;; valids  instanceLookup      // valid *Named (incl. instantiated) types per the validType check
+
+
+
+
+
+
+
+
+    ^{:line 134 :tag (map string (map string bool)) :doc "pkgPathMap maps package names to the set of distinct import paths we've\nseen for that name, anywhere in the import graph. It is used for\ndisambiguating package names in error messages.\n\npkgPathMap is allocated lazily, so that we don't pay the price of building\nit on the happy path. seenPkgMap tracks the packages that we've already\nwalked.\n"} pkgPathMap
+    ^{:line 135 :tag (map (* Package) bool)} seenPkgMap
+
+
+
+
+    ^{:line 140 :tag (slice (* syntax/File)) :doc "information collected during type-checking of a set of package files\n(initialized by Files, valid only for the duration of check.Files;\nmaps and lists are allocated on demand)\n"} files ; list of package files
+    ^{:line 141 :tag (map (* syntax/PosBase) string)} versions ; maps files to version strings (each file has an entry); shared with Info.FileVersions if present; may be unaltered Config.GoVersion
+    ^{:line 142 :tag (slice (* PkgName))} imports ; list of imported packages
+    ^{:line 143 :tag (map dotImportKey (* PkgName))} dotImportMap ; maps dot-imported objects to the package they were dot-imported through
+    ^{:line 144 :tag (map (* TypeName) bool)} brokenAliases ; set of aliases with broken (not yet determined) types
+    ^{:line 145 :tag (map (* Union) (* _TypeSet))} unionTypeSets ; computed type sets for union types
+    ^{:line 146 :tag (map (* Var) bool)} usedVars ; set of used variables
+    ^{:line 147 :tag (map (* PkgName) bool)} usedPkgNames ; set of used package names
+    ^{:line 148 :tag monoGraph} mono ; graph for detecting non-monomorphizable instantiation loops
+
+    ^{:line 150 :tag error} firstErr ; first error encountered
+    ^{:line 151 :tag (map (* TypeName) (slice (* Func)))} methods ; maps package scope type names to associated non-blank (non-interface) methods
+    ^{:line 152 :tag (map syntax/Expr exprInfo)} untyped ; map of expressions without final type
+    ^{:line 153 :tag (slice action)} delayed ; stack of delayed action segments; segments are processed in FIFO order
+    ^{:line 154 :tag (slice Object)} objPath ; path of object dependencies during type-checking (for cycle reporting)
+    ^{:line 155 :tag (map Object int)} objPathIdx ; map of object to object path index during type-checking (for cycle reporting)
+    ^{:line 156 :tag (slice cleaner)} cleaners ; list of types that may need a final cleanup at the end of type-checking
+
+
+
+    ^{:line 160 :doc "environment within which the current object is type-checked (valid only\nfor the duration of type-checking a specific object)\n"} environment
+
+
+    ^{:line 163 :tag (slice syntax/Pos) :doc "debugging\n"} posStack ; stack of source positions seen; used for panic tracing
+    ^{:line 164 :tag int} indent)) ; indentation for tracing
+
+
+
+^{:go/end 177} (go/method addDeclDep "addDeclDep adds the dependency edge (check.decl -> to) if check.decl exists\n" [^{:tag (* Checker)} check ^Object to]
+  (let [from ^{:go/via [environment]} (.-decl check)]
+    (when (== from nil)
+      (return)) ; not in a package-level init expression
+
+    (when [(values _ found) (aget (.-objMap check) to)] (not found)
+      (return)) ; to is not a package-level object
+
+    (.addDep from to)))
+
+
+^{:go/end 186} (go/method rememberUntyped [^{:tag (* Checker)} check ^syntax/Expr e ^bool lhs ^operandMode mode ^{:tag (* Basic)} typ ^constant/Value val]
+  (let [m (.-untyped check)]
+    (when (== m nil)
+      (set! m (make (map syntax/Expr exprInfo)))
+      (set! (.-untyped check) m))
+
+    (aset m e (lit exprInfo lhs mode typ val))))
+
+
+
+
+
+
+
+
+^{:go/end 198} (go/method later "later pushes f on to the stack of actions that will be processed later;\neither at the end of the current statement, or in case of a local constant\nor variable declaration, before the constant or variable is in scope\n(so that f still sees the scope before any new declarations).\nlater returns the pushed action so one can provide a description\nvia action.describef for debugging, if desired.\n" ^{:tag (* action)} [^{:tag (* Checker)} check ^{:tag (func [])} f]
+  (let [i (len (.-delayed check))]
+    (set! (.-delayed check) (append (.-delayed check) (lit action :version ^{:go/via [environment]} (.-version check) :f f)))
+    (addr (aget (.-delayed check) i))))
+
+
+
+^{:go/end 207} (go/method push "push pushes obj onto the object path and records its index in the path index map.\n" [^{:tag (* Checker)} check ^Object obj]
+  (when (== (.-objPathIdx check) nil)
+    (set! (.-objPathIdx check) (make (map Object int))))
+
+  (aset (.-objPathIdx check) obj (len (.-objPath check)))
+  (set! (.-objPath check) (append (.-objPath check) obj)))
+
+
+
+^{:go/end 216} (go/method pop "pop pops an object from the object path and removes it from the path index map.\n" [^{:tag (* Checker)} check]
+  (let [i (- (len (.-objPath check)) 1)
+      ^{:line 212} obj (aget (.-objPath check) i)]
+    (aset (.-objPath check) i nil) ; help the garbage collector
+    (set! (.-objPath check) (subslice (.-objPath check) _ i))
+    (delete (.-objPathIdx check) obj)))
+
+
+(go/type cleaner (interface
+    (cleanup [])))
+
+
+
+
+^{:go/end 226} (go/method needsCleanup "needsCleanup records objects/types that implement the cleanup method\nwhich will be called at the end of type-checking.\n" [^{:tag (* Checker)} check ^cleaner c]
+  (set! (.-cleaners check) (append (.-cleaners check) c)))
+
+
+
+
+^{:go/end 257} (go/func NewChecker "NewChecker returns a new Checker instance for a given package.\nPackage files may be added incrementally via checker.Files.\n" ^{:tag (* Checker)} [^{:tag (* Config)} conf ^{:tag (* Package)} pkg ^{:tag (* Info)} info]
+  ;; make sure we have a configuration
+  (when (== conf nil)
+    (set! conf (new Config)))
+
+
+  ;; make sure we have an info struct
+  (when (== info nil)
+    (set! info (new Info)))
+
+
+  ;; Note: clients may call NewChecker with the Unsafe package, which is
+  ;; globally shared and must not be mutated. Therefore NewChecker must not
+  ;; mutate *pkg.
+  ;;
+  ;; (previously, pkg.goVersion was mutated here: go.dev/issue/61212)
+
+  (addr ^{:go/breaks [2 4 6 8 10 12 14 16]} (lit Checker
+      :conf conf
+      :ctxt (.-Context conf)
+      :pkg pkg
+      :Info info
+      :objMap (make (map Object (* declInfo)))
+      :impMap (make (map importKey (* Package)))
+      :usedVars (make (map (* Var) bool))
+      :usedPkgNames (make (map (* PkgName) bool)))))
+
+
+
+
+
+^{:go/end 349} (go/method initFiles "initFiles initializes the files-specific portion of checker.\nThe provided files must all belong to the same package.\n" [^{:tag (* Checker)} check ^{:tag (slice (* syntax/File))} files]
+  ;; start with a clean slate (check.Files may be called multiple times)
+  ;; TODO(gri): what determines which fields are zeroed out here, vs at the end
+  ;; of checkFiles?
+  (set! (.-files check) nil)
+  (set! (.-imports check) nil)
+  (set! (.-dotImportMap check) nil)
+
+  (set! (.-firstErr check) nil)
+  (set! (.-methods check) nil)
+  (set! (.-untyped check) nil)
+  (set! (.-delayed check) nil)
+  (set! (.-objPath check) nil)
+  (set! (.-objPathIdx check) nil)
+  (set! (.-cleaners check) nil)
+
+  ;; We must initialize usedVars and usedPkgNames both here and in NewChecker,
+  ;; because initFiles is not called in the CheckExpr or Eval codepaths, yet we
+  ;; want to free this memory at the end of Files ('used' predicates are
+  ;; only needed in the context of a given file).
+  (set! (.-usedVars check) (make (map (* Var) bool)))
+  (set! (.-usedPkgNames check) (make (map (* PkgName) bool)))
+
+  ;; determine package name and collect valid files
+  (let [pkg (.-pkg check)]
+    (range [_ file files]
+      (switch [name (.-Value (.-PkgName file))] (.-name pkg)
+        (case [""]
+          (if (!= name "_")
+            (set! (.-name pkg) name)
+
+            (.error check (.-PkgName file) BlankPkgName "invalid package name _"))
+
+          (fallthrough))
+
+        (case [name]
+          (set! (.-files check) (append (.-files check) file)))
+
+        (default
+          (.errorf check file MismatchedPkgName "package %s; expected package %s" name (.-name pkg)))))
+    ;; ignore this file
+
+
+
+    ;; reuse Info.FileVersions if provided
+    (let [versions (.-FileVersions (.-Info check))]
+      (when (== versions nil)
+        (set! versions (make (map (* syntax/PosBase) string))))
+
+      (set! (.-versions check) versions)
+
+      (let [pkgVersion (asGoVersion (.-GoVersion (.-conf check)))]
+        (when (and (.isValid pkgVersion) (> (len files) 0) (> (.cmp pkgVersion go_current) 0))
+          (.errorf check (aget files 0) TooNew "package requires newer Go version %v (application built with %v)"
+            ^{:line 315} pkgVersion go_current))
+
+
+        ;; determine Go version for each file
+        (range [_ file (.-files check)]
+          ;; use unaltered Config.GoVersion by default
+          ;; (This version string may contain dot-release numbers as in go1.20.1,
+          ;; unlike file versions which are Go language versions only, if valid.)
+          (let [v (.-GoVersion (.-conf check))]
+
+            ;; If the file specifies a version, use max(fileVersion, go1.21).
+            (when [fileVersion (asGoVersion (.-GoVersion file))] (.isValid fileVersion)
+              ;; Go 1.21 introduced the feature of allowing //go:build lines
+              ;; to sometimes set the Go version in a given file. Versions Go 1.21 and later
+              ;; can be set backwards compatibly as that was the first version
+              ;; files with go1.21 or later build tags could be built with.
+              ;;
+              ;; Set the version to max(fileVersion, go1.21): That will allow a
+              ;; downgrade to a version before go1.22, where the for loop semantics
+              ;; change was made, while being backwards compatible with versions of
+              ;; go before the new //go:build semantics were introduced.
+              (set! v (conv string (versionMax fileVersion go1_21)))
+
+              ;; Report a specific error for each tagged file that's too new.
+              ;; (Normally the build system will have filtered files by version,
+              ;; but clients can present arbitrary files to the type checker.)
+              (when (> (.cmp fileVersion go_current) 0)
+                ;; Use position of 'package [p]' for types/types2 consistency.
+                ;; (Ideally we would use the //build tag itself.)
+                (.errorf check (.-PkgName file) TooNew "file requires newer Go version %v" fileVersion)))
+
+
+            (aset versions (.FileBase ^{:go/via [node]} (.Pos file)) v))))))) ; file.Pos().FileBase() may be nil for tests
+
+
+
+^{:go/end 356} (go/func versionMax ^goVersion [^goVersion a ^goVersion b]
+  (when (> (.cmp a b) 0)
+    (return a))
+
+  ^{:line 355} b)
+
+
+
+^{:go/end 361} (go/method pushPos "pushPos pushes pos onto the pos stack.\n" [^{:tag (* Checker)} check ^syntax/Pos pos]
+  (set! (.-posStack check) (append (.-posStack check) pos)))
+
+
+
+^{:go/end 366} (go/method popPos "popPos pops from the pos stack.\n" [^{:tag (* Checker)} check]
+  (set! (.-posStack check) (subslice (.-posStack check) _ (- (len (.-posStack check)) 1))))
+
+
+
+(go/type bailout "A bailout panic is used for early termination.\n" (struct))
+
+^{:go/end 398} (go/method handleBailout [^{:tag (* Checker)} check ^{:tag (* error)} err]
+  (type-switch [p (recover)]
+    (case [nil bailout]
+      ;; normal return or early exit
+      (set! @err (.-firstErr check)))
+    (default
+      (when (> (len (.-posStack check)) 0)
+        (let [doPrint ^{:go/end 382} (fn [^{:tag (slice syntax/Pos)} ps]
+              (for [i (- (len ps) 1)] (>= i 0) (dec! i)
+                (fmt/Fprintf os/Stderr "\t%v\n" (aget ps i))))]
+
+
+
+          (fmt/Fprintln os/Stderr "The following panic happened checking types near:")
+          (if (<= (len (.-posStack check)) 10)
+            (doPrint (.-posStack check))
+            (do
+              ;; if it's long, truncate the middle; it's least likely to help
+              (doPrint (subslice (.-posStack check) (- (len (.-posStack check)) 5)))
+              (fmt/Fprintln os/Stderr "\t...")
+              (doPrint (subslice (.-posStack check) _ 5))))))
+
+
+
+      ;; re-panic
+      (panic p))))
+
+
+
+
+^{:go/end 416} (go/method Files "Files checks the provided files as part of the checker's package.\n" [^{:tag (* Checker)} check ^{:tag (slice (* syntax/File))} files] :results [^error err]
+  (when (== (.-pkg check) Unsafe)
+    ;; Defensive handling for Unsafe, which cannot be type checked, and must
+    ;; not be mutated. See https://go.dev/issue/61212 for an example of where
+    ;; Unsafe is passed to NewChecker.
+    (return nil))
+
+
+  ;; Avoid early returns here! Nearly all errors can be
+  ;; localized to a piece of syntax and needn't prevent
+  ;; type-checking of the rest of the package.
+
+  (defer (.handleBailout check (addr err)))
+  (.checkFiles check files)
+  (return))
+
+
+
+
+
+
+^{:go/end 483} (go/method checkFiles "checkFiles type-checks the specified files. Errors are reported as\na side effect, not by returning early, to ensure that well-formed\nsyntax is properly type annotated even in a package containing\nerrors.\n" [^{:tag (* Checker)} check ^{:tag (slice (* syntax/File))} files]
+  (let [print ^{:go/end 428} (fn [^string msg]
+        (when (.-Trace (.-conf check))
+          (fmt/Println)
+          (fmt/Println msg)))]
+
+
+
+    (go/call print "== initFiles ==")
+    (.initFiles check files)
+
+    (go/call print "== collectObjects ==")
+    (.collectObjects check)
+
+    (go/call print "== sortObjects ==")
+    (.sortObjects check)
+
+    (go/call print "== directCycles ==")
+    (.directCycles check)
+
+    (go/call print "== packageObjects ==")
+    (.packageObjects check)
+
+    (go/call print "== processDelayed ==")
+    (.processDelayed check 0) ; incl. all functions
+
+    (go/call print "== cleanup ==")
+    (.cleanup check)
+
+    (go/call print "== initOrder ==")
+    (.initOrder check)
+
+    (when (not (.-DisableUnusedImportCheck (.-conf check)))
+      (go/call print "== unusedImports ==")
+      (.unusedImports check))
+
+
+    (go/call print "== recordUntyped ==")
+    (.recordUntyped check)
+
+    (when (== (.-firstErr check) nil)
+      ;; TODO(mdempsky): Ensure monomorph is safe when errors exist.
+      (.monomorph check))
+
+
+    (set! (.-goVersion (.-pkg check)) (.-GoVersion (.-conf check)))
+    (set! (.-complete (.-pkg check)) true)
+
+    ;; no longer needed - release memory
+    (set! (.-imports check) nil)
+    (set! (.-dotImportMap check) nil)
+    (set! (.-pkgPathMap check) nil)
+    (set! (.-seenPkgMap check) nil)
+    (set! (.-brokenAliases check) nil)
+    (set! (.-unionTypeSets check) nil)
+    (set! (.-usedVars check) nil)
+    (set! (.-usedPkgNames check) nil)
+    (set! (.-ctxt check) nil)))
+
+;; TODO(gri): shouldn't the cleanup above occur after the bailout?
+;; TODO(gri) There's more memory we should release at this point.
+
+
+
+^{:go/end 512} (go/method processDelayed "processDelayed processes all delayed actions pushed after top.\n" [^{:tag (* Checker)} check ^int top]
+  ;; If each delayed action pushes a new action, the
+  ;; stack will continue to grow during this loop.
+  ;; However, it is only processing functions (which
+  ;; are processed in a delayed fashion) that may
+  ;; add more actions (such as nested functions), so
+  ;; this is a sufficiently bounded process.
+  (let [savedVersion ^{:go/via [environment]} (.-version check)]
+    (for [i top] (< i (len (.-delayed check))) (inc! i)
+      (let [a (addr (aget (.-delayed check) i))]
+        (when (.-Trace (.-conf check))
+          (if (!= (.-desc a) nil)
+            (.trace check (.Pos (.-pos (.-desc a))) (+ "-- " (.-format (.-desc a))) (spread (.-args (.-desc a))))
+
+            (.trace check nopos "-- delayed %p" (.-f a))))
+
+
+        (set! ^{:go/via [environment]} (.-version check) (.-version a)) ; reestablish the effective Go version captured earlier
+        ((.-f a)) ; may append to check.delayed
+        (when (.-Trace (.-conf check))
+          (fmt/Println))))
+
+
+    (go/call assert (<= top (len (.-delayed check)))) ; stack must not have shrunk
+    (set! (.-delayed check) (subslice (.-delayed check) _ top))
+    (set! ^{:go/via [environment]} (.-version check) savedVersion)))
+
+
+
+^{:go/end 521} (go/method cleanup "cleanup runs cleanup for all collected cleaners.\n" [^{:tag (* Checker)} check]
+  ;; Don't use a range clause since Named.cleanup may add more cleaners.
+  (for [i 0] (< i (len (.-cleaners check))) (inc! i)
+    (.cleanup (aget (.-cleaners check) i)))
+
+  (set! (.-cleaners check) nil))
+
+
+
+^{:go/end 554} (go/method recordTypeAndValueInSyntax "types2-specific support for recording type information in the syntax tree.\n" [^{:tag (* Checker)} check ^syntax/Expr x ^operandMode mode ^Type typ ^constant/Value val]
+  (when ^{:go/via [Info]} (.-StoreTypesInSyntax check)
+    (let [tv (lit TypeAndValue mode typ val)
+        ^{:line 527} stv (lit syntax/TypeAndValue :Type typ :Value val)]
+      (when (.IsVoid tv)
+        ^{:go/via [exprFlags]} (.SetIsVoid stv))
+
+      (when (.IsType tv)
+        ^{:go/via [exprFlags]} (.SetIsType stv))
+
+      (when (.IsBuiltin tv)
+        ^{:go/via [exprFlags]} (.SetIsBuiltin stv))
+
+      (when (.IsValue tv)
+        ^{:go/via [exprFlags]} (.SetIsValue stv))
+
+      (when (.IsNil tv)
+        ^{:go/via [exprFlags]} (.SetIsNil stv))
+
+      (when (.Addressable tv)
+        ^{:go/via [exprFlags]} (.SetAddressable stv))
+
+      (when (.Assignable tv)
+        ^{:go/via [exprFlags]} (.SetAssignable stv))
+
+      (when (.HasOk tv)
+        ^{:go/via [exprFlags]} (.SetHasOk stv))
+
+      (.SetTypeInfo x stv))))
+
+
+
+
+^{:go/end 577} (go/method recordCommaOkTypesInSyntax "types2-specific support for recording type information in the syntax tree.\n" [^{:tag (* Checker)} check ^syntax/Expr x ^Type t0 ^Type t1]
+  (when ^{:go/via [Info]} (.-StoreTypesInSyntax check)
+    ;; Note: this loop is duplicated because the type of tv is different.
+    ;; Above it is types2.TypeAndValue, here it is syntax.TypeAndValue.
+    (while true
+      (let [tv (.GetTypeInfo x)]
+        (go/call assert (!= (.-Type tv) nil)) ; should have been recorded already
+        (let [pos (.Pos x)]
+          (set! (.-Type tv) (NewTuple
+              (NewParam pos (.-pkg check) "" t0)
+              (NewParam pos (.-pkg check) "" t1)))
+
+          (.SetTypeInfo x tv)
+          (let [(values p _) (assert (* syntax/ParenExpr) x)]
+            (when (== p nil)
+              (break))
+
+            (set! x (.-X p))))))))
+
+
+
+
+
+
+^{:go/end 598} (go/func instantiatedIdent "instantiatedIdent determines the identifier of the type instantiated in expr.\nHelper function for recordInstance in recording.go.\n" ^{:tag (* syntax/Name)} [^syntax/Expr expr]
+  (let [^syntax/Expr selOrIdent (zero syntax/Expr)]
+    (type-switch [e expr]
+      (case [(* syntax/IndexExpr)]
+        (set! selOrIdent (.-X e)))
+      (case [(* syntax/SelectorExpr) (* syntax/Name)]
+        (set! selOrIdent e)))
+
+    (type-switch [x selOrIdent]
+      (case [(* syntax/Name)]
+        (return x))
+      (case [(* syntax/SelectorExpr)]
+        (return (.-Sel x))))
+
+
+    ;; extra debugging of go.dev/issue/63933
+    (panic (sprintf nil true "instantiated ident not found; please report: %s" expr))))

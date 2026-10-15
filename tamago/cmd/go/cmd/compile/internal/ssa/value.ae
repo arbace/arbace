@@ -1,0 +1,678 @@
+;; Copyright 2015 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.cmd.compile.internal.ssa) (go/file "value.go" :imports [
+
+
+    ^{:line 8} [ir "cmd/compile/internal/ir"]
+    ^{:line 9} [types "cmd/compile/internal/types"]
+    ^{:line 10} [src "cmd/internal/src"]
+    ^{:line 11} [fmt "fmt"]
+    ^{:line 12} [buildcfg "internal/buildcfg"]
+    ^{:line 13} [math "math"]
+    ^{:line 14} [sort "sort"]
+    ^{:line 15} [strings "strings"]])
+
+
+
+
+
+(go/type Value "A Value represents a value in the SSA representation of the program.\nThe ID and Type fields must not be modified. The remainder may be modified\nif they preserve the value of the Value (e.g. changing a (mul 2 x) to an (add x x)).\n" (struct
+
+
+    ^{:line 24 :tag ID :doc "A unique identifier for the value. For performance we allocate these IDs\ndensely starting at 1.  There is no guarantee that there won't be occasional holes, though.\n"} ID
+
+
+    ^{:line 27 :tag Op :doc "The operation that computes this value. See op.go.\n"} Op
+
+
+
+    ^{:line 31 :tag (* types/Type) :doc "The type of this value. Normally this will be a Go type, but there\nare a few other pseudo-types, see ../types/type.go.\n"} Type
+
+
+
+
+
+
+
+
+    ^{:line 40 :tag int64 :doc "Auxiliary info for this value. The type of this information depends on the opcode and type.\nAuxInt is used for integer values, Aux is used for other values.\nFloats are stored in AuxInt using math.Float64bits(f).\nUnused portions of AuxInt are filled by sign-extending the used portion,\neven if the represented value is unsigned.\nUsers of AuxInt which interpret AuxInt as unsigned (e.g. shifts) must be careful.\nUse Value.AuxUnsigned to get the zero-extended value of AuxInt.\n"} AuxInt
+    ^{:line 41 :tag Aux} Aux
+
+
+    ^{:line 44 :tag (slice (* Value)) :doc "Arguments of this value\n"} Args
+
+
+    ^{:line 47 :tag (* Block) :doc "Containing basic block\n"} Block
+
+
+    ^{:line 50 :tag src/XPos :doc "Source position\n"} Pos
+
+
+    ^{:line 53 :tag int32 :doc "Use count. Each appearance in Value.Args and Block.Controls counts once.\n"} Uses
+
+
+
+    ^{:line 57 :tag bool :doc "wasm: Value stays on the WebAssembly stack. This value will not get a \"register\" (WebAssembly variable)\nnor a slot on Go stack, and the generation of this value is delayed to its use time.\n"} OnWasmStack
+
+
+    ^{:line 60 :tag bool :doc "Is this value in the per-function constant cache? If so, remove from cache before changing it or recycling it.\n"} InCache
+
+
+    ^{:line 63 :tag (array 3 (* Value)) :doc "Storage for the first three args\n"} argstorage))
+
+
+;; Examples:
+;; Opcode          aux   args
+;;  OpAdd          nil      2
+;;  OpConst     string      0    string constant
+;;  OpConst      int64      0    int64 constant
+;;  OpAddcq      int64      1    amd64 op: v = arg[0] + constant
+
+
+^{:go/end 79} (go/method String "short form print. Just v#.\n" ^string [^{:tag (* Value)} v]
+  (when (== v nil)
+    (return "nil")) ; should never happen, but not panicking helps with debugging
+
+  (fmt/Sprintf "v%d" (.-ID v)))
+
+
+^{:go/end 86} (go/method AuxInt8 ^int8 [^{:tag (* Value)} v]
+  (when (and (!= (.-auxType (aget opcodeTable (.-Op v))) auxInt8) (!= (.-auxType (aget opcodeTable (.-Op v))) auxNameOffsetInt8))
+    (.Fatalf v "op %s doesn't have an int8 aux field" (.-Op v)))
+
+  (conv int8 (.-AuxInt v)))
+
+
+^{:go/end 93} (go/method AuxUInt8 ^uint8 [^{:tag (* Value)} v]
+  (when (!= (.-auxType (aget opcodeTable (.-Op v))) auxUInt8)
+    (.Fatalf v "op %s doesn't have a uint8 aux field" (.-Op v)))
+
+  (conv uint8 (.-AuxInt v)))
+
+
+^{:go/end 100} (go/method AuxInt16 ^int16 [^{:tag (* Value)} v]
+  (when (!= (.-auxType (aget opcodeTable (.-Op v))) auxInt16)
+    (.Fatalf v "op %s doesn't have an int16 aux field" (.-Op v)))
+
+  (conv int16 (.-AuxInt v)))
+
+
+^{:go/end 107} (go/method AuxInt32 ^int32 [^{:tag (* Value)} v]
+  (when (!= (.-auxType (aget opcodeTable (.-Op v))) auxInt32)
+    (.Fatalf v "op %s doesn't have an int32 aux field" (.-Op v)))
+
+  (conv int32 (.-AuxInt v)))
+
+
+
+
+
+^{:go/end 126} (go/method AuxUnsigned "AuxUnsigned returns v.AuxInt as an unsigned value for OpConst*.\nv.AuxInt is always sign-extended to 64 bits, even if the\nrepresented value is unsigned. This undoes that sign extension.\n" ^uint64 [^{:tag (* Value)} v]
+  ^{:go/breaks [4]} (let [c (.-AuxInt v)]
+    (switch (.-Op v)
+      (case [OpConst64]
+        (return (conv uint64 c)))
+      (case [OpConst32]
+        (return (conv uint64 (conv uint32 c))))
+      (case [OpConst16]
+        (return (conv uint64 (conv uint16 c))))
+      (case [OpConst8]
+        (return (conv uint64 (conv uint8 c)))))
+
+    (.Fatalf v "op %s isn't OpConst*" (.-Op v))
+    0))
+
+
+^{:go/end 133} (go/method AuxFloat ^float64 [^{:tag (* Value)} v]
+  (when (and (!= (.-auxType (aget opcodeTable (.-Op v))) auxFloat32) (!= (.-auxType (aget opcodeTable (.-Op v))) auxFloat64))
+    (.Fatalf v "op %s doesn't have a float aux field" (.-Op v)))
+
+  (math/Float64frombits (conv uint64 (.-AuxInt v))))
+
+^{:go/end 139} (go/method AuxValAndOff ^ValAndOff [^{:tag (* Value)} v]
+  (when (!= (.-auxType (aget opcodeTable (.-Op v))) auxSymValAndOff)
+    (.Fatalf v "op %s doesn't have a ValAndOff aux field" (.-Op v)))
+
+  (conv ValAndOff (.-AuxInt v)))
+
+
+^{:go/end 146} (go/method AuxArm64BitField ^arm64BitField [^{:tag (* Value)} v]
+  (when (!= (.-auxType (aget opcodeTable (.-Op v))) auxARM64BitField)
+    (.Fatalf v "op %s doesn't have a ARM64BitField aux field" (.-Op v)))
+
+  (conv arm64BitField (.-AuxInt v)))
+
+
+^{:go/end 153} (go/method AuxArm64ConditionalParams ^arm64ConditionalParams [^{:tag (* Value)} v]
+  (when (!= (.-auxType (aget opcodeTable (.-Op v))) auxARM64ConditionalParams)
+    (.Fatalf v "op %s doesn't have a ARM64ConditionalParams aux field" (.-Op v)))
+
+  (auxIntToArm64ConditionalParams (.-AuxInt v)))
+
+
+
+^{:go/end 190} (go/method LongString "long form print.  v# = opcode <type> [aux] args [: reg] (names)\n" ^string [^{:tag (* Value)} v]
+  (when (== v nil)
+    (return "<NIL VALUE>"))
+
+  (let [s (fmt/Sprintf "v%d = %s" (.-ID v) (.-Op v))]
+    (set! s + (+ " <" (.String (.-Type v)) ">"))
+    (set! s + (.auxString v))
+    (range [_ a (.-Args v)]
+      (set! s + (fmt/Sprintf " %v" a)))
+
+    (when (== (.-Block v) nil)
+      (return s))
+
+    (let [r (.-RegAlloc (.-Func (.-Block v)))]
+      (when (and (< (conv int (.-ID v)) (len r)) (!= (aget r (.-ID v)) nil))
+        (set! s + (+ " : " (.String (aget r (.-ID v))))))
+
+      (when [reg (aget (.-tempRegs (.-Func (.-Block v))) (.-ID v))] (!= reg nil)
+        (set! s + (+ " tmp=" (.String reg))))
+
+      (let [^{:tag (slice string)} names (zero (slice string))]
+        (range [name values (.-NamedValues (.-Func (.-Block v)))]
+          (range [_ value values]
+            (when (== value v)
+              (set! names (append names (.String name)))
+              (break)))) ; drop duplicates.
+
+
+
+        (when (!= (len names) 0)
+          (sort/Strings names) ; Otherwise a source of variation in debugging output.
+          (set! s + (+ " (" (strings/Join names ", ") ")")))
+
+        ^{:line 189} s))))
+
+
+^{:go/end 259} (go/method auxString ^string [^{:tag (* Value)} v]
+  (switch (.-auxType (aget opcodeTable (.-Op v)))
+    (case [auxBool]
+      (if (== (.-AuxInt v) 0)
+        (return " [false]")
+
+        (return " [true]")))
+
+    (case [auxInt8]
+      (return (fmt/Sprintf " [%d]" (.AuxInt8 v))))
+    (case [auxInt16]
+      (return (fmt/Sprintf " [%d]" (.AuxInt16 v))))
+    (case [auxInt32]
+      (return (fmt/Sprintf " [%d]" (.AuxInt32 v))))
+    (case [auxInt64 auxInt128]
+      (return (fmt/Sprintf " [%d]" (.-AuxInt v))))
+    (case [auxUInt8]
+      (return (fmt/Sprintf " [%d]" (.AuxUInt8 v))))
+    (case [auxARM64BitField]
+      (let [lsb (.lsb (.AuxArm64BitField v))
+          ^{:line 212} width (.width (.AuxArm64BitField v))]
+        (return (fmt/Sprintf " [lsb=%d,width=%d]" lsb width))))
+    (case [auxARM64ConditionalParams]
+      (let [params (.AuxArm64ConditionalParams v)
+          ^{:line 216} cond (.Cond params)
+          ^{:line 217} nzcv (.Nzcv params)
+          (values imm ok) (.ConstValue params)]
+        (when ok
+          (return (fmt/Sprintf " [cond=%s,nzcv=%d,imm=%d]" cond nzcv imm)))
+
+        (return (fmt/Sprintf " [cond=%s,nzcv=%d]" cond nzcv))))
+    (case [auxFloat32 auxFloat64]
+      (return (fmt/Sprintf " [%g]" (.AuxFloat v))))
+    (case [auxString]
+      (return (fmt/Sprintf " {%q}" (.-Aux v))))
+    (case [auxSym auxCall auxTyp]
+      (when (!= (.-Aux v) nil)
+        (return (fmt/Sprintf " {%v}" (.-Aux v))))
+
+      (return ""))
+    (case [auxSymOff auxCallOff auxTypSize auxNameOffsetInt8]
+      (let [s ""]
+        (when (!= (.-Aux v) nil)
+          (set! s (fmt/Sprintf " {%v}" (.-Aux v))))
+
+        (when (or (!= (.-AuxInt v) 0) (== (.-auxType (aget opcodeTable (.-Op v))) auxNameOffsetInt8))
+          (set! s + (fmt/Sprintf " [%v]" (.-AuxInt v))))
+
+        (return s)))
+    (case [auxSymValAndOff]
+      (let [s ""]
+        (when (!= (.-Aux v) nil)
+          (set! s (fmt/Sprintf " {%v}" (.-Aux v))))
+
+        (return (+ s (fmt/Sprintf " [%s]" (.AuxValAndOff v))))))
+    (case [auxCCop]
+      (return (fmt/Sprintf " [%s]" (conv Op (.-AuxInt v)))))
+    (case [auxS390XCCMask auxS390XRotateParams]
+      (return (fmt/Sprintf " {%v}" (.-Aux v))))
+    (case [auxFlagConstant]
+      (return (fmt/Sprintf "[%s]" (conv flagConstant (.-AuxInt v)))))
+    (case [auxNone]
+      (return ""))
+    (default
+      ;; If you see this, add a case above instead.
+      (return (fmt/Sprintf "[auxtype=%d AuxInt=%d Aux=%v]" (.-auxType (aget opcodeTable (.-Op v))) (.-AuxInt v) (.-Aux v))))))
+
+
+
+
+
+
+
+^{:go/end 271} (go/method ^:go/noinline AddArg "If/when midstack inlining is enabled (-l=4), the compiler gets both larger and slower.\nNot-inlining this method is a help (*Value.reset and *Block.NewValue0 are similar).\n" [^{:tag (* Value)} v ^{:tag (* Value)} w]
+  (when (== (.-Args v) nil)
+    (.resetArgs v)) ; use argstorage
+
+  (set! (.-Args v) (append (.-Args v) w))
+  (inc! (.-Uses w)))
+
+
+
+^{:go/end 281} (go/method ^:go/noinline AddArg2 [^{:tag (* Value)} v ^{:tag (* Value)} w1 ^{:tag (* Value)} w2]
+  (when (== (.-Args v) nil)
+    (.resetArgs v)) ; use argstorage
+
+  (set! (.-Args v) (append (.-Args v) w1 w2))
+  (inc! (.-Uses w1))
+  (inc! (.-Uses w2)))
+
+
+
+^{:go/end 292} (go/method ^:go/noinline AddArg3 [^{:tag (* Value)} v ^{:tag (* Value)} w1 ^{:tag (* Value)} w2 ^{:tag (* Value)} w3]
+  (when (== (.-Args v) nil)
+    (.resetArgs v)) ; use argstorage
+
+  (set! (.-Args v) (append (.-Args v) w1 w2 w3))
+  (inc! (.-Uses w1))
+  (inc! (.-Uses w2))
+  (inc! (.-Uses w3)))
+
+
+
+^{:go/end 301} (go/method ^:go/noinline AddArg4 [^{:tag (* Value)} v ^{:tag (* Value)} w1 ^{:tag (* Value)} w2 ^{:tag (* Value)} w3 ^{:tag (* Value)} w4]
+  (set! (.-Args v) (append (.-Args v) w1 w2 w3 w4))
+  (inc! (.-Uses w1))
+  (inc! (.-Uses w2))
+  (inc! (.-Uses w3))
+  (inc! (.-Uses w4)))
+
+
+
+^{:go/end 311} (go/method ^:go/noinline AddArg5 [^{:tag (* Value)} v ^{:tag (* Value)} w1 ^{:tag (* Value)} w2 ^{:tag (* Value)} w3 ^{:tag (* Value)} w4 ^{:tag (* Value)} w5]
+  (set! (.-Args v) (append (.-Args v) w1 w2 w3 w4 w5))
+  (inc! (.-Uses w1))
+  (inc! (.-Uses w2))
+  (inc! (.-Uses w3))
+  (inc! (.-Uses w4))
+  (inc! (.-Uses w5)))
+
+
+
+^{:go/end 322} (go/method ^:go/noinline AddArg6 [^{:tag (* Value)} v ^{:tag (* Value)} w1 ^{:tag (* Value)} w2 ^{:tag (* Value)} w3 ^{:tag (* Value)} w4 ^{:tag (* Value)} w5 ^{:tag (* Value)} w6]
+  (set! (.-Args v) (append (.-Args v) w1 w2 w3 w4 w5 w6))
+  (inc! (.-Uses w1))
+  (inc! (.-Uses w2))
+  (inc! (.-Uses w3))
+  (inc! (.-Uses w4))
+  (inc! (.-Uses w5))
+  (inc! (.-Uses w6)))
+
+
+^{:go/end 332} (go/method AddArgs [^{:tag (* Value)} v & ^{:tag (slice (* Value))} a]
+  (when (== (.-Args v) nil)
+    (.resetArgs v)) ; use argstorage
+
+  (set! (.-Args v) (append (.-Args v) (spread a)))
+  (range [_ x a]
+    (inc! (.-Uses x))))
+
+
+^{:go/end 337} (go/method SetArg [^{:tag (* Value)} v ^int i ^{:tag (* Value)} w]
+  (dec! (.-Uses (aget (.-Args v) i)))
+  (aset (.-Args v) i w)
+  (inc! (.-Uses w)))
+
+^{:go/end 341} (go/method SetArgs1 [^{:tag (* Value)} v ^{:tag (* Value)} a]
+  (.resetArgs v)
+  (.AddArg v a))
+
+^{:go/end 346} (go/method SetArgs2 [^{:tag (* Value)} v ^{:tag (* Value)} a ^{:tag (* Value)} b]
+  (.resetArgs v)
+  (.AddArg v a)
+  (.AddArg v b))
+
+^{:go/end 352} (go/method SetArgs3 [^{:tag (* Value)} v ^{:tag (* Value)} a ^{:tag (* Value)} b ^{:tag (* Value)} c]
+  (.resetArgs v)
+  (.AddArg v a)
+  (.AddArg v b)
+  (.AddArg v c))
+
+^{:go/end 359} (go/method SetArgs4 [^{:tag (* Value)} v ^{:tag (* Value)} a ^{:tag (* Value)} b ^{:tag (* Value)} c ^{:tag (* Value)} d]
+  (.resetArgs v)
+  (.AddArg v a)
+  (.AddArg v b)
+  (.AddArg v c)
+  (.AddArg v d))
+
+
+^{:go/end 369} (go/method resetArgs [^{:tag (* Value)} v]
+  (range [_ a (.-Args v)]
+    (dec! (.-Uses a)))
+
+  (aset (.-argstorage v) 0 nil)
+  (aset (.-argstorage v) 1 nil)
+  (aset (.-argstorage v) 2 nil)
+  (set! (.-Args v) (subslice (.-argstorage v) _ 0)))
+
+
+
+
+
+
+
+^{:go/end 384} (go/method ^:go/noinline reset "reset is called from most rewrite rules.\nAllowing it to be inlined increases the size\nof cmd/compile by almost 10%, and slows it down.\n" [^{:tag (* Value)} v ^Op op]
+  (when (.-InCache v)
+    (.unCache (.-Func (.-Block v)) v))
+
+  (set! (.-Op v) op)
+  (.resetArgs v)
+  (set! (.-AuxInt v) 0)
+  (set! (.-Aux v) nil))
+
+
+
+
+
+
+
+
+
+
+^{:go/end 417} (go/method invalidateRecursively "invalidateRecursively marks a value as invalid (unused)\nand after decrementing reference counts on its Args,\nalso recursively invalidates any of those whose use\ncount goes to zero.  It returns whether any of the\ninvalidated values was marked with IsStmt.\n\nBEWARE of doing this *before* you've applied intended\nupdates to SSA.\n" ^bool [^{:tag (* Value)} v]
+  (let [lostStmt (== ^{:go/via [lico]} (.IsStmt (.-Pos v)) src/PosIsStmt)]
+    (when (.-InCache v)
+      (.unCache (.-Func (.-Block v)) v))
+
+    (set! (.-Op v) OpInvalid)
+
+    (range [_ a (.-Args v)]
+      (dec! (.-Uses a))
+      (when (== (.-Uses a) 0)
+        (let [lost (.invalidateRecursively a)]
+          (set! lostStmt (or lost lostStmt)))))
+
+
+
+    (aset (.-argstorage v) 0 nil)
+    (aset (.-argstorage v) 1 nil)
+    (aset (.-argstorage v) 2 nil)
+    (set! (.-Args v) (subslice (.-argstorage v) _ 0))
+
+    (set! (.-AuxInt v) 0)
+    (set! (.-Aux v) nil)
+    ^{:line 416} lostStmt))
+
+
+
+
+
+
+^{:go/end 436} (go/method ^:go/noinline copyOf "copyOf is called from rewrite rules.\nIt modifies v to be (Copy a).\n" [^{:tag (* Value)} v ^{:tag (* Value)} a]
+  (when (== v a)
+    (return))
+
+  (when (.-InCache v)
+    (.unCache (.-Func (.-Block v)) v))
+
+  (set! (.-Op v) OpCopy)
+  (.resetArgs v)
+  (.AddArg v a)
+  (set! (.-AuxInt v) 0)
+  (set! (.-Aux v) nil)
+  (set! (.-Type v) (.-Type a)))
+
+
+
+
+^{:go/end 451} (go/method copyInto "copyInto makes a new value identical to v and adds it to the end of b.\nunlike copyIntoWithXPos this does not check for v.Pos being a statement.\n" ^{:tag (* Value)} [^{:tag (* Value)} v ^{:tag (* Block)} b]
+  (let [c (.NewValue0 b (.WithNotStmt (.-Pos v)) (.-Op v) (.-Type v))] ; Lose the position, this causes line number churn otherwise.
+    (set! (.-Aux c) (.-Aux v))
+    (set! (.-AuxInt c) (.-AuxInt v))
+    (.AddArgs c (spread (.-Args v)))
+    (range [_ a (.-Args v)]
+      (when (.IsMemory (.-Type a))
+        (.Fatalf v "can't move a value with a memory arg %s" (.LongString v))))
+
+
+    ^{:line 450} c))
+
+
+
+
+
+
+
+
+^{:go/end 473} (go/method copyIntoWithXPos "copyIntoWithXPos makes a new value identical to v and adds it to the end of b.\nThe supplied position is used as the position of the new value.\nBecause this is used for rematerialization, check for case that (rematerialized)\ninput to value with position 'pos' carried a statement mark, and that the supplied\nposition (of the instruction using the rematerialized value) is not marked, and\npreserve that mark if its line matches the supplied position.\n" ^{:tag (* Value)} [^{:tag (* Value)} v ^{:tag (* Block)} b ^src/XPos pos]
+  (when (and (== ^{:go/via [lico]} (.IsStmt (.-Pos v)) src/PosIsStmt) (!= ^{:go/via [lico]} (.IsStmt pos) src/PosIsStmt) (.SameFileAndLine (.-Pos v) pos))
+    (set! pos (.WithIsStmt pos)))
+
+  (let [c (.NewValue0 b pos (.-Op v) (.-Type v))]
+    (set! (.-Aux c) (.-Aux v))
+    (set! (.-AuxInt c) (.-AuxInt v))
+    (.AddArgs c (spread (.-Args v)))
+    (range [_ a (.-Args v)]
+      (when (.IsMemory (.-Type a))
+        (.Fatalf v "can't move a value with a memory arg %s" (.LongString v))))
+
+
+    ^{:line 472} c))
+
+
+^{:go/end 475} (go/method Logf [^{:tag (* Value)} v ^string msg & ^{:tag (slice any)} args] (.Logf (.-Block v) msg (spread args)))
+^{:go/end 476} (go/method Log ^bool [^{:tag (* Value)} v] (.Log (.-Block v)))
+^{:go/end 479} (go/method Fatalf [^{:tag (* Value)} v ^string msg & ^{:tag (slice any)} args]
+  (.Fatalf (.-fe (.-Func (.-Block v))) (.-Pos v) msg (spread args)))
+
+
+
+^{:go/end 484} (go/method isGenericIntConst "isGenericIntConst reports whether v is a generic integer constant.\n" ^bool [^{:tag (* Value)} v]
+  (and (!= v nil) ^:go/paren (or (== (.-Op v) OpConst64) (== (.-Op v) OpConst32) (== (.-Op v) OpConst16) (== (.-Op v) OpConst8))))
+
+
+
+
+
+^{:go/end 501} (go/method ResultReg "ResultReg returns the result register assigned to v, in cmd/internal/obj/$ARCH numbering.\nIt is similar to Reg and Reg0, except that it is usable interchangeably for all Value Ops.\nIf you know v.Op, using Reg or Reg0 (as appropriate) will be more efficient.\n" ^int16 [^{:tag (* Value)} v]
+  (let [reg (aget (.-RegAlloc (.-Func (.-Block v))) (.-ID v))]
+    (when (== reg nil)
+      (.Fatalf v "nil reg for value: %s\n%s\n" (.LongString v) (.-Func (.-Block v))))
+
+    (when [(values pair ok) (assert LocPair reg)] ok
+      (set! reg (aget pair 0)))
+
+    (when (== reg nil)
+      (.Fatalf v "nil reg0 for value: %s\n%s\n" (.LongString v) (.-Func (.-Block v))))
+
+    (.-objNum (assert (* Register) reg))))
+
+
+
+^{:go/end 510} (go/method Reg "Reg returns the register assigned to v, in cmd/internal/obj/$ARCH numbering.\n" ^int16 [^{:tag (* Value)} v]
+  (let [reg (aget (.-RegAlloc (.-Func (.-Block v))) (.-ID v))]
+    (when (== reg nil)
+      (.Fatalf v "nil register for value: %s\n%s\n" (.LongString v) (.-Func (.-Block v))))
+
+    (.-objNum (assert (* Register) reg))))
+
+
+
+^{:go/end 519} (go/method Reg0 "Reg0 returns the register assigned to the first output of v, in cmd/internal/obj/$ARCH numbering.\n" ^int16 [^{:tag (* Value)} v]
+  (let [reg (aget (assert LocPair (aget (.-RegAlloc (.-Func (.-Block v))) (.-ID v))) 0)]
+    (when (== reg nil)
+      (.Fatalf v "nil first register for value: %s\n%s\n" (.LongString v) (.-Func (.-Block v))))
+
+    (.-objNum (assert (* Register) reg))))
+
+
+
+^{:go/end 528} (go/method Reg1 "Reg1 returns the register assigned to the second output of v, in cmd/internal/obj/$ARCH numbering.\n" ^int16 [^{:tag (* Value)} v]
+  (let [reg (aget (assert LocPair (aget (.-RegAlloc (.-Func (.-Block v))) (.-ID v))) 1)]
+    (when (== reg nil)
+      (.Fatalf v "nil second register for value: %s\n%s\n" (.LongString v) (.-Func (.-Block v))))
+
+    (.-objNum (assert (* Register) reg))))
+
+
+
+^{:go/end 537} (go/method RegTmp "RegTmp returns the temporary register assigned to v, in cmd/internal/obj/$ARCH numbering.\n" ^int16 [^{:tag (* Value)} v]
+  (let [reg (aget (.-tempRegs (.-Func (.-Block v))) (.-ID v))]
+    (when (== reg nil)
+      (.Fatalf v "nil tmp register for value: %s\n%s\n" (.LongString v) (.-Func (.-Block v))))
+
+    (.-objNum reg)))
+
+
+^{:go/end 545} (go/method RegName ^string [^{:tag (* Value)} v]
+  (let [reg (aget (.-RegAlloc (.-Func (.-Block v))) (.-ID v))]
+    (when (== reg nil)
+      (.Fatalf v "nil register for value: %s\n%s\n" (.LongString v) (.-Func (.-Block v))))
+
+    (.-name (assert (* Register) reg))))
+
+
+
+
+
+^{:go/end 562} (go/method MemoryArg "MemoryArg returns the memory argument for the Value.\nThe returned value, if non-nil, will be memory-typed (or a tuple with a memory-typed second part).\nOtherwise, nil is returned.\n" ^{:tag (* Value)} [^{:tag (* Value)} v]
+  (when (== (.-Op v) OpPhi)
+    (.Fatalf v "MemoryArg on Phi"))
+
+  ^{:go/breaks [[4 561]]} (let [na (len (.-Args v))]
+    (when (== na 0)
+      (return nil))
+
+    (when [m (aget (.-Args v) (- na 1))] (.IsMemory (.-Type m))
+      (return m))
+
+    nil))
+
+
+
+
+
+^{:go/end 573} (go/method LackingPos "LackingPos indicates whether v is a value that is unlikely to have a correct\nposition assigned to it.  Ignoring such values leads to more user-friendly positions\nassigned to nearby values and the blocks containing them.\n" ^bool [^{:tag (* Value)} v]
+  ;; The exact definition of LackingPos is somewhat heuristically defined and may change
+  ;; in the future, for example if some of these operations are generated more carefully
+  ;; with respect to their source position.
+  (or (== (.-Op v) OpVarDef) (== (.-Op v) OpVarLive) (== (.-Op v) OpPhi)
+    (and ^:go/paren (or (== (.-Op v) OpFwdRef) (== (.-Op v) OpCopy)) (== (.-Type v) types/TypeMem))))
+
+
+
+
+^{:go/breaks [[8 596]] :go/end 597} (go/method removeable "removeable reports whether the value v can be removed from the SSA graph entirely\nif its use count drops to 0.\n" ^bool [^{:tag (* Value)} v]
+  (when (.IsVoid (.-Type v))
+    ;; Void ops (inline marks), must stay.
+    (return false))
+
+  (when (.-nilCheck (aget opcodeTable (.-Op v)))
+    ;; Nil pointer checks must stay.
+    (return false))
+
+  (when (.IsMemory (.-Type v))
+    ;; We don't need to preserve all memory ops, but we do need
+    ;; to keep calls at least (because they might have
+    ;; synchronization operations we can't see).
+    (return false))
+
+  (when (.HasSideEffects (.-Op v))
+    ;; These are mostly synchronization operations.
+    (return false))
+
+  true)
+
+
+
+
+^{:go/end 611} (go/func AutoVar "AutoVar returns a *Name and int64 representing the auto variable and offset within it\nwhere v should be spilled.\n" [^{:tag (* Value)} v] :results [(* ir/Name) int64]
+  (when [(values loc ok) (assert LocalSlot (aget (.-RegAlloc (.-Func (.-Block v))) (.-ID v)))] ok
+    (when (> (.Size (.-Type v)) (.Size (.-Type loc)))
+      (.Fatalf v "v%d: spill/restore type %v doesn't fit in slot type %v" (.-ID v) (.-Type v) (.-Type loc)))
+
+    (return (.-N loc) (.-Off loc)))
+
+  ;; Assume it is a register, return its spill slot, which needs to be live
+  (let [nameOff (assert (* AuxNameOffset) (.-Aux v))]
+    (return (.-Name nameOff) (.-Offset nameOff))))
+
+
+
+^{:go/end 667} (go/func CanSSA "CanSSA reports whether values of type t can be represented as a Value.\n" ^bool [^{:tag (* types/Type)} t]
+  (types/CalcSize t)
+  (when (.IsSIMD t)
+    (return true))
+
+  (when (== (.Size t) 0)
+    (return true))
+
+  (let [sizeLimit (conv int64 (* MaxStruct types/PtrSize))]
+    (when (> (.Size t) sizeLimit)
+      ;; 4*Widthptr is an arbitrary constant. We want it
+      ;; to be at least 3*Widthptr so slices can be registerized.
+      ;; Too big and we'll introduce too much register pressure.
+      (when (not ^{:go/via [Flags]} (.-SIMD buildcfg/Experiment))
+        (return false)))
+
+
+    (switch (.Kind t)
+      (case [types/TARRAY]
+        ;; We can't do larger arrays because dynamic indexing is
+        ;; not supported on SSA variables.
+        ;; TODO: allow if all indexes are constant.
+        (when (<= (.NumElem t) 1)
+          (return (CanSSA (.Elem t))))
+
+        (return false))
+      (case [types/TSTRUCT]
+        (when (types/IsDirectIface t)
+          ;; Note: even if t.NumFields()>MaxStruct! See issue 77534.
+          (return true))
+
+        (when (> (.NumFields t) MaxStruct)
+          (return false))
+
+        (range [_ t1 (.Fields t)]
+          (when (not (CanSSA (.-Type t1)))
+            (return false)))
+
+
+        ;; Special check for SIMD. If the composite type
+        ;; contains SIMD vectors we can return true
+        ;; if it pass the checks below.
+        (when (not ^{:go/via [Flags]} (.-SIMD buildcfg/Experiment))
+          (return true))
+
+        (when (<= (.Size t) sizeLimit)
+          (return true))
+
+        (let [(values i f) (.Registers t)]
+          (return (<= (+ i f) MaxStruct))))
+      (default
+        (return true)))))
+
+
+
+
+
+^{:go/breaks [[6 678]] :go/end 679} (go/method AddrSinkArg "AddrSinkArg reports whether the idx'th argument is known\nto not propagate to the output value.\n" ^bool [^{:tag (* Value)} v ^int idx]
+  (when (== idx 0)
+    (return (.-addrSinkArg0 (aget opcodeTable (.-Op v)))))
+
+  (when (== idx 1)
+    (return (.-addrSinkArg1 (aget opcodeTable (.-Op v)))))
+
+  false)

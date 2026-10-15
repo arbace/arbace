@@ -1,0 +1,151 @@
+;; Copyright 2015 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.cmd.asm.internal.lex) (go/file "tokenizer.go" :imports [
+
+
+    ^{:line 8} [constraint "go/build/constraint"]
+    ^{:line 9} [io "io"]
+    ^{:line 10} [os "os"]
+    ^{:line 11} [strings "strings"]
+    ^{:line 12} [scanner "text/scanner"]
+    ^{:line 13} [unicode "unicode"]
+
+    ^{:line 15} [flags "cmd/asm/internal/flags"]
+    ^{:line 16} [objabi "cmd/internal/objabi"]
+    ^{:line 17} [src "cmd/internal/src"]])
+
+
+
+
+
+(go/type Tokenizer "A Tokenizer is a simple wrapping of text/scanner.Scanner, configured\nfor our purposes and made a TokenReader. It forms the lowest level,\nturning text from readers into tokens.\n" (struct
+    ^{:line 24 :tag ScanToken} tok
+    ^{:line 25 :tag (* scanner/Scanner)} s
+    ^{:line 26 :tag (* src/PosBase)} base
+    ^{:line 27 :tag int} line
+    ^{:line 28 :tag (* os/File)} file)) ; If non-nil, file descriptor to close.
+
+
+^{:go/end 51} (go/func NewTokenizer ^{:tag (* Tokenizer)} [^string name ^io/Reader r ^{:tag (* os/File)} file]
+  (let [^scanner/Scanner s (zero scanner/Scanner)]
+    (.Init s r)
+    ;; Newline is like a semicolon; other space characters are fine.
+    (set! (.-Whitespace s) (bit-or (<< 1 \tab) (<< 1 \return) (<< 1 \space)))
+    ;; Don't skip comments: we need to count newlines.
+    (set! (.-Mode s) (bit-or scanner/ScanChars
+        ^{:line 38} scanner/ScanFloats
+        ^{:line 39} scanner/ScanIdents
+        ^{:line 40} scanner/ScanInts
+        ^{:line 41} scanner/ScanStrings
+        ^{:line 42} scanner/ScanComments))
+    (set! (.-Filename (.-Position s)) name)
+    (set! (.-IsIdentRune s) isIdentRune)
+    (addr ^{:go/breaks [2 4 6 8]} (lit Tokenizer
+        :s (addr s)
+        :base (src/NewFileBase name (objabi/AbsFile (objabi/WorkingDir) name @flags/TrimPath))
+        :line 1
+        :file file))))
+
+
+
+
+^{:go/end 68} (go/func isIdentRune "We want center dot (·) and division slash (∕) to work as identifier characters.\n" ^bool [^rune ch ^int i]
+  (when (unicode/IsLetter ch)
+    (return true))
+
+  (switch ch
+    (case [\_] ; Underscore; traditional.
+      (return true))
+    (case [\·] ; Represents the period in runtime.exit. U+00B7 '·' middle dot
+      (return true))
+    (case [\∕] ; Represents the slash in runtime/debug.setGCPercent. U+2215 '∕' division slash
+      (return true)))
+
+  ;; Digits are OK only after the first character.
+  (and (> i 0) (unicode/IsDigit ch)))
+
+
+^{:go/end 82} (go/method Text ^string [^{:tag (* Tokenizer)} t]
+  (switch (.-tok t)
+    (case [LSH]
+      (return "<<"))
+    (case [RSH]
+      (return ">>"))
+    (case [ARR]
+      (return "->"))
+    (case [ROT]
+      (return "@>")))
+
+  (.TokenText (.-s t)))
+
+
+^{:go/end 86} (go/method File ^string [^{:tag (* Tokenizer)} t]
+  (.Filename (.-base t)))
+
+
+^{:go/end 90} (go/method Base ^{:tag (* src/PosBase)} [^{:tag (* Tokenizer)} t]
+  (.-base t))
+
+
+^{:go/end 94} (go/method SetBase [^{:tag (* Tokenizer)} t ^{:tag (* src/PosBase)} base]
+  (set! (.-base t) base))
+
+
+^{:go/end 98} (go/method Line ^int [^{:tag (* Tokenizer)} t]
+  (.-line t))
+
+
+^{:go/end 102} (go/method Col ^int [^{:tag (* Tokenizer)} t]
+  (.-Column (.Pos (.-s t))))
+
+
+^{:go/end 147} (go/method Next ^ScanToken [^{:tag (* Tokenizer)} t]
+  (let [s (.-s t)]
+    (while true
+      (set! (.-tok t) (conv ScanToken (.Scan s)))
+      (when (!= (.-tok t) scanner/Comment)
+        (break))
+
+      (let [text (.TokenText s)]
+        (set! (.-line t) + (strings/Count text "\n"))
+        (when (constraint/IsGoBuild text)
+          (set! (.-tok t) BuildComment)
+          (break))))
+
+
+    (switch (.-tok t)
+      (case [\newline]
+        (inc! (.-line t)))
+      (case [\-]
+        (when (== (.Peek s) \>)
+          (.Next s)
+          (set! (.-tok t) ARR)
+          (return ARR)))
+
+      (case [\@]
+        (when (== (.Peek s) \>)
+          (.Next s)
+          (set! (.-tok t) ROT)
+          (return ROT)))
+
+      (case [\<]
+        (when (== (.Peek s) \<)
+          (.Next s)
+          (set! (.-tok t) LSH)
+          (return LSH)))
+
+      (case [\>]
+        (when (== (.Peek s) \>)
+          (.Next s)
+          (set! (.-tok t) RSH)
+          (return RSH))))
+
+
+    (.-tok t)))
+
+
+^{:go/end 153} (go/method Close [^{:tag (* Tokenizer)} t]
+  (when (!= (.-file t) nil)
+    (.Close (.-file t))))

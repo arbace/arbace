@@ -1,0 +1,348 @@
+;; Copyright 2009 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.cmd.compile.internal.staticdata) (go/file "data.go" :imports [
+
+
+    ^{:line 8} [base64 "encoding/base64"]
+    ^{:line 9} [fmt "fmt"]
+    ^{:line 10} [constant "go/constant"]
+    ^{:line 11} [io "io"]
+    ^{:line 12} [os "os"]
+    ^{:line 13} [slices "slices"]
+    ^{:line 14} [strconv "strconv"]
+    ^{:line 15} [strings "strings"]
+    ^{:line 16} [sync "sync"]
+
+    ^{:line 18} [base "cmd/compile/internal/base"]
+    ^{:line 19} [ir "cmd/compile/internal/ir"]
+    ^{:line 20} [objw "cmd/compile/internal/objw"]
+    ^{:line 21} [types "cmd/compile/internal/types"]
+    ^{:line 22} [hash "cmd/internal/hash"]
+    ^{:line 23} [obj "cmd/internal/obj"]
+    ^{:line 24} [objabi "cmd/internal/objabi"]
+    ^{:line 25} [src "cmd/internal/src"]])
+
+
+
+
+^{:go/end 39} (go/func InitAddrOffset "InitAddrOffset writes the static name symbol lsym to n, it does not modify n.\nIt's the caller responsibility to make sure lsym is from ONAME/PEXTERN node.\n" [^{:tag (* ir/Name)} n ^int64 noff ^{:tag (* obj/LSym)} lsym ^int64 off]
+  (when (!= ^{:go/via [miniExpr miniNode]} (.Op n) ir/ONAME)
+    (base/Fatalf "InitAddr n op %v" ^{:go/via [miniExpr miniNode]} (.Op n)))
+
+  (when (== (.Sym n) nil)
+    (base/Fatalf "InitAddr nil n sym"))
+
+  (let [s (.Linksym n)]
+    (.WriteAddr s base/Ctxt noff types/PtrSize lsym off)))
+
+
+
+^{:go/end 44} (go/func InitAddr "InitAddr is InitAddrOffset, with offset fixed to 0.\n" [^{:tag (* ir/Name)} n ^int64 noff ^{:tag (* obj/LSym)} lsym]
+  (InitAddrOffset n noff lsym 0))
+
+
+
+
+^{:go/end 53} (go/func InitSlice "InitSlice writes a static slice symbol {lsym, lencap, lencap} to n+noff, it does not modify n.\nIt's the caller responsibility to make sure lsym is from ONAME node.\n" [^{:tag (* ir/Name)} n ^int64 noff ^{:tag (* obj/LSym)} lsym ^int64 lencap]
+  (let [s (.Linksym n)]
+    (.WriteAddr s base/Ctxt noff types/PtrSize lsym 0)
+    (.WriteInt s base/Ctxt (+ noff types/SliceLenOffset) types/PtrSize lencap)
+    (.WriteInt s base/Ctxt (+ noff types/SliceCapOffset) types/PtrSize lencap)))
+
+
+^{:go/end 60} (go/func InitSliceBytes [^{:tag (* ir/Name)} nam ^int64 off ^string s]
+  (when (!= ^{:go/via [miniExpr miniNode]} (.Op nam) ir/ONAME)
+    (base/Fatalf "InitSliceBytes %v" nam))
+
+  (InitSlice nam off (slicedata ^{:go/via [miniExpr miniNode]} (.Pos nam) s) (conv int64 (len s))))
+
+
+(go/const
+  ^{:line 63} [^{:val "go:string."} stringSymPrefix "go:string."]
+  ^{:line 64} [^{:val ".gostring.%d.%s"} stringSymPattern ".gostring.%d.%s"])
+
+
+
+
+^{:go/end 71} (go/func shortHashString "shortHashString converts the hash to a string for use with stringSymPattern.\nWe cut it to 16 bytes and then base64-encode to make it even smaller.\n" ^string [^{:tag (slice byte)} hash]
+  (.EncodeToString base64/StdEncoding (subslice hash _ 16)))
+
+
+
+
+^{:go/end 99} (go/func StringSym "StringSym returns a symbol containing the string s.\nThe symbol contains the string data, not a string header.\n" [^src/XPos pos ^string s] :results [^{:tag (* obj/LSym)} data]
+  (let [^string symname (zero string)]
+    (if (> (len s) 100)
+      ;; Huge strings are hashed to avoid long names in object files.
+      ;; Indulge in some paranoia by writing the length of s, too,
+      ;; as protection against length extension attacks.
+      ;; Same pattern is known to fileStringSym below.
+      (let [h (hash/New32)]
+        (io/WriteString h s)
+        (set! symname (fmt/Sprintf stringSymPattern (len s) (shortHashString (.Sum h nil)))))
+
+      ;; Small strings get named directly by their contents.
+      (set! symname (strconv/Quote s)))
+
+
+    (let [symdata (.Lookup base/Ctxt (+ stringSymPrefix symname))]
+      (when (not ^{:go/via [Attribute]} (.OnList symdata))
+        (let [off (dstringdata symdata 0 s pos "string")]
+          (objw/Global symdata (conv int32 off) (bit-or obj/DUPOK obj/RODATA obj/LOCAL))
+          ^{:go/via [Attribute]} (.Set symdata obj/AttrContentAddressable true)
+          (set! (.-Align symdata) 1)))
+
+
+      ^{:line 98} symdata)))
+
+
+
+
+
+^{:go/end 109} (go/func StringSymNoCommon "StringSymNoCommon is like StringSym, but produces a symbol that is not content-\naddressable. This symbol is not supposed to appear in the final binary, it is\nonly used to pass string arguments to the linker like R_USENAMEDMETHOD does.\n" [^string s] :results [^{:tag (* obj/LSym)} data]
+  (let [^obj/LSym nameSym (zero obj/LSym)]
+    (.WriteString nameSym base/Ctxt 0 (len s) s)
+    (objw/Global (addr nameSym) (conv int32 (len s)) obj/RODATA)
+    (addr nameSym)))
+
+
+
+
+(go/const ^{:val 2000000000 :doc "maxFileSize is the maximum file size permitted by the linker\n(see issue #9862).\n"} maxFileSize obj/MaxSymSize)
+
+
+
+
+
+
+
+
+^{:go/end 206} (go/func fileStringSym "fileStringSym returns a symbol for the contents and the size of file.\nIf readonly is true, the symbol shares storage with any literal string\nor other file with the same content and is placed in a read-only section.\nIf readonly is false, the symbol is a read-write copy separate from any other,\nfor use as the backing store of a []byte.\nThe content hash of file is copied into hashBytes. (If hash is nil, nothing is copied.)\nThe returned symbol contains the data itself, not a string header.\n" [^src/XPos pos ^string file ^bool readonly ^{:tag (slice byte)} hashBytes] :results [(* obj/LSym) int64 error]
+  (let [(values f err) (os/Open file)]
+    (when (!= err nil)
+      (return nil 0 err))
+
+    (defer (.Close f))
+    (let [(values info ^:assign err) (.Stat f)]
+      (when (!= err nil)
+        (return nil 0 err))
+
+      (when (not (.IsRegular (.Mode info)))
+        (return nil 0 (fmt/Errorf "not a regular file")))
+
+      (let [size (.Size info)]
+        (when (<= size (* 1 1024))
+          (let [(values data err) (io/ReadAll f)]
+            (when (!= err nil)
+              (return nil 0 err))
+
+            (when (!= (conv int64 (len data)) size)
+              (return nil 0 (fmt/Errorf "file changed between reads")))
+
+            (let [^{:tag (* obj/LSym)} sym (zero (* obj/LSym))]
+              (if readonly
+                (set! sym (StringSym pos (conv string data)))
+
+                (set! sym (slicedata pos (conv string data))))
+
+              (when (> (len hashBytes) 0)
+                (let [sum (hash/Sum32 data)]
+                  (copy hashBytes (subslice sum))))
+
+              (return sym size nil))))
+
+        (when (> size maxFileSize)
+          ;; ggloblsym takes an int32,
+          ;; and probably the rest of the toolchain
+          ;; can't handle such big symbols either.
+          ;; See golang.org/issue/9862.
+          (return nil 0 (fmt/Errorf "file too large (%d bytes > %d bytes)" size maxFileSize)))
+
+
+        ;; File is too big to read and keep in memory.
+        ;; Compute hashBytes if needed for read-only content hashing or if the caller wants it.
+        (let [^{:tag (slice byte)} sum (zero (slice byte))]
+          (when (or readonly (> (len hashBytes) 0))
+            (let [h (hash/New32)
+                (values n err) (io/Copy h f)]
+              (when (!= err nil)
+                (return nil 0 err))
+
+              (when (!= n size)
+                (return nil 0 (fmt/Errorf "file changed between reads")))
+
+              (set! sum (.Sum h nil))
+              (copy hashBytes sum)))
+
+
+          (let [^{:tag (* obj/LSym)} symdata (zero (* obj/LSym))]
+            (if readonly
+              (let [symname (fmt/Sprintf stringSymPattern size (shortHashString sum))]
+                (set! symdata (.Lookup base/Ctxt (+ stringSymPrefix symname)))
+                (when (not ^{:go/via [Attribute]} (.OnList symdata))
+                  (let [info (.NewFileInfo symdata)]
+                    (set! (.-Name info) file)
+                    (set! (.-Size info) size)
+                    (objw/Global symdata (conv int32 size) (bit-or obj/DUPOK obj/RODATA obj/LOCAL))
+                    (set! (.-Align symdata) 1))))
+              ;; Note: AttrContentAddressable cannot be set here,
+              ;; because the content-addressable-handling code
+              ;; does not know about file symbols.
+
+              (do
+                ;; Emit a zero-length data symbol
+                ;; and then fix up length and content to use file.
+                (set! symdata (slicedata pos ""))
+                (set! (.-Size symdata) size)
+                (set! (.-Type symdata) objabi/SNOPTRDATA)
+                (let [info (.NewFileInfo symdata)]
+                  (set! (.-Name info) file)
+                  (set! (.-Size info) size))))
+
+
+            (return symdata size nil)))))))
+
+
+(go/var ^int slicedataGen)
+
+^{:go/end 219} (go/func slicedata ^{:tag (* obj/LSym)} [^src/XPos pos ^string s]
+  (inc! slicedataGen)
+  (let [symname (fmt/Sprintf ".gobytes.%d" slicedataGen)
+      ^{:line 213} lsym (.LinksymABI (.Lookup types/LocalPkg symname) obj/ABI0)
+      ^{:line 214} off (dstringdata lsym 0 s pos "slice")]
+    (objw/Global lsym (conv int32 off) (bit-or obj/NOPTR obj/LOCAL))
+    (set! (.-Align lsym) 1)
+
+    ^{:line 218} lsym))
+
+
+^{:go/end 232} (go/func dstringdata ^int [^{:tag (* obj/LSym)} s ^int off ^string t ^src/XPos pos ^string what]
+  ;; Objects that are too large will cause the data section to overflow right away,
+  ;; causing a cryptic error message by the linker. Check for oversize objects here
+  ;; and provide a useful error message instead.
+  (when (> (conv int64 (len t)) 2.0E9)
+    (base/ErrorfAt pos 0 "%v with length %v is too big" what (len t))
+    (return 0))
+
+
+  (.WriteString s base/Ctxt (conv int64 off) (len t) t)
+  (+ off (len t)))
+
+
+(go/var
+  ^{:line 235} [^sync/Mutex funcsymsmu] ; protects funcsyms and associated package lookups (see func funcsym)
+  ^{:line 236} [^{:tag (slice (* ir/Name))} funcsyms]) ; functions that need function value symbols
+
+
+
+^{:go/end 261} (go/func FuncLinksym "FuncLinksym returns n·f, the function value symbol for n.\n" ^{:tag (* obj/LSym)} [^{:tag (* ir/Name)} n]
+  (when (or (!= ^{:go/via [miniExpr miniNode]} (.Op n) ir/ONAME) (!= (.-Class n) ir/PFUNC))
+    (base/Fatalf "expected func name: %v" n))
+
+  (let [s (.Sym n)]
+
+    ;; funcsymsmu here serves to protect not just mutations of funcsyms (below),
+    ;; but also the package lookup of the func sym name,
+    ;; since this function gets called concurrently from the backend.
+    ;; There are no other concurrent package lookups in the backend,
+    ;; except for the types package, which is protected separately.
+    ;; Reusing funcsymsmu to also cover this package lookup
+    ;; avoids a general, broader, expensive package lookup mutex.
+    (.Lock funcsymsmu)
+    (let [(values sf existed) (.LookupOK (.-Pkg s) (ir/FuncSymName s))]
+      (when (not existed)
+        (set! funcsyms (append funcsyms n)))
+
+      (.Unlock funcsymsmu)
+
+      (.Linksym sf))))
+
+
+^{:go/end 268} (go/func GlobalLinksym ^{:tag (* obj/LSym)} [^{:tag (* ir/Name)} n]
+  (when (or (!= ^{:go/via [miniExpr miniNode]} (.Op n) ir/ONAME) (!= (.-Class n) ir/PEXTERN))
+    (base/Fatalf "expected global variable: %v" n))
+
+  (.Linksym n))
+
+
+^{:go/end 294} (go/func WriteFuncSyms []
+  (^{:inst [(slice (* ir/Name)) (* ir/Name)]} slices/SortFunc funcsyms ^{:go/end 273} (fn ^int [^{:tag (* ir/Name)} a ^{:tag (* ir/Name)} b]
+      (strings/Compare (.-Name (.Linksym a)) (.-Name (.Linksym b)))))
+
+  (range [_ nam funcsyms]
+    (let [s (.Sym nam)
+        ^{:line 276} sf (.Linksym (.Lookup (.-Pkg s) (ir/FuncSymName s)))]
+
+      ;; While compiling package runtime, we might try to create
+      ;; funcsyms for functions from both types.LocalPkg and
+      ;; ir.Pkgs.Runtime.
+      (when (and (.-CompilingRuntime base/Flag) ^{:go/via [Attribute]} (.OnList sf))
+        (continue))
+
+
+      ;; Function values must always reference ABIInternal
+      ;; entry points.
+      (let [target (.Linksym s)]
+        (when (!= ^{:go/via [Attribute]} (.ABI target) obj/ABIInternal)
+          (base/Fatalf "expected ABIInternal: %v has %v" target ^{:go/via [Attribute]} (.ABI target)))
+
+        (objw/SymPtr sf 0 target 0)
+        (objw/Global sf (conv int32 types/PtrSize) (bit-or obj/DUPOK obj/RODATA))))))
+
+
+
+
+
+^{:go/end 350} (go/func InitConst "InitConst writes the static literal c to n.\nNeither n nor c is modified.\n" [^{:tag (* ir/Name)} n ^int64 noff ^ir/Node c ^int wid]
+  (when (!= ^{:go/via [miniExpr miniNode]} (.Op n) ir/ONAME)
+    (base/Fatalf "InitConst n op %v" ^{:go/via [miniExpr miniNode]} (.Op n)))
+
+  (when (== (.Sym n) nil)
+    (base/Fatalf "InitConst nil n sym"))
+
+  (when (== (.Op c) ir/ONIL)
+    (return))
+
+  (when (!= (.Op c) ir/OLITERAL)
+    (base/Fatalf "InitConst c op %v" (.Op c)))
+
+  (let [s (.Linksym n)]
+    (switch [u (.Val c)] (.Kind u)
+      (case [constant/Bool]
+        (let [i (conv int64 (obj/Bool2int (constant/BoolVal u)))]
+          (.WriteInt s base/Ctxt noff wid i)))
+
+      (case [constant/Int]
+        (.WriteInt s base/Ctxt noff wid (ir/IntVal (.Type c) u)))
+
+      (case [constant/Float]
+        (let [(values f _) (constant/Float64Val u)]
+          (switch (.Kind (.Type c))
+            (case [types/TFLOAT32]
+              (.WriteFloat32 s base/Ctxt noff (conv float32 f)))
+            (case [types/TFLOAT64]
+              (.WriteFloat64 s base/Ctxt noff f)))))
+
+
+      (case [constant/Complex]
+        (let [(values re _) (constant/Float64Val (constant/Real u))
+            (values im _) (constant/Float64Val (constant/Imag u))]
+          (switch (.Kind (.Type c))
+            (case [types/TCOMPLEX64]
+              (.WriteFloat32 s base/Ctxt noff (conv float32 re))
+              (.WriteFloat32 s base/Ctxt (+ noff 4) (conv float32 im)))
+            (case [types/TCOMPLEX128]
+              (.WriteFloat64 s base/Ctxt noff re)
+              (.WriteFloat64 s base/Ctxt (+ noff 8) im)))))
+
+
+      (case [constant/String]
+        (let [i (constant/StringVal u)
+            ^{:line 343} symdata (StringSym ^{:go/via [miniExpr miniNode]} (.Pos n) i)]
+          (.WriteAddr s base/Ctxt noff types/PtrSize symdata 0)
+          (.WriteInt s base/Ctxt (+ noff (conv int64 types/PtrSize)) types/PtrSize (conv int64 (len i)))))
+
+      (default
+        (base/Fatalf "InitConst unhandled OLITERAL %v" c)))))

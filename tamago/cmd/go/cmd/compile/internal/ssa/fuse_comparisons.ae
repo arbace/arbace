@@ -1,0 +1,275 @@
+;; Copyright 2019 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.cmd.compile.internal.ssa) (go/file "fuse_comparisons.go" :imports [])
+
+
+
+
+^{:go/end 12} (go/func fuseIntInRange "fuseIntInRange transforms integer range checks to remove the short-circuit operator. For example,\nit would convert `if 1 <= x && x < 5 { ... }` into `if (1 <= x) & (x < 5) { ... }`. Rewrite rules\ncan then optimize these into unsigned range checks, `if unsigned(x-1) < 4 { ... }` in this case.\n" ^bool [^{:tag (* Block)} b]
+  (fuseComparisons b canOptIntInRange))
+
+
+
+
+
+
+^{:go/end 20} (go/func fuseNanCheck "fuseNanCheck replaces the short-circuit operators between NaN checks and comparisons with\nconstants. For example, it would transform `if x != x || x > 1.0 { ... }` into\n`if (x != x) | (x > 1.0) { ... }`. Rewrite rules can then merge the NaN check with the comparison,\nin this case generating `if !(x <= 1.0) { ... }`.\n" ^bool [^{:tag (* Block)} b]
+  (fuseComparisons b canOptNanCheck))
+
+
+
+
+
+
+^{:go/end 28} (go/func fuseSingleBitDifference "fuseSingleBitDifference replaces the short-circuit operators between equality checks with\nconstants that only differ by a single bit. For example, it would convert\n`if x == 4 || x == 6 { ... }` into `if (x == 4) | (x == 6) { ... }`. Rewrite rules can\nthen optimize these using a bitwise operation, in this case generating `if x|2 == 6 { ... }`.\n" ^bool [^{:tag (* Block)} b]
+  (fuseComparisons b canOptSingleBitDifference))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 117} (go/func fuseComparisons "fuseComparisons looks for control graphs that match this pattern:\n\n\tp - predecessor\n\t|\\\n\t| b - block\n\t|/ \\\n\ts0 s1 - successors\n\nThis pattern is typical for if statements such as `if x || y { ... }` and `if x && y { ... }`.\n\nIf canOptControls returns true when passed the control values for p and b then fuseComparisons\nwill try to convert p into a plain block with only one successor (b) and modify b's control\nvalue to include p's control value (effectively causing b to be speculatively executed).\n\nThis transformation results in a control graph that will now look like this:\n\n\tp\n\t \\\n\t  b\n\t / \\\n\ts0 s1\n\nLater passes will then fuse p and b.\n\nIn other words `if x || y { ... }` will become `if x | y { ... }` and `if x && y { ... }` will\nbecome `if x & y { ... }`. This is a useful transformation because we can then use rewrite\nrules to optimize `x | y` and `x & y`.\n" ^bool [^{:tag (* Block)} b ^{:tag (func [^{:tag (* Value)} a ^{:tag (* Value)} b ^Op op] [bool])} canOptControls]
+  (when (!= (len (.-Preds b)) 1)
+    (return false))
+
+  ^{:go/breaks [[6 116]]} (let [p (.Block (aget (.-Preds b) 0))]
+    (when (or (!= (.-Kind b) BlockIf) (!= (.-Kind p) BlockIf))
+      (return false))
+
+
+    ;; Don't merge control values if b is likely to be bypassed anyway.
+    (when (and (== (.-Likely p) BranchLikely) (!= (.Block (aget (.-Succs p) 0)) b))
+      (return false))
+
+    (when (and (== (.-Likely p) BranchUnlikely) (!= (.Block (aget (.-Succs p) 1)) b))
+      (return false))
+
+
+    ;; If the first (true) successors match then we have a disjunction (||).
+    ;; If the second (false) successors match then we have a conjunction (&&).
+    (range [i op (lit (array 2 Op) OpOrB OpAndB)]
+      (when (!= (.Block (aget (.-Succs p) i)) (.Block (aget (.-Succs b) i)))
+        (continue))
+
+
+      ;; Check if the control values can be usefully combined.
+      (let [bc (aget (.-Controls b) 0)
+          ^{:line 83} pc (aget (.-Controls p) 0)]
+        (when (not (canOptControls bc pc op))
+          (return false))
+
+
+        ;; TODO(mundaym): should we also check the cost of executing b?
+        ;; Currently we might speculatively execute b even if b contains
+        ;; a lot of instructions. We could just check that len(b.Values)
+        ;; is lower than a fixed amount. Bear in mind however that the
+        ;; other optimization passes might yet reduce the cost of b
+        ;; significantly so we shouldn't be overly conservative.
+        (when (not (canSpeculativelyExecute b))
+          (return false))
+
+
+        ;; Logically combine the control values for p and b.
+        (let [v (.NewValue0 b (.-Pos bc) op (.-Type bc))]
+          (.AddArg v pc)
+          (.AddArg v bc)
+
+          ;; Set the combined control value as the control value for b.
+          (.SetControl b v)
+
+          ;; Modify p so that it jumps directly to b.
+          (.removeEdge p i)
+          (set! (.-Kind p) BlockPlain)
+          (set! (.-Likely p) BranchUnknown)
+          (.ResetControls p)
+
+          (return true))))
+
+
+    ;; TODO: could negate condition(s) to merge controls.
+    false))
+
+
+
+
+^{:go/breaks [[5 128]] :go/end 129} (go/func getConstIntArgIndex "getConstIntArgIndex returns the index of the first argument that is a\nconstant integer or -1 if no such argument exists.\n" ^int [^{:tag (* Value)} v]
+  (range [i a (.-Args v)]
+    (switch (.-Op a)
+      (case [OpConst8 OpConst16 OpConst32 OpConst64]
+        (return i))))
+
+
+  -1)
+
+
+
+
+^{:go/breaks [[5 139]] :go/end 140} (go/func isSignedInequality "isSignedInequality reports whether op represents the inequality < or ≤\nin the signed domain.\n" ^bool [^{:tag (* Value)} v]
+  (switch (.-Op v)
+    (case [OpLess64 OpLess32 OpLess16 OpLess8
+        ^{:line 136} OpLeq64 OpLeq32 OpLeq16 OpLeq8]
+      (return true)))
+
+  false)
+
+
+
+
+^{:go/breaks [[5 150]] :go/end 151} (go/func isUnsignedInequality "isUnsignedInequality reports whether op represents the inequality < or ≤\nin the unsigned domain.\n" ^bool [^{:tag (* Value)} v]
+  (switch (.-Op v)
+    (case [OpLess64U OpLess32U OpLess16U OpLess8U
+        ^{:line 147} OpLeq64U OpLeq32U OpLeq16U OpLeq8U]
+      (return true)))
+
+  false)
+
+
+^{:go/end 182} (go/func canOptIntInRange ^bool [^{:tag (* Value)} x ^{:tag (* Value)} y ^Op op]
+  ;; We need both inequalities to be either in the signed or unsigned domain.
+  ;; TODO(mundaym): it would also be good to merge when we have an Eq op that
+  ;; could be transformed into a Less/Leq. For example in the unsigned
+  ;; domain 'x == 0 || 3 < x' is equivalent to 'x <= 0 || 3 < x'
+  ^{:go/breaks [[3 181]]} (let [inequalityChecks (lit (array ... (func [(* Value)] [bool]))
+        ^{:line 159} isSignedInequality
+        ^{:line 160} isUnsignedInequality)]
+
+    (range [_ f inequalityChecks]
+      (when (or (not (f x)) (not (f y)))
+        (continue))
+
+
+      ;; Check that both inequalities are comparisons with constants.
+      (let [xi (getConstIntArgIndex x)]
+        (when (< xi 0)
+          (return false))
+
+        (let [yi (getConstIntArgIndex y)]
+          (when (< yi 0)
+            (return false))
+
+
+          ;; Check that the non-constant arguments to the inequalities
+          ;; are the same.
+          (return (== (aget (.-Args x) (bit-xor xi 1)) (aget (.-Args y) (bit-xor yi 1)))))))
+
+    false))
+
+
+
+
+
+
+
+
+
+
+
+^{:go/breaks [[6 238]] :go/end 239} (go/func canOptNanCheck "canOptNanCheck reports whether one of arguments is a NaN check and the other\nis a comparison with a constant that can be combined together.\n\nExamples (c must be a constant):\n\n\tv != v || v <  c => !(c <= v)\n\tv != v || v <= c => !(c <  v)\n\tv != v || c <  v => !(v <= c)\n\tv != v || c <= v => !(v <  c)\n" ^bool [^{:tag (* Value)} x ^{:tag (* Value)} y ^Op op]
+  (when (!= op OpOrB)
+    (return false))
+
+
+  (for [i 0] (<= i 1) (set! (values i x y) (values (+ i 1) y x))
+    (when (or (!= (len (.-Args x)) 2) (!= (aget (.-Args x) 0) (aget (.-Args x) 1)))
+      (continue))
+
+    (let [v (aget (.-Args x) 0)]
+      (switch (.-Op x)
+        (case [OpNeq64F]
+          (when (and (!= (.-Op y) OpLess64F) (!= (.-Op y) OpLeq64F))
+            (return false))
+
+          (for [j 0] (<= j 1) (inc! j)
+            (let [(values a b) (values (aget (.-Args y) j) (aget (.-Args y) (bit-xor j 1)))]
+              (when (!= (.-Op a) OpConst64F)
+                (continue))
+
+              ;; Sign bit operations not affect NaN check results. This special case allows us
+              ;; to optimize statements like `if v != v || Abs(v) > c { ... }`.
+              (when (and ^:go/paren (or (== (.-Op b) OpAbs) (== (.-Op b) OpNeg64F)) (== (aget (.-Args b) 0) v))
+                (return true))
+
+              (return (== b v)))))
+
+        (case [OpNeq32F]
+          (when (and (!= (.-Op y) OpLess32F) (!= (.-Op y) OpLeq32F))
+            (return false))
+
+          (for [j 0] (<= j 1) (inc! j)
+            (let [(values a b) (values (aget (.-Args y) j) (aget (.-Args y) (bit-xor j 1)))]
+              (when (!= (.-Op a) OpConst32F)
+                (continue))
+
+              ;; Sign bit operations not affect NaN check results. This special case allows us
+              ;; to optimize statements like `if v != v || -v > c { ... }`.
+              (when (and (== (.-Op b) OpNeg32F) (== (aget (.-Args b) 0) v))
+                (return true))
+
+              (return (== b v))))))))
+
+
+
+  false)
+
+
+
+
+
+
+
+
+^{:go/end 276} (go/func canOptSingleBitDifference "canOptSingleBitDifference returns true if x op y matches either:\n\n\tv == c || v == d\n\tv != c && v != d\n\nWhere c and d are constant values that differ by a single bit.\n" ^bool [^{:tag (* Value)} x ^{:tag (* Value)} y ^Op op]
+  (when (!= (.-Op x) (.-Op y))
+    (return false))
+
+  (switch (.-Op x)
+    (case [OpEq64 OpEq32 OpEq16 OpEq8]
+      (when (!= op OpOrB)
+        (return false)))
+
+    (case [OpNeq64 OpNeq32 OpNeq16 OpNeq8]
+      (when (!= op OpAndB)
+        (return false)))
+
+    (default
+      (return false)))
+
+
+  (let [xi (getConstIntArgIndex x)]
+    (when (< xi 0)
+      (return false))
+
+    (let [yi (getConstIntArgIndex y)]
+      (when (< yi 0)
+        (return false))
+
+      (when (!= (aget (.-Args x) (bit-xor xi 1)) (aget (.-Args y) (bit-xor yi 1)))
+        (return false))
+
+      (^{:inst [int64]} oneBit (bit-xor (.-AuxInt (aget (.-Args x) xi)) (.-AuxInt (aget (.-Args y) yi)))))))

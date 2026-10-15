@@ -1,0 +1,858 @@
+;; Copyright 2016 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.cmd.compile.internal.ssa) (go/file "writebarrier.go" :imports [
+
+
+    ^{:line 8} [reflectdata "cmd/compile/internal/reflectdata"]
+    ^{:line 9} [types "cmd/compile/internal/types"]
+    ^{:line 10} [obj "cmd/internal/obj"]
+    ^{:line 11} [objabi "cmd/internal/objabi"]
+    ^{:line 12} [src "cmd/internal/src"]
+    ^{:line 13} [fmt "fmt"]
+    ^{:line 14} [buildcfg "internal/buildcfg"]])
+
+
+
+
+
+
+
+
+(go/type ZeroRegion "A ZeroRegion records parts of an object which are known to be zero.\nA ZeroRegion only applies to a single memory state.\nEach bit in mask is set if the corresponding pointer-sized word of\nthe base object is known to be zero.\nIn other words, if mask & (1<<i) != 0, then [base+i*ptrSize, base+(i+1)*ptrSize)\nis known to be zero.\n" (struct
+    ^{:line 24 :tag (* Value)} base
+    ^{:line 25 :tag uint64} mask))
+
+
+
+
+^{:go/breaks [[5 34]] :go/end 35} (go/func mightBeHeapPointer "mightBeHeapPointer reports whether v might point to the heap.\nv must have pointer type.\n" ^bool [^{:tag (* Value)} v]
+  (when (IsGlobalAddr v)
+    (return false))
+
+  true)
+
+
+
+
+
+^{:go/end 79} (go/func mightContainHeapPointer "mightContainHeapPointer reports whether the data currently at addresses\n[ptr,ptr+size) might contain heap pointers. \"currently\" means at memory state mem.\nzeroes contains ZeroRegion data to help make that decision (see computeZeroMap).\n" ^bool [^{:tag (* Value)} ptr ^int64 size ^{:tag (* Value)} mem ^{:tag (map ID ZeroRegion)} zeroes]
+  (when (IsReadOnlyGlobalAddr ptr)
+    ;; The read-only globals section cannot contain any heap pointers.
+    (return false))
+
+
+  ;; See if we can prove that the queried memory is all zero.
+
+  ;; Find base pointer and offset. Hopefully, the base is the result of a new(T).
+  (let [^int64 off (zero int64)]
+    (while (== (.-Op ptr) OpOffPtr)
+      (set! off + (.-AuxInt ptr))
+      (set! ptr (aget (.-Args ptr) 0)))
+
+
+    (let [ptrSize (.-PtrSize (.-Config (.-Func (.-Block ptr))))]
+      (when (!= (% off ptrSize) 0)
+        (return true)) ; see issue 61187
+
+      (when (!= (% size ptrSize) 0)
+        (.Fatalf ptr "unaligned pointer write"))
+
+      (when (or (< off 0) (> (+ off size) (* 64 ptrSize)))
+        ;; memory range goes off end of tracked offsets
+        (return true))
+
+      (let [z (aget zeroes (.-ID mem))]
+        (when (!= ptr (.-base z))
+          ;; This isn't the object we know about at this memory state.
+          (return true))
+
+        ;; Mask of bits we're asking about
+        ^{:go/breaks [[3 78]]} (let [m (<< (- (<< (conv uint64 1) (/ size ptrSize)) 1) (/ off ptrSize))]
+
+          (when (== (bit-and (.-mask z) m) m)
+            ;; All locations are known to be zero, so no heap pointers.
+            (return false))
+
+          true)))))
+
+
+
+
+
+^{:go/end 118} (go/func needwb "needwb reports whether we need write barrier for store op v.\nv must be Store/Move/Zero.\nzeroes provides known zero information (keyed by ID of memory-type values).\n" ^bool [^{:tag (* Value)} v ^{:tag (map ID ZeroRegion)} zeroes]
+  (let [(values t ok) (assert (* types/Type) (.-Aux v))]
+    (when (not ok)
+      (.Fatalf v "store aux is not a type: %s" (.LongString v)))
+
+    (when (not (.HasPointers t))
+      (return false))
+
+    ^{:go/breaks [[5 117]]} (let [dst (aget (.-Args v) 0)]
+      (when (IsStackAddr dst)
+        (return false)) ; writes into the stack don't need write barrier
+
+      ;; If we're writing to a place that might have heap pointers, we need
+      ;; the write barrier.
+      (when (mightContainHeapPointer dst (.Size t) (.MemoryArg v) zeroes)
+        (return true))
+
+      ;; Lastly, check if the values we're writing might be heap pointers.
+      ;; If they aren't, we don't need a write barrier.
+      (switch (.-Op v)
+        (case [OpStore]
+          (when (not (mightBeHeapPointer (aget (.-Args v) 1)))
+            (return false)))
+
+        (case [OpZero]
+          (return false)) ; nil is not a heap pointer
+        (case [OpMove]
+          (when (not (mightContainHeapPointer (aget (.-Args v) 1) (.Size t) (aget (.-Args v) 2) zeroes))
+            (return false)))
+
+        (default
+          (.Fatalf v "store op unknown: %s" (.LongString v))))
+
+      true)))
+
+
+
+^{:go/end 123} (go/func needWBsrc "needWBsrc reports whether GC needs to see v when it is the source of a store.\n" ^bool [^{:tag (* Value)} v]
+  (not (IsGlobalAddr v)))
+
+
+
+
+^{:go/end 149} (go/func needWBdst "needWBdst reports whether GC needs to see what used to be in *ptr when ptr is\nthe target of a pointer store.\n" ^bool [^{:tag (* Value)} ptr ^{:tag (* Value)} mem ^{:tag (map ID ZeroRegion)} zeroes]
+  ;; Detect storing to zeroed memory.
+  (let [^int64 off (zero int64)]
+    (while (== (.-Op ptr) OpOffPtr)
+      (set! off + (.-AuxInt ptr))
+      (set! ptr (aget (.-Args ptr) 0)))
+
+    (let [ptrSize (.-PtrSize (.-Config (.-Func (.-Block ptr))))]
+      (when (!= (% off ptrSize) 0)
+        (return true)) ; see issue 61187
+
+      (when (or (< off 0) (>= off (* 64 ptrSize)))
+        ;; write goes off end of tracked offsets
+        (return true))
+
+      (let [z (aget zeroes (.-ID mem))]
+        (when (!= ptr (.-base z))
+          (return true))
+
+        ;; If destination is known to be zeroed, we don't need the write barrier
+        ;; to record the old value in *ptr.
+        (== (bit-and (>> (.-mask z) (conv uint (/ off ptrSize))) 1) 0)))))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 597} (go/func writebarrier "writebarrier pass inserts write barriers for store ops (Store, Move, Zero)\nwhen necessary (the condition above). It rewrites store ops to branches\nand runtime calls, like\n\n\tif writeBarrier.enabled {\n\t\tbuf := gcWriteBarrier2()\t// Not a regular Go call\n\t\tbuf[0] = val\n\t\tbuf[1] = *ptr\n\t}\n\t*ptr = val\n\nA sequence of WB stores for many pointer fields of a single type will\nbe emitted together, with a single branch.\n" [^{:tag (* Func)} f]
+  (when (not (.UseWriteBarrier (.-fe f)))
+    (return))
+
+
+  ;; Number of write buffer entries we can request at once.
+  ;; Must match runtime/mwbbuf.go:wbMaxEntriesPerCall.
+  ;; It must also match the number of instances of runtime.gcWriteBarrier{X}.
+  (let [^:const ^{:val 8} maxEntries 8
+
+      (values ^{:tag (* Value)} sb ^{:tag (* Value)} sp ^{:tag (* Value)} wbaddr ^{:tag (* Value)} const0) (zero (* Value))
+      (values ^{:tag (* obj/LSym)} cgoCheckPtrWrite ^{:tag (* obj/LSym)} cgoCheckMemmove) (zero (* obj/LSym))
+      (values ^{:tag (* obj/LSym)} wbZero ^{:tag (* obj/LSym)} wbMove) (zero (* obj/LSym))
+      (values ^{:tag (slice (* Value))} stores ^{:tag (slice (* Value))} after) (zero (slice (* Value)))
+      (values ^{:tag (* sparseSet)} sset ^{:tag (* sparseSet)} sset2) (zero (* sparseSet))
+      ^{:line 179 :tag (slice int32)} storeNumber (zero (slice int32))
+
+      ;; Compute map from a value to the SelectN [1] value that uses it.
+      ^{:line 182} select1 (.allocValueSlice (.-Cache f) (.NumValues f))]
+    (defer (^{:go/end 183} (fn [] (.freeValueSlice (.-Cache f) select1))))
+    (range [_ b (.-Blocks f)]
+      (range [_ v (.-Values b)]
+        (when (!= (.-Op v) OpSelectN)
+          (continue))
+
+        (when (!= (.-AuxInt v) 1)
+          (continue))
+
+        (aset select1 (.-ID (aget (.-Args v) 0)) v)))
+
+
+
+    (let [zeroes (.computeZeroMap f select1)]
+      (range [_ b (.-Blocks f)] ; range loop is safe since the blocks we added contain no stores to expand
+        ;; first, identify all the stores that need to insert a write barrier.
+        ;; mark them with WB ops temporarily. record presence of WB ops.
+        (let [nWBops 0] ; count of temporarily created WB ops remaining to be rewritten in the current block
+          (range [_ v (.-Values b)]
+            (switch (.-Op v)
+              (case [OpStore OpMove OpZero]
+                (when (needwb v zeroes)
+                  (switch (.-Op v)
+                    (case [OpStore]
+                      (set! (.-Op v) OpStoreWB))
+                    (case [OpMove]
+                      (set! (.-Op v) OpMoveWB))
+                    (case [OpZero]
+                      (set! (.-Op v) OpZeroWB)))
+
+                  (inc! nWBops)))))
+
+
+
+          (when (== nWBops 0)
+            (continue))
+
+
+          (when (== wbaddr nil)
+            ;; lazily initialize global values for write barrier test and calls
+            ;; find SB and SP values in entry block
+            (let [initpos (.-Pos (.-Entry f))]
+              (set! (values sp sb) (.spSb f))
+              (let [wbsym (.Syslook (.-fe f) "writeBarrier")]
+                (set! wbaddr (.NewValue1A (.-Entry f) initpos OpAddr (.-UInt32Ptr (.-Types (.-Config f))) wbsym sb))
+                (set! wbZero (.Syslook (.-fe f) "wbZero"))
+                (set! wbMove (.Syslook (.-fe f) "wbMove"))
+                (when ^{:go/via [Flags]} (.-CgoCheck2 buildcfg/Experiment)
+                  (set! cgoCheckPtrWrite (.Syslook (.-fe f) "cgoCheckPtrWrite"))
+                  (set! cgoCheckMemmove (.Syslook (.-fe f) "cgoCheckMemmove")))
+
+                (set! const0 (.ConstInt32 f (.-UInt32 (.-Types (.-Config f))) 0))
+
+                ;; allocate auxiliary data structures for computing store order
+                (set! sset (.newSparseSet f (.NumValues f)))
+                (defer (.retSparseSet f sset))
+                (set! sset2 (.newSparseSet f (.NumValues f)))
+                (defer (.retSparseSet f sset2))
+                (set! storeNumber (.allocInt32Slice (.-Cache f) (.NumValues f)))
+                (defer (.freeInt32Slice (.-Cache f) storeNumber)))))
+
+
+          ;; order values in store order
+          (set! (.-Values b) (storeOrder (.-Values b) sset storeNumber))
+          (let [
+              ;; find the start and end of the last contiguous WB store sequence.
+              ;; a branch will be inserted there. values after it will be moved
+              ;; to a new block.
+              ^{:line 251 :tag (* Value) :go/label :again :go/label-line 247} last (zero (* Value))
+              (values ^int start ^int end) (zero int)
+              ^{:line 253 :tag int} nonPtrStores (zero int)
+              ^{:line 254} values (.-Values b)
+              ^{:line 255} hasMove false]
+            (label :FindSeq
+              (for [i (- (len values) 1)] (>= i 0) (dec! i)
+                (let [w (aget values i)]
+                  (switch (.-Op w)
+                    (case [OpStoreWB OpMoveWB OpZeroWB]
+                      (set! start i)
+                      (when (== last nil)
+                        (set! last w)
+                        (set! end (+ i 1)))
+
+                      (set! nonPtrStores 0)
+                      (when (== (.-Op w) OpMoveWB)
+                        (set! hasMove true)))
+
+                    (case [OpVarDef OpVarLive]
+                      (continue))
+                    (case [OpStore]
+                      (when (== last nil)
+                        (continue))
+
+                      (inc! nonPtrStores)
+                      (when (> nonPtrStores 2)
+                        (break :FindSeq))
+
+                      (when hasMove
+                        ;; We need to ensure that this store happens
+                        ;; before we issue a wbMove, as the wbMove might
+                        ;; use the result of this store as its source.
+                        ;; Even though this store is not write-barrier
+                        ;; eligible, it might nevertheless be the store
+                        ;; of a pointer to the stack, which is then the
+                        ;; source of the move.
+                        ;; See issue 71228.
+                        (break :FindSeq)))
+
+                    (default
+                      (when (== last nil)
+                        (continue))
+
+                      (break :FindSeq))))))
+
+
+            (set! stores (append (subslice stores _ 0) (spread (subslice (.-Values b) start end)))) ; copy to avoid aliasing
+            (set! after (append (subslice after _ 0) (spread (subslice (.-Values b) end))))
+            (set! (.-Values b) (subslice (.-Values b) _ start))
+
+            ;; find the memory before the WB stores
+            (let [mem (.MemoryArg (aget stores 0))
+                ^{:line 304} pos (.-Pos (aget stores 0))
+
+                ;; If there is a nil check before the WB store, duplicate it to
+                ;; the two branches, where the store and the WB load occur. So
+                ;; they are more likely be removed by late nilcheck removal (which
+                ;; is block-local).
+                (values ^{:tag (* Value)} nilcheck ^{:tag (* Value)} nilcheckThen ^{:tag (* Value)} nilcheckEnd) (zero (* Value))]
+              (when [a (aget (.-Args (aget stores 0)) 0)] (and (== (.-Op a) OpNilCheck) (== (aget (.-Args a) 1) mem))
+                (set! nilcheck a))
+
+
+              ;; If the source of a MoveWB is volatile (will be clobbered by a
+              ;; function call), we need to copy it to a temporary location, as
+              ;; marshaling the args of wbMove might clobber the value we're
+              ;; trying to move.
+              ;; Look for volatile source, copy it to temporary before we check
+              ;; the write barrier flag.
+              ;; It is unlikely to have more than one of them. Just do a linear
+              ;; search instead of using a map.
+              ;; See issue 15854.
+              (let-type [volatileCopy (struct
+                    ^{:line 325 :tag (* Value)} src ; address of original volatile value
+                    ^{:line 326 :tag (* Value)} tmp)] ; address of temporary we've copied the volatile value into
+
+                (let [^{:tag (slice volatileCopy)} volatiles (zero (slice volatileCopy))]
+
+                  (when (not (and (== (.-ABIDefault f) (.-ABI1 f)) (>= (len (.-intParamRegs (.-Config f))) 3)))
+                    ;; We don't need to do this if the calls we're going to do take
+                    ;; all their arguments in registers.
+                    ;; 3 is the magic number because it covers wbZero, wbMove, cgoCheckMemmove.
+                    (label :copyLoop
+                      (range [_ w stores]
+                        (when (== (.-Op w) OpMoveWB)
+                          (let [val (aget (.-Args w) 1)]
+                            (when (isVolatile val)
+                              (range [_ c volatiles]
+                                (when (== val (.-src c))
+                                  (continue :copyLoop))) ; already copied
+
+
+
+                              (let [t (.Elem (.-Type val))
+                                  ^{:line 346} tmp (.NewLocal f (.-Pos w) t)]
+                                (set! mem (.NewValue1A b (.-Pos w) OpVarDef types/TypeMem tmp mem))
+                                (let [tmpaddr (.NewValue2A b (.-Pos w) OpLocalAddr (.PtrTo t) tmp sp mem)
+                                    ^{:line 349} siz (.Size t)]
+                                  (set! mem (.NewValue3I b (.-Pos w) OpMove types/TypeMem siz tmpaddr val mem))
+                                  (set! (.-Aux mem) t)
+                                  (set! volatiles (append volatiles (lit volatileCopy val tmpaddr)))))))))))
+
+
+
+
+
+                  ;; Build branch point.
+                  (let [bThen (.NewBlock f BlockPlain)
+                      ^{:line 360} bEnd (.NewBlock f (.-Kind b))]
+                    (set! (.-Pos bThen) pos)
+                    (set! (.-Pos bEnd) (.-Pos b))
+                    (set! (.-Pos b) pos)
+
+                    ;; Set up control flow for end block.
+                    (.CopyControls bEnd b)
+                    (set! (.-Likely bEnd) (.-Likely b))
+                    (range [_ e (.-Succs b)]
+                      (set! (.-Succs bEnd) (append (.-Succs bEnd) e))
+                      (set! (.-b (aget (.-Preds (.-b e)) (.-i e))) bEnd))
+
+
+                    ;; set up control flow for write barrier test
+                    ;; load word, test word, avoiding partial register write from load byte.
+                    (let [cfgtypes (addr (.-Types (.-Config f)))
+                        ^{:line 376} flag (.NewValue2 b pos OpLoad (.-UInt32 cfgtypes) wbaddr mem)]
+                      (set! flag (.NewValue2 b pos OpNeq32 (.-Bool cfgtypes) flag const0))
+                      (set! (.-Kind b) BlockIf)
+                      (.SetControl b flag)
+                      (set! (.-Likely b) BranchUnlikely)
+                      (set! (.-Succs b) (subslice (.-Succs b) _ 0))
+                      (.AddEdgeTo b bThen)
+                      (.AddEdgeTo b bEnd)
+                      (.AddEdgeTo bThen bEnd)
+
+                      ;; For each write barrier store, append write barrier code to bThen.
+                      (let [memThen mem]
+
+                        (when (!= nilcheck nil)
+                          (set! nilcheckThen (.NewValue2 bThen (.-Pos nilcheck) OpNilCheck (.-Type nilcheck) (aget (.-Args nilcheck) 0) memThen)))
+
+
+                        ;; Note: we can issue the write barrier code in any order. In particular,
+                        ;; it doesn't matter if they are in a different order *even if* they end
+                        ;; up referring to overlapping memory regions. For instance if an OpStore
+                        ;; stores to a location that is later read by an OpMove. In all cases
+                        ;; any pointers we must get into the write barrier buffer still make it,
+                        ;; possibly in a different order and possibly a different (but definitely
+                        ;; more than 0) number of times.
+                        ;; In light of that, we process all the OpStoreWBs first. This minimizes
+                        ;; the amount of spill/restore code we need around the Zero/Move calls.
+
+                        ;; srcs contains the value IDs of pointer values we've put in the write barrier buffer.
+                        (let [srcs sset]
+                          (.clear srcs)
+                          ;; dsts contains the value IDs of locations which we've read a pointer out of
+                          ;; and put the result in the write barrier buffer.
+                          (let [dsts sset2]
+                            (.clear dsts)
+
+                            ;; Buffer up entries that we need to put in the write barrier buffer.
+                            (let-type [write (struct
+                                  ^{:line 413 :tag (* Value)} ptr ; value to put in write barrier buffer
+                                  ^{:line 414 :tag src/XPos} pos)] ; location to use for the write
+
+                              (let [^{:tag (array maxEntries write)} writeStore (zero (array maxEntries write))
+                                  ^{:line 417} writes (subslice writeStore _ 0)
+
+                                  ^{:line 419} flush ^{:go/end 434} (fn []
+                                    (when (== (len writes) 0)
+                                      (return))
+
+                                    ;; Issue a call to get a write barrier buffer.
+                                    (let [t (types/NewTuple (.PtrTo (aget types/Types types/TUINTPTR)) types/TypeMem)
+                                        ^{:line 425} call (.NewValue1I bThen pos OpWB t (conv int64 (len writes)) memThen)
+                                        ^{:line 426} curPtr (.NewValue1 bThen pos OpSelect0 (.PtrTo (aget types/Types types/TUINTPTR)) call)]
+                                      (set! memThen (.NewValue1 bThen pos OpSelect1 types/TypeMem call))
+                                      ;; Write each pending pointer to a slot in the buffer.
+                                      (range [i write writes]
+                                        (let [wbuf (.NewValue1I bThen (.-pos write) OpOffPtr (.PtrTo (aget types/Types types/TUINTPTR)) (* (conv int64 i) (.-PtrSize (.-Config f))) curPtr)]
+                                          (set! memThen (.NewValue3A bThen (.-pos write) OpStore types/TypeMem (aget types/Types types/TUINTPTR) wbuf (.-ptr write) memThen))))
+
+                                      (set! writes (subslice writes _ 0))))
+
+                                  ^{:line 435} addEntry ^{:go/end 440} (fn [^src/XPos pos ^{:tag (* Value)} ptr]
+                                    (set! writes (append writes (lit write :ptr ptr :pos pos)))
+                                    (when (== (len writes) maxEntries)
+                                      (flush)))]
+
+
+
+                                ;; Find all the pointers we need to write to the buffer.
+                                (range [_ w stores]
+                                  (when (!= (.-Op w) OpStoreWB)
+                                    (continue))
+
+                                  (let [pos (.-Pos w)
+                                      ^{:line 448} ptr (aget (.-Args w) 0)
+                                      ^{:line 449} val (aget (.-Args w) 1)]
+                                    (when (and (not (.contains srcs (.-ID val))) (needWBsrc val))
+                                      (.add srcs (.-ID val))
+                                      (addEntry pos val))
+
+                                    (when (and (not (.contains dsts (.-ID ptr))) (needWBdst ptr (aget (.-Args w) 2) zeroes))
+                                      (.add dsts (.-ID ptr))
+                                      ;; Load old value from store target.
+                                      ;; Note: This turns bad pointer writes into bad
+                                      ;; pointer reads, which could be confusing. We could avoid
+                                      ;; reading from obviously bad pointers, which would
+                                      ;; take care of the vast majority of these. We could
+                                      ;; patch this up in the signal handler, or use XCHG to
+                                      ;; combine the read and the write.
+                                      (when (== ptr nilcheck)
+                                        (set! ptr nilcheckThen))
+
+                                      (let [oldVal (.NewValue2 bThen pos OpLoad (aget types/Types types/TUINTPTR) ptr memThen)]
+                                        ;; Save old value to write buffer.
+                                        (addEntry pos oldVal)))
+
+                                    (.SetWBPos (.Func (.-fe f)) pos)
+                                    (dec! nWBops)))
+
+                                (flush)
+
+                                ;; Now do the rare cases, Zeros and Moves.
+                                (range [_ w stores]
+                                  (let [pos (.-Pos w)
+                                      ^{:line 478} dst (aget (.-Args w) 0)]
+                                    (when (== dst nilcheck)
+                                      (set! dst nilcheckThen))
+
+                                    (switch (.-Op w)
+                                      (case [OpZeroWB]
+                                        (let [typ (reflectdata/TypeLinksym (assert (* types/Type) (.-Aux w)))
+                                            ;; zeroWB(&typ, dst)
+                                            ^{:line 486} taddr (.NewValue1A b pos OpAddr (.-Uintptr (.-Types (.-Config (.-Func b)))) typ sb)]
+                                          (set! memThen (wbcall pos bThen wbZero sp memThen taddr dst))
+                                          (.SetWBPos (.Func (.-fe f)) pos)
+                                          (dec! nWBops)))
+                                      (case [OpMoveWB]
+                                        (let [src (aget (.-Args w) 1)]
+                                          (when (isVolatile src)
+                                            (range [_ c volatiles]
+                                              (when (== src (.-src c))
+                                                (set! src (.-tmp c))
+                                                (break))))
+
+
+
+                                          (let [typ (reflectdata/TypeLinksym (assert (* types/Type) (.-Aux w)))
+                                              ;; moveWB(&typ, dst, src)
+                                              ^{:line 502} taddr (.NewValue1A b pos OpAddr (.-Uintptr (.-Types (.-Config (.-Func b)))) typ sb)]
+                                            (set! memThen (wbcall pos bThen wbMove sp memThen taddr dst src))
+                                            (.SetWBPos (.Func (.-fe f)) pos)
+                                            (dec! nWBops)))))))
+
+
+
+                                ;; merge memory
+                                (set! mem (.NewValue2 bEnd pos OpPhi types/TypeMem mem memThen))
+
+                                (when (!= nilcheck nil)
+                                  (set! nilcheckEnd (.NewValue2 bEnd (.-Pos nilcheck) OpNilCheck (.-Type nilcheck) (aget (.-Args nilcheck) 0) mem)))
+
+
+                                ;; Do raw stores after merge point.
+                                (range [_ w stores]
+                                  (let [pos (.-Pos w)
+                                      ^{:line 519} dst (aget (.-Args w) 0)]
+                                    (when (== dst nilcheck)
+                                      (set! dst nilcheckEnd))
+
+                                    (switch (.-Op w)
+                                      (case [OpStoreWB]
+                                        (let [val (aget (.-Args w) 1)]
+                                          (when ^{:go/via [Flags]} (.-CgoCheck2 buildcfg/Experiment)
+                                            ;; Issue cgo checking code.
+                                            (set! mem (wbcall pos bEnd cgoCheckPtrWrite sp mem dst val)))
+
+                                          (set! mem (.NewValue3A bEnd pos OpStore types/TypeMem (.-Aux w) dst val mem))))
+                                      (case [OpZeroWB]
+                                        (set! mem (.NewValue2I bEnd pos OpZero types/TypeMem (.-AuxInt w) dst mem))
+                                        (set! (.-Aux mem) (.-Aux w)))
+                                      (case [OpMoveWB]
+                                        (let [src (aget (.-Args w) 1)]
+                                          (when (isVolatile src)
+                                            (range [_ c volatiles]
+                                              (when (== src (.-src c))
+                                                (set! src (.-tmp c))
+                                                (break))))
+
+
+
+                                          (when ^{:go/via [Flags]} (.-CgoCheck2 buildcfg/Experiment)
+                                            ;; Issue cgo checking code.
+                                            (let [typ (reflectdata/TypeLinksym (assert (* types/Type) (.-Aux w)))
+                                                ^{:line 547} taddr (.NewValue1A b pos OpAddr (.-Uintptr (.-Types (.-Config (.-Func b)))) typ sb)]
+                                              (set! mem (wbcall pos bEnd cgoCheckMemmove sp mem taddr dst src))))
+
+                                          (set! mem (.NewValue3I bEnd pos OpMove types/TypeMem (.-AuxInt w) dst src mem))
+                                          (set! (.-Aux mem) (.-Aux w))))
+                                      (case [OpVarDef OpVarLive]
+                                        (set! mem (.NewValue1A bEnd pos (.-Op w) types/TypeMem (.-Aux w) mem)))
+                                      (case [OpStore]
+                                        (let [val (aget (.-Args w) 1)]
+                                          (set! mem (.NewValue3A bEnd pos OpStore types/TypeMem (.-Aux w) dst val mem)))))))
+
+
+
+                                ;; The last store becomes the WBend marker. This marker is used by the liveness
+                                ;; pass to determine what parts of the code are preemption-unsafe.
+                                ;; All subsequent memory operations use this memory, so we have to sacrifice the
+                                ;; previous last memory op to become this new value.
+                                (set! (.-Values bEnd) (append (.-Values bEnd) last))
+                                (set! (.-Block last) bEnd)
+                                (.reset last OpWBend)
+                                (set! (.-Pos last) (.WithNotStmt (.-Pos last)))
+                                (set! (.-Type last) types/TypeMem)
+                                (.AddArg last mem)
+
+                                ;; Free all the old stores, except last which became the WBend marker.
+                                (range [_ w stores]
+                                  (when (!= w last)
+                                    (.resetArgs w)))
+
+
+                                (range [_ w stores]
+                                  (when (!= w last)
+                                    (.freeValue f w)))
+
+
+                                (when (and (!= nilcheck nil) (== (.-Uses nilcheck) 0))
+                                  (.reset nilcheck OpInvalid))
+
+
+                                ;; put values after the store sequence into the end block
+                                (set! (.-Values bEnd) (append (.-Values bEnd) (spread after)))
+                                (range [_ w after]
+                                  (set! (.-Block w) bEnd))
+
+
+                                ;; if we have more stores in this block, do this block again
+                                (when (> nWBops 0)
+                                  (goto :again))))))))))))))))))
+
+
+
+
+
+
+^{:go/end 696} (go/method computeZeroMap "computeZeroMap returns a map from an ID of a memory value to\na set of locations that are known to be zeroed at that memory value.\n" ^{:tag (map ID ZeroRegion)} [^{:tag (* Func)} f ^{:tag (slice (* Value))} select1]
+
+  (let [ptrSize (.-PtrSize (.-Config f))
+      ;; Keep track of which parts of memory are known to be zero.
+      ;; This helps with removing write barriers for various initialization patterns.
+      ;; This analysis is conservative. We only keep track, for each memory state, of
+      ;; which of the first 64 words of a single object are known to be zero.
+      ^{:line 608} zeroes (lit (map ID ZeroRegion))]
+    ;; Find new objects.
+    (range [_ b (.-Blocks f)]
+      (range [_ v (.-Values b)]
+        (when [(values mem ok) (IsNewObject v select1)] ok
+          ;; While compiling package runtime itself, we might see user
+          ;; calls to newobject, which will have result type
+          ;; unsafe.Pointer instead. We can't easily infer how large the
+          ;; allocated memory is, so just skip it.
+          (when (and (== (.-Path types/LocalPkg) "runtime") (.IsUnsafePtr (.-Type v)))
+            (continue))
+
+
+          (let [nptr (min 64 (/ (.Size (.Elem (.-Type v))) ptrSize))]
+            (aset zeroes (.-ID mem) (lit ZeroRegion :base v :mask (- ^uint64 (<< 1 (conv uint nptr)) 1)))))))
+
+
+
+    ;; Find stores to those new objects.
+    (while true
+      (let [changed false]
+        (range [_ b (.-Blocks f)]
+          ;; Note: iterating forwards helps convergence, as values are
+          ;; typically (but not always!) in store order.
+          (range [_ v (.-Values b)]
+            (when (!= (.-Op v) OpStore)
+              (continue))
+
+            (let [(values z ok) (aget zeroes (.-ID (.MemoryArg v)))]
+              (when (not ok)
+                (continue))
+
+              (let [ptr (aget (.-Args v) 0)
+                  ^{:line 641 :tag int64} off (zero int64)
+                  ^{:line 642} size (.Size (assert (* types/Type) (.-Aux v)))]
+                (while (== (.-Op ptr) OpOffPtr)
+                  (set! off + (.-AuxInt ptr))
+                  (set! ptr (aget (.-Args ptr) 0)))
+
+                (when (!= ptr (.-base z))
+                  ;; Different base object - we don't know anything.
+                  ;; We could even be writing to the base object we know
+                  ;; about, but through an aliased but offset pointer.
+                  ;; So we have to throw all the zero information we have away.
+                  (continue))
+
+                ;; Round to cover any partially written pointer slots.
+                ;; Pointer writes should never be unaligned like this, but non-pointer
+                ;; writes to pointer-containing types will do this.
+                (when [d (% off ptrSize)] (!= d 0)
+                  (set! off - d)
+                  (set! size + d))
+
+                (when [d (% size ptrSize)] (!= d 0)
+                  (set! size + (- ptrSize d)))
+
+                ;; Clip to the 64 words that we track.
+                (let [minimum (max off 0)
+                    ^{:line 666} maximum (min (+ off size) (* 64 ptrSize))]
+
+                  ;; Clear bits for parts that we are writing (and hence
+                  ;; will no longer necessarily be zero).
+                  (for [i minimum] (< i maximum) (set! i + ptrSize)
+                    (let [bit (/ i ptrSize)]
+                      (set! (.-mask z) bit-and-not ^uint64 (<< 1 (conv uint bit)))))
+
+                  (when (== (.-mask z) 0)
+                    ;; No more known zeros - don't bother keeping.
+                    (continue))
+
+                  ;; Save updated known zero contents for new store.
+                  (when (!= (aget zeroes (.-ID v)) z)
+                    (aset zeroes (.-ID v) z)
+                    (set! changed true)))))))
+
+
+
+        (when (not changed)
+          (break))))
+
+
+    (when (> (.-debug (.-pass f)) 0)
+      (fmt/Printf "func %s\n" (.-Name f))
+      (range [mem z zeroes]
+        (fmt/Printf "  memory=v%d ptr=%v zeromask=%b\n" mem (.-base z) (.-mask z))))
+
+
+    ^{:line 695} zeroes))
+
+
+
+^{:go/end 729} (go/func wbcall "wbcall emits write barrier runtime call in b, returns memory.\n" ^{:tag (* Value)} [^src/XPos pos ^{:tag (* Block)} b ^{:tag (* obj/LSym)} fn ^{:tag (* Value)} sp ^{:tag (* Value)} mem & ^{:tag (slice (* Value))} args]
+  (let [config (.-Config (.-Func b))
+      ^{:line 701} typ (.-Uintptr (.-Types config)) ; type of all argument values
+      ^{:line 702} nargs (len args)
+
+      ;; TODO (register args) this is a bit of a hack.
+      ^{:line 705} inRegs (and (== (.-ABIDefault (.-Func b)) (.-ABI1 (.-Func b))) (>= (len (.-intParamRegs config)) 3))]
+
+    (when (not inRegs)
+      ;; Store arguments to the appropriate stack slot.
+      (let [off ^{:go/via [Arch]} (.-FixedFrameSize (.-Arch (.-ctxt config)))]
+        (range [_ arg args]
+          (let [stkaddr (.NewValue1I b pos OpOffPtr (.PtrTo typ) off sp)]
+            (set! mem (.NewValue3A b pos OpStore types/TypeMem typ stkaddr arg mem))
+            (set! off + (.Size typ))))
+
+        (set! args (subslice args _ 0))))
+
+
+    (set! args (append args mem))
+
+    ;; issue call
+    (let [argTypes (make (slice (* types/Type)) nargs 3)] ; at most 3 args; allows stack allocation
+      (for [i 0] (< i nargs) (inc! i)
+        (aset argTypes i typ))
+
+      (let [call (.NewValue0A b pos OpStaticCall types/TypeResultMem (StaticAuxCall fn (.ABIAnalyzeTypes (.-ABIDefault (.-Func b)) argTypes nil)))]
+        (.AddArgs call (spread args))
+        (set! (.-AuxInt call) (* (conv int64 nargs) (.Size typ)))
+        (.NewValue1I b pos OpSelectN types/TypeMem 0 call)))))
+
+
+
+^{:go/breaks [[6 740]] :go/end 741} (go/func IsStackAddr "IsStackAddr reports whether v is known to be an address of a stack slot.\n" ^bool [^{:tag (* Value)} v]
+  (while (or (== (.-Op v) OpOffPtr) (== (.-Op v) OpAddPtr) (== (.-Op v) OpPtrIndex) (== (.-Op v) OpCopy))
+    (set! v (aget (.-Args v) 0)))
+
+  (switch (.-Op v)
+    (case [OpSP OpLocalAddr OpSelectNAddr OpGetCallerSP]
+      (return true)))
+
+  false)
+
+
+
+^{:go/breaks [[8 757]] :go/end 758} (go/func IsGlobalAddr "IsGlobalAddr reports whether v is known to be an address of a global (or nil).\n" ^bool [^{:tag (* Value)} v]
+  (while (or (== (.-Op v) OpOffPtr) (== (.-Op v) OpAddPtr) (== (.-Op v) OpPtrIndex) (== (.-Op v) OpCopy))
+    (set! v (aget (.-Args v) 0)))
+
+  (when (and (== (.-Op v) OpAddr) (== (.-Op (aget (.-Args v) 0)) OpSB))
+    (return true)) ; address of a global
+
+  (when (== (.-Op v) OpConstNil)
+    (return true))
+
+  (when (and (== (.-Op v) OpLoad) (IsReadOnlyGlobalAddr (aget (.-Args v) 0)))
+    (return true)) ; loading from a read-only global - the resulting address can't be a heap address.
+
+  false)
+
+
+
+^{:go/breaks [[6 769]] :go/end 770} (go/func IsReadOnlyGlobalAddr "IsReadOnlyGlobalAddr reports whether v is known to be an address of a read-only global.\n" ^bool [^{:tag (* Value)} v]
+  (when (== (.-Op v) OpConstNil)
+    ;; Nil pointers are read only. See issue 33438.
+    (return true))
+
+  (when (and (== (.-Op v) OpAddr) (!= (.-Aux v) nil) (== (.-Type (assert (* obj/LSym) (.-Aux v))) objabi/SRODATA))
+    (return true))
+
+  false)
+
+
+
+
+^{:go/end 829} (go/func IsNewObject "IsNewObject reports whether v is a pointer to a freshly allocated & zeroed object,\nif so, also returns the memory state mem at which v is zero.\n" [^{:tag (* Value)} v ^{:tag (slice (* Value))} select1] :results [^{:tag (* Value)} mem ^bool ok]
+  (let [f (.-Func (.-Block v))
+      ^{:line 776} c (.-Config f)]
+    (if (and (== (.-ABIDefault f) (.-ABI1 f)) (>= (len (.-intParamRegs c)) 1)) (do
+        (when (or (!= (.-Op v) OpSelectN) (!= (.-AuxInt v) 0))
+          (return nil false))
+
+        (set! mem (aget select1 (.-ID (aget (.-Args v) 0))))
+        (when (== mem nil)
+          (return nil false)))
+
+      (do
+        (when (!= (.-Op v) OpLoad)
+          (return nil false))
+
+        (set! mem (.MemoryArg v))
+        (when (!= (.-Op mem) OpSelectN)
+          (return nil false))
+
+        (when (!= (.-Type mem) types/TypeMem)
+          (return nil false))))
+    ;; assume it is the right selection if true
+
+    (let [call (aget (.-Args mem) 0)]
+      (when (!= (.-Op call) OpStaticCall)
+        (return nil false))
+
+      ;; Check for new object, or for new object calls that have been transformed into size-specialized malloc calls.
+      ;; Calls that have return type unsafe pointer may have originally been produced by flushPendingHeapAllocations
+      ;; in the ssa generator, so may have not originally been newObject calls.
+      (let [^int64 numParameters (zero int64)]
+        (switch
+          (case [(isNewObject (.-Aux call))]
+            (set! numParameters 1))
+          (case [(and (isSpecializedMalloc (.-Aux call)) (not (.IsUnsafePtr (.-Type v))))]
+            (set! numParameters 3))
+          (default
+            (return nil false)))
+
+        (when (and (== (.-ABIDefault f) (.-ABI1 f)) (>= (len (.-intParamRegs c)) 1))
+          (when (== (aget (.-Args v) 0) call)
+            (return mem true))
+
+          (return nil false))
+
+        (when (!= (.-Op (aget (.-Args v) 0)) OpOffPtr)
+          (return nil false))
+
+        (when (!= (.-Op (aget (.-Args (aget (.-Args v) 0)) 0)) OpSP)
+          (return nil false))
+
+        (when (!= (.-AuxInt (aget (.-Args v) 0)) (+ ^{:go/via [Arch]} (.-FixedFrameSize (.-Arch (.-ctxt c))) (* numParameters (.-RegSize c)))) ; offset of return value
+          (return nil false))
+
+        (return mem true)))))
+
+
+
+
+^{:go/breaks [[6 849]] :go/end 850} (go/func IsSanitizerSafeAddr "IsSanitizerSafeAddr reports whether v is known to be an address\nthat doesn't need instrumentation.\n" ^bool [^{:tag (* Value)} v]
+  (while (or (== (.-Op v) OpOffPtr) (== (.-Op v) OpAddPtr) (== (.-Op v) OpPtrIndex) (== (.-Op v) OpCopy))
+    (set! v (aget (.-Args v) 0)))
+
+  (switch (.-Op v)
+    (case [OpSP OpLocalAddr OpSelectNAddr]
+      ;; Stack addresses are always safe.
+      (return true))
+    (case [OpITab OpStringPtr OpGetClosurePtr]
+      ;; Itabs, string data, and closure fields are
+      ;; read-only once initialized.
+      (return true))
+    (case [OpAddr]
+      (let [vt (.-Type (assert (* obj/LSym) (.-Aux v)))]
+        (return (or (== vt objabi/SRODATA) (== vt objabi/SLIBFUZZER_8BIT_COUNTER) (== vt objabi/SCOVERAGE_COUNTER) (== vt objabi/SCOVERAGE_AUXVAR))))))
+
+  false)
+
+
+
+
+^{:go/end 859} (go/func isVolatile "isVolatile reports whether v is a pointer to argument region on stack which\nwill be clobbered by a function call.\n" ^bool [^{:tag (* Value)} v]
+  (while (or (== (.-Op v) OpOffPtr) (== (.-Op v) OpAddPtr) (== (.-Op v) OpPtrIndex) (== (.-Op v) OpCopy) (== (.-Op v) OpSelectNAddr))
+    (set! v (aget (.-Args v) 0)))
+
+  (== (.-Op v) OpSP))

@@ -1,0 +1,1407 @@
+;; Copyright 2022 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.cmd.compile.internal.loong64) (go/file "ssa.go" :imports [
+
+
+    ^{:line 8} [math "math"]
+
+    ^{:line 10} [base "cmd/compile/internal/base"]
+    ^{:line 11} [ir "cmd/compile/internal/ir"]
+    ^{:line 12} [logopt "cmd/compile/internal/logopt"]
+    ^{:line 13} [objw "cmd/compile/internal/objw"]
+    ^{:line 14} [ssa "cmd/compile/internal/ssa"]
+    ^{:line 15} [ssagen "cmd/compile/internal/ssagen"]
+    ^{:line 16} [types "cmd/compile/internal/types"]
+    ^{:line 17} [obj "cmd/internal/obj"]
+    ^{:line 18} [loong64 "cmd/internal/obj/loong64"]
+    ^{:line 19} [abi "internal/abi"]])
+
+
+
+^{:go/end 25} (go/func isFPreg "isFPreg reports whether r is an FP register.\n" ^bool [^int16 r]
+  (and (<= loong64/REG_F0 r) (<= r loong64/REG_F31)))
+
+
+
+^{:go/end 60} (go/func loadByType "loadByType returns the load instruction of the given type.\n" ^obj/As [^{:tag (* types/Type)} t ^int16 r]
+  (if (isFPreg r)
+    (if (== (.Size t) 4)
+      (return loong64/AMOVF)
+
+      (return loong64/AMOVD))
+
+
+    (switch (.Size t)
+      (case [1]
+        (if (.IsSigned t)
+          (return loong64/AMOVB)
+
+          (return loong64/AMOVBU)))
+
+      (case [2]
+        (if (.IsSigned t)
+          (return loong64/AMOVH)
+
+          (return loong64/AMOVHU)))
+
+      (case [4]
+        (if (.IsSigned t)
+          (return loong64/AMOVW)
+
+          (return loong64/AMOVWU)))
+
+      (case [8]
+        (return loong64/AMOVV))))
+
+
+  (panic "bad load type"))
+
+
+
+^{:go/end 83} (go/func storeByType "storeByType returns the store instruction of the given type.\n" ^obj/As [^{:tag (* types/Type)} t ^int16 r]
+  (if (isFPreg r)
+    (if (== (.Size t) 4)
+      (return loong64/AMOVF)
+
+      (return loong64/AMOVD))
+
+
+    (switch (.Size t)
+      (case [1]
+        (return loong64/AMOVB))
+      (case [2]
+        (return loong64/AMOVH))
+      (case [4]
+        (return loong64/AMOVW))
+      (case [8]
+        (return loong64/AMOVV))))
+
+
+  (panic "bad store type"))
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 105} (go/func largestMove "largestMove returns the largest move instruction possible and its size,\ngiven the alignment of the total size of the move.\n\ne.g., a 16-byte move may use MOVV, but an 11-byte move must use MOVB.\n\nNote that the moves may not be on naturally aligned addresses depending on\nthe source and destination.\n\nThis matches the calculation in ssa.moveSize.\n" [^int64 alignment] :results [obj/As int64]
+  (switch
+    (case [(== (% alignment 8) 0)]
+      (return loong64/AMOVV 8))
+    (case [(== (% alignment 4) 0)]
+      (return loong64/AMOVW 4))
+    (case [(== (% alignment 2) 0)]
+      (return loong64/AMOVH 2))
+    (default
+      (return loong64/AMOVB 1))))
+
+
+
+^{:go/end 1252} (go/func ssaGenValue [^{:tag (* ssagen/State)} s ^{:tag (* ssa/Value)} v]
+  (switch (.-Op v)
+    (case [ssa/OpCopy ssa/OpLOONG64MOVVreg]
+      (when (.IsMemory (.-Type v))
+        (return))
+
+      (let [x (.Reg (aget (.-Args v) 0))
+          ^{:line 114} y (.Reg v)]
+        (when (== x y)
+          (return))
+
+        (let [as loong64/AMOVV]
+          (when (and (isFPreg x) (isFPreg y))
+            (set! as loong64/AMOVD))
+
+          (let [p (.Prog s as)]
+            (set! (.-Type (.-From p)) obj/TYPE_REG)
+            (set! (.-Reg (.-From p)) x)
+            (set! (.-Type (.-To p)) obj/TYPE_REG)
+            (set! (.-Reg (.-To p)) y)))))
+    (case [ssa/OpLOONG64MOVVnop
+        ^{:line 128} ssa/OpLOONG64ZERO
+        ^{:line 129} ssa/OpLOONG64LoweredRound32F
+        ^{:line 130} ssa/OpLOONG64LoweredRound64F])
+    ;; nothing to do
+    (case [ssa/OpLoadReg]
+      (when (.IsFlags (.-Type v))
+        (.Fatalf v "load flags not implemented: %v" (.LongString v))
+        (return))
+
+      (let [r (.Reg v)
+          ^{:line 138} p (.Prog s (loadByType (.-Type v) r))]
+        (ssagen/AddrAuto (addr (.-From p)) (aget (.-Args v) 0))
+        (set! (.-Type (.-To p)) obj/TYPE_REG)
+        (set! (.-Reg (.-To p)) r)))
+    (case [ssa/OpStoreReg]
+      (when (.IsFlags (.-Type v))
+        (.Fatalf v "store flags not implemented: %v" (.LongString v))
+        (return))
+
+      (let [r (.Reg (aget (.-Args v) 0))
+          ^{:line 148} p (.Prog s (storeByType (.-Type v) r))]
+        (set! (.-Type (.-From p)) obj/TYPE_REG)
+        (set! (.-Reg (.-From p)) r)
+        (ssagen/AddrAuto (addr (.-To p)) v)))
+    (case [ssa/OpArgIntReg ssa/OpArgFloatReg]
+      ;; The assembler needs to wrap the entry safepoint/stack growth code with spill/unspill
+      ;; The loop only runs once.
+      (range [_ a (.-RegArgs (.-Func (.-Block v)))]
+        ;; Pass the spill/unspill information along to the assembler, offset by size of
+        ;; the saved LR slot.
+        (let [addr (ssagen/SpillSlotAddr a loong64/REGSP ^{:go/via [Arch]} (.-FixedFrameSize (.-Arch base/Ctxt)))]
+          (.AddSpill (.FuncInfo s)
+            (lit obj/RegSpill :Reg (.-Reg a) :Addr addr :Unspill (loadByType (.-Type a) (.-Reg a)) :Spill (storeByType (.-Type a) (.-Reg a))))))
+
+      (set! (.-RegArgs (.-Func (.-Block v))) nil)
+      (ssagen/CheckArgReg v))
+    (case [ssa/OpLOONG64ADDV
+        ^{:line 165} ssa/OpLOONG64SUBV
+        ^{:line 166} ssa/OpLOONG64AND
+        ^{:line 167} ssa/OpLOONG64OR
+        ^{:line 168} ssa/OpLOONG64XOR
+        ^{:line 169} ssa/OpLOONG64NOR
+        ^{:line 170} ssa/OpLOONG64ANDN
+        ^{:line 171} ssa/OpLOONG64ORN
+        ^{:line 172} ssa/OpLOONG64SLL
+        ^{:line 173} ssa/OpLOONG64SLLV
+        ^{:line 174} ssa/OpLOONG64SRL
+        ^{:line 175} ssa/OpLOONG64SRLV
+        ^{:line 176} ssa/OpLOONG64SRA
+        ^{:line 177} ssa/OpLOONG64SRAV
+        ^{:line 178} ssa/OpLOONG64ROTR
+        ^{:line 179} ssa/OpLOONG64ROTRV
+        ^{:line 180} ssa/OpLOONG64ADDF
+        ^{:line 181} ssa/OpLOONG64ADDD
+        ^{:line 182} ssa/OpLOONG64SUBF
+        ^{:line 183} ssa/OpLOONG64SUBD
+        ^{:line 184} ssa/OpLOONG64MULF
+        ^{:line 185} ssa/OpLOONG64MULD
+        ^{:line 186} ssa/OpLOONG64DIVF
+        ^{:line 187} ssa/OpLOONG64DIVD
+        ^{:line 188} ssa/OpLOONG64MULV ssa/OpLOONG64MULHV ssa/OpLOONG64MULHVU ssa/OpLOONG64MULH ssa/OpLOONG64MULHU
+        ^{:line 189} ssa/OpLOONG64DIVV ssa/OpLOONG64REMV ssa/OpLOONG64DIVVU ssa/OpLOONG64REMVU
+        ^{:line 190} ssa/OpLOONG64MULWVW ssa/OpLOONG64MULWVWU
+        ^{:line 191} ssa/OpLOONG64FCOPYSGD]
+      (let [p (.Prog s (.Asm (.-Op v)))]
+        (set! (.-Type (.-From p)) obj/TYPE_REG)
+        (set! (.-Reg (.-From p)) (.Reg (aget (.-Args v) 1)))
+        (set! (.-Reg p) (.Reg (aget (.-Args v) 0)))
+        (set! (.-Type (.-To p)) obj/TYPE_REG)
+        (set! (.-Reg (.-To p)) (.Reg v))))
+
+    (case [ssa/OpLOONG64BSTRPICKV
+        ^{:line 200} ssa/OpLOONG64BSTRPICKW]
+      (let [p (.Prog s (.Asm (.-Op v)))]
+        (set! (.-Type (.-From p)) obj/TYPE_CONST)
+        (if (== (.-Op v) ssa/OpLOONG64BSTRPICKW) (do
+            (set! (.-Offset (.-From p)) (>> (.-AuxInt v) 5))
+            (.AddRestSourceConst p (bit-and (.-AuxInt v) 0x1f)))
+          (do
+            (set! (.-Offset (.-From p)) (>> (.-AuxInt v) 6))
+            (.AddRestSourceConst p (bit-and (.-AuxInt v) 0x3f))))
+
+        (set! (.-Reg p) (.Reg (aget (.-Args v) 0)))
+        (set! (.-Type (.-To p)) obj/TYPE_REG)
+        (set! (.-Reg (.-To p)) (.Reg v))))
+
+    (case [ssa/OpLOONG64FMINF
+        ^{:line 215} ssa/OpLOONG64FMIND
+        ^{:line 216} ssa/OpLOONG64FMAXF
+        ^{:line 217} ssa/OpLOONG64FMAXD]
+      ;; ADDD Rarg0, Rarg1, Rout
+      ;; CMPEQD Rarg0, Rarg0, FCC0
+      ;; bceqz FCC0, end
+      ;; CMPEQD Rarg1, Rarg1, FCC0
+      ;; bceqz FCC0, end
+      ;; F(MIN|MAX)(F|D)
+
+      (let [r0 (.Reg (aget (.-Args v) 0))
+          ^{:line 226} r1 (.Reg (aget (.-Args v) 1))
+          ^{:line 227} out (.Reg v)
+          (values add fcmp) (values loong64/AADDD loong64/ACMPEQD)]
+        (when (or (== (.-Op v) ssa/OpLOONG64FMINF) (== (.-Op v) ssa/OpLOONG64FMAXF))
+          (set! add loong64/AADDF)
+          (set! fcmp loong64/ACMPEQF))
+
+        (let [p1 (.Prog s add)]
+          (set! (.-Type (.-From p1)) obj/TYPE_REG)
+          (set! (.-Reg (.-From p1)) r0)
+          (set! (.-Reg p1) r1)
+          (set! (.-Type (.-To p1)) obj/TYPE_REG)
+          (set! (.-Reg (.-To p1)) out)
+
+          (let [p2 (.Prog s fcmp)]
+            (set! (.-Type (.-From p2)) obj/TYPE_REG)
+            (set! (.-Reg (.-From p2)) r0)
+            (set! (.-Reg p2) r0)
+            (set! (.-Type (.-To p2)) obj/TYPE_REG)
+            (set! (.-Reg (.-To p2)) loong64/REG_FCC0)
+
+            (let [p3 (.Prog s loong64/ABFPF)]
+              (set! (.-Type (.-To p3)) obj/TYPE_BRANCH)
+
+              (let [p4 (.Prog s fcmp)]
+                (set! (.-Type (.-From p4)) obj/TYPE_REG)
+                (set! (.-Reg (.-From p4)) r1)
+                (set! (.-Reg p4) r1)
+                (set! (.-Type (.-To p4)) obj/TYPE_REG)
+                (set! (.-Reg (.-To p4)) loong64/REG_FCC0)
+
+                (let [p5 (.Prog s loong64/ABFPF)]
+                  (set! (.-Type (.-To p5)) obj/TYPE_BRANCH)
+
+                  (let [p6 (.Prog s (.Asm (.-Op v)))]
+                    (set! (.-Type (.-From p6)) obj/TYPE_REG)
+                    (set! (.-Reg (.-From p6)) r1)
+                    (set! (.-Reg p6) r0)
+                    (set! (.-Type (.-To p6)) obj/TYPE_REG)
+                    (set! (.-Reg (.-To p6)) out)
+
+                    (let [nop (.Prog s obj/ANOP)]
+                      (.SetTarget (.-To p3) nop)
+                      (.SetTarget (.-To p5) nop))))))))))
+
+    (case [ssa/OpLOONG64SGT
+        ^{:line 272} ssa/OpLOONG64SGTU]
+      (let [p (.Prog s (.Asm (.-Op v)))]
+        (set! (.-Type (.-From p)) obj/TYPE_REG)
+        (set! (.-Reg (.-From p)) (.Reg (aget (.-Args v) 0)))
+        (set! (.-Reg p) (.Reg (aget (.-Args v) 1)))
+        (set! (.-Type (.-To p)) obj/TYPE_REG)
+        (set! (.-Reg (.-To p)) (.Reg v))))
+    (case [ssa/OpLOONG64ADDVconst
+        ^{:line 280} ssa/OpLOONG64ADDV16const
+        ^{:line 281} ssa/OpLOONG64SUBVconst
+        ^{:line 282} ssa/OpLOONG64ANDconst
+        ^{:line 283} ssa/OpLOONG64ORconst
+        ^{:line 284} ssa/OpLOONG64XORconst
+        ^{:line 285} ssa/OpLOONG64SLLconst
+        ^{:line 286} ssa/OpLOONG64SLLVconst
+        ^{:line 287} ssa/OpLOONG64SRLconst
+        ^{:line 288} ssa/OpLOONG64SRLVconst
+        ^{:line 289} ssa/OpLOONG64SRAconst
+        ^{:line 290} ssa/OpLOONG64SRAVconst
+        ^{:line 291} ssa/OpLOONG64ROTRconst
+        ^{:line 292} ssa/OpLOONG64ROTRVconst
+        ^{:line 293} ssa/OpLOONG64SGTconst
+        ^{:line 294} ssa/OpLOONG64SGTUconst]
+      (let [p (.Prog s (.Asm (.-Op v)))]
+        (set! (.-Type (.-From p)) obj/TYPE_CONST)
+        (set! (.-Offset (.-From p)) (.-AuxInt v))
+        (set! (.-Reg p) (.Reg (aget (.-Args v) 0)))
+        (set! (.-Type (.-To p)) obj/TYPE_REG)
+        (set! (.-Reg (.-To p)) (.Reg v))))
+
+    (case [ssa/OpLOONG64NORconst]
+      ;; MOVV $const, Rtmp
+      ;; NOR  Rtmp, Rarg0, Rout
+      (let [p (.Prog s loong64/AMOVV)]
+        (set! (.-Type (.-From p)) obj/TYPE_CONST)
+        (set! (.-Offset (.-From p)) (.-AuxInt v))
+        (set! (.-Type (.-To p)) obj/TYPE_REG)
+        (set! (.-Reg (.-To p)) loong64/REGTMP)
+
+        (let [p2 (.Prog s (.Asm (.-Op v)))]
+          (set! (.-Type (.-From p2)) obj/TYPE_REG)
+          (set! (.-Reg (.-From p2)) loong64/REGTMP)
+          (set! (.-Reg p2) (.Reg (aget (.-Args v) 0)))
+          (set! (.-Type (.-To p2)) obj/TYPE_REG)
+          (set! (.-Reg (.-To p2)) (.Reg v)))))
+
+    (case [ssa/OpLOONG64MOVVconst]
+      (let [r (.Reg v)
+          ^{:line 320} p (.Prog s (.Asm (.-Op v)))]
+        (set! (.-Type (.-From p)) obj/TYPE_CONST)
+        (set! (.-Offset (.-From p)) (.-AuxInt v))
+        (set! (.-Type (.-To p)) obj/TYPE_REG)
+        (set! (.-Reg (.-To p)) r)
+        (when (isFPreg r)
+          ;; cannot move into FP or special registers, use TMP as intermediate
+          (set! (.-Reg (.-To p)) loong64/REGTMP)
+          (set! p (.Prog s loong64/AMOVV))
+          (set! (.-Type (.-From p)) obj/TYPE_REG)
+          (set! (.-Reg (.-From p)) loong64/REGTMP)
+          (set! (.-Type (.-To p)) obj/TYPE_REG)
+          (set! (.-Reg (.-To p)) r))))
+
+    (case [ssa/OpLOONG64MOVFconst
+        ^{:line 335} ssa/OpLOONG64MOVDconst]
+      (let [p (.Prog s (.Asm (.-Op v)))]
+        (set! (.-Type (.-From p)) obj/TYPE_FCONST)
+        (set! (.-Val (.-From p)) (math/Float64frombits (conv uint64 (.-AuxInt v))))
+        (set! (.-Type (.-To p)) obj/TYPE_REG)
+        (set! (.-Reg (.-To p)) (.Reg v))))
+    (case [ssa/OpLOONG64CMPEQF
+        ^{:line 342} ssa/OpLOONG64CMPEQD
+        ^{:line 343} ssa/OpLOONG64CMPGEF
+        ^{:line 344} ssa/OpLOONG64CMPGED
+        ^{:line 345} ssa/OpLOONG64CMPGTF
+        ^{:line 346} ssa/OpLOONG64CMPGTD]
+      (let [p (.Prog s (.Asm (.-Op v)))]
+        (set! (.-Type (.-From p)) obj/TYPE_REG)
+        (set! (.-Reg (.-From p)) (.Reg (aget (.-Args v) 0)))
+        (set! (.-Reg p) (.Reg (aget (.-Args v) 1)))
+        (set! (.-Type (.-To p)) obj/TYPE_REG)
+        (set! (.-Reg (.-To p)) loong64/REG_FCC0)))
+
+    (case [ssa/OpLOONG64FMADDF
+        ^{:line 355} ssa/OpLOONG64FMADDD
+        ^{:line 356} ssa/OpLOONG64FMSUBF
+        ^{:line 357} ssa/OpLOONG64FMSUBD
+        ^{:line 358} ssa/OpLOONG64FNMADDF
+        ^{:line 359} ssa/OpLOONG64FNMADDD
+        ^{:line 360} ssa/OpLOONG64FNMSUBF
+        ^{:line 361} ssa/OpLOONG64FNMSUBD]
+      (let [p (.Prog s (.Asm (.-Op v)))
+          ;; r=(FMA x y z) -> FMADDD z, y, x, r
+          ;; the SSA operand order is for taking advantage of
+          ;; commutativity (that only applies for the first two operands)
+          ^{:line 366} r (.Reg v)
+          ^{:line 367} x (.Reg (aget (.-Args v) 0))
+          ^{:line 368} y (.Reg (aget (.-Args v) 1))
+          ^{:line 369} z (.Reg (aget (.-Args v) 2))]
+        (set! (.-Type (.-From p)) obj/TYPE_REG)
+        (set! (.-Reg (.-From p)) z)
+        (set! (.-Reg p) y)
+        (.AddRestSourceReg p x)
+        (set! (.-Type (.-To p)) obj/TYPE_REG)
+        (set! (.-Reg (.-To p)) r)))
+
+    (case [ssa/OpLOONG64MOVVaddr]
+      (let [p (.Prog s loong64/AMOVV)]
+        (set! (.-Type (.-From p)) obj/TYPE_ADDR)
+        (set! (.-Reg (.-From p)) (.Reg (aget (.-Args v) 0)))
+        (let [^string wantreg (zero string)]
+          ;; MOVV $sym+off(base), R
+          ;; the assembler expands it as the following:
+          ;; - base is SP: add constant offset to SP (R3)
+          ;; when constant is large, tmp register (R30) may be used
+          ;; - base is SB: load external address with relocation
+          (type-switch (.-Aux v)
+            (default
+              (.Fatalf v "aux is of unknown type %T" (.-Aux v)))
+            (case [(* obj/LSym)]
+              (set! wantreg "SB")
+              (ssagen/AddAux (addr (.-From p)) v))
+            (case [(* ir/Name)]
+              (set! wantreg "SP")
+              (ssagen/AddAux (addr (.-From p)) v))
+            (case [nil]
+              ;; No sym, just MOVV $off(SP), R
+              (set! wantreg "SP")
+              (set! (.-Offset (.-From p)) (.-AuxInt v))))
+
+          (when [reg (.RegName (aget (.-Args v) 0))] (!= reg wantreg)
+            (.Fatalf v "bad reg %s for symbol type %T, want %s" reg (.-Aux v) wantreg))
+
+          (set! (.-Type (.-To p)) obj/TYPE_REG)
+          (set! (.-Reg (.-To p)) (.Reg v)))))
+
+    (case [ssa/OpLOONG64MOVBloadidx
+        ^{:line 408} ssa/OpLOONG64MOVBUloadidx
+        ^{:line 409} ssa/OpLOONG64MOVHloadidx
+        ^{:line 410} ssa/OpLOONG64MOVHUloadidx
+        ^{:line 411} ssa/OpLOONG64MOVWloadidx
+        ^{:line 412} ssa/OpLOONG64MOVWUloadidx
+        ^{:line 413} ssa/OpLOONG64MOVVloadidx
+        ^{:line 414} ssa/OpLOONG64MOVFloadidx
+        ^{:line 415} ssa/OpLOONG64MOVDloadidx]
+      (let [p (.Prog s (.Asm (.-Op v)))]
+        (set! (.-Type (.-From p)) obj/TYPE_MEM)
+        (set! (.-Name (.-From p)) obj/NAME_NONE)
+        (set! (.-Reg (.-From p)) (.Reg (aget (.-Args v) 0)))
+        (set! (.-Index (.-From p)) (.Reg (aget (.-Args v) 1)))
+        (set! (.-Type (.-To p)) obj/TYPE_REG)
+        (set! (.-Reg (.-To p)) (.Reg v))))
+
+    (case [ssa/OpLOONG64MOVBstoreidx
+        ^{:line 425} ssa/OpLOONG64MOVHstoreidx
+        ^{:line 426} ssa/OpLOONG64MOVWstoreidx
+        ^{:line 427} ssa/OpLOONG64MOVVstoreidx
+        ^{:line 428} ssa/OpLOONG64MOVFstoreidx
+        ^{:line 429} ssa/OpLOONG64MOVDstoreidx]
+      (let [p (.Prog s (.Asm (.-Op v)))]
+        (set! (.-Type (.-From p)) obj/TYPE_REG)
+        (set! (.-Reg (.-From p)) (.Reg (aget (.-Args v) 2)))
+        (set! (.-Type (.-To p)) obj/TYPE_MEM)
+        (set! (.-Name (.-To p)) obj/NAME_NONE)
+        (set! (.-Reg (.-To p)) (.Reg (aget (.-Args v) 0)))
+        (set! (.-Index (.-To p)) (.Reg (aget (.-Args v) 1)))))
+
+    (case [ssa/OpLOONG64MOVBload
+        ^{:line 439} ssa/OpLOONG64MOVBUload
+        ^{:line 440} ssa/OpLOONG64MOVHload
+        ^{:line 441} ssa/OpLOONG64MOVHUload
+        ^{:line 442} ssa/OpLOONG64MOVWload
+        ^{:line 443} ssa/OpLOONG64MOVWUload
+        ^{:line 444} ssa/OpLOONG64MOVVload
+        ^{:line 445} ssa/OpLOONG64MOVFload
+        ^{:line 446} ssa/OpLOONG64MOVDload]
+      (let [p (.Prog s (.Asm (.-Op v)))]
+        (set! (.-Type (.-From p)) obj/TYPE_MEM)
+        (set! (.-Reg (.-From p)) (.Reg (aget (.-Args v) 0)))
+        (ssagen/AddAux (addr (.-From p)) v)
+        (set! (.-Type (.-To p)) obj/TYPE_REG)
+        (set! (.-Reg (.-To p)) (.Reg v))))
+    (case [ssa/OpLOONG64MOVBstore
+        ^{:line 454} ssa/OpLOONG64MOVHstore
+        ^{:line 455} ssa/OpLOONG64MOVWstore
+        ^{:line 456} ssa/OpLOONG64MOVVstore
+        ^{:line 457} ssa/OpLOONG64MOVFstore
+        ^{:line 458} ssa/OpLOONG64MOVDstore]
+      (let [p (.Prog s (.Asm (.-Op v)))]
+        (set! (.-Type (.-From p)) obj/TYPE_REG)
+        (set! (.-Reg (.-From p)) (.Reg (aget (.-Args v) 1)))
+        (set! (.-Type (.-To p)) obj/TYPE_MEM)
+        (set! (.-Reg (.-To p)) (.Reg (aget (.-Args v) 0)))
+        (ssagen/AddAux (addr (.-To p)) v)))
+    (case [ssa/OpLOONG64MOVBreg
+        ^{:line 466} ssa/OpLOONG64MOVBUreg
+        ^{:line 467} ssa/OpLOONG64MOVHreg
+        ^{:line 468} ssa/OpLOONG64MOVHUreg
+        ^{:line 469} ssa/OpLOONG64MOVWreg
+        ^{:line 470} ssa/OpLOONG64MOVWUreg]
+      (let [a (aget (.-Args v) 0)]
+        (while (or (== (.-Op a) ssa/OpCopy) (== (.-Op a) ssa/OpLOONG64MOVVreg))
+          (set! a (aget (.-Args a) 0)))
+
+        (when (and (== (.-Op a) ssa/OpLoadReg) (<= loong64/REG_R0 (.Reg a)) (<= (.Reg a) loong64/REG_R31))
+          ;; LoadReg from a narrower type does an extension, except loading
+          ;; to a floating point register. So only eliminate the extension
+          ;; if it is loaded to an integer register.
+
+          (let [t (.-Type a)]
+            (switch
+              (case [(and (== (.-Op v) ssa/OpLOONG64MOVBreg) (== (.Size t) 1) (.IsSigned t))
+                  (and (== (.-Op v) ssa/OpLOONG64MOVBUreg) (== (.Size t) 1) (not (.IsSigned t)))
+                  (and (== (.-Op v) ssa/OpLOONG64MOVHreg) (== (.Size t) 2) (.IsSigned t))
+                  (and (== (.-Op v) ssa/OpLOONG64MOVHUreg) (== (.Size t) 2) (not (.IsSigned t)))
+                  (and (== (.-Op v) ssa/OpLOONG64MOVWreg) (== (.Size t) 4) (.IsSigned t))
+                  (and (== (.-Op v) ssa/OpLOONG64MOVWUreg) (== (.Size t) 4) (not (.IsSigned t)))]
+                ;; arg is a proper-typed load, already zero/sign-extended, don't extend again
+                (when (== (.Reg v) (.Reg (aget (.-Args v) 0)))
+                  (return))
+
+                (let [p (.Prog s loong64/AMOVV)]
+                  (set! (.-Type (.-From p)) obj/TYPE_REG)
+                  (set! (.-Reg (.-From p)) (.Reg (aget (.-Args v) 0)))
+                  (set! (.-Type (.-To p)) obj/TYPE_REG)
+                  (set! (.-Reg (.-To p)) (.Reg v))
+                  (return)))
+              (default))))
+
+
+        (fallthrough)))
+
+    (case [ssa/OpLOONG64MOVWF
+        ^{:line 504} ssa/OpLOONG64MOVWD
+        ^{:line 505} ssa/OpLOONG64TRUNCFW
+        ^{:line 506} ssa/OpLOONG64TRUNCDW
+        ^{:line 507} ssa/OpLOONG64MOVVF
+        ^{:line 508} ssa/OpLOONG64MOVVD
+        ^{:line 509} ssa/OpLOONG64TRUNCFV
+        ^{:line 510} ssa/OpLOONG64TRUNCDV
+        ^{:line 511} ssa/OpLOONG64MOVFD
+        ^{:line 512} ssa/OpLOONG64MOVDF
+        ^{:line 513} ssa/OpLOONG64MOVWfpgp
+        ^{:line 514} ssa/OpLOONG64MOVWgpfp
+        ^{:line 515} ssa/OpLOONG64MOVVfpgp
+        ^{:line 516} ssa/OpLOONG64MOVVgpfp
+        ^{:line 517} ssa/OpLOONG64NEGF
+        ^{:line 518} ssa/OpLOONG64NEGD
+        ^{:line 519} ssa/OpLOONG64CLZW
+        ^{:line 520} ssa/OpLOONG64CLZV
+        ^{:line 521} ssa/OpLOONG64CTZW
+        ^{:line 522} ssa/OpLOONG64CTZV
+        ^{:line 523} ssa/OpLOONG64SQRTD
+        ^{:line 524} ssa/OpLOONG64SQRTF
+        ^{:line 525} ssa/OpLOONG64REVB2H
+        ^{:line 526} ssa/OpLOONG64REVB2W
+        ^{:line 527} ssa/OpLOONG64REVB4H
+        ^{:line 528} ssa/OpLOONG64REVBV
+        ^{:line 529} ssa/OpLOONG64BITREV4B
+        ^{:line 530} ssa/OpLOONG64BITREVW
+        ^{:line 531} ssa/OpLOONG64BITREVV
+        ^{:line 532} ssa/OpLOONG64ABSF
+        ^{:line 533} ssa/OpLOONG64ABSD]
+      (let [p (.Prog s (.Asm (.-Op v)))]
+        (set! (.-Type (.-From p)) obj/TYPE_REG)
+        (set! (.-Reg (.-From p)) (.Reg (aget (.-Args v) 0)))
+        (set! (.-Type (.-To p)) obj/TYPE_REG)
+        (set! (.-Reg (.-To p)) (.Reg v))))
+
+    (case [ssa/OpLOONG64VPCNT64
+        ^{:line 541} ssa/OpLOONG64VPCNT32
+        ^{:line 542} ssa/OpLOONG64VPCNT16
+        ^{:line 543} ssa/OpLOONG64FRINTND
+        ^{:line 544} ssa/OpLOONG64FRINTZD
+        ^{:line 545} ssa/OpLOONG64FRINTPD
+        ^{:line 546} ssa/OpLOONG64FRINTMD]
+      (let [p (.Prog s (.Asm (.-Op v)))]
+        (set! (.-Type (.-From p)) obj/TYPE_REG)
+        (set! (.-Reg (.-From p)) (+ (bit-and (- (.Reg (aget (.-Args v) 0)) loong64/REG_F0) 31) loong64/REG_V0))
+        (set! (.-Type (.-To p)) obj/TYPE_REG)
+        (set! (.-Reg (.-To p)) (+ (bit-and (- (.Reg v) loong64/REG_F0) 31) loong64/REG_V0))))
+
+    (case [ssa/OpLOONG64NEGV]
+      ;; SUB from REGZERO
+      (let [p (.Prog s loong64/ASUBVU)]
+        (set! (.-Type (.-From p)) obj/TYPE_REG)
+        (set! (.-Reg (.-From p)) (.Reg (aget (.-Args v) 0)))
+        (set! (.-Reg p) loong64/REGZERO)
+        (set! (.-Type (.-To p)) obj/TYPE_REG)
+        (set! (.-Reg (.-To p)) (.Reg v))))
+
+    (case [ssa/OpLOONG64LoweredZero]
+      (let [ptrReg (.Reg (aget (.-Args v) 0))
+          ^{:line 564} n (.-AuxInt v)]
+        (when (< n 16)
+          (.Fatalf v "Zero too small %d" n))
+
+
+        ;; Generate Zeroing instructions.
+        (let [^int64 off (zero int64)]
+          (while (>= n 8)
+            ;; MOVV     ZR, off(ptrReg)
+            (zero8 s ptrReg off)
+            (set! off + 8)
+            (set! n - 8))
+
+          (when (!= n 0)
+            ;; MOVV     ZR, off+n-8(ptrReg)
+            (zero8 s ptrReg (- (+ off n) 8))))))
+
+    (case [ssa/OpLOONG64LoweredZeroLoop]
+      (let [ptrReg (.Reg (aget (.-Args v) 0))
+          ^{:line 583} endReg (.RegTmp v)
+          ^{:line 584} flagReg (conv int16 loong64/REGTMP)
+          ^{:line 585 :tag int64} off (zero int64)
+          ^{:line 586} n (.-AuxInt v)
+          ^{:line 587} loopSize (conv int64 64)]
+        (when (< n (* 3 loopSize))
+          ;; - a loop count of 0 won't work.
+          ;; - a loop count of 1 is useless.
+          ;; - a loop count of 2 is a code size ~tie
+          ;;     4 instructions to implement the loop
+          ;;     8 instructions in the loop body
+          ;;   vs
+          ;;     16 instuctions in the straightline code
+          ;;   Might as well use straightline code.
+          (.Fatalf v "ZeroLoop size too small %d" n))
+
+
+        ;;    ADDV    n - n%loopSize, ptrReg, endReg
+        ;;    MOVBU   ir.Syms.Loong64HasLSX, flagReg
+        ;;    BNE     flagReg, lsxInit
+        ;; genericLoop:
+        ;;    for off = 0; off < loopSize; off += 8 {
+        ;;            zero8(s, ptrReg, off)
+        ;;    }
+        ;;    ADDV    $loopSize, ptrReg
+        ;;    BNE     endReg, ptrReg, genericLoop
+        ;;    JMP     tail
+        ;; lsxInit:
+        ;;    VXORV   V31, V31, V31
+        ;; lsxLoop:
+        ;;    for off = 0; off < loopSize; off += 16 {
+        ;;            zero16(s, V31, ptrReg, off)
+        ;;    }
+        ;;    ADDV    $loopSize, ptrReg
+        ;;    BNE     endReg, ptrReg, lsxLoop
+        ;; tail:
+        ;;    n %= loopSize
+        ;;    for off = 0; n >= 8; off += 8, n -= 8 {
+        ;;            zero8(s, ptrReg, off)
+        ;;    }
+        ;;
+        ;;    if n != 0 {
+        ;;           zero8(s, ptrReg, off+n-8)
+        ;;    }
+
+        (let [p1 (.Prog s loong64/AADDV)]
+          (set! (.-Type (.-From p1)) obj/TYPE_CONST)
+          (set! (.-Offset (.-From p1)) (- n (% n loopSize)))
+          (set! (.-Reg p1) ptrReg)
+          (set! (.-Type (.-To p1)) obj/TYPE_REG)
+          (set! (.-Reg (.-To p1)) endReg)
+
+          (let [p2 (.Prog s loong64/AMOVBU)]
+            (set! (.-Type (.-From p2)) obj/TYPE_MEM)
+            (set! (.-Name (.-From p2)) obj/NAME_EXTERN)
+            (set! (.-Sym (.-From p2)) (.-Loong64HasLSX ir/Syms))
+            (set! (.-Type (.-To p2)) obj/TYPE_REG)
+            (set! (.-Reg (.-To p2)) flagReg)
+
+            (let [p3 (.Prog s loong64/ABNE)]
+              (set! (.-Type (.-From p3)) obj/TYPE_REG)
+              (set! (.-Reg (.-From p3)) flagReg)
+              (set! (.-Type (.-To p3)) obj/TYPE_BRANCH)
+
+              (for [(set! off 0)] (< off loopSize) (set! off + 8)
+                (zero8 s ptrReg off))
+
+
+              (let [p4 (.Prog s loong64/AADDV)]
+                (set! (.-Type (.-From p4)) obj/TYPE_CONST)
+                (set! (.-Offset (.-From p4)) loopSize)
+                (set! (.-Type (.-To p4)) obj/TYPE_REG)
+                (set! (.-Reg (.-To p4)) ptrReg)
+
+                (let [p5 (.Prog s loong64/ABNE)]
+                  (set! (.-Type (.-From p5)) obj/TYPE_REG)
+                  (set! (.-Reg (.-From p5)) endReg)
+                  (set! (.-Reg p5) ptrReg)
+                  (set! (.-Type (.-To p5)) obj/TYPE_BRANCH)
+                  (.SetTarget (.-To p5) (.-Link p3))
+
+                  (let [p6 (.Prog s obj/AJMP)]
+                    (set! (.-Type (.-To p6)) obj/TYPE_BRANCH)
+
+                    (let [p7 (.Prog s loong64/AVXORV)]
+                      (set! (.-Type (.-From p7)) obj/TYPE_REG)
+                      (set! (.-Reg (.-From p7)) loong64/REG_V31)
+                      (set! (.-Type (.-To p7)) obj/TYPE_REG)
+                      (set! (.-Reg (.-To p7)) loong64/REG_V31)
+                      (.SetTarget (.-To p3) p7)
+
+                      (for [(set! off 0)] (< off loopSize) (set! off + 16)
+                        (zero16 s loong64/REG_V31 ptrReg off))
+
+
+                      (let [p8 (.Prog s loong64/AADDV)]
+                        (set! (.-Type (.-From p8)) obj/TYPE_CONST)
+                        (set! (.-Offset (.-From p8)) loopSize)
+                        (set! (.-Type (.-To p8)) obj/TYPE_REG)
+                        (set! (.-Reg (.-To p8)) ptrReg)
+
+                        (let [p9 (.Prog s loong64/ABNE)]
+                          (set! (.-Type (.-From p9)) obj/TYPE_REG)
+                          (set! (.-Reg (.-From p9)) endReg)
+                          (set! (.-Reg p9) ptrReg)
+                          (set! (.-Type (.-To p9)) obj/TYPE_BRANCH)
+                          (.SetTarget (.-To p9) (.-Link p7))
+
+                          (let [p10 (.Prog s obj/ANOP)]
+                            (.SetTarget (.-To p6) p10)
+
+                            ;; Multiples of the loop size are now done.
+                            (set! n % loopSize)
+                            ;; Write any fractional portion.
+                            (for [(set! off 0)] (>= n 8) (set! off + 8)
+                              ;; MOVV   ZR, off(ptrReg)
+                              (zero8 s ptrReg off)
+                              (set! n - 8))
+
+
+                            (when (!= n 0)
+                              (zero8 s ptrReg (- (+ off n) 8)))))))))))))))
+
+
+    (case [ssa/OpLOONG64LoweredMove]
+      (let [dstReg (.Reg (aget (.-Args v) 0))
+          ^{:line 709} srcReg (.Reg (aget (.-Args v) 1))]
+        (when (== dstReg srcReg)
+          (break))
+
+        (let [tmpReg (conv int16 loong64/REG_R23)
+            ^{:line 714} n (.-AuxInt v)]
+          (when (< n 16)
+            (.Fatalf v "Move too small %d" n))
+
+
+          (let [^int64 off (zero int64)]
+            (while (>= n 8)
+              ;; MOVV     off(srcReg), tmpReg
+              ;; MOVV     tmpReg, off(dstReg)
+              (move8 s srcReg dstReg tmpReg off)
+              (set! off + 8)
+              (set! n - 8))
+
+
+            (when (!= n 0)
+              ;; MOVV     off+n-8(srcReg), tmpReg
+              ;; MOVV     tmpReg, off+n-8(srcReg)
+              (move8 s srcReg dstReg tmpReg (- (+ off n) 8)))))))
+
+    (case [ssa/OpLOONG64LoweredMoveLoop]
+      (let [dstReg (.Reg (aget (.-Args v) 0))
+          ^{:line 735} srcReg (.Reg (aget (.-Args v) 1))]
+        (when (== dstReg srcReg)
+          (break))
+
+        (let [srcEndReg (conv int16 loong64/REG_R23)
+            ^{:line 740} tmpReg (conv int16 loong64/REG_R24)
+            ^{:line 741 :tag int64} off (zero int64)
+            ^{:line 742} n (.-AuxInt v)
+            ^{:line 743} loopSize (conv int64 64)]
+          (when (< n (* 3 loopSize))
+            ;; - a loop count of 0 won't work.
+            ;; - a loop count of 1 is useless.
+            ;; - a loop count of 2 is a code size ~tie
+            ;;     4 instructions to implement the loop
+            ;;     8 instructions in the loop body
+            ;;   vs
+            ;;     16 instructions in the straightline code
+            ;;   Might as well use straightline code.
+            (.Fatalf v "MoveLoop size too small %d" n))
+
+
+          ;;    ADDV    n - n%loopSize, srcReg, srcEndReg
+          ;; Loop8:
+          ;;    for off = 0; off < loopSize; off += 8 {
+          ;;            move8(s, srcReg, dstReg, tmpReg, off)
+          ;;    }
+          ;;    ADDV    $loopSize, srcReg
+          ;;    ADDV    $loopSize, dstReg
+          ;;    BNE     srcEndReg, srcReg, Loop8
+          ;;
+          ;;    n %= loopSize
+          ;;    for off = 0; n >= 8; off += 8 {
+          ;;           move8(s, srcReg, dstReg, tmpReg, off)
+          ;;           n -= 8
+          ;;    }
+          ;;
+          ;;    if n != 0 {
+          ;;           move8(s, srcReg, dstReg, tmpReg, off+n-8)
+          ;;    }
+
+          (let [p1 (.Prog s loong64/AADDV)]
+            (set! (.-Type (.-From p1)) obj/TYPE_CONST)
+            (set! (.-Offset (.-From p1)) (- n (% n loopSize)))
+            (set! (.-Reg p1) srcReg)
+            (set! (.-Type (.-To p1)) obj/TYPE_REG)
+            (set! (.-Reg (.-To p1)) srcEndReg)
+
+            (for [(set! off 0)] (< off loopSize) (set! off + 8)
+              (move8 s srcReg dstReg tmpReg off))
+
+
+            (let [p2 (.Prog s loong64/AADDV)]
+              (set! (.-Type (.-From p2)) obj/TYPE_CONST)
+              (set! (.-Offset (.-From p2)) loopSize)
+              (set! (.-Type (.-To p2)) obj/TYPE_REG)
+              (set! (.-Reg (.-To p2)) srcReg)
+
+              (let [p3 (.Prog s loong64/AADDV)]
+                (set! (.-Type (.-From p3)) obj/TYPE_CONST)
+                (set! (.-Offset (.-From p3)) loopSize)
+                (set! (.-Type (.-To p3)) obj/TYPE_REG)
+                (set! (.-Reg (.-To p3)) dstReg)
+
+                (let [p4 (.Prog s loong64/ABNE)]
+                  (set! (.-Type (.-From p4)) obj/TYPE_REG)
+                  (set! (.-Reg (.-From p4)) srcEndReg)
+                  (set! (.-Reg p4) srcReg)
+                  (set! (.-Type (.-To p4)) obj/TYPE_BRANCH)
+                  (.SetTarget (.-To p4) (.-Link p1))
+
+                  ;; Multiples of the loop size are now done.
+                  (set! n % loopSize)
+
+                  ;; Copy any fractional portion.
+                  (for [(set! off 0)] (>= n 8) (set! off + 8)
+                    (move8 s srcReg dstReg tmpReg off)
+                    (set! n - 8))
+
+
+                  (when (!= n 0)
+                    (move8 s srcReg dstReg tmpReg (- (+ off n) 8))))))))))
+
+
+    (case [ssa/OpLOONG64CALLstatic ssa/OpLOONG64CALLclosure ssa/OpLOONG64CALLinter]
+      (.Call s v))
+    (case [ssa/OpLOONG64CALLtail ssa/OpLOONG64CALLtailinter]
+      (.TailCall s v))
+    (case [ssa/OpLOONG64LoweredWB]
+      (let [p (.Prog s obj/ACALL)]
+        (set! (.-Type (.-To p)) obj/TYPE_MEM)
+        (set! (.-Name (.-To p)) obj/NAME_EXTERN)
+        ;; AuxInt encodes how many buffer entries we need.
+        (set! (.-Sym (.-To p)) (aget (.-GCWriteBarrier ir/Syms) (- (.-AuxInt v) 1)))))
+
+    (case [ssa/OpLOONG64LoweredPubBarrier]
+      ;; DBAR 0x1A
+      (let [p (.Prog s (.Asm (.-Op v)))]
+        (set! (.-Type (.-From p)) obj/TYPE_CONST)
+        (set! (.-Offset (.-From p)) 0x1A)))
+
+    (case [ssa/OpLOONG64LoweredPanicBoundsRR ssa/OpLOONG64LoweredPanicBoundsRC ssa/OpLOONG64LoweredPanicBoundsCR ssa/OpLOONG64LoweredPanicBoundsCC]
+      ;; Compute the constant we put in the PCData entry for this call.
+      (let [(values code signed) (.Code (conv ssa/BoundsKind (.-AuxInt v)))
+          ^{:line 838} xIsReg false
+          ^{:line 839} yIsReg false
+          ^{:line 840} xVal 0
+          ^{:line 841} yVal 0]
+        (switch (.-Op v)
+          (case [ssa/OpLOONG64LoweredPanicBoundsRR]
+            (set! xIsReg true)
+            (set! xVal (conv int (- (.Reg (aget (.-Args v) 0)) loong64/REG_R4)))
+            (set! yIsReg true)
+            (set! yVal (conv int (- (.Reg (aget (.-Args v) 1)) loong64/REG_R4))))
+          (case [ssa/OpLOONG64LoweredPanicBoundsRC]
+            (set! xIsReg true)
+            (set! xVal (conv int (- (.Reg (aget (.-Args v) 0)) loong64/REG_R4)))
+            (let [c (.-C (assert ssa/PanicBoundsC (.-Aux v)))]
+              (if (and (>= c 0) (<= c abi/BoundsMaxConst))
+                (set! yVal (conv int c))
+                (do
+                  ;; Move constant to a register
+                  (set! yIsReg true)
+                  (when (== yVal xVal)
+                    (set! yVal 1))
+
+                  (let [p (.Prog s loong64/AMOVV)]
+                    (set! (.-Type (.-From p)) obj/TYPE_CONST)
+                    (set! (.-Offset (.-From p)) c)
+                    (set! (.-Type (.-To p)) obj/TYPE_REG)
+                    (set! (.-Reg (.-To p)) (+ loong64/REG_R4 (conv int16 yVal))))))))
+
+          (case [ssa/OpLOONG64LoweredPanicBoundsCR]
+            (set! yIsReg true)
+            (set! yVal (conv int (- (.Reg (aget (.-Args v) 0)) loong64/REG_R4)))
+            (let [c (.-C (assert ssa/PanicBoundsC (.-Aux v)))]
+              (if (and (>= c 0) (<= c abi/BoundsMaxConst))
+                (set! xVal (conv int c))
+                (do
+                  ;; Move constant to a register
+                  (set! xIsReg true)
+                  (when (== xVal yVal)
+                    (set! xVal 1))
+
+                  (let [p (.Prog s loong64/AMOVV)]
+                    (set! (.-Type (.-From p)) obj/TYPE_CONST)
+                    (set! (.-Offset (.-From p)) c)
+                    (set! (.-Type (.-To p)) obj/TYPE_REG)
+                    (set! (.-Reg (.-To p)) (+ loong64/REG_R4 (conv int16 xVal))))))))
+
+          (case [ssa/OpLOONG64LoweredPanicBoundsCC]
+            (let [c (.-Cx (assert ssa/PanicBoundsCC (.-Aux v)))]
+              (if (and (>= c 0) (<= c abi/BoundsMaxConst))
+                (set! xVal (conv int c))
+                (do
+                  ;; Move constant to a register
+                  (set! xIsReg true)
+                  (let [p (.Prog s loong64/AMOVV)]
+                    (set! (.-Type (.-From p)) obj/TYPE_CONST)
+                    (set! (.-Offset (.-From p)) c)
+                    (set! (.-Type (.-To p)) obj/TYPE_REG)
+                    (set! (.-Reg (.-To p)) (+ loong64/REG_R4 (conv int16 xVal))))))
+
+              (set! c (.-Cy (assert ssa/PanicBoundsCC (.-Aux v))))
+              (if (and (>= c 0) (<= c abi/BoundsMaxConst))
+                (set! yVal (conv int c))
+                (do
+                  ;; Move constant to a register
+                  (set! yIsReg true)
+                  (set! yVal 1)
+                  (let [p (.Prog s loong64/AMOVV)]
+                    (set! (.-Type (.-From p)) obj/TYPE_CONST)
+                    (set! (.-Offset (.-From p)) c)
+                    (set! (.-Type (.-To p)) obj/TYPE_REG)
+                    (set! (.-Reg (.-To p)) (+ loong64/REG_R4 (conv int16 yVal)))))))))
+
+
+        (let [c (abi/BoundsEncode code signed xIsReg yIsReg xVal yVal)
+
+            ^{:line 913} p (.Prog s obj/APCDATA)]
+          (.SetConst (.-From p) abi/PCDATA_PanicBounds)
+          (.SetConst (.-To p) (conv int64 c))
+          (set! p (.Prog s obj/ACALL))
+          (set! (.-Type (.-To p)) obj/TYPE_MEM)
+          (set! (.-Name (.-To p)) obj/NAME_EXTERN)
+          (set! (.-Sym (.-To p)) (.-PanicBounds ir/Syms)))))
+
+    (case [ssa/OpLOONG64LoweredAtomicLoad8 ssa/OpLOONG64LoweredAtomicLoad32 ssa/OpLOONG64LoweredAtomicLoad64]
+      ;; MOVB	(Rarg0), Rout
+      ;; DBAR	0x14
+      (let [as loong64/AMOVV]
+        (switch (.-Op v)
+          (case [ssa/OpLOONG64LoweredAtomicLoad8]
+            (set! as loong64/AMOVB))
+          (case [ssa/OpLOONG64LoweredAtomicLoad32]
+            (set! as loong64/AMOVW)))
+
+        (let [p (.Prog s as)]
+          (set! (.-Type (.-From p)) obj/TYPE_MEM)
+          (set! (.-Reg (.-From p)) (.Reg (aget (.-Args v) 0)))
+          (set! (.-Type (.-To p)) obj/TYPE_REG)
+          (set! (.-Reg (.-To p)) (.Reg0 v))
+          (let [p1 (.Prog s loong64/ADBAR)]
+            (set! (.-Type (.-From p1)) obj/TYPE_CONST)
+            (set! (.-Offset (.-From p1)) 0x14)))))
+
+    (case [ssa/OpLOONG64LoweredAtomicStore8
+        ^{:line 941} ssa/OpLOONG64LoweredAtomicStore32
+        ^{:line 942} ssa/OpLOONG64LoweredAtomicStore64]
+      ;; DBAR 0x12
+      ;; MOVx (Rarg1), Rout
+      ;; DBAR 0x18
+      (let [movx loong64/AMOVV]
+        (switch (.-Op v)
+          (case [ssa/OpLOONG64LoweredAtomicStore8]
+            (set! movx loong64/AMOVB))
+          (case [ssa/OpLOONG64LoweredAtomicStore32]
+            (set! movx loong64/AMOVW)))
+
+        (let [p (.Prog s loong64/ADBAR)]
+          (set! (.-Type (.-From p)) obj/TYPE_CONST)
+          (set! (.-Offset (.-From p)) 0x12)
+
+          (let [p1 (.Prog s movx)]
+            (set! (.-Type (.-From p1)) obj/TYPE_REG)
+            (set! (.-Reg (.-From p1)) (.Reg (aget (.-Args v) 1)))
+            (set! (.-Type (.-To p1)) obj/TYPE_MEM)
+            (set! (.-Reg (.-To p1)) (.Reg (aget (.-Args v) 0)))
+
+            (let [p2 (.Prog s loong64/ADBAR)]
+              (set! (.-Type (.-From p2)) obj/TYPE_CONST)
+              (set! (.-Offset (.-From p2)) 0x18))))))
+
+    (case [ssa/OpLOONG64LoweredAtomicStore8Variant
+        ^{:line 968} ssa/OpLOONG64LoweredAtomicStore32Variant
+        ^{:line 969} ssa/OpLOONG64LoweredAtomicStore64Variant]
+      ;;AMSWAPx  Rarg1, (Rarg0), Rout
+      (let [amswapx loong64/AAMSWAPDBV]
+        (switch (.-Op v)
+          (case [ssa/OpLOONG64LoweredAtomicStore32Variant]
+            (set! amswapx loong64/AAMSWAPDBW))
+          (case [ssa/OpLOONG64LoweredAtomicStore8Variant]
+            (set! amswapx loong64/AAMSWAPDBB)))
+
+        (let [p (.Prog s amswapx)]
+          (set! (.-Type (.-From p)) obj/TYPE_REG)
+          (set! (.-Reg (.-From p)) (.Reg (aget (.-Args v) 1)))
+          (set! (.-Type (.-To p)) obj/TYPE_MEM)
+          (set! (.-Reg (.-To p)) (.Reg (aget (.-Args v) 0)))
+          (set! (.-RegTo2 p) loong64/REGZERO))))
+
+    (case [ssa/OpLOONG64LoweredAtomicExchange32 ssa/OpLOONG64LoweredAtomicExchange64]
+      ;; AMSWAPx	Rarg1, (Rarg0), Rout
+      (let [amswapx loong64/AAMSWAPDBV]
+        (when (== (.-Op v) ssa/OpLOONG64LoweredAtomicExchange32)
+          (set! amswapx loong64/AAMSWAPDBW))
+
+        (let [p (.Prog s amswapx)]
+          (set! (.-Type (.-From p)) obj/TYPE_REG)
+          (set! (.-Reg (.-From p)) (.Reg (aget (.-Args v) 1)))
+          (set! (.-Type (.-To p)) obj/TYPE_MEM)
+          (set! (.-Reg (.-To p)) (.Reg (aget (.-Args v) 0)))
+          (set! (.-RegTo2 p) (.Reg0 v)))))
+
+    (case [ssa/OpLOONG64LoweredAtomicExchange8Variant]
+      ;; AMSWAPDBB	Rarg1, (Rarg0), Rout
+      (let [p (.Prog s loong64/AAMSWAPDBB)]
+        (set! (.-Type (.-From p)) obj/TYPE_REG)
+        (set! (.-Reg (.-From p)) (.Reg (aget (.-Args v) 1)))
+        (set! (.-Type (.-To p)) obj/TYPE_MEM)
+        (set! (.-Reg (.-To p)) (.Reg (aget (.-Args v) 0)))
+        (set! (.-RegTo2 p) (.Reg0 v))))
+
+    (case [ssa/OpLOONG64LoweredAtomicAdd32 ssa/OpLOONG64LoweredAtomicAdd64]
+      ;; AMADDx  Rarg1, (Rarg0), Rout
+      ;; ADDV    Rarg1, Rout, Rout
+      (let [amaddx loong64/AAMADDDBV
+          ^{:line 1011} addx loong64/AADDV]
+        (when (== (.-Op v) ssa/OpLOONG64LoweredAtomicAdd32)
+          (set! amaddx loong64/AAMADDDBW))
+
+        (let [p (.Prog s amaddx)]
+          (set! (.-Type (.-From p)) obj/TYPE_REG)
+          (set! (.-Reg (.-From p)) (.Reg (aget (.-Args v) 1)))
+          (set! (.-Type (.-To p)) obj/TYPE_MEM)
+          (set! (.-Reg (.-To p)) (.Reg (aget (.-Args v) 0)))
+          (set! (.-RegTo2 p) (.Reg0 v))
+
+          (let [p1 (.Prog s addx)]
+            (set! (.-Type (.-From p1)) obj/TYPE_REG)
+            (set! (.-Reg (.-From p1)) (.Reg (aget (.-Args v) 1)))
+            (set! (.-Reg p1) (.Reg0 v))
+            (set! (.-Type (.-To p1)) obj/TYPE_REG)
+            (set! (.-Reg (.-To p1)) (.Reg0 v))))))
+
+    (case [ssa/OpLOONG64LoweredAtomicCas32 ssa/OpLOONG64LoweredAtomicCas64]
+      ;; MOVV $0, Rout
+      ;; DBAR 0x14
+      ;; LL	(Rarg0), Rtmp
+      ;; BNE	Rtmp, Rarg1, 4(PC)
+      ;; MOVV Rarg2, Rout
+      ;; SC	Rout, (Rarg0)
+      ;; BEQ	Rout, -4(PC)
+      ;; DBAR 0x12
+      (let [ll loong64/ALLV
+          ^{:line 1039} sc loong64/ASCV]
+        (when (== (.-Op v) ssa/OpLOONG64LoweredAtomicCas32)
+          (set! ll loong64/ALL)
+          (set! sc loong64/ASC))
+
+
+        (let [p (.Prog s loong64/AMOVV)]
+          (set! (.-Type (.-From p)) obj/TYPE_REG)
+          (set! (.-Reg (.-From p)) loong64/REGZERO)
+          (set! (.-Type (.-To p)) obj/TYPE_REG)
+          (set! (.-Reg (.-To p)) (.Reg0 v))
+
+          (let [p1 (.Prog s loong64/ADBAR)]
+            (set! (.-Type (.-From p1)) obj/TYPE_CONST)
+            (set! (.-Offset (.-From p1)) 0x14)
+
+            (let [p2 (.Prog s ll)]
+              (set! (.-Type (.-From p2)) obj/TYPE_MEM)
+              (set! (.-Reg (.-From p2)) (.Reg (aget (.-Args v) 0)))
+              (set! (.-Type (.-To p2)) obj/TYPE_REG)
+              (set! (.-Reg (.-To p2)) loong64/REGTMP)
+
+              (let [p3 (.Prog s loong64/ABNE)]
+                (set! (.-Type (.-From p3)) obj/TYPE_REG)
+                (set! (.-Reg (.-From p3)) (.Reg (aget (.-Args v) 1)))
+                (set! (.-Reg p3) loong64/REGTMP)
+                (set! (.-Type (.-To p3)) obj/TYPE_BRANCH)
+
+                (let [p4 (.Prog s loong64/AMOVV)]
+                  (set! (.-Type (.-From p4)) obj/TYPE_REG)
+                  (set! (.-Reg (.-From p4)) (.Reg (aget (.-Args v) 2)))
+                  (set! (.-Type (.-To p4)) obj/TYPE_REG)
+                  (set! (.-Reg (.-To p4)) (.Reg0 v))
+
+                  (let [p5 (.Prog s sc)]
+                    (set! (.-Type (.-From p5)) obj/TYPE_REG)
+                    (set! (.-Reg (.-From p5)) (.Reg0 v))
+                    (set! (.-Type (.-To p5)) obj/TYPE_MEM)
+                    (set! (.-Reg (.-To p5)) (.Reg (aget (.-Args v) 0)))
+
+                    (let [p6 (.Prog s loong64/ABEQ)]
+                      (set! (.-Type (.-From p6)) obj/TYPE_REG)
+                      (set! (.-Reg (.-From p6)) (.Reg0 v))
+                      (set! (.-Type (.-To p6)) obj/TYPE_BRANCH)
+                      (.SetTarget (.-To p6) p2)
+
+                      (let [p7 (.Prog s loong64/ADBAR)]
+                        (set! (.-Type (.-From p7)) obj/TYPE_CONST)
+                        (set! (.-Offset (.-From p7)) 0x12)
+                        (.SetTarget (.-To p3) p7)))))))))))
+
+    (case [ssa/OpLOONG64LoweredAtomicAnd32
+        ^{:line 1091} ssa/OpLOONG64LoweredAtomicOr32]
+      ;; AM{AND,OR}DBx  Rarg1, (Rarg0), RegZero
+      (let [p (.Prog s (.Asm (.-Op v)))]
+        (set! (.-Type (.-From p)) obj/TYPE_REG)
+        (set! (.-Reg (.-From p)) (.Reg (aget (.-Args v) 1)))
+        (set! (.-Type (.-To p)) obj/TYPE_MEM)
+        (set! (.-Reg (.-To p)) (.Reg (aget (.-Args v) 0)))
+        (set! (.-RegTo2 p) loong64/REGZERO)))
+
+    (case [ssa/OpLOONG64LoweredAtomicAnd32value
+        ^{:line 1101} ssa/OpLOONG64LoweredAtomicAnd64value
+        ^{:line 1102} ssa/OpLOONG64LoweredAtomicOr64value
+        ^{:line 1103} ssa/OpLOONG64LoweredAtomicOr32value]
+      ;; AM{AND,OR}DBx  Rarg1, (Rarg0), Rout
+      (let [p (.Prog s (.Asm (.-Op v)))]
+        (set! (.-Type (.-From p)) obj/TYPE_REG)
+        (set! (.-Reg (.-From p)) (.Reg (aget (.-Args v) 1)))
+        (set! (.-Type (.-To p)) obj/TYPE_MEM)
+        (set! (.-Reg (.-To p)) (.Reg (aget (.-Args v) 0)))
+        (set! (.-RegTo2 p) (.Reg0 v))))
+
+    (case [ssa/OpLOONG64LoweredAtomicCas64Variant ssa/OpLOONG64LoweredAtomicCas32Variant]
+      ;; MOVV         $0, Rout
+      ;; MOVV         Rarg1, Rtmp
+      ;; AMCASDBx     Rarg2, (Rarg0), Rtmp
+      ;; BNE          Rarg1, Rtmp, 2(PC)
+      ;; MOVV         $1, Rout
+      ;; NOP
+
+      (let [amcasx loong64/AAMCASDBV]
+        (when (== (.-Op v) ssa/OpLOONG64LoweredAtomicCas32Variant)
+          (set! amcasx loong64/AAMCASDBW))
+
+
+        (let [p (.Prog s loong64/AMOVV)]
+          (set! (.-Type (.-From p)) obj/TYPE_REG)
+          (set! (.-Reg (.-From p)) loong64/REGZERO)
+          (set! (.-Type (.-To p)) obj/TYPE_REG)
+          (set! (.-Reg (.-To p)) (.Reg0 v))
+
+          (let [p1 (.Prog s loong64/AMOVV)]
+            (set! (.-Type (.-From p1)) obj/TYPE_REG)
+            (set! (.-Reg (.-From p1)) (.Reg (aget (.-Args v) 1)))
+            (set! (.-Type (.-To p1)) obj/TYPE_REG)
+            (set! (.-Reg (.-To p1)) loong64/REGTMP)
+
+            (let [p2 (.Prog s amcasx)]
+              (set! (.-Type (.-From p2)) obj/TYPE_REG)
+              (set! (.-Reg (.-From p2)) (.Reg (aget (.-Args v) 2)))
+              (set! (.-Type (.-To p2)) obj/TYPE_MEM)
+              (set! (.-Reg (.-To p2)) (.Reg (aget (.-Args v) 0)))
+              (set! (.-RegTo2 p2) loong64/REGTMP)
+
+              (let [p3 (.Prog s loong64/ABNE)]
+                (set! (.-Type (.-From p3)) obj/TYPE_REG)
+                (set! (.-Reg (.-From p3)) (.Reg (aget (.-Args v) 1)))
+                (set! (.-Reg p3) loong64/REGTMP)
+                (set! (.-Type (.-To p3)) obj/TYPE_BRANCH)
+
+                (let [p4 (.Prog s loong64/AMOVV)]
+                  (set! (.-Type (.-From p4)) obj/TYPE_CONST)
+                  (set! (.-Offset (.-From p4)) 0x1)
+                  (set! (.-Type (.-To p4)) obj/TYPE_REG)
+                  (set! (.-Reg (.-To p4)) (.Reg0 v))
+
+                  (let [p5 (.Prog s obj/ANOP)]
+                    (.SetTarget (.-To p3) p5)))))))))
+
+    (case [ssa/OpLOONG64LoweredNilCheck]
+      ;; Issue a load which will fault if arg is nil.
+      (let [p (.Prog s loong64/AMOVB)]
+        (set! (.-Type (.-From p)) obj/TYPE_MEM)
+        (set! (.-Reg (.-From p)) (.Reg (aget (.-Args v) 0)))
+        (ssagen/AddAux (addr (.-From p)) v)
+        (set! (.-Type (.-To p)) obj/TYPE_REG)
+        (set! (.-Reg (.-To p)) loong64/REGTMP)
+        (when (logopt/Enabled)
+          (logopt/LogOpt (.-Pos v) "nilcheck" "genssa" (.-Name (.-Func (.-Block v)))))
+
+        (when (and (!= (.-Nil base/Debug) 0) (> ^{:go/via [lico]} (.Line (.-Pos v)) 1)) ; v.Pos.Line()==1 in generated wrappers
+          (base/WarnfAt (.-Pos v) "generated nil check"))))
+
+    (case [ssa/OpLOONG64FPFlagTrue
+        ^{:line 1174} ssa/OpLOONG64FPFlagFalse]
+      ;; MOVV	$0, r
+      ;; BFPF	2(PC)
+      ;; MOVV	$1, r
+      (let [branch loong64/ABFPF]
+        (when (== (.-Op v) ssa/OpLOONG64FPFlagFalse)
+          (set! branch loong64/ABFPT))
+
+        (let [p (.Prog s loong64/AMOVV)]
+          (set! (.-Type (.-From p)) obj/TYPE_REG)
+          (set! (.-Reg (.-From p)) loong64/REGZERO)
+          (set! (.-Type (.-To p)) obj/TYPE_REG)
+          (set! (.-Reg (.-To p)) (.Reg v))
+          (let [p2 (.Prog s branch)]
+            (set! (.-Type (.-To p2)) obj/TYPE_BRANCH)
+            (let [p3 (.Prog s loong64/AMOVV)]
+              (set! (.-Type (.-From p3)) obj/TYPE_CONST)
+              (set! (.-Offset (.-From p3)) 1)
+              (set! (.-Type (.-To p3)) obj/TYPE_REG)
+              (set! (.-Reg (.-To p3)) (.Reg v))
+              (let [p4 (.Prog s obj/ANOP)] ; not a machine instruction, for branch to land
+                (.SetTarget (.-To p2) p4)))))))
+    (case [ssa/OpLOONG64LoweredGetClosurePtr]
+      ;; Closure pointer is R22 (loong64.REGCTXT).
+      (ssagen/CheckLoweredGetClosurePtr v))
+    (case [ssa/OpLOONG64LoweredGetCallerSP]
+      ;; caller's SP is FixedFrameSize below the address of the first arg
+      (let [p (.Prog s loong64/AMOVV)]
+        (set! (.-Type (.-From p)) obj/TYPE_ADDR)
+        (set! (.-Offset (.-From p)) (- ^{:go/via [Arch]} (.-FixedFrameSize (.-Arch base/Ctxt))))
+        (set! (.-Name (.-From p)) obj/NAME_PARAM)
+        (set! (.-Type (.-To p)) obj/TYPE_REG)
+        (set! (.-Reg (.-To p)) (.Reg v))))
+    (case [ssa/OpLOONG64LoweredGetCallerPC]
+      (let [p (.Prog s obj/AGETCALLERPC)]
+        (set! (.-Type (.-To p)) obj/TYPE_REG)
+        (set! (.-Reg (.-To p)) (.Reg v))))
+    (case [ssa/OpLOONG64MASKEQZ ssa/OpLOONG64MASKNEZ]
+      (let [p (.Prog s (.Asm (.-Op v)))]
+        (set! (.-Type (.-From p)) obj/TYPE_REG)
+        (set! (.-Reg (.-From p)) (.Reg (aget (.-Args v) 1)))
+        (set! (.-Reg p) (.Reg (aget (.-Args v) 0)))
+        (set! (.-Type (.-To p)) obj/TYPE_REG)
+        (set! (.-Reg (.-To p)) (.Reg v))))
+
+    (case [ssa/OpLOONG64PRELD]
+      ;; PRELD (Rarg0), hint
+      (let [p (.Prog s (.Asm (.-Op v)))]
+        (set! (.-Type (.-From p)) obj/TYPE_MEM)
+        (set! (.-Reg (.-From p)) (.Reg (aget (.-Args v) 0)))
+        (.AddRestSourceConst p (bit-and (.-AuxInt v) 0x1f))))
+
+    (case [ssa/OpLOONG64PRELDX]
+      ;; PRELDX (Rarg0), $n, $hint
+      (let [p (.Prog s (.Asm (.-Op v)))]
+        (set! (.-Type (.-From p)) obj/TYPE_MEM)
+        (set! (.-Reg (.-From p)) (.Reg (aget (.-Args v) 0)))
+        (.AddRestSourceArgs p (lit (slice obj/Addr)
+            (lit _ :Type obj/TYPE_CONST :Offset (bit-and (>> (.-AuxInt v) 5) 0x1fffffffff))
+            (lit _ :Type obj/TYPE_CONST :Offset (bit-and (>> (.-AuxInt v) 0) 0x1f))))))
+
+
+    (case [ssa/OpLOONG64ADDshiftLLV]
+      ;; ADDshiftLLV Rarg0, Rarg1, $shift
+      ;; ALSLV $shift, Rarg1, Rarg0, Rtmp
+      (let [p (.Prog s (.Asm (.-Op v)))]
+        (set! (.-Type (.-From p)) obj/TYPE_CONST)
+        (set! (.-Offset (.-From p)) (.-AuxInt v))
+        (set! (.-Reg p) (.Reg (aget (.-Args v) 1)))
+        (.AddRestSourceReg p (.Reg (aget (.-Args v) 0)))
+        (set! (.-Type (.-To p)) obj/TYPE_REG)
+        (set! (.-Reg (.-To p)) (.Reg v))))
+
+    (case [ssa/OpClobber ssa/OpClobberReg])
+    ;; TODO: implement for clobberdead experiment. Nop is ok for now.
+    (default
+      (.Fatalf v "genValue not implemented: %s" (.LongString v)))))
+
+
+
+(go/var blockJump (lit (map ssa/BlockKind (struct
+        ^{:line 1255 :tag obj/As} asm ^obj/As invasm))
+
+    ^{:line 1257} [ssa/BlockLOONG64EQZ (lit _ loong64/ABEQ loong64/ABNE)]
+    ^{:line 1258} [ssa/BlockLOONG64NEZ (lit _ loong64/ABNE loong64/ABEQ)]
+    ^{:line 1259} [ssa/BlockLOONG64LTZ (lit _ loong64/ABLTZ loong64/ABGEZ)]
+    ^{:line 1260} [ssa/BlockLOONG64GEZ (lit _ loong64/ABGEZ loong64/ABLTZ)]
+    ^{:line 1261} [ssa/BlockLOONG64LEZ (lit _ loong64/ABLEZ loong64/ABGTZ)]
+    ^{:line 1262} [ssa/BlockLOONG64GTZ (lit _ loong64/ABGTZ loong64/ABLEZ)]
+    ^{:line 1263} [ssa/BlockLOONG64FPT (lit _ loong64/ABFPT loong64/ABFPF)]
+    ^{:line 1264} [ssa/BlockLOONG64FPF (lit _ loong64/ABFPF loong64/ABFPT)]
+    ^{:line 1265} [ssa/BlockLOONG64BEQ (lit _ loong64/ABEQ loong64/ABNE)]
+    ^{:line 1266} [ssa/BlockLOONG64BNE (lit _ loong64/ABNE loong64/ABEQ)]
+    ^{:line 1267} [ssa/BlockLOONG64BGE (lit _ loong64/ABGE loong64/ABLT)]
+    ^{:line 1268} [ssa/BlockLOONG64BLT (lit _ loong64/ABLT loong64/ABGE)]
+    ^{:line 1269} [ssa/BlockLOONG64BLTU (lit _ loong64/ABLTU loong64/ABGEU)]
+    ^{:line 1270} [ssa/BlockLOONG64BGEU (lit _ loong64/ABGEU loong64/ABLTU)]))
+
+
+^{:go/end 1349} (go/func ssaGenBlock [^{:tag (* ssagen/State)} s ^{:tag (* ssa/Block)} b ^{:tag (* ssa/Block)} next]
+  (switch (.-Kind b)
+    (case [ssa/BlockPlain ssa/BlockDefer]
+      (when (!= (.Block (aget (.-Succs b) 0)) next)
+        (let [p (.Prog s obj/AJMP)]
+          (set! (.-Type (.-To p)) obj/TYPE_BRANCH)
+          (set! (.-Branches s) (append (.-Branches s) (lit ssagen/Branch :P p :B (.Block (aget (.-Succs b) 0))))))))
+
+    (case [ssa/BlockExit ssa/BlockRetJmp])
+    (case [ssa/BlockRet]
+      (.Prog s obj/ARET))
+    (case [ssa/BlockLOONG64EQZ ssa/BlockLOONG64NEZ
+        ^{:line 1285} ssa/BlockLOONG64LTZ ssa/BlockLOONG64GEZ
+        ^{:line 1286} ssa/BlockLOONG64LEZ ssa/BlockLOONG64GTZ
+        ^{:line 1287} ssa/BlockLOONG64BEQ ssa/BlockLOONG64BNE
+        ^{:line 1288} ssa/BlockLOONG64BLT ssa/BlockLOONG64BGE
+        ^{:line 1289} ssa/BlockLOONG64BLTU ssa/BlockLOONG64BGEU
+        ^{:line 1290} ssa/BlockLOONG64FPT ssa/BlockLOONG64FPF]
+      (let [jmp (aget blockJump (.-Kind b))
+          ^{:line 1292 :tag (* obj/Prog)} p (zero (* obj/Prog))]
+        (switch next
+          (case [(.Block (aget (.-Succs b) 0))]
+            (set! p (.Br s (.-invasm jmp) (.Block (aget (.-Succs b) 1)))))
+          (case [(.Block (aget (.-Succs b) 1))]
+            (set! p (.Br s (.-asm jmp) (.Block (aget (.-Succs b) 0)))))
+          (default
+            (if (!= (.-Likely b) ssa/BranchUnlikely) (do
+                (set! p (.Br s (.-asm jmp) (.Block (aget (.-Succs b) 0))))
+                (.Br s obj/AJMP (.Block (aget (.-Succs b) 1))))
+              (do
+                (set! p (.Br s (.-invasm jmp) (.Block (aget (.-Succs b) 1))))
+                (.Br s obj/AJMP (.Block (aget (.-Succs b) 0)))))))
+
+
+        (switch (.-Kind b)
+          (case [ssa/BlockLOONG64BEQ ssa/BlockLOONG64BNE
+              ^{:line 1309} ssa/BlockLOONG64BGE ssa/BlockLOONG64BLT
+              ^{:line 1310} ssa/BlockLOONG64BGEU ssa/BlockLOONG64BLTU]
+            (set! (.-Type (.-From p)) obj/TYPE_REG)
+            (set! (.-Reg (.-From p)) (.Reg (aget (.-Controls b) 0)))
+            (set! (.-Reg p) (.Reg (aget (.-Controls b) 1))))
+          (case [ssa/BlockLOONG64EQZ ssa/BlockLOONG64NEZ
+              ^{:line 1315} ssa/BlockLOONG64LTZ ssa/BlockLOONG64GEZ
+              ^{:line 1316} ssa/BlockLOONG64LEZ ssa/BlockLOONG64GTZ
+              ^{:line 1317} ssa/BlockLOONG64FPT ssa/BlockLOONG64FPF]
+            (when (not (.IsFlags (.-Type (aget (.-Controls b) 0))))
+              (set! (.-Type (.-From p)) obj/TYPE_REG)
+              (set! (.-Reg (.-From p)) (.Reg (aget (.-Controls b) 0))))))))
+
+
+    (case [ssa/BlockLOONG64JUMPTABLE]
+      ;; ALSLV $3, Rarg0, Rarg1, REGTMP
+      ;; MOVV (REGTMP), REGTMP
+      ;; JMP	(REGTMP)
+      (let [p (.Prog s loong64/AALSLV)]
+        (set! (.-Type (.-From p)) obj/TYPE_CONST)
+        (set! (.-Offset (.-From p)) 3) ; idx*8
+        (set! (.-Reg p) (.Reg (aget (.-Controls b) 0)))
+        (.AddRestSourceReg p (.Reg (aget (.-Controls b) 1)))
+        (set! (.-Type (.-To p)) obj/TYPE_REG)
+        (set! (.-Reg (.-To p)) loong64/REGTMP)
+        (let [p1 (.Prog s loong64/AMOVV)]
+          (set! (.-Type (.-From p1)) obj/TYPE_MEM)
+          (set! (.-Reg (.-From p1)) loong64/REGTMP)
+          (set! (.-Offset (.-From p1)) 0)
+          (set! (.-Type (.-To p1)) obj/TYPE_REG)
+          (set! (.-Reg (.-To p1)) loong64/REGTMP)
+          (let [p2 (.Prog s obj/AJMP)]
+            (set! (.-Type (.-To p2)) obj/TYPE_MEM)
+            (set! (.-Reg (.-To p2)) loong64/REGTMP)
+            ;; Save jump tables for later resolution of the target blocks.
+            (set! (.-JumpTables s) (append (.-JumpTables s) b))))))
+
+    (default
+      (.Fatalf b "branch not implemented: %s" (.LongString b)))))
+
+
+
+^{:go/end 1360} (go/func loadRegResult ^{:tag (* obj/Prog)} [^{:tag (* ssagen/State)} s ^{:tag (* ssa/Func)} f ^{:tag (* types/Type)} t ^int16 reg ^{:tag (* ir/Name)} n ^int64 off]
+  (let [p (.Prog s (loadByType t reg))]
+    (set! (.-Type (.-From p)) obj/TYPE_MEM)
+    (set! (.-Name (.-From p)) obj/NAME_AUTO)
+    (set! (.-Sym (.-From p)) (.Linksym n))
+    (set! (.-Offset (.-From p)) (+ (.FrameOffset n) off))
+    (set! (.-Type (.-To p)) obj/TYPE_REG)
+    (set! (.-Reg (.-To p)) reg)
+    ^{:line 1359} p))
+
+
+^{:go/end 1368} (go/func spillArgReg ^{:tag (* obj/Prog)} [^{:tag (* objw/Progs)} pp ^{:tag (* obj/Prog)} p ^{:tag (* ssa/Func)} f ^{:tag (* types/Type)} t ^int16 reg ^{:tag (* ir/Name)} n ^int64 off]
+  (set! p (.Append pp p (storeByType t reg) obj/TYPE_REG reg 0 obj/TYPE_MEM 0 (+ (.FrameOffset n) off)))
+  (set! (.-Name (.-To p)) obj/NAME_PARAM)
+  (set! (.-Sym (.-To p)) (.Linksym n))
+  (set! (.-Pos p) (.WithNotStmt (.-Pos p)))
+  ^{:line 1367} p)
+
+
+
+^{:go/end 1386} (go/func move8 "move8 copies 8 bytes at src+off to dst+off.\n" [^{:tag (* ssagen/State)} s ^int16 src ^int16 dst ^int16 tmp ^int64 off]
+  ;; MOVV     off(src), tmp
+  (let [ld (.Prog s loong64/AMOVV)]
+    (set! (.-Type (.-From ld)) obj/TYPE_MEM)
+    (set! (.-Reg (.-From ld)) src)
+    (set! (.-Offset (.-From ld)) off)
+    (set! (.-Type (.-To ld)) obj/TYPE_REG)
+    (set! (.-Reg (.-To ld)) tmp)
+    ;; MOVV     tmp, off(dst)
+    (let [st (.Prog s loong64/AMOVV)]
+      (set! (.-Type (.-From st)) obj/TYPE_REG)
+      (set! (.-Reg (.-From st)) tmp)
+      (set! (.-Type (.-To st)) obj/TYPE_MEM)
+      (set! (.-Reg (.-To st)) dst)
+      (set! (.-Offset (.-To st)) off))))
+
+
+
+^{:go/end 1397} (go/func zero8 "zero8 zeroes 8 bytes at reg+off.\n" [^{:tag (* ssagen/State)} s ^int16 reg ^int64 off]
+  ;; MOVV   ZR, off(reg)
+  (let [p (.Prog s loong64/AMOVV)]
+    (set! (.-Type (.-From p)) obj/TYPE_REG)
+    (set! (.-Reg (.-From p)) loong64/REGZERO)
+    (set! (.-Type (.-To p)) obj/TYPE_MEM)
+    (set! (.-Reg (.-To p)) reg)
+    (set! (.-Offset (.-To p)) off)))
+
+
+
+^{:go/end 1408} (go/func zero16 "zero16 zeroes 16 bytes at reg+off.\n" [^{:tag (* ssagen/State)} s ^int16 regZero ^int16 regBase ^int64 off]
+  ;; VMOVQ   regZero, off(regBase)
+  (let [p (.Prog s loong64/AVMOVQ)]
+    (set! (.-Type (.-From p)) obj/TYPE_REG)
+    (set! (.-Reg (.-From p)) regZero)
+    (set! (.-Type (.-To p)) obj/TYPE_MEM)
+    (set! (.-Reg (.-To p)) regBase)
+    (set! (.-Offset (.-To p)) off)))

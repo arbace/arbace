@@ -1,0 +1,486 @@
+;; Copyright 2016 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.cmd.compile.internal.ssa) (go/file "pair.go" :imports [
+
+
+    ^{:line 8} [ir "cmd/compile/internal/ir"]
+    ^{:line 9} [types "cmd/compile/internal/types"]
+    ^{:line 10} [obj "cmd/internal/obj"]
+    ^{:line 11} [slices "slices"]])
+
+
+
+
+^{:go/end 25} (go/func pair "The pair pass finds memory operations that can be paired up\ninto single 2-register memory instructions.\n" [^{:tag (* Func)} f]
+  ;; Only arm64 for now. This pass is fairly arch-specific.
+  (switch (.-arch (.-Config f))
+    (case ["arm64"])
+    (default
+      (return)))
+
+  (pairLoads f)
+  (pairStores f))
+
+
+(go/type pairableLoadInfo (struct
+    ^{:line 28 :tag int64} width ; width of one element in the pair, in bytes
+    ^{:line 29 :tag Op} pair))
+
+
+
+
+(go/var ^{:doc "All pairableLoad ops must take 2 arguments, a pointer and a memory.\nThey must also take an offset in Aux/AuxInt.\n"} pairableLoads (lit (map Op pairableLoadInfo)
+    ^{:line 35} [OpARM64MOVDload (lit _ 8 OpARM64LDP)]
+    ^{:line 36} [OpARM64MOVWUload (lit _ 4 OpARM64LDPW)]
+    ^{:line 37} [OpARM64MOVWload (lit _ 4 OpARM64LDPSW)]
+    ;; TODO: conceivably we could pair a signed and unsigned load
+    ;; if we knew the upper bits of one of them weren't being used.
+    ^{:line 40} [OpARM64FMOVDload (lit _ 8 OpARM64FLDPD)]
+    ^{:line 41} [OpARM64FMOVSload (lit _ 4 OpARM64FLDPS)]))
+
+
+(go/type pairableStoreInfo (struct
+    ^{:line 45 :tag int64} width ; width of one element in the pair, in bytes
+    ^{:line 46 :tag Op} pair))
+
+
+
+
+
+(go/var ^{:doc "All pairableStore keys must take 3 arguments, a pointer, a value, and a memory.\nAll pairableStore values must take 4 arguments, a pointer, 2 values, and a memory.\nThey must also take an offset in Aux/AuxInt.\n"} pairableStores (lit (map Op pairableStoreInfo)
+    ^{:line 53} [OpARM64MOVDstore (lit _ 8 OpARM64STP)]
+    ^{:line 54} [OpARM64MOVWstore (lit _ 4 OpARM64STPW)]
+    ^{:line 55} [OpARM64FMOVDstore (lit _ 8 OpARM64FSTPD)]
+    ^{:line 56} [OpARM64FMOVSstore (lit _ 4 OpARM64FSTPS)]))
+
+
+
+
+
+
+
+
+^{:go/breaks [[7 119]] :go/end 120} (go/func offsetOk "offsetOk returns true if a pair instruction should be used\nfor the offset Aux+off, when the data width (of the\nunpaired instructions) is width.\nThis function is best-effort. The compiled function must\nstill work if offsetOk always returns true.\nTODO: this is currently arm64-specific.\n" ^bool [^Aux aux ^int64 off ^int64 width]
+  (when true
+    ;; Seems to generate slightly smaller code if we just
+    ;; always allow this rewrite.
+    ;;
+    ;; Without pairing, we have 2 load instructions, like:
+    ;;   LDR 88(R0), R1
+    ;;   LDR 96(R0), R2
+    ;; with pairing we have, best case:
+    ;;   LDP 88(R0), R1, R2
+    ;; but maybe we need an adjuster if out of range or unaligned:
+    ;;   ADD R0, $88, R27
+    ;;   LDP (R27), R1, R2
+    ;; Even with the adjuster, it is at least no worse.
+    ;;
+    ;; A similar situation occurs when accessing globals.
+    ;; Two loads from globals requires 4 instructions,
+    ;; two ADRP and two LDR. With pairing, we need
+    ;; ADRP+ADD+LDP, three instructions.
+    ;;
+    ;; With pairing, it looks like the critical path might
+    ;; be a little bit longer. But it should never be more
+    ;; instructions.
+    ;; TODO: see if that longer critical path causes any
+    ;; regressions.
+    (return true))
+
+  (when (!= aux nil)
+    (when [(values _ ok) (assert (* ir/Name) aux)] (not ok)
+      ;; Offset is probably too big (globals).
+      (return false))
+
+    ;; We let *ir.Names pass here, as
+    ;; they are probably small offsets from SP.
+    ;; There's no guarantee that we're in range
+    ;; in that case though (we don't know the
+    ;; stack frame size yet), so the assembler
+    ;; might need to issue fixup instructions.
+    ;; Assume some small frame size.
+    (when (>= off 0)
+      (set! off + 120)))
+
+  ;; TODO: figure out how often this helps vs. hurts.
+
+  (switch width
+    (case [4]
+      (when (and (>= off -256) (<= off 252) (== (% off 4) 0))
+        (return true)))
+
+    (case [8]
+      (when (and (>= off -512) (<= off 504) (== (% off 8) 0))
+        (return true))))
+
+
+  false)
+
+
+^{:go/end 307} (go/func pairLoads [^{:tag (* Func)} f]
+  (let [^{:tag (slice (* Value))} loads (zero (slice (* Value)))
+
+      ;; Registry of aux values for sorting.
+      ^{:line 126} auxIDs (lit (map Aux int))
+      ^{:line 127} auxID ^{:go/end 134} (fn ^int [^Aux aux]
+        (let [(values id ok) (aget auxIDs aux)]
+          (when (not ok)
+            (set! id (len auxIDs))
+            (aset auxIDs aux id))
+
+          ^{:line 133} id))]
+
+
+    (range [_ b (.-Blocks f)]
+      ;; Find loads.
+      (set! loads (subslice loads _ 0))
+      (clear auxIDs)
+      (range [_ v (.-Values b)]
+        (let [info (aget pairableLoads (.-Op v))]
+          (when (== (.-width info) 0)
+            (continue)) ; not pairable
+
+          (when (not (offsetOk (.-Aux v) (.-AuxInt v) (.-width info)))
+            (continue)) ; not advisable
+
+          (set! loads (append loads v))))
+
+      (when (< (len loads) 2)
+        (continue))
+
+
+      ;; Sort to put pairable loads together.
+      (^{:inst [(slice (* Value)) (* Value)]} slices/SortFunc loads ^{:go/end 180} (fn ^int [^{:tag (* Value)} x ^{:tag (* Value)} y]
+          ;; First sort by op, ptr, and memory arg.
+          (when (!= (.-Op x) (.-Op y))
+            (return (conv int (- (.-Op x) (.-Op y)))))
+
+          (when (!= (.-ID (aget (.-Args x) 0)) (.-ID (aget (.-Args y) 0)))
+            (return (conv int (- (.-ID (aget (.-Args x) 0)) (.-ID (aget (.-Args y) 0))))))
+
+          (when (!= (.-ID (aget (.-Args x) 1)) (.-ID (aget (.-Args y) 1)))
+            (return (conv int (- (.-ID (aget (.-Args x) 1)) (.-ID (aget (.-Args y) 1))))))
+
+          ;; Then sort by aux. (nil first, then by aux ID)
+          (cond (!= (.-Aux x) nil) (do
+              (when (== (.-Aux y) nil)
+                (return 1))
+
+              (let [(values a b) (values (auxID (.-Aux x)) (auxID (.-Aux y)))]
+                (when (!= a b)
+                  (return (- a b)))))
+
+            (!= (.-Aux y) nil)
+            (return -1))
+
+          ;; Then sort by offset, low to high.
+          (conv int (- (.-AuxInt x) (.-AuxInt y)))))
+
+
+      ;; Look for pairable loads.
+      (for [i 0] (< i (- (len loads) 1)) (inc! i)
+        (let [x (aget loads i)
+            ^{:line 185} y (aget loads (+ i 1))]
+          (when (or (!= (.-Op x) (.-Op y)) (!= (aget (.-Args x) 0) (aget (.-Args y) 0)) (!= (aget (.-Args x) 1) (aget (.-Args y) 1)))
+            (continue))
+
+          (when (!= (.-Aux x) (.-Aux y))
+            (continue))
+
+          (when (!= (+ (.-AuxInt x) (.-width (aget pairableLoads (.-Op x)))) (.-AuxInt y))
+            (continue))
+
+
+          ;; Commit point.
+
+          ;; Make the 2-register load.
+          (let [load (.NewValue2IA b (.-Pos x) (.-pair (aget pairableLoads (.-Op x))) (types/NewTuple (.-Type x) (.-Type y)) (.-AuxInt x) (.-Aux x) (aget (.-Args x) 0) (aget (.-Args x) 1))]
+
+            ;; Modify x to be (Select0 load). Similar for y.
+            (.reset x OpSelect0)
+            (.SetArgs1 x load)
+            (.reset y OpSelect1)
+            (.SetArgs1 y load)
+
+            (inc! i))))) ; Skip y next time around the loop.
+
+
+
+    ;; Try to pair a load with a load from a subsequent block.
+    ;; Note that this is always safe to do if the memory arguments match.
+    ;; (But see the memory barrier case below.)
+    (let-type [nextBlockKey (struct
+          ^{:line 215 :tag Op} op
+          ^{:line 216 :tag ID} ptr
+          ^{:line 217 :tag ID} mem
+          ^{:line 218 :tag int64} auxInt
+          ^{:line 219 :tag any} aux)]
+
+      (let [nextBlock (lit (map nextBlockKey (* Value)))]
+        (range [_ b (.-Blocks f)]
+          (when (memoryBarrierTest b)
+            ;; TODO: Do we really need to skip write barrier test blocks?
+            ;;     type T struct {
+            ;;         a *byte
+            ;;         b int
+            ;;     }
+            ;;     func f(t *T) int {
+            ;;         r := t.b
+            ;;         t.a = nil
+            ;;         return r
+            ;;     }
+            ;; This would issue a single LDP for both the t.a and t.b fields,
+            ;; *before* we check the write barrier flag. (We load the t.a field
+            ;; to put it in the write barrier buffer.) Not sure if that is ok.
+            (continue))
+
+          ;; Find loads in the next block(s) that we can move to this one.
+          ;; TODO: could maybe look further than just one successor hop.
+          (clear nextBlock)
+          (range [_ e (.-Succs b)]
+            (when (> (len (.-Preds (.-b e))) 1)
+              (continue))
+
+            (range [_ v (.-Values (.-b e))]
+              (let [info (aget pairableLoads (.-Op v))]
+                (when (== (.-width info) 0)
+                  (continue))
+
+                (when (not (offsetOk (.-Aux v) (.-AuxInt v) (.-width info)))
+                  (continue)) ; not advisable
+
+                (aset nextBlock (lit nextBlockKey :op (.-Op v) :ptr (.-ID (aget (.-Args v) 0)) :mem (.-ID (aget (.-Args v) 1)) :auxInt (.-AuxInt v) :aux (.-Aux v)) v))))
+
+
+          (when (== (len nextBlock) 0)
+            (continue))
+
+          ;; don't move too many loads. Each requires a register across a basic block boundary.
+          (let [^:const ^{:val 4} maxMoved 4
+              ^{:line 262} nMoved 0]
+            (for [i (- (len (.-Values b)) 1)] (and (>= i 0) (< nMoved maxMoved)) (dec! i)
+              (let [x (aget (.-Values b) i)
+                  ^{:line 265} info (aget pairableLoads (.-Op x))]
+                (when (== (.-width info) 0)
+                  (continue))
+
+                (when (not (offsetOk (.-Aux x) (.-AuxInt x) (.-width info)))
+                  (continue)) ; not advisable
+
+                (let [key (lit nextBlockKey :op (.-Op x) :ptr (.-ID (aget (.-Args x) 0)) :mem (.-ID (aget (.-Args x) 1)) :auxInt (+ (.-AuxInt x) (.-width info)) :aux (.-Aux x))]
+                  (when [y (aget nextBlock key)] (!= y nil)
+                    (delete nextBlock key)
+
+                    ;; Make the 2-register load.
+                    (let [load (.NewValue2IA b (.-Pos x) (.-pair info) (types/NewTuple (.-Type x) (.-Type y)) (.-AuxInt x) (.-Aux x) (aget (.-Args x) 0) (aget (.-Args x) 1))]
+
+                      ;; Modify x to be (Select0 load).
+                      (.reset x OpSelect0)
+                      (.SetArgs1 x load)
+                      ;; Modify y to be (Copy (Select1 load)).
+                      ;; Note: the Select* needs to live in the load's block, not y's block.
+                      (.reset y OpCopy)
+                      (.SetArgs1 y (.NewValue1 b (.-Pos y) OpSelect1 (.-Type y) load))
+                      (inc! nMoved)
+                      (continue)))
+
+                  (set! (.-auxInt key) (- (.-AuxInt x) (.-width info)))
+                  (when [y (aget nextBlock key)] (!= y nil)
+                    (delete nextBlock key)
+
+                    ;; Make the 2-register load.
+                    (let [load (.NewValue2IA b (.-Pos x) (.-pair info) (types/NewTuple (.-Type y) (.-Type x)) (.-AuxInt y) (.-Aux x) (aget (.-Args x) 0) (aget (.-Args x) 1))]
+
+                      ;; Modify x to be (Select1 load).
+                      (.reset x OpSelect1)
+                      (.SetArgs1 x load)
+                      ;; Modify y to be (Copy (Select0 load)).
+                      (.reset y OpCopy)
+                      (.SetArgs1 y (.NewValue1 b (.-Pos y) OpSelect0 (.-Type y) load))
+                      (inc! nMoved)
+                      (continue))))))))))))
+
+
+
+
+
+^{:go/end 321} (go/func memoryBarrierTest ^bool [^{:tag (* Block)} b]
+  (when (!= (.-Kind b) BlockARM64NZW)
+    (return false))
+
+  ^{:go/breaks [[4 320]]} (let [c (aget (.-Controls b) 0)]
+    (when (!= (.-Op c) OpARM64MOVWUload)
+      (return false))
+
+    (when [(values globl ok) (assert (* obj/LSym) (.-Aux c))] ok
+      (return (== (.-Name globl) "runtime.writeBarrier")))
+
+    false))
+
+
+
+
+
+
+^{:go/end 488} (go/func pairStores "pairStores merges store instructions.\nIt collects stores into a buffer where they can be freely reordered.\nWhen encountering an instruction that cannot be added to the buffer,\nit pairs the accumulated stores, flushes the buffer, and continues processing.\n" [^{:tag (* Func)} f]
+  (let [last (.allocBoolSlice (.-Cache f) (.NumValues f))]
+    (defer (.freeBoolSlice (.-Cache f) last))
+
+    ;; memChain contains a list of stores with the same ptr/aux pair and
+    ;; nonoverlapping write ranges [AuxInt:AuxInt+writeSize]. All of the
+    ;; elements of memChain can be reordered with each other.
+    (let [memChain (lit (slice (* Value)))
+
+        ;; Limit of length of memChain array.
+        ;; This keeps us in O(n) territory.
+        ^{:line 338} limit 100
+
+        ;; flushMemChain sorts the stores in memChain and merges them when possible.
+        ;; Then it flushes memChain.
+        ^{:line 342} flushMemChain ^{:go/end 385} (fn []
+          (when (< (len memChain) 2)
+            (set! memChain (subslice memChain _ 0))
+            (return))
+
+
+          ;; Sort in increasing AuxInt to put pairable stores together.
+          (^{:inst [(slice (* Value)) (* Value)]} slices/SortFunc memChain ^{:go/end 351} (fn ^int [^{:tag (* Value)} x ^{:tag (* Value)} y]
+              (conv int (- (.-AuxInt x) (.-AuxInt y)))))
+
+
+          (let [lastIdx (- (len memChain) 1)]
+            (for [i 0] (< i lastIdx) (inc! i)
+              (let [v (aget memChain i)
+                  ^{:line 356} w (aget memChain (+ i 1))
+                  ^{:line 357} info (aget pairableStores (.-Op v))
+
+                  ^{:line 359} off (.-AuxInt v)
+                  ^{:line 360} mem (.MemoryArg v)
+                  ^{:line 361} aux (.-Aux v)
+                  ^{:line 362} pos (.-Pos v)
+                  ^{:line 363} wmem (.MemoryArg w)]
+
+                (when (and (== (.-Op w) (.-Op v)) (== (.-AuxInt w) (+ off (.-width info))))
+                  ;; Arguments for the merged store: ptr, val1, val2, mem.
+                  (let [args (lit (slice (* Value)) (aget (.-Args v) 0) (aget (.-Args v) 1) (aget (.-Args w) 1) mem)]
+
+                    (.reset v (.-pair info))
+                    (.AddArgs v (spread args))
+                    (set! (.-Aux v) aux)
+                    (set! (.-AuxInt v) off)
+                    (set! (.-Pos v) pos)
+
+                    ;; Make w just a memory copy.
+                    (.reset w OpCopy)
+                    (.SetArgs1 w wmem)
+
+                    ;; Skip merged store (w)
+                    (inc! i)))))
+
+
+
+            (set! memChain (subslice memChain _ 0))))
+
+
+        ;; prevStore returns the previous store in the
+        ;; same block, or nil if there are none.
+        ^{:line 389} prevStore ^{:go/end 398} (fn ^{:tag (* Value)} [^{:tag (* Value)} v]
+          (when (or (== (.-Op v) OpInitMem) (== (.-Op v) OpPhi))
+            (return nil))
+
+          (let [m (.MemoryArg v)]
+            (when (!= (.-Block m) (.-Block v))
+              (return nil))
+
+            ^{:line 397} m))
+
+
+        ;; storeWidth returns the width of store,
+        ;; or 0 if it is not a store this pass understands.
+        ^{:line 402} storeWidth ^{:go/end 417} (fn ^int64 [^Op op]
+          (let [^int64 width (zero int64)]
+            (switch op
+              (case [OpARM64MOVDstore OpARM64FMOVDstore]
+                (set! width 8))
+              (case [OpARM64MOVWstore OpARM64FMOVSstore]
+                (set! width 4))
+              (case [OpARM64MOVHstore]
+                (set! width 2))
+              (case [OpARM64MOVBstore]
+                (set! width 1))
+              (default
+                (set! width 0)))
+
+            ^{:line 416} width))]
+
+
+      (range [_ b (.-Blocks f)]
+        (set! memChain (subslice memChain _ 0))
+
+        ;; Find last store in block, so we can
+        ;; walk the stores last to first.
+        ;; Last to first helps ensure that the rewrites we
+        ;; perform do not get in the way of subsequent rewrites.
+        (range [_ v (.-Values b)]
+          (when (.IsMemory (.-Type v))
+            (aset last (.-ID v) true)))
+
+
+        (range [_ v (.-Values b)]
+          (when (.IsMemory (.-Type v))
+            (when [m (prevStore v)] (!= m nil)
+              (aset last (.-ID m) false))))
+
+
+
+        (let [^{:tag (* Value)} lastMem (zero (* Value))]
+          (range [_ v (.-Values b)]
+            (when (aget last (.-ID v))
+              (set! lastMem v)
+              (break)))
+
+
+
+          ;; Iterate over memory stores, accumulating them in memChain for potential merging.
+          ;; Flush the chain when reordering is unsafe or a conflict is detected.
+          (for [v lastMem] (!= v nil) (set! v (prevStore v))
+            (let [writeSize (storeWidth (.-Op v))]
+
+              (when (== writeSize 0)
+                ;; We can't reorder stores with calls or other instructions
+                ;; with writeSize == 0.
+                (flushMemChain)
+                (continue))
+
+              (when (or (and (!= (.-Uses v) 1) (> (len memChain) 0))
+                  (and (> (len memChain) 0) ^:go/paren (or (!= (aget (.-Args v) 0) (aget (.-Args (aget memChain 0)) 0)) (!= (.-Aux v) (.-Aux (aget memChain 0)))))
+                  (== (len memChain) limit))
+                ;; If v has multiple uses and it is not the latest store in the chain,
+                ;; we cannot merge it with other store instructions.
+                ;; If v has a different base pointer or Aux value from the current chain,
+                ;; we need to flush memChain and start a new one with v.
+                ;; If memChain length limit is exceeded, we also need to flush the chain
+                ;; and start a new one with v.
+                ;; Only look back so far.
+                ;; This keeps us in O(n) territory, and it
+                ;; also prevents us from keeping values
+                ;; in registers for too long (and thus
+                ;; needing to spill them).
+                (flushMemChain))
+
+
+              (range [_ w memChain]
+                (let [wWriteSize (storeWidth (.-Op w))]
+                  (when (overlap (.-AuxInt w) wWriteSize (.-AuxInt v) writeSize)
+                    ;; Aliases with w's location.
+                    ;; Flush the chain and start a new one with v.
+                    (flushMemChain)
+                    (break))))
+
+
+
+              (set! memChain (append memChain v))))
+
+          (flushMemChain))))))

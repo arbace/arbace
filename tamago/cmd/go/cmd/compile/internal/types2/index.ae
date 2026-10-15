@@ -1,0 +1,484 @@
+;; Copyright 2021 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; This file implements typechecking of index/slice expressions.
+
+(in-ns 'go.cmd.compile.internal.types2) (go/file "index.go" :imports [
+
+
+    ^{:line 10} [syntax "cmd/compile/internal/syntax"]
+    ^{:line 11} [constant "go/constant"]
+    ^{:line 12} [. "internal/types/errors"]])
+
+
+
+
+
+^{:go/end 229} (go/method indexExpr "If e is a valid function instantiation, indexExpr returns true.\nIn that case x represents the uninstantiated function value and\nit is the caller's responsibility to instantiate the function.\n" [^{:tag (* Checker)} check ^{:tag (* operand)} x ^{:tag (* syntax/IndexExpr)} e] :results [^bool isFuncInst]
+  (.exprOrType check x (.-X e) true)
+  ;; x may be generic
+
+  (switch (.mode x)
+    (case [invalid]
+      (.use check (.-Index e))
+      (return false))
+
+    (case [typexpr]
+      ;; type instantiation
+      (.invalidate x)
+      ;; TODO(gri) here we re-evaluate e.X - try to avoid this
+      (set! (.-typ_ x) (.varType check e))
+      (when (isValid (.typ x))
+        (set! (.-mode_ x) typexpr))
+
+      (return false))
+
+    (case [value]
+      (when [(values sig _) (assert (* Signature) (.Underlying (.typ x)))] (and (!= sig nil) (> (.Len (.TypeParams sig)) 0))
+        ;; function instantiation
+        (return true))))
+
+
+
+  ;; x should not be generic at this point, but be safe and check
+  (.nonGeneric check nil x)
+  (when (not (.isValid x))
+    (return false))
+
+
+  ;; We cannot index on an incomplete type; make sure it's complete.
+  (when (not (.isComplete check (.typ x)))
+    (.invalidate x)
+    (return false))
+
+  (type-switch [typ (.Underlying (.typ x))]
+    (case [(* Pointer)]
+      ;; Additionally, if x.typ is a pointer to an array type, indexing implicitly dereferences the value, meaning
+      ;; its base type must also be complete.
+      (when (not (.isComplete check (.-base typ)))
+        (.invalidate x)
+        (return false)))
+
+    (case [(* Map)]
+      ;; Lastly, if x.typ is a map type, indexing must produce a value of a complete type, meaning
+      ;; its element type must also be complete.
+      (when (not (.isComplete check (.-elem typ)))
+        (.invalidate x)
+        (return false))))
+
+
+
+  ;; ordinary index expression
+  (let [valid false
+      ^{:line 74} length (conv int64 -1)] ; valid if >= 0
+    (type-switch [typ (.Underlying (.typ x))]
+      (case [(* Basic)]
+        (when (isString typ)
+          (set! valid true)
+          (when (== (.mode x) constant_)
+            (set! length (constant/StringLen (.-val x))))
+
+          ;; an indexed string always yields a byte value
+          ;; (not a constant) even if the string and the
+          ;; index are constant
+          (set! (.-mode_ x) value)
+          (set! (.-typ_ x) universeByte))) ; use 'byte' name
+
+
+      (case [(* Array)]
+        (set! valid true)
+        (set! length (.-len typ))
+        (when (!= (.mode x) variable)
+          (set! (.-mode_ x) value))
+
+        (set! (.-typ_ x) (.-elem typ)))
+
+      (case [(* Pointer)]
+        (when [(values typ _) (assert (* Array) (.Underlying (.-base typ)))] (!= typ nil)
+          (set! valid true)
+          (set! length (.-len typ))
+          (set! (.-mode_ x) variable)
+          (set! (.-typ_ x) (.-elem typ))))
+
+
+      (case [(* Slice)]
+        (set! valid true)
+        (set! (.-mode_ x) variable)
+        (set! (.-typ_ x) (.-elem typ)))
+
+      (case [(* Map)]
+        (let [index (.singleIndex check e)]
+          (when (== index nil)
+            (.invalidate x)
+            (return false))
+
+          (let [^operand key (zero operand)]
+            (.genericExpr check (addr key) index nil)
+            (.assignment check (addr key) (.-key typ) "map index")
+            ;; ok to continue even if indexing failed - map element type is known
+            (set! (.-mode_ x) mapindex)
+            (set! (.-typ_ x) (.-elem typ))
+            (set! (.-expr x) e)
+            (return false))))
+
+      (case [(* Interface)]
+        (when (not (isTypeParam (.typ x)))
+          (break))
+
+        ;; TODO(gri) report detailed failure cause for better error messages
+        (let [(values ^Type key ^Type elem) (zero Type) ; key != nil: we must have all maps
+            ^{:line 131} mode variable] ; non-maps result mode
+          ;; TODO(gri) factor out closure and use it for non-typeparam cases as well
+          (when (underIs (.typ x) ^{:go/end 182} (fn ^bool [^Type u]
+                ^{:go/breaks [[8 181]]} (let [l (conv int64 -1) ; valid if >= 0
+                    (values ^Type k ^Type e) (zero Type)] ; k is only set for maps
+                  (type-switch [t u]
+                    (case [(* Basic)]
+                      (when (isString t)
+                        (set! e universeByte)
+                        (set! mode value)))
+
+                    (case [(* Array)]
+                      (set! l (.-len t))
+                      (set! e (.-elem t))
+                      (when (!= (.mode x) variable)
+                        (set! mode value)))
+
+                    (case [(* Pointer)]
+                      (when [(values t _) (assert (* Array) (.Underlying (.-base t)))] (!= t nil)
+                        (set! l (.-len t))
+                        (set! e (.-elem t))))
+
+                    (case [(* Slice)]
+                      (set! e (.-elem t)))
+                    (case [(* Map)]
+                      (set! k (.-key t))
+                      (set! e (.-elem t))))
+
+                  (when (== e nil)
+                    (return false))
+
+                  (when (== elem nil)
+                    ;; first type
+                    (set! length l)
+                    (set! (values key elem) (values k e))
+                    (return true))
+
+                  ;; all map keys must be identical (incl. all nil)
+                  ;; (that is, we cannot mix maps with other types)
+                  (when (not (Identical key k))
+                    (return false))
+
+                  ;; all element types must be identical
+                  (when (not (Identical elem e))
+                    (return false))
+
+                  ;; track the minimal length for arrays, if any
+                  (when (and (>= l 0) (< l length))
+                    (set! length l))
+
+                  true)))
+
+            ;; For maps, the index expression must be assignable to the map key type.
+            (when (!= key nil)
+              (let [index (.singleIndex check e)]
+                (when (== index nil)
+                  (.invalidate x)
+                  (return false))
+
+                (let [^operand k (zero operand)]
+                  (.genericExpr check (addr k) index nil)
+                  (.assignment check (addr k) key "map index")
+                  ;; ok to continue even if indexing failed - map element type is known
+                  (set! (.-mode_ x) mapindex)
+                  (set! (.-typ_ x) elem)
+                  (set! (.-expr x) e)
+                  (return false))))
+
+
+            ;; no maps
+            (set! valid true)
+            (set! (.-mode_ x) mode)
+            (set! (.-typ_ x) elem)))))
+
+
+
+    (when (not valid)
+      (.errorf check ^{:go/via [expr node]} (.Pos e) NonSliceableOperand "cannot index %s" x)
+      (.use check (.-Index e))
+      (.invalidate x)
+      (return false))
+
+
+    ^{:go/breaks [5]} (let [index (.singleIndex check e)]
+      (when (== index nil)
+        (.invalidate x)
+        (return false))
+
+
+      ;; In pathological (invalid) cases (e.g.: type T1 [][[]T1{}[0][0]]T0)
+      ;; the element type may be accessed before it's set. Make sure we have
+      ;; a valid type.
+      (when (== (.typ x) nil)
+        (set! (.-typ_ x) (aget Typ Invalid)))
+
+
+      (.index check index length)
+      false)))
+
+
+^{:go/end 393} (go/method sliceExpr [^{:tag (* Checker)} check ^{:tag (* operand)} x ^{:tag (* syntax/SliceExpr)} e]
+  (.expr check nil x (.-X e))
+  (when (not (.isValid x))
+    (.use check (spread (subslice (.-Index e))))
+    (return))
+
+
+  ;; determine common underlying type cu
+  (let [(values ^Type ct ^Type cu) (zero Type) ; type and respective common underlying type
+      ^{:line 240 :tag bool} hasString (zero bool)]
+    (range [t u (typeset (.typ x))]
+      (when (== u nil)
+        (.errorf check x NonSliceableOperand "cannot slice %s: no specific type in %s" x (.typ x))
+        (set! cu nil)
+        (break))
+
+
+      ;; Treat strings like byte slices but remember that we saw a string.
+      (when (isString u)
+        (set! u (NewSlice universeByte))
+        (set! hasString true))
+
+
+      ;; If this is the first type we're seeing, we're done.
+      (when (== cu nil)
+        (set! (values ct cu) (values t u))
+        (continue))
+
+
+      ;; Otherwise, the current type must have the same underlying type as all previous types.
+      (when (not (Identical cu u))
+        (.errorf check x NonSliceableOperand "cannot slice %s: %s and %s have different underlying types" x ct t)
+        (set! cu nil)
+        (break)))
+
+
+    (when hasString
+      ;; If we saw a string, proceed with string type,
+      ;; but don't go from untyped string to string.
+      (set! cu (aget Typ String))
+      (when (not (isTypeParam (.typ x)))
+        (set! cu (.Underlying (.typ x))))) ; untyped string remains untyped
+
+
+
+    ;; Note that we don't permit slice expressions where x is a type expression, so we don't check for that here.
+    ;; However, if x.typ is a pointer to an array type, slicing implicitly dereferences the value, meaning
+    ;; its base type must also be complete.
+    (when [(values p ok) (assert (* Pointer) (.Underlying (.typ x)))] (and ok (not (.isComplete check (.-base p))))
+      (.invalidate x)
+      (return))
+
+
+    (let [valid false
+        ^{:line 285} length (conv int64 -1)] ; valid if >= 0
+      (type-switch [u cu]
+        (case [nil]
+          ;; error reported above
+          (.invalidate x)
+          (return))
+
+        (case [(* Basic)]
+          (when (isString u)
+            (when (.-Full e)
+              (let [at (aget (.-Index e) 2)]
+                (when (== at nil)
+                  (set! at e)) ; e.Index[2] should be present but be careful
+
+                (.error check at InvalidSliceExpr (+ invalidOp "3-index slice of string"))
+                (.invalidate x)
+                (return)))
+
+            (set! valid true)
+            (when (== (.mode x) constant_)
+              (set! length (constant/StringLen (.-val x))))
+
+            ;; spec: "For untyped string operands the result
+            ;; is a non-constant value of type string."
+            (when (isUntyped (.typ x))
+              (set! (.-typ_ x) (aget Typ String)))))
+
+
+
+        (case [(* Array)]
+          (set! valid true)
+          (set! length (.-len u))
+          (when (!= (.mode x) variable)
+            (.errorf check x NonSliceableOperand "cannot slice unaddressable value %s" x)
+            (.invalidate x)
+            (return))
+
+          (set! (.-typ_ x) (addr (lit Slice :elem (.-elem u)))))
+
+        (case [(* Pointer)]
+          (when [(values u _) (assert (* Array) (.Underlying (.-base u)))] (!= u nil)
+            (set! valid true)
+            (set! length (.-len u))
+            (set! (.-typ_ x) (addr (lit Slice :elem (.-elem u))))))
+
+
+        (case [(* Slice)]
+          (set! valid true)))
+      ;; x.typ doesn't change
+
+
+      (when (not valid)
+        (.errorf check x NonSliceableOperand "cannot slice %s" x)
+        (.invalidate x)
+        (return))
+
+
+      (set! (.-mode_ x) value)
+
+      ;; spec: "Only the first index may be omitted; it defaults to 0."
+      (when (and (.-Full e) ^:go/paren (or (== (aget (.-Index e) 1) nil) (== (aget (.-Index e) 2) nil)))
+        (.error check e InvalidSyntaxTree "2nd and 3rd index required in 3-index slice")
+        (.invalidate x)
+        (return))
+
+
+      ;; check indices
+      (let [^{:tag (array 3 int64)} ind (zero (array 3 int64))]
+        (range [i expr (.-Index e)]
+          (let [x (conv int64 -1)]
+            (switch
+              (case [(!= expr nil)]
+                ;; The "capacity" is only known statically for strings, arrays,
+                ;; and pointers to arrays, and it is the same as the length for
+                ;; those types.
+                (let [max (conv int64 -1)]
+                  (when (>= length 0)
+                    (set! max (+ length 1)))
+
+                  (when [(values _ v) (.index check expr max)] (>= v 0)
+                    (set! x v))))
+
+              (case [(== i 0)]
+                ;; default is 0 for the first index
+                (set! x 0))
+              (case [(>= length 0)]
+                ;; default is length (== capacity) otherwise
+                (set! x length)))
+
+            (aset ind i x)))
+
+
+        ;; constant indices must be in range
+        ;; (check.index already checks that existing indices >= 0)
+        (label :L
+          (range [i x (subslice ind _ (- (len ind) 1))]
+            (when (> x 0)
+              (range [j y (subslice ind (+ i 1))]
+                (when (and (>= y 0) (< y x))
+                  ;; The value y corresponds to the expression e.Index[i+1+j].
+                  ;; Because y >= 0, it must have been set from the expression
+                  ;; when checking indices and thus e.Index[i+1+j] is not nil.
+                  (.errorf check (aget (.-Index e) (+ i 1 j)) SwappedSliceIndices "invalid slice indices: %d < %d" y x)
+                  (break :L)))))))))) ; only report one error, ok to continue
+
+
+
+
+
+
+
+
+
+^{:go/end 414} (go/method singleIndex "singleIndex returns the (single) index from the index expression e.\nIf the index is missing, or if there are multiple indices, an error\nis reported and the result is nil.\n" ^syntax/Expr [^{:tag (* Checker)} check ^{:tag (* syntax/IndexExpr)} e]
+  (let [index (.-Index e)]
+    (when (== index nil)
+      (.errorf check e InvalidSyntaxTree "missing index for %s" (.-X e))
+      (return nil))
+
+    (when [(values l _) (assert (* syntax/ListExpr) index)] (!= l nil)
+      (when [n (len (.-ElemList l))] (<= n 1)
+        (.errorf check e InvalidSyntaxTree "invalid use of ListExpr for index expression %v with %d indices" e n)
+        (return nil))
+
+      ;; len(l.ElemList) > 1
+      (.error check (aget (.-ElemList l) 1) InvalidIndex (+ invalidOp "more than one index"))
+      (set! index (aget (.-ElemList l) 0))) ; continue with first index
+
+    ^{:line 413} index))
+
+
+
+
+
+
+^{:go/end 447} (go/method index "index checks an index expression for validity.\nIf max >= 0, it is the upper bound for index.\nIf the result typ is != Typ[Invalid], index is valid and typ is its (possibly named) integer type.\nIf the result val >= 0, index is valid and val is its constant int value.\n" [^{:tag (* Checker)} check ^syntax/Expr index ^int64 max] :results [^Type typ ^int64 val]
+  (set! typ (aget Typ Invalid))
+  (set! val -1)
+
+  (let [^operand x (zero operand)]
+    (.expr check nil (addr x) index)
+    (when (not (.isValidIndex check (addr x) InvalidIndex "index" false))
+      (return))
+
+
+    (when (!= (.mode x) constant_)
+      (return (.typ x) -1))
+
+
+    (when (== (.Kind (.-val x)) constant/Unknown)
+      (return))
+
+
+    (let [(values v ok) (constant/Int64Val (.-val x))]
+      (go/call assert ok)
+      (when (and (>= max 0) (>= v max))
+        (.errorf check (addr x) InvalidIndex (+ invalidArg "index %s out of bounds [0:%d]") (.String (.-val x)) max)
+        (return))
+
+
+      ;; 0 <= v [ && v < max ]
+      (return (.typ x) v))))
+
+
+
+
+
+
+^{:go/breaks [[9 484]] :go/end 485} (go/method isValidIndex "isValidIndex checks whether operand x satisfies the criteria for integer\nindex values. If allowNegative is set, a constant operand may be negative.\nIf the operand is not valid, an error is reported (using what as context)\nand the result is false.\n" ^bool [^{:tag (* Checker)} check ^{:tag (* operand)} x ^Code code ^string what ^bool allowNegative]
+  (when (not (.isValid x))
+    (return false))
+
+
+  ;; spec: "a constant index that is untyped is given type int"
+  (.convertUntyped check x (aget Typ Int))
+  (when (not (.isValid x))
+    (return false))
+
+
+  ;; spec: "the index x must be of integer type or an untyped constant"
+  (when (not (allInteger (.typ x)))
+    (.errorf check x code (+ invalidArg "%s %s must be integer") what x)
+    (return false))
+
+
+  (when (== (.mode x) constant_)
+    ;; spec: "a constant index must be non-negative ..."
+    (when (and (not allowNegative) (< (constant/Sign (.-val x)) 0))
+      (.errorf check x code (+ invalidArg "%s %s must not be negative") what x)
+      (return false))
+
+
+    ;; spec: "... and representable by a value of type int"
+    (when (not (representableConst (.-val x) check (aget Typ Int) (addr (.-val x))))
+      (.errorf check x code (+ invalidArg "%s %s overflows int") what x)
+      (return false)))
+
+
+
+  true)

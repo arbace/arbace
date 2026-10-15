@@ -1,0 +1,81 @@
+;; Copyright 2023 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.cmd.vendor.golang_org.x.telemetry.internal.counter) (go/file "parse.go" :imports [
+
+
+    ^{:line 8} [bytes "bytes"]
+    ^{:line 9} [fmt "fmt"]
+    ^{:line 10} [strings "strings"]
+    ^{:line 11} [unsafe "unsafe"]
+
+    ^{:line 13} [mmap "golang.org/x/telemetry/internal/mmap"]])
+
+
+(go/type File (struct
+    ^{:line 17 :tag (map string string)} Meta
+    ^{:line 18 :tag (map string uint64)} Count))
+
+
+^{:go/end 82} (go/func Parse [^string filename ^{:tag (slice byte)} data] :results [(* File) error]
+  (when (or (not (bytes/HasPrefix data (conv (slice byte) hdrPrefix))) (< (len data) pageSize))
+    (when (< (len data) pageSize)
+      (return nil (fmt/Errorf "%s: file too short (%d<%d)" filename (len data) pageSize)))
+
+    (return nil (fmt/Errorf "%s: wrong hdr (not %q)" filename hdrPrefix)))
+
+  (let [corrupt ^{:go/end 31} (fn [] :results [(* File) error]
+        ;; TODO(rfindley): return a useful error message.
+        (return nil (fmt/Errorf "%s: corrupt counter file" filename)))
+
+
+      ^{:line 33} f (addr ^{:go/breaks [2 4]} (lit File
+          :Meta (make (map string string))
+          :Count (make (map string uint64))))
+
+      ^{:line 37} np (^{:inst [int]} round (len hdrPrefix) 4)
+      ^{:line 38} hdrLen @(conv (* uint32) (conv unsafe/Pointer (addr (aget data np))))]
+    (when (> hdrLen pageSize)
+      (return (corrupt)))
+
+    (let [meta (subslice data (+ np 4) hdrLen)]
+      (when [i (bytes/IndexByte meta 0)] (>= i 0)
+        (set! meta (subslice meta _ i)))
+
+      (let [m (addr ^{:go/breaks [2 4 6]} (lit mappedFile
+              :meta (conv string meta)
+              :hdrLen hdrLen
+              :mapping (addr (lit mmap/Data :Data data))))
+
+
+          ^{:line 52} lines (strings/Split (.-meta m) "\n")]
+        (range [_ line lines]
+          (when (== line "")
+            (continue))
+
+          (let [(values k v ok) (strings/Cut line ": ")]
+            (when (not ok)
+              (return (corrupt)))
+
+            (aset (.-Meta f) k v)))
+
+
+        (for [i (conv uint32 0)] (< i numHash) (inc! i)
+          (let [headOff (+ hdrLen hashOff (* i 4))
+              ^{:line 66} head (.load32 m headOff)
+              ^{:line 67} off head]
+            (while (!= off 0)
+              (let [(values ename next v ok) (.entryAt m off)]
+                (when (not ok)
+                  (return (corrupt)))
+
+                (when [(values _ ok) (aget (.-Count f) (conv string ename))] ok
+                  (return (corrupt)))
+
+                (let [ctrName (DecodeStack (conv string ename))]
+                  (aset (.-Count f) ctrName (.Load v))
+                  (set! off next))))))
+
+
+        (return f nil)))))

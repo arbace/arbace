@@ -1,0 +1,332 @@
+;; Copyright 2009 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.cmd.compile.internal.noder) (go/file "import.go" :imports [
+
+
+    ^{:line 8} [errors "errors"]
+    ^{:line 9} [fmt "fmt"]
+    ^{:line 10} [buildcfg "internal/buildcfg"]
+    ^{:line 11} [exportdata "internal/exportdata"]
+    ^{:line 12} [pkgbits "internal/pkgbits"]
+    ^{:line 13} [os "os"]
+    ^:alias ^{:line 14} [pathpkg "path"]
+    ^{:line 15} [runtime "runtime"]
+    ^{:line 16} [strings "strings"]
+    ^{:line 17} [unicode "unicode"]
+    ^{:line 18} [utf8 "unicode/utf8"]
+
+    ^{:line 20} [base "cmd/compile/internal/base"]
+    ^{:line 21} [importer "cmd/compile/internal/importer"]
+    ^{:line 22} [ir "cmd/compile/internal/ir"]
+    ^{:line 23} [typecheck "cmd/compile/internal/typecheck"]
+    ^{:line 24} [types "cmd/compile/internal/types"]
+    ^{:line 25} [types2 "cmd/compile/internal/types2"]
+    ^{:line 26} [bio "cmd/internal/bio"]
+    ^{:line 27} [goobj "cmd/internal/goobj"]
+    ^{:line 28} [objabi "cmd/internal/objabi"]])
+
+
+(go/type gcimports (struct
+    ^{:line 32 :tag (* types2/Context)} ctxt
+    ^{:line 33 :tag (map string (* types2/Package))} packages))
+
+
+^{:go/end 38} (go/method Import [^{:tag (* gcimports)} m ^string path] :results [(* types2/Package) error]
+  (.ImportFrom m path "" 0)) ; /* no vendoring */
+
+
+^{:go/end 47} (go/method ImportFrom [^{:tag (* gcimports)} m ^string path ^string srcDir ^types2/ImportMode mode] :results [(* types2/Package) error]
+  (when (!= mode 0)
+    (panic "mode must be 0"))
+
+
+  (let [(values _ pkg err) (readImportFile path typecheck/Target (.-ctxt m) (.-packages m))]
+    (return pkg err)))
+
+
+^{:go/end 51} (go/func isDriveLetter ^bool [^byte b]
+  (or (and (<= \a b) (<= b \z)) (and (<= \A b) (<= b \Z))))
+
+
+
+^{:go/end 59} (go/func islocalname "is this path a local name? begins with ./ or ../ or /\n" ^bool [^string name]
+  (or (strings/HasPrefix name "/")
+    (and (== runtime/GOOS "windows") (>= (len name) 3) (isDriveLetter (aget name 0)) (== (aget name 1) \:) (== (aget name 2) \/))
+    (strings/HasPrefix name "./") (== name ".")
+    (strings/HasPrefix name "../") (== name "..")))
+
+
+^{:go/end 123} (go/func openPackage [^string path] :results [(* os/File) error]
+  (when (islocalname path)
+    (when (.-NoLocalImports base/Flag)
+      (return nil (errors/New "local imports disallowed")))
+
+
+    (when (!= (.-PackageFile (.-Cfg base/Flag)) nil)
+      (return (os/Open (aget (.-PackageFile (.-Cfg base/Flag)) path))))
+
+
+    ;; try .a before .o.  important for building libraries:
+    ;; if there is an array.o in the array.a library,
+    ;; want to find all of array.a, not just array.o.
+    (when [(values file err) (os/Open (fmt/Sprintf "%s.a" path))] (== err nil)
+      (return file nil))
+
+    (when [(values file err) (os/Open (fmt/Sprintf "%s.o" path))] (== err nil)
+      (return file nil))
+
+    (return nil (errors/New "file not found")))
+
+
+  ;; local imports should be canonicalized already.
+  ;; don't want to see "encoding/../encoding/base64"
+  ;; as different from "encoding/base64".
+  (when [q (pathpkg/Clean path)] (!= q path)
+    (return nil (fmt/Errorf "non-canonical import path %q (should be %q)" path q)))
+
+
+  (when (!= (.-PackageFile (.-Cfg base/Flag)) nil)
+    (return (os/Open (aget (.-PackageFile (.-Cfg base/Flag)) path))))
+
+
+  (range [_ dir (.-ImportDirs (.-Cfg base/Flag))]
+    (when [(values file err) (os/Open (fmt/Sprintf "%s/%s.a" dir path))] (== err nil)
+      (return file nil))
+
+    (when [(values file err) (os/Open (fmt/Sprintf "%s/%s.o" dir path))] (== err nil)
+      (return file nil)))
+
+
+
+  (when (!= buildcfg/GOROOT "")
+    (let [suffix ""]
+      (cond (!= (.-InstallSuffix base/Flag) "")
+        (set! suffix (+ "_" (.-InstallSuffix base/Flag)))
+        (.-Race base/Flag)
+        (set! suffix "_race")
+        (.-MSan base/Flag)
+        (set! suffix "_msan")
+        (.-ASan base/Flag)
+        (set! suffix "_asan"))
+
+
+      (when [(values file err) (os/Open (fmt/Sprintf "%s/pkg/%s_%s%s/%s.a" buildcfg/GOROOT buildcfg/GOOS buildcfg/GOARCH suffix path))] (== err nil)
+        (return file nil))
+
+      (when [(values file err) (os/Open (fmt/Sprintf "%s/pkg/%s_%s%s/%s.o" buildcfg/GOROOT buildcfg/GOOS buildcfg/GOARCH suffix path))] (== err nil)
+        (return file nil))))
+
+
+  (return nil (errors/New "file not found")))
+
+
+
+
+^{:go/end 168} (go/func resolveImportPath "resolveImportPath resolves an import path as it appears in a Go\nsource file to the package's full path.\n" [^string path] :results [string error]
+  ;; The package name main is no longer reserved,
+  ;; but we reserve the import path "main" to identify
+  ;; the main package, just as we reserve the import
+  ;; path "math" to identify the standard math package.
+  (when (== path "main")
+    (return "" (errors/New "cannot import \"main\"")))
+
+
+  (when (== (.-Pkgpath base/Ctxt) "")
+    (panic "missing pkgpath"))
+
+  (when (== path (.-Pkgpath base/Ctxt))
+    (return "" (fmt/Errorf "import %q while compiling that package (import cycle)" path)))
+
+
+  (when [(values mapped ok) (aget (.-ImportMap (.-Cfg base/Flag)) path)] ok
+    (set! path mapped))
+
+
+  (when (islocalname path)
+    (when (== (aget path 0) \/)
+      (return "" (errors/New "import path cannot be absolute path")))
+
+
+    (let [prefix (.-D base/Flag)]
+      (when (== prefix "")
+        ;; Questionable, but when -D isn't specified, historically we
+        ;; resolve local import paths relative to the directory the
+        ;; compiler's current directory, not the respective source
+        ;; file's directory.
+        (set! prefix (.-Pathname base/Ctxt)))
+
+      (set! path (pathpkg/Join prefix path))
+
+      (when [err (checkImportPath path true)] (!= err nil)
+        (return "" err))))
+
+
+
+  (return path nil))
+
+
+
+
+
+^{:go/end 230} (go/func readImportFile "readImportFile reads the import file for the given package path and\nreturns its types.Pkg representation. If packages is non-nil, the\ntypes2.Package representation is also returned.\n" [^string path ^{:tag (* ir/Package)} target ^{:tag (* types2/Context)} env ^{:tag (map string (* types2/Package))} packages] :results [^{:tag (* types/Pkg)} pkg1 ^{:tag (* types2/Package)} pkg2 ^error err]
+  (set! (values path err) (resolveImportPath path))
+  (when (!= err nil)
+    (return))
+
+
+  (when (== path "unsafe")
+    (set! (values pkg1 pkg2) (values types/UnsafePkg types2/Unsafe))
+
+    ;; TODO(mdempsky): Investigate if this actually matters. Why would
+    ;; the linker or runtime care whether a package imported unsafe?
+    (when (not (.-Direct pkg1))
+      (set! (.-Direct pkg1) true)
+      (set! (.-Imports target) (append (.-Imports target) pkg1)))
+
+
+    (return))
+
+
+  (set! pkg1 (types/NewPkg path ""))
+  (when (!= packages nil)
+    (set! pkg2 (aget packages path))
+    (when (not (== (.-Direct pkg1) (and (!= pkg2 nil) (.Complete pkg2))))
+
+      (base/Fatalf "pkg1.Direct == (pkg2 != nil && pkg2.Complete()), path=%s\npackages=%v" path packages)))
+
+
+
+  (when (.-Direct pkg1)
+    (return))
+
+  (set! (.-Direct pkg1) true)
+  (set! (.-Imports target) (append (.-Imports target) pkg1))
+
+  (let [(values f ^:assign err) (openPackage path)]
+    (when (!= err nil)
+      (return))
+
+    (defer (.Close f))
+
+    (let [(values data ^:assign err) (readExportData f)]
+      (when (!= err nil)
+        (return))
+
+
+      (when (!= (.-Export base/Debug) 0)
+        (fmt/Printf "importing %s (%s)\n" path (.Name f)))
+
+
+      (let [pr (pkgbits/NewPkgDecoder (.-Path pkg1) data)]
+
+        ;; Read package descriptors for both types2 and compiler backend.
+        (readPackage (newPkgReader pr) pkg1 false)
+        (set! pkg2 (importer/ReadPackage env packages pr))
+
+        (set! err (addFingerprint path data))
+        (return)))))
+
+
+
+^{:go/end 283} (go/func readExportData "readExportData returns the contents of GC-created unified export data.\n" [^{:tag (* os/File)} f] :results [^string data ^error err]
+  (let [r (bio/NewReader f)
+
+      (values sz ^:assign err) (exportdata/FindPackageDefinition (.-Reader r))]
+    (when (!= err nil)
+      (return))
+
+    (let [end (+ (.Offset r) (conv int64 sz))
+
+        (values abihdr _ ^:assign err) (exportdata/ReadObjectHeaders (.-Reader r))]
+      (when (!= err nil)
+        (return))
+
+
+      (when [expect (objabi/HeaderString)] (!= abihdr expect)
+        (set! err (fmt/Errorf "object is [%s] expected [%s]" abihdr expect))
+        (return))
+
+
+      (set! (values _ err) (exportdata/ReadExportDataHeader (.-Reader r)))
+      (when (!= err nil)
+        (return))
+
+
+      (let [pos (.Offset r)
+
+          ;; Map export data section (+ end-of-section marker) into memory
+          ;; as a single large string. This reduces heap fragmentation and
+          ;; allows returning individual substrings very efficiently.
+          ^{:line 262 :tag string} mapped (zero string)]
+        (set! (values mapped err) (base/MapFile (.File r) pos (- end pos)))
+        (when (!= err nil)
+          (return))
+
+
+        ;; check for end-of-section marker "\n$$\n" and remove it
+        (let [^:const ^{:val "\n$$\n"} marker "\n$$\n"
+
+            ^{:line 271 :tag bool} ok (zero bool)]
+          (set! (values data ok) (strings/CutSuffix mapped marker))
+          (when (not ok)
+            (let [cutoff data] ; include last 10 bytes in error message
+              (when (>= (len cutoff) 10)
+                (set! cutoff (subslice cutoff (- (len cutoff) 10))))
+
+              (set! err (fmt/Errorf "expected $$ marker, but found %q (recompile package)" cutoff))
+              (return)))
+
+
+          (return))))))
+
+
+
+
+^{:go/end 300} (go/func addFingerprint "addFingerprint reads the linker fingerprint included at the end of\nthe exportdata.\n" ^error [^string path ^string data]
+  (let [^goobj/FingerprintType fingerprint (zero goobj/FingerprintType)
+
+      ^{:line 290} pos (- (len data) (len fingerprint))]
+    (when (< pos 0)
+      (return (fmt/Errorf "missing linker fingerprint in exportdata, but found %q" data)))
+
+    ^{:go/breaks [[4 299]]} (let [buf (conv (slice byte) (subslice data pos))]
+
+      (copy (subslice fingerprint) buf)
+      (.AddImport base/Ctxt path fingerprint)
+
+      nil)))
+
+
+^{:go/breaks [[7 332]] :go/end 333} (go/func checkImportPath ^error [^string path ^bool allowSpace]
+  (when (== path "")
+    (return (errors/New "import path is empty")))
+
+
+  (when (strings/Contains path "\u0000")
+    (return (errors/New "import path contains NUL")))
+
+
+  (range [ri base/ReservedImports]
+    (when (== path ri)
+      (return (fmt/Errorf "import path %q is reserved and cannot be used" path))))
+
+
+
+  (range [_ r path]
+    (switch
+      (case [(== r utf8/RuneError)]
+        (return (fmt/Errorf "import path contains invalid UTF-8 sequence: %q" path)))
+      (case [(or (< r 0x20) (== r 0x7f))]
+        (return (fmt/Errorf "import path contains control character: %q" path)))
+      (case [(== r \\)]
+        (return (fmt/Errorf "import path contains backslash; use slash: %q" path)))
+      (case [(and (not allowSpace) (unicode/IsSpace r))]
+        (return (fmt/Errorf "import path contains space character: %q" path)))
+      (case [(strings/ContainsRune "!\"#$%&'()*,:;<=>?[]^`{|}" r)]
+        (return (fmt/Errorf "import path contains invalid character '%c': %q" r path)))))
+
+
+
+  nil)

@@ -2700,3 +2700,128 @@ byte**, `b6f2e89e...`, the three builds one run each from the new stage 0, 561 s
   re-recorded edge makes builds two runs until a re-seed). *Recommended: (a)*.
 
 **Decided (2026-10-15, the user):** SA160-SA163 (a) as recommended, all as built.
+
+## S9: Go's toolchain as forms (2026-10-15)
+
+The survey's S9 (STANDALONE-SURVEY.md §7, step b1'; §8.1): `cmd/compile`, `cmd/link`, `cmd/asm`
+and what they build from as Go forms, the tools built from the forms identical to the
+originals'. Started at the user's request beside the build's second speed round. Branch `s9`.
+
+### The survey
+
+`go list -deps cmd/compile cmd/link cmd/asm` (TamaGo's go1.27.1, cgo off) for the three
+configurations Arbace builds the tools for: linux/amd64 (the host's tools, what `go build` runs)
+and tamago/amd64, tamago/arm64 (the box's tool guests, `bin/box-tools`, S7). The same 105
+packages under `cmd/` for each (and 271 to 273 of std, which `tamago/goroot/` holds already but
+for the linux-only ones, from GOROOT/src as they are):
+
+| part | packages | files | lines | generated lines |
+|---|---:|---:|---:|---:|
+| `cmd/compile/...` | 51 | 408 | 599,059 | 431,914 (the SSA rules' rewrite files, `opGen.go`) |
+| `cmd/internal/...` | 25 | 128 | 117,005 | 37,824 |
+| `cmd/link/...` | 20 | 86 | 42,666 | 96 |
+| `cmd/asm/...` | 5 | 18 | 5,793 | 0 |
+| `cmd/vendor/golang.org/x/telemetry/...` | 4 | 13 | 2,101 | 0 |
+| all | 105 | 653 | 766,624 | 469,834 |
+
+The files differ by configuration in 4 packages only, by the OS (linux's mmap and fallocate
+against tamago's read and no-op variants: `cmd/compile/internal/base`, `cmd/internal/bio`,
+`cmd/link/internal/ld`, telemetry's `mmap`), not by the architecture: the tools target every
+architecture whatever they run on. Assembly: three files named `_test.s` that are the package's
+(`ssa`'s `flags_amd64_test.s`, `flags_arm64_test.s`, `obj/arm64`'s `asm_arm64_test.s`); no
+embedded files. `cmd/compile` is built with PGO, `cmd/compile/default.pgo` (so std's packages
+are compiled a second time for it, `[cmd/compile]` in go list's output): a file of no package the
+build reads, held beside `go.mod`, `go.sum` and `vendor/modules.txt`.
+
+### The forms
+
+`bin/toolchain-vendor convert` (new; modelled on `bin/tamago-vendor`): `bin/g2a convert --goos
+GOOS --goarch ARCH` run in GOROOT/src/cmd on each configuration's packages, by their go list paths
+(`cmd/vendor/golang.org/x/telemetry/...`, as std's vendored packages are `vendor/...`), each
+package's assembly copied into its forms directory, the three trees merged as BX63 merges two:
+**`tamago/cmd/`**, `go/` the forms (a file once when the configurations convert it alike, which
+all do: `conf/CONF/go/`, for files whose forms differ by configuration, is empty), `src/cmd/`
+the four files of no package. 105 packages, 758 forms files, 30.3 MB (the Go: 21.2 MB); all
+dumped, converted and read back (0 failed); 23 minutes for the three on the shared host.
+`tamago/cmd/README.md` records the origin: TamaGo's go1.27.1 tree, its `src/cmd/` pinned by the
+script (`c0db2e8f...`, the sorted SHA-256 list of every file), the whole tree by
+`seed/goroot.sha256`.
+
+### The proof
+
+`bin/toolchain-vendor check`: for each configuration, GOROOT/src/cmd printed (lines layout) into
+a GOROOT whose other entries link the toolchain's, and `compile`, `link` and `asm` built from it
+and from the toolchain's own tree, the same way: for linux/amd64 `go build -trimpath` in
+GOROOT/src/cmd; for tamago/ARCH as `bin/box-tools` builds the tool guests (its overlay of the
+board and the tool shim, `-T 0x201000 -R 0x1000 -w`; it takes `BOX_TOOLS_OUT` and
+`BOX_TOOLS_LDFLAGS` now). Both with empty build IDs: `-buildid=`, and the build ID the go command
+stores in a toolchain binary for its staleness checks (`-X=cmd/internal/objabi.buildID=`,
+`cmd/go/internal/work/gc.go`): both hash the source text, which the printer does not keep
+(comments).
+
+**All nine byte-identical**, linux/amd64 with its DWARF:
+
+| configuration | compile | link | asm |
+|---|---|---|---|
+| linux/amd64 | 36,993,738 `683a6c3f...` | 10,077,256 `6ebbbe18...` | 7,208,609 `17ce724f...` |
+| tamago/amd64 | 28,114,036 `2d729aa8...` | 7,159,722 `3e66b2f3...` | 5,407,207 `dbe3dc82...` |
+| tamago/arm64 | 26,386,956 `84cba1b9...` | 6,653,861 `88ffa63d...` | 5,147,590 `727acff6...` |
+
+Found on the way, g2a's printing (lines layout) fixed, both cases that no form of std, the box,
+`x509roots/` or Arbace's program had:
+- **A labeled declaration's own line.** `next:` then a comment line then `var tok ...`
+  (`cmd/asm/internal/asm/parse.go:182`; `ssa/writebarrier.go:247`, `obj/mips/obj0.go`,
+  `ssa/stackalloc.go`): the printer put the label on the line before the declaration, as gofmt
+  writes it, and gc records a label that begins a function's code at its line (`asm`'s and
+  `compile`'s line tables differed). The converter now writes `:go/label-line` beside
+  `:go/label` when the label is neither there nor on the declaration's line, and the printer
+  puts it there (SPEC §7.3). In std one such label, `regexp/backtrack.go`'s `Skip:` (a blank
+  line between): `tamago/goroot/go/regexp/backtrack.ae` gains `:go/label-line 162`, as a fresh
+  conversion writes it.
+- **A parameter list after type parameters that span lines.** `func flagSliceToSB[T interface
+  {` ... `}](sb *strings.Builder, ...)` (`inline/inlheur/funcprop_string.go`): the printer
+  writes the constraint on one line, and reached the parameters' recorded line (the vector's
+  `:line`, its `(`'s) only inside the first parameter's type, so `sb` stood at line 28, not 31:
+  DWARF's declaration line of the parameter (only the linux build, unstripped, showed it). The
+  printer now breaks to the vector's line before its `(`.
+- **Printing GOROOT's tree with several main packages.** `bin/g2a build --print-only --module
+  std` required no main package; GOROOT/src/cmd holds three.
+
+Outside `tamago/cmd/`: `bin/tamago-vendor`'s `verify` and its print key look at its own two roots,
+`goroot/` and `goos/`; `bin/box-rebuild` archives those two of `tamago/` into the box's store, not
+the toolchain's forms.
+
+### Checks
+
+- `bin/toolchain-vendor check`: the nine tools identical (above).
+- `bin/toolchain-vendor verify`: VERIFY
+- `bin/tamago-vendor check amd64` (the printer changed, `regexp/backtrack.ae` changed): TVCHECK
+- `bin/g2a test`: 6 tests, 150 assertions, 0 failures.
+- The essential `bin/gate` on the branch: GATE
+
+### Amendments (proposed 2026-10-15)
+
+- **SA200 g2a's two printing fixes.** (a) `:go/label-line` in the forms where a labeled
+  declaration's label stands apart, the parameter list's `(` at the vector's line, several main
+  packages in `--module std` (as built); (b) the label's line always recorded (every labeled
+  declaration's forms change, 20 in std). *Recommended: (a)*: the forms change only where the
+  line is not the one the printer gives.
+- **SA201 Where the toolchain's forms live.** (a) `tamago/cmd/`, a third root beside
+  `tamago/goroot/` and `tamago/goos/`, with its own script, so the box's builds and
+  `tamago-vendor` do not print or verify it (as built); (b) inside `tamago/goroot/go/cmd/` with
+  std (one tree as GOROOT/src is, but every box build would print 30 MB more); (c) a top-level
+  `goroot-cmd/`. *Recommended: (a)*.
+- **SA202 The configurations.** (a) linux/amd64, tamago/amd64 and tamago/arm64, the three
+  Arbace builds the tools for (as built); (b) the tool guests' two only. *Recommended: (a)*:
+  linux/amd64 adds 6 files (its mmap and fallocate variants) and proves the DWARF too.
+- **SA203 What builds the tools.** (a) Nothing changes for now: the host runs the toolchain's
+  binaries and `bin/box-tools` builds the tool guests from the toolchain's tree, S9 proving the
+  forms equivalent; (b) `bin/box-tools` builds the tool guests from `tamago/cmd/` printed (as
+  the box's guest is built from `tamago/` printed since S6, `ARBACE_BOX_GO=orig` the way back),
+  and the box's rebuild takes the toolchain's forms from its source tree. *Recommended: (b)*,
+  next: it makes the forms the source, which is S9's point (and P1's, a gc edited as forms), at
+  the cost of a printing of 21 MB of Go per change to the printer (cached by its key).
+- **SA204 In the gate.** (a) `bin/toolchain-vendor verify` and `check` in `bin/gate --full`'s g2a
+  chain (the conversion of three configurations, 23 minutes on the shared host; the check about
+  3 minutes a configuration: two prints and two builds of the three tools); (b) at milestones by hand. *Recommended: (a)*,
+  as `bin/tamago-vendor`'s are.

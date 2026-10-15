@@ -1,0 +1,1247 @@
+;; Copyright 2009 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.cmd.compile.internal.staticinit) (go/file "sched.go" :imports [
+
+
+    ^{:line 8} [fmt "fmt"]
+    ^{:line 9} [constant "go/constant"]
+    ^{:line 10} [token "go/token"]
+    ^{:line 11} [os "os"]
+    ^{:line 12} [strings "strings"]
+
+    ^{:line 14} [base "cmd/compile/internal/base"]
+    ^{:line 15} [ir "cmd/compile/internal/ir"]
+    ^{:line 16} [reflectdata "cmd/compile/internal/reflectdata"]
+    ^{:line 17} [staticdata "cmd/compile/internal/staticdata"]
+    ^{:line 18} [typecheck "cmd/compile/internal/typecheck"]
+    ^{:line 19} [types "cmd/compile/internal/types"]
+    ^{:line 20} [obj "cmd/internal/obj"]
+    ^{:line 21} [objabi "cmd/internal/objabi"]
+    ^{:line 22} [src "cmd/internal/src"]])
+
+
+(go/type Entry (struct
+    ^{:line 26 :tag int64} Xoffset ; struct, array only
+    ^{:line 27 :tag ir/Node} Expr)) ; bytes of run-time computed expressions
+
+
+(go/type Plan (struct
+    ^{:line 31 :tag (slice Entry)} E))
+
+
+
+
+
+
+(go/type Schedule "An Schedule is used to decompose assignment statements into\nstatic and dynamic initialization parts. Static initializations are\nhandled by populating variables' linker symbol data, while dynamic\ninitializations are accumulated to be executed in order.\n" (struct
+
+
+    ^{:line 41 :tag (slice ir/Node) :doc "Out is the ordered list of dynamic initialization\nstatements.\n"} Out
+
+    ^{:line 43 :tag (map ir/Node (* Plan))} Plans
+    ^{:line 44 :tag (map ir/Node (* ir/Name))} Temps
+
+
+
+
+    ^{:line 49 :tag bool :doc "seenMutation tracks whether we've seen an initialization\nexpression that may have modified other package-scope variables\nwithin this package.\n"} seenMutation))
+
+
+^{:go/end 54} (go/method append [^{:tag (* Schedule)} s ^ir/Node n]
+  (set! (.-Out s) (append (.-Out s) n)))
+
+
+
+^{:go/end 64} (go/method StaticInit "StaticInit adds an initialization statement n to the schedule.\n" [^{:tag (* Schedule)} s ^ir/Node n]
+  (when (not (.tryStaticInit s n))
+    (when (!= (.-Percent base/Flag) 0)
+      (ir/Dump "StaticInit failed" n))
+
+    (.append s n)))
+
+
+
+
+
+
+(go/var ^{:tag (map (* ir/Name) (* ir/Func)) :doc "varToMapInit holds book-keeping state for global map initialization;\nit records the init function created by the compiler to host the\ninitialization code for the map in question.\n"} varToMapInit)
+
+
+
+
+(go/var ^{:tag (map (* ir/Func) (* ir/Name)) :doc "MapInitToVar is the inverse of VarToMapInit; it maintains a mapping\nfrom a compiler-generated init function to the map the function is\ninitializing.\n"} MapInitToVar)
+
+
+
+
+^{:go/end 86} (go/func recordFuncForVar "recordFuncForVar establishes a mapping between global map var \"v\" and\noutlined init function \"fn\" (and vice versa); so that we can use\nthe mappings later on to update relocations.\n" [^{:tag (* ir/Name)} v ^{:tag (* ir/Func)} fn]
+  (when (== varToMapInit nil)
+    (set! varToMapInit (make (map (* ir/Name) (* ir/Func))))
+    (set! MapInitToVar (make (map (* ir/Func) (* ir/Name)))))
+
+  (aset varToMapInit v fn)
+  (aset MapInitToVar fn v))
+
+
+
+^{:go/breaks [[5 95]] :go/end 96} (go/func allBlank "allBlank reports whether every node in exprs is blank.\n" ^bool [^{:tag (slice ir/Node)} exprs]
+  (range [_ expr exprs]
+    (when (not (ir/IsBlank expr))
+      (return false)))
+
+
+  true)
+
+
+
+
+^{:go/end 153} (go/method tryStaticInit "tryStaticInit attempts to statically execute an initialization\nstatement and reports whether it succeeded.\n" ^bool [^{:tag (* Schedule)} s ^ir/Node n]
+  (let [^{:tag (slice ir/Node)} lhs (zero (slice ir/Node))
+      ^{:line 102 :tag ir/Node} rhs (zero ir/Node)]
+
+    (switch (.Op n)
+      (default
+        (base/FatalfAt (.Pos n) "unexpected initialization statement: %v" n))
+      (case [ir/OAS]
+        (let [n (assert (* ir/AssignStmt) n)]
+          (set! (values lhs rhs) (values (lit (slice ir/Node) (.-X n)) (.-Y n)))))
+      (case [ir/OAS2]
+        ;; Usually OAS2 has been rewritten to separate OASes by types2.
+        ;; What's left here is "var a, b = tmp1, tmp2" as a result from rewriting
+        ;; "var a, b = f()" that needs type conversion, which is not static.
+        (let [n (assert (* ir/AssignListStmt) n)]
+          (range [_ rhs (.-Rhs n)]
+            (while (or (== (.Op rhs) ir/OCONVNOP) (== (.Op rhs) ir/OCONVIFACE))
+              (set! rhs (.-X (assert (* ir/ConvExpr) rhs))))
+
+            (when [(values name ok) (assert (* ir/Name) rhs)] (or (not ok) (not (.AutoTemp name)))
+              (base/FatalfAt ^{:go/via [miniStmt miniNode]} (.Pos n) "unexpected rhs, not an autotmp: %+v" rhs)))
+
+
+          (return false)))
+      (case [ir/OAS2DOTTYPE ir/OAS2FUNC ir/OAS2MAPR ir/OAS2RECV]
+        (let [n (assert (* ir/AssignListStmt) n)]
+          (when (or (< (len (.-Lhs n)) 2) (!= (len (.-Rhs n)) 1))
+            (base/FatalfAt ^{:go/via [miniStmt miniNode]} (.Pos n) "unexpected shape for %v: %v" ^{:go/via [miniStmt miniNode]} (.Op n) n))
+
+          (set! (values lhs rhs) (values (.-Lhs n) (aget (.-Rhs n) 0)))))
+      (case [ir/OCALLFUNC]
+        (return false))) ; outlined map init call; no mutations
+
+
+    (when (not (.-seenMutation s))
+      (set! (.-seenMutation s) (mayModifyPkgVar rhs)))
+
+
+    (when (and (allBlank lhs) (not (AnySideEffects rhs)))
+      (return true)) ; discard
+
+
+    ;; Only worry about simple "l = r" assignments. The OAS2*
+    ;; assignments mostly necessitate dynamic execution anyway.
+    (when (> (len lhs) 1)
+      (return false))
+
+
+    (let [lno (ir/SetPos n)]
+      (defer (^{:go/end 149} (fn [] (set! base/Pos lno))))
+
+      (let [nam (assert (* ir/Name) (aget lhs 0))]
+        (.StaticAssign s nam 0 rhs ^{:go/via [miniExpr]} (.Type nam))))))
+
+
+
+
+^{:go/end 282} (go/method staticcopy "like staticassign but we are copying an already\ninitialized value r.\n" ^bool [^{:tag (* Schedule)} s ^{:tag (* ir/Name)} l ^int64 loff ^{:tag (* ir/Name)} rn ^{:tag (* types/Type)} typ]
+  (when (== (.-Class rn) ir/PFUNC)
+    ;; TODO if roff != 0 { panic }
+    (staticdata/InitAddr l loff (staticdata/FuncLinksym rn))
+    (return true))
+
+  (when (or (!= (.-Class rn) ir/PEXTERN) (!= (.-Pkg (.Sym rn)) types/LocalPkg))
+    (return false))
+
+  (when (== (.-Defn rn) nil)
+    ;; No explicit initialization value. Probably zeroed but perhaps
+    ;; supplied externally and of unknown value.
+    (return false))
+
+  (when (!= (.Op (.-Defn rn)) ir/OAS)
+    (return false))
+
+  (when (.IsString ^{:go/via [miniExpr]} (.Type rn)) ; perhaps overwritten by cmd/link -X (#34675)
+    (return false))
+
+  (when (!= (.-Embed rn) nil)
+    (return false))
+
+  ^{:go/breaks [[6 281]]} (let [orig rn
+      ^{:line 181} r (.-Y (assert (* ir/AssignStmt) (.-Defn rn)))]
+    (when (== r nil)
+      ;; types2.InitOrder doesn't include default initializers.
+      (base/Fatalf "unexpected initializer: %v" (.-Defn rn)))
+
+
+    ;; Variable may have been reassigned by a user-written function call
+    ;; that was invoked to initialize another global variable (#51913).
+    (when (.-seenMutation s)
+      (when (!= (.-StaticCopy base/Debug) 0)
+        (base/WarnfAt ^{:go/via [miniExpr miniNode]} (.Pos l) "skipping static copy of %v+%v with %v" l loff r))
+
+      (return false))
+
+
+    (while (and (== (.Op r) ir/OCONVNOP) (not (types/Identical (.Type r) typ)))
+      (set! r (.-X (assert (* ir/ConvExpr) r))))
+
+
+    (switch (.Op r)
+      (case [ir/OMETHEXPR]
+        (set! r (.FuncName (assert (* ir/SelectorExpr) r)))
+        (fallthrough))
+      (case [ir/ONAME]
+        (let [r (assert (* ir/Name) r)]
+          (when (.staticcopy s l loff r typ)
+            (return true))
+
+          ;; We may have skipped past one or more OCONVNOPs, so
+          ;; use conv to ensure r is assignable to l (#13263).
+          (let [dst (conv ir/Node l)]
+            (when (or (!= loff 0) (not (types/Identical typ ^{:go/via [miniExpr]} (.Type l))))
+              (set! dst (ir/NewNameOffsetExpr base/Pos l loff typ)))
+
+            (.append s (ir/NewAssignStmt base/Pos dst (typecheck/Conv r typ)))
+            (return true))))
+
+      (case [ir/ONIL]
+        (return true))
+
+      (case [ir/OLITERAL]
+        (when (ir/IsZero r)
+          (return true))
+
+        (staticdata/InitConst l loff r (conv int (.Size typ)))
+        (return true))
+
+      (case [ir/OADDR]
+        (let [r (assert (* ir/AddrExpr) r)]
+          (when [(values a ok) (assert (* ir/Name) (.-X r))] (and ok (== ^{:go/via [miniExpr miniNode]} (.Op a) ir/ONAME))
+            (when (!= (.-Class a) ir/PEXTERN)
+              (return false)) ; e.g. local from new(expr)
+
+            (staticdata/InitAddr l loff (staticdata/GlobalLinksym a))
+            (return true))))
+
+
+      (case [ir/OPTRLIT]
+        (let [r (assert (* ir/AddrExpr) r)]
+          (switch (.Op (.-X r))
+            (case [ir/OARRAYLIT ir/OSLICELIT ir/OSTRUCTLIT ir/OMAPLIT]
+              ;; copy pointer
+              (staticdata/InitAddr l loff (staticdata/GlobalLinksym (aget (.-Temps s) r)))
+              (return true)))))
+
+
+      (case [ir/OSLICELIT]
+        (let [r (assert (* ir/CompLitExpr) r)]
+          ;; copy slice
+          (staticdata/InitSlice l loff (staticdata/GlobalLinksym (aget (.-Temps s) r)) (.-Len r))
+          (return true)))
+
+      (case [ir/OARRAYLIT ir/OSTRUCTLIT]
+        (let [r (assert (* ir/CompLitExpr) r)
+            ^{:line 255} p (aget (.-Plans s) r)]
+          (range [i (.-E p)]
+            (let [e (addr (aget (.-E p) i))
+                ^{:line 258} typ (.Type (.-Expr e))]
+              (when (or (== (.Op (.-Expr e)) ir/OLITERAL) (== (.Op (.-Expr e)) ir/ONIL))
+                (staticdata/InitConst l (+ loff (.-Xoffset e)) (.-Expr e) (conv int (.Size typ)))
+                (continue))
+
+              (let [x (.-Expr e)]
+                (when (== (.Op x) ir/OMETHEXPR)
+                  (set! x (.FuncName (assert (* ir/SelectorExpr) x))))
+
+                (when (and (== (.Op x) ir/ONAME) (.staticcopy s l (+ loff (.-Xoffset e)) (assert (* ir/Name) x) typ))
+                  (continue))
+
+                ;; Requires computation, but we're
+                ;; copying someone else's computation.
+                (let [ll (ir/NewNameOffsetExpr base/Pos l (+ loff (.-Xoffset e)) typ)
+                    ^{:line 273} rr (ir/NewNameOffsetExpr base/Pos orig (.-Xoffset e) typ)]
+                  (ir/SetPos rr)
+                  (.append s (ir/NewAssignStmt base/Pos ll rr))))))
+
+
+          (return true))))
+
+
+    false))
+
+
+^{:go/end 513} (go/method StaticAssign ^bool [^{:tag (* Schedule)} s ^{:tag (* ir/Name)} l ^int64 loff ^ir/Node r ^{:tag (* types/Type)} typ]
+  ;; If we're building for FIPS, avoid global data relocations
+  ;; by treating all address-of operations as non-static.
+  ;; See ../../../internal/obj/fips.go for more context.
+  ;; We do this even in non-PIE mode to avoid generating
+  ;; static temporaries that would go into SRODATAFIPS
+  ;; but need relocations. We can't handle that in the verification.
+  (let [disableGlobalAddrs (.IsFIPS base/Ctxt)]
+
+    (when (== r nil)
+      ;; No explicit initialization value. Either zero or supplied
+      ;; externally.
+      (return true))
+
+    (while (== (.Op r) ir/OCONVNOP)
+      (set! r (.-X (assert (* ir/ConvExpr) r))))
+
+
+    ^{:go/breaks [[4 512]]} (let [assign ^{:go/end 314} (fn [^src/XPos pos ^{:tag (* ir/Name)} a ^int64 aoff ^ir/Node v]
+          (when (.StaticAssign s a aoff v (.Type v))
+            (return))
+
+          (let [^ir/Node lhs (zero ir/Node)]
+            (if (ir/IsBlank a)
+              ;; Don't use NameOffsetExpr with blank (#43677).
+              (set! lhs ir/BlankNode)
+
+              (set! lhs (ir/NewNameOffsetExpr pos a aoff (.Type v))))
+
+            (.append s (ir/NewAssignStmt pos lhs v))))]
+
+
+      (switch (.Op r)
+        (case [ir/ONAME]
+          (when disableGlobalAddrs
+            (return false))
+
+          (let [r (assert (* ir/Name) r)]
+            (return (.staticcopy s l loff r typ))))
+
+        (case [ir/OMETHEXPR]
+          (when disableGlobalAddrs
+            (return false))
+
+          (let [r (assert (* ir/SelectorExpr) r)]
+            (return (.staticcopy s l loff (.FuncName r) typ))))
+
+        (case [ir/ONIL]
+          (return true))
+
+        (case [ir/OLITERAL]
+          (when (ir/IsZero r)
+            (return true))
+
+          (when (and disableGlobalAddrs (.IsString (.Type r)))
+            (return false))
+
+          (staticdata/InitConst l loff r (conv int (.Size typ)))
+          (return true))
+
+        (case [ir/OADDR]
+          (when disableGlobalAddrs
+            (return false))
+
+          (let [r (assert (* ir/AddrExpr) r)]
+            (when [(values name offset ok) (StaticLoc (.-X r))] (and ok (== (.-Class name) ir/PEXTERN))
+              (staticdata/InitAddrOffset l loff (.Linksym name) offset)
+              (return true))
+
+            (fallthrough)))
+
+        (case [ir/OPTRLIT]
+          (when disableGlobalAddrs
+            (return false))
+
+          (let [r (assert (* ir/AddrExpr) r)]
+            (switch (.Op (.-X r))
+              (case [ir/OARRAYLIT ir/OSLICELIT ir/OMAPLIT ir/OSTRUCTLIT]
+                ;; Init pointer.
+                (let [a (StaticName (.Type (.-X r)))]
+
+                  (aset (.-Temps s) r a)
+                  (staticdata/InitAddr l loff (.Linksym a))
+
+                  ;; Init underlying literal.
+                  (assign base/Pos a 0 (.-X r))
+                  (return true))))))
+
+        ;;dump("not static ptrlit", r);
+
+        (case [ir/OSTR2BYTES]
+          (when disableGlobalAddrs
+            (return false))
+
+          (let [r (assert (* ir/ConvExpr) r)]
+            (when (and (== (.-Class l) ir/PEXTERN) (== (.Op (.-X r)) ir/OLITERAL))
+              (let [sval (ir/StringVal (.-X r))]
+                (staticdata/InitSliceBytes l loff sval)
+                (return true)))))
+
+
+        (case [ir/OSLICELIT]
+          (when disableGlobalAddrs
+            (return false))
+
+          (let [r (assert (* ir/CompLitExpr) r)]
+            (.initplan s r)
+            ;; Init slice.
+            (let [ta (types/NewArray (.Elem ^{:go/via [miniExpr]} (.Type r)) (.-Len r))]
+              (.SetNoalg ta true)
+              (let [a (StaticName ta)]
+                (aset (.-Temps s) r a)
+                (staticdata/InitSlice l loff (.Linksym a) (.-Len r))
+                ;; Fall through to init underlying array.
+                (set! l a)
+                (set! loff 0)
+                (fallthrough)))))
+
+        (case [ir/OARRAYLIT ir/OSTRUCTLIT]
+          (let [r (assert (* ir/CompLitExpr) r)]
+            (.initplan s r)
+
+            (let [p (aget (.-Plans s) r)]
+              (range [i (.-E p)]
+                (let [e (addr (aget (.-E p) i))]
+                  (when (or (and (== (.Op (.-Expr e)) ir/OLITERAL) (not disableGlobalAddrs)) (== (.Op (.-Expr e)) ir/ONIL))
+                    (staticdata/InitConst l (+ loff (.-Xoffset e)) (.-Expr e) (conv int (.Size (.Type (.-Expr e)))))
+                    (continue))
+
+                  (ir/SetPos (.-Expr e))
+                  (assign base/Pos l (+ loff (.-Xoffset e)) (.-Expr e))))
+
+
+              (return true))))
+
+        (case [ir/OMAPLIT]
+          (break))
+
+        (case [ir/OCLOSURE]
+          (when disableGlobalAddrs
+            (return false))
+
+          (let [r (assert (* ir/ClosureExpr) r)]
+            (when (not (.IsClosure (.-Func r)))
+              (when (> (.-Closure base/Debug) 0)
+                (base/WarnfAt ^{:go/via [miniExpr miniNode]} (.Pos r) "closure converted to global"))
+
+              ;; Closures with no captured variables are globals,
+              ;; so the assignment can be done at link time.
+              ;; TODO if roff != 0 { panic }
+              (staticdata/InitAddr l loff (staticdata/FuncLinksym (.-Nname (.-Func r))))
+              (return true))
+
+            (ir/ClosureDebugRuntimeCheck r)))
+
+        (case [ir/OCONVIFACE]
+          ;; This logic is mirrored in isStaticCompositeLiteral.
+          ;; If you change something here, change it there, and vice versa.
+
+          (when disableGlobalAddrs
+            (return false))
+
+
+          ;; Determine the underlying concrete type and value we are converting from.
+          (let [r (assert (* ir/ConvExpr) r)
+              ^{:line 449} val (conv ir/Node r)]
+            (while (== (.Op val) ir/OCONVIFACE)
+              (set! val (.-X (assert (* ir/ConvExpr) val))))
+
+
+            (when (.IsInterface (.Type val))
+              ;; val is an interface type.
+              ;; If val is nil, we can statically initialize l;
+              ;; both words are zero and so there no work to do, so report success.
+              ;; If val is non-nil, we have no concrete type to record,
+              ;; and we won't be able to statically initialize its value, so report failure.
+              (return (== (.Op val) ir/ONIL)))
+
+
+            (when (.HasShape (.Type val))
+              ;; See comment in cmd/compile/internal/walk/convert.go:walkConvInterface
+              (return false))
+
+
+            (reflectdata/MarkTypeUsedInInterface (.Type val) (.Linksym l))
+
+            (let [^{:tag (* ir/AddrExpr)} itab (zero (* ir/AddrExpr))]
+              (if (.IsEmptyInterface typ)
+                (set! itab (reflectdata/TypePtrAt base/Pos (.Type val)))
+
+                (set! itab (reflectdata/ITabAddrAt base/Pos (.Type val) typ)))
+
+
+              ;; Create a copy of l to modify while we emit data.
+
+              ;; Emit itab, advance offset.
+              (staticdata/InitAddr l loff (.-Linksym (assert (* ir/LinksymOffsetExpr) (.-X itab))))
+
+              ;; Emit data.
+              (if (types/IsDirectIface (.Type val)) (do
+                  (when (== (.Op val) ir/ONIL)
+                    ;; Nil is zero, nothing to do.
+                    (return true))
+
+                  ;; Copy val directly into n.
+                  (ir/SetPos val)
+                  (assign base/Pos l (+ loff (conv int64 types/PtrSize)) val))
+
+                ;; Construct temp to hold val, write pointer to temp into n.
+                (let [a (StaticName (.Type val))]
+                  (aset (.-Temps s) val a)
+                  (assign base/Pos a 0 val)
+                  (staticdata/InitAddr l (+ loff (conv int64 types/PtrSize)) (.Linksym a))))
+
+
+              (return true))))
+
+        (case [ir/OINLCALL]
+          (when disableGlobalAddrs
+            (return false))
+
+          (let [r (assert (* ir/InlinedCallExpr) r)]
+            (return (.staticAssignInlinedCall s l loff r typ)))))
+
+
+      (when (!= (.-Percent base/Flag) 0)
+        (ir/Dump "not static" r))
+
+      false)))
+
+
+^{:go/end 561} (go/method initplan [^{:tag (* Schedule)} s ^ir/Node n]
+  (when (!= (aget (.-Plans s) n) nil)
+    (return))
+
+  (let [p (new Plan)]
+    (aset (.-Plans s) n p)
+    (switch (.Op n)
+      (default
+        (base/Fatalf "initplan"))
+
+      (case [ir/OARRAYLIT ir/OSLICELIT]
+        (let [n (assert (* ir/CompLitExpr) n)
+            ^{:line 527 :tag int64} k (zero int64)]
+          (range [_ a (.-List n)]
+            (when (== (.Op a) ir/OKEY)
+              (let [kv (assert (* ir/KeyExpr) a)]
+                (set! k (typecheck/IndexConst (.-Key kv)))
+                (set! a (.-Value kv))))
+
+            (.addvalue s p (* k (.Size (.Elem ^{:go/via [miniExpr]} (.Type n)))) a)
+            (inc! k))))
+
+
+      (case [ir/OSTRUCTLIT]
+        (let [n (assert (* ir/CompLitExpr) n)]
+          (range [_ a (.-List n)]
+            (when (!= (.Op a) ir/OSTRUCTKEY)
+              (base/Fatalf "initplan structlit"))
+
+            (let [a (assert (* ir/StructKeyExpr) a)]
+              (when (.IsBlank (.Sym a))
+                (continue))
+
+              (.addvalue s p (typecheck/FieldOffset ^{:go/via [miniExpr]} (.Type n) (.-Field a)) (.-Value a))))))
+
+
+      (case [ir/OMAPLIT]
+        (let [n (assert (* ir/CompLitExpr) n)]
+          (range [_ a (.-List n)]
+            (when (!= (.Op a) ir/OKEY)
+              (base/Fatalf "initplan maplit"))
+
+            (let [a (assert (* ir/KeyExpr) a)]
+              (.addvalue s p -1 (.-Value a)))))))))
+
+
+
+
+^{:go/end 583} (go/method addvalue [^{:tag (* Schedule)} s ^{:tag (* Plan)} p ^int64 xoffset ^ir/Node n]
+  ;; special case: zero can be dropped entirely
+  (when (ir/IsZero n)
+    (return))
+
+
+  ;; special case: inline struct and array (not slice) literals
+  (when (isvaluelit n)
+    (.initplan s n)
+    (let [q (aget (.-Plans s) n)]
+      (range [_ qe (.-E q)]
+        ;; qe is a copy; we are not modifying entries in q.E
+        (set! (.-Xoffset qe) + xoffset)
+        (set! (.-E p) (append (.-E p) qe)))
+
+      (return)))
+
+
+  ;; add to plan
+  (set! (.-E p) (append (.-E p) (lit Entry :Xoffset xoffset :Expr n))))
+
+
+^{:go/end 743} (go/method staticAssignInlinedCall ^bool [^{:tag (* Schedule)} s ^{:tag (* ir/Name)} l ^int64 loff ^{:tag (* ir/InlinedCallExpr)} call ^{:tag (* types/Type)} typ]
+  (when (== (.-InlStaticInit base/Debug) 0)
+    (return false))
+
+
+  ;; Handle the special case of an inlined call of
+  ;; a function body with a single return statement,
+  ;; which turns into a single assignment plus a goto.
+  ;;
+  ;; For example code like this:
+  ;;
+  ;;	type T struct{ x int }
+  ;;	func F(x int) *T { return &T{x} }
+  ;;	var Global = F(400)
+  ;;
+  ;; turns into IR like this:
+  ;;
+  ;; 	INLCALL-init
+  ;; 	.   AS2-init
+  ;; 	.   .   DCL # x.go:18:13
+  ;; 	.   .   .   NAME-p.x Class:PAUTO Offset:0 InlFormal OnStack Used int tc(1) # x.go:14:9,x.go:18:13
+  ;; 	.   AS2 Def tc(1) # x.go:18:13
+  ;; 	.   AS2-Lhs
+  ;; 	.   .   NAME-p.x Class:PAUTO Offset:0 InlFormal OnStack Used int tc(1) # x.go:14:9,x.go:18:13
+  ;; 	.   AS2-Rhs
+  ;; 	.   .   LITERAL-400 int tc(1) # x.go:18:14
+  ;; 	.   INLMARK Index:1 # +x.go:18:13
+  ;; 	INLCALL PTR-*T tc(1) # x.go:18:13
+  ;; 	INLCALL-Body
+  ;; 	.   BLOCK tc(1) # x.go:18:13
+  ;; 	.   BLOCK-List
+  ;; 	.   .   DCL tc(1) # x.go:18:13
+  ;; 	.   .   .   NAME-p.~R0 Class:PAUTO Offset:0 OnStack Used PTR-*T tc(1) # x.go:18:13
+  ;; 	.   .   AS2 tc(1) # x.go:18:13
+  ;; 	.   .   AS2-Lhs
+  ;; 	.   .   .   NAME-p.~R0 Class:PAUTO Offset:0 OnStack Used PTR-*T tc(1) # x.go:18:13
+  ;; 	.   .   AS2-Rhs
+  ;; 	.   .   .   INLINED RETURN ARGUMENT HERE
+  ;; 	.   .   GOTO p..i1 tc(1) # x.go:18:13
+  ;; 	.   LABEL p..i1 # x.go:18:13
+  ;; 	INLCALL-ReturnVars
+  ;; 	.   NAME-p.~R0 Class:PAUTO Offset:0 OnStack Used PTR-*T tc(1) # x.go:18:13
+  ;;
+  ;; If the init values are side-effect-free and each either only
+  ;; appears once in the function body or is safely repeatable,
+  ;; then we inline the value expressions into the return argument
+  ;; and then call StaticAssign to handle that copy.
+  ;;
+  ;; This handles simple cases like
+  ;;
+  ;;	var myError = errors.New("mine")
+  ;;
+  ;; where errors.New is
+  ;;
+  ;;	func New(text string) error {
+  ;;		return &errorString{text}
+  ;;	}
+  ;;
+  ;; We could make things more sophisticated but this kind of initializer
+  ;; is the most important case for us to get right.
+
+  (let [init ^{:go/via [miniExpr]} (.Init call)]
+    (when (or (!= (len init) 2) (!= (.Op (aget init 0)) ir/OAS2) (!= (.Op (aget init 1)) ir/OINLMARK))
+      (return false))
+
+    (let [as2init (assert (* ir/AssignListStmt) (aget init 0))]
+
+      (when (or (!= (len (.-Body call)) 2) (!= (.Op (aget (.-Body call) 0)) ir/OBLOCK) (!= (.Op (aget (.-Body call) 1)) ir/OLABEL))
+        (return false))
+
+      (let [label (.-Label (assert (* ir/LabelStmt) (aget (.-Body call) 1)))
+          ^{:line 656} block (assert (* ir/BlockStmt) (aget (.-Body call) 0))
+          ^{:line 657} list (.-List block)]
+        (when (or (!= (len list) 3)
+            (!= (.Op (aget list 0)) ir/ODCL)
+            (!= (.Op (aget list 1)) ir/OAS2)
+            (!= (.Op (aget list 2)) ir/OGOTO)
+            (!= (.-Label (assert (* ir/BranchStmt) (aget list 2))) label))
+          (return false))
+
+        (let [dcl (assert (* ir/Decl) (aget list 0))
+            ^{:line 666} as2body (assert (* ir/AssignListStmt) (aget list 1))]
+          (when (or (!= (len (.-Lhs as2body)) 1) (!= (aget (.-Lhs as2body) 0) (.-X dcl)))
+            (return false))
+
+
+          ;; Can't remove the parameter variables if an address is taken.
+          (range [_ v (.-Lhs as2init)]
+            (when (.Addrtaken (assert (* ir/Name) v))
+              (return false)))
+
+
+          ;; Can't move the computation of the args if they have side effects.
+          (range [_ r (.-Rhs as2init)]
+            (when (AnySideEffects r)
+              (return false)))
+
+
+
+          ;; Can only substitute arg for param if param is used
+          ;; at most once or is repeatable.
+          (let [count (make (map (* ir/Name) int))]
+            (range [_ x (.-Lhs as2init)]
+              (aset count (assert (* ir/Name) x) 0))
+
+
+            (let [hasClosure false]
+              (ir/Visit (aget (.-Rhs as2body) 0) ^{:go/end 701} (fn [^ir/Node n]
+                  (when [(values name ok) (assert (* ir/Name) n)] ok
+                    (when [(values c ok) (aget count name)] ok
+                      (aset count name (+ c 1))))
+
+
+                  (when [(values clo ok) (assert (* ir/ClosureExpr) n)] ok
+                    (set! hasClosure (or hasClosure (.IsClosure (.-Func clo)))))))
+
+
+
+              ;; If there's a closure, it has captured the param,
+              ;; so we can't substitute arg for param.
+              (when hasClosure
+                (return false))
+
+
+              (range [name c count]
+                (when (> c 1)
+                  ;; Check whether corresponding initializer can be repeated.
+                  ;; Something like 1 can be; make(chan int) or &T{} cannot,
+                  ;; because they need to evaluate to the same result in each use.
+                  (range [i n (.-Lhs as2init)]
+                    (when (and (== n name) (not (canRepeat (aget (.-Rhs as2init) i))))
+                      (return false)))))
+
+
+
+
+
+              ;; Possible static init.
+              ;; Build tree with args substituted for params and try it.
+              (let [args (make (map (* ir/Name) ir/Node))]
+                (range [i v (.-Lhs as2init)]
+                  (when (ir/IsBlank v)
+                    (continue))
+
+                  (aset args (assert (* ir/Name) v) (aget (.-Rhs as2init) i)))
+
+                (let [(values r ok) (subst (aget (.-Rhs as2body) 0) args)]
+                  (when (not ok)
+                    (return false))
+
+                  (set! ok (.StaticAssign s l loff r typ))
+
+                  (when (and ok (!= (.-Percent base/Flag) 0))
+                    (ir/Dump "static inlined-LEFT" l)
+                    (ir/Dump "static inlined-ORIG" call)
+                    (ir/Dump "static inlined-RIGHT" r))
+
+                  ^{:line 742} ok)))))))))
+
+
+;; from here down is the walk analysis
+;; of composite literals.
+;; most of the work is to generate
+;; data statements for the constant
+;; part of the composite literal.
+
+(go/var ^int statuniqgen) ; name generator for static temps
+
+
+^{:go/end 769} (go/func StaticName "StaticName returns a name backed by a (writable) static data symbol.\n" ^{:tag (* ir/Name)} [^{:tag (* types/Type)} t]
+  ;; Don't use LookupNum; it interns the resulting string, but these are all unique.
+  (let [sym (typecheck/Lookup (fmt/Sprintf "%s%d" obj/StaticNamePrefix statuniqgen))]
+    (inc! statuniqgen)
+
+    (let [n (ir/NewNameAt base/Pos sym t)]
+      (set! (.-Def sym) n)
+
+      (set! (.-Class n) ir/PEXTERN)
+      (set! (.-Externs typecheck/Target) (append (.-Externs typecheck/Target) n))
+
+      ^{:go/via [Attribute]} (.Set (.Linksym n) obj/AttrStatic true)
+      (set! (.-Align (.Linksym n)) (conv int16 (.Alignment t)))
+
+      ^{:line 768} n)))
+
+
+
+^{:go/end 816} (go/func StaticLoc "StaticLoc returns the static address of n, if n has one, or else nil.\n" [^ir/Node n] :results [^{:tag (* ir/Name)} name ^int64 offset ^bool ok]
+  (when (== n nil)
+    (return nil 0 false))
+
+
+  (switch (.Op n)
+    (case [ir/ONAME]
+      (let [n (assert (* ir/Name) n)]
+        (return n 0 true)))
+
+    (case [ir/OMETHEXPR]
+      (let [n (assert (* ir/SelectorExpr) n)]
+        (return (StaticLoc (.FuncName n)))))
+
+    (case [ir/ODOT]
+      (let [n (assert (* ir/SelectorExpr) n)]
+        (when [(set! (values name offset ok) (StaticLoc (.-X n)))] (not ok)
+          (break))
+
+        (set! offset + (.Offset n))
+        (return name offset true)))
+
+    (case [ir/OINDEX]
+      (let [n (assert (* ir/IndexExpr) n)]
+        (when (.IsSlice (.Type (.-X n)))
+          (break))
+
+        (when [(set! (values name offset ok) (StaticLoc (.-X n)))] (not ok)
+          (break))
+
+        (let [l (getlit (.-Index n))]
+          (when (< l 0)
+            (break))
+
+
+          ;; Check for overflow.
+          (when (and (!= (.Size ^{:go/via [miniExpr]} (.Type n)) 0) (<= (/ types/MaxWidth (.Size ^{:go/via [miniExpr]} (.Type n))) (conv int64 l)))
+            (break))
+
+          (set! offset + (* (conv int64 l) (.Size ^{:go/via [miniExpr]} (.Type n))))
+          (return name offset true)))))
+
+
+  (return nil 0 false))
+
+
+^{:go/breaks [[4 899]] :go/end 900} (go/func isSideEffect ^bool [^ir/Node n]
+  (switch (.Op n)
+    ;; Assume side effects unless we know otherwise.
+    (default
+      (return true))
+
+    ;; No side effects here (arguments are checked separately).
+    (case [ir/ONAME
+        ^{:line 826} ir/ONONAME
+        ^{:line 827} ir/OTYPE
+        ^{:line 828} ir/OLITERAL
+        ^{:line 829} ir/ONIL
+        ^{:line 830} ir/OADD
+        ^{:line 831} ir/OSUB
+        ^{:line 832} ir/OOR
+        ^{:line 833} ir/OXOR
+        ^{:line 834} ir/OADDSTR
+        ^{:line 835} ir/OADDR
+        ^{:line 836} ir/OANDAND
+        ^{:line 837} ir/OBYTES2STR
+        ^{:line 838} ir/ORUNES2STR
+        ^{:line 839} ir/OSTR2BYTES
+        ^{:line 840} ir/OSTR2RUNES
+        ^{:line 841} ir/OCAP
+        ^{:line 842} ir/OCOMPLIT
+        ^{:line 843} ir/OMAPLIT
+        ^{:line 844} ir/OSTRUCTLIT
+        ^{:line 845} ir/OARRAYLIT
+        ^{:line 846} ir/OSLICELIT
+        ^{:line 847} ir/OPTRLIT
+        ^{:line 848} ir/OCONV
+        ^{:line 849} ir/OCONVIFACE
+        ^{:line 850} ir/OCONVNOP
+        ^{:line 851} ir/ODOT
+        ^{:line 852} ir/OEQ
+        ^{:line 853} ir/ONE
+        ^{:line 854} ir/OLT
+        ^{:line 855} ir/OLE
+        ^{:line 856} ir/OGT
+        ^{:line 857} ir/OGE
+        ^{:line 858} ir/OKEY
+        ^{:line 859} ir/OSTRUCTKEY
+        ^{:line 860} ir/OLEN
+        ^{:line 861} ir/OMUL
+        ^{:line 862} ir/OLSH
+        ^{:line 863} ir/ORSH
+        ^{:line 864} ir/OAND
+        ^{:line 865} ir/OANDNOT
+        ^{:line 866} ir/ONEW
+        ^{:line 867} ir/ONOT
+        ^{:line 868} ir/OBITNOT
+        ^{:line 869} ir/OPLUS
+        ^{:line 870} ir/ONEG
+        ^{:line 871} ir/OOROR
+        ^{:line 872} ir/OPAREN
+        ^{:line 873} ir/ORUNESTR
+        ^{:line 874} ir/OREAL
+        ^{:line 875} ir/OIMAG
+        ^{:line 876} ir/OCOMPLEX]
+      (return false))
+
+    ;; Only possible side effect is division by zero.
+    (case [ir/ODIV ir/OMOD]
+      (let [n (assert (* ir/BinaryExpr) n)]
+        (when (or (!= (.Op (.-Y n)) ir/OLITERAL) (== (constant/Sign (.Val (.-Y n))) 0))
+          (return true))))
+
+
+    ;; Only possible side effect is panic on invalid size,
+    ;; but many makechan and makemap use size zero, which is definitely OK.
+    (case [ir/OMAKECHAN ir/OMAKEMAP]
+      (let [n (assert (* ir/MakeExpr) n)]
+        (when (or (not (ir/IsConst (.-Len n) constant/Int)) (!= (constant/Sign (.Val (.-Len n))) 0))
+          (return true))))
+
+
+    ;; Only possible side effect is panic on invalid size.
+    ;; TODO(rsc): Merge with previous case (probably breaks toolstash -cmp).
+    (case [ir/OMAKESLICE ir/OMAKESLICECOPY]
+      (return true)))
+
+  false)
+
+
+
+^{:go/end 905} (go/func AnySideEffects "AnySideEffects reports whether n contains any operations that could have observable side effects.\n" ^bool [^ir/Node n]
+  (ir/Any n isSideEffect))
+
+
+
+
+^{:go/end 954} (go/func mayModifyPkgVar "mayModifyPkgVar reports whether expression n may modify any\npackage-scope variables declared within the current package.\n" ^bool [^ir/Node n]
+  ;; safeLHS reports whether the assigned-to variable lhs is either a
+  ;; local variable or a global from another package.
+  (let [safeLHS ^{:go/end 921} (fn ^bool [^ir/Node lhs]
+        (let [outer (ir/OuterValue lhs)]
+          ;; "*p = ..." should be safe if p is a local variable.
+          ;; TODO: Should ir.OuterValue handle this?
+          (while (== (.Op outer) ir/ODEREF)
+            (set! outer (.-X (assert (* ir/StarExpr) outer))))
+
+          (let [(values v ok) (assert (* ir/Name) outer)]
+            (and ok (== ^{:go/via [miniExpr miniNode]} (.Op v) ir/ONAME) (not (and (== (.-Class v) ir/PEXTERN) (== (.-Pkg (.Sym v)) types/LocalPkg)))))))]
+
+
+    (ir/Any n ^{:go/breaks [[3 952]] :go/end 953} (fn ^bool [^ir/Node n]
+        (switch (.Op n)
+          (case [ir/OCALLFUNC ir/OCALLINTER]
+            (return (not (ir/IsFuncPCIntrinsic (assert (* ir/CallExpr) n)))))
+
+          (case [ir/OAPPEND ir/OCLEAR ir/OCOPY]
+            (return true)) ; could mutate a global array
+
+          (case [ir/OASOP]
+            (let [n (assert (* ir/AssignOpStmt) n)]
+              (when (not (safeLHS (.-X n)))
+                (return true))))
+
+
+          (case [ir/OAS]
+            (let [n (assert (* ir/AssignStmt) n)]
+              (when (not (safeLHS (.-X n)))
+                (return true))))
+
+
+          (case [ir/OAS2 ir/OAS2DOTTYPE ir/OAS2FUNC ir/OAS2MAPR ir/OAS2RECV]
+            (let [n (assert (* ir/AssignListStmt) n)]
+              (range [_ lhs (.-Lhs n)]
+                (when (not (safeLHS lhs))
+                  (return true))))))
+
+
+
+
+        false))))
+
+
+
+
+
+^{:go/end 979} (go/func canRepeat "canRepeat reports whether executing n multiple times has the same effect as\nassigning n to a single variable and using that variable multiple times.\n" ^bool [^ir/Node n]
+  (let [bad ^{:go/breaks [[4 976]] :go/end 977} (fn ^bool [^ir/Node n]
+        (when (isSideEffect n)
+          (return true))
+
+        (switch (.Op n)
+          (case [ir/OMAKECHAN
+              ^{:line 965} ir/OMAKEMAP
+              ^{:line 966} ir/OMAKESLICE
+              ^{:line 967} ir/OMAKESLICECOPY
+              ^{:line 968} ir/OMAPLIT
+              ^{:line 969} ir/ONEW
+              ^{:line 970} ir/OPTRLIT
+              ^{:line 971} ir/OSLICELIT
+              ^{:line 972} ir/OSTR2BYTES
+              ^{:line 973} ir/OSTR2RUNES]
+            (return true)))
+
+        false)]
+
+    (not (ir/Any n bad))))
+
+
+^{:go/breaks [[4 985]] :go/end 986} (go/func getlit ^int [^ir/Node lit]
+  (when (ir/IsSmallIntConst lit)
+    (return (conv int (ir/Int64Val lit))))
+
+  -1)
+
+
+^{:go/end 990} (go/func isvaluelit ^bool [^ir/Node n]
+  (or (== (.Op n) ir/OARRAYLIT) (== (.Op n) ir/OSTRUCTLIT)))
+
+
+^{:go/end 1027} (go/func subst [^ir/Node n ^{:tag (map (* ir/Name) ir/Node)} m] :results [ir/Node bool]
+  (let [valid true
+      ^{:line 994 :tag (func [ir/Node] [ir/Node])} edit (zero (func [ir/Node] [ir/Node]))]
+    (set! edit ^{:go/end 1024} (fn ^ir/Node [^ir/Node x]
+        (switch (.Op x)
+          (case [ir/ONAME]
+            (let [x (assert (* ir/Name) x)]
+              (when [(values v ok) (aget m x)] ok
+                (return (ir/DeepCopy (.Pos v) v)))
+
+              (return x)))
+          (case [ir/ONONAME ir/OLITERAL ir/ONIL ir/OTYPE]
+            (return x)))
+
+        (set! x (ir/Copy x))
+        (ir/EditChildrenWithHidden x edit)
+
+        ;; TODO: handle more operations, see details discussion in go.dev/cl/466277.
+        (switch (.Op x)
+          (case [ir/OCONV]
+            (let [x (assert (* ir/ConvExpr) x)]
+              (when (== (.Op (.-X x)) ir/OLITERAL)
+                (when [(values x ok) (truncate (.-X x) ^{:go/via [miniExpr]} (.Type x))] ok
+                  (return x))
+
+                (set! valid false)
+                (return x))))
+
+          (case [ir/OADDSTR]
+            (return (addStr (assert (* ir/AddStringExpr) x)))))
+
+        ^{:line 1023} x))
+
+    (set! n (edit n))
+    (return n valid)))
+
+
+
+
+
+^{:go/end 1057} (go/func truncate "truncate returns the result of force converting c to type t,\ntruncating its value as needed, like a conversion of a variable.\nIf the conversion is too difficult, truncate returns nil, false.\n" [^ir/Node c ^{:tag (* types/Type)} t] :results [ir/Node bool]
+  (let [ct (.Type c)
+      ^{:line 1034} cv (.Val c)]
+    (when (!= (.Kind ct) (.Kind t))
+      (switch
+        (default
+          ;; Note: float -> float/integer and complex -> complex are valid but subtle.
+          ;; For example a float32(float64 1e300) evaluates to +Inf at runtime
+          ;; and the compiler doesn't have any concept of +Inf, so that would
+          ;; have to be left for runtime code evaluation.
+          ;; For now
+          (return nil false))
+
+        (case [(and (.IsInteger ct) (.IsInteger t))]
+          ;; truncate or sign extend
+          (let [bits (* (.Size t) 8)]
+            (set! cv (constant/BinaryOp cv token/AND (constant/MakeUint64 (- ^uint64 (<< 1 bits) 1))))
+            (when (and (.IsSigned t) (constant/Compare cv token/GEQ (constant/MakeUint64 ^uint64 (<< 1 (- bits 1)))))
+              (set! cv (constant/BinaryOp cv token/OR (constant/MakeInt64 ^int64 (<< -1 (- bits 1))))))))))
+
+
+
+    (set! c (ir/NewConstExpr cv c))
+    (.SetType c t)
+    (return c true)))
+
+
+^{:go/end 1100} (go/func addStr ^ir/Node [^{:tag (* ir/AddStringExpr)} n]
+  ;; Merge adjacent constants in the argument list.
+  (let [s (.-List n)
+      ^{:line 1062} need 0]
+    (for [i 0] (< i (len s)) (inc! i)
+      (when (or (== i 0) (not (ir/IsConst (aget s (- i 1)) constant/String)) (not (ir/IsConst (aget s i) constant/String)))
+        ;; Can't merge s[i] into s[i-1]; need a slot in the list.
+        (inc! need)))
+
+
+    (when (== need (len s))
+      (return n))
+
+    (when (== need 1)
+      (let [^{:tag (slice string)} strs (zero (slice string))]
+        (range [_ c s]
+          (set! strs (append strs (ir/StringVal c))))
+
+        (return (ir/NewConstExpr (constant/MakeString (strings/Join strs "")) n))))
+
+    (let [newList (make (slice ir/Node) 0 need)]
+      (for [i 0] (< i (len s)) (inc! i)
+        (if (and (ir/IsConst (aget s i) constant/String) (< (+ i 1) (len s)) (ir/IsConst (aget s (+ i 1)) constant/String))
+          ;; merge from i up to but not including i2
+          (let [^{:tag (slice string)} strs (zero (slice string))
+              ^{:line 1084} i2 i]
+            (while (and (< i2 (len s)) (ir/IsConst (aget s i2) constant/String))
+              (set! strs (append strs (ir/StringVal (aget s i2))))
+              (inc! i2))
+
+
+            (set! newList (append newList (ir/NewConstExpr (constant/MakeString (strings/Join strs "")) (aget s i))))
+            (set! i (- i2 1)))
+
+          (set! newList (append newList (aget s i)))))
+
+
+
+      (let [nn (assert (* ir/AddStringExpr) (ir/Copy n))]
+        (set! (.-List nn) newList)
+        ^{:line 1099} nn))))
+
+
+(go/const ^{:val 20} wrapGlobalMapInitSizeThreshold 20)
+
+
+
+
+
+
+
+^{:go/end 1191} (go/func tryWrapGlobalInit "tryWrapGlobalInit returns a new outlined function to contain global\ninitializer statement n, if possible and worthwhile. Otherwise, it\nreturns nil.\n\nCurrently, it outlines map assignment statements with large,\nside-effect-free RHS expressions.\n" ^{:tag (* ir/Func)} [^ir/Node n]
+  ;; Look for "X = ..." where X has map type.
+  ;; FIXME: might also be worth trying to look for cases where
+  ;; the LHS is of interface type but RHS is map type.
+  (when (!= (.Op n) ir/OAS)
+    (return nil))
+
+  (let [as (assert (* ir/AssignStmt) n)]
+    (when (or (ir/IsBlank (.-X as)) (!= (.Op (.-X as)) ir/ONAME))
+      (return nil))
+
+    (let [nm (assert (* ir/Name) (.-X as))]
+      (when (not (.IsMap ^{:go/via [miniExpr]} (.Type nm)))
+        (return nil))
+
+
+      ;; Determine size of RHS.
+      (let [rsiz 0]
+        (ir/Any (.-Y as) ^{:go/breaks [3] :go/end 1131} (fn ^bool [^ir/Node n]
+            (inc! rsiz)
+            false))
+
+        (when (> (.-WrapGlobalMapDbg base/Debug) 0)
+          (fmt/Fprintf os/Stderr "=-= mapassign %s %v rhs size %d\n"
+            (.-Pkgpath base/Ctxt) n rsiz))
+
+
+        ;; Reject smaller candidates if not in stress mode.
+        (when (and (< rsiz wrapGlobalMapInitSizeThreshold) (!= (.-WrapGlobalMapCtl base/Debug) 2))
+          (when (> (.-WrapGlobalMapDbg base/Debug) 1)
+            (fmt/Fprintf os/Stderr "=-= skipping %v size too small at %d\n"
+              ^{:line 1141} nm rsiz))
+
+          (return nil))
+
+
+        ;; Reject right hand sides with side effects.
+        (when (AnySideEffects (.-Y as))
+          (when (> (.-WrapGlobalMapDbg base/Debug) 0)
+            (fmt/Fprintf os/Stderr "=-= rejected %v due to side effects\n" nm))
+
+          (return nil))
+
+
+        (when (> (.-WrapGlobalMapDbg base/Debug) 1)
+          (fmt/Fprintf os/Stderr "=-= committed for: %+v\n" n))
+
+
+        ;; Create a new function that will (eventually) have this form:
+        ;;
+        ;;	func map.init.%d() {
+        ;;		globmapvar = <map initialization>
+        ;;	}
+        ;;
+        ;; Note: cmd/link expects the function name to contain "map.init".
+        (let [minitsym (typecheck/LookupNum "map.init." mapinitgen)]
+          (inc! mapinitgen)
+
+          (let [fn (ir/NewFunc (.Pos n) (.Pos n) minitsym (types/NewSignature nil nil nil))]
+            (.SetInlinabilityChecked fn true) ; suppress inlining (which would defeat the point)
+            (typecheck/DeclFunc fn)
+            (when (> (.-WrapGlobalMapDbg base/Debug) 0)
+              (fmt/Fprintf os/Stderr "=-= generated func is %v\n" fn))
+
+
+            ;; NB: we're relying on this phase being run before inlining;
+            ;; if for some reason we need to move it after inlining, we'll
+            ;; need code here that relocates or duplicates inline temps.
+
+            ;; Insert assignment into function body; mark body finished.
+            (set! (.-Body fn) (lit (slice ir/Node) as))
+            (typecheck/FinishFuncBody)
+
+            (when (> (.-WrapGlobalMapDbg base/Debug) 1)
+              (fmt/Fprintf os/Stderr "=-= mapvar is %v\n" nm)
+              (fmt/Fprintf os/Stderr "=-= newfunc is %+v\n" fn))
+
+
+            (recordFuncForVar nm fn)
+
+            ^{:line 1190} fn))))))
+
+
+
+
+(go/var ^{:tag int :doc "mapinitgen is a counter used to uniquify compiler-generated\nmap init functions.\n"} mapinitgen)
+
+
+
+
+
+
+^{:go/end 1223} (go/func AddKeepRelocations "AddKeepRelocations adds a dummy \"R_KEEP\" relocation from each\nglobal map variable V to its associated outlined init function.\nThese relocation ensure that if the map var itself is determined to\nbe reachable at link time, we also mark the init function as\nreachable.\n" []
+  (when (== varToMapInit nil)
+    (return))
+
+  (range [k v varToMapInit]
+    ;; Add R_KEEP relocation from map to init function.
+    (let [fs (.Linksym v)]
+      (when (== fs nil)
+        (base/Fatalf "bad: func %v has no linksym" v))
+
+      (let [vs (.Linksym k)]
+        (when (== vs nil)
+          (base/Fatalf "bad: mapvar %v has no linksym" k))
+
+        (.AddRel vs base/Ctxt (lit obj/Reloc :Type objabi/R_KEEP :Sym fs))
+        (when (> (.-WrapGlobalMapDbg base/Debug) 1)
+          (fmt/Fprintf os/Stderr "=-= add R_KEEP relo from %s to %s\n"
+            (.-Name vs) (.-Name fs))))))
+
+
+  (set! varToMapInit nil))
+
+
+
+
+
+
+^{:go/end 1249} (go/func OutlineMapInits "OutlineMapInits replaces global map initializers with outlined\ncalls to separate \"map init\" functions (where possible and\nprofitable), to facilitate better dead-code elimination by the\nlinker.\n" [^{:tag (* ir/Func)} fn]
+  (when (== (.-WrapGlobalMapCtl base/Debug) 1)
+    (return))
+
+
+  (let [outlined 0]
+    (range [i stmt (.-Body fn)]
+      ;; Attempt to outline stmt. If successful, replace it with a call
+      ;; to the returned wrapper function.
+      (when [wrapperFn (tryWrapGlobalInit stmt)] (!= wrapperFn nil)
+        (ir/WithFunc fn ^{:go/end 1241} (fn []
+            (aset (.-Body fn) i (typecheck/Call (.Pos stmt) (.-Nname wrapperFn) nil false))))
+
+        (inc! outlined)))
+
+
+
+    (when (> (.-WrapGlobalMapDbg base/Debug) 1)
+      (fmt/Fprintf os/Stderr "=-= outlined %v map initializations\n" outlined))))

@@ -1,0 +1,164 @@
+;; Copyright 2023 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.cmd.internal.obj.x86) (go/file "seh.go" :imports [
+
+
+    ^{:line 8} [obj "cmd/internal/obj"]
+    ^{:line 9} [objabi "cmd/internal/objabi"]
+    ^{:line 10} [src "cmd/internal/src"]
+    ^{:line 11} [base64 "encoding/base64"]
+    ^{:line 12} [fmt "fmt"]
+    ^{:line 13} [math "math"]])
+
+
+(go/type sehbuf (struct
+    ^{:line 17 :tag (* obj/Link)} ctxt
+    ^{:line 18 :tag (slice byte)} data
+    ^{:line 19 :tag int} off))
+
+
+^{:go/end 31} (go/func newsehbuf ^sehbuf [^{:tag (* obj/Link)} ctxt ^uint8 nodes]
+  ;; - 8 bytes for the header
+  ;; - 2 bytes for each node
+  ;; - 2 bytes in case nodes is not even
+  (let [size (+ 8 (* nodes 2))]
+    (when (!= (% nodes 2) 0)
+      (set! size + 2))
+
+    (lit sehbuf ctxt (make (slice byte) size) 0)))
+
+
+^{:go/end 36} (go/method write8 [^{:tag (* sehbuf)} b ^uint8 v]
+  (aset (.-data b) (.-off b) v)
+  (inc! (.-off b)))
+
+
+^{:go/end 41} (go/method write32 [^{:tag (* sehbuf)} b ^uint32 v]
+  (.PutUint32 ^{:go/via [Arch]} (.-ByteOrder (.-Arch (.-ctxt b))) (subslice (.-data b) (.-off b)) v)
+  (set! (.-off b) + 4))
+
+
+^{:go/end 45} (go/method writecode [^{:tag (* sehbuf)} b ^uint8 op ^uint8 value]
+  (.write8 b (bit-or (<< value 4) op)))
+
+
+
+^{:go/end 166} (go/func populateSeh "populateSeh generates the SEH unwind information for s.\n" [^{:tag (* obj/Link)} ctxt ^{:tag (* obj/LSym)} s] :results [^{:tag (* obj/LSym)} sehsym]
+  (when ^{:go/via [Attribute]} (.NoFrame s)
+    (return))
+
+
+  ;; This implementation expects the following function prologue layout:
+  ;; - Stack split code (optional)
+  ;; - PUSHQ	BP
+  ;; - MOVQ	SP,	BP
+  ;;
+  ;; If the prologue layout change, the unwind information should be updated
+  ;; accordingly.
+
+  ;; Search for the PUSHQ BP instruction inside the prologue.
+  (let [^{:tag (* obj/Prog)} pushbp (zero (* obj/Prog))]
+    (for [p (.-Text (.Func s))] (!= p nil) (set! p (.-Link p))
+      (when (and (== (.-As p) APUSHQ) (== (.-Type (.-From p)) obj/TYPE_REG) (== (.-Reg (.-From p)) REG_BP))
+        (set! pushbp p)
+        (break))
+
+      (when (== ^{:go/via [lico]} (.Xlogue (.-Pos p)) src/PosPrologueEnd)
+        (break)))
+
+
+    (when (== pushbp nil)
+      (.Diag ctxt "missing frame pointer instruction: PUSHQ BP")
+      (return))
+
+
+    ;; It must be followed by a MOVQ SP, BP.
+    (let [movbp (.-Link pushbp)]
+      (when (== movbp nil)
+        (.Diag ctxt "missing frame pointer instruction: MOVQ SP, BP")
+        (return))
+
+      (when (not (and (== (.-As movbp) AMOVQ) (== (.-Type (.-From movbp)) obj/TYPE_REG) (== (.-Reg (.-From movbp)) REG_SP)
+            (== (.-Type (.-To movbp)) obj/TYPE_REG) (== (.-Reg (.-To movbp)) REG_BP) (== (.-Offset (.-From movbp)) 0)))
+        (.Diag ctxt "unexpected frame pointer instruction\n%v" movbp)
+        (return))
+
+      (when (> (.-Pc (.-Link movbp)) math/MaxUint8)
+        ;; SEH unwind information don't support prologues that are more than 255 bytes long.
+        ;; These are very rare, but still possible, e.g., when compiling functions with many
+        ;; parameters with -gcflags=-d=maymorestack=runtime.mayMoreStackPreempt.
+        ;; Return without reporting an error.
+        (return))
+
+
+      ;; Reference:
+      ;; https://learn.microsoft.com/en-us/cpp/build/exception-handling-x64#struct-unwind_info
+
+      (let [
+          ^:const ^{:line 100 :val 0} UWOP_PUSH_NONVOL 0
+          ^:const ^:go/grouped ^{:line 101 :val 3} UWOP_SET_FPREG 3
+          ^:const ^:go/grouped ^{:line 102 :val 5} SEH_REG_BP 5
+          ^:const ^:go/grouped ^{:line 103 :val 8} UNW_FLAG_EHANDLER (<< 1 3)
+
+
+          ^{:line 106 :tag (* obj/LSym)} exceptionHandler (zero (* obj/LSym))
+          ^{:line 107 :tag uint8} flags (zero uint8)]
+        (when (== (.-Name s) "runtime.asmcgocall_landingpad")
+          ;; Most cgo calls go through runtime.asmcgocall_landingpad,
+          ;; we can use it to catch exceptions from C code.
+          ;; TODO: use a more generic approach to identify which calls need an exception handler.
+          (set! exceptionHandler (.Lookup ctxt "runtime.sehtramp"))
+          (when (== exceptionHandler nil)
+            (.Diag ctxt "missing runtime.sehtramp\n")
+            (return))
+
+          (set! flags UNW_FLAG_EHANDLER))
+
+
+        ;; Fow now we only support operations which are encoded
+        ;; using a single 2-byte node, so the number of nodes
+        ;; is the number of operations.
+        (let [nodes (conv uint8 2)
+            ^{:line 124} buf (newsehbuf ctxt nodes)]
+          (.write8 buf (bit-or flags 1)) ; Flags + version
+          (.write8 buf (conv uint8 (.-Pc (.-Link movbp)))) ; Size of prolog
+          (.write8 buf nodes) ; Count of nodes
+          (.write8 buf SEH_REG_BP) ; FP register
+
+          ;; Notes are written in reverse order of appearance.
+          (.write8 buf (conv uint8 (.-Pc (.-Link movbp))))
+          (.writecode buf UWOP_SET_FPREG 0)
+
+          (.write8 buf (conv uint8 (.-Pc (.-Link pushbp))))
+          (.writecode buf UWOP_PUSH_NONVOL SEH_REG_BP)
+
+          ;; The following 4 bytes reference the RVA of the exception handler.
+          ;; The value is set to 0 for now, if an exception handler is needed,
+          ;; it will be updated later with a R_PEIMAGEOFF relocation to the
+          ;; exception handler.
+          (.write32 buf 0)
+
+          ;; The list of unwind infos in a PE binary have very low cardinality
+          ;; as each info only contains frame pointer operations,
+          ;; which are very similar across functions.
+          ;; Dedup them when possible.
+          (let [hash (.EncodeToString base64/StdEncoding (.-data buf))
+              ^{:line 148} symname (fmt/Sprintf "%d.%s" (len (.-data buf)) hash)]
+            (.LookupInit ctxt (+ "go:sehuw." symname) ^{:go/end 165} (fn [^{:tag (* obj/LSym)} s]
+                (.WriteBytes s ctxt 0 (.-data buf))
+                (set! (.-Align s) 4)
+                (set! (.-Type s) objabi/SSEHUNWINDINFO)
+                ^{:go/via [Attribute]} (.Set s obj/AttrDuplicateOK true)
+                ^{:go/via [Attribute]} (.Set s obj/AttrLocal true)
+                ^{:go/via [Attribute]} (.Set s obj/AttrContentAddressable true)
+                (when (!= exceptionHandler nil)
+                  (.AddRel s ctxt ^{:go/breaks [2 4 6 8]} (lit obj/Reloc
+                      :Type objabi/R_PEIMAGEOFF
+                      :Off (conv int32 (- (len (.-data buf)) 4))
+                      :Siz 4
+                      :Sym exceptionHandler)))
+
+
+                (set! (.-SEHSyms ctxt) (append (.-SEHSyms ctxt) s))))))))))

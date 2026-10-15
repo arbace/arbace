@@ -1,0 +1,190 @@
+;; Copyright 2024 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; This file implements recording of type information
+;; in the types2.Info maps.
+
+(in-ns 'go.cmd.compile.internal.types2) (go/file "recording.go" :imports [
+
+
+    ^{:line 11} [syntax "cmd/compile/internal/syntax"]
+    ^{:line 12} [constant "go/constant"]])
+
+
+^{:go/end 40} (go/method record [^{:tag (* Checker)} check ^{:tag (* operand)} x]
+  ;; convert x into a user-friendly set of values
+  ;; TODO(gri) this code can be simplified
+  (let [^Type typ (zero Type)
+      ^{:line 19 :tag constant/Value} val (zero constant/Value)]
+    (switch (.mode x)
+      (case [invalid]
+        (set! typ (aget Typ Invalid)))
+      (case [novalue]
+        (set! typ (conv (* Tuple) nil)))
+      (case [constant_]
+        (set! typ (.typ x))
+        (set! val (.-val x)))
+      (default
+        (set! typ (.typ x))))
+
+    (go/call assert (and (!= (.-expr x) nil) (!= typ nil)))
+
+    (if (isUntyped typ)
+      ;; delay type and value recording until we know the type
+      ;; or until the end of type checking
+      (.rememberUntyped check (.-expr x) false (.mode x) (assert (* Basic) typ) val)
+
+      (.recordTypeAndValue check (.-expr x) (.mode x) typ val))))
+
+
+
+^{:go/end 54} (go/method recordUntyped [^{:tag (* Checker)} check]
+  (when (and (not debug) (not ^{:go/via [Info]} (.recordTypes check)))
+    (return)) ; nothing to do
+
+
+  (range [x info (.-untyped check)]
+    (when (and debug (isTyped (.-typ info)))
+      (.dump check "%v: %s (type %s) is typed" (atPos x) x (.-typ info))
+      (panic "unreachable"))
+
+    (.recordTypeAndValue check x (.-mode info) (.-typ info) (.-val info))))
+
+
+
+^{:go/end 72} (go/method recordTypeAndValue [^{:tag (* Checker)} check ^syntax/Expr x ^operandMode mode ^Type typ ^constant/Value val]
+  (go/call assert (!= x nil))
+  (go/call assert (!= typ nil))
+  (when (== mode invalid)
+    (return)) ; omit
+
+  (when (== mode constant_)
+    (go/call assert (!= val nil))
+    ;; We check allBasic(typ, IsConstType) here as constant expressions may be
+    ;; recorded as type parameters.
+    (go/call assert (or (not (isValid typ)) (allBasic typ IsConstType))))
+
+  (when [m ^{:go/via [Info]} (.-Types check)] (!= m nil)
+    (aset m x (lit TypeAndValue mode typ val)))
+
+  (.recordTypeAndValueInSyntax check x mode typ val))
+
+
+^{:go/end 90} (go/method recordBuiltinType [^{:tag (* Checker)} check ^syntax/Expr f ^{:tag (* Signature)} sig]
+  ;; f must be a (possibly parenthesized, possibly qualified)
+  ;; identifier denoting a built-in (including unsafe's non-constant
+  ;; functions Add and Slice): record the signature for f and possible
+  ;; children.
+  (while true
+    (.recordTypeAndValue check f builtin sig nil)
+    (type-switch [p f]
+      (case [(* syntax/Name) (* syntax/SelectorExpr)]
+        (return)) ; we're done
+      (case [(* syntax/ParenExpr)]
+        (set! f (.-X p)))
+      (default
+        (panic "unreachable")))))
+
+
+
+
+
+
+^{:go/end 121} (go/method recordCommaOkTypes "recordCommaOkTypes updates recorded types to reflect that x is used in a commaOk context\n(and therefore has tuple type).\n" [^{:tag (* Checker)} check ^syntax/Expr x ^{:tag (slice (* operand))} a]
+  (go/call assert (!= x nil))
+  (go/call assert (== (len a) 2))
+  (when (== (.mode (aget a 0)) invalid)
+    (return))
+
+  (let [(values t0 t1) (values (.typ (aget a 0)) (.typ (aget a 1)))]
+    (go/call assert (and (isTyped t0) (isTyped t1) ^:go/paren (or (allBoolean t1) (== t1 universeError))))
+    (when [m ^{:go/via [Info]} (.-Types check)] (!= m nil)
+      (while true
+        (let [tv (aget m x)]
+          (go/call assert (!= (.-Type tv) nil)) ; should have been recorded already
+          (let [pos (.Pos x)]
+            (set! (.-Type tv) (NewTuple
+                (newVar LocalVar pos (.-pkg check) "" t0)
+                (newVar LocalVar pos (.-pkg check) "" t1)))
+
+            (aset m x tv)
+            ;; if x is a parenthesized expression (p.X), update p.X
+            (let [(values p _) (assert (* syntax/ParenExpr) x)]
+              (when (== p nil)
+                (break))
+
+              (set! x (.-X p)))))))
+
+
+    (.recordCommaOkTypesInSyntax check x t0 t1)))
+
+
+
+
+
+
+
+
+^{:go/end 153} (go/method recordInstance "recordInstance records instantiation information into check.Info, if the\nInstances map is non-nil. The given expr must be an ident, selector, or\nindex (list) expr with ident or selector operand.\n\nTODO(rfindley): the expr parameter is fragile. See if we can access the\ninstantiated identifier in some other way.\n" [^{:tag (* Checker)} check ^syntax/Expr expr ^{:tag (slice Type)} targs ^Type typ]
+  (let [ident (instantiatedIdent expr)]
+    (go/call assert (!= ident nil))
+    (go/call assert (!= typ nil))
+    (when [m ^{:go/via [Info]} (.-Instances check)] (!= m nil)
+      ;; If this is an instance of a method value/expression, replace the
+      ;; receiver for the Signature stored in Instances (go.dev/issue/79657).
+      (when [(values sig _) (assert (* Signature) typ)] (and (!= sig nil) (!= (.-recvold sig) nil))
+        (let [copy @sig]
+          (set! (.-recvold copy) nil) ; not strictly necessary
+          (when (== (.-recvold sig) methodExprSentinel)
+            (let [pars @(.-params copy)]
+              (set! (.-recv copy) (aget (.-vars pars) 0))
+              (set! (.-vars pars) (subslice (.-vars pars) 1))
+              (set! (.-params copy) (addr pars))
+              (aset m ident (lit Instance (newTypeList targs) (addr copy)))
+              (return)))
+
+          (set! (.-recv copy) (.-recvold sig))
+          (aset m ident (lit Instance (newTypeList targs) (addr copy)))
+          (return)))
+
+      (aset m ident (lit Instance (newTypeList targs) typ)))))
+
+
+
+^{:go/end 160} (go/method recordDef [^{:tag (* Checker)} check ^{:tag (* syntax/Name)} id ^Object obj]
+  (go/call assert (!= id nil))
+  (when [m ^{:go/via [Info]} (.-Defs check)] (!= m nil)
+    (aset m id obj)))
+
+
+
+^{:go/end 168} (go/method recordUse [^{:tag (* Checker)} check ^{:tag (* syntax/Name)} id ^Object obj]
+  (go/call assert (!= id nil))
+  (go/call assert (!= obj nil))
+  (when [m ^{:go/via [Info]} (.-Uses check)] (!= m nil)
+    (aset m id obj)))
+
+
+
+^{:go/end 176} (go/method recordImplicit [^{:tag (* Checker)} check ^syntax/Node node ^Object obj]
+  (go/call assert (!= node nil))
+  (go/call assert (!= obj nil))
+  (when [m ^{:go/via [Info]} (.-Implicits check)] (!= m nil)
+    (aset m node obj)))
+
+
+
+^{:go/end 184} (go/method recordSelection [^{:tag (* Checker)} check ^{:tag (* syntax/SelectorExpr)} x ^SelectionKind kind ^Type recv ^Object obj ^{:tag (slice int)} index ^bool indirect]
+  (go/call assert (and (!= obj nil) ^:go/paren (or (== recv nil) (> (len index) 0))))
+  (.recordUse check (.-Sel x) obj)
+  (when [m ^{:go/via [Info]} (.-Selections check)] (!= m nil)
+    (aset m x (addr (lit Selection kind recv obj index indirect)))))
+
+
+
+^{:go/end 192} (go/method recordScope [^{:tag (* Checker)} check ^syntax/Node node ^{:tag (* Scope)} scope]
+  (go/call assert (!= node nil))
+  (go/call assert (!= scope nil))
+  (when [m ^{:go/via [Info]} (.-Scopes check)] (!= m nil)
+    (aset m node scope)))

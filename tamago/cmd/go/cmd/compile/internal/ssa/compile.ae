@@ -1,0 +1,635 @@
+;; Copyright 2015 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.cmd.compile.internal.ssa) (go/file "compile.go" :imports [
+
+
+    ^{:line 8} [src "cmd/internal/src"]
+    ^{:line 9} [fmt "fmt"]
+    ^{:line 10} [crc32 "hash/crc32"]
+    ^{:line 11} [buildcfg "internal/buildcfg"]
+    ^{:line 12} [io "io"]
+    ^{:line 13} [log "log"]
+    ^{:line 14} [rand "math/rand"]
+    ^{:line 15} [os "os"]
+    ^{:line 16} [filepath "path/filepath"]
+    ^{:line 17} [regexp "regexp"]
+    ^{:line 18} [runtime "runtime"]
+    ^{:line 19} [sort "sort"]
+    ^{:line 20} [strings "strings"]
+    ^{:line 21} [time "time"]])
+
+
+
+
+
+
+
+
+^{:go/end 165} (go/func Compile "Compile is the main entry point for this package.\nCompile modifies f so that on return:\n  - all Values in f map to 0 or 1 assembly instructions of the target architecture\n  - the order of f.Blocks is the order to emit the Blocks\n  - the order of b.Values is the order to emit the Values in each Block\n  - f has a non-nil regAlloc field\n" [^{:tag (* Func)} f]
+  ;; TODO: debugging - set flags to control verbosity of compiler,
+  ;; which phases to dump IR before/after, etc.
+  (when (.Log f)
+    (.Logf f "compiling %s\n" (.-Name f)))
+
+
+  (let [^{:tag (* rand/Rand)} rnd (zero (* rand/Rand))]
+    (when checkEnabled
+      (let [seed (bit-xor (conv int64 (crc32/ChecksumIEEE (conv (slice byte) (.-Name f)))) (conv int64 checkRandSeed))]
+        (set! rnd (rand/New (rand/NewSource seed)))))
+
+
+    ;; hook to print function & phase if panic happens
+    (let [phaseName "init"]
+      (defer (^{:go/end 56} (fn []
+            (when (!= phaseName "")
+              (let [err (recover)
+                  ^{:line 48} stack (make (slice byte) 16384)
+                  ^{:line 49} n (runtime/Stack stack false)]
+                (set! stack (subslice stack _ n))
+                (when (!= (.-HTMLWriter f) nil)
+                  (.flushPhases (.-HTMLWriter f)))
+
+                (.Fatalf f "panic during %s while compiling %s:\n\n%v\n\n%s\n" phaseName (.-Name f) err stack))))))
+
+
+
+      ;; Run all the passes
+      (when (.Log f)
+        (printFunc f))
+
+      (.WritePhase (.-HTMLWriter f) "start" "start")
+      (when (aget BuildDump (.-Name f))
+        (.dumpFile f "build"))
+
+      (when checkEnabled
+        (checkFunc f))
+
+      (let [^:const ^{:val false} logMemStats false]
+        (range [_ p passes]
+          (when (or (and (not (.-optimize (.-Config f))) (not (.-required p))) (.-disabled p))
+            (continue))
+
+          (set! (.-pass f) (addr p))
+          (set! phaseName (.-name p))
+          (when (.Log f)
+            (.Logf f "  pass %s begin\n" (.-name p)))
+
+          ;; TODO: capture logging during this pass, add it to the HTML
+          (let [^runtime/MemStats mStart (zero runtime/MemStats)]
+            (when (or logMemStats (.-mem p))
+              (runtime/ReadMemStats (addr mStart)))
+
+
+            (when (and checkEnabled (not (.-scheduled f)))
+              ;; Test that we don't depend on the value order, by randomizing
+              ;; the order of values in each block. See issue 18169.
+              (range [_ b (.-Blocks f)]
+                (for [i 0] (< i (- (len (.-Values b)) 1)) (inc! i)
+                  (let [j (+ i (.Intn rnd (- (len (.-Values b)) i)))]
+                    (set! (values (aget (.-Values b) i) (aget (.-Values b) j)) (values (aget (.-Values b) j) (aget (.-Values b) i)))))))
+
+
+
+
+            (let [tStart (time/Now)]
+              ((.-fn p) f)
+              (let [tEnd (time/Now)]
+
+                ;; Need something less crude than "Log the whole intermediate result".
+                (when (or (.Log f) (!= (.-HTMLWriter f) nil))
+                  (let [time (.Nanoseconds (.Sub tEnd tStart))
+                      ^{:line 103 :tag string} stats (zero string)]
+                    (if logMemStats
+                      (let [^runtime/MemStats mEnd (zero runtime/MemStats)]
+                        (runtime/ReadMemStats (addr mEnd))
+                        (let [nBytes (- (.-TotalAlloc mEnd) (.-TotalAlloc mStart))
+                            ^{:line 108} nAllocs (- (.-Mallocs mEnd) (.-Mallocs mStart))]
+                          (set! stats (fmt/Sprintf "[%d ns %d allocs %d bytes]" time nAllocs nBytes))))
+
+                      (set! stats (fmt/Sprintf "[%d ns]" time)))
+
+
+                    (when (.Log f)
+                      (.Logf f "  pass %s end %s\n" (.-name p) stats)
+                      (printFunc f))
+
+                    (.WritePhase (.-HTMLWriter f) phaseName (fmt/Sprintf "%s <span class=\"stats\">%s</span>" phaseName stats))))
+
+                (when (or (.-time p) (.-mem p))
+                  ;; Surround timing information w/ enough context to allow comparisons.
+                  (let [time (.Nanoseconds (.Sub tEnd tStart))]
+                    (when (.-time p)
+                      (.LogStat f "TIME(ns)" time))
+
+                    (when (.-mem p)
+                      (let [^runtime/MemStats mEnd (zero runtime/MemStats)]
+                        (runtime/ReadMemStats (addr mEnd))
+                        (let [nBytes (- (.-TotalAlloc mEnd) (.-TotalAlloc mStart))
+                            ^{:line 130} nAllocs (- (.-Mallocs mEnd) (.-Mallocs mStart))]
+                          (.LogStat f "TIME(ns):BYTES:ALLOCS" time nBytes nAllocs))))))
+
+
+                (when (and (!= (.-dump p) nil) (aget (.-dump p) (.-Name f)))
+                  ;; Dump function to appropriately named file
+                  (.dumpFile f phaseName))
+
+                (when checkEnabled
+                  (checkFunc f))))))
+
+
+
+        (when (!= (.-HTMLWriter f) nil)
+          ;; Ensure we write any pending phases to the html
+          (.flushPhases (.-HTMLWriter f)))
+
+
+        (when (!= (.-ruleMatches f) nil)
+          (let [^{:tag (slice string)} keys (zero (slice string))]
+            (range [key (.-ruleMatches f)]
+              (set! keys (append keys key)))
+
+            (sort/Strings keys)
+            (let [buf (new strings/Builder)]
+              (fmt/Fprintf buf "%s: " (.-Name f))
+              (range [_ key keys]
+                (fmt/Fprintf buf "%s=%d " key (aget (.-ruleMatches f) key)))
+
+              (fmt/Fprint buf "\n")
+              (fmt/Print (.String buf)))))
+
+
+        ;; Squash error printing defer
+        (set! phaseName "")))))
+
+
+
+
+^{:go/end 186} (go/method DumpFileForPhase "DumpFileForPhase creates a file from the function name and phase name,\nwarning and returning nil if this is not possible.\n" ^io/WriteCloser [^{:tag (* Func)} f ^string phaseName]
+  (inc! (.-dumpFileSeq f))
+  (let [fname (fmt/Sprintf "%s_%02d__%s.dump" (.-Name f) (conv int (.-dumpFileSeq f)) phaseName)]
+    (set! fname (strings/ReplaceAll fname " " "_"))
+    (set! fname (strings/ReplaceAll fname "/" "_"))
+    (set! fname (strings/ReplaceAll fname ":" "_"))
+
+    (when [ssaDir (os/Getenv "GOSSADIR")] (!= ssaDir "")
+      (set! fname (filepath/Join ssaDir fname)))
+
+
+    (let [(values fi err) (os/Create fname)]
+      (when (!= err nil)
+        (.Warnl f src/NoXPos "Unable to create after-phase dump file %s" fname)
+        (return nil))
+
+      ^{:line 185} fi)))
+
+
+
+
+
+^{:go/end 198} (go/method dumpFile "dumpFile creates a file from the phase name and function name\nDumping is done to files to avoid buffering huge strings before\noutput.\n" [^{:tag (* Func)} f ^string phaseName]
+  (let [fi (.DumpFileForPhase f phaseName)]
+    (when (!= fi nil)
+      (let [p (lit stringFuncPrinter :w fi)]
+        (fprintFunc p f)
+        (.Close fi)))))
+
+
+
+(go/type pass (struct
+    ^{:line 201 :tag string} name
+    ^{:line 202 :tag (func [(* Func)])} fn
+    ^{:line 203 :tag bool} required
+    ^{:line 204 :tag bool} disabled
+    ^{:line 205 :tag bool} time ; report time to run pass
+    ^{:line 206 :tag bool} mem ; report mem stats to run pass
+    ^{:line 207 :tag int} stats ; pass reports own "stats" (e.g., branches removed)
+    ^{:line 208 :tag int} debug ; pass performs some debugging. =1 should be in error-testing-friendly Warnl format.
+    ^{:line 209 :tag int} test ; pass-specific ad-hoc option, perhaps useful in development
+    ^{:line 210 :tag (map string bool)} dump)) ; dump if function name matches
+
+
+^{:go/end 218} (go/method addDump [^{:tag (* pass)} p ^string s]
+  (when (== (.-dump p) nil)
+    (set! (.-dump p) (make (map string bool))))
+
+  (aset (.-dump p) s true))
+
+
+^{:go/end 225} (go/method String ^string [^{:tag (* pass)} p]
+  (when (== p nil)
+    (return "nil pass"))
+
+  (.-name p))
+
+
+
+(go/var "Run consistency checker between each phase\n"
+  ^{:line 229} [checkEnabled false]
+  ^{:line 230} [checkRandSeed 0])
+
+
+
+(go/var ^{:tag int :doc "Debug output\n"} IntrinsicsDebug)
+(go/var ^bool IntrinsicsDisable)
+
+(go/var ^int BuildDebug)
+(go/var ^int BuildTest)
+(go/var ^int BuildStats)
+(go/var ^{:tag (map string bool)} BuildDump (make (map string bool))) ; names of functions to dump after initial build of ssa
+
+(go/var ^{:tag (map string bool)} GenssaDump (make (map string bool))) ; names of functions to dump after ssa has been converted to asm
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 454} (go/func PhaseOption "PhaseOption sets the specified flag in the specified ssa phase,\nreturning empty string if this was successful or a string explaining\nthe error if it was not.\nA version of the phase name with \"_\" replaced by \" \" is also checked for a match.\nIf the phase name begins a '~' then the rest of the underscores-replaced-with-blanks\nversion is used as a regular expression to match the phase name(s).\n\nSpecial cases that have turned out to be useful:\n  - ssa/check/on enables checking after each phase\n  - ssa/all/time enables time reporting for all phases\n\nSee gc/lex.go for dissection of the option string.\nExample uses:\n\nGO_GCFLAGS=-d=ssa/generic_cse/time,ssa/generic_cse/stats,ssa/generic_cse/debug=3 ./make.bash\n\nBOOT_GO_GCFLAGS=-d='ssa/~^.*scc$/off' GO_GCFLAGS='-d=ssa/~^.*scc$/off' ./make.bash\n" ^string [^string phase ^string flag ^int val ^string valString]
+  (switch phase
+    (case ["" "help"]
+      (let [lastcr 0
+          ^{:line 265} phasenames "    check, all, build, intrinsics, genssa"]
+        (range [_ p passes]
+          (let [pn (strings/ReplaceAll (.-name p) " " "_")]
+            (if (> (- (+ (len pn) (len phasenames)) lastcr) 70) (do
+                (set! phasenames + "\n    ")
+                (set! lastcr (len phasenames))
+                (set! phasenames + pn))
+
+              (set! phasenames + (+ ", " pn)))))
+
+
+        (return (+ "PhaseOptions usage:\n\n    go tool compile -d=ssa/<phase>/<flag>[=<value>|<function_name>]\n\nwhere:\n\n- <phase> is one of:\n"
+
+
+
+
+
+
+            ^{:line 283} phasenames "\n\n- <flag> is one of:\n    on, off, debug, mem, time, test, stats, dump, seed\n\n- <value> defaults to 1\n\n- <function_name> is required for the \"dump\" flag, and specifies the\n  name of function to dump after <phase>\n\nPhase \"all\" supports flags \"time\", \"mem\", and \"dump\".\nPhase \"intrinsics\" supports flags \"on\", \"off\", and \"debug\".\nPhase \"genssa\" (assembly generation) supports the flag \"dump\".\n\nIf the \"dump\" flag is specified, the output is written on a file named\n<phase>__<function_name>_<seq>.dump; otherwise it is directed to stdout.\n\nExamples:\n\n    -d=ssa/check/on\nenables checking after each phase\n\n\t-d=ssa/check/seed=1234\nenables checking after each phase, using 1234 to seed the PRNG\nused for value order randomization\n\n    -d=ssa/all/time\nenables time reporting for all phases\n\n    -d=ssa/prove/debug=2\nsets debugging level to 2 in the prove pass\n\nBe aware that when \"/debug=X\" is applied to a pass, some passes\nwill emit debug output for all functions, and other passes will\nonly emit debug output for functions that match the current\nGOSSAFUNC value.\n\nMultiple flags can be passed at once, by separating them with\ncommas. For example:\n\n    -d=ssa/check/on,ssa/all/time\n")))))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+  (when (== phase "check")
+    (switch flag
+      (case ["on"]
+        (set! checkEnabled (!= val 0))
+        (set! debugPoset checkEnabled) ; also turn on advanced self-checking in prove's data structure
+        (return ""))
+      (case ["off"]
+        (set! checkEnabled (== val 0))
+        (set! debugPoset checkEnabled)
+        (return ""))
+      (case ["seed"]
+        (set! checkEnabled true)
+        (set! checkRandSeed val)
+        (set! debugPoset checkEnabled)
+        (return ""))))
+
+
+
+  (let [alltime false
+      ^{:line 346} allmem false
+      ^{:line 347} alldump false]
+    (when (== phase "all")
+      (switch flag
+        (case ["time"]
+          (set! alltime (!= val 0)))
+        (case ["mem"]
+          (set! allmem (!= val 0)))
+        (case ["dump"]
+          (set! alldump (!= val 0))
+          (when alldump
+            (aset BuildDump valString true)
+            (aset GenssaDump valString true)))
+
+        (default
+          (return (fmt/Sprintf "Did not find a flag matching %s in -d=ssa/%s debug option (expected ssa/all/{time,mem,dump=function_name})" flag phase)))))
+
+
+
+    (when (== phase "intrinsics")
+      (switch flag
+        (case ["on"]
+          (set! IntrinsicsDisable (== val 0)))
+        (case ["off"]
+          (set! IntrinsicsDisable (!= val 0)))
+        (case ["debug"]
+          (set! IntrinsicsDebug val))
+        (default
+          (return (fmt/Sprintf "Did not find a flag matching %s in -d=ssa/%s debug option (expected ssa/intrinsics/{on,off,debug})" flag phase))))
+
+      (return ""))
+
+    (when (== phase "build")
+      (switch flag
+        (case ["debug"]
+          (set! BuildDebug val))
+        (case ["test"]
+          (set! BuildTest val))
+        (case ["stats"]
+          (set! BuildStats val))
+        (case ["dump"]
+          (aset BuildDump valString true))
+        (default
+          (return (fmt/Sprintf "Did not find a flag matching %s in -d=ssa/%s debug option (expected ssa/build/{debug,test,stats,dump=function_name})" flag phase))))
+
+      (return ""))
+
+    (when (== phase "genssa")
+      (switch flag
+        (case ["dump"]
+          (aset GenssaDump valString true))
+        (default
+          (return (fmt/Sprintf "Did not find a flag matching %s in -d=ssa/%s debug option (expected ssa/genssa/dump=function_name)" flag phase))))
+
+      (return ""))
+
+
+    (let [underphase (strings/ReplaceAll phase "_" " ")
+        ^{:line 404 :tag (* regexp/Regexp)} re (zero (* regexp/Regexp))]
+      (when (== (aget phase 0) \~)
+        (let [(values r ok) (regexp/Compile (subslice underphase 1))]
+          (when (!= ok nil)
+            (return (fmt/Sprintf "Error %s in regexp for phase %s, flag %s" (.Error ok) phase flag)))
+
+          (set! re r)))
+
+      (let [matchedOne false]
+        (range [i p passes]
+          (cond (== phase "all") (do
+              (set! (.-time p) alltime)
+              (set! (.-mem p) allmem)
+              (when alldump
+                (.addDump p valString))
+
+              (aset passes i p)
+              (set! matchedOne true))
+            (or (== (.-name p) phase) (== (.-name p) underphase) (and (!= re nil) (.MatchString re (.-name p)))) (do
+              (switch flag
+                (case ["on"]
+                  (set! (.-disabled p) (== val 0)))
+                (case ["off"]
+                  (set! (.-disabled p) (!= val 0)))
+                (case ["time"]
+                  (set! (.-time p) (!= val 0)))
+                (case ["mem"]
+                  (set! (.-mem p) (!= val 0)))
+                (case ["debug"]
+                  (set! (.-debug p) val))
+                (case ["stats"]
+                  (set! (.-stats p) val))
+                (case ["test"]
+                  (set! (.-test p) val))
+                (case ["dump"]
+                  (.addDump p valString))
+                (default
+                  (return (fmt/Sprintf "Did not find a flag matching %s in -d=ssa/%s debug option" flag phase))))
+
+              (when (and (.-disabled p) (.-required p))
+                (return (fmt/Sprintf "Cannot disable required SSA phase %s using -d=ssa/%s debug option" phase phase)))
+
+              (aset passes i p)
+              (set! matchedOne true))))
+
+
+        (when matchedOne
+          (return ""))
+
+        (fmt/Sprintf "Did not find a phase matching %s in -d=ssa/... debug option" phase)))))
+
+
+
+(go/var ^{:doc "list of passes for the compiler\n"} passes (lit (array ... pass)
+    (lit _ :name "number lines" :fn numberLines :required true)
+    (lit _ :name "early phielim and copyelim" :fn copyelim)
+    (lit _ :name "early deadcode" :fn deadcode) ; remove generated dead code to avoid doing pointless work during opt
+    (lit _ :name "short circuit" :fn shortcircuit)
+    (lit _ :name "decompose user" :fn decomposeUser :required true)
+    (lit _ :name "pre-opt deadcode" :fn deadcode)
+    (lit _ :name "opt" :fn opt :required true)
+    (lit _ :name "zero arg cse" :fn zcse :required true) ; required to merge OpSB values
+    (lit _ :name "opt deadcode" :fn deadcode :required true) ; remove any blocks orphaned during opt
+    (lit _ :name "generic cse" :fn cse)
+    (lit _ :name "phiopt" :fn phiopt)
+    (lit _ :name "gcse deadcode" :fn deadcode :required true) ; clean out after cse and phiopt
+    (lit _ :name "nilcheckelim" :fn nilcheckelim)
+    (lit _ :name "prove" :fn prove)
+    (lit _ :name "divisible" :fn divisible :required true)
+    (lit _ :name "divmod" :fn divmod :required true)
+    (lit _ :name "middle opt" :fn opt :required true)
+    (lit _ :name "known bits" :fn knownBits)
+    (lit _ :name "early fuse" :fn fuseEarly)
+    (lit _ :name "expand calls" :fn expandCalls :required true)
+    (lit _ :name "decompose builtin" :fn postExpandCallsDecompose :required true)
+    (lit _ :name "softfloat" :fn softfloat :required true)
+    (lit _ :name "branchelim" :fn branchelim)
+    (lit _ :name "late opt" :fn opt :required true)
+    (lit _ :name "dead auto elim" :fn elimDeadAutosGeneric)
+    (lit _ :name "sccp" :fn sccp)
+    (lit _ :name "generic deadcode" :fn deadcode :required true) ; remove dead stores, which otherwise mess up store chain
+    (lit _ :name "late fuse" :fn fuseLate)
+    (lit _ :name "check bce" :fn checkbce)
+    (lit _ :name "dse" :fn dse)
+    (lit _ :name "memcombine" :fn memcombine)
+    (lit _ :name "writebarrier" :fn writebarrier :required true) ; expand write barrier ops
+    ^{:go/breaks [6]} (lit _ :name "insert resched checks" :fn insertLoopReschedChecks
+      :disabled (not ^{:go/via [Flags]} (.-PreemptibleLoops buildcfg/Experiment))) ; insert resched checks in loops.
+    (lit _ :name "cpufeatures" :fn cpufeatures :required ^{:go/via [Flags]} (.-SIMD buildcfg/Experiment) :disabled (not ^{:go/via [Flags]} (.-SIMD buildcfg/Experiment)))
+    (lit _ :name "rewrite tern" :fn rewriteTern :required false :disabled (not ^{:go/via [Flags]} (.-SIMD buildcfg/Experiment)))
+    (lit _ :name "lower" :fn lower :required true)
+    (lit _ :name "addressing modes" :fn addressingModes :required false)
+    (lit _ :name "late lower" :fn lateLower :required true)
+    (lit _ :name "pair" :fn pair)
+    (lit _ :name "lowered deadcode for cse" :fn deadcode) ; deadcode immediately before CSE avoids CSE making dead values live again
+    (lit _ :name "lowered cse" :fn cse)
+    (lit _ :name "elim unread autos" :fn elimUnreadAutos)
+    (lit _ :name "tighten tuple selectors" :fn tightenTupleSelectors :required true)
+    (lit _ :name "lowered deadcode" :fn deadcode :required true)
+    (lit _ :name "checkLower" :fn checkLower :required true)
+    (lit _ :name "loop invariant" :fn licm)
+    (lit _ :name "late phielim and copyelim" :fn copyelim)
+    (lit _ :name "tighten" :fn tighten :required true) ; move values closer to their uses
+    ;; TODO: fix 80102 and re-enable.
+    ;;{name: "merge conditional branches", fn: mergeConditionalBranches}, // generate conditional comparison instructions on ARM64 architecture
+    (lit _ :name "late deadcode" :fn deadcode)
+    (lit _ :name "critical" :fn critical :required true) ; remove critical edges
+    (lit _ :name "phi tighten" :fn phiTighten) ; place rematerializable phi args near uses to reduce value lifetimes
+    (lit _ :name "likelyadjust" :fn likelyadjust)
+    (lit _ :name "layout" :fn layout :required true) ; schedule blocks
+    (lit _ :name "schedule" :fn schedule :required true) ; schedule values
+    (lit _ :name "late nilcheck" :fn nilcheckelim2)
+    (lit _ :name "flagalloc" :fn flagalloc :required true) ; allocate flags register
+    (lit _ :name "regalloc" :fn regalloc :required true) ; allocate int & float registers + stack slots
+    (lit _ :name "loop rotate" :fn loopRotate)
+    (lit _ :name "trim" :fn trim))) ; remove empty blocks
+
+
+
+
+
+
+(go/type constraint "Double-check phase ordering constraints.\nThis code is intended to document the ordering requirements\nbetween different phases. It does not override the passes\nlist above.\n" (struct
+    ^{:line 527 :tag string} a ^string b)) ; a must come before b
+
+
+(go/var passOrder (lit (array ... constraint)
+    ;; "insert resched checks" uses mem, better to clean out stores first.
+    (lit _ "dse" "insert resched checks")
+    ;; insert resched checks adds new blocks containing generic instructions
+    (lit _ "insert resched checks" "lower")
+    (lit _ "insert resched checks" "tighten")
+
+    ;; prove relies on common-subexpression elimination for maximum benefits.
+    (lit _ "generic cse" "prove")
+    ;; deadcode after prove to eliminate all new dead blocks.
+    (lit _ "prove" "generic deadcode")
+    ;; divisible after prove to let prove analyze div and mod
+    (lit _ "prove" "divisible")
+    ;; divmod after divisible to avoid rewriting subexpressions of ones divisible will handle
+    (lit _ "divisible" "divmod")
+    ;; divmod before decompose builtin to handle 64-bit on 32-bit systems
+    (lit _ "divmod" "decompose builtin")
+    ;; common-subexpression before dead-store elim, so that we recognize
+    ;; when two address expressions are the same.
+    (lit _ "generic cse" "dse")
+    ;; cse substantially improves nilcheckelim efficacy
+    (lit _ "generic cse" "nilcheckelim")
+    ;; allow deadcode to clean up after nilcheckelim
+    (lit _ "nilcheckelim" "generic deadcode")
+    ;; nilcheckelim generates sequences of plain basic blocks
+    (lit _ "nilcheckelim" "late fuse")
+    ;; nilcheckelim relies on the first opt to rewrite user nil checks
+    (lit _ "opt" "nilcheckelim")
+    ;; tighten will be most effective when as many values have been removed as possible
+    (lit _ "generic deadcode" "tighten")
+    (lit _ "generic cse" "tighten")
+    ;; checkbce needs the values removed
+    (lit _ "generic deadcode" "check bce")
+    ;; decompose builtin now also cleans up after expand calls
+    (lit _ "expand calls" "decompose builtin")
+    ;; don't run optimization pass until we've decomposed builtin objects
+    (lit _ "decompose builtin" "late opt")
+    ;; decompose builtin is the last pass that may introduce new float ops, so run softfloat after it
+    (lit _ "decompose builtin" "softfloat")
+    ;; tuple selectors must be tightened to generators and de-duplicated before scheduling
+    (lit _ "tighten tuple selectors" "schedule")
+    ;; remove critical edges before phi tighten, so that phi args get better placement
+    (lit _ "critical" "phi tighten")
+    ;; don't layout blocks until critical edges have been removed
+    (lit _ "critical" "layout")
+    ;; regalloc requires the removal of all critical edges
+    (lit _ "critical" "regalloc")
+    ;; regalloc requires all the values in a block to be scheduled
+    (lit _ "schedule" "regalloc")
+    ;; the rules in late lower run after the general rules.
+    (lit _ "lower" "late lower")
+    ;; late lower may generate some values that need to be CSEed.
+    (lit _ "late lower" "lowered cse")
+    ;; checkLower must run after lowering & subsequent dead code elim
+    (lit _ "lower" "checkLower")
+    (lit _ "lowered deadcode" "checkLower")
+    (lit _ "late lower" "checkLower")
+    ;; late nilcheck needs instructions to be scheduled.
+    (lit _ "schedule" "late nilcheck")
+    ;; flagalloc needs instructions to be scheduled.
+    (lit _ "schedule" "flagalloc")
+    ;; regalloc needs flags to be allocated first.
+    (lit _ "flagalloc" "regalloc")
+    ;; loopRotate will confuse regalloc.
+    (lit _ "regalloc" "loop rotate")
+    ;; trim needs regalloc to be done first.
+    (lit _ "regalloc" "trim")
+    ;; memcombine works better if fuse happens first, to help merge stores.
+    (lit _ "late fuse" "memcombine")
+    ;; memcombine is a arch-independent pass.
+    (lit _ "memcombine" "lower")
+    ;; late opt transform some CondSelects into math.
+    (lit _ "branchelim" "late opt")
+    ;; branchelim is an arch-independent pass.
+    (lit _ "branchelim" "lower")
+    ;; lower needs cpu feature information (for SIMD)
+    (lit _ "cpufeatures" "lower")
+    ;; known bits is an arch-independent pass.
+    (lit _ "known bits" "lower")
+    ;; known bits does very little except some fancy constant folding and we need opt to clean it up.
+    (lit _ "known bits" "late opt")
+    ;; known bits does a better job once prove cleaned up some always taken and never taken branches.
+    (lit _ "prove" "known bits")))
+
+
+^{:go/end 638} (go/func init []
+  (range [_ c passOrder]
+    (let [(values a b) (values (.-a c) (.-b c))
+        ^{:line 618} i -1
+        ^{:line 619} j -1]
+      (range [k p passes]
+        (when (== (.-name p) a)
+          (set! i k))
+
+        (when (== (.-name p) b)
+          (set! j k)))
+
+
+      (when (< i 0)
+        (log/Panicf "pass %s not found" a))
+
+      (when (< j 0)
+        (log/Panicf "pass %s not found" b))
+
+      (when (>= i j)
+        (log/Panicf "passes %s and %s out of order" a b)))))

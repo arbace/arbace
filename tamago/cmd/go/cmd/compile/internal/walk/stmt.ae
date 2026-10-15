@@ -1,0 +1,228 @@
+;; Copyright 2009 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.cmd.compile.internal.walk) (go/file "stmt.go" :imports [
+
+
+    ^{:line 8} [base "cmd/compile/internal/base"]
+    ^{:line 9} [ir "cmd/compile/internal/ir"]])
+
+
+
+
+
+^{:go/end 172} (go/func walkStmt "The result of walkStmt MUST be assigned back to n, e.g.\n\n\tn.Left = walkStmt(n.Left)\n" ^ir/Node [^ir/Node n]
+  (when (== n nil)
+    (return n))
+
+
+  (ir/SetPos n)
+
+  (walkStmtList (.Init n))
+
+  (switch (.Op n)
+    (default
+      (if (== (.Op n) ir/ONAME)
+        (let [n (assert (* ir/Name) n)]
+          (base/Errorf "%v is not a top level statement" (.Sym n)))
+
+        (base/Errorf "%v is not a top level statement" (.Op n)))
+
+      (ir/Dump "nottop" n)
+      (return n))
+
+    (case [ir/OAS
+        ^{:line 36} ir/OASOP
+        ^{:line 37} ir/OAS2
+        ^{:line 38} ir/OAS2DOTTYPE
+        ^{:line 39} ir/OAS2RECV
+        ^{:line 40} ir/OAS2FUNC
+        ^{:line 41} ir/OAS2MAPR
+        ^{:line 42} ir/OCLEAR
+        ^{:line 43} ir/OCLOSE
+        ^{:line 44} ir/OCOPY
+        ^{:line 45} ir/OCALLINTER
+        ^{:line 46} ir/OCALL
+        ^{:line 47} ir/OCALLFUNC
+        ^{:line 48} ir/ODELETE
+        ^{:line 49} ir/OSEND
+        ^{:line 50} ir/OPRINT
+        ^{:line 51} ir/OPRINTLN
+        ^{:line 52} ir/OPANIC
+        ^{:line 53} ir/ORECOVER
+        ^{:line 54} ir/OGETG]
+      (when (== (.Typecheck n) 0)
+        (base/Fatalf "missing typecheck: %+v" n))
+
+
+      (let [init (ir/TakeInit n)]
+        (set! n (walkExpr n (addr init)))
+        (when (== (.Op n) ir/ONAME)
+          ;; copy rewrote to a statement list and a temp for the length.
+          ;; Throw away the temp to avoid plain values as statements.
+          (set! n (ir/NewBlockStmt (.Pos n) init))
+          (set! init nil))
+
+        (when (> (len init) 0)
+          (switch (.Op n)
+            (case [ir/OAS ir/OAS2 ir/OBLOCK]
+              (.Prepend (.PtrInit (assert ir/InitNode n)) (spread init)))
+
+            (default
+              (.Append init n)
+              (set! n (ir/NewBlockStmt (.Pos n) init)))))
+
+
+        (return n)))
+
+    ;; special case for a receive where we throw away
+    ;; the value received.
+    (case [ir/ORECV]
+      (let [n (assert (* ir/UnaryExpr) n)]
+        (return (walkRecv n))))
+
+    (case [ir/OBREAK
+        ^{:line 86} ir/OCONTINUE
+        ^{:line 87} ir/OFALL
+        ^{:line 88} ir/OGOTO
+        ^{:line 89} ir/OLABEL
+        ^{:line 90} ir/OJUMPTABLE
+        ^{:line 91} ir/OINTERFACESWITCH
+        ^{:line 92} ir/ODCL
+        ^{:line 93} ir/OCHECKNIL]
+      (return n))
+
+    (case [ir/OBLOCK]
+      (let [n (assert (* ir/BlockStmt) n)]
+        (walkStmtList (.-List n))
+        (return n)))
+
+    (case [ir/OCASE]
+      (base/Errorf "case statement out of place")
+      (panic "unreachable"))
+
+    (case [ir/ODEFER]
+      (let [n (assert (* ir/GoDeferStmt) n)]
+        (.SetHasDefer ir/CurFunc true)
+        (inc! (.-NumDefers ir/CurFunc))
+        (when (or (> (.-NumDefers ir/CurFunc) maxOpenDefers) (!= (.-DeferAt n) nil))
+          ;; Don't allow open-coded defers if there are more than
+          ;; 8 defers in the function, since we use a single
+          ;; byte to record active defers.
+          ;; Also don't allow if we need to use deferprocat.
+          (.SetOpenCodedDeferDisallowed ir/CurFunc true))
+
+        (when (!= ^{:go/via [miniStmt miniNode]} (.Esc n) ir/EscNever)
+          ;; If n.Esc is not EscNever, then this defer occurs in a loop,
+          ;; so open-coded defers cannot be used in this function.
+          (.SetOpenCodedDeferDisallowed ir/CurFunc true))
+
+        (fallthrough)))
+    (case [ir/OGO]
+      (let [n (assert (* ir/GoDeferStmt) n)]
+        (return (walkGoDefer n))))
+
+    (case [ir/OFOR]
+      (let [n (assert (* ir/ForStmt) n)]
+        (return (walkFor n))))
+
+    (case [ir/OIF]
+      (let [n (assert (* ir/IfStmt) n)]
+        (return (walkIf n))))
+
+    (case [ir/ORETURN]
+      (let [n (assert (* ir/ReturnStmt) n)]
+        (return (walkReturn n))))
+
+    (case [ir/OTAILCALL]
+      (let [n (assert (* ir/TailCallStmt) n)
+
+          ^{:line 141 :tag ir/Nodes} init (zero ir/Nodes)]
+        (set! (.-Fun (.-Call n)) (walkExpr (.-Fun (.-Call n)) (addr init)))
+
+        (when (> (len init) 0)
+          (.Append init n)
+          (return (ir/NewBlockStmt ^{:go/via [miniStmt miniNode]} (.Pos n) init)))
+
+        (return n)))
+
+    (case [ir/OINLMARK]
+      (let [n (assert (* ir/InlineMarkStmt) n)]
+        (return n)))
+
+    (case [ir/OSELECT]
+      (let [n (assert (* ir/SelectStmt) n)]
+        (walkSelect n)
+        (return n)))
+
+    (case [ir/OSWITCH]
+      (let [n (assert (* ir/SwitchStmt) n)]
+        (walkSwitch n)
+        (return n)))
+
+    (case [ir/ORANGE]
+      (let [n (assert (* ir/RangeStmt) n)]
+        (return (walkRange n))))))
+
+
+;; No return! Each case must return (or panic),
+;; to avoid confusion about what gets returned
+;; in the presence of type assertions.
+
+
+^{:go/end 178} (go/func walkStmtList [^{:tag (slice ir/Node)} s]
+  (range [i s]
+    (aset s i (walkStmt (aget s i)))))
+
+
+
+
+^{:go/end 192} (go/func walkFor "walkFor walks an OFOR node.\n" ^ir/Node [^{:tag (* ir/ForStmt)} n]
+  (when (!= (.-Cond n) nil)
+    (let [init (ir/TakeInit (.-Cond n))]
+      (walkStmtList init)
+      (set! (.-Cond n) (walkExpr (.-Cond n) (addr init)))
+      (set! (.-Cond n) (ir/InitExpr init (.-Cond n)))))
+
+
+  (set! (.-Post n) (walkStmt (.-Post n)))
+  (walkStmtList (.-Body n))
+  ^{:line 191} n)
+
+
+
+
+
+^{:go/breaks [[5 202]] :go/end 203} (go/func validGoDeferCall "validGoDeferCall reports whether call is a valid call to appear in\na go or defer statement; that is, whether it's a regular function\ncall without arguments or results.\n" ^bool [^ir/Node call]
+  (when [(values call ok) (assert (* ir/CallExpr) call)] (and ok (== ^{:go/via [miniExpr miniNode]} (.Op call) ir/OCALLFUNC) (== (len (.-KeepAlive call)) 0))
+    (let [sig (.Type (.-Fun call))]
+      (return (== (+ (.NumParams sig) (.NumResults sig)) 0))))
+
+  false)
+
+
+
+^{:go/end 221} (go/func walkGoDefer "walkGoDefer walks an OGO or ODEFER node.\n" ^ir/Node [^{:tag (* ir/GoDeferStmt)} n]
+  (when (not (validGoDeferCall (.-Call n)))
+    (base/FatalfAt ^{:go/via [miniStmt miniNode]} (.Pos n) "invalid %v call: %v" ^{:go/via [miniStmt miniNode]} (.Op n) (.-Call n)))
+
+
+  (let [^ir/Nodes init (zero ir/Nodes)
+
+      ^{:line 213} call (assert (* ir/CallExpr) (.-Call n))]
+    (set! (.-Fun call) (walkExpr (.-Fun call) (addr init)))
+
+    (when (> (len init) 0)
+      (.Append init n)
+      (return (ir/NewBlockStmt ^{:go/via [miniStmt miniNode]} (.Pos n) init)))
+
+    ^{:line 220} n))
+
+
+
+^{:go/end 229} (go/func walkIf "walkIf walks an OIF node.\n" ^ir/Node [^{:tag (* ir/IfStmt)} n]
+  (set! (.-Cond n) (walkExpr (.-Cond n) ^{:go/via [miniStmt]} (.PtrInit n)))
+  (walkStmtList (.-Body n))
+  (walkStmtList (.-Else n))
+  ^{:line 228} n)

@@ -1,0 +1,58 @@
+;; Copyright 2019 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+
+
+(in-ns 'go.cmd.link.internal.ld) (go/file "outbuf_mmap.go" :build ["//go:build unix"] :imports [
+
+
+    ^{:line 10} [syscall "syscall"]])
+
+
+
+
+
+^{:go/end 51} (go/method Mmap "Mmap maps the output file with the given size. It unmaps the old mapping\nif it is already mapped. It also flushes any in-heap data to the new\nmapping.\n" [^{:tag (* OutBuf)} out ^uint64 filesize] :results [^error err]
+  ^{:go/breaks [12]} (let [oldlen (len (.-buf out))]
+    (when (!= oldlen 0)
+      (.munmap out))
+
+
+    (while true
+      (when [(set! err (.fallocate out filesize))] (!= err syscall/EINTR)
+        (break)))
+
+
+    (when (!= err nil)
+      ;; Some file systems do not support fallocate. We ignore that error as linking
+      ;; can still take place, but you might SIGBUS when you write to the mmapped
+      ;; area.
+      (when (and (!= err syscall/ENOTSUP) (!= err syscall/EOPNOTSUPP) (!= err syscall/EPERM) (!= err errNoFallocate))
+        (return err)))
+
+
+    (set! err (.Truncate (.-f out) (conv int64 filesize)))
+    (when (!= err nil)
+      (Exitf "resize output file failed: %v" err))
+
+    (set! (values (.-buf out) err) (syscall/Mmap (conv int (.Fd (.-f out))) 0 (conv int filesize) (bit-or syscall/PROT_READ syscall/PROT_WRITE) (bit-or syscall/MAP_SHARED syscall/MAP_FILE)))
+    (when (!= err nil)
+      (return err))
+
+
+    ;; copy heap to new mapping
+    (when (> (conv uint64 (+ oldlen (len (.-heap out)))) filesize)
+      (panic "mmap size too small"))
+
+    (copy (subslice (.-buf out) oldlen) (.-heap out))
+    (set! (.-heap out) (subslice (.-heap out) _ 0))
+    nil))
+
+
+^{:go/end 59} (go/method munmap [^{:tag (* OutBuf)} out]
+  (when (== (.-buf out) nil)
+    (return))
+
+  (syscall/Munmap (.-buf out))
+  (set! (.-buf out) nil))

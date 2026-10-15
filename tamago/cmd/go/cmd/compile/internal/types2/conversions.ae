@@ -1,0 +1,314 @@
+;; Copyright 2012 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; This file implements typechecking of conversions.
+
+(in-ns 'go.cmd.compile.internal.types2) (go/file "conversions.go" :imports [
+
+
+    ^{:line 10} [constant "go/constant"]
+    ^{:line 11} [. "internal/types/errors"]
+    ^{:line 12} [unicode "unicode"]])
+
+
+
+
+^{:go/end 120} (go/method conversion "conversion type-checks the conversion T(x).\nThe result is in x.\n" [^{:tag (* Checker)} check ^{:tag (* operand)} x ^Type T]
+  (let [constArg (== (.mode x) constant_)
+
+      ^{:line 20} constConvertibleTo ^{:go/breaks [[3 36]] :go/end 37} (fn ^bool [^Type T ^{:tag (* constant/Value)} val]
+        (switch [(values t _) (assert (* Basic) (.Underlying T))]
+          (case [(== t nil)])
+          ;; nothing to do
+          (case [(representableConst (.-val x) check t val)]
+            (return true))
+          (case [(and (isInteger (.typ x)) (isString t))]
+            (let [codepoint unicode/ReplacementChar]
+              (when [(values i ok) (constant/Uint64Val (.-val x))] (and ok (<= i unicode/MaxRune))
+                (set! codepoint (conv rune i)))
+
+              (when (!= val nil)
+                (set! @val (constant/MakeString (conv string codepoint))))
+
+              (return true))))
+
+        false)
+
+
+      ^{:line 39 :tag bool} ok (zero bool)
+      ^{:line 40 :tag string} cause (zero string)]
+    (switch
+      (case [(and constArg (isConstType T))]
+        ;; constant conversion
+        (set! ok (constConvertibleTo T (addr (.-val x))))
+        ;; A conversion from an integer constant to an integer type
+        ;; can only fail if there's overflow. Give a concise error.
+        ;; (go.dev/issue/63563)
+        (when (and (not ok) (isInteger (.typ x)) (isInteger T))
+          (.errorf check x InvalidConversion "constant %s overflows %s" (.-val x) T)
+          (.invalidate x)
+          (return)))
+
+      (case [(and constArg (isTypeParam T))]
+        ;; x is convertible to T if it is convertible
+        ;; to each specific type in the type set of T.
+        ;; If T's type set is empty, or if it doesn't
+        ;; have specific types, constant x cannot be
+        ;; converted.
+        (set! ok (underIs T ^{:go/breaks [[5 77]] :go/end 78} (fn ^bool [^Type u]
+              ;; u is nil if there are no specific type terms
+              (when (== u nil)
+                (set! cause (.sprintf check "%s does not contain specific types" T))
+                (return false))
+
+              (when (and (isString (.typ x)) (isBytesOrRunes u))
+                (return true))
+
+              (when (not (constConvertibleTo u nil))
+                (if (and (isInteger (.typ x)) (isInteger u))
+                  ;; see comment above on constant conversion
+                  (set! cause (.sprintf check "constant %s overflows %s (in %s)" (.-val x) u T))
+
+                  (set! cause (.sprintf check "cannot convert %s to type %s (in %s)" x u T)))
+
+                (return false))
+
+              true)))
+
+        (set! (.-mode_ x) value)) ; type parameters are not constants
+      (case [(.convertibleTo x check T (addr cause))]
+        ;; non-constant conversion
+        (set! ok true)
+        (set! (.-mode_ x) value)))
+
+
+    (when (not ok)
+      (if (!= cause "")
+        (.errorf check x InvalidConversion "cannot convert %s to type %s: %s" x T cause)
+
+        (.errorf check x InvalidConversion "cannot convert %s to type %s" x T))
+
+      (.invalidate x)
+      (return))
+
+
+    ;; The conversion argument types are final. For untyped values the
+    ;; conversion provides the type, per the spec: "A constant may be
+    ;; given a type explicitly by a constant declaration or conversion,...".
+    (when (isUntyped (.typ x))
+      (let [final T]
+        ;; - For conversions to interfaces, except for untyped nil arguments
+        ;;   and isTypes2, use the argument's default type.
+        ;; - For conversions of untyped constants to non-constant types, also
+        ;;   use the default type (e.g., []byte("foo") should report string
+        ;;   not []byte as type for the constant "foo").
+        ;; - If !isTypes2, keep untyped nil for untyped nil arguments.
+        ;; - For constant integer to string conversions, keep the argument type.
+        ;;   (See also the TODO below.)
+        (cond (and isTypes2 (== (.typ x) (aget Typ UntypedNil))) (do)
+          ;; ok
+          (or (isNonTypeParamInterface T) (and constArg (not (isConstType T))) (and (not isTypes2) (.isNil x)))
+          (set! final (Default (.typ x))) ; default type of untyped nil is untyped nil
+          (and (== (.mode x) constant_) (isInteger (.typ x)) (allString T))
+          (set! final (.typ x)))
+
+        (.updateExprType check (.-expr x) final true)))
+
+
+    (set! (.-typ_ x) T)))
+
+
+;; TODO(gri) convertibleTo checks if T(x) is valid. It assumes that the type
+;; of x is fully known, but that's not the case for say string(1<<s + 1.0):
+;; Here, the type of 1<<s + 1.0 will be UntypedFloat which will lead to the
+;; (correct!) refusal of the conversion. But the reported error is essentially
+;; "cannot convert untyped float value to string", yet the correct error (per
+;; the spec) is that we cannot shift a floating-point value: 1 in 1<<s should
+;; be converted to UntypedFloat because of the addition of 1.0. Fixing this
+;; is tricky because we'd have to run updateExprType on the argument first.
+;; (go.dev/issue/21982.)
+
+
+
+
+
+^{:go/end 292} (go/method convertibleTo "convertibleTo reports whether T(x) is valid. In the failure case, *cause\nmay be set to the cause for the failure.\nThe check parameter may be nil if convertibleTo is invoked through an\nexported API call, i.e., when all methods have been type-checked.\n" ^bool [^{:tag (* operand)} x ^{:tag (* Checker)} check ^Type T ^{:tag (* string)} cause]
+  ;; "x is assignable to T"
+  (when [(values ok _) (.assignableTo x check T cause)] ok
+    (return true))
+
+
+  (let [origT T
+      ^{:line 143} V (Unalias (.typ x))]
+    (set! T (Unalias T))
+    (let [Vu (.Underlying V)
+        ^{:line 146} Tu (.Underlying T)
+        (values Vp _) (assert (* TypeParam) V)
+        (values Tp _) (assert (* TypeParam) T)]
+
+      ;; "V and T have identical underlying types if tags are ignored
+      ;; and V and T are not type parameters"
+      (when (and (IdenticalIgnoreTags Vu Tu) (== Vp nil) (== Tp nil))
+        (return true))
+
+
+      ;; "V and T are unnamed pointer types and their pointer base types
+      ;; have identical underlying types if tags are ignored
+      ;; and their pointer base types are not type parameters"
+      (when [(values V ok) (assert (* Pointer) V)] ok
+        (when [(values T ok) (assert (* Pointer) T)] ok
+          (when (and (IdenticalIgnoreTags (.Underlying (.-base V)) (.Underlying (.-base T))) (not (isTypeParam (.-base V))) (not (isTypeParam (.-base T))))
+            (return true))))
+
+
+
+
+      ;; "V and T are both integer or floating point types"
+      (when (and (isIntegerOrFloat Vu) (isIntegerOrFloat Tu))
+        (return true))
+
+
+      ;; "V and T are both complex types"
+      (when (and (isComplex Vu) (isComplex Tu))
+        (return true))
+
+
+      ;; "V is an integer or a slice of bytes or runes and T is a string type"
+      (when (and ^:go/paren (or (isInteger Vu) (isBytesOrRunes Vu)) (isString Tu))
+        (return true))
+
+
+      ;; "V is a string and T is a slice of bytes or runes"
+      (when (and (isString Vu) (isBytesOrRunes Tu))
+        (return true))
+
+
+      ;; package unsafe:
+      ;; "any pointer or value of underlying type uintptr can be converted into a unsafe.Pointer"
+      (when (and ^:go/paren (or (isPointer Vu) (isUintptr Vu)) (isUnsafePointer Tu))
+        (return true))
+
+      ;; "and vice versa"
+      (when (and (isUnsafePointer Vu) ^:go/paren (or (isPointer Tu) (isUintptr Tu)))
+        (return true))
+
+
+      ;; "V is a slice, T is an array or pointer-to-array type,
+      ;; and the slice and array types have identical element types."
+      (when [(values s _) (assert (* Slice) Vu)] (!= s nil)
+        (type-switch [a Tu]
+          (case [(* Array)]
+            (when (Identical (.Elem s) (.Elem a))
+              (when (or (== check nil) (.allowVersion check go1_20))
+                (return true))
+
+              ;; check != nil
+              (when (!= cause nil)
+                ;; TODO(gri) consider restructuring versionErrorf so we can use it here and below
+                (set! @cause "conversion of slice to array requires go1.20 or later"))
+
+              (return false)))
+
+          (case [(* Pointer)]
+            (when [(values a _) (assert (* Array) (.Underlying (.Elem a)))] (!= a nil)
+              (when (Identical (.Elem s) (.Elem a))
+                (when (or (== check nil) (.allowVersion check go1_17))
+                  (return true))
+
+                ;; check != nil
+                (when (!= cause nil)
+                  (set! @cause "conversion of slice to array pointer requires go1.17 or later"))
+
+                (return false))))))
+
+
+
+
+
+      ;; optimization: if we don't have type parameters, we're done
+      (when (and (== Vp nil) (== Tp nil))
+        (return false))
+
+
+      ^{:go/breaks [[3 291]]} (let [errorf ^{:go/end 242} (fn [^string format & ^{:tag (slice any)} args]
+            (when (and (!= check nil) (!= cause nil))
+              (let [msg (.sprintf check format (spread args))]
+                (when (!= @cause "")
+                  (set! msg + (+ "\n\t" @cause)))
+
+                (set! @cause msg))))]
+
+
+
+        ;; generic cases with specific type terms
+        ;; (generic operands cannot be constants, so we can ignore x.val)
+        (switch
+          (case [(and (!= Vp nil) (!= Tp nil))]
+            (let [x @x] ; don't clobber outer x
+              (return (.is Vp ^{:go/end 264} (fn ^bool [^{:tag (* term)} V]
+                    (when (== V nil)
+                      (return false)) ; no specific types
+
+                    (set! (.-typ_ x) (.-typ V))
+                    (.is Tp ^{:go/breaks [[4 262]] :go/end 263} (fn ^bool [^{:tag (* term)} T]
+                        (when (== T nil)
+                          (return false)) ; no specific types
+
+                        (when (not (.convertibleTo x check (.-typ T) cause))
+                          (errorf "cannot convert %s (in %s) to type %s (in %s)" (.-typ V) Vp (.-typ T) Tp)
+                          (return false))
+
+                        true)))))))
+
+
+          (case [(!= Vp nil)]
+            (let [x @x] ; don't clobber outer x
+              (return (.is Vp ^{:go/breaks [[5 276]] :go/end 277} (fn ^bool [^{:tag (* term)} V]
+                    (when (== V nil)
+                      (return false)) ; no specific types
+
+                    (set! (.-typ_ x) (.-typ V))
+                    (when (not (.convertibleTo x check T cause))
+                      (errorf "cannot convert %s (in %s) to type %s" (.-typ V) Vp origT)
+                      (return false))
+
+                    true)))))
+
+          (case [(!= Tp nil)]
+            (return (.is Tp ^{:go/breaks [[4 287]] :go/end 288} (fn ^bool [^{:tag (* term)} T]
+                  (when (== T nil)
+                    (return false)) ; no specific types
+
+                  (when (not (.convertibleTo x check (.-typ T) cause))
+                    (errorf "cannot convert %s to type %s (in %s)" (.typ x) (.-typ T) Tp)
+                    (return false))
+
+                  true)))))
+
+
+
+        false))))
+
+
+^{:go/end 297} (go/func isUintptr ^bool [^Type typ]
+  (let [(values t _) (assert (* Basic) (.Underlying typ))]
+    (and (!= t nil) (== (.-kind t) Uintptr))))
+
+
+^{:go/end 302} (go/func isUnsafePointer ^bool [^Type typ]
+  (let [(values t _) (assert (* Basic) (.Underlying typ))]
+    (and (!= t nil) (== (.-kind t) UnsafePointer))))
+
+
+^{:go/end 307} (go/func isPointer ^bool [^Type typ]
+  (let [(values _ ok) (assert (* Pointer) (.Underlying typ))]
+    ^{:line 306} ok))
+
+
+^{:go/breaks [[4 314]] :go/end 315} (go/func isBytesOrRunes ^bool [^Type typ]
+  (when [(values s _) (assert (* Slice) (.Underlying typ))] (!= s nil)
+    (let [(values t _) (assert (* Basic) (.Underlying (.-elem s)))]
+      (return (and (!= t nil) ^:go/paren (or (== (.-kind t) Byte) (== (.-kind t) Rune))))))
+
+  false)

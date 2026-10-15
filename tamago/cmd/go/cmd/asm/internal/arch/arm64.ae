@@ -1,0 +1,270 @@
+;; Copyright 2015 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; This file encapsulates some of the odd characteristics of the ARM64
+;; instruction set, to minimize its interaction with the core of the
+;; assembler.
+
+(in-ns 'go.cmd.asm.internal.arch) (go/file "arm64.go" :imports [
+
+
+    ^{:line 12} [obj "cmd/internal/obj"]
+    ^{:line 13} [arm64 "cmd/internal/obj/arm64"]
+    ^{:line 14} [errors "errors"]])
+
+
+(go/var arm64LS (lit (map string uint8)
+    ^{:line 18} ["P" arm64/C_XPOST]
+    ^{:line 19} ["W" arm64/C_XPRE]))
+
+
+(go/var arm64Jump (lit (map string bool)
+    ^{:line 23} ["B" true]
+    ^{:line 24} ["BL" true]
+    ^{:line 25} ["BEQ" true]
+    ^{:line 26} ["BNE" true]
+    ^{:line 27} ["BCS" true]
+    ^{:line 28} ["BHS" true]
+    ^{:line 29} ["BCC" true]
+    ^{:line 30} ["BLO" true]
+    ^{:line 31} ["BMI" true]
+    ^{:line 32} ["BPL" true]
+    ^{:line 33} ["BVS" true]
+    ^{:line 34} ["BVC" true]
+    ^{:line 35} ["BHI" true]
+    ^{:line 36} ["BLS" true]
+    ^{:line 37} ["BGE" true]
+    ^{:line 38} ["BLT" true]
+    ^{:line 39} ["BGT" true]
+    ^{:line 40} ["BLE" true]
+    ^{:line 41} ["CALL" true]
+    ^{:line 42} ["CBZ" true]
+    ^{:line 43} ["CBZW" true]
+    ^{:line 44} ["CBNZ" true]
+    ^{:line 45} ["CBNZW" true]
+    ^{:line 46} ["JMP" true]
+    ^{:line 47} ["TBNZ" true]
+    ^{:line 48} ["TBZ" true]
+
+    ;; ADR isn't really a jump, but it takes a PC or label reference,
+    ;; which needs to patched like a jump.
+    ^{:line 52} ["ADR" true]
+    ^{:line 53} ["ADRP" true]))
+
+
+^{:go/end 58} (go/func jumpArm64 ^bool [^string word]
+  (aget arm64Jump word))
+
+
+(go/var ^{:tag (map string arm64/SpecialOperand)} arm64SpecialOperand)
+
+
+^{:go/end 85} (go/func ARM64SpecialOperand "ARM64SpecialOperand returns the internal representation of a special operand.\n" ^arm64/SpecialOperand [^string name]
+  (when (== arm64SpecialOperand nil)
+    ;; Generate mapping when function is first called.
+    (set! arm64SpecialOperand (lit (map string arm64/SpecialOperand)))
+    (for [opd arm64/SPOP_BEGIN] (< opd arm64/SPOP_END) (inc! opd)
+      (aset arm64SpecialOperand (.String opd) opd))
+
+
+    ;; Handle some special cases.
+    (let [specialMapping (lit (map string arm64/SpecialOperand)
+          ;; The internal representation of CS(CC) and HS(LO) are the same.
+          ^{:line 74} ["CS" arm64/SPOP_HS]
+          ^{:line 75} ["CC" arm64/SPOP_LO])]
+
+      (range [s opd specialMapping]
+        (aset arm64SpecialOperand s opd))))
+
+
+  (when [(values opd ok) (aget arm64SpecialOperand name)] ok
+    (return opd))
+
+  ^{:line 84} arm64/SPOP_END)
+
+
+
+
+^{:go/breaks [[5 94]] :go/end 95} (go/func IsARM64ADR "IsARM64ADR reports whether the op (as defined by an arm64.A* constant) is\none of the comparison instructions that require special handling.\n" ^bool [^obj/As op]
+  (switch op
+    (case [arm64/AADR arm64/AADRP]
+      (return true)))
+
+  false)
+
+
+
+
+^{:go/breaks [[5 107]] :go/end 108} (go/func IsARM64CMP "IsARM64CMP reports whether the op (as defined by an arm64.A* constant) is\none of the comparison instructions that require special handling.\n" ^bool [^obj/As op]
+  (switch op
+    (case [arm64/ACMN arm64/ACMP arm64/ATST
+        ^{:line 102} arm64/ACMNW arm64/ACMPW arm64/ATSTW
+        ^{:line 103} arm64/AFCMPS arm64/AFCMPD
+        ^{:line 104} arm64/AFCMPES arm64/AFCMPED]
+      (return true)))
+
+  false)
+
+
+
+
+
+^{:go/end 122} (go/func IsARM64STLXR "IsARM64STLXR reports whether the op (as defined by an arm64.A*\nconstant) is one of the STLXR-like instructions that require special\nhandling.\n" ^bool [^obj/As op]
+  (switch op
+    (case [arm64/ASTLXRB arm64/ASTLXRH arm64/ASTLXRW arm64/ASTLXR
+        ^{:line 116} arm64/ASTXRB arm64/ASTXRH arm64/ASTXRW arm64/ASTXR
+        ^{:line 117} arm64/ASTXP arm64/ASTXPW arm64/ASTLXP arm64/ASTLXPW]
+      (return true)))
+
+  ;; LDADDx/SWPx/CASx atomic instructions
+  (arm64/IsAtomicInstruction op))
+
+
+
+
+
+^{:go/breaks [[5 132]] :go/end 133} (go/func IsARM64TBL "IsARM64TBL reports whether the op (as defined by an arm64.A*\nconstant) is one of the TBL-like instructions and one of its\ninputs does not fit into prog.Reg, so require special handling.\n" ^bool [^obj/As op]
+  (switch op
+    (case [arm64/AVTBL arm64/AVTBX arm64/AVMOVQ]
+      (return true)))
+
+  false)
+
+
+
+
+
+^{:go/breaks [[5 143]] :go/end 144} (go/func IsARM64CASP "IsARM64CASP reports whether the op (as defined by an arm64.A*\nconstant) is one of the CASP-like instructions, and its 2nd\ndestination is a register pair that require special handling.\n" ^bool [^obj/As op]
+  (switch op
+    (case [arm64/ACASPD arm64/ACASPW]
+      (return true)))
+
+  false)
+
+
+
+
+
+^{:go/end 159} (go/func ARM64Suffix "ARM64Suffix handles the special suffix for the ARM64.\nIt returns a boolean to indicate success; failure means\ncond was unrecognized.\n" ^bool [^{:tag (* obj/Prog)} prog ^string cond]
+  (when (== cond "")
+    (return true))
+
+  ^{:go/breaks [4]} (let [(values bits ok) (parseARM64Suffix cond)]
+    (when (not ok)
+      (return false))
+
+    (set! (.-Scond prog) bits)
+    true))
+
+
+
+
+
+^{:go/end 169} (go/func parseARM64Suffix "parseARM64Suffix parses the suffix attached to an ARM64 instruction.\nThe input is a single string consisting of period-separated condition\ncodes, such as \".P.W\". An initial period is ignored.\n" [^string cond] :results [uint8 bool]
+  (when (== cond "")
+    (return 0 true))
+
+  (parseARMCondition cond arm64LS nil))
+
+
+^{:go/end 199} (go/func arm64RegisterNumber [^string name ^int16 n] :results [int16 bool]
+  (switch name
+    (case ["F"]
+      (when (and (<= 0 n) (<= n 31))
+        (return (+ arm64/REG_F0 n) true)))
+
+    (case ["R"]
+      (when (and (<= 0 n) (<= n 30)) ; not 31
+        (return (+ arm64/REG_R0 n) true)))
+
+    (case ["V"]
+      (when (and (<= 0 n) (<= n 31))
+        (return (+ arm64/REG_V0 n) true)))
+
+    (case ["Z"]
+      (when (and (<= 0 n) (<= n 31))
+        (return (+ arm64/REG_Z0 n) true)))
+
+    (case ["P"]
+      (when (and (<= 0 n) (<= n 15))
+        (return (+ arm64/REG_P0 n) true)))
+
+    (case ["PN"]
+      (when (and (<= 0 n) (<= n 15))
+        (return (+ arm64/REG_PN0 n) true))))
+
+
+  (return 0 false))
+
+
+
+^{:go/end 208} (go/func ARM64RegisterShift "ARM64RegisterShift constructs an ARM64 register with shift operation.\n" [^int16 reg ^int16 op ^int16 count] :results [int64 error]
+  ;; the base register of shift operations must be general register.
+  (when (or (> reg arm64/REG_R31) (< reg arm64/REG_R0))
+    (return 0 (errors/New "invalid register for shift operation")))
+
+  (return (bit-or (<< (conv int64 (bit-and reg 31)) 16) (<< (conv int64 op) 22) (conv int64 (conv uint16 count))) nil))
+
+
+
+^{:go/end 271} (go/func ARM64RegisterArrangement "ARM64RegisterArrangement constructs an ARM64 vector register arrangement.\n" [^int16 reg ^string name ^string arng] :results [int64 error]
+  (let [(values ^uint16 curQ ^uint16 curSize ^uint16 prefix) (zero uint16)]
+    (when (and (!= (aget name 0) \V) (!= (aget name 0) \Z) (!= (aget name 0) \P))
+      (return 0 (errors/New (+ "expect V0-V31, Z0-Z31, or P0-P15; found: " name))))
+
+    (switch (aget name 0)
+      (case [\V]
+        (set! prefix 0))
+      (case [\Z]
+        (set! prefix 1))
+      (case [\P]
+        (set! prefix 2)))
+
+    (when (< reg 0)
+      (return 0 (errors/New (+ "invalid register number: " name))))
+
+    (switch arng
+      (case ["B8"]
+        (set! curSize 0)
+        (set! curQ 0))
+      (case ["B16"]
+        (set! curSize 0)
+        (set! curQ 1))
+      (case ["H4"]
+        (set! curSize 1)
+        (set! curQ 0))
+      (case ["H8"]
+        (set! curSize 1)
+        (set! curQ 1))
+      (case ["S2"]
+        (set! curSize 2)
+        (set! curQ 0))
+      (case ["S4"]
+        (set! curSize 2)
+        (set! curQ 1))
+      (case ["D1"]
+        (set! curSize 3)
+        (set! curQ 0))
+      (case ["D2"]
+        (set! curSize 3)
+        (set! curQ 1))
+      (case ["B"]
+        (set! curSize 1)
+        (set! curQ 2))
+      (case ["H"]
+        (set! curSize 2)
+        (set! curQ 2))
+      (case ["S"]
+        (set! curSize 3)
+        (set! curQ 2))
+      (case ["D"]
+        (set! curSize 1)
+        (set! curQ 3))
+      (case ["Q"]
+        (set! curSize 2)
+        (set! curQ 3))
+      (default
+        (return 0 (errors/New "invalid arrangement in ARM64 register list"))))
+
+    (return (bit-or (<< (conv int64 prefix) 32) (<< (bit-and (conv int64 curQ) 3) 30) (<< (conv int64 (bit-and curSize 3)) 10)) nil)))

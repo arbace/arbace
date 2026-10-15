@@ -1,0 +1,1063 @@
+;; Copyright 2016 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.cmd.compile.internal.s390x) (go/file "ssa.go" :imports [
+
+
+    ^{:line 8} [math "math"]
+
+    ^{:line 10} [base "cmd/compile/internal/base"]
+    ^{:line 11} [ir "cmd/compile/internal/ir"]
+    ^{:line 12} [logopt "cmd/compile/internal/logopt"]
+    ^{:line 13} [objw "cmd/compile/internal/objw"]
+    ^{:line 14} [ssa "cmd/compile/internal/ssa"]
+    ^{:line 15} [ssagen "cmd/compile/internal/ssagen"]
+    ^{:line 16} [types "cmd/compile/internal/types"]
+    ^{:line 17} [obj "cmd/internal/obj"]
+    ^{:line 18} [s390x "cmd/internal/obj/s390x"]
+    ^{:line 19} [abi "internal/abi"]])
+
+
+
+^{:go/end 43} (go/func ssaMarkMoves "ssaMarkMoves marks any MOVXconst ops that need to avoid clobbering flags.\n" [^{:tag (* ssagen/State)} s ^{:tag (* ssa/Block)} b]
+  (let [flive (.-FlagsLiveAtEnd b)]
+    (range [_ c (.ControlValues b)]
+      (set! flive (or (.IsFlags (.-Type c)) flive)))
+
+    (for [i (- (len (.-Values b)) 1)] (>= i 0) (dec! i)
+      (let [v (aget (.-Values b) i)]
+        (when (and flive (== (.-Op v) ssa/OpS390XMOVDconst))
+          ;; The "mark" is any non-nil Aux value.
+          (set! (.-Aux v) ssa/AuxMark))
+
+        (when (.IsFlags (.-Type v))
+          (set! flive false))
+
+        (range [_ a (.-Args v)]
+          (when (.IsFlags (.-Type a))
+            (set! flive true)))))))
+
+
+
+
+
+
+^{:go/end 79} (go/func loadByType "loadByType returns the load instruction of the given type.\n" ^obj/As [^{:tag (* types/Type)} t]
+  (if (.IsFloat t)
+    (switch (.Size t)
+      (case [4]
+        (return s390x/AFMOVS))
+      (case [8]
+        (return s390x/AFMOVD)))
+
+
+    (switch (.Size t)
+      (case [1]
+        (if (.IsSigned t)
+          (return s390x/AMOVB)
+
+          (return s390x/AMOVBZ)))
+
+      (case [2]
+        (if (.IsSigned t)
+          (return s390x/AMOVH)
+
+          (return s390x/AMOVHZ)))
+
+      (case [4]
+        (if (.IsSigned t)
+          (return s390x/AMOVW)
+
+          (return s390x/AMOVWZ)))
+
+      (case [8]
+        (return s390x/AMOVD))))
+
+
+  (panic "bad load type"))
+
+
+
+^{:go/end 104} (go/func storeByType "storeByType returns the store instruction of the given type.\n" ^obj/As [^{:tag (* types/Type)} t]
+  (let [width (.Size t)]
+    (if (.IsFloat t)
+      (switch width
+        (case [4]
+          (return s390x/AFMOVS))
+        (case [8]
+          (return s390x/AFMOVD)))
+
+
+      (switch width
+        (case [1]
+          (return s390x/AMOVB))
+        (case [2]
+          (return s390x/AMOVH))
+        (case [4]
+          (return s390x/AMOVW))
+        (case [8]
+          (return s390x/AMOVD))))
+
+
+    (panic "bad store type")))
+
+
+
+^{:go/end 135} (go/func moveByType "moveByType returns the reg->reg move instruction of the given type.\n" ^obj/As [^{:tag (* types/Type)} t]
+  (if (.IsFloat t)
+    (return s390x/AFMOVD)
+
+    (switch (.Size t)
+      (case [1]
+        (if (.IsSigned t)
+          (return s390x/AMOVB)
+
+          (return s390x/AMOVBZ)))
+
+      (case [2]
+        (if (.IsSigned t)
+          (return s390x/AMOVH)
+
+          (return s390x/AMOVHZ)))
+
+      (case [4]
+        (if (.IsSigned t)
+          (return s390x/AMOVW)
+
+          (return s390x/AMOVWZ)))
+
+      (case [8]
+        (return s390x/AMOVD))))
+
+
+  (panic "bad move type"))
+
+
+
+
+
+
+
+
+^{:go/end 150} (go/func opregreg "opregreg emits instructions for\n\n\tdest := dest(To) op src(From)\n\nand also returns the created obj.Prog so it\nmay be further adjusted (offset, scale, etc).\n" ^{:tag (* obj/Prog)} [^{:tag (* ssagen/State)} s ^obj/As op ^int16 dest ^int16 src]
+  (let [p (.Prog s op)]
+    (set! (.-Type (.-From p)) obj/TYPE_REG)
+    (set! (.-Type (.-To p)) obj/TYPE_REG)
+    (set! (.-Reg (.-To p)) dest)
+    (set! (.-Reg (.-From p)) src)
+    ^{:line 149} p))
+
+
+
+
+
+
+
+
+^{:go/end 166} (go/func opregregimm "opregregimm emits instructions for\n\n\tdest := src(From) op off\n\nand also returns the created obj.Prog so it\nmay be further adjusted (offset, scale, etc).\n" ^{:tag (* obj/Prog)} [^{:tag (* ssagen/State)} s ^obj/As op ^int16 dest ^int16 src ^int64 off]
+  (let [p (.Prog s op)]
+    (set! (.-Type (.-From p)) obj/TYPE_CONST)
+    (set! (.-Offset (.-From p)) off)
+    (set! (.-Reg p) src)
+    (set! (.-Reg (.-To p)) dest)
+    (set! (.-Type (.-To p)) obj/TYPE_REG)
+    ^{:line 165} p))
+
+
+^{:go/end 959} (go/func ssaGenValue [^{:tag (* ssagen/State)} s ^{:tag (* ssa/Value)} v]
+  (switch (.-Op v)
+    (case [ssa/OpS390XSLD ssa/OpS390XSLW
+        ^{:line 171} ssa/OpS390XSRD ssa/OpS390XSRW
+        ^{:line 172} ssa/OpS390XSRAD ssa/OpS390XSRAW
+        ^{:line 173} ssa/OpS390XRLLG ssa/OpS390XRLL]
+      (let [r (.Reg v)
+          ^{:line 175} r1 (.Reg (aget (.-Args v) 0))
+          ^{:line 176} r2 (.Reg (aget (.-Args v) 1))]
+        (when (== r2 s390x/REG_R0)
+          (.Fatalf v "cannot use R0 as shift value %s" (.LongString v)))
+
+        (let [p (opregreg s (.Asm (.-Op v)) r r2)]
+          (when (!= r r1)
+            (set! (.-Reg p) r1)))))
+
+    (case [ssa/OpS390XRXSBG]
+      (let [r2 (.Reg (aget (.-Args v) 1))
+          ^{:line 186} i (assert s390x/RotateParams (.-Aux v))
+          ^{:line 187} p (.Prog s (.Asm (.-Op v)))]
+        (set! (.-From p) (lit obj/Addr :Type obj/TYPE_CONST :Offset (conv int64 (.-Start i))))
+        (.AddRestSourceArgs p (lit (slice obj/Addr)
+            (lit _ :Type obj/TYPE_CONST :Offset (conv int64 (.-End i)))
+            (lit _ :Type obj/TYPE_CONST :Offset (conv int64 (.-Amount i)))
+            (lit _ :Type obj/TYPE_REG :Reg r2)))
+
+        (set! (.-To p) (lit obj/Addr :Type obj/TYPE_REG :Reg (.Reg v)))))
+    (case [ssa/OpS390XRISBGZ]
+      (let [r1 (.Reg v)
+          ^{:line 197} r2 (.Reg (aget (.-Args v) 0))
+          ^{:line 198} i (assert s390x/RotateParams (.-Aux v))
+          ^{:line 199} p (.Prog s (.Asm (.-Op v)))]
+        (set! (.-From p) (lit obj/Addr :Type obj/TYPE_CONST :Offset (conv int64 (.-Start i))))
+        (.AddRestSourceArgs p (lit (slice obj/Addr)
+            (lit _ :Type obj/TYPE_CONST :Offset (conv int64 (.-End i)))
+            (lit _ :Type obj/TYPE_CONST :Offset (conv int64 (.-Amount i)))
+            (lit _ :Type obj/TYPE_REG :Reg r2)))
+
+        (set! (.-To p) (lit obj/Addr :Type obj/TYPE_REG :Reg r1))))
+    (case [ssa/OpS390XADD ssa/OpS390XADDW
+        ^{:line 208} ssa/OpS390XSUB ssa/OpS390XSUBW
+        ^{:line 209} ssa/OpS390XAND ssa/OpS390XANDW
+        ^{:line 210} ssa/OpS390XOR ssa/OpS390XORW
+        ^{:line 211} ssa/OpS390XXOR ssa/OpS390XXORW]
+      (let [r (.Reg v)
+          ^{:line 213} r1 (.Reg (aget (.-Args v) 0))
+          ^{:line 214} r2 (.Reg (aget (.-Args v) 1))
+          ^{:line 215} p (opregreg s (.Asm (.-Op v)) r r2)]
+        (when (!= r r1)
+          (set! (.-Reg p) r1))))
+
+    (case [ssa/OpS390XADDC]
+      (let [r1 (.Reg0 v)
+          ^{:line 221} r2 (.Reg (aget (.-Args v) 0))
+          ^{:line 222} r3 (.Reg (aget (.-Args v) 1))]
+        (when (== r1 r2)
+          (set! (values r2 r3) (values r3 r2)))
+
+        (let [p (opregreg s (.Asm (.-Op v)) r1 r2)]
+          (when (!= r3 r1)
+            (set! (.-Reg p) r3)))))
+
+    (case [ssa/OpS390XSUBC]
+      (let [r1 (.Reg0 v)
+          ^{:line 232} r2 (.Reg (aget (.-Args v) 0))
+          ^{:line 233} r3 (.Reg (aget (.-Args v) 1))
+          ^{:line 234} p (opregreg s (.Asm (.-Op v)) r1 r3)]
+        (when (!= r1 r2)
+          (set! (.-Reg p) r2))))
+
+    (case [ssa/OpS390XADDE ssa/OpS390XSUBE]
+      (let [r2 (.Reg (aget (.-Args v) 1))]
+        (opregreg s (.Asm (.-Op v)) (.Reg0 v) r2)))
+    (case [ssa/OpS390XADDCconst]
+      (let [r1 (.Reg0 v)
+          ^{:line 243} r3 (.Reg (aget (.-Args v) 0))
+          ^{:line 244} i2 (conv int64 (conv int16 (.-AuxInt v)))]
+        (opregregimm s (.Asm (.-Op v)) r1 r3 i2)))
+    ;; 2-address opcode arithmetic
+    (case [ssa/OpS390XMULLD ssa/OpS390XMULLW
+        ^{:line 248} ssa/OpS390XMULHD ssa/OpS390XMULHDU
+        ^{:line 249} ssa/OpS390XFMULS ssa/OpS390XFMUL ssa/OpS390XFDIVS ssa/OpS390XFDIV]
+      (opregreg s (.Asm (.-Op v)) (.Reg v) (.Reg (aget (.-Args v) 1))))
+    (case [ssa/OpS390XFSUBS ssa/OpS390XFSUB
+        ^{:line 252} ssa/OpS390XFADDS ssa/OpS390XFADD]
+      (opregreg s (.Asm (.-Op v)) (.Reg0 v) (.Reg (aget (.-Args v) 1))))
+    (case [ssa/OpS390XMLGR]
+      ;; MLGR Rx R3 -> R2:R3
+      (let [r0 (.Reg (aget (.-Args v) 0))
+          ^{:line 257} r1 (.Reg (aget (.-Args v) 1))]
+        (when (!= r1 s390x/REG_R3)
+          (.Fatalf v "We require the multiplcand to be stored in R3 for MLGR %s" (.LongString v)))
+
+        (let [p (.Prog s s390x/AMLGR)]
+          (set! (.-Type (.-From p)) obj/TYPE_REG)
+          (set! (.-Reg (.-From p)) r0)
+          (set! (.-Reg (.-To p)) s390x/REG_R2)
+          (set! (.-Type (.-To p)) obj/TYPE_REG))))
+    (case [ssa/OpS390XFMADD ssa/OpS390XFMADDS
+        ^{:line 267} ssa/OpS390XFMSUB ssa/OpS390XFMSUBS]
+      (let [r1 (.Reg (aget (.-Args v) 1))
+          ^{:line 269} r2 (.Reg (aget (.-Args v) 2))
+          ^{:line 270} p (.Prog s (.Asm (.-Op v)))]
+        (set! (.-Type (.-From p)) obj/TYPE_REG)
+        (set! (.-Reg (.-From p)) r1)
+        (set! (.-Reg p) r2)
+        (set! (.-Type (.-To p)) obj/TYPE_REG)
+        (set! (.-Reg (.-To p)) (.Reg v))))
+    (case [ssa/OpS390XFIDBR]
+      (switch (.-AuxInt v)
+        (case [0 1 3 4 5 6 7]
+          (opregregimm s (.Asm (.-Op v)) (.Reg v) (.Reg (aget (.-Args v) 0)) (.-AuxInt v)))
+        (default
+          (.Fatalf v "invalid FIDBR mask: %v" (.-AuxInt v)))))
+
+    (case [ssa/OpS390XCPSDR]
+      (let [p (opregreg s (.Asm (.-Op v)) (.Reg v) (.Reg (aget (.-Args v) 1)))]
+        (set! (.-Reg p) (.Reg (aget (.-Args v) 0)))))
+    (case [ssa/OpS390XWFMAXDB ssa/OpS390XWFMAXSB
+        ^{:line 287} ssa/OpS390XWFMINDB ssa/OpS390XWFMINSB]
+      (let [p (opregregimm s (.Asm (.-Op v)) (.Reg v) (.Reg (aget (.-Args v) 0)) 1)] ; /* Java Math.Max() */
+        (.AddRestSource p (lit obj/Addr :Type obj/TYPE_REG :Reg (.Reg (aget (.-Args v) 1))))))
+    (case [ssa/OpS390XDIVD ssa/OpS390XDIVW
+        ^{:line 291} ssa/OpS390XDIVDU ssa/OpS390XDIVWU
+        ^{:line 292} ssa/OpS390XMODD ssa/OpS390XMODW
+        ^{:line 293} ssa/OpS390XMODDU ssa/OpS390XMODWU]
+
+      ;; TODO(mundaym): use the temp registers every time like x86 does with AX?
+      (let [dividend (.Reg (aget (.-Args v) 0))
+          ^{:line 297} divisor (.Reg (aget (.-Args v) 1))
+
+          ;; CPU faults upon signed overflow, which occurs when most
+          ;; negative int is divided by -1.
+          ^{:line 301 :tag (* obj/Prog)} j (zero (* obj/Prog))]
+        (when (or (== (.-Op v) ssa/OpS390XDIVD) (== (.-Op v) ssa/OpS390XDIVW)
+            (== (.-Op v) ssa/OpS390XMODD) (== (.-Op v) ssa/OpS390XMODW))
+
+          (let [^{:tag (* obj/Prog)} c (zero (* obj/Prog))]
+            (set! c (.Prog s s390x/ACMP))
+            (set! j (.Prog s s390x/ABEQ))
+
+            (set! (.-Type (.-From c)) obj/TYPE_REG)
+            (set! (.-Reg (.-From c)) divisor)
+            (set! (.-Type (.-To c)) obj/TYPE_CONST)
+            (set! (.-Offset (.-To c)) -1)
+
+            (set! (.-Type (.-To j)) obj/TYPE_BRANCH)))
+
+
+
+        (let [p (.Prog s (.Asm (.-Op v)))]
+          (set! (.-Type (.-From p)) obj/TYPE_REG)
+          (set! (.-Reg (.-From p)) divisor)
+          (set! (.-Reg p) 0)
+          (set! (.-Type (.-To p)) obj/TYPE_REG)
+          (set! (.-Reg (.-To p)) dividend)
+
+          ;; signed division, rest of the check for -1 case
+          (when (!= j nil)
+            (let [j2 (.Prog s s390x/ABR)]
+              (set! (.-Type (.-To j2)) obj/TYPE_BRANCH)
+
+              (let [^{:tag (* obj/Prog)} n (zero (* obj/Prog))]
+                (if (or (== (.-Op v) ssa/OpS390XDIVD) (== (.-Op v) ssa/OpS390XDIVW)) (do
+                    ;; n * -1 = -n
+                    (set! n (.Prog s s390x/ANEG))
+                    (set! (.-Type (.-To n)) obj/TYPE_REG)
+                    (set! (.-Reg (.-To n)) dividend))
+                  (do
+                    ;; n % -1 == 0
+                    (set! n (.Prog s s390x/AXOR))
+                    (set! (.-Type (.-From n)) obj/TYPE_REG)
+                    (set! (.-Reg (.-From n)) dividend)
+                    (set! (.-Type (.-To n)) obj/TYPE_REG)
+                    (set! (.-Reg (.-To n)) dividend)))
+
+
+                (.SetTarget (.-To j) n)
+                (.SetTarget (.-To j2) (.Pc s))))))))
+
+    (case [ssa/OpS390XADDconst ssa/OpS390XADDWconst]
+      (opregregimm s (.Asm (.-Op v)) (.Reg v) (.Reg (aget (.-Args v) 0)) (.-AuxInt v)))
+    (case [ssa/OpS390XMULLDconst ssa/OpS390XMULLWconst
+        ^{:line 351} ssa/OpS390XSUBconst ssa/OpS390XSUBWconst
+        ^{:line 352} ssa/OpS390XANDconst ssa/OpS390XANDWconst
+        ^{:line 353} ssa/OpS390XORconst ssa/OpS390XORWconst
+        ^{:line 354} ssa/OpS390XXORconst ssa/OpS390XXORWconst]
+      (let [p (.Prog s (.Asm (.-Op v)))]
+        (set! (.-Type (.-From p)) obj/TYPE_CONST)
+        (set! (.-Offset (.-From p)) (.-AuxInt v))
+        (set! (.-Type (.-To p)) obj/TYPE_REG)
+        (set! (.-Reg (.-To p)) (.Reg v))))
+    (case [ssa/OpS390XSLDconst ssa/OpS390XSLWconst
+        ^{:line 361} ssa/OpS390XSRDconst ssa/OpS390XSRWconst
+        ^{:line 362} ssa/OpS390XSRADconst ssa/OpS390XSRAWconst
+        ^{:line 363} ssa/OpS390XRLLconst]
+      (let [p (.Prog s (.Asm (.-Op v)))]
+        (set! (.-Type (.-From p)) obj/TYPE_CONST)
+        (set! (.-Offset (.-From p)) (.-AuxInt v))
+        (let [r (.Reg v)
+            ^{:line 368} r1 (.Reg (aget (.-Args v) 0))]
+          (when (!= r r1)
+            (set! (.-Reg p) r1))
+
+          (set! (.-Type (.-To p)) obj/TYPE_REG)
+          (set! (.-Reg (.-To p)) r))))
+    (case [ssa/OpS390XMOVDaddridx]
+      (let [r (.Reg (aget (.-Args v) 0))
+          ^{:line 376} i (.Reg (aget (.-Args v) 1))
+          ^{:line 377} p (.Prog s s390x/AMOVD)]
+        (set! (.-Scale (.-From p)) 1)
+        (when (== i s390x/REGSP)
+          (set! (values r i) (values i r)))
+
+        (set! (.-Type (.-From p)) obj/TYPE_ADDR)
+        (set! (.-Reg (.-From p)) r)
+        (set! (.-Index (.-From p)) i)
+        (ssagen/AddAux (addr (.-From p)) v)
+        (set! (.-Type (.-To p)) obj/TYPE_REG)
+        (set! (.-Reg (.-To p)) (.Reg v))))
+    (case [ssa/OpS390XMOVDaddr]
+      (let [p (.Prog s s390x/AMOVD)]
+        (set! (.-Type (.-From p)) obj/TYPE_ADDR)
+        (set! (.-Reg (.-From p)) (.Reg (aget (.-Args v) 0)))
+        (ssagen/AddAux (addr (.-From p)) v)
+        (set! (.-Type (.-To p)) obj/TYPE_REG)
+        (set! (.-Reg (.-To p)) (.Reg v))))
+    (case [ssa/OpS390XCMP ssa/OpS390XCMPW ssa/OpS390XCMPU ssa/OpS390XCMPWU]
+      (opregreg s (.Asm (.-Op v)) (.Reg (aget (.-Args v) 1)) (.Reg (aget (.-Args v) 0))))
+    (case [ssa/OpS390XFCMPS ssa/OpS390XFCMP]
+      (opregreg s (.Asm (.-Op v)) (.Reg (aget (.-Args v) 1)) (.Reg (aget (.-Args v) 0))))
+    (case [ssa/OpS390XCMPconst ssa/OpS390XCMPWconst]
+      (let [p (.Prog s (.Asm (.-Op v)))]
+        (set! (.-Type (.-From p)) obj/TYPE_REG)
+        (set! (.-Reg (.-From p)) (.Reg (aget (.-Args v) 0)))
+        (set! (.-Type (.-To p)) obj/TYPE_CONST)
+        (set! (.-Offset (.-To p)) (.-AuxInt v))))
+    (case [ssa/OpS390XCMPUconst ssa/OpS390XCMPWUconst]
+      (let [p (.Prog s (.Asm (.-Op v)))]
+        (set! (.-Type (.-From p)) obj/TYPE_REG)
+        (set! (.-Reg (.-From p)) (.Reg (aget (.-Args v) 0)))
+        (set! (.-Type (.-To p)) obj/TYPE_CONST)
+        (set! (.-Offset (.-To p)) (conv int64 (conv uint32 (.-AuxInt v))))))
+    (case [ssa/OpS390XMOVDconst]
+      (let [x (.Reg v)
+          ^{:line 413} p (.Prog s (.Asm (.-Op v)))]
+        (set! (.-Type (.-From p)) obj/TYPE_CONST)
+        (set! (.-Offset (.-From p)) (.-AuxInt v))
+        (set! (.-Type (.-To p)) obj/TYPE_REG)
+        (set! (.-Reg (.-To p)) x)))
+    (case [ssa/OpS390XFMOVSconst ssa/OpS390XFMOVDconst]
+      (let [x (.Reg v)
+          ^{:line 420} p (.Prog s (.Asm (.-Op v)))]
+        (set! (.-Type (.-From p)) obj/TYPE_FCONST)
+        (set! (.-Val (.-From p)) (math/Float64frombits (conv uint64 (.-AuxInt v))))
+        (set! (.-Type (.-To p)) obj/TYPE_REG)
+        (set! (.-Reg (.-To p)) x)))
+    (case [ssa/OpS390XADDWload ssa/OpS390XADDload
+        ^{:line 426} ssa/OpS390XMULLWload ssa/OpS390XMULLDload
+        ^{:line 427} ssa/OpS390XSUBWload ssa/OpS390XSUBload
+        ^{:line 428} ssa/OpS390XANDWload ssa/OpS390XANDload
+        ^{:line 429} ssa/OpS390XORWload ssa/OpS390XORload
+        ^{:line 430} ssa/OpS390XXORWload ssa/OpS390XXORload]
+      (let [p (.Prog s (.Asm (.-Op v)))]
+        (set! (.-Type (.-From p)) obj/TYPE_MEM)
+        (set! (.-Reg (.-From p)) (.Reg (aget (.-Args v) 1)))
+        (ssagen/AddAux (addr (.-From p)) v)
+        (set! (.-Type (.-To p)) obj/TYPE_REG)
+        (set! (.-Reg (.-To p)) (.Reg v))))
+    (case [ssa/OpS390XMOVDload
+        ^{:line 438} ssa/OpS390XMOVWZload ssa/OpS390XMOVHZload ssa/OpS390XMOVBZload
+        ^{:line 439} ssa/OpS390XMOVDBRload ssa/OpS390XMOVWBRload ssa/OpS390XMOVHBRload
+        ^{:line 440} ssa/OpS390XMOVBload ssa/OpS390XMOVHload ssa/OpS390XMOVWload
+        ^{:line 441} ssa/OpS390XFMOVSload ssa/OpS390XFMOVDload]
+      (let [p (.Prog s (.Asm (.-Op v)))]
+        (set! (.-Type (.-From p)) obj/TYPE_MEM)
+        (set! (.-Reg (.-From p)) (.Reg (aget (.-Args v) 0)))
+        (ssagen/AddAux (addr (.-From p)) v)
+        (set! (.-Type (.-To p)) obj/TYPE_REG)
+        (set! (.-Reg (.-To p)) (.Reg v))))
+    (case [ssa/OpS390XMOVBZloadidx ssa/OpS390XMOVHZloadidx ssa/OpS390XMOVWZloadidx
+        ^{:line 449} ssa/OpS390XMOVBloadidx ssa/OpS390XMOVHloadidx ssa/OpS390XMOVWloadidx ssa/OpS390XMOVDloadidx
+        ^{:line 450} ssa/OpS390XMOVHBRloadidx ssa/OpS390XMOVWBRloadidx ssa/OpS390XMOVDBRloadidx
+        ^{:line 451} ssa/OpS390XFMOVSloadidx ssa/OpS390XFMOVDloadidx]
+      (let [r (.Reg (aget (.-Args v) 0))
+          ^{:line 453} i (.Reg (aget (.-Args v) 1))]
+        (when (== i s390x/REGSP)
+          (set! (values r i) (values i r)))
+
+        (let [p (.Prog s (.Asm (.-Op v)))]
+          (set! (.-Type (.-From p)) obj/TYPE_MEM)
+          (set! (.-Reg (.-From p)) r)
+          (set! (.-Scale (.-From p)) 1)
+          (set! (.-Index (.-From p)) i)
+          (ssagen/AddAux (addr (.-From p)) v)
+          (set! (.-Type (.-To p)) obj/TYPE_REG)
+          (set! (.-Reg (.-To p)) (.Reg v)))))
+    (case [ssa/OpS390XMOVBstore ssa/OpS390XMOVHstore ssa/OpS390XMOVWstore ssa/OpS390XMOVDstore
+        ^{:line 466} ssa/OpS390XMOVHBRstore ssa/OpS390XMOVWBRstore ssa/OpS390XMOVDBRstore
+        ^{:line 467} ssa/OpS390XFMOVSstore ssa/OpS390XFMOVDstore]
+      (let [p (.Prog s (.Asm (.-Op v)))]
+        (set! (.-Type (.-From p)) obj/TYPE_REG)
+        (set! (.-Reg (.-From p)) (.Reg (aget (.-Args v) 1)))
+        (set! (.-Type (.-To p)) obj/TYPE_MEM)
+        (set! (.-Reg (.-To p)) (.Reg (aget (.-Args v) 0)))
+        (ssagen/AddAux (addr (.-To p)) v)))
+    (case [ssa/OpS390XMOVBstoreidx ssa/OpS390XMOVHstoreidx ssa/OpS390XMOVWstoreidx ssa/OpS390XMOVDstoreidx
+        ^{:line 475} ssa/OpS390XMOVHBRstoreidx ssa/OpS390XMOVWBRstoreidx ssa/OpS390XMOVDBRstoreidx
+        ^{:line 476} ssa/OpS390XFMOVSstoreidx ssa/OpS390XFMOVDstoreidx]
+      (let [r (.Reg (aget (.-Args v) 0))
+          ^{:line 478} i (.Reg (aget (.-Args v) 1))]
+        (when (== i s390x/REGSP)
+          (set! (values r i) (values i r)))
+
+        (let [p (.Prog s (.Asm (.-Op v)))]
+          (set! (.-Type (.-From p)) obj/TYPE_REG)
+          (set! (.-Reg (.-From p)) (.Reg (aget (.-Args v) 2)))
+          (set! (.-Type (.-To p)) obj/TYPE_MEM)
+          (set! (.-Reg (.-To p)) r)
+          (set! (.-Scale (.-To p)) 1)
+          (set! (.-Index (.-To p)) i)
+          (ssagen/AddAux (addr (.-To p)) v))))
+    (case [ssa/OpS390XMOVDstoreconst ssa/OpS390XMOVWstoreconst ssa/OpS390XMOVHstoreconst ssa/OpS390XMOVBstoreconst]
+      (let [p (.Prog s (.Asm (.-Op v)))]
+        (set! (.-Type (.-From p)) obj/TYPE_CONST)
+        (let [sc (.AuxValAndOff v)]
+          (set! (.-Offset (.-From p)) (.Val64 sc))
+          (set! (.-Type (.-To p)) obj/TYPE_MEM)
+          (set! (.-Reg (.-To p)) (.Reg (aget (.-Args v) 0)))
+          (ssagen/AddAux2 (addr (.-To p)) v (.Off64 sc)))))
+    (case [ssa/OpS390XMOVBreg ssa/OpS390XMOVHreg ssa/OpS390XMOVWreg
+        ^{:line 499} ssa/OpS390XMOVBZreg ssa/OpS390XMOVHZreg ssa/OpS390XMOVWZreg
+        ^{:line 500} ssa/OpS390XLDGR ssa/OpS390XLGDR
+        ^{:line 501} ssa/OpS390XCEFBRA ssa/OpS390XCDFBRA ssa/OpS390XCEGBRA ssa/OpS390XCDGBRA
+        ^{:line 502} ssa/OpS390XCFEBRA ssa/OpS390XCFDBRA ssa/OpS390XCGEBRA ssa/OpS390XCGDBRA
+        ^{:line 503} ssa/OpS390XCELFBR ssa/OpS390XCDLFBR ssa/OpS390XCELGBR ssa/OpS390XCDLGBR
+        ^{:line 504} ssa/OpS390XCLFEBR ssa/OpS390XCLFDBR ssa/OpS390XCLGEBR ssa/OpS390XCLGDBR
+        ^{:line 505} ssa/OpS390XLDEBR ssa/OpS390XLEDBR
+        ^{:line 506} ssa/OpS390XFNEG ssa/OpS390XFNEGS
+        ^{:line 507} ssa/OpS390XLPDFR ssa/OpS390XLNDFR]
+      (opregreg s (.Asm (.-Op v)) (.Reg v) (.Reg (aget (.-Args v) 0))))
+    (case [ssa/OpS390XCLEAR]
+      (let [p (.Prog s (.Asm (.-Op v)))]
+        (set! (.-Type (.-From p)) obj/TYPE_CONST)
+        (let [sc (.AuxValAndOff v)]
+          (set! (.-Offset (.-From p)) (.Val64 sc))
+          (set! (.-Type (.-To p)) obj/TYPE_MEM)
+          (set! (.-Reg (.-To p)) (.Reg (aget (.-Args v) 0)))
+          (ssagen/AddAux2 (addr (.-To p)) v (.Off64 sc)))))
+    (case [ssa/OpCopy]
+      (when (.IsMemory (.-Type v))
+        (return))
+
+      (let [x (.Reg (aget (.-Args v) 0))
+          ^{:line 522} y (.Reg v)]
+        (when (!= x y)
+          (opregreg s (moveByType (.-Type v)) y x))))
+
+    (case [ssa/OpLoadReg]
+      (when (.IsFlags (.-Type v))
+        (.Fatalf v "load flags not implemented: %v" (.LongString v))
+        (return))
+
+      (let [p (.Prog s (loadByType (.-Type v)))]
+        (ssagen/AddrAuto (addr (.-From p)) (aget (.-Args v) 0))
+        (set! (.-Type (.-To p)) obj/TYPE_REG)
+        (set! (.-Reg (.-To p)) (.Reg v))))
+    (case [ssa/OpStoreReg]
+      (when (.IsFlags (.-Type v))
+        (.Fatalf v "store flags not implemented: %v" (.LongString v))
+        (return))
+
+      (let [p (.Prog s (storeByType (.-Type v)))]
+        (set! (.-Type (.-From p)) obj/TYPE_REG)
+        (set! (.-Reg (.-From p)) (.Reg (aget (.-Args v) 0)))
+        (ssagen/AddrAuto (addr (.-To p)) v)))
+    (case [ssa/OpArgIntReg ssa/OpArgFloatReg]
+      ;; The assembler needs to wrap the entry safepoint/stack growth code with spill/unspill
+      ;; The loop only runs once.
+      (range [_ a (.-RegArgs (.-Func (.-Block v)))]
+        ;; Pass the spill/unspill information along to the assembler, offset by size of
+        ;; the saved LR slot.
+        (let [addr (ssagen/SpillSlotAddr a s390x/REGSP ^{:go/via [Arch]} (.-FixedFrameSize (.-Arch base/Ctxt)))]
+          (.AddSpill (.FuncInfo s)
+            (lit obj/RegSpill :Reg (.-Reg a) :Addr addr :Unspill (loadByType (.-Type a)) :Spill (storeByType (.-Type a))))))
+
+      (set! (.-RegArgs (.-Func (.-Block v))) nil)
+
+      (ssagen/CheckArgReg v))
+    (case [ssa/OpS390XLoweredGetClosurePtr]
+      ;; Closure pointer is R12 (already)
+      (ssagen/CheckLoweredGetClosurePtr v))
+    (case [ssa/OpS390XLoweredRound32F ssa/OpS390XLoweredRound64F])
+    ;; input is already rounded
+    (case [ssa/OpS390XLoweredGetG]
+      (let [r (.Reg v)
+          ^{:line 564} p (.Prog s s390x/AMOVD)]
+        (set! (.-Type (.-From p)) obj/TYPE_REG)
+        (set! (.-Reg (.-From p)) s390x/REGG)
+        (set! (.-Type (.-To p)) obj/TYPE_REG)
+        (set! (.-Reg (.-To p)) r)))
+    (case [ssa/OpS390XLoweredGetCallerSP]
+      ;; caller's SP is FixedFrameSize below the address of the first arg
+      (let [p (.Prog s s390x/AMOVD)]
+        (set! (.-Type (.-From p)) obj/TYPE_ADDR)
+        (set! (.-Offset (.-From p)) (- ^{:go/via [Arch]} (.-FixedFrameSize (.-Arch base/Ctxt))))
+        (set! (.-Name (.-From p)) obj/NAME_PARAM)
+        (set! (.-Type (.-To p)) obj/TYPE_REG)
+        (set! (.-Reg (.-To p)) (.Reg v))))
+    (case [ssa/OpS390XLoweredGetCallerPC]
+      (let [p (.Prog s obj/AGETCALLERPC)]
+        (set! (.-Type (.-To p)) obj/TYPE_REG)
+        (set! (.-Reg (.-To p)) (.Reg v))))
+    (case [ssa/OpS390XCALLstatic ssa/OpS390XCALLclosure ssa/OpS390XCALLinter]
+      (.Call s v))
+    (case [ssa/OpS390XCALLtail ssa/OpS390XCALLtailinter]
+      (.TailCall s v))
+    (case [ssa/OpS390XLoweredWB]
+      (let [p (.Prog s obj/ACALL)]
+        (set! (.-Type (.-To p)) obj/TYPE_MEM)
+        (set! (.-Name (.-To p)) obj/NAME_EXTERN)
+        ;; AuxInt encodes how many buffer entries we need.
+        (set! (.-Sym (.-To p)) (aget (.-GCWriteBarrier ir/Syms) (- (.-AuxInt v) 1)))))
+
+    (case [ssa/OpS390XLoweredPanicBoundsRR ssa/OpS390XLoweredPanicBoundsRC ssa/OpS390XLoweredPanicBoundsCR ssa/OpS390XLoweredPanicBoundsCC]
+      ;; Compute the constant we put in the PCData entry for this call.
+      (let [(values code signed) (.Code (conv ssa/BoundsKind (.-AuxInt v)))
+          ^{:line 595} xIsReg false
+          ^{:line 596} yIsReg false
+          ^{:line 597} xVal 0
+          ^{:line 598} yVal 0]
+        (switch (.-Op v)
+          (case [ssa/OpS390XLoweredPanicBoundsRR]
+            (set! xIsReg true)
+            (set! xVal (conv int (- (.Reg (aget (.-Args v) 0)) s390x/REG_R0)))
+            (set! yIsReg true)
+            (set! yVal (conv int (- (.Reg (aget (.-Args v) 1)) s390x/REG_R0))))
+          (case [ssa/OpS390XLoweredPanicBoundsRC]
+            (set! xIsReg true)
+            (set! xVal (conv int (- (.Reg (aget (.-Args v) 0)) s390x/REG_R0)))
+            (let [c (.-C (assert ssa/PanicBoundsC (.-Aux v)))]
+              (if (and (>= c 0) (<= c abi/BoundsMaxConst))
+                (set! yVal (conv int c))
+                (do
+                  ;; Move constant to a register
+                  (set! yIsReg true)
+                  (when (== yVal xVal)
+                    (set! yVal 1))
+
+                  (let [p (.Prog s s390x/AMOVD)]
+                    (set! (.-Type (.-From p)) obj/TYPE_CONST)
+                    (set! (.-Offset (.-From p)) c)
+                    (set! (.-Type (.-To p)) obj/TYPE_REG)
+                    (set! (.-Reg (.-To p)) (+ s390x/REG_R0 (conv int16 yVal))))))))
+
+          (case [ssa/OpS390XLoweredPanicBoundsCR]
+            (set! yIsReg true)
+            (set! yVal (conv int (- (.Reg (aget (.-Args v) 0)) s390x/REG_R0)))
+            (let [c (.-C (assert ssa/PanicBoundsC (.-Aux v)))]
+              (if (and (>= c 0) (<= c abi/BoundsMaxConst))
+                (set! xVal (conv int c))
+                (do
+                  ;; Move constant to a register
+                  (when (== xVal yVal)
+                    (set! xVal 1))
+
+                  (let [p (.Prog s s390x/AMOVD)]
+                    (set! (.-Type (.-From p)) obj/TYPE_CONST)
+                    (set! (.-Offset (.-From p)) c)
+                    (set! (.-Type (.-To p)) obj/TYPE_REG)
+                    (set! (.-Reg (.-To p)) (+ s390x/REG_R0 (conv int16 xVal))))))))
+
+          (case [ssa/OpS390XLoweredPanicBoundsCC]
+            (let [c (.-Cx (assert ssa/PanicBoundsCC (.-Aux v)))]
+              (if (and (>= c 0) (<= c abi/BoundsMaxConst))
+                (set! xVal (conv int c))
+                (do
+                  ;; Move constant to a register
+                  (set! xIsReg true)
+                  (let [p (.Prog s s390x/AMOVD)]
+                    (set! (.-Type (.-From p)) obj/TYPE_CONST)
+                    (set! (.-Offset (.-From p)) c)
+                    (set! (.-Type (.-To p)) obj/TYPE_REG)
+                    (set! (.-Reg (.-To p)) (+ s390x/REG_R0 (conv int16 xVal))))))
+
+              (set! c (.-Cy (assert ssa/PanicBoundsCC (.-Aux v))))
+              (if (and (>= c 0) (<= c abi/BoundsMaxConst))
+                (set! yVal (conv int c))
+                (do
+                  ;; Move constant to a register
+                  (set! yIsReg true)
+                  (set! yVal 1)
+                  (let [p (.Prog s s390x/AMOVD)]
+                    (set! (.-Type (.-From p)) obj/TYPE_CONST)
+                    (set! (.-Offset (.-From p)) c)
+                    (set! (.-Type (.-To p)) obj/TYPE_REG)
+                    (set! (.-Reg (.-To p)) (+ s390x/REG_R0 (conv int16 yVal)))))))))
+
+
+        (let [c (abi/BoundsEncode code signed xIsReg yIsReg xVal yVal)
+
+            ^{:line 669} p (.Prog s obj/APCDATA)]
+          (.SetConst (.-From p) abi/PCDATA_PanicBounds)
+          (.SetConst (.-To p) (conv int64 c))
+          (set! p (.Prog s obj/ACALL))
+          (set! (.-Type (.-To p)) obj/TYPE_MEM)
+          (set! (.-Name (.-To p)) obj/NAME_EXTERN)
+          (set! (.-Sym (.-To p)) (.-PanicBounds ir/Syms)))))
+
+    (case [ssa/OpS390XFLOGR ssa/OpS390XPOPCNT
+        ^{:line 678} ssa/OpS390XNEG ssa/OpS390XNEGW
+        ^{:line 679} ssa/OpS390XMOVWBR ssa/OpS390XMOVDBR]
+      (let [p (.Prog s (.Asm (.-Op v)))]
+        (set! (.-Type (.-From p)) obj/TYPE_REG)
+        (set! (.-Reg (.-From p)) (.Reg (aget (.-Args v) 0)))
+        (set! (.-Type (.-To p)) obj/TYPE_REG)
+        (set! (.-Reg (.-To p)) (.Reg v))))
+    (case [ssa/OpS390XNOT ssa/OpS390XNOTW]
+      (.Fatalf v "NOT/NOTW generated %s" (.LongString v)))
+    (case [ssa/OpS390XSumBytes2 ssa/OpS390XSumBytes4 ssa/OpS390XSumBytes8]
+      (.Fatalf v "SumBytes generated %s" (.LongString v)))
+    (case [ssa/OpS390XLOCGR]
+      (let [p (.Prog s (.Asm (.-Op v)))]
+        (set! (.-Type (.-From p)) obj/TYPE_CONST)
+        (set! (.-Offset (.-From p)) (conv int64 (assert s390x/CCMask (.-Aux v))))
+        (set! (.-Reg p) (.Reg (aget (.-Args v) 1)))
+        (set! (.-Type (.-To p)) obj/TYPE_REG)
+        (set! (.-Reg (.-To p)) (.Reg v))))
+    (case [ssa/OpS390XFSQRTS ssa/OpS390XFSQRT]
+      (let [p (.Prog s (.Asm (.-Op v)))]
+        (set! (.-Type (.-From p)) obj/TYPE_REG)
+        (set! (.-Reg (.-From p)) (.Reg (aget (.-Args v) 0)))
+        (set! (.-Type (.-To p)) obj/TYPE_REG)
+        (set! (.-Reg (.-To p)) (.Reg v))))
+    (case [ssa/OpS390XLTDBR ssa/OpS390XLTEBR]
+      (opregreg s (.Asm (.-Op v)) (.Reg (aget (.-Args v) 0)) (.Reg (aget (.-Args v) 0))))
+    (case [ssa/OpS390XInvertFlags]
+      (.Fatalf v "InvertFlags should never make it to codegen %v" (.LongString v)))
+    (case [ssa/OpS390XFlagEQ ssa/OpS390XFlagLT ssa/OpS390XFlagGT ssa/OpS390XFlagOV]
+      (.Fatalf v "Flag* ops should never make it to codegen %v" (.LongString v)))
+    (case [ssa/OpS390XAddTupleFirst32 ssa/OpS390XAddTupleFirst64]
+      (.Fatalf v "AddTupleFirst* should never make it to codegen %v" (.LongString v)))
+    (case [ssa/OpS390XLoweredNilCheck]
+      ;; Issue a load which will fault if the input is nil.
+      (let [p (.Prog s s390x/AMOVBZ)]
+        (set! (.-Type (.-From p)) obj/TYPE_MEM)
+        (set! (.-Reg (.-From p)) (.Reg (aget (.-Args v) 0)))
+        (ssagen/AddAux (addr (.-From p)) v)
+        (set! (.-Type (.-To p)) obj/TYPE_REG)
+        (set! (.-Reg (.-To p)) s390x/REGTMP)
+        (when (logopt/Enabled)
+          (logopt/LogOpt (.-Pos v) "nilcheck" "genssa" (.-Name (.-Func (.-Block v)))))
+
+        (when (and (!= (.-Nil base/Debug) 0) (> ^{:go/via [lico]} (.Line (.-Pos v)) 1)) ; v.Pos.Line()==1 in generated wrappers
+          (base/WarnfAt (.-Pos v) "generated nil check"))))
+
+    (case [ssa/OpS390XMVC]
+      (let [vo (.AuxValAndOff v)
+          ^{:line 726} p (.Prog s s390x/AMVC)]
+        (set! (.-Type (.-From p)) obj/TYPE_CONST)
+        (set! (.-Offset (.-From p)) (.Val64 vo))
+        (.AddRestSource p ^{:go/breaks [2 4 6]} (lit obj/Addr
+            :Type obj/TYPE_MEM
+            :Reg (.Reg (aget (.-Args v) 1))
+            :Offset (.Off64 vo)))
+
+        (set! (.-Type (.-To p)) obj/TYPE_MEM)
+        (set! (.-Reg (.-To p)) (.Reg (aget (.-Args v) 0)))
+        (set! (.-Offset (.-To p)) (.Off64 vo))))
+    (case [ssa/OpS390XSTMG2 ssa/OpS390XSTMG3 ssa/OpS390XSTMG4
+        ^{:line 738} ssa/OpS390XSTM2 ssa/OpS390XSTM3 ssa/OpS390XSTM4]
+      (for [i 2] (< i (- (len (.-Args v)) 1)) (inc! i)
+        (when (!= (.Reg (aget (.-Args v) i)) (+ (.Reg (aget (.-Args v) (- i 1))) 1))
+          (.Fatalf v "invalid store multiple %s" (.LongString v))))
+
+
+      (let [p (.Prog s (.Asm (.-Op v)))]
+        (set! (.-Type (.-From p)) obj/TYPE_REG)
+        (set! (.-Reg (.-From p)) (.Reg (aget (.-Args v) 1)))
+        (set! (.-Reg p) (.Reg (aget (.-Args v) (- (len (.-Args v)) 2))))
+        (set! (.-Type (.-To p)) obj/TYPE_MEM)
+        (set! (.-Reg (.-To p)) (.Reg (aget (.-Args v) 0)))
+        (ssagen/AddAux (addr (.-To p)) v)))
+    (case [ssa/OpS390XLoweredMove]
+      ;; Inputs must be valid pointers to memory,
+      ;; so adjust arg0 and arg1 as part of the expansion.
+      ;; arg2 should be src+size,
+      ;;
+      ;; mvc: MVC  $256, 0(R2), 0(R1)
+      ;;      MOVD $256(R1), R1
+      ;;      MOVD $256(R2), R2
+      ;;      CMP  R2, Rarg2
+      ;;      BNE  mvc
+      ;;      MVC  $rem, 0(R2), 0(R1) // if rem > 0
+      ;; arg2 is the last address to move in the loop + 256
+      (let [mvc (.Prog s s390x/AMVC)]
+        (set! (.-Type (.-From mvc)) obj/TYPE_CONST)
+        (set! (.-Offset (.-From mvc)) 256)
+        (.AddRestSource mvc (lit obj/Addr :Type obj/TYPE_MEM :Reg (.Reg (aget (.-Args v) 1))))
+        (set! (.-Type (.-To mvc)) obj/TYPE_MEM)
+        (set! (.-Reg (.-To mvc)) (.Reg (aget (.-Args v) 0)))
+
+        (for [i 0] (< i 2) (inc! i)
+          (let [movd (.Prog s s390x/AMOVD)]
+            (set! (.-Type (.-From movd)) obj/TYPE_ADDR)
+            (set! (.-Reg (.-From movd)) (.Reg (aget (.-Args v) i)))
+            (set! (.-Offset (.-From movd)) 256)
+            (set! (.-Type (.-To movd)) obj/TYPE_REG)
+            (set! (.-Reg (.-To movd)) (.Reg (aget (.-Args v) i)))))
+
+
+        (let [cmpu (.Prog s s390x/ACMPU)]
+          (set! (.-Reg (.-From cmpu)) (.Reg (aget (.-Args v) 1)))
+          (set! (.-Type (.-From cmpu)) obj/TYPE_REG)
+          (set! (.-Reg (.-To cmpu)) (.Reg (aget (.-Args v) 2)))
+          (set! (.-Type (.-To cmpu)) obj/TYPE_REG)
+
+          (let [bne (.Prog s s390x/ABLT)]
+            (set! (.-Type (.-To bne)) obj/TYPE_BRANCH)
+            (.SetTarget (.-To bne) mvc)
+
+            (when (> (.-AuxInt v) 0)
+              (let [mvc (.Prog s s390x/AMVC)]
+                (set! (.-Type (.-From mvc)) obj/TYPE_CONST)
+                (set! (.-Offset (.-From mvc)) (.-AuxInt v))
+                (.AddRestSource mvc (lit obj/Addr :Type obj/TYPE_MEM :Reg (.Reg (aget (.-Args v) 1))))
+                (set! (.-Type (.-To mvc)) obj/TYPE_MEM)
+                (set! (.-Reg (.-To mvc)) (.Reg (aget (.-Args v) 0)))))))))
+
+    (case [ssa/OpS390XLoweredZero]
+      ;; Input must be valid pointers to memory,
+      ;; so adjust arg0 as part of the expansion.
+      ;; arg1 should be src+size,
+      ;;
+      ;; clear: CLEAR $256, 0(R1)
+      ;;        MOVD  $256(R1), R1
+      ;;        CMP   R1, Rarg1
+      ;;        BNE   clear
+      ;;        CLEAR $rem, 0(R1) // if rem > 0
+      ;; arg1 is the last address to zero in the loop + 256
+      (let [clear (.Prog s s390x/ACLEAR)]
+        (set! (.-Type (.-From clear)) obj/TYPE_CONST)
+        (set! (.-Offset (.-From clear)) 256)
+        (set! (.-Type (.-To clear)) obj/TYPE_MEM)
+        (set! (.-Reg (.-To clear)) (.Reg (aget (.-Args v) 0)))
+
+        (let [movd (.Prog s s390x/AMOVD)]
+          (set! (.-Type (.-From movd)) obj/TYPE_ADDR)
+          (set! (.-Reg (.-From movd)) (.Reg (aget (.-Args v) 0)))
+          (set! (.-Offset (.-From movd)) 256)
+          (set! (.-Type (.-To movd)) obj/TYPE_REG)
+          (set! (.-Reg (.-To movd)) (.Reg (aget (.-Args v) 0)))
+
+          (let [cmpu (.Prog s s390x/ACMPU)]
+            (set! (.-Reg (.-From cmpu)) (.Reg (aget (.-Args v) 0)))
+            (set! (.-Type (.-From cmpu)) obj/TYPE_REG)
+            (set! (.-Reg (.-To cmpu)) (.Reg (aget (.-Args v) 1)))
+            (set! (.-Type (.-To cmpu)) obj/TYPE_REG)
+
+            (let [bne (.Prog s s390x/ABLT)]
+              (set! (.-Type (.-To bne)) obj/TYPE_BRANCH)
+              (.SetTarget (.-To bne) clear)
+
+              (when (> (.-AuxInt v) 0)
+                (let [clear (.Prog s s390x/ACLEAR)]
+                  (set! (.-Type (.-From clear)) obj/TYPE_CONST)
+                  (set! (.-Offset (.-From clear)) (.-AuxInt v))
+                  (set! (.-Type (.-To clear)) obj/TYPE_MEM)
+                  (set! (.-Reg (.-To clear)) (.Reg (aget (.-Args v) 0))))))))))
+
+    (case [ssa/OpS390XMOVBZatomicload ssa/OpS390XMOVWZatomicload ssa/OpS390XMOVDatomicload]
+      (let [p (.Prog s (.Asm (.-Op v)))]
+        (set! (.-Type (.-From p)) obj/TYPE_MEM)
+        (set! (.-Reg (.-From p)) (.Reg (aget (.-Args v) 0)))
+        (ssagen/AddAux (addr (.-From p)) v)
+        (set! (.-Type (.-To p)) obj/TYPE_REG)
+        (set! (.-Reg (.-To p)) (.Reg0 v))))
+    (case [ssa/OpS390XMOVBatomicstore ssa/OpS390XMOVWatomicstore ssa/OpS390XMOVDatomicstore]
+      (let [p (.Prog s (.Asm (.-Op v)))]
+        (set! (.-Type (.-From p)) obj/TYPE_REG)
+        (set! (.-Reg (.-From p)) (.Reg (aget (.-Args v) 1)))
+        (set! (.-Type (.-To p)) obj/TYPE_MEM)
+        (set! (.-Reg (.-To p)) (.Reg (aget (.-Args v) 0)))
+        (ssagen/AddAux (addr (.-To p)) v)))
+    (case [ssa/OpS390XLAN ssa/OpS390XLAO]
+      ;; LA(N|O) Ry, TMP, 0(Rx)
+      (let [op (.Prog s (.Asm (.-Op v)))]
+        (set! (.-Type (.-From op)) obj/TYPE_REG)
+        (set! (.-Reg (.-From op)) (.Reg (aget (.-Args v) 1)))
+        (set! (.-Reg op) s390x/REGTMP)
+        (set! (.-Type (.-To op)) obj/TYPE_MEM)
+        (set! (.-Reg (.-To op)) (.Reg (aget (.-Args v) 0)))))
+    (case [ssa/OpS390XLANfloor ssa/OpS390XLAOfloor]
+      (let [r (.Reg (aget (.-Args v) 0)) ; clobbered, assumed R1 in comments
+
+          ;; Round ptr down to nearest multiple of 4.
+          ;; ANDW $~3, R1
+          ^{:line 865} ptr (.Prog s s390x/AANDW)]
+        (set! (.-Type (.-From ptr)) obj/TYPE_CONST)
+        (set! (.-Offset (.-From ptr)) 0xfffffffc)
+        (set! (.-Type (.-To ptr)) obj/TYPE_REG)
+        (set! (.-Reg (.-To ptr)) r)
+
+        ;; Redirect output of LA(N|O) into R1 since it is clobbered anyway.
+        ;; LA(N|O) Rx, R1, 0(R1)
+        (let [op (.Prog s (.Asm (.-Op v)))]
+          (set! (.-Type (.-From op)) obj/TYPE_REG)
+          (set! (.-Reg (.-From op)) (.Reg (aget (.-Args v) 1)))
+          (set! (.-Reg op) r)
+          (set! (.-Type (.-To op)) obj/TYPE_MEM)
+          (set! (.-Reg (.-To op)) r))))
+    (case [ssa/OpS390XLAA ssa/OpS390XLAAG]
+      (let [p (.Prog s (.Asm (.-Op v)))]
+        (set! (.-Reg p) (.Reg0 v))
+        (set! (.-Type (.-From p)) obj/TYPE_REG)
+        (set! (.-Reg (.-From p)) (.Reg (aget (.-Args v) 1)))
+        (set! (.-Type (.-To p)) obj/TYPE_MEM)
+        (set! (.-Reg (.-To p)) (.Reg (aget (.-Args v) 0)))
+        (ssagen/AddAux (addr (.-To p)) v)))
+    (case [ssa/OpS390XLoweredAtomicCas32 ssa/OpS390XLoweredAtomicCas64]
+      ;; Convert the flags output of CS{,G} into a bool.
+      ;;    CS{,G} arg1, arg2, arg0
+      ;;    MOVD   $0, ret
+      ;;    BNE    2(PC)
+      ;;    MOVD   $1, ret
+      ;;    NOP (so the BNE has somewhere to land)
+
+      ;; CS{,G} arg1, arg2, arg0
+      (let [cs (.Prog s (.Asm (.-Op v)))]
+        (set! (.-Type (.-From cs)) obj/TYPE_REG)
+        (set! (.-Reg (.-From cs)) (.Reg (aget (.-Args v) 1))) ; old
+        (set! (.-Reg cs) (.Reg (aget (.-Args v) 2))) ; new
+        (set! (.-Type (.-To cs)) obj/TYPE_MEM)
+        (set! (.-Reg (.-To cs)) (.Reg (aget (.-Args v) 0)))
+        (ssagen/AddAux (addr (.-To cs)) v)
+
+        ;; MOVD $0, ret
+        (let [movd (.Prog s s390x/AMOVD)]
+          (set! (.-Type (.-From movd)) obj/TYPE_CONST)
+          (set! (.-Offset (.-From movd)) 0)
+          (set! (.-Type (.-To movd)) obj/TYPE_REG)
+          (set! (.-Reg (.-To movd)) (.Reg0 v))
+
+          ;; BNE 2(PC)
+          (let [bne (.Prog s s390x/ABNE)]
+            (set! (.-Type (.-To bne)) obj/TYPE_BRANCH)
+
+            ;; MOVD $1, ret
+            (set! movd (.Prog s s390x/AMOVD))
+            (set! (.-Type (.-From movd)) obj/TYPE_CONST)
+            (set! (.-Offset (.-From movd)) 1)
+            (set! (.-Type (.-To movd)) obj/TYPE_REG)
+            (set! (.-Reg (.-To movd)) (.Reg0 v))
+
+            ;; NOP (so the BNE has somewhere to land)
+            (let [nop (.Prog s obj/ANOP)]
+              (.SetTarget (.-To bne) nop))))))
+    (case [ssa/OpS390XLoweredAtomicExchange32 ssa/OpS390XLoweredAtomicExchange64]
+      ;; Loop until the CS{,G} succeeds.
+      ;;     MOV{WZ,D} arg0, ret
+      ;; cs: CS{,G}    ret, arg1, arg0
+      ;;     BNE       cs
+
+      ;; MOV{WZ,D} arg0, ret
+      (let [load (.Prog s (loadByType (.FieldType (.-Type v) 0)))]
+        (set! (.-Type (.-From load)) obj/TYPE_MEM)
+        (set! (.-Reg (.-From load)) (.Reg (aget (.-Args v) 0)))
+        (set! (.-Type (.-To load)) obj/TYPE_REG)
+        (set! (.-Reg (.-To load)) (.Reg0 v))
+        (ssagen/AddAux (addr (.-From load)) v)
+
+        ;; CS{,G} ret, arg1, arg0
+        (let [cs (.Prog s (.Asm (.-Op v)))]
+          (set! (.-Type (.-From cs)) obj/TYPE_REG)
+          (set! (.-Reg (.-From cs)) (.Reg0 v)) ; old
+          (set! (.-Reg cs) (.Reg (aget (.-Args v) 1))) ; new
+          (set! (.-Type (.-To cs)) obj/TYPE_MEM)
+          (set! (.-Reg (.-To cs)) (.Reg (aget (.-Args v) 0)))
+          (ssagen/AddAux (addr (.-To cs)) v)
+
+          ;; BNE cs
+          (let [bne (.Prog s s390x/ABNE)]
+            (set! (.-Type (.-To bne)) obj/TYPE_BRANCH)
+            (.SetTarget (.-To bne) cs)))))
+    (case [ssa/OpS390XSYNC]
+      (.Prog s s390x/ASYNC))
+    (case [ssa/OpClobber ssa/OpClobberReg])
+    ;; TODO: implement for clobberdead experiment. Nop is ok for now.
+    (default
+      (.Fatalf v "genValue not implemented: %s" (.LongString v)))))
+
+
+
+^{:go/end 984} (go/func blockAsm ^obj/As [^{:tag (* ssa/Block)} b]
+  (switch (.-Kind b)
+    (case [ssa/BlockS390XBRC]
+      (return s390x/ABRC))
+    (case [ssa/BlockS390XCRJ]
+      (return s390x/ACRJ))
+    (case [ssa/BlockS390XCGRJ]
+      (return s390x/ACGRJ))
+    (case [ssa/BlockS390XCLRJ]
+      (return s390x/ACLRJ))
+    (case [ssa/BlockS390XCLGRJ]
+      (return s390x/ACLGRJ))
+    (case [ssa/BlockS390XCIJ]
+      (return s390x/ACIJ))
+    (case [ssa/BlockS390XCGIJ]
+      (return s390x/ACGIJ))
+    (case [ssa/BlockS390XCLIJ]
+      (return s390x/ACLIJ))
+    (case [ssa/BlockS390XCLGIJ]
+      (return s390x/ACLGIJ)))
+
+  (.Fatalf b "blockAsm not implemented: %s" (.LongString b))
+  (panic "unreachable"))
+
+
+^{:go/end 1045} (go/func ssaGenBlock [^{:tag (* ssagen/State)} s ^{:tag (* ssa/Block)} b ^{:tag (* ssa/Block)} next]
+  ;; Handle generic blocks first.
+  (switch (.-Kind b)
+    (case [ssa/BlockPlain ssa/BlockDefer]
+      (when (!= (.Block (aget (.-Succs b) 0)) next)
+        (let [p (.Prog s s390x/ABR)]
+          (set! (.-Type (.-To p)) obj/TYPE_BRANCH)
+          (set! (.-Branches s) (append (.-Branches s) (lit ssagen/Branch :P p :B (.Block (aget (.-Succs b) 0)))))))
+
+      (return))
+    (case [ssa/BlockExit ssa/BlockRetJmp]
+      (return))
+    (case [ssa/BlockRet]
+      (.Prog s obj/ARET)
+      (return)))
+
+
+  ;; Handle s390x-specific blocks. These blocks all have a
+  ;; condition code mask in the Aux value and 2 successors.
+  (let [succs (lit (array ... (* ssa/Block)) (.Block (aget (.-Succs b) 0)) (.Block (aget (.-Succs b) 1)))
+      ^{:line 1006} mask (assert s390x/CCMask (.-Aux b))]
+
+    ;; TODO: take into account Likely property for forward/backward
+    ;; branches. We currently can't do this because we don't know
+    ;; whether a block has already been emitted. In general forward
+    ;; branches are assumed 'not taken' and backward branches are
+    ;; assumed 'taken'.
+    (when (== next (aget succs 0))
+      (set! (values (aget succs 0) (aget succs 1)) (values (aget succs 1) (aget succs 0)))
+      (set! mask (.Inverse mask)))
+
+
+    (let [p (.Br s (blockAsm b) (aget succs 0))]
+      (switch (.-Kind b)
+        (case [ssa/BlockS390XBRC]
+          (set! (.-Type (.-From p)) obj/TYPE_CONST)
+          (set! (.-Offset (.-From p)) (conv int64 mask)))
+        (case [ssa/BlockS390XCGRJ ssa/BlockS390XCRJ
+            ^{:line 1024} ssa/BlockS390XCLGRJ ssa/BlockS390XCLRJ]
+          (set! (.-Type (.-From p)) obj/TYPE_CONST)
+          (set! (.-Offset (.-From p)) (conv int64 (bit-and mask s390x/NotUnordered))) ; unordered is not possible
+          (set! (.-Reg p) (.Reg (aget (.-Controls b) 0)))
+          (.AddRestSourceReg p (.Reg (aget (.-Controls b) 1))))
+        (case [ssa/BlockS390XCGIJ ssa/BlockS390XCIJ]
+          (set! (.-Type (.-From p)) obj/TYPE_CONST)
+          (set! (.-Offset (.-From p)) (conv int64 (bit-and mask s390x/NotUnordered))) ; unordered is not possible
+          (set! (.-Reg p) (.Reg (aget (.-Controls b) 0)))
+          (.AddRestSourceConst p (conv int64 (conv int8 (.-AuxInt b)))))
+        (case [ssa/BlockS390XCLGIJ ssa/BlockS390XCLIJ]
+          (set! (.-Type (.-From p)) obj/TYPE_CONST)
+          (set! (.-Offset (.-From p)) (conv int64 (bit-and mask s390x/NotUnordered))) ; unordered is not possible
+          (set! (.-Reg p) (.Reg (aget (.-Controls b) 0)))
+          (.AddRestSourceConst p (conv int64 (conv uint8 (.-AuxInt b)))))
+        (default
+          (.Fatalf b "branch not implemented: %s" (.LongString b))))
+
+      (when (!= next (aget succs 1))
+        (.Br s s390x/ABR (aget succs 1))))))
+
+
+
+^{:go/end 1056} (go/func loadRegResult ^{:tag (* obj/Prog)} [^{:tag (* ssagen/State)} s ^{:tag (* ssa/Func)} f ^{:tag (* types/Type)} t ^int16 reg ^{:tag (* ir/Name)} n ^int64 off]
+  (let [p (.Prog s (loadByType t))]
+    (set! (.-Type (.-From p)) obj/TYPE_MEM)
+    (set! (.-Name (.-From p)) obj/NAME_AUTO)
+    (set! (.-Sym (.-From p)) (.Linksym n))
+    (set! (.-Offset (.-From p)) (+ (.FrameOffset n) off))
+    (set! (.-Type (.-To p)) obj/TYPE_REG)
+    (set! (.-Reg (.-To p)) reg)
+    ^{:line 1055} p))
+
+
+^{:go/end 1064} (go/func spillArgReg ^{:tag (* obj/Prog)} [^{:tag (* objw/Progs)} pp ^{:tag (* obj/Prog)} p ^{:tag (* ssa/Func)} f ^{:tag (* types/Type)} t ^int16 reg ^{:tag (* ir/Name)} n ^int64 off]
+  (set! p (.Append pp p (storeByType t) obj/TYPE_REG reg 0 obj/TYPE_MEM 0 (+ (.FrameOffset n) off)))
+  (set! (.-Name (.-To p)) obj/NAME_PARAM)
+  (set! (.-Sym (.-To p)) (.Linksym n))
+  (set! (.-Pos p) (.WithNotStmt (.-Pos p)))
+  ^{:line 1063} p)

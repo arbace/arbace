@@ -1,0 +1,1800 @@
+;; Copyright 2018 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.cmd.link.internal.ld) (go/file "xcoff.go" :imports [
+
+
+    ^{:line 8} [bytes "bytes"]
+    ^{:line 9} [binary "encoding/binary"]
+    ^{:line 10} [fmt "fmt"]
+    ^{:line 11} [bits "math/bits"]
+    ^{:line 12} [os "os"]
+    ^{:line 13} [filepath "path/filepath"]
+    ^{:line 14} [sort "sort"]
+    ^{:line 15} [strings "strings"]
+    ^{:line 16} [sync "sync"]
+
+    ^{:line 18} [objabi "cmd/internal/objabi"]
+    ^{:line 19} [loader "cmd/link/internal/loader"]
+    ^{:line 20} [sym "cmd/link/internal/sym"]])
+
+
+;; This file handles all algorithms related to XCOFF files generation.
+;; Most of them are adaptations of the ones in  cmd/link/internal/pe.go
+;; as PE and XCOFF are based on COFF files.
+;; XCOFF files generated are 64 bits.
+
+(go/const
+
+
+
+  ^{:line 32} [^{:val 1800 :doc "Total amount of space to reserve at the start of the file\nfor File Header, Auxiliary Header, and Section Headers.\nMay waste some.\n"} XCOFFHDRRESERVE (+ FILHSZ_64 AOUTHSZ_EXEC64 (* SCNHSZ_64 23))]
+
+
+
+  ^{:line 36} [^{:tag int64 :val 64 :doc "base on dump -o, then rounded from 32B to 64B to\nmatch worst case elf text section alignment on ppc64.\n"} XCOFFSECTALIGN 64]
+
+
+
+
+
+
+  ^{:line 43} [^{:val 4294967296 :doc "XCOFF binaries should normally have all its sections position-independent.\nHowever, this is not yet possible for .text because of some R_ADDR relocations\ninside RODATA symbols.\n.data and .bss are position-independent so their address start inside an unreachable\nsegment during execution to force segfault if something is wrong.\n"} XCOFFTEXTBASE 0x100000000] ; Start of text address
+  ^{:line 44} [^{:val 8589934592} XCOFFDATABASE 0x200000000]) ; Start of data address
+
+
+
+(go/type XcoffFileHdr64 "File Header\n" (struct
+    ^{:line 49 :tag uint16} Fmagic ; Target machine
+    ^{:line 50 :tag uint16} Fnscns ; Number of sections
+    ^{:line 51 :tag int32} Ftimedat ; Time and date of file creation
+    ^{:line 52 :tag uint64} Fsymptr ; Byte offset to symbol table start
+    ^{:line 53 :tag uint16} Fopthdr ; Number of bytes in optional header
+    ^{:line 54 :tag uint16} Fflags ; Flags
+    ^{:line 55 :tag int32} Fnsyms)) ; Number of entries in symbol table
+
+
+(go/const
+  ^{:line 59} [^{:val 503} U64_TOCMAGIC 0767]) ; AIX 64-bit XCOFF
+
+
+
+(go/const "Flags that describe the type of the object file.\n"
+  ^{:line 64} [^{:val 1} F_RELFLG 0x0001]
+  ^{:line 65} [^{:val 2} F_EXEC 0x0002]
+  ^{:line 66} [^{:val 4} F_LNNO 0x0004]
+  ^{:line 67} [^{:val 16} F_FDPR_PROF 0x0010]
+  ^{:line 68} [^{:val 32} F_FDPR_OPTI 0x0020]
+  ^{:line 69} [^{:val 64} F_DSA 0x0040]
+  ^{:line 70} [^{:val 256} F_VARPG 0x0100]
+  ^{:line 71} [^{:val 4096} F_DYNLOAD 0x1000]
+  ^{:line 72} [^{:val 8192} F_SHROBJ 0x2000]
+  ^{:line 73} [^{:val 16384} F_LOADONLY 0x4000])
+
+
+
+(go/type XcoffAoutHdr64 "Auxiliary Header\n" (struct
+    ^{:line 78 :tag int16} Omagic ; Flags - Ignored If Vstamp Is 1
+    ^{:line 79 :tag int16} Ovstamp ; Version
+    ^{:line 80 :tag uint32} Odebugger ; Reserved For Debugger
+    ^{:line 81 :tag uint64} Otextstart ; Virtual Address Of Text
+    ^{:line 82 :tag uint64} Odatastart ; Virtual Address Of Data
+    ^{:line 83 :tag uint64} Otoc ; Toc Address
+    ^{:line 84 :tag int16} Osnentry ; Section Number For Entry Point
+    ^{:line 85 :tag int16} Osntext ; Section Number For Text
+    ^{:line 86 :tag int16} Osndata ; Section Number For Data
+    ^{:line 87 :tag int16} Osntoc ; Section Number For Toc
+    ^{:line 88 :tag int16} Osnloader ; Section Number For Loader
+    ^{:line 89 :tag int16} Osnbss ; Section Number For Bss
+    ^{:line 90 :tag int16} Oalgntext ; Max Text Alignment
+    ^{:line 91 :tag int16} Oalgndata ; Max Data Alignment
+    ^{:line 92 :tag (array 2 byte)} Omodtype ; Module Type Field
+    ^{:line 93 :tag uint8} Ocpuflag ; Bit Flags - Cputypes Of Objects
+    ^{:line 94 :tag uint8} Ocputype ; Reserved for CPU type
+    ^{:line 95 :tag uint8} Otextpsize ; Requested text page size
+    ^{:line 96 :tag uint8} Odatapsize ; Requested data page size
+    ^{:line 97 :tag uint8} Ostackpsize ; Requested stack page size
+    ^{:line 98 :tag uint8} Oflags ; Flags And TLS Alignment
+    ^{:line 99 :tag uint64} Otsize ; Text Size In Bytes
+    ^{:line 100 :tag uint64} Odsize ; Data Size In Bytes
+    ^{:line 101 :tag uint64} Obsize ; Bss Size In Bytes
+    ^{:line 102 :tag uint64} Oentry ; Entry Point Address
+    ^{:line 103 :tag uint64} Omaxstack ; Max Stack Size Allowed
+    ^{:line 104 :tag uint64} Omaxdata ; Max Data Size Allowed
+    ^{:line 105 :tag int16} Osntdata ; Section Number For Tdata Section
+    ^{:line 106 :tag int16} Osntbss ; Section Number For Tbss Section
+    ^{:line 107 :tag uint16} Ox64flags ; Additional Flags For 64-Bit Objects
+    ^{:line 108 :tag int16} Oresv3a ; Reserved
+    ^{:line 109 :tag (array 2 int32)} Oresv3)) ; Reserved
+
+
+
+(go/type XcoffScnHdr64 "Section Header\n" (struct
+    ^{:line 114 :tag (array 8 byte)} Sname ; Section Name
+    ^{:line 115 :tag uint64} Spaddr ; Physical Address
+    ^{:line 116 :tag uint64} Svaddr ; Virtual Address
+    ^{:line 117 :tag uint64} Ssize ; Section Size
+    ^{:line 118 :tag uint64} Sscnptr ; File Offset To Raw Data
+    ^{:line 119 :tag uint64} Srelptr ; File Offset To Relocation
+    ^{:line 120 :tag uint64} Slnnoptr ; File Offset To Line Numbers
+    ^{:line 121 :tag uint32} Snreloc ; Number Of Relocation Entries
+    ^{:line 122 :tag uint32} Snlnno ; Number Of Line Number Entries
+    ^{:line 123 :tag uint32} Sflags)) ; flags
+
+
+
+(go/const "Flags defining the section type.\n"
+  ^{:line 128} [^{:val 16} STYP_DWARF 0x0010]
+  ^{:line 129} [^{:val 32} STYP_TEXT 0x0020]
+  ^{:line 130} [^{:val 64} STYP_DATA 0x0040]
+  ^{:line 131} [^{:val 128} STYP_BSS 0x0080]
+  ^{:line 132} [^{:val 256} STYP_EXCEPT 0x0100]
+  ^{:line 133} [^{:val 512} STYP_INFO 0x0200]
+  ^{:line 134} [^{:val 1024} STYP_TDATA 0x0400]
+  ^{:line 135} [^{:val 2048} STYP_TBSS 0x0800]
+  ^{:line 136} [^{:val 4096} STYP_LOADER 0x1000]
+  ^{:line 137} [^{:val 8192} STYP_DEBUG 0x2000]
+  ^{:line 138} [^{:val 16384} STYP_TYPCHK 0x4000]
+  ^{:line 139} [^{:val 32768} STYP_OVRFLO 0x8000])
+
+(go/const
+  ^{:line 142} [^{:val 65536} SSUBTYP_DWINFO 0x10000] ; DWARF info section
+  ^{:line 143} [^{:val 131072} SSUBTYP_DWLINE 0x20000] ; DWARF line-number section
+  ^{:line 144} [^{:val 196608} SSUBTYP_DWPBNMS 0x30000] ; DWARF public names section
+  ^{:line 145} [^{:val 262144} SSUBTYP_DWPBTYP 0x40000] ; DWARF public types section
+  ^{:line 146} [^{:val 327680} SSUBTYP_DWARNGE 0x50000] ; DWARF aranges section
+  ^{:line 147} [^{:val 393216} SSUBTYP_DWABREV 0x60000] ; DWARF abbreviation section
+  ^{:line 148} [^{:val 458752} SSUBTYP_DWSTR 0x70000] ; DWARF strings section
+  ^{:line 149} [^{:val 524288} SSUBTYP_DWRNGES 0x80000] ; DWARF ranges section
+  ^{:line 150} [^{:val 589824} SSUBTYP_DWLOC 0x90000] ; DWARF location lists section
+  ^{:line 151} [^{:val 655360} SSUBTYP_DWFRAME 0xA0000] ; DWARF frames section
+  ^{:line 152} [^{:val 720896} SSUBTYP_DWMAC 0xB0000]) ; DWARF macros section
+
+
+
+(go/const "Headers size\n"
+  ^{:line 157} [^{:val 20} FILHSZ_32 20]
+  ^{:line 158} [^{:val 24} FILHSZ_64 24]
+  ^{:line 159} [^{:val 72} AOUTHSZ_EXEC32 72]
+  ^{:line 160} [^{:val 120} AOUTHSZ_EXEC64 120]
+  ^{:line 161} [^{:val 40} SCNHSZ_32 40]
+  ^{:line 162} [^{:val 72} SCNHSZ_64 72]
+  ^{:line 163} [^{:val 32} LDHDRSZ_32 32]
+  ^{:line 164} [^{:val 56} LDHDRSZ_64 56]
+  ^{:line 165} [^{:val 24} LDSYMSZ_64 24]
+  ^{:line 166} [^{:val 14} RELSZ_64 14])
+
+
+
+(go/type xcoffSym "Type representing all XCOFF symbols.\n" any)
+
+
+(go/type XcoffSymEnt64 "Symbol Table Entry\n" (struct
+    ^{:line 174 :tag uint64} Nvalue ; Symbol value
+    ^{:line 175 :tag uint32} Noffset ; Offset of the name in string table or .debug section
+    ^{:line 176 :tag int16} Nscnum ; Section number of symbol
+    ^{:line 177 :tag uint16} Ntype ; Basic and derived type specification
+    ^{:line 178 :tag uint8} Nsclass ; Storage class of symbol
+    ^{:line 179 :tag int8} Nnumaux)) ; Number of auxiliary entries
+
+
+(go/const ^{:val 18} SYMESZ 18)
+
+(go/const
+
+  ^{:line 186} [^{:val -2 :doc "Nscnum\n"} N_DEBUG -2]
+  ^{:line 187} [^{:val -1} N_ABS -1]
+  ^{:line 188} [^{:val 0} N_UNDEF 0]
+
+
+  ^{:line 191} [^{:val 4096 :doc "Ntype\n"} SYM_V_INTERNAL 0x1000]
+  ^{:line 192} [^{:val 8192} SYM_V_HIDDEN 0x2000]
+  ^{:line 193} [^{:val 12288} SYM_V_PROTECTED 0x3000]
+  ^{:line 194} [^{:val 16384} SYM_V_EXPORTED 0x4000]
+  ^{:line 195} [^{:val 32} SYM_TYPE_FUNC 0x0020]) ; is function
+
+
+
+(go/const "Storage Class.\n"
+  ^{:line 200} [^{:val 0} C_NULL 0] ; Symbol table entry marked for deletion
+  ^{:line 201} [^{:val 2} C_EXT 2] ; External symbol
+  ^{:line 202} [^{:val 3} C_STAT 3] ; Static symbol
+  ^{:line 203} [^{:val 100} C_BLOCK 100] ; Beginning or end of inner block
+  ^{:line 204} [^{:val 101} C_FCN 101] ; Beginning or end of function
+  ^{:line 205} [^{:val 103} C_FILE 103] ; Source file name and compiler information
+  ^{:line 206} [^{:val 107} C_HIDEXT 107] ; Unnamed external symbol
+  ^{:line 207} [^{:val 108} C_BINCL 108] ; Beginning of include file
+  ^{:line 208} [^{:val 109} C_EINCL 109] ; End of include file
+  ^{:line 209} [^{:val 111} C_WEAKEXT 111] ; Weak external symbol
+  ^{:line 210} [^{:val 112} C_DWARF 112] ; DWARF symbol
+  ^{:line 211} [^{:val 128} C_GSYM 128] ; Global variable
+  ^{:line 212} [^{:val 129} C_LSYM 129] ; Automatic variable allocated on stack
+  ^{:line 213} [^{:val 130} C_PSYM 130] ; Argument to subroutine allocated on stack
+  ^{:line 214} [^{:val 131} C_RSYM 131] ; Register variable
+  ^{:line 215} [^{:val 132} C_RPSYM 132] ; Argument to function or procedure stored in register
+  ^{:line 216} [^{:val 133} C_STSYM 133] ; Statically allocated symbol
+  ^{:line 217} [^{:val 135} C_BCOMM 135] ; Beginning of common block
+  ^{:line 218} [^{:val 136} C_ECOML 136] ; Local member of common block
+  ^{:line 219} [^{:val 137} C_ECOMM 137] ; End of common block
+  ^{:line 220} [^{:val 140} C_DECL 140] ; Declaration of object
+  ^{:line 221} [^{:val 141} C_ENTRY 141] ; Alternate entry
+  ^{:line 222} [^{:val 142} C_FUN 142] ; Function or procedure
+  ^{:line 223} [^{:val 143} C_BSTAT 143] ; Beginning of static block
+  ^{:line 224} [^{:val 144} C_ESTAT 144] ; End of static block
+  ^{:line 225} [^{:val 145} C_GTLS 145] ; Global thread-local variable
+  ^{:line 226} [^{:val 146} C_STTLS 146]) ; Static thread-local variable
+
+
+
+(go/type XcoffAuxFile64 "File Auxiliary Entry\n" (struct
+    ^{:line 231 :tag uint32} Xzeroes ; The name is always in the string table
+    ^{:line 232 :tag uint32} Xoffset ; Offset in the string table
+    ^{:line 233 :tag (array 6 byte)} X_pad1
+    ^{:line 234 :tag uint8} Xftype ; Source file string type
+    ^{:line 235 :tag (array 2 byte)} X_pad2
+    ^{:line 236 :tag uint8} Xauxtype)) ; Type of auxiliary entry
+
+
+
+(go/type XcoffAuxFcn64 "Function Auxiliary Entry\n" (struct
+    ^{:line 241 :tag uint64} Xlnnoptr ; File pointer to line number
+    ^{:line 242 :tag uint32} Xfsize ; Size of function in bytes
+    ^{:line 243 :tag uint32} Xendndx ; Symbol table index of next entry
+    ^{:line 244 :tag uint8} Xpad ; Unused
+    ^{:line 245 :tag uint8} Xauxtype)) ; Type of auxiliary entry
+
+
+
+(go/type XcoffAuxCSect64 "csect Auxiliary Entry.\n" (struct
+    ^{:line 250 :tag uint32} Xscnlenlo ; Lower 4 bytes of length or symbol table index
+    ^{:line 251 :tag uint32} Xparmhash ; Offset of parameter type-check string
+    ^{:line 252 :tag uint16} Xsnhash ; .typchk section number
+    ^{:line 253 :tag uint8} Xsmtyp ; Symbol alignment and type
+    ^{:line 254 :tag uint8} Xsmclas ; Storage-mapping class
+    ^{:line 255 :tag uint32} Xscnlenhi ; Upper 4 bytes of length or symbol table index
+    ^{:line 256 :tag uint8} Xpad ; Unused
+    ^{:line 257 :tag uint8} Xauxtype)) ; Type of auxiliary entry
+
+
+
+(go/type XcoffAuxDWARF64 "DWARF Auxiliary Entry\n" (struct
+    ^{:line 262 :tag uint64} Xscnlen ; Length of this symbol section
+    ^{:line 263 :tag (array 9 byte)} X_pad
+    ^{:line 264 :tag uint8} Xauxtype)) ; Type of auxiliary entry
+
+
+
+(go/const "Auxiliary type\n"
+  ^{:line 269} [^{:val 255} _AUX_EXCEPT 255]
+  ^{:line 270} [^{:val 254} _AUX_FCN 254]
+  ^{:line 271} [^{:val 253} _AUX_SYM 253]
+  ^{:line 272} [^{:val 252} _AUX_FILE 252]
+  ^{:line 273} [^{:val 251} _AUX_CSECT 251]
+  ^{:line 274} [^{:val 250} _AUX_SECT 250])
+
+
+
+(go/const "Xftype field\n"
+  ^{:line 279} [^{:val 0} XFT_FN 0] ; Source File Name
+  ^{:line 280} [^{:val 1} XFT_CT 1] ; Compile Time Stamp
+  ^{:line 281} [^{:val 2} XFT_CV 2] ; Compiler Version Number
+  ^{:line 282} [^{:val 128} XFT_CD 128]) ; Compiler Defined Information/
+
+
+
+
+(go/const "Symbol type field.\n"
+  ^{:line 288} [^{:val 0} XTY_ER 0] ; External reference
+  ^{:line 289} [^{:val 1} XTY_SD 1] ; Section definition
+  ^{:line 290} [^{:val 2} XTY_LD 2] ; Label definition
+  ^{:line 291} [^{:val 3} XTY_CM 3] ; Common csect definition
+  ^{:line 292} [^{:val 8} XTY_WK 0x8] ; Weak symbol
+  ^{:line 293} [^{:val 16} XTY_EXP 0x10] ; Exported symbol
+  ^{:line 294} [^{:val 32} XTY_ENT 0x20] ; Entry point symbol
+  ^{:line 295} [^{:val 64} XTY_IMP 0x40]) ; Imported symbol
+
+
+
+(go/const "Storage-mapping class.\n"
+  ^{:line 300} [^{:val 0} XMC_PR 0] ; Program code
+  ^{:line 301} [^{:val 1} XMC_RO 1] ; Read-only constant
+  ^{:line 302} [^{:val 2} XMC_DB 2] ; Debug dictionary table
+  ^{:line 303} [^{:val 3} XMC_TC 3] ; TOC entry
+  ^{:line 304} [^{:val 4} XMC_UA 4] ; Unclassified
+  ^{:line 305} [^{:val 5} XMC_RW 5] ; Read/Write data
+  ^{:line 306} [^{:val 6} XMC_GL 6] ; Global linkage
+  ^{:line 307} [^{:val 7} XMC_XO 7] ; Extended operation
+  ^{:line 308} [^{:val 8} XMC_SV 8] ; 32-bit supervisor call descriptor
+  ^{:line 309} [^{:val 9} XMC_BS 9] ; BSS class
+  ^{:line 310} [^{:val 10} XMC_DS 10] ; Function descriptor
+  ^{:line 311} [^{:val 11} XMC_UC 11] ; Unnamed FORTRAN common
+  ^{:line 312} [^{:val 15} XMC_TC0 15] ; TOC anchor
+  ^{:line 313} [^{:val 16} XMC_TD 16] ; Scalar data entry in the TOC
+  ^{:line 314} [^{:val 17} XMC_SV64 17] ; 64-bit supervisor call descriptor
+  ^{:line 315} [^{:val 18} XMC_SV3264 18] ; Supervisor call descriptor for both 32-bit and 64-bit
+  ^{:line 316} [^{:val 20} XMC_TL 20] ; Read/Write thread-local data
+  ^{:line 317} [^{:val 21} XMC_UL 21] ; Read/Write thread-local data (.tbss)
+  ^{:line 318} [^{:val 22} XMC_TE 22]) ; TOC entry
+
+
+
+(go/type XcoffLdHdr64 "Loader Header\n" (struct
+    ^{:line 323 :tag int32} Lversion ; Loader section version number
+    ^{:line 324 :tag int32} Lnsyms ; Number of symbol table entries
+    ^{:line 325 :tag int32} Lnreloc ; Number of relocation table entries
+    ^{:line 326 :tag uint32} Listlen ; Length of import file ID string table
+    ^{:line 327 :tag int32} Lnimpid ; Number of import file IDs
+    ^{:line 328 :tag uint32} Lstlen ; Length of string table
+    ^{:line 329 :tag uint64} Limpoff ; Offset to start of import file IDs
+    ^{:line 330 :tag uint64} Lstoff ; Offset to start of string table
+    ^{:line 331 :tag uint64} Lsymoff ; Offset to start of symbol table
+    ^{:line 332 :tag uint64} Lrldoff)) ; Offset to start of relocation entries
+
+
+
+(go/type XcoffLdSym64 "Loader Symbol\n" (struct
+    ^{:line 337 :tag uint64} Lvalue ; Address field
+    ^{:line 338 :tag uint32} Loffset ; Byte offset into string table of symbol name
+    ^{:line 339 :tag int16} Lscnum ; Section number containing symbol
+    ^{:line 340 :tag int8} Lsmtype ; Symbol type, export, import flags
+    ^{:line 341 :tag int8} Lsmclas ; Symbol storage class
+    ^{:line 342 :tag int32} Lifile ; Import file ID; ordinal of import file IDs
+    ^{:line 343 :tag uint32} Lparm)) ; Parameter type-check field
+
+
+(go/type xcoffLoaderSymbol (struct
+    ^{:line 347 :tag loader/Sym} sym
+    ^{:line 348 :tag int8} smtype
+    ^{:line 349 :tag int8} smclas))
+
+
+(go/type XcoffLdImportFile64 (struct
+    ^{:line 353 :tag string} Limpidpath
+    ^{:line 354 :tag string} Limpidbase
+    ^{:line 355 :tag string} Limpidmem))
+
+
+(go/type XcoffLdRel64 (struct
+    ^{:line 359 :tag uint64} Lvaddr ; Address Field
+    ^{:line 360 :tag uint16} Lrtype ; Relocation Size and Type
+    ^{:line 361 :tag int16} Lrsecnm ; Section Number being relocated
+    ^{:line 362 :tag int32} Lsymndx)) ; Loader-Section symbol table index
+
+
+
+(go/type xcoffLoaderReloc "xcoffLoaderReloc holds information about a relocation made by the loader.\n" (struct
+    ^{:line 367 :tag loader/Sym} sym
+    ^{:line 368 :tag int32} roff
+    ^{:line 369 :tag uint16} rtype
+    ^{:line 370 :tag int32} symndx))
+
+
+(go/const
+  ^{:line 374} [^{:val 0} XCOFF_R_POS 0x00] ; A(sym) Positive Relocation
+  ^{:line 375} [^{:val 1} XCOFF_R_NEG 0x01] ; -A(sym) Negative Relocation
+  ^{:line 376} [^{:val 2} XCOFF_R_REL 0x02] ; A(sym-*) Relative to self
+  ^{:line 377} [^{:val 3} XCOFF_R_TOC 0x03] ; A(sym-TOC) Relative to TOC
+  ^{:line 378} [^{:val 18} XCOFF_R_TRL 0x12] ; A(sym-TOC) TOC Relative indirect load.
+
+  ^{:line 380} [^{:val 19} XCOFF_R_TRLA 0x13] ; A(sym-TOC) TOC Rel load address. modifiable inst
+  ^{:line 381} [^{:val 5} XCOFF_R_GL 0x05] ; A(external TOC of sym) Global Linkage
+  ^{:line 382} [^{:val 6} XCOFF_R_TCL 0x06] ; A(local TOC of sym) Local object TOC address
+  ^{:line 383} [^{:val 12} XCOFF_R_RL 0x0C] ; A(sym) Pos indirect load. modifiable instruction
+  ^{:line 384} [^{:val 13} XCOFF_R_RLA 0x0D] ; A(sym) Pos Load Address. modifiable instruction
+  ^{:line 385} [^{:val 15} XCOFF_R_REF 0x0F] ; AL0(sym) Non relocating ref. No garbage collect
+  ^{:line 386} [^{:val 8} XCOFF_R_BA 0x08] ; A(sym) Branch absolute. Cannot modify instruction
+  ^{:line 387} [^{:val 24} XCOFF_R_RBA 0x18] ; A(sym) Branch absolute. modifiable instruction
+  ^{:line 388} [^{:val 10} XCOFF_R_BR 0x0A] ; A(sym-*) Branch rel to self. non modifiable
+  ^{:line 389} [^{:val 26} XCOFF_R_RBR 0x1A] ; A(sym-*) Branch rel to self. modifiable instr
+
+  ^{:line 391} [^{:val 32} XCOFF_R_TLS 0x20] ; General-dynamic reference to TLS symbol
+  ^{:line 392} [^{:val 33} XCOFF_R_TLS_IE 0x21] ; Initial-exec reference to TLS symbol
+  ^{:line 393} [^{:val 34} XCOFF_R_TLS_LD 0x22] ; Local-dynamic reference to TLS symbol
+  ^{:line 394} [^{:val 35} XCOFF_R_TLS_LE 0x23] ; Local-exec reference to TLS symbol
+  ^{:line 395} [^{:val 36} XCOFF_R_TLSM 0x24] ; Module reference to TLS symbol
+  ^{:line 396} [^{:val 37} XCOFF_R_TLSML 0x25] ; Module reference to local (own) module
+
+  ^{:line 398} [^{:val 48} XCOFF_R_TOCU 0x30] ; Relative to TOC - high order bits
+  ^{:line 399} [^{:val 49} XCOFF_R_TOCL 0x31]) ; Relative to TOC - low order bits
+
+
+(go/type XcoffLdStr64 (struct
+    ^{:line 403 :tag uint16} size
+    ^{:line 404 :tag string} name))
+
+
+
+(go/type xcoffFile "xcoffFile is used to build XCOFF file.\n" (struct
+    ^{:line 409 :tag XcoffFileHdr64} xfhdr
+    ^{:line 410 :tag XcoffAoutHdr64} xahdr
+    ^{:line 411 :tag (slice (* XcoffScnHdr64))} sections
+    ^{:line 412 :tag (* XcoffScnHdr64)} sectText
+    ^{:line 413 :tag (* XcoffScnHdr64)} sectData
+    ^{:line 414 :tag (* XcoffScnHdr64)} sectBss
+    ^{:line 415 :tag xcoffStringTable} stringTable
+    ^{:line 416 :tag (map string int16)} sectNameToScnum
+    ^{:line 417 :tag uint64} loaderSize
+    ^{:line 418 :tag int64} symtabOffset ; offset to the start of symbol table
+    ^{:line 419 :tag uint32} symbolCount ; number of symbol table records written
+    ^{:line 420 :tag (slice xcoffSym)} symtabSym ; XCOFF symbols for the symbol table
+    ^{:line 421 :tag (map string int)} dynLibraries ; Dynamic libraries in .loader section. The integer represents its import file number (- 1)
+    ^{:line 422 :tag (slice (* xcoffLoaderSymbol))} loaderSymbols ; symbols inside .loader symbol table
+    ^{:line 423 :tag (slice (* xcoffLoaderReloc))} loaderReloc ; Reloc that must be made inside loader
+    ^{:line 424} sync/Mutex)) ; currently protect loaderReloc
+
+
+
+(go/var "Var used by XCOFF Generation algorithms\n"
+  ^{:line 429} [^xcoffFile xfile])
+
+
+
+(go/type xcoffStringTable "xcoffStringTable is a XCOFF string table.\n" (struct
+    ^{:line 434 :tag (slice string)} strings
+    ^{:line 435 :tag int} stringsLen))
+
+
+
+^{:go/end 442} (go/method size "size returns size of string table t.\n" ^int [^{:tag (* xcoffStringTable)} t]
+  ;; string table starts with 4-byte length at the beginning
+  (+ (.-stringsLen t) 4))
+
+
+
+^{:go/end 450} (go/method add "add adds string str to string table t.\n" ^int [^{:tag (* xcoffStringTable)} t ^string str]
+  (let [off (.size t)]
+    (set! (.-strings t) (append (.-strings t) str))
+    (set! (.-stringsLen t) + (+ (len str) 1)) ; each string will have 0 appended to it
+    ^{:line 449} off))
+
+
+
+^{:go/end 459} (go/method write "write writes string table t into the output file.\n" [^{:tag (* xcoffStringTable)} t ^{:tag (* OutBuf)} out]
+  (.Write32 out (conv uint32 (.size t)))
+  (range [_ s (.-strings t)]
+    (.WriteString out s)
+    (.Write8 out 0)))
+
+
+
+
+^{:go/end 465} (go/method write "write writes XCOFF section sect into the output file.\n" [^{:tag (* XcoffScnHdr64)} sect ^{:tag (* Link)} ctxt]
+  (binary/Write (.-Out ctxt) binary/BigEndian sect)
+  (.Write32 (.-Out ctxt) 0)) ; Add 4 empty bytes at the end to match alignment
+
+
+
+^{:go/end 480} (go/method addSection "addSection adds section to the XCOFF file f.\n" ^{:tag (* XcoffScnHdr64)} [^{:tag (* xcoffFile)} f ^string name ^uint64 addr ^uint64 size ^uint64 fileoff ^uint32 flags]
+  (let [sect (addr ^{:go/breaks [2 4 6 8 10]} (lit XcoffScnHdr64
+          :Spaddr addr
+          :Svaddr addr
+          :Ssize size
+          :Sscnptr fileoff
+          :Sflags flags))]
+
+    (copy (subslice (.-Sname sect)) name) ; copy string to [8]byte
+    (set! (.-sections f) (append (.-sections f) sect))
+    (aset (.-sectNameToScnum f) name (conv int16 (len (.-sections f))))
+    ^{:line 479} sect))
+
+
+
+
+
+^{:go/end 488} (go/method addDwarfSection "addDwarfSection adds a dwarf section to the XCOFF file f.\nThis function is similar to addSection, but Dwarf section names\nmust be modified to conventional names and they are various subtypes.\n" ^{:tag (* XcoffScnHdr64)} [^{:tag (* xcoffFile)} f ^{:tag (* sym/Section)} s]
+  (let [(values newName subtype) (xcoffGetDwarfSubtype (.-Name s))]
+    (.addSection f newName 0 (.-Length s) (- (+ (.-Fileoff (.-Seg s)) (.-Vaddr s)) (.-Vaddr (.-Seg s))) (bit-or STYP_DWARF subtype))))
+
+
+
+
+^{:go/end 515} (go/func xcoffGetDwarfSubtype "xcoffGetDwarfSubtype returns the XCOFF name of the DWARF section str\nand its subtype constant.\n" [^string str] :results [string uint32]
+  (switch str
+    (default
+      (Exitf "unknown DWARF section name for XCOFF: %s" str))
+    (case [".debug_abbrev"]
+      (return ".dwabrev" SSUBTYP_DWABREV))
+    (case [".debug_info"]
+      (return ".dwinfo" SSUBTYP_DWINFO))
+    (case [".debug_frame"]
+      (return ".dwframe" SSUBTYP_DWFRAME))
+    (case [".debug_line"]
+      (return ".dwline" SSUBTYP_DWLINE))
+    (case [".debug_loc"]
+      (return ".dwloc" SSUBTYP_DWLOC))
+    (case [".debug_pubnames"]
+      (return ".dwpbnms" SSUBTYP_DWPBNMS))
+    (case [".debug_pubtypes"]
+      (return ".dwpbtyp" SSUBTYP_DWPBTYP))
+    (case [".debug_ranges"]
+      (return ".dwrnges" SSUBTYP_DWRNGES)))
+
+  ;; never used
+  (return "" 0))
+
+
+
+^{:go/breaks [6] :go/end 538} (go/method getXCOFFscnum "getXCOFFscnum returns the XCOFF section number of a Go section.\n" ^int16 [^{:tag (* xcoffFile)} f ^{:tag (* sym/Section)} sect]
+  (switch (.-Seg sect)
+    (case [(addr Segtext)]
+      (return (aget (.-sectNameToScnum f) ".text")))
+    (case [(addr Segdata)]
+      (when (or (== (.-Name sect) ".noptrbss") (== (.-Name sect) ".bss"))
+        (return (aget (.-sectNameToScnum f) ".bss")))
+
+      (when (== (.-Name sect) ".tbss")
+        (return (aget (.-sectNameToScnum f) ".tbss")))
+
+      (return (aget (.-sectNameToScnum f) ".data")))
+    (case [(addr Segdwarf)]
+      (let [(values name _) (xcoffGetDwarfSubtype (.-Name sect))]
+        (return (aget (.-sectNameToScnum f) name))))
+    (case [(addr Segrelrodata)]
+      (return (aget (.-sectNameToScnum f) ".data"))))
+
+  (Errorf "getXCOFFscnum not implemented for section %s" (.-Name sect))
+  -1)
+
+
+
+
+^{:go/end 554} (go/func Xcoffinit "Xcoffinit initialised some internal value and setups\nalready known header information.\n" [^{:tag (* Link)} ctxt]
+  (set! (.-dynLibraries xfile) (make (map string int)))
+
+  (set! HEADR (conv int32 (Rnd XCOFFHDRRESERVE XCOFFSECTALIGN)))
+  (when (!= @FlagRound -1)
+    (Errorf "-R not available on AIX"))
+
+  (set! @FlagRound XCOFFSECTALIGN)
+  (when (!= @FlagTextAddr -1)
+    (Errorf "-T not available on AIX"))
+
+  (set! @FlagTextAddr (+ (Rnd XCOFFTEXTBASE @FlagRound) (conv int64 HEADR))))
+
+
+;; SYMBOL TABLE
+
+
+(go/type xcoffSymSrcFile "type records C_FILE information needed for genasmsym in XCOFF.\n" (struct
+    ^{:line 560 :tag string} name
+    ^{:line 561 :tag (* XcoffSymEnt64)} file ; Symbol of this C_FILE
+    ^{:line 562 :tag (* XcoffAuxCSect64)} csectAux ; Symbol for the current .csect
+    ^{:line 563 :tag uint64} csectSymNb ; Symbol number for the current .csect
+    ^{:line 564 :tag int64} csectVAStart
+    ^{:line 565 :tag int64} csectVAEnd))
+
+
+(go/var
+  ^{:line 569} [currDwscnoff (make (map string uint64))] ; Needed to create C_DWARF symbols
+  ^{:line 570} [^xcoffSymSrcFile currSymSrcFile]
+  ^{:line 571} [outerSymSize (make (map string int64))])
+
+
+
+
+^{:go/end 611} (go/func xcoffUpdateOuterSize "xcoffUpdateOuterSize stores the size of outer symbols in order to have it\nin the symbol table.\n" [^{:tag (* Link)} ctxt ^int64 size ^sym/SymKind stype]
+  (when (== size 0)
+    (return))
+
+  ;; TODO: use CarrierSymByType
+
+  (let [ldr (.-loader ctxt)]
+    (switch stype
+      (default
+        (Errorf "unknown XCOFF outer symbol for type %s" (.String stype)))
+      (case [sym/SRODATA sym/SRODATARELRO sym/SSTRING])
+      ;; Nothing to do
+      (case [sym/STYPE]
+        ;; runtime.types size must be removed, as it's a real symbol.
+        (let [tsize (.SymSize ldr (.Lookup ldr "runtime.types" 0))]
+          (aset outerSymSize "type:*" (- size tsize))))
+      (case [sym/SGOSTRING]
+        (aset outerSymSize "go:string.*" size))
+      (case [sym/SGOFUNC]
+        (when (not (.DynlinkingGo ctxt))
+          (aset outerSymSize "go:funcdesc" size)))
+
+      (case [sym/SGCBITS]
+        (aset outerSymSize "runtime.gcbits.*" size))
+      (case [sym/SPCLNTAB]
+        ;; go:func.* size must be removed from pclntab,
+        ;; as it's a real symbol. Same for runtime.findfunctab.
+        (let [fsize (.SymSize ldr (.Lookup ldr "go:func.*" 0))
+            ^{:line 604} fft (.Lookup ldr "runtime.findfunctab" 0)]
+          (set! fsize (Rnd fsize (conv int64 (symalign ldr fft))))
+          (let [tsize (.SymSize ldr fft)]
+            (aset outerSymSize "runtime.pclntab" (- size (+ fsize tsize))))))
+      (case [sym/SGCMASK]
+        (aset outerSymSize "runtime.gcmask.*" size)))))
+
+
+
+
+^{:go/end 617} (go/method addSymbol "addSymbol writes a symbol or an auxiliary symbol entry on ctxt.out.\n" [^{:tag (* xcoffFile)} f ^xcoffSym sym]
+  (set! (.-symtabSym f) (append (.-symtabSym f) sym))
+  (inc! (.-symbolCount f)))
+
+
+
+^{:go/end 630} (go/func xcoffAlign "xcoffAlign returns the log base 2 of the symbol's alignment.\n" ^uint8 [^{:tag (* loader/Loader)} ldr ^loader/Sym x ^SymbolType t]
+  (let [align (.SymAlign ldr x)]
+    (when (== align 0)
+      (if (== t TextSym)
+        (set! align (conv int32 Funcalign))
+
+        (set! align (symalign ldr x))))
+
+
+    (logBase2 (conv int align))))
+
+
+
+^{:go/end 635} (go/func logBase2 "logBase2 returns the log in base 2 of a.\n" ^uint8 [^int a]
+  (conv uint8 (- (bits/Len (conv uint a)) 1)))
+
+
+
+
+
+
+
+
+
+
+^{:go/end 750} (go/method writeSymbolNewFile "Write symbols needed when a new file appeared:\n- a C_FILE with one auxiliary entry for its name\n- C_DWARF symbols to provide debug information\n- a C_HIDEXT which will be a csect containing all of its functions\nIt needs several parameters to create .csect symbols such as its entry point and its section number.\n\nCurrently, a new file is in fact a new package. It seems to be OK, but it might change\nin the future.\n" [^{:tag (* xcoffFile)} f ^{:tag (* Link)} ctxt ^string name ^uint64 firstEntry ^int16 extnum]
+  (let [ldr (.-loader ctxt)
+      ;; /* C_FILE */
+      ^{:line 648} s (addr ^{:go/breaks [2 4 6 8 10]} (lit XcoffSymEnt64
+          :Noffset (conv uint32 (.add (.-stringTable f) ".file"))
+          :Nsclass C_FILE
+          :Nscnum N_DEBUG
+          :Ntype 0 ; Go isn't inside predefined language.
+          :Nnumaux 1))]
+
+    (.addSymbol f s)
+    (set! (.-file currSymSrcFile) s)
+
+    ;; Auxiliary entry for file name.
+    (let [auxf (addr ^{:go/breaks [2 4 6]} (lit XcoffAuxFile64
+            :Xoffset (conv uint32 (.add (.-stringTable f) name))
+            :Xftype XFT_FN
+            :Xauxtype _AUX_FILE))]
+
+      (.addSymbol f auxf)
+
+      ;; /* Dwarf */
+      (range [_ sect (.-Sections Segdwarf)]
+        (let [^uint64 dwsize (zero uint64)]
+          (if (== ^{:go/via [Target]} (.-LinkMode ctxt) LinkInternal) (do
+              ;; Find the size of this corresponding package DWARF compilation unit.
+              ;; This size is set during DWARF generation (see dwarf.go).
+              (set! dwsize (getDwsectCUSize (.-Name sect) name))
+              ;; .debug_abbrev is common to all packages and not found with the previous function
+              (when (== (.-Name sect) ".debug_abbrev")
+                (set! dwsize (conv uint64 (.SymSize ldr (.-Sym sect))))))
+
+
+
+            ;; There is only one .FILE with external linking.
+            (set! dwsize (.-Length sect)))
+
+
+          ;; get XCOFF name
+          (let [(values name _) (xcoffGetDwarfSubtype (.-Name sect))
+              ^{:line 685} s (addr ^{:go/breaks [2 4 6 8 10]} (lit XcoffSymEnt64
+                  :Nvalue (aget currDwscnoff (.-Name sect))
+                  :Noffset (conv uint32 (.add (.-stringTable f) name))
+                  :Nsclass C_DWARF
+                  :Nscnum (.getXCOFFscnum f sect)
+                  :Nnumaux 1))]
+
+
+            (when (== (.-csectAux currSymSrcFile) nil)
+              ;; Dwarf relocations need the symbol number of .dw* symbols.
+              ;; It doesn't need to know it for each package, one is enough.
+              ;; currSymSrcFile.csectAux == nil means first package.
+              (.SetSymDynid ldr (.-Sym sect) (conv int32 (.-symbolCount f)))
+
+              (when (and (== (.-Name sect) ".debug_frame") (!= ^{:go/via [Target]} (.-LinkMode ctxt) LinkExternal))
+                ;; CIE size must be added to the first package.
+                (set! dwsize + 48)))
+
+
+
+            (.addSymbol f s)
+
+            ;; update the DWARF section offset in this file
+            (when (!= (.-Name sect) ".debug_abbrev")
+              (set! (aget currDwscnoff (.-Name sect)) + dwsize))
+
+
+            ;; Auxiliary dwarf section
+            (let [auxd (addr ^{:go/breaks [2 4]} (lit XcoffAuxDWARF64
+                    :Xscnlen dwsize
+                    :Xauxtype _AUX_SECT))]
+
+
+              (.addSymbol f auxd)))))
+
+
+      ;; /* .csect */
+      ;; Check if extnum is in text.
+      ;; This is temporary and only here to check if this algorithm is correct.
+      (when (!= extnum 1)
+        (Exitf "XCOFF symtab: A new file was detected with its first symbol not in .text"))
+
+
+      (set! (.-csectSymNb currSymSrcFile) (conv uint64 (.-symbolCount f)))
+
+      ;; No offset because no name
+      (set! s (addr ^{:go/breaks [2 4 6 8 10]} (lit XcoffSymEnt64
+            :Nvalue firstEntry
+            :Nscnum extnum
+            :Nsclass C_HIDEXT
+            :Ntype 0 ; check visibility ?
+            :Nnumaux 1)))
+
+      (.addSymbol f s)
+
+      (let [aux (addr ^{:go/breaks [2 4 6]} (lit XcoffAuxCSect64
+              :Xsmclas XMC_PR
+              :Xsmtyp (bit-or XTY_SD (<< (logBase2 Funcalign) 3))
+              :Xauxtype _AUX_CSECT))]
+
+        (.addSymbol f aux)
+
+        (set! (.-csectAux currSymSrcFile) aux)
+        (set! (.-csectVAStart currSymSrcFile) (conv int64 firstEntry))
+        (set! (.-csectVAEnd currSymSrcFile) (conv int64 firstEntry))))))
+
+
+
+
+
+^{:go/end 774} (go/method updatePreviousFile "Update values for the previous package.\n  - Svalue of the C_FILE symbol: if it is the last one, this Svalue must be -1\n  - Xsclen of the csect symbol.\n" [^{:tag (* xcoffFile)} f ^{:tag (* Link)} ctxt ^bool last]
+  ;; first file
+  (when (== (.-file currSymSrcFile) nil)
+    (return))
+
+
+  ;; Update C_FILE
+  (let [cfile (.-file currSymSrcFile)]
+    (if last
+      (set! (.-Nvalue cfile) 0xFFFFFFFFFFFFFFFF)
+
+      (set! (.-Nvalue cfile) (conv uint64 (.-symbolCount f))))
+
+
+    ;; update csect scnlen in this auxiliary entry
+    (let [aux (.-csectAux currSymSrcFile)
+        ^{:line 771} csectSize (- (.-csectVAEnd currSymSrcFile) (.-csectVAStart currSymSrcFile))]
+      (set! (.-Xscnlenlo aux) (conv uint32 (bit-and csectSize 0xFFFFFFFF)))
+      (set! (.-Xscnlenhi aux) (conv uint32 (>> csectSize 32))))))
+
+
+
+
+
+^{:go/end 867} (go/method writeSymbolFunc "Write symbol representing a .text function.\nThe symbol table is split with C_FILE corresponding to each package\nand not to each source file as it should be.\n" ^{:tag (slice xcoffSym)} [^{:tag (* xcoffFile)} f ^{:tag (* Link)} ctxt ^loader/Sym x]
+  ;; New XCOFF symbols which will be written.
+  (let [syms (lit (slice xcoffSym))
+
+      ;; Check if a new file is detected.
+      ^{:line 784} ldr (.-loader ctxt)
+      ^{:line 785} name (.SymName ldr x)]
+    (cond (or (strings/Contains name "-tramp") (strings/HasPrefix name "runtime.text.")) (do)
+      ;; Trampoline don't have a FILE so there are considered
+      ;; in the current file.
+      ;; Same goes for runtime.text.X symbols.
+      (== (.SymPkg ldr x) "") ; Undefined global symbol
+      ;; If this happens, the algorithm must be redone.
+      (when (!= (.-name currSymSrcFile) "")
+        (Exitf "undefined global symbol found inside another file")) :else
+
+      (do
+        ;; Current file has changed. New C_FILE, C_DWARF, etc must be generated.
+        (when (!= (.-name currSymSrcFile) (.SymPkg ldr x))
+          (if (== ^{:go/via [Target]} (.-LinkMode ctxt) LinkInternal) (do
+              ;; update previous file values
+              (.updatePreviousFile xfile ctxt false)
+              (set! (.-name currSymSrcFile) (.SymPkg ldr x))
+              (.writeSymbolNewFile f ctxt (.SymPkg ldr x) (conv uint64 (.SymValue ldr x)) (.getXCOFFscnum xfile (.SymSect ldr x))))
+            (do
+              ;; With external linking, ld will crash if there is several
+              ;; .FILE and DWARF debugging enable, somewhere during
+              ;; the relocation phase.
+              ;; Therefore, all packages are merged under a fake .FILE
+              ;; "go_functions".
+              ;; TODO(aix); remove once ld has been fixed or the triggering
+              ;; relocation has been found and fixed.
+              (when (== (.-name currSymSrcFile) "")
+                (set! (.-name currSymSrcFile) (.SymPkg ldr x))
+                (.writeSymbolNewFile f ctxt "go_functions" (conv uint64 (.SymValue ldr x)) (.getXCOFFscnum xfile (.SymSect ldr x)))))))))
+
+
+
+
+
+
+    (set! name (.SymExtname ldr x))
+    (set! name (mangleABIName ctxt ldr x name))
+
+    (let [s (addr ^{:go/breaks [2 4 6 8 10 12]} (lit XcoffSymEnt64
+            :Nsclass C_EXT
+            :Noffset (conv uint32 (.add (.-stringTable xfile) name))
+            :Nvalue (conv uint64 (.SymValue ldr x))
+            :Nscnum (.getXCOFFscnum f (.SymSect ldr x))
+            :Ntype SYM_TYPE_FUNC
+            :Nnumaux 2))]
+
+
+      (when (or (.IsFileLocal ldr x) (.AttrVisibilityHidden ldr x) (.AttrLocal ldr x) (.IsContentHashed ldr x))
+        (set! (.-Nsclass s) C_HIDEXT))
+
+
+      (.SetSymDynid ldr x (conv int32 (.-symbolCount xfile)))
+      (set! syms (append syms s))
+
+      ;; Keep track of the section size by tracking the VA range. Individual
+      ;; alignment differences may introduce a few extra bytes of padding
+      ;; which are not fully accounted for by ldr.SymSize(x).
+      (let [sv (+ (.SymValue ldr x) (.SymSize ldr x))]
+        (when (< (.-csectVAEnd currSymSrcFile) sv)
+          (set! (.-csectVAEnd currSymSrcFile) sv))
+
+
+        ;; create auxiliary entries
+        (let [a2 (addr ^{:go/breaks [2 4 6 8]} (lit XcoffAuxFcn64
+                :Xfsize (conv uint32 (.SymSize ldr x))
+                :Xlnnoptr 0 ; TODO
+                :Xendndx (+ (.-symbolCount xfile) 3) ; this symbol + 2 aux entries
+                :Xauxtype _AUX_FCN))]
+
+          (set! syms (append syms a2))
+
+          (let [a4 (addr ^{:go/breaks [2 4 6 8 10]} (lit XcoffAuxCSect64
+                  :Xscnlenlo (conv uint32 (bit-and (.-csectSymNb currSymSrcFile) 0xFFFFFFFF))
+                  :Xscnlenhi (conv uint32 (>> (.-csectSymNb currSymSrcFile) 32))
+                  :Xsmclas XMC_PR ; Program Code
+                  :Xsmtyp XTY_LD ; label definition (based on C)
+                  :Xauxtype _AUX_CSECT))]
+
+            (set! (.-Xsmtyp a4) bit-or (<< (xcoffAlign ldr x TextSym) 3))
+
+            (set! syms (append syms a4))
+            ^{:line 866} syms))))))
+
+
+
+^{:go/end 1032} (go/func putaixsym "put function used by genasmsym to write symbol table.\n" [^{:tag (* Link)} ctxt ^loader/Sym x ^SymbolType t]
+  ;; All XCOFF symbols generated by this GO symbols
+  ;; Can be a symbol entry or an auxiliary entry
+  (let [syms (lit (slice xcoffSym))
+
+      ^{:line 875} ldr (.-loader ctxt)
+      ^{:line 876} name (.SymName ldr x)]
+    (when (== t UndefinedSym)
+      (set! name (.SymExtname ldr x)))
+
+
+    (switch t
+      (default
+        (return))
+
+      (case [TextSym]
+        (if (or (!= (.SymPkg ldr x) "") (strings/Contains name "-tramp") (strings/HasPrefix name "runtime.text."))
+          ;; Function within a file
+          (set! syms (.writeSymbolFunc xfile ctxt x))
+          (do
+            ;; Only runtime.text and runtime.etext come through this way
+            (when (and (!= name "runtime.text") (!= name "runtime.etext") (!= name "go:buildid"))
+              (Exitf "putaixsym: unknown text symbol %s" name))
+
+            (let [s (addr ^{:go/breaks [2 4 6 8 10 12]} (lit XcoffSymEnt64
+                    :Nsclass C_HIDEXT
+                    :Noffset (conv uint32 (.add (.-stringTable xfile) name))
+                    :Nvalue (conv uint64 (.SymValue ldr x))
+                    :Nscnum (.getXCOFFscnum xfile (.SymSect ldr x))
+                    :Ntype SYM_TYPE_FUNC
+                    :Nnumaux 1))]
+
+              (.SetSymDynid ldr x (conv int32 (.-symbolCount xfile)))
+              (set! syms (append syms s))
+
+              (let [size (conv uint64 (.SymSize ldr x))
+                  ^{:line 906} a4 (addr ^{:go/breaks [2 4 6 8 10]} (lit XcoffAuxCSect64
+                      :Xauxtype _AUX_CSECT
+                      :Xscnlenlo (conv uint32 (bit-and size 0xFFFFFFFF))
+                      :Xscnlenhi (conv uint32 (>> size 32))
+                      :Xsmclas XMC_PR
+                      :Xsmtyp XTY_SD))]
+
+                (set! (.-Xsmtyp a4) bit-or (<< (xcoffAlign ldr x TextSym) 3))
+                (set! syms (append syms a4)))))))
+
+
+      (case [DataSym BSSSym]
+        (let [s (addr ^{:go/breaks [2 4 6 8 10]} (lit XcoffSymEnt64
+                :Nsclass C_EXT
+                :Noffset (conv uint32 (.add (.-stringTable xfile) name))
+                :Nvalue (conv uint64 (.SymValue ldr x))
+                :Nscnum (.getXCOFFscnum xfile (.SymSect ldr x))
+                :Nnumaux 1))]
+
+
+          (when (or (.IsFileLocal ldr x) (.AttrVisibilityHidden ldr x) (.AttrLocal ldr x))
+            ;; There is more symbols in the case of a global data
+            ;; which are related to the assembly generated
+            ;; to access such symbols.
+            ;; But as Golang as its own way to check if a symbol is
+            ;; global or local (the capital letter), we don't need to
+            ;; implement them yet.
+            (set! (.-Nsclass s) C_HIDEXT))
+
+
+          (.SetSymDynid ldr x (conv int32 (.-symbolCount xfile)))
+          (set! syms (append syms s))
+
+          ;; Create auxiliary entry
+
+          ;; Normally, size should be the size of csect containing all
+          ;; the data and bss symbols of one file/package.
+          ;; However, it's easier to just have a csect for each symbol.
+          ;; It might change
+          (let [size (conv uint64 (.SymSize ldr x))
+              ^{:line 946} a4 (addr ^{:go/breaks [2 4 6]} (lit XcoffAuxCSect64
+                  :Xauxtype _AUX_CSECT
+                  :Xscnlenlo (conv uint32 (bit-and size 0xFFFFFFFF))
+                  :Xscnlenhi (conv uint32 (>> size 32))))]
+
+
+            (if [ty (.SymType ldr x)] (and (>= ty sym/SSTRING) (<= ty sym/SPCLNTAB))
+              (if (and ^{:go/via [Target]} (.IsExternal ctxt) (strings/HasPrefix (.-Name (.SymSect ldr x)) ".data.rel.ro"))
+                ;; During external linking, read-only datas with relocation
+                ;; must be in .data.
+                (set! (.-Xsmclas a4) XMC_RW)
+
+                ;; Read only data
+                (set! (.-Xsmclas a4) XMC_RO))
+
+              (cond (and (strings/HasPrefix (.SymName ldr x) "TOC.") ^{:go/via [Target]} (.IsExternal ctxt)) ; /*ty == sym.SDATA &&*/
+                (set! (.-Xsmclas a4) XMC_TC)
+                (== (.SymName ldr x) "TOC")
+                (set! (.-Xsmclas a4) XMC_TC0) :else
+
+                (set! (.-Xsmclas a4) XMC_RW)))
+
+            (if (== t DataSym)
+              (set! (.-Xsmtyp a4) bit-or XTY_SD)
+
+              (set! (.-Xsmtyp a4) bit-or XTY_CM))
+
+
+            (set! (.-Xsmtyp a4) bit-or (<< (xcoffAlign ldr x t) 3))
+
+            (set! syms (append syms a4)))))
+
+      (case [UndefinedSym]
+        (when [ty (.SymType ldr x)] (and (!= ty sym/SDYNIMPORT) (!= ty sym/SHOSTOBJ) (!= ty sym/SUNDEFEXT))
+          (return))
+
+        (let [s (addr ^{:go/breaks [2 4 6]} (lit XcoffSymEnt64
+                :Nsclass C_EXT
+                :Noffset (conv uint32 (.add (.-stringTable xfile) name))
+                :Nnumaux 1))]
+
+          (.SetSymDynid ldr x (conv int32 (.-symbolCount xfile)))
+          (set! syms (append syms s))
+
+          (let [a4 (addr ^{:go/breaks [2 4 6]} (lit XcoffAuxCSect64
+                  :Xauxtype _AUX_CSECT
+                  :Xsmclas XMC_DS
+                  :Xsmtyp (bit-or XTY_ER XTY_IMP)))]
+
+
+            (when (== (.SymName ldr x) "__n_pthreads")
+              ;; Currently, all imported symbols made by cgo_import_dynamic are
+              ;; syscall functions, except __n_pthreads which is a variable.
+              ;; TODO(aix): Find a way to detect variables imported by cgo.
+              (set! (.-Xsmclas a4) XMC_RW))
+
+
+            (set! syms (append syms a4)))))
+
+      (case [TLSSym]
+        (let [s (addr ^{:go/breaks [2 4 6 8 10]} (lit XcoffSymEnt64
+                :Nsclass C_EXT
+                :Noffset (conv uint32 (.add (.-stringTable xfile) name))
+                :Nscnum (.getXCOFFscnum xfile (.SymSect ldr x))
+                :Nvalue (conv uint64 (.SymValue ldr x))
+                :Nnumaux 1))]
+
+
+          (.SetSymDynid ldr x (conv int32 (.-symbolCount xfile)))
+          (set! syms (append syms s))
+
+          (let [size (conv uint64 (.SymSize ldr x))
+              ^{:line 1018} a4 (addr ^{:go/breaks [2 4 6 8 10]} (lit XcoffAuxCSect64
+                  :Xauxtype _AUX_CSECT
+                  :Xsmclas XMC_UL
+                  :Xsmtyp XTY_CM
+                  :Xscnlenlo (conv uint32 (bit-and size 0xFFFFFFFF))
+                  :Xscnlenhi (conv uint32 (>> size 32))))]
+
+
+            (set! syms (append syms a4))))))
+
+
+    (range [_ s syms]
+      (.addSymbol xfile s))))
+
+
+
+
+
+
+^{:go/end 1142} (go/method asmaixsym "Generate XCOFF Symbol table.\nIt will be written in out file in Asmbxcoff, because it must be\nat the very end, especially after relocation sections which needs symbols' index.\n" [^{:tag (* xcoffFile)} f ^{:tag (* Link)} ctxt]
+  (let [ldr (.-loader ctxt)]
+    ;; Get correct size for symbols wrapping others symbols like go.string.*
+    ;; sym.Size can be used directly as the symbols have already been written.
+    (range [name size outerSymSize]
+      (let [sym (.Lookup ldr name 0)]
+        (if (== sym 0)
+          (Errorf "unknown outer symbol with name %s" name)
+
+          (let [s (.MakeSymbolUpdater ldr sym)]
+            (.SetSize s size)))))
+
+
+
+    ;; These symbols won't show up in the first loop below because we
+    ;; skip sym.STEXT symbols. Normal sym.STEXT symbols are emitted by walking textp.
+    (let [s (.Lookup ldr "runtime.text" 0)]
+      (when (.IsText (.SymType ldr s))
+        ;; We've already included this symbol in ctxt.Textp on AIX with external linker.
+        ;; See data.go:/textaddress
+        (when (not ^{:go/via [Target]} (.IsExternal ctxt))
+          (putaixsym ctxt s TextSym)))
+
+
+
+      (let [n 1]
+        ;; Generate base addresses for all text sections if there are multiple
+        (range [_ sect (subslice (.-Sections Segtext) 1)]
+          (when (or (!= (.-Name sect) ".text") ^{:go/via [Target]} (.IsExternal ctxt))
+            ;; On AIX, runtime.text.X are symbols already in the symtab.
+            (break))
+
+          (set! s (.Lookup ldr (fmt/Sprintf "runtime.text.%d" n) 0))
+          (when (== s 0)
+            (break))
+
+          (when (.IsText (.SymType ldr s))
+            (putaixsym ctxt s TextSym))
+
+          (inc! n))
+
+
+        (set! s (.Lookup ldr "runtime.etext" 0))
+        (when (.IsText (.SymType ldr s))
+          ;; We've already included this symbol in ctxt.Textp
+          ;; on AIX with external linker.
+          ;; See data.go:/textaddress
+          (when (not ^{:go/via [Target]} (.IsExternal ctxt))
+            (putaixsym ctxt s TextSym)))
+
+
+
+        (let [shouldBeInSymbolTable ^{:go/breaks [[4 1096]] :go/end 1097} (fn ^bool [^loader/Sym s ^string name]
+              (when (.AttrNotInSymbolTable ldr s)
+                (return false))
+
+              (when (and ^:go/paren (or (== name "") (== (aget name 0) \.)) (not (.IsFileLocal ldr s)) (!= name ".TOC."))
+                (return false))
+
+              true)]
+
+
+          (for [(values s nsym) (values (conv loader/Sym 1) (conv loader/Sym (.NSym ldr)))] (< s nsym) (inc! s)
+            (when (not (shouldBeInSymbolTable s (.SymName ldr s)))
+              (continue))
+
+            (let [st (.SymType ldr s)]
+              (switch
+                (case [(== st sym/STLSBSS)]
+                  (when ^{:go/via [Target]} (.IsExternal ctxt)
+                    (putaixsym ctxt s TLSSym)))
+
+
+                (case [(== st sym/SBSS) (== st sym/SNOPTRBSS) (== st sym/SGCMASK) (== st sym/SLIBFUZZER_8BIT_COUNTER) (== st sym/SCOVERAGE_COUNTER)]
+                  (when (.AttrReachable ldr s)
+                    (let [data (.Data ldr s)]
+                      (when (> (len data) 0)
+                        (.Errorf ldr s "should not be bss (size=%d type=%v special=%v)" (len data) (.SymType ldr s) (.AttrSpecial ldr s)))
+
+                      (putaixsym ctxt s BSSSym))))
+
+
+                (case [(and (>= st sym/SELFRXSECT) (< st sym/SFirstUnallocated))] ; data sections handled in dodata
+                  (when (.AttrReachable ldr s)
+                    (putaixsym ctxt s DataSym)))
+
+
+                (case [(== st sym/SUNDEFEXT)]
+                  (putaixsym ctxt s UndefinedSym))
+
+                (case [(== st sym/SDYNIMPORT)]
+                  (when (.AttrReachable ldr s)
+                    (putaixsym ctxt s UndefinedSym))))))
+
+
+
+
+          (range [_ s (.-Textp ctxt)]
+            (putaixsym ctxt s TextSym))
+
+
+          (when (!= (.-Debugvlog ctxt) 0)
+            (.Logf ctxt "symsize = %d\n" (conv uint32 symSize)))
+
+          (.updatePreviousFile xfile ctxt true))))))
+
+
+^{:go/end 1164} (go/method genDynSym [^{:tag (* xcoffFile)} f ^{:tag (* Link)} ctxt]
+  (let [ldr (.-loader ctxt)
+      ^{:line 1146 :tag (slice loader/Sym)} dynsyms (zero (slice loader/Sym))]
+    (for [s (conv loader/Sym 1)] (< s (conv loader/Sym (.NSym ldr))) (inc! s)
+      (when (not (.AttrReachable ldr s))
+        (continue))
+
+      (when [t (.SymType ldr s)] (and (!= t sym/SHOSTOBJ) (!= t sym/SDYNIMPORT))
+        (continue))
+
+      (set! dynsyms (append dynsyms s)))
+
+
+    (range [_ s dynsyms]
+      (.adddynimpsym f ctxt s)
+
+      (when [(values _ ok) (aget (.-dynLibraries f) (.SymDynimplib ldr s))] (not ok)
+        (aset (.-dynLibraries f) (.SymDynimplib ldr s) (len (.-dynLibraries f)))))))
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 1217} (go/method adddynimpsym "(*xcoffFile)adddynimpsym adds the dynamic symbol \"s\" to a XCOFF file.\nA new symbol named s.Extname() is created to be the actual dynamic symbol\nin the .loader section and in the symbol table as an External Reference.\nThe symbol \"s\" is transformed to SXCOFFTOC to end up in .data section.\nHowever, there is no writing protection on those symbols and\nit might need to be added.\nTODO(aix): Handles dynamic symbols without library.\n" [^{:tag (* xcoffFile)} f ^{:tag (* Link)} ctxt ^loader/Sym s]
+  ;; Check that library name is given.
+  ;; Pattern is already checked when compiling.
+  (let [ldr (.-loader ctxt)]
+    (when (and ^{:go/via [Target]} (.IsInternal ctxt) (== (.SymDynimplib ldr s) ""))
+      (.Errorf ctxt s "imported symbol must have a given library"))
+
+
+    (let [sb (.MakeSymbolUpdater ldr s)]
+      (.SetReachable sb true)
+      (.SetType sb sym/SXCOFFTOC)
+
+      ;; Create new dynamic symbol
+      (let [extsym (.CreateSymForUpdate ldr (.SymExtname ldr s) 0)]
+        (.SetType extsym sym/SDYNIMPORT)
+        (.SetDynimplib extsym (.SymDynimplib ldr s))
+        (.SetExtname extsym (.SymExtname ldr s))
+        (.SetDynimpvers extsym (.SymDynimpvers ldr s))
+
+        ;; Add loader symbol
+        (let [lds (addr ^{:go/breaks [2 4 6]} (lit xcoffLoaderSymbol
+                :sym (.Sym extsym)
+                :smtype XTY_IMP
+                :smclas XMC_DS))]
+
+          (when (== (.SymName ldr s) "__n_pthreads")
+            ;; Currently, all imported symbols made by cgo_import_dynamic are
+            ;; syscall functions, except __n_pthreads which is a variable.
+            ;; TODO(aix): Find a way to detect variables imported by cgo.
+            (set! (.-smclas lds) XMC_RW))
+
+          (set! (.-loaderSymbols f) (append (.-loaderSymbols f) lds))
+
+          ;; Relocation to retrieve the external address
+          (.AddBytes sb (make (slice byte) 8))
+          (let [(values r _) (.AddRel sb objabi/R_ADDR)]
+            (.SetSym r (.Sym extsym))
+            ^{:go/via [Reloc]} (.SetSiz r (conv uint8 (.-PtrSize ^{:go/via [Target]} (.-Arch ctxt))))))))))
+;; TODO: maybe this could be
+;; sb.SetSize(0)
+;; sb.SetData(nil)
+;; sb.AddAddr(ctxt.Arch, extsym.Sym())
+;; If the size is not 0 to begin with, I don't think the added 8 bytes
+;; of zeros are necessary.
+
+
+
+
+^{:go/end 1280} (go/func Xcoffadddynrel "Xcoffadddynrel adds a dynamic relocation in a XCOFF file.\nThis relocation will be made by the loader.\n" ^bool [^{:tag (* Target)} target ^{:tag (* loader/Loader)} ldr ^{:tag (* ArchSyms)} syms ^loader/Sym s ^loader/Reloc r ^int rIdx]
+  (when (.IsExternal target)
+    (return true))
+
+  (when (<= (.SymType ldr s) sym/SPCLNTAB)
+    (.Errorf ldr s "cannot have a relocation to %s in a text section symbol" (.SymName ldr (.Sym r)))
+    (return false))
+
+
+  ^{:go/breaks [7]} (let [xldr (addr ^{:go/breaks [2 4]} (lit xcoffLoaderReloc
+          :sym s
+          :roff ^{:go/via [Reloc]} (.Off r)))
+
+      ^{:line 1234} targ (.Sym r)
+      ^{:line 1235 :tag sym/SymKind} targType (zero sym/SymKind)]
+    (when (!= targ 0)
+      (set! targType (.SymType ldr targ)))
+
+
+    (switch (.Type r)
+      (default
+        (.Errorf ldr s "unexpected .loader relocation to symbol: %s (type: %s)" (.SymName ldr targ) (.String (.Type r)))
+        (return false))
+      (case [objabi/R_ADDR]
+        (if (and (== (.SymType ldr s) sym/SXCOFFTOC) (== targType sym/SDYNIMPORT))
+          ;; Imported symbol relocation
+          (range [i dynsym (.-loaderSymbols xfile)]
+            (when (== (.SymName ldr (.-sym dynsym)) (.SymName ldr targ))
+              (set! (.-symndx xldr) (conv int32 (+ i 3))) ; +3 because of 3 section symbols
+              (break)))
+
+
+          (if [t (.SymType ldr s)] (or (.IsDATA t) (.IsNOPTRDATA t) (== t sym/SBUILDINFO) (== t sym/SXCOFFTOC) (== t sym/SMODULEDATA))
+            (switch (.-Seg (.SymSect ldr targ))
+              (default
+                (.Errorf ldr s "unknown segment for .loader relocation with symbol %s" (.SymName ldr targ)))
+              (case [(addr Segtext)])
+              (case [(addr Segrodata)]
+                (set! (.-symndx xldr) 0)) ; .text
+              (case [(addr Segdata)]
+                (if (or (== targType sym/SBSS) (== targType sym/SNOPTRBSS) (== targType sym/SGCMASK))
+                  (set! (.-symndx xldr) 2) ; .bss
+
+                  (set! (.-symndx xldr) 1)))) ; .data
+
+
+
+            (do
+              (.Errorf ldr s "unexpected type for .loader relocation R_ADDR for symbol %s: %s to %s" (.SymName ldr targ) (.SymType ldr s) (.SymType ldr targ))
+              (return false))))
+
+
+        (set! (.-rtype xldr) (+ (<< 0x3F 8) XCOFF_R_POS))))
+
+
+    ^{:go/via [Mutex]} (.Lock xfile)
+    (set! (.-loaderReloc xfile) (append (.-loaderReloc xfile) xldr))
+    ^{:go/via [Mutex]} (.Unlock xfile)
+    true))
+
+
+^{:go/end 1341} (go/method doxcoff [^{:tag (* Link)} ctxt]
+  (let [ldr (.-loader ctxt)
+
+      ;; TOC
+      ^{:line 1286} toc (.CreateSymForUpdate ldr "TOC" 0)]
+    (.SetType toc sym/SXCOFFTOC)
+    (.SetVisibilityHidden toc true)
+
+    ;; Add entry point to .loader symbols.
+    (let [ep (.Lookup ldr @flagEntrySymbol 0)]
+      (when (or (== ep 0) (not (.AttrReachable ldr ep)))
+        (Exitf "wrong entry point"))
+
+
+      (set! (.-loaderSymbols xfile) (append (.-loaderSymbols xfile) (addr ^{:go/breaks [2 4 6]} (lit xcoffLoaderSymbol
+              :sym ep
+              :smtype (bit-or XTY_ENT XTY_SD)
+              :smclas XMC_DS))))
+
+
+      (.genDynSym xfile ctxt)
+
+      (for [s (conv loader/Sym 1)] (< s (conv loader/Sym (.NSym ldr))) (inc! s)
+        (when (strings/HasPrefix (.SymName ldr s) "TOC.")
+          (let [sb (.MakeSymbolUpdater ldr s)]
+            (.SetType sb sym/SXCOFFTOC))))
+
+
+
+      (when ^{:go/via [Target]} (.IsExternal ctxt)
+        ;; Change rt0_go name to match name in runtime/cgo:main().
+        (let [rt0 (.Lookup ldr "runtime.rt0_go" 0)]
+          (.SetSymExtname ldr rt0 "runtime_rt0_go")
+
+          (let [nsym (conv loader/Sym (.NSym ldr))]
+            (for [s (conv loader/Sym 1)] (< s nsym) (inc! s)
+              (when (not (.AttrCgoExport ldr s))
+                (continue))
+
+              (when (.IsFileLocal ldr s)
+                (panic "cgo_export on static symbol"))
+
+
+              (when (.IsText (.SymType ldr s))
+                ;; On AIX, an exported function must have two symbols:
+                ;; - a .text symbol which must start with a ".".
+                ;; - a .data symbol which is a function descriptor.
+                (let [name (.SymExtname ldr s)]
+                  (.SetSymExtname ldr s (+ "." name))
+
+                  (let [desc (.MakeSymbolUpdater ldr (.CreateExtSym ldr name 0))]
+                    (.SetReachable desc true)
+                    (.SetType desc sym/SNOPTRDATA)
+                    (.AddAddr desc ^{:go/via [Target]} (.-Arch ctxt) s)
+                    (.AddAddr desc ^{:go/via [Target]} (.-Arch ctxt) (.Sym toc))
+                    (.AddUint64 desc ^{:go/via [Target]} (.-Arch ctxt) 0)))))))))))
+
+
+
+
+
+;; Loader section
+;; Currently, this section is created from scratch when assembling the XCOFF file
+;; according to information retrieved in xfile object.
+
+
+^{:go/end 1350} (go/func Loaderblk "Create loader section and returns its size.\n" [^{:tag (* Link)} ctxt ^uint64 off]
+  (.writeLdrScn xfile ctxt off))
+
+
+^{:go/end 1521} (go/method writeLdrScn [^{:tag (* xcoffFile)} f ^{:tag (* Link)} ctxt ^uint64 globalOff]
+  (let [^{:tag (slice (* XcoffLdSym64))} symtab (zero (slice (* XcoffLdSym64)))
+      ^{:line 1354 :tag (slice (* XcoffLdStr64))} strtab (zero (slice (* XcoffLdStr64)))
+      ^{:line 1355 :tag (slice (* XcoffLdImportFile64))} importtab (zero (slice (* XcoffLdImportFile64)))
+      ^{:line 1356 :tag (slice (* XcoffLdRel64))} reloctab (zero (slice (* XcoffLdRel64)))
+      ^{:line 1357 :tag (slice (* XcoffLdRel64))} dynimpreloc (zero (slice (* XcoffLdRel64)))
+
+      ;; As the string table is updated in any loader subsection,
+      ;;  its length must be computed at the same time.
+      ^{:line 1361} stlen (conv uint32 0)
+
+      ;; Loader Header
+      ^{:line 1364} hdr (addr ^{:go/breaks [2 4]} (lit XcoffLdHdr64
+          :Lversion 2
+          :Lsymoff LDHDRSZ_64))
+
+
+      ^{:line 1369} ldr (.-loader ctxt)]
+    ;; /* Symbol table */
+    (range [_ s (.-loaderSymbols f)]
+      (let [lds (addr ^{:go/breaks [2 4 6]} (lit XcoffLdSym64
+              :Loffset (+ stlen 2)
+              :Lsmtype (.-smtype s)
+              :Lsmclas (.-smclas s)))
+
+          ^{:line 1377} sym (.-sym s)]
+        (switch (.-smtype s)
+          (default
+            (.Errorf ldr sym "unexpected loader symbol type: 0x%x" (.-smtype s)))
+          (case [(bit-or XTY_ENT XTY_SD)]
+            (set! (.-Lvalue lds) (conv uint64 (.SymValue ldr sym)))
+            (set! (.-Lscnum lds) (.getXCOFFscnum f (.SymSect ldr sym))))
+          (case [XTY_IMP]
+            (set! (.-Lifile lds) (conv int32 (+ (aget (.-dynLibraries f) (.SymDynimplib ldr sym)) 1)))))
+
+        (let [ldstr (addr ^{:go/breaks [2 4]} (lit XcoffLdStr64
+                :size (conv uint16 (+ (len (.SymName ldr sym)) 1)) ; + null terminator
+                :name (.SymName ldr sym)))]
+
+          (set! stlen + (conv uint32 (+ 2 (.-size ldstr)))) ; 2 = sizeof ldstr.size
+          (set! symtab (append symtab lds))
+          (set! strtab (append strtab ldstr)))))
+
+
+
+    (set! (.-Lnsyms hdr) (conv int32 (len symtab)))
+    (set! (.-Lrldoff hdr) (+ (.-Lsymoff hdr) (conv uint64 (* 24 (.-Lnsyms hdr))))) ; 24 = sizeof one symbol
+    (let [off (.-Lrldoff hdr)] ; current offset is the same of reloc offset
+
+      ;; /* Reloc */
+      ;; Ensure deterministic order
+      (sort/Slice (.-loaderReloc f) ^{:go/end 1415} (fn ^bool [^int i ^int j]
+          (let [(values r1 r2) (values (aget (.-loaderReloc f) i) (aget (.-loaderReloc f) j))]
+            (when (!= (.-sym r1) (.-sym r2))
+              (return (< (.-sym r1) (.-sym r2))))
+
+            (when (!= (.-roff r1) (.-roff r2))
+              (return (< (.-roff r1) (.-roff r2))))
+
+            (when (!= (.-rtype r1) (.-rtype r2))
+              (return (< (.-rtype r1) (.-rtype r2))))
+
+            (< (.-symndx r1) (.-symndx r2)))))
+
+
+      (let [ep (.Lookup ldr @flagEntrySymbol 0)
+          ^{:line 1418} xldr (addr ^{:go/breaks [2 4 6 8]} (lit XcoffLdRel64
+              :Lvaddr (conv uint64 (.SymValue ldr ep))
+              :Lrtype 0x3F00
+              :Lrsecnm (.getXCOFFscnum f (.SymSect ldr ep))
+              :Lsymndx 0))]
+
+        (set! off + 16)
+        (set! reloctab (append reloctab xldr))
+
+        (set! off + (conv uint64 (* 16 (len (.-loaderReloc f)))))
+        (range [_ r (.-loaderReloc f)]
+          (let [symp (.-sym r)]
+            (when (== symp 0)
+              (panic "unexpected 0 sym value"))
+
+            (set! xldr (addr ^{:go/breaks [2 4 6]} (lit XcoffLdRel64
+                  :Lvaddr (conv uint64 (+ (.SymValue ldr symp) (conv int64 (.-roff r))))
+                  :Lrtype (.-rtype r)
+                  :Lsymndx (.-symndx r))))
+
+
+            (when (!= (.SymSect ldr symp) nil)
+              (set! (.-Lrsecnm xldr) (.getXCOFFscnum f (.SymSect ldr symp))))
+
+
+            (set! reloctab (append reloctab xldr))))
+
+
+        (set! off + (conv uint64 (* 16 (len dynimpreloc))))
+        (set! reloctab (append reloctab (spread dynimpreloc)))
+
+        (set! (.-Lnreloc hdr) (conv int32 (len reloctab)))
+        (set! (.-Limpoff hdr) off)
+
+        ;; /* Import */
+        ;; Default import: /usr/lib:/lib
+        (let [ldimpf (addr ^{:go/breaks [2]} (lit XcoffLdImportFile64
+                :Limpidpath "/usr/lib:/lib"))]
+
+          (set! off + (conv uint64 (+ (len (.-Limpidpath ldimpf)) (len (.-Limpidbase ldimpf)) (len (.-Limpidmem ldimpf)) 3))) ; + null delimiter
+          (set! importtab (append importtab ldimpf))
+
+          ;; The map created by adddynimpsym associates the name to a number
+          ;; This number represents the librairie index (- 1) in this import files section
+          ;; Therefore, they must be sorted before being put inside the section
+          (let [libsOrdered (make (slice string) (len (.-dynLibraries f)))]
+            (range [key val (.-dynLibraries f)]
+              (when (!= (aget libsOrdered val) "")
+                (continue))
+
+              (aset libsOrdered val key))
+
+
+            (range [_ lib libsOrdered]
+              ;; lib string is defined as base.a/mem.o or path/base.a/mem.o
+              (let [n (strings/Split lib "/")
+                  ^{:line 1474} path ""
+                  ^{:line 1475} base (aget n (- (len n) 2))
+                  ^{:line 1476} mem (aget n (- (len n) 1))]
+                (when (> (len n) 2)
+                  (set! path (subslice lib _ (- (len lib) (len base) (len mem) 2))))
+
+
+                (set! ldimpf (addr ^{:go/breaks [2 4 6]} (lit XcoffLdImportFile64
+                      :Limpidpath path
+                      :Limpidbase base
+                      :Limpidmem mem)))
+
+                (set! off + (conv uint64 (+ (len (.-Limpidpath ldimpf)) (len (.-Limpidbase ldimpf)) (len (.-Limpidmem ldimpf)) 3))) ; + null delimiter
+                (set! importtab (append importtab ldimpf))))
+
+
+            (set! (.-Lnimpid hdr) (conv int32 (len importtab)))
+            (set! (.-Listlen hdr) (conv uint32 (- off (.-Limpoff hdr))))
+            (set! (.-Lstoff hdr) off)
+            (set! (.-Lstlen hdr) stlen)
+
+            ;; /* Writing */
+            (.SeekSet (.-Out ctxt) (conv int64 globalOff))
+            (binary/Write (.-Out ctxt) (.-ByteOrder ^{:go/via [Target]} (.-Arch ctxt)) hdr)
+
+            (range [_ s symtab]
+              (binary/Write (.-Out ctxt) (.-ByteOrder ^{:go/via [Target]} (.-Arch ctxt)) s))
+
+
+            (range [_ r reloctab]
+              (binary/Write (.-Out ctxt) (.-ByteOrder ^{:go/via [Target]} (.-Arch ctxt)) r))
+
+            (range [_ f importtab]
+              (.WriteString (.-Out ctxt) (.-Limpidpath f))
+              (.Write8 (.-Out ctxt) 0)
+              (.WriteString (.-Out ctxt) (.-Limpidbase f))
+              (.Write8 (.-Out ctxt) 0)
+              (.WriteString (.-Out ctxt) (.-Limpidmem f))
+              (.Write8 (.-Out ctxt) 0))
+
+            (range [_ s strtab]
+              (.Write16 (.-Out ctxt) (.-size s))
+              (.WriteString (.-Out ctxt) (.-name s))
+              (.Write8 (.-Out ctxt) 0)) ; null terminator
+
+
+            (set! (.-loaderSize f) (+ off (conv uint64 stlen)))))))))
+
+
+;; XCOFF assembling and writing file
+
+^{:go/end 1562} (go/method writeFileHeader [^{:tag (* xcoffFile)} f ^{:tag (* Link)} ctxt]
+  ;; File header
+  (set! (.-Fmagic (.-xfhdr f)) U64_TOCMAGIC)
+  (set! (.-Fnscns (.-xfhdr f)) (conv uint16 (len (.-sections f))))
+  (set! (.-Ftimedat (.-xfhdr f)) 0)
+
+  (when (not @FlagS)
+    (set! (.-Fsymptr (.-xfhdr f)) (conv uint64 (.-symtabOffset f)))
+    (set! (.-Fnsyms (.-xfhdr f)) (conv int32 (.-symbolCount f))))
+
+
+  (if (and (== ^{:go/via [Target]} (.-BuildMode ctxt) BuildModeExe) (== ^{:go/via [Target]} (.-LinkMode ctxt) LinkInternal))
+    (let [ldr (.-loader ctxt)]
+      (set! (.-Fopthdr (.-xfhdr f)) AOUTHSZ_EXEC64)
+      (set! (.-Fflags (.-xfhdr f)) F_EXEC)
+
+      ;; auxiliary header
+      (set! (.-Ovstamp (.-xahdr f)) 1) ; based on dump -o
+      (set! (.-Omagic (.-xahdr f)) 0x10b)
+      (copy (subslice (.-Omodtype (.-xahdr f))) "1L")
+      (let [entry (.Lookup ldr @flagEntrySymbol 0)]
+        (set! (.-Oentry (.-xahdr f)) (conv uint64 (.SymValue ldr entry)))
+        (set! (.-Osnentry (.-xahdr f)) (.getXCOFFscnum f (.SymSect ldr entry)))
+        (let [toc (.Lookup ldr "TOC" 0)]
+          (set! (.-Otoc (.-xahdr f)) (conv uint64 (.SymValue ldr toc)))
+          (set! (.-Osntoc (.-xahdr f)) (.getXCOFFscnum f (.SymSect ldr toc)))
+
+          (set! (.-Oalgntext (.-xahdr f)) (conv int16 (logBase2 (conv int XCOFFSECTALIGN))))
+          (set! (.-Oalgndata (.-xahdr f)) 0x5)
+
+          (binary/Write (.-Out ctxt) binary/BigEndian (addr (.-xfhdr f)))
+          (binary/Write (.-Out ctxt) binary/BigEndian (addr (.-xahdr f))))))
+    (do
+      (set! (.-Fopthdr (.-xfhdr f)) 0)
+      (binary/Write (.-Out ctxt) binary/BigEndian (addr (.-xfhdr f))))))
+
+
+
+
+^{:go/end 1572} (go/func xcoffwrite [^{:tag (* Link)} ctxt]
+  (.SeekSet (.-Out ctxt) 0)
+
+  (.writeFileHeader xfile ctxt)
+
+  (range [_ sect (.-sections xfile)]
+    (.write sect ctxt)))
+
+
+
+
+^{:go/end 1658} (go/func asmbXcoff "Generate XCOFF assembly file.\n" [^{:tag (* Link)} ctxt]
+  (.SeekSet (.-Out ctxt) 0)
+  (let [fileoff (conv int64 (+ (.-Fileoff Segdwarf) (.-Filelen Segdwarf)))]
+    (set! fileoff (Rnd fileoff @FlagRound))
+
+    (set! (.-sectNameToScnum xfile) (make (map string int16)))
+
+    ;; Add sections
+    (let [s (.addSection xfile ".text" (.-Vaddr Segtext) (.-Length Segtext) (.-Fileoff Segtext) STYP_TEXT)]
+      (set! (.-Otextstart (.-xahdr xfile)) (.-Svaddr s))
+      (set! (.-Osntext (.-xahdr xfile)) (aget (.-sectNameToScnum xfile) ".text"))
+      (set! (.-Otsize (.-xahdr xfile)) (.-Ssize s))
+      (set! (.-sectText xfile) s)
+
+      (let [segdataVaddr (.-Vaddr Segdata)
+          ^{:line 1590} segdataFilelen (.-Filelen Segdata)
+          ^{:line 1591} segdataFileoff (.-Fileoff Segdata)
+          ^{:line 1592} segbssFilelen (- (.-Length Segdata) (.-Filelen Segdata))]
+        (when (> (len (.-Sections Segrelrodata)) 0)
+          ;; Merge relro segment to data segment as
+          ;; relro data are inside data segment on AIX.
+          (set! segdataVaddr (.-Vaddr Segrelrodata))
+          (set! segdataFileoff (.-Fileoff Segrelrodata))
+          (set! segdataFilelen (- (+ (.-Vaddr Segdata) (.-Filelen Segdata)) (.-Vaddr Segrelrodata))))
+
+
+        (set! s (.addSection xfile ".data" segdataVaddr segdataFilelen segdataFileoff STYP_DATA))
+        (set! (.-Odatastart (.-xahdr xfile)) (.-Svaddr s))
+        (set! (.-Osndata (.-xahdr xfile)) (aget (.-sectNameToScnum xfile) ".data"))
+        (set! (.-Odsize (.-xahdr xfile)) (.-Ssize s))
+        (set! (.-sectData xfile) s)
+
+        (set! s (.addSection xfile ".bss" (+ segdataVaddr segdataFilelen) segbssFilelen 0 STYP_BSS))
+        (set! (.-Osnbss (.-xahdr xfile)) (aget (.-sectNameToScnum xfile) ".bss"))
+        (set! (.-Obsize (.-xahdr xfile)) (.-Ssize s))
+        (set! (.-sectBss xfile) s)
+
+        (when (== ^{:go/via [Target]} (.-LinkMode ctxt) LinkExternal)
+          (let [^{:tag (* sym/Section)} tbss (zero (* sym/Section))]
+            (range [_ s (.-Sections Segdata)]
+              (when (== (.-Name s) ".tbss")
+                (set! tbss s)
+                (break)))
+
+
+            (set! s (.addSection xfile ".tbss" (.-Vaddr tbss) (.-Length tbss) 0 STYP_TBSS))))
+
+
+        ;; add dwarf sections
+        (range [_ sect (.-Sections Segdwarf)]
+          (.addDwarfSection xfile sect))
+
+
+        ;; add and write remaining sections
+        (when (== ^{:go/via [Target]} (.-LinkMode ctxt) LinkInternal)
+          ;; Loader section
+          (when (== ^{:go/via [Target]} (.-BuildMode ctxt) BuildModeExe)
+            (Loaderblk ctxt (conv uint64 fileoff))
+            (set! s (.addSection xfile ".loader" 0 (.-loaderSize xfile) (conv uint64 fileoff) STYP_LOADER))
+            (set! (.-Osnloader (.-xahdr xfile)) (aget (.-sectNameToScnum xfile) ".loader"))
+
+            ;; Update fileoff for symbol table
+            (set! fileoff + (conv int64 (.-loaderSize xfile)))))
+
+
+
+        ;; Create Symbol table
+        (.asmaixsym xfile ctxt)
+
+        (when (== ^{:go/via [Target]} (.-LinkMode ctxt) LinkExternal)
+          (.emitRelocations xfile ctxt fileoff))
+
+
+        ;; Write Symbol table
+        (set! (.-symtabOffset xfile) (.Offset (.-Out ctxt)))
+        (range [_ s (.-symtabSym xfile)]
+          (binary/Write (.-Out ctxt) (.-ByteOrder ^{:go/via [Target]} (.-Arch ctxt)) s))
+
+        ;; write string table
+        (.write (.-stringTable xfile) (.-Out ctxt))
+
+        ;; write headers
+        (xcoffwrite ctxt)))))
+
+
+
+^{:go/end 1767} (go/method emitRelocations "emitRelocations emits relocation entries for go.o in external linking.\n" [^{:tag (* xcoffFile)} f ^{:tag (* Link)} ctxt ^int64 fileoff]
+  (.SeekSet (.-Out ctxt) fileoff)
+  (while (!= (bit-and (.Offset (.-Out ctxt)) 7) 0)
+    (.Write8 (.-Out ctxt) 0))
+
+
+  (let [ldr (.-loader ctxt)
+      ;; relocsect relocates symbols from first in section sect, and returns
+      ;; the total number of relocations emitted.
+      ^{:line 1670} relocsect ^{:go/end 1726} (fn ^uint32 [^{:tag (* sym/Section)} sect ^{:tag (slice loader/Sym)} syms ^uint64 base]
+        ;; ctxt.Logf("%s 0x%x\n", sect.Name, sect.Vaddr)
+        ;; If main section has no bits, nothing to relocate.
+        (when (>= (.-Vaddr sect) (+ (.-Vaddr (.-Seg sect)) (.-Filelen (.-Seg sect))))
+          (return 0))
+
+        (set! (.-Reloff sect) (conv uint64 (.Offset (.-Out ctxt))))
+        (range [i s syms]
+          (when (not (.AttrReachable ldr s))
+            (continue))
+
+          (when (>= (conv uint64 (.SymValue ldr s)) (.-Vaddr sect))
+            (set! syms (subslice syms i))
+            (break)))
+
+
+        (let [eaddr (conv int64 (+ (.-Vaddr sect) (.-Length sect)))]
+          (range [_ s syms]
+            (when (not (.AttrReachable ldr s))
+              (continue))
+
+            (when (>= (.SymValue ldr s) eaddr)
+              (break))
+
+
+            ;; Compute external relocations on the go, and pass to Xcoffreloc1 to stream out.
+            ;; Relocation must be ordered by address, so create a list of sorted indices.
+            (let [relocs (.Relocs ldr s)
+                ^{:line 1698} sorted (make (slice int) (.Count relocs))]
+              (for [i 0] (< i (.Count relocs)) (inc! i)
+                (aset sorted i i))
+
+              (sort/Slice sorted ^{:go/end 1704} (fn ^bool [^int i ^int j]
+                  (< ^{:go/via [Reloc]} (.Off (.At relocs (aget sorted i))) ^{:go/via [Reloc]} (.Off (.At relocs (aget sorted j))))))
+
+
+              (range [_ ri sorted]
+                (let [r (.At relocs ri)
+                    (values rr ok) (extreloc ctxt ldr s r)]
+                  (when (not ok)
+                    (continue))
+
+                  (when (== (.-Xsym rr) 0)
+                    (.Errorf ldr s "missing xsym in relocation")
+                    (continue))
+
+                  (when (< (.SymDynid ldr (.-Xsym rr)) 0)
+                    (.Errorf ldr s "reloc %s to non-coff symbol %s (outer=%s) %d %d" (.Type r) (.SymName ldr (.Sym r)) (.SymName ldr (.-Xsym rr)) (.SymType ldr (.Sym r)) (.SymDynid ldr (.-Xsym rr))))
+
+                  (when (not ((.-Xcoffreloc1 thearch) ^{:go/via [Target]} (.-Arch ctxt) (.-Out ctxt) ldr s rr (conv int64 (- (conv uint64 (+ (.SymValue ldr s) (conv int64 ^{:go/via [Reloc]} (.Off r)))) base))))
+                    (.Errorf ldr s "unsupported obj reloc %d(%s)/%d to %s" (.Type r) (.Type r) ^{:go/via [Reloc]} (.Siz r) (.SymName ldr (.Sym r))))))))
+
+
+
+          (set! (.-Rellen sect) (- (conv uint64 (.Offset (.-Out ctxt))) (.-Reloff sect)))
+          (/ (conv uint32 (.-Rellen sect)) RELSZ_64)))
+
+      ^{:line 1727} sects (lit (slice (struct
+            ^{:line 1728 :tag (* XcoffScnHdr64)} xcoffSect
+            ^{:line 1729 :tag (slice (* sym/Segment))} segs))
+
+        (lit _ (.-sectText f) (lit (slice (* sym/Segment)) (addr Segtext)))
+        (lit _ (.-sectData f) (lit (slice (* sym/Segment)) (addr Segrelrodata) (addr Segdata))))]
+
+    (range [_ s sects]
+      (set! (.-Srelptr (.-xcoffSect s)) (conv uint64 (.Offset (.-Out ctxt))))
+      (let [n (conv uint32 0)]
+        (range [_ seg (.-segs s)]
+          (range [_ sect (.-Sections seg)]
+            (if (== (.-Name sect) ".text")
+              (set! n + (relocsect sect (.-Textp ctxt) 0))
+
+              (set! n + (relocsect sect (.-datap ctxt) 0)))))
+
+
+
+        (set! (.-Snreloc (.-xcoffSect s)) + n)))
+
+
+    (label :dwarfLoop
+      (for [i 0] (< i (len (.-Sections Segdwarf))) (inc! i)
+        (let [sect (aget (.-Sections Segdwarf) i)
+            ^{:line 1752} si (aget dwarfp i)]
+          (when (or (!= (.secSym si) (.-Sym sect))
+              (!= (.SymSect ldr (.secSym si)) sect))
+            (panic "inconsistency between dwarfp and Segdwarf"))
+
+          (range [_ xcoffSect (.-sections f)]
+            (let [(values _ subtyp) (xcoffGetDwarfSubtype (.-Name sect))]
+              (when (== (bit-and (.-Sflags xcoffSect) 0xF0000) subtyp)
+                (set! (.-Srelptr xcoffSect) (conv uint64 (.Offset (.-Out ctxt))))
+                (set! (.-Snreloc xcoffSect) (relocsect sect (.-syms si) (.-Vaddr sect)))
+                (continue :dwarfLoop))))
+
+
+          (Errorf "emitRelocations: could not find %q section" (.-Name sect)))))))
+
+
+
+
+
+
+^{:go/end 1801} (go/func xcoffCreateExportFile "xcoffCreateExportFile creates a file with exported symbols for\n-Wl,-bE option.\nld won't export symbols unless they are listed in an export file.\n" [^{:tag (* Link)} ctxt] :results [^string fname]
+  (set! fname (filepath/Join @flagTmpdir "export_file.exp"))
+  (let [^bytes/Buffer buf (zero bytes/Buffer)
+
+      ^{:line 1776} ldr (.-loader ctxt)]
+    (range [s (.ForAllCgoExportStatic ldr)]
+      (let [extname (.SymExtname ldr s)]
+        (when (not (strings/HasPrefix extname "._cgoexp_"))
+          (continue))
+
+        (when (.IsFileLocal ldr s)
+          (continue)) ; Only export non-static symbols
+
+
+        ;; Retrieve the name of the initial symbol
+        ;; exported by cgo.
+        ;; The corresponding Go symbol is:
+        ;; _cgoexp_hashcode_symname.
+        (let [name (aget (strings/SplitN extname "_" 4) 3)]
+
+          (.Write buf (conv (slice byte) (+ name "\n"))))))
+
+
+    (let [err (os/WriteFile fname (.Bytes buf) 0666)]
+      (when (!= err nil)
+        (Errorf "WriteFile %s failed: %v" fname err))
+
+
+      ^{:line 1800} fname)))

@@ -1,0 +1,354 @@
+;; Copyright 2021 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.cmd.compile.internal.noder) (go/file "linker.go" :imports [
+
+
+    ^{:line 8} [buildcfg "internal/buildcfg"]
+    ^{:line 9} [pkgbits "internal/pkgbits"]
+    ^{:line 10} [io "io"]
+
+    ^{:line 12} [base "cmd/compile/internal/base"]
+    ^{:line 13} [ir "cmd/compile/internal/ir"]
+    ^{:line 14} [reflectdata "cmd/compile/internal/reflectdata"]
+    ^{:line 15} [types "cmd/compile/internal/types"]
+    ^{:line 16} [goobj "cmd/internal/goobj"]
+    ^{:line 17} [obj "cmd/internal/obj"]])
+
+
+;; This file implements the unified IR linker, which combines the
+;; local package's stub data with imported package data to produce a
+;; complete export data file. It also rewrites the compiler's
+;; extension data sections based on the results of compilation (e.g.,
+;; the function inlining cost and linker symbol index assignments).
+;;
+;; TODO(mdempsky): Using the name "linker" here is confusing, because
+;; readers are likely to mistake references to it for cmd/link. But
+;; there's a shortage of good names for "something that combines
+;; multiple parts into a cohesive whole"... e.g., "assembler" and
+;; "compiler" are also already taken.
+
+;; TODO(mdempsky): Should linker go into pkgbits? Probably the
+;; low-level linking details can be moved there, but the logic for
+;; handling extension data needs to stay in the compiler.
+
+
+
+
+(go/type linker "A linker combines a package's stub export data with any referenced\nelements from imported packages into a single, self-contained\nexport data file.\n" (struct
+    ^{:line 40 :tag pkgbits/PkgEncoder} pw
+
+    ^{:line 42 :tag (map string index)} pkgs
+    ^{:line 43 :tag (map (* types/Sym) index)} decls
+    ^{:line 44 :tag (map (* types/Sym) index)} bodies))
+
+
+
+
+
+^{:go/end 57} (go/method relocAll "relocAll ensures that all elements specified by pr and relocs are\ncopied into the output export data file, and returns the\ncorresponding indices in the output.\n" ^{:tag (slice pkgbits/RefTableEntry)} [^{:tag (* linker)} l ^{:tag (* pkgReader)} pr ^{:tag (slice pkgbits/RefTableEntry)} relocs]
+  (let [res (make (slice pkgbits/RefTableEntry) (len relocs))]
+    (range [i rent relocs]
+      (set! (.-Idx rent) (.relocIdx l pr (.-Kind rent) (.-Idx rent)))
+      (aset res i rent))
+
+    ^{:line 56} res))
+
+
+
+
+^{:go/end 94} (go/method relocIdx "relocIdx ensures a single element is copied into the output export\ndata file, and returns the corresponding index in the output.\n" ^index [^{:tag (* linker)} l ^{:tag (* pkgReader)} pr ^pkgbits/SectionKind k ^index idx]
+  (go/call assert (!= pr nil))
+
+  (let [absIdx ^{:go/via [PkgDecoder]} (.AbsIdx pr k idx)]
+
+    (when [newidx (aget (.-newindex pr) absIdx)] (!= newidx 0)
+      (return (bit-not newidx)))
+
+
+    (let [^index newidx (zero index)]
+      (switch k
+        (case [pkgbits/SectionString]
+          (set! newidx (.relocString l pr idx)))
+        (case [pkgbits/SectionPkg]
+          (set! newidx (.relocPkg l pr idx)))
+        (case [pkgbits/SectionObj]
+          (set! newidx (.relocObj l pr idx)))
+
+        (default
+          ;; Generic relocations.
+          ;;
+          ;; TODO(mdempsky): Deduplicate more sections? In fact, I think
+          ;; every section could be deduplicated. This would also be easier
+          ;; if we do external relocations.
+
+          (let [w (.NewEncoderRaw (.-pw l) k)]
+            (.relocCommon l pr w k idx)
+            (set! newidx (.-Idx w)))))
+
+
+      (aset (.-newindex pr) absIdx (bit-not newidx))
+
+      ^{:line 93} newidx)))
+
+
+
+
+^{:go/end 100} (go/method relocString "relocString copies the specified string from pr into the output\nexport data file, deduplicating it against other strings.\n" ^index [^{:tag (* linker)} l ^{:tag (* pkgReader)} pr ^index idx]
+  (.StringIdx (.-pw l) ^{:go/via [PkgDecoder]} (.StringIdx pr idx)))
+
+
+
+
+
+
+
+
+
+^{:go/end 132} (go/method relocPkg "relocPkg copies the specified package from pr into the output\nexport data file, rewriting its import path to match how it was\nimported.\n\nTODO(mdempsky): Since CL 391014, we already have the compilation\nunit's import path, so there should be no need to rewrite packages\nanymore.\n" ^index [^{:tag (* linker)} l ^{:tag (* pkgReader)} pr ^index idx]
+  (let [path ^{:go/via [PkgDecoder]} (.PeekPkgPath pr idx)]
+
+    (when [(values newidx ok) (aget (.-pkgs l) path)] ok
+      (return newidx))
+
+
+    (let [r ^{:go/via [PkgDecoder]} (.NewDecoder pr pkgbits/SectionPkg idx pkgbits/SyncPkgDef)
+        ^{:line 117} w (.NewEncoder (.-pw l) pkgbits/SectionPkg pkgbits/SyncPkgDef)]
+      (aset (.-pkgs l) path (.-Idx w))
+
+      ;; TODO(mdempsky): We end up leaving an empty string reference here
+      ;; from when the package was originally written as "". Probably not
+      ;; a big deal, but a little annoying. Maybe relocating
+      ;; cross-references in place is the way to go after all.
+      (set! (.-Relocs w) (.relocAll l pr (.-Relocs r)))
+
+      (set! _ (.String r)) ; original path
+      (.String w path)
+
+      (io/Copy (addr (.-Data w)) (addr (.-Data r)))
+
+      (.Flush w))))
+
+
+
+
+
+^{:go/end 212} (go/method relocObj "relocObj copies the specified object from pr into the output export\ndata file, rewriting its compiler-private extension data (e.g.,\nadding inlining cost and escape analysis results for functions).\n" ^index [^{:tag (* linker)} l ^{:tag (* pkgReader)} pr ^index idx]
+  (let [(values path name tag) ^{:go/via [PkgDecoder]} (.PeekObj pr idx)
+      ^{:line 139} sym (.Lookup (types/NewPkg path "") name)]
+
+    (when [(values newidx ok) (aget (.-decls l) sym)] ok
+      (return newidx))
+
+
+    (when (and (== tag pkgbits/ObjStub) (!= path "builtin") (!= path "unsafe"))
+      (let [(values pri ok) (aget objReader sym)]
+        (when (not ok)
+          (base/Fatalf "missing reader for %q.%v" path name))
+
+        (go/call assert ok)
+
+        (set! pr (.-pr pri))
+        (set! idx (.-idx pri))
+
+        (let [(values path2 name2 tag2) ^{:go/via [PkgDecoder]} (.PeekObj pr idx)
+            ^{:line 156} sym2 (.Lookup (types/NewPkg path2 "") name2)]
+          (go/call assert (== sym sym2))
+          (go/call assert (!= tag2 pkgbits/ObjStub)))))
+
+
+    (let [w (.NewEncoderRaw (.-pw l) pkgbits/SectionObj)
+        ^{:line 162} wext (.NewEncoderRaw (.-pw l) pkgbits/SectionObjExt)
+        ^{:line 163} wname (.NewEncoderRaw (.-pw l) pkgbits/SectionName)
+        ^{:line 164} wdict (.NewEncoderRaw (.-pw l) pkgbits/SectionObjDict)]
+
+      (aset (.-decls l) sym (.-Idx w))
+      (go/call assert (== (.-Idx wext) (.-Idx w)))
+      (go/call assert (== (.-Idx wname) (.-Idx w)))
+      (go/call assert (== (.-Idx wdict) (.-Idx w)))
+
+      (.relocCommon l pr w pkgbits/SectionObj idx)
+      (.relocCommon l pr wname pkgbits/SectionName idx)
+      (.relocCommon l pr wdict pkgbits/SectionObjDict idx)
+
+      ;; Generic types and functions won't have definitions, and imported
+      ;; objects may not either.
+      (let [(values obj _) (assert (* ir/Name) (.-Def sym))
+          ^{:line 178} local (== (.-Pkg sym) types/LocalPkg)]
+
+        (if (and local (!= obj nil)) (do
+            (.Sync wext pkgbits/SyncObject1)
+            (switch tag
+              (case [pkgbits/ObjFunc]
+                (.relocFuncExt l wext obj))
+              (case [pkgbits/ObjType]
+                (.relocTypeExt l wext obj))
+              (case [pkgbits/ObjVar]
+                (.relocVarExt l wext obj)))
+
+            (.Flush wext))
+
+          (.relocCommon l pr wext pkgbits/SectionObjExt idx))
+
+
+        ;; Check if we need to export the inline bodies for functions and
+        ;; methods.
+        (when (!= obj nil)
+          (when (and (== ^{:go/via [miniExpr miniNode]} (.Op obj) ir/ONAME) (== (.-Class obj) ir/PFUNC))
+            (.exportBody l obj local))
+
+
+          (when (and (== ^{:go/via [miniExpr miniNode]} (.Op obj) ir/OTYPE) (not (.Alias obj)))
+            (when [typ ^{:go/via [miniExpr]} (.Type obj)] (not (.IsInterface typ))
+              (range [_ method (.Methods typ)]
+                (.exportBody l (assert (* ir/Name) (.-Nname method)) local)))))
+
+
+
+
+
+        (.-Idx w)))))
+
+
+
+
+
+
+
+^{:go/end 251} (go/method exportBody "exportBody exports the given function or method's body, if\nappropriate. local indicates whether it's a local function or\nmethod available on a locally declared type. (Due to cross-package\ntype aliases, a method may be imported, but still available on a\nlocally declared type.)\n" [^{:tag (* linker)} l ^{:tag (* ir/Name)} obj ^bool local]
+  (go/call assert (and (== ^{:go/via [miniExpr miniNode]} (.Op obj) ir/ONAME) (== (.-Class obj) ir/PFUNC)))
+
+  (let [fn (.-Func obj)]
+    (when (== (.-Inl fn) nil)
+      (return)) ; not inlinable anyway
+
+
+    ;; As a simple heuristic, if the function was declared in this
+    ;; package or we inlined it somewhere in this package, then we'll
+    ;; (re)export the function body. This isn't perfect, but seems
+    ;; reasonable in practice. In particular, it has the nice property
+    ;; that in the worst case, adding a blank import ensures the
+    ;; function body is available for inlining.
+    ;;
+    ;; TODO(mdempsky): Reimplement the reachable method crawling logic
+    ;; from typecheck/crawler.go.
+    (let [exportBody (or local (.-HaveDcl (.-Inl fn)))]
+      (when (not exportBody)
+        (return))
+
+
+      (let [sym (.Sym obj)]
+        (when [(values _ ok) (aget (.-bodies l) sym)] ok
+          ;; Due to type aliases, we might visit methods multiple times.
+          (base/AssertfAt (!= (.Recv ^{:go/via [miniExpr]} (.Type obj)) nil) ^{:go/via [miniExpr miniNode]} (.Pos obj) "expected method: %v" obj)
+          (return))
+
+
+        (let [(values pri ok) (bodyReaderFor fn)]
+          (go/call assert ok)
+          (aset (.-bodies l) sym (.relocIdx l (.-pr pri) pkgbits/SectionBody (.-idx pri))))))))
+
+
+
+
+^{:go/end 260} (go/method relocCommon "relocCommon copies the specified element from pr into w,\nrecursively relocating any referenced elements as well.\n" [^{:tag (* linker)} l ^{:tag (* pkgReader)} pr ^{:tag (* pkgbits/Encoder)} w ^pkgbits/SectionKind k ^index idx]
+  (let [r ^{:go/via [PkgDecoder]} (.NewDecoderRaw pr k idx)]
+    (set! (.-Relocs w) (.relocAll l pr (.-Relocs r)))
+    (io/Copy (addr (.-Data w)) (addr (.-Data r)))
+    (.Flush w)))
+
+
+^{:go/end 265} (go/method pragmaFlag [^{:tag (* linker)} l ^{:tag (* pkgbits/Encoder)} w ^ir/PragmaFlag pragma]
+  (.Sync w pkgbits/SyncPragma)
+  (.Int w (conv int pragma)))
+
+
+^{:go/end 310} (go/method relocFuncExt [^{:tag (* linker)} l ^{:tag (* pkgbits/Encoder)} w ^{:tag (* ir/Name)} name]
+  (.Sync w pkgbits/SyncFuncExt)
+
+  (.pragmaFlag l w (.-Pragma (.-Func name)))
+  (.linkname l w name)
+
+  (when (== buildcfg/GOARCH "wasm")
+    (if (!= (.-WasmImport (.-Func name)) nil) (do
+        (.String w (.-Module (.-WasmImport (.-Func name))))
+        (.String w (.-Name (.-WasmImport (.-Func name)))))
+      (do
+        (.String w "")
+        (.String w "")))
+
+    (if (!= (.-WasmExport (.-Func name)) nil)
+      (.String w (.-Name (.-WasmExport (.-Func name))))
+
+      (.String w "")))
+
+
+
+  ;; Relocated extension data.
+  (.Bool w true)
+
+  ;; Record definition ABI so cross-ABI calls can be direct.
+  ;; This is important for the performance of calling some
+  ;; common functions implemented in assembly (e.g., bytealg).
+  (.Uint64 w (conv uint64 (.-ABI (.-Func name))))
+
+  ;; Escape analysis.
+  (range [_ f (.RecvParams ^{:go/via [miniExpr]} (.Type name))]
+    (.String w (.-Note f)))
+
+
+  (when [inl (.-Inl (.-Func name))] (.Bool w (!= inl nil))
+    (.Len w (conv int (.-Cost inl)))
+    (.Bool w (.-CanDelayResults inl))
+    (when ^{:go/via [Flags]} (.-NewInliner buildcfg/Experiment)
+      (.String w (.-Properties inl))))
+
+
+
+  (.Sync w pkgbits/SyncEOF))
+
+
+^{:go/end 328} (go/method relocTypeExt [^{:tag (* linker)} l ^{:tag (* pkgbits/Encoder)} w ^{:tag (* ir/Name)} name]
+  (.Sync w pkgbits/SyncTypeExt)
+
+  (let [typ ^{:go/via [miniExpr]} (.Type name)]
+
+    (.pragmaFlag l w (.Pragma name))
+
+    ;; For type T, export the index of type descriptor symbols of T and *T.
+    (.lsymIdx l w "" (reflectdata/TypeLinksym typ))
+    (.lsymIdx l w "" (reflectdata/TypeLinksym (.PtrTo typ)))
+
+    (when (!= (.Kind typ) types/TINTER)
+      (range [_ method (.Methods typ)]
+        (.relocFuncExt l w (assert (* ir/Name) (.-Nname method)))))))
+
+
+
+
+^{:go/end 333} (go/method relocVarExt [^{:tag (* linker)} l ^{:tag (* pkgbits/Encoder)} w ^{:tag (* ir/Name)} name]
+  (.Sync w pkgbits/SyncVarExt)
+  (.linkname l w name))
+
+
+^{:go/end 343} (go/method linkname [^{:tag (* linker)} l ^{:tag (* pkgbits/Encoder)} w ^{:tag (* ir/Name)} name]
+  (.Sync w pkgbits/SyncLinkname)
+
+  (let [linkname (.-Linkname (.Sym name))]
+    (when (not (.lsymIdx l w linkname (.Linksym name)))
+      (.String w linkname)
+      (.Bool w ^{:go/via [Attribute]} (.IsLinknameStd (.Linksym name))))))
+
+
+
+^{:go/breaks [5] :go/end 355} (go/method lsymIdx ^bool [^{:tag (* linker)} l ^{:tag (* pkgbits/Encoder)} w ^string linkname ^{:tag (* obj/LSym)} lsym]
+  (when (or (> (.-PkgIdx lsym) goobj/PkgIdxSelf) ^:go/paren (and (== (.-PkgIdx lsym) goobj/PkgIdxInvalid) (not ^{:go/via [Attribute]} (.Indexed lsym))) (!= linkname ""))
+    (.Int64 w -1)
+    (return false))
+
+
+  ;; For a defined symbol, export its index.
+  ;; For re-exporting an imported symbol, pass its index through.
+  (.Int64 w (conv int64 (.-SymIdx lsym)))
+  true)

@@ -1,0 +1,253 @@
+;; Derived from Inferno utils/6l/obj.c and utils/6l/span.c
+;; https://bitbucket.org/inferno-os/inferno-os/src/master/utils/6l/obj.c
+;; https://bitbucket.org/inferno-os/inferno-os/src/master/utils/6l/span.c
+;;
+;;	Copyright © 1994-1999 Lucent Technologies Inc.  All rights reserved.
+;;	Portions Copyright © 1995-1997 C H Forsyth (forsyth@terzarima.net)
+;;	Portions Copyright © 1997-1999 Vita Nuova Limited
+;;	Portions Copyright © 2000-2007 Vita Nuova Holdings Limited (www.vitanuova.com)
+;;	Portions Copyright © 2004,2006 Bruce Ellis
+;;	Portions Copyright © 2005-2007 C H Forsyth (forsyth@terzarima.net)
+;;	Revisions Copyright © 2000-2007 Lucent Technologies Inc. and others
+;;	Portions Copyright © 2009 The Go Authors. All rights reserved.
+;;
+;; Permission is hereby granted, free of charge, to any person obtaining a copy
+;; of this software and associated documentation files (the "Software"), to deal
+;; in the Software without restriction, including without limitation the rights
+;; to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+;; copies of the Software, and to permit persons to whom the Software is
+;; furnished to do so, subject to the following conditions:
+;;
+;; The above copyright notice and this permission notice shall be included in
+;; all copies or substantial portions of the Software.
+;;
+;; THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+;; IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+;; FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL THE
+;; AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+;; LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+;; OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+;; THE SOFTWARE.
+
+(in-ns 'go.cmd.link.internal.ld) (go/file "ld.go" :imports [
+
+
+    ^{:line 35} [log "log"]
+    ^{:line 36} [os "os"]
+    ^{:line 37} [path "path"]
+    ^{:line 38} [filepath "path/filepath"]
+    ^{:line 39} [strconv "strconv"]
+    ^{:line 40} [strings "strings"]
+
+    ^{:line 42} [goobj "cmd/internal/goobj"]
+    ^{:line 43} [loader "cmd/link/internal/loader"]
+    ^{:line 44} [sym "cmd/link/internal/sym"]])
+
+
+^{:go/end 94} (go/method readImportCfg [^{:tag (* Link)} ctxt ^string file]
+  (set! (.-PackageFile ctxt) (make (map string string)))
+  (set! (.-PackageShlib ctxt) (make (map string string)))
+  (let [(values data err) (os/ReadFile file)]
+    (when (!= err nil)
+      (log/Fatalf "-importcfg: %v" err))
+
+
+    (range [lineNum line (strings/Split (conv string data) "\n")]
+      (inc! lineNum) ; 1-based
+      (set! line (strings/TrimSpace line))
+      (when (== line "")
+        (continue))
+
+      (when (or (== line "") (strings/HasPrefix line "#"))
+        (continue))
+
+
+      (let [(values verb args found) (strings/Cut line " ")]
+        (when found
+          (set! args (strings/TrimSpace args)))
+
+        (let [(values before after exist) (strings/Cut args "=")]
+          (when (not exist)
+            (set! before ""))
+
+          (switch verb
+            (default
+              (log/Fatalf "%s:%d: unknown directive %q" file lineNum verb))
+            (case ["packagefile"]
+              (when (or (== before "") (== after ""))
+                (log/Fatalf "%s:%d: invalid packagefile: syntax is \"packagefile path=filename\"" file lineNum))
+
+              (aset (.-PackageFile ctxt) before after))
+            (case ["packageshlib"]
+              (when (or (== before "") (== after ""))
+                (log/Fatalf "%s:%d: invalid packageshlib: syntax is \"packageshlib path=filename\"" file lineNum))
+
+              (aset (.-PackageShlib ctxt) before after))
+            (case ["modinfo"]
+              (let [(values s err) (strconv/Unquote args)]
+                (when (!= err nil)
+                  (log/Fatalf "%s:%d: invalid modinfo: %v" file lineNum err))
+
+                (addstrdata1 ctxt (+ "runtime.modinfo=" s))))))))))
+
+
+
+
+^{:go/end 98} (go/func pkgname ^string [^{:tag (* Link)} ctxt ^string lib]
+  (path/Clean lib))
+
+
+^{:go/end 140} (go/func findlib [^{:tag (* Link)} ctxt ^string lib] :results [string bool]
+  (let [name (path/Clean lib)
+
+      ^{:line 103 :tag string} pname (zero string)
+      ^{:line 104} isshlib false]
+
+    (cond (and ^{:go/via [Target]} (.-linkShared ctxt) (!= (aget (.-PackageShlib ctxt) name) "")) (do
+        (set! pname (aget (.-PackageShlib ctxt) name))
+        (set! isshlib true))
+      (!= (.-PackageFile ctxt) nil) (do
+        (set! pname (aget (.-PackageFile ctxt) name))
+        (when (== pname "")
+          (.Logf ctxt "cannot find package %s (using -importcfg)\n" name)
+          (return "" false))) :else
+
+
+      (let [pkg (pkgname ctxt lib)]
+
+        ;; search -L "libdir" directories
+        (range [_ dir (.-Libdir ctxt)]
+          (when ^{:go/via [Target]} (.-linkShared ctxt)
+            (set! pname (filepath/Join dir (+ pkg ".shlibname")))
+            (when [(values _ err) (os/Stat pname)] (== err nil)
+              (set! isshlib true)
+              (break)))
+
+
+          (set! pname (filepath/Join dir (+ name ".a")))
+          (when [(values _ err) (os/Stat pname)] (== err nil)
+            (break))
+
+          (set! pname (filepath/Join dir (+ name ".o")))
+          (when [(values _ err) (os/Stat pname)] (== err nil)
+            (break)))
+
+
+        (set! pname (filepath/Clean pname))))
+
+
+    (return pname isshlib)))
+
+
+^{:go/end 166} (go/func addlib ^{:tag (* sym/Library)} [^{:tag (* Link)} ctxt ^string src ^string obj ^string lib ^goobj/FingerprintType fingerprint]
+  (let [pkg (pkgname ctxt lib)]
+
+    ;; already loaded?
+    (when [l (aget (.-LibraryByPkg ctxt) pkg)] (and (!= l nil) (not (.IsZero (.-Fingerprint l))))
+      ;; Normally, packages are loaded in dependency order, and if l != nil
+      ;; l is already loaded with the actual fingerprint. In shared build mode,
+      ;; however, packages may be added not in dependency order, and it is
+      ;; possible that l's fingerprint is not yet loaded -- exclude it in
+      ;; checking.
+      (checkFingerprint l (.-Fingerprint l) src fingerprint)
+      (return l))
+
+
+    (let [(values pname isshlib) (findlib ctxt lib)]
+
+      (when (> (.-Debugvlog ctxt) 1)
+        (.Logf ctxt "addlib: %s %s pulls in %s isshlib %v\n" obj src pname isshlib))
+
+
+      (when isshlib
+        (return (addlibpath ctxt src obj "" pkg pname fingerprint)))
+
+      (addlibpath ctxt src obj pname pkg "" fingerprint))))
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 206} (go/func addlibpath " * add library to library list, return added library.\n *\tsrcref: src file referring to package\n *\tobjref: object file referring to package\n *\tfile: object file, e.g., /home/rsc/go/pkg/container/vector.a\n *\tpkg: package import path, e.g. container/vector\n *\tshlib: path to shared library, or .shlibname file holding path\n *\tfingerprint: if not 0, expected fingerprint for import from srcref\n *\t             fingerprint is 0 if the library is not imported (e.g. main)\n" ^{:tag (* sym/Library)} [^{:tag (* Link)} ctxt ^string srcref ^string objref ^string file ^string pkg ^string shlib ^goobj/FingerprintType fingerprint]
+  (when [l (aget (.-LibraryByPkg ctxt) pkg)] (!= l nil)
+    (return l))
+
+
+  (when (> (.-Debugvlog ctxt) 1)
+    (.Logf ctxt "addlibpath: srcref: %s objref: %s file: %s pkg: %s shlib: %s fingerprint: %x\n" srcref objref file pkg shlib fingerprint))
+
+
+  (let [l (addr (lit sym/Library))]
+    (aset (.-LibraryByPkg ctxt) pkg l)
+    (set! (.-Library ctxt) (append (.-Library ctxt) l))
+    (set! (.-Objref l) objref)
+    (set! (.-Srcref l) srcref)
+    (set! (.-File l) file)
+    (set! (.-Pkg l) pkg)
+    (set! (.-Fingerprint l) fingerprint)
+    (when (!= shlib "")
+      (when (strings/HasSuffix shlib ".shlibname")
+        (let [(values data err) (os/ReadFile shlib)]
+          (when (!= err nil)
+            (Errorf "cannot read %s: %v" shlib err))
+
+          (set! shlib (strings/TrimSpace (conv string data)))))
+
+      (set! (.-Shlib l) shlib))
+
+    ^{:line 205} l))
+
+
+^{:go/end 211} (go/func atolwhex ^int64 [^string s]
+  (let [(values n _) (strconv/ParseInt s 0 64)]
+    ^{:line 210} n))
+
+
+
+
+
+
+
+
+^{:go/end 254} (go/func PrepareAddmoduledata "PrepareAddmoduledata returns a symbol builder that target-specific\ncode can use to build up the linker-generated go.link.addmoduledata\nfunction, along with the sym for runtime.addmoduledata itself. If\nthis function is not needed (for example in cases where we're\nlinking a module that contains the runtime) the returned builder\nwill be nil.\n" [^{:tag (* Link)} ctxt] :results [(* loader/SymbolBuilder) loader/Sym]
+  (when (not (.DynlinkingGo ctxt))
+    (return nil 0))
+
+  (let [amd (.LookupOrCreateSym (.-loader ctxt) "runtime.addmoduledata" 0)]
+    (when (and (.IsText (.SymType (.-loader ctxt) amd)) (!= ^{:go/via [Target]} (.-BuildMode ctxt) BuildModePlugin))
+      ;; we're linking a module containing the runtime -> no need for
+      ;; an init function
+      (return nil 0))
+
+    (.SetAttrReachable (.-loader ctxt) amd true)
+
+    ;; Create a new init func text symbol. Caller will populate this
+    ;; sym with arch-specific content.
+    (let [ifs (.LookupOrCreateSym (.-loader ctxt) "go:link.addmoduledata" 0)
+        ^{:line 234} initfunc (.MakeSymbolUpdater (.-loader ctxt) ifs)]
+      (.SetAttrReachable (.-loader ctxt) ifs true)
+      (.SetAttrLocal (.-loader ctxt) ifs true)
+      (.SetType initfunc sym/STEXT)
+
+      ;; Add the init func and/or addmoduledata to Textp.
+      (when (== ^{:go/via [Target]} (.-BuildMode ctxt) BuildModePlugin)
+        (set! (.-Textp ctxt) (append (.-Textp ctxt) amd)))
+
+      (set! (.-Textp ctxt) (append (.-Textp ctxt) (.Sym initfunc)))
+
+      ;; Create an init array entry
+      (let [amdi (.LookupOrCreateSym (.-loader ctxt) "go:link.addmoduledatainit" 0)
+          ^{:line 247} initarray_entry (.MakeSymbolUpdater (.-loader ctxt) amdi)]
+        (.SetAttrReachable (.-loader ctxt) amdi true)
+        (.SetAttrLocal (.-loader ctxt) amdi true)
+        (.SetType initarray_entry sym/SINITARR)
+        (.AddAddr initarray_entry ^{:go/via [Target]} (.-Arch ctxt) ifs)
+
+        (return initfunc amd)))))

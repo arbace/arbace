@@ -1,0 +1,124 @@
+;; Copyright 2011 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.cmd.compile.internal.ir) (go/file "scc.go" :imports [])
+
+;; Strongly connected components.
+;;
+;; Run analysis on minimal sets of mutually recursive functions
+;; or single non-recursive functions, bottom up.
+;;
+;; Finding these sets is finding strongly connected components
+;; by reverse topological order in the static call graph.
+;; The algorithm (known as Tarjan's algorithm) for doing that is taken from
+;; Sedgewick, Algorithms, Second Edition, p. 482, with two adaptations.
+;;
+;; First, a closure function (fn.IsClosure()) cannot be
+;; the root of a connected component. Refusing to use it as a root forces
+;; it into the component of the function in which it appears.  This is
+;; more convenient for escape analysis.
+;;
+;; Second, each function becomes two virtual nodes in the graph,
+;; with numbers n and n+1. We record the function's node number as n
+;; but search from node n+1. If the search tells us that the component
+;; number (minVisitGen) is n+1, we know that this is a trivial component: one function
+;; plus its closures. If the search tells us that the component number is
+;; n, then there was a path from node n+1 back to node n, meaning that
+;; the function set is mutually recursive. The escape analysis can be
+;; more precise when analyzing a single non-recursive function than
+;; when analyzing a set of mutually recursive functions.
+
+(go/type bottomUpVisitor (struct
+    ^{:line 33 :tag (func [(slice (* Func)) bool])} analyze
+    ^{:line 34 :tag uint32} visitgen
+    ^{:line 35 :tag (map (* Func) uint32)} nodeID
+    ^{:line 36 :tag (slice (* Func))} stack))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 61} (go/func VisitFuncsBottomUp "VisitFuncsBottomUp invokes analyze on the ODCLFUNC nodes listed in list.\nIt calls analyze with successive groups of functions, working from\nthe bottom of the call graph upward. Each time analyze is called with\na list of functions, every function on that list only calls other functions\non the list or functions that have been passed in previous invocations of\nanalyze. Closures appear in the same list as their outer functions.\nThe lists are as short as possible while preserving those requirements.\n(In a typical program, many invocations of analyze will be passed just\na single function.) The boolean argument 'recursive' passed to analyze\nspecifies whether the functions on the list are mutually recursive.\nIf recursive is false, the list consists of only a single function and its closures.\nIf recursive is true, the list may still contain only a single function,\nif that function is itself recursive.\n" [^{:tag (slice (* Func))} list ^{:tag (func [^{:tag (slice (* Func))} list ^bool recursive])} analyze]
+  (let [^bottomUpVisitor v (zero bottomUpVisitor)]
+    (set! (.-analyze v) analyze)
+    (set! (.-nodeID v) (make (map (* Func) uint32)))
+    (range [_ n list]
+      (when (not (.IsClosure n))
+        (.visit v n)))))
+
+
+
+
+^{:go/end 125} (go/method visit ^uint32 [^{:tag (* bottomUpVisitor)} v ^{:tag (* Func)} n]
+  (when [id (aget (.-nodeID v) n)] (> id 0)
+    ;; already visited
+    (return id))
+
+
+  (inc! (.-visitgen v))
+  (let [id (.-visitgen v)]
+    (aset (.-nodeID v) n id)
+    (inc! (.-visitgen v))
+    (let [minVisitGen (.-visitgen v)]
+      (set! (.-stack v) (append (.-stack v) n))
+
+      (let [do ^{:go/end 82} (fn [^Node defn]
+            (when (!= defn nil)
+              (when [m (.visit v (assert (* Func) defn))] (< m minVisitGen)
+                (set! minVisitGen m))))]
+
+
+
+
+        (Visit n ^{:go/end 98} (fn [^Node n]
+            (switch (.Op n)
+              (case [ONAME]
+                (when [n (assert (* Name) n)] (== (.-Class n) PFUNC)
+                  (go/call do (.-Defn n))))
+
+              (case [ODOTMETH OMETHVALUE OMETHEXPR]
+                (when [fn (MethodExprName n)] (!= fn nil)
+                  (go/call do (.-Defn fn))))
+
+              (case [OCLOSURE]
+                (let [n (assert (* ClosureExpr) n)]
+                  (go/call do (.-Func n)))))))
+
+
+
+        (when (and ^:go/paren (or (== minVisitGen id) (== minVisitGen (+ id 1))) (not (.IsClosure n)))
+          ;; This node is the root of a strongly connected component.
+
+          ;; The original minVisitGen was id+1. If the bottomUpVisitor found its way
+          ;; back to id, then this block is a set of mutually recursive functions.
+          ;; Otherwise, it's just a lone function that does not recurse.
+          (let [recursive (== minVisitGen id)
+
+              ;; Remove connected component from stack and mark v.nodeID so that future
+              ;; visits return a large number, which will not affect the caller's min.
+              ^{:line 110 :tag int} i (zero int)]
+            (for [(set! i (- (len (.-stack v)) 1))] (>= i 0) (dec! i)
+              (let [x (aget (.-stack v) i)]
+                (aset (.-nodeID v) x (bit-not (conv uint32 0)))
+                (when (== x n)
+                  (break))))
+
+
+            (let [block (subslice (.-stack v) i)]
+              ;; Call analyze on this set of functions.
+              (set! (.-stack v) (subslice (.-stack v) _ i))
+              ((.-analyze v) block recursive))))
+
+
+        ^{:line 124} minVisitGen))))

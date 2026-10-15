@@ -1,0 +1,557 @@
+;; Copyright 2016 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.cmd.compile.internal.ssagen) (go/file "phi.go" :imports [
+
+
+    ^{:line 8} [heap "container/heap"]
+    ^{:line 9} [fmt "fmt"]
+
+    ^{:line 11} [ir "cmd/compile/internal/ir"]
+    ^{:line 12} [ssa "cmd/compile/internal/ssa"]
+    ^{:line 13} [types "cmd/compile/internal/types"]
+    ^{:line 14} [src "cmd/internal/src"]])
+
+
+;; This file contains the algorithm to place phi nodes in a function.
+;; For small functions, we use Braun, Buchwald, Hack, Leißa, Mallon, and Zwinkau.
+;; https://pp.info.uni-karlsruhe.de/uploads/publikationen/braun13cc.pdf
+;; For large functions, we use Sreedhar & Gao: A Linear Time Algorithm for Placing Φ-Nodes.
+;; http://citeseerx.ist.psu.edu/viewdoc/download?doi=10.1.1.8.1979&rep=rep1&type=pdf
+
+(go/const ^{:val 500} smallBlocks 500)
+
+(go/const ^{:val false} debugPhi false)
+
+
+(go/type fwdRefAux "fwdRefAux wraps an arbitrary ir.Node as an ssa.Aux for use with OpFwdref.\n" (struct
+    ^{:line 29 :tag (array 0 (func []))} _ ; ensure ir.Node isn't compared for equality
+    ^{:line 30 :tag ir/Node} N))
+
+
+^{:go/end 33} (go/method CanBeAnSSAAux [fwdRefAux])
+
+
+
+
+
+
+
+
+^{:go/end 50} (go/method insertPhis "insertPhis finds all the places in the function where a phi is\nnecessary and inserts them.\nUses FwdRef ops to find all uses of variables, and s.defvars to find\nall definitions.\nPhi values are inserted, and all FwdRefs are changed to a Copy\nof the appropriate phi or definition.\nTODO: make this part of cmd/compile/internal/ssa somehow?\n" [^{:tag (* state)} s]
+  (when (<= (len (.-Blocks (.-f s))) smallBlocks)
+    (let [sps (lit simplePhiState :s s :f (.-f s) :defvars (.-defvars s))]
+      (.insertPhis sps)
+      (return)))
+
+  (let [ps (lit phiState :s s :f (.-f s) :defvars (.-defvars s))]
+    (.insertPhis ps)))
+
+
+(go/type phiState (struct
+    ^{:line 53 :tag (* state)} s ; SSA state
+    ^{:line 54 :tag (* ssa/Func)} f ; function to work on
+    ^{:line 55 :tag (slice (map ir/Node (* ssa/Value)))} defvars ; defined variables at end of each block
+
+    ^{:line 57 :tag (map ir/Node int32)} varnum ; variable numbering
+
+
+    ^{:line 60 :tag (slice (* ssa/Block)) :doc "properties of the dominator tree\n"} idom ; dominator parents
+    ^{:line 61 :tag (slice domBlock)} tree ; dominator child+sibling
+    ^{:line 62 :tag (slice int32)} level ; level in dominator tree (0 = root or unreachable, 1 = children of root, ...)
+
+
+    ^{:line 65 :tag blockHeap :doc "scratch locations\n"} priq ; priority queue of blocks, higher level (toward leaves) = higher priority
+    ^{:line 66 :tag (slice (* ssa/Block))} q ; inner loop queue
+    ^{:line 67 :tag (* sparseSet)} queued ; has been put in q
+    ^{:line 68 :tag (* sparseSet)} hasPhi ; has a phi
+    ^{:line 69 :tag (* sparseSet)} hasDef ; has a write of the variable we're processing
+
+
+    ^{:line 72 :tag (* ssa/Value) :doc "miscellaneous\n"} placeholder)) ; value to use as a "not set yet" placeholder.
+
+
+^{:go/end 199} (go/method insertPhis [^{:tag (* phiState)} s]
+  (when debugPhi
+    (fmt/Println (.String (.-f s))))
+
+
+  ;; Find all the variables for which we need to match up reads & writes.
+  ;; This step prunes any basic-block-only variables from consideration.
+  ;; Generate a numbering for these variables.
+  (set! (.-varnum s) (lit (map ir/Node int32)))
+  (let [^{:tag (slice ir/Node)} vars (zero (slice ir/Node))
+      ^{:line 85 :tag (slice (* types/Type))} vartypes (zero (slice (* types/Type)))]
+    (range [_ b (.-Blocks (.-f s))]
+      (range [_ v (.-Values b)]
+        (when (!= (.-Op v) ssa/OpFwdRef)
+          (continue))
+
+        (let [var_ (.-N (assert fwdRefAux (.-Aux v)))]
+
+          ;; Optimization: look back 1 block for the definition.
+          (when (== (len (.-Preds b)) 1)
+            (let [c (.Block (aget (.-Preds b) 0))]
+              (when [w (aget (aget (.-defvars s) (.-ID c)) var_)] (!= w nil)
+                (set! (.-Op v) ssa/OpCopy)
+                (set! (.-Aux v) nil)
+                (.AddArg v w)
+                (continue))))
+
+
+
+          (when [(values _ ok) (aget (.-varnum s) var_)] ok
+            (continue))
+
+          (aset (.-varnum s) var_ (conv int32 (len vartypes)))
+          (when debugPhi
+            (fmt/Printf "var%d = %v\n" (len vartypes) var_))
+
+          (set! vars (append vars var_))
+          (set! vartypes (append vartypes (.-Type v))))))
+
+
+
+    (when (== (len vartypes) 0)
+      (return))
+
+
+    ;; Find all definitions of the variables we need to process.
+    ;; defs[n] contains all the blocks in which variable number n is assigned.
+    (let [defs (make (slice (slice (* ssa/Block))) (len vartypes))]
+      (range [_ b (.-Blocks (.-f s))]
+        (range [var_ (aget (.-defvars s) (.-ID b))] ; TODO: encode defvars some other way (explicit ops)? make defvars[n] a slice instead of a map.
+          (when [(values n ok) (aget (.-varnum s) var_)] ok
+            (aset defs n (append (aget defs n) b)))))
+
+
+
+
+      ;; Make dominator tree.
+      (set! (.-idom s) (.Idom (.-f s)))
+      (set! (.-tree s) (make (slice domBlock) (.NumBlocks (.-f s))))
+      (range [_ b (.-Blocks (.-f s))]
+        (let [p (aget (.-idom s) (.-ID b))]
+          (when (!= p nil)
+            (set! (.-sibling (aget (.-tree s) (.-ID b))) (.-firstChild (aget (.-tree s) (.-ID p))))
+            (set! (.-firstChild (aget (.-tree s) (.-ID p))) b))))
+
+
+      ;; Compute levels in dominator tree.
+      ;; With parent pointers we can do a depth-first walk without
+      ;; any auxiliary storage.
+      (set! (.-level s) (make (slice int32) (.NumBlocks (.-f s))))
+      (let [b (.-Entry (.-f s))]
+        (label :levels
+          (while true
+            (when [p (aget (.-idom s) (.-ID b))] (!= p nil)
+              (aset (.-level s) (.-ID b) (+ (aget (.-level s) (.-ID p)) 1))
+              (when debugPhi
+                (fmt/Printf "level %s = %d\n" b (aget (.-level s) (.-ID b)))))
+
+
+            (when [c (.-firstChild (aget (.-tree s) (.-ID b)))] (!= c nil)
+              (set! b c)
+              (continue))
+
+            (while true
+              (when [c (.-sibling (aget (.-tree s) (.-ID b)))] (!= c nil)
+                (set! b c)
+                (continue :levels))
+
+              (set! b (aget (.-idom s) (.-ID b)))
+              (when (== b nil)
+                (break :levels)))))
+
+
+
+
+        ;; Allocate scratch locations.
+        (set! (.-level (.-priq s)) (.-level s))
+        (set! (.-q s) (make (slice (* ssa/Block)) 0 (.NumBlocks (.-f s))))
+        (set! (.-queued s) (newSparseSet (.NumBlocks (.-f s))))
+        (set! (.-hasPhi s) (newSparseSet (.NumBlocks (.-f s))))
+        (set! (.-hasDef s) (newSparseSet (.NumBlocks (.-f s))))
+        (set! (.-placeholder s) (.entryNewValue0 (.-s s) ssa/OpUnknown types/TypeInvalid))
+
+        ;; Generate phi ops for each variable.
+        (range [n vartypes]
+          (.insertVarPhis s n (aget vars n) (aget defs n) (aget vartypes n)))
+
+
+        ;; Resolve FwdRefs to the correct write or phi.
+        (.resolveFwdRefs s)
+
+        ;; Erase variable numbers stored in AuxInt fields of phi ops. They are no longer needed.
+        (range [_ b (.-Blocks (.-f s))]
+          (range [_ v (.-Values b)]
+            (when (== (.-Op v) ssa/OpPhi)
+              (set! (.-AuxInt v) 0))
+
+            ;; Any remaining FwdRefs are dead code.
+            (when (== (.-Op v) ssa/OpFwdRef)
+              (set! (.-Op v) ssa/OpUnknown)
+              (set! (.-Aux v) nil))))))))
+
+
+
+
+
+^{:go/end 284} (go/method insertVarPhis [^{:tag (* phiState)} s ^int n ^ir/Node var_ ^{:tag (slice (* ssa/Block))} defs ^{:tag (* types/Type)} typ]
+  (let [priq (addr (.-priq s))
+      ^{:line 203} q (.-q s)
+      ^{:line 204} queued (.-queued s)]
+    (.clear queued)
+    (let [hasPhi (.-hasPhi s)]
+      (.clear hasPhi)
+      (let [hasDef (.-hasDef s)]
+        (.clear hasDef)
+
+        ;; Add defining blocks to priority queue.
+        (range [_ b defs]
+          (set! (.-a priq) (append (.-a priq) b))
+          (.add hasDef (.-ID b))
+          (when debugPhi
+            (fmt/Printf "def of var%d in %s\n" n b)))
+
+
+        (heap/Init priq)
+
+        ;; Visit blocks defining variable n, from deepest to shallowest.
+        (while (> (len (.-a priq)) 0)
+          (let [currentRoot (assert (* ssa/Block) (heap/Pop priq))]
+            (when debugPhi
+              (fmt/Printf "currentRoot %s\n" currentRoot))
+
+            ;; Walk subtree below definition.
+            ;; Skip subtrees we've done in previous iterations.
+            ;; Find edges exiting tree dominated by definition (the dominance frontier).
+            ;; Insert phis at target blocks.
+            (when (.contains queued (.-ID currentRoot))
+              (.Fatalf (.-s s) "root already in queue"))
+
+            (set! q (append q currentRoot))
+            (.add queued (.-ID currentRoot))
+            (while (> (len q) 0)
+              (let [b (aget q (- (len q) 1))]
+                (set! q (subslice q _ (- (len q) 1)))
+                (when debugPhi
+                  (fmt/Printf "  processing %s\n" b))
+
+
+                (let [currentRootLevel (aget (.-level s) (.-ID currentRoot))]
+                  (range [_ e (.-Succs b)]
+                    (let [c (.Block e)]
+                      ;; TODO: if the variable is dead at c, skip it.
+                      (when (> (aget (.-level s) (.-ID c)) currentRootLevel)
+                        ;; a D-edge, or an edge whose target is in currentRoot's subtree.
+                        (continue))
+
+                      (when (.contains hasPhi (.-ID c))
+                        (continue))
+
+                      ;; Add a phi to block c for variable n.
+                      (.add hasPhi (.-ID c))
+                      (let [v (.NewValue0I c (aget (.-blockStarts (.-s s)) (.-ID b)) ssa/OpPhi typ (conv int64 n))]
+                        ;; Note: we store the variable number in the phi's AuxInt field. Used temporarily by phi building.
+                        (when (== (.Op var_) ir/ONAME)
+                          (.addNamedValue (.-s s) (assert (* ir/Name) var_) v))
+
+                        (range [(.-Preds c)]
+                          (.AddArg v (.-placeholder s))) ; Actual args will be filled in by resolveFwdRefs.
+
+                        (when debugPhi
+                          (fmt/Printf "new phi for var%d in %s: %s\n" n c v))
+
+                        (when (not (.contains hasDef (.-ID c)))
+                          ;; There's now a new definition of this variable in block c.
+                          ;; Add it to the priority queue to explore.
+                          (heap/Push priq c)
+                          (.add hasDef (.-ID c))))))
+
+
+
+                  ;; Visit children if they have not been visited yet.
+                  (for [c (.-firstChild (aget (.-tree s) (.-ID b)))] (!= c nil) (set! c (.-sibling (aget (.-tree s) (.-ID c))))
+                    (when (not (.contains queued (.-ID c)))
+                      (set! q (append q c))
+                      (.add queued (.-ID c)))))))))))))
+
+
+
+
+
+
+
+^{:go/end 379} (go/method resolveFwdRefs "resolveFwdRefs links all FwdRef uses up to their nearest dominating definition.\n" [^{:tag (* phiState)} s]
+  ;; Do a depth-first walk of the dominator tree, keeping track
+  ;; of the most-recently-seen value for each variable.
+
+  ;; Map from variable ID to SSA value at the current point of the walk.
+  (let [values (make (slice (* ssa/Value)) (len (.-varnum s)))]
+    (range [i values]
+      (aset values i (.-placeholder s)))
+
+
+    ;; Stack of work to do.
+    (let-type [stackEntry (struct
+          ^{:line 299 :tag (* ssa/Block)} b ; block to explore
+
+
+          ^{:line 302 :tag int32 :doc "variable/value pair to reinstate on exit\n"} n ; variable ID
+          ^{:line 303 :tag (* ssa/Value)} v)]
+
+      ;; Note: only one of b or n,v will be set.
+
+      (let [^{:tag (slice stackEntry)} stk (zero (slice stackEntry))]
+
+        (set! stk (append stk (lit stackEntry :b (.-Entry (.-f s)))))
+        (while (> (len stk) 0)
+          (let [work (aget stk (- (len stk) 1))]
+            (set! stk (subslice stk _ (- (len stk) 1)))
+
+            (let [b (.-b work)]
+              (when (== b nil)
+                ;; On exit from a block, this case will undo any assignments done below.
+                (aset values (.-n work) (.-v work))
+                (continue))
+
+
+              ;; Process phis as new defs. They come before FwdRefs in this block.
+              (range [_ v (.-Values b)]
+                (when (!= (.-Op v) ssa/OpPhi)
+                  (continue))
+
+                (let [n (conv int32 (.-AuxInt v))]
+                  ;; Remember the old assignment so we can undo it when we exit b.
+                  (set! stk (append stk (lit stackEntry :n n :v (aget values n))))
+                  ;; Record the new assignment.
+                  (aset values n v)))
+
+
+              ;; Replace a FwdRef op with the current incoming value for its variable.
+              (range [_ v (.-Values b)]
+                (when (!= (.-Op v) ssa/OpFwdRef)
+                  (continue))
+
+                (let [n (aget (.-varnum s) (.-N (assert fwdRefAux (.-Aux v))))]
+                  (set! (.-Op v) ssa/OpCopy)
+                  (set! (.-Aux v) nil)
+                  (.AddArg v (aget values n))))
+
+
+              ;; Establish values for variables defined in b.
+              (range [var_ v (aget (.-defvars s) (.-ID b))]
+                (let [(values n ok) (aget (.-varnum s) var_)]
+                  (when (not ok)
+                    ;; some variable not live across a basic block boundary.
+                    (continue))
+
+                  ;; Remember the old assignment so we can undo it when we exit b.
+                  (set! stk (append stk (lit stackEntry :n n :v (aget values n))))
+                  ;; Record the new assignment.
+                  (aset values n v)))
+
+
+              ;; Replace phi args in successors with the current incoming value.
+              (range [_ e (.-Succs b)]
+                (let [(values c i) (values (.Block e) (.Index e))]
+                  (for [j (- (len (.-Values c)) 1)] (>= j 0) (dec! j)
+                    (let [v (aget (.-Values c) j)]
+                      (when (!= (.-Op v) ssa/OpPhi)
+                        (break)) ; All phis will be at the end of the block during phi building.
+
+                      ;; Only set arguments that have been resolved.
+                      ;; For very wide CFGs, this significantly speeds up phi resolution.
+                      ;; See golang.org/issue/8225.
+                      (when [w (aget values (.-AuxInt v))] (!= (.-Op w) ssa/OpUnknown)
+                        (.SetArg v i w))))))
+
+
+
+
+              ;; Walk children in dominator tree.
+              (for [c (.-firstChild (aget (.-tree s) (.-ID b)))] (!= c nil) (set! c (.-sibling (aget (.-tree s) (.-ID c))))
+                (set! stk (append stk (lit stackEntry :b c)))))))))))
+
+
+
+
+
+(go/type domBlock "domBlock contains extra per-block information to record the dominator tree.\n" (struct
+    ^{:line 383 :tag (* ssa/Block)} firstChild ; first child of block in dominator tree
+    ^{:line 384 :tag (* ssa/Block)} sibling)) ; next child of parent in dominator tree
+
+
+
+
+
+
+(go/type blockHeap "A block heap is used as a priority queue to implement the PiggyBank\nfrom Sreedhar and Gao.  That paper uses an array which is better\nasymptotically but worse in the common case when the PiggyBank\nholds a sparse set of blocks.\n" (struct
+    ^{:line 392 :tag (slice (* ssa/Block))} a ; block IDs in heap
+    ^{:line 393 :tag (slice int32)} level)) ; depth in dominator tree (static, used for determining priority)
+
+
+^{:go/end 396} (go/method Len ^int [^{:tag (* blockHeap)} h] (len (.-a h)))
+^{:go/end 397} (go/method Swap [^{:tag (* blockHeap)} h ^int i ^int j] (let [a (.-a h)] (set! (values (aget a i) (aget a j)) (values (aget a j) (aget a i)))))
+
+^{:go/end 402} (go/method Push [^{:tag (* blockHeap)} h ^any x]
+  (let [v (assert (* ssa/Block) x)]
+    (set! (.-a h) (append (.-a h) v))))
+
+^{:go/end 409} (go/method Pop ^any [^{:tag (* blockHeap)} h]
+  (let [old (.-a h)
+      ^{:line 405} n (len old)
+      ^{:line 406} x (aget old (- n 1))]
+    (set! (.-a h) (subslice old _ (- n 1)))
+    ^{:line 408} x))
+
+^{:go/end 412} (go/method Less ^bool [^{:tag (* blockHeap)} h ^int i ^int j]
+  (> (aget (.-level h) (.-ID (aget (.-a h) i))) (aget (.-level h) (.-ID (aget (.-a h) j)))))
+
+
+;; TODO: stop walking the iterated domininance frontier when
+;; the variable is dead. Maybe detect that by checking if the
+;; node we're on is reverse dominated by all the reads?
+;; Reverse dominated by the highest common successor of all the reads?
+
+
+
+(go/type sparseSet "copy of ../ssa/sparseset.go\nTODO: move this file to ../ssa, then use sparseSet there.\n" (struct
+    ^{:line 422 :tag (slice ssa/ID)} dense
+    ^{:line 423 :tag (slice int32)} sparse))
+
+
+
+
+^{:go/end 430} (go/func newSparseSet "newSparseSet returns a sparseSet that can represent\nintegers between 0 and n-1.\n" ^{:tag (* sparseSet)} [^int n]
+  (addr (lit sparseSet :dense nil :sparse (make (slice int32) n))))
+
+
+^{:go/end 435} (go/method contains ^bool [^{:tag (* sparseSet)} s ^ssa/ID x]
+  (let [i (aget (.-sparse s) x)]
+    (and (< i (conv int32 (len (.-dense s)))) (== (aget (.-dense s) i) x))))
+
+
+^{:go/end 444} (go/method add [^{:tag (* sparseSet)} s ^ssa/ID x]
+  (let [i (aget (.-sparse s) x)]
+    (when (and (< i (conv int32 (len (.-dense s)))) (== (aget (.-dense s) i) x))
+      (return))
+
+    (set! (.-dense s) (append (.-dense s) x))
+    (aset (.-sparse s) x (- (conv int32 (len (.-dense s))) 1))))
+
+
+^{:go/end 448} (go/method clear [^{:tag (* sparseSet)} s]
+  (set! (.-dense s) (subslice (.-dense s) _ 0)))
+
+
+
+(go/type simplePhiState "Variant to use for small functions.\n" (struct
+    ^{:line 452 :tag (* state)} s ; SSA state
+    ^{:line 453 :tag (* ssa/Func)} f ; function to work on
+    ^{:line 454 :tag (slice (* ssa/Value))} fwdrefs ; list of FwdRefs to be processed
+    ^{:line 455 :tag (slice (map ir/Node (* ssa/Value)))} defvars ; defined variables at end of each block
+    ^{:line 456 :tag (slice bool)} reachable)) ; which blocks are reachable
+
+
+^{:go/end 529} (go/method insertPhis [^{:tag (* simplePhiState)} s]
+  (set! (.-reachable s) (ssa/ReachableBlocks (.-f s)))
+
+  ;; Find FwdRef ops.
+  (range [_ b (.-Blocks (.-f s))]
+    (range [_ v (.-Values b)]
+      (when (!= (.-Op v) ssa/OpFwdRef)
+        (continue))
+
+      (set! (.-fwdrefs s) (append (.-fwdrefs s) v))
+      (let [var_ (.-N (assert fwdRefAux (.-Aux v)))]
+        (when [(values _ ok) (aget (aget (.-defvars s) (.-ID b)) var_)] (not ok)
+          (aset (aget (.-defvars s) (.-ID b)) var_ v))))) ; treat FwdDefs as definitions.
+
+
+
+
+  (let [^{:tag (slice (* ssa/Value))} args (zero (slice (* ssa/Value)))]
+
+    (label :loop
+      (while (> (len (.-fwdrefs s)) 0)
+        (let [v (aget (.-fwdrefs s) (- (len (.-fwdrefs s)) 1))]
+          (set! (.-fwdrefs s) (subslice (.-fwdrefs s) _ (- (len (.-fwdrefs s)) 1)))
+          (let [b (.-Block v)
+              ^{:line 483} var_ (.-N (assert fwdRefAux (.-Aux v)))]
+            (when (== b (.-Entry (.-f s)))
+              ;; No variable should be live at entry.
+              (.Fatalf (.-s s) "value %v (%v) incorrectly live at entry" var_ v))
+
+            (when (not (aget (.-reachable s) (.-ID b)))
+              ;; This block is dead.
+              ;; It doesn't matter what we use here as long as it is well-formed.
+              (set! (.-Op v) ssa/OpUnknown)
+              (set! (.-Aux v) nil)
+              (continue))
+
+            ;; Find variable value on each predecessor.
+            (set! args (subslice args _ 0))
+            (range [_ e (.-Preds b)]
+              (set! args (append args (.lookupVarOutgoing s (.Block e) (.-Type v) var_ (.-Pos v)))))
+
+
+            ;; Decide if we need a phi or not. We need a phi if there
+            ;; are two different args (which are both not v).
+            (let [^{:tag (* ssa/Value)} w (zero (* ssa/Value))]
+              (range [_ a args]
+                (when (== a v)
+                  (continue)) ; self-reference
+
+                (when (== a w)
+                  (continue)) ; already have this witness
+
+                (when (!= w nil)
+                  ;; two witnesses, need a phi value
+                  (set! (.-Op v) ssa/OpPhi)
+                  (.AddArgs v (spread args))
+                  (set! (.-Aux v) nil)
+                  (set! (.-Pos v) (aget (.-blockStarts (.-s s)) (.-ID b)))
+                  (continue :loop))
+
+                (set! w a)) ; save witness
+
+              (when (== w nil)
+                (.Fatalf (.-s s) "no witness for reachable phi %s" v))
+
+              ;; One witness. Make v a copy of w.
+              (set! (.-Op v) ssa/OpCopy)
+              (set! (.-Aux v) nil)
+              (.AddArg v w))))))))
+
+
+
+
+^{:go/end 558} (go/method lookupVarOutgoing "lookupVarOutgoing finds the variable's value at the end of block b.\n" ^{:tag (* ssa/Value)} [^{:tag (* simplePhiState)} s ^{:tag (* ssa/Block)} b ^{:tag (* types/Type)} t ^ir/Node var_ ^src/XPos line]
+  (while true
+    (when [v (aget (aget (.-defvars s) (.-ID b)) var_)] (!= v nil)
+      (return v))
+
+    ;; The variable is not defined by b and we haven't looked it up yet.
+    ;; If b has exactly one predecessor, loop to look it up there.
+    ;; Otherwise, give up and insert a new FwdRef and resolve it later.
+    (when (!= (len (.-Preds b)) 1)
+      (break))
+
+    (set! b (.Block (aget (.-Preds b) 0)))
+    (when (not (aget (.-reachable s) (.-ID b)))
+      ;; This is rare; it happens with oddly interleaved infinite loops in dead code.
+      ;; See issue 19783.
+      (break)))
+
+
+  ;; Generate a FwdRef for the variable and return that.
+  (let [v (.NewValue0A b line ssa/OpFwdRef t (lit fwdRefAux :N var_))]
+    (aset (aget (.-defvars s) (.-ID b)) var_ v)
+    (when (== (.Op var_) ir/ONAME)
+      (.addNamedValue (.-s s) (assert (* ir/Name) var_) v))
+
+    (set! (.-fwdrefs s) (append (.-fwdrefs s) v))
+    ^{:line 557} v))

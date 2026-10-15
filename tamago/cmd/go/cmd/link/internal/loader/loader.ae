@@ -1,0 +1,2975 @@
+;; Copyright 2019 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.cmd.link.internal.loader) (go/file "loader.go" :imports [
+
+
+    ^{:line 8} [bytes "bytes"]
+    ^{:line 9} [bio "cmd/internal/bio"]
+    ^{:line 10} [goobj "cmd/internal/goobj"]
+    ^{:line 11} [obj "cmd/internal/obj"]
+    ^{:line 12} [objabi "cmd/internal/objabi"]
+    ^{:line 13} [sys "cmd/internal/sys"]
+    ^{:line 14} [sym "cmd/link/internal/sym"]
+    ^{:line 15} [elf "debug/elf"]
+    ^{:line 16} [fmt "fmt"]
+    ^{:line 17} [abi "internal/abi"]
+    ^{:line 18} [buildcfg "internal/buildcfg"]
+    ^{:line 19} [io "io"]
+    ^{:line 20} [iter "iter"]
+    ^{:line 21} [log "log"]
+    ^{:line 22} [bits "math/bits"]
+    ^{:line 23} [os "os"]
+    ^{:line 24} [sort "sort"]
+    ^{:line 25} [strings "strings"]])
+
+
+(go/var _ fmt/Print)
+
+
+
+(go/type ^:alias Sym "Sym encapsulates a global symbol index, used to identify a specific\nGo symbol. The 0-valued Sym is corresponds to an invalid symbol.\n" sym/LoaderSym)
+
+
+
+(go/type Relocs "Relocs encapsulates the set of relocations on a given symbol; an\ninstance of this type is returned by the Loader Relocs() method.\n" (struct
+    ^{:line 37 :tag (slice goobj/Reloc)} rs
+
+    ^{:line 39 :tag uint32} li ; local index of symbol whose relocs we're examining
+    ^{:line 40 :tag (* oReader)} r ; object reader for containing package
+    ^{:line 41 :tag (* Loader)} l)) ; loader
+
+
+
+(go/type ExtReloc "ExtReloc contains the payload for an external relocation.\n" (struct
+    ^{:line 46 :tag Sym} Xsym
+    ^{:line 47 :tag int64} Xadd
+    ^{:line 48 :tag objabi/RelocType} Type
+    ^{:line 49 :tag uint8} Size))
+
+
+
+
+(go/type Reloc "Reloc holds a \"handle\" to access a relocation record from an\nobject file.\n" (struct
+    (* goobj/Reloc)
+    ^{:line 56 :tag (* oReader)} r
+    ^{:line 57 :tag (* Loader)} l))
+
+
+^{:go/end 60} (go/method Type ^objabi/RelocType [^Reloc rel] (bit-and-not (conv objabi/RelocType (.Type (.-Reloc rel))) objabi/R_WEAK))
+^{:go/end 61} (go/method Weak ^bool [^Reloc rel] (!= (bit-and (conv objabi/RelocType (.Type (.-Reloc rel))) objabi/R_WEAK) 0))
+^{:go/end 62} (go/method SetType [^Reloc rel ^objabi/RelocType t] (.SetType (.-Reloc rel) (conv uint16 t)))
+^{:go/end 63} (go/method Sym ^Sym [^Reloc rel] (.resolve (.-l rel) (.-r rel) (.Sym (.-Reloc rel))))
+^{:go/end 64} (go/method SetSym [^Reloc rel ^Sym s] (.SetSym (.-Reloc rel) (lit goobj/SymRef :PkgIdx 0 :SymIdx (conv uint32 s))))
+^{:go/end 65} (go/method IsMarker ^bool [^Reloc rel] (== ^{:go/via [Reloc]} (.Siz rel) 0))
+
+
+
+(go/type Aux "Aux holds a \"handle\" to access an aux symbol record from an\nobject file.\n" (struct
+    (* goobj/Aux)
+    ^{:line 71 :tag (* oReader)} r
+    ^{:line 72 :tag (* Loader)} l))
+
+
+^{:go/end 75} (go/method Sym ^Sym [^Aux a] (.resolve (.-l a) (.-r a) (.Sym (.-Aux a))))
+
+
+
+(go/type oReader "oReader is a wrapper type of obj.Reader, along with some\nextra information.\n" (struct
+    (* goobj/Reader)
+    ^{:line 81 :tag (* sym/CompilationUnit)} unit
+    ^{:line 82 :tag int} version ; version of static symbol
+    ^{:line 83 :tag string} pkgprefix
+    ^{:line 84 :tag (slice Sym)} syms ; Sym's global index, indexed by local index
+    ^{:line 85 :tag (slice uint32)} pkg ; indices of referenced package by PkgIdx (index into loader.objs array)
+    ^{:line 86 :tag int} ndef ; cache goobj.Reader.NSym()
+    ^{:line 87 :tag int} nhashed64def ; cache goobj.Reader.NHashed64Def()
+    ^{:line 88 :tag int} nhasheddef ; cache goobj.Reader.NHashedDef()
+    ^{:line 89 :tag uint32} objidx)) ; index of this reader in the objs slice
+
+
+
+
+^{:go/end 94} (go/method NAlldef "Total number of defined symbols (package symbols, hashed symbols, and\nnon-package symbols).\n" ^int [^{:tag (* oReader)} r] (+ (.-ndef r) (.-nhashed64def r) (.-nhasheddef r) ^{:go/via [Reader]} (.NNonpkgdef r)))
+
+
+^{:go/end 101} (go/method IsContentHashed "whether the symbol at local index li is a content hashed symbol\n" ^bool [^{:tag (* oReader)} r ^uint32 li]
+  (let [start (conv uint32 (+ (.-ndef r) (.-nhashed64def r)))
+      ^{:line 99} end (+ start (conv uint32 (.-nhasheddef r)))]
+    (and (<= start li) (< li end))))
+
+
+
+
+
+
+
+(go/type objSym "objSym represents a symbol in an object file. It is a tuple of\nthe object and the symbol's local index.\nFor external symbols, objidx is the index of l.extReader (extObj),\ns is its index into the payload array.\n{0, 0} represents the nil symbol.\n" (struct
+    ^{:line 109 :tag uint32} objidx ; index of the object (in l.objs array)
+    ^{:line 110 :tag uint32} s)) ; local index
+
+
+(go/type nameVer (struct
+    ^{:line 114 :tag string} name
+    ^{:line 115 :tag int} v))
+
+
+(go/type Bitmap (slice uint32))
+
+
+^{:go/end 124} (go/method Set "set the i-th bit.\n" [^Bitmap bm ^Sym i]
+  (let [(values n r) (values (/ (conv uint i) 32) (% (conv uint i) 32))]
+    (set! (aget bm n) bit-or ^uint32 (<< 1 r))))
+
+
+
+^{:go/end 130} (go/method Unset "unset the i-th bit.\n" [^Bitmap bm ^Sym i]
+  (let [(values n r) (values (/ (conv uint i) 32) (% (conv uint i) 32))]
+    (set! (aget bm n) bit-and-not ^uint32 (<< 1 r))))
+
+
+
+^{:go/end 136} (go/method Has "whether the i-th bit is set.\n" ^bool [^Bitmap bm ^Sym i]
+  (let [(values n r) (values (/ (conv uint i) 32) (% (conv uint i) 32))]
+    (!= (bit-and (aget bm n) ^uint32 (<< 1 r)) 0)))
+
+
+
+^{:go/end 141} (go/method Len "return current length of bitmap in bits.\n" ^int [^Bitmap bm]
+  (* (len bm) 32))
+
+
+
+^{:go/end 150} (go/method Count "return the number of bits set.\n" ^int [^Bitmap bm]
+  (let [s 0]
+    (range [_ x bm]
+      (set! s + (bits/OnesCount32 x)))
+
+    ^{:line 149} s))
+
+
+^{:go/end 154} (go/func MakeBitmap ^Bitmap [^int n]
+  (make Bitmap (/ (+ n 31) 32)))
+
+
+
+
+^{:go/end 164} (go/func growBitmap "growBitmap insures that the specified bitmap has enough capacity,\nreallocating (doubling the size) if needed.\n" ^Bitmap [^int reqLen ^Bitmap b]
+  (let [curLen (.Len b)]
+    (when (> reqLen curLen)
+      (set! b (append b (spread (MakeBitmap (- (+ reqLen 1) curLen))))))
+
+    ^{:line 163} b))
+
+
+(go/type symAndSize (struct
+    ^{:line 167 :tag Sym} sym
+    ^{:line 168 :tag uint32} size))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+(go/type Loader "A Loader loads new object files and resolves indexed symbol references.\n\nNotes on the layout of global symbol index space:\n\n  - Go object files are read before host object files; each Go object\n    read adds its defined package symbols to the global index space.\n    Nonpackage symbols are not yet added.\n\n  - In loader.LoadNonpkgSyms, add non-package defined symbols and\n    references in all object files to the global index space.\n\n  - Host object file loading happens; the host object loader does a\n    name/version lookup for each symbol it finds; this can wind up\n    extending the external symbol index space range. The host object\n    loader stores symbol payloads in loader.payloads using SymbolBuilder.\n\n  - Each symbol gets a unique global index. For duplicated and\n    overwriting/overwritten symbols, the second (or later) appearance\n    of the symbol gets the same global index as the first appearance.\n" (struct
+    ^{:line 191 :tag (slice (* oReader))} objs
+    ^{:line 192 :tag Sym} extStart ; from this index on, the symbols are externally defined
+    ^{:line 193 :tag (slice Sym)} builtinSyms ; global index of builtin symbols
+
+    ^{:line 195 :tag (slice objSym)} objSyms ; global index mapping to local index
+
+    ^{:line 197 :tag (array 2 (map string Sym))} symsByName ; map symbol name to index, two maps are for ABI0 and ABIInternal
+    ^{:line 198 :tag (map nameVer Sym)} extStaticSyms ; externally defined static symbols, keyed by name
+
+    ^{:line 200 :tag (* oReader)} extReader ; a dummy oReader, for external symbols
+    ^{:line 201 :tag (slice extSymPayload)} payloadBatch
+    ^{:line 202 :tag (slice (* extSymPayload))} payloads ; contents of linker-materialized external syms
+    ^{:line 203 :tag (slice int64)} values ; symbol values, indexed by global sym index
+
+    ^{:line 205 :tag (slice (* sym/Section))} sects ; sections
+    ^{:line 206 :tag (slice uint16)} symSects ; symbol's section, index to sects array
+
+    ^{:line 208 :tag (slice uint8)} align ; symbol 2^N alignment, indexed by global index
+
+    ^{:line 210 :tag (map Sym bool)} deferReturnTramp ; whether the symbol is a trampoline of a deferreturn call
+
+    ^{:line 212 :tag (map string uint32)} objByPkg ; map package path to the index of its Go object reader
+
+    ^{:line 214 :tag int} anonVersion ; most recently assigned ext static sym pseudo-version
+
+
+
+
+
+
+    ^{:line 221 :tag Bitmap :doc "Bitmaps and other side structures used to store data used to store\nsymbol flags/attributes; these are to be accessed via the\ncorresponding loader \"AttrXXX\" and \"SetAttrXXX\" methods. Please\nvisit the comments on these methods for more details on the\nsemantics / interpretation of the specific flags or attribute.\n"} attrReachable ; reachable symbols, indexed by global index
+    ^{:line 222 :tag Bitmap} attrOnList ; "on list" symbols, indexed by global index
+    ^{:line 223 :tag Bitmap} attrLocal ; "local" symbols, indexed by global index
+    ^{:line 224 :tag Bitmap} attrNotInSymbolTable ; "not in symtab" symbols, indexed by global idx
+    ^{:line 225 :tag Bitmap} attrUsedInIface ; "used in interface" symbols, indexed by global idx
+    ^{:line 226 :tag Bitmap} attrSpecial ; "special" frame symbols, indexed by global idx
+    ^{:line 227 :tag Bitmap} attrVisibilityHidden ; hidden symbols, indexed by ext sym index
+    ^{:line 228 :tag Bitmap} attrDuplicateOK ; dupOK symbols, indexed by ext sym index
+    ^{:line 229 :tag Bitmap} attrShared ; shared symbols, indexed by ext sym index
+    ^{:line 230 :tag Bitmap} attrExternal ; external symbols, indexed by ext sym index
+    ^{:line 231 :tag Bitmap} generatedSyms ; symbols that generate their content, indexed by ext sym idx
+
+    ^{:line 233 :tag (map Sym bool)} attrReadOnly ; readonly data for this sym
+    ^{:line 234 :tag (map Sym (struct))} attrCgoExportDynamic ; "cgo_export_dynamic" symbols
+    ^{:line 235 :tag (map Sym (struct))} attrCgoExportStatic ; "cgo_export_static" symbols
+
+
+    ^{:line 238 :tag (slice Sym) :doc "Outer and Sub relations for symbols.\n"} outer ; indexed by global index
+    ^{:line 239 :tag (map Sym Sym)} sub
+
+    ^{:line 241 :tag (map Sym string)} dynimplib ; stores Dynimplib symbol attribute
+    ^{:line 242 :tag (map Sym string)} dynimpvers ; stores Dynimpvers symbol attribute
+    ^{:line 243 :tag (map Sym uint8)} localentry ; stores Localentry symbol attribute
+    ^{:line 244 :tag (map Sym string)} extname ; stores Extname symbol attribute
+    ^{:line 245 :tag (map Sym elf/SymType)} elfType ; stores elf type symbol property
+    ^{:line 246 :tag (map Sym int32)} elfSym ; stores elf sym symbol property
+    ^{:line 247 :tag (map Sym int32)} localElfSym ; stores "local" elf sym symbol property
+    ^{:line 248 :tag (map Sym string)} symPkg ; stores package for symbol, or library for shlib-derived syms
+    ^{:line 249 :tag (map Sym int32)} plt ; stores dynimport for pe objects
+    ^{:line 250 :tag (map Sym int32)} got ; stores got for pe objects
+    ^{:line 251 :tag (map Sym int32)} dynid ; stores Dynid for symbol
+    ^{:line 252 :tag (map Sym bool)} weakBinding ; stores whether a symbol has a weak binding
+    ^{:line 253 :tag (map Sym bool)} contentHashed ; whether a symbol is a content hashed symbol, for external symbol only
+
+    ^{:line 255 :tag (map relocId sym/RelocVariant)} relocVariant ; stores variant relocs
+
+
+
+
+    ^{:line 260 :tag (slice Sym) :doc "Used to implement field tracking; created during deadcode if\nfield tracking is enabled. Reachparent[K] contains the index of\nthe symbol that triggered the marking of symbol K as live.\n"} Reachparent
+
+
+    ^{:line 263 :tag (map string Sym) :doc "CgoExports records cgo-exported symbols by SymName.\n"} CgoExports
+
+    ^{:line 265 :tag (slice Sym)} WasmExports
+
+
+
+
+
+    ^{:line 271 :tag (slice symAndSize) :doc "sizeFixups records symbols that we need to fix up the size\nafter loading. It is very rarely needed, only for a DATA symbol\nand a BSS symbol with the same name, and the BSS symbol has\nlarger size.\n"} sizeFixups
+
+    ^{:line 273 :tag uint32} flags
+
+    ^{:line 275 :tag int} strictDupMsgs ; number of strict-dup warning/errors, when FlagStrictDups is enabled
+
+    ^{:line 277 :tag (* ErrorReporter)} errorReporter
+
+    ^{:line 279 :tag int} npkgsyms ; number of package symbols, for accounting
+    ^{:line 280 :tag int} nhashedsyms)) ; number of hashed symbols, for accounting
+
+
+(go/const
+  ^{:line 284} [^{:val 0} pkgDef iota]
+  ^{:line 285} [^{:val 1} hashed64Def]
+  ^{:line 286} [^{:val 2} hashedDef]
+  ^{:line 287} [^{:val 3} nonPkgDef]
+  ^{:line 288} [^{:val 4} nonPkgRef])
+
+
+
+(go/const "objidx\n"
+  ^{:line 293} [^{:val 0} nilObj iota]
+  ^{:line 294} [^{:val 1} extObj]
+  ^{:line 295} [^{:val 2} goObjStart])
+
+
+
+
+(go/type extSymPayload "extSymPayload holds the payload (data + relocations) for linker-synthesized\nexternal symbols (note that symbol value is stored in a separate slice).\n" (struct
+    ^{:line 301 :tag string} name ; TODO: would this be better as offset into str table?
+    ^{:line 302 :tag int64} size
+    ^{:line 303 :tag int} ver
+    ^{:line 304 :tag sym/SymKind} kind
+    ^{:line 305 :tag uint32} objidx ; index of original object if sym made by cloneToExternal
+    ^{:line 306 :tag (slice goobj/Reloc)} relocs
+    ^{:line 307 :tag (slice byte)} data
+    ^{:line 308 :tag (slice goobj/Aux)} auxs))
+
+
+(go/const
+
+  ^{:line 313} [^{:val 1 :doc "Loader.flags\n"} FlagStrictDups (<< 1 iota)]
+  ^{:line 314} [^{:val 2} FlagCheckLinkname])
+
+
+^{:go/end 352} (go/func NewLoader ^{:tag (* Loader)} [^uint32 flags ^{:tag (* ErrorReporter)} reporter]
+  (let [nbuiltin (goobj/NBuiltin)
+      ^{:line 319} extReader (addr (lit oReader :objidx extObj))
+      ^{:line 320} ldr (addr ^{:go/breaks [2 4 6 8 10 12 14 16 18 20 22 24 26 28 30 32 34 36 38 40 42 44 46 48 50 52 54 56]} (lit Loader
+          :objs (lit (slice (* oReader)) nil extReader) ; reserve index 0 for nil symbol, 1 for external symbols
+          :objSyms (make (slice objSym) 1 1) ; This will get overwritten later.
+          :extReader extReader
+          :symsByName (lit (array 2 (map string Sym)) (make (map string Sym) 80000) (make (map string Sym) 50000)) ; preallocate ~2MB for ABI0 and ~1MB for ABI1 symbols
+          :objByPkg (make (map string uint32))
+          :sub (make (map Sym Sym))
+          :dynimplib (make (map Sym string))
+          :dynimpvers (make (map Sym string))
+          :localentry (make (map Sym uint8))
+          :extname (make (map Sym string))
+          :attrReadOnly (make (map Sym bool))
+          :elfType (make (map Sym elf/SymType))
+          :elfSym (make (map Sym int32))
+          :localElfSym (make (map Sym int32))
+          :symPkg (make (map Sym string))
+          :plt (make (map Sym int32))
+          :got (make (map Sym int32))
+          :dynid (make (map Sym int32))
+          :weakBinding (make (map Sym bool))
+          :attrCgoExportDynamic (make (map Sym (struct)))
+          :attrCgoExportStatic (make (map Sym (struct)))
+          :deferReturnTramp (make (map Sym bool))
+          :contentHashed (make (map Sym bool))
+          :extStaticSyms (make (map nameVer Sym))
+          :builtinSyms (make (slice Sym) nbuiltin)
+          :flags flags
+          :errorReporter reporter
+          :sects (lit (slice (* sym/Section)) nil)))] ; reserve index 0 for nil section
+
+    (set! (.-ldr reporter) ldr)
+    ^{:line 351} ldr))
+
+
+
+^{:go/end 361} (go/method addObj "Add object file r\n" [^{:tag (* Loader)} l ^string pkg ^{:tag (* oReader)} r]
+  (set! pkg (objabi/PathToPrefix pkg)) ; the object file contains escaped package path
+  (when [(values _ ok) (aget (.-objByPkg l) pkg)] (not ok)
+    (aset (.-objByPkg l) pkg (.-objidx r)))
+
+  (set! (.-objs l) (append (.-objs l) r)))
+
+
+
+
+^{:go/end 540} (go/method addSym "Add a symbol from an object file, return the global index.\nIf the symbol already exist, it returns the index of that symbol.\n" ^Sym [^{:tag (* loadState)} st ^string name ^int ver ^{:tag (* oReader)} r ^uint32 li ^int kind ^{:tag (* goobj/Sym)} osym]
+  (let [l (.-l st)]
+    (when (!= (.-extStart l) 0)
+      (panic "addSym called after external symbol is created"))
+
+    (let [i (conv Sym (len (.-objSyms l)))]
+      (when (!= (conv int i) (len (.-objSyms l))) ; overflow
+        (panic "too many symbols"))
+
+      (let [addToGlobal ^{:go/end 376} (fn []
+            (set! (.-objSyms l) (append (.-objSyms l) (lit objSym (.-objidx r) li))))]
+
+        (when (and (== name "") (!= kind hashed64Def) (!= kind hashedDef))
+          (addToGlobal)
+          (return i)) ; unnamed aux symbol
+
+        (when (== ver (.-version r))
+          ;; Static symbol. Add its global index but don't
+          ;; add to name lookup table, as it cannot be
+          ;; referenced by name.
+          (addToGlobal)
+          (return i))
+
+        (switch kind
+          (case [pkgDef]
+            ;; Defined package symbols cannot be dup to each other.
+            ;; We load all the package symbols first, so we don't need
+            ;; to check dup here.
+            ;; We still add it to the lookup table, as it may still be
+            ;; referenced by name (e.g. through linkname).
+            (aset (aget (.-symsByName l) ver) name i)
+            (addToGlobal)
+            (return i))
+          (case [hashed64Def hashedDef]
+            ;; Hashed (content-addressable) symbol. Check the hash
+            ;; but don't add to name lookup table, as they are not
+            ;; referenced by name. Also no need to do overwriting
+            ;; check, as same hash indicates same content.
+            (let [^{:tag (func [] [symAndSize bool])} checkHash (zero (func [] [symAndSize bool]))
+                ^{:line 404 :tag (func [symAndSize])} addToHashMap (zero (func [symAndSize]))
+                ^{:line 405 :tag uint64} h64 (zero uint64) ; only used for hashed64Def
+                ^{:line 406 :tag (* goobj/HashType)} h (zero (* goobj/HashType))] ; only used for hashedDef
+              (if (== kind hashed64Def) (do
+                  (set! checkHash ^{:go/end 412} (fn [] :results [symAndSize bool]
+                      (set! h64 ^{:go/via [Reader]} (.Hash64 r (- li (conv uint32 (.-ndef r)))))
+                      (let [(values s existed) (aget (.-hashed64Syms st) h64)]
+                        (return s existed))))
+
+                  (set! addToHashMap ^{:go/end 413} (fn [^symAndSize ss] (aset (.-hashed64Syms st) h64 ss))))
+                (do
+                  (set! checkHash ^{:go/end 419} (fn [] :results [symAndSize bool]
+                      (set! h ^{:go/via [Reader]} (.Hash r (- li (conv uint32 (+ (.-ndef r) (.-nhashed64def r))))))
+                      (let [(values s existed) (aget (.-hashedSyms st) @h)]
+                        (return s existed))))
+
+                  (set! addToHashMap ^{:go/end 420} (fn [^symAndSize ss] (aset (.-hashedSyms st) @h ss)))))
+
+              (let [siz (.Siz osym)]
+                (when [(values s existed) (checkHash)] existed
+                  ;; The content hash is built from symbol data and relocations. In the
+                  ;; object file, the symbol data may not always contain trailing zeros,
+                  ;; e.g. for [5]int{1,2,3} and [100]int{1,2,3}, the data is same
+                  ;; (although the size is different).
+                  ;; Also, for short symbols, the content hash is the identity function of
+                  ;; the 8 bytes, and trailing zeros doesn't change the hash value, e.g.
+                  ;; hash("A") == hash("A\0\0\0").
+                  ;; So when two symbols have the same hash, we need to use the one with
+                  ;; larger size.
+                  (when (> siz (.-size s))
+                    ;; New symbol has larger size, use the new one. Rewrite the index mapping.
+                    (aset (.-objSyms l) (.-sym s) (lit objSym (.-objidx r) li))
+                    (addToHashMap (lit symAndSize (.-sym s) siz)))
+
+                  (return (.-sym s)))
+
+                (addToHashMap (lit symAndSize i siz))
+                (addToGlobal)
+                (return i)))))
+
+
+        ;; Non-package (named) symbol.
+        ;; Check if it already exists.
+        (let [(values oldi existed) (aget (aget (.-symsByName l) ver) name)]
+          (when (not existed)
+            (aset (aget (.-symsByName l) ver) name i)
+            (addToGlobal)
+            (return i))
+
+          ;; symbol already exists
+          ;; Fix for issue #47185 -- given two dupok or BSS symbols with
+          ;; different sizes, favor symbol with larger size. See also
+          ;; issue #46653 and #72032.
+          (let [oldsz (.SymSize l oldi)
+              ^{:line 458} sz (conv int64 (.Siz ^{:go/via [Reader]} (.Sym r li)))
+              (values oldr oldli) (.toLocal l oldi)
+              ^{:line 460} oldsym ^{:go/via [Reader]} (.Sym oldr oldli)]
+            (when (.Dupok osym)
+              (when (.Dupok oldsym)
+                (when (!= (bit-and (.-flags l) FlagStrictDups) 0)
+                  (.checkdup l name r li oldi))
+
+                (when (< oldsz sz)
+                  ;; new symbol overwrites old symbol.
+                  (aset (.-objSyms l) oldi (lit objSym (.-objidx r) li))))
+
+
+              (return oldi))
+
+            (when (.Dupok oldsym)
+              ;; oldsym is Dupok, new is not.
+              ;; new symbol overwrites old symbol.
+              (aset (.-objSyms l) oldi (lit objSym (.-objidx r) li))
+              (return oldi))
+
+            ;; If one is a DATA symbol (i.e. has content, DataSize != 0,
+            ;; including RODATA) and the other is BSS, the one with content wins.
+            ;; If both are BSS, the one with larger size wins.
+            ;;
+            ;; For a special case, we allow a TEXT symbol overwrites a BSS symbol
+            ;; even if the BSS symbol has larger size. This is because there is
+            ;; code like below to take the address of a function
+            ;;
+            ;;	//go:linkname fn
+            ;;	var fn uintptr
+            ;;	var fnAddr = uintptr(unsafe.Pointer(&fn))
+            ;;
+            ;; TODO: maybe limit this case to just pointer sized variable?
+            ;;
+            ;; In summary, the "overwrite" variable and the final result are
+            ;;
+            ;; new sym       old sym       result
+            ;; -------------------------------------------------------
+            ;; TEXT          BSS           new wins
+            ;; DATA          DATA          ERROR
+            ;; DATA lg/eq    BSS  sm/eq    new wins
+            ;; DATA small    BSS  large    merge: new with larger size
+            ;; BSS  large    DATA small    merge: old with larger size
+            ;; BSS  large    BSS  small    new wins
+            ;; BSS  sm/eq    D/B  lg/eq    old wins
+            ;; BSS           TEXT          old wins
+            (let [oldtyp (aget sym/AbiSymKindToSymKind (conv objabi/SymKind (.Type oldsym)))
+                ^{:line 506} newtyp (aget sym/AbiSymKindToSymKind (conv objabi/SymKind (.Type osym)))
+                ^{:line 507} newIsText (.IsText newtyp)
+                ^{:line 508} oldHasContent (!= ^{:go/via [Reader]} (.DataSize oldr oldli) 0)
+                ^{:line 509} newHasContent (!= ^{:go/via [Reader]} (.DataSize r li) 0)
+                ^{:line 510} oldIsBSS (and (.IsData oldtyp) (not oldHasContent))
+                ^{:line 511} newIsBSS (and (.IsData newtyp) (not newHasContent))]
+              (switch
+                (case [(and newIsText oldIsBSS)
+                    (and newHasContent oldIsBSS)
+                    (and newIsBSS oldIsBSS (> sz oldsz))]
+                  ;; new symbol overwrites old symbol.
+                  (aset (.-objSyms l) oldi (lit objSym (.-objidx r) li))
+                  (when (> oldsz sz)
+                    ;; If the BSS symbol has a larger size, expand the data
+                    ;; symbol's size so access from the BSS side cannot overrun.
+                    ;; It is hard to modify the symbol size until all Go objects
+                    ;; (potentially read-only) are loaded, so we record it in
+                    ;; a fixup table and apply them later. This is very rare.
+                    ;; One case is a global variable with a Go declaration and an
+                    ;; assembly definition, which typically have the same size,
+                    ;; but in ASAN mode the Go declaration has a larger size due
+                    ;; to the inserted red zone.
+                    (set! (.-sizeFixups l) (append (.-sizeFixups l) (lit symAndSize oldi (conv uint32 oldsz))))))
+
+                (case [newIsBSS]
+                  ;; old win, just ignore the new symbol.
+                  (when (> sz oldsz)
+                    ;; See the comment above for sizeFixups.
+                    (set! (.-sizeFixups l) (append (.-sizeFixups l) (lit symAndSize oldi (conv uint32 sz))))))
+
+                (default
+                  (log/Fatalf "duplicated definition of symbol %s, from %s (type %s size %d) and %s (type %s size %d)" name (.-Pkg (.-Lib (.-unit r))) newtyp sz (.-Pkg (.-Lib (.-unit oldr))) oldtyp oldsz)))
+
+              ^{:line 539} oldi)))))))
+
+
+
+
+^{:go/end 559} (go/method newExtSym "newExtSym creates a new external sym with the specified\nname/version.\n" ^Sym [^{:tag (* Loader)} l ^string name ^int ver]
+  (let [i (conv Sym (len (.-objSyms l)))]
+    (when (!= (conv int i) (len (.-objSyms l))) ; overflow
+      (panic "too many symbols"))
+
+    (when (== (.-extStart l) 0)
+      (set! (.-extStart l) i))
+
+    (.growValues l (+ (conv int i) 1))
+    (.growOuter l (+ (conv int i) 1))
+    (.growAttrBitmaps l (+ (conv int i) 1))
+    (let [pi (.newPayload l name ver)]
+      (set! (.-objSyms l) (append (.-objSyms l) (lit objSym (.-objidx (.-extReader l)) (conv uint32 pi))))
+      (set! (.-syms (.-extReader l)) (append (.-syms (.-extReader l)) i))
+      ^{:line 558} i)))
+
+
+
+
+
+^{:go/end 577} (go/method LookupOrCreateSym "LookupOrCreateSym looks up the symbol with the specified name/version,\nreturning its Sym index if found. If the lookup fails, a new external\nSym will be created, entered into the lookup tables, and returned.\n" ^Sym [^{:tag (* Loader)} l ^string name ^int ver]
+  (let [i (.Lookup l name ver)]
+    (when (!= i 0)
+      (return i))
+
+    (set! i (.newExtSym l name ver))
+    (let [static (or (>= ver sym/SymVerStatic) (< ver 0))]
+      (if static
+        (aset (.-extStaticSyms l) (lit nameVer name ver) i)
+
+        (aset (aget (.-symsByName l) ver) name i))
+
+      ^{:line 576} i)))
+
+
+
+
+
+^{:go/end 587} (go/method AddCgoExport "AddCgoExport records a cgo-exported symbol in l.CgoExports.\nThis table is used to identify the correct Go symbol ABI to use\nto resolve references from host objects (which don't have ABIs).\n" [^{:tag (* Loader)} l ^Sym s]
+  (when (== (.-CgoExports l) nil)
+    (set! (.-CgoExports l) (make (map string Sym))))
+
+  (aset (.-CgoExports l) (.SymName l s) s))
+
+
+
+
+
+
+^{:go/end 607} (go/method LookupOrCreateCgoExport "LookupOrCreateCgoExport is like LookupOrCreateSym, but if ver\nindicates a global symbol, it uses the CgoExport table to determine\nthe appropriate symbol version (ABI) to use. ver must be either 0\nor a static symbol version.\n" ^Sym [^{:tag (* Loader)} l ^string name ^int ver]
+  (when (>= ver sym/SymVerStatic)
+    (return (.LookupOrCreateSym l name ver)))
+
+  (when (!= ver 0)
+    (panic "ver must be 0 or a static version"))
+
+  ;; Look for a cgo-exported symbol from Go.
+  (when [(values s ok) (aget (.-CgoExports l) name)] ok
+    (return s))
+
+  ;; Otherwise, this must just be a symbol in the host object.
+  ;; Create a version 0 symbol for it.
+  (.LookupOrCreateSym l name 0))
+
+
+^{:go/end 612} (go/method IsExternal ^bool [^{:tag (* Loader)} l ^Sym i]
+  (let [(values r _) (.toLocal l i)]
+    (.isExtReader l r)))
+
+
+^{:go/end 616} (go/method isExtReader ^bool [^{:tag (* Loader)} l ^{:tag (* oReader)} r]
+  (== r (.-extReader l)))
+
+
+
+
+
+^{:go/end 624} (go/method extIndex "For external symbol, return its index in the payloads array.\nXXX result is actually not a global index. We (ab)use the Sym type\nso we don't need conversion for accessing bitmaps.\n" ^Sym [^{:tag (* Loader)} l ^Sym i]
+  (let [(values _ li) (.toLocal l i)]
+    (conv Sym li)))
+
+
+
+
+^{:go/end 636} (go/method newPayload "Get a new payload for external symbol, return its index in\nthe payloads array.\n" ^int [^{:tag (* Loader)} l ^string name ^int ver]
+  (let [pi (len (.-payloads l))
+      ^{:line 630} pp (.allocPayload l)]
+    (set! (.-name pp) name)
+    (set! (.-ver pp) ver)
+    (set! (.-payloads l) (append (.-payloads l) pp))
+    (.growExtAttrBitmaps l)
+    ^{:line 635} pi))
+
+
+
+
+
+^{:go/end 647} (go/method getPayload "getPayload returns a pointer to the extSymPayload struct for an\nexternal symbol if the symbol has a payload. Will panic if the\nsymbol in question is bogus (zero or not an external sym).\n" ^{:tag (* extSymPayload)} [^{:tag (* Loader)} l ^Sym i]
+  (when (not (.IsExternal l i))
+    (panic (fmt/Sprintf "bogus symbol index %d in getPayload" i)))
+
+  (let [pi (.extIndex l i)]
+    (aget (.-payloads l) pi)))
+
+
+
+^{:go/end 658} (go/method allocPayload "allocPayload allocates a new payload.\n" ^{:tag (* extSymPayload)} [^{:tag (* Loader)} l]
+  (let [batch (.-payloadBatch l)]
+    (when (== (len batch) 0)
+      (set! batch (make (slice extSymPayload) 1000)))
+
+    (let [p (addr (aget batch 0))]
+      (set! (.-payloadBatch l) (subslice batch 1))
+      ^{:line 657} p)))
+
+
+^{:go/end 673} (go/method Grow [^{:tag (* extSymPayload)} ms ^int64 siz]
+  (when (!= (conv int64 (conv int siz)) siz)
+    (log/Fatalf "symgrow size %d too long" siz))
+
+  (when (>= (conv int64 (len (.-data ms))) siz)
+    (return))
+
+  (when (< (cap (.-data ms)) (conv int siz))
+    (let [cl (len (.-data ms))]
+      (set! (.-data ms) (append (.-data ms) (spread (make (slice byte) (- (+ (conv int siz) 1) cl)))))
+      (set! (.-data ms) (subslice (.-data ms) 0 cl))))
+
+  (set! (.-data ms) (subslice (.-data ms) _ siz)))
+
+
+
+^{:go/end 678} (go/method toGlobal "Convert a local index to a global index.\n" ^Sym [^{:tag (* Loader)} l ^{:tag (* oReader)} r ^uint32 i]
+  (aget (.-syms r) i))
+
+
+
+^{:go/end 683} (go/method toLocal "Convert a global index to a local index.\n" [^{:tag (* Loader)} l ^Sym i] :results [(* oReader) uint32]
+  (return (aget (.-objs l) (.-objidx (aget (.-objSyms l) i))) (.-s (aget (.-objSyms l) i))))
+
+
+
+^{:go/end 721} (go/method resolve "Resolve a local symbol reference. Return global index.\n" ^Sym [^{:tag (* Loader)} l ^{:tag (* oReader)} r ^goobj/SymRef s]
+  (let [^{:tag (* oReader)} rr (zero (* oReader))]
+    (switch [p (.-PkgIdx s)] p
+      (case [goobj/PkgIdxInvalid]
+        ;; {0, X} with non-zero X is never a valid sym reference from a Go object.
+        ;; We steal this space for symbol references from external objects.
+        ;; In this case, X is just the global index.
+        (when (.isExtReader l r)
+          (return (conv Sym (.-SymIdx s))))
+
+        (when (!= (.-SymIdx s) 0)
+          (panic "bad sym ref"))
+
+        (return 0))
+      (case [goobj/PkgIdxHashed64]
+        (let [i (+ (conv int (.-SymIdx s)) (.-ndef r))]
+          (return (aget (.-syms r) i))))
+      (case [goobj/PkgIdxHashed]
+        (let [i (+ (conv int (.-SymIdx s)) (.-ndef r) (.-nhashed64def r))]
+          (return (aget (.-syms r) i))))
+      (case [goobj/PkgIdxNone]
+        (let [i (+ (conv int (.-SymIdx s)) (.-ndef r) (.-nhashed64def r) (.-nhasheddef r))]
+          (return (aget (.-syms r) i))))
+      (case [goobj/PkgIdxBuiltin]
+        (when [bi (aget (.-builtinSyms l) (.-SymIdx s))] (!= bi 0)
+          (return bi))
+
+        (.reportMissingBuiltin l (conv int (.-SymIdx s)) (.-Pkg (.-Lib (.-unit r))))
+        (return 0))
+      (case [goobj/PkgIdxSelf]
+        (set! rr r))
+      (default
+        (set! rr (aget (.-objs l) (aget (.-pkg r) p)))))
+
+    (.toGlobal l rr (.-SymIdx s))))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 744} (go/method reportMissingBuiltin "reportMissingBuiltin issues an error in the case where we have a\nrelocation against a runtime builtin whose definition is not found\nwhen the runtime package is built. The canonical example is\n\"runtime.racefuncenter\" -- currently if you do something like\n\n\tgo build -gcflags=-race myprogram.go\n\nthe compiler will insert calls to the builtin runtime.racefuncenter,\nbut the version of the runtime used for linkage won't actually contain\ndefinitions of that symbol. See issue #42396 for details.\n\nAs currently implemented, this is a fatal error. This has drawbacks\nin that if there are multiple missing builtins, the error will only\ncite the first one. On the plus side, terminating the link here has\nadvantages in that we won't run the risk of panics or crashes later\non in the linker due to R_CALL relocations with 0-valued target\nsymbols.\n" [^{:tag (* Loader)} l ^int bsym ^string reflib]
+  (let [(values bname _) (goobj/BuiltinName bsym)]
+    (log/Fatalf "reference to undefined builtin %q from package %q"
+      ^{:line 743} bname reflib)))
+
+
+
+
+
+^{:go/end 754} (go/method Lookup "Look up a symbol by name, return global index, or 0 if not found.\nThis is more like Syms.ROLookup than Lookup -- it doesn't create\nnew symbol.\n" ^Sym [^{:tag (* Loader)} l ^string name ^int ver]
+  (when (or (>= ver sym/SymVerStatic) (< ver 0))
+    (return (aget (.-extStaticSyms l) (lit nameVer name ver))))
+
+  (aget (aget (.-symsByName l) ver) name))
+
+
+
+^{:go/end 787} (go/method checkdup "Check that duplicate symbols have same contents.\n" [^{:tag (* Loader)} l ^string name ^{:tag (* oReader)} r ^uint32 li ^Sym dup]
+  (let [p ^{:go/via [Reader]} (.Data r li)
+      (values rdup ldup) (.toLocal l dup)
+      ^{:line 760} pdup ^{:go/via [Reader]} (.Data rdup ldup)
+      ^{:line 761} reason "same length but different contents"]
+    (cond (!= (len p) (len pdup))
+      (set! reason (fmt/Sprintf "new length %d != old length %d" (len p) (len pdup)))
+      (bytes/Equal p pdup)
+      ;; For BSS symbols, we need to check size as well, see issue 46653.
+      (let [szdup (.SymSize l dup)
+          ^{:line 767} sz (conv int64 (.Siz ^{:go/via [Reader]} (.Sym r li)))]
+        (when (== szdup sz)
+          (return))
+
+        (set! reason (fmt/Sprintf "different sizes: new size %d != old size %d"
+            ^{:line 772} sz szdup))))
+
+    (fmt/Fprintf os/Stderr "cmd/link: while reading object for '%v': duplicate symbol '%s', previous def at '%v', with mismatched payload: %s\n" (.-Lib (.-unit r)) name (.-Lib (.-unit rdup)) reason)
+
+    ;; For the moment, allow DWARF subprogram DIEs for
+    ;; auto-generated wrapper functions. What seems to happen
+    ;; here is that we get different line numbers on formal
+    ;; params; I am guessing that the pos is being inherited
+    ;; from the spot where the wrapper is needed.
+    (let [allowed (or (strings/HasPrefix name "go:info.go.interface")
+          (strings/HasPrefix name "go:info.go.builtin")
+          (strings/HasPrefix name "go:debuglines"))]
+      (when (not allowed)
+        (inc! (.-strictDupMsgs l))))))
+
+
+
+^{:go/end 789} (go/method NStrictDupMsgs ^int [^{:tag (* Loader)} l] (.-strictDupMsgs l))
+
+
+^{:go/end 794} (go/method NSym "Number of total symbols.\n" ^int [^{:tag (* Loader)} l]
+  (len (.-objSyms l)))
+
+
+
+^{:go/end 799} (go/method NDef "Number of defined Go symbols.\n" ^int [^{:tag (* Loader)} l]
+  (conv int (.-extStart l)))
+
+
+
+^{:go/end 804} (go/method NReachableSym "Number of reachable symbols.\n" ^int [^{:tag (* Loader)} l]
+  (.Count (.-attrReachable l)))
+
+
+
+^{:go/end 817} (go/method SymName "Returns the name of the i-th symbol.\n" ^string [^{:tag (* Loader)} l ^Sym i]
+  (when (.IsExternal l i)
+    (let [pp (.getPayload l i)]
+      (return (.-name pp))))
+
+  (let [(values r li) (.toLocal l i)]
+    (when (== r nil)
+      (return "?"))
+
+    (.Name ^{:go/via [Reader]} (.Sym r li) (.-Reader r))))
+
+
+
+^{:go/end 827} (go/method SymVersion "Returns the version of the i-th symbol.\n" ^int [^{:tag (* Loader)} l ^Sym i]
+  (when (.IsExternal l i)
+    (let [pp (.getPayload l i)]
+      (return (.-ver pp))))
+
+  (let [(values r li) (.toLocal l i)]
+    (abiToVer (.ABI ^{:go/via [Reader]} (.Sym r li)) (.-version r))))
+
+
+^{:go/end 835} (go/method IsContentHashed ^bool [^{:tag (* Loader)} l ^Sym i]
+  (when (.IsExternal l i)
+    (return (aget (.-contentHashed l) i)))
+
+  (let [(values r li) (.toLocal l i)]
+    (.IsContentHashed r li)))
+
+
+^{:go/end 839} (go/method IsFileLocal ^bool [^{:tag (* Loader)} l ^Sym i]
+  (>= (.SymVersion l i) sym/SymVerStatic))
+
+
+
+
+^{:go/end 854} (go/method IsFromAssembly "IsFromAssembly returns true if this symbol is derived from an\nobject file generated by the Go assembler.\n" ^bool [^{:tag (* Loader)} l ^Sym i]
+  (when (.IsExternal l i)
+    (let [pp (.getPayload l i)]
+      (when (!= (.-objidx pp) 0)
+        (let [r (aget (.-objs l) (.-objidx pp))]
+          (return ^{:go/via [Reader]} (.FromAssembly r))))
+
+      (return false)))
+
+  (let [(values r _) (.toLocal l i)]
+    ^{:go/via [Reader]} (.FromAssembly r)))
+
+
+
+^{:go/end 867} (go/method SymType "Returns the type of the i-th symbol.\n" ^sym/SymKind [^{:tag (* Loader)} l ^Sym i]
+  (when (.IsExternal l i)
+    (let [pp (.getPayload l i)]
+      (when (!= pp nil)
+        (return (.-kind pp)))
+
+      (return 0)))
+
+  (let [(values r li) (.toLocal l i)]
+    (aget sym/AbiSymKindToSymKind (conv objabi/SymKind (.Type ^{:go/via [Reader]} (.Sym r li))))))
+
+
+
+^{:go/end 879} (go/method SymAttr "Returns the attributes of the i-th symbol.\n" ^uint8 [^{:tag (* Loader)} l ^Sym i]
+  (when (.IsExternal l i)
+    ;; TODO: do something? External symbols have different representation of attributes.
+    ;; For now, ReflectMethod, NoSplit, GoType, and Typelink are used and they cannot be
+    ;; set by external symbol.
+    (return 0))
+
+  (let [(values r li) (.toLocal l i)]
+    (.Flag ^{:go/via [Reader]} (.Sym r li))))
+
+
+
+^{:go/end 889} (go/method SymSize "Returns the size of the i-th symbol.\n" ^int64 [^{:tag (* Loader)} l ^Sym i]
+  (when (.IsExternal l i)
+    (let [pp (.getPayload l i)]
+      (return (.-size pp))))
+
+  (let [(values r li) (.toLocal l i)]
+    (conv int64 (.Siz ^{:go/via [Reader]} (.Sym r li)))))
+
+
+
+
+
+^{:go/end 896} (go/method AttrReachable "AttrReachable returns true for symbols that are transitively\nreferenced from the entry points. Unreachable symbols are not\nwritten to the output.\n" ^bool [^{:tag (* Loader)} l ^Sym i]
+  (.Has (.-attrReachable l) i))
+
+
+
+
+^{:go/end 906} (go/method SetAttrReachable "SetAttrReachable sets the reachability property for a symbol (see\nAttrReachable).\n" [^{:tag (* Loader)} l ^Sym i ^bool v]
+  (if v
+    (.Set (.-attrReachable l) i)
+
+    (.Unset (.-attrReachable l) i)))
+
+
+
+
+
+
+
+^{:go/end 914} (go/method AttrOnList "AttrOnList returns true for symbols that are on some list (such as\nthe list of all text symbols, or one of the lists of data symbols)\nand is consulted to avoid bugs where a symbol is put on a list\ntwice.\n" ^bool [^{:tag (* Loader)} l ^Sym i]
+  (.Has (.-attrOnList l) i))
+
+
+
+
+^{:go/end 924} (go/method SetAttrOnList "SetAttrOnList sets the \"on list\" property for a symbol (see\nAttrOnList).\n" [^{:tag (* Loader)} l ^Sym i ^bool v]
+  (if v
+    (.Set (.-attrOnList l) i)
+
+    (.Unset (.-attrOnList l) i)))
+
+
+
+
+
+
+^{:go/end 931} (go/method AttrLocal "AttrLocal returns true for symbols that are only visible within the\nmodule (executable or shared library) being linked. This attribute\nis applied to thunks and certain other linker-generated symbols.\n" ^bool [^{:tag (* Loader)} l ^Sym i]
+  (.Has (.-attrLocal l) i))
+
+
+
+^{:go/end 940} (go/method SetAttrLocal "SetAttrLocal the \"local\" property for a symbol (see AttrLocal above).\n" [^{:tag (* Loader)} l ^Sym i ^bool v]
+  (if v
+    (.Set (.-attrLocal l) i)
+
+    (.Unset (.-attrLocal l) i)))
+
+
+
+
+
+^{:go/end 946} (go/method AttrUsedInIface "AttrUsedInIface returns true for a type symbol that is used in\nan interface.\n" ^bool [^{:tag (* Loader)} l ^Sym i]
+  (.Has (.-attrUsedInIface l) i))
+
+
+^{:go/end 954} (go/method SetAttrUsedInIface [^{:tag (* Loader)} l ^Sym i ^bool v]
+  (if v
+    (.Set (.-attrUsedInIface l) i)
+
+    (.Unset (.-attrUsedInIface l) i)))
+
+
+
+
+^{:go/end 962} (go/method SymAddr "SymAddr checks that a symbol is reachable, and returns its value.\n" ^int64 [^{:tag (* Loader)} l ^Sym i]
+  (when (not (.AttrReachable l i))
+    (panic "unreachable symbol in symaddr"))
+
+  (aget (.-values l) i))
+
+
+
+
+^{:go/end 968} (go/method AttrNotInSymbolTable "AttrNotInSymbolTable returns true for symbols that should not be\nadded to the symbol table of the final generated load module.\n" ^bool [^{:tag (* Loader)} l ^Sym i]
+  (.Has (.-attrNotInSymbolTable l) i))
+
+
+
+
+^{:go/end 978} (go/method SetAttrNotInSymbolTable "SetAttrNotInSymbolTable the \"not in symtab\" property for a symbol\n(see AttrNotInSymbolTable above).\n" [^{:tag (* Loader)} l ^Sym i ^bool v]
+  (if v
+    (.Set (.-attrNotInSymbolTable l) i)
+
+    (.Unset (.-attrNotInSymbolTable l) i)))
+
+
+
+
+
+
+
+^{:go/end 989} (go/method AttrVisibilityHidden "AttrVisibilityHidden symbols returns true for ELF symbols with\nvisibility set to STV_HIDDEN. They become local symbols in\nthe final executable. Only relevant when internally linking\non an ELF platform.\n" ^bool [^{:tag (* Loader)} l ^Sym i]
+  (when (not (.IsExternal l i))
+    (return false))
+
+  (.Has (.-attrVisibilityHidden l) (.extIndex l i)))
+
+
+
+
+^{:go/end 1002} (go/method SetAttrVisibilityHidden "SetAttrVisibilityHidden sets the \"hidden visibility\" property for a\nsymbol (see AttrVisibilityHidden).\n" [^{:tag (* Loader)} l ^Sym i ^bool v]
+  (when (not (.IsExternal l i))
+    (panic "tried to set visibility attr on non-external symbol"))
+
+  (if v
+    (.Set (.-attrVisibilityHidden l) (.extIndex l i))
+
+    (.Unset (.-attrVisibilityHidden l) (.extIndex l i))))
+
+
+
+
+
+^{:go/end 1015} (go/method AttrDuplicateOK "AttrDuplicateOK returns true for a symbol that can be present in\nmultiple object files.\n" ^bool [^{:tag (* Loader)} l ^Sym i]
+  (when (not (.IsExternal l i))
+    ;; TODO: if this path winds up being taken frequently, it
+    ;; might make more sense to copy the flag value out of the object
+    ;; into a larger bitmap during preload.
+    (let [(values r li) (.toLocal l i)]
+      (return (.Dupok ^{:go/via [Reader]} (.Sym r li)))))
+
+  (.Has (.-attrDuplicateOK l) (.extIndex l i)))
+
+
+
+
+^{:go/end 1028} (go/method SetAttrDuplicateOK "SetAttrDuplicateOK sets the \"duplicate OK\" property for an external\nsymbol (see AttrDuplicateOK).\n" [^{:tag (* Loader)} l ^Sym i ^bool v]
+  (when (not (.IsExternal l i))
+    (panic "tried to set dupok attr on non-external symbol"))
+
+  (if v
+    (.Set (.-attrDuplicateOK l) (.extIndex l i))
+
+    (.Unset (.-attrDuplicateOK l) (.extIndex l i))))
+
+
+
+
+^{:go/end 1040} (go/method AttrShared "AttrShared returns true for symbols compiled with the -shared option.\n" ^bool [^{:tag (* Loader)} l ^Sym i]
+  (when (not (.IsExternal l i))
+    ;; TODO: if this path winds up being taken frequently, it
+    ;; might make more sense to copy the flag value out of the
+    ;; object into a larger bitmap during preload.
+    (let [(values r _) (.toLocal l i)]
+      (return ^{:go/via [Reader]} (.Shared r))))
+
+  (.Has (.-attrShared l) (.extIndex l i)))
+
+
+
+
+^{:go/end 1053} (go/method SetAttrShared "SetAttrShared sets the \"shared\" property for an external\nsymbol (see AttrShared).\n" [^{:tag (* Loader)} l ^Sym i ^bool v]
+  (when (not (.IsExternal l i))
+    (panic (fmt/Sprintf "tried to set shared attr on non-external symbol %d %s" i (.SymName l i))))
+
+  (if v
+    (.Set (.-attrShared l) (.extIndex l i))
+
+    (.Unset (.-attrShared l) (.extIndex l i))))
+
+
+
+
+
+^{:go/end 1062} (go/method AttrExternal "AttrExternal returns true for function symbols loaded from host\nobject files.\n" ^bool [^{:tag (* Loader)} l ^Sym i]
+  (when (not (.IsExternal l i))
+    (return false))
+
+  (.Has (.-attrExternal l) (.extIndex l i)))
+
+
+
+
+^{:go/end 1075} (go/method SetAttrExternal "SetAttrExternal sets the \"external\" property for a host object\nsymbol (see AttrExternal).\n" [^{:tag (* Loader)} l ^Sym i ^bool v]
+  (when (not (.IsExternal l i))
+    (panic (fmt/Sprintf "tried to set external attr on non-external symbol %q" (.SymName l i))))
+
+  (if v
+    (.Set (.-attrExternal l) (.extIndex l i))
+
+    (.Unset (.-attrExternal l) (.extIndex l i))))
+
+
+
+
+
+
+^{:go/end 1082} (go/method AttrSpecial "AttrSpecial returns true for a symbols that do not have their\naddress (i.e. Value) computed by the usual mechanism of\ndata.go:dodata() & data.go:address().\n" ^bool [^{:tag (* Loader)} l ^Sym i]
+  (.Has (.-attrSpecial l) i))
+
+
+
+
+^{:go/end 1092} (go/method SetAttrSpecial "SetAttrSpecial sets the \"special\" property for a symbol (see\nAttrSpecial).\n" [^{:tag (* Loader)} l ^Sym i ^bool v]
+  (if v
+    (.Set (.-attrSpecial l) i)
+
+    (.Unset (.-attrSpecial l) i)))
+
+
+
+
+
+
+^{:go/end 1100} (go/method AttrCgoExportDynamic "AttrCgoExportDynamic returns true for a symbol that has been\nspecially marked via the \"cgo_export_dynamic\" compiler directive\nwritten by cgo (in response to //export directives in the source).\n" ^bool [^{:tag (* Loader)} l ^Sym i]
+  (let [(values _ ok) (aget (.-attrCgoExportDynamic l) i)]
+    ^{:line 1099} ok))
+
+
+
+
+^{:go/end 1110} (go/method SetAttrCgoExportDynamic "SetAttrCgoExportDynamic sets the \"cgo_export_dynamic\" for a symbol\n(see AttrCgoExportDynamic).\n" [^{:tag (* Loader)} l ^Sym i ^bool v]
+  (if v
+    (aset (.-attrCgoExportDynamic l) i (lit (struct)))
+
+    (delete (.-attrCgoExportDynamic l) i)))
+
+
+
+
+
+^{:go/end 1118} (go/method ForAllCgoExportDynamic "ForAllCgoExportDynamic calls f for every symbol that has been\nmarked with the \"cgo_export_dynamic\" compiler directive.\n" [^{:tag (* Loader)} l ^{:tag (func [Sym])} f]
+  (range [s (.-attrCgoExportDynamic l)]
+    (f s)))
+
+
+
+
+
+
+^{:go/end 1126} (go/method AttrCgoExportStatic "AttrCgoExportStatic returns true for a symbol that has been\nspecially marked via the \"cgo_export_static\" directive\nwritten by cgo.\n" ^bool [^{:tag (* Loader)} l ^Sym i]
+  (let [(values _ ok) (aget (.-attrCgoExportStatic l) i)]
+    ^{:line 1125} ok))
+
+
+
+
+^{:go/end 1136} (go/method SetAttrCgoExportStatic "SetAttrCgoExportStatic sets the \"cgo_export_static\" for a symbol\n(see AttrCgoExportStatic).\n" [^{:tag (* Loader)} l ^Sym i ^bool v]
+  (if v
+    (aset (.-attrCgoExportStatic l) i (lit (struct)))
+
+    (delete (.-attrCgoExportStatic l) i)))
+
+
+
+
+
+^{:go/end 1148} (go/method ForAllCgoExportStatic "ForAllCgoExportStatic returns an iterator over all symbols\nmarked with the \"cgo_export_static\" compiler directive.\n" ^{:tag (iter/Seq Sym)} [^{:tag (* Loader)} l]
+  ^{:go/end 1147} (fn [^{:tag (func [Sym] [bool])} yield]
+    (range [s (.-attrCgoExportStatic l)]
+      (when (not (yield s))
+        (break)))))
+
+
+
+
+
+
+
+
+^{:go/end 1158} (go/method IsGeneratedSym "IsGeneratedSym returns true if a symbol's been previously marked as a\ngenerator symbol through the SetIsGeneratedSym. The functions for generator\nsymbols are kept in the Link context.\n" ^bool [^{:tag (* Loader)} l ^Sym i]
+  (when (not (.IsExternal l i))
+    (return false))
+
+  (.Has (.-generatedSyms l) (.extIndex l i)))
+
+
+
+
+
+^{:go/end 1172} (go/method SetIsGeneratedSym "SetIsGeneratedSym marks symbols as generated symbols. Data shouldn't be\nstored in generated symbols, and a function is registered and called for\neach of these symbols.\n" [^{:tag (* Loader)} l ^Sym i ^bool v]
+  (when (not (.IsExternal l i))
+    (panic "only external symbols can be generated"))
+
+  (if v
+    (.Set (.-generatedSyms l) (.extIndex l i))
+
+    (.Unset (.-generatedSyms l) (.extIndex l i))))
+
+
+
+^{:go/end 1176} (go/method AttrCgoExport ^bool [^{:tag (* Loader)} l ^Sym i]
+  (or (.AttrCgoExportDynamic l i) (.AttrCgoExportStatic l i)))
+
+
+
+
+^{:go/end 1193} (go/method AttrReadOnly "AttrReadOnly returns true for a symbol whose underlying data\nis stored via a read-only mmap.\n" ^bool [^{:tag (* Loader)} l ^Sym i]
+  (when [(values v ok) (aget (.-attrReadOnly l) i)] ok
+    (return v))
+
+  (when (.IsExternal l i)
+    (let [pp (.getPayload l i)]
+      (when (!= (.-objidx pp) 0)
+        (return ^{:go/via [Reader]} (.ReadOnly (aget (.-objs l) (.-objidx pp)))))
+
+      (return false)))
+
+  (let [(values r _) (.toLocal l i)]
+    ^{:go/via [Reader]} (.ReadOnly r)))
+
+
+
+
+^{:go/end 1199} (go/method SetAttrReadOnly "SetAttrReadOnly sets the \"data is read only\" property for a symbol\n(see AttrReadOnly).\n" [^{:tag (* Loader)} l ^Sym i ^bool v]
+  (aset (.-attrReadOnly l) i v))
+
+
+;; AttrSubSymbol returns true for symbols that are listed as a
+;; sub-symbol of some other outer symbol. The sub/outer mechanism is
+;; used when loading host objects (sections from the host object
+;; become regular linker symbols and symbols go on the Sub list of
+;; their section) and for constructing the global offset table when
+;; internally linking a dynamic executable.
+;;
+;; Note that in later stages of the linker, we set Outer(S) to some
+;; container symbol C, but don't set Sub(C). Thus we have two
+;; distinct scenarios:
+;;
+;; - Outer symbol covers the address ranges of its sub-symbols.
+;;   Outer.Sub is set in this case.
+;; - Outer symbol doesn't cover the address ranges. It is zero-sized
+;;   and doesn't have sub-symbols. In the case, the inner symbol is
+;;   not actually a "SubSymbol". (Tricky!)
+;;
+;; This method returns TRUE only for sub-symbols in the first scenario.
+;;
+;; FIXME: would be better to do away with this and have a better way
+;; to represent container symbols.
+
+^{:go/end 1231} (go/method AttrSubSymbol ^bool [^{:tag (* Loader)} l ^Sym i]
+  ;; we don't explicitly store this attribute any more -- return
+  ;; a value based on the sub-symbol setting.
+  (let [o (.OuterSym l i)]
+    (when (== o 0)
+      (return false))
+
+    (!= (.SubSym l o) 0)))
+
+
+;; Note that we don't have a 'SetAttrSubSymbol' method in the loader;
+;; clients should instead use the AddInteriorSym method to establish
+;; containment relationships for host object symbols.
+
+
+^{:go/end 1240} (go/method IsReflectMethod "Returns whether the i-th symbol has ReflectMethod attribute set.\n" ^bool [^{:tag (* Loader)} l ^Sym i]
+  (!= (bit-and (.SymAttr l i) goobj/SymFlagReflectMethod) 0))
+
+
+
+^{:go/end 1245} (go/method IsNoSplit "Returns whether the i-th symbol is nosplit.\n" ^bool [^{:tag (* Loader)} l ^Sym i]
+  (!= (bit-and (.SymAttr l i) goobj/SymFlagNoSplit) 0))
+
+
+
+^{:go/end 1250} (go/method IsGoType "Returns whether this is a Go type symbol.\n" ^bool [^{:tag (* Loader)} l ^Sym i]
+  (!= (bit-and (.SymAttr l i) goobj/SymFlagGoType) 0))
+
+
+
+^{:go/end 1255} (go/method IsTypelink "Returns whether this symbol should be included in typelink.\n" ^bool [^{:tag (* Loader)} l ^Sym i]
+  (!= (bit-and (.SymAttr l i) goobj/SymFlagTypelink) 0))
+
+
+
+^{:go/end 1264} (go/method IsItab "Returns whether this symbol is an itab symbol.\n" ^bool [^{:tag (* Loader)} l ^Sym i]
+  (when (.IsExternal l i)
+    (return false))
+
+  (let [(values r li) (.toLocal l i)]
+    (.IsItab ^{:go/via [Reader]} (.Sym r li))))
+
+
+
+^{:go/end 1273} (go/method IsDict "Returns whether this symbol is a dictionary symbol.\n" ^bool [^{:tag (* Loader)} l ^Sym i]
+  (when (.IsExternal l i)
+    (return false))
+
+  (let [(values r li) (.toLocal l i)]
+    (.IsDict ^{:go/via [Reader]} (.Sym r li))))
+
+
+
+^{:go/end 1282} (go/method IsPkgInit "Returns whether this symbol is a compiler-generated package init func.\n" ^bool [^{:tag (* Loader)} l ^Sym i]
+  (when (.IsExternal l i)
+    (return false))
+
+  (let [(values r li) (.toLocal l i)]
+    (.IsPkgInit ^{:go/via [Reader]} (.Sym r li))))
+
+
+
+^{:go/end 1287} (go/method IsDeferReturnTramp "Return whether this is a trampoline of a deferreturn call.\n" ^bool [^{:tag (* Loader)} l ^Sym i]
+  (aget (.-deferReturnTramp l) i))
+
+
+
+^{:go/end 1292} (go/method SetIsDeferReturnTramp "Set that i is a trampoline of a deferreturn call.\n" [^{:tag (* Loader)} l ^Sym i ^bool v]
+  (aset (.-deferReturnTramp l) i v))
+
+
+
+^{:go/end 1300} (go/method growValues "growValues grows the slice used to store symbol values.\n" [^{:tag (* Loader)} l ^int reqLen]
+  (let [curLen (len (.-values l))]
+    (when (> reqLen curLen)
+      (set! (.-values l) (append (.-values l) (spread (make (slice int64) (- (+ reqLen 1) curLen))))))))
+
+
+
+
+^{:go/end 1305} (go/method SymValue "SymValue returns the value of the i-th symbol. i is global index.\n" ^int64 [^{:tag (* Loader)} l ^Sym i]
+  (aget (.-values l) i))
+
+
+
+^{:go/end 1310} (go/method SetSymValue "SetSymValue sets the value of the i-th symbol. i is global index.\n" [^{:tag (* Loader)} l ^Sym i ^int64 val]
+  (aset (.-values l) i val))
+
+
+
+^{:go/end 1315} (go/method AddToSymValue "AddToSymValue adds to the value of the i-th symbol. i is the global index.\n" [^{:tag (* Loader)} l ^Sym i ^int64 val]
+  (set! (aget (.-values l) i) + val))
+
+
+
+^{:go/end 1328} (go/method Data "Returns the symbol content of the i-th symbol. i is global index.\n" ^{:tag (slice byte)} [^{:tag (* Loader)} l ^Sym i]
+  (when (.IsExternal l i)
+    (let [pp (.getPayload l i)]
+      (when (!= pp nil)
+        (return (.-data pp)))
+
+      (return nil)))
+
+  (let [(values r li) (.toLocal l i)]
+    ^{:go/via [Reader]} (.Data r li)))
+
+
+
+^{:go/end 1338} (go/method DataString "Returns the symbol content of the i-th symbol as a string. i is global index.\n" ^string [^{:tag (* Loader)} l ^Sym i]
+  (when (.IsExternal l i)
+    (let [pp (.getPayload l i)]
+      (return (conv string (.-data pp)))))
+
+  (let [(values r li) (.toLocal l i)]
+    ^{:go/via [Reader]} (.DataString r li)))
+
+
+
+
+
+^{:go/end 1350} (go/method FreeData "FreeData clears the symbol data of an external symbol, allowing the memory\nto be freed earlier. No-op for non-external symbols.\ni is global index.\n" [^{:tag (* Loader)} l ^Sym i]
+  (when (.IsExternal l i)
+    (let [pp (.getPayload l i)]
+      (when (!= pp nil)
+        (set! (.-data pp) nil)))))
+
+
+
+
+
+^{:go/end 1368} (go/method SymAlign "SymAlign returns the alignment for a symbol.\n" ^int32 [^{:tag (* Loader)} l ^Sym i]
+  (when (>= (conv int i) (len (.-align l)))
+    ;; align is extended lazily -- it the sym in question is
+    ;; outside the range of the existing slice, then we assume its
+    ;; alignment has not yet been set.
+    (return 0))
+
+  ;; TODO: would it make sense to return an arch-specific
+  ;; alignment depending on section type? E.g. STEXT => 32,
+  ;; SDATA => 1, etc?
+  (let [abits (aget (.-align l) i)]
+    (when (== abits 0)
+      (return 0))
+
+    (conv int32 ^int32 (<< 1 (- abits 1)))))
+
+
+
+^{:go/end 1380} (go/method SetSymAlign "SetSymAlign sets the alignment for a symbol.\n" [^{:tag (* Loader)} l ^Sym i ^int32 align]
+  ;; Reject nonsense alignments.
+  (when (or (< align 0) (!= (bit-and align (- align 1)) 0))
+    (panic "bad alignment value"))
+
+  (when (>= (conv int i) (len (.-align l)))
+    (set! (.-align l) (append (.-align l) (spread (make (slice uint8) (- (.NSym l) (len (.-align l))))))))
+
+  (aset (.-align l) i (conv uint8 (bits/Len32 (conv uint32 align)))))
+
+
+
+^{:go/end 1391} (go/method SymSect "SymSect returns the section of the i-th symbol. i is global index.\n" ^{:tag (* sym/Section)} [^{:tag (* Loader)} l ^Sym i]
+  (when (>= (conv int i) (len (.-symSects l)))
+    ;; symSects is extended lazily -- it the sym in question is
+    ;; outside the range of the existing slice, then we assume its
+    ;; section has not yet been set.
+    (return nil))
+
+  (aget (.-sects l) (aget (.-symSects l) i)))
+
+
+
+^{:go/end 1399} (go/method SetSymSect "SetSymSect sets the section of the i-th symbol. i is global index.\n" [^{:tag (* Loader)} l ^Sym i ^{:tag (* sym/Section)} sect]
+  (when (>= (conv int i) (len (.-symSects l)))
+    (set! (.-symSects l) (append (.-symSects l) (spread (make (slice uint16) (- (.NSym l) (len (.-symSects l))))))))
+
+  (aset (.-symSects l) i (.-Index sect)))
+
+
+
+^{:go/end 1411} (go/method NewSection "NewSection creates a new (output) section.\n" ^{:tag (* sym/Section)} [^{:tag (* Loader)} l]
+  (let [sect (new sym/Section)
+      ^{:line 1404} idx (len (.-sects l))]
+    (when (!= idx (conv int (conv uint16 idx)))
+      (panic "too many sections created"))
+
+    (set! (.-Index sect) (conv uint16 idx))
+    (set! (.-sects l) (append (.-sects l) sect))
+    ^{:line 1410} sect))
+
+
+
+
+
+^{:go/end 1418} (go/method SymDynimplib "SymDynimplib returns the \"dynimplib\" attribute for the specified\nsymbol, making up a portion of the info for a symbol specified\non a \"cgo_import_dynamic\" compiler directive.\n" ^string [^{:tag (* Loader)} l ^Sym i]
+  (aget (.-dynimplib l) i))
+
+
+
+^{:go/end 1431} (go/method SetSymDynimplib "SetSymDynimplib sets the \"dynimplib\" attribute for a symbol.\n" [^{:tag (* Loader)} l ^Sym i ^string value]
+  ;; reject bad symbols
+  (when (or (>= i (conv Sym (len (.-objSyms l)))) (== i 0))
+    (panic "bad symbol index in SetDynimplib"))
+
+  (if (== value "")
+    (delete (.-dynimplib l) i)
+
+    (aset (.-dynimplib l) i value)))
+
+
+
+
+
+
+^{:go/end 1438} (go/method SymDynimpvers "SymDynimpvers returns the \"dynimpvers\" attribute for the specified\nsymbol, making up a portion of the info for a symbol specified\non a \"cgo_import_dynamic\" compiler directive.\n" ^string [^{:tag (* Loader)} l ^Sym i]
+  (aget (.-dynimpvers l) i))
+
+
+
+^{:go/end 1451} (go/method SetSymDynimpvers "SetSymDynimpvers sets the \"dynimpvers\" attribute for a symbol.\n" [^{:tag (* Loader)} l ^Sym i ^string value]
+  ;; reject bad symbols
+  (when (or (>= i (conv Sym (len (.-objSyms l)))) (== i 0))
+    (panic "bad symbol index in SetDynimpvers"))
+
+  (if (== value "")
+    (delete (.-dynimpvers l) i)
+
+    (aset (.-dynimpvers l) i value)))
+
+
+
+
+
+^{:go/end 1460} (go/method SymExtname "SymExtname returns the \"extname\" value for the specified\nsymbol.\n" ^string [^{:tag (* Loader)} l ^Sym i]
+  (when [(values s ok) (aget (.-extname l) i)] ok
+    (return s))
+
+  (.SymName l i))
+
+
+
+^{:go/end 1473} (go/method SetSymExtname "SetSymExtname sets the  \"extname\" attribute for a symbol.\n" [^{:tag (* Loader)} l ^Sym i ^string value]
+  ;; reject bad symbols
+  (when (or (>= i (conv Sym (len (.-objSyms l)))) (== i 0))
+    (panic "bad symbol index in SetExtname"))
+
+  (if (== value "")
+    (delete (.-extname l) i)
+
+    (aset (.-extname l) i value)))
+
+
+
+^{:go/end 1477} (go/method SymWeakBinding ^bool [^{:tag (* Loader)} l ^Sym i]
+  (aget (.-weakBinding l) i))
+
+
+^{:go/end 1485} (go/method SetSymWeakBinding [^{:tag (* Loader)} l ^Sym i ^bool v]
+  ;; reject bad symbols
+  (when (or (>= i (conv Sym (len (.-objSyms l)))) (== i 0))
+    (panic "bad symbol index in SetSymWeakBinding"))
+
+  (aset (.-weakBinding l) i v))
+
+
+
+
+
+
+^{:go/end 1496} (go/method SymElfType "SymElfType returns the previously recorded ELF type for a symbol\n(used only for symbols read from shared libraries by ldshlibsyms).\nIt is not set for symbols defined by the packages being linked or\nby symbols read by ldelf (and so is left as elf.STT_NOTYPE).\n" ^elf/SymType [^{:tag (* Loader)} l ^Sym i]
+  (when [(values et ok) (aget (.-elfType l) i)] ok
+    (return et))
+
+  ^{:line 1495} elf/STT_NOTYPE)
+
+
+
+^{:go/end 1509} (go/method SetSymElfType "SetSymElfType sets the elf type attribute for a symbol.\n" [^{:tag (* Loader)} l ^Sym i ^elf/SymType et]
+  ;; reject bad symbols
+  (when (or (>= i (conv Sym (len (.-objSyms l)))) (== i 0))
+    (panic "bad symbol index in SetSymElfType"))
+
+  (if (== et elf/STT_NOTYPE)
+    (delete (.-elfType l) i)
+
+    (aset (.-elfType l) i et)))
+
+
+
+
+
+^{:go/end 1515} (go/method SymElfSym "SymElfSym returns the ELF symbol index for a given loader\nsymbol, assigned during ELF symtab generation.\n" ^int32 [^{:tag (* Loader)} l ^Sym i]
+  (aget (.-elfSym l) i))
+
+
+
+^{:go/end 1527} (go/method SetSymElfSym "SetSymElfSym sets the elf symbol index for a symbol.\n" [^{:tag (* Loader)} l ^Sym i ^int32 es]
+  (when (== i 0)
+    (panic "bad sym index"))
+
+  (if (== es 0)
+    (delete (.-elfSym l) i)
+
+    (aset (.-elfSym l) i es)))
+
+
+
+
+
+^{:go/end 1533} (go/method SymLocalElfSym "SymLocalElfSym returns the \"local\" ELF symbol index for a given loader\nsymbol, assigned during ELF symtab generation.\n" ^int32 [^{:tag (* Loader)} l ^Sym i]
+  (aget (.-localElfSym l) i))
+
+
+
+^{:go/end 1545} (go/method SetSymLocalElfSym "SetSymLocalElfSym sets the \"local\" elf symbol index for a symbol.\n" [^{:tag (* Loader)} l ^Sym i ^int32 es]
+  (when (== i 0)
+    (panic "bad sym index"))
+
+  (if (== es 0)
+    (delete (.-localElfSym l) i)
+
+    (aset (.-localElfSym l) i es)))
+
+
+
+
+^{:go/breaks [[5 1552]] :go/end 1553} (go/method SymPlt "SymPlt returns the PLT offset of symbol s.\n" ^int32 [^{:tag (* Loader)} l ^Sym s]
+  (when [(values v ok) (aget (.-plt l) s)] ok
+    (return v))
+
+  -1)
+
+
+
+^{:go/end 1565} (go/method SetPlt "SetPlt sets the PLT offset of symbol i.\n" [^{:tag (* Loader)} l ^Sym i ^int32 v]
+  (when (or (>= i (conv Sym (len (.-objSyms l)))) (== i 0))
+    (panic "bad symbol for SetPlt"))
+
+  (if (== v -1)
+    (delete (.-plt l) i)
+
+    (aset (.-plt l) i v)))
+
+
+
+
+^{:go/breaks [[5 1572]] :go/end 1573} (go/method SymGot "SymGot returns the GOT offset of symbol s.\n" ^int32 [^{:tag (* Loader)} l ^Sym s]
+  (when [(values v ok) (aget (.-got l) s)] ok
+    (return v))
+
+  -1)
+
+
+
+^{:go/end 1585} (go/method SetGot "SetGot sets the GOT offset of symbol i.\n" [^{:tag (* Loader)} l ^Sym i ^int32 v]
+  (when (or (>= i (conv Sym (len (.-objSyms l)))) (== i 0))
+    (panic "bad symbol for SetGot"))
+
+  (if (== v -1)
+    (delete (.-got l) i)
+
+    (aset (.-got l) i v)))
+
+
+
+
+^{:go/breaks [[5 1592]] :go/end 1593} (go/method SymDynid "SymDynid returns the \"dynid\" property for the specified symbol.\n" ^int32 [^{:tag (* Loader)} l ^Sym i]
+  (when [(values s ok) (aget (.-dynid l) i)] ok
+    (return s))
+
+  -1)
+
+
+
+^{:go/end 1606} (go/method SetSymDynid "SetSymDynid sets the \"dynid\" property for a symbol.\n" [^{:tag (* Loader)} l ^Sym i ^int32 val]
+  ;; reject bad symbols
+  (when (or (>= i (conv Sym (len (.-objSyms l)))) (== i 0))
+    (panic "bad symbol index in SetSymDynid"))
+
+  (if (== val -1)
+    (delete (.-dynid l) i)
+
+    (aset (.-dynid l) i val)))
+
+
+
+
+
+
+^{:go/end 1618} (go/method DynidSyms "DynidSyms returns the set of symbols for which dynID is set to an\ninteresting (non-default) value. This is expected to be a fairly\nsmall set.\n" ^{:tag (slice Sym)} [^{:tag (* Loader)} l]
+  (let [sl (make (slice Sym) 0 (len (.-dynid l)))]
+    (range [s (.-dynid l)]
+      (set! sl (append sl s)))
+
+    (sort/Slice sl ^{:go/end 1616} (fn ^bool [^int i ^int j] (< (aget sl i) (aget sl j))))
+    ^{:line 1617} sl))
+
+
+
+
+
+
+
+
+^{:go/end 1626} (go/method SymGoType "SymGoType returns the 'Gotype' property for a given symbol (set by\nthe Go compiler for variable symbols). This version relies on\nreading aux symbols for the target sym -- it could be that a faster\napproach would be to check for gotype during preload and copy the\nresults in to a map (might want to try this at some point and see\nif it helps speed things up).\n" ^Sym [^{:tag (* Loader)} l ^Sym i] (.aux1 l i goobj/AuxGotype))
+
+
+
+^{:go/end 1641} (go/method SymUnit "SymUnit returns the compilation unit for a given symbol (which will\ntypically be nil for external or linker-manufactured symbols).\n" ^{:tag (* sym/CompilationUnit)} [^{:tag (* Loader)} l ^Sym i]
+  (when (.IsExternal l i)
+    (let [pp (.getPayload l i)]
+      (when (!= (.-objidx pp) 0)
+        (let [r (aget (.-objs l) (.-objidx pp))]
+          (return (.-unit r))))
+
+      (return nil)))
+
+  (let [(values r _) (.toLocal l i)]
+    (.-unit r)))
+
+
+
+
+
+
+
+^{:go/end 1662} (go/method SymPkg "SymPkg returns the package where the symbol came from (for\nregular compiler-generated Go symbols), but in the case of\nbuilding with \"-linkshared\" (when a symbol is read from a\nshared library), will hold the library name.\nNOTE: this corresponds to sym.Symbol.File field.\n" ^string [^{:tag (* Loader)} l ^Sym i]
+  (when [(values f ok) (aget (.-symPkg l) i)] ok
+    (return f))
+
+  (when (.IsExternal l i)
+    (let [pp (.getPayload l i)]
+      (when (!= (.-objidx pp) 0)
+        (let [r (aget (.-objs l) (.-objidx pp))]
+          (return (.-Pkg (.-Lib (.-unit r))))))
+
+      (return "")))
+
+  (let [(values r _) (.toLocal l i)]
+    (.-Pkg (.-Lib (.-unit r)))))
+
+
+
+
+
+^{:go/end 1673} (go/method SetSymPkg "SetSymPkg sets the package/library for a symbol. This is\nneeded mainly for external symbols, specifically those imported\nfrom shared libraries.\n" [^{:tag (* Loader)} l ^Sym i ^string pkg]
+  ;; reject bad symbols
+  (when (or (>= i (conv Sym (len (.-objSyms l)))) (== i 0))
+    (panic "bad symbol index in SetSymPkg"))
+
+  (aset (.-symPkg l) i pkg))
+
+
+
+
+
+
+^{:go/end 1681} (go/method SymLocalentry "SymLocalentry returns an offset in bytes of the \"local entry\" of a symbol.\n\nOn PPC64, a value of 1 indicates the symbol does not use or preserve a TOC\npointer in R2, nor does it have a distinct local entry.\n" ^uint8 [^{:tag (* Loader)} l ^Sym i]
+  (aget (.-localentry l) i))
+
+
+
+^{:go/end 1694} (go/method SetSymLocalentry "SetSymLocalentry sets the \"local entry\" offset attribute for a symbol.\n" [^{:tag (* Loader)} l ^Sym i ^uint8 value]
+  ;; reject bad symbols
+  (when (or (>= i (conv Sym (len (.-objSyms l)))) (== i 0))
+    (panic "bad symbol index in SetSymLocalentry"))
+
+  (if (== value 0)
+    (delete (.-localentry l) i)
+
+    (aset (.-localentry l) i value)))
+
+
+
+
+^{:go/end 1703} (go/method NAux "Returns the number of aux symbols given a global index.\n" ^int [^{:tag (* Loader)} l ^Sym i]
+  (when (.IsExternal l i)
+    (return 0))
+
+  (let [(values r li) (.toLocal l i)]
+    ^{:go/via [Reader]} (.NAux r li)))
+
+
+
+^{:go/end 1715} (go/method Aux "Returns the \"handle\" to the j-th aux symbol of the i-th symbol.\n" ^Aux [^{:tag (* Loader)} l ^Sym i ^int j]
+  (when (.IsExternal l i)
+    (return (lit Aux)))
+
+  (let [(values r li) (.toLocal l i)]
+    (when (>= j ^{:go/via [Reader]} (.NAux r li))
+      (return (lit Aux)))
+
+    (lit Aux ^{:go/via [Reader]} (.Aux r li j) r l)))
+
+
+
+
+
+
+
+
+^{:go/end 1728} (go/method WasmImportSym "WasmImportSym returns the auxiliary WebAssembly import symbol associated with\na given function symbol. The aux sym only exists for Go function stubs that\nhave been annotated with the //go:wasmimport directive.  The aux sym\ncontains the information necessary for the linker to add a WebAssembly\nimport statement.\n(https://webassembly.github.io/spec/core/syntax/modules.html#imports)\n" ^Sym [^{:tag (* Loader)} l ^Sym fnSymIdx]
+  (when (not (.IsText (.SymType l fnSymIdx)))
+    (log/Fatalf "error: non-function sym %d/%s t=%s passed to WasmImportSym" fnSymIdx (.SymName l fnSymIdx) (.String (.SymType l fnSymIdx))))
+
+  (.aux1 l fnSymIdx goobj/AuxWasmImport))
+
+
+^{:go/end 1732} (go/method WasmTypeSym ^Sym [^{:tag (* Loader)} l ^Sym s]
+  (.aux1 l s goobj/AuxWasmType))
+
+
+
+
+^{:go/end 1742} (go/method SEHUnwindSym "SEHUnwindSym returns the auxiliary SEH unwind symbol associated with\na given function symbol.\n" ^Sym [^{:tag (* Loader)} l ^Sym fnSymIdx]
+  (when (not (.IsText (.SymType l fnSymIdx)))
+    (log/Fatalf "error: non-function sym %d/%s t=%s passed to SEHUnwindSym" fnSymIdx (.SymName l fnSymIdx) (.String (.SymType l fnSymIdx))))
+
+
+  (.aux1 l fnSymIdx goobj/AuxSehUnwindInfo))
+
+
+
+
+
+
+
+^{:go/end 1781} (go/method GetFuncDwarfAuxSyms "GetFuncDwarfAuxSyms collects and returns the auxiliary DWARF\nsymbols associated with a given function symbol.  Prior to the\nintroduction of the loader, this was done purely using name\nlookups, e.f. for function with name XYZ we would then look up\ngo.info.XYZ, etc.\n" [^{:tag (* Loader)} l ^Sym fnSymIdx] :results [^Sym auxDwarfInfo ^Sym auxDwarfLoc ^Sym auxDwarfRanges ^Sym auxDwarfLines]
+  (when (not (.IsText (.SymType l fnSymIdx)))
+    (log/Fatalf "error: non-function sym %d/%s t=%s passed to GetFuncDwarfAuxSyms" fnSymIdx (.SymName l fnSymIdx) (.String (.SymType l fnSymIdx))))
+
+  (let [(values r auxs) (.auxs l fnSymIdx)]
+
+    (range [i auxs]
+      (let [a (addr (aget auxs i))]
+        (switch (.Type a)
+          (case [goobj/AuxDwarfInfo]
+            (set! auxDwarfInfo (.resolve l r (.Sym a)))
+            (when (!= (.SymType l auxDwarfInfo) sym/SDWARFFCN)
+              (panic "aux dwarf info sym with wrong type")))
+
+          (case [goobj/AuxDwarfLoc]
+            (set! auxDwarfLoc (.resolve l r (.Sym a)))
+            (when (!= (.SymType l auxDwarfLoc) sym/SDWARFLOC)
+              (panic "aux dwarf loc sym with wrong type")))
+
+          (case [goobj/AuxDwarfRanges]
+            (set! auxDwarfRanges (.resolve l r (.Sym a)))
+            (when (!= (.SymType l auxDwarfRanges) sym/SDWARFRANGE)
+              (panic "aux dwarf ranges sym with wrong type")))
+
+          (case [goobj/AuxDwarfLines]
+            (set! auxDwarfLines (.resolve l r (.Sym a)))
+            (when (!= (.SymType l auxDwarfLines) sym/SDWARFLINES)
+              (panic "aux dwarf lines sym with wrong type"))))))
+
+
+
+    (return)))
+
+
+^{:go/end 1790} (go/method GetVarDwarfAuxSym ^Sym [^{:tag (* Loader)} l ^Sym i]
+  (let [aux (.aux1 l i goobj/AuxDwarfInfo)]
+    (when (and (!= aux 0) (!= (.SymType l aux) sym/SDWARFVAR))
+      (fmt/Println (.SymName l i) (.SymType l i) (.SymType l aux) sym/SDWARFVAR)
+      (panic "aux dwarf info sym with wrong type"))
+
+    ^{:line 1789} aux))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 1831} (go/method AddInteriorSym "AddInteriorSym sets up 'interior' as an interior symbol of\ncontainer/payload symbol 'container'. An interior symbol does not\nitself have data, but gives a name to a subrange of the data in its\ncontainer symbol. The container itself may or may not have a name.\nThis method is intended primarily for use in the host object\nloaders, to capture the semantics of symbols and sections in an\nobject file. When reading a host object file, we'll typically\nencounter a static section symbol (ex: \".text\") containing content\nfor a collection of functions, then a series of ELF (or macho, etc)\nsymbol table entries each of which points into a sub-section\n(offset and length) of its corresponding container symbol. Within\nthe go linker we create a loader.Sym for the container (which is\nexpected to have the actual content/payload) and then a set of\ninterior loader.Sym's that point into a portion of the container.\n" [^{:tag (* Loader)} l ^Sym container ^Sym interior]
+  ;; The interior symbols for a container are not expected to have
+  ;; content/data or relocations.
+  (when (!= (len (.Data l interior)) 0)
+    (panic "unexpected non-empty interior symbol"))
+
+  ;; Interior symbol is expected to be in the symbol table.
+  (when (.AttrNotInSymbolTable l interior)
+    (panic "interior symbol must be in symtab"))
+
+  ;; Only a single level of containment is allowed.
+  (when (!= (.OuterSym l container) 0)
+    (panic "outer has outer itself"))
+
+  ;; Interior sym should not already have a sibling.
+  (when (!= (.SubSym l interior) 0)
+    (panic "sub set for subsym"))
+
+  ;; Interior sym should not already point at a container.
+  (when (!= (.OuterSym l interior) 0)
+    (panic "outer already set for subsym"))
+
+  (aset (.-sub l) interior (aget (.-sub l) container))
+  (aset (.-sub l) container interior)
+  (aset (.-outer l) interior container))
+
+
+
+^{:go/end 1836} (go/method OuterSym "OuterSym gets the outer/container symbol.\n" ^Sym [^{:tag (* Loader)} l ^Sym i]
+  (aget (.-outer l) i))
+
+
+
+^{:go/end 1841} (go/method SubSym "SubSym gets the subsymbol for host object loaded symbols.\n" ^Sym [^{:tag (* Loader)} l ^Sym i]
+  (aget (.-sub l) i))
+
+
+
+^{:go/end 1849} (go/method growOuter "growOuter grows the slice used to store outer symbol.\n" [^{:tag (* Loader)} l ^int reqLen]
+  (let [curLen (len (.-outer l))]
+    (when (> reqLen curLen)
+      (set! (.-outer l) (append (.-outer l) (spread (make (slice Sym) (- reqLen curLen))))))))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 1881} (go/method SetCarrierSym "SetCarrierSym declares that 'c' is the carrier or container symbol\nfor 's'. Carrier symbols are used in the linker to as a container\nfor a collection of sub-symbols where the content of the\nsub-symbols is effectively concatenated to form the content of the\ncarrier. The carrier is given a name in the output symbol table\nwhile the sub-symbol names are not. For example, the Go compiler\nemits named string symbols (type SGOSTRING) when compiling a\npackage; after being deduplicated, these symbols are collected into\na single unit by assigning them a new carrier symbol named\n\"go:string.*\" (which appears in the final symbol table for the\noutput load module).\n" [^{:tag (* Loader)} l ^Sym s ^Sym c]
+  (when (== c 0)
+    (panic "invalid carrier in SetCarrierSym"))
+
+  (when (== s 0)
+    (panic "invalid sub-symbol in SetCarrierSym"))
+
+  ;; Carrier symbols are not expected to have content/data. It is
+  ;; ok for them to have non-zero size (to allow for use of generator
+  ;; symbols).
+  (when (!= (len (.Data l c)) 0)
+    (panic "unexpected non-empty carrier symbol"))
+
+  (aset (.-outer l) s c)
+  ;; relocsym's foldSubSymbolOffset requires that we only
+  ;; have a single level of containment-- enforce here.
+  (when (!= (aget (.-outer l) c) 0)
+    (panic "invalid nested carrier sym")))
+
+
+
+
+^{:go/end 1886} (go/method InitReachable "Initialize Reachable bitmap and its siblings for running deadcode pass.\n" [^{:tag (* Loader)} l]
+  (.growAttrBitmaps l (+ (.NSym l) 1)))
+
+
+(go/type symWithVal (struct
+    ^{:line 1889 :tag Sym} s
+    ^{:line 1890 :tag int64} v))
+
+(go/type bySymValue (slice symWithVal))
+
+^{:go/end 1894} (go/method Len ^int [^bySymValue s] (len s))
+^{:go/end 1895} (go/method Swap [^bySymValue s ^int i ^int j] (set! (values (aget s i) (aget s j)) (values (aget s j) (aget s i))))
+^{:go/end 1896} (go/method Less ^bool [^bySymValue s ^int i ^int j] (< (.-v (aget s i)) (.-v (aget s j))))
+
+
+
+
+^{:go/end 1927} (go/method SortSub "SortSub walks through the sub-symbols for 's' and sorts them\nin place by increasing value. Return value is the new\nsub symbol for the specified outer symbol.\n" ^Sym [^{:tag (* Loader)} l ^Sym s]
+
+  (when (or (== s 0) (== (aget (.-sub l) s) 0))
+    (return s))
+
+
+  ;; Sort symbols using a slice first. Use a stable sort on the off
+  ;; chance that there's more than once symbol with the same value,
+  ;; so as to preserve reproducible builds.
+  (let [sl (lit (slice symWithVal))]
+    (for [ss (aget (.-sub l) s)] (!= ss 0) (set! ss (aget (.-sub l) ss))
+      (set! sl (append sl (lit symWithVal :s ss :v (.SymValue l ss)))))
+
+    (sort/Stable (conv bySymValue sl))
+
+    ;; Then apply any changes needed to the sub map.
+    (let [ns (conv Sym 0)]
+      (for [i (- (len sl) 1)] (>= i 0) (dec! i)
+        (let [s (.-s (aget sl i))]
+          (aset (.-sub l) s ns)
+          (set! ns s)))
+
+
+      ;; Update sub for outer symbol, then return
+      (aset (.-sub l) s (.-s (aget sl 0)))
+      (.-s (aget sl 0)))))
+
+
+
+^{:go/end 1932} (go/method SortSyms "SortSyms sorts a list of symbols by their value.\n" [^{:tag (* Loader)} l ^{:tag (slice Sym)} ss]
+  (sort/SliceStable ss ^{:go/end 1931} (fn ^bool [^int i ^int j] (< (.SymValue l (aget ss i)) (.SymValue l (aget ss j))))))
+
+
+
+^{:go/end 1946} (go/method growAttrBitmaps "Insure that reachable bitmap and its siblings have enough size.\n" [^{:tag (* Loader)} l ^int reqLen]
+  (when (> reqLen (.Len (.-attrReachable l)))
+    ;; These are indexed by global symbol
+    (set! (.-attrReachable l) (growBitmap reqLen (.-attrReachable l)))
+    (set! (.-attrOnList l) (growBitmap reqLen (.-attrOnList l)))
+    (set! (.-attrLocal l) (growBitmap reqLen (.-attrLocal l)))
+    (set! (.-attrNotInSymbolTable l) (growBitmap reqLen (.-attrNotInSymbolTable l)))
+    (set! (.-attrUsedInIface l) (growBitmap reqLen (.-attrUsedInIface l)))
+    (set! (.-attrSpecial l) (growBitmap reqLen (.-attrSpecial l))))
+
+  (.growExtAttrBitmaps l))
+
+
+^{:go/end 1958} (go/method growExtAttrBitmaps [^{:tag (* Loader)} l]
+  ;; These are indexed by external symbol index (e.g. l.extIndex(i))
+  (let [extReqLen (len (.-payloads l))]
+    (when (> extReqLen (.Len (.-attrVisibilityHidden l)))
+      (set! (.-attrVisibilityHidden l) (growBitmap extReqLen (.-attrVisibilityHidden l)))
+      (set! (.-attrDuplicateOK l) (growBitmap extReqLen (.-attrDuplicateOK l)))
+      (set! (.-attrShared l) (growBitmap extReqLen (.-attrShared l)))
+      (set! (.-attrExternal l) (growBitmap extReqLen (.-attrExternal l)))
+      (set! (.-generatedSyms l) (growBitmap extReqLen (.-generatedSyms l))))))
+
+
+
+^{:go/end 1960} (go/method Count ^int [^{:tag (* Relocs)} relocs] (len (.-rs relocs)))
+
+
+^{:go/end 1968} (go/method At "At returns the j-th reloc for a global symbol.\n" ^Reloc [^{:tag (* Relocs)} relocs ^int j]
+  (when (.isExtReader (.-l relocs) (.-r relocs))
+    (return (lit Reloc (addr (aget (.-rs relocs) j)) (.-r relocs) (.-l relocs))))
+
+  (lit Reloc (addr (aget (.-rs relocs) j)) (.-r relocs) (.-l relocs)))
+
+
+
+^{:go/end 1977} (go/method Relocs "Relocs returns a Relocs object for the given global sym.\n" ^Relocs [^{:tag (* Loader)} l ^Sym i]
+  (let [(values r li) (.toLocal l i)]
+    (when (== r nil)
+      (panic (fmt/Sprintf "trying to get oreader for invalid sym %d\n\n" i)))
+
+    (.relocs l r li)))
+
+
+
+^{:go/end 1994} (go/method relocs "relocs returns a Relocs object given a local sym index and reader.\n" ^Relocs [^{:tag (* Loader)} l ^{:tag (* oReader)} r ^uint32 li]
+  (let [^{:tag (slice goobj/Reloc)} rs (zero (slice goobj/Reloc))]
+    (if (.isExtReader l r)
+      (let [pp (aget (.-payloads l) li)]
+        (set! rs (.-relocs pp)))
+
+      (set! rs ^{:go/via [Reader]} (.Relocs r li)))
+
+    ^{:go/breaks [2 4 6 8]} (lit Relocs
+      :rs rs
+      :li li
+      :r r
+      :l l)))
+
+
+
+^{:go/end 2004} (go/method auxs [^{:tag (* Loader)} l ^Sym i] :results [(* oReader) (slice goobj/Aux)]
+  (if (.IsExternal l i)
+    (let [pp (.getPayload l i)]
+      (return (aget (.-objs l) (.-objidx pp)) (.-auxs pp)))
+
+    (let [(values r li) (.toLocal l i)]
+      (return r ^{:go/via [Reader]} (.Auxs r li)))))
+
+
+
+
+^{:go/end 2016} (go/method aux1 "Returns a specific aux symbol of type t for symbol i.\n" ^Sym [^{:tag (* Loader)} l ^Sym i ^uint8 t]
+  ^{:go/breaks [[3 2015]]} (let [(values r auxs) (.auxs l i)]
+    (range [j auxs]
+      (let [a (addr (aget auxs j))]
+        (when (== (.Type a) t)
+          (return (.resolve l r (.Sym a))))))
+
+
+    0))
+
+
+^{:go/end 2018} (go/method Pcsp ^Sym [^{:tag (* Loader)} l ^Sym i] (.aux1 l i goobj/AuxPcsp))
+
+
+
+^{:go/end 2041} (go/method PcdataAuxs "Returns all aux symbols of per-PC data for symbol i.\ntmp is a scratch space for the pcdata slice.\n" [^{:tag (* Loader)} l ^Sym i ^{:tag (slice Sym)} tmp] :results [^Sym pcsp ^Sym pcfile ^Sym pcline ^Sym pcinline ^{:tag (slice Sym)} pcdata]
+  (set! pcdata (subslice tmp _ 0))
+  (let [(values r auxs) (.auxs l i)]
+    (range [j auxs]
+      (let [a (addr (aget auxs j))]
+        (switch (.Type a)
+          (case [goobj/AuxPcsp]
+            (set! pcsp (.resolve l r (.Sym a))))
+          (case [goobj/AuxPcline]
+            (set! pcline (.resolve l r (.Sym a))))
+          (case [goobj/AuxPcfile]
+            (set! pcfile (.resolve l r (.Sym a))))
+          (case [goobj/AuxPcinline]
+            (set! pcinline (.resolve l r (.Sym a))))
+          (case [goobj/AuxPcdata]
+            (set! pcdata (append pcdata (.resolve l r (.Sym a))))))))
+
+
+    (return)))
+
+
+
+^{:go/end 2054} (go/method NumPcdata "Returns the number of pcdata for symbol i.\n" ^int [^{:tag (* Loader)} l ^Sym i]
+  (let [n 0
+      (values _ auxs) (.auxs l i)]
+    (range [j auxs]
+      (let [a (addr (aget auxs j))]
+        (when (== (.Type a) goobj/AuxPcdata)
+          (inc! n))))
+
+
+    ^{:line 2053} n))
+
+
+
+
+^{:go/end 2068} (go/method Funcdata "Returns all funcdata symbols of symbol i.\ntmp is a scratch space.\n" ^{:tag (slice Sym)} [^{:tag (* Loader)} l ^Sym i ^{:tag (slice Sym)} tmp]
+  (let [fd (subslice tmp _ 0)
+      (values r auxs) (.auxs l i)]
+    (range [j auxs]
+      (let [a (addr (aget auxs j))]
+        (when (== (.Type a) goobj/AuxFuncdata)
+          (set! fd (append fd (.resolve l r (.Sym a)))))))
+
+
+    ^{:line 2067} fd))
+
+
+
+^{:go/end 2081} (go/method NumFuncdata "Returns the number of funcdata for symbol i.\n" ^int [^{:tag (* Loader)} l ^Sym i]
+  (let [n 0
+      (values _ auxs) (.auxs l i)]
+    (range [j auxs]
+      (let [a (addr (aget auxs j))]
+        (when (== (.Type a) goobj/AuxFuncdata)
+          (inc! n))))
+
+
+    ^{:line 2080} n))
+
+
+
+(go/type FuncInfo "FuncInfo provides hooks to access goobj.FuncInfo in the objects.\n" (struct
+    ^{:line 2085 :tag (* Loader)} l
+    ^{:line 2086 :tag (* oReader)} r
+    ^{:line 2087 :tag (slice byte)} data
+    ^{:line 2088 :tag goobj/FuncInfoLengths} lengths))
+
+
+^{:go/end 2091} (go/method Valid ^bool [^{:tag (* FuncInfo)} fi] (!= (.-r fi) nil))
+
+^{:go/end 2095} (go/method Args ^int [^{:tag (* FuncInfo)} fi]
+  (conv int (.ReadArgs (conv (* goobj/FuncInfo) nil) (.-data fi))))
+
+
+^{:go/end 2099} (go/method Locals ^int [^{:tag (* FuncInfo)} fi]
+  (conv int (.ReadLocals (conv (* goobj/FuncInfo) nil) (.-data fi))))
+
+
+^{:go/end 2103} (go/method FuncID ^abi/FuncID [^{:tag (* FuncInfo)} fi]
+  (.ReadFuncID (conv (* goobj/FuncInfo) nil) (.-data fi)))
+
+
+^{:go/end 2107} (go/method FuncFlag ^abi/FuncFlag [^{:tag (* FuncInfo)} fi]
+  (.ReadFuncFlag (conv (* goobj/FuncInfo) nil) (.-data fi)))
+
+
+^{:go/end 2111} (go/method StartLine ^int32 [^{:tag (* FuncInfo)} fi]
+  (.ReadStartLine (conv (* goobj/FuncInfo) nil) (.-data fi)))
+
+
+
+
+^{:go/end 2117} (go/method Preload "Preload has to be called prior to invoking the various methods\nbelow related to pcdata, funcdataoff, files, and inltree nodes.\n" [^{:tag (* FuncInfo)} fi]
+  (set! (.-lengths fi) (.ReadFuncInfoLengths (conv (* goobj/FuncInfo) nil) (.-data fi))))
+
+
+^{:go/end 2124} (go/method NumFile ^uint32 [^{:tag (* FuncInfo)} fi]
+  (when (not (.-Initialized (.-lengths fi)))
+    (panic "need to call Preload first"))
+
+  (.-NumFile (.-lengths fi)))
+
+
+^{:go/end 2131} (go/method File ^goobj/CUFileIndex [^{:tag (* FuncInfo)} fi ^int k]
+  (when (not (.-Initialized (.-lengths fi)))
+    (panic "need to call Preload first"))
+
+  (.ReadFile (conv (* goobj/FuncInfo) nil) (.-data fi) (.-FileOff (.-lengths fi)) (conv uint32 k)))
+
+
+
+
+
+^{:go/end 2138} (go/method TopFrame "TopFrame returns true if the function associated with this FuncInfo\nis an entry point, meaning that unwinders should stop when they hit\nthis function.\n" ^bool [^{:tag (* FuncInfo)} fi]
+  (!= (bit-and (.FuncFlag fi) abi/FuncFlagTopFrame) 0))
+
+
+(go/type InlTreeNode (struct
+    ^{:line 2141 :tag int32} Parent
+    ^{:line 2142 :tag goobj/CUFileIndex} File
+    ^{:line 2143 :tag int32} Line
+    ^{:line 2144 :tag Sym} Func
+    ^{:line 2145 :tag int32} ParentPC))
+
+
+^{:go/end 2153} (go/method NumInlTree ^uint32 [^{:tag (* FuncInfo)} fi]
+  (when (not (.-Initialized (.-lengths fi)))
+    (panic "need to call Preload first"))
+
+  (.-NumInlTree (.-lengths fi)))
+
+
+^{:go/end 2167} (go/method InlTree ^InlTreeNode [^{:tag (* FuncInfo)} fi ^int k]
+  (when (not (.-Initialized (.-lengths fi)))
+    (panic "need to call Preload first"))
+
+  (let [node (.ReadInlTree (conv (* goobj/FuncInfo) nil) (.-data fi) (.-InlTreeOff (.-lengths fi)) (conv uint32 k))]
+    ^{:go/breaks [2 4 6 8 10]} (lit InlTreeNode
+      :Parent (.-Parent node)
+      :File (.-File node)
+      :Line (.-Line node)
+      :Func (.resolve (.-l fi) (.-r fi) (.-Func node))
+      :ParentPC (.-ParentPC node))))
+
+
+
+^{:go/end 2179} (go/method FuncInfo ^FuncInfo [^{:tag (* Loader)} l ^Sym i]
+  (let [(values r auxs) (.auxs l i)]
+    (range [j auxs]
+      (let [a (addr (aget auxs j))]
+        (when (== (.Type a) goobj/AuxFuncInfo)
+          (let [b ^{:go/via [Reader]} (.Data r (.-SymIdx (.Sym a)))]
+            (return (lit FuncInfo l r b (lit goobj/FuncInfoLengths)))))))
+
+
+    (lit FuncInfo)))
+
+
+
+
+
+
+
+^{:go/end 2234} (go/method Preload "Preload a package: adds autolib.\nDoes not add defined package or non-packaged symbols to the symbol table.\nThese are done in LoadSyms.\nDoes not read symbol data.\nReturns the fingerprint of the object.\n" ^goobj/FingerprintType [^{:tag (* Loader)} l ^int localSymVersion ^{:tag (* bio/Reader)} f ^{:tag (* sym/Library)} lib ^{:tag (* sym/CompilationUnit)} unit ^int64 length]
+  (let [(values roObject readonly err) (.Slice f (conv uint64 length))] ; TODO: no need to map blocks that are for tools only (e.g. RefName)
+    (when (!= err nil)
+      (log/Fatal "cannot read object file:" err))
+
+    (let [r (goobj/NewReaderFromBytes roObject readonly)]
+      (when (== r nil)
+        (when (and (>= (len roObject) 8) (bytes/Equal (subslice roObject _ 8) (conv (slice byte) "\u0000go114ld")))
+          (log/Fatalf "found object file %s in old format" (.Name (.File f))))
+
+        (panic "cannot read object file"))
+
+      (let [pkgprefix (+ (objabi/PathToPrefix (.-Pkg lib)) ".")
+          ^{:line 2199} ndef (.NSym r)
+          ^{:line 2200} nhashed64def (.NHashed64def r)
+          ^{:line 2201} nhasheddef (.NHasheddef r)
+          ^{:line 2202} or (addr ^{:go/breaks [2 4 6 8 10 12 14 16 18]} (lit oReader
+              :Reader r
+              :unit unit
+              :version localSymVersion
+              :pkgprefix pkgprefix
+              :syms (make (slice Sym) (+ ndef nhashed64def nhasheddef (.NNonpkgdef r) (.NNonpkgref r)))
+              :ndef ndef
+              :nhasheddef nhasheddef
+              :nhashed64def nhashed64def
+              :objidx (conv uint32 (len (.-objs l)))))]
+
+
+        (when (.Unlinkable r)
+          (log/Fatalf "link: unlinkable object (from package %s) - compiler requires -p flag" (.-Pkg lib)))
+
+
+        ;; Autolib
+        (set! (.-Autolib lib) (append (.-Autolib lib) (spread (.Autolib r))))
+
+        ;; DWARF file table
+        (let [nfile (.NFile r)]
+          (set! (.-FileTable unit) (make (slice string) nfile))
+          (range [i (.-FileTable unit)]
+            (aset (.-FileTable unit) i (.File r i)))
+
+
+          (.addObj l (.-Pkg lib) or)
+
+          ;; The caller expects us consuming all the data
+          (.MustSeek f length io/SeekCurrent)
+
+          (.Fingerprint r))))))
+
+
+
+(go/type loadState "Holds the loader along with temporary states for loading symbols.\n" (struct
+    ^{:line 2238 :tag (* Loader)} l
+    ^{:line 2239 :tag (map uint64 symAndSize)} hashed64Syms ; short hashed (content-addressable) symbols, keyed by content hash
+    ^{:line 2240 :tag (map goobj/HashType symAndSize)} hashedSyms ; hashed (content-addressable) symbols, keyed by content hash
+
+    ^{:line 2242 :tag (slice linknameVarRef)} linknameVarRefs)) ; linknamed var refererces
+
+
+(go/type linknameVarRef (struct
+    ^{:line 2246 :tag (* oReader)} pkg ; package of reference (not definition)
+    ^{:line 2247 :tag string} name
+    ^{:line 2248 :tag Sym} sym))
+
+
+
+^{:go/end 2316} (go/method preloadSyms "Preload symbols of given kind from an object.\n" [^{:tag (* loadState)} st ^{:tag (* oReader)} r ^int kind]
+  (let [l (.-l st)
+      (values ^uint32 start ^uint32 end) (zero uint32)]
+    (switch kind
+      (case [pkgDef]
+        (set! start 0)
+        (set! end (conv uint32 (.-ndef r))))
+      (case [hashed64Def]
+        (set! start (conv uint32 (.-ndef r)))
+        (set! end (conv uint32 (+ (.-ndef r) (.-nhashed64def r)))))
+      (case [hashedDef]
+        (set! start (conv uint32 (+ (.-ndef r) (.-nhashed64def r))))
+        (set! end (conv uint32 (+ (.-ndef r) (.-nhashed64def r) (.-nhasheddef r)))))
+      (case [nonPkgDef]
+        (set! start (conv uint32 (+ (.-ndef r) (.-nhashed64def r) (.-nhasheddef r))))
+        (set! end (conv uint32 (+ (.-ndef r) (.-nhashed64def r) (.-nhasheddef r) ^{:go/via [Reader]} (.NNonpkgdef r)))))
+      (default
+        (panic "preloadSyms: bad kind")))
+
+    (.growAttrBitmaps l (+ (len (.-objSyms l)) (conv int (- end start))))
+    (let [loadingRuntimePkg (== (.-Pkg (.-Lib (.-unit r))) "runtime")]
+      (for [i start] (< i end) (inc! i)
+        (let [osym ^{:go/via [Reader]} (.Sym r i)
+            ^{:line 2275 :tag string} name (zero string)
+            ^{:line 2276 :tag int} v (zero int)]
+          (when (and (!= kind hashed64Def) (!= kind hashedDef)) ; we don't need the name, etc. for hashed symbols
+            (set! name (.Name osym (.-Reader r)))
+            (set! v (abiToVer (.ABI osym) (.-version r))))
+
+          (let [gi (.addSym st name v r i kind osym)]
+            (aset (.-syms r) i gi)
+            (when (and (== kind nonPkgDef) ^:go/paren (or (.IsLinkname osym) (.IsLinknameStd osym)) (== ^{:go/via [Reader]} (.DataSize r i) 0) (strings/Contains name "."))
+              ;; This is a linknamed "var" "reference" (var x T with no data and //go:linkname x).
+              ;; We want to check if a linkname reference is allowed. Here we haven't loaded all
+              ;; symbol definitions, so we don't yet know all the push linknames. So we add to a
+              ;; list and check later after all symbol defs are loaded. Linknamed vars are rare,
+              ;; so this list won't be long.
+              ;; Only check references (pull), not definitions (push, with non-zero size),
+              ;; so push is always allowed.
+              ;; This use of linkname is usually for referencing C symbols, so allow symbols
+              ;; with no "." in its name (not a regular Go symbol).
+              ;; Linkname is always a non-package reference.
+              (set! (.-linknameVarRefs st) (append (.-linknameVarRefs st) (lit linknameVarRef r name gi))))
+
+            (when (.Local osym)
+              (.SetAttrLocal l gi true))
+
+            (when (.UsedInIface osym)
+              (.SetAttrUsedInIface l gi true))
+
+            (when (or (strings/HasPrefix name "runtime.")
+                ^:go/paren (and loadingRuntimePkg (strings/HasPrefix name "type:")))
+              (when [bi (goobj/BuiltinIdx name (conv int (.ABI osym)))] (!= bi -1)
+                ;; This is a definition of a builtin symbol. Record where it is.
+                (aset (.-builtinSyms l) bi gi)))
+
+
+            (when [a (conv int32 (.Align osym))] (and (!= a 0) (> a (.SymAlign l gi)))
+              (.SetSymAlign l gi a))
+
+            (when (.WasmExport osym)
+              (set! (.-WasmExports l) (append (.-WasmExports l) gi)))))))))
+
+
+
+
+
+
+^{:go/end 2361} (go/method LoadSyms "Add syms, hashed (content-addressable) symbols, non-package symbols, and\nreferences to external symbols (which are always named).\n" [^{:tag (* Loader)} l ^{:tag (* sys/Arch)} arch]
+  ;; Allocate space for symbols, making a guess as to how much space we need.
+  ;; This function was determined empirically by looking at the cmd/compile on
+  ;; Darwin, and picking factors for hashed and hashed64 syms.
+  (let [(values ^int symSize ^int hashedSize ^int hashed64Size) (zero int)]
+    (range [_ r (subslice (.-objs l) goObjStart)]
+      (set! symSize + (+ (.-ndef r) (/ (.-nhasheddef r) 2) (/ (.-nhashed64def r) 2) ^{:go/via [Reader]} (.NNonpkgdef r)))
+      (set! hashedSize + (/ (.-nhasheddef r) 2))
+      (set! hashed64Size + (/ (.-nhashed64def r) 2)))
+
+    ;; Index 0 is invalid for symbols.
+    (set! (.-objSyms l) (make (slice objSym) 1 symSize))
+
+    (let [st ^{:go/breaks [2 4 6]} (lit loadState
+          :l l
+          :hashed64Syms (make (map uint64 symAndSize) hashed64Size)
+          :hashedSyms (make (map goobj/HashType symAndSize) hashedSize))]
+
+
+      (range [_ r (subslice (.-objs l) goObjStart)]
+        (.preloadSyms st r pkgDef))
+
+      (set! (.-npkgsyms l) (.NSym l))
+      (range [_ r (subslice (.-objs l) goObjStart)]
+        (.preloadSyms st r hashed64Def)
+        (.preloadSyms st r hashedDef)
+        (.preloadSyms st r nonPkgDef))
+
+      (range [_ vr (.-linknameVarRefs st)]
+        (.checkLinkname l (.-pkg vr) (.-name vr) (.-sym vr)))
+
+      (set! (.-nhashedsyms l) (+ (len (.-hashed64Syms st)) (len (.-hashedSyms st))))
+      (range [_ r (subslice (.-objs l) goObjStart)]
+        (loadObjRefs l r arch))
+
+      (range [_ sf (.-sizeFixups l)]
+        (let [pp (.cloneToExternal l (.-sym sf))]
+          (set! (.-size pp) (conv int64 (.-size sf)))))
+
+      (set! (.-values l) (make (slice int64) (.NSym l) (+ (.NSym l) 1000))) ; +1000 make some room for external symbols
+      (set! (.-outer l) (make (slice Sym) (.NSym l) (+ (.NSym l) 1000))))))
+
+
+^{:go/end 2407} (go/func loadObjRefs [^{:tag (* Loader)} l ^{:tag (* oReader)} r ^{:tag (* sys/Arch)} arch]
+  ;; load non-package refs
+  (let [ndef (conv uint32 (.NAlldef r))]
+    (for [(values i n) (values (conv uint32 0) (conv uint32 ^{:go/via [Reader]} (.NNonpkgref r)))] (< i n) (inc! i)
+      (let [osym ^{:go/via [Reader]} (.Sym r (+ ndef i))
+          ^{:line 2368} name (.Name osym (.-Reader r))
+          ^{:line 2369} v (abiToVer (.ABI osym) (.-version r))
+          ^{:line 2370} gi (.LookupOrCreateSym l name v)]
+        (aset (.-syms r) (+ ndef i) gi)
+        (when (or (.IsLinkname osym) (.IsLinknameStd osym) ^{:go/via [Reader]} (.FromAssembly r))
+          ;; Check if a linkname reference is allowed.
+          ;; Only check references (pull), not definitions (push),
+          ;; so push is always allowed.
+          ;; Linkname is always a non-package reference.
+          (.checkLinkname l r name gi))
+
+        (when (.Local osym)
+          (.SetAttrLocal l gi true))
+
+        (when (.UsedInIface osym)
+          (.SetAttrUsedInIface l gi true))))
+
+
+
+    ;; referenced packages
+    (let [npkg ^{:go/via [Reader]} (.NPkg r)]
+      (set! (.-pkg r) (make (slice uint32) npkg))
+      (for [i 1] (< i npkg) (inc! i) ; PkgIdx 0 is a dummy invalid package
+        (let [pkg ^{:go/via [Reader]} (.Pkg r i)
+            (values objidx ok) (aget (.-objByPkg l) pkg)]
+          (when (not ok)
+            (log/Fatalf "%v: reference to nonexistent package %s" (.-Lib (.-unit r)) pkg))
+
+          (aset (.-pkg r) i objidx)))
+
+
+      ;; load flags of package refs
+      (for [(values i n) (values 0 ^{:go/via [Reader]} (.NRefFlags r))] (< i n) (inc! i)
+        (let [rf ^{:go/via [Reader]} (.RefFlags r i)
+            ^{:line 2402} gi (.resolve l r (.Sym rf))]
+          (when (!= (bit-and (.Flag2 rf) goobj/SymFlagUsedInIface) 0)
+            (.SetAttrUsedInIface l gi true)))))))
+
+
+
+
+^{:go/end 2421} (go/func abiToVer ^int [^uint16 abi ^int localSymVersion]
+  (let [^int v (zero int)]
+    (if (== abi goobj/SymABIstatic)
+      ;; Static
+      (set! v localSymVersion)
+      (if [abiver (sym/ABIToVersion (conv obj/ABI abi))] (!= abiver -1)
+        ;; Note that data symbols are "ABI0", which maps to version 0.
+        (set! v abiver)
+
+        (log/Fatalf "invalid symbol ABI: %d" abi)))
+
+    ^{:line 2420} v))
+
+
+
+
+
+
+
+
+(go/var ^{:doc "A list of blocked linknames. Some linknames are allowed only\nin specific packages. This maps symbol names to allowed packages.\nIf a name is not in this map, it is allowed iff the definition\nhas a linkname (push).\nIf a name is in this map, it is allowed only in listed packages,\neven if it has a linknamed definition.\n"} blockedLinknames (lit (map string (slice string))
+    ;; fips info
+    ^{:line 2431} ["go:fipsinfo" (lit _ "crypto/internal/fips140/check")]
+    ;; New internal linknames in Go 1.24
+    ;; Pushed from runtime
+    ^{:line 2434} ["crypto/internal/fips140.fatal" (lit _ "crypto/internal/fips140")]
+    ^{:line 2435} ["crypto/internal/fips140.getIndicator" (lit _ "crypto/internal/fips140")]
+    ^{:line 2436} ["crypto/internal/fips140.setIndicator" (lit _ "crypto/internal/fips140")]
+    ^{:line 2437} ["crypto/internal/sysrand.fatal" (lit _ "crypto/internal/sysrand")]
+    ^{:line 2438} ["crypto/rand.fatal" (lit _ "crypto/rand")]
+    ^{:line 2439} ["internal/runtime/maps.errNilAssign" (lit _ "internal/runtime/maps")]
+    ^{:line 2440} ["internal/runtime/maps.fatal" (lit _ "internal/runtime/maps")]
+    ^{:line 2441} ["internal/runtime/maps.newarray" (lit _ "internal/runtime/maps")]
+    ^{:line 2442} ["internal/runtime/maps.newobject" (lit _ "internal/runtime/maps")]
+    ^{:line 2443} ["internal/runtime/maps.rand" (lit _ "internal/runtime/maps")]
+    ^{:line 2444} ["internal/runtime/maps.typedmemclr" (lit _ "internal/runtime/maps")]
+    ^{:line 2445} ["internal/runtime/maps.typedmemmove" (lit _ "internal/runtime/maps")]
+    ^{:line 2446} ["internal/sync.fatal" (lit _ "internal/sync")]
+    ^{:line 2447} ["internal/sync.runtime_canSpin" (lit _ "internal/sync")]
+    ^{:line 2448} ["internal/sync.runtime_doSpin" (lit _ "internal/sync")]
+    ^{:line 2449} ["internal/sync.runtime_nanotime" (lit _ "internal/sync")]
+    ^{:line 2450} ["internal/sync.runtime_Semrelease" (lit _ "internal/sync")]
+    ^{:line 2451} ["internal/sync.runtime_SemacquireMutex" (lit _ "internal/sync")]
+    ^{:line 2452} ["internal/sync.throw" (lit _ "internal/sync")]
+    ^{:line 2453} ["internal/synctest.Run" (lit _ "internal/synctest")]
+    ^{:line 2454} ["internal/synctest.Wait" (lit _ "internal/synctest")]
+    ^{:line 2455} ["internal/synctest.acquire" (lit _ "internal/synctest")]
+    ^{:line 2456} ["internal/synctest.release" (lit _ "internal/synctest")]
+    ^{:line 2457} ["internal/synctest.inBubble" (lit _ "internal/synctest")]
+    ^{:line 2458} ["runtime.getStaticuint64s" (lit _ "reflect")]
+    ^{:line 2459} ["sync.runtime_SemacquireWaitGroup" (lit _ "sync")]
+    ^{:line 2460} ["time.runtimeNow" (lit _ "time")]
+    ^{:line 2461} ["time.runtimeNano" (lit _ "time")]
+    ;; Pushed to runtime from internal/runtime/maps
+    ;; (other map functions are already linknamed in Go 1.23)
+    ^{:line 2464} ["runtime.mapaccess1" (lit _ "runtime")]
+    ^{:line 2465} ["runtime.mapaccess1_fast32" (lit _ "runtime")]
+    ^{:line 2466} ["runtime.mapaccess1_fast64" (lit _ "runtime")]
+    ^{:line 2467} ["runtime.mapaccess1_faststr" (lit _ "runtime")]
+    ^{:line 2468} ["runtime.mapdelete_fast32" (lit _ "runtime")]
+    ^{:line 2469} ["runtime.mapdelete_fast64" (lit _ "runtime")]
+    ^{:line 2470} ["runtime.mapdelete_faststr" (lit _ "runtime")]
+    ;; New internal linknames in Go 1.25
+    ;; Pushed from runtime
+    ^{:line 2473} ["internal/cpu.riscvHWProbe" (lit _ "internal/cpu")]
+    ^{:line 2474} ["internal/runtime/cgroup.throw" (lit _ "internal/runtime/cgroup")]
+    ^{:line 2475} ["internal/runtime/maps.typeString" (lit _ "internal/runtime/maps")]
+    ^{:line 2476} ["internal/synctest.IsInBubble" (lit _ "internal/synctest")]
+    ^{:line 2477} ["internal/synctest.associate" (lit _ "internal/synctest")]
+    ^{:line 2478} ["internal/synctest.disassociate" (lit _ "internal/synctest")]
+    ^{:line 2479} ["internal/synctest.isAssociated" (lit _ "internal/synctest")]
+    ^{:line 2480} ["runtime/trace.runtime_readTrace" (lit _ "runtime/trace")]
+    ^{:line 2481} ["runtime/trace.runtime_traceClockUnitsPerSecond" (lit _ "runtime/trace")]
+    ^{:line 2482} ["sync_test.runtime_blockUntilEmptyCleanupQueue" (lit _ "sync_test")]
+    ^{:line 2483} ["time.runtimeIsBubbled" (lit _ "time")]
+    ^{:line 2484} ["unique.runtime_blockUntilEmptyCleanupQueue" (lit _ "unique")]
+    ;; Others
+    ^{:line 2486} ["net.newWindowsFile" (lit _ "net")] ; pushed from os
+    ^{:line 2487} ["testing/synctest.testingSynctestTest" (lit _ "testing/synctest")] ; pushed from testing
+    ;; New internal linknames in Go 1.26
+    ;; Pushed from runtime
+    ^{:line 2490} ["crypto/fips140.isBypassed" (lit _ "crypto/fips140")]
+    ^{:line 2491} ["crypto/fips140.setBypass" (lit _ "crypto/fips140")]
+    ^{:line 2492} ["crypto/fips140.unsetBypass" (lit _ "crypto/fips140")]
+    ^{:line 2493} ["crypto/subtle.setDITEnabled" (lit _ "crypto/subtle")]
+    ^{:line 2494} ["crypto/subtle.setDITDisabled" (lit _ "crypto/subtle")]
+    ^{:line 2495} ["internal/cpu.sysctlbynameBytes" (lit _ "internal/cpu")]
+    ^{:line 2496} ["internal/cpu.sysctlbynameInt32" (lit _ "internal/cpu")]
+    ^{:line 2497} ["runtime.pprof_goroutineLeakProfileWithLabels" (lit _ "runtime/pprof")]
+    ^{:line 2498} ["runtime/pprof.runtime_goroutineLeakGC" (lit _ "runtime/pprof")]
+    ^{:line 2499} ["runtime/pprof.runtime_goroutineleakcount" (lit _ "runtime/pprof")]
+    ^{:line 2500} ["runtime/secret.appendSignalStacks" (lit _ "runtime/secret")]
+    ^{:line 2501} ["runtime/secret.count" (lit _ "runtime/secret")]
+    ^{:line 2502} ["runtime/secret.dec" (lit _ "runtime/secret")]
+    ^{:line 2503} ["runtime/secret.eraseSecrets" (lit _ "runtime/secret")]
+    ^{:line 2504} ["runtime/secret.getStack" (lit _ "runtime/secret")]
+    ^{:line 2505} ["runtime/secret.inc" (lit _ "runtime/secret")]
+    ^{:line 2506} ["syscall.rawsyscalln" (lit _ "syscall")]
+    ^{:line 2507} ["syscall.runtimeClearenv" (lit _ "syscall")]
+    ^{:line 2508} ["syscall.syscalln" (lit _ "syscall")]
+    ;; Others
+    ^{:line 2510} ["crypto/internal/rand.SetTestingReader" (lit _ "testing/cryptotest")] ; pushed from crypto/internal/rand
+    ^{:line 2511} ["testing.checkParallel" (lit _ "testing/cryptotest")] ; pushed from testing
+    ^{:line 2512} ["runtime.addmoduledata" (lit _)] ; assembly symbol, disallow all packages
+    ;; Used by GOOS=tamago
+    ^{:line 2514} ["os/signal.Relay" (lit _ "")] ; used by external interrupt handlers
+    ^{:line 2515} ["runtime.CallOnG0" (lit _ "")] ; used by external exception handlers
+    ^{:line 2516} ["runtime.rt0_amd64_tamago" (lit _ "")] ; used by external runtime/goos.CPUInit overlay
+    ^{:line 2517} ["runtime.rt0_arm64_tamago" (lit _ "")] ; used by external runtime/goos.CPUInit overlay
+    ^{:line 2518} ["runtime.rt0_arm_tamago" (lit _ "")] ; used by external runtime/goos.CPUInit overlay
+    ^{:line 2519} ["runtime.rt0_loong64_tamago" (lit _ "")] ; used by external runtime/goos.CPUInit overlay
+    ^{:line 2520} ["runtime.rt0_riscv64_tamago" (lit _ "")] ; used by external runtime/goos.CPUInit overlay
+    ^{:line 2521} ["runtime.findTimer" (lit _ "os/signal")]
+    ^{:line 2522} ["runtime.wakeG" (lit _ "os/signal")]))
+
+
+
+^{:go/end 2606} (go/method checkLinkname "check if a linkname reference to symbol s from refpkg is allowed\n" [^{:tag (* Loader)} l ^{:tag (* oReader)} refpkg ^string name ^Sym s]
+  (when (== (bit-and (.-flags l) FlagCheckLinkname) 0)
+    (return))
+
+
+  (let [pkg (.-Pkg (.-Lib (.-unit refpkg)))
+      ^{:line 2532} error ^{:go/end 2534} (fn []
+        (log/Fatalf "%s: invalid reference to %s" pkg name))
+
+      (values pkgs ok) (aget blockedLinknames name)]
+    (when ok
+      (range [_ p pkgs]
+        (when (or (== pkg p) ^:go/paren (and (== buildcfg/GOOS "tamago") (== p "")))
+          (return)) ; pkg is allowed
+
+        ;; crypto/internal/fips140/vX.Y.Z/... is the frozen version of
+        ;; crypto/internal/fips140/... and is similarly allowed.
+        (when (strings/HasPrefix pkg "crypto/internal/fips140/v")
+          (let [parts (strings/Split pkg "/")]
+            (set! parts (append (subslice parts _ 3) (spread (subslice parts 4))))
+            (let [pkg (strings/Join parts "/")]
+              (when (== pkg p)
+                (return))))))
+
+
+
+      (error))
+
+    (let [(values r li) (.toLocal l s)]
+      (when (== r (.-extReader l)) ; referencing external symbol is okay
+        (return))
+
+      (when (not ^{:go/via [Reader]} (.Std r)) ; For now, only check for symbols defined in std
+        (return))
+
+      (when (== (.-Pkg (.-Lib (.-unit r))) pkg) ; assembly reference from same package
+        (return))
+
+      (let [osym ^{:go/via [Reader]} (.Sym r li)]
+        (when (and ^{:go/via [Reader]} (.FromAssembly r) (not (.IsLinknameStd osym)) (not (.IsLinkname osym)))
+          (when (strings/HasPrefix name pkg)
+            ;; Allow if by name it is pushed to pkg, e.g. in package a,
+            ;; an assembly function is defined as b.F, then it is allowed
+            ;; to be used in package b.
+            (return))
+
+          (when (not (strings/Contains name "."))
+            ;; Symbol without "." in its name is meant to be accessed
+            ;; in non-Go code. Usually non-Go access is not checked, but
+            ;; it can also be from Go code via assembly or linkname.
+            ;; Notable member of the hall of shame is
+            ;; github.com/ebitengine/purego accessing crosscall2.
+            (return))
+
+          ;; For an assembly symbol, check if there is a linkname applied
+          ;; to its ABI wrapper.
+          (when (not ^{:go/via [Flags]} (.-RegabiWrappers buildcfg/Experiment))
+            ;; If ABI wrapper is not enabled (i.e. non-regabi platform),
+            ;; permit for now, as there is no good way to check.
+            (return))
+
+          (let [otherABI (- 1 (abiToVer (.ABI osym) (.-version r))) ; for now, we only have ABI 0 and 1
+              ^{:line 2588} w (.Lookup l name otherABI)] ; TODO: use an aux symbol instead of name lookup?
+            (when (!= w 0)
+              (set! (values r li) (.toLocal l w))
+              (set! osym ^{:go/via [Reader]} (.Sym r li)))))
+
+
+        (when (.IsLinknameStd osym)
+          ;; It is pushed with linknamestd. Allow only pulls from the
+          ;; standard library.
+          (when ^{:go/via [Reader]} (.Std refpkg)
+            (return)))
+
+
+        (when (.IsLinkname osym)
+          ;; Allow if the def has a linkname (push).
+          (return))
+
+        (error)))))
+
+
+
+
+
+
+^{:go/end 2614} (go/method TopLevelSym "TopLevelSym tests a symbol (by name and kind) to determine whether\nthe symbol first class sym (participating in the link) or is an\nanonymous aux or sub-symbol containing some sub-part or payload of\nanother symbol.\n" ^bool [^{:tag (* Loader)} l ^Sym s]
+  (topLevelSym (.SymName l s) (.SymType l s)))
+
+
+
+
+
+
+^{:go/end 2630} (go/func topLevelSym "topLevelSym tests a symbol name and kind to determine whether\nthe symbol first class sym (participating in the link) or is an\nanonymous aux or sub-symbol containing some sub-part or payload of\nanother symbol.\n" ^bool [^string sname ^sym/SymKind skind]
+  (when (!= sname "")
+    (return true))
+
+  (switch skind
+    (case [sym/SDWARFFCN sym/SDWARFABSFCN sym/SDWARFTYPE sym/SDWARFCONST sym/SDWARFCUINFO sym/SDWARFRANGE sym/SDWARFLOC sym/SDWARFLINES sym/SGOFUNC]
+      (return true))
+    (default
+      (return false))))
+
+
+
+
+
+
+
+
+
+
+^{:go/end 2696} (go/method cloneToExternal "cloneToExternal takes the existing object file symbol (symIdx)\nand creates a new external symbol payload that is a clone with\nrespect to name, version, type, relocations, etc. The idea here\nis that if the linker decides it wants to update the contents of\na symbol originally discovered as part of an object file, it's\neasier to do this if we make the updates to an external symbol\npayload.\n" ^{:tag (* extSymPayload)} [^{:tag (* Loader)} l ^Sym symIdx]
+  (when (.IsExternal l symIdx)
+    (panic "sym is already external, no need for clone"))
+
+
+  ;; Read the particulars from object.
+  (let [(values r li) (.toLocal l symIdx)
+      ^{:line 2646} osym ^{:go/via [Reader]} (.Sym r li)
+      ^{:line 2647} sname (.Name osym (.-Reader r))
+      ^{:line 2648} sver (abiToVer (.ABI osym) (.-version r))
+      ^{:line 2649} skind (aget sym/AbiSymKindToSymKind (conv objabi/SymKind (.Type osym)))
+
+      ;; Create new symbol, update version and kind.
+      ^{:line 2652} pi (.newPayload l sname sver)
+      ^{:line 2653} pp (aget (.-payloads l) pi)]
+    (set! (.-kind pp) skind)
+    (set! (.-ver pp) sver)
+    (set! (.-size pp) (conv int64 (.Siz osym)))
+    (set! (.-objidx pp) (.-objidx r))
+
+    ;; If this is a def, then copy the guts. We expect this case
+    ;; to be very rare (one case it may come up is with -X).
+    (when (< li (conv uint32 (.NAlldef r)))
+
+      ;; Copy relocations
+      (let [relocs (.Relocs l symIdx)]
+        (set! (.-relocs pp) (make (slice goobj/Reloc) (.Count relocs)))
+        (range [i (.-relocs pp)]
+          ;; Copy the relocs slice.
+          ;; Convert local reference to global reference.
+          (let [rel (.At relocs i)]
+            (.Set (aget (.-relocs pp) i) ^{:go/via [Reloc]} (.Off rel) ^{:go/via [Reloc]} (.Siz rel) (conv uint16 (.Type rel)) ^{:go/via [Reloc]} (.Add rel) (lit goobj/SymRef :PkgIdx 0 :SymIdx (conv uint32 (.Sym rel))))))
+
+
+        ;; Copy data
+        (set! (.-data pp) ^{:go/via [Reader]} (.Data r li))))
+
+
+    ;; If we're overriding a data symbol, collect the associated
+    ;; Gotype, so as to propagate it to the new symbol.
+    (let [auxs ^{:go/via [Reader]} (.Auxs r li)]
+      (set! (.-auxs pp) auxs)
+
+      ;; Install new payload to global index space.
+      ;; (This needs to happen at the end, as the accessors above
+      ;; need to access the old symbol content.)
+      (aset (.-objSyms l) symIdx (lit objSym (.-objidx (.-extReader l)) (conv uint32 pi)))
+      (set! (.-syms (.-extReader l)) (append (.-syms (.-extReader l)) symIdx))
+
+      ;; Some attributes were encoded in the object file. Copy them over.
+      (.SetAttrDuplicateOK l symIdx (.Dupok ^{:go/via [Reader]} (.Sym r li)))
+      (.SetAttrShared l symIdx ^{:go/via [Reader]} (.Shared r))
+      (when (.IsContentHashed r li)
+        (aset (.-contentHashed l) symIdx true))
+
+
+      ^{:line 2695} pp)))
+
+
+
+
+
+
+
+
+^{:go/end 2714} (go/method CopySym "Copy the payload of symbol src to dst. Both src and dst must be external\nsymbols.\nThe intended use case is that when building/linking against a shared library,\nwhere we do symbol name mangling, the Go object file may have reference to\nthe original symbol name whereas the shared library provides a symbol with\nthe mangled name. When we do mangling, we copy payload of mangled to original.\n" [^{:tag (* Loader)} l ^Sym src ^Sym dst]
+  (when (not (.IsExternal l dst))
+    (panic "dst is not external")) ;l.newExtSym(l.SymName(dst), l.SymVersion(dst))
+
+  (when (not (.IsExternal l src))
+    (panic "src is not external")) ;l.cloneToExternal(src)
+
+  (aset (.-payloads l) (.extIndex l dst) (aget (.-payloads l) (.extIndex l src)))
+  (.SetSymPkg l dst (.SymPkg l src)))
+;; TODO: other attributes?
+
+
+
+
+^{:go/end 2720} (go/method CreateExtSym "CreateExtSym creates a new external symbol with the specified name\nwithout adding it to any lookup tables, returning a Sym index for it.\n" ^Sym [^{:tag (* Loader)} l ^string name ^int ver]
+  (.newExtSym l name ver))
+
+
+
+
+^{:go/end 2729} (go/method CreateStaticSym "CreateStaticSym creates a new static symbol with the specified name\nwithout adding it to any lookup tables, returning a Sym index for it.\n" ^Sym [^{:tag (* Loader)} l ^string name]
+  ;; Assign a new unique negative version -- this is to mark the
+  ;; symbol so that it is not included in the name lookup table.
+  (dec! (.-anonVersion l))
+  (.newExtSym l name (.-anonVersion l)))
+
+
+^{:go/end 2736} (go/method FreeSym [^{:tag (* Loader)} l ^Sym i]
+  (when (.IsExternal l i)
+    (let [pp (.getPayload l i)]
+      (set! @pp (lit extSymPayload)))))
+
+
+
+
+
+(go/type relocId "relocId is essentially a <S,R> tuple identifying the Rth\nrelocation of symbol S.\n" (struct
+    ^{:line 2741 :tag Sym} sym
+    ^{:line 2742 :tag int} ridx))
+
+
+
+
+^{:go/end 2760} (go/method SetRelocVariant "SetRelocVariant sets the 'variant' property of a relocation on\nsome specific symbol.\n" [^{:tag (* Loader)} l ^Sym s ^int ri ^sym/RelocVariant v]
+  ;; sanity check
+  (when [relocs (.Relocs l s)] (>= ri (.Count relocs))
+    (panic "invalid relocation ID"))
+
+  (when (== (.-relocVariant l) nil)
+    (set! (.-relocVariant l) (make (map relocId sym/RelocVariant))))
+
+  (if (!= v 0)
+    (aset (.-relocVariant l) (lit relocId s ri) v)
+
+    (delete (.-relocVariant l) (lit relocId s ri))))
+
+
+
+
+
+^{:go/end 2766} (go/method RelocVariant "RelocVariant returns the 'variant' property of a relocation on\nsome specific symbol.\n" ^sym/RelocVariant [^{:tag (* Loader)} l ^Sym s ^int ri]
+  (aget (.-relocVariant l) (lit relocId s ri)))
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 2796} (go/method UndefinedRelocTargets "UndefinedRelocTargets iterates through the global symbol index\nspace, looking for symbols with relocations targeting undefined\nreferences. The linker's loadlib method uses this to determine if\nthere are unresolved references to functions in system libraries\n(for example, libgcc.a), presumably due to CGO code. Return value\nis a pair of lists of loader.Sym's. First list corresponds to the\ncorresponding to the undefined symbols themselves, the second list\nis the symbol that is making a reference to the undef. The \"limit\"\nparam controls the maximum number of results returned; if \"limit\"\nis -1, then all undefs are returned.\n" [^{:tag (* Loader)} l ^int limit] :results [(slice Sym) (slice Sym)]
+  (let [(values result fromr) (values (lit (slice Sym)) (lit (slice Sym)))]
+    (label :outerloop
+      (for [si (conv Sym 1)] (< si (conv Sym (len (.-objSyms l)))) (inc! si)
+        (let [relocs (.Relocs l si)]
+          (for [ri 0] (< ri (.Count relocs)) (inc! ri)
+            (let [r (.At relocs ri)
+                ^{:line 2785} rs (.Sym r)]
+              (when (and (!= rs 0) (== (.SymType l rs) sym/SXREF) (!= (.SymName l rs) ".got"))
+                (set! result (append result rs))
+                (set! fromr (append fromr si))
+                (when (and (!= limit -1) (>= (len result) limit))
+                  (break :outerloop))))))))
+
+
+
+
+    (return result fromr)))
+
+
+
+
+
+
+^{:go/end 2896} (go/method AssignTextSymbolOrder "AssignTextSymbolOrder populates the Textp slices within each\nlibrary and compilation unit, insuring that packages are laid down\nin dependency order (internal first, then everything else). Return value\nis a slice of all text syms.\n" ^{:tag (slice Sym)} [^{:tag (* Loader)} l ^{:tag (slice (* sym/Library))} libs ^{:tag (slice bool)} intlibs ^{:tag (slice Sym)} extsyms]
+
+  ;; Library Textp lists should be empty at this point.
+  (range [_ lib libs]
+    (when (!= (len (.-Textp lib)) 0)
+      (panic "expected empty Textp slice for library"))
+
+    (when (!= (len (.-DupTextSyms lib)) 0)
+      (panic "expected empty DupTextSyms slice for library")))
+
+
+
+  ;; Used to record which dupok symbol we've assigned to a unit.
+  ;; Can't use the onlist attribute here because it will need to
+  ;; clear for the later assignment of the sym.Symbol to a unit.
+  ;; NB: we can convert to using onList once we no longer have to
+  ;; call the regular addToTextp.
+  (let [assignedToUnit (MakeBitmap (+ (.NSym l) 1))
+
+      ;; Start off textp with reachable external syms.
+      ^{:line 2822} textp (lit (slice Sym))]
+    (range [_ sym extsyms]
+      (when (not (.Has (.-attrReachable l) sym))
+        (continue))
+
+      (set! textp (append textp sym)))
+
+
+    ;; Walk through all text symbols from Go object files and append
+    ;; them to their corresponding library's textp list.
+    (range [_ r (subslice (.-objs l) goObjStart)]
+      (let [lib (.-Lib (.-unit r))]
+        (for [(values i n) (values (conv uint32 0) (conv uint32 (.NAlldef r)))] (< i n) (inc! i)
+          (let [gi (.toGlobal l r i)]
+            (when (not (.Has (.-attrReachable l) gi))
+              (continue))
+
+            (let [osym ^{:go/via [Reader]} (.Sym r i)
+                ^{:line 2840} st (aget sym/AbiSymKindToSymKind (conv objabi/SymKind (.Type osym)))]
+              (when (not (.IsText st))
+                (continue))
+
+              (let [dupok (.Dupok osym)]
+                (when [(values r2 i2) (.toLocal l gi)] (or (!= r2 r) (!= i2 i))
+                  ;; A dupok text symbol is resolved to another package.
+                  ;; We still need to record its presence in the current
+                  ;; package, as the trampoline pass expects packages
+                  ;; are laid out in dependency order.
+                  (set! (.-DupTextSyms lib) (append (.-DupTextSyms lib) gi))
+                  (continue)) ; symbol in different object
+
+                (when dupok
+                  (set! (.-DupTextSyms lib) (append (.-DupTextSyms lib) gi))
+                  (continue))
+
+
+                (set! (.-Textp lib) (append (.-Textp lib) gi))))))))
+
+
+
+    ;; Now assemble global textp, and assign text symbols to units.
+    (range [_ doInternal (lit (array 2 bool) true false)]
+      (range [idx lib libs]
+        (when (!= (aget intlibs idx) doInternal)
+          (continue))
+
+        (let [lists (lit (array 2 (slice sym/LoaderSym)) (.-Textp lib) (.-DupTextSyms lib))]
+          (range [i list lists]
+            (range [_ s list]
+              (let [sym s]
+                (when (not (.Has assignedToUnit sym))
+                  (set! textp (append textp sym))
+                  (let [unit (.SymUnit l sym)]
+                    (when (!= unit nil)
+                      (set! (.-Textp unit) (append (.-Textp unit) s))
+                      (.Set assignedToUnit sym))
+
+                    ;; Dupok symbols may be defined in multiple packages; the
+                    ;; associated package for a dupok sym is chosen sort of
+                    ;; arbitrarily (the first containing package that the linker
+                    ;; loads). Canonicalizes its Pkg to the package with which
+                    ;; it will be laid down in text.
+                    (when (and (== i 1) (!= (.SymPkg l sym) (.-Pkg lib))) ; /* DupTextSyms2 */
+                      (.SetSymPkg l sym (.-Pkg lib))))))))
+
+
+
+
+          (set! (.-Textp lib) nil)
+          (set! (.-DupTextSyms lib) nil))))
+
+
+
+    ^{:line 2895} textp))
+
+
+
+(go/type ErrorReporter "ErrorReporter is a helper class for reporting errors.\n" (struct
+    ^{:line 2900 :tag (* Loader)} ldr
+    ^{:line 2901 :tag (func [])} AfterErrorAction))
+
+
+
+
+
+
+
+
+
+
+^{:go/end 2923} (go/method Errorf "Errorf method logs an error message.\n\nAfter each error, the error actions function will be invoked; this\nwill either terminate the link immediately (if -h option given)\nor it will keep a count and exit if more than 20 errors have been printed.\n\nLogging an error means that on exit cmd/link will delete any\noutput file and return a non-zero error code.\n" [^{:tag (* ErrorReporter)} reporter ^Sym s ^string format & ^{:tag (slice any)} args]
+  (if (and (!= s 0) (!= (.SymName (.-ldr reporter) s) ""))
+    ;; Note: Replace is needed here because symbol names might have % in them,
+    ;; due to the use of LinkString for names of instantiating types.
+    (set! format (+ (strings/ReplaceAll (.SymName (.-ldr reporter) s) "%" "%%") ": " format))
+
+    (set! format (fmt/Sprintf "sym %d: %s" s format)))
+
+  (set! format + "\n")
+  (fmt/Fprintf os/Stderr format (spread args))
+  ((.-AfterErrorAction reporter)))
+
+
+
+^{:go/end 2928} (go/method GetErrorReporter "GetErrorReporter returns the loader's associated error reporter.\n" ^{:tag (* ErrorReporter)} [^{:tag (* Loader)} l]
+  (.-errorReporter l))
+
+
+
+^{:go/end 2933} (go/method Errorf "Errorf method logs an error message. See ErrorReporter.Errorf for details.\n" [^{:tag (* Loader)} l ^Sym s ^string format & ^{:tag (slice any)} args]
+  (.Errorf (.-errorReporter l) s format (spread args)))
+
+
+
+^{:go/end 2941} (go/method Stat "Symbol statistics.\n" ^string [^{:tag (* Loader)} l]
+  (let [s (fmt/Sprintf "%d symbols, %d reachable\n" (.NSym l) (.NReachableSym l))]
+    (set! s + (fmt/Sprintf "\t%d package symbols, %d hashed symbols, %d non-package symbols, %d external symbols\n"
+        (.-npkgsyms l) (.-nhashedsyms l) (- (conv int (.-extStart l)) (.-npkgsyms l) (.-nhashedsyms l)) (- (.NSym l) (conv int (.-extStart l)))))
+    ^{:line 2940} s))
+
+
+
+^{:go/end 2977} (go/method Dump "For debugging.\n" [^{:tag (* Loader)} l]
+  (fmt/Println "objs")
+  (range [_ r (subslice (.-objs l) goObjStart)]
+    (when (!= r nil)
+      (fmt/Println (.-Lib (.-unit r)))))
+
+
+  (fmt/Println "extStart:" (.-extStart l))
+  (fmt/Println "Nsyms:" (len (.-objSyms l)))
+  (fmt/Println "syms")
+  (for [i (conv Sym 1)] (< i (conv Sym (len (.-objSyms l)))) (inc! i)
+    (let [pi ""]
+      (when (.IsExternal l i)
+        (set! pi (fmt/Sprintf "<ext %d>" (.extIndex l i))))
+
+      (let [sect ""]
+        (when (!= (.SymSect l i) nil)
+          (set! sect (.-Name (.SymSect l i))))
+
+        (fmt/Printf "%v %v %v %v %x %v\n" i (.SymName l i) (.SymType l i) pi (.SymValue l i) sect))))
+
+  (fmt/Println "symsByName")
+  (range [name i (aget (.-symsByName l) 0)]
+    (fmt/Println i name 0))
+
+  (range [name i (aget (.-symsByName l) 1)]
+    (fmt/Println i name 1))
+
+  (fmt/Println "payloads:")
+  (range [i (.-payloads l)]
+    (let [pp (aget (.-payloads l) i)]
+      (fmt/Println i (.-name pp) (.-ver pp) (.-kind pp)))))

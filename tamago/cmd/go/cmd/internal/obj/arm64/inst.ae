@@ -1,0 +1,895 @@
+;; Copyright 2026 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.cmd.internal.obj.arm64) (go/file "inst.go" :imports [
+
+
+    ^{:line 8} [obj "cmd/internal/obj"]
+    ^{:line 9} [fmt "fmt"]
+    ^{:line 10} [iter "iter"]
+    ^{:line 11} [math "math"]
+    ^{:line 12} [bits "math/bits"]])
+
+
+
+(go/type instEncoder "instEncoder represents an instruction encoder.\n" (struct
+    ^{:line 17 :tag obj/As} goOp ; Go opcode mnemonic
+    ^{:line 18 :tag uint32} fixedBits ; Known bits
+    ^{:line 19 :tag (slice operand)} args)) ; Operands, in Go order
+
+
+(go/type varBits (struct
+
+    ^{:line 24 :tag int :doc "The low and high bit index in the binary encoding, exclusive on hi\n"} lo ^{:tag int :doc "The low and high bit index in the binary encoding, exclusive on hi\n"} hi
+    ^{:line 25 :tag bool} encoded ; If true then its value is already encoded
+    ^{:line 26 :tag uint32} bits))
+
+
+
+
+
+
+
+
+
+
+
+
+
+(go/type component "component is the component of an binary encoding.\ne.g. for operand <Zda>.<T>, <T>'s encoding function might be described as:\n\n\tFor the \"Byte and halfword\" variant: is the size specifier,\n\tsz\t<T>\n\t0\tB\n\t1\tH\n\tbit range mappings:\n\tsz: [22:23)\n\nThen sz is the component of the binary encoding.\n" uint16)
+
+(go/type elemEncoder (struct
+    ^{:line 43 :tag (func [uint32] [uint32 bool])} fn
+
+    ^{:line 45 :tag component :doc "comp is the component of the binary encoding.\n"} comp))
+
+
+
+(go/type operand "operand is the operand type of an instruction.\n" (struct
+    ^{:line 50 :tag AClass} class ; Operand class, register, constant, memory operation etc.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    ^{:line 65 :tag (slice elemEncoder) :doc "The elements that this operand includes, this only includes the encoding-related parts\nThey are represented as a list of pointers to the encoding functions.\nThe first returned value is the encoded binary, the second is the ok signal.\nThe encoding functions return the ok signal for deduplication purposes:\nFor example:\n\tSDOT  <Zda>.<T>, <Zn>.<Tb>, <Zm>.<Tb>\n\tSDOT  <Zda>.H, <Zn>.B, <Zm>.B\n\tSDOT  <Zda>.S, <Zn>.H, <Zm>.H\n\n<T> and <Tb> are specified in the encoding text, that there is a constraint \"T = 4*Tb\".\nWe don't know this fact by looking at the encoding format solely, without this information\nthe first encoding domain entails the other 2. And at instruction matching phase we simply\ncannot deduplicate them. So we defer this deduplication to the encoding phase.\nWe need the ok signal with [elemEncoder.comp] field to deduplicate them.\n"} elemEncoders))
+
+
+
+^{:go/end 89} (go/func opsInProg "opsInProg returns an iterator over the operands ([Addr]) of p\n" ^{:tag (iter/Seq (* obj/Addr))} [^{:tag (* obj/Prog)} p]
+  ^{:go/end 88} (fn [^{:tag (func [(* obj/Addr)] [bool])} yield]
+    ;; Go order: From, Reg, RestArgs..., To
+    ;; For SVE, Reg is unused as it's so common that registers have arrangements.
+    (when (!= (.-Type (.-From p)) obj/TYPE_NONE)
+      (when (not (yield (addr (.-From p))))
+        (return)))
+
+
+    (range [j (.-RestArgs p)]
+      (when (not (yield (addr (.-Addr (aget (.-RestArgs p) j)))))
+        (return)))
+
+
+    (when (!= (.-Type (.-To p)) obj/TYPE_NONE)
+      (when (not (yield (addr (.-To p))))
+        (return)))))
+
+
+
+
+
+
+^{:go/end 165} (go/func aclass "aclass returns the AClass of an Addr.\n" ^AClass [^{:tag (* obj/Addr)} a]
+  (when (== (.-Type a) obj/TYPE_REG)
+    (when (!= (bit-and (.-Offset a) (<< (conv int64 1) 62)) 0)
+      (return AC_PREGSEL))
+
+    (when (and (>= (.-Reg a) REG_Z0) (<= (.-Reg a) REG_Z31))
+      (return AC_ZREG))
+
+    (when (and (>= (.-Reg a) REG_P0) (<= (.-Reg a) REG_PN15))
+      (return AC_PREG))
+
+    (when (and (>= (.-Reg a) REG_ARNG) (< (.-Reg a) REG_ELEM))
+      (return AC_ARNG))
+
+    (when (and (>= (.-Reg a) REG_ZARNG) (< (.-Reg a) REG_ZARNGELEM))
+      (return AC_ARNG))
+
+    (when (and (>= (.-Reg a) REG_ZARNGELEM) (< (.-Reg a) REG_PZELEM))
+      (return AC_ARNGIDX))
+
+    (when (and (>= (.-Reg a) REG_PZELEM) (< (.-Reg a) REG_PARNGZM))
+      (if (== (bit-and (.-Reg a) (<< 1 5)) 0)
+        (return AC_ZREGIDX)
+
+        (return AC_PREGIDX)))
+
+
+    (when (and (>= (.-Reg a) REG_PARNGZM) (< (.-Reg a) REG_PARNGZM_END))
+      (switch (bit-and (>> (.-Reg a) 5) 15)
+        (case [PRED_M PRED_Z]
+          (return AC_PREGZM))
+        (default
+          (return AC_ARNG))))
+
+
+    (when (and (>= (.-Reg a) REG_V0) (<= (.-Reg a) REG_V31))
+      (return AC_VREG))
+
+    (when (or (and (>= (.-Reg a) REG_R0) (<= (.-Reg a) REG_R31)) (== (.-Reg a) REG_RSP))
+      (return AC_SPZGREG)))
+
+
+  (when (or (== (.-Type a) obj/TYPE_CONST) (== (.-Type a) obj/TYPE_FCONST))
+    (return AC_IMM))
+
+  (when (== (.-Type a) obj/TYPE_REGLIST)
+    (when (> (.-Scale a) 0)
+      (return AC_REGLIST_RANGE))
+
+    (switch (bit-and (>> (.-Offset a) 12) 0xf)
+      (case [0x7]
+        (return AC_REGLIST1))
+      (case [0xa]
+        (return AC_REGLIST2))
+      (case [0x6]
+        (return AC_REGLIST3))
+      (case [0x2]
+        (return AC_REGLIST4))))
+
+
+  (when (== (.-Type a) obj/TYPE_MEM)
+    (when (== (.-Index a) 0)
+      (when (!= (bit-and (.-Scale a) -32768) 0)
+        (return AC_MEMOFFMULVL))
+
+      (return AC_MEMOFF))
+
+    (return AC_MEMEXT))
+
+  (when (== (.-Type a) obj/TYPE_SPECIAL)
+    (return AC_SPECIAL))
+
+  (panic (fmt/Errorf "unknown AClass, addr = %v\n" a)))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 454} (go/func addrComponent "addrComponent returns the binary (component) of the stored element in a at index, for operand\nof type aclass.\n\nFor example, for operand of type AC_ARNG, it has 2 permissible components (identified by index)\n 0. register: <reg>\n 1. arrangement: <T>\n\nThey are stored in a.Reg as:\n\n\treg | (arrangement << 5)\n\nMore details are in the comments in the switch cases of this function.\n" ^uint32 [^{:tag (* obj/Addr)} a ^AClass acl ^int index]
+  (switch acl
+    ;;	AClass: AC_PREGSEL
+    ;;	GNU mnemonic: <preg>.<T>[<selreg>, <imm>]
+    ;;	Go mnemonic:
+    ;;		[selreg, $idximm](preg.T)
+    ;;	Encoding:
+    ;;		Type = TYPE_REG
+    ;; 		Offset = packed bits: preg (5 bits) | T (4 bits) | selreg (5 bits) | idximm (6 bits) | sentinel (bit 62)
+    (case [AC_PREGSEL]
+      (switch index
+        (case [0]
+          (return (conv uint32 (bit-and (.-Offset a) 31))))
+        (case [1]
+          (return (conv uint32 (bit-and (>> (.-Offset a) 5) 15))))
+        (case [2]
+          (return (conv uint32 (+ (bit-and (>> (.-Offset a) 9) 31) REG_R0)))) ; encoding functions assume a ARM64 register
+        (case [3]
+          ;; This is to check the width of selreg, which is guaranteed to be W in AC_PREGSEL.
+          ;; W check always returns true as it's resolved in the generator already.
+          ;; So we just return a default value 0 here.
+          (return 0))
+        (case [4]
+          (return (conv uint32 (bit-and (>> (.-Offset a) 14) 63))))
+        (default
+          (panic (fmt/Errorf "unknown elm index at %d in AClass %d" index acl)))))
+
+    ;;	AClass: AC_ARNG, AC_PREG, AC_PREGZ, AC_PREGM, AC_ZREG
+    ;;	GNU mnemonic: <reg>.<T> Or <reg>/<T> (T is M or Z)
+    ;;	Go mnemonic:
+    ;;		reg.<T>
+    ;;	Encoding:
+    ;;		Type = TYPE_REG
+    ;; 		Reg = reg | (arrangement or predication << 5)
+    (case [AC_ARNG AC_PREG AC_PREGZM AC_ZREG]
+      (switch index
+        (case [0]
+          (return (conv uint32 (bit-and (.-Reg a) 31))))
+        (case [1]
+          (return (conv uint32 (bit-and (>> (.-Reg a) 5) 15))))
+        (default
+          (panic (fmt/Errorf "unknown elm index at %d in AClass %d" index acl)))))
+
+    ;;	AClass: AC_ARNGIDX, AC_PREGIDX, AC_ZREGIDX
+    ;;	GNU mnemonic: <reg>.<T>[<index>]
+    ;;	Go mnemonic:
+    ;;		reg.T[index]
+    ;;	Encoding:
+    ;;		Type = TYPE_REG
+    ;; 		Reg = reg | (arrangement << 5)
+    ;;		Index = index
+    (case [AC_ARNGIDX AC_PREGIDX AC_ZREGIDX]
+      (switch index
+        (case [0]
+          (return (conv uint32 (bit-and (.-Reg a) 31))))
+        (case [1]
+          ;; Arrangement
+          (return (conv uint32 (bit-and (>> (.-Reg a) 5) 15))))
+        (case [2]
+          ;; Index
+          (return (conv uint32 (.-Index a))))
+        (default
+          (panic (fmt/Errorf "unknown elm index at %d in AClass %d" index acl)))))
+
+    ;;	AClass: AC_SPZGREG, AC_VREG
+    ;;	GNU mnemonic: <width><reg>
+    ;;	Go mnemonic:
+    ;;		reg (the width is already represented in the opcode)
+    ;;	Encoding:
+    ;;		Type = TYPE_REG
+    ;; 		Reg = reg
+    (case [AC_SPZGREG AC_VREG]
+      (switch index
+        (case [0]
+          ;; These are all width checks, they should map to no-op checks altogether.
+          (return 0))
+        (case [1]
+          (return (conv uint32 (.-Reg a))))
+        (default
+          (panic (fmt/Errorf "unknown elm index at %d in AClass %d" index acl)))))
+
+    ;;	AClass: AC_IMM
+    ;;	GNU mnemonic: <imm>, <shift>
+    ;;	Go mnemonic:
+    ;;		$imm<<shift
+    ;;	Encoding:
+    ;;		Type = TYPE_CONST or TYPE_FCONST
+    ;;		Offset = imm (shift already applied)
+    (case [AC_IMM]
+      (switch index
+        (case [0]
+          (when (== (.-Type a) obj/TYPE_FCONST)
+            (type-switch [v (.-Val a)]
+              (case [float64]
+                (return (math/Float32bits (conv float32 v))))
+              (default
+                (panic (fmt/Errorf "unknown float immediate value %v" (.-Val a))))))
+
+
+          (return (conv uint32 (.-Offset a))))
+        (default
+          (panic (fmt/Errorf "unknown elm index at %d in AClass %d" index acl)))))
+
+    ;;	AClass: AC_REGLIST1, AC_REGLIST2, AC_REGLIST3, AC_REGLIST4, AC_REGLIST_RANGE
+    ;;	GNU mnemonic: {reg1.T, reg2.T, ...}
+    ;;	Go mnemonic:
+    ;;		[reg1.T, reg2.T, ...]
+    ;;	Encoding:
+    ;;		Type = TYPE_REGLIST
+    ;; 		Offset = register prefix | register count | arrangement (opcode) | first register
+    ;;		Scale = range size - 1 (if REGLIST_RANGE)
+    (case [AC_REGLIST1 AC_REGLIST2 AC_REGLIST3 AC_REGLIST4 AC_REGLIST_RANGE]
+      (let [firstReg (conv int (bit-and (.-Offset a) 31))
+          ^{:line 292} prefix (bit-and (>> (.-Offset a) 32) 2r11)
+          ^{:line 293} sum 32]
+        (when (== prefix 2)
+          (set! sum 16))
+
+        (switch acl
+          (case [AC_REGLIST1]
+            (when (> index 2)
+              (panic (fmt/Errorf "unknown elm index at %d in AClass %d" index acl))))
+
+          (case [AC_REGLIST2]
+            (when (> index 4)
+              (panic (fmt/Errorf "unknown elm index at %d in AClass %d" index acl))))
+
+          (case [AC_REGLIST3]
+            (when (> index 6)
+              (panic (fmt/Errorf "unknown elm index at %d in AClass %d" index acl))))
+
+          (case [AC_REGLIST4]
+            (when (> index 8)
+              (panic (fmt/Errorf "unknown elm index at %d in AClass %d" index acl))))
+
+          (case [AC_REGLIST_RANGE]
+            ;; It behaves just like a AC_REGLIST2
+            (when (> index 4)
+              (panic (fmt/Errorf "unknown elm index at %d in AClass %d" index acl)))))
+
+
+        (switch (% index 2)
+          (case [0]
+            ;; register
+            (when (> (.-Scale a) 0)
+              ;; For register ranges in SVE we allow discontiguous registers.
+              (return (conv uint32 (% (+ firstReg (* (/ index 2) (conv int (.-Scale a)))) sum))))
+
+            (return (conv uint32 (% (+ firstReg (/ index 2)) sum))))
+          (case [1]
+            ;; arrangement
+            (let [curQ (bit-and (>> (.-Offset a) 30) 2r11)
+                ^{:line 331} curSize (bit-and (>> (.-Offset a) 10) 2r11)]
+              (switch curQ
+                (case [0]
+                  (switch curSize
+                    (case [0]
+                      (return ARNG_8B))
+                    (case [1]
+                      (return ARNG_4H))
+                    (case [2]
+                      (return ARNG_2S))
+                    (case [3]
+                      (return ARNG_1D))
+                    (default
+                      (panic (fmt/Errorf "unknown size value at %d in AClass %d" index acl)))))
+
+                (case [1]
+                  (switch curSize
+                    (case [0]
+                      (return ARNG_16B))
+                    (case [1]
+                      (return ARNG_8H))
+                    (case [2]
+                      (return ARNG_4S))
+                    (case [3]
+                      (return ARNG_2D))
+                    (default
+                      (panic (fmt/Errorf "unknown size value at %d in AClass %d" index acl)))))
+
+                (case [2]
+                  (switch curSize
+                    (case [1]
+                      (return ARNG_B))
+                    (case [2]
+                      (return ARNG_H))
+                    (case [3]
+                      (return ARNG_S))
+                    (default
+                      (panic (fmt/Errorf "unknown size value at %d in AClass %d" index acl)))))
+
+                (case [3]
+                  (switch curSize
+                    (case [1]
+                      (return ARNG_D))
+                    (case [2]
+                      (return ARNG_Q))
+                    (default
+                      (panic (fmt/Errorf "unknown size value at %d in AClass %d" index acl)))))
+
+                (default
+                  (panic (fmt/Errorf "unknown Q value at %d in AClass %d" index acl))))))
+
+          (default
+            (panic (fmt/Errorf "unknown elm index at %d in AClass %d" index acl))))))
+
+    ;;	AClass: AC_SPECIAL
+    ;;	GNU mnemonic: <special>
+    ;;	Go mnemonic:
+    ;;		special
+    ;;	Encoding:
+    ;;		Type = TYPE_SPECIAL
+    ;;		Offset = SpecialOperand enum value
+    (case [AC_SPECIAL]
+      (switch index
+        (case [0]
+          (return (conv uint32 (.-Offset a))))
+        (default
+          (panic (fmt/Errorf "unknown elm index at %d in AClass %d" index acl)))))
+
+    ;;	AClass: AC_MEMOFF, AC_MEMOFFMULVL
+    ;;	GNU mnemonic: [<reg>.<T>, #<imm>]
+    ;;	Go mnemonic:
+    ;;		imm(reg.T)
+    ;;	Encoding:
+    ;;		Type = TYPE_MEM
+    ;;		Reg = Base register (with arrangement if applicable)
+    ;;		Offset = Immediate offset
+    (case [AC_MEMOFF AC_MEMOFFMULVL]
+      (switch index
+        (case [0]
+          (return (conv uint32 (bit-and (.-Reg a) 31))))
+        (case [1]
+          (return (conv uint32 (bit-and (>> (.-Reg a) 5) 15))))
+        (case [2]
+          (return (conv uint32 (.-Offset a))))
+        (default
+          (panic (fmt/Errorf "unknown elm index at %d in AClass %d" index acl)))))
+
+    ;;	AClass: AC_MEMEXT
+    ;;	GNU mnemonic: [<reg1>.<T1>, <reg2>.<T2>, <mod> <amount>]
+    ;;	Go mnemonic:
+    ;;		(reg2.T2.mod<<amount)(reg1.T1)
+    ;;	Encoding:
+    ;;		Type = TYPE_MEM
+    ;;		Reg = Index register (with arrangement if applicable)
+    ;;		Index = Base register (with arrangement if applicable)
+    ;;		Scale = Packed mod and amount
+    (case [AC_MEMEXT]
+      (switch index
+        (case [0]
+          (return (conv uint32 (.-Index a))))
+        (case [1]
+          (return (conv uint32 (bit-and (>> (.-Index a) 5) 15))))
+        (case [2]
+          (return (conv uint32 (.-Reg a))))
+        (case [3]
+          (return (conv uint32 (bit-and (>> (.-Reg a) 5) 15))))
+        (case [4]
+          ;; mod is either 1 (UXTW), 2 (SXTW), or 4 (LSL)
+          (let [mod (conv uint32 (bit-and (>> (.-Scale a) 9) 0x7))
+              ^{:line 440} amount (conv uint32 (bit-and (>> (.-Scale a) 12) 0x7))]
+            (when (and (== mod 0) (> amount 0))
+              ;; LSL is implied when no extension is specified but amount > 0
+              (set! mod bit-or (<< 1 2)))
+
+            (return mod)))
+        (case [5]
+          (return (conv uint32 (bit-and (>> (.-Scale a) 12) 0x7))))
+        (default
+          (panic (fmt/Errorf "unknown elm index at %d in AClass %d" index acl))))))
+
+
+  ;; TODO: handle more AClasses.
+  (panic (fmt/Errorf "unknown AClass %d" acl)))
+
+
+(go/var ^uint32 codeI1Tsz 0xffffffff)
+(go/var ^uint32 codeImm2Tsz 0xfffffffe)
+(go/var ^uint32 codeShift161919212223 0xfffffffd)
+(go/var ^uint32 codeShift161919212224 0xfffffffc)
+(go/var ^uint32 codeShift588102224 0xfffffffb)
+(go/var ^uint32 codeLogicalImmArrEncoding 0xfffffffa)
+(go/var ^uint32 codeImm3Tsize1621 0xfffffff9)
+(go/var ^uint32 codeShiftI1TszhTszl 0xfffffff8)
+(go/var ^uint32 codeNoOp 0xfffffff7)
+
+
+
+
+
+
+
+
+
+
+^{:go/end 505} (go/func encodeI1Tsz "encodeI1Tsz is the implementation of the following encoding logic:\nIs the immediate index, in the range 0 to one less than the number of elements in 128 bits, encoded in \"i1:tsz\".\nbit range mappings:\ni1: [20:21)\ntsz: [16:20)\nNote:\n\n\tarr is the arrangement.\n\tThis encoding is aligned to the high bit of the box, according to the spec.\n" [^uint32 v ^uint32 arr] :results [uint32 bool]
+  (switch arr
+    (case [ARNG_B]
+      (when (> v 15)
+        (return 0 false))
+
+      (return (<< v 17) true))
+    (case [ARNG_H]
+      (when (> v 7)
+        (return 0 false))
+
+      (return (<< v 18) true))
+    (case [ARNG_S]
+      (when (> v 3)
+        (return 0 false))
+
+      (return (<< v 19) true))
+    (case [ARNG_D]
+      (when (> v 1)
+        (return 0 false))
+
+      (return (<< v 20) true))
+    (case [ARNG_Q]
+      (when (> v 0)
+        (return 0 false))
+
+      (return 0 true))
+    (default
+      (return 0 false))))
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 551} (go/func encodeImm2Tsz "encodeImm2Tsz is the implementation of the following encoding logic:\nIs the immediate index, in the range 0 to one less than the number of elements in 512 bits, encoded in \"imm2:tsz\".\nbit range mappings:\nimm2: [22:24)\ntsz: [16:21)\nNote:\n\n\tarr is the arrangement.\n\tThis encoding is aligned to the high bit of the box, according to the spec.\n" [^uint32 v ^uint32 arr] :results [uint32 bool]
+  (switch arr
+    (case [ARNG_B]
+      (when (> v 63)
+        (return 0 false))
+
+      (set! v << 1)
+      (return (bit-or (<< (bit-and v 31) 16) (<< (>> v 5) 22)) true))
+    (case [ARNG_H]
+      (when (> v 31)
+        (return 0 false))
+
+      (set! v << 2)
+      (return (bit-or (<< (bit-and v 31) 16) (<< (>> v 5) 22)) true))
+    (case [ARNG_S]
+      (when (> v 15)
+        (return 0 false))
+
+      (set! v << 3)
+      (return (bit-or (<< (bit-and v 31) 16) (<< (>> v 5) 22)) true))
+    (case [ARNG_D]
+      (when (> v 7)
+        (return 0 false))
+
+      (set! v << 4)
+      (return (bit-or (<< (bit-and v 31) 16) (<< (>> v 5) 22)) true))
+    (case [ARNG_Q]
+      (when (> v 3)
+        (return 0 false))
+
+      (set! v << 5)
+      (return (bit-or (<< (bit-and v 31) 16) (<< (>> v 5) 22)) true))
+    (default
+      (return 0 false))))
+
+
+
+(go/type arrAlignType int)
+
+(go/const
+  ^{:line 556} [^{:tag arrAlignType :val 0} arrAlignBHSD iota]
+  ^{:line 557} [^{:val 1} arrAlignHSD]
+  ^{:line 558} [^{:val 2} arrAlignBHS])
+
+
+
+
+
+^{:go/end 621} (go/func encodeShiftTriple "encodeShiftTriple encodes an shift immediate value in \"tszh:tszl:imm3\".\ntszh, tszl, imm3 are in ranges, sorted by bit position.\nThese shifts are also bounded by arrangement element size.\n" [^uint32 v ^{:tag (array 6 int)} r ^{:tag (* obj/Addr)} prevAddr ^obj/As op] :results [uint32 bool]
+  ;; The previous op must be a scalable vector, and we need its arrangement.
+  (let [acl (aclass prevAddr)]
+    (when (!= acl AC_ARNG)
+      (return 0 false))
+
+    (let [arr (addrComponent prevAddr acl 1) ; Get arrangement
+        ^{:line 571} elemBits (conv uint32 0)]
+      (switch arr
+        (case [ARNG_B]
+          (set! elemBits 8))
+        (case [ARNG_H]
+          (set! elemBits 16))
+        (case [ARNG_S]
+          (set! elemBits 32))
+        (case [ARNG_D]
+          (set! elemBits 64))
+        (default
+          (return 0 false)))
+
+      (when (>= v elemBits)
+        (return 0 false))
+
+      (let [^uint32 C (zero uint32)
+          ;; Unfortunately these information are in the decoding ASL.
+          ;; For these instructions, the esize (see comment in the switch below)
+          ;; is derived from the destination arrangement, however how this function is called is deriving
+          ;; the esize from one of the source.
+          ;; We need to address this discrepancy.
+          ^{:line 593} effectiveEsize elemBits]
+        (switch op
+          (case [AZRSHRNB AZRSHRNT AZSHRNB AZSHRNT AZSQRSHRNB AZSQRSHRNT AZSQRSHRUNB AZSQRSHRUNT
+              ^{:line 596} AZSQSHRNB AZSQSHRNT AZSQSHRUNB AZSQSHRUNT AZUQRSHRNB AZUQRSHRNT AZUQSHRNB AZUQSHRNT]
+            (set! effectiveEsize (/ elemBits 2))))
+
+        (switch op
+          (case [AZASR AZLSR AZURSHR AZASRD
+              ^{:line 601} AZRSHRNB AZRSHRNT AZSHRNB AZSHRNT AZSQRSHRNB AZSQRSHRNT AZSQRSHRUNB AZSQRSHRUNT
+              ^{:line 602} AZSQSHRNB AZSQSHRNT AZSQSHRUNB AZSQSHRUNT AZSRSHR AZUQRSHRNB AZUQRSHRNT AZUQSHRNB AZUQSHRNT
+              ^{:line 603} AZURSRA AZUSRA AZXAR AZSRI AZSRSRA AZSSRA]
+            ;; ASL: let shift : integer = (2 * esize) - UInt(tsize::imm3);
+            (when (== v 0)
+              (return 0 false))
+
+            (set! C (- (* 2 effectiveEsize) v)))
+          (default
+            ;; ASL: let shift : integer = UInt(tsize::imm3) - esize;
+            (set! C (+ effectiveEsize v))))
+
+        (let [^{:tag (array 3 uint32)} chunks (zero (array 3 uint32))]
+          (for [i 0] (< i 6) (set! i + 2)
+            (aset chunks (/ i 2) (bit-and C (- ^uint32 (<< 1 (- (aget r (+ i 1)) (aget r i))) 1)))
+            (set! C >> (- (aget r (+ i 1)) (aget r i))))
+
+          (return (conv uint32 (bit-or (<< (aget chunks 0) (aget r 0))
+                (<< (aget chunks 1) (aget r 2))
+                (<< (aget chunks 2) (aget r 4)))) true))))))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 748} (go/func encodeLogicalImmArrEncoding "encodeLogicalImmEncoding is the implementation of the following encoding logic:\nIs the size specifier,\nimm13\t<T>\n0xxxxxx0xxxxx\tS\n0xxxxxx10xxxx\tH\n0xxxxxx110xxx\tB\n0xxxxxx1110xx\tB\n0xxxxxx11110x\tB\n0xxxxxx11111x\tRESERVED\n1xxxxxxxxxxxx\tD\nAt the meantime:\nIs a 64, 32, 16 or 8-bit bitmask consisting of replicated 2, 4, 8, 16, 32 or 64 bit fields,\neach field containing a rotated run of non-zero bits, encoded in the \"imm13\" field.\n\nbit range mappings:\nimm13: [5:18)\n\nARM created a \"clever\" recipe that can generate useful repeating 8-64 bit bitmasks.\nInstead of storing the literal binary number, the processor reads a 13-bit recipe\nusing three fields (bits from high to low):\nN (1 bit), immr (6 bits), and imms (6 bits).\n\nHow the recipe works:\nEvery logical immediate represents a repeating pattern (like repeating tiles). The processor\nuses the three fields to figure out the size of the tile, how many 1s are in the tile, and\nhow far to rotate it.\nThe N bit combined with the upper bits of imms determines the width of the repeating block.\nDepending on these bits, the fundamental block can be 2, 4, 8, 16, 32, or 64 bits wide.\nThe lower bits of imms dictate exactly how many contiguous 1s exist inside that block.\nThe immr value tells the processor how many bits to rotate that block to the right.\nFinally, the resulting block is duplicated to fill a standard 64-bit lane.\n" [^uint64 v ^{:tag (* obj/Addr)} adjacentAddr] :results [uint32 bool]
+  (let [acl (aclass adjacentAddr)]
+    (when (!= acl AC_ARNG)
+      (return 0 false))
+
+    (let [arr (addrComponent adjacentAddr acl 1)
+
+        ;; Replicate the given immediate to fill a full 64-bit lane.
+        ;; This ensures our pattern-shrinking logic naturally respects the vector lane bounds.
+        ^{:line 663 :tag uint64} val (zero uint64)]
+      (switch arr
+        (case [ARNG_B] ; 8-bit lane
+          (let [v8 (conv uint64 (bit-and v 0xFF))]
+            (set! val (* v8 0x0101010101010101))))
+        (case [ARNG_H] ; 16-bit lane
+          (let [v16 (conv uint64 (bit-and v 0xFFFF))]
+            (set! val (* v16 0x0001000100010001))))
+        (case [ARNG_S] ; 32-bit lane
+          (let [v32 (conv uint64 v)]
+            (set! val (bit-or v32 (<< v32 32)))))
+        (case [ARNG_D] ; 64-bit lane
+          (set! val (conv uint64 v)))
+        (default
+          (return 0 false)))
+
+
+      ;; Reject all zeros or all ones (handled by MOV/EOR, invalid for AND/ORR immediates)
+      (when (or (== val 0) (== val (bit-not (conv uint64 0))))
+        (return 0 false))
+
+
+      ;; Find the absolute smallest repeating pattern size (64 down to 2)
+      (let [size (conv uint64 64)]
+        (while (> size 2)
+          (let [half (/ size 2)
+              ^{:line 689} mask (- (<< (conv uint64 1) half) 1)
+              ^{:line 690} lower (bit-and val mask)
+              ^{:line 691} upper (bit-and (>> val half) mask)]
+
+            ;; If the top half matches the bottom half, shrink our window
+            (if (== lower upper) (do
+                (set! size half)
+                (set! val lower))
+
+              (break))))
+
+
+
+        ;; Count the contiguous ones in this minimal pattern
+        (let [mask (- (<< (conv uint64 1) size) 1)]
+          (set! val bit-and mask)
+          (let [ones (bits/OnesCount64 val)
+
+              ;; Find the right-rotation (rot) needed to align the 1s at the bottom
+              ^{:line 708} expected (- (<< (conv uint64 1) ones) 1)
+              ^{:line 709} rot -1]
+            (for [r 0] (< r (conv int size)) (inc! r)
+              ;; Right rotate 'val' by 'r' bits within a 'size'-bit window
+              (let [rotated (bit-and (bit-or (>> val r) (<< val (- (conv int size) r))) mask)]
+                (when (== rotated expected)
+                  (set! rot r)
+                  (break))))
+
+
+
+            (when (== rot -1)
+              (return 0 false))
+
+
+            ;; immr is the amount the hardware must right-rotate the base pattern.
+            ;; Since 'rot' is how much we right-rotated the target to find the base,
+            ;; the hardware needs the inverse rotation.
+            (let [immr (conv uint32 (% (- (conv int size) rot) (conv int size)))]
+
+              ;; If we couldn't find a rotation that forms a perfect contiguous block of 1s, it's invalid.
+              (when (== rot -1)
+                (return 0 false))
+
+
+              ;; Encode N, immr, and imms
+              (let [n (conv uint32 0)]
+                (when (== size 64)
+                  (set! n 1))
+
+
+                ;; The imms prefix is mathematically generated by (~(size*2 - 1) & 0x3F).
+                ;; We then OR it with the number of ones (minus 1).
+                (let [imms (bit-or (bit-and (conv uint32 (bit-not (- (* size 2) 1))) 0x3F) (conv uint32 (- ones 1)))
+
+                    ;; Construct the final 13-bit field: N (1) | immr (6) | imms (6)
+                    ^{:line 744} imm13 (bit-or (<< n 12) (<< immr 6) imms)]
+
+                  ;; Shift by 5 to place imm13 into instruction bits [5:17]
+                  (return (<< imm13 5) true))))))))))
+
+
+
+
+
+
+
+
+
+^{:go/end 774} (go/func encodeImm3Tsize1621 "encodeImm3Tsize1621 is the implementation of the following encoding logic:\nIs the immediate shift amount, in the range 1 to number of bits per element, encoded in \"tsize:imm3\".\nbit range mappings:\nimm3: [16:19)\ntsize: [19:21)\n\nsrcArr is the <Tb> in the source reglist (ranged).\n" [^uint32 v ^uint32 srcArr] :results [uint32 bool]
+  ;; From ARM ASL: let shift : integer = (2 * esize) - UInt(tsize::imm3);
+  ;; Then tsize::imm3 = (2 * esize) - shift.
+  (let [^uint32 size (zero uint32)]
+    (switch srcArr
+      (case [ARNG_H]
+        ;; It's the destination size, which is half the source.
+        (set! size 8))
+      (case [ARNG_S]
+        (set! size 16))
+      (default
+        (return 0 false)))
+
+    (when (or (< v 1) (> v size))
+      (return 0 false))
+
+    (return (<< (bit-and (- (* 2 size) v) 0x1f) 16) true)))
+
+
+
+
+
+
+
+
+
+
+^{:go/end 807} (go/func encodeShiftI1TszhTszl "encodeShiftI1TszhTszl is the implementation of the following encoding logic:\nIs the element index, in the range 0 to one less than the number of vector elements in a 128-bit vector register, encoded in \"i1:tszh:tszl\".\nbit range mappings:\ni1: [23:24)\ntszh: [22:23)\ntszl: [18:21)\n\narr is the arrangement\n" [^uint32 v ^uint32 arr] :results [uint32 bool]
+  (let [(values ^uint32 shift ^uint32 max) (zero uint32)]
+    (switch arr
+      (case [ARNG_B]
+        (set! shift 1)
+        (set! max 16))
+      (case [ARNG_H]
+        (set! shift 2)
+        (set! max 8))
+      (case [ARNG_S]
+        (set! shift 3)
+        (set! max 4))
+      (case [ARNG_D]
+        (set! shift 4)
+        (set! max 2))
+      (default
+        (return 0 false)))
+
+    (when (>= v max)
+      (return 0 false))
+
+    (set! v << shift)
+    (return (bit-or (<< (bit-and v 0x7) 18) (<< (>> v 3) 22)) true)))
+
+
+
+^{:go/end 896} (go/method tryEncode "tryEncode tries to encode p with i, it returns the encoded binary and ok signal.\n" [^{:tag (* instEncoder)} i ^{:tag (* obj/Prog)} p] :results [uint32 bool]
+  (let [bin (.-fixedBits i)
+      ;; Some elements are encoded in the same component, they need to be equal.
+      ;; For example { <Zn1>.<Tb>-<Zn2>.<Tb> }.
+      ;; The 2 instances of <Tb> must encode to the same value.
+      ^{:line 815} encoded (lit (map component uint32))
+      ^{:line 816 :tag (slice (* obj/Addr))} addrs (zero (slice (* obj/Addr)))]
+    (range [addr (opsInProg p)]
+      (set! addrs (append addrs addr)))
+
+    (when (!= (len addrs) (len (.-args i)))
+      (return 0 false))
+
+    (range [opIdx addr addrs]
+      (when (>= opIdx (len (.-args i)))
+        (return 0 false))
+
+      (let [op (aget (.-args i) opIdx)
+          ^{:line 828} acl (aclass addr)]
+        (when (!= acl (.-class op))
+          (return 0 false))
+
+        (range [i enc (.-elemEncoders op)]
+          (let [val (addrComponent addr acl i)]
+            (when (and ^:go/paren (or (== (.-As p) AZFCPY) (== (.-As p) AZFDUP)) (== acl AC_IMM))
+              ;; These instructions expects ARM's 8-bit float encoding.
+              ;; Reinterpret the uint32 bits back as a float32, then convert to float64 for chipfloat7
+              (let [fval (conv float64 (math/Float32frombits val))
+                  ^{:line 838} encode (.chipfloat7 (addr (lit ctxt7)) fval)]
+                (when (== encode -1)
+                  ;; Handle error or return false to indicate mismatch
+                  (return 0 false))
+
+                (set! val (conv uint32 encode))))
+
+            (if [(values b ok) ((.-fn enc) val)] (or ok (!= b 0))
+              (let [specialB (conv uint32 b)]
+                (when (not ok)
+                  (set! specialB b)
+                  (switch b
+                    (case [codeI1Tsz]
+                      (set! (values b ok) (encodeI1Tsz val (addrComponent addr acl (- i 1)))))
+                    (case [codeImm2Tsz]
+                      (set! (values b ok) (encodeImm2Tsz val (addrComponent addr acl (- i 1)))))
+                    (case [codeShift161919212223]
+                      (set! (values b ok) (encodeShiftTriple val (lit (array 6 int) 16 19 19 21 22 23) (aget addrs (+ opIdx 1)) (.-As p))))
+                    (case [codeShift161919212224]
+                      (set! (values b ok) (encodeShiftTriple val (lit (array 6 int) 16 19 19 21 22 24) (aget addrs (+ opIdx 1)) (.-As p))))
+                    (case [codeShift588102224]
+                      (set! (values b ok) (encodeShiftTriple val (lit (array 6 int) 5 8 8 10 22 24) (aget addrs (+ opIdx 1)) (.-As p))))
+                    (case [codeLogicalImmArrEncoding]
+                      ;; Now that we know this is an immediate.
+                      ;; ARM64 allows imm13 to encode up to 64 bits of immediates.
+                      ;; addrComponent is not the right fit here, we need to extract [Offset] fields manually.
+                      (set! (values b ok) (encodeLogicalImmArrEncoding (conv uint64 (.-Offset addr)) (aget addrs (+ opIdx 1)))))
+                    (case [codeImm3Tsize1621]
+                      (set! (values b ok) (encodeImm3Tsize1621 val (addrComponent (aget addrs (+ opIdx 1)) (aclass (aget addrs (+ opIdx 1))) 1))))
+                    (case [codeShiftI1TszhTszl]
+                      (set! (values b ok) (encodeShiftI1TszhTszl val (addrComponent addr AC_PREGSEL 1))))
+                    (case [codeNoOp]
+                      (set! (values b ok) (values 0 true)))
+                    (default
+                      (panic (fmt/Errorf "unknown encoding function code %d" b)))))
+
+
+                (when (not ok)
+                  (return 0 false))
+
+                (set! bin bit-or b)
+                (when [(values _ ok) (aget encoded (.-comp enc))] (and ok (!= b (aget encoded (.-comp enc))))
+                  (when (== specialB codeNoOp)
+                    ;; NoOp encodings don't need checks.
+                    (continue))
+
+                  (return 0 false))
+
+                (when (and (!= (.-comp enc) enc_NIL) (!= specialB codeNoOp))
+                  ;; NoOp encodings don't need bookkeeping.
+                  (aset encoded (.-comp enc) b)))
+
+
+              (return 0 false))))))
+
+
+
+    (return bin true)))

@@ -1,0 +1,987 @@
+;; Copyright 2020 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.cmd.compile.internal.ssa) (go/file "expand_calls.go" :imports [
+
+
+    ^{:line 8} [abi "cmd/compile/internal/abi"]
+    ^{:line 9} [base "cmd/compile/internal/base"]
+    ^{:line 10} [ir "cmd/compile/internal/ir"]
+    ^{:line 11} [types "cmd/compile/internal/types"]
+    ^{:line 12} [src "cmd/internal/src"]
+    ^{:line 13} [fmt "fmt"]])
+
+
+^{:go/end 19} (go/func postExpandCallsDecompose [^{:tag (* Func)} f]
+  (decomposeUser f) ; redo user decompose to cleanup after expand calls
+  (decomposeBuiltin f)) ; handles both regular decomposition and cleanup.
+
+
+^{:go/end 218} (go/func expandCalls [^{:tag (* Func)} f]
+  ;; Convert each aggregate arg to a call into "dismantle aggregate, store/pass parts"
+  ;; Convert each aggregate result from a call into "assemble aggregate from parts"
+  ;; Convert each multivalue exit into "dismantle aggregate, store/return parts"
+  ;; Convert incoming aggregate arg into assembly of parts.
+  ;; Feed modified AST to decompose.
+
+  (let [(values sp _) (.spSb f)
+
+      ^{:line 30} x (addr ^{:go/breaks [2 4 6 8 10 12 14 16 18]} (lit expandState
+          :f f
+          :debug (.-debug (.-pass f))
+          :regSize (.-RegSize (.-Config f))
+          :sp sp
+          :typs (addr (.-Types (.-Config f)))
+          :wideSelects (make (map (* Value) (* Value)))
+          :commonArgs (make (map selKey (* Value)))
+          :commonSelectors (make (map selKey (* Value)))
+          :memForCall (make (map ID (* Value)))))]
+
+
+    ;; For 32-bit, need to deal with decomposition of 64-bit integers, which depends on endianness.
+    (if (.-BigEndian (.-Config f)) (do
+        (set! (.-firstOp x) OpInt64Hi)
+        (set! (.-secondOp x) OpInt64Lo)
+        (set! (.-firstType x) (.-Int32 (.-typs x)))
+        (set! (.-secondType x) (.-UInt32 (.-typs x))))
+      (do
+        (set! (.-firstOp x) OpInt64Lo)
+        (set! (.-secondOp x) OpInt64Hi)
+        (set! (.-firstType x) (.-UInt32 (.-typs x)))
+        (set! (.-secondType x) (.-Int32 (.-typs x)))))
+
+
+    ;; Defer select processing until after all calls and selects are seen.
+    (let [^{:tag (slice (* Value))} selects (zero (slice (* Value)))
+        ^{:line 57 :tag (slice (* Value))} calls (zero (slice (* Value)))
+        ^{:line 58 :tag (slice (* Value))} args (zero (slice (* Value)))
+        ^{:line 59 :tag (slice (* Block))} exitBlocks (zero (slice (* Block)))
+
+        ^{:line 61 :tag (* Value)} m0 (zero (* Value))]
+
+      ;; Accumulate lists of calls, args, selects, and exit blocks to process,
+      ;; note "wide" selects consumed by stores,
+      ;; rewrite mem for each call,
+      ;; rewrite each OpSelectNAddr.
+      (range [_ b (.-Blocks f)]
+        (range [_ v (.-Values b)]
+          (switch (.-Op v)
+            (case [OpInitMem]
+              (set! m0 v))
+
+            (case [OpClosureLECall OpInterLECall OpStaticLECall OpTailLECall OpTailLECallInter]
+              (set! calls (append calls v)))
+
+            (case [OpArg]
+              (set! args (append args v)))
+
+            (case [OpStore]
+              (when [a (aget (.-Args v) 1)] (and (== (.-Op a) OpSelectN) (not (CanSSA (.-Type a))))
+                (when (> (.-Uses a) 1)
+                  (panic (fmt/Errorf "Saw double use of wide SelectN %s operand of Store %s"
+                      (.LongString a) (.LongString v))))
+
+                (aset (.-wideSelects x) a v)))
+
+
+            (case [OpSelectN]
+              (if (== (.-Type v) types/TypeMem)
+                ;; rewrite the mem selector in place
+                (let [call (aget (.-Args v) 0)
+                    ^{:line 92} aux (assert (* AuxCall) (.-Aux call))
+                    ^{:line 93} mem (aget (.-memForCall x) (.-ID call))]
+                  (if (== mem nil) (do
+                      (set! (.-AuxInt v) (conv int64 (.OutRegistersUsed (.-abiInfo aux))))
+                      (aset (.-memForCall x) (.-ID call) v))
+
+                    (panic (fmt/Errorf "Saw two memories for call %v, %v and %v" call mem v))))
+
+
+                (set! selects (append selects v))))
+
+
+            (case [OpSelectNAddr]
+              (let [call (aget (.-Args v) 0)
+                  ^{:line 106} which (.-AuxInt v)
+                  ^{:line 107} aux (assert (* AuxCall) (.-Aux call))
+                  ^{:line 108} pt (.-Type v)
+                  ^{:line 109} off (.offsetFrom x (.-Entry (.-f x)) (.-sp x) (.OffsetOfResult aux which) pt)]
+                (.copyOf v off)))))
+
+
+
+        ;; rewrite function results from an exit block
+        ;; values returned by function need to be split out into registers.
+        (when (isBlockMultiValueExit b)
+          (set! exitBlocks (append exitBlocks b))))
+
+
+
+      ;; Convert each aggregate arg into Make of its parts (and so on, to primitive types)
+      (range [_ v args]
+        (let [^registerCursor rc (zero registerCursor)
+            ^{:line 124} a (.prAssignForArg x v)
+            ^{:line 125} aux (.-OwnAux (.-f x))
+            ^{:line 126} regs (.-Registers a)
+            ^{:line 127 :tag int64} offset (zero int64)]
+          (when (== (len regs) 0)
+            (set! offset (.FrameOffset a (.-abiInfo aux))))
+
+          (let [auxBase (.offsetFrom x (.-Entry (.-f x)) (.-sp x) offset (types/NewPtr (.-Type v)))]
+            (.init rc regs (.-abiInfo aux) nil auxBase 0)
+            (.rewriteSelectOrArg x (.-Pos (.-Entry f)) (.-Entry f) v v m0 (.-Type v) rc))))
+
+
+      ;; Rewrite selects of results (which may be aggregates) into make-aggregates of register/memory-targeted selects
+      (range [_ v selects]
+        (when (== (.-Op v) OpInvalid)
+          (continue))
+
+
+        (let [call (aget (.-Args v) 0)
+            ^{:line 143} aux (assert (* AuxCall) (.-Aux call))
+            ^{:line 144} mem (aget (.-memForCall x) (.-ID call))]
+          (when (== mem nil)
+            (set! mem (.NewValue1I (.-Block call) (.-Pos call) OpSelectN types/TypeMem (conv int64 (.OutRegistersUsed (.-abiInfo aux))) call))
+            (aset (.-memForCall x) (.-ID call) mem))
+
+
+          (let [i (.-AuxInt v)
+              ^{:line 151} regs (.RegsOfResult aux i)]
+
+            ;; If this select cannot fit into SSA and is stored, either disaggregate to register stores, or mem-mem move.
+            (when [store (aget (.-wideSelects x) v)] (!= store nil)
+              ;; Use the mem that comes from the store operation.
+              (let [storeAddr (aget (.-Args store) 0)
+                  ^{:line 157} mem (aget (.-Args store) 2)]
+                (if (> (len regs) 0)
+                  ;; Cannot do a rewrite that builds up a result from pieces; instead, copy pieces to the store operation.
+                  (let [^registerCursor rc (zero registerCursor)]
+                    (.init rc regs (.-abiInfo aux) nil storeAddr 0)
+                    (set! mem (.rewriteWideSelectToStores x (.-Pos call) (.-Block call) v mem (.-Type v) rc))
+                    (.copyOf store mem))
+
+                  ;; Move directly from AuxBase to store target; rewrite the store instruction.
+                  (let [offset (.OffsetOfResult aux i)
+                      ^{:line 167} auxBase (.offsetFrom x (.-Entry (.-f x)) (.-sp x) offset (types/NewPtr (.-Type v)))
+                      ;; was Store dst, v, mem
+                      ;; now Move dst, auxBase, mem
+                      ^{:line 170} move (.NewValue3A (.-Block store) (.-Pos store) OpMove types/TypeMem (.-Type v) storeAddr auxBase mem)]
+                    (set! (.-AuxInt move) (.Size (.-Type v)))
+                    (.copyOf store move)))
+
+                (continue)))
+
+
+            (let [^{:tag (* Value)} auxBase (zero (* Value))]
+              (when (== (len regs) 0)
+                (let [offset (.OffsetOfResult aux i)]
+                  (set! auxBase (.offsetFrom x (.-Entry (.-f x)) (.-sp x) offset (types/NewPtr (.-Type v))))))
+
+              (let [^registerCursor rc (zero registerCursor)]
+                (.init rc regs (.-abiInfo aux) nil auxBase 0)
+                (.rewriteSelectOrArg x (.-Pos call) (.-Block call) v v mem (.-Type v) rc))))))
+
+
+      (let [rewriteCall ^{:go/end 193} (fn [^{:tag (* Value)} v ^Op newOp ^int argStart]
+            ;; Break aggregate args passed to call into smaller pieces.
+            (.rewriteCallArgs x v argStart)
+            (set! (.-Op v) newOp)
+            (let [rts (abi/RegisterTypes (.OutParams (.-abiInfo (assert (* AuxCall) (.-Aux v)))))]
+              (set! (.-Type v) (types/NewResults (append rts types/TypeMem)))))]
+
+
+        ;; Rewrite calls
+        (range [_ v calls]
+          (switch (.-Op v)
+            (case [OpStaticLECall]
+              (rewriteCall v OpStaticCall 0))
+            (case [OpTailLECall]
+              (rewriteCall v OpTailCall 0))
+            (case [OpTailLECallInter]
+              (rewriteCall v OpTailCallInter 1))
+            (case [OpClosureLECall]
+              (rewriteCall v OpClosureCall 2))
+            (case [OpInterLECall]
+              (rewriteCall v OpInterCall 1))))
+
+
+
+        ;; Rewrite results from exit blocks
+        (range [_ b exitBlocks]
+          (let [v (aget (.-Controls b) 0)]
+            (.rewriteFuncResults x v b (.-OwnAux f))
+            (.SetControl b v)))))))
+
+
+
+
+^{:go/end 268} (go/method rewriteFuncResults [^{:tag (* expandState)} x ^{:tag (* Value)} v ^{:tag (* Block)} b ^{:tag (* AuxCall)} aux]
+  ;; This is very similar to rewriteCallArgs
+  ;; differences:
+  ;; firstArg + preArgs
+  ;; sp vs auxBase
+
+  (let [m0 (.MemoryArg v)
+      ^{:line 227} mem m0
+
+      ^{:line 229} allResults (lit (slice (* Value)))
+      ^{:line 230 :tag (slice (* Value))} oldArgs (zero (slice (* Value)))
+      ^{:line 231} argsWithoutMem (subslice (.-Args v) _ (- (len (.-Args v)) 1))]
+
+    (range [j a argsWithoutMem]
+      (set! oldArgs (append oldArgs a))
+      (let [i (conv int64 j)
+          ^{:line 236} auxType (.TypeOfResult aux i)
+          ^{:line 237} auxBase (.NewValue2A b (.-Pos v) OpLocalAddr (types/NewPtr auxType) (.NameOfResult aux i) (.-sp x) mem)
+          ^{:line 238} auxOffset (conv int64 0)
+          ^{:line 239} aRegs (.RegsOfResult aux (conv int64 j))]
+        (when (== (.-Op a) OpDereference)
+          (set! (.-Op a) OpLoad))
+
+        (let [^registerCursor rc (zero registerCursor)
+            ^{:line 244 :tag (* (slice (* Value)))} result (zero (* (slice (* Value))))]
+          (if (> (len aRegs) 0)
+            (set! result (addr allResults))
+            (do
+              (when (and (== (.-Op a) OpLoad) (== (.-Op (aget (.-Args a) 0)) OpLocalAddr) (== (.-Aux (aget (.-Args a) 0)) (.NameOfResult aux i)))
+                (continue)))) ; Self move to output parameter
+
+
+          (.init rc aRegs (.-abiInfo aux) result auxBase auxOffset)
+          (set! mem (.decomposeAsNecessary x (.-Pos v) b a mem rc)))))
+
+    (.resetArgs v)
+    (.AddArgs v (spread allResults))
+    (.AddArg v mem)
+    (range [_ a oldArgs]
+      (when (== (.-Uses a) 0)
+        (when (> (.-debug x) 1)
+          (.Printf x "...marking %v unused\n" (.LongString a)))
+
+        (.invalidateRecursively x a)))
+
+
+    (set! (.-Type v) (types/NewResults (append (abi/RegisterTypes (.OutParams (.-abiInfo aux))) types/TypeMem)))
+    (return)))
+
+
+^{:go/end 336} (go/method rewriteCallArgs [^{:tag (* expandState)} x ^{:tag (* Value)} v ^int firstArg]
+  (when (> (.-debug x) 1)
+    (.indent x 3)
+    (defer (.indent x -3))
+    (.Printf x "rewriteCallArgs(%s; %d)\n" (.LongString v) firstArg))
+
+  ;; Thread the stores on the memory arg
+  (let [aux (assert (* AuxCall) (.-Aux v))
+      ^{:line 278} m0 (.MemoryArg v)
+      ^{:line 279} mem m0
+      ^{:line 280} allResults (lit (slice (* Value)))
+      ^{:line 281} oldArgs (lit (slice (* Value)))
+      ^{:line 282} argsWithoutMem (subslice (.-Args v) firstArg (- (len (.-Args v)) 1)) ; Also strip closure/interface Op-specific args
+
+      ^{:line 284} sp (.-sp x)]
+    (when (or (== (.-Op v) OpTailLECall) (== (.-Op v) OpTailLECallInter))
+      ;; For tail call, we unwind the frame before the call so we'll use the caller's
+      ;; SP.
+      (set! sp (.NewValue1 (.-Block v) src/NoXPos OpGetCallerSP (.-Uintptr (.-typs x)) mem)))
+
+
+    (range [i a argsWithoutMem] ; skip leading non-parameter SSA Args and trailing mem SSA Arg.
+      (set! oldArgs (append oldArgs a))
+      (let [auxI (conv int64 i)
+          ^{:line 294} aRegs (.RegsOfArg aux auxI)
+          ^{:line 295} aType (.TypeOfArg aux auxI)]
+
+        (when (== (.-Op a) OpDereference)
+          (set! (.-Op a) OpLoad))
+
+        (let [^registerCursor rc (zero registerCursor)
+            ^{:line 301 :tag (* (slice (* Value)))} result (zero (* (slice (* Value))))
+            ^{:line 302 :tag int64} aOffset (zero int64)]
+          (if (> (len aRegs) 0)
+            (set! result (addr allResults))
+
+            (set! aOffset (.OffsetOfArg aux auxI)))
+
+          (when (and (== (.-Op v) OpTailLECall) (== (.-Op a) OpArg) (== (.-AuxInt a) 0))
+            ;; It's common for a tail call passing the same arguments (e.g. method wrapper),
+            ;; so this would be a self copy. Detect this and optimize it out.
+            (let [n (assert (* ir/Name) (.-Aux a))]
+              (when (and (== (.-Class n) ir/PPARAM) (== (+ (.FrameOffset n) ^{:go/via [Arch]} (.-FixedFrameSize (.-Arch (.-ctxt (.-Config (.-f x)))))) aOffset))
+                (continue))))
+
+
+          (when (> (.-debug x) 1)
+            (.Printf x "...storeArg %s, %v, %d\n" (.LongString a) aType aOffset))
+
+
+          (.init rc aRegs (.-abiInfo aux) result sp aOffset)
+          (set! mem (.decomposeAsNecessary x (.-Pos v) (.-Block v) a mem rc)))))
+
+    (let [^{:tag (array 2 (* Value))} preArgStore (zero (array 2 (* Value)))
+        ^{:line 324} preArgs (append (subslice preArgStore _ 0) (spread (subslice (.-Args v) 0 firstArg)))]
+      (.resetArgs v)
+      (.AddArgs v (spread preArgs))
+      (.AddArgs v (spread allResults))
+      (.AddArg v mem)
+      (range [_ a oldArgs]
+        (when (== (.-Uses a) 0)
+          (.invalidateRecursively x a)))
+
+
+
+      (return))))
+
+
+^{:go/end 345} (go/method decomposePair ^{:tag (* Value)} [^{:tag (* expandState)} x ^src/XPos pos ^{:tag (* Block)} b ^{:tag (* Value)} a ^{:tag (* Value)} mem ^{:tag (* types/Type)} t0 ^{:tag (* types/Type)} t1 ^Op o0 ^Op o1 ^{:tag (* registerCursor)} rc]
+  (let [e (.NewValue1 b pos o0 t0 a)]
+    (set! pos (.WithNotStmt pos))
+    (set! mem (.decomposeAsNecessary x pos b e mem (.next rc t0)))
+    (set! e (.NewValue1 b pos o1 t1 a))
+    (set! mem (.decomposeAsNecessary x pos b e mem (.next rc t1)))
+    ^{:line 344} mem))
+
+
+^{:go/end 352} (go/method decomposeOne ^{:tag (* Value)} [^{:tag (* expandState)} x ^src/XPos pos ^{:tag (* Block)} b ^{:tag (* Value)} a ^{:tag (* Value)} mem ^{:tag (* types/Type)} t0 ^Op o0 ^{:tag (* registerCursor)} rc]
+  (let [e (.NewValue1 b pos o0 t0 a)]
+    (set! pos (.WithNotStmt pos))
+    (set! mem (.decomposeAsNecessary x pos b e mem (.next rc t0)))
+    ^{:line 351} mem))
+
+
+
+
+
+
+
+
+
+
+^{:go/end 476} (go/method decomposeAsNecessary "decomposeAsNecessary converts a value (perhaps an aggregate) passed to a call or returned by a function,\ninto the appropriate sequence of stores and register assignments to transmit that value in a given ABI, and\nreturns the current memory after this convert/rewrite (it may be the input memory, perhaps stores were needed.)\n'pos' is the source position all this is tied to\n'b' is the enclosing block\n'a' is the value to decompose\n'm0' is the input memory arg used for the first store (or returned if there are no stores)\n'rc' is a registerCursor which identifies the register/memory destination for the value\n" ^{:tag (* Value)} [^{:tag (* expandState)} x ^src/XPos pos ^{:tag (* Block)} b ^{:tag (* Value)} a ^{:tag (* Value)} m0 ^registerCursor rc]
+  (when (> (.-debug x) 1)
+    (.indent x 3)
+    (defer (.indent x -3)))
+
+  (let [at (.-Type a)]
+    (when (== (.Size at) 0)
+      (return m0))
+
+    (when (== (.-Op a) OpDereference)
+      (set! (.-Op a) OpLoad)) ; For purposes of parameter passing expansion, a Dereference is a Load.
+
+
+    (when (and (not (.hasRegs rc)) (not (CanSSA at)))
+      (let [dst (.offsetFrom x b (.-storeDest rc) (.-storeOffset rc) (types/NewPtr at))]
+        (when (> (.-debug x) 1)
+          (.Printf x "...recur store %s at %s\n" (.LongString a) (.LongString dst)))
+
+        (if (== (.-Op a) OpLoad) (do
+            (set! m0 (.NewValue3A b pos OpMove types/TypeMem at dst (aget (.-Args a) 0) m0))
+            (set! (.-AuxInt m0) (.Size at))
+            (return m0))
+
+          (panic (fmt/Errorf "Store of not a load")))))
+
+
+
+    (let [mem m0]
+      (switch (.Kind at)
+        (case [types/TARRAY]
+          (let [et (.Elem at)]
+            (for [i (conv int64 0)] (< i (.NumElem at)) (inc! i)
+              (let [e (.NewValue1I b pos OpArraySelect et i a)]
+                (set! pos (.WithNotStmt pos))
+                (set! mem (.decomposeAsNecessary x pos b e mem (.next rc et)))))
+
+            (return mem)))
+
+        (case [types/TSTRUCT]
+          (when (.IsSIMD at)
+            (break)) ; XXX
+
+          (for [i 0] (< i (.NumFields at)) (inc! i)
+            (let [et (.-Type (.Field at i)) ; might need to read offsets from the fields
+                ^{:line 406} e (.NewValue1I b pos OpStructSelect et (conv int64 i) a)]
+              (set! pos (.WithNotStmt pos))
+              (when (> (.-debug x) 1)
+                (.Printf x "...recur decompose %s, %v\n" (.LongString e) et))
+
+              (set! mem (.decomposeAsNecessary x pos b e mem (.next rc et)))))
+
+          (return mem))
+
+        (case [types/TSLICE]
+          (set! mem (.decomposeOne x pos b a mem (.PtrTo (.Elem at)) OpSlicePtr (addr rc)))
+          (set! pos (.WithNotStmt pos))
+          (set! mem (.decomposeOne x pos b a mem (.-Int (.-typs x)) OpSliceLen (addr rc)))
+          (return (.decomposeOne x pos b a mem (.-Int (.-typs x)) OpSliceCap (addr rc))))
+
+        (case [types/TSTRING]
+          (return (.decomposePair x pos b a mem (.-BytePtr (.-typs x)) (.-Int (.-typs x)) OpStringPtr OpStringLen (addr rc))))
+
+        (case [types/TINTER]
+          (set! mem (.decomposeOne x pos b a mem (.-Uintptr (.-typs x)) OpITab (addr rc)))
+          (set! pos (.WithNotStmt pos))
+          ;; Immediate interfaces cause so many headaches.
+          (when (== (.-Op a) OpIMake)
+            (let [data (aget (.-Args a) 1)]
+              (while (or (== (.-Op data) OpStructMake) (== (.-Op data) OpArrayMake1))
+                ;; A struct make might have a few zero-sized fields.
+                ;; Use the pointer-y one we know is there.
+                (range [_ a (.-Args data)]
+                  (when (> (.Size (.-Type a)) 0)
+                    (set! data a)
+                    (break))))
+
+
+
+              (return (.decomposeAsNecessary x pos b data mem (.next rc (.-Type data))))))
+
+          (return (.decomposeOne x pos b a mem (.-BytePtr (.-typs x)) OpIData (addr rc))))
+
+        (case [types/TCOMPLEX64]
+          (return (.decomposePair x pos b a mem (.-Float32 (.-typs x)) (.-Float32 (.-typs x)) OpComplexReal OpComplexImag (addr rc))))
+
+        (case [types/TCOMPLEX128]
+          (return (.decomposePair x pos b a mem (.-Float64 (.-typs x)) (.-Float64 (.-typs x)) OpComplexReal OpComplexImag (addr rc))))
+
+        (case [types/TINT64]
+          (when (> (.Size at) (.-regSize x))
+            (return (.decomposePair x pos b a mem (.-firstType x) (.-secondType x) (.-firstOp x) (.-secondOp x) (addr rc)))))
+
+        (case [types/TUINT64]
+          (when (> (.Size at) (.-regSize x))
+            (return (.decomposePair x pos b a mem (.-UInt32 (.-typs x)) (.-UInt32 (.-typs x)) (.-firstOp x) (.-secondOp x) (addr rc))))))
+
+
+
+      ;; An atomic type, either record the register or store it and update the memory.
+
+      (if (.hasRegs rc) (do
+          (when (> (.-debug x) 1)
+            (.Printf x "...recur addArg %s\n" (.LongString a)))
+
+          (.addArg rc a))
+
+        (let [dst (.offsetFrom x b (.-storeDest rc) (.-storeOffset rc) (types/NewPtr at))]
+          (when (> (.-debug x) 1)
+            (.Printf x "...recur store %s at %s\n" (.LongString a) (.LongString dst)))
+
+          (set! mem (.NewValue3A b pos OpStore types/TypeMem at dst a mem))))
+
+
+      ^{:line 475} mem)))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 700} (go/method rewriteSelectOrArg "Convert scalar OpArg into the proper OpWhateverArg instruction\nConvert scalar OpSelectN into perhaps-differently-indexed OpSelectN\nConvert aggregate OpArg into Make of its parts (which are eventually scalars)\nConvert aggregate OpSelectN into Make of its parts (which are eventually scalars)\nReturns the converted value.\n\n  - \"pos\" the position for any generated instructions\n  - \"b\" the block for any generated instructions\n  - \"container\" the outermost OpArg/OpSelectN\n  - \"a\" the instruction to overwrite, if any (only the outermost caller)\n  - \"m0\" the memory arg for any loads that are necessary\n  - \"at\" the type of the Arg/part\n  - \"rc\" the register/memory cursor locating the various parts of the Arg.\n" ^{:tag (* Value)} [^{:tag (* expandState)} x ^src/XPos pos ^{:tag (* Block)} b ^{:tag (* Value)} container ^{:tag (* Value)} a ^{:tag (* Value)} m0 ^{:tag (* types/Type)} at ^registerCursor rc]
+
+  (when (== at types/TypeMem)
+    (.copyOf a m0)
+    (return a))
+
+
+  (let [makeOf ^{:go/end 509} (fn ^{:tag (* Value)} [^{:tag (* Value)} a ^Op op ^{:tag (slice (* Value))} args]
+        (if (== a nil) (do
+            (set! a (.NewValue0 b pos op at))
+            (.AddArgs a (spread args)))
+          (do
+            (.resetArgs a)
+            (set! (values (.-Aux a) (.-AuxInt a)) (values nil 0))
+            (set! (values (.-Pos a) (.-Op a) (.-Type a)) (values pos op at))
+            (.AddArgs a (spread args))))
+
+        ^{:line 508} a)]
+
+
+    (when (== (.Size at) 0)
+      ;; For consistency, create these values even though they'll ultimately be unused
+      (return (makeOf a OpEmpty nil)))
+
+
+    (let [sk (lit selKey :from container :size 0 :offsetOrIndex (.-storeOffset rc) :typ at)
+        ^{:line 517} dupe (aget (.-commonSelectors x) sk)]
+      (when (!= dupe nil)
+        (when (== a nil)
+          (return dupe))
+
+        (.copyOf a dupe)
+        (return a))
+
+
+      (let [^{:tag (array 10 (* Value))} argStore (zero (array 10 (* Value)))
+          ^{:line 527} args (subslice argStore _ 0)
+
+          ^{:line 529} addArg ^{:go/end 538} (fn [^{:tag (* Value)} a0]
+            (when (== a0 nil)
+              (let [as "<nil>"]
+                (when (!= a nil)
+                  (set! as (.LongString a)))
+
+                (panic (fmt/Errorf "a0 should not be nil, a=%v, container=%v, at=%v" as (.LongString container) at))))
+
+            (set! args (append args a0)))]
+
+
+        (switch (.Kind at)
+          (case [types/TARRAY]
+            (let [et (.Elem at)]
+              (for [i (conv int64 0)] (< i (.NumElem at)) (inc! i)
+                (let [e (.rewriteSelectOrArg x pos b container nil m0 et (.next rc et))]
+                  (addArg e)))
+
+              (set! a (makeOf a OpArrayMake1 args))
+              (aset (.-commonSelectors x) sk a)
+              (return a)))
+
+          (case [types/TSTRUCT]
+            ;; Assume ssagen/ssa.go (in buildssa) spills large aggregates so they won't appear here.
+            (when (.IsSIMD at)
+              (break)) ; XXX
+
+            (for [i 0] (< i (.NumFields at)) (inc! i)
+              (let [et (.-Type (.Field at i))
+                  ^{:line 558} e (.rewriteSelectOrArg x pos b container nil m0 et (.next rc et))]
+                (when (== e nil)
+                  (panic (fmt/Errorf "nil e, et=%v, et.Size()=%d, i=%d" et (.Size et) i)))
+
+                (addArg e)
+                (set! pos (.WithNotStmt pos))))
+
+            (when (and (> (.NumFields at) MaxStruct) (not (types/IsDirectIface at)))
+              (panic (fmt/Errorf "Too many fields (%d, %d bytes), container=%s" (.NumFields at) (.Size at) (.LongString container))))
+
+            (set! a (makeOf a OpStructMake args))
+            (aset (.-commonSelectors x) sk a)
+            (return a))
+
+          (case [types/TSLICE]
+            (addArg (.rewriteSelectOrArg x pos b container nil m0 (.PtrTo (.Elem at)) (.next rc (.-BytePtr (.-typs x)))))
+            (set! pos (.WithNotStmt pos))
+            (addArg (.rewriteSelectOrArg x pos b container nil m0 (.-Int (.-typs x)) (.next rc (.-Int (.-typs x)))))
+            (addArg (.rewriteSelectOrArg x pos b container nil m0 (.-Int (.-typs x)) (.next rc (.-Int (.-typs x)))))
+            (set! a (makeOf a OpSliceMake args))
+            (aset (.-commonSelectors x) sk a)
+            (return a))
+
+          (case [types/TSTRING]
+            (addArg (.rewriteSelectOrArg x pos b container nil m0 (.-BytePtr (.-typs x)) (.next rc (.-BytePtr (.-typs x)))))
+            (set! pos (.WithNotStmt pos))
+            (addArg (.rewriteSelectOrArg x pos b container nil m0 (.-Int (.-typs x)) (.next rc (.-Int (.-typs x)))))
+            (set! a (makeOf a OpStringMake args))
+            (aset (.-commonSelectors x) sk a)
+            (return a))
+
+          (case [types/TINTER]
+            (addArg (.rewriteSelectOrArg x pos b container nil m0 (.-Uintptr (.-typs x)) (.next rc (.-Uintptr (.-typs x)))))
+            (set! pos (.WithNotStmt pos))
+            (addArg (.rewriteSelectOrArg x pos b container nil m0 (.-BytePtr (.-typs x)) (.next rc (.-BytePtr (.-typs x)))))
+            (set! a (makeOf a OpIMake args))
+            (aset (.-commonSelectors x) sk a)
+            (return a))
+
+          (case [types/TCOMPLEX64]
+            (addArg (.rewriteSelectOrArg x pos b container nil m0 (.-Float32 (.-typs x)) (.next rc (.-Float32 (.-typs x)))))
+            (set! pos (.WithNotStmt pos))
+            (addArg (.rewriteSelectOrArg x pos b container nil m0 (.-Float32 (.-typs x)) (.next rc (.-Float32 (.-typs x)))))
+            (set! a (makeOf a OpComplexMake args))
+            (aset (.-commonSelectors x) sk a)
+            (return a))
+
+          (case [types/TCOMPLEX128]
+            (addArg (.rewriteSelectOrArg x pos b container nil m0 (.-Float64 (.-typs x)) (.next rc (.-Float64 (.-typs x)))))
+            (set! pos (.WithNotStmt pos))
+            (addArg (.rewriteSelectOrArg x pos b container nil m0 (.-Float64 (.-typs x)) (.next rc (.-Float64 (.-typs x)))))
+            (set! a (makeOf a OpComplexMake args))
+            (aset (.-commonSelectors x) sk a)
+            (return a))
+
+          (case [types/TINT64]
+            (when (> (.Size at) (.-regSize x))
+              (addArg (.rewriteSelectOrArg x pos b container nil m0 (.-firstType x) (.next rc (.-firstType x))))
+              (set! pos (.WithNotStmt pos))
+              (addArg (.rewriteSelectOrArg x pos b container nil m0 (.-secondType x) (.next rc (.-secondType x))))
+              (when (not (.-BigEndian (.-Config (.-f x))))
+                ;; Int64Make args are big, little
+                (set! (values (aget args 0) (aget args 1)) (values (aget args 1) (aget args 0))))
+
+              (set! a (makeOf a OpInt64Make args))
+              (aset (.-commonSelectors x) sk a)
+              (return a)))
+
+          (case [types/TUINT64]
+            (when (> (.Size at) (.-regSize x))
+              (addArg (.rewriteSelectOrArg x pos b container nil m0 (.-UInt32 (.-typs x)) (.next rc (.-UInt32 (.-typs x)))))
+              (set! pos (.WithNotStmt pos))
+              (addArg (.rewriteSelectOrArg x pos b container nil m0 (.-UInt32 (.-typs x)) (.next rc (.-UInt32 (.-typs x)))))
+              (when (not (.-BigEndian (.-Config (.-f x))))
+                ;; Int64Make args are big, little
+                (set! (values (aget args 0) (aget args 1)) (values (aget args 1) (aget args 0))))
+
+              (set! a (makeOf a OpInt64Make args))
+              (aset (.-commonSelectors x) sk a)
+              (return a))))
+
+
+
+        ;; An atomic type, either record the register or store it and update the memory.
+
+        ;; Depending on the container Op, the leaves are either OpSelectN or OpArg{Int,Float}Reg
+
+        (cond (== (.-Op container) OpArg)
+          (if (.hasRegs rc)
+            (let [(values op i) (.ArgOpAndRegisterFor rc)
+                ^{:line 648} name (assert (* ir/Name) (.-Aux container))]
+              (set! a (makeOf a op nil))
+              (set! (.-AuxInt a) i)
+              (set! (.-Aux a) (addr (lit AuxNameOffset name (.-storeOffset rc)))))
+
+            (let [key (lit selKey container (.-storeOffset rc) (.Size at) at)
+                ^{:line 654} w (aget (.-commonArgs x) key)]
+              (if (and (!= w nil) (!= (.-Uses w) 0))
+                (if (== a nil)
+                  (set! a w)
+
+                  (.copyOf a w))
+
+                (do
+                  (if (== a nil)
+                    (let [aux (.-Aux container)
+                        ^{:line 664} auxInt (+ (.-AuxInt container) (.-storeOffset rc))]
+                      (set! a (.NewValue0IA (.-Block container) (.-Pos container) OpArg at auxInt aux)))
+                    (do))
+                  ;; do nothing, the original should be okay.
+
+                  (aset (.-commonArgs x) key a)))))
+
+
+          (== (.-Op container) OpSelectN)
+          (let [call (aget (.-Args container) 0)
+              ^{:line 674} aux (assert (* AuxCall) (.-Aux call))
+              ^{:line 675} which (.-AuxInt container)]
+
+            (cond (== at types/TypeMem)
+              (when (or (!= a m0) (!= a (aget (.-memForCall x) (.-ID call))))
+                (panic (fmt/Errorf "Memories %s, %s, and %s should all be equal after %s" (.LongString a) (.LongString m0) (aget (.-memForCall x) (.-ID call)) (.LongString call))))
+
+              (.hasRegs rc)
+              (let [firstReg (conv uint32 0)]
+                (for [i 0] (< i (conv int which)) (inc! i)
+                  (set! firstReg + (conv uint32 (len (.-Registers (.OutParam (.-abiInfo aux) i))))))
+
+                (let [reg (conv int64 (+ (.-nextSlice rc) (conv Abi1RO firstReg)))]
+                  (set! a (makeOf a OpSelectN (lit (slice (* Value)) call)))
+                  (set! (.-AuxInt a) reg))) :else
+
+              (let [off (.offsetFrom x (.-Entry (.-f x)) (.-sp x) (+ (.-storeOffset rc) (.OffsetOfResult aux which)) (types/NewPtr at))]
+                (set! a (makeOf a OpLoad (lit (slice (* Value)) off m0)))))) :else
+
+
+
+          (panic (fmt/Errorf "Expected container OpArg or OpSelectN, saw %v instead" (.LongString container))))
+
+
+        (aset (.-commonSelectors x) sk a)
+        ^{:line 699} a))))
+
+
+
+
+
+
+^{:go/end 801} (go/method rewriteWideSelectToStores "rewriteWideSelectToStores handles the case of a SelectN'd result from a function call that is too large for SSA,\nbut is transferred in registers.  In this case the register cursor tracks both operands; the register sources and\nthe memory destinations.\nThis returns the memory flowing out of the last store\n" ^{:tag (* Value)} [^{:tag (* expandState)} x ^src/XPos pos ^{:tag (* Block)} b ^{:tag (* Value)} container ^{:tag (* Value)} m0 ^{:tag (* types/Type)} at ^registerCursor rc]
+
+  (when (== (.Size at) 0)
+    (return m0))
+
+
+  (switch (.Kind at)
+    (case [types/TARRAY]
+      (let [et (.Elem at)]
+        (for [i (conv int64 0)] (< i (.NumElem at)) (inc! i)
+          (set! m0 (.rewriteWideSelectToStores x pos b container m0 et (.next rc et))))
+
+        (return m0)))
+
+    (case [types/TSTRUCT]
+      ;; Assume ssagen/ssa.go (in buildssa) spills large aggregates so they won't appear here.
+      (when (.IsSIMD at)
+        (break)) ; XXX
+
+      (for [i 0] (< i (.NumFields at)) (inc! i)
+        (let [et (.-Type (.Field at i))]
+          (set! m0 (.rewriteWideSelectToStores x pos b container m0 et (.next rc et)))
+          (set! pos (.WithNotStmt pos))))
+
+      (return m0))
+
+    (case [types/TSLICE]
+      (set! m0 (.rewriteWideSelectToStores x pos b container m0 (.PtrTo (.Elem at)) (.next rc (.-BytePtr (.-typs x)))))
+      (set! pos (.WithNotStmt pos))
+      (set! m0 (.rewriteWideSelectToStores x pos b container m0 (.-Int (.-typs x)) (.next rc (.-Int (.-typs x)))))
+      (set! m0 (.rewriteWideSelectToStores x pos b container m0 (.-Int (.-typs x)) (.next rc (.-Int (.-typs x)))))
+      (return m0))
+
+    (case [types/TSTRING]
+      (set! m0 (.rewriteWideSelectToStores x pos b container m0 (.-BytePtr (.-typs x)) (.next rc (.-BytePtr (.-typs x)))))
+      (set! pos (.WithNotStmt pos))
+      (set! m0 (.rewriteWideSelectToStores x pos b container m0 (.-Int (.-typs x)) (.next rc (.-Int (.-typs x)))))
+      (return m0))
+
+    (case [types/TINTER]
+      (set! m0 (.rewriteWideSelectToStores x pos b container m0 (.-Uintptr (.-typs x)) (.next rc (.-Uintptr (.-typs x)))))
+      (set! pos (.WithNotStmt pos))
+      (set! m0 (.rewriteWideSelectToStores x pos b container m0 (.-BytePtr (.-typs x)) (.next rc (.-BytePtr (.-typs x)))))
+      (return m0))
+
+    (case [types/TCOMPLEX64]
+      (set! m0 (.rewriteWideSelectToStores x pos b container m0 (.-Float32 (.-typs x)) (.next rc (.-Float32 (.-typs x)))))
+      (set! pos (.WithNotStmt pos))
+      (set! m0 (.rewriteWideSelectToStores x pos b container m0 (.-Float32 (.-typs x)) (.next rc (.-Float32 (.-typs x)))))
+      (return m0))
+
+    (case [types/TCOMPLEX128]
+      (set! m0 (.rewriteWideSelectToStores x pos b container m0 (.-Float64 (.-typs x)) (.next rc (.-Float64 (.-typs x)))))
+      (set! pos (.WithNotStmt pos))
+      (set! m0 (.rewriteWideSelectToStores x pos b container m0 (.-Float64 (.-typs x)) (.next rc (.-Float64 (.-typs x)))))
+      (return m0))
+
+    (case [types/TINT64]
+      (when (> (.Size at) (.-regSize x))
+        (set! m0 (.rewriteWideSelectToStores x pos b container m0 (.-firstType x) (.next rc (.-firstType x))))
+        (set! pos (.WithNotStmt pos))
+        (set! m0 (.rewriteWideSelectToStores x pos b container m0 (.-secondType x) (.next rc (.-secondType x))))
+        (return m0)))
+
+    (case [types/TUINT64]
+      (when (> (.Size at) (.-regSize x))
+        (set! m0 (.rewriteWideSelectToStores x pos b container m0 (.-UInt32 (.-typs x)) (.next rc (.-UInt32 (.-typs x)))))
+        (set! pos (.WithNotStmt pos))
+        (set! m0 (.rewriteWideSelectToStores x pos b container m0 (.-UInt32 (.-typs x)) (.next rc (.-UInt32 (.-typs x)))))
+        (return m0))))
+
+
+
+  ;; TODO could change treatment of too-large OpArg, would deal with it here.
+  (if (== (.-Op container) OpSelectN)
+    (let [call (aget (.-Args container) 0)
+        ^{:line 782} aux (assert (* AuxCall) (.-Aux call))
+        ^{:line 783} which (.-AuxInt container)]
+
+      (if (.hasRegs rc)
+        (let [firstReg (conv uint32 0)]
+          (for [i 0] (< i (conv int which)) (inc! i)
+            (set! firstReg + (conv uint32 (len (.-Registers (.OutParam (.-abiInfo aux) i))))))
+
+          (let [reg (conv int64 (+ (.-nextSlice rc) (conv Abi1RO firstReg)))
+              ^{:line 791} a (.NewValue1I b pos OpSelectN at reg call)
+              ^{:line 792} dst (.offsetFrom x b (.-storeDest rc) (.-storeOffset rc) (types/NewPtr at))]
+            (set! m0 (.NewValue3A b pos OpStore types/TypeMem at dst a m0))))
+
+        (panic (fmt/Errorf "Expected rc to have registers"))))
+
+
+    (panic (fmt/Errorf "Expected container OpSelectN, saw %v instead" (.LongString container))))
+
+  ^{:line 800} m0)
+
+
+^{:go/end 805} (go/func isBlockMultiValueExit ^bool [^{:tag (* Block)} b]
+  (and ^:go/paren (or (== (.-Kind b) BlockRet) (== (.-Kind b) BlockRetJmp)) (!= (aget (.-Controls b) 0) nil) (== (.-Op (aget (.-Controls b) 0)) OpMakeResult)))
+
+
+(go/type Abi1RO uint8) ; An offset within a parameter's slice of register indices, for abi1.
+
+
+(go/type registerCursor "A registerCursor tracks which register is used for an Arg or regValues, or a piece of such.\n" (struct
+    ^{:line 811 :tag (* Value)} storeDest ; if there are no register targets, then this is the base of the store.
+    ^{:line 812 :tag int64} storeOffset
+    ^{:line 813 :tag (slice abi/RegIndex)} regs ; the registers available for this Arg/result (which is all in registers or not at all)
+    ^{:line 814 :tag Abi1RO} nextSlice ; the next register/register-slice offset
+    ^{:line 815 :tag (* abi/ABIConfig)} config
+    ^{:line 816 :tag (* (slice (* Value)))} regValues)) ; values assigned to registers accumulate here
+
+
+^{:go/end 837} (go/method String ^string [^{:tag (* registerCursor)} c]
+  (let [dest "<none>"]
+    (when (!= (.-storeDest c) nil)
+      (set! dest (fmt/Sprintf "%s+%d" (.String (.-storeDest c)) (.-storeOffset c))))
+
+    (let [regs "<none>"]
+      (when (!= (.-regValues c) nil)
+        (set! regs "")
+        (range [i x @(.-regValues c)]
+          (when (> i 0)
+            (set! regs (+ regs "; ")))
+
+          (set! regs (+ regs (.LongString x)))))
+
+
+
+      ;; not printing the config because that has not been useful
+      (fmt/Sprintf "RCSR{storeDest=%v, regsLen=%d, nextSlice=%d, regValues=[%s]}" dest (len (.-regs c)) (.-nextSlice c) regs))))
+
+
+
+
+^{:go/end 850} (go/method next "next effectively post-increments the register cursor; the receiver is advanced,\nthe (aligned) old value is returned.\n" ^registerCursor [^{:tag (* registerCursor)} c ^{:tag (* types/Type)} t]
+  (set! (.-storeOffset c) (types/RoundUp (.-storeOffset c) (.Alignment t)))
+  (let [rc @c]
+    (set! (.-storeOffset c) (types/RoundUp (+ (.-storeOffset c) (.Size t)) (.Alignment t)))
+    (when (< (conv int (.-nextSlice c)) (len (.-regs c)))
+      (let [w (.NumParamRegs (.-config c) t)]
+        (set! (.-nextSlice c) + (conv Abi1RO w))))
+
+    ^{:line 849} rc))
+
+
+
+^{:go/end 857} (go/method plus "plus returns a register cursor offset from the original, without modifying the original.\n" ^registerCursor [^{:tag (* registerCursor)} c ^Abi1RO regWidth]
+  (let [rc @c]
+    (set! (.-nextSlice rc) + regWidth)
+    ^{:line 856} rc))
+
+
+^{:go/end 866} (go/method init [^{:tag (* registerCursor)} c ^{:tag (slice abi/RegIndex)} regs ^{:tag (* abi/ABIParamResultInfo)} info ^{:tag (* (slice (* Value)))} result ^{:tag (* Value)} storeDest ^int64 storeOffset]
+  (set! (.-regs c) regs)
+  (set! (.-nextSlice c) 0)
+  (set! (.-storeOffset c) storeOffset)
+  (set! (.-storeDest c) storeDest)
+  (set! (.-config c) (.Config info))
+  (set! (.-regValues c) result))
+
+
+^{:go/end 870} (go/method addArg [^{:tag (* registerCursor)} c ^{:tag (* Value)} v]
+  (set! @(.-regValues c) (append @(.-regValues c) v)))
+
+
+^{:go/end 874} (go/method hasRegs ^bool [^{:tag (* registerCursor)} c]
+  (> (len (.-regs c)) 0))
+
+
+^{:go/end 879} (go/method ArgOpAndRegisterFor [^{:tag (* registerCursor)} c] :results [Op int64]
+  (let [r (aget (.-regs c) (.-nextSlice c))]
+    (ArgOpAndRegisterFor r (.-config c))))
+
+
+
+
+^{:go/end 889} (go/func ArgOpAndRegisterFor "ArgOpAndRegisterFor converts an abi register index into an ssa Op and corresponding\narg register index.\n" [^abi/RegIndex r ^{:tag (* abi/ABIConfig)} abiConfig] :results [Op int64]
+  (let [i (.FloatIndexFor abiConfig r)]
+    (when (>= i 0) ; float PR
+      (return OpArgFloatReg i))
+
+    (return OpArgIntReg (conv int64 r))))
+
+
+(go/type selKey (struct
+    ^{:line 892 :tag (* Value)} from ; what is selected from
+    ^{:line 893 :tag int64} offsetOrIndex ; whatever is appropriate for the selector
+    ^{:line 894 :tag int64} size
+    ^{:line 895 :tag (* types/Type)} typ))
+
+
+(go/type expandState (struct
+    ^{:line 899 :tag (* Func)} f
+    ^{:line 900 :tag int} debug ; odd values log lost statement markers, so likely settings are 1 (stmts), 2 (expansion), and 3 (both)
+    ^{:line 901 :tag int64} regSize
+    ^{:line 902 :tag (* Value)} sp
+    ^{:line 903 :tag (* Types)} typs
+
+    ^{:line 905 :tag Op} firstOp ; for 64-bit integers on 32-bit machines, first word in memory
+    ^{:line 906 :tag Op} secondOp ; for 64-bit integers on 32-bit machines, second word in memory
+    ^{:line 907 :tag (* types/Type)} firstType ; first half type, for Int64
+    ^{:line 908 :tag (* types/Type)} secondType ; second half type, for Int64
+
+    ^{:line 910 :tag (map (* Value) (* Value))} wideSelects ; Selects that are not SSA-able, mapped to consuming stores.
+    ^{:line 911 :tag (map selKey (* Value))} commonSelectors ; used to de-dupe selectors
+    ^{:line 912 :tag (map selKey (* Value))} commonArgs ; used to de-dupe OpArg/OpArgIntReg/OpArgFloatReg
+    ^{:line 913 :tag (map ID (* Value))} memForCall ; For a call, need to know the unique selector that gets the mem.
+    ^{:line 914 :tag int} indentLevel)) ; Indentation for debugging recursion
+
+
+
+^{:go/end 938} (go/method offsetFrom "offsetFrom creates an offset from a pointer, simplifying chained offsets and offsets from SP\n" ^{:tag (* Value)} [^{:tag (* expandState)} x ^{:tag (* Block)} b ^{:tag (* Value)} from ^int64 offset ^{:tag (* types/Type)} pt]
+  (let [ft (.-Type from)]
+    (when (== offset 0)
+      (when (== ft pt)
+        (return from))
+
+      ;; This captures common, (apparently) safe cases.  The unsafe cases involve ft == uintptr
+      (when (and ^:go/paren (or (.IsPtr ft) (.IsUnsafePtr ft)) (.IsPtr pt))
+        (return from)))
+
+
+    ;; Simplify, canonicalize
+    (while (== (.-Op from) OpOffPtr)
+      (set! offset + (.-AuxInt from))
+      (set! from (aget (.-Args from) 0)))
+
+    (when (== from (.-sp x))
+      (return (.ConstOffPtrSP (.-f x) pt offset (.-sp x))))
+
+    (.NewValue1I b (.WithNotStmt (.-Pos from)) OpOffPtr pt offset from)))
+
+
+
+^{:go/end 946} (go/method prAssignForArg "prAssignForArg returns the ABIParamAssignment for v, assumed to be an OpArg.\n" ^{:tag (* abi/ABIParamAssignment)} [^{:tag (* expandState)} x ^{:tag (* Value)} v]
+  (when (!= (.-Op v) OpArg)
+    (panic (fmt/Errorf "Wanted OpArg, instead saw %s" (.LongString v))))
+
+  (ParamAssignmentForArgName (.-f x) (assert (* ir/Name) (.-Aux v))))
+
+
+
+^{:go/end 958} (go/func ParamAssignmentForArgName "ParamAssignmentForArgName returns the ABIParamAssignment for f's arg with matching name.\n" ^{:tag (* abi/ABIParamAssignment)} [^{:tag (* Func)} f ^{:tag (* ir/Name)} name]
+  (let [abiInfo (.-abiInfo (.-OwnAux f))
+      ^{:line 951} ip (.InParams abiInfo)]
+    (range [i a ip]
+      (when (== (.-Name a) name)
+        (return (addr (aget ip i)))))
+
+
+    (panic (fmt/Errorf "Did not match param %v in prInfo %+v" name (.InParams abiInfo)))))
+
+
+
+^{:go/end 963} (go/method indent "indent increments (or decrements) the indentation.\n" [^{:tag (* expandState)} x ^int n]
+  (set! (.-indentLevel x) + n))
+
+
+
+^{:go/end 971} (go/method Printf "Printf does an indented fmt.Printf on the format and args.\n" [^{:tag (* expandState)} x ^string format & ^{:tag (slice any)} a] :results [^int n ^error err]
+  (when (> (.-indentLevel x) 0)
+    (fmt/Printf "%[1]*s" (.-indentLevel x) ""))
+
+  (fmt/Printf format (spread a)))
+
+
+^{:go/end 989} (go/method invalidateRecursively [^{:tag (* expandState)} x ^{:tag (* Value)} a]
+  (let [^string s (zero string)]
+    (when (> (.-debug x) 0)
+      (let [plus " "]
+        (when (== ^{:go/via [lico]} (.IsStmt (.-Pos a)) src/PosIsStmt)
+          (set! plus " +"))
+
+        (set! s (+ (.String a) plus (.LineNumber (.-Pos a)) " " (.LongString a)))
+        (when (> (.-debug x) 1)
+          (.Printf x "...marking %v unused\n" s))))
+
+
+    (let [lost (.invalidateRecursively a)]
+      (when (and (!= (bit-and (.-debug x) 1) 0) lost) ; For odd values of x.debug, do this.
+        (.Printf x "Lost statement marker in %s on former %s\n" (+ (.-Pkgpath base/Ctxt) "." (.-Name (.-f x))) s)))))

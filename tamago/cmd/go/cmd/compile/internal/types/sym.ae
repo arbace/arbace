@@ -1,0 +1,142 @@
+;; Copyright 2017 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.cmd.compile.internal.types) (go/file "sym.go" :imports [
+
+
+    ^{:line 8} [base "cmd/compile/internal/base"]
+    ^{:line 9} [obj "cmd/internal/obj"]
+    ^{:line 10} [strings "strings"]
+    ^{:line 11} [unicode "unicode"]
+    ^{:line 12} [utf8 "unicode/utf8"]])
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+(go/type Sym "Sym represents an object name in a segmented (pkg, name) namespace.\nMost commonly, this is a Go identifier naming an object declared within a package,\nbut Syms are also used to name internal synthesized objects.\n\nAs an exception, field and method names that are exported use the Sym\nassociated with localpkg instead of the package that declared them. This\nallows using Sym pointer equality to test for Go identifier uniqueness when\nhandling selector expressions.\n\nIdeally, Sym should be used for representing Go language constructs,\nwhile cmd/internal/obj.LSym is used for representing emitted artifacts.\n\nNOTE: In practice, things can be messier than the description above\nfor various reasons (historical, convenience).\n" (struct
+    ^{:line 30 :tag string} Linkname ; link name
+
+    ^{:line 32 :tag (* Pkg)} Pkg
+    ^{:line 33 :tag string} Name ; object name
+
+
+
+
+
+
+
+    ^{:line 41 :tag Object :doc "The unique ONAME, OTYPE, OPACK, or OLITERAL node that this symbol is\nbound to within the current scope. (Most parts of the compiler should\nprefer passing the Node directly, rather than relying on this field.)\n\nDeprecated: New code should avoid depending on Sym.Def. Add\nmdempsky@ as a reviewer for any CLs involving Sym.Def.\n"} Def
+
+    ^{:line 43 :tag bitset8} flags))
+
+
+(go/const
+  ^{:line 47} [^{:val 1} symOnExportList (<< 1 iota)] ; added to exportlist (no need to add again)
+  ^{:line 48} [^{:val 2} symUniq]
+  ^{:line 49} [^{:val 4} symSiggen] ; type symbol has been generated
+  ^{:line 50} [^{:val 8} symAsm] ; on asmlist, for writing to -asmhdr
+  ^{:line 51} [^{:val 16} symFunc]) ; function symbol
+
+
+^{:go/end 54} (go/method OnExportList ^bool [^{:tag (* Sym)} sym] (!= (bit-and (.-flags sym) symOnExportList) 0))
+^{:go/end 55} (go/method Uniq ^bool [^{:tag (* Sym)} sym] (!= (bit-and (.-flags sym) symUniq) 0))
+^{:go/end 56} (go/method Siggen ^bool [^{:tag (* Sym)} sym] (!= (bit-and (.-flags sym) symSiggen) 0))
+^{:go/end 57} (go/method Asm ^bool [^{:tag (* Sym)} sym] (!= (bit-and (.-flags sym) symAsm) 0))
+^{:go/end 58} (go/method Func ^bool [^{:tag (* Sym)} sym] (!= (bit-and (.-flags sym) symFunc) 0))
+
+^{:go/end 60} (go/method SetOnExportList [^{:tag (* Sym)} sym ^bool b] (.set (.-flags sym) symOnExportList b))
+^{:go/end 61} (go/method SetUniq [^{:tag (* Sym)} sym ^bool b] (.set (.-flags sym) symUniq b))
+^{:go/end 62} (go/method SetSiggen [^{:tag (* Sym)} sym ^bool b] (.set (.-flags sym) symSiggen b))
+^{:go/end 63} (go/method SetAsm [^{:tag (* Sym)} sym ^bool b] (.set (.-flags sym) symAsm b))
+^{:go/end 64} (go/method SetFunc [^{:tag (* Sym)} sym ^bool b] (.set (.-flags sym) symFunc b))
+
+^{:go/end 68} (go/method IsBlank ^bool [^{:tag (* Sym)} sym]
+  (and (!= sym nil) (== (.-Name sym) "_")))
+
+
+
+
+
+
+^{:go/end 80} (go/method Linksym "Deprecated: This method should not be used directly. Instead, use a\nhigher-level abstraction that directly returns the linker symbol\nfor a named object. For example, reflectdata.TypeLinksym(t) instead\nof reflectdata.TypeSym(t).Linksym().\n" ^{:tag (* obj/LSym)} [^{:tag (* Sym)} sym]
+  (let [abi obj/ABI0]
+    (when (.Func sym)
+      (set! abi obj/ABIInternal))
+
+    (.LinksymABI sym abi)))
+
+
+
+
+
+
+^{:go/end 94} (go/method LinksymABI "Deprecated: This method should not be used directly. Instead, use a\nhigher-level abstraction that directly returns the linker symbol\nfor a named object. For example, (*ir.Name).LinksymABI(abi) instead\nof (*ir.Name).Sym().LinksymABI(abi).\n" ^{:tag (* obj/LSym)} [^{:tag (* Sym)} sym ^obj/ABI abi]
+  (when (== sym nil)
+    (base/Fatalf "nil symbol"))
+
+  (when (!= (.-Linkname sym) "")
+    (return (base/Linkname (.-Linkname sym) abi)))
+
+  (base/PkgLinksym (.-Prefix (.-Pkg sym)) (.-Name sym) abi))
+
+
+
+
+
+
+^{:go/end 133} (go/func CompareSyms "CompareSyms return the ordering of a and b, as for [cmp.Compare].\n\nSymbols are ordered exported before non-exported, then by name, and\nfinally (for non-exported symbols) by package path.\n" ^int [^{:tag (* Sym)} a ^{:tag (* Sym)} b]
+  (when (== a b)
+    (return 0))
+
+
+  ;; Nil before non-nil.
+  (when (== a nil)
+    (return -1))
+
+  (when (== b nil)
+    (return (+ 1)))
+
+
+  ;; Exported symbols before non-exported.
+  ^{:go/breaks [[5 132]]} (let [ea (IsExported (.-Name a))
+      ^{:line 115} eb (IsExported (.-Name b))]
+    (when (!= ea eb)
+      (if ea
+        (return -1)
+
+        (return (+ 1))))
+
+
+
+    ;; Order by name and then (for non-exported names) by package
+    ;; height and path.
+    (when [r (strings/Compare (.-Name a) (.-Name b))] (!= r 0)
+      (return r))
+
+    (when (not ea)
+      (return (strings/Compare (.-Path (.-Pkg a)) (.-Path (.-Pkg b)))))
+
+    0))
+
+
+
+
+^{:go/end 143} (go/func IsExported "IsExported reports whether name is an exported Go symbol (that is,\nwhether it begins with an upper-case letter).\n" ^bool [^string name]
+  (when [r (aget name 0)] (< r utf8/RuneSelf)
+    (return (and (<= \A r) (<= r \Z))))
+
+  (let [(values r _) (utf8/DecodeRuneInString name)]
+    (unicode/IsUpper r)))

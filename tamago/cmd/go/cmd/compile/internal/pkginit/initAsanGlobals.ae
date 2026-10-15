@@ -1,0 +1,241 @@
+;; Copyright 2022 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.cmd.compile.internal.pkginit) (go/file "initAsanGlobals.go" :imports [
+
+
+    ^{:line 8} [strings "strings"]
+
+    ^{:line 10} [base "cmd/compile/internal/base"]
+    ^{:line 11} [ir "cmd/compile/internal/ir"]
+    ^{:line 12} [typecheck "cmd/compile/internal/typecheck"]
+    ^{:line 13} [types "cmd/compile/internal/types"]
+    ^{:line 14} [src "cmd/internal/src"]])
+
+
+
+^{:go/end 121} (go/func instrumentGlobals "instrumentGlobals declares a global array of _asan_global structures and initializes it.\n" ^{:tag (* ir/Name)} [^{:tag (* ir/Func)} fn]
+  (let [(values asanGlobalStruct asanLocationStruct defStringstruct) (createtypes)
+      ^{:line 20} lname typecheck/Lookup
+      ^{:line 21} tconv typecheck/ConvNop
+      ;; Make a global array of asanGlobalStruct type.
+      ;; var asanglobals []asanGlobalStruct
+      ^{:line 24} arraytype (types/NewArray asanGlobalStruct (conv int64 (len InstrumentGlobalsMap)))
+      ^{:line 25} symG (lname ".asanglobals")
+      ^{:line 26} globals (ir/NewNameAt base/Pos symG arraytype)]
+    (set! (.-Class globals) ir/PEXTERN)
+    (set! (.-Def symG) globals)
+    (set! (.-Externs typecheck/Target) (append (.-Externs typecheck/Target) globals))
+    ;; Make a global array of asanLocationStruct type.
+    ;; var asanL []asanLocationStruct
+    (set! arraytype (types/NewArray asanLocationStruct (conv int64 (len InstrumentGlobalsMap))))
+    (let [symL (lname ".asanL")
+        ^{:line 34} asanlocation (ir/NewNameAt base/Pos symL arraytype)]
+      (set! (.-Class asanlocation) ir/PEXTERN)
+      (set! (.-Def symL) asanlocation)
+      (set! (.-Externs typecheck/Target) (append (.-Externs typecheck/Target) asanlocation))
+      ;; Make three global string variables to pass the global name and module name
+      ;; and the name of the source file that defines it.
+      ;; var asanName string
+      ;; var asanModulename string
+      ;; var asanFilename string
+      (set! symL (lname ".asanName"))
+      (let [asanName (ir/NewNameAt base/Pos symL (aget types/Types types/TSTRING))]
+        (set! (.-Class asanName) ir/PEXTERN)
+        (set! (.-Def symL) asanName)
+        (set! (.-Externs typecheck/Target) (append (.-Externs typecheck/Target) asanName))
+
+        (set! symL (lname ".asanModulename"))
+        (let [asanModulename (ir/NewNameAt base/Pos symL (aget types/Types types/TSTRING))]
+          (set! (.-Class asanModulename) ir/PEXTERN)
+          (set! (.-Def symL) asanModulename)
+          (set! (.-Externs typecheck/Target) (append (.-Externs typecheck/Target) asanModulename))
+
+          (set! symL (lname ".asanFilename"))
+          (let [asanFilename (ir/NewNameAt base/Pos symL (aget types/Types types/TSTRING))]
+            (set! (.-Class asanFilename) ir/PEXTERN)
+            (set! (.-Def symL) asanFilename)
+            (set! (.-Externs typecheck/Target) (append (.-Externs typecheck/Target) asanFilename))
+
+            (let [^ir/Nodes init (zero ir/Nodes)
+                ^{:line 62 :tag ir/Node} c (zero ir/Node)]
+              ;; globals[i].odrIndicator = 0 is the default, no need to set it explicitly here.
+              (range [i n InstrumentGlobalsSlice]
+                (let [setField ^{:go/end 69} (fn [^string f ^ir/Node val ^int i]
+                      (let [r (ir/NewAssignStmt base/Pos (ir/NewSelectorExpr base/Pos ir/ODOT
+                              (ir/NewIndexExpr base/Pos globals (ir/NewInt base/Pos (conv int64 i))) (lname f)) val)]
+                        (.Append init (typecheck/Stmt r))))]
+
+                  ;; globals[i].beg = uintptr(unsafe.Pointer(&n))
+                  (set! c (tconv (typecheck/NodAddr n) (aget types/Types types/TUNSAFEPTR)))
+                  (set! c (tconv c (aget types/Types types/TUINTPTR)))
+                  (setField "beg" c i)
+                  ;; Assign globals[i].size.
+                  (let [g (assert (* ir/Name) n)
+                      ^{:line 76} size (.Size ^{:go/via [miniExpr]} (.Type g))]
+                    (set! c (typecheck/DefaultLit (ir/NewInt base/Pos size) (aget types/Types types/TUINTPTR)))
+                    (setField "size" c i)
+                    ;; Assign globals[i].sizeWithRedzone.
+                    (let [rzSize (GetRedzoneSizeForGlobal size)
+                        ^{:line 81} sizeWithRz (+ rzSize size)]
+                      (set! c (typecheck/DefaultLit (ir/NewInt base/Pos sizeWithRz) (aget types/Types types/TUINTPTR)))
+                      (setField "sizeWithRedzone" c i)
+                      ;; The C string type is terminated by a null character "\0", Go should use three-digit
+                      ;; octal "\000" or two-digit hexadecimal "\x00" to create null terminated string.
+                      ;; asanName = symbol's linkname + "\000"
+                      ;; globals[i].name = (*defString)(unsafe.Pointer(&asanName)).data
+                      (let [name (.-Name (.Linksym g))]
+                        (.Append init (typecheck/Stmt (ir/NewAssignStmt base/Pos asanName (ir/NewString base/Pos (+ name "\u0000")))))
+                        (set! c (tconv (typecheck/NodAddr asanName) (aget types/Types types/TUNSAFEPTR)))
+                        (set! c (tconv c (types/NewPtr defStringstruct)))
+                        (set! c (ir/NewSelectorExpr base/Pos ir/ODOT c (lname "data")))
+                        (setField "name" c i)
+
+                        ;; Set the name of package being compiled as a unique identifier of a module.
+                        ;; asanModulename = pkgName + "\000"
+                        (.Append init (typecheck/Stmt (ir/NewAssignStmt base/Pos asanModulename (ir/NewString base/Pos (+ (.-Name types/LocalPkg) "\u0000")))))
+                        (set! c (tconv (typecheck/NodAddr asanModulename) (aget types/Types types/TUNSAFEPTR)))
+                        (set! c (tconv c (types/NewPtr defStringstruct)))
+                        (set! c (ir/NewSelectorExpr base/Pos ir/ODOT c (lname "data")))
+                        (setField "moduleName" c i)
+                        ;; Assign asanL[i].filename, asanL[i].line, asanL[i].column
+                        ;; and assign globals[i].location = uintptr(unsafe.Pointer(&asanL[i]))
+                        (let [asanLi (ir/NewIndexExpr base/Pos asanlocation (ir/NewInt base/Pos (conv int64 i)))
+                            ^{:line 105} filename (ir/NewString base/Pos (+ (.Filename (.Pos (.-PosTable base/Ctxt) (.Pos n))) "\u0000"))]
+                          (.Append init (typecheck/Stmt (ir/NewAssignStmt base/Pos asanFilename filename)))
+                          (set! c (tconv (typecheck/NodAddr asanFilename) (aget types/Types types/TUNSAFEPTR)))
+                          (set! c (tconv c (types/NewPtr defStringstruct)))
+                          (set! c (ir/NewSelectorExpr base/Pos ir/ODOT c (lname "data")))
+                          (.Append init (typecheck/Stmt (ir/NewAssignStmt base/Pos (ir/NewSelectorExpr base/Pos ir/ODOT asanLi (lname "filename")) c)))
+                          (let [line (ir/NewInt base/Pos (conv int64 ^{:go/via [lico]} (.Line (.Pos n))))]
+                            (.Append init (typecheck/Stmt (ir/NewAssignStmt base/Pos (ir/NewSelectorExpr base/Pos ir/ODOT asanLi (lname "line")) line)))
+                            (let [col (ir/NewInt base/Pos (conv int64 ^{:go/via [lico]} (.Col (.Pos n))))]
+                              (.Append init (typecheck/Stmt (ir/NewAssignStmt base/Pos (ir/NewSelectorExpr base/Pos ir/ODOT asanLi (lname "column")) col)))
+                              (set! c (tconv (typecheck/NodAddr asanLi) (aget types/Types types/TUNSAFEPTR)))
+                              (set! c (tconv c (aget types/Types types/TUINTPTR)))
+                              (setField "sourceLocation" c i)))))))))
+
+              (.Append (.-Body fn) (spread init))
+              ^{:line 120} globals)))))))
+
+
+;; createtypes creates the asanGlobal, asanLocation and defString struct type.
+;; Go compiler does not refer to the C types, we represent the struct field
+;; by a uintptr, then use type conversion to make copies of the data.
+;; E.g., (*defString)(asanGlobal.name).data to C string.
+;;
+;; Keep in sync with src/runtime/asan/asan.go.
+;; type asanGlobal struct {
+;;	beg               uintptr
+;;	size              uintptr
+;;	size_with_redzone uintptr
+;;	name              uintptr
+;;	moduleName        uintptr
+;;	hasDynamicInit    uintptr
+;;	sourceLocation    uintptr
+;;	odrIndicator      uintptr
+;; }
+;;
+;; type asanLocation struct {
+;;	filename uintptr
+;;	line     int32
+;;	column   int32
+;; }
+;;
+;; defString is synthesized struct type meant to capture the underlying
+;; implementations of string.
+;; type defString struct {
+;;	data uintptr
+;;	len  uintptr
+;; }
+
+^{:go/end 185} (go/func createtypes [] :results [(* types/Type) (* types/Type) (* types/Type)]
+  (let [up (aget types/Types types/TUINTPTR)
+      ^{:line 155} i32 (aget types/Types types/TINT32)
+      ^{:line 156} fname typecheck/Lookup
+      ^{:line 157} nxp src/NoXPos
+      ^{:line 158} nfield types/NewField
+      ^{:line 159} asanGlobal (types/NewStruct (lit (slice (* types/Field))
+          (nfield nxp (fname "beg") up)
+          (nfield nxp (fname "size") up)
+          (nfield nxp (fname "sizeWithRedzone") up)
+          (nfield nxp (fname "name") up)
+          (nfield nxp (fname "moduleName") up)
+          (nfield nxp (fname "hasDynamicInit") up)
+          (nfield nxp (fname "sourceLocation") up)
+          (nfield nxp (fname "odrIndicator") up)))]
+
+    (types/CalcSize asanGlobal)
+
+    (let [asanLocation (types/NewStruct (lit (slice (* types/Field))
+            (nfield nxp (fname "filename") up)
+            (nfield nxp (fname "line") i32)
+            (nfield nxp (fname "column") i32)))]
+
+      (types/CalcSize asanLocation)
+
+      (let [defString (types/NewStruct (lit (slice (* types/Field))
+              (types/NewField nxp (fname "data") up)
+              (types/NewField nxp (fname "len") up)))]
+
+        (types/CalcSize defString)
+
+        (return asanGlobal asanLocation defString)))))
+
+
+
+^{:go/end 203} (go/func GetRedzoneSizeForGlobal "Calculate redzone for globals.\n" ^int64 [^int64 size]
+  (let [maxRZ (conv int64 (<< 1 18))
+      ^{:line 190} minRZ (conv int64 32)
+      ^{:line 191} redZone (* (/ size minRZ 4) minRZ)]
+    (switch
+      (case [(> redZone maxRZ)]
+        (set! redZone maxRZ))
+      (case [(< redZone minRZ)]
+        (set! redZone minRZ)))
+
+    ;; Round up to multiple of minRZ.
+    (when (!= (% size minRZ) 0)
+      (set! redZone + (- minRZ (% size minRZ))))
+
+    ^{:line 202} redZone))
+
+
+
+
+
+
+
+
+(go/var ^{:doc "InstrumentGlobalsMap contains only package-local (and unlinknamed from somewhere else)\nglobals.\nAnd the key is the object name. For example, in package p, a global foo would be in this\nmap as \"foo\".\nConsider range over maps is nondeterministic, make a slice to hold all the values in the\nInstrumentGlobalsMap and iterate over the InstrumentGlobalsSlice.\n"} InstrumentGlobalsMap (make (map string ir/Node)))
+(go/var InstrumentGlobalsSlice (make (slice ir/Node) 0 0))
+
+^{:go/end 242} (go/func canInstrumentGlobal ^bool [^ir/Node g]
+  (when (!= (.Op g) ir/ONAME)
+    (return false))
+
+  ^{:go/breaks [[7 241]]} (let [n (assert (* ir/Name) g)]
+    (when (== (.-Class n) ir/PFUNC)
+      (return false))
+
+    (when (!= (.-Pkg (.Sym n)) types/LocalPkg)
+      (return false))
+
+    ;; Do not instrument any _cgo_ related global variables, because they are declared in C code.
+    (when (strings/Contains (.-Name (.Sym n)) "cgo")
+      (return false))
+
+
+    ;; Do not instrument counter globals in internal/fuzz. These globals are replaced by the linker.
+    ;; See go.dev/issue/72766 for more details.
+    (when (and (== (.-Path (.-Pkg (.Sym n))) "internal/fuzz") ^:go/paren (or (== (.-Name (.Sym n)) "_counters") (== (.-Name (.Sym n)) "_ecounters")))
+      (return false))
+
+
+    ;; Do not instrument globals that are linknamed, because their home package will do the work.
+    (when (!= (.-Linkname (.Sym n)) "")
+      (return false))
+
+
+    true))

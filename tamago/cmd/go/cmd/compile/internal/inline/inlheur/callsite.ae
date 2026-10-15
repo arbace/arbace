@@ -1,0 +1,148 @@
+;; Copyright 2023 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.cmd.compile.internal.inline.inlheur) (go/file "callsite.go" :imports [
+
+
+    ^{:line 8} [base "cmd/compile/internal/base"]
+    ^{:line 9} [ir "cmd/compile/internal/ir"]
+    ^{:line 10} [src "cmd/internal/src"]
+    ^{:line 11} [fmt "fmt"]
+    ^{:line 12} [io "io"]
+    ^{:line 13} [filepath "path/filepath"]
+    ^{:line 14} [sort "sort"]
+    ^{:line 15} [strings "strings"]])
+
+
+
+
+
+
+
+
+
+
+
+(go/type CallSite "CallSite records useful information about a potentially inlinable\n(direct) function call. \"Callee\" is the target of the call, \"Call\"\nis the ir node corresponding to the call itself, \"Assign\" is\nthe top-level assignment statement containing the call (if the call\nappears in the form of a top-level statement, e.g. \"x := foo()\"),\n\"Flags\" contains properties of the call that might be useful for\nmaking inlining decisions, \"Score\" is the final score assigned to\nthe site, and \"ID\" is a numeric ID for the site within its\ncontaining function.\n" (struct
+    ^{:line 28 :tag (* ir/Func)} Callee
+    ^{:line 29 :tag (* ir/CallExpr)} Call
+    ^{:line 30 :tag (* CallSite)} parent
+    ^{:line 31 :tag ir/Node} Assign
+    ^{:line 32 :tag CSPropBits} Flags
+
+    ^{:line 34 :tag (slice ActualExprPropBits)} ArgProps
+    ^{:line 35 :tag int} Score
+    ^{:line 36 :tag scoreAdjustTyp} ScoreMask
+    ^{:line 37 :tag uint} ID
+    ^{:line 38 :tag uint8} aux))
+
+
+
+
+
+
+
+(go/type CallSiteTab "CallSiteTab is a table of call sites, keyed by call expr.\nIdeally it would be nice to key the table by src.XPos, but\nthis results in collisions for calls on very long lines (the\nfront end saturates column numbers at 255). We also wind up\nwith many calls that share the same auto-generated pos.\n" (map (* ir/CallExpr) (* CallSite)))
+
+
+
+(go/type ActualExprPropBits "ActualExprPropBits describes a property of an actual expression (value\npassed to some specific func argument at a call site).\n" uint8)
+
+(go/const
+  ^{:line 53} [^{:tag ActualExprPropBits :val 1} ActualExprConstant (<< 1 iota)]
+  ^{:line 54} [^{:val 2} ActualExprIsConcreteConvIface]
+  ^{:line 55} [^{:val 4} ActualExprIsFunc]
+  ^{:line 56} [^{:val 8} ActualExprIsInlinableFunc])
+
+
+(go/type CSPropBits uint32)
+
+(go/const
+  ^{:line 62} [^{:tag CSPropBits :val 1} CallSiteInLoop (<< 1 iota)]
+  ^{:line 63} [^{:val 2} CallSiteOnPanicPath]
+  ^{:line 64} [^{:val 4} CallSiteInInitFunc])
+
+
+(go/type csAuxBits uint8)
+
+(go/const
+  ^{:line 70} [^{:val 1} csAuxInlined (<< 1 iota)])
+
+
+
+
+
+(go/type encodedCallSiteTab "encodedCallSiteTab is a table keyed by \"encoded\" callsite\n(stringified src.XPos plus call site ID) mapping to a value of call\nproperty bits and score.\n" (map string propsAndScore))
+
+(go/type propsAndScore (struct
+    ^{:line 79 :tag CSPropBits} props
+    ^{:line 80 :tag int} score
+    ^{:line 81 :tag scoreAdjustTyp} mask))
+
+
+^{:go/end 87} (go/method String ^string [^propsAndScore pas]
+  (fmt/Sprintf "P=%s|S=%d|M=%s" (.String (.-props pas))
+    (.-score pas) (.String (.-mask pas))))
+
+
+^{:go/breaks [[4 96]] :go/end 97} (go/method merge ^error [^CallSiteTab cst ^CallSiteTab other]
+  (range [k v other]
+    (when [(values prev ok) (aget cst k)] ok
+      (return (fmt/Errorf "internal error: collision during call site table merge, fn=%s callsite=%s" (.-Name (.Sym (.-Callee prev))) (fmtFullPos ^{:go/via [miniExpr miniNode]} (.Pos (.-Call prev))))))
+
+    (aset cst k v))
+
+  nil)
+
+
+^{:go/end 109} (go/func fmtFullPos ^string [^src/XPos p]
+  (let [^strings/Builder sb (zero strings/Builder)
+      ^{:line 101} sep ""]
+    (.AllPos base/Ctxt p ^{:go/end 107} (fn [^src/Pos pos]
+        (.WriteString sb sep)
+        (set! sep "|")
+        (let [file (filepath/Base (.Filename pos))]
+          (fmt/Fprintf (addr sb) "%s:%d:%d" file ^{:go/via [lico]} (.Line pos) ^{:go/via [lico]} (.Col pos)))))
+
+    (.String sb)))
+
+
+^{:go/end 117} (go/func EncodeCallSiteKey ^string [^{:tag (* CallSite)} cs]
+  (let [^strings/Builder sb (zero strings/Builder)]
+    ;; FIXME: maybe rewrite line offsets relative to function start?
+    (.WriteString sb (fmtFullPos ^{:go/via [miniExpr miniNode]} (.Pos (.-Call cs))))
+    (fmt/Fprintf (addr sb) "|%d" (.-ID cs))
+    (.String sb)))
+
+
+^{:go/end 130} (go/func buildEncodedCallSiteTab ^encodedCallSiteTab [^CallSiteTab tab]
+  (let [r (make encodedCallSiteTab)]
+    (range [_ cs tab]
+      (let [k (EncodeCallSiteKey cs)]
+        (aset r k ^{:go/breaks [2 4 6]} (lit propsAndScore
+            :props (.-Flags cs)
+            :score (.-Score cs)
+            :mask (.-ScoreMask cs)))))
+
+
+    ^{:line 129} r))
+
+
+
+
+
+^{:go/end 149} (go/func dumpCallSiteComments "dumpCallSiteComments emits comments into the dump file for the\ncallsites in the function of interest. If \"ecst\" is non-nil, we use\nthat, otherwise generated a fresh encodedCallSiteTab from \"tab\".\n" [^io/Writer w ^CallSiteTab tab ^encodedCallSiteTab ecst]
+  (when (== ecst nil)
+    (set! ecst (buildEncodedCallSiteTab tab)))
+
+  (let [tags (make (slice string) 0 (len ecst))]
+    (range [k ecst]
+      (set! tags (append tags k)))
+
+    (sort/Strings tags)
+    (range [_ s tags]
+      (let [v (aget ecst s)]
+        (fmt/Fprintf w "// callsite: %s flagstr %q flagval %d score %d mask %d maskstr %q\n" s (.String (.-props v)) (.-props v) (.-score v) (.-mask v) (.String (.-mask v)))))
+
+    (fmt/Fprintf w "// %s\n" csDelimiter)))

@@ -1,0 +1,338 @@
+;; Copyright 2017 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.cmd.compile.internal.syntax) (go/file "branches.go" :imports [
+
+    ^{:line 7} [fmt "fmt"]])
+
+
+
+
+
+
+
+
+^{:go/end 45} (go/func checkBranches "checkBranches checks correct use of labels and branch\nstatements (break, continue, fallthrough, goto) in a function body.\nIt catches:\n  - misplaced breaks, continues, and fallthroughs\n  - bad labeled breaks and continues\n  - invalid, unused, duplicate, and missing labels\n  - gotos jumping over variable declarations and into blocks\n" [^{:tag (* BlockStmt)} body ^ErrorHandler errh]
+  (when (== body nil)
+    (return))
+
+
+  ;; scope of all labels in this body
+  (let [ls (addr (lit labelScope :errh errh))
+      ^{:line 23} fwdGotos (.blockBranches ls nil (lit targets) nil ^{:go/via [stmt node]} (.Pos body) (.-List body))]
+
+    ;; If there are any forward gotos left, no matching label was
+    ;; found for them. Either those labels were never defined, or
+    ;; they are inside blocks and not reachable from the gotos.
+    (range [_ fwd fwdGotos]
+      (let [name (.-Value (.-Label fwd))]
+        (if [l (aget (.-labels ls) name)] (!= l nil) (do
+            (set! (.-used l) true) ; avoid "defined and not used" error
+            (.errf ls ^{:go/via [expr node]} (.Pos (.-Label fwd)) "goto %s jumps into block starting at %s" name (.-start (.-parent l))))
+
+          (.errf ls ^{:go/via [expr node]} (.Pos (.-Label fwd)) "label %s not defined" name))))
+
+
+
+    ;; spec: "It is illegal to define a label that is never used."
+    (range [_ l (.-labels ls)]
+      (when (not (.-used l))
+        (let [l (.-Label (.-lstmt l))]
+          (.errf ls ^{:go/via [expr node]} (.Pos l) "label %s defined and not used" (.-Value l)))))))
+
+
+
+
+(go/type labelScope (struct
+    ^{:line 48 :tag ErrorHandler} errh
+    ^{:line 49 :tag (map string (* label))} labels)) ; all label declarations inside the function; allocated lazily
+
+
+(go/type label (struct
+    ^{:line 53 :tag (* block)} parent ; block containing this label declaration
+    ^{:line 54 :tag (* LabeledStmt)} lstmt ; statement declaring the label
+    ^{:line 55 :tag bool} used)) ; whether the label is used or not
+
+
+(go/type block (struct
+    ^{:line 59 :tag (* block)} parent ; immediately enclosing block, or nil
+    ^{:line 60 :tag Pos} start ; start of block
+    ^{:line 61 :tag (* LabeledStmt)} lstmt)) ; labeled statement associated with this block, or nil
+
+
+^{:go/end 66} (go/method errf [^{:tag (* labelScope)} ls ^Pos pos ^string format & ^{:tag (slice any)} args]
+  ((.-errh ls) (lit Error pos (fmt/Sprintf format (spread args)))))
+
+
+
+
+
+^{:go/end 84} (go/method declare "declare declares the label introduced by s in block b and returns\nthe new label. If the label was already declared, declare reports\nand error and the existing label is returned instead.\n" ^{:tag (* label)} [^{:tag (* labelScope)} ls ^{:tag (* block)} b ^{:tag (* LabeledStmt)} s]
+  (let [name (.-Value (.-Label s))
+      ^{:line 73} labels (.-labels ls)]
+    (if (== labels nil) (do
+        (set! labels (make (map string (* label))))
+        (set! (.-labels ls) labels))
+      (when [alt (aget labels name)] (!= alt nil)
+        (.errf ls ^{:go/via [expr node]} (.Pos (.-Label s)) "label %s already defined at %s" name (.String ^{:go/via [expr node]} (.Pos (.-Label (.-lstmt alt)))))
+        (return alt)))
+
+    (let [l (addr (lit label b s false))]
+      (aset labels name l)
+      ^{:line 83} l)))
+
+
+
+
+
+^{:go/breaks [[5 98]] :go/end 99} (go/method gotoTarget "gotoTarget returns the labeled statement matching the given name and\ndeclared in block b or any of its enclosing blocks. The result is nil\nif the label is not defined, or doesn't match a valid labeled statement.\n" ^{:tag (* LabeledStmt)} [^{:tag (* labelScope)} ls ^{:tag (* block)} b ^string name]
+  (when [l (aget (.-labels ls) name)] (!= l nil)
+    (set! (.-used l) true) ; even if it's not a valid target
+    (for [] (!= b nil) (set! b (.-parent b))
+      (when (== (.-parent l) b)
+        (return (.-lstmt l)))))
+
+
+
+  nil)
+
+
+(go/var invalid (new LabeledStmt)) ; singleton to signal invalid enclosing target
+
+
+
+
+^{:go/breaks [[5 116]] :go/end 117} (go/method enclosingTarget "enclosingTarget returns the innermost enclosing labeled statement matching\nthe given name. The result is nil if the label is not defined, and invalid\nif the label is defined but doesn't label a valid labeled statement.\n" ^{:tag (* LabeledStmt)} [^{:tag (* labelScope)} ls ^{:tag (* block)} b ^string name]
+  (when [l (aget (.-labels ls) name)] (!= l nil)
+    (set! (.-used l) true) ; even if it's not a valid target (see e.g., test/fixedbugs/bug136.go)
+    (for [] (!= b nil) (set! b (.-parent b))
+      (when (== (.-lstmt l) (.-lstmt b))
+        (return (.-lstmt l))))
+
+
+    (return invalid))
+
+  nil)
+
+
+
+
+(go/type targets "targets describes the target statements within which break\nor continue statements are valid.\n" (struct
+    ^{:line 122 :tag Stmt} breaks ; *ForStmt, *SwitchStmt, *SelectStmt, or nil
+    ^{:line 123 :tag (* ForStmt)} continues ; or nil
+    ^{:line 124 :tag int} caseIndex)) ; case index of immediately enclosing switch statement, or < 0
+
+
+
+
+
+
+^{:go/end 330} (go/method blockBranches "blockBranches processes a block's body starting at start and returns the\nlist of unresolved (forward) gotos. parent is the immediately enclosing\nblock (or nil), ctxt provides information about the enclosing statements,\nand lstmt is the labeled statement associated with this block, or nil.\n" ^{:tag (slice (* BranchStmt))} [^{:tag (* labelScope)} ls ^{:tag (* block)} parent ^targets ctxt ^{:tag (* LabeledStmt)} lstmt ^Pos start ^{:tag (slice Stmt)} body]
+  (let [b (addr (lit block :parent parent :start start :lstmt lstmt))
+
+      ^{:line 134 :tag Pos} varPos (zero Pos)
+      ^{:line 135 :tag Expr} varName (zero Expr)
+      (values ^{:tag (slice (* BranchStmt))} fwdGotos ^{:tag (slice (* BranchStmt))} badGotos) (zero (slice (* BranchStmt)))
+
+      ^{:line 138} recordVarDecl ^{:go/end 146} (fn [^Pos pos ^Expr name]
+        (set! varPos pos)
+        (set! varName name)
+        ;; Any existing forward goto jumping over the variable
+        ;; declaration is invalid. The goto may still jump out
+        ;; of the block and be ok, but we don't know that yet.
+        ;; Remember all forward gotos as potential bad gotos.
+        (set! badGotos (append (subslice badGotos _ 0) (spread fwdGotos))))
+
+
+      ^{:line 148} jumpsOverVarDecl ^{:go/breaks [[3 156]] :go/end 157} (fn ^bool [^{:tag (* BranchStmt)} fwd]
+        (when (.IsKnown varPos)
+          (range [_ bad badGotos]
+            (when (== fwd bad)
+              (return true))))
+
+
+
+        false)
+
+
+      ^{:line 159} innerBlock ^{:go/end 163} (fn [^targets ctxt ^Pos start ^{:tag (slice Stmt)} body]
+        ;; Unresolved forward gotos from the inner block
+        ;; become forward gotos for the current block.
+        (set! fwdGotos (append fwdGotos (spread (.blockBranches ls b ctxt lstmt start body)))))
+
+
+      ;; A fallthrough statement counts as last statement in a statement
+      ;; list even if there are trailing empty statements; remove them.
+      ^{:line 167} stmtList (trimTrailingEmptyStmts body)]
+    (range [stmtIndex stmt stmtList]
+      (set! lstmt nil)
+      (label :L
+        (type-switch [s stmt]
+          (case [(* DeclStmt)]
+            (range [_ d (.-DeclList s)]
+              (when [(values v ok) (assert (* VarDecl) d)] ok
+                (recordVarDecl ^{:go/via [decl node]} (.Pos v) (aget (.-NameList v) 0))
+                (break)))) ; the first VarDecl will do
+
+
+
+          (case [(* LabeledStmt)]
+            ;; declare non-blank label
+            (when [name (.-Value (.-Label s))] (!= name "_")
+              (let [l (.declare ls b s)
+                  ;; resolve matching forward gotos
+                  ^{:line 185} i 0]
+                (range [_ fwd fwdGotos]
+                  (if (== (.-Value (.-Label fwd)) name) (do
+                      (set! (.-Target fwd) s)
+                      (set! (.-used l) true)
+                      (when (jumpsOverVarDecl fwd)
+                        ^{:go/breaks [3]} (.errf ls
+                          ^{:go/via [expr node]} (.Pos (.-Label fwd))
+                          "goto %s jumps over declaration of %s at %s"
+                          ^{:line 194} name (String varName) varPos)))
+
+
+                    (do
+                      ;; no match - keep forward goto
+                      (aset fwdGotos i fwd)
+                      (inc! i))))
+
+
+                (set! fwdGotos (subslice fwdGotos _ i))
+                (set! lstmt s)))
+
+            ;; process labeled statement
+            (set! stmt (.-Stmt s))
+            (goto :L))
+
+          (case [(* BranchStmt)]
+            ;; unlabeled branch statement
+            (when (== (.-Label s) nil)
+              (switch (.-Tok s)
+                (case [_Break]
+                  (if [t (.-breaks ctxt)] (!= t nil)
+                    (set! (.-Target s) t)
+
+                    (.errf ls ^{:go/via [stmt node]} (.Pos s) "break is not in a loop, switch, or select")))
+
+                (case [_Continue]
+                  (if [t (.-continues ctxt)] (!= t nil)
+                    (set! (.-Target s) t)
+
+                    (.errf ls ^{:go/via [stmt node]} (.Pos s) "continue is not in a loop")))
+
+                (case [_Fallthrough]
+                  (let [msg "fallthrough statement out of place"]
+                    (when [(values t _) (assert (* SwitchStmt) (.-breaks ctxt))] (!= t nil)
+                      (if [(values _ ok) (assert (* TypeSwitchGuard) (.-Tag t))] ok
+                        (set! msg "cannot fallthrough in type switch")
+                        (cond (or (< (.-caseIndex ctxt) 0) (< (+ stmtIndex 1) (len stmtList))) (do)
+                          ;; fallthrough nested in a block or not the last statement
+                          ;; use msg as is
+                          (== (+ (.-caseIndex ctxt) 1) (len (.-Body t)))
+                          (set! msg "cannot fallthrough final case in switch") :else
+
+                          (break)))) ; fallthrough ok
+
+
+                    (.errf ls ^{:go/via [stmt node]} (.Pos s) "%s" msg)))
+                (case [_Goto]
+                  (fallthrough)) ; should always have a label
+                (default
+                  (panic "invalid BranchStmt")))
+
+              (break))
+
+
+            ;; labeled branch statement
+            (let [name (.-Value (.-Label s))]
+              (switch (.-Tok s)
+                (case [_Break]
+                  ;; spec: "If there is a label, it must be that of an enclosing
+                  ;; "for", "switch", or "select" statement, and that is the one
+                  ;; whose execution terminates."
+                  (if [t (.enclosingTarget ls b name)] (!= t nil)
+                    (type-switch [t (.-Stmt t)]
+                      (case [(* SwitchStmt) (* SelectStmt) (* ForStmt)]
+                        (set! (.-Target s) t))
+                      (default
+                        (.errf ls ^{:go/via [expr node]} (.Pos (.-Label s)) "invalid break label %s" name)))
+
+
+                    (.errf ls ^{:go/via [expr node]} (.Pos (.-Label s)) "break label not defined: %s" name)))
+
+
+                (case [_Continue]
+                  ;; spec: "If there is a label, it must be that of an enclosing
+                  ;; "for" statement, and that is the one whose execution advances."
+                  (if [t (.enclosingTarget ls b name)] (!= t nil)
+                    (if [(values t ok) (assert (* ForStmt) (.-Stmt t))] ok
+                      (set! (.-Target s) t)
+
+                      (.errf ls ^{:go/via [expr node]} (.Pos (.-Label s)) "invalid continue label %s" name))
+
+
+                    (.errf ls ^{:go/via [expr node]} (.Pos (.-Label s)) "continue label not defined: %s" name)))
+
+
+                (case [_Goto]
+                  (if [t (.gotoTarget ls b name)] (!= t nil)
+                    (set! (.-Target s) t)
+
+                    ;; label may be declared later - add goto to forward gotos
+                    (set! fwdGotos (append fwdGotos s))))
+
+
+                (case [_Fallthrough]
+                  (fallthrough)) ; should never have a label
+                (default
+                  (panic "invalid BranchStmt")))))
+
+
+          (case [(* AssignStmt)]
+            (when (== (.-Op s) Def)
+              (recordVarDecl ^{:go/via [simpleStmt stmt node]} (.Pos s) (.-Lhs s))))
+
+
+          (case [(* BlockStmt)]
+            (let [inner (lit targets (.-breaks ctxt) (.-continues ctxt) -1)]
+              (innerBlock inner ^{:go/via [stmt node]} (.Pos s) (.-List s))))
+
+          (case [(* IfStmt)]
+            (let [inner (lit targets (.-breaks ctxt) (.-continues ctxt) -1)]
+              (innerBlock inner ^{:go/via [stmt node]} (.Pos (.-Then s)) (.-List (.-Then s)))
+              (when (!= (.-Else s) nil)
+                (innerBlock inner (.Pos (.-Else s)) (lit (slice Stmt) (.-Else s))))))
+
+
+          (case [(* ForStmt)]
+            (let [inner (lit targets s s -1)]
+              (innerBlock inner ^{:go/via [stmt node]} (.Pos (.-Body s)) (.-List (.-Body s)))))
+
+          (case [(* SwitchStmt)]
+            (let [inner (lit targets s (.-continues ctxt) -1)]
+              (range [i cc (.-Body s)]
+                (set! (.-caseIndex inner) i)
+                (innerBlock inner ^{:go/via [node]} (.Pos cc) (.-Body cc)))))
+
+
+          (case [(* SelectStmt)]
+            (let [inner (lit targets s (.-continues ctxt) -1)]
+              (range [_ cc (.-Body s)]
+                (innerBlock inner ^{:go/via [node]} (.Pos cc) (.-Body cc))))))))
+
+
+
+
+    ^{:line 329} fwdGotos))
+
+
+^{:go/breaks [[4 338]] :go/end 339} (go/func trimTrailingEmptyStmts ^{:tag (slice Stmt)} [^{:tag (slice Stmt)} list]
+  (for [i (len list)] (> i 0) (dec! i)
+    (when [(values _ ok) (assert (* EmptyStmt) (aget list (- i 1)))] (not ok)
+      (return (subslice list _ i))))
+
+
+  nil)

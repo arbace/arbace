@@ -1,0 +1,228 @@
+;; Copyright 2009 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.cmd.compile.internal.walk) (go/file "closure.go" :imports [
+
+
+    ^{:line 8} [base "cmd/compile/internal/base"]
+    ^{:line 9} [ir "cmd/compile/internal/ir"]
+    ^{:line 10} [typecheck "cmd/compile/internal/typecheck"]
+    ^{:line 11} [types "cmd/compile/internal/types"]
+    ^{:line 12} [src "cmd/internal/src"]])
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 92} (go/func directClosureCall "directClosureCall rewrites a direct call of a function literal into\na normal function call with closure variables passed as arguments.\nThis avoids allocation of a closure object.\n\nFor illustration, the following call:\n\n\tfunc(a int) {\n\t\tprintln(byval)\n\t\tbyref++\n\t}(42)\n\nbecomes:\n\n\tfunc(byval int, &byref *int, a int) {\n\t\tprintln(byval)\n\t\t(*&byref)++\n\t}(byval, &byref, 42)\n" [^{:tag (* ir/CallExpr)} n]
+  (let [clo (assert (* ir/ClosureExpr) (.-Fun n))
+      ^{:line 34} clofn (.-Func clo)]
+
+    (when (not (.IsClosure clofn))
+      (return)) ; leave for walkClosure to handle
+
+
+    ;; We are going to insert captured variables before input args.
+    (let [^{:tag (slice (* types/Field))} params (zero (slice (* types/Field)))
+        ^{:line 42 :tag (slice (* ir/Name))} decls (zero (slice (* ir/Name)))]
+      (range [_ v (.-ClosureVars clofn)]
+        (when (not (.Byval v))
+          ;; If v of type T is captured by reference,
+          ;; we introduce function param &v *T
+          ;; and v remains PAUTOHEAP with &v heapaddr
+          ;; (accesses will implicitly deref &v).
+
+          (let [addr (ir/NewNameAt ^{:go/via [miniNode]} (.Pos clofn) (typecheck/Lookup (+ "&" (.-Name (.Sym v)))) (types/NewPtr ^{:go/via [miniExpr]} (.Type v)))]
+            (set! (.-Curfn addr) clofn)
+            (set! (.-Heapaddr v) addr)
+            (set! v addr)))
+
+
+        (set! (.-Class v) ir/PPARAM)
+        (set! decls (append decls v))
+
+        (let [fld (types/NewField src/NoXPos (.Sym v) ^{:go/via [miniExpr]} (.Type v))]
+          (set! (.-Nname fld) v)
+          (set! params (append params fld))))
+
+
+      ;; f is ONAME of the actual function.
+      (let [f (.-Nname clofn)
+          ^{:line 66} typ ^{:go/via [miniExpr]} (.Type f)]
+
+        ;; Create new function type with parameters prepended, and
+        ;; then update type and declarations.
+        (set! typ (types/NewSignature nil (append params (spread (.Params typ))) (.Results typ)))
+        ^{:go/via [miniExpr]} (.SetType f typ)
+        (set! (.-Dcl clofn) (append decls (spread (.-Dcl clofn))))
+
+        ;; Rewrite call.
+        (set! (.-Fun n) f)
+        (.Prepend (.-Args n) (spread (closureArgs clo)))
+
+        ;; Update the call expression's type. We need to do this
+        ;; because typecheck gave it the result type of the OCLOSURE
+        ;; node, but we only rewrote the ONAME node's type. Logically,
+        ;; they're the same, but the stack offsets probably changed.
+        (if (== (.NumResults typ) 1)
+          ^{:go/via [miniExpr]} (.SetType n (.-Type (.Result typ 0)))
+
+          ^{:go/via [miniExpr]} (.SetType n (.ResultsTuple typ)))
+
+
+        ;; Add to Closures for enqueueFunc. It's no longer a proper
+        ;; closure, but we may have already skipped over it in the
+        ;; functions list, so this just ensures it's compiled.
+        (set! (.-Closures ir/CurFunc) (append (.-Closures ir/CurFunc) clofn))))))
+
+
+^{:go/end 144} (go/func walkClosure ^ir/Node [^{:tag (* ir/ClosureExpr)} clo ^{:tag (* ir/Nodes)} init]
+  (let [clofn (.-Func clo)]
+
+    ;; If not a closure, don't bother wrapping.
+    (when (not (.IsClosure clofn))
+      (when (> (.-Closure base/Debug) 0)
+        (base/WarnfAt ^{:go/via [miniExpr miniNode]} (.Pos clo) "closure converted to global"))
+
+      (return (.-Nname clofn)))
+
+
+    ;; The closure is not trivial or directly called, so it's going to stay a closure.
+    (ir/ClosureDebugRuntimeCheck clo)
+    (.SetNeedctxt clofn true)
+
+    ;; The closure expression may be walked more than once if it appeared in composite
+    ;; literal initialization (e.g, see issue #49029).
+    ;;
+    ;; Don't add the closure function to compilation queue more than once, since when
+    ;; compiling a function twice would lead to an ICE.
+    (when (not ^{:go/via [miniNode]} (.Walked clofn))
+      ^{:go/via [miniNode]} (.SetWalked clofn true)
+      (set! (.-Closures ir/CurFunc) (append (.-Closures ir/CurFunc) clofn)))
+
+
+    (let [typ (typecheck/ClosureType clo)
+
+        ^{:line 121} clos (ir/NewCompLitExpr base/Pos ir/OCOMPLIT typ nil)]
+      ^{:go/via [miniExpr miniNode]} (.SetEsc clos ^{:go/via [miniExpr miniNode]} (.Esc clo))
+      (set! (.-List clos) (append (lit (slice ir/Node) (ir/NewUnaryExpr base/Pos ir/OCFUNC (.-Nname clofn))) (spread (closureArgs clo))))
+      (range [i value (.-List clos)]
+        (aset (.-List clos) i (ir/NewStructKeyExpr base/Pos (.Field typ i) value)))
+
+
+      (let [addr (typecheck/NodAddr clos)]
+        ^{:go/via [miniExpr miniNode]} (.SetEsc addr ^{:go/via [miniExpr miniNode]} (.Esc clo))
+
+        ;; Force type conversion from *struct to the func type.
+        (let [cfn (typecheck/ConvNop addr ^{:go/via [miniExpr]} (.Type clo))]
+
+          ;; non-escaping temp to use, if any.
+          (when [x (.-Prealloc clo)] (!= x nil)
+            (when (not (types/Identical typ ^{:go/via [miniExpr]} (.Type x)))
+              (panic "closure type does not match order's assigned type"))
+
+            (set! (.-Prealloc addr) x)
+            (set! (.-Prealloc clo) nil))
+
+
+          (walkExpr cfn init))))))
+
+
+
+
+
+
+
+^{:go/end 164} (go/func closureArgs "closureArgs returns a slice of expressions that can be used to\ninitialize the given closure's free variables. These correspond\none-to-one with the variables in clo.Func.ClosureVars, and will be\neither an ONAME node (if the variable is captured by value) or an\nOADDR-of-ONAME node (if not).\n" ^{:tag (slice ir/Node)} [^{:tag (* ir/ClosureExpr)} clo]
+  (let [fn (.-Func clo)
+
+      ^{:line 154} args (make (slice ir/Node) (len (.-ClosureVars fn)))]
+    (range [i v (.-ClosureVars fn)]
+      (let [^ir/Node outer (zero ir/Node)]
+        (set! outer (.-Outer v))
+        (when (not (.Byval v))
+          (set! outer (typecheck/NodAddrAt ^{:go/via [miniNode]} (.Pos fn) outer)))
+
+        (aset args i (typecheck/Expr outer))))
+
+    ^{:line 163} args))
+
+
+^{:go/end 207} (go/func walkMethodValue ^ir/Node [^{:tag (* ir/SelectorExpr)} n ^{:tag (* ir/Nodes)} init]
+  ;; Create closure in the form of a composite literal.
+  ;; For x.M with receiver (x) type T, the generated code looks like:
+  ;;
+  ;;	clos = &struct{F uintptr; R T}{T.M·f, x}
+  ;;
+  ;; Like walkClosure above.
+
+  (when (.IsInterface (.Type (.-X n)))
+    ;; Trigger panic for method on nil interface now.
+    ;; Otherwise it happens in the wrapper and is confusing.
+    (set! (.-X n) (cheapExpr (.-X n) init))
+    (set! (.-X n) (walkExpr (.-X n) nil))
+
+    (let [tab (ir/NewUnaryExpr base/Pos ir/OITAB (.-X n))
+        ^{:line 181} check (ir/NewUnaryExpr base/Pos ir/OCHECKNIL tab)]
+      (.Append init (typecheck/Stmt check))))
+
+
+  (let [typ (typecheck/MethodValueType n)
+
+      ^{:line 187} clos (ir/NewCompLitExpr base/Pos ir/OCOMPLIT typ nil)]
+    ^{:go/via [miniExpr miniNode]} (.SetEsc clos ^{:go/via [miniExpr miniNode]} (.Esc n))
+    (set! (.-List clos) (lit (slice ir/Node) (ir/NewUnaryExpr base/Pos ir/OCFUNC (methodValueWrapper n)) (.-X n)))
+
+    (let [addr (typecheck/NodAddr clos)]
+      ^{:go/via [miniExpr miniNode]} (.SetEsc addr ^{:go/via [miniExpr miniNode]} (.Esc n))
+
+      ;; Force type conversion from *struct to the func type.
+      (let [cfn (typecheck/ConvNop addr ^{:go/via [miniExpr]} (.Type n))]
+
+        ;; non-escaping temp to use, if any.
+        (when [x (.-Prealloc n)] (!= x nil)
+          (when (not (types/Identical typ ^{:go/via [miniExpr]} (.Type x)))
+            (panic "partial call type does not match order's assigned type"))
+
+          (set! (.-Prealloc addr) x)
+          (set! (.-Prealloc n) nil))
+
+
+        (walkExpr cfn init)))))
+
+
+
+
+
+
+^{:go/end 229} (go/func methodValueWrapper "methodValueWrapper returns the ONAME node representing the\nwrapper function (*-fm) needed for the given method value. If the\nwrapper function hasn't already been created yet, it's created and\nadded to typecheck.Target.Decls.\n" ^{:tag (* ir/Name)} [^{:tag (* ir/SelectorExpr)} dot]
+  (when (!= ^{:go/via [miniExpr miniNode]} (.Op dot) ir/OMETHVALUE)
+    (base/Fatalf "methodValueWrapper: unexpected %v (%v)" dot ^{:go/via [miniExpr miniNode]} (.Op dot)))
+
+
+  (let [meth (.-Sel dot)
+      ^{:line 219} rcvrtype (.Type (.-X dot))
+      ^{:line 220} sym (ir/MethodSymSuffix rcvrtype meth "-fm")]
+
+    (when (.Uniq sym)
+      (return (assert (* ir/Name) (.-Def sym))))
+
+    (.SetUniq sym true)
+
+    (base/FatalfAt ^{:go/via [miniExpr miniNode]} (.Pos dot) "missing wrapper for %v" meth)
+    (panic "unreachable")))

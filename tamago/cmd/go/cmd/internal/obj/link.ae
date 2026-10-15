@@ -1,0 +1,1299 @@
+;; Derived from Inferno utils/6l/l.h and related files.
+;; https://bitbucket.org/inferno-os/inferno-os/src/master/utils/6l/l.h
+;;
+;;	Copyright © 1994-1999 Lucent Technologies Inc.  All rights reserved.
+;;	Portions Copyright © 1995-1997 C H Forsyth (forsyth@terzarima.net)
+;;	Portions Copyright © 1997-1999 Vita Nuova Limited
+;;	Portions Copyright © 2000-2007 Vita Nuova Holdings Limited (www.vitanuova.com)
+;;	Portions Copyright © 2004,2006 Bruce Ellis
+;;	Portions Copyright © 2005-2007 C H Forsyth (forsyth@terzarima.net)
+;;	Revisions Copyright © 2000-2007 Lucent Technologies Inc. and others
+;;	Portions Copyright © 2009 The Go Authors. All rights reserved.
+;;
+;; Permission is hereby granted, free of charge, to any person obtaining a copy
+;; of this software and associated documentation files (the "Software"), to deal
+;; in the Software without restriction, including without limitation the rights
+;; to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+;; copies of the Software, and to permit persons to whom the Software is
+;; furnished to do so, subject to the following conditions:
+;;
+;; The above copyright notice and this permission notice shall be included in
+;; all copies or substantial portions of the Software.
+;;
+;; THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+;; IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+;; FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL THE
+;; AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+;; LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+;; OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+;; THE SOFTWARE.
+
+(in-ns 'go.cmd.internal.obj) (go/file "link.go" :imports [
+
+
+    ^{:line 34} [bufio "bufio"]
+    ^{:line 35} [bytes "bytes"]
+    ^{:line 36} [dwarf "cmd/internal/dwarf"]
+    ^{:line 37} [goobj "cmd/internal/goobj"]
+    ^{:line 38} [objabi "cmd/internal/objabi"]
+    ^{:line 39} [src "cmd/internal/src"]
+    ^{:line 40} [sys "cmd/internal/sys"]
+    ^{:line 41} [binary "encoding/binary"]
+    ^{:line 42} [fmt "fmt"]
+    ^{:line 43} [abi "internal/abi"]
+    ^{:line 44} [sync "sync"]
+    ^{:line 45} [atomic "sync/atomic"]])
+
+
+;; An Addr is an argument to an instruction.
+;; The general forms and their encodings are:
+;;
+;;	sym±offset(symkind)(reg)(index*scale)
+;;		Memory reference at address &sym(symkind) + offset + reg + index*scale.
+;;		Any of sym(symkind), ±offset, (reg), (index*scale), and *scale can be omitted.
+;;		If (reg) and *scale are both omitted, the resulting expression (index) is parsed as (reg).
+;;		To force a parsing as index*scale, write (index*1).
+;;		Encoding:
+;;			type = TYPE_MEM
+;;			name = symkind (NAME_AUTO, ...) or 0 (NAME_NONE)
+;;			sym = sym
+;;			offset = ±offset
+;;			reg = reg (REG_*)
+;;			index = index (REG_*)
+;;			scale = scale (1, 2, 4, 8)
+;;
+;;	$<mem>
+;;		Effective address of memory reference <mem>, defined above.
+;;		Encoding: same as memory reference, but type = TYPE_ADDR.
+;;
+;;	$<±integer value>
+;;		This is a special case of $<mem>, in which only ±offset is present.
+;;		It has a separate type for easy recognition.
+;;		Encoding:
+;;			type = TYPE_CONST
+;;			offset = ±integer value
+;;
+;;	*<mem>
+;;		Indirect reference through memory reference <mem>, defined above.
+;;		Only used on x86 for CALL/JMP *sym(SB), which calls/jumps to a function
+;;		pointer stored in the data word sym(SB), not a function named sym(SB).
+;;		Encoding: same as above, but type = TYPE_INDIR.
+;;
+;;	$*$<mem>
+;;		No longer used.
+;;		On machines with actual SB registers, $*$<mem> forced the
+;;		instruction encoding to use a full 32-bit constant, never a
+;;		reference relative to SB.
+;;
+;;	$<floating point literal>
+;;		Floating point constant value.
+;;		Encoding:
+;;			type = TYPE_FCONST
+;;			val = floating point value
+;;
+;;	$<string literal, up to 8 chars>
+;;		String literal value (raw bytes used for DATA instruction).
+;;		Encoding:
+;;			type = TYPE_SCONST
+;;			val = string
+;;
+;;	<symbolic constant name>
+;;		Special symbolic constants for ARM64 (such as conditional flags, tlbi_op and so on)
+;;		and RISCV64 (such as names for vector configuration instruction arguments and CSRs).
+;;		Encoding:
+;;			type = TYPE_SPECIAL
+;;			offset = The constant value corresponding to this symbol
+;;
+;;	<register name>
+;;		Any register: integer, floating point, control, segment, and so on.
+;;		If looking for specific register kind, must check type and reg value range.
+;;		Encoding:
+;;			type = TYPE_REG
+;;			reg = reg (REG_*)
+;;
+;;	x(PC)
+;;		Encoding:
+;;			type = TYPE_BRANCH
+;;			val = Prog* reference OR ELSE offset = target pc (branch takes priority)
+;;
+;;	$±x-±y
+;;		Final argument to TEXT, specifying local frame size x and argument size y.
+;;		In this form, x and y are integer literals only, not arbitrary expressions.
+;;		This avoids parsing ambiguities due to the use of - as a separator.
+;;		The ± are optional.
+;;		If the final argument to TEXT omits the -±y, the encoding should still
+;;		use TYPE_TEXTSIZE (not TYPE_CONST), with u.argsize = ArgsSizeUnknown.
+;;		Encoding:
+;;			type = TYPE_TEXTSIZE
+;;			offset = x
+;;			val = int32(y)
+;;
+;;	reg<<shift, reg>>shift, reg->shift, reg@>shift
+;;		Shifted register value, for ARM and ARM64.
+;;		In this form, reg must be a register and shift can be a register or an integer constant.
+;;		Encoding:
+;;			type = TYPE_SHIFT
+;;		On ARM:
+;;			offset = (reg&15) | shifttype<<5 | count
+;;			shifttype = 0, 1, 2, 3 for <<, >>, ->, @>
+;;			count = (reg&15)<<8 | 1<<4 for a register shift count, (n&31)<<7 for an integer constant.
+;;		On ARM64:
+;;			offset = (reg&31)<<16 | shifttype<<22 | (count&63)<<10
+;;			shifttype = 0, 1, 2 for <<, >>, ->
+;;
+;;	(reg, reg)
+;;		A destination register pair. When used as the last argument of an instruction,
+;;		this form makes clear that both registers are destinations.
+;;		Encoding:
+;;			type = TYPE_REGREG
+;;			reg = first register
+;;			offset = second register
+;;
+;;	[reg, reg, reg-reg]
+;;		Register list for ARM, ARM64, 386/AMD64.
+;;		Encoding:
+;;			type = TYPE_REGLIST
+;;		On ARM:
+;;			offset = bit mask of registers in list; R0 is low bit.
+;;		On ARM64:
+;;			offset = register count (Q:size) | arrangement (opcode) | first register
+;;		On 386/AMD64:
+;;			reg = range low register
+;;			offset = 2 packed registers + kind tag (see x86.EncodeRegisterRange)
+;;
+;;	reg, reg
+;;		Register pair for ARM.
+;;		TYPE_REGREG2
+;;
+;;	(reg+reg)
+;;		Register pair for PPC64.
+;;		Encoding:
+;;			type = TYPE_MEM
+;;			reg = first register
+;;			index = second register
+;;			scale = 1
+;;
+;;	reg.[US]XT[BHWX]
+;;		Register extension for ARM64
+;;		Encoding:
+;;			type = TYPE_REG
+;;			reg = REG_[US]XT[BHWX] + register + shift amount
+;;			offset = ((reg&31) << 16) | (exttype << 13) | (amount<<10)
+;;
+;;	reg.<T>
+;;		Register arrangement for ARM64 and Loong64 SIMD register
+;;		e.g.:
+;;			On ARM64: V1.S4, V2.S2, V7.D2, V2.H4, V6.B16
+;;			On Loong64: X1.B32, X1.H16, X1.W8, X2.V4, X1.Q1, V1.B16, V1.H8, V1.W4, V1.V2
+;;		Encoding:
+;;			type = TYPE_REG
+;;			reg = REG_ARNG + register + arrangement
+;;
+;;	reg.<T>[index]
+;;		Register element for ARM64 and Loong64
+;;		Encoding:
+;;			type = TYPE_REG
+;;			reg = REG_ELEM + register + arrangement
+;;			index = element index
+
+(go/type Addr (struct
+    ^{:line 200 :tag int16} Reg
+    ^{:line 201 :tag int16} Index
+    ^{:line 202 :tag int16} Scale ; Sometimes holds a register.
+    ^{:line 203 :tag AddrType} Type
+    ^{:line 204 :tag AddrName} Name
+    ^{:line 205 :tag int8} Class
+    ^{:line 206 :tag int64} Offset
+    ^{:line 207 :tag (* LSym)} Sym
+
+
+
+
+
+
+    ^{:line 214 :tag any :doc "argument value:\n\tfor TYPE_SCONST, a string\n\tfor TYPE_FCONST, a float64\n\tfor TYPE_BRANCH, a *Prog (optional)\n\tfor TYPE_TEXTSIZE, an int32 (optional)\n"} Val))
+
+
+(go/type AddrName int8)
+
+(go/const
+  ^{:line 220} [^{:tag AddrName :val 0} NAME_NONE iota]
+  ^{:line 221} [^{:val 1} NAME_EXTERN]
+  ^{:line 222} [^{:val 2} NAME_STATIC]
+  ^{:line 223} [^{:val 3} NAME_AUTO]
+  ^{:line 224} [^{:val 4} NAME_PARAM]
+
+
+  ^{:line 227} [^{:val 5 :doc "A reference to name@GOT(SB) is a reference to the entry in the global offset\ntable for 'name'.\n"} NAME_GOTREF]
+
+  ^{:line 229} [^{:val 6 :doc "Indicates that this is a reference to a TOC anchor.\n"} NAME_TOCREF])
+
+
+(go/directive "//go:generate stringer -type AddrType")
+
+(go/type AddrType uint8)
+
+(go/const
+  ^{:line 237} [^{:tag AddrType :val 0} TYPE_NONE iota]
+  ^{:line 238} [^{:val 1} TYPE_BRANCH]
+  ^{:line 239} [^{:val 2} TYPE_TEXTSIZE]
+  ^{:line 240} [^{:val 3} TYPE_MEM]
+  ^{:line 241} [^{:val 4} TYPE_CONST]
+  ^{:line 242} [^{:val 5} TYPE_FCONST]
+  ^{:line 243} [^{:val 6} TYPE_SCONST]
+  ^{:line 244} [^{:val 7} TYPE_REG]
+  ^{:line 245} [^{:val 8} TYPE_ADDR]
+  ^{:line 246} [^{:val 9} TYPE_SHIFT]
+  ^{:line 247} [^{:val 10} TYPE_REGREG]
+  ^{:line 248} [^{:val 11} TYPE_REGREG2]
+  ^{:line 249} [^{:val 12} TYPE_INDIR]
+  ^{:line 250} [^{:val 13} TYPE_REGLIST]
+  ^{:line 251} [^{:val 14} TYPE_SPECIAL])
+
+
+^{:go/breaks [[4 258]] :go/end 259} (go/method Target ^{:tag (* Prog)} [^{:tag (* Addr)} a]
+  (when (and (== (.-Type a) TYPE_BRANCH) (!= (.-Val a) nil))
+    (return (assert (* Prog) (.-Val a))))
+
+  nil)
+
+^{:go/end 265} (go/method SetTarget [^{:tag (* Addr)} a ^{:tag (* Prog)} t]
+  (when (!= (.-Type a) TYPE_BRANCH)
+    (panic "setting branch target when type is not TYPE_BRANCH"))
+
+  (set! (.-Val a) t))
+
+
+^{:go/end 271} (go/method SetConst [^{:tag (* Addr)} a ^int64 v]
+  (set! (.-Sym a) nil)
+  (set! (.-Type a) TYPE_CONST)
+  (set! (.-Offset a) v))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+(go/type Prog "Prog describes a single machine instruction.\n\nThe general instruction form is:\n\n\t(1) As.Scond From [, ...RestArgs], To\n\t(2) As.Scond From, Reg [, ...RestArgs], To, RegTo2\n\nwhere As is an opcode and the others are arguments:\nFrom, Reg are sources, and To, RegTo2 are destinations.\nRestArgs can hold additional sources and destinations.\nUsually, not all arguments are present.\nFor example, MOVL R1, R2 encodes using only As=MOVL, From=R1, To=R2.\nThe Scond field holds additional condition bits for systems (like arm)\nthat have generalized conditional execution.\n(2) form is present for compatibility with older code,\nto avoid too much changes in a single swing.\n(1) scheme is enough to express any kind of operand combination.\n\nJump instructions use the To.Val field to point to the target *Prog,\nwhich must be in the same linked list as the jump instruction.\n\nThe Progs for a given function are arranged in a list linked through the Link field.\n\nEach Prog is charged to a specific source line in the debug information,\nspecified by Pos.Line().\nEvery Prog has a Ctxt field that defines its context.\nFor performance reasons, Progs are usually bulk allocated, cached, and reused;\nthose bulk allocators should always be used, rather than new(Prog).\n\nThe other fields not yet mentioned are for use by the back ends and should\nbe left zeroed by creators of Prog lists.\n" (struct
+    ^{:line 305 :tag (* Link)} Ctxt ; linker context
+    ^{:line 306 :tag (* Prog)} Link ; next Prog in linked list
+    ^{:line 307 :tag Addr} From ; first source operand
+    ^{:line 308 :tag (slice AddrPos)} RestArgs ; can pack any operands that not fit into {Prog.From, Prog.To}, same kinds of operands are saved in order
+    ^{:line 309 :tag Addr} To ; destination operand (second is RegTo2 below)
+    ^{:line 310 :tag (* Prog)} Pool ; constant pool entry, for arm,arm64 back ends
+    ^{:line 311 :tag (* Prog)} Forwd ; for x86 back end
+    ^{:line 312 :tag (* Prog)} Rel ; for x86, arm back ends
+    ^{:line 313 :tag int64} Pc ; for back ends or assembler: virtual or actual program counter, depending on phase
+    ^{:line 314 :tag src/XPos} Pos ; source position of this instruction
+    ^{:line 315 :tag int32} Spadj ; effect of instruction on stack pointer (increment or decrement amount)
+    ^{:line 316 :tag As} As ; assembler opcode
+    ^{:line 317 :tag int16} Reg ; 2nd source operand
+    ^{:line 318 :tag int16} RegTo2 ; 2nd destination operand
+    ^{:line 319 :tag uint16} Mark ; bitmask of arch-specific items
+    ^{:line 320 :tag uint16} Optab ; arch-specific opcode index
+    ^{:line 321 :tag uint8} Scond ; bits that describe instruction suffixes (e.g. ARM conditions, RISCV Rounding Mode)
+    ^{:line 322 :tag uint8} Back ; for x86 back end: backwards branch state
+    ^{:line 323 :tag uint8} Ft ; for x86 back end: type index of Prog.From
+    ^{:line 324 :tag uint8} Tt ; for x86 back end: type index of Prog.To
+    ^{:line 325 :tag uint8} Isize)) ; for x86 back end: size of the instruction in bytes
+
+
+
+(go/type AddrPos "AddrPos indicates whether the operand is the source or the destination.\n" (struct
+    ^{:line 330} Addr
+    ^{:line 331 :tag OperandPos} Pos))
+
+
+(go/type OperandPos int8)
+
+(go/const
+  ^{:line 337} [^{:tag OperandPos :val 0} Source iota]
+  ^{:line 338} [^{:val 1} Destination])
+
+
+
+
+^{:go/end 349} (go/method From3Type "From3Type returns p.GetFrom3().Type, or TYPE_NONE when\np.GetFrom3() returns nil.\n" ^AddrType [^{:tag (* Prog)} p]
+  (let [from3 (.GetFrom3 p)]
+    (when (== from3 nil)
+      (return TYPE_NONE))
+
+    (.-Type from3)))
+
+
+
+
+
+
+
+^{:go/breaks [[5 362]] :go/end 363} (go/method GetFrom3 "GetFrom3 returns second source operand (the first is Prog.From).\nThe same kinds of operands are saved in order so GetFrom3 actually\nreturn the first source operand in p.RestArgs.\nIn combination with Prog.From and Prog.To it makes common 3 operand\ncase easier to use.\n" ^{:tag (* Addr)} [^{:tag (* Prog)} p]
+  (range [i (.-RestArgs p)]
+    (when (== (.-Pos (aget (.-RestArgs p) i)) Source)
+      (return (addr (.-Addr (aget (.-RestArgs p) i))))))
+
+
+  nil)
+
+
+
+^{:go/end 368} (go/method AddRestSource "AddRestSource assigns []Args{{a, Source}} to p.RestArgs.\n" [^{:tag (* Prog)} p ^Addr a]
+  (set! (.-RestArgs p) (append (.-RestArgs p) (lit AddrPos a Source))))
+
+
+
+^{:go/end 373} (go/method AddRestSourceReg "AddRestSourceReg calls p.AddRestSource with a register Addr containing reg.\n" [^{:tag (* Prog)} p ^int16 reg]
+  (.AddRestSource p (lit Addr :Type TYPE_REG :Reg reg)))
+
+
+
+^{:go/end 378} (go/method AddRestSourceConst "AddRestSourceConst calls p.AddRestSource with a const Addr containing off.\n" [^{:tag (* Prog)} p ^int64 off]
+  (.AddRestSource p (lit Addr :Type TYPE_CONST :Offset off)))
+
+
+
+
+^{:go/end 384} (go/method AddRestDest "AddRestDest assigns []Args{{a, Destination}} to p.RestArgs when the second destination\noperand does not fit into prog.RegTo2.\n" [^{:tag (* Prog)} p ^Addr a]
+  (set! (.-RestArgs p) (append (.-RestArgs p) (lit AddrPos a Destination))))
+
+
+
+
+
+^{:go/breaks [[5 395]] :go/end 396} (go/method GetTo2 "GetTo2 returns the second destination operand.\nThe same kinds of operands are saved in order so GetTo2 actually\nreturn the first destination operand in Prog.RestArgs[]\n" ^{:tag (* Addr)} [^{:tag (* Prog)} p]
+  (range [i (.-RestArgs p)]
+    (when (== (.-Pos (aget (.-RestArgs p) i)) Destination)
+      (return (addr (.-Addr (aget (.-RestArgs p) i))))))
+
+
+  nil)
+
+
+
+^{:go/end 403} (go/method AddRestSourceArgs "AddRestSourceArgs assigns more than one source operands to p.RestArgs.\n" [^{:tag (* Prog)} p ^{:tag (slice Addr)} args]
+  (range [i args]
+    (set! (.-RestArgs p) (append (.-RestArgs p) (lit AddrPos (aget args i) Source)))))
+
+
+
+
+
+
+
+
+(go/type As "An As denotes an assembler opcode.\nThere are some portable opcodes, declared here in package obj,\nthat are common to all architectures.\nHowever, the majority of opcodes are arch-specific\nand are declared in their respective architecture's subpackage.\n" int16)
+
+
+(go/const "These are the portable opcodes.\n"
+  ^{:line 414} [^{:tag As :val 0} AXXX iota]
+  ^{:line 415} [^{:val 1} ACALL]
+  ^{:line 416} [^{:val 2} ADUFFCOPY]
+  ^{:line 417} [^{:val 3} ADUFFZERO]
+  ^{:line 418} [^{:val 4} AEND]
+  ^{:line 419} [^{:val 5} AFUNCDATA]
+  ^{:line 420} [^{:val 6} AJMP]
+  ^{:line 421} [^{:val 7} ANOP]
+  ^{:line 422} [^{:val 8} APCALIGN]
+  ^{:line 423} [^{:val 9} APCALIGNMAX] ; currently x86, amd64 and arm64
+  ^{:line 424} [^{:val 10} APCDATA]
+  ^{:line 425} [^{:val 11} ARET]
+  ^{:line 426} [^{:val 12} AGETCALLERPC]
+  ^{:line 427} [^{:val 13} ATEXT]
+  ^{:line 428} [^{:val 14} AUNDEF]
+  ^{:line 429} [^{:val 15} A_ARCHSPECIFIC])
+
+
+
+
+
+
+
+
+
+(go/const "Each architecture is allotted a distinct subspace of opcode values\nfor declaring its arch-specific opcodes.\nWithin this subspace, the first arch-specific opcode should be\nat offset A_ARCHSPECIFIC.\n\nSubspaces are aligned to a power of two so opcodes can be masked\nwith AMask and used as compact array indices.\n"
+  ^{:line 440} [^{:val 2048} ABase386 (<< (+ 1 iota) 11)]
+  ^{:line 441} [^{:val 4096} ABaseARM]
+  ^{:line 442} [^{:val 6144} ABaseAMD64]
+  ^{:line 443} [^{:val 8192} ABasePPC64]
+  ^{:line 444} [^{:val 10240} ABaseARM64]
+  ^{:line 445} [^{:val 12288} ABaseMIPS]
+  ^{:line 446} [^{:val 14336} ABaseLoong64]
+  ^{:line 447} [^{:val 16384} ABaseRISCV]
+  ^{:line 448} [^{:val 18432} ABaseS390X]
+  ^{:line 449} [^{:val 20480} ABaseWasm]
+
+  ^{:line 451} [^{:val 2048} AllowedOpCodes (<< 1 11)] ; The number of opcodes available for any given architecture.
+  ^{:line 452} [^{:val 2047} AMask (- AllowedOpCodes 1)]) ; AND with this to use the opcode as an array index.
+
+
+
+
+(go/type LSym "An LSym is the sort of symbol that is written to an object file.\nIt represents Go symbols in a flat pkg+\".\"+name namespace.\n" (struct
+    ^{:line 458 :tag string} Name
+    ^{:line 459} Attribute
+    ^{:line 460 :tag objabi/SymKind} Type
+
+    ^{:line 462 :tag int16} Align
+    ^{:line 463 :tag int64} Size
+    ^{:line 464 :tag (* LSym)} Gotype
+    ^{:line 465 :tag (slice byte)} P
+    ^{:line 466 :tag (slice Reloc)} R
+
+    ^{:line 468 :tag (* any)} Extra ; *FuncInfo, *VarInfo, *FileInfo, *TypeInfo, or *ItabInfo, if present
+
+    ^{:line 470 :tag string} Pkg
+    ^{:line 471 :tag int32} PkgIdx
+    ^{:line 472 :tag int32} SymIdx))
+
+
+
+(go/type FuncInfo "A FuncInfo contains extra fields for STEXT symbols.\n" (struct
+    ^{:line 477 :tag int32} Args
+    ^{:line 478 :tag int32} Locals
+    ^{:line 479 :tag abi/FuncID} FuncID
+    ^{:line 480 :tag abi/FuncFlag} FuncFlag
+    ^{:line 481 :tag int32} StartLine
+    ^{:line 482 :tag (* Prog)} Text
+    ^{:line 483 :tag (map (* LSym) (struct))} Autot
+    ^{:line 484 :tag Pcln} Pcln
+    ^{:line 485 :tag (slice InlMark)} InlMarks
+    ^{:line 486 :tag (slice RegSpill)} spills
+
+    ^{:line 488 :tag (* LSym)} dwarfInfoSym
+    ^{:line 489 :tag (* LSym)} dwarfLocSym
+    ^{:line 490 :tag (* LSym)} dwarfRangesSym
+    ^{:line 491 :tag (* LSym)} dwarfAbsFnSym
+    ^{:line 492 :tag (* LSym)} dwarfDebugLinesSym
+
+    ^{:line 494 :tag (* LSym)} GCArgs
+    ^{:line 495 :tag (* LSym)} GCLocals
+    ^{:line 496 :tag (* LSym)} StackObjects
+    ^{:line 497 :tag (* LSym)} OpenCodedDeferInfo
+    ^{:line 498 :tag (* LSym)} ArgInfo ; argument info for traceback
+    ^{:line 499 :tag (* LSym)} ArgLiveInfo ; argument liveness info for traceback
+    ^{:line 500 :tag (* LSym)} WrapInfo ; for wrapper, info of wrapped function
+    ^{:line 501 :tag (slice JumpTable)} JumpTables
+
+    ^{:line 503 :tag (* LSym)} FuncInfoSym
+
+    ^{:line 505 :tag (* WasmImport)} WasmImport
+    ^{:line 506 :tag (* WasmExport)} WasmExport
+
+    ^{:line 508 :tag (* LSym)} sehUnwindInfoSym))
+
+
+
+
+
+
+(go/type JumpTable "JumpTable represents a table used for implementing multi-way\ncomputed branching, used typically for implementing switches.\nSym is the table itself, and Targets is a list of target\ninstructions to go to for the computed branch index.\n" (struct
+    ^{:line 516 :tag (* LSym)} Sym
+    ^{:line 517 :tag (slice (* Prog))} Targets))
+
+
+
+^{:go/end 529} (go/method NewFuncInfo "NewFuncInfo allocates and returns a FuncInfo for LSym.\n" ^{:tag (* FuncInfo)} [^{:tag (* LSym)} s]
+  (when (!= (.-Extra s) nil)
+    (panic (fmt/Sprintf "invalid use of LSym - NewFuncInfo with Extra of type %T" @(.-Extra s))))
+
+  (let [f (new FuncInfo)]
+    (set! (.-Extra s) (new any))
+    (set! @(.-Extra s) f)
+    ^{:line 528} f))
+
+
+
+^{:go/end 538} (go/method Func "Func returns the *FuncInfo associated with s, or else nil.\n" ^{:tag (* FuncInfo)} [^{:tag (* LSym)} s]
+  (when (== (.-Extra s) nil)
+    (return nil))
+
+  (let [(values f _) (assert (* FuncInfo) @(.-Extra s))]
+    ^{:line 537} f))
+
+
+(go/type VarInfo (struct
+    ^{:line 541 :tag (* LSym)} dwarfInfoSym))
+
+
+
+^{:go/end 553} (go/method NewVarInfo "NewVarInfo allocates and returns a VarInfo for LSym.\n" ^{:tag (* VarInfo)} [^{:tag (* LSym)} s]
+  (when (!= (.-Extra s) nil)
+    (panic (fmt/Sprintf "invalid use of LSym - NewVarInfo with Extra of type %T" @(.-Extra s))))
+
+  (let [f (new VarInfo)]
+    (set! (.-Extra s) (new any))
+    (set! @(.-Extra s) f)
+    ^{:line 552} f))
+
+
+
+^{:go/end 562} (go/method VarInfo "VarInfo returns the *VarInfo associated with s, or else nil.\n" ^{:tag (* VarInfo)} [^{:tag (* LSym)} s]
+  (when (== (.-Extra s) nil)
+    (return nil))
+
+  (let [(values f _) (assert (* VarInfo) @(.-Extra s))]
+    ^{:line 561} f))
+
+
+
+
+(go/type FileInfo "A FileInfo contains extra fields for SDATA symbols backed by files.\n(If LSym.Extra is a *FileInfo, LSym.P == nil.)\n" (struct
+    ^{:line 567 :tag string} Name ; name of file to read into object file
+    ^{:line 568 :tag int64} Size)) ; length of file
+
+
+
+^{:go/end 580} (go/method NewFileInfo "NewFileInfo allocates and returns a FileInfo for LSym.\n" ^{:tag (* FileInfo)} [^{:tag (* LSym)} s]
+  (when (!= (.-Extra s) nil)
+    (panic (fmt/Sprintf "invalid use of LSym - NewFileInfo with Extra of type %T" @(.-Extra s))))
+
+  (let [f (new FileInfo)]
+    (set! (.-Extra s) (new any))
+    (set! @(.-Extra s) f)
+    ^{:line 579} f))
+
+
+
+^{:go/end 589} (go/method File "File returns the *FileInfo associated with s, or else nil.\n" ^{:tag (* FileInfo)} [^{:tag (* LSym)} s]
+  (when (== (.-Extra s) nil)
+    (return nil))
+
+  (let [(values f _) (assert (* FileInfo) @(.-Extra s))]
+    ^{:line 588} f))
+
+
+
+
+(go/type TypeInfo "A TypeInfo contains information for a symbol\nthat contains a runtime._type.\n" (struct
+    ^{:line 594 :tag any} Type)) ; a *cmd/compile/internal/types.Type
+
+
+^{:go/end 605} (go/method NewTypeInfo ^{:tag (* TypeInfo)} [^{:tag (* LSym)} s]
+  (when (!= (.-Extra s) nil)
+    (panic (fmt/Sprintf "invalid use of LSym - NewTypeInfo with Extra of type %T" @(.-Extra s))))
+
+  (let [t (new TypeInfo)]
+    (set! (.-Extra s) (new any))
+    (set! @(.-Extra s) t)
+    ^{:line 604} t))
+
+
+
+^{:go/end 614} (go/method TypeInfo "TypeInfo returns the *TypeInfo associated with s, or else nil.\n" ^{:tag (* TypeInfo)} [^{:tag (* LSym)} s]
+  (when (== (.-Extra s) nil)
+    (return nil))
+
+  (let [(values t _) (assert (* TypeInfo) @(.-Extra s))]
+    ^{:line 613} t))
+
+
+
+
+(go/type ItabInfo "An ItabInfo contains information for a symbol\nthat contains a runtime.itab.\n" (struct
+    ^{:line 619 :tag any} Type)) ; a *cmd/compile/internal/types.Type
+
+
+^{:go/end 630} (go/method NewItabInfo ^{:tag (* ItabInfo)} [^{:tag (* LSym)} s]
+  (when (!= (.-Extra s) nil)
+    (panic (fmt/Sprintf "invalid use of LSym - NewItabInfo with Extra of type %T" @(.-Extra s))))
+
+  (let [t (new ItabInfo)]
+    (set! (.-Extra s) (new any))
+    (set! @(.-Extra s) t)
+    ^{:line 629} t))
+
+
+
+^{:go/end 639} (go/method ItabInfo "ItabInfo returns the *ItabInfo associated with s, or else nil.\n" ^{:tag (* ItabInfo)} [^{:tag (* LSym)} s]
+  (when (== (.-Extra s) nil)
+    (return nil))
+
+  (let [(values i _) (assert (* ItabInfo) @(.-Extra s))]
+    ^{:line 638} i))
+
+
+
+
+
+(go/type WasmImport "WasmImport represents a WebAssembly (WASM) imported function with\nparameters and results translated into WASM types based on the Go function\ndeclaration.\n" (struct
+
+
+    ^{:line 647 :tag string :doc "Module holds the WASM module name specified by the //go:wasmimport\ndirective.\n"} Module
+
+
+    ^{:line 650 :tag string :doc "Name holds the WASM imported function name specified by the\n//go:wasmimport directive.\n"} Name
+
+    ^{:line 652} WasmFuncType ; type of the imported function
+
+
+
+    ^{:line 656 :tag (* LSym) :doc "aux symbol to pass metadata to the linker, serialization of\nthe fields above.\n"} AuxSym))
+
+
+^{:go/end 668} (go/method CreateAuxSym [^{:tag (* WasmImport)} wi]
+  (let [^bytes/Buffer b (zero bytes/Buffer)]
+    (.Write wi (addr b))
+    (let [p (.Bytes b)]
+      (set! (.-AuxSym wi) (addr ^{:go/breaks [2 4 6]} (lit LSym
+            :Type objabi/SDATA ; doesn't really matter
+            :P (append (conv (slice byte) nil) (spread p))
+            :Size (conv int64 (len p))))))))
+
+
+
+^{:go/end 683} (go/method Write [^{:tag (* WasmImport)} wi ^{:tag (* bytes/Buffer)} w]
+  (let [^{:tag (array 8 byte)} b (zero (array 8 byte))
+      ^{:line 672} writeUint32 ^{:go/end 675} (fn [^uint32 x]
+        (.PutUint32 binary/LittleEndian (subslice b) x)
+        (.Write w (subslice b _ 4)))
+
+      ^{:line 676} writeString ^{:go/end 679} (fn [^string s]
+        (writeUint32 (conv uint32 (len s)))
+        (.WriteString w s))]
+
+    (writeString (.-Module wi))
+    (writeString (.-Name wi))
+    (.Write (.-WasmFuncType wi) w)))
+
+
+^{:go/end 700} (go/method Read [^{:tag (* WasmImport)} wi ^{:tag (slice byte)} b]
+  (let [readUint32 ^{:go/end 690} (fn ^uint32 []
+        (let [x (.Uint32 binary/LittleEndian b)]
+          (set! b (subslice b 4))
+          ^{:line 689} x))
+
+      ^{:line 691} readString ^{:go/end 696} (fn ^string []
+        (let [n (readUint32)
+            ^{:line 693} s (conv string (subslice b _ n))]
+          (set! b (subslice b n))
+          ^{:line 695} s))]
+
+    (set! (.-Module wi) (readString))
+    (set! (.-Name wi) (readString))
+    (.Read (.-WasmFuncType wi) b)))
+
+
+
+
+
+(go/type WasmFuncType "WasmFuncType represents a WebAssembly (WASM) function type with\nparameters and results translated into WASM types based on the Go function\ndeclaration.\n" (struct
+
+    ^{:line 707 :tag (slice WasmField) :doc "Params holds the function parameter fields.\n"} Params
+
+    ^{:line 709 :tag (slice WasmField) :doc "Results holds the function result fields.\n"} Results))
+
+
+^{:go/end 735} (go/method Write [^{:tag (* WasmFuncType)} ft ^{:tag (* bytes/Buffer)} w]
+  (let [^{:tag (array 8 byte)} b (zero (array 8 byte))
+      ^{:line 714} writeByte ^{:go/end 716} (fn [^byte x]
+        (.WriteByte w x))
+
+      ^{:line 717} writeUint32 ^{:go/end 720} (fn [^uint32 x]
+        (.PutUint32 binary/LittleEndian (subslice b) x)
+        (.Write w (subslice b _ 4)))
+
+      ^{:line 721} writeInt64 ^{:go/end 724} (fn [^int64 x]
+        (.PutUint64 binary/LittleEndian (subslice b) (conv uint64 x))
+        (.Write w (subslice b)))]
+
+    (writeUint32 (conv uint32 (len (.-Params ft))))
+    (range [_ f (.-Params ft)]
+      (writeByte (conv byte (.-Type f)))
+      (writeInt64 (.-Offset f)))
+
+    (writeUint32 (conv uint32 (len (.-Results ft))))
+    (range [_ f (.-Results ft)]
+      (writeByte (conv byte (.-Type f)))
+      (writeInt64 (.-Offset f)))))
+
+
+
+^{:go/end 763} (go/method Read [^{:tag (* WasmFuncType)} ft ^{:tag (slice byte)} b]
+  (let [readByte ^{:go/end 742} (fn ^byte []
+        (let [x (aget b 0)]
+          (set! b (subslice b 1))
+          ^{:line 741} x))
+
+      ^{:line 743} readUint32 ^{:go/end 747} (fn ^uint32 []
+        (let [x (.Uint32 binary/LittleEndian b)]
+          (set! b (subslice b 4))
+          ^{:line 746} x))
+
+      ^{:line 748} readInt64 ^{:go/end 752} (fn ^int64 []
+        (let [x (.Uint64 binary/LittleEndian b)]
+          (set! b (subslice b 8))
+          (conv int64 x)))]
+
+    (set! (.-Params ft) (make (slice WasmField) (readUint32)))
+    (range [i (.-Params ft)]
+      (set! (.-Type (aget (.-Params ft) i)) (conv WasmFieldType (readByte)))
+      (set! (.-Offset (aget (.-Params ft) i)) (readInt64)))
+
+    (set! (.-Results ft) (make (slice WasmField) (readUint32)))
+    (range [i (.-Results ft)]
+      (set! (.-Type (aget (.-Results ft) i)) (conv WasmFieldType (readByte)))
+      (set! (.-Offset (aget (.-Results ft) i)) (readInt64)))))
+
+
+
+
+
+
+(go/type WasmExport "WasmExport represents a WebAssembly (WASM) exported function with\nparameters and results translated into WASM types based on the Go function\ndeclaration.\n" (struct
+    ^{:line 769} WasmFuncType
+
+    ^{:line 771 :tag (* LSym)} WrappedSym ; the wrapped Go function
+    ^{:line 772 :tag (* LSym)} AuxSym)) ; aux symbol to pass metadata to the linker
+
+
+^{:go/end 784} (go/method CreateAuxSym [^{:tag (* WasmExport)} we]
+  (let [^bytes/Buffer b (zero bytes/Buffer)]
+    (.Write (.-WasmFuncType we) (addr b))
+    (let [p (.Bytes b)]
+      (set! (.-AuxSym we) (addr ^{:go/breaks [2 4 6]} (lit LSym
+            :Type objabi/SDATA ; doesn't really matter
+            :P (append (conv (slice byte) nil) (spread p))
+            :Size (conv int64 (len p))))))))
+
+
+
+(go/type WasmField (struct
+    ^{:line 787 :tag WasmFieldType} Type
+
+
+
+    ^{:line 791 :tag int64 :doc "Offset holds the frame-pointer-relative locations for Go's stack-based\nABI. This is used by the src/cmd/internal/wasm package to map WASM\nimport parameters to the Go stack in a wrapper function.\n"} Offset))
+
+
+(go/type WasmFieldType byte)
+
+(go/const
+  ^{:line 797} [^{:tag WasmFieldType :val 0} WasmI32 iota]
+  ^{:line 798} [^{:val 1} WasmI64]
+  ^{:line 799} [^{:val 2} WasmF32]
+  ^{:line 800} [^{:val 3} WasmF64]
+  ^{:line 801} [^{:val 4} WasmPtr]
+  ^{:line 802} [^{:val 5} WasmV128]
+
+
+
+  ^{:line 806} [^{:val 6 :doc "bool is not really a wasm type, but we allow it on wasmimport/wasmexport\nfunction parameters/results. 32-bit on Wasm side, 8-bit on Go side.\n"} WasmBool])
+
+
+(go/type InlMark (struct
+
+
+
+
+    ^{:line 814 :tag (* Prog) :doc "When unwinding from an instruction in an inlined body, mark\nwhere we should unwind to.\nid records the global inlining id of the inlined body.\np records the location of an instruction in the parent (inliner) frame.\n"} p
+    ^{:line 815 :tag int32} id))
+
+
+
+
+
+
+^{:go/end 824} (go/method AddInlMark "Mark p as the instruction to set as the pc when\n\"unwinding\" the inlining global frame id. Usually it should be\ninstruction with a file:line at the callsite, and occur\njust before the body of the inlined function.\n" [^{:tag (* FuncInfo)} fi ^{:tag (* Prog)} p ^int32 id]
+  (set! (.-InlMarks fi) (append (.-InlMarks fi) (lit InlMark :p p :id id))))
+
+
+
+^{:go/end 829} (go/method AddSpill "AddSpill appends a spill record to the list for FuncInfo fi\n" [^{:tag (* FuncInfo)} fi ^RegSpill s]
+  (set! (.-spills fi) (append (.-spills fi) s)))
+
+
+
+
+^{:go/end 838} (go/method RecordAutoType "Record the type symbol for an auto variable so that the linker\nan emit DWARF type information for the type.\n" [^{:tag (* FuncInfo)} fi ^{:tag (* LSym)} gotype]
+  (when (== (.-Autot fi) nil)
+    (set! (.-Autot fi) (make (map (* LSym) (struct)))))
+
+  (aset (.-Autot fi) gotype (lit (struct))))
+
+
+(go/directive "//go:generate stringer -type ABI")
+
+
+(go/type ABI "ABI is the calling convention of a text symbol.\n" uint8)
+
+(go/const
+
+
+
+
+
+  ^{:line 851} [^{:tag ABI :val 0 :doc "ABI0 is the stable stack-based ABI. It's important that the\nvalue of this is \"0\": we can't distinguish between\nreferences to data and ABI0 text symbols in assembly code,\nand hence this doesn't distinguish between symbols without\nan ABI and text symbols with ABI0.\n"} ABI0 iota]
+
+
+
+
+
+  ^{:line 857} [^{:val 1 :doc "ABIInternal is the internal ABI that may change between Go\nversions. All Go functions use the internal ABI and the\ncompiler generates wrappers for calls to and from other\nABIs.\n"} ABIInternal]
+
+  ^{:line 859} [^{:val 2} ABICount])
+
+
+
+
+
+^{:go/end 874} (go/func ParseABI "ParseABI converts from a string representation in 'abistr' to the\ncorresponding ABI value. Second return value is TRUE if the\nabi string is recognized, FALSE otherwise.\n" [^string abistr] :results [ABI bool]
+  (switch abistr
+    (default
+      (return ABI0 false))
+    (case ["ABI0"]
+      (return ABI0 true))
+    (case ["ABIInternal"]
+      (return ABIInternal true))))
+
+
+
+
+(go/type ABISet "ABISet is a bit set of ABI values.\n" uint8)
+
+(go/const
+
+
+  ^{:line 882} [^{:tag ABISet :val 3 :doc "ABISetCallable is the set of all ABIs any function could\npotentially be called using.\n"} ABISetCallable (bit-or (<< 1 ABI0) (<< 1 ABIInternal))])
+
+
+
+(go/var ^{:tag ABISet :doc "Ensure ABISet is big enough to hold all ABIs.\n"} _ (<< 1 (- ABICount 1)))
+
+^{:go/end 890} (go/func ABISetOf ^ABISet [^ABI abi]
+  ^ABISet (<< 1 abi))
+
+
+^{:go/end 898} (go/method Set [^{:tag (* ABISet)} a ^ABI abi ^bool value]
+  (if value
+    (set! @a bit-or ^ABISet (<< 1 abi))
+
+    (set! @a bit-and-not ^ABISet (<< 1 abi))))
+
+
+
+^{:go/end 902} (go/method Get ^bool [^{:tag (* ABISet)} a ^ABI abi]
+  (!= (bit-and (>> @a abi) 1) 0))
+
+
+^{:go/end 916} (go/method String ^string [^ABISet a]
+  (let [s "{"]
+    (for [i (conv ABI 0)] (!= a 0) (inc! i)
+      (when (!= (bit-and a ^ABISet (<< 1 i)) 0)
+        (when (!= s "{")
+          (set! s + ","))
+
+        (set! s + (.String i))
+        (set! a bit-and-not ^ABISet (<< 1 i))))
+
+
+    (+ s "}")))
+
+
+
+(go/type Attribute "Attribute is a set of symbol attributes.\n" uint32)
+
+(go/const
+  ^{:line 922} [^{:tag Attribute :val 1} AttrDuplicateOK (<< 1 iota)]
+  ^{:line 923} [^{:val 2} AttrCFunc]
+  ^{:line 924} [^{:val 4} AttrNoSplit]
+  ^{:line 925} [^{:val 8} AttrLeaf]
+  ^{:line 926} [^{:val 16} AttrWrapper]
+  ^{:line 927} [^{:val 32} AttrNeedCtxt]
+  ^{:line 928} [^{:val 64} AttrNoFrame]
+  ^{:line 929} [^{:val 128} AttrOnList]
+  ^{:line 930} [^{:val 256} AttrStatic]
+
+
+  ^{:line 933} [^{:val 512 :doc "MakeTypelink means that the type should have an entry in the typelink table.\n"} AttrMakeTypelink]
+
+
+
+
+
+
+
+  ^{:line 941} [^{:val 1024 :doc "ReflectMethod means the function may call reflect.Type.Method or\nreflect.Type.MethodByName. Matching is imprecise (as reflect.Type\ncan be used through a custom interface), so ReflectMethod may be\nset in some cases when the reflect package is not called.\n\nUsed by the linker to determine what methods can be pruned.\n"} AttrReflectMethod]
+
+
+
+
+
+
+
+  ^{:line 949} [^{:val 2048 :doc "Local means make the symbol local even when compiling Go code to reference Go\nsymbols in other shared libraries, as in this mode symbols are global by\ndefault. \"local\" here means in the sense of the dynamic linker, i.e. not\nvisible outside of the module (shared library or executable) that contains its\ndefinition. (When not compiling to support Go shared libraries, all symbols are\nlocal in this sense unless there is a cgo_export_* directive).\n"} AttrLocal]
+
+
+
+  ^{:line 953} [^{:val 4096 :doc "For function symbols; indicates that the specified function was the\ntarget of an inline during compilation\n"} AttrWasInlined]
+
+
+
+  ^{:line 957} [^{:val 8192 :doc "Indexed indicates this symbol has been assigned with an index (when using the\nnew object file format).\n"} AttrIndexed]
+
+
+
+
+
+  ^{:line 963} [^{:val 16384 :doc "Only applied on type descriptor symbols, UsedInIface indicates this type is\nconverted to an interface.\n\nUsed by the linker to determine what methods can be pruned.\n"} AttrUsedInIface]
+
+
+  ^{:line 966} [^{:val 32768 :doc "ContentAddressable indicates this is a content-addressable symbol.\n"} AttrContentAddressable]
+
+
+
+  ^{:line 970} [^{:val 65536 :doc "ABI wrapper is set for compiler-generated text symbols that\nconvert between ABI0 and ABIInternal calling conventions.\n"} AttrABIWrapper]
+
+
+  ^{:line 973} [^{:val 131072 :doc "IsPcdata indicates this is a pcdata symbol.\n"} AttrPcdata]
+
+
+  ^{:line 976} [^{:val 262144 :doc "PkgInit indicates this is a compiler-generated package init func.\n"} AttrPkgInit]
+
+
+  ^{:line 979} [^{:val 524288 :doc "Linkname indicates this is a go:linkname'd symbol.\n"} AttrLinkname]
+
+
+  ^{:line 982} [^{:val 1048576 :doc "LinknameStd indicates this is a go:linknamestd'd symbol.\n"} AttrLinknameStd]
+
+
+
+
+
+
+  ^{:line 989} [^{:val 2097152 :doc "attrABIBase is the value at which the ABI is encoded in\nAttribute. This must be last; all bits after this are\nassumed to be an ABI value.\n\nMUST BE LAST since all bits above this comprise the ABI.\n"} attrABIBase])
+
+
+^{:go/end 992} (go/method load ^Attribute [^{:tag (* Attribute)} a] (conv Attribute (atomic/LoadUint32 (conv (* uint32) a))))
+
+^{:go/end 994} (go/method DuplicateOK ^bool [^{:tag (* Attribute)} a] (!= (bit-and (.load a) AttrDuplicateOK) 0))
+^{:go/end 995} (go/method MakeTypelink ^bool [^{:tag (* Attribute)} a] (!= (bit-and (.load a) AttrMakeTypelink) 0))
+^{:go/end 996} (go/method CFunc ^bool [^{:tag (* Attribute)} a] (!= (bit-and (.load a) AttrCFunc) 0))
+^{:go/end 997} (go/method NoSplit ^bool [^{:tag (* Attribute)} a] (!= (bit-and (.load a) AttrNoSplit) 0))
+^{:go/end 998} (go/method Leaf ^bool [^{:tag (* Attribute)} a] (!= (bit-and (.load a) AttrLeaf) 0))
+^{:go/end 999} (go/method OnList ^bool [^{:tag (* Attribute)} a] (!= (bit-and (.load a) AttrOnList) 0))
+^{:go/end 1000} (go/method ReflectMethod ^bool [^{:tag (* Attribute)} a] (!= (bit-and (.load a) AttrReflectMethod) 0))
+^{:go/end 1001} (go/method Local ^bool [^{:tag (* Attribute)} a] (!= (bit-and (.load a) AttrLocal) 0))
+^{:go/end 1002} (go/method Wrapper ^bool [^{:tag (* Attribute)} a] (!= (bit-and (.load a) AttrWrapper) 0))
+^{:go/end 1003} (go/method NeedCtxt ^bool [^{:tag (* Attribute)} a] (!= (bit-and (.load a) AttrNeedCtxt) 0))
+^{:go/end 1004} (go/method NoFrame ^bool [^{:tag (* Attribute)} a] (!= (bit-and (.load a) AttrNoFrame) 0))
+^{:go/end 1005} (go/method Static ^bool [^{:tag (* Attribute)} a] (!= (bit-and (.load a) AttrStatic) 0))
+^{:go/end 1006} (go/method WasInlined ^bool [^{:tag (* Attribute)} a] (!= (bit-and (.load a) AttrWasInlined) 0))
+^{:go/end 1007} (go/method Indexed ^bool [^{:tag (* Attribute)} a] (!= (bit-and (.load a) AttrIndexed) 0))
+^{:go/end 1008} (go/method UsedInIface ^bool [^{:tag (* Attribute)} a] (!= (bit-and (.load a) AttrUsedInIface) 0))
+^{:go/end 1009} (go/method ContentAddressable ^bool [^{:tag (* Attribute)} a] (!= (bit-and (.load a) AttrContentAddressable) 0))
+^{:go/end 1010} (go/method ABIWrapper ^bool [^{:tag (* Attribute)} a] (!= (bit-and (.load a) AttrABIWrapper) 0))
+^{:go/end 1011} (go/method IsPcdata ^bool [^{:tag (* Attribute)} a] (!= (bit-and (.load a) AttrPcdata) 0))
+^{:go/end 1012} (go/method IsPkgInit ^bool [^{:tag (* Attribute)} a] (!= (bit-and (.load a) AttrPkgInit) 0))
+^{:go/end 1013} (go/method IsLinkname ^bool [^{:tag (* Attribute)} a] (!= (bit-and (.load a) AttrLinkname) 0))
+^{:go/end 1014} (go/method IsLinknameStd ^bool [^{:tag (* Attribute)} a] (!= (bit-and (.load a) AttrLinknameStd) 0))
+
+^{:go/end 1029} (go/method Set [^{:tag (* Attribute)} a ^Attribute flag ^bool value]
+  (while true
+    (let [v0 (.load a)
+        ^{:line 1019} v v0]
+      (if value
+        (set! v bit-or flag)
+
+        (set! v bit-and-not flag))
+
+      (when (atomic/CompareAndSwapUint32 (conv (* uint32) a) (conv uint32 v0) (conv uint32 v))
+        (break)))))
+
+
+
+
+^{:go/end 1031} (go/method ABI ^ABI [^{:tag (* Attribute)} a] (conv ABI (/ (.load a) attrABIBase)))
+^{:go/end 1041} (go/method SetABI [^{:tag (* Attribute)} a ^ABI abi]
+  (let [^:const ^{:val 1} mask 1] ; Only one ABI bit for now.
+    (while true
+      (let [v0 (.load a)
+          ^{:line 1036} v (bit-or (bit-and-not v0 (* mask attrABIBase)) (* (conv Attribute abi) attrABIBase))]
+        (when (atomic/CompareAndSwapUint32 (conv (* uint32) a) (conv uint32 v0) (conv uint32 v))
+          (break))))))
+
+
+
+
+(go/var textAttrStrings (lit (array ... (struct
+        ^{:line 1044 :tag Attribute} bit
+        ^{:line 1045 :tag string} s))
+
+    (lit _ :bit AttrDuplicateOK :s "DUPOK")
+    (lit _ :bit AttrMakeTypelink :s "")
+    (lit _ :bit AttrCFunc :s "CFUNC")
+    (lit _ :bit AttrNoSplit :s "NOSPLIT")
+    (lit _ :bit AttrLeaf :s "LEAF")
+    (lit _ :bit AttrOnList :s "")
+    (lit _ :bit AttrReflectMethod :s "REFLECTMETHOD")
+    (lit _ :bit AttrLocal :s "LOCAL")
+    (lit _ :bit AttrWrapper :s "WRAPPER")
+    (lit _ :bit AttrNeedCtxt :s "NEEDCTXT")
+    (lit _ :bit AttrNoFrame :s "NOFRAME")
+    (lit _ :bit AttrStatic :s "STATIC")
+    (lit _ :bit AttrWasInlined :s "")
+    (lit _ :bit AttrIndexed :s "")
+    (lit _ :bit AttrContentAddressable :s "")
+    (lit _ :bit AttrABIWrapper :s "ABIWRAPPER")
+    (lit _ :bit AttrPkgInit :s "PKGINIT")
+    (lit _ :bit AttrLinkname :s "LINKNAME")
+    (lit _ :bit AttrLinknameStd :s "LINKNAMESTD")))
+
+
+
+^{:go/end 1093} (go/method String "String formats a for printing in as part of a TEXT prog.\n" ^string [^Attribute a]
+  (let [^string s (zero string)]
+    (range [_ x textAttrStrings]
+      (when (!= (bit-and a (.-bit x)) 0)
+        (when (!= (.-s x) "")
+          (set! s + (+ (.-s x) "|")))
+
+        (set! a bit-and-not (.-bit x))))
+
+
+    (switch (.ABI a)
+      (case [ABI0])
+      (case [ABIInternal]
+        (set! s + "ABIInternal|")
+        (.SetABI a 0))) ; Clear ABI so we don't print below.
+
+    (when (!= a 0)
+      (set! s + (fmt/Sprintf "UnknownAttribute(%d)|" a)))
+
+    ;; Chop off trailing |, if present.
+    (when (> (len s) 0)
+      (set! s (subslice s _ (- (len s) 1))))
+
+    ^{:line 1092} s))
+
+
+
+^{:go/end 1105} (go/method TextAttrString "TextAttrString formats the symbol attributes for printing in as part of a TEXT prog.\n" ^string [^{:tag (* LSym)} s]
+  (let [attr (.String (.-Attribute s))]
+    (when (!= (bit-and (.-FuncFlag (.Func s)) abi/FuncFlagTopFrame) 0)
+      (when (!= attr "")
+        (set! attr + "|"))
+
+      (set! attr + "TOPFRAME"))
+
+    ^{:line 1104} attr))
+
+
+^{:go/end 1109} (go/method String ^string [^{:tag (* LSym)} s]
+  (.-Name s))
+
+
+
+^{:go/end 1112} (go/method CanBeAnSSASym "The compiler needs *LSym to be assignable to cmd/compile/internal/ssa.Sym.\n" [(* LSym)])
+^{:go/end 1113} (go/method CanBeAnSSAAux [(* LSym)])
+
+(go/type Pcln (struct
+
+    ^{:line 1117 :tag (* LSym) :doc "Aux symbols for pcln\n"} Pcsp
+    ^{:line 1118 :tag (* LSym)} Pcfile
+    ^{:line 1119 :tag (* LSym)} Pcline
+    ^{:line 1120 :tag (* LSym)} Pcinline
+    ^{:line 1121 :tag (slice (* LSym))} Pcdata
+    ^{:line 1122 :tag (slice (* LSym))} Funcdata
+    ^{:line 1123 :tag (map goobj/CUFileIndex (struct))} UsedFiles ; file indices used while generating pcfile
+    ^{:line 1124 :tag InlTree} InlTree)) ; per-function inlining tree extracted from the global tree
+
+
+(go/type Reloc (struct
+    ^{:line 1128 :tag int32} Off
+    ^{:line 1129 :tag uint8} Siz
+    ^{:line 1130 :tag objabi/RelocType} Type
+    ^{:line 1131 :tag int64} Add
+    ^{:line 1132 :tag (* LSym)} Sym))
+
+
+(go/type Auto (struct
+    ^{:line 1136 :tag (* LSym)} Asym
+    ^{:line 1137 :tag int32} Aoffset
+    ^{:line 1138 :tag AddrName} Name
+    ^{:line 1139 :tag (* LSym)} Gotype))
+
+
+
+
+
+
+
+(go/type RegSpill "RegSpill provides spill/fill information for a register-resident argument\nto a function.  These need spilling/filling in the safepoint/stackgrowth case.\nAt the time of fill/spill, the offset must be adjusted by the architecture-dependent\nadjustment to hardware SP that occurs in a call instruction.  E.g., for AMD64,\nat Offset+8 because the return address was pushed.\n" (struct
+    ^{:line 1148 :tag Addr} Addr
+    ^{:line 1149 :tag int16} Reg
+    ^{:line 1150 :tag int16} Reg2 ; If not 0, a second register to spill at Addr+regSize. Only for some archs.
+    ^{:line 1151 :tag As} Spill ^As Unspill))
+
+
+
+(go/type Func "A Func represents a Go function. If non-nil, it must be a *ir.Func.\n" (interface
+    (Pos ^src/XPos [])))
+
+
+
+
+(go/type Link "Link holds the context for writing object code from a compiler\nto be linker input or for reading that input into the linker.\n" (struct
+    ^{:line 1162 :tag objabi/HeadType} Headtype
+    ^{:line 1163 :tag (* LinkArch)} Arch
+    ^{:line 1164 :tag bool} CompressInstructions ; use compressed instructions where possible (if supported by architecture)
+    ^{:line 1165 :tag int} Debugasm
+    ^{:line 1166 :tag bool} Debugvlog
+    ^{:line 1167 :tag string} Debugpcln
+    ^{:line 1168 :tag bool} Flag_shared
+    ^{:line 1169 :tag bool} Flag_dynlink
+    ^{:line 1170 :tag bool} Flag_linkshared
+    ^{:line 1171 :tag bool} Flag_optimize
+    ^{:line 1172 :tag bool} Flag_locationlists
+    ^{:line 1173 :tag bool} Flag_noRefName ; do not include referenced symbol names in object file
+    ^{:line 1174 :tag bool} Retpoline ; emit use of retpoline stubs for indirect jmp/call
+    ^{:line 1175 :tag string} Flag_maymorestack ; If not "", call this function before stack checks
+    ^{:line 1176 :tag (* bufio/Writer)} Bso
+    ^{:line 1177 :tag string} Pathname
+    ^{:line 1178 :tag string} Pkgpath ; the current package's import path
+
+    ^{:line 1180 :tag sync/Mutex} hashmu ; protects hash, funchash
+    ^{:line 1181 :tag sync/Map} hash ; name(string) -> sym(*syncOnce) mapping
+    ^{:line 1182 :tag sync/Map} funchash ; name(string) -> sym(*syncOnce) mapping for ABIInternal syms
+    ^{:line 1183 :tag (map string (* LSym))} statichash ; name -> sym mapping for static syms
+    ^{:line 1184 :tag src/PosTable} PosTable
+    ^{:line 1185 :tag InlTree} InlTree ; global inlining tree used by gc/inl.go
+    ^{:line 1186 :tag (* DwarfFixupTable)} DwFixups
+    ^{:line 1187 :tag int} DwTextCount
+    ^{:line 1188 :tag (slice goobj/ImportedPkg)} Imports
+    ^{:line 1189 :tag (func [string & (slice any)])} DiagFunc
+    ^{:line 1190 :tag (func [])} DiagFlush
+    ^{:line 1191 :tag (func [^{:tag (* Link)} ctxt ^{:tag (* LSym)} fn ^{:tag (* LSym)} info ^Func curfn] [(slice dwarf/Scope) dwarf/InlCalls])} DebugInfo
+    ^{:line 1192 :tag (func [^{:tag (* LSym)} fn])} GenAbstractFunc
+    ^{:line 1193 :tag int} Errors
+
+    ^{:line 1195 :tag bool} InParallel ; parallel backend phase in effect
+    ^{:line 1196 :tag bool} UseBASEntries ; use Base Address Selection Entries in location lists and PC ranges
+    ^{:line 1197 :tag bool} IsAsm ; is the source assembly language, which may contain surprising idioms (e.g., call tables)
+    ^{:line 1198 :tag bool} Std ; is standard library package
+
+
+    ^{:line 1201 :tag (slice (* LSym)) :doc "state for writing objects\n"} Text
+    ^{:line 1202 :tag (slice (* LSym))} Data
+
+
+
+
+
+    ^{:line 1208 :tag (slice (* LSym)) :doc "Constant symbols (e.g. $i64.*) are data symbols created late\nin the concurrent phase. To ensure a deterministic order, we\nadd them to a separate list, sort at the end, and append it\nto Data.\n"} constSyms
+
+
+
+    ^{:line 1212 :tag (slice (* LSym)) :doc "Windows SEH symbols are also data symbols that can be created\nconcurrently.\n"} SEHSyms
+
+
+
+    ^{:line 1216 :tag (map string int32) :doc "pkgIdx maps package path to index. The index is used for\nsymbol reference in the object file.\n"} pkgIdx
+
+    ^{:line 1218 :tag (slice (* LSym))} defs ; list of defined symbols in the current package
+    ^{:line 1219 :tag (slice (* LSym))} hashed64defs ; list of defined short (64-bit or less) hashed (content-addressable) symbols
+    ^{:line 1220 :tag (slice (* LSym))} hasheddefs ; list of defined hashed (content-addressable) symbols
+    ^{:line 1221 :tag (slice (* LSym))} nonpkgdefs ; list of defined non-package symbols
+    ^{:line 1222 :tag (slice (* LSym))} nonpkgrefs ; list of referenced non-package symbols
+
+    ^{:line 1224 :tag goobj/FingerprintType} Fingerprint)) ; fingerprint of symbol indices, to catch index mismatch
+
+
+
+
+(go/type symOnce "symOnce is a \"marker\" value for our sync.Maps. We insert it on lookup and\nuse the atomic value to check whether initialization has been completed.\n" (struct
+    ^{:line 1230 :tag LSym} sym
+    ^{:line 1231 :tag atomic/Bool} inited))
+
+
+
+^{:go/end 1239} (go/func _ "Assert to vet's printf checker that Link.DiagFunc is a printf-like.\n" [^{:tag (* Link)} ctxt]
+  (set! (.-DiagFunc ctxt) ^{:go/end 1238} (fn [^string format & ^{:tag (slice any)} args]
+      (set! _ (fmt/Sprintf format (spread args))))))
+
+
+
+^{:go/end 1244} (go/method Diag [^{:tag (* Link)} ctxt ^string format & ^{:tag (slice any)} args]
+  (inc! (.-Errors ctxt))
+  ((.-DiagFunc ctxt) format (spread args)))
+
+
+^{:go/end 1249} (go/method Logf [^{:tag (* Link)} ctxt ^string format & ^{:tag (slice any)} args]
+  (fmt/Fprintf (.-Bso ctxt) format (spread args))
+  (.Flush (.-Bso ctxt)))
+
+
+
+
+^{:go/end 1268} (go/method SpillRegisterArgs "SpillRegisterArgs emits the code to spill register args into whatever\nlocations the spill records specify.\n" ^{:tag (* Prog)} [^{:tag (* FuncInfo)} fi ^{:tag (* Prog)} last ^ProgAlloc pa]
+  ;; Spill register args.
+  (range [_ ra (.-spills fi)]
+    (let [spill (Appendp last pa)]
+      (set! (.-As spill) (.-Spill ra))
+      (set! (.-Type (.-From spill)) TYPE_REG)
+      (set! (.-Reg (.-From spill)) (.-Reg ra))
+      (when (!= (.-Reg2 ra) 0)
+        (set! (.-Type (.-From spill)) TYPE_REGREG)
+        (set! (.-Offset (.-From spill)) (conv int64 (.-Reg2 ra))))
+
+      (set! (.-To spill) (.-Addr ra))
+      (set! last spill)))
+
+  ^{:line 1267} last)
+
+
+
+
+^{:go/end 1287} (go/method UnspillRegisterArgs "UnspillRegisterArgs emits the code to restore register args from whatever\nlocations the spill records specify.\n" ^{:tag (* Prog)} [^{:tag (* FuncInfo)} fi ^{:tag (* Prog)} last ^ProgAlloc pa]
+  ;; Unspill any spilled register args
+  (range [_ ra (.-spills fi)]
+    (let [unspill (Appendp last pa)]
+      (set! (.-As unspill) (.-Unspill ra))
+      (set! (.-From unspill) (.-Addr ra))
+      (set! (.-Type (.-To unspill)) TYPE_REG)
+      (set! (.-Reg (.-To unspill)) (.-Reg ra))
+      (when (!= (.-Reg2 ra) 0)
+        (set! (.-Type (.-To unspill)) TYPE_REGREG)
+        (set! (.-Offset (.-To unspill)) (conv int64 (.-Reg2 ra))))
+
+      (set! last unspill)))
+
+  ^{:line 1286} last)
+
+
+
+(go/type LinkArch "LinkArch is the definition of a single architecture.\n" (struct
+    (* sys/Arch)
+    ^{:line 1292 :tag (func [(* Link)])} Init
+    ^{:line 1293 :tag (func [(* Link) (* LSym)])} ErrorCheck
+    ^{:line 1294 :tag (func [(* Link) (* LSym) ProgAlloc])} Preprocess
+    ^{:line 1295 :tag (func [(* Link) (* LSym) ProgAlloc])} Assemble
+    ^{:line 1296 :tag (func [(* Link) (* Prog) ProgAlloc])} Progedit
+    ^{:line 1297 :tag (func [(* Link) (* LSym)] [(* LSym)])} SEH
+    ^{:line 1298 :tag (map As bool)} UnaryDst ; Instruction takes one operand, a destination.
+    ^{:line 1299 :tag (map int16 int16)} DWARFRegisters))

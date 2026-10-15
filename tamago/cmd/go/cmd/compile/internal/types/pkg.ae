@@ -1,0 +1,130 @@
+;; Copyright 2017 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.cmd.compile.internal.types) (go/file "pkg.go" :imports [
+
+
+    ^{:line 8} [obj "cmd/internal/obj"]
+    ^{:line 9} [objabi "cmd/internal/objabi"]
+    ^{:line 10} [fmt "fmt"]
+    ^{:line 11} [strconv "strconv"]
+    ^{:line 12} [sync "sync"]])
+
+
+
+(go/var ^{:doc "pkgMap maps a package path to a package.\n"} pkgMap (make (map string (* Pkg))))
+
+(go/type Pkg (struct
+    ^{:line 19 :tag string} Path ; string literal used in import statement, e.g. "internal/runtime/sys"
+    ^{:line 20 :tag string} Name ; package name, e.g. "sys"
+    ^{:line 21 :tag string} Prefix ; escaped path for use in symbol table
+    ^{:line 22 :tag (map string (* Sym))} Syms
+    ^{:line 23 :tag (* obj/LSym)} Pathsym
+
+    ^{:line 25 :tag bool} Direct)) ; imported directly
+
+
+
+
+
+^{:go/end 55} (go/func NewPkg "NewPkg returns a new Pkg for the given package path and name.\nUnless name is the empty string, if the package exists already,\nthe existing package name and the provided name must match.\n" ^{:tag (* Pkg)} [^string path ^string name]
+  (when [p (aget pkgMap path)] (!= p nil)
+    (when (and (!= name "") (!= (.-Name p) name))
+      (panic (fmt/Sprintf "conflicting package names %s and %s for path %q" (.-Name p) name path)))
+
+    (return p))
+
+
+  (let [p (new Pkg)]
+    (set! (.-Path p) path)
+    (set! (.-Name p) name)
+    (if (== path "go.shape")
+      ;; Don't escape "go.shape", since it's not needed (it's a builtin
+      ;; package), and we don't want escape codes showing up in shape type
+      ;; names, which also appear in names of function/method
+      ;; instantiations.
+      (set! (.-Prefix p) path)
+
+      (set! (.-Prefix p) (objabi/PathToPrefix path)))
+
+    (set! (.-Syms p) (make (map string (* Sym))))
+    (aset pkgMap path p)
+
+    ^{:line 54} p))
+
+
+^{:go/end 59} (go/func PkgMap ^{:tag (map string (* Pkg))} []
+  ^{:line 58} pkgMap)
+
+
+(go/var nopkg (addr ^{:go/breaks [2]} (lit Pkg
+      :Syms (make (map string (* Sym))))))
+
+
+^{:go/end 68} (go/method Lookup ^{:tag (* Sym)} [^{:tag (* Pkg)} pkg ^string name]
+  (let [(values s _) (.LookupOK pkg name)]
+    ^{:line 67} s))
+
+
+
+^{:go/end 86} (go/method LookupOK "LookupOK looks up name in pkg and reports whether it previously existed.\n" [^{:tag (* Pkg)} pkg ^string name] :results [^{:tag (* Sym)} s ^bool existed]
+  ;; TODO(gri) remove this check in favor of specialized lookup
+  (when (== pkg nil)
+    (set! pkg nopkg))
+
+  (when [s (aget (.-Syms pkg) name)] (!= s nil)
+    (return s true))
+
+
+  (set! s (addr ^{:go/breaks [2 4]} (lit Sym
+        :Name name
+        :Pkg pkg)))
+
+  (aset (.-Syms pkg) name s)
+  (return s false))
+
+
+^{:go/end 98} (go/method LookupBytes ^{:tag (* Sym)} [^{:tag (* Pkg)} pkg ^{:tag (slice byte)} name]
+  ;; TODO(gri) remove this check in favor of specialized lookup
+  (when (== pkg nil)
+    (set! pkg nopkg))
+
+  (when [s (aget (.-Syms pkg) (conv string name))] (!= s nil)
+    (return s))
+
+  (let [str (InternString name)]
+    (.Lookup pkg str)))
+
+
+
+
+^{:go/end 107} (go/method LookupNum "LookupNum looks up the symbol starting with prefix and ending with\nthe decimal n. If prefix is too long, LookupNum panics.\n" ^{:tag (* Sym)} [^{:tag (* Pkg)} pkg ^string prefix ^int n]
+  (let [^{:tag (array 20 byte)} buf (zero (array 20 byte))] ; plenty long enough for all current users
+    (copy (subslice buf) prefix)
+    (let [b (strconv/AppendInt (subslice buf _ (len prefix)) (conv int64 n) 10)]
+      (.LookupBytes pkg b))))
+
+
+
+^{:go/end 115} (go/method Selector "Selector looks up a selector identifier.\n" ^{:tag (* Sym)} [^{:tag (* Pkg)} pkg ^string name]
+  (when (IsExported name)
+    (set! pkg LocalPkg))
+
+  (.Lookup pkg name))
+
+
+(go/var
+  ^{:line 118} [^sync/Mutex internedStringsmu] ; protects internedStrings
+  ^{:line 119} [internedStrings (lit (map string string))])
+
+
+^{:go/end 131} (go/func InternString ^string [^{:tag (slice byte)} b]
+  (.Lock internedStringsmu)
+  (let [(values s ok) (aget internedStrings (conv string b))] ; string(b) here doesn't allocate
+    (when (not ok)
+      (set! s (conv string b))
+      (aset internedStrings s s))
+
+    (.Unlock internedStringsmu)
+    ^{:line 130} s))

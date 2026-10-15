@@ -1,0 +1,182 @@
+;; Copyright 2024 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; This file implements (error and trace) message formatting support.
+
+(in-ns 'go.cmd.compile.internal.types2) (go/file "format.go" :imports [
+
+
+    ^{:line 10} [bytes "bytes"]
+    ^{:line 11} [syntax "cmd/compile/internal/syntax"]
+    ^{:line 12} [fmt "fmt"]
+    ^{:line 13} [strconv "strconv"]
+    ^{:line 14} [strings "strings"]])
+
+
+^{:go/end 90} (go/func sprintf ^string [^Qualifier qf ^bool tpSubscripts ^string format & ^{:tag (slice any)} args]
+  (range [i arg args]
+    (type-switch [a arg]
+      (case [nil]
+        (set! arg "<nil>"))
+      (case [operand]
+        (panic "got operand instead of *operand"))
+      (case [(* operand)]
+        (set! arg (operandString a qf)))
+      (case [(slice (* operand))]
+        (let [^strings/Builder buf (zero strings/Builder)]
+          (.WriteByte buf \[)
+          (range [i x a]
+            (when (> i 0)
+              (.WriteString buf ", "))
+
+            (.WriteString buf (operandString x qf)))
+
+          (.WriteByte buf \])
+          (set! arg (.String buf))))
+      (case [syntax/Pos]
+        (set! arg (.String a)))
+      (case [syntax/Expr]
+        (set! arg (ExprString a)))
+      (case [(slice syntax/Expr)]
+        (let [^strings/Builder buf (zero strings/Builder)]
+          (.WriteByte buf \[)
+          (range [i x a]
+            (when (> i 0)
+              (.WriteString buf ", "))
+
+            (.WriteString buf (ExprString x)))
+
+          (.WriteByte buf \])
+          (set! arg (.String buf))))
+      (case [Object]
+        (set! arg (ObjectString a qf)))
+      (case [Type]
+        (let [^bytes/Buffer buf (zero bytes/Buffer)
+            ^{:line 56} w (newTypeWriter (addr buf) qf)]
+          (set! (.-tpSubscripts w) tpSubscripts)
+          (.typ w a)
+          (set! arg (.String buf))))
+      (case [(slice Type)]
+        (let [^bytes/Buffer buf (zero bytes/Buffer)
+            ^{:line 62} w (newTypeWriter (addr buf) qf)]
+          (set! (.-tpSubscripts w) tpSubscripts)
+          (.WriteByte buf \[)
+          (range [i x a]
+            (when (> i 0)
+              (.WriteString buf ", "))
+
+            (.typ w x))
+
+          (.WriteByte buf \])
+          (set! arg (.String buf))))
+      (case [(slice (* TypeParam))]
+        (let [^bytes/Buffer buf (zero bytes/Buffer)
+            ^{:line 75} w (newTypeWriter (addr buf) qf)]
+          (set! (.-tpSubscripts w) tpSubscripts)
+          (.WriteByte buf \[)
+          (range [i x a]
+            (when (> i 0)
+              (.WriteString buf ", "))
+
+            (.typ w x))
+
+          (.WriteByte buf \])
+          (set! arg (.String buf)))))
+
+    (aset args i arg))
+
+  (fmt/Sprintf format (spread args)))
+
+
+
+^{:go/end 99} (go/method sprintf "check may be nil.\n" ^string [^{:tag (* Checker)} check ^string format & ^{:tag (slice any)} args]
+  (let [^Qualifier qf (zero Qualifier)]
+    (when (!= check nil)
+      (set! qf (.-qualifier check)))
+
+    (sprintf qf false format (spread args))))
+
+
+^{:go/end 113} (go/method trace [^{:tag (* Checker)} check ^syntax/Pos pos ^string format & ^{:tag (slice any)} args]
+  ;; Use the width of line and pos values to align the ":" by adding padding before it.
+  ;; Cap padding at 5: 3 digits for the line, 2 digits for the column number, which is
+  ;; ok for most cases.
+  (let [w (+ (ndigits (.Line pos)) (ndigits (.Col pos)))
+      ^{:line 106} pad (subslice "     " _ (max (- 5 w) 0))]
+    (fmt/Printf "%s%s:  %s%s\n"
+      ^{:line 108} pos
+      ^{:line 109} pad
+      (strings/Repeat ".  " (.-indent check))
+      (sprintf (.-qualifier check) true format (spread args)))))
+
+
+
+
+
+^{:go/end 126} (go/func ndigits "ndigits returns the number of decimal digits in x.\nFor x > 100, the result is always 3.\n" ^int [^uint x]
+  (switch
+    (case [(< x 10)]
+      (return 1))
+    (case [(< x 100)]
+      (return 2))
+    (default
+      (return 3))))
+
+
+
+
+^{:go/end 131} (go/method dump "dump is only needed for debugging\n" [^{:tag (* Checker)} check ^string format & ^{:tag (slice any)} args]
+  (fmt/Println (sprintf (.-qualifier check) true format (spread args))))
+
+
+^{:go/breaks [[4 147]] :go/end 148} (go/method qualifier ^string [^{:tag (* Checker)} check ^{:tag (* Package)} pkg]
+  ;; Qualify the package unless it's the package being type-checked.
+  (when (!= pkg (.-pkg check))
+    (when (== (.-pkgPathMap check) nil)
+      (set! (.-pkgPathMap check) (make (map string (map string bool))))
+      (set! (.-seenPkgMap check) (make (map (* Package) bool)))
+      (.markImports check (.-pkg check)))
+
+    ;; If the same package name was used by multiple packages, display the full path.
+    (when (> (len (aget (.-pkgPathMap check) (.-name pkg))) 1)
+      (return (strconv/Quote (.-path pkg))))
+
+    (return (.-name pkg)))
+
+  "")
+
+
+
+
+^{:go/end 168} (go/method markImports "markImports recursively walks pkg and its imports, to record unique import\npaths in pkgPathMap.\n" [^{:tag (* Checker)} check ^{:tag (* Package)} pkg]
+  (when (aget (.-seenPkgMap check) pkg)
+    (return))
+
+  (aset (.-seenPkgMap check) pkg true)
+
+  (let [(values forName ok) (aget (.-pkgPathMap check) (.-name pkg))]
+    (when (not ok)
+      (set! forName (make (map string bool)))
+      (aset (.-pkgPathMap check) (.-name pkg) forName))
+
+    (aset forName (.-path pkg) true)
+
+    (range [_ imp (.-imports pkg)]
+      (.markImports check imp))))
+
+
+
+
+^{:go/end 183} (go/func stripAnnotations "stripAnnotations removes internal (type) annotations from s.\n" ^string [^string s]
+  (let [^strings/Builder buf (zero strings/Builder)]
+    (range [_ r s]
+      ;; strip #'s and subscript digits
+      (when (or (< r \₀) (<= (+ \₀ 10) r)) ; '₀' == U+2080
+        (.WriteRune buf r)))
+
+
+    (when (< (.Len buf) (len s))
+      (return (.String buf)))
+
+    ^{:line 182} s))

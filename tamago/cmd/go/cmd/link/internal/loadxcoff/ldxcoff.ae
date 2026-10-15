@@ -1,0 +1,223 @@
+;; Copyright 2018 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; Package loadxcoff implements a XCOFF file reader.
+(in-ns 'go.cmd.link.internal.loadxcoff) (go/file "ldxcoff.go" :doc "Package loadxcoff implements a XCOFF file reader.\n" :imports [
+
+
+    ^{:line 9} [bio "cmd/internal/bio"]
+    ^{:line 10} [objabi "cmd/internal/objabi"]
+    ^{:line 11} [sys "cmd/internal/sys"]
+    ^{:line 12} [loader "cmd/link/internal/loader"]
+    ^{:line 13} [sym "cmd/link/internal/sym"]
+    ^{:line 14} [errors "errors"]
+    ^{:line 15} [fmt "fmt"]
+    ^{:line 16} [xcoff "internal/xcoff"]])
+
+
+
+(go/type ldSection "ldSection is an XCOFF section with its symbols.\n" (struct
+    ^{:line 21} xcoff/Section
+    ^{:line 22 :tag loader/Sym} sym))
+
+
+;; TODO(brainman): maybe just add ReadAt method to bio.Reader instead of creating xcoffBiobuf
+
+
+(go/type xcoffBiobuf "xcoffBiobuf makes bio.Reader look like io.ReaderAt.\n" bio/Reader)
+
+^{:go/end 40} (go/method ReadAt [^{:tag (* xcoffBiobuf)} f ^{:tag (slice byte)} p ^int64 off] :results [int error]
+  (let [ret (.MustSeek (conv (* bio/Reader) f) off 0)]
+    (when (< ret 0)
+      (return 0 (errors/New "fail to seek")))
+
+    (let [(values n err) ^{:go/via [Reader]} (.Read f p)]
+      (when (!= err nil)
+        (return 0 err))
+
+      (return n nil))))
+
+
+
+
+^{:go/end 158} (go/func Load "loads the Xcoff file pn from f.\nSymbols are written into loader, and a slice of the text symbols is returned.\n" [^{:tag (* loader/Loader)} l ^{:tag (* sys/Arch)} arch ^int localSymVersion ^{:tag (* bio/Reader)} input ^string pkg ^int64 length ^string pn] :results [^{:tag (slice loader/Sym)} textp ^error err]
+  (let [errorf ^{:go/end 47} (fn [^string str & ^{:tag (slice any)} args] :results [(slice loader/Sym) error]
+        (return nil (fmt/Errorf "loadxcoff: %v: %v" pn (fmt/Sprintf str (spread args)))))
+
+
+      ^{:line 49 :tag (slice (* ldSection))} ldSections (zero (slice (* ldSection)))
+
+      (values f ^:assign err) (xcoff/NewFile (conv (* xcoffBiobuf) input))]
+    (when (!= err nil)
+      (return nil err))
+
+    (defer (.Close f))
+
+    (range [_ sect (.-Sections f)]
+      ;;only text, data and bss section
+      (when (or (< ^{:go/via [SectionHeader]} (.-Type sect) xcoff/STYP_TEXT) (> ^{:go/via [SectionHeader]} (.-Type sect) xcoff/STYP_BSS))
+        (continue))
+
+      (let [lds (new ldSection)]
+        (set! (.-Section lds) @sect)
+        (let [name (fmt/Sprintf "%s(%s)" pkg ^{:go/via [Section SectionHeader]} (.-Name lds))
+            ^{:line 65} symbol (.LookupOrCreateSym l name localSymVersion)
+            ^{:line 66} s (.MakeSymbolUpdater l symbol)]
+
+          (switch ^{:go/via [Section SectionHeader]} (.-Type lds)
+            (default
+              (return (errorf "unrecognized section type 0x%x" ^{:go/via [Section SectionHeader]} (.-Type lds))))
+            (case [xcoff/STYP_TEXT]
+              (.SetType s sym/STEXT))
+            (case [xcoff/STYP_DATA]
+              (.SetType s sym/SNOPTRDATA))
+            (case [xcoff/STYP_BSS]
+              (.SetType s sym/SNOPTRBSS)))
+
+
+          (.SetSize s (conv int64 ^{:go/via [Section SectionHeader]} (.-Size lds)))
+          (when (!= (.Type s) sym/SNOPTRBSS)
+            (let [(values data err) (.Data (.-Section lds))]
+              (when (!= err nil)
+                (return nil err))
+
+              (.SetData s data)))
+
+
+          (set! (.-sym lds) symbol)
+          (set! ldSections (append ldSections lds)))))
+
+
+    ;; sx = symbol from file
+    ;; s = symbol for loader
+    (range [_ sx (.-Symbols f)]
+      ;; get symbol type
+      (let [(values stype errmsg) (getSymbolType f sx)]
+        (when (!= errmsg "")
+          (return (errorf "error reading symbol %s: %s" (.-Name sx) errmsg)))
+
+        (when (== stype sym/Sxxx)
+          (continue))
+
+
+        (let [s (.LookupOrCreateSym l (.-Name sx) 0)]
+
+          ;; Text symbol
+          (when (.IsText (.SymType l s))
+            (when (.AttrOnList l s)
+              (return (errorf "symbol %s listed multiple times" (.SymName l s))))
+
+            (.SetAttrOnList l s true)
+            (set! textp (append textp s))))))
+
+
+
+    ;; Read relocations
+    (range [_ sect ldSections]
+      ;; TODO(aix): Dwarf section relocation if needed
+      (when (and (!= ^{:go/via [Section SectionHeader]} (.-Type sect) xcoff/STYP_TEXT) (!= ^{:go/via [Section SectionHeader]} (.-Type sect) xcoff/STYP_DATA))
+        (continue))
+
+      (let [sb (.MakeSymbolUpdater l (.-sym sect))]
+        (range [_ rx ^{:go/via [Section]} (.-Relocs sect)]
+          (let [rSym (.LookupOrCreateCgoExport l (.-Name (.-Symbol rx)) 0)]
+            (when (!= (conv uint64 (conv int32 (.-VirtualAddress rx))) (.-VirtualAddress rx))
+              (return (errorf "virtual address of a relocation is too big: 0x%x" (.-VirtualAddress rx))))
+
+            (let [rOff (conv int32 (.-VirtualAddress rx))
+                ^{:line 129 :tag uint8} rSize (zero uint8)
+                ^{:line 130 :tag objabi/RelocType} rType (zero objabi/RelocType)
+                ^{:line 131 :tag int64} rAdd (zero int64)]
+              (switch (.-Type rx)
+                (default
+                  (return (errorf "section %s: unknown relocation of type 0x%x" ^{:go/via [Section SectionHeader]} (.-Name sect) (.-Type rx))))
+                (case [xcoff/R_POS]
+                  ;; Reloc the address of r.Sym
+                  ;; Length should be 64
+                  (when (!= (.-Length rx) 64)
+                    (return (errorf "section %s: relocation R_POS has length different from 64: %d" ^{:go/via [Section SectionHeader]} (.-Name sect) (.-Length rx))))
+
+                  (set! rSize 8)
+                  (set! rType objabi/R_CONST)
+                  (set! rAdd (conv int64 (.-Value (.-Symbol rx)))))
+
+                (case [xcoff/R_RBR]
+                  (set! rSize 4)
+                  (set! rType objabi/R_CALLPOWER)
+                  (set! rAdd 0)))
+
+              (let [(values r _) (.AddRel sb rType)]
+                ^{:go/via [Reloc]} (.SetOff r rOff)
+                ^{:go/via [Reloc]} (.SetSiz r rSize)
+                (.SetSym r rSym)
+                ^{:go/via [Reloc]} (.SetAdd r rAdd)))))))
+
+
+    (return textp nil)))
+
+
+
+
+^{:go/end 227} (go/func getSymbolType "Convert symbol xcoff type to sym.SymKind\nReturns nil if this shouldn't be added into loader (like .file or .dw symbols )\n" [^{:tag (* xcoff/File)} f ^{:tag (* xcoff/Symbol)} s] :results [^sym/SymKind stype ^string err]
+  ;; .file symbol
+  (when (== (.-SectionNumber s) -2)
+    (when (== (.-StorageClass s) xcoff/C_FILE)
+      (return sym/Sxxx ""))
+
+    (return sym/Sxxx "unrecognised StorageClass for sectionNumber = -2"))
+
+
+  ;; extern symbols
+  ;; TODO(aix)
+  (when (== (.-SectionNumber s) 0)
+    (return sym/Sxxx ""))
+
+
+  (let [sectType (.-Type (.-SectionHeader (aget (.-Sections f) (- (.-SectionNumber s) 1))))]
+    (switch sectType
+      (default
+        (return sym/Sxxx (fmt/Sprintf "getSymbolType for Section type 0x%x not implemented" sectType)))
+      (case [xcoff/STYP_DWARF xcoff/STYP_DEBUG]
+        (return sym/Sxxx ""))
+      (case [xcoff/STYP_DATA xcoff/STYP_BSS xcoff/STYP_TEXT]))
+
+
+    (switch (.-StorageClass s)
+      (default
+        (return sym/Sxxx (fmt/Sprintf "getSymbolType for Storage class 0x%x not implemented" (.-StorageClass s))))
+      (case [xcoff/C_HIDEXT xcoff/C_EXT xcoff/C_WEAKEXT]
+        (switch (.-StorageMappingClass (.-AuxCSect s))
+          (default
+            (return sym/Sxxx (fmt/Sprintf "getSymbolType for Storage class 0x%x and Storage Map 0x%x not implemented" (.-StorageClass s) (.-StorageMappingClass (.-AuxCSect s)))))
+
+          ;; Program Code
+          (case [xcoff/XMC_PR]
+            (when (== sectType xcoff/STYP_TEXT)
+              (return sym/STEXT ""))
+
+            (return sym/Sxxx (fmt/Sprintf "unrecognised Section Type 0x%x for Storage Class 0x%x with Storage Map XMC_PR" sectType (.-StorageClass s))))
+
+          ;; Read/Write Data
+          (case [xcoff/XMC_RW]
+            (when (== sectType xcoff/STYP_DATA)
+              (return sym/SDATA ""))
+
+            (when (== sectType xcoff/STYP_BSS)
+              (return sym/SBSS ""))
+
+            (return sym/Sxxx (fmt/Sprintf "unrecognised Section Type 0x%x for Storage Class 0x%x with Storage Map XMC_RW" sectType (.-StorageClass s))))
+
+          ;; Function descriptor
+          (case [xcoff/XMC_DS]
+            (when (== sectType xcoff/STYP_DATA)
+              (return sym/SDATA ""))
+
+            (return sym/Sxxx (fmt/Sprintf "unrecognised Section Type 0x%x for Storage Class 0x%x with Storage Map XMC_DS" sectType (.-StorageClass s))))
+
+          ;; TOC anchor and TOC entry
+          (case [xcoff/XMC_TC0 xcoff/XMC_TE]
+            (when (== sectType xcoff/STYP_DATA)
+              (return sym/SXCOFFTOC ""))
+
+            (return sym/Sxxx (fmt/Sprintf "unrecognised Section Type 0x%x for Storage Class 0x%x with Storage Map XMC_DS" sectType (.-StorageClass s)))))))))

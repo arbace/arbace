@@ -1,0 +1,421 @@
+;; Copyright 2018 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; This file implements textual dumping of arbitrary data structures
+;; for debugging purposes. The code is customized for Node graphs
+;; and may be used for an alternative view of the node structure.
+
+(in-ns 'go.cmd.compile.internal.ir) (go/file "dump.go" :imports [
+
+
+    ^{:line 12} [sha256 "crypto/sha256"]
+    ^{:line 13} [hex "encoding/hex"]
+    ^{:line 14} [fmt "fmt"]
+    ^{:line 15} [io "io"]
+    ^{:line 16} [url "net/url"]
+    ^{:line 17} [os "os"]
+    ^{:line 18} [reflect "reflect"]
+    ^{:line 19} [regexp "regexp"]
+    ^{:line 20} [strings "strings"]
+    ^{:line 21} [sync "sync"]
+
+    ^{:line 23} [base "cmd/compile/internal/base"]
+    ^{:line 24} [types "cmd/compile/internal/types"]
+    ^{:line 25} [src "cmd/internal/src"]])
+
+
+
+^{:go/end 31} (go/func DumpAny "DumpAny is like FDumpAny but prints to stderr.\n" [^any root ^string filter ^int depth]
+  (FDumpAny os/Stderr root filter depth))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 69} (go/func FDumpAny "FDumpAny prints the structure of a rooted data structure\nto w by depth-first traversal of the data structure.\n\nThe filter parameter is a regular expression. If it is\nnon-empty, only struct fields whose names match filter\nare printed.\n\nThe depth parameter controls how deep traversal recurses\nbefore it returns (higher value means greater depth).\nIf an empty field filter is given, a good depth default value\nis 4. A negative depth means no depth limit, which may be fine\nfor small data structures or if there is a non-empty filter.\n\nIn the output, Node structs are identified by their Op name\nrather than their type; struct fields with zero values or\nnon-matching field names are omitted, and \"…\" means recursion\ndepth has been reached or struct fields have been omitted.\n" [^io/Writer w ^any root ^string filter ^int depth]
+  (when (== root nil)
+    (fmt/Fprintln w "nil")
+    (return))
+
+
+  (when (== filter "")
+    (set! filter ".*")) ; default
+
+
+  (let [p ^{:go/breaks [2 4 6 8]} (lit dumper
+        :output w
+        :fieldrx (regexp/MustCompile filter)
+        :ptrmap (make (map uintptr int))
+        :last \newline)] ; force printing of line number on first line
+
+
+    (.dump p (reflect/ValueOf root) depth)
+    (.printf p "\n")))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 89} (go/func MatchAstDump "MatchAstDump returns true if the fn matches the value\nof the astdump debug flag.  Fn matches in the following\ncases:\n\n  - astdump == name(fn)\n  - astdump == pkgname(fn).name(fn)\n  - astdump == afterslash(pkgname(fn)).name(fn)\n  - astdump begins with a \"~\" and what follows \"~\" is a\n    regular expression matching pkgname(fn).name(fn)\n\nIf MatchAstDump returns true, it also prints to os.Stderr\n\n\t\\nir.Match(<fn>, <astdump>) for <where>\\n\n" ^bool [^{:tag (* Func)} fn ^string where]
+  (when (== (len (.-AstDump base/Debug)) 0)
+    (return false))
+
+  (matchForDump fn (.-Pkgpath base/Ctxt) where))
+
+
+
+
+
+
+
+^{:go/end 98} (go/func ^:go/noinline matchForDump "matchForDump is marked noinline to ensure that the exported\nfunction MatchAstDump IS inlineable and is also small, because\ncommon case is AstDump is not set.\n" ^bool [^{:tag (* Func)} fn ^string pkgPath ^string where]
+  (MatchPkgFn pkgPath (FuncName fn) (.-AstDump base/Debug)))
+
+
+
+
+
+
+
+^{:go/end 126} (go/func MatchPkgFn "MatchPkgFn returns true if pkg and fnName \"match\" toMatch.\n\"~REGEXP\" matches REGEXP against pkgName + \".\" + fnName\n\"aFunc\" matches \"aFunc\" (in any package)\n\"aPkg.aFunc\" matches \"aPkg.aFunc\"\n\"aPkg/subPkg.aFunc\" matches \"subPkg.aFunc\"\n" ^bool [^string pkgName ^string fnName ^string toMatch]
+  (when (== (aget toMatch 0) \~)
+    (let [dbgRE (regexp/MustCompile (subslice toMatch 1))]
+      (return (.MatchString dbgRE (+ pkgName "." fnName)))))
+
+  (when (== fnName toMatch)
+    (return true))
+
+  ^{:go/breaks [[4 125]]} (let [matchPkgDotName ^{:go/end 117} (fn ^bool [^string pkg]
+        ;; Allocation-free equality check for toMatch == base.Ctxt.Pkgpath + "." + fnName
+        (and (== (len toMatch) (+ (len pkg) 1 (len fnName)))
+          (strings/HasPrefix toMatch pkg) (== (aget toMatch (len pkg)) \.) (strings/HasSuffix toMatch fnName)))]
+
+    (when (matchPkgDotName pkgName)
+      (return true))
+
+    (when [l (strings/LastIndexByte pkgName \/)] (and (> l 0) (matchPkgDotName (subslice pkgName (+ l 1))))
+      (return true))
+
+
+    false))
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 154} (go/func AstDump "AstDump appends the ast dump for fn to the ast dump file for fn.\nThe generated file name is\n\n\turl.PathEscape(PkgFuncName(fn)) + \".ast\"\n\nIt also prints\n\n\tWriting ast output to <astfilename>\\n\n\nto os.Stderr.\n" [^{:tag (* Func)} fn ^string why]
+  (let [err (withLockAndFile
+        ^{:line 140} fn
+        ^{:go/end 143} (fn [^io/Writer w]
+          (FDump w why fn)))
+
+
+      ;; strip text following comma, for phase names.
+      ^{:line 146} comma (strings/Index why ",")]
+    (when (> comma 0)
+      (set! why (subslice why _ comma)))
+
+    (DumpNodeHTML fn why fn)
+    (when (!= err nil)
+      (fmt/Fprintf os/Stderr "Dump returned error %v\n" err))))
+
+
+
+(go/var ^sync/Mutex mu)
+(go/var astDumpFiles (make (map string bool)))
+
+^{:go/end 161} (go/func escapedFileName ^string [^{:tag (* Func)} fn ^string suffix]
+  (EscapedFileName (PkgFuncName fn) suffix))
+
+
+
+
+
+
+
+^{:go/end 175} (go/func EscapedFileName "EscapedFileName constructs a file name from fn and suffix,\nurl-path-escaping the function part of the name and replacing it\nwith a hash if it is too long.  The suffix is neither escaped\nnor including in the length calculation, so an excessively\ncreative suffix will result in problems.\n" ^string [^string fn ^string suffix]
+  (let [name (url/PathEscape fn)]
+    (when (> (len name) 125) ; arbitrary limit on file names, as if anyone types these in by hand
+      (let [hash (sha256/Sum256 (conv (slice byte) name))]
+        (set! name (hex/EncodeToString (subslice hash _ 8)))))
+
+    (+ name suffix)))
+
+
+
+
+^{:go/end 199} (go/func withLockAndFile "withLockAndFile manages ast dump files for various function names\nand invokes a dumping function to write output, under a lock.\n" [^{:tag (* Func)} fn ^{:tag (func [io/Writer])} dump] :results [^error err]
+  (let [name (escapedFileName fn ".ast")]
+
+    ;; Ensure that debugging output is not scrambled and is written promptly
+    (.Lock mu)
+    (defer (.Unlock mu))
+    (let [mode (bit-or os/O_APPEND os/O_RDWR)]
+      (when (not (aget astDumpFiles name))
+        (aset astDumpFiles name true)
+        (set! mode (bit-or os/O_CREATE os/O_TRUNC os/O_RDWR))
+        (fmt/Fprintf os/Stderr "Writing text ast output for %s to %s\n" (PkgFuncName fn) name))
+
+
+      (let [(values fi ^:assign err) (os/OpenFile name mode 0777)]
+        (when (!= err nil)
+          (return err))
+
+        (defer (^{:go/end 196} (fn [] (set! err (.Close fi)))))
+        (dump fi)
+        (return)))))
+
+
+(go/var htmlWriters (make (map (* Func) (* HTMLWriter))))
+(go/var orderedFuncs (lit (slice (* Func))))
+
+
+
+^{:go/end 217} (go/func DumpNodeHTML "DumpNodeHTML dumps the node n to the HTML writer for fn.\nIt uses the same phase name as the text dump.\n" [^{:tag (* Func)} fn ^string why ^Node n]
+  (.Lock mu)
+  (defer (.Unlock mu))
+  (let [(values w ok) (aget htmlWriters fn)]
+    (when (not ok)
+      (let [name (escapedFileName fn ".html")]
+        (set! w (NewHTMLWriter name fn ""))
+        (aset htmlWriters fn w)
+        (set! orderedFuncs (append orderedFuncs fn))))
+
+    ^{:go/via [HTMLWriterBase]} (.WritePhase w why why)))
+
+
+
+^{:go/end 230} (go/func CloseHTMLWriters "CloseHTMLWriters closes the HTML writer for fn, if one exists.\n" []
+  (.Lock mu)
+  (defer (.Unlock mu))
+  (range [_ fn orderedFuncs]
+    (when [(values w ok) (aget htmlWriters fn)] ok
+      ^{:go/via [HTMLWriterBase]} (.Close w "Writing html ast output for %s to %s\n" (PkgFuncName (.-Func w)) ^{:go/via [HTMLWriterBase]} (.-path w))
+      (delete htmlWriters fn)))
+
+
+  (set! orderedFuncs nil))
+
+
+(go/type dumper (struct
+    ^{:line 233 :tag io/Writer} output
+    ^{:line 234 :tag (* regexp/Regexp)} fieldrx ; field name filter
+    ^{:line 235 :tag (map uintptr int)} ptrmap ; ptr -> dump line number
+    ^{:line 236 :tag string} lastadr ; last address string printed (for shortening)
+
+
+    ^{:line 239 :tag int :doc "output\n"} indent ; current indentation level
+    ^{:line 240 :tag byte} last ; last byte processed by Write
+    ^{:line 241 :tag int} line)) ; current line number
+
+
+(go/var indentBytes (conv (slice byte) ".  "))
+
+^{:go/end 276} (go/method Write [^{:tag (* dumper)} p ^{:tag (slice byte)} data] :results [^int n ^error err]
+  (let [^int m (zero int)]
+    (range [i b data]
+      ;; invariant: data[0:n] has been written
+      (cond (== b \newline) (do
+          (set! (values m err) (.Write (.-output p) (subslice data n (+ i 1))))
+          (set! n + m)
+          (when (!= err nil)
+            (return)))
+
+        (== (.-last p) \newline) (do
+          (inc! (.-line p))
+          (set! (values _ err) (fmt/Fprintf (.-output p) "%6d  " (.-line p)))
+          (when (!= err nil)
+            (return))
+
+          (for [j (.-indent p)] (> j 0) (dec! j)
+            (set! (values _ err) (.Write (.-output p) indentBytes))
+            (when (!= err nil)
+              (return)))))
+
+
+
+      (set! (.-last p) b))
+
+    (when (> (len data) n)
+      (set! (values m err) (.Write (.-output p) (subslice data n)))
+      (set! n + m))
+
+    (return)))
+
+
+
+^{:go/end 283} (go/method printf "printf is a convenience wrapper.\n" [^{:tag (* dumper)} p ^string format & ^{:tag (slice any)} args]
+  (when [(values _ err) (fmt/Fprintf p format (spread args))] (!= err nil)
+    (panic err)))
+
+
+
+
+
+
+
+^{:go/end 300} (go/method addr "addr returns the (hexadecimal) address string of the object\nrepresented by x (or \"?\" if x is not addressable), with the\ncommon prefix between this and the prior address replaced by\n\"0x…\" to make it easier to visually match addresses.\n" ^string [^{:tag (* dumper)} p ^reflect/Value x]
+  (when (not (.CanAddr x))
+    (return "?"))
+
+  (let [adr (fmt/Sprintf "%p" (.Interface (.Addr x)))
+      ^{:line 294} s adr]
+    (when [i (commonPrefixLen (.-lastadr p) adr)] (> i 0)
+      (set! s (+ "0x…" (subslice adr i))))
+
+    (set! (.-lastadr p) adr)
+    ^{:line 299} s))
+
+
+
+^{:go/end 415} (go/method dump "dump prints the contents of x.\n" [^{:tag (* dumper)} p ^reflect/Value x ^int depth]
+  (when (== depth 0)
+    (.printf p "…")
+    (return))
+
+
+  (when [(values pos ok) (assert src/XPos (.Interface x))] ok
+    (.printf p "%s" (base/FmtPos pos))
+    (return))
+
+
+  (switch (.Kind x)
+    (case [reflect/String]
+      (.printf p "%q" (.Interface x))) ; print strings in quotes
+
+    (case [reflect/Interface]
+      (when (.IsNil x)
+        (.printf p "nil")
+        (return))
+
+      (.dump p (.Elem x) (- depth 1)))
+
+    (case [reflect/Ptr]
+      (when (.IsNil x)
+        (.printf p "nil")
+        (return))
+
+
+      (.printf p "*")
+      (let [ptr (.Pointer x)]
+        (when [(values line exists) (aget (.-ptrmap p) ptr)] exists
+          (.printf p "(@%d)" line)
+          (return))
+
+        (aset (.-ptrmap p) ptr (.-line p))
+        (.dump p (.Elem x) depth))) ; don't count pointer indirection towards depth
+
+    (case [reflect/Slice]
+      (when (.IsNil x)
+        (.printf p "nil")
+        (return))
+
+      (.printf p "%s (%d entries) {" (.Type x) (.Len x))
+      (when (> (.Len x) 0)
+        (inc! (.-indent p))
+        (.printf p "\n")
+        (for [(values i n) (values 0 (.Len x))] (< i n) (inc! i)
+          (.printf p "%d: " i)
+          (.dump p (.Index x i) (- depth 1))
+          (.printf p "\n"))
+
+        (dec! (.-indent p)))
+
+      (.printf p "}"))
+
+    (case [reflect/Struct]
+      (let [typ (.Type x)
+
+          ^{:line 361} isNode false]
+        (if [(values n ok) (assert Node (.Interface x))] ok (do
+            (set! isNode true)
+            (.printf p "%s %s {" (.String (.Op n)) (.addr p x)))
+
+          (.printf p "%s {" typ))
+
+        (inc! (.-indent p))
+
+        (let [first true
+            ^{:line 371} omitted false]
+          (for [(values i n) (values 0 (.NumField typ))] (< i n) (inc! i)
+            ;; Exclude non-exported fields because their
+            ;; values cannot be accessed via reflection.
+            (when [name (.-Name (.Field typ i))] (types/IsExported name)
+              (when (not (.MatchString (.-fieldrx p) name))
+                (set! omitted true)
+                (continue)) ; field name not selected by filter
+
+
+              ;; special cases
+              (when (and isNode (== name "Op"))
+                (set! omitted true)
+                (continue)) ; Op field already printed for Nodes
+
+              (let [x (.Field x i)]
+                (when (.IsZero x)
+                  (set! omitted true)
+                  (continue)) ; exclude zero-valued fields
+
+                (when [(values n ok) (assert Nodes (.Interface x))] (and ok (== (len n) 0))
+                  (set! omitted true)
+                  (continue)) ; exclude empty Nodes slices
+
+
+                (when first
+                  (.printf p "\n")
+                  (set! first false))
+
+                (.printf p "%s: " name)
+                (.dump p x (- depth 1))
+                (.printf p "\n"))))
+
+
+          (when omitted
+            (.printf p "…\n"))
+
+
+          (dec! (.-indent p))
+          (.printf p "}"))))
+
+    (default
+      (.printf p "%v" (.Interface x)))))
+
+
+
+^{:go/end 422} (go/func commonPrefixLen [^string a ^string b] :results [^int i]
+  (while (and (< i (len a)) (< i (len b)) (== (aget a i) (aget b i)))
+    (inc! i))
+
+  (return))

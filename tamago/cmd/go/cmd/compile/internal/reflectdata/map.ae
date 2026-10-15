@@ -1,0 +1,350 @@
+;; Copyright 2024 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.cmd.compile.internal.reflectdata) (go/file "map.go" :imports [
+
+
+    ^{:line 8} [base "cmd/compile/internal/base"]
+    ^{:line 9} [ir "cmd/compile/internal/ir"]
+    ^{:line 10} [rttype "cmd/compile/internal/rttype"]
+    ^{:line 11} [types "cmd/compile/internal/types"]
+    ^{:line 12} [obj "cmd/internal/obj"]
+    ^{:line 13} [objabi "cmd/internal/objabi"]
+    ^{:line 14} [src "cmd/internal/src"]
+    ^{:line 15} [abi "internal/abi"]
+    ^{:line 16} [buildcfg "internal/buildcfg"]])
+
+
+
+^{:go/end 111} (go/func MapGroupType "MapGroupType makes the map slot group type given the type of the map.\n" ^{:tag (* types/Type)} [^{:tag (* types/Type)} t]
+  (when (!= (.-Group (.MapType t)) nil)
+    (return (.-Group (.MapType t))))
+
+
+  ;; Builds a type representing a group structure for the given map type.
+  ;; This type is not visible to users, we include it so we can generate
+  ;; a correct GC program for it.
+  ;;
+  ;; Make sure this stays in sync with internal/runtime/maps/group.go.
+
+  (let [keytype (.Key t)
+      ^{:line 32} elemtype (.Elem t)]
+    (types/CalcSize keytype)
+    (types/CalcSize elemtype)
+    (when (> (.Size keytype) abi/MapMaxKeyBytes)
+      (set! keytype (types/NewPtr keytype)))
+
+    (when (> (.Size elemtype) abi/MapMaxElemBytes)
+      (set! elemtype (types/NewPtr elemtype)))
+
+
+    (let [^{:tag (slice (* types/Field))} fields (zero (slice (* types/Field)))]
+      (if ^{:go/via [Flags]} (.-MapSplitGroup buildcfg/Experiment)
+        ;; Split layout (KKKKVVVV):
+        ;; type group struct {
+        ;;     ctrl  uint64
+        ;;     keys  [abi.MapGroupSlots]keyType
+        ;;     elems [abi.MapGroupSlots]elemType
+        ;; }
+        (let [keyArr (types/NewArray keytype abi/MapGroupSlots)]
+          (.SetNoalg keyArr true)
+
+          (let [elemArr (types/NewArray elemtype abi/MapGroupSlots)]
+            (.SetNoalg elemArr true)
+
+            (set! fields (lit (slice (* types/Field))
+                (makefield "ctrl" (aget types/Types types/TUINT64))
+                (makefield "keys" keyArr)
+                (makefield "elems" elemArr)))))
+
+
+        ;; Interleaved slot layout (KVKVKVKV):
+        ;; type group struct {
+        ;;     ctrl  uint64
+        ;;     slots [abi.MapGroupSlots]struct {
+        ;;         key  keyType
+        ;;         elem elemType
+        ;;     }
+        ;; }
+        (let [slotFields (lit (slice (* types/Field))
+              (makefield "key" keytype)
+              (makefield "elem" elemtype))
+
+            ^{:line 74} slot (types/NewStruct slotFields)]
+          (.SetNoalg slot true)
+
+          (let [slotArr (types/NewArray slot abi/MapGroupSlots)]
+            (.SetNoalg slotArr true)
+
+            (set! fields (lit (slice (* types/Field))
+                (makefield "ctrl" (aget types/Types types/TUINT64))
+                (makefield "slots" slotArr))))))
+
+
+
+      (let [group (types/NewStruct fields)]
+        (.SetNoalg group true)
+        (types/CalcSize group)
+
+        ;; Check invariants that map code depends on.
+        (when (not (types/IsComparable (.Key t)))
+          (base/Fatalf "unsupported map key type for %v" t))
+
+        (when (<= (.Size group) 8)
+          ;; internal/runtime/maps creates pointers to slots, even if
+          ;; both key and elem are size zero. In this case, each slot is
+          ;; size 0, but group should still reserve a word of padding at
+          ;; the end to ensure pointers are valid.
+          (base/Fatalf "bad group size for %v" t))
+
+        (when (and (> (.Size (.Key t)) abi/MapMaxKeyBytes) (not (.IsPtr keytype)))
+          (base/Fatalf "key indirect incorrect for %v" t))
+
+        (when (and (> (.Size (.Elem t)) abi/MapMaxElemBytes) (not (.IsPtr elemtype)))
+          (base/Fatalf "elem indirect incorrect for %v" t))
+
+
+        (set! (.-Group (.MapType t)) group)
+        (set! (.-Map (.StructType group)) t)
+        ^{:line 110} group))))
+
+
+(go/var ^{:tag (* types/Type)} cachedMapTableType)
+
+
+
+^{:go/end 162} (go/func mapTableType "mapTableType returns a type interchangeable with internal/runtime/maps.table.\nMake sure this stays in sync with internal/runtime/maps/table.go.\n" ^{:tag (* types/Type)} []
+  (when (!= cachedMapTableType nil)
+    (return cachedMapTableType))
+
+
+  ;; type table struct {
+  ;;     used       uint16
+  ;;     capacity   uint16
+  ;;     growthLeft uint16
+  ;;     localDepth uint8
+  ;;     // N.B Padding
+  ;;
+  ;;     index int
+  ;;
+  ;;     // From groups.
+  ;;     groups_data       unsafe.Pointer
+  ;;     groups_lengthMask uint64
+  ;; }
+  ;; must match internal/runtime/maps/table.go:table.
+  (let [fields (lit (slice (* types/Field))
+        (makefield "used" (aget types/Types types/TUINT16))
+        (makefield "capacity" (aget types/Types types/TUINT16))
+        (makefield "growthLeft" (aget types/Types types/TUINT16))
+        (makefield "localDepth" (aget types/Types types/TUINT8))
+        (makefield "index" (aget types/Types types/TINT))
+        (makefield "groups_data" (aget types/Types types/TUNSAFEPTR))
+        (makefield "groups_lengthMask" (aget types/Types types/TUINT64)))
+
+
+      ^{:line 146} n (ir/NewDeclNameAt src/NoXPos ir/OTYPE (.Lookup (.-InternalMaps ir/Pkgs) "table"))
+      ^{:line 147} table (types/NewNamed n)]
+    ^{:go/via [miniExpr]} (.SetType n table)
+    ^{:go/via [miniExpr miniNode]} (.SetTypecheck n 1)
+
+    (.SetUnderlying table (types/NewStruct fields))
+    (types/CalcSize table)
+
+    ;; The size of table should be 32 bytes on 64 bit
+    ;; and 24 bytes on 32 bit platforms.
+    (when [size (conv int64 (+ (* 3 2) (* 2 1) (* 1 8) (* 2 types/PtrSize)))] (!= (.Size table) size) ; /* one extra for padding */
+      (base/Fatalf "internal/runtime/maps.table size not correct: got %d, want %d" (.Size table) size))
+
+
+    (set! cachedMapTableType table)
+    ^{:line 161} table))
+
+
+(go/var ^{:tag (* types/Type)} cachedMapType)
+
+
+
+^{:go/end 218} (go/func MapType "MapType returns a type interchangeable with internal/runtime/maps.Map.\nMake sure this stays in sync with internal/runtime/maps/map.go.\n" ^{:tag (* types/Type)} []
+  (when (!= cachedMapType nil)
+    (return cachedMapType))
+
+
+  ;; type Map struct {
+  ;;     used uint64
+  ;;     seed uintptr
+  ;;
+  ;;     dirPtr unsafe.Pointer
+  ;;     dirLen int
+  ;;
+  ;;     globalDepth uint8
+  ;;     globalShift uint8
+  ;;
+  ;;     writing uint8
+  ;;     tombstonePossible bool
+  ;;     // N.B Padding
+  ;;
+  ;;     clearSeq uint64
+  ;; }
+  ;; must match internal/runtime/maps/map.go:Map.
+  (let [fields (lit (slice (* types/Field))
+        (makefield "used" (aget types/Types types/TUINT64))
+        (makefield "seed" (aget types/Types types/TUINTPTR))
+        (makefield "dirPtr" (aget types/Types types/TUNSAFEPTR))
+        (makefield "dirLen" (aget types/Types types/TINT))
+        (makefield "globalDepth" (aget types/Types types/TUINT8))
+        (makefield "globalShift" (aget types/Types types/TUINT8))
+        (makefield "writing" (aget types/Types types/TUINT8))
+        (makefield "tombstonePossible" (aget types/Types types/TBOOL))
+        (makefield "clearSeq" (aget types/Types types/TUINT64)))
+
+
+      ^{:line 202} n (ir/NewDeclNameAt src/NoXPos ir/OTYPE (.Lookup (.-InternalMaps ir/Pkgs) "Map"))
+      ^{:line 203} m (types/NewNamed n)]
+    ^{:go/via [miniExpr]} (.SetType n m)
+    ^{:go/via [miniExpr miniNode]} (.SetTypecheck n 1)
+
+    (.SetUnderlying m (types/NewStruct fields))
+    (types/CalcSize m)
+
+    ;; The size of Map should be 48 bytes on 64 bit
+    ;; and 32 bytes on 32 bit platforms.
+    (when [size (conv int64 (+ (* 2 8) (* 4 types/PtrSize)))] (!= (.Size m) size) ; /* one extra for globalDepth/globalShift/writing + padding */
+      (base/Fatalf "internal/runtime/maps.Map size not correct: got %d, want %d" (.Size m) size))
+
+
+    (set! cachedMapType m)
+    ^{:line 217} m))
+
+
+(go/var ^{:tag (* types/Type)} cachedMapIterType)
+
+
+
+^{:go/end 284} (go/func MapIterType "MapIterType returns a type interchangeable with internal/runtime/maps.Iter.\nMake sure this stays in sync with internal/runtime/maps/table.go.\n" ^{:tag (* types/Type)} []
+  (when (!= cachedMapIterType nil)
+    (return cachedMapIterType))
+
+
+  ;; type Iter struct {
+  ;;    key  unsafe.Pointer // *Key
+  ;;    elem unsafe.Pointer // *Elem
+  ;;    typ  unsafe.Pointer // *MapType
+  ;;    m    *Map
+  ;;
+  ;;    groupSlotOffset uint64
+  ;;    dirOffset       uint64
+  ;;
+  ;;    clearSeq uint64
+  ;;
+  ;;    globalDepth uint8
+  ;;    // N.B. padding
+  ;;
+  ;;    dirIdx int
+  ;;
+  ;;    tab *table
+  ;;
+  ;;    group unsafe.Pointer // actually groupReference.data
+  ;;
+  ;;    entryIdx uint64
+  ;; }
+  ;; must match internal/runtime/maps/table.go:Iter.
+  (let [fields (lit (slice (* types/Field))
+        (makefield "key" (aget types/Types types/TUNSAFEPTR)) ; Used in range.go for TMAP.
+        (makefield "elem" (aget types/Types types/TUNSAFEPTR)) ; Used in range.go for TMAP.
+        (makefield "typ" (aget types/Types types/TUNSAFEPTR))
+        (makefield "m" (types/NewPtr (MapType)))
+        (makefield "groupSlotOffset" (aget types/Types types/TUINT64))
+        (makefield "dirOffset" (aget types/Types types/TUINT64))
+        (makefield "clearSeq" (aget types/Types types/TUINT64))
+        (makefield "globalDepth" (aget types/Types types/TUINT8))
+        (makefield "dirIdx" (aget types/Types types/TINT))
+        (makefield "tab" (types/NewPtr (mapTableType)))
+        (makefield "group" (aget types/Types types/TUNSAFEPTR))
+        (makefield "entryIdx" (aget types/Types types/TUINT64)))
+
+
+      ;; build iterator struct holding the above fields
+      ^{:line 268} n (ir/NewDeclNameAt src/NoXPos ir/OTYPE (.Lookup (.-InternalMaps ir/Pkgs) "Iter"))
+      ^{:line 269} iter (types/NewNamed n)]
+    ^{:go/via [miniExpr]} (.SetType n iter)
+    ^{:go/via [miniExpr miniNode]} (.SetTypecheck n 1)
+
+    (.SetUnderlying iter (types/NewStruct fields))
+    (types/CalcSize iter)
+
+    ;; The size of Iter should be 96 bytes on 64 bit
+    ;; and 64 bytes on 32 bit platforms.
+    (when [size (+ (* 8 types/PtrSize) (* 4 8))] (!= (.Size iter) (conv int64 size)) ; /* one extra for globalDepth + padding */
+      (base/Fatalf "internal/runtime/maps.Iter size not correct: got %d, want %d" (.Size iter) size))
+
+
+    (set! cachedMapIterType iter)
+    ^{:line 283} iter))
+
+
+^{:go/end 352} (go/func writeMapType [^{:tag (* types/Type)} t ^{:tag (* obj/LSym)} lsym ^rttype/Cursor c]
+  ;; internal/abi.MapType
+  (let [gtyp (MapGroupType t)
+      ^{:line 289} s1 (writeType (.Key t))
+      ^{:line 290} s2 (writeType (.Elem t))
+      ^{:line 291} s3 (writeType gtyp)
+      ^{:line 292} hasher (genhash (.Key t))
+
+      ^{:line 294 :tag int64} keysOff (zero int64)
+      ^{:line 295 :tag int64} keyStride (zero int64)
+      ^{:line 296 :tag int64} elemsOff (zero int64)
+      ^{:line 297 :tag int64} elemStride (zero int64)
+      ^{:line 298 :tag int64} elemOff (zero int64)]
+    (if ^{:go/via [Flags]} (.-MapSplitGroup buildcfg/Experiment) (do
+        ;; Split layout: field 1 is keys array, field 2 is elems array.
+        (set! keysOff (.-Offset (.Field gtyp 1)))
+        (set! keyStride (.Size (.Elem (.-Type (.Field gtyp 1)))))
+        (set! elemsOff (.-Offset (.Field gtyp 2)))
+        (set! elemStride (.Size (.Elem (.-Type (.Field gtyp 2))))))
+      (do
+        ;; Interleaved layout: field 1 is slots array.
+        ;; KeysOff = offset of slots array (first key).
+        ;; KeyStride = ElemStride = slot stride.
+        ;; ElemsOff = offset of slots + offset of elem within slot.
+        (set! keysOff (.-Offset (.Field gtyp 1)))
+        (let [slotTyp (.Elem (.-Type (.Field gtyp 1)))
+            ^{:line 312} slotSize (.Size slotTyp)
+            ^{:line 313} elemOffInSlot (.-Offset (.Field slotTyp 1))]
+          (set! keyStride slotSize)
+          (set! elemsOff (+ keysOff elemOffInSlot))
+          (set! elemStride slotSize)
+          (set! elemOff (.-Offset (.Field slotTyp 1))))))
+
+
+    (.WritePtr (.Field c "Key") s1)
+    (.WritePtr (.Field c "Elem") s2)
+    (.WritePtr (.Field c "Group") s3)
+    (.WritePtr (.Field c "Hasher") hasher)
+    (.WriteUintptr (.Field c "GroupSize") (conv uint64 (.Size gtyp)))
+    (.WriteUintptr (.Field c "KeysOff") (conv uint64 keysOff))
+    (.WriteUintptr (.Field c "KeyStride") (conv uint64 keyStride))
+    (.WriteUintptr (.Field c "ElemsOff") (conv uint64 elemsOff))
+    (.WriteUintptr (.Field c "ElemStride") (conv uint64 elemStride))
+    (.WriteUintptr (.Field c "ElemOff") (conv uint64 elemOff))
+    (let [^uint32 flags (zero uint32)]
+      (when (needkeyupdate (.Key t))
+        (set! flags bit-or abi/MapNeedKeyUpdate))
+
+      (when (hashMightPanic (.Key t))
+        (set! flags bit-or abi/MapHashMightPanic))
+
+      (when (> (.Size (.Key t)) abi/MapMaxKeyBytes)
+        (set! flags bit-or abi/MapIndirectKey))
+
+      (when (> (.Size (.Elem t)) abi/MapMaxElemBytes)
+        (set! flags bit-or abi/MapIndirectElem))
+
+      (.WriteUint32 (.Field c "Flags") flags)
+
+      (when [u (.Underlying t)] (!= u t)
+        ;; If t is a named map type, also keep the underlying map
+        ;; type live in the binary. This is important to make sure that
+        ;; a named map and that same map cast to its underlying type via
+        ;; reflection, use the same hash function. See issue 37716.
+        (.AddRel lsym base/Ctxt (lit obj/Reloc :Type objabi/R_KEEP :Sym (writeType u)))))))

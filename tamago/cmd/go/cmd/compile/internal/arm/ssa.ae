@@ -1,0 +1,1113 @@
+;; Copyright 2016 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.cmd.compile.internal.arm) (go/file "ssa.go" :imports [
+
+
+    ^{:line 8} [fmt "fmt"]
+    ^{:line 9} [buildcfg "internal/buildcfg"]
+    ^{:line 10} [math "math"]
+    ^{:line 11} [bits "math/bits"]
+
+    ^{:line 13} [base "cmd/compile/internal/base"]
+    ^{:line 14} [ir "cmd/compile/internal/ir"]
+    ^{:line 15} [logopt "cmd/compile/internal/logopt"]
+    ^{:line 16} [ssa "cmd/compile/internal/ssa"]
+    ^{:line 17} [ssagen "cmd/compile/internal/ssagen"]
+    ^{:line 18} [types "cmd/compile/internal/types"]
+    ^{:line 19} [obj "cmd/internal/obj"]
+    ^{:line 20} [arm "cmd/internal/obj/arm"]
+    ^{:line 21} [abi "internal/abi"]])
+
+
+
+^{:go/end 52} (go/func loadByType "loadByType returns the load instruction of the given type.\n" ^obj/As [^{:tag (* types/Type)} t]
+  (if (.IsFloat t)
+    (switch (.Size t)
+      (case [4]
+        (return arm/AMOVF))
+      (case [8]
+        (return arm/AMOVD)))
+
+
+    (switch (.Size t)
+      (case [1]
+        (if (.IsSigned t)
+          (return arm/AMOVB)
+
+          (return arm/AMOVBU)))
+
+      (case [2]
+        (if (.IsSigned t)
+          (return arm/AMOVH)
+
+          (return arm/AMOVHU)))
+
+      (case [4]
+        (return arm/AMOVW))))
+
+
+  (panic "bad load type"))
+
+
+
+^{:go/end 74} (go/func storeByType "storeByType returns the store instruction of the given type.\n" ^obj/As [^{:tag (* types/Type)} t]
+  (if (.IsFloat t)
+    (switch (.Size t)
+      (case [4]
+        (return arm/AMOVF))
+      (case [8]
+        (return arm/AMOVD)))
+
+
+    (switch (.Size t)
+      (case [1]
+        (return arm/AMOVB))
+      (case [2]
+        (return arm/AMOVH))
+      (case [4]
+        (return arm/AMOVW))))
+
+
+  (panic "bad store type"))
+
+
+
+(go/type shift "shift type is used as Offset in obj.TYPE_SHIFT operands to encode shifted register operands.\n" int64)
+
+
+^{:go/end 89} (go/method String "copied from ../../../internal/obj/util.go:/TYPE_SHIFT\n" ^string [^shift v]
+  (let [op (subslice "<<>>->@>" (<< (bit-and (>> v 5) 3) 1))]
+    (if (!= (bit-and v (<< 1 4)) 0)
+      ;; register shift
+      (return (fmt/Sprintf "R%d%c%cR%d" (bit-and v 15) (aget op 0) (aget op 1) (bit-and (>> v 8) 15)))
+
+      ;; constant shift
+      (return (fmt/Sprintf "R%d%c%c%d" (bit-and v 15) (aget op 0) (aget op 1) (bit-and (>> v 7) 31))))))
+
+
+
+
+^{:go/end 97} (go/func makeshift "makeshift encodes a register shifted by a constant.\n" ^shift [^{:tag (* ssa/Value)} v ^int16 reg ^int64 typ ^int64 s]
+  (when (or (< s 0) (>= s 32))
+    (.Fatalf v "shift out of range: %d" s))
+
+  (conv shift (bit-or (conv int64 (bit-and reg 0xf)) typ (<< (bit-and s 31) 7))))
+
+
+
+^{:go/end 110} (go/func genshift "genshift generates a Prog for r = r0 op (r1 shifted by n).\n" ^{:tag (* obj/Prog)} [^{:tag (* ssagen/State)} s ^{:tag (* ssa/Value)} v ^obj/As as ^int16 r0 ^int16 r1 ^int16 r ^int64 typ ^int64 n]
+  (let [p (.Prog s as)]
+    (set! (.-Type (.-From p)) obj/TYPE_SHIFT)
+    (set! (.-Offset (.-From p)) (conv int64 (makeshift v r1 typ n)))
+    (set! (.-Reg p) r0)
+    (when (!= r 0)
+      (set! (.-Type (.-To p)) obj/TYPE_REG)
+      (set! (.-Reg (.-To p)) r))
+
+    ^{:line 109} p))
+
+
+
+^{:go/end 115} (go/func makeregshift "makeregshift encodes a register shifted by a register.\n" ^shift [^int16 r1 ^int64 typ ^int16 r2]
+  (conv shift (bit-or (conv int64 (bit-and r1 0xf)) typ (<< (conv int64 (bit-and r2 0xf)) 8) (<< 1 4))))
+
+
+
+^{:go/end 128} (go/func genregshift "genregshift generates a Prog for r = r0 op (r1 shifted by r2).\n" ^{:tag (* obj/Prog)} [^{:tag (* ssagen/State)} s ^obj/As as ^int16 r0 ^int16 r1 ^int16 r2 ^int16 r ^int64 typ]
+  (let [p (.Prog s as)]
+    (set! (.-Type (.-From p)) obj/TYPE_SHIFT)
+    (set! (.-Offset (.-From p)) (conv int64 (makeregshift r1 typ r2)))
+    (set! (.-Reg p) r0)
+    (when (!= r 0)
+      (set! (.-Type (.-To p)) obj/TYPE_REG)
+      (set! (.-Reg (.-To p)) r))
+
+    ^{:line 127} p))
+
+
+
+
+
+^{:go/end 150} (go/func getBFC "find a (lsb, width) pair for BFC\nlsb must be in [0, 31], width must be in [1, 32 - lsb]\nreturn (0xffffffff, 0) if v is not a binary like 0...01...10...0\n" [^uint32 v] :results [uint32 uint32]
+  (let [(values ^uint32 m ^uint32 l) (zero uint32)]
+    ;; BFC is not applicable with zero
+    (when (== v 0)
+      (return 0xffffffff 0))
+
+    ;; find the lowest set bit, for example l=2 for 0x3ffffffc
+    (set! l (conv uint32 (bits/TrailingZeros32 v)))
+    ;; m-1 represents the highest set bit index, for example m=30 for 0x3ffffffc
+    (set! m (- 32 (conv uint32 (bits/LeadingZeros32 v))))
+    ;; check if v is a binary like 0...01...10...0
+    (when (== (- ^uint32 (<< 1 m) ^uint32 (<< 1 l)) v)
+      ;; it must be m > l for non-zero v
+      (return l (- m l)))
+
+    ;; invalid
+    (return 0xffffffff 0)))
+
+
+^{:go/end 1026} (go/func ssaGenValue [^{:tag (* ssagen/State)} s ^{:tag (* ssa/Value)} v]
+  (switch (.-Op v)
+    (case [ssa/OpCopy ssa/OpARMMOVWreg]
+      (when (.IsMemory (.-Type v))
+        (return))
+
+      (let [x (.Reg (aget (.-Args v) 0))
+          ^{:line 159} y (.Reg v)]
+        (when (== x y)
+          (return))
+
+        (let [as arm/AMOVW]
+          (when (.IsFloat (.-Type v))
+            (switch (.Size (.-Type v))
+              (case [4]
+                (set! as arm/AMOVF))
+              (case [8]
+                (set! as arm/AMOVD))
+              (default
+                (panic "bad float size"))))
+
+
+          (let [p (.Prog s as)]
+            (set! (.-Type (.-From p)) obj/TYPE_REG)
+            (set! (.-Reg (.-From p)) x)
+            (set! (.-Type (.-To p)) obj/TYPE_REG)
+            (set! (.-Reg (.-To p)) y)))))
+    (case [ssa/OpARMMOVWnop])
+    ;; nothing to do
+    (case [ssa/OpLoadReg]
+      (when (.IsFlags (.-Type v))
+        (.Fatalf v "load flags not implemented: %v" (.LongString v))
+        (return))
+
+      (let [p (.Prog s (loadByType (.-Type v)))]
+        (ssagen/AddrAuto (addr (.-From p)) (aget (.-Args v) 0))
+        (set! (.-Type (.-To p)) obj/TYPE_REG)
+        (set! (.-Reg (.-To p)) (.Reg v))))
+    (case [ssa/OpStoreReg]
+      (when (.IsFlags (.-Type v))
+        (.Fatalf v "store flags not implemented: %v" (.LongString v))
+        (return))
+
+      (let [p (.Prog s (storeByType (.-Type v)))]
+        (set! (.-Type (.-From p)) obj/TYPE_REG)
+        (set! (.-Reg (.-From p)) (.Reg (aget (.-Args v) 0)))
+        (ssagen/AddrAuto (addr (.-To p)) v)))
+    (case [ssa/OpARMADD
+        ^{:line 200} ssa/OpARMADC
+        ^{:line 201} ssa/OpARMSUB
+        ^{:line 202} ssa/OpARMSBC
+        ^{:line 203} ssa/OpARMRSB
+        ^{:line 204} ssa/OpARMAND
+        ^{:line 205} ssa/OpARMOR
+        ^{:line 206} ssa/OpARMXOR
+        ^{:line 207} ssa/OpARMBIC
+        ^{:line 208} ssa/OpARMMUL
+        ^{:line 209} ssa/OpARMADDF
+        ^{:line 210} ssa/OpARMADDD
+        ^{:line 211} ssa/OpARMSUBF
+        ^{:line 212} ssa/OpARMSUBD
+        ^{:line 213} ssa/OpARMSLL
+        ^{:line 214} ssa/OpARMSRL
+        ^{:line 215} ssa/OpARMSRA
+        ^{:line 216} ssa/OpARMMULF
+        ^{:line 217} ssa/OpARMMULD
+        ^{:line 218} ssa/OpARMNMULF
+        ^{:line 219} ssa/OpARMNMULD
+        ^{:line 220} ssa/OpARMDIVF
+        ^{:line 221} ssa/OpARMDIVD]
+      (let [r (.Reg v)
+          ^{:line 223} r1 (.Reg (aget (.-Args v) 0))
+          ^{:line 224} r2 (.Reg (aget (.-Args v) 1))
+          ^{:line 225} p (.Prog s (.Asm (.-Op v)))]
+        (set! (.-Type (.-From p)) obj/TYPE_REG)
+        (set! (.-Reg (.-From p)) r2)
+        (set! (.-Reg p) r1)
+        (set! (.-Type (.-To p)) obj/TYPE_REG)
+        (set! (.-Reg (.-To p)) r)))
+    (case [ssa/OpARMSRR]
+      (genregshift s arm/AMOVW 0 (.Reg (aget (.-Args v) 0)) (.Reg (aget (.-Args v) 1)) (.Reg v) arm/SHIFT_RR))
+    (case [ssa/OpARMMULAF ssa/OpARMMULAD ssa/OpARMMULSF ssa/OpARMMULSD ssa/OpARMFMULAD]
+      (let [r (.Reg v)
+          ^{:line 235} r0 (.Reg (aget (.-Args v) 0))
+          ^{:line 236} r1 (.Reg (aget (.-Args v) 1))
+          ^{:line 237} r2 (.Reg (aget (.-Args v) 2))]
+        (when (!= r r0)
+          (.Fatalf v "result and addend are not in the same register: %v" (.LongString v)))
+
+        (let [p (.Prog s (.Asm (.-Op v)))]
+          (set! (.-Type (.-From p)) obj/TYPE_REG)
+          (set! (.-Reg (.-From p)) r2)
+          (set! (.-Reg p) r1)
+          (set! (.-Type (.-To p)) obj/TYPE_REG)
+          (set! (.-Reg (.-To p)) r))))
+    (case [ssa/OpARMADDS
+        ^{:line 248} ssa/OpARMADCS
+        ^{:line 249} ssa/OpARMSUBS]
+      (let [r (.Reg0 v)
+          ^{:line 251} r1 (.Reg (aget (.-Args v) 0))
+          ^{:line 252} r2 (.Reg (aget (.-Args v) 1))
+          ^{:line 253} p (.Prog s (.Asm (.-Op v)))]
+        (set! (.-Scond p) arm/C_SBIT)
+        (set! (.-Type (.-From p)) obj/TYPE_REG)
+        (set! (.-Reg (.-From p)) r2)
+        (set! (.-Reg p) r1)
+        (set! (.-Type (.-To p)) obj/TYPE_REG)
+        (set! (.-Reg (.-To p)) r)))
+    (case [ssa/OpARMSRAcond]
+      ;; ARM shift instructions uses only the low-order byte of the shift amount
+      ;; generate conditional instructions to deal with large shifts
+      ;; flag is already set
+      ;; SRA.HS	$31, Rarg0, Rdst // shift 31 bits to get the sign bit
+      ;; SRA.LO	Rarg1, Rarg0, Rdst
+      (let [r (.Reg v)
+          ^{:line 267} r1 (.Reg (aget (.-Args v) 0))
+          ^{:line 268} r2 (.Reg (aget (.-Args v) 1))
+          ^{:line 269} p (.Prog s arm/ASRA)]
+        (set! (.-Scond p) arm/C_SCOND_HS)
+        (set! (.-Type (.-From p)) obj/TYPE_CONST)
+        (set! (.-Offset (.-From p)) 31)
+        (set! (.-Reg p) r1)
+        (set! (.-Type (.-To p)) obj/TYPE_REG)
+        (set! (.-Reg (.-To p)) r)
+        (set! p (.Prog s arm/ASRA))
+        (set! (.-Scond p) arm/C_SCOND_LO)
+        (set! (.-Type (.-From p)) obj/TYPE_REG)
+        (set! (.-Reg (.-From p)) r2)
+        (set! (.-Reg p) r1)
+        (set! (.-Type (.-To p)) obj/TYPE_REG)
+        (set! (.-Reg (.-To p)) r)))
+    (case [ssa/OpARMBFX ssa/OpARMBFXU]
+      (let [p (.Prog s (.Asm (.-Op v)))]
+        (set! (.-Type (.-From p)) obj/TYPE_CONST)
+        (set! (.-Offset (.-From p)) (>> (.-AuxInt v) 8))
+        (.AddRestSourceConst p (bit-and (.-AuxInt v) 0xff))
+        (set! (.-Reg p) (.Reg (aget (.-Args v) 0)))
+        (set! (.-Type (.-To p)) obj/TYPE_REG)
+        (set! (.-Reg (.-To p)) (.Reg v))))
+    (case [ssa/OpARMANDconst ssa/OpARMBICconst]
+      ;; try to optimize ANDconst and BICconst to BFC, which saves bytes and ticks
+      ;; BFC is only available on ARMv7, and its result and source are in the same register
+      (when (and (== (.-Version buildcfg/GOARM) 7) (== (.Reg v) (.Reg (aget (.-Args v) 0))))
+        (let [^uint32 val (zero uint32)]
+          (if (== (.-Op v) ssa/OpARMANDconst)
+            (set! val (bit-not (conv uint32 (.-AuxInt v))))
+            ;; BICconst
+            (set! val (conv uint32 (.-AuxInt v))))
+
+          (let [(values lsb width) (getBFC val)]
+            ;; omit BFC for ARM's imm12
+            (when (and (< 8 width) (< width 24))
+              (let [p (.Prog s arm/ABFC)]
+                (set! (.-Type (.-From p)) obj/TYPE_CONST)
+                (set! (.-Offset (.-From p)) (conv int64 width))
+                (.AddRestSourceConst p (conv int64 lsb))
+                (set! (.-Type (.-To p)) obj/TYPE_REG)
+                (set! (.-Reg (.-To p)) (.Reg v))
+                (break))))))
+
+
+      ;; fall back to ordinary form
+      (fallthrough))
+    (case [ssa/OpARMADDconst
+        ^{:line 316} ssa/OpARMADCconst
+        ^{:line 317} ssa/OpARMSUBconst
+        ^{:line 318} ssa/OpARMSBCconst
+        ^{:line 319} ssa/OpARMRSBconst
+        ^{:line 320} ssa/OpARMRSCconst
+        ^{:line 321} ssa/OpARMORconst
+        ^{:line 322} ssa/OpARMXORconst
+        ^{:line 323} ssa/OpARMSLLconst
+        ^{:line 324} ssa/OpARMSRLconst
+        ^{:line 325} ssa/OpARMSRAconst]
+      (let [p (.Prog s (.Asm (.-Op v)))]
+        (set! (.-Type (.-From p)) obj/TYPE_CONST)
+        (set! (.-Offset (.-From p)) (.-AuxInt v))
+        (set! (.-Reg p) (.Reg (aget (.-Args v) 0)))
+        (set! (.-Type (.-To p)) obj/TYPE_REG)
+        (set! (.-Reg (.-To p)) (.Reg v))))
+    (case [ssa/OpARMADDSconst
+        ^{:line 333} ssa/OpARMSUBSconst
+        ^{:line 334} ssa/OpARMRSBSconst]
+      (let [p (.Prog s (.Asm (.-Op v)))]
+        (set! (.-Scond p) arm/C_SBIT)
+        (set! (.-Type (.-From p)) obj/TYPE_CONST)
+        (set! (.-Offset (.-From p)) (.-AuxInt v))
+        (set! (.-Reg p) (.Reg (aget (.-Args v) 0)))
+        (set! (.-Type (.-To p)) obj/TYPE_REG)
+        (set! (.-Reg (.-To p)) (.Reg0 v))))
+    (case [ssa/OpARMSRRconst]
+      (genshift s v arm/AMOVW 0 (.Reg (aget (.-Args v) 0)) (.Reg v) arm/SHIFT_RR (.-AuxInt v)))
+    (case [ssa/OpARMADDshiftLL
+        ^{:line 345} ssa/OpARMADCshiftLL
+        ^{:line 346} ssa/OpARMSUBshiftLL
+        ^{:line 347} ssa/OpARMSBCshiftLL
+        ^{:line 348} ssa/OpARMRSBshiftLL
+        ^{:line 349} ssa/OpARMRSCshiftLL
+        ^{:line 350} ssa/OpARMANDshiftLL
+        ^{:line 351} ssa/OpARMORshiftLL
+        ^{:line 352} ssa/OpARMXORshiftLL
+        ^{:line 353} ssa/OpARMBICshiftLL]
+      (genshift s v (.Asm (.-Op v)) (.Reg (aget (.-Args v) 0)) (.Reg (aget (.-Args v) 1)) (.Reg v) arm/SHIFT_LL (.-AuxInt v)))
+    (case [ssa/OpARMADDSshiftLL
+        ^{:line 356} ssa/OpARMSUBSshiftLL
+        ^{:line 357} ssa/OpARMRSBSshiftLL]
+      (let [p (genshift s v (.Asm (.-Op v)) (.Reg (aget (.-Args v) 0)) (.Reg (aget (.-Args v) 1)) (.Reg0 v) arm/SHIFT_LL (.-AuxInt v))]
+        (set! (.-Scond p) arm/C_SBIT)))
+    (case [ssa/OpARMADDshiftRL
+        ^{:line 361} ssa/OpARMADCshiftRL
+        ^{:line 362} ssa/OpARMSUBshiftRL
+        ^{:line 363} ssa/OpARMSBCshiftRL
+        ^{:line 364} ssa/OpARMRSBshiftRL
+        ^{:line 365} ssa/OpARMRSCshiftRL
+        ^{:line 366} ssa/OpARMANDshiftRL
+        ^{:line 367} ssa/OpARMORshiftRL
+        ^{:line 368} ssa/OpARMXORshiftRL
+        ^{:line 369} ssa/OpARMBICshiftRL]
+      (genshift s v (.Asm (.-Op v)) (.Reg (aget (.-Args v) 0)) (.Reg (aget (.-Args v) 1)) (.Reg v) arm/SHIFT_LR (.-AuxInt v)))
+    (case [ssa/OpARMADDSshiftRL
+        ^{:line 372} ssa/OpARMSUBSshiftRL
+        ^{:line 373} ssa/OpARMRSBSshiftRL]
+      (let [p (genshift s v (.Asm (.-Op v)) (.Reg (aget (.-Args v) 0)) (.Reg (aget (.-Args v) 1)) (.Reg0 v) arm/SHIFT_LR (.-AuxInt v))]
+        (set! (.-Scond p) arm/C_SBIT)))
+    (case [ssa/OpARMADDshiftRA
+        ^{:line 377} ssa/OpARMADCshiftRA
+        ^{:line 378} ssa/OpARMSUBshiftRA
+        ^{:line 379} ssa/OpARMSBCshiftRA
+        ^{:line 380} ssa/OpARMRSBshiftRA
+        ^{:line 381} ssa/OpARMRSCshiftRA
+        ^{:line 382} ssa/OpARMANDshiftRA
+        ^{:line 383} ssa/OpARMORshiftRA
+        ^{:line 384} ssa/OpARMXORshiftRA
+        ^{:line 385} ssa/OpARMBICshiftRA]
+      (genshift s v (.Asm (.-Op v)) (.Reg (aget (.-Args v) 0)) (.Reg (aget (.-Args v) 1)) (.Reg v) arm/SHIFT_AR (.-AuxInt v)))
+    (case [ssa/OpARMADDSshiftRA
+        ^{:line 388} ssa/OpARMSUBSshiftRA
+        ^{:line 389} ssa/OpARMRSBSshiftRA]
+      (let [p (genshift s v (.Asm (.-Op v)) (.Reg (aget (.-Args v) 0)) (.Reg (aget (.-Args v) 1)) (.Reg0 v) arm/SHIFT_AR (.-AuxInt v))]
+        (set! (.-Scond p) arm/C_SBIT)))
+    (case [ssa/OpARMXORshiftRR]
+      (genshift s v (.Asm (.-Op v)) (.Reg (aget (.-Args v) 0)) (.Reg (aget (.-Args v) 1)) (.Reg v) arm/SHIFT_RR (.-AuxInt v)))
+    (case [ssa/OpARMMVNshiftLL]
+      (genshift s v (.Asm (.-Op v)) 0 (.Reg (aget (.-Args v) 0)) (.Reg v) arm/SHIFT_LL (.-AuxInt v)))
+    (case [ssa/OpARMMVNshiftRL]
+      (genshift s v (.Asm (.-Op v)) 0 (.Reg (aget (.-Args v) 0)) (.Reg v) arm/SHIFT_LR (.-AuxInt v)))
+    (case [ssa/OpARMMVNshiftRA]
+      (genshift s v (.Asm (.-Op v)) 0 (.Reg (aget (.-Args v) 0)) (.Reg v) arm/SHIFT_AR (.-AuxInt v)))
+    (case [ssa/OpARMMVNshiftLLreg]
+      (genregshift s (.Asm (.-Op v)) 0 (.Reg (aget (.-Args v) 0)) (.Reg (aget (.-Args v) 1)) (.Reg v) arm/SHIFT_LL))
+    (case [ssa/OpARMMVNshiftRLreg]
+      (genregshift s (.Asm (.-Op v)) 0 (.Reg (aget (.-Args v) 0)) (.Reg (aget (.-Args v) 1)) (.Reg v) arm/SHIFT_LR))
+    (case [ssa/OpARMMVNshiftRAreg]
+      (genregshift s (.Asm (.-Op v)) 0 (.Reg (aget (.-Args v) 0)) (.Reg (aget (.-Args v) 1)) (.Reg v) arm/SHIFT_AR))
+    (case [ssa/OpARMADDshiftLLreg
+        ^{:line 407} ssa/OpARMADCshiftLLreg
+        ^{:line 408} ssa/OpARMSUBshiftLLreg
+        ^{:line 409} ssa/OpARMSBCshiftLLreg
+        ^{:line 410} ssa/OpARMRSBshiftLLreg
+        ^{:line 411} ssa/OpARMRSCshiftLLreg
+        ^{:line 412} ssa/OpARMANDshiftLLreg
+        ^{:line 413} ssa/OpARMORshiftLLreg
+        ^{:line 414} ssa/OpARMXORshiftLLreg
+        ^{:line 415} ssa/OpARMBICshiftLLreg]
+      (genregshift s (.Asm (.-Op v)) (.Reg (aget (.-Args v) 0)) (.Reg (aget (.-Args v) 1)) (.Reg (aget (.-Args v) 2)) (.Reg v) arm/SHIFT_LL))
+    (case [ssa/OpARMADDSshiftLLreg
+        ^{:line 418} ssa/OpARMSUBSshiftLLreg
+        ^{:line 419} ssa/OpARMRSBSshiftLLreg]
+      (let [p (genregshift s (.Asm (.-Op v)) (.Reg (aget (.-Args v) 0)) (.Reg (aget (.-Args v) 1)) (.Reg (aget (.-Args v) 2)) (.Reg0 v) arm/SHIFT_LL)]
+        (set! (.-Scond p) arm/C_SBIT)))
+    (case [ssa/OpARMADDshiftRLreg
+        ^{:line 423} ssa/OpARMADCshiftRLreg
+        ^{:line 424} ssa/OpARMSUBshiftRLreg
+        ^{:line 425} ssa/OpARMSBCshiftRLreg
+        ^{:line 426} ssa/OpARMRSBshiftRLreg
+        ^{:line 427} ssa/OpARMRSCshiftRLreg
+        ^{:line 428} ssa/OpARMANDshiftRLreg
+        ^{:line 429} ssa/OpARMORshiftRLreg
+        ^{:line 430} ssa/OpARMXORshiftRLreg
+        ^{:line 431} ssa/OpARMBICshiftRLreg]
+      (genregshift s (.Asm (.-Op v)) (.Reg (aget (.-Args v) 0)) (.Reg (aget (.-Args v) 1)) (.Reg (aget (.-Args v) 2)) (.Reg v) arm/SHIFT_LR))
+    (case [ssa/OpARMADDSshiftRLreg
+        ^{:line 434} ssa/OpARMSUBSshiftRLreg
+        ^{:line 435} ssa/OpARMRSBSshiftRLreg]
+      (let [p (genregshift s (.Asm (.-Op v)) (.Reg (aget (.-Args v) 0)) (.Reg (aget (.-Args v) 1)) (.Reg (aget (.-Args v) 2)) (.Reg0 v) arm/SHIFT_LR)]
+        (set! (.-Scond p) arm/C_SBIT)))
+    (case [ssa/OpARMADDshiftRAreg
+        ^{:line 439} ssa/OpARMADCshiftRAreg
+        ^{:line 440} ssa/OpARMSUBshiftRAreg
+        ^{:line 441} ssa/OpARMSBCshiftRAreg
+        ^{:line 442} ssa/OpARMRSBshiftRAreg
+        ^{:line 443} ssa/OpARMRSCshiftRAreg
+        ^{:line 444} ssa/OpARMANDshiftRAreg
+        ^{:line 445} ssa/OpARMORshiftRAreg
+        ^{:line 446} ssa/OpARMXORshiftRAreg
+        ^{:line 447} ssa/OpARMBICshiftRAreg]
+      (genregshift s (.Asm (.-Op v)) (.Reg (aget (.-Args v) 0)) (.Reg (aget (.-Args v) 1)) (.Reg (aget (.-Args v) 2)) (.Reg v) arm/SHIFT_AR))
+    (case [ssa/OpARMADDSshiftRAreg
+        ^{:line 450} ssa/OpARMSUBSshiftRAreg
+        ^{:line 451} ssa/OpARMRSBSshiftRAreg]
+      (let [p (genregshift s (.Asm (.-Op v)) (.Reg (aget (.-Args v) 0)) (.Reg (aget (.-Args v) 1)) (.Reg (aget (.-Args v) 2)) (.Reg0 v) arm/SHIFT_AR)]
+        (set! (.-Scond p) arm/C_SBIT)))
+    (case [ssa/OpARMHMUL
+        ^{:line 455} ssa/OpARMHMULU]
+      ;; 32-bit high multiplication
+      (let [p (.Prog s (.Asm (.-Op v)))]
+        (set! (.-Type (.-From p)) obj/TYPE_REG)
+        (set! (.-Reg (.-From p)) (.Reg (aget (.-Args v) 0)))
+        (set! (.-Reg p) (.Reg (aget (.-Args v) 1)))
+        (set! (.-Type (.-To p)) obj/TYPE_REGREG)
+        (set! (.-Reg (.-To p)) (.Reg v))
+        (set! (.-Offset (.-To p)) arm/REGTMP))) ; throw away low 32-bit into tmp register
+    (case [ssa/OpARMMULLU]
+      ;; 32-bit multiplication, results 64-bit, high 32-bit in out0, low 32-bit in out1
+      (let [p (.Prog s (.Asm (.-Op v)))]
+        (set! (.-Type (.-From p)) obj/TYPE_REG)
+        (set! (.-Reg (.-From p)) (.Reg (aget (.-Args v) 0)))
+        (set! (.-Reg p) (.Reg (aget (.-Args v) 1)))
+        (set! (.-Type (.-To p)) obj/TYPE_REGREG)
+        (set! (.-Reg (.-To p)) (.Reg0 v)) ; high 32-bit
+        (set! (.-Offset (.-To p)) (conv int64 (.Reg1 v))))) ; low 32-bit
+    (case [ssa/OpARMMULA ssa/OpARMMULS]
+      (let [p (.Prog s (.Asm (.-Op v)))]
+        (set! (.-Type (.-From p)) obj/TYPE_REG)
+        (set! (.-Reg (.-From p)) (.Reg (aget (.-Args v) 0)))
+        (set! (.-Reg p) (.Reg (aget (.-Args v) 1)))
+        (set! (.-Type (.-To p)) obj/TYPE_REGREG2)
+        (set! (.-Reg (.-To p)) (.Reg v)) ; result
+        (set! (.-Offset (.-To p)) (conv int64 (.Reg (aget (.-Args v) 2)))))) ; addend
+    (case [ssa/OpARMMOVWconst]
+      (let [p (.Prog s (.Asm (.-Op v)))]
+        (set! (.-Type (.-From p)) obj/TYPE_CONST)
+        (set! (.-Offset (.-From p)) (.-AuxInt v))
+        (set! (.-Type (.-To p)) obj/TYPE_REG)
+        (set! (.-Reg (.-To p)) (.Reg v))))
+    (case [ssa/OpARMMOVFconst
+        ^{:line 488} ssa/OpARMMOVDconst]
+      (let [p (.Prog s (.Asm (.-Op v)))]
+        (set! (.-Type (.-From p)) obj/TYPE_FCONST)
+        (set! (.-Val (.-From p)) (math/Float64frombits (conv uint64 (.-AuxInt v))))
+        (set! (.-Type (.-To p)) obj/TYPE_REG)
+        (set! (.-Reg (.-To p)) (.Reg v))))
+    (case [ssa/OpARMCMP
+        ^{:line 495} ssa/OpARMCMN
+        ^{:line 496} ssa/OpARMTST
+        ^{:line 497} ssa/OpARMTEQ
+        ^{:line 498} ssa/OpARMCMPF
+        ^{:line 499} ssa/OpARMCMPD]
+      (let [p (.Prog s (.Asm (.-Op v)))]
+        (set! (.-Type (.-From p)) obj/TYPE_REG)
+        ;; Special layout in ARM assembly
+        ;; Comparing to x86, the operands of ARM's CMP are reversed.
+        (set! (.-Reg (.-From p)) (.Reg (aget (.-Args v) 1)))
+        (set! (.-Reg p) (.Reg (aget (.-Args v) 0)))))
+    (case [ssa/OpARMCMPconst
+        ^{:line 507} ssa/OpARMCMNconst
+        ^{:line 508} ssa/OpARMTSTconst
+        ^{:line 509} ssa/OpARMTEQconst]
+      ;; Special layout in ARM assembly
+      (let [p (.Prog s (.Asm (.-Op v)))]
+        (set! (.-Type (.-From p)) obj/TYPE_CONST)
+        (set! (.-Offset (.-From p)) (.-AuxInt v))
+        (set! (.-Reg p) (.Reg (aget (.-Args v) 0)))))
+    (case [ssa/OpARMCMPF0
+        ^{:line 516} ssa/OpARMCMPD0]
+      (let [p (.Prog s (.Asm (.-Op v)))]
+        (set! (.-Type (.-From p)) obj/TYPE_REG)
+        (set! (.-Reg (.-From p)) (.Reg (aget (.-Args v) 0)))))
+    (case [ssa/OpARMCMPshiftLL ssa/OpARMCMNshiftLL ssa/OpARMTSTshiftLL ssa/OpARMTEQshiftLL]
+      (genshift s v (.Asm (.-Op v)) (.Reg (aget (.-Args v) 0)) (.Reg (aget (.-Args v) 1)) 0 arm/SHIFT_LL (.-AuxInt v)))
+    (case [ssa/OpARMCMPshiftRL ssa/OpARMCMNshiftRL ssa/OpARMTSTshiftRL ssa/OpARMTEQshiftRL]
+      (genshift s v (.Asm (.-Op v)) (.Reg (aget (.-Args v) 0)) (.Reg (aget (.-Args v) 1)) 0 arm/SHIFT_LR (.-AuxInt v)))
+    (case [ssa/OpARMCMPshiftRA ssa/OpARMCMNshiftRA ssa/OpARMTSTshiftRA ssa/OpARMTEQshiftRA]
+      (genshift s v (.Asm (.-Op v)) (.Reg (aget (.-Args v) 0)) (.Reg (aget (.-Args v) 1)) 0 arm/SHIFT_AR (.-AuxInt v)))
+    (case [ssa/OpARMCMPshiftLLreg ssa/OpARMCMNshiftLLreg ssa/OpARMTSTshiftLLreg ssa/OpARMTEQshiftLLreg]
+      (genregshift s (.Asm (.-Op v)) (.Reg (aget (.-Args v) 0)) (.Reg (aget (.-Args v) 1)) (.Reg (aget (.-Args v) 2)) 0 arm/SHIFT_LL))
+    (case [ssa/OpARMCMPshiftRLreg ssa/OpARMCMNshiftRLreg ssa/OpARMTSTshiftRLreg ssa/OpARMTEQshiftRLreg]
+      (genregshift s (.Asm (.-Op v)) (.Reg (aget (.-Args v) 0)) (.Reg (aget (.-Args v) 1)) (.Reg (aget (.-Args v) 2)) 0 arm/SHIFT_LR))
+    (case [ssa/OpARMCMPshiftRAreg ssa/OpARMCMNshiftRAreg ssa/OpARMTSTshiftRAreg ssa/OpARMTEQshiftRAreg]
+      (genregshift s (.Asm (.-Op v)) (.Reg (aget (.-Args v) 0)) (.Reg (aget (.-Args v) 1)) (.Reg (aget (.-Args v) 2)) 0 arm/SHIFT_AR))
+    (case [ssa/OpARMMOVWaddr]
+      (let [p (.Prog s arm/AMOVW)]
+        (set! (.-Type (.-From p)) obj/TYPE_ADDR)
+        (set! (.-Reg (.-From p)) (.Reg (aget (.-Args v) 0)))
+        (set! (.-Type (.-To p)) obj/TYPE_REG)
+        (set! (.-Reg (.-To p)) (.Reg v))
+
+        (let [^string wantreg (zero string)]
+          ;; MOVW $sym+off(base), R
+          ;; the assembler expands it as the following:
+          ;; - base is SP: add constant offset to SP (R13)
+          ;;               when constant is large, tmp register (R11) may be used
+          ;; - base is SB: load external address from constant pool (use relocation)
+          (type-switch (.-Aux v)
+            (default
+              (.Fatalf v "aux is of unknown type %T" (.-Aux v)))
+            (case [(* obj/LSym)]
+              (set! wantreg "SB")
+              (ssagen/AddAux (addr (.-From p)) v))
+            (case [(* ir/Name)]
+              (set! wantreg "SP")
+              (ssagen/AddAux (addr (.-From p)) v))
+            (case [nil]
+              ;; No sym, just MOVW $off(SP), R
+              (set! wantreg "SP")
+              (set! (.-Offset (.-From p)) (.-AuxInt v))))
+
+          (when [reg (.RegName (aget (.-Args v) 0))] (!= reg wantreg)
+            (.Fatalf v "bad reg %s for symbol type %T, want %s" reg (.-Aux v) wantreg)))))
+
+
+    (case [ssa/OpARMMOVBload
+        ^{:line 564} ssa/OpARMMOVBUload
+        ^{:line 565} ssa/OpARMMOVHload
+        ^{:line 566} ssa/OpARMMOVHUload
+        ^{:line 567} ssa/OpARMMOVWload
+        ^{:line 568} ssa/OpARMMOVFload
+        ^{:line 569} ssa/OpARMMOVDload]
+      (let [p (.Prog s (.Asm (.-Op v)))]
+        (set! (.-Type (.-From p)) obj/TYPE_MEM)
+        (set! (.-Reg (.-From p)) (.Reg (aget (.-Args v) 0)))
+        (ssagen/AddAux (addr (.-From p)) v)
+        (set! (.-Type (.-To p)) obj/TYPE_REG)
+        (set! (.-Reg (.-To p)) (.Reg v))))
+    (case [ssa/OpARMMOVBstore
+        ^{:line 577} ssa/OpARMMOVHstore
+        ^{:line 578} ssa/OpARMMOVWstore
+        ^{:line 579} ssa/OpARMMOVFstore
+        ^{:line 580} ssa/OpARMMOVDstore]
+      (let [p (.Prog s (.Asm (.-Op v)))]
+        (set! (.-Type (.-From p)) obj/TYPE_REG)
+        (set! (.-Reg (.-From p)) (.Reg (aget (.-Args v) 1)))
+        (set! (.-Type (.-To p)) obj/TYPE_MEM)
+        (set! (.-Reg (.-To p)) (.Reg (aget (.-Args v) 0)))
+        (ssagen/AddAux (addr (.-To p)) v)))
+    (case [ssa/OpARMMOVWloadidx ssa/OpARMMOVBUloadidx ssa/OpARMMOVBloadidx ssa/OpARMMOVHUloadidx ssa/OpARMMOVHloadidx]
+      ;; this is just shift 0 bits
+      (fallthrough))
+    (case [ssa/OpARMMOVWloadshiftLL]
+      (let [p (genshift s v (.Asm (.-Op v)) 0 (.Reg (aget (.-Args v) 1)) (.Reg v) arm/SHIFT_LL (.-AuxInt v))]
+        (set! (.-Reg (.-From p)) (.Reg (aget (.-Args v) 0)))))
+    (case [ssa/OpARMMOVWloadshiftRL]
+      (let [p (genshift s v (.Asm (.-Op v)) 0 (.Reg (aget (.-Args v) 1)) (.Reg v) arm/SHIFT_LR (.-AuxInt v))]
+        (set! (.-Reg (.-From p)) (.Reg (aget (.-Args v) 0)))))
+    (case [ssa/OpARMMOVWloadshiftRA]
+      (let [p (genshift s v (.Asm (.-Op v)) 0 (.Reg (aget (.-Args v) 1)) (.Reg v) arm/SHIFT_AR (.-AuxInt v))]
+        (set! (.-Reg (.-From p)) (.Reg (aget (.-Args v) 0)))))
+    (case [ssa/OpARMMOVWstoreidx ssa/OpARMMOVBstoreidx ssa/OpARMMOVHstoreidx]
+      ;; this is just shift 0 bits
+      (fallthrough))
+    (case [ssa/OpARMMOVWstoreshiftLL]
+      (let [p (.Prog s (.Asm (.-Op v)))]
+        (set! (.-Type (.-From p)) obj/TYPE_REG)
+        (set! (.-Reg (.-From p)) (.Reg (aget (.-Args v) 2)))
+        (set! (.-Type (.-To p)) obj/TYPE_SHIFT)
+        (set! (.-Reg (.-To p)) (.Reg (aget (.-Args v) 0)))
+        (set! (.-Offset (.-To p)) (conv int64 (makeshift v (.Reg (aget (.-Args v) 1)) arm/SHIFT_LL (.-AuxInt v))))))
+    (case [ssa/OpARMMOVWstoreshiftRL]
+      (let [p (.Prog s (.Asm (.-Op v)))]
+        (set! (.-Type (.-From p)) obj/TYPE_REG)
+        (set! (.-Reg (.-From p)) (.Reg (aget (.-Args v) 2)))
+        (set! (.-Type (.-To p)) obj/TYPE_SHIFT)
+        (set! (.-Reg (.-To p)) (.Reg (aget (.-Args v) 0)))
+        (set! (.-Offset (.-To p)) (conv int64 (makeshift v (.Reg (aget (.-Args v) 1)) arm/SHIFT_LR (.-AuxInt v))))))
+    (case [ssa/OpARMMOVWstoreshiftRA]
+      (let [p (.Prog s (.Asm (.-Op v)))]
+        (set! (.-Type (.-From p)) obj/TYPE_REG)
+        (set! (.-Reg (.-From p)) (.Reg (aget (.-Args v) 2)))
+        (set! (.-Type (.-To p)) obj/TYPE_SHIFT)
+        (set! (.-Reg (.-To p)) (.Reg (aget (.-Args v) 0)))
+        (set! (.-Offset (.-To p)) (conv int64 (makeshift v (.Reg (aget (.-Args v) 1)) arm/SHIFT_AR (.-AuxInt v))))))
+    (case [ssa/OpARMMOVBreg
+        ^{:line 624} ssa/OpARMMOVBUreg
+        ^{:line 625} ssa/OpARMMOVHreg
+        ^{:line 626} ssa/OpARMMOVHUreg]
+      (let [a (aget (.-Args v) 0)]
+        (while (or (== (.-Op a) ssa/OpCopy) (== (.-Op a) ssa/OpARMMOVWreg) (== (.-Op a) ssa/OpARMMOVWnop))
+          (set! a (aget (.-Args a) 0)))
+
+        (when (== (.-Op a) ssa/OpLoadReg)
+          (let [t (.-Type a)]
+            (switch
+              (case [(and (== (.-Op v) ssa/OpARMMOVBreg) (== (.Size t) 1) (.IsSigned t))
+                  (and (== (.-Op v) ssa/OpARMMOVBUreg) (== (.Size t) 1) (not (.IsSigned t)))
+                  (and (== (.-Op v) ssa/OpARMMOVHreg) (== (.Size t) 2) (.IsSigned t))
+                  (and (== (.-Op v) ssa/OpARMMOVHUreg) (== (.Size t) 2) (not (.IsSigned t)))]
+                ;; arg is a proper-typed load, already zero/sign-extended, don't extend again
+                (when (== (.Reg v) (.Reg (aget (.-Args v) 0)))
+                  (return))
+
+                (let [p (.Prog s arm/AMOVW)]
+                  (set! (.-Type (.-From p)) obj/TYPE_REG)
+                  (set! (.-Reg (.-From p)) (.Reg (aget (.-Args v) 0)))
+                  (set! (.-Type (.-To p)) obj/TYPE_REG)
+                  (set! (.-Reg (.-To p)) (.Reg v))
+                  (return)))
+              (default))))
+
+
+        (when (>= (.-Version buildcfg/GOARM) 6)
+          ;; generate more efficient "MOVB/MOVBU/MOVH/MOVHU Reg@>0, Reg" on ARMv6 & ARMv7
+          (genshift s v (.Asm (.-Op v)) 0 (.Reg (aget (.-Args v) 0)) (.Reg v) arm/SHIFT_RR 0)
+          (return))
+
+        (fallthrough)))
+    (case [ssa/OpARMMVN
+        ^{:line 658} ssa/OpARMCLZ
+        ^{:line 659} ssa/OpARMREV
+        ^{:line 660} ssa/OpARMREV16
+        ^{:line 661} ssa/OpARMRBIT
+        ^{:line 662} ssa/OpARMSQRTF
+        ^{:line 663} ssa/OpARMSQRTD
+        ^{:line 664} ssa/OpARMNEGF
+        ^{:line 665} ssa/OpARMNEGD
+        ^{:line 666} ssa/OpARMABSD
+        ^{:line 667} ssa/OpARMMOVWF
+        ^{:line 668} ssa/OpARMMOVWD
+        ^{:line 669} ssa/OpARMMOVFW
+        ^{:line 670} ssa/OpARMMOVDW
+        ^{:line 671} ssa/OpARMMOVFD
+        ^{:line 672} ssa/OpARMMOVDF]
+      (let [p (.Prog s (.Asm (.-Op v)))]
+        (set! (.-Type (.-From p)) obj/TYPE_REG)
+        (set! (.-Reg (.-From p)) (.Reg (aget (.-Args v) 0)))
+        (set! (.-Type (.-To p)) obj/TYPE_REG)
+        (set! (.-Reg (.-To p)) (.Reg v))))
+    (case [ssa/OpARMMOVWUF
+        ^{:line 679} ssa/OpARMMOVWUD
+        ^{:line 680} ssa/OpARMMOVFWU
+        ^{:line 681} ssa/OpARMMOVDWU]
+      (let [p (.Prog s (.Asm (.-Op v)))]
+        (set! (.-Scond p) arm/C_UBIT)
+        (set! (.-Type (.-From p)) obj/TYPE_REG)
+        (set! (.-Reg (.-From p)) (.Reg (aget (.-Args v) 0)))
+        (set! (.-Type (.-To p)) obj/TYPE_REG)
+        (set! (.-Reg (.-To p)) (.Reg v))))
+    (case [ssa/OpARMCMOVWHSconst]
+      (let [p (.Prog s arm/AMOVW)]
+        (set! (.-Scond p) arm/C_SCOND_HS)
+        (set! (.-Type (.-From p)) obj/TYPE_CONST)
+        (set! (.-Offset (.-From p)) (.-AuxInt v))
+        (set! (.-Type (.-To p)) obj/TYPE_REG)
+        (set! (.-Reg (.-To p)) (.Reg v))))
+    (case [ssa/OpARMCMOVWLSconst]
+      (let [p (.Prog s arm/AMOVW)]
+        (set! (.-Scond p) arm/C_SCOND_LS)
+        (set! (.-Type (.-From p)) obj/TYPE_CONST)
+        (set! (.-Offset (.-From p)) (.-AuxInt v))
+        (set! (.-Type (.-To p)) obj/TYPE_REG)
+        (set! (.-Reg (.-To p)) (.Reg v))))
+    (case [ssa/OpARMCALLstatic ssa/OpARMCALLclosure ssa/OpARMCALLinter]
+      (.Call s v))
+    (case [ssa/OpARMCALLtail ssa/OpARMCALLtailinter]
+      (.TailCall s v))
+    (case [ssa/OpARMCALLudiv]
+      (let [p (.Prog s obj/ACALL)]
+        (set! (.-Type (.-To p)) obj/TYPE_MEM)
+        (set! (.-Name (.-To p)) obj/NAME_EXTERN)
+        (set! (.-Sym (.-To p)) (.-Udiv ir/Syms))))
+    (case [ssa/OpARMLoweredWB]
+      (let [p (.Prog s obj/ACALL)]
+        (set! (.-Type (.-To p)) obj/TYPE_MEM)
+        (set! (.-Name (.-To p)) obj/NAME_EXTERN)
+        ;; AuxInt encodes how many buffer entries we need.
+        (set! (.-Sym (.-To p)) (aget (.-GCWriteBarrier ir/Syms) (- (.-AuxInt v) 1)))))
+
+    (case [ssa/OpARMLoweredPanicBoundsRR ssa/OpARMLoweredPanicBoundsRC ssa/OpARMLoweredPanicBoundsCR ssa/OpARMLoweredPanicBoundsCC
+        ^{:line 719} ssa/OpARMLoweredPanicExtendRR ssa/OpARMLoweredPanicExtendRC]
+      ;; Compute the constant we put in the PCData entry for this call.
+      (let [(values code signed) (.Code (conv ssa/BoundsKind (.-AuxInt v)))
+          ^{:line 722} xIsReg false
+          ^{:line 723} yIsReg false
+          ^{:line 724} xVal 0
+          ^{:line 725} yVal 0
+          ^{:line 726} extend false]
+        (switch (.-Op v)
+          (case [ssa/OpARMLoweredPanicBoundsRR]
+            (set! xIsReg true)
+            (set! xVal (conv int (- (.Reg (aget (.-Args v) 0)) arm/REG_R0)))
+            (set! yIsReg true)
+            (set! yVal (conv int (- (.Reg (aget (.-Args v) 1)) arm/REG_R0))))
+          (case [ssa/OpARMLoweredPanicExtendRR]
+            (set! extend true)
+            (set! xIsReg true)
+            (let [hi (conv int (- (.Reg (aget (.-Args v) 0)) arm/REG_R0))
+                ^{:line 737} lo (conv int (- (.Reg (aget (.-Args v) 1)) arm/REG_R0))]
+              (set! xVal (+ (<< hi 2) lo)) ; encode 2 register numbers
+              (set! yIsReg true)
+              (set! yVal (conv int (- (.Reg (aget (.-Args v) 2)) arm/REG_R0)))))
+          (case [ssa/OpARMLoweredPanicBoundsRC]
+            (set! xIsReg true)
+            (set! xVal (conv int (- (.Reg (aget (.-Args v) 0)) arm/REG_R0)))
+            (let [c (.-C (assert ssa/PanicBoundsC (.-Aux v)))]
+              (if (and (>= c 0) (<= c abi/BoundsMaxConst))
+                (set! yVal (conv int c))
+                (do
+                  ;; Move constant to a register
+                  (set! yIsReg true)
+                  (when (== yVal xVal)
+                    (set! yVal 1))
+
+                  (let [p (.Prog s arm/AMOVW)]
+                    (set! (.-Type (.-From p)) obj/TYPE_CONST)
+                    (set! (.-Offset (.-From p)) c)
+                    (set! (.-Type (.-To p)) obj/TYPE_REG)
+                    (set! (.-Reg (.-To p)) (+ arm/REG_R0 (conv int16 yVal))))))))
+
+          (case [ssa/OpARMLoweredPanicExtendRC]
+            (set! extend true)
+            (set! xIsReg true)
+            (let [hi (conv int (- (.Reg (aget (.-Args v) 0)) arm/REG_R0))
+                ^{:line 763} lo (conv int (- (.Reg (aget (.-Args v) 1)) arm/REG_R0))]
+              (set! xVal (+ (<< hi 2) lo)) ; encode 2 register numbers
+              (let [c (.-C (assert ssa/PanicBoundsC (.-Aux v)))]
+                (if (and (>= c 0) (<= c abi/BoundsMaxConst))
+                  (set! yVal (conv int c))
+                  (do
+                    ;; Move constant to a register
+                    (while (or (== yVal hi) (== yVal lo))
+                      (inc! yVal))
+
+                    (let [p (.Prog s arm/AMOVW)]
+                      (set! (.-Type (.-From p)) obj/TYPE_CONST)
+                      (set! (.-Offset (.-From p)) c)
+                      (set! (.-Type (.-To p)) obj/TYPE_REG)
+                      (set! (.-Reg (.-To p)) (+ arm/REG_R0 (conv int16 yVal)))))))))
+
+          (case [ssa/OpARMLoweredPanicBoundsCR]
+            (set! yIsReg true)
+            (set! yVal (conv int (- (.Reg (aget (.-Args v) 0)) arm/REG_R0)))
+            (let [c (.-C (assert ssa/PanicBoundsC (.-Aux v)))]
+              (cond (and (>= c 0) (<= c abi/BoundsMaxConst))
+                (set! xVal (conv int c))
+                (or (and signed (== (conv int64 (conv int32 c)) c)) (and (not signed) (== (conv int64 (conv uint32 c)) c))) (do
+                  ;; Move constant to a register
+                  (set! xIsReg true)
+                  (when (== xVal yVal)
+                    (set! xVal 1))
+
+                  (let [p (.Prog s arm/AMOVW)]
+                    (set! (.-Type (.-From p)) obj/TYPE_CONST)
+                    (set! (.-Offset (.-From p)) c)
+                    (set! (.-Type (.-To p)) obj/TYPE_REG)
+                    (set! (.-Reg (.-To p)) (+ arm/REG_R0 (conv int16 xVal))))) :else
+                (do
+                  ;; Move constant to two registers
+                  (set! extend true)
+                  (set! xIsReg true)
+                  (let [hi 0
+                      ^{:line 801} lo 1]
+                    (when (== hi yVal)
+                      (set! hi 2))
+
+                    (when (== lo yVal)
+                      (set! lo 2))
+
+                    (set! xVal (+ (<< hi 2) lo))
+                    (let [p (.Prog s arm/AMOVW)]
+                      (set! (.-Type (.-From p)) obj/TYPE_CONST)
+                      (set! (.-Offset (.-From p)) (>> c 32))
+                      (set! (.-Type (.-To p)) obj/TYPE_REG)
+                      (set! (.-Reg (.-To p)) (+ arm/REG_R0 (conv int16 hi)))
+                      (set! p (.Prog s arm/AMOVW))
+                      (set! (.-Type (.-From p)) obj/TYPE_CONST)
+                      (set! (.-Offset (.-From p)) (conv int64 (conv int32 c)))
+                      (set! (.-Type (.-To p)) obj/TYPE_REG)
+                      (set! (.-Reg (.-To p)) (+ arm/REG_R0 (conv int16 lo)))))))))
+
+          (case [ssa/OpARMLoweredPanicBoundsCC]
+            (let [c (.-Cx (assert ssa/PanicBoundsCC (.-Aux v)))]
+              (cond (and (>= c 0) (<= c abi/BoundsMaxConst))
+                (set! xVal (conv int c))
+                (or (and signed (== (conv int64 (conv int32 c)) c)) (and (not signed) (== (conv int64 (conv uint32 c)) c))) (do
+                  ;; Move constant to a register
+                  (set! xIsReg true)
+                  (let [p (.Prog s arm/AMOVW)]
+                    (set! (.-Type (.-From p)) obj/TYPE_CONST)
+                    (set! (.-Offset (.-From p)) c)
+                    (set! (.-Type (.-To p)) obj/TYPE_REG)
+                    (set! (.-Reg (.-To p)) (+ arm/REG_R0 (conv int16 xVal))))) :else
+                (do
+                  ;; Move constant to two registers
+                  (set! extend true)
+                  (set! xIsReg true)
+                  (let [hi 0
+                      ^{:line 837} lo 1]
+                    (set! xVal (+ (<< hi 2) lo))
+                    (let [p (.Prog s arm/AMOVW)]
+                      (set! (.-Type (.-From p)) obj/TYPE_CONST)
+                      (set! (.-Offset (.-From p)) (>> c 32))
+                      (set! (.-Type (.-To p)) obj/TYPE_REG)
+                      (set! (.-Reg (.-To p)) (+ arm/REG_R0 (conv int16 hi)))
+                      (set! p (.Prog s arm/AMOVW))
+                      (set! (.-Type (.-From p)) obj/TYPE_CONST)
+                      (set! (.-Offset (.-From p)) (conv int64 (conv int32 c)))
+                      (set! (.-Type (.-To p)) obj/TYPE_REG)
+                      (set! (.-Reg (.-To p)) (+ arm/REG_R0 (conv int16 lo)))))))
+
+              (set! c (.-Cy (assert ssa/PanicBoundsCC (.-Aux v))))
+              (if (and (>= c 0) (<= c abi/BoundsMaxConst))
+                (set! yVal (conv int c))
+                (do
+                  ;; Move constant to a register
+                  (set! yIsReg true)
+                  (set! yVal 2)
+                  (let [p (.Prog s arm/AMOVW)]
+                    (set! (.-Type (.-From p)) obj/TYPE_CONST)
+                    (set! (.-Offset (.-From p)) c)
+                    (set! (.-Type (.-To p)) obj/TYPE_REG)
+                    (set! (.-Reg (.-To p)) (+ arm/REG_R0 (conv int16 yVal)))))))))
+
+
+        (let [c (abi/BoundsEncode code signed xIsReg yIsReg xVal yVal)
+
+            ^{:line 866} p (.Prog s obj/APCDATA)]
+          (.SetConst (.-From p) abi/PCDATA_PanicBounds)
+          (.SetConst (.-To p) (conv int64 c))
+          (set! p (.Prog s obj/ACALL))
+          (set! (.-Type (.-To p)) obj/TYPE_MEM)
+          (set! (.-Name (.-To p)) obj/NAME_EXTERN)
+          (if extend
+            (set! (.-Sym (.-To p)) (.-PanicExtend ir/Syms))
+
+            (set! (.-Sym (.-To p)) (.-PanicBounds ir/Syms))))))
+
+
+    (case [ssa/OpARMDUFFZERO]
+      (let [p (.Prog s obj/ADUFFZERO)]
+        (set! (.-Type (.-To p)) obj/TYPE_MEM)
+        (set! (.-Name (.-To p)) obj/NAME_EXTERN)
+        (set! (.-Sym (.-To p)) (.-Duffzero ir/Syms))
+        (set! (.-Offset (.-To p)) (.-AuxInt v))))
+    (case [ssa/OpARMDUFFCOPY]
+      (let [p (.Prog s obj/ADUFFCOPY)]
+        (set! (.-Type (.-To p)) obj/TYPE_MEM)
+        (set! (.-Name (.-To p)) obj/NAME_EXTERN)
+        (set! (.-Sym (.-To p)) (.-Duffcopy ir/Syms))
+        (set! (.-Offset (.-To p)) (.-AuxInt v))))
+    (case [ssa/OpARMLoweredNilCheck]
+      ;; Issue a load which will fault if arg is nil.
+      (let [p (.Prog s arm/AMOVB)]
+        (set! (.-Type (.-From p)) obj/TYPE_MEM)
+        (set! (.-Reg (.-From p)) (.Reg (aget (.-Args v) 0)))
+        (ssagen/AddAux (addr (.-From p)) v)
+        (set! (.-Type (.-To p)) obj/TYPE_REG)
+        (set! (.-Reg (.-To p)) arm/REGTMP)
+        (when (logopt/Enabled)
+          (logopt/LogOpt (.-Pos v) "nilcheck" "genssa" (.-Name (.-Func (.-Block v)))))
+
+        (when (and (!= (.-Nil base/Debug) 0) (> ^{:go/via [lico]} (.Line (.-Pos v)) 1)) ; v.Pos.Line()==1 in generated wrappers
+          (base/WarnfAt (.-Pos v) "generated nil check"))))
+
+    (case [ssa/OpARMLoweredZero]
+      ;; MOVW.P	Rarg2, 4(R1)
+      ;; CMP	Rarg1, R1
+      ;; BLE	-2(PC)
+      ;; arg1 is the address of the last element to zero
+      ;; arg2 is known to be zero
+      ;; auxint is alignment
+      (let [^int64 sz (zero int64)
+          ^{:line 912 :tag obj/As} mov (zero obj/As)]
+        (switch
+          (case [(== (% (.-AuxInt v) 4) 0)]
+            (set! sz 4)
+            (set! mov arm/AMOVW))
+          (case [(== (% (.-AuxInt v) 2) 0)]
+            (set! sz 2)
+            (set! mov arm/AMOVH))
+          (default
+            (set! sz 1)
+            (set! mov arm/AMOVB)))
+
+        (let [p (.Prog s mov)]
+          (set! (.-Scond p) arm/C_PBIT)
+          (set! (.-Type (.-From p)) obj/TYPE_REG)
+          (set! (.-Reg (.-From p)) (.Reg (aget (.-Args v) 2)))
+          (set! (.-Type (.-To p)) obj/TYPE_MEM)
+          (set! (.-Reg (.-To p)) arm/REG_R1)
+          (set! (.-Offset (.-To p)) sz)
+          (let [p2 (.Prog s arm/ACMP)]
+            (set! (.-Type (.-From p2)) obj/TYPE_REG)
+            (set! (.-Reg (.-From p2)) (.Reg (aget (.-Args v) 1)))
+            (set! (.-Reg p2) arm/REG_R1)
+            (let [p3 (.Prog s arm/ABLE)]
+              (set! (.-Type (.-To p3)) obj/TYPE_BRANCH)
+              (.SetTarget (.-To p3) p))))))
+    (case [ssa/OpARMLoweredMove]
+      ;; MOVW.P	4(R1), Rtmp
+      ;; MOVW.P	Rtmp, 4(R2)
+      ;; CMP	Rarg2, R1
+      ;; BLE	-3(PC)
+      ;; arg2 is the address of the last element of src
+      ;; auxint is alignment
+      (let [^int64 sz (zero int64)
+          ^{:line 946 :tag obj/As} mov (zero obj/As)]
+        (switch
+          (case [(== (% (.-AuxInt v) 4) 0)]
+            (set! sz 4)
+            (set! mov arm/AMOVW))
+          (case [(== (% (.-AuxInt v) 2) 0)]
+            (set! sz 2)
+            (set! mov arm/AMOVH))
+          (default
+            (set! sz 1)
+            (set! mov arm/AMOVB)))
+
+        (let [p (.Prog s mov)]
+          (set! (.-Scond p) arm/C_PBIT)
+          (set! (.-Type (.-From p)) obj/TYPE_MEM)
+          (set! (.-Reg (.-From p)) arm/REG_R1)
+          (set! (.-Offset (.-From p)) sz)
+          (set! (.-Type (.-To p)) obj/TYPE_REG)
+          (set! (.-Reg (.-To p)) arm/REGTMP)
+          (let [p2 (.Prog s mov)]
+            (set! (.-Scond p2) arm/C_PBIT)
+            (set! (.-Type (.-From p2)) obj/TYPE_REG)
+            (set! (.-Reg (.-From p2)) arm/REGTMP)
+            (set! (.-Type (.-To p2)) obj/TYPE_MEM)
+            (set! (.-Reg (.-To p2)) arm/REG_R2)
+            (set! (.-Offset (.-To p2)) sz)
+            (let [p3 (.Prog s arm/ACMP)]
+              (set! (.-Type (.-From p3)) obj/TYPE_REG)
+              (set! (.-Reg (.-From p3)) (.Reg (aget (.-Args v) 2)))
+              (set! (.-Reg p3) arm/REG_R1)
+              (let [p4 (.Prog s arm/ABLE)]
+                (set! (.-Type (.-To p4)) obj/TYPE_BRANCH)
+                (.SetTarget (.-To p4) p)))))))
+    (case [ssa/OpARMEqual
+        ^{:line 980} ssa/OpARMNotEqual
+        ^{:line 981} ssa/OpARMLessThan
+        ^{:line 982} ssa/OpARMLessEqual
+        ^{:line 983} ssa/OpARMGreaterThan
+        ^{:line 984} ssa/OpARMGreaterEqual
+        ^{:line 985} ssa/OpARMLessThanU
+        ^{:line 986} ssa/OpARMLessEqualU
+        ^{:line 987} ssa/OpARMGreaterThanU
+        ^{:line 988} ssa/OpARMGreaterEqualU]
+      ;; generate boolean values
+      ;; use conditional move
+      (let [p (.Prog s arm/AMOVW)]
+        (set! (.-Type (.-From p)) obj/TYPE_CONST)
+        (set! (.-Offset (.-From p)) 0)
+        (set! (.-Type (.-To p)) obj/TYPE_REG)
+        (set! (.-Reg (.-To p)) (.Reg v))
+        (set! p (.Prog s arm/AMOVW))
+        (set! (.-Scond p) (aget condBits (.-Op v)))
+        (set! (.-Type (.-From p)) obj/TYPE_CONST)
+        (set! (.-Offset (.-From p)) 1)
+        (set! (.-Type (.-To p)) obj/TYPE_REG)
+        (set! (.-Reg (.-To p)) (.Reg v))))
+    (case [ssa/OpARMLoweredGetClosurePtr]
+      ;; Closure pointer is R7 (arm.REGCTXT).
+      (ssagen/CheckLoweredGetClosurePtr v))
+    (case [ssa/OpARMLoweredGetCallerSP]
+      ;; caller's SP is FixedFrameSize below the address of the first arg
+      (let [p (.Prog s arm/AMOVW)]
+        (set! (.-Type (.-From p)) obj/TYPE_ADDR)
+        (set! (.-Offset (.-From p)) (- ^{:go/via [Arch]} (.-FixedFrameSize (.-Arch base/Ctxt))))
+        (set! (.-Name (.-From p)) obj/NAME_PARAM)
+        (set! (.-Type (.-To p)) obj/TYPE_REG)
+        (set! (.-Reg (.-To p)) (.Reg v))))
+    (case [ssa/OpARMLoweredGetCallerPC]
+      (let [p (.Prog s obj/AGETCALLERPC)]
+        (set! (.-Type (.-To p)) obj/TYPE_REG)
+        (set! (.-Reg (.-To p)) (.Reg v))))
+    (case [ssa/OpARMFlagConstant]
+      (.Fatalf v "FlagConstant op should never make it to codegen %v" (.LongString v)))
+    (case [ssa/OpARMInvertFlags]
+      (.Fatalf v "InvertFlags should never make it to codegen %v" (.LongString v)))
+    (case [ssa/OpClobber ssa/OpClobberReg])
+    ;; TODO: implement for clobberdead experiment. Nop is ok for now.
+    (default
+      (.Fatalf v "genValue not implemented: %s" (.LongString v)))))
+
+
+
+(go/var condBits (lit (map ssa/Op uint8)
+    ^{:line 1029} [ssa/OpARMEqual arm/C_SCOND_EQ]
+    ^{:line 1030} [ssa/OpARMNotEqual arm/C_SCOND_NE]
+    ^{:line 1031} [ssa/OpARMLessThan arm/C_SCOND_LT]
+    ^{:line 1032} [ssa/OpARMLessThanU arm/C_SCOND_LO]
+    ^{:line 1033} [ssa/OpARMLessEqual arm/C_SCOND_LE]
+    ^{:line 1034} [ssa/OpARMLessEqualU arm/C_SCOND_LS]
+    ^{:line 1035} [ssa/OpARMGreaterThan arm/C_SCOND_GT]
+    ^{:line 1036} [ssa/OpARMGreaterThanU arm/C_SCOND_HI]
+    ^{:line 1037} [ssa/OpARMGreaterEqual arm/C_SCOND_GE]
+    ^{:line 1038} [ssa/OpARMGreaterEqualU arm/C_SCOND_HS]))
+
+
+(go/var blockJump (lit (map ssa/BlockKind (struct
+        ^{:line 1042 :tag obj/As} asm ^obj/As invasm))
+
+    ^{:line 1044} [ssa/BlockARMEQ (lit _ arm/ABEQ arm/ABNE)]
+    ^{:line 1045} [ssa/BlockARMNE (lit _ arm/ABNE arm/ABEQ)]
+    ^{:line 1046} [ssa/BlockARMLT (lit _ arm/ABLT arm/ABGE)]
+    ^{:line 1047} [ssa/BlockARMGE (lit _ arm/ABGE arm/ABLT)]
+    ^{:line 1048} [ssa/BlockARMLE (lit _ arm/ABLE arm/ABGT)]
+    ^{:line 1049} [ssa/BlockARMGT (lit _ arm/ABGT arm/ABLE)]
+    ^{:line 1050} [ssa/BlockARMULT (lit _ arm/ABLO arm/ABHS)]
+    ^{:line 1051} [ssa/BlockARMUGE (lit _ arm/ABHS arm/ABLO)]
+    ^{:line 1052} [ssa/BlockARMUGT (lit _ arm/ABHI arm/ABLS)]
+    ^{:line 1053} [ssa/BlockARMULE (lit _ arm/ABLS arm/ABHI)]
+    ^{:line 1054} [ssa/BlockARMLTnoov (lit _ arm/ABMI arm/ABPL)]
+    ^{:line 1055} [ssa/BlockARMGEnoov (lit _ arm/ABPL arm/ABMI)]))
+
+
+
+(go/var ^{:doc "To model a 'LEnoov' ('<=' without overflow checking) branching.\n"} leJumps (lit (array 2 (array 2 ssagen/IndexJump))
+    (lit _ (lit _ :Jump arm/ABEQ :Index 0) (lit _ :Jump arm/ABPL :Index 1)) ; next == b.Succs[0]
+    (lit _ (lit _ :Jump arm/ABMI :Index 0) (lit _ :Jump arm/ABEQ :Index 0)))) ; next == b.Succs[1]
+
+
+
+(go/var ^{:doc "To model a 'GTnoov' ('>' without overflow checking) branching.\n"} gtJumps (lit (array 2 (array 2 ssagen/IndexJump))
+    (lit _ (lit _ :Jump arm/ABMI :Index 1) (lit _ :Jump arm/ABEQ :Index 1)) ; next == b.Succs[0]
+    (lit _ (lit _ :Jump arm/ABEQ :Index 1) (lit _ :Jump arm/ABPL :Index 0)))) ; next == b.Succs[1]
+
+
+^{:go/end 1115} (go/func ssaGenBlock [^{:tag (* ssagen/State)} s ^{:tag (* ssa/Block)} b ^{:tag (* ssa/Block)} next]
+  (switch (.-Kind b)
+    (case [ssa/BlockPlain ssa/BlockDefer]
+      (when (!= (.Block (aget (.-Succs b) 0)) next)
+        (let [p (.Prog s obj/AJMP)]
+          (set! (.-Type (.-To p)) obj/TYPE_BRANCH)
+          (set! (.-Branches s) (append (.-Branches s) (lit ssagen/Branch :P p :B (.Block (aget (.-Succs b) 0))))))))
+
+
+    (case [ssa/BlockExit ssa/BlockRetJmp])
+
+    (case [ssa/BlockRet]
+      (.Prog s obj/ARET))
+
+    (case [ssa/BlockARMEQ ssa/BlockARMNE
+        ^{:line 1085} ssa/BlockARMLT ssa/BlockARMGE
+        ^{:line 1086} ssa/BlockARMLE ssa/BlockARMGT
+        ^{:line 1087} ssa/BlockARMULT ssa/BlockARMUGT
+        ^{:line 1088} ssa/BlockARMULE ssa/BlockARMUGE
+        ^{:line 1089} ssa/BlockARMLTnoov ssa/BlockARMGEnoov]
+      (let [jmp (aget blockJump (.-Kind b))]
+        (switch next
+          (case [(.Block (aget (.-Succs b) 0))]
+            (.Br s (.-invasm jmp) (.Block (aget (.-Succs b) 1))))
+          (case [(.Block (aget (.-Succs b) 1))]
+            (.Br s (.-asm jmp) (.Block (aget (.-Succs b) 0))))
+          (default
+            (if (!= (.-Likely b) ssa/BranchUnlikely) (do
+                (.Br s (.-asm jmp) (.Block (aget (.-Succs b) 0)))
+                (.Br s obj/AJMP (.Block (aget (.-Succs b) 1))))
+              (do
+                (.Br s (.-invasm jmp) (.Block (aget (.-Succs b) 1)))
+                (.Br s obj/AJMP (.Block (aget (.-Succs b) 0)))))))))
+
+
+
+    (case [ssa/BlockARMLEnoov]
+      (.CombJump s b next (addr leJumps)))
+
+    (case [ssa/BlockARMGTnoov]
+      (.CombJump s b next (addr gtJumps)))
+
+    (default
+      (.Fatalf b "branch not implemented: %s" (.LongString b)))))

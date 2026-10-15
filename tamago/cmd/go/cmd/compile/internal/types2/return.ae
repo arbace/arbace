@@ -1,0 +1,183 @@
+;; Copyright 2013 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; This file implements isTerminating.
+
+(in-ns 'go.cmd.compile.internal.types2) (go/file "return.go" :imports [
+
+
+    ^{:line 10} [syntax "cmd/compile/internal/syntax"]])
+
+
+
+
+
+^{:go/breaks [[5 75]] :go/end 76} (go/method isTerminating "isTerminating reports if s is a terminating statement.\nIf s is labeled, label is the label name; otherwise s\nis \"\".\n" ^bool [^{:tag (* Checker)} check ^syntax/Stmt s ^string label]
+  (type-switch [s s]
+    (default
+      (panic "unreachable"))
+
+    (case [(* syntax/DeclStmt) (* syntax/EmptyStmt) (* syntax/SendStmt)
+        (* syntax/AssignStmt) (* syntax/CallStmt)])
+    ;; no chance
+
+    (case [(* syntax/LabeledStmt)]
+      (return (.isTerminating check (.-Stmt s) (.-Value (.-Label s)))))
+
+    (case [(* syntax/ExprStmt)]
+      ;; calling the predeclared (possibly parenthesized) panic() function is terminating
+      (when [(values call ok) (assert (* syntax/CallExpr) (syntax/Unparen (.-X s)))] (and ok (aget ^{:go/via [environment]} (.-isPanic check) call))
+        (return true)))
+
+
+    (case [(* syntax/ReturnStmt)]
+      (return true))
+
+    (case [(* syntax/BranchStmt)]
+      (when (or (== (.-Tok s) syntax/Goto) (== (.-Tok s) syntax/Fallthrough))
+        (return true)))
+
+
+    (case [(* syntax/BlockStmt)]
+      (return (.isTerminatingList check (.-List s) "")))
+
+    (case [(* syntax/IfStmt)]
+      (when (and (!= (.-Else s) nil)
+          (.isTerminating check (.-Then s) "")
+          (.isTerminating check (.-Else s) ""))
+        (return true)))
+
+
+    (case [(* syntax/SwitchStmt)]
+      (return (.isTerminatingSwitch check (.-Body s) label)))
+
+    (case [(* syntax/SelectStmt)]
+      (range [_ cc (.-Body s)]
+        (when (or (not (.isTerminatingList check (.-Body cc) "")) (hasBreakList (.-Body cc) label true))
+          (return false)))
+
+
+
+      (return true))
+
+    (case [(* syntax/ForStmt)]
+      (when [(values _ ok) (assert (* syntax/RangeClause) (.-Init s))] ok
+        ;; Range clauses guarantee that the loop terminates,
+        ;; so the loop is not a terminating statement. See go.dev/issue/49003.
+        (break))
+
+      (when (and (== (.-Cond s) nil) (not (hasBreak (.-Body s) label true)))
+        (return true))))
+
+
+
+  false)
+
+
+^{:go/breaks [[4 85]] :go/end 86} (go/method isTerminatingList ^bool [^{:tag (* Checker)} check ^{:tag (slice syntax/Stmt)} list ^string label]
+  ;; trailing empty statements are permitted - skip them
+  (for [i (- (len list) 1)] (>= i 0) (dec! i)
+    (when [(values _ ok) (assert (* syntax/EmptyStmt) (aget list i))] (not ok)
+      (return (.isTerminating check (aget list i) label))))
+
+
+  false) ; all statements are empty
+
+
+^{:go/end 99} (go/method isTerminatingSwitch ^bool [^{:tag (* Checker)} check ^{:tag (slice (* syntax/CaseClause))} body ^string label]
+  (let [hasDefault false]
+    (range [_ cc body]
+      (when (== (.-Cases cc) nil)
+        (set! hasDefault true))
+
+      (when (or (not (.isTerminatingList check (.-Body cc) "")) (hasBreakList (.-Body cc) label true))
+        (return false)))
+
+
+    ^{:line 98} hasDefault))
+
+
+;; TODO(gri) For nested breakable statements, the current implementation of hasBreak
+;; will traverse the same subtree repeatedly, once for each label. Replace
+;; with a single-pass label/break matching phase.
+
+
+
+
+^{:go/breaks [[5 156]] :go/end 157} (go/func hasBreak "hasBreak reports if s is or contains a break statement\nreferring to the label-ed statement or implicit-ly the\nclosest outer breakable statement.\n" ^bool [^syntax/Stmt s ^string label ^bool implicit]
+  (type-switch [s s]
+    (default
+      (panic "unreachable"))
+
+    (case [(* syntax/DeclStmt) (* syntax/EmptyStmt) (* syntax/ExprStmt)
+        (* syntax/SendStmt) (* syntax/AssignStmt) (* syntax/CallStmt)
+        (* syntax/ReturnStmt)])
+    ;; no chance
+
+    (case [(* syntax/LabeledStmt)]
+      (return (hasBreak (.-Stmt s) label implicit)))
+
+    (case [(* syntax/BranchStmt)]
+      (when (== (.-Tok s) syntax/Break)
+        (when (== (.-Label s) nil)
+          (return implicit))
+
+        (when (== (.-Value (.-Label s)) label)
+          (return true))))
+
+
+
+    (case [(* syntax/BlockStmt)]
+      (return (hasBreakList (.-List s) label implicit)))
+
+    (case [(* syntax/IfStmt)]
+      (when (or (hasBreak (.-Then s) label implicit)
+          (and (!= (.-Else s) nil) (hasBreak (.-Else s) label implicit)))
+        (return true)))
+
+
+    (case [(* syntax/SwitchStmt)]
+      (when (and (!= label "") (hasBreakCaseList (.-Body s) label false))
+        (return true)))
+
+
+    (case [(* syntax/SelectStmt)]
+      (when (and (!= label "") (hasBreakCommList (.-Body s) label false))
+        (return true)))
+
+
+    (case [(* syntax/ForStmt)]
+      (when (and (!= label "") (hasBreak (.-Body s) label false))
+        (return true))))
+
+
+
+  false)
+
+
+^{:go/breaks [[4 165]] :go/end 166} (go/func hasBreakList ^bool [^{:tag (slice syntax/Stmt)} list ^string label ^bool implicit]
+  (range [_ s list]
+    (when (hasBreak s label implicit)
+      (return true)))
+
+
+  false)
+
+
+^{:go/breaks [[4 174]] :go/end 175} (go/func hasBreakCaseList ^bool [^{:tag (slice (* syntax/CaseClause))} list ^string label ^bool implicit]
+  (range [_ s list]
+    (when (hasBreakList (.-Body s) label implicit)
+      (return true)))
+
+
+  false)
+
+
+^{:go/breaks [[4 183]] :go/end 184} (go/func hasBreakCommList ^bool [^{:tag (slice (* syntax/CommClause))} list ^string label ^bool implicit]
+  (range [_ s list]
+    (when (hasBreakList (.-Body s) label implicit)
+      (return true)))
+
+
+  false)

@@ -1,0 +1,843 @@
+;; Copyright 2014 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.cmd.compile.internal.types2) (go/file "decl.go" :imports [
+
+
+    ^{:line 8} [syntax "cmd/compile/internal/syntax"]
+    ^{:line 9} [fmt "fmt"]
+    ^{:line 10} [constant "go/constant"]
+    ^{:line 11} [. "internal/types/errors"]
+    ^{:line 12} [slices "slices"]])
+
+
+^{:go/end 33} (go/method declare [^{:tag (* Checker)} check ^{:tag (* Scope)} scope ^{:tag (* syntax/Name)} id ^Object obj ^syntax/Pos pos]
+  ;; spec: "The blank identifier, represented by the underscore
+  ;; character _, may be used in a declaration like any other
+  ;; identifier but the declaration does not introduce a new
+  ;; binding."
+  (when (!= (.Name obj) "_")
+    (when [alt (.Insert scope obj)] (!= alt nil)
+      (let [err (.newError check DuplicateDecl)]
+        (.addf err obj "%s redeclared in this block" (.Name obj))
+        (.addAltDecl err alt)
+        (.report err)
+        (return)))
+
+    (.setScopePos obj pos))
+
+  (when (!= id nil)
+    (.recordDef check id obj)))
+
+
+
+
+^{:go/end 45} (go/func pathString "pathString returns a string of the form a->b-> ... ->g for a path [a, b, ... g].\n" ^string [^{:tag (slice Object)} path]
+  (let [^string s (zero string)]
+    (range [i p path]
+      (when (> i 0)
+        (set! s + "->"))
+
+      (set! s + (.Name p)))
+
+    ^{:line 44} s))
+
+
+
+^{:go/end 166} (go/method objDecl "objDecl type-checks the declaration of obj in its respective (file) environment.\n" [^{:tag (* Checker)} check ^Object obj]
+  (when tracePos
+    (.pushPos check (.Pos obj))
+    (defer (^{:go/end 57} (fn []
+          ;; If we're panicking, keep stack of source positions.
+          (when [p (recover)] (!= p nil)
+            (panic p))
+
+          (.popPos check)))))
+
+
+
+  (when (and (.-Trace (.-conf check)) (== (.Type obj) nil))
+    (when (== (.-indent check) 0)
+      (fmt/Println)) ; empty line between top-level objects for readability
+
+    (.trace check (.Pos obj) "-- checking %s (objPath = %s)" obj (pathString (.-objPath check)))
+    (inc! (.-indent check))
+    (defer (^{:go/end 69} (fn []
+          (dec! (.-indent check))
+          (.trace check (.Pos obj) "=> %s" obj)))))
+
+
+
+  ;; Checking the declaration of an object means determining its type
+  ;; (and also its value for constants). An object (and thus its type)
+  ;; may be in 1 of 3 states:
+  ;;
+  ;; - not in Checker.objPathIdx and type == nil : type is not yet known (white)
+  ;; -     in Checker.objPathIdx                 : type is pending       (grey)
+  ;; - not in Checker.objPathIdx and type != nil : type is known         (black)
+  ;;
+  ;; During type-checking, an object changes from white to grey to black.
+  ;; Predeclared objects start as black (their type is known without checking).
+  ;;
+  ;; A black object may only depend on (refer to) to other black objects. White
+  ;; and grey objects may depend on white or black objects. A dependency on a
+  ;; grey object indicates a (possibly invalid) cycle.
+  ;;
+  ;; When an object is marked grey, it is pushed onto the object path (a stack)
+  ;; and its index in the path is recorded in the path index map. It is popped
+  ;; and removed from the map when its type is determined (and marked black).
+
+  ;; If this object is grey, we have a (possibly invalid) cycle. This is signaled
+  ;; by a non-nil type for the object, except for constants and variables whose
+  ;; type may be non-nil (known), or nil if it depends on a not-yet known
+  ;; initialization value.
+  ;;
+  ;; In the former case, set the type to Typ[Invalid] because we have an
+  ;; initialization cycle. The cycle error will be reported later, when
+  ;; determining initialization order.
+  ;;
+  ;; TODO(gri) Report cycle here and simplify initialization order code.
+  (when [(values _ ok) (aget (.-objPathIdx check) obj)] ok
+    (type-switch [obj obj]
+      (case [(* Const) (* Var)]
+        (when (or (not (.validCycle check obj)) (== (.Type obj) nil))
+          (.setType obj (aget Typ Invalid))))
+
+      (case [(* TypeName)]
+        (when (not (.validCycle check obj))
+          ^{:go/via [object]} (.setType obj (aget Typ Invalid))))
+
+      (case [(* Func)]
+        (when (not (.validCycle check obj))))
+      ;; Don't set type to Typ[Invalid]; plenty of code asserts that
+      ;; functions have a *Signature type. Instead, leave the type
+      ;; as an empty signature, which makes it impossible to
+      ;; initialize a variable with the function.
+
+      (default
+        (panic "unreachable")))
+
+
+    (go/call assert (!= (.Type obj) nil))
+    (return))
+
+
+  (when (!= (.Type obj) nil) ; black, meaning it's already type-checked
+    (return))
+
+
+  ;; white, meaning it must be type-checked
+
+  (.push check obj)
+  (defer (.pop check))
+
+  (let [(values d ok) (aget (.-objMap check) obj)]
+    (go/call assert ok)
+
+    ;; save/restore current environment and set up object environment
+    (defer (^{:go/end 141} (fn [^environment env]
+          (set! (.-environment check) env))
+        (.-environment check)))
+    (set! (.-environment check) (lit environment :scope (.-file d) :version (.-version d)))
+
+    ;; Const and var declarations must not have initialization
+    ;; cycles. We track them by remembering the current declaration
+    ;; in check.decl. Initialization expressions depending on other
+    ;; consts, vars, or functions, add dependencies to the current
+    ;; check.decl.
+    (type-switch [obj obj]
+      (case [(* Const)]
+        (set! ^{:go/via [environment]} (.-decl check) d) ; new package-level const decl
+        (.constDecl check obj (.-vtyp d) (.-init d) (.-inherited d)))
+      (case [(* Var)]
+        (set! ^{:go/via [environment]} (.-decl check) d) ; new package-level var decl
+        (.varDecl check obj (.-lhs d) (.-vtyp d) (.-init d)))
+      (case [(* TypeName)]
+        ;; invalid recursive types are detected via path
+        (.typeDecl check obj (.-tdecl d))
+        (.collectMethods check obj)) ; methods can only be added to top-level types
+      (case [(* Func)]
+        ;; functions may be recursive - no need to track dependencies
+        (.funcDecl check obj d))
+      (default
+        (panic "unreachable")))))
+
+
+
+
+
+^{:go/end 249} (go/method validCycle "validCycle reports whether the cycle starting with obj is valid and\nreports an error if it is not.\n" [^{:tag (* Checker)} check ^Object obj] :results [^bool valid]
+  ;; The object map contains the package scope objects and the non-interface methods.
+  (when debug
+    (let [info (aget (.-objMap check) obj)
+        ^{:line 174} inObjMap (and (!= info nil) ^:go/paren (or (== (.-fdecl info) nil) (== (.-Recv (.-fdecl info)) nil))) ; exclude methods
+        ^{:line 175} isPkgObj (== (.Parent obj) (.-scope (.-pkg check)))]
+      (when (!= isPkgObj inObjMap)
+        (.dump check "%v: inconsistent object map for %s (isPkgObj = %v, inObjMap = %v)" (.Pos obj) obj isPkgObj inObjMap)
+        (panic "unreachable"))))
+
+
+
+  ;; Count cycle objects.
+  (let [(values start found) (aget (.-objPathIdx check) obj)]
+    (go/call assert found)
+    ^{:go/breaks [8]} (let [cycle (subslice (.-objPath check) start)
+        ^{:line 186} tparCycle false ; if set, the cycle is through a type parameter list
+        ^{:line 187} nval 0 ; number of (constant or variable) values in the cycle
+        ^{:line 188} ndef 0] ; number of type definitions in the cycle
+      (label :loop
+        (range [_ obj cycle]
+          (type-switch [obj obj]
+            (case [(* Const) (* Var)]
+              (inc! nval))
+            (case [(* TypeName)]
+              ;; If we reach a generic type that is part of a cycle
+              ;; and we are in a type parameter list, we have a cycle
+              ;; through a type parameter list.
+              (when (and ^{:go/via [environment]} (.-inTParamList check) (isGeneric ^{:go/via [object]} (.-typ obj)))
+                (set! tparCycle true)
+                (break :loop))
+
+              (when (not (.IsAlias obj))
+                (inc! ndef)))
+
+            (case [(* Func)])
+            ;; ignored for now
+            (default
+              (panic "unreachable")))))
+
+
+
+      (when (.-Trace (.-conf check))
+        (.trace check (.Pos obj) "## cycle detected: objPath = %s->%s (len = %d)" (pathString cycle) (.Name obj) (len cycle))
+        (if tparCycle
+          (.trace check (.Pos obj) "## cycle contains: generic type in a type parameter list")
+
+          (.trace check (.Pos obj) "## cycle contains: %d values, %d type definitions" nval ndef))
+
+        (defer (^{:go/end 225} (fn []
+              (if valid
+                (.trace check (.Pos obj) "=> cycle is valid")
+
+                (.trace check (.Pos obj) "=> error: cycle is invalid"))))))
+
+
+
+
+      ;; Cycles through type parameter lists are ok (go.dev/issue/68162).
+      (when tparCycle
+        (return true))
+
+
+      ;; A cycle involving only constants and variables is invalid but we
+      ;; ignore them here because they are reported via the initialization
+      ;; cycle check.
+      (when (== nval (len cycle))
+        (return true))
+
+
+      ;; A cycle involving only types (and possibly functions) must have at least
+      ;; one type definition to be permitted: If there is no type definition, we
+      ;; have a sequence of alias type names which will expand ad infinitum.
+      (when (and (== nval 0) (> ndef 0))
+        (return true))
+
+
+      (.cycleError check cycle (firstInSrc cycle))
+      false)))
+
+
+
+^{:go/end 297} (go/method cycleError "cycleError reports a declaration cycle starting with the object at cycle[start].\n" [^{:tag (* Checker)} check ^{:tag (slice Object)} cycle ^int start]
+  ;; name returns the (possibly qualified) object name.
+  ;; This is needed because with generic types, cycles
+  ;; may refer to imported types. See go.dev/issue/50788.
+  ;; TODO(gri) This functionality is used elsewhere. Factor it out.
+  (let [name ^{:go/end 263} (fn ^string [^Object obj]
+        ;; include any type arguments in the reported error message
+        (when [n (asNamed (.Type obj))] (and (!= n nil) (!= (.-inst n) nil))
+          (return (TypeString n (.-qualifier check))))
+
+        (+ (packagePrefix (.Pkg obj) (.-qualifier check)) (.Name obj)))
+
+
+      ;; If obj is a type alias, mark it as valid (not broken) in order to avoid follow-on errors.
+      ^{:line 266} obj (aget cycle start)
+      (values tname _) (assert (* TypeName) obj)]
+    (when (!= tname nil)
+      (when [(values a ok) (assert (* Alias) ^{:go/via [object]} (.Type tname))] ok
+        (set! (.-fromRHS a) (aget Typ Invalid))))
+
+
+
+    ;; report a more concise error for self references
+    (when (== (len cycle) 1)
+      (if (!= tname nil)
+        (.errorf check obj InvalidDeclCycle "invalid recursive type: %s refers to itself" (name obj))
+
+        (.errorf check obj InvalidDeclCycle "invalid cycle in declaration: %s refers to itself" (name obj)))
+
+      (return))
+
+
+    (let [err (.newError check InvalidDeclCycle)]
+      (if (!= tname nil)
+        (.addf err obj "invalid recursive type %s" (name obj))
+
+        (.addf err obj "invalid cycle in declaration of %s" (name obj)))
+
+      ;; "cycle[i] refers to cycle[j]" for (i,j) = (s,s+1), (s+1,s+2), ..., (n-1,0), (0,1), ..., (s-1,s) for len(cycle) = n, s = start.
+      (range [i cycle]
+        (let [next (aget cycle (% (+ start i 1) (len cycle)))]
+          (.addf err obj "%s refers to %s" (name obj) (name next))
+          (set! obj next)))
+
+      (.report err))))
+
+
+
+
+^{:go/end 309} (go/func firstInSrc "firstInSrc reports the index of the object with the \"smallest\"\nsource position in path. path must not be empty.\n" ^int [^{:tag (slice Object)} path]
+  (let [(values fst pos) (values 0 (.Pos (aget path 0)))]
+    (range [i t (subslice path 1)]
+      (when (< (cmpPos (.Pos t) pos) 0)
+        (set! (values fst pos) (values (+ i 1) (.Pos t)))))
+
+
+    ^{:line 308} fst))
+
+
+^{:go/end 355} (go/method constDecl [^{:tag (* Checker)} check ^{:tag (* Const)} obj ^syntax/Expr typ ^syntax/Expr init ^bool inherited]
+  (go/call assert (== ^{:go/via [object]} (.-typ obj) nil))
+
+  ;; use the correct value of iota and errpos
+  (defer (^{:go/end 318} (fn [^constant/Value iota ^syntax/Pos errpos]
+        (set! ^{:go/via [environment]} (.-iota check) iota)
+        (set! ^{:go/via [environment]} (.-errpos check) errpos))
+      ^{:go/via [environment]} (.-iota check) ^{:go/via [environment]} (.-errpos check)))
+  (set! ^{:go/via [environment]} (.-iota check) (.-val obj))
+  (set! ^{:go/via [environment]} (.-errpos check) nopos)
+
+  ;; provide valid constant value under all circumstances
+  (set! (.-val obj) (constant/MakeUnknown))
+
+  ;; determine type, if any
+  (when (!= typ nil)
+    (let [t (.typ check typ)]
+      (when (not (isConstType t))
+        ;; don't report an error if the type is an invalid C (defined) type
+        ;; (go.dev/issue/22090)
+        (when (isValid (.Underlying t))
+          (.errorf check typ InvalidConstType "invalid constant type %s" t))
+
+        (set! ^{:go/via [object]} (.-typ obj) (aget Typ Invalid))
+        (return))
+
+      (set! ^{:go/via [object]} (.-typ obj) t)))
+
+
+  ;; check initialization
+  (let [^operand x (zero operand)]
+    (when (!= init nil)
+      (when inherited
+        ;; The initialization expression is inherited from a previous
+        ;; constant declaration, and (error) positions refer to that
+        ;; expression and not the current constant declaration. Use
+        ;; the constant identifier position for any errors during
+        ;; init expression evaluation since that is all we have
+        ;; (see issues go.dev/issue/42991, go.dev/issue/42992).
+        (set! ^{:go/via [environment]} (.-errpos check) ^{:go/via [object]} (.-pos obj)))
+
+      (.expr check nil (addr x) init))
+
+    (.initConst check obj (addr x))))
+
+
+^{:go/end 408} (go/method varDecl [^{:tag (* Checker)} check ^{:tag (* Var)} obj ^{:tag (slice (* Var))} lhs ^syntax/Expr typ ^syntax/Expr init]
+  (go/call assert (== ^{:go/via [object]} (.-typ obj) nil))
+
+  ;; determine type, if any
+  (when (!= typ nil)
+    (set! ^{:go/via [object]} (.-typ obj) (.varType check typ)))
+  ;; We cannot spread the type to all lhs variables if there
+  ;; are more than one since that would mark them as checked
+  ;; (see Checker.objDecl) and the assignment of init exprs,
+  ;; if any, would not be checked.
+  ;;
+  ;; TODO(gri) If we have no init expr, we should distribute
+  ;; a given type otherwise we need to re-evaluate the type
+  ;; expr for each lhs variable, leading to duplicate work.
+
+
+  ;; check initialization
+  (when (== init nil)
+    (when (== typ nil)
+      ;; error reported before by arityMatch
+      (set! ^{:go/via [object]} (.-typ obj) (aget Typ Invalid)))
+
+    (return))
+
+
+  (when (or (== lhs nil) (== (len lhs) 1))
+    (go/call assert (or (== lhs nil) (== (aget lhs 0) obj)))
+    (let [^operand x (zero operand)]
+      (.expr check (newTarget ^{:go/via [object]} (.-typ obj) ^{:go/via [object]} (.-name obj)) (addr x) init)
+      (.initVar check obj (addr x) "variable declaration")
+      (return)))
+
+
+  (when debug
+    ;; obj must be one of lhs
+    (when (not (^{:inst [(slice (* Var)) (* Var)]} slices/Contains lhs obj))
+      (panic "inconsistent lhs")))
+
+
+
+  ;; We have multiple variables on the lhs and one init expr.
+  ;; Make sure all variables have been given the same type if
+  ;; one was specified, otherwise they assume the type of the
+  ;; init expression values (was go.dev/issue/15755).
+  (when (!= typ nil)
+    (range [_ lhs lhs]
+      (set! ^{:go/via [object]} (.-typ lhs) ^{:go/via [object]} (.-typ obj))))
+
+
+
+  (.initVars check lhs (lit (slice syntax/Expr) init) nil))
+
+
+
+^{:go/end 418} (go/method isImportedConstraint "isImportedConstraint reports whether typ is an imported type constraint.\n" ^bool [^{:tag (* Checker)} check ^Type typ]
+  (let [named (asNamed typ)]
+    (when (or (== named nil) (== ^{:go/via [object]} (.-pkg (.-obj named)) (.-pkg check)) (== ^{:go/via [object]} (.-pkg (.-obj named)) nil))
+      (return false))
+
+    (let [(values u _) (assert (* Interface) (.Underlying named))]
+      (and (!= u nil) (not (.IsMethodSet u))))))
+
+
+^{:go/end 506} (go/method typeDecl [^{:tag (* Checker)} check ^{:tag (* TypeName)} obj ^{:tag (* syntax/TypeDecl)} tdecl]
+  (go/call assert (== ^{:go/via [object]} (.-typ obj) nil))
+
+  ;; Only report a version error if we have not reported one already.
+  (let [versionErr false
+
+      ^{:line 426 :tag Type} rhs (zero Type)]
+    (.describef (.later check ^{:go/end 433} (fn []
+          (when [t (asNamed ^{:go/via [object]} (.-typ obj))] (!= t nil) ; type may be invalid
+            (.validType check t))
+
+          ;; If typ is local, an error was already reported where typ is specified/defined.
+          (set! _ (and (not versionErr) (.isImportedConstraint check rhs) (.verifyVersionf check (.-Type tdecl) go1_18 "using type constraint %s" rhs)))))
+      ^{:line 433} obj "validType(%s)" ^{:go/via [object]} (.Name obj))
+
+    ;; First type parameter, or nil.
+    (let [^{:tag (* syntax/Field)} tparam0 (zero (* syntax/Field))]
+      (when (> (len (.-TParamList tdecl)) 0)
+        (set! tparam0 (aget (.-TParamList tdecl) 0)))
+
+
+      ;; alias declaration
+      (when (.-Alias tdecl)
+        ;; Report highest version requirement first so that fixing a version issue
+        ;; avoids possibly two -lang changes (first to Go 1.9 and then to Go 1.23).
+        (when (and (not versionErr) (!= tparam0 nil) (not (.verifyVersionf check tparam0 go1_23 "generic type alias")))
+          (set! versionErr true))
+
+        (when (and (not versionErr) (not (.verifyVersionf check tdecl go1_9 "type alias")))
+          (set! versionErr true))
+
+
+        (let [alias (.newAlias check obj nil)]
+
+          ;; If we could not type the RHS, set it to invalid. This should
+          ;; only ever happen if we panic before setting.
+          (defer (^{:go/end 461} (fn []
+                (when (== (.-fromRHS alias) nil)
+                  (set! (.-fromRHS alias) (aget Typ Invalid))
+                  (unalias alias)))))
+
+
+
+          ;; handle type parameters even if not allowed (Alias type is supported)
+          (when (!= tparam0 nil)
+            (.openScope check tdecl "type parameters")
+            (defer (.closeScope check))
+            (.collectTypeParams check (addr (.-tparams alias)) (.-TParamList tdecl)))
+
+
+          (set! rhs (.declaredType check (.-Type tdecl) obj))
+          (go/call assert (!= rhs nil))
+          (set! (.-fromRHS alias) rhs)
+
+          ;; spec: In an alias declaration the given type cannot be a type parameter declared in the same declaration."
+          ;; (see also go.dev/issue/75884, go.dev/issue/#75885)
+          (when [(values tpar ok) (assert (* TypeParam) rhs)] (and ok (!= (.-tparams alias) nil) (>= (^{:inst [(slice (* TypeParam)) (* TypeParam)]} slices/Index (.list (.-tparams alias)) tpar) 0))
+            (.error check (.-Type tdecl) MisplacedTypeParam "cannot use type parameter declared in alias declaration as RHS")
+            (set! (.-fromRHS alias) (aget Typ Invalid)))
+
+
+          (return)))
+
+
+      ;; type definition or generic type declaration
+      (when (and (not versionErr) (!= tparam0 nil) (not (.verifyVersionf check tparam0 go1_18 "type parameter")))
+        (set! versionErr true))
+
+
+      (let [named (.newNamed check obj nil nil)]
+        (when (!= (.-TParamList tdecl) nil)
+          (.openScope check tdecl "type parameters")
+          (defer (.closeScope check))
+          (.collectTypeParams check (addr (.-tparams named)) (.-TParamList tdecl)))
+
+
+        (set! rhs (.declaredType check (.-Type tdecl) obj))
+        (go/call assert (!= rhs nil))
+        (set! (.-fromRHS named) rhs)
+
+        ;; spec: "In a type definition the given type cannot be a type parameter."
+        ;; (See also go.dev/issue/45639.)
+        (when (isTypeParam rhs)
+          (.error check (.-Type tdecl) MisplacedTypeParam "cannot use a type parameter as RHS in type declaration")
+          (set! (.-fromRHS named) (aget Typ Invalid)))))))
+
+
+
+^{:go/end 558} (go/method collectTypeParams [^{:tag (* Checker)} check ^{:tag (* (* TypeParamList))} dst ^{:tag (slice (* syntax/Field))} list]
+  (let [tparams (make (slice (* TypeParam)) (len list))]
+
+    ;; Declare type parameters up-front.
+    ;; The scope of type parameters starts at the beginning of the type parameter
+    ;; list (so we can have mutually recursive parameterized type bounds).
+    (when (> (len list) 0)
+      (let [scopePos ^{:go/via [node]} (.Pos (aget list 0))]
+        (range [i f list]
+          (aset tparams i (.declareTypeParam check (.-Name f) scopePos)))))
+
+
+
+    ;; Set the type parameters before collecting the type constraints because
+    ;; the parameterized type may be used by the constraints (go.dev/issue/47887).
+    ;; Example: type T[P T[P]] interface{}
+    (set! @dst (bindTParams tparams))
+
+    ;; Signal to cycle detection that we are in a type parameter list.
+    ;; We can only be inside one type parameter list at any given time:
+    ;; function closures may appear inside a type parameter list but they
+    ;; cannot be generic, and their bodies are processed in delayed and
+    ;; sequential fashion. Note that with each new declaration, we save
+    ;; the existing environment and restore it when done; thus inTParamList
+    ;; is true exactly only when we are in a specific type parameter list.
+    (go/call assert (not ^{:go/via [environment]} (.-inTParamList check)))
+    (set! ^{:go/via [environment]} (.-inTParamList check) true)
+    (defer (^{:go/end 537} (fn []
+          (set! ^{:go/via [environment]} (.-inTParamList check) false))))
+
+
+    ;; Keep track of bounds for later validation.
+    (let [^Type bound (zero Type)]
+      (range [i f list]
+        ;; Optimization: Re-use the previous type bound if it hasn't changed.
+        ;; This also preserves the grouped output of type parameter lists
+        ;; when printing type strings.
+        (when (or (== i 0) (!= (.-Type f) (.-Type (aget list (- i 1)))))
+          (set! bound (.bound check (.-Type f)))
+          (when (isTypeParam bound)
+            ;; We may be able to allow this since it is now well-defined what
+            ;; the underlying type and thus type set of a type parameter is.
+            ;; But we may need some additional form of cycle detection within
+            ;; type parameter lists.
+            (.error check (.-Type f) MisplacedTypeParam "cannot use a type parameter as constraint")
+            (set! bound (aget Typ Invalid))))
+
+
+        (set! (.-bound (aget tparams i)) bound)))))
+
+
+
+^{:go/end 573} (go/method bound ^Type [^{:tag (* Checker)} check ^syntax/Expr x]
+  ;; A type set literal of the form ~T and A|B may only appear as constraint;
+  ;; embed it in an implicit interface so that only interface type-checking
+  ;; needs to take care of such type expressions.
+  (when [(values op _) (assert (* syntax/Operation) x)] (and (!= op nil) ^:go/paren (or (== (.-Op op) syntax/Tilde) (== (.-Op op) syntax/Or)))
+    (let [t (.typ check (addr (lit syntax/InterfaceType :MethodList (lit (slice (* syntax/Field)) (lit _ :Type x)))))]
+      ;; mark t as implicit interface if all went well
+      (when [(values t _) (assert (* Interface) t)] (!= t nil)
+        (set! (.-implicit t) true))
+
+      (return t)))
+
+  (.typ check x))
+
+
+^{:go/end 586} (go/method declareTypeParam ^{:tag (* TypeParam)} [^{:tag (* Checker)} check ^{:tag (* syntax/Name)} name ^syntax/Pos scopePos]
+  ;; Use Typ[Invalid] for the type constraint to ensure that a type
+  ;; is present even if the actual constraint has not been assigned
+  ;; yet.
+  ;; TODO(gri) Need to systematically review all uses of type parameter
+  ;;           constraints to make sure we don't rely on them if they
+  ;;           are not properly set yet.
+  (let [tname (NewTypeName ^{:go/via [expr node]} (.Pos name) (.-pkg check) (.-Value name) nil)
+      ^{:line 583} tpar (.newTypeParam check tname (aget Typ Invalid))] ; assigns type to tname as a side-effect
+    (.declare check ^{:go/via [environment]} (.-scope check) name tname scopePos)
+    ^{:line 585} tpar))
+
+
+^{:go/end 643} (go/method collectMethods [^{:tag (* Checker)} check ^{:tag (* TypeName)} obj]
+  ;; get associated methods
+  ;; (Checker.collectObjects only collects methods with non-blank names;
+  ;; Checker.resolveBaseTypeName ensures that obj is not an alias name
+  ;; if it has attached methods.)
+  (let [methods (aget (.-methods check) obj)]
+    (when (== methods nil)
+      (return))
+
+    (delete (.-methods check) obj)
+    (go/call assert (not (.-Alias (.-tdecl (aget (.-objMap check) obj))))) ; don't use TypeName.IsAlias (requires fully set up object)
+
+    ;; use an objset to check for name conflicts
+    (let [^objset mset (zero objset)
+
+        ;; spec: "If the base type is a struct type, the non-blank method
+        ;; and field names must be distinct."
+        ^{:line 605} base (asNamed ^{:go/via [object]} (.-typ obj))] ; shouldn't fail but be conservative
+      (when (!= base nil)
+        (go/call assert (== (.Len (.TypeArgs base)) 0)) ; collectMethods should not be called on an instantiated type
+
+        ;; See go.dev/issue/52529: we must delay the expansion of underlying here, as
+        ;; base may not be fully set-up.
+        (.describef (.later check ^{:go/end 613} (fn []
+              (.checkFieldUniqueness check base)))
+          ^{:line 613} obj "verifying field uniqueness for %v" base)
+
+        ;; Checker.Files may be called multiple times; additional package files
+        ;; may add methods to already type-checked types. Add pre-existing methods
+        ;; so that we can detect redeclarations.
+        (for [i 0] (< i (.NumMethods base)) (inc! i)
+          (let [m (.Method base i)]
+            (go/call assert (!= ^{:go/via [object]} (.-name m) "_"))
+            (go/call assert (== (.insert mset m) nil)))))
+
+
+
+      ;; add valid methods
+      (range [_ m methods]
+        ;; spec: "For a base type, the non-blank names of methods bound
+        ;; to it must be unique."
+        (go/call assert (!= ^{:go/via [object]} (.-name m) "_"))
+        (when [alt (.insert mset m)] (!= alt nil)
+          (if (.IsKnown (.Pos alt))
+            (.errorf check ^{:go/via [object]} (.-pos m) DuplicateMethod "method %s.%s already declared at %v" ^{:go/via [object]} (.Name obj) ^{:go/via [object]} (.-name m) (.Pos alt))
+
+            (.errorf check ^{:go/via [object]} (.-pos m) DuplicateMethod "method %s.%s already declared" ^{:go/via [object]} (.Name obj) ^{:go/via [object]} (.-name m)))
+
+          (continue))
+
+
+        (when (!= base nil)
+          (.AddMethod base m))))))
+
+
+
+
+^{:go/end 673} (go/method checkFieldUniqueness [^{:tag (* Checker)} check ^{:tag (* Named)} base]
+  (when [(values t _) (assert (* Struct) (.Underlying base))] (!= t nil)
+    (let [^objset mset (zero objset)]
+      (for [i 0] (< i (.NumMethods base)) (inc! i)
+        (let [m (.Method base i)]
+          (go/call assert (!= ^{:go/via [object]} (.-name m) "_"))
+          (go/call assert (== (.insert mset m) nil))))
+
+
+      ;; Check that any non-blank field names of base are distinct from its
+      ;; method names.
+      (range [_ fld (.-fields t)]
+        (when (!= ^{:go/via [object]} (.-name fld) "_")
+          (when [alt (.insert mset fld)] (!= alt nil)
+            ;; Struct fields should already be unique, so we should only
+            ;; encounter an alternate via collision with a method name.
+            (set! _ (assert (* Func) alt))
+
+            ;; For historical consistency, we report the primary error on the
+            ;; method, and the alt decl on the field.
+            (let [err (.newError check DuplicateFieldAndMethod)]
+              (.addf err alt "field and method with the same name %s" ^{:go/via [object]} (.-name fld))
+              (.addAltDecl err fld)
+              (.report err))))))))
+
+
+
+
+
+
+^{:go/end 709} (go/method funcDecl [^{:tag (* Checker)} check ^{:tag (* Func)} obj ^{:tag (* declInfo)} decl]
+  (go/call assert (== ^{:go/via [object]} (.-typ obj) nil))
+
+  ;; func declarations cannot use iota
+  (go/call assert (== ^{:go/via [environment]} (.-iota check) nil))
+
+  (let [sig (new Signature)]
+    (set! ^{:go/via [object]} (.-typ obj) sig) ; guard against cycles
+
+    (let [fdecl (.-fdecl decl)]
+      (.funcType check sig (.-Recv fdecl) (.-TParamList fdecl) (.-Type fdecl))
+
+      (when (!= (.-Pragma fdecl) nil)
+        (when [(values p ok) (assert (interface (Nointerface ^bool [])) (.-Pragma fdecl))] (and ok (.Nointerface p))
+          (set! (.-nointerface obj) true)))
+
+
+
+      ;; Set the scope's extent to the complete "func (...) { ... }"
+      ;; so that Scope.Innermost works correctly.
+      (set! (.-pos (.-scope sig)) ^{:go/via [decl node]} (.Pos fdecl))
+      (set! (.-end (.-scope sig)) (syntax/EndPos fdecl))
+
+      (when (and (> (len (.-TParamList fdecl)) 0) (== (.-Body fdecl) nil))
+        (.softErrorf check fdecl BadDecl "generic function is missing function body"))
+
+
+      ;; function body must be type-checked after global declarations
+      ;; (functions implemented elsewhere have no body)
+      (when (and (not (.-IgnoreFuncBodies (.-conf check))) (!= (.-Body fdecl) nil))
+        (.describef (.later check ^{:go/end 707} (fn []
+              (.funcBody check decl ^{:go/via [object]} (.-name obj) sig (.-Body fdecl) nil)))
+          ^{:line 707} obj "func %s" ^{:go/via [object]} (.-name obj))))))
+
+
+
+^{:go/end 846} (go/method declStmt [^{:tag (* Checker)} check ^{:tag (slice syntax/Decl)} list]
+  (let [pkg (.-pkg check)
+
+      ^{:line 714} first -1 ; index of first ConstDecl in the current group, or -1
+      ^{:line 715 :tag (* syntax/ConstDecl)} last (zero (* syntax/ConstDecl))] ; last ConstDecl with init expressions, or nil
+    (range [index decl list]
+      (when [(values _ ok) (assert (* syntax/ConstDecl) decl)] (not ok)
+        (set! first -1)) ; we're not in a constant declaration
+
+
+      (type-switch [s decl]
+        (case [(* syntax/ConstDecl)]
+          (let [top (len (.-delayed check))]
+
+            ;; iota is the index of the current constDecl within the group
+            (when (or (< first 0) (== (.-Group s) nil) (!= (.-Group (assert (* syntax/ConstDecl) (aget list (- index 1)))) (.-Group s)))
+              (set! first index)
+              (set! last nil))
+
+            (let [iota (constant/MakeInt64 (conv int64 (- index first)))
+
+                ;; determine which initialization expressions to use
+                ^{:line 733} inherited true]
+              (switch
+                (case [(or (!= (.-Type s) nil) (!= (.-Values s) nil))]
+                  (set! last s)
+                  (set! inherited false))
+                (case [(== last nil)]
+                  (set! last (new syntax/ConstDecl)) ; make sure last exists
+                  (set! inherited false)))
+
+
+              ;; declare all constants
+              (let [lhs (make (slice (* Const)) (len (.-NameList s)))
+                  ^{:line 745} values (syntax/UnpackListExpr (.-Values last))]
+                (range [i name (.-NameList s)]
+                  (let [obj (NewConst ^{:go/via [expr node]} (.Pos name) pkg (.-Value name) nil iota)]
+                    (aset lhs i obj)
+
+                    (let [^syntax/Expr init (zero syntax/Expr)]
+                      (when (< i (len values))
+                        (set! init (aget values i)))
+
+
+                      (.constDecl check obj (.-Type last) init inherited))))
+
+
+                ;; Constants must always have init values.
+                (.arity check ^{:go/via [decl node]} (.Pos s) (.-NameList s) values true inherited)
+
+                ;; process function literals in init expressions before scope changes
+                (.processDelayed check top)
+
+                ;; spec: "The scope of a constant or variable identifier declared
+                ;; inside a function begins at the end of the ConstSpec or VarSpec
+                ;; (ShortVarDecl for short variable declarations) and ends at the
+                ;; end of the innermost containing block."
+                (let [scopePos (syntax/EndPos s)]
+                  (range [i name (.-NameList s)]
+                    (.declare check ^{:go/via [environment]} (.-scope check) name (aget lhs i) scopePos)))))))
+
+
+        (case [(* syntax/VarDecl)]
+          (let [top (len (.-delayed check))
+
+              ^{:line 776} lhs0 (make (slice (* Var)) (len (.-NameList s)))]
+            (range [i name (.-NameList s)]
+              (aset lhs0 i (newVar LocalVar ^{:go/via [expr node]} (.Pos name) pkg (.-Value name) nil)))
+
+
+            ;; initialize all variables
+            (let [values (syntax/UnpackListExpr (.-Values s))]
+              (range [i obj lhs0]
+                (let [^{:tag (slice (* Var))} lhs (zero (slice (* Var)))
+                    ^{:line 785 :tag syntax/Expr} init (zero syntax/Expr)]
+                  (switch (len values)
+                    (case [(len (.-NameList s))]
+                      ;; lhs and rhs match
+                      (set! init (aget values i)))
+                    (case [1]
+                      ;; rhs is expected to be a multi-valued expression
+                      (set! lhs lhs0)
+                      (set! init (aget values 0)))
+                    (default
+                      (when (< i (len values))
+                        (set! init (aget values i)))))
+
+
+                  (.varDecl check obj lhs (.-Type s) init)
+                  (when (== (len values) 1)
+                    ;; If we have a single lhs variable we are done either way.
+                    ;; If we have a single rhs expression, it must be a multi-
+                    ;; valued expression, in which case handling the first lhs
+                    ;; variable will cause all lhs variables to have a type
+                    ;; assigned, and we are done as well.
+                    (when debug
+                      (range [_ obj lhs0]
+                        (go/call assert (!= ^{:go/via [object]} (.-typ obj) nil))))
+
+
+                    (break))))
+
+
+
+              ;; If we have no type, we must have values.
+              (when (or (== (.-Type s) nil) (!= values nil))
+                (.arity check ^{:go/via [decl node]} (.Pos s) (.-NameList s) values false false))
+
+
+              ;; process function literals in init expressions before scope changes
+              (.processDelayed check top)
+
+              ;; declare all variables
+              ;; (only at this point are the variable scopes (parents) set)
+              (let [scopePos (syntax/EndPos s)] ; see constant declarations
+                (range [i name (.-NameList s)]
+                  ;; see constant declarations
+                  (.declare check ^{:go/via [environment]} (.-scope check) name (aget lhs0 i) scopePos))))))
+
+
+        (case [(* syntax/TypeDecl)]
+          (let [obj (NewTypeName ^{:go/via [expr node]} (.Pos (.-Name s)) pkg (.-Value (.-Name s)) nil)
+              ;; spec: "The scope of a type identifier declared inside a function
+              ;; begins at the identifier in the TypeSpec and ends at the end of
+              ;; the innermost containing block."
+              ^{:line 836} scopePos ^{:go/via [expr node]} (.Pos (.-Name s))]
+            (.declare check ^{:go/via [environment]} (.-scope check) (.-Name s) obj scopePos)
+            (.push check obj) ; mark as grey
+            (.typeDecl check obj s)
+            (.pop check)))
+
+        (default
+          (.errorf check s InvalidSyntaxTree "unknown syntax.Decl node %T" s))))))

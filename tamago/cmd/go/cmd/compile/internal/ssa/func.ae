@@ -1,0 +1,879 @@
+;; Copyright 2015 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.cmd.compile.internal.ssa) (go/file "func.go" :imports [
+
+
+    ^{:line 8} [abi "cmd/compile/internal/abi"]
+    ^{:line 9} [base "cmd/compile/internal/base"]
+    ^{:line 10} [ir "cmd/compile/internal/ir"]
+    ^{:line 11} [typecheck "cmd/compile/internal/typecheck"]
+    ^{:line 12} [types "cmd/compile/internal/types"]
+    ^{:line 13} [obj "cmd/internal/obj"]
+    ^{:line 14} [src "cmd/internal/src"]
+    ^{:line 15} [fmt "fmt"]
+    ^{:line 16} [math "math"]
+    ^{:line 17} [strings "strings"]])
+
+
+
+
+
+(go/type Func "A Func represents a Go func declaration (or function literal) and its body.\nThis package compiles each Func independently.\nFuncs are single-use; a new Func must be created for every compiled function.\n" (struct
+    ^{:line 24 :tag (* Config)} Config ; architecture information
+    ^{:line 25 :tag (* Cache)} Cache ; re-usable cache
+    ^{:line 26 :tag Frontend} fe ; frontend state associated with this Func, callbacks into compiler frontend
+    ^{:line 27 :tag (* pass)} pass ; current pass information (name, options, etc.)
+    ^{:line 28 :tag string} Name ; e.g. NewFunc or (*Func).NumBlocks (no package prefix)
+    ^{:line 29 :tag (* types/Type)} Type ; type signature of the function.
+    ^{:line 30 :tag (slice (* Block))} Blocks ; unordered set of all basic blocks (note: not indexable by ID)
+    ^{:line 31 :tag (* Block)} Entry ; the entry basic block
+
+    ^{:line 33 :tag idAlloc} bid ; block ID allocator
+    ^{:line 34 :tag idAlloc} vid ; value ID allocator
+
+    ^{:line 36 :tag (* HTMLWriter)} HTMLWriter ; html writer, for debugging
+    ^{:line 37 :tag bool} PrintOrHtmlSSA ; true if GOSSAFUNC matches, true even if fe.Log() (spew phase results to stdout) is false.  There's an odd dependence on this in debug.go for method logf.
+    ^{:line 38 :tag (map string int)} ruleMatches ; number of times countRule was called during compilation for any given string
+    ^{:line 39 :tag (* abi/ABIConfig)} ABI0 ; ABI configuration for ABI0
+    ^{:line 40 :tag (* abi/ABIConfig)} ABI1 ; ABI configuration for ABIInternal
+    ^{:line 41 :tag (* abi/ABIConfig)} ABISelf ; ABI for function being compiled
+    ^{:line 42 :tag (* abi/ABIConfig)} ABIDefault ; ABI for rtcall and other no-parsed-signature/pragma functions.
+
+    ^{:line 44 :tag CPUfeatures} maxCPUFeatures ; union of all the CPU features in all the blocks.
+
+    ^{:line 46 :tag bool} scheduled ; Values in Blocks are in final order
+    ^{:line 47 :tag bool} laidout ; Blocks are ordered
+    ^{:line 48 :tag bool} NoSplit ; true if function is marked as nosplit.  Used by schedule check pass.
+    ^{:line 49 :tag uint8} dumpFileSeq ; the sequence numbers of dump file. (%s_%02d__%s.dump", funcname, dumpFileSeq, phaseName)
+    ^{:line 50 :tag bool} IsPgoHot
+    ^{:line 51 :tag (* Block)} DeferReturn ; avoid creating more than one deferreturn if there's multiple calls to deferproc-etc.
+
+
+    ^{:line 54 :tag (slice Location) :doc "when register allocation is done, maps value ids to locations\n"} RegAlloc
+
+
+    ^{:line 57 :tag (map ID (* Register)) :doc "temporary registers allocated to rare instructions\n"} tempRegs
+
+
+    ^{:line 60 :tag (map LocalSlot (slice (* Value))) :doc "map from LocalSlot to set of Values that we want to store in that slot.\n"} NamedValues
+
+
+    ^{:line 63 :tag (slice (* LocalSlot)) :doc "Names is a copy of NamedValues.Keys. We keep a separate list\nof keys to make iteration order deterministic.\n"} Names
+
+
+    ^{:line 66 :tag (map LocalSlot (* LocalSlot)) :doc "Canonicalize root/top-level local slots, and canonicalize their pieces.\nBecause LocalSlot pieces refer to their parents with a pointer, this ensures that equivalent slots really are equal.\n"} CanonicalLocalSlots
+    ^{:line 67 :tag (map LocalSlotSplitKey (* LocalSlot))} CanonicalLocalSplits
+
+
+    ^{:line 70 :tag (slice Spill) :doc "RegArgs is a slice of register-memory pairs that must be spilled and unspilled in the uncommon path of function entry.\n"} RegArgs
+
+    ^{:line 72 :tag (* AuxCall) :doc "OwnAux describes parameters and results for this function.\n"} OwnAux
+
+
+    ^{:line 75 :tag (* ir/Name) :doc "CloSlot holds the compiler-synthesized name (\".closureptr\")\nwhere we spill the closure pointer for range func bodies.\n"} CloSlot
+
+    ^{:line 77 :tag (* Value)} freeValues ; free Values linked by argstorage[0].  All other fields except ID are 0/nil.
+    ^{:line 78 :tag (* Block)} freeBlocks ; free Blocks linked by succstorage[0].b.  All other fields except ID are 0/nil.
+
+    ^{:line 80 :tag (slice (* Block))} cachedPostorder ; cached postorder traversal
+    ^{:line 81 :tag (slice (* Block))} cachedIdom ; cached immediate dominators
+    ^{:line 82 :tag SparseTree} cachedSdom ; cached dominator tree
+    ^{:line 83 :tag (* loopnest)} cachedLoopnest ; cached loop nest information
+    ^{:line 84 :tag (* xposmap)} cachedLineStarts ; cached map/set of xpos to integers
+
+    ^{:line 86 :tag auxmap} auxmap ; map from aux values to opaque ids used by CSE
+    ^{:line 87 :tag (map int64 (slice (* Value)))} constants)) ; constants cache, keyed by constant value; users must check value's Op and Type
+
+
+(go/type LocalSlotSplitKey (struct
+    ^{:line 91 :tag (* LocalSlot)} parent
+    ^{:line 92 :tag int64} Off ; offset of slot in N
+    ^{:line 93 :tag (* types/Type)} Type)) ; type of slot
+
+
+
+
+^{:go/end 109} (go/method NewFunc "NewFunc returns a new, empty function object.\nCaller must reset cache before calling NewFunc.\n" ^{:tag (* Func)} [^{:tag (* Config)} c ^Frontend fe ^{:tag (* Cache)} cache]
+  (addr ^{:go/breaks [2 4 6 [8 104] 10 12 14]} (lit Func
+      :fe fe
+      :Config c
+      :Cache cache
+
+      :NamedValues (make (map LocalSlot (slice (* Value))))
+      :CanonicalLocalSlots (make (map LocalSlot (* LocalSlot)))
+      :CanonicalLocalSplits (make (map LocalSlotSplitKey (* LocalSlot)))
+      :OwnAux (addr (lit AuxCall)))))
+
+
+
+
+^{:go/end 114} (go/method NumBlocks "NumBlocks returns an integer larger than the id of any Block in the Func.\n" ^int [^{:tag (* Func)} f]
+  (.num (.-bid f)))
+
+
+
+^{:go/end 119} (go/method NumValues "NumValues returns an integer larger than the id of any Value in the Func.\n" ^int [^{:tag (* Func)} f]
+  (.num (.-vid f)))
+
+
+
+
+
+
+^{:go/end 127} (go/method NameABI "NameABI returns the function name followed by comma and the ABI number.\nThis is intended for use with GOSSAFUNC and HTML dumps, and differs from\nthe linker's \"<1>\" convention because \"<\" and \">\" require shell quoting\nand are not legal file names (for use with GOSSADIR) on Windows.\n" ^string [^{:tag (* Func)} f]
+  (FuncNameABI (.-Name f) (.Which (.-ABISelf f))))
+
+
+
+
+
+^{:go/end 134} (go/func FuncNameABI "FuncNameABI returns n followed by a comma and the value of a.\nThis is a separate function to allow a single point encoding\nof the format, which is used in places where there's not a Func yet.\n" ^string [^string n ^obj/ABI a]
+  (fmt/Sprintf "%s,%d" n a))
+
+
+
+^{:go/end 139} (go/method newSparseSet "newSparseSet returns a sparse set that can store at least up to n integers.\n" ^{:tag (* sparseSet)} [^{:tag (* Func)} f ^int n]
+  (.allocSparseSet (.-Cache f) n))
+
+
+
+
+^{:go/end 145} (go/method retSparseSet "retSparseSet returns a sparse set to the config's cache of sparse\nsets to be reused by f.newSparseSet.\n" [^{:tag (* Func)} f ^{:tag (* sparseSet)} ss]
+  (.freeSparseSet (.-Cache f) ss))
+
+
+
+^{:go/end 150} (go/method newSparseMap "newSparseMap returns a sparse map that can store at least up to n integers.\n" ^{:tag (* sparseMap)} [^{:tag (* Func)} f ^int n]
+  (.allocSparseMap (.-Cache f) n))
+
+
+
+
+^{:go/end 156} (go/method retSparseMap "retSparseMap returns a sparse map to the config's cache of sparse\nsets to be reused by f.newSparseMap.\n" [^{:tag (* Func)} f ^{:tag (* sparseMap)} ss]
+  (.freeSparseMap (.-Cache f) ss))
+
+
+
+^{:go/end 161} (go/method newSparseMapPos "newSparseMapPos returns a sparse map that can store at least up to n integers.\n" ^{:tag (* sparseMapPos)} [^{:tag (* Func)} f ^int n]
+  (.allocSparseMapPos (.-Cache f) n))
+
+
+
+
+^{:go/end 167} (go/method retSparseMapPos "retSparseMapPos returns a sparse map to the config's cache of sparse\nsets to be reused by f.newSparseMapPos.\n" [^{:tag (* Func)} f ^{:tag (* sparseMapPos)} ss]
+  (.freeSparseMapPos (.-Cache f) ss))
+
+
+
+^{:go/end 177} (go/method newPoset "newPoset returns a new poset from the internal cache\n" ^{:tag (* poset)} [^{:tag (* Func)} f]
+  (when (> (len (.-scrPoset (.-Cache f))) 0)
+    (let [po (aget (.-scrPoset (.-Cache f)) (- (len (.-scrPoset (.-Cache f))) 1))]
+      (set! (.-scrPoset (.-Cache f)) (subslice (.-scrPoset (.-Cache f)) _ (- (len (.-scrPoset (.-Cache f))) 1)))
+      (return po)))
+
+  (newPoset))
+
+
+
+^{:go/end 182} (go/method retPoset "retPoset returns a poset to the internal cache\n" [^{:tag (* Func)} f ^{:tag (* poset)} po]
+  (set! (.-scrPoset (.-Cache f)) (append (.-scrPoset (.-Cache f)) po)))
+
+
+^{:go/end 192} (go/method localSlotAddr ^{:tag (* LocalSlot)} [^{:tag (* Func)} f ^LocalSlot slot]
+  (let [(values a ok) (aget (.-CanonicalLocalSlots f) slot)]
+    (when (not ok)
+      (set! a (new LocalSlot))
+      (set! @a slot) ; don't escape slot
+      (aset (.-CanonicalLocalSlots f) slot a))
+
+    ^{:line 191} a))
+
+
+^{:go/end 201} (go/method SplitString [^{:tag (* Func)} f ^{:tag (* LocalSlot)} name] :results [(* LocalSlot) (* LocalSlot)]
+  (let [ptrType (types/NewPtr (aget types/Types types/TUINT8))
+      ^{:line 196} lenType (aget types/Types types/TINT)
+      ;; Split this string up into two separate variables.
+      ^{:line 198} p (.SplitSlot f name ".ptr" 0 ptrType)
+      ^{:line 199} l (.SplitSlot f name ".len" (.Size ptrType) lenType)]
+    (return p l)))
+
+
+^{:go/end 215} (go/method SplitInterface [^{:tag (* Func)} f ^{:tag (* LocalSlot)} name] :results [(* LocalSlot) (* LocalSlot)]
+  (let [n (.-N name)
+      ^{:line 205} u (aget types/Types types/TUINTPTR)
+      ^{:line 206} t (types/NewPtr (aget types/Types types/TUINT8))
+      ;; Split this interface up into two separate variables.
+      ^{:line 208} sfx ".itab"]
+    (when (.IsEmptyInterface ^{:go/via [miniExpr]} (.Type n))
+      (set! sfx ".type"))
+
+    (let [c (.SplitSlot f name sfx 0 u) ; see comment in typebits.Set
+        ^{:line 213} d (.SplitSlot f name ".data" (.Size u) t)]
+      (return c d))))
+
+
+^{:go/end 224} (go/method SplitSlice [^{:tag (* Func)} f ^{:tag (* LocalSlot)} name] :results [(* LocalSlot) (* LocalSlot) (* LocalSlot)]
+  (let [ptrType (types/NewPtr (.Elem (.-Type name)))
+      ^{:line 219} lenType (aget types/Types types/TINT)
+      ^{:line 220} p (.SplitSlot f name ".ptr" 0 ptrType)
+      ^{:line 221} l (.SplitSlot f name ".len" (.Size ptrType) lenType)
+      ^{:line 222} c (.SplitSlot f name ".cap" (+ (.Size ptrType) (.Size lenType)) lenType)]
+    (return p l c)))
+
+
+^{:go/end 237} (go/method SplitComplex [^{:tag (* Func)} f ^{:tag (* LocalSlot)} name] :results [(* LocalSlot) (* LocalSlot)]
+  (let [s (/ (.Size (.-Type name)) 2)
+      ^{:line 228 :tag (* types/Type)} t (zero (* types/Type))]
+    (if (== s 8)
+      (set! t (aget types/Types types/TFLOAT64))
+
+      (set! t (aget types/Types types/TFLOAT32)))
+
+    (let [r (.SplitSlot f name ".real" 0 t)
+        ^{:line 235} i (.SplitSlot f name ".imag" (.Size t) t)]
+      (return r i))))
+
+
+^{:go/end 250} (go/method SplitInt64 [^{:tag (* Func)} f ^{:tag (* LocalSlot)} name] :results [(* LocalSlot) (* LocalSlot)]
+  (let [^{:tag (* types/Type)} t (zero (* types/Type))]
+    (if (.IsSigned (.-Type name))
+      (set! t (aget types/Types types/TINT32))
+
+      (set! t (aget types/Types types/TUINT32)))
+
+    (when (.-BigEndian (.-Config f))
+      (return (.SplitSlot f name ".hi" 0 t) (.SplitSlot f name ".lo" (.Size t) (aget types/Types types/TUINT32))))
+
+    (return (.SplitSlot f name ".hi" (.Size t) t) (.SplitSlot f name ".lo" 0 (aget types/Types types/TUINT32)))))
+
+
+^{:go/end 255} (go/method SplitStruct ^{:tag (* LocalSlot)} [^{:tag (* Func)} f ^{:tag (* LocalSlot)} name ^int i]
+  (let [st (.-Type name)]
+    (.SplitSlot f name (.FieldName st i) (.FieldOff st i) (.FieldType st i))))
+
+^{:go/end 264} (go/method SplitArray ^{:tag (* LocalSlot)} [^{:tag (* Func)} f ^{:tag (* LocalSlot)} name]
+  (let [n (.-N name)
+      ^{:line 258} at (.-Type name)]
+    (when (!= (.NumElem at) 1)
+      (base/FatalfAt ^{:go/via [miniExpr miniNode]} (.Pos n) "bad array size"))
+
+    (let [et (.Elem at)]
+      (.SplitSlot f name "[0]" 0 et))))
+
+
+^{:go/end 277} (go/method SplitSlot ^{:tag (* LocalSlot)} [^{:tag (* Func)} f ^{:tag (* LocalSlot)} name ^string sfx ^int64 offset ^{:tag (* types/Type)} t]
+  (let [lssk (lit LocalSlotSplitKey name offset t)]
+    (when [(values als ok) (aget (.-CanonicalLocalSplits f) lssk)] ok
+      (return als))
+
+    ;; Note: the _ field may appear several times.  But
+    ;; have no fear, identically-named but distinct Autos are
+    ;; ok, albeit maybe confusing for a debugger.
+    (let [ls (.SplitSlot (.-fe f) name sfx offset t)]
+      (aset (.-CanonicalLocalSplits f) lssk (addr ls))
+      (addr ls))))
+
+
+
+^{:go/end 304} (go/method newValue "newValue allocates a new Value with the given fields and places it at the end of b.Values.\n" ^{:tag (* Value)} [^{:tag (* Func)} f ^Op op ^{:tag (* types/Type)} t ^{:tag (* Block)} b ^src/XPos pos]
+  (let [^{:tag (* Value)} v (zero (* Value))]
+    (if (!= (.-freeValues f) nil) (do
+        (set! v (.-freeValues f))
+        (set! (.-freeValues f) (aget (.-argstorage v) 0))
+        (aset (.-argstorage v) 0 nil))
+
+      (let [ID (.get (.-vid f))]
+        (if (< (conv int ID) (len (.-values (.-Cache f)))) (do
+            (set! v (addr (aget (.-values (.-Cache f)) ID)))
+            (set! (.-ID v) ID))
+
+          (set! v (addr (lit Value :ID ID))))))
+
+
+    (set! (.-Op v) op)
+    (set! (.-Type v) t)
+    (set! (.-Block v) b)
+    (when (notStmtBoundary op)
+      (set! pos (.WithNotStmt pos)))
+
+    (set! (.-Pos v) pos)
+    (set! (.-Values b) (append (.-Values b) v))
+    ^{:line 303} v))
+
+
+
+
+
+
+^{:go/end 333} (go/method newValueNoBlock "newValueNoBlock allocates a new Value with the given fields.\nThe returned value is not placed in any block.  Once the caller\ndecides on a block b, it must set b.Block and append\nthe returned value to b.Values.\n" ^{:tag (* Value)} [^{:tag (* Func)} f ^Op op ^{:tag (* types/Type)} t ^src/XPos pos]
+  (let [^{:tag (* Value)} v (zero (* Value))]
+    (if (!= (.-freeValues f) nil) (do
+        (set! v (.-freeValues f))
+        (set! (.-freeValues f) (aget (.-argstorage v) 0))
+        (aset (.-argstorage v) 0 nil))
+
+      (let [ID (.get (.-vid f))]
+        (if (< (conv int ID) (len (.-values (.-Cache f)))) (do
+            (set! v (addr (aget (.-values (.-Cache f)) ID)))
+            (set! (.-ID v) ID))
+
+          (set! v (addr (lit Value :ID ID))))))
+
+
+    (set! (.-Op v) op)
+    (set! (.-Type v) t)
+    (set! (.-Block v) nil) ; caller must fix this.
+    (when (notStmtBoundary op)
+      (set! pos (.WithNotStmt pos)))
+
+    (set! (.-Pos v) pos)
+    ^{:line 332} v))
+
+
+
+
+
+
+
+
+^{:go/end 351} (go/method LogStat "LogStat writes a string key and int value as a warning in a\ntab-separated format easily handled by spreadsheets or awk.\nfile names, lines, and function names are included to provide enough (?)\ncontext to allow item-by-item comparisons across runs.\nFor example:\nawk 'BEGIN {FS=\"\\t\"} $3~/TIME/{sum+=$4} END{print \"t(ns)=\",sum}' t.log\n" [^{:tag (* Func)} f ^string key & ^{:tag (slice any)} args]
+  (let [value ""]
+    (range [_ a args]
+      (set! value + (fmt/Sprintf "\t%v" a)))
+
+    (let [n "missing_pass"]
+      (when (!= (.-pass f) nil)
+        (set! n (strings/ReplaceAll (.-name (.-pass f)) " " "_")))
+
+      (.Warnl f (.-Pos (.-Entry f)) "\t%s\t%s%s\t%s" n key value (.-Name f)))))
+
+
+
+
+
+^{:go/end 368} (go/method unCacheLine "unCacheLine removes v from f's constant cache \"line\" for aux,\nresets v.InCache when it is found (and removed),\nand returns whether v was found in that line.\n" ^bool [^{:tag (* Func)} f ^{:tag (* Value)} v ^int64 aux]
+  ^{:go/breaks [[3 367]]} (let [vv (aget (.-constants f) aux)]
+    (range [i cv vv]
+      (when (== v cv)
+        (aset vv i (aget vv (- (len vv) 1)))
+        (aset vv (- (len vv) 1) nil)
+        (aset (.-constants f) aux (subslice vv 0 (- (len vv) 1)))
+        (set! (.-InCache v) false)
+        (return true)))
+
+
+    false))
+
+
+
+^{:go/end 394} (go/method unCache "unCache removes v from f's constant cache.\n" [^{:tag (* Func)} f ^{:tag (* Value)} v]
+  (when (.-InCache v)
+    (let [aux (.-AuxInt v)]
+      (when (.unCacheLine f v aux)
+        (return))
+
+      (when (== aux 0)
+        (switch (.-Op v)
+          (case [OpConstNil]
+            (set! aux constNilMagic))
+          (case [OpConstSlice]
+            (set! aux constSliceMagic))
+          (case [OpConstString]
+            (set! aux constEmptyStringMagic))
+          (case [OpConstInterface]
+            (set! aux constInterfaceMagic)))
+
+        (when (and (!= aux 0) (.unCacheLine f v aux))
+          (return)))
+
+
+      (.Fatalf f "unCached value %s not found in cache, auxInt=0x%x, adjusted aux=0x%x" (.LongString v) (.-AuxInt v) aux))))
+
+
+
+
+^{:go/end 416} (go/method freeValue "freeValue frees a value. It must no longer be referenced or have any args.\n" [^{:tag (* Func)} f ^{:tag (* Value)} v]
+  (when (== (.-Block v) nil)
+    (.Fatalf f "trying to free an already freed value"))
+
+  (when (!= (.-Uses v) 0)
+    (.Fatalf f "value %s still has %d uses" v (.-Uses v)))
+
+  (when (!= (len (.-Args v)) 0)
+    (.Fatalf f "value %s still has %d args" v (len (.-Args v))))
+
+  ;; Clear everything but ID (which we reuse).
+  (let [id (.-ID v)]
+    (when (.-InCache v)
+      (.unCache f v))
+
+    (set! @v (lit Value))
+    (set! (.-ID v) id)
+    (aset (.-argstorage v) 0 (.-freeValues f))
+    (set! (.-freeValues f) v)))
+
+
+
+^{:go/end 442} (go/method NewBlock "NewBlock allocates a new Block of the given kind and places it at the end of f.Blocks.\n" ^{:tag (* Block)} [^{:tag (* Func)} f ^BlockKind kind]
+  (let [^{:tag (* Block)} b (zero (* Block))]
+    (if (!= (.-freeBlocks f) nil) (do
+        (set! b (.-freeBlocks f))
+        (set! (.-freeBlocks f) (.-b (aget (.-succstorage b) 0)))
+        (set! (.-b (aget (.-succstorage b) 0)) nil))
+
+      (let [ID (.get (.-bid f))]
+        (if (< (conv int ID) (len (.-blocks (.-Cache f)))) (do
+            (set! b (addr (aget (.-blocks (.-Cache f)) ID)))
+            (set! (.-ID b) ID))
+
+          (set! b (addr (lit Block :ID ID))))))
+
+
+    (set! (.-Kind b) kind)
+    (set! (.-Func b) f)
+    (set! (.-Preds b) (subslice (.-predstorage b) _ 0))
+    (set! (.-Succs b) (subslice (.-succstorage b) _ 0))
+    (set! (.-Values b) (subslice (.-valstorage b) _ 0))
+    (set! (.-Blocks f) (append (.-Blocks f) b))
+    (.invalidateCFG f)
+    ^{:line 441} b))
+
+
+^{:go/end 454} (go/method freeBlock [^{:tag (* Func)} f ^{:tag (* Block)} b]
+  (when (== (.-Func b) nil)
+    (.Fatalf f "trying to free an already freed block"))
+
+  ;; Clear everything but ID (which we reuse).
+  (let [id (.-ID b)]
+    (set! @b (lit Block))
+    (set! (.-ID b) id)
+    (set! (.-b (aget (.-succstorage b) 0)) (.-freeBlocks f))
+    (set! (.-freeBlocks f) b)))
+
+
+
+^{:go/end 462} (go/method NewValue0 "NewValue0 returns a new value in the block with no arguments and zero aux values.\n" ^{:tag (* Value)} [^{:tag (* Block)} b ^src/XPos pos ^Op op ^{:tag (* types/Type)} t]
+  (let [v (.newValue (.-Func b) op t b pos)]
+    (set! (.-AuxInt v) 0)
+    (set! (.-Args v) (subslice (.-argstorage v) _ 0))
+    ^{:line 461} v))
+
+
+
+^{:go/end 470} (go/method NewValue0I "NewValue0I returns a new value in the block with no arguments and an auxint value.\n" ^{:tag (* Value)} [^{:tag (* Block)} b ^src/XPos pos ^Op op ^{:tag (* types/Type)} t ^int64 auxint]
+  (let [v (.newValue (.-Func b) op t b pos)]
+    (set! (.-AuxInt v) auxint)
+    (set! (.-Args v) (subslice (.-argstorage v) _ 0))
+    ^{:line 469} v))
+
+
+
+^{:go/end 479} (go/method NewValue0A "NewValue0A returns a new value in the block with no arguments and an aux value.\n" ^{:tag (* Value)} [^{:tag (* Block)} b ^src/XPos pos ^Op op ^{:tag (* types/Type)} t ^Aux aux]
+  (let [v (.newValue (.-Func b) op t b pos)]
+    (set! (.-AuxInt v) 0)
+    (set! (.-Aux v) aux)
+    (set! (.-Args v) (subslice (.-argstorage v) _ 0))
+    ^{:line 478} v))
+
+
+
+^{:go/end 488} (go/method NewValue0IA "NewValue0IA returns a new value in the block with no arguments and both an auxint and aux values.\n" ^{:tag (* Value)} [^{:tag (* Block)} b ^src/XPos pos ^Op op ^{:tag (* types/Type)} t ^int64 auxint ^Aux aux]
+  (let [v (.newValue (.-Func b) op t b pos)]
+    (set! (.-AuxInt v) auxint)
+    (set! (.-Aux v) aux)
+    (set! (.-Args v) (subslice (.-argstorage v) _ 0))
+    ^{:line 487} v))
+
+
+
+^{:go/end 498} (go/method NewValue1 "NewValue1 returns a new value in the block with one argument and zero aux values.\n" ^{:tag (* Value)} [^{:tag (* Block)} b ^src/XPos pos ^Op op ^{:tag (* types/Type)} t ^{:tag (* Value)} arg]
+  (let [v (.newValue (.-Func b) op t b pos)]
+    (set! (.-AuxInt v) 0)
+    (set! (.-Args v) (subslice (.-argstorage v) _ 1))
+    (aset (.-argstorage v) 0 arg)
+    (inc! (.-Uses arg))
+    ^{:line 497} v))
+
+
+
+^{:go/end 508} (go/method NewValue1I "NewValue1I returns a new value in the block with one argument and an auxint value.\n" ^{:tag (* Value)} [^{:tag (* Block)} b ^src/XPos pos ^Op op ^{:tag (* types/Type)} t ^int64 auxint ^{:tag (* Value)} arg]
+  (let [v (.newValue (.-Func b) op t b pos)]
+    (set! (.-AuxInt v) auxint)
+    (set! (.-Args v) (subslice (.-argstorage v) _ 1))
+    (aset (.-argstorage v) 0 arg)
+    (inc! (.-Uses arg))
+    ^{:line 507} v))
+
+
+
+^{:go/end 519} (go/method NewValue1A "NewValue1A returns a new value in the block with one argument and an aux value.\n" ^{:tag (* Value)} [^{:tag (* Block)} b ^src/XPos pos ^Op op ^{:tag (* types/Type)} t ^Aux aux ^{:tag (* Value)} arg]
+  (let [v (.newValue (.-Func b) op t b pos)]
+    (set! (.-AuxInt v) 0)
+    (set! (.-Aux v) aux)
+    (set! (.-Args v) (subslice (.-argstorage v) _ 1))
+    (aset (.-argstorage v) 0 arg)
+    (inc! (.-Uses arg))
+    ^{:line 518} v))
+
+
+
+^{:go/end 530} (go/method NewValue1IA "NewValue1IA returns a new value in the block with one argument and both an auxint and aux values.\n" ^{:tag (* Value)} [^{:tag (* Block)} b ^src/XPos pos ^Op op ^{:tag (* types/Type)} t ^int64 auxint ^Aux aux ^{:tag (* Value)} arg]
+  (let [v (.newValue (.-Func b) op t b pos)]
+    (set! (.-AuxInt v) auxint)
+    (set! (.-Aux v) aux)
+    (set! (.-Args v) (subslice (.-argstorage v) _ 1))
+    (aset (.-argstorage v) 0 arg)
+    (inc! (.-Uses arg))
+    ^{:line 529} v))
+
+
+
+^{:go/end 542} (go/method NewValue2 "NewValue2 returns a new value in the block with two arguments and zero aux values.\n" ^{:tag (* Value)} [^{:tag (* Block)} b ^src/XPos pos ^Op op ^{:tag (* types/Type)} t ^{:tag (* Value)} arg0 ^{:tag (* Value)} arg1]
+  (let [v (.newValue (.-Func b) op t b pos)]
+    (set! (.-AuxInt v) 0)
+    (set! (.-Args v) (subslice (.-argstorage v) _ 2))
+    (aset (.-argstorage v) 0 arg0)
+    (aset (.-argstorage v) 1 arg1)
+    (inc! (.-Uses arg0))
+    (inc! (.-Uses arg1))
+    ^{:line 541} v))
+
+
+
+^{:go/end 555} (go/method NewValue2A "NewValue2A returns a new value in the block with two arguments and one aux values.\n" ^{:tag (* Value)} [^{:tag (* Block)} b ^src/XPos pos ^Op op ^{:tag (* types/Type)} t ^Aux aux ^{:tag (* Value)} arg0 ^{:tag (* Value)} arg1]
+  (let [v (.newValue (.-Func b) op t b pos)]
+    (set! (.-AuxInt v) 0)
+    (set! (.-Aux v) aux)
+    (set! (.-Args v) (subslice (.-argstorage v) _ 2))
+    (aset (.-argstorage v) 0 arg0)
+    (aset (.-argstorage v) 1 arg1)
+    (inc! (.-Uses arg0))
+    (inc! (.-Uses arg1))
+    ^{:line 554} v))
+
+
+
+^{:go/end 567} (go/method NewValue2I "NewValue2I returns a new value in the block with two arguments and an auxint value.\n" ^{:tag (* Value)} [^{:tag (* Block)} b ^src/XPos pos ^Op op ^{:tag (* types/Type)} t ^int64 auxint ^{:tag (* Value)} arg0 ^{:tag (* Value)} arg1]
+  (let [v (.newValue (.-Func b) op t b pos)]
+    (set! (.-AuxInt v) auxint)
+    (set! (.-Args v) (subslice (.-argstorage v) _ 2))
+    (aset (.-argstorage v) 0 arg0)
+    (aset (.-argstorage v) 1 arg1)
+    (inc! (.-Uses arg0))
+    (inc! (.-Uses arg1))
+    ^{:line 566} v))
+
+
+
+^{:go/end 580} (go/method NewValue2IA "NewValue2IA returns a new value in the block with two arguments and both an auxint and aux values.\n" ^{:tag (* Value)} [^{:tag (* Block)} b ^src/XPos pos ^Op op ^{:tag (* types/Type)} t ^int64 auxint ^Aux aux ^{:tag (* Value)} arg0 ^{:tag (* Value)} arg1]
+  (let [v (.newValue (.-Func b) op t b pos)]
+    (set! (.-AuxInt v) auxint)
+    (set! (.-Aux v) aux)
+    (set! (.-Args v) (subslice (.-argstorage v) _ 2))
+    (aset (.-argstorage v) 0 arg0)
+    (aset (.-argstorage v) 1 arg1)
+    (inc! (.-Uses arg0))
+    (inc! (.-Uses arg1))
+    ^{:line 579} v))
+
+
+
+^{:go/end 594} (go/method NewValue3 "NewValue3 returns a new value in the block with three arguments and zero aux values.\n" ^{:tag (* Value)} [^{:tag (* Block)} b ^src/XPos pos ^Op op ^{:tag (* types/Type)} t ^{:tag (* Value)} arg0 ^{:tag (* Value)} arg1 ^{:tag (* Value)} arg2]
+  (let [v (.newValue (.-Func b) op t b pos)]
+    (set! (.-AuxInt v) 0)
+    (set! (.-Args v) (subslice (.-argstorage v) _ 3))
+    (aset (.-argstorage v) 0 arg0)
+    (aset (.-argstorage v) 1 arg1)
+    (aset (.-argstorage v) 2 arg2)
+    (inc! (.-Uses arg0))
+    (inc! (.-Uses arg1))
+    (inc! (.-Uses arg2))
+    ^{:line 593} v))
+
+
+
+^{:go/end 608} (go/method NewValue3I "NewValue3I returns a new value in the block with three arguments and an auxint value.\n" ^{:tag (* Value)} [^{:tag (* Block)} b ^src/XPos pos ^Op op ^{:tag (* types/Type)} t ^int64 auxint ^{:tag (* Value)} arg0 ^{:tag (* Value)} arg1 ^{:tag (* Value)} arg2]
+  (let [v (.newValue (.-Func b) op t b pos)]
+    (set! (.-AuxInt v) auxint)
+    (set! (.-Args v) (subslice (.-argstorage v) _ 3))
+    (aset (.-argstorage v) 0 arg0)
+    (aset (.-argstorage v) 1 arg1)
+    (aset (.-argstorage v) 2 arg2)
+    (inc! (.-Uses arg0))
+    (inc! (.-Uses arg1))
+    (inc! (.-Uses arg2))
+    ^{:line 607} v))
+
+
+
+^{:go/end 623} (go/method NewValue3A "NewValue3A returns a new value in the block with three argument and an aux value.\n" ^{:tag (* Value)} [^{:tag (* Block)} b ^src/XPos pos ^Op op ^{:tag (* types/Type)} t ^Aux aux ^{:tag (* Value)} arg0 ^{:tag (* Value)} arg1 ^{:tag (* Value)} arg2]
+  (let [v (.newValue (.-Func b) op t b pos)]
+    (set! (.-AuxInt v) 0)
+    (set! (.-Aux v) aux)
+    (set! (.-Args v) (subslice (.-argstorage v) _ 3))
+    (aset (.-argstorage v) 0 arg0)
+    (aset (.-argstorage v) 1 arg1)
+    (aset (.-argstorage v) 2 arg2)
+    (inc! (.-Uses arg0))
+    (inc! (.-Uses arg1))
+    (inc! (.-Uses arg2))
+    ^{:line 622} v))
+
+
+
+^{:go/end 635} (go/method NewValue4 "NewValue4 returns a new value in the block with four arguments and zero aux values.\n" ^{:tag (* Value)} [^{:tag (* Block)} b ^src/XPos pos ^Op op ^{:tag (* types/Type)} t ^{:tag (* Value)} arg0 ^{:tag (* Value)} arg1 ^{:tag (* Value)} arg2 ^{:tag (* Value)} arg3]
+  (let [v (.newValue (.-Func b) op t b pos)]
+    (set! (.-AuxInt v) 0)
+    (set! (.-Args v) (lit (slice (* Value)) arg0 arg1 arg2 arg3))
+    (inc! (.-Uses arg0))
+    (inc! (.-Uses arg1))
+    (inc! (.-Uses arg2))
+    (inc! (.-Uses arg3))
+    ^{:line 634} v))
+
+
+
+^{:go/end 648} (go/method NewValue4A "NewValue4A returns a new value in the block with four arguments and zero aux values.\n" ^{:tag (* Value)} [^{:tag (* Block)} b ^src/XPos pos ^Op op ^{:tag (* types/Type)} t ^Aux aux ^{:tag (* Value)} arg0 ^{:tag (* Value)} arg1 ^{:tag (* Value)} arg2 ^{:tag (* Value)} arg3]
+  (let [v (.newValue (.-Func b) op t b pos)]
+    (set! (.-AuxInt v) 0)
+    (set! (.-Aux v) aux)
+    (set! (.-Args v) (lit (slice (* Value)) arg0 arg1 arg2 arg3))
+    (inc! (.-Uses arg0))
+    (inc! (.-Uses arg1))
+    (inc! (.-Uses arg2))
+    (inc! (.-Uses arg3))
+    ^{:line 647} v))
+
+
+
+^{:go/end 660} (go/method NewValue4I "NewValue4I returns a new value in the block with four arguments and auxint value.\n" ^{:tag (* Value)} [^{:tag (* Block)} b ^src/XPos pos ^Op op ^{:tag (* types/Type)} t ^int64 auxint ^{:tag (* Value)} arg0 ^{:tag (* Value)} arg1 ^{:tag (* Value)} arg2 ^{:tag (* Value)} arg3]
+  (let [v (.newValue (.-Func b) op t b pos)]
+    (set! (.-AuxInt v) auxint)
+    (set! (.-Args v) (lit (slice (* Value)) arg0 arg1 arg2 arg3))
+    (inc! (.-Uses arg0))
+    (inc! (.-Uses arg1))
+    (inc! (.-Uses arg2))
+    (inc! (.-Uses arg3))
+    ^{:line 659} v))
+
+
+
+^{:go/end 685} (go/method constVal "constVal returns a constant value for c.\n" ^{:tag (* Value)} [^{:tag (* Func)} f ^Op op ^{:tag (* types/Type)} t ^int64 c ^bool setAuxInt]
+  (when (== (.-constants f) nil)
+    (set! (.-constants f) (make (map int64 (slice (* Value))))))
+
+  (let [vv (aget (.-constants f) c)]
+    (range [_ v vv]
+      (when (and (== (.-Op v) op) (== (.Compare (.-Type v) t) types/CMPeq))
+        (when (and setAuxInt (!= (.-AuxInt v) c))
+          (panic (fmt/Sprintf "cached const %s should have AuxInt of %d" (.LongString v) c)))
+
+        (return v)))
+
+
+    (let [^{:tag (* Value)} v (zero (* Value))]
+      (if setAuxInt
+        (set! v (.NewValue0I (.-Entry f) src/NoXPos op t c))
+
+        (set! v (.NewValue0 (.-Entry f) src/NoXPos op t)))
+
+      (aset (.-constants f) c (append vv v))
+      (set! (.-InCache v) true)
+      ^{:line 684} v)))
+
+
+
+
+
+
+(go/const "These magic auxint values let us easily cache non-numeric constants\nusing the same constants map while making collisions unlikely.\nThese values are unlikely to occur in regular code and\nare easy to grep for in case of bugs.\n"
+  ^{:line 692} [^{:val 1122334455} constSliceMagic 1122334455]
+  ^{:line 693} [^{:val 2233445566} constInterfaceMagic 2233445566]
+  ^{:line 694} [^{:val 3344556677} constNilMagic 3344556677]
+  ^{:line 695} [^{:val 4455667788} constEmptyStringMagic 4455667788])
+
+
+
+^{:go/end 705} (go/method ConstBool "ConstBool returns an int constant representing its argument.\n" ^{:tag (* Value)} [^{:tag (* Func)} f ^{:tag (* types/Type)} t ^bool c]
+  (let [i (conv int64 0)]
+    (when c
+      (set! i 1))
+
+    (.constVal f OpConstBool t i true)))
+
+^{:go/end 708} (go/method ConstInt8 ^{:tag (* Value)} [^{:tag (* Func)} f ^{:tag (* types/Type)} t ^int8 c]
+  (.constVal f OpConst8 t (conv int64 c) true))
+
+^{:go/end 711} (go/method ConstInt16 ^{:tag (* Value)} [^{:tag (* Func)} f ^{:tag (* types/Type)} t ^int16 c]
+  (.constVal f OpConst16 t (conv int64 c) true))
+
+^{:go/end 714} (go/method ConstInt32 ^{:tag (* Value)} [^{:tag (* Func)} f ^{:tag (* types/Type)} t ^int32 c]
+  (.constVal f OpConst32 t (conv int64 c) true))
+
+^{:go/end 717} (go/method ConstInt64 ^{:tag (* Value)} [^{:tag (* Func)} f ^{:tag (* types/Type)} t ^int64 c]
+  (.constVal f OpConst64 t c true))
+
+^{:go/end 720} (go/method ConstFloat32 ^{:tag (* Value)} [^{:tag (* Func)} f ^{:tag (* types/Type)} t ^float64 c]
+  (.constVal f OpConst32F t (conv int64 (math/Float64bits (conv float64 (conv float32 c)))) true))
+
+^{:go/end 723} (go/method ConstFloat64 ^{:tag (* Value)} [^{:tag (* Func)} f ^{:tag (* types/Type)} t ^float64 c]
+  (.constVal f OpConst64F t (conv int64 (math/Float64bits c)) true))
+
+
+^{:go/end 727} (go/method ConstSlice ^{:tag (* Value)} [^{:tag (* Func)} f ^{:tag (* types/Type)} t]
+  (.constVal f OpConstSlice t constSliceMagic false))
+
+^{:go/end 730} (go/method ConstInterface ^{:tag (* Value)} [^{:tag (* Func)} f ^{:tag (* types/Type)} t]
+  (.constVal f OpConstInterface t constInterfaceMagic false))
+
+^{:go/end 733} (go/method ConstNil ^{:tag (* Value)} [^{:tag (* Func)} f ^{:tag (* types/Type)} t]
+  (.constVal f OpConstNil t constNilMagic false))
+
+^{:go/end 738} (go/method ConstEmptyString ^{:tag (* Value)} [^{:tag (* Func)} f ^{:tag (* types/Type)} t]
+  (let [v (.constVal f OpConstString t constEmptyStringMagic false)]
+    (set! (.-Aux v) (StringToAux ""))
+    ^{:line 737} v))
+
+^{:go/end 745} (go/method ConstOffPtrSP ^{:tag (* Value)} [^{:tag (* Func)} f ^{:tag (* types/Type)} t ^int64 c ^{:tag (* Value)} sp]
+  (let [v (.constVal f OpOffPtr t c true)]
+    (when (== (len (.-Args v)) 0)
+      (.AddArg v sp))
+
+    ^{:line 744} v))
+
+
+^{:go/end 747} (go/method Frontend ^Frontend [^{:tag (* Func)} f] (.-fe f))
+^{:go/end 748} (go/method Warnl [^{:tag (* Func)} f ^src/XPos pos ^string msg & ^{:tag (slice any)} args] (.Warnl (.-fe f) pos msg (spread args)))
+^{:go/end 749} (go/method Logf [^{:tag (* Func)} f ^string msg & ^{:tag (slice any)} args] (.Logf (.-fe f) msg (spread args)))
+^{:go/end 750} (go/method Log ^bool [^{:tag (* Func)} f] (.Log (.-fe f)))
+
+^{:go/end 763} (go/method Fatalf [^{:tag (* Func)} f ^string msg & ^{:tag (slice any)} args]
+  (let [stats "crashed"]
+    (when (.Log f)
+      (.Logf f "  pass %s end %s\n" (.-name (.-pass f)) stats)
+      (printFunc f))
+
+    (when (!= (.-HTMLWriter f) nil)
+      (.WritePhase (.-HTMLWriter f) (.-name (.-pass f)) (fmt/Sprintf "%s <span class=\"stats\">%s</span>" (.-name (.-pass f)) stats))
+      (.flushPhases (.-HTMLWriter f)))
+
+    (.Fatalf (.-fe f) (.-Pos (.-Entry f)) msg (spread args))))
+
+
+
+^{:go/end 771} (go/method postorder "postorder returns the reachable blocks in f in a postorder traversal.\n" ^{:tag (slice (* Block))} [^{:tag (* Func)} f]
+  (when (== (.-cachedPostorder f) nil)
+    (set! (.-cachedPostorder f) (postorder f)))
+
+  (.-cachedPostorder f))
+
+
+^{:go/end 775} (go/method Postorder ^{:tag (slice (* Block))} [^{:tag (* Func)} f]
+  (.postorder f))
+
+
+
+
+^{:go/end 784} (go/method Idom "Idom returns a map from block ID to the immediate dominator of that block.\nf.Entry.ID maps to nil. Unreachable blocks map to nil as well.\n" ^{:tag (slice (* Block))} [^{:tag (* Func)} f]
+  (when (== (.-cachedIdom f) nil)
+    (set! (.-cachedIdom f) (dominators f)))
+
+  (.-cachedIdom f))
+
+
+
+
+^{:go/end 793} (go/method Sdom "Sdom returns a sparse tree representing the dominator relationships\namong the blocks of f.\n" ^SparseTree [^{:tag (* Func)} f]
+  (when (== (.-cachedSdom f) nil)
+    (set! (.-cachedSdom f) (newSparseTree f (.Idom f))))
+
+  (.-cachedSdom f))
+
+
+
+^{:go/end 801} (go/method loopnest "loopnest returns the loop nest information for f.\n" ^{:tag (* loopnest)} [^{:tag (* Func)} f]
+  (when (== (.-cachedLoopnest f) nil)
+    (set! (.-cachedLoopnest f) (loopnestfor f)))
+
+  (.-cachedLoopnest f))
+
+
+
+^{:go/end 809} (go/method invalidateCFG "invalidateCFG tells f that its CFG has changed.\n" [^{:tag (* Func)} f]
+  (set! (.-cachedPostorder f) nil)
+  (set! (.-cachedIdom f) nil)
+  (set! (.-cachedSdom f) nil)
+  (set! (.-cachedLoopnest f) nil))
+
+
+
+
+
+
+
+
+
+^{:go/end 824} (go/method DebugHashMatch "DebugHashMatch returns\n\n\tbase.DebugHashMatch(this function's package.name)\n\nfor use in bug isolation.  The return value is true unless\nenvironment variable GOCOMPILEDEBUG=gossahash=X is set, in which case \"it depends on X\".\nSee [base.DebugHashMatch] for more information.\n" ^bool [^{:tag (* Func)} f]
+  (when (not (base/HasDebugHash))
+    (return true))
+
+  (let [sym (.Sym (.Func (.-fe f)))]
+    (base/DebugHashMatchPkgFunc (.-Path (.-Pkg sym)) (.-Name sym))))
+
+
+^{:go/end 846} (go/method spSb [^{:tag (* Func)} f] :results [^{:tag (* Value)} sp ^{:tag (* Value)} sb]
+  (let [initpos src/NoXPos] ; These are originally created with no position in ssa.go; if they are optimized out then recreated, should be the same.
+    (range [_ v (.-Values (.-Entry f))]
+      (when (== (.-Op v) OpSB)
+        (set! sb v))
+
+      (when (== (.-Op v) OpSP)
+        (set! sp v))
+
+      (when (and (!= sb nil) (!= sp nil))
+        (return)))
+
+
+    (when (== sb nil)
+      (set! sb (.NewValue0 (.-Entry f) (.WithNotStmt initpos) OpSB (.-Uintptr (.-Types (.-Config f))))))
+
+    (when (== sp nil)
+      (set! sp (.NewValue0 (.-Entry f) (.WithNotStmt initpos) OpSP (.-Uintptr (.-Types (.-Config f))))))
+
+    (return)))
+
+
+
+
+^{:go/end 855} (go/method useFMA "useFMA allows targeted debugging w/ GOFMAHASH\nIf you have an architecture-dependent FP glitch, this will help you find it.\n" ^bool [^{:tag (* Func)} f ^{:tag (* Value)} v]
+  (when (== base/FmaHash nil)
+    (return true))
+
+  (.MatchPos base/FmaHash (.-Pos v) nil))
+
+
+
+^{:go/end 862} (go/method NewLocal "NewLocal returns a new anonymous local variable of the given type.\n" ^{:tag (* ir/Name)} [^{:tag (* Func)} f ^src/XPos pos ^{:tag (* types/Type)} typ]
+  (let [nn (typecheck/TempAt pos (.Func (.-fe f)) typ)] ; Note: adds new auto to fn.Dcl list
+    (.SetNonMergeable nn true)
+    ^{:line 861} nn))
+
+
+
+
+
+
+
+^{:go/breaks [[5 879]] :go/end 880} (go/func IsMergeCandidate "IsMergeCandidate returns true if variable n could participate in\nstack slot merging. For now we're restricting the set to things to\nitems larger than what CanSSA would allow (approximateky, we disallow things\nmarked as open defer slots so as to avoid complicating liveness\nanalysis.\n" ^bool [^{:tag (* ir/Name)} n]
+  (when (or (== (.-MergeLocals base/Debug) 0)
+      (!= (.-N base/Flag) 0)
+      (!= (.-Class n) ir/PAUTO)
+      (<= (.Size ^{:go/via [miniExpr]} (.Type n)) (conv int64 (* 3 types/PtrSize)))
+      (.Addrtaken n)
+      (.NonMergeable n)
+      (.OpenDeferSlot n))
+    (return false))
+
+  true)

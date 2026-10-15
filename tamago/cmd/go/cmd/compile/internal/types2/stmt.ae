@@ -1,0 +1,839 @@
+;; Copyright 2012 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; This file implements typechecking of statements.
+
+(in-ns 'go.cmd.compile.internal.types2) (go/file "stmt.go" :imports [
+
+
+    ^{:line 10} [syntax "cmd/compile/internal/syntax"]
+    ^{:line 11} [constant "go/constant"]
+    ^{:line 12} [. "internal/types/errors"]
+    ^{:line 13} [slices "slices"]])
+
+
+
+^{:go/end 54} (go/method funcBody "decl may be nil\n" [^{:tag (* Checker)} check ^{:tag (* declInfo)} decl ^string name ^{:tag (* Signature)} sig ^{:tag (* syntax/BlockStmt)} body ^constant/Value iota]
+  (when (.-IgnoreFuncBodies (.-conf check))
+    (panic "function body not ignored"))
+
+
+  (when (.-Trace (.-conf check))
+    (.trace check ^{:go/via [stmt node]} (.Pos body) "-- %s: %s" name sig))
+
+
+  ;; save/restore current environment and set up function environment
+  ;; (and use 0 indentation at function start)
+  (defer (^{:go/end 31} (fn [^environment env ^int indent]
+        (set! (.-environment check) env)
+        (set! (.-indent check) indent))
+      (.-environment check) (.-indent check)))
+  (set! (.-environment check) ^{:go/breaks [2 4 6 8 10]} (lit environment
+      :decl decl
+      :scope (.-scope sig)
+      :version ^{:go/via [environment]} (.-version check) ; TODO(adonovan): would decl.version (if decl != nil) be better?
+      :iota iota
+      :sig sig))
+
+  (set! (.-indent check) 0)
+
+  (.stmtList check 0 (.-List body))
+
+  (when (and ^{:go/via [environment]} (.-hasLabel check) (not (.-IgnoreBranchErrors (.-conf check))))
+    (.labels check body))
+
+
+  (when (and (> (.Len (.-results sig)) 0) (not (.isTerminating check body "")))
+    (.error check (.-Rbrace body) MissingReturn "missing return"))
+
+
+  ;; spec: "Implementation restriction: A compiler may make it illegal to
+  ;; declare a variable inside a function body if the variable is never used."
+  (.usage check (.-scope sig)))
+
+
+^{:go/end 81} (go/method usage [^{:tag (* Checker)} check ^{:tag (* Scope)} scope]
+  (let [needUse ^{:go/end 59} (fn ^bool [^VarKind kind]
+        (not (or (== kind RecvVar) (== kind ParamVar) (== kind ResultVar))))
+
+      ^{:line 60 :tag (slice (* Var))} unused (zero (slice (* Var)))]
+    (range [name elem (.-elems scope)]
+      (set! elem (resolve name elem))
+      (when [(values v _) (assert (* Var) elem)] (and (!= v nil) (needUse (.-kind v)) (not (aget (.-usedVars check) v)))
+        (set! unused (append unused v))))
+
+
+    (^{:inst [(slice (* Var)) (* Var)]} slices/SortFunc unused ^{:go/end 69} (fn ^int [^{:tag (* Var)} a ^{:tag (* Var)} b]
+        (cmpPos ^{:go/via [object]} (.-pos a) ^{:go/via [object]} (.-pos b))))
+
+    (range [_ v unused]
+      (.softErrorf check ^{:go/via [object]} (.-pos v) UnusedVar "declared and not used: %s" ^{:go/via [object]} (.-name v)))
+
+
+    (range [_ scope (.-children scope)]
+      ;; Don't go inside function literal scopes a second time;
+      ;; they are handled explicitly by funcBody.
+      (when (not (.-isFunc scope))
+        (.usage check scope)))))
+
+
+
+
+
+
+
+
+(go/type stmtContext "stmtContext is a bitset describing which\ncontrol-flow statements are permissible,\nand provides additional context information\nfor better error messages.\n" uint)
+
+(go/const
+
+  ^{:line 91} [^{:tag stmtContext :val 1 :doc "permissible control-flow statements\n"} breakOk (<< 1 iota)]
+  ^{:line 92} [^{:val 2} continueOk]
+  ^{:line 93} [^{:val 4} fallthroughOk]
+
+
+  ^{:line 96} [^{:val 8 :doc "additional context information\n"} finalSwitchCase]
+  ^{:line 97} [^{:val 16} inTypeSwitch])
+
+
+^{:go/end 104} (go/method simpleStmt [^{:tag (* Checker)} check ^syntax/Stmt s]
+  (when (!= s nil)
+    (.stmt check 0 s)))
+
+
+
+^{:go/breaks [[4 112]] :go/end 113} (go/func trimTrailingEmptyStmts ^{:tag (slice syntax/Stmt)} [^{:tag (slice syntax/Stmt)} list]
+  (for [i (len list)] (> i 0) (dec! i)
+    (when [(values _ ok) (assert (* syntax/EmptyStmt) (aget list (- i 1)))] (not ok)
+      (return (subslice list _ i))))
+
+
+  nil)
+
+
+^{:go/end 126} (go/method stmtList [^{:tag (* Checker)} check ^stmtContext ctxt ^{:tag (slice syntax/Stmt)} list]
+  (let [ok (!= (bit-and ctxt fallthroughOk) 0)
+      ^{:line 117} inner (bit-and-not ctxt fallthroughOk)]
+    (set! list (trimTrailingEmptyStmts list)) ; trailing empty statements are "invisible" to fallthrough analysis
+    (range [i s list]
+      (let [inner inner]
+        (when (and ok (== (+ i 1) (len list)))
+          (set! inner bit-or fallthroughOk))
+
+        (.stmt check inner s)))))
+
+
+
+^{:go/end 140} (go/method multipleSwitchDefaults [^{:tag (* Checker)} check ^{:tag (slice (* syntax/CaseClause))} list]
+  (let [^{:tag (* syntax/CaseClause)} first (zero (* syntax/CaseClause))]
+    (range [_ c list]
+      (when (== (.-Cases c) nil)
+        (if (!= first nil)
+          (.errorf check c DuplicateDefault "multiple defaults (first at %s)" ^{:go/via [node]} (.Pos first))
+          ;; TODO(gri) probably ok to bail out after first error (and simplify this code)
+
+          (set! first c))))))
+
+
+
+
+
+^{:go/end 154} (go/method multipleSelectDefaults [^{:tag (* Checker)} check ^{:tag (slice (* syntax/CommClause))} list]
+  (let [^{:tag (* syntax/CommClause)} first (zero (* syntax/CommClause))]
+    (range [_ c list]
+      (when (== (.-Comm c) nil)
+        (if (!= first nil)
+          (.errorf check c DuplicateDefault "multiple defaults (first at %s)" ^{:go/via [node]} (.Pos first))
+          ;; TODO(gri) probably ok to bail out after first error (and simplify this code)
+
+          (set! first c))))))
+
+
+
+
+
+^{:go/end 160} (go/method openScope [^{:tag (* Checker)} check ^syntax/Node node ^string comment]
+  (let [scope (NewScope ^{:go/via [environment]} (.-scope check) (.Pos node) (syntax/EndPos node) comment)]
+    (.recordScope check node scope)
+    (set! ^{:go/via [environment]} (.-scope check) scope)))
+
+
+^{:go/end 164} (go/method closeScope [^{:tag (* Checker)} check]
+  (set! ^{:go/via [environment]} (.-scope check) (.Parent ^{:go/via [environment]} (.-scope check))))
+
+
+^{:go/end 192} (go/method suspendedCall [^{:tag (* Checker)} check ^string keyword ^syntax/Expr call]
+  (let [code InvalidDefer]
+    (when (== keyword "go")
+      (set! code InvalidGo))
+
+
+    (when [(values _ ok) (assert (* syntax/CallExpr) call)] (not ok)
+      (.errorf check call code "expression in %s must be function call" keyword)
+      (.use check call)
+      (return))
+
+
+    (let [^operand x (zero operand)
+        ^{:line 179 :tag string} msg (zero string)]
+      (switch (.rawExpr check nil (addr x) call nil false)
+        (case [conversion]
+          (set! msg "requires function call, not conversion"))
+        (case [expression]
+          (set! msg "discards result of")
+          (set! code UnusedResults))
+        (case [statement]
+          (return))
+        (default
+          (panic "unreachable")))
+
+      (.errorf check (addr x) code "%s %s %s" keyword msg (addr x)))))
+
+
+
+^{:go/breaks [[6 219]] :go/end 220} (go/func goVal "goVal returns the Go value for val, or nil.\n" ^any [^constant/Value val]
+  ;; val should exist, but be conservative and check
+  (when (== val nil)
+    (return nil))
+
+  ;; Match implementation restriction of other compilers.
+  ;; gc only checks duplicates for integer, floating-point
+  ;; and string values, so only create Go values for these
+  ;; types.
+  (switch (.Kind val)
+    (case [constant/Int]
+      (when [(values x ok) (constant/Int64Val val)] ok
+        (return x))
+
+      (when [(values x ok) (constant/Uint64Val val)] ok
+        (return x)))
+
+    (case [constant/Float]
+      (when [(values x ok) (constant/Float64Val val)] ok
+        (return x)))
+
+    (case [constant/String]
+      (return (constant/StringVal val))))
+
+  nil)
+
+
+
+
+
+
+
+
+(go/type "A valueMap maps a case value (of a basic Go type) to a list of positions\nwhere the same case value appeared, together with the corresponding case\ntypes.\nSince two case values may have the same \"underlying\" value but different\ntypes we need to also check the value's types (e.g., byte(1) vs myByte(1))\nwhen the switch expression is of interface type.\n"
+  ^{:line 229} [valueMap (map any (slice valueType))] ; underlying Go value -> valueType
+  ^{:line 230} [valueType (struct
+      ^{:line 231 :tag syntax/Pos} pos
+      ^{:line 232 :tag Type} typ)])
+
+
+
+^{:go/end 273} (go/method caseValues [^{:tag (* Checker)} check ^{:tag (* operand)} x ^{:tag (slice syntax/Expr)} values ^valueMap seen]
+  (label :L
+    (range [_ e values]
+      (let [^operand v (zero operand)]
+        (.expr check nil (addr v) e)
+        (when (or (not (.isValid x)) (not (.isValid v)))
+          (continue :L))
+
+        (.convertUntyped check (addr v) (.typ x))
+        (when (not (.isValid v))
+          (continue :L))
+
+        ;; Order matters: By comparing v against x, error positions are at the case values.
+        (let [res v] ; keep original v unchanged
+          (.comparison check (addr res) x syntax/Eql true)
+          (when (not (.isValid res))
+            (continue :L))
+
+          (when (!= (.mode v) constant_)
+            (continue :L)) ; we're done
+
+          ;; look for duplicate values
+          (when [val (goVal (.-val v))] (!= val nil)
+            ;; look for duplicate types for a given value
+            ;; (quadratic algorithm, but these lists tend to be very short)
+            (range [_ vt (aget seen val)]
+              (when (Identical (.typ v) (.-typ vt))
+                (let [err (.newError check DuplicateCase)]
+                  (.addf err (addr v) "duplicate case %s in expression switch" (addr v))
+                  (.addf err (.-pos vt) "previous case")
+                  (.report err)
+                  (continue :L))))
+
+
+            (aset seen val (append (aget seen val) (lit valueType (.Pos v) (.typ v))))))))))
+
+
+
+
+
+^{:go/breaks [[5 282]] :go/end 283} (go/method isNil "isNil reports whether the expression e denotes the predeclared value nil.\n" ^bool [^{:tag (* Checker)} check ^syntax/Expr e]
+  ;; The only way to express the nil value is by literally writing nil (possibly in parentheses).
+  (when [(values name _) (assert (* syntax/Name) (syntax/Unparen e))] (!= name nil)
+    (let [(values _ ok) (assert (* Nil) ^{:go/via [environment]} (.lookup check (.-Value name)))]
+      (return ok)))
+
+  false)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 354} (go/method caseTypes "caseTypes typechecks the type expressions of a type case, checks for duplicate types\nusing the seen map, and verifies that each type is valid with respect to the type of\nthe operand x corresponding to the type switch expression. If that expression is not\nvalid, x must be nil.\n\n\tswitch <x>.(type) {\n\tcase <types>: ...\n\t...\n\t}\n\ncaseTypes returns the case-specific type for a variable v introduced through a short\nvariable declaration by the type switch:\n\n\tswitch v := <x>.(type) {\n\tcase <types>: // T is the type of <v> in this case\n\t...\n\t}\n\nIf there is exactly one type expression, T is the type of that expression. If there\nare multiple type expressions, or if predeclared nil is among the types, the result\nis the type of x. If x is invalid (nil), the result is the invalid type.\n" ^Type [^{:tag (* Checker)} check ^{:tag (* operand)} x ^{:tag (slice syntax/Expr)} types ^{:tag (map Type syntax/Expr)} seen]
+  (let [^Type T (zero Type)
+      ^{:line 308 :tag operand} dummy (zero operand)]
+    (label :L
+      (range [_ e types]
+        ;; The spec allows the value nil instead of a type.
+        (if (.isNil check e) (do
+            (set! T nil)
+            (.expr check nil (addr dummy) e)) ; run e through expr so we get the usual Info recordings
+          (do
+            (set! T (.varType check e))
+            (when (not (isValid T))
+              (continue :L))))
+
+
+        ;; look for duplicate types
+        ;; (quadratic algorithm, but type switches tend to be reasonably small)
+        (range [t other seen]
+          (when (or (and (== T nil) (== t nil)) (and (!= T nil) (!= t nil) (Identical T t)))
+            ;; talk about "case" rather than "type" because of nil case
+            (let [Ts "nil"]
+              (when (!= T nil)
+                (set! Ts (TypeString T (.-qualifier check))))
+
+              (let [err (.newError check DuplicateCase)]
+                (.addf err e "duplicate case %s in type switch" Ts)
+                (.addf err other "previous case")
+                (.report err)
+                (continue :L)))))
+
+
+        (aset seen T e)
+        (when (and (!= x nil) (!= T nil))
+          (.typeAssertion check e x T true))))
+
+
+
+    ;; spec: "In clauses with a case listing exactly one type, the variable has that type;
+    ;; otherwise, the variable has the type of the expression in the TypeSwitchGuard.
+    (when (or (!= (len types) 1) (== T nil))
+      (set! T (aget Typ Invalid))
+      (when (!= x nil)
+        (set! T (.typ x))))
+
+
+
+    (go/call assert (!= T nil))
+    ^{:line 353} T))
+
+
+
+
+^{:go/end 407} (go/method caseTypes_currently_unused "TODO(gri) Once we are certain that typeHash is correct in all situations, use this version of caseTypes instead.\n(Currently it may be possible that different types have identical names and import paths due to ImporterFrom.)\n" ^Type [^{:tag (* Checker)} check ^{:tag (* operand)} x ^{:tag (* Interface)} xtyp ^{:tag (slice syntax/Expr)} types ^{:tag (map string syntax/Expr)} seen]
+  (let [^Type T (zero Type)
+      ^{:line 360 :tag operand} dummy (zero operand)]
+    (label :L
+      (range [_ e types]
+        ;; The spec allows the value nil instead of a type.
+        (let [^string hash (zero string)]
+          (if (.isNil check e) (do
+              (.expr check nil (addr dummy) e) ; run e through expr so we get the usual Info recordings
+              (set! T nil)
+              (set! hash "<nil>")) ; avoid collision with a type named nil
+            (do
+              (set! T (.varType check e))
+              (when (not (isValid T))
+                (continue :L))
+
+              (panic "enable typeHash(T, nil)")))
+          ;; hash = typeHash(T, nil)
+
+          ;; look for duplicate types
+          (when [other (aget seen hash)] (!= other nil)
+            ;; talk about "case" rather than "type" because of nil case
+            (let [Ts "nil"]
+              (when (!= T nil)
+                (set! Ts (TypeString T (.-qualifier check))))
+
+              (let [err (.newError check DuplicateCase)]
+                (.addf err e "duplicate case %s in type switch" Ts)
+                (.addf err other "previous case")
+                (.report err)
+                (continue :L))))
+
+          (aset seen hash e)
+          (when (!= T nil)
+            (.typeAssertion check e x T true)))))
+
+
+
+    ;; spec: "In clauses with a case listing exactly one type, the variable has that type;
+    ;; otherwise, the variable has the type of the expression in the TypeSwitchGuard.
+    (when (or (!= (len types) 1) (== T nil))
+      (set! T (aget Typ Invalid))
+      (when (!= x nil)
+        (set! T (.typ x))))
+
+
+
+    (go/call assert (!= T nil))
+    ^{:line 406} T))
+
+
+
+^{:go/end 713} (go/method stmt "stmt typechecks statement s.\n" [^{:tag (* Checker)} check ^stmtContext ctxt ^syntax/Stmt s]
+  ;; statements must end with the same top scope as they started with
+  (when debug
+    (defer (^{:go/end 419} (fn [^{:tag (* Scope)} scope]
+          ;; don't check if code is panicking
+          (when [p (recover)] (!= p nil)
+            (panic p))
+
+          (go/call assert (== scope ^{:go/via [environment]} (.-scope check))))
+        ^{:go/via [environment]} (.-scope check))))
+
+
+  ;; process collected function literals before scope changes
+  (defer (.processDelayed check (len (.-delayed check))))
+
+  ;; reset context for statements of inner blocks
+  (let [inner (bit-and-not ctxt (bit-or fallthroughOk finalSwitchCase inTypeSwitch))]
+
+    (type-switch [s s]
+      (case [(* syntax/EmptyStmt)])
+      ;; ignore
+
+      (case [(* syntax/DeclStmt)]
+        (.declStmt check (.-DeclList s)))
+
+      (case [(* syntax/LabeledStmt)]
+        (set! ^{:go/via [environment]} (.-hasLabel check) true)
+        (.stmt check ctxt (.-Stmt s)))
+
+      (case [(* syntax/ExprStmt)]
+        ;; spec: "With the exception of specific built-in functions,
+        ;; function and method calls and receive operations can appear
+        ;; in statement context. Such statements may be parenthesized."
+        (let [^operand x (zero operand)
+            ^{:line 444} kind (.rawExpr check nil (addr x) (.-X s) nil false)
+            ^{:line 445 :tag string} msg (zero string)
+            ^{:line 446 :tag Code} code (zero Code)]
+          (switch (.mode x)
+            (default
+              (when (== kind statement)
+                (return))
+
+              (set! msg "is not used")
+              (set! code UnusedExpr))
+            (case [builtin]
+              (set! msg "must be called")
+              (set! code UncalledBuiltin))
+            (case [typexpr]
+              (set! msg "is not an expression")
+              (set! code NotAnExpr)))
+
+          (.errorf check (addr x) code "%s %s" (addr x) msg)))
+
+      (case [(* syntax/SendStmt)]
+        (let [(values ^operand ch ^operand val) (zero operand)]
+          (.expr check nil (addr ch) (.-Chan s))
+          (.genericExpr check (addr val) (.-Value s) nil)
+          (when (or (not (.isValid ch)) (not (.isValid val)))
+            (return))
+
+          (when [elem (.chanElem check s (addr ch) false)] (!= elem nil)
+            (.assignment check (addr val) elem "send"))))
+
+
+      (case [(* syntax/AssignStmt)]
+        (when (== (.-Rhs s) nil)
+          ;; x++ or x--
+          ;; (no need to call unpackExpr as s.Lhs must be single-valued)
+          (let [^operand x (zero operand)]
+            (.expr check nil (addr x) (.-Lhs s))
+            (when (not (.isValid x))
+              (return))
+
+            (when (not (allNumeric (.typ x)))
+              (.errorf check (.-Lhs s) NonNumericIncDec (+ invalidOp "%s%s%s (non-numeric type %s)") (.-Lhs s) (.-Op s) (.-Op s) (.typ x))
+              (return))
+
+            (.assignVar check (.-Lhs s) nil (addr x) "assignment")
+            (return)))
+
+
+        (let [lhs (syntax/UnpackListExpr (.-Lhs s))
+            ^{:line 492} rhs (syntax/UnpackListExpr (.-Rhs s))]
+          (switch (.-Op s)
+            (case [0]
+              (.assignVars check lhs rhs)
+              (return))
+            (case [syntax/Def]
+              (.shortVarDecl check ^{:go/via [simpleStmt stmt node]} (.Pos s) lhs rhs)
+              (return)))
+
+
+          ;; assignment operations
+          (when (or (!= (len lhs) 1) (!= (len rhs) 1))
+            (.errorf check s MultiValAssignOp "assignment operation %s requires single-valued expressions" (.-Op s))
+            (return))
+
+
+          (let [^operand x (zero operand)]
+            (.binary check (addr x) nil (aget lhs 0) (aget rhs 0) (.-Op s))
+            (.assignVar check (aget lhs 0) nil (addr x) "assignment"))))
+
+      (case [(* syntax/CallStmt)]
+        (let [kind "go"]
+          (when (== (.-Tok s) syntax/Defer)
+            (set! kind "defer"))
+
+          (.suspendedCall check kind (.-Call s))))
+
+      (case [(* syntax/ReturnStmt)]
+        (let [res (.-results ^{:go/via [environment]} (.-sig check))
+            ;; Return with implicit results allowed for function with named results.
+            ;; (If one is named, all are named.)
+            ^{:line 523} results (syntax/UnpackListExpr (.-Results s))]
+          (if (and (== (len results) 0) (> (.Len res) 0) (!= ^{:go/via [object]} (.-name (aget (.-vars res) 0)) ""))
+            ;; spec: "Implementation restriction: A compiler may disallow an empty expression
+            ;; list in a "return" statement if a different entity (constant, type, or variable)
+            ;; with the same name as a result parameter is in scope at the place of the return."
+            (range [_ obj (.-vars res)]
+              (when [alt ^{:go/via [environment]} (.lookup check ^{:go/via [object]} (.-name obj))] (and (!= alt nil) (!= alt obj))
+                (let [err (.newError check OutOfScopeResult)]
+                  (.addf err s "result parameter %s not in scope at return" ^{:go/via [object]} (.-name obj))
+                  (.addf err alt "inner declaration of %s" obj)
+                  (.report err))))
+            ;; ok to continue
+
+
+
+            (let [^{:tag (slice (* Var))} lhs (zero (slice (* Var)))]
+              (when (> (.Len res) 0)
+                (set! lhs (.-vars res)))
+
+              (.initVars check lhs results s)))))
+
+
+      (case [(* syntax/BranchStmt)]
+        (when (!= (.-Label s) nil)
+          (set! ^{:go/via [environment]} (.-hasLabel check) true)
+          (break)) ; checked in 2nd pass (check.labels)
+
+        (when (.-IgnoreBranchErrors (.-conf check))
+          (break))
+
+        (switch (.-Tok s)
+          (case [syntax/Break]
+            (when (== (bit-and ctxt breakOk) 0)
+              (.error check s MisplacedBreak "break not in for, switch, or select statement")))
+
+          (case [syntax/Continue]
+            (when (== (bit-and ctxt continueOk) 0)
+              (.error check s MisplacedContinue "continue not in for statement")))
+
+          (case [syntax/Fallthrough]
+            (when (== (bit-and ctxt fallthroughOk) 0)
+              (let [^string msg (zero string)]
+                (switch
+                  (case [(!= (bit-and ctxt finalSwitchCase) 0)]
+                    (set! msg "cannot fallthrough final case in switch"))
+                  (case [(!= (bit-and ctxt inTypeSwitch) 0)]
+                    (set! msg "cannot fallthrough in type switch"))
+                  (default
+                    (set! msg "fallthrough statement out of place")))
+
+                (.error check s MisplacedFallthrough msg))))
+
+          (case [syntax/Goto]
+            ;; goto's must have labels, should have been caught above
+            (fallthrough))
+          (default
+            (.errorf check s InvalidSyntaxTree "branch statement: %s" (.-Tok s)))))
+
+
+      (case [(* syntax/BlockStmt)]
+        (.openScope check s "block")
+        (defer (.closeScope check))
+
+        (.stmtList check inner (.-List s)))
+
+      (case [(* syntax/IfStmt)]
+        (.openScope check s "if")
+        (defer (.closeScope check))
+
+        (.simpleStmt check (.-Init s))
+        (let [^operand x (zero operand)]
+          (.expr check nil (addr x) (.-Cond s))
+          (when (and (.isValid x) (not (allBoolean (.typ x))))
+            (.error check (.-Cond s) InvalidCond "non-boolean condition in if statement"))
+
+          (.stmt check inner (.-Then s))
+          ;; The parser produces a correct AST but if it was modified
+          ;; elsewhere the else branch may be invalid. Check again.
+          (type-switch (.-Else s)
+            (case [nil])
+            ;; valid or error already reported
+            (case [(* syntax/IfStmt) (* syntax/BlockStmt)]
+              (.stmt check inner (.-Else s)))
+            (default
+              (.error check (.-Else s) InvalidSyntaxTree "invalid else branch in if statement")))))
+
+
+      (case [(* syntax/SwitchStmt)]
+        (set! inner bit-or breakOk)
+        (.openScope check s "switch")
+        (defer (.closeScope check))
+
+        (.simpleStmt check (.-Init s))
+
+        (if [(values g _) (assert (* syntax/TypeSwitchGuard) (.-Tag s))] (!= g nil)
+          (.typeSwitchStmt check (bit-or inner inTypeSwitch) s g)
+
+          (.switchStmt check inner s)))
+
+
+      (case [(* syntax/SelectStmt)]
+        (set! inner bit-or breakOk)
+
+        (.multipleSelectDefaults check (.-Body s))
+
+        (range [_ clause (.-Body s)]
+          (when (== clause nil)
+            (continue)) ; error reported before
+
+
+          ;; clause.Comm must be a SendStmt, RecvStmt, or default case
+          (let [valid false
+              ^{:line 635 :tag syntax/Expr} rhs (zero syntax/Expr)] ; rhs of RecvStmt, or nil
+            (type-switch [s (.-Comm clause)]
+              (case [nil (* syntax/SendStmt)]
+                (set! valid true))
+              (case [(* syntax/AssignStmt)]
+                (when [(values _ ok) (assert (* syntax/ListExpr) (.-Rhs s))] (not ok)
+                  (set! rhs (.-Rhs s))))
+
+              (case [(* syntax/ExprStmt)]
+                (set! rhs (.-X s))))
+
+
+            ;; if present, rhs must be a receive operation
+            (when (!= rhs nil)
+              (when [(values x _) (assert (* syntax/Operation) (syntax/Unparen rhs))] (and (!= x nil) (== (.-Y x) nil) (== (.-Op x) syntax/Recv))
+                (set! valid true)))
+
+
+
+            (when (not valid)
+              (.error check (.-Comm clause) InvalidSelectCase "select case must be send or receive (possibly with assignment)")
+              (continue))
+
+            (.openScope check clause "case")
+            (when (!= (.-Comm clause) nil)
+              (.stmt check inner (.-Comm clause)))
+
+            (.stmtList check inner (.-Body clause))
+            (.closeScope check))))
+
+
+      (case [(* syntax/ForStmt)]
+        (set! inner bit-or (bit-or breakOk continueOk))
+
+        (when [(values rclause _) (assert (* syntax/RangeClause) (.-Init s))] (!= rclause nil)
+          ;; extract sKey, sValue, s.Extra from the range clause
+          (let [sKey (.-Lhs rclause) ; possibly nil
+              (values ^syntax/Expr sValue ^syntax/Expr sExtra) (zero syntax/Expr)] ; possibly nil
+            (when [(values p _) (assert (* syntax/ListExpr) sKey)] (!= p nil)
+              (when (< (len (.-ElemList p)) 2)
+                (.error check s InvalidSyntaxTree "invalid lhs in range clause")
+                (return))
+
+              ;; len(p.ElemList) >= 2
+              (set! sKey (aget (.-ElemList p) 0))
+              (set! sValue (aget (.-ElemList p) 1))
+              (when (> (len (.-ElemList p)) 2)
+                ;; delay error reporting until we know more
+                (set! sExtra (aget (.-ElemList p) 2))))
+
+
+            (.rangeStmt check inner s s sKey sValue sExtra (.-X rclause) (.-Def rclause))
+            (break)))
+
+
+        (.openScope check s "for")
+        (defer (.closeScope check))
+
+        (.simpleStmt check (.-Init s))
+        (when (!= (.-Cond s) nil)
+          (let [^operand x (zero operand)]
+            (.expr check nil (addr x) (.-Cond s))
+            (when (and (.isValid x) (not (allBoolean (.typ x))))
+              (.error check (.-Cond s) InvalidCond "non-boolean condition in for statement"))))
+
+
+        (.simpleStmt check (.-Post s))
+        ;; spec: "The init statement may be a short variable
+        ;; declaration, but the post statement must not."
+        (when [(values s _) (assert (* syntax/AssignStmt) (.-Post s))] (and (!= s nil) (== (.-Op s) syntax/Def))
+          ;; The parser already reported an error.
+          (.use check (.-Lhs s))) ; avoid follow-up errors
+
+        (.stmt check inner (.-Body s)))
+
+      (default
+        (.error check s InvalidSyntaxTree "invalid statement")))))
+
+
+
+^{:go/end 761} (go/method switchStmt [^{:tag (* Checker)} check ^stmtContext inner ^{:tag (* syntax/SwitchStmt)} s]
+  ;; init statement already handled
+
+  (let [^operand x (zero operand)]
+    (if (!= (.-Tag s) nil) (do
+        (.expr check nil (addr x) (.-Tag s))
+        ;; By checking assignment of x to an invisible temporary
+        ;; (as a compiler would), we get all the relevant checks.
+        (.assignment check (addr x) nil "switch expression")
+        (when (and (.isValid x) (not (Comparable (.typ x))) (not (hasNil (.typ x))))
+          (.errorf check (addr x) InvalidExprSwitch "cannot switch on %s (%s is not comparable)" (addr x) (.typ x))
+          (.invalidate x)))
+
+      (do
+        ;; spec: "A missing switch expression is
+        ;; equivalent to the boolean value true."
+        (set! (.-mode_ x) constant_)
+        (set! (.-typ_ x) (aget Typ Bool))
+        (set! (.-val x) (constant/MakeBool true))
+        ;; TODO(gri) should have a better position here
+        (let [pos (.-Rbrace s)]
+          (when (> (len (.-Body s)) 0)
+            (set! pos ^{:go/via [node]} (.Pos (aget (.-Body s) 0))))
+
+          (set! (.-expr x) (syntax/NewName pos "true")))))
+
+
+    (.multipleSwitchDefaults check (.-Body s))
+
+    (let [seen (make valueMap)] ; map of seen case values to positions and types
+      (range [i clause (.-Body s)]
+        (when (== clause nil)
+          (.error check clause InvalidSyntaxTree "incorrect expression switch case")
+          (continue))
+
+        (let [inner inner]
+          (if (< (+ i 1) (len (.-Body s)))
+            (set! inner bit-or fallthroughOk)
+
+            (set! inner bit-or finalSwitchCase))
+
+          (.caseValues check (addr x) (syntax/UnpackListExpr (.-Cases clause)) seen)
+          (.openScope check clause "case")
+          (.stmtList check inner (.-Body clause))
+          (.closeScope check))))))
+
+
+
+^{:go/end 842} (go/method typeSwitchStmt [^{:tag (* Checker)} check ^stmtContext inner ^{:tag (* syntax/SwitchStmt)} s ^{:tag (* syntax/TypeSwitchGuard)} guard]
+  ;; init statement already handled
+
+  ;; A type switch guard must be of the form:
+  ;;
+  ;;     TypeSwitchGuard = [ identifier ":=" ] PrimaryExpr "." "(" "type" ")" .
+  ;;                          \__lhs__/        \___rhs___/
+
+  ;; check lhs, if any
+  (let [lhs (.-Lhs guard)]
+    (when (!= lhs nil)
+      (if (== (.-Value lhs) "_") (do
+          ;; _ := x.(type) is an invalid short variable declaration
+          (.softErrorf check lhs NoNewVar "no new variable on left side of :=")
+          (set! lhs nil)) ; avoid declared and not used error below
+
+        (.recordDef check lhs nil))) ; lhs variable is implicitly declared in each cause clause
+
+
+
+    ;; check rhs
+    (let [^{:tag (* operand)} sx (zero (* operand))] ; switch expression against which cases are compared against; nil if invalid
+      (do
+        (let [^operand x (zero operand)]
+          (.expr check nil (addr x) (.-X guard))
+          (when (.isValid x)
+            (cond (isTypeParam (.typ x))
+              (.errorf check (addr x) InvalidTypeSwitch "cannot use type switch on type parameter value %s" (addr x))
+              (IsInterface (.typ x))
+              (set! sx (addr x)) :else
+
+              (.errorf check (addr x) InvalidTypeSwitch "%s is not an interface" (addr x))))))
+
+
+
+
+      (.multipleSwitchDefaults check (.-Body s))
+
+      (let [^{:tag (slice (* Var))} lhsVars (zero (slice (* Var))) ; list of implicitly declared lhs variables
+          ^{:line 802} seen (make (map Type syntax/Expr))] ; map of seen types to positions
+        (range [_ clause (.-Body s)]
+          (when (== clause nil)
+            (.error check s InvalidSyntaxTree "incorrect type switch case")
+            (continue))
+
+          ;; Check each type in this type switch case.
+          (let [cases (syntax/UnpackListExpr (.-Cases clause))
+              ^{:line 810} T (.caseTypes check sx cases seen)]
+            (.openScope check clause "case")
+            ;; If lhs exists, declare a corresponding variable in the case-local scope.
+            (when (!= lhs nil)
+              (let [obj (newVar LocalVar ^{:go/via [expr node]} (.Pos lhs) (.-pkg check) (.-Value lhs) T)]
+                (.declare check ^{:go/via [environment]} (.-scope check) nil obj (.-Colon clause))
+                (.recordImplicit check clause obj)
+                ;; For the "declared and not used" error, all lhs variables act as
+                ;; one; i.e., if any one of them is 'used', all of them are 'used'.
+                ;; Collect them for later analysis.
+                (set! lhsVars (append lhsVars obj))))
+
+            (.stmtList check inner (.-Body clause))
+            (.closeScope check)))
+
+
+        ;; If lhs exists, we must have at least one lhs variable that was used.
+        ;; (We can't use check.usage because that only looks at one scope; and
+        ;; we don't want to use the same variable for all scopes and change the
+        ;; variable type underfoot.)
+        (when (!= lhs nil)
+          (let [^bool used (zero bool)]
+            (range [_ v lhsVars]
+              (when (aget (.-usedVars check) v)
+                (set! used true))
+
+              (aset (.-usedVars check) v true)) ; avoid usage error when checking entire function
+
+            (when (not used)
+              (.softErrorf check lhs UnusedVar "%s declared and not used" (.-Value lhs)))))))))

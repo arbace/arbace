@@ -1,0 +1,160 @@
+;; Copyright 2009 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.cmd.compile.internal.ir) (go/file "const.go" :imports [
+
+
+    ^{:line 8} [constant "go/constant"]
+    ^{:line 9} [math "math"]
+    ^{:line 10} [big "math/big"]
+
+    ^{:line 12} [base "cmd/compile/internal/base"]
+    ^{:line 13} [types "cmd/compile/internal/types"]
+    ^{:line 14} [src "cmd/internal/src"]])
+
+
+
+^{:go/end 20} (go/func NewBool "NewBool returns an OLITERAL representing b as an untyped boolean.\n" ^Node [^src/XPos pos ^bool b]
+  (NewBasicLit pos types/UntypedBool (constant/MakeBool b)))
+
+
+
+^{:go/end 25} (go/func NewInt "NewInt returns an OLITERAL representing v as an untyped integer.\n" ^Node [^src/XPos pos ^int64 v]
+  (NewBasicLit pos types/UntypedInt (constant/MakeInt64 v)))
+
+
+
+^{:go/end 30} (go/func NewString "NewString returns an OLITERAL representing s as an untyped string.\n" ^Node [^src/XPos pos ^string s]
+  (NewBasicLit pos types/UntypedString (constant/MakeString s)))
+
+
+
+^{:go/end 35} (go/func NewUintptr "NewUintptr returns an OLITERAL representing v as a uintptr.\n" ^Node [^src/XPos pos ^int64 v]
+  (NewBasicLit pos (aget types/Types types/TUINTPTR) (constant/MakeInt64 v)))
+
+
+
+^{:go/end 59} (go/func NewZero "NewZero returns a zero value of the given type.\n" ^Node [^src/XPos pos ^{:tag (* types/Type)} typ]
+  (switch
+    (case [(.HasNil typ)]
+      (return (NewNilExpr pos typ)))
+    (case [(.IsInteger typ)]
+      (return (NewBasicLit pos typ intZero)))
+    (case [(.IsFloat typ)]
+      (return (NewBasicLit pos typ floatZero)))
+    (case [(.IsComplex typ)]
+      (return (NewBasicLit pos typ complexZero)))
+    (case [(.IsBoolean typ)]
+      (return (NewBasicLit pos typ (constant/MakeBool false))))
+    (case [(.IsString typ)]
+      (return (NewBasicLit pos typ (constant/MakeString ""))))
+    (case [(or (.IsArray typ) (.IsStruct typ))]
+      ;; TODO(mdempsky): Return a typechecked expression instead.
+      (return (NewCompLitExpr pos OCOMPLIT typ nil))))
+
+
+  (base/FatalfAt pos "unexpected type: %v" typ)
+  (panic "unreachable"))
+
+
+(go/var
+  ^{:line 62} [intZero (constant/MakeInt64 0)]
+  ^{:line 63} [floatZero (constant/ToFloat intZero)]
+  ^{:line 64} [complexZero (constant/ToComplex intZero)])
+
+
+
+^{:go/end 82} (go/func NewOne "NewOne returns an OLITERAL representing 1 with the given type.\n" ^Node [^src/XPos pos ^{:tag (* types/Type)} typ]
+  (let [^constant/Value val (zero constant/Value)]
+    (switch
+      (case [(.IsInteger typ)]
+        (set! val intOne))
+      (case [(.IsFloat typ)]
+        (set! val floatOne))
+      (case [(.IsComplex typ)]
+        (set! val complexOne))
+      (default
+        (base/FatalfAt pos "%v cannot represent 1" typ)))
+
+
+    (NewBasicLit pos typ val)))
+
+
+(go/var
+  ^{:line 85} [intOne (constant/MakeInt64 1)]
+  ^{:line 86} [floatOne (constant/ToFloat intOne)]
+  ^{:line 87} [complexOne (constant/ToComplex intOne)])
+
+
+(go/const
+
+
+  ^{:line 93} [^{:val 512 :doc "Maximum size in bits for big.Ints before signaling\noverflow and also mantissa precision for big.Floats.\n"} ConstPrec 512])
+
+
+^{:go/end 112} (go/func BigFloat ^{:tag (* big/Float)} [^constant/Value v]
+  (let [f (new big/Float)]
+    (.SetPrec f ConstPrec)
+    (type-switch [u (constant/Val v)]
+      (case [int64]
+        (.SetInt64 f u))
+      (case [(* big/Int)]
+        (.SetInt f u))
+      (case [(* big/Float)]
+        (.Set f u))
+      (case [(* big/Rat)]
+        (.SetRat f u))
+      (default
+        (base/Fatalf "unexpected: %v" u)))
+
+    ^{:line 111} f))
+
+
+
+
+^{:go/end 144} (go/func ConstOverflow "ConstOverflow reports whether constant value v is too large\nto represent with type t.\n" ^bool [^constant/Value v ^{:tag (* types/Type)} t]
+  (switch
+    (case [(.IsInteger t)]
+      (let [bits (conv uint (* 8 (.Size t)))]
+        (when (.IsUnsigned t)
+          (let [(values x ok) (constant/Uint64Val v)]
+            (return (or (not ok) (!= (>> x bits) 0)))))
+
+        (let [(values x ok) (constant/Int64Val v)]
+          (when (< x 0)
+            (set! x (bit-not x)))
+
+          (return (or (not ok) (!= (>> x (- bits 1)) 0))))))
+    (case [(.IsFloat t)]
+      (switch (.Size t)
+        (case [4]
+          (let [(values f _) (constant/Float32Val v)]
+            (return (math/IsInf (conv float64 f) 0))))
+        (case [8]
+          (let [(values f _) (constant/Float64Val v)]
+            (return (math/IsInf f 0))))))
+
+    (case [(.IsComplex t)]
+      (let [ft (types/FloatForComplex t)]
+        (return (or (ConstOverflow (constant/Real v) ft) (ConstOverflow (constant/Imag v) ft))))))
+
+  (base/Fatalf "ConstOverflow: %v, %v" v t)
+  (panic "unreachable"))
+
+
+
+
+
+
+
+^{:go/end 153} (go/func IsConstNode "IsConstNode reports whether n is a Go language constant (as opposed to a\ncompile-time constant).\n\nExpressions derived from nil, like string([]byte(nil)), while they\nmay be known at compile time, are not Go language constants.\n" ^bool [^Node n]
+  (== (.Op n) OLITERAL))
+
+
+^{:go/breaks [[4 160]] :go/end 161} (go/func IsSmallIntConst ^bool [^Node n]
+  (when (== (.Op n) OLITERAL)
+    (let [(values v ok) (constant/Int64Val (.Val n))]
+      (return (and ok (== (conv int64 (conv int32 v)) v)))))
+
+  false)

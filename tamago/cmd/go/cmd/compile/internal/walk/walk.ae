@@ -1,0 +1,492 @@
+;; Copyright 2009 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.cmd.compile.internal.walk) (go/file "walk.go" :imports [
+
+
+    ^{:line 8} [fmt "fmt"]
+    ^{:line 9} [abi "internal/abi"]
+
+    ^{:line 11} [base "cmd/compile/internal/base"]
+    ^{:line 12} [ir "cmd/compile/internal/ir"]
+    ^{:line 13} [rttype "cmd/compile/internal/rttype"]
+    ^{:line 14} [ssagen "cmd/compile/internal/ssagen"]
+    ^{:line 15} [typecheck "cmd/compile/internal/typecheck"]
+    ^{:line 16} [types "cmd/compile/internal/types"]
+    ^{:line 17} [src "cmd/internal/src"]])
+
+
+
+(go/const ^{:val 32 :doc "The constant is known to runtime.\n"} tmpstringbufsize 32)
+
+^{:go/end 53} (go/func Walk [^{:tag (* ir/Func)} fn]
+  (set! ir/CurFunc fn)
+
+  ;; Build pre-walk analysis caches with a single AST traversal.
+  ;; (At some point, it might be worthwhile to have a walkState structure
+  ;; that gets passed everywhere where things like this can go.)
+  (analyzePreWalk fn)
+  (defer (^{:go/end 30} (fn [] (set! staticValues nil) (set! shapeConvSources nil))))
+
+  (let [errorsBefore (base/Errors)]
+    (order fn)
+    (when (> (base/Errors) errorsBefore)
+      (return))
+
+
+    (when (!= (.-W base/Flag) 0)
+      (let [s (fmt/Sprintf "\nbefore walk %v" (.Sym ir/CurFunc))]
+        (ir/DumpList s (.-Body ir/CurFunc))))
+
+
+    (walkStmtList (.-Body ir/CurFunc))
+    (when (!= (.-W base/Flag) 0)
+      (let [s (fmt/Sprintf "after walk %v" (.Sym ir/CurFunc))]
+        (ir/DumpList s (.-Body ir/CurFunc))))
+
+
+    ;; Eagerly compute sizes of all variables for SSA.
+    (range [_ n (.-Dcl fn)]
+      (types/CalcSize ^{:go/via [miniExpr]} (.Type n)))))
+
+
+
+
+^{:go/end 65} (go/func walkRecv "walkRecv walks an ORECV node.\n" ^ir/Node [^{:tag (* ir/UnaryExpr)} n]
+  (when (== ^{:go/via [miniExpr miniNode]} (.Typecheck n) 0)
+    (base/Fatalf "missing typecheck: %+v" n))
+
+  (let [init (ir/TakeInit n)]
+
+    (set! (.-X n) (walkExpr (.-X n) (addr init)))
+    (let [call (walkExpr (mkcall1 (chanfn "chanrecv1" 2 (.Type (.-X n))) nil (addr init) (.-X n) (typecheck/NodNil)) (addr init))]
+      (ir/InitExpr init call))))
+
+
+^{:go/end 95} (go/func convas ^{:tag (* ir/AssignStmt)} [^{:tag (* ir/AssignStmt)} n ^{:tag (* ir/Nodes)} init]
+  (when (!= ^{:go/via [miniStmt miniNode]} (.Op n) ir/OAS)
+    (base/Fatalf "convas: not OAS %v" ^{:go/via [miniStmt miniNode]} (.Op n)))
+
+  ^{:go/via [miniStmt miniNode]} (.SetTypecheck n 1)
+
+  (when (or (== (.-X n) nil) (== (.-Y n) nil))
+    (return n))
+
+
+  (let [lt (.Type (.-X n))
+      ^{:line 78} rt (.Type (.-Y n))]
+    (when (or (== lt nil) (== rt nil))
+      (return n))
+
+
+    (when (ir/IsBlank (.-X n))
+      (set! (.-Y n) (typecheck/DefaultLit (.-Y n) nil))
+      (return n))
+
+
+    (when (not (types/Identical lt rt))
+      (set! (.-Y n) (typecheck/AssignConv (.-Y n) lt "assignment"))
+      (set! (.-Y n) (walkExpr (.-Y n) init)))
+
+    (types/CalcSize (.Type (.-Y n)))
+
+    ^{:line 94} n))
+
+
+^{:go/end 113} (go/func vmkcall ^{:tag (* ir/CallExpr)} [^ir/Node fn ^{:tag (* types/Type)} t ^{:tag (* ir/Nodes)} init ^{:tag (slice ir/Node)} va]
+  (when (== init nil)
+    (base/Fatalf "mkcall with nil init: %v" fn))
+
+  (when (or (== (.Type fn) nil) (!= (.Kind (.Type fn)) types/TFUNC))
+    (base/Fatalf "mkcall %v %v" fn (.Type fn)))
+
+
+  (let [n (.NumParams (.Type fn))]
+    (when (!= n (len va))
+      (base/Fatalf "vmkcall %v needs %v args got %v" fn n (len va)))
+
+
+    (let [call (assert (* ir/CallExpr) (typecheck/Call base/Pos fn va false))]
+      ^{:go/via [miniExpr]} (.SetType call t)
+      (assert (* ir/CallExpr) (walkExpr call init)))))
+
+
+^{:go/end 117} (go/func mkcall ^{:tag (* ir/CallExpr)} [^string name ^{:tag (* types/Type)} t ^{:tag (* ir/Nodes)} init & ^{:tag (slice ir/Node)} args]
+  (vmkcall (typecheck/LookupRuntime name) t init args))
+
+
+^{:go/end 121} (go/func mkcallstmt ^ir/Node [^string name & ^{:tag (slice ir/Node)} args]
+  (mkcallstmt1 (typecheck/LookupRuntime name) (spread args)))
+
+
+^{:go/end 125} (go/func mkcall1 ^{:tag (* ir/CallExpr)} [^ir/Node fn ^{:tag (* types/Type)} t ^{:tag (* ir/Nodes)} init & ^{:tag (slice ir/Node)} args]
+  (vmkcall fn t init args))
+
+
+^{:go/end 135} (go/func mkcallstmt1 ^ir/Node [^ir/Node fn & ^{:tag (slice ir/Node)} args]
+  (let [^ir/Nodes init (zero ir/Nodes)
+      ^{:line 129} n (vmkcall fn nil (addr init) args)]
+    (when (== (len init) 0)
+      (return n))
+
+    (.Append init n)
+    (ir/NewBlockStmt ^{:go/via [miniExpr miniNode]} (.Pos n) init)))
+
+
+^{:go/breaks [6] :go/end 149} (go/func chanfn ^ir/Node [^string name ^int n ^{:tag (* types/Type)} t]
+  (when (not (.IsChan t))
+    (base/Fatalf "chanfn %v" t))
+
+  (switch n
+    (case [1]
+      (return (typecheck/LookupRuntime name (.Elem t))))
+    (case [2]
+      (return (typecheck/LookupRuntime name (.Elem t) (.Elem t)))))
+
+  (base/Fatalf "chanfn %d" n)
+  nil)
+
+
+^{:go/end 159} (go/func mapfn ^ir/Node [^string name ^{:tag (* types/Type)} t ^bool isfat]
+  (when (not (.IsMap t))
+    (base/Fatalf "mapfn %v" t))
+
+  (when (or (== (mapfast t) mapslow) isfat)
+    (return (typecheck/LookupRuntime name (.Key t) (.Elem t) (.Key t) (.Elem t))))
+
+  (typecheck/LookupRuntime name (.Key t) (.Elem t) (.Elem t)))
+
+
+^{:go/end 169} (go/func mapfndel ^ir/Node [^string name ^{:tag (* types/Type)} t]
+  (when (not (.IsMap t))
+    (base/Fatalf "mapfn %v" t))
+
+  (when (== (mapfast t) mapslow)
+    (return (typecheck/LookupRuntime name (.Key t) (.Elem t) (.Key t))))
+
+  (typecheck/LookupRuntime name (.Key t) (.Elem t)))
+
+
+(go/const
+  ^{:line 172} [^{:val 0} mapslow iota]
+  ^{:line 173} [^{:val 1} mapfast32]
+  ^{:line 174} [^{:val 2} mapfast32ptr]
+  ^{:line 175} [^{:val 3} mapfast64]
+  ^{:line 176} [^{:val 4} mapfast64ptr]
+  ^{:line 177} [^{:val 5} mapfaststr]
+  ^{:line 178} [^{:val 6} nmapfast])
+
+
+(go/type mapnames (array nmapfast string))
+
+^{:go/end 185} (go/func mkmapnames ^mapnames [^string base ^string ptr]
+  (lit mapnames base (+ base "_fast32") (+ base "_fast32" ptr) (+ base "_fast64") (+ base "_fast64" ptr) (+ base "_faststr")))
+
+
+(go/var mapaccess1 (mkmapnames "mapaccess1" ""))
+(go/var mapaccess2 (mkmapnames "mapaccess2" ""))
+(go/var mapassign (mkmapnames "mapassign" "ptr"))
+(go/var mapdelete (mkmapnames "mapdelete" ""))
+
+^{:go/end 218} (go/func mapfast ^int [^{:tag (* types/Type)} t]
+  (when (> (.Size (.Elem t)) abi/MapMaxElemBytes)
+    (return mapslow))
+
+  (switch (algType (.Key t))
+    (case [types/AMEM32]
+      (when (not (.HasPointers (.Key t)))
+        (return mapfast32))
+
+      (when (== types/PtrSize 4)
+        (return mapfast32ptr))
+
+      (base/Fatalf "small pointer %v" (.Key t)))
+    (case [types/AMEM64]
+      (when (not (.HasPointers (.Key t)))
+        (return mapfast64))
+
+      (when (== types/PtrSize 8)
+        (return mapfast64ptr)))
+
+    ;; Two-word object, at least one of which is a pointer.
+    ;; Use the slow path.
+    (case [types/ASTRING]
+      (return mapfaststr)))
+
+  ^{:line 217} mapslow)
+
+
+
+
+^{:go/end 247} (go/func algType "algType returns the fixed-width AMEMxx variants instead of the general\nAMEM kind when possible.\n" ^types/AlgKind [^{:tag (* types/Type)} t]
+  (let [a (types/AlgType t)]
+    (when (== a types/AMEM)
+      (when (and (< (.Alignment t) (conv int64 ^{:go/via [Arch]} (.-Alignment (.-Arch base/Ctxt)))) (< (.Alignment t) (.Size t)))
+        ;; For example, we can't treat [2]int16 as an int32 if int32s require
+        ;; 4-byte alignment. See issue 46283.
+        (return a))
+
+      (switch (.Size t)
+        (case [0]
+          (return types/AMEM0))
+        (case [1]
+          (return types/AMEM8))
+        (case [2]
+          (return types/AMEM16))
+        (case [4]
+          (return types/AMEM32))
+        (case [8]
+          (return types/AMEM64))
+        (case [16]
+          (return types/AMEM128))))
+
+
+
+    ^{:line 246} a))
+
+
+^{:go/end 259} (go/func walkAppendArgs [^{:tag (* ir/CallExpr)} n ^{:tag (* ir/Nodes)} init]
+  (walkExprListSafe (.-Args n) init)
+
+  ;; walkExprListSafe will leave OINDEX (s[n]) alone if both s
+  ;; and n are name or literal, but those may index the slice we're
+  ;; modifying here. Fix explicitly.
+  (let [ls (.-Args n)]
+    (range [i1 n1 ls]
+      (aset ls i1 (cheapExpr n1 init)))))
+
+
+
+
+^{:go/end 275} (go/func appendWalkStmt "appendWalkStmt typechecks and walks stmt and then appends it to init.\n" [^{:tag (* ir/Nodes)} init ^ir/Node stmt]
+  (let [op (.Op stmt)
+      ^{:line 264} n (typecheck/Stmt stmt)]
+    (if (or (== op ir/OAS) (== op ir/OAS2))
+      ;; If the assignment has side effects, walkExpr will append them
+      ;; directly to init for us, while walkStmt will wrap it in an OBLOCK.
+      ;; We need to append them directly.
+      ;; TODO(rsc): Clean this up.
+      (set! n (walkExpr n init))
+
+      (set! n (walkStmt n)))
+
+    (.Append init n)))
+
+
+
+
+(go/const ^{:val 8 :doc "The max number of defers in a function using open-coded defers. We enforce this\nlimit because the deferBits bitmask is currently a single byte (to minimize code size)\n"} maxOpenDefers 8)
+
+
+
+^{:go/end 300} (go/func backingArrayPtrLen "backingArrayPtrLen extracts the pointer and length from a slice or string.\nThis constructs two nodes referring to n, so n must be a cheapExpr.\n" [^ir/Node n] :results [^ir/Node ptr ^ir/Node length]
+  (let [^ir/Nodes init (zero ir/Nodes)
+      ^{:line 285} c (cheapExpr n (addr init))]
+    (when (or (!= c n) (!= (len init) 0))
+      (base/Fatalf "backingArrayPtrLen not cheap: %v" n))
+
+    (set! ptr (ir/NewUnaryExpr base/Pos ir/OSPTR n))
+    (if (.IsString (.Type n))
+      (.SetType ptr (.PtrTo (aget types/Types types/TUINT8)))
+
+      (.SetType ptr (.PtrTo (.Elem (.Type n)))))
+
+    (.SetTypecheck ptr 1)
+    (set! length (ir/NewUnaryExpr base/Pos ir/OLEN n))
+    (.SetType length (aget types/Types types/TINT))
+    (.SetTypecheck length 1)
+    (return ptr length)))
+
+
+
+
+
+^{:go/end 382} (go/func mayCall "mayCall reports whether evaluating expression n may require\nfunction calls, which could clobber function call arguments/results\ncurrently on the stack.\n" ^bool [^ir/Node n]
+  ;; This is intended to avoid putting constants
+  ;; into temporaries with the race detector (or other
+  ;; instrumentation) which interferes with simple
+  ;; "this is a constant" tests in ssagen.
+  ;; Also, it will generally lead to better code.
+  (when (== (.Op n) ir/OLITERAL)
+    (return false))
+
+
+  ;; When instrumenting, any expression might require function calls.
+  (when (.-Instrumenting (.-Cfg base/Flag))
+    (return true))
+
+
+  (let [isSoftFloat ^{:go/end 322} (fn ^bool [^{:tag (* types/Type)} typ]
+        (or (aget types/IsFloat (.Kind typ)) (aget types/IsComplex (.Kind typ))))]
+
+
+    (ir/Any n ^{:go/breaks [[4 380]] :go/end 381} (fn ^bool [^ir/Node n]
+        ;; walk should have already moved any Init blocks off of
+        ;; expressions.
+        (when (!= (len (.Init n)) 0)
+          (base/FatalfAt (.Pos n) "mayCall %+v" n))
+
+
+        (switch (.Op n)
+          (default
+            (base/FatalfAt (.Pos n) "mayCall %+v" n))
+
+          (case [ir/OCALLFUNC ir/OCALLINTER
+              ^{:line 336} ir/OUNSAFEADD ir/OUNSAFESLICE]
+            (return true))
+
+          (case [ir/OINDEX ir/OSLICE ir/OSLICEARR ir/OSLICE3 ir/OSLICE3ARR ir/OSLICESTR
+              ^{:line 340} ir/ODEREF ir/ODOTPTR ir/ODOTTYPE ir/ODYNAMICDOTTYPE ir/ODIV ir/OMOD
+              ^{:line 341} ir/OSLICE2ARR ir/OSLICE2ARRPTR]
+            ;; These ops might panic, make sure they are done
+            ;; before we start marshaling args for a call. See issue 16760.
+            (return true))
+
+          (case [ir/OANDAND ir/OOROR]
+            (let [n (assert (* ir/LogicalExpr) n)]
+              ;; The RHS expression may have init statements that
+              ;; should only execute conditionally, and so cannot be
+              ;; pulled out to the top-level init list. We could try
+              ;; to be more precise here.
+              (return (!= (len (.Init (.-Y n))) 0))))
+
+          ;; When using soft-float, these ops might be rewritten to function calls
+          ;; so we ensure they are evaluated first.
+          (case [ir/OADD ir/OSUB ir/OMUL ir/ONEG]
+            (return (and (.-SoftFloat ssagen/Arch) (isSoftFloat (.Type n)))))
+          (case [ir/OLT ir/OEQ ir/ONE ir/OLE ir/OGE ir/OGT]
+            (let [n (assert (* ir/BinaryExpr) n)]
+              (return (and (.-SoftFloat ssagen/Arch) (isSoftFloat (.Type (.-X n)))))))
+          (case [ir/OCONV]
+            (let [n (assert (* ir/ConvExpr) n)]
+              (return (and (.-SoftFloat ssagen/Arch) ^:go/paren (or (isSoftFloat ^{:go/via [miniExpr]} (.Type n)) (isSoftFloat (.Type (.-X n))))))))
+
+          (case [ir/OMIN ir/OMAX]
+            ;; string or float requires runtime call, see (*ssagen.state).minmax method.
+            (return (or (.IsString (.Type n)) (.IsFloat (.Type n)))))
+
+          (case [ir/OLITERAL ir/ONIL ir/ONAME ir/OLINKSYMOFFSET ir/OMETHEXPR
+              ^{:line 370} ir/OAND ir/OANDNOT ir/OLSH ir/OOR ir/ORSH ir/OXOR ir/OCOMPLEX ir/OMAKEFACE
+              ^{:line 371} ir/OADDR ir/OBITNOT ir/ONOT ir/OPLUS
+              ^{:line 372} ir/OCAP ir/OIMAG ir/OLEN ir/OREAL
+              ^{:line 373} ir/OCONVNOP ir/ODOT
+              ^{:line 374} ir/OCFUNC ir/OIDATA ir/OITAB ir/OSPTR
+              ^{:line 375} ir/OBYTES2STRTMP ir/OGETG ir/OGETCALLERSP ir/OSLICEHEADER ir/OSTRINGHEADER]))
+        ;; ok: operations that don't require function calls.
+        ;; Expand as needed.
+
+
+        false))))
+
+
+
+
+^{:go/end 391} (go/func itabType "itabType loads the _type field from a runtime.itab struct.\n" ^ir/Node [^ir/Node itab]
+  (when (== itabTypeField nil)
+    ;; internal/abi.ITab's Type field
+    (set! itabTypeField (runtimeField "Type" (.OffsetOf rttype/ITab "Type") (types/NewPtr (aget types/Types types/TUINT8)))))
+
+  (boundedDotPtr base/Pos itab itabTypeField))
+
+
+(go/var ^{:tag (* types/Field)} itabTypeField)
+
+
+
+^{:go/end 404} (go/func boundedDotPtr "boundedDotPtr returns a selector expression representing ptr.field\nand omits nil-pointer checks for ptr.\n" ^{:tag (* ir/SelectorExpr)} [^src/XPos pos ^ir/Node ptr ^{:tag (* types/Field)} field]
+  (let [sel (ir/NewSelectorExpr pos ir/ODOTPTR ptr (.-Sym field))]
+    (set! (.-Selection sel) field)
+    ^{:go/via [miniExpr]} (.SetType sel (.-Type field))
+    ^{:go/via [miniExpr miniNode]} (.SetTypecheck sel 1)
+    ^{:go/via [miniExpr]} (.SetBounded sel true) ; guaranteed not to fault
+    ^{:line 403} sel))
+
+
+^{:go/end 410} (go/func runtimeField ^{:tag (* types/Field)} [^string name ^int64 offset ^{:tag (* types/Type)} typ]
+  (let [f (types/NewField src/NoXPos (.Lookup (.-Runtime ir/Pkgs) name) typ)]
+    (set! (.-Offset f) offset)
+    ^{:line 409} f))
+
+
+
+
+
+^{:go/end 432} (go/func ifaceData "ifaceData loads the data field from an interface.\nThe concrete type must be known to have type t.\nIt follows the pointer if !IsDirectIface(t).\n" ^ir/Node [^src/XPos pos ^ir/Node n ^{:tag (* types/Type)} t]
+  (when (.IsInterface t)
+    (base/Fatalf "ifaceData interface: %v" t))
+
+  (let [ptr (ir/NewUnaryExpr pos ir/OIDATA n)]
+    (when (types/IsDirectIface t)
+      ^{:go/via [miniExpr]} (.SetType ptr t)
+      ^{:go/via [miniExpr miniNode]} (.SetTypecheck ptr 1)
+      (return ptr))
+
+    ^{:go/via [miniExpr]} (.SetType ptr (types/NewPtr t))
+    ^{:go/via [miniExpr miniNode]} (.SetTypecheck ptr 1)
+    (let [ind (ir/NewStarExpr pos ptr)]
+      ^{:go/via [miniExpr]} (.SetType ind t)
+      ^{:go/via [miniExpr miniNode]} (.SetTypecheck ind 1)
+      ^{:go/via [miniExpr]} (.SetBounded ind true)
+      ^{:line 431} ind)))
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 448} (go/func staticValue "staticValue returns the earliest expression it can find that always\nevaluates to n, with similar semantics to [ir.StaticValue].\n\nIt only returns results for the ir.CurFunc being processed in [Walk],\nincluding its closures, and uses a cache to reduce duplicative work.\nIt can return n or nil if it does not find an earlier expression.\n\nThe current use case is reducing OCONVIFACE allocations, and hence\nstaticValue is currently only useful when given an *ir.ConvExpr.X as n.\n" ^ir/Node [^ir/Node n]
+  (when (== staticValues nil)
+    (base/Fatalf "staticValues is nil. staticValue called outside of walk.Walk?"))
+
+  (aget staticValues n))
+
+
+
+(go/var ^{:tag (map ir/Node ir/Node) :doc "staticValues is a cache of static values for use by staticValue.\n"} staticValues)
+
+
+
+
+(go/var ^{:tag (map (* ir/Name) (* types/Type)) :doc "shapeConvSources maps an *ir.Name (a PAUTO interface variable) to\nthe shape type of the OCONVIFACE expression that is its single\nstatic value, if any.\n"} shapeConvSources)
+
+
+
+
+
+
+^{:go/end 493} (go/func analyzePreWalk "analyzePreWalk populates staticValues and shapeConvSources using a\nsingle AST traversal. We can't use an ir.ReassignOracle or\nir.StaticValue in the middle of walk because they don't currently\nhandle transformed assignments (e.g., will complain about\n'RHS == nil'). So we build these maps before walk begins.\n" [^{:tag (* ir/Func)} fn]
+  (let [ro (addr (lit ir/ReassignOracle))]
+    (.Init ro fn)
+    (let [sv (make (map ir/Node ir/Node))
+        ^{:line 467} scs (make (map (* ir/Name) (* types/Type)))]
+      (ir/Visit fn ^{:go/end 490} (fn [^ir/Node n]
+          (switch (.Op n)
+            (case [ir/OCONVIFACE]
+              (let [x (.-X (assert (* ir/ConvExpr) n))
+                  ^{:line 472} v (.StaticValue ro x)]
+                (when (and (!= v nil) (!= v x))
+                  (aset sv x v))))
+
+            (case [ir/ONAME]
+              (let [name (.Canonical (assert (* ir/Name) n))]
+                (when (or (!= (.-Class name) ir/PAUTO) (== ^{:go/via [miniExpr]} (.Type name) nil) (not (.IsInterface ^{:go/via [miniExpr]} (.Type name))))
+                  (return))
+
+                (let [val (.StaticValue ro name)]
+                  (when (or (== val nil) (!= (.Op val) ir/OCONVIFACE))
+                    (return))
+
+                  (let [srcType (.Type (.-X (assert (* ir/ConvExpr) val)))]
+                    (when (and (!= srcType nil) (not (.IsInterface srcType)) (.IsShape srcType))
+                      (aset scs name srcType)))))))))
+
+
+
+      (set! staticValues sv)
+      (set! shapeConvSources scs))))

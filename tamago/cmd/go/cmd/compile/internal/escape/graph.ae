@@ -1,0 +1,359 @@
+;; Copyright 2018 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.cmd.compile.internal.escape) (go/file "graph.go" :imports [
+
+
+    ^{:line 8} [base "cmd/compile/internal/base"]
+    ^{:line 9} [ir "cmd/compile/internal/ir"]
+    ^{:line 10} [logopt "cmd/compile/internal/logopt"]
+    ^{:line 11} [types "cmd/compile/internal/types"]
+    ^{:line 12} [fmt "fmt"]])
+
+
+;; Below we implement the methods for walking the AST and recording
+;; data flow edges. Note that because a sub-expression might have
+;; side-effects, it's important to always visit the entire AST.
+;;
+;; For example, write either:
+;;
+;;     if x {
+;;         e.discard(n.Left)
+;;     } else {
+;;         e.value(k, n.Left)
+;;     }
+;;
+;; or
+;;
+;;     if x {
+;;         k = e.discardHole()
+;;     }
+;;     e.value(k, n.Left)
+;;
+;; Do NOT write:
+;;
+;;    // BAD: possibly loses side-effects within n.Left
+;;    if !x {
+;;        e.value(k, n.Left)
+;;    }
+
+
+
+(go/type location "A location represents an abstract location that stores a Go\nvariable.\n" (struct
+    ^{:line 44 :tag ir/Node} n ; represented variable or expression, if any
+    ^{:line 45 :tag (* ir/Func)} curfn ; enclosing function
+    ^{:line 46 :tag (slice edge)} edges ; incoming edges
+    ^{:line 47 :tag int} loopDepth ; loopDepth at declaration
+
+
+
+
+    ^{:line 52 :tag int :doc "resultIndex records the tuple index (starting at 1) for\nPPARAMOUT variables within their function's result type.\nFor non-PPARAMOUT variables it's 0.\n"} resultIndex
+
+
+
+    ^{:line 56 :tag int :doc "derefs and walkgen are used during walkOne to track the\nminimal dereferences from the walk root.\n"} derefs ; >= -1
+    ^{:line 57 :tag uint32} walkgen
+
+
+
+
+    ^{:line 62 :tag (* location) :doc "dst and dstEdgeindex track the next immediate assignment\ndestination location during walkone, along with the index\nof the edge pointing back to this location.\n"} dst
+    ^{:line 63 :tag int} dstEdgeIdx
+
+
+
+    ^{:line 67 :tag bool :doc "queuedWalkAll is used by walkAll to track whether this location is\nin its work queue.\n"} queuedWalkAll
+
+
+
+
+    ^{:line 72 :tag uint32 :doc "queuedWalkOne is used by walkOne to track whether this location is\nin its work queue. The value is the walkgen when this location was\nlast queued for walkOne, or 0 if it's not currently queued.\n"} queuedWalkOne
+
+
+    ^{:line 75 :tag locAttr :doc "attrs is a bitset of location attributes.\n"} attrs
+
+
+    ^{:line 78 :tag leaks :doc "paramEsc records the represented parameter's leak set.\n"} paramEsc
+
+    ^{:line 80 :tag bool} captured ; has a closure captured this variable?
+    ^{:line 81 :tag bool} reassigned ; has this variable been reassigned?
+    ^{:line 82 :tag bool} addrtaken ; has this variable's address been taken?
+    ^{:line 83 :tag bool} param ; is this variable a parameter (ONAME of class ir.PPARAM)?
+    ^{:line 84 :tag bool} paramOut)) ; is this variable an out parameter (ONAME of class ir.PPARAMOUT)?
+
+
+(go/type locAttr uint8)
+
+(go/const
+
+
+  ^{:line 92} [^{:tag locAttr :val 1 :doc "attrEscapes indicates whether the represented variable's address\nescapes; that is, whether the variable must be heap allocated.\n"} attrEscapes (<< 1 iota)]
+
+
+
+
+  ^{:line 97} [^{:val 2 :doc "attrPersists indicates whether the represented expression's\naddress outlives the statement; that is, whether its storage\ncannot be immediately reused.\n"} attrPersists]
+
+
+
+
+
+  ^{:line 103} [^{:val 4 :doc "attrMutates indicates whether pointers that are reachable from\nthis location may have their addressed memory mutated. This is\nused to detect string->[]byte conversions that can be safely\noptimized away.\n"} attrMutates]
+
+
+
+
+  ^{:line 108} [^{:val 8 :doc "attrCalls indicates whether closures that are reachable from this\nlocation may be called without tracking their results. This is\nused to better optimize indirect closure calls.\n"} attrCalls])
+
+
+^{:go/end 111} (go/method hasAttr ^bool [^{:tag (* location)} l ^locAttr attr] (!= (bit-and (.-attrs l) attr) 0))
+
+
+(go/type edge "An edge represents an assignment edge between two Go variables.\n" (struct
+    ^{:line 115 :tag (* location)} src
+    ^{:line 116 :tag int} derefs ; >= -1
+    ^{:line 117 :tag (* note)} notes))
+
+
+^{:go/end 122} (go/method asHole ^hole [^{:tag (* location)} l]
+  (lit hole :dst l))
+
+
+
+^{:go/end 140} (go/method leakTo "leak records that parameter l leaks to sink.\n" [^{:tag (* location)} l ^{:tag (* location)} sink ^int derefs]
+  ;; If sink is a result parameter that doesn't escape (#44614)
+  ;; and we can fit return bits into the escape analysis tag,
+  ;; then record as a result leak.
+  (when (and (not (.hasAttr sink attrEscapes)) (.isName sink ir/PPARAMOUT) (== (.-curfn sink) (.-curfn l)))
+    (let [ri (- (.-resultIndex sink) 1)]
+      (when (< ri numEscResults)
+        ;; Leak to result parameter.
+        (.AddResult (.-paramEsc l) ri derefs)
+        (return))))
+
+
+
+  ;; Otherwise, record as heap leak.
+  (.AddHeap (.-paramEsc l) derefs))
+
+
+^{:go/end 144} (go/method isName ^bool [^{:tag (* location)} l ^ir/Class c]
+  (and (!= (.-n l) nil) (== (.Op (.-n l)) ir/ONAME) (== (.-Class (assert (* ir/Name) (.-n l))) c)))
+
+
+
+
+
+(go/type hole "A hole represents a context for evaluation of a Go\nexpression. E.g., when evaluating p in \"x = **p\", we'd have a hole\nwith dst==x and derefs==2.\n" (struct
+    ^{:line 150 :tag (* location)} dst
+    ^{:line 151 :tag int} derefs ; >= -1
+    ^{:line 152 :tag (* note)} notes
+
+
+
+
+    ^{:line 157 :tag bool :doc "addrtaken indicates whether this context is taking the address of\nthe expression, independent of whether the address will actually\nbe stored into a variable.\n"} addrtaken))
+
+
+(go/type note (struct
+    ^{:line 161 :tag (* note)} next
+    ^{:line 162 :tag ir/Node} where
+    ^{:line 163 :tag string} why))
+
+
+^{:go/end 178} (go/method note ^hole [^hole k ^ir/Node where ^string why]
+  (when (or (== where nil) (== why ""))
+    (base/Fatalf "note: missing where/why"))
+
+  (when (or (>= (.-LowerM base/Flag) 2) (logopt/Enabled))
+    (set! (.-notes k) (addr ^{:go/breaks [2 4 6]} (lit note
+          :next (.-notes k)
+          :where where
+          :why why))))
+
+
+  ^{:line 177} k)
+
+
+^{:go/end 187} (go/method shift ^hole [^hole k ^int delta]
+  (set! (.-derefs k) + delta)
+  (when (< (.-derefs k) -1)
+    (base/Fatalf "derefs underflow: %v" (.-derefs k)))
+
+  (set! (.-addrtaken k) (< delta 0))
+  ^{:line 186} k)
+
+
+^{:go/end 189} (go/method deref ^hole [^hole k ^ir/Node where ^string why] (.note (.shift k 1) where why))
+^{:go/end 190} (go/method addr ^hole [^hole k ^ir/Node where ^string why] (.note (.shift k -1) where why))
+
+^{:go/end 197} (go/method dotType ^hole [^hole k ^{:tag (* types/Type)} t ^ir/Node where ^string why]
+  (when (and (not (.IsInterface t)) (not (types/IsDirectIface t)))
+    (set! k (.shift k 1)))
+
+  (.note k where why))
+
+
+^{:go/end 230} (go/method flow [^{:tag (* batch)} b ^hole k ^{:tag (* location)} src]
+  (when (.-addrtaken k)
+    (set! (.-addrtaken src) true))
+
+
+  (let [dst (.-dst k)]
+    (when (== dst (addr (.-blankLoc b)))
+      (return))
+
+    (when (and (== dst src) (>= (.-derefs k) 0)) ; dst = dst, dst = *dst, ...
+      (return))
+
+    (when (and (.hasAttr dst attrEscapes) (< (.-derefs k) 0)) ; dst = &src
+      (when (or (>= (.-LowerM base/Flag) 2) (logopt/Enabled))
+        (let [pos (base/FmtPos (.Pos (.-n src)))]
+          (when (>= (.-LowerM base/Flag) 2)
+            (fmt/Printf "%s: %v escapes to heap in %v:\n" pos (.-n src) (ir/FuncName (.-curfn src))))
+
+          (let [explanation (.explainFlow b pos dst src (.-derefs k) (.-notes k) (lit (slice (* logopt/LoggedOpt))))]
+            (when (logopt/Enabled)
+              (let [^{:tag (* ir/Func)} e_curfn (zero (* ir/Func))] ; TODO(mdempsky): Fix.
+                (logopt/LogOpt (.Pos (.-n src)) "escapes" "escape" (ir/FuncName e_curfn) (fmt/Sprintf "%v escapes to heap" (.-n src)) explanation))))))
+
+
+
+      (set! (.-attrs src) bit-or (bit-or attrEscapes attrPersists attrMutates attrCalls))
+      (return))
+
+
+    ;; TODO(mdempsky): Deduplicate edges?
+    (set! (.-edges dst) (append (.-edges dst) (lit edge :src src :derefs (.-derefs k) :notes (.-notes k))))))
+
+
+^{:go/end 232} (go/method heapHole ^hole [^{:tag (* batch)} b] (.asHole (.-heapLoc b)))
+^{:go/end 233} (go/method mutatorHole ^hole [^{:tag (* batch)} b] (.asHole (.-mutatorLoc b)))
+^{:go/end 234} (go/method calleeHole ^hole [^{:tag (* batch)} b] (.asHole (.-calleeLoc b)))
+^{:go/end 235} (go/method discardHole ^hole [^{:tag (* batch)} b] (.asHole (.-blankLoc b)))
+
+^{:go/end 242} (go/method oldLoc ^{:tag (* location)} [^{:tag (* batch)} b ^{:tag (* ir/Name)} n]
+  (when (== (.-Opt (.Canonical n)) nil)
+    (base/FatalfAt ^{:go/via [miniExpr miniNode]} (.Pos n) "%v has no location" n))
+
+  (assert (* location) (.-Opt (.Canonical n))))
+
+
+^{:go/end 288} (go/method newLoc ^{:tag (* location)} [^{:tag (* escape)} e ^ir/Node n ^bool persists]
+  (when (== (.-curfn e) nil)
+    (base/Fatalf "e.curfn isn't set"))
+
+  (when (and (!= n nil) (!= (.Type n) nil) (.NotInHeap (.Type n)))
+    (base/ErrorfAt (.Pos n) 0 "%v is incomplete (or unallocatable); stack allocation disallowed" (.Type n)))
+
+
+  (when (and (!= n nil) (== (.Op n) ir/ONAME))
+    (when [canon (.Canonical (assert (* ir/Name) n))] (!= n canon)
+      (base/FatalfAt (.Pos n) "newLoc on non-canonical %v (canonical is %v)" n canon)))
+
+
+  (let [loc (addr ^{:go/breaks [2 4 6]} (lit location
+          :n n
+          :curfn (.-curfn e)
+          :loopDepth (.-loopDepth e)))]
+
+    (cond (.isName loc ir/PPARAM)
+      (set! (.-param loc) true)
+      (.isName loc ir/PPARAMOUT)
+      (set! (.-paramOut loc) true))
+
+
+    (when persists
+      (set! (.-attrs loc) bit-or attrPersists))
+
+    (set! ^{:go/via [batch]} (.-allLocs e) (append ^{:go/via [batch]} (.-allLocs e) loc))
+    (when (!= n nil)
+      (when (== (.Op n) ir/ONAME)
+        (let [n (assert (* ir/Name) n)]
+          (cond (and (== (.-Class n) ir/PPARAM) (== (.-Curfn n) nil)) (do)
+            ;; ok; hidden parameter
+            (!= (.-Curfn n) (.-curfn e))
+            (base/FatalfAt ^{:go/via [miniExpr miniNode]} (.Pos n) "curfn mismatch: %v != %v for %v" (.-Curfn n) (.-curfn e) n))
+
+
+          (when (!= (.-Opt n) nil)
+            (base/FatalfAt ^{:go/via [miniExpr miniNode]} (.Pos n) "%v already has a location" n))
+
+          (set! (.-Opt n) loc))))
+
+
+    ^{:line 287} loc))
+
+
+
+
+^{:go/end 318} (go/method teeHole "teeHole returns a new hole that flows into each hole of ks,\nsimilar to the Unix tee(1) command.\n" ^hole [^{:tag (* escape)} e & ^{:tag (slice hole)} ks]
+  (when (== (len ks) 0)
+    (return ^{:go/via [batch]} (.discardHole e)))
+
+  (when (== (len ks) 1)
+    (return (aget ks 0)))
+
+  ;; TODO(mdempsky): Optimize if there's only one non-discard hole?
+
+  ;; Given holes "l1 = _", "l2 = **_", "l3 = *_", ..., create a
+  ;; new temporary location ltmp, wire it into place, and return
+  ;; a hole for "ltmp = _".
+  (let [loc (.newLoc e nil false)]
+    (range [_ k ks]
+      ;; N.B., "p = &q" and "p = &tmp; tmp = q" are not
+      ;; semantically equivalent. To combine holes like "l1
+      ;; = _" and "l2 = &_", we'd need to wire them as "l1 =
+      ;; *ltmp" and "l2 = ltmp" and return "ltmp = &_"
+      ;; instead.
+      (when (< (.-derefs k) 0)
+        (base/Fatalf "teeHole: negative derefs"))
+
+
+      ^{:go/via [batch]} (.flow e k loc))
+
+    (.asHole loc)))
+
+
+
+
+
+^{:go/end 327} (go/method later "later returns a new hole that flows into k, but some time later.\nIts main effect is to prevent immediate reuse of temporary\nvariables introduced during Order.\n" ^hole [^{:tag (* escape)} e ^hole k]
+  (let [loc (.newLoc e nil true)]
+    ^{:go/via [batch]} (.flow e k loc)
+    (.asHole loc)))
+
+
+
+^{:go/end 360} (go/func Fmt "Fmt is called from node printing to print information about escape analysis results.\n" ^string [^ir/Node n]
+  (let [text ""]
+    (switch (.Esc n)
+      (case [ir/EscUnknown]
+        (break))
+
+      (case [ir/EscHeap]
+        (set! text "esc(h)"))
+
+      (case [ir/EscNone]
+        (set! text "esc(no)"))
+
+      (case [ir/EscNever]
+        (set! text "esc(N)"))
+
+      (default
+        (set! text (fmt/Sprintf "esc(%d)" (.Esc n)))))
+
+
+    (when (== (.Op n) ir/ONAME)
+      (let [n (assert (* ir/Name) n)]
+        (when [(values loc ok) (assert (* location) (.-Opt n))] (and ok (!= (.-loopDepth loc) 0))
+          (when (!= text "")
+            (set! text + " "))
+
+          (set! text + (fmt/Sprintf "ld(%d)" (.-loopDepth loc))))))
+
+
+
+    ^{:line 359} text))

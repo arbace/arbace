@@ -1,0 +1,3141 @@
+;; Inferno utils/5l/span.c
+;; https://bitbucket.org/inferno-os/inferno-os/src/master/utils/5l/span.c
+;;
+;;	Copyright © 1994-1999 Lucent Technologies Inc.  All rights reserved.
+;;	Portions Copyright © 1995-1997 C H Forsyth (forsyth@terzarima.net)
+;;	Portions Copyright © 1997-1999 Vita Nuova Limited
+;;	Portions Copyright © 2000-2007 Vita Nuova Holdings Limited (www.vitanuova.com)
+;;	Portions Copyright © 2004,2006 Bruce Ellis
+;;	Portions Copyright © 2005-2007 C H Forsyth (forsyth@terzarima.net)
+;;	Revisions Copyright © 2000-2007 Lucent Technologies Inc. and others
+;;	Portions Copyright © 2009 The Go Authors. All rights reserved.
+;;
+;; Permission is hereby granted, free of charge, to any person obtaining a copy
+;; of this software and associated documentation files (the "Software"), to deal
+;; in the Software without restriction, including without limitation the rights
+;; to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+;; copies of the Software, and to permit persons to whom the Software is
+;; furnished to do so, subject to the following conditions:
+;;
+;; The above copyright notice and this permission notice shall be included in
+;; all copies or substantial portions of the Software.
+;;
+;; THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+;; IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+;; FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL THE
+;; AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+;; LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+;; OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+;; THE SOFTWARE.
+
+(in-ns 'go.cmd.internal.obj.arm) (go/file "asm5.go" :imports [
+
+
+    ^{:line 34} [obj "cmd/internal/obj"]
+    ^{:line 35} [objabi "cmd/internal/objabi"]
+    ^{:line 36} [fmt "fmt"]
+    ^{:line 37} [buildcfg "internal/buildcfg"]
+    ^{:line 38} [log "log"]
+    ^{:line 39} [math "math"]
+    ^{:line 40} [slices "slices"]])
+
+
+
+
+
+(go/type ctxt5 "ctxt5 holds state while assembling a single function.\nEach function gets a fresh ctxt5.\nThis allows for multiple functions to be safely concurrently assembled.\n" (struct
+    ^{:line 47 :tag (* obj/Link)} ctxt
+    ^{:line 48 :tag obj/ProgAlloc} newprog
+    ^{:line 49 :tag (* obj/LSym)} cursym
+    ^{:line 50 :tag (* obj/Prog)} printp
+    ^{:line 51 :tag (* obj/Prog)} blitrl
+    ^{:line 52 :tag (* obj/Prog)} elitrl
+    ^{:line 53 :tag int64} autosize
+    ^{:line 54 :tag int64} instoffset
+    ^{:line 55 :tag int64} pc
+    ^{:line 56 :tag (struct ^uint32 start ^uint32 size ^uint32 extra)} pool))
+
+
+
+
+
+
+(go/type Optab (struct
+    ^{:line 64 :tag obj/As} as
+    ^{:line 65 :tag uint8} a1
+    ^{:line 66 :tag int8} a2
+    ^{:line 67 :tag uint8} a3
+    ^{:line 68 :tag uint8} type_
+    ^{:line 69 :tag int8} size
+    ^{:line 70 :tag int16} param
+    ^{:line 71 :tag int8} flag
+    ^{:line 72 :tag uint8} pcrelsiz
+    ^{:line 73 :tag uint8} scond)) ; optional flags accepted by the instruction
+
+
+(go/type Opcross (array 32 (array 2 (array 32 uint8))))
+
+(go/const
+  ^{:line 79} [^{:val 1} LFROM (<< 1 0)]
+  ^{:line 80} [^{:val 2} LTO (<< 1 1)]
+  ^{:line 81} [^{:val 4} LPOOL (<< 1 2)]
+  ^{:line 82} [^{:val 8} LPCREL (<< 1 3)])
+
+
+(go/var optab (lit (slice Optab)
+    ;; /* struct Optab:
+    ;; OPCODE, from, prog->reg, to, type, size, param, flag, extra data size, optional suffix */
+    (lit _ obj/ATEXT C_ADDR C_NONE C_TEXTSIZE 0 0 0 0 0 0)
+    (lit _ AADD C_REG C_REG C_REG 1 4 0 0 0 C_SBIT)
+    (lit _ AADD C_REG C_NONE C_REG 1 4 0 0 0 C_SBIT)
+    (lit _ AAND C_REG C_REG C_REG 1 4 0 0 0 C_SBIT)
+    (lit _ AAND C_REG C_NONE C_REG 1 4 0 0 0 C_SBIT)
+    (lit _ AORR C_REG C_REG C_REG 1 4 0 0 0 C_SBIT)
+    (lit _ AORR C_REG C_NONE C_REG 1 4 0 0 0 C_SBIT)
+    (lit _ AMOVW C_REG C_NONE C_REG 1 4 0 0 0 C_SBIT)
+    (lit _ AMVN C_REG C_NONE C_REG 1 4 0 0 0 C_SBIT)
+    (lit _ ACMP C_REG C_REG C_NONE 1 4 0 0 0 0)
+    (lit _ AADD C_RCON C_REG C_REG 2 4 0 0 0 C_SBIT)
+    (lit _ AADD C_RCON C_NONE C_REG 2 4 0 0 0 C_SBIT)
+    (lit _ AAND C_RCON C_REG C_REG 2 4 0 0 0 C_SBIT)
+    (lit _ AAND C_RCON C_NONE C_REG 2 4 0 0 0 C_SBIT)
+    (lit _ AORR C_RCON C_REG C_REG 2 4 0 0 0 C_SBIT)
+    (lit _ AORR C_RCON C_NONE C_REG 2 4 0 0 0 C_SBIT)
+    (lit _ AMOVW C_RCON C_NONE C_REG 2 4 0 0 0 0)
+    (lit _ AMVN C_RCON C_NONE C_REG 2 4 0 0 0 0)
+    (lit _ ACMP C_RCON C_REG C_NONE 2 4 0 0 0 0)
+    (lit _ AADD C_SHIFT C_REG C_REG 3 4 0 0 0 C_SBIT)
+    (lit _ AADD C_SHIFT C_NONE C_REG 3 4 0 0 0 C_SBIT)
+    (lit _ AAND C_SHIFT C_REG C_REG 3 4 0 0 0 C_SBIT)
+    (lit _ AAND C_SHIFT C_NONE C_REG 3 4 0 0 0 C_SBIT)
+    (lit _ AORR C_SHIFT C_REG C_REG 3 4 0 0 0 C_SBIT)
+    (lit _ AORR C_SHIFT C_NONE C_REG 3 4 0 0 0 C_SBIT)
+    (lit _ AMVN C_SHIFT C_NONE C_REG 3 4 0 0 0 C_SBIT)
+    (lit _ ACMP C_SHIFT C_REG C_NONE 3 4 0 0 0 0)
+    (lit _ AMOVW C_RACON C_NONE C_REG 4 4 REGSP 0 0 C_SBIT)
+    (lit _ AB C_NONE C_NONE C_SBRA 5 4 0 LPOOL 0 0)
+    (lit _ ABL C_NONE C_NONE C_SBRA 5 4 0 0 0 0)
+    (lit _ ABX C_NONE C_NONE C_SBRA 74 20 0 0 0 0)
+    (lit _ ABEQ C_NONE C_NONE C_SBRA 5 4 0 0 0 0)
+    (lit _ ABEQ C_RCON C_NONE C_SBRA 5 4 0 0 0 0) ; prediction hinted form, hint ignored
+    (lit _ AB C_NONE C_NONE C_ROREG 6 4 0 LPOOL 0 0)
+    (lit _ ABL C_NONE C_NONE C_ROREG 7 4 0 0 0 0)
+    (lit _ ABL C_REG C_NONE C_ROREG 7 4 0 0 0 0)
+    (lit _ ABX C_NONE C_NONE C_ROREG 75 12 0 0 0 0)
+    (lit _ ABXRET C_NONE C_NONE C_ROREG 76 4 0 0 0 0)
+    (lit _ ASLL C_RCON C_REG C_REG 8 4 0 0 0 C_SBIT)
+    (lit _ ASLL C_RCON C_NONE C_REG 8 4 0 0 0 C_SBIT)
+    (lit _ ASLL C_REG C_NONE C_REG 9 4 0 0 0 C_SBIT)
+    (lit _ ASLL C_REG C_REG C_REG 9 4 0 0 0 C_SBIT)
+    (lit _ ASWI C_NONE C_NONE C_NONE 10 4 0 0 0 0)
+    (lit _ ASWI C_NONE C_NONE C_LCON 10 4 0 0 0 0)
+    (lit _ AWORD C_NONE C_NONE C_LCON 11 4 0 0 0 0)
+    (lit _ AWORD C_NONE C_NONE C_LCONADDR 11 4 0 0 0 0)
+    (lit _ AWORD C_NONE C_NONE C_ADDR 11 4 0 0 0 0)
+    (lit _ AWORD C_NONE C_NONE C_TLS_LE 103 4 0 0 0 0)
+    (lit _ AWORD C_NONE C_NONE C_TLS_IE 104 4 0 0 0 0)
+    (lit _ AMOVW C_NCON C_NONE C_REG 12 4 0 0 0 0)
+    (lit _ AMOVW C_SCON C_NONE C_REG 12 4 0 0 0 0)
+    (lit _ AMOVW C_LCON C_NONE C_REG 12 4 0 LFROM 0 0)
+    (lit _ AMOVW C_LCONADDR C_NONE C_REG 12 4 0 (bit-or LFROM LPCREL) 4 0)
+    (lit _ AMVN C_NCON C_NONE C_REG 12 4 0 0 0 0)
+    (lit _ AADD C_NCON C_REG C_REG 13 8 0 0 0 C_SBIT)
+    (lit _ AADD C_NCON C_NONE C_REG 13 8 0 0 0 C_SBIT)
+    (lit _ AAND C_NCON C_REG C_REG 114 4 0 0 0 C_SBIT)
+    (lit _ AAND C_NCON C_NONE C_REG 114 4 0 0 0 C_SBIT)
+    (lit _ AORR C_NCON C_REG C_REG 13 8 0 0 0 C_SBIT)
+    (lit _ AORR C_NCON C_NONE C_REG 13 8 0 0 0 C_SBIT)
+    (lit _ ACMP C_NCON C_REG C_NONE 13 8 0 0 0 0)
+    (lit _ AADD C_SCON C_REG C_REG 13 8 0 0 0 C_SBIT)
+    (lit _ AADD C_SCON C_NONE C_REG 13 8 0 0 0 C_SBIT)
+    (lit _ AAND C_SCON C_REG C_REG 13 8 0 0 0 C_SBIT)
+    (lit _ AAND C_SCON C_NONE C_REG 13 8 0 0 0 C_SBIT)
+    (lit _ AORR C_SCON C_REG C_REG 13 8 0 0 0 C_SBIT)
+    (lit _ AORR C_SCON C_NONE C_REG 13 8 0 0 0 C_SBIT)
+    (lit _ AMVN C_SCON C_NONE C_REG 13 8 0 0 0 0)
+    (lit _ ACMP C_SCON C_REG C_NONE 13 8 0 0 0 0)
+    (lit _ AADD C_RCON2A C_REG C_REG 106 8 0 0 0 0)
+    (lit _ AADD C_RCON2A C_NONE C_REG 106 8 0 0 0 0)
+    (lit _ AORR C_RCON2A C_REG C_REG 106 8 0 0 0 0)
+    (lit _ AORR C_RCON2A C_NONE C_REG 106 8 0 0 0 0)
+    (lit _ AADD C_RCON2S C_REG C_REG 107 8 0 0 0 0)
+    (lit _ AADD C_RCON2S C_NONE C_REG 107 8 0 0 0 0)
+    (lit _ AADD C_LCON C_REG C_REG 13 8 0 LFROM 0 C_SBIT)
+    (lit _ AADD C_LCON C_NONE C_REG 13 8 0 LFROM 0 C_SBIT)
+    (lit _ AAND C_LCON C_REG C_REG 13 8 0 LFROM 0 C_SBIT)
+    (lit _ AAND C_LCON C_NONE C_REG 13 8 0 LFROM 0 C_SBIT)
+    (lit _ AORR C_LCON C_REG C_REG 13 8 0 LFROM 0 C_SBIT)
+    (lit _ AORR C_LCON C_NONE C_REG 13 8 0 LFROM 0 C_SBIT)
+    (lit _ AMVN C_LCON C_NONE C_REG 13 8 0 LFROM 0 0)
+    (lit _ ACMP C_LCON C_REG C_NONE 13 8 0 LFROM 0 0)
+    (lit _ AMOVB C_REG C_NONE C_REG 1 4 0 0 0 0)
+    (lit _ AMOVBS C_REG C_NONE C_REG 14 8 0 0 0 0)
+    (lit _ AMOVBU C_REG C_NONE C_REG 58 4 0 0 0 0)
+    (lit _ AMOVH C_REG C_NONE C_REG 1 4 0 0 0 0)
+    (lit _ AMOVHS C_REG C_NONE C_REG 14 8 0 0 0 0)
+    (lit _ AMOVHU C_REG C_NONE C_REG 14 8 0 0 0 0)
+    (lit _ AMUL C_REG C_REG C_REG 15 4 0 0 0 C_SBIT)
+    (lit _ AMUL C_REG C_NONE C_REG 15 4 0 0 0 C_SBIT)
+    (lit _ ADIV C_REG C_REG C_REG 16 4 0 0 0 0)
+    (lit _ ADIV C_REG C_NONE C_REG 16 4 0 0 0 0)
+    (lit _ ADIVHW C_REG C_REG C_REG 105 4 0 0 0 0)
+    (lit _ ADIVHW C_REG C_NONE C_REG 105 4 0 0 0 0)
+    (lit _ AMULL C_REG C_REG C_REGREG 17 4 0 0 0 C_SBIT)
+    (lit _ ABFX C_LCON C_REG C_REG 18 4 0 0 0 0) ; width in From, LSB in From3
+    (lit _ ABFX C_LCON C_NONE C_REG 18 4 0 0 0 0) ; width in From, LSB in From3
+    (lit _ AMOVW C_REG C_NONE C_SAUTO 20 4 REGSP 0 0 (bit-or C_PBIT C_WBIT C_UBIT))
+    (lit _ AMOVW C_REG C_NONE C_SOREG 20 4 0 0 0 (bit-or C_PBIT C_WBIT C_UBIT))
+    (lit _ AMOVB C_REG C_NONE C_SAUTO 20 4 REGSP 0 0 (bit-or C_PBIT C_WBIT C_UBIT))
+    (lit _ AMOVB C_REG C_NONE C_SOREG 20 4 0 0 0 (bit-or C_PBIT C_WBIT C_UBIT))
+    (lit _ AMOVBS C_REG C_NONE C_SAUTO 20 4 REGSP 0 0 (bit-or C_PBIT C_WBIT C_UBIT))
+    (lit _ AMOVBS C_REG C_NONE C_SOREG 20 4 0 0 0 (bit-or C_PBIT C_WBIT C_UBIT))
+    (lit _ AMOVBU C_REG C_NONE C_SAUTO 20 4 REGSP 0 0 (bit-or C_PBIT C_WBIT C_UBIT))
+    (lit _ AMOVBU C_REG C_NONE C_SOREG 20 4 0 0 0 (bit-or C_PBIT C_WBIT C_UBIT))
+    (lit _ AMOVW C_SAUTO C_NONE C_REG 21 4 REGSP 0 0 (bit-or C_PBIT C_WBIT C_UBIT))
+    (lit _ AMOVW C_SOREG C_NONE C_REG 21 4 0 0 0 (bit-or C_PBIT C_WBIT C_UBIT))
+    (lit _ AMOVBU C_SAUTO C_NONE C_REG 21 4 REGSP 0 0 (bit-or C_PBIT C_WBIT C_UBIT))
+    (lit _ AMOVBU C_SOREG C_NONE C_REG 21 4 0 0 0 (bit-or C_PBIT C_WBIT C_UBIT))
+    (lit _ AXTAB C_SHIFT C_REG C_REG 22 4 0 0 0 0)
+    (lit _ AXTAB C_SHIFT C_NONE C_REG 22 4 0 0 0 0)
+    (lit _ AMOVW C_SHIFT C_NONE C_REG 23 4 0 0 0 C_SBIT)
+    (lit _ AMOVB C_SHIFT C_NONE C_REG 23 4 0 0 0 0)
+    (lit _ AMOVBS C_SHIFT C_NONE C_REG 23 4 0 0 0 0)
+    (lit _ AMOVBU C_SHIFT C_NONE C_REG 23 4 0 0 0 0)
+    (lit _ AMOVH C_SHIFT C_NONE C_REG 23 4 0 0 0 0)
+    (lit _ AMOVHS C_SHIFT C_NONE C_REG 23 4 0 0 0 0)
+    (lit _ AMOVHU C_SHIFT C_NONE C_REG 23 4 0 0 0 0)
+    (lit _ AMOVW C_REG C_NONE C_LAUTO 30 8 REGSP LTO 0 (bit-or C_PBIT C_WBIT C_UBIT))
+    (lit _ AMOVW C_REG C_NONE C_LOREG 30 8 0 LTO 0 (bit-or C_PBIT C_WBIT C_UBIT))
+    (lit _ AMOVW C_REG C_NONE C_ADDR 64 8 0 (bit-or LTO LPCREL) 4 (bit-or C_PBIT C_WBIT C_UBIT))
+    (lit _ AMOVB C_REG C_NONE C_LAUTO 30 8 REGSP LTO 0 (bit-or C_PBIT C_WBIT C_UBIT))
+    (lit _ AMOVB C_REG C_NONE C_LOREG 30 8 0 LTO 0 (bit-or C_PBIT C_WBIT C_UBIT))
+    (lit _ AMOVB C_REG C_NONE C_ADDR 64 8 0 (bit-or LTO LPCREL) 4 (bit-or C_PBIT C_WBIT C_UBIT))
+    (lit _ AMOVBS C_REG C_NONE C_LAUTO 30 8 REGSP LTO 0 (bit-or C_PBIT C_WBIT C_UBIT))
+    (lit _ AMOVBS C_REG C_NONE C_LOREG 30 8 0 LTO 0 (bit-or C_PBIT C_WBIT C_UBIT))
+    (lit _ AMOVBS C_REG C_NONE C_ADDR 64 8 0 (bit-or LTO LPCREL) 4 (bit-or C_PBIT C_WBIT C_UBIT))
+    (lit _ AMOVBU C_REG C_NONE C_LAUTO 30 8 REGSP LTO 0 (bit-or C_PBIT C_WBIT C_UBIT))
+    (lit _ AMOVBU C_REG C_NONE C_LOREG 30 8 0 LTO 0 (bit-or C_PBIT C_WBIT C_UBIT))
+    (lit _ AMOVBU C_REG C_NONE C_ADDR 64 8 0 (bit-or LTO LPCREL) 4 (bit-or C_PBIT C_WBIT C_UBIT))
+    (lit _ AMOVW C_TLS_LE C_NONE C_REG 101 4 0 LFROM 0 0)
+    (lit _ AMOVW C_TLS_IE C_NONE C_REG 102 8 0 LFROM 0 0)
+    (lit _ AMOVW C_LAUTO C_NONE C_REG 31 8 REGSP LFROM 0 (bit-or C_PBIT C_WBIT C_UBIT))
+    (lit _ AMOVW C_LOREG C_NONE C_REG 31 8 0 LFROM 0 (bit-or C_PBIT C_WBIT C_UBIT))
+    (lit _ AMOVW C_ADDR C_NONE C_REG 65 8 0 (bit-or LFROM LPCREL) 4 (bit-or C_PBIT C_WBIT C_UBIT))
+    (lit _ AMOVBU C_LAUTO C_NONE C_REG 31 8 REGSP LFROM 0 (bit-or C_PBIT C_WBIT C_UBIT))
+    (lit _ AMOVBU C_LOREG C_NONE C_REG 31 8 0 LFROM 0 (bit-or C_PBIT C_WBIT C_UBIT))
+    (lit _ AMOVBU C_ADDR C_NONE C_REG 65 8 0 (bit-or LFROM LPCREL) 4 (bit-or C_PBIT C_WBIT C_UBIT))
+    (lit _ AMOVW C_LACON C_NONE C_REG 34 8 REGSP LFROM 0 C_SBIT)
+    (lit _ AMOVW C_PSR C_NONE C_REG 35 4 0 0 0 0)
+    (lit _ AMOVW C_REG C_NONE C_PSR 36 4 0 0 0 0)
+    (lit _ AMOVW C_RCON C_NONE C_PSR 37 4 0 0 0 0)
+    (lit _ AMOVM C_REGLIST C_NONE C_SOREG 38 4 0 0 0 (bit-or C_PBIT C_WBIT C_UBIT))
+    (lit _ AMOVM C_SOREG C_NONE C_REGLIST 39 4 0 0 0 (bit-or C_PBIT C_WBIT C_UBIT))
+    (lit _ ASWPW C_SOREG C_REG C_REG 40 4 0 0 0 0)
+    (lit _ ARFE C_NONE C_NONE C_NONE 41 4 0 0 0 0)
+    (lit _ AMOVF C_FREG C_NONE C_FAUTO 50 4 REGSP 0 0 (bit-or C_PBIT C_WBIT C_UBIT))
+    (lit _ AMOVF C_FREG C_NONE C_FOREG 50 4 0 0 0 (bit-or C_PBIT C_WBIT C_UBIT))
+    (lit _ AMOVF C_FAUTO C_NONE C_FREG 51 4 REGSP 0 0 (bit-or C_PBIT C_WBIT C_UBIT))
+    (lit _ AMOVF C_FOREG C_NONE C_FREG 51 4 0 0 0 (bit-or C_PBIT C_WBIT C_UBIT))
+    (lit _ AMOVF C_FREG C_NONE C_LAUTO 52 12 REGSP LTO 0 (bit-or C_PBIT C_WBIT C_UBIT))
+    (lit _ AMOVF C_FREG C_NONE C_LOREG 52 12 0 LTO 0 (bit-or C_PBIT C_WBIT C_UBIT))
+    (lit _ AMOVF C_LAUTO C_NONE C_FREG 53 12 REGSP LFROM 0 (bit-or C_PBIT C_WBIT C_UBIT))
+    (lit _ AMOVF C_LOREG C_NONE C_FREG 53 12 0 LFROM 0 (bit-or C_PBIT C_WBIT C_UBIT))
+    (lit _ AMOVF C_FREG C_NONE C_ADDR 68 8 0 (bit-or LTO LPCREL) 4 (bit-or C_PBIT C_WBIT C_UBIT))
+    (lit _ AMOVF C_ADDR C_NONE C_FREG 69 8 0 (bit-or LFROM LPCREL) 4 (bit-or C_PBIT C_WBIT C_UBIT))
+    (lit _ AADDF C_FREG C_NONE C_FREG 54 4 0 0 0 0)
+    (lit _ AADDF C_FREG C_FREG C_FREG 54 4 0 0 0 0)
+    (lit _ AMOVF C_FREG C_NONE C_FREG 55 4 0 0 0 0)
+    (lit _ ANEGF C_FREG C_NONE C_FREG 55 4 0 0 0 0)
+    (lit _ AMOVW C_REG C_NONE C_FCR 56 4 0 0 0 0)
+    (lit _ AMOVW C_FCR C_NONE C_REG 57 4 0 0 0 0)
+    (lit _ AMOVW C_SHIFTADDR C_NONE C_REG 59 4 0 0 0 (bit-or C_PBIT C_WBIT C_UBIT))
+    (lit _ AMOVBU C_SHIFTADDR C_NONE C_REG 59 4 0 0 0 (bit-or C_PBIT C_WBIT C_UBIT))
+    (lit _ AMOVB C_SHIFTADDR C_NONE C_REG 60 4 0 0 0 (bit-or C_PBIT C_WBIT C_UBIT))
+    (lit _ AMOVBS C_SHIFTADDR C_NONE C_REG 60 4 0 0 0 (bit-or C_PBIT C_WBIT C_UBIT))
+    (lit _ AMOVH C_SHIFTADDR C_NONE C_REG 60 4 0 0 0 (bit-or C_PBIT C_WBIT C_UBIT))
+    (lit _ AMOVHS C_SHIFTADDR C_NONE C_REG 60 4 0 0 0 (bit-or C_PBIT C_WBIT C_UBIT))
+    (lit _ AMOVHU C_SHIFTADDR C_NONE C_REG 60 4 0 0 0 (bit-or C_PBIT C_WBIT C_UBIT))
+    (lit _ AMOVW C_REG C_NONE C_SHIFTADDR 61 4 0 0 0 (bit-or C_PBIT C_WBIT C_UBIT))
+    (lit _ AMOVB C_REG C_NONE C_SHIFTADDR 61 4 0 0 0 (bit-or C_PBIT C_WBIT C_UBIT))
+    (lit _ AMOVBS C_REG C_NONE C_SHIFTADDR 61 4 0 0 0 (bit-or C_PBIT C_WBIT C_UBIT))
+    (lit _ AMOVBU C_REG C_NONE C_SHIFTADDR 61 4 0 0 0 (bit-or C_PBIT C_WBIT C_UBIT))
+    (lit _ AMOVH C_REG C_NONE C_SHIFTADDR 62 4 0 0 0 (bit-or C_PBIT C_WBIT C_UBIT))
+    (lit _ AMOVHS C_REG C_NONE C_SHIFTADDR 62 4 0 0 0 (bit-or C_PBIT C_WBIT C_UBIT))
+    (lit _ AMOVHU C_REG C_NONE C_SHIFTADDR 62 4 0 0 0 (bit-or C_PBIT C_WBIT C_UBIT))
+    (lit _ AMOVH C_REG C_NONE C_HAUTO 70 4 REGSP 0 0 (bit-or C_PBIT C_WBIT C_UBIT))
+    (lit _ AMOVH C_REG C_NONE C_HOREG 70 4 0 0 0 (bit-or C_PBIT C_WBIT C_UBIT))
+    (lit _ AMOVHS C_REG C_NONE C_HAUTO 70 4 REGSP 0 0 (bit-or C_PBIT C_WBIT C_UBIT))
+    (lit _ AMOVHS C_REG C_NONE C_HOREG 70 4 0 0 0 (bit-or C_PBIT C_WBIT C_UBIT))
+    (lit _ AMOVHU C_REG C_NONE C_HAUTO 70 4 REGSP 0 0 (bit-or C_PBIT C_WBIT C_UBIT))
+    (lit _ AMOVHU C_REG C_NONE C_HOREG 70 4 0 0 0 (bit-or C_PBIT C_WBIT C_UBIT))
+    (lit _ AMOVB C_HAUTO C_NONE C_REG 71 4 REGSP 0 0 (bit-or C_PBIT C_WBIT C_UBIT))
+    (lit _ AMOVB C_HOREG C_NONE C_REG 71 4 0 0 0 (bit-or C_PBIT C_WBIT C_UBIT))
+    (lit _ AMOVBS C_HAUTO C_NONE C_REG 71 4 REGSP 0 0 (bit-or C_PBIT C_WBIT C_UBIT))
+    (lit _ AMOVBS C_HOREG C_NONE C_REG 71 4 0 0 0 (bit-or C_PBIT C_WBIT C_UBIT))
+    (lit _ AMOVH C_HAUTO C_NONE C_REG 71 4 REGSP 0 0 (bit-or C_PBIT C_WBIT C_UBIT))
+    (lit _ AMOVH C_HOREG C_NONE C_REG 71 4 0 0 0 (bit-or C_PBIT C_WBIT C_UBIT))
+    (lit _ AMOVHS C_HAUTO C_NONE C_REG 71 4 REGSP 0 0 (bit-or C_PBIT C_WBIT C_UBIT))
+    (lit _ AMOVHS C_HOREG C_NONE C_REG 71 4 0 0 0 (bit-or C_PBIT C_WBIT C_UBIT))
+    (lit _ AMOVHU C_HAUTO C_NONE C_REG 71 4 REGSP 0 0 (bit-or C_PBIT C_WBIT C_UBIT))
+    (lit _ AMOVHU C_HOREG C_NONE C_REG 71 4 0 0 0 (bit-or C_PBIT C_WBIT C_UBIT))
+    (lit _ AMOVH C_REG C_NONE C_LAUTO 72 8 REGSP LTO 0 (bit-or C_PBIT C_WBIT C_UBIT))
+    (lit _ AMOVH C_REG C_NONE C_LOREG 72 8 0 LTO 0 (bit-or C_PBIT C_WBIT C_UBIT))
+    (lit _ AMOVH C_REG C_NONE C_ADDR 94 8 0 (bit-or LTO LPCREL) 4 (bit-or C_PBIT C_WBIT C_UBIT))
+    (lit _ AMOVHS C_REG C_NONE C_LAUTO 72 8 REGSP LTO 0 (bit-or C_PBIT C_WBIT C_UBIT))
+    (lit _ AMOVHS C_REG C_NONE C_LOREG 72 8 0 LTO 0 (bit-or C_PBIT C_WBIT C_UBIT))
+    (lit _ AMOVHS C_REG C_NONE C_ADDR 94 8 0 (bit-or LTO LPCREL) 4 (bit-or C_PBIT C_WBIT C_UBIT))
+    (lit _ AMOVHU C_REG C_NONE C_LAUTO 72 8 REGSP LTO 0 (bit-or C_PBIT C_WBIT C_UBIT))
+    (lit _ AMOVHU C_REG C_NONE C_LOREG 72 8 0 LTO 0 (bit-or C_PBIT C_WBIT C_UBIT))
+    (lit _ AMOVHU C_REG C_NONE C_ADDR 94 8 0 (bit-or LTO LPCREL) 4 (bit-or C_PBIT C_WBIT C_UBIT))
+    (lit _ AMOVB C_LAUTO C_NONE C_REG 73 8 REGSP LFROM 0 (bit-or C_PBIT C_WBIT C_UBIT))
+    (lit _ AMOVB C_LOREG C_NONE C_REG 73 8 0 LFROM 0 (bit-or C_PBIT C_WBIT C_UBIT))
+    (lit _ AMOVB C_ADDR C_NONE C_REG 93 8 0 (bit-or LFROM LPCREL) 4 (bit-or C_PBIT C_WBIT C_UBIT))
+    (lit _ AMOVBS C_LAUTO C_NONE C_REG 73 8 REGSP LFROM 0 (bit-or C_PBIT C_WBIT C_UBIT))
+    (lit _ AMOVBS C_LOREG C_NONE C_REG 73 8 0 LFROM 0 (bit-or C_PBIT C_WBIT C_UBIT))
+    (lit _ AMOVBS C_ADDR C_NONE C_REG 93 8 0 (bit-or LFROM LPCREL) 4 (bit-or C_PBIT C_WBIT C_UBIT))
+    (lit _ AMOVH C_LAUTO C_NONE C_REG 73 8 REGSP LFROM 0 (bit-or C_PBIT C_WBIT C_UBIT))
+    (lit _ AMOVH C_LOREG C_NONE C_REG 73 8 0 LFROM 0 (bit-or C_PBIT C_WBIT C_UBIT))
+    (lit _ AMOVH C_ADDR C_NONE C_REG 93 8 0 (bit-or LFROM LPCREL) 4 (bit-or C_PBIT C_WBIT C_UBIT))
+    (lit _ AMOVHS C_LAUTO C_NONE C_REG 73 8 REGSP LFROM 0 (bit-or C_PBIT C_WBIT C_UBIT))
+    (lit _ AMOVHS C_LOREG C_NONE C_REG 73 8 0 LFROM 0 (bit-or C_PBIT C_WBIT C_UBIT))
+    (lit _ AMOVHS C_ADDR C_NONE C_REG 93 8 0 (bit-or LFROM LPCREL) 4 (bit-or C_PBIT C_WBIT C_UBIT))
+    (lit _ AMOVHU C_LAUTO C_NONE C_REG 73 8 REGSP LFROM 0 (bit-or C_PBIT C_WBIT C_UBIT))
+    (lit _ AMOVHU C_LOREG C_NONE C_REG 73 8 0 LFROM 0 (bit-or C_PBIT C_WBIT C_UBIT))
+    (lit _ AMOVHU C_ADDR C_NONE C_REG 93 8 0 (bit-or LFROM LPCREL) 4 (bit-or C_PBIT C_WBIT C_UBIT))
+    (lit _ ALDREX C_SOREG C_NONE C_REG 77 4 0 0 0 0)
+    (lit _ ASTREX C_SOREG C_REG C_REG 78 4 0 0 0 0)
+    (lit _ ADMB C_NONE C_NONE C_NONE 110 4 0 0 0 0)
+    (lit _ ADMB C_LCON C_NONE C_NONE 110 4 0 0 0 0)
+    (lit _ ADMB C_SPR C_NONE C_NONE 110 4 0 0 0 0)
+    (lit _ AMOVF C_ZFCON C_NONE C_FREG 80 8 0 0 0 0)
+    (lit _ AMOVF C_SFCON C_NONE C_FREG 81 4 0 0 0 0)
+    (lit _ ACMPF C_FREG C_FREG C_NONE 82 8 0 0 0 0)
+    (lit _ ACMPF C_FREG C_NONE C_NONE 83 8 0 0 0 0)
+    (lit _ AMOVFW C_FREG C_NONE C_FREG 84 4 0 0 0 C_UBIT)
+    (lit _ AMOVWF C_FREG C_NONE C_FREG 85 4 0 0 0 C_UBIT)
+    (lit _ AMOVFW C_FREG C_NONE C_REG 86 8 0 0 0 C_UBIT)
+    (lit _ AMOVWF C_REG C_NONE C_FREG 87 8 0 0 0 C_UBIT)
+    (lit _ AMOVW C_REG C_NONE C_FREG 88 4 0 0 0 0)
+    (lit _ AMOVW C_FREG C_NONE C_REG 89 4 0 0 0 0)
+    (lit _ ALDREXD C_SOREG C_NONE C_REG 91 4 0 0 0 0)
+    (lit _ ALDREXB C_SOREG C_NONE C_REG 91 4 0 0 0 0)
+    (lit _ ASTREXD C_SOREG C_REG C_REG 92 4 0 0 0 0)
+    (lit _ ASTREXB C_SOREG C_REG C_REG 92 4 0 0 0 0)
+    (lit _ APLD C_SOREG C_NONE C_NONE 95 4 0 0 0 0)
+    (lit _ obj/AUNDEF C_NONE C_NONE C_NONE 96 4 0 0 0 0)
+    (lit _ ACLZ C_REG C_NONE C_REG 97 4 0 0 0 0)
+    (lit _ AMULWT C_REG C_REG C_REG 98 4 0 0 0 0)
+    (lit _ AMULA C_REG C_REG C_REGREG2 99 4 0 0 0 C_SBIT)
+    (lit _ AMULAWT C_REG C_REG C_REGREG2 99 4 0 0 0 0)
+    (lit _ obj/APCDATA C_LCON C_NONE C_LCON 0 0 0 0 0 0)
+    (lit _ obj/AFUNCDATA C_LCON C_NONE C_ADDR 0 0 0 0 0 0)
+    (lit _ obj/ANOP C_NONE C_NONE C_NONE 0 0 0 0 0 0)
+    (lit _ obj/ANOP C_LCON C_NONE C_NONE 0 0 0 0 0 0) ; nop variants, see #40689
+    (lit _ obj/ANOP C_REG C_NONE C_NONE 0 0 0 0 0 0)
+    (lit _ obj/ANOP C_FREG C_NONE C_NONE 0 0 0 0 0 0)
+    (lit _ obj/ADUFFZERO C_NONE C_NONE C_SBRA 5 4 0 0 0 0) ; same as ABL
+    (lit _ obj/ADUFFCOPY C_NONE C_NONE C_SBRA 5 4 0 0 0 0) ; same as ABL
+    (lit _ obj/AXXX C_NONE C_NONE C_NONE 0 4 0 0 0 0)))
+
+
+(go/var mbOp (lit (slice (struct
+        ^{:line 342 :tag int16} reg
+        ^{:line 343 :tag uint32} enc))
+
+    (lit _ REG_MB_SY 15)
+    (lit _ REG_MB_ST 14)
+    (lit _ REG_MB_ISH 11)
+    (lit _ REG_MB_ISHST 10)
+    (lit _ REG_MB_NSH 7)
+    (lit _ REG_MB_NSHST 6)
+    (lit _ REG_MB_OSH 3)
+    (lit _ REG_MB_OSHST 2)))
+
+
+(go/var ^{:tag (array (bit-and ALAST obj/AMask) (slice Optab))} oprange)
+
+(go/var ^{:tag (array (+ C_GOK 1) (array (+ C_GOK 1) bool))} xcmp)
+
+(go/var
+  ^{:line 360} [^{:tag (* obj/LSym)} symdiv]
+  ^{:line 361} [^{:tag (* obj/LSym)} symdivu]
+  ^{:line 362} [^{:tag (* obj/LSym)} symmod]
+  ^{:line 363} [^{:tag (* obj/LSym)} symmodu])
+
+
+;; Note about encoding: Prog.scond holds the condition encoding,
+;; but XOR'ed with C_SCOND_XOR, so that C_SCOND_NONE == 0.
+;; The code that shifts the value << 28 has the responsibility
+;; for XORing with C_SCOND_XOR too.
+
+^{:go/end 384} (go/func checkSuffix [^{:tag (* ctxt5)} c ^{:tag (* obj/Prog)} p ^{:tag (* Optab)} o]
+  (when (and (!= (bit-and (.-Scond p) C_SBIT) 0) (== (bit-and (.-scond o) C_SBIT) 0))
+    (.Diag (.-ctxt c) "invalid .S suffix: %v" p))
+
+  (when (and (!= (bit-and (.-Scond p) C_PBIT) 0) (== (bit-and (.-scond o) C_PBIT) 0))
+    (.Diag (.-ctxt c) "invalid .P suffix: %v" p))
+
+  (when (and (!= (bit-and (.-Scond p) C_WBIT) 0) (== (bit-and (.-scond o) C_WBIT) 0))
+    (.Diag (.-ctxt c) "invalid .W suffix: %v" p))
+
+  (when (and (!= (bit-and (.-Scond p) C_UBIT) 0) (== (bit-and (.-scond o) C_UBIT) 0))
+    (.Diag (.-ctxt c) "invalid .U suffix: %v" p)))
+
+
+
+^{:go/end 612} (go/func span5 [^{:tag (* obj/Link)} ctxt ^{:tag (* obj/LSym)} cursym ^obj/ProgAlloc newprog]
+  (when (.-Retpoline ctxt)
+    (.Diag ctxt "-spectre=ret not supported on arm")
+    (set! (.-Retpoline ctxt) false)) ; don't keep printing
+
+
+  (let [^{:tag (* obj/Prog)} p (zero (* obj/Prog))
+      ^{:line 393 :tag (* obj/Prog)} op (zero (* obj/Prog))]
+
+    (set! p (.-Text (.Func cursym)))
+    (when (or (== p nil) (== (.-Link p) nil)) ; handle external functions and ELF section symbols
+      (return))
+
+
+    (when (== (aget oprange (bit-and AAND obj/AMask)) nil)
+      (.Diag ctxt "arm ops not initialized, call arm.buildop first"))
+
+
+    (let [c (lit ctxt5 :ctxt ctxt :newprog newprog :cursym cursym :autosize (+ (.-Offset (.-To p)) 4))
+        ^{:line 405} pc (conv int32 0)]
+
+      (set! op p)
+      (set! p (.-Link p))
+      (let [^int m (zero int)
+          ^{:line 410 :tag (* Optab)} o (zero (* Optab))]
+        (for [] (or (!= p nil) (!= (.-blitrl c) nil)) (set! (values op p) (values p (.-Link p)))
+          (when (== p nil)
+            (when (.checkpool c op pc)
+              (set! p op)
+              (continue))
+
+
+            ;; can't happen: blitrl is not nil, but checkpool didn't flushpool
+            (.Diag ctxt "internal inconsistency")
+
+            (break))
+
+
+          (set! (.-Pc p) (conv int64 pc))
+          (set! o (.oplook c p))
+          (set! m (conv int (.-size o)))
+
+          (when (or (!= (% m 4) 0) (!= (% (.-Pc p) 4) 0))
+            (.Diag ctxt "!pc invalid: %v size=%d" p m))
+
+
+          ;; must check literal pool here in case p generates many instructions
+          (when (!= (.-blitrl c) nil)
+            ;; Emit the constant pool just before p if p
+            ;; would push us over the immediate size limit.
+            (when (.checkpool c op (+ pc (conv int32 m)))
+              ;; Back up to the instruction just
+              ;; before the pool and continue with
+              ;; the first instruction of the pool.
+              (set! p op)
+              (continue)))
+
+
+
+          (when (and (== m 0) ^:go/paren (and (!= (.-As p) obj/AFUNCDATA) (!= (.-As p) obj/APCDATA) (!= (.-As p) obj/ANOP)))
+            (.Diag ctxt "zero-width instruction\n%v" p)
+            (continue))
+
+
+          (switch (bit-and (.-flag o) (bit-or LFROM LTO LPOOL))
+            (case [LFROM]
+              (.addpool c p (addr (.-From p))))
+
+            (case [LTO]
+              (.addpool c p (addr (.-To p))))
+
+            (case [LPOOL]
+              (when (== (bit-and (.-Scond p) C_SCOND) C_SCOND_NONE)
+                (.flushpool c p 0 0))))
+
+
+
+          (when (and (== (.-As p) AMOVW) (== (.-Type (.-To p)) obj/TYPE_REG) (== (.-Reg (.-To p)) REGPC) (== (bit-and (.-Scond p) C_SCOND) C_SCOND_NONE))
+            (.flushpool c p 0 0))
+
+
+          (set! pc + (conv int32 m)))
+
+
+        (set! (.-Size (.-cursym c)) (conv int64 pc))
+
+        ;; /*
+        ;; * if any procedure is large enough to
+        ;; * generate a large SBRA branch, then
+        ;; * generate extra passes putting branches
+        ;; * around jmps to fix. this is rare.
+        ;; */
+        (let [times 0
+
+            ^{:line 480 :tag int} bflag (zero int)
+            ^{:line 481 :tag int32} opc (zero int32)
+            ^{:line 482 :tag (array (+ 6 3) uint32)} out (zero (array (+ 6 3) uint32))]
+          (while true
+            (set! bflag 0)
+            (set! pc 0)
+            (inc! times)
+            (set! (.-Pc (.-Text (.Func (.-cursym c)))) 0) ; force re-layout the code.
+            (for [(set! p (.-Text (.Func (.-cursym c))))] (!= p nil) (set! p (.-Link p))
+              (set! o (.oplook c p))
+              (when (> (conv int64 pc) (.-Pc p))
+                (set! (.-Pc p) (conv int64 pc)))
+
+
+              ;; /* very large branches
+              ;; if(o->type == 6 && p->pcond) {
+              ;; otxt = p->pcond->pc - c;
+              ;; if(otxt < 0)
+              ;; otxt = -otxt;
+              ;; if(otxt >= (1L<<17) - 10) {
+              ;; q = emallocz(sizeof(Prog));
+              ;; q->link = p->link;
+              ;; p->link = q;
+              ;; q->as = AB;
+              ;; q->to.type = TYPE_BRANCH;
+              ;; q->pcond = p->pcond;
+              ;; p->pcond = q;
+              ;; q = emallocz(sizeof(Prog));
+              ;; q->link = p->link;
+              ;; p->link = q;
+              ;; q->as = AB;
+              ;; q->to.type = TYPE_BRANCH;
+              ;; q->pcond = q->link->link;
+              ;; bflag = 1;
+              ;; }
+              ;; }
+              ;; */
+              (set! opc (conv int32 (.-Pc p)))
+              (set! m (conv int (.-size o)))
+              (when (!= (.-Pc p) (conv int64 opc))
+                (set! bflag 1))
+
+
+              ;;print("%v pc changed %d to %d in iter. %d\n", p, opc, (int32)p->pc, times);
+              (set! pc (conv int32 (+ (.-Pc p) (conv int64 m))))
+
+              (when (or (!= (% m 4) 0) (!= (% (.-Pc p) 4) 0))
+                (.Diag ctxt "pc invalid: %v size=%d" p m))
+
+
+              (when (> (/ m 4) (len out))
+                (.Diag ctxt "instruction size too large: %d > %d" (/ m 4) (len out)))
+
+              (when (and (== m 0) ^:go/paren (and (!= (.-As p) obj/AFUNCDATA) (!= (.-As p) obj/APCDATA) (!= (.-As p) obj/ANOP)))
+                (when (== (.-As p) obj/ATEXT)
+                  (set! (.-autosize c) (+ (.-Offset (.-To p)) 4))
+                  (continue))
+
+
+                (.Diag ctxt "zero-width instruction\n%v" p)
+                (continue)))
+
+
+
+            (set! (.-Size (.-cursym c)) (conv int64 pc))
+            (when (== bflag 0)
+              (break)))
+
+
+
+          (when (!= (% pc 4) 0)
+            (.Diag ctxt "sym->size=%d, invalid" pc))
+
+
+          ;; /*
+          ;; * lay out the code.  all the pc-relative code references,
+          ;; * even cross-function, are resolved now;
+          ;; * only data references need to be relocated.
+          ;; * with more work we could leave cross-function
+          ;; * code references to be relocated too, and then
+          ;; * perhaps we'd be able to parallelize the span loop above.
+          ;; */
+
+          (set! p (.-Text (.Func (.-cursym c))))
+          (set! (.-autosize c) (+ (.-Offset (.-To p)) 4))
+          (.Grow (.-cursym c) (.-Size (.-cursym c)))
+
+          (let [bp (.-P (.-cursym c))]
+            (set! pc (conv int32 (.-Pc p))) ; even p->link might need extra padding
+            (let [^int v (zero int)]
+              (for [(set! p (.-Link p))] (!= p nil) (set! p (.-Link p))
+                (set! (.-pc c) (.-Pc p))
+                (set! o (.oplook c p))
+                (set! opc (conv int32 (.-Pc p)))
+                (.asmout c p o (subslice out))
+                (set! m (conv int (.-size o)))
+
+                (when (or (!= (% m 4) 0) (!= (% (.-Pc p) 4) 0))
+                  (.Diag ctxt "final stage: pc invalid: %v size=%d" p m))
+
+
+                (when (> (conv int64 pc) (.-Pc p))
+                  (.Diag ctxt "PC padding invalid: want %d, has %d: %v" (.-Pc p) pc p))
+
+                (while (!= (conv int64 pc) (.-Pc p))
+                  ;; emit 0xe1a00000 (MOVW R0, R0)
+                  (aset bp 0 0x00)
+                  (set! bp (subslice bp 1))
+
+                  (aset bp 0 0x00)
+                  (set! bp (subslice bp 1))
+                  (aset bp 0 0xa0)
+                  (set! bp (subslice bp 1))
+                  (aset bp 0 0xe1)
+                  (set! bp (subslice bp 1))
+                  (set! pc + 4))
+
+
+                (for [i 0] (< i (/ m 4)) (inc! i)
+                  (set! v (conv int (aget out i)))
+                  (aset bp 0 (conv byte v))
+                  (set! bp (subslice bp 1))
+                  (aset bp 0 (conv byte (>> v 8)))
+                  (set! bp (subslice bp 1))
+                  (aset bp 0 (conv byte (>> v 16)))
+                  (set! bp (subslice bp 1))
+                  (aset bp 0 (conv byte (>> v 24)))
+                  (set! bp (subslice bp 1)))
+
+
+                (set! pc + (conv int32 m))))))))))
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 638} (go/method checkpool "checkpool flushes the literal pool when the first reference to\nit threatens to go out of range of a 12-bit PC-relative offset.\n\nnextpc is the tentative next PC at which the pool could be emitted.\ncheckpool should be called *before* emitting the instruction that\nwould cause the PC to reach nextpc.\nIf nextpc is too far from the first pool reference, checkpool will\nflush the pool immediately after p.\nThe caller should resume processing a p.Link.\n" ^bool [^{:tag (* ctxt5)} c ^{:tag (* obj/Prog)} p ^int32 nextpc]
+  (let [poolLast nextpc]
+    (set! poolLast + 4) ; the AB instruction to jump around the pool
+    (set! poolLast + (- (conv int32 (.-size (.-pool c))) 4)) ; the offset of the last pool entry
+
+    ^{:go/breaks [[3 637]]} (let [refPC (conv int32 (.-start (.-pool c))) ; PC of the first pool reference
+
+        ^{:line 630} v (- poolLast refPC 8)] ; 12-bit PC-relative offset (see omvl)
+
+      (cond (or (>= (.-size (.-pool c)) 0xff0) (== (immaddr v) 0))
+        (return (.flushpool c p 1 0))
+        (== (.-Link p) nil)
+        (return (.flushpool c p 2 0)))
+
+      false)))
+
+
+^{:go/breaks [[4 675]] :go/end 676} (go/method flushpool ^bool [^{:tag (* ctxt5)} c ^{:tag (* obj/Prog)} p ^int skip ^int force]
+  (when (!= (.-blitrl c) nil)
+    (cond (!= skip 0) (do
+        (when (and false (== skip 1))
+          (fmt/Printf "note: flush literal pool at %x: len=%d ref=%x\n" (conv uint64 (+ (.-Pc p) 4)) (.-size (.-pool c)) (.-start (.-pool c))))
+
+        (let [q ((.-newprog c))]
+          (set! (.-As q) AB)
+          (set! (.-Type (.-To q)) obj/TYPE_BRANCH)
+          (.SetTarget (.-To q) (.-Link p))
+          (set! (.-Link q) (.-blitrl c))
+          (set! (.-Pos q) (.-Pos p))
+          (set! (.-blitrl c) q)))
+      (and (== force 0) ^:go/paren (< (- (+ (.-Pc p) (conv int64 (.-size (.-pool c)))) (conv int64 (.-start (.-pool c)))) 2048))
+      (return false))
+
+
+    ;; The line number for constant pool entries doesn't really matter.
+    ;; We set it to the line number of the preceding instruction so that
+    ;; there are no deltas to encode in the pc-line tables.
+    (for [q (.-blitrl c)] (!= q nil) (set! q (.-Link q))
+      (set! (.-Pos q) (.-Pos p)))
+
+
+    (set! (.-Link (.-elitrl c)) (.-Link p))
+    (set! (.-Link p) (.-blitrl c))
+
+    (set! (.-blitrl c) nil) ; /* BUG: should refer back to values until out-of-range */
+    (set! (.-elitrl c) nil)
+    (set! (.-size (.-pool c)) 0)
+    (set! (.-start (.-pool c)) 0)
+    (set! (.-extra (.-pool c)) 0)
+    (return true))
+
+
+  false)
+
+
+^{:go/end 734} (go/method addpool [^{:tag (* ctxt5)} c ^{:tag (* obj/Prog)} p ^{:tag (* obj/Addr)} a]
+  (let [t ((.-newprog c))]
+    (set! (.-As t) AWORD)
+
+    (switch (.aclass c a)
+      (default
+        (set! (.-Offset (.-To t)) (.-Offset a))
+        (set! (.-Sym (.-To t)) (.-Sym a))
+        (set! (.-Type (.-To t)) (.-Type a))
+        (set! (.-Name (.-To t)) (.-Name a))
+
+        (when (and (.-Flag_shared (.-ctxt c)) (!= (.-Sym (.-To t)) nil))
+          (set! (.-Rel t) p)))
+
+
+      (case [C_HOREG
+          ^{:line 694} C_FOREG
+          ^{:line 695} C_HFOREG
+          ^{:line 696} C_SOREG
+          ^{:line 697} C_ROREG
+          ^{:line 698} C_SROREG
+          ^{:line 699} C_LOREG
+          ^{:line 700} C_HAUTO
+          ^{:line 701} C_FAUTO
+          ^{:line 702} C_HFAUTO
+          ^{:line 703} C_SAUTO
+          ^{:line 704} C_LAUTO
+          ^{:line 705} C_LACON]
+        (set! (.-Type (.-To t)) obj/TYPE_CONST)
+        (set! (.-Offset (.-To t)) (.-instoffset c))))
+
+
+    (when (== (.-Rel t) nil)
+      (for [q (.-blitrl c)] (!= q nil) (set! q (.-Link q)) ; /* could hash on t.t0.offset */
+        (when (and (== (.-Rel q) nil) (== (.-To q) (.-To t)))
+          (set! (.-Pool p) q)
+          (return))))
+
+
+
+
+    (let [q ((.-newprog c))]
+      (set! @q @t)
+      (set! (.-Pc q) (conv int64 (.-size (.-pool c))))
+
+      (if (== (.-blitrl c) nil) (do
+          (set! (.-blitrl c) q)
+          (set! (.-start (.-pool c)) (conv uint32 (.-Pc p))))
+
+        (set! (.-Link (.-elitrl c)) q))
+
+      (set! (.-elitrl c) q)
+      (set! (.-size (.-pool c)) + 4)
+
+      ;; Store the link to the pool entry in Pool.
+      (set! (.-Pool p) q))))
+
+
+^{:go/end 740} (go/method regoff ^int32 [^{:tag (* ctxt5)} c ^{:tag (* obj/Addr)} a]
+  (set! (.-instoffset c) 0)
+  (.aclass c a)
+  (conv int32 (.-instoffset c)))
+
+
+^{:go/breaks [[4 750]] :go/end 751} (go/func immrot ^int32 [^uint32 v]
+  (for [i 0] (< i 16) (inc! i)
+    (when (== (bit-and-not v 0xff) 0)
+      (return (conv int32 (bit-or (conv uint32 (<< (conv int32 i) 8)) v (<< 1 25)))))
+
+    (set! v (bit-or (<< v 2) (>> v 30))))
+
+
+  0)
+
+
+
+
+
+^{:go/end 766} (go/func immrot2a "immrot2a returns bits encoding the immediate constant fields of two instructions,\nsuch that the encoded constants x, y satisfy x|y==v, x&y==0.\nReturns 0,0 if no such decomposition of v exists.\n" [^uint32 v] :results [uint32 uint32]
+  (for [i (conv uint 1)] (< i 32) (inc! i)
+    (let [m (conv uint32 (- ^uint32 (<< 1 i) 1))]
+      (when [(values x y) (values (immrot (bit-and v m)) (immrot (bit-and-not v m)))] (and (!= x 0) (!= y 0))
+        (return (conv uint32 x) (conv uint32 y)))))
+
+
+  ;; TODO: handle some more cases, like where
+  ;; the wraparound from the rotate could help.
+  (return 0 0))
+
+
+
+
+
+^{:go/end 792} (go/func immrot2s "immrot2s returns bits encoding the immediate constant fields of two instructions,\nsuch that the encoded constants y, x satisfy y-x==v, y&x==0.\nReturns 0,0 if no such decomposition of v exists.\n" [^uint32 v] :results [uint32 uint32]
+  (when (!= (immrot v) 0)
+    (return v 0))
+
+  ;; suppose v in the form of {leading 00, upper effective bits, lower 8 effective bits, trailing 00}
+  ;; omit trailing 00
+  (let [^uint32 i (zero uint32)]
+    (for [(set! i 2)] (< i 32) (set! i + 2)
+      (when (!= (bit-and v (- ^uint32 (<< 1 i) 1)) 0)
+        (break)))
+
+
+    ;; i must be <= 24, then adjust i just above lower 8 effective bits of v
+    (set! i + 6)
+    ;; let x = {the complement of lower 8 effective bits, trailing 00}, y = x + v
+    (let [x (- ^uint32 (<< 1 i) (bit-and v (- ^uint32 (<< 1 i) 1)))
+        ^{:line 787} y (+ v x)]
+      (when [(set! (values y x) (values (conv uint32 (immrot y)) (conv uint32 (immrot x))))] (and (!= y 0) (!= x 0))
+        (return y x))
+
+      (return 0 0))))
+
+
+^{:go/breaks [[5 801]] :go/end 802} (go/func immaddr ^int32 [^int32 v]
+  (when (and (>= v 0) (<= v 0xfff))
+    (return (bit-or (bit-and v 0xfff) (<< 1 24) (<< 1 23)))) ; /* pre indexing */ ; /* pre indexing, up */
+
+  (when (and (>= v -0xfff) (< v 0))
+    (return (bit-or (bit-and (- v) 0xfff) (<< 1 24)))) ; /* pre indexing */
+
+  0)
+
+
+^{:go/end 806} (go/func immfloat ^bool [^int32 v]
+  (== (bit-and v 0xC03) 0)) ; /* offset will fit in floating-point load/store */
+
+
+^{:go/breaks [[5 815]] :go/end 816} (go/func immhalf ^bool [^int32 v]
+  (when (and (>= v 0) (<= v 0xff))
+    (return (!= (bit-or v (<< 1 24) (<< 1 23)) 0))) ; /* pre indexing */ ; /* pre indexing, up */
+
+  (when (and (>= v -0xff) (< v 0))
+    (return (!= (bit-or (bit-and (- v) 0xff) (<< 1 24)) 0))) ; /* pre indexing */
+
+  false)
+
+
+^{:go/end 1031} (go/method aclass ^int [^{:tag (* ctxt5)} c ^{:tag (* obj/Addr)} a]
+  (switch (.-Type a)
+    (case [obj/TYPE_NONE]
+      (return C_NONE))
+
+    (case [obj/TYPE_REG]
+      (set! (.-instoffset c) 0)
+      (when (and (<= REG_R0 (.-Reg a)) (<= (.-Reg a) REG_R15))
+        (return C_REG))
+
+      (when (and (<= REG_F0 (.-Reg a)) (<= (.-Reg a) REG_F15))
+        (return C_FREG))
+
+      (when (or (== (.-Reg a) REG_FPSR) (== (.-Reg a) REG_FPCR))
+        (return C_FCR))
+
+      (when (or (== (.-Reg a) REG_CPSR) (== (.-Reg a) REG_SPSR))
+        (return C_PSR))
+
+      (when (>= (.-Reg a) REG_SPECIAL)
+        (return C_SPR))
+
+      (return C_GOK))
+
+    (case [obj/TYPE_REGREG]
+      (return C_REGREG))
+
+    (case [obj/TYPE_REGREG2]
+      (return C_REGREG2))
+
+    (case [obj/TYPE_REGLIST]
+      (return C_REGLIST))
+
+    (case [obj/TYPE_SHIFT]
+      (if (== (.-Reg a) 0)
+        ;; register shift R>>i
+        (return C_SHIFT)
+
+        ;; memory address with shifted offset R>>i(R)
+        (return C_SHIFTADDR)))
+
+
+    (case [obj/TYPE_MEM]
+      (switch (.-Name a)
+        (case [obj/NAME_EXTERN
+            ^{:line 863} obj/NAME_GOTREF
+            ^{:line 864} obj/NAME_STATIC]
+          (when (or (== (.-Sym a) nil) (== (.-Name (.-Sym a)) ""))
+            (fmt/Printf "null sym external\n")
+            (return C_GOK))
+
+
+          (set! (.-instoffset c) 0) ; s.b. unused but just in case
+          (when (== (.-Type (.-Sym a)) objabi/STLSBSS)
+            (if (.-Flag_shared (.-ctxt c))
+              (return C_TLS_IE)
+
+              (return C_TLS_LE)))
+
+
+
+          (return C_ADDR))
+
+        (case [obj/NAME_AUTO]
+          (when (== (.-Reg a) REGSP)
+            ;; unset base register for better printing, since
+            ;; a.Offset is still relative to pseudo-SP.
+            (set! (.-Reg a) obj/REG_NONE))
+
+          (set! (.-instoffset c) (+ (.-autosize c) (.-Offset a)))
+          (when [t (immaddr (conv int32 (.-instoffset c)))] (!= t 0)
+            (when (immhalf (conv int32 (.-instoffset c)))
+              (when (immfloat t)
+                (return C_HFAUTO))
+
+              (return C_HAUTO))
+
+
+            (when (immfloat t)
+              (return C_FAUTO))
+
+            (return C_SAUTO))
+
+
+          (return C_LAUTO))
+
+        (case [obj/NAME_PARAM]
+          (when (== (.-Reg a) REGSP)
+            ;; unset base register for better printing, since
+            ;; a.Offset is still relative to pseudo-FP.
+            (set! (.-Reg a) obj/REG_NONE))
+
+          (set! (.-instoffset c) (+ (.-autosize c) (.-Offset a) 4))
+          (when [t (immaddr (conv int32 (.-instoffset c)))] (!= t 0)
+            (when (immhalf (conv int32 (.-instoffset c)))
+              (when (immfloat t)
+                (return C_HFAUTO))
+
+              (return C_HAUTO))
+
+
+            (when (immfloat t)
+              (return C_FAUTO))
+
+            (return C_SAUTO))
+
+
+          (return C_LAUTO))
+
+        (case [obj/NAME_NONE]
+          (set! (.-instoffset c) (.-Offset a))
+          (when [t (immaddr (conv int32 (.-instoffset c)))] (!= t 0)
+            (when (immhalf (conv int32 (.-instoffset c))) ; /* n.b. that it will also satisfy immrot */
+              (when (immfloat t)
+                (return C_HFOREG))
+
+              (return C_HOREG))
+
+
+            (when (immfloat t)
+              (return C_FOREG)) ; /* n.b. that it will also satisfy immrot */
+
+            (when (!= (immrot (conv uint32 (.-instoffset c))) 0)
+              (return C_SROREG))
+
+            (when (immhalf (conv int32 (.-instoffset c)))
+              (return C_HOREG))
+
+            (return C_SOREG))
+
+
+          (when (!= (immrot (conv uint32 (.-instoffset c))) 0)
+            (return C_ROREG))
+
+          (return C_LOREG)))
+
+
+      (return C_GOK))
+
+    (case [obj/TYPE_FCONST]
+      (when (>= (.chipzero5 c (assert float64 (.-Val a))) 0)
+        (return C_ZFCON))
+
+      (when (>= (.chipfloat5 c (assert float64 (.-Val a))) 0)
+        (return C_SFCON))
+
+      (return C_LFCON))
+
+    (case [obj/TYPE_TEXTSIZE]
+      (return C_TEXTSIZE))
+
+    (case [obj/TYPE_CONST
+        ^{:line 970} obj/TYPE_ADDR]
+      (switch (.-Name a)
+        (case [obj/NAME_NONE]
+          (set! (.-instoffset c) (.-Offset a))
+          (when (!= (.-Reg a) 0)
+            (return (.aconsize c)))
+
+
+          (when (!= (immrot (conv uint32 (.-instoffset c))) 0)
+            (return C_RCON))
+
+          (when (!= (immrot (bit-not (conv uint32 (.-instoffset c)))) 0)
+            (return C_NCON))
+
+          (when (and (<= (conv uint32 (.-instoffset c)) 0xffff) (== (.-Version buildcfg/GOARM) 7))
+            (return C_SCON))
+
+          (when [(values x y) (immrot2a (conv uint32 (.-instoffset c)))] (and (!= x 0) (!= y 0))
+            (return C_RCON2A))
+
+          (when [(values y x) (immrot2s (conv uint32 (.-instoffset c)))] (and (!= x 0) (!= y 0))
+            (return C_RCON2S))
+
+          (return C_LCON))
+
+        (case [obj/NAME_EXTERN
+            ^{:line 996} obj/NAME_GOTREF
+            ^{:line 997} obj/NAME_STATIC]
+          (let [s (.-Sym a)]
+            (when (== s nil)
+              (break))
+
+            (set! (.-instoffset c) 0) ; s.b. unused but just in case
+            (return C_LCONADDR)))
+
+        (case [obj/NAME_AUTO]
+          (when (== (.-Reg a) REGSP)
+            ;; unset base register for better printing, since
+            ;; a.Offset is still relative to pseudo-SP.
+            (set! (.-Reg a) obj/REG_NONE))
+
+          (set! (.-instoffset c) (+ (.-autosize c) (.-Offset a)))
+          (return (.aconsize c)))
+
+        (case [obj/NAME_PARAM]
+          (when (== (.-Reg a) REGSP)
+            ;; unset base register for better printing, since
+            ;; a.Offset is still relative to pseudo-FP.
+            (set! (.-Reg a) obj/REG_NONE))
+
+          (set! (.-instoffset c) (+ (.-autosize c) (.-Offset a) 4))
+          (return (.aconsize c))))
+
+
+      (return C_GOK))
+
+    (case [obj/TYPE_BRANCH]
+      (return C_SBRA)))
+
+
+  ^{:line 1030} C_GOK)
+
+
+^{:go/end 1041} (go/method aconsize ^int [^{:tag (* ctxt5)} c]
+  (when (!= (immrot (conv uint32 (.-instoffset c))) 0)
+    (return C_RACON))
+
+  (when (!= (immrot (conv uint32 (- (.-instoffset c)))) 0)
+    (return C_RACON))
+
+  ^{:line 1040} C_LACON)
+
+
+^{:go/end 1147} (go/method oplook ^{:tag (* Optab)} [^{:tag (* ctxt5)} c ^{:tag (* obj/Prog)} p]
+  (let [a1 (conv int (.-Optab p))]
+    (when (!= a1 0)
+      (return (addr (aget optab (- a1 1)))))
+
+    (set! a1 (conv int (.-Class (.-From p))))
+    (when (== a1 0)
+      (set! a1 (+ (.aclass c (addr (.-From p))) 1))
+      (set! (.-Class (.-From p)) (conv int8 a1)))
+
+
+    (dec! a1)
+    (let [a3 (conv int (.-Class (.-To p)))]
+      (when (== a3 0)
+        (set! a3 (+ (.aclass c (addr (.-To p))) 1))
+        (set! (.-Class (.-To p)) (conv int8 a3)))
+
+
+      (dec! a3)
+      (let [a2 C_NONE]
+        (when (!= (.-Reg p) 0)
+          (switch
+            (case [(and (<= REG_F0 (.-Reg p)) (<= (.-Reg p) REG_F15))]
+              (set! a2 C_FREG))
+            (case [(and (<= REG_R0 (.-Reg p)) (<= (.-Reg p) REG_R15))]
+              (set! a2 C_REG))
+            (default
+              (.Diag (.-ctxt c) "invalid register in %v" p))))
+
+
+
+        ;; check illegal base register
+        (switch a1
+          (case [C_SOREG C_LOREG C_HOREG C_FOREG C_ROREG C_HFOREG C_SROREG C_SHIFTADDR]
+            (when (or (< (.-Reg (.-From p)) REG_R0) (< REG_R15 (.-Reg (.-From p))))
+              (.Diag (.-ctxt c) "illegal base register: %v" p)))
+
+          (default))
+
+        (switch a3
+          (case [C_SOREG C_LOREG C_HOREG C_FOREG C_ROREG C_HFOREG C_SROREG C_SHIFTADDR]
+            (when (or (< (.-Reg (.-To p)) REG_R0) (< REG_R15 (.-Reg (.-To p))))
+              (.Diag (.-ctxt c) "illegal base register: %v" p)))
+
+          (default))
+
+
+        ;; If current instruction has a .S suffix (flags update),
+        ;; we must use the constant pool instead of splitting it.
+        (when (and ^:go/paren (or (== a1 C_RCON2A) (== a1 C_RCON2S)) (!= (bit-and (.-Scond p) C_SBIT) 0))
+          (set! a1 C_LCON))
+
+        (when (and ^:go/paren (or (== a3 C_RCON2A) (== a3 C_RCON2S)) (!= (bit-and (.-Scond p) C_SBIT) 0))
+          (set! a3 C_LCON))
+
+
+        (when false ; /*debug['O']*/
+          (fmt/Printf "oplook %v %v %v %v\n" (.-As p) (DRconv a1) (DRconv a2) (DRconv a3))
+          (fmt/Printf "\t\t%d %d\n" (.-Type (.-From p)) (.-Type (.-To p))))
+
+
+        (when (and ^:go/paren (or (== (.-As p) ASRL) (== (.-As p) ASRA)) (== (.-Type (.-From p)) obj/TYPE_CONST) (== (.-Offset (.-From p)) 0))
+          ;; Right shifts are weird - a shift that looks like "shift by constant 0" actually
+          ;; means "shift by constant 32". Use left shift in this situation instead.
+          ;; See issue 64715.
+          ;; TODO: rotate by 0? Not currently supported, but if we ever do then include it here.
+          (set! (.-As p) ASLL))
+
+        (when (and (!= (.-As p) AMOVB) (!= (.-As p) AMOVBS) (!= (.-As p) AMOVBU) (!= (.-As p) AMOVH) (!= (.-As p) AMOVHS) (!= (.-As p) AMOVHU) (!= (.-As p) AXTAB) (!= (.-As p) AXTABU) (!= (.-As p) AXTAH) (!= (.-As p) AXTAHU))
+          ;; Same here, but for shifts encoded in Addrs.
+          ;; Don't do it for the extension ops, which
+          ;; need to keep their RR shifts.
+          (let [fixShift ^{:go/end 1125} (fn [^{:tag (* obj/Addr)} a]
+                (when (== (.-Type a) obj/TYPE_SHIFT)
+                  (let [typ (bit-and (.-Offset a) SHIFT_RR)
+                      ^{:line 1118} isConst (== (bit-and (.-Offset a) (<< 1 4)) 0)
+                      ^{:line 1119} amount (bit-and (>> (.-Offset a) 7) 0x1f)]
+                    (when (and isConst (== amount 0) ^:go/paren (or (== typ SHIFT_LR) (== typ SHIFT_AR) (== typ SHIFT_RR)))
+                      (set! (.-Offset a) - typ)
+                      (set! (.-Offset a) + SHIFT_LL)))))]
+
+
+
+            (fixShift (addr (.-From p)))
+            (fixShift (addr (.-To p)))))
+
+
+        (let [ops (aget oprange (bit-and (.-As p) obj/AMask))
+            ^{:line 1131} c1 (addr (aget xcmp a1))
+            ^{:line 1132} c3 (addr (aget xcmp a3))]
+          (range [i ops]
+            (let [op (addr (aget ops i))]
+              (when (and (== (conv int (.-a2 op)) a2) (aget c1 (.-a1 op)) (aget c3 (.-a3 op)))
+                (set! (.-Optab p) (conv uint16 (+ (- (cap optab) (cap ops)) i 1)))
+                (checkSuffix c p op)
+                (return op))))
+
+
+
+          (.Diag (.-ctxt c) "illegal combination %v; %v %v %v; from %d %d; to %d %d" p (DRconv a1) (DRconv a2) (DRconv a3) (.-Type (.-From p)) (.-Name (.-From p)) (.-Type (.-To p)) (.-Name (.-To p)))
+          (when (== ops nil)
+            (set! ops optab))
+
+          (addr (aget ops 0)))))))
+
+
+^{:go/breaks [[5 1205]] :go/end 1206} (go/func cmp ^bool [^int a ^int b]
+  (when (== a b)
+    (return true))
+
+  (switch a
+    (case [C_LCON]
+      (when (or (== b C_RCON) (== b C_NCON) (== b C_SCON) (== b C_RCON2A) (== b C_RCON2S))
+        (return true)))
+
+
+    (case [C_LACON]
+      (when (== b C_RACON)
+        (return true)))
+
+
+    (case [C_LFCON]
+      (when (or (== b C_ZFCON) (== b C_SFCON))
+        (return true)))
+
+
+    (case [C_HFAUTO]
+      (return (or (== b C_HAUTO) (== b C_FAUTO))))
+
+    (case [C_FAUTO C_HAUTO]
+      (return (== b C_HFAUTO)))
+
+    (case [C_SAUTO]
+      (return (cmp C_HFAUTO b)))
+
+    (case [C_LAUTO]
+      (return (cmp C_SAUTO b)))
+
+    (case [C_HFOREG]
+      (return (or (== b C_HOREG) (== b C_FOREG))))
+
+    (case [C_FOREG C_HOREG]
+      (return (== b C_HFOREG)))
+
+    (case [C_SROREG]
+      (return (or (cmp C_SOREG b) (cmp C_ROREG b))))
+
+    (case [C_SOREG C_ROREG]
+      (return (or (== b C_SROREG) (cmp C_HFOREG b))))
+
+    (case [C_LOREG]
+      (return (cmp C_SROREG b)))
+
+    (case [C_LBRA]
+      (when (== b C_SBRA)
+        (return true)))
+
+
+    (case [C_HREG]
+      (return (or (cmp C_SP b) (cmp C_PC b)))))
+
+
+  false)
+
+
+^{:go/breaks [[7 1221]] :go/end 1222} (go/func ocmp ^int [^Optab a ^Optab b]
+  (when (!= (.-as a) (.-as b))
+    (return (- (conv int (.-as a)) (conv int (.-as b)))))
+
+  (when (!= (.-a1 a) (.-a1 b))
+    (return (- (conv int (.-a1 a)) (conv int (.-a1 b)))))
+
+  (when (!= (.-a2 a) (.-a2 b))
+    (return (- (conv int (.-a2 a)) (conv int (.-a2 b)))))
+
+  (when (!= (.-a3 a) (.-a3 b))
+    (return (- (conv int (.-a3 a)) (conv int (.-a3 b)))))
+
+  0)
+
+
+^{:go/end 1226} (go/func opset [^obj/As a ^obj/As b0]
+  (aset oprange (bit-and a obj/AMask) (aget oprange b0)))
+
+
+^{:go/end 1451} (go/func buildop [^{:tag (* obj/Link)} ctxt]
+  (when (!= (aget oprange (bit-and AAND obj/AMask)) nil)
+    ;; Already initialized; stop now.
+    ;; This happens in the cmd/asm tests,
+    ;; each of which re-initializes the arch.
+    (return))
+
+
+  (set! symdiv (.Lookup ctxt "runtime._div"))
+  (set! symdivu (.Lookup ctxt "runtime._divu"))
+  (set! symmod (.Lookup ctxt "runtime._mod"))
+  (set! symmodu (.Lookup ctxt "runtime._modu"))
+
+  (let [^int n (zero int)]
+
+    (for [i 0] (< i C_GOK) (inc! i)
+      (for [(set! n 0)] (< n C_GOK) (inc! n)
+        (when (cmp n i)
+          (aset (aget xcmp i) n true))))
+
+
+
+    (for [(set! n 0)] (!= (.-as (aget optab n)) obj/AXXX) (inc! n)
+      (when (!= (bit-and (.-flag (aget optab n)) LPCREL) 0)
+        (if (.-Flag_shared ctxt)
+          (set! (.-size (aget optab n)) + (conv int8 (.-pcrelsiz (aget optab n))))
+
+          (set! (.-flag (aget optab n)) bit-and-not LPCREL))))
+
+
+
+
+    (^{:inst [(slice Optab) Optab]} slices/SortFunc (subslice optab _ n) ocmp)
+    (for [i 0] (< i n) (inc! i)
+      (let [r (.-as (aget optab i))
+          ^{:line 1263} r0 (bit-and r obj/AMask)
+          ^{:line 1264} start i]
+        (while (== (.-as (aget optab i)) r)
+          (inc! i))
+
+        (aset oprange r0 (subslice optab start i))
+        (dec! i)
+
+        (switch r
+          (default
+            (.Diag ctxt "unknown op in build: %v" r)
+            ((.-DiagFlush ctxt))
+            (log/Fatalf "bad code"))
+
+          (case [AADD]
+            (opset ASUB r0)
+            (opset ARSB r0)
+            (opset AADC r0)
+            (opset ASBC r0)
+            (opset ARSC r0))
+
+          (case [AORR]
+            (opset AEOR r0)
+            (opset ABIC r0))
+
+          (case [ACMP]
+            (opset ATEQ r0)
+            (opset ACMN r0)
+            (opset ATST r0))
+
+          (case [AMVN]
+            (break))
+
+          (case [ABEQ]
+            (opset ABNE r0)
+            (opset ABCS r0)
+            (opset ABHS r0)
+            (opset ABCC r0)
+            (opset ABLO r0)
+            (opset ABMI r0)
+            (opset ABPL r0)
+            (opset ABVS r0)
+            (opset ABVC r0)
+            (opset ABHI r0)
+            (opset ABLS r0)
+            (opset ABGE r0)
+            (opset ABLT r0)
+            (opset ABGT r0)
+            (opset ABLE r0))
+
+          (case [ASLL]
+            (opset ASRL r0)
+            (opset ASRA r0))
+
+          (case [AMUL]
+            (opset AMULU r0))
+
+          (case [ADIV]
+            (opset AMOD r0)
+            (opset AMODU r0)
+            (opset ADIVU r0))
+
+          (case [ADIVHW]
+            (opset ADIVUHW r0))
+
+          (case [AMOVW
+              ^{:line 1329} AMOVB
+              ^{:line 1330} AMOVBS
+              ^{:line 1331} AMOVBU
+              ^{:line 1332} AMOVH
+              ^{:line 1333} AMOVHS
+              ^{:line 1334} AMOVHU]
+            (break))
+
+          (case [ASWPW]
+            (opset ASWPBU r0))
+
+          (case [AB
+              ^{:line 1341} ABL
+              ^{:line 1342} ABX
+              ^{:line 1343} ABXRET
+              ^{:line 1344} obj/ADUFFZERO
+              ^{:line 1345} obj/ADUFFCOPY
+              ^{:line 1346} ASWI
+              ^{:line 1347} AWORD
+              ^{:line 1348} AMOVM
+              ^{:line 1349} ARFE
+              ^{:line 1350} obj/ATEXT]
+            (break))
+
+          (case [AADDF]
+            (opset AADDD r0)
+            (opset ASUBF r0)
+            (opset ASUBD r0)
+            (opset AMULF r0)
+            (opset AMULD r0)
+            (opset ANMULF r0)
+            (opset ANMULD r0)
+            (opset AMULAF r0)
+            (opset AMULAD r0)
+            (opset AMULSF r0)
+            (opset AMULSD r0)
+            (opset ANMULAF r0)
+            (opset ANMULAD r0)
+            (opset ANMULSF r0)
+            (opset ANMULSD r0)
+            (opset AFMULAF r0)
+            (opset AFMULAD r0)
+            (opset AFMULSF r0)
+            (opset AFMULSD r0)
+            (opset AFNMULAF r0)
+            (opset AFNMULAD r0)
+            (opset AFNMULSF r0)
+            (opset AFNMULSD r0)
+            (opset ADIVF r0)
+            (opset ADIVD r0))
+
+          (case [ANEGF]
+            (opset ANEGD r0)
+            (opset ASQRTF r0)
+            (opset ASQRTD r0)
+            (opset AMOVFD r0)
+            (opset AMOVDF r0)
+            (opset AABSF r0)
+            (opset AABSD r0))
+
+          (case [ACMPF]
+            (opset ACMPD r0))
+
+          (case [AMOVF]
+            (opset AMOVD r0))
+
+          (case [AMOVFW]
+            (opset AMOVDW r0))
+
+          (case [AMOVWF]
+            (opset AMOVWD r0))
+
+          (case [AMULL]
+            (opset AMULAL r0)
+            (opset AMULLU r0)
+            (opset AMULALU r0))
+
+          (case [AMULWT]
+            (opset AMULWB r0)
+            (opset AMULBB r0)
+            (opset AMMUL r0))
+
+          (case [AMULAWT]
+            (opset AMULAWB r0)
+            (opset AMULABB r0)
+            (opset AMULS r0)
+            (opset AMMULA r0)
+            (opset AMMULS r0))
+
+          (case [ABFX]
+            (opset ABFXU r0)
+            (opset ABFC r0)
+            (opset ABFI r0))
+
+          (case [ACLZ]
+            (opset AREV r0)
+            (opset AREV16 r0)
+            (opset AREVSH r0)
+            (opset ARBIT r0))
+
+          (case [AXTAB]
+            (opset AXTAH r0)
+            (opset AXTABU r0)
+            (opset AXTAHU r0))
+
+          (case [ALDREX
+              ^{:line 1435} ASTREX
+              ^{:line 1436} ALDREXD
+              ^{:line 1437} ALDREXB
+              ^{:line 1438} ASTREXD
+              ^{:line 1439} ASTREXB
+              ^{:line 1440} ADMB
+              ^{:line 1441} APLD
+              ^{:line 1442} AAND
+              ^{:line 1443} AMULA
+              ^{:line 1444} obj/AUNDEF
+              ^{:line 1445} obj/AFUNCDATA
+              ^{:line 1446} obj/APCDATA
+              ^{:line 1447} obj/ANOP]
+            (break)))))))
+
+
+
+
+^{:go/end 2579} (go/method asmout [^{:tag (* ctxt5)} c ^{:tag (* obj/Prog)} p ^{:tag (* Optab)} o ^{:tag (slice uint32)} out]
+  (set! (.-printp c) p)
+  (let [o1 (conv uint32 0)
+      ^{:line 1456} o2 (conv uint32 0)
+      ^{:line 1457} o3 (conv uint32 0)
+      ^{:line 1458} o4 (conv uint32 0)
+      ^{:line 1459} o5 (conv uint32 0)
+      ^{:line 1460} o6 (conv uint32 0)]
+    (when false ; /*debug['P']*/
+      (fmt/Printf "%x: %v\ttype %d\n" (conv uint32 (.-Pc p)) p (.-type_ o)))
+
+    (switch (.-type_ o)
+      (default
+        (.Diag (.-ctxt c) "%v: unknown asm %d" p (.-type_ o)))
+
+      (case [0] ; /* pseudo ops */
+        (when false ; /*debug['G']*/
+          (fmt/Printf "%x: %s: arm\n" (conv uint32 (.-Pc p)) (.-Name (.-Sym (.-From p))))))
+
+
+      (case [1] ; /* op R,[R],R */
+        (set! o1 (.oprrr c p (.-As p) (conv int (.-Scond p))))
+
+        (let [rf (conv int (.-Reg (.-From p)))
+            ^{:line 1477} rt (conv int (.-Reg (.-To p)))
+            ^{:line 1478} r (conv int (.-Reg p))]
+          (when (== (.-Type (.-To p)) obj/TYPE_NONE)
+            (set! rt 0))
+
+          (cond (or (== (.-As p) AMOVB) (== (.-As p) AMOVH) (== (.-As p) AMOVW) (== (.-As p) AMVN))
+            (set! r 0)
+            (== r 0)
+            (set! r rt))
+
+          (set! o1 bit-or (bit-or (<< (bit-and (conv uint32 rf) 15) 0) (<< (bit-and (conv uint32 r) 15) 16) (<< (bit-and (conv uint32 rt) 15) 12)))))
+
+      (case [2] ; /* movbu $I,[R],R */
+        (.aclass c (addr (.-From p)))
+
+        (set! o1 (.oprrr c p (.-As p) (conv int (.-Scond p))))
+        (set! o1 bit-or (conv uint32 (immrot (conv uint32 (.-instoffset c)))))
+        (let [rt (conv int (.-Reg (.-To p)))
+            ^{:line 1495} r (conv int (.-Reg p))]
+          (when (== (.-Type (.-To p)) obj/TYPE_NONE)
+            (set! rt 0))
+
+          (cond (or (== (.-As p) AMOVW) (== (.-As p) AMVN))
+            (set! r 0)
+            (== r 0)
+            (set! r rt))
+
+          (set! o1 bit-or (bit-or (<< (bit-and (conv uint32 r) 15) 16) (<< (bit-and (conv uint32 rt) 15) 12)))))
+
+      (case [106] ; /* op $I,R,R where I can be decomposed into 2 immediates */
+        (.aclass c (addr (.-From p)))
+        (let [r (conv int (.-Reg p))
+            ^{:line 1509} rt (conv int (.-Reg (.-To p)))]
+          (when (== r 0)
+            (set! r rt))
+
+          (let [(values x y) (immrot2a (conv uint32 (.-instoffset c)))
+              ^{:line 1514 :tag obj/As} as2 (zero obj/As)]
+            (switch (.-As p)
+              (case [AADD ASUB AORR AEOR ABIC]
+                (set! as2 (.-As p))) ; ADD, SUB, ORR, EOR, BIC
+              (case [ARSB]
+                (set! as2 AADD)) ; RSB -> RSB/ADD pair
+              (case [AADC]
+                (set! as2 AADD)) ; ADC -> ADC/ADD pair
+              (case [ASBC]
+                (set! as2 ASUB)) ; SBC -> SBC/SUB pair
+              (case [ARSC]
+                (set! as2 AADD)) ; RSC -> RSC/ADD pair
+              (default
+                (.Diag (.-ctxt c) "unknown second op for %v" p)))
+
+            (set! o1 (.oprrr c p (.-As p) (conv int (.-Scond p))))
+            (set! o2 (.oprrr c p as2 (conv int (.-Scond p))))
+            (set! o1 bit-or (bit-or (<< (bit-and (conv uint32 r) 15) 16) (<< (bit-and (conv uint32 rt) 15) 12)))
+            (set! o2 bit-or (bit-or (<< (bit-and (conv uint32 rt) 15) 16) (<< (bit-and (conv uint32 rt) 15) 12)))
+            (set! o1 bit-or x)
+            (set! o2 bit-or y))))
+
+      (case [107] ; /* op $I,R,R where I can be decomposed into 2 immediates */
+        (.aclass c (addr (.-From p)))
+        (let [r (conv int (.-Reg p))
+            ^{:line 1539} rt (conv int (.-Reg (.-To p)))]
+          (when (== r 0)
+            (set! r rt))
+
+          (let [(values y x) (immrot2s (conv uint32 (.-instoffset c)))
+              ^{:line 1544 :tag obj/As} as2 (zero obj/As)]
+            (switch (.-As p)
+              (case [AADD]
+                (set! as2 ASUB)) ; ADD -> ADD/SUB pair
+              (case [ASUB]
+                (set! as2 AADD)) ; SUB -> SUB/ADD pair
+              (case [ARSB]
+                (set! as2 ASUB)) ; RSB -> RSB/SUB pair
+              (case [AADC]
+                (set! as2 ASUB)) ; ADC -> ADC/SUB pair
+              (case [ASBC]
+                (set! as2 AADD)) ; SBC -> SBC/ADD pair
+              (case [ARSC]
+                (set! as2 ASUB)) ; RSC -> RSC/SUB pair
+              (default
+                (.Diag (.-ctxt c) "unknown second op for %v" p)))
+
+            (set! o1 (.oprrr c p (.-As p) (conv int (.-Scond p))))
+            (set! o2 (.oprrr c p as2 (conv int (.-Scond p))))
+            (set! o1 bit-or (bit-or (<< (bit-and (conv uint32 r) 15) 16) (<< (bit-and (conv uint32 rt) 15) 12)))
+            (set! o2 bit-or (bit-or (<< (bit-and (conv uint32 rt) 15) 16) (<< (bit-and (conv uint32 rt) 15) 12)))
+            (set! o1 bit-or y)
+            (set! o2 bit-or x))))
+
+      (case [3] ; /* add R<<[IR],[R],R */
+        (set! o1 (.mov c p)))
+
+      (case [4] ; /* MOVW $off(R), R -> add $off,[R],R */
+        (.aclass c (addr (.-From p)))
+        (if (< (.-instoffset c) 0) (do
+            (set! o1 (.oprrr c p ASUB (conv int (.-Scond p))))
+            (set! o1 bit-or (conv uint32 (immrot (conv uint32 (- (.-instoffset c)))))))
+          (do
+            (set! o1 (.oprrr c p AADD (conv int (.-Scond p))))
+            (set! o1 bit-or (conv uint32 (immrot (conv uint32 (.-instoffset c)))))))
+
+        (let [r (conv int (.-Reg (.-From p)))]
+          (when (== r 0)
+            (set! r (conv int (.-param o))))
+
+          (set! o1 bit-or (<< (bit-and (conv uint32 r) 15) 16))
+          (set! o1 bit-or (<< (bit-and (conv uint32 (.-Reg (.-To p))) 15) 12))))
+
+      (case [5] ; /* bra s */
+        (set! o1 (.opbra c p (.-As p) (conv int (.-Scond p))))
+
+        (let [v (conv int32 -8)]
+          (when (!= (.-Sym (.-To p)) nil)
+            (set! v + (conv int32 (.-Offset (.-To p))))
+            (.AddRel (.-cursym c) (.-ctxt c) ^{:go/breaks [2 4 6 8 10]} (lit obj/Reloc
+                :Type objabi/R_CALLARM
+                :Off (conv int32 (.-pc c))
+                :Siz 4
+                :Sym (.-Sym (.-To p))
+                :Add (bit-or (conv int64 o1) (bit-and (>> (conv int64 v) 2) 0xffffff))))
+
+            (break))
+
+
+          (when (!= (.Target (.-To p)) nil)
+            (set! v (conv int32 (- (.-Pc (.Target (.-To p))) (.-pc c) 8))))
+
+          (set! o1 bit-or (bit-and (>> (conv uint32 v) 2) 0xffffff))))
+
+      (case [6] ; /* b ,O(R) -> add $O,R,PC */
+        (.aclass c (addr (.-To p)))
+
+        (set! o1 (.oprrr c p AADD (conv int (.-Scond p))))
+        (set! o1 bit-or (conv uint32 (immrot (conv uint32 (.-instoffset c)))))
+        (set! o1 bit-or (<< (bit-and (conv uint32 (.-Reg (.-To p))) 15) 16))
+        (set! o1 bit-or (<< (bit-and REGPC 15) 12)))
+
+      (case [7] ; /* bl (R) -> blx R */
+        (.aclass c (addr (.-To p)))
+
+        (when (!= (.-instoffset c) 0)
+          (.Diag (.-ctxt c) "%v: doesn't support BL offset(REG) with non-zero offset %d" p (.-instoffset c)))
+
+        (set! o1 (.oprrr c p ABL (conv int (.-Scond p))))
+        (set! o1 bit-or (<< (bit-and (conv uint32 (.-Reg (.-To p))) 15) 0))
+        (.AddRel (.-cursym c) (.-ctxt c) ^{:go/breaks [2 4]} (lit obj/Reloc
+            :Type objabi/R_CALLIND
+            :Off (conv int32 (.-pc c)))))
+
+
+      (case [8] ; /* sll $c,[R],R -> mov (R<<$c),R */
+        (.aclass c (addr (.-From p)))
+
+        (set! o1 (.oprrr c p (.-As p) (conv int (.-Scond p))))
+        (let [r (conv int (.-Reg p))]
+          (when (== r 0)
+            (set! r (conv int (.-Reg (.-To p)))))
+
+          (set! o1 bit-or (<< (bit-and (conv uint32 r) 15) 0))
+          (set! o1 bit-or (conv uint32 (<< (bit-and (.-instoffset c) 31) 7)))
+          (set! o1 bit-or (<< (bit-and (conv uint32 (.-Reg (.-To p))) 15) 12))))
+
+      (case [9] ; /* sll R,[R],R -> mov (R<<R),R */
+        (set! o1 (.oprrr c p (.-As p) (conv int (.-Scond p))))
+
+        (let [r (conv int (.-Reg p))]
+          (when (== r 0)
+            (set! r (conv int (.-Reg (.-To p)))))
+
+          (set! o1 bit-or (<< (bit-and (conv uint32 r) 15) 0))
+          (set! o1 bit-or (bit-or (<< (bit-and (conv uint32 (.-Reg (.-From p))) 15) 8) (<< 1 4)))
+          (set! o1 bit-or (<< (bit-and (conv uint32 (.-Reg (.-To p))) 15) 12))))
+
+      (case [10] ; /* swi [$con] */
+        (set! o1 (.oprrr c p (.-As p) (conv int (.-Scond p))))
+
+        (when (!= (.-Type (.-To p)) obj/TYPE_NONE)
+          (.aclass c (addr (.-To p)))
+          (set! o1 bit-or (conv uint32 (bit-and (.-instoffset c) 0xffffff)))))
+
+
+      (case [11] ; /* word */
+        (.aclass c (addr (.-To p)))
+
+        (set! o1 (conv uint32 (.-instoffset c)))
+        (when (!= (.-Sym (.-To p)) nil)
+          ;; This case happens with words generated
+          ;; in the PC stream as part of the literal pool (c.pool).
+          (let [typ objabi/R_ADDR
+              ^{:line 1668} add (.-Offset (.-To p))]
+            (when (.-Flag_shared (.-ctxt c))
+              (if (== (.-Name (.-To p)) obj/NAME_GOTREF)
+                (set! typ objabi/R_GOTPCREL)
+
+                (set! typ objabi/R_PCREL))
+
+              (set! add + (- (.-pc c) (.-Pc (.-Rel p)) 8)))
+
+            (.AddRel (.-cursym c) (.-ctxt c) ^{:go/breaks [2 4 6 8 10]} (lit obj/Reloc
+                :Type typ
+                :Off (conv int32 (.-pc c))
+                :Siz 4
+                :Sym (.-Sym (.-To p))
+                :Add add))
+
+            (set! o1 0))))
+
+
+      (case [12] ; /* movw $lcon, reg */
+        (cond (== (.-a1 o) C_SCON)
+          (set! o1 (.omvs c p (addr (.-From p)) (conv int (.-Reg (.-To p)))))
+          (== (.-As p) AMVN)
+          (set! o1 (.omvr c p (addr (.-From p)) (conv int (.-Reg (.-To p))))) :else
+
+          (set! o1 (.omvl c p (addr (.-From p)) (conv int (.-Reg (.-To p))))))
+
+
+        (when (!= (bit-and (.-flag o) LPCREL) 0)
+          (set! o2 (bit-or (.oprrr c p AADD (conv int (.-Scond p))) (<< (bit-and (conv uint32 (.-Reg (.-To p))) 15) 0) (<< (bit-and REGPC 15) 16) (<< (bit-and (conv uint32 (.-Reg (.-To p))) 15) 12)))))
+
+
+      (case [13] ; /* op $lcon, [R], R */
+        (if (== (.-a1 o) C_SCON)
+          (set! o1 (.omvs c p (addr (.-From p)) REGTMP))
+
+          (set! o1 (.omvl c p (addr (.-From p)) REGTMP)))
+
+
+        (when (== o1 0)
+          (break))
+
+        (set! o2 (.oprrr c p (.-As p) (conv int (.-Scond p))))
+        (set! o2 bit-or (bit-and REGTMP 15))
+        (let [r (conv int (.-Reg p))]
+          (cond (== (.-As p) AMVN)
+            (set! r 0)
+            (== r 0)
+            (set! r (conv int (.-Reg (.-To p)))))
+
+          (set! o2 bit-or (<< (bit-and (conv uint32 r) 15) 16))
+          (when (!= (.-Type (.-To p)) obj/TYPE_NONE)
+            (set! o2 bit-or (<< (bit-and (conv uint32 (.-Reg (.-To p))) 15) 12)))))
+
+
+      (case [14] ; /* movb/movbu/movh/movhu R,R */
+        (set! o1 (.oprrr c p ASLL (conv int (.-Scond p))))
+
+        (if (or (== (.-As p) AMOVBU) (== (.-As p) AMOVHU))
+          (set! o2 (.oprrr c p ASRL (conv int (.-Scond p))))
+
+          (set! o2 (.oprrr c p ASRA (conv int (.-Scond p)))))
+
+
+        (let [r (conv int (.-Reg (.-To p)))]
+          (set! o1 bit-or (bit-or (<< (bit-and (conv uint32 (.-Reg (.-From p))) 15) 0) (<< (bit-and (conv uint32 r) 15) 12)))
+          (set! o2 bit-or (bit-or (bit-and (conv uint32 r) 15) (<< (bit-and (conv uint32 r) 15) 12)))
+          (if (or (== (.-As p) AMOVB) (== (.-As p) AMOVBS) (== (.-As p) AMOVBU)) (do
+              (set! o1 bit-or (<< 24 7))
+              (set! o2 bit-or (<< 24 7)))
+            (do
+              (set! o1 bit-or (<< 16 7))
+              (set! o2 bit-or (<< 16 7))))))
+
+
+      (case [15] ; /* mul r,[r,]r */
+        (set! o1 (.oprrr c p (.-As p) (conv int (.-Scond p))))
+
+        (let [rf (conv int (.-Reg (.-From p)))
+            ^{:line 1747} rt (conv int (.-Reg (.-To p)))
+            ^{:line 1748} r (conv int (.-Reg p))]
+          (when (== r 0)
+            (set! r rt))
+
+
+          (set! o1 bit-or (bit-or (<< (bit-and (conv uint32 rf) 15) 8) (<< (bit-and (conv uint32 r) 15) 0) (<< (bit-and (conv uint32 rt) 15) 16)))))
+
+      (case [16] ; /* div r,[r,]r */
+        (set! o1 (<< 0xf 28))
+
+        (set! o2 0))
+
+      (case [17]
+        (set! o1 (.oprrr c p (.-As p) (conv int (.-Scond p))))
+        (let [rf (conv int (.-Reg (.-From p)))
+            ^{:line 1763} rt (conv int (.-Reg (.-To p)))
+            ^{:line 1764} rt2 (conv int (.-Offset (.-To p)))
+            ^{:line 1765} r (conv int (.-Reg p))]
+          (set! o1 bit-or (bit-or (<< (bit-and (conv uint32 rf) 15) 8) (<< (bit-and (conv uint32 r) 15) 0) (<< (bit-and (conv uint32 rt) 15) 16) (<< (bit-and (conv uint32 rt2) 15) 12)))))
+
+      (case [18] ; /* BFX/BFXU/BFC/BFI */
+        (set! o1 (.oprrr c p (.-As p) (conv int (.-Scond p))))
+        (let [rt (conv int (.-Reg (.-To p)))
+            ^{:line 1771} r (conv int (.-Reg p))]
+          (cond (== r 0)
+            (set! r rt)
+            (== (.-As p) ABFC) ; only "BFC $width, $lsb, Reg" is accepted, p.Reg must be 0
+            (.Diag (.-ctxt c) "illegal combination: %v" p))
+
+          (when (or (== (.GetFrom3 p) nil) (!= (.-Type (.GetFrom3 p)) obj/TYPE_CONST))
+            (.Diag (.-ctxt c) "%v: missing or wrong LSB" p)
+            (break))
+
+          (let [lsb (.-Offset (.GetFrom3 p))
+              ^{:line 1782} width (.-Offset (.-From p))]
+            (when (or (< lsb 0) (> lsb 31) (<= width 0) (> (+ lsb width) 32))
+              (.Diag (.-ctxt c) "%v: wrong width or LSB" p))
+
+            (switch (.-As p)
+              (case [ABFX ABFXU] ; (width-1) is encoded
+                (set! o1 bit-or (bit-or (<< (bit-and (conv uint32 r) 15) 0) (<< (bit-and (conv uint32 rt) 15) 12) (<< (conv uint32 lsb) 7) (<< (conv uint32 (- width 1)) 16))))
+              (case [ABFC ABFI] ; MSB is encoded
+                (set! o1 bit-or (bit-or (<< (bit-and (conv uint32 r) 15) 0) (<< (bit-and (conv uint32 rt) 15) 12) (<< (conv uint32 lsb) 7) (<< (conv uint32 (- (+ lsb width) 1)) 16))))
+              (default
+                (.Diag (.-ctxt c) "illegal combination: %v" p))))))
+
+
+      (case [20] ; /* mov/movb/movbu R,O(R) */
+        (.aclass c (addr (.-To p)))
+
+        (let [r (conv int (.-Reg (.-To p)))]
+          (when (== r 0)
+            (set! r (conv int (.-param o))))
+
+          (set! o1 (.osr c (.-As p) (conv int (.-Reg (.-From p))) (conv int32 (.-instoffset c)) r (conv int (.-Scond p))))))
+
+      (case [21] ; /* mov/movbu O(R),R -> lr */
+        (.aclass c (addr (.-From p)))
+
+        (let [r (conv int (.-Reg (.-From p)))]
+          (when (== r 0)
+            (set! r (conv int (.-param o))))
+
+          (set! o1 (.olr c (conv int32 (.-instoffset c)) r (conv int (.-Reg (.-To p))) (conv int (.-Scond p))))
+          (when (!= (.-As p) AMOVW)
+            (set! o1 bit-or (<< 1 22)))))
+
+
+      (case [22] ; /* XTAB R@>i, [R], R */
+        (set! o1 (.oprrr c p (.-As p) (conv int (.-Scond p))))
+        (switch (bit-and-not (.-Offset (.-From p)) 0xf)
+          ;; only 0/8/16/24 bits rotation is accepted
+          (case [SHIFT_RR (bit-or SHIFT_RR (<< 8 7)) (bit-or SHIFT_RR (<< 16 7)) (bit-or SHIFT_RR (<< 24 7))]
+            (set! o1 bit-or (bit-and (conv uint32 (.-Offset (.-From p))) 0xc0f)))
+          (default
+            (.Diag (.-ctxt c) "illegal shift: %v" p)))
+
+        (let [rt (.-Reg (.-To p))
+            ^{:line 1826} r (.-Reg p)]
+          (when (== r 0)
+            (set! r rt))
+
+          (set! o1 bit-or (bit-or (<< (bit-and (conv uint32 rt) 15) 12) (<< (bit-and (conv uint32 r) 15) 16)))))
+
+      (case [23] ; /* MOVW/MOVB/MOVH R@>i, R */
+        (switch (.-As p)
+          (case [AMOVW]
+            (set! o1 (.mov c p)))
+          (case [AMOVBU AMOVBS AMOVB AMOVHU AMOVHS AMOVH]
+            (set! o1 (.movxt c p)))
+          (default
+            (.Diag (.-ctxt c) "illegal combination: %v" p))))
+
+
+      (case [30] ; /* mov/movb/movbu R,L(R) */
+        (set! o1 (.omvl c p (addr (.-To p)) REGTMP))
+
+        (when (== o1 0)
+          (break))
+
+        (let [r (conv int (.-Reg (.-To p)))]
+          (when (== r 0)
+            (set! r (conv int (.-param o))))
+
+          (set! o2 (.osrr c (conv int (.-Reg (.-From p))) (bit-and REGTMP 15) r (conv int (.-Scond p))))
+          (when (!= (.-As p) AMOVW)
+            (set! o2 bit-or (<< 1 22)))))
+
+
+      (case [31] ; /* mov/movbu L(R),R -> lr[b] */
+        (set! o1 (.omvl c p (addr (.-From p)) REGTMP))
+
+        (when (== o1 0)
+          (break))
+
+        (let [r (conv int (.-Reg (.-From p)))]
+          (when (== r 0)
+            (set! r (conv int (.-param o))))
+
+          (set! o2 (.olrr c (bit-and REGTMP 15) r (conv int (.-Reg (.-To p))) (conv int (.-Scond p))))
+          (when (or (== (.-As p) AMOVBU) (== (.-As p) AMOVBS) (== (.-As p) AMOVB))
+            (set! o2 bit-or (<< 1 22)))))
+
+
+      (case [34] ; /* mov $lacon,R */
+        (set! o1 (.omvl c p (addr (.-From p)) REGTMP))
+
+        (when (== o1 0)
+          (break))
+
+
+        (set! o2 (.oprrr c p AADD (conv int (.-Scond p))))
+        (set! o2 bit-or (bit-and REGTMP 15))
+        (let [r (conv int (.-Reg (.-From p)))]
+          (when (== r 0)
+            (set! r (conv int (.-param o))))
+
+          (set! o2 bit-or (<< (bit-and (conv uint32 r) 15) 16))
+          (when (!= (.-Type (.-To p)) obj/TYPE_NONE)
+            (set! o2 bit-or (<< (bit-and (conv uint32 (.-Reg (.-To p))) 15) 12)))))
+
+
+      (case [35] ; /* mov PSR,R */
+        (set! o1 (bit-or (<< 2 23) (<< 0xf 16) (<< 0 0)))
+
+        (set! o1 bit-or (<< (bit-xor (bit-and (conv uint32 (.-Scond p)) C_SCOND) C_SCOND_XOR) 28))
+        (set! o1 bit-or (<< (bit-and (conv uint32 (.-Reg (.-From p))) 1) 22))
+        (set! o1 bit-or (<< (bit-and (conv uint32 (.-Reg (.-To p))) 15) 12)))
+
+      (case [36] ; /* mov R,PSR */
+        (set! o1 (bit-or (<< 2 23) (<< 0x2cf 12) (<< 0 4)))
+
+        (when (!= (bit-and (.-Scond p) C_FBIT) 0)
+          (set! o1 bit-xor (<< 0x010 12)))
+
+        (set! o1 bit-or (<< (bit-xor (bit-and (conv uint32 (.-Scond p)) C_SCOND) C_SCOND_XOR) 28))
+        (set! o1 bit-or (<< (bit-and (conv uint32 (.-Reg (.-To p))) 1) 22))
+        (set! o1 bit-or (<< (bit-and (conv uint32 (.-Reg (.-From p))) 15) 0)))
+
+      (case [37] ; /* mov $con,PSR */
+        (.aclass c (addr (.-From p)))
+
+        (set! o1 (bit-or (<< 2 23) (<< 0x2cf 12) (<< 0 4)))
+        (when (!= (bit-and (.-Scond p) C_FBIT) 0)
+          (set! o1 bit-xor (<< 0x010 12)))
+
+        (set! o1 bit-or (<< (bit-xor (bit-and (conv uint32 (.-Scond p)) C_SCOND) C_SCOND_XOR) 28))
+        (set! o1 bit-or (conv uint32 (immrot (conv uint32 (.-instoffset c)))))
+        (set! o1 bit-or (<< (bit-and (conv uint32 (.-Reg (.-To p))) 1) 22))
+        (set! o1 bit-or (<< (bit-and (conv uint32 (.-Reg (.-From p))) 15) 0)))
+
+      (case [38 39]
+        (switch (.-type_ o)
+          (case [38] ; /* movm $con,oreg -> stm */
+            (set! o1 (<< 0x4 25))
+
+            (set! o1 bit-or (conv uint32 (bit-and (.-Offset (.-From p)) 0xffff)))
+            (set! o1 bit-or (<< (bit-and (conv uint32 (.-Reg (.-To p))) 15) 16))
+            (.aclass c (addr (.-To p))))
+
+          (case [39] ; /* movm oreg,$con -> ldm */
+            (set! o1 (bit-or (<< 0x4 25) (<< 1 20)))
+
+            (set! o1 bit-or (conv uint32 (bit-and (.-Offset (.-To p)) 0xffff)))
+            (set! o1 bit-or (<< (bit-and (conv uint32 (.-Reg (.-From p))) 15) 16))
+            (.aclass c (addr (.-From p)))))
+
+
+        (when (!= (.-instoffset c) 0)
+          (.Diag (.-ctxt c) "offset must be zero in MOVM; %v" p))
+
+        (set! o1 bit-or (<< (bit-xor (bit-and (conv uint32 (.-Scond p)) C_SCOND) C_SCOND_XOR) 28))
+        (when (!= (bit-and (.-Scond p) C_PBIT) 0)
+          (set! o1 bit-or (<< 1 24)))
+
+        (when (!= (bit-and (.-Scond p) C_UBIT) 0)
+          (set! o1 bit-or (<< 1 23)))
+
+        (when (!= (bit-and (.-Scond p) C_WBIT) 0)
+          (set! o1 bit-or (<< 1 21))))
+
+
+      (case [40] ; /* swp oreg,reg,reg */
+        (.aclass c (addr (.-From p)))
+
+        (when (!= (.-instoffset c) 0)
+          (.Diag (.-ctxt c) "offset must be zero in SWP"))
+
+        (set! o1 (bit-or (<< 0x2 23) (<< 0x9 4)))
+        (when (!= (.-As p) ASWPW)
+          (set! o1 bit-or (<< 1 22)))
+
+        (set! o1 bit-or (<< (bit-and (conv uint32 (.-Reg (.-From p))) 15) 16))
+        (set! o1 bit-or (<< (bit-and (conv uint32 (.-Reg p)) 15) 0))
+        (set! o1 bit-or (<< (bit-and (conv uint32 (.-Reg (.-To p))) 15) 12))
+        (set! o1 bit-or (<< (bit-xor (bit-and (conv uint32 (.-Scond p)) C_SCOND) C_SCOND_XOR) 28)))
+
+      (case [41] ; /* rfe -> movm.s.w.u 0(r13),[r15] */
+        (set! o1 0xe8fd8000))
+
+      (case [50] ; /* floating point store */
+        (let [v (.regoff c (addr (.-To p)))
+
+            ^{:line 1971} r (conv int (.-Reg (.-To p)))]
+          (when (== r 0)
+            (set! r (conv int (.-param o))))
+
+          (set! o1 (.ofsr c (.-As p) (conv int (.-Reg (.-From p))) v r (conv int (.-Scond p)) p))))
+
+      (case [51] ; /* floating point load */
+        (let [v (.regoff c (addr (.-From p)))
+
+            ^{:line 1980} r (conv int (.-Reg (.-From p)))]
+          (when (== r 0)
+            (set! r (conv int (.-param o))))
+
+          (set! o1 (bit-or (.ofsr c (.-As p) (conv int (.-Reg (.-To p))) v r (conv int (.-Scond p)) p) (<< 1 20)))))
+
+      (case [52] ; /* floating point store, int32 offset UGLY */
+        (set! o1 (.omvl c p (addr (.-To p)) REGTMP))
+
+        (when (== o1 0)
+          (break))
+
+        (let [r (conv int (.-Reg (.-To p)))]
+          (when (== r 0)
+            (set! r (conv int (.-param o))))
+
+          (set! o2 (bit-or (.oprrr c p AADD (conv int (.-Scond p))) (<< (bit-and REGTMP 15) 12) (<< (bit-and REGTMP 15) 16) (<< (bit-and (conv uint32 r) 15) 0)))
+          (set! o3 (.ofsr c (.-As p) (conv int (.-Reg (.-From p))) 0 REGTMP (conv int (.-Scond p)) p))))
+
+      (case [53] ; /* floating point load, int32 offset UGLY */
+        (set! o1 (.omvl c p (addr (.-From p)) REGTMP))
+
+        (when (== o1 0)
+          (break))
+
+        (let [r (conv int (.-Reg (.-From p)))]
+          (when (== r 0)
+            (set! r (conv int (.-param o))))
+
+          (set! o2 (bit-or (.oprrr c p AADD (conv int (.-Scond p))) (<< (bit-and REGTMP 15) 12) (<< (bit-and REGTMP 15) 16) (<< (bit-and (conv uint32 r) 15) 0)))
+          (set! o3 (bit-or (.ofsr c (.-As p) (conv int (.-Reg (.-To p))) 0 (bit-and REGTMP 15) (conv int (.-Scond p)) p) (<< 1 20)))))
+
+      (case [54] ; /* floating point arith */
+        (set! o1 (.oprrr c p (.-As p) (conv int (.-Scond p))))
+
+        (let [rf (conv int (.-Reg (.-From p)))
+            ^{:line 2016} rt (conv int (.-Reg (.-To p)))
+            ^{:line 2017} r (conv int (.-Reg p))]
+          (when (== r 0)
+            (switch (.-As p)
+              (case [AMULAD AMULAF AMULSF AMULSD ANMULAF ANMULAD ANMULSF ANMULSD
+                  ^{:line 2021} AFMULAD AFMULAF AFMULSF AFMULSD AFNMULAF AFNMULAD AFNMULSF AFNMULSD]
+                (.Diag (.-ctxt c) "illegal combination: %v" p))
+              (default
+                (set! r rt))))
+
+
+
+          (set! o1 bit-or (bit-or (<< (bit-and (conv uint32 rf) 15) 0) (<< (bit-and (conv uint32 r) 15) 16) (<< (bit-and (conv uint32 rt) 15) 12)))))
+
+      (case [55] ; /* negf freg, freg */
+        (set! o1 (.oprrr c p (.-As p) (conv int (.-Scond p))))
+
+        (let [rf (conv int (.-Reg (.-From p)))
+            ^{:line 2034} rt (conv int (.-Reg (.-To p)))]
+
+          (set! o1 bit-or (bit-or (<< (bit-and (conv uint32 rf) 15) 0) (<< (bit-and (conv uint32 rt) 15) 12)))))
+
+      (case [56] ; /* move to FP[CS]R */
+        (set! o1 (bit-or (<< (bit-xor (bit-and (conv uint32 (.-Scond p)) C_SCOND) C_SCOND_XOR) 28) (<< 0xee1 16) (<< 0xa1 4)))
+
+        (set! o1 bit-or (<< (bit-and (conv uint32 (.-Reg (.-From p))) 15) 12)))
+
+      (case [57] ; /* move from FP[CS]R */
+        (set! o1 (bit-or (<< (bit-xor (bit-and (conv uint32 (.-Scond p)) C_SCOND) C_SCOND_XOR) 28) (<< 0xef1 16) (<< 0xa1 4)))
+
+        (set! o1 bit-or (<< (bit-and (conv uint32 (.-Reg (.-To p))) 15) 12)))
+
+      (case [58] ; /* movbu R,R */
+        (set! o1 (.oprrr c p AAND (conv int (.-Scond p))))
+
+        (set! o1 bit-or (conv uint32 (immrot 0xff)))
+        (let [rt (conv int (.-Reg (.-To p)))
+            ^{:line 2053} r (conv int (.-Reg (.-From p)))]
+          (when (== (.-Type (.-To p)) obj/TYPE_NONE)
+            (set! rt 0))
+
+          (when (== r 0)
+            (set! r rt))
+
+          (set! o1 bit-or (bit-or (<< (bit-and (conv uint32 r) 15) 16) (<< (bit-and (conv uint32 rt) 15) 12)))))
+
+      (case [59] ; /* movw/bu R<<I(R),R -> ldr indexed */
+        (when (== (.-Reg (.-From p)) 0)
+          (.Diag (.-ctxt c) "source operand is not a memory address: %v" p)
+          (break))
+
+        (when (!= (bit-and (.-Offset (.-From p)) (<< 1 4)) 0)
+          (.Diag (.-ctxt c) "bad shift in LDR")
+          (break))
+
+        (set! o1 (.olrr c (conv int (.-Offset (.-From p))) (conv int (.-Reg (.-From p))) (conv int (.-Reg (.-To p))) (conv int (.-Scond p))))
+        (when (== (.-As p) AMOVBU)
+          (set! o1 bit-or (<< 1 22))))
+
+
+      (case [60] ; /* movb R(R),R -> ldrsb indexed */
+        (when (== (.-Reg (.-From p)) 0)
+          (.Diag (.-ctxt c) "source operand is not a memory address: %v" p)
+          (break))
+
+        (when (!= (bit-and (.-Offset (.-From p)) (bit-not 0xf)) 0)
+          (.Diag (.-ctxt c) "bad shift: %v" p)
+          (break))
+
+        (set! o1 (.olhrr c (conv int (.-Offset (.-From p))) (conv int (.-Reg (.-From p))) (conv int (.-Reg (.-To p))) (conv int (.-Scond p))))
+        (switch (.-As p)
+          (case [AMOVB AMOVBS]
+            (set! o1 bit-xor (bit-or (<< 1 5) (<< 1 6))))
+          (case [AMOVH AMOVHS]
+            (set! o1 bit-xor (<< 1 6)))
+          (default))
+
+        (when (!= (bit-and (.-Scond p) C_UBIT) 0)
+          (set! o1 bit-and-not (<< 1 23))))
+
+
+      (case [61] ; /* movw/b/bu R,R<<[IR](R) -> str indexed */
+        (when (== (.-Reg (.-To p)) 0)
+          (.Diag (.-ctxt c) "MOV to shifter operand"))
+
+        (set! o1 (.osrr c (conv int (.-Reg (.-From p))) (conv int (.-Offset (.-To p))) (conv int (.-Reg (.-To p))) (conv int (.-Scond p))))
+        (when (or (== (.-As p) AMOVB) (== (.-As p) AMOVBS) (== (.-As p) AMOVBU))
+          (set! o1 bit-or (<< 1 22))))
+
+
+      (case [62] ; /* MOVH/MOVHS/MOVHU Reg, Reg<<0(Reg) -> strh */
+        (when (== (.-Reg (.-To p)) 0)
+          (.Diag (.-ctxt c) "MOV to shifter operand"))
+
+        (when (!= (bit-and (.-Offset (.-To p)) (bit-not 0xf)) 0)
+          (.Diag (.-ctxt c) "bad shift: %v" p))
+
+        (set! o1 (.olhrr c (conv int (.-Offset (.-To p))) (conv int (.-Reg (.-To p))) (conv int (.-Reg (.-From p))) (conv int (.-Scond p))))
+        (set! o1 bit-xor (<< 1 20))
+        (when (!= (bit-and (.-Scond p) C_UBIT) 0)
+          (set! o1 bit-and-not (<< 1 23))))
+
+
+      ;; /* reloc ops */
+      (case [64] ; /* mov/movb/movbu R,addr */
+        (set! o1 (.omvl c p (addr (.-To p)) REGTMP))
+
+        (when (== o1 0)
+          (break))
+
+        (set! o2 (.osr c (.-As p) (conv int (.-Reg (.-From p))) 0 REGTMP (conv int (.-Scond p))))
+        (when (!= (bit-and (.-flag o) LPCREL) 0)
+          (set! o3 o2)
+          (set! o2 (bit-or (.oprrr c p AADD (conv int (.-Scond p))) (bit-and REGTMP 15) (<< (bit-and REGPC 15) 16) (<< (bit-and REGTMP 15) 12)))))
+
+
+      (case [65] ; /* mov/movbu addr,R */
+        (set! o1 (.omvl c p (addr (.-From p)) REGTMP))
+
+        (when (== o1 0)
+          (break))
+
+        (set! o2 (.olr c 0 REGTMP (conv int (.-Reg (.-To p))) (conv int (.-Scond p))))
+        (when (or (== (.-As p) AMOVBU) (== (.-As p) AMOVBS) (== (.-As p) AMOVB))
+          (set! o2 bit-or (<< 1 22)))
+
+        (when (!= (bit-and (.-flag o) LPCREL) 0)
+          (set! o3 o2)
+          (set! o2 (bit-or (.oprrr c p AADD (conv int (.-Scond p))) (bit-and REGTMP 15) (<< (bit-and REGPC 15) 16) (<< (bit-and REGTMP 15) 12)))))
+
+
+      (case [101] ; /* movw tlsvar,R, local exec*/
+        (set! o1 (.omvl c p (addr (.-From p)) (conv int (.-Reg (.-To p))))))
+
+      (case [102] ; /* movw tlsvar,R, initial exec*/
+        (set! o1 (.omvl c p (addr (.-From p)) (conv int (.-Reg (.-To p)))))
+        (set! o2 (.olrr c (bit-and (conv int (.-Reg (.-To p))) 15) (bit-and REGPC 15) (conv int (.-Reg (.-To p))) (conv int (.-Scond p)))))
+
+      (case [103] ; /* word tlsvar, local exec */
+        (when (== (.-Sym (.-To p)) nil)
+          (.Diag (.-ctxt c) "nil sym in tls %v" p))
+
+        (when (!= (.-Offset (.-To p)) 0)
+          (.Diag (.-ctxt c) "offset against tls var in %v" p))
+
+        ;; This case happens with words generated in the PC stream as part of
+        ;; the literal c.pool.
+        (.AddRel (.-cursym c) (.-ctxt c) ^{:go/breaks [2 4 6 8]} (lit obj/Reloc
+            :Type objabi/R_TLS_LE
+            :Off (conv int32 (.-pc c))
+            :Siz 4
+            :Sym (.-Sym (.-To p))))
+
+        (set! o1 0))
+
+      (case [104] ; /* word tlsvar, initial exec */
+        (when (== (.-Sym (.-To p)) nil)
+          (.Diag (.-ctxt c) "nil sym in tls %v" p))
+
+        (when (!= (.-Offset (.-To p)) 0)
+          (.Diag (.-ctxt c) "offset against tls var in %v" p))
+
+        (.AddRel (.-cursym c) (.-ctxt c) ^{:go/breaks [2 4 6 8 10]} (lit obj/Reloc
+            :Type objabi/R_TLS_IE
+            :Off (conv int32 (.-pc c))
+            :Siz 4
+            :Sym (.-Sym (.-To p))
+            :Add (- (.-pc c) (.-Pc (.-Rel p)) 8 4))))
+
+
+      (case [68] ; /* floating point store -> ADDR */
+        (set! o1 (.omvl c p (addr (.-To p)) REGTMP))
+
+        (when (== o1 0)
+          (break))
+
+        (set! o2 (.ofsr c (.-As p) (conv int (.-Reg (.-From p))) 0 REGTMP (conv int (.-Scond p)) p))
+        (when (!= (bit-and (.-flag o) LPCREL) 0)
+          (set! o3 o2)
+          (set! o2 (bit-or (.oprrr c p AADD (conv int (.-Scond p))) (bit-and REGTMP 15) (<< (bit-and REGPC 15) 16) (<< (bit-and REGTMP 15) 12)))))
+
+
+      (case [69] ; /* floating point load <- ADDR */
+        (set! o1 (.omvl c p (addr (.-From p)) REGTMP))
+
+        (when (== o1 0)
+          (break))
+
+        (set! o2 (bit-or (.ofsr c (.-As p) (conv int (.-Reg (.-To p))) 0 (bit-and REGTMP 15) (conv int (.-Scond p)) p) (<< 1 20)))
+        (when (!= (bit-and (.-flag o) LPCREL) 0)
+          (set! o3 o2)
+          (set! o2 (bit-or (.oprrr c p AADD (conv int (.-Scond p))) (bit-and REGTMP 15) (<< (bit-and REGPC 15) 16) (<< (bit-and REGTMP 15) 12)))))
+
+
+      ;; /* ArmV4 ops: */
+      (case [70] ; /* movh/movhu R,O(R) -> strh */
+        (.aclass c (addr (.-To p)))
+
+        (let [r (conv int (.-Reg (.-To p)))]
+          (when (== r 0)
+            (set! r (conv int (.-param o))))
+
+          (set! o1 (.oshr c (conv int (.-Reg (.-From p))) (conv int32 (.-instoffset c)) r (conv int (.-Scond p))))))
+
+      (case [71] ; /* movb/movh/movhu O(R),R -> ldrsb/ldrsh/ldrh */
+        (.aclass c (addr (.-From p)))
+
+        (let [r (conv int (.-Reg (.-From p)))]
+          (when (== r 0)
+            (set! r (conv int (.-param o))))
+
+          (set! o1 (.olhr c (conv int32 (.-instoffset c)) r (conv int (.-Reg (.-To p))) (conv int (.-Scond p))))
+          (cond (or (== (.-As p) AMOVB) (== (.-As p) AMOVBS))
+            (set! o1 bit-xor (bit-or (<< 1 5) (<< 1 6)))
+            (or (== (.-As p) AMOVH) (== (.-As p) AMOVHS))
+            (set! o1 bit-xor (<< 1 6)))))
+
+
+      (case [72] ; /* movh/movhu R,L(R) -> strh */
+        (set! o1 (.omvl c p (addr (.-To p)) REGTMP))
+
+        (when (== o1 0)
+          (break))
+
+        (let [r (conv int (.-Reg (.-To p)))]
+          (when (== r 0)
+            (set! r (conv int (.-param o))))
+
+          (set! o2 (.oshrr c (conv int (.-Reg (.-From p))) (bit-and REGTMP 15) r (conv int (.-Scond p))))))
+
+      (case [73] ; /* movb/movh/movhu L(R),R -> ldrsb/ldrsh/ldrh */
+        (set! o1 (.omvl c p (addr (.-From p)) REGTMP))
+
+        (when (== o1 0)
+          (break))
+
+        (let [r (conv int (.-Reg (.-From p)))]
+          (when (== r 0)
+            (set! r (conv int (.-param o))))
+
+          (set! o2 (.olhrr c (bit-and REGTMP 15) r (conv int (.-Reg (.-To p))) (conv int (.-Scond p))))
+          (cond (or (== (.-As p) AMOVB) (== (.-As p) AMOVBS))
+            (set! o2 bit-xor (bit-or (<< 1 5) (<< 1 6)))
+            (or (== (.-As p) AMOVH) (== (.-As p) AMOVHS))
+            (set! o2 bit-xor (<< 1 6)))))
+
+
+      (case [74] ; /* bx $I */
+        (.Diag (.-ctxt c) "ABX $I"))
+
+      (case [75] ; /* bx O(R) */
+        (.aclass c (addr (.-To p)))
+
+        (when (!= (.-instoffset c) 0)
+          (.Diag (.-ctxt c) "non-zero offset in ABX"))
+
+
+        ;; /*
+        ;; o1 = 	c.oprrr(p, AADD, p->scond) | immrot(0) | ((REGPC&15)<<16) | ((REGLINK&15)<<12);	// mov PC, LR
+        ;; o2 = (((p->scond&C_SCOND) ^ C_SCOND_XOR)<<28) | (0x12fff<<8) | (1<<4) | ((p->to.reg&15) << 0);		// BX R
+        ;; */
+        ;; p->to.reg may be REGLINK
+        (set! o1 (.oprrr c p AADD (conv int (.-Scond p))))
+
+        (set! o1 bit-or (conv uint32 (immrot (conv uint32 (.-instoffset c)))))
+        (set! o1 bit-or (<< (bit-and (conv uint32 (.-Reg (.-To p))) 15) 16))
+        (set! o1 bit-or (<< (bit-and REGTMP 15) 12))
+        (set! o2 (bit-or (.oprrr c p AADD (conv int (.-Scond p))) (conv uint32 (immrot 0)) (<< (bit-and REGPC 15) 16) (<< (bit-and REGLINK 15) 12))) ; mov PC, LR
+        (set! o3 (bit-or (<< (bit-xor (bit-and (conv uint32 (.-Scond p)) C_SCOND) C_SCOND_XOR) 28) (<< 0x12fff 8) (<< 1 4) (bit-and REGTMP 15)))) ; BX Rtmp
+
+      (case [76] ; /* bx O(R) when returning from fn*/
+        (.Diag (.-ctxt c) "ABXRET"))
+
+      (case [77] ; /* ldrex oreg,reg */
+        (.aclass c (addr (.-From p)))
+
+        (when (!= (.-instoffset c) 0)
+          (.Diag (.-ctxt c) "offset must be zero in LDREX"))
+
+        (set! o1 (bit-or (<< 0x19 20) 0xf9f))
+        (set! o1 bit-or (<< (bit-and (conv uint32 (.-Reg (.-From p))) 15) 16))
+        (set! o1 bit-or (<< (bit-and (conv uint32 (.-Reg (.-To p))) 15) 12))
+        (set! o1 bit-or (<< (bit-xor (bit-and (conv uint32 (.-Scond p)) C_SCOND) C_SCOND_XOR) 28)))
+
+      (case [78] ; /* strex reg,oreg,reg */
+        (.aclass c (addr (.-From p)))
+
+        (when (!= (.-instoffset c) 0)
+          (.Diag (.-ctxt c) "offset must be zero in STREX"))
+
+        (when (or (== (.-Reg (.-To p)) (.-Reg (.-From p))) (== (.-Reg (.-To p)) (.-Reg p)))
+          (.Diag (.-ctxt c) "cannot use same register as both source and destination: %v" p))
+
+        (set! o1 (bit-or (<< 0x18 20) 0xf90))
+        (set! o1 bit-or (<< (bit-and (conv uint32 (.-Reg (.-From p))) 15) 16))
+        (set! o1 bit-or (<< (bit-and (conv uint32 (.-Reg p)) 15) 0))
+        (set! o1 bit-or (<< (bit-and (conv uint32 (.-Reg (.-To p))) 15) 12))
+        (set! o1 bit-or (<< (bit-xor (bit-and (conv uint32 (.-Scond p)) C_SCOND) C_SCOND_XOR) 28)))
+
+      (case [80] ; /* fmov zfcon,freg */
+        (if (== (.-As p) AMOVD) (do
+            (set! o1 0xeeb00b00) ; VMOV imm 64
+            (set! o2 (.oprrr c p ASUBD (conv int (.-Scond p)))))
+          (do
+            (set! o1 0x0eb00a00) ; VMOV imm 32
+            (set! o2 (.oprrr c p ASUBF (conv int (.-Scond p))))))
+
+
+        (let [v (conv int32 0x70) ; 1.0
+            ^{:line 2325} r (<< (bit-and (conv int (.-Reg (.-To p))) 15) 0)]
+
+          ;; movf $1.0, r
+          (set! o1 bit-or (<< (bit-xor (bit-and (conv uint32 (.-Scond p)) C_SCOND) C_SCOND_XOR) 28))
+
+          (set! o1 bit-or (<< (bit-and (conv uint32 r) 15) 12))
+          (set! o1 bit-or (<< (bit-and (conv uint32 v) 0xf) 0))
+          (set! o1 bit-or (<< (bit-and (conv uint32 v) 0xf0) 12))
+
+          ;; subf r,r,r
+          (set! o2 bit-or (bit-or (<< (bit-and (conv uint32 r) 15) 0) (<< (bit-and (conv uint32 r) 15) 16) (<< (bit-and (conv uint32 r) 15) 12)))))
+
+      (case [81] ; /* fmov sfcon,freg */
+        (set! o1 0x0eb00a00) ; VMOV imm 32
+        (when (== (.-As p) AMOVD)
+          (set! o1 0xeeb00b00)) ; VMOV imm 64
+
+        (set! o1 bit-or (<< (bit-xor (bit-and (conv uint32 (.-Scond p)) C_SCOND) C_SCOND_XOR) 28))
+        (set! o1 bit-or (<< (bit-and (conv uint32 (.-Reg (.-To p))) 15) 12))
+        (let [v (conv int32 (.chipfloat5 c (assert float64 (.-Val (.-From p)))))]
+          (set! o1 bit-or (<< (bit-and (conv uint32 v) 0xf) 0))
+          (set! o1 bit-or (<< (bit-and (conv uint32 v) 0xf0) 12))))
+
+      (case [82] ; /* fcmp freg,freg, */
+        (set! o1 (.oprrr c p (.-As p) (conv int (.-Scond p))))
+
+        (set! o1 bit-or (bit-or (<< (bit-and (conv uint32 (.-Reg p)) 15) 12) (<< (bit-and (conv uint32 (.-Reg (.-From p))) 15) 0)))
+        (set! o2 0x0ef1fa10) ; VMRS R15
+        (set! o2 bit-or (<< (bit-xor (bit-and (conv uint32 (.-Scond p)) C_SCOND) C_SCOND_XOR) 28)))
+
+      (case [83] ; /* fcmp freg,, */
+        (set! o1 (.oprrr c p (.-As p) (conv int (.-Scond p))))
+
+        (set! o1 bit-or (bit-or (<< (bit-and (conv uint32 (.-Reg (.-From p))) 15) 12) (<< 1 16)))
+        (set! o2 0x0ef1fa10) ; VMRS R15
+        (set! o2 bit-or (<< (bit-xor (bit-and (conv uint32 (.-Scond p)) C_SCOND) C_SCOND_XOR) 28)))
+
+      (case [84] ; /* movfw freg,freg - truncate float-to-fix */
+        (set! o1 (.oprrr c p (.-As p) (conv int (.-Scond p))))
+
+        (set! o1 bit-or (<< (bit-and (conv uint32 (.-Reg (.-From p))) 15) 0))
+        (set! o1 bit-or (<< (bit-and (conv uint32 (.-Reg (.-To p))) 15) 12)))
+
+      (case [85] ; /* movwf freg,freg - fix-to-float */
+        (set! o1 (.oprrr c p (.-As p) (conv int (.-Scond p))))
+
+        (set! o1 bit-or (<< (bit-and (conv uint32 (.-Reg (.-From p))) 15) 0))
+        (set! o1 bit-or (<< (bit-and (conv uint32 (.-Reg (.-To p))) 15) 12)))
+
+      ;; macro for movfw freg,FTMP; movw FTMP,reg
+      (case [86] ; /* movfw freg,reg - truncate float-to-fix */
+        (set! o1 (.oprrr c p (.-As p) (conv int (.-Scond p))))
+
+        (set! o1 bit-or (<< (bit-and (conv uint32 (.-Reg (.-From p))) 15) 0))
+        (set! o1 bit-or (<< (bit-and FREGTMP 15) 12))
+        (set! o2 (.oprrr c p (- AMOVFW) (conv int (.-Scond p))))
+        (set! o2 bit-or (<< (bit-and FREGTMP 15) 16))
+        (set! o2 bit-or (<< (bit-and (conv uint32 (.-Reg (.-To p))) 15) 12)))
+
+      ;; macro for movw reg,FTMP; movwf FTMP,freg
+      (case [87] ; /* movwf reg,freg - fix-to-float */
+        (set! o1 (.oprrr c p (- AMOVWF) (conv int (.-Scond p))))
+
+        (set! o1 bit-or (<< (bit-and (conv uint32 (.-Reg (.-From p))) 15) 12))
+        (set! o1 bit-or (<< (bit-and FREGTMP 15) 16))
+        (set! o2 (.oprrr c p (.-As p) (conv int (.-Scond p))))
+        (set! o2 bit-or (<< (bit-and FREGTMP 15) 0))
+        (set! o2 bit-or (<< (bit-and (conv uint32 (.-Reg (.-To p))) 15) 12)))
+
+      (case [88] ; /* movw reg,freg  */
+        (set! o1 (.oprrr c p (- AMOVWF) (conv int (.-Scond p))))
+
+        (set! o1 bit-or (<< (bit-and (conv uint32 (.-Reg (.-From p))) 15) 12))
+        (set! o1 bit-or (<< (bit-and (conv uint32 (.-Reg (.-To p))) 15) 16)))
+
+      (case [89] ; /* movw freg,reg  */
+        (set! o1 (.oprrr c p (- AMOVFW) (conv int (.-Scond p))))
+
+        (set! o1 bit-or (<< (bit-and (conv uint32 (.-Reg (.-From p))) 15) 16))
+        (set! o1 bit-or (<< (bit-and (conv uint32 (.-Reg (.-To p))) 15) 12)))
+
+      (case [91] ; /* ldrexd/ldrexb oreg,reg */
+        (.aclass c (addr (.-From p)))
+
+        (when (!= (.-instoffset c) 0)
+          (.Diag (.-ctxt c) "offset must be zero in LDREX"))
+
+
+        (switch (.-As p)
+          (case [ALDREXD]
+            (set! o1 (<< 0x1b 20)))
+          (case [ALDREXB]
+            (set! o1 (<< 0x1d 20))))
+
+        (set! o1 bit-or 0xf9f)
+        (set! o1 bit-or (<< (bit-and (conv uint32 (.-Reg (.-From p))) 15) 16))
+        (set! o1 bit-or (<< (bit-and (conv uint32 (.-Reg (.-To p))) 15) 12))
+        (set! o1 bit-or (<< (bit-xor (bit-and (conv uint32 (.-Scond p)) C_SCOND) C_SCOND_XOR) 28)))
+
+      (case [92] ; /* strexd/strexb reg,oreg,reg */
+        (.aclass c (addr (.-From p)))
+
+        (when (!= (.-instoffset c) 0)
+          (.Diag (.-ctxt c) "offset must be zero in STREX"))
+
+        (when (or (== (.-Reg (.-To p)) (.-Reg (.-From p))) (== (.-Reg (.-To p)) (.-Reg p)) ^:go/paren (and (== (.-As p) ASTREXD) (== (.-Reg (.-To p)) (+ (.-Reg p) 1))))
+          (.Diag (.-ctxt c) "cannot use same register as both source and destination: %v" p))
+
+
+        (switch (.-As p)
+          (case [ASTREXD]
+            (when (!= (bit-and (.-Reg p) 1) 0)
+              (.Diag (.-ctxt c) "source register must be even in STREXD: %v" p))
+
+            (set! o1 (<< 0x1a 20)))
+          (case [ASTREXB]
+            (set! o1 (<< 0x1c 20))))
+
+        (set! o1 bit-or 0xf90)
+        (set! o1 bit-or (<< (bit-and (conv uint32 (.-Reg (.-From p))) 15) 16))
+        (set! o1 bit-or (<< (bit-and (conv uint32 (.-Reg p)) 15) 0))
+        (set! o1 bit-or (<< (bit-and (conv uint32 (.-Reg (.-To p))) 15) 12))
+        (set! o1 bit-or (<< (bit-xor (bit-and (conv uint32 (.-Scond p)) C_SCOND) C_SCOND_XOR) 28)))
+
+      (case [93] ; /* movb/movh/movhu addr,R -> ldrsb/ldrsh/ldrh */
+        (set! o1 (.omvl c p (addr (.-From p)) REGTMP))
+
+        (when (== o1 0)
+          (break))
+
+        (set! o2 (.olhr c 0 REGTMP (conv int (.-Reg (.-To p))) (conv int (.-Scond p))))
+        (cond (or (== (.-As p) AMOVB) (== (.-As p) AMOVBS))
+          (set! o2 bit-xor (bit-or (<< 1 5) (<< 1 6)))
+          (or (== (.-As p) AMOVH) (== (.-As p) AMOVHS))
+          (set! o2 bit-xor (<< 1 6)))
+
+        (when (!= (bit-and (.-flag o) LPCREL) 0)
+          (set! o3 o2)
+          (set! o2 (bit-or (.oprrr c p AADD (conv int (.-Scond p))) (bit-and REGTMP 15) (<< (bit-and REGPC 15) 16) (<< (bit-and REGTMP 15) 12)))))
+
+
+      (case [94] ; /* movh/movhu R,addr -> strh */
+        (set! o1 (.omvl c p (addr (.-To p)) REGTMP))
+
+        (when (== o1 0)
+          (break))
+
+        (set! o2 (.oshr c (conv int (.-Reg (.-From p))) 0 REGTMP (conv int (.-Scond p))))
+        (when (!= (bit-and (.-flag o) LPCREL) 0)
+          (set! o3 o2)
+          (set! o2 (bit-or (.oprrr c p AADD (conv int (.-Scond p))) (bit-and REGTMP 15) (<< (bit-and REGPC 15) 16) (<< (bit-and REGTMP 15) 12)))))
+
+
+      (case [95] ; /* PLD off(reg) */
+        (set! o1 0xf5d0f000)
+
+        (set! o1 bit-or (<< (bit-and (conv uint32 (.-Reg (.-From p))) 15) 16))
+        (if (< (.-Offset (.-From p)) 0) (do
+            (set! o1 bit-and-not (<< 1 23))
+            (set! o1 bit-or (conv uint32 (bit-and (- (.-Offset (.-From p))) 0xfff))))
+
+          (set! o1 bit-or (conv uint32 (bit-and (.-Offset (.-From p)) 0xfff)))))
+
+
+      ;; This is supposed to be something that stops execution.
+      ;; It's not supposed to be reached, ever, but if it is, we'd
+      ;; like to be able to tell how we got there. Assemble as
+      ;; 0xf7fabcfd which is guaranteed to raise undefined instruction
+      ;; exception.
+      (case [96] ; /* UNDEF */
+        (set! o1 0xf7fabcfd))
+
+      (case [97] ; /* CLZ Rm, Rd */
+        (set! o1 (.oprrr c p (.-As p) (conv int (.-Scond p))))
+
+        (set! o1 bit-or (<< (bit-and (conv uint32 (.-Reg (.-To p))) 15) 12))
+        (set! o1 bit-or (<< (bit-and (conv uint32 (.-Reg (.-From p))) 15) 0)))
+
+      (case [98] ; /* MULW{T,B} Rs, Rm, Rd */
+        (set! o1 (.oprrr c p (.-As p) (conv int (.-Scond p))))
+
+        (set! o1 bit-or (<< (bit-and (conv uint32 (.-Reg (.-To p))) 15) 16))
+        (set! o1 bit-or (<< (bit-and (conv uint32 (.-Reg (.-From p))) 15) 8))
+        (set! o1 bit-or (<< (bit-and (conv uint32 (.-Reg p)) 15) 0)))
+
+      (case [99] ; /* MULAW{T,B} Rs, Rm, Rn, Rd */
+        (set! o1 (.oprrr c p (.-As p) (conv int (.-Scond p))))
+
+        (set! o1 bit-or (<< (bit-and (conv uint32 (.-Reg (.-To p))) 15) 16))
+        (set! o1 bit-or (<< (bit-and (conv uint32 (.-Reg (.-From p))) 15) 8))
+        (set! o1 bit-or (<< (bit-and (conv uint32 (.-Reg p)) 15) 0))
+        (set! o1 bit-or (conv uint32 (<< (bit-and (.-Offset (.-To p)) 15) 12))))
+
+      (case [105] ; /* divhw r,[r,]r */
+        (set! o1 (.oprrr c p (.-As p) (conv int (.-Scond p))))
+        (let [rf (conv int (.-Reg (.-From p)))
+            ^{:line 2521} rt (conv int (.-Reg (.-To p)))
+            ^{:line 2522} r (conv int (.-Reg p))]
+          (when (== r 0)
+            (set! r rt))
+
+          (set! o1 bit-or (bit-or (<< (bit-and (conv uint32 rf) 15) 8) (<< (bit-and (conv uint32 r) 15) 0) (<< (bit-and (conv uint32 rt) 15) 16)))))
+
+      (case [110] ; /* dmb [mbop | $con] */
+        (set! o1 0xf57ff050)
+        (let [mbop (conv uint32 0)]
+
+          (switch (.aclass c (addr (.-From p)))
+            (case [C_SPR]
+              (range [_ f mbOp]
+                (when (== (.-reg f) (.-Reg (.-From p)))
+                  (set! mbop (.-enc f))
+                  (break))))
+
+
+            (case [C_RCON]
+              (range [_ f mbOp]
+                (let [enc (conv uint32 (.-instoffset c))]
+                  (when (== (.-enc f) enc)
+                    (set! mbop enc)
+                    (break)))))
+
+
+            (case [C_NONE]
+              (set! mbop 0xf)))
+
+
+          (when (== mbop 0)
+            (.Diag (.-ctxt c) "illegal mb option:\n%v" p))
+
+          (set! o1 bit-or mbop)))
+
+      (case [114] ; /* AND $C_NCON, [R], R -> BIC $~C_NCON, [R], R */
+        ;; AND with an immediate that is not encodable as a rotated 8-bit
+        ;; value, but whose bitwise complement is, can be emitted as a
+        ;; single BIC instruction without a scratch register. This avoids
+        ;; the MVN+AND synthesis used by case 13, which clobbers REGTMP.
+        (.aclass c (addr (.-From p)))
+        (set! o1 (.oprrr c p ABIC (conv int (.-Scond p))))
+        (set! o1 bit-or (conv uint32 (immrot (bit-not (conv uint32 (.-instoffset c))))))
+        (let [rt (conv int (.-Reg (.-To p)))
+            ^{:line 2566} r (conv int (.-Reg p))]
+          (when (== r 0)
+            (set! r rt))
+
+          (set! o1 bit-or (bit-or (<< (bit-and (conv uint32 r) 15) 16) (<< (bit-and (conv uint32 rt) 15) 12))))))
+
+
+    (aset out 0 o1)
+    (aset out 1 o2)
+    (aset out 2 o3)
+    (aset out 3 o4)
+    (aset out 4 o5)
+    (aset out 5 o6)))
+
+
+^{:go/end 2604} (go/method movxt ^uint32 [^{:tag (* ctxt5)} c ^{:tag (* obj/Prog)} p]
+  (let [o1 (<< (bit-xor (bit-and (conv uint32 (.-Scond p)) C_SCOND) C_SCOND_XOR) 28)]
+    (switch (.-As p)
+      (case [AMOVB AMOVBS]
+        (set! o1 bit-or (bit-or (<< 0x6af 16) (<< 0x7 4))))
+      (case [AMOVH AMOVHS]
+        (set! o1 bit-or (bit-or (<< 0x6bf 16) (<< 0x7 4))))
+      (case [AMOVBU]
+        (set! o1 bit-or (bit-or (<< 0x6ef 16) (<< 0x7 4))))
+      (case [AMOVHU]
+        (set! o1 bit-or (bit-or (<< 0x6ff 16) (<< 0x7 4))))
+      (default
+        (.Diag (.-ctxt c) "illegal combination: %v" p)))
+
+    (switch (bit-and-not (.-Offset (.-From p)) 0xf)
+      ;; only 0/8/16/24 bits rotation is accepted
+      (case [SHIFT_RR (bit-or SHIFT_RR (<< 8 7)) (bit-or SHIFT_RR (<< 16 7)) (bit-or SHIFT_RR (<< 24 7))]
+        (set! o1 bit-or (bit-and (conv uint32 (.-Offset (.-From p))) 0xc0f)))
+      (default
+        (.Diag (.-ctxt c) "illegal shift: %v" p)))
+
+    (set! o1 bit-or (<< (bit-and (conv uint32 (.-Reg (.-To p))) 15) 12))
+    ^{:line 2603} o1))
+
+
+^{:go/end 2622} (go/method mov ^uint32 [^{:tag (* ctxt5)} c ^{:tag (* obj/Prog)} p]
+  (.aclass c (addr (.-From p)))
+  (let [o1 (.oprrr c p (.-As p) (conv int (.-Scond p)))]
+    (set! o1 bit-or (conv uint32 (.-Offset (.-From p))))
+    (let [rt (conv int (.-Reg (.-To p)))]
+      (when (== (.-Type (.-To p)) obj/TYPE_NONE)
+        (set! rt 0))
+
+      (let [r (conv int (.-Reg p))]
+        (cond (or (== (.-As p) AMOVW) (== (.-As p) AMVN))
+          (set! r 0)
+          (== r 0)
+          (set! r rt))
+
+        (set! o1 bit-or (bit-or (<< (bit-and (conv uint32 r) 15) 16) (<< (bit-and (conv uint32 rt) 15) 12)))
+        ^{:line 2621} o1))))
+
+
+^{:go/end 2875} (go/method oprrr ^uint32 [^{:tag (* ctxt5)} c ^{:tag (* obj/Prog)} p ^obj/As a ^int sc]
+  ^{:go/breaks [5]} (let [o (<< (bit-xor (bit-and (conv uint32 sc) C_SCOND) C_SCOND_XOR) 28)]
+    (when (!= (bit-and sc C_SBIT) 0)
+      (set! o bit-or (<< 1 20)))
+
+    (switch a
+      (case [ADIVHW]
+        (return (bit-or o (<< 0x71 20) (<< 0xf 12) (<< 0x1 4))))
+      (case [ADIVUHW]
+        (return (bit-or o (<< 0x73 20) (<< 0xf 12) (<< 0x1 4))))
+      (case [AMMUL]
+        (return (bit-or o (<< 0x75 20) (<< 0xf 12) (<< 0x1 4))))
+      (case [AMULS]
+        (return (bit-or o (<< 0x6 20) (<< 0x9 4))))
+      (case [AMMULA]
+        (return (bit-or o (<< 0x75 20) (<< 0x1 4))))
+      (case [AMMULS]
+        (return (bit-or o (<< 0x75 20) (<< 0xd 4))))
+      (case [AMULU AMUL]
+        (return (bit-or o (<< 0x0 21) (<< 0x9 4))))
+      (case [AMULA]
+        (return (bit-or o (<< 0x1 21) (<< 0x9 4))))
+      (case [AMULLU]
+        (return (bit-or o (<< 0x4 21) (<< 0x9 4))))
+      (case [AMULL]
+        (return (bit-or o (<< 0x6 21) (<< 0x9 4))))
+      (case [AMULALU]
+        (return (bit-or o (<< 0x5 21) (<< 0x9 4))))
+      (case [AMULAL]
+        (return (bit-or o (<< 0x7 21) (<< 0x9 4))))
+      (case [AAND]
+        (return (bit-or o (<< 0x0 21))))
+      (case [AEOR]
+        (return (bit-or o (<< 0x1 21))))
+      (case [ASUB]
+        (return (bit-or o (<< 0x2 21))))
+      (case [ARSB]
+        (return (bit-or o (<< 0x3 21))))
+      (case [AADD]
+        (return (bit-or o (<< 0x4 21))))
+      (case [AADC]
+        (return (bit-or o (<< 0x5 21))))
+      (case [ASBC]
+        (return (bit-or o (<< 0x6 21))))
+      (case [ARSC]
+        (return (bit-or o (<< 0x7 21))))
+      (case [ATST]
+        (return (bit-or o (<< 0x8 21) (<< 1 20))))
+      (case [ATEQ]
+        (return (bit-or o (<< 0x9 21) (<< 1 20))))
+      (case [ACMP]
+        (return (bit-or o (<< 0xa 21) (<< 1 20))))
+      (case [ACMN]
+        (return (bit-or o (<< 0xb 21) (<< 1 20))))
+      (case [AORR]
+        (return (bit-or o (<< 0xc 21))))
+
+      (case [AMOVB AMOVH AMOVW]
+        (when (!= (bit-and sc (bit-or C_PBIT C_WBIT)) 0)
+          (.Diag (.-ctxt c) "invalid .P/.W suffix: %v" p))
+
+        (return (bit-or o (<< 0xd 21))))
+      (case [ABIC]
+        (return (bit-or o (<< 0xe 21))))
+      (case [AMVN]
+        (return (bit-or o (<< 0xf 21))))
+      (case [ASLL]
+        (return (bit-or o (<< 0xd 21) (<< 0 5))))
+      (case [ASRL]
+        (return (bit-or o (<< 0xd 21) (<< 1 5))))
+      (case [ASRA]
+        (return (bit-or o (<< 0xd 21) (<< 2 5))))
+      (case [ASWI]
+        (return (bit-or o (<< 0xf 24))))
+
+      (case [AADDD]
+        (return (bit-or o (<< 0xe 24) (<< 0x3 20) (<< 0xb 8) (<< 0 4))))
+      (case [AADDF]
+        (return (bit-or o (<< 0xe 24) (<< 0x3 20) (<< 0xa 8) (<< 0 4))))
+      (case [ASUBD]
+        (return (bit-or o (<< 0xe 24) (<< 0x3 20) (<< 0xb 8) (<< 4 4))))
+      (case [ASUBF]
+        (return (bit-or o (<< 0xe 24) (<< 0x3 20) (<< 0xa 8) (<< 4 4))))
+      (case [AMULD]
+        (return (bit-or o (<< 0xe 24) (<< 0x2 20) (<< 0xb 8) (<< 0 4))))
+      (case [AMULF]
+        (return (bit-or o (<< 0xe 24) (<< 0x2 20) (<< 0xa 8) (<< 0 4))))
+      (case [ANMULD]
+        (return (bit-or o (<< 0xe 24) (<< 0x2 20) (<< 0xb 8) (<< 0x4 4))))
+      (case [ANMULF]
+        (return (bit-or o (<< 0xe 24) (<< 0x2 20) (<< 0xa 8) (<< 0x4 4))))
+      (case [AMULAD]
+        (return (bit-or o (<< 0xe 24) (<< 0xb 8))))
+      (case [AMULAF]
+        (return (bit-or o (<< 0xe 24) (<< 0xa 8))))
+      (case [AMULSD]
+        (return (bit-or o (<< 0xe 24) (<< 0xb 8) (<< 0x4 4))))
+      (case [AMULSF]
+        (return (bit-or o (<< 0xe 24) (<< 0xa 8) (<< 0x4 4))))
+      (case [ANMULAD]
+        (return (bit-or o (<< 0xe 24) (<< 0x1 20) (<< 0xb 8) (<< 0x4 4))))
+      (case [ANMULAF]
+        (return (bit-or o (<< 0xe 24) (<< 0x1 20) (<< 0xa 8) (<< 0x4 4))))
+      (case [ANMULSD]
+        (return (bit-or o (<< 0xe 24) (<< 0x1 20) (<< 0xb 8))))
+      (case [ANMULSF]
+        (return (bit-or o (<< 0xe 24) (<< 0x1 20) (<< 0xa 8))))
+      (case [AFMULAD]
+        (return (bit-or o (<< 0xe 24) (<< 0xa 20) (<< 0xb 8))))
+      (case [AFMULAF]
+        (return (bit-or o (<< 0xe 24) (<< 0xa 20) (<< 0xa 8))))
+      (case [AFMULSD]
+        (return (bit-or o (<< 0xe 24) (<< 0xa 20) (<< 0xb 8) (<< 0x4 4))))
+      (case [AFMULSF]
+        (return (bit-or o (<< 0xe 24) (<< 0xa 20) (<< 0xa 8) (<< 0x4 4))))
+      (case [AFNMULAD]
+        (return (bit-or o (<< 0xe 24) (<< 0x9 20) (<< 0xb 8) (<< 0x4 4))))
+      (case [AFNMULAF]
+        (return (bit-or o (<< 0xe 24) (<< 0x9 20) (<< 0xa 8) (<< 0x4 4))))
+      (case [AFNMULSD]
+        (return (bit-or o (<< 0xe 24) (<< 0x9 20) (<< 0xb 8))))
+      (case [AFNMULSF]
+        (return (bit-or o (<< 0xe 24) (<< 0x9 20) (<< 0xa 8))))
+      (case [ADIVD]
+        (return (bit-or o (<< 0xe 24) (<< 0x8 20) (<< 0xb 8) (<< 0 4))))
+      (case [ADIVF]
+        (return (bit-or o (<< 0xe 24) (<< 0x8 20) (<< 0xa 8) (<< 0 4))))
+      (case [ASQRTD]
+        (return (bit-or o (<< 0xe 24) (<< 0xb 20) (<< 1 16) (<< 0xb 8) (<< 0xc 4))))
+      (case [ASQRTF]
+        (return (bit-or o (<< 0xe 24) (<< 0xb 20) (<< 1 16) (<< 0xa 8) (<< 0xc 4))))
+      (case [AABSD]
+        (return (bit-or o (<< 0xe 24) (<< 0xb 20) (<< 0 16) (<< 0xb 8) (<< 0xc 4))))
+      (case [AABSF]
+        (return (bit-or o (<< 0xe 24) (<< 0xb 20) (<< 0 16) (<< 0xa 8) (<< 0xc 4))))
+      (case [ANEGD]
+        (return (bit-or o (<< 0xe 24) (<< 0xb 20) (<< 1 16) (<< 0xb 8) (<< 0x4 4))))
+      (case [ANEGF]
+        (return (bit-or o (<< 0xe 24) (<< 0xb 20) (<< 1 16) (<< 0xa 8) (<< 0x4 4))))
+      (case [ACMPD]
+        (return (bit-or o (<< 0xe 24) (<< 0xb 20) (<< 4 16) (<< 0xb 8) (<< 0xc 4))))
+      (case [ACMPF]
+        (return (bit-or o (<< 0xe 24) (<< 0xb 20) (<< 4 16) (<< 0xa 8) (<< 0xc 4))))
+
+      (case [AMOVF]
+        (return (bit-or o (<< 0xe 24) (<< 0xb 20) (<< 0 16) (<< 0xa 8) (<< 4 4))))
+      (case [AMOVD]
+        (return (bit-or o (<< 0xe 24) (<< 0xb 20) (<< 0 16) (<< 0xb 8) (<< 4 4))))
+
+      (case [AMOVDF]
+        (return (bit-or o (<< 0xe 24) (<< 0xb 20) (<< 7 16) (<< 0xa 8) (<< 0xc 4) (<< 1 8)))) ; dtof
+      (case [AMOVFD]
+        (return (bit-or o (<< 0xe 24) (<< 0xb 20) (<< 7 16) (<< 0xa 8) (<< 0xc 4) (<< 0 8)))) ; dtof
+
+      (case [AMOVWF]
+        (when (== (bit-and sc C_UBIT) 0)
+          (set! o bit-or (<< 1 7))) ; /* signed */
+
+        (return (bit-or o (<< 0xe 24) (<< 0xb 20) (<< 8 16) (<< 0xa 8) (<< 4 4) (<< 0 18) (<< 0 8)))) ; toint, double
+
+      (case [AMOVWD]
+        (when (== (bit-and sc C_UBIT) 0)
+          (set! o bit-or (<< 1 7))) ; /* signed */
+
+        (return (bit-or o (<< 0xe 24) (<< 0xb 20) (<< 8 16) (<< 0xa 8) (<< 4 4) (<< 0 18) (<< 1 8)))) ; toint, double
+
+      (case [AMOVFW]
+        (when (== (bit-and sc C_UBIT) 0)
+          (set! o bit-or (<< 1 16))) ; /* signed */
+
+        (return (bit-or o (<< 0xe 24) (<< 0xb 20) (<< 8 16) (<< 0xa 8) (<< 4 4) (<< 1 18) (<< 0 8) (<< 1 7)))) ; toint, double, trunc
+
+      (case [AMOVDW]
+        (when (== (bit-and sc C_UBIT) 0)
+          (set! o bit-or (<< 1 16))) ; /* signed */
+
+        (return (bit-or o (<< 0xe 24) (<< 0xb 20) (<< 8 16) (<< 0xa 8) (<< 4 4) (<< 1 18) (<< 1 8) (<< 1 7)))) ; toint, double, trunc
+
+      (case [(- AMOVWF)] ; copy WtoF
+        (return (bit-or o (<< 0xe 24) (<< 0x0 20) (<< 0xb 8) (<< 1 4))))
+
+      (case [(- AMOVFW)] ; copy FtoW
+        (return (bit-or o (<< 0xe 24) (<< 0x1 20) (<< 0xb 8) (<< 1 4))))
+
+      (case [(- ACMP)] ; cmp imm
+        (return (bit-or o (<< 0x3 24) (<< 0x5 20))))
+
+      (case [ABFX]
+        (return (bit-or o (<< 0x3d 21) (<< 0x5 4))))
+
+      (case [ABFXU]
+        (return (bit-or o (<< 0x3f 21) (<< 0x5 4))))
+
+      (case [ABFC]
+        (return (bit-or o (<< 0x3e 21) 0x1f)))
+
+      (case [ABFI]
+        (return (bit-or o (<< 0x3e 21) (<< 0x1 4))))
+
+      (case [AXTAB]
+        (return (bit-or o (<< 0x6a 20) (<< 0x7 4))))
+
+      (case [AXTAH]
+        (return (bit-or o (<< 0x6b 20) (<< 0x7 4))))
+
+      (case [AXTABU]
+        (return (bit-or o (<< 0x6e 20) (<< 0x7 4))))
+
+      (case [AXTAHU]
+        (return (bit-or o (<< 0x6f 20) (<< 0x7 4))))
+
+      ;; CLZ doesn't support .nil
+      (case [ACLZ]
+        (return (bit-or (bit-and o (<< 0xf 28)) (<< 0x16f 16) (<< 0xf1 4))))
+
+      (case [AREV]
+        (return (bit-or (bit-and o (<< 0xf 28)) (<< 0x6bf 16) (<< 0xf3 4))))
+
+      (case [AREV16]
+        (return (bit-or (bit-and o (<< 0xf 28)) (<< 0x6bf 16) (<< 0xfb 4))))
+
+      (case [AREVSH]
+        (return (bit-or (bit-and o (<< 0xf 28)) (<< 0x6ff 16) (<< 0xfb 4))))
+
+      (case [ARBIT]
+        (return (bit-or (bit-and o (<< 0xf 28)) (<< 0x6ff 16) (<< 0xf3 4))))
+
+      (case [AMULWT]
+        (return (bit-or (bit-and o (<< 0xf 28)) (<< 0x12 20) (<< 0xe 4))))
+
+      (case [AMULWB]
+        (return (bit-or (bit-and o (<< 0xf 28)) (<< 0x12 20) (<< 0xa 4))))
+
+      (case [AMULBB]
+        (return (bit-or (bit-and o (<< 0xf 28)) (<< 0x16 20) (<< 0x8 4))))
+
+      (case [AMULAWT]
+        (return (bit-or (bit-and o (<< 0xf 28)) (<< 0x12 20) (<< 0xc 4))))
+
+      (case [AMULAWB]
+        (return (bit-or (bit-and o (<< 0xf 28)) (<< 0x12 20) (<< 0x8 4))))
+
+      (case [AMULABB]
+        (return (bit-or (bit-and o (<< 0xf 28)) (<< 0x10 20) (<< 0x8 4))))
+
+      (case [ABL] ; BLX REG
+        (return (bit-or (bit-and o (<< 0xf 28)) (<< 0x12fff3 4)))))
+
+
+    (.Diag (.-ctxt c) "%v: bad rrr %d" p a)
+    0))
+
+
+^{:go/breaks [9] :go/end 2925} (go/method opbra ^uint32 [^{:tag (* ctxt5)} c ^{:tag (* obj/Prog)} p ^obj/As a ^int sc]
+  (set! sc bit-and C_SCOND)
+  (set! sc bit-xor C_SCOND_XOR)
+  (when (or (== a ABL) (== a obj/ADUFFZERO) (== a obj/ADUFFCOPY))
+    (return (bit-or (<< (conv uint32 sc) 28) (<< 0x5 25) (<< 0x1 24))))
+
+  (when (!= sc 0xe)
+    (.Diag (.-ctxt c) "%v: .COND on bcond instruction" p))
+
+  (switch a
+    (case [ABEQ]
+      (return (bit-or (<< 0x0 28) (<< 0x5 25))))
+    (case [ABNE]
+      (return (bit-or (<< 0x1 28) (<< 0x5 25))))
+    (case [ABCS]
+      (return (bit-or (<< 0x2 28) (<< 0x5 25))))
+    (case [ABHS]
+      (return (bit-or (<< 0x2 28) (<< 0x5 25))))
+    (case [ABCC]
+      (return (bit-or (<< 0x3 28) (<< 0x5 25))))
+    (case [ABLO]
+      (return (bit-or (<< 0x3 28) (<< 0x5 25))))
+    (case [ABMI]
+      (return (bit-or (<< 0x4 28) (<< 0x5 25))))
+    (case [ABPL]
+      (return (bit-or (<< 0x5 28) (<< 0x5 25))))
+    (case [ABVS]
+      (return (bit-or (<< 0x6 28) (<< 0x5 25))))
+    (case [ABVC]
+      (return (bit-or (<< 0x7 28) (<< 0x5 25))))
+    (case [ABHI]
+      (return (bit-or (<< 0x8 28) (<< 0x5 25))))
+    (case [ABLS]
+      (return (bit-or (<< 0x9 28) (<< 0x5 25))))
+    (case [ABGE]
+      (return (bit-or (<< 0xa 28) (<< 0x5 25))))
+    (case [ABLT]
+      (return (bit-or (<< 0xb 28) (<< 0x5 25))))
+    (case [ABGT]
+      (return (bit-or (<< 0xc 28) (<< 0x5 25))))
+    (case [ABLE]
+      (return (bit-or (<< 0xd 28) (<< 0x5 25))))
+    (case [AB]
+      (return (bit-or (<< 0xe 28) (<< 0x5 25)))))
+
+
+  (.Diag (.-ctxt c) "%v: bad bra %v" p a)
+  0)
+
+
+^{:go/end 2954} (go/method olr ^uint32 [^{:tag (* ctxt5)} c ^int32 v ^int b ^int r ^int sc]
+  (let [o (<< (bit-xor (bit-and (conv uint32 sc) C_SCOND) C_SCOND_XOR) 28)]
+    (when (== (bit-and sc C_PBIT) 0)
+      (set! o bit-or (<< 1 24)))
+
+    (when (== (bit-and sc C_UBIT) 0)
+      (set! o bit-or (<< 1 23)))
+
+    (when (!= (bit-and sc C_WBIT) 0)
+      (set! o bit-or (<< 1 21)))
+
+    (set! o bit-or (bit-or (<< 1 26) (<< 1 20)))
+    (when (< v 0)
+      (when (!= (bit-and sc C_UBIT) 0)
+        (.Diag (.-ctxt c) ".U on neg offset"))
+
+      (set! v (- v))
+      (set! o bit-xor (<< 1 23)))
+
+
+    (when (or (>= v (<< 1 12)) (< v 0))
+      (.Diag (.-ctxt c) "literal span too large: %d (R%d)\n%v" v b (.-printp c)))
+
+    (set! o bit-or (conv uint32 v))
+    (set! o bit-or (<< (bit-and (conv uint32 b) 15) 16))
+    (set! o bit-or (<< (bit-and (conv uint32 r) 15) 12))
+    ^{:line 2953} o))
+
+
+^{:go/end 2977} (go/method olhr ^uint32 [^{:tag (* ctxt5)} c ^int32 v ^int b ^int r ^int sc]
+  (let [o (<< (bit-xor (bit-and (conv uint32 sc) C_SCOND) C_SCOND_XOR) 28)]
+    (when (== (bit-and sc C_PBIT) 0)
+      (set! o bit-or (<< 1 24)))
+
+    (when (!= (bit-and sc C_WBIT) 0)
+      (set! o bit-or (<< 1 21)))
+
+    (set! o bit-or (bit-or (<< 1 23) (<< 1 20) (<< 0xb 4)))
+    (when (< v 0)
+      (set! v (- v))
+      (set! o bit-xor (<< 1 23)))
+
+
+    (when (or (>= v (<< 1 8)) (< v 0))
+      (.Diag (.-ctxt c) "literal span too large: %d (R%d)\n%v" v b (.-printp c)))
+
+    (set! o bit-or (bit-or (bit-and (conv uint32 v) 0xf) (<< (>> (conv uint32 v) 4) 8) (<< 1 22)))
+    (set! o bit-or (<< (bit-and (conv uint32 b) 15) 16))
+    (set! o bit-or (<< (bit-and (conv uint32 r) 15) 12))
+    ^{:line 2976} o))
+
+
+^{:go/end 2985} (go/method osr ^uint32 [^{:tag (* ctxt5)} c ^obj/As a ^int r ^int32 v ^int b ^int sc]
+  (let [o (bit-xor (.olr c v b r sc) (<< 1 20))]
+    (when (!= a AMOVW)
+      (set! o bit-or (<< 1 22)))
+
+    ^{:line 2984} o))
+
+
+^{:go/end 2990} (go/method oshr ^uint32 [^{:tag (* ctxt5)} c ^int r ^int32 v ^int b ^int sc]
+  (let [o (bit-xor (.olhr c v b r sc) (<< 1 20))]
+    ^{:line 2989} o))
+
+
+^{:go/end 2994} (go/method osrr ^uint32 [^{:tag (* ctxt5)} c ^int r ^int i ^int b ^int sc]
+  (bit-xor (.olr c (conv int32 i) b r sc) (bit-or (<< 1 25) (<< 1 20))))
+
+
+^{:go/end 2998} (go/method oshrr ^uint32 [^{:tag (* ctxt5)} c ^int r ^int i ^int b ^int sc]
+  (bit-xor (.olhr c (conv int32 i) b r sc) (bit-or (<< 1 22) (<< 1 20))))
+
+
+^{:go/end 3002} (go/method olrr ^uint32 [^{:tag (* ctxt5)} c ^int i ^int b ^int r ^int sc]
+  (bit-xor (.olr c (conv int32 i) b r sc) (<< 1 25)))
+
+
+^{:go/end 3006} (go/method olhrr ^uint32 [^{:tag (* ctxt5)} c ^int i ^int b ^int r ^int sc]
+  (bit-xor (.olhr c (conv int32 i) b r sc) (<< 1 22)))
+
+
+^{:go/end 3045} (go/method ofsr ^uint32 [^{:tag (* ctxt5)} c ^obj/As a ^int r ^int32 v ^int b ^int sc ^{:tag (* obj/Prog)} p]
+  (let [o (<< (bit-xor (bit-and (conv uint32 sc) C_SCOND) C_SCOND_XOR) 28)]
+    (when (== (bit-and sc C_PBIT) 0)
+      (set! o bit-or (<< 1 24)))
+
+    (when (!= (bit-and sc C_WBIT) 0)
+      (set! o bit-or (<< 1 21)))
+
+    (set! o bit-or (bit-or (<< 6 25) (<< 1 24) (<< 1 23) (<< 10 8)))
+    (when (< v 0)
+      (set! v (- v))
+      (set! o bit-xor (<< 1 23)))
+
+
+    (cond (!= (bit-and v 3) 0)
+      (.Diag (.-ctxt c) "odd offset for floating point op: %d\n%v" v p)
+      (or (>= v (<< 1 10)) (< v 0))
+      (.Diag (.-ctxt c) "literal span too large: %d\n%v" v p))
+
+    (set! o bit-or (bit-and (>> (conv uint32 v) 2) 0xFF))
+    (set! o bit-or (<< (bit-and (conv uint32 b) 15) 16))
+    (set! o bit-or (<< (bit-and (conv uint32 r) 15) 12))
+
+    (switch a
+      (default
+        (.Diag (.-ctxt c) "bad fst %v" a)
+        (fallthrough))
+
+      (case [AMOVD]
+        (set! o bit-or (<< 1 8))
+        (fallthrough))
+
+      (case [AMOVF]
+        (break)))
+
+
+    ^{:line 3044} o))
+
+
+
+^{:go/end 3055} (go/method omvs "MOVW $\"lower 16-bit\", Reg\n" ^uint32 [^{:tag (* ctxt5)} c ^{:tag (* obj/Prog)} p ^{:tag (* obj/Addr)} a ^int dr]
+  (let [o1 (<< (bit-xor (bit-and (conv uint32 (.-Scond p)) C_SCOND) C_SCOND_XOR) 28)]
+    (set! o1 bit-or (<< 0x30 20))
+    (set! o1 bit-or (<< (bit-and (conv uint32 dr) 15) 12))
+    (set! o1 bit-or (bit-and (conv uint32 (.-Offset a)) 0x0fff))
+    (set! o1 bit-or (<< (bit-and (conv uint32 (.-Offset a)) 0xf000) 4))
+    ^{:line 3054} o1))
+
+
+
+^{:go/end 3068} (go/method omvr "MVN $C_NCON, Reg -> MOVW $C_RCON, Reg\n" ^uint32 [^{:tag (* ctxt5)} c ^{:tag (* obj/Prog)} p ^{:tag (* obj/Addr)} a ^int dr]
+  (let [o1 (.oprrr c p AMOVW (conv int (.-Scond p)))]
+    (set! o1 bit-or (<< (bit-and (conv uint32 dr) 15) 12))
+    (let [v (immrot (bit-not (conv uint32 (.-Offset a))))]
+      (when (== v 0)
+        (.Diag (.-ctxt c) "%v: missing literal" p)
+        (return 0))
+
+      (set! o1 bit-or (conv uint32 v))
+      ^{:line 3067} o1)))
+
+
+^{:go/end 3089} (go/method omvl ^uint32 [^{:tag (* ctxt5)} c ^{:tag (* obj/Prog)} p ^{:tag (* obj/Addr)} a ^int dr]
+  (let [^uint32 o1 (zero uint32)]
+    (if (== (.-Pool p) nil) (do
+        (.aclass c a)
+        (let [v (immrot (bit-not (conv uint32 (.-instoffset c))))]
+          (when (== v 0)
+            (.Diag (.-ctxt c) "%v: missing literal" p)
+            (return 0))
+
+
+          (set! o1 (.oprrr c p AMVN (bit-and (conv int (.-Scond p)) C_SCOND)))
+          (set! o1 bit-or (conv uint32 v))
+          (set! o1 bit-or (<< (bit-and (conv uint32 dr) 15) 12))))
+
+      (let [v (conv int32 (- (.-Pc (.-Pool p)) (.-Pc p) 8))]
+        (set! o1 (.olr c v REGPC dr (bit-and (conv int (.-Scond p)) C_SCOND)))))
+
+
+    ^{:line 3088} o1))
+
+
+^{:go/breaks [[4 3096]] :go/end 3097} (go/method chipzero5 ^int [^{:tag (* ctxt5)} c ^float64 e]
+  ;; We use GOARM.Version=7 and !GOARM.SoftFloat to gate the use of VFPv3 vmov (imm) instructions.
+  (when (or (< (.-Version buildcfg/GOARM) 7) (.-SoftFloat buildcfg/GOARM) (!= (math/Float64bits e) 0))
+    (return -1))
+
+  0)
+
+
+^{:go/end 3133} (go/method chipfloat5 ^int [^{:tag (* ctxt5)} c ^float64 e]
+  ;; We use GOARM.Version=7 and !GOARM.SoftFloat to gate the use of VFPv3 vmov (imm) instructions.
+  (when (or (< (.-Version buildcfg/GOARM) 7) (.-SoftFloat buildcfg/GOARM))
+    (return -1))
+
+
+  (let [ei (math/Float64bits e)
+      ^{:line 3106} l (conv uint32 ei)
+      ^{:line 3107} h (conv uint32 (>> ei 32))]
+
+    (when (or (!= l 0) (!= (bit-and h 0xffff) 0))
+      (return -1))
+
+    (let [h1 (bit-and h 0x7fc00000)]
+      (when (and (!= h1 0x40000000) (!= h1 0x3fc00000))
+        (return -1))
+
+      (let [n 0]
+
+        ;; sign bit (a)
+        (when (!= (bit-and h 0x80000000) 0)
+          (set! n bit-or (<< 1 7)))
+
+
+        ;; exp sign bit (b)
+        (when (== h1 0x3fc00000)
+          (set! n bit-or (<< 1 6)))
+
+
+        ;; rest of exp and mantissa (cd-efgh)
+        (set! n bit-or (conv int (bit-and (>> h 16) 0x3f)))
+
+        ;;print("match %.8lux %.8lux %d\n", l, h, n);
+        ^{:line 3132} n))))
+
+
+^{:go/end 3142} (go/func nocache [^{:tag (* obj/Prog)} p]
+  (set! (.-Optab p) 0)
+  (set! (.-Class (.-From p)) 0)
+  (when (!= (.GetFrom3 p) nil)
+    (set! (.-Class (.GetFrom3 p)) 0))
+
+  (set! (.-Class (.-To p)) 0))

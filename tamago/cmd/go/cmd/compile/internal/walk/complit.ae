@@ -1,0 +1,632 @@
+;; Copyright 2009 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.cmd.compile.internal.walk) (go/file "complit.go" :imports [
+
+
+    ^{:line 8} [base "cmd/compile/internal/base"]
+    ^{:line 9} [ir "cmd/compile/internal/ir"]
+    ^{:line 10} [ssa "cmd/compile/internal/ssa"]
+    ^{:line 11} [staticdata "cmd/compile/internal/staticdata"]
+    ^{:line 12} [staticinit "cmd/compile/internal/staticinit"]
+    ^{:line 13} [typecheck "cmd/compile/internal/typecheck"]
+    ^{:line 14} [types "cmd/compile/internal/types"]
+    ^{:line 15} [obj "cmd/internal/obj"]])
+
+
+
+
+^{:go/end 32} (go/func walkCompLit "walkCompLit walks a composite literal node:\nOARRAYLIT, OSLICELIT, OMAPLIT, OSTRUCTLIT (all CompLitExpr), or OPTRLIT (AddrExpr).\n" ^ir/Node [^ir/Node n ^{:tag (* ir/Nodes)} init]
+  (when (and (isStaticCompositeLiteral n) (not (ssa/CanSSA (.Type n))))
+    (let [n (assert (* ir/CompLitExpr) n) ; not OPTRLIT
+        ;; n can be directly represented in the read-only data section.
+        ;; Make direct reference to the static data. See issue 12841.
+        ^{:line 25} vstat (readonlystaticname ^{:go/via [miniExpr]} (.Type n))]
+      (fixedlit initKindStatic n vstat init)
+      (return (typecheck/Expr vstat))))
+
+  (let [var_ (typecheck/TempAt base/Pos ir/CurFunc (.Type n))]
+    (anylit n var_ init)
+    ^{:line 31} var_))
+
+
+
+^{:go/end 41} (go/func readonlystaticname "readonlystaticname returns a name backed by a read-only static data symbol.\n" ^{:tag (* ir/Name)} [^{:tag (* types/Type)} t]
+  (let [n (staticinit/StaticName t)]
+    (.MarkReadonly n)
+    ^{:go/via [Attribute]} (.Set (.Linksym n) obj/AttrContentAddressable true)
+    ^{:go/via [Attribute]} (.Set (.Linksym n) obj/AttrLocal true)
+    ^{:line 40} n))
+
+
+^{:go/end 49} (go/func isSimpleName ^bool [^ir/Node nn]
+  (when (or (!= (.Op nn) ir/ONAME) (ir/IsBlank nn))
+    (return false))
+
+  (let [n (assert (* ir/Name) nn)]
+    (.OnStack n)))
+
+
+
+(go/type initGenType "initGenType is a bitmap indicating the types of generation that will occur for a static value.\n" uint8)
+
+(go/const
+  ^{:line 55} [^{:tag initGenType :val 1} initDynamic (<< 1 iota)] ; contains some dynamic values, for which init code will be generated
+  ^{:line 56} [^{:val 2} initConst]) ; contains some constant values, which may be written into data symbols
+
+
+
+
+^{:go/end 102} (go/func getdyn "getdyn calculates the initGenType for n.\nIf top is false, getdyn is recursing.\n" ^initGenType [^ir/Node n ^bool top]
+  (switch (.Op n)
+    (default
+      (when (isStaticLiteral n)
+        (return initConst))
+
+      (return initDynamic))
+
+    (case [ir/OSLICELIT]
+      (let [n (assert (* ir/CompLitExpr) n)]
+        (when (not top)
+          (return initDynamic))
+
+        (when (> (/ (.-Len n) 4) (conv int64 (len (.-List n))))
+          ;; <25% of entries have explicit values.
+          ;; Very rough estimation, it takes 4 bytes of instructions
+          ;; to initialize 1 byte of result. So don't use a static
+          ;; initializer if the dynamic initialization code would be
+          ;; smaller than the static value.
+          ;; See issue 23780.
+          (return initDynamic))))
+
+
+    (case [ir/OARRAYLIT ir/OSTRUCTLIT]))
+
+  (let [lit (assert (* ir/CompLitExpr) n)
+
+      ^{:line 88 :tag initGenType} mode (zero initGenType)]
+    (range [_ n1 (.-List lit)]
+      (switch (.Op n1)
+        (case [ir/OKEY]
+          (set! n1 (.-Value (assert (* ir/KeyExpr) n1))))
+        (case [ir/OSTRUCTKEY]
+          (set! n1 (.-Value (assert (* ir/StructKeyExpr) n1)))))
+
+      (set! mode bit-or (getdyn n1 false))
+      (when (== mode (bit-or initDynamic initConst))
+        (break)))
+
+
+    ^{:line 101} mode))
+
+
+
+
+^{:go/end 110} (go/func isStaticLiteral "isStaticLiteral reports whether n is a compile-time (non-composite)\nconstant, which can be represented in the read-only data section.\n" ^bool [^ir/Node n]
+  ;; A string reference requires a relocation, not allowed
+  ;; in static data in FIPS mode.
+  (and (ir/IsConstNode n) (not (and (.IsFIPS base/Ctxt) (.IsString (.Type n))))))
+
+
+
+
+
+^{:go/breaks [[5 161]] :go/end 162} (go/func isStaticCompositeLiteral "isStaticCompositeLiteral reports whether a composite literal n\nis a compile-time constant, which can be represented in the\nread-only data section.\n" ^bool [^ir/Node n]
+  (switch (.Op n)
+    (case [ir/OSLICELIT]
+      (return false))
+    (case [ir/OARRAYLIT]
+      (let [n (assert (* ir/CompLitExpr) n)]
+        (range [_ r (.-List n)]
+          (when (== (.Op r) ir/OKEY)
+            (set! r (.-Value (assert (* ir/KeyExpr) r))))
+
+          (when (not (isStaticCompositeLiteral r))
+            (return false)))
+
+
+        (return true)))
+    (case [ir/OSTRUCTLIT]
+      (let [n (assert (* ir/CompLitExpr) n)]
+        (range [_ r (.-List n)]
+          (let [r (assert (* ir/StructKeyExpr) r)]
+            (when (not (isStaticCompositeLiteral (.-Value r)))
+              (return false))))
+
+
+        (return true)))
+    (case [ir/ONIL]
+      (return true))
+    (case [ir/OLITERAL]
+      (return (isStaticLiteral n)))
+    (case [ir/OCONVIFACE]
+      ;; See staticinit.Schedule.StaticAssign's OCONVIFACE case for comments.
+      (when (and (.IsFIPS base/Ctxt) (.-Flag_shared base/Ctxt))
+        (return false))
+
+      (let [n (assert (* ir/ConvExpr) n)
+          ^{:line 149} val (conv ir/Node n)]
+        (while (== (.Op val) ir/OCONVIFACE)
+          (set! val (.-X (assert (* ir/ConvExpr) val))))
+
+        (when (.IsInterface (.Type val))
+          (return (== (.Op val) ir/ONIL)))
+
+        (when (and (types/IsDirectIface (.Type val)) (== (.Op val) ir/ONIL))
+          (return true))
+
+        (return (isStaticCompositeLiteral val)))))
+
+  false)
+
+
+
+
+
+
+
+
+
+
+
+(go/type initKind "initKind is a kind of static initialization: static, dynamic, or local.\nStatic initialization represents literals and\nliteral components of composite literals.\nDynamic initialization represents non-literals and\nnon-literal components of composite literals.\nLocalCode initialization represents initialization\nthat occurs purely in generated code local to the function of use.\nInitialization code is sometimes generated in passes,\nfirst static then dynamic.\n" uint8)
+
+(go/const
+  ^{:line 176} [^{:tag initKind :val 1} initKindStatic (+ iota 1)]
+  ^{:line 177} [^{:val 2} initKindDynamic]
+  ^{:line 178} [^{:val 3} initKindLocalCode])
+
+
+
+
+^{:go/end 255} (go/func fixedlit "fixedlit handles struct, array, and slice literals.\nTODO: expand documentation.\n" [^initKind kind ^{:tag (* ir/CompLitExpr)} n ^ir/Node var_ ^{:tag (* ir/Nodes)} init]
+  (let [isBlank (== var_ ir/BlankNode)
+      ^{:line 185 :tag (func [ir/Node] [^ir/Node a ^ir/Node value])} splitnode (zero (func [ir/Node] [^ir/Node a ^ir/Node value]))]
+    (switch ^{:go/via [miniExpr miniNode]} (.Op n)
+      (case [ir/OARRAYLIT ir/OSLICELIT]
+        (let [^int64 k (zero int64)]
+          (set! splitnode ^{:go/end 201} (fn [^ir/Node r] :results [ir/Node ir/Node]
+              (when (== (.Op r) ir/OKEY)
+                (let [kv (assert (* ir/KeyExpr) r)]
+                  (set! k (typecheck/IndexConst (.-Key kv)))
+                  (set! r (.-Value kv))))
+
+              (let [a (ir/NewIndexExpr base/Pos var_ (ir/NewInt base/Pos k))]
+                (inc! k)
+                (when isBlank
+                  (return ir/BlankNode r))
+
+                (return a r))))))
+
+      (case [ir/OSTRUCTLIT]
+        (set! splitnode ^{:go/end 210} (fn [^ir/Node rn] :results [ir/Node ir/Node]
+            (let [r (assert (* ir/StructKeyExpr) rn)]
+              (when (or (.IsBlank (.Sym r)) isBlank)
+                (return ir/BlankNode (.-Value r)))
+
+              (ir/SetPos r)
+              (return (ir/NewSelectorExpr base/Pos ir/OXDOT var_ (.Sym r)) (.-Value r))))))
+
+      (default
+        (base/Fatalf "fixedlit bad op: %v" ^{:go/via [miniExpr miniNode]} (.Op n))))
+
+
+    (range [_ r (.-List n)]
+      (let [(values a value) (splitnode r)]
+        (when (and (== a ir/BlankNode) (not (staticinit/AnySideEffects value)))
+          ;; Discard.
+          (continue))
+
+
+        (switch (.Op value)
+          (case [ir/OSLICELIT]
+            (let [value (assert (* ir/CompLitExpr) value)]
+              (when (== kind initKindDynamic)
+                (slicelit value a init)
+                (continue))))
+
+
+          (case [ir/OARRAYLIT ir/OSTRUCTLIT]
+            (let [value (assert (* ir/CompLitExpr) value)]
+              (fixedlit kind value a init)
+              (continue))))
+
+
+        (let [islit (isStaticLiteral value)]
+          (when (or ^:go/paren (and (== kind initKindStatic) (not islit)) ^:go/paren (and (== kind initKindDynamic) islit))
+            (continue))
+
+
+          ;; build list of assignments: var[index] = expr
+          (ir/SetPos a)
+          (let [as (ir/NewAssignStmt base/Pos a value)]
+            (set! as (assert (* ir/AssignStmt) (typecheck/Stmt as)))
+            (switch kind
+              (case [initKindStatic]
+                (genAsStatic as))
+              (case [initKindDynamic initKindLocalCode]
+                (appendWalkStmt init (orderStmtInPlace as (lit (map string (slice (* ir/Name)))))))
+              (default
+                (base/Fatalf "fixedlit: bad kind %d" kind)))))))))
+
+
+
+
+
+^{:go/end 263} (go/func isSmallSliceLit ^bool [^{:tag (* ir/CompLitExpr)} n]
+  (when (!= ^{:go/via [miniExpr miniNode]} (.Op n) ir/OSLICELIT)
+    (return false))
+
+
+  (or (== (.Size (.Elem ^{:go/via [miniExpr]} (.Type n))) 0) (<= (.-Len n) (/ ir/MaxSmallArraySize (.Size (.Elem ^{:go/via [miniExpr]} (.Type n)))))))
+
+
+^{:go/end 368} (go/func slicelit [^{:tag (* ir/CompLitExpr)} n ^ir/Node var_ ^{:tag (* ir/Nodes)} init]
+  ;; make an array type corresponding the number of elements we have
+  (let [t (types/NewArray (.Elem ^{:go/via [miniExpr]} (.Type n)) (.-Len n))]
+    (types/CalcSize t)
+
+    ;; recipe for var = []t{...}
+    ;; 1. make a static array
+    ;;	var vstat [...]t
+    ;; 2. assign (data statements) the constant part
+    ;;	vstat = constpart{}
+    ;; 3. make an auto pointer to array and allocate heap to it
+    ;;	var vauto *[...]t = new([...]t)
+    ;; 4. copy the static array to the auto array
+    ;;	*vauto = vstat
+    ;; 5. for each dynamic part assign to the array
+    ;;	vauto[i] = dynamic part
+    ;; 6. assign slice of allocated heap to var
+    ;;	var = vauto[:]
+    ;;
+    ;; an optimization is done if there is no constant part
+    ;;	3. var vauto *[...]t = new([...]t)
+    ;;	5. vauto[i] = dynamic part
+    ;;	6. var = vauto[:]
+
+    ;; if the literal contains constants,
+    ;; make static initialized array (1),(2)
+    (let [^ir/Node vstat (zero ir/Node)
+
+        ^{:line 293} mode (getdyn n true)]
+      (when (and (!= (bit-and mode initConst) 0) (not (isSmallSliceLit n)))
+        (set! vstat (readonlystaticname t))
+        (fixedlit initKindStatic n vstat init))
+
+
+      ;; make new auto *array (3 declare)
+      (let [vauto (typecheck/TempAt base/Pos ir/CurFunc (types/NewPtr t))
+
+          ;; set auto to point at new temp or heap (3 assign)
+          ^{:line 303 :tag ir/Node} a (zero ir/Node)]
+        (if [x (.-Prealloc n)] (!= x nil) (do
+            ;; temp allocated during order.go for dddarg
+            (when (not (types/Identical t ^{:go/via [miniExpr]} (.Type x)))
+              (panic "dotdotdot base type does not match order's assigned type"))
+
+            (set! a (initStackTemp init x vstat)))
+          (if (== ^{:go/via [miniExpr miniNode]} (.Esc n) ir/EscNone)
+            (set! a (initStackTemp init (typecheck/TempAt base/Pos ir/CurFunc t) vstat))
+
+            (set! a (ir/NewUnaryExpr base/Pos ir/ONEW (ir/TypeNode t)))))
+
+        (appendWalkStmt init (ir/NewAssignStmt base/Pos vauto a))
+
+        (when (and (!= vstat nil) (== (.-Prealloc n) nil) (!= ^{:go/via [miniExpr miniNode]} (.Esc n) ir/EscNone))
+          ;; If we allocated on the heap with ONEW, copy the static to the
+          ;; heap (4). We skip this for stack temporaries, because
+          ;; initStackTemp already handled the copy.
+          (set! a (ir/NewStarExpr base/Pos vauto))
+          (appendWalkStmt init (ir/NewAssignStmt base/Pos a vstat)))
+
+
+        ;; put dynamics into array (5)
+        (let [^int64 index (zero int64)]
+          (range [_ value (.-List n)]
+            (when (== (.Op value) ir/OKEY)
+              (let [kv (assert (* ir/KeyExpr) value)]
+                (set! index (typecheck/IndexConst (.-Key kv)))
+                (set! value (.-Value kv))))
+
+            (let [a (ir/NewIndexExpr base/Pos vauto (ir/NewInt base/Pos index))]
+              ^{:go/via [miniExpr]} (.SetBounded a true)
+              (inc! index)
+
+              ;; TODO need to check bounds?
+
+              (switch (.Op value)
+                (case [ir/OSLICELIT]
+                  (break))
+
+                (case [ir/OARRAYLIT ir/OSTRUCTLIT]
+                  (let [value (assert (* ir/CompLitExpr) value)
+                      ^{:line 345} k initKindDynamic]
+                    (when (== vstat nil)
+                      ;; Generate both static and dynamic initializations.
+                      ;; See issue #31987.
+                      (set! k initKindLocalCode))
+
+                    (fixedlit k value a init)
+                    (continue))))
+
+
+              (when (and (!= vstat nil) (isStaticLiteral value)) ; already set by copy from static value
+                (continue))
+
+
+              ;; build list of vauto[c] = expr
+              (ir/SetPos value)
+              (let [as (ir/NewAssignStmt base/Pos a value)]
+                (appendWalkStmt init (orderStmtInPlace (typecheck/Stmt as) (lit (map string (slice (* ir/Name)))))))))
+
+
+          ;; make slice out of heap (6)
+          (set! a (ir/NewAssignStmt base/Pos var_ (ir/NewSliceExpr base/Pos ir/OSLICE vauto nil nil nil)))
+          (appendWalkStmt init (orderStmtInPlace (typecheck/Stmt a) (lit (map string (slice (* ir/Name)))))))))))
+
+
+^{:go/end 478} (go/func maplit [^{:tag (* ir/CompLitExpr)} n ^ir/Node m ^{:tag (* ir/Nodes)} init]
+  ;; make the map var
+  (let [args (lit (slice ir/Node) (ir/TypeNode ^{:go/via [miniExpr]} (.Type n)) (ir/NewInt base/Pos (+ (.-Len n) (conv int64 (len (.-List n))))))
+      ^{:line 373} a (assert (* ir/MakeExpr) (typecheck/Expr (ir/NewCallExpr base/Pos ir/OMAKE nil args)))]
+    (set! (.-RType a) (.-RType n))
+    ^{:go/via [miniExpr miniNode]} (.SetEsc a ^{:go/via [miniExpr miniNode]} (.Esc n))
+    (appendWalkStmt init (ir/NewAssignStmt base/Pos m a))
+
+    (let [entries (.-List n)]
+
+      ;; The order pass already removed any dynamic (runtime-computed) entries.
+      ;; All remaining entries are static. Double-check that.
+      (range [_ r entries]
+        (let [r (assert (* ir/KeyExpr) r)]
+          (when (or (not (isStaticCompositeLiteral (.-Key r))) (not (isStaticCompositeLiteral (.-Value r))))
+            (base/Fatalf "maplit: entry is not a literal: %v" r))))
+
+
+
+      (when (> (len entries) 25)
+        ;; For a large number of entries, put them in an array and loop.
+
+        ;; build types [count]Tindex and [count]Tvalue
+        (let [tk (types/NewArray (.Key ^{:go/via [miniExpr]} (.Type n)) (conv int64 (len entries)))
+            ^{:line 394} te (types/NewArray (.Elem ^{:go/via [miniExpr]} (.Type n)) (conv int64 (len entries)))]
+
+          ;; TODO(#47904): mark tk and te NoAlg here once the
+          ;; compiler/linker can handle NoAlg types correctly.
+
+          (types/CalcSize tk)
+          (types/CalcSize te)
+
+          ;; make and initialize static arrays
+          (let [vstatk (readonlystaticname tk)
+              ^{:line 404} vstate (readonlystaticname te)
+
+              ^{:line 406} datak (ir/NewCompLitExpr base/Pos ir/OARRAYLIT nil nil)
+              ^{:line 407} datae (ir/NewCompLitExpr base/Pos ir/OARRAYLIT nil nil)]
+            (range [_ r entries]
+              (let [r (assert (* ir/KeyExpr) r)]
+                (.Append (.-List datak) (.-Key r))
+                (.Append (.-List datae) (.-Value r))))
+
+            (fixedlit initKindStatic datak vstatk init)
+            (fixedlit initKindStatic datae vstate init)
+
+            ;; loop adding structure elements to map
+            ;; for i = 0; i < len(vstatk); i++ {
+            ;;	map[vstatk[i]] = vstate[i]
+            ;; }
+            (let [i (typecheck/TempAt base/Pos ir/CurFunc (aget types/Types types/TINT))
+                ^{:line 421} rhs (ir/NewIndexExpr base/Pos vstate i)]
+              ^{:go/via [miniExpr]} (.SetBounded rhs true)
+
+              (let [kidx (ir/NewIndexExpr base/Pos vstatk i)]
+                ^{:go/via [miniExpr]} (.SetBounded kidx true)
+
+                ;; typechecker rewrites OINDEX to OINDEXMAP
+                (let [lhs (assert (* ir/IndexExpr) (typecheck/AssignExpr (ir/NewIndexExpr base/Pos m kidx)))]
+                  (base/AssertfAt (== ^{:go/via [miniExpr miniNode]} (.Op lhs) ir/OINDEXMAP) ^{:go/via [miniExpr miniNode]} (.Pos lhs) "want OINDEXMAP, have %+v" lhs)
+                  (set! (.-RType lhs) (.-RType n))
+
+                  (let [zero (ir/NewAssignStmt base/Pos i (ir/NewInt base/Pos 0))
+                      ^{:line 433} cond (ir/NewBinaryExpr base/Pos ir/OLT i (ir/NewInt base/Pos (.NumElem tk)))
+                      ^{:line 434} incr (ir/NewAssignStmt base/Pos i (ir/NewBinaryExpr base/Pos ir/OADD i (ir/NewInt base/Pos 1)))
+
+                      ^{:line 436 :tag ir/Node} body (ir/NewAssignStmt base/Pos lhs rhs)]
+                    (set! body (typecheck/Stmt body))
+                    (set! body (orderStmtInPlace body (lit (map string (slice (* ir/Name))))))
+
+                    (let [loop (ir/NewForStmt base/Pos nil cond incr nil false)]
+                      (set! (.-Body loop) (lit (slice ir/Node) body))
+                      ^{:go/via [miniStmt]} (.SetInit loop (lit (slice ir/Node) zero))
+
+                      (appendWalkStmt init loop)
+                      (return)))))))))
+
+      ;; For a small number of entries, just add them directly.
+
+      ;; Build list of var[c] = expr.
+      ;; Use temporaries so that mapassign1 can have addressable key, elem.
+      ;; TODO(josharian): avoid map key temporaries for mapfast_* assignments with literal keys.
+      ;; TODO(khr): assign these temps in order phase so we can reuse them across multiple maplits?
+      (let [tmpkey (typecheck/TempAt base/Pos ir/CurFunc (.Key (.Type m)))
+          ^{:line 454} tmpelem (typecheck/TempAt base/Pos ir/CurFunc (.Elem (.Type m)))]
+
+        (range [_ r entries]
+          (let [r (assert (* ir/KeyExpr) r)
+              (values index elem) (values (.-Key r) (.-Value r))]
+
+            (ir/SetPos index)
+            (appendWalkStmt init (ir/NewAssignStmt base/Pos tmpkey index))
+
+            (ir/SetPos elem)
+            (appendWalkStmt init (ir/NewAssignStmt base/Pos tmpelem elem))
+
+            (ir/SetPos tmpelem)
+
+            ;; typechecker rewrites OINDEX to OINDEXMAP
+            (let [lhs (assert (* ir/IndexExpr) (typecheck/AssignExpr (ir/NewIndexExpr base/Pos m tmpkey)))]
+              (base/AssertfAt (== ^{:go/via [miniExpr miniNode]} (.Op lhs) ir/OINDEXMAP) ^{:go/via [miniExpr miniNode]} (.Pos lhs) "want OINDEXMAP, have %+v" lhs)
+              (set! (.-RType lhs) (.-RType n))
+
+              (let [^ir/Node a (ir/NewAssignStmt base/Pos lhs tmpelem)]
+                (set! a (typecheck/Stmt a))
+                (set! a (orderStmtInPlace a (lit (map string (slice (* ir/Name))))))
+                (appendWalkStmt init a)))))))))
+
+
+
+^{:go/end 558} (go/func anylit [^ir/Node n ^ir/Node var_ ^{:tag (* ir/Nodes)} init]
+  (let [t (.Type n)]
+    (switch (.Op n)
+      (default
+        (base/Fatalf "anylit: not lit, op=%v node=%v" (.Op n) n))
+
+      (case [ir/ONAME]
+        (let [n (assert (* ir/Name) n)]
+          (appendWalkStmt init (ir/NewAssignStmt base/Pos var_ n))))
+
+      (case [ir/OMETHEXPR]
+        (let [n (assert (* ir/SelectorExpr) n)]
+          (anylit (.FuncName n) var_ init)))
+
+      (case [ir/OPTRLIT]
+        (let [n (assert (* ir/AddrExpr) n)]
+          (when (not (.IsPtr t))
+            (base/Fatalf "anylit: not ptr"))
+
+
+          (let [^ir/Node r (zero ir/Node)]
+            (if (!= (.-Prealloc n) nil)
+              ;; n.Prealloc is stack temporary used as backing store.
+              (set! r (initStackTemp init (.-Prealloc n) nil))
+              (do
+                (set! r (ir/NewUnaryExpr base/Pos ir/ONEW (ir/TypeNode (.Type (.-X n)))))
+                (.SetEsc r ^{:go/via [miniExpr miniNode]} (.Esc n))))
+
+            (appendWalkStmt init (ir/NewAssignStmt base/Pos var_ r))
+
+            (set! var_ (ir/NewStarExpr base/Pos var_))
+            (set! var_ (typecheck/AssignExpr var_))
+            (anylit (.-X n) var_ init))))
+
+      (case [ir/OSTRUCTLIT ir/OARRAYLIT]
+        (let [n (assert (* ir/CompLitExpr) n)]
+          (when (and (not (.IsStruct t)) (not (.IsArray t)))
+            (base/Fatalf "anylit: not struct/array"))
+
+
+          (when (and (isSimpleName var_) (> (len (.-List n)) 4))
+            ;; lay out static data
+            (let [vstat (readonlystaticname t)]
+
+              (fixedlit initKindStatic n vstat init)
+
+              ;; copy static to var
+              (appendWalkStmt init (ir/NewAssignStmt base/Pos var_ vstat))
+
+              ;; add expressions to automatic
+              (fixedlit initKindDynamic n var_ init)
+              (break)))
+
+
+          (let [^int64 components (zero int64)]
+            (if (== ^{:go/via [miniExpr miniNode]} (.Op n) ir/OARRAYLIT)
+              (set! components (.NumElem t))
+
+              (set! components (conv int64 (.NumFields t))))
+
+            ;; initialization of an array or struct with unspecified components (missing fields or arrays)
+            (when (or (isSimpleName var_) (< (conv int64 (len (.-List n))) components))
+              (appendWalkStmt init (ir/NewAssignStmt base/Pos var_ nil)))
+
+
+            (fixedlit initKindLocalCode n var_ init))))
+
+      (case [ir/OSLICELIT]
+        (let [n (assert (* ir/CompLitExpr) n)]
+          (slicelit n var_ init)))
+
+      (case [ir/OMAPLIT]
+        (let [n (assert (* ir/CompLitExpr) n)]
+          (when (not (.IsMap t))
+            (base/Fatalf "anylit: not map"))
+
+          (maplit n var_ init))))))
+
+
+
+
+
+
+^{:go/end 602} (go/func oaslit "oaslit handles special composite literal assignments.\nIt returns true if n's effects have been added to init,\nin which case n should be dropped from the program by the caller.\n" ^bool [^{:tag (* ir/AssignStmt)} n ^{:tag (* ir/Nodes)} init]
+  (when (or (== (.-X n) nil) (== (.-Y n) nil))
+    ;; not a special composite literal assignment
+    (return false))
+
+  (when (or (== (.Type (.-X n)) nil) (== (.Type (.-Y n)) nil))
+    ;; not a special composite literal assignment
+    (return false))
+
+  (when (not (isSimpleName (.-X n)))
+    ;; not a special composite literal assignment
+    (return false))
+
+  ^{:go/breaks [[5 601]]} (let [x (assert (* ir/Name) (.-X n))]
+    (when (not (types/Identical (.Type (.-X n)) (.Type (.-Y n))))
+      ;; not a special composite literal assignment
+      (return false))
+
+    (when (.Addrtaken x)
+      ;; If x is address-taken, the RHS may (implicitly) uses LHS.
+      ;; Not safe to do a special composite literal assignment
+      ;; (which may expand to multiple assignments).
+      (return false))
+
+
+    (switch (.Op (.-Y n))
+      (default
+        ;; not a special composite literal assignment
+        (return false))
+
+      (case [ir/OSTRUCTLIT ir/OARRAYLIT ir/OSLICELIT ir/OMAPLIT]
+        (when (ir/Any (.-Y n) ^{:go/end 594} (fn ^bool [^ir/Node y] (ir/Uses y x)))
+          ;; not safe to do a special composite literal assignment if RHS uses LHS.
+          (return false))
+
+        (anylit (.-Y n) (.-X n) init)))
+
+
+    true))
+
+
+^{:go/end 633} (go/func genAsStatic [^{:tag (* ir/AssignStmt)} as]
+  (when (== (.Type (.-X as)) nil)
+    (base/Fatalf "genAsStatic as.Left not typechecked"))
+
+
+  (let [(values name offset ok) (staticinit/StaticLoc (.-X as))]
+    (when (or (not ok) ^:go/paren (and (!= (.-Class name) ir/PEXTERN) (!= (.-X as) ir/BlankNode)))
+      (base/Fatalf "genAsStatic: lhs %v" (.-X as)))
+
+
+    (switch [r (.-Y as)] (.Op r)
+      (case [ir/OLITERAL]
+        (staticdata/InitConst name offset r (conv int (.Size (.Type r))))
+        (return))
+      (case [ir/OMETHEXPR]
+        (let [r (assert (* ir/SelectorExpr) r)]
+          (staticdata/InitAddr name offset (staticdata/FuncLinksym (.FuncName r)))
+          (return)))
+      (case [ir/ONAME]
+        (let [r (assert (* ir/Name) r)]
+          (when (!= (.-Offset_ r) 0)
+            (base/Fatalf "genAsStatic %+v" as))
+
+          (when (== (.-Class r) ir/PFUNC)
+            (staticdata/InitAddr name offset (staticdata/FuncLinksym r))
+            (return)))))
+
+
+    (base/Fatalf "genAsStatic: rhs %v" (.-Y as))))

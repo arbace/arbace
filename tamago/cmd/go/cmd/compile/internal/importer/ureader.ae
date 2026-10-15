@@ -1,0 +1,641 @@
+;; Copyright 2021 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; package importer implements package reading for gc-generated object files.
+(in-ns 'go.cmd.compile.internal.importer) (go/file "ureader.go" :doc "package importer implements package reading for gc-generated object files.\n" :imports [
+
+
+    ^{:line 9} [base "cmd/compile/internal/base"]
+    ^{:line 10} [syntax "cmd/compile/internal/syntax"]
+    ^{:line 11} [types2 "cmd/compile/internal/types2"]
+    ^{:line 12} [src "cmd/internal/src"]
+    ^{:line 13} [pkgbits "internal/pkgbits"]])
+
+
+(go/type pkgReader (struct
+    ^{:line 17} pkgbits/PkgDecoder
+
+    ^{:line 19 :tag (* types2/Context)} ctxt
+    ^{:line 20 :tag (map string (* types2/Package))} imports
+    ^{:line 21 :tag bool} enableAlias ; whether to use aliases
+
+    ^{:line 23 :tag (slice (* syntax/PosBase))} posBases
+    ^{:line 24 :tag (slice (* types2/Package))} pkgs
+    ^{:line 25 :tag (slice types2/Type)} typs))
+
+
+^{:go/end 63} (go/func ReadPackage ^{:tag (* types2/Package)} [^{:tag (* types2/Context)} ctxt ^{:tag (map string (* types2/Package))} imports ^pkgbits/PkgDecoder input]
+  (let [pr ^{:go/breaks [2 [4 32] 6 8 [10 36] 12 14]} (lit pkgReader
+        :PkgDecoder input
+
+        :ctxt ctxt
+        :imports imports
+        :enableAlias true
+
+        :posBases (make (slice (* syntax/PosBase)) (.NumElems input pkgbits/SectionPosBase))
+        :pkgs (make (slice (* types2/Package)) (.NumElems input pkgbits/SectionPkg))
+        :typs (make (slice types2/Type) (.NumElems input pkgbits/SectionType)))
+
+
+      ^{:line 41} r (.newReader pr pkgbits/SectionMeta pkgbits/PublicRootIdx pkgbits/SyncPublic)
+      ^{:line 42} pkg (.pkg r)]
+
+    (when (.Has ^{:go/via [Decoder]} (.Version r) pkgbits/HasInit)
+      ^{:go/via [Decoder]} (.Bool r))
+
+
+    (for [(values i n) (values 0 ^{:go/via [Decoder]} (.Len r))] (< i n) (inc! i)
+      ;; As if r.obj(), but avoiding the Scope.Lookup call,
+      ;; to avoid eager loading of imports.
+      ^{:go/via [Decoder]} (.Sync r pkgbits/SyncObject)
+      (when (.Has ^{:go/via [Decoder]} (.Version r) pkgbits/DerivedFuncInstance)
+        (go/call assert (not ^{:go/via [Decoder]} (.Bool r))))
+
+      (.objIdx (.-p r) ^{:go/via [Decoder]} (.Reloc r pkgbits/SectionObj))
+      (go/call assert (== ^{:go/via [Decoder]} (.Len r) 0)))
+
+
+    ^{:go/via [Decoder]} (.Sync r pkgbits/SyncEOF)
+
+    (.MarkComplete pkg)
+    ^{:line 62} pkg))
+
+
+(go/type reader (struct
+    ^{:line 66} pkgbits/Decoder
+
+    ^{:line 68 :tag (* pkgReader)} p
+
+    ^{:line 70 :tag (* readerDict)} dict
+    ^{:line 71 :tag (slice (func []))} delayed))
+
+
+(go/type readerDict (struct
+    ^{:line 75 :tag (slice typeInfo)} rtbounds
+    ^{:line 76 :tag (slice (* types2/TypeParam))} rtparams
+
+    ^{:line 78 :tag (slice typeInfo)} tbounds
+    ^{:line 79 :tag (slice (* types2/TypeParam))} tparams
+
+    ^{:line 81 :tag (slice derivedInfo)} derived
+    ^{:line 82 :tag (slice types2/Type)} derivedTypes))
+
+
+(go/type readerTypeBound (struct
+    ^{:line 86 :tag bool} derived
+    ^{:line 87 :tag int} boundIdx))
+
+
+^{:go/end 95} (go/method newReader ^{:tag (* reader)} [^{:tag (* pkgReader)} pr ^pkgbits/SectionKind k ^pkgbits/Index idx ^pkgbits/SyncMarker marker]
+  (addr ^{:go/breaks [2 4]} (lit reader
+      :Decoder ^{:go/via [PkgDecoder]} (.NewDecoder pr k idx marker)
+      :p pr)))
+
+
+
+^{:go/end 102} (go/method tempReader ^{:tag (* reader)} [^{:tag (* pkgReader)} pr ^pkgbits/SectionKind k ^pkgbits/Index idx ^pkgbits/SyncMarker marker]
+  (addr ^{:go/breaks [2 4]} (lit reader
+      :Decoder ^{:go/via [PkgDecoder]} (.TempDecoder pr k idx marker)
+      :p pr)))
+
+
+
+^{:go/end 106} (go/method retireReader [^{:tag (* pkgReader)} pr ^{:tag (* reader)} r]
+  ^{:go/via [PkgDecoder]} (.RetireDecoder pr (addr (.-Decoder r))))
+
+
+;; @@@ Positions
+
+^{:go/end 121} (go/method pos ^syntax/Pos [^{:tag (* reader)} r]
+  ^{:go/via [Decoder]} (.Sync r pkgbits/SyncPos)
+  (when (not ^{:go/via [Decoder]} (.Bool r))
+    (return (lit syntax/Pos)))
+
+
+  ;; TODO(mdempsky): Delta encoding.
+  (let [posBase (.posBase r)
+      ^{:line 118} line ^{:go/via [Decoder]} (.Uint r)
+      ^{:line 119} col ^{:go/via [Decoder]} (.Uint r)]
+    (syntax/MakePos posBase line col)))
+
+
+^{:go/end 125} (go/method posBase ^{:tag (* syntax/PosBase)} [^{:tag (* reader)} r]
+  (.posBaseIdx (.-p r) ^{:go/via [Decoder]} (.Reloc r pkgbits/SectionPosBase)))
+
+
+^{:go/end 150} (go/method posBaseIdx ^{:tag (* syntax/PosBase)} [^{:tag (* pkgReader)} pr ^pkgbits/Index idx]
+  (when [b (aget (.-posBases pr) idx)] (!= b nil)
+    (return b))
+
+  (let [^{:tag (* syntax/PosBase)} b (zero (* syntax/PosBase))]
+    (do
+      (let [r (.tempReader pr pkgbits/SectionPosBase idx pkgbits/SyncPosBase)
+
+          ^{:line 135} filename ^{:go/via [Decoder]} (.String r)]
+
+        (if ^{:go/via [Decoder]} (.Bool r)
+          (set! b (syntax/NewTrimmedFileBase filename true))
+
+          (let [pos (.pos r)
+              ^{:line 141} line ^{:go/via [Decoder]} (.Uint r)
+              ^{:line 142} col ^{:go/via [Decoder]} (.Uint r)]
+            (set! b (syntax/NewLineBase pos filename true line col))))
+
+        (.retireReader pr r)))
+
+
+    (aset (.-posBases pr) idx b)
+    ^{:line 149} b))
+
+
+;; @@@ Packages
+
+^{:go/end 157} (go/method pkg ^{:tag (* types2/Package)} [^{:tag (* reader)} r]
+  ^{:go/via [Decoder]} (.Sync r pkgbits/SyncPkg)
+  (.pkgIdx (.-p r) ^{:go/via [Decoder]} (.Reloc r pkgbits/SectionPkg)))
+
+
+^{:go/end 169} (go/method pkgIdx ^{:tag (* types2/Package)} [^{:tag (* pkgReader)} pr ^pkgbits/Index idx]
+  ;; TODO(mdempsky): Consider using some non-nil pointer to indicate
+  ;; the universe scope, so we don't need to keep re-reading it.
+  (when [pkg (aget (.-pkgs pr) idx)] (!= pkg nil)
+    (return pkg))
+
+
+  (let [pkg (.doPkg (.newReader pr pkgbits/SectionPkg idx pkgbits/SyncPkgDef))]
+    (aset (.-pkgs pr) idx pkg)
+    ^{:line 168} pkg))
+
+
+^{:go/end 199} (go/method doPkg ^{:tag (* types2/Package)} [^{:tag (* reader)} r]
+  (let [path ^{:go/via [Decoder]} (.String r)]
+    (switch path
+      (case [""]
+        (set! path ^{:go/via [PkgDecoder]} (.PkgPath (.-p r))))
+      (case ["builtin"]
+        (return nil)) ; universe
+      (case ["unsafe"]
+        (return types2/Unsafe)))
+
+
+    (when [pkg (aget (.-imports (.-p r)) path)] (!= pkg nil)
+      (return pkg))
+
+
+    (let [name ^{:go/via [Decoder]} (.String r)
+        ^{:line 187} pkg (types2/NewPackage path name)]
+      (aset (.-imports (.-p r)) path pkg)
+
+      ;; TODO(mdempsky): The list of imported packages is important for
+      ;; go/types, but we could probably skip populating it for types2.
+      (let [imports (make (slice (* types2/Package)) ^{:go/via [Decoder]} (.Len r))]
+        (range [i imports]
+          (aset imports i (.pkg r)))
+
+        (.SetImports pkg imports)
+
+        ^{:line 198} pkg))))
+
+
+;; @@@ Types
+
+^{:go/end 205} (go/method typ ^types2/Type [^{:tag (* reader)} r]
+  (.typIdx (.-p r) (.typInfo r) (.-dict r)))
+
+
+^{:go/end 213} (go/method typInfo ^typeInfo [^{:tag (* reader)} r]
+  ^{:go/via [Decoder]} (.Sync r pkgbits/SyncType)
+  (when ^{:go/via [Decoder]} (.Bool r)
+    (return (lit typeInfo :idx (conv pkgbits/Index ^{:go/via [Decoder]} (.Len r)) :derived true)))
+
+  (lit typeInfo :idx ^{:go/via [Decoder]} (.Reloc r pkgbits/SectionType) :derived false))
+
+
+^{:go/end 246} (go/method typIdx ^types2/Type [^{:tag (* pkgReader)} pr ^typeInfo info ^{:tag (* readerDict)} dict]
+  (let [idx (.-idx info)
+      ^{:line 217 :tag (* types2/Type)} where (zero (* types2/Type))]
+    (if (.-derived info) (do
+        (set! where (addr (aget (.-derivedTypes dict) idx)))
+        (set! idx (.-idx (aget (.-derived dict) idx))))
+
+      (set! where (addr (aget (.-typs pr) idx))))
+
+
+    (when [typ @where] (!= typ nil)
+      (return typ))
+
+
+    (let [^types2/Type typ (zero types2/Type)]
+      (do
+        (let [r (.tempReader pr pkgbits/SectionType idx pkgbits/SyncTypeIdx)]
+          (set! (.-dict r) dict)
+
+          (set! typ (.doTyp r))
+          (go/call assert (!= typ nil))
+          (.retireReader pr r)))
+
+
+      ;; See comment in pkgReader.typIdx explaining how this happens.
+      (when [prev @where] (!= prev nil)
+        (return prev))
+
+
+      (set! @where typ)
+      ^{:line 245} typ)))
+
+
+^{:go/end 294} (go/method doTyp [^{:tag (* reader)} r] :results [^types2/Type res]
+  (switch [tag (conv pkgbits/CodeType ^{:go/via [Decoder]} (.Code r pkgbits/SyncType))] tag
+    (default
+      (base/FatalfAt src/NoXPos "unhandled type tag: %v" tag)
+      (panic "unreachable"))
+
+    (case [pkgbits/TypeBasic]
+      (return (aget types2/Typ ^{:go/via [Decoder]} (.Len r))))
+
+    (case [pkgbits/TypeNamed]
+      (let [(values obj targs) (.obj r)
+          ^{:line 259} name (assert (* types2/TypeName) obj)]
+        (when (!= (len targs) 0)
+          (let [(values t _) (types2/Instantiate (.-ctxt (.-p r)) ^{:go/via [object]} (.Type name) targs false)]
+            (return t)))
+
+        (return ^{:go/via [object]} (.Type name))))
+
+    (case [pkgbits/TypeTypeParam]
+      (let [n ^{:go/via [Decoder]} (.Len r)]
+        (when (< n (len (.-rtbounds (.-dict r))))
+          (return (aget (.-rtparams (.-dict r)) n)))
+
+        (return (aget (.-tparams (.-dict r)) (- n (len (.-rtbounds (.-dict r))))))))
+
+    (case [pkgbits/TypeArray]
+      (let [len (conv int64 ^{:go/via [Decoder]} (.Uint64 r))]
+        (return (types2/NewArray (.typ r) len))))
+    (case [pkgbits/TypeChan]
+      (let [dir (conv types2/ChanDir ^{:go/via [Decoder]} (.Len r))]
+        (return (types2/NewChan dir (.typ r)))))
+    (case [pkgbits/TypeMap]
+      (return (types2/NewMap (.typ r) (.typ r))))
+    (case [pkgbits/TypePointer]
+      (return (types2/NewPointer (.typ r))))
+    (case [pkgbits/TypeSignature]
+      (return (.signature r nil nil nil)))
+    (case [pkgbits/TypeSlice]
+      (return (types2/NewSlice (.typ r))))
+    (case [pkgbits/TypeStruct]
+      (return (.structType r)))
+    (case [pkgbits/TypeInterface]
+      (return (.interfaceType r)))
+    (case [pkgbits/TypeUnion]
+      (return (.unionType r)))))
+
+
+
+^{:go/end 315} (go/method structType ^{:tag (* types2/Struct)} [^{:tag (* reader)} r]
+  (let [fields (make (slice (* types2/Var)) ^{:go/via [Decoder]} (.Len r))
+      ^{:line 298 :tag (slice string)} tags (zero (slice string))]
+    (range [i fields]
+      (let [pos (.pos r)
+          (values pkg name) (.selector r)
+          ^{:line 302} ftyp (.typ r)
+          ^{:line 303} tag ^{:go/via [Decoder]} (.String r)
+          ^{:line 304} embedded ^{:go/via [Decoder]} (.Bool r)]
+
+        (aset fields i (types2/NewField pos pkg name ftyp embedded))
+        (when (!= tag "")
+          (while (< (len tags) i)
+            (set! tags (append tags "")))
+
+          (set! tags (append tags tag)))))
+
+
+    (types2/NewStruct fields tags)))
+
+
+^{:go/end 323} (go/method unionType ^{:tag (* types2/Union)} [^{:tag (* reader)} r]
+  (let [terms (make (slice (* types2/Term)) ^{:go/via [Decoder]} (.Len r))]
+    (range [i terms]
+      (aset terms i (types2/NewTerm ^{:go/via [Decoder]} (.Bool r) (.typ r))))
+
+    (types2/NewUnion terms)))
+
+
+^{:go/end 346} (go/method interfaceType ^{:tag (* types2/Interface)} [^{:tag (* reader)} r]
+  (let [methods (make (slice (* types2/Func)) ^{:go/via [Decoder]} (.Len r))
+      ^{:line 327} embeddeds (make (slice types2/Type) ^{:go/via [Decoder]} (.Len r))
+      ^{:line 328} implicit (and (== (len methods) 0) (== (len embeddeds) 1) ^{:go/via [Decoder]} (.Bool r))]
+
+    (range [i methods]
+      (let [pos (.pos r)
+          (values pkg name) (.selector r)
+          ^{:line 333} mtyp (.signature r nil nil nil)]
+        (aset methods i (types2/NewFunc pos pkg name mtyp))))
+
+
+    (range [i embeddeds]
+      (aset embeddeds i (.typ r)))
+
+
+    (let [iface (types2/NewInterfaceType methods embeddeds)]
+      (when implicit
+        (.MarkImplicit iface))
+
+      ^{:line 345} iface)))
+
+
+^{:go/end 356} (go/method signature ^{:tag (* types2/Signature)} [^{:tag (* reader)} r ^{:tag (* types2/Var)} recv ^{:tag (slice (* types2/TypeParam))} rtparams ^{:tag (slice (* types2/TypeParam))} tparams]
+  ^{:go/via [Decoder]} (.Sync r pkgbits/SyncSignature)
+
+  (let [params (.params r)
+      ^{:line 352} results (.params r)
+      ^{:line 353} variadic ^{:go/via [Decoder]} (.Bool r)]
+
+    (types2/NewSignatureType recv rtparams tparams params results variadic)))
+
+
+^{:go/end 365} (go/method params ^{:tag (* types2/Tuple)} [^{:tag (* reader)} r]
+  ^{:go/via [Decoder]} (.Sync r pkgbits/SyncParams)
+  (let [params (make (slice (* types2/Var)) ^{:go/via [Decoder]} (.Len r))]
+    (range [i params]
+      (aset params i (.param r)))
+
+    (types2/NewTuple (spread params))))
+
+
+^{:go/end 375} (go/method param ^{:tag (* types2/Var)} [^{:tag (* reader)} r]
+  ^{:go/via [Decoder]} (.Sync r pkgbits/SyncParam)
+
+  (let [pos (.pos r)
+      (values pkg name) (.localIdent r)
+      ^{:line 372} typ (.typ r)]
+
+    (types2/NewParam pos pkg name typ)))
+
+
+;; @@@ Objects
+
+^{:go/end 395} (go/method obj [^{:tag (* reader)} r] :results [types2/Object (slice types2/Type)]
+  ^{:go/via [Decoder]} (.Sync r pkgbits/SyncObject)
+
+  (when (.Has ^{:go/via [Decoder]} (.Version r) pkgbits/DerivedFuncInstance)
+    (go/call assert (not ^{:go/via [Decoder]} (.Bool r))))
+
+
+  (let [(values pkg name) (.objIdx (.-p r) ^{:go/via [Decoder]} (.Reloc r pkgbits/SectionObj))
+      ^{:line 387} obj (.Lookup (.Scope pkg) name)
+
+      ^{:line 389} targs (make (slice types2/Type) ^{:go/via [Decoder]} (.Len r))]
+    (range [i targs]
+      (aset targs i (.typ r)))
+
+
+    (return obj targs)))
+
+
+^{:go/end 503} (go/method objIdx [^{:tag (* pkgReader)} pr ^pkgbits/Index idx] :results [(* types2/Package) string]
+  (let [^{:tag (* types2/Package)} objPkg (zero (* types2/Package))
+      ^{:line 399 :tag string} objName (zero string)
+      ^{:line 400 :tag pkgbits/CodeObj} tag (zero pkgbits/CodeObj)]
+    (do
+      (let [rname (.tempReader pr pkgbits/SectionName idx pkgbits/SyncObject1)]
+
+        (set! (values objPkg objName) (.qualifiedIdent rname))
+        (go/call assert (!= objName ""))
+
+        (set! tag (conv pkgbits/CodeObj ^{:go/via [Decoder]} (.Code rname pkgbits/SyncCodeObj)))
+        (.retireReader pr rname)))
+
+
+    (when (== tag pkgbits/ObjStub)
+      (base/Assertf (or (== objPkg nil) (== objPkg types2/Unsafe)) "unexpected stub package: %v" objPkg)
+      (return objPkg objName))
+
+
+    (.InsertLazy (.Scope objPkg) objName ^{:go/end 500} (fn ^types2/Object []
+        (let [dict (.objDictIdx pr idx)
+
+            ^{:line 419} r (.newReader pr pkgbits/SectionObj idx pkgbits/SyncObject1)]
+          (set! (.-dict r) dict)
+
+          (switch tag
+            (default
+              (panic "weird"))
+
+            (case [pkgbits/ObjAlias]
+              (let [pos (.pos r)
+                  ^{:line 428 :tag (slice (* types2/TypeParam))} tparams (zero (slice (* types2/TypeParam)))]
+                (when (.Has ^{:go/via [Decoder]} (.Version r) pkgbits/AliasTypeParamNames)
+                  (set! tparams (.typeParamNames r false false)))
+
+                (let [typ (.typ r)]
+                  (return (newAliasTypeName (.-enableAlias pr) pos objPkg objName typ tparams)))))
+
+            (case [pkgbits/ObjConst]
+              (let [pos (.pos r)
+                  ^{:line 437} typ (.typ r)
+                  ^{:line 438} val ^{:go/via [Decoder]} (.Value r)]
+                (return (types2/NewConst pos objPkg objName typ val))))
+
+            (case [pkgbits/ObjFunc]
+              (let [pos (.pos r)]
+                (when (.Has ^{:go/via [Decoder]} (.Version r) pkgbits/GenericMethods)
+                  (go/call assert (not ^{:go/via [Decoder]} (.Bool r)))) ; generic methods are read in their defining type
+
+                (let [tparams (.typeParamNames r false false)
+                    ^{:line 447} sig (.signature r nil nil tparams)]
+                  (return (types2/NewFunc pos objPkg objName sig)))))
+
+            (case [pkgbits/ObjType]
+              (let [pos (.pos r)]
+
+                (return (types2/NewTypeNameLazy pos objPkg objName ^{:go/end 493} (fn [^{:tag (* types2/Named)} _] :results [(slice (* types2/TypeParam)) types2/Type (slice (* types2/Func)) (slice (func []))]
+                      (let [tparams (.typeParamNames r true false)
+
+                          ;; TODO(mdempsky): Rewrite receiver types to underlying is an
+                          ;; Interface? The go/types importer does this (I think because
+                          ;; unit tests expected that), but cmd/compile doesn't care
+                          ;; about it, so maybe we can avoid worrying about that here.
+                          ^{:line 460} underlying (.Underlying (.typ r))
+
+                          ^{:line 462} methods (make (slice (* types2/Func)) ^{:go/via [Decoder]} (.Len r))]
+                        (range [i methods]
+                          (aset methods i (.method r true)))
+
+
+                        (when (.Has ^{:go/via [Decoder]} (.Version r) pkgbits/GenericMethods)
+                          (range [^{:go/via [Decoder]} (.Len r)]
+                            ;; Careful: objIdx is used to read in package-scoped declarations, which
+                            ;; methods are not. Instead, decode it here. This makes it easier to
+                            ;; associate it with the type and avoids the main objIdx loop.
+                            (let [idx ^{:go/via [Decoder]} (.Reloc r pkgbits/SectionObj)
+
+                                ^{:line 474} t (.tempReader pr pkgbits/SectionObj idx pkgbits/SyncObject1)]
+                              (set! (.-dict t) (.objDictIdx pr idx))
+
+                              (let [pos (.pos t)]
+                                (go/call assert ^{:go/via [Decoder]} (.Bool t)) ; generic method
+                                (let [(values pkg name) (.selector t)
+                                    ^{:line 480} rtparams (.typeParamNames t true true)
+                                    ^{:line 481} recv (.param t)
+                                    ^{:line 482} tparams (.typeParamNames t true false)
+                                    ^{:line 483} sig (.signature t recv rtparams tparams)]
+
+                                  (set! (.-delayed r) (append (.-delayed r) (spread (.-delayed t)))) ; propagate before retiring
+
+                                  (.retireReader pr t)
+                                  (set! methods (append methods (types2/NewFunc pos pkg name sig))))))))
+
+
+
+                        (return tparams underlying methods (.-delayed r))))))))
+
+
+            (case [pkgbits/ObjVar]
+              (let [pos (.pos r)
+                  ^{:line 497} typ (.typ r)]
+                (return (types2/NewVar pos objPkg objName typ))))))))
+
+
+
+    (return objPkg objName)))
+
+
+^{:go/end 544} (go/method objDictIdx ^{:tag (* readerDict)} [^{:tag (* pkgReader)} pr ^pkgbits/Index idx]
+  (let [^readerDict dict (zero readerDict)]
+    (do
+      (let [r (.tempReader pr pkgbits/SectionObjDict idx pkgbits/SyncObject1)]
+
+        (when [implicits ^{:go/via [Decoder]} (.Len r)] (!= implicits 0)
+          (base/Fatalf "unexpected object with %v implicit type parameter(s)" implicits))
+
+
+        (let [nreceivers 0]
+          (when (.Has ^{:go/via [Decoder]} (.Version r) pkgbits/GenericMethods)
+            (set! nreceivers ^{:go/via [Decoder]} (.Len r)))
+
+          (let [nexplicits ^{:go/via [Decoder]} (.Len r)]
+
+            (set! (.-rtbounds dict) (make (slice typeInfo) nreceivers))
+            (range [i (.-rtbounds dict)]
+              (aset (.-rtbounds dict) i (.typInfo r)))
+
+
+            (set! (.-tbounds dict) (make (slice typeInfo) nexplicits))
+            (range [i (.-tbounds dict)]
+              (aset (.-tbounds dict) i (.typInfo r)))
+
+
+            (set! (.-derived dict) (make (slice derivedInfo) ^{:go/via [Decoder]} (.Len r)))
+            (set! (.-derivedTypes dict) (make (slice types2/Type) (len (.-derived dict))))
+            (range [i (.-derived dict)]
+              (aset (.-derived dict) i (lit derivedInfo :idx ^{:go/via [Decoder]} (.Reloc r pkgbits/SectionType)))
+              (when (.Has ^{:go/via [Decoder]} (.Version r) pkgbits/DerivedInfoNeeded)
+                (go/call assert (not ^{:go/via [Decoder]} (.Bool r)))))
+
+
+
+            (.retireReader pr r)))))
+
+    ;; function references follow, but reader doesn't need those
+
+    (addr dict)))
+
+
+^{:go/end 607} (go/method typeParamNames ^{:tag (slice (* types2/TypeParam))} [^{:tag (* reader)} r ^bool isLazy ^bool isGenMeth]
+  ^{:go/via [Decoder]} (.Sync r pkgbits/SyncTypeParamNames)
+
+  ;; Note: This code assumes there are no implicit type parameters.
+  ;; This is fine since it only reads exported declarations, which
+  ;; never have implicits.
+
+  (let [^{:tag (slice typeInfo)} in (zero (slice typeInfo))
+      ^{:line 554 :tag (* (slice (* types2/TypeParam)))} out (zero (* (slice (* types2/TypeParam))))]
+    (if isGenMeth (do
+        (set! in (.-rtbounds (.-dict r)))
+        (set! out (addr (.-rtparams (.-dict r)))))
+      (do
+        (set! in (.-tbounds (.-dict r)))
+        (set! out (addr (.-tparams (.-dict r))))))
+
+
+    (when (== (len in) 0)
+      (return nil))
+
+
+    ;; Careful: Type parameter lists may have cycles. To allow for this,
+    ;; we construct the type parameter list in two passes: first we
+    ;; create all the TypeNames and TypeParams, then we construct and
+    ;; set the bound type.
+
+    ;; We have to save tparams outside of the closure, because typeParamNames
+    ;; can be called multiple times with the same dictionary instance.
+    (let [tparams (make (slice (* types2/TypeParam)) (len in))]
+      (set! @out tparams)
+
+      (range [i in]
+        (let [pos (.pos r)
+            (values pkg name) (.localIdent r)
+
+            ^{:line 581} tname (types2/NewTypeName pos pkg name nil)]
+          (aset tparams i (types2/NewTypeParam tname nil))))
+
+
+      ;; Type parameters that are read by lazy loaders cannot have their
+      ;; constraints set eagerly; do them after loading (go.dev/issue/63285).
+      (if isLazy
+        ;; The reader dictionary will continue mutating before we have time
+        ;; to call delayed functions; make a local copy of the constraints.
+        (let [types (make (slice types2/Type) (len in))]
+          (range [i info in]
+            (aset types i (.typIdx (.-p r) info (.-dict r))))
+
+
+          (set! (.-delayed r) (append (.-delayed r) ^{:go/end 599} (fn []
+                (range [i typ types]
+                  (.SetConstraint (aget tparams i) typ))))))
+
+
+
+        (range [i info in]
+          (.SetConstraint (aget tparams i) (.typIdx (.-p r) info (.-dict r)))))
+
+
+
+      ^{:line 606} tparams)))
+
+
+^{:go/end 619} (go/method method ^{:tag (* types2/Func)} [^{:tag (* reader)} r ^bool isLazy]
+  ^{:go/via [Decoder]} (.Sync r pkgbits/SyncMethod)
+  (let [pos (.pos r)
+      (values pkg name) (.selector r)
+
+      ^{:line 614} rtparams (.typeParamNames r isLazy false)
+      ^{:line 615} sig (.signature r (.param r) rtparams nil)]
+
+    (set! _ (.pos r)) ; TODO(mdempsky): Remove; this is a hacker for linker.go.
+    (types2/NewFunc pos pkg name sig)))
+
+
+^{:go/end 621} (go/method qualifiedIdent [^{:tag (* reader)} r] :results [(* types2/Package) string] (.ident r pkgbits/SyncSym))
+^{:go/end 622} (go/method localIdent [^{:tag (* reader)} r] :results [(* types2/Package) string] (.ident r pkgbits/SyncLocalIdent))
+^{:go/end 623} (go/method selector [^{:tag (* reader)} r] :results [(* types2/Package) string] (.ident r pkgbits/SyncSelector))
+
+^{:go/end 628} (go/method ident [^{:tag (* reader)} r ^pkgbits/SyncMarker marker] :results [(* types2/Package) string]
+  ^{:go/via [Decoder]} (.Sync r marker)
+  (return (.pkg r) ^{:go/via [Decoder]} (.String r)))
+
+
+
+^{:go/end 642} (go/func newAliasTypeName "newAliasTypeName returns a new TypeName, with a materialized *types2.Alias if supported.\n" ^{:tag (* types2/TypeName)} [^bool aliases ^syntax/Pos pos ^{:tag (* types2/Package)} pkg ^string name ^types2/Type rhs ^{:tag (slice (* types2/TypeParam))} tparams]
+  ;; Copied from x/tools/internal/aliases.NewAlias via
+  ;; GOROOT/src/go/internal/gcimporter/ureader.go.
+  (when aliases
+    (let [tname (types2/NewTypeName pos pkg name nil)
+        ^{:line 636} a (types2/NewAlias tname rhs)] ; form TypeName -> Alias cycle
+      (.SetTypeParams a tparams)
+      (return tname)))
+
+  (go/call assert (== (len tparams) 0))
+  (types2/NewTypeName pos pkg name rhs))

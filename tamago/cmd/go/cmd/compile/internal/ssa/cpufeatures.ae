@@ -1,0 +1,257 @@
+;; Copyright 2025 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.cmd.compile.internal.ssa) (go/file "cpufeatures.go" :imports [
+
+
+    ^{:line 8} [types "cmd/compile/internal/types"]
+    ^{:line 9} [obj "cmd/internal/obj"]
+    ^{:line 10} [fmt "fmt"]
+    ^{:line 11} [goarch "internal/goarch"]])
+
+
+(go/type localEffect (struct
+    ^{:line 15 :tag CPUfeatures} start ; features present at beginning of block
+    ^{:line 16 :tag CPUfeatures} internal ; features implied by execution of block
+    ^{:line 17 :tag (array 2 CPUfeatures)} end ; for BlockIf, features present on outgoing edges
+    ^{:line 18 :tag bool} visited)) ; On the first iteration this will be false for backedges.
+
+
+^{:go/end 23} (go/method String ^string [^localEffect e]
+  (fmt/Sprintf "visited=%v, start=%v, internal=%v, end[0]=%v, end[1]=%v" (.-visited e) (.-start e) (.-internal e) (aget (.-end e) 0) (aget (.-end e) 1)))
+
+
+
+
+
+^{:go/end 113} (go/func ifEffect "ifEffect pattern matches for a BlockIf conditional on a load\nof a field from internal/cpu.X86 and returns the corresponding\neffect.\n" [^{:tag (* Block)} b] :results [^CPUfeatures features ^int taken]
+  ;; TODO generalize for other architectures.
+  (when (!= (.-Kind b) BlockIf)
+    (return))
+
+  (let [c (aget (.-Controls b) 0)]
+
+    (when (== (.-Op c) OpNot)
+      (set! taken 1)
+      (set! c (aget (.-Args c) 0)))
+
+    (when (!= (.-Op c) OpLoad)
+      (return))
+
+    (let [offPtr (aget (.-Args c) 0)]
+      (when (!= (.-Op offPtr) OpOffPtr)
+        (return))
+
+      (let [addr (aget (.-Args offPtr) 0)]
+        (when (or (!= (.-Op addr) OpAddr) (!= (.-Op (aget (.-Args addr) 0)) OpSB))
+          (return))
+
+        (let [sym (assert (* obj/LSym) (.-Aux addr))]
+          (when (!= (.-Name sym) "internal/cpu.X86")
+            (return))
+
+          (let [o (.-AuxInt offPtr)
+              ^{:line 55} t (.-Type addr)]
+            (when (not (.IsPtr t))
+              (.Fatalf (.-Func b) "The symbol %s is not a pointer, found %v instead" (.-Name sym) t))
+
+            (set! t (.Elem t))
+            (when (not (.IsStruct t))
+              (.Fatalf (.-Func b) "The referent of symbol %s is not a struct, found %v instead" (.-Name sym) t))
+
+            (let [match ""]
+              (range [_ f (.Fields t)]
+                (when (and (== o (.-Offset f)) (!= (.-Sym f) nil))
+                  (set! match (.-Name (.-Sym f)))
+                  (break)))
+
+
+
+              (switch match
+
+                (case ["HasAVX"]
+                  (set! features CPUavx))
+                (case ["HasAVXVNNI"]
+                  (set! features (bit-or CPUavx CPUavxvnni)))
+                (case ["HasAVX2"]
+                  (set! features (bit-or CPUavx2 CPUavx)))
+
+                ;; Compiler currently treats these all alike.
+                (case ^{:go/breaks [4]} ["HasAVX512" "HasAVX512F" "HasAVX512CD" "HasAVX512BW"
+                    "HasAVX512DQ" "HasAVX512VL" "HasAVX512VPCLMULQDQ"]
+                  (set! features (bit-or CPUavx512 CPUavx2 CPUavx)))
+
+                (case ["HasAVX512GFNI"]
+                  (set! features (bit-or CPUavx512 CPUgfni CPUavx2 CPUavx)))
+                (case ["HasAVX512VNNI"]
+                  (set! features (bit-or CPUavx512 CPUavx512vnni CPUavx2 CPUavx)))
+                (case ["HasAVX512VBMI"]
+                  (set! features (bit-or CPUavx512 CPUvbmi CPUavx2 CPUavx)))
+                (case ["HasAVX512VBMI2"]
+                  (set! features (bit-or CPUavx512 CPUvbmi2 CPUavx2 CPUavx)))
+                (case ["HasAVX512BITALG"]
+                  (set! features (bit-or CPUavx512 CPUbitalg CPUavx2 CPUavx)))
+                (case ["HasAVX512VPOPCNTDQ"]
+                  (set! features (bit-or CPUavx512 CPUvpopcntdq CPUavx2 CPUavx)))
+
+                (case ["HasBMI1"]
+                  (set! features CPUvbmi))
+                (case ["HasBMI2"]
+                  (set! features CPUvbmi2))
+
+                ;; Features that are not currently interesting to the compiler.
+                (case ^{:go/breaks [7 11]} ["HasAES" "HasADX" "HasERMS" "HasFSRM" "HasFMA" "HasGFNI" "HasOSXSAVE"
+                    "HasPCLMULQDQ" "HasPOPCNT" "HasRDTSCP" "HasSHA"
+                    "HasSSE3" "HasSSSE3" "HasSSE41" "HasSSE42"]))
+
+
+              (when (> (.-debug (.-pass (.-Func b))) 2)
+                (.Warnl (.-Func b) (.-Pos b) "%s, block b%v has features offset %d, match is %s, features is %v" (.-Name (.-Func b)) (.-ID b) o match features))
+
+              (return))))))))
+
+
+^{:go/end 262} (go/func cpufeatures [^{:tag (* Func)} f]
+  (let [arch ^{:go/via [Arch]} (.-Family (.-Arch (.Ctxt (.-Config f))))]
+    ;; TODO there are other SIMD architectures
+    (when (!= arch goarch/AMD64)
+      (return))
+
+
+    (let [po (.Postorder f)
+
+        ^{:line 124} effects (make (slice localEffect) (+ 1 (.NumBlocks f)) (+ 1 (.NumBlocks f)))
+
+        ^{:line 126} features ^{:go/end 136} (fn ^CPUfeatures [^{:tag (* types/Type)} t]
+          (when (.IsSIMD t)
+            (switch (.Size t)
+              (case [16 32]
+                (return CPUavx))
+              (case [64]
+                (return (bit-or CPUavx512 CPUavx2 CPUavx)))))
+
+
+          ^{:line 135} CPUNone)]
+
+
+      ;; visit blocks in reverse post order
+      ;; when b is visited, all of its predecessors (except for loop back edges)
+      ;; will have been visited
+      (for [i (- (len po) 1)] (>= i 0) (dec! i)
+        (let [b (aget po i)
+
+            ^{:line 144 :tag CPUfeatures} feat (zero CPUfeatures)]
+
+          (if (== b (.-Entry f))
+            ;; Check the types of inputs and outputs, as well as annotations.
+            ;; Start with none and union all that is implied by all the types seen.
+            (when (!= (.-Type f) nil) ; a problem for SSA tests
+              (range [_ field (.RecvParamsResults (.-Type f))]
+                (set! feat bit-or (features (.-Type field)))))
+
+
+
+            (do
+              ;; Start with all and intersect over predecessors
+              (set! feat CPUAll)
+              (range [_ p (.-Preds b)]
+                (let [pb (.Block p)]
+                  (when (not (.-visited (aget effects (.-ID pb))))
+
+                    (continue))
+
+                  (let [pi (.Index p)]
+                    (when (!= (.-Kind pb) BlockIf)
+                      (set! pi 0))
+
+
+                    (set! feat bit-and (aget (.-end (aget effects (.-ID pb))) pi)))))))
+
+
+
+          (let [e (lit localEffect :start feat :visited true)
+
+              ;; Separately capture the internal effects of this block
+              ^{:line 176 :tag CPUfeatures} internal (zero CPUfeatures)]
+            (range [_ v (.-Values b)]
+              ;; the rule applied here is, if the block contains any
+              ;; instruction that would fault if the feature (avx, avx512)
+              ;; were not present, then assume that the feature is present
+              ;; for all the instructions in the block, a fault is a fault.
+              (let [t (.-Type v)]
+                (if (.IsResults t)
+                  (for [i 0] (< i (.NumFields t)) (inc! i)
+                    (set! feat bit-or (features (.FieldType t i))))
+
+
+                  (set! internal bit-or (features (.-Type v))))))
+
+
+            (set! (.-internal e) internal)
+            (set! feat bit-or internal)
+
+            (let [(values branchEffect taken) (ifEffect b)]
+              (set! (.-end e) (lit (array 2 CPUfeatures) feat feat))
+              (set! (aget (.-end e) taken) bit-or branchEffect)
+
+              (aset effects (.-ID b) e)
+              (when (and (> (.-debug (.-pass f)) 1) (!= feat CPUNone))
+                (.Warnl f (.-Pos b) "%s, block b%v has features %v" (.-Name (.-Func b)) (.-ID b) feat))
+
+
+              (set! (.-CPUfeatures b) feat)
+              (set! (.-maxCPUFeatures f) bit-or feat))))) ; not necessary to refine this estimate below
+
+
+      ;; If the flow graph is irreducible, things can still change on backedges.
+      (let [change true]
+        (while change
+          (set! change false)
+          (for [i (- (len po) 1)] (>= i 0) (dec! i)
+            (let [b (aget po i)]
+
+              (when (== b (.-Entry f))
+                (continue)) ; cannot change
+
+              (let [feat CPUAll]
+                (range [_ p (.-Preds b)]
+                  (let [pb (.Block p)
+                      ^{:line 220} pi (.Index p)]
+                    (when (!= (.-Kind pb) BlockIf)
+                      (set! pi 0))
+
+                    (set! feat bit-and (aget (.-end (aget effects (.-ID pb))) pi))))
+
+                (let [e (aget effects (.-ID b))]
+                  (when (== feat (.-start e))
+                    (continue))
+
+                  (set! (.-start e) feat)
+                  (aset effects (.-ID b) e)
+                  ;; uh-oh, something changed
+                  (when (> (.-debug (.-pass f)) 1)
+                    (.Warnl f (.-Pos b) "%s, block b%v saw predecessor feature change" (.-Name (.-Func b)) (.-ID b)))
+
+
+                  (set! feat bit-or (.-internal e))
+                  (when (== feat (bit-and (aget (.-end e) 0) (aget (.-end e) 1)))
+                    (continue))
+
+
+                  (let [(values branchEffect taken) (ifEffect b)]
+                    (set! (.-end e) (lit (array 2 CPUfeatures) feat feat))
+                    (set! (aget (.-end e) taken) bit-or branchEffect)
+
+                    (aset effects (.-ID b) e)
+                    (set! (.-CPUfeatures b) feat)
+                    (when (> (.-debug (.-pass f)) 1)
+                      (.Warnl f (.-Pos b) "%s, block b%v has new features %v" (.-Name (.-Func b)) (.-ID b) feat))
+
+                    (set! change true)))))))
+
+
+        (when (> (.-debug (.-pass f)) 0)
+          (range [_ b (.-Blocks f)]
+            (when (!= (.-CPUfeatures b) CPUNone)
+              (.Warnl f (.-Pos b) "%s, block b%v has features %v" (.-Name (.-Func b)) (.-ID b) (.-CPUfeatures b)))))))))

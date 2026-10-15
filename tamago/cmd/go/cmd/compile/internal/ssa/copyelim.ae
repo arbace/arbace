@@ -1,0 +1,156 @@
+;; Copyright 2015 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.cmd.compile.internal.ssa) (go/file "copyelim.go" :imports [])
+
+
+
+
+^{:go/end 32} (go/func copyelim "combine copyelim and phielim into a single pass.\ncopyelim removes all uses of OpCopy values from f.\nA subsequent deadcode pass is needed to actually remove the copies.\n" [^{:tag (* Func)} f]
+  (phielim f)
+
+  ;; loop of copyelimValue(v) process has been done in phielim() pass.
+  ;; Update block control values.
+  (range [_ b (.-Blocks f)]
+    (range [i v (.ControlValues b)]
+      (when (== (.-Op v) OpCopy)
+        (.ReplaceControl b i (aget (.-Args v) 0)))))
+
+
+
+
+  ;; Update named values.
+  (range [_ name (.-Names f)]
+    (let [values (aget (.-NamedValues f) @name)]
+      (range [i v values]
+        (when (== (.-Op v) OpCopy)
+          (aset values i (aget (.-Args v) 0)))))))
+
+
+
+
+
+
+
+^{:go/end 71} (go/func copySource "copySource returns the (non-copy) op which is the\nultimate source of v.  v must be a copy op.\n" ^{:tag (* Value)} [^{:tag (* Value)} v]
+  (let [w (aget (.-Args v) 0)
+
+      ;; This loop is just:
+      ;; for w.Op == OpCopy {
+      ;;     w = w.Args[0]
+      ;; }
+      ;; but we take some extra care to make sure we
+      ;; don't get stuck in an infinite loop.
+      ;; Infinite copy loops may happen in unreachable code.
+      ;; (TODO: or can they? Needs a test.)
+      ^{:line 47} slow w
+      ^{:line 48 :tag bool} advance (zero bool)]
+    (while (== (.-Op w) OpCopy)
+      (set! w (aget (.-Args w) 0))
+      (when (== w slow)
+        (.reset w OpUnknown)
+        (break))
+
+      (when advance
+        (set! slow (aget (.-Args slow) 0)))
+
+      (set! advance (not advance)))
+
+
+    ;; The answer is w.  Update all the copies we saw
+    ;; to point directly to w.  Doing this update makes
+    ;; sure that we don't end up doing O(n^2) work
+    ;; for a chain of n copies.
+    (while (!= v w)
+      (let [x (aget (.-Args v) 0)]
+        (.SetArg v 0 w)
+        (set! v x)))
+
+    ^{:line 70} w))
+
+
+
+^{:go/end 80} (go/func copyelimValue "copyelimValue ensures that no args of v are copies.\n" [^{:tag (* Value)} v]
+  (range [i a (.-Args v)]
+    (when (== (.-Op a) OpCopy)
+      (.SetArg v i (copySource a)))))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 120} (go/func phielim "phielim eliminates redundant phi values from f.\nA phi is redundant if its arguments are all equal. For\npurposes of counting, ignore the phi itself. Both of\nthese phis are redundant:\n\n\tv = phi(x,x,x)\n\tv = phi(x,v,x,v)\n\nWe repeat this process to also catch situations like:\n\n\tv = phi(x, phi(x, x), phi(x, v))\n\nTODO: Can we also simplify cases like:\n\n\tv = phi(v, w, x)\n\tw = phi(v, w, x)\n\nand would that be useful?\n" [^{:tag (* Func)} f]
+  (while true
+    (let [change false]
+      (range [_ b (.-Blocks f)]
+        (range [_ v (.-Values b)]
+          ;; This is an early place in SSA where all values are examined.
+          ;; Rewrite all 0-sized Go values to remove accessors, dereferences, loads, etc.
+          (when [t (.-Type v)] (and ^:go/paren (or (.IsStruct t) (.IsArray t)) (== (.Size t) 0))
+            (.reset v OpEmpty))
+
+          ;; Modify all values so no arg (including args
+          ;; of OpCopy) is a copy.
+          (copyelimValue v)
+          (set! change (or (phielimValue v) change))))
+
+
+      (when (not change)
+        (break)))))
+
+
+
+
+
+^{:go/end 157} (go/func phielimValue "phielimValue tries to convert the phi v to a copy.\n" ^bool [^{:tag (* Value)} v]
+  (when (!= (.-Op v) OpPhi)
+    (return false))
+
+
+  ;; If there are two distinct args of v which
+  ;; are not v itself, then the phi must remain.
+  ;; Otherwise, we can replace it with a copy.
+  (let [^{:tag (* Value)} w (zero (* Value))]
+    (range [_ x (.-Args v)]
+      (when (== x v)
+        (continue))
+
+      (when (== x w)
+        (continue))
+
+      (when (!= w nil)
+        (return false))
+
+      (set! w x))
+
+
+    (when (== w nil)
+      ;; v references only itself. It must be in
+      ;; a dead code loop. Don't bother modifying it.
+      (return false))
+
+    (set! (.-Op v) OpCopy)
+    (.SetArgs1 v w)
+    ^{:go/breaks [[3 156]]} (let [f (.-Func (.-Block v))]
+      (when (> (.-debug (.-pass f)) 0)
+        (.Warnl f (.-Pos v) "eliminated phi"))
+
+      true)))

@@ -1,0 +1,143 @@
+;; Copyright 2021 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.cmd.compile.internal.types2) (go/file "context.go" :imports [
+
+
+    ^{:line 8} [bytes "bytes"]
+    ^{:line 9} [fmt "fmt"]
+    ^{:line 10} [strconv "strconv"]
+    ^{:line 11} [strings "strings"]
+    ^{:line 12} [sync "sync"]])
+
+
+;; This file contains a definition of the type-checking context; an opaque type
+;; that may be supplied by users during instantiation.
+;;
+;; Contexts serve two purposes:
+;;  - reduce the duplication of identical instances
+;;  - short-circuit instantiation cycles
+;;
+;; For the latter purpose, we must always have a context during instantiation,
+;; whether or not it is supplied by the user. For both purposes, it must be the
+;; case that hashing a pointer-identical type produces consistent results
+;; (somewhat obviously).
+;;
+;; However, neither of these purposes require that our hash is perfect, and so
+;; this was not an explicit design goal of the context type. In fact, due to
+;; concurrent use it is convenient not to guarantee de-duplication.
+;;
+;; Nevertheless, in the future it could be helpful to allow users to leverage
+;; contexts to canonicalize instances, and it would probably be possible to
+;; achieve such a guarantee.
+
+
+
+
+
+
+
+(go/type Context "A Context is an opaque type checking context. It may be used to share\nidentical type instances across type-checked packages or calls to\nInstantiate. Contexts are safe for concurrent use.\n\nThe use of a shared context does not guarantee that identical instances are\ndeduplicated in all cases.\n" (struct
+    ^{:line 42 :tag sync/Mutex} mu
+    ^{:line 43 :tag (map string (slice ctxtEntry))} typeMap ; type hash -> instances entries
+    ^{:line 44 :tag int} nextID ; next unique ID
+    ^{:line 45 :tag (map Type int)} originIDs)) ; origin type -> unique ID
+
+
+(go/type ctxtEntry (struct
+    ^{:line 49 :tag Type} orig
+    ^{:line 50 :tag (slice Type)} targs
+    ^{:line 51 :tag Type} instance)) ; = orig[targs]
+
+
+
+^{:go/end 60} (go/func NewContext "NewContext creates a new Context.\n" ^{:tag (* Context)} []
+  (addr ^{:go/breaks [2 4]} (lit Context
+      :typeMap (make (map string (slice ctxtEntry)))
+      :originIDs (make (map Type int)))))
+
+
+
+
+
+
+^{:go/end 83} (go/method instanceHash "instanceHash returns a string representation of typ instantiated with targs.\nThe hash should be a perfect hash, though out of caution the type checker\ndoes not assume this. The result is guaranteed to not contain blanks.\n" ^string [^{:tag (* Context)} ctxt ^Type orig ^{:tag (slice Type)} targs]
+  (go/call assert (!= ctxt nil))
+  (go/call assert (!= orig nil))
+  (let [^bytes/Buffer buf (zero bytes/Buffer)
+
+      ^{:line 70} h (newTypeHasher (addr buf) ctxt)]
+    (.string h (strconv/Itoa (.getID ctxt orig)))
+    ;; Because we've already written the unique origin ID this call to h.typ is
+    ;; unnecessary, but we leave it for hash readability. It can be removed later
+    ;; if performance is an issue.
+    (.typ h orig)
+    (when (> (len targs) 0)
+      ;; TODO(rfindley): consider asserting on isGeneric(typ) here, if and when
+      ;; isGeneric handles *Signature types.
+      (.typeList h targs))
+
+
+    (strings/ReplaceAll (.String buf) " " "#")))
+
+
+
+
+^{:go/breaks [[7 101]] :go/end 102} (go/method lookup "lookup returns an existing instantiation of orig with targs, if it exists.\nOtherwise, it returns nil.\n" ^Type [^{:tag (* Context)} ctxt ^string h ^Type orig ^{:tag (slice Type)} targs]
+  (.Lock (.-mu ctxt))
+  (defer (.Unlock (.-mu ctxt)))
+
+  (range [_ e (aget (.-typeMap ctxt) h)]
+    (when (identicalInstance orig targs (.-orig e) (.-targs e))
+      (return (.-instance e)))
+
+    (when debug
+      ;; Panic during development to surface any imperfections in our hash.
+      (panic (fmt/Sprintf "non-identical instances: (orig: %s, targs: %v) and %s" orig targs (.-instance e)))))
+
+
+
+  nil)
+
+
+
+
+
+
+^{:go/end 131} (go/method update "update de-duplicates inst against previously seen types with the hash h.\nIf an identical type is found with the type hash h, the previously seen\ntype is returned. Otherwise, inst is returned, and recorded in the Context\nfor the hash h.\n" ^Type [^{:tag (* Context)} ctxt ^string h ^Type orig ^{:tag (slice Type)} targs ^Type inst]
+  (go/call assert (!= inst nil))
+
+  (.Lock (.-mu ctxt))
+  (defer (.Unlock (.-mu ctxt)))
+
+  (range [_ e (aget (.-typeMap ctxt) h)]
+    (when (or (== inst nil) (Identical inst (.-instance e)))
+      (return (.-instance e)))
+
+    (when debug
+      ;; Panic during development to surface any imperfections in our hash.
+      (panic (fmt/Sprintf "%s and %s are not identical" inst (.-instance e)))))
+
+
+
+  (aset (.-typeMap ctxt) h (append (aget (.-typeMap ctxt) h) ^{:go/breaks [2 4 6]} (lit ctxtEntry
+        :orig orig
+        :targs targs
+        :instance inst)))
+
+
+  ^{:line 130} inst)
+
+
+
+^{:go/end 144} (go/method getID "getID returns a unique ID for the type t.\n" ^int [^{:tag (* Context)} ctxt ^Type t]
+  (.Lock (.-mu ctxt))
+  (defer (.Unlock (.-mu ctxt)))
+  (let [(values id ok) (aget (.-originIDs ctxt) t)]
+    (when (not ok)
+      (set! id (.-nextID ctxt))
+      (aset (.-originIDs ctxt) t id)
+      (inc! (.-nextID ctxt)))
+
+    ^{:line 143} id))

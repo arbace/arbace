@@ -1,0 +1,236 @@
+;; Copyright 2016 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.cmd.compile.internal.base) (go/file "timings.go" :imports [
+
+
+    ^{:line 8} [fmt "fmt"]
+    ^{:line 9} [io "io"]
+    ^{:line 10} [strings "strings"]
+    ^{:line 11} [time "time"]])
+
+
+(go/var ^Timings Timer)
+
+
+
+
+(go/type Timings "Timings collects the execution times of labeled phases\nwhich are added through a sequence of Start/Stop calls.\nEvents may be associated with each phase via AddEvent.\n" (struct
+    ^{:line 20 :tag (slice timestamp)} list
+    ^{:line 21 :tag (map int (slice (* event)))} events)) ; lazily allocated
+
+
+(go/type timestamp (struct
+    ^{:line 25 :tag time/Time} time
+    ^{:line 26 :tag string} label
+    ^{:line 27 :tag bool} start))
+
+
+(go/type event (struct
+    ^{:line 31 :tag int64} size ; count or amount of data processed (allocations, data size, lines, funcs, ...)
+    ^{:line 32 :tag string} unit)) ; unit of size measure (count, MB, lines, funcs, ...)
+
+
+^{:go/end 37} (go/method append [^{:tag (* Timings)} t ^{:tag (slice string)} labels ^bool start]
+  (set! (.-list t) (append (.-list t) (lit timestamp (time/Now) (strings/Join labels ":") start))))
+
+
+
+
+^{:go/end 43} (go/method Start "Start marks the beginning of a new phase and implicitly stops the previous phase.\nThe phase name is the colon-separated concatenation of the labels.\n" [^{:tag (* Timings)} t & ^{:tag (slice string)} labels]
+  (.append t labels true))
+
+
+
+
+^{:go/end 49} (go/method Stop "Stop marks the end of a phase and implicitly starts a new phase.\nThe labels are added to the labels of the ended phase.\n" [^{:tag (* Timings)} t & ^{:tag (slice string)} labels]
+  (.append t labels false))
+
+
+
+
+
+
+^{:go/end 66} (go/method AddEvent "AddEvent associates an event, i.e., a count, or an amount of data,\nwith the most recently started or stopped phase; or the very first\nphase if Start or Stop hasn't been called yet. The unit specifies\nthe unit of measurement (e.g., MB, lines, no. of funcs, etc.).\n" [^{:tag (* Timings)} t ^int64 size ^string unit]
+  (let [m (.-events t)]
+    (when (== m nil)
+      (set! m (make (map int (slice (* event)))))
+      (set! (.-events t) m))
+
+    (let [i (len (.-list t))]
+      (when (> i 0)
+        (dec! i))
+
+      (aset m i (append (aget m i) (addr (lit event size unit)))))))
+
+
+
+
+^{:go/end 157} (go/method Write "Write prints the phase times to w.\nThe prefix is printed at the start of each line.\n" [^{:tag (* Timings)} t ^io/Writer w ^string prefix]
+  (when (> (len (.-list t)) 0)
+    (let [^lines lines (zero lines)
+
+        ;; group of phases with shared non-empty label prefix
+        ^{:line 75 :tag (struct ^string label ^time/Duration tot ^int size)} group (zero (struct
+            ^{:line 76 :tag string} label ; label prefix
+            ^{:line 77 :tag time/Duration} tot ; accumulated phase time
+            ^{:line 78 :tag int} size)) ; number of phases collected in group
+
+
+        ;; accumulated time between Stop/Start timestamps
+        ^{:line 82 :tag time/Duration} unaccounted (zero time/Duration)
+
+        ;; process Start/Stop timestamps
+        ^{:line 85} pt (addr (aget (.-list t) 0)) ; previous timestamp
+        ^{:line 86} tot (.Sub (.-time (aget (.-list t) (- (len (.-list t)) 1))) (.-time pt))]
+      (for [i 1] (< i (len (.-list t))) (inc! i)
+        (let [qt (addr (aget (.-list t) i)) ; current timestamp
+            ^{:line 89} dt (.Sub (.-time qt) (.-time pt))
+
+            ^{:line 91 :tag string} label (zero string)
+            ^{:line 92 :tag (slice (* event))} events (zero (slice (* event)))]
+          (if (.-start pt) (do
+              ;; previous phase started
+              (set! label (.-label pt))
+              (set! events (aget (.-events t) (- i 1)))
+              (if (.-start qt) (do)
+                ;; start implicitly ended previous phase; nothing to do
+                (do
+                  ;; stop ended previous phase; append stop labels, if any
+                  (when (!= (.-label qt) "")
+                    (set! label + (+ ":" (.-label qt))))
+
+                  ;; events associated with stop replace prior events
+                  (when [e (aget (.-events t) i)] (!= e nil)
+                    (set! events e)))))
+
+
+            (do
+              ;; previous phase stopped
+              (if (.-start qt)
+                ;; between a stopped and started phase; unaccounted time
+                (set! unaccounted + dt)
+                (do
+                  ;; previous stop implicitly started current phase
+                  (set! label (.-label qt))
+                  (set! events (aget (.-events t) i))))))
+
+
+          (when (!= label "")
+            ;; add phase to existing group, or start a new group
+            (let [l (commonPrefix (.-label group) label)]
+              (if (or (and (== (.-size group) 1) (!= l "")) (and (> (.-size group) 1) (== l (.-label group)))) (do
+                  ;; add to existing group
+                  (set! (.-label group) l)
+                  (set! (.-tot group) + dt)
+                  (inc! (.-size group)))
+                (do
+                  ;; start a new group
+                  (when (> (.-size group) 1)
+                    (.add lines (+ prefix (.-label group) "subtotal") 1 (.-tot group) tot nil))
+
+                  (set! (.-label group) label)
+                  (set! (.-tot group) dt)
+                  (set! (.-size group) 1)))
+
+
+              ;; write phase
+              (.add lines (+ prefix label) 1 dt tot events)))
+
+
+          (set! pt qt)))
+
+
+      (when (> (.-size group) 1)
+        (.add lines (+ prefix (.-label group) "subtotal") 1 (.-tot group) tot nil))
+
+
+      (when (!= unaccounted 0)
+        (.add lines (+ prefix "unaccounted") 1 unaccounted tot nil))
+
+
+      (.add lines (+ prefix "total") 1 tot tot nil)
+
+      (.write lines w))))
+
+
+
+^{:go/end 165} (go/func commonPrefix ^string [^string a ^string b]
+  (let [i 0]
+    (while (and (< i (len a)) (< i (len b)) (== (aget a i) (aget b i)))
+      (inc! i))
+
+    (subslice a _ i)))
+
+
+(go/type lines (slice (slice string)))
+
+^{:go/end 188} (go/method add [^{:tag (* lines)} lines ^string label ^int n ^time/Duration dt ^time/Duration tot ^{:tag (slice (* event))} events]
+  (let [^{:tag (slice string)} line (zero (slice string))
+      ^{:line 171} add ^{:go/end 173} (fn [^string format & ^{:tag (slice any)} args]
+        (set! line (append line (fmt/Sprintf format (spread args)))))]
+
+
+    (add "%s" label)
+    (add "    %d" n)
+    (add "    %d ns/op" dt)
+    (add "    %.2f %%" (* (/ (conv float64 dt) (conv float64 tot)) 100))
+
+    (range [_ e events]
+      (add "    %d" (.-size e))
+      (add " %s" (.-unit e))
+      (add "    %d" (conv int64 (+ (/ (conv float64 (.-size e)) (.Seconds dt)) 0.5)))
+      (add " %s/s" (.-unit e)))
+
+
+    (set! @lines (append @lines line))))
+
+
+^{:go/end 227} (go/method write [^lines lines ^io/Writer w]
+  ;; determine column widths and contents
+  (let [^{:tag (slice int)} widths (zero (slice int))
+      ^{:line 193 :tag (slice bool)} number (zero (slice bool))]
+    (range [_ line lines]
+      (range [i col line]
+        (if (< i (len widths))
+          (when (> (len col) (aget widths i))
+            (aset widths i (len col)))
+
+          (do
+            (set! widths (append widths (len col)))
+            (set! number (append number (isnumber col))))))) ; first line determines column contents
+
+
+
+
+    ;; make column widths a multiple of align for more stable output
+    (let [^:const ^{:val 1} align 1] ; set to a value > 1 to enable
+      (when (> align 1)
+        (range [i w widths]
+          (set! w + (- align 1))
+          (aset widths i (- w (% w align)))))
+
+
+
+      ;; print lines taking column widths and contents into account
+      (range [_ line lines]
+        (range [i col line]
+          (let [format "%-*s"]
+            (when (aget number i)
+              (set! format "%*s")) ; numbers are right-aligned
+
+            (fmt/Fprintf w format (aget widths i) col)))
+
+        (fmt/Fprintln w)))))
+
+
+
+^{:go/breaks [[4 236]] :go/end 237} (go/func isnumber ^bool [^string s]
+  (range [_ ch s]
+    (when (<= ch \space)
+      (continue)) ; ignore leading whitespace
+
+    (return (or (and (<= \0 ch) (<= ch \9)) (== ch \.) (== ch \-) (== ch \+))))
+
+  false)

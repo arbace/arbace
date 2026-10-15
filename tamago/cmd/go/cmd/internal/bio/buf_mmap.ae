@@ -1,0 +1,61 @@
+;; Copyright 2019 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+
+
+(in-ns 'go.cmd.internal.bio) (go/file "buf_mmap.go" :build ["//go:build unix"] :imports [
+
+
+    ^{:line 10} [runtime "runtime"]
+    ^{:line 11} [atomic "sync/atomic"]
+    ^{:line 12} [syscall "syscall"]])
+
+
+
+
+
+
+
+
+
+
+
+
+
+(go/var ^{:tag int32 :doc "mmapLimit is the maximum number of mmaped regions to create before\nfalling back to reading into a heap-allocated slice. This exists\nbecause some operating systems place a limit on the number of\ndistinct mapped regions per process. As of this writing:\n\n\tDarwin    unlimited\n\tDragonFly   1000000 (vm.max_proc_mmap)\n\tFreeBSD   unlimited\n\tLinux         65530 (vm.max_map_count) // TODO: query /proc/sys/vm/max_map_count?\n\tNetBSD    unlimited\n\tOpenBSD   unlimited\n"} mmapLimit (- (<< 1 31) 1))
+
+^{:go/end 33} (go/func init []
+  ;; Linux is the only practically concerning OS.
+  (when (== runtime/GOOS "linux")
+    (set! mmapLimit 30000)))
+
+
+
+^{:go/end 62} (go/method sliceOS [^{:tag (* Reader)} r ^uint64 length] :results [(slice byte) bool]
+  ;; For small slices, don't bother with the overhead of a
+  ;; mapping, especially since we have no way to unmap it.
+  (let [^:const ^{:val 16384} threshold (<< 16 10)]
+    (when (< length threshold)
+      (return nil false))
+
+
+    ;; Have we reached the mmap limit?
+    (when (< (atomic/AddInt32 (addr mmapLimit) -1) 0)
+      (atomic/AddInt32 (addr mmapLimit) 1)
+      (return nil false))
+
+
+    ;; Page-align the offset.
+    (let [off (.Offset r)
+        ^{:line 51} align (syscall/Getpagesize)
+        ^{:line 52} aoff (bit-and-not off (conv int64 (- align 1)))
+
+        (values data err) (syscall/Mmap (conv int (.Fd (.-f r))) aoff (conv int (+ length (conv uint64 (- off aoff)))) syscall/PROT_READ (bit-or syscall/MAP_SHARED syscall/MAP_FILE))]
+      (when (!= err nil)
+        (return nil false))
+
+
+      (set! data (subslice data (- off aoff)))
+      (.MustSeek r (conv int64 length) 1)
+      (return data true))))

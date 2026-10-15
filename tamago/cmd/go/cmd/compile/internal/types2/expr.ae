@@ -1,0 +1,1462 @@
+;; Copyright 2012 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; This file implements typechecking of expressions.
+
+(in-ns 'go.cmd.compile.internal.types2) (go/file "expr.go" :imports [
+
+
+    ^{:line 10} [syntax "cmd/compile/internal/syntax"]
+    ^{:line 11} [fmt "fmt"]
+    ^{:line 12} [constant "go/constant"]
+    ^{:line 13} [token "go/token"]
+    ^{:line 14} [. "internal/types/errors"]])
+
+
+;; /*
+;; Basic algorithm:
+;; 
+;; Expressions are checked recursively, top down. Expression checker functions
+;; are generally of the form:
+;; 
+;; func f(x *operand, e *syntax.Expr, ...)
+;; 
+;; where e is the expression to be checked, and x is the result of the check.
+;; The check performed by f may fail in which case x.mode_ == invalid, and
+;; related error messages will have been issued by f.
+;; 
+;; If a hint argument is present, it is the composite literal element type
+;; of an outer composite literal; it is used to type-check composite literal
+;; elements that have no explicit type specification in the source
+;; (e.g.: []T{{...}, {...}}, the hint is the type T in this case).
+;; 
+;; All expressions are checked via rawExpr, which dispatches according
+;; to expression kind. Upon returning, rawExpr is recording the types and
+;; constant values for all expressions that have an untyped type (those types
+;; may change on the way up in the expression tree). Usually these are constants,
+;; but the results of comparisons or non-constant shifts of untyped constants
+;; may also be untyped, but not constant.
+;; 
+;; Untyped expressions may eventually become fully typed (i.e., not untyped),
+;; typically when the value is assigned to a variable, or is used otherwise.
+;; The updateExprType method is used to record this final type and update
+;; the recorded types: the type-checked expression tree is again traversed down,
+;; and the new type is propagated as needed. Untyped constant expression values
+;; that become fully typed must now be representable by the full type (constant
+;; sub-expression trees are left alone except for their roots). This mechanism
+;; ensures that a client sees the actual (run-time) type an untyped value would
+;; have. It also permits type-checking of lhs shift operands "as if the shift
+;; were not present": when updateExprType visits an untyped lhs shift operand
+;; and assigns it it's final type, that type must be an integer type, and a
+;; constant lhs must be representable as an integer.
+;; 
+;; When an expression gets its final type, either on the way out from rawExpr,
+;; on the way down in updateExprType, or at the end of the type checker run,
+;; the type (and constant value, if any) is recorded via Info.Types, if present.
+;; */
+
+(go/type opPredicates (map syntax/Operator (func [Type] [bool])))
+
+(go/var ^opPredicates unaryOpPredicates)
+
+^{:go/end 71} (go/func init []
+  ;; Setting unaryOpPredicates in init avoids declaration cycles.
+  (set! unaryOpPredicates (lit opPredicates
+      ^{:line 66} [syntax/Add allNumeric]
+      ^{:line 67} [syntax/Sub allNumeric]
+      ^{:line 68} [syntax/Xor allInteger]
+      ^{:line 69} [syntax/Not allBoolean])))
+
+
+
+^{:go/breaks [[4 83]] :go/end 84} (go/method op ^bool [^{:tag (* Checker)} check ^opPredicates m ^{:tag (* operand)} x ^syntax/Operator op]
+  (if [pred (aget m op)] (!= pred nil)
+    (when (not (pred (.typ x)))
+      (.errorf check x UndefinedOp (+ invalidOp "operator %s not defined on %s") op x)
+      (return false))
+
+    (do
+      (.errorf check x InvalidSyntaxTree "unknown operator %s" op)
+      (return false)))
+
+  true)
+
+
+
+
+^{:go/end 97} (go/func opPos "opPos returns the position of the operator if x is an operation;\notherwise it returns the start position of x.\n" ^syntax/Pos [^syntax/Expr x]
+  (type-switch [op x]
+    (case [nil]
+      (return nopos)) ; don't crash
+    (case [(* syntax/Operation)]
+      (return ^{:go/via [expr node]} (.Pos op)))
+    (default
+      (return (syntax/StartPos x)))))
+
+
+
+
+
+^{:go/breaks [[5 114]] :go/end 115} (go/func opName "opName returns the name of the operation if x is an operation\nthat might overflow; otherwise it returns the empty string.\n" ^string [^syntax/Expr x]
+  (when [(values e _) (assert (* syntax/Operation) x)] (!= e nil)
+    (let [op (conv int (.-Op e))]
+      (if (== (.-Y e) nil)
+        (when (< op (len op2str1))
+          (return (aget op2str1 op)))
+
+        (do
+          (when (< op (len op2str2))
+            (return (aget op2str2 op)))))))
+
+
+
+  "")
+
+
+(go/var op2str1 (lit (array ... string)
+    ^{:line 118} [syntax/Xor "bitwise complement"]))
+
+
+
+(go/var ^{:doc "This is only used for operations that may cause overflow.\n"} op2str2 (lit (array ... string)
+    ^{:line 123} [syntax/Add "addition"]
+    ^{:line 124} [syntax/Sub "subtraction"]
+    ^{:line 125} [syntax/Xor "bitwise XOR"]
+    ^{:line 126} [syntax/Mul "multiplication"]
+    ^{:line 127} [syntax/Shl "shift"]))
+
+
+^{:go/end 194} (go/method unary [^{:tag (* Checker)} check ^{:tag (* operand)} x ^{:tag (* syntax/Operation)} e]
+  (.expr check nil x (.-X e))
+  (when (not (.isValid x))
+    (return))
+
+
+  (let [op (.-Op e)]
+    (switch op
+      (case [syntax/And]
+        ;; spec: "As an exception to the addressability
+        ;; requirement x may also be a composite literal."
+        (when [(values _ ok) (assert (* syntax/CompositeLit) (syntax/Unparen (.-X e)))] (and (not ok) (!= (.mode x) variable))
+          (.errorf check x UnaddressableOperand (+ invalidOp "cannot take address of %s") x)
+          (.invalidate x)
+          (return))
+
+        (set! (.-mode_ x) value)
+        (set! (.-typ_ x) (addr (lit Pointer :base (.typ x))))
+        (return))
+
+      (case [syntax/Recv]
+        ;; We cannot receive a value with an incomplete type; make sure it's complete.
+        (when [elem (.chanElem check x x true)] (and (!= elem nil) (.isComplete check elem))
+          (set! (.-mode_ x) commaok)
+          (set! (.-typ_ x) elem)
+          (set! ^{:go/via [environment]} (.-hasCallOrRecv check) true)
+          (return))
+
+        (.invalidate x)
+        (return))
+
+      (case [syntax/Tilde]
+        ;; Provide a better error position and message than what check.op below would do.
+        (when (not (allInteger (.typ x)))
+          (.error check e UndefinedOp "cannot use ~ outside of interface or type constraint")
+          (.invalidate x)
+          (return))
+
+        (.error check e UndefinedOp "cannot use ~ outside of interface or type constraint (use ^ for bitwise complement)")
+        (set! op syntax/Xor)))
+
+
+    (when (not (.op check unaryOpPredicates x op))
+      (.invalidate x)
+      (return))
+
+
+    (when (== (.mode x) constant_)
+      (when (== (.Kind (.-val x)) constant/Unknown)
+        ;; nothing to do (and don't cause an error below in the overflow check)
+        (return))
+
+      (let [^uint prec (zero uint)]
+        (when (isUnsigned (.typ x))
+          (set! prec (conv uint (* (.sizeof (.-conf check) (.typ x)) 8))))
+
+        (set! (.-val x) (constant/UnaryOp (aget op2tok op) (.-val x) prec))
+        (set! (.-expr x) e)
+        (.overflow check x (opPos (.-expr x)))
+        (return)))
+
+
+    (set! (.-mode_ x) value)))
+;; x.typ remains unchanged
+
+
+
+
+
+^{:go/end 238} (go/method chanElem "chanElem returns the channel element type of x for a receive from x (recv == true)\nor send to x (recv == false) operation. If the operation is not valid, chanElem\nreports an error and returns nil.\n" ^Type [^{:tag (* Checker)} check ^poser pos ^{:tag (* operand)} x ^bool recv]
+  (let [(values u err) (commonUnder (.typ x) ^{:go/end 215} (fn ^{:tag (* typeError)} [^Type t ^Type u]
+          (when (== u nil)
+            (return (typeErrorf "no specific channel type")))
+
+          ^{:go/breaks [[5 214]]} (let [(values ch _) (assert (* Chan) u)]
+            (when (== ch nil)
+              (return (typeErrorf "non-channel %s" t)))
+
+            (when (and recv (== (.-dir ch) SendOnly))
+              (return (typeErrorf "send-only channel %s" t)))
+
+            (when (and (not recv) (== (.-dir ch) RecvOnly))
+              (return (typeErrorf "receive-only channel %s" t)))
+
+            nil)))]
+
+
+    (when (!= u nil)
+      (return (.-elem (assert (* Chan) u))))
+
+
+    ^{:go/breaks [[3 237]]} (let [cause (.format err check)]
+      (if recv
+        (if (isTypeParam (.typ x))
+          (.errorf check pos InvalidReceive (+ invalidOp "cannot receive from %s: %s") x cause)
+
+          ;; In this case, only the non-channel and send-only channel error are possible.
+          (.errorf check pos InvalidReceive (+ invalidOp "cannot receive from %s %s") cause x))
+
+        (do
+          (if (isTypeParam (.typ x))
+            (.errorf check pos InvalidSend (+ invalidOp "cannot send to %s: %s") x cause)
+
+            ;; In this case, only the non-channel and receive-only channel error are possible.
+            (.errorf check pos InvalidSend (+ invalidOp "cannot send to %s %s") cause x))))
+
+
+      nil)))
+
+
+^{:go/end 242} (go/func isShift ^bool [^syntax/Operator op]
+  (or (== op syntax/Shl) (== op syntax/Shr)))
+
+
+^{:go/breaks [[4 250]] :go/end 251} (go/func isComparison ^bool [^syntax/Operator op]
+  ;; Note: tokens are not ordered well to make this much easier
+  (switch op
+    (case [syntax/Eql syntax/Neq syntax/Lss syntax/Leq syntax/Gtr syntax/Geq]
+      (return true)))
+
+  false)
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 397} (go/method updateExprType "updateExprType updates the type of x to typ and invokes itself\nrecursively for the operands of x, depending on expression kind.\nIf typ is still an untyped and not the final type, updateExprType\nonly updates the recorded untyped type for x and possibly its\noperands. Otherwise (i.e., typ is not an untyped type anymore,\nor it is the final type for x), the type and value are recorded.\nAlso, if x is a constant, it must be representable as a value of typ,\nand if x is the (formerly untyped) lhs operand of a non-constant\nshift, it must be an integer value.\n" [^{:tag (* Checker)} check ^syntax/Expr x ^Type typ ^bool final]
+  (let [(values old found) (aget (.-untyped check) x)]
+    (when (not found)
+      (return)) ; nothing to do
+
+
+    ;; update operands of x if necessary
+    (type-switch [x x]
+      (case [(* syntax/BadExpr)
+          (* syntax/FuncLit)
+          (* syntax/CompositeLit)
+          (* syntax/IndexExpr)
+          (* syntax/SliceExpr)
+          (* syntax/AssertExpr)
+          (* syntax/ListExpr)
+          ;;*syntax.StarExpr,
+          (* syntax/KeyValueExpr)
+          (* syntax/ArrayType)
+          (* syntax/StructType)
+          (* syntax/FuncType)
+          (* syntax/InterfaceType)
+          (* syntax/MapType)
+          (* syntax/ChanType)]
+        ;; These expression are never untyped - nothing to do.
+        ;; The respective sub-expressions got their final types
+        ;; upon assignment or use.
+        (when debug
+          (.dump check "%v: found old type(%s): %s (new: %s)" (atPos x) x (.-typ old) typ)
+          (panic "unreachable"))
+
+        (return))
+
+      (case [(* syntax/CallExpr)])
+      ;; Resulting in an untyped constant (e.g., built-in complex).
+      ;; The respective calls take care of calling updateExprType
+      ;; for the arguments if necessary.
+
+      (case [(* syntax/Name) (* syntax/BasicLit) (* syntax/SelectorExpr)])
+      ;; An identifier denoting a constant, a constant literal,
+      ;; or a qualified identifier (imported untyped constant).
+      ;; No operands to take care of.
+
+      (case [(* syntax/ParenExpr)]
+        (.updateExprType check (.-X x) typ final))
+
+      ;; case *syntax.UnaryExpr:
+      ;; 	// If x is a constant, the operands were constants.
+      ;; 	// The operands don't need to be updated since they
+      ;; 	// never get "materialized" into a typed value. If
+      ;; 	// left in the untyped map, they will be processed
+      ;; 	// at the end of the type check.
+      ;; 	if old.val != nil {
+      ;; 		break
+      ;; 	}
+      ;; 	check.updateExprType(x.X, typ, final)
+
+      (case [(* syntax/Operation)]
+        (when (== (.-Y x) nil)
+          ;; unary expression
+          (when (== (.-Op x) syntax/Mul)
+            ;; see commented out code for StarExpr above
+            ;; TODO(gri) needs cleanup
+            (when debug
+              (panic "unimplemented"))
+
+            (return))
+
+          ;; If x is a constant, the operands were constants.
+          ;; The operands don't need to be updated since they
+          ;; never get "materialized" into a typed value. If
+          ;; left in the untyped map, they will be processed
+          ;; at the end of the type check.
+          (when (!= (.-val old) nil)
+            (break))
+
+          (.updateExprType check (.-X x) typ final)
+          (break))
+
+
+        ;; binary expression
+        (when (!= (.-val old) nil)
+          (break)) ; see comment for unary expressions
+
+        (cond (isComparison (.-Op x)) (do)
+          ;; The result type is independent of operand types
+          ;; and the operand types must have final types.
+          (isShift (.-Op x))
+          ;; The result type depends only on lhs operand.
+          ;; The rhs type was updated when checking the shift.
+          (.updateExprType check (.-X x) typ final) :else
+          (do
+            ;; The operand types match the result type.
+            (.updateExprType check (.-X x) typ final)
+            (.updateExprType check (.-Y x) typ final))))
+
+
+      (default
+        (panic "unreachable")))
+
+
+    ;; If the new type is not final and still untyped, just
+    ;; update the recorded type.
+    (when (and (not final) (isUntyped typ))
+      (set! (.-typ old) (assert (* Basic) (.Underlying typ)))
+      (aset (.-untyped check) x old)
+      (return))
+
+
+    ;; Otherwise we have the final (typed or untyped type).
+    ;; Remove it from the map of yet untyped expressions.
+    (delete (.-untyped check) x)
+
+    (when (.-isLhs old)
+      ;; If x is the lhs of a shift, its final type must be integer.
+      ;; We already know from the shift check that it is representable
+      ;; as an integer if it is a constant.
+      (when (not (allInteger typ))
+        (.errorf check x InvalidShiftOperand (+ invalidOp "shifted operand %s (type %s) must be integer") x typ)
+        (return)))
+
+    ;; Even if we have an integer, if the value is a constant we
+    ;; still must check that it is representable as the specific
+    ;; int type requested (was go.dev/issue/22969). Fall through here.
+
+    (when (!= (.-val old) nil)
+      ;; If x is a constant, it must be representable as a value of typ.
+      (let [c (lit operand (.-mode old) x (.-typ old) (.-val old) 0)]
+        (.convertUntyped check (addr c) typ)
+        (when (not (.isValid c))
+          (return))))
+
+
+
+    ;; Everything's fine, record final type and value for x.
+    (.recordTypeAndValue check x (.-mode old) typ (.-val old))))
+
+
+
+^{:go/end 405} (go/method updateExprVal "updateExprVal updates the value of x to val.\n" [^{:tag (* Checker)} check ^syntax/Expr x ^constant/Value val]
+  (when [(values info ok) (aget (.-untyped check) x)] ok
+    (set! (.-val info) val)
+    (aset (.-untyped check) x info)))
+
+
+
+
+
+
+
+
+
+^{:go/end 491} (go/method implicitTypeAndValue "implicitTypeAndValue returns the implicit type of x when used in a context\nwhere the target type is expected. If no such implicit conversion is\npossible, it returns a nil Type and non-zero error code.\n\nIf x is a constant operand, the returned constant.Value will be the\nrepresentation of x in this context.\n" [^{:tag (* Checker)} check ^{:tag (* operand)} x ^Type target] :results [Type constant/Value Code]
+  (when (or (not (.isValid x)) (isTyped (.typ x)) (not (isValid target)))
+    (return (.typ x) nil 0))
+
+  ;; x is untyped
+
+  (when (isUntyped target)
+    ;; both x and target are untyped
+    (when [m (maxType (.typ x) target)] (!= m nil)
+      (return m nil 0))
+
+    (return nil nil InvalidUntypedConversion))
+
+
+  (when (.isNil x)
+    (go/call assert (isUntyped (.typ x)))
+    (when (hasNil target)
+      (return target nil 0))
+
+    (return nil nil InvalidUntypedConversion))
+
+
+  (type-switch [u (.Underlying target)]
+    (case [(* Basic)]
+      (when (== (.mode x) constant_)
+        (let [(values v code) (.representation check x u)]
+          (when (!= code 0)
+            (return nil nil code))
+
+          (return target v code)))
+
+      ;; Non-constant untyped values may appear as the
+      ;; result of comparisons (untyped bool), intermediate
+      ;; (delayed-checked) rhs operands of shifts, and as
+      ;; the value nil.
+      (switch (.-kind (assert (* Basic) (.typ x)))
+        (case [UntypedBool]
+          (when (not (isBoolean target))
+            (return nil nil InvalidUntypedConversion)))
+
+        (case [UntypedInt UntypedRune UntypedFloat UntypedComplex]
+          (when (not (isNumeric target))
+            (return nil nil InvalidUntypedConversion)))
+
+        (case [UntypedString]
+          ;; Non-constant untyped string values are not permitted by the spec and
+          ;; should not occur during normal typechecking passes, but this path is
+          ;; reachable via the AssignableTo API.
+          (when (not (isString target))
+            (return nil nil InvalidUntypedConversion)))
+
+        (default
+          (return nil nil InvalidUntypedConversion))))
+
+    (case [(* Interface)]
+      (when (isTypeParam target)
+        (when (not (underIs target ^{:go/end 475} (fn ^bool [^Type u]
+                (when (== u nil)
+                  (return false))
+
+                (let [(values t _ _) (.implicitTypeAndValue check x u)]
+                  (!= t nil)))))
+
+          (return nil nil InvalidUntypedConversion))
+
+        (break))
+
+      ;; Update operand types to the default type rather than the target
+      ;; (interface) type: values must have concrete dynamic types.
+      ;; Untyped nil was handled upfront.
+      (when (not (.Empty u))
+        (return nil nil InvalidUntypedConversion)) ; cannot assign untyped values to non-empty interfaces
+
+      (return (Default (.typ x)) nil 0)) ; default type for nil is nil
+    (default
+      (return nil nil InvalidUntypedConversion)))
+
+  (return target nil 0))
+
+
+
+^{:go/end 615} (go/method comparison "If switchCase is true, the operator op is ignored.\n" [^{:tag (* Checker)} check ^{:tag (* operand)} x ^{:tag (* operand)} y ^syntax/Operator op ^bool switchCase]
+  ;; Avoid spurious errors if any of the operands has an invalid type (go.dev/issue/54405).
+  (when (or (not (isValid (.typ x))) (not (isValid (.typ y))))
+    (.invalidate x)
+    (return))
+
+
+  (when switchCase
+    (set! op syntax/Eql))
+
+
+  (let [errOp x ; operand for which error is reported, if any
+      ^{:line 506} cause "" ; specific error cause, if any
+
+      ;; spec: "In any comparison, the first operand must be assignable
+      ;; to the type of the second operand, or vice versa."
+      ^{:line 510} code MismatchedTypes
+      (values ok _) (.assignableTo x check (.typ y) nil)]
+    (when (not ok)
+      (set! (values ok _) (.assignableTo y check (.typ x) nil)))
+
+    (when (not ok)
+      ;; Report the error on the 2nd operand since we only
+      ;; know after seeing the 2nd operand whether we have
+      ;; a type mismatch.
+      (set! errOp y)
+      (set! cause (.sprintf check "mismatched types %s and %s" (.typ x) (.typ y)))
+      (goto :Error))
+
+
+    ;; check if comparison is defined for operands
+    (set! code UndefinedOp)
+    (switch op
+      (case [syntax/Eql syntax/Neq]
+        ;; spec: "The equality operators == and != apply to operands that are comparable."
+        (switch
+          (case [(or (.isNil x) (.isNil y))]
+            ;; Comparison against nil requires that the other operand type has nil.
+            (let [typ (.typ x)]
+              (when (.isNil x)
+                (set! typ (.typ y)))
+
+              (when (not (hasNil typ))
+                ;; This case should only be possible for "nil == nil".
+                ;; Report the error on the 2nd operand since we only
+                ;; know after seeing the 2nd operand whether we have
+                ;; an invalid comparison.
+                (set! errOp y)
+                (goto :Error))))
+
+
+          (case [(not (Comparable (.typ x)))]
+            (set! errOp x)
+            (set! cause (.incomparableCause check (.typ x)))
+            (goto :Error))
+
+          (case [(not (Comparable (.typ y)))]
+            (set! errOp y)
+            (set! cause (.incomparableCause check (.typ y)))
+            (goto :Error))))
+
+
+      (case [syntax/Lss syntax/Leq syntax/Gtr syntax/Geq]
+        ;; spec: The ordering operators <, <=, >, and >= apply to operands that are ordered."
+        (switch
+          (case [(not (allOrdered (.typ x)))]
+            (set! errOp x)
+            (goto :Error))
+          (case [(not (allOrdered (.typ y)))]
+            (set! errOp y)
+            (goto :Error))))
+
+
+      (default
+        (panic "unreachable")))
+
+
+    ;; comparison is ok
+    (if (and (== (.mode x) constant_) (== (.mode y) constant_))
+      (set! (.-val x) (constant/MakeBool (constant/Compare (.-val x) (aget op2tok op) (.-val y))))
+      ;; The operands are never materialized; no need to update
+      ;; their types.
+      (do
+        (set! (.-mode_ x) value)
+        ;; The operands have now their final types, which at run-
+        ;; time will be materialized. Update the expression trees.
+        ;; If the current types are untyped, the materialized type
+        ;; is the respective default type.
+        (.updateExprType check (.-expr x) (Default (.typ x)) true)
+        (.updateExprType check (.-expr y) (Default (.typ y)) true)))
+
+
+    ;; spec: "Comparison operators compare two operands and yield
+    ;;        an untyped boolean value."
+    (set! (.-typ_ x) (aget Typ UntypedBool))
+    (return)
+
+    (label :Error
+      ;; We have an offending operand errOp and possibly an error cause.
+      (when (== cause "")
+        (if (or (isTypeParam (.typ x)) (isTypeParam (.typ y))) (do
+            ;; TODO(gri) should report the specific type causing the problem, if any
+            (when (not (isTypeParam (.typ x)))
+              (set! errOp y))
+
+            (set! cause (.sprintf check "type parameter %s cannot use operator %s" (.typ errOp) op)))
+
+          ;; catch-all: neither x nor y is a type parameter
+          (let [what (compositeKind (.typ errOp))]
+            (when (== what "")
+              (set! what (.sprintf check "%s" (.typ errOp))))
+
+            (set! cause (.sprintf check "operator %s not defined on %s" op what))))))
+
+
+    (if switchCase
+      (.errorf check x code "invalid case %s in switch on %s (%s)" (.-expr x) (.-expr y) cause) ; error position always at 1st operand
+
+      (.errorf check errOp code (+ invalidOp "%s %s %s (%s)") (.-expr x) op (.-expr y) cause))
+
+    (.invalidate x)))
+
+
+
+
+^{:go/end 626} (go/method incomparableCause "incomparableCause returns a more specific cause why typ is not comparable.\nIf there is no more specific cause, the result is \"\".\n" ^string [^{:tag (* Checker)} check ^Type typ]
+  (type-switch (.Underlying typ)
+    (case [(* Slice) (* Signature) (* Map)]
+      (return (+ (compositeKind typ) " can only be compared to nil"))))
+
+  ;; see if we can extract a more specific error
+  (.format (comparableType typ true nil) check))
+
+
+
+^{:go/end 766} (go/method shift "If e != nil, it must be the shift expression; it may be nil for non-constant shifts.\n" [^{:tag (* Checker)} check ^{:tag (* operand)} x ^{:tag (* operand)} y ^syntax/Expr e ^syntax/Operator op]
+  ;; TODO(gri) This function seems overly complex. Revisit.
+
+  (let [^constant/Value xval (zero constant/Value)]
+    (when (== (.mode x) constant_)
+      (set! xval (constant/ToInt (.-val x))))
+
+
+    (if (or (allInteger (.typ x)) (and (isUntyped (.typ x)) (!= xval nil) (== (.Kind xval) constant/Int))) (do)
+      ;; The lhs is of integer type or an untyped constant representable
+      ;; as an integer. Nothing to do.
+      (do
+        ;; shift has no chance
+        (.errorf check x InvalidShiftOperand (+ invalidOp "shifted operand %s must be integer") x)
+        (.invalidate x)
+        (return)))
+
+
+    ;; spec: "The right operand in a shift expression must have integer type
+    ;; or be an untyped constant representable by a value of type uint."
+
+    ;; Check that constants are representable by uint, but do not convert them
+    ;; (see also go.dev/issue/47243).
+    (let [^constant/Value yval (zero constant/Value)]
+      (if (== (.mode y) constant_) (do
+          ;; Provide a good error message for negative shift counts.
+          (set! yval (constant/ToInt (.-val y))) ; consider -1, 1.0, but not -1.1
+          (when (and (== (.Kind yval) constant/Int) (< (constant/Sign yval) 0))
+            (.errorf check y InvalidShiftCount (+ invalidOp "negative shift count %s") y)
+            (.invalidate x)
+            (return))
+
+
+          (when (isUntyped (.typ y))
+            ;; Caution: Check for representability here, rather than in the switch
+            ;; below, because isInteger includes untyped integers (was bug go.dev/issue/43697).
+            (.representable check y (aget Typ Uint))
+            (when (not (.isValid y))
+              (.invalidate x)
+              (return))))
+
+
+
+        ;; Check that RHS is otherwise at least of integer type.
+        (switch
+          (case [(allInteger (.typ y))]
+            (when (and (not (allUnsigned (.typ y))) (not (.verifyVersionf check y go1_13 (+ invalidOp "signed shift count %s") y)))
+              (.invalidate x)
+              (return)))
+
+          (case [(isUntyped (.typ y))]
+            ;; This is incorrect, but preserves pre-existing behavior.
+            ;; See also go.dev/issue/47410.
+            (.convertUntyped check y (aget Typ Uint))
+            (when (not (.isValid y))
+              (.invalidate x)
+              (return)))
+
+          (default
+            (.errorf check y InvalidShiftCount (+ invalidOp "shift count %s must be integer") y)
+            (.invalidate x)
+            (return))))
+
+
+
+      (when (== (.mode x) constant_)
+        (when (== (.mode y) constant_)
+          ;; if either x or y has an unknown value, the result is unknown
+          (when (or (== (.Kind (.-val x)) constant/Unknown) (== (.Kind (.-val y)) constant/Unknown))
+            (set! (.-val x) (constant/MakeUnknown))
+            ;; ensure the correct type - see comment below
+            (when (not (isInteger (.typ x)))
+              (set! (.-typ_ x) (aget Typ UntypedInt)))
+
+            (return))
+
+          ;; rhs must be within reasonable bounds in constant shifts
+          (let [^:const ^{:val 1074} shiftBound (+ (- 1023 1) 52) ; so we can express smallestFloat64 (see go.dev/issue/44057)
+              (values s ok) (constant/Uint64Val yval)]
+            (when (or (not ok) (> s shiftBound))
+              (.errorf check y InvalidShiftCount (+ invalidOp "invalid shift count %s") y)
+              (.invalidate x)
+              (return))
+
+            ;; The lhs is representable as an integer but may not be an integer
+            ;; (e.g., 2.0, an untyped float) - this can only happen for untyped
+            ;; non-integer numeric constants. Correct the type so that the shift
+            ;; result is of integer type.
+            (when (not (isInteger (.typ x)))
+              (set! (.-typ_ x) (aget Typ UntypedInt)))
+
+            ;; x is a constant so xval != nil and it must be of Int kind.
+            (set! (.-val x) (constant/Shift xval (aget op2tok op) (conv uint s)))
+            (set! (.-expr x) e)
+            (.overflow check x (opPos (.-expr x)))
+            (return)))
+
+
+        ;; non-constant shift with constant lhs
+        (when (isUntyped (.typ x))
+          ;; spec: "If the left operand of a non-constant shift
+          ;; expression is an untyped constant, the type of the
+          ;; constant is what it would be if the shift expression
+          ;; were replaced by its left operand alone.".
+          ;;
+          ;; Delay operand checking until we know the final type
+          ;; by marking the lhs expression as lhs shift operand.
+          ;;
+          ;; Usually (in correct programs), the lhs expression
+          ;; is in the untyped map. However, it is possible to
+          ;; create incorrect programs where the same expression
+          ;; is evaluated twice (via a declaration cycle) such
+          ;; that the lhs expression type is determined in the
+          ;; first round and thus deleted from the map, and then
+          ;; not found in the second round (double insertion of
+          ;; the same expr node still just leads to one entry for
+          ;; that node, and it can only be deleted once).
+          ;; Be cautious and check for presence of entry.
+          ;; Example: var e, f = int(1<<""[f]) // go.dev/issue/11347
+          (when [(values info found) (aget (.-untyped check) (.-expr x))] found
+            (set! (.-isLhs info) true)
+            (aset (.-untyped check) (.-expr x) info))
+
+          ;; keep x's type
+          (set! (.-mode_ x) value)
+          (return)))
+
+
+
+      ;; non-constant shift - lhs must be an integer
+      (when (not (allInteger (.typ x)))
+        (.errorf check x InvalidShiftOperand (+ invalidOp "shifted operand %s must be integer") x)
+        (.invalidate x)
+        (return))
+
+
+      (set! (.-mode_ x) value))))
+
+
+(go/var ^opPredicates binaryOpPredicates)
+
+^{:go/end 787} (go/func init []
+  ;; Setting binaryOpPredicates in init avoids declaration cycles.
+  (set! binaryOpPredicates (lit opPredicates
+      ^{:line 773} [syntax/Add allNumericOrString]
+      ^{:line 774} [syntax/Sub allNumeric]
+      ^{:line 775} [syntax/Mul allNumeric]
+      ^{:line 776} [syntax/Div allNumeric]
+      ^{:line 777} [syntax/Rem allInteger]
+
+      ^{:line 779} [syntax/And allInteger]
+      ^{:line 780} [syntax/Or allInteger]
+      ^{:line 781} [syntax/Xor allInteger]
+      ^{:line 782} [syntax/AndNot allInteger]
+
+      ^{:line 784} [syntax/AndAnd allBoolean]
+      ^{:line 785} [syntax/OrOr allBoolean])))
+
+
+
+
+
+^{:go/end 880} (go/method binary "If e != nil, it must be the binary expression; it may be nil for non-constant expressions\n(when invoked for an assignment operation where the binary expression is implicit).\n" [^{:tag (* Checker)} check ^{:tag (* operand)} x ^syntax/Expr e ^syntax/Expr lhs ^syntax/Expr rhs ^syntax/Operator op]
+  (let [^operand y (zero operand)]
+
+    (.expr check nil x lhs)
+    (.expr check nil (addr y) rhs)
+
+    (when (not (.isValid x))
+      (return))
+
+    (when (not (.isValid y))
+      (.invalidate x)
+      (set! (.-expr x) (.-expr y))
+      (return))
+
+
+    (when (isShift op)
+      (.shift check x (addr y) e op)
+      (return))
+
+
+    (.matchTypes check x (addr y))
+    (when (not (.isValid x))
+      (return))
+
+
+    (when (isComparison op)
+      (.comparison check x (addr y) op false)
+      (return))
+
+
+    (when (not (Identical (.typ x) (.typ y)))
+      ;; only report an error if we have valid types
+      ;; (otherwise we had an error reported elsewhere already)
+      (when (and (isValid (.typ x)) (isValid (.typ y)))
+        (if (!= e nil)
+          (.errorf check x MismatchedTypes (+ invalidOp "%s (mismatched types %s and %s)") e (.typ x) (.typ y))
+
+          (.errorf check x MismatchedTypes (+ invalidOp "%s %s= %s (mismatched types %s and %s)") lhs op rhs (.typ x) (.typ y))))
+
+
+      (.invalidate x)
+      (return))
+
+
+    (when (not (.op check binaryOpPredicates x op))
+      (.invalidate x)
+      (return))
+
+
+    (when (or (== op syntax/Div) (== op syntax/Rem))
+      ;; check for zero divisor
+      (when (and ^:go/paren (or (== (.mode x) constant_) (allInteger (.typ x))) (== (.mode y) constant_) (== (constant/Sign (.-val y)) 0))
+        (.error check (addr y) DivByZero (+ invalidOp "division by zero"))
+        (.invalidate x)
+        (return))
+
+
+      ;; check for divisor underflow in complex division (see go.dev/issue/20227)
+      (when (and (== (.mode x) constant_) (== (.mode y) constant_) (isComplex (.typ x)))
+        (let [(values re im) (values (constant/Real (.-val y)) (constant/Imag (.-val y)))
+            (values re2 im2) (values (constant/BinaryOp re token/MUL re) (constant/BinaryOp im token/MUL im))]
+          (when (and (== (constant/Sign re2) 0) (== (constant/Sign im2) 0))
+            (.error check (addr y) DivByZero (+ invalidOp "division by zero"))
+            (.invalidate x)
+            (return)))))
+
+
+
+
+    (when (and (== (.mode x) constant_) (== (.mode y) constant_))
+      ;; if either x or y has an unknown value, the result is unknown
+      (when (or (== (.Kind (.-val x)) constant/Unknown) (== (.Kind (.-val y)) constant/Unknown))
+        (set! (.-val x) (constant/MakeUnknown))
+        ;; x.typ is unchanged
+        (return))
+
+      ;; force integer division for integer operands
+      (let [tok (aget op2tok op)]
+        (when (and (== op syntax/Div) (isInteger (.typ x)))
+          (set! tok token/QUO_ASSIGN))
+
+        (set! (.-val x) (constant/BinaryOp (.-val x) tok (.-val y)))
+        (set! (.-expr x) e)
+        (.overflow check x (opPos (.-expr x)))
+        (return)))
+
+
+    (set! (.-mode_ x) value)))
+;; x.typ is unchanged
+
+
+
+
+^{:go/end 944} (go/method matchTypes "matchTypes attempts to convert any untyped types x and y such that they match.\nIf an error occurs, x.mode is set to invalid.\n" [^{:tag (* Checker)} check ^{:tag (* operand)} x ^{:tag (* operand)} y]
+  ;; mayConvert reports whether the operands x and y may
+  ;; possibly have matching types after converting one
+  ;; untyped operand to the type of the other.
+  ;; If mayConvert returns true, we try to convert the
+  ;; operands to each other's types, and if that fails
+  ;; we report a conversion failure.
+  ;; If mayConvert returns false, we continue without an
+  ;; attempt at conversion, and if the operand types are
+  ;; not compatible, we report a type mismatch error.
+  (let [mayConvert ^{:go/breaks [[10 930]] :go/end 931} (fn ^bool [^{:tag (* operand)} x ^{:tag (* operand)} y]
+        ;; If both operands are typed, there's no need for an implicit conversion.
+        (when (and (isTyped (.typ x)) (isTyped (.typ y)))
+          (return false))
+
+        ;; A numeric type can only convert to another numeric type.
+        (when (!= (allNumeric (.typ x)) (allNumeric (.typ y)))
+          (return false))
+
+        ;; An untyped operand may convert to its default type when paired with an empty interface
+        ;; TODO(gri) This should only matter for comparisons (the only binary operation that is
+        ;;           valid with interfaces), but in that case the assignability check should take
+        ;;           care of the conversion. Verify and possibly eliminate this extra test.
+        (when (or (isNonTypeParamInterface (.typ x)) (isNonTypeParamInterface (.typ y)))
+          (return true))
+
+        ;; A boolean type can only convert to another boolean type.
+        (when (!= (allBoolean (.typ x)) (allBoolean (.typ y)))
+          (return false))
+
+        ;; A string type can only convert to another string type.
+        (when (!= (allString (.typ x)) (allString (.typ y)))
+          (return false))
+
+        ;; Untyped nil can only convert to a type that has a nil.
+        (when (.isNil x)
+          (return (hasNil (.typ y))))
+
+        (when (.isNil y)
+          (return (hasNil (.typ x))))
+
+        ;; An untyped operand cannot convert to a pointer.
+        ;; TODO(gri) generalize to type parameters
+        (when (or (isPointer (.typ x)) (isPointer (.typ y)))
+          (return false))
+
+        true)]
+
+
+    (when (mayConvert x y)
+      (.convertUntyped check x (.typ y))
+      (when (not (.isValid x))
+        (return))
+
+      (.convertUntyped check y (.typ x))
+      (when (not (.isValid y))
+        (.invalidate x)
+        (return)))))
+
+
+
+
+
+
+(go/type exprKind "exprKind describes the kind of an expression; the kind\ndetermines if an expression is valid in 'statement context'.\n" int)
+
+(go/const
+  ^{:line 951} [^{:tag exprKind :val 0} conversion iota]
+  ^{:line 952} [^{:val 1} expression]
+  ^{:line 953} [^{:val 2} statement])
+
+
+
+
+(go/type target "target represent the (signature) type and description of the LHS\nvariable of an assignment, or of a function result variable.\n" (struct
+    ^{:line 959 :tag (* Signature)} sig
+    ^{:line 960 :tag string} desc))
+
+
+
+
+^{:go/breaks [[5 973]] :go/end 974} (go/func newTarget "newTarget creates a new target for the given type and description.\nThe result is nil if typ is not a signature.\n" ^{:tag (* target)} [^Type typ ^string desc]
+  (when (!= typ nil)
+    (when [(values u _) (commonUnder typ nil)] (!= u nil)
+      (when [(values sig _) (assert (* Signature) u)] (!= sig nil)
+        (return (addr (lit target sig desc))))))
+
+
+
+  nil)
+
+
+
+
+
+
+
+
+
+^{:go/end 1002} (go/method rawExpr "rawExpr typechecks expression e and initializes x with the expression\nvalue or type. If an error occurred, x.mode is set to invalid.\nIf a non-nil target T is given and e is a generic function,\nT is used to infer the type arguments for e.\nIf hint != nil, it is the type of a composite literal element.\nIf allowGeneric is set, the operand type may be an uninstantiated\nparameterized type or function value.\n" ^exprKind [^{:tag (* Checker)} check ^{:tag (* target)} T ^{:tag (* operand)} x ^syntax/Expr e ^Type hint ^bool allowGeneric]
+  (when (.-Trace (.-conf check))
+    (.trace check (.Pos e) "-- expr %s" e)
+    (inc! (.-indent check))
+    (defer (^{:go/end 990} (fn []
+          (dec! (.-indent check))
+          (.trace check (.Pos e) "=> %s" x)))))
+
+
+
+  (let [kind (.exprInternal check T x e hint)]
+
+    (when (not allowGeneric)
+      (.nonGeneric check T x))
+
+
+    (.record check x)
+
+    ^{:line 1001} kind))
+
+
+
+
+
+^{:go/end 1031} (go/method nonGeneric "If x is a generic type, or a generic function whose type arguments cannot be inferred\nfrom a non-nil target T, nonGeneric reports an error and invalidates x.mode and x.typ.\nOtherwise it leaves x alone.\n" [^{:tag (* Checker)} check ^{:tag (* target)} T ^{:tag (* operand)} x]
+  (when (or (not (.isValid x)) (== (.mode x) novalue))
+    (return))
+
+  (let [^string what (zero string)]
+    (type-switch [t (.typ x)]
+      (case [(* Alias) (* Named)]
+        (when (isGeneric t)
+          (set! what "type")))
+
+      (case [(* Signature)]
+        (when (!= (.-tparams t) nil)
+          (when (and enableReverseTypeInference (!= T nil))
+            (.funcInst check T (.Pos x) x nil true)
+            (return))
+
+          (set! what "function"))))
+
+
+    (when (!= what "")
+      (.errorf check (.-expr x) WrongTypeArgCount "cannot use generic %s %s without instantiation" what (.-expr x))
+      (.invalidate x)
+      (set! (.-typ_ x) (aget Typ Invalid)))))
+
+
+
+
+
+
+^{:go/end 1251} (go/method exprInternal "exprInternal contains the core of type checking of expressions.\nMust only be called by rawExpr.\n(See rawExpr for an explanation of the parameters.)\n" ^exprKind [^{:tag (* Checker)} check ^{:tag (* target)} T ^{:tag (* operand)} x ^syntax/Expr e ^Type hint]
+  ;; make sure x has a valid state in case of bailout
+  ;; (was go.dev/issue/5770)
+  (.invalidate x)
+  (set! (.-typ_ x) (aget Typ Invalid))
+
+  (type-switch [e e]
+    (case [nil]
+      (panic "unreachable"))
+
+    (case [(* syntax/BadExpr)]
+      (goto :Error)) ; error was reported before
+
+    (case [(* syntax/Name)]
+      (.ident check x e false))
+
+    (case [(* syntax/DotsType)]
+      ;; dots are handled explicitly where they are valid
+      (.error check e InvalidSyntaxTree "invalid use of ...")
+      (goto :Error))
+
+    (case [(* syntax/BasicLit)]
+      (when (.-Bad e)
+        (goto :Error)) ; error reported during parsing
+
+      (.basicLit check x e)
+      (when (not (.isValid x))
+        (goto :Error)))
+
+
+    (case [(* syntax/FuncLit)]
+      (.funcLit check x e)
+      (when (not (.isValid x))
+        (goto :Error)))
+
+
+    (case [(* syntax/CompositeLit)]
+      (.compositeLit check x e hint)
+      (when (not (.isValid x))
+        (goto :Error)))
+
+
+    (case [(* syntax/ParenExpr)]
+      ;; type inference doesn't go past parentheses (target type T = nil)
+      (let [kind (.rawExpr check nil x (.-X e) nil false)]
+        (set! (.-expr x) e)
+        (return kind)))
+
+    (case [(* syntax/SelectorExpr)]
+      (.selector check x e false))
+
+    (case [(* syntax/IndexExpr)]
+      (when (.indexExpr check x e)
+        (when (not enableReverseTypeInference)
+          (set! T nil))
+
+        (.funcInst check T ^{:go/via [expr node]} (.Pos e) x e true))
+
+      (when (not (.isValid x))
+        (goto :Error)))
+
+
+    (case [(* syntax/SliceExpr)]
+      (.sliceExpr check x e)
+      (when (not (.isValid x))
+        (goto :Error)))
+
+
+    (case [(* syntax/AssertExpr)]
+      (.expr check nil x (.-X e))
+      (when (not (.isValid x))
+        (goto :Error))
+
+      ;; x.(type) expressions are encoded via TypeSwitchGuards
+      (when (== (.-Type e) nil)
+        (.error check e InvalidSyntaxTree "invalid use of AssertExpr")
+        (goto :Error))
+
+      (when (isTypeParam (.typ x))
+        (.errorf check x InvalidAssert (+ invalidOp "cannot use type assertion on type parameter value %s") x)
+        (goto :Error))
+
+      (when [(values _ ok) (assert (* Interface) (.Underlying (.typ x)))] (not ok)
+        (.errorf check x InvalidAssert (+ invalidOp "%s is not an interface") x)
+        (goto :Error))
+
+      (let [T (.varType check (.-Type e))]
+        (when (not (isValid T))
+          (goto :Error))
+
+        ;; We cannot assert to an incomplete type; make sure it's complete.
+        (when (not (.isComplete check T))
+          (goto :Error))
+
+        (.typeAssertion check e x T false)
+        (set! (.-mode_ x) commaok)
+        (set! (.-typ_ x) T)))
+
+    (case [(* syntax/TypeSwitchGuard)]
+      ;; x.(type) expressions are handled explicitly in type switches
+      (.error check e InvalidSyntaxTree "use of .(type) outside type switch")
+      (.use check (.-X e))
+      (goto :Error))
+
+    (case [(* syntax/CallExpr)]
+      (return (.callExpr check x e)))
+
+    (case [(* syntax/ListExpr)]
+      ;; catch-all for unexpected expression lists
+      (.error check e InvalidSyntaxTree "unexpected list of expressions")
+      (goto :Error))
+
+    ;; case *syntax.UnaryExpr:
+    ;; 	check.expr(x, e.X)
+    ;; 	if x.mode == invalid {
+    ;; 		goto Error
+    ;; 	}
+    ;; 	check.unary(x, e, e.Op)
+    ;; 	if x.mode == invalid {
+    ;; 		goto Error
+    ;; 	}
+    ;; 	if e.Op == token.ARROW {
+    ;; 		x.expr = e
+    ;; 		return statement // receive operations may appear in statement context
+    ;; 	}
+
+    ;; case *syntax.BinaryExpr:
+    ;; 	check.binary(x, e, e.X, e.Y, e.Op)
+    ;; 	if x.mode == invalid {
+    ;; 		goto Error
+    ;; 	}
+
+    (case [(* syntax/Operation)]
+      (when (== (.-Y e) nil)
+        ;; unary expression
+        (when (== (.-Op e) syntax/Mul)
+          ;; pointer indirection
+          (.exprOrType check x (.-X e) false)
+          (switch (.mode x)
+            (case [invalid]
+              (goto :Error))
+            (case [typexpr]
+              (.validVarType check (.-X e) (.typ x))
+              (set! (.-typ_ x) (addr (lit Pointer :base (.typ x)))))
+            (default
+              (let [^Type base (zero Type)]
+                (when (not (underIs (.typ x) ^{:go/end 1194} (fn ^bool [^Type u]
+                        ^{:go/breaks [5]} (let [(values p _) (assert (* Pointer) u)]
+                          (when (== p nil)
+                            (.errorf check x InvalidIndirection (+ invalidOp "cannot indirect %s") x)
+                            (return false))
+
+                          (when (and (!= base nil) (not (Identical (.-base p) base)))
+                            (.errorf check x InvalidIndirection (+ invalidOp "pointers of %s must have identical base types") x)
+                            (return false))
+
+                          (set! base (.-base p))
+                          true))))
+
+                  (goto :Error))
+
+                ;; We cannot dereference a pointer with an incomplete base type; make sure it's complete.
+                (when (not (.isComplete check base))
+                  (goto :Error))
+
+                (set! (.-mode_ x) variable)
+                (set! (.-typ_ x) base))))
+
+          (break))
+
+
+        (.unary check x e)
+        (when (not (.isValid x))
+          (goto :Error))
+
+        (when (== (.-Op e) syntax/Recv)
+          (set! (.-expr x) e)
+          (return statement)) ; receive operations may appear in statement context
+
+        (break))
+
+
+      ;; binary expression
+      (.binary check x e (.-X e) (.-Y e) (.-Op e))
+      (when (not (.isValid x))
+        (goto :Error)))
+
+
+    (case [(* syntax/KeyValueExpr)]
+      ;; key:value expressions are handled in composite literals
+      (.error check e InvalidSyntaxTree "no key:value expected")
+      (goto :Error))
+
+    (case [(* syntax/ArrayType) (* syntax/SliceType) (* syntax/StructType) (* syntax/FuncType)
+        (* syntax/InterfaceType) (* syntax/MapType) (* syntax/ChanType)]
+      (set! (.-mode_ x) typexpr)
+      (set! (.-typ_ x) (.typ check e)))
+    ;; Note: rawExpr (caller of exprInternal) will call check.recordTypeAndValue
+    ;; even though check.typ has already called it. This is fine as both
+    ;; times the same expression and type are recorded. It is also not a
+    ;; performance issue because we only reach here for composite literal
+    ;; types, which are comparatively rare.
+
+    (default
+      (panic (fmt/Sprintf "%s: unknown expression type %T" (atPos e) e))))
+
+
+  ;; everything went well
+  (set! (.-expr x) e)
+  (return expression)
+
+  (label :Error
+    (.invalidate x))
+  (set! (.-expr x) e)
+  ^{:line 1250} statement) ; avoid follow-up errors
+
+
+
+
+
+
+
+
+
+
+^{:go/end 1293} (go/func keyVal "keyVal maps a complex, float, integer, string or boolean constant value\nto the corresponding complex128, float64, int64, uint64, string, or bool\nGo value if possible; otherwise it returns x.\nA complex constant that can be represented as a float (such as 1.2 + 0i)\nis returned as a floating point value; if a floating point value can be\nrepresented as an integer (such as 1.0) it is returned as an integer value.\nThis ensures that constants of different kind but equal value (such as\n1.0 + 0i, 1.0, 1) result in the same value.\n" ^any [^constant/Value x]
+  (switch (.Kind x)
+    (case [constant/Complex]
+      (let [f (constant/ToFloat x)]
+        (when (!= (.Kind f) constant/Float)
+          (let [(values r _) (constant/Float64Val (constant/Real x))
+              (values i _) (constant/Float64Val (constant/Imag x))]
+            (return (complex r i))))
+
+        (set! x f)
+        (fallthrough)))
+    (case [constant/Float]
+      (let [i (constant/ToInt x)]
+        (when (!= (.Kind i) constant/Int)
+          (let [(values v _) (constant/Float64Val x)]
+            (return v)))
+
+        (set! x i)
+        (fallthrough)))
+    (case [constant/Int]
+      (when [(values v ok) (constant/Int64Val x)] ok
+        (return v))
+
+      (when [(values v ok) (constant/Uint64Val x)] ok
+        (return v)))
+
+    (case [constant/String]
+      (return (constant/StringVal x)))
+    (case [constant/Bool]
+      (return (constant/BoolVal x))))
+
+  ^{:line 1292} x)
+
+
+
+^{:go/end 1308} (go/method typeAssertion "typeAssertion checks x.(T). The type of x must be an interface.\n" [^{:tag (* Checker)} check ^syntax/Expr e ^{:tag (* operand)} x ^Type T ^bool typeSwitch]
+  (let [^string cause (zero string)]
+    (when (.assertableTo check (.typ x) T (addr cause))
+      (return)) ; success
+
+
+    (when typeSwitch
+      (.errorf check e ImpossibleAssert "impossible type switch case: %s\n\t%s cannot have dynamic type %s %s" e x T cause)
+      (return))
+
+
+    (.errorf check e ImpossibleAssert "impossible type assertion: %s\n\t%s does not implement %s %s" e T (.typ x) cause)))
+
+
+
+
+
+
+
+^{:go/end 1319} (go/method expr "expr typechecks expression e and initializes x with the expression value.\nIf a non-nil target T is given and e is a generic function or\na function call, T is used to infer the type arguments for e.\nThe result must be a single value.\nIf an error occurred, x.mode is set to invalid.\n" [^{:tag (* Checker)} check ^{:tag (* target)} T ^{:tag (* operand)} x ^syntax/Expr e]
+  (.rawExpr check T x e nil false)
+  (.exclude check x (bit-or (<< 1 novalue) (<< 1 builtin) (<< 1 typexpr)))
+  (.singleValue check x))
+
+
+
+^{:go/end 1326} (go/method genericExpr "genericExpr is like expr but the result may also be generic.\n" [^{:tag (* Checker)} check ^{:tag (* operand)} x ^syntax/Expr e ^Type hint]
+  (.rawExpr check nil x e hint true)
+  (.exclude check x (bit-or (<< 1 novalue) (<< 1 builtin) (<< 1 typexpr)))
+  (.singleValue check x))
+
+
+
+
+
+
+
+^{:go/end 1366} (go/method multiExpr "multiExpr typechecks e and returns its value (or values) in list.\nIf allowCommaOk is set and e is a map index, comma-ok, or comma-err\nexpression, the result is a two-element list containing the value\nof e, and an untyped bool value or an error value, respectively.\nIf an error occurred, list[0] is not valid.\n" [^{:tag (* Checker)} check ^syntax/Expr e ^bool allowCommaOk] :results [^{:tag (slice (* operand))} list ^bool commaOk]
+  (let [^operand x (zero operand)]
+    (.rawExpr check nil (addr x) e nil false)
+    (.exclude check (addr x) (bit-or (<< 1 novalue) (<< 1 builtin) (<< 1 typexpr)))
+
+    (when [(values t ok) (assert (* Tuple) (.typ x))] (and ok (.isValid x))
+      ;; multiple values
+      (set! list (make (slice (* operand)) (.Len t)))
+      (range [i v (.-vars t)]
+        ;; create a dummy expression (in place of e) for better error messages
+        (let [dummy (syntax/NewName (syntax/StartPos e) (nth (+ i 1) "function result"))]
+          (aset list i (addr (lit operand :mode_ value :expr dummy :typ_ ^{:go/via [object]} (.-typ v))))))
+
+      (return))
+
+
+    ;; exactly one (possibly invalid or comma-ok) value
+    (set! list (lit (slice (* operand)) (addr x)))
+    (when (and allowCommaOk ^:go/paren (or (== (.mode x) mapindex) (== (.mode x) commaok) (== (.mode x) commaerr)))
+      (let [^string what "ok value of (comma, ok) expression"
+          ^{:line 1353 :tag Type} typ (aget Typ UntypedBool)]
+        (when (== (.mode x) commaerr)
+          (set! what "err value of (comma, err) expression")
+          (set! typ universeError))
+
+        ;; create a dummy expression (in place of e) for better error messages
+        (let [dummy (syntax/NewName (syntax/StartPos e) what)
+            ^{:line 1360} x2 (addr (lit operand :mode_ value :expr dummy :typ_ typ))]
+          (set! list (append list x2))
+          (set! commaOk true))))
+
+
+    (return)))
+
+
+
+
+^{:go/end 1383} (go/func nth "nth returns a string of the form \"nth \" + what, where nth\nstands for 1st, 2nd, 3rd, 4th, etc. depending on n.\n" ^string [^int n ^string what]
+  (let [^string ext (zero string)]
+    (switch n
+      (case [1]
+        (set! ext "st"))
+      (case [2]
+        (set! ext "nd"))
+      (case [3]
+        (set! ext "rd"))
+      (default
+        (set! ext "th")))
+
+    (fmt/Sprintf "%d%s %s" n ext what)))
+
+
+
+
+
+
+^{:go/end 1393} (go/method exprOrType "exprOrType typechecks expression or type e and initializes x with the expression value or type.\nIf allowGeneric is set, the operand type may be an uninstantiated parameterized type or function\nvalue.\nIf an error occurred, x.mode is set to invalid.\n" [^{:tag (* Checker)} check ^{:tag (* operand)} x ^syntax/Expr e ^bool allowGeneric]
+  (.rawExpr check nil x e nil allowGeneric)
+  (.exclude check x (<< 1 novalue))
+  (.singleValue check x))
+
+
+
+
+^{:go/end 1421} (go/method exclude "exclude reports an error if x.mode is in modeset and sets x.mode to invalid.\nThe modeset may contain any of 1<<novalue, 1<<builtin, 1<<typexpr.\n" [^{:tag (* Checker)} check ^{:tag (* operand)} x ^uint modeset]
+  (when (!= (bit-and modeset ^uint (<< 1 (.mode x))) 0)
+    (let [^string msg (zero string)
+        ^{:line 1400 :tag Code} code (zero Code)]
+      (switch (.mode x)
+        (case [novalue]
+          (if (!= (bit-and modeset (<< 1 typexpr)) 0)
+            (set! msg "%s used as value")
+
+            (set! msg "%s used as value or type"))
+
+          (set! code TooManyValues))
+        (case [builtin]
+          (set! msg "%s must be called")
+          (set! code UncalledBuiltin))
+        (case [typexpr]
+          (set! msg "%s is not an expression")
+          (set! code NotAnExpr))
+        (default
+          (panic "unreachable")))
+
+      (.errorf check x code msg x)
+      (.invalidate x))))
+
+
+
+
+^{:go/end 1433} (go/method singleValue "singleValue reports an error if x describes a tuple and sets x.mode to invalid.\n" [^{:tag (* Checker)} check ^{:tag (* operand)} x]
+  (when (== (.mode x) value)
+    ;; tuple types are never named - no need for underlying type below
+    (when [(values t ok) (assert (* Tuple) (.typ x))] ok
+      (go/call assert (!= (.Len t) 1))
+      (.errorf check x TooManyValues "multiple-value %s in single-value context" x)
+      (.invalidate x))))
+
+
+
+
+
+(go/var ^{:doc "op2tok translates syntax.Operators into token.Tokens.\n"} op2tok (lit (array ... token/Token)
+    ^{:line 1437} [syntax/Def token/ILLEGAL]
+    ^{:line 1438} [syntax/Not token/NOT]
+    ^{:line 1439} [syntax/Recv token/ILLEGAL]
+
+    ^{:line 1441} [syntax/OrOr token/LOR]
+    ^{:line 1442} [syntax/AndAnd token/LAND]
+
+    ^{:line 1444} [syntax/Eql token/EQL]
+    ^{:line 1445} [syntax/Neq token/NEQ]
+    ^{:line 1446} [syntax/Lss token/LSS]
+    ^{:line 1447} [syntax/Leq token/LEQ]
+    ^{:line 1448} [syntax/Gtr token/GTR]
+    ^{:line 1449} [syntax/Geq token/GEQ]
+
+    ^{:line 1451} [syntax/Add token/ADD]
+    ^{:line 1452} [syntax/Sub token/SUB]
+    ^{:line 1453} [syntax/Or token/OR]
+    ^{:line 1454} [syntax/Xor token/XOR]
+
+    ^{:line 1456} [syntax/Mul token/MUL]
+    ^{:line 1457} [syntax/Div token/QUO]
+    ^{:line 1458} [syntax/Rem token/REM]
+    ^{:line 1459} [syntax/And token/AND]
+    ^{:line 1460} [syntax/AndNot token/AND_NOT]
+    ^{:line 1461} [syntax/Shl token/SHL]
+    ^{:line 1462} [syntax/Shr token/SHR]))

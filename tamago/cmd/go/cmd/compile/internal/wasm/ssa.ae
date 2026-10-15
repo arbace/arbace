@@ -1,0 +1,651 @@
+;; Copyright 2018 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.cmd.compile.internal.wasm) (go/file "ssa.go" :imports [
+
+
+    ^{:line 8} [base "cmd/compile/internal/base"]
+    ^{:line 9} [ir "cmd/compile/internal/ir"]
+    ^{:line 10} [logopt "cmd/compile/internal/logopt"]
+    ^{:line 11} [objw "cmd/compile/internal/objw"]
+    ^{:line 12} [ssa "cmd/compile/internal/ssa"]
+    ^{:line 13} [ssagen "cmd/compile/internal/ssagen"]
+    ^{:line 14} [types "cmd/compile/internal/types"]
+    ^{:line 15} [obj "cmd/internal/obj"]
+    ^{:line 16} [wasm "cmd/internal/obj/wasm"]])
+
+
+;; /*
+;; 
+;; Wasm implementation
+;; -------------------
+;; 
+;; Wasm is a strange Go port because the machine isn't
+;; a register-based machine, threads are different, code paths
+;; are different, etc. We outline those differences here.
+;; 
+;; See the design doc for some additional info on this topic.
+;; https://docs.google.com/document/d/131vjr4DH6JFnb-blm_uRdaC0_Nv3OUwjEY5qVCxCup4/edit#heading=h.mjo1bish3xni
+;; 
+;; PCs:
+;; 
+;; Wasm doesn't have PCs in the normal sense that you can jump
+;; to or call to. Instead, we simulate these PCs using our own construct.
+;; 
+;; A PC in the Wasm implementation is the combination of a function
+;; ID and a block ID within that function. The function ID is an index
+;; into a function table which transfers control to the start of the
+;; function in question, and the block ID is a sequential integer
+;; indicating where in the function we are.
+;; 
+;; Every function starts with a branch table which transfers control
+;; to the place in the function indicated by the block ID. The block
+;; ID is provided to the function as the sole Wasm argument.
+;; 
+;; Block IDs do not encode every possible PC. They only encode places
+;; in the function where it might be suspended. Typically these places
+;; are call sites.
+;; 
+;; Sometimes we encode the function ID and block ID separately. When
+;; recorded together as a single integer, we use the value F<<16+B.
+;; 
+;; Threads:
+;; 
+;; Wasm doesn't (yet) have threads. We have to simulate threads by
+;; keeping goroutine stacks in linear memory and unwinding
+;; the Wasm stack each time we want to switch goroutines.
+;; 
+;; To support unwinding a stack, each function call returns on the Wasm
+;; stack a boolean that tells the function whether it should return
+;; immediately or not. When returning immediately, a return address
+;; is left on the top of the Go stack indicating where the goroutine
+;; should be resumed.
+;; 
+;; Stack pointer:
+;; 
+;; There is a single global stack pointer which records the stack pointer
+;; used by the currently active goroutine. This is just an address in
+;; linear memory where the Go runtime is maintaining the stack for that
+;; goroutine.
+;; 
+;; Functions cache the global stack pointer in a local variable for
+;; faster access, but any changes must be spilled to the global variable
+;; before any call and restored from the global variable after any call.
+;; 
+;; Calling convention:
+;; 
+;; All Go arguments and return values are passed on the Go stack, not
+;; the wasm stack. In addition, return addresses are pushed on the
+;; Go stack at every call point. Return addresses are not used during
+;; normal execution, they are used only when resuming goroutines.
+;; (So they are not really a "return address", they are a "resume address".)
+;; 
+;; All Go functions have the Wasm type (i32)->i32. The argument
+;; is the block ID and the return value is the exit immediately flag.
+;; 
+;; Callsite:
+;; - write arguments to the Go stack (starting at SP+0)
+;; - push return address to Go stack (8 bytes)
+;; - write local SP to global SP
+;; - push 0 (type i32) to Wasm stack
+;; - issue Call
+;; - restore local SP from global SP
+;; - pop int32 from top of Wasm stack. If nonzero, exit function immediately.
+;; - use results from Go stack (starting at SP+sizeof(args))
+;; - note that the callee will have popped the return address
+;; 
+;; Prologue:
+;; - initialize local SP from global SP
+;; - jump to the location indicated by the block ID argument
+;; (which appears in local variable 0)
+;; - at block 0
+;; - check for Go stack overflow, call morestack if needed
+;; - subtract frame size from SP
+;; - note that arguments now start at SP+framesize+8
+;; 
+;; Normal epilogue:
+;; - pop frame from Go stack
+;; - pop return address from Go stack
+;; - push 0 (type i32) on the Wasm stack
+;; - return
+;; Exit immediately epilogue:
+;; - push 1 (type i32) on the Wasm stack
+;; - return
+;; - note that the return address and stack frame are left on the Go stack
+;; 
+;; The main loop that executes goroutines is wasm_pc_f_loop, in
+;; runtime/rt0_js_wasm.s. It grabs the saved return address from
+;; the top of the Go stack (actually SP-8?), splits it up into F
+;; and B parts, then calls F with its Wasm argument set to B.
+;; 
+;; Note that when resuming a goroutine, only the most recent function
+;; invocation of that goroutine appears on the Wasm stack. When that
+;; Wasm function returns normally, the next most recent frame will
+;; then be started up by wasm_pc_f_loop.
+;; 
+;; Global 0 is SP (stack pointer)
+;; Global 1 is CTXT (closure pointer)
+;; Global 2 is GP (goroutine pointer)
+;; */
+
+^{:go/end 143} (go/func Init [^{:tag (* ssagen/ArchInfo)} arch]
+  (set! (.-LinkArch arch) (addr wasm/Linkwasm))
+  (set! (.-REGSP arch) wasm/REG_SP)
+  (set! (.-MAXWIDTH arch) (<< 1 50))
+
+  (set! (.-ZeroRange arch) zeroRange)
+  (set! (.-Ginsnop arch) ginsnop)
+
+  (set! (.-SSAMarkMoves arch) ssaMarkMoves)
+  (set! (.-SSAGenValue arch) ssaGenValue)
+  (set! (.-SSAGenBlock arch) ssaGenBlock))
+
+
+^{:go/end 160} (go/func zeroRange ^{:tag (* obj/Prog)} [^{:tag (* objw/Progs)} pp ^{:tag (* obj/Prog)} p ^int64 off ^int64 cnt ^{:tag (* uint32)} state]
+  (when (== cnt 0)
+    (return p))
+
+  (when (!= (% cnt 8) 0)
+    (base/Fatalf "zerorange count not a multiple of widthptr %d" cnt))
+
+
+  (for [i (conv int64 0)] (< i cnt) (set! i + 8)
+    (set! p (.Append pp p wasm/AGet obj/TYPE_REG wasm/REG_SP 0 0 0 0))
+    (set! p (.Append pp p wasm/AI64Const obj/TYPE_CONST 0 0 0 0 0))
+    (set! p (.Append pp p wasm/AI64Store 0 0 0 obj/TYPE_CONST 0 (+ off i))))
+
+
+  ^{:line 159} p)
+
+
+^{:go/end 164} (go/func ginsnop ^{:tag (* obj/Prog)} [^{:tag (* objw/Progs)} pp]
+  (.Prog pp wasm/ANop))
+
+
+^{:go/end 167} (go/func ssaMarkMoves [^{:tag (* ssagen/State)} s ^{:tag (* ssa/Block)} b])
+
+
+^{:go/end 215} (go/func ssaGenBlock [^{:tag (* ssagen/State)} s ^{:tag (* ssa/Block)} b ^{:tag (* ssa/Block)} next]
+  (switch (.-Kind b)
+    (case [ssa/BlockPlain ssa/BlockDefer]
+      (when (!= next (.Block (aget (.-Succs b) 0)))
+        (.Br s obj/AJMP (.Block (aget (.-Succs b) 0)))))
+
+
+    (case [ssa/BlockIf]
+      (switch next
+        (case [(.Block (aget (.-Succs b) 0))]
+          ;; if false, jump to b.Succs[1]
+          (getValue32 s (aget (.-Controls b) 0))
+          (.Prog s wasm/AI32Eqz)
+          (.Prog s wasm/AIf)
+          (.Br s obj/AJMP (.Block (aget (.-Succs b) 1)))
+          (.Prog s wasm/AEnd))
+        (case [(.Block (aget (.-Succs b) 1))]
+          ;; if true, jump to b.Succs[0]
+          (getValue32 s (aget (.-Controls b) 0))
+          (.Prog s wasm/AIf)
+          (.Br s obj/AJMP (.Block (aget (.-Succs b) 0)))
+          (.Prog s wasm/AEnd))
+        (default
+          ;; if true, jump to b.Succs[0], else jump to b.Succs[1]
+          (getValue32 s (aget (.-Controls b) 0))
+          (.Prog s wasm/AIf)
+          (.Br s obj/AJMP (.Block (aget (.-Succs b) 0)))
+          (.Prog s wasm/AEnd)
+          (.Br s obj/AJMP (.Block (aget (.-Succs b) 1))))))
+
+
+    (case [ssa/BlockRet]
+      (.Prog s obj/ARET))
+
+    (case [ssa/BlockExit ssa/BlockRetJmp])
+
+    (default
+      (base/FatalfAt (.-Pos b) "unexpected block b%d, kind=%v" (.-ID b) (.-Kind b))))
+
+
+  ;; Entry point for the next block. Used by the JMP in goToBlock.
+  (.Prog s wasm/ARESUMEPOINT)
+
+  (when (!= (.-OnWasmStackSkipped s) 0)
+    (panic "wasm: bad stack")))
+
+
+
+^{:go/end 324} (go/func ssaGenValue [^{:tag (* ssagen/State)} s ^{:tag (* ssa/Value)} v]
+  (switch (.-Op v)
+    (case [ssa/OpWasmLoweredStaticCall ssa/OpWasmLoweredClosureCall ssa/OpWasmLoweredInterCall ssa/OpWasmLoweredTailCall ssa/OpWasmLoweredTailCallInter]
+      (.PrepareCall s v)
+      (when [(values call ok) (assert (* ssa/AuxCall) (.-Aux v))] (and ok (== (.-Fn call) (.-Deferreturn ir/Syms)))
+        ;; The runtime needs to inject jumps to
+        ;; deferreturn calls using the address in
+        ;; _func.deferreturn. Hence, the call to
+        ;; deferreturn must itself be a resumption
+        ;; point so it gets a target PC.
+        (.Prog s wasm/ARESUMEPOINT))
+
+      (when (== (.-Op v) ssa/OpWasmLoweredClosureCall)
+        (getValue64 s (aget (.-Args v) 1))
+        (setReg s wasm/REG_CTXT))
+
+      (if [(values call ok) (assert (* ssa/AuxCall) (.-Aux v))] (and ok (!= (.-Fn call) nil))
+        (let [sym (.-Fn call)
+            ^{:line 235} p (.Prog s obj/ACALL)]
+          (set! (.-To p) (lit obj/Addr :Type obj/TYPE_MEM :Name obj/NAME_EXTERN :Sym sym))
+          (set! (.-Pos p) (.-Pos v))
+          (when (== (.-Op v) ssa/OpWasmLoweredTailCall)
+            (set! (.-As p) obj/ARET)))
+
+        (do
+          (getValue64 s (aget (.-Args v) 0))
+          (let [p (.Prog s obj/ACALL)]
+            (set! (.-To p) (lit obj/Addr :Type obj/TYPE_NONE))
+            (set! (.-Pos p) (.-Pos v))
+            (when (== (.-Op v) ssa/OpWasmLoweredTailCallInter)
+              (set! (.-As p) obj/ARET))))))
+
+
+
+    (case [ssa/OpWasmLoweredMove]
+      (getValue32 s (aget (.-Args v) 0))
+      (getValue32 s (aget (.-Args v) 1))
+      (i32Const s (conv int32 (.-AuxInt v)))
+      (.Prog s wasm/AMemoryCopy))
+
+    (case [ssa/OpWasmLoweredZero]
+      (getValue32 s (aget (.-Args v) 0))
+      (i32Const s 0)
+      (i32Const s (conv int32 (.-AuxInt v)))
+      (.Prog s wasm/AMemoryFill))
+
+    (case [ssa/OpWasmLoweredNilCheck]
+      (getValue64 s (aget (.-Args v) 0))
+      (.Prog s wasm/AI64Eqz)
+      (.Prog s wasm/AIf)
+      (let [p (.Prog s wasm/ACALLNORESUME)]
+        (set! (.-To p) (lit obj/Addr :Type obj/TYPE_MEM :Name obj/NAME_EXTERN :Sym (.-SigPanic ir/Syms)))
+        (.Prog s wasm/AEnd)
+        (when (logopt/Enabled)
+          (logopt/LogOpt (.-Pos v) "nilcheck" "genssa" (.-Name (.-Func (.-Block v)))))
+
+        (when (and (!= (.-Nil base/Debug) 0) (> ^{:go/via [lico]} (.Line (.-Pos v)) 1)) ; v.Pos.Line()==1 in generated wrappers
+          (base/WarnfAt (.-Pos v) "generated nil check"))))
+
+
+    (case [ssa/OpWasmLoweredWB]
+      (let [p (.Prog s wasm/ACall)]
+        ;; AuxInt encodes how many buffer entries we need.
+        (set! (.-To p) (lit obj/Addr :Type obj/TYPE_MEM :Name obj/NAME_EXTERN :Sym (aget (.-GCWriteBarrier ir/Syms) (- (.-AuxInt v) 1))))
+        (setReg s (.Reg0 v)))) ; move result from wasm stack to register local
+
+    (case [ssa/OpWasmI64Store8 ssa/OpWasmI64Store16 ssa/OpWasmI64Store32 ssa/OpWasmI64Store ssa/OpWasmF32Store ssa/OpWasmF64Store]
+      (getValue32 s (aget (.-Args v) 0))
+      (getValue64 s (aget (.-Args v) 1))
+      (let [p (.Prog s (.Asm (.-Op v)))]
+        (set! (.-To p) (lit obj/Addr :Type obj/TYPE_CONST :Offset (.-AuxInt v)))))
+
+    (case [ssa/OpWasmV128Store]
+      (getValue32 s (aget (.-Args v) 0))
+      (getValue128 s (aget (.-Args v) 1))
+      (let [p (.Prog s (.Asm (.-Op v)))]
+        (set! (.-To p) (lit obj/Addr :Type obj/TYPE_CONST :Offset (.-AuxInt v)))))
+
+    (case [ssa/OpStoreReg]
+      (getReg s wasm/REG_SP)
+      (if (== (.Size (.-Type v)) 16)
+        (getValue128 s (aget (.-Args v) 0))
+
+        (getValue64 s (aget (.-Args v) 0)))
+
+      (let [p (.Prog s (storeOp (.-Type v)))]
+        (ssagen/AddrAuto (addr (.-To p)) v)))
+
+    (case [ssa/OpClobber ssa/OpClobberReg])
+    ;; TODO: implement for clobberdead experiment. Nop is ok for now.
+
+    (default
+      (when (.IsMemory (.-Type v))
+        (return))
+
+      (when (.-OnWasmStack v)
+        (inc! (.-OnWasmStackSkipped s))
+        ;; If a Value is marked OnWasmStack, we don't generate the value and store it to a register now.
+        ;; Instead, we delay the generation to when the value is used and then directly generate it on the WebAssembly stack.
+        (return))
+
+      (ssaGenValueOnStack s v true)
+      (when (!= (.-OnWasmStackSkipped s) 0)
+        (panic "wasm: bad stack"))
+
+      (setReg s (.Reg v)))))
+
+
+
+^{:go/end 492} (go/func ssaGenValueOnStack [^{:tag (* ssagen/State)} s ^{:tag (* ssa/Value)} v ^bool extend]
+  (switch (.-Op v)
+    (case [ssa/OpWasmLoweredGetClosurePtr]
+      (getReg s wasm/REG_CTXT))
+
+    (case [ssa/OpWasmLoweredGetCallerPC]
+      (let [p (.Prog s wasm/AI64Load)]
+        ;; Caller PC is stored 8 bytes below first parameter.
+        (set! (.-From p) ^{:go/breaks [2 4 6]} (lit obj/Addr
+            :Type obj/TYPE_MEM
+            :Name obj/NAME_PARAM
+            :Offset -8))))
+
+
+    (case [ssa/OpWasmLoweredGetCallerSP]
+      (let [p (.Prog s wasm/AGet)]
+        ;; Caller SP is the address of the first parameter.
+        (set! (.-From p) ^{:go/breaks [2 4 6 8]} (lit obj/Addr
+            :Type obj/TYPE_ADDR
+            :Name obj/NAME_PARAM
+            :Reg wasm/REG_SP
+            :Offset 0))))
+
+
+    (case [ssa/OpWasmLoweredAddr]
+      (when (== (.-Aux v) nil) ; address of off(SP), no symbol
+        (getValue64 s (aget (.-Args v) 0))
+        (i64Const s (.-AuxInt v))
+        (.Prog s wasm/AI64Add)
+        (break))
+
+      (let [p (.Prog s wasm/AGet)]
+        (set! (.-Type (.-From p)) obj/TYPE_ADDR)
+        (type-switch (.-Aux v)
+          (case [(* obj/LSym)]
+            (ssagen/AddAux (addr (.-From p)) v))
+          (case [(* ir/Name)]
+            (set! (.-Reg (.-From p)) (.Reg (aget (.-Args v) 0)))
+            (ssagen/AddAux (addr (.-From p)) v))
+          (default
+            (panic "wasm: bad LoweredAddr")))))
+
+
+    (case [ssa/OpWasmLoweredConvert]
+      (getValue64 s (aget (.-Args v) 0)))
+
+    (case [ssa/OpWasmSelect]
+      (getValue64 s (aget (.-Args v) 0))
+      (getValue64 s (aget (.-Args v) 1))
+      (getValue32 s (aget (.-Args v) 2))
+      (.Prog s (.Asm (.-Op v))))
+
+    (case [ssa/OpWasmSelectV]
+      (getValue128 s (aget (.-Args v) 0))
+      (getValue128 s (aget (.-Args v) 1))
+      (getValue32 s (aget (.-Args v) 2))
+      (.Prog s (.Asm (.-Op v))))
+
+    (case [ssa/OpWasmI64AddConst]
+      (getValue64 s (aget (.-Args v) 0))
+      (i64Const s (.-AuxInt v))
+      (.Prog s (.Asm (.-Op v))))
+
+    (case [ssa/OpWasmI64Const]
+      (i64Const s (.-AuxInt v)))
+
+    (case [ssa/OpWasmF32Const]
+      (f32Const s (.AuxFloat v)))
+
+    (case [ssa/OpWasmF64Const]
+      (f64Const s (.AuxFloat v)))
+
+    (case [ssa/OpWasmI64Load8U ssa/OpWasmI64Load8S ssa/OpWasmI64Load16U ssa/OpWasmI64Load16S
+        ^{:line 399} ssa/OpWasmI64Load32U ssa/OpWasmI64Load32S ssa/OpWasmI64Load ssa/OpWasmF32Load ssa/OpWasmF64Load ssa/OpWasmV128Load]
+      (getValue32 s (aget (.-Args v) 0))
+      (let [p (.Prog s (.Asm (.-Op v)))]
+        (set! (.-From p) (lit obj/Addr :Type obj/TYPE_CONST :Offset (.-AuxInt v)))))
+
+    (case [ssa/OpWasmI64Eqz]
+      (getValue64 s (aget (.-Args v) 0))
+      (.Prog s (.Asm (.-Op v)))
+      (when extend
+        (.Prog s wasm/AI64ExtendI32U)))
+
+
+    (case [ssa/OpWasmI64Eq ssa/OpWasmI64Ne ssa/OpWasmI64LtS ssa/OpWasmI64LtU ssa/OpWasmI64GtS ssa/OpWasmI64GtU ssa/OpWasmI64LeS ssa/OpWasmI64LeU ssa/OpWasmI64GeS ssa/OpWasmI64GeU
+        ^{:line 412} ssa/OpWasmF32Eq ssa/OpWasmF32Ne ssa/OpWasmF32Lt ssa/OpWasmF32Gt ssa/OpWasmF32Le ssa/OpWasmF32Ge
+        ^{:line 413} ssa/OpWasmF64Eq ssa/OpWasmF64Ne ssa/OpWasmF64Lt ssa/OpWasmF64Gt ssa/OpWasmF64Le ssa/OpWasmF64Ge]
+      (getValue64 s (aget (.-Args v) 0))
+      (getValue64 s (aget (.-Args v) 1))
+      (.Prog s (.Asm (.-Op v)))
+      (when extend
+        (.Prog s wasm/AI64ExtendI32U)))
+
+
+    (case [ssa/OpWasmI64Add ssa/OpWasmI64Sub ssa/OpWasmI64Mul ssa/OpWasmI64DivU ssa/OpWasmI64RemS ssa/OpWasmI64RemU ssa/OpWasmI64And ssa/OpWasmI64Or ssa/OpWasmI64Xor ssa/OpWasmI64Shl ssa/OpWasmI64ShrS ssa/OpWasmI64ShrU ssa/OpWasmI64Rotl
+        ^{:line 422} ssa/OpWasmF32Add ssa/OpWasmF32Sub ssa/OpWasmF32Mul ssa/OpWasmF32Div ssa/OpWasmF32Copysign
+        ^{:line 423} ssa/OpWasmF64Add ssa/OpWasmF64Sub ssa/OpWasmF64Mul ssa/OpWasmF64Div ssa/OpWasmF64Copysign]
+      (getValue64 s (aget (.-Args v) 0))
+      (getValue64 s (aget (.-Args v) 1))
+      (.Prog s (.Asm (.-Op v))))
+
+    (case [ssa/OpWasmI32Rotl]
+      (getValue32 s (aget (.-Args v) 0))
+      (getValue32 s (aget (.-Args v) 1))
+      (.Prog s wasm/AI32Rotl)
+      (.Prog s wasm/AI64ExtendI32U))
+
+    (case [ssa/OpWasmI64DivS]
+      (getValue64 s (aget (.-Args v) 0))
+      (getValue64 s (aget (.-Args v) 1))
+      (when (== (.Size (.-Type v)) 8)
+        ;; Division of int64 needs helper function wasmDiv to handle the MinInt64 / -1 case.
+        (let [p (.Prog s wasm/ACall)]
+          (set! (.-To p) (lit obj/Addr :Type obj/TYPE_MEM :Name obj/NAME_EXTERN :Sym (.-WasmDiv ir/Syms)))
+          (break)))
+
+      (.Prog s wasm/AI64DivS))
+
+    (case [ssa/OpWasmI64TruncSatF32S ssa/OpWasmI64TruncSatF64S]
+      (getValue64 s (aget (.-Args v) 0))
+      (.Prog s (.Asm (.-Op v))))
+
+    (case [ssa/OpWasmI64TruncSatF32U ssa/OpWasmI64TruncSatF64U]
+      (getValue64 s (aget (.-Args v) 0))
+      (.Prog s (.Asm (.-Op v))))
+
+    (case [ssa/OpWasmF32DemoteF64]
+      (getValue64 s (aget (.-Args v) 0))
+      (.Prog s (.Asm (.-Op v))))
+
+    (case [ssa/OpWasmF64PromoteF32]
+      (getValue64 s (aget (.-Args v) 0))
+      (.Prog s (.Asm (.-Op v))))
+
+    (case [ssa/OpWasmF32ConvertI64S ssa/OpWasmF32ConvertI64U
+        ^{:line 462} ssa/OpWasmF64ConvertI64S ssa/OpWasmF64ConvertI64U
+        ^{:line 463} ssa/OpWasmI64Extend8S ssa/OpWasmI64Extend16S ssa/OpWasmI64Extend32S
+        ^{:line 464} ssa/OpWasmF32Neg ssa/OpWasmF32Sqrt ssa/OpWasmF32Trunc ssa/OpWasmF32Ceil ssa/OpWasmF32Floor ssa/OpWasmF32Nearest ssa/OpWasmF32Abs
+        ^{:line 465} ssa/OpWasmF64Neg ssa/OpWasmF64Sqrt ssa/OpWasmF64Trunc ssa/OpWasmF64Ceil ssa/OpWasmF64Floor ssa/OpWasmF64Nearest ssa/OpWasmF64Abs
+        ^{:line 466} ssa/OpWasmI64Ctz ssa/OpWasmI64Clz ssa/OpWasmI64Popcnt]
+      (getValue64 s (aget (.-Args v) 0))
+      (.Prog s (.Asm (.-Op v))))
+
+    (case [ssa/OpWasmV128Zero]
+      (let [p (.Prog s wasm/AV128Const)]
+        (set! (.-From p) (lit obj/Addr :Type obj/TYPE_CONST :Offset 0))
+        (set! (.-To p) (lit obj/Addr :Type obj/TYPE_CONST :Offset 0))))
+
+    (case [ssa/OpLoadReg]
+      (let [p (.Prog s (loadOp (.-Type v)))]
+        (ssagen/AddrAuto (addr (.-From p)) (aget (.-Args v) 0))))
+
+    (case [ssa/OpCopy]
+      (if (== (.Size (.-Type v)) 16)
+        (getValue128 s (aget (.-Args v) 0))
+
+        (getValue64 s (aget (.-Args v) 0))))
+
+
+    (default
+      (when (not (ssaGenSIMDValue s v extend))
+        (.Fatalf v "unexpected op: %s" (.-Op v))))))
+
+
+
+
+
+^{:go/end 505} (go/func isAlready32 ^bool [^{:tag (* ssa/Value)} v]
+  (switch (.-Op v)
+    (case [ssa/OpWasmI64Eqz ssa/OpWasmI64Eq ssa/OpWasmI64Ne ssa/OpWasmI64LtS ssa/OpWasmI64LtU ssa/OpWasmI64GtS ssa/OpWasmI64GtU ssa/OpWasmI64LeS ssa/OpWasmI64LeU ssa/OpWasmI64GeS ssa/OpWasmI64GeU
+        ^{:line 497} ssa/OpWasmF32Eq ssa/OpWasmF32Ne ssa/OpWasmF32Lt ssa/OpWasmF32Gt ssa/OpWasmF32Le ssa/OpWasmF32Ge
+        ^{:line 498} ssa/OpWasmF64Eq ssa/OpWasmF64Ne ssa/OpWasmF64Lt ssa/OpWasmF64Gt ssa/OpWasmF64Le ssa/OpWasmF64Ge
+        ^{:line 499} ssa/OpWasmI8x16ExtractLaneS ssa/OpWasmI16x8ExtractLaneS ssa/OpWasmI32x4ExtractLane
+        ^{:line 500} ssa/OpWasmI8x16ExtractLaneU ssa/OpWasmI16x8ExtractLaneU]
+      (return true))
+    (default
+      (return false))))
+
+
+
+^{:go/end 522} (go/func getValue32 [^{:tag (* ssagen/State)} s ^{:tag (* ssa/Value)} v]
+  (when (.-OnWasmStack v)
+    (dec! (.-OnWasmStackSkipped s))
+    (ssaGenValueOnStack s v false)
+    (when (not (isAlready32 v))
+      (.Prog s wasm/AI32WrapI64))
+
+    (return))
+
+
+  (let [reg (.Reg v)]
+    (getReg s reg)
+    (when (!= reg wasm/REG_SP)
+      (.Prog s wasm/AI32WrapI64))))
+
+
+
+^{:go/end 536} (go/func getValue64 [^{:tag (* ssagen/State)} s ^{:tag (* ssa/Value)} v]
+  (when (.-OnWasmStack v)
+    (dec! (.-OnWasmStackSkipped s))
+    (ssaGenValueOnStack s v true)
+    (return))
+
+
+  (let [reg (.Reg v)]
+    (getReg s reg)
+    (when (== reg wasm/REG_SP)
+      (.Prog s wasm/AI64ExtendI32U))))
+
+
+
+^{:go/end 547} (go/func getValue128 [^{:tag (* ssagen/State)} s ^{:tag (* ssa/Value)} v]
+  (when (.-OnWasmStack v)
+    (dec! (.-OnWasmStackSkipped s))
+    (ssaGenValueOnStack s v true)
+    (return))
+
+
+  (let [reg (.Reg v)]
+    (getReg s reg)))
+
+
+^{:go/end 558} (go/func getValueFxx [^{:tag (* ssagen/State)} s ^{:tag (* ssa/Value)} v]
+  (when (.-OnWasmStack v)
+    (dec! (.-OnWasmStackSkipped s))
+    (ssaGenValueOnStack s v true)
+    (return))
+
+
+  (let [reg (.Reg v)]
+    (getReg s reg)))
+
+
+^{:go/end 563} (go/func i32Const [^{:tag (* ssagen/State)} s ^int32 val]
+  (let [p (.Prog s wasm/AI32Const)]
+    (set! (.-From p) (lit obj/Addr :Type obj/TYPE_CONST :Offset (conv int64 val)))))
+
+
+^{:go/end 568} (go/func i64Const [^{:tag (* ssagen/State)} s ^int64 val]
+  (let [p (.Prog s wasm/AI64Const)]
+    (set! (.-From p) (lit obj/Addr :Type obj/TYPE_CONST :Offset val))))
+
+
+^{:go/end 573} (go/func f32Const [^{:tag (* ssagen/State)} s ^float64 val]
+  (let [p (.Prog s wasm/AF32Const)]
+    (set! (.-From p) (lit obj/Addr :Type obj/TYPE_FCONST :Val val))))
+
+
+^{:go/end 578} (go/func f64Const [^{:tag (* ssagen/State)} s ^float64 val]
+  (let [p (.Prog s wasm/AF64Const)]
+    (set! (.-From p) (lit obj/Addr :Type obj/TYPE_FCONST :Val val))))
+
+
+^{:go/end 583} (go/func getReg [^{:tag (* ssagen/State)} s ^int16 reg]
+  (let [p (.Prog s wasm/AGet)]
+    (set! (.-From p) (lit obj/Addr :Type obj/TYPE_REG :Reg reg))))
+
+
+^{:go/end 588} (go/func setReg [^{:tag (* ssagen/State)} s ^int16 reg]
+  (let [p (.Prog s wasm/ASet)]
+    (set! (.-To p) (lit obj/Addr :Type obj/TYPE_REG :Reg reg))))
+
+
+^{:go/end 625} (go/func loadOp ^obj/As [^{:tag (* types/Type)} t]
+  (when (.IsFloat t)
+    (switch (.Size t)
+      (case [4]
+        (return wasm/AF32Load))
+      (case [8]
+        (return wasm/AF64Load))
+      (default
+        (panic "bad load type"))))
+
+
+
+  (switch (.Size t)
+    (case [1]
+      (when (.IsSigned t)
+        (return wasm/AI64Load8S))
+
+      (return wasm/AI64Load8U))
+    (case [2]
+      (when (.IsSigned t)
+        (return wasm/AI64Load16S))
+
+      (return wasm/AI64Load16U))
+    (case [4]
+      (when (.IsSigned t)
+        (return wasm/AI64Load32S))
+
+      (return wasm/AI64Load32U))
+    (case [8]
+      (return wasm/AI64Load))
+    (case [16]
+      (return wasm/AV128Load))
+    (default
+      (panic "bad load type"))))
+
+
+
+^{:go/end 653} (go/func storeOp ^obj/As [^{:tag (* types/Type)} t]
+  (when (.IsFloat t)
+    (switch (.Size t)
+      (case [4]
+        (return wasm/AF32Store))
+      (case [8]
+        (return wasm/AF64Store))
+      (default
+        (panic "bad store type"))))
+
+
+
+  (switch (.Size t)
+    (case [1]
+      (return wasm/AI64Store8))
+    (case [2]
+      (return wasm/AI64Store16))
+    (case [4]
+      (return wasm/AI64Store32))
+    (case [8]
+      (return wasm/AI64Store))
+    (case [16]
+      (return wasm/AV128Store))
+    (default
+      (panic "bad store type"))))

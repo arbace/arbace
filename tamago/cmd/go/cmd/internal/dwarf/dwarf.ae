@@ -1,0 +1,1694 @@
+;; Copyright 2016 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; Package dwarf generates DWARF debugging information.
+;; DWARF generation is split between the compiler and the linker,
+;; this package contains the shared code.
+(in-ns 'go.cmd.internal.dwarf) (go/file "dwarf.go" :doc "Package dwarf generates DWARF debugging information.\nDWARF generation is split between the compiler and the linker,\nthis package contains the shared code.\n" :imports [
+
+
+    ^{:line 11} [bytes "bytes"]
+    ^{:line 12} [src "cmd/internal/src"]
+    ^{:line 13} [cmp "cmp"]
+    ^{:line 14} [errors "errors"]
+    ^{:line 15} [fmt "fmt"]
+    ^{:line 16} [buildcfg "internal/buildcfg"]
+    ^{:line 17} [exec "os/exec"]
+    ^{:line 18} [slices "slices"]
+    ^{:line 19} [strconv "strconv"]
+    ^{:line 20} [strings "strings"]])
+
+
+
+(go/const ^{:val "go:info." :doc "InfoPrefix is the prefix for all the symbols containing DWARF info entries.\n"} InfoPrefix "go:info.")
+
+
+
+(go/const ^{:val "go:constinfo." :doc "ConstInfoPrefix is the prefix for all symbols containing DWARF info\nentries that contain constants.\n"} ConstInfoPrefix "go:constinfo.")
+
+
+
+(go/const ^{:val "go:cuinfo." :doc "CUInfoPrefix is the prefix for symbols containing information to\npopulate the DWARF compilation unit info entries.\n"} CUInfoPrefix "go:cuinfo.")
+
+
+
+(go/const ^{:val "$abstract" :doc "Used to form the symbol name assigned to the DWARF \"abstract subprogram\"\ninfo entry for a function\n"} AbstractFuncSuffix "$abstract")
+
+
+
+(go/var ^{:tag bool :doc "Controls logging/debugging for selected aspects of DWARF subprogram\ngeneration (functions, scopes).\n"} logDwarf)
+
+
+(go/type Sym "Sym represents a symbol.\n" any)
+
+
+(go/type Var "A Var represents a local variable or a function parameter.\n" (struct
+    ^{:line 47 :tag string} Name
+    ^{:line 48 :tag int} Tag ; Either DW_TAG_variable or DW_TAG_formal_parameter
+    ^{:line 49 :tag bool} WithLoclist
+    ^{:line 50 :tag bool} IsReturnValue
+    ^{:line 51 :tag bool} IsInlFormal
+    ^{:line 52 :tag uint16} DictIndex ; index of the dictionary entry describing the type of this variable
+    ^{:line 53 :tag int32} StackOffset
+
+
+    ^{:line 56 :tag (func [^Sym listSym ^Sym startPC]) :doc "This package can't use the ssa package, so it can't mention ssa.FuncDebug,\nso indirect through a closure.\n"} PutLocationList
+    ^{:line 57 :tag int32} Scope
+    ^{:line 58 :tag Sym} Type
+    ^{:line 59 :tag string} DeclFile
+    ^{:line 60 :tag uint} DeclLine
+    ^{:line 61 :tag uint} DeclCol
+    ^{:line 62 :tag int32} InlIndex ; subtract 1 to form real index into InlTree
+    ^{:line 63 :tag int32} ChildIndex ; child DIE index in abstract function
+    ^{:line 64 :tag bool} IsInAbstract ; variable exists in abstract function
+    ^{:line 65 :tag int64} ClosureOffset)) ; if non-zero this is the offset of this variable in the closure struct
+
+
+
+
+
+
+
+
+(go/type Scope "A Scope represents a lexical scope. All variables declared within a\nscope will only be visible to instructions covered by the scope.\nLexical scopes are contiguous in source files but can end up being\ncompiled to discontiguous blocks of instructions in the executable.\nThe Ranges field lists all the blocks of instructions that belong\nin this scope.\n" (struct
+    ^{:line 75 :tag int32} Parent
+    ^{:line 76 :tag (slice Range)} Ranges
+    ^{:line 77 :tag (slice (* Var))} Vars))
+
+
+
+(go/type Range "A Range represents a half-open interval [Start, End).\n" (struct
+    ^{:line 82 :tag int64} Start ^int64 End))
+
+
+
+
+(go/type FnState "This container is used by the PutFunc* variants below when\ncreating the DWARF subprogram DIE(s) for a function.\n" (struct
+    ^{:line 88 :tag string} Name
+    ^{:line 89 :tag Sym} Info
+    ^{:line 90 :tag Sym} Loc
+    ^{:line 91 :tag Sym} Ranges
+    ^{:line 92 :tag Sym} Absfn
+    ^{:line 93 :tag Sym} StartPC
+    ^{:line 94 :tag src/Pos} StartPos
+    ^{:line 95 :tag int64} Size
+    ^{:line 96 :tag bool} External
+    ^{:line 97 :tag (slice Scope)} Scopes
+    ^{:line 98 :tag InlCalls} InlCalls
+    ^{:line 99 :tag bool} UseBASEntries
+
+    ^{:line 101 :tag (slice int64)} dictIndexToOffset))
+
+
+^{:go/end 106} (go/func EnableLogging [^bool doit]
+  (set! logDwarf doit))
+
+
+
+
+^{:go/end 141} (go/func MergeRanges "MergeRanges creates a new range list by merging the ranges from\nits two arguments, then returns the new list.\n" ^{:tag (slice Range)} [^{:tag (slice Range)} in1 ^{:tag (slice Range)} in2]
+  (let [out (make (slice Range) 0 (+ (len in1) (len in2)))
+      (values i j) (values 0 0)]
+    (while true
+      (let [^Range cur (zero Range)]
+        (cond (and (< i (len in2)) (< j (len in1)))
+          (if (< (.-Start (aget in2 i)) (.-Start (aget in1 j))) (do
+              (set! cur (aget in2 i))
+              (inc! i))
+            (do
+              (set! cur (aget in1 j))
+              (inc! j)))
+
+          (< i (len in2)) (do
+            (set! cur (aget in2 i))
+            (inc! i))
+          (< j (len in1)) (do
+            (set! cur (aget in1 j))
+            (inc! j)) :else
+
+          (break))
+
+
+        (if [n (len out)] (and (> n 0) (<= (.-Start cur) (.-End (aget out (- n 1)))))
+          (set! (.-End (aget out (- n 1))) (.-End cur))
+
+          (set! out (append out cur)))))
+
+
+
+    ^{:line 140} out))
+
+
+
+^{:go/end 146} (go/method UnifyRanges "UnifyRanges merges the ranges from 'c' into the list of ranges for 's'.\n" [^{:tag (* Scope)} s ^{:tag (* Scope)} c]
+  (set! (.-Ranges s) (MergeRanges (.-Ranges s) (.-Ranges c))))
+
+
+
+
+^{:go/end 160} (go/method AppendRange "AppendRange adds r to s, if r is non-empty.\nIf possible, it extends the last Range in s.Ranges; if not, it creates a new one.\n" [^{:tag (* Scope)} s ^Range r]
+  (when (<= (.-End r) (.-Start r))
+    (return))
+
+  (let [i (len (.-Ranges s))]
+    (when (and (> i 0) (== (.-End (aget (.-Ranges s) (- i 1))) (.-Start r)))
+      (set! (.-End (aget (.-Ranges s) (- i 1))) (.-End r))
+      (return))
+
+    (set! (.-Ranges s) (append (.-Ranges s) r))))
+
+
+(go/type InlCalls (struct
+    ^{:line 163 :tag (slice InlCall)} Calls))
+
+
+(go/type InlCall (struct
+
+    ^{:line 168 :tag int :doc "index into ctx.InlTree describing the call inlined here\n"} InlIndex
+
+
+    ^{:line 171 :tag src/Pos :doc "Position of the inlined call site.\n"} CallPos
+
+
+    ^{:line 174 :tag Sym :doc "Dwarf abstract subroutine symbol (really *obj.LSym).\n"} AbsFunSym
+
+
+    ^{:line 177 :tag (slice int) :doc "Indices of child inlines within Calls array above.\n"} Children
+
+
+
+    ^{:line 181 :tag (slice (* Var)) :doc "entries in this list are PAUTO's created by the inliner to\ncapture the promoted formals and locals of the inlined callee.\n"} InlVars
+
+
+    ^{:line 184 :tag (slice Range) :doc "PC ranges for this inlined call.\n"} Ranges
+
+
+    ^{:line 187 :tag bool :doc "Root call (not a child of some other call).\n"} Root))
+
+
+
+(go/type Context "A Context specifies how to add data to a Sym.\n" (interface
+    (PtrSize ^int [])
+    (Size ^int64 [^Sym s])
+    (AddInt [^Sym s ^int size ^int64 i])
+    (AddBytes [^Sym s ^{:tag (slice byte)} b])
+    (AddAddress [^Sym s ^any t ^int64 ofs])
+    (AddCURelativeAddress [^Sym s ^any t ^int64 ofs])
+    (AddSectionOffset [^Sym s ^int size ^any t ^int64 ofs])
+    (AddDWARFAddrSectionOffset [^Sym s ^any t ^int64 ofs])
+    (AddIndirectTextRef [^Sym s ^any t])
+    (CurrentOffset ^int64 [^Sym s])
+    (RecordDclReference [^Sym from ^Sym to ^int dclIdx ^int inlIndex])
+    (RecordChildDieOffsets [^Sym s ^{:tag (slice (* Var))} vars ^{:tag (slice int32)} offsets])
+    (AddString [^Sym s ^string v])
+    (Logf [^string format & ^{:tag (slice any)} args])))
+
+
+
+^{:go/end 222} (go/func AppendUleb128 "AppendUleb128 appends v to b using DWARF's unsigned LEB128 encoding.\n" ^{:tag (slice byte)} [^{:tag (slice byte)} b ^uint64 v]
+  (while true
+    (let [c (conv uint8 (bit-and v 0x7f))]
+      (set! v >> 7)
+      (when (!= v 0)
+        (set! c bit-or 0x80))
+
+      (set! b (append b c))
+      (when (== (bit-and c 0x80) 0)
+        (break))))
+
+
+  ^{:line 221} b)
+
+
+
+^{:go/end 239} (go/func AppendSleb128 "AppendSleb128 appends v to b using DWARF's signed LEB128 encoding.\n" ^{:tag (slice byte)} [^{:tag (slice byte)} b ^int64 v]
+  (while true
+    (let [c (conv uint8 (bit-and v 0x7f))
+        ^{:line 228} s (conv uint8 (bit-and v 0x40))]
+      (set! v >> 7)
+      (when (and ^:go/paren (or (!= v -1) (== s 0)) ^:go/paren (or (!= v 0) (!= s 0)))
+        (set! c bit-or 0x80))
+
+      (set! b (append b c))
+      (when (== (bit-and c 0x80) 0)
+        (break))))
+
+
+  ^{:line 238} b)
+
+
+
+(go/var ^{:doc "sevenbits contains all unsigned seven bit numbers, indexed by their value.\n"} sevenbits ^{:go/breaks [2 18 34 50 66 82 98 114]} (lit (array ... byte)
+    0x00 0x01 0x02 0x03 0x04 0x05 0x06 0x07 0x08 0x09 0x0a 0x0b 0x0c 0x0d 0x0e 0x0f
+    0x10 0x11 0x12 0x13 0x14 0x15 0x16 0x17 0x18 0x19 0x1a 0x1b 0x1c 0x1d 0x1e 0x1f
+    0x20 0x21 0x22 0x23 0x24 0x25 0x26 0x27 0x28 0x29 0x2a 0x2b 0x2c 0x2d 0x2e 0x2f
+    0x30 0x31 0x32 0x33 0x34 0x35 0x36 0x37 0x38 0x39 0x3a 0x3b 0x3c 0x3d 0x3e 0x3f
+    0x40 0x41 0x42 0x43 0x44 0x45 0x46 0x47 0x48 0x49 0x4a 0x4b 0x4c 0x4d 0x4e 0x4f
+    0x50 0x51 0x52 0x53 0x54 0x55 0x56 0x57 0x58 0x59 0x5a 0x5b 0x5c 0x5d 0x5e 0x5f
+    0x60 0x61 0x62 0x63 0x64 0x65 0x66 0x67 0x68 0x69 0x6a 0x6b 0x6c 0x6d 0x6e 0x6f
+    0x70 0x71 0x72 0x73 0x74 0x75 0x76 0x77 0x78 0x79 0x7a 0x7b 0x7c 0x7d 0x7e 0x7f))
+
+
+
+
+^{:go/breaks [[5 259]] :go/end 260} (go/func sevenBitU "sevenBitU returns the unsigned LEB128 encoding of v if v is seven bits and nil otherwise.\nThe contents of the returned slice must not be modified.\n" ^{:tag (slice byte)} [^int64 v]
+  (when (< (conv uint64 v) (conv uint64 (len sevenbits)))
+    (return (subslice sevenbits v (+ v 1))))
+
+  nil)
+
+
+
+
+^{:go/breaks [[6 271]] :go/end 272} (go/func sevenBitS "sevenBitS returns the signed LEB128 encoding of v if v is seven bits and nil otherwise.\nThe contents of the returned slice must not be modified.\n" ^{:tag (slice byte)} [^int64 v]
+  (when (<= (conv uint64 v) 63)
+    (return (subslice sevenbits v (+ v 1))))
+
+  (when (<= (conv uint64 (- v)) 64)
+    (return (subslice sevenbits (+ 128 v) (+ 128 v 1))))
+
+  nil)
+
+
+
+^{:go/end 282} (go/func Uleb128put "Uleb128put appends v to s using DWARF's unsigned LEB128 encoding.\n" [^Context ctxt ^Sym s ^int64 v]
+  (let [b (sevenBitU v)]
+    (when (== b nil)
+      (let [^{:tag (array 20 byte)} encbuf (zero (array 20 byte))]
+        (set! b (AppendUleb128 (subslice encbuf _ 0) (conv uint64 v)))))
+
+    (.AddBytes ctxt s b)))
+
+
+
+^{:go/end 292} (go/func Sleb128put "Sleb128put appends v to s using DWARF's signed LEB128 encoding.\n" [^Context ctxt ^Sym s ^int64 v]
+  (let [b (sevenBitS v)]
+    (when (== b nil)
+      (let [^{:tag (array 20 byte)} encbuf (zero (array 20 byte))]
+        (set! b (AppendSleb128 (subslice encbuf _ 0) v))))
+
+    (.AddBytes ctxt s b)))
+
+
+
+
+
+
+
+
+
+
+(go/type dwAttrForm " * Defining Abbrevs. This is hardcoded on a per-platform basis (that is,\n * each platform will see a fixed abbrev table for all objects); the number\n * of abbrev entries is fairly small (compared to C++ objects).  The DWARF\n * spec places no restriction on the ordering of attributes in the\n * Abbrevs and DIEs, and we will always write them out in the order\n * of declaration in the abbrev.\n" (struct
+    ^{:line 303 :tag uint16} attr
+    ^{:line 304 :tag uint8} form))
+
+
+
+(go/const "Go-specific type attributes.\n"
+  ^{:line 309} [^{:val 10496} DW_AT_go_kind 0x2900]
+  ^{:line 310} [^{:val 10497} DW_AT_go_key 0x2901]
+  ^{:line 311} [^{:val 10498} DW_AT_go_elem 0x2902]
+
+
+  ^{:line 314} [^{:val 10499 :doc "Attribute for DW_TAG_member of a struct type.\nNonzero value indicates the struct field is an embedded field.\n"} DW_AT_go_embedded_field 0x2903]
+  ^{:line 315} [^{:val 10500} DW_AT_go_runtime_type 0x2904]
+
+  ^{:line 317} [^{:val 10501} DW_AT_go_package_name 0x2905] ; Attribute for DW_TAG_compile_unit
+  ^{:line 318} [^{:val 10502} DW_AT_go_dict_index 0x2906] ; Attribute for DW_TAG_typedef_type, index of the dictionary entry describing the real type of this type shape
+  ^{:line 319} [^{:val 10503} DW_AT_go_closure_offset 0x2907] ; Attribute for DW_TAG_variable, offset in the closure struct where this captured variable resides
+
+  ^{:line 321} [^{:val 253} DW_AT_internal_location 253]) ; params and locals; not emitted
+
+
+
+(go/const "Index into the abbrevs table below.\n"
+  ^{:line 326} [^{:val 0} DW_ABRV_NULL iota]
+  ^{:line 327} [^{:val 1} DW_ABRV_COMPUNIT]
+  ^{:line 328} [^{:val 2} DW_ABRV_COMPUNIT_TEXTLESS]
+  ^{:line 329} [^{:val 3} DW_ABRV_FUNCTION]
+  ^{:line 330} [^{:val 4} DW_ABRV_WRAPPER]
+  ^{:line 331} [^{:val 5} DW_ABRV_FUNCTION_ABSTRACT]
+  ^{:line 332} [^{:val 6} DW_ABRV_FUNCTION_CONCRETE]
+  ^{:line 333} [^{:val 7} DW_ABRV_WRAPPER_CONCRETE]
+  ^{:line 334} [^{:val 8} DW_ABRV_INLINED_SUBROUTINE]
+  ^{:line 335} [^{:val 9} DW_ABRV_INLINED_SUBROUTINE_RANGES]
+  ^{:line 336} [^{:val 10} DW_ABRV_VARIABLE]
+  ^{:line 337} [^{:val 11} DW_ABRV_INT_CONSTANT]
+  ^{:line 338} [^{:val 12} DW_ABRV_LEXICAL_BLOCK_RANGES]
+  ^{:line 339} [^{:val 13} DW_ABRV_LEXICAL_BLOCK_SIMPLE]
+  ^{:line 340} [^{:val 14} DW_ABRV_STRUCTFIELD]
+  ^{:line 341} [^{:val 15} DW_ABRV_FUNCTYPEPARAM]
+  ^{:line 342} [^{:val 16} DW_ABRV_FUNCTYPEOUTPARAM]
+  ^{:line 343} [^{:val 17} DW_ABRV_DOTDOTDOT]
+  ^{:line 344} [^{:val 18} DW_ABRV_ARRAYRANGE]
+  ^{:line 345} [^{:val 19} DW_ABRV_NULLTYPE]
+  ^{:line 346} [^{:val 20} DW_ABRV_BASETYPE]
+  ^{:line 347} [^{:val 21} DW_ABRV_ARRAYTYPE]
+  ^{:line 348} [^{:val 22} DW_ABRV_CHANTYPE]
+  ^{:line 349} [^{:val 23} DW_ABRV_FUNCTYPE]
+  ^{:line 350} [^{:val 24} DW_ABRV_IFACETYPE]
+  ^{:line 351} [^{:val 25} DW_ABRV_MAPTYPE]
+  ^{:line 352} [^{:val 26} DW_ABRV_PTRTYPE]
+  ^{:line 353} [^{:val 27} DW_ABRV_BARE_PTRTYPE] ; only for void*, no DW_AT_type attr to please gdb 6.
+  ^{:line 354} [^{:val 28} DW_ABRV_SLICETYPE]
+  ^{:line 355} [^{:val 29} DW_ABRV_STRINGTYPE]
+  ^{:line 356} [^{:val 30} DW_ABRV_STRUCTTYPE]
+  ^{:line 357} [^{:val 31} DW_ABRV_TYPEDECL]
+  ^{:line 358} [^{:val 32} DW_ABRV_DICT_INDEX]
+  ^{:line 359} [^{:val 33} DW_ABRV_PUTVAR_START])
+
+
+(go/type dwAbbrev (struct
+    ^{:line 363 :tag uint8} tag
+    ^{:line 364 :tag uint8} children
+    ^{:line 365 :tag (slice dwAttrForm)} attr))
+
+
+(go/var ^bool abbrevsFinalized)
+
+
+
+
+
+
+
+
+
+
+^{:go/end 400} (go/func expandPseudoForm "expandPseudoForm takes an input DW_FORM_xxx value and translates it\ninto a version- and platform-appropriate concrete form. Existing\nconcrete/real DW_FORM values are left untouched. For the moment the\nonly platform-specific pseudo-form is DW_FORM_udata_pseudo, which\ngets expanded to DW_FORM_data4 on Darwin and DW_FORM_udata\neverywhere else. See issue #31459 for more context. Then we have a\npair of pseudo-forms for lo and hi PC attributes, which are\nexpanded differently depending on whether we're generating DWARF\nversion 4 or 5.\n" ^uint8 [^uint8 form]
+  (switch form
+    (case [DW_FORM_udata_pseudo]
+      (let [expandedForm DW_FORM_udata]
+        (when (or (== buildcfg/GOOS "darwin") (== buildcfg/GOOS "ios"))
+          (set! expandedForm DW_FORM_data4))
+
+        (return (conv uint8 expandedForm))))
+    (case [DW_FORM_lo_pc_pseudo]
+      (when ^{:go/via [Flags]} (.-Dwarf5 buildcfg/Experiment)
+        (return DW_FORM_addrx))
+
+      (return DW_FORM_addr))
+    (case [DW_FORM_hi_pc_pseudo]
+      (when ^{:go/via [Flags]} (.-Dwarf5 buildcfg/Experiment)
+        (return DW_FORM_udata))
+
+      (return DW_FORM_addr))
+    (default
+      (return form))))
+
+
+
+
+
+^{:go/end 435} (go/func Abbrevs "Abbrevs returns the finalized abbrev array for the platform,\nexpanding any DW_FORM pseudo-ops to real values.\n" ^{:tag (slice dwAbbrev)} []
+  (when abbrevsFinalized
+    (return abbrevs))
+
+  (set! abbrevs (append abbrevs (spread putvarAbbrevs)))
+  (for [i 1] (< i (len abbrevs)) (inc! i)
+    (for [j 0] (< j (len (.-attr (aget abbrevs i)))) (inc! j)
+      (set! (.-form (aget (.-attr (aget abbrevs i)) j)) (expandPseudoForm (.-form (aget (.-attr (aget abbrevs i)) j))))))
+
+
+  (when ^{:go/via [Flags]} (.-Dwarf5 buildcfg/Experiment)
+    ;; Tack on a new DW_AT_addr_base attribute to the compunit DIE,
+    ;; which will point to the offset in the .debug_addr section
+    ;; containing entries for this comp unit (this attr gets
+    ;; fixed up in the linker).
+    (for [i 1] (< i (len abbrevs)) (inc! i)
+      (let [haveLo false]
+        (for [j 0] (< j (len (.-attr (aget abbrevs i)))) (inc! j)
+          (when (== (.-attr (aget (.-attr (aget abbrevs i)) j)) DW_AT_low_pc)
+            (set! haveLo true)))
+
+
+        (when (and (== (.-tag (aget abbrevs i)) DW_TAG_compile_unit) haveLo)
+          (set! (.-attr (aget abbrevs i)) (append (.-attr (aget abbrevs i))
+              (lit dwAttrForm DW_AT_addr_base DW_FORM_sec_offset)))))))
+
+
+
+
+  (set! abbrevsFinalized true)
+  ^{:line 434} abbrevs)
+
+
+;; abbrevs is a raw table of abbrev entries; it needs to be post-processed
+;; by the Abbrevs() function above prior to being consumed, to expand
+;; the 'pseudo-form' entries below to real DWARF form values.
+
+(go/var abbrevs (lit (slice dwAbbrev)
+    ;; /* The mandatory DW_ABRV_NULL entry. */
+    (lit _ 0 0 (lit (slice dwAttrForm)))
+
+    ;; /* COMPUNIT */
+    (lit _
+      ^{:line 447} DW_TAG_compile_unit
+      ^{:line 448} DW_CHILDREN_yes
+      (lit (slice dwAttrForm)
+        (lit _ DW_AT_name DW_FORM_string)
+        (lit _ DW_AT_language DW_FORM_data1)
+        (lit _ DW_AT_stmt_list DW_FORM_sec_offset)
+        (lit _ DW_AT_low_pc DW_FORM_addr)
+        (lit _ DW_AT_ranges DW_FORM_sec_offset)
+        (lit _ DW_AT_comp_dir DW_FORM_string)
+        (lit _ DW_AT_producer DW_FORM_string)
+        (lit _ DW_AT_go_package_name DW_FORM_string)))
+    ;; NB: DWARF5 adds DW_AT_addr_base here.
+
+
+
+    ;; /* COMPUNIT_TEXTLESS */
+    (lit _
+      ^{:line 464} DW_TAG_compile_unit
+      ^{:line 465} DW_CHILDREN_yes
+      (lit (slice dwAttrForm)
+        (lit _ DW_AT_name DW_FORM_string)
+        (lit _ DW_AT_language DW_FORM_data1)
+        (lit _ DW_AT_comp_dir DW_FORM_string)
+        (lit _ DW_AT_producer DW_FORM_string)
+        (lit _ DW_AT_go_package_name DW_FORM_string)))
+
+
+
+    ;; /* FUNCTION */
+    (lit _
+      ^{:line 477} DW_TAG_subprogram
+      ^{:line 478} DW_CHILDREN_yes
+      (lit (slice dwAttrForm)
+        (lit _ DW_AT_name DW_FORM_string)
+        (lit _ DW_AT_low_pc DW_FORM_lo_pc_pseudo)
+        (lit _ DW_AT_high_pc DW_FORM_hi_pc_pseudo)
+        (lit _ DW_AT_frame_base DW_FORM_block1)
+        (lit _ DW_AT_decl_file DW_FORM_data4)
+        (lit _ DW_AT_decl_line DW_FORM_udata)
+        (lit _ DW_AT_external DW_FORM_flag)))
+
+
+
+    ;; /* WRAPPER */
+    (lit _
+      ^{:line 492} DW_TAG_subprogram
+      ^{:line 493} DW_CHILDREN_yes
+      (lit (slice dwAttrForm)
+        (lit _ DW_AT_name DW_FORM_string)
+        (lit _ DW_AT_low_pc DW_FORM_lo_pc_pseudo)
+        (lit _ DW_AT_high_pc DW_FORM_hi_pc_pseudo)
+        (lit _ DW_AT_frame_base DW_FORM_block1)
+        (lit _ DW_AT_trampoline DW_FORM_flag)))
+
+
+
+    ;; /* FUNCTION_ABSTRACT */
+    (lit _
+      ^{:line 505} DW_TAG_subprogram
+      ^{:line 506} DW_CHILDREN_yes
+      (lit (slice dwAttrForm)
+        (lit _ DW_AT_name DW_FORM_string)
+        (lit _ DW_AT_inline DW_FORM_data1)
+        (lit _ DW_AT_decl_line DW_FORM_udata)
+        (lit _ DW_AT_external DW_FORM_flag)))
+
+
+
+    ;; /* FUNCTION_CONCRETE */
+    (lit _
+      ^{:line 517} DW_TAG_subprogram
+      ^{:line 518} DW_CHILDREN_yes
+      (lit (slice dwAttrForm)
+        (lit _ DW_AT_abstract_origin DW_FORM_ref_addr)
+        (lit _ DW_AT_low_pc DW_FORM_lo_pc_pseudo)
+        (lit _ DW_AT_high_pc DW_FORM_hi_pc_pseudo)
+        (lit _ DW_AT_frame_base DW_FORM_block1)))
+
+
+
+    ;; /* WRAPPER_CONCRETE */
+    (lit _
+      ^{:line 529} DW_TAG_subprogram
+      ^{:line 530} DW_CHILDREN_yes
+      (lit (slice dwAttrForm)
+        (lit _ DW_AT_abstract_origin DW_FORM_ref_addr)
+        (lit _ DW_AT_low_pc DW_FORM_lo_pc_pseudo)
+        (lit _ DW_AT_high_pc DW_FORM_hi_pc_pseudo)
+        (lit _ DW_AT_frame_base DW_FORM_block1)
+        (lit _ DW_AT_trampoline DW_FORM_flag)))
+
+
+
+    ;; /* INLINED_SUBROUTINE */
+    (lit _
+      ^{:line 542} DW_TAG_inlined_subroutine
+      ^{:line 543} DW_CHILDREN_yes
+      (lit (slice dwAttrForm)
+        (lit _ DW_AT_abstract_origin DW_FORM_ref_addr)
+        (lit _ DW_AT_low_pc DW_FORM_lo_pc_pseudo)
+        (lit _ DW_AT_high_pc DW_FORM_hi_pc_pseudo)
+        (lit _ DW_AT_call_file DW_FORM_data4)
+        (lit _ DW_AT_call_line DW_FORM_udata_pseudo))) ; pseudo-form
+
+
+
+    ;; /* INLINED_SUBROUTINE_RANGES */
+    (lit _
+      ^{:line 555} DW_TAG_inlined_subroutine
+      ^{:line 556} DW_CHILDREN_yes
+      (lit (slice dwAttrForm)
+        (lit _ DW_AT_abstract_origin DW_FORM_ref_addr)
+        (lit _ DW_AT_ranges DW_FORM_sec_offset)
+        (lit _ DW_AT_call_file DW_FORM_data4)
+        (lit _ DW_AT_call_line DW_FORM_udata_pseudo))) ; pseudo-form
+
+
+
+    ;; /* VARIABLE */
+    (lit _
+      ^{:line 567} DW_TAG_variable
+      ^{:line 568} DW_CHILDREN_no
+      (lit (slice dwAttrForm)
+        (lit _ DW_AT_name DW_FORM_string)
+        (lit _ DW_AT_location DW_FORM_block1)
+        (lit _ DW_AT_type DW_FORM_ref_addr)
+        (lit _ DW_AT_external DW_FORM_flag)))
+
+
+
+    ;; /* INT CONSTANT */
+    (lit _
+      ^{:line 579} DW_TAG_constant
+      ^{:line 580} DW_CHILDREN_no
+      (lit (slice dwAttrForm)
+        (lit _ DW_AT_name DW_FORM_string)
+        (lit _ DW_AT_type DW_FORM_ref_addr)
+        (lit _ DW_AT_const_value DW_FORM_sdata)))
+
+
+
+    ;; /* LEXICAL_BLOCK_RANGES */
+    (lit _
+      ^{:line 590} DW_TAG_lexical_block
+      ^{:line 591} DW_CHILDREN_yes
+      (lit (slice dwAttrForm)
+        (lit _ DW_AT_ranges DW_FORM_sec_offset)))
+
+
+
+    ;; /* LEXICAL_BLOCK_SIMPLE */
+    (lit _
+      ^{:line 599} DW_TAG_lexical_block
+      ^{:line 600} DW_CHILDREN_yes
+      (lit (slice dwAttrForm)
+        ;; Note: unused if we are generating DWARF 5, we
+        ;; use the ranges form even if there is a singleton range.
+        (lit _ DW_AT_low_pc DW_FORM_addr)
+        (lit _ DW_AT_high_pc DW_FORM_addr)))
+
+
+
+    ;; /* STRUCTFIELD */
+    (lit _
+      ^{:line 611} DW_TAG_member
+      ^{:line 612} DW_CHILDREN_no
+      ;; This abbrev is special-cased by the linker (unlike other DIEs
+      ;; we don't want a loader.Sym created for this DIE).
+      (lit (slice dwAttrForm)
+        (lit _ DW_AT_name DW_FORM_string)
+        (lit _ DW_AT_data_member_location DW_FORM_udata)
+        (lit _ DW_AT_type DW_FORM_ref_addr)
+        (lit _ DW_AT_go_embedded_field DW_FORM_flag)))
+
+
+
+    ;; /* FUNCTYPEPARAM */
+    (lit _
+      ^{:line 625} DW_TAG_formal_parameter
+      ^{:line 626} DW_CHILDREN_no
+
+      ;; No name!
+      ;; This abbrev is special-cased by the linker (unlike other DIEs
+      ;; we don't want a loader.Sym created for this DIE).
+      (lit (slice dwAttrForm)
+        (lit _ DW_AT_type DW_FORM_ref_addr)))
+
+
+
+    ;; /* FUNCTYPEOUTPARAM */
+    (lit _
+      ^{:line 638} DW_TAG_formal_parameter
+      ^{:line 639} DW_CHILDREN_no
+
+      ;; No name!
+      ;; This abbrev is special-cased by the linker (unlike other DIEs
+      ;; we don't want a loader.Sym created for this DIE).
+      (lit (slice dwAttrForm)
+        (lit _ DW_AT_variable_parameter DW_FORM_flag)
+        (lit _ DW_AT_type DW_FORM_ref_addr)))
+
+
+
+    ;; /* DOTDOTDOT */
+    (lit _
+      ^{:line 652} DW_TAG_unspecified_parameters
+      ^{:line 653} DW_CHILDREN_no
+      ;; No name.
+      ;; This abbrev is special-cased by the linker (unlike other DIEs
+      ;; we don't want a loader.Sym created for this DIE).
+      (lit (slice dwAttrForm)))
+
+
+    ;; /* ARRAYRANGE */
+    (lit _
+      ^{:line 662} DW_TAG_subrange_type
+      ^{:line 663} DW_CHILDREN_no
+
+      ;; No name!
+      ;; This abbrev is special-cased by the linker (unlike other DIEs
+      ;; we don't want a loader.Sym created for this DIE).
+      (lit (slice dwAttrForm)
+        (lit _ DW_AT_type DW_FORM_ref_addr)
+        (lit _ DW_AT_count DW_FORM_udata)))
+
+
+
+    ;; Below here are the types considered public by ispubtype
+    ;; /* NULLTYPE */
+    (lit _
+      ^{:line 677} DW_TAG_unspecified_type
+      ^{:line 678} DW_CHILDREN_no
+      (lit (slice dwAttrForm)
+        (lit _ DW_AT_name DW_FORM_string)))
+
+
+
+    ;; /* BASETYPE */
+    (lit _
+      ^{:line 686} DW_TAG_base_type
+      ^{:line 687} DW_CHILDREN_no
+      (lit (slice dwAttrForm)
+        (lit _ DW_AT_name DW_FORM_string)
+        (lit _ DW_AT_encoding DW_FORM_data1)
+        (lit _ DW_AT_byte_size DW_FORM_data1)
+        (lit _ DW_AT_go_kind DW_FORM_data1)
+        (lit _ DW_AT_go_runtime_type DW_FORM_addr)))
+
+
+
+    ;; /* ARRAYTYPE */
+    ;; child is subrange with upper bound
+    (lit _
+      ^{:line 700} DW_TAG_array_type
+      ^{:line 701} DW_CHILDREN_yes
+      (lit (slice dwAttrForm)
+        (lit _ DW_AT_name DW_FORM_string)
+        (lit _ DW_AT_type DW_FORM_ref_addr)
+        (lit _ DW_AT_byte_size DW_FORM_udata)
+        (lit _ DW_AT_go_kind DW_FORM_data1)
+        (lit _ DW_AT_go_runtime_type DW_FORM_addr)))
+
+
+
+    ;; /* CHANTYPE */
+    (lit _
+      ^{:line 713} DW_TAG_typedef
+      ^{:line 714} DW_CHILDREN_no
+      (lit (slice dwAttrForm)
+        (lit _ DW_AT_name DW_FORM_string)
+        (lit _ DW_AT_type DW_FORM_ref_addr)
+        (lit _ DW_AT_go_kind DW_FORM_data1)
+        (lit _ DW_AT_go_runtime_type DW_FORM_addr)
+        (lit _ DW_AT_go_elem DW_FORM_ref_addr)))
+
+
+
+    ;; /* FUNCTYPE */
+    (lit _
+      ^{:line 726} DW_TAG_subroutine_type
+      ^{:line 727} DW_CHILDREN_yes
+      (lit (slice dwAttrForm)
+        (lit _ DW_AT_name DW_FORM_string)
+        (lit _ DW_AT_byte_size DW_FORM_udata)
+        (lit _ DW_AT_go_kind DW_FORM_data1)
+        (lit _ DW_AT_go_runtime_type DW_FORM_addr)))
+
+
+
+    ;; /* IFACETYPE */
+    (lit _
+      ^{:line 738} DW_TAG_typedef
+      ^{:line 739} DW_CHILDREN_yes
+      (lit (slice dwAttrForm)
+        (lit _ DW_AT_name DW_FORM_string)
+        (lit _ DW_AT_type DW_FORM_ref_addr)
+        (lit _ DW_AT_go_kind DW_FORM_data1)
+        (lit _ DW_AT_go_runtime_type DW_FORM_addr)))
+
+
+
+    ;; /* MAPTYPE */
+    (lit _
+      ^{:line 750} DW_TAG_typedef
+      ^{:line 751} DW_CHILDREN_no
+      (lit (slice dwAttrForm)
+        (lit _ DW_AT_name DW_FORM_string)
+        (lit _ DW_AT_type DW_FORM_ref_addr)
+        (lit _ DW_AT_go_kind DW_FORM_data1)
+        (lit _ DW_AT_go_runtime_type DW_FORM_addr)
+        (lit _ DW_AT_go_key DW_FORM_ref_addr)
+        (lit _ DW_AT_go_elem DW_FORM_ref_addr)))
+
+
+
+    ;; /* PTRTYPE */
+    (lit _
+      ^{:line 764} DW_TAG_pointer_type
+      ^{:line 765} DW_CHILDREN_no
+      (lit (slice dwAttrForm)
+        (lit _ DW_AT_name DW_FORM_string)
+        (lit _ DW_AT_type DW_FORM_ref_addr)
+        (lit _ DW_AT_go_kind DW_FORM_data1)
+        (lit _ DW_AT_go_runtime_type DW_FORM_addr)))
+
+
+
+    ;; /* BARE_PTRTYPE */
+    (lit _
+      ^{:line 776} DW_TAG_pointer_type
+      ^{:line 777} DW_CHILDREN_no
+      (lit (slice dwAttrForm)
+        (lit _ DW_AT_name DW_FORM_string)
+        (lit _ DW_AT_go_runtime_type DW_FORM_addr)))
+
+
+
+    ;; /* SLICETYPE */
+    (lit _
+      ^{:line 786} DW_TAG_structure_type
+      ^{:line 787} DW_CHILDREN_yes
+      (lit (slice dwAttrForm)
+        (lit _ DW_AT_name DW_FORM_string)
+        (lit _ DW_AT_byte_size DW_FORM_udata)
+        (lit _ DW_AT_go_kind DW_FORM_data1)
+        (lit _ DW_AT_go_runtime_type DW_FORM_addr)
+        (lit _ DW_AT_go_elem DW_FORM_ref_addr)))
+
+
+
+    ;; /* STRINGTYPE */
+    (lit _
+      ^{:line 799} DW_TAG_structure_type
+      ^{:line 800} DW_CHILDREN_yes
+      (lit (slice dwAttrForm)
+        (lit _ DW_AT_name DW_FORM_string)
+        (lit _ DW_AT_byte_size DW_FORM_udata)
+        (lit _ DW_AT_go_kind DW_FORM_data1)
+        (lit _ DW_AT_go_runtime_type DW_FORM_addr)))
+
+
+
+    ;; /* STRUCTTYPE */
+    (lit _
+      ^{:line 811} DW_TAG_structure_type
+      ^{:line 812} DW_CHILDREN_yes
+      (lit (slice dwAttrForm)
+        (lit _ DW_AT_name DW_FORM_string)
+        (lit _ DW_AT_byte_size DW_FORM_udata)
+        (lit _ DW_AT_go_kind DW_FORM_data1)
+        (lit _ DW_AT_go_runtime_type DW_FORM_addr)))
+
+
+
+    ;; /* TYPEDECL */
+    (lit _
+      ^{:line 823} DW_TAG_typedef
+      ^{:line 824} DW_CHILDREN_no
+      (lit (slice dwAttrForm)
+        (lit _ DW_AT_name DW_FORM_string)
+        (lit _ DW_AT_type DW_FORM_ref_addr)))
+
+
+
+    ;; /* DICT_INDEX */
+    (lit _
+      ^{:line 833} DW_TAG_typedef
+      ^{:line 834} DW_CHILDREN_no
+      (lit (slice dwAttrForm)
+        (lit _ DW_AT_name DW_FORM_string)
+        (lit _ DW_AT_type DW_FORM_ref_addr)
+        (lit _ DW_AT_go_dict_index DW_FORM_udata)))))
+
+
+
+
+
+^{:go/end 859} (go/func GetAbbrev "GetAbbrev returns the contents of the .debug_abbrev section.\n" ^{:tag (slice byte)} []
+  (let [abbrevs (Abbrevs)
+      ^{:line 846 :tag (slice byte)} buf (zero (slice byte))]
+    (for [i 1] (< i (len abbrevs)) (inc! i)
+      ;; See section 7.5.3
+      (set! buf (AppendUleb128 buf (conv uint64 i)))
+      (set! buf (AppendUleb128 buf (conv uint64 (.-tag (aget abbrevs i)))))
+      (set! buf (append buf (.-children (aget abbrevs i))))
+      (range [_ f (.-attr (aget abbrevs i))]
+        (set! buf (AppendUleb128 buf (conv uint64 (.-attr f))))
+        (set! buf (AppendUleb128 buf (conv uint64 (.-form f)))))
+
+      (set! buf (append buf 0 0)))
+
+    (append buf 0)))
+
+
+;; /*
+;; * Debugging Information Entries and their attributes.
+;; */
+
+
+
+
+
+
+
+(go/type DWAttr "DWAttr represents an attribute of a DWDie.\n\nFor DW_CLS_string and _block, value should contain the length, and\ndata the data, for _reference, value is 0 and data is a DWDie* to\nthe referenced instance, for all others, value is the whole thing\nand data is null.\n" (struct
+    ^{:line 872 :tag (* DWAttr)} Link
+    ^{:line 873 :tag uint16} Atr ; DW_AT_
+    ^{:line 874 :tag uint8} Cls ; DW_CLS_
+    ^{:line 875 :tag int64} Value
+    ^{:line 876 :tag any} Data))
+
+
+
+(go/type DWDie "DWDie represents a DWARF debug info entry.\n" (struct
+    ^{:line 881 :tag int} Abbrev
+    ^{:line 882 :tag (* DWDie)} Link
+    ^{:line 883 :tag (* DWDie)} Child
+    ^{:line 884 :tag (* DWAttr)} Attr
+    ^{:line 885 :tag Sym} Sym))
+
+
+^{:go/breaks [[4 997]] :go/end 998} (go/func putattr ^error [^Context ctxt ^Sym s ^int abbrev ^int form ^int cls ^int64 value ^any data]
+  (switch form
+    (case [DW_FORM_addr] ; address
+      ;; Allow nil addresses for DW_AT_go_runtime_type.
+      (when (and (== data nil) (== value 0))
+        (.AddInt ctxt s (.PtrSize ctxt) 0)
+        (break))
+
+      (when (== cls DW_CLS_GO_TYPEREF)
+        (.AddSectionOffset ctxt s (.PtrSize ctxt) data value)
+        (break))
+
+      (.AddAddress ctxt s data value))
+
+    (case [DW_FORM_block1] ; block
+      (when (== cls DW_CLS_ADDRESS)
+        (.AddInt ctxt s 1 (conv int64 (+ 1 (.PtrSize ctxt))))
+        (.AddInt ctxt s 1 DW_OP_addr)
+        (.AddAddress ctxt s data 0)
+        (break))
+
+
+      (set! value bit-and 0xff)
+      (.AddInt ctxt s 1 value)
+      (let [p (subslice (assert (slice byte) data) _ value)]
+        (.AddBytes ctxt s p)))
+
+    (case [DW_FORM_block2] ; block
+      (set! value bit-and 0xffff)
+
+      (.AddInt ctxt s 2 value)
+      (let [p (subslice (assert (slice byte) data) _ value)]
+        (.AddBytes ctxt s p)))
+
+    (case [DW_FORM_block4] ; block
+      (set! value bit-and 0xffffffff)
+
+      (.AddInt ctxt s 4 value)
+      (let [p (subslice (assert (slice byte) data) _ value)]
+        (.AddBytes ctxt s p)))
+
+    (case [DW_FORM_block] ; block
+      (Uleb128put ctxt s value)
+
+      (let [p (subslice (assert (slice byte) data) _ value)]
+        (.AddBytes ctxt s p)))
+
+    (case [DW_FORM_data1] ; constant
+      (.AddInt ctxt s 1 value))
+
+    (case [DW_FORM_data2] ; constant
+      (.AddInt ctxt s 2 value))
+
+    (case [DW_FORM_data4] ; constant, {line,loclist,mac,rangelist}ptr
+      (when (== cls DW_CLS_PTR) ; DW_AT_stmt_list and DW_AT_ranges
+        (.AddDWARFAddrSectionOffset ctxt s data value)
+        (break))
+
+      (.AddInt ctxt s 4 value))
+
+    (case [DW_FORM_data8] ; constant, {line,loclist,mac,rangelist}ptr
+      (.AddInt ctxt s 8 value))
+
+    (case [DW_FORM_sdata] ; constant
+      (Sleb128put ctxt s value))
+
+    (case [DW_FORM_udata] ; constant
+      (Uleb128put ctxt s value))
+
+    (case [DW_FORM_string] ; string
+      (let [str (assert string data)]
+        (.AddString ctxt s str)
+        ;; TODO(ribrdb): verify padded strings are never used and remove this
+        (for [i (conv int64 (len str))] (< i value) (inc! i)
+          (.AddInt ctxt s 1 0))))
+
+
+    (case [DW_FORM_flag] ; flag
+      (if (!= value 0)
+        (.AddInt ctxt s 1 1)
+
+        (.AddInt ctxt s 1 0)))
+
+
+    ;; As of DWARF 3 the ref_addr is always 32 bits, unless emitting a large
+    ;; (> 4 GB of debug info aka "64-bit") unit, which we don't implement.
+    (case [DW_FORM_ref_addr] ; reference to a DIE in the .info section
+      (fallthrough))
+    (case [DW_FORM_sec_offset] ; offset into a DWARF section other than .info
+      (when (== data nil)
+        (return (fmt/Errorf "dwarf: null reference in %d" abbrev)))
+
+      (.AddDWARFAddrSectionOffset ctxt s data value))
+
+    (case [DW_FORM_addrx] ; index into .debug_addr section
+      (.AddIndirectTextRef ctxt s data))
+
+    (case [DW_FORM_ref1 ; reference within the compilation unit
+        ^{:line 986} DW_FORM_ref2 ; reference
+        ^{:line 987} DW_FORM_ref4 ; reference
+        ^{:line 988} DW_FORM_ref8 ; reference
+        ^{:line 989} DW_FORM_ref_udata ; reference
+
+        ^{:line 991} DW_FORM_strp ; string
+        ^{:line 992} DW_FORM_indirect] ; (see Section 7.5.3)
+      (fallthrough))
+    (default
+      (return (fmt/Errorf "dwarf: unsupported attribute form %d / class %d" form cls))))
+
+  nil)
+
+
+
+
+
+
+^{:go/end 1017} (go/func PutAttrs "PutAttrs writes the attributes for a DIE to symbol 's'.\n\nNote that we can (and do) add arbitrary attributes to a DIE, but\nonly the ones actually listed in the Abbrev will be written out.\n" [^Context ctxt ^Sym s ^int abbrev ^{:tag (* DWAttr)} attr]
+  (let [abbrevs (Abbrevs)]
+    (label :Outer
+      (range [_ f (.-attr (aget abbrevs abbrev))]
+        (for [ap attr] (!= ap nil) (set! ap (.-Link ap))
+          (when (== (.-Atr ap) (.-attr f))
+            (putattr ctxt s abbrev (conv int (.-form f)) (conv int (.-Cls ap)) (.-Value ap) (.-Data ap))
+            (continue :Outer)))
+
+
+
+        (putattr ctxt s abbrev (conv int (.-form f)) 0 0 nil)))))
+
+
+
+
+^{:go/end 1023} (go/func HasChildren "HasChildren reports whether 'die' uses an abbrev that supports children.\n" ^bool [^{:tag (* DWDie)} die]
+  (let [abbrevs (Abbrevs)]
+    (!= (.-children (aget abbrevs (.-Abbrev die))) 0)))
+
+
+
+^{:go/end 1031} (go/func PutIntConst "PutIntConst writes a DIE for an integer constant\n" [^Context ctxt ^Sym info ^Sym typ ^string name ^int64 val]
+  (Uleb128put ctxt info DW_ABRV_INT_CONSTANT)
+  (putattr ctxt info DW_ABRV_INT_CONSTANT DW_FORM_string DW_CLS_STRING (conv int64 (len name)) name)
+  (putattr ctxt info DW_ABRV_INT_CONSTANT DW_FORM_ref_addr DW_CLS_REFERENCE 0 typ)
+  (putattr ctxt info DW_ABRV_INT_CONSTANT DW_FORM_sdata DW_CLS_CONSTANT val nil))
+
+
+
+^{:go/end 1040} (go/func PutGlobal "PutGlobal writes a DIE for a global variable.\n" [^Context ctxt ^Sym info ^Sym typ ^Sym gvar ^string name]
+  (Uleb128put ctxt info DW_ABRV_VARIABLE)
+  (putattr ctxt info DW_ABRV_VARIABLE DW_FORM_string DW_CLS_STRING (conv int64 (len name)) name)
+  (putattr ctxt info DW_ABRV_VARIABLE DW_FORM_block1 DW_CLS_ADDRESS 0 gvar)
+  (putattr ctxt info DW_ABRV_VARIABLE DW_FORM_ref_addr DW_CLS_REFERENCE 0 typ)
+  (putattr ctxt info DW_ABRV_VARIABLE DW_FORM_flag DW_CLS_FLAG 1 nil))
+
+
+
+
+
+^{:go/end 1055} (go/func PutBasedRanges "PutBasedRanges writes a range table to sym. All addresses in ranges are\nrelative to some base address, which must be arranged by the caller\n(e.g., with a DW_AT_low_pc attribute, or in a BASE-prefixed range).\n" [^Context ctxt ^Sym sym ^{:tag (slice Range)} ranges]
+  (let [ps (.PtrSize ctxt)]
+    ;; Write ranges.
+    (range [_ r ranges]
+      (.AddInt ctxt sym ps (.-Start r))
+      (.AddInt ctxt sym ps (.-End r)))
+
+    ;; Write trailer.
+    (.AddInt ctxt sym ps 0)
+    (.AddInt ctxt sym ps 0)))
+
+
+
+
+^{:go/end 1079} (go/func PutRngListRanges "PutRngListRanges writes a DWARF5-style set of rangelist entries to sym,\nusing base as a starting/base address.\n" [^Context ctxt ^Sym sym ^Sym base ^{:tag (slice Range)} ranges]
+  (let [addULEB128 ^{:go/end 1067} (fn [^int64 v]
+        (let [b (sevenBitU v)]
+          (when (== b nil)
+            (let [^{:tag (array 20 byte)} encbuf (zero (array 20 byte))]
+              (set! b (AppendUleb128 (subslice encbuf _ 0) (conv uint64 v)))))
+
+          (.AddBytes ctxt sym b)))]
+
+    ;; First entry is base address.
+    (.AddInt ctxt sym 1 DW_RLE_base_addressx)
+    (.AddIndirectTextRef ctxt sym base)
+    ;; Remaining entries are .debug_rnglist offset pairs
+    (range [_ r ranges]
+      (.AddInt ctxt sym 1 DW_RLE_offset_pair)
+      (addULEB128 (.-Start r))
+      (addULEB128 (.-End r)))
+
+    ;; Terminator to mark end of list
+    (.AddInt ctxt sym 1 DW_RLE_end_of_list)))
+
+
+
+
+^{:go/end 1109} (go/method PutRanges "PutRanges writes a range table to s.Ranges.\nAll addresses in ranges are relative to s.base.\n" [^{:tag (* FnState)} s ^Context ctxt ^{:tag (slice Range)} ranges]
+  (let [ps (.PtrSize ctxt)
+      (values sym base) (values (.-Ranges s) (.-StartPC s))]
+
+    (when ^{:go/via [Flags]} (.-Dwarf5 buildcfg/Experiment)
+      (PutRngListRanges ctxt sym base ranges)
+      (return))
+
+
+    (when (.-UseBASEntries s)
+      ;; Using a Base Address Selection Entry reduces the number of relocations, but
+      ;; this is not done on macOS because it is not supported by dsymutil/dwarfdump/lldb
+      (.AddInt ctxt sym ps -1)
+      (.AddAddress ctxt sym base 0)
+      (PutBasedRanges ctxt sym ranges)
+      (return))
+
+
+    ;; Write ranges full of relocations
+    (range [_ r ranges]
+      (.AddCURelativeAddress ctxt sym base (.-Start r))
+      (.AddCURelativeAddress ctxt sym base (.-End r)))
+
+    ;; Write trailer.
+    (.AddInt ctxt sym ps 0)
+    (.AddInt ctxt sym ps 0)))
+
+
+
+
+
+^{:go/end 1132} (go/func isEmptyInlinedCall "Return TRUE if the inlined call in the specified slot is empty,\nmeaning it has a zero-length range (no instructions), and all\nof its children are empty.\n" ^bool [^int slot ^{:tag (* InlCalls)} calls]
+  (let [ic (addr (aget (.-Calls calls) slot))]
+    (when (== (.-InlIndex ic) -2)
+      (return true))
+
+    (let [live false]
+      (range [_ k (.-Children ic)]
+        (when (not (isEmptyInlinedCall k calls))
+          (set! live true)))
+
+
+      (when (> (len (.-Ranges ic)) 0)
+        (set! live true))
+
+      (when (not live)
+        (set! (.-InlIndex ic) -2))
+
+      (not live))))
+
+
+
+
+^{:go/end 1152} (go/func inlChildren "Slot -1:    return top-level inlines.\nSlot >= 0:  return children of that slot.\n" ^{:tag (slice int)} [^int slot ^{:tag (* InlCalls)} calls]
+  (let [^{:tag (slice int)} kids (zero (slice int))]
+    (if (!= slot -1)
+      (range [_ k (.-Children (aget (.-Calls calls) slot))]
+        (when (not (isEmptyInlinedCall k calls))
+          (set! kids (append kids k))))
+
+
+
+      (for [k 0] (< k (len (.-Calls calls))) (set! k + 1)
+        (when (and (.-Root (aget (.-Calls calls) k)) (not (isEmptyInlinedCall k calls)))
+          (set! kids (append kids k)))))
+
+
+
+    ^{:line 1151} kids))
+
+
+^{:go/end 1162} (go/func inlinedVarTable ^{:tag (map (* Var) bool)} [^{:tag (* InlCalls)} inlcalls]
+  (let [vars (make (map (* Var) bool))]
+    (range [_ ic (.-Calls inlcalls)]
+      (range [_ v (.-InlVars ic)]
+        (aset vars v true)))
+
+
+    ^{:line 1161} vars))
+
+
+
+
+
+
+
+
+^{:go/end 1195} (go/func putPrunedScopes "The s.Scopes slice contains variables were originally part of the\nfunction being emitted, as well as variables that were imported\nfrom various callee functions during the inlining process. This\nfunction prunes out any variables from the latter category (since\nthey will be emitted as part of DWARF inlined_subroutine DIEs) and\nthen generates scopes for vars in the former category.\n" ^error [^Context ctxt ^{:tag (* FnState)} s ^int fnabbrev]
+  (when (== (len (.-Scopes s)) 0)
+    (return nil))
+
+  (let [scopes (make (slice Scope) (len (.-Scopes s)) (len (.-Scopes s)))
+      ^{:line 1175} pvars (inlinedVarTable (addr (.-InlCalls s)))]
+    (range [k s (.-Scopes s)]
+      (let [^Scope pruned (lit Scope :Parent (.-Parent s) :Ranges (.-Ranges s))]
+        (for [i 0] (< i (len (.-Vars s))) (inc! i)
+          (let [(values _ found) (aget pvars (aget (.-Vars s) i))]
+            (when (not found)
+              (set! (.-Vars pruned) (append (.-Vars pruned) (aget (.-Vars s) i))))))
+
+
+        (^{:inst [(slice (* Var)) (* Var)]} slices/SortFunc (.-Vars pruned) byChildIndexCmp)
+        (aset scopes k pruned)))
+
+
+    (set! (.-dictIndexToOffset s) (putparamtypes ctxt s scopes fnabbrev))
+
+    ^{:go/breaks [[3 1194]]} (let [^{:tag (array 20 byte)} encbuf (zero (array 20 byte))]
+      (when (< (putscope ctxt s scopes 0 fnabbrev (subslice encbuf _ 0)) (conv int32 (len scopes)))
+        (return (errors/New "multiple toplevel scopes")))
+
+      nil)))
+
+
+
+
+
+
+
+
+
+^{:go/end 1276} (go/func PutAbstractFunc "Emit DWARF attributes and child DIEs for an 'abstract' subprogram.\nThe abstract subprogram DIE for a function contains its\nlocation-independent attributes (name, type, etc). Other instances\nof the function (any inlined copy of it, or the single out-of-line\n'concrete' instance) will contain a pointer back to this abstract\nDIE (as a space-saving measure, so that name/type etc doesn't have\nto be repeated for each inlined copy).\n" ^error [^Context ctxt ^{:tag (* FnState)} s]
+  (when logDwarf
+    (.Logf ctxt "PutAbstractFunc(%v)\n" (.-Absfn s)))
+
+
+  (let [abbrev DW_ABRV_FUNCTION_ABSTRACT]
+    (Uleb128put ctxt (.-Absfn s) (conv int64 abbrev))
+
+    (let [fullname (.-Name s)]
+      (when (strings/HasPrefix (.-Name s) "\"\".")
+        (return (fmt/Errorf "unqualified symbol name: %v" (.-Name s))))
+
+      (putattr ctxt (.-Absfn s) abbrev DW_FORM_string DW_CLS_STRING (conv int64 (len fullname)) fullname)
+
+      ;; DW_AT_inlined value
+      (putattr ctxt (.-Absfn s) abbrev DW_FORM_data1 DW_CLS_CONSTANT (conv int64 DW_INL_inlined) nil)
+
+      ;; TODO(mdempsky): Shouldn't we write out StartPos.FileIndex() too?
+      (putattr ctxt (.-Absfn s) abbrev DW_FORM_udata DW_CLS_CONSTANT (conv int64 (.RelLine (.-StartPos s))) nil)
+
+      (let [^int64 ev (zero int64)]
+        (when (.-External s)
+          (set! ev 1))
+
+        (putattr ctxt (.-Absfn s) abbrev DW_FORM_flag DW_CLS_FLAG ev 0)
+
+        ;; Child variables (may be empty)
+        ^{:go/breaks [5]} (let [^{:tag (slice (* Var))} flattened (zero (slice (* Var)))
+
+            ;; This slice will hold the offset in bytes for each child var DIE
+            ;; with respect to the start of the parent subprogram DIE.
+            ^{:line 1235 :tag (slice int32)} offsets (zero (slice int32))]
+
+          ;; Scopes/vars
+          (when (> (len (.-Scopes s)) 0)
+            ;; For abstract subprogram DIEs we want to flatten out scope info:
+            ;; lexical scope DIEs contain range and/or hi/lo PC attributes,
+            ;; which we explicitly don't want for the abstract subprogram DIE.
+            (let [pvars (inlinedVarTable (addr (.-InlCalls s)))]
+              (range [_ scope (.-Scopes s)]
+                (for [i 0] (< i (len (.-Vars scope))) (inc! i)
+                  (let [(values _ found) (aget pvars (aget (.-Vars scope) i))]
+                    (when (or found (not (.-IsInAbstract (aget (.-Vars scope) i))))
+                      (continue))
+
+                    (set! flattened (append flattened (aget (.-Vars scope) i))))))
+
+
+              (when (> (len flattened) 0)
+                (^{:inst [(slice (* Var)) (* Var)]} slices/SortFunc flattened byChildIndexCmp)
+
+                (when logDwarf
+                  (.Logf ctxt "putAbstractScope(%v): vars:" (.-Info s))
+                  (range [i v flattened]
+                    (.Logf ctxt " %d:%s" i (.-Name v)))
+
+                  (.Logf ctxt "\n"))
+
+
+                ;; This slice will hold the offset in bytes for each child
+                ;; variable DIE with respect to the start of the parent
+                ;; subprogram DIE.
+                (range [_ v flattened]
+                  (set! offsets (append offsets (conv int32 (.CurrentOffset ctxt (.-Absfn s)))))
+                  (putAbstractVar ctxt (.-Absfn s) v)))))
+
+
+
+          (.RecordChildDieOffsets ctxt (.-Absfn s) flattened offsets)
+
+          (Uleb128put ctxt (.-Absfn s) 0)
+          nil)))))
+
+
+
+
+^{:go/end 1282} (go/func dwarfFileIndex "dwarfFileIndex returns the DWARF file index value for the file associated\nwith pos.\n" ^int64 [^src/Pos pos]
+  (conv int64 (+ 1 (.FileIndex pos))))
+
+
+
+
+
+
+
+^{:go/end 1345} (go/func putInlinedFunc "Emit DWARF attributes and child DIEs for an inlined subroutine. The\nfirst attribute of an inlined subroutine DIE is a reference back to\nits corresponding 'abstract' DIE (containing location-independent\nattributes such as name, type, etc). Inlined subroutine DIEs can\nhave other inlined subroutine DIEs as children.\n" ^error [^Context ctxt ^{:tag (* FnState)} s ^int callIdx]
+  (let [ic (aget (.-Calls (.-InlCalls s)) callIdx)
+      ^{:line 1291} callee (.-AbsFunSym ic)
+
+      ;; For DWARF 5, we always use the ranges form of the abbrev, since
+      ;; it is more compact than using explicit hi/lo PC attrs.  See
+      ;; issue #72821 for more on why this makes sense.
+      ^{:line 1296} abbrev DW_ABRV_INLINED_SUBROUTINE_RANGES]
+    (when (and (== (len (.-Ranges ic)) 1) (not ^{:go/via [Flags]} (.-Dwarf5 buildcfg/Experiment)))
+      (set! abbrev DW_ABRV_INLINED_SUBROUTINE))
+
+    (Uleb128put ctxt (.-Info s) (conv int64 abbrev))
+
+    (when logDwarf
+      (.Logf ctxt "putInlinedFunc(callee=%v,abbrev=%d)\n" callee abbrev))
+
+
+    ;; Abstract origin.
+    (putattr ctxt (.-Info s) abbrev DW_FORM_ref_addr DW_CLS_REFERENCE 0 callee)
+
+    (if (== abbrev DW_ABRV_INLINED_SUBROUTINE_RANGES) (do
+        (putattr ctxt (.-Info s) abbrev DW_FORM_sec_offset DW_CLS_PTR (.Size ctxt (.-Ranges s)) (.-Ranges s))
+        (.PutRanges s ctxt (.-Ranges ic)))
+
+      (let [st (.-Start (aget (.-Ranges ic) 0))
+          ^{:line 1314} en (.-End (aget (.-Ranges ic) 0))]
+        (emitHiLoPc ctxt abbrev s st en)))
+
+
+    ;; Emit call file, line attrs.
+    (putattr ctxt (.-Info s) abbrev DW_FORM_data4 DW_CLS_CONSTANT (dwarfFileIndex (.-CallPos ic)) nil)
+    (let [form (conv int (expandPseudoForm DW_FORM_udata_pseudo))]
+      (putattr ctxt (.-Info s) abbrev form DW_CLS_CONSTANT (conv int64 (.RelLine (.-CallPos ic))) nil)
+
+      ;; Variables associated with this inlined routine instance.
+      (let [vars (.-InlVars ic)]
+        (^{:inst [(slice (* Var)) (* Var)]} slices/SortFunc vars byChildIndexCmp)
+        ^{:go/breaks [5]} (let [inlIndex (.-InlIndex ic)
+            ^{:line 1327 :tag (array 20 byte)} encbuf (zero (array 20 byte))]
+          (range [_ v vars]
+            (when (not (.-IsInAbstract v))
+              (continue))
+
+            (putvar ctxt s v callee abbrev inlIndex (subslice encbuf _ 0)))
+
+
+          ;; Children of this inline.
+          (range [_ sib (inlChildren callIdx (addr (.-InlCalls s)))]
+            (let [err (putInlinedFunc ctxt s sib)]
+              (when (!= err nil)
+                (return err))))
+
+
+
+          (Uleb128put ctxt (.-Info s) 0)
+          nil)))))
+
+
+^{:go/end 1355} (go/func emitHiLoPc [^Context ctxt ^int abbrev ^{:tag (* FnState)} fns ^int64 st ^int64 en]
+  (if ^{:go/via [Flags]} (.-Dwarf5 buildcfg/Experiment) (do
+      (putattr ctxt (.-Info fns) abbrev DW_FORM_addrx DW_CLS_CONSTANT st (.-StartPC fns))
+      (putattr ctxt (.-Info fns) abbrev DW_FORM_udata DW_CLS_CONSTANT en 0))
+    (do
+      (putattr ctxt (.-Info fns) abbrev DW_FORM_addr DW_CLS_ADDRESS st (.-StartPC fns))
+      (putattr ctxt (.-Info fns) abbrev DW_FORM_addr DW_CLS_ADDRESS en (.-StartPC fns)))))
+
+
+
+
+
+
+
+
+
+
+^{:go/end 1402} (go/func PutConcreteFunc "Emit DWARF attributes and child DIEs for a 'concrete' subprogram,\nmeaning the out-of-line copy of a function that was inlined at some\npoint during the compilation of its containing package. The first\nattribute for a concrete DIE is a reference to the 'abstract' DIE\nfor the function (which holds location-independent attributes such\nas name, type), then the remainder of the attributes are specific\nto this instance (location, frame base, etc).\n" ^error [^Context ctxt ^{:tag (* FnState)} s ^bool isWrapper ^int fncount]
+  (when logDwarf
+    (.Logf ctxt "PutConcreteFunc(%v)\n" (.-Info s)))
+
+  ^{:go/breaks [11]} (let [abbrev DW_ABRV_FUNCTION_CONCRETE]
+    (when isWrapper
+      (set! abbrev DW_ABRV_WRAPPER_CONCRETE))
+
+    (Uleb128put ctxt (.-Info s) (conv int64 abbrev))
+
+    ;; Abstract origin.
+    (putattr ctxt (.-Info s) abbrev DW_FORM_ref_addr DW_CLS_REFERENCE 0 (.-Absfn s))
+
+    ;; Start/end PC.
+    (emitHiLoPc ctxt abbrev s 0 (.-Size s))
+
+    ;; cfa / frame base
+    (putattr ctxt (.-Info s) abbrev DW_FORM_block1 DW_CLS_BLOCK 1 (lit (slice byte) DW_OP_call_frame_cfa))
+
+    (when isWrapper
+      (putattr ctxt (.-Info s) abbrev DW_FORM_flag DW_CLS_FLAG (conv int64 1) 0))
+
+
+    ;; Scopes
+    (when [err (putPrunedScopes ctxt s abbrev)] (!= err nil)
+      (return err))
+
+
+    ;; Inlined subroutines.
+    (range [_ sib (inlChildren -1 (addr (.-InlCalls s)))]
+      (let [err (putInlinedFunc ctxt s sib)]
+        (when (!= err nil)
+          (return err))))
+
+
+
+    (Uleb128put ctxt (.-Info s) 0)
+    nil))
+
+
+
+
+
+
+
+^{:go/end 1455} (go/func PutDefaultFunc "Emit DWARF attributes and child DIEs for a subprogram. Here\n'default' implies that the function in question was not inlined\nwhen its containing package was compiled (hence there is no need to\nemit an abstract version for it to use as a base for inlined\nroutine records).\n" ^error [^Context ctxt ^{:tag (* FnState)} s ^bool isWrapper]
+  (when logDwarf
+    (.Logf ctxt "PutDefaultFunc(%v)\n" (.-Info s)))
+
+  (let [abbrev DW_ABRV_FUNCTION]
+    (when isWrapper
+      (set! abbrev DW_ABRV_WRAPPER))
+
+    (Uleb128put ctxt (.-Info s) (conv int64 abbrev))
+
+    ^{:go/breaks [10]} (let [name (.-Name s)]
+      (when (strings/HasPrefix name "\"\".")
+        (return (fmt/Errorf "unqualified symbol name: %v" name)))
+
+
+      (putattr ctxt (.-Info s) DW_ABRV_FUNCTION DW_FORM_string DW_CLS_STRING (conv int64 (len name)) name)
+      (emitHiLoPc ctxt abbrev s 0 (.-Size s))
+      (putattr ctxt (.-Info s) abbrev DW_FORM_block1 DW_CLS_BLOCK 1 (lit (slice byte) DW_OP_call_frame_cfa))
+      (if isWrapper
+        (putattr ctxt (.-Info s) abbrev DW_FORM_flag DW_CLS_FLAG (conv int64 1) 0)
+        (do
+          (putattr ctxt (.-Info s) abbrev DW_FORM_data4 DW_CLS_CONSTANT (dwarfFileIndex (.-StartPos s)) nil)
+          (putattr ctxt (.-Info s) abbrev DW_FORM_udata DW_CLS_CONSTANT (conv int64 (.RelLine (.-StartPos s))) nil)
+
+          (let [^int64 ev (zero int64)]
+            (when (.-External s)
+              (set! ev 1))
+
+            (putattr ctxt (.-Info s) abbrev DW_FORM_flag DW_CLS_FLAG ev 0))))
+
+
+      ;; Scopes
+      (when [err (putPrunedScopes ctxt s abbrev)] (!= err nil)
+        (return err))
+
+
+      ;; Inlined subroutines.
+      (range [_ sib (inlChildren -1 (addr (.-InlCalls s)))]
+        (let [err (putInlinedFunc ctxt s sib)]
+          (when (!= err nil)
+            (return err))))
+
+
+
+      (Uleb128put ctxt (.-Info s) 0)
+      nil)))
+
+
+
+^{:go/end 1496} (go/func putparamtypes "putparamtypes writes typedef DIEs for any parametric types that are used by this function.\n" ^{:tag (slice int64)} [^Context ctxt ^{:tag (* FnState)} s ^{:tag (slice Scope)} scopes ^int fnabbrev]
+  (when (== fnabbrev DW_ABRV_FUNCTION_CONCRETE)
+    (return nil))
+
+
+  (let [maxDictIndex (conv uint16 0)]
+
+    (range [i scopes]
+      (range [_ v (.-Vars (aget scopes i))]
+        (when (> (.-DictIndex v) maxDictIndex)
+          (set! maxDictIndex (.-DictIndex v)))))
+
+
+
+
+    (when (== maxDictIndex 0)
+      (return nil))
+
+
+    (let [dictIndexToOffset (make (slice int64) maxDictIndex)]
+
+      (range [i scopes]
+        (range [_ v (.-Vars (aget scopes i))]
+          (when (or (== (.-DictIndex v) 0) (!= (aget dictIndexToOffset (- (.-DictIndex v) 1)) 0))
+            (continue))
+
+
+          (aset dictIndexToOffset (- (.-DictIndex v) 1) (.CurrentOffset ctxt (.-Info s)))
+
+          (Uleb128put ctxt (.-Info s) (conv int64 DW_ABRV_DICT_INDEX))
+          (let [n (fmt/Sprintf ".param%d" (- (.-DictIndex v) 1))]
+            (putattr ctxt (.-Info s) DW_ABRV_DICT_INDEX DW_FORM_string DW_CLS_STRING (conv int64 (len n)) n)
+            (putattr ctxt (.-Info s) DW_ABRV_DICT_INDEX DW_FORM_ref_addr DW_CLS_REFERENCE 0 (.-Type v))
+            (putattr ctxt (.-Info s) DW_ABRV_DICT_INDEX DW_FORM_udata DW_CLS_CONSTANT (conv int64 (- (.-DictIndex v) 1)) nil))))
+
+
+
+      ^{:line 1495} dictIndexToOffset)))
+
+
+^{:go/end 1543} (go/func putscope ^int32 [^Context ctxt ^{:tag (* FnState)} s ^{:tag (slice Scope)} scopes ^int32 curscope ^int fnabbrev ^{:tag (slice byte)} encbuf]
+
+  (when logDwarf
+    (.Logf ctxt "putscope(%v,%d): vars:" (.-Info s) curscope)
+    (range [i v (.-Vars (aget scopes curscope))]
+      (.Logf ctxt " %d:%d:%s" i (.-ChildIndex v) (.-Name v)))
+
+    (.Logf ctxt "\n"))
+
+
+  (range [_ v (.-Vars (aget scopes curscope))]
+    (putvar ctxt s v (.-Absfn s) fnabbrev -1 encbuf))
+
+  (let [this curscope]
+    (inc! curscope)
+    (while (< curscope (conv int32 (len scopes)))
+      (let [scope (aget scopes curscope)]
+        (when (!= (.-Parent scope) this)
+          (return curscope))
+
+
+        (when (== (len (.-Vars (aget scopes curscope))) 0)
+          (set! curscope (putscope ctxt s scopes curscope fnabbrev encbuf))
+          (continue))
+
+
+        ;; For DWARF 5, we always use the ranges form of the abbrev, since
+        ;; it is more compact than using explicit hi/lo PC attrs.  See
+        ;; issue #72821 for more on why this makes sense.
+        (if (and (== (len (.-Ranges scope)) 1) (not ^{:go/via [Flags]} (.-Dwarf5 buildcfg/Experiment))) (do
+            (Uleb128put ctxt (.-Info s) DW_ABRV_LEXICAL_BLOCK_SIMPLE)
+            (putattr ctxt (.-Info s) DW_ABRV_LEXICAL_BLOCK_SIMPLE DW_FORM_addr DW_CLS_ADDRESS (.-Start (aget (.-Ranges scope) 0)) (.-StartPC s))
+            (putattr ctxt (.-Info s) DW_ABRV_LEXICAL_BLOCK_SIMPLE DW_FORM_addr DW_CLS_ADDRESS (.-End (aget (.-Ranges scope) 0)) (.-StartPC s)))
+          (do
+            (Uleb128put ctxt (.-Info s) DW_ABRV_LEXICAL_BLOCK_RANGES)
+            (putattr ctxt (.-Info s) DW_ABRV_LEXICAL_BLOCK_RANGES DW_FORM_sec_offset DW_CLS_PTR (.Size ctxt (.-Ranges s)) (.-Ranges s))
+
+            (.PutRanges s ctxt (.-Ranges scope))))
+
+
+        (set! curscope (putscope ctxt s scopes curscope fnabbrev encbuf))
+
+        (Uleb128put ctxt (.-Info s) 0)))
+
+    ^{:line 1542} curscope))
+
+
+^{:go/end 1562} (go/func concreteVar ^bool [^int fnabbrev ^{:tag (* Var)} v]
+  (let [concrete true]
+    (switch fnabbrev
+      (case [DW_ABRV_FUNCTION DW_ABRV_WRAPPER]
+        (set! concrete false))
+      (case [DW_ABRV_FUNCTION_CONCRETE DW_ABRV_WRAPPER_CONCRETE]
+        ;; If we're emitting a concrete subprogram DIE and the variable
+        ;; in question is not part of the corresponding abstract function DIE,
+        ;; then use the default (non-concrete) abbrev for this param.
+        (when (not (.-IsInAbstract v))
+          (set! concrete false)))
+
+      (case [DW_ABRV_INLINED_SUBROUTINE DW_ABRV_INLINED_SUBROUTINE_RANGES])
+      (default
+        (panic "should never happen")))
+
+    ^{:line 1561} concrete))
+
+
+
+^{:go/end 1590} (go/func putAbstractVar "Emit DWARF attributes for a variable belonging to an 'abstract' subprogram.\n" [^Context ctxt ^Sym info ^{:tag (* Var)} v]
+  ;; The contents of this functions are used to generate putAbstractVarAbbrev automatically, see TestPutVarAbbrevGenerator.
+  (let [abbrev (putAbstractVarAbbrev v)]
+    (Uleb128put ctxt info (conv int64 abbrev))
+    (putattr ctxt info abbrev DW_FORM_string DW_CLS_STRING (conv int64 (len (.-Name v))) (.-Name v)) ; DW_AT_name
+
+    ;; Isreturn attribute if this is a param
+    (when (== (.-Tag v) DW_TAG_formal_parameter)
+      (let [^int64 isReturn (zero int64)]
+        (when (.-IsReturnValue v)
+          (set! isReturn 1))
+
+        (putattr ctxt info abbrev DW_FORM_flag DW_CLS_FLAG isReturn nil))) ; DW_AT_variable_parameter
+
+
+    ;; Line
+    (when (== (.-Tag v) DW_TAG_variable)
+      ;; See issue 23374 for more on why decl line is skipped for abs params.
+      (putattr ctxt info abbrev DW_FORM_udata DW_CLS_CONSTANT (conv int64 (.-DeclLine v)) nil)) ; DW_AT_decl_line
+
+
+    ;; Type
+    (putattr ctxt info abbrev DW_FORM_ref_addr DW_CLS_REFERENCE 0 (.-Type v)))) ; DW_AT_type
+
+;; Var has no children => no terminator
+
+
+^{:go/end 1651} (go/func putvar [^Context ctxt ^{:tag (* FnState)} s ^{:tag (* Var)} v ^Sym absfn ^int fnabbrev ^int inlIndex ^{:tag (slice byte)} encbuf]
+  ;; The contents of this functions are used to generate putvarAbbrev automatically, see TestPutVarAbbrevGenerator.
+  (let [concrete (concreteVar fnabbrev v)
+      ^{:line 1595} hasParametricType (and (not concrete) ^:go/paren (and (> (.-DictIndex v) 0) (!= (.-dictIndexToOffset s) nil) (!= (aget (.-dictIndexToOffset s) (- (.-DictIndex v) 1)) 0)))
+      ^{:line 1596} withLoclist (and (.-WithLoclist v) (!= (.-PutLocationList v) nil))
+
+      ^{:line 1598} abbrev (putvarAbbrev v concrete withLoclist)]
+    (Uleb128put ctxt (.-Info s) (conv int64 abbrev))
+
+    ;; Abstract origin for concrete / inlined case
+    (if concrete (do
+        ;; Here we are making a reference to a child DIE of an abstract
+        ;; function subprogram DIE. The child DIE has no LSym, so instead
+        ;; after the call to 'putattr' below we make a call to register
+        ;; the child DIE reference.
+        (putattr ctxt (.-Info s) abbrev DW_FORM_ref_addr DW_CLS_REFERENCE 0 absfn) ; DW_AT_abstract_origin
+        (.RecordDclReference ctxt (.-Info s) absfn (conv int (.-ChildIndex v)) inlIndex))
+
+      ;; Var name, line for abstract and default cases
+      (let [n (.-Name v)]
+        (putattr ctxt (.-Info s) abbrev DW_FORM_string DW_CLS_STRING (conv int64 (len n)) n) ; DW_AT_name
+        (when (== (.-Tag v) DW_TAG_formal_parameter)
+          (let [^int64 isReturn (zero int64)]
+            (when (.-IsReturnValue v)
+              (set! isReturn 1))
+
+            (putattr ctxt (.-Info s) abbrev DW_FORM_flag DW_CLS_FLAG isReturn nil))) ; DW_AT_variable_parameter
+
+        (putattr ctxt (.-Info s) abbrev DW_FORM_udata DW_CLS_CONSTANT (conv int64 (.-DeclLine v)) nil) ; DW_AT_decl_line
+        (if hasParametricType
+          ;; If the type of this variable is parametric use the entry emitted by putparamtypes
+          (putattr ctxt (.-Info s) abbrev DW_FORM_ref_addr DW_CLS_REFERENCE (aget (.-dictIndexToOffset s) (- (.-DictIndex v) 1)) (.-Info s)) ; DW_AT_type
+
+          (putattr ctxt (.-Info s) abbrev DW_FORM_ref_addr DW_CLS_REFERENCE 0 (.-Type v))) ; DW_AT_type
+
+
+        (when (> (.-ClosureOffset v) 0)
+          (putattr ctxt (.-Info s) abbrev DW_FORM_udata DW_CLS_CONSTANT (.-ClosureOffset v) nil)))) ; DW_AT_go_closure_offset
+
+
+
+    (if withLoclist (do
+        (putattr ctxt (.-Info s) abbrev DW_FORM_sec_offset DW_CLS_PTR (.Size ctxt (.-Loc s)) (.-Loc s)) ; DW_AT_location
+        ((.-PutLocationList v) (.-Loc s) (.-StartPC s)))
+
+      (let [loc (subslice encbuf _ 0)]
+        (switch
+          (case [(.-WithLoclist v)]
+            (break)) ; no location
+          (case [(== (.-StackOffset v) 0)]
+            (set! loc (append loc DW_OP_call_frame_cfa)))
+          (default
+            (set! loc (append loc DW_OP_fbreg))
+            (set! loc (AppendSleb128 loc (conv int64 (.-StackOffset v))))))
+
+        (putattr ctxt (.-Info s) abbrev DW_FORM_block1 DW_CLS_BLOCK (conv int64 (len loc)) loc))))) ; DW_AT_location
+
+
+;; Var has no children => no terminator
+
+
+
+^{:go/end 1654} (go/func byChildIndexCmp "byChildIndexCmp compares two *dwarf.Var by child index.\n" ^int [^{:tag (* Var)} a ^{:tag (* Var)} b] (^{:inst [int32]} cmp/Compare (.-ChildIndex a) (.-ChildIndex b)))
+
+
+
+
+
+^{:go/end 1695} (go/func IsDWARFEnabledOnAIXLd "IsDWARFEnabledOnAIXLd returns true if DWARF is possible on the\ncurrent extld.\nAIX ld doesn't support DWARF with -bnoobjreorder with version\nprior to 7.2.2.\n" [^{:tag (slice string)} extld] :results [bool error]
+  (let [(values name args) (values (aget extld 0) (subslice extld 1))]
+    (set! args (append args "-Wl,-V"))
+    (let [(values out err) (.CombinedOutput (exec/Command name (spread args)))]
+      (when (!= err nil)
+        ;; The normal output should display ld version and
+        ;; then fails because ".main" is not defined:
+        ;; ld: 0711-317 ERROR: Undefined symbol: .main
+        (when (not (bytes/Contains out (conv (slice byte) "0711-317")))
+          (return false (fmt/Errorf "%s -Wl,-V failed: %v\n%s" extld err out))))
+
+
+      ;; gcc -Wl,-V output should be:
+      ;;   /usr/bin/ld: LD X.X.X(date)
+      ;;   ...
+      (set! out (bytes/TrimPrefix out (conv (slice byte) "/usr/bin/ld: LD ")))
+      (let [vers (conv string (aget (bytes/Split out (conv (slice byte) "(")) 0))
+          ^{:line 1677} subvers (strings/Split vers ".")]
+        (when (!= (len subvers) 3)
+          (return false (fmt/Errorf "cannot parse %s -Wl,-V (%s): %v\n" extld out err)))
+
+        (if [(values v err) (strconv/Atoi (aget subvers 0))] (or (!= err nil) (< v 7))
+          (return false nil)
+          (when (> v 7)
+            (return true nil)))
+
+        (if [(values v err) (strconv/Atoi (aget subvers 1))] (or (!= err nil) (< v 2))
+          (return false nil)
+          (when (> v 2)
+            (return true nil)))
+
+        (when [(values v err) (strconv/Atoi (aget subvers 2))] (or (!= err nil) (< v 2))
+          (return false nil))
+
+        (return true nil)))))

@@ -1,0 +1,383 @@
+;; Copyright 2024 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.cmd.compile.internal.liveness) (go/file "intervals.go" :imports [
+
+    ;; This file defines an "Intervals" helper type that stores a
+    ;; sorted sequence of disjoint ranges or intervals. An Intervals
+    ;; example: { [0,5) [9-12) [100,101) }, which corresponds to the
+    ;; numbers 0-4, 9-11, and 100. Once an Intervals object is created, it
+    ;; can be tested to see if it has any overlap with another Intervals
+    ;; object, or it can be merged with another Intervals object to form a
+    ;; union of the two.
+    ;;
+    ;; The intended use case for this helper is in describing object or
+    ;; variable lifetime ranges within a linearized program representation
+    ;; where each IR instruction has a slot or index. Example:
+    ;;
+    ;;          b1:
+    ;;  0        VarDef abc
+    ;;  1        memset(abc,0)
+    ;;  2        VarDef xyz
+    ;;  3        memset(xyz,0)
+    ;;  4        abc.f1 = 2
+    ;;  5        xyz.f3 = 9
+    ;;  6        if q goto B4
+    ;;  7 B3:    z = xyz.x
+    ;;  8        goto B5
+    ;;  9 B4:    z = abc.x
+    ;;           // fallthrough
+    ;; 10 B5:    z++
+    ;;
+    ;; To describe the lifetime of the variables above we might use these
+    ;; intervals:
+    ;;
+    ;;    "abc"   [1,7), [9,10)
+    ;;    "xyz"   [3,8)
+    ;;
+    ;; Clients can construct an Intervals object from a given IR sequence
+    ;; using the "IntervalsBuilder" helper abstraction (one builder per
+    ;; candidate variable), by making a
+    ;; backwards sweep and invoking the Live/Kill methods to note the
+    ;; starts and end of a given lifetime. For the example above, we would
+    ;; expect to see this sequence of calls to Live/Kill:
+    ;;
+    ;;    abc:  Live(9), Kill(8), Live(6), Kill(0)
+    ;;    xyz:  Live(8), Kill(2)
+
+
+    ^{:line 50} [fmt "fmt"]
+    ^{:line 51} [os "os"]
+    ^{:line 52} [slices "slices"]
+    ^{:line 53} [strings "strings"]])
+
+
+(go/const ^{:val false} debugtrace false)
+
+
+(go/type Interval "Interval hols the range [st,en).\n" (struct
+    ^{:line 60 :tag int} st ^int en))
+
+
+
+(go/type Intervals "Intervals is a sequence of sorted, disjoint intervals.\n" (slice Interval))
+
+^{:go/end 68} (go/method String ^string [^Interval i]
+  (fmt/Sprintf "[%d,%d)" (.-st i) (.-en i)))
+
+
+
+^{:go/end 76} (go/func imin "TEMPORARY until bootstrap version catches up.\n" ^int [^int i ^int j]
+  (when (< i j)
+    (return i))
+
+  ^{:line 75} j)
+
+
+
+^{:go/end 84} (go/func imax "TEMPORARY until bootstrap version catches up.\n" ^int [^int i ^int j]
+  (when (> i j)
+    (return i))
+
+  ^{:line 83} j)
+
+
+
+^{:go/end 89} (go/method Overlaps "Overlaps returns true if here is any overlap between i and i2.\n" ^bool [^Interval i ^Interval i2]
+  (> (- (imin (.-en i) (.-en i2)) (imax (.-st i) (.-st i2))) 0))
+
+
+
+
+^{:go/end 95} (go/method adjacent "adjacent returns true if the start of one interval is equal to the\nend of another interval (e.g. they represent consecutive ranges).\n" ^bool [^Interval i1 ^Interval i2]
+  (or (== (.-en i1) (.-st i2)) (== (.-en i2) (.-st i1))))
+
+
+
+
+^{:go/breaks [7] :go/end 106} (go/method MergeInto "MergeInto merges interval i2 into i1. This version happens to\nrequire that the two intervals either overlap or are adjacent.\n" ^error [^{:tag (* Interval)} i1 ^Interval i2]
+  (when (and (not (.Overlaps i1 i2)) (not (.adjacent i1 i2)))
+    (return (fmt/Errorf "merge method invoked on non-overlapping/non-adjacent")))
+
+  (set! (.-st i1) (imin (.-st i1) (.-st i2)))
+  (set! (.-en i1) (imax (.-en i1) (.-en i2)))
+  nil)
+
+
+
+
+
+
+
+
+
+
+
+
+
+(go/type IntervalsBuilder "IntervalsBuilder is a helper for constructing intervals based on\nlive dataflow sets for a series of BBs where we're making a\nbackwards pass over each BB looking for uses and kills. The\nexpected use case is:\n\n  - invoke MakeIntervalsBuilder to create a new object \"b\"\n  - series of calls to b.Live/b.Kill based on a backwards reverse layout\n    order scan over instructions\n  - invoke b.Finish() to produce final set\n\nSee the Live method comment for an IR example.\n" (struct
+    ^{:line 120 :tag Intervals} s
+
+    ^{:line 122 :tag int :doc "index of last instruction visited plus 1\n"} lidx))
+
+
+^{:go/end 127} (go/method last ^int [^{:tag (* IntervalsBuilder)} c]
+  (- (.-lidx c) 1))
+
+
+^{:go/end 131} (go/method setLast [^{:tag (* IntervalsBuilder)} c ^int x]
+  (set! (.-lidx c) (+ x 1)))
+
+
+^{:go/end 141} (go/method Finish [^{:tag (* IntervalsBuilder)} c] :results [Intervals error]
+  ;; Reverse intervals list and check.
+  (^{:inst [Intervals Interval]} slices/Reverse (.-s c))
+  (when [err (check (.-s c))] (!= err nil)
+    (return (lit Intervals) err))
+
+  (let [r (.-s c)]
+    (return r nil)))
+
+
+
+
+
+^{:go/breaks [9] :go/end 165} (go/method Live "Live method should be invoked on instruction at position p if instr\ncontains an upwards-exposed use of a resource. See the example in\nthe comment at the beginning of this file for an example.\n" ^error [^{:tag (* IntervalsBuilder)} c ^int pos]
+  (when (< pos 0)
+    (return (fmt/Errorf "bad pos, negative")))
+
+  (when (== (.last c) -1)
+    (.setLast c pos)
+    (when debugtrace
+      (fmt/Fprintf os/Stderr "=-= begin lifetime at pos=%d\n" pos))
+
+    (set! (.-s c) (append (.-s c) (lit Interval :st pos :en (+ pos 1))))
+    (return nil))
+
+  (when (>= pos (.last c))
+    (return (fmt/Errorf "pos not decreasing")))
+
+  ;; extend lifetime across this pos
+  (set! (.-st (aget (.-s c) (- (len (.-s c)) 1))) pos)
+  (.setLast c pos)
+  nil)
+
+
+
+
+
+
+
+
+
+
+^{:go/breaks [[10 191]] :go/end 192} (go/method Kill "Kill method should be invoked on instruction at position p if instr\nshould be treated as having a kill (lifetime end) for the\nresource. See the example in the comment at the beginning of this\nfile for an example. Note that if we see a kill at position K for a\nresource currently live since J, this will result in a lifetime\nsegment of [K+1,J+1), the assumption being that the first live\ninstruction will be the one after the kill position, not the kill\nposition itself.\n" ^error [^{:tag (* IntervalsBuilder)} c ^int pos]
+  (when (< pos 0)
+    (return (fmt/Errorf "bad pos, negative")))
+
+  (when (== (.last c) -1)
+    (return nil))
+
+  (when (>= pos (.last c))
+    (return (fmt/Errorf "pos not decreasing")))
+
+  (set! (.-st (aget (.-s c) (- (len (.-s c)) 1))) (+ pos 1))
+  ;; terminate lifetime
+  (.setLast c -1)
+  (when debugtrace
+    (fmt/Fprintf os/Stderr "=-= term lifetime at pos=%d\n" pos))
+
+  nil)
+
+
+
+
+^{:go/breaks [[5 219]] :go/end 220} (go/func check "check examines the intervals in \"is\" to try to find internal\ninconsistencies or problems.\n" ^error [^Intervals is]
+  (for [i 0] (< i (len is)) (inc! i)
+    (let [st (.-st (aget is i))
+        ^{:line 199} en (.-en (aget is i))]
+      (when (<= en st)
+        (return (fmt/Errorf "bad range elem %d:%d, en<=st" st en)))
+
+      (when (== i 0)
+        (continue))
+
+      ;; check for badly ordered starts
+      (let [pst (.-st (aget is (- i 1)))
+          ^{:line 208} pen (.-en (aget is (- i 1)))]
+        (when (>= pst st)
+          (return (fmt/Errorf "range start not ordered %d:%d less than prev %d:%d" st en
+              ^{:line 211} pst pen)))
+
+        ;; check end of last range against start of this range
+        (when (> pen st)
+          (return (fmt/Errorf "bad range elem %d:%d overlaps prev %d:%d" st en
+              ^{:line 216} pst pen))))))
+
+
+  nil)
+
+
+^{:go/end 231} (go/method String ^string [^{:tag (* Intervals)} is]
+  (let [^strings/Builder sb (zero strings/Builder)]
+    (range [i @is]
+      (when (!= i 0)
+        (.WriteString sb " "))
+
+      (.WriteString sb (.String (aget @is i))))
+
+    (.String sb)))
+
+
+
+
+
+
+
+(go/type intWithIdx "intWithIdx holds an interval i and an index pairIndex storing i's\nposition (either 0 or 1) within some previously specified interval\npair <I1,I2>; a pairIndex of -1 is used to signal \"end of\niteration\". Used for Intervals operations, not expected to be\nexported.\n" (struct
+    ^{:line 239 :tag Interval} i
+    ^{:line 240 :tag int} pairIndex))
+
+
+^{:go/end 245} (go/method done ^bool [^intWithIdx iwi]
+  (== (.-pairIndex iwi) -1))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+(go/type pairVisitor "pairVisitor provides a way to visit (iterate through) each interval\nwithin a pair of Intervals in order of increasing start time. Expected\nusage model:\n\n\tfunc example(i1, i2 Intervals) {\n\t  var pairVisitor pv\n\t  cur := pv.init(i1, i2);\n\t  for !cur.done() {\n\t     fmt.Printf(\"interval %s from i%d\", cur.i.String(), cur.pairIndex+1)\n\t     cur = pv.nxt()\n\t  }\n\t}\n\nUsed internally for Intervals operations, not expected to be exported.\n" (struct
+    ^{:line 262 :tag intWithIdx} cur
+    ^{:line 263 :tag int} i1pos
+    ^{:line 264 :tag int} i2pos
+    ^{:line 265 :tag Intervals} i1 ^Intervals i2))
+
+
+
+
+
+^{:go/end 275} (go/method init "init initializes a pairVisitor for the specified pair of intervals\ni1 and i2 and returns an intWithIdx object that points to the first\ninterval by start position within i1/i2.\n" ^intWithIdx [^{:tag (* pairVisitor)} pv ^Intervals i1 ^Intervals i2]
+  (set! (values (.-i1 pv) (.-i2 pv)) (values i1 i2))
+  (set! (.-cur pv) (.sel pv))
+  (.-cur pv))
+
+
+
+
+
+^{:go/end 288} (go/method nxt "nxt advances the pairVisitor to the next interval by starting\nposition within the pair, returning an intWithIdx that describes\nthe interval.\n" ^intWithIdx [^{:tag (* pairVisitor)} pv]
+  (if (== (.-pairIndex (.-cur pv)) 0)
+    (inc! (.-i1pos pv))
+
+    (inc! (.-i2pos pv)))
+
+  (set! (.-cur pv) (.sel pv))
+  (.-cur pv))
+
+
+
+
+
+
+^{:go/end 316} (go/method sel "sel is a helper function used by 'init' and 'nxt' above; it selects\nthe earlier of the two intervals at the current positions within i1\nand i2, or a degenerate (pairIndex -1) intWithIdx if we have no\nmore intervals to visit.\n" ^intWithIdx [^{:tag (* pairVisitor)} pv]
+  (let [(values ^intWithIdx c1 ^intWithIdx c2) (zero intWithIdx)]
+    (if (>= (.-i1pos pv) (len (.-i1 pv)))
+      (set! (.-pairIndex c1) -1)
+
+      (set! c1 (lit intWithIdx :i (aget (.-i1 pv) (.-i1pos pv)) :pairIndex 0)))
+
+    (if (>= (.-i2pos pv) (len (.-i2 pv)))
+      (set! (.-pairIndex c2) -1)
+
+      (set! c2 (lit intWithIdx :i (aget (.-i2 pv) (.-i2pos pv)) :pairIndex 1)))
+
+    (when (== (.-pairIndex c1) -1)
+      (return c2))
+
+    (when (== (.-pairIndex c2) -1)
+      (return c1))
+
+    (when (<= (.-st (.-i c1)) (.-st (.-i c2)))
+      (return c1))
+
+    ^{:line 315} c2))
+
+
+
+
+^{:go/end 351} (go/method Overlaps "Overlaps returns whether any of the component ranges in is overlaps\nwith some range in is2.\n" ^bool [^Intervals is ^Intervals is2]
+  ;; check for empty intervals
+  (when (or (== (len is) 0) (== (len is2) 0))
+    (return false))
+
+  (let [li (len is)
+      ^{:line 326} li2 (len is2)]
+    ;; check for completely disjoint ranges
+    (when (or (<= (.-en (aget is (- li 1))) (.-st (aget is2 0)))
+        (>= (.-st (aget is 0)) (.-en (aget is2 (- li2 1)))))
+      (return false))
+
+    ;; walk the combined sets of intervals and check for piecewise
+    ;; overlap.
+    ^{:go/breaks [[3 350]]} (let [^pairVisitor pv (zero pairVisitor)
+        ^{:line 335} first (.init pv is is2)]
+      (while true
+        (let [second (.nxt pv)]
+          (when (.done second)
+            (break))
+
+          (when (== (.-pairIndex first) (.-pairIndex second))
+            (set! first second)
+            (continue))
+
+          (when (.Overlaps (.-i first) (.-i second))
+            (return true))
+
+          (set! first second)))
+
+      false)))
+
+
+
+
+
+^{:go/end 384} (go/method Merge "Merge combines the intervals from \"is\" and \"is2\" and returns\na new Intervals object containing all combined ranges from the\ntwo inputs.\n" ^Intervals [^Intervals is ^Intervals is2]
+  (cond (== (len is) 0)
+    (return is2)
+    (== (len is2) 0)
+    (return is))
+
+  ;; walk the combined set of intervals and merge them together.
+  (let [^Intervals ret (zero Intervals)
+      ^{:line 364 :tag pairVisitor} pv (zero pairVisitor)
+      ^{:line 365} cur (.init pv is is2)]
+    (while true
+      (let [second (.nxt pv)]
+        (when (.done second)
+          (break))
+
+
+        ;; Check for overlap between cur and second. If no overlap
+        ;; then add cur to result and move on.
+        (when (and (not (.Overlaps (.-i cur) (.-i second))) (not (.adjacent (.-i cur) (.-i second))))
+          (set! ret (append ret (.-i cur)))
+          (set! cur second)
+          (continue))
+
+        ;; cur overlaps with second; merge second into cur
+        (.MergeInto (.-i cur) (.-i second))))
+
+    (set! ret (append ret (.-i cur)))
+    ^{:line 383} ret))

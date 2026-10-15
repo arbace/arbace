@@ -1,0 +1,729 @@
+;; Based on cmd/internal/obj/ppc64/obj9.go.
+;;
+;;	Copyright © 1994-1999 Lucent Technologies Inc.  All rights reserved.
+;;	Portions Copyright © 1995-1997 C H Forsyth (forsyth@terzarima.net)
+;;	Portions Copyright © 1997-1999 Vita Nuova Limited
+;;	Portions Copyright © 2000-2008 Vita Nuova Holdings Limited (www.vitanuova.com)
+;;	Portions Copyright © 2004,2006 Bruce Ellis
+;;	Portions Copyright © 2005-2007 C H Forsyth (forsyth@terzarima.net)
+;;	Revisions Copyright © 2000-2008 Lucent Technologies Inc. and others
+;;	Portions Copyright © 2009 The Go Authors. All rights reserved.
+;;
+;; Permission is hereby granted, free of charge, to any person obtaining a copy
+;; of this software and associated documentation files (the "Software"), to deal
+;; in the Software without restriction, including without limitation the rights
+;; to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+;; copies of the Software, and to permit persons to whom the Software is
+;; furnished to do so, subject to the following conditions:
+;;
+;; The above copyright notice and this permission notice shall be included in
+;; all copies or substantial portions of the Software.
+;;
+;; THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+;; IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+;; FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL THE
+;; AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+;; LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+;; OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+;; THE SOFTWARE.
+
+(in-ns 'go.cmd.internal.obj.s390x) (go/file "objz.go" :imports [
+
+
+    ^{:line 33} [obj "cmd/internal/obj"]
+    ^{:line 34} [objabi "cmd/internal/objabi"]
+    ^{:line 35} [sys "cmd/internal/sys"]
+    ^{:line 36} [abi "internal/abi"]
+    ^{:line 37} [log "log"]
+    ^{:line 38} [math "math"]])
+
+
+^{:go/end 114} (go/func progedit [^{:tag (* obj/Link)} ctxt ^{:tag (* obj/Prog)} p ^obj/ProgAlloc newprog]
+  (set! (.-Class (.-From p)) 0)
+  (set! (.-Class (.-To p)) 0)
+
+  (let [c (lit ctxtz :ctxt ctxt :newprog newprog)]
+
+    ;; Rewrite BR/BL to symbol as TYPE_BRANCH.
+    (switch (.-As p)
+      (case [ABR ABL obj/ARET obj/ADUFFZERO obj/ADUFFCOPY]
+        (when (!= (.-Sym (.-To p)) nil)
+          (set! (.-Type (.-To p)) obj/TYPE_BRANCH))))
+
+
+
+    ;; Rewrite float constants to values stored in memory unless they are +0.
+    (switch (.-As p)
+      (case [AFMOVS]
+        (when (== (.-Type (.-From p)) obj/TYPE_FCONST)
+          (let [f32 (conv float32 (assert float64 (.-Val (.-From p))))]
+            (when (== (math/Float32bits f32) 0) ; +0
+              (break))
+
+            (set! (.-Type (.-From p)) obj/TYPE_MEM)
+            (set! (.-Sym (.-From p)) (.Float32Sym ctxt f32))
+            (set! (.-Name (.-From p)) obj/NAME_EXTERN)
+            (set! (.-Offset (.-From p)) 0))))
+
+
+      (case [AFMOVD]
+        (when (== (.-Type (.-From p)) obj/TYPE_FCONST)
+          (let [f64 (assert float64 (.-Val (.-From p)))]
+            (when (== (math/Float64bits f64) 0) ; +0
+              (break))
+
+            (set! (.-Type (.-From p)) obj/TYPE_MEM)
+            (set! (.-Sym (.-From p)) (.Float64Sym ctxt f64))
+            (set! (.-Name (.-From p)) obj/NAME_EXTERN)
+            (set! (.-Offset (.-From p)) 0))))
+
+
+      ;; put constants not loadable by LOAD IMMEDIATE into memory
+      (case [AMOVD]
+        (when (== (.-Type (.-From p)) obj/TYPE_CONST)
+          (let [val (.-Offset (.-From p))]
+            (when (and (!= (conv int64 (conv int32 val)) val)
+                (!= (conv int64 (conv uint32 val)) val)
+                (!= (conv int64 (bit-and (conv uint64 val) (<< 0xffffffff 32))) val))
+              (set! (.-Type (.-From p)) obj/TYPE_MEM)
+              (set! (.-Sym (.-From p)) (.Int64Sym ctxt (.-Offset (.-From p))))
+              (set! (.-Name (.-From p)) obj/NAME_EXTERN)
+              (set! (.-Offset (.-From p)) 0))))))
+
+
+
+
+    ;; Rewrite SUB constants into ADD.
+    (switch (.-As p)
+      (case [ASUBC]
+        (when (and (== (.-Type (.-From p)) obj/TYPE_CONST) (isint32 (- (.-Offset (.-From p)))))
+          (set! (.-Offset (.-From p)) (- (.-Offset (.-From p))))
+          (set! (.-As p) AADDC)))
+
+
+      (case [ASUB]
+        (when (and (== (.-Type (.-From p)) obj/TYPE_CONST) (isint32 (- (.-Offset (.-From p)))))
+          (set! (.-Offset (.-From p)) (- (.-Offset (.-From p))))
+          (set! (.-As p) AADD))))
+
+
+
+    (when (.-Flag_dynlink (.-ctxt c))
+      (.rewriteToUseGot c p))))
+
+
+
+
+^{:go/end 206} (go/method rewriteToUseGot "Rewrite p, if necessary, to access global data via the global offset table.\n" [^{:tag (* ctxtz)} c ^{:tag (* obj/Prog)} p]
+  ;; At the moment EXRL instructions are not emitted by the compiler and only reference local symbols in
+  ;; assembly code.
+  (when (== (.-As p) AEXRL)
+    (return))
+
+
+  ;; We only care about global data: NAME_EXTERN means a global
+  ;; symbol in the Go sense, and p.Sym.Local is true for a few
+  ;; internally defined symbols.
+  ;; Rewrites must not clobber flags and therefore cannot use the
+  ;; ADD instruction.
+  (when (and (== (.-Type (.-From p)) obj/TYPE_ADDR) (== (.-Name (.-From p)) obj/NAME_EXTERN) (not ^{:go/via [Attribute]} (.Local (.-Sym (.-From p)))))
+    ;; MOVD $sym, Rx becomes MOVD sym@GOT, Rx
+    ;; MOVD $sym+<off>, Rx becomes MOVD sym@GOT, Rx or REGTMP2; MOVD $<off>(Rx or REGTMP2), Rx
+    (when (or (!= (.-Type (.-To p)) obj/TYPE_REG) (!= (.-As p) AMOVD))
+      (.Diag (.-ctxt c) "do not know how to handle LEA-type insn to non-register in %v with -dynlink" p))
+
+    (set! (.-Type (.-From p)) obj/TYPE_MEM)
+    (set! (.-Name (.-From p)) obj/NAME_GOTREF)
+    (let [q p]
+      (when (!= (.-Offset (.-From p)) 0)
+        (let [target (.-Reg (.-To p))]
+          (when (== target REG_R0)
+            ;; Cannot use R0 as input to address calculation.
+            ;; REGTMP might be used by the assembler.
+            (set! (.-Reg (.-To p)) REGTMP2))
+
+          (set! q (obj/Appendp q (.-newprog c)))
+          (set! (.-As q) AMOVD)
+          (set! (.-Type (.-From q)) obj/TYPE_ADDR)
+          (set! (.-Offset (.-From q)) (.-Offset (.-From p)))
+          (set! (.-Reg (.-From q)) (.-Reg (.-To p)))
+          (set! (.-Type (.-To q)) obj/TYPE_REG)
+          (set! (.-Reg (.-To q)) target)
+          (set! (.-Offset (.-From p)) 0)))))
+
+
+  (when (and (!= (.GetFrom3 p) nil) (== (.-Name (.GetFrom3 p)) obj/NAME_EXTERN))
+    (.Diag (.-ctxt c) "don't know how to handle %v with -dynlink" p))
+
+  (let [^{:tag (* obj/Addr)} source (zero (* obj/Addr))]
+    ;; MOVD sym, Ry becomes MOVD sym@GOT, REGTMP2; MOVD (REGTMP2), Ry
+    ;; MOVD Ry, sym becomes MOVD sym@GOT, REGTMP2; MOVD Ry, (REGTMP2)
+    ;; An addition may be inserted between the two MOVs if there is an offset.
+    (cond (and (== (.-Name (.-From p)) obj/NAME_EXTERN) (not ^{:go/via [Attribute]} (.Local (.-Sym (.-From p))))) (do
+        (when (and (== (.-Name (.-To p)) obj/NAME_EXTERN) (not ^{:go/via [Attribute]} (.Local (.-Sym (.-To p)))))
+          (.Diag (.-ctxt c) "cannot handle NAME_EXTERN on both sides in %v with -dynlink" p))
+
+        (set! source (addr (.-From p))))
+      (and (== (.-Name (.-To p)) obj/NAME_EXTERN) (not ^{:go/via [Attribute]} (.Local (.-Sym (.-To p)))))
+      (set! source (addr (.-To p))) :else
+
+      (return))
+
+    (when (or (== (.-As p) obj/ATEXT) (== (.-As p) obj/AFUNCDATA) (== (.-As p) obj/ACALL) (== (.-As p) obj/ARET) (== (.-As p) obj/AJMP))
+      (return))
+
+    (when (== (.-Type (.-Sym source)) objabi/STLSBSS)
+      (return))
+
+    (when (!= (.-Type source) obj/TYPE_MEM)
+      (.Diag (.-ctxt c) "don't know how to handle %v with -dynlink" p))
+
+    (let [p1 (obj/Appendp p (.-newprog c))
+        ^{:line 182} p2 (obj/Appendp p1 (.-newprog c))]
+
+      (set! (.-As p1) AMOVD)
+      (set! (.-Type (.-From p1)) obj/TYPE_MEM)
+      (set! (.-Sym (.-From p1)) (.-Sym source))
+      (set! (.-Name (.-From p1)) obj/NAME_GOTREF)
+      (set! (.-Type (.-To p1)) obj/TYPE_REG)
+      (set! (.-Reg (.-To p1)) REGTMP2)
+
+      (set! (.-As p2) (.-As p))
+      (set! (.-From p2) (.-From p))
+      (set! (.-To p2) (.-To p))
+      (cond (== (.-Name (.-From p)) obj/NAME_EXTERN) (do
+          (set! (.-Reg (.-From p2)) REGTMP2)
+          (set! (.-Name (.-From p2)) obj/NAME_NONE)
+          (set! (.-Sym (.-From p2)) nil))
+        (== (.-Name (.-To p)) obj/NAME_EXTERN) (do
+          (set! (.-Reg (.-To p2)) REGTMP2)
+          (set! (.-Name (.-To p2)) obj/NAME_NONE)
+          (set! (.-Sym (.-To p2)) nil)) :else
+
+        (return))
+
+      (obj/Nopout p))))
+
+
+^{:go/end 501} (go/func preprocess [^{:tag (* obj/Link)} ctxt ^{:tag (* obj/LSym)} cursym ^obj/ProgAlloc newprog]
+  ;; TODO(minux): add morestack short-cuts with small fixed frame-size.
+  (when (or (== (.-Text (.Func cursym)) nil) (== (.-Link (.-Text (.Func cursym))) nil))
+    (return))
+
+
+  (let [c (lit ctxtz :ctxt ctxt :cursym cursym :newprog newprog)
+
+      ^{:line 216} p (.-Text (.Func (.-cursym c)))
+      ^{:line 217} textstksiz (.-Offset (.-To p))]
+    (when (== textstksiz -8)
+      ;; Compatibility hack.
+      ^{:go/via [Attribute]} (.Set (.-Sym (.-From p)) obj/AttrNoFrame true)
+      (set! textstksiz 0))
+
+    (when (!= (% textstksiz 8) 0)
+      (.Diag (.-ctxt c) "frame size %d not a multiple of 8" textstksiz))
+
+    (when ^{:go/via [Attribute]} (.NoFrame (.-Sym (.-From p)))
+      (when (!= textstksiz 0)
+        (.Diag (.-ctxt c) "NOFRAME functions must have a frame size of 0, not %d" textstksiz)))
+
+
+
+    (set! (.-Args (.Func (.-cursym c))) (assert int32 (.-Val (.-To p))))
+    (set! (.-Locals (.Func (.-cursym c))) (conv int32 textstksiz))
+
+    ;; /*
+    ;; * find leaf subroutines
+    ;; * strip NOPs
+    ;; * expand RET
+    ;; */
+
+    (let [^{:tag (* obj/Prog)} q (zero (* obj/Prog))]
+      (for [p (.-Text (.Func (.-cursym c)))] (!= p nil) (set! p (.-Link p))
+        (switch (.-As p)
+          (case [obj/ATEXT]
+            (set! q p)
+            (set! (.-Mark p) bit-or LEAF))
+
+          (case [ABL ABCL]
+            (set! q p)
+            (set! (.-Mark (.-Text (.Func (.-cursym c)))) bit-and-not LEAF)
+            (fallthrough))
+
+          (case [ABC
+              ^{:line 254} ABRC
+              ^{:line 255} ABEQ
+              ^{:line 256} ABGE
+              ^{:line 257} ABGT
+              ^{:line 258} ABLE
+              ^{:line 259} ABLT
+              ^{:line 260} ABLEU
+              ^{:line 261} ABLTU
+              ^{:line 262} ABNE
+              ^{:line 263} ABR
+              ^{:line 264} ABVC
+              ^{:line 265} ABVS
+              ^{:line 266} ACRJ
+              ^{:line 267} ACGRJ
+              ^{:line 268} ACLRJ
+              ^{:line 269} ACLGRJ
+              ^{:line 270} ACIJ
+              ^{:line 271} ACGIJ
+              ^{:line 272} ACLIJ
+              ^{:line 273} ACLGIJ
+              ^{:line 274} ACMPBEQ
+              ^{:line 275} ACMPBGE
+              ^{:line 276} ACMPBGT
+              ^{:line 277} ACMPBLE
+              ^{:line 278} ACMPBLT
+              ^{:line 279} ACMPBNE
+              ^{:line 280} ACMPUBEQ
+              ^{:line 281} ACMPUBGE
+              ^{:line 282} ACMPUBGT
+              ^{:line 283} ACMPUBLE
+              ^{:line 284} ACMPUBLT
+              ^{:line 285} ACMPUBNE]
+            (set! q p)
+            (set! (.-Mark p) bit-or BRANCH))
+
+          (default
+            (set! q p))))
+
+
+
+      (let [autosize (conv int32 0)
+          ^{:line 295 :tag (* obj/Prog)} pLast (zero (* obj/Prog))
+          ^{:line 296 :tag (* obj/Prog)} pPre (zero (* obj/Prog))
+          ^{:line 297 :tag (* obj/Prog)} pPreempt (zero (* obj/Prog))
+          ^{:line 298 :tag (* obj/Prog)} pCheck (zero (* obj/Prog))
+          ^{:line 299} wasSplit false]
+        (for [p (.-Text (.Func (.-cursym c)))] (!= p nil) (set! p (.-Link p))
+          (set! pLast p)
+          (switch (.-As p)
+            (case [obj/ATEXT]
+              (set! autosize (conv int32 textstksiz))
+
+              (when (and (!= (bit-and (.-Mark p) LEAF) 0) (== autosize 0))
+                ;; A leaf function with no locals has no frame.
+                ^{:go/via [Attribute]} (.Set (.-Sym (.-From p)) obj/AttrNoFrame true))
+
+
+              (when (not ^{:go/via [Attribute]} (.NoFrame (.-Sym (.-From p))))
+                ;; If there is a stack frame at all, it includes
+                ;; space to save the LR.
+                (set! autosize + (conv int32 ^{:go/via [Arch]} (.-FixedFrameSize (.-Arch (.-ctxt c))))))
+
+
+              (when (and (!= (bit-and (.-Mark p) LEAF) 0) (< autosize abi/StackSmall))
+                ;; A leaf function with a small stack can be marked
+                ;; NOSPLIT, avoiding a stack check.
+                ^{:go/via [Attribute]} (.Set (.-Sym (.-From p)) obj/AttrNoSplit true))
+
+
+              (set! (.-Offset (.-To p)) (conv int64 autosize))
+
+              (let [q p]
+
+                (when (not ^{:go/via [Attribute]} (.NoSplit (.-Sym (.-From p))))
+                  (set! (values p pPreempt pCheck) (.stacksplitPre c p autosize)) ; emit pre part of split check
+                  (set! pPre p)
+                  (set! p (.EndUnsafePoint (.-ctxt c) p (.-newprog c) -1))
+                  (set! wasSplit true)) ;need post part of split
+
+
+                (cond (!= autosize 0) (do
+                    ;; Make sure to save link register for non-empty frame, even if
+                    ;; it is a leaf function, so that traceback works.
+                    ;; Store link register before decrementing SP, so if a signal comes
+                    ;; during the execution of the function prologue, the traceback
+                    ;; code will not see a half-updated stack frame.
+                    ;; This sequence is not async preemptible, as if we open a frame
+                    ;; at the current SP, it will clobber the saved LR.
+                    (set! q (.StartUnsafePoint (.-ctxt c) p (.-newprog c)))
+
+                    (set! q (obj/Appendp q (.-newprog c)))
+                    (set! (.-As q) AMOVD)
+                    (set! (.-Type (.-From q)) obj/TYPE_REG)
+                    (set! (.-Reg (.-From q)) REG_LR)
+                    (set! (.-Type (.-To q)) obj/TYPE_MEM)
+                    (set! (.-Reg (.-To q)) REGSP)
+                    (set! (.-Offset (.-To q)) (conv int64 (- autosize)))
+
+                    (set! q (obj/Appendp q (.-newprog c)))
+                    (set! (.-As q) AMOVD)
+                    (set! (.-Type (.-From q)) obj/TYPE_ADDR)
+                    (set! (.-Offset (.-From q)) (conv int64 (- autosize)))
+                    (set! (.-Reg (.-From q)) REGSP) ; not actually needed - REGSP is assumed if no reg is provided
+                    (set! (.-Type (.-To q)) obj/TYPE_REG)
+                    (set! (.-Reg (.-To q)) REGSP)
+                    (set! (.-Spadj q) autosize)
+
+                    (set! q (.EndUnsafePoint (.-ctxt c) q (.-newprog c) -1))
+
+                    ;; On Linux, in a cgo binary we may get a SIGSETXID signal early on
+                    ;; before the signal stack is set, as glibc doesn't allow us to block
+                    ;; SIGSETXID. So a signal may land on the current stack and clobber
+                    ;; the content below the SP. We store the LR again after the SP is
+                    ;; decremented.
+                    (set! q (obj/Appendp q (.-newprog c)))
+                    (set! (.-As q) AMOVD)
+                    (set! (.-Type (.-From q)) obj/TYPE_REG)
+                    (set! (.-Reg (.-From q)) REG_LR)
+                    (set! (.-Type (.-To q)) obj/TYPE_MEM)
+                    (set! (.-Reg (.-To q)) REGSP)
+                    (set! (.-Offset (.-To q)) 0))
+                  (== (bit-and (.-Mark (.-Text (.Func (.-cursym c)))) LEAF) 0)
+                  ;; A very few functions that do not return to their caller
+                  ;; (e.g. gogo) are not identified as leaves but still have
+                  ;; no frame.
+                  (set! (.-Mark (.-Text (.Func (.-cursym c)))) bit-or LEAF))
+
+
+                (when (!= (bit-and (.-Mark (.-Text (.Func (.-cursym c)))) LEAF) 0)
+                  ^{:go/via [Attribute]} (.Set (.-cursym c) obj/AttrLeaf true)
+                  (break))))
+
+
+            (case [obj/ARET]
+              (let [(values retTarget retReg) (values (.-Sym (.-To p)) (.-Reg (.-To p)))]
+                (when (== retReg obj/REG_NONE)
+                  (set! retReg REG_LR))
+
+
+                (when (!= (bit-and (.-Mark (.-Text (.Func (.-cursym c)))) LEAF) 0)
+                  (when (== autosize 0)
+                    (set! (.-As p) ABR)
+                    (set! (.-From p) (lit obj/Addr))
+                    (if (== retTarget nil) (do
+                        (set! (.-Type (.-To p)) obj/TYPE_REG)
+                        (set! (.-Reg (.-To p)) retReg))
+                      (do
+                        (set! (.-Type (.-To p)) obj/TYPE_BRANCH)
+                        (set! (.-Sym (.-To p)) retTarget)))
+
+                    (set! (.-Mark p) bit-or BRANCH)
+                    (break))
+
+
+                  (set! (.-As p) AADD)
+                  (set! (.-Type (.-From p)) obj/TYPE_CONST)
+                  (set! (.-Offset (.-From p)) (conv int64 autosize))
+                  (set! (.-Type (.-To p)) obj/TYPE_REG)
+                  (set! (.-Reg (.-To p)) REGSP)
+                  (set! (.-Spadj p) (- autosize))
+
+                  (set! q (obj/Appendp p (.-newprog c)))
+                  (set! (.-As q) ABR)
+                  (set! (.-From q) (lit obj/Addr))
+                  (if (== retTarget nil) (do
+                      (set! (.-Type (.-To q)) obj/TYPE_REG)
+                      (set! (.-Reg (.-To q)) retReg))
+                    (do
+                      (set! (.-Type (.-To q)) obj/TYPE_BRANCH)
+                      (set! (.-Sym (.-To q)) retTarget)))
+
+                  (set! (.-Mark q) bit-or BRANCH)
+                  (set! (.-Spadj q) autosize)
+                  (break))
+
+
+                (set! (.-As p) AMOVD)
+                (set! (.-Type (.-From p)) obj/TYPE_MEM)
+                (set! (.-Reg (.-From p)) REGSP)
+                (set! (.-Offset (.-From p)) 0)
+                (set! (.-To p) ^{:go/breaks [2 4]} (lit obj/Addr
+                    :Type obj/TYPE_REG
+                    :Reg REG_LR))
+
+
+                (set! q p)
+
+                (when (!= autosize 0)
+                  (set! q (obj/Appendp q (.-newprog c)))
+                  (set! (.-As q) AADD)
+                  (set! (.-Type (.-From q)) obj/TYPE_CONST)
+                  (set! (.-Offset (.-From q)) (conv int64 autosize))
+                  (set! (.-Type (.-To q)) obj/TYPE_REG)
+                  (set! (.-Reg (.-To q)) REGSP)
+                  (set! (.-Spadj q) (- autosize)))
+
+
+                (set! q (obj/Appendp q (.-newprog c)))
+                (set! (.-As q) ABR)
+                (set! (.-From q) (lit obj/Addr))
+                (if (== retTarget nil) (do
+                    (set! (.-Type (.-To q)) obj/TYPE_REG)
+                    (set! (.-Reg (.-To q)) retReg))
+                  (do
+                    (set! (.-Type (.-To q)) obj/TYPE_BRANCH)
+                    (set! (.-Sym (.-To q)) retTarget)))
+
+                (set! (.-Mark q) bit-or BRANCH)
+                (set! (.-Spadj q) autosize)))
+
+            (case [AADD]
+              (when (and (== (.-Type (.-To p)) obj/TYPE_REG) (== (.-Reg (.-To p)) REGSP) (== (.-Type (.-From p)) obj/TYPE_CONST))
+                (set! (.-Spadj p) (conv int32 (- (.-Offset (.-From p)))))))
+
+
+            (case [obj/AGETCALLERPC]
+              (if ^{:go/via [Attribute]} (.Leaf cursym) (do
+                  ;; /* MOVD LR, Rd */
+                  (set! (.-As p) AMOVD)
+                  (set! (.-Type (.-From p)) obj/TYPE_REG)
+                  (set! (.-Reg (.-From p)) REG_LR))
+                (do
+                  ;; /* MOVD (RSP), Rd */
+                  (set! (.-As p) AMOVD)
+                  (set! (.-Type (.-From p)) obj/TYPE_MEM)
+                  (set! (.-Reg (.-From p)) REGSP)))))
+
+
+
+          (when (and (== (.-Type (.-To p)) obj/TYPE_REG) (== (.-Reg (.-To p)) REGSP) (== (.-Spadj p) 0))
+            (let [f (.Func (.-cursym c))]
+              (when (== (bit-and (.-FuncFlag f) abi/FuncFlagSPWrite) 0)
+                (set! (.-FuncFlag (.Func (.-cursym c))) bit-or abi/FuncFlagSPWrite)
+                (when (or (.-Debugvlog ctxt) (not (.-IsAsm ctxt)))
+                  (.Logf ctxt "auto-SPWRITE: %s\n" (.-Name (.-cursym c)))
+                  (when (not (.-IsAsm ctxt))
+                    (.Diag ctxt "invalid auto-SPWRITE in non-assembly")
+                    ((.-DiagFlush ctxt))
+                    (log/Fatalf "bad SPWRITE")))))))
+
+
+
+
+
+        (when wasSplit
+          (.stacksplitPost c pLast pPre pPreempt pCheck autosize)))))) ; emit post part of split check
+
+
+
+
+
+
+
+^{:go/end 650} (go/method stacksplitPre "stacksplitPre generates the function stack check prologue following\nProg p (which should be the TEXT Prog). It returns one or two\nbranch Progs that must be patched to jump to the morestack epilogue,\nand the Prog that starts the morestack check.\n" [^{:tag (* ctxtz)} c ^{:tag (* obj/Prog)} p ^int32 framesize] :results [^{:tag (* obj/Prog)} pPre ^{:tag (* obj/Prog)} pPreempt ^{:tag (* obj/Prog)} pCheck]
+  (when (!= (.-Flag_maymorestack (.-ctxt c)) "")
+    ;; Save LR and REGCTXT
+    (let [^:const ^{:val 16} frameSize 16]
+      (set! p (.StartUnsafePoint (.-ctxt c) p (.-newprog c)))
+
+      ;; Spill arguments. This has to happen before we open
+      ;; any more frame space.
+      (set! p (.SpillRegisterArgs (.Func (.-cursym c)) p (.-newprog c)))
+
+      ;; MOVD LR, -16(SP)
+
+      (set! p (obj/Appendp p (.-newprog c)))
+      (set! (.-As p) AMOVD)
+      (set! (.-From p) (lit obj/Addr :Type obj/TYPE_REG :Reg REG_LR))
+      (set! (.-To p) (lit obj/Addr :Type obj/TYPE_MEM :Reg REGSP :Offset (- frameSize)))
+      ;; MOVD $-16(SP), SP
+      (set! p (obj/Appendp p (.-newprog c)))
+      (set! (.-As p) AMOVD)
+      (set! (.-From p) (lit obj/Addr :Type obj/TYPE_ADDR :Offset (- frameSize) :Reg REGSP))
+      (set! (.-To p) (lit obj/Addr :Type obj/TYPE_REG :Reg REGSP))
+      (set! (.-Spadj p) frameSize)
+      ;; MOVD REGCTXT, 8(SP)
+      (set! p (obj/Appendp p (.-newprog c)))
+      (set! (.-As p) AMOVD)
+      (set! (.-From p) (lit obj/Addr :Type obj/TYPE_REG :Reg REGCTXT))
+      (set! (.-To p) (lit obj/Addr :Type obj/TYPE_MEM :Reg REGSP :Offset 8))
+
+      ;; BL maymorestack
+      (set! p (obj/Appendp p (.-newprog c)))
+      (set! (.-As p) ABL)
+      ;; See ../x86/obj6.go
+      (let [sym (.LookupABI (.-ctxt c) (.-Flag_maymorestack (.-ctxt c)) ^{:go/via [Attribute]} (.ABI (.-cursym c)))]
+        (set! (.-To p) (lit obj/Addr :Type obj/TYPE_BRANCH :Sym sym))
+
+        ;; Restore LR and REGCTXT
+
+        ;; MOVD REGCTXT, 8(SP)
+        (set! p (obj/Appendp p (.-newprog c)))
+        (set! (.-As p) AMOVD)
+        (set! (.-From p) (lit obj/Addr :Type obj/TYPE_MEM :Reg REGSP :Offset 8))
+        (set! (.-To p) (lit obj/Addr :Type obj/TYPE_REG :Reg REGCTXT))
+        ;; MOVD (SP), LR
+        (set! p (obj/Appendp p (.-newprog c)))
+        (set! (.-As p) AMOVD)
+        (set! (.-From p) (lit obj/Addr :Type obj/TYPE_MEM :Reg REGSP :Offset 0))
+        (set! (.-To p) (lit obj/Addr :Type obj/TYPE_REG :Reg REG_LR))
+        ;; MOVD $16(SP), SP
+        (set! p (obj/Appendp p (.-newprog c)))
+        (set! (.-As p) AMOVD)
+        (set! (.-From p) (lit obj/Addr :Type obj/TYPE_CONST :Reg REGSP :Offset frameSize))
+        (set! (.-To p) (lit obj/Addr :Type obj/TYPE_REG :Reg REGSP))
+        (set! (.-Spadj p) (- frameSize))
+
+        ;; Unspill arguments
+        (set! p (.UnspillRegisterArgs (.Func (.-cursym c)) p (.-newprog c)))
+        (set! p (.EndUnsafePoint (.-ctxt c) p (.-newprog c) -1)))))
+
+
+  ;; MOVD	g_stackguard(g), R10
+  (set! p (obj/Appendp p (.-newprog c)))
+  ;; Jump back to here after morestack returns.
+  (set! pCheck p)
+
+  (set! (.-As p) AMOVD)
+  (set! (.-Type (.-From p)) obj/TYPE_MEM)
+  (set! (.-Reg (.-From p)) REGG)
+  (set! (.-Offset (.-From p)) (* 2 (conv int64 ^{:go/via [Arch]} (.-PtrSize (.-Arch (.-ctxt c)))))) ; G.stackguard0
+  (when ^{:go/via [Attribute]} (.CFunc (.-cursym c))
+    (set! (.-Offset (.-From p)) (* 3 (conv int64 ^{:go/via [Arch]} (.-PtrSize (.-Arch (.-ctxt c))))))) ; G.stackguard1
+
+  (set! (.-Type (.-To p)) obj/TYPE_REG)
+  (set! (.-Reg (.-To p)) REG_R10)
+
+  ;; Mark the stack bound check and morestack call async nonpreemptible.
+  ;; If we get preempted here, when resumed the preemption request is
+  ;; cleared, but we'll still call morestack, which will double the stack
+  ;; unnecessarily. See issue #35470.
+  (set! p (.StartUnsafePoint (.-ctxt c) p (.-newprog c)))
+
+  (when (<= framesize abi/StackSmall)
+    ;; small stack: SP < stackguard
+    ;;	CMPUBGE	stackguard, SP, label-of-call-to-morestack
+
+    (set! p (obj/Appendp p (.-newprog c)))
+    (set! (.-Type (.-From p)) obj/TYPE_REG)
+    (set! (.-Reg (.-From p)) REG_R10)
+    (set! (.-Reg p) REGSP)
+    (set! (.-As p) ACMPUBGE)
+    (set! (.-Type (.-To p)) obj/TYPE_BRANCH)
+
+    (return p nil pCheck))
+
+
+  ;; large stack: SP-framesize < stackguard-StackSmall
+
+  (let [offset (- (conv int64 framesize) abi/StackSmall)]
+    (when (> framesize abi/StackBig)
+      ;; Such a large stack we need to protect against underflow.
+      ;; The runtime guarantees SP > objabi.StackBig, but
+      ;; framesize is large enough that SP-framesize may
+      ;; underflow, causing a direct comparison with the
+      ;; stack guard to incorrectly succeed. We explicitly
+      ;; guard against underflow.
+      ;;
+      ;;	MOVD	$(framesize-StackSmall), R11
+      ;;	CMPUBLT	SP, R11, label-of-call-to-morestack
+
+      (set! p (obj/Appendp p (.-newprog c)))
+      (set! (.-As p) AMOVD)
+      (set! (.-Type (.-From p)) obj/TYPE_CONST)
+      (set! (.-Offset (.-From p)) offset)
+      (set! (.-Type (.-To p)) obj/TYPE_REG)
+      (set! (.-Reg (.-To p)) REG_R11)
+
+      (set! p (obj/Appendp p (.-newprog c)))
+      (set! pPreempt p)
+      (set! (.-As p) ACMPUBLT)
+      (set! (.-Type (.-From p)) obj/TYPE_REG)
+      (set! (.-Reg (.-From p)) REGSP)
+      (set! (.-Reg p) REG_R11)
+      (set! (.-Type (.-To p)) obj/TYPE_BRANCH))
+
+
+    ;; Check against the stack guard. We've ensured this won't underflow.
+    ;;	ADD $-(framesize-StackSmall), SP, R11
+    ;;	CMPUBGE stackguard, R11, label-of-call-to-morestack
+    (set! p (obj/Appendp p (.-newprog c)))
+    (set! (.-As p) AADD)
+    (set! (.-Type (.-From p)) obj/TYPE_CONST)
+    (set! (.-Offset (.-From p)) (- offset))
+    (set! (.-Reg p) REGSP)
+    (set! (.-Type (.-To p)) obj/TYPE_REG)
+    (set! (.-Reg (.-To p)) REG_R11)
+
+    (set! p (obj/Appendp p (.-newprog c)))
+    (set! (.-Type (.-From p)) obj/TYPE_REG)
+    (set! (.-Reg (.-From p)) REG_R10)
+    (set! (.-Reg p) REG_R11)
+    (set! (.-As p) ACMPUBGE)
+    (set! (.-Type (.-To p)) obj/TYPE_BRANCH)
+
+    (return p pPreempt pCheck)))
+
+
+
+
+
+
+
+
+^{:go/end 709} (go/method stacksplitPost "stacksplitPost generates the function epilogue that calls morestack\nand returns the new last instruction in the function.\n\np is the last Prog in the function. pPre and pPreempt, if non-nil,\nare the instructions that branch to the epilogue. This will fill in\ntheir branch targets. pCheck is the Prog that begins the stack check.\n" ^{:tag (* obj/Prog)} [^{:tag (* ctxtz)} c ^{:tag (* obj/Prog)} p ^{:tag (* obj/Prog)} pPre ^{:tag (* obj/Prog)} pPreempt ^{:tag (* obj/Prog)} pCheck ^int32 framesize]
+  ;; Now we are at the end of the function, but logically
+  ;; we are still in function prologue. We need to fix the
+  ;; SP data and PCDATA.
+  (let [spfix (obj/Appendp p (.-newprog c))]
+    (set! (.-As spfix) obj/ANOP)
+    (set! (.-Spadj spfix) (- framesize))
+
+    (let [pcdata (.EmitEntryStackMap (.-ctxt c) (.-cursym c) spfix (.-newprog c))]
+      (set! pcdata (.StartUnsafePoint (.-ctxt c) pcdata (.-newprog c)))
+      (when (!= pPreempt nil)
+        (.SetTarget (.-To pPreempt) pcdata))
+
+      (.SetTarget (.-To pPre) pcdata)
+
+      ;; Spill the register args that could be clobbered by the
+      ;; morestack code.
+      (let [spill (.SpillRegisterArgs (.Func (.-cursym c)) pcdata (.-newprog c))]
+
+        ;; MOVD	LR, R5
+        (set! p (obj/Appendp spill (.-newprog c)))
+        (set! (.-As p) AMOVD)
+        (set! (.-Type (.-From p)) obj/TYPE_REG)
+        (set! (.-Reg (.-From p)) REG_LR)
+        (set! (.-Type (.-To p)) obj/TYPE_REG)
+        (set! (.-Reg (.-To p)) REG_R5)
+
+        ;; BL	runtime.morestack(SB)
+        (set! p (obj/Appendp p (.-newprog c)))
+
+        (set! (.-As p) ABL)
+        (set! (.-Type (.-To p)) obj/TYPE_BRANCH)
+        (cond ^{:go/via [Attribute]} (.CFunc (.-cursym c))
+          (set! (.-Sym (.-To p)) (.Lookup (.-ctxt c) "runtime.morestackc"))
+          (not ^{:go/via [Attribute]} (.NeedCtxt (.-Sym (.-From (.-Text (.Func (.-cursym c)))))))
+          (set! (.-Sym (.-To p)) (.Lookup (.-ctxt c) "runtime.morestack_noctxt")) :else
+
+          (set! (.-Sym (.-To p)) (.Lookup (.-ctxt c) "runtime.morestack")))
+
+
+        ;; The instructions which unspill regs should be preemptible.
+        (set! p (.EndUnsafePoint (.-ctxt c) p (.-newprog c) -1))
+        (let [unspill (.UnspillRegisterArgs (.Func (.-cursym c)) p (.-newprog c))]
+
+          ;; BR	pCheck
+          (set! p (obj/Appendp unspill (.-newprog c)))
+
+          (set! (.-As p) ABR)
+          (set! (.-Type (.-To p)) obj/TYPE_BRANCH)
+          (.SetTarget (.-To p) pCheck)
+          ^{:line 708} p)))))
+
+
+(go/var unaryDst (lit (map obj/As bool)
+    ^{:line 712} [ASTCK true]
+    ^{:line 713} [ASTCKC true]
+    ^{:line 714} [ASTCKE true]
+    ^{:line 715} [ASTCKF true]
+    ^{:line 716} [ANEG true]
+    ^{:line 717} [ANEGW true]
+    ^{:line 718} [AVONE true]
+    ^{:line 719} [AVZERO true]))
+
+
+(go/var Links390x ^{:go/breaks [2 4 6 8 10 12 14]} (lit obj/LinkArch
+    :Arch sys/ArchS390X
+    :Init buildop
+    :Preprocess preprocess
+    :Assemble spanz
+    :Progedit progedit
+    :UnaryDst unaryDst
+    :DWARFRegisters S390XDWARFRegisters))

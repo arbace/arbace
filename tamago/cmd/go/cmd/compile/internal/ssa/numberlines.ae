@@ -1,0 +1,261 @@
+;; Copyright 2018 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.cmd.compile.internal.ssa) (go/file "numberlines.go" :imports [
+
+
+    ^{:line 8} [src "cmd/internal/src"]
+    ^{:line 9} [fmt "fmt"]
+    ^{:line 10} [sort "sort"]])
+
+
+^{:go/breaks [[4 23]] :go/end 24} (go/func isPoorStatementOp ^bool [^Op op]
+  (switch op
+    ;; Note that Nilcheck often vanishes, but when it doesn't, you'd love to start the statement there
+    ;; so that a debugger-user sees the stop before the panic, and can examine the value.
+    (case [OpAddr OpLocalAddr OpOffPtr OpStructSelect OpPhi OpITab OpIData
+        ^{:line 18} OpIMake OpStringMake OpSliceMake OpStructMake
+        ^{:line 19} OpConstBool OpConst8 OpConst16 OpConst32 OpConst64 OpConst32F OpConst64F OpSB OpSP
+        ^{:line 20} OpArgIntReg OpArgFloatReg]
+      (return true)))
+
+  false)
+
+
+
+
+
+
+
+^{:go/end 58} (go/func nextGoodStatementIndex "nextGoodStatementIndex returns an index at i or later that is believed\nto be a good place to start the statement for b.  This decision is\nbased on v's Op, the possibility of a better later operation, and\nwhether the values following i are the same line as v.\nIf a better statement index isn't found, then i is returned.\n" ^int [^{:tag (* Value)} v ^int i ^{:tag (* Block)} b]
+  ;; If the value is the last one in the block, too bad, it will have to do
+  ;; (this assumes that the value ordering vaguely corresponds to the source
+  ;; program execution order, which tends to be true directly after ssa is
+  ;; first built).
+  (when (>= i (- (len (.-Values b)) 1))
+    (return i))
+
+  ;; Skip the likely-ephemeral/fragile opcodes expected to vanish in a rewrite.
+  (when (not (isPoorStatementOp (.-Op v)))
+    (return i))
+
+  ;; Look ahead to see what the line number is on the next thing that could be a boundary.
+  (for [j (+ i 1)] (< j (len (.-Values b))) (inc! j)
+    (let [u (aget (.-Values b) j)]
+      (when (== ^{:go/via [lico]} (.IsStmt (.-Pos u)) src/PosNotStmt) ; ignore non-statements
+        (continue))
+
+      (when (.SameFileAndLine (.-Pos u) (.-Pos v))
+        (when (isPoorStatementOp (.-Op u))
+          (continue)) ; Keep looking, this is also not a good statement op
+
+        (return j))
+
+      (return i)))
+
+  ^{:line 57} i)
+
+
+
+
+
+^{:go/breaks [[5 68]] :go/end 69} (go/func notStmtBoundary "notStmtBoundary reports whether a value with opcode op can never be a statement\nboundary. Such values don't correspond to a user's understanding of a\nstatement boundary.\n" ^bool [^Op op]
+  (switch op
+    (case [OpCopy OpPhi OpVarDef OpVarLive OpUnknown OpFwdRef OpArg OpArgIntReg OpArgFloatReg]
+      (return true)))
+
+  false)
+
+
+^{:go/breaks [[4 78]] :go/end 79} (go/method FirstPossibleStmtValue ^{:tag (* Value)} [^{:tag (* Block)} b]
+  (range [_ v (.-Values b)]
+    (when (notStmtBoundary (.-Op v))
+      (continue))
+
+    (return v))
+
+  nil)
+
+
+^{:go/end 86} (go/func flc ^string [^src/XPos p]
+  (when (== p src/NoXPos)
+    (return "none"))
+
+  (fmt/Sprintf "(%d):%d:%d" (.FileIndex p) ^{:go/via [lico]} (.Line p) ^{:go/via [lico]} (.Col p)))
+
+
+(go/type fileAndPair (struct
+    ^{:line 89 :tag int32} f
+    ^{:line 90 :tag lineRange} lp))
+
+
+(go/type fileAndPairs (slice fileAndPair))
+
+^{:go/end 97} (go/method Len ^int [^fileAndPairs fap]
+  (len fap))
+
+^{:go/end 100} (go/method Less ^bool [^fileAndPairs fap ^int i ^int j]
+  (< (.-f (aget fap i)) (.-f (aget fap j))))
+
+^{:go/end 103} (go/method Swap [^fileAndPairs fap ^int i ^int j]
+  (set! (values (aget fap i) (aget fap j)) (values (aget fap j) (aget fap i))))
+
+
+
+
+^{:go/end 262} (go/func numberLines "-d=ssa/number_lines/stats=1 (that bit) for line and file distribution statistics\n-d=ssa/number_lines/debug for information about why particular values are marked as statements.\n" [^{:tag (* Func)} f]
+  (let [po (.Postorder f)
+      ^{:line 109} endlines (make (map ID src/XPos))
+      ^{:line 110} ranges (make (map int lineRange))
+      ^{:line 111} note ^{:go/end 127} (fn [^src/XPos p]
+        (let [line (conv uint32 ^{:go/via [lico]} (.Line p))
+            ^{:line 113} i (conv int (.FileIndex p))
+            (values lp found) (aget ranges i)
+            ^{:line 115} change false]
+          (when (or (< line (.-first lp)) (not found))
+            (set! (.-first lp) line)
+            (set! change true))
+
+          (when (> line (.-last lp))
+            (set! (.-last lp) line)
+            (set! change true))
+
+          (when change
+            (aset ranges i lp))))]
+
+
+
+    ;; Visit in reverse post order so that all non-loop predecessors come first.
+    (for [j (- (len po) 1)] (>= j 0) (dec! j)
+      (let [b (aget po j)
+          ;; Find the first interesting position and check to see if it differs from any predecessor
+          ^{:line 133} firstPos src/NoXPos
+          ^{:line 134} firstPosIndex -1]
+        (when (!= ^{:go/via [lico]} (.IsStmt (.-Pos b)) src/PosNotStmt)
+          (note (.-Pos b)))
+
+        (for [i 0] (< i (len (.-Values b))) (inc! i)
+          (let [v (aget (.-Values b) i)]
+            (when (!= ^{:go/via [lico]} (.IsStmt (.-Pos v)) src/PosNotStmt)
+              (note (.-Pos v))
+              ;; skip ahead to better instruction for this line if possible
+              (set! i (nextGoodStatementIndex v i b))
+              (set! v (aget (.-Values b) i))
+              (set! firstPosIndex i)
+              (set! firstPos (.-Pos v))
+              (set! (.-Pos v) (.WithDefaultStmt firstPos)) ; default to default
+              (break))))
+
+
+
+        (when (== firstPosIndex -1) ; Effectively empty block, check block's own Pos, consider preds.
+          (let [line src/NoXPos]
+            (range [_ p (.-Preds b)]
+              (let [pbi (.-ID (.Block p))]
+                (when (not (.SameFileAndLine (aget endlines pbi) line))
+                  (if (== line src/NoXPos) (do
+                      (set! line (aget endlines pbi))
+                      (continue))
+                    (do
+                      (set! line src/NoXPos)
+                      (break))))))
+
+
+
+
+            ;; If the block has no statement itself and is effectively empty, tag it w/ predecessor(s) but not as a statement
+            (when (== ^{:go/via [lico]} (.IsStmt (.-Pos b)) src/PosNotStmt)
+              (set! (.-Pos b) line)
+              (aset endlines (.-ID b) line)
+              (continue))
+
+            ;; If the block differs from its predecessors, mark it as a statement
+            (when (or (== line src/NoXPos) (not (.SameFileAndLine line (.-Pos b))))
+              (set! (.-Pos b) (.WithIsStmt (.-Pos b)))
+              (when (> (.-debug (.-pass f)) 0)
+                (fmt/Printf "Mark stmt effectively-empty-block %s %s %s\n" (.-Name f) b (flc (.-Pos b)))))
+
+
+            (aset endlines (.-ID b) (.-Pos b))
+            (continue)))
+
+        ;; check predecessors for any difference; if firstPos differs, then it is a boundary.
+        (if (== (len (.-Preds b)) 0) (do ; Don't forget the entry block
+            (set! (.-Pos (aget (.-Values b) firstPosIndex)) (.WithIsStmt firstPos))
+            (when (> (.-debug (.-pass f)) 0)
+              (fmt/Printf "Mark stmt entry-block %s %s %s %s\n" (.-Name f) b (aget (.-Values b) firstPosIndex) (flc firstPos))))
+
+          ;; differing pred
+          (range [_ p (.-Preds b)]
+            (let [pbi (.-ID (.Block p))]
+              (when (not (.SameFileAndLine (aget endlines pbi) firstPos))
+                (set! (.-Pos (aget (.-Values b) firstPosIndex)) (.WithIsStmt firstPos))
+                (when (> (.-debug (.-pass f)) 0)
+                  (fmt/Printf "Mark stmt differing-pred %s %s %s %s, different=%s ending %s\n"
+                    (.-Name f) b (aget (.-Values b) firstPosIndex) (flc firstPos) (.Block p) (flc (aget endlines pbi))))
+
+                (break)))))
+
+
+
+        ;; iterate forward setting each new (interesting) position as a statement boundary.
+        (for [i (+ firstPosIndex 1)] (< i (len (.-Values b))) (inc! i)
+          (let [v (aget (.-Values b) i)]
+            (when (== ^{:go/via [lico]} (.IsStmt (.-Pos v)) src/PosNotStmt)
+              (continue))
+
+            (note (.-Pos v))
+            ;; skip ahead if possible
+            (set! i (nextGoodStatementIndex v i b))
+            (set! v (aget (.-Values b) i))
+            (if (not (.SameFileAndLine (.-Pos v) firstPos)) (do
+                (when (> (.-debug (.-pass f)) 0)
+                  (fmt/Printf "Mark stmt new line %s %s %s %s prev pos = %s\n" (.-Name f) b v (flc (.-Pos v)) (flc firstPos)))
+
+                (set! firstPos (.-Pos v))
+                (set! (.-Pos v) (.WithIsStmt (.-Pos v))))
+
+              (set! (.-Pos v) (.WithDefaultStmt (.-Pos v))))))
+
+
+        (when (and (!= ^{:go/via [lico]} (.IsStmt (.-Pos b)) src/PosNotStmt) (not (.SameFileAndLine (.-Pos b) firstPos)))
+          (when (> (.-debug (.-pass f)) 0)
+            (fmt/Printf "Mark stmt end of block differs %s %s %s prev pos = %s\n" (.-Name f) b (flc (.-Pos b)) (flc firstPos)))
+
+          (set! (.-Pos b) (.WithIsStmt (.-Pos b)))
+          (set! firstPos (.-Pos b)))
+
+        (aset endlines (.-ID b) firstPos)))
+
+    (when (!= (bit-and (.-stats (.-pass f)) 1) 0)
+      ;; Report summary statistics on the shape of the sparse map about to be constructed
+      ;; TODO use this information to make sparse maps faster.
+      (let [^fileAndPairs entries (zero fileAndPairs)]
+        (range [k v ranges]
+          (set! entries (append entries (lit fileAndPair (conv int32 k) v))))
+
+        (sort/Sort entries)
+        (let [total (conv uint64 0) ; sum over files of maxline(file) - minline(file)
+            ^{:line 240} maxfile (conv int32 0) ; max(file indices)
+            ^{:line 241} minline (conv uint32 0xffffffff) ; min over files of minline(file)
+            ^{:line 242} maxline (conv uint32 0)] ; max over files of maxline(file)
+          (range [_ v entries]
+            (when (> (.-stats (.-pass f)) 1)
+              (.LogStat f "file" (.-f v) "low" (.-first (.-lp v)) "high" (.-last (.-lp v))))
+
+            (set! total + (conv uint64 (- (.-last (.-lp v)) (.-first (.-lp v)))))
+            (when (< maxfile (.-f v))
+              (set! maxfile (.-f v)))
+
+            (when (> minline (.-first (.-lp v)))
+              (set! minline (.-first (.-lp v))))
+
+            (when (< maxline (.-last (.-lp v)))
+              (set! maxline (.-last (.-lp v)))))
+
+
+          (.LogStat f "SUM_LINE_RANGE" total "MAXMIN_LINE_RANGE" (- maxline minline) "MAXFILE" maxfile "NFILES" (len entries)))))
+
+    ;; cachedLineStarts is an empty sparse map for values that are included within ranges.
+    (set! (.-cachedLineStarts f) (newXposmap ranges))))

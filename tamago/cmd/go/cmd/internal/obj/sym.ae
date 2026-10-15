@@ -1,0 +1,531 @@
+;; Derived from Inferno utils/6l/obj.c and utils/6l/span.c
+;; https://bitbucket.org/inferno-os/inferno-os/src/master/utils/6l/obj.c
+;; https://bitbucket.org/inferno-os/inferno-os/src/master/utils/6l/span.c
+;;
+;;	Copyright © 1994-1999 Lucent Technologies Inc.  All rights reserved.
+;;	Portions Copyright © 1995-1997 C H Forsyth (forsyth@terzarima.net)
+;;	Portions Copyright © 1997-1999 Vita Nuova Limited
+;;	Portions Copyright © 2000-2007 Vita Nuova Holdings Limited (www.vitanuova.com)
+;;	Portions Copyright © 2004,2006 Bruce Ellis
+;;	Portions Copyright © 2005-2007 C H Forsyth (forsyth@terzarima.net)
+;;	Revisions Copyright © 2000-2007 Lucent Technologies Inc. and others
+;;	Portions Copyright © 2009 The Go Authors. All rights reserved.
+;;
+;; Permission is hereby granted, free of charge, to any person obtaining a copy
+;; of this software and associated documentation files (the "Software"), to deal
+;; in the Software without restriction, including without limitation the rights
+;; to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+;; copies of the Software, and to permit persons to whom the Software is
+;; furnished to do so, subject to the following conditions:
+;;
+;; The above copyright notice and this permission notice shall be included in
+;; all copies or substantial portions of the Software.
+;;
+;; THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+;; IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+;; FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL THE
+;; AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+;; LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+;; OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+;; THE SOFTWARE.
+
+(in-ns 'go.cmd.internal.obj) (go/file "sym.go" :imports [
+
+
+    ^{:line 35} [goobj "cmd/internal/goobj"]
+    ^{:line 36} [hash "cmd/internal/hash"]
+    ^{:line 37} [objabi "cmd/internal/objabi"]
+    ^{:line 38} [base64 "encoding/base64"]
+    ^{:line 39} [binary "encoding/binary"]
+    ^{:line 40} [fmt "fmt"]
+    ^{:line 41} [buildcfg "internal/buildcfg"]
+    ^{:line 42} [log "log"]
+    ^{:line 43} [math "math"]
+    ^{:line 44} [sort "sort"]
+    ^{:line 45} [sync "sync"]])
+
+
+^{:go/end 60} (go/func Linknew ^{:tag (* Link)} [^{:tag (* LinkArch)} arch]
+  (let [ctxt (new Link)]
+    (set! (.-statichash ctxt) (make (map string (* LSym))))
+    (set! (.-Arch ctxt) arch)
+    (set! (.-Pathname ctxt) (objabi/WorkingDir))
+
+    (when [err (.Set (.-Headtype ctxt) buildcfg/GOOS)] (!= err nil)
+      (log/Fatalf "unknown goos %s" buildcfg/GOOS))
+
+
+    (set! (.-Flag_optimize ctxt) true)
+    ^{:line 59} ctxt))
+
+
+
+
+^{:go/end 69} (go/method LookupDerived "LookupDerived looks up or creates the symbol with name derived from symbol s.\nThe resulting symbol will be static iff s is.\n" ^{:tag (* LSym)} [^{:tag (* Link)} ctxt ^{:tag (* LSym)} s ^string name]
+  (when ^{:go/via [Attribute]} (.Static s)
+    (return (.LookupStatic ctxt name)))
+
+  (.Lookup ctxt name))
+
+
+
+
+^{:go/end 80} (go/method LookupStatic "LookupStatic looks up the static symbol with name name.\nIf it does not exist, it creates it.\n" ^{:tag (* LSym)} [^{:tag (* Link)} ctxt ^string name]
+  (let [s (aget (.-statichash ctxt) name)]
+    (when (== s nil)
+      (set! s (addr (lit LSym :Name name :Attribute AttrStatic)))
+      (aset (.-statichash ctxt) name s))
+
+    ^{:line 79} s))
+
+
+
+
+^{:go/end 86} (go/method LookupABI "LookupABI looks up a symbol with the given ABI.\nIf it does not exist, it creates it.\n" ^{:tag (* LSym)} [^{:tag (* Link)} ctxt ^string name ^ABI abi]
+  (.LookupABIInit ctxt name abi nil))
+
+
+
+
+
+^{:go/end 120} (go/method LookupABIInit "LookupABIInit looks up a symbol with the given ABI.\nIf it does not exist, it creates it and\npasses it to init for one-time initialization.\n" ^{:tag (* LSym)} [^{:tag (* Link)} ctxt ^string name ^ABI abi ^{:tag (func [^{:tag (* LSym)} s])} init]
+  (let [^{:tag (* sync/Map)} hash (zero (* sync/Map))]
+    (switch abi
+      (case [ABI0]
+        (set! hash (addr (.-hash ctxt))))
+      (case [ABIInternal]
+        (set! hash (addr (.-funchash ctxt))))
+      (default
+        (panic "unknown ABI")))
+
+
+    (let [(values c _) (.Load hash name)]
+      (when (== c nil)
+        (let [once (addr ^{:go/breaks [2]} (lit symOnce
+                :sym (lit LSym :Name name)))]
+
+          ^{:go/via [Attribute]} (.SetABI (.-sym once) abi)
+          (set! (values c _) (.LoadOrStore hash name once))))
+
+      (let [once (assert (* symOnce) c)]
+        (when (and (!= init nil) (not (.Load (.-inited once))))
+          (.Lock (.-hashmu ctxt))
+          (when (not (.Load (.-inited once)))
+            (init (addr (.-sym once)))
+            (.Store (.-inited once) true))
+
+          (.Unlock (.-hashmu ctxt)))
+
+        (addr (.-sym once))))))
+
+
+
+
+^{:go/end 126} (go/method Lookup "Lookup looks up the symbol with name name.\nIf it does not exist, it creates it.\n" ^{:tag (* LSym)} [^{:tag (* Link)} ctxt ^string name]
+  (.LookupInit ctxt name nil))
+
+
+
+
+
+^{:go/end 157} (go/method LookupInit "LookupInit looks up the symbol with name name.\nIf it does not exist, it creates it and\npasses it to init for one-time initialization.\n" ^{:tag (* LSym)} [^{:tag (* Link)} ctxt ^string name ^{:tag (func [^{:tag (* LSym)} s])} init]
+  (let [(values c _) (.Load (.-hash ctxt) name)]
+    (when (== c nil)
+      (let [once (addr ^{:go/breaks [2]} (lit symOnce
+              :sym (lit LSym :Name name)))]
+
+        (set! (values c _) (.LoadOrStore (.-hash ctxt) name once))))
+
+    (let [once (assert (* symOnce) c)]
+      (when (and (!= init nil) (not (.Load (.-inited once))))
+        ;; TODO(dmo): some of our init functions modify other fields
+        ;; in the symbol table. They are only implicitly protected since
+        ;; we serialize all inits under the hashmu lock.
+        ;; Consider auditing the functions and have them lock their
+        ;; concurrent access values explicitly. This would make it possible
+        ;; to have more than one than one init going at a time (although this might
+        ;; be a theoretical concern, I have yet to catch this lock actually being waited
+        ;; on).
+        (.Lock (.-hashmu ctxt))
+        (when (not (.Load (.-inited once)))
+          (init (addr (.-sym once)))
+          (.Store (.-inited once) true))
+
+        (.Unlock (.-hashmu ctxt)))
+
+      (addr (.-sym once)))))
+
+
+^{:go/end 161} (go/method rodataKind [^{:tag (* Link)} ctxt] :results [^string suffix ^objabi/SymKind typ]
+  (return "" objabi/SRODATA))
+
+
+^{:go/end 176} (go/method Float32Sym ^{:tag (* LSym)} [^{:tag (* Link)} ctxt ^float32 f]
+  (let [(values suffix typ) (.rodataKind ctxt)
+      ^{:line 165} i (math/Float32bits f)
+      ^{:line 166} name (fmt/Sprintf "$f32.%08x%s" i suffix)]
+    (.LookupInit ctxt name ^{:go/end 175} (fn [^{:tag (* LSym)} s]
+        (set! (.-Size s) 4)
+        (set! (.-Align s) 4)
+        (.WriteFloat32 s ctxt 0 f)
+        (set! (.-Type s) typ)
+        ^{:go/via [Attribute]} (.Set s AttrLocal true)
+        ^{:go/via [Attribute]} (.Set s AttrContentAddressable true)
+        (set! (.-constSyms ctxt) (append (.-constSyms ctxt) s))))))
+
+
+
+^{:go/end 191} (go/method Float64Sym ^{:tag (* LSym)} [^{:tag (* Link)} ctxt ^float64 f]
+  (let [(values suffix typ) (.rodataKind ctxt)
+      ^{:line 180} i (math/Float64bits f)
+      ^{:line 181} name (fmt/Sprintf "$f64.%016x%s" i suffix)]
+    (.LookupInit ctxt name ^{:go/end 190} (fn [^{:tag (* LSym)} s]
+        (set! (.-Size s) 8)
+        (set! (.-Align s) (conv int16 ^{:go/via [Arch]} (.-PtrSize (.-Arch ctxt))))
+        (.WriteFloat64 s ctxt 0 f)
+        (set! (.-Type s) typ)
+        ^{:go/via [Attribute]} (.Set s AttrLocal true)
+        ^{:go/via [Attribute]} (.Set s AttrContentAddressable true)
+        (set! (.-constSyms ctxt) (append (.-constSyms ctxt) s))))))
+
+
+
+^{:go/end 205} (go/method Int32Sym ^{:tag (* LSym)} [^{:tag (* Link)} ctxt ^int64 i]
+  (let [(values suffix typ) (.rodataKind ctxt)
+      ^{:line 195} name (fmt/Sprintf "$i32.%08x%s" (conv uint64 i) suffix)]
+    (.LookupInit ctxt name ^{:go/end 204} (fn [^{:tag (* LSym)} s]
+        (set! (.-Size s) 4)
+        (set! (.-Align s) 4)
+        (.WriteInt s ctxt 0 4 i)
+        (set! (.-Type s) typ)
+        ^{:go/via [Attribute]} (.Set s AttrLocal true)
+        ^{:go/via [Attribute]} (.Set s AttrContentAddressable true)
+        (set! (.-constSyms ctxt) (append (.-constSyms ctxt) s))))))
+
+
+
+^{:go/end 219} (go/method Int64Sym ^{:tag (* LSym)} [^{:tag (* Link)} ctxt ^int64 i]
+  (let [(values suffix typ) (.rodataKind ctxt)
+      ^{:line 209} name (fmt/Sprintf "$i64.%016x%s" (conv uint64 i) suffix)]
+    (.LookupInit ctxt name ^{:go/end 218} (fn [^{:tag (* LSym)} s]
+        (set! (.-Size s) 8)
+        (set! (.-Align s) (conv int16 ^{:go/via [Arch]} (.-PtrSize (.-Arch ctxt))))
+        (.WriteInt s ctxt 0 8 i)
+        (set! (.-Type s) typ)
+        ^{:go/via [Attribute]} (.Set s AttrLocal true)
+        ^{:go/via [Attribute]} (.Set s AttrContentAddressable true)
+        (set! (.-constSyms ctxt) (append (.-constSyms ctxt) s))))))
+
+
+
+^{:go/end 239} (go/method Int128Sym ^{:tag (* LSym)} [^{:tag (* Link)} ctxt ^int64 hi ^int64 lo]
+  (let [(values suffix typ) (.rodataKind ctxt)
+      ^{:line 223} name (fmt/Sprintf "$i128.%016x%016x%s" (conv uint64 hi) (conv uint64 lo) suffix)]
+    (.LookupInit ctxt name ^{:go/end 238} (fn [^{:tag (* LSym)} s]
+        (set! (.-Size s) 16)
+        (set! (.-Align s) (conv int16 ^{:go/via [Arch]} (.-PtrSize (.-Arch ctxt))))
+        (if (== ^{:go/via [Arch]} (.-ByteOrder (.-Arch ctxt)) binary/LittleEndian) (do
+            (.WriteInt s ctxt 0 8 lo)
+            (.WriteInt s ctxt 8 8 hi))
+          (do
+            (.WriteInt s ctxt 0 8 hi)
+            (.WriteInt s ctxt 8 8 lo)))
+
+        (set! (.-Type s) typ)
+        ^{:go/via [Attribute]} (.Set s AttrLocal true)
+        ^{:go/via [Attribute]} (.Set s AttrContentAddressable true)
+        (set! (.-constSyms ctxt) (append (.-constSyms ctxt) s))))))
+
+
+
+
+^{:go/end 250} (go/method GCLocalsSym "GCLocalsSym generates a content-addressable sym containing data.\n" ^{:tag (* LSym)} [^{:tag (* Link)} ctxt ^{:tag (slice byte)} data]
+  (let [sum (hash/Sum32 data)
+      ^{:line 244} str (.EncodeToString base64/StdEncoding (subslice sum _ 16))]
+    (.LookupInit ctxt (fmt/Sprintf "gclocals·%s" str) ^{:go/end 249} (fn [^{:tag (* LSym)} lsym]
+        (set! (.-P lsym) data)
+        ^{:go/via [Attribute]} (.Set lsym AttrContentAddressable true)
+        (set! (.-Align lsym) 4)))))
+
+
+
+
+
+
+^{:go/end 379} (go/method NumberSyms "Assign index to symbols.\nasm is set to true if this is called by the assembler (i.e. not the compiler),\nin which case all the symbols are non-package (for now).\n" [^{:tag (* Link)} ctxt]
+  (when (== (.-Pkgpath ctxt) "")
+    (panic "NumberSyms called without package path"))
+
+
+  (when (== (.-Headtype ctxt) objabi/Haix)
+    ;; Data must be in a reliable order for reproducible builds.
+    ;; The original entries are in a reliable order, but the TOC symbols
+    ;; that are added in Progedit are added by different goroutines
+    ;; that can be scheduled independently. We need to reorder those
+    ;; symbols reliably. Sort by name but use a stable sort, so that
+    ;; any original entries with the same name (all DWARFVAR symbols
+    ;; have empty names but different relocation sets) are not shuffled.
+    ;; TODO: Find a better place and optimize to only sort TOC symbols.
+    (sort/SliceStable (.-Data ctxt) ^{:go/end 271} (fn ^bool [^int i ^int j]
+        (< (.-Name (aget (.-Data ctxt) i)) (.-Name (aget (.-Data ctxt) j))))))
+
+
+
+  ;; Constant symbols are created late in the concurrent phase. Sort them
+  ;; to ensure a deterministic order.
+  (sort/Slice (.-constSyms ctxt) ^{:go/end 278} (fn ^bool [^int i ^int j]
+      (< (.-Name (aget (.-constSyms ctxt) i)) (.-Name (aget (.-constSyms ctxt) j)))))
+
+  (set! (.-Data ctxt) (append (.-Data ctxt) (spread (.-constSyms ctxt))))
+  (set! (.-constSyms ctxt) nil)
+
+  ;; So are SEH symbols.
+  (sort/Slice (.-SEHSyms ctxt) ^{:go/end 285} (fn ^bool [^int i ^int j]
+      (< (.-Name (aget (.-SEHSyms ctxt) i)) (.-Name (aget (.-SEHSyms ctxt) j)))))
+
+  (set! (.-Data ctxt) (append (.-Data ctxt) (spread (.-SEHSyms ctxt))))
+  (set! (.-SEHSyms ctxt) nil)
+
+  (set! (.-pkgIdx ctxt) (make (map string int32)))
+  (set! (.-defs ctxt) (lit (slice (* LSym))))
+  (set! (.-hashed64defs ctxt) (lit (slice (* LSym))))
+  (set! (.-hasheddefs ctxt) (lit (slice (* LSym))))
+  (set! (.-nonpkgdefs ctxt) (lit (slice (* LSym))))
+
+  (let [(values ^int32 idx ^int32 hashedidx ^int32 hashed64idx ^int32 nonpkgidx) (zero int32)]
+    (.traverseSyms ctxt (bit-or traverseDefs traversePcdata) ^{:go/end 336} (fn [^{:tag (* LSym)} s]
+        (cond ^{:go/via [Attribute]} (.ContentAddressable s)
+          (if (and (<= (.-Size s) 8) (== (len (.-R s)) 0) (== (contentHashSection s) 0)) (do
+              ;; We can use short hash only for symbols without relocations.
+              ;; Don't use short hash for symbols that belong in a particular section
+              ;; or require special handling (such as type symbols).
+              (set! (.-PkgIdx s) goobj/PkgIdxHashed64)
+              (set! (.-SymIdx s) hashed64idx)
+              (when (!= hashed64idx (conv int32 (len (.-hashed64defs ctxt))))
+                (panic "bad index"))
+
+              (set! (.-hashed64defs ctxt) (append (.-hashed64defs ctxt) s))
+              (inc! hashed64idx))
+            (do
+              (set! (.-PkgIdx s) goobj/PkgIdxHashed)
+              (set! (.-SymIdx s) hashedidx)
+              (when (!= hashedidx (conv int32 (len (.-hasheddefs ctxt))))
+                (panic "bad index"))
+
+              (set! (.-hasheddefs ctxt) (append (.-hasheddefs ctxt) s))
+              (inc! hashedidx)))
+
+          (isNonPkgSym ctxt s) (do
+            (set! (.-PkgIdx s) goobj/PkgIdxNone)
+            (set! (.-SymIdx s) nonpkgidx)
+            (when (!= nonpkgidx (conv int32 (len (.-nonpkgdefs ctxt))))
+              (panic "bad index"))
+
+            (set! (.-nonpkgdefs ctxt) (append (.-nonpkgdefs ctxt) s))
+            (inc! nonpkgidx)) :else
+          (do
+            (set! (.-PkgIdx s) goobj/PkgIdxSelf)
+            (set! (.-SymIdx s) idx)
+            (when (!= idx (conv int32 (len (.-defs ctxt))))
+              (panic "bad index"))
+
+            (set! (.-defs ctxt) (append (.-defs ctxt) s))
+            (inc! idx)))
+
+        ^{:go/via [Attribute]} (.Set s AttrIndexed true)))
+
+
+    (let [ipkg (conv int32 1) ; 0 is invalid index
+        ^{:line 339} nonpkgdef nonpkgidx]
+      (.traverseSyms ctxt (bit-or traverseRefs traverseAux) ^{:go/end 378} (fn [^{:tag (* LSym)} rs]
+          (when (!= (.-PkgIdx rs) goobj/PkgIdxInvalid)
+            (return))
+
+          (when (not (.-Flag_linkshared ctxt))
+            ;; Assign special index for builtin symbols.
+            ;; Don't do it when linking against shared libraries, as the runtime
+            ;; may be in a different library.
+            (when [i (goobj/BuiltinIdx (.-Name rs) (conv int ^{:go/via [Attribute]} (.ABI rs)))] (and (!= i -1) (not ^{:go/via [Attribute]} (.IsLinkname rs)))
+              (set! (.-PkgIdx rs) goobj/PkgIdxBuiltin)
+              (set! (.-SymIdx rs) (conv int32 i))
+              ^{:go/via [Attribute]} (.Set rs AttrIndexed true)
+              (return)))
+
+
+          (let [pkg (.-Pkg rs)]
+            (when ^{:go/via [Attribute]} (.ContentAddressable rs)
+              ;; for now, only support content-addressable symbols that are always locally defined.
+              (panic "hashed refs unsupported for now"))
+
+            (when (or (== pkg "") (== pkg "\"\"") (== pkg "_") (not ^{:go/via [Attribute]} (.Indexed rs)))
+              (set! (.-PkgIdx rs) goobj/PkgIdxNone)
+              (set! (.-SymIdx rs) nonpkgidx)
+              ^{:go/via [Attribute]} (.Set rs AttrIndexed true)
+              (when (!= nonpkgidx (+ nonpkgdef (conv int32 (len (.-nonpkgrefs ctxt)))))
+                (panic "bad index"))
+
+              (set! (.-nonpkgrefs ctxt) (append (.-nonpkgrefs ctxt) rs))
+              (inc! nonpkgidx)
+              (return))
+
+            (when [(values k ok) (aget (.-pkgIdx ctxt) pkg)] ok
+              (set! (.-PkgIdx rs) k)
+              (return))
+
+            (set! (.-PkgIdx rs) ipkg)
+            (aset (.-pkgIdx ctxt) pkg ipkg)
+            (inc! ipkg)))))))
+
+
+
+
+
+^{:go/breaks [[8 403]] :go/end 404} (go/func isNonPkgSym "Returns whether s is a non-package symbol, which needs to be referenced\nby name instead of by index.\n" ^bool [^{:tag (* Link)} ctxt ^{:tag (* LSym)} s]
+  (when (and (.-IsAsm ctxt) (not ^{:go/via [Attribute]} (.Static s)))
+    ;; asm symbols are referenced by name only, except static symbols
+    ;; which are file-local and can be referenced by index.
+    (return true))
+
+  (when (.-Flag_linkshared ctxt)
+    ;; The referenced symbol may be in a different shared library so
+    ;; the linker cannot see its index.
+    (return true))
+
+  (when (== (.-Pkg s) "_")
+    ;; The frontend uses package "_" to mark symbols that should not
+    ;; be referenced by index, e.g. linkname'd symbols.
+    (return true))
+
+  (when ^{:go/via [Attribute]} (.DuplicateOK s)
+    ;; Dupok symbol needs to be dedup'd by name.
+    (return true))
+
+  false)
+
+
+
+
+
+(go/const ^{:val ".stmp_" :doc "StaticNamePrefix is the prefix the front end applies to static temporary\nvariables. When turned into LSyms, these can be tagged as static so\nas to avoid inserting them into the linker's name lookup tables.\n"} StaticNamePrefix ".stmp_")
+
+(go/type traverseFlag uint32)
+
+(go/const
+  ^{:line 414} [^{:tag traverseFlag :val 1} traverseDefs (<< 1 iota)]
+  ^{:line 415} [^{:val 2} traverseRefs]
+  ^{:line 416} [^{:val 4} traverseAux]
+  ^{:line 417} [^{:val 8} traversePcdata]
+
+  ^{:line 419} [^{:val 15} traverseAll (bit-or traverseDefs traverseRefs traverseAux traversePcdata)])
+
+
+
+^{:go/end 464} (go/method traverseSyms "Traverse symbols based on flag, call fn for each symbol.\n" [^{:tag (* Link)} ctxt ^traverseFlag flag ^{:tag (func [(* LSym)])} fn]
+  (let [fnNoNil ^{:go/end 428} (fn [^{:tag (* LSym)} s]
+        (when (!= s nil)
+          (go/call fn s)))
+
+
+      ^{:line 429} lists (lit (slice (slice (* LSym))) (.-Text ctxt) (.-Data ctxt))
+      ^{:line 430} files (.FileTable (.-PosTable ctxt))]
+    (range [_ list lists]
+      (range [_ s list]
+        (when (!= (bit-and flag traverseDefs) 0)
+          (go/call fn s))
+
+        (when (!= (bit-and flag traverseRefs) 0)
+          (range [_ r (.-R s)]
+            (fnNoNil (.-Sym r))))
+
+
+        (when (!= (bit-and flag traverseAux) 0)
+          (fnNoNil (.-Gotype s))
+          (if (.IsText (.-Type s))
+            (let [f ^{:go/end 446} (fn [^{:tag (* LSym)} parent ^{:tag (* LSym)} aux]
+                  (go/call fn aux))]
+
+              (.traverseFuncAux ctxt flag s f files))
+            (when [v (.VarInfo s)] (!= v nil)
+              (fnNoNil (.-dwarfInfoSym v)))))
+
+
+        (when (and (!= (bit-and flag traversePcdata) 0) (.IsText (.-Type s)))
+          (let [fi (.-Pcln (.Func s))]
+            (fnNoNil (.-Pcsp fi))
+            (fnNoNil (.-Pcfile fi))
+            (fnNoNil (.-Pcline fi))
+            (fnNoNil (.-Pcinline fi))
+            (range [_ d (.-Pcdata fi)]
+              (fnNoNil d))))))))
+
+
+
+
+
+
+^{:go/end 515} (go/method traverseFuncAux [^{:tag (* Link)} ctxt ^traverseFlag flag ^{:tag (* LSym)} fsym ^{:tag (func [^{:tag (* LSym)} parent ^{:tag (* LSym)} aux])} fn ^{:tag (slice string)} files]
+  (let [fninfo (.Func fsym)
+      ^{:line 468} pc (addr (.-Pcln fninfo))]
+    (when (== (bit-and flag traverseAux) 0)
+      ;; NB: should it become necessary to walk aux sym reloc references
+      ;; without walking the aux syms themselves, this can be changed.
+      (panic "should not be here"))
+
+    (range [_ d (.-Funcdata pc)]
+      (when (!= d nil)
+        (go/call fn fsym d)))
+
+
+    (let [usedFiles (make (slice goobj/CUFileIndex) 0 (len (.-UsedFiles pc)))]
+      (range [f (.-UsedFiles pc)]
+        (set! usedFiles (append usedFiles f)))
+
+      (sort/Slice usedFiles ^{:go/end 483} (fn ^bool [^int i ^int j] (< (aget usedFiles i) (aget usedFiles j))))
+      (range [_ f usedFiles]
+        (when [filesym (.Lookup ctxt (aget files f))] (!= filesym nil)
+          (go/call fn fsym filesym)))
+
+
+      (range [_ call (.-nodes (.-InlTree pc))]
+        (when (!= (.-Func call) nil)
+          (go/call fn fsym (.-Func call))))
+
+
+
+      (let [auxsyms (lit (slice (* LSym)) (.-dwarfRangesSym fninfo) (.-dwarfLocSym fninfo) (.-dwarfDebugLinesSym fninfo) (.-dwarfInfoSym fninfo) (.-sehUnwindInfoSym fninfo))]
+        (when [wi (.-WasmImport fninfo)] (!= wi nil)
+          (set! auxsyms (append auxsyms (.-AuxSym wi))))
+
+        (when [we (.-WasmExport fninfo)] (!= we nil)
+          (set! auxsyms (append auxsyms (.-AuxSym we))))
+
+        (range [_ s auxsyms]
+          (when (or (== s nil) (== (.-Size s) 0))
+            (continue))
+
+          (go/call fn fsym s)
+          (when (!= (bit-and flag traverseRefs) 0)
+            (range [_ r (.-R s)]
+              (when (!= (.-Sym r) nil)
+                (go/call fn s (.-Sym r))))))))))
+
+
+
+
+
+
+
+^{:go/end 535} (go/method traverseAuxSyms "Traverse aux symbols, calling fn for each sym/aux pair.\n" [^{:tag (* Link)} ctxt ^traverseFlag flag ^{:tag (func [^{:tag (* LSym)} parent ^{:tag (* LSym)} aux])} fn]
+  (let [lists (lit (slice (slice (* LSym))) (.-Text ctxt) (.-Data ctxt))
+      ^{:line 520} files (.FileTable (.-PosTable ctxt))]
+    (range [_ list lists]
+      (range [_ s list]
+        (when (!= (.-Gotype s) nil)
+          (when (!= (bit-and flag traverseDefs) 0)
+            (go/call fn s (.-Gotype s))))
+
+
+        (if (.IsText (.-Type s))
+          (.traverseFuncAux ctxt flag s fn files)
+          (when [v (.VarInfo s)] (and (!= v nil) (!= (.-dwarfInfoSym v) nil))
+            (go/call fn s (.-dwarfInfoSym v))))))))

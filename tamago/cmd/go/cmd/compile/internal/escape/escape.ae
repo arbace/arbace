@@ -1,0 +1,676 @@
+;; Copyright 2018 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.cmd.compile.internal.escape) (go/file "escape.go" :imports [
+
+
+    ^{:line 8} [fmt "fmt"]
+    ^{:line 9} [constant "go/constant"]
+    ^{:line 10} [token "go/token"]
+    ^{:line 11} [goexperiment "internal/goexperiment"]
+
+    ^{:line 13} [base "cmd/compile/internal/base"]
+    ^{:line 14} [ir "cmd/compile/internal/ir"]
+    ^{:line 15} [logopt "cmd/compile/internal/logopt"]
+    ^{:line 16} [typecheck "cmd/compile/internal/typecheck"]
+    ^{:line 17} [types "cmd/compile/internal/types"]
+    ^{:line 18} [src "cmd/internal/src"]])
+
+
+;; Escape analysis.
+;;
+;; Here we analyze functions to determine which Go variables
+;; (including implicit allocations such as calls to "new" or "make",
+;; composite literals, etc.) can be allocated on the stack. The two
+;; key invariants we have to ensure are: (1) pointers to stack objects
+;; cannot be stored in the heap, and (2) pointers to a stack object
+;; cannot outlive that object (e.g., because the declaring function
+;; returned and destroyed the object's stack frame, or its space is
+;; reused across loop iterations for logically distinct variables).
+;;
+;; We implement this with a static data-flow analysis of the AST.
+;; First, we construct a directed weighted graph where vertices
+;; (termed "locations") represent variables allocated by statements
+;; and expressions, and edges represent assignments between variables
+;; (with weights representing addressing/dereference counts).
+;;
+;; Next we walk the graph looking for assignment paths that might
+;; violate the invariants stated above. If a variable v's address is
+;; stored in the heap or elsewhere that may outlive it, then v is
+;; marked as requiring heap allocation.
+;;
+;; To support interprocedural analysis, we also record data-flow from
+;; each function's parameters to the heap and to its result
+;; parameters. This information is summarized as "parameter tags",
+;; which are used at static call sites to improve escape analysis of
+;; function arguments.
+
+;; Constructing the location graph.
+;;
+;; Every allocating statement (e.g., variable declaration) or
+;; expression (e.g., "new" or "make") is first mapped to a unique
+;; "location."
+;;
+;; We also model every Go assignment as a directed edges between
+;; locations. The number of dereference operations minus the number of
+;; addressing operations is recorded as the edge's weight (termed
+;; "derefs"). For example:
+;;
+;;     p = &q    // -1
+;;     p = q     //  0
+;;     p = *q    //  1
+;;     p = **q   //  2
+;;
+;;     p = **&**&q  // 2
+;;
+;; Note that the & operator can only be applied to addressable
+;; expressions, and the expression &x itself is not addressable, so
+;; derefs cannot go below -1.
+;;
+;; Every Go language construct is lowered into this representation,
+;; generally without sensitivity to flow, path, or context; and
+;; without distinguishing elements within a compound variable. For
+;; example:
+;;
+;;     var x struct { f, g *int }
+;;     var u []*int
+;;
+;;     x.f = u[0]
+;;
+;; is modeled simply as
+;;
+;;     x = *u
+;;
+;; That is, we don't distinguish x.f from x.g, or u[0] from u[1],
+;; u[2], etc. However, we do record the implicit dereference involved
+;; in indexing a slice.
+
+
+
+(go/type batch "A batch holds escape analysis state that's shared across an entire\nbatch of functions being analyzed at once.\n" (struct
+    ^{:line 92 :tag (slice (* location))} allLocs
+    ^{:line 93 :tag (slice closure)} closures
+    ^{:line 94 :tag (map (* ir/Func) (* ir/ReassignOracle))} reassignOracles
+
+    ^{:line 96 :tag location} heapLoc
+    ^{:line 97 :tag location} mutatorLoc
+    ^{:line 98 :tag location} calleeLoc
+    ^{:line 99 :tag location} blankLoc))
+
+
+
+
+(go/type closure "A closure holds a closure expression and its spill hole (i.e.,\nwhere the hole representing storing into its closure record).\n" (struct
+    ^{:line 105 :tag hole} k
+    ^{:line 106 :tag (* ir/ClosureExpr)} clo))
+
+
+
+
+(go/type escape "An escape holds state specific to a single function being analyzed\nwithin a batch.\n" (struct
+    (* batch)
+
+    ^{:line 114 :tag (* ir/Func)} curfn ; function being analyzed
+
+    ^{:line 116 :tag (map (* types/Sym) labelState)} labels ; known labels
+
+
+
+
+
+    ^{:line 122 :tag int :doc "loopDepth counts the current loop nesting depth within\ncurfn. It increments within each \"for\" loop and at each\nlabel with a corresponding backwards \"goto\" (i.e.,\nunstructured loop).\n"} loopDepth))
+
+
+^{:go/end 134} (go/func Funcs [^{:tag (slice (* ir/Func))} all]
+  ;; Make a cache of ir.ReassignOracles. The cache is lazily populated.
+  ;; TODO(thepudds): consider adding a field on ir.Func instead. We might also be able
+  ;; to use that field elsewhere, like in walk. See discussion in https://go.dev/cl/688075.
+  (let [reassignOracles (make (map (* ir/Func) (* ir/ReassignOracle)))]
+
+    (ir/VisitFuncsBottomUp all ^{:go/end 133} (fn [^{:tag (slice (* ir/Func))} list ^bool recursive]
+        (Batch list reassignOracles)))))
+
+
+
+
+
+^{:go/end 181} (go/func Batch "Batch performs escape analysis on a minimal batch of\nfunctions.\n" [^{:tag (slice (* ir/Func))} fns ^{:tag (map (* ir/Func) (* ir/ReassignOracle))} reassignOracles]
+  (let [^batch b (zero batch)]
+    (set! (.-attrs (.-heapLoc b)) (bit-or attrEscapes attrPersists attrMutates attrCalls))
+    (set! (.-attrs (.-mutatorLoc b)) attrMutates)
+    (set! (.-attrs (.-calleeLoc b)) attrCalls)
+    (set! (.-reassignOracles b) reassignOracles)
+
+    ;; Construct data-flow graph from syntax trees.
+    (range [_ fn fns]
+      (when (> (.-W base/Flag) 1)
+        (let [s (fmt/Sprintf "\nbefore escape %v" fn)]
+          (ir/Dump s fn)))
+
+      (.initFunc b fn))
+
+    (range [_ fn fns]
+      (when (not (.IsClosure fn))
+        (.walkFunc b fn)))
+
+
+
+    ;; We've walked the function bodies, so we've seen everywhere a
+    ;; variable might be reassigned or have its address taken. Now we
+    ;; can decide whether closures should capture their free variables
+    ;; by value or reference.
+    (range [_ closure (.-closures b)]
+      (.flowClosure b (.-k closure) (.-clo closure)))
+
+    (set! (.-closures b) nil)
+
+    (range [_ loc (.-allLocs b)]
+      ;; Try to replace some non-constant expressions with literals.
+      (.rewriteWithLiterals b (.-n loc) (.-curfn loc))
+
+      ;; Check if the node must be heap allocated for certain reasons
+      ;; such as OMAKESLICE for a large slice.
+      (when [why (HeapAllocReason (.-n loc))] (!= why "")
+        (.flow b (.addr (.heapHole b) (.-n loc) why) loc)))
+
+
+
+    (.walkAll b)
+    (.finish b fns)))
+
+
+^{:go/end 189} (go/method with ^{:tag (* escape)} [^{:tag (* batch)} b ^{:tag (* ir/Func)} fn]
+  (addr ^{:go/breaks [2 4 6]} (lit escape
+      :batch b
+      :curfn fn
+      :loopDepth 1)))
+
+
+
+^{:go/end 218} (go/method initFunc [^{:tag (* batch)} b ^{:tag (* ir/Func)} fn]
+  (let [e (.with b fn)]
+    (when (!= ^{:go/via [miniNode]} (.Esc fn) escFuncUnknown)
+      (base/Fatalf "unexpected node: %v" fn))
+
+    ^{:go/via [miniNode]} (.SetEsc fn escFuncPlanned)
+    (when (> (.-LowerM base/Flag) 3)
+      (ir/Dump "escAnalyze" fn))
+
+
+    ;; Allocate locations for local variables.
+    (range [_ n (.-Dcl fn)]
+      (.newLoc e n true))
+
+
+    ;; Also for hidden parameters (e.g., the ".this" parameter to a
+    ;; method value wrapper).
+    (when (== (.-OClosure fn) nil)
+      (range [_ n (.-ClosureVars fn)]
+        (.newLoc e (.Canonical n) true)))
+
+
+
+    ;; Initialize resultIndex for result parameters.
+    (range [i f (.Results (.Type fn))]
+      (set! (.-resultIndex ^{:go/via [batch]} (.oldLoc e (assert (* ir/Name) (.-Nname f)))) (+ 1 i)))))
+
+
+
+^{:go/end 252} (go/method walkFunc [^{:tag (* batch)} b ^{:tag (* ir/Func)} fn]
+  (let [e (.with b fn)]
+    ^{:go/via [miniNode]} (.SetEsc fn escFuncStarted)
+
+    ;; Identify labels that mark the head of an unstructured loop.
+    (ir/Visit fn ^{:go/end 245} (fn [^ir/Node n]
+        (switch (.Op n)
+          (case [ir/OLABEL]
+            (let [n (assert (* ir/LabelStmt) n)]
+              (when (.IsBlank (.-Label n))
+                (break))
+
+              (when (== (.-labels e) nil)
+                (set! (.-labels e) (make (map (* types/Sym) labelState))))
+
+              (aset (.-labels e) (.-Label n) nonlooping)))
+
+          (case [ir/OGOTO]
+            ;; If we visited the label before the goto,
+            ;; then this is a looping label.
+            (let [n (assert (* ir/BranchStmt) n)]
+              (when (== (aget (.-labels e) (.-Label n)) nonlooping)
+                (aset (.-labels e) (.-Label n) looping)))))))
+
+
+
+
+    (.block e (.-Body fn))
+
+    (when (!= (len (.-labels e)) 0)
+      (base/FatalfAt ^{:go/via [miniNode]} (.Pos fn) "leftover labels after walkFunc"))))
+
+
+
+^{:go/end 286} (go/method flowClosure [^{:tag (* batch)} b ^hole k ^{:tag (* ir/ClosureExpr)} clo]
+  (range [_ cv (.-ClosureVars (.-Func clo))]
+    (let [n (.Canonical cv)
+        ^{:line 257} loc (.oldLoc b cv)]
+      (when (not (.-captured loc))
+        (base/FatalfAt ^{:go/via [miniExpr miniNode]} (.Pos cv) "closure variable never captured: %v" cv))
+
+
+      ;; Capture by value for variables <= 128 bytes that are never reassigned.
+      (.SetByval n (and (not (.-addrtaken loc)) (not (.-reassigned loc)) (<= (.Size ^{:go/via [miniExpr]} (.Type n)) 128)))
+      (when (not (.Byval n))
+        (.SetAddrtaken n true)
+        (when (== (.-Name (.Sym n)) typecheck/LocalDictName)
+          (base/FatalfAt ^{:go/via [miniExpr miniNode]} (.Pos n) "dictionary variable not captured by value")))
+
+
+
+      (when (> (.-LowerM base/Flag) 1)
+        (let [how "ref"]
+          (when (.Byval n)
+            (set! how "value"))
+
+          (base/WarnfAt ^{:go/via [miniExpr miniNode]} (.Pos n) "%v capturing by %s: %v (addr=%v assign=%v width=%d)" (.-Curfn n) how n (.-addrtaken loc) (.-reassigned loc) (.Size ^{:go/via [miniExpr]} (.Type n)))))
+
+
+      ;; Flow captured variables to closure.
+      (let [k k]
+        (when (not (.Byval cv))
+          (set! k (.addr k cv "reference")))
+
+        (.flow b (.note k cv "captured by a closure") loc)))))
+
+
+
+^{:go/end 388} (go/method finish [^{:tag (* batch)} b ^{:tag (slice (* ir/Func))} fns]
+  ;; Record parameter tags for package export data.
+  (range [_ fn fns]
+    ^{:go/via [miniNode]} (.SetEsc fn escFuncTagged)
+
+    (range [i param (.RecvParams (.Type fn))]
+      (set! (.-Note param) (.paramTag b fn (+ 1 i) param))))
+
+
+
+  (range [_ loc (.-allLocs b)]
+    (let [n (.-n loc)]
+      (when (== n nil)
+        (continue))
+
+
+      (when (== (.Op n) ir/ONAME)
+        (let [n (assert (* ir/Name) n)]
+          (set! (.-Opt n) nil)))
+
+
+      ;; Update n.Esc based on escape analysis results.
+
+      ;; Omit escape diagnostics for go/defer wrappers, at least for now.
+      ;; Historically, we haven't printed them, and test cases don't expect them.
+      ;; TODO(mdempsky): Update tests to expect this.
+      (let [goDeferWrapper (and (== (.Op n) ir/OCLOSURE) (.Wrapper (.-Func (assert (* ir/ClosureExpr) n))))]
+
+        (if (.hasAttr loc attrEscapes) (do
+            (if (== (.Op n) ir/ONAME) (do
+                (when (.-CompilingRuntime base/Flag)
+                  (base/ErrorfAt (.Pos n) 0 "%v escapes to heap, not allowed in runtime" n))
+
+                (when (!= (.-LowerM base/Flag) 0)
+                  (base/WarnfAt (.Pos n) "moved to heap: %v" n)))
+
+              (do
+                (when (and (!= (.-LowerM base/Flag) 0) (not goDeferWrapper))
+                  (if (== (.Op n) ir/OAPPEND)
+                    (base/WarnfAt (.Pos n) "append escapes to heap")
+
+                    (base/WarnfAt (.Pos n) "%v escapes to heap" n)))
+
+
+                (when (logopt/Enabled)
+                  (let [^{:tag (* ir/Func)} e_curfn (zero (* ir/Func))] ; TODO(mdempsky): Fix.
+                    (logopt/LogOpt (.Pos n) "escape" "escape" (ir/FuncName e_curfn))))))
+
+
+            (.SetEsc n ir/EscHeap))
+          (do
+            (when (and (!= (.-LowerM base/Flag) 0) (!= (.Op n) ir/ONAME) (not goDeferWrapper))
+              (if (== (.Op n) ir/OAPPEND)
+                (base/WarnfAt (.Pos n) "append does not escape")
+
+                (base/WarnfAt (.Pos n) "%v does not escape" n)))
+
+
+            (.SetEsc n ir/EscNone)
+            (when (not (.hasAttr loc attrPersists))
+              (switch (.Op n)
+                (case [ir/OCLOSURE]
+                  (let [n (assert (* ir/ClosureExpr) n)]
+                    ^{:go/via [miniExpr]} (.SetTransient n true)))
+                (case [ir/OMETHVALUE]
+                  (let [n (assert (* ir/SelectorExpr) n)]
+                    ^{:go/via [miniExpr]} (.SetTransient n true)))
+                (case [ir/OSLICELIT]
+                  (let [n (assert (* ir/CompLitExpr) n)]
+                    ^{:go/via [miniExpr]} (.SetTransient n true)))))))
+
+
+
+
+        ;; If the result of a string->[]byte conversion is never mutated,
+        ;; then it can simply reuse the string's memory directly.
+        (when (!= (.-ZeroCopy base/Debug) 0)
+          (when [(values n ok) (assert (* ir/ConvExpr) n)] (and ok (== ^{:go/via [miniExpr miniNode]} (.Op n) ir/OSTR2BYTES) (not (.hasAttr loc attrMutates)))
+            (when (>= (.-LowerM base/Flag) 1)
+              (base/WarnfAt ^{:go/via [miniExpr miniNode]} (.Pos n) "zero-copy string->[]byte conversion"))
+
+            (.SetOp n ir/OSTR2BYTESTMP))))))
+
+
+
+
+  (when goexperiment/RuntimeFreegc
+    ;; Look for specific patterns of usage, such as appends
+    ;; to slices that we can prove are not aliased.
+    (range [_ fn fns]
+      (let [a (lit aliasAnalysis)]
+        (.analyze a fn))))
+
+
+
+  (range [_ fn fns]
+    (when (ir/MatchAstDump fn "escape")
+      (ir/AstDump fn (+ "escape, " (ir/FuncName fn))))))
+
+
+
+
+
+
+
+
+
+^{:go/breaks [[5 402]] :go/end 403} (go/method inMutualBatch "inMutualBatch reports whether function fn is in the batch of\nmutually recursive functions being analyzed. When this is true,\nfn has not yet been analyzed, so its parameters and results\nshould be incorporated directly into the flow graph instead of\nrelying on its escape analysis tagging.\n" ^bool [^{:tag (* batch)} b ^{:tag (* ir/Name)} fn]
+  (when (and (!= (.-Defn fn) nil) (< (.Esc (.-Defn fn)) escFuncTagged))
+    (when (== (.Esc (.-Defn fn)) escFuncUnknown)
+      (base/FatalfAt ^{:go/via [miniExpr miniNode]} (.Pos fn) "graph inconsistency: %v" fn))
+
+    (return true))
+
+  false)
+
+
+(go/const
+  ^{:line 406} [^{:val 0} escFuncUnknown (+ 0 iota)]
+  ^{:line 407} [^{:val 1} escFuncPlanned]
+  ^{:line 408} [^{:val 2} escFuncStarted]
+  ^{:line 409} [^{:val 3} escFuncTagged])
+
+
+
+(go/type labelState "Mark labels that have no backjumps to them as not increasing e.loopdepth.\n" int)
+
+(go/const
+  ^{:line 416} [^{:tag labelState :val 1} looping (+ 1 iota)]
+  ^{:line 417} [^{:val 2} nonlooping])
+
+
+^{:go/end 509} (go/method paramTag ^string [^{:tag (* batch)} b ^{:tag (* ir/Func)} fn ^int narg ^{:tag (* types/Field)} f]
+  (let [name ^{:go/end 426} (fn ^string []
+        (when (!= (.-Nname f) nil)
+          (return (.-Name (.Sym (.-Nname f)))))
+
+        (fmt/Sprintf "arg#%d" narg))
+
+
+      ;; Only report diagnostics for user code;
+      ;; not for wrappers generated around them.
+      ;; TODO(mdempsky): Generalize this.
+      ^{:line 431} diagnose (and (!= (.-LowerM base/Flag) 0) (not (or (.Wrapper fn) (.Dupok fn))))]
+
+    (when (== (len (.-Body fn)) 0)
+      ;; Assume that uintptr arguments must be held live across the call.
+      ;; This is most important for syscall.Syscall.
+      ;; See golang.org/issue/13372.
+      ;; This really doesn't have much to do with escape analysis per se,
+      ;; but we are reusing the ability to annotate an individual function
+      ;; argument and pass those annotations along to importing code.
+      (set! (.-Pragma fn) bit-or ir/UintptrKeepAlive)
+
+      (when (.IsUintptr (.-Type f))
+        (when diagnose
+          (base/WarnfAt (.-Pos f) "assuming %v is unsafe uintptr" (name)))
+
+        (return ""))
+
+
+      (when (not (.HasPointers (.-Type f))) ; don't bother tagging for scalars
+        (return ""))
+
+
+      (let [^leaks esc (zero leaks)]
+
+        ;; External functions are assumed unsafe, unless
+        ;; //go:noescape is given before the declaration.
+        (if (!= (bit-and (.-Pragma fn) ir/Noescape) 0) (do
+            (when (and diagnose (!= (.-Sym f) nil))
+              (base/WarnfAt (.-Pos f) "%v does not escape" (name)))
+
+            (.AddMutator esc 0)
+            (.AddCallee esc 0))
+          (do
+            (when (and diagnose (!= (.-Sym f) nil))
+              (base/WarnfAt (.-Pos f) "leaking param: %v" (name)))
+
+            (.AddHeap esc 0)))
+
+
+        (return (.Encode esc))))
+
+
+    (when (!= (bit-and (.-Pragma fn) ir/UintptrEscapes) 0)
+      (when (.IsUintptr (.-Type f))
+        (when diagnose
+          (base/WarnfAt (.-Pos f) "marking %v as escaping uintptr" (name)))
+
+        (return ""))
+
+      (when (and (.IsDDD f) (.IsUintptr (.Elem (.-Type f))))
+        ;; final argument is ...uintptr.
+        (when diagnose
+          (base/WarnfAt (.-Pos f) "marking %v as escaping ...uintptr" (name)))
+
+        (return "")))
+
+
+
+    (when (not (.HasPointers (.-Type f))) ; don't bother tagging for scalars
+      (return ""))
+
+
+    ;; Unnamed parameters are unused and therefore do not escape.
+    (when (or (== (.-Sym f) nil) (.IsBlank (.-Sym f)))
+      (let [^leaks esc (zero leaks)]
+        (return (.Encode esc))))
+
+
+    (let [n (assert (* ir/Name) (.-Nname f))
+        ^{:line 500} loc (.oldLoc b n)
+        ^{:line 501} esc (.-paramEsc loc)]
+      (.Optimize esc)
+
+      (when (and diagnose (not (.hasAttr loc attrEscapes)))
+        (.reportLeaks b (.-Pos f) (name) esc (.Type fn)))
+
+
+      (.Encode esc))))
+
+
+^{:go/end 549} (go/method reportLeaks [^{:tag (* batch)} b ^src/XPos pos ^string name ^leaks esc ^{:tag (* types/Type)} sig]
+  (let [warned false]
+    (when [x (.Heap esc)] (>= x 0)
+      (if (== x 0)
+        (base/WarnfAt pos "leaking param: %v" name)
+
+        ;; TODO(mdempsky): Mention level=x like below?
+        (base/WarnfAt pos "leaking param content: %v" name))
+
+      (set! warned true))
+
+    (for [i 0] (< i numEscResults) (inc! i)
+      (when [x (.Result esc i)] (>= x 0)
+        (let [res (.-Name (.Sym (.-Nname (.Result sig i))))]
+          (base/WarnfAt pos "leaking param: %v to result %v level=%d" name res x)
+          (set! warned true))))
+
+
+
+    (when (<= (.-EscapeMutationsCalls base/Debug) 0)
+      (when (not warned)
+        (base/WarnfAt pos "%v does not escape" name))
+
+      (return))
+
+
+    (when [x (.Mutator esc)] (>= x 0)
+      (base/WarnfAt pos "mutates param: %v derefs=%v" name x)
+      (set! warned true))
+
+    (when [x (.Callee esc)] (>= x 0)
+      (base/WarnfAt pos "calls param: %v derefs=%v" name x)
+      (set! warned true))
+
+
+    (when (not warned)
+      (base/WarnfAt pos "%v does not escape, mutate, or call" name))))
+
+
+
+
+
+^{:go/end 637} (go/method rewriteWithLiterals "rewriteWithLiterals attempts to replace certain non-constant expressions\nwithin n with a literal if possible.\n" [^{:tag (* batch)} b ^ir/Node n ^{:tag (* ir/Func)} fn]
+  (when (or (== n nil) (== fn nil))
+    (return))
+
+
+  (let [assignTemp ^{:go/end 563} (fn [^src/XPos pos ^ir/Node n ^{:tag (* ir/Nodes)} init]
+        ;; Preserve any side effects of n by assigning it to an otherwise unused temp.
+        (let [tmp (typecheck/TempAt pos fn (.Type n))]
+          (.Append init (typecheck/Stmt (ir/NewDecl pos ir/ODCL tmp)))
+          (.Append init (typecheck/Stmt (ir/NewAssignStmt pos tmp n)))))]
+
+
+    (switch (.Op n)
+      (case [ir/OMAKESLICE]
+        ;; Check if we can replace a non-constant argument to make with
+        ;; a literal to allow for this slice to be stack allocated if otherwise allowed.
+        (let [n (assert (* ir/MakeExpr) n)
+
+            ^{:line 571} r (addr (.-Cap n))]
+          (when (== (.-Cap n) nil)
+            (set! r (addr (.-Len n))))
+
+
+          (when (!= (.Op @r) ir/OLITERAL)
+            ;; Look up a cached ReassignOracle for the function, lazily computing one if needed.
+            (let [ro (.reassignOracle b fn)]
+              (when (== ro nil)
+                (base/Fatalf "no ReassignOracle for function %v with closure parent %v" fn (.-ClosureParent fn)))
+
+
+              (let [s (.StaticValue ro @r)]
+                (switch (.Op s)
+                  (case [ir/OLITERAL]
+                    (let [(values lit ok) (assert (* ir/BasicLit) s)]
+                      (when (or (not ok) (!= (.Kind (.Val lit)) constant/Int))
+                        (base/Fatalf "unexpected BasicLit Kind"))
+
+                      (when (constant/Compare (.Val lit) token/GEQ (constant/MakeInt64 0))
+                        (when (not (.MatchPos base/LiteralAllocHash ^{:go/via [miniExpr miniNode]} (.Pos n) nil))
+                          ;; De-selected by literal alloc optimizations debug hash.
+                          (return))
+
+                        ;; Preserve any side effects of the original expression, then replace it.
+                        (assignTemp ^{:go/via [miniExpr miniNode]} (.Pos n) @r ^{:go/via [miniExpr]} (.PtrInit n))
+                        (set! @r (ir/NewBasicLit ^{:go/via [miniExpr miniNode]} (.Pos n) (.Type @r) (.Val lit))))))
+
+                  (case [ir/OLEN]
+                    (let [x (.StaticValue ro (.-X (assert (* ir/UnaryExpr) s)))]
+                      (when (== (.Op x) ir/OSLICELIT)
+                        (let [x (assert (* ir/CompLitExpr) x)]
+                          ;; Preserve any side effects of the original expression, then update the value.
+                          (assignTemp ^{:go/via [miniExpr miniNode]} (.Pos n) @r ^{:go/via [miniExpr]} (.PtrInit n))
+                          (set! @r (ir/NewBasicLit ^{:go/via [miniExpr miniNode]} (.Pos n) (aget types/Types types/TINT) (constant/MakeInt64 (.-Len x))))))))))))))
+
+
+
+      (case [ir/OCONVIFACE]
+        ;; Check if we can replace a non-constant expression in an interface conversion with
+        ;; a literal to avoid heap allocating the underlying interface value.
+        (let [conv (assert (* ir/ConvExpr) n)]
+          (when (and (!= (.Op (.-X conv)) ir/OLITERAL) (not (.IsInterface (.Type (.-X conv)))))
+            ;; TODO(thepudds): likely could avoid some work by tightening the check of conv.X's type.
+            ;; Look up a cached ReassignOracle for the function, lazily computing one if needed.
+            (let [ro (.reassignOracle b fn)]
+              (when (== ro nil)
+                (base/Fatalf "no ReassignOracle for function %v with closure parent %v" fn (.-ClosureParent fn)))
+
+              (let [v (.StaticValue ro (.-X conv))]
+                (when (and (!= v nil) (== (.Op v) ir/OLITERAL) (ir/ValidTypeForConst (.Type (.-X conv)) (.Val v)))
+                  (when (not (.MatchPos base/LiteralAllocHash (.Pos n) nil))
+                    ;; De-selected by literal alloc optimizations debug hash.
+                    (return))
+
+                  (when (>= (.-EscapeDebug base/Debug) 3)
+                    (base/WarnfAt (.Pos n) "rewriting OCONVIFACE value from %v (%v) to %v (%v)" (.-X conv) (.Type (.-X conv)) v (.Type v)))
+
+                  ;; Preserve any side effects of the original expression, then replace it.
+                  (assignTemp ^{:go/via [miniExpr miniNode]} (.Pos conv) (.-X conv) ^{:go/via [miniExpr]} (.PtrInit conv))
+                  (let [v (assert (* ir/BasicLit) v)]
+                    (set! (.-X conv) (ir/NewBasicLit ^{:go/via [miniExpr miniNode]} (.Pos conv) (.Type (.-X conv)) (.Val v)))
+                    (typecheck/Expr conv)))))))))))
+
+
+
+
+
+
+
+
+
+
+^{:go/end 677} (go/method reassignOracle "reassignOracle returns an initialized *ir.ReassignOracle for fn.\nIf fn is a closure, it returns the ReassignOracle for the ultimate parent.\n\nA new ReassignOracle is initialized lazily if needed, and the result\nis cached to reduce duplicative work of preparing a ReassignOracle.\n" ^{:tag (* ir/ReassignOracle)} [^{:tag (* batch)} b ^{:tag (* ir/Func)} fn]
+  (when [(values ro ok) (aget (.-reassignOracles b) fn)] ok
+    (return ro)) ; Hit.
+
+
+  ;; For closures, we want the ultimate parent's ReassignOracle,
+  ;; so walk up the parent chain, if any.
+  (let [f fn]
+    (while (and (!= (.-ClosureParent f) nil) (not (.IsPackageInit (.-ClosureParent f))))
+      (set! f (.-ClosureParent f)))
+
+
+    (when (!= f fn)
+      ;; We found a parent.
+      (let [ro (aget (.-reassignOracles b) f)]
+        (when (!= ro nil)
+          ;; Hit, via a parent. Before returning, store this ro for the original fn as well.
+          (aset (.-reassignOracles b) fn ro)
+          (return ro))))
+
+
+
+    ;; Miss. We did not find a ReassignOracle for fn or a parent, so lazily create one.
+    (let [ro (addr (lit ir/ReassignOracle))]
+      (.Init ro f)
+
+      ;; Cache the answer for the original fn.
+      (aset (.-reassignOracles b) fn ro)
+      (when (!= f fn)
+        ;; Cache for the parent as well.
+        (aset (.-reassignOracles b) f ro))
+
+      ^{:line 676} ro)))

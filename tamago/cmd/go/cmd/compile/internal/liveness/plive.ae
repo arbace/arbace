@@ -1,0 +1,1608 @@
+;; Copyright 2013 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; Garbage collector liveness bitmap generation.
+
+;; The command line flag -live causes this code to print debug information.
+;; The levels are:
+;;
+;;	-live (aka -live=1): print liveness lists as code warnings at safe points
+;;	-live=2: print an assembly listing with liveness annotations
+;;
+;; Each level includes the earlier output as well.
+
+(in-ns 'go.cmd.compile.internal.liveness) (go/file "plive.go" :imports [
+
+
+    ^{:line 18} [cmp "cmp"]
+    ^{:line 19} [fmt "fmt"]
+    ^{:line 20} [math "math"]
+    ^{:line 21} [os "os"]
+    ^{:line 22} [slices "slices"]
+    ^{:line 23} [sort "sort"]
+    ^{:line 24} [strings "strings"]
+
+    ^{:line 26} [abi "cmd/compile/internal/abi"]
+    ^{:line 27} [base "cmd/compile/internal/base"]
+    ^{:line 28} [bitvec "cmd/compile/internal/bitvec"]
+    ^{:line 29} [ir "cmd/compile/internal/ir"]
+    ^{:line 30} [objw "cmd/compile/internal/objw"]
+    ^{:line 31} [reflectdata "cmd/compile/internal/reflectdata"]
+    ^{:line 32} [ssa "cmd/compile/internal/ssa"]
+    ^{:line 33} [typebits "cmd/compile/internal/typebits"]
+    ^{:line 34} [types "cmd/compile/internal/types"]
+    ^{:line 35} [hash "cmd/internal/hash"]
+    ^{:line 36} [obj "cmd/internal/obj"]
+    ^{:line 37} [src "cmd/internal/src"]
+
+    ^:alias ^{:line 39} [rtabi "internal/abi"]])
+
+
+;; OpVarDef is an annotation for the liveness analysis, marking a place
+;; where a complete initialization (definition) of a variable begins.
+;; Since the liveness analysis can see initialization of single-word
+;; variables quite easy, OpVarDef is only needed for multi-word
+;; variables satisfying isfat(n.Type). For simplicity though, buildssa
+;; emits OpVarDef regardless of variable width.
+;;
+;; An 'OpVarDef x' annotation in the instruction stream tells the liveness
+;; analysis to behave as though the variable x is being initialized at that
+;; point in the instruction stream. The OpVarDef must appear before the
+;; actual (multi-instruction) initialization, and it must also appear after
+;; any uses of the previous value, if any. For example, if compiling:
+;;
+;;	x = x[1:]
+;;
+;; it is important to generate code like:
+;;
+;;	base, len, cap = pieces of x[1:]
+;;	OpVarDef x
+;;	x = {base, len, cap}
+;;
+;; If instead the generated code looked like:
+;;
+;;	OpVarDef x
+;;	base, len, cap = pieces of x[1:]
+;;	x = {base, len, cap}
+;;
+;; then the liveness analysis would decide the previous value of x was
+;; unnecessary even though it is about to be used by the x[1:] computation.
+;; Similarly, if the generated code looked like:
+;;
+;;	base, len, cap = pieces of x[1:]
+;;	x = {base, len, cap}
+;;	OpVarDef x
+;;
+;; then the liveness analysis will not preserve the new value of x, because
+;; the OpVarDef appears to have "overwritten" it.
+;;
+;; OpVarDef is a bit of a kludge to work around the fact that the instruction
+;; stream is working on single-word values but the liveness analysis
+;; wants to work on individual variables, which might be multi-word
+;; aggregates. It might make sense at some point to look into letting
+;; the liveness analysis work on single-word values as well, although
+;; there are complications around interface values, slices, and strings,
+;; all of which cannot be treated as individual words.
+
+
+(go/type blockEffects "blockEffects summarizes the liveness effects on an SSA block.\n" (struct
+
+
+
+
+
+    ^{:line 95 :tag bitvec/BitVec :doc "Computed during Liveness.prologue using only the content of\nindividual blocks:\n\n\tuevar: upward exposed variables (used before set in block)\n\tvarkill: killed variables (set in block)\n"} uevar
+    ^{:line 96 :tag bitvec/BitVec} varkill
+
+
+
+
+
+    ^{:line 102 :tag bitvec/BitVec :doc "Computed during Liveness.solve using control flow information:\n\n\tlivein: variables live at block entry\n\tliveout: variables live at block exit\n"} livein
+    ^{:line 103 :tag bitvec/BitVec} liveout))
+
+
+
+(go/type Liveness "A collection of global state used by Liveness analysis.\n" (struct
+    ^{:line 108 :tag (* ir/Func)} fn
+    ^{:line 109 :tag (* ssa/Func)} f
+    ^{:line 110 :tag (slice (* ir/Name))} vars
+    ^{:line 111 :tag (map (* ir/Name) int32)} idx
+    ^{:line 112 :tag int64} stkptrsize
+
+    ^{:line 114 :tag (slice blockEffects)} be
+
+
+
+    ^{:line 118 :tag bool :doc "allUnsafe indicates that all points in this function are\nunsafe-points.\n"} allUnsafe
+
+
+    ^{:line 121 :tag bitvec/BitVec :doc "unsafePoints bit i is set if Value ID i is an unsafe-point\n(preemption is not allowed). Only valid if !allUnsafe.\n"} unsafePoints
+
+
+
+    ^{:line 125 :tag bitvec/BitVec :doc "unsafeBlocks bit i is set if Block ID i is an unsafe-point\n(preemption is not allowed on any end-of-block\ninstructions). Only valid if !allUnsafe.\n"} unsafeBlocks
+
+
+
+
+
+
+    ^{:line 132 :tag (slice bitvec/BitVec) :doc "An array with a bit vector for each safe point in the\ncurrent Block during liveness.epilogue. Indexed in Value\norder for that block. Additionally, for the entry block\nlivevars[0] is the entry bitmap. liveness.compact moves\nthese to stackMaps.\n"} livevars
+
+
+
+    ^{:line 136 :tag Map :doc "livenessMap maps from safe points (i.e., CALLs) to their\nliveness map indexes.\n"} livenessMap
+    ^{:line 137 :tag bvecSet} stackMapSet
+    ^{:line 138 :tag (slice bitvec/BitVec)} stackMaps
+
+    ^{:line 140 :tag progeffectscache} cache
+
+
+
+
+    ^{:line 145 :tag (map (* ir/Name) bool) :doc "partLiveArgs includes input arguments (PPARAM) that may\nbe partially live. That is, it is considered live because\na part of it is used, but we may not initialize all parts.\n"} partLiveArgs
+
+    ^{:line 147 :tag bool} doClobber ; Whether to clobber dead stack slots in this function.
+    ^{:line 148 :tag bool} noClobberArgs ; Do not clobber function arguments
+
+
+
+
+    ^{:line 153 :tag bool :doc "treat \"dead\" writes as equivalent to reads during the analysis;\nused only during liveness analysis for stack slot merging (doesn't\nmake sense for stackmap analysis).\n"} conservativeWrites))
+
+
+
+
+
+(go/type Map "Map maps from *ssa.Value to StackMapIndex.\nAlso keeps track of unsafe ssa.Values and ssa.Blocks.\n(unsafe = can't be interrupted during GC.)\n" (struct
+    ^{:line 160 :tag (map ssa/ID objw/StackMapIndex)} Vals
+    ^{:line 161 :tag (map ssa/ID bool)} UnsafeVals
+    ^{:line 162 :tag (map ssa/ID bool)} UnsafeBlocks
+
+
+    ^{:line 165 :tag objw/StackMapIndex :doc "The set of live, pointer-containing variables at the DeferReturn\ncall (only set when open-coded defers are used).\n"} DeferReturn))
+
+
+^{:go/end 179} (go/method reset [^{:tag (* Map)} m]
+  (if (== (.-Vals m) nil) (do
+      (set! (.-Vals m) (make (map ssa/ID objw/StackMapIndex)))
+      (set! (.-UnsafeVals m) (make (map ssa/ID bool)))
+      (set! (.-UnsafeBlocks m) (make (map ssa/ID bool))))
+    (do
+      (clear (.-Vals m))
+      (clear (.-UnsafeVals m))
+      (clear (.-UnsafeBlocks m))))
+
+  (set! (.-DeferReturn m) objw/StackMapDontCare))
+
+
+^{:go/end 183} (go/method set [^{:tag (* Map)} m ^{:tag (* ssa/Value)} v ^objw/StackMapIndex i]
+  (aset (.-Vals m) (.-ID v) i))
+
+^{:go/end 186} (go/method setUnsafeVal [^{:tag (* Map)} m ^{:tag (* ssa/Value)} v]
+  (aset (.-UnsafeVals m) (.-ID v) true))
+
+^{:go/end 189} (go/method setUnsafeBlock [^{:tag (* Map)} m ^{:tag (* ssa/Block)} b]
+  (aset (.-UnsafeBlocks m) (.-ID b) true))
+
+
+^{:go/end 197} (go/method Get ^objw/StackMapIndex [^Map m ^{:tag (* ssa/Value)} v]
+  ;; If v isn't in the map, then it's a "don't care".
+  (when [(values idx ok) (aget (.-Vals m) (.-ID v))] ok
+    (return idx))
+
+  ^{:line 196} objw/StackMapDontCare)
+
+^{:go/end 201} (go/method GetUnsafe ^bool [^Map m ^{:tag (* ssa/Value)} v]
+  ;; default is safe
+  (aget (.-UnsafeVals m) (.-ID v)))
+
+^{:go/end 205} (go/method GetUnsafeBlock ^bool [^Map m ^{:tag (* ssa/Block)} b]
+  ;; default is safe
+  (aget (.-UnsafeBlocks m) (.-ID b)))
+
+
+(go/type progeffectscache (struct
+    ^{:line 208 :tag (slice int32)} retuevar
+    ^{:line 209 :tag (slice int32)} tailuevar
+    ^{:line 210 :tag bool} initialized))
+
+
+
+
+
+
+
+
+^{:go/end 221} (go/func shouldTrack "shouldTrack reports whether the liveness analysis\nshould track the variable n.\nWe don't care about variables that have no pointers,\nnor do we care about non-local variables,\nnor do we care about empty structs (handled by the pointer check),\nnor do we care about the fake PAUTOHEAP variables.\n" ^bool [^{:tag (* ir/Name)} n]
+  (and ^:go/paren (or (and (== (.-Class n) ir/PAUTO) (!= ^{:go/via [miniExpr miniNode]} (.Esc n) ir/EscHeap)) (== (.-Class n) ir/PPARAM) (== (.-Class n) ir/PPARAMOUT)) (.HasPointers ^{:go/via [miniExpr]} (.Type n))))
+
+
+
+
+^{:go/end 237} (go/func getvariables "getvariables returns the list of on-stack variables that we need to track\nand a map for looking up indices by *Node.\n" [^{:tag (* ir/Func)} fn] :results [(slice (* ir/Name)) (map (* ir/Name) int32)]
+  (let [^{:tag (slice (* ir/Name))} vars (zero (slice (* ir/Name)))]
+    (range [_ n (.-Dcl fn)]
+      (when (shouldTrack n)
+        (set! vars (append vars n))))
+
+
+    (let [idx (make (map (* ir/Name) int32) (len vars))]
+      (range [i n vars]
+        (aset idx n (conv int32 i)))
+
+      (return vars idx))))
+
+
+^{:go/end 264} (go/method initcache [^{:tag (* Liveness)} lv]
+  (when (.-initialized (.-cache lv))
+    (base/Fatalf "liveness cache initialized twice")
+    (return))
+
+  (set! (.-initialized (.-cache lv)) true)
+
+  (range [i node (.-vars lv)]
+    (switch (.-Class node)
+      (case [ir/PPARAM]
+        ;; A return instruction with a p.to is a tail return, which brings
+        ;; the stack pointer back up (if it ever went down) and then jumps
+        ;; to a new function entirely. That form of instruction must read
+        ;; all the parameters for correctness, and similarly it must not
+        ;; read the out arguments - they won't be set until the new
+        ;; function runs.
+        (set! (.-tailuevar (.-cache lv)) (append (.-tailuevar (.-cache lv)) (conv int32 i))))
+
+      (case [ir/PPARAMOUT]
+        ;; All results are live at every return point.
+        ;; Note that this point is after escaping return values
+        ;; are copied back to the stack using their PAUTOHEAP references.
+        (set! (.-retuevar (.-cache lv)) (append (.-retuevar (.-cache lv)) (conv int32 i)))))))
+
+
+
+
+
+
+
+
+
+
+
+
+
+(go/type liveEffect "A liveEffect is a set of flags that describe an instruction's\nliveness effects on a variable.\n\nThe possible flags are:\n\n\tuevar - used by the instruction\n\tvarkill - killed by the instruction (set)\n\nA kill happens after the use (for an instruction that updates a value, for example).\n" int)
+
+(go/const
+  ^{:line 278} [^{:tag liveEffect :val 1} uevar (<< 1 iota)]
+  ^{:line 279} [^{:val 2} varkill])
+
+
+
+
+
+^{:go/end 333} (go/method valueEffects "valueEffects returns the index of a variable in lv.vars and the\nliveness effects v has on that variable.\nIf v does not affect any tracked variables, it returns -1, 0.\n" [^{:tag (* Liveness)} lv ^{:tag (* ssa/Value)} v] :results [int32 liveEffect]
+  (let [(values n e) (affectedVar v)]
+    (when (or (== e 0) (== n nil)) ; cheapest checks first
+      (return -1 0))
+
+    ;; AllocFrame has dropped unused variables from
+    ;; lv.fn.Func.Dcl, but they might still be referenced by
+    ;; OpVarFoo pseudo-ops. Ignore them to prevent "lost track of
+    ;; variable" ICEs (issue 19632).
+    (switch (.-Op v)
+      (case [ssa/OpVarDef ssa/OpVarLive ssa/OpKeepAlive]
+        (when (not (.Used n))
+          (return -1 0))))
+
+
+
+    (when (and (== (.-Class n) ir/PPARAM) (not (.Addrtaken n)) (> (.Size ^{:go/via [miniExpr]} (.Type n)) (conv int64 types/PtrSize)))
+      ;; Only aggregate-typed arguments that are not address-taken can be
+      ;; partially live.
+      (aset (.-partLiveArgs lv) n true))
+
+
+    (let [^liveEffect effect (zero liveEffect)]
+      ;; Read is a read, obviously.
+      ;;
+      ;; Addr is a read also, as any subsequent holder of the pointer must be able
+      ;; to see all the values (including initialization) written so far.
+      ;; This also prevents a variable from "coming back from the dead" and presenting
+      ;; stale pointers to the garbage collector. See issue 28445.
+      (when (!= (bit-and e (bit-or ssa/SymRead ssa/SymAddr)) 0)
+        (set! effect bit-or uevar))
+
+      (when (!= (bit-and e ssa/SymWrite) 0)
+        (cond (or (not (isfat ^{:go/via [miniExpr]} (.Type n))) (== (.-Op v) ssa/OpVarDef))
+          (set! effect bit-or varkill)
+          (.-conservativeWrites lv)
+          (set! effect bit-or uevar)))
+
+
+
+      (when (== effect 0)
+        (return -1 0))
+
+
+      (when [(values pos ok) (aget (.-idx lv) n)] ok
+        (return pos effect))
+
+      (return -1 0))))
+
+
+
+^{:go/end 386} (go/func affectedVar "affectedVar returns the *ir.Name node affected by v.\n" [^{:tag (* ssa/Value)} v] :results [(* ir/Name) ssa/SymEffect]
+  ;; Special cases.
+  (switch (.-Op v)
+    (case [ssa/OpLoadReg]
+      (let [(values n _) (ssa/AutoVar (aget (.-Args v) 0))]
+        (return n ssa/SymRead)))
+    (case [ssa/OpStoreReg]
+      (let [(values n _) (ssa/AutoVar v)]
+        (return n ssa/SymWrite)))
+
+    (case [ssa/OpArgIntReg]
+      ;; This forces the spill slot for the register to be live at function entry.
+      ;; one of the following holds for a function F with pointer-valued register arg X:
+      ;;  0. No GC (so an uninitialized spill slot is okay)
+      ;;  1. GC at entry of F.  GC is precise, but the spills around morestack initialize X's spill slot
+      ;;  2. Stack growth at entry of F.  Same as GC.
+      ;;  3. GC occurs within F itself.  This has to be from preemption, and thus GC is conservative.
+      ;;     a. X is in a register -- then X is seen, and the spill slot is also scanned conservatively.
+      ;;     b. X is spilled -- the spill slot is initialized, and scanned conservatively
+      ;;     c. X is not live -- the spill slot is scanned conservatively, and it may contain X from an earlier spill.
+      ;;  4. GC within G, transitively called from F
+      ;;    a. X is live at call site, therefore is spilled, to its spill slot (which is live because of subsequent LoadReg).
+      ;;    b. X is not live at call site -- but neither is its spill slot.
+      (let [(values n _) (ssa/AutoVar v)]
+        (return n ssa/SymRead)))
+
+    (case [ssa/OpVarLive]
+      (return (assert (* ir/Name) (.-Aux v)) ssa/SymRead))
+    (case [ssa/OpVarDef]
+      (return (assert (* ir/Name) (.-Aux v)) ssa/SymWrite))
+    (case [ssa/OpKeepAlive]
+      (let [(values n _) (ssa/AutoVar (aget (.-Args v) 0))]
+        (return n ssa/SymRead))))
+
+
+  (let [e (.SymEffect (.-Op v))]
+    (when (== e 0)
+      (return nil 0))
+
+
+    (type-switch [a (.-Aux v)]
+      (case [nil (* obj/LSym)]
+        ;; ok, but no node
+        (return nil e))
+      (case [(* ir/Name)]
+        (return a e))
+      (default
+        (base/Fatalf "weird aux: %s" (.LongString v))
+        (return nil e)))))
+
+
+
+(go/type livenessFuncCache (struct
+    ^{:line 389 :tag (slice blockEffects)} be
+    ^{:line 390 :tag Map} livenessMap))
+
+
+
+
+
+^{:go/end 449} (go/func newliveness "Constructs a new liveness structure used to hold the global state of the\nliveness computation. The cfg argument is a slice of *BasicBlocks and the\nvars argument is a slice of *Nodes.\n" ^{:tag (* Liveness)} [^{:tag (* ir/Func)} fn ^{:tag (* ssa/Func)} f ^{:tag (slice (* ir/Name))} vars ^{:tag (map (* ir/Name) int32)} idx ^int64 stkptrsize]
+  (let [lv (addr ^{:go/breaks [2 4 6 8 10]} (lit Liveness
+          :fn fn
+          :f f
+          :vars vars
+          :idx idx
+          :stkptrsize stkptrsize))]
+
+
+    ;; Significant sources of allocation are kept in the ssa.Cache
+    ;; and reused. Surprisingly, the bit vectors themselves aren't
+    ;; a major source of allocation, but the liveness maps are.
+    (if [(values lc _) (assert (* livenessFuncCache) (.-Liveness (.-Cache f)))] (== lc nil)
+      ;; Prep the cache so liveness can fill it later.
+      (set! (.-Liveness (.-Cache f)) (new livenessFuncCache))
+      (do
+        (when (>= (cap (.-be lc)) (.NumBlocks f))
+          (set! (.-be lv) (subslice (.-be lc) _ (.NumBlocks f))))
+
+        (set! (.-livenessMap lv) ^{:go/breaks [2 4 6 8]} (lit Map
+            :Vals (.-Vals (.-livenessMap lc))
+            :UnsafeVals (.-UnsafeVals (.-livenessMap lc))
+            :UnsafeBlocks (.-UnsafeBlocks (.-livenessMap lc))
+            :DeferReturn objw/StackMapDontCare))
+
+        (set! (.-Vals (.-livenessMap lc)) nil)
+        (set! (.-UnsafeVals (.-livenessMap lc)) nil)
+        (set! (.-UnsafeBlocks (.-livenessMap lc)) nil)))
+
+    (when (== (.-be lv) nil)
+      (set! (.-be lv) (make (slice blockEffects) (.NumBlocks f))))
+
+
+    (let [nblocks (conv int32 (len (.-Blocks f)))
+        ^{:line 430} nvars (conv int32 (len vars))
+        ^{:line 431} bulk (bitvec/NewBulk nvars (* nblocks 4))]
+      (range [_ b (.-Blocks f)]
+        (let [be (.blockEffects lv b)]
+
+          (set! (.-uevar be) (.Next bulk))
+          (set! (.-varkill be) (.Next bulk))
+          (set! (.-livein be) (.Next bulk))
+          (set! (.-liveout be) (.Next bulk))))
+
+      (.reset (.-livenessMap lv))
+
+      (.markUnsafePoints lv)
+
+      (set! (.-partLiveArgs lv) (make (map (* ir/Name) bool)))
+
+      (.enableClobber lv)
+
+      ^{:line 448} lv)))
+
+
+^{:go/end 453} (go/method blockEffects ^{:tag (* blockEffects)} [^{:tag (* Liveness)} lv ^{:tag (* ssa/Block)} b]
+  (addr (aget (.-be lv) (.-ID b))))
+
+
+
+
+
+^{:go/end 490} (go/method pointerMap "Generates live pointer value maps for arguments and local variables. The\nthis argument and the in arguments are always assumed live. The vars\nargument is a slice of *Nodes.\n" [^{:tag (* Liveness)} lv ^bitvec/BitVec liveout ^{:tag (slice (* ir/Name))} vars ^bitvec/BitVec args ^bitvec/BitVec locals]
+  (let [^{:tag (map int64 (* ir/Name))} slotsSeen (zero (map int64 (* ir/Name)))
+      ^{:line 460} checkForDuplicateSlots (!= (.-MergeLocals base/Debug) 0)]
+    (when checkForDuplicateSlots
+      (set! slotsSeen (make (map int64 (* ir/Name)))))
+
+    (for [i (conv int32 0)] _ (inc! i)
+      (set! i (.Next liveout i))
+      (when (< i 0)
+        (break))
+
+      (let [node (aget vars i)]
+        (switch (.-Class node)
+          (case [ir/PPARAM ir/PPARAMOUT]
+            (when (not (.IsOutputParamInRegisters node))
+              (when (< (.FrameOffset node) 0)
+                (.Fatalf (.-f lv) "Node %v has frameoffset %d\n" (.-Name (.Sym node)) (.FrameOffset node)))
+
+              (typebits/SetNoCheck ^{:go/via [miniExpr]} (.Type node) (.FrameOffset node) args)
+              (break))
+
+            (fallthrough)) ; PPARAMOUT in registers acts memory-allocates like an AUTO
+          (case [ir/PAUTO]
+            (when checkForDuplicateSlots
+              (when [(values prev ok) (aget slotsSeen (.FrameOffset node))] ok
+                (base/FatalfAt ^{:go/via [miniExpr miniNode]} (.Pos node) "two vars live at pointerMap generation: %q and %q" (.-Name (.Sym prev)) (.-Name (.Sym node))))
+
+              (aset slotsSeen (.FrameOffset node) node))
+
+            (typebits/Set ^{:go/via [miniExpr]} (.Type node) (+ (.FrameOffset node) (.-stkptrsize lv)) locals)))))))
+
+
+
+
+
+
+^{:go/end 505} (go/func IsUnsafe "IsUnsafe indicates that all points in this function are\nunsafe-points.\n" ^bool [^{:tag (* ssa/Func)} f]
+  ;; The runtime assumes the only safe-points are function
+  ;; prologues (because that's how it used to be). We could and
+  ;; should improve that, but for now keep consider all points
+  ;; in the runtime unsafe. obj will add prologues and their
+  ;; safe-points.
+  ;;
+  ;; go:nosplit functions are similar. Since safe points used to
+  ;; be coupled with stack checks, go:nosplit often actually
+  ;; means "no safe points in this function".
+  (or (.-CompilingRuntime base/Flag) (.-NoSplit f)))
+
+
+
+^{:go/end 644} (go/method markUnsafePoints "markUnsafePoints finds unsafe points and computes lv.unsafePoints.\n" [^{:tag (* Liveness)} lv]
+  (when (IsUnsafe (.-f lv))
+    ;; No complex analysis necessary.
+    (set! (.-allUnsafe lv) true)
+    (return))
+
+
+  (set! (.-unsafePoints lv) (bitvec/New (conv int32 (.NumValues (.-f lv)))))
+  (set! (.-unsafeBlocks lv) (bitvec/New (conv int32 (.NumBlocks (.-f lv)))))
+
+  ;; Mark architecture-specific unsafe points.
+  (range [_ b (.-Blocks (.-f lv))]
+    (range [_ v (.-Values b)]
+      (when (.UnsafePoint (.-Op v))
+        (.Set (.-unsafePoints lv) (conv int32 (.-ID v))))))
+
+
+
+
+  (range [_ b (.-Blocks (.-f lv))]
+    (range [_ v (.-Values b)]
+      (when (!= (.-Op v) ssa/OpWBend)
+        (continue))
+
+      ;; WBend appears at the start of a block, like this:
+      ;;    ...
+      ;;    if wbEnabled: goto C else D
+      ;; C:
+      ;;    ... some write barrier enabled code ...
+      ;;    goto B
+      ;; D:
+      ;;    ... some write barrier disabled code ...
+      ;;    goto B
+      ;; B:
+      ;;    m1 = Phi mem_C mem_D
+      ;;    m2 = store operation ... m1
+      ;;    m3 = store operation ... m2
+      ;;    m4 = WBend m3
+
+      ;; Find first memory op in the block, which should be a Phi.
+      (let [m v]
+        (while true
+          (set! m (.MemoryArg m))
+          (when (!= (.-Block m) b)
+            (.Fatalf (.-f lv) "can't find Phi before write barrier end mark %v" v))
+
+          (when (== (.-Op m) ssa/OpPhi)
+            (break)))
+
+
+        ;; Find the two predecessor blocks (write barrier on and write barrier off)
+        (when (!= (len (.-Args m)) 2)
+          (.Fatalf (.-f lv) "phi before write barrier end mark has %d args, want 2" (len (.-Args m))))
+
+        (let [c (.Block (aget (.-Preds b) 0))
+            ^{:line 563} d (.Block (aget (.-Preds b) 1))
+
+            ;; Find their common predecessor block (the one that branches based on wb on/off).
+            ;; It might be a diamond pattern, or one of the blocks in the diamond pattern might
+            ;; be missing.
+            ^{:line 568 :tag (* ssa/Block)} decisionBlock (zero (* ssa/Block))]
+          (cond (and (== (len (.-Preds c)) 1) (== (.Block (aget (.-Preds c) 0)) d))
+            (set! decisionBlock d)
+            (and (== (len (.-Preds d)) 1) (== (.Block (aget (.-Preds d) 0)) c))
+            (set! decisionBlock c)
+            (and (== (len (.-Preds c)) 1) (== (len (.-Preds d)) 1) (== (.Block (aget (.-Preds c) 0)) (.Block (aget (.-Preds d) 0))))
+            (set! decisionBlock (.Block (aget (.-Preds c) 0))) :else
+
+            (.Fatalf (.-f lv) "can't find write barrier pattern %v" v))
+
+          (when (!= (len (.-Succs decisionBlock)) 2)
+            (.Fatalf (.-f lv) "common predecessor block the wrong type %s" (.-Kind decisionBlock)))
+
+
+          ;; Flow backwards from the control value to find the
+          ;; flag load. We don't know what lowered ops we're
+          ;; looking for, but all current arches produce a
+          ;; single op that does the memory load from the flag
+          ;; address, so we look for that.
+          (let [^{:tag (* ssa/Value)} load (zero (* ssa/Value))
+              ^{:line 588} v (aget (.-Controls decisionBlock) 0)]
+            (while true
+              (when (!= (.MemoryArg v) nil)
+                ;; Single instruction to load (and maybe compare) the write barrier flag.
+                (when [(values sym ok) (assert (* obj/LSym) (.-Aux v))] (and ok (== sym (.-WriteBarrier ir/Syms)))
+                  (set! load v)
+                  (break))
+
+                ;; Some architectures have to materialize the address separate from
+                ;; the load.
+                (when [(values sym ok) (assert (* obj/LSym) (.-Aux (aget (.-Args v) 0)))] (and ok (== sym (.-WriteBarrier ir/Syms)))
+                  (set! load v)
+                  (break))
+
+                (.Fatalf v "load of write barrier flag not from correct global: %s" (.LongString v)))
+
+              ;; Common case: just flow backwards.
+              (when (or (== (len (.-Args v)) 1) (and (== (len (.-Args v)) 2) (== (aget (.-Args v) 0) (aget (.-Args v) 1))))
+                ;; Note: 386 lowers Neq32 to (TESTL cond cond),
+                (set! v (aget (.-Args v) 0))
+                (continue))
+
+              (.Fatalf v "write barrier control value has more than one argument: %s" (.LongString v)))
+
+
+            ;; Mark everything after the load unsafe.
+            (let [found false]
+              (range [_ v (.-Values decisionBlock)]
+                (when found
+                  (.Set (.-unsafePoints lv) (conv int32 (.-ID v))))
+
+                (set! found (or found (== v load))))
+
+              (.Set (.-unsafeBlocks lv) (conv int32 (.-ID decisionBlock)))
+
+              ;; Mark the write barrier on/off blocks as unsafe.
+              (range [_ e (.-Succs decisionBlock)]
+                (let [x (.Block e)]
+                  (when (== x b)
+                    (continue))
+
+                  (range [_ v (.-Values x)]
+                    (.Set (.-unsafePoints lv) (conv int32 (.-ID v))))
+
+                  (.Set (.-unsafeBlocks lv) (conv int32 (.-ID x)))))
+
+
+              ;; Mark from the join point up to the WBend as unsafe.
+              (range [_ v (.-Values b)]
+                (when (== (.-Op v) ssa/OpWBend)
+                  (break))
+
+                (.Set (.-unsafePoints lv) (conv int32 (.-ID v)))))))))))
+
+
+
+
+
+
+
+
+
+
+^{:go/breaks [[6 661]] :go/end 662} (go/method hasStackMap "Returns true for instructions that must have a stack map.\n\nThis does not necessarily mean the instruction is a safe-point. In\nparticular, call Values can have a stack map in case the callee\ngrows the stack, but not themselves be a safe-point.\n" ^bool [^{:tag (* Liveness)} lv ^{:tag (* ssa/Value)} v]
+  (when (not (.IsCall (.-Op v)))
+    (return false))
+
+  ;; wbZero and wbCopy are write barriers and
+  ;; deeply non-preemptible. They are unsafe points and
+  ;; hence should not have liveness maps.
+  (when [(values sym ok) (assert (* ssa/AuxCall) (.-Aux v))] (and ok ^:go/paren (or (== (.-Fn sym) (.-WBZero ir/Syms)) (== (.-Fn sym) (.-WBMove ir/Syms))))
+    (return false))
+
+  true)
+
+
+
+
+
+^{:go/end 686} (go/method prologue "Initializes the sets for solving the live variables. Visits all the\ninstructions in each basic block to summarizes the information at each basic\nblock\n" [^{:tag (* Liveness)} lv]
+  (.initcache lv)
+
+  (range [_ b (.-Blocks (.-f lv))]
+    (let [be (.blockEffects lv b)]
+
+      ;; Walk the block instructions backward and update the block
+      ;; effects with the each prog effects.
+      (for [j (- (len (.-Values b)) 1)] (>= j 0) (dec! j)
+        (let [(values pos e) (.valueEffects lv (aget (.-Values b) j))]
+          (when (!= (bit-and e varkill) 0)
+            (.Set (.-varkill be) pos)
+            (.Unset (.-uevar be) pos))
+
+          (when (!= (bit-and e uevar) 0)
+            (.Set (.-uevar be) pos)))))))
+
+
+
+
+
+
+^{:go/end 745} (go/method solve "Solve the liveness dataflow equations.\n" [^{:tag (* Liveness)} lv]
+  ;; These temporary bitvectors exist to avoid successive allocations and
+  ;; frees within the loop.
+  (let [nvars (conv int32 (len (.-vars lv)))
+      ^{:line 693} newlivein (bitvec/New nvars)
+      ^{:line 694} newliveout (bitvec/New nvars)
+
+      ;; Walk blocks in postorder ordering. This improves convergence.
+      ^{:line 697} po (.Postorder (.-f lv))]
+
+    ;; Iterate through the blocks in reverse round-robin fashion. A work
+    ;; queue might be slightly faster. As is, the number of iterations is
+    ;; so low that it hardly seems to be worth the complexity.
+
+    (for [change true] change _
+      (set! change false)
+      (range [_ b po]
+        (let [be (.blockEffects lv b)]
+
+          (.Clear newliveout)
+          (switch (.-Kind b)
+            (case [ssa/BlockRet]
+              (range [_ pos (.-retuevar (.-cache lv))]
+                (.Set newliveout pos)))
+
+            (case [ssa/BlockRetJmp]
+              (range [_ pos (.-tailuevar (.-cache lv))]
+                (.Set newliveout pos)))
+
+            (case [ssa/BlockExit])
+            ;; panic exit - nothing to do
+            (default
+              ;; A variable is live on output from this block
+              ;; if it is live on input to some successor.
+              ;;
+              ;; out[b] = \bigcup_{s \in succ[b]} in[s]
+              (.Copy newliveout (.-livein (.blockEffects lv (.Block (aget (.-Succs b) 0)))))
+              (range [_ succ (subslice (.-Succs b) 1)]
+                (.Or newliveout newliveout (.-livein (.blockEffects lv (.Block succ)))))))
+
+
+
+          (when (not (.Eq (.-liveout be) newliveout))
+            (set! change true)
+            (.Copy (.-liveout be) newliveout))
+
+
+          ;; A variable is live on input to this block
+          ;; if it is used by this block, or live on output from this block and
+          ;; not set by the code in this block.
+          ;;
+          ;; in[b] = uevar[b] \cup (out[b] \setminus varkill[b])
+          (.AndNot newlivein (.-liveout be) (.-varkill be))
+          (.Or (.-livein be) newlivein (.-uevar be)))))))
+
+
+
+
+
+
+^{:go/end 900} (go/method epilogue "Visits all instructions in a basic block and computes a bit vector of live\nvariables at each safe point locations.\n" [^{:tag (* Liveness)} lv]
+  (let [nvars (conv int32 (len (.-vars lv)))
+      ^{:line 751} liveout (bitvec/New nvars)
+      ^{:line 752} livedefer (bitvec/New nvars)] ; always-live variables
+
+    ;; If there is a defer (that could recover), then all output
+    ;; parameters are live all the time.  In addition, any locals
+    ;; that are pointers to heap-allocated output parameters are
+    ;; also always live (post-deferreturn code needs these
+    ;; pointers to copy values back to the stack).
+    ;; TODO: if the output parameter is heap-allocated, then we
+    ;; don't need to keep the stack copy live?
+    (when (.HasDefer (.-fn lv))
+      (range [i n (.-vars lv)]
+        (when (== (.-Class n) ir/PPARAMOUT)
+          (when (.IsOutputParamHeapAddr n)
+            ;; Just to be paranoid.  Heap addresses are PAUTOs.
+            (base/Fatalf "variable %v both output param and heap output param" n))
+
+          (when (!= (.-Heapaddr n) nil)
+            ;; If this variable moved to the heap, then
+            ;; its stack copy is not live.
+            (continue))
+
+          ;; Note: zeroing is handled by zeroResults in ../ssagen/ssa.go.
+          (.Set livedefer (conv int32 i)))
+
+        (when (.IsOutputParamHeapAddr n)
+          ;; This variable will be overwritten early in the function
+          ;; prologue (from the result of a mallocgc) but we need to
+          ;; zero it in case that malloc causes a stack scan.
+          (.SetNeedzero n true)
+          (.Set livedefer (conv int32 i)))
+
+        (when (.OpenDeferSlot n)
+          ;; Open-coded defer args slots must be live
+          ;; everywhere in a function, since a panic can
+          ;; occur (almost) anywhere. Because it is live
+          ;; everywhere, it must be zeroed on entry.
+          (.Set livedefer (conv int32 i))
+          ;; It was already marked as Needzero when created.
+          (when (not (.Needzero n))
+            (base/Fatalf "all pointer-containing defer arg slots should have Needzero set")))))
+
+
+
+
+
+    ;; We must analyze the entry block first. The runtime assumes
+    ;; the function entry map is index 0. Conveniently, layout
+    ;; already ensured that the entry block is first.
+    (when (!= (.-Entry (.-f lv)) (aget (.-Blocks (.-f lv)) 0))
+      (.Fatalf (.-f lv) "entry block must be first"))
+
+
+    (do
+      ;; Reserve an entry for function entry.
+      (let [live (bitvec/New nvars)]
+        (set! (.-livevars lv) (append (.-livevars lv) live))))
+
+
+    (range [_ b (.-Blocks (.-f lv))]
+      (let [be (.blockEffects lv b)]
+
+        ;; Walk forward through the basic block instructions and
+        ;; allocate liveness maps for those instructions that need them.
+        (range [_ v (.-Values b)]
+          (when (not (.hasStackMap lv v))
+            (continue))
+
+
+          (let [live (bitvec/New nvars)]
+            (set! (.-livevars lv) (append (.-livevars lv) live))))
+
+
+        ;; walk backward, construct maps at each safe point
+        (let [index (conv int32 (- (len (.-livevars lv)) 1))]
+
+          (.Copy liveout (.-liveout be))
+          (for [i (- (len (.-Values b)) 1)] (>= i 0) (dec! i)
+            (let [v (aget (.-Values b) i)]
+
+              (when (.hasStackMap lv v)
+                ;; Found an interesting instruction, record the
+                ;; corresponding liveness information.
+
+                (let [live (addr (aget (.-livevars lv) index))]
+                  (.Or live @live liveout)
+                  (.Or live @live livedefer) ; only for non-entry safe points
+                  (dec! index)))
+
+
+              ;; Update liveness information.
+              (let [(values pos e) (.valueEffects lv v)]
+                (when (!= (bit-and e varkill) 0)
+                  (.Unset liveout pos))
+
+                (when (!= (bit-and e uevar) 0)
+                  (.Set liveout pos)))))
+
+
+
+          (when (== b (.-Entry (.-f lv)))
+            (when (!= index 0)
+              (base/Fatalf "bad index for entry point: %v" index))
+
+
+            ;; Check to make sure only input variables are live.
+            (range [i n (.-vars lv)]
+              (when (not (.Get liveout (conv int32 i)))
+                (continue))
+
+              (when (== (.-Class n) ir/PPARAM)
+                (continue)) ; ok
+
+              (base/FatalfAt ^{:go/via [miniExpr miniNode]} (.Pos n) "bad live variable at entry of %v: %L" (.-Nname (.-fn lv)) n))
+
+
+            ;; Record live variables.
+            (let [live (addr (aget (.-livevars lv) index))]
+              (.Or live @live liveout)))
+
+
+          (when (.-doClobber lv)
+            (.clobber lv b))
+
+
+          ;; The liveness maps for this block are now complete. Compact them.
+          (.compact lv b))))
+
+
+    ;; If we have an open-coded deferreturn call, make a liveness map for it.
+    (if (.OpenCodedDeferDisallowed (.-fn lv))
+      (set! (.-DeferReturn (.-livenessMap lv)) objw/StackMapDontCare)
+
+      (let [(values idx _) (.add (.-stackMapSet lv) livedefer)]
+        (set! (.-DeferReturn (.-livenessMap lv)) (conv objw/StackMapIndex idx))))
+
+
+    ;; Done compacting. Throw out the stack map set.
+    (set! (.-stackMaps lv) (.extractUnique (.-stackMapSet lv)))
+    (set! (.-stackMapSet lv) (lit bvecSet))
+
+    ;; Useful sanity check: on entry to the function,
+    ;; the only things that can possibly be live are the
+    ;; input parameters.
+    (range [j n (.-vars lv)]
+      (when (and (!= (.-Class n) ir/PPARAM) (.Get (aget (.-stackMaps lv) 0) (conv int32 j)))
+        (.Fatalf (.-f lv) "%v %L recorded as live on entry" (.-Nname (.-fn lv)) n)))))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 941} (go/method compact "Compact coalesces identical bitmaps from lv.livevars into the sets\nlv.stackMapSet.\n\nCompact clears lv.livevars.\n\nThere are actually two lists of bitmaps, one list for the local variables and one\nlist for the function arguments. Both lists are indexed by the same PCDATA\nindex, so the corresponding pairs must be considered together when\nmerging duplicates. The argument bitmaps change much less often during\nfunction execution than the local variable bitmaps, so it is possible that\nwe could introduce a separate PCDATA index for arguments vs locals and\nthen compact the set of argument bitmaps separately from the set of\nlocal variable bitmaps. As of 2014-04-02, doing this to the godoc binary\nis actually a net loss: we save about 50k of argument bitmaps but the new\nPCDATA tables cost about 100k. So for now we keep using a single index for\nboth bitmap lists.\n" [^{:tag (* Liveness)} lv ^{:tag (* ssa/Block)} b]
+  (let [pos 0]
+    (when (== b (.-Entry (.-f lv)))
+      ;; Handle entry stack map.
+      (.add (.-stackMapSet lv) (aget (.-livevars lv) 0))
+      (inc! pos))
+
+    (range [_ v (.-Values b)]
+      (when (.hasStackMap lv v)
+        (let [(values idx _) (.add (.-stackMapSet lv) (aget (.-livevars lv) pos))]
+          (inc! pos)
+          (.set (.-livenessMap lv) v (conv objw/StackMapIndex idx))))
+
+      (when (or (.-allUnsafe lv) (and (!= (.-Op v) ssa/OpClobber) (.Get (.-unsafePoints lv) (conv int32 (.-ID v)))))
+        (.setUnsafeVal (.-livenessMap lv) v)))
+
+
+    (when (or (.-allUnsafe lv) (.Get (.-unsafeBlocks lv) (conv int32 (.-ID b))))
+      (.setUnsafeBlock (.-livenessMap lv) b))
+
+
+    ;; Reset livevars.
+    (set! (.-livevars lv) (subslice (.-livevars lv) _ 0))))
+
+
+^{:go/end 994} (go/method enableClobber [^{:tag (* Liveness)} lv]
+  ;; The clobberdead experiment inserts code to clobber pointer slots in all
+  ;; the dead variables (locals and args) at every synchronous safepoint.
+  (when (not (.-ClobberDead base/Flag))
+    (return))
+
+  (when (!= (bit-and (.-Pragma (.-fn lv)) ir/CgoUnsafeArgs) 0)
+    ;; C or assembly code uses the exact frame layout. Don't clobber.
+    (return))
+
+  (when (or (> (len (.-vars lv)) 10000) (> (len (.-Blocks (.-f lv))) 10000))
+    ;; Be careful to avoid doing too much work.
+    ;; Bail if >10000 variables or >10000 blocks.
+    ;; Otherwise, giant functions make this experiment generate too much code.
+    (return))
+
+  (when (== (.-Name (.-f lv)) "forkAndExecInChild")
+    ;; forkAndExecInChild calls vfork on some platforms.
+    ;; The code we add here clobbers parts of the stack in the child.
+    ;; When the parent resumes, it is using the same stack frame. But the
+    ;; child has clobbered stack variables that the parent needs. Boom!
+    ;; In particular, the sys argument gets clobbered.
+    (return))
+
+  (when (or (== (.-Name (.-f lv)) "wbBufFlush")
+      ^:go/paren (and ^:go/paren (or (== (.-Name (.-f lv)) "callReflect") (== (.-Name (.-f lv)) "callMethod")) (.ABIWrapper (.-fn lv))))
+    ;; runtime.wbBufFlush must not modify its arguments. See the comments
+    ;; in runtime/mwbbuf.go:wbBufFlush.
+    ;;
+    ;; reflect.callReflect and reflect.callMethod are called from special
+    ;; functions makeFuncStub and methodValueCall. The runtime expects
+    ;; that it can find the first argument (ctxt) at 0(SP) in makeFuncStub
+    ;; and methodValueCall's frame (see runtime/traceback.go:getArgInfo).
+    ;; Normally callReflect and callMethod already do not modify the
+    ;; argument, and keep it alive. But the compiler-generated ABI wrappers
+    ;; don't do that. Special case the wrappers to not clobber its arguments.
+    (set! (.-noClobberArgs lv) true))
+
+  (when [h (os/Getenv "GOCLOBBERDEADHASH")] (!= h "")
+    ;; Clobber only functions where the hash of the function name matches a pattern.
+    ;; Useful for binary searching for a miscompiled function.
+    (let [hstr ""]
+      (range [_ b (hash/Sum32 (conv (slice byte) (.-Name (.-f lv))))]
+        (set! hstr + (fmt/Sprintf "%08b" b)))
+
+      (when (not (strings/HasSuffix hstr h))
+        (return))
+
+      (fmt/Printf "\t\t\tCLOBBERDEAD %s\n" (.-Name (.-f lv)))))
+
+  (set! (.-doClobber lv) true))
+
+
+
+
+^{:go/end 1028} (go/method clobber "Inserts code to clobber pointer slots in all the dead variables (locals and args)\nat every synchronous safepoint in b.\n" [^{:tag (* Liveness)} lv ^{:tag (* ssa/Block)} b]
+  ;; Copy block's values to a temporary.
+  (let [oldSched (append (lit (slice (* ssa/Value))) (spread (.-Values b)))]
+    (set! (.-Values b) (subslice (.-Values b) _ 0))
+    (let [idx 0]
+
+      ;; Clobber pointer slots in all dead variables at entry.
+      (when (== b (.-Entry (.-f lv)))
+        (while (and (> (len oldSched) 0) (== (len (.-Args (aget oldSched 0))) 0))
+          ;; Skip argless ops. We need to skip at least
+          ;; the lowered ClosurePtr op, because it
+          ;; really wants to be first. This will also
+          ;; skip ops like InitMem and SP, which are ok.
+          (set! (.-Values b) (append (.-Values b) (aget oldSched 0)))
+          (set! oldSched (subslice oldSched 1)))
+
+        (clobber lv b (aget (.-livevars lv) 0))
+        (inc! idx))
+
+
+      ;; Copy values into schedule, adding clobbering around safepoints.
+      (range [_ v oldSched]
+        (when (not (.hasStackMap lv v))
+          (set! (.-Values b) (append (.-Values b) v))
+          (continue))
+
+        (clobber lv b (aget (.-livevars lv) idx))
+        (set! (.-Values b) (append (.-Values b) v))
+        (inc! idx)))))
+
+
+
+
+
+
+^{:go/end 1046} (go/func clobber "clobber generates code to clobber pointer slots in all dead variables\n(those not marked in live). Clobbering instructions are added to the end\nof b.Values.\n" [^{:tag (* Liveness)} lv ^{:tag (* ssa/Block)} b ^bitvec/BitVec live]
+  (range [i n (.-vars lv)]
+    (when (and (not (.Get live (conv int32 i))) (not (.Addrtaken n)) (not (.OpenDeferSlot n)) (not (.IsOutputParamHeapAddr n)))
+      ;; Don't clobber stack objects (address-taken). They are
+      ;; tracked dynamically.
+      ;; Also don't clobber slots that are live for defers (see
+      ;; the code setting livedefer in epilogue).
+      (when (and (.-noClobberArgs lv) (== (.-Class n) ir/PPARAM))
+        (continue))
+
+      (clobberVar b n))))
+
+
+
+
+
+
+^{:go/end 1052} (go/func clobberVar "clobberVar generates code to trash the pointers in v.\nClobbering instructions are added to the end of b.Values.\n" [^{:tag (* ssa/Block)} b ^{:tag (* ir/Name)} v]
+  (clobberWalk b v 0 ^{:go/via [miniExpr]} (.Type v)))
+
+
+
+
+
+
+^{:go/end 1098} (go/func clobberWalk "b = block to which we append instructions\nv = variable\noffset = offset of (sub-portion of) variable to clobber (in bytes)\nt = type of sub-portion of v.\n" [^{:tag (* ssa/Block)} b ^{:tag (* ir/Name)} v ^int64 offset ^{:tag (* types/Type)} t]
+  (when (not (.HasPointers t))
+    (return))
+
+  (switch (.Kind t)
+    (case [types/TPTR
+        ^{:line 1064} types/TUNSAFEPTR
+        ^{:line 1065} types/TFUNC
+        ^{:line 1066} types/TCHAN
+        ^{:line 1067} types/TMAP]
+      (clobberPtr b v offset))
+
+    (case [types/TSTRING]
+      ;; struct { byte *str; int len; }
+      (clobberPtr b v offset))
+
+    (case [types/TINTER]
+      ;; struct { Itab *tab; void *data; }
+      ;; or, when isnilinter(t)==true:
+      ;; struct { Type *type; void *data; }
+      (clobberPtr b v offset)
+      (clobberPtr b v (+ offset (conv int64 types/PtrSize))))
+
+    (case [types/TSLICE]
+      ;; struct { byte *array; int len; int cap; }
+      (clobberPtr b v offset))
+
+    (case [types/TARRAY]
+      (for [i (conv int64 0)] (< i (.NumElem t)) (inc! i)
+        (clobberWalk b v (+ offset (* i (.Size (.Elem t)))) (.Elem t))))
+
+
+    (case [types/TSTRUCT]
+      (range [_ t1 (.Fields t)]
+        (clobberWalk b v (+ offset (.-Offset t1)) (.-Type t1))))
+
+
+    (default
+      (base/Fatalf "clobberWalk: unexpected type, %v" t))))
+
+
+
+
+
+^{:go/end 1104} (go/func clobberPtr "clobberPtr generates a clobber of the pointer at offset offset in v.\nThe clobber instruction is added at the end of b.\n" [^{:tag (* ssa/Block)} b ^{:tag (* ir/Name)} v ^int64 offset]
+  (.NewValue0IA b src/NoXPos ssa/OpClobber types/TypeVoid offset v))
+
+
+^{:go/end 1126} (go/method showlive [^{:tag (* Liveness)} lv ^{:tag (* ssa/Value)} v ^bitvec/BitVec live]
+  (when (or (== (.-Live base/Flag) 0) (== (ir/FuncName (.-fn lv)) "init") (strings/HasPrefix (ir/FuncName (.-fn lv)) "."))
+    (return))
+
+  (when (or (.Wrapper (.-fn lv)) (.Dupok (.-fn lv)))
+    ;; Skip reporting liveness information for compiler-generated wrappers.
+    (return))
+
+  (when (not (or (== v nil) (.IsCall (.-Op v))))
+    ;; Historically we only printed this information at
+    ;; calls. Keep doing so.
+    (return))
+
+  (when (.IsEmpty live)
+    (return))
+
+
+  (let [(values pos s) (.format lv v live)]
+
+    (base/WarnfAt pos "%s" s)))
+
+
+^{:go/breaks [[5 1137]] :go/end 1138} (go/method Format ^string [^{:tag (* Liveness)} lv ^{:tag (* ssa/Value)} v]
+  (when (== v nil)
+    (let [(values _ s) (.format lv nil (aget (.-stackMaps lv) 0))]
+      (return s)))
+
+  (when [idx (.Get (.-livenessMap lv) v)] (.StackMapValid idx)
+    (let [(values _ s) (.format lv v (aget (.-stackMaps lv) idx))]
+      (return s)))
+
+  "")
+
+
+^{:go/end 1172} (go/method format [^{:tag (* Liveness)} lv ^{:tag (* ssa/Value)} v ^bitvec/BitVec live] :results [src/XPos string]
+  (let [pos ^{:go/via [miniExpr miniNode]} (.Pos (.-Nname (.-fn lv)))]
+    (when (!= v nil)
+      (set! pos (.-Pos v)))
+
+
+    (let [s "live at "]
+      (if (== v nil)
+        (set! s + (fmt/Sprintf "entry to %s:" (ir/FuncName (.-fn lv))))
+        (if [(values sym ok) (assert (* ssa/AuxCall) (.-Aux v))] (and ok (!= (.-Fn sym) nil))
+          (let [fn (.-Name (.-Fn sym))]
+            (when [pos (strings/Index fn ".")] (>= pos 0)
+              (set! fn (subslice fn (+ pos 1))))
+
+            (set! s + (fmt/Sprintf "call to %s:" fn)))
+
+          (set! s + "indirect call:")))
+
+
+      ;; Sort variable names for display. Variables aren't in any particular order, and
+      ;; the order can change by architecture, particularly with differences in regabi.
+      (let [^{:tag (slice string)} names (zero (slice string))]
+        (range [j n (.-vars lv)]
+          (when (.Get live (conv int32 j))
+            (set! names (append names (.-Name (.Sym n))))))
+
+
+        (sort/Strings names)
+        (range [_ v names]
+          (set! s + (+ " " v)))
+
+        (return pos s)))))
+
+
+^{:go/end 1195} (go/method printbvec ^bool [^{:tag (* Liveness)} lv ^bool printed ^string name ^bitvec/BitVec live]
+  (when (.IsEmpty live)
+    (return printed))
+
+
+  (if (not printed)
+    (fmt/Printf "\t")
+
+    (fmt/Printf " "))
+
+  (fmt/Printf "%s=" name)
+
+  ^{:go/breaks [[3 1194]]} (let [comma ""]
+    (range [i n (.-vars lv)]
+      (when (not (.Get live (conv int32 i)))
+        (continue))
+
+      (fmt/Printf "%s%s" comma (.-Name (.Sym n)))
+      (set! comma ","))
+
+    true))
+
+
+
+^{:go/breaks [[8 1212]] :go/end 1213} (go/method printeffect "printeffect is like printbvec, but for valueEffects.\n" ^bool [^{:tag (* Liveness)} lv ^bool printed ^string name ^int32 pos ^bool x]
+  (when (not x)
+    (return printed))
+
+  (if (not printed)
+    (fmt/Printf "\t")
+
+    (fmt/Printf " "))
+
+  (fmt/Printf "%s=" name)
+  (when x
+    (fmt/Printf "%s" (.-Name (.Sym (aget (.-vars lv) pos)))))
+
+
+  true)
+
+
+
+
+
+^{:go/end 1324} (go/method printDebug "Prints the computed liveness information and inputs, for debugging.\nThis format synthesizes the information used during the multiple passes\ninto a single presentation.\n" [^{:tag (* Liveness)} lv]
+  (fmt/Printf "liveness: %s\n" (ir/FuncName (.-fn lv)))
+
+  (range [i b (.-Blocks (.-f lv))]
+    (when (> i 0)
+      (fmt/Printf "\n"))
+
+
+    ;; bb#0 pred=1,2 succ=3,4
+    (fmt/Printf "bb#%d pred=" (.-ID b))
+    (range [j pred (.-Preds b)]
+      (when (> j 0)
+        (fmt/Printf ","))
+
+      (fmt/Printf "%d" (.-ID (.Block pred))))
+
+    (fmt/Printf " succ=")
+    (range [j succ (.-Succs b)]
+      (when (> j 0)
+        (fmt/Printf ","))
+
+      (fmt/Printf "%d" (.-ID (.Block succ))))
+
+    (fmt/Printf "\n")
+
+    (let [be (.blockEffects lv b)
+
+        ;; initial settings
+        ^{:line 1246} printed false]
+      (set! printed (.printbvec lv printed "uevar" (.-uevar be)))
+      (set! printed (.printbvec lv printed "livein" (.-livein be)))
+      (when printed
+        (fmt/Printf "\n"))
+
+
+      ;; program listing, with individual effects listed
+
+      (when (== b (.-Entry (.-f lv)))
+        (let [live (aget (.-stackMaps lv) 0)]
+          (fmt/Printf "(%s) function entry\n" (base/FmtPos ^{:go/via [miniExpr miniNode]} (.Pos (.-Nname (.-fn lv)))))
+          (fmt/Printf "\tlive=")
+          (set! printed false)
+          (range [j n (.-vars lv)]
+            (when (not (.Get live (conv int32 j)))
+              (continue))
+
+            (when printed
+              (fmt/Printf ","))
+
+            (fmt/Printf "%v" n)
+            (set! printed true))
+
+          (fmt/Printf "\n")))
+
+
+      (range [_ v (.-Values b)]
+        (fmt/Printf "(%s) %v\n" (base/FmtPos (.-Pos v)) (.LongString v))
+
+        (let [pcdata (.Get (.-livenessMap lv) v)
+
+            (values pos effect) (.valueEffects lv v)]
+          (set! printed false)
+          (set! printed (.printeffect lv printed "uevar" pos (!= (bit-and effect uevar) 0)))
+          (set! printed (.printeffect lv printed "varkill" pos (!= (bit-and effect varkill) 0)))
+          (when printed
+            (fmt/Printf "\n"))
+
+
+          (when (.StackMapValid pcdata)
+            (fmt/Printf "\tlive=")
+            (set! printed false)
+            (when (.StackMapValid pcdata)
+              (let [live (aget (.-stackMaps lv) pcdata)]
+                (range [j n (.-vars lv)]
+                  (when (not (.Get live (conv int32 j)))
+                    (continue))
+
+                  (when printed
+                    (fmt/Printf ","))
+
+                  (fmt/Printf "%v" n)
+                  (set! printed true))))
+
+
+            (fmt/Printf "\n"))
+
+
+          (when (.GetUnsafe (.-livenessMap lv) v)
+            (fmt/Printf "\tunsafe-point\n"))))
+
+
+      (when (.GetUnsafeBlock (.-livenessMap lv) b)
+        (fmt/Printf "\tunsafe-block\n"))
+
+
+      ;; bb bitsets
+      (fmt/Printf "end\n")
+      (set! printed false)
+      (set! printed (.printbvec lv printed "varkill" (.-varkill be)))
+      (set! printed (.printbvec lv printed "liveout" (.-liveout be)))
+      (when printed
+        (fmt/Printf "\n"))))
+
+
+
+  (fmt/Printf "\n"))
+
+
+
+
+
+
+^{:go/end 1388} (go/method emit "Dumps a slice of bitmaps to a symbol as a sequence of uint32 values. The\nfirst word dumped is the total number of bitmaps. The second word is the\nlength of the bitmaps. All bitmaps are assumed to be of equal length. The\nremaining bytes are the raw bitmaps.\n" [^{:tag (* Liveness)} lv] :results [^{:tag (* obj/LSym)} argsSym ^{:tag (* obj/LSym)} liveSym]
+  ;; Size args bitmaps to be just large enough to hold the largest pointer.
+  ;; First, find the largest Xoffset node we care about.
+  ;; (Nodes without pointers aren't in lv.vars; see ShouldTrack.)
+  (let [^{:tag (* ir/Name)} maxArgNode (zero (* ir/Name))]
+    (range [_ n (.-vars lv)]
+      (switch (.-Class n)
+        (case [ir/PPARAM ir/PPARAMOUT]
+          (when (not (.IsOutputParamInRegisters n))
+            (when (or (== maxArgNode nil) (> (.FrameOffset n) (.FrameOffset maxArgNode)))
+              (set! maxArgNode n))))))
+
+
+
+
+    ;; Next, find the offset of the largest pointer in the largest node.
+    (let [^int64 maxArgs (zero int64)]
+      (when (!= maxArgNode nil)
+        (set! maxArgs (+ (.FrameOffset maxArgNode) (types/PtrDataSize ^{:go/via [miniExpr]} (.Type maxArgNode)))))
+
+
+      ;; Size locals bitmaps to be stkptrsize sized.
+      ;; We cannot shrink them to only hold the largest pointer,
+      ;; because their size is used to calculate the beginning
+      ;; of the local variables frame.
+      ;; Further discussion in https://golang.org/cl/104175.
+      ;; TODO: consider trimming leading zeros.
+      ;; This would require shifting all bitmaps.
+      (let [maxLocals (.-stkptrsize lv)
+
+          ;; Temporary symbols for encoding bitmaps.
+          (values ^obj/LSym argsSymTmp ^obj/LSym liveSymTmp) (zero obj/LSym)
+
+          ^{:line 1363} args (bitvec/New (conv int32 (/ maxArgs (conv int64 types/PtrSize))))
+          ^{:line 1364} aoff (objw/Uint32 (addr argsSymTmp) 0 (conv uint32 (len (.-stackMaps lv))))] ; number of bitmaps
+        (set! aoff (objw/Uint32 (addr argsSymTmp) aoff (conv uint32 (.-N args)))) ; number of bits in each bitmap
+
+        (let [locals (bitvec/New (conv int32 (/ maxLocals (conv int64 types/PtrSize))))
+            ^{:line 1368} loff (objw/Uint32 (addr liveSymTmp) 0 (conv uint32 (len (.-stackMaps lv))))] ; number of bitmaps
+          (set! loff (objw/Uint32 (addr liveSymTmp) loff (conv uint32 (.-N locals)))) ; number of bits in each bitmap
+
+          ;; Check for overflow before serializing stackmaps
+          (checkStackmapOverflow args (len (.-stackMaps lv)) ^{:go/via [miniNode]} (.Pos (.-fn lv)))
+          (checkStackmapOverflow locals (len (.-stackMaps lv)) ^{:go/via [miniNode]} (.Pos (.-fn lv)))
+
+          (range [_ live (.-stackMaps lv)]
+            (.Clear args)
+            (.Clear locals)
+
+            (.pointerMap lv live (.-vars lv) args locals)
+
+            (set! aoff (objw/BitVec (addr argsSymTmp) aoff args))
+            (set! loff (objw/BitVec (addr liveSymTmp) loff locals)))
+
+
+          ;; These symbols will be added to Ctxt.Data by addGCLocals
+          ;; after parallel compilation is done.
+          (return (.GCLocalsSym base/Ctxt (.-P argsSymTmp)) (.GCLocalsSym base/Ctxt (.-P liveSymTmp))))))))
+
+
+
+
+
+
+
+^{:go/end 1461} (go/func Compute "Entry pointer for Compute analysis. Solves for the Compute of\npointer variables in the function and emits a runtime data\nstructure read by the garbage collector.\nReturns a map from GC safe points to their corresponding stack map index,\nand a map that contains all input parameters that may be partially live.\n" [^{:tag (* ir/Func)} curfn ^{:tag (* ssa/Func)} f ^int64 stkptrsize ^{:tag (* objw/Progs)} pp ^bool retLiveness] :results [Map (map (* ir/Name) bool) (* Liveness)]
+  ;; Construct the global liveness state.
+  (let [(values vars idx) (getvariables curfn)
+      ^{:line 1398} lv (newliveness curfn f vars idx stkptrsize)]
+
+    ;; Run the dataflow framework.
+    (.prologue lv)
+    (.solve lv)
+    (.epilogue lv)
+    (when (> (.-Live base/Flag) 0)
+      (.showlive lv nil (aget (.-stackMaps lv) 0))
+      (range [_ b (.-Blocks f)]
+        (range [_ val (.-Values b)]
+          (when [idx (.Get (.-livenessMap lv) val)] (.StackMapValid idx)
+            (.showlive lv val (aget (.-stackMaps lv) idx))))))
+
+
+
+
+    (when (>= (.-Live base/Flag) 2)
+      (.printDebug lv))
+
+
+    ;; Update the function cache.
+    (do
+      (let [cache (assert (* livenessFuncCache) (.-Liveness (.-Cache f)))]
+        (when (< (cap (.-be lv)) 2000) ; Threshold from ssa.Cache slices.
+          (clear (.-be lv))
+          (set! (.-be cache) (.-be lv)))
+
+        (when (< (len (.-Vals (.-livenessMap lv))) 2000)
+          (set! (.-livenessMap cache) (.-livenessMap lv)))))
+
+
+
+    ;; Emit the live pointer map data structures
+    (let [ls (.-LSym curfn)
+        ^{:line 1432} fninfo (.Func ls)]
+      (set! (values (.-GCArgs fninfo) (.-GCLocals fninfo)) (.emit lv))
+
+      (let [p (.Prog pp obj/AFUNCDATA)]
+        (.SetConst (.-From p) rtabi/FUNCDATA_ArgsPointerMaps)
+        (set! (.-Type (.-To p)) obj/TYPE_MEM)
+        (set! (.-Name (.-To p)) obj/NAME_EXTERN)
+        (set! (.-Sym (.-To p)) (.-GCArgs fninfo))
+
+        (set! p (.Prog pp obj/AFUNCDATA))
+        (.SetConst (.-From p) rtabi/FUNCDATA_LocalsPointerMaps)
+        (set! (.-Type (.-To p)) obj/TYPE_MEM)
+        (set! (.-Name (.-To p)) obj/NAME_EXTERN)
+        (set! (.-Sym (.-To p)) (.-GCLocals fninfo))
+
+        (when [x (.emitStackObjects lv)] (!= x nil)
+          (let [p (.Prog pp obj/AFUNCDATA)]
+            (.SetConst (.-From p) rtabi/FUNCDATA_StackObjects)
+            (set! (.-Type (.-To p)) obj/TYPE_MEM)
+            (set! (.-Name (.-To p)) obj/NAME_EXTERN)
+            (set! (.-Sym (.-To p)) x)))
+
+
+        (let [retLv lv]
+          (when (not retLiveness)
+            (set! retLv nil))
+
+
+          (return (.-livenessMap lv) (.-partLiveArgs lv) retLv))))))
+
+
+^{:go/end 1515} (go/method emitStackObjects ^{:tag (* obj/LSym)} [^{:tag (* Liveness)} lv]
+  (let [^{:tag (slice (* ir/Name))} vars (zero (slice (* ir/Name)))]
+    (range [_ n (.-Dcl (.-fn lv))]
+      (when (and (shouldTrack n) (.Addrtaken n) (!= ^{:go/via [miniExpr miniNode]} (.Esc n) ir/EscHeap))
+        (set! vars (append vars n))))
+
+
+    (when (== (len vars) 0)
+      (return nil))
+
+
+    ;; Sort variables from lowest to highest address.
+    (^{:inst [(slice (* ir/Name)) (* ir/Name)]} slices/SortFunc vars ^{:go/end 1475} (fn ^int [^{:tag (* ir/Name)} a ^{:tag (* ir/Name)} b] (^{:inst [int64]} cmp/Compare (.FrameOffset a) (.FrameOffset b))))
+
+    ;; Populate the stack object data.
+    ;; Format must match runtime/stack.go:stackObjectRecord.
+    (let [x (.Lookup base/Ctxt (+ (.-Name (.-LSym (.-fn lv))) ".stkobj"))]
+      ^{:go/via [Attribute]} (.Set x obj/AttrContentAddressable true)
+      (set! (.-Align x) (conv int16 types/PtrSize)) ; see https://go.dev/issue/80668
+      (set! (.-StackObjects (.Func (.-LSym (.-fn lv)))) x)
+      (let [off 0]
+        (set! off (objw/Uintptr x off (conv uint64 (len vars))))
+        (range [_ v vars]
+          ;; Note: arguments and return values have non-negative Xoffset,
+          ;; in which case the offset is relative to argp.
+          ;; Locals have a negative Xoffset, in which case the offset is relative to varp.
+          ;; We already limit the frame size, so the offset and the object size
+          ;; should not be too big.
+          (let [frameOffset (.FrameOffset v)]
+            (when (!= frameOffset (conv int64 (conv int32 frameOffset)))
+              (base/Fatalf "frame offset too big: %v %d" v frameOffset))
+
+            (set! off (objw/Uint32 x off (conv uint32 frameOffset)))
+
+            (let [t ^{:go/via [miniExpr]} (.Type v)
+                ^{:line 1498} sz (.Size t)]
+              (when (!= sz (conv int64 (conv int32 sz)))
+                (base/Fatalf "stack object too big: %v of type %v, size %d" v t sz))
+
+              (let [(values lsym ptrBytes) (reflectdata/GCSym t false)]
+                (set! off (objw/Uint32 x off (conv uint32 sz)))
+                (set! off (objw/Uint32 x off (conv uint32 ptrBytes)))
+                (set! off (objw/SymPtrOff x off lsym))))))
+
+
+        (when (!= (.-Live base/Flag) 0)
+          (range [_ v vars]
+            (base/WarnfAt ^{:go/via [miniExpr miniNode]} (.Pos v) "stack object %v %v" v ^{:go/via [miniExpr]} (.Type v))))
+
+
+
+        ^{:line 1514} x))))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/breaks [[5 1554]] :go/end 1555} (go/func isfat "isfat reports whether a variable of type t needs multiple assignments to initialize.\nFor example:\n\n\ttype T struct { x, y int }\n\tx := T{x: 0, y: 1}\n\nThen we need:\n\n\tvar t T\n\tt.x = 0\n\tt.y = 1\n\nto fully initialize t.\n" ^bool [^{:tag (* types/Type)} t]
+  (when (!= t nil)
+    (switch (.Kind t)
+      (case [types/TSLICE types/TSTRING
+          ^{:line 1534} types/TINTER] ; maybe remove later
+        (return true))
+      (case [types/TARRAY]
+        ;; Array of 1 element, check if element is fat
+        (when (== (.NumElem t) 1)
+          (return (isfat (.Elem t))))
+
+        (return true))
+      (case [types/TSTRUCT]
+        (when (.IsSIMD t)
+          (return false))
+
+        ;; Struct with 1 field, check if field is fat
+        (when (== (.NumFields t) 1)
+          (return (isfat (.-Type (.Field t 0)))))
+
+        (return true))))
+
+
+
+  false)
+
+
+
+
+
+^{:go/end 1595} (go/func WriteFuncMap "WriteFuncMap writes the pointer bitmaps for bodyless function fn's\ninputs and outputs as the value of symbol <fn>.args_stackmap.\nIf fn has outputs, two bitmaps are written, otherwise just one.\n" [^{:tag (* ir/Func)} fn ^{:tag (* abi/ABIParamResultInfo)} abiInfo]
+  (when (== (ir/FuncName fn) "_")
+    (return))
+
+  (let [nptr (conv int (/ (.ArgWidth abiInfo) (conv int64 types/PtrSize)))
+      ^{:line 1565} bv (bitvec/New (conv int32 nptr))]
+
+    (range [_ p (.InParams abiInfo)]
+      (typebits/SetNoCheck (.-Type p) (.FrameOffset p abiInfo) bv))
+
+
+    (let [nbitmap 1]
+      (when (> (.NumResults (.Type fn)) 0)
+        (set! nbitmap 2))
+
+
+      ;; defensive check: function arguments can't realistically be large enough for overflow here
+      (checkStackmapOverflow bv nbitmap ^{:go/via [miniNode]} (.Pos fn))
+
+      (let [lsym (.Lookup base/Ctxt (+ (.-Name (.-LSym fn)) ".args_stackmap"))]
+        ^{:go/via [Attribute]} (.Set lsym obj/AttrLinkname true) ; allow args_stackmap referenced from assembly
+        (let [off (objw/Uint32 lsym 0 (conv uint32 nbitmap))]
+          (set! off (objw/Uint32 lsym off (conv uint32 (.-N bv))))
+          (set! off (objw/BitVec lsym off bv))
+
+          (when (> (.NumResults (.Type fn)) 0)
+            (range [_ p (.OutParams abiInfo)]
+              (when (== (len (.-Registers p)) 0)
+                (typebits/SetNoCheck (.-Type p) (.FrameOffset p abiInfo) bv)))
+
+
+            (set! off (objw/BitVec lsym off bv)))
+
+
+          (objw/Global lsym (conv int32 off) (bit-or obj/RODATA obj/LOCAL)))))))
+
+
+
+
+
+^{:go/end 1610} (go/func checkStackmapOverflow "checkStackmapOverflow checks for potential overflow in runtime stackmap reading.\nRuntime computes: n * ((nbit+7)/8) using int32 arithmetic.\nSee runtime.stackmapdata implementation.\n" [^bitvec/BitVec bv ^int count ^src/XPos pos]
+  (when (or (<= (.-N bv) 0) (<= count 0))
+    (return))
+
+  (let [bytesPerBitVec (>> (+ (conv int64 (.-N bv)) 7) 3)
+      ^{:line 1605} totalBytes (* bytesPerBitVec (conv int64 count))]
+    (when (> totalBytes math/MaxInt32)
+      ;; runtime.stackmap has to support 64-bit values to avoid this restriction, see issue 77170
+      (base/FatalfAt pos "liveness stackmaps are too large: nbit=%d count=%d totalBytes=%d exceeds MaxInt32" (.-N bv) count totalBytes))))

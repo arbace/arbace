@@ -1,0 +1,473 @@
+;; Copyright 2017 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.cmd.compile.internal.ssa) (go/file "branchelim.go" :imports [
+
+    ^{:line 7} [src "cmd/internal/src"]])
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 70} (go/func branchelim "branchelim tries to eliminate branches by\ngenerating CondSelect instructions.\n\nSearch for basic blocks that look like\n\n\tbb0            bb0\n\t | \\          /   \\\n\t | bb1  or  bb1   bb2    <- trivial if/else blocks\n\t | /          \\   /\n\tbb2            bb3\n\nwhere the intermediate blocks are mostly empty (with no side-effects);\nrewrite Phis in the postdominator as CondSelects.\n" [^{:tag (* Func)} f]
+  ;; FIXME: add support for lowering CondSelects on more architectures
+  (when (not (.-haveCondSelect (.-Config f)))
+    (return))
+
+
+  ;; Find all the values used in computing the address of any load.
+  ;; Typically these values have operations like AddPtr, Lsh64x64, etc.
+  (let [loadAddr (.newSparseSet f (.NumValues f))]
+    (defer (.retSparseSet f loadAddr))
+    (range [_ b (.-Blocks f)]
+      (range [_ v (.-Values b)]
+        (switch (.-Op v)
+          (case [OpLoad OpAtomicLoad8 OpAtomicLoad32 OpAtomicLoad64 OpAtomicLoadPtr OpAtomicLoadAcq32 OpAtomicLoadAcq64]
+            (.add loadAddr (.-ID (aget (.-Args v) 0))))
+          (case [OpMove]
+            (.add loadAddr (.-ID (aget (.-Args v) 1)))))))
+
+
+
+    (let [po (.postorder f)]
+      (while true
+        (let [n (.size loadAddr)]
+          (range [_ b po]
+            (for [i (- (len (.-Values b)) 1)] (>= i 0) (dec! i)
+              (let [v (aget (.-Values b) i)]
+                (when (not (.contains loadAddr (.-ID v)))
+                  (continue))
+
+                (range [_ a (.-Args v)]
+                  (when (or (.IsInteger (.-Type a)) (.IsPtr (.-Type a)) (.IsUnsafePtr (.-Type a)))
+                    (.add loadAddr (.-ID a)))))))
+
+
+
+
+          (when (== (.size loadAddr) n)
+            (break))))
+
+
+
+      (let [change true]
+        (while change
+          (set! change false)
+          (range [_ b (.-Blocks f)]
+            (set! change (or (elimIf f loadAddr b) (elimIfElse f loadAddr b) change))))))))
+
+
+
+
+^{:go/end 108} (go/func canCondSelect ^bool [^{:tag (* Value)} v ^string arch ^{:tag (* sparseSet)} loadAddr]
+  (when (and (!= loadAddr nil) ; prove calls this on some multiplies and doesn't take care of loadAddrs
+      (.contains loadAddr (.-ID v)))
+    ;; The result of the soon-to-be conditional move is used to compute a load address.
+    ;; We want to avoid generating a conditional move in this case
+    ;; because the load address would now be data-dependent on the condition.
+    ;; Previously it would only be control-dependent on the condition, which is faster
+    ;; if the branch predicts well (or possibly even if it doesn't, if the load will
+    ;; be an expensive cache miss).
+    ;; See issue #26306.
+    (return false))
+
+  (when (== arch "loong64")
+    ;; We should not generate conditional moves if neither of the arguments is constant zero,
+    ;; because it requires three instructions (OR, MASKEQZ, MASKNEZ) and will increase the
+    ;; register pressure.
+    (when (and (not (and (.isGenericIntConst (aget (.-Args v) 0)) (== (.-AuxInt (aget (.-Args v) 0)) 0)))
+        (not (and (.isGenericIntConst (aget (.-Args v) 1)) (== (.-AuxInt (aget (.-Args v) 1)) 0))))
+      (return false)))
+
+
+  ;; For now, stick to simple scalars that fit in registers
+  (switch
+    (case [(> (.Size (.-Type v)) (.-RegSize (.-Config (.-Func (.-Block v)))))]
+      (return false))
+    (case [(.IsPtrShaped (.-Type v))]
+      (return true))
+    (case [(.IsInteger (.-Type v))]
+      (when (and (== arch "amd64") (< (.Size (.-Type v)) 2))
+        ;; amd64 doesn't support CMOV with byte registers
+        (return false))
+
+      (return true))
+    (default
+      (return false))))
+
+
+
+
+
+
+^{:go/end 287} (go/func elimIf "elimIf converts the one-way branch starting at dom in f to a conditional move if possible.\nloadAddr is a set of values which are used to compute the address of a load.\nThose values are exempt from CMOV generation.\n" ^bool [^{:tag (* Func)} f ^{:tag (* sparseSet)} loadAddr ^{:tag (* Block)} dom]
+  ;; See if dom is an If with one arm that
+  ;; is trivial and succeeded by the other
+  ;; successor of dom.
+  (when (or (!= (.-Kind dom) BlockIf) (!= (.-Likely dom) BranchUnknown))
+    (return false))
+
+  (let [(values ^{:tag (* Block)} simple ^{:tag (* Block)} post) (zero (* Block))]
+    (range [i (.-Succs dom)]
+      (let [(values bb other) (values (.Block (aget (.-Succs dom) i)) (.Block (aget (.-Succs dom) (bit-xor i 1))))]
+        (when (and (isLeafPlain bb) (== (.Block (aget (.-Succs bb) 0)) other))
+          (set! simple bb)
+          (set! post other)
+          (break))))
+
+
+    (when (or (== simple nil) (!= (len (.-Preds post)) 2) (== post dom))
+      (return false))
+
+
+    ;; We've found our diamond CFG of blocks.
+    ;; Now decide if fusing 'simple' into dom+post
+    ;; looks profitable.
+
+    ;; Check that there are Phis, and that all of them
+    ;; can be safely rewritten to CondSelect.
+    (let [hasphis false]
+      (range [_ v (.-Values post)]
+        (when (== (.-Op v) OpPhi)
+          (set! hasphis true)
+          (when (not (canCondSelect v (.-arch (.-Config f)) loadAddr))
+            (return false))))
+
+
+
+      (when (not hasphis)
+        (return false))
+
+
+      ;; Pick some upper bound for the number of instructions
+      ;; we'd be willing to execute just to generate a dead
+      ;; argument to CondSelect. In the worst case, this is
+      ;; the number of useless instructions executed.
+      (let [^:const ^{:val 2} maxfuseinsts 2]
+
+        (when (or (> (len (.-Values simple)) maxfuseinsts) (not (canSpeculativelyExecute simple)))
+          (return false))
+
+
+        ;; Replace Phi instructions in b with CondSelect instructions
+        (let [swap (!= (== (.Block (aget (.-Preds post) 0)) dom) (== (.Block (aget (.-Succs dom) 0)) post))]
+          (range [_ v (.-Values post)]
+            (when (!= (.-Op v) OpPhi)
+              (continue))
+
+            (set! (.-Op v) OpCondSelect)
+            (when swap
+              (set! (values (aget (.-Args v) 0) (aget (.-Args v) 1)) (values (aget (.-Args v) 1) (aget (.-Args v) 0))))
+
+            (.AddArg v (aget (.-Controls dom) 0)))
+
+
+          ;; Put all of the instructions into 'dom'
+          ;; and update the CFG appropriately.
+          (set! (.-Kind dom) (.-Kind post))
+          (.CopyControls dom post)
+          (set! (.-Aux dom) (.-Aux post))
+          (set! (.-Succs dom) (append (subslice (.-Succs dom) _ 0) (spread (.-Succs post))))
+          (range [i (.-Succs dom)]
+            (let [e (aget (.-Succs dom) i)]
+              (set! (.-b (aget (.-Preds (.-b e)) (.-i e))) dom)))
+
+
+          ;; Try really hard to preserve statement marks attached to blocks.
+          (let [simplePos (.-Pos simple)
+              ^{:line 188} postPos (.-Pos post)
+              ^{:line 189} simpleStmt (== ^{:go/via [lico]} (.IsStmt simplePos) src/PosIsStmt)
+              ^{:line 190} postStmt (== ^{:go/via [lico]} (.IsStmt postPos) src/PosIsStmt)]
+
+            (range [_ v (.-Values simple)]
+              (set! (.-Block v) dom))
+
+            (range [_ v (.-Values post)]
+              (set! (.-Block v) dom))
+
+
+            ;; findBlockPos determines if b contains a stmt-marked value
+            ;; that has the same line number as the Pos for b itself.
+            ;; (i.e. is the position on b actually redundant?)
+            (let [findBlockPos ^{:go/end 211} (fn ^bool [^{:tag (* Block)} b]
+                  ^{:go/breaks [[3 210]]} (let [pos (.-Pos b)]
+                    (range [_ v (.-Values b)]
+                      ;; See if there is a stmt-marked value already that matches simple.Pos (and perhaps post.Pos)
+                      (when (and (.SameFileAndLine pos (.-Pos v)) (== ^{:go/via [lico]} (.IsStmt (.-Pos v)) src/PosIsStmt))
+                        (return true)))
+
+
+                    false))]
+
+              (when simpleStmt
+                (set! simpleStmt (not (findBlockPos simple)))
+                (when (and (not simpleStmt) (.SameFileAndLine simplePos postPos))
+                  (set! postStmt false)))
+
+
+
+              (when postStmt
+                (set! postStmt (not (findBlockPos post))))
+
+
+              ;; If simpleStmt and/or postStmt are still true, then try harder
+              ;; to find the corresponding statement marks new homes.
+
+              ;; setBlockPos determines if b contains a can-be-statement value
+              ;; that has the same line number as the Pos for b itself, and
+              ;; puts a statement mark on it, and returns whether it succeeded
+              ;; in this operation.
+              ^{:go/breaks [10]} (let [setBlockPos ^{:go/end 239} (fn ^bool [^{:tag (* Block)} b]
+                    ^{:go/breaks [[3 238]]} (let [pos (.-Pos b)]
+                      (range [_ v (.-Values b)]
+                        (when (and (.SameFileAndLine pos (.-Pos v)) (not (isPoorStatementOp (.-Op v))))
+                          (set! (.-Pos v) (.WithIsStmt (.-Pos v)))
+                          (return true)))
+
+
+                      false))]
+
+                ;; If necessary and possible, add a mark to a value in simple
+                (when simpleStmt
+                  (when (and (setBlockPos simple) (.SameFileAndLine simplePos postPos))
+                    (set! postStmt false)))
+
+
+                ;; If necessary and possible, add a mark to a value in post
+                (when postStmt
+                  (set! postStmt (not (setBlockPos post))))
+
+
+                ;; Before giving up (this was added because it helps), try the end of "dom", and if that is not available,
+                ;; try the values in the successor block if it is uncomplicated.
+                (when postStmt
+                  (if (!= ^{:go/via [lico]} (.IsStmt (.-Pos dom)) src/PosIsStmt)
+                    (set! (.-Pos dom) postPos)
+                    (do
+                      ;; Try the successor block
+                      (when (and (== (len (.-Succs dom)) 1) (== (len (.-Preds (.Block (aget (.-Succs dom) 0)))) 1))
+                        (let [succ (.Block (aget (.-Succs dom) 0))]
+                          (range [_ v (.-Values succ)]
+                            (when (isPoorStatementOp (.-Op v))
+                              (continue))
+
+                            (when (.SameFileAndLine postPos (.-Pos v))
+                              (set! (.-Pos v) (.WithIsStmt (.-Pos v))))
+
+                            (set! postStmt false)
+                            (break))
+
+                          ;; If postStmt still true, tag the block itself if possible
+                          (when (and postStmt (!= ^{:go/via [lico]} (.IsStmt (.-Pos succ)) src/PosIsStmt))
+                            (set! (.-Pos succ) postPos)))))))
+
+
+
+
+
+                (set! (.-Values dom) (append (.-Values dom) (spread (.-Values simple))))
+                (set! (.-Values dom) (append (.-Values dom) (spread (.-Values post))))
+
+                ;; Trash 'post' and 'simple'
+                (clobberBlock post)
+                (clobberBlock simple)
+
+                (.invalidateCFG f)
+                true))))))))
+
+
+
+^{:go/end 292} (go/func isLeafPlain "is this a BlockPlain with one predecessor?\n" ^bool [^{:tag (* Block)} b]
+  (and (== (.-Kind b) BlockPlain) (== (len (.-Preds b)) 1)))
+
+
+^{:go/end 302} (go/func clobberBlock [^{:tag (* Block)} b]
+  (set! (.-Values b) nil)
+  (set! (.-Preds b) nil)
+  (set! (.-Succs b) nil)
+  (set! (.-Aux b) nil)
+  (.ResetControls b)
+  (set! (.-Likely b) BranchUnknown)
+  (set! (.-Kind b) BlockInvalid))
+
+
+
+
+
+^{:go/end 390} (go/func elimIfElse "elimIfElse converts the two-way branch starting at dom in f to a conditional move if possible.\nloadAddr is a set of values which are used to compute the address of a load.\nThose values are exempt from CMOV generation.\n" ^bool [^{:tag (* Func)} f ^{:tag (* sparseSet)} loadAddr ^{:tag (* Block)} b]
+  ;; See if 'b' ends in an if/else: it should
+  ;; have two successors, both of which are BlockPlain
+  ;; and succeeded by the same block.
+  (when (or (!= (.-Kind b) BlockIf) (!= (.-Likely b) BranchUnknown))
+    (return false))
+
+  (let [(values yes no) (values (.Block (aget (.-Succs b) 0)) (.Block (aget (.-Succs b) 1)))]
+    (when (or (not (isLeafPlain yes)) (> (len (.-Values yes)) 1) (not (canSpeculativelyExecute yes)))
+      (return false))
+
+    (when (or (not (isLeafPlain no)) (> (len (.-Values no)) 1) (not (canSpeculativelyExecute no)))
+      (return false))
+
+    (when (!= (.Block (aget (.-Succs (.Block (aget (.-Succs b) 0))) 0)) (.Block (aget (.-Succs (.Block (aget (.-Succs b) 1))) 0)))
+      (return false))
+
+    ;; block that postdominates the if/else
+    (let [post (.Block (aget (.-Succs (.Block (aget (.-Succs b) 0))) 0))]
+      (when (or (!= (len (.-Preds post)) 2) (== post b))
+        (return false))
+
+      (let [hasphis false]
+        (range [_ v (.-Values post)]
+          (when (== (.-Op v) OpPhi)
+            (set! hasphis true)
+            (when (not (canCondSelect v (.-arch (.-Config f)) loadAddr))
+              (return false))))
+
+
+
+        (when (not hasphis)
+          (return false))
+
+
+        ;; Don't generate CondSelects if branch is cheaper.
+        (when (not (shouldElimIfElse no yes post (.-arch (.-Config f))))
+          (return false))
+
+
+        ;; now we're committed: rewrite each Phi as a CondSelect
+        ^{:go/breaks [18]} (let [swap (!= (.Block (aget (.-Preds post) 0)) (.Block (aget (.-Succs b) 0)))]
+          (range [_ v (.-Values post)]
+            (when (!= (.-Op v) OpPhi)
+              (continue))
+
+            (set! (.-Op v) OpCondSelect)
+            (when swap
+              (set! (values (aget (.-Args v) 0) (aget (.-Args v) 1)) (values (aget (.-Args v) 1) (aget (.-Args v) 0))))
+
+            (.AddArg v (aget (.-Controls b) 0)))
+
+
+          ;; Move the contents of all of these
+          ;; blocks into 'b' and update CFG edges accordingly
+          (set! (.-Kind b) (.-Kind post))
+          (.CopyControls b post)
+          (set! (.-Aux b) (.-Aux post))
+          (set! (.-Succs b) (append (subslice (.-Succs b) _ 0) (spread (.-Succs post))))
+          (range [i (.-Succs b)]
+            (let [e (aget (.-Succs b) i)]
+              (set! (.-b (aget (.-Preds (.-b e)) (.-i e))) b)))
+
+          (range [i (.-Values post)]
+            (set! (.-Block (aget (.-Values post) i)) b))
+
+          (range [i (.-Values yes)]
+            (set! (.-Block (aget (.-Values yes) i)) b))
+
+          (range [i (.-Values no)]
+            (set! (.-Block (aget (.-Values no) i)) b))
+
+          (set! (.-Values b) (append (.-Values b) (spread (.-Values yes))))
+          (set! (.-Values b) (append (.-Values b) (spread (.-Values no))))
+          (set! (.-Values b) (append (.-Values b) (spread (.-Values post))))
+
+          ;; trash post, yes, and no
+          (clobberBlock yes)
+          (clobberBlock no)
+          (clobberBlock post)
+
+          (.invalidateCFG f)
+          true)))))
+
+
+
+
+^{:go/end 423} (go/func shouldElimIfElse "shouldElimIfElse reports whether estimated cost of eliminating branch\nis lower than threshold.\n" ^bool [^{:tag (* Block)} no ^{:tag (* Block)} yes ^{:tag (* Block)} post ^string arch]
+  (switch arch
+    (default
+      (return true))
+    (case ["amd64"]
+      (let [^:const ^{:val 2} maxcost 2
+          ^{:line 400} phi 0
+          ^{:line 401} other 0]
+        (range [_ v (.-Values post)]
+          (when (== (.-Op v) OpPhi)
+            ;; Each phi results in CondSelect, which lowers into CMOV,
+            ;; CMOV has latency >1 on most CPUs.
+            (inc! phi))
+
+          (range [_ x (.-Args v)]
+            (when (or (== (.-Block x) no) (== (.-Block x) yes))
+              (inc! other))))
+
+
+
+        (let [cost (* phi 1)]
+          (when (> phi 1)
+            ;; If we have more than 1 phi and some values in post have args
+            ;; in yes or no blocks, we may have to recalculate condition, because
+            ;; those args may clobber flags. For now assume that all operations clobber flags.
+            (set! cost + (* other 1)))
+
+          (return (< cost maxcost)))))))
+
+
+
+
+
+
+
+
+
+
+
+^{:go/breaks [[5 449]] :go/end 450} (go/func canSpeculativelyExecute "canSpeculativelyExecute reports whether every value in the block can\nbe evaluated without causing any observable side effects (memory\naccesses, panics and so on) except for execution time changes. It\nalso ensures that the block does not contain any phis which we can't\nspeculatively execute.\nWarning: this function cannot currently detect values that represent\ninstructions the execution of which need to be guarded with CPU\nhardware feature checks. See issue #34950.\n" ^bool [^{:tag (* Block)} b]
+  ;; don't fuse memory ops, Phi ops, divides (can panic),
+  ;; or anything else with side-effects
+  (range [_ v (.-Values b)]
+    (when (or (== (.-Op v) OpPhi) (isDivMod (.-Op v)) (isPtrArithmetic (.-Op v))
+        (.IsMemory (.-Type v)) (.-hasSideEffects (aget opcodeTable (.-Op v))))
+      (return false))
+
+
+    ;; Allow inlining markers to be speculatively executed
+    ;; even though they have a memory argument.
+    ;; See issue #74915.
+    (when (and (!= (.-Op v) OpInlMark) (!= (.MemoryArg v) nil))
+      (return false)))
+
+
+  true)
+
+
+^{:go/end 463} (go/func isDivMod ^bool [^Op op]
+  (switch op
+    (case [OpDiv8 OpDiv8u OpDiv16 OpDiv16u
+        ^{:line 455} OpDiv32 OpDiv32u OpDiv64 OpDiv64u OpDiv128u
+        ^{:line 456} OpDiv32F OpDiv64F
+        ^{:line 457} OpMod8 OpMod8u OpMod16 OpMod16u
+        ^{:line 458} OpMod32 OpMod32u OpMod64 OpMod64u]
+      (return true))
+    (default
+      (return false))))
+
+
+
+^{:go/end 475} (go/func isPtrArithmetic ^bool [^Op op]
+  ;; Pointer arithmetic can't be speculatively executed because the result
+  ;; may be an invalid pointer (if, for example, the condition is that the
+  ;; base pointer is not nil). See issue 56990.
+  (switch op
+    (case [OpOffPtr OpAddPtr OpSubPtr]
+      (return true))
+    (default
+      (return false))))

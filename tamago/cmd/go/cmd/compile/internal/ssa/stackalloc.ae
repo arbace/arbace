@@ -1,0 +1,483 @@
+;; Copyright 2015 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; TODO: live at start of block instead?
+
+(in-ns 'go.cmd.compile.internal.ssa) (go/file "stackalloc.go" :imports [
+
+
+    ^{:line 10} [ir "cmd/compile/internal/ir"]
+    ^{:line 11} [types "cmd/compile/internal/types"]
+    ^{:line 12} [src "cmd/internal/src"]
+    ^{:line 13} [fmt "fmt"]])
+
+
+(go/type stackAllocState (struct
+    ^{:line 17 :tag (* Func)} f
+
+
+
+    ^{:line 21 :tag (slice (slice ID)) :doc "live is the output of stackalloc.\nlive[b.id] = live values at the end of block b.\n"} live
+
+
+
+    ^{:line 25 :tag (slice stackValState) :doc "The following slices are reused across multiple users\nof stackAllocState.\n"} values
+    ^{:line 26 :tag (slice (slice ID))} interfere ; interfere[v.id] = values that interfere with v.
+    ^{:line 27 :tag (slice LocalSlot)} names
+
+    ^{:line 29 :tag int32} nArgSlot ; Number of Values sourced to arg slot
+    ^{:line 30 :tag int32} nNotNeed ; Number of Values not needing a stack slot
+    ^{:line 31 :tag int32} nNamedSlot ; Number of Values using a named stack slot
+    ^{:line 32 :tag int32} nReuse ; Number of values reusing a stack slot
+    ^{:line 33 :tag int32} nAuto ; Number of autos allocated for stack slots.
+    ^{:line 34 :tag int32} nSelfInterfere)) ; Number of self-interferences
+
+
+^{:go/end 46} (go/func newStackAllocState ^{:tag (* stackAllocState)} [^{:tag (* Func)} f]
+  (let [s (.-stackAllocState (.-Cache f))]
+    (when (== s nil)
+      (return (new stackAllocState)))
+
+    (when (!= (.-f s) nil)
+      (.Fatalf (.-fe f) src/NoXPos "newStackAllocState called without previous free"))
+
+    ^{:line 45} s))
+
+
+^{:go/end 56} (go/func putStackAllocState [^{:tag (* stackAllocState)} s]
+  (clear (.-values s))
+  (clear (.-interfere s))
+  (clear (.-names s))
+  (set! (.-stackAllocState (.-Cache (.-f s))) s)
+  (set! (.-f s) nil)
+  (set! (.-live s) nil)
+  (set! (values (.-nArgSlot s) (.-nNotNeed s) (.-nNamedSlot s) (.-nReuse s) (.-nAuto s) (.-nSelfInterfere s)) (values 0 0 0 0 0 0)))
+
+
+(go/type stackValState (struct
+    ^{:line 59 :tag (* types/Type)} typ
+    ^{:line 60 :tag (* Value)} spill
+    ^{:line 61 :tag bool} needSlot
+    ^{:line 62 :tag bool} isArg
+    ^{:line 63 :tag ID} defBlock
+    ^{:line 64 :tag (slice stackUseBlock)} useBlocks))
+
+
+
+
+
+
+
+^{:go/end 83} (go/method addUseBlock "addUseBlock adds a block to the set of blocks that uses this value.\nNote that we only loosely enforce the set property by checking the last\nblock that was appended to the list and duplicates may occur.\nBecause we add values block by block (barring phi-nodes), the number of duplicates is\nsmall and we deduplicate as part of the liveness algorithm later anyway.\n" [^{:tag (* stackValState)} sv ^{:tag (* Block)} b ^bool liveout]
+  (let [entry ^{:go/breaks [2 4]} (lit stackUseBlock
+        :b b
+        :liveout liveout)]
+
+    (when (or (== (.-useBlocks sv) nil) (!= (aget (.-useBlocks sv) (- (len (.-useBlocks sv)) 1)) entry))
+      (set! (.-useBlocks sv) (append (.-useBlocks sv) ^{:go/breaks [2 4]} (lit stackUseBlock
+            :b b
+            :liveout liveout))))))
+
+
+
+
+(go/type stackUseBlock (struct
+    ^{:line 86 :tag (* Block)} b
+    ^{:line 87 :tag bool} liveout))
+
+
+
+
+
+^{:go/end 111} (go/func stackalloc "stackalloc allocates storage in the stack frame for\nall Values that did not get a register.\nReturns a map from block ID to the stack values live at the end of that block.\n" ^{:tag (slice (slice ID))} [^{:tag (* Func)} f ^{:tag (slice (slice ID))} spillLive]
+  (when (> (.-debug (.-pass f)) stackDebug)
+    (fmt/Println "before stackalloc")
+    (fmt/Println (.String f)))
+
+  (let [s (newStackAllocState f)]
+    (.init s f spillLive)
+    (defer (putStackAllocState s))
+
+    (.stackalloc s)
+    (when (> (.-stats (.-pass f)) 0)
+      (.LogStat f "stack_alloc_stats"
+        (.-nArgSlot s) "arg_slots" (.-nNotNeed s) "slot_not_needed"
+        (.-nNamedSlot s) "named_slots" (.-nAuto s) "auto_slots"
+        (.-nReuse s) "reused_slots" (.-nSelfInterfere s) "self_interfering"))
+
+
+    (.-live s)))
+
+
+^{:go/end 142} (go/method init [^{:tag (* stackAllocState)} s ^{:tag (* Func)} f ^{:tag (slice (slice ID))} spillLive]
+  (set! (.-f s) f)
+
+  ;; Initialize value information.
+  (if [n (.NumValues f)] (>= (cap (.-values s)) n)
+    (set! (.-values s) (subslice (.-values s) _ n))
+
+    (set! (.-values s) (make (slice stackValState) n)))
+
+  (range [_ b (.-Blocks f)]
+    (range [_ v (.-Values b)]
+      (set! (.-typ (aget (.-values s) (.-ID v))) (.-Type v))
+      (set! (.-needSlot (aget (.-values s) (.-ID v))) (and (not (.IsMemory (.-Type v))) (not (.IsVoid (.-Type v))) (not (.IsFlags (.-Type v))) (== (.getHome f (.-ID v)) nil) (not (.rematerializeable v)) (not (.-OnWasmStack v))))
+      (set! (.-isArg (aget (.-values s) (.-ID v))) (hasAnyArgOp v))
+      (set! (.-defBlock (aget (.-values s) (.-ID v))) (.-ID b))
+      (when (and (> (.-debug (.-pass f)) stackDebug) (.-needSlot (aget (.-values s) (.-ID v))))
+        (fmt/Printf "%s needs a stack slot\n" v))
+
+      (when (== (.-Op v) OpStoreReg)
+        (set! (.-spill (aget (.-values s) (.-ID (aget (.-Args v) 0)))) v))))
+
+
+
+
+  ;; Compute liveness info for values needing a slot.
+  (.computeLive s spillLive)
+
+  ;; Build interference graph among values needing a slot.
+  (.buildInterferenceGraph s))
+
+
+^{:go/end 316} (go/method stackalloc [^{:tag (* stackAllocState)} s]
+  (let [f (.-f s)]
+
+    ;; Build map from values to their names, if any.
+    ;; A value may be associated with more than one name (e.g. after
+    ;; the assignment i=j). This step picks one name per value arbitrarily.
+    (if [n (.NumValues f)] (>= (cap (.-names s)) n)
+      (set! (.-names s) (subslice (.-names s) _ n))
+
+      (set! (.-names s) (make (slice LocalSlot) n)))
+
+    (let [names (.-names s)
+        ^{:line 156} empty (lit LocalSlot)]
+      (range [_ name (.-Names f)]
+        ;; Note: not "range f.NamedValues" above, because
+        ;; that would be nondeterministic.
+        (range [_ v (aget (.-NamedValues f) @name)]
+          (cond (or (== (.-Op v) OpArgIntReg) (== (.-Op v) OpArgFloatReg))
+            (let [aux (assert (* AuxNameOffset) (.-Aux v))]
+              ;; Never let an arg be bound to a differently named thing.
+              (when (or (!= (.-N name) (.-Name aux)) (!= (.-Off name) (.-Offset aux)))
+                (when (> (.-debug (.-pass f)) stackDebug)
+                  (fmt/Printf "stackalloc register arg %s skipping name %s\n" v name))
+
+                (continue)))
+
+            (and (== (.-Class (.-N name)) ir/PPARAM) (!= (.-Op v) OpArg)) (do
+              ;; PPARAM's only bind to OpArg
+              (when (> (.-debug (.-pass f)) stackDebug)
+                (fmt/Printf "stackalloc PPARAM name %s skipping non-Arg %s\n" name v))
+
+              (continue)))
+
+
+          (when (== (aget names (.-ID v)) empty)
+            (when (> (.-debug (.-pass f)) stackDebug)
+              (fmt/Printf "stackalloc value %s to name %s\n" v @name))
+
+            (aset names (.-ID v) @name))))
+
+
+
+
+      ;; Allocate args to their assigned locations.
+      (range [_ v (.-Values (.-Entry f))]
+        (when (not (hasAnyArgOp v))
+          (continue))
+
+        (when (== (.-Aux v) nil)
+          (.Fatalf f "%s has nil Aux\n" (.LongString v)))
+
+        (when (== (.-Op v) OpArg)
+          (let [loc (lit LocalSlot :N (assert (* ir/Name) (.-Aux v)) :Type (.-Type v) :Off (.-AuxInt v))]
+            (when (> (.-debug (.-pass f)) stackDebug)
+              (fmt/Printf "stackalloc OpArg %s to %s\n" v loc))
+
+            (.setHome f v loc)
+            (continue))))
+
+      ;; You might think this below would be the right idea, but you would be wrong.
+      ;; It almost works; as of 105a6e9518 - 2021-04-23,
+      ;; GOSSAHASH=11011011001011111 == cmd/compile/internal/noder.(*noder).embedded
+      ;; is compiled incorrectly.  I believe the cause is one of those SSA-to-registers
+      ;; puzzles that the register allocator untangles; in the event that a register
+      ;; parameter does not end up bound to a name, "fixing" it is a bad idea.
+      ;;
+      ;;if f.DebugTest {
+      ;;	if v.Op == OpArgIntReg || v.Op == OpArgFloatReg {
+      ;;		aux := v.Aux.(*AuxNameOffset)
+      ;;		loc := LocalSlot{N: aux.Name, Type: v.Type, Off: aux.Offset}
+      ;;		if f.pass.debug > stackDebug {
+      ;;			fmt.Printf("stackalloc Op%s %s to %s\n", v.Op, v, loc)
+      ;;		}
+      ;;		names[v.ID] = loc
+      ;;		continue
+      ;;	}
+      ;;}
+
+
+
+      ;; For each type, we keep track of all the stack slots we
+      ;; have allocated for that type. This map is keyed by
+      ;; strings returned by types.LinkString. This guarantees
+      ;; type equality, but also lets us match the same type represented
+      ;; by two different types.Type structures. See issue 65783.
+      (let [locations (lit (map string (slice LocalSlot)))
+
+          ;; Each time we assign a stack slot to a value v, we remember
+          ;; the slot we used via an index into locations[v.Type].
+          ^{:line 233} slots (.allocIntSlice (.-Cache f) (.NumValues f))]
+        (defer (.freeIntSlice (.-Cache f) slots))
+        (range [i slots]
+          (aset slots i -1))
+
+
+        ;; Pick a stack slot for each value needing one.
+        (let [used (.allocBoolSlice (.-Cache f) (.NumValues f))]
+          (defer (.freeBoolSlice (.-Cache f) used))
+          (range [_ b (.-Blocks f)]
+            (range [_ v (.-Values b)]
+              (when (not (.-needSlot (aget (.-values s) (.-ID v))))
+                (inc! (.-nNotNeed s))
+                (continue))
+
+              (when (hasAnyArgOp v)
+                (inc! (.-nArgSlot s))
+                (continue)) ; already picked
+
+
+              ;; If this is a named value, try to use the name as
+              ;; the spill location.
+              (let [^LocalSlot name (zero LocalSlot)]
+                (if (== (.-Op v) OpStoreReg)
+                  (set! name (aget names (.-ID (aget (.-Args v) 0))))
+
+                  (set! name (aget names (.-ID v))))
+
+                (when (and (!= (.-N name) nil) (== (.Compare (.-Type v) (.-Type name)) types/CMPeq))
+                  (range [_ id (aget (.-interfere s) (.-ID v))]
+                    (let [h (.getHome f id)]
+                      (when (and (!= h nil) (== (.-N (assert LocalSlot h)) (.-N name)) (== (.-Off (assert LocalSlot h)) (.-Off name)))
+                        ;; A variable can interfere with itself.
+                        ;; It is rare, but it can happen.
+                        (inc! (.-nSelfInterfere s))
+                        (goto :noname))))
+
+
+                  (when (> (.-debug (.-pass f)) stackDebug)
+                    (fmt/Printf "stackalloc %s to %s\n" v name))
+
+                  (inc! (.-nNamedSlot s))
+                  (.setHome f v name)
+                  (continue))
+
+
+                (let [
+                    ;; Set of stack slots we could reuse.
+                    ^{:line 281 :go/label :noname :go/label-line 279} typeKey (.LinkString (.-Type v))
+                    ^{:line 282} locs (aget locations typeKey)]
+                  ;; Mark all positions in locs used by interfering values.
+                  (for [i 0] (< i (len locs)) (inc! i)
+                    (aset used i false))
+
+                  (range [_ xid (aget (.-interfere s) (.-ID v))]
+                    (let [slot (aget slots xid)]
+                      (when (>= slot 0)
+                        (aset used slot true))))
+
+
+                  ;; Find an unused stack slot.
+                  (let [^int i (zero int)]
+                    (for [(set! i 0)] (< i (len locs)) (inc! i)
+                      (when (not (aget used i))
+                        (inc! (.-nReuse s))
+                        (break)))
+
+
+                    ;; If there is no unused stack slot, allocate a new one.
+                    (when (== i (len locs))
+                      (inc! (.-nAuto s))
+                      (set! locs (append locs (lit LocalSlot :N (.NewLocal f (.-Pos v) (.-Type v)) :Type (.-Type v) :Off 0)))
+                      (aset locations typeKey locs))
+
+                    ;; Use the stack variable at that index for v.
+                    (let [loc (aget locs i)]
+                      (when (> (.-debug (.-pass f)) stackDebug)
+                        (fmt/Printf "stackalloc %s to %s\n" v loc))
+
+                      (.setHome f v loc)
+                      (aset slots (.-ID v) i))))))))))))
+
+
+
+
+
+
+^{:go/end 408} (go/method computeLive "computeLive computes a map from block ID to a list of\nstack-slot-needing value IDs live at the end of that block.\n" [^{:tag (* stackAllocState)} s ^{:tag (slice (slice ID))} spillLive]
+
+  ;; Because values using stack slots are few and far inbetween
+  ;; (compared to the set of all values), we use a path exploration
+  ;; algorithm to calculate liveness here.
+  (let [f (.-f s)]
+    (range [_ b (.-Blocks f)]
+      (range [_ spillvid (aget spillLive (.-ID b))]
+        (let [val (addr (aget (.-values s) spillvid))]
+          (.addUseBlock val b true)))
+
+      (range [_ v (.-Values b)]
+        (range [i a (.-Args v)]
+          (let [val (addr (aget (.-values s) (.-ID a)))
+              ^{:line 334} useBlock b
+              ^{:line 335} forceLiveout false]
+            (when (== (.-Op v) OpPhi)
+              (set! useBlock (.-b (aget (.-Preds b) i)))
+              (set! forceLiveout true)
+              (when [spill (.-spill val)] (!= spill nil)
+                ;;TODO: remove?  Subsumed by SpillUse?
+                (.addUseBlock (aget (.-values s) (.-ID spill)) useBlock true)))
+
+
+            (when (not (.-needSlot val))
+              (continue))
+
+            (.addUseBlock val useBlock forceLiveout)))))
+
+
+
+
+    (set! (.-live s) (make (slice (slice ID)) (.NumBlocks f)))
+    (let [push ^{:go/end 359} (fn [^ID bid ^ID vid]
+          (let [l (aget (.-live s) bid)]
+            (when (or (== l nil) (!= (aget l (- (len l) 1)) vid))
+              (set! l (append l vid))
+              (aset (.-live s) bid l))))
+
+
+        ;; TODO: If we can help along the interference graph by calculating livein sets,
+        ;; we can do so trivially by turning this sparse set into an array of arrays
+        ;; and checking the top for the current value instead of inclusion in the sparse set.
+        ^{:line 363} seen (.newSparseSet f (.NumBlocks f))]
+      (defer (.retSparseSet f seen))
+      ;; instead of pruning out duplicate blocks when we build the useblocks slices
+      ;; or when we add them to the queue, rely on the seen set to stop considering
+      ;; them. This is slightly faster than building the workqueues as sets
+      ;;
+      ;; However, this means that the queue can grow larger than the number of blocks,
+      ;; usually in very short functions. Returning a slice with values appended beyond the
+      ;; original allocation can corrupt the allocator state, so cap the queue and return
+      ;; the originally allocated slice regardless.
+      (let [allocedBqueue (.allocBlockSlice (.-Cache f) (.NumBlocks f))]
+        (defer (.freeBlockSlice (.-Cache f) allocedBqueue))
+        (let [bqueue (subslice allocedBqueue _ 0 (.NumBlocks f))]
+
+          (range [vid v (.-values s)]
+            (when (not (.-needSlot v))
+              (continue))
+
+            (.clear seen)
+            (set! bqueue (subslice bqueue _ 0))
+            (range [_ b (.-useBlocks v)]
+              (when (.-liveout b)
+                (push (.-ID (.-b b)) (conv ID vid)))
+
+              (set! bqueue (append bqueue (.-b b))))
+
+            (while (> (len bqueue) 0)
+              (let [work (aget bqueue (- (len bqueue) 1))]
+                (set! bqueue (subslice bqueue _ (- (len bqueue) 1)))
+                (when (or (.contains seen (.-ID work)) (== (.-ID work) (.-defBlock v)))
+                  (continue))
+
+                (.add seen (.-ID work))
+                (range [_ e (.-Preds work)]
+                  (push (.-ID (.-b e)) (conv ID vid))
+                  (set! bqueue (append bqueue (.-b e)))))))
+
+
+
+
+          (when (> (.-debug (.-pass (.-f s))) stackDebug)
+            (range [_ b (.-Blocks (.-f s))]
+              (fmt/Printf "stacklive %s %v\n" b (aget (.-live s) (.-ID b))))))))))
+
+
+
+
+^{:go/end 415} (go/method getHome ^Location [^{:tag (* Func)} f ^ID vid]
+  (when (>= (conv int vid) (len (.-RegAlloc f)))
+    (return nil))
+
+  (aget (.-RegAlloc f) vid))
+
+
+^{:go/end 422} (go/method setHome [^{:tag (* Func)} f ^{:tag (* Value)} v ^Location loc]
+  (while (>= (.-ID v) (conv ID (len (.-RegAlloc f))))
+    (set! (.-RegAlloc f) (append (.-RegAlloc f) nil)))
+
+  (aset (.-RegAlloc f) (.-ID v) loc))
+
+
+^{:go/end 480} (go/method buildInterferenceGraph [^{:tag (* stackAllocState)} s]
+  (let [f (.-f s)]
+    (if [n (.NumValues f)] (>= (cap (.-interfere s)) n)
+      (set! (.-interfere s) (subslice (.-interfere s) _ n))
+
+      (set! (.-interfere s) (make (slice (slice ID)) n)))
+
+    (let [live (.newSparseSet f (.NumValues f))]
+      (defer (.retSparseSet f live))
+      (range [_ b (.-Blocks f)]
+        ;; Propagate liveness backwards to the start of the block.
+        ;; Two values interfere if one is defined while the other is live.
+        (.clear live)
+        (.addAll live (aget (.-live s) (.-ID b)))
+        (for [i (- (len (.-Values b)) 1)] (>= i 0) (dec! i)
+          (let [v (aget (.-Values b) i)]
+            (when (.-needSlot (aget (.-values s) (.-ID v)))
+              (.remove live (.-ID v))
+              (range [_ id (.contents live)]
+                ;; Note: args can have different types and still interfere
+                ;; (with each other or with other values). See issue 23522.
+                (when (or (== (.Compare (.-typ (aget (.-values s) (.-ID v))) (.-typ (aget (.-values s) id))) types/CMPeq) (hasAnyArgOp v) (.-isArg (aget (.-values s) id)))
+                  (aset (.-interfere s) (.-ID v) (append (aget (.-interfere s) (.-ID v)) id))
+                  (aset (.-interfere s) id (append (aget (.-interfere s) id) (.-ID v))))))
+
+
+
+            (range [_ a (.-Args v)]
+              (when (.-needSlot (aget (.-values s) (.-ID a)))
+                (.add live (.-ID a))))
+
+
+            (when (and (hasAnyArgOp v) (.-needSlot (aget (.-values s) (.-ID v))))
+              ;; OpArg is an input argument which is pre-spilled.
+              ;; We add back v.ID here because we want this value
+              ;; to appear live even before this point. Being live
+              ;; all the way to the start of the entry block prevents other
+              ;; values from being allocated to the same slot and clobbering
+              ;; the input value before we have a chance to load it.
+
+              ;; TODO(register args) this is apparently not wrong for register args -- is it necessary?
+              (.add live (.-ID v))))))
+
+
+
+      (when (> (.-debug (.-pass f)) stackDebug)
+        (range [vid i (.-interfere s)]
+          (when (> (len i) 0)
+            (fmt/Printf "v%d interferes with" vid)
+            (range [_ x i]
+              (fmt/Printf " v%d" x))
+
+            (fmt/Println)))))))
+
+
+
+
+
+^{:go/end 484} (go/func hasAnyArgOp ^bool [^{:tag (* Value)} v]
+  (or (== (.-Op v) OpArg) (== (.-Op v) OpArgIntReg) (== (.-Op v) OpArgFloatReg)))

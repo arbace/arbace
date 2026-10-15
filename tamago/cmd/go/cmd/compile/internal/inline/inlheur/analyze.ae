@@ -1,0 +1,371 @@
+;; Copyright 2023 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.cmd.compile.internal.inline.inlheur) (go/file "analyze.go" :imports [
+
+
+    ^{:line 8} [base "cmd/compile/internal/base"]
+    ^{:line 9} [ir "cmd/compile/internal/ir"]
+    ^{:line 10} [types "cmd/compile/internal/types"]
+    ^{:line 11} [cmp "cmp"]
+    ^{:line 12} [json "encoding/json"]
+    ^{:line 13} [fmt "fmt"]
+    ^{:line 14} [buildcfg "internal/buildcfg"]
+    ^{:line 15} [io "io"]
+    ^{:line 16} [os "os"]
+    ^{:line 17} [filepath "path/filepath"]
+    ^{:line 18} [slices "slices"]
+    ^{:line 19} [strings "strings"]])
+
+
+(go/const
+  ^{:line 23} [^{:val 1} debugTraceFuncs (<< 1 iota)]
+  ^{:line 24} [^{:val 2} debugTraceFuncFlags]
+  ^{:line 25} [^{:val 4} debugTraceResults]
+  ^{:line 26} [^{:val 8} debugTraceParams]
+  ^{:line 27} [^{:val 16} debugTraceExprClassify]
+  ^{:line 28} [^{:val 32} debugTraceCalls]
+  ^{:line 29} [^{:val 64} debugTraceScoring])
+
+
+
+
+
+
+
+
+
+
+
+(go/type propAnalyzer "propAnalyzer interface is used for defining one or more analyzer\nhelper objects, each tasked with computing some specific subset of\nthe properties we're interested in. The assumption is that\nproperties are independent, so each new analyzer that implements\nthis interface can operate entirely on its own. For a given analyzer\nthere will be a sequence of calls to nodeVisitPre and nodeVisitPost\nas the nodes within a function are visited, then a followup call to\nsetResults so that the analyzer can transfer its results into the\nfinal properties object.\n" (interface
+    (nodeVisitPre [^ir/Node n])
+    (nodeVisitPost [^ir/Node n])
+    (setResults [^{:tag (* FuncProps)} funcProps])))
+
+
+
+
+
+
+
+
+
+(go/type fnInlHeur "fnInlHeur contains inline heuristics state information about a\nspecific Go function being analyzed/considered by the inliner. Note\nthat in addition to constructing a fnInlHeur object by analyzing a\nspecific *ir.Func, there is also code in the test harness\n(funcprops_test.go) that builds up fnInlHeur's by reading in and\nparsing a dump. This is the reason why we have file/fname/line\nfields below instead of just an *ir.Func field.\n" (struct
+    ^{:line 55 :tag (* FuncProps)} props
+    ^{:line 56 :tag CallSiteTab} cstab
+    ^{:line 57 :tag string} fname
+    ^{:line 58 :tag string} file
+    ^{:line 59 :tag uint} line))
+
+
+(go/var fpmap (lit (map (* ir/Func) fnInlHeur)))
+
+
+
+
+
+
+
+^{:go/end 115} (go/func AnalyzeFunc "AnalyzeFunc computes function properties for fn and its contained\nclosures, updating the global 'fpmap' table. It is assumed that\n\"CanInline\" has been run on fn and on the closures that feed\ndirectly into calls; other closures not directly called will also\nbe checked inlinability for inlinability here in case they are\nreturned as a result.\n" [^{:tag (* ir/Func)} fn ^{:tag (func [(* ir/Func)])} canInline ^{:tag (func [(* ir/Func)] [int32])} budgetForFunc ^int inlineMaxBudget]
+  (when (== fpmap nil)
+    ;; If fpmap is nil this indicates that the main inliner pass is
+    ;; complete and we're doing inlining of wrappers (no heuristics
+    ;; used here).
+    (return))
+
+  (when (!= (.-OClosure fn) nil)
+    ;; closures will be processed along with their outer enclosing func.
+    (return))
+
+  (enableDebugTraceIfEnv)
+  (when (!= (bit-and debugTrace debugTraceFuncs) 0)
+    (fmt/Fprintf os/Stderr "=-= AnalyzeFunc(%v)\n" fn))
+
+  ;; Build up a list containing 'fn' and any closures it contains. Along
+  ;; the way, test to see whether each closure is inlinable in case
+  ;; we might be returning it.
+  (let [funcs (lit (slice (* ir/Func)) fn)]
+    (ir/VisitFuncAndClosures fn ^{:go/end 93} (fn [^ir/Node n]
+        (when [(values clo ok) (assert (* ir/ClosureExpr) n)] ok
+          (set! funcs (append funcs (.-Func clo))))))
+
+
+
+    ;; Analyze the list of functions. We want to visit a given func
+    ;; only after the closures it contains have been processed, so
+    ;; iterate through the list in reverse order. Once a function has
+    ;; been analyzed, revisit the question of whether it should be
+    ;; inlinable; if it is over the default hairiness limit and it
+    ;; doesn't have any interesting properties, then we don't want
+    ;; the overhead of writing out its inline body.
+    (let [nameFinder (newNameFinder fn)]
+      (for [i (- (len funcs) 1)] (>= i 0) (dec! i)
+        (let [f (aget funcs i)]
+          (when (and (!= (.-OClosure f) nil) (not (.InlinabilityChecked f)))
+            (canInline f))
+
+          (let [funcProps (analyzeFunc f inlineMaxBudget nameFinder)]
+            (revisitInlinability f funcProps budgetForFunc)
+            (when (!= (.-Inl f) nil)
+              (set! (.-Properties (.-Inl f)) (.SerializeToString funcProps))))))
+
+
+      (disableDebugTrace))))
+
+
+
+
+
+
+^{:go/end 125} (go/func TearDown "TearDown is invoked at the end of the main inlining pass; doing\nfunction analysis and call site scoring is unlikely to help a lot\nafter this point, so nil out fpmap and other globals to reclaim\nstorage.\n" []
+  (set! fpmap nil)
+  (set! (.-tab scoreCallsCache) nil)
+  (set! (.-csl scoreCallsCache) nil))
+
+
+^{:go/end 146} (go/func analyzeFunc ^{:tag (* FuncProps)} [^{:tag (* ir/Func)} fn ^int inlineMaxBudget ^{:tag (* nameFinder)} nf]
+  (when [(values funcInlHeur ok) (aget fpmap fn)] ok
+    (return (.-props funcInlHeur)))
+
+  (let [(values funcProps fcstab) (computeFuncProps fn inlineMaxBudget nf)
+      (values file line) (fnFileLine fn)
+      ^{:line 133} entry ^{:go/breaks [2 4 6 8 10]} (lit fnInlHeur
+        :fname (.-Name (.Sym fn))
+        :file file
+        :line line
+        :props funcProps
+        :cstab fcstab)]
+
+    (.SetNeverReturns fn (!= (bit-and (.-Flags (.-props entry)) FuncPropNeverReturns) 0))
+    (aset fpmap fn entry)
+    (when (and (!= (.-Inl fn) nil) (== (.-Properties (.-Inl fn)) ""))
+      (set! (.-Properties (.-Inl fn)) (.SerializeToString (.-props entry))))
+
+    ^{:line 145} funcProps))
+
+
+
+
+
+
+
+
+^{:go/end 163} (go/func revisitInlinability "revisitInlinability revisits the question of whether to continue to\ntreat function 'fn' as an inline candidate based on the set of\nproperties we've computed for it. If (for example) it has an\ninitial size score of 150 and no interesting properties to speak\nof, then there isn't really any point to moving ahead with it as an\ninline candidate.\n" [^{:tag (* ir/Func)} fn ^{:tag (* FuncProps)} funcProps ^{:tag (func [(* ir/Func)] [int32])} budgetForFunc]
+  (when (== (.-Inl fn) nil)
+    (return))
+
+  (let [maxAdj (conv int32 (LargestNegativeScoreAdjustment fn funcProps))
+      ^{:line 159} budget (budgetForFunc fn)]
+    (when (> (+ (.-Cost (.-Inl fn)) maxAdj) budget)
+      (set! (.-Inl fn) nil))))
+
+
+
+
+
+
+^{:go/end 184} (go/func computeFuncProps "computeFuncProps examines the Go function 'fn' and computes for it\na function \"properties\" object, to be used to drive inlining\nheuristics. See comments on the FuncProps type for more info.\n" [^{:tag (* ir/Func)} fn ^int inlineMaxBudget ^{:tag (* nameFinder)} nf] :results [(* FuncProps) CallSiteTab]
+  (when (!= (bit-and debugTrace debugTraceFuncs) 0)
+    (fmt/Fprintf os/Stderr "=-= starting analysis of func %v:\n%+v\n"
+      ^{:line 171} fn fn))
+
+  (let [funcProps (new FuncProps)
+      ^{:line 174} ffa (makeFuncFlagsAnalyzer fn)
+      ^{:line 175} analyzers (lit (slice propAnalyzer) ffa)]
+    (set! analyzers (addResultsAnalyzer fn analyzers funcProps inlineMaxBudget nf))
+    (set! analyzers (addParamsAnalyzer fn analyzers funcProps nf))
+    (runAnalyzersOnFunction fn analyzers)
+    (range [_ a analyzers]
+      (.setResults a funcProps))
+
+    (let [cstab (computeCallSiteTable fn (.-Body fn) nil (.panicPathTable ffa) 0 nf)]
+      (return funcProps cstab))))
+
+
+^{:go/end 199} (go/func runAnalyzersOnFunction [^{:tag (* ir/Func)} fn ^{:tag (slice propAnalyzer)} analyzers]
+  (let [^{:tag (func [ir/Node] [bool])} doNode (zero (func [ir/Node] [bool]))]
+    (set! doNode ^{:go/breaks [[5 196]] :go/end 197} (fn ^bool [^ir/Node n]
+        (range [_ a analyzers]
+          (.nodeVisitPre a n))
+
+        (ir/DoChildren n doNode)
+        (range [_ a analyzers]
+          (.nodeVisitPost a n))
+
+        false))
+
+    (doNode fn)))
+
+
+^{:go/breaks [[4 209]] :go/end 210} (go/func propsForFunc ^{:tag (* FuncProps)} [^{:tag (* ir/Func)} fn]
+  (if [(values funcInlHeur ok) (aget fpmap fn)] ok
+    (return (.-props funcInlHeur))
+    (when (and (!= (.-Inl fn) nil) (!= (.-Properties (.-Inl fn)) ""))
+      ;; FIXME: considering adding some sort of cache or table
+      ;; for deserialized properties of imported functions.
+      (return (DeserializeFromString (.-Properties (.-Inl fn))))))
+
+  nil)
+
+
+^{:go/end 215} (go/func fnFileLine [^{:tag (* ir/Func)} fn] :results [string uint]
+  (let [p (.InnermostPos base/Ctxt ^{:go/via [miniNode]} (.Pos fn))]
+    (return (filepath/Base (.Filename p)) ^{:go/via [lico]} (.Line p))))
+
+
+^{:go/end 219} (go/func Enabled ^bool []
+  (or ^{:go/via [Flags]} (.-NewInliner buildcfg/Experiment) (UnitTesting)))
+
+
+^{:go/end 224} (go/func UnitTesting ^bool []
+  (or (!= (.-DumpInlFuncProps base/Debug) "")
+    (!= (.-DumpInlCallSiteScores base/Debug) 0)))
+
+
+
+
+
+
+
+^{:go/end 246} (go/func DumpFuncProps "DumpFuncProps computes and caches function properties for the func\n'fn', writing out a description of the previously computed set of\nproperties to the file given in 'dumpfile'. Used for the\n\"-d=dumpinlfuncprops=...\" command line flag, intended for use\nprimarily in unit testing.\n" [^{:tag (* ir/Func)} fn ^string dumpfile]
+  (if (!= fn nil) (do
+      (when (!= (.-OClosure fn) nil)
+        ;; closures will be processed along with their outer enclosing func.
+        (return))
+
+      (captureFuncDumpEntry fn)
+      (ir/VisitFuncAndClosures fn ^{:go/end 242} (fn [^ir/Node n]
+          (when [(values clo ok) (assert (* ir/ClosureExpr) n)] ok
+            (captureFuncDumpEntry (.-Func clo))))))
+
+
+
+    (emitDumpToFile dumpfile)))
+
+
+
+
+
+
+
+^{:go/end 292} (go/func emitDumpToFile "emitDumpToFile writes out the buffer function property dump entries\nto a file, for unit testing. Dump entries need to be sorted by\ndefinition line, and due to generics we need to account for the\npossibility that several ir.Func's will have the same def line.\n" [^string dumpfile]
+  (let [mode (bit-or os/O_WRONLY os/O_CREATE os/O_TRUNC)]
+    (when (== (aget dumpfile 0) \+)
+      (set! dumpfile (subslice dumpfile 1))
+      (set! mode (bit-or os/O_WRONLY os/O_APPEND os/O_CREATE)))
+
+    (when (== (aget dumpfile 0) \%)
+      (set! dumpfile (subslice dumpfile 1))
+      (let [(values d b) (values (filepath/Dir dumpfile) (filepath/Base dumpfile))
+          ^{:line 261} ptag (strings/ReplaceAll (.-Path types/LocalPkg) "/" ":")]
+        (set! dumpfile (+ d "/" ptag "." b))))
+
+    (let [(values outf err) (os/OpenFile dumpfile mode 0644)]
+      (when (!= err nil)
+        (base/Fatalf "opening function props dump file %q: %v\n" dumpfile err))
+
+      (defer (.Close outf))
+      (dumpFilePreamble outf)
+
+      (let [atline (lit (map uint uint))
+          ^{:line 272} sl (make (slice fnInlHeur) 0 (len dumpBuffer))]
+        (range [_ e dumpBuffer]
+          (set! sl (append sl e))
+          (aset atline (.-line e) (+ (aget atline (.-line e)) 1)))
+
+        (set! sl (sortFnInlHeurSlice sl))
+
+        (let [prevline (conv uint 0)]
+          (range [_ entry sl]
+            (let [idx (conv uint 0)]
+              (when (== prevline (.-line entry))
+                (inc! idx))
+
+              (set! prevline (.-line entry))
+              (let [atl (aget atline (.-line entry))]
+                (when [err (dumpFnPreamble outf (addr entry) nil idx atl)] (!= err nil)
+                  (base/Fatalf "function props dump: %v\n" err)))))
+
+
+          (set! dumpBuffer nil))))))
+
+
+
+
+
+
+^{:go/end 320} (go/func captureFuncDumpEntry "captureFuncDumpEntry grabs the function properties object for 'fn'\nand enqueues it for later dumping. Used for the\n\"-d=dumpinlfuncprops=...\" command line flag, intended for use\nprimarily in unit testing.\n" [^{:tag (* ir/Func)} fn]
+  ;; avoid capturing compiler-generated equality funcs.
+  (when (strings/HasPrefix (.-Name (.Sym fn)) ".eq.")
+    (return))
+
+  (let [(values funcInlHeur ok) (aget fpmap fn)]
+    (when (not ok)
+      ;; Missing entry is expected for functions that are too large
+      ;; to inline. We still want to write out call site scores in
+      ;; this case however.
+      (set! funcInlHeur (lit fnInlHeur :cstab callSiteTab)))
+
+    (when (== dumpBuffer nil)
+      (set! dumpBuffer (make (map (* ir/Func) fnInlHeur))))
+
+    (when [(values _ ok) (aget dumpBuffer fn)] ok
+      (return))
+
+    (when (!= (bit-and debugTrace debugTraceFuncs) 0)
+      (fmt/Fprintf os/Stderr "=-= capturing dump for %v:\n" fn))
+
+    (aset dumpBuffer fn funcInlHeur)))
+
+
+
+
+^{:go/end 329} (go/func dumpFilePreamble "dumpFilePreamble writes out a file-level preamble for a given\nGo function as part of a function properties dump.\n" [^io/Writer w]
+  (fmt/Fprintf w "// DO NOT EDIT (use 'go test -v -update-expected' instead.)\n")
+  (fmt/Fprintf w "// See cmd/compile/internal/inline/inlheur/testdata/props/README.txt\n")
+  (fmt/Fprintf w "// for more information on the format of this file.\n")
+  (fmt/Fprintf w "// %s\n" preambleDelimiter))
+
+
+
+
+
+
+^{:go/end 348} (go/func dumpFnPreamble "dumpFnPreamble writes out a function-level preamble for a given\nGo function as part of a function properties dump. See the\nREADME.txt file in testdata/props for more on the format of\nthis preamble.\n" ^error [^io/Writer w ^{:tag (* fnInlHeur)} funcInlHeur ^encodedCallSiteTab ecst ^uint idx ^uint atl]
+  (fmt/Fprintf w "// %s %s %d %d %d\n"
+    (.-file funcInlHeur) (.-fname funcInlHeur) (.-line funcInlHeur) idx atl)
+  ;; emit props as comments, followed by delimiter
+  (fmt/Fprintf w "%s// %s\n" (.ToString (.-props funcInlHeur) "// ") comDelimiter)
+  ^{:go/breaks [6]} (let [(values data err) (json/Marshal (.-props funcInlHeur))]
+    (when (!= err nil)
+      (return (fmt/Errorf "marshal error %v\n" err)))
+
+    (fmt/Fprintf w "// %s\n" (conv string data))
+    (dumpCallSiteComments w (.-cstab funcInlHeur) ecst)
+    (fmt/Fprintf w "// %s\n" fnDelimiter)
+    nil))
+
+
+
+
+^{:go/end 360} (go/func sortFnInlHeurSlice "sortFnInlHeurSlice sorts a slice of fnInlHeur based on\nthe starting line of the function definition, then by name.\n" ^{:tag (slice fnInlHeur)} [^{:tag (slice fnInlHeur)} sl]
+  (^{:inst [(slice fnInlHeur) fnInlHeur]} slices/SortStableFunc sl ^{:go/end 358} (fn ^int [^fnInlHeur a ^fnInlHeur b]
+      (when (!= (.-line a) (.-line b))
+        (return (^{:inst [uint]} cmp/Compare (.-line a) (.-line b))))
+
+      (strings/Compare (.-fname a) (.-fname b))))
+
+  ^{:line 359} sl)
+
+
+
+
+(go/const ^{:val "<endfilepreamble>" :doc "delimiters written to various preambles to make parsing of\ndumps easier.\n"} preambleDelimiter "<endfilepreamble>")
+(go/const ^{:val "<endfuncpreamble>"} fnDelimiter "<endfuncpreamble>")
+(go/const ^{:val "<endpropsdump>"} comDelimiter "<endpropsdump>")
+(go/const ^{:val "<endcallsites>"} csDelimiter "<endcallsites>")
+
+
+
+(go/var ^{:tag (map (* ir/Func) fnInlHeur) :doc "dumpBuffer stores up function properties dumps when\n\"-d=dumpinlfuncprops=...\" is in effect.\n"} dumpBuffer)

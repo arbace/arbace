@@ -1,0 +1,88 @@
+;; Copyright 2016 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.cmd.compile.internal.s390x) (go/file "ggen.go" :imports [
+
+
+    ^{:line 8} [base "cmd/compile/internal/base"]
+    ^{:line 9} [objw "cmd/compile/internal/objw"]
+    ^{:line 10} [obj "cmd/internal/obj"]
+    ^{:line 11} [s390x "cmd/internal/obj/s390x"]])
+
+
+
+
+
+
+(go/const ^{:val 1024 :doc "clearLoopCutoff is the (somewhat arbitrary) value above which it is better\nto have a loop of clear instructions (e.g. XCs) rather than just generating\nmultiple instructions (i.e. loop unrolling).\nMust be between 256 and 4096.\n"} clearLoopCutoff 1024)
+
+
+^{:go/end 85} (go/func zerorange "zerorange clears the stack in the given range.\n" ^{:tag (* obj/Prog)} [^{:tag (* objw/Progs)} pp ^{:tag (* obj/Prog)} p ^int64 off ^int64 cnt ^{:tag (* uint32)} _]
+  (when (== cnt 0)
+    (return p))
+
+
+  ;; Adjust the frame to account for LR.
+  (set! off + ^{:go/via [Arch]} (.-FixedFrameSize (.-Arch base/Ctxt)))
+  (let [reg (conv int16 s390x/REGSP)]
+
+    ;; If the off cannot fit in a 12-bit unsigned displacement then we
+    ;; need to create a copy of the stack pointer that we can adjust.
+    ;; We also need to do this if we are going to loop.
+    (when (or (< off 0) (> off (- 4096 clearLoopCutoff)) (> cnt clearLoopCutoff))
+      (set! p (.Append pp p s390x/AADD obj/TYPE_CONST 0 off obj/TYPE_REG s390x/REGRT1 0))
+      (set! (.-Reg p) (conv int16 s390x/REGSP))
+      (set! reg s390x/REGRT1)
+      (set! off 0))
+
+
+    ;; Generate a loop of large clears.
+    (when (> cnt clearLoopCutoff)
+      (let [ireg (conv int16 s390x/REGRT2)] ; register holds number of remaining loop iterations
+        (set! p (.Append pp p s390x/AMOVD obj/TYPE_CONST 0 (/ cnt 256) obj/TYPE_REG ireg 0))
+        (set! p (.Append pp p s390x/ACLEAR obj/TYPE_CONST 0 256 obj/TYPE_MEM reg off))
+        (let [pl p]
+          (set! p (.Append pp p s390x/AADD obj/TYPE_CONST 0 256 obj/TYPE_REG reg 0))
+          (set! p (.Append pp p s390x/ABRCTG obj/TYPE_REG ireg 0 obj/TYPE_BRANCH 0 0))
+          (.SetTarget (.-To p) pl)
+          (set! cnt (% cnt 256)))))
+
+
+    ;; Generate remaining clear instructions without a loop.
+    (while (> cnt 0)
+      (let [n cnt]
+
+        ;; Can clear at most 256 bytes per instruction.
+        (when (> n 256)
+          (set! n 256))
+
+
+        (switch n
+          ;; Handle very small clears with move instructions.
+          (case [8 4 2 1]
+            (let [ins s390x/AMOVB]
+              (switch n
+                (case [8]
+                  (set! ins s390x/AMOVD))
+                (case [4]
+                  (set! ins s390x/AMOVW))
+                (case [2]
+                  (set! ins s390x/AMOVH)))
+
+              (set! p (.Append pp p ins obj/TYPE_CONST 0 0 obj/TYPE_MEM reg off))))
+
+          ;; Handle clears that would require multiple move instructions with CLEAR (assembled as XC).
+          (default
+            (set! p (.Append pp p s390x/ACLEAR obj/TYPE_CONST 0 n obj/TYPE_MEM reg off))))
+
+
+        (set! cnt - n)
+        (set! off + n)))
+
+
+    ^{:line 84} p))
+
+
+^{:go/end 89} (go/func ginsnop ^{:tag (* obj/Prog)} [^{:tag (* objw/Progs)} pp]
+  (.Prog pp s390x/ANOPH))

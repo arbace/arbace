@@ -1,0 +1,183 @@
+;; Copyright 2009 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.cmd.compile.internal.noder) (go/file "lex.go" :imports [
+
+
+    ^{:line 8} [fmt "fmt"]
+    ^{:line 9} [buildcfg "internal/buildcfg"]
+    ^{:line 10} [strings "strings"]
+
+    ^{:line 12} [ir "cmd/compile/internal/ir"]
+    ^{:line 13} [syntax "cmd/compile/internal/syntax"]])
+
+
+^{:go/end 18} (go/func isSpace ^bool [^rune c]
+  (or (== c \space) (== c \tab) (== c \newline) (== c \return)))
+
+
+^{:go/end 22} (go/func isQuoted ^bool [^string s]
+  (and (>= (len s) 2) (== (aget s 0) \") (== (aget s (- (len s) 1)) \")))
+
+
+(go/const
+  ^{:line 25} [^{:val 24575} funcPragmas (bit-or ir/Nointerface
+      ^{:line 26} ir/Noescape
+      ^{:line 27} ir/Norace
+      ^{:line 28} ir/Nosplit
+      ^{:line 29} ir/Noinline
+      ^{:line 30} ir/NoCheckPtr
+      ^{:line 31} ir/RegisterParams ; TODO(register args) remove after register abi is working
+      ^{:line 32} ir/CgoUnsafeArgs
+      ^{:line 33} ir/UintptrKeepAlive
+      ^{:line 34} ir/UintptrEscapes
+      ^{:line 35} ir/Systemstack
+      ^{:line 36} ir/Nowritebarrier
+      ^{:line 37} ir/Nowritebarrierrec
+      ^{:line 38} ir/Yeswritebarrierrec)])
+
+
+^{:go/breaks [[4 79]] :go/end 80} (go/func pragmaFlag ^ir/PragmaFlag [^string verb]
+  (switch verb
+    (case ["go:build"]
+      (return ir/GoBuildPragma))
+    (case ["go:nointerface"]
+      (when ^{:go/via [Flags]} (.-FieldTrack buildcfg/Experiment)
+        (return ir/Nointerface)))
+
+    (case ["go:noescape"]
+      (return ir/Noescape))
+    (case ["go:norace"]
+      (return ir/Norace))
+    (case ["go:nosplit"]
+      (return (bit-or ir/Nosplit ir/NoCheckPtr))) ; implies NoCheckPtr (see #34972)
+    (case ["go:noinline"]
+      (return ir/Noinline))
+    (case ["go:nocheckptr"]
+      (return ir/NoCheckPtr))
+    (case ["go:systemstack"]
+      (return ir/Systemstack))
+    (case ["go:nowritebarrier"]
+      (return ir/Nowritebarrier))
+    (case ["go:nowritebarrierrec"]
+      (return (bit-or ir/Nowritebarrierrec ir/Nowritebarrier))) ; implies Nowritebarrier
+    (case ["go:yeswritebarrierrec"]
+      (return ir/Yeswritebarrierrec))
+    (case ["go:cgo_unsafe_args"]
+      (return (bit-or ir/CgoUnsafeArgs ir/NoCheckPtr))) ; implies NoCheckPtr (see #34968)
+    (case ["go:uintptrkeepalive"]
+      (return ir/UintptrKeepAlive))
+    (case ["go:uintptrescapes"]
+      ;; This directive extends //go:uintptrkeepalive by forcing
+      ;; uintptr arguments to escape to the heap, which makes stack
+      ;; growth safe.
+      (return (bit-or ir/UintptrEscapes ir/UintptrKeepAlive))) ; implies UintptrKeepAlive
+    (case ["go:registerparams"] ; TODO(register args) remove after register abi is working
+      (return ir/RegisterParams)))
+
+  0)
+
+
+
+^{:go/end 144} (go/method pragcgo "pragcgo is called concurrently if files are parsed concurrently.\n" [^{:tag (* noder)} p ^syntax/Pos pos ^string text]
+  (let [f (pragmaFields text)
+
+      ^{:line 86} verb (strings/TrimPrefix (aget f 0) "go:")]
+    (aset f 0 verb)
+
+    (switch verb
+      (case ["cgo_export_static" "cgo_export_dynamic"]
+        (switch
+          (case [(and (== (len f) 2) (not (isQuoted (aget f 1))))])
+          (case [(and (== (len f) 3) (not (isQuoted (aget f 1))) (not (isQuoted (aget f 2))))])
+          (default
+            (.error p (lit syntax/Error :Pos pos :Msg (fmt/Sprintf "usage: //go:%s local [remote]" verb)))
+            (return))))
+
+      (case ["cgo_import_dynamic"]
+        (switch
+          (case [(and (== (len f) 2) (not (isQuoted (aget f 1))))])
+          (case [(and (== (len f) 3) (not (isQuoted (aget f 1))) (not (isQuoted (aget f 2))))])
+          (case [(and (== (len f) 4) (not (isQuoted (aget f 1))) (not (isQuoted (aget f 2))) (isQuoted (aget f 3)))]
+            (aset f 3 (strings/Trim (aget f 3) "\""))
+            (when (and (== buildcfg/GOOS "aix") (!= (aget f 3) ""))
+              ;; On Aix, library pattern must be "lib.a/object.o"
+              ;; or "lib.a/libname.so.X"
+              (let [n (strings/Split (aget f 3) "/")]
+                (when (or (!= (len n) 2) (not (strings/HasSuffix (aget n 0) ".a")) ^:go/paren (and (not (strings/HasSuffix (aget n 1) ".o")) (not (strings/Contains (aget n 1) ".so."))))
+                  (.error p (lit syntax/Error :Pos pos :Msg "usage: //go:cgo_import_dynamic local [remote [\"lib.a/object.o\"]]"))
+                  (return)))))
+
+
+          (default
+            (.error p (lit syntax/Error :Pos pos :Msg "usage: //go:cgo_import_dynamic local [remote [\"library\"]]"))
+            (return))))
+
+      (case ["cgo_import_static"]
+        (switch
+          (case [(and (== (len f) 2) (not (isQuoted (aget f 1))))])
+          (default
+            (.error p (lit syntax/Error :Pos pos :Msg "usage: //go:cgo_import_static local"))
+            (return))))
+
+      (case ["cgo_dynamic_linker"]
+        (switch
+          (case [(and (== (len f) 2) (isQuoted (aget f 1)))]
+            (aset f 1 (strings/Trim (aget f 1) "\"")))
+          (default
+            (.error p (lit syntax/Error :Pos pos :Msg "usage: //go:cgo_dynamic_linker \"path\""))
+            (return))))
+
+      (case ["cgo_ldflag"]
+        (switch
+          (case [(and (== (len f) 2) (isQuoted (aget f 1)))]
+            (aset f 1 (strings/Trim (aget f 1) "\"")))
+          (default
+            (.error p (lit syntax/Error :Pos pos :Msg "usage: //go:cgo_ldflag \"arg\""))
+            (return))))
+
+      (default
+        (return)))
+
+    (set! (.-pragcgobuf p) (append (.-pragcgobuf p) f))))
+
+
+
+
+
+
+
+^{:go/end 184} (go/func pragmaFields "pragmaFields is similar to strings.FieldsFunc(s, isSpace)\nbut does not split when inside double quoted regions and always\nsplits before the start and after the end of a double quoted region.\npragmaFields does not recognize escaped quotes. If a quote in s is not\nclosed the part after the opening quote will not be returned as a field.\n" ^{:tag (slice string)} [^string s]
+  (let [^{:tag (slice string)} a (zero (slice string))
+      ^{:line 153} inQuote false
+      ^{:line 154} fieldStart -1] ; Set to -1 when looking for start of field.
+    (range [i c s]
+      (switch
+        (case [(== c \")]
+          (if inQuote (do
+              (set! inQuote false)
+              (set! a (append a (subslice s fieldStart (+ i 1))))
+              (set! fieldStart -1))
+            (do
+              (set! inQuote true)
+              (when (>= fieldStart 0)
+                (set! a (append a (subslice s fieldStart i))))
+
+              (set! fieldStart i))))
+
+        (case [(and (not inQuote) (isSpace c))]
+          (when (>= fieldStart 0)
+            (set! a (append a (subslice s fieldStart i)))
+            (set! fieldStart -1)))
+
+        (default
+          (when (== fieldStart -1)
+            (set! fieldStart i)))))
+
+
+
+    (when (and (not inQuote) (>= fieldStart 0)) ; Last field might end at the end of the string.
+      (set! a (append a (subslice s fieldStart))))
+
+    ^{:line 183} a))

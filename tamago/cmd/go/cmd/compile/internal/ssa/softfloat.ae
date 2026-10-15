@@ -1,0 +1,77 @@
+;; Copyright 2017 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.cmd.compile.internal.ssa) (go/file "softfloat.go" :imports [
+
+
+    ^{:line 8} [types "cmd/compile/internal/types"]
+    ^{:line 9} [math "math"]])
+
+
+^{:go/end 80} (go/func softfloat [^{:tag (* Func)} f]
+  (when (not (.-SoftFloat (.-Config f)))
+    (return))
+
+  (let [newInt64 false]
+
+    (range [_ b (.-Blocks f)]
+      (range [_ v (.-Values b)]
+        (cond (.IsFloat (.-Type v)) (do
+            (.unCache f v)
+            (switch (.-Op v)
+              (case [OpPhi OpLoad OpArg]
+                (if (== (.Size (.-Type v)) 4)
+                  (set! (.-Type v) (.-UInt32 (.-Types (.-Config f))))
+
+                  (set! (.-Type v) (.-UInt64 (.-Types (.-Config f))))))
+
+              (case [OpConst32F]
+                (set! (.-Op v) OpConst32)
+                (set! (.-Type v) (.-UInt32 (.-Types (.-Config f))))
+                (set! (.-AuxInt v) (conv int64 (conv int32 (math/Float32bits (auxTo32F (.-AuxInt v)))))))
+              (case [OpConst64F]
+                (set! (.-Op v) OpConst64)
+                (set! (.-Type v) (.-UInt64 (.-Types (.-Config f)))))
+              (case [OpNeg32F]
+                (let [arg0 (aget (.-Args v) 0)]
+                  (.reset v OpXor32)
+                  (set! (.-Type v) (.-UInt32 (.-Types (.-Config f))))
+                  (.AddArg v arg0)
+                  (let [mask (.NewValue0 (.-Block v) (.-Pos v) OpConst32 (.-Type v))]
+                    (set! (.-AuxInt mask) -0x80000000)
+                    (.AddArg v mask))))
+              (case [OpNeg64F]
+                (let [arg0 (aget (.-Args v) 0)]
+                  (.reset v OpXor64)
+                  (set! (.-Type v) (.-UInt64 (.-Types (.-Config f))))
+                  (.AddArg v arg0)
+                  (let [mask (.NewValue0 (.-Block v) (.-Pos v) OpConst64 (.-Type v))]
+                    (set! (.-AuxInt mask) -0x8000000000000000)
+                    (.AddArg v mask))))
+              (case [OpRound32F]
+                (set! (.-Op v) OpCopy)
+                (set! (.-Type v) (.-UInt32 (.-Types (.-Config f)))))
+              (case [OpRound64F]
+                (set! (.-Op v) OpCopy)
+                (set! (.-Type v) (.-UInt64 (.-Types (.-Config f))))))
+
+            (set! newInt64 (or newInt64 (== (.Size (.-Type v)) 8))))
+          (and ^:go/paren (or (== (.-Op v) OpStore) (== (.-Op v) OpZero) (== (.-Op v) OpMove)) (.IsFloat (assert (* types/Type) (.-Aux v))))
+          (switch [size (.Size (assert (* types/Type) (.-Aux v)))] size
+            (case [4]
+              (set! (.-Aux v) (.-UInt32 (.-Types (.-Config f)))))
+            (case [8]
+              (set! (.-Aux v) (.-UInt64 (.-Types (.-Config f))))
+              (set! newInt64 true))
+            (default
+              (.Fatalf v "bad float type with size %d" size))))))
+
+
+
+
+
+    (when (and newInt64 (== (.-RegSize (.-Config f)) 4))
+      ;; On 32bit arch, decompose Uint64 introduced in the switch above.
+      (decomposeBuiltin f)
+      (applyRewrite f rewriteBlockdec64 rewriteValuedec64 removeDeadValues))))

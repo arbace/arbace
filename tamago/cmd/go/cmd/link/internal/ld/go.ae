@@ -1,0 +1,448 @@
+;; Copyright 2009 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; go-specific code shared across loaders (5l, 6l, 8l).
+
+(in-ns 'go.cmd.link.internal.ld) (go/file "go.go" :imports [
+
+
+    ^{:line 10} [bio "cmd/internal/bio"]
+    ^{:line 11} [obj "cmd/internal/obj"]
+    ^{:line 12} [objabi "cmd/internal/objabi"]
+    ^{:line 13} [sys "cmd/internal/sys"]
+    ^{:line 14} [loader "cmd/link/internal/loader"]
+    ^{:line 15} [sym "cmd/link/internal/sym"]
+    ^{:line 16} [elf "debug/elf"]
+    ^{:line 17} [json "encoding/json"]
+    ^{:line 18} [fmt "fmt"]
+    ^{:line 19} [io "io"]
+    ^{:line 20} [os "os"]
+    ^{:line 21} [sort "sort"]
+    ^{:line 22} [strconv "strconv"]
+    ^{:line 23} [strings "strings"]])
+
+
+;; go-specific code shared across loaders (5l, 6l, 8l).
+
+;; TODO:
+;;	generate debugging section in binary.
+;;	once the dust settles, try to move some code to
+;;		libmach, so that other linkers and ar can share.
+
+^{:go/end 85} (go/func ldpkg [^{:tag (* Link)} ctxt ^{:tag (* bio/Reader)} f ^{:tag (* sym/Library)} lib ^int64 length ^string filename]
+  (when @flagG
+    (return))
+
+
+  (when (!= (conv int64 (conv int length)) length)
+    (fmt/Fprintf os/Stderr "%s: too much pkg data in %s\n" (aget os/Args 0) filename)
+    (return))
+
+
+  (let [bdata (make (slice byte) length)]
+    (when [(values _ err) (io/ReadFull f bdata)] (!= err nil)
+      (fmt/Fprintf os/Stderr "%s: short pkg read %s\n" (aget os/Args 0) filename)
+      (return))
+
+    (let [data (conv string bdata)]
+
+      ;; process header lines
+      (while (!= data "")
+        (let [^string line (zero string)]
+          (set! (values line data _) (strings/Cut data "\n"))
+          (when (== line "main")
+            (set! (.-Main lib) true))
+
+          (when (== line "")
+            (break))))
+
+
+
+      ;; look for cgo section
+      (let [p0 (strings/Index data "\n$$  // cgo")
+          ^{:line 64 :tag int} p1 (zero int)]
+        (when (>= p0 0)
+          (set! p0 + p1)
+          (let [i (strings/IndexByte (subslice data (+ p0 1)) \newline)]
+            (when (< i 0)
+              (fmt/Fprintf os/Stderr "%s: found $$ // cgo but no newline in %s\n" (aget os/Args 0) filename)
+              (return))
+
+            (set! p0 + (+ 1 i))
+
+            (set! p1 (strings/Index (subslice data p0) "\n$$"))
+            (when (< p1 0)
+              (set! p1 (strings/Index (subslice data p0) "\n!\n")))
+
+            (when (< p1 0)
+              (fmt/Fprintf os/Stderr "%s: cannot find end of // cgo section in %s\n" (aget os/Args 0) filename)
+              (return))
+
+            (set! p1 + p0)
+            (loadcgo ctxt filename (objabi/PathToPrefix (.-Pkg lib)) (subslice data p0 p1))))))))
+
+
+
+^{:go/end 97} (go/func loadcgo [^{:tag (* Link)} ctxt ^string file ^string pkg ^string p]
+  (let [^{:tag (slice (slice string))} directives (zero (slice (slice string)))]
+    (when [err (.Decode (json/NewDecoder (strings/NewReader p)) (addr directives))] (!= err nil)
+      (fmt/Fprintf os/Stderr "%s: %s: failed decoding cgo directives: %v\n" (aget os/Args 0) file err)
+      (inc! nerrors)
+      (return))
+
+
+    ;; Record the directives. We'll process them later after Symbols are created.
+    (set! (.-cgodata ctxt) (append (.-cgodata ctxt) (lit cgodata file pkg directives)))))
+
+
+
+
+^{:go/end 286} (go/func setCgoAttr "Set symbol attributes or flags based on cgo directives.\nAny newly discovered HOSTOBJ syms are added to 'hostObjSyms'.\n" [^{:tag (* Link)} ctxt ^string file ^string pkg ^{:tag (slice (slice string))} directives ^{:tag (map loader/Sym (struct))} hostObjSyms]
+  (let [l (.-loader ctxt)]
+    (range [_ f directives]
+      (switch (aget f 0)
+        (case ["cgo_import_dynamic"]
+          (when (or (< (len f) 2) (> (len f) 4))
+            (break))
+
+
+          (let [local (aget f 1)
+              ^{:line 111} remote local]
+            (when (> (len f) 2)
+              (set! remote (aget f 2)))
+
+            (let [lib ""]
+              (when (> (len f) 3)
+                (set! lib (aget f 3)))
+
+
+              (when @FlagD
+                (fmt/Fprintf os/Stderr "%s: %s: cannot use dynamic imports with -d flag\n" (aget os/Args 0) file)
+                (inc! nerrors)
+                (return))
+
+
+              (when (and (== local "_") (== remote "_"))
+                ;; allow #pragma dynimport _ _ "foo.so"
+                ;; to force a link of foo.so.
+                (set! havedynamic 1)
+
+                (if (== ^{:go/via [Target]} (.-HeadType ctxt) objabi/Hdarwin)
+                  (machoadddynlib lib ^{:go/via [Target]} (.-LinkMode ctxt))
+
+                  (set! dynlib (append dynlib lib)))
+
+                (continue))
+
+
+              (let [q ""]
+                (when [(values before after found) (strings/Cut remote "#")] found
+                  (set! (values remote q) (values before after)))
+
+                (let [s (.LookupOrCreateSym l local 0)
+                    ^{:line 144} st (.SymType l s)]
+                  (when (or (== st 0) (== st sym/SXREF) (== st sym/SBSS) (== st sym/SNOPTRBSS) (== st sym/SHOSTOBJ))
+                    (.SetSymDynimplib l s lib)
+                    (.SetSymExtname l s remote)
+                    (.SetSymDynimpvers l s q)
+                    (if (!= st sym/SHOSTOBJ)
+                      (let [su (.MakeSymbolUpdater l s)]
+                        (.SetType su sym/SDYNIMPORT))
+
+                      (aset hostObjSyms s (lit (struct))))
+
+                    (set! havedynamic 1)
+                    (when (and (!= lib "") ^{:go/via [Target]} (.IsDarwin ctxt))
+                      (machoadddynlib lib ^{:go/via [Target]} (.-LinkMode ctxt))))
+
+
+
+                  (continue))))))
+
+        (case ["cgo_import_static"]
+          (when (!= (len f) 2)
+            (break))
+
+          (let [local (aget f 1)
+
+              ^{:line 169} s (.LookupOrCreateSym l local 0)
+              ^{:line 170} su (.MakeSymbolUpdater l s)]
+            (.SetType su sym/SHOSTOBJ)
+            (.SetSize su 0)
+            (aset hostObjSyms s (lit (struct)))
+            (continue)))
+
+        (case ["cgo_export_static" "cgo_export_dynamic"]
+          (when (or (< (len f) 2) (> (len f) 4))
+            (break))
+
+          (let [local (aget f 1)
+              ^{:line 181} remote local]
+            (when (> (len f) 2)
+              (set! remote (aget f 2)))
+
+            ;; The compiler adds a fourth argument giving
+            ;; the definition ABI of function symbols.
+            (let [abi obj/ABI0]
+              (when (> (len f) 3)
+                (let [^bool ok (zero bool)]
+                  (set! (values abi ok) (obj/ParseABI (aget f 3)))
+                  (when (not ok)
+                    (fmt/Fprintf os/Stderr "%s: bad ABI in cgo_export directive %s\n" (aget os/Args 0) f)
+                    (inc! nerrors)
+                    (return))))
+
+
+
+              (let [s (.LookupOrCreateSym l local (sym/ABIToVersion abi))]
+
+                (when (== (.SymType l s) sym/SHOSTOBJ)
+                  (aset hostObjSyms s (lit (struct))))
+
+
+                (switch ^{:go/via [Target]} (.-BuildMode ctxt)
+                  (case [BuildModeCShared BuildModeCArchive BuildModePlugin]
+                    (when (== s (.Lookup l "main" 0))
+                      (continue))))
+
+
+
+                ;; export overrides import, for openbsd/cgo.
+                ;; see issue 4878.
+                (when (!= (.SymDynimplib l s) "")
+                  (.SetSymDynimplib l s "")
+                  (.SetSymDynimpvers l s "")
+                  (.SetSymExtname l s "")
+                  (let [^{:tag (* loader/SymbolBuilder)} su (zero (* loader/SymbolBuilder))]
+                    (set! su (.MakeSymbolUpdater l s))
+                    (.SetType su 0)))
+
+
+                (cond (not (or (.AttrCgoExportStatic l s) (.AttrCgoExportDynamic l s)))
+                  (.SetSymExtname l s remote)
+                  (!= (.SymExtname l s) remote) (do
+                    (fmt/Fprintf os/Stderr "%s: conflicting cgo_export directives: %s as %s and %s\n" (aget os/Args 0) (.SymName l s) (.SymExtname l s) remote)
+                    (inc! nerrors)
+                    (return)))
+
+
+                ;; Mark exported symbols and also add them to
+                ;; the lists used for roots in the deadcode pass.
+                (if (== (aget f 0) "cgo_export_static") (do
+                    (when (and (== ^{:go/via [Target]} (.-LinkMode ctxt) LinkExternal) (not (.AttrCgoExportStatic l s)))
+                      ;; Static cgo exports appear
+                      ;; in the exported symbol table.
+                      (set! (.-dynexp ctxt) (append (.-dynexp ctxt) s)))
+
+                    (when (== ^{:go/via [Target]} (.-LinkMode ctxt) LinkInternal)
+                      ;; For internal linking, we're
+                      ;; responsible for resolving
+                      ;; relocations from host objects.
+                      ;; Record the right Go symbol
+                      ;; version to use.
+                      (.AddCgoExport l s))
+
+                    (.SetAttrCgoExportStatic l s true))
+                  (do
+                    (when (and (== ^{:go/via [Target]} (.-LinkMode ctxt) LinkInternal) (not (.AttrCgoExportDynamic l s)))
+                      ;; Dynamic cgo exports appear
+                      ;; in the exported symbol table.
+                      (set! (.-dynexp ctxt) (append (.-dynexp ctxt) s)))
+
+                    (.SetAttrCgoExportDynamic l s true)))
+
+
+                (continue)))))
+
+        (case ["cgo_dynamic_linker"]
+          (when (!= (len f) 2)
+            (break))
+
+
+          (when (== @flagInterpreter "")
+            (when (and (!= interpreter "") (!= interpreter (aget f 1)))
+              (fmt/Fprintf os/Stderr "%s: conflict dynlinker: %s and %s\n" (aget os/Args 0) interpreter (aget f 1))
+              (inc! nerrors)
+              (return))
+
+
+            (set! interpreter (aget f 1)))
+
+          (continue))
+
+        (case ["cgo_ldflag"]
+          (when (!= (len f) 2)
+            (break))
+
+          (set! ldflag (append ldflag (aget f 1)))
+          (continue)))
+
+
+      (fmt/Fprintf os/Stderr "%s: %s: invalid cgo directive: %q\n" (aget os/Args 0) file f)
+      (inc! nerrors))
+
+    (return)))
+
+
+
+
+
+^{:go/end 306} (go/func openbsdTrimLibVersion "openbsdTrimLibVersion indicates whether a shared library is\nversioned and if it is, returns the unversioned name. The\nOpenBSD library naming scheme is lib<name>.so.<major>.<minor>\n" [^string lib] :results [string bool]
+  (let [parts (strings/Split lib ".")]
+    (when (!= (len parts) 4)
+      (return "" false))
+
+    (when (!= (aget parts 1) "so")
+      (return "" false))
+
+    (when [(values _ err) (strconv/Atoi (aget parts 2))] (!= err nil)
+      (return "" false))
+
+    (when [(values _ err) (strconv/Atoi (aget parts 3))] (!= err nil)
+      (return "" false))
+
+    (return (fmt/Sprintf "%s.%s" (aget parts 0) (aget parts 1)) true)))
+
+
+
+
+
+
+
+
+
+
+^{:go/end 335} (go/func dedupLibrariesOpenBSD "dedupLibrariesOpenBSD dedups a list of shared libraries, treating versioned\nand unversioned libraries as equivalents. Versioned libraries are preferred\nand retained over unversioned libraries. This avoids the situation where\nthe use of cgo results in a DT_NEEDED for a versioned library (for example,\nlibc.so.96.1), while a dynamic import specifies an unversioned library (for\nexample, libc.so) - this would otherwise result in two DT_NEEDED entries\nfor the same library, resulting in a failure when ld.so attempts to load\nthe Go binary.\n" ^{:tag (slice string)} [^{:tag (* Link)} ctxt ^{:tag (slice string)} libs]
+  (let [libraries (make (map string string))]
+    (range [_ lib libs]
+      (if [(values name ok) (openbsdTrimLibVersion lib)] ok (do
+          ;; Record unversioned name as seen.
+          (aset seenlib name true)
+          (aset libraries name lib))
+        (when [(values _ ok) (aget libraries lib)] (not ok)
+          (aset libraries lib lib))))
+
+
+
+    (set! libs nil)
+    (range [_ lib libraries]
+      (set! libs (append libs lib)))
+
+    (sort/Strings libs)
+
+    ^{:line 334} libs))
+
+
+^{:go/end 342} (go/func dedupLibraries ^{:tag (slice string)} [^{:tag (* Link)} ctxt ^{:tag (slice string)} libs]
+  (when (.IsOpenbsd (.-Target ctxt))
+    (return (dedupLibrariesOpenBSD ctxt libs)))
+
+  ^{:line 341} libs)
+
+
+(go/var seenlib (make (map string bool)))
+
+^{:go/end 362} (go/func adddynlib [^{:tag (* Link)} ctxt ^string lib]
+  (when (or (aget seenlib lib) (== ^{:go/via [Target]} (.-LinkMode ctxt) LinkExternal))
+    (return))
+
+  (aset seenlib lib true)
+
+  (if ^{:go/via [Target]} (.-IsELF ctxt)
+    (let [dsu (.MakeSymbolUpdater (.-loader ctxt) ^{:go/via [ArchSyms]} (.-DynStr ctxt))]
+      (when (== (.Size dsu) 0)
+        (.Addstring dsu ""))
+
+      (let [du (.MakeSymbolUpdater (.-loader ctxt) ^{:go/via [ArchSyms]} (.-Dynamic ctxt))]
+        (Elfwritedynent ^{:go/via [Target]} (.-Arch ctxt) du elf/DT_NEEDED (conv uint64 (.Addstring dsu lib)))))
+
+    (Errorf "adddynlib: unsupported binary format")))
+
+
+
+^{:go/end 378} (go/func Adddynsym [^{:tag (* loader/Loader)} ldr ^{:tag (* Target)} target ^{:tag (* ArchSyms)} syms ^loader/Sym s]
+  (when (or (>= (.SymDynid ldr s) 0) (== (.-LinkMode target) LinkExternal))
+    (return))
+
+
+  (cond (.-IsELF target)
+    (elfadddynsym ldr target syms s)
+    (== (.-HeadType target) objabi/Hdarwin)
+    (.Errorf ldr s "adddynsym: missed symbol (Extname=%s)" (.SymExtname ldr s))
+    (== (.-HeadType target) objabi/Hwindows) (do) :else
+    ;; already taken care of
+
+    (.Errorf ldr s "adddynsym: unsupported binary format")))
+
+
+
+^{:go/end 407} (go/func fieldtrack [^{:tag (* sys/Arch)} arch ^{:tag (* loader/Loader)} l]
+  (let [^strings/Builder buf (zero strings/Builder)]
+    (for [i (conv loader/Sym 1)] (< i (conv loader/Sym (.NSym l))) (inc! i)
+      (when [name (.SymName l i)] (strings/HasPrefix name "go:track.")
+        (when (.AttrReachable l i)
+          (.SetAttrSpecial l i true)
+          (.SetAttrNotInSymbolTable l i true)
+          (.WriteString buf (subslice name 9))
+          (for [p (aget (.-Reachparent l) i)] (!= p 0) (set! p (aget (.-Reachparent l) p))
+            (.WriteString buf "\t")
+            (.WriteString buf (.SymName l p)))
+
+          (.WriteString buf "\n"))))
+
+
+
+    (set! (.-Reachparent l) nil) ; we are done with it
+    (when (== @flagFieldTrack "")
+      (return))
+
+    (let [s (.Lookup l @flagFieldTrack 0)]
+      (when (or (== s 0) (not (.AttrReachable l s)))
+        (return))
+
+      (let [bld (.MakeSymbolUpdater l s)]
+        (.SetType bld sym/SDATA)
+        (addstrdata arch l @flagFieldTrack (.String buf))))))
+
+
+^{:go/end 450} (go/method addexport [^{:tag (* Link)} ctxt]
+  ;; Track undefined external symbols during external link.
+  (when (== ^{:go/via [Target]} (.-LinkMode ctxt) LinkExternal)
+    (range [_ s (.-Textp ctxt)]
+      (when (or (.AttrSpecial (.-loader ctxt) s) (.AttrSubSymbol (.-loader ctxt) s))
+        (continue))
+
+      (let [relocs (.Relocs (.-loader ctxt) s)]
+        (for [i 0] (< i (.Count relocs)) (inc! i)
+          (when [rs (.Sym (.At relocs i))] (!= rs 0)
+            (when (and (== (.SymType (.-loader ctxt) rs) sym/Sxxx) (not (.AttrLocal (.-loader ctxt) rs)))
+              ;; sanity check
+              (when (!= (len (.Data (.-loader ctxt) rs)) 0)
+                (panic "expected no data on undef symbol"))
+
+              (let [su (.MakeSymbolUpdater (.-loader ctxt) rs)]
+                (.SetType su sym/SUNDEFEXT))))))))
+
+
+
+
+
+
+  ;; TODO(aix)
+  (when (or (== ^{:go/via [Target]} (.-HeadType ctxt) objabi/Hdarwin) (== ^{:go/via [Target]} (.-HeadType ctxt) objabi/Haix))
+    (return))
+
+
+  ;; Add dynamic symbols.
+  (range [_ s (.-dynexp ctxt)]
+    ;; Consistency check.
+    (when (not (.AttrReachable (.-loader ctxt) s))
+      (panic "dynexp entry not reachable"))
+
+
+    (Adddynsym (.-loader ctxt) (addr (.-Target ctxt)) (addr (.-ArchSyms ctxt)) s))
+
+
+  (range [_ lib (dedupLibraries ctxt dynlib)]
+    (adddynlib ctxt lib)))

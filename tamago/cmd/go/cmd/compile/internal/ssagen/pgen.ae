@@ -1,0 +1,447 @@
+;; Copyright 2011 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.cmd.compile.internal.ssagen) (go/file "pgen.go" :imports [
+
+
+    ^{:line 8} [fmt "fmt"]
+    ^{:line 9} [buildcfg "internal/buildcfg"]
+    ^{:line 10} [os "os"]
+    ^{:line 11} [slices "slices"]
+    ^{:line 12} [sort "sort"]
+    ^{:line 13} [strings "strings"]
+    ^{:line 14} [sync "sync"]
+
+    ^{:line 16} [base "cmd/compile/internal/base"]
+    ^{:line 17} [inline "cmd/compile/internal/inline"]
+    ^{:line 18} [ir "cmd/compile/internal/ir"]
+    ^{:line 19} [liveness "cmd/compile/internal/liveness"]
+    ^{:line 20} [objw "cmd/compile/internal/objw"]
+    ^{:line 21} [pgoir "cmd/compile/internal/pgoir"]
+    ^{:line 22} [ssa "cmd/compile/internal/ssa"]
+    ^{:line 23} [types "cmd/compile/internal/types"]
+    ^{:line 24} [obj "cmd/internal/obj"]
+    ^{:line 25} [objabi "cmd/internal/objabi"]
+    ^{:line 26} [src "cmd/internal/src"]])
+
+
+
+^{:go/end 99} (go/func cmpstackvarlt "cmpstackvarlt reports whether the stack variable a sorts before b.\n" ^bool [^{:tag (* ir/Name)} a ^{:tag (* ir/Name)} b ^{:tag (* liveness/MergeLocalsState)} mls]
+  ;; Sort non-autos before autos.
+  (when (!= (needAlloc a) (needAlloc b))
+    (return (needAlloc b)))
+
+
+  ;; If both are non-auto (e.g., parameters, results), then sort by
+  ;; frame offset (defined by ABI).
+  (when (not (needAlloc a))
+    (return (< (.FrameOffset a) (.FrameOffset b))))
+
+
+  ;; From here on, a and b are both autos (i.e., local variables).
+
+  ;; Sort followers after leaders, if mls != nil
+  (when (!= mls nil)
+    (let [aFollow (.Subsumed mls a)
+        ^{:line 47} bFollow (.Subsumed mls b)]
+      (when (!= aFollow bFollow)
+        (return bFollow))))
+
+
+
+  ;; Sort used before unused (so AllocFrame can truncate unused
+  ;; variables).
+  (when (!= (.Used a) (.Used b))
+    (return (.Used a)))
+
+
+  ;; Sort pointer-typed before non-pointer types.
+  ;; Keeps the stack's GC bitmap compact.
+  (let [ap (.HasPointers ^{:go/via [miniExpr]} (.Type a))
+      ^{:line 62} bp (.HasPointers ^{:go/via [miniExpr]} (.Type b))]
+    (when (!= ap bp)
+      (return ap))
+
+
+    ;; Group variables that need zeroing, so we can efficiently zero
+    ;; them altogether.
+    (set! ap (.Needzero a))
+    (set! bp (.Needzero b))
+    (when (!= ap bp)
+      (return ap))
+
+
+    ;; Sort variables in descending alignment order, so we can optimally
+    ;; pack variables into the frame.
+    (when (!= (.Alignment ^{:go/via [miniExpr]} (.Type a)) (.Alignment ^{:go/via [miniExpr]} (.Type b)))
+      (return (> (.Alignment ^{:go/via [miniExpr]} (.Type a)) (.Alignment ^{:go/via [miniExpr]} (.Type b)))))
+
+
+    ;; Sort normal variables before open-coded-defer slots, so that the
+    ;; latter are grouped together and near the top of the frame (to
+    ;; minimize varint encoding of their varp offset).
+    (when (!= (.OpenDeferSlot a) (.OpenDeferSlot b))
+      (return (.OpenDeferSlot a)))
+
+
+    ;; If a and b are both open-coded defer slots, then order them by
+    ;; index in descending order, so they'll be laid out in the frame in
+    ;; ascending order.
+    ;;
+    ;; Their index was saved in FrameOffset in state.openDeferSave.
+    (when (.OpenDeferSlot a)
+      (return (> (.FrameOffset a) (.FrameOffset b))))
+
+
+    ;; Tie breaker for stable results.
+    (< (.-Name (.Sym a)) (.-Name (.Sym b)))))
+
+
+
+
+
+^{:go/end 121} (go/func needAlloc "needAlloc reports whether n is within the current frame, for which we need to\nallocate space. In particular, it excludes arguments and results, which are in\nthe callers frame.\n" ^bool [^{:tag (* ir/Name)} n]
+  (when (!= ^{:go/via [miniExpr miniNode]} (.Op n) ir/ONAME)
+    (base/FatalfAt ^{:go/via [miniExpr miniNode]} (.Pos n) "%v has unexpected Op %v" n ^{:go/via [miniExpr miniNode]} (.Op n)))
+
+
+  (switch (.-Class n)
+    (case [ir/PAUTO]
+      (return true))
+    (case [ir/PPARAM]
+      (return false))
+    (case [ir/PPARAMOUT]
+      (return (.IsOutputParamInRegisters n)))
+
+    (default
+      (base/FatalfAt ^{:go/via [miniExpr miniNode]} (.Pos n) "%v has unexpected Class %v" n (.-Class n))
+      (return false))))
+
+
+
+^{:go/end 295} (go/method AllocFrame [^{:tag (* ssafn)} s ^{:tag (* ssa/Func)} f]
+  (set! (.-stksize s) 0)
+  (set! (.-stkptrsize s) 0)
+  (set! (.-stkalign s) (conv int64 types/RegSize))
+  (let [fn (.-curfn s)]
+
+    ;; Mark the PAUTO's unused.
+    (range [_ ln (.-Dcl fn)]
+      (when (.OpenDeferSlot ln)
+        ;; Open-coded defer slots have indices that were assigned
+        ;; upfront during SSA construction, but the defer statement can
+        ;; later get removed during deadcode elimination (#61895). To
+        ;; keep their relative offsets correct, treat them all as used.
+        (continue))
+
+
+      (when (needAlloc ln)
+        (.SetUsed ln false)))
+
+
+
+    (range [_ l (.-RegAlloc f)]
+      (when [(values ls ok) (assert ssa/LocalSlot l)] ok
+        (.SetUsed (.-N ls) true)))
+
+
+
+    (range [_ b (.-Blocks f)]
+      (range [_ v (.-Values b)]
+        (when [(values n ok) (assert (* ir/Name) (.-Aux v))] ok
+          (switch (.-Class n)
+            (case [ir/PPARAMOUT]
+              (when (and (.IsOutputParamInRegisters n) (== (.-Op v) ssa/OpVarDef))
+                ;; ignore VarDef, look for "real" uses.
+                ;; TODO: maybe do this for PAUTO as well?
+                (continue))
+
+              (fallthrough))
+            (case [ir/PPARAM ir/PAUTO]
+              (.SetUsed n true))))))
+
+
+
+
+
+    (let [^{:tag (* liveness/MergeLocalsState)} mls (zero (* liveness/MergeLocalsState))
+        ^{:line 169 :tag (map (* ir/Name) int64)} leaders (zero (map (* ir/Name) int64))]
+      (when (!= (.-MergeLocals base/Debug) 0)
+        (set! mls (liveness/MergeLocals fn f))
+        (when (and (> (.-MergeLocalsTrace base/Debug) 0) (!= mls nil))
+          (let [(values savedNP savedP) (.EstSavings mls)]
+            (fmt/Fprintf os/Stderr "%s: %d bytes of stack space saved via stack slot merging (%d nonpointer %d pointer)\n" (ir/FuncName fn) (+ savedNP savedP) savedNP savedP)
+            (when (> (.-MergeLocalsTrace base/Debug) 1)
+              (fmt/Fprintf os/Stderr "=-= merge locals state for %v:\n%v"
+                ^{:line 177} fn mls))))
+
+
+        (set! leaders (make (map (* ir/Name) int64))))
+
+
+      ;; Use sort.SliceStable instead of sort.Slice so stack layout (and thus
+      ;; compiler output) is less sensitive to frontend changes that
+      ;; introduce or remove unused variables.
+      (sort/SliceStable (.-Dcl fn) ^{:go/end 188} (fn ^bool [^int i ^int j]
+          (cmpstackvarlt (aget (.-Dcl fn) i) (aget (.-Dcl fn) j) mls)))
+
+
+      (when (!= mls nil)
+        ;; Rewrite fn.Dcl to reposition followers (subsumed vars) to
+        ;; be immediately following the leader var in their partition.
+        (let [followers (lit (slice (* ir/Name)))
+            ^{:line 194} newdcl (make (slice (* ir/Name)) 0 (len (.-Dcl fn)))]
+          (for [i 0] (< i (len (.-Dcl fn))) (inc! i)
+            (let [n (aget (.-Dcl fn) i)]
+              (when (.Subsumed mls n)
+                (continue))
+
+              (set! newdcl (append newdcl n))
+              (when (.IsLeader mls n)
+                (set! followers (.Followers mls n followers))
+                ;; position followers immediately after leader
+                (set! newdcl (append newdcl (spread followers))))))
+
+
+          (set! (.-Dcl fn) newdcl)))
+
+
+      (when (and (> (.-MergeLocalsTrace base/Debug) 1) (!= mls nil))
+        (fmt/Fprintf os/Stderr "=-= sorted DCL for %v:\n" fn)
+        (range [i v (.-Dcl fn)]
+          (when (not (ssa/IsMergeCandidate v))
+            (continue))
+
+          (fmt/Fprintf os/Stderr " %d: %q isleader=%v subsumed=%v used=%v sz=%d align=%d t=%s\n" i (.-Name (.Sym v)) (.IsLeader mls v) (.Subsumed mls v) (.Used v) (.Size ^{:go/via [miniExpr]} (.Type v)) (.Alignment ^{:go/via [miniExpr]} (.Type v)) (.String ^{:go/via [miniExpr]} (.Type v)))))
+
+
+
+      ;; Reassign stack offsets of the locals that are used.
+      (let [lastHasPtr false]
+        (range [i n (.-Dcl fn)]
+          (when (or (!= ^{:go/via [miniExpr miniNode]} (.Op n) ir/ONAME) (and (!= (.-Class n) ir/PAUTO) (not (and (== (.-Class n) ir/PPARAMOUT) (.IsOutputParamInRegisters n)))))
+            ;; i.e., stack assign if AUTO, or if PARAMOUT in registers (which has no predefined spill locations)
+            (continue))
+
+          (when (and (!= mls nil) (.Subsumed mls n))
+            (continue))
+
+          (when (not (.Used n))
+            (set! (.-OptDcl (assert (* ssa/FuncDebug) (.-DebugInfo fn))) (subslice (.-Dcl fn) i))
+            (set! (.-Dcl fn) (subslice (.-Dcl fn) _ i))
+            (break))
+
+          (types/CalcSize ^{:go/via [miniExpr]} (.Type n))
+          (let [w (.Size ^{:go/via [miniExpr]} (.Type n))]
+            (when (or (>= w types/MaxWidth) (< w 0))
+              (base/Fatalf "bad width"))
+
+            (when (and (== w 0) lastHasPtr)
+              ;; Pad between a pointer-containing object and a zero-sized object.
+              ;; This prevents a pointer to the zero-sized object from being interpreted
+              ;; as a pointer to the pointer-containing object (and causing it
+              ;; to be scanned when it shouldn't be). See issue 24993.
+              (set! w 1))
+
+            (set! (.-stksize s) + w)
+            (set! (.-stksize s) (types/RoundUp (.-stksize s) (.Alignment ^{:go/via [miniExpr]} (.Type n))))
+            (when (> (.Alignment ^{:go/via [miniExpr]} (.Type n)) (conv int64 types/RegSize))
+              (set! (.-stkalign s) (.Alignment ^{:go/via [miniExpr]} (.Type n))))
+
+            (if (.HasPointers ^{:go/via [miniExpr]} (.Type n)) (do
+                (set! (.-stkptrsize s) (.-stksize s))
+                (set! lastHasPtr true))
+
+              (set! lastHasPtr false))
+
+            (.SetFrameOffset n (- (.-stksize s)))
+            (when (and (!= mls nil) (.IsLeader mls n))
+              (aset leaders n (- (.-stksize s))))))
+
+
+
+        (when (!= mls nil)
+          ;; Update offsets of followers (subsumed vars) to be the
+          ;; same as the leader var in their partition.
+          (for [i 0] (< i (len (.-Dcl fn))) (inc! i)
+            (let [n (aget (.-Dcl fn) i)]
+              (when (not (.Subsumed mls n))
+                (continue))
+
+              (let [leader (.Leader mls n)
+                  (values off ok) (aget leaders leader)]
+                (when (not ok)
+                  (panic "internal error missing leader"))
+
+                ;; Set the stack offset this subsumed (followed) var
+                ;; to be the same as the leader.
+                (.SetFrameOffset n off))))
+
+
+          (when (> (.-MergeLocalsTrace base/Debug) 1)
+            (fmt/Fprintf os/Stderr "=-= stack layout for %v:\n" fn)
+            (range [i v (.-Dcl fn)]
+              (when (or (!= ^{:go/via [miniExpr miniNode]} (.Op v) ir/ONAME) ^:go/paren (and (!= (.-Class v) ir/PAUTO) (not (and (== (.-Class v) ir/PPARAMOUT) (.IsOutputParamInRegisters v)))))
+                (continue))
+
+              (fmt/Fprintf os/Stderr " %d: %q frameoff %d isleader=%v subsumed=%v sz=%d align=%d t=%s\n" i (.-Name (.Sym v)) (.FrameOffset v) (.IsLeader mls v) (.Subsumed mls v) (.Size ^{:go/via [miniExpr]} (.Type v)) (.Alignment ^{:go/via [miniExpr]} (.Type v)) (.String ^{:go/via [miniExpr]} (.Type v))))))
+
+
+
+
+        (set! (.-stksize s) (types/RoundUp (.-stksize s) (.-stkalign s)))
+        (set! (.-stkptrsize s) (types/RoundUp (.-stkptrsize s) (.-stkalign s)))))))
+
+
+(go/const ^{:val 1073741824} maxStackSize (<< 1 30))
+
+
+
+
+
+^{:go/end 340} (go/func Compile "Compile builds an SSA backend function,\nuses it to generate a plist,\nand flushes that plist to machine code.\nworker indicates which of the backend workers is doing the processing.\n" [^{:tag (* ir/Func)} fn ^int worker ^{:tag (* pgoir/Profile)} profile]
+  (let [f (buildssa fn worker (or (inline/IsPgoHotFunc fn profile) (inline/HasPgoHotInline fn)))]
+    ;; Note: check arg size to fix issue 25507.
+    (when (or (>= (.-stksize (assert (* ssafn) (.Frontend f))) maxStackSize) (>= (.ArgWidth (.-OwnAux f)) maxStackSize))
+      (.Lock largeStackFramesMu)
+      (set! largeStackFrames (append largeStackFrames (lit largeStack :locals (.-stksize (assert (* ssafn) (.Frontend f))) :args (.ArgWidth (.-OwnAux f)) :pos ^{:go/via [miniNode]} (.Pos fn))))
+      (.Unlock largeStackFramesMu)
+      (return))
+
+    (let [pp (objw/NewProgs fn worker)]
+      (defer (.Free pp))
+      (genssa f pp)
+      ;; Check frame size again.
+      ;; The check above included only the space needed for local variables.
+      ;; After genssa, the space needed includes local variables and the callee arg region.
+      ;; We must do this check prior to calling pp.Flush.
+      ;; If there are any oversized stack frames,
+      ;; the assembler may emit inscrutable complaints about invalid instructions.
+      (when (>= (.-Offset (.-To (.-Text pp))) maxStackSize)
+        (.Lock largeStackFramesMu)
+        (let [locals (.-stksize (assert (* ssafn) (.Frontend f)))]
+          (set! largeStackFrames (append largeStackFrames (lit largeStack :locals locals :args (.ArgWidth (.-OwnAux f)) :callee (- (.-Offset (.-To (.-Text pp))) locals) :pos ^{:go/via [miniNode]} (.Pos fn))))
+          (.Unlock largeStackFramesMu)
+          (return)))
+
+
+      (.Flush pp) ; assemble, fill in boilerplate, etc.
+
+      ;; If we're compiling the package init function, search for any
+      ;; relocations that target global map init outline functions and
+      ;; turn them into weak relocs.
+      (when (and (.IsPackageInit fn) (!= (.-WrapGlobalMapCtl base/Debug) 1))
+        (weakenGlobalMapInitRelocs fn))
+
+
+      ;; fieldtrack must be called after pp.Flush. See issue 20014.
+      (fieldtrack (.-Sym (.-From (.-Text pp))) (.-FieldTrack fn)))))
+
+
+
+
+(go/var ^{:tag (map (* obj/LSym) (struct)) :doc "globalMapInitLsyms records the LSym of each map.init.NNN outlined\nmap initializer function created by the compiler.\n"} globalMapInitLsyms)
+
+
+
+^{:go/end 353} (go/func RegisterMapInitLsym "RegisterMapInitLsym records \"s\" in the set of outlined map initializer\nfunctions.\n" [^{:tag (* obj/LSym)} s]
+  (when (== globalMapInitLsyms nil)
+    (set! globalMapInitLsyms (make (map (* obj/LSym) (struct)))))
+
+  (aset globalMapInitLsyms s (lit (struct))))
+
+
+
+
+
+
+^{:go/end 378} (go/func weakenGlobalMapInitRelocs "weakenGlobalMapInitRelocs walks through all of the relocations on a\ngiven a package init function \"fn\" and looks for relocs that target\noutlined global map initializer functions; if it finds any such\nrelocs, it flags them as R_WEAK.\n" [^{:tag (* ir/Func)} fn]
+  (when (== globalMapInitLsyms nil)
+    (return))
+
+  (range [i (.-R (.-LSym fn))]
+    (let [tgt (.-Sym (aget (.-R (.-LSym fn)) i))]
+      (when (== tgt nil)
+        (continue))
+
+      (when [(values _ ok) (aget globalMapInitLsyms tgt)] (not ok)
+        (continue))
+
+      (when (> (.-WrapGlobalMapDbg base/Debug) 1)
+        (fmt/Fprintf os/Stderr "=-= weakify fn %v reloc %d %+v\n" fn i
+          (aget (.-R (.-LSym fn)) i)))
+
+      ;; set the R_WEAK bit, leave rest of reloc type intact
+      (set! (.-Type (aget (.-R (.-LSym fn)) i)) bit-or objabi/R_WEAK))))
+
+
+
+
+
+
+^{:go/end 403} (go/func StackOffset "StackOffset returns the stack location of a LocalSlot relative to the\nstack pointer, suitable for use in a DWARF location entry. This has nothing\nto do with its offset in the user variable.\n" ^int32 [^ssa/LocalSlot slot]
+  (let [n (.-N slot)
+      ^{:line 385 :tag int64} off (zero int64)]
+    (switch (.-Class n)
+      (case [ir/PPARAM ir/PPARAMOUT]
+        (when (not (.IsOutputParamInRegisters n))
+          (set! off (+ (.FrameOffset n) ^{:go/via [Arch]} (.-FixedFrameSize (.-Arch base/Ctxt))))
+          (break))
+
+        (fallthrough)) ; PPARAMOUT in registers allocates like an AUTO
+      (case [ir/PAUTO]
+        (set! off (.FrameOffset n))
+        (when (== ^{:go/via [Arch]} (.-FixedFrameSize (.-Arch base/Ctxt)) 0)
+          (set! off - (conv int64 types/PtrSize)))
+
+        (when buildcfg/FramePointerEnabled
+          (set! off - (conv int64 types/PtrSize)))))
+
+
+    (conv int32 (+ off (.-Off slot)))))
+
+
+
+
+^{:go/end 423} (go/func fieldtrack "fieldtrack adds R_USEFIELD relocations to fnsym to record any\nstruct fields that it used.\n" [^{:tag (* obj/LSym)} fnsym ^{:tag (map (* obj/LSym) (struct))} tracked]
+  (when (== fnsym nil)
+    (return))
+
+  (when (or (not ^{:go/via [Flags]} (.-FieldTrack buildcfg/Experiment)) (== (len tracked) 0))
+    (return))
+
+
+  (let [trackSyms (make (slice (* obj/LSym)) 0 (len tracked))]
+    (range [sym tracked]
+      (set! trackSyms (append trackSyms sym)))
+
+    (^{:inst [(slice (* obj/LSym)) (* obj/LSym)]} slices/SortFunc trackSyms ^{:go/end 419} (fn ^int [^{:tag (* obj/LSym)} a ^{:tag (* obj/LSym)} b] (strings/Compare (.-Name a) (.-Name b))))
+    (range [_ sym trackSyms]
+      (.AddRel fnsym base/Ctxt (lit obj/Reloc :Type objabi/R_USEFIELD :Sym sym)))))
+
+
+
+
+(go/type largeStack "largeStack is info about a function whose stack frame is too large (rare).\n" (struct
+    ^{:line 427 :tag int64} locals
+    ^{:line 428 :tag int64} args
+    ^{:line 429 :tag int64} callee
+    ^{:line 430 :tag src/XPos} pos))
+
+
+(go/var
+  ^{:line 434} [^sync/Mutex largeStackFramesMu] ; protects largeStackFrames
+  ^{:line 435} [^{:tag (slice largeStack)} largeStackFrames])
+
+
+^{:go/end 450} (go/func CheckLargeStacks []
+  ;; Check whether any of the functions we have compiled have gigantic stack frames.
+  (sort/Slice largeStackFrames ^{:go/end 442} (fn ^bool [^int i ^int j]
+      (.Before (.-pos (aget largeStackFrames i)) (.-pos (aget largeStackFrames j)))))
+
+  (range [_ large largeStackFrames]
+    (if (!= (.-callee large) 0)
+      (base/ErrorfAt (.-pos large) 0 "stack frame too large (>1GB): %d MB locals + %d MB args + %d MB callee" (>> (.-locals large) 20) (>> (.-args large) 20) (>> (.-callee large) 20))
+
+      (base/ErrorfAt (.-pos large) 0 "stack frame too large (>1GB): %d MB locals + %d MB args" (>> (.-locals large) 20) (>> (.-args large) 20)))))

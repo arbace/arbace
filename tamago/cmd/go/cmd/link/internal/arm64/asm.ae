@@ -1,0 +1,1469 @@
+;; Inferno utils/5l/asm.c
+;; https://bitbucket.org/inferno-os/inferno-os/src/master/utils/5l/asm.c
+;;
+;;	Copyright © 1994-1999 Lucent Technologies Inc.  All rights reserved.
+;;	Portions Copyright © 1995-1997 C H Forsyth (forsyth@terzarima.net)
+;;	Portions Copyright © 1997-1999 Vita Nuova Limited
+;;	Portions Copyright © 2000-2007 Vita Nuova Holdings Limited (www.vitanuova.com)
+;;	Portions Copyright © 2004,2006 Bruce Ellis
+;;	Portions Copyright © 2005-2007 C H Forsyth (forsyth@terzarima.net)
+;;	Revisions Copyright © 2000-2007 Lucent Technologies Inc. and others
+;;	Portions Copyright © 2009 The Go Authors. All rights reserved.
+;;
+;; Permission is hereby granted, free of charge, to any person obtaining a copy
+;; of this software and associated documentation files (the "Software"), to deal
+;; in the Software without restriction, including without limitation the rights
+;; to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+;; copies of the Software, and to permit persons to whom the Software is
+;; furnished to do so, subject to the following conditions:
+;;
+;; The above copyright notice and this permission notice shall be included in
+;; all copies or substantial portions of the Software.
+;;
+;; THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+;; IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+;; FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL THE
+;; AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+;; LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+;; OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+;; THE SOFTWARE.
+
+(in-ns 'go.cmd.link.internal.arm64) (go/file "asm.go" :imports [
+
+
+    ^{:line 34} [objabi "cmd/internal/objabi"]
+    ^{:line 35} [sys "cmd/internal/sys"]
+    ^{:line 36} [ld "cmd/link/internal/ld"]
+    ^{:line 37} [loader "cmd/link/internal/loader"]
+    ^{:line 38} [sym "cmd/link/internal/sym"]
+    ^{:line 39} [elf "debug/elf"]
+    ^{:line 40} [fmt "fmt"]
+    ^{:line 41} [log "log"]])
+
+
+^{:go/end 72} (go/func gentext [^{:tag (* ld/Link)} ctxt ^{:tag (* loader/Loader)} ldr]
+  (let [(values initfunc addmoduledata) (ld/PrepareAddmoduledata ctxt)]
+    (when (== initfunc nil)
+      (return))
+
+
+    (let [o ^{:go/end 52} (fn [^uint32 op]
+          (.AddUint32 initfunc ^{:go/via [Target]} (.-Arch ctxt) op))]
+
+      ;; 0000000000000000 <local.dso_init>:
+      ;; 0:	90000000 	adrp	x0, 0 <runtime.firstmoduledata>
+      ;; 	0: R_AARCH64_ADR_PREL_PG_HI21	local.moduledata
+      ;; 4:	91000000 	add	x0, x0, #0x0
+      ;; 	4: R_AARCH64_ADD_ABS_LO12_NC	local.moduledata
+      (o 0x90000000)
+      (o 0x91000000)
+      (let [(values rel _) (.AddRel initfunc objabi/R_ADDRARM64)]
+        ^{:go/via [Reloc]} (.SetOff rel 0)
+        ^{:go/via [Reloc]} (.SetSiz rel 8)
+        (.SetSym rel (.-Moduledata ctxt))
+
+        ;; 8:	14000000 	b	0 <runtime.addmoduledata>
+        ;; 	8: R_AARCH64_CALL26	runtime.addmoduledata
+        (o 0x14000000)
+        (let [(values rel2 _) (.AddRel initfunc objabi/R_CALLARM64)]
+          ^{:go/via [Reloc]} (.SetOff rel2 8)
+          ^{:go/via [Reloc]} (.SetSiz rel2 4)
+          (.SetSym rel2 addmoduledata))))))
+
+
+^{:go/end 516} (go/func adddynrel ^bool [^{:tag (* ld/Target)} target ^{:tag (* loader/Loader)} ldr ^{:tag (* ld/ArchSyms)} syms ^loader/Sym s ^loader/Reloc r ^int rIdx]
+  (let [targ (.Sym r)
+      ^{:line 76 :tag sym/SymKind} targType (zero sym/SymKind)]
+    (when (!= targ 0)
+      (set! targType (.SymType ldr targ)))
+
+
+    (let [^:const ^{:val 1} pcrel 1]
+      (switch (.Type r)
+        (default
+          (when (>= (.Type r) objabi/ElfRelocOffset)
+            (.Errorf ldr s "unexpected relocation type %d (%s)" (.Type r) (sym/RelocName (.-Arch target) (.Type r)))
+            (return false)))
+
+
+        ;; Handle relocations found in ELF object files.
+        (case [(+ objabi/ElfRelocOffset (conv objabi/RelocType elf/R_AARCH64_PREL32))]
+          (when (== targType sym/SDYNIMPORT)
+            (.Errorf ldr s "unexpected R_AARCH64_PREL32 relocation for dynamic symbol %s" (.SymName ldr targ)))
+
+          (when (or (== targType 0) (== targType sym/SXREF))
+            (.Errorf ldr s "unknown symbol %s in pcrel" (.SymName ldr targ)))
+
+          (let [su (.MakeSymbolUpdater ldr s)]
+            (.SetRelocType su rIdx objabi/R_PCREL)
+            (.SetRelocAdd su rIdx (+ ^{:go/via [Reloc]} (.Add r) 4))
+            (return true)))
+
+        (case [(+ objabi/ElfRelocOffset (conv objabi/RelocType elf/R_AARCH64_PREL64))]
+          (when (== targType sym/SDYNIMPORT)
+            (.Errorf ldr s "unexpected R_AARCH64_PREL64 relocation for dynamic symbol %s" (.SymName ldr targ)))
+
+          (when (or (== targType 0) (== targType sym/SXREF))
+            (.Errorf ldr s "unknown symbol %s in pcrel" (.SymName ldr targ)))
+
+          (let [su (.MakeSymbolUpdater ldr s)]
+            (.SetRelocType su rIdx objabi/R_PCREL)
+            (.SetRelocAdd su rIdx (+ ^{:go/via [Reloc]} (.Add r) 8))
+            (return true)))
+
+        (case [(+ objabi/ElfRelocOffset (conv objabi/RelocType elf/R_AARCH64_CALL26))
+            (+ objabi/ElfRelocOffset (conv objabi/RelocType elf/R_AARCH64_JUMP26))]
+          (when (== targType sym/SDYNIMPORT)
+            (addpltsym target ldr syms targ)
+            (let [su (.MakeSymbolUpdater ldr s)]
+              (.SetRelocSym su rIdx (.-PLT syms))
+              (.SetRelocAdd su rIdx (+ ^{:go/via [Reloc]} (.Add r) (conv int64 (.SymPlt ldr targ))))))
+
+          (when (or (== targType 0) (== targType sym/SXREF))
+            (.Errorf ldr s "unknown symbol %s in callarm64" (.SymName ldr targ)))
+
+          (let [su (.MakeSymbolUpdater ldr s)]
+            (.SetRelocType su rIdx objabi/R_CALLARM64)
+            (return true)))
+
+        (case [(+ objabi/ElfRelocOffset (conv objabi/RelocType elf/R_AARCH64_ADR_GOT_PAGE))
+            (+ objabi/ElfRelocOffset (conv objabi/RelocType elf/R_AARCH64_LD64_GOT_LO12_NC))]
+          (when (!= targType sym/SDYNIMPORT))
+          ;; have symbol
+          ;; TODO: turn LDR of GOT entry into ADR of symbol itself
+
+
+          ;; fall back to using GOT
+          ;; TODO: just needs relocation, no need to put in .dynsym
+          (ld/AddGotSym target ldr syms targ (conv uint32 elf/R_AARCH64_GLOB_DAT))
+          (let [su (.MakeSymbolUpdater ldr s)]
+            (.SetRelocType su rIdx objabi/R_ARM64_GOT)
+            (.SetRelocSym su rIdx (.-GOT syms))
+            (.SetRelocAdd su rIdx (+ ^{:go/via [Reloc]} (.Add r) (conv int64 (.SymGot ldr targ))))
+            (return true)))
+
+        (case [(+ objabi/ElfRelocOffset (conv objabi/RelocType elf/R_AARCH64_ADR_PREL_PG_HI21))
+            (+ objabi/ElfRelocOffset (conv objabi/RelocType elf/R_AARCH64_ADD_ABS_LO12_NC))]
+          (when (== targType sym/SDYNIMPORT)
+            (.Errorf ldr s "unexpected relocation for dynamic symbol %s" (.SymName ldr targ)))
+
+          (when (or (== targType 0) (== targType sym/SXREF))
+            (.Errorf ldr s "unknown symbol %s" (.SymName ldr targ)))
+
+          (let [su (.MakeSymbolUpdater ldr s)]
+            (.SetRelocType su rIdx objabi/R_ARM64_PCREL)
+            (return true)))
+
+        (case [(+ objabi/ElfRelocOffset (conv objabi/RelocType elf/R_AARCH64_ABS64))]
+          (when (== targType sym/SDYNIMPORT)
+            (.Errorf ldr s "unexpected R_AARCH64_ABS64 relocation for dynamic symbol %s" (.SymName ldr targ)))
+
+          (let [su (.MakeSymbolUpdater ldr s)]
+            (.SetRelocType su rIdx objabi/R_ADDR)
+            (when (and (.IsPIE target) (.IsInternal target))
+              ;; For internal linking PIE, this R_ADDR relocation cannot
+              ;; be resolved statically. We need to generate a dynamic
+              ;; relocation. Let the code below handle it.
+              (break))
+
+            (return true)))
+
+        (case [(+ objabi/ElfRelocOffset (conv objabi/RelocType elf/R_AARCH64_LDST8_ABS_LO12_NC))]
+          (when (== targType sym/SDYNIMPORT)
+            (.Errorf ldr s "unexpected relocation for dynamic symbol %s" (.SymName ldr targ)))
+
+          (let [su (.MakeSymbolUpdater ldr s)]
+            (.SetRelocType su rIdx objabi/R_ARM64_LDST8)
+            (return true)))
+
+        (case [(+ objabi/ElfRelocOffset (conv objabi/RelocType elf/R_AARCH64_LDST16_ABS_LO12_NC))]
+          (when (== targType sym/SDYNIMPORT)
+            (.Errorf ldr s "unexpected relocation for dynamic symbol %s" (.SymName ldr targ)))
+
+          (let [su (.MakeSymbolUpdater ldr s)]
+            (.SetRelocType su rIdx objabi/R_ARM64_LDST16)
+            (return true)))
+
+        (case [(+ objabi/ElfRelocOffset (conv objabi/RelocType elf/R_AARCH64_LDST32_ABS_LO12_NC))]
+          (when (== targType sym/SDYNIMPORT)
+            (.Errorf ldr s "unexpected relocation for dynamic symbol %s" (.SymName ldr targ)))
+
+          (let [su (.MakeSymbolUpdater ldr s)]
+            (.SetRelocType su rIdx objabi/R_ARM64_LDST32)
+            (return true)))
+
+        (case [(+ objabi/ElfRelocOffset (conv objabi/RelocType elf/R_AARCH64_LDST64_ABS_LO12_NC))]
+          (when (== targType sym/SDYNIMPORT)
+            (.Errorf ldr s "unexpected relocation for dynamic symbol %s" (.SymName ldr targ)))
+
+          (let [su (.MakeSymbolUpdater ldr s)]
+            (.SetRelocType su rIdx objabi/R_ARM64_LDST64)
+
+            (return true)))
+
+        (case [(+ objabi/ElfRelocOffset (conv objabi/RelocType elf/R_AARCH64_LDST128_ABS_LO12_NC))]
+          (when (== targType sym/SDYNIMPORT)
+            (.Errorf ldr s "unexpected relocation for dynamic symbol %s" (.SymName ldr targ)))
+
+          (let [su (.MakeSymbolUpdater ldr s)]
+            (.SetRelocType su rIdx objabi/R_ARM64_LDST128)
+            (return true)))
+
+        ;; Handle relocations found in Mach-O object files.
+        (case [(+ objabi/MachoRelocOffset (* ld/MACHO_ARM64_RELOC_UNSIGNED 2))]
+          (let [su (.MakeSymbolUpdater ldr s)]
+            (.SetRelocType su rIdx objabi/R_ADDR)
+            (when (and (.IsPIE target) (.IsInternal target))
+              ;; For internal linking PIE, this R_ADDR relocation cannot
+              ;; be resolved statically. We need to generate a dynamic
+              ;; relocation. Let the code below handle it.
+              (break))
+
+            (when (== targType sym/SDYNIMPORT)
+              (.Errorf ldr s "unexpected reloc for dynamic symbol %s" (.SymName ldr targ)))
+
+            (return true)))
+
+        (case [(+ objabi/MachoRelocOffset (* ld/MACHO_ARM64_RELOC_SUBTRACTOR 2))]
+          ;; ARM64_RELOC_SUBTRACTOR must be followed by ARM64_RELOC_UNSIGNED.
+          ;; The pair of relocations resolves to the difference between two
+          ;; symbol addresses (each relocation specifies a symbol).
+          (let [(values outer off) (ld/FoldSubSymbolOffset ldr targ)]
+            (when (!= outer s)
+              ;; TODO: support subtracted symbol in different section.
+              (.Errorf ldr s "unsupported ARM64_RELOC_SUBTRACTOR reloc: target %s, outer %s" (.SymName ldr targ) (.SymName ldr outer))
+              (break))
+
+            (let [su (.MakeSymbolUpdater ldr s)
+                ^{:line 238} relocs (.Relocs su)]
+              (when (or (>= (+ rIdx 1) (.Count relocs)) (!= (.Type (.At relocs (+ rIdx 1))) (+ objabi/MachoRelocOffset (* ld/MACHO_ARM64_RELOC_UNSIGNED 2))) (!= ^{:go/via [Reloc]} (.Off (.At relocs (+ rIdx 1))) ^{:go/via [Reloc]} (.Off r)))
+                (.Errorf ldr s "unexpected ARM64_RELOC_SUBTRACTOR reloc, must be followed by ARM64_RELOC_UNSIGNED at same offset")
+                (break))
+
+              (.SetRelocType su (+ rIdx 1) objabi/R_PCREL)
+              (.SetRelocAdd su (+ rIdx 1) (- (+ ^{:go/via [Reloc]} (.Add r) (conv int64 ^{:go/via [Reloc]} (.Off r)) (conv int64 ^{:go/via [Reloc]} (.Siz r))) off))
+              ;; Remove the other relocation
+              (.SetRelocSiz su rIdx 0)
+              (return true))))
+
+        (case [(+ objabi/MachoRelocOffset (* ld/MACHO_ARM64_RELOC_BRANCH26 2) pcrel)]
+          (let [su (.MakeSymbolUpdater ldr s)]
+            (.SetRelocType su rIdx objabi/R_CALLARM64)
+            (when (== targType sym/SDYNIMPORT)
+              (addpltsym target ldr syms targ)
+              (.SetRelocSym su rIdx (.-PLT syms))
+              (.SetRelocAdd su rIdx (conv int64 (.SymPlt ldr targ))))
+
+            (return true)))
+
+        (case [(+ objabi/MachoRelocOffset (* ld/MACHO_ARM64_RELOC_PAGE21 2) pcrel)
+            (+ objabi/MachoRelocOffset (* ld/MACHO_ARM64_RELOC_PAGEOFF12 2))]
+          (when (== targType sym/SDYNIMPORT)
+            (.Errorf ldr s "unexpected relocation for dynamic symbol %s" (.SymName ldr targ)))
+
+          (let [su (.MakeSymbolUpdater ldr s)]
+            (.SetRelocType su rIdx objabi/R_ARM64_PCREL)
+            (return true)))
+
+        (case [(+ objabi/MachoRelocOffset (* ld/MACHO_ARM64_RELOC_GOT_LOAD_PAGE21 2) pcrel)
+            (+ objabi/MachoRelocOffset (* ld/MACHO_ARM64_RELOC_GOT_LOAD_PAGEOFF12 2))]
+          (when (!= targType sym/SDYNIMPORT)
+            ;; have symbol
+            ;; turn MOVD sym@GOT (adrp+ldr) into MOVD $sym (adrp+add)
+            (let [data (.Data ldr s)
+                ^{:line 274} off ^{:go/via [Reloc]} (.Off r)]
+              (when (>= (conv int (+ off 3)) (len data))
+                (.Errorf ldr s "unexpected GOT_LOAD reloc for non-dynamic symbol %s" (.SymName ldr targ))
+                (return false))
+
+              (let [o (.Uint32 (.-ByteOrder (.-Arch target)) (subslice data off))
+                  ^{:line 280} su (.MakeSymbolUpdater ldr s)]
+                (switch
+                  (case [(== (bit-and (>> o 24) 0x9f) 0x90)]) ; adrp
+                  ;; keep instruction unchanged, change relocation type below
+                  (case [(== (>> o 24) 0xf9)] ; ldr
+                    ;; rewrite to add
+                    (set! o (bit-or (<< 0x91 24) (bit-and o (- (<< 1 22) 1))))
+                    (.MakeWritable su)
+                    (.SetUint32 su (.-Arch target) (conv int64 off) o))
+                  (default
+                    (.Errorf ldr s "unexpected GOT_LOAD reloc for non-dynamic symbol %s" (.SymName ldr targ))
+                    (return false)))
+
+                (.SetRelocType su rIdx objabi/R_ARM64_PCREL)
+                (return true))))
+
+          (ld/AddGotSym target ldr syms targ 0)
+          (let [su (.MakeSymbolUpdater ldr s)]
+            (.SetRelocType su rIdx objabi/R_ARM64_GOT)
+            (.SetRelocSym su rIdx (.-GOT syms))
+            (.SetRelocAdd su rIdx (conv int64 (.SymGot ldr targ)))
+            (return true)))
+
+        (case [(+ objabi/MachoRelocOffset (* ld/MACHO_ARM64_RELOC_POINTER_TO_GOT 2) pcrel)]
+          (when (!= targType sym/SDYNIMPORT)
+            (.Errorf ldr s "unexpected GOT reloc for non-dynamic symbol %s" (.SymName ldr targ)))
+
+          (ld/AddGotSym target ldr syms targ 0)
+          (let [su (.MakeSymbolUpdater ldr s)]
+            (.SetRelocType su rIdx objabi/R_PCREL)
+            (.SetRelocSym su rIdx (.-GOT syms))
+            (.SetRelocAdd su rIdx (+ ^{:go/via [Reloc]} (.Add r) (conv int64 ^{:go/via [Reloc]} (.Siz r)) (conv int64 (.SymGot ldr targ))))
+            (return true))))
+
+
+      ;; Reread the reloc to incorporate any changes in type above.
+      ^{:go/breaks [[4 515]]} (let [relocs (.Relocs ldr s)]
+        (set! r (.At relocs rIdx))
+
+        (switch (.Type r)
+          (case [objabi/R_CALLARM64]
+            (when (!= targType sym/SDYNIMPORT)
+              ;; nothing to do, the relocation will be laid out in reloc
+              (return true))
+
+            (when (.IsExternal target)
+              ;; External linker will do this relocation.
+              (return true))
+
+            ;; Internal linking.
+            (when (!= ^{:go/via [Reloc]} (.Add r) 0)
+              (.Errorf ldr s "PLT call with non-zero addend (%v)" ^{:go/via [Reloc]} (.Add r)))
+
+            ;; Build a PLT entry and change the relocation target to that entry.
+            (addpltsym target ldr syms targ)
+            (let [su (.MakeSymbolUpdater ldr s)]
+              (.SetRelocSym su rIdx (.-PLT syms))
+              (.SetRelocAdd su rIdx (conv int64 (.SymPlt ldr targ)))
+              (return true)))
+
+          (case [objabi/R_ADDRARM64]
+            (when (and (== targType sym/SDYNIMPORT) (.IsText (.SymType ldr s)) (.IsDarwin target))
+              ;; Loading the address of a dynamic symbol. Rewrite to use GOT.
+              ;; turn MOVD $sym (adrp+add) into MOVD sym@GOT (adrp+ldr)
+              (when (!= ^{:go/via [Reloc]} (.Add r) 0)
+                (.Errorf ldr s "unexpected nonzero addend for dynamic symbol %s" (.SymName ldr targ))
+                (return false))
+
+              (let [su (.MakeSymbolUpdater ldr s)
+                  ^{:line 349} data (.Data ldr s)
+                  ^{:line 350} off ^{:go/via [Reloc]} (.Off r)]
+                (when (> (conv int (+ off 8)) (len data))
+                  (.Errorf ldr s "unexpected R_ADDRARM64 reloc for dynamic symbol %s" (.SymName ldr targ))
+                  (return false))
+
+                (let [o (.Uint32 (.-ByteOrder (.-Arch target)) (subslice data (+ off 4)))]
+                  (when (== (>> o 24) 0x91) ; add
+                    ;; rewrite to ldr
+                    (set! o (bit-or (<< 0xf9 24) (<< 1 22) (bit-and o (- (<< 1 22) 1))))
+                    (.MakeWritable su)
+                    (.SetUint32 su (.-Arch target) (conv int64 (+ off 4)) o)
+                    (if (.IsInternal target) (do
+                        (ld/AddGotSym target ldr syms targ 0)
+                        (.SetRelocSym su rIdx (.-GOT syms))
+                        (.SetRelocAdd su rIdx (conv int64 (.SymGot ldr targ)))
+                        (.SetRelocType su rIdx objabi/R_ARM64_PCREL_LDST64))
+
+                      (.SetRelocType su rIdx objabi/R_ARM64_GOTPCREL))
+
+                    (return true))
+
+                  (.Errorf ldr s "unexpected R_ADDRARM64 reloc for dynamic symbol %s" (.SymName ldr targ))))))
+
+
+          (case [objabi/R_ADDR]
+            (when (and (.IsText (.SymType ldr s)) (.IsElf target))
+              ;; The code is asking for the address of an external
+              ;; function. We provide it with the address of the
+              ;; correspondent GOT symbol.
+              (ld/AddGotSym target ldr syms targ (conv uint32 elf/R_AARCH64_GLOB_DAT))
+              (let [su (.MakeSymbolUpdater ldr s)]
+                (.SetRelocSym su rIdx (.-GOT syms))
+                (.SetRelocAdd su rIdx (+ ^{:go/via [Reloc]} (.Add r) (conv int64 (.SymGot ldr targ))))
+                (return true)))
+
+
+            ;; Process dynamic relocations for the data sections.
+            (if (and (.IsPIE target) (.IsInternal target))
+              ;; When internally linking, generate dynamic relocations
+              ;; for all typical R_ADDR relocations. The exception
+              ;; are those R_ADDR that are created as part of generating
+              ;; the dynamic relocations and must be resolved statically.
+              ;;
+              ;; There are three phases relevant to understanding this:
+              ;;
+              ;;	dodata()  // we are here
+              ;;	address() // symbol address assignment
+              ;;	reloc()   // resolution of static R_ADDR relocs
+              ;;
+              ;; At this point symbol addresses have not been
+              ;; assigned yet (as the final size of the .rela section
+              ;; will affect the addresses), and so we cannot write
+              ;; the Elf64_Rela.r_offset now. Instead we delay it
+              ;; until after the 'address' phase of the linker is
+              ;; complete. We do this via Addaddrplus, which creates
+              ;; a new R_ADDR relocation which will be resolved in
+              ;; the 'reloc' phase.
+              ;;
+              ;; These synthetic static R_ADDR relocs must be skipped
+              ;; now, or else we will be caught in an infinite loop
+              ;; of generating synthetic relocs for our synthetic
+              ;; relocs.
+              ;;
+              ;; Furthermore, the rela sections contain dynamic
+              ;; relocations with R_ADDR relocations on
+              ;; Elf64_Rela.r_offset. This field should contain the
+              ;; symbol offset as determined by reloc(), not the
+              ;; final dynamically linked address as a dynamic
+              ;; relocation would provide.
+              (switch (.SymName ldr s)
+                (case [".dynsym" ".rela" ".rela.plt" ".got.plt" ".dynamic"]
+                  (return false)))
+
+              (do
+                ;; Either internally linking a static executable,
+                ;; in which case we can resolve these relocations
+                ;; statically in the 'reloc' phase, or externally
+                ;; linking, in which case the relocation will be
+                ;; prepared in the 'reloc' phase and passed to the
+                ;; external linker in the 'asmb' phase.
+                (when [t (.SymType ldr s)] (and (not (.IsDATA t)) (not (.IsRODATA t)))
+                  (break))))
+
+
+
+            (when (.IsElf target)
+              ;; Generate R_AARCH64_RELATIVE relocations for best
+              ;; efficiency in the dynamic linker.
+              ;;
+              ;; As noted above, symbol addresses have not been
+              ;; assigned yet, so we can't generate the final reloc
+              ;; entry yet. We ultimately want:
+              ;;
+              ;; r_offset = s + r.Off
+              ;; r_info = R_AARCH64_RELATIVE
+              ;; r_addend = targ + r.Add
+              ;;
+              ;; The dynamic linker will set *offset = base address +
+              ;; addend.
+              ;;
+              ;; AddAddrPlus is used for r_offset and r_addend to
+              ;; generate new R_ADDR relocations that will update
+              ;; these fields in the 'reloc' phase.
+              (let [rela (.MakeSymbolUpdater ldr (.-Rela syms))]
+                (.AddAddrPlus rela (.-Arch target) s (conv int64 ^{:go/via [Reloc]} (.Off r)))
+                (if (== ^{:go/via [Reloc]} (.Siz r) 8)
+                  (.AddUint64 rela (.-Arch target) (elf/R_INFO 0 (conv uint32 elf/R_AARCH64_RELATIVE)))
+
+                  (.Errorf ldr s "unexpected relocation for dynamic symbol %s" (.SymName ldr targ)))
+
+                (.AddAddrPlus rela (.-Arch target) targ ^{:go/via [Reloc]} (.Add r))
+                ;; Not mark r done here. So we still apply it statically,
+                ;; so in the file content we'll also have the right offset
+                ;; to the relocation target. So it can be examined statically
+                ;; (e.g. go version).
+                (return true)))
+
+
+            (when (.IsDarwin target)
+              ;; Mach-O relocations are a royal pain to lay out.
+              ;; They use a compact stateful bytecode representation.
+              ;; Here we record what are needed and encode them later.
+              (if (== targType sym/SDYNIMPORT)
+                ;; Dynamic import: the pointer must be bound by
+                ;; the dynamic linker at load time.
+                (ld/MachoAddBind s (conv int64 ^{:go/via [Reloc]} (.Off r)) targ)
+
+                (ld/MachoAddRebase s (conv int64 ^{:go/via [Reloc]} (.Off r))))
+
+              ;; Not mark r done here. So we still apply it statically,
+              ;; so in the file content we'll also have the right offset
+              ;; to the relocation target. So it can be examined statically
+              ;; (e.g. go version).
+              (return true)))
+
+
+          (case [objabi/R_ARM64_GOTPCREL]
+            (when (.IsExternal target)
+              ;; External linker will do this relocation.
+              (return true))
+
+            (when (!= targType sym/SDYNIMPORT)
+              (.Errorf ldr s "R_ARM64_GOTPCREL target is not SDYNIMPORT symbol: %v" (.SymName ldr targ)))
+
+            (when (!= ^{:go/via [Reloc]} (.Add r) 0)
+              (.Errorf ldr s "R_ARM64_GOTPCREL with non-zero addend (%v)" ^{:go/via [Reloc]} (.Add r)))
+
+            (if (.IsElf target)
+              (ld/AddGotSym target ldr syms targ (conv uint32 elf/R_AARCH64_GLOB_DAT))
+
+              (ld/AddGotSym target ldr syms targ 0))
+
+            ;; turn into two relocations, one for each instruction.
+            (let [su (.MakeSymbolUpdater ldr s)]
+              (.SetType r objabi/R_ARM64_GOT)
+              ^{:go/via [Reloc]} (.SetSiz r 4)
+              (.SetSym r (.-GOT syms))
+              ^{:go/via [Reloc]} (.SetAdd r (conv int64 (.SymGot ldr targ)))
+              (let [(values r2 _) (.AddRel su objabi/R_ARM64_GOT)]
+                ^{:go/via [Reloc]} (.SetSiz r2 4)
+                ^{:go/via [Reloc]} (.SetOff r2 (+ ^{:go/via [Reloc]} (.Off r) 4))
+                (.SetSym r2 (.-GOT syms))
+                ^{:go/via [Reloc]} (.SetAdd r2 (conv int64 (.SymGot ldr targ)))
+                (return true)))))
+
+        false))))
+
+
+^{:go/end 585} (go/func elfreloc1 ^bool [^{:tag (* ld/Link)} ctxt ^{:tag (* ld/OutBuf)} out ^{:tag (* loader/Loader)} ldr ^loader/Sym s ^loader/ExtReloc r ^int ri ^int64 sectoff]
+  (.Write64 out (conv uint64 sectoff))
+
+  ^{:go/breaks [[4 584]]} (let [elfsym (ld/ElfSymForReloc ctxt (.-Xsym r))
+      ^{:line 522} siz (.-Size r)]
+    (switch (.-Type r)
+      (default
+        (return false))
+      (case [objabi/R_ADDR objabi/R_DWARFSECREF]
+        (switch siz
+          (case [4]
+            (.Write64 out (bit-or (conv uint64 elf/R_AARCH64_ABS32) (<< (conv uint64 elfsym) 32))))
+          (case [8]
+            (.Write64 out (bit-or (conv uint64 elf/R_AARCH64_ABS64) (<< (conv uint64 elfsym) 32))))
+          (default
+            (return false))))
+
+      (case [objabi/R_ADDRARM64]
+        ;; two relocations: R_AARCH64_ADR_PREL_PG_HI21 and R_AARCH64_ADD_ABS_LO12_NC
+        (.Write64 out (bit-or (conv uint64 elf/R_AARCH64_ADR_PREL_PG_HI21) (<< (conv uint64 elfsym) 32)))
+        (.Write64 out (conv uint64 (.-Xadd r)))
+        (.Write64 out (conv uint64 (+ sectoff 4)))
+        (.Write64 out (bit-or (conv uint64 elf/R_AARCH64_ADD_ABS_LO12_NC) (<< (conv uint64 elfsym) 32))))
+
+      (case [objabi/R_ARM64_PCREL_LDST8
+          ^{:line 543} objabi/R_ARM64_PCREL_LDST16
+          ^{:line 544} objabi/R_ARM64_PCREL_LDST32
+          ^{:line 545} objabi/R_ARM64_PCREL_LDST64]
+        ;; two relocations: R_AARCH64_ADR_PREL_PG_HI21 and R_AARCH64_LDST{64/32/16/8}_ABS_LO12_NC
+        (.Write64 out (bit-or (conv uint64 elf/R_AARCH64_ADR_PREL_PG_HI21) (<< (conv uint64 elfsym) 32)))
+        (.Write64 out (conv uint64 (.-Xadd r)))
+        (.Write64 out (conv uint64 (+ sectoff 4)))
+        (let [^elf/R_AARCH64 ldstType (zero elf/R_AARCH64)]
+          (switch (.-Type r)
+            (case [objabi/R_ARM64_PCREL_LDST8]
+              (set! ldstType elf/R_AARCH64_LDST8_ABS_LO12_NC))
+            (case [objabi/R_ARM64_PCREL_LDST16]
+              (set! ldstType elf/R_AARCH64_LDST16_ABS_LO12_NC))
+            (case [objabi/R_ARM64_PCREL_LDST32]
+              (set! ldstType elf/R_AARCH64_LDST32_ABS_LO12_NC))
+            (case [objabi/R_ARM64_PCREL_LDST64]
+              (set! ldstType elf/R_AARCH64_LDST64_ABS_LO12_NC)))
+
+          (.Write64 out (bit-or (conv uint64 ldstType) (<< (conv uint64 elfsym) 32)))))
+
+      (case [objabi/R_ARM64_TLS_LE]
+        (.Write64 out (bit-or (conv uint64 elf/R_AARCH64_TLSLE_MOVW_TPREL_G0) (<< (conv uint64 elfsym) 32))))
+      (case [objabi/R_ARM64_TLS_IE]
+        (.Write64 out (bit-or (conv uint64 elf/R_AARCH64_TLSIE_ADR_GOTTPREL_PAGE21) (<< (conv uint64 elfsym) 32)))
+        (.Write64 out (conv uint64 (.-Xadd r)))
+        (.Write64 out (conv uint64 (+ sectoff 4)))
+        (.Write64 out (bit-or (conv uint64 elf/R_AARCH64_TLSIE_LD64_GOTTPREL_LO12_NC) (<< (conv uint64 elfsym) 32))))
+      (case [objabi/R_ARM64_GOTPCREL]
+        (.Write64 out (bit-or (conv uint64 elf/R_AARCH64_ADR_GOT_PAGE) (<< (conv uint64 elfsym) 32)))
+        (.Write64 out (conv uint64 (.-Xadd r)))
+        (.Write64 out (conv uint64 (+ sectoff 4)))
+        (.Write64 out (bit-or (conv uint64 elf/R_AARCH64_LD64_GOT_LO12_NC) (<< (conv uint64 elfsym) 32))))
+      (case [objabi/R_CALLARM64]
+        (when (!= siz 4)
+          (return false))
+
+        (.Write64 out (bit-or (conv uint64 elf/R_AARCH64_CALL26) (<< (conv uint64 elfsym) 32)))))
+
+
+    (.Write64 out (conv uint64 (.-Xadd r)))
+
+    true))
+
+
+
+^{:go/end 588} (go/func signext21 "sign-extends from 21, 24-bit.\n" ^int64 [^int64 x] (>> (<< x (- 64 21)) (- 64 21)))
+^{:go/end 589} (go/func signext24 ^int64 [^int64 x] (>> (<< x (- 64 24)) (- 64 24)))
+
+^{:go/end 703} (go/func machoreloc1 ^bool [^{:tag (* sys/Arch)} arch ^{:tag (* ld/OutBuf)} out ^{:tag (* loader/Loader)} ldr ^loader/Sym s ^loader/ExtReloc r ^int64 sectoff]
+  ^{:go/breaks [9]} (let [^uint32 v (zero uint32)
+
+      ^{:line 594} rs (.-Xsym r)
+      ^{:line 595} rt (.-Type r)
+      ^{:line 596} siz (.-Size r)
+      ^{:line 597} xadd (.-Xadd r)]
+
+    (when (and (!= xadd (signext24 xadd)) (!= rt objabi/R_ADDR))
+      ;; If the relocation target would overflow the addend, then target
+      ;; a linker-manufactured label symbol with a smaller addend instead.
+      ;; R_ADDR has full-width addend encoded in data content, so it doesn't
+      ;; use a label symbol.
+      (let [label (.Lookup ldr (offsetLabelName ldr rs (* (/ xadd machoRelocLimit) machoRelocLimit)) (.SymVersion ldr rs))]
+        (when (!= label 0)
+          (set! xadd (- (+ (.SymValue ldr rs) xadd) (.SymValue ldr label)))
+          (set! rs label))
+
+        (when (!= xadd (signext24 xadd))
+          (.Errorf ldr s "internal error: relocation addend overflow: %s+0x%x" (.SymName ldr rs) xadd))))
+
+
+    (when (and (== rt objabi/R_CALLARM64) (!= xadd 0))
+      (let [label (.Lookup ldr (offsetLabelName ldr rs xadd) (.SymVersion ldr rs))]
+        (when (!= label 0)
+          (set! xadd (- (+ (.SymValue ldr rs) xadd) (.SymValue ldr label))) ; should always be 0 (checked below)
+          (set! rs label))))
+
+
+
+    (if (not (.IsDWARF (.SymType ldr s))) (do
+        (when (< (.SymDynid ldr rs) 0)
+          (.Errorf ldr s "reloc %d (%s) to non-macho symbol %s type=%d (%s)" rt (sym/RelocName arch rt) (.SymName ldr rs) (.SymType ldr rs) (.SymType ldr rs))
+          (return false))
+
+
+        (set! v (conv uint32 (.SymDynid ldr rs)))
+        (set! v bit-or (<< 1 27))) ; external relocation
+      (do
+        (set! v (conv uint32 (.-Extnum (.SymSect ldr rs))))
+        (when (== v 0)
+          (.Errorf ldr s "reloc %d (%s) to symbol %s in non-macho section %s type=%d (%s)" rt (sym/RelocName arch rt) (.SymName ldr rs) (.-Name (.SymSect ldr rs)) (.SymType ldr rs) (.SymType ldr rs))
+          (return false))))
+
+
+
+    (switch rt
+      (default
+        (return false))
+      (case [objabi/R_ADDR]
+        (set! v bit-or (<< ld/MACHO_ARM64_RELOC_UNSIGNED 28)))
+      (case [objabi/R_CALLARM64]
+        (when (!= xadd 0)
+          ;; Addend should be handled above via label symbols.
+          (.Errorf ldr s "unexpected non-zero addend: %s+%d" (.SymName ldr rs) xadd))
+
+        (set! v bit-or (<< 1 24)) ; pc-relative bit
+        (set! v bit-or (<< ld/MACHO_ARM64_RELOC_BRANCH26 28)))
+      (case [objabi/R_ADDRARM64
+          ^{:line 650} objabi/R_ARM64_PCREL_LDST8
+          ^{:line 651} objabi/R_ARM64_PCREL_LDST16
+          ^{:line 652} objabi/R_ARM64_PCREL_LDST32
+          ^{:line 653} objabi/R_ARM64_PCREL_LDST64]
+        (set! siz 4)
+        ;; Two relocation entries: MACHO_ARM64_RELOC_PAGEOFF12 MACHO_ARM64_RELOC_PAGE21
+        ;; if r.Xadd is non-zero, add two MACHO_ARM64_RELOC_ADDEND.
+        (when (!= (.-Xadd r) 0)
+          (.Write32 out (conv uint32 (+ sectoff 4)))
+          (.Write32 out (bit-or (<< ld/MACHO_ARM64_RELOC_ADDEND 28) (<< 2 25) (conv uint32 (bit-and xadd 0xffffff)))))
+
+        (.Write32 out (conv uint32 (+ sectoff 4)))
+        (.Write32 out (bit-or v (<< ld/MACHO_ARM64_RELOC_PAGEOFF12 28) (<< 2 25)))
+        (when (!= (.-Xadd r) 0)
+          (.Write32 out (conv uint32 sectoff))
+          (.Write32 out (bit-or (<< ld/MACHO_ARM64_RELOC_ADDEND 28) (<< 2 25) (conv uint32 (bit-and xadd 0xffffff)))))
+
+        (set! v bit-or (<< 1 24)) ; pc-relative bit
+        (set! v bit-or (<< ld/MACHO_ARM64_RELOC_PAGE21 28)))
+      (case [objabi/R_ARM64_GOTPCREL]
+        (set! siz 4)
+        ;; Two relocation entries: MACHO_ARM64_RELOC_GOT_LOAD_PAGEOFF12 MACHO_ARM64_RELOC_GOT_LOAD_PAGE21
+        ;; if r.Xadd is non-zero, add two MACHO_ARM64_RELOC_ADDEND.
+        (when (!= (.-Xadd r) 0)
+          (.Write32 out (conv uint32 (+ sectoff 4)))
+          (.Write32 out (bit-or (<< ld/MACHO_ARM64_RELOC_ADDEND 28) (<< 2 25) (conv uint32 (bit-and xadd 0xffffff)))))
+
+        (.Write32 out (conv uint32 (+ sectoff 4)))
+        (.Write32 out (bit-or v (<< ld/MACHO_ARM64_RELOC_GOT_LOAD_PAGEOFF12 28) (<< 2 25)))
+        (when (!= (.-Xadd r) 0)
+          (.Write32 out (conv uint32 sectoff))
+          (.Write32 out (bit-or (<< ld/MACHO_ARM64_RELOC_ADDEND 28) (<< 2 25) (conv uint32 (bit-and xadd 0xffffff)))))
+
+        (set! v bit-or (<< 1 24)) ; pc-relative bit
+        (set! v bit-or (<< ld/MACHO_ARM64_RELOC_GOT_LOAD_PAGE21 28))))
+
+
+    (switch siz
+      (default
+        (return false))
+      (case [1]
+        (set! v bit-or (<< 0 25)))
+      (case [2]
+        (set! v bit-or (<< 1 25)))
+      (case [4]
+        (set! v bit-or (<< 2 25)))
+      (case [8]
+        (set! v bit-or (<< 3 25))))
+
+
+    (.Write32 out (conv uint32 sectoff))
+    (.Write32 out v)
+    true))
+
+
+^{:go/end 786} (go/func pereloc1 ^bool [^{:tag (* sys/Arch)} arch ^{:tag (* ld/OutBuf)} out ^{:tag (* loader/Loader)} ldr ^loader/Sym s ^loader/ExtReloc r ^int64 sectoff]
+  (let [rs (.-Xsym r)
+      ^{:line 707} rt (.-Type r)]
+
+    (when (and ^:go/paren (or (== rt objabi/R_ADDRARM64) (== rt objabi/R_ARM64_PCREL_LDST8) (== rt objabi/R_ARM64_PCREL_LDST16)
+          (== rt objabi/R_ARM64_PCREL_LDST32) (== rt objabi/R_ARM64_PCREL_LDST64)) (!= (.-Xadd r) (signext21 (.-Xadd r))))
+      ;; If the relocation target would overflow the addend, then target
+      ;; a linker-manufactured label symbol with a smaller addend instead.
+      (let [label (.Lookup ldr (offsetLabelName ldr rs (* (/ (.-Xadd r) peRelocLimit) peRelocLimit)) (.SymVersion ldr rs))]
+        (when (== label 0)
+          (.Errorf ldr s "invalid relocation: %v %s+0x%x" rt (.SymName ldr rs) (.-Xadd r))
+          (return false))
+
+        (set! rs label)))
+
+    (when (and (== rt objabi/R_CALLARM64) (!= (.-Xadd r) 0))
+      (let [label (.Lookup ldr (offsetLabelName ldr rs (.-Xadd r)) (.SymVersion ldr rs))]
+        (when (== label 0)
+          (.Errorf ldr s "invalid relocation: %v %s+0x%x" rt (.SymName ldr rs) (.-Xadd r))
+          (return false))
+
+        (set! rs label)))
+
+    ^{:go/breaks [[4 785]]} (let [symdynid (.SymDynid ldr rs)]
+      (when (< symdynid 0)
+        (.Errorf ldr s "reloc %d (%s) to non-coff symbol %s type=%d (%s)" rt (sym/RelocName arch rt) (.SymName ldr rs) (.SymType ldr rs) (.SymType ldr rs))
+        (return false))
+
+
+      (switch rt
+        (default
+          (return false))
+
+        (case [objabi/R_DWARFSECREF]
+          (.Write32 out (conv uint32 sectoff))
+          (.Write32 out (conv uint32 symdynid))
+          (.Write16 out ld/IMAGE_REL_ARM64_SECREL))
+
+        (case [objabi/R_ADDR]
+          (.Write32 out (conv uint32 sectoff))
+          (.Write32 out (conv uint32 symdynid))
+          (if (== (.-Size r) 8)
+            (.Write16 out ld/IMAGE_REL_ARM64_ADDR64)
+
+            (.Write16 out ld/IMAGE_REL_ARM64_ADDR32)))
+
+
+        (case [objabi/R_PEIMAGEOFF]
+          (.Write16 out ld/IMAGE_REL_ARM64_ADDR32NB))
+
+        (case [objabi/R_ADDRARM64]
+          ;; Note: r.Xadd has been taken care of below, in archreloc.
+          (.Write32 out (conv uint32 sectoff))
+          (.Write32 out (conv uint32 symdynid))
+          (.Write16 out ld/IMAGE_REL_ARM64_PAGEBASE_REL21)
+
+          (.Write32 out (conv uint32 (+ sectoff 4)))
+          (.Write32 out (conv uint32 symdynid))
+          (.Write16 out ld/IMAGE_REL_ARM64_PAGEOFFSET_12A))
+
+        (case [objabi/R_ARM64_PCREL_LDST8
+            ^{:line 766} objabi/R_ARM64_PCREL_LDST16
+            ^{:line 767} objabi/R_ARM64_PCREL_LDST32
+            ^{:line 768} objabi/R_ARM64_PCREL_LDST64]
+          ;; Note: r.Xadd has been taken care of below, in archreloc.
+          (.Write32 out (conv uint32 sectoff))
+          (.Write32 out (conv uint32 symdynid))
+          (.Write16 out ld/IMAGE_REL_ARM64_PAGEBASE_REL21)
+
+          (.Write32 out (conv uint32 (+ sectoff 4)))
+          (.Write32 out (conv uint32 symdynid))
+          (.Write16 out ld/IMAGE_REL_ARM64_PAGEOFFSET_12L))
+
+        (case [objabi/R_CALLARM64]
+          ;; Note: r.Xadd has been taken care of above, by using a label pointing into the middle of the function.
+          (.Write32 out (conv uint32 sectoff))
+          (.Write32 out (conv uint32 symdynid))
+          (.Write16 out ld/IMAGE_REL_ARM64_BRANCH26)))
+
+
+      true)))
+
+
+^{:go/end 1121} (go/func archreloc [^{:tag (* ld/Target)} target ^{:tag (* loader/Loader)} ldr ^{:tag (* ld/ArchSyms)} syms ^loader/Reloc r ^loader/Sym s ^int64 val] :results [int64 int bool]
+  (let [^:const ^{:val 0} noExtReloc 0
+      ^:const ^{:line 790 :val true} isOk true
+
+      ^{:line 792} rs (.Sym r)]
+
+    (when (.IsExternal target)
+      (let [nExtReloc 0]
+        (switch [rt (.Type r)] rt
+          (default)
+          (case [objabi/R_ARM64_GOTPCREL
+              ^{:line 799} objabi/R_ARM64_PCREL_LDST8
+              ^{:line 800} objabi/R_ARM64_PCREL_LDST16
+              ^{:line 801} objabi/R_ARM64_PCREL_LDST32
+              ^{:line 802} objabi/R_ARM64_PCREL_LDST64
+              ^{:line 803} objabi/R_ADDRARM64]
+
+            ;; set up addend for eventual relocation via outer symbol.
+            (let [(values rs off) (ld/FoldSubSymbolOffset ldr rs)
+                ^{:line 807} xadd (+ ^{:go/via [Reloc]} (.Add r) off)
+                ^{:line 808} rst (.SymType ldr rs)]
+              (when (and (!= rst sym/SHOSTOBJ) (!= rst sym/SDYNIMPORT) (== (.SymSect ldr rs) nil))
+                (.Errorf ldr s "missing section for %s" (.SymName ldr rs)))
+
+
+              (set! nExtReloc 2) ; need two ELF/Mach-O relocations. see elfreloc1/machoreloc1
+              (when (and (.IsDarwin target) (!= xadd 0))
+                (set! nExtReloc 4)) ; need another two relocations for non-zero addend
+
+
+              (when (.IsWindows target)
+                (let [(values ^uint32 o0 ^uint32 o1) (zero uint32)]
+                  (if (.IsBigEndian target) (do
+                      (set! o0 (conv uint32 (>> val 32)))
+                      (set! o1 (conv uint32 val)))
+                    (do
+                      (set! o0 (conv uint32 val))
+                      (set! o1 (conv uint32 (>> val 32)))))
+
+
+                  ;; The first instruction (ADRP) has a 21-bit immediate field,
+                  ;; and the second (ADD or LD/ST) has a 12-bit immediate field.
+                  ;; The first instruction is only for high bits, but to get the carry bits right we have
+                  ;; to put the full addend, including the bottom 12 bits again.
+                  ;; That limits the distance of any addend to only 21 bits.
+                  ;; But we assume that ADRP's top bit will be interpreted as a sign bit,
+                  ;; so we only use 20 bits.
+                  ;; pereloc takes care of introducing new symbol labels
+                  ;; every megabyte for longer relocations.
+                  (let [xadd (conv uint32 xadd)]
+                    (set! o0 bit-or (bit-or (<< (bit-and xadd 3) 29) (<< (bit-and xadd 0xffffc) 3)))
+                    (switch rt
+                      (case [objabi/R_ARM64_PCREL_LDST8 objabi/R_ADDRARM64]
+                        (set! o1 bit-or (<< (bit-and xadd 0xfff) 10)))
+                      (case [objabi/R_ARM64_PCREL_LDST16]
+                        (when (!= (bit-and xadd 0x1) 0)
+                          (.Errorf ldr s "offset for 16-bit load/store has unaligned value %d" (bit-and xadd 0xfff)))
+
+                        (set! o1 bit-or (<< (>> (bit-and xadd 0xfff) 1) 10)))
+                      (case [objabi/R_ARM64_PCREL_LDST32]
+                        (when (!= (bit-and xadd 0x3) 0)
+                          (.Errorf ldr s "offset for 32-bit load/store has unaligned value %d" (bit-and xadd 0xfff)))
+
+                        (set! o1 bit-or (<< (>> (bit-and xadd 0xfff) 2) 10)))
+                      (case [objabi/R_ARM64_PCREL_LDST64]
+                        (when (!= (bit-and xadd 0x7) 0)
+                          (.Errorf ldr s "offset for 64-bit load/store has unaligned value %d" (bit-and xadd 0xfff)))
+
+                        (set! o1 bit-or (<< (>> (bit-and xadd 0xfff) 3) 10))))
+
+
+                    (if (.IsBigEndian target)
+                      (set! val (bit-or (<< (conv int64 o0) 32) (conv int64 o1)))
+
+                      (set! val (bit-or (<< (conv int64 o1) 32) (conv int64 o0)))))))
+
+
+
+              (return val nExtReloc isOk)))
+
+          (case [objabi/R_CALLARM64]
+            (set! nExtReloc 1)
+            (return val nExtReloc isOk))
+
+          (case [objabi/R_ARM64_TLS_LE]
+            (set! nExtReloc 1)
+            (return val nExtReloc isOk))
+
+          (case [objabi/R_ARM64_TLS_IE]
+            (set! nExtReloc 2) ; need two ELF relocations. see elfreloc1
+            (return val nExtReloc isOk))
+
+          (case [objabi/R_ADDR]
+            (when (and (.IsWindows target) (!= ^{:go/via [Reloc]} (.Add r) 0))
+              (cond (== ^{:go/via [Reloc]} (.Siz r) 8)
+                (set! val ^{:go/via [Reloc]} (.Add r))
+                (.IsBigEndian target)
+                (set! val (bit-or (conv int64 (conv uint32 val)) (<< ^{:go/via [Reloc]} (.Add r) 32))) :else
+
+                (set! val (bit-or (<< (>> val 32) 32) (conv int64 (conv uint32 ^{:go/via [Reloc]} (.Add r))))))
+
+              (return val 1 true))))))
+
+
+
+
+    (switch [rt (.Type r)] rt
+      (case [objabi/R_ADDRARM64
+          ^{:line 896} objabi/R_ARM64_PCREL_LDST8
+          ^{:line 897} objabi/R_ARM64_PCREL_LDST16
+          ^{:line 898} objabi/R_ARM64_PCREL_LDST32
+          ^{:line 899} objabi/R_ARM64_PCREL_LDST64]
+        (let [t (- (+ (.SymAddr ldr rs) ^{:go/via [Reloc]} (.Add r)) (bit-and-not (+ (.SymValue ldr s) (conv int64 ^{:go/via [Reloc]} (.Off r))) 0xfff))]
+          (when (or (>= t (<< 1 32)) (< t (<< -1 32)))
+            (.Errorf ldr s "program too large, address relocation distance = %d" t))
+
+
+          (let [(values ^uint32 o0 ^uint32 o1) (zero uint32)]
+
+            (if (.IsBigEndian target) (do
+                (set! o0 (conv uint32 (>> val 32)))
+                (set! o1 (conv uint32 val)))
+              (do
+                (set! o0 (conv uint32 val))
+                (set! o1 (conv uint32 (>> val 32)))))
+
+
+            (set! o0 bit-or (bit-or (<< (conv uint32 (bit-and (>> t 12) 3)) 29) (<< (conv uint32 (bit-and (>> (>> t 12) 2) 0x7ffff)) 5)))
+            (switch rt
+              (case [objabi/R_ARM64_PCREL_LDST8 objabi/R_ADDRARM64]
+                (set! o1 bit-or (<< (conv uint32 (bit-and t 0xfff)) 10)))
+              (case [objabi/R_ARM64_PCREL_LDST16]
+                (when (!= (bit-and t 0x1) 0)
+                  (.Errorf ldr s "offset for 16-bit load/store has unaligned value %d" (bit-and t 0xfff)))
+
+                (set! o1 bit-or (<< (>> (conv uint32 (bit-and t 0xfff)) 1) 10)))
+              (case [objabi/R_ARM64_PCREL_LDST32]
+                (when (!= (bit-and t 0x3) 0)
+                  (.Errorf ldr s "offset for 32-bit load/store has unaligned value %d" (bit-and t 0xfff)))
+
+                (set! o1 bit-or (<< (>> (conv uint32 (bit-and t 0xfff)) 2) 10)))
+              (case [objabi/R_ARM64_PCREL_LDST64]
+                (when (!= (bit-and t 0x7) 0)
+                  (.Errorf ldr s "offset for 64-bit load/store has unaligned value %d" (bit-and t 0xfff)))
+
+                (set! o1 bit-or (<< (>> (conv uint32 (bit-and t 0xfff)) 3) 10))))
+
+
+            ;; when laid out, the instruction order must always be o1, o2.
+            (when (.IsBigEndian target)
+              (return (bit-or (<< (conv int64 o0) 32) (conv int64 o1)) noExtReloc true))
+
+            (return (bit-or (<< (conv int64 o1) 32) (conv int64 o0)) noExtReloc true))))
+
+      (case [objabi/R_ARM64_TLS_LE]
+        (when (.IsDarwin target)
+          (.Errorf ldr s "TLS reloc on unsupported OS %v" (.-HeadType target)))
+
+        ;; The TCB is two pointers. This is not documented anywhere, but is
+        ;; de facto part of the ABI.
+        (let [v (+ (.SymValue ldr rs) (conv int64 (* 2 (.-PtrSize (.-Arch target)))))]
+          (when (or (< v 0) (>= v 32678))
+            (.Errorf ldr s "TLS offset out of range %d" v))
+
+          (return (bit-or val (<< v 5)) noExtReloc true)))
+
+      (case [objabi/R_ARM64_TLS_IE]
+        (if (and (.IsPIE target) (.IsElf target)) (do
+            ;; We are linking the final executable, so we
+            ;; can optimize any TLS IE relocation to LE.
+
+            (when (not (.IsLinux target))
+              (.Errorf ldr s "TLS reloc on unsupported OS %v" (.-HeadType target)))
+
+
+            ;; The TCB is two pointers. This is not documented anywhere, but is
+            ;; de facto part of the ABI.
+            (let [v (+ (.SymAddr ldr rs) (conv int64 (* 2 (.-PtrSize (.-Arch target)))) ^{:go/via [Reloc]} (.Add r))]
+              (when (or (< v 0) (>= v 32678))
+                (.Errorf ldr s "TLS offset out of range %d" v))
+
+
+              (let [(values ^uint32 o0 ^uint32 o1) (zero uint32)]
+                (if (.IsBigEndian target) (do
+                    (set! o0 (conv uint32 (>> val 32)))
+                    (set! o1 (conv uint32 val)))
+                  (do
+                    (set! o0 (conv uint32 val))
+                    (set! o1 (conv uint32 (>> val 32)))))
+
+
+                ;; R_AARCH64_TLSIE_ADR_GOTTPREL_PAGE21
+                ;; turn ADRP to MOVZ
+                (set! o0 (bit-or 0xd2a00000 (bit-and o0 0x1f) (<< (conv uint32 (bit-and (>> v 16) 0xffff)) 5)))
+                ;; R_AARCH64_TLSIE_LD64_GOTTPREL_LO12_NC
+                ;; turn LD64 to MOVK
+                (when (!= (bit-and v 3) 0)
+                  (.Errorf ldr s "invalid address: %x for relocation type: R_AARCH64_TLSIE_LD64_GOTTPREL_LO12_NC" v))
+
+                (set! o1 (bit-or 0xf2800000 (bit-and o1 0x1f) (<< (conv uint32 (bit-and v 0xffff)) 5)))
+
+                ;; when laid out, the instruction order must always be o0, o1.
+                (when (.IsBigEndian target)
+                  (return (bit-or (<< (conv int64 o0) 32) (conv int64 o1)) noExtReloc isOk))
+
+                (return (bit-or (<< (conv int64 o1) 32) (conv int64 o0)) noExtReloc isOk))))
+
+          (log/Fatalf "cannot handle R_ARM64_TLS_IE (sym %s) when linking internally" (.SymName ldr s))))
+
+
+      (case [objabi/R_CALLARM64]
+        (let [^int64 t (zero int64)]
+          (if (== (.SymType ldr rs) sym/SDYNIMPORT)
+            (set! t (- (+ (.SymAddr ldr (.-PLT syms)) ^{:go/via [Reloc]} (.Add r)) (+ (.SymValue ldr s) (conv int64 ^{:go/via [Reloc]} (.Off r)))))
+
+            (set! t (- (+ (.SymAddr ldr rs) ^{:go/via [Reloc]} (.Add r)) (+ (.SymValue ldr s) (conv int64 ^{:go/via [Reloc]} (.Off r))))))
+
+          (when (or (>= t (<< 1 27)) (< t (<< -1 27)))
+            (.Errorf ldr s "program too large, call relocation distance = %d" t))
+
+          (return (bit-or val (bit-and (>> t 2) 0x03ffffff)) noExtReloc true)))
+
+      (case [objabi/R_ARM64_GOT]
+        (cond (== (bit-and (>> val 24) 0x9f) 0x90)
+          ;; R_AARCH64_ADR_GOT_PAGE
+          ;; patch instruction: adrp
+          (let [t (- (+ (.SymAddr ldr rs) ^{:go/via [Reloc]} (.Add r)) (bit-and-not (+ (.SymValue ldr s) (conv int64 ^{:go/via [Reloc]} (.Off r))) 0xfff))]
+            (when (or (>= t (<< 1 32)) (< t (<< -1 32)))
+              (.Errorf ldr s "program too large, address relocation distance = %d" t))
+
+            (let [^uint32 o0 (zero uint32)]
+              (set! o0 bit-or (bit-or (<< (conv uint32 (bit-and (>> t 12) 3)) 29) (<< (conv uint32 (bit-and (>> (>> t 12) 2) 0x7ffff)) 5)))
+              (return (bit-or val (conv int64 o0)) noExtReloc isOk)))
+          (== (>> val 24) 0xf9)
+          ;; R_AARCH64_LD64_GOT_LO12_NC
+          ;; patch instruction: ldr
+          (let [t (- (+ (.SymAddr ldr rs) ^{:go/via [Reloc]} (.Add r)) (bit-and-not (+ (.SymValue ldr s) (conv int64 ^{:go/via [Reloc]} (.Off r))) 0xfff))]
+            (when (!= (bit-and t 7) 0)
+              (.Errorf ldr s "invalid address: %x for relocation type: R_AARCH64_LD64_GOT_LO12_NC" t))
+
+            (let [^uint32 o1 (zero uint32)]
+              (set! o1 bit-or (<< (conv uint32 (bit-and t 0xfff)) (- 10 3)))
+              (return (bit-or val (conv int64 (conv uint64 o1))) noExtReloc isOk))) :else
+
+          (.Errorf ldr s "unsupported instruction for %x R_GOTARM64" val)))
+
+
+      (case [objabi/R_ARM64_PCREL]
+        ;; When targetting Windows, the instruction immediate field is cleared
+        ;; before applying relocations, as it contains the offset as bytes
+        ;; instead of pages. It has already been accounted for in loadpe.Load
+        ;; by adjusting r.Add().
+        (cond (== (bit-and (>> val 24) 0x9f) 0x90)
+          ;; ELF R_AARCH64_ADR_PREL_PG_HI21, or Mach-O ARM64_RELOC_PAGE21, or PE IMAGE_REL_ARM64_PAGEBASE_REL21
+          ;; patch instruction: adrp
+          (let [t (- (+ (.SymAddr ldr rs) ^{:go/via [Reloc]} (.Add r)) (bit-and-not (+ (.SymValue ldr s) (conv int64 ^{:go/via [Reloc]} (.Off r))) 0xfff))]
+            (when (or (>= t (<< 1 32)) (< t (<< -1 32)))
+              (.Errorf ldr s "program too large, address relocation distance = %d" t))
+
+            (let [o0 (bit-or (<< (conv uint32 (bit-and (>> t 12) 3)) 29) (<< (conv uint32 (bit-and (>> (>> t 12) 2) 0x7ffff)) 5))]
+              (when (.IsWindows target)
+                (set! val bit-and-not (bit-or (<< 3 29) (<< 0x7ffff 5))))
+
+              (return (bit-or val (conv int64 o0)) noExtReloc isOk)))
+          (== (bit-and (>> val 24) 0x9f) 0x91)
+          ;; ELF R_AARCH64_ADD_ABS_LO12_NC, or Mach-O ARM64_RELOC_PAGEOFF12, or PE IMAGE_REL_ARM64_PAGEOFFSET_12A
+          ;; patch instruction: add
+          (let [t (- (+ (.SymAddr ldr rs) ^{:go/via [Reloc]} (.Add r)) (bit-and-not (+ (.SymValue ldr s) (conv int64 ^{:go/via [Reloc]} (.Off r))) 0xfff))
+              ^{:line 1056} o1 (<< (conv uint32 (bit-and t 0xfff)) 10)]
+            (when (.IsWindows target)
+              (set! val bit-and-not (<< 0xfff 10)))
+
+            (return (bit-or val (conv int64 o1)) noExtReloc isOk))
+          (== (bit-and (>> val 24) 0x3b) 0x39)
+          ;; Mach-O ARM64_RELOC_PAGEOFF12 or PE IMAGE_REL_ARM64_PAGEOFFSET_12L
+          ;; patch ldr/str(b/h/w/d/q) (integer or vector) instructions, which have different scaling factors.
+          ;; Mach-O and PE use same relocation type for them.
+          (let [shift (>> (conv uint32 val) 30)]
+            (when (and (== shift 0) (== (bit-and (>> val 20) 0x048) 0x048)) ; 128-bit vector load
+              (set! shift 4))
+
+            (let [t (- (+ (.SymAddr ldr rs) ^{:go/via [Reloc]} (.Add r)) (bit-and-not (+ (.SymValue ldr s) (conv int64 ^{:go/via [Reloc]} (.Off r))) 0xfff))]
+              (when (!= (bit-and t (- ^int64 (<< 1 shift) 1)) 0)
+                (.Errorf ldr s "invalid address: %x for relocation type: ARM64_RELOC_PAGEOFF12" t))
+
+              (let [o1 (<< (>> (conv uint32 (bit-and t 0xfff)) shift) 10)]
+                (when (.IsWindows target)
+                  (set! val bit-and-not (<< 0xfff 10)))
+
+                (return (bit-or val (conv int64 o1)) noExtReloc isOk)))) :else
+
+          (.Errorf ldr s "unsupported instruction for %x R_ARM64_PCREL" val)))
+
+
+      (case [objabi/R_ARM64_LDST8]
+        (let [t (- (+ (.SymAddr ldr rs) ^{:go/via [Reloc]} (.Add r)) (bit-and-not (+ (.SymValue ldr s) (conv int64 ^{:go/via [Reloc]} (.Off r))) 0xfff))
+            ^{:line 1084} o0 (<< (conv uint32 (bit-and t 0xfff)) 10)]
+          (return (bit-or val (conv int64 o0)) noExtReloc true)))
+
+      (case [objabi/R_ARM64_LDST16]
+        (let [t (- (+ (.SymAddr ldr rs) ^{:go/via [Reloc]} (.Add r)) (bit-and-not (+ (.SymValue ldr s) (conv int64 ^{:go/via [Reloc]} (.Off r))) 0xfff))]
+          (when (!= (bit-and t 1) 0)
+            (.Errorf ldr s "invalid address: %x for relocation type: R_AARCH64_LDST16_ABS_LO12_NC" t))
+
+          (let [o0 (<< (>> (conv uint32 (bit-and t 0xfff)) 1) 10)]
+            (return (bit-or val (conv int64 o0)) noExtReloc true))))
+
+      (case [objabi/R_ARM64_LDST32]
+        (let [t (- (+ (.SymAddr ldr rs) ^{:go/via [Reloc]} (.Add r)) (bit-and-not (+ (.SymValue ldr s) (conv int64 ^{:go/via [Reloc]} (.Off r))) 0xfff))]
+          (when (!= (bit-and t 3) 0)
+            (.Errorf ldr s "invalid address: %x for relocation type: R_AARCH64_LDST32_ABS_LO12_NC" t))
+
+          (let [o0 (<< (>> (conv uint32 (bit-and t 0xfff)) 2) 10)]
+            (return (bit-or val (conv int64 o0)) noExtReloc true))))
+
+      (case [objabi/R_ARM64_LDST64]
+        (let [t (- (+ (.SymAddr ldr rs) ^{:go/via [Reloc]} (.Add r)) (bit-and-not (+ (.SymValue ldr s) (conv int64 ^{:go/via [Reloc]} (.Off r))) 0xfff))]
+          (when (!= (bit-and t 7) 0)
+            (.Errorf ldr s "invalid address: %x for relocation type: R_AARCH64_LDST64_ABS_LO12_NC" t))
+
+          (let [o0 (<< (>> (conv uint32 (bit-and t 0xfff)) 3) 10)]
+            (return (bit-or val (conv int64 o0)) noExtReloc true))))
+
+      (case [objabi/R_ARM64_LDST128]
+        (let [t (- (+ (.SymAddr ldr rs) ^{:go/via [Reloc]} (.Add r)) (bit-and-not (+ (.SymValue ldr s) (conv int64 ^{:go/via [Reloc]} (.Off r))) 0xfff))]
+          (when (!= (bit-and t 15) 0)
+            (.Errorf ldr s "invalid address: %x for relocation type: R_AARCH64_LDST128_ABS_LO12_NC" t))
+
+          (let [o0 (<< (>> (conv uint32 (bit-and t 0xfff)) 4) 10)]
+            (return (bit-or val (conv int64 o0)) noExtReloc true)))))
+
+
+    (return val 0 false)))
+
+
+^{:go/breaks [4] :go/end 1126} (go/func archrelocvariant ^int64 [(* ld/Target) (* loader/Loader) loader/Reloc sym/RelocVariant loader/Sym int64 (slice byte)]
+  (log/Fatalf "unexpected relocation variant")
+  -1)
+
+
+^{:go/end 1144} (go/func extreloc [^{:tag (* ld/Target)} target ^{:tag (* loader/Loader)} ldr ^loader/Reloc r ^loader/Sym s] :results [loader/ExtReloc bool]
+  (switch [rt (.Type r)] rt
+    (case [objabi/R_ARM64_GOTPCREL
+        ^{:line 1131} objabi/R_ARM64_PCREL_LDST8
+        ^{:line 1132} objabi/R_ARM64_PCREL_LDST16
+        ^{:line 1133} objabi/R_ARM64_PCREL_LDST32
+        ^{:line 1134} objabi/R_ARM64_PCREL_LDST64
+        ^{:line 1135} objabi/R_ADDRARM64]
+      (let [rr (ld/ExtrelocViaOuterSym ldr r s)]
+        (return rr true)))
+    (case [objabi/R_CALLARM64
+        ^{:line 1139} objabi/R_ARM64_TLS_LE
+        ^{:line 1140} objabi/R_ARM64_TLS_IE]
+      (return (ld/ExtrelocSimple ldr r) true)))
+
+  (return (lit loader/ExtReloc) false))
+
+
+^{:go/end 1183} (go/func elfsetupplt [^{:tag (* ld/Link)} ctxt ^{:tag (* loader/Loader)} ldr ^{:tag (* loader/SymbolBuilder)} plt ^{:tag (* loader/SymbolBuilder)} gotplt ^loader/Sym dynamic]
+  (when (== (.Size plt) 0)
+    ;; stp     x16, x30, [sp, #-16]!
+    ;; identifying information
+    (.AddUint32 plt ^{:go/via [Target]} (.-Arch ctxt) 0xa9bf7bf0)
+
+    ;; the following two instructions (adrp + ldr) load *got[2] into x17
+    ;; adrp    x16, &got[0]
+    (.AddSymRef plt ^{:go/via [Target]} (.-Arch ctxt) (.Sym gotplt) 16 objabi/R_ARM64_GOT 4)
+    (.SetUint32 plt ^{:go/via [Target]} (.-Arch ctxt) (- (.Size plt) 4) 0x90000010)
+
+    ;; <imm> is the offset value of &got[2] to &got[0], the same below
+    ;; ldr     x17, [x16, <imm>]
+    (.AddSymRef plt ^{:go/via [Target]} (.-Arch ctxt) (.Sym gotplt) 16 objabi/R_ARM64_GOT 4)
+    (.SetUint32 plt ^{:go/via [Target]} (.-Arch ctxt) (- (.Size plt) 4) 0xf9400211)
+
+    ;; add     x16, x16, <imm>
+    (.AddSymRef plt ^{:go/via [Target]} (.-Arch ctxt) (.Sym gotplt) 16 objabi/R_ARM64_PCREL 4)
+    (.SetUint32 plt ^{:go/via [Target]} (.-Arch ctxt) (- (.Size plt) 4) 0x91000210)
+
+    ;; br      x17
+    (.AddUint32 plt ^{:go/via [Target]} (.-Arch ctxt) 0xd61f0220)
+
+    ;; 3 nop for place holder
+    (.AddUint32 plt ^{:go/via [Target]} (.-Arch ctxt) 0xd503201f)
+    (.AddUint32 plt ^{:go/via [Target]} (.-Arch ctxt) 0xd503201f)
+    (.AddUint32 plt ^{:go/via [Target]} (.-Arch ctxt) 0xd503201f)
+
+    ;; check gotplt.size == 0
+    (when (!= (.Size gotplt) 0)
+      (.Errorf ctxt (.Sym gotplt) "got.plt is not empty at the very beginning"))
+
+    (.AddAddrPlus gotplt ^{:go/via [Target]} (.-Arch ctxt) dynamic 0)
+
+    (.AddUint64 gotplt ^{:go/via [Target]} (.-Arch ctxt) 0)
+    (.AddUint64 gotplt ^{:go/via [Target]} (.-Arch ctxt) 0)))
+
+
+
+^{:go/end 1264} (go/func addpltsym [^{:tag (* ld/Target)} target ^{:tag (* loader/Loader)} ldr ^{:tag (* ld/ArchSyms)} syms ^loader/Sym s]
+  (when (>= (.SymPlt ldr s) 0)
+    (return))
+
+
+  (ld/Adddynsym ldr target syms s)
+
+  (cond (.IsElf target)
+    (let [plt (.MakeSymbolUpdater ldr (.-PLT syms))
+        ^{:line 1194} gotplt (.MakeSymbolUpdater ldr (.-GOTPLT syms))
+        ^{:line 1195} rela (.MakeSymbolUpdater ldr (.-RelaPLT syms))]
+      (when (== (.Size plt) 0)
+        (panic "plt is not set up"))
+
+
+      ;; adrp    x16, &got.plt[0]
+      (.AddAddrPlus4 plt (.-Arch target) (.Sym gotplt) (.Size gotplt))
+      (.SetUint32 plt (.-Arch target) (- (.Size plt) 4) 0x90000010)
+      (let [relocs (.Relocs plt)]
+        (.SetRelocType plt (- (.Count relocs) 1) objabi/R_ARM64_GOT)
+
+        ;; <offset> is the offset value of &got.plt[n] to &got.plt[0]
+        ;; ldr     x17, [x16, <offset>]
+        (.AddAddrPlus4 plt (.-Arch target) (.Sym gotplt) (.Size gotplt))
+        (.SetUint32 plt (.-Arch target) (- (.Size plt) 4) 0xf9400211)
+        (set! relocs (.Relocs plt))
+        (.SetRelocType plt (- (.Count relocs) 1) objabi/R_ARM64_GOT)
+
+        ;; add     x16, x16, <offset>
+        (.AddAddrPlus4 plt (.-Arch target) (.Sym gotplt) (.Size gotplt))
+        (.SetUint32 plt (.-Arch target) (- (.Size plt) 4) 0x91000210)
+        (set! relocs (.Relocs plt))
+        (.SetRelocType plt (- (.Count relocs) 1) objabi/R_ARM64_PCREL)
+
+        ;; br      x17
+        (.AddUint32 plt (.-Arch target) 0xd61f0220)
+
+        ;; add to got.plt: pointer to plt[0]
+        (.AddAddrPlus gotplt (.-Arch target) (.Sym plt) 0)
+
+        ;; rela
+        (.AddAddrPlus rela (.-Arch target) (.Sym gotplt) (- (.Size gotplt) 8))
+        (let [sDynid (.SymDynid ldr s)]
+
+          (.AddUint64 rela (.-Arch target) (elf/R_INFO (conv uint32 sDynid) (conv uint32 elf/R_AARCH64_JUMP_SLOT)))
+          (.AddUint64 rela (.-Arch target) 0)
+
+          (.SetPlt ldr s (conv int32 (- (.Size plt) 16))))))
+    (.IsDarwin target) (do
+      (ld/AddGotSym target ldr syms s 0)
+
+      (let [sDynid (.SymDynid ldr s)
+          ^{:line 1237} lep (.MakeSymbolUpdater ldr (.-LinkEditPLT syms))]
+        (.AddUint32 lep (.-Arch target) (conv uint32 sDynid))
+
+        (let [plt (.MakeSymbolUpdater ldr (.-PLT syms))]
+          (.SetPlt ldr s (conv int32 (.Size plt)))
+
+          ;; adrp x16, GOT
+          (.AddUint32 plt (.-Arch target) 0x90000010)
+          (let [(values r _) (.AddRel plt objabi/R_ARM64_GOT)]
+            ^{:go/via [Reloc]} (.SetOff r (conv int32 (- (.Size plt) 4)))
+            ^{:go/via [Reloc]} (.SetSiz r 4)
+            (.SetSym r (.-GOT syms))
+            ^{:go/via [Reloc]} (.SetAdd r (conv int64 (.SymGot ldr s)))
+
+            ;; ldr x17, [x16, <offset>]
+            (.AddUint32 plt (.-Arch target) 0xf9400211)
+            (set! (values r _) (.AddRel plt objabi/R_ARM64_GOT))
+            ^{:go/via [Reloc]} (.SetOff r (conv int32 (- (.Size plt) 4)))
+            ^{:go/via [Reloc]} (.SetSiz r 4)
+            (.SetSym r (.-GOT syms))
+            ^{:go/via [Reloc]} (.SetAdd r (conv int64 (.SymGot ldr s)))
+
+            ;; br x17
+            (.AddUint32 plt (.-Arch target) 0xd61f0220))))) :else
+
+    (.Errorf ldr s "addpltsym: unsupported binary format")))
+
+
+
+(go/const
+  ^{:line 1267} [^{:val 8388608} machoRelocLimit (<< 1 23)]
+  ^{:line 1268} [^{:val 1048576} peRelocLimit (<< 1 20)])
+
+
+^{:go/end 1349} (go/func gensymlate [^{:tag (* ld/Link)} ctxt ^{:tag (* loader/Loader)} ldr]
+  ;; When external linking on darwin, Mach-O relocation has only signed 24-bit
+  ;; addend. For large symbols, we generate "label" symbols in the middle, so
+  ;; that relocations can target them with smaller addends.
+  ;; On Windows, we only get 21 bits, again (presumably) signed.
+  (when (or (and (not ^{:go/via [Target]} (.IsDarwin ctxt)) (not ^{:go/via [Target]} (.IsWindows ctxt))) (not ^{:go/via [Target]} (.IsExternal ctxt)))
+    (return))
+
+
+  (let [limit (conv int64 machoRelocLimit)]
+    (when ^{:go/via [Target]} (.IsWindows ctxt)
+      (set! limit peRelocLimit))
+
+
+    ;; addLabelSyms adds "label" symbols at s+limit, s+2*limit, etc.
+    (let [addLabelSyms ^{:go/end 1305} (fn [^loader/Sym s ^int64 limit ^int64 sz]
+          (when (== (.SymSect ldr s) nil)
+            (log/Fatalf "gensymlate: symbol %s has no section (type=%v)" (.SymName ldr s) (.SymType ldr s)))
+
+          (let [v (.SymValue ldr s)]
+            (for [off limit] (< off sz) (set! off + limit)
+              (let [p (.LookupOrCreateSym ldr (offsetLabelName ldr s off) (.SymVersion ldr s))]
+                (.SetAttrReachable ldr p true)
+                (.SetSymValue ldr p (+ v off))
+                (.SetSymSect ldr p (.SymSect ldr s))
+                (cond ^{:go/via [Target]} (.IsDarwin ctxt)
+                  (ld/AddMachoSym ldr p)
+                  ^{:go/via [Target]} (.IsWindows ctxt)
+                  (ld/AddPELabelSym ldr p) :else
+
+                  (panic "missing case in gensymlate"))))))]
+
+      ;; fmt.Printf("gensymlate %s %x\n", ldr.SymName(p), ldr.SymValue(p))
+
+
+
+      (when ^{:go/via [Target]} (.IsDarwin ctxt)
+        (let [big false]
+          (range [_ seg ld/Segments]
+            (when (>= (.-Length seg) machoRelocLimit)
+              (set! big true)
+              (break)))
+
+
+          (when (not big)
+            (return)))) ; skip work if nothing big
+
+
+
+      (for [(values s n) (values (conv loader/Sym 1) (conv loader/Sym (.NSym ldr)))] (< s n) (inc! s)
+        (when (not (.AttrReachable ldr s))
+          (continue))
+
+        (let [t (.SymType ldr s)]
+          (when (.IsText t)
+            ;; We don't target the middle of a function.
+            (continue))
+
+          (when (>= t sym/SDWARFSECT)
+            (continue)) ; no need to add label for DWARF symbols
+
+          (when (or (.AttrSpecial ldr s) (not (.TopLevelSym ldr s)))
+            ;; no need to add label for special symbols and non-top-level symbols
+            (continue))
+
+          (let [sz (.SymSize ldr s)]
+            (when (<= sz limit)
+              (continue))
+
+            (addLabelSyms s limit sz))))
+
+
+      ;; Also for carrier symbols (for which SymSize is 0)
+      (range [_ ss ld/CarrierSymByType]
+        (when (and (!= (.-Sym ss) 0) (> (.-Size ss) limit))
+          (addLabelSyms (.-Sym ss) limit (.-Size ss)))))))
+
+
+
+
+
+
+
+^{:go/end 1359} (go/func offsetLabelName "offsetLabelName returns the name of the \"label\" symbol used for a\nrelocation targeting s+off. The label symbols is used on Darwin/Windows\nwhen external linking, so that the addend fits in a Mach-O/PE relocation.\n" ^string [^{:tag (* loader/Loader)} ldr ^loader/Sym s ^int64 off]
+  (when (== (<< (>> off 20) 20) off)
+    (return (fmt/Sprintf "%s+%dMB" (.SymExtname ldr s) (>> off 20))))
+
+  (fmt/Sprintf "%s+%d" (.SymExtname ldr s) off))
+
+
+
+^{:go/end 1435} (go/func trampoline "Convert the direct jump relocation r to refer to a trampoline if the target is too far.\n" [^{:tag (* ld/Link)} ctxt ^{:tag (* loader/Loader)} ldr ^int ri ^loader/Sym rs ^loader/Sym s]
+  (let [relocs (.Relocs ldr s)
+      ^{:line 1364} r (.At relocs ri)
+      ^:const ^{:line 1365 :val 1} pcrel 1]
+    (switch (.Type r)
+      (case [(+ objabi/ElfRelocOffset (conv objabi/RelocType elf/R_AARCH64_CALL26))
+          (+ objabi/ElfRelocOffset (conv objabi/RelocType elf/R_AARCH64_JUMP26))
+          (+ objabi/MachoRelocOffset (* ld/MACHO_ARM64_RELOC_BRANCH26 2) pcrel)]
+        ;; Host object relocations that will be turned into a PLT call.
+        ;; The PLT may be too far. Insert a trampoline for them.
+        (fallthrough))
+      (case [objabi/R_CALLARM64]
+        (let [^int64 t (zero int64)]
+          ;; ldr.SymValue(rs) == 0 indicates a cross-package jump to a function that is not yet
+          ;; laid out. Conservatively use a trampoline. This should be rare, as we lay out packages
+          ;; in dependency order.
+          (when (!= (.SymValue ldr rs) 0)
+            (set! t (- (+ (.SymValue ldr rs) ^{:go/via [Reloc]} (.Add r)) (+ (.SymValue ldr s) (conv int64 ^{:go/via [Reloc]} (.Off r))))))
+
+          (when (or (>= t (<< 1 27)) (< t (<< -1 27)) (== (.SymValue ldr rs) 0) ^:go/paren (and (> @ld/FlagDebugTramp 1) ^:go/paren (or (== (.SymPkg ldr s) "") (!= (.SymPkg ldr s) (.SymPkg ldr rs)))))
+            ;; direct call too far, need to insert trampoline.
+            ;; look up existing trampolines first. if we found one within the range
+            ;; of direct call, we can reuse it. otherwise create a new one.
+            (let [^loader/Sym tramp (zero loader/Sym)]
+              (for [i 0] _ (inc! i)
+                (let [oName (.SymName ldr rs)
+                    ^{:line 1388} name (+ oName (fmt/Sprintf "%+x-tramp%d" ^{:go/via [Reloc]} (.Add r) i))]
+                  (set! tramp (.LookupOrCreateSym ldr name (.SymVersion ldr rs)))
+                  (.SetAttrReachable ldr tramp true)
+                  (when (== (.SymType ldr tramp) sym/SDYNIMPORT)
+                    ;; don't reuse trampoline defined in other module
+                    (continue))
+
+                  (when (== oName "runtime.deferreturn")
+                    (.SetIsDeferReturnTramp ldr tramp true))
+
+                  (when (== (.SymValue ldr tramp) 0)
+                    ;; either the trampoline does not exist -- we need to create one,
+                    ;; or found one the address which is not assigned -- this will be
+                    ;; laid down immediately after the current function. use this one.
+                    (break))
+
+
+                  (set! t (- (.SymValue ldr tramp) (+ (.SymValue ldr s) (conv int64 ^{:go/via [Reloc]} (.Off r)))))
+                  (when (and (>= t (<< -1 27)) (< t (<< 1 27)))
+                    ;; found an existing trampoline that is not too far
+                    ;; we can just use it
+                    (break))))
+
+
+              (when (== (.SymType ldr tramp) 0)
+                ;; trampoline does not exist, create one
+                (let [trampb (.MakeSymbolUpdater ldr tramp)]
+                  (.AddTramp ctxt trampb (.SymType ldr s))
+                  (if (== (.SymType ldr rs) sym/SDYNIMPORT) (do
+                      (when (!= ^{:go/via [Reloc]} (.Add r) 0)
+                        (.Errorf ctxt s "nonzero addend for DYNIMPORT call: %v+%d" (.SymName ldr rs) ^{:go/via [Reloc]} (.Add r)))
+
+                      (gentrampgot ctxt ldr trampb rs))
+
+                    (gentramp ctxt ldr trampb rs ^{:go/via [Reloc]} (.Add r)))))
+
+
+              ;; modify reloc to point to tramp, which will be resolved later
+              (let [sb (.MakeSymbolUpdater ldr s)
+                  ^{:line 1427} relocs (.Relocs sb)
+                  ^{:line 1428} r (.At relocs ri)]
+                (.SetSym r tramp)
+                ^{:go/via [Reloc]} (.SetAdd r 0)))))) ; clear the offset embedded in the instruction
+
+      (default
+        (.Errorf ctxt s "trampoline called with non-jump reloc: %d (%s)" (.Type r) (sym/RelocName ^{:go/via [Target]} (.-Arch ctxt) (.Type r)))))))
+
+
+
+
+^{:go/end 1453} (go/func gentramp "generate a trampoline to target+offset.\n" [^{:tag (* ld/Link)} ctxt ^{:tag (* loader/Loader)} ldr ^{:tag (* loader/SymbolBuilder)} tramp ^loader/Sym target ^int64 offset]
+  (.SetSize tramp 12) ; 3 instructions
+  (let [P (make (slice byte) (.Size tramp))
+      ^{:line 1441} o1 (conv uint32 0x90000010) ; adrp x16, target
+      ^{:line 1442} o2 (conv uint32 0x91000210) ; add x16, pc-relative-offset
+      ^{:line 1443} o3 (conv uint32 0xd61f0200)] ; br x16
+    (.PutUint32 (.-ByteOrder ^{:go/via [Target]} (.-Arch ctxt)) P o1)
+    (.PutUint32 (.-ByteOrder ^{:go/via [Target]} (.-Arch ctxt)) (subslice P 4) o2)
+    (.PutUint32 (.-ByteOrder ^{:go/via [Target]} (.-Arch ctxt)) (subslice P 8) o3)
+    (.SetData tramp P)
+
+    (let [(values r _) (.AddRel tramp objabi/R_ADDRARM64)]
+      ^{:go/via [Reloc]} (.SetSiz r 8)
+      (.SetSym r target)
+      ^{:go/via [Reloc]} (.SetAdd r offset))))
+
+
+
+^{:go/end 1470} (go/func gentrampgot "generate a trampoline to target+offset for a DYNIMPORT symbol via GOT.\n" [^{:tag (* ld/Link)} ctxt ^{:tag (* loader/Loader)} ldr ^{:tag (* loader/SymbolBuilder)} tramp ^loader/Sym target]
+  (.SetSize tramp 12) ; 3 instructions
+  (let [P (make (slice byte) (.Size tramp))
+      ^{:line 1459} o1 (conv uint32 0x90000010) ; adrp x16, target@GOT
+      ^{:line 1460} o2 (conv uint32 0xf9400210) ; ldr x16, [x16, offset]
+      ^{:line 1461} o3 (conv uint32 0xd61f0200)] ; br x16
+    (.PutUint32 (.-ByteOrder ^{:go/via [Target]} (.-Arch ctxt)) P o1)
+    (.PutUint32 (.-ByteOrder ^{:go/via [Target]} (.-Arch ctxt)) (subslice P 4) o2)
+    (.PutUint32 (.-ByteOrder ^{:go/via [Target]} (.-Arch ctxt)) (subslice P 8) o3)
+    (.SetData tramp P)
+
+    (let [(values r _) (.AddRel tramp objabi/R_ARM64_GOTPCREL)]
+      ^{:go/via [Reloc]} (.SetSiz r 8)
+      (.SetSym r target))))

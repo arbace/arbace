@@ -1,0 +1,357 @@
+;; Copyright 2023 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; Package interleaved implements the interleaved devirtualization and
+;; inlining pass.
+(in-ns 'go.cmd.compile.internal.inline.interleaved) (go/file "interleaved.go" :doc "Package interleaved implements the interleaved devirtualization and\ninlining pass.\n" :imports [
+
+
+    ^{:line 10} [base "cmd/compile/internal/base"]
+    ^{:line 11} [devirtualize "cmd/compile/internal/devirtualize"]
+    ^{:line 12} [inline "cmd/compile/internal/inline"]
+    ^{:line 13} [inlheur "cmd/compile/internal/inline/inlheur"]
+    ^{:line 14} [ir "cmd/compile/internal/ir"]
+    ^{:line 15} [pgoir "cmd/compile/internal/pgoir"]
+    ^{:line 16} [typecheck "cmd/compile/internal/typecheck"]
+    ^{:line 17} [fmt "fmt"]])
+
+
+
+
+^{:go/end 155} (go/func DevirtualizeAndInlinePackage "DevirtualizeAndInlinePackage interleaves devirtualization and inlining on\nall functions within pkg.\n" [^{:tag (* ir/Package)} pkg ^{:tag (* pgoir/Profile)} profile]
+  (when (> (.-W base/Flag) 1)
+    (range [_ fn (.-Funcs typecheck/Target)]
+      (let [s (fmt/Sprintf "\nbefore devirtualize-and-inline %v" (.Sym fn))]
+        (ir/DumpList s (.-Body fn)))))
+
+
+
+  (when (and (!= profile nil) (> (.-PGODevirtualize base/Debug) 0))
+    ;; TODO(mdempsky): Integrate into DevirtualizeAndInlineFunc below.
+    (ir/VisitFuncsBottomUp (.-Funcs typecheck/Target) ^{:go/end 36} (fn [^{:tag (slice (* ir/Func))} list ^bool recursive]
+        (range [_ fn list]
+          (devirtualize/ProfileGuided fn profile))))
+
+
+    (set! ir/CurFunc nil))
+
+
+  (when (!= (.-LowerL base/Flag) 0)
+    (inlheur/SetupScoreAdjustments))
+
+
+  (let [^{:tag (* pgoir/Profile)} inlProfile (zero (* pgoir/Profile))] ; copy of profile for inlining
+    (when (!= (.-PGOInline base/Debug) 0)
+      (set! inlProfile profile))
+
+
+    ;; First compute inlinability of all functions in the package.
+    (inline/CanInlineFuncs (.-Funcs pkg) inlProfile)
+
+    (let [inlState (make (map (* ir/Func) (* inlClosureState)))
+        ^{:line 53} calleeUseCounts (make (map (* ir/Func) int))
+
+        ^{:line 55 :tag devirtualize/State} state (zero devirtualize/State)]
+
+      ;; Pre-process all the functions, adding parentheses around call sites and starting their "inl state".
+      (range [_ fn (.-Funcs typecheck/Target)]
+        (let [bigCaller (and (!= (.-LowerL base/Flag) 0) (inline/IsBigFunc fn))]
+          (when (and bigCaller (> (.-LowerM base/Flag) 1))
+            (fmt/Printf "%v: function %v considered 'big'; reducing max cost of inlinees\n" (ir/Line fn) fn))
+
+
+          (let [s (addr (lit inlClosureState :bigCaller bigCaller :profile profile :fn fn :callSites (make (map (* ir/ParenExpr) bool)) :useCounts calleeUseCounts))]
+            (.parenthesize s)
+            (aset inlState fn s)
+
+            ;; Do a first pass at counting call sites.
+            (range [i (.-parens s)]
+              (.resolve s (addr state) i)))))
+
+
+
+      (ir/VisitFuncsBottomUp (.-Funcs typecheck/Target) ^{:go/end 136} (fn [^{:tag (slice (* ir/Func))} list ^bool recursive]
+
+          (let [anyInlineHeuristics false]
+
+            ;; inline heuristics, placed here because they have static state and that's what seems to work.
+            (range [_ fn list]
+              (when (!= (.-LowerL base/Flag) 0)
+                (when (and (inlheur/Enabled) (not (.Wrapper fn)))
+                  (inlheur/ScoreCalls fn)
+                  (set! anyInlineHeuristics true))
+
+                (when (and (!= (.-DumpInlFuncProps base/Debug) "") (not (.Wrapper fn)))
+                  (inlheur/DumpFuncProps fn (.-DumpInlFuncProps base/Debug)))))
+
+
+
+
+            (when anyInlineHeuristics
+              (defer (inlheur/ScoreCallsCleanup)))
+
+
+            ;; Iterate to a fixed point over all the functions.
+            (let [done false]
+              (while (not done)
+                (set! done true)
+                (range [_ fn list]
+                  (let [s (aget inlState fn)]
+
+                    (ir/WithFunc fn ^{:go/end 132} (fn []
+                        (let [l1 (len (.-parens s))
+                            ^{:line 104} l0 0]
+
+                          ;; Batch iterations so that newly discovered call sites are
+                          ;; resolved in a batch before inlining attempts.
+                          ;; Do this to avoid discovering new closure calls 1 at a time
+                          ;; which might cause first call to be seen as a single (high-budget)
+                          ;; call before the second is observed.
+                          (while true
+                            (for [i l0] (< i l1) (inc! i) ; can't use "range parens" here
+                              (let [paren (aget (.-parens s) i)]
+                                (when [(values origCall inlinedCall) (.edit s (addr state) i)] (!= inlinedCall nil)
+                                  ;; Update AST and recursively mark nodes.
+                                  (set! (.-X paren) inlinedCall)
+                                  (ir/EditChildren inlinedCall (.-mark s)) ; mark may append to parens
+                                  (.InlinedCall state (.-fn s) origCall inlinedCall)
+                                  (set! done false))))
+
+
+                            (set! (values l0 l1) (values l1 (len (.-parens s))))
+                            (when (== l0 l1)
+                              (break))
+
+                            (for [i l0] (< i l1) (inc! i)
+                              (.resolve s (addr state) i)))))))))))))
+
+
+
+
+      ;; WithFunc
+
+
+
+
+
+      (set! ir/CurFunc nil)
+
+      (when (!= (.-LowerL base/Flag) 0)
+        (when (!= (.-DumpInlFuncProps base/Debug) "")
+          (inlheur/DumpFuncProps nil (.-DumpInlFuncProps base/Debug)))
+
+        (when (inlheur/Enabled)
+          (inline/PostProcessCallSites inlProfile)
+          (inlheur/TearDown)))
+
+
+
+      ;; remove parentheses
+      (range [_ fn (.-Funcs typecheck/Target)]
+        (.unparenthesize (aget inlState fn))))))
+
+
+
+
+
+
+^{:go/end 181} (go/func DevirtualizeAndInlineFunc "DevirtualizeAndInlineFunc interleaves devirtualization and inlining\non a single function.\n" [^{:tag (* ir/Func)} fn ^{:tag (* pgoir/Profile)} profile]
+  (ir/WithFunc fn ^{:go/end 180} (fn []
+      (when (!= (.-LowerL base/Flag) 0)
+        (when (and (inlheur/Enabled) (not (.Wrapper fn)))
+          (inlheur/ScoreCalls fn)
+          (defer (inlheur/ScoreCallsCleanup)))
+
+        (when (and (!= (.-DumpInlFuncProps base/Debug) "") (not (.Wrapper fn)))
+          (inlheur/DumpFuncProps fn (.-DumpInlFuncProps base/Debug))))
+
+
+
+      (let [bigCaller (and (!= (.-LowerL base/Flag) 0) (inline/IsBigFunc fn))]
+        (when (and bigCaller (> (.-LowerM base/Flag) 1))
+          (fmt/Printf "%v: function %v considered 'big'; reducing max cost of inlinees\n" (ir/Line fn) fn))
+
+
+        (let [s (addr (lit inlClosureState :bigCaller bigCaller :profile profile :fn fn :callSites (make (map (* ir/ParenExpr) bool)) :useCounts (make (map (* ir/Func) int))))]
+          (.parenthesize s)
+          (.fixpoint s)
+          (.unparenthesize s))))))
+
+
+
+(go/type callSite (struct
+    ^{:line 184 :tag (* ir/Func)} fn
+    ^{:line 185 :tag int} whichParen))
+
+
+(go/type inlClosureState (struct
+    ^{:line 189 :tag (* ir/Func)} fn
+    ^{:line 190 :tag (* pgoir/Profile)} profile
+    ^{:line 191 :tag (map (* ir/ParenExpr) bool)} callSites ; callSites[p] == "p appears in parens" (do not append again)
+    ^{:line 192 :tag (slice (* ir/Func))} resolved ; for each call in parens, the resolved target of the call
+    ^{:line 193 :tag (map (* ir/Func) int)} useCounts ; shared among all InlClosureStates
+    ^{:line 194 :tag (slice (* ir/ParenExpr))} parens
+    ^{:line 195 :tag bool} bigCaller))
+
+
+
+
+
+^{:go/end 224} (go/method resolve "resolve attempts to resolve a call to a potentially inlineable callee\nand updates use counts on the callees.  Returns the call site count\nfor that callee.\n" [^{:tag (* inlClosureState)} s ^{:tag (* devirtualize/State)} state ^int i] :results [(* ir/Func) int]
+  (let [p (aget (.-parens s) i)]
+    (when (< i (len (.-resolved s)))
+      (when [callee (aget (.-resolved s) i)] (!= callee nil)
+        (return callee (aget (.-useCounts s) callee))))
+
+
+    (let [n (.-X p)
+        (values call ok) (assert (* ir/CallExpr) n)]
+      (when (not ok) ; previously inlined
+        (return nil -1))
+
+      (devirtualize/StaticCall state call)
+      (when [callee (inline/InlineCallTarget (.-fn s) call (.-profile s))] (!= callee nil)
+        (while (<= (len (.-resolved s)) i)
+          (set! (.-resolved s) (append (.-resolved s) nil)))
+
+        (aset (.-resolved s) i callee)
+        (let [c (+ (aget (.-useCounts s) callee) 1)]
+          (aset (.-useCounts s) callee c)
+          (return callee c)))
+
+      (return nil 0))))
+
+
+^{:go/end 243} (go/method edit [^{:tag (* inlClosureState)} s ^{:tag (* devirtualize/State)} state ^int i] :results [(* ir/CallExpr) (* ir/InlinedCallExpr)]
+  (let [n (.-X (aget (.-parens s) i))
+      (values call ok) (assert (* ir/CallExpr) n)]
+    (when (not ok)
+      (return nil nil))
+
+    ;; This is redundant with earlier calls to
+    ;; resolve, but because things can change it
+    ;; must be re-checked.
+    (let [(values callee count) (.resolve s state i)]
+      (when (<= count 0)
+        (return nil nil))
+
+      (when [inlCall (inline/TryInlineCall (.-fn s) call (.-bigCaller s) (.-profile s) (and (== count 1) (!= (.-ClosureParent callee) nil)))] (!= inlCall nil)
+        (return call inlCall))
+
+      (return nil nil))))
+
+
+
+
+
+^{:go/end 291} (go/method mark "Mark inserts parentheses, and is called repeatedly.\nThese inserted parentheses mark the call sites where\ninlining will be attempted.\n" ^ir/Node [^{:tag (* inlClosureState)} s ^ir/Node n]
+  ;; Consider the expression "f(g())". We want to be able to replace
+  ;; "g()" in-place with its inlined representation. But if we first
+  ;; replace "f(...)" with its inlined representation, then "g()" will
+  ;; instead appear somewhere within this new AST.
+  ;;
+  ;; To mitigate this, each matched node n is wrapped in a ParenExpr,
+  ;; so we can reliably replace n in-place by assigning ParenExpr.X.
+  ;; It's safe to use ParenExpr here, because typecheck already
+  ;; removed them all.
+
+  (let [(values p _) (assert (* ir/ParenExpr) n)]
+    (when (and (!= p nil) (aget (.-callSites s) p))
+      (return n)) ; already visited n.X before wrapping
+
+
+    (when (!= p nil)
+      (set! n (.-X p))) ; in this case p was copied in from a (marked) inlined function, this is a new unvisited node.
+
+
+    (let [ok (match n)]
+
+      ;; can't wrap TailCall's child into ParenExpr
+      (if [(values t ok) (assert (* ir/TailCallStmt) n)] ok
+        (ir/EditChildren (.-Call t) (.-mark s))
+
+        (ir/EditChildren n (.-mark s)))
+
+
+      (cond ok (do
+          (when (== p nil)
+            (set! p (ir/NewParenExpr (.Pos n) n))
+            ^{:go/via [miniExpr]} (.SetType p (.Type n))
+            ^{:go/via [miniExpr miniNode]} (.SetTypecheck p (.Typecheck n))
+            (aset (.-callSites s) p true))
+
+
+          (set! (.-parens s) (append (.-parens s) p))
+          (set! n p))
+        (!= p nil)
+        (set! n p)) ; didn't change anything, restore n
+
+      ^{:line 290} n)))
+
+
+
+
+^{:go/end 297} (go/method parenthesize "parenthesize applies s.mark to all the nodes within\ns.fn to mark calls and simplify rewriting them in place.\n" [^{:tag (* inlClosureState)} s]
+  (ir/EditChildren (.-fn s) (.-mark s)))
+
+
+^{:go/end 316} (go/method unparenthesize [^{:tag (* inlClosureState)} s]
+  (when (== s nil)
+    (return))
+
+  (when (== (len (.-parens s)) 0)
+    (return)) ; short circuit
+
+
+  (let [^{:tag (func [ir/Node] [ir/Node])} unparen (zero (func [ir/Node] [ir/Node]))]
+    (set! unparen ^{:go/end 314} (fn ^ir/Node [^ir/Node n]
+        (when [(values paren ok) (assert (* ir/ParenExpr) n)] ok
+          (set! n (.-X paren)))
+
+        (ir/EditChildren n unparen)
+        ^{:line 313} n))
+
+    (ir/EditChildren (.-fn s) unparen)))
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 348} (go/method fixpoint "fixpoint repeatedly edits a function until it stabilizes, returning\nwhether anything changed in any of the fixpoint iterations.\n\nIt applies s.edit(n) to each node n within the parentheses in s.parens.\nIf s.edit(n) returns nil, no change is made. Otherwise, the result\nreplaces n in fn's body, and fixpoint iterates at least once more.\n\nAfter an iteration where all edit calls return nil, fixpoint\nreturns.\n" ^bool [^{:tag (* inlClosureState)} s]
+  (let [changed false
+      ^{:line 329 :tag devirtualize/State} state (zero devirtualize/State)]
+    (ir/WithFunc (.-fn s) ^{:go/end 346} (fn []
+        (let [done false]
+          (while (not done)
+            (set! done true)
+            (for [i 0] (< i (len (.-parens s))) (inc! i) ; can't use "range parens" here
+              (let [paren (aget (.-parens s) i)]
+                (when [(values origCall inlinedCall) (.edit s (addr state) i)] (!= inlinedCall nil)
+                  ;; Update AST and recursively mark nodes.
+                  (set! (.-X paren) inlinedCall)
+                  (ir/EditChildren inlinedCall (.-mark s)) ; mark may append to parens
+                  (.InlinedCall state (.-fn s) origCall inlinedCall)
+                  (set! done false)
+                  (set! changed true))))))))
+
+
+
+
+    ^{:line 347} changed))
+
+
+^{:go/breaks [[4 357]] :go/end 358} (go/func match ^bool [^ir/Node n]
+  (type-switch [n n]
+    (case [(* ir/CallExpr)]
+      (return true))
+    (case [(* ir/TailCallStmt)]
+      (set! (.-NoInline (.-Call n)) true))) ; can't inline yet
+
+  false)

@@ -1,0 +1,156 @@
+;; Copyright 2016 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.cmd.compile.internal.ssa) (go/file "licm.go" :imports [])
+
+;; We are looking for loops with following structure
+;; (loop bodies may have control flow inside):
+;;
+;;              +--------------+
+;;              |              |
+;;              |  preheader   |
+;;              |              |
+;;              +-------+------+
+;;                      |
+;;                      |
+;;              +-------v------+
+;;              |              |
+;;       +------>    header    |
+;;       |      |              |
+;;       |      +-------+------+
+;;       |              |
+;;       |              |
+;;       |      +-------v------+
+;;       |      |              |
+;;       +------+  loop body   |
+;;              |              |
+;;              +--------------+
+;;
+;;
+;; We consider all phis and memory operations as initial loop dependent set.
+;; So loop independent values are all loop values,
+;; minus transitive closure of initial loop dependent values.
+;; We remove those values from their BBs and move them to preheader.
+
+^{:go/end 159} (go/func licm [^{:tag (* Func)} f]
+  ;; See likelyadjust.go for details about loop info.
+  (let [nest (loopnestfor f)]
+    (when (or (== (len (.-loops nest)) 0) (.-hasIrreducible nest))
+      (return))
+
+
+    (let [uses (uses f)]
+      (defer (.free uses f))
+
+      (let [loopDependent (.allocBoolSlice (.-Cache f) (.NumValues f))]
+        (defer (.freeBoolSlice (.-Cache f) loopDependent))
+        (let [queue (.allocValueSlice (.-Cache f) (.NumValues f))]
+          (defer (.freeValueSlice (.-Cache f) queue))
+          (set! queue (subslice queue _ 0))
+
+          ;; Start with all values we can't move out of loops.
+          (range [_ b (.-Blocks f)]
+            (when [loop (aget (.-b2l nest) (.-ID b))] (or (== loop nil) (not (.-isInner loop)))
+              ;; Values outside any loop we don't care about.
+              ;; Values not in a leaf loop we can't handle.
+              (continue))
+
+            (range [_ v (.-Values b)]
+              (when (.-earlyOk (aget opcodeTable (.-Op v)))
+                ;; Double check we didn't mark the wrong ops as earlyOk
+                (when (or (.IsMemory (.-Type v)) (.-nilCheck (aget opcodeTable (.-Op v))) (.-hasSideEffects (aget opcodeTable (.-Op v))) (!= (.MemoryArg v) nil))
+                  (.Fatalf v "op %s has bad earlyOk mark" (.-Op v)))
+
+                (when (not (.IsPtr (.-Type v)))
+                  ;; Note: can't move pointer arithmetic, as it may be guarded by conditionals
+                  ;; and thus could materialize a bad pointer across a safepoint.
+
+                  (continue))) ; Ok to lift out of loop.
+
+
+              (when (or (== (.-Op v) OpSelect0) (== (.-Op v) OpSelect1))
+                ;; These ops can (and must) move with the op they are selecting from.
+                (continue))
+
+              (aset loopDependent (.-ID v) true)
+              (set! queue (append queue v))))
+
+
+
+          ;; If a value can't be moved out of a loop, neither can its users.
+          ;; The queue contains values which are loop dependent, but their users
+          ;; have not been marked as loop dependent yet.
+          (while (> (len queue) 0)
+            (let [v (aget queue (- (len queue) 1))]
+              (set! queue (subslice queue _ (- (len queue) 1)))
+
+              (range [_ u (.get uses v)]
+                (when [loop (aget (.-b2l nest) (.-ID (.-Block u)))] (or (== loop nil) (not (.-isInner loop)))
+                  (continue)) ; see above
+
+                (when (aget loopDependent (.-ID u))
+                  (continue))
+
+                (aset loopDependent (.-ID u) true)
+                (set! queue (append queue u)))))
+
+
+
+          ;; Anything not marked as loop-dependent can be moved out of its loop.
+          (range [_ b (.-Blocks f)]
+            (let [loop (aget (.-b2l nest) (.-ID b))]
+              (when (or (== loop nil) (not (.-isInner loop)))
+                ;; loopDependent check is wrong for loops containing other loops,
+                ;; because then a value might have an argument computed inside
+                ;; a nested loop.
+                (continue))
+
+              (when (!= (len (.-Preds (.-header loop))) 2)
+                (continue)) ; is never true?
+
+              (let [anyMoved false]
+                (range [i v (.-Values b)]
+                  (when (aget loopDependent (.-ID v))
+                    (continue))
+
+                  ;; Figure out where to move loop-independent values.
+                  (let [h (.-header loop)
+                      ^{:line 119 :tag int} inIdx (zero int)]
+                    (if (or (>= (conv int (.-ID (.-b (aget (.-Preds h) 0)))) (len (.-b2l nest))) (!= (aget (.-b2l nest) (.-ID (.-b (aget (.-Preds h) 0)))) loop))
+                      (set! inIdx 0)
+
+                      (set! inIdx 1))
+
+                    (let [dest (.-b (aget (.-Preds h) inIdx))]
+                      (when (!= (.-Kind dest) BlockPlain)
+                        (let [outIdx (.-i (aget (.-Preds h) inIdx))
+                            ;; Introduce a new block between the loop
+                            ;; header predecessor and the loop header itself.
+                            ^{:line 130} mid (.NewBlock f BlockPlain)]
+                          (set! (.-Pos mid) (.-Pos dest))
+                          ;; Splice into graph.
+                          (set! (.-Preds mid) (append (.-Preds mid) (lit Edge dest outIdx)))
+                          (set! (.-Succs mid) (append (.-Succs mid) (lit Edge h inIdx)))
+                          (aset (.-Preds h) inIdx (lit Edge mid 0))
+                          (aset (.-Succs dest) outIdx (lit Edge mid 0))
+
+                          (set! dest mid)))
+
+
+                      (aset (.-Values b) i nil)
+                      (set! (.-Block v) dest)
+                      (set! (.-Values dest) (append (.-Values dest) v))
+                      (set! anyMoved true))))
+
+                (when anyMoved
+                  ;; We just nil'd entries in b.Values above. Compact out the nils.
+                  (let [i 0]
+                    (range [_ v (.-Values b)]
+                      (when (== v nil)
+                        (continue))
+
+                      (aset (.-Values b) i v)
+                      (inc! i))
+
+                    (set! (.-Values b) (subslice (.-Values b) _ i))))))))))))

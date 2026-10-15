@@ -1,0 +1,828 @@
+;; Copyright 2023 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.cmd.compile.internal.devirtualize) (go/file "pgo.go" :imports [
+
+
+    ^{:line 8} [base "cmd/compile/internal/base"]
+    ^{:line 9} [inline "cmd/compile/internal/inline"]
+    ^{:line 10} [ir "cmd/compile/internal/ir"]
+    ^{:line 11} [logopt "cmd/compile/internal/logopt"]
+    ^{:line 12} [pgoir "cmd/compile/internal/pgoir"]
+    ^{:line 13} [typecheck "cmd/compile/internal/typecheck"]
+    ^{:line 14} [types "cmd/compile/internal/types"]
+    ^{:line 15} [obj "cmd/internal/obj"]
+    ^{:line 16} [src "cmd/internal/src"]
+    ^{:line 17} [json "encoding/json"]
+    ^{:line 18} [fmt "fmt"]
+    ^{:line 19} [os "os"]
+    ^{:line 20} [strings "strings"]])
+
+
+
+
+
+(go/type CallStat "CallStat summarizes a single call site.\n\nThis is used only for debug logging.\n" (struct
+    ^{:line 27 :tag string} Pkg ; base.Ctxt.Pkgpath
+    ^{:line 28 :tag string} Pos ; file:line:col of call.
+
+    ^{:line 30 :tag string} Caller ; Linker symbol name of calling function.
+
+
+    ^{:line 33 :tag bool :doc "Direct or indirect call.\n"} Direct
+
+
+    ^{:line 36 :tag bool :doc "For indirect calls, interface call or other indirect function call.\n"} Interface
+
+
+    ^{:line 39 :tag int64 :doc "Total edge weight from this call site.\n"} Weight
+
+
+
+    ^{:line 43 :tag string :doc "Hottest callee from this call site, regardless of type\ncompatibility.\n"} Hottest
+    ^{:line 44 :tag int64} HottestWeight
+
+
+
+
+
+
+    ^{:line 51 :tag string :doc "Devirtualized callee if != \"\".\n\nNote that this may be different than Hottest because we apply\ntype-check restrictions, which helps distinguish multiple calls on\nthe same line.\n"} Devirtualized
+    ^{:line 52 :tag int64} DevirtualizedWeight))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 182} (go/func ProfileGuided "ProfileGuided performs call devirtualization of indirect calls based on\nprofile information.\n\nSpecifically, it performs conditional devirtualization of interface calls or\nfunction value calls for the hottest callee.\n\nThat is, for interface calls it performs a transformation like:\n\n\ttype Iface interface {\n\t\tFoo()\n\t}\n\n\ttype Concrete struct{}\n\n\tfunc (Concrete) Foo() {}\n\n\tfunc foo(i Iface) {\n\t\ti.Foo()\n\t}\n\nto:\n\n\tfunc foo(i Iface) {\n\t\tif c, ok := i.(Concrete); ok {\n\t\t\tc.Foo()\n\t\t} else {\n\t\t\ti.Foo()\n\t\t}\n\t}\n\nFor function value calls it performs a transformation like:\n\n\tfunc Concrete() {}\n\n\tfunc foo(fn func()) {\n\t\tfn()\n\t}\n\nto:\n\n\tfunc foo(fn func()) {\n\t\tif internal/abi.FuncPCABIInternal(fn) == internal/abi.FuncPCABIInternal(Concrete) {\n\t\t\tConcrete()\n\t\t} else {\n\t\t\tfn()\n\t\t}\n\t}\n\nThe primary benefit of this transformation is enabling inlining of the\ndirect call.\n" [^{:tag (* ir/Func)} fn ^{:tag (* pgoir/Profile)} p]
+  (set! ir/CurFunc fn)
+
+  (let [name (ir/LinkFuncName fn)
+
+      ^{:line 110 :tag (* json/Encoder)} jsonW (zero (* json/Encoder))]
+    (when (>= (.-PGODebug base/Debug) 3)
+      (set! jsonW (json/NewEncoder os/Stdout)))
+
+
+    (let [^{:tag (func [^ir/Node n] [ir/Node])} edit (zero (func [^ir/Node n] [ir/Node]))]
+      (set! edit ^{:go/end 179} (fn ^ir/Node [^ir/Node n]
+          (when (== n nil)
+            (return n))
+
+
+          (ir/EditChildren n edit)
+
+          (let [(values call ok) (assert (* ir/CallExpr) n)]
+            (when (not ok)
+              (return n))
+
+
+            (let [^{:tag (* CallStat)} stat (zero (* CallStat))]
+              (when (>= (.-PGODebug base/Debug) 3)
+                ;; Statistics about every single call. Handy for external data analysis.
+                ;;
+                ;; TODO(prattmic): Log via logopt?
+                (set! stat (constructCallStat p fn name call))
+                (when (!= stat nil)
+                  (defer (^{:go/end 137} (fn []
+                        (.Encode jsonW (addr stat)))))))
+
+
+
+
+              (let [op ^{:go/via [miniExpr miniNode]} (.Op call)]
+                (when (and (!= op ir/OCALLFUNC) (!= op ir/OCALLINTER))
+                  (return n))
+
+
+                (when (>= (.-PGODebug base/Debug) 2)
+                  (fmt/Printf "%v: PGO devirtualize considering call %v\n" (ir/Line call) call))
+
+
+                (when (.-GoDefer call)
+                  (when (>= (.-PGODebug base/Debug) 2)
+                    (fmt/Printf "%v: can't PGO devirtualize go/defer call %v\n" (ir/Line call) call))
+
+                  (return n))
+
+
+                (let [^ir/Node newNode (zero ir/Node)
+                    ^{:line 158 :tag (* ir/Func)} callee (zero (* ir/Func))
+                    ^{:line 159 :tag int64} weight (zero int64)]
+                  (switch op
+                    (case [ir/OCALLFUNC]
+                      (set! (values newNode callee weight) (maybeDevirtualizeFunctionCall p fn call)))
+                    (case [ir/OCALLINTER]
+                      (set! (values newNode callee weight) (maybeDevirtualizeInterfaceCall p fn call)))
+                    (default
+                      (panic "unreachable")))
+
+
+                  (when (== newNode nil)
+                    (return n))
+
+
+                  (when (!= stat nil)
+                    (set! (.-Devirtualized stat) (ir/LinkFuncName callee))
+                    (set! (.-DevirtualizedWeight stat) weight))
+
+
+                  ^{:line 178} newNode))))))
+
+
+      (ir/EditChildren fn edit))))
+
+
+
+
+
+^{:go/end 212} (go/func maybeDevirtualizeInterfaceCall "Devirtualize interface call if possible and eligible. Returns the new\nir.Node if call was devirtualized, and if so also the callee and weight of\nthe devirtualized edge.\n" [^{:tag (* pgoir/Profile)} p ^{:tag (* ir/Func)} fn ^{:tag (* ir/CallExpr)} call] :results [ir/Node (* ir/Func) int64]
+  (when (< (.-PGODevirtualize base/Debug) 1)
+    (return nil nil 0))
+
+
+  ;; Bail if we do not have a hot callee.
+  (let [(values callee weight) (findHotConcreteInterfaceCallee p fn call)]
+    (when (== callee nil)
+      (return nil nil 0))
+
+    ;; Bail if we do not have a Type node for the hot callee.
+    (let [ctyp (methodRecvType callee)]
+      (when (== ctyp nil)
+        (return nil nil 0))
+
+      ;; Bail if we know for sure it won't inline.
+      (when (not (shouldPGODevirt callee))
+        (return nil nil 0))
+
+      ;; Bail if de-selected by PGO Hash.
+      (when (not (.MatchPosWithInfo base/PGOHash ^{:go/via [miniExpr miniNode]} (.Pos call) "devirt" nil))
+        (return nil nil 0))
+
+
+      (return (rewriteInterfaceCall call fn callee ctyp) callee weight))))
+
+
+
+
+
+^{:go/end 297} (go/func maybeDevirtualizeFunctionCall "Devirtualize an indirect function call if possible and eligible. Returns the new\nir.Node if call was devirtualized, and if so also the callee and weight of\nthe devirtualized edge.\n" [^{:tag (* pgoir/Profile)} p ^{:tag (* ir/Func)} fn ^{:tag (* ir/CallExpr)} call] :results [ir/Node (* ir/Func) int64]
+  (when (< (.-PGODevirtualize base/Debug) 2)
+    (return nil nil 0))
+
+
+  ;; Bail if this is a direct call; no devirtualization necessary.
+  (let [callee (pgoir/DirectCallee (.-Fun call))]
+    (when (!= callee nil)
+      (return nil nil 0))
+
+
+    ;; Bail if we do not have a hot callee.
+    (let [(values ^:assign callee weight) (findHotConcreteFunctionCallee p fn call)]
+      (when (== callee nil)
+        (return nil nil 0))
+
+
+      ;; TODO(go.dev/issue/61577): Closures need the closure context passed
+      ;; via the context register. That requires extra plumbing that we
+      ;; haven't done yet.
+      (when (!= (.-OClosure callee) nil)
+        (when (>= (.-PGODebug base/Debug) 3)
+          (fmt/Printf "callee %s is a closure, skipping\n" (ir/FuncName callee)))
+
+        (return nil nil 0))
+
+      ;; runtime.memhash_varlen does not look like a closure, but it uses
+      ;; internal/runtime/sys.GetClosurePtr to access data encoded by
+      ;; callers, which are generated by
+      ;; cmd/compile/internal/reflectdata.genhash.
+      (when (and (== (.-Path (.-Pkg (.Sym callee))) "runtime") (== (.-Name (.Sym callee)) "memhash_varlen"))
+        (when (>= (.-PGODebug base/Debug) 3)
+          (fmt/Printf "callee %s is a closure (runtime.memhash_varlen), skipping\n" (ir/FuncName callee)))
+
+        (return nil nil 0))
+
+      ;; TODO(prattmic): We don't properly handle methods as callees in two
+      ;; different dimensions:
+      ;;
+      ;; 1. Method expressions. e.g.,
+      ;;
+      ;;      var fn func(*os.File, []byte) (int, error) = (*os.File).Read
+      ;;
+      ;; In this case, typ will report *os.File as the receiver while
+      ;; ctyp reports it as the first argument. types.Identical ignores
+      ;; receiver parameters, so it treats these as different, even though
+      ;; they are still call compatible.
+      ;;
+      ;; 2. Method values. e.g.,
+      ;;
+      ;;      var f *os.File
+      ;;      var fn func([]byte) (int, error) = f.Read
+      ;;
+      ;; types.Identical will treat these as compatible (since receiver
+      ;; parameters are ignored). However, in this case, we do not call
+      ;; (*os.File).Read directly. Instead, f is stored in closure context
+      ;; and we call the wrapper (*os.File).Read-fm. However, runtime/pprof
+      ;; hides wrappers from profiles, making it appear that there is a call
+      ;; directly to the method. We could recognize this pattern return the
+      ;; wrapper rather than the method.
+      ;;
+      ;; N.B. perf profiles will report wrapper symbols directly, so
+      ;; ideally we should support direct wrapper references as well.
+      (when (!= (.Recv (.Type callee)) nil)
+        (when (>= (.-PGODebug base/Debug) 3)
+          (fmt/Printf "callee %s is a method, skipping\n" (ir/FuncName callee)))
+
+        (return nil nil 0))
+
+
+      ;; Bail if we know for sure it won't inline.
+      (when (not (shouldPGODevirt callee))
+        (return nil nil 0))
+
+      ;; Bail if de-selected by PGO Hash.
+      (when (not (.MatchPosWithInfo base/PGOHash ^{:go/via [miniExpr miniNode]} (.Pos call) "devirt" nil))
+        (return nil nil 0))
+
+
+      (return (rewriteFunctionCall call fn callee) callee weight))))
+
+
+
+
+
+
+
+^{:go/end 335} (go/func shouldPGODevirt "shouldPGODevirt checks if we should perform PGO devirtualization to the\ntarget function.\n\nPGO devirtualization is most valuable when the callee is inlined, so if it\nwon't inline we can skip devirtualizing.\n" ^bool [^{:tag (* ir/Func)} fn]
+  ^{:go/breaks [[5 334]]} (let [^string reason (zero string)]
+    (when (or (> (.-LowerM base/Flag) 1) (logopt/Enabled))
+      (defer (^{:go/end 316} (fn []
+            (when (!= reason "")
+              (when (> (.-LowerM base/Flag) 1)
+                (fmt/Printf "%v: should not PGO devirtualize %v: %s\n" (ir/Line fn) (ir/FuncName fn) reason))
+
+              (when (logopt/Enabled)
+                (logopt/LogOpt ^{:go/via [miniNode]} (.Pos fn) ": should not PGO devirtualize function" "pgoir-devirtualize" (ir/FuncName fn) reason)))))))
+
+
+
+
+
+    (set! reason (inline/InlineImpossible fn))
+    (when (!= reason "")
+      (return false))
+
+
+    ;; TODO(prattmic): checking only InlineImpossible is very conservative,
+    ;; primarily excluding only functions with pragmas. We probably want to
+    ;; move in either direction. Either:
+    ;;
+    ;; 1. Don't even bother to check InlineImpossible, as it affects so few
+    ;; functions.
+    ;;
+    ;; 2. Or consider the function body (notably cost) to better determine
+    ;; if the function will actually inline.
+
+    true))
+
+
+
+
+
+^{:go/end 409} (go/func constructCallStat "constructCallStat builds an initial CallStat describing this call, for\nlogging. If the call is devirtualized, the devirtualization fields should be\nupdated.\n" ^{:tag (* CallStat)} [^{:tag (* pgoir/Profile)} p ^{:tag (* ir/Func)} fn ^string name ^{:tag (* ir/CallExpr)} call]
+  (switch ^{:go/via [miniExpr miniNode]} (.Op call)
+    (case [ir/OCALLFUNC ir/OCALLINTER ir/OCALLMETH])
+    (default
+      ;; We don't care about logging builtin functions.
+      (return nil)))
+
+
+  (let [stat ^{:go/breaks [2 4 6]} (lit CallStat
+        :Pkg (.-Pkgpath base/Ctxt)
+        :Pos (ir/Line call)
+        :Caller name)
+
+
+      ^{:line 354} offset (pgoir/NodeLineOffset call fn)
+
+      ^{:line 356} hotter ^{:go/end 366} (fn ^bool [^{:tag (* pgoir/IREdge)} e]
+        (when (== (.-Hottest stat) "")
+          (return true))
+
+        (when (!= (.-Weight e) (.-HottestWeight stat))
+          (return (> (.-Weight e) (.-HottestWeight stat))))
+
+        ;; If weight is the same, arbitrarily sort lexicographally, as
+        ;; findHotConcreteCallee does.
+        (< (.Name (.-Dst e)) (.-Hottest stat)))
+
+
+      ^{:line 368} callerNode (aget (.-IRNodes (.-WeightedCG p)) name)]
+    (when (== callerNode nil)
+      (return nil))
+
+
+    ;; Sum of all edges from this callsite, regardless of callee.
+    ;; For direct calls, this should be the same as the single edge
+    ;; weight (except for multiple calls on one line, which we
+    ;; can't distinguish).
+    (range [_ edge (.-OutEdges callerNode)]
+      (when (!= (.-CallSiteOffset edge) offset)
+        (continue))
+
+      (set! (.-Weight stat) + (.-Weight edge))
+      (when (hotter edge)
+        (set! (.-HottestWeight stat) (.-Weight edge))
+        (set! (.-Hottest stat) (.Name (.-Dst edge)))))
+
+
+
+    (switch ^{:go/via [miniExpr miniNode]} (.Op call)
+      (case [ir/OCALLFUNC]
+        (set! (.-Interface stat) false)
+
+        (let [callee (pgoir/DirectCallee (.-Fun call))]
+          (if (!= callee nil) (do
+              (set! (.-Direct stat) true)
+              (when (== (.-Hottest stat) "")
+                (set! (.-Hottest stat) (ir/LinkFuncName callee))))
+
+
+            (set! (.-Direct stat) false))))
+
+      (case [ir/OCALLINTER]
+        (set! (.-Direct stat) false)
+        (set! (.-Interface stat) true))
+      (case [ir/OCALLMETH]
+        (base/FatalfAt ^{:go/via [miniExpr miniNode]} (.Pos call) "OCALLMETH missed by typecheck")))
+
+
+    (addr stat)))
+
+
+
+
+
+
+
+
+^{:go/end 441} (go/func copyInputs "copyInputs copies the inputs to a call: the receiver (for interface calls)\nor function value (for function value calls) and the arguments. These\nexpressions are evaluated once and assigned to temporaries.\n\nThe assignment statement is added to init and the copied receiver/fn\nexpression and copied arguments expressions are returned.\n" [^{:tag (* ir/Func)} curfn ^src/XPos pos ^ir/Node recvOrFn ^{:tag (slice ir/Node)} args ^{:tag (* ir/Nodes)} init] :results [ir/Node (slice ir/Node)]
+  ;; Evaluate receiver/fn and argument expressions. The receiver/fn is
+  ;; used twice but we don't want to cause side effects twice. The
+  ;; arguments are used in two different calls and we can't trivially
+  ;; copy them.
+  ;;
+  ;; recvOrFn must be first in the assignment list as its side effects
+  ;; must be ordered before argument side effects.
+  (let [(values ^{:tag (slice ir/Node)} lhs ^{:tag (slice ir/Node)} rhs) (zero (slice ir/Node))
+      ^{:line 426} newRecvOrFn (typecheck/TempAt pos curfn (.Type recvOrFn))]
+    (set! lhs (append lhs newRecvOrFn))
+    (set! rhs (append rhs recvOrFn))
+
+    (range [_ arg args]
+      (let [argvar (typecheck/TempAt pos curfn (.Type arg))]
+
+        (set! lhs (append lhs argvar))
+        (set! rhs (append rhs arg))))
+
+
+    (let [asList (ir/NewAssignListStmt pos ir/OAS2 lhs rhs)]
+      (.Append init (typecheck/Stmt asList))
+
+      (return newRecvOrFn (subslice lhs 1)))))
+
+
+
+^{:go/end 451} (go/func retTemps "retTemps returns a slice of temporaries to be used for storing result values from call.\n" ^{:tag (slice ir/Node)} [^{:tag (* ir/Func)} curfn ^src/XPos pos ^{:tag (* ir/CallExpr)} call]
+  (let [sig (.Type (.-Fun call))
+      ^{:line 446 :tag (slice ir/Node)} retvars (zero (slice ir/Node))]
+    (range [_ ret (.Results sig)]
+      (set! retvars (append retvars (typecheck/TempAt pos curfn (.-Type ret)))))
+
+    ^{:line 450} retvars))
+
+
+
+
+
+^{:go/end 489} (go/func condCall "condCall returns an ir.InlinedCallExpr that performs a call to thenCall if\ncond is true and elseCall if cond is false. The return variables of the\nInlinedCallExpr evaluate to the return values from the call.\n" ^{:tag (* ir/InlinedCallExpr)} [^{:tag (* ir/Func)} curfn ^src/XPos pos ^ir/Node cond ^{:tag (* ir/CallExpr)} thenCall ^{:tag (* ir/CallExpr)} elseCall ^ir/Nodes init]
+  ;; Doesn't matter whether we use thenCall or elseCall, they must have
+  ;; the same return types.
+  (let [retvars (retTemps curfn pos thenCall)
+
+      (values ^ir/Nodes thenBlock ^ir/Nodes elseBlock) (zero ir/Nodes)]
+    (if (== (len retvars) 0) (do
+        (.Append thenBlock thenCall)
+        (.Append elseBlock elseCall))
+
+      ;; Copy slice so edits in one location don't affect another.
+      (let [thenRet (append (conv (slice ir/Node) nil) (spread retvars))
+          ^{:line 468} thenAsList (ir/NewAssignListStmt pos ir/OAS2 thenRet (lit (slice ir/Node) thenCall))]
+        (.Append thenBlock (typecheck/Stmt thenAsList))
+
+        (let [elseRet (append (conv (slice ir/Node) nil) (spread retvars))
+            ^{:line 472} elseAsList (ir/NewAssignListStmt pos ir/OAS2 elseRet (lit (slice ir/Node) elseCall))]
+          (.Append elseBlock (typecheck/Stmt elseAsList)))))
+
+
+    (let [nif (ir/NewIfStmt pos cond thenBlock elseBlock)]
+      ^{:go/via [miniStmt]} (.SetInit nif init)
+      (set! (.-Likely nif) true)
+
+      (let [body (lit (slice ir/Node) (typecheck/Stmt nif))
+
+          ;; This isn't really an inlined call of course, but InlinedCallExpr
+          ;; makes handling reassignment of return values easier.
+          ^{:line 484} res (ir/NewInlinedCallExpr pos body retvars)]
+        ^{:go/via [miniExpr]} (.SetType res ^{:go/via [miniExpr]} (.Type thenCall))
+        ^{:go/via [miniExpr miniNode]} (.SetTypecheck res 1)
+        (set! (.-Reshape res) (.-Reshape thenCall))
+        ^{:line 488} res))))
+
+
+
+
+^{:go/end 557} (go/func rewriteInterfaceCall "rewriteInterfaceCall devirtualizes the given interface call using a direct\nmethod call to concretetyp.\n" ^ir/Node [^{:tag (* ir/CallExpr)} call ^{:tag (* ir/Func)} curfn ^{:tag (* ir/Func)} callee ^{:tag (* types/Type)} concretetyp]
+  (when (!= (.-LowerM base/Flag) 0)
+    (fmt/Printf "%v: PGO devirtualizing interface call %v to %v\n" (ir/Line call) (.-Fun call) callee))
+
+
+  ;; We generate an OINCALL of:
+  ;;
+  ;; var recv Iface
+  ;;
+  ;; var arg1 A1
+  ;; var argN AN
+  ;;
+  ;; var ret1 R1
+  ;; var retN RN
+  ;;
+  ;; recv, arg1, argN = recv expr, arg1 expr, argN expr
+  ;;
+  ;; t, ok := recv.(Concrete)
+  ;; if ok {
+  ;;   ret1, retN = t.Method(arg1, ... argN)
+  ;; } else {
+  ;;   ret1, retN = recv.Method(arg1, ... argN)
+  ;; }
+  ;;
+  ;; OINCALL retvars: ret1, ... retN
+  ;;
+  ;; This isn't really an inlined call of course, but InlinedCallExpr
+  ;; makes handling reassignment of return values easier.
+  ;;
+  ;; TODO(prattmic): This increases the size of the AST in the caller,
+  ;; making it less like to inline. We may want to compensate for this
+  ;; somehow.
+
+  (let [sel (assert (* ir/SelectorExpr) (.-Fun call))
+      ^{:line 527} method (.-Sel sel)
+      ^{:line 528} pos ^{:go/via [miniExpr miniNode]} (.Pos call)
+      ^{:line 529} init (ir/TakeInit call)
+
+      (values recv args) (copyInputs curfn pos (.-X sel) (.Take (.-Args call)) (addr init))
+
+      ;; Copy slice so edits in one location don't affect another.
+      ^{:line 534} argvars (append (conv (slice ir/Node) nil) (spread args))]
+    (set! (.-Args call) argvars)
+
+    (let [tmpnode (typecheck/TempAt base/Pos curfn concretetyp)
+        ^{:line 538} tmpok (typecheck/TempAt base/Pos curfn (aget types/Types types/TBOOL))
+
+        ^{:line 540} assert (ir/NewTypeAssertExpr pos recv concretetyp)
+
+        ^{:line 542} assertAsList (ir/NewAssignListStmt pos ir/OAS2 (lit (slice ir/Node) tmpnode tmpok) (lit (slice ir/Node) (typecheck/Expr assert)))]
+      (.Append init (typecheck/Stmt assertAsList))
+
+      (let [concreteCallee (typecheck/XDotMethod pos tmpnode method true)]
+        ;; Copy slice so edits in one location don't affect another.
+        (set! argvars (append (conv (slice ir/Node) nil) (spread argvars)))
+        (let [concreteCall (assert (* ir/CallExpr) (typecheck/Call pos concreteCallee argvars (.-IsDDD call)))
+
+            ^{:line 550} res (condCall curfn pos tmpok concreteCall call init)]
+
+          (when (>= (.-PGODebug base/Debug) 3)
+            (fmt/Printf "PGO devirtualizing interface call to %+v. After: %+v\n" concretetyp res))
+
+
+          ^{:line 556} res)))))
+
+
+
+
+^{:go/end 629} (go/func rewriteFunctionCall "rewriteFunctionCall devirtualizes the given OCALLFUNC using a direct\nfunction call to callee.\n" ^ir/Node [^{:tag (* ir/CallExpr)} call ^{:tag (* ir/Func)} curfn ^{:tag (* ir/Func)} callee]
+  (when (!= (.-LowerM base/Flag) 0)
+    (fmt/Printf "%v: PGO devirtualizing function call %v to %v\n" (ir/Line call) (.-Fun call) callee))
+
+
+  ;; We generate an OINCALL of:
+  ;;
+  ;; var fn FuncType
+  ;;
+  ;; var arg1 A1
+  ;; var argN AN
+  ;;
+  ;; var ret1 R1
+  ;; var retN RN
+  ;;
+  ;; fn, arg1, argN = fn expr, arg1 expr, argN expr
+  ;;
+  ;; fnPC := internal/abi.FuncPCABIInternal(fn)
+  ;; concretePC := internal/abi.FuncPCABIInternal(concrete)
+  ;;
+  ;; if fnPC == concretePC {
+  ;;   ret1, retN = concrete(arg1, ... argN) // Same closure context passed (TODO)
+  ;; } else {
+  ;;   ret1, retN = fn(arg1, ... argN)
+  ;; }
+  ;;
+  ;; OINCALL retvars: ret1, ... retN
+  ;;
+  ;; This isn't really an inlined call of course, but InlinedCallExpr
+  ;; makes handling reassignment of return values easier.
+
+  (let [pos ^{:go/via [miniExpr miniNode]} (.Pos call)
+      ^{:line 593} init (ir/TakeInit call)
+
+      (values fn args) (copyInputs curfn pos (.-Fun call) (.Take (.-Args call)) (addr init))
+
+      ;; Copy slice so edits in one location don't affect another.
+      ^{:line 598} argvars (append (conv (slice ir/Node) nil) (spread args))]
+    (set! (.-Args call) argvars)
+
+    ;; FuncPCABIInternal takes an interface{}, emulate that. This is needed
+    ;; for to ensure we get the MAKEFACE we need for SSA.
+    (let [fnIface (typecheck/Expr (ir/NewConvExpr pos ir/OCONV (aget types/Types types/TINTER) fn))
+        ^{:line 604} calleeIface (typecheck/Expr (ir/NewConvExpr pos ir/OCONV (aget types/Types types/TINTER) (.-Nname callee)))
+
+        ^{:line 606} fnPC (ir/FuncPC pos fnIface obj/ABIInternal)
+        ^{:line 607} concretePC (ir/FuncPC pos calleeIface obj/ABIInternal)
+
+        ^{:line 609} pcEq (typecheck/Expr (ir/NewBinaryExpr base/Pos ir/OEQ fnPC concretePC))]
+
+      ;; TODO(go.dev/issue/61577): Handle callees that a closures and need a
+      ;; copy of the closure context from call. For now, we skip callees that
+      ;; are closures in maybeDevirtualizeFunctionCall.
+      (when (!= (.-OClosure callee) nil)
+        (base/Fatalf "Callee is a closure: %+v" callee))
+
+
+      ;; Copy slice so edits in one location don't affect another.
+      (set! argvars (append (conv (slice ir/Node) nil) (spread argvars)))
+      (let [concreteCall (assert (* ir/CallExpr) (typecheck/Call pos (.-Nname callee) argvars (.-IsDDD call)))
+
+          ^{:line 622} res (condCall curfn pos pcEq concreteCall call init)]
+
+        (when (>= (.-PGODebug base/Debug) 3)
+          (fmt/Printf "PGO devirtualizing function call to %+v. After: %+v\n" (ir/FuncName callee) res))
+
+
+        ^{:line 628} res))))
+
+
+
+
+^{:go/end 639} (go/func methodRecvType "methodRecvType returns the type containing method fn. Returns nil if fn\nis not a method.\n" ^{:tag (* types/Type)} [^{:tag (* ir/Func)} fn]
+  (let [recv (.Recv ^{:go/via [miniExpr]} (.Type (.-Nname fn)))]
+    (when (== recv nil)
+      (return nil))
+
+    (.-Type recv)))
+
+
+
+
+^{:go/end 654} (go/func interfaceCallRecvTypeAndMethod "interfaceCallRecvTypeAndMethod returns the type and the method of the interface\nused in an interface call.\n" [^{:tag (* ir/CallExpr)} call] :results [(* types/Type) (* types/Sym)]
+  (when (!= ^{:go/via [miniExpr miniNode]} (.Op call) ir/OCALLINTER)
+    (base/Fatalf "Call isn't OCALLINTER: %+v" call))
+
+
+  (let [(values sel ok) (assert (* ir/SelectorExpr) (.-Fun call))]
+    (when (not ok)
+      (base/Fatalf "OCALLINTER doesn't contain SelectorExpr: %+v" call))
+
+
+    (return (.Type (.-X sel)) (.-Sel sel))))
+
+
+
+
+
+
+^{:go/end 756} (go/func findHotConcreteCallee "findHotConcreteCallee returns the *ir.Func of the hottest callee of a call,\nif available, and its edge weight. extraFn can perform additional\napplicability checks on each candidate edge. If extraFn returns false,\ncandidate will not be considered a valid callee candidate.\n" [^{:tag (* pgoir/Profile)} p ^{:tag (* ir/Func)} caller ^{:tag (* ir/CallExpr)} call ^{:tag (func [^string callerName ^int callOffset ^{:tag (* pgoir/IREdge)} candidate] [bool])} extraFn] :results [(* ir/Func) int64]
+  (let [callerName (ir/LinkFuncName caller)
+      ^{:line 662} callerNode (aget (.-IRNodes (.-WeightedCG p)) callerName)
+      ^{:line 663} callOffset (pgoir/NodeLineOffset call caller)]
+
+    (when (== callerNode nil)
+      (return nil 0))
+
+
+    (let [^{:tag (* pgoir/IREdge)} hottest (zero (* pgoir/IREdge))
+
+        ;; Returns true if e is hotter than hottest.
+        ;;
+        ;; Naively this is just e.Weight > hottest.Weight, but because OutEdges
+        ;; has arbitrary iteration order, we need to apply additional sort
+        ;; criteria when e.Weight == hottest.Weight to ensure we have stable
+        ;; selection.
+        ^{:line 677} hotter ^{:go/end 699} (fn ^bool [^{:tag (* pgoir/IREdge)} e]
+          (when (== hottest nil)
+            (return true))
+
+          (when (!= (.-Weight e) (.-Weight hottest))
+            (return (> (.-Weight e) (.-Weight hottest))))
+
+
+          ;; Now e.Weight == hottest.Weight, we must select on other
+          ;; criteria.
+
+          ;; If only one edge has IR, prefer that one.
+          (when (!= (== (.-AST (.-Dst hottest)) nil) (== (.-AST (.-Dst e)) nil))
+            (when (!= (.-AST (.-Dst e)) nil)
+              (return true))
+
+            (return false))
+
+
+          ;; Arbitrary, but the callee names will always differ. Select
+          ;; the lexicographically first callee.
+          (< (.Name (.-Dst e)) (.Name (.-Dst hottest))))]
+
+
+      (range [_ e (.-OutEdges callerNode)]
+        (when (!= (.-CallSiteOffset e) callOffset)
+          (continue))
+
+
+        (when (not (hotter e))
+          ;; TODO(prattmic): consider total caller weight? i.e.,
+          ;; if the hottest callee is only 10% of the weight,
+          ;; maybe don't devirtualize? Similarly, if this is call
+          ;; is globally very cold, there is not much value in
+          ;; devirtualizing.
+          (when (>= (.-PGODebug base/Debug) 2)
+            (fmt/Printf "%v: edge %s:%d -> %s (weight %d): too cold (hottest %d)\n" (ir/Line call) callerName callOffset (.Name (.-Dst e)) (.-Weight e) (.-Weight hottest)))
+
+          (continue))
+
+
+        (when (== (.-AST (.-Dst e)) nil)
+          ;; Destination isn't visible from this package
+          ;; compilation.
+          ;;
+          ;; We must assume it implements the interface.
+          ;;
+          ;; We still record this as the hottest callee so far
+          ;; because we only want to return the #1 hottest
+          ;; callee. If we skip this then we'd return the #2
+          ;; hottest callee.
+          (when (>= (.-PGODebug base/Debug) 2)
+            (fmt/Printf "%v: edge %s:%d -> %s (weight %d) (missing IR): hottest so far\n" (ir/Line call) callerName callOffset (.Name (.-Dst e)) (.-Weight e)))
+
+          (set! hottest e)
+          (continue))
+
+
+        (when (and (!= extraFn nil) (not (extraFn callerName callOffset e)))
+          (continue))
+
+
+        (when (>= (.-PGODebug base/Debug) 2)
+          (fmt/Printf "%v: edge %s:%d -> %s (weight %d): hottest so far\n" (ir/Line call) callerName callOffset (.Name (.-Dst e)) (.-Weight e)))
+
+        (set! hottest e))
+
+
+      (when (or (== hottest nil) (== (.-Weight hottest) 0))
+        (when (>= (.-PGODebug base/Debug) 2)
+          (fmt/Printf "%v: call %s:%d: no hot callee\n" (ir/Line call) callerName callOffset))
+
+        (return nil 0))
+
+
+      (when (>= (.-PGODebug base/Debug) 2)
+        (fmt/Printf "%v: call %s:%d: hottest callee %s (weight %d)\n" (ir/Line call) callerName callOffset (.Name (.-Dst hottest)) (.-Weight hottest)))
+
+      (return (.-AST (.-Dst hottest)) (.-Weight hottest)))))
+
+
+
+
+^{:go/end 804} (go/func findHotConcreteInterfaceCallee "findHotConcreteInterfaceCallee returns the *ir.Func of the hottest callee of an\ninterface call, if available, and its edge weight.\n" [^{:tag (* pgoir/Profile)} p ^{:tag (* ir/Func)} caller ^{:tag (* ir/CallExpr)} call] :results [(* ir/Func) int64]
+  (let [(values inter method) (interfaceCallRecvTypeAndMethod call)]
+
+    (findHotConcreteCallee p caller call ^{:go/end 803} (fn ^bool [^string callerName ^int callOffset ^{:tag (* pgoir/IREdge)} e]
+        ^{:go/breaks [[5 802]]} (let [ctyp (methodRecvType (.-AST (.-Dst e)))]
+          (when (== ctyp nil)
+            ;; Not a method.
+            ;; TODO(prattmic): Support non-interface indirect calls.
+            (when (>= (.-PGODebug base/Debug) 2)
+              (fmt/Printf "%v: edge %s:%d -> %s (weight %d): callee not a method\n" (ir/Line call) callerName callOffset (.Name (.-Dst e)) (.-Weight e)))
+
+            (return false))
+
+
+          ;; If ctyp doesn't implement inter it is most likely from a
+          ;; different call on the same line
+          (when (not (typecheck/Implements ctyp inter))
+            ;; TODO(prattmic): this is overly strict. Consider if
+            ;; ctyp is a partial implementation of an interface
+            ;; that gets embedded in types that complete the
+            ;; interface. It would still be OK to devirtualize a
+            ;; call to this method.
+            ;;
+            ;; What we'd need to do is check that the function
+            ;; pointer in the itab matches the method we want,
+            ;; rather than doing a full type assertion.
+            (when (>= (.-PGODebug base/Debug) 2)
+              (let [why (typecheck/ImplementsExplain ctyp inter)]
+                (fmt/Printf "%v: edge %s:%d -> %s (weight %d): %v doesn't implement %v (%s)\n" (ir/Line call) callerName callOffset (.Name (.-Dst e)) (.-Weight e) ctyp inter why)))
+
+            (return false))
+
+
+          ;; If the method name is different it is most likely from a
+          ;; different call on the same line
+          (when (not (strings/HasSuffix (.Name (.-Dst e)) (+ "." (.-Name method))))
+            (when (>= (.-PGODebug base/Debug) 2)
+              (fmt/Printf "%v: edge %s:%d -> %s (weight %d): callee is a different method\n" (ir/Line call) callerName callOffset (.Name (.-Dst e)) (.-Weight e)))
+
+            (return false))
+
+
+          true)))))
+
+
+
+
+
+^{:go/end 830} (go/func findHotConcreteFunctionCallee "findHotConcreteFunctionCallee returns the *ir.Func of the hottest callee of an\nindirect function call, if available, and its edge weight.\n" [^{:tag (* pgoir/Profile)} p ^{:tag (* ir/Func)} caller ^{:tag (* ir/CallExpr)} call] :results [(* ir/Func) int64]
+  (let [typ (.Underlying (.Type (.-Fun call)))]
+
+    (findHotConcreteCallee p caller call ^{:go/end 829} (fn ^bool [^string callerName ^int callOffset ^{:tag (* pgoir/IREdge)} e]
+        ^{:go/breaks [[3 828]]} (let [ctyp (.Underlying (.Type (.-AST (.-Dst e))))]
+
+          ;; If ctyp doesn't match typ it is most likely from a different
+          ;; call on the same line.
+          ;;
+          ;; Note that we are comparing underlying types, as different
+          ;; defined types are OK. e.g., a call to a value of type
+          ;; net/http.HandlerFunc can be devirtualized to a function with
+          ;; the same underlying type.
+          (when (not (types/Identical typ ctyp))
+            (when (>= (.-PGODebug base/Debug) 2)
+              (fmt/Printf "%v: edge %s:%d -> %s (weight %d): %v doesn't match %v\n" (ir/Line call) callerName callOffset (.Name (.-Dst e)) (.-Weight e) ctyp typ))
+
+            (return false))
+
+
+          true)))))

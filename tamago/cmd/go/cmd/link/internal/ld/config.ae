@@ -1,0 +1,217 @@
+;; Copyright 2016 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.cmd.link.internal.ld) (go/file "config.go" :imports [
+
+
+    ^{:line 8} [fmt "fmt"]
+    ^{:line 9} [buildcfg "internal/buildcfg"]
+    ^{:line 10} [platform "internal/platform"]])
+
+
+
+
+
+
+(go/type BuildMode "A BuildMode indicates the sort of object we are building.\n\nPossible build modes are the same as those for the -buildmode flag\nin cmd/go, and are documented in 'go help buildmode'.\n" uint8)
+
+(go/const
+  ^{:line 20} [^{:tag BuildMode :val 0} BuildModeUnset iota]
+  ^{:line 21} [^{:val 1} BuildModeExe]
+  ^{:line 22} [^{:val 2} BuildModePIE]
+  ^{:line 23} [^{:val 3} BuildModeCArchive]
+  ^{:line 24} [^{:val 4} BuildModeCShared]
+  ^{:line 25} [^{:val 5} BuildModeShared]
+  ^{:line 26} [^{:val 6} BuildModePlugin])
+
+
+
+
+^{:go/breaks [[6 58]] :go/end 59} (go/method Set "Set implements flag.Value to set the build mode based on the argument\nto the -buildmode flag.\n" ^error [^{:tag (* BuildMode)} mode ^string s]
+  (switch s
+    (default
+      (return (fmt/Errorf "invalid buildmode: %q" s)))
+    (case ["exe"]
+      (switch (+ buildcfg/GOOS "/" buildcfg/GOARCH)
+        (case ["darwin/arm64" "windows/arm64"] ; On these platforms, everything is PIE
+          (set! @mode BuildModePIE))
+        (default
+          (set! @mode BuildModeExe))))
+
+    (case ["pie"]
+      (set! @mode BuildModePIE))
+    (case ["c-archive"]
+      (set! @mode BuildModeCArchive))
+    (case ["c-shared"]
+      (set! @mode BuildModeCShared))
+    (case ["shared"]
+      (set! @mode BuildModeShared))
+    (case ["plugin"]
+      (set! @mode BuildModePlugin)))
+
+
+  (when (not (platform/BuildModeSupported "gc" s buildcfg/GOOS buildcfg/GOARCH))
+    (return (fmt/Errorf "buildmode %s not supported on %s/%s" s buildcfg/GOOS buildcfg/GOARCH)))
+
+
+  nil)
+
+
+^{:go/end 79} (go/method String ^string [^BuildMode mode]
+  (switch mode
+    (case [BuildModeUnset]
+      (return "")) ; avoid showing a default in usage message
+    (case [BuildModeExe]
+      (return "exe"))
+    (case [BuildModePIE]
+      (return "pie"))
+    (case [BuildModeCArchive]
+      (return "c-archive"))
+    (case [BuildModeCShared]
+      (return "c-shared"))
+    (case [BuildModeShared]
+      (return "shared"))
+    (case [BuildModePlugin]
+      (return "plugin")))
+
+  (fmt/Sprintf "BuildMode(%d)" (conv uint8 mode)))
+
+
+
+(go/type LinkMode "LinkMode indicates whether an external linker is used for the final link.\n" uint8)
+
+(go/const
+  ^{:line 85} [^{:tag LinkMode :val 0} LinkAuto iota]
+  ^{:line 86} [^{:val 1} LinkInternal]
+  ^{:line 87} [^{:val 2} LinkExternal])
+
+
+^{:go/breaks [[4 101]] :go/end 102} (go/method Set ^error [^{:tag (* LinkMode)} mode ^string s]
+  (switch s
+    (default
+      (return (fmt/Errorf "invalid linkmode: %q" s)))
+    (case ["auto"]
+      (set! @mode LinkAuto))
+    (case ["internal"]
+      (set! @mode LinkInternal))
+    (case ["external"]
+      (set! @mode LinkExternal)))
+
+  nil)
+
+
+^{:go/end 114} (go/method String ^string [^{:tag (* LinkMode)} mode]
+  (switch @mode
+    (case [LinkAuto]
+      (return "auto"))
+    (case [LinkInternal]
+      (return "internal"))
+    (case [LinkExternal]
+      (return "external")))
+
+  (fmt/Sprintf "LinkMode(%d)" (conv uint8 @mode)))
+
+
+
+
+^{:go/end 180} (go/func mustLinkExternal "mustLinkExternal reports whether the program being linked requires\nthe external linker be used to complete the link.\n" [^{:tag (* Link)} ctxt] :results [^bool res ^string reason]
+  (when (> (.-Debugvlog ctxt) 1)
+    (defer (^{:go/end 124} (fn []
+          (when res
+            (.Logf ctxt "external linking is forced by: %s\n" reason))))))
+
+
+
+
+  (when (platform/MustLinkExternal buildcfg/GOOS buildcfg/GOARCH false)
+    (return true (fmt/Sprintf "%s/%s requires external linking" buildcfg/GOOS buildcfg/GOARCH)))
+
+
+  (when @flagMsan
+    (return true "msan"))
+
+
+  (when @flagAsan
+    (return true "asan"))
+
+
+  (when (and iscgo (platform/MustLinkExternal buildcfg/GOOS buildcfg/GOARCH true))
+    (return true (+ buildcfg/GOARCH " does not support internal cgo")))
+
+
+  ;; Some build modes require work the internal linker cannot do (yet).
+  (switch ^{:go/via [Target]} (.-BuildMode ctxt)
+    (case [BuildModeCArchive]
+      (return true "buildmode=c-archive"))
+    (case [BuildModeCShared]
+      (when (== buildcfg/GOARCH "wasm")
+        (break))
+
+      (return true "buildmode=c-shared"))
+    (case [BuildModePIE]
+      (when (not (platform/InternalLinkPIESupported buildcfg/GOOS buildcfg/GOARCH))
+        ;; Internal linking does not support TLS_IE.
+        (return true "buildmode=pie")))
+
+    (case [BuildModePlugin]
+      (return true "buildmode=plugin"))
+    (case [BuildModeShared]
+      (return true "buildmode=shared")))
+
+  (when ^{:go/via [Target]} (.-linkShared ctxt)
+    (return true "dynamically linking with a shared library"))
+
+
+  (when unknownObjFormat
+    (return true "some input objects have an unrecognized file format"))
+
+
+  (when (> (len dynimportfail) 0)
+    ;; This error means that we were unable to generate
+    ;; the _cgo_import.go file for some packages.
+    ;; This typically means that there are some dependencies
+    ;; that the cgo tool could not figure out.
+    ;; See issue #52863.
+    (return true (fmt/Sprintf "some packages could not be built to support internal linking (%v)" dynimportfail)))
+
+
+  (return false ""))
+
+
+
+
+
+
+
+^{:go/end 219} (go/func determineLinkMode "determineLinkMode sets ctxt.LinkMode.\n\nIt is called after flags are processed and inputs are processed,\nso the ctxt.LinkMode variable has an initial value from the -linkmode\nflag and the iscgo, externalobj, and unknownObjFormat variables are set.\n" [^{:tag (* Link)} ctxt]
+  (let [(values extNeeded extReason) (mustLinkExternal ctxt)
+      ^{:line 189} via ""]
+
+    (when (== ^{:go/via [Target]} (.-LinkMode ctxt) LinkAuto)
+      ;; The environment variable GO_EXTLINK_ENABLED controls the
+      ;; default value of -linkmode. If it is not set when the
+      ;; linker is called we take the value it was set to when
+      ;; cmd/link was compiled. (See make.bash.)
+      (switch (buildcfg/Getgoextlinkenabled)
+        (case ["0"]
+          (set! ^{:go/via [Target]} (.-LinkMode ctxt) LinkInternal)
+          (set! via "via GO_EXTLINK_ENABLED "))
+        (case ["1"]
+          (set! ^{:go/via [Target]} (.-LinkMode ctxt) LinkExternal)
+          (set! via "via GO_EXTLINK_ENABLED "))
+        (default
+          (let [preferExternal (!= (len preferlinkext) 0)]
+            (when (and preferExternal (> (.-Debugvlog ctxt) 0))
+              (.Logf ctxt "external linking prefer list is %v\n" preferlinkext))
+
+            (if (or extNeeded ^:go/paren (and iscgo ^:go/paren (or externalobj preferExternal)))
+              (set! ^{:go/via [Target]} (.-LinkMode ctxt) LinkExternal)
+
+              (set! ^{:go/via [Target]} (.-LinkMode ctxt) LinkInternal))))))
+
+
+
+
+    (when (and (== ^{:go/via [Target]} (.-LinkMode ctxt) LinkInternal) extNeeded)
+      (Exitf "internal linking requested %sbut external linking required: %s" via extReason))))

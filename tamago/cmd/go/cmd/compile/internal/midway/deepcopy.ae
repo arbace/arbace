@@ -1,0 +1,626 @@
+;; Copyright 2026 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.cmd.compile.internal.midway) (go/file "deepcopy.go" :imports [
+
+
+    ^{:line 8} [fmt "fmt"]
+    ^{:line 9} [strings "strings"]
+
+    ^{:line 11} [base "cmd/compile/internal/base"]
+    ^{:line 12} [syntax "cmd/compile/internal/syntax"]
+    ^{:line 13} [types2 "cmd/compile/internal/types2"]])
+
+
+
+(go/type DeepCopier "DeepCopier clones syntax nodes and maintains types2.Info mappings.\n" (struct
+    ^{:line 18 :tag int} VecLen
+    ^{:line 19 :tag (* types2/Info)} info
+    ^{:line 20 :tag (* types2/Package)} pkg
+    ^{:line 21 :tag (* Analyzer)} analyzer
+    ^{:line 22 :tag string} suffix
+
+    ^{:line 24 :tag (map (* types2/Var) (* types2/Var))} vars))
+
+
+^{:go/end 36} (go/func NewDeepCopier ^{:tag (* DeepCopier)} [^{:tag (* types2/Package)} pkg ^{:tag (* types2/Info)} info ^int vecLen ^{:tag (* Analyzer)} analyzer ^string suffix]
+  (addr ^{:go/breaks [2 4 6 8 10 12]} (lit DeepCopier
+      :VecLen vecLen
+      :info info
+      :pkg pkg
+      :analyzer analyzer
+      :suffix suffix
+      :vars (make (map (* types2/Var) (* types2/Var))))))
+
+
+
+^{:go/end 51} (go/method registerDef [^{:tag (* DeepCopier)} c ^{:tag (* syntax/Name)} newName ^{:tag (* syntax/Name)} oldName]
+  (when (or (== oldName nil) (== newName nil))
+    (return))
+
+  (when [oldObj (aget (.-Defs (.-info c)) oldName)] (!= oldObj nil)
+    (if [(values val isVar) (assert (* types2/Var) oldObj)] isVar
+      (let [newObj (types2/NewVar ^{:go/via [expr node]} (.Pos newName) (.-pkg c) (.-Value newName) ^{:go/via [object]} (.Type val))]
+        (aset (.-vars c) val newObj)
+        (aset (.-Defs (.-info c)) newName newObj))
+
+      (aset (.-Defs (.-info c)) newName oldObj))))
+
+
+
+
+^{:go/end 64} (go/method mapUse [^{:tag (* DeepCopier)} c ^{:tag (* syntax/Name)} newName ^{:tag (* syntax/Name)} oldName]
+  (when (or (== oldName nil) (== newName nil))
+    (return))
+
+  (when [oldObj (aget (.-Uses (.-info c)) oldName)] (!= oldObj nil)
+    (if [(values val isVar) (assert (* types2/Var) oldObj)] (and isVar (!= (aget (.-vars c) val) nil))
+      (aset (.-Uses (.-info c)) newName (aget (.-vars c) val))
+
+      (aset (.-Uses (.-info c)) newName oldObj))))
+
+
+
+
+
+^{:go/end 89} (go/method OnName "OnName rewrites \"dependent\" and SIMD names to their architecture-specific version.\n" ^{:tag (* syntax/Name)} [^{:tag (* DeepCopier)} c ^{:tag (* syntax/Name)} id]
+  ^{:go/breaks [[6 88]]} (let [obj (aget (.-Uses (.-info c)) id)]
+    (when (== obj nil)
+      (set! obj (aget (.-Defs (.-info c)) id)))
+
+    (when (== obj nil)
+      (return nil))
+
+    ;; Don't rename methods of dependent types
+    (when (aget (.-isDependentMethod (.-analyzer c)) obj)
+      (return nil))
+
+
+    (when (or (aget (.-isDependentObj (.-analyzer c)) obj) (isBaseSimdTypeObj obj))
+      (let [newId (syntax/NewName ^{:go/via [expr node]} (.Pos id) (+ (.-Value id) (.-suffix c)))]
+        ;; Object link will be handled manually in deepcopier Use/Def mapper
+        (when (> (.-Simd base/Debug) 0)
+          (base/Warn "%s: rewriting name %s to %s" (.String ^{:go/via [expr node]} (.Pos id)) (.-Value id) (.-Value newId)))
+
+        (return newId)))
+
+    nil))
+
+
+
+
+^{:go/end 142} (go/method OnNameExpr "OnNameExpr rewrites references to simd.<simd type> into\n<bridge package>.<size-dependent-type>.\n" ^syntax/Expr [^{:tag (* DeepCopier)} c ^{:tag (* syntax/Name)} id]
+  ^{:go/breaks [[6 141]]} (let [obj (aget (.-Uses (.-info c)) id)]
+    (when (== obj nil)
+      (set! obj (aget (.-Defs (.-info c)) id)))
+
+    (when (== obj nil)
+      (return nil))
+
+
+    (when (isBaseSimdTypeObj obj)
+      ;; if it is a name, that means that this is in the simd package,
+      ;; and the name must be replaced with a selector referencing
+      ;; the architecture-dependent packages.
+      (let [name (.-Value id)
+          ^{:line 107} width (nameToElemBitWidth name)]
+        (when (> width 0)
+          (let [archsimdId (syntax/NewName ^{:go/via [expr node]} (.Pos id) archPkg)]
+            (when (== (.-VecLen c) 0)
+              ;; special case for emulation
+              (let [newSel (addr ^{:go/breaks [2 4]} (lit syntax/SelectorExpr
+                      :X archsimdId
+                      :Sel id))] ; name is unchanged for emulation
+
+                ^{:go/via [expr node]} (.SetPos newSel ^{:go/via [expr node]} (.Pos id))
+                (return newSel)))
+
+
+            (let [count (/ (.-VecLen c) width)
+                ^{:line 121} base (subslice name _ (- (len name) 1))
+                ^{:line 122} newName (fmt/Sprintf "%sx%d" base count)
+                ^{:line 123} newSelId (syntax/NewName ^{:go/via [expr node]} (.Pos id) newName)
+                ^{:line 124} newSel (addr ^{:go/breaks [2 4]} (lit syntax/SelectorExpr
+                    :X archsimdId
+                    :Sel newSelId))]
+
+              ^{:go/via [expr node]} (.SetPos newSel ^{:go/via [expr node]} (.Pos id))
+              (return newSel))))))
+
+
+
+    (when (aget (.-isDependentObj (.-analyzer c)) obj)
+      (let [newId (syntax/NewName ^{:go/via [expr node]} (.Pos id) (+ (.-Value id) (.-suffix c)))]
+        ;; Object link will be handled manually in deepcopier Use/Def mapper
+        (when (> (.-Simd base/Debug) 0)
+          (base/Warn "%s: rewriting name %s to %s" (.String ^{:go/via [expr node]} (.Pos id)) (.-Value id) (.-Value newId)))
+
+        (return newId)))
+
+    nil))
+
+
+
+
+
+^{:go/breaks [[5 200]] :go/end 201} (go/method OnSelector "OnSelector is looking for simd.Something, to be rewritten into\nappropriately.  Note that this will not work properly within the simd\npackage because there is no \"simd.\" selection there.\n" ^syntax/Expr [^{:tag (* DeepCopier)} c ^{:tag (* syntax/SelectorExpr)} se]
+  (when [(values x ok) (assert (* syntax/Name) (.-X se))] ok
+    (let [obj (aget (.-Uses (.-info c)) x)]
+      (when [(values pkgName isPkg) (assert (* types2/PkgName) obj)] (and isPkg (== (.Path (.Imported pkgName)) simdPkg))
+        ;; This first little bit detects name = Load-Type-Width-s-{,Part}
+        ;; and converts the name to Type-Width-s (for nameToWidth), sets isLoad,
+        ;; and initializes the suffix appropriately.
+        (let [prefix ""
+            ^{:line 155} nameSuffix ""
+            ^{:line 156} name (.-Value (.-Sel se))
+            ^{:line 157} end (len name)]
+          (when (strings/HasPrefix name "Load")
+            (set! prefix "Load")
+            (when (strings/HasSuffix name "Part")
+              (set! end (strings/Index name "Part"))
+              (set! nameSuffix "Part"))
+
+            (set! name (subslice name (len "Load") end)))
+
+          (when (strings/HasPrefix name "Broadcast")
+            (set! prefix "Broadcast")
+            (set! name (subslice name (len "Broadcast") end)))
+
+
+          (let [width (nameToElemBitWidth name)]
+            (when (> width 0)
+              (let [archsimdId (syntax/NewName ^{:go/via [expr node]} (.Pos se) archPkg)]
+                (when (== (.-VecLen c) 0)
+                  ;; emulated instead, name is unchanged
+                  (let [newSel (addr ^{:go/breaks [2 4]} (lit syntax/SelectorExpr
+                          :X archsimdId
+                          :Sel (.-Sel se)))]
+
+                    ^{:go/via [expr node]} (.SetPos newSel ^{:go/via [expr node]} (.Pos se))
+                    (return newSel)))
+
+
+                (let [count (/ (.-VecLen c) width)
+                    ^{:line 185} base (subslice name _ (- (len name) 1))
+                    ^{:line 186} newName (fmt/Sprintf "%sx%d" base count)]
+                  (set! newName (+ prefix newName nameSuffix))
+
+                  (let [newSelId (syntax/NewName ^{:go/via [expr node]} (.Pos (.-Sel se)) newName)
+
+                      ^{:line 191} newSel (addr ^{:go/breaks [2 4]} (lit syntax/SelectorExpr
+                          :X archsimdId
+                          :Sel newSelId))]
+
+                    ^{:go/via [expr node]} (.SetPos newSel ^{:go/via [expr node]} (.Pos se))
+                    (return newSel))))))))))
+
+
+
+  nil)
+
+
+^{:go/end 228} (go/method CopyDecl ^syntax/Decl [^{:tag (* DeepCopier)} c ^syntax/Decl d]
+  (when (== d nil)
+    (return nil))
+
+  (type-switch [d d]
+    (case [(* syntax/FuncDecl)]
+      (return (.CopyFuncDecl c d)))
+    (case [(* syntax/VarDecl)]
+      (return (.CopyVarDecl c d)))
+    (case [(* syntax/TypeDecl)]
+      (return (.CopyTypeDecl c d)))
+    (case [(* syntax/ConstDecl)]
+      (return (.CopyConstDecl c d)))
+    (case [(* syntax/ImportDecl)]
+      (let [newD (addr ^{:go/breaks [2 4 6 8]} (lit syntax/ImportDecl
+              :Group (.-Group d)
+              :Pragma (.-Pragma d)
+              :LocalPkgName (.CopyName c (.-LocalPkgName d) false)
+              :Path (assert (* syntax/BasicLit) (.CopyExpr c (.-Path d)))))]
+
+        ^{:go/via [decl node]} (.SetPos newD ^{:go/via [decl node]} (.Pos d))
+        (return newD)))
+    (default
+      (return d))))
+
+
+
+^{:go/end 243} (go/method CopyVarDecl ^{:tag (* syntax/VarDecl)} [^{:tag (* DeepCopier)} c ^{:tag (* syntax/VarDecl)} d]
+  (let [newD (addr ^{:go/breaks [2 4 6 8]} (lit syntax/VarDecl
+          :Group (.-Group d)
+          :Pragma (.-Pragma d)
+          :Type (.CopyExpr c (.-Type d))
+          :Values (.CopyExpr c (.-Values d))))]
+
+    ^{:go/via [decl node]} (.SetPos newD ^{:go/via [decl node]} (.Pos d))
+    (range [_ n (.-NameList d)]
+      (let [newN (.CopyName c n true)]
+        (set! (.-NameList newD) (append (.-NameList newD) newN))))
+
+    ^{:line 242} newD))
+
+
+^{:go/end 256} (go/method CopyTypeDecl ^{:tag (* syntax/TypeDecl)} [^{:tag (* DeepCopier)} c ^{:tag (* syntax/TypeDecl)} d]
+  (let [newD (addr ^{:go/breaks [2 4 6 8 10 12]} (lit syntax/TypeDecl
+          :Group (.-Group d)
+          :Pragma (.-Pragma d)
+          :Name (.CopyName c (.-Name d) true)
+          :TParamList (.CopyFieldList c (.-TParamList d))
+          :Alias (.-Alias d)
+          :Type (.CopyExpr c (.-Type d))))]
+
+    ^{:go/via [decl node]} (.SetPos newD ^{:go/via [decl node]} (.Pos d))
+    ^{:line 255} newD))
+
+
+^{:go/end 270} (go/method CopyConstDecl ^{:tag (* syntax/ConstDecl)} [^{:tag (* DeepCopier)} c ^{:tag (* syntax/ConstDecl)} d]
+  (let [newD (addr ^{:go/breaks [2 4 6 8]} (lit syntax/ConstDecl
+          :Group (.-Group d)
+          :Pragma (.-Pragma d)
+          :Type (.CopyExpr c (.-Type d))
+          :Values (.CopyExpr c (.-Values d))))]
+
+    ^{:go/via [decl node]} (.SetPos newD ^{:go/via [decl node]} (.Pos d))
+    (range [_ n (.-NameList d)]
+      (set! (.-NameList newD) (append (.-NameList newD) (.CopyName c n true))))
+
+    ^{:line 269} newD))
+
+
+^{:go/end 290} (go/method CopyFuncDecl ^{:tag (* syntax/FuncDecl)} [^{:tag (* DeepCopier)} c ^{:tag (* syntax/FuncDecl)} d]
+  (let [newD (addr ^{:go/breaks [2 4 6 8 10]} (lit syntax/FuncDecl
+          :Pragma (.-Pragma d)
+          :Recv (.CopyField c (.-Recv d))
+          :Name (.CopyName c (.-Name d) true)
+          :TParamList (.CopyFieldList c (.-TParamList d))
+          :Type (assert (* syntax/FuncType) (.CopyExpr c (.-Type d)))))]
+
+    ^{:go/via [decl node]} (.SetPos newD ^{:go/via [decl node]} (.Pos d))
+
+    ;; Create and register new types2.Func
+    (when [(values oldFuncObj ok) (assert (* types2/Func) (aget (.-Defs (.-info c)) (.-Name d)))] ok
+      (let [newFuncObj (types2/NewFunc ^{:go/via [expr node]} (.Pos (.-Name newD)) (.-pkg c) (.-Value (.-Name newD)) (assert (* types2/Signature) ^{:go/via [object]} (.Type oldFuncObj)))]
+        (aset (.-Defs (.-info c)) (.-Name newD) newFuncObj)))
+
+
+    (set! (.-Body newD) (.CopyBlockStmt c (.-Body d)))
+    ^{:line 289} newD))
+
+
+^{:go/end 312} (go/method CopyName ^{:tag (* syntax/Name)} [^{:tag (* DeepCopier)} c ^{:tag (* syntax/Name)} id ^bool isDef]
+  (when (== id nil)
+    (return nil))
+
+  (when [match (.OnName c id)] (!= match nil)
+    ^{:go/via [expr node]} (.SetPos match ^{:go/via [expr node]} (.Pos id))
+    (if isDef
+      (.registerDef c match id)
+
+      (.mapUse c match id))
+
+    (return match))
+
+  (let [newId (syntax/NewName ^{:go/via [expr node]} (.Pos id) (.-Value id))]
+    (if isDef
+      (.registerDef c newId id)
+
+      (.mapUse c newId id))
+
+    ^{:line 311} newId))
+
+
+^{:go/end 333} (go/method CopyNameExpr ^syntax/Expr [^{:tag (* DeepCopier)} c ^{:tag (* syntax/Name)} id]
+  (when (not (.-inSimd (.-analyzer c)))
+    (return (.CopyName c id false)))
+
+  (when (== id nil)
+    (return nil))
+
+
+  (when [match (.OnNameExpr c id)] (!= match nil)
+    (.SetPos match ^{:go/via [expr node]} (.Pos id))
+    (when [(values n ok) (assert (* syntax/Name) match)] ok
+      (.mapUse c n id))
+
+    (return match))
+
+
+  (let [newId (syntax/NewName ^{:go/via [expr node]} (.Pos id) (.-Value id))]
+    (.mapUse c newId id)
+    ^{:line 332} newId))
+
+
+^{:go/end 433} (go/method CopyExpr ^syntax/Expr [^{:tag (* DeepCopier)} c ^syntax/Expr e]
+  (when (== e nil)
+    (return nil))
+
+  (let [^syntax/Expr newE (zero syntax/Expr)]
+    (type-switch [e e]
+      (case [(* syntax/Name)]
+        (return (.CopyNameExpr c e)))
+      (case [(* syntax/BasicLit)]
+        (let [newLit (addr (lit syntax/BasicLit :Value (.-Value e) :Kind (.-Kind e) :Bad (.-Bad e)))]
+          (set! newE newLit)))
+      (case [(* syntax/CompositeLit)]
+        (let [newLit (addr ^{:go/breaks [2 4 6]} (lit syntax/CompositeLit
+                :Type (.CopyExpr c (.-Type e))
+                :NKeys (.-NKeys e)
+                :Rbrace (.-Rbrace e)))]
+
+          (range [_ el (.-ElemList e)]
+            (set! (.-ElemList newLit) (append (.-ElemList newLit) (.CopyExpr c el))))
+
+          (set! newE newLit)))
+      (case [(* syntax/KeyValueExpr)]
+        (set! newE (addr (lit syntax/KeyValueExpr :Key (.CopyExpr c (.-Key e)) :Value (.CopyExpr c (.-Value e))))))
+      (case [(* syntax/FuncLit)]
+        (set! newE (addr (lit syntax/FuncLit :Type (assert (* syntax/FuncType) (.CopyExpr c (.-Type e))) :Body (.CopyBlockStmt c (.-Body e))))))
+      (case [(* syntax/ParenExpr)]
+        (set! newE (addr (lit syntax/ParenExpr :X (.CopyExpr c (.-X e))))))
+      (case [(* syntax/SelectorExpr)]
+        (when [sub (.OnSelector c e)] (!= sub nil)
+          (.SetPos sub ^{:go/via [expr node]} (.Pos e))
+          (when [sel (aget (.-Selections (.-info c)) e)] (!= sel nil)
+            (aset (.-Selections (.-info c)) (assert (* syntax/SelectorExpr) sub) sel))
+
+          (return sub))
+
+        (let [newSel (addr (lit syntax/SelectorExpr :X (.CopyExpr c (.-X e)) :Sel (.CopyName c (.-Sel e) false)))]
+          (when [sel (aget (.-Selections (.-info c)) e)] (!= sel nil)
+            (aset (.-Selections (.-info c)) newSel sel))
+
+          (set! newE newSel)))
+      (case [(* syntax/IndexExpr)]
+        (set! newE (addr (lit syntax/IndexExpr :X (.CopyExpr c (.-X e)) :Index (.CopyExpr c (.-Index e))))))
+      (case [(* syntax/SliceExpr)]
+        (set! newE (addr ^{:go/breaks [2 4 6]} (lit syntax/SliceExpr
+              :X (.CopyExpr c (.-X e))
+              :Index (lit (array 3 syntax/Expr) (.CopyExpr c (aget (.-Index e) 0)) (.CopyExpr c (aget (.-Index e) 1)) (.CopyExpr c (aget (.-Index e) 2)))
+              :Full (.-Full e)))))
+
+      (case [(* syntax/AssertExpr)]
+        (set! newE (addr (lit syntax/AssertExpr :X (.CopyExpr c (.-X e)) :Type (.CopyExpr c (.-Type e))))))
+      (case [(* syntax/TypeSwitchGuard)]
+        (set! newE (addr (lit syntax/TypeSwitchGuard :Lhs (.CopyName c (.-Lhs e) true) :X (.CopyExpr c (.-X e))))))
+      (case [(* syntax/Operation)]
+        (set! newE (addr (lit syntax/Operation :Op (.-Op e) :X (.CopyExpr c (.-X e)) :Y (.CopyExpr c (.-Y e))))))
+      (case [(* syntax/CallExpr)]
+        (let [newCall (addr ^{:go/breaks [2 4]} (lit syntax/CallExpr
+                :Fun (.CopyExpr c (.-Fun e))
+                :HasDots (.-HasDots e)))]
+
+          (range [_ a (.-ArgList e)]
+            (set! (.-ArgList newCall) (append (.-ArgList newCall) (.CopyExpr c a))))
+
+          (set! newE newCall)))
+      (case [(* syntax/ListExpr)]
+        (let [newList (addr (lit syntax/ListExpr))]
+          (range [_ el (.-ElemList e)]
+            (set! (.-ElemList newList) (append (.-ElemList newList) (.CopyExpr c el))))
+
+          (set! newE newList)))
+      (case [(* syntax/ArrayType)]
+        (set! newE (addr (lit syntax/ArrayType :Len (.CopyExpr c (.-Len e)) :Elem (.CopyExpr c (.-Elem e))))))
+      (case [(* syntax/SliceType)]
+        (set! newE (addr (lit syntax/SliceType :Elem (.CopyExpr c (.-Elem e))))))
+      (case [(* syntax/DotsType)]
+        (set! newE (addr (lit syntax/DotsType :Elem (.CopyExpr c (.-Elem e))))))
+      (case [(* syntax/StructType)]
+        (set! newE (addr ^{:go/breaks [2 4]} (lit syntax/StructType
+              :FieldList (.CopyFieldList c (.-FieldList e))
+              :TagList (.-TagList e))))) ; Shallow copy for tags is fine usually
+
+      (case [(* syntax/InterfaceType)]
+        (set! newE (addr (lit syntax/InterfaceType :MethodList (.CopyFieldList c (.-MethodList e))))))
+      (case [(* syntax/FuncType)]
+        (set! newE (addr ^{:go/breaks [2 4]} (lit syntax/FuncType
+              :ParamList (.CopyFieldList c (.-ParamList e))
+              :ResultList (.CopyFieldList c (.-ResultList e))))))
+
+      (case [(* syntax/MapType)]
+        (set! newE (addr (lit syntax/MapType :Key (.CopyExpr c (.-Key e)) :Value (.CopyExpr c (.-Value e))))))
+      (case [(* syntax/ChanType)]
+        (set! newE (addr (lit syntax/ChanType :Dir (.-Dir e) :Elem (.CopyExpr c (.-Elem e))))))
+      (case [(* syntax/BadExpr)]
+        (set! newE (addr (lit syntax/BadExpr))))
+      (default
+        (set! newE e)))
+
+    (.SetPos newE (.Pos e))
+    ^{:line 432} newE))
+
+
+^{:go/end 497} (go/method CopyStmt ^syntax/Stmt [^{:tag (* DeepCopier)} c ^syntax/Stmt s]
+  (when (== s nil)
+    (return nil))
+
+  (let [^syntax/Stmt newS (zero syntax/Stmt)]
+    (type-switch [s s]
+      (case [(* syntax/DeclStmt)]
+        (let [newDeclList (make (slice syntax/Decl) (len (.-DeclList s)))]
+          (range [i v (.-DeclList s)]
+            (aset newDeclList i (.CopyDecl c v)))
+
+          (set! newS (addr (lit syntax/DeclStmt :DeclList newDeclList)))))
+      (case [(* syntax/ExprStmt)]
+        (set! newS (addr (lit syntax/ExprStmt :X (.CopyExpr c (.-X s))))))
+      (case [(* syntax/SendStmt)]
+        (set! newS (addr (lit syntax/SendStmt :Chan (.CopyExpr c (.-Chan s)) :Value (.CopyExpr c (.-Value s))))))
+      (case [(* syntax/AssignStmt)]
+        (set! newS (addr (lit syntax/AssignStmt :Op (.-Op s) :Lhs (.CopyExpr c (.-Lhs s)) :Rhs (.CopyExpr c (.-Rhs s))))))
+      (case [(* syntax/ReturnStmt)]
+        (set! newS (addr (lit syntax/ReturnStmt :Results (.CopyExpr c (.-Results s))))))
+      (case [(* syntax/BranchStmt)]
+        ;; TODO this is broken
+        (set! newS (addr (lit syntax/BranchStmt :Tok (.-Tok s) :Label (.CopyName c (.-Label s) false) :Target nil)))) ; Targets need fix-up
+      (case [(* syntax/CallStmt)]
+        (set! newS (addr (lit syntax/CallStmt :Tok (.-Tok s) :Call (.CopyExpr c (.-Call s)) :DeferAt (.CopyExpr c (.-DeferAt s))))))
+      (case [(* syntax/IfStmt)]
+        (set! newS (addr ^{:go/breaks [2 4 6 8]} (lit syntax/IfStmt
+              :Init (.CopySimpleStmt c (.-Init s))
+              :Cond (.CopyExpr c (.-Cond s))
+              :Then (.CopyBlockStmt c (.-Then s))
+              :Else (.CopyStmt c (.-Else s))))))
+
+      (case [(* syntax/ForStmt)]
+        (set! newS (addr ^{:go/breaks [2 4 6 8]} (lit syntax/ForStmt
+              :Init (.CopySimpleStmt c (.-Init s))
+              :Cond (.CopyExpr c (.-Cond s))
+              :Post (.CopySimpleStmt c (.-Post s))
+              :Body (.CopyBlockStmt c (.-Body s))))))
+
+      (case [(* syntax/SwitchStmt)]
+        (set! newS (addr ^{:go/breaks [2 4 6 8]} (lit syntax/SwitchStmt
+              :Init (.CopySimpleStmt c (.-Init s))
+              :Tag (.CopyExpr c (.-Tag s))
+              :Body (.CopyCaseClauses c (.-Body s))
+              :Rbrace (.-Rbrace s)))))
+
+      (case [(* syntax/SelectStmt)]
+        (set! newS (addr ^{:go/breaks [2 4]} (lit syntax/SelectStmt
+              :Body (.CopyCommClauses c (.-Body s))
+              :Rbrace (.-Rbrace s)))))
+
+      (case [(* syntax/EmptyStmt)]
+        (set! newS (addr (lit syntax/EmptyStmt))))
+      (case [(* syntax/LabeledStmt)]
+        (set! newS (addr (lit syntax/LabeledStmt :Label (.CopyName c (.-Label s) true) :Stmt (.CopyStmt c (.-Stmt s)))))) ; Labels are defs
+      (case [(* syntax/BlockStmt)]
+        (return (.CopyBlockStmt c s)))
+      (default
+        (set! newS s)))
+
+    (.SetPos newS (.Pos s))
+    ^{:line 496} newS))
+
+
+^{:go/end 566} (go/method CopySimpleStmt ^syntax/SimpleStmt [^{:tag (* DeepCopier)} c ^syntax/SimpleStmt s]
+  (when (== s nil)
+    (return nil))
+
+  (type-switch [s s]
+    (case [(* syntax/RangeClause)]
+      (let [newS (addr ^{:go/breaks [2 4]} (lit syntax/RangeClause
+              :Def (.-Def s)
+              :X (.CopyExpr c (.-X s))))]
+
+        ;; In a range clause, Lhs may contain definitions if Def is true.
+        (if [(values list ok) (assert (* syntax/ListExpr) (.-Lhs s))] (and ok (.-Def s))
+          (let [newList (addr (lit syntax/ListExpr))]
+            (range [_ el (.-ElemList list)]
+              (if [(values id ok) (assert (* syntax/Name) el)] ok
+                (set! (.-ElemList newList) (append (.-ElemList newList) (.CopyName c id true)))
+
+                (set! (.-ElemList newList) (append (.-ElemList newList) (.CopyExpr c el)))))
+
+
+            (set! (.-Lhs newS) newList))
+          (if [(values id ok) (assert (* syntax/Name) (.-Lhs s))] (and ok (.-Def s))
+            (set! (.-Lhs newS) (.CopyName c id true))
+
+            (set! (.-Lhs newS) (.CopyExpr c (.-Lhs s)))))
+
+        (.SetPos (.-Lhs newS) (.Pos (.-Lhs s)))
+        ^{:go/via [simpleStmt stmt node]} (.SetPos newS ^{:go/via [simpleStmt stmt node]} (.Pos s))
+        (return newS)))
+    (case [(* syntax/AssignStmt)]
+      ;; Check for :=
+      (let [isDef false]
+        (if [(values list ok) (assert (* syntax/ListExpr) (.-Lhs s))] ok
+          (range [_ el (.-ElemList list)]
+            (when [(values id ok) (assert (* syntax/Name) el)] (and ok (!= (aget (.-Defs (.-info c)) id) nil))
+              (set! isDef true)
+              (break)))
+
+
+          (when [(values id ok) (assert (* syntax/Name) (.-Lhs s))] (and ok (!= (aget (.-Defs (.-info c)) id) nil))
+            (set! isDef true)))
+
+
+        (let [newS (addr (lit syntax/AssignStmt :Op (.-Op s) :Rhs (.CopyExpr c (.-Rhs s))))]
+          (if isDef
+            (if [(values list ok) (assert (* syntax/ListExpr) (.-Lhs s))] ok
+              (let [newList (addr (lit syntax/ListExpr))]
+                (range [_ el (.-ElemList list)]
+                  (if [(values id ok) (assert (* syntax/Name) el)] (and ok (!= (aget (.-Defs (.-info c)) id) nil))
+                    (set! (.-ElemList newList) (append (.-ElemList newList) (.CopyName c id true)))
+
+                    (set! (.-ElemList newList) (append (.-ElemList newList) (.CopyExpr c el)))))
+
+
+                (set! (.-Lhs newS) newList))
+              (when [(values id ok) (assert (* syntax/Name) (.-Lhs s))] ok
+                (set! (.-Lhs newS) (.CopyName c id true))))
+
+
+            (set! (.-Lhs newS) (.CopyExpr c (.-Lhs s))))
+
+          (.SetPos (.-Lhs newS) (.Pos (.-Lhs s)))
+          ^{:go/via [simpleStmt stmt node]} (.SetPos newS ^{:go/via [simpleStmt stmt node]} (.Pos s))
+          (return newS))))
+    (default
+      (return (assert syntax/SimpleStmt (.CopyStmt c s))))))
+
+
+
+^{:go/end 579} (go/method CopyCaseClauses ^{:tag (slice (* syntax/CaseClause))} [^{:tag (* DeepCopier)} c ^{:tag (slice (* syntax/CaseClause))} list]
+  (let [^{:tag (slice (* syntax/CaseClause))} newList (zero (slice (* syntax/CaseClause)))]
+    (range [_ cc list]
+      (let [newC (addr (lit syntax/CaseClause :Cases (.CopyExpr c (.-Cases cc)) :Colon (.-Colon cc)))]
+        (range [_ b (.-Body cc)]
+          (set! (.-Body newC) (append (.-Body newC) (.CopyStmt c b))))
+
+        ^{:go/via [node]} (.SetPos newC ^{:go/via [node]} (.Pos cc))
+        (set! newList (append newList newC))))
+
+    ^{:line 578} newList))
+
+
+^{:go/end 592} (go/method CopyCommClauses ^{:tag (slice (* syntax/CommClause))} [^{:tag (* DeepCopier)} c ^{:tag (slice (* syntax/CommClause))} list]
+  (let [^{:tag (slice (* syntax/CommClause))} newList (zero (slice (* syntax/CommClause)))]
+    (range [_ cc list]
+      (let [newC (addr (lit syntax/CommClause :Comm (.CopySimpleStmt c (.-Comm cc)) :Colon (.-Colon cc)))]
+        (range [_ b (.-Body cc)]
+          (set! (.-Body newC) (append (.-Body newC) (.CopyStmt c b))))
+
+        ^{:go/via [node]} (.SetPos newC ^{:go/via [node]} (.Pos cc))
+        (set! newList (append newList newC))))
+
+    ^{:line 591} newList))
+
+
+^{:go/end 604} (go/method CopyBlockStmt ^{:tag (* syntax/BlockStmt)} [^{:tag (* DeepCopier)} c ^{:tag (* syntax/BlockStmt)} b]
+  (when (== b nil)
+    (return nil))
+
+  (let [newB (addr (lit syntax/BlockStmt :Rbrace (.-Rbrace b)))]
+    (range [_ s (.-List b)]
+      (set! (.-List newB) (append (.-List newB) (.CopyStmt c s))))
+
+    ^{:go/via [stmt node]} (.SetPos newB ^{:go/via [stmt node]} (.Pos b))
+    ^{:line 603} newB))
+
+
+^{:go/end 615} (go/method CopyFieldList ^{:tag (slice (* syntax/Field))} [^{:tag (* DeepCopier)} c ^{:tag (slice (* syntax/Field))} f]
+  (when (== f nil)
+    (return nil))
+
+  (let [^{:tag (slice (* syntax/Field))} newF (zero (slice (* syntax/Field)))]
+    (range [_ field f]
+      (set! newF (append newF (.CopyField c field))))
+
+    ^{:line 614} newF))
+
+
+^{:go/end 627} (go/method CopyField ^{:tag (* syntax/Field)} [^{:tag (* DeepCopier)} c ^{:tag (* syntax/Field)} f]
+  (when (== f nil)
+    (return nil))
+
+  (let [newF (addr ^{:go/breaks [2 4]} (lit syntax/Field
+          :Name (.CopyName c (.-Name f) true)
+          :Type (.CopyExpr c (.-Type f))))]
+
+    ^{:go/via [node]} (.SetPos newF ^{:go/via [node]} (.Pos f))
+    ^{:line 626} newF))

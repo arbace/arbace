@@ -1,0 +1,166 @@
+;; Copyright 2016 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.cmd.compile.internal.ssa) (go/file "trim.go" :imports [
+
+    ^{:line 7} [src "cmd/internal/src"]])
+
+
+
+^{:go/end 115} (go/func trim "trim removes blocks with no code in them.\nThese blocks were inserted to remove critical edges.\n" [^{:tag (* Func)} f]
+  (let [n 0]
+    (range [_ b (.-Blocks f)]
+      (when (not (trimmableBlock b))
+        (aset (.-Blocks f) n b)
+        (inc! n)
+        (continue))
+
+
+      (let [bPos (.-Pos b)
+          ^{:line 21} bIsStmt (== ^{:go/via [lico]} (.IsStmt bPos) src/PosIsStmt)
+
+          ;; Splice b out of the graph. NOTE: `mergePhi` depends on the
+          ;; order, in which the predecessors edges are merged here.
+          (values p i) (values (.-b (aget (.-Preds b) 0)) (.-i (aget (.-Preds b) 0)))
+          (values s j) (values (.-b (aget (.-Succs b) 0)) (.-i (aget (.-Succs b) 0)))
+          ^{:line 27} ns (len (.-Preds s))]
+        (aset (.-Succs p) i (lit Edge s j))
+        (aset (.-Preds s) j (lit Edge p i))
+
+        (range [_ e (subslice (.-Preds b) 1)]
+          (let [(values p i) (values (.-b e) (.-i e))]
+            (aset (.-Succs p) i (lit Edge s (len (.-Preds s))))
+            (set! (.-Preds s) (append (.-Preds s) (lit Edge p i)))))
+
+
+        ;; Attempt to preserve a statement boundary
+        (when bIsStmt
+          (let [sawStmt false]
+            (range [_ v (.-Values s)]
+              (when (isPoorStatementOp (.-Op v))
+                (continue))
+
+              (when (.SameFileAndLine (.-Pos v) bPos)
+                (set! (.-Pos v) (.WithIsStmt (.-Pos v))))
+
+              (set! sawStmt true)
+              (break))
+
+            (when (and (not sawStmt) (.SameFileAndLine (.-Pos s) bPos))
+              (set! (.-Pos s) (.WithIsStmt (.-Pos s))))))
+
+
+        ;; If `s` had more than one predecessor, update its phi-ops to
+        ;; account for the merge.
+        (when (> ns 1)
+          (range [_ v (.-Values s)]
+            (when (== (.-Op v) OpPhi)
+              (mergePhi v j b)))
+
+
+
+          ;; Remove the phi-ops from `b` if they were merged into the
+          ;; phi-ops of `s`.
+          (let [k 0]
+            (range [_ v (.-Values b)]
+              (when (== (.-Op v) OpPhi)
+                (when (== (.-Uses v) 0)
+                  (.resetArgs v)
+                  (continue))
+
+                ;; Pad the arguments of the remaining phi-ops so
+                ;; they match the new predecessor count of `s`.
+                ;; Since s did not have a Phi op corresponding to
+                ;; the phi op in b, the other edges coming into s
+                ;; must be loopback edges from s, so v is the right
+                ;; argument to v!
+                (let [args (make (slice (* Value)) (len (.-Args v)))]
+                  (copy args (.-Args v))
+                  (.resetArgs v)
+                  (for [x 0] (< x j) (inc! x)
+                    (.AddArg v v))
+
+                  (.AddArg v (aget args 0))
+                  (for [x (+ j 1)] (< x ns) (inc! x)
+                    (.AddArg v v))
+
+                  (range [_ a (subslice args 1)]
+                    (.AddArg v a))))
+
+
+              (aset (.-Values b) k v)
+              (inc! k))
+
+            (set! (.-Values b) (subslice (.-Values b) _ k))))
+
+
+        ;; Merge the blocks' values.
+        (range [_ v (.-Values b)]
+          (set! (.-Block v) s))
+
+        (let [k (len (.-Values b))
+            ^{:line 103} m (len (.-Values s))]
+          (for [i 0] (< i k) (inc! i)
+            (set! (.-Values s) (append (.-Values s) nil)))
+
+          (copy (subslice (.-Values s) k) (subslice (.-Values s) _ m))
+          (copy (.-Values s) (.-Values b)))))
+
+    (when (< n (len (.-Blocks f)))
+      (.invalidateCFG f)
+      (clear (subslice (.-Blocks f) n))
+      (set! (.-Blocks f) (subslice (.-Blocks f) _ n)))))
+
+
+
+
+
+^{:go/breaks [[5 125]] :go/end 126} (go/func emptyBlock "emptyBlock reports whether the block does not contain actual\ninstructions.\n" ^bool [^{:tag (* Block)} b]
+  (range [_ v (.-Values b)]
+    (when (!= (.-Op v) OpPhi)
+      (return false)))
+
+
+  true)
+
+
+
+
+
+
+
+
+
+^{:go/end 141} (go/func trimmableBlock "trimmableBlock reports whether the block can be trimmed from the CFG,\nsubject to the following criteria:\n  - it should not be the first block.\n  - it should be BlockPlain.\n  - it should not loop back to itself.\n  - it either is the single predecessor of the successor block or\n    contains no actual instructions.\n" ^bool [^{:tag (* Block)} b]
+  (when (or (!= (.-Kind b) BlockPlain) (== b (.-Entry (.-Func b))))
+    (return false))
+
+  (let [s (.-b (aget (.-Succs b) 0))]
+    (and (!= s b) ^:go/paren (or (== (len (.-Preds s)) 1) (emptyBlock b)))))
+
+
+
+
+^{:go/end 169} (go/func mergePhi "mergePhi adjusts the number of `v`s arguments to account for merge\nof `b`, which was `i`th predecessor of the `v`s block.\n" [^{:tag (* Value)} v ^int i ^{:tag (* Block)} b]
+  (let [u (aget (.-Args v) i)]
+    (if (== (.-Block u) b) (do
+        (when (!= (.-Op u) OpPhi)
+          (.Fatalf (.-Func b) "value %s is not a phi operation" (.LongString u)))
+
+        ;; If the original block contained u = φ(u0, u1, ..., un) and
+        ;; the current phi is
+        ;;    v = φ(v0, v1, ..., u, ..., vk)
+        ;; then the merged phi is
+        ;;    v = φ(v0, v1, ..., u0, ..., vk, u1, ..., un)
+        (.SetArg v i (aget (.-Args u) 0))
+        (.AddArgs v (spread (subslice (.-Args u) 1))))
+
+      ;; If the original block contained u = φ(u0, u1, ..., un) and
+      ;; the current phi is
+      ;;    v = φ(v0, v1, ...,  vi, ..., vk)
+      ;; i.e. it does not use a value from the predecessor block,
+      ;; then the merged phi is
+      ;;    v = φ(v0, v1, ..., vk, vi, vi, ...)
+      (for [j 1] (< j (len (.-Preds b))) (inc! j)
+        (.AddArg v (aget (.-Args v) i))))))

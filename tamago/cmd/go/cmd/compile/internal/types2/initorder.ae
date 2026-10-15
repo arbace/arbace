@@ -1,0 +1,344 @@
+;; Copyright 2014 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.cmd.compile.internal.types2) (go/file "initorder.go" :imports [
+
+
+    ^{:line 8} [cmp "cmp"]
+    ^{:line 9} [heap "container/heap"]
+    ^{:line 10} [fmt "fmt"]
+    ^{:line 11} [. "internal/types/errors"]
+    ^{:line 12} [slices "slices"]
+    ^{:line 13} [sort "sort"]])
+
+
+
+^{:go/end 132} (go/method initOrder "initOrder computes the Info.InitOrder for package variables.\n" [^{:tag (* Checker)} check]
+  ;; An InitOrder may already have been computed if a package is
+  ;; built from several calls to (*Checker).Files. Clear it.
+  (set! (.-InitOrder (.-Info check)) (subslice (.-InitOrder (.-Info check)) _ 0))
+
+  ;; Compute the object dependency graph and initialize
+  ;; a priority queue with the list of graph nodes.
+  (let [pq (conv nodeQueue (dependencyGraph (.-objMap check)))]
+    (heap/Init (addr pq))
+
+    (let [^:const ^{:val false} debug false]
+      (when debug
+        (fmt/Printf "Computing initialization order for %s\n\n" (.-pkg check))
+        (fmt/Println "Object dependency graph:")
+        (range [obj d (.-objMap check)]
+          ;; only print objects that may appear in the dependency graph
+          (when [(values obj _) (assert dependency obj)] (!= obj nil)
+            (if (> (len (.-deps d)) 0) (do
+                (fmt/Printf "\t%s depends on\n" (.Name obj))
+                (range [dep (.-deps d)]
+                  (fmt/Printf "\t\t%s\n" (.Name dep))))
+
+
+              (fmt/Printf "\t%s has no dependencies\n" (.Name obj)))))
+
+
+
+        (fmt/Println)
+
+        (fmt/Println "Transposed object dependency graph (functions eliminated):")
+        (range [_ n pq]
+          (fmt/Printf "\t%s depends on %d nodes\n" (.Name (.-obj n)) (.-ndeps n))
+          (range [p (.-pred n)]
+            (fmt/Printf "\t\t%s is dependent\n" (.Name (.-obj p)))))
+
+
+        (fmt/Println)
+
+        (fmt/Println "Processing nodes:"))
+
+
+      ;; Determine initialization order by removing the highest priority node
+      ;; (the one with the fewest dependencies) and its edges from the graph,
+      ;; repeatedly, until there are no nodes left.
+      ;; In a valid Go program, those nodes always have zero dependencies (after
+      ;; removing all incoming dependencies), otherwise there are initialization
+      ;; cycles.
+      (let [emitted (make (map (* declInfo) bool))]
+        (while (> (len pq) 0)
+          ;; get the next node
+          (let [n (assert (* graphNode) (heap/Pop (addr pq)))]
+
+            (when debug
+              (fmt/Printf "\t%s (src pos %d) depends on %d nodes now\n"
+                (.Name (.-obj n)) (.order (.-obj n)) (.-ndeps n)))
+
+
+            ;; if n still depends on other nodes, we have a cycle
+            (when (> (.-ndeps n) 0)
+              (let [cycle (findPath (.-objMap check) (.-obj n) (.-obj n) (make (map Object bool)))]
+                ;; If n.obj is not part of the cycle (e.g., n.obj->b->c->d->c),
+                ;; cycle will be nil. Don't report anything in that case since
+                ;; the cycle is reported when the algorithm gets to an object
+                ;; in the cycle.
+                ;; Furthermore, once an object in the cycle is encountered,
+                ;; the cycle will be broken (dependency count will be reduced
+                ;; below), and so the remaining nodes in the cycle don't trigger
+                ;; another error (unless they are part of multiple cycles).
+                (when (!= cycle nil)
+                  (.reportCycle check cycle))))
+
+            ;; Ok to continue, but the variable initialization order
+            ;; will be incorrect at this point since it assumes no
+            ;; cycle errors.
+
+
+            ;; reduce dependency count of all dependent nodes
+            ;; and update priority queue
+            (range [p (.-pred n)]
+              (dec! (.-ndeps p))
+              (heap/Fix (addr pq) (.-index p)))
+
+
+            ;; record the init order for variables with initializers only
+            (let [(values v _) (assert (* Var) (.-obj n))
+                ^{:line 102} info (aget (.-objMap check) v)]
+              (when (or (== v nil) (not (.hasInitializer info)))
+                (continue))
+
+
+              ;; n:1 variable declarations such as: a, b = f()
+              ;; introduce a node for each lhs variable (here: a, b);
+              ;; but they all have the same initializer - emit only
+              ;; one, for the first variable seen
+              (when (aget emitted info)
+                (continue)) ; initializer already emitted, if any
+
+              (aset emitted info true)
+
+              (let [infoLhs (.-lhs info)] ; possibly nil (see declInfo.lhs field comment)
+                (when (== infoLhs nil)
+                  (set! infoLhs (lit (slice (* Var)) v)))
+
+                (let [init (addr (lit Initializer infoLhs (.-init info)))]
+                  (set! (.-InitOrder (.-Info check)) (append (.-InitOrder (.-Info check)) init)))))))
+
+
+        (when debug
+          (fmt/Println)
+          (fmt/Println "Initialization order:")
+          (range [_ init (.-InitOrder (.-Info check))]
+            (fmt/Printf "\t%s\n" init))
+
+          (fmt/Println))))))
+
+
+
+
+
+
+^{:go/end 162} (go/func findPath "findPath returns the (reversed) list of objects []Object{to, ... from}\nsuch that there is a path of object dependencies from 'from' to 'to'.\nIf there is no such path, the result is nil.\n" ^{:tag (slice Object)} [^{:tag (map Object (* declInfo))} objMap ^Object from ^Object to ^{:tag (map Object bool)} seen]
+  (when (aget seen from)
+    (return nil))
+
+  (aset seen from true)
+
+  ;; sort deps for deterministic result
+  ^{:go/breaks [[5 161]]} (let [^{:tag (slice Object)} deps (zero (slice Object))]
+    (range [d (.-deps (aget objMap from))]
+      (set! deps (append deps d)))
+
+    (sort/Slice deps ^{:go/end 150} (fn ^bool [^int i ^int j]
+        (< (.order (aget deps i)) (.order (aget deps j)))))
+
+
+    (range [_ d deps]
+      (when (== d to)
+        (return (lit (slice Object) d)))
+
+      (when [P (findPath objMap d to seen)] (!= P nil)
+        (return (append P d))))
+
+
+
+    nil))
+
+
+
+^{:go/end 183} (go/method reportCycle "reportCycle reports an error for the given cycle.\n" [^{:tag (* Checker)} check ^{:tag (slice Object)} cycle]
+  (let [obj (aget cycle 0)]
+
+    ;; report a more concise error for self references
+    (when (== (len cycle) 1)
+      (.errorf check obj InvalidInitCycle "initialization cycle: %s refers to itself" (.Name obj))
+      (return))
+
+
+    (let [err (.newError check InvalidInitCycle)]
+      (.addf err obj "initialization cycle for %s" (.Name obj))
+      ;; "cycle[i] refers to cycle[j]" for (i,j) = (0,n-1), (n-1,n-2), ..., (1,0) for len(cycle) = n.
+      (for [j (- (len cycle) 1)] (>= j 0) (dec! j)
+        (let [next (aget cycle j)]
+          (.addf err obj "%s refers to %s" (.Name obj) (.Name next))
+          (set! obj next)))
+
+      (.report err))))
+
+
+;; ----------------------------------------------------------------------------
+;; Object dependency graph
+
+
+
+
+
+(go/type dependency "A dependency is an object that may be a dependency in an initialization\nexpression. Only constants, variables, and functions can be dependencies.\nConstants are here because constant expression cycles are reported during\ninitialization order computation.\n" (interface
+    ^{:line 193} Object
+    (isDependency [])))
+
+
+
+
+
+
+(go/type graphNode "A graphNode represents a node in the object dependency graph.\nEach node p in n.pred represents an edge p->n, and each node\ns in n.succ represents an edge n->s; with a->b indicating that\na depends on b.\n" (struct
+    ^{:line 202 :tag dependency} obj ; object represented by this node
+    ^{:line 203 :tag nodeSet} pred ^nodeSet succ ; consumers and dependencies of this node (lazily initialized)
+    ^{:line 204 :tag int} index ; node index in graph slice/priority queue
+    ^{:line 205 :tag int} ndeps)) ; number of outstanding dependencies before this object can be initialized
+
+
+
+
+^{:go/end 212} (go/method cost "cost returns the cost of removing this node, which involves copying each\npredecessor to each successor (and vice-versa).\n" ^int [^{:tag (* graphNode)} n]
+  (* (len (.-pred n)) (len (.-succ n))))
+
+
+(go/type nodeSet (map (* graphNode) bool))
+
+^{:go/end 221} (go/method add [^{:tag (* nodeSet)} s ^{:tag (* graphNode)} p]
+  (when (== @s nil)
+    (set! @s (make nodeSet)))
+
+  (aset @s p true))
+
+
+
+
+
+^{:go/end 303} (go/func dependencyGraph "dependencyGraph computes the object dependency graph from the given objMap,\nwith any function nodes removed. The resulting graph contains only constants\nand variables.\n" ^{:tag (slice (* graphNode))} [^{:tag (map Object (* declInfo))} objMap]
+  ;; M is the dependency (Object) -> graphNode mapping
+  (let [M (make (map dependency (* graphNode)))]
+    (range [obj objMap]
+      ;; only consider nodes that may be an initialization dependency
+      (when [(values obj _) (assert dependency obj)] (!= obj nil)
+        (aset M obj (addr (lit graphNode :obj obj)))))
+
+
+
+    ;; compute edges for graph M
+    ;; (We need to include all nodes, even isolated ones, because they still need
+    ;; to be scheduled for initialization in correct order relative to other nodes.)
+    (range [obj n M]
+      ;; for each dependency obj -> d (= deps[i]), create graph edges n->s and s->n
+      (range [d (.-deps (aget objMap obj))]
+        ;; only consider nodes that may be an initialization dependency
+        (when [(values d _) (assert dependency d)] (!= d nil)
+          (let [d (aget M d)]
+            (.add (.-succ n) d)
+            (.add (.-pred d) n)))))
+
+
+
+
+    (let [(values ^{:tag (slice (* graphNode))} G ^{:tag (slice (* graphNode))} funcG) (zero (slice (* graphNode)))] ; separate non-functions and functions
+      (range [_ n M]
+        (if [(values _ ok) (assert (* Func) (.-obj n))] ok
+          (set! funcG (append funcG n))
+
+          (set! G (append G n))))
+
+
+
+      ;; remove function nodes and collect remaining graph nodes in G
+      ;; (Mutually recursive functions may introduce cycles among themselves
+      ;; which are permitted. Yet such cycles may incorrectly inflate the dependency
+      ;; count for variables which in turn may not get scheduled for initialization
+      ;; in correct order.)
+      ;;
+      ;; Note that because we recursively copy predecessors and successors
+      ;; throughout the function graph, the cost of removing a function at
+      ;; position X is proportional to cost * (len(funcG)-X). Therefore, we should
+      ;; remove high-cost functions last.
+      (^{:inst [(slice (* graphNode)) (* graphNode)]} slices/SortFunc funcG ^{:go/end 272} (fn ^int [^{:tag (* graphNode)} a ^{:tag (* graphNode)} b]
+          (^{:inst [int]} cmp/Compare (.cost a) (.cost b))))
+
+      (range [_ n funcG]
+        ;; connect each predecessor p of n with each successor s
+        ;; and drop the function node (don't collect it in G)
+        (range [p (.-pred n)]
+          ;; ignore self-cycles
+          (when (!= p n)
+            ;; Each successor s of n becomes a successor of p, and
+            ;; each predecessor p of n becomes a predecessor of s.
+            (range [s (.-succ n)]
+              ;; ignore self-cycles
+              (when (!= s n)
+                (.add (.-succ p) s)
+                (.add (.-pred s) p)))
+
+
+            (delete (.-succ p) n))) ; remove edge to n
+
+
+        (range [s (.-succ n)]
+          (delete (.-pred s) n))) ; remove edge to n
+
+
+
+      ;; fill in index and ndeps fields
+      (range [i n G]
+        (set! (.-index n) i)
+        (set! (.-ndeps n) (len (.-succ n))))
+
+
+      ^{:line 302} G)))
+
+
+;; ----------------------------------------------------------------------------
+;; Priority queue
+
+
+
+(go/type nodeQueue "nodeQueue implements the container/heap interface;\na nodeQueue may be used as a priority queue.\n" (slice (* graphNode)))
+
+^{:go/end 312} (go/method Len ^int [^nodeQueue a] (len a))
+
+^{:go/end 318} (go/method Swap [^nodeQueue a ^int i ^int j]
+  (let [(values x y) (values (aget a i) (aget a j))]
+    (set! (values (aget a i) (aget a j)) (values y x))
+    (set! (values (.-index x) (.-index y)) (values j i))))
+
+
+^{:go/end 333} (go/method Less ^bool [^nodeQueue a ^int i ^int j]
+  (let [(values x y) (values (aget a i) (aget a j))
+
+      ;; Prioritize all constants before non-constants. See go.dev/issue/66575/.
+      (values _ xConst) (assert (* Const) (.-obj x))
+      (values _ yConst) (assert (* Const) (.-obj y))]
+    (when (!= xConst yConst)
+      (return xConst))
+
+
+    ;; nodes are prioritized by number of incoming dependencies (1st key)
+    ;; and source order (2nd key)
+    (or (< (.-ndeps x) (.-ndeps y)) (and (== (.-ndeps x) (.-ndeps y)) (< (.order (.-obj x)) (.order (.-obj y)))))))
+
+
+^{:go/end 337} (go/method Push [^{:tag (* nodeQueue)} a ^any x]
+  (panic "unreachable"))
+
+
+^{:go/end 345} (go/method Pop ^any [^{:tag (* nodeQueue)} a]
+  (let [n (len @a)
+      ^{:line 341} x (aget @a (- n 1))]
+    (set! (.-index x) -1) ; for safety
+    (set! @a (subslice @a _ (- n 1)))
+    ^{:line 344} x))

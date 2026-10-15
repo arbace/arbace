@@ -1,0 +1,191 @@
+;; Copyright 2011 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.cmd.compile.internal.gc) (go/file "compile.go" :imports [
+
+
+    ^{:line 8} [cmp "cmp"]
+    ^{:line 9} [race "internal/race"]
+    ^{:line 10} [rand "math/rand"]
+    ^{:line 11} [slices "slices"]
+    ^{:line 12} [sync "sync"]
+
+    ^{:line 14} [base "cmd/compile/internal/base"]
+    ^{:line 15} [ir "cmd/compile/internal/ir"]
+    ^{:line 16} [liveness "cmd/compile/internal/liveness"]
+    ^{:line 17} [objw "cmd/compile/internal/objw"]
+    ^{:line 18} [pgoir "cmd/compile/internal/pgoir"]
+    ^{:line 19} [ssagen "cmd/compile/internal/ssagen"]
+    ^{:line 20} [staticinit "cmd/compile/internal/staticinit"]
+    ^{:line 21} [types "cmd/compile/internal/types"]
+    ^{:line 22} [walk "cmd/compile/internal/walk"]
+    ^{:line 23} [obj "cmd/internal/obj"]])
+
+
+;; "Portable" code generation.
+
+(go/var
+  ^{:line 29} [^{:tag (slice (* ir/Func))} compilequeue]) ; functions waiting to be compiled
+
+
+^{:go/end 96} (go/func enqueueFunc [^{:tag (* ir/Func)} fn ^{:tag (* ssagen/SymABIs)} symABIs]
+  (when (!= ir/CurFunc nil)
+    (base/FatalfAt ^{:go/via [miniNode]} (.Pos fn) "enqueueFunc %v inside %v" fn ir/CurFunc))
+
+
+  (when (== (ir/FuncName fn) "_")
+    ;; Skip compiling blank functions.
+    ;; Frontend already reported any spec-mandated errors (#29870).
+    (return))
+
+
+  (when (.IsClosure fn)
+    (return)) ; we'll get this as part of its enclosing function
+
+
+  (when (ssagen/CreateWasmImportWrapper fn)
+    (return))
+
+
+  (when (== (len (.-Body fn)) 0)
+    (if (and (ir/IsIntrinsicSym (.Sym fn)) (== (.-Linkname (.Sym fn)) "") (not (.HasDef symABIs (.Sym fn))))
+      ;; Generate the function body for a bodyless intrinsic, in case it
+      ;; is used in a non-call context (e.g. as a function pointer).
+      ;; We skip functions defined in assembly, or has a linkname (which
+      ;; could be defined in another package).
+      (ssagen/GenIntrinsicBody fn)
+      (do
+        ;; Initialize ABI wrappers if necessary.
+        (ir/InitLSym fn false)
+        (types/CalcSize (.Type fn))
+        (let [a (ssagen/AbiForBodylessFuncStackMap fn)
+            ^{:line 63} abiInfo (.ABIAnalyzeFuncType a (.Type fn))] ; abiInfo has spill/home locations for wrapper
+          (when (== (.-ABI fn) obj/ABI0)
+            ;; The current args_stackmap generation assumes the function
+            ;; is ABI0, and only ABI0 assembly function can have a FUNCDATA
+            ;; reference to args_stackmap (see cmd/internal/obj/plist.go:Flushplist).
+            ;; So avoid introducing an args_stackmap if the func is not ABI0.
+            (liveness/WriteFuncMap fn abiInfo)
+
+            (let [x (ssagen/EmitArgInfo fn abiInfo)]
+              (objw/Global x (conv int32 (len (.-P x))) (bit-or obj/RODATA obj/LOCAL))))
+
+          (return)))))
+
+
+
+  (let [errorsBefore (base/Errors)
+
+      ^{:line 80} todo (lit (slice (* ir/Func)) fn)]
+    (while (> (len todo) 0)
+      (let [next (aget todo (- (len todo) 1))]
+        (set! todo (subslice todo _ (- (len todo) 1)))
+
+        (prepareFunc next)
+        (set! todo (append todo (spread (.-Closures next))))))
+
+
+    (when (> (base/Errors) errorsBefore)
+      (return))
+
+
+    ;; Enqueue just fn itself. compileFunctions will handle
+    ;; scheduling compilation of its closures after it's done.
+    (set! compilequeue (append compilequeue fn))))
+
+
+
+
+^{:go/end 130} (go/func prepareFunc "prepareFunc handles any remaining frontend compilation tasks that\naren't yet safe to perform concurrently.\n" [^{:tag (* ir/Func)} fn]
+  ;; Set up the function's LSym early to avoid data races with the assemblers.
+  ;; Do this before walk, as walk needs the LSym to set attributes/relocations
+  ;; (e.g. in MarkTypeUsedInInterface).
+  (ir/InitLSym fn true)
+
+  ;; If this function is a compiler-generated outlined global map
+  ;; initializer function, register its LSym for later processing.
+  (when (!= staticinit/MapInitToVar nil)
+    (when [(values _ ok) (aget staticinit/MapInitToVar fn)] ok
+      (ssagen/RegisterMapInitLsym (.Linksym fn))))
+
+
+
+  ;; Calculate parameter offsets.
+  (types/CalcSize (.Type fn))
+
+  ;; Generate wrappers between Go ABI and Wasm ABI, for a wasmexport
+  ;; function.
+  ;; Must be done after InitLSym and CalcSize.
+  (ssagen/GenWasmExportWrapper fn)
+
+  (set! ir/CurFunc fn)
+  (walk/Walk fn)
+  (when (ir/MatchAstDump fn "walk")
+    (ir/AstDump fn (+ "walk, " (ir/FuncName fn))))
+
+  (set! ir/CurFunc nil) ; enforce no further uses of CurFunc
+
+  (inc! (.-DwTextCount base/Ctxt)))
+
+
+
+
+
+^{:go/end 192} (go/func compileFunctions "compileFunctions compiles all functions in compilequeue.\nIt fans out nBackendWorkers to do the work\nand waits for them to complete.\n" [^{:tag (* pgoir/Profile)} profile]
+  (if race/Enabled
+    ;; Randomize compilation order to try to shake out races.
+    (let [tmp (make (slice (* ir/Func)) (len compilequeue))
+        ^{:line 139} perm (rand/Perm (len compilequeue))]
+      (range [i v perm]
+        (aset tmp v (aget compilequeue i)))
+
+      (copy compilequeue tmp))
+
+    ;; Compile the longest functions first,
+    ;; since they're most likely to be the slowest.
+    ;; This helps avoid stragglers.
+    ;; Since we remove from the end of the slice queue,
+    ;; that means shortest to longest.
+    (^{:inst [(slice (* ir/Func)) (* ir/Func)]} slices/SortFunc compilequeue ^{:go/end 152} (fn ^int [^{:tag (* ir/Func)} a ^{:tag (* ir/Func)} b]
+        (^{:inst [int]} cmp/Compare (len (.-Body a)) (len (.-Body b))))))
+
+
+
+  (let [^sync/Mutex mu (zero sync/Mutex)
+      ^{:line 156 :tag sync/WaitGroup} wg (zero sync/WaitGroup)]
+    (.Lock mu)
+
+    (range [workerId (.-LowerC base/Flag)]
+      ;; TODO: replace with wg.Go when the oldest bootstrap has it.
+      ;; With the current policy, that'd be go1.27.
+      (.Add wg 1)
+      (go (^{:go/end 180} (fn []
+            (defer (.Done wg))
+            (let [^{:tag (slice (* ir/Func))} closures (zero (slice (* ir/Func)))]
+              (while true
+                (.Lock mu)
+                (set! compilequeue (append compilequeue (spread closures)))
+                (let [remaining (len compilequeue)]
+                  (when (== remaining 0)
+                    (.Unlock mu)
+                    (return))
+
+                  (let [fn (aget compilequeue (- (len compilequeue) 1))]
+                    (set! compilequeue (subslice compilequeue _ (- (len compilequeue) 1)))
+                    (.Unlock mu)
+                    (ssagen/Compile fn workerId profile)
+                    (set! closures (.-Closures fn))))))))))
+
+
+
+
+    (set! types/CalcSizeDisabled true) ; not safe to calculate sizes concurrently
+    (set! (.-InParallel base/Ctxt) true)
+
+    (.Unlock mu)
+    (.Wait wg)
+    (set! compilequeue nil)
+
+    (set! (.-InParallel base/Ctxt) false)
+    (set! types/CalcSizeDisabled false)))

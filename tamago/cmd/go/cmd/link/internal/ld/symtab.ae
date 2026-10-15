@@ -1,0 +1,858 @@
+;; Inferno utils/6l/span.c
+;; https://bitbucket.org/inferno-os/inferno-os/src/master/utils/6l/span.c
+;;
+;;	Copyright © 1994-1999 Lucent Technologies Inc.  All rights reserved.
+;;	Portions Copyright © 1995-1997 C H Forsyth (forsyth@terzarima.net)
+;;	Portions Copyright © 1997-1999 Vita Nuova Limited
+;;	Portions Copyright © 2000-2007 Vita Nuova Holdings Limited (www.vitanuova.com)
+;;	Portions Copyright © 2004,2006 Bruce Ellis
+;;	Portions Copyright © 2005-2007 C H Forsyth (forsyth@terzarima.net)
+;;	Revisions Copyright © 2000-2007 Lucent Technologies Inc. and others
+;;	Portions Copyright © 2009 The Go Authors. All rights reserved.
+;;
+;; Permission is hereby granted, free of charge, to any person obtaining a copy
+;; of this software and associated documentation files (the "Software"), to deal
+;; in the Software without restriction, including without limitation the rights
+;; to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+;; copies of the Software, and to permit persons to whom the Software is
+;; furnished to do so, subject to the following conditions:
+;;
+;; The above copyright notice and this permission notice shall be included in
+;; all copies or substantial portions of the Software.
+;;
+;; THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+;; IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+;; FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL THE
+;; AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+;; LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+;; OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+;; THE SOFTWARE.
+
+(in-ns 'go.cmd.link.internal.ld) (go/file "symtab.go" :imports [
+
+
+    ^{:line 34} [obj "cmd/internal/obj"]
+    ^{:line 35} [objabi "cmd/internal/objabi"]
+    ^{:line 36} [loader "cmd/link/internal/loader"]
+    ^{:line 37} [sym "cmd/link/internal/sym"]
+    ^{:line 38} [elf "debug/elf"]
+    ^{:line 39} [fmt "fmt"]
+    ^{:line 40} [buildcfg "internal/buildcfg"]
+    ^{:line 41} [filepath "path/filepath"]
+    ^{:line 42} [strings "strings"]])
+
+
+;; Symbol table.
+
+^{:go/end 57} (go/func putelfstr ^int [^string s]
+  (when (and (== (len elfstrdat) 0) (!= s ""))
+    ;; first entry must be empty string
+    (putelfstr ""))
+
+
+  (let [off (len elfstrdat)]
+    (set! elfstrdat (append elfstrdat (spread s)))
+    (set! elfstrdat (append elfstrdat 0))
+    ^{:line 56} off))
+
+
+^{:go/end 77} (go/func putelfsyment [^{:tag (* OutBuf)} out ^int off ^int64 addr ^int64 size ^uint8 info ^elf/SectionIndex shndx ^int other]
+  (if elf64 (do
+      (.Write32 out (conv uint32 off))
+      (.Write8 out info)
+      (.Write8 out (conv uint8 other))
+      (.Write16 out (conv uint16 shndx))
+      (.Write64 out (conv uint64 addr))
+      (.Write64 out (conv uint64 size))
+      (set! symSize + ELF64SYMSIZE))
+    (do
+      (.Write32 out (conv uint32 off))
+      (.Write32 out (conv uint32 addr))
+      (.Write32 out (conv uint32 size))
+      (.Write8 out info)
+      (.Write8 out (conv uint8 other))
+      (.Write16 out (conv uint16 shndx))
+      (set! symSize + ELF32SYMSIZE))))
+
+
+
+^{:go/end 184} (go/func putelfsym [^{:tag (* Link)} ctxt ^loader/Sym x ^elf/SymType typ ^elf/SymBind curbind]
+  (let [ldr (.-loader ctxt)
+      ^{:line 81} addr (.SymValue ldr x)
+      ^{:line 82} size (.SymSize ldr x)
+
+      ^{:line 84} xo x]
+    (when (!= (.OuterSym ldr x) 0)
+      (set! xo (.OuterSym ldr x)))
+
+    (let [xot (.SymType ldr xo)
+        ^{:line 89} xosect (.SymSect ldr xo)
+
+        ^{:line 91 :tag elf/SectionIndex} elfshnum (zero elf/SectionIndex)]
+      (if (or (== xot sym/SDYNIMPORT) (== xot sym/SHOSTOBJ) (== xot sym/SUNDEFEXT)) (do
+          (set! elfshnum elf/SHN_UNDEF)
+          (set! size 0))
+        (do
+          (when (== xosect nil)
+            (.Errorf ldr x "missing section in putelfsym")
+            (return))
+
+          (when (== (.-Elfsect xosect) nil)
+            (.Errorf ldr x "missing ELF section in putelfsym")
+            (return))
+
+          (set! elfshnum (elfShdrShnum (assert (* ElfShdr) (.-Elfsect xosect))))))
+
+
+      (let [sname (.SymExtname ldr x)]
+        (set! sname (mangleABIName ctxt ldr x sname))
+
+        ;; One pass for each binding: elf.STB_LOCAL, elf.STB_GLOBAL,
+        ;; maybe one day elf.STB_WEAK.
+        (let [bind elf/STB_GLOBAL]
+          (when (or (and (.IsFileLocal ldr x) (not (isStaticTmp sname))) (.AttrVisibilityHidden ldr x) (.AttrLocal ldr x)
+              ^:go/paren (and (.IsContentHashed ldr x) (.IsText (.SymType ldr x))))
+            ;; Static tmp is package local, but a package can be shared among multiple DSOs.
+            ;; They need to have a single view of the static tmp that are writable.
+            ;; Content-hashed text symbols may have the same name. Mark them local to avoid
+            ;; collision.
+            (set! bind elf/STB_LOCAL))
+
+
+          ;; In external linking mode, we have to invoke gcc with -rdynamic
+          ;; to get the exported symbols put into the dynamic symbol table.
+          ;; To avoid filling the dynamic table with lots of unnecessary symbols,
+          ;; mark all Go symbols local (not global) in the final executable.
+          ;; But when we're dynamically linking, we need all those global symbols.
+          (when (and (not (.DynlinkingGo ctxt)) ^{:go/via [Target]} (.IsExternal ctxt) (not (.AttrCgoExportStatic ldr x)) (!= elfshnum elf/SHN_UNDEF))
+            (set! bind elf/STB_LOCAL))
+
+
+          (when (and (== ^{:go/via [Target]} (.-LinkMode ctxt) LinkExternal) (!= elfshnum elf/SHN_UNDEF))
+            (set! addr - (conv int64 (.-Vaddr xosect))))
+
+          (let [other (conv int elf/STV_DEFAULT)]
+            (when (.AttrVisibilityHidden ldr x)
+              ;; TODO(mwhudson): We only set AttrVisibilityHidden in ldelf, i.e. when
+              ;; internally linking. But STV_HIDDEN visibility only matters in object
+              ;; files and shared libraries, and as we are a long way from implementing
+              ;; internal linking for shared libraries and only create object files when
+              ;; externally linking, I don't think this makes a lot of sense.
+              (set! other (conv int elf/STV_HIDDEN)))
+
+            (when (and ^{:go/via [Target]} (.IsPPC64 ctxt) (== typ elf/STT_FUNC) (.AttrShared ldr x))
+              ;; On ppc64 the top three bits of the st_other field indicate how many
+              ;; bytes separate the global and local entry points. For non-PCrel shared
+              ;; symbols this is always 8 bytes except for some special functions.
+              (let [hasPCrel (and (>= buildcfg/GOPPC64 10) (== buildcfg/GOOS "linux"))]
+
+                ;; This should match the preprocessing behavior in cmd/internal/obj/ppc64/obj9.go
+                ;; where the distinct global entry is inserted.
+                (when (and (not hasPCrel) (!= (.SymName ldr x) "runtime.duffzero") (!= (.SymName ldr x) "runtime.duffcopy"))
+                  (set! other bit-or (<< 3 5)))))
+
+
+
+            ;; When dynamically linking, we create Symbols by reading the names from
+            ;; the symbol tables of the shared libraries and so the names need to
+            ;; match exactly. Tools like DTrace will have to wait for now.
+            (when (not (.DynlinkingGo ctxt))
+              ;; Rewrite · to . for ASCII-only tools like DTrace (sigh)
+              (set! sname (strings/ReplaceAll sname "·" ".")))
+
+
+            (cond (and (.DynlinkingGo ctxt) (== bind elf/STB_GLOBAL) (== curbind elf/STB_LOCAL) (.IsText (.SymType ldr x))) (do
+                ;; When dynamically linking, we want references to functions defined
+                ;; in this module to always be to the function object, not to the
+                ;; PLT. We force this by writing an additional local symbol for every
+                ;; global function symbol and making all relocations against the
+                ;; global symbol refer to this local symbol instead (see
+                ;; (*sym.Symbol).ElfsymForReloc). This is approximately equivalent to the
+                ;; ELF linker -Bsymbolic-functions option, but that is buggy on
+                ;; several platforms.
+                (putelfsyment (.-Out ctxt) (putelfstr (+ "local." sname)) addr size (elf/ST_INFO elf/STB_LOCAL typ) elfshnum other)
+                (.SetSymLocalElfSym ldr x (conv int32 (.-numelfsym ctxt)))
+                (inc! (.-numelfsym ctxt))
+                (return))
+              (!= bind curbind)
+              (return))
+
+
+            (putelfsyment (.-Out ctxt) (putelfstr sname) addr size (elf/ST_INFO bind typ) elfshnum other)
+            (.SetSymElfSym ldr x (conv int32 (.-numelfsym ctxt)))
+            (inc! (.-numelfsym ctxt))))))))
+
+
+^{:go/end 190} (go/func putelfsectionsym [^{:tag (* Link)} ctxt ^{:tag (* OutBuf)} out ^loader/Sym s ^elf/SectionIndex shndx]
+  (putelfsyment out 0 0 0 (elf/ST_INFO elf/STB_LOCAL elf/STT_SECTION) shndx 0)
+  (.SetSymElfSym (.-loader ctxt) s (conv int32 (.-numelfsym ctxt)))
+  (inc! (.-numelfsym ctxt)))
+
+
+^{:go/end 268} (go/func genelfsym [^{:tag (* Link)} ctxt ^elf/SymBind elfbind]
+  (let [ldr (.-loader ctxt)
+
+      ;; runtime.text marker symbol(s).
+      ^{:line 196} s (.Lookup ldr "runtime.text" 0)]
+    (putelfsym ctxt s elf/STT_FUNC elfbind)
+    (range [k sect (subslice (.-Sections Segtext) 1)]
+      (let [n (+ k 1)]
+        (when (or (!= (.-Name sect) ".text") ^:go/paren (and ^{:go/via [Target]} (.IsAIX ctxt) ^{:go/via [Target]} (.IsExternal ctxt)))
+          ;; On AIX, runtime.text.X are symbols already in the symtab.
+          (break))
+
+        (set! s (.Lookup ldr (fmt/Sprintf "runtime.text.%d" n) 0))
+        (when (== s 0)
+          (break))
+
+        (when (not (.IsText (.SymType ldr s)))
+          (panic "unexpected type for runtime.text symbol"))
+
+        (putelfsym ctxt s elf/STT_FUNC elfbind)))
+
+
+    ;; Text symbols.
+    (range [_ s (.-Textp ctxt)]
+      (putelfsym ctxt s elf/STT_FUNC elfbind))
+
+
+    ;; runtime.etext marker symbol.
+    (set! s (.Lookup ldr "runtime.etext" 0))
+    (when (.IsText (.SymType ldr s))
+      (putelfsym ctxt s elf/STT_FUNC elfbind))
+
+
+    (let [shouldBeInSymbolTable ^{:go/end 242} (fn ^bool [^loader/Sym s]
+          (when (.AttrNotInSymbolTable ldr s)
+            (return false))
+
+          ;; FIXME: avoid having to do name inspections here.
+          ;; NB: the restrictions below on file local symbols are a bit
+          ;; arbitrary -- if it turns out we need nameless static
+          ;; symbols they could be relaxed/removed.
+          ^{:go/breaks [[4 241]]} (let [sn (.SymName ldr s)]
+            (when (and ^:go/paren (or (== sn "") (== (aget sn 0) \.)) (.IsFileLocal ldr s))
+              (panic (fmt/Sprintf "unexpected file local symbol %d %s<%d>\n"
+                  ^{:line 236} s sn (.SymVersion ldr s))))
+
+            (when (and ^:go/paren (or (== sn "") (== (aget sn 0) \.)) (not (.IsFileLocal ldr s)))
+              (return false))
+
+            true))]
+
+
+      ;; Data symbols.
+      (for [s (conv loader/Sym 1)] (< s (conv loader/Sym (.NSym ldr))) (inc! s)
+        (when (not (.AttrReachable ldr s))
+          (continue))
+
+        (let [st (.SymType ldr s)]
+          (when (and (>= st sym/SELFRXSECT) (< st sym/SFirstUnallocated))
+            (let [typ elf/STT_OBJECT]
+              (when (== st sym/STLSBSS)
+                (when ^{:go/via [Target]} (.IsInternal ctxt)
+                  (continue))
+
+                (set! typ elf/STT_TLS))
+
+              (when (not (shouldBeInSymbolTable s))
+                (continue))
+
+              (putelfsym ctxt s typ elfbind)
+              (continue)))
+
+          (when (or (== st sym/SHOSTOBJ) (== st sym/SDYNIMPORT) (== st sym/SUNDEFEXT))
+            (putelfsym ctxt s (.SymElfType ldr s) elfbind)))))))
+
+
+
+
+^{:go/end 291} (go/func asmElfSym [^{:tag (* Link)} ctxt]
+
+  ;; the first symbol entry is reserved
+  (putelfsyment (.-Out ctxt) 0 0 0 (elf/ST_INFO elf/STB_LOCAL elf/STT_NOTYPE) 0 0)
+
+  (dwarfaddelfsectionsyms ctxt)
+
+  ;; Some linkers will add a FILE sym if one is not present.
+  ;; Avoid having the working directory inserted into the symbol table.
+  ;; It is added with a name to avoid problems with external linking
+  ;; encountered on some versions of Solaris. See issue #14957.
+  (putelfsyment (.-Out ctxt) (putelfstr "go.go") 0 0 (elf/ST_INFO elf/STB_LOCAL elf/STT_FILE) elf/SHN_ABS 0)
+  (inc! (.-numelfsym ctxt))
+
+  (let [bindings (lit (slice elf/SymBind) elf/STB_LOCAL elf/STB_GLOBAL)]
+    (range [_ elfbind bindings]
+      (when (== elfbind elf/STB_GLOBAL)
+        (set! elfglobalsymndx (.-numelfsym ctxt)))
+
+      (genelfsym ctxt elfbind))))
+
+
+
+^{:go/end 314} (go/func putplan9sym [^{:tag (* Link)} ctxt ^{:tag (* loader/Loader)} ldr ^loader/Sym s ^SymbolType char]
+  (let [t (conv int char)]
+    (when (.IsFileLocal ldr s)
+      (set! t + (- \a \A)))
+
+    (let [l 4
+        ^{:line 299} addr (.SymValue ldr s)]
+      (when (and ^{:go/via [Target]} (.IsAMD64 ctxt) (not flag8))
+        (.Write32b (.-Out ctxt) (conv uint32 (>> addr 32)))
+        (set! l 8))
+
+
+      (.Write32b (.-Out ctxt) (conv uint32 addr))
+      (.Write8 (.-Out ctxt) (conv uint8 (+ t 0x80))) ; /* 0x80 is variable length */
+
+      (let [name (.SymName ldr s)]
+        (set! name (mangleABIName ctxt ldr s name))
+        (.WriteString (.-Out ctxt) name)
+        (.Write8 (.-Out ctxt) 0)
+
+        (set! symSize + (+ (conv int32 l) 1 (conv int32 (len name)) 1))))))
+
+
+^{:go/end 365} (go/func asmbPlan9Sym [^{:tag (* Link)} ctxt]
+  (let [ldr (.-loader ctxt)
+
+      ;; Add special runtime.text and runtime.etext symbols.
+      ^{:line 320} s (.Lookup ldr "runtime.text" 0)]
+    (when (.IsText (.SymType ldr s))
+      (putplan9sym ctxt ldr s TextSym))
+
+    (set! s (.Lookup ldr "runtime.etext" 0))
+    (when (.IsText (.SymType ldr s))
+      (putplan9sym ctxt ldr s TextSym))
+
+
+    ;; Add text symbols.
+    (range [_ s (.-Textp ctxt)]
+      (putplan9sym ctxt ldr s TextSym))
+
+
+    (let [shouldBeInSymbolTable ^{:go/end 343} (fn ^bool [^loader/Sym s]
+          (when (.AttrNotInSymbolTable ldr s)
+            (return false))
+
+          ^{:go/breaks [[3 342]]} (let [name (.SymName ldr s)] ; TODO: try not to read the name
+            (when (or (== name "") (== (aget name 0) \.))
+              (return false))
+
+            true))]
+
+
+      ;; Add data symbols and external references.
+      (for [s (conv loader/Sym 1)] (< s (conv loader/Sym (.NSym ldr))) (inc! s)
+        (when (not (.AttrReachable ldr s))
+          (continue))
+
+        (let [t (.SymType ldr s)]
+          (when (and (>= t sym/SELFRXSECT) (< t sym/SFirstUnallocated)) ; data sections handled in dodata
+            (when (== t sym/STLSBSS)
+              (continue))
+
+            (when (not (shouldBeInSymbolTable s))
+              (continue))
+
+            (let [char DataSym]
+              (when (or (== t sym/SBSS) (== t sym/SNOPTRBSS))
+                (set! char BSSSym))
+
+              (putplan9sym ctxt ldr s char))))))))
+
+
+
+
+
+
+^{:go/end 419} (go/func textsectionmap "Create a table with information on the text sections.\nReturn the symbol of the table, and number of sections.\n" [^{:tag (* Link)} ctxt] :results [loader/Sym uint32]
+  (let [ldr (.-loader ctxt)
+      ^{:line 371} t (.CreateSymForUpdate ldr "runtime.textsectionmap" 0)]
+    (.SetType t sym/SRODATA)
+    (let [nsections (conv int64 0)]
+
+      (range [_ sect (.-Sections Segtext)]
+        (if (== (.-Name sect) ".text")
+          (inc! nsections)
+
+          (break)))
+
+
+      ^{:go/via [extSymPayload]} (.Grow t (* 3 nsections (conv int64 (.-PtrSize ^{:go/via [Target]} (.-Arch ctxt)))))
+
+      (let [off (conv int64 0)
+          ^{:line 385} n 0
+
+          ;; The vaddr for each text section is the difference between the section's
+          ;; Vaddr and the Vaddr for the first text section as determined at compile
+          ;; time.
+
+          ;; The symbol for the first text section is named runtime.text as before.
+          ;; Additional text sections are named runtime.text.n where n is the
+          ;; order of creation starting with 1. These symbols provide the section's
+          ;; address after relocation by the linker.
+
+          ^{:line 396} textbase (.-Vaddr (aget (.-Sections Segtext) 0))]
+        (range [_ sect (.-Sections Segtext)]
+          (when (!= (.-Name sect) ".text")
+            (break))
+
+          ;; The fields written should match runtime/symtab.go:textsect.
+          ;; They are designed to minimize runtime calculations.
+          (let [vaddr (- (.-Vaddr sect) textbase)]
+            (set! off (.SetUint t ^{:go/via [Target]} (.-Arch ctxt) off vaddr)) ; field vaddr
+            (let [end (+ vaddr (.-Length sect))]
+              (set! off (.SetUint t ^{:go/via [Target]} (.-Arch ctxt) off end)) ; field end
+              (let [name "runtime.text"]
+                (when (!= n 0)
+                  (set! name (fmt/Sprintf "runtime.text.%d" n)))
+
+                (let [s (.Lookup ldr name 0)]
+                  (when (== s 0)
+                    (.Errorf ctxt s "Unable to find symbol %s\n" name))
+
+                  (set! off (.SetAddr t ^{:go/via [Target]} (.-Arch ctxt) off s)) ; field baseaddr
+                  (inc! n))))))
+
+        (return (.Sym t) (conv uint32 n))))))
+
+
+^{:go/end 796} (go/method symtab ^{:tag (slice sym/SymKind)} [^{:tag (* Link)} ctxt ^{:tag (* pclntab)} pcln]
+  (let [ldr (.-loader ctxt)]
+
+    (when (and (not ^{:go/via [Target]} (.IsAIX ctxt)) (not ^{:go/via [Target]} (.IsWasm ctxt)))
+      (switch ^{:go/via [Target]} (.-BuildMode ctxt)
+        (case [BuildModeCArchive BuildModeCShared]
+          (let [s (.Lookup ldr @flagEntrySymbol sym/SymVerABI0)]
+            (when (!= s 0)
+              (addinitarrdata ctxt ldr s))))))
+
+
+
+
+    ;; Define these so that they'll get put into the symbol table.
+    ;; data.c:/^address will provide the actual values.
+    (.xdefine ctxt "runtime.rodata" sym/SRODATA 0)
+    (.xdefine ctxt "runtime.erodata" sym/SRODATAEND 0)
+    (.xdefine ctxt "runtime.types" sym/SRODATA 0)
+    (.xdefine ctxt "runtime.etypes" sym/SRODATA 0)
+    (.xdefine ctxt "runtime.noptrdata" sym/SNOPTRDATA 0)
+    (.xdefine ctxt "runtime.enoptrdata" sym/SNOPTRDATAEND 0)
+    (.xdefine ctxt "runtime.data" sym/SDATA 0)
+    (.xdefine ctxt "runtime.edata" sym/SDATAEND 0)
+    (.xdefine ctxt "runtime.bss" sym/SBSS 0)
+    (.xdefine ctxt "runtime.ebss" sym/SBSS 0)
+    (.xdefine ctxt "runtime.noptrbss" sym/SNOPTRBSS 0)
+    (.xdefine ctxt "runtime.enoptrbss" sym/SNOPTRBSS 0)
+    (.xdefine ctxt "runtime.gcmask.*" sym/SNOPTRBSS 0)
+    (.xdefine ctxt "runtime.covctrs" sym/SNOPTRBSS 0)
+    (.xdefine ctxt "runtime.ecovctrs" sym/SNOPTRBSS 0)
+    (.xdefine ctxt "runtime.end" sym/SBSS 0)
+    (.xdefine ctxt "runtime.epclntab" sym/SRODATA 0)
+
+    ;; garbage collection symbols
+    (let [s (.CreateSymForUpdate ldr "runtime.gcdata" 0)]
+      (.SetType s sym/SRODATA)
+      (.SetSize s 0)
+      (.xdefine ctxt "runtime.egcdata" sym/SRODATA 0)
+
+      (set! s (.CreateSymForUpdate ldr "runtime.gcbss" 0))
+      (.SetType s sym/SRODATA)
+      (.SetSize s 0)
+      (.xdefine ctxt "runtime.egcbss" sym/SRODATA 0)
+
+      ;; pseudo-symbols to mark locations of type, string, and go string data.
+      (set! s (.CreateSymForUpdate ldr "type:*" 0))
+      (.SetType s sym/STYPE)
+      (.SetSize s 0)
+      (.SetAlign s (conv int32 (.-PtrSize ^{:go/via [Target]} (.-Arch ctxt))))
+      (let [symtype (.Sym s)]
+        (setCarrierSym sym/STYPE symtype)
+
+        (let [groupSym ^{:go/end 481} (fn ^loader/Sym [^string name ^sym/SymKind t]
+              (let [s (.CreateSymForUpdate ldr name 0)]
+                (.SetType s t)
+                (.SetSize s 0)
+                (.SetAlign s (conv int32 (.-PtrSize ^{:go/via [Target]} (.-Arch ctxt))))
+                (.SetLocal s true)
+                (setCarrierSym t (.Sym s))
+                (.Sym s)))
+
+
+            ^:var ^{:line 483} symgostring (groupSym "go:string.*" sym/SGOSTRING)
+            ^:var ^{:line 484} symgofunc (groupSym "go:funcdesc" sym/SGOFUNC)
+            ^:var ^{:line 485} symgcbits (groupSym "runtime.gcbits.*" sym/SGCBITS)
+            ^:var ^{:line 486} symgcmask (groupSym "runtime.gcmask.*" sym/SGCMASK)
+
+
+            ;; assign specific types so that they sort together.
+            ;; within a type they sort by size, so the .* symbols
+            ;; just defined above will be first.
+            ;; hide the specific symbols.
+            ;; Some of these symbol section conditions are duplicated
+            ;; in cmd/internal/obj.contentHashSection.
+            ^{:line 495} nsym (conv loader/Sym (.NSym ldr))
+            ^{:line 496} symGroupType (make (slice sym/SymKind) nsym)]
+          (for [s (conv loader/Sym 1)] (< s nsym) (inc! s)
+            (when (or ^:go/paren (and (not ^{:go/via [Target]} (.IsExternal ctxt)) (.IsFileLocal ldr s) (not (.IsFromAssembly ldr s)) (!= (.SymPkg ldr s) "")) ^:go/paren (and (== ^{:go/via [Target]} (.-LinkMode ctxt) LinkInternal) (== (.SymType ldr s) sym/SCOVERAGE_COUNTER)))
+              (.SetAttrNotInSymbolTable ldr s true))
+
+
+            (when (or (not (.AttrReachable ldr s)) (.AttrSpecial ldr s))
+              (continue))
+
+
+            (when (and (== (.SymType ldr s) sym/SNOPTRBSS) (strings/HasPrefix (.SymName ldr s) "type:.gcmask."))
+              (aset symGroupType s sym/SGCMASK)
+              (.SetAttrNotInSymbolTable ldr s true)
+              (.SetCarrierSym ldr s symgcmask)
+              (continue))
+
+
+            (when (and (!= (.SymType ldr s) sym/SRODATA) (!= (.SymType ldr s) sym/SGOFUNC))
+              (continue))
+
+
+            (let [name (.SymName ldr s)]
+              (switch
+                (case [(strings/HasPrefix name "go:string.")]
+                  (aset symGroupType s sym/SGOSTRING)
+                  (.SetAttrNotInSymbolTable ldr s true)
+                  (.SetCarrierSym ldr s symgostring))
+
+                (case [(strings/HasPrefix name "runtime.gcbits.")]
+                  (aset symGroupType s sym/SGCBITS)
+                  (.SetAttrNotInSymbolTable ldr s true)
+                  (.SetCarrierSym ldr s symgcbits))
+
+                (case [(strings/HasSuffix name "·f")]
+                  (when (not (.DynlinkingGo ctxt))
+                    (.SetAttrNotInSymbolTable ldr s true)
+                    (.SetCarrierSym ldr s symgofunc))
+
+                  (aset symGroupType s sym/SGOFUNC))
+
+                (case [(strings/HasPrefix name "type:")]
+                  (when (not (.DynlinkingGo ctxt))
+                    (.SetAttrNotInSymbolTable ldr s true)
+                    (.SetCarrierSym ldr s symtype))
+
+                  (aset symGroupType s sym/STYPE))
+
+                (case [(.IsItab ldr s)]
+                  (when (not (.DynlinkingGo ctxt))
+                    (.SetAttrNotInSymbolTable ldr s true)
+                    (.SetCarrierSym ldr s symtype))
+
+                  (aset symGroupType s sym/STYPE)))))
+
+
+
+          (when (== ^{:go/via [Target]} (.-BuildMode ctxt) BuildModeShared)
+            (let [abihashgostr (.CreateSymForUpdate ldr (+ "go:link.abihash." (filepath/Base @flagOutfile)) 0)]
+              (.SetType abihashgostr sym/SRODATA)
+              (let [hashsym (.LookupOrCreateSym ldr "go:link.abihashbytes" 0)]
+                (.AddAddr abihashgostr ^{:go/via [Target]} (.-Arch ctxt) hashsym)
+                (.AddUint abihashgostr ^{:go/via [Target]} (.-Arch ctxt) (conv uint64 (.SymSize ldr hashsym))))))
+
+          (when (or (== ^{:go/via [Target]} (.-BuildMode ctxt) BuildModePlugin) (.CanUsePlugins ctxt))
+            (range [_ l (.-Library ctxt)]
+              (let [s (.CreateSymForUpdate ldr (+ "go:link.pkghashbytes." (.-Pkg l)) 0)]
+                (.SetType s sym/SRODATA)
+                (.SetSize s (conv int64 (len (.-Fingerprint l))))
+                (.SetData s (subslice (.-Fingerprint l)))
+                (let [str (.CreateSymForUpdate ldr (+ "go:link.pkghash." (.-Pkg l)) 0)]
+                  (.SetType str sym/SRODATA)
+                  (.AddAddr str ^{:go/via [Target]} (.-Arch ctxt) (.Sym s))
+                  (.AddUint str ^{:go/via [Target]} (.-Arch ctxt) (conv uint64 (len (.-Fingerprint l))))))))
+
+
+
+          (let [(values textsectionmapSym nsections) (textsectionmap ctxt)
+
+              ;; Information about the layout of the executable image for the
+              ;; runtime to use. Any changes here must be matched by changes to
+              ;; the definition of moduledata in runtime/symtab.go.
+              ;; This code uses several global variables that are set by pcln.go:pclntab.
+              ^{:line 578} moduledata (.MakeSymbolUpdater ldr (.-Moduledata ctxt))
+
+              ^{:line 580} slice ^{:go/end 584} (fn [^loader/Sym sym ^uint64 len]
+                (.AddAddr moduledata ^{:go/via [Target]} (.-Arch ctxt) sym)
+                (.AddUint moduledata ^{:go/via [Target]} (.-Arch ctxt) len)
+                (.AddUint moduledata ^{:go/via [Target]} (.-Arch ctxt) len))
+
+
+              ^{:line 586} sliceSym ^{:go/end 588} (fn [^loader/Sym sym]
+                (go/call slice sym (conv uint64 (.SymSize ldr sym))))
+
+
+              ^{:line 590} nilSlice ^{:go/end 594} (fn []
+                (.AddUint moduledata ^{:go/via [Target]} (.-Arch ctxt) 0)
+                (.AddUint moduledata ^{:go/via [Target]} (.-Arch ctxt) 0)
+                (.AddUint moduledata ^{:go/via [Target]} (.-Arch ctxt) 0))]
+
+
+            ;; The pcHeader
+            (.AddAddr moduledata ^{:go/via [Target]} (.-Arch ctxt) (.-pcheader pcln))
+
+            ;; The function name slice
+            (sliceSym (.-funcnametab pcln))
+
+            ;; The cutab slice
+            (go/call slice (.-cutab pcln) (/ (conv uint64 (.SymSize ldr (.-cutab pcln))) 4))
+
+            ;; The filetab slice
+            (sliceSym (.-filetab pcln))
+
+            ;; The pctab slice
+            (sliceSym (.-pctab pcln))
+
+            ;; The pclntab slice
+            (sliceSym (.-pclntab pcln))
+
+            ;; The ftab slice
+            (go/call slice (.-pclntab pcln) (conv uint64 (+ (.-nfunc pcln) 1)))
+
+            ;; findfunctab
+            (.AddAddr moduledata ^{:go/via [Target]} (.-Arch ctxt) (.-findfunctab pcln))
+            ;; minpc, maxpc
+            (.AddAddr moduledata ^{:go/via [Target]} (.-Arch ctxt) (.-firstFunc pcln))
+            (.AddAddrPlus moduledata ^{:go/via [Target]} (.-Arch ctxt) (.-lastFunc pcln) (.SymSize ldr (.-lastFunc pcln)))
+            ;; pointers to specific parts of the module
+            (.AddAddr moduledata ^{:go/via [Target]} (.-Arch ctxt) (.Lookup ldr "runtime.text" 0))
+            (.AddAddr moduledata ^{:go/via [Target]} (.-Arch ctxt) (.Lookup ldr "runtime.etext" 0))
+            (.AddAddr moduledata ^{:go/via [Target]} (.-Arch ctxt) (.Lookup ldr "runtime.noptrdata" 0))
+            (.AddAddr moduledata ^{:go/via [Target]} (.-Arch ctxt) (.Lookup ldr "runtime.enoptrdata" 0))
+            (.AddAddr moduledata ^{:go/via [Target]} (.-Arch ctxt) (.Lookup ldr "runtime.data" 0))
+            (.AddAddr moduledata ^{:go/via [Target]} (.-Arch ctxt) (.Lookup ldr "runtime.edata" 0))
+            (.AddAddr moduledata ^{:go/via [Target]} (.-Arch ctxt) (.Lookup ldr "runtime.bss" 0))
+            (.AddAddr moduledata ^{:go/via [Target]} (.-Arch ctxt) (.Lookup ldr "runtime.ebss" 0))
+            (.AddAddr moduledata ^{:go/via [Target]} (.-Arch ctxt) (.Lookup ldr "runtime.noptrbss" 0))
+            (.AddAddr moduledata ^{:go/via [Target]} (.-Arch ctxt) (.Lookup ldr "runtime.enoptrbss" 0))
+            (.AddAddr moduledata ^{:go/via [Target]} (.-Arch ctxt) (.Lookup ldr "runtime.covctrs" 0))
+            (.AddAddr moduledata ^{:go/via [Target]} (.-Arch ctxt) (.Lookup ldr "runtime.ecovctrs" 0))
+            (.AddAddr moduledata ^{:go/via [Target]} (.-Arch ctxt) (.Lookup ldr "runtime.end" 0))
+            (.AddAddr moduledata ^{:go/via [Target]} (.-Arch ctxt) (.Lookup ldr "runtime.gcdata" 0))
+            (.AddAddr moduledata ^{:go/via [Target]} (.-Arch ctxt) (.Lookup ldr "runtime.gcbss" 0))
+            (.AddAddr moduledata ^{:go/via [Target]} (.-Arch ctxt) (.Lookup ldr "runtime.types" 0))
+            (set! (.-moduledataTypeDescOffset ctxt) (.Size moduledata))
+            (.AddUint moduledata ^{:go/via [Target]} (.-Arch ctxt) 0) ; filled in by dodataSect
+            (.AddAddr moduledata ^{:go/via [Target]} (.-Arch ctxt) (.Lookup ldr "runtime.etypes" 0))
+            (set! (.-moduledataItabOffset ctxt) (.Size moduledata))
+            (.AddUint moduledata ^{:go/via [Target]} (.-Arch ctxt) 0) ; filled in by dodataSect
+            (set! (.-moduledataItabSizeOffset ctxt) (.Size moduledata))
+            (.AddUint moduledata ^{:go/via [Target]} (.-Arch ctxt) 0) ; filled in by dodataSect
+            (.AddAddr moduledata ^{:go/via [Target]} (.-Arch ctxt) (.Lookup ldr "runtime.rodata" 0))
+            (.AddAddr moduledata ^{:go/via [Target]} (.-Arch ctxt) (.Lookup ldr "go:func.*" 0))
+            (.AddAddr moduledata ^{:go/via [Target]} (.-Arch ctxt) (.Lookup ldr "runtime.epclntab" 0))
+
+            (when (and ^{:go/via [Target]} (.IsAIX ctxt) ^{:go/via [Target]} (.IsExternal ctxt))
+              ;; Add R_XCOFFREF relocation to prevent ld's garbage collection of
+              ;; the following symbols. They might not be referenced in the program.
+              (let [addRef ^{:go/end 661} (fn [^string name]
+                    (let [s (.Lookup ldr name 0)]
+                      (when (== s 0)
+                        (return))
+
+                      (let [(values r _) (.AddRel moduledata objabi/R_XCOFFREF)]
+                        (.SetSym r s)
+                        ^{:go/via [Reloc]} (.SetSiz r (conv uint8 (.-PtrSize ^{:go/via [Target]} (.-Arch ctxt)))))))]
+
+                (addRef "runtime.rodata")
+                (addRef "runtime.erodata")
+                (addRef "runtime.epclntab")
+                (addRef "go:func.*")
+                ;; As we use relative addressing for text symbols in functab, it is
+                ;; important that the offsets we computed stay unchanged by the external
+                ;; linker, i.e. all symbols in Textp should not be removed.
+                ;; Most of them are actually referenced (our deadcode pass ensures that),
+                ;; except go:buildid which is generated late and not used by the program.
+                (addRef "go:buildid")))
+
+            (when ^{:go/via [Target]} (.IsAIX ctxt)
+              ;; On AIX, an R_ADDR relocation from an RODATA symbol to a DATA symbol
+              ;; does not work. See data.go:relocsym, case R_ADDR.
+              ;; Here we record the unrelocated address in aixStaticDataBase (it is
+              ;; unrelocated as it is in RODATA) so we can compute the delta at
+              ;; run time.
+              (let [sb (.CreateSymForUpdate ldr "runtime.aixStaticDataBase" 0)]
+                (.SetSize sb 0)
+                (.AddAddr sb ^{:go/via [Target]} (.-Arch ctxt) (.Lookup ldr "runtime.data" 0))
+                (.SetType sb sym/SRODATA)))
+
+
+            ;; text section information
+            (go/call slice textsectionmapSym (conv uint64 nsections))
+
+            ;; The ptab slice
+            (if [ptab (.Lookup ldr "go:plugin.tabs" 0)] (and (!= ptab 0) (.AttrReachable ldr ptab)) (do
+                (.SetAttrLocal ldr ptab true)
+                (when (!= (.SymType ldr ptab) sym/SRODATA)
+                  (panic (fmt/Sprintf "go:plugin.tabs is %v, not SRODATA" (.SymType ldr ptab))))
+
+                (let [nentries (conv uint64 (/ (len (.Data ldr ptab)) 8))] ; sizeof(nameOff) + sizeof(typeOff)
+                  (go/call slice ptab nentries)))
+
+              (nilSlice))
+
+
+            (if (== ^{:go/via [Target]} (.-BuildMode ctxt) BuildModePlugin) (do
+                (addgostring ctxt ldr moduledata "go:link.thispluginpath" (objabi/PathToPrefix @flagPluginPath))
+
+                (let [pkghashes (.CreateSymForUpdate ldr "go:link.pkghashes" 0)]
+                  (.SetLocal pkghashes true)
+                  (.SetType pkghashes sym/SRODATA)
+
+                  (range [i l (.-Library ctxt)]
+                    ;; pkghashes[i].name
+                    (addgostring ctxt ldr pkghashes (fmt/Sprintf "go:link.pkgname.%d" i) (.-Pkg l))
+                    ;; pkghashes[i].linktimehash
+                    (addgostring ctxt ldr pkghashes (fmt/Sprintf "go:link.pkglinkhash.%d" i) (conv string (subslice (.-Fingerprint l))))
+                    ;; pkghashes[i].runtimehash
+                    (let [hash (.Lookup ldr (+ "go:link.pkghash." (.-Pkg l)) 0)]
+                      (.AddAddr pkghashes ^{:go/via [Target]} (.-Arch ctxt) hash)))
+
+                  (go/call slice (.Sym pkghashes) (conv uint64 (len (.-Library ctxt))))))
+              (do
+                (.AddUint moduledata ^{:go/via [Target]} (.-Arch ctxt) 0) ; pluginpath
+                (.AddUint moduledata ^{:go/via [Target]} (.-Arch ctxt) 0)
+                (nilSlice))) ; pkghashes slice
+
+            ;; Add inittasks slice
+            (let [t ^{:go/via [ArchSyms]} (.-mainInittasks ctxt)]
+              (if (!= t 0) (do
+                  (.AddAddr moduledata ^{:go/via [Target]} (.-Arch ctxt) t)
+                  (.AddUint moduledata ^{:go/via [Target]} (.-Arch ctxt) (conv uint64 (/ (.SymSize ldr t) (conv int64 (.-PtrSize ^{:go/via [Target]} (.-Arch ctxt))))))
+                  (.AddUint moduledata ^{:go/via [Target]} (.-Arch ctxt) (conv uint64 (/ (.SymSize ldr t) (conv int64 (.-PtrSize ^{:go/via [Target]} (.-Arch ctxt)))))))
+                (do
+                  ;; Some build modes have no inittasks, like a shared library.
+                  ;; Its inittask list will be constructed by a higher-level
+                  ;; linking step.
+                  ;; This branch can also happen if there are no init tasks at all.
+                  (.AddUint moduledata ^{:go/via [Target]} (.-Arch ctxt) 0)
+                  (.AddUint moduledata ^{:go/via [Target]} (.-Arch ctxt) 0)
+                  (.AddUint moduledata ^{:go/via [Target]} (.-Arch ctxt) 0)))
+
+
+              (if (> (len (.-Shlibs ctxt)) 0)
+                (let [thismodulename (filepath/Base @flagOutfile)]
+                  (switch ^{:go/via [Target]} (.-BuildMode ctxt)
+                    (case [BuildModeExe BuildModePIE]
+                      ;; When linking an executable, outfile is just "a.out". Make
+                      ;; it something slightly more comprehensible.
+                      (set! thismodulename "the executable")))
+
+                  (addgostring ctxt ldr moduledata "go:link.thismodulename" thismodulename)
+
+                  (let [modulehashes (.CreateSymForUpdate ldr "go:link.abihashes" 0)]
+                    (.SetLocal modulehashes true)
+                    (.SetType modulehashes sym/SRODATA)
+
+                    (range [i shlib (.-Shlibs ctxt)]
+                      ;; modulehashes[i].modulename
+                      (let [modulename (filepath/Base (.-Path shlib))]
+                        (addgostring ctxt ldr modulehashes (fmt/Sprintf "go:link.libname.%d" i) modulename)
+
+                        ;; modulehashes[i].linktimehash
+                        (addgostring ctxt ldr modulehashes (fmt/Sprintf "go:link.linkhash.%d" i) (conv string (.-Hash shlib)))
+
+                        ;; modulehashes[i].runtimehash
+                        (let [abihash (.LookupOrCreateSym ldr (+ "go:link.abihash." modulename) 0)]
+                          (.SetAttrReachable ldr abihash true)
+                          (.AddAddr modulehashes ^{:go/via [Target]} (.-Arch ctxt) abihash))))
+
+
+                    (go/call slice (.Sym modulehashes) (conv uint64 (len (.-Shlibs ctxt))))))
+                (do
+                  (.AddUint moduledata ^{:go/via [Target]} (.-Arch ctxt) 0) ; modulename
+                  (.AddUint moduledata ^{:go/via [Target]} (.-Arch ctxt) 0)
+                  (nilSlice))) ; moduleshashes slice
+
+
+              (let [hasmain (or (== ^{:go/via [Target]} (.-BuildMode ctxt) BuildModeExe) (== ^{:go/via [Target]} (.-BuildMode ctxt) BuildModePIE))]
+                (if hasmain
+                  (.AddUint8 moduledata 1)
+
+                  (.AddUint8 moduledata 0))
+
+
+                ;; The rest of moduledata is zero initialized.
+                ;; When linking an object that does not contain the runtime we are
+                ;; creating the moduledata from scratch and it does not have a
+                ;; compiler-provided size, so read it from the type data.
+                (let [moduledatatype (.Lookup ldr "type:runtime.moduledata" 0)]
+                  (.SetSize moduledata (decodetypeSize ^{:go/via [Target]} (.-Arch ctxt) (.Data ldr moduledatatype)))
+                  ^{:go/via [extSymPayload]} (.Grow moduledata (.Size moduledata))
+
+                  (let [lastmoduledatap (.CreateSymForUpdate ldr "runtime.lastmoduledatap" 0)]
+                    (when (!= (.Type lastmoduledatap) sym/SDYNIMPORT)
+                      (.SetType lastmoduledatap sym/SNOPTRDATA)
+                      (.SetSize lastmoduledatap 0) ; overwrite existing value
+                      (.SetData lastmoduledatap nil)
+                      (.AddAddr lastmoduledatap ^{:go/via [Target]} (.-Arch ctxt) (.Sym moduledata)))
+
+                    ^{:line 795} symGroupType))))))))))
+
+
+
+(go/var ^{:tag (array sym/SFirstUnallocated (struct ^loader/Sym Sym ^int64 Size)) :doc "CarrierSymByType tracks carrier symbols and their sizes.\n"} CarrierSymByType)
+
+
+
+
+^{:go/end 809} (go/func setCarrierSym [^sym/SymKind typ ^loader/Sym s]
+  (when (!= (.-Sym (aget CarrierSymByType typ)) 0)
+    (panic (fmt/Sprintf "carrier symbol for type %v already set" typ)))
+
+  (set! (.-Sym (aget CarrierSymByType typ)) s))
+
+
+^{:go/end 819} (go/func setCarrierSize [^sym/SymKind typ ^int64 sz]
+  (when (== typ sym/Sxxx)
+    (panic "setCarrierSize(Sxxx)"))
+
+  (when (!= (.-Size (aget CarrierSymByType typ)) 0)
+    (panic (fmt/Sprintf "carrier symbol size for type %v already set" typ)))
+
+  (set! (.-Size (aget CarrierSymByType typ)) sz))
+
+
+^{:go/end 823} (go/func isStaticTmp ^bool [^string name]
+  (strings/Contains name (+ "." obj/StaticNamePrefix)))
+
+
+
+^{:go/end 859} (go/func mangleABIName "Mangle function name with ABI information.\n" ^string [^{:tag (* Link)} ctxt ^{:tag (* loader/Loader)} ldr ^loader/Sym x ^string name]
+  ;; For functions with ABI wrappers, we have to make sure that we
+  ;; don't wind up with two symbol table entries with the same
+  ;; name (since this will generated an error from the external
+  ;; linker). If we have wrappers, keep the ABIInternal name
+  ;; unmangled since we want cross-load-module calls to target
+  ;; ABIInternal, and rename other symbols.
+  ;;
+  ;; TODO: avoid the ldr.Lookup calls below by instead using an aux
+  ;; sym or marker relocation to associate the wrapper with the
+  ;; wrapped function.
+  (when (not ^{:go/via [Flags]} (.-RegabiWrappers buildcfg/Experiment))
+    (return name))
+
+
+  (when (and (.IsText (.SymType ldr x)) (!= (.SymVersion ldr x) sym/SymVerABIInternal) (< (.SymVersion ldr x) sym/SymVerStatic))
+    (when [s2 (.Lookup ldr name sym/SymVerABIInternal)] (and (!= s2 0) (.IsText (.SymType ldr s2)))
+      (set! name (fmt/Sprintf "%s.abi%d" name (.SymVersion ldr x)))))
+
+
+
+  ;; When loading a shared library, if a symbol has only one ABI,
+  ;; and the name is not mangled, we don't know what ABI it is.
+  ;; So we always mangle ABIInternal function name in shared linkage,
+  ;; except symbols that are exported to C. Type symbols are always
+  ;; ABIInternal so they are not mangled.
+  (when ^{:go/via [Target]} (.IsShared ctxt)
+    (when (and (.IsText (.SymType ldr x)) (== (.SymVersion ldr x) sym/SymVerABIInternal) (not (.AttrCgoExport ldr x)) (not (strings/HasPrefix name "type:")))
+      (set! name (fmt/Sprintf "%s.abiinternal" name))))
+
+
+
+  ^{:line 858} name)

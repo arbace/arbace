@@ -1,0 +1,1887 @@
+;; Copyright 2017 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.cmd.compile.internal.ssa) (go/file "debug.go" :imports [
+
+
+    ^{:line 8} [abi "cmd/compile/internal/abi"]
+    ^{:line 9} [abt "cmd/compile/internal/abt"]
+    ^{:line 10} [ir "cmd/compile/internal/ir"]
+    ^{:line 11} [types "cmd/compile/internal/types"]
+    ^{:line 12} [dwarf "cmd/internal/dwarf"]
+    ^{:line 13} [obj "cmd/internal/obj"]
+    ^{:line 14} [src "cmd/internal/src"]
+    ^{:line 15} [cmp "cmp"]
+    ^{:line 16} [fmt "fmt"]
+    ^{:line 17} [buildcfg "internal/buildcfg"]
+    ^{:line 18} [bits "math/bits"]
+    ^{:line 19} [slices "slices"]
+    ^{:line 20} [strings "strings"]])
+
+
+(go/type SlotID int32)
+(go/type VarID int32)
+
+
+
+
+(go/type FuncDebug "A FuncDebug contains all the debug information for the variables in a\nfunction. Variables are identified by their LocalSlot, which may be\nthe result of decomposing a larger variable.\n" (struct
+
+    ^{:line 31 :tag (slice LocalSlot) :doc "Slots is all the slots used in the debug info, indexed by their SlotID.\n"} Slots
+
+    ^{:line 33 :tag (slice (* ir/Name)) :doc "The user variables, indexed by VarID.\n"} Vars
+
+    ^{:line 35 :tag (slice (slice SlotID)) :doc "The slots that make up each variable, indexed by VarID.\n"} VarSlots
+
+    ^{:line 37 :tag (slice (slice LocListEntry)) :doc "The location list data, indexed by VarID. Must be processed by PutLocationList.\n"} LocationLists
+
+
+    ^{:line 40 :tag (slice (* ir/Name)) :doc "Register-resident output parameters for the function. This is filled in at\nSSA generation time.\n"} RegOutputParams
+
+    ^{:line 42 :tag (slice (* ir/Name)) :doc "Variable declarations that were removed during optimization\n"} OptDcl
+
+
+    ^{:line 45 :tag ID :doc "The ssa.Func.EntryID value, used to build location lists for\nreturn values promoted to heap in later DWARF generation.\n"} EntryID
+
+
+
+
+
+    ^{:line 51 :tag (func [^ID block ^ID value] [int64]) :doc "Filled in by the user. Translates Block and Value ID to PC.\n\nNOTE: block is only used if value is BlockStart.ID or BlockEnd.ID.\nOtherwise, it is ignored.\n"} GetPC))
+
+
+
+
+
+(go/type LocListEntry "LocListEntry represents a single entry in a location list.\nStartBlock/StartValue and EndBlock/EndValue are SSA coordinates\nthat get resolved to PCs during final encoding.\n" (struct
+    ^{:line 58 :tag ID} StartBlock ^ID StartValue
+    ^{:line 59 :tag ID} EndBlock ^ID EndValue
+    ^{:line 60 :tag (slice byte)} Expr)) ; DWARF location expression (DW_OP_*)
+
+
+(go/type BlockDebug (struct
+
+
+    ^{:line 66 :tag abt/T :doc "State at the start and end of the block. These are initialized,\nand updated from new information that flows on back edges.\n"} startState ^{:tag abt/T :doc "State at the start and end of the block. These are initialized,\nand updated from new information that flows on back edges.\n"} endState
+
+
+
+    ^{:line 70 :tag int32 :doc "Use these to avoid excess work in the merge. If none of the\npredecessors has changed since the last check, the old answer is\nstill good.\n"} lastCheckedTime ^{:tag int32 :doc "Use these to avoid excess work in the merge. If none of the\npredecessors has changed since the last check, the old answer is\nstill good.\n"} lastChangedTime
+
+    ^{:line 72 :tag bool :doc "Whether the block had any changes to user variables at all.\n"} relevant
+
+
+
+    ^{:line 76 :tag bool :doc "false until the block has been processed at least once. This\naffects how the merge is done; the goal is to maximize sharing\nand avoid allocation.\n"} everProcessed))
+
+
+
+(go/type liveSlot "A liveSlot is a slot that's live in loc at entry/exit of a block.\n" (struct
+    ^{:line 81} VarLoc))
+
+
+^{:go/end 86} (go/method String ^string [^{:tag (* liveSlot)} ls]
+  (fmt/Sprintf "0x%x.%d.%d" ^{:go/via [VarLoc]} (.-Registers ls) ^{:go/via [VarLoc StackOffset]} (.stackOffsetValue ls) (bit-and (conv int32 ^{:go/via [VarLoc]} (.-StackOffset ls)) 1)))
+
+
+
+
+
+(go/type StackOffset "StackOffset encodes whether a value is on the stack and if so, where.\nIt is a 31-bit integer followed by a presence flag at the low-order\nbit.\n" int32)
+
+^{:go/end 95} (go/method onStack ^bool [^StackOffset s]
+  (!= s 0))
+
+
+^{:go/end 99} (go/method stackOffsetValue ^int32 [^StackOffset s]
+  (>> (conv int32 s) 1))
+
+
+
+(go/type stateAtPC "stateAtPC is the current state of all variables at some point.\n" (struct
+
+    ^{:line 104 :tag (slice VarLoc) :doc "The location of each known slot, indexed by SlotID.\n"} slots
+
+    ^{:line 106 :tag (slice (slice SlotID)) :doc "The slots present in each register, indexed by register number.\n"} registers))
+
+
+
+^{:go/end 136} (go/method reset "reset fills state with the live variables from live.\n" [^{:tag (* stateAtPC)} state ^abt/T live]
+  (let [(values slots registers) (values (.-slots state) (.-registers state))]
+    (clear slots)
+    (range [i registers]
+      (aset registers i (subslice (aget registers i) _ 0)))
+
+    (for [it (.Iterator live)] (not (.Done it)) _
+      (let [(values k d) (.Next it)
+          ^{:line 118} live (assert (* liveSlot) d)]
+        (aset slots k (.-VarLoc live))
+        (when (== (.-Registers (.-VarLoc live)) 0)
+          (continue))
+
+
+        (let [mask (conv uint64 (.-Registers (.-VarLoc live)))]
+          (while true
+            (when (== mask 0)
+              (break))
+
+            (let [reg (conv uint8 (bits/TrailingZeros64 mask))]
+              (set! mask bit-and-not ^uint64 (<< 1 reg))
+
+              (aset registers reg (append (aget registers reg) (conv SlotID k))))))))
+
+
+    (set! (values (.-slots state) (.-registers state)) (values slots registers))))
+
+
+^{:go/end 159} (go/method LocString ^string [^{:tag (* debugState)} s ^VarLoc loc]
+  (when (.absent loc)
+    (return "<nil>"))
+
+
+  (let [^{:tag (slice string)} storage (zero (slice string))]
+    (when ^{:go/via [StackOffset]} (.onStack loc)
+      (set! storage (append storage (fmt/Sprintf "@%+d" ^{:go/via [StackOffset]} (.stackOffsetValue loc)))))
+
+
+    (let [mask (conv uint64 (.-Registers loc))]
+      (while true
+        (when (== mask 0)
+          (break))
+
+        (let [reg (conv uint8 (bits/TrailingZeros64 mask))]
+          (set! mask bit-and-not ^uint64 (<< 1 reg))
+
+          (set! storage (append storage (.String (aget (.-registers s) reg))))))
+
+      (strings/Join storage ","))))
+
+
+
+(go/type VarLoc "A VarLoc describes the storage for part of a user variable.\n" (struct
+
+
+    ^{:line 165 :tag RegisterSet :doc "The registers this variable is available in. There can be more than\none in various situations, e.g. it's being moved between registers.\n"} Registers
+
+    ^{:line 167} StackOffset))
+
+
+^{:go/end 172} (go/method absent ^bool [^VarLoc loc]
+  (and (== (.-Registers loc) 0) (not ^{:go/via [StackOffset]} (.onStack loc))))
+
+
+^{:go/end 180} (go/method intersect ^VarLoc [^VarLoc loc ^VarLoc other]
+  (when (or (not ^{:go/via [StackOffset]} (.onStack loc)) (not ^{:go/via [StackOffset]} (.onStack other)) (!= (.-StackOffset loc) (.-StackOffset other)))
+    (set! (.-StackOffset loc) 0))
+
+  (set! (.-Registers loc) bit-and (.-Registers other))
+  ^{:line 179} loc)
+
+
+(go/var BlockStart (addr ^{:go/breaks [2 4 6]} (lit Value
+      :ID -10000
+      :Op OpInvalid
+      :Aux (StringToAux "BlockStart"))))
+
+
+(go/var BlockEnd (addr ^{:go/breaks [2 4 6]} (lit Value
+      :ID -20000
+      :Op OpInvalid
+      :Aux (StringToAux "BlockEnd"))))
+
+
+(go/var FuncEnd (addr ^{:go/breaks [2 4 6]} (lit Value
+      :ID -30000
+      :Op OpInvalid
+      :Aux (StringToAux "FuncEnd"))))
+
+
+
+(go/type RegisterSet "RegisterSet is a bitmap of registers, indexed by Register.num.\n" uint64)
+
+
+
+
+^{:go/end 210} (go/method logf "logf prints debug-specific logging to stdout (always stdout) if the\ncurrent function is tagged by GOSSAFUNC (for ssa output directed\neither to stdout or html).\n" [^{:tag (* debugState)} s ^string msg & ^{:tag (slice any)} args]
+  (when (.-PrintOrHtmlSSA (.-f s))
+    (fmt/Printf msg (spread args))))
+
+
+
+(go/type debugState (struct
+
+    ^{:line 214 :tag (slice LocalSlot) :doc "See FuncDebug.\n"} slots
+    ^{:line 215 :tag (slice (* ir/Name))} vars
+    ^{:line 216 :tag (slice (slice SlotID))} varSlots
+    ^{:line 217 :tag (slice (slice LocListEntry))} lists
+
+
+    ^{:line 220 :tag (slice VarID) :doc "The user variable that each slot rolls up to, indexed by SlotID.\n"} slotVars
+
+    ^{:line 222 :tag (* Func)} f
+    ^{:line 223 :tag int} loggingLevel
+    ^{:line 224 :tag int} convergeCount ; testing; iterate over block debug state this many times
+    ^{:line 225 :tag (slice Register)} registers
+    ^{:line 226 :tag (func [LocalSlot] [int32])} stackOffset
+    ^{:line 227 :tag (* obj/Link)} ctxt
+
+
+    ^{:line 230 :tag (slice (slice SlotID)) :doc "The names (slots) associated with each value, indexed by Value ID.\n"} valueNames
+
+
+    ^{:line 233 :tag stateAtPC :doc "The current state of whatever analysis is running.\n"} currentState
+    ^{:line 234 :tag (* sparseSet)} changedVars
+    ^{:line 235 :tag (* sparseSet)} changedSlots
+
+
+    ^{:line 238 :tag (slice pendingEntry) :doc "The pending location list entry for each user variable, indexed by VarID.\n"} pendingEntries
+
+    ^{:line 240 :tag (map (* ir/Name) (slice SlotID))} varParts
+    ^{:line 241 :tag (slice BlockDebug)} blockDebug
+    ^{:line 242 :tag (slice VarLoc)} pendingSlotLocs))
+
+
+^{:go/end 309} (go/method initializeCache [^{:tag (* debugState)} state ^{:tag (* Func)} f ^int numVars ^int numSlots]
+  ;; One blockDebug per block. Initialized in allocBlock.
+  (if (< (cap (.-blockDebug state)) (.NumBlocks f))
+    (set! (.-blockDebug state) (make (slice BlockDebug) (.NumBlocks f)))
+
+    (clear (subslice (.-blockDebug state) _ (.NumBlocks f))))
+
+
+  ;; A list of slots per Value. Reuse the previous child slices.
+  (when (< (cap (.-valueNames state)) (.NumValues f))
+    (let [old (.-valueNames state)]
+      (set! (.-valueNames state) (make (slice (slice SlotID)) (.NumValues f)))
+      (copy (.-valueNames state) old)))
+
+  (let [vn (subslice (.-valueNames state) _ (.NumValues f))]
+    (range [i vn]
+      (aset vn i (subslice (aget vn i) _ 0)))
+
+
+    ;; Slot and register contents for currentState. Cleared by reset().
+    (if (< (cap (.-slots (.-currentState state))) numSlots)
+      (set! (.-slots (.-currentState state)) (make (slice VarLoc) numSlots))
+
+      (set! (.-slots (.-currentState state)) (subslice (.-slots (.-currentState state)) _ numSlots)))
+
+    (if (< (cap (.-registers (.-currentState state))) (len (.-registers state)))
+      (set! (.-registers (.-currentState state)) (make (slice (slice SlotID)) (len (.-registers state))))
+
+      (set! (.-registers (.-currentState state)) (subslice (.-registers (.-currentState state)) _ (len (.-registers state)))))
+
+
+    ;; A relatively small slice, but used many times as the return from processValue.
+    (set! (.-changedVars state) (newSparseSet numVars))
+    (set! (.-changedSlots state) (newSparseSet numSlots))
+
+    ;; A pending entry per user variable, with space to track each of its pieces.
+    (let [numPieces 0]
+      (range [i (.-varSlots state)]
+        (set! numPieces + (len (aget (.-varSlots state) i))))
+
+      (if (< (cap (.-pendingSlotLocs state)) numPieces)
+        (set! (.-pendingSlotLocs state) (make (slice VarLoc) numPieces))
+
+        (clear (subslice (.-pendingSlotLocs state) _ numPieces)))
+
+      (when (< (cap (.-pendingEntries state)) numVars)
+        (set! (.-pendingEntries state) (make (slice pendingEntry) numVars)))
+
+      (let [pe (subslice (.-pendingEntries state) _ numVars)
+          ^{:line 294} freePieceIdx 0]
+        (range [varID slots (.-varSlots state)]
+          (aset pe varID ^{:go/breaks [2]} (lit pendingEntry
+              :pieces (subslice (.-pendingSlotLocs state) freePieceIdx (+ freePieceIdx (len slots)))))
+
+          (set! freePieceIdx + (len slots)))
+
+        (set! (.-pendingEntries state) pe)
+
+        (if (< (cap (.-lists state)) numVars)
+          (set! (.-lists state) (make (slice (slice LocListEntry)) numVars))
+          (do
+            (set! (.-lists state) (subslice (.-lists state) _ numVars))
+            (clear (.-lists state))))))))
+
+
+
+^{:go/end 313} (go/method allocBlock ^{:tag (* BlockDebug)} [^{:tag (* debugState)} state ^{:tag (* Block)} b]
+  (addr (aget (.-blockDebug state) (.-ID b))))
+
+
+^{:go/end 319} (go/method blockEndStateString ^string [^{:tag (* debugState)} s ^{:tag (* BlockDebug)} b]
+  (let [endState (lit stateAtPC :slots (make (slice VarLoc) (len (.-slots s))) :registers (make (slice (slice SlotID)) (len (.-registers s))))]
+    (.reset endState (.-endState b))
+    (.stateString s endState)))
+
+
+^{:go/end 344} (go/method stateString ^string [^{:tag (* debugState)} s ^stateAtPC state]
+  (let [^{:tag (slice string)} strs (zero (slice string))]
+    (range [slotID loc (.-slots state)]
+      (when (not (.absent loc))
+        (set! strs (append strs (fmt/Sprintf "\t%v = %v\n" (aget (.-slots s) slotID) (.LocString s loc))))))
+
+
+
+    (set! strs (append strs "\n"))
+    (range [reg slots (.-registers state)]
+      (when (!= (len slots) 0)
+        (let [^{:tag (slice string)} slotStrs (zero (slice string))]
+          (range [_ slot slots]
+            (set! slotStrs (append slotStrs (.String (aget (.-slots s) slot)))))
+
+          (set! strs (append strs (fmt/Sprintf "\t%v = %v\n" (addr (aget (.-registers s) reg)) slotStrs))))))
+
+
+
+    (when (== (len strs) 1)
+      (return "(no vars)\n"))
+
+    (strings/Join strs "")))
+
+
+
+
+
+
+(go/type slotCanonicalizer "slotCanonicalizer is a table used to lookup and canonicalize\nLocalSlot's in a type insensitive way (e.g. taking into account the\nbase name, offset, and width of the slot, but ignoring the slot\ntype).\n" (struct
+    ^{:line 351 :tag (map slotKey SlKeyIdx)} slmap
+    ^{:line 352 :tag (slice LocalSlot)} slkeys))
+
+
+^{:go/end 360} (go/func newSlotCanonicalizer ^{:tag (* slotCanonicalizer)} []
+  (addr ^{:go/breaks [2 4]} (lit slotCanonicalizer
+      :slmap (make (map slotKey SlKeyIdx))
+      :slkeys (lit (slice LocalSlot) (lit LocalSlot :N nil)))))
+
+
+
+(go/type SlKeyIdx uint32)
+
+(go/const ^{:val 0} noSlot (conv SlKeyIdx 0))
+
+
+
+(go/type slotKey "slotKey is a type-insensitive encapsulation of a LocalSlot; it\nis used to key a map within slotCanonicalizer.\n" (struct
+    ^{:line 369 :tag (* ir/Name)} name
+    ^{:line 370 :tag int64} offset
+    ^{:line 371 :tag int64} width
+    ^{:line 372 :tag SlKeyIdx} splitOf ; idx in slkeys slice in slotCanonicalizer
+    ^{:line 373 :tag int64} splitOffset))
+
+
+
+
+
+
+^{:go/end 396} (go/method lookup "lookup looks up a LocalSlot in the slot canonicalizer \"sc\", returning\na canonical index for the slot, and adding it to the table if need\nbe. Return value is the canonical slot index, and a boolean indicating\nwhether the slot was found in the table already (TRUE => found).\n" [^{:tag (* slotCanonicalizer)} sc ^LocalSlot ls] :results [SlKeyIdx bool]
+  (let [split noSlot]
+    (when (!= (.-SplitOf ls) nil)
+      (set! (values split _) (.lookup sc @(.-SplitOf ls))))
+
+    (let [k ^{:go/breaks [2 8]} (lit slotKey
+          :name (.-N ls) :offset (.-Off ls) :width (.Size (.-Type ls))
+          :splitOf split :splitOffset (.-SplitOffset ls))]
+
+      (when [(values idx ok) (aget (.-slmap sc) k)] ok
+        (return idx true))
+
+      (let [rv (conv SlKeyIdx (len (.-slkeys sc)))]
+        (set! (.-slkeys sc) (append (.-slkeys sc) ls))
+        (aset (.-slmap sc) k rv)
+        (return rv false)))))
+
+
+^{:go/end 400} (go/method canonSlot ^LocalSlot [^{:tag (* slotCanonicalizer)} sc ^SlKeyIdx idx]
+  (aget (.-slkeys sc) idx))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 553} (go/func PopulateABIInRegArgOps "PopulateABIInRegArgOps examines the entry block of the function\nand looks for incoming parameters that have missing or partial\nOpArg{Int,Float}Reg values, inserting additional values in\ncases where they are missing. Example:\n\n\tfunc foo(s string, used int, notused int) int {\n\t  return len(s) + used\n\t}\n\nIn the function above, the incoming parameter \"used\" is fully live,\n\"notused\" is not live, and \"s\" is partially live (only the length\nfield of the string is used). At the point where debug value\nanalysis runs, we might expect to see an entry block with:\n\n\tb1:\n\t  v4 = ArgIntReg <uintptr> {s+8} [0] : BX\n\t  v5 = ArgIntReg <int> {used} [0] : CX\n\nWhile this is an accurate picture of the live incoming params,\nwe also want to have debug locations for non-live params (or\ntheir non-live pieces), e.g. something like\n\n\tb1:\n\t  v9 = ArgIntReg <*uint8> {s+0} [0] : AX\n\t  v4 = ArgIntReg <uintptr> {s+8} [0] : BX\n\t  v5 = ArgIntReg <int> {used} [0] : CX\n\t  v10 = ArgIntReg <int> {unused} [0] : DI\n\nThis function examines the live OpArg{Int,Float}Reg values and\nsynthesizes new (dead) values for the non-live params or the\nnon-live pieces of partially live params.\n" [^{:tag (* Func)} f]
+  (let [pri (.ABIAnalyzeFuncType (.-ABISelf f) (.-Type f))
+
+      ;; When manufacturing new slots that correspond to splits of
+      ;; composite parameters, we want to avoid creating a new sub-slot
+      ;; that differs from some existing sub-slot only by type, since
+      ;; the debug location analysis will treat that slot as a separate
+      ;; entity. To achieve this, create a lookup table of existing
+      ;; slots that is type-insenstitive.
+      ^{:line 442} sc (newSlotCanonicalizer)]
+    (range [_ sl (.-Names f)]
+      (.lookup sc @sl))
+
+
+    ;; Add slot -> value entry to f.NamedValues if not already present.
+    (let [addToNV ^{:go/end 463} (fn [^{:tag (* Value)} v ^LocalSlot sl]
+          (let [(values values ok) (aget (.-NamedValues f) sl)]
+            (if (not ok)
+              ;; Haven't seen this slot yet.
+              (let [sla (.localSlotAddr f sl)]
+                (set! (.-Names f) (append (.-Names f) sla)))
+
+              (range [_ ev values]
+                (when (== v ev)
+                  (return))))
+
+
+
+            (set! values (append values v))
+            (aset (.-NamedValues f) sl values)))
+
+
+        ^{:line 465} newValues (lit (slice (* Value)))
+
+        ^{:line 467} abiRegIndexToRegister ^{:go/end 474} (fn ^int8 [^abi/RegIndex reg]
+          (let [i (.FloatIndexFor (.-ABISelf f) reg)]
+            (if (>= i 0) ; float PR
+              (return (aget (.-floatParamRegs (.-Config f)) i))
+
+              (return (aget (.-intParamRegs (.-Config f)) reg)))))
+
+
+
+        ;; Helper to construct a new OpArg{Float,Int}Reg op value.
+        ^{:line 477 :tag src/XPos} pos (zero src/XPos)]
+      (when (!= (len (.-Values (.-Entry f))) 0)
+        (set! pos (.-Pos (aget (.-Values (.-Entry f)) 0))))
+
+      (let [synthesizeOpIntFloatArg ^{:go/end 493} (fn ^{:tag (* Value)} [^{:tag (* ir/Name)} n ^{:tag (* types/Type)} t ^abi/RegIndex reg ^LocalSlot sl]
+            (let [aux (addr (lit AuxNameOffset n (.-Off sl)))
+                (values op auxInt) (ArgOpAndRegisterFor reg (.-ABISelf f))
+                ^{:line 484} v (.newValueNoBlock f op t pos)]
+              (set! (.-AuxInt v) auxInt)
+              (set! (.-Aux v) aux)
+              (set! (.-Args v) nil)
+              (set! (.-Block v) (.-Entry f))
+              (set! newValues (append newValues v))
+              (addToNV v sl)
+              (.setHome f v (addr (aget (.-registers (.-Config f)) (abiRegIndexToRegister reg))))
+              ^{:line 492} v))]
+
+
+        ;; Make a pass through the entry block looking for
+        ;; OpArg{Int,Float}Reg ops. Record the slots they use in a table
+        ;; ("sc"). We use a type-insensitive lookup for the slot table,
+        ;; since the type we get from the ABI analyzer won't always match
+        ;; what the compiler uses when creating OpArg{Int,Float}Reg ops.
+        (range [_ v (.-Values (.-Entry f))]
+          (cond (or (== (.-Op v) OpArgIntReg) (== (.-Op v) OpArgFloatReg))
+            (let [aux (assert (* AuxNameOffset) (.-Aux v))
+                ^{:line 503} sl (lit LocalSlot :N (.-Name aux) :Type (.-Type v) :Off (.-Offset aux))
+                ;; install slot in lookup table
+                (values idx _) (.lookup sc sl)]
+              ;; add to f.NamedValues if not already present
+              (addToNV v (.canonSlot sc idx)))
+            (.IsCall (.-Op v))
+            ;; if we hit a call, we've gone too far.
+            (break)))
+
+
+
+        ;; Now make a pass through the ABI in-params, looking for params
+        ;; or pieces of params that we didn't encounter in the loop above.
+        (range [_ inp (.InParams pri)]
+          (when (not (isNamedRegParam inp))
+            (continue))
+
+          (let [n (.-Name inp)
+
+              ;; Param is spread across one or more registers. Walk through
+              ;; each piece to see whether we've seen an arg reg op for it.
+              (values types offsets) (.RegisterTypesAndOffsets inp)]
+            (range [k t types]
+              ;; Note: this recipe for creating a LocalSlot is designed
+              ;; to be compatible with the one used in expand_calls.go
+              ;; as opposed to decompose.go. The expand calls code just
+              ;; takes the base name and creates an offset into it,
+              ;; without using the SplitOf/SplitOffset fields. The code
+              ;; in decompose.go does the opposite -- it creates a
+              ;; LocalSlot object with "Off" set to zero, but with
+              ;; SplitOf pointing to a parent slot, and SplitOffset
+              ;; holding the offset into the parent object.
+              (let [pieceSlot (lit LocalSlot :N n :Type t :Off (aget offsets k))
+
+                  ;; Look up this piece to see if we've seen a reg op
+                  ;; for it. If not, create one.
+                  (values _ found) (.lookup sc pieceSlot)]
+                (when (not found)
+                  ;; This slot doesn't appear in the map, meaning it
+                  ;; corresponds to an in-param that is not live, or
+                  ;; a portion of an in-param that is not live/used.
+                  ;; Add a new dummy OpArg{Int,Float}Reg for it.
+                  (synthesizeOpIntFloatArg n t (aget (.-Registers inp) k)
+                    ^{:line 546} pieceSlot))))))
+
+
+
+
+        ;; Insert the new values into the head of the block.
+        (set! (.-Values (.-Entry f)) (append newValues (spread (.-Values (.-Entry f)))))))))
+
+
+
+
+
+^{:go/end 676} (go/func BuildFuncDebug "BuildFuncDebug builds debug information for f, placing the results\nin \"rval\". f must be fully processed, so that each Value is where it\nwill be when machine code is emitted.\n" [^{:tag (* obj/Link)} ctxt ^{:tag (* Func)} f ^int loggingLevel ^{:tag (func [LocalSlot] [int32])} stackOffset ^{:tag (* FuncDebug)} rval]
+  (when (== (.-RegAlloc f) nil)
+    (.Fatalf f "BuildFuncDebug on func %v that has not been fully processed" f))
+
+  (let [state (addr (.-debugState (.-Cache f)))]
+    (set! (.-loggingLevel state) (% loggingLevel 1000))
+
+    ;; A specific number demands exactly that many iterations. Under
+    ;; particular circumstances it make require more than the total of
+    ;; 2 passes implied by a single run through liveness and a single
+    ;; run through location list generation.
+    (set! (.-convergeCount state) (/ loggingLevel 1000))
+    (set! (.-f state) f)
+    (set! (.-registers state) (.-registers (.-Config f)))
+    (set! (.-stackOffset state) stackOffset)
+    (set! (.-ctxt state) ctxt)
+
+    (when ^{:go/via [Flags]} (.-RegabiArgs buildcfg/Experiment)
+      (PopulateABIInRegArgOps f))
+
+
+    (when (> (.-loggingLevel state) 0)
+      (.logf state "Generating location lists for function %q\n" (.-Name f)))
+
+
+    (if (== (.-varParts state) nil)
+      (set! (.-varParts state) (make (map (* ir/Name) (slice SlotID))))
+
+      (clear (.-varParts state)))
+
+
+    ;; Recompose any decomposed variables, and establish the canonical
+    ;; IDs for each var and slot by filling out state.vars and state.slots.
+
+    (set! (.-slots state) (subslice (.-slots state) _ 0))
+    (set! (.-vars state) (subslice (.-vars state) _ 0))
+    (range [i slot (.-Names f)]
+      (set! (.-slots state) (append (.-slots state) @slot))
+      (when (or (ir/IsSynthetic (.-N slot)) (not (IsVarWantedForDebug (.-N slot))))
+        (continue))
+
+
+      (let [topSlot slot]
+        (while (!= (.-SplitOf topSlot) nil)
+          (set! topSlot (.-SplitOf topSlot)))
+
+        (when [(values _ ok) (aget (.-varParts state) (.-N topSlot))] (not ok)
+          (set! (.-vars state) (append (.-vars state) (.-N topSlot))))
+
+        (aset (.-varParts state) (.-N topSlot) (append (aget (.-varParts state) (.-N topSlot)) (conv SlotID i)))))
+
+
+    ;; Recreate the LocalSlot for each stack-only variable.
+    ;; This would probably be better as an output from stackframe.
+    (range [_ b (.-Blocks f)]
+      (range [_ v (.-Values b)]
+        (when (== (.-Op v) OpVarDef)
+          (let [n (assert (* ir/Name) (.-Aux v))]
+            (when (or (ir/IsSynthetic n) (not (IsVarWantedForDebug n)))
+              (continue))
+
+
+            (when [(values _ ok) (aget (.-varParts state) n)] (not ok)
+              (let [slot (lit LocalSlot :N n :Type (.-Type v) :Off 0)]
+                (set! (.-slots state) (append (.-slots state) slot))
+                (aset (.-varParts state) n (lit (slice SlotID) (conv SlotID (- (len (.-slots state)) 1))))
+                (set! (.-vars state) (append (.-vars state) n))))))))
+
+
+
+
+
+    ;; Fill in the var<->slot mappings.
+    (if (< (cap (.-varSlots state)) (len (.-vars state)))
+      (set! (.-varSlots state) (make (slice (slice SlotID)) (len (.-vars state))))
+      (do
+        (set! (.-varSlots state) (subslice (.-varSlots state) _ (len (.-vars state))))
+        (range [i (.-varSlots state)]
+          (aset (.-varSlots state) i (subslice (aget (.-varSlots state) i) _ 0)))))
+
+
+    (if (< (cap (.-slotVars state)) (len (.-slots state)))
+      (set! (.-slotVars state) (make (slice VarID) (len (.-slots state))))
+
+      (set! (.-slotVars state) (subslice (.-slotVars state) _ (len (.-slots state)))))
+
+
+    (range [varID n (.-vars state)]
+      (let [parts (aget (.-varParts state) n)]
+        (^{:inst [(slice SlotID) SlotID]} slices/SortFunc parts ^{:go/end 649} (fn ^int [^SlotID a ^SlotID b]
+            (^{:inst [int64]} cmp/Compare (varOffset (aget (.-slots state) a)) (varOffset (aget (.-slots state) b)))))
+
+
+        (aset (.-varSlots state) varID parts)
+        (range [_ slotID parts]
+          (aset (.-slotVars state) slotID (conv VarID varID)))))
+
+
+
+    (.initializeCache state f (len (.-varParts state)) (len (.-slots state)))
+
+    (range [i slot (.-Names f)]
+      (when (or (ir/IsSynthetic (.-N slot)) (not (IsVarWantedForDebug (.-N slot))))
+        (continue))
+
+      (range [_ value (aget (.-NamedValues f) @slot)]
+        (aset (.-valueNames state) (.-ID value) (append (aget (.-valueNames state) (.-ID value)) (conv SlotID i)))))
+
+
+
+    (let [blockLocs (.liveness state)]
+      (.buildLocationLists state blockLocs)
+
+      ;; Populate "rval" with what we've computed.
+      (set! (.-Slots rval) (.-slots state))
+      (set! (.-VarSlots rval) (.-varSlots state))
+      (set! (.-Vars rval) (.-vars state))
+      (set! (.-LocationLists rval) (.-lists state)))))
+
+
+
+
+^{:go/end 791} (go/method liveness "liveness walks the function in control flow order, calculating the start\nand end state of each block.\n" ^{:tag (slice (* BlockDebug))} [^{:tag (* debugState)} state]
+  (let [blockLocs (make (slice (* BlockDebug)) (.NumBlocks (.-f state)))
+      ^{:line 682} counterTime (conv int32 1)
+
+      ;; Reverse postorder: visit a block after as many as possible of its
+      ;; predecessors have been visited.
+      ^{:line 686} po (.Postorder (.-f state))
+      ^{:line 687} converged false
+
+      ;; The iteration rule is that by default, run until converged, but
+      ;; if a particular iteration count is specified, run that many
+      ;; iterations, no more, no less.  A count is specified as the
+      ;; thousands digit of the location lists debug flag,
+      ;; e.g. -d=locationlists=4000
+      ^{:line 694} keepGoing ^{:go/end 699} (fn ^bool [^int k]
+        (when (== (.-convergeCount state) 0)
+          (return (not converged)))
+
+        (< k (.-convergeCount state)))]
+
+    (for [k 0] (keepGoing k) (inc! k)
+      (when (> (.-loggingLevel state) 0)
+        (.logf state "Liveness pass %d\n" k))
+
+      (set! converged true)
+      (for [i (- (len po) 1)] (>= i 0) (dec! i)
+        (let [b (aget po i)
+            ^{:line 707} locs (aget blockLocs (.-ID b))]
+          (when (== locs nil)
+            (set! locs (.allocBlock state b))
+            (aset blockLocs (.-ID b) locs))
+
+
+          ;; Build the starting state for the block from the final
+          ;; state of its predecessors.
+          (let [(values startState blockChanged) (.mergePredecessors state b blockLocs nil false)]
+            (set! (.-lastCheckedTime locs) counterTime)
+            (inc! counterTime)
+            (when (> (.-loggingLevel state) 1)
+              (.logf state "Processing %v, block changed %v, initial state:\n%v" b blockChanged (.stateString state (.-currentState state))))
+
+
+            (when blockChanged
+              ;; If the start did not change, then the old endState is good
+              (set! converged false)
+              (let [changed false]
+                (.clear (.-changedSlots state))
+
+                ;; Update locs/registers with the effects of each Value.
+                (range [_ v (.-Values b)]
+                  (let [slots (aget (.-valueNames state) (.-ID v))
+
+                      ;; Loads and stores inherit the names of their sources.
+                      ^{:line 733 :tag (* Value)} source (zero (* Value))]
+                    (switch (.-Op v)
+                      (case [OpStoreReg]
+                        (set! source (aget (.-Args v) 0)))
+                      (case [OpLoadReg]
+                        (switch [a (aget (.-Args v) 0)] (.-Op a)
+                          (case [OpArg OpPhi]
+                            (set! source a))
+                          (case [OpStoreReg]
+                            (set! source (aget (.-Args a) 0)))
+                          (default
+                            (when (> (.-loggingLevel state) 1)
+                              (.logf state "at %v: load with unexpected source op: %v (%v)\n" v (.-Op a) a))))))
+
+
+
+                    ;; Update valueNames with the source so that later steps
+                    ;; don't need special handling.
+                    (when (and (!= source nil) (== k 0))
+                      ;; limit to k == 0 otherwise there are duplicates.
+                      (set! slots (append slots (spread (aget (.-valueNames state) (.-ID source)))))
+                      (aset (.-valueNames state) (.-ID v) slots))
+
+
+                    (let [(values reg _) (assert (* Register) (.getHome (.-f state) (.-ID v)))
+                        ^{:line 758} c (.processValue state v slots reg)]
+                      (set! changed (or changed c)))))
+
+
+                (when (> (.-loggingLevel state) 1)
+                  (.logf state "Block %v done, locs:\n%v" b (.stateString state (.-currentState state))))
+
+
+                (set! (.-relevant locs) (or (.-relevant locs) changed))
+                (if (not changed)
+                  (set! (.-endState locs) startState)
+                  (do
+                    (range [_ id (.contents (.-changedSlots state))]
+                      (let [slotID (conv SlotID id)
+                          ^{:line 772} slotLoc (aget (.-slots (.-currentState state)) slotID)]
+                        (when (.absent slotLoc)
+                          (.Delete startState (conv int32 slotID))
+                          (continue))
+
+                        (let [old (.Find startState (conv int32 slotID))] ; do NOT replace existing values
+                          (when [(values oldLS ok) (assert (* liveSlot) old)] (or (not ok) (!= (.-VarLoc oldLS) slotLoc))
+                            (.Insert startState (conv int32 slotID)
+                              (addr (lit liveSlot :VarLoc slotLoc)))))))
+
+
+                    (set! (.-endState locs) startState)))
+
+                (set! (.-lastChangedTime locs) counterTime)))
+
+            (inc! counterTime)))))
+
+
+    ^{:line 790} blockLocs))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 1035} (go/method mergePredecessors "mergePredecessors takes the end state of each of b's predecessors and\nintersects them to form the starting state for b. It puts that state\nin blockLocs[b.ID].startState, and fills state.currentState with it.\nIt returns the start state and whether this is changed from the\npreviously approximated value of startState for this block.  After\nthe first call, subsequent calls can only shrink startState.\n\nPassing forLocationLists=true enables additional side-effects that\nare necessary for building location lists but superfluous while still\niterating to an answer.\n\nIf previousBlock is non-nil, it registers changes vs. that block's\nend state in state.changedVars. Note that previousBlock will often\nnot be a predecessor.\n\nNote that mergePredecessors behaves slightly differently between\nfirst and subsequent calls for a block.  For the first call, the\nstarting state is approximated by taking the state from the\npredecessor whose state is smallest, and removing any elements not\nin all the other predecessors; this makes the smallest number of\nchanges and shares the most state.  On subsequent calls the old\nvalue of startState is adjusted with new information; this is judged\nto do the least amount of extra work.\n\nTo improve performance, each block's state information is marked with\nlastChanged and lastChecked \"times\" so unchanged predecessors can be\nskipped on after-the-first iterations.  Doing this allows extra\niterations by the caller to be almost free.\n\nIt is important to know that the set representation used for\nstartState, endState, and merges can share data for two sets where\none is a small delta from the other.  Doing this does require a\nlittle care in how sets are updated, both in mergePredecessors, and\nusing its result.\n" [^{:tag (* debugState)} state ^{:tag (* Block)} b ^{:tag (slice (* BlockDebug))} blockLocs ^{:tag (* Block)} previousBlock ^bool forLocationLists] :results [abt/T bool]
+  ;; Filter out back branches.
+  (let [^{:tag (array 10 (* Block))} predsBuf (zero (array 10 (* Block)))
+
+      ^{:line 831} preds (subslice predsBuf _ 0)
+      ^{:line 832} locs (aget blockLocs (.-ID b))
+
+      ^{:line 834} blockChanged (not (.-everProcessed locs)) ; the first time it always changes.
+      ^{:line 835} updating (.-everProcessed locs)]
+
+    ;; For the first merge, exclude predecessors that have not been seen yet.
+    ;; I.e., backedges.
+    (range [_ pred (.-Preds b)]
+      (when [bl (aget blockLocs (.-ID (.-b pred)))] (and (!= bl nil) (.-everProcessed bl))
+        ;; crucially, a self-edge has bl != nil, but bl.everProcessed is false the first time.
+        (set! preds (append preds (.-b pred)))))
+
+
+
+    (set! (.-everProcessed locs) true)
+
+    (when (> (.-loggingLevel state) 1)
+      ;; The logf below would cause preds to be heap-allocated if
+      ;; it were passed directly.
+      (let [preds2 (make (slice (* Block)) (len preds))]
+        (copy preds2 preds)
+        (.logf state "Merging %v into %v (changed=%d, checked=%d)\n" preds2 b (.-lastChangedTime locs) (.-lastCheckedTime locs))))
+
+
+    (.clear (.-changedVars state))
+
+    (let [markChangedVars ^{:go/end 872} (fn [^abt/T slots ^abt/T merged]
+          (when (not forLocationLists)
+            (return))
+
+          ;; Fill changedVars with those that differ between the previous
+          ;; block (in the emit order, not necessarily a flow predecessor)
+          ;; and the start state for this block.
+          (for [it (.Iterator slots)] (not (.Done it)) _
+            (let [(values k v) (.Next it)
+                ^{:line 867} m (.Find merged k)]
+              (when (or (== m nil) (!= (.-VarLoc (assert (* liveSlot) v)) (.-VarLoc (assert (* liveSlot) m))))
+                (.add (.-changedVars state) (conv ID (aget (.-slotVars state) k)))))))
+
+
+
+
+        ^{:line 874} reset ^{:go/end 882} (fn [^abt/T ourStartState]
+          (when (not (or forLocationLists blockChanged))
+            ;; there is no change and this is not for location lists, do
+            ;; not bother to reset currentState because it will not be
+            ;; examined.
+            (return))
+
+          (.reset (.-currentState state) ourStartState))]
+
+
+      ;; Zero predecessors
+      (when (== (len preds) 0)
+        (when (!= previousBlock nil)
+          (.Fatalf (.-f state) "Function %v, block %s with no predecessors is not first block, has previous %s" (.-f state) (.String b) (.String previousBlock)))
+
+        ;; startState is empty
+        (reset (lit abt/T))
+        (return (lit abt/T) blockChanged))
+
+
+      ;; One predecessor
+      (let [l0 (aget blockLocs (.-ID (aget preds 0)))
+          ^{:line 896} p0 (.-endState l0)]
+        (when (== (len preds) 1)
+          (when (and (!= previousBlock nil) (!= (.-ID (aget preds 0)) (.-ID previousBlock)))
+            ;; Change from previous block is its endState minus the predecessor's endState
+            (markChangedVars (.-endState (aget blockLocs (.-ID previousBlock))) p0))
+
+          (set! (.-startState locs) p0)
+          (set! blockChanged (or blockChanged (> (.-lastChangedTime l0) (.-lastCheckedTime locs))))
+          (reset p0)
+          (return p0 blockChanged))
+
+
+        ;; More than one predecessor
+
+        (when updating
+          ;; After the first approximation, i.e., when updating, results
+          ;; can only get smaller, because initially backedge
+          ;; predecessors do not participate in the intersection.  This
+          ;; means that for the update, given the prior approximation of
+          ;; startState, there is no need to re-intersect with unchanged
+          ;; blocks.  Therefore remove unchanged blocks from the
+          ;; predecessor list.
+          (for [i (- (len preds) 1)] (>= i 0) (dec! i)
+            (let [pred (aget preds i)]
+              (when (> (.-lastChangedTime (aget blockLocs (.-ID pred))) (.-lastCheckedTime locs))
+                (continue)) ; keep this predecessor
+
+              (aset preds i (aget preds (- (len preds) 1)))
+              (set! preds (subslice preds _ (- (len preds) 1)))
+              (when (> (.-loggingLevel state) 2)
+                (.logf state "Pruned b%d, lastChanged was %d but b%d lastChecked is %d\n" (.-ID pred) (.-lastChangedTime (aget blockLocs (.-ID pred))) (.-ID b) (.-lastCheckedTime locs)))))
+
+
+          ;; Check for an early out; this should always hit for the update
+          ;; if there are no cycles.
+          (when (== (len preds) 0)
+            (set! blockChanged false)
+
+            (reset (.-startState locs))
+            (when (> (.-loggingLevel state) 2)
+              (.logf state "Early out, no predecessors changed since last check\n"))
+
+            (when (!= previousBlock nil)
+              (markChangedVars (.-endState (aget blockLocs (.-ID previousBlock))) (.-startState locs)))
+
+            (return (.-startState locs) blockChanged)))
+
+
+
+        (let [baseID (.-ID (aget preds 0))
+            ^{:line 946} baseState p0]
+
+          ;; Choose the predecessor with the smallest endState for intersection work
+          (range [_ pred (subslice preds 1)]
+            (when (< (.Size (.-endState (aget blockLocs (.-ID pred)))) (.Size baseState))
+              (set! baseState (.-endState (aget blockLocs (.-ID pred))))
+              (set! baseID (.-ID pred))))
+
+
+
+          (when (> (.-loggingLevel state) 2)
+            (.logf state "Starting %v with state from b%v:\n%v" b baseID (.blockEndStateString state (aget blockLocs baseID)))
+            (range [_ pred preds]
+              (when (== (.-ID pred) baseID)
+                (continue))
+
+              (.logf state "Merging in state from %v:\n%v" pred (.blockEndStateString state (aget blockLocs (.-ID pred))))))
+
+
+
+          (.reset (.-currentState state) (lit abt/T))
+          ;; The normal logic of "reset" is included in the intersection loop below.
+
+          (let [slotLocs (.-slots (.-currentState state))
+
+              ;; If this is the first call, do updates on the "baseState"; if this
+              ;; is a subsequent call, tweak the startState instead. Note that
+              ;; these "set" values are values; there are no side effects to
+              ;; other values as these are modified.
+              ^{:line 975} newState baseState]
+            (when updating
+              (set! newState (.-startState (aget blockLocs (.-ID b)))))
+
+
+            (for [it (.Iterator newState)] (not (.Done it)) _
+              (let [(values k d) (.Next it)
+                  ^{:line 982} thisSlot (assert (* liveSlot) d)
+                  ^{:line 983} x (.-VarLoc thisSlot)
+                  ^{:line 984} x0 x] ; initial value in newState
+
+                ;; Intersect this slot with the slot in all the predecessors
+                (range [_ other preds]
+                  (when (and (not updating) (== (.-ID other) baseID))
+                    (continue))
+
+                  (let [otherSlot (.Find (.-endState (aget blockLocs (.-ID other))) k)]
+                    (when (== otherSlot nil)
+                      (set! x (lit VarLoc))
+                      (break))
+
+                    (let [y (.-VarLoc (assert (* liveSlot) otherSlot))]
+                      (set! x (.intersect x y))
+                      (when (.absent x)
+                        (set! x (lit VarLoc))
+                        (break)))))
+
+
+
+                ;; Delete if necessary, but not otherwise (in order to maximize sharing).
+                (when (.absent x)
+                  (when (not (.absent x0))
+                    (set! blockChanged true)
+                    (.Delete newState k))
+
+                  (aset slotLocs k (lit VarLoc))
+                  (continue))
+
+                (when (!= x x0)
+                  (set! blockChanged true)
+                  (.Insert newState k (addr (lit liveSlot :VarLoc x))))
+
+
+                (aset slotLocs k x)
+                (let [mask (conv uint64 (.-Registers x))]
+                  (while true
+                    (when (== mask 0)
+                      (break))
+
+                    (let [reg (conv uint8 (bits/TrailingZeros64 mask))]
+                      (set! mask bit-and-not ^uint64 (<< 1 reg))
+                      (aset (.-registers (.-currentState state)) reg (append (aget (.-registers (.-currentState state)) reg) (conv SlotID k))))))))
+
+
+
+            (when (!= previousBlock nil)
+              (markChangedVars (.-endState (aget blockLocs (.-ID previousBlock))) newState))
+
+            (set! (.-startState locs) newState)
+            (return newState blockChanged)))))))
+
+
+
+
+
+
+^{:go/end 1162} (go/method processValue "processValue updates locs and state.registerContents to reflect v, a\nvalue with the names in vSlots and homed in vReg.  \"v\" becomes\nvisible after execution of the instructions evaluating it. It\nreturns which VarIDs were modified by the Value's execution.\n" ^bool [^{:tag (* debugState)} state ^{:tag (* Value)} v ^{:tag (slice SlotID)} vSlots ^{:tag (* Register)} vReg]
+  (let [locs (.-currentState state)
+      ^{:line 1043} changed false
+      ^{:line 1044} setSlot ^{:go/end 1049} (fn [^SlotID slot ^VarLoc loc]
+        (set! changed true)
+        (.add (.-changedVars state) (conv ID (aget (.-slotVars state) slot)))
+        (.add (.-changedSlots state) (conv ID slot))
+        (aset (.-slots (.-currentState state)) slot loc))
+
+
+      ;; Handle any register clobbering. Call operations, for example,
+      ;; clobber all registers even though they don't explicitly write to
+      ;; them.
+      ^{:line 1054} clobbers (.-clobbers (.-reg (aget opcodeTable (.-Op v))))]
+    (while true
+      (when (.empty clobbers)
+        (break))
+
+      (let [reg (.pickReg clobbers)]
+        (set! clobbers (.removeReg clobbers reg))
+
+        (range [_ slot (aget (.-registers locs) reg)]
+          (when (> (.-loggingLevel state) 1)
+            (.logf state "at %v: %v clobbered out of %v\n" v (aget (.-slots state) slot) (addr (aget (.-registers state) reg))))
+
+
+          (let [last (aget (.-slots locs) slot)]
+            (when (.absent last)
+              (.Fatalf (.-f state) "at %v: slot %v in register %v with no location entry" v (aget (.-slots state) slot) (addr (aget (.-registers state) reg)))
+              (continue))
+
+            (let [regs (bit-and-not (.-Registers last) ^RegisterSet (<< 1 reg))]
+              (setSlot slot (lit VarLoc regs (.-StackOffset last))))))
+
+
+        (aset (.-registers locs) reg (subslice (aget (.-registers locs) reg) _ 0))))
+
+
+    (switch
+      (case [(== (.-Op v) OpVarDef)]
+        (let [n (assert (* ir/Name) (.-Aux v))]
+          (when (or (ir/IsSynthetic n) (not (IsVarWantedForDebug n)))
+            (break))
+
+
+          (let [slotID (aget (aget (.-varParts state) n) 0)
+              ^{:line 1087 :tag StackOffset} stackOffset (zero StackOffset)]
+            (when (== (.-Op v) OpVarDef)
+              (set! stackOffset (conv StackOffset (bit-or (<< ((.-stackOffset state) (aget (.-slots state) slotID)) 1) 1))))
+
+            (setSlot slotID (lit VarLoc 0 stackOffset))
+            (when (> (.-loggingLevel state) 1)
+              (if (== (.-Op v) OpVarDef)
+                (.logf state "at %v: stack-only var %v now live\n" v (aget (.-slots state) slotID))
+
+                (.logf state "at %v: stack-only var %v now dead\n" v (aget (.-slots state) slotID)))))))
+
+
+
+      (case [(== (.-Op v) OpArg)]
+        (let [home (assert LocalSlot (.getHome (.-f state) (.-ID v)))
+            ^{:line 1102} stackOffset (bit-or (<< ((.-stackOffset state) home) 1) 1)]
+          (range [_ slot vSlots]
+            (when (> (.-loggingLevel state) 1)
+              (.logf state "at %v: arg %v now on stack in location %v\n" v (aget (.-slots state) slot) home)
+              (when [last (aget (.-slots locs) slot)] (not (.absent last))
+                (.logf state "at %v: unexpected arg op on already-live slot %v\n" v (aget (.-slots state) slot))))
+
+
+
+            (setSlot slot (lit VarLoc 0 (conv StackOffset stackOffset))))))
+
+
+      (case [(== (.-Op v) OpStoreReg)]
+        (let [home (assert LocalSlot (.getHome (.-f state) (.-ID v)))
+            ^{:line 1116} stackOffset (bit-or (<< ((.-stackOffset state) home) 1) 1)]
+          (range [_ slot vSlots]
+            (let [last (aget (.-slots locs) slot)]
+              (when (.absent last)
+                (when (> (.-loggingLevel state) 1)
+                  (.logf state "at %v: unexpected spill of unnamed register %s\n" v vReg))
+
+                (break))
+
+
+              (setSlot slot (lit VarLoc (.-Registers last) (conv StackOffset stackOffset)))
+              (when (> (.-loggingLevel state) 1)
+                (.logf state "at %v: %v spilled to stack location %v@%d\n" v (aget (.-slots state) slot) home ((.-stackOffset state) home)))))))
+
+
+
+      (case [(!= vReg nil)]
+        (when (> (.-loggingLevel state) 1)
+          (let [newSlots (make (slice bool) (len (.-slots state)))]
+            (range [_ slot vSlots]
+              (aset newSlots slot true))
+
+
+            (range [_ slot (aget (.-registers locs) (.-num vReg))]
+              (when (not (aget newSlots slot))
+                (.logf state "at %v: overwrote %v in register %v\n" v (aget (.-slots state) slot) vReg)))))
+
+
+
+
+        (range [_ slot (aget (.-registers locs) (.-num vReg))]
+          (let [last (aget (.-slots locs) slot)]
+            (setSlot slot (lit VarLoc (bit-and-not (.-Registers last) ^RegisterSet (<< 1 (conv uint8 (.-num vReg)))) (.-StackOffset last)))))
+
+        (aset (.-registers locs) (.-num vReg) (subslice (aget (.-registers locs) (.-num vReg)) _ 0))
+        (aset (.-registers locs) (.-num vReg) (append (aget (.-registers locs) (.-num vReg)) (spread vSlots)))
+        (range [_ slot vSlots]
+          (when (> (.-loggingLevel state) 1)
+            (.logf state "at %v: %v now in %s\n" v (aget (.-slots state) slot) vReg))
+
+
+          (let [last (aget (.-slots locs) slot)]
+            (setSlot slot (lit VarLoc (bit-or ^RegisterSet (<< 1 (conv uint8 (.-num vReg))) (.-Registers last)) (.-StackOffset last)))))))
+
+
+    ^{:line 1161} changed))
+
+
+
+
+^{:go/end 1173} (go/func varOffset "varOffset returns the offset of slot within the user variable it was\ndecomposed from. This has nothing to do with its stack offset.\n" ^int64 [^LocalSlot slot]
+  (let [offset (.-Off slot)
+      ^{:line 1168} s (addr slot)]
+    (for [] (!= (.-SplitOf s) nil) (set! s (.-SplitOf s))
+      (set! offset + (.-SplitOffset s)))
+
+    ^{:line 1172} offset))
+
+
+
+
+(go/type pendingEntry "A pendingEntry represents the beginning of a location list entry, missing\nonly its end coordinate.\n" (struct
+    ^{:line 1178 :tag bool} present
+    ^{:line 1179 :tag ID} startBlock ^ID startValue
+
+
+    ^{:line 1182 :tag (slice VarLoc) :doc "The location of each piece of the variable, in the same order as the\nSlotIDs in varParts.\n"} pieces))
+
+
+^{:go/end 1190} (go/method clear [^{:tag (* pendingEntry)} e]
+  (set! (.-present e) false)
+  (set! (.-startBlock e) 0)
+  (set! (.-startValue e) 0)
+  (clear (.-pieces e)))
+
+
+
+
+
+
+^{:go/breaks [[8 1214]] :go/end 1215} (go/func canMerge "canMerge reports whether a new location description is a superset\nof the (non-empty) pending location description, if so, the two\ncan be merged (i.e., pending is still a valid and useful location\ndescription).\n" ^bool [^VarLoc pending ^VarLoc new]
+  (when (and (.absent pending) (.absent new))
+    (return true))
+
+  (when (or (.absent pending) (.absent new))
+    (return false))
+
+  ;; pending is not absent, therefore it has either a stack mapping,
+  ;; or registers, or both.
+  (when (and ^{:go/via [StackOffset]} (.onStack pending) (!= (.-StackOffset pending) (.-StackOffset new)))
+    ;; if pending has a stack offset, then new must also, and it
+    ;; must be the same (StackOffset encodes onStack).
+    (return false))
+
+  (when (!= (bit-and (.-Registers pending) (.-Registers new)) (.-Registers pending))
+    ;; There is at least one register in pending not mentioned in new.
+    (return false))
+
+  true)
+
+
+
+^{:go/end 1225} (go/func firstReg "firstReg returns the first register in set that is present.\n" ^uint8 [^RegisterSet set]
+  (when (== set 0)
+    ;; This is wrong, but there seem to be some situations where we
+    ;; produce locations with no storage.
+    (return 0))
+
+  (conv uint8 (bits/TrailingZeros64 (conv uint64 set))))
+
+
+
+
+
+
+
+^{:go/end 1363} (go/method buildLocationLists "buildLocationLists builds location lists for all the user variables\nin state.f, using the information about block state in blockLocs.\nThe returned location lists are not fully complete. They are in\nterms of SSA values rather than PCs, and have no base address/end\nentries. They will be finished by PutLocationList.\n" [^{:tag (* debugState)} state ^{:tag (slice (* BlockDebug))} blockLocs]
+  ;; Run through the function in program text order, building up location
+  ;; lists as we go. The heavy lifting has mostly already been done.
+
+  (let [^{:tag (* Block)} prevBlock (zero (* Block))]
+    (range [_ b (.-Blocks (.-f state))]
+      (.mergePredecessors state b blockLocs prevBlock true)
+
+      ;; Handle any differences among predecessor blocks and previous block (perhaps not a predecessor)
+      (range [_ varID (.contents (.-changedVars state))]
+        (.updateVar state (conv VarID varID) b BlockStart))
+
+      (.clear (.-changedVars state))
+
+      (when (not (.-relevant (aget blockLocs (.-ID b))))
+        (continue))
+
+
+      (let [mustBeFirst ^{:go/end 1253} (fn ^bool [^{:tag (* Value)} v]
+            (or (== (.-Op v) OpPhi) (.isLoweredGetClosurePtr (.-Op v))
+              (== (.-Op v) OpArgIntReg) (== (.-Op v) OpArgFloatReg)))
+
+
+          ^{:line 1255} blockPrologComplete ^{:go/end 1261} (fn ^bool [^{:tag (* Value)} v]
+            (if (!= (.-ID b) (.-ID (.-Entry (.-f state))))
+              (return (not (.-zeroWidth (aget opcodeTable (.-Op v)))))
+
+              (return (== (.-Op v) OpInitMem))))]
+
+
+
+        ;; Examine the prolog portion of the block to process special
+        ;; zero-width ops such as Arg, Phi, LoweredGetClosurePtr (etc)
+        ;; whose lifetimes begin at the block starting point. In an
+        ;; entry block, allow for the possibility that we may see Arg
+        ;; ops that appear _after_ other non-zero-width operations.
+        ;; Example:
+        ;;
+        ;;   v33 = ArgIntReg <uintptr> {foo+0} [0] : AX (foo)
+        ;;   v34 = ArgIntReg <uintptr> {bar+0} [0] : BX (bar)
+        ;;   ...
+        ;;   v77 = StoreReg <unsafe.Pointer> v67 : ctx+8[unsafe.Pointer]
+        ;;   v78 = StoreReg <unsafe.Pointer> v68 : ctx[unsafe.Pointer]
+        ;;   v79 = Arg <*uint8> {args} : args[*uint8] (args[*uint8])
+        ;;   v80 = Arg <int> {args} [8] : args+8[int] (args+8[int])
+        ;;   ...
+        ;;   v1 = InitMem <mem>
+        ;;
+        ;; We can stop scanning the initial portion of the block when
+        ;; we either see the InitMem op (for entry blocks) or the
+        ;; first non-zero-width op (for other blocks).
+        (for [idx 0] (< idx (len (.-Values b))) (inc! idx)
+          (let [v (aget (.-Values b) idx)]
+            (when (blockPrologComplete v)
+              (break))
+
+            ;; Consider only "lifetime begins at block start" ops.
+            (when (and (not (mustBeFirst v)) (!= (.-Op v) OpArg))
+              (continue))
+
+            (let [slots (aget (.-valueNames state) (.-ID v))
+                (values reg _) (assert (* Register) (.getHome (.-f state) (.-ID v)))
+                ^{:line 1294} changed (.processValue state v slots reg)] ; changed == added to state.changedVars
+              (when changed
+                (range [_ varID (.contents (.-changedVars state))]
+                  (.updateVar state (conv VarID varID) (.-Block v) BlockStart))
+
+                (.clear (.-changedVars state))))))
+
+
+
+        ;; Now examine the block again, handling things other than the
+        ;; "begins at block start" lifetimes.
+        (let [zeroWidthPending false
+            ^{:line 1306} prologComplete false]
+          ;; expect to see values in pattern (apc)* (zerowidth|real)*
+          (range [_ v (.-Values b)]
+            (when (blockPrologComplete v)
+              (set! prologComplete true))
+
+            (let [slots (aget (.-valueNames state) (.-ID v))
+                (values reg _) (assert (* Register) (.getHome (.-f state) (.-ID v)))
+                ^{:line 1314} changed (.processValue state v slots reg)] ; changed == added to state.changedVars
+
+              (when (.-zeroWidth (aget opcodeTable (.-Op v)))
+                (when (and prologComplete (mustBeFirst v))
+                  (panic (fmt/Errorf "Unexpected placement of op '%s' appearing after non-pseudo-op at beginning of block %s in %s\n%s" (.LongString v) b (.-Name (.-Func b)) (.-Func b))))
+
+                (when changed
+                  (when (or (mustBeFirst v) (== (.-Op v) OpArg))
+                    ;; already taken care of above
+                    (continue))
+
+                  (set! zeroWidthPending true))
+
+                (continue))
+
+              (when (and (not changed) (not zeroWidthPending))
+                (continue))
+
+
+              ;; Not zero-width; i.e., a "real" instruction.
+              (set! zeroWidthPending false)
+              (range [_ varID (.contents (.-changedVars state))]
+                (.updateVar state (conv VarID varID) (.-Block v) v))
+
+              (.clear (.-changedVars state))))
+
+          (range [_ varID (.contents (.-changedVars state))]
+            (.updateVar state (conv VarID varID) b BlockEnd))
+
+
+          (set! prevBlock b))))
+
+
+    (when (> (.-loggingLevel state) 0)
+      (.logf state "location lists:\n"))
+
+
+    ;; Flush any leftover entries live at the end of the last block.
+    (range [varID (.-lists state)]
+      (.writePendingEntry state (conv VarID varID) -1 (.-ID FuncEnd))
+      (let [list (aget (.-lists state) varID)]
+        (when (> (.-loggingLevel state) 0)
+          (if (== (len list) 0)
+            (.logf state "\t%v : empty list\n" (aget (.-vars state) varID))
+
+            (.logf state "\t%v : %d entries\n" (aget (.-vars state) varID) (len list))))))))
+
+
+
+
+
+
+
+
+^{:go/end 1406} (go/method updateVar "updateVar updates the pending location list entry for varID to\nreflect the new locations in curLoc, beginning at v in block b.\nv may be one of the special values indicating block start or end.\n" [^{:tag (* debugState)} state ^VarID varID ^{:tag (* Block)} b ^{:tag (* Value)} v]
+  (let [curLoc (.-slots (.-currentState state))
+      ;; Assemble the location list entry with whatever's live.
+      ^{:line 1371} empty true]
+    (range [_ slotID (aget (.-varSlots state) varID)]
+      (when (not (.absent (aget curLoc slotID)))
+        (set! empty false)
+        (break)))
+
+
+    (let [pending (addr (aget (.-pendingEntries state) varID))]
+      (when empty
+        (.writePendingEntry state varID (.-ID b) (.-ID v))
+        (.clear pending)
+        (return))
+
+
+      ;; Extend the previous entry if possible.
+      (when (.-present pending)
+        (let [merge true]
+          (range [i slotID (aget (.-varSlots state) varID)]
+            (when (not (canMerge (aget (.-pieces pending) i) (aget curLoc slotID)))
+              (set! merge false)
+              (break)))
+
+
+          (when merge
+            (return))))
+
+
+
+      (.writePendingEntry state varID (.-ID b) (.-ID v))
+      (set! (.-present pending) true)
+      (set! (.-startBlock pending) (.-ID b))
+      (set! (.-startValue pending) (.-ID v))
+      (range [i slot (aget (.-varSlots state) varID)]
+        (aset (.-pieces pending) i (aget curLoc slot))))))
+
+
+
+
+
+^{:go/end 1471} (go/method writePendingEntry "writePendingEntry writes out the pending entry for varID, if any,\nterminated at endBlock/Value.\n" [^{:tag (* debugState)} state ^VarID varID ^ID endBlock ^ID endValue]
+  (let [pending (aget (.-pendingEntries state) varID)]
+    (when (not (.-present pending))
+      (return))
+
+
+    ;; Skip zero-width entries where start and end coordinates are identical.
+    (when (and (== (.-startBlock pending) endBlock) (== (.-startValue pending) endValue))
+      (when (> (.-loggingLevel state) 1)
+        (.logf state "Skipping empty location list for %v in %s\n" (aget (.-vars state) varID) (.-Name (.-f state))))
+
+      (return))
+
+
+    (when (> (.-loggingLevel state) 1)
+      (let [^{:tag (slice string)} partStrs (zero (slice string))]
+        (range [i slot (aget (.-varSlots state) varID)]
+          (set! partStrs (append partStrs (fmt/Sprintf "%v@%v" (aget (.-slots state) slot) (.LocString state (aget (.-pieces pending) i))))))
+
+        (.logf state "Add entry for %v: \tb%vv%v-b%vv%v = \t%v\n" (aget (.-vars state) varID) (.-startBlock pending) (.-startValue pending) endBlock endValue (strings/Join partStrs " "))))
+
+
+    ;; Build the DWARF location expression.
+    (let [^{:tag (slice byte)} expr (zero (slice byte))]
+      (range [i slotID (aget (.-varSlots state) varID)]
+        (let [loc (aget (.-pieces pending) i)
+            ^{:line 1436} slot (aget (.-slots state) slotID)]
+
+          (when (not (.absent loc))
+            (if ^{:go/via [StackOffset]} (.onStack loc)
+              (if (== ^{:go/via [StackOffset]} (.stackOffsetValue loc) 0)
+                (set! expr (append expr dwarf/DW_OP_call_frame_cfa))
+                (do
+                  (set! expr (append expr dwarf/DW_OP_fbreg))
+                  (set! expr (dwarf/AppendSleb128 expr (conv int64 ^{:go/via [StackOffset]} (.stackOffsetValue loc))))))
+
+
+              (let [regnum (aget (.-DWARFRegisters (.-Arch (.-ctxt state))) (.ObjNum (aget (.-registers state) (firstReg (.-Registers loc)))))]
+                (if (< regnum 32)
+                  (set! expr (append expr (+ dwarf/DW_OP_reg0 (conv byte regnum))))
+                  (do
+                    (set! expr (append expr dwarf/DW_OP_regx))
+                    (set! expr (dwarf/AppendUleb128 expr (conv uint64 regnum))))))))
+
+
+
+
+          (when (> (len (aget (.-varSlots state) varID)) 1)
+            (set! expr (append expr dwarf/DW_OP_piece))
+            (set! expr (dwarf/AppendUleb128 expr (conv uint64 (.Size (.-Type slot))))))))
+
+
+
+      (let [entry ^{:go/breaks [2 4 6 8 10]} (lit LocListEntry
+            :StartBlock (.-startBlock pending)
+            :StartValue (.-startValue pending)
+            :EndBlock endBlock
+            :EndValue endValue
+            :Expr expr)]
+
+        (aset (.-lists state) varID (append (aget (.-lists state) varID) entry))))))
+
+
+
+
+^{:go/end 1481} (go/method PutLocationList "PutLocationList adds entries (a location list in structured form)\nto listSym, encoding it in the appropriate DWARF format.\n" [^{:tag (* FuncDebug)} debugInfo ^{:tag (slice LocListEntry)} entries ^{:tag (* obj/Link)} ctxt ^{:tag (* obj/LSym)} listSym ^{:tag (* obj/LSym)} startPC]
+  (if ^{:go/via [Flags]} (.-Dwarf5 buildcfg/Experiment)
+    (.PutLocationListDwarf5 debugInfo entries ctxt listSym startPC)
+
+    (.PutLocationListDwarf4 debugInfo entries ctxt listSym startPC)))
+
+
+
+
+
+^{:go/end 1516} (go/method PutLocationListDwarf5 "PutLocationListDwarf5 adds entries (a location list in structured form)\nto listSym in DWARF 5 format.\n" [^{:tag (* FuncDebug)} debugInfo ^{:tag (slice LocListEntry)} entries ^{:tag (* obj/Link)} ctxt ^{:tag (* obj/LSym)} listSym ^{:tag (* obj/LSym)} startPC]
+  (let [getPC (.-GetPC debugInfo)]
+
+    ;; base address entry
+    (.WriteInt listSym ctxt (.-Size listSym) 1 dwarf/DW_LLE_base_addressx)
+    (.WriteDwTxtAddrx listSym ctxt (.-Size listSym) startPC (* (.-DwTextCount ctxt) 2))
+
+    (let [(values ^{:tag (array 10 byte)} stbuf ^{:tag (array 10 byte)} enbuf) (zero (array 10 byte))]
+      (range [_ entry entries]
+        (let [begin (getPC (.-StartBlock entry) (.-StartValue entry))
+            ^{:line 1495} end (getPC (.-EndBlock entry) (.-EndValue entry))]
+
+          ;; Write LLE_offset_pair tag followed by payload (ULEB for start
+          ;; and then end).
+          (.WriteInt listSym ctxt (.-Size listSym) 1 dwarf/DW_LLE_offset_pair)
+          (let [stb (subslice stbuf _ 0)
+              ^{:line 1501} enb (subslice enbuf _ 0)]
+            (set! stb (dwarf/AppendUleb128 stb (conv uint64 begin)))
+            (set! enb (dwarf/AppendUleb128 enb (conv uint64 end)))
+            (.WriteBytes listSym ctxt (.-Size listSym) stb)
+            (.WriteBytes listSym ctxt (.-Size listSym) enb)
+
+            ;; DWARF5 uses ULEB128-encoded length for the location expression.
+            (set! stb (subslice stbuf _ 0))
+            (set! stb (dwarf/AppendUleb128 stb (conv uint64 (len (.-Expr entry)))))
+            (.WriteBytes listSym ctxt (.-Size listSym) stb)
+            (.WriteBytes listSym ctxt (.-Size listSym) (.-Expr entry)))))
+
+
+      ;; Terminator
+      (.WriteInt listSym ctxt (.-Size listSym) 1 dwarf/DW_LLE_end_of_list))))
+
+
+
+
+^{:go/end 1556} (go/method PutLocationListDwarf4 "PutLocationListDwarf4 adds entries (a location list in structured form)\nto listSym in DWARF 4 format.\n" [^{:tag (* FuncDebug)} debugInfo ^{:tag (slice LocListEntry)} entries ^{:tag (* obj/Link)} ctxt ^{:tag (* obj/LSym)} listSym ^{:tag (* obj/LSym)} startPC]
+  (let [getPC (.-GetPC debugInfo)]
+
+    (when (.-UseBASEntries ctxt)
+      (.WriteInt listSym ctxt (.-Size listSym) ^{:go/via [Arch]} (.-PtrSize (.-Arch ctxt)) (bit-not 0))
+      (.WriteAddr listSym ctxt (.-Size listSym) ^{:go/via [Arch]} (.-PtrSize (.-Arch ctxt)) startPC 0))
+
+
+    (range [_ entry entries]
+      (let [begin (getPC (.-StartBlock entry) (.-StartValue entry))
+          ^{:line 1530} end (getPC (.-EndBlock entry) (.-EndValue entry))]
+
+        ;; Horrible hack. If a range contains only zero-width
+        ;; instructions, e.g. an Arg, and it's at the beginning of the
+        ;; function, this would be indistinguishable from an
+        ;; end entry. Fudge it.
+        (when (and (== begin 0) (== end 0))
+          (set! end 1))
+
+
+        (if (.-UseBASEntries ctxt) (do
+            (.WriteInt listSym ctxt (.-Size listSym) ^{:go/via [Arch]} (.-PtrSize (.-Arch ctxt)) begin)
+            (.WriteInt listSym ctxt (.-Size listSym) ^{:go/via [Arch]} (.-PtrSize (.-Arch ctxt)) end))
+          (do
+            (.WriteCURelativeAddr listSym ctxt (.-Size listSym) startPC begin)
+            (.WriteCURelativeAddr listSym ctxt (.-Size listSym) startPC end)))
+
+
+        ;; Write 2-byte length prefix followed by the location expression.
+        (.WriteInt listSym ctxt (.-Size listSym) 2 (conv int64 (len (.-Expr entry))))
+        (.WriteBytes listSym ctxt (.-Size listSym) (.-Expr entry))))
+
+
+    ;; End entry.
+    (.WriteInt listSym ctxt (.-Size listSym) ^{:go/via [Arch]} (.-PtrSize (.-Arch ctxt)) 0)
+    (.WriteInt listSym ctxt (.-Size listSym) ^{:go/via [Arch]} (.-PtrSize (.-Arch ctxt)) 0)))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 1659} (go/func locatePrologEnd "locatePrologEnd walks the entry block of a function with incoming\nregister arguments and locates the last instruction in the prolog\nthat spills a register arg. It returns the ID of that instruction,\nand (where appropriate) the prolog's lowered closure ptr store inst.\n\nExample:\n\n\tb1:\n\t    v3 = ArgIntReg <int> {p1+0} [0] : AX\n\t    ... more arg regs ..\n\t    v4 = ArgFloatReg <float32> {f1+0} [0] : X0\n\t    v52 = MOVQstore <mem> {p1} v2 v3 v1\n\t    ... more stores ...\n\t    v68 = MOVSSstore <mem> {f4} v2 v67 v66\n\t    v38 = MOVQstoreconst <mem> {blob} [val=0,off=0] v2 v32\n\nImportant: locatePrologEnd is expected to work properly only with\noptimization turned off (e.g. \"-N\"). If optimization is enabled\nwe can't be assured of finding all input arguments spilled in the\nentry block prolog.\n" [^{:tag (* Func)} f ^bool needCloCtx] :results [ID (* Value)]
+
+  ;; returns true if this instruction looks like it moves an ABI
+  ;; register (or context register for rangefunc bodies) to the
+  ;; stack, along with the value being stored.
+  (let [isRegMoveLike ^{:go/end 1605} (fn [^{:tag (* Value)} v] :results [bool ID]
+        (let [(values n ok) (assert (* ir/Name) (.-Aux v))
+            ^{:line 1585 :tag ID} r (zero ID)]
+          (when (and ^:go/paren (or (not ok) (!= (.-Class n) ir/PPARAM)) (not needCloCtx))
+            (return false r))
+
+          (let [(values regInputs memInputs spInputs) (values 0 0 0)]
+            (range [_ a (.-Args v)]
+              (cond (or (== (.-Op a) OpArgIntReg) (== (.-Op a) OpArgFloatReg)
+                  ^:go/paren (and needCloCtx (.isLoweredGetClosurePtr (.-Op a)))) (do
+                  (inc! regInputs)
+                  (set! r (.-ID a)))
+                (.IsMemory (.-Type a))
+                (inc! memInputs)
+                (== (.-Op a) OpSP)
+                (inc! spInputs) :else
+
+                (return false r)))
+
+
+            (return (and (.IsMemory (.-Type v)) (== memInputs 1)
+                (== regInputs 1) (== spInputs 1)) r))))
+
+
+      ;; OpArg*Reg values we've seen so far on our forward walk,
+      ;; for which we have not yet seen a corresponding spill.
+      ^{:line 1609} regArgs (make (slice ID) 0 32)
+
+      ;; removeReg tries to remove a value from regArgs, returning true
+      ;; if found and removed, or false otherwise.
+      ^{:line 1613} removeReg ^{:go/breaks [[3 1620]] :go/end 1621} (fn ^bool [^ID r]
+        (for [i 0] (< i (len regArgs)) (inc! i)
+          (when (== (aget regArgs i) r)
+            (set! regArgs (^{:inst [(slice ID) ID]} slices/Delete regArgs i (+ i 1)))
+            (return true)))
+
+
+        false)
+
+
+      ;; Walk forwards through the block. When we see OpArg*Reg, record
+      ;; the value it produces in the regArgs list. When see a store that uses
+      ;; the value, remove the entry. When we hit the last store (use)
+      ;; then we've arrived at the end of the prolog.
+      ^{:line 1627 :tag (* Value)} cloRegStore (zero (* Value))]
+    (range [k v (.-Values (.-Entry f))]
+      (when (or (== (.-Op v) OpArgIntReg) (== (.-Op v) OpArgFloatReg))
+        (set! regArgs (append regArgs (.-ID v)))
+        (continue))
+
+      (when (and needCloCtx (.isLoweredGetClosurePtr (.-Op v)))
+        (set! regArgs (append regArgs (.-ID v)))
+        (set! cloRegStore v)
+        (continue))
+
+      (when [(values ok r) (isRegMoveLike v)] ok
+        (when [removed (removeReg r)] removed
+          (when (== (len regArgs) 0)
+            ;; Found our last spill; return the value after
+            ;; it. Note that it is possible that this spill is
+            ;; the last instruction in the block. If so, then
+            ;; return the "end of block" sentinel.
+            (when (< k (- (len (.-Values (.-Entry f))) 1))
+              (return (.-ID (aget (.-Values (.-Entry f)) (+ k 1))) cloRegStore))
+
+            (return (.-ID BlockEnd) cloRegStore))))
+
+
+
+      (when (.IsCall (.-Op v))
+        ;; if we hit a call, we've gone too far.
+        (return (.-ID v) cloRegStore)))
+
+
+    ;; nothing found
+    (return (conv ID -1) cloRegStore)))
+
+
+
+
+
+^{:go/end 1676} (go/func isNamedRegParam "isNamedRegParam returns true if the param corresponding to \"p\"\nis a named, non-blank input parameter assigned to one or more\nregisters.\n" ^bool [^abi/ABIParamAssignment p]
+  (when (== (.-Name p) nil)
+    (return false))
+
+  ^{:go/breaks [[4 1675]]} (let [n (.-Name p)]
+    (when (or (== (.Sym n) nil) (.IsBlank (.Sym n)))
+      (return false))
+
+    (when (== (len (.-Registers p)) 0)
+      (return false))
+
+    true))
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 1872} (go/func BuildFuncDebugNoOptimized "BuildFuncDebugNoOptimized populates a FuncDebug object \"rval\" with\nentries corresponding to the register-resident input parameters for\nthe function \"f\"; it is used when we are compiling without\noptimization but the register ABI is enabled. For each reg param,\nit constructs a 2-element location list: the first element holds\nthe input register, and the second element holds the stack location\nof the param (the assumption being that when optimization is off,\neach input param reg will be spilled in the prolog). In addition\nto the register params, here we also build location lists (where\nappropriate for the \".closureptr\" compiler-synthesized variable\nneeded by the debugger for range func bodies.\n" [^{:tag (* obj/Link)} ctxt ^{:tag (* Func)} f ^bool loggingEnabled ^{:tag (func [LocalSlot] [int32])} stackOffset ^{:tag (* FuncDebug)} rval]
+  (let [needCloCtx (!= (.-CloSlot f) nil)
+      ^{:line 1691} pri (.ABIAnalyzeFuncType (.-ABISelf f) (.-Type f))
+
+      ;; Look to see if we have any named register-promoted parameters,
+      ;; and/or whether we need location info for the ".closureptr"
+      ;; synthetic variable; if not bail early and let the caller sort
+      ;; things out for the remainder of the params/locals.
+      ^{:line 1697} numRegParams 0]
+    (range [_ inp (.InParams pri)]
+      (when (isNamedRegParam inp)
+        (inc! numRegParams)))
+
+
+    (when (and (== numRegParams 0) (not needCloCtx))
+      (return))
+
+
+    (let [state (lit debugState :f f)]
+
+      (when loggingEnabled
+        (.logf state "generating -N reg param loc lists for func %q\n" (.-Name f)))
+
+
+      ;; cloReg stores the obj register num that the context register
+      ;; appears in within the function prolog, where appropriate.
+      (let [^int16 cloReg (zero int16)
+
+          ^{:line 1717} extraForCloCtx 0]
+        (when needCloCtx
+          (set! extraForCloCtx 1))
+
+
+        ;; Allocate location lists.
+        (set! (.-LocationLists rval) (make (slice (slice LocListEntry)) (+ numRegParams extraForCloCtx)))
+
+        ;; Locate the value corresponding to the last spill of
+        ;; an input register.
+        (let [(values afterPrologVal cloRegStore) (locatePrologEnd f needCloCtx)]
+
+          (when needCloCtx
+            (let [(values reg _) (assert (* Register) (.getHome (.-f state) (.-ID cloRegStore)))]
+              (set! cloReg (.ObjNum reg))
+              (when loggingEnabled
+                (.logf state "needCloCtx is true for func %q, cloreg=%v\n"
+                  (.-Name f) reg))))
+
+
+
+          (let [addVarSlot ^{:go/end 1744} (fn [^{:tag (* ir/Name)} name ^{:tag (* types/Type)} typ]
+                (let [sl (lit LocalSlot :N name :Type typ :Off 0)]
+                  (set! (.-Vars rval) (append (.-Vars rval) name))
+                  (set! (.-Slots rval) (append (.-Slots rval) sl))
+                  (let [slid (len (.-VarSlots rval))]
+                    (set! (.-VarSlots rval) (append (.-VarSlots rval) (lit (slice SlotID) (conv SlotID slid)))))))
+
+
+              ;; Make an initial pass to populate the vars/slots for our return
+              ;; value, covering first the input parameters and then (if needed)
+              ;; the special ".closureptr" var for rangefunc bodies.
+              ^{:line 1749} params (lit (slice abi/ABIParamAssignment))]
+            (range [_ inp (.InParams pri)]
+              (when (not (isNamedRegParam inp))
+                ;; will be sorted out elsewhere
+                (continue))
+
+              (when (not (IsVarWantedForDebug (.-Name inp)))
+                (continue))
+
+              (addVarSlot (.-Name inp) (.-Type inp))
+              (set! params (append params inp)))
+
+            (when needCloCtx
+              (addVarSlot (.-CloSlot f) ^{:go/via [miniExpr]} (.Type (.-CloSlot f)))
+              (let [cloAssign ^{:go/breaks [2 4 6]} (lit abi/ABIParamAssignment
+                    :Type ^{:go/via [miniExpr]} (.Type (.-CloSlot f))
+                    :Name (.-CloSlot f)
+                    :Registers (lit (slice abi/RegIndex) 0))] ; dummy
+
+                (set! params (append params cloAssign))))
+
+
+            ;; Walk the input params again and process the register-resident elements.
+            (let [pidx 0]
+              (range [_ inp params]
+                (when (not (isNamedRegParam inp))
+                  ;; will be sorted out elsewhere
+                  (continue))
+
+                (when (not (IsVarWantedForDebug (.-Name inp)))
+                  (continue))
+
+
+                (let [sl (aget (.-Slots rval) pidx)
+                    ^{:line 1783} n (aget (.-Vars rval) pidx)]
+
+                  (when (== afterPrologVal (conv ID -1))
+                    ;; This can happen for degenerate functions with infinite
+                    ;; loops such as that in issue 45948. In such cases, leave
+                    ;; the var/slot set up for the param, but don't try to
+                    ;; emit a location list.
+                    (when loggingEnabled
+                      (.logf state "locatePrologEnd failed, skipping %v\n" n))
+
+                    (inc! pidx)
+                    (continue))
+
+
+                  ;; Param is arriving in one or more registers. We need a 2-element
+                  ;; location expression for it. First entry in location list
+                  ;; will correspond to lifetime in input registers.
+                  (when loggingEnabled
+                    (.logf state "param %v:\n  [<entry>, %d]:\n" n afterPrologVal))
+
+                  (let [^{:tag (slice byte)} regExpr (zero (slice byte))
+                      (values rtypes _) (.RegisterTypesAndOffsets inp)
+                      ^{:line 1805} padding (make (slice uint64) 0 32)]
+                    (set! padding (.ComputePadding inp padding))
+                    (range [k r (.-Registers inp)]
+                      (let [^int16 reg (zero int16)]
+                        (if (== n (.-CloSlot f))
+                          (set! reg cloReg)
+
+                          (set! reg (ObjRegForAbiReg r (.-Config f))))
+
+                        (let [dwreg (aget (.-DWARFRegisters (.-Arch ctxt)) reg)]
+                          (if (< dwreg 32)
+                            (set! regExpr (append regExpr (+ dwarf/DW_OP_reg0 (conv byte dwreg))))
+                            (do
+                              (set! regExpr (append regExpr dwarf/DW_OP_regx))
+                              (set! regExpr (dwarf/AppendUleb128 regExpr (conv uint64 dwreg)))))
+
+                          (when loggingEnabled
+                            (.logf state "    piece %d -> dwreg %d" k dwreg))
+
+                          (when (> (len (.-Registers inp)) 1)
+                            (set! regExpr (append regExpr dwarf/DW_OP_piece))
+                            (let [ts (.Size (aget rtypes k))]
+                              (set! regExpr (dwarf/AppendUleb128 regExpr (conv uint64 ts)))
+                              (when (> (aget padding k) 0)
+                                (when loggingEnabled
+                                  (.logf state " [pad %d bytes]" (aget padding k)))
+
+                                (set! regExpr (append regExpr dwarf/DW_OP_piece))
+                                (set! regExpr (dwarf/AppendUleb128 regExpr (aget padding k))))))
+
+
+                          (when loggingEnabled
+                            (.logf state "\n")))))
+
+
+                    (aset (.-LocationLists rval) pidx (append (aget (.-LocationLists rval) pidx) ^{:go/breaks [2 4 6 8 10]} (lit LocListEntry
+                          :StartBlock (.-ID (.-Entry f))
+                          :StartValue (.-ID BlockStart)
+                          :EndBlock (.-ID (.-Entry f))
+                          :EndValue afterPrologVal
+                          :Expr regExpr)))
+
+
+                    ;; Second entry in the location list will be the stack home
+                    ;; of the param, once it has been spilled.  Emit that now.
+                    (let [^{:tag (slice byte)} stackExpr (zero (slice byte))
+                        ^{:line 1851} soff (stackOffset sl)]
+                      (if (== soff 0)
+                        (set! stackExpr (append stackExpr dwarf/DW_OP_call_frame_cfa))
+                        (do
+                          (set! stackExpr (append stackExpr dwarf/DW_OP_fbreg))
+                          (set! stackExpr (dwarf/AppendSleb128 stackExpr (conv int64 soff)))))
+
+                      (when loggingEnabled
+                        (.logf state "  [%d, <end>): stackOffset=%d\n" afterPrologVal soff))
+
+
+                      (aset (.-LocationLists rval) pidx (append (aget (.-LocationLists rval) pidx) ^{:go/breaks [2 4 6 8 10]} (lit LocListEntry
+                            :StartBlock (.-ID (.-Entry f))
+                            :StartValue afterPrologVal
+                            :EndBlock (.-ID (.-Entry f))
+                            :EndValue (.-ID FuncEnd)
+                            :Expr stackExpr)))
+
+
+                      (inc! pidx))))))))))))
+
+
+
+
+
+
+
+^{:go/end 1888} (go/func IsVarWantedForDebug "IsVarWantedForDebug returns true if the debug info for the node should\nbe generated.\nFor example, internal variables for range-over-func loops have little\nvalue to users, so we don't generate debug info for them.\n" ^bool [^ir/Node n]
+  ^{:go/breaks [[4 1887]]} (let [name (.-Name (.Sym n))]
+    (when (and (> (len name) 0) (== (aget name 0) \&))
+      (set! name (subslice name 1)))
+
+    (when (and (> (len name) 0) (== (aget name 0) \#))
+      ;; #yield is used by delve.
+      (return (strings/HasPrefix name "#yield")))
+
+    true))

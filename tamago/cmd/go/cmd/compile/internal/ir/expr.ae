@@ -1,0 +1,1319 @@
+;; Copyright 2020 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.cmd.compile.internal.ir) (go/file "expr.go" :imports [
+
+
+    ^{:line 8} [bytes "bytes"]
+    ^{:line 9} [base "cmd/compile/internal/base"]
+    ^{:line 10} [types "cmd/compile/internal/types"]
+    ^{:line 11} [obj "cmd/internal/obj"]
+    ^{:line 12} [src "cmd/internal/src"]
+    ^{:line 13} [fmt "fmt"]
+    ^{:line 14} [constant "go/constant"]
+    ^{:line 15} [token "go/token"]])
+
+
+
+(go/type Expr "An Expr is a Node that can appear as an expression.\n" (interface
+    ^{:line 20} Node
+    (isExpr [])))
+
+
+
+
+
+
+(go/type miniExpr "A miniExpr is a miniNode with extra fields common to expressions.\nTODO(rsc): Once we are sure about the contents, compact the bools\ninto a bit field and leave extra bits available for implementations\nembedding miniExpr. Right now there are ~24 unused bits sitting here.\n" (struct
+    ^{:line 29} miniNode
+    ^{:line 30 :tag bitset8} flags
+    ^{:line 31 :tag (* types/Type)} typ
+    ^{:line 32 :tag Nodes} init)) ; TODO(rsc): Don't require every Node to have an init
+
+
+(go/const
+  ^{:line 36} [^{:val 1} miniExprNonNil (<< 1 iota)]
+  ^{:line 37} [^{:val 2} miniExprTransient]
+  ^{:line 38} [^{:val 4} miniExprBounded]
+  ^{:line 39} [^{:val 8} miniExprImplicit] ; for use by implementations; not supported by every Expr
+  ^{:line 40} [^{:val 16} miniExprCheckPtr])
+
+
+^{:go/end 43} (go/method isExpr [(* miniExpr)])
+
+^{:go/end 45} (go/method Type ^{:tag (* types/Type)} [^{:tag (* miniExpr)} n] (.-typ n))
+^{:go/end 46} (go/method SetType [^{:tag (* miniExpr)} n ^{:tag (* types/Type)} x] (set! (.-typ n) x))
+^{:go/end 47} (go/method NonNil ^bool [^{:tag (* miniExpr)} n] (!= (bit-and (.-flags n) miniExprNonNil) 0))
+^{:go/end 48} (go/method MarkNonNil [^{:tag (* miniExpr)} n] (set! (.-flags n) bit-or miniExprNonNil))
+^{:go/end 49} (go/method Transient ^bool [^{:tag (* miniExpr)} n] (!= (bit-and (.-flags n) miniExprTransient) 0))
+^{:go/end 50} (go/method SetTransient [^{:tag (* miniExpr)} n ^bool b] (.set (.-flags n) miniExprTransient b))
+^{:go/end 51} (go/method Bounded ^bool [^{:tag (* miniExpr)} n] (!= (bit-and (.-flags n) miniExprBounded) 0))
+^{:go/end 52} (go/method SetBounded [^{:tag (* miniExpr)} n ^bool b] (.set (.-flags n) miniExprBounded b))
+^{:go/end 53} (go/method Init ^Nodes [^{:tag (* miniExpr)} n] (.-init n))
+^{:go/end 54} (go/method PtrInit ^{:tag (* Nodes)} [^{:tag (* miniExpr)} n] (addr (.-init n)))
+^{:go/end 55} (go/method SetInit [^{:tag (* miniExpr)} n ^Nodes x] (set! (.-init n) x))
+
+
+(go/type AddStringExpr "An AddStringExpr is a string concatenation List[0] + List[1] + ... + List[len(List)-1].\n" (struct
+    ^{:line 59} miniExpr
+    ^{:line 60 :tag Nodes} List
+    ^{:line 61 :tag (* Name)} Prealloc))
+
+
+^{:go/end 70} (go/func NewAddStringExpr ^{:tag (* AddStringExpr)} [^src/XPos pos ^{:tag (slice Node)} list]
+  (let [n (addr (lit AddStringExpr))]
+    (set! ^{:go/via [miniExpr miniNode]} (.-pos n) pos)
+    (set! ^{:go/via [miniExpr miniNode]} (.-op n) OADDSTR)
+    (set! (.-List n) list)
+    ^{:line 69} n))
+
+
+
+
+(go/type AddrExpr "An AddrExpr is an address-of expression &X.\nIt may end up being a normal address-of or an allocation of a composite literal.\n" (struct
+    ^{:line 75} miniExpr
+    ^{:line 76 :tag Node} X
+    ^{:line 77 :tag (* Name)} Prealloc)) ; preallocated storage if any
+
+
+^{:go/end 115} (go/func NewAddrExpr ^{:tag (* AddrExpr)} [^src/XPos pos ^Node x]
+  (when (or (== x nil) (!= (.Typecheck x) 1))
+    (base/FatalfAt pos "missed typecheck: %L" x))
+
+  (let [n (addr (lit AddrExpr :X x))]
+    (set! ^{:go/via [miniExpr miniNode]} (.-pos n) pos)
+
+    (switch (.Op x)
+      (case [OARRAYLIT OMAPLIT OSLICELIT OSTRUCTLIT]
+        (set! ^{:go/via [miniExpr miniNode]} (.-op n) OPTRLIT))
+
+      (default
+        (set! ^{:go/via [miniExpr miniNode]} (.-op n) OADDR)
+        (when [(values r ok) (assert (* Name) (OuterValue x))] (and ok (== ^{:go/via [miniExpr miniNode]} (.Op r) ONAME))
+          (.SetAddrtaken r true)
+
+          ;; If r is a closure variable, we need to mark its canonical
+          ;; variable as addrtaken too, so that closure conversion
+          ;; captures it by reference.
+          ;;
+          ;; Exception: if we've already marked the variable as
+          ;; capture-by-value, then that means this variable isn't
+          ;; logically modified, and we must be taking its address to pass
+          ;; to a runtime function that won't mutate it. In that case, we
+          ;; only need to make sure our own copy is addressable.
+          (when (and (.IsClosureVar r) (not (.Byval r)))
+            (.SetAddrtaken (.Canonical r) true)))))
+
+
+
+
+    ^{:go/via [miniExpr]} (.SetType n (types/NewPtr (.Type x)))
+    ^{:go/via [miniExpr miniNode]} (.SetTypecheck n 1)
+
+    ^{:line 114} n))
+
+
+^{:go/end 117} (go/method Implicit ^bool [^{:tag (* AddrExpr)} n] (!= (bit-and ^{:go/via [miniExpr]} (.-flags n) miniExprImplicit) 0))
+^{:go/end 118} (go/method SetImplicit [^{:tag (* AddrExpr)} n ^bool b] (.set ^{:go/via [miniExpr]} (.-flags n) miniExprImplicit b))
+
+^{:go/end 127} (go/method SetOp [^{:tag (* AddrExpr)} n ^Op op]
+  (switch op
+    (default
+      (panic ^{:go/via [miniExpr miniNode]} (.no n (+ "SetOp " (.String op)))))
+    (case [OADDR OPTRLIT]
+      (set! ^{:go/via [miniExpr miniNode]} (.-op n) op))))
+
+
+
+
+(go/type BasicLit "A BasicLit is a literal of basic type.\n" (struct
+    ^{:line 131} miniExpr
+    ^{:line 132 :tag constant/Value} val))
+
+
+
+^{:go/end 145} (go/func NewBasicLit "NewBasicLit returns an OLITERAL representing val with the given type.\n" ^Node [^src/XPos pos ^{:tag (* types/Type)} typ ^constant/Value val]
+  (AssertValidTypeForConst typ val)
+
+  (let [n (addr (lit BasicLit :val val))]
+    (set! ^{:go/via [miniExpr miniNode]} (.-op n) OLITERAL)
+    (set! ^{:go/via [miniExpr miniNode]} (.-pos n) pos)
+    ^{:go/via [miniExpr]} (.SetType n typ)
+    ^{:go/via [miniExpr miniNode]} (.SetTypecheck n 1)
+    ^{:line 144} n))
+
+
+^{:go/end 147} (go/method Val ^constant/Value [^{:tag (* BasicLit)} n] (.-val n))
+^{:go/end 148} (go/method SetVal [^{:tag (* BasicLit)} n ^constant/Value val] (set! (.-val n) val))
+
+
+
+^{:go/end 154} (go/func NewConstExpr "NewConstExpr returns an OLITERAL representing val, copying the\nposition and type from orig.\n" ^Node [^constant/Value val ^Node orig]
+  (NewBasicLit (.Pos orig) (.Type orig) val))
+
+
+
+
+(go/type BinaryExpr "A BinaryExpr is a binary expression X Op Y,\nor Op(X, Y) for builtin functions that do not become calls.\n" (struct
+    ^{:line 159} miniExpr
+    ^{:line 160 :tag Node} X
+    ^{:line 161 :tag Node} Y
+    ^{:line 162 :tag Node :go/tag "mknode:\"-\""} RType)) ; see reflectdata/helpers.go
+
+
+^{:go/end 170} (go/func NewBinaryExpr ^{:tag (* BinaryExpr)} [^src/XPos pos ^Op op ^Node x ^Node y]
+  (let [n (addr (lit BinaryExpr :X x :Y y))]
+    (set! ^{:go/via [miniExpr miniNode]} (.-pos n) pos)
+    (.SetOp n op)
+    ^{:line 169} n))
+
+
+^{:go/end 182} (go/method SetOp [^{:tag (* BinaryExpr)} n ^Op op]
+  (switch op
+    (default
+      (panic ^{:go/via [miniExpr miniNode]} (.no n (+ "SetOp " (.String op)))))
+    (case [OADD OADDSTR OAND OANDNOT ODIV OEQ OGE OGT OLE
+        ^{:line 177} OLSH OLT OMOD OMUL ONE OOR ORSH OSUB OXOR
+        ^{:line 178} OCOPY OCOMPLEX OUNSAFEADD OUNSAFESLICE OUNSAFESTRING
+        ^{:line 179} OMAKEFACE]
+      (set! ^{:go/via [miniExpr miniNode]} (.-op n) op))))
+
+
+
+
+(go/type CallExpr "A CallExpr is a function call Fun(Args).\n" (struct
+    ^{:line 186} miniExpr
+    ^{:line 187 :tag Node} Fun
+    ^{:line 188 :tag Nodes} Args
+    ^{:line 189 :tag Node} DeferAt
+    ^{:line 190 :tag Node :go/tag "mknode:\"-\""} RType ; see reflectdata/helpers.go
+    ^{:line 191 :tag (slice (* Name))} KeepAlive ; vars to be kept alive until call returns
+    ^{:line 192 :tag bool} IsDDD
+    ^{:line 193 :tag bool} GoDefer ; whether this call is part of a go or defer statement
+    ^{:line 194 :tag bool} NoInline ; whether this call must not be inlined
+    ^{:line 195 :tag bool} UseBuf ; use stack buffer for backing store (OAPPEND only)
+    ^{:line 196 :tag bool} AppendNoAlias ; backing store proven to be unaliased (OAPPEND only)
+
+
+    ^{:line 199 :tag bool :doc "whether it's a runtime.KeepAlive call the compiler generates to\nkeep a variable alive. See #73137.\n"} IsCompilerVarLive
+    ^{:line 200 :tag bool} Reshape))
+
+
+^{:go/end 209} (go/func NewCallExpr ^{:tag (* CallExpr)} [^src/XPos pos ^Op op ^Node fun ^{:tag (slice Node)} args]
+  (let [n (addr (lit CallExpr :Fun fun))]
+    (set! ^{:go/via [miniExpr miniNode]} (.-pos n) pos)
+    (.SetOp n op)
+    (set! (.-Args n) args)
+    ^{:line 208} n))
+
+
+^{:go/end 211} (go/method isStmt [(* CallExpr)])
+
+^{:go/end 225} (go/method SetOp [^{:tag (* CallExpr)} n ^Op op]
+  (switch op
+    (default
+      (panic ^{:go/via [miniExpr miniNode]} (.no n (+ "SetOp " (.String op)))))
+    (case [OAPPEND
+        ^{:line 218} OCALL OCALLFUNC OCALLINTER OCALLMETH
+        ^{:line 219} ODELETE
+        ^{:line 220} OGETG OGETCALLERSP
+        ^{:line 221} OMAKE OMAX OMIN OPRINT OPRINTLN
+        ^{:line 222} ORECOVER]
+      (set! ^{:go/via [miniExpr miniNode]} (.-op n) op))))
+
+
+
+
+(go/type ClosureExpr "A ClosureExpr is a function literal expression.\n" (struct
+    ^{:line 229} miniExpr
+    ^{:line 230 :tag (* Func) :go/tag "mknode:\"-\""} Func
+    ^{:line 231 :tag (* Name)} Prealloc
+    ^{:line 232 :tag bool} IsGoWrap)) ; whether this is wrapper closure of a go statement
+
+
+
+
+(go/type CompLitExpr "A CompLitExpr is a composite literal Type{Vals}.\nBefore type-checking, the type is Ntype.\n" (struct
+    ^{:line 238} miniExpr
+    ^{:line 239 :tag Nodes} List ; initialized values
+    ^{:line 240 :tag Node :go/tag "mknode:\"-\""} RType ; *runtime._type for OMAPLIT map types
+    ^{:line 241 :tag (* Name)} Prealloc
+
+
+
+    ^{:line 245 :tag int64 :doc "For OSLICELIT, Len is the backing array length.\nFor OMAPLIT, Len is the number of entries that we've removed from List and\ngenerated explicit mapassign calls for. This is used to inform the map alloc hint.\n"} Len))
+
+
+^{:go/end 256} (go/func NewCompLitExpr ^{:tag (* CompLitExpr)} [^src/XPos pos ^Op op ^{:tag (* types/Type)} typ ^{:tag (slice Node)} list]
+  (let [n (addr (lit CompLitExpr :List list))]
+    (set! ^{:go/via [miniExpr miniNode]} (.-pos n) pos)
+    (.SetOp n op)
+    (when (!= typ nil)
+      ^{:go/via [miniExpr]} (.SetType n typ))
+
+    ^{:line 255} n))
+
+
+^{:go/end 258} (go/method Implicit ^bool [^{:tag (* CompLitExpr)} n] (!= (bit-and ^{:go/via [miniExpr]} (.-flags n) miniExprImplicit) 0))
+^{:go/end 259} (go/method SetImplicit [^{:tag (* CompLitExpr)} n ^bool b] (.set ^{:go/via [miniExpr]} (.-flags n) miniExprImplicit b))
+
+^{:go/end 268} (go/method SetOp [^{:tag (* CompLitExpr)} n ^Op op]
+  (switch op
+    (default
+      (panic ^{:go/via [miniExpr miniNode]} (.no n (+ "SetOp " (.String op)))))
+    (case [OARRAYLIT OCOMPLIT OMAPLIT OSTRUCTLIT OSLICELIT]
+      (set! ^{:go/via [miniExpr miniNode]} (.-op n) op))))
+
+
+
+
+
+(go/type ConvExpr "A ConvExpr is a conversion Type(X).\nIt may end up being a value or a type.\n" (struct
+    ^{:line 273} miniExpr
+    ^{:line 274 :tag Node} X
+
+
+
+
+
+
+
+
+
+    ^{:line 284 :tag Node :go/tag "mknode:\"-\"" :doc "For implementing OCONVIFACE expressions.\n\nTypeWord is an expression yielding a *runtime._type or\n*runtime.itab value to go in the type word of the iface/eface\nresult. See reflectdata.ConvIfaceTypeWord for further details.\n\nSrcRType is an expression yielding a *runtime._type value for X,\nif it's not pointer-shaped and needs to be heap allocated.\n"} TypeWord
+    ^{:line 285 :tag Node :go/tag "mknode:\"-\""} SrcRType
+
+
+
+
+
+
+
+
+    ^{:line 294 :tag Node :go/tag "mknode:\"-\"" :doc "For -d=checkptr instrumentation of conversions from\nunsafe.Pointer to *Elem or *[Len]Elem.\n\nTODO(mdempsky): We only ever need one of these, but currently we\ndon't decide which one until walk. Longer term, it probably makes\nsense to have a dedicated IR op for `(*[Len]Elem)(ptr)[:n:m]`\nexpressions.\n"} ElemRType
+    ^{:line 295 :tag Node :go/tag "mknode:\"-\""} ElemElemRType))
+
+
+^{:go/end 304} (go/func NewConvExpr ^{:tag (* ConvExpr)} [^src/XPos pos ^Op op ^{:tag (* types/Type)} typ ^Node x]
+  (let [n (addr (lit ConvExpr :X x))]
+    (set! ^{:go/via [miniExpr miniNode]} (.-pos n) pos)
+    (set! ^{:go/via [miniExpr]} (.-typ n) typ)
+    (.SetOp n op)
+    ^{:line 303} n))
+
+
+^{:go/end 306} (go/method Implicit ^bool [^{:tag (* ConvExpr)} n] (!= (bit-and ^{:go/via [miniExpr]} (.-flags n) miniExprImplicit) 0))
+^{:go/end 307} (go/method SetImplicit [^{:tag (* ConvExpr)} n ^bool b] (.set ^{:go/via [miniExpr]} (.-flags n) miniExprImplicit b))
+^{:go/end 308} (go/method CheckPtr ^bool [^{:tag (* ConvExpr)} n] (!= (bit-and ^{:go/via [miniExpr]} (.-flags n) miniExprCheckPtr) 0))
+^{:go/end 309} (go/method SetCheckPtr [^{:tag (* ConvExpr)} n ^bool b] (.set ^{:go/via [miniExpr]} (.-flags n) miniExprCheckPtr b))
+
+^{:go/end 318} (go/method SetOp [^{:tag (* ConvExpr)} n ^Op op]
+  (switch op
+    (default
+      (panic ^{:go/via [miniExpr miniNode]} (.no n (+ "SetOp " (.String op)))))
+    (case [OCONV OCONVIFACE OCONVNOP OBYTES2STR OBYTES2STRTMP ORUNES2STR OSTR2BYTES OSTR2BYTESTMP OSTR2RUNES ORUNESTR OSLICE2ARR OSLICE2ARRPTR]
+      (set! ^{:go/via [miniExpr miniNode]} (.-op n) op))))
+
+
+
+
+(go/type IndexExpr "An IndexExpr is an index expression X[Index].\n" (struct
+    ^{:line 322} miniExpr
+    ^{:line 323 :tag Node} X
+    ^{:line 324 :tag Node} Index
+    ^{:line 325 :tag Node :go/tag "mknode:\"-\""} RType ; see reflectdata/helpers.go
+    ^{:line 326 :tag bool} Assigned))
+
+
+^{:go/end 334} (go/func NewIndexExpr ^{:tag (* IndexExpr)} [^src/XPos pos ^Node x ^Node index]
+  (let [n (addr (lit IndexExpr :X x :Index index))]
+    (set! ^{:go/via [miniExpr miniNode]} (.-pos n) pos)
+    (set! ^{:go/via [miniExpr miniNode]} (.-op n) OINDEX)
+    ^{:line 333} n))
+
+
+^{:go/end 343} (go/method SetOp [^{:tag (* IndexExpr)} n ^Op op]
+  (switch op
+    (default
+      (panic ^{:go/via [miniExpr miniNode]} (.no n (+ "SetOp " (.String op)))))
+    (case [OINDEX OINDEXMAP]
+      (set! ^{:go/via [miniExpr miniNode]} (.-op n) op))))
+
+
+
+
+(go/type KeyExpr "A KeyExpr is a Key: Value composite literal key.\n" (struct
+    ^{:line 347} miniExpr
+    ^{:line 348 :tag Node} Key
+    ^{:line 349 :tag Node} Value))
+
+
+^{:go/end 357} (go/func NewKeyExpr ^{:tag (* KeyExpr)} [^src/XPos pos ^Node key ^Node value]
+  (let [n (addr (lit KeyExpr :Key key :Value value))]
+    (set! ^{:go/via [miniExpr miniNode]} (.-pos n) pos)
+    (set! ^{:go/via [miniExpr miniNode]} (.-op n) OKEY)
+    ^{:line 356} n))
+
+
+
+(go/type StructKeyExpr "A StructKeyExpr is a Field: Value composite literal key.\n" (struct
+    ^{:line 361} miniExpr
+    ^{:line 362 :tag (* types/Field)} Field
+    ^{:line 363 :tag Node} Value))
+
+
+^{:go/end 371} (go/func NewStructKeyExpr ^{:tag (* StructKeyExpr)} [^src/XPos pos ^{:tag (* types/Field)} field ^Node value]
+  (let [n (addr (lit StructKeyExpr :Field field :Value value))]
+    (set! ^{:go/via [miniExpr miniNode]} (.-pos n) pos)
+    (set! ^{:go/via [miniExpr miniNode]} (.-op n) OSTRUCTKEY)
+    ^{:line 370} n))
+
+
+^{:go/end 373} (go/method Sym ^{:tag (* types/Sym)} [^{:tag (* StructKeyExpr)} n] (.-Sym (.-Field n)))
+
+
+(go/type InlinedCallExpr "An InlinedCallExpr is an inlined function call.\n" (struct
+    ^{:line 377} miniExpr
+    ^{:line 378 :tag Nodes} Body
+    ^{:line 379 :tag Nodes} ReturnVars ; must be side-effect free
+    ^{:line 380 :tag bool} Reshape))
+
+
+^{:go/end 390} (go/func NewInlinedCallExpr ^{:tag (* InlinedCallExpr)} [^src/XPos pos ^{:tag (slice Node)} body ^{:tag (slice Node)} retvars]
+  (let [n (addr (lit InlinedCallExpr))]
+    (set! ^{:go/via [miniExpr miniNode]} (.-pos n) pos)
+    (set! ^{:go/via [miniExpr miniNode]} (.-op n) OINLCALL)
+    (set! (.-Body n) body)
+    (set! (.-ReturnVars n) retvars)
+    ^{:line 389} n))
+
+
+^{:go/end 411} (go/method SingleResult ^Node [^{:tag (* InlinedCallExpr)} n]
+  (when [have (len (.-ReturnVars n))] (!= have 1)
+    (base/FatalfAt ^{:go/via [miniExpr miniNode]} (.Pos n) "inlined call has %v results, expected 1" have))
+
+
+  ;; If the type of the call is not a shape, but the type of the return value
+  ;; is a shape, we need to do an implicit conversion, so the real type
+  ;; of n is maintained.
+  (let [needImplicitConv (and (not (.HasShape ^{:go/via [miniExpr]} (.Type n))) (.HasShape (.Type (aget (.-ReturnVars n) 0))))]
+    (when (.-Reshape n) ; or if the inlined call expr needs reshaping.
+      (set! needImplicitConv true))
+
+
+    (when needImplicitConv
+      (let [r (NewConvExpr ^{:go/via [miniExpr miniNode]} (.Pos n) OCONVNOP ^{:go/via [miniExpr]} (.Type n) (aget (.-ReturnVars n) 0))]
+        ^{:go/via [miniExpr miniNode]} (.SetTypecheck r 1)
+        (return r)))
+
+    (aget (.-ReturnVars n) 0)))
+
+
+
+
+
+(go/type LogicalExpr "A LogicalExpr is an expression X Op Y where Op is && or ||.\nIt is separate from BinaryExpr to make room for statements\nthat must be executed before Y but after X.\n" (struct
+    ^{:line 417} miniExpr
+    ^{:line 418 :tag Node} X
+    ^{:line 419 :tag Node} Y))
+
+
+^{:go/end 427} (go/func NewLogicalExpr ^{:tag (* LogicalExpr)} [^src/XPos pos ^Op op ^Node x ^Node y]
+  (let [n (addr (lit LogicalExpr :X x :Y y))]
+    (set! ^{:go/via [miniExpr miniNode]} (.-pos n) pos)
+    (.SetOp n op)
+    ^{:line 426} n))
+
+
+^{:go/end 436} (go/method SetOp [^{:tag (* LogicalExpr)} n ^Op op]
+  (switch op
+    (default
+      (panic ^{:go/via [miniExpr miniNode]} (.no n (+ "SetOp " (.String op)))))
+    (case [OANDAND OOROR]
+      (set! ^{:go/via [miniExpr miniNode]} (.-op n) op))))
+
+
+
+
+
+
+(go/type MakeExpr "A MakeExpr is a make expression: make(Type[, Len[, Cap]]).\nOp is OMAKECHAN, OMAKEMAP, OMAKESLICE, or OMAKESLICECOPY,\nbut *not* OMAKE (that's a pre-typechecking CallExpr).\n" (struct
+    ^{:line 442} miniExpr
+    ^{:line 443 :tag Node :go/tag "mknode:\"-\""} RType ; see reflectdata/helpers.go
+    ^{:line 444 :tag Node} Len
+    ^{:line 445 :tag Node} Cap))
+
+
+^{:go/end 453} (go/func NewMakeExpr ^{:tag (* MakeExpr)} [^src/XPos pos ^Op op ^Node len ^Node cap]
+  (let [n (addr (lit MakeExpr :Len len :Cap cap))]
+    (set! ^{:go/via [miniExpr miniNode]} (.-pos n) pos)
+    (.SetOp n op)
+    ^{:line 452} n))
+
+
+^{:go/end 462} (go/method SetOp [^{:tag (* MakeExpr)} n ^Op op]
+  (switch op
+    (default
+      (panic ^{:go/via [miniExpr miniNode]} (.no n (+ "SetOp " (.String op)))))
+    (case [OMAKECHAN OMAKEMAP OMAKESLICE OMAKESLICECOPY]
+      (set! ^{:go/via [miniExpr miniNode]} (.-op n) op))))
+
+
+
+
+(go/type NilExpr "A NilExpr represents the predefined untyped constant nil.\n" (struct
+    ^{:line 466} miniExpr))
+
+
+^{:go/end 479} (go/func NewNilExpr ^{:tag (* NilExpr)} [^src/XPos pos ^{:tag (* types/Type)} typ]
+  (when (== typ nil)
+    (base/FatalfAt pos "missing type"))
+
+  (let [n (addr (lit NilExpr))]
+    (set! ^{:go/via [miniExpr miniNode]} (.-pos n) pos)
+    (set! ^{:go/via [miniExpr miniNode]} (.-op n) ONIL)
+    ^{:go/via [miniExpr]} (.SetType n typ)
+    ^{:go/via [miniExpr miniNode]} (.SetTypecheck n 1)
+    ^{:line 478} n))
+
+
+
+
+(go/type ParenExpr "A ParenExpr is a parenthesized expression (X).\nIt may end up being a value or a type.\n" (struct
+    ^{:line 484} miniExpr
+    ^{:line 485 :tag Node} X))
+
+
+^{:go/end 493} (go/func NewParenExpr ^{:tag (* ParenExpr)} [^src/XPos pos ^Node x]
+  (let [n (addr (lit ParenExpr :X x))]
+    (set! ^{:go/via [miniExpr miniNode]} (.-op n) OPAREN)
+    (set! ^{:go/via [miniExpr miniNode]} (.-pos n) pos)
+    ^{:line 492} n))
+
+
+^{:go/end 495} (go/method Implicit ^bool [^{:tag (* ParenExpr)} n] (!= (bit-and ^{:go/via [miniExpr]} (.-flags n) miniExprImplicit) 0))
+^{:go/end 496} (go/method SetImplicit [^{:tag (* ParenExpr)} n ^bool b] (.set ^{:go/via [miniExpr]} (.-flags n) miniExprImplicit b))
+
+
+(go/type ResultExpr "A ResultExpr represents a direct access to a result.\n" (struct
+    ^{:line 500} miniExpr
+    ^{:line 501 :tag int64} Index)) ; index of the result expr.
+
+
+^{:go/end 510} (go/func NewResultExpr ^{:tag (* ResultExpr)} [^src/XPos pos ^{:tag (* types/Type)} typ ^int64 index]
+  (let [n (addr (lit ResultExpr :Index index))]
+    (set! ^{:go/via [miniExpr miniNode]} (.-pos n) pos)
+    (set! ^{:go/via [miniExpr miniNode]} (.-op n) ORESULT)
+    (set! ^{:go/via [miniExpr]} (.-typ n) typ)
+    ^{:line 509} n))
+
+
+
+
+(go/type LinksymOffsetExpr "A LinksymOffsetExpr refers to an offset within a global variable.\nIt is like a SelectorExpr but without the field name.\n" (struct
+    ^{:line 515} miniExpr
+    ^{:line 516 :tag (* obj/LSym)} Linksym
+    ^{:line 517 :tag int64} Offset_))
+
+
+^{:go/end 529} (go/func NewLinksymOffsetExpr ^{:tag (* LinksymOffsetExpr)} [^src/XPos pos ^{:tag (* obj/LSym)} lsym ^int64 offset ^{:tag (* types/Type)} typ]
+  (when (== typ nil)
+    (base/FatalfAt pos "nil type"))
+
+  (let [n (addr (lit LinksymOffsetExpr :Linksym lsym :Offset_ offset))]
+    (set! ^{:go/via [miniExpr]} (.-typ n) typ)
+    (set! ^{:go/via [miniExpr miniNode]} (.-op n) OLINKSYMOFFSET)
+    ^{:go/via [miniExpr miniNode]} (.SetTypecheck n 1)
+    ^{:line 528} n))
+
+
+
+^{:go/end 534} (go/func NewLinksymExpr "NewLinksymExpr is NewLinksymOffsetExpr, but with offset fixed at 0.\n" ^{:tag (* LinksymOffsetExpr)} [^src/XPos pos ^{:tag (* obj/LSym)} lsym ^{:tag (* types/Type)} typ]
+  (NewLinksymOffsetExpr pos lsym 0 typ))
+
+
+
+
+^{:go/end 543} (go/func NewNameOffsetExpr "NewNameOffsetExpr is NewLinksymOffsetExpr, but taking a *Name\nrepresenting a global variable instead of an *obj.LSym directly.\n" ^{:tag (* LinksymOffsetExpr)} [^src/XPos pos ^{:tag (* Name)} name ^int64 offset ^{:tag (* types/Type)} typ]
+  (when (or (== name nil) (IsBlank name) (not (and (== ^{:go/via [miniExpr miniNode]} (.Op name) ONAME) (== (.-Class name) PEXTERN))))
+    (base/FatalfAt pos "cannot take offset of nil, blank name or non-global variable: %v" name))
+
+  (NewLinksymOffsetExpr pos (.Linksym name) offset typ))
+
+
+
+(go/type SelectorExpr "A SelectorExpr is a selector expression X.Sel.\n" (struct
+    ^{:line 547} miniExpr
+    ^{:line 548 :tag Node} X
+
+
+
+
+    ^{:line 553 :tag (* types/Sym) :doc "Sel is the name of the field or method being selected, without (in the\ncase of methods) any preceding type specifier. If the field/method is\nexported, than the Sym uses the local package regardless of the package\nof the containing type.\n"} Sel
+
+    ^{:line 555 :tag (* types/Field) :doc "The actual selected field - may not be filled in until typechecking.\n"} Selection
+    ^{:line 556 :tag (* Name)} Prealloc)) ; preallocated storage for OMETHVALUE, if any
+
+
+^{:go/end 564} (go/func NewSelectorExpr ^{:tag (* SelectorExpr)} [^src/XPos pos ^Op op ^Node x ^{:tag (* types/Sym)} sel]
+  (let [n (addr (lit SelectorExpr :X x :Sel sel))]
+    (set! ^{:go/via [miniExpr miniNode]} (.-pos n) pos)
+    (.SetOp n op)
+    ^{:line 563} n))
+
+
+^{:go/end 573} (go/method SetOp [^{:tag (* SelectorExpr)} n ^Op op]
+  (switch op
+    (default
+      (panic ^{:go/via [miniExpr miniNode]} (.no n (+ "SetOp " (.String op)))))
+    (case [OXDOT ODOT ODOTPTR ODOTMETH ODOTINTER OMETHVALUE OMETHEXPR]
+      (set! ^{:go/via [miniExpr miniNode]} (.-op n) op))))
+
+
+
+^{:go/end 575} (go/method Sym ^{:tag (* types/Sym)} [^{:tag (* SelectorExpr)} n] (.-Sel n))
+^{:go/end 576} (go/method Implicit ^bool [^{:tag (* SelectorExpr)} n] (!= (bit-and ^{:go/via [miniExpr]} (.-flags n) miniExprImplicit) 0))
+^{:go/end 577} (go/method SetImplicit [^{:tag (* SelectorExpr)} n ^bool b] (.set ^{:go/via [miniExpr]} (.-flags n) miniExprImplicit b))
+^{:go/end 578} (go/method Offset ^int64 [^{:tag (* SelectorExpr)} n] (.-Offset (.-Selection n)))
+
+^{:go/end 593} (go/method FuncName ^{:tag (* Name)} [^{:tag (* SelectorExpr)} n]
+  (when (!= ^{:go/via [miniExpr miniNode]} (.Op n) OMETHEXPR)
+    (panic ^{:go/via [miniExpr miniNode]} (.no n "FuncName")))
+
+  (let [fn (NewNameAt (.-Pos (.-Selection n)) (MethodSym (.Type (.-X n)) (.-Sel n)) ^{:go/via [miniExpr]} (.Type n))]
+    (set! (.-Class fn) PFUNC)
+    (when (!= (.-Nname (.-Selection n)) nil)
+      ;; TODO(austin): Nname is nil for interface method
+      ;; expressions (I.M), so we can't attach a Func to
+      ;; those here.
+      (set! (.-Func fn) (.-Func (assert (* Name) (.-Nname (.-Selection n))))))
+
+    ^{:line 592} fn))
+
+
+
+(go/type SliceExpr "A SliceExpr is a slice expression X[Low:High] or X[Low:High:Max].\n" (struct
+    ^{:line 597} miniExpr
+    ^{:line 598 :tag Node} X
+    ^{:line 599 :tag Node} Low
+    ^{:line 600 :tag Node} High
+    ^{:line 601 :tag Node} Max))
+
+
+^{:go/end 609} (go/func NewSliceExpr ^{:tag (* SliceExpr)} [^src/XPos pos ^Op op ^Node x ^Node low ^Node high ^Node max]
+  (let [n (addr (lit SliceExpr :X x :Low low :High high :Max max))]
+    (set! ^{:go/via [miniExpr miniNode]} (.-pos n) pos)
+    (set! ^{:go/via [miniExpr miniNode]} (.-op n) op)
+    ^{:line 608} n))
+
+
+^{:go/end 618} (go/method SetOp [^{:tag (* SliceExpr)} n ^Op op]
+  (switch op
+    (default
+      (panic ^{:go/via [miniExpr miniNode]} (.no n (+ "SetOp " (.String op)))))
+    (case [OSLICE OSLICEARR OSLICESTR OSLICE3 OSLICE3ARR]
+      (set! ^{:go/via [miniExpr miniNode]} (.-op n) op))))
+
+
+
+
+
+^{:go/breaks [6] :go/end 631} (go/method IsSlice3 "IsSlice3 reports whether o is a slice3 op (OSLICE3, OSLICE3ARR).\no must be a slicing op.\n" ^bool [^Op o]
+  (switch o
+    (case [OSLICE OSLICEARR OSLICESTR]
+      (return false))
+    (case [OSLICE3 OSLICE3ARR]
+      (return true)))
+
+  (base/Fatalf "IsSlice3 op %v" o)
+  false)
+
+
+
+(go/type SliceHeaderExpr "A SliceHeaderExpr constructs a slice header from its parts.\n" (struct
+    ^{:line 635} miniExpr
+    ^{:line 636 :tag Node} Ptr
+    ^{:line 637 :tag Node} Len
+    ^{:line 638 :tag Node} Cap))
+
+
+^{:go/end 647} (go/func NewSliceHeaderExpr ^{:tag (* SliceHeaderExpr)} [^src/XPos pos ^{:tag (* types/Type)} typ ^Node ptr ^Node len ^Node cap]
+  (let [n (addr (lit SliceHeaderExpr :Ptr ptr :Len len :Cap cap))]
+    (set! ^{:go/via [miniExpr miniNode]} (.-pos n) pos)
+    (set! ^{:go/via [miniExpr miniNode]} (.-op n) OSLICEHEADER)
+    (set! ^{:go/via [miniExpr]} (.-typ n) typ)
+    ^{:line 646} n))
+
+
+
+(go/type StringHeaderExpr "A StringHeaderExpr expression constructs a string header from its parts.\n" (struct
+    ^{:line 651} miniExpr
+    ^{:line 652 :tag Node} Ptr
+    ^{:line 653 :tag Node} Len))
+
+
+^{:go/end 662} (go/func NewStringHeaderExpr ^{:tag (* StringHeaderExpr)} [^src/XPos pos ^Node ptr ^Node len]
+  (let [n (addr (lit StringHeaderExpr :Ptr ptr :Len len))]
+    (set! ^{:go/via [miniExpr miniNode]} (.-pos n) pos)
+    (set! ^{:go/via [miniExpr miniNode]} (.-op n) OSTRINGHEADER)
+    (set! ^{:go/via [miniExpr]} (.-typ n) (aget types/Types types/TSTRING))
+    ^{:line 661} n))
+
+
+
+
+(go/type StarExpr "A StarExpr is a dereference expression *X.\nIt may end up being a value or a type.\n" (struct
+    ^{:line 667} miniExpr
+    ^{:line 668 :tag Node} X))
+
+
+^{:go/end 676} (go/func NewStarExpr ^{:tag (* StarExpr)} [^src/XPos pos ^Node x]
+  (let [n (addr (lit StarExpr :X x))]
+    (set! ^{:go/via [miniExpr miniNode]} (.-op n) ODEREF)
+    (set! ^{:go/via [miniExpr miniNode]} (.-pos n) pos)
+    ^{:line 675} n))
+
+
+^{:go/end 678} (go/method Implicit ^bool [^{:tag (* StarExpr)} n] (!= (bit-and ^{:go/via [miniExpr]} (.-flags n) miniExprImplicit) 0))
+^{:go/end 679} (go/method SetImplicit [^{:tag (* StarExpr)} n ^bool b] (.set ^{:go/via [miniExpr]} (.-flags n) miniExprImplicit b))
+
+
+
+(go/type TypeAssertExpr "A TypeAssertExpr is a selector expression X.(Type).\nBefore type-checking, the type is Ntype.\n" (struct
+    ^{:line 684} miniExpr
+    ^{:line 685 :tag Node} X
+
+
+
+    ^{:line 689 :tag Node :go/tag "mknode:\"-\"" :doc "Runtime type information provided by walkDotType for\nassertions from non-empty interface to concrete type.\n"} ITab ; *runtime.itab for Type implementing X's type
+
+
+    ^{:line 692 :tag (* obj/LSym) :doc "An internal/abi.TypeAssert descriptor to pass to the runtime.\n"} Descriptor
+
+
+
+
+    ^{:line 697 :tag bool :doc "When set to true, if this assert would panic, then use a nil pointer panic\ninstead of an interface conversion panic.\nIt must not be set for type assertions using the commaok form.\n"} UseNilPanic))
+
+
+^{:go/end 708} (go/func NewTypeAssertExpr ^{:tag (* TypeAssertExpr)} [^src/XPos pos ^Node x ^{:tag (* types/Type)} typ]
+  (let [n (addr (lit TypeAssertExpr :X x))]
+    (set! ^{:go/via [miniExpr miniNode]} (.-pos n) pos)
+    (set! ^{:go/via [miniExpr miniNode]} (.-op n) ODOTTYPE)
+    (when (!= typ nil)
+      ^{:go/via [miniExpr]} (.SetType n typ))
+
+    ^{:line 707} n))
+
+
+^{:go/end 717} (go/method SetOp [^{:tag (* TypeAssertExpr)} n ^Op op]
+  (switch op
+    (default
+      (panic ^{:go/via [miniExpr miniNode]} (.no n (+ "SetOp " (.String op)))))
+    (case [ODOTTYPE ODOTTYPE2]
+      (set! ^{:go/via [miniExpr miniNode]} (.-op n) op))))
+
+
+
+
+(go/type DynamicTypeAssertExpr "A DynamicTypeAssertExpr asserts that X is of dynamic type RType.\n" (struct
+    ^{:line 721} miniExpr
+    ^{:line 722 :tag Node} X
+
+
+
+
+    ^{:line 727 :tag Node :doc "SrcRType is an expression that yields a *runtime._type value\nrepresenting X's type. It's used in failed assertion panic\nmessages.\n"} SrcRType
+
+
+
+
+
+    ^{:line 733 :tag Node :doc "RType is an expression that yields a *runtime._type value\nrepresenting the asserted type.\n\nBUG(mdempsky): If ITab is non-nil, RType may be nil.\n"} RType
+
+
+
+
+
+
+
+
+    ^{:line 742 :tag Node :doc "ITab is an expression that yields a *runtime.itab value\nrepresenting the asserted type within the assertee expression's\noriginal interface type.\n\nITab is only used for assertions from non-empty interface type to\na concrete (i.e., non-interface) type. For all other assertions,\nITab is nil.\n"} ITab))
+
+
+^{:go/end 750} (go/func NewDynamicTypeAssertExpr ^{:tag (* DynamicTypeAssertExpr)} [^src/XPos pos ^Op op ^Node x ^Node rtype]
+  (let [n (addr (lit DynamicTypeAssertExpr :X x :RType rtype))]
+    (set! ^{:go/via [miniExpr miniNode]} (.-pos n) pos)
+    (set! ^{:go/via [miniExpr miniNode]} (.-op n) op)
+    ^{:line 749} n))
+
+
+^{:go/end 759} (go/method SetOp [^{:tag (* DynamicTypeAssertExpr)} n ^Op op]
+  (switch op
+    (default
+      (panic ^{:go/via [miniExpr miniNode]} (.no n (+ "SetOp " (.String op)))))
+    (case [ODYNAMICDOTTYPE ODYNAMICDOTTYPE2]
+      (set! ^{:go/via [miniExpr miniNode]} (.-op n) op))))
+
+
+
+
+
+(go/type UnaryExpr "A UnaryExpr is a unary expression Op X,\nor Op(X) for a builtin function that does not end up being a call.\n" (struct
+    ^{:line 764} miniExpr
+    ^{:line 765 :tag Node} X))
+
+
+^{:go/end 773} (go/func NewUnaryExpr ^{:tag (* UnaryExpr)} [^src/XPos pos ^Op op ^Node x]
+  (let [n (addr (lit UnaryExpr :X x))]
+    (set! ^{:go/via [miniExpr miniNode]} (.-pos n) pos)
+    (.SetOp n op)
+    ^{:line 772} n))
+
+
+^{:go/end 785} (go/method SetOp [^{:tag (* UnaryExpr)} n ^Op op]
+  (switch op
+    (default
+      (panic ^{:go/via [miniExpr miniNode]} (.no n (+ "SetOp " (.String op)))))
+    (case [OBITNOT ONEG ONOT OPLUS ORECV
+        ^{:line 780} OCAP OCLEAR OCLOSE OIMAG OLEN ONEW OPANIC OREAL
+        ^{:line 781} OCHECKNIL OCFUNC OIDATA OITAB OSPTR
+        ^{:line 782} OUNSAFESTRINGDATA OUNSAFESLICEDATA]
+      (set! ^{:go/via [miniExpr miniNode]} (.-op n) op))))
+
+
+
+^{:go/breaks [[4 825]] :go/end 826} (go/func IsZero ^bool [^Node n]
+  (switch (.Op n)
+    (case [ONIL]
+      (return true))
+
+    (case [OLITERAL]
+      (switch [u (.Val n)] (.Kind u)
+        (case [constant/String]
+          (return (== (constant/StringVal u) "")))
+        (case [constant/Bool]
+          (return (not (constant/BoolVal u))))
+        (default
+          (return (== (constant/Sign u) 0)))))
+
+
+    (case [OARRAYLIT]
+      (let [n (assert (* CompLitExpr) n)]
+        (range [_ n1 (.-List n)]
+          (when (== (.Op n1) OKEY)
+            (set! n1 (.-Value (assert (* KeyExpr) n1))))
+
+          (when (not (IsZero n1))
+            (return false)))
+
+
+        (return true)))
+
+    (case [OSTRUCTLIT]
+      (let [n (assert (* CompLitExpr) n)]
+        (range [_ n1 (.-List n)]
+          (let [n1 (assert (* StructKeyExpr) n1)]
+            (when (not (IsZero (.-Value n1)))
+              (return false))))
+
+
+        (return true))))
+
+
+  false)
+
+
+
+^{:go/breaks [[5 858]] :go/end 859} (go/func IsAddressable "lvalue etc\n" ^bool [^Node n]
+  (switch (.Op n)
+    (case [OINDEX]
+      (let [n (assert (* IndexExpr) n)]
+        (when (and (!= (.Type (.-X n)) nil) (.IsArray (.Type (.-X n))))
+          (return (IsAddressable (.-X n))))
+
+        (when (and (!= (.Type (.-X n)) nil) (.IsString (.Type (.-X n))))
+          (return false))
+
+        (fallthrough)))
+    (case [ODEREF ODOTPTR]
+      (return true))
+
+    (case [ODOT]
+      (let [n (assert (* SelectorExpr) n)]
+        (return (IsAddressable (.-X n)))))
+
+    (case [ONAME]
+      (let [n (assert (* Name) n)]
+        (when (== (.-Class n) PFUNC)
+          (return false))
+
+        (return true)))
+
+    (case [OLINKSYMOFFSET]
+      (return true)))
+
+
+  false)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 903} (go/func StaticValue "StaticValue analyzes n to find the earliest expression that always\nevaluates to the same value as n, which might be from an enclosing\nfunction.\n\nFor example, given:\n\n\tvar x int = g()\n\tfunc() {\n\t\ty := x\n\t\t*p = int(y)\n\t}\n\ncalling StaticValue on the \"int(y)\" expression returns the outer\n\"g()\" expression.\n\nNOTE: StaticValue can return a result with a different type than\nn's type because it can traverse through OCONVNOP operations.\nTODO: consider reapplying OCONVNOP operations to the result. See https://go.dev/cl/676517.\n" ^Node [^Node n]
+  (while true
+    (type-switch [n1 n]
+      (case [(* ConvExpr)]
+        (when (== ^{:go/via [miniExpr miniNode]} (.Op n1) OCONVNOP)
+          (set! n (.-X n1))
+          (continue)))
+
+      (case [(* InlinedCallExpr)]
+        (when (== ^{:go/via [miniExpr miniNode]} (.Op n1) OINLCALL)
+          (set! n (.SingleResult n1))
+          (continue)))
+
+      (case [(* ParenExpr)]
+        (set! n (.-X n1))
+        (continue)))
+
+
+    (let [n1 (staticValue1 n)]
+      (when (== n1 nil)
+        (return n))
+
+      (set! n n1))))
+
+
+
+^{:go/end 946} (go/func staticValue1 ^Node [^Node nn]
+  (when (!= (.Op nn) ONAME)
+    (return nil))
+
+  (let [n (.Canonical (assert (* Name) nn))]
+    (when (!= (.-Class n) PAUTO)
+      (return nil))
+
+
+    (let [defn (.-Defn n)]
+      (when (== defn nil)
+        (return nil))
+
+
+      (let [^Node rhs (zero Node)]
+        (label :FindRHS
+          (switch (.Op defn)
+            (case [OAS]
+              (let [defn (assert (* AssignStmt) defn)]
+                (set! rhs (.-Y defn))))
+            (case [OAS2]
+              (let [defn (assert (* AssignListStmt) defn)]
+                (range [i lhs (.-Lhs defn)]
+                  (when (== lhs n)
+                    (set! rhs (aget (.-Rhs defn) i))
+                    (break :FindRHS)))
+
+
+                (base/FatalfAt ^{:go/via [miniStmt miniNode]} (.Pos defn) "%v missing from LHS of %v" n defn)))
+            (default
+              (return nil))))
+
+        (when (== rhs nil)
+          (base/FatalfAt (.Pos defn) "RHS is nil: %v" defn))
+
+
+        (when (Reassigned n)
+          (return nil))
+
+
+        ^{:line 945} rhs))))
+
+
+
+
+
+
+
+
+
+
+^{:go/end 1021} (go/func Reassigned "Reassigned takes an ONAME node, walks the function in which it is\ndefined, and returns a boolean indicating whether the name has any\nassignments other than its declaration.\nNB: global variables are always considered to be re-assigned.\nTODO: handle initial declaration not including an assignment and\nfollowed by a single assignment?\nNOTE: any changes made here should also be made in the corresponding\ncode in the ReassignOracle.Init method.\n" ^bool [^{:tag (* Name)} name]
+  (when (!= ^{:go/via [miniExpr miniNode]} (.Op name) ONAME)
+    (base/Fatalf "reassigned %v" name))
+
+  ;; no way to reliably check for no-reassignment of globals, assume it can be
+  (when (== (.-Curfn name) nil)
+    (return true))
+
+
+  (when (.Addrtaken name)
+    (return true)) ; conservatively assume it's reassigned indirectly
+
+
+  ;; TODO(mdempsky): This is inefficient and becoming increasingly
+  ;; unwieldy. Figure out a way to generalize escape analysis's
+  ;; reassignment detection for use by inlining and devirtualization.
+
+  ;; isName reports whether n is a reference to name.
+  (let [isName ^{:go/end 980} (fn ^bool [^Node x]
+        (when (== x nil)
+          (return false))
+
+        (let [(values n ok) (assert (* Name) (OuterValue x))]
+          (and ok (== (.Canonical n) name))))
+
+
+      ^{:line 982 :tag (func [^Node n] [bool])} do (zero (func [^Node n] [bool]))]
+    (set! do ^{:go/breaks [[3 1018]] :go/end 1019} (fn ^bool [^Node n]
+        (switch (.Op n)
+          (case [OAS]
+            (let [n (assert (* AssignStmt) n)]
+              (when (and (isName (.-X n)) (!= n (.-Defn name)))
+                (return true))))
+
+          (case [OAS2 OAS2FUNC OAS2MAPR OAS2DOTTYPE OAS2RECV OSELRECV2]
+            (let [n (assert (* AssignListStmt) n)]
+              (range [_ p (.-Lhs n)]
+                (when (and (isName p) (!= n (.-Defn name)))
+                  (return true)))))
+
+
+          (case [OASOP]
+            (let [n (assert (* AssignOpStmt) n)]
+              (when (isName (.-X n))
+                (return true))))
+
+          (case [OADDR]
+            (let [n (assert (* AddrExpr) n)]
+              (when (isName (.-X n))
+                (base/FatalfAt ^{:go/via [miniExpr miniNode]} (.Pos n) "%v not marked addrtaken" name))))
+
+          (case [ORANGE]
+            (let [n (assert (* RangeStmt) n)]
+              (when (or (isName (.-Key n)) (isName (.-Value n)))
+                (return true))))
+
+          (case [OCLOSURE]
+            (let [n (assert (* ClosureExpr) n)]
+              (when (Any (.-Func n) do)
+                (return true)))))
+
+
+        false))
+
+    (Any (.-Curfn name) do)))
+
+
+
+^{:go/breaks [[5 1037]] :go/end 1038} (go/func StaticCalleeName "StaticCalleeName returns the ONAME/PFUNC for n, if known.\n" ^{:tag (* Name)} [^Node n]
+  (switch (.Op n)
+    (case [OMETHEXPR]
+      (let [n (assert (* SelectorExpr) n)]
+        (return (MethodExprName n))))
+    (case [ONAME]
+      (let [n (assert (* Name) n)]
+        (when (== (.-Class n) PFUNC)
+          (return n))))
+
+    (case [OCLOSURE]
+      (return (.-Nname (.-Func (assert (* ClosureExpr) n))))))
+
+  nil)
+
+
+
+(go/var ^{:doc "IsIntrinsicCall reports whether the compiler back end will treat the call as an intrinsic operation.\n"} IsIntrinsicCall ^{:go/end 1041} (fn ^bool [(* CallExpr)] false))
+
+
+(go/var ^{:doc "IsIntrinsicSym reports whether the compiler back end will treat a call to this symbol as an intrinsic operation.\n"} IsIntrinsicSym ^{:go/end 1044} (fn ^bool [(* types/Sym)] false))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/breaks [[8 1115]] :go/end 1116} (go/func SameSafeExpr "SameSafeExpr checks whether it is safe to reuse one of l and r\ninstead of computing both. SameSafeExpr assumes that l and r are\nused in the same statement or expression. In order for it to be\nsafe to reuse l or r, they must:\n  - be the same expression\n  - not have side-effects (no function calls, no channel ops);\n    however, panics are ok\n  - not cause inappropriate aliasing; e.g. two string to []byte\n    conversions, must result in two distinct slices\n\nThe handling of OINDEXMAP is subtle. OINDEXMAP can occur both\nas an lvalue (map assignment) and an rvalue (map access). This is\ncurrently OK, since the only place SameSafeExpr gets used on an\nlvalue expression is for OSLICE and OAPPEND optimizations, and it\nis correct in those settings.\n" ^bool [^Node l ^Node r]
+  (while (== (.Op l) OCONVNOP)
+    (set! l (.-X (assert (* ConvExpr) l))))
+
+  (while (== (.Op r) OCONVNOP)
+    (set! r (.-X (assert (* ConvExpr) r))))
+
+  (when (or (!= (.Op l) (.Op r)) (not (types/Identical (.Type l) (.Type r))))
+    (return false))
+
+
+  (switch (.Op l)
+    (case [ONAME]
+      (return (== l r)))
+
+    (case [ODOT ODOTPTR]
+      (let [l (assert (* SelectorExpr) l)
+          ^{:line 1078} r (assert (* SelectorExpr) r)]
+        (return (and (!= (.-Sel l) nil) (!= (.-Sel r) nil) (== (.-Sel l) (.-Sel r)) (SameSafeExpr (.-X l) (.-X r))))))
+
+    (case [ODEREF]
+      (let [l (assert (* StarExpr) l)
+          ^{:line 1083} r (assert (* StarExpr) r)]
+        (return (SameSafeExpr (.-X l) (.-X r)))))
+
+    (case [ONOT OBITNOT OPLUS ONEG]
+      (let [l (assert (* UnaryExpr) l)
+          ^{:line 1088} r (assert (* UnaryExpr) r)]
+        (return (SameSafeExpr (.-X l) (.-X r)))))
+
+    (case [OCONV]
+      (let [l (assert (* ConvExpr) l)
+          ^{:line 1093} r (assert (* ConvExpr) r)]
+        ;; Some conversions can't be reused, such as []byte(str).
+        ;; Allow only numeric-ish types. This is a bit conservative.
+        (return (and (aget types/IsSimple (.Kind ^{:go/via [miniExpr]} (.Type l))) (SameSafeExpr (.-X l) (.-X r))))))
+
+    (case [OINDEX OINDEXMAP]
+      (let [l (assert (* IndexExpr) l)
+          ^{:line 1100} r (assert (* IndexExpr) r)]
+        (return (and (SameSafeExpr (.-X l) (.-X r)) (SameSafeExpr (.-Index l) (.-Index r))))))
+
+    (case [OADD OSUB OOR OXOR OMUL OLSH ORSH OAND OANDNOT ODIV OMOD]
+      (let [l (assert (* BinaryExpr) l)
+          ^{:line 1105} r (assert (* BinaryExpr) r)]
+        (return (and (SameSafeExpr (.-X l) (.-X r)) (SameSafeExpr (.-Y l) (.-Y r))))))
+
+    (case [OLITERAL]
+      (return (constant/Compare (.Val l) token/EQL (.Val r))))
+
+    (case [ONIL]
+      (return true)))
+
+
+  false)
+
+
+
+
+
+^{:go/end 1123} (go/func ShouldCheckPtr "ShouldCheckPtr reports whether pointer checking should be enabled for\nfunction fn at a given level. See debugHelpFooter for defined\nlevels.\n" ^bool [^{:tag (* Func)} fn ^int level]
+  (and (>= (.-Checkptr base/Debug) level) (== (bit-and (.-Pragma fn) NoCheckPtr) 0)))
+
+
+
+
+^{:go/end 1129} (go/func ShouldAsanCheckPtr "ShouldAsanCheckPtr reports whether pointer checking should be enabled for\nfunction fn when -asan is enabled.\n" ^bool [^{:tag (* Func)} fn]
+  (and (.-ASan base/Flag) (== (bit-and (.-Pragma fn) NoCheckPtr) 0)))
+
+
+
+
+^{:go/end 1154} (go/func IsReflectHeaderDataField "IsReflectHeaderDataField reports whether l is an expression p.Data\nwhere p has type reflect.SliceHeader or reflect.StringHeader.\n" ^bool [^Node l]
+  (when (!= (.Type l) (aget types/Types types/TUINTPTR))
+    (return false))
+
+
+  (let [^{:tag (* types/Sym)} tsym (zero (* types/Sym))]
+    (switch (.Op l)
+      (case [ODOT]
+        (let [l (assert (* SelectorExpr) l)]
+          (set! tsym (.Sym (.Type (.-X l))))))
+      (case [ODOTPTR]
+        (let [l (assert (* SelectorExpr) l)]
+          (set! tsym (.Sym (.Elem (.Type (.-X l)))))))
+      (default
+        (return false)))
+
+
+    (when (or (== tsym nil) (!= (.-Name (.Sym l)) "Data") (!= (.-Path (.-Pkg tsym)) "reflect"))
+      (return false))
+
+    (or (== (.-Name tsym) "SliceHeader") (== (.-Name tsym) "StringHeader"))))
+
+
+^{:go/end 1162} (go/func ParamNames ^{:tag (slice Node)} [^{:tag (* types/Type)} ft]
+  (let [args (make (slice Node) (.NumParams ft))]
+    (range [i f (.Params ft)]
+      (aset args i (assert (* Name) (.-Nname f))))
+
+    ^{:line 1161} args))
+
+
+^{:go/end 1170} (go/func RecvParamNames ^{:tag (slice Node)} [^{:tag (* types/Type)} ft]
+  (let [args (make (slice Node) (+ (.NumRecvs ft) (.NumParams ft)))]
+    (range [i f (.RecvParams ft)]
+      (aset args i (assert (* Name) (.-Nname f))))
+
+    ^{:line 1169} args))
+
+
+
+
+
+
+
+
+
+
+^{:go/end 1184} (go/func MethodSym "MethodSym returns the method symbol representing a method name\nassociated with a specific receiver type.\n\nMethod symbols can be used to distinguish the same method appearing\nin different method sets. For example, T.M and (*T).M have distinct\nmethod symbols.\n\nThe returned symbol will be marked as a function.\n" ^{:tag (* types/Sym)} [^{:tag (* types/Type)} recv ^{:tag (* types/Sym)} msym]
+  (let [sym (MethodSymSuffix recv msym "")]
+    (.SetFunc sym true)
+    ^{:line 1183} sym))
+
+
+
+
+
+^{:go/end 1232} (go/func MethodSymSuffix "MethodSymSuffix is like MethodSym, but allows attaching a\ndistinguisher suffix. To avoid collisions, the suffix must not\nstart with a letter, number, or period.\n" ^{:tag (* types/Sym)} [^{:tag (* types/Type)} recv ^{:tag (* types/Sym)} msym ^string suffix]
+  (when (.IsBlank msym)
+    (base/Fatalf "blank method name"))
+
+
+  (let [rsym (.Sym recv)]
+    (when (.IsPtr recv)
+      (when (!= rsym nil)
+        (base/Fatalf "declared pointer receiver type: %v" recv))
+
+      (set! rsym (.Sym (.Elem recv))))
+
+
+    ;; Find the package the receiver type appeared in. For
+    ;; anonymous receiver types (i.e., anonymous structs with
+    ;; embedded fields), use the "go" pseudo-package instead.
+    (let [rpkg (.-Go Pkgs)]
+      (when (!= rsym nil)
+        (set! rpkg (.-Pkg rsym)))
+
+
+      (let [^bytes/Buffer b (zero bytes/Buffer)]
+        (if (.IsPtr recv)
+          ;; The parentheses aren't really necessary, but
+          ;; they're pretty traditional at this point.
+          (fmt/Fprintf (addr b) "(%-S)" recv)
+
+          (fmt/Fprintf (addr b) "%-S" recv))
+
+
+        ;; A particular receiver type may have multiple non-exported
+        ;; methods with the same name. To disambiguate them, include a
+        ;; package qualifier for names that came from a different
+        ;; package than the receiver type.
+        (when (and (not (types/IsExported (.-Name msym))) (!= (.-Pkg msym) rpkg))
+          (.WriteString b ".")
+          (.WriteString b (.-Prefix (.-Pkg msym))))
+
+
+        (.WriteString b ".")
+        (.WriteString b (.-Name msym))
+        (.WriteString b suffix)
+        (.LookupBytes rpkg (.Bytes b))))))
+
+
+
+
+
+
+^{:go/end 1253} (go/func LookupMethodSelector "LookupMethodSelector returns the types.Sym of the selector for a method\nnamed in local symbol name, as well as the types.Sym of the receiver.\n\nTODO(prattmic): this does not attempt to handle method suffixes (wrappers).\n" [^{:tag (* types/Pkg)} pkg ^string name] :results [^{:tag (* types/Sym)} typ ^{:tag (* types/Sym)} meth ^error err]
+  (let [(values typeName methName) (splitType name)]
+    (when (== typeName "")
+      (return nil nil (fmt/Errorf "%s doesn't contain type split" name)))
+
+
+    (when (and (> (len typeName) 3) (== (subslice typeName _ 2) "(*") (== (aget typeName (- (len typeName) 1)) \)))
+      ;; Symbol name is for a pointer receiver method. We just want
+      ;; the base type name.
+      (set! typeName (subslice typeName 2 (- (len typeName) 1))))
+
+
+    (set! typ (.Lookup pkg typeName))
+    (set! meth (.Selector pkg methName))
+    (return typ meth nil)))
+
+
+
+
+
+
+
+^{:go/end 1277} (go/func splitType "splitType splits a local symbol name into type and method (fn). If this a\nfree function, typ == \"\".\n\nN.B. closures and methods can be ambiguous (e.g., bar.func1). These cases\nare returned as methods.\n" [^string name] :results [^string typ ^string fn]
+  ;; Types are split on the first dot, ignoring everything inside
+  ;; brackets (instantiation of type parameter, usually including
+  ;; "go.shape").
+  (let [bracket 0]
+    (range [i r name]
+      (when (and (== r \.) (== bracket 0))
+        (return (subslice name _ i) (subslice name (+ i 1))))
+
+      (when (== r \[)
+        (inc! bracket))
+
+      (when (== r \])
+        (dec! bracket)))
+
+
+    (return "" name)))
+
+
+
+
+
+^{:go/end 1285} (go/func MethodExprName "MethodExprName returns the ONAME representing the method\nreferenced by expression n, which must be a method selector,\nmethod expression, or method value.\n" ^{:tag (* Name)} [^Node n]
+  (let [(values name _) (assert (* Name) (.-Nname (MethodExprFunc n)))]
+    ^{:line 1284} name))
+
+
+
+^{:go/end 1295} (go/func MethodExprFunc "MethodExprFunc is like MethodExprName, but returns the types.Field instead.\n" ^{:tag (* types/Field)} [^Node n]
+  (switch (.Op n)
+    (case [ODOTMETH OMETHEXPR OMETHVALUE]
+      (return (.-Selection (assert (* SelectorExpr) n)))))
+
+  (base/Fatalf "unexpected node: %v (%v)" n (.Op n))
+  (panic "unreachable"))
+
+
+
+
+
+(go/type MoveToHeapExpr "A MoveToHeapExpr takes a slice as input and moves it to the\nheap (by copying the backing store if it is not already\non the heap).\n" (struct
+    ^{:line 1301} miniExpr
+    ^{:line 1302 :tag Node} Slice
+
+
+    ^{:line 1305 :tag Node :doc "An expression that evaluates to a *runtime._type\nthat represents the slice element type.\n"} RType
+
+
+
+
+
+
+    ^{:line 1312 :tag bool :doc "If PreserveCapacity is true, the capacity of\nthe resulting slice, and all of the elements in\n[len:cap], must be preserved.\nIf PreserveCapacity is false, the resulting\nslice may have any capacity >= len, with any\nelements in the resulting [len:cap] range zeroed.\n"} PreserveCapacity))
+
+
+^{:go/end 1320} (go/func NewMoveToHeapExpr ^{:tag (* MoveToHeapExpr)} [^src/XPos pos ^Node slice]
+  (let [n (addr (lit MoveToHeapExpr :Slice slice))]
+    (set! ^{:go/via [miniExpr miniNode]} (.-pos n) pos)
+    (set! ^{:go/via [miniExpr miniNode]} (.-op n) OMOVE2HEAP)
+    ^{:line 1319} n))

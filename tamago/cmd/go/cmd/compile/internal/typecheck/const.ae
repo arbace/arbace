@@ -1,0 +1,466 @@
+;; Copyright 2009 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.cmd.compile.internal.typecheck) (go/file "const.go" :imports [
+
+
+    ^{:line 8} [fmt "fmt"]
+    ^{:line 9} [constant "go/constant"]
+    ^{:line 10} [token "go/token"]
+    ^{:line 11} [math "math"]
+    ^{:line 12} [big "math/big"]
+    ^{:line 13} [unicode "unicode"]
+
+    ^{:line 15} [base "cmd/compile/internal/base"]
+    ^{:line 16} [ir "cmd/compile/internal/ir"]
+    ^{:line 17} [types "cmd/compile/internal/types"]])
+
+
+^{:go/end 31} (go/func roundFloat ^constant/Value [^constant/Value v ^int64 sz]
+  (switch sz
+    (case [4]
+      (let [(values f _) (constant/Float32Val v)]
+        (return (makeFloat64 (conv float64 f)))))
+    (case [8]
+      (let [(values f _) (constant/Float64Val v)]
+        (return (makeFloat64 f)))))
+
+  (base/Fatalf "unexpected size: %v" sz)
+  (panic "unreachable"))
+
+
+
+
+^{:go/end 41} (go/func truncfltlit "truncate float literal fv to 32-bit or 64-bit precision\naccording to type; return truncated value.\n" ^constant/Value [^constant/Value v ^{:tag (* types/Type)} t]
+  (when (.IsUntyped t)
+    (return v))
+
+
+  (roundFloat v (.Size t)))
+
+
+
+
+
+^{:go/end 53} (go/func trunccmplxlit "truncate Real and Imag parts of Mpcplx to 32-bit or 64-bit\nprecision, according to type; return truncated value. In case of\noverflow, calls Errorf but does not truncate the input value.\n" ^constant/Value [^constant/Value v ^{:tag (* types/Type)} t]
+  (when (.IsUntyped t)
+    (return v))
+
+
+  (let [fsz (/ (.Size t) 2)]
+    (makeComplex (roundFloat (constant/Real v) fsz) (roundFloat (constant/Imag v) fsz))))
+
+
+
+^{:go/end 56} (go/func convlit "TODO(mdempsky): Replace these with better APIs.\n" ^ir/Node [^ir/Node n ^{:tag (* types/Type)} t] (convlit1 n t false nil))
+^{:go/end 57} (go/func DefaultLit ^ir/Node [^ir/Node n ^{:tag (* types/Type)} t] (convlit1 n t false nil))
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 201} (go/func convlit1 "convlit1 converts an untyped expression n to type t. If n already\nhas a type, convlit1 has no effect.\n\nFor explicit conversions, t must be non-nil, and integer-to-string\nconversions are allowed.\n\nFor implicit conversions (e.g., assignments), t may be nil; if so,\nn is converted to its default type.\n\nIf there's an error converting n to t, context is used in the error\nmessage.\n" ^ir/Node [^ir/Node n ^{:tag (* types/Type)} t ^bool explicit ^{:tag (func [] [string])} context]
+  (when (and explicit (== t nil))
+    (base/Fatalf "explicit conversion missing type"))
+
+  (when (and (!= t nil) (.IsUntyped t))
+    (base/Fatalf "bad conversion to untyped: %v" t))
+
+
+  (when (or (== n nil) (== (.Type n) nil))
+    ;; Allow sloppy callers.
+    (return n))
+
+  (when (not (.IsUntyped (.Type n)))
+    ;; Already typed; nothing to do.
+    (return n))
+
+
+  ;; Nil is technically not a constant, so handle it specially.
+  (when (== (.Kind (.Type n)) types/TNIL)
+    (when (!= (.Op n) ir/ONIL)
+      (base/Fatalf "unexpected op: %v (%v)" n (.Op n)))
+
+    (set! n (ir/Copy n))
+    (when (== t nil)
+      (base/Fatalf "use of untyped nil"))
+
+
+    (when (not (.HasNil t))
+      ;; Leave for caller to handle.
+      (return n))
+
+
+    (.SetType n t)
+    (return n))
+
+
+  (when (or (== t nil) (not (aget ir/OKForConst (.Kind t))))
+    (set! t (defaultType (.Type n))))
+
+
+  (switch (.Op n)
+    (default
+      (base/Fatalf "unexpected untyped expression: %v" n))
+
+    (case [ir/OLITERAL]
+      (let [v (ConvertVal (.Val n) t explicit)]
+        (when (== (.Kind v) constant/Unknown)
+          (set! n (ir/NewConstExpr (.Val n) n))
+          (break))
+
+        (set! n (ir/NewConstExpr v n))
+        (.SetType n t)
+        (return n)))
+
+    (case [ir/OPLUS ir/ONEG ir/OBITNOT ir/ONOT ir/OREAL ir/OIMAG]
+      (let [ot (operandType (.Op n) t)]
+        (when (== ot nil)
+          (set! n (DefaultLit n nil))
+          (break))
+
+
+        (let [n (assert (* ir/UnaryExpr) n)]
+          (set! (.-X n) (convlit (.-X n) ot))
+          (when (== (.Type (.-X n)) nil)
+            ^{:go/via [miniExpr]} (.SetType n nil)
+            (return n))
+
+          ^{:go/via [miniExpr]} (.SetType n t)
+          (return n))))
+
+    (case [ir/OADD ir/OSUB ir/OMUL ir/ODIV ir/OMOD ir/OOR ir/OXOR ir/OAND ir/OANDNOT ir/OOROR ir/OANDAND ir/OCOMPLEX]
+      (let [ot (operandType (.Op n) t)]
+        (when (== ot nil)
+          (set! n (DefaultLit n nil))
+          (break))
+
+
+        (let [(values ^ir/Node l ^ir/Node r) (zero ir/Node)]
+          (type-switch [n n]
+            (case [(* ir/BinaryExpr)]
+              (set! (.-X n) (convlit (.-X n) ot))
+              (set! (.-Y n) (convlit (.-Y n) ot))
+              (set! (values l r) (values (.-X n) (.-Y n))))
+            (case [(* ir/LogicalExpr)]
+              (set! (.-X n) (convlit (.-X n) ot))
+              (set! (.-Y n) (convlit (.-Y n) ot))
+              (set! (values l r) (values (.-X n) (.-Y n)))))
+
+
+          (when (or (== (.Type l) nil) (== (.Type r) nil))
+            (.SetType n nil)
+            (return n))
+
+          (when (not (types/Identical (.Type l) (.Type r)))
+            (base/Errorf "invalid operation: %v (mismatched types %v and %v)" n (.Type l) (.Type r))
+            (.SetType n nil)
+            (return n))
+
+
+          (.SetType n t)
+          (return n))))
+
+    (case [ir/OEQ ir/ONE ir/OLT ir/OLE ir/OGT ir/OGE]
+      (let [n (assert (* ir/BinaryExpr) n)]
+        (when (not (.IsBoolean t))
+          (break))
+
+        ^{:go/via [miniExpr]} (.SetType n t)
+        (return n)))
+
+    (case [ir/OLSH ir/ORSH]
+      (let [n (assert (* ir/BinaryExpr) n)]
+        (set! (.-X n) (convlit1 (.-X n) t explicit nil))
+        ^{:go/via [miniExpr]} (.SetType n (.Type (.-X n)))
+        (when (and (!= ^{:go/via [miniExpr]} (.Type n) nil) (not (.IsInteger ^{:go/via [miniExpr]} (.Type n))))
+          (base/Errorf "invalid operation: %v (shift of type %v)" n ^{:go/via [miniExpr]} (.Type n))
+          ^{:go/via [miniExpr]} (.SetType n nil))
+
+        (return n))))
+
+
+  (cond explicit
+    (base/Fatalf "cannot convert %L to type %v" n t)
+    (!= context nil)
+    (base/Fatalf "cannot use %L as type %v in %s" n t (context)) :else
+
+    (base/Fatalf "cannot use %L as type %v" n t))
+
+
+  (.SetType n nil)
+  ^{:line 200} n)
+
+
+^{:go/breaks [[4 218]] :go/end 219} (go/func operandType ^{:tag (* types/Type)} [^ir/Op op ^{:tag (* types/Type)} t]
+  (switch op
+    (case [ir/OCOMPLEX]
+      (when (.IsComplex t)
+        (return (types/FloatForComplex t))))
+
+    (case [ir/OREAL ir/OIMAG]
+      (when (.IsFloat t)
+        (return (types/ComplexForFloat t))))
+
+    (default
+      (when (aget (aget okfor op) (.Kind t))
+        (return t))))
+
+
+  nil)
+
+
+
+
+
+
+
+
+^{:go/end 261} (go/func ConvertVal "ConvertVal converts v into a representation appropriate for t. If\nno such representation exists, it returns constant.MakeUnknown()\ninstead.\n\nIf explicit is true, then conversions from integer to string are\nalso allowed.\n" ^constant/Value [^constant/Value v ^{:tag (* types/Type)} t ^bool explicit]
+  (switch [ct (.Kind v)] ct
+    (case [constant/Bool]
+      (when (.IsBoolean t)
+        (return v)))
+
+
+    (case [constant/String]
+      (when (.IsString t)
+        (return v)))
+
+
+    (case [constant/Int]
+      (when (and explicit (.IsString t))
+        (return (tostr v)))
+
+      (fallthrough))
+    (case [constant/Float constant/Complex]
+      (switch
+        (case [(.IsInteger t)]
+          (set! v (toint v))
+          (return v))
+        (case [(.IsFloat t)]
+          (set! v (toflt v))
+          (set! v (truncfltlit v t))
+          (return v))
+        (case [(.IsComplex t)]
+          (set! v (tocplx v))
+          (set! v (trunccmplxlit v t))
+          (return v)))))
+
+
+
+  (constant/MakeUnknown))
+
+
+^{:go/end 265} (go/func tocplx ^constant/Value [^constant/Value v]
+  (constant/ToComplex v))
+
+
+^{:go/end 273} (go/func toflt ^constant/Value [^constant/Value v]
+  (when (== (.Kind v) constant/Complex)
+    (set! v (constant/Real v)))
+
+
+  (constant/ToFloat v))
+
+
+^{:go/end 308} (go/func toint ^constant/Value [^constant/Value v]
+  (when (== (.Kind v) constant/Complex)
+    (set! v (constant/Real v)))
+
+
+  (when [v (constant/ToInt v)] (== (.Kind v) constant/Int)
+    (return v))
+
+
+  ;; The value of v cannot be represented as an integer;
+  ;; so we need to print an error message.
+  ;; Unfortunately some float values cannot be
+  ;; reasonably formatted for inclusion in an error
+  ;; message (example: 1 + 1e-100), so first we try to
+  ;; format the float; if the truncation resulted in
+  ;; something that looks like an integer we omit the
+  ;; value from the error message.
+  ;; (See issue #11371).
+  (let [f (ir/BigFloat v)]
+    (if (> (.MantExp f nil) (* 2 ir/ConstPrec))
+      (base/Errorf "integer too large")
+
+      (let [^big/Float t (zero big/Float)]
+        (.Parse t (fmt/Sprint v) 0)
+        (if (.IsInt t)
+          (base/Errorf "constant truncated to integer")
+
+          (base/Errorf "constant %v truncated to integer" v))))
+
+
+
+    ;; Prevent follow-on errors.
+    (constant/MakeUnknown)))
+
+
+^{:go/end 319} (go/func tostr ^constant/Value [^constant/Value v]
+  (when (== (.Kind v) constant/Int)
+    (let [r unicode/ReplacementChar]
+      (when [(values x ok) (constant/Uint64Val v)] (and ok (<= x unicode/MaxRune))
+        (set! r (conv rune x)))
+
+      (set! v (constant/MakeString (conv string r)))))
+
+  ^{:line 318} v)
+
+
+^{:go/end 326} (go/func makeFloat64 ^constant/Value [^float64 f]
+  (when (math/IsInf f 0)
+    (base/Fatalf "infinity is not a valid constant"))
+
+  (constant/MakeFloat64 f))
+
+
+^{:go/end 330} (go/func makeComplex ^constant/Value [^constant/Value real ^constant/Value imag]
+  (constant/BinaryOp (constant/ToFloat real) token/ADD (constant/MakeImag (constant/ToFloat imag))))
+
+
+
+
+
+
+
+
+
+^{:go/end 376} (go/func defaultlit2 "DefaultLit on both nodes simultaneously;\nif they're both ideal going in they better\nget the same type going out.\nforce means must assign concrete (non-ideal) type.\nThe results of defaultlit2 MUST be assigned back to l and r, e.g.\n\n\tn.Left, n.Right = defaultlit2(n.Left, n.Right, force)\n" [^ir/Node l ^ir/Node r ^bool force] :results [ir/Node ir/Node]
+  (when (or (== (.Type l) nil) (== (.Type r) nil))
+    (return l r))
+
+
+  (when (and (not (.IsInterface (.Type l))) (not (.IsInterface (.Type r))))
+    ;; Can't mix bool with non-bool, string with non-string.
+    (when (!= (.IsBoolean (.Type l)) (.IsBoolean (.Type r)))
+      (return l r))
+
+    (when (!= (.IsString (.Type l)) (.IsString (.Type r)))
+      (return l r)))
+
+
+
+  (when (not (.IsUntyped (.Type l)))
+    (set! r (convlit r (.Type l)))
+    (return l r))
+
+
+  (when (not (.IsUntyped (.Type r)))
+    (set! l (convlit l (.Type r)))
+    (return l r))
+
+
+  (when (not force)
+    (return l r))
+
+
+  ;; Can't mix nil with anything untyped.
+  (when (or (ir/IsNil l) (ir/IsNil r))
+    (return l r))
+
+  (let [t (defaultType (mixUntyped (.Type l) (.Type r)))]
+    (set! l (convlit l t))
+    (set! r (convlit r t))
+    (return l r)))
+
+
+^{:go/end 402} (go/func mixUntyped ^{:tag (* types/Type)} [^{:tag (* types/Type)} t1 ^{:tag (* types/Type)} t2]
+  (when (== t1 t2)
+    (return t1))
+
+
+  (let [rank ^{:go/end 396} (fn ^int [^{:tag (* types/Type)} t]
+        (switch t
+          (case [types/UntypedInt]
+            (return 0))
+          (case [types/UntypedRune]
+            (return 1))
+          (case [types/UntypedFloat]
+            (return 2))
+          (case [types/UntypedComplex]
+            (return 3)))
+
+        (base/Fatalf "bad type %v" t)
+        (panic "unreachable"))]
+
+
+    (when (> (rank t2) (rank t1))
+      (return t2))
+
+    ^{:line 401} t1))
+
+
+^{:go/breaks [6] :go/end 426} (go/func defaultType ^{:tag (* types/Type)} [^{:tag (* types/Type)} t]
+  (when (or (not (.IsUntyped t)) (== (.Kind t) types/TNIL))
+    (return t))
+
+
+  (switch t
+    (case [types/UntypedBool]
+      (return (aget types/Types types/TBOOL)))
+    (case [types/UntypedString]
+      (return (aget types/Types types/TSTRING)))
+    (case [types/UntypedInt]
+      (return (aget types/Types types/TINT)))
+    (case [types/UntypedRune]
+      (return types/RuneType))
+    (case [types/UntypedFloat]
+      (return (aget types/Types types/TFLOAT64)))
+    (case [types/UntypedComplex]
+      (return (aget types/Types types/TCOMPLEX128))))
+
+
+  (base/Fatalf "bad type %v" t)
+  nil)
+
+
+
+^{:go/end 431} (go/func IndexConst "IndexConst returns the index value of constant Node n.\n" ^int64 [^ir/Node n]
+  (ir/IntVal (aget types/Types types/TINT) (toint (.Val n))))
+
+
+
+^{:go/breaks [[5 466]] :go/end 467} (go/func callOrChan "callOrChan reports whether n is a call or channel operation.\n" ^bool [^ir/Node n]
+  (switch (.Op n)
+    (case [ir/OAPPEND
+        ^{:line 437} ir/OCALL
+        ^{:line 438} ir/OCALLFUNC
+        ^{:line 439} ir/OCALLINTER
+        ^{:line 440} ir/OCALLMETH
+        ^{:line 441} ir/OCAP
+        ^{:line 442} ir/OCLEAR
+        ^{:line 443} ir/OCLOSE
+        ^{:line 444} ir/OCOMPLEX
+        ^{:line 445} ir/OCOPY
+        ^{:line 446} ir/ODELETE
+        ^{:line 447} ir/OIMAG
+        ^{:line 448} ir/OLEN
+        ^{:line 449} ir/OMAKE
+        ^{:line 450} ir/OMAX
+        ^{:line 451} ir/OMIN
+        ^{:line 452} ir/ONEW
+        ^{:line 453} ir/OPANIC
+        ^{:line 454} ir/OPRINT
+        ^{:line 455} ir/OPRINTLN
+        ^{:line 456} ir/OREAL
+        ^{:line 457} ir/ORECOVER
+        ^{:line 458} ir/ORECV
+        ^{:line 459} ir/OUNSAFEADD
+        ^{:line 460} ir/OUNSAFESLICE
+        ^{:line 461} ir/OUNSAFESLICEDATA
+        ^{:line 462} ir/OUNSAFESTRING
+        ^{:line 463} ir/OUNSAFESTRINGDATA]
+      (return true)))
+
+  false)

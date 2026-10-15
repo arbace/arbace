@@ -1,0 +1,217 @@
+;; Copyright 2016 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; This file implements source, a buffered rune reader
+;; specialized for scanning Go code: Reading
+;; ASCII characters, maintaining current (line, col)
+;; position information, and recording of the most
+;; recently read source segment are highly optimized.
+;; This file is self-contained (go tool compile source.go
+;; compiles) and thus could be made into its own package.
+
+(in-ns 'go.cmd.compile.internal.syntax) (go/file "source.go" :imports [
+
+
+    ^{:line 16} [io "io"]
+    ^{:line 17} [utf8 "unicode/utf8"]])
+
+
+;; The source buffer is accessed using three indices b (begin),
+;; r (read), and e (end):
+;;
+;; - If b >= 0, it points to the beginning of a segment of most
+;;   recently read characters (typically a Go literal).
+;;
+;; - r points to the byte immediately following the most recently
+;;   read character ch, which starts at r-chw.
+;;
+;; - e points to the byte immediately following the last byte that
+;;   was read into the buffer.
+;;
+;; The buffer content is terminated at buf[e] with the sentinel
+;; character utf8.RuneSelf. This makes it possible to test for
+;; the common case of ASCII characters with a single 'if' (see
+;; nextch method).
+;;
+;;                +------ content in use -------+
+;;                v                             v
+;; buf [...read...|...segment...|ch|...unread...|s|...free...]
+;;                ^             ^  ^            ^
+;;                |             |  |            |
+;;                b         r-chw  r            e
+;;
+;; Invariant: -1 <= b < r <= e < len(buf) && buf[e] == sentinel
+
+(go/type source (struct
+    ^{:line 47 :tag io/Reader} in
+    ^{:line 48 :tag (func [^uint line ^uint col ^string msg])} errh
+
+    ^{:line 50 :tag (slice byte)} buf ; source buffer
+    ^{:line 51 :tag error} ioerr ; pending I/O error, or nil
+    ^{:line 52 :tag int} b ^int r ^int e ; buffer indices (see comment above)
+    ^{:line 53 :tag uint} line ^uint col ; source position of ch (0-based)
+    ^{:line 54 :tag rune} ch ; most recently read character
+    ^{:line 55 :tag int} chw)) ; width of ch
+
+
+(go/const ^{:val 128} sentinel utf8/RuneSelf)
+
+^{:go/end 73} (go/method init [^{:tag (* source)} s ^io/Reader in ^{:tag (func [^uint line ^uint col ^string msg])} errh]
+  (set! (.-in s) in)
+  (set! (.-errh s) errh)
+
+  (when (== (.-buf s) nil)
+    (set! (.-buf s) (make (slice byte) (nextSize 0))))
+
+  (aset (.-buf s) 0 sentinel)
+  (set! (.-ioerr s) nil)
+  (set! (values (.-b s) (.-r s) (.-e s)) (values -1 0 0))
+  (set! (values (.-line s) (.-col s)) (values 0 0))
+  (set! (.-ch s) \space)
+  (set! (.-chw s) 0))
+
+
+
+(go/const ^{:val 1 :doc "starting points for line and column numbers\n"} linebase 1)
+(go/const ^{:val 1} colbase 1)
+
+
+^{:go/end 82} (go/method pos "pos returns the (line, col) source position of s.ch.\n" [^{:tag (* source)} s] :results [^uint line ^uint col]
+  (return (+ linebase (.-line s)) (+ colbase (.-col s))))
+
+
+
+^{:go/end 88} (go/method error "error reports the error msg at source position s.pos().\n" [^{:tag (* source)} s ^string msg]
+  (let [(values line col) (.pos s)]
+    ((.-errh s) line col msg)))
+
+
+
+
+
+^{:go/end 93} (go/method start "start starts a new active source segment (including s.ch).\nAs long as stop has not been called, the active segment's\nbytes (excluding s.ch) may be retrieved by calling segment.\n" [^{:tag (* source)} s] (set! (.-b s) (- (.-r s) (.-chw s))))
+^{:go/end 94} (go/method stop [^{:tag (* source)} s] (set! (.-b s) -1))
+^{:go/end 95} (go/method segment ^{:tag (slice byte)} [^{:tag (* source)} s] (subslice (.-buf s) (.-b s) (- (.-r s) (.-chw s))))
+
+
+
+
+
+
+
+^{:go/end 111} (go/method rewind "rewind rewinds the scanner's read position and character s.ch\nto the start of the currently active segment, which must not\ncontain any newlines (otherwise position information will be\nincorrect). Currently, rewind is only needed for handling the\nsource sequence \"..\"; it must not be called outside an active\nsegment.\n" [^{:tag (* source)} s]
+  ;; ok to verify precondition - rewind is rarely called
+  (when (< (.-b s) 0)
+    (panic "no active segment"))
+
+  (set! (.-col s) - (conv uint (- (.-r s) (.-b s))))
+  (set! (.-r s) (.-b s))
+  (.nextch s))
+
+
+^{:go/end 165} (go/method nextch [^{:tag (* source)} s]
+  (label :redo
+    (set! (.-col s) + (conv uint (.-chw s))))
+  (when (== (.-ch s) \newline)
+    (inc! (.-line s))
+    (set! (.-col s) 0))
+
+
+  ;; fast common case: at least one ASCII character
+  (when [(set! (.-ch s) (conv rune (aget (.-buf s) (.-r s))))] (< (.-ch s) sentinel)
+    (inc! (.-r s))
+    (set! (.-chw s) 1)
+    (when (== (.-ch s) 0)
+      (.error s "invalid NUL character")
+      (goto :redo))
+
+    (return))
+
+
+  ;; slower general case: add more bytes to buffer if we don't have a full rune
+  (while (and (< (- (.-e s) (.-r s)) utf8/UTFMax) (not (utf8/FullRune (subslice (.-buf s) (.-r s) (.-e s)))) (== (.-ioerr s) nil))
+    (.fill s))
+
+
+  ;; EOF
+  (when (== (.-r s) (.-e s))
+    (when (!= (.-ioerr s) io/EOF)
+      ;; ensure we never start with a '/' (e.g., rooted path) in the error message
+      (.error s (+ "I/O error: " (.Error (.-ioerr s))))
+      (set! (.-ioerr s) nil))
+
+    (set! (.-ch s) -1)
+    (set! (.-chw s) 0)
+    (return))
+
+
+  (set! (values (.-ch s) (.-chw s)) (utf8/DecodeRune (subslice (.-buf s) (.-r s) (.-e s))))
+  (set! (.-r s) + (.-chw s))
+
+  (when (and (== (.-ch s) utf8/RuneError) (== (.-chw s) 1))
+    (.error s "invalid UTF-8 encoding")
+    (goto :redo))
+
+
+  ;; BOM's are only allowed as the first character in a file
+  (let [^:const ^{:val 65279} BOM 0xfeff]
+    (when (== (.-ch s) BOM)
+      (when (or (> (.-line s) 0) (> (.-col s) 0))
+        (.error s "invalid BOM in the middle of the file"))
+
+      (goto :redo))))
+
+
+
+
+
+^{:go/end 205} (go/method fill "fill reads more source bytes into s.buf.\nIt returns with at least one more byte in the buffer, or with s.ioerr != nil.\n" [^{:tag (* source)} s]
+  ;; determine content to preserve
+  (let [b (.-r s)]
+    (when (>= (.-b s) 0)
+      (set! b (.-b s))
+      (set! (.-b s) 0)) ; after buffer has grown or content has been moved down
+
+    (let [content (subslice (.-buf s) b (.-e s))]
+
+      ;; grow buffer or move content down
+      (cond (> (* (len content) 2) (len (.-buf s))) (do
+          (set! (.-buf s) (make (slice byte) (nextSize (len (.-buf s)))))
+          (copy (.-buf s) content))
+        (> b 0)
+        (copy (.-buf s) content))
+
+      (set! (.-r s) - b)
+      (set! (.-e s) - b)
+
+      ;; read more data: try a limited number of times
+      (for [i 0] (< i 10) (inc! i)
+        (let [^int n (zero int)]
+          (set! (values n (.-ioerr s)) (.Read (.-in s) (subslice (.-buf s) (.-e s) (- (len (.-buf s)) 1)))) ; -1 to leave space for sentinel
+          (when (< n 0)
+            (panic "negative read")) ; incorrect underlying io.Reader implementation
+
+          (when (or (> n 0) (!= (.-ioerr s) nil))
+            (set! (.-e s) + n)
+            (aset (.-buf s) (.-e s) sentinel)
+            (return))))
+
+      ;; n == 0
+
+
+      (aset (.-buf s) (.-e s) sentinel)
+      (set! (.-ioerr s) io/ErrNoProgress))))
+
+
+
+^{:go/end 218} (go/func nextSize "nextSize returns the next bigger size for a buffer of a given size.\n" ^int [^int size]
+  (let [^:const ^{:val 4096} min (<< 4 10) ; 4K: minimum buffer size
+      ^:const ^{:line 210 :val 1048576} max (<< 1 20)] ; 1M: maximum buffer size which is still doubled
+    (when (< size min)
+      (return min))
+
+    (when (<= size max)
+      (return (<< size 1)))
+
+    (+ size max)))

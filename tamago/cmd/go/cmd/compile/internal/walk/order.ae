@@ -1,0 +1,1595 @@
+;; Copyright 2012 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.cmd.compile.internal.walk) (go/file "order.go" :imports [
+
+
+    ^{:line 8} [fmt "fmt"]
+    ^{:line 9} [constant "go/constant"]
+    ^{:line 10} [abi "internal/abi"]
+
+    ^{:line 12} [base "cmd/compile/internal/base"]
+    ^{:line 13} [ir "cmd/compile/internal/ir"]
+    ^{:line 14} [reflectdata "cmd/compile/internal/reflectdata"]
+    ^{:line 15} [ssa "cmd/compile/internal/ssa"]
+    ^{:line 16} [staticinit "cmd/compile/internal/staticinit"]
+    ^{:line 17} [typecheck "cmd/compile/internal/typecheck"]
+    ^{:line 18} [types "cmd/compile/internal/types"]
+    ^{:line 19} [objabi "cmd/internal/objabi"]
+    ^{:line 20} [src "cmd/internal/src"]])
+
+
+;; Rewrite tree to use separate statements to enforce
+;; order of evaluation. Makes walk easier, because it
+;; can (after this runs) reorder at will within an expression.
+;;
+;; Rewrite m[k] op= r into m[k] = m[k] op r if op is / or %.
+;;
+;; Introduce temporaries as needed by runtime routines.
+;; For example, the map runtime routines take the map key
+;; by reference, so make sure all map keys are addressable
+;; by copying them to temporaries as needed.
+;; The same is true for channel operations.
+;;
+;; Arrange that map index expressions only appear in direct
+;; assignments x = m[k] or m[k] = x, never in larger expressions.
+;;
+;; Arrange that receive expressions only appear in direct assignments
+;; x = <-c or as standalone statements <-c, never in larger expressions.
+
+
+(go/type orderState "orderState holds state during the ordering process.\n" (struct
+    ^{:line 43 :tag (slice ir/Node)} out ; list of generated statements
+    ^{:line 44 :tag (slice (* ir/Name))} temp ; stack of temporary variables
+    ^{:line 45 :tag (map string (slice (* ir/Name)))} free ; free list of unused temporaries, by type.LinkString().
+    ^{:line 46 :tag (func [ir/Node] [ir/Node])} edit)) ; cached closure of o.exprNoLHS
+
+
+
+
+^{:go/end 58} (go/func order "order rewrites fn.Nbody to apply the ordering constraints\ndescribed in the comment at the top of the file.\n" [^{:tag (* ir/Func)} fn]
+  (when (> (.-W base/Flag) 1)
+    (let [s (fmt/Sprintf "\nbefore order %v" (.Sym fn))]
+      (ir/DumpList s (.-Body fn))))
+
+  (ir/SetPos fn) ; Set reasonable position for instrumenting code. See issue 53688.
+  (orderBlock (addr (.-Body fn)) (lit (map string (slice (* ir/Name))))))
+
+
+
+^{:go/end 63} (go/method append "append typechecks stmt and appends it to out.\n" [^{:tag (* orderState)} o ^ir/Node stmt]
+  (set! (.-out o) (append (.-out o) (typecheck/Stmt stmt))))
+
+
+
+
+
+^{:go/end 86} (go/method newTemp "newTemp allocates a new temporary with the given type,\npushes it onto the temp stack, and returns it.\nIf clear is true, newTemp emits code to zero the temporary.\n" ^{:tag (* ir/Name)} [^{:tag (* orderState)} o ^{:tag (* types/Type)} t ^bool clear]
+  (let [^{:tag (* ir/Name)} v (zero (* ir/Name))
+      ^{:line 70} key (.LinkString t)]
+    (if [a (aget (.-free o) key)] (> (len a) 0) (do
+        (set! v (aget a (- (len a) 1)))
+        (when (not (types/Identical t ^{:go/via [miniExpr]} (.Type v)))
+          (base/Fatalf "expected %L to have type %v" v t))
+
+        (aset (.-free o) key (subslice a _ (- (len a) 1))))
+
+      (set! v (typecheck/TempAt base/Pos ir/CurFunc t)))
+
+    (when clear
+      (.append o (ir/NewAssignStmt base/Pos v nil)))
+
+
+    (set! (.-temp o) (append (.-temp o) v))
+    ^{:line 85} v))
+
+
+
+
+^{:go/end 92} (go/method copyExpr "copyExpr behaves like newTemp but also emits\ncode to initialize the temporary to the value n.\n" ^{:tag (* ir/Name)} [^{:tag (* orderState)} o ^ir/Node n]
+  (.copyExpr1 o n false))
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 106} (go/method copyExprClear "copyExprClear is like copyExpr but clears the temp before assignment.\nIt is provided for use when the evaluation of tmp = n turns into\na function call that is passed a pointer to the temporary as the output space.\nIf the call blocks before tmp has been written,\nthe garbage collector will still treat the temporary as live,\nso we must zero it before entering that call.\nToday, this only happens for channel receive operations.\n(The other candidate would be map access, but map access\nreturns a pointer to the result data instead of taking a pointer\nto be filled in.)\n" ^{:tag (* ir/Name)} [^{:tag (* orderState)} o ^ir/Node n]
+  (.copyExpr1 o n true))
+
+
+^{:go/end 113} (go/method copyExpr1 ^{:tag (* ir/Name)} [^{:tag (* orderState)} o ^ir/Node n ^bool clear]
+  (let [t (.Type n)
+      ^{:line 110} v (.newTemp o t clear)]
+    (.append o (ir/NewAssignStmt base/Pos v n))
+    ^{:line 112} v))
+
+
+
+
+
+
+^{:go/end 139} (go/method cheapExpr "cheapExpr returns a cheap version of n.\nThe definition of cheap is that n is a variable or constant.\nIf not, cheapExpr allocates a new tmp, emits tmp = n,\nand then returns tmp.\n" ^ir/Node [^{:tag (* orderState)} o ^ir/Node n]
+  (when (== n nil)
+    (return nil))
+
+
+  (switch (.Op n)
+    (case [ir/ONAME ir/OLITERAL ir/ONIL]
+      (return n))
+    (case [ir/OLEN ir/OCAP]
+      (let [n (assert (* ir/UnaryExpr) n)
+          ^{:line 129} l (.cheapExpr o (.-X n))]
+        (when (== l (.-X n))
+          (return n))
+
+        (let [a (assert (* ir/UnaryExpr) (ir/Copy n))]
+          (set! (.-X a) l)
+          (return (typecheck/Expr a))))))
+
+
+  (.copyExpr o n))
+
+
+
+
+
+
+
+
+
+^{:go/end 214} (go/method safeExpr "safeExpr returns a safe version of n.\nThe definition of safe is that n can appear multiple times\nwithout violating the semantics of the original program,\nand that assigning to the safe version has the same effect\nas assigning to the original n.\n\nThe intended use is to apply to x when rewriting x += y into x = x + y.\n" ^ir/Node [^{:tag (* orderState)} o ^ir/Node n]
+  (switch (.Op n)
+    (case [ir/ONAME ir/OLITERAL ir/ONIL]
+      (return n))
+
+    (case [ir/OLEN ir/OCAP]
+      (let [n (assert (* ir/UnaryExpr) n)
+          ^{:line 155} l (.safeExpr o (.-X n))]
+        (when (== l (.-X n))
+          (return n))
+
+        (let [a (assert (* ir/UnaryExpr) (ir/Copy n))]
+          (set! (.-X a) l)
+          (return (typecheck/Expr a)))))
+
+    (case [ir/ODOT]
+      (let [n (assert (* ir/SelectorExpr) n)
+          ^{:line 165} l (.safeExpr o (.-X n))]
+        (when (== l (.-X n))
+          (return n))
+
+        (let [a (assert (* ir/SelectorExpr) (ir/Copy n))]
+          (set! (.-X a) l)
+          (return (typecheck/Expr a)))))
+
+    (case [ir/ODOTPTR]
+      (let [n (assert (* ir/SelectorExpr) n)
+          ^{:line 175} l (.cheapExpr o (.-X n))]
+        (when (== l (.-X n))
+          (return n))
+
+        (let [a (assert (* ir/SelectorExpr) (ir/Copy n))]
+          (set! (.-X a) l)
+          (return (typecheck/Expr a)))))
+
+    (case [ir/ODEREF]
+      (let [n (assert (* ir/StarExpr) n)
+          ^{:line 185} l (.cheapExpr o (.-X n))]
+        (when (== l (.-X n))
+          (return n))
+
+        (let [a (assert (* ir/StarExpr) (ir/Copy n))]
+          (set! (.-X a) l)
+          (return (typecheck/Expr a)))))
+
+    (case [ir/OINDEX ir/OINDEXMAP]
+      (let [n (assert (* ir/IndexExpr) n)
+          ^{:line 195 :tag ir/Node} l (zero ir/Node)]
+        (if (.IsArray (.Type (.-X n)))
+          (set! l (.safeExpr o (.-X n)))
+
+          (set! l (.cheapExpr o (.-X n))))
+
+        (let [r (.cheapExpr o (.-Index n))]
+          (when (and (== l (.-X n)) (== r (.-Index n)))
+            (return n))
+
+          (let [a (assert (* ir/IndexExpr) (ir/Copy n))]
+            (set! (.-X a) l)
+            (set! (.-Index a) r)
+            (return (typecheck/Expr a))))))
+
+    (default
+      (base/Fatalf "order.safeExpr %v" (.Op n))
+      (return nil)))) ; not reached
+
+
+
+
+
+
+
+
+
+^{:go/end 288} (go/method addrTemp "addrTemp ensures that n is okay to pass by address to runtime routines.\nIf the original argument n is not okay, addrTemp creates a tmp, emits\ntmp = n, and then returns tmp.\nThe result of addrTemp MUST be assigned back to n, e.g.\n\n\tn.Left = o.addrTemp(n.Left)\n" ^ir/Node [^{:tag (* orderState)} o ^ir/Node n]
+  ;; Note: Avoid addrTemp with static assignment for literal strings
+  ;; when compiling FIPS packages.
+  ;; The problem is that panic("foo") ends up creating a static RODATA temp
+  ;; for the implicit conversion of "foo" to any, and we can't handle
+  ;; the relocations in that temp.
+  (when (or (== (.Op n) ir/ONIL) ^:go/paren (and (== (.Op n) ir/OLITERAL) (not (.IsFIPS base/Ctxt))))
+    ;; This is a basic literal or nil that we can store
+    ;; directly in the read-only data section.
+    (set! n (typecheck/DefaultLit n nil))
+    (types/CalcSize (.Type n))
+    (let [vstat (readonlystaticname (.Type n))
+        ^{:line 234 :tag staticinit/Schedule} s (zero staticinit/Schedule)]
+      (.StaticAssign s vstat 0 n (.Type n))
+      (when (!= (.-Out s) nil)
+        (base/Fatalf "staticassign of const generated code: %+v" n))
+
+      (set! vstat (assert (* ir/Name) (typecheck/Expr vstat)))
+      (return vstat)))
+
+
+  ;; Check now for a composite literal to possibly store in the read-only data section.
+  (let [v (staticValue n)]
+    (when (== v nil)
+      (set! v n))
+
+    (let [optEnabled ^{:go/end 251} (fn ^bool [^ir/Node n]
+          ;; Do this optimization only when enabled for this node.
+          (.MatchPos base/LiteralAllocHash (.Pos n) nil))]
+
+      (when (and ^:go/paren (or (== (.Op v) ir/OSTRUCTLIT) (== (.Op v) ir/OARRAYLIT)) (not (.IsFIPS base/Ctxt)))
+        (when (and (ir/IsZero v) (< 0 (.Size (.Type v))) (<= (.Size (.Type v)) abi/ZeroValSize) (optEnabled n))
+          ;; This zero value can be represented by the read-only zeroVal.
+          (let [zeroVal (ir/NewLinksymExpr (.Pos v) (.-ZeroVal ir/Syms) (.Type n))
+              ^{:line 256} vstat (assert (* ir/LinksymOffsetExpr) (typecheck/Expr zeroVal))]
+            (return vstat)))
+
+        (when (and (isStaticCompositeLiteral v) (optEnabled n))
+          ;; v can be directly represented in the read-only data section.
+          (let [lit (assert (* ir/CompLitExpr) v)
+              ^{:line 262} vstat (readonlystaticname (.Type n))]
+            (fixedlit initKindStatic lit vstat nil) ; nil init
+            (set! vstat (assert (* ir/Name) (typecheck/Expr vstat)))
+            (return vstat))))
+
+
+
+      ;; Prevent taking the address of an SSA-able local variable (#63332).
+      ;;
+      ;; TODO(mdempsky): Note that OuterValue unwraps OCONVNOPs, but
+      ;; IsAddressable does not. It should be possible to skip copying for
+      ;; at least some of these OCONVNOPs (e.g., reinsert them after the
+      ;; OADDR operation), but at least walkCompare needs to be fixed to
+      ;; support that (see trybot failures on go.dev/cl/541715, PS1).
+      (when (ir/IsAddressable n)
+        (when [(values name ok) (assert (* ir/Name) (ir/OuterValue n))] (and ok (== ^{:go/via [miniExpr miniNode]} (.Op name) ir/ONAME))
+          (when (and (== (.-Class name) ir/PAUTO) (not (.Addrtaken name)) (ssa/CanSSA ^{:go/via [miniExpr]} (.Type name)))
+            (goto :Copy)))
+
+
+
+        (return n))
+
+
+      (label :Copy
+        (return (.copyExpr o n))))))
+
+
+
+
+
+^{:go/end 346} (go/method mapKeyTemp "mapKeyTemp prepares n to be a key in a map runtime call and returns n.\nThe first parameter is the position of n's containing node, for use in case\nthat n's position is not unique (e.g., if n is an ONAME).\n" ^ir/Node [^{:tag (* orderState)} o ^src/XPos outerPos ^{:tag (* types/Type)} t ^ir/Node n]
+  (let [pos outerPos]
+    (when (ir/HasUniquePos n)
+      (set! pos (.Pos n)))
+
+    ;; Most map calls need to take the address of the key.
+    ;; Exception: map*_fast* calls. See golang.org/issue/19015.
+    (let [alg (mapfast t)]
+      (when (== alg mapslow)
+        (return (.addrTemp o n)))
+
+      (let [^{:tag (* types/Type)} kt (zero (* types/Type))]
+        (switch alg
+          (case [mapfast32]
+            (set! kt (aget types/Types types/TUINT32)))
+          (case [mapfast64]
+            (set! kt (aget types/Types types/TUINT64)))
+          (case [mapfast32ptr mapfast64ptr]
+            (set! kt (aget types/Types types/TUNSAFEPTR)))
+          (case [mapfaststr]
+            (set! kt (aget types/Types types/TSTRING))))
+
+        (let [nt (.Type n)]
+          (switch
+            (case [(== nt kt)]
+              (return n))
+            (case [(== (.Kind nt) (.Kind kt)) (and (.IsPtrShaped nt) (.IsPtrShaped kt))]
+              ;; can directly convert (e.g. named type to underlying type, or one pointer to another)
+              (return (typecheck/Expr (ir/NewConvExpr pos ir/OCONVNOP kt n))))
+            (case [(and (.IsInteger nt) (.IsInteger kt))]
+              ;; can directly convert (e.g. int32 to uint32)
+              (when (and (== (.Op n) ir/OLITERAL) (.IsSigned nt))
+                ;; avoid constant overflow error
+                (set! n (ir/NewConstExpr (constant/MakeUint64 (conv uint64 (ir/Int64Val n))) n))
+                (.SetType n kt)
+                (return n))
+
+              (return (typecheck/Expr (ir/NewConvExpr pos ir/OCONV kt n))))
+            (default
+              ;; Unsafe cast through memory.
+              ;; We'll need to do a load with type kt. Create a temporary of type kt to
+              ;; ensure sufficient alignment. nt may be under-aligned.
+              (when (< (conv uint8 (.Alignment kt)) (conv uint8 (.Alignment nt)))
+                (base/Fatalf "mapKeyTemp: key type is not sufficiently aligned, kt=%v nt=%v" kt nt))
+
+              (let [tmp (.newTemp o kt true)
+                  ;; *(*nt)(&tmp) = n
+                  ^{:line 340 :tag ir/Node} e (typecheck/NodAddr tmp)]
+                (set! e (ir/NewConvExpr pos ir/OCONVNOP (.PtrTo nt) e))
+                (set! e (ir/NewStarExpr pos e))
+                (.append o (ir/NewAssignStmt pos e n))
+                (return tmp)))))))))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 399} (go/func mapKeyReplaceStrConv "mapKeyReplaceStrConv replaces OBYTES2STR by OBYTES2STRTMP\nin n to avoid string allocations for keys in map lookups.\nReturns a bool that signals if a modification was made.\n\nFor:\n\n\tx = m[string(k)]\n\tx = m[T1{... Tn{..., string(k), ...}}]\n\nwhere k is []byte, T1 to Tn is a nesting of struct and array literals,\nthe allocation of backing bytes for the string can be avoided\nby reusing the []byte backing array. These are special cases\nfor avoiding allocations when converting byte slices to strings.\nIt would be nice to handle these generally, but because\n[]byte keys are not allowed in maps, the use of string(k)\ncomes up in important cases in practice. See issue 3512.\n\nNote that this code does not handle the case:\n\n\ts := string(k)\n\tx = m[s]\n\nCases like this are handled during SSA, search for slicebytetostring\nin ../ssa/_gen/generic.rules.\n" ^bool [^ir/Node n]
+  (let [^bool replaced (zero bool)]
+    (switch (.Op n)
+      (case [ir/OBYTES2STR]
+        (let [n (assert (* ir/ConvExpr) n)]
+          (.SetOp n ir/OBYTES2STRTMP)
+          (set! replaced true)))
+      (case [ir/OSTRUCTLIT]
+        (let [n (assert (* ir/CompLitExpr) n)]
+          (range [_ elem (.-List n)]
+            (let [elem (assert (* ir/StructKeyExpr) elem)]
+              (when (mapKeyReplaceStrConv (.-Value elem))
+                (set! replaced true))))))
+
+
+      (case [ir/OARRAYLIT]
+        (let [n (assert (* ir/CompLitExpr) n)]
+          (range [_ elem (.-List n)]
+            (when (== (.Op elem) ir/OKEY)
+              (set! elem (.-Value (assert (* ir/KeyExpr) elem))))
+
+            (when (mapKeyReplaceStrConv elem)
+              (set! replaced true))))))
+
+
+
+    ^{:line 398} replaced))
+
+
+(go/type ordermarker int)
+
+
+^{:go/end 406} (go/method markTemp "markTemp returns the top of the temporary variable stack.\n" ^ordermarker [^{:tag (* orderState)} o]
+  (conv ordermarker (len (.-temp o))))
+
+
+
+
+^{:go/end 416} (go/method popTemp "popTemp pops temporaries off the stack until reaching the mark,\nwhich must have been returned by markTemp.\n" [^{:tag (* orderState)} o ^ordermarker mark]
+  (range [_ n (subslice (.-temp o) mark)]
+    (let [key (.LinkString ^{:go/via [miniExpr]} (.Type n))]
+      (aset (.-free o) key (append (aget (.-free o) key) n))))
+
+  (set! (.-temp o) (subslice (.-temp o) _ mark)))
+
+
+
+^{:go/end 425} (go/method stmtList "stmtList orders each of the statements in the list.\n" [^{:tag (* orderState)} o ^ir/Nodes l]
+  (let [s l]
+    (range [i s]
+      (orderMakeSliceCopy (subslice s i))
+      (.stmt o (aget s i)))))
+
+
+
+
+
+
+
+
+
+
+^{:go/end 463} (go/func orderMakeSliceCopy "orderMakeSliceCopy matches the pattern:\n\n\tm = OMAKESLICE([]T, x); OCOPY(m, s)\n\nand rewrites it to:\n\n\tm = OMAKESLICECOPY([]T, x, s); nil\n" [^{:tag (slice ir/Node)} s]
+  (when (or (!= (.-N base/Flag) 0) (.-Instrumenting (.-Cfg base/Flag)))
+    (return))
+
+  (when (or (< (len s) 2) (== (aget s 0) nil) (!= (.Op (aget s 0)) ir/OAS) (== (aget s 1) nil) (!= (.Op (aget s 1)) ir/OCOPY))
+    (return))
+
+
+  (let [as (assert (* ir/AssignStmt) (aget s 0))
+      ^{:line 443} cp (assert (* ir/BinaryExpr) (aget s 1))]
+    (when (or (== (.-Y as) nil) (!= (.Op (.-Y as)) ir/OMAKESLICE) (ir/IsBlank (.-X as))
+        (!= (.Op (.-X as)) ir/ONAME) (!= (.Op (.-X cp)) ir/ONAME) (!= (.Op (.-Y cp)) ir/ONAME)
+        (!= (.Name (.-X as)) (.Name (.-X cp))) (== (.Name (.-X cp)) (.Name (.-Y cp))))
+      ;; The line above this one is correct with the differing equality operators:
+      ;; we want as.X and cp.X to be the same name,
+      ;; but we want the initial data to be coming from a different name.
+      (return))
+
+
+    (let [mk (assert (* ir/MakeExpr) (.-Y as))]
+      (when (or (== ^{:go/via [miniExpr miniNode]} (.Esc mk) ir/EscNone) (== (.-Len mk) nil) (!= (.-Cap mk) nil))
+        (return))
+
+      (.SetOp mk ir/OMAKESLICECOPY)
+      (set! (.-Cap mk) (.-Y cp))
+      ;; Set bounded when m = OMAKESLICE([]T, len(s)); OCOPY(m, s)
+      ^{:go/via [miniExpr]} (.SetBounded mk (and (== (.Op (.-Len mk)) ir/OLEN) (ir/SameSafeExpr (.-X (assert (* ir/UnaryExpr) (.-Len mk))) (.-Y cp))))
+      (set! (.-Y as) (typecheck/Expr mk))
+      (aset s 1 nil)))) ; remove separate copy call
+
+
+
+^{:go/end 496} (go/method edge "edge inserts coverage instrumentation for libfuzzer.\n" [^{:tag (* orderState)} o]
+  (when (== (.-Libfuzzer base/Debug) 0)
+    (return))
+
+
+  ;; Create a new uint8 counter to be allocated in section __sancov_cntrs
+  (let [counter (staticinit/StaticName (aget types/Types types/TUINT8))]
+    (.SetLibfuzzer8BitCounter counter true)
+    ;; As well as setting SetLibfuzzer8BitCounter, we preemptively set the
+    ;; symbol type to SLIBFUZZER_8BIT_COUNTER so that the race detector
+    ;; instrumentation pass (which does not have access to the flags set by
+    ;; SetLibfuzzer8BitCounter) knows to ignore them. This information is
+    ;; lost by the time it reaches the compile step, so SetLibfuzzer8BitCounter
+    ;; is still necessary.
+    (set! (.-Type (.Linksym counter)) objabi/SLIBFUZZER_8BIT_COUNTER)
+
+    ;; We guarantee that the counter never becomes zero again once it has been
+    ;; incremented once. This implementation follows the NeverZero optimization
+    ;; presented by the paper:
+    ;; "AFL++: Combining Incremental Steps of Fuzzing Research"
+    ;; The NeverZero policy avoids the overflow to 0 by setting the counter to one
+    ;; after it reaches 255 and so, if an edge is executed at least one time, the entry is
+    ;; never 0.
+    ;; Another policy presented in the paper is the Saturated Counters policy which
+    ;; freezes the counter when it reaches the value of 255. However, a range
+    ;; of experiments showed that doing so decreases overall performance.
+    (.append o (ir/NewIfStmt base/Pos
+        (ir/NewBinaryExpr base/Pos ir/OEQ counter (ir/NewInt base/Pos 0xff))
+        (lit (slice ir/Node) (ir/NewAssignStmt base/Pos counter (ir/NewInt base/Pos 1)))
+        (lit (slice ir/Node) (ir/NewAssignOpStmt base/Pos ir/OADD counter (ir/NewInt base/Pos 1)))))))
+
+
+
+
+
+^{:go/end 515} (go/func orderBlock "orderBlock orders the block of statements in n into a new slice,\nand then replaces the old slice in n with the new slice.\nfree is a map that can be used to obtain temporary variables by type.\n" [^{:tag (* ir/Nodes)} n ^{:tag (map string (slice (* ir/Name)))} free]
+  (when (!= (len @n) 0)
+    ;; Set reasonable position for instrumenting code. See issue 53688.
+    ;; It would be nice if ir.Nodes had a position (the opening {, probably),
+    ;; but it doesn't. So we use the first statement's position instead.
+    (ir/SetPos (aget @n 0)))
+
+  (let [^orderState order (zero orderState)]
+    (set! (.-free order) free)
+    (let [mark (.markTemp order)]
+      (.edge order)
+      (.stmtList order @n)
+      (.popTemp order mark)
+      (set! @n (.-out order)))))
+
+
+
+
+
+
+
+^{:go/end 532} (go/method exprInPlace "exprInPlace orders the side effects in *np and\nleaves them as the init list of the final *np.\nThe result of exprInPlace MUST be assigned back to n, e.g.\n\n\tn.Left = o.exprInPlace(n.Left)\n" ^ir/Node [^{:tag (* orderState)} o ^ir/Node n]
+  (let [^orderState order (zero orderState)]
+    (set! (.-free order) (.-free o))
+    (set! n (.expr order n nil))
+    (set! n (ir/InitExpr (.-out order) n))
+
+    ;; insert new temporaries from order
+    ;; at head of outer list.
+    (set! (.-temp o) (append (.-temp o) (spread (.-temp order))))
+    ^{:line 531} n))
+
+
+
+
+
+
+
+
+
+^{:go/end 548} (go/func orderStmtInPlace "orderStmtInPlace orders the side effects of the single statement *np\nand replaces it with the resulting statement list.\nThe result of orderStmtInPlace MUST be assigned back to n, e.g.\n\n\tn.Left = orderStmtInPlace(n.Left)\n\nfree is a map that can be used to obtain temporary variables by type.\n" ^ir/Node [^ir/Node n ^{:tag (map string (slice (* ir/Name)))} free]
+  (let [^orderState order (zero orderState)]
+    (set! (.-free order) free)
+    (let [mark (.markTemp order)]
+      (.stmt order n)
+      (.popTemp order mark)
+      (ir/NewBlockStmt src/NoXPos (.-out order)))))
+
+
+
+^{:go/end 561} (go/method init "init moves n's init list to o.out.\n" [^{:tag (* orderState)} o ^ir/Node n]
+  (when (ir/MayBeShared n)
+    ;; For concurrency safety, don't mutate potentially shared nodes.
+    ;; First, ensure that no work is required here.
+    (when (> (len (.Init n)) 0)
+      (base/Fatalf "order.init shared node with ninit"))
+
+    (return))
+
+  (.stmtList o (ir/TakeInit n)))
+
+
+
+
+^{:go/end 607} (go/method call "call orders the call expression n.\nn.Op is OCALLFUNC/OCALLINTER or a builtin like OCOPY.\n" [^{:tag (* orderState)} o ^ir/Node nn]
+  (when (> (len (.Init nn)) 0)
+    ;; Caller should have already called o.init(nn).
+    (base/Fatalf "%v with unexpected ninit" (.Op nn)))
+
+  (when (== (.Op nn) ir/OCALLMETH)
+    (base/FatalfAt (.Pos nn) "OCALLMETH missed by typecheck"))
+
+
+  ;; Builtin functions.
+  (when (and (!= (.Op nn) ir/OCALLFUNC) (!= (.Op nn) ir/OCALLINTER))
+    (type-switch [n nn]
+      (default
+        (base/Fatalf "unexpected call: %+v" n))
+      (case [(* ir/UnaryExpr)]
+        (set! (.-X n) (.expr o (.-X n) nil)))
+      (case [(* ir/ConvExpr)]
+        (set! (.-X n) (.expr o (.-X n) nil)))
+      (case [(* ir/BinaryExpr)]
+        (set! (.-X n) (.expr o (.-X n) nil))
+        (set! (.-Y n) (.expr o (.-Y n) nil)))
+      (case [(* ir/MakeExpr)]
+        (set! (.-Len n) (.expr o (.-Len n) nil))
+        (set! (.-Cap n) (.expr o (.-Cap n) nil)))
+      (case [(* ir/CallExpr)]
+        (.exprList o (.-Args n))))
+
+    (return))
+
+
+  (let [n (assert (* ir/CallExpr) nn)]
+    (typecheck/AssertFixedCall n)
+
+    (when (and (ir/IsFuncPCIntrinsic n) (!= (ir/IsIfaceOfFunc (aget (.-Args n) 0)) nil))
+      ;; For internal/abi.FuncPCABIxxx(fn), if fn is a defined function,
+      ;; do not introduce temporaries here, so it is easier to rewrite it
+      ;; to symbol address reference later in walk.
+      (return))
+
+
+    (set! (.-Fun n) (.expr o (.-Fun n) nil))
+    (.exprList o (.-Args n))))
+
+
+
+^{:go/end 628} (go/method mapAssign "mapAssign appends n to o.out.\n" [^{:tag (* orderState)} o ^ir/Node n]
+  (switch (.Op n)
+    (default
+      (base/Fatalf "order.mapAssign %v" (.Op n)))
+
+    (case [ir/OAS]
+      (let [n (assert (* ir/AssignStmt) n)]
+        (when (== (.Op (.-X n)) ir/OINDEXMAP)
+          (set! (.-Y n) (.safeMapRHS o (.-Y n))))
+
+        (set! (.-out o) (append (.-out o) n))))
+    (case [ir/OASOP]
+      (let [n (assert (* ir/AssignOpStmt) n)]
+        (when (== (.Op (.-X n)) ir/OINDEXMAP)
+          (set! (.-Y n) (.safeMapRHS o (.-Y n))))
+
+        (set! (.-out o) (append (.-out o) n))))))
+
+
+
+^{:go/end 642} (go/method safeMapRHS ^ir/Node [^{:tag (* orderState)} o ^ir/Node r]
+  ;; Make sure we evaluate the RHS before starting the map insert.
+  ;; We need to make sure the RHS won't panic.  See issue 22881.
+  (when (== (.Op r) ir/OAPPEND)
+    (let [r (assert (* ir/CallExpr) r)
+        ^{:line 635} s (subslice (.-Args r) 1)]
+      (range [i n s]
+        (aset s i (.cheapExpr o n)))
+
+      (return r)))
+
+  (.cheapExpr o r))
+
+
+
+^{:go/end 1136} (go/method stmt "stmt orders the statement n, appending to o.out.\n" [^{:tag (* orderState)} o ^ir/Node n]
+  (when (== n nil)
+    (return))
+
+
+  (let [lno (ir/SetPos n)]
+    (.init o n)
+
+    (switch (.Op n)
+      (default
+        (base/Fatalf "order.stmt %v" (.Op n)))
+
+      (case [ir/OINLMARK]
+        (set! (.-out o) (append (.-out o) n)))
+
+      (case [ir/OAS]
+        (let [n (assert (* ir/AssignStmt) n)
+            ^{:line 662} t (.markTemp o)
+
+            ;; There's a delicate interaction here between two OINDEXMAP
+            ;; optimizations.
+            ;;
+            ;; First, we want to handle m[k] = append(m[k], ...) with a single
+            ;; runtime call to mapassign. This requires the m[k] expressions to
+            ;; satisfy ir.SameSafeExpr in walkAssign.
+            ;;
+            ;; But if k is a slow map key type that's passed by reference (e.g.,
+            ;; byte), then we want to avoid marking user variables as addrtaken,
+            ;; if that might prevent the compiler from keeping k in a register.
+            ;;
+            ;; TODO(mdempsky): It would be better if walk was responsible for
+            ;; inserting temporaries as needed.
+            ^{:line 677} mapAppend (and (== (.Op (.-X n)) ir/OINDEXMAP) (== (.Op (.-Y n)) ir/OAPPEND)
+              (ir/SameSafeExpr (.-X n) (aget (.-Args (assert (* ir/CallExpr) (.-Y n))) 0)))]
+
+          (set! (.-X n) (.expr o (.-X n) nil))
+          (if mapAppend
+            (let [indexLHS (assert (* ir/IndexExpr) (.-X n))]
+              (set! (.-X indexLHS) (.cheapExpr o (.-X indexLHS)))
+              (set! (.-Index indexLHS) (.cheapExpr o (.-Index indexLHS)))
+
+              (let [call (assert (* ir/CallExpr) (.-Y n))
+                  ^{:line 687} arg0 (aget (.-Args call) 0)]
+                ;; ir.SameSafeExpr skips OCONVNOPs, so we must do the same here (#66096).
+                (while (== (.Op arg0) ir/OCONVNOP)
+                  (set! arg0 (.-X (assert (* ir/ConvExpr) arg0))))
+
+                (let [indexRHS (assert (* ir/IndexExpr) arg0)]
+                  (set! (.-X indexRHS) (.-X indexLHS))
+                  (set! (.-Index indexRHS) (.-Index indexLHS))
+
+                  (.exprList o (subslice (.-Args call) 1)))))
+
+            (set! (.-Y n) (.expr o (.-Y n) (.-X n))))
+
+          (.mapAssign o n)
+          (.popTemp o t)))
+
+      (case [ir/OASOP]
+        (let [n (assert (* ir/AssignOpStmt) n)
+            ^{:line 705} t (.markTemp o)]
+          (set! (.-X n) (.expr o (.-X n) nil))
+          (set! (.-Y n) (.expr o (.-Y n) nil))
+
+          (when (or (.-Instrumenting (.-Cfg base/Flag)) (and (== (.Op (.-X n)) ir/OINDEXMAP) ^:go/paren (or (== (.-AsOp n) ir/ODIV) (== (.-AsOp n) ir/OMOD))))
+            ;; Rewrite m[k] op= r into m[k] = m[k] op r so
+            ;; that we can ensure that if op panics
+            ;; because r is zero, the panic happens before
+            ;; the map assignment.
+            ;; DeepCopy is a big hammer here, but safeExpr
+            ;; makes sure there is nothing too deep being copied.
+            (let [l1 (.safeExpr o (.-X n))
+                ^{:line 717} l2 (ir/DeepCopy src/NoXPos l1)]
+              (when (== (.Op l2) ir/OINDEXMAP)
+                (let [l2 (assert (* ir/IndexExpr) l2)]
+                  (set! (.-Assigned l2) false)))
+
+              (set! l2 (.copyExpr o l2))
+              (let [r (.expr o (typecheck/Expr (ir/NewBinaryExpr ^{:go/via [miniStmt miniNode]} (.Pos n) (.-AsOp n) l2 (.-Y n))) nil)
+                  ^{:line 724} as (typecheck/Stmt (ir/NewAssignStmt ^{:go/via [miniStmt miniNode]} (.Pos n) l1 r))]
+                (.mapAssign o as)
+                (.popTemp o t)
+                (return))))
+
+
+          (.mapAssign o n)
+          (.popTemp o t)))
+
+      (case [ir/OAS2]
+        (let [n (assert (* ir/AssignListStmt) n)
+            ^{:line 735} t (.markTemp o)]
+          (.exprList o (.-Lhs n))
+          (.exprList o (.-Rhs n))
+          (set! (.-out o) (append (.-out o) n))
+          (.popTemp o t)))
+
+      ;; Special: avoid copy of func call n.Right
+      (case [ir/OAS2FUNC]
+        (let [n (assert (* ir/AssignListStmt) n)
+            ^{:line 744} t (.markTemp o)]
+          (.exprList o (.-Lhs n))
+          (let [call (aget (.-Rhs n) 0)]
+            (.init o call)
+            (if [(values ic ok) (assert (* ir/InlinedCallExpr) call)] ok (do
+                (.stmtList o (.-Body ic))
+
+                (.SetOp n ir/OAS2)
+                (set! (.-Rhs n) (.-ReturnVars ic))
+
+                (.exprList o (.-Rhs n))
+                (set! (.-out o) (append (.-out o) n)))
+              (do
+                (.call o call)
+                (.as2func o n)))
+
+            (.popTemp o t))))
+
+      ;; Special: use temporary variables to hold result,
+      ;; so that runtime can take address of temporary.
+      ;; No temporary for blank assignment.
+      ;;
+      ;; OAS2MAPR: make sure key is addressable if needed,
+      ;;           and make sure OINDEXMAP is not copied out.
+      (case [ir/OAS2DOTTYPE ir/OAS2RECV ir/OAS2MAPR]
+        (let [n (assert (* ir/AssignListStmt) n)
+            ^{:line 770} t (.markTemp o)]
+          (.exprList o (.-Lhs n))
+
+          (switch [r (aget (.-Rhs n) 0)] (.Op r)
+            (case [ir/ODOTTYPE2]
+              (let [r (assert (* ir/TypeAssertExpr) r)]
+                (set! (.-X r) (.expr o (.-X r) nil))))
+            (case [ir/ODYNAMICDOTTYPE2]
+              (let [r (assert (* ir/DynamicTypeAssertExpr) r)]
+                (set! (.-X r) (.expr o (.-X r) nil))
+                (set! (.-RType r) (.expr o (.-RType r) nil))
+                (set! (.-ITab r) (.expr o (.-ITab r) nil))))
+            (case [ir/ORECV]
+              (let [r (assert (* ir/UnaryExpr) r)]
+                (set! (.-X r) (.expr o (.-X r) nil))))
+            (case [ir/OINDEXMAP]
+              (let [r (assert (* ir/IndexExpr) r)]
+                (set! (.-X r) (.expr o (.-X r) nil))
+                (set! (.-Index r) (.expr o (.-Index r) nil))
+                ;; See similar conversion for OINDEXMAP below.
+                (set! _ (mapKeyReplaceStrConv (.-Index r)))
+                (set! (.-Index r) (.mapKeyTemp o ^{:go/via [miniExpr miniNode]} (.Pos r) (.Type (.-X r)) (.-Index r)))))
+            (default
+              (base/Fatalf "order.stmt: %v" (.Op r))))
+
+
+          (.as2ok o n)
+          (.popTemp o t)))
+
+      ;; Special: does not save n onto out.
+      (case [ir/OBLOCK]
+        (let [n (assert (* ir/BlockStmt) n)]
+          (.stmtList o (.-List n))))
+
+      ;; Special: n->left is not an expression; save as is.
+      (case [ir/OBREAK
+          ^{:line 806} ir/OCONTINUE
+          ^{:line 807} ir/ODCL
+          ^{:line 808} ir/OFALL
+          ^{:line 809} ir/OGOTO
+          ^{:line 810} ir/OLABEL
+          ^{:line 811} ir/OTAILCALL]
+        (set! (.-out o) (append (.-out o) n)))
+
+      ;; Special: handle call arguments.
+      (case [ir/OCALLFUNC ir/OCALLINTER]
+        (let [n (assert (* ir/CallExpr) n)
+            ^{:line 817} t (.markTemp o)]
+          (.call o n)
+          (set! (.-out o) (append (.-out o) n))
+          (.popTemp o t)))
+
+      (case [ir/OINLCALL]
+        (let [n (assert (* ir/InlinedCallExpr) n)]
+          (.stmtList o (.-Body n))
+
+          ;; discard results; double-check for no side effects
+          (range [_ result (.-ReturnVars n)]
+            (when (staticinit/AnySideEffects result)
+              (base/FatalfAt (.Pos result) "inlined call result has side effects: %v" result)))))
+
+
+
+      (case [ir/OCHECKNIL ir/OCLEAR ir/OCLOSE ir/OPANIC ir/ORECV]
+        (let [n (assert (* ir/UnaryExpr) n)
+            ^{:line 835} t (.markTemp o)]
+          (set! (.-X n) (.expr o (.-X n) nil))
+          (set! (.-out o) (append (.-out o) n))
+          (.popTemp o t)))
+
+      (case [ir/OCOPY]
+        (let [n (assert (* ir/BinaryExpr) n)
+            ^{:line 842} t (.markTemp o)]
+          (set! (.-X n) (.expr o (.-X n) nil))
+          (set! (.-Y n) (.expr o (.-Y n) nil))
+          (set! (.-out o) (append (.-out o) n))
+          (.popTemp o t)))
+
+      (case [ir/OPRINT ir/OPRINTLN ir/ORECOVER]
+        (let [n (assert (* ir/CallExpr) n)
+            ^{:line 850} t (.markTemp o)]
+          (.call o n)
+          (set! (.-out o) (append (.-out o) n))
+          (.popTemp o t)))
+
+      ;; Special: order arguments to inner call but not call itself.
+      (case [ir/ODEFER ir/OGO]
+        (let [n (assert (* ir/GoDeferStmt) n)
+            ^{:line 858} t (.markTemp o)]
+          (.init o (.-Call n))
+          (.call o (.-Call n))
+          (set! (.-out o) (append (.-out o) n))
+          (.popTemp o t)))
+
+      (case [ir/ODELETE]
+        (let [n (assert (* ir/CallExpr) n)
+            ^{:line 866} t (.markTemp o)]
+          (aset (.-Args n) 0 (.expr o (aget (.-Args n) 0) nil))
+          (aset (.-Args n) 1 (.expr o (aget (.-Args n) 1) nil))
+          (aset (.-Args n) 1 (.mapKeyTemp o ^{:go/via [miniExpr miniNode]} (.Pos n) (.Type (aget (.-Args n) 0)) (aget (.-Args n) 1)))
+          (set! (.-out o) (append (.-out o) n))
+          (.popTemp o t)))
+
+      ;; Clean temporaries from condition evaluation at
+      ;; beginning of loop body and after for statement.
+      (case [ir/OFOR]
+        (let [n (assert (* ir/ForStmt) n)
+            ^{:line 877} t (.markTemp o)]
+          (set! (.-Cond n) (.exprInPlace o (.-Cond n)))
+          (orderBlock (addr (.-Body n)) (.-free o))
+          (set! (.-Post n) (orderStmtInPlace (.-Post n) (.-free o)))
+          (set! (.-out o) (append (.-out o) n))
+          (.popTemp o t)))
+
+      ;; Clean temporaries from condition at
+      ;; beginning of both branches.
+      (case [ir/OIF]
+        (let [n (assert (* ir/IfStmt) n)
+            ^{:line 888} t (.markTemp o)]
+          (set! (.-Cond n) (.exprInPlace o (.-Cond n)))
+          (.popTemp o t)
+          (orderBlock (addr (.-Body n)) (.-free o))
+          (orderBlock (addr (.-Else n)) (.-free o))
+          (set! (.-out o) (append (.-out o) n))))
+
+      (case [ir/ORANGE]
+        ;; n.Right is the expression being ranged over.
+        ;; order it, and then make a copy if we need one.
+        ;; We almost always do, to ensure that we don't
+        ;; see any value changes made during the loop.
+        ;; Usually the copy is cheap (e.g., array pointer,
+        ;; chan, slice, string are all tiny).
+        ;; The exception is ranging over an array value
+        ;; (not a slice, not a pointer to array),
+        ;; which must make a copy to avoid seeing updates made during
+        ;; the range body. Ranging over an array value is uncommon though.
+
+        ;; Mark []byte(str) range expression to reuse string backing storage.
+        ;; It is safe because the storage cannot be mutated.
+        (let [n (assert (* ir/RangeStmt) n)]
+          (when [(values x ok) (assert (* ir/ConvExpr) (.-X n))] ok
+            (switch ^{:go/via [miniExpr miniNode]} (.Op x)
+              (case [ir/OSTR2BYTES]
+                (.SetOp x ir/OSTR2BYTESTMP)
+                (fallthrough))
+              (case [ir/OSTR2BYTESTMP]
+                ^{:go/via [miniExpr]} (.MarkNonNil x)))) ; "range []byte(nil)" is fine
+
+
+
+          (let [t (.markTemp o)]
+            (set! (.-X n) (.expr o (.-X n) nil))
+
+            (let [orderBody true
+                ^{:line 924} xt (typecheck/RangeExprType (.Type (.-X n)))]
+              (switch [k (.Kind xt)]
+                (default
+                  (base/Fatalf "order.stmt range %v" ^{:go/via [miniStmt miniNode]} (.Type n)))
+
+                (case [(aget types/IsInt k)])
+                ;; Used only once, no need to copy.
+
+                (case [(== k types/TARRAY) (== k types/TSLICE)]
+                  (when (or (== (.-Value n) nil) (ir/IsBlank (.-Value n)))
+                    ;; for i := range x will only use x once, to compute len(x).
+                    ;; No need to copy it.
+                    (break))
+
+                  (fallthrough))
+
+                (case [(== k types/TCHAN) (== k types/TSTRING)]
+                  ;; chan, string, slice, array ranges use value multiple times.
+                  ;; make copy.
+                  (let [r (.-X n)]
+
+                    (when (and (.IsString (.Type r)) (!= (.Type r) (aget types/Types types/TSTRING)))
+                      (set! r (ir/NewConvExpr base/Pos ir/OCONV nil r))
+                      (.SetType r (aget types/Types types/TSTRING))
+                      (set! r (typecheck/Expr r)))
+
+
+                    (set! (.-X n) (.copyExpr o r))))
+
+                (case [(== k types/TMAP)]
+                  (when (isMapClear n)
+                    ;; Preserve the body of the map clear pattern so it can
+                    ;; be detected during walk. The loop body will not be used
+                    ;; when optimizing away the range loop to a runtime call.
+                    (set! orderBody false)
+                    (break))
+
+
+                  ;; copy the map value in case it is a map literal.
+                  ;; TODO(rsc): Make tmp = literal expressions reuse tmp.
+                  ;; For maps tmp is just one word so it hardly matters.
+                  (let [r (.-X n)]
+                    (set! (.-X n) (.copyExpr o r))
+
+                    ;; n.Prealloc is the temp for the iterator.
+                    ;; MapIterType contains pointers and needs to be zeroed.
+                    (set! (.-Prealloc n) (.newTemp o (reflectdata/MapIterType) true)))))
+
+              (set! (.-Key n) (.exprInPlace o (.-Key n)))
+              (set! (.-Value n) (.exprInPlace o (.-Value n)))
+              (when orderBody
+                (orderBlock (addr (.-Body n)) (.-free o)))
+
+              (set! (.-out o) (append (.-out o) n))
+              (.popTemp o t)))))
+
+      (case [ir/ORETURN]
+        (let [n (assert (* ir/ReturnStmt) n)]
+          (.exprList o (.-Results n))
+          (set! (.-out o) (append (.-out o) n))))
+
+      ;; Special: clean case temporaries in each block entry.
+      ;; Select must enter one of its blocks, so there is no
+      ;; need for a cleaning at the end.
+      ;; Doubly special: evaluation order for select is stricter
+      ;; than ordinary expressions. Even something like p.c
+      ;; has to be hoisted into a temporary, so that it cannot be
+      ;; reordered after the channel evaluation for a different
+      ;; case (if p were nil, then the timing of the fault would
+      ;; give this away).
+      (case [ir/OSELECT]
+        (let [n (assert (* ir/SelectStmt) n)
+            ^{:line 996} t (.markTemp o)]
+          (range [_ ncas (.-Cases n)]
+            (let [r (.-Comm ncas)]
+              (ir/SetPos ncas)
+
+              ;; Append any new body prologue to ninit.
+              ;; The next loop will insert ninit into nbody.
+              (when (!= (len ^{:go/via [miniStmt]} (.Init ncas)) 0)
+                (base/Fatalf "order select ninit"))
+
+              (when (== r nil)
+                (continue))
+
+              (switch (.Op r)
+                (default
+                  (ir/Dump "select case" r)
+                  (base/Fatalf "unknown op in select %v" (.Op r)))
+
+                (case [ir/OSELRECV2]
+                  ;; case x, ok = <-c
+                  (let [r (assert (* ir/AssignListStmt) r)
+                      ^{:line 1017} recv (assert (* ir/UnaryExpr) (aget (.-Rhs r) 0))]
+                    (set! (.-X recv) (.expr o (.-X recv) nil))
+                    (when (not (ir/IsAutoTmp (.-X recv)))
+                      (set! (.-X recv) (.copyExpr o (.-X recv))))
+
+                    (let [init (ir/TakeInit r)
+
+                        ^{:line 1024} colas (.-Def r)
+                        ^{:line 1025} do ^{:go/end 1051} (fn [^int i ^{:tag (* types/Type)} t]
+                          (let [n (aget (.-Lhs r) i)]
+                            (when (ir/IsBlank n)
+                              (return))
+
+                            ;; If this is case x := <-ch or case x, y := <-ch, the case has
+                            ;; the ODCL nodes to declare x and y. We want to delay that
+                            ;; declaration (and possible allocation) until inside the case body.
+                            ;; Delete the ODCL nodes here and recreate them inside the body below.
+                            (when colas
+                              (when (and (> (len init) 0) (== (.Op (aget init 0)) ir/ODCL) (== (.-X (assert (* ir/Decl) (aget init 0))) n))
+                                (set! init (subslice init 1))
+
+                                ;; iimport may have added a default initialization assignment,
+                                ;; due to how it handles ODCL statements.
+                                (when (and (> (len init) 0) (== (.Op (aget init 0)) ir/OAS) (== (.-X (assert (* ir/AssignStmt) (aget init 0))) n))
+                                  (set! init (subslice init 1))))
+
+
+                              (let [dcl (typecheck/Stmt (ir/NewDecl base/Pos ir/ODCL (assert (* ir/Name) n)))]
+                                (.Append ^{:go/via [miniStmt]} (.PtrInit ncas) dcl)))
+
+                            (let [tmp (.newTemp o t (.HasPointers t))
+                                ^{:line 1048} as (typecheck/Stmt (ir/NewAssignStmt base/Pos n (typecheck/Conv tmp (.Type n))))]
+                              (.Append ^{:go/via [miniStmt]} (.PtrInit ncas) as)
+                              (aset (.-Lhs r) i tmp))))]
+
+                      (go/call do 0 (.Elem (.Type (.-X recv))))
+                      (go/call do 1 (aget types/Types types/TBOOL))
+                      (when (!= (len init) 0)
+                        (ir/DumpList "ninit" init)
+                        (base/Fatalf "ninit on select recv"))
+
+                      (orderBlock ^{:go/via [miniStmt]} (.PtrInit ncas) (.-free o)))))
+
+                (case [ir/OSEND]
+                  (let [r (assert (* ir/SendStmt) r)]
+                    (when (!= (len ^{:go/via [miniStmt]} (.Init r)) 0)
+                      (ir/DumpList "ninit" ^{:go/via [miniStmt]} (.Init r))
+                      (base/Fatalf "ninit on select send"))
+
+
+                    ;; case c <- x
+                    ;; r->left is c, r->right is x, both are always evaluated.
+                    (set! (.-Chan r) (.expr o (.-Chan r) nil))
+
+                    (when (not (ir/IsAutoTmp (.-Chan r)))
+                      (set! (.-Chan r) (.copyExpr o (.-Chan r))))
+
+                    (set! (.-Value r) (.expr o (.-Value r) nil))
+                    (when (not (ir/IsAutoTmp (.-Value r)))
+                      (set! (.-Value r) (.copyExpr o (.-Value r)))))))))
+
+
+
+          ;; Now that we have accumulated all the temporaries, clean them.
+          ;; Also insert any ninit queued during the previous loop.
+          ;; (The temporary cleaning must follow that ninit work.)
+          (range [_ cas (.-Cases n)]
+            (orderBlock (addr (.-Body cas)) (.-free o))
+
+            ;; TODO(mdempsky): Is this actually necessary?
+            ;; walkSelect appears to walk Ninit.
+            (.Prepend (.-Body cas) (spread (ir/TakeInit cas))))
+
+
+          (set! (.-out o) (append (.-out o) n))
+          (.popTemp o t)))
+
+      ;; Special: value being sent is passed as a pointer; make it addressable.
+      (case [ir/OSEND]
+        (let [n (assert (* ir/SendStmt) n)
+            ^{:line 1097} t (.markTemp o)]
+          (set! (.-Chan n) (.expr o (.-Chan n) nil))
+          (set! (.-Value n) (.expr o (.-Value n) nil))
+          (if (.-Instrumenting (.-Cfg base/Flag))
+            ;; Force copying to the stack so that (chan T)(nil) <- x
+            ;; is still instrumented as a read of x.
+            (set! (.-Value n) (.copyExpr o (.-Value n)))
+
+            (set! (.-Value n) (.addrTemp o (.-Value n))))
+
+          (set! (.-out o) (append (.-out o) n))
+          (.popTemp o t)))
+
+      ;; TODO(rsc): Clean temporaries more aggressively.
+      ;; Note that because walkSwitch will rewrite some of the
+      ;; switch into a binary search, this is not as easy as it looks.
+      ;; (If we ran that code here we could invoke order.stmt on
+      ;; the if-else chain instead.)
+      ;; For now just clean all the temporaries at the end.
+      ;; In practice that's fine.
+      (case [ir/OSWITCH]
+        (let [n (assert (* ir/SwitchStmt) n)]
+          (when (and (!= (.-Libfuzzer base/Debug) 0) (not (hasDefaultCase n)))
+            ;; Add empty "default:" case for instrumentation.
+            (set! (.-Cases n) (append (.-Cases n) (ir/NewCaseStmt base/Pos nil nil))))
+
+
+          (let [t (.markTemp o)]
+            (set! (.-Tag n) (.expr o (.-Tag n) nil))
+            (range [_ ncas (.-Cases n)]
+              (.exprListInPlace o (.-List ncas))
+              (orderBlock (addr (.-Body ncas)) (.-free o)))
+
+
+            (set! (.-out o) (append (.-out o) n))
+            (.popTemp o t)))))
+
+
+    (set! base/Pos lno)))
+
+
+^{:go/breaks [[4 1144]] :go/end 1145} (go/func hasDefaultCase ^bool [^{:tag (* ir/SwitchStmt)} n]
+  (range [_ ncas (.-Cases n)]
+    (when (== (len (.-List ncas)) 0)
+      (return true)))
+
+
+  false)
+
+
+
+^{:go/end 1153} (go/method exprList "exprList orders the expression list l into o.\n" [^{:tag (* orderState)} o ^ir/Nodes l]
+  (let [s l]
+    (range [i s]
+      (aset s i (.expr o (aget s i) nil)))))
+
+
+
+
+
+^{:go/end 1162} (go/method exprListInPlace "exprListInPlace orders the expression list l but saves\nthe side effects on the individual expression ninit lists.\n" [^{:tag (* orderState)} o ^ir/Nodes l]
+  (let [s l]
+    (range [i s]
+      (aset s i (.exprInPlace o (aget s i))))))
+
+
+
+^{:go/end 1166} (go/method exprNoLHS ^ir/Node [^{:tag (* orderState)} o ^ir/Node n]
+  (.expr o n nil))
+
+
+
+
+
+
+
+
+
+
+^{:go/end 1184} (go/method expr "expr orders a single expression, appending side\neffects to o.out as needed.\nIf this is part of an assignment lhs = *np, lhs is given.\nOtherwise lhs == nil. (When lhs != nil it may be possible\nto avoid copying the result of the expression to a temporary.)\nThe result of expr MUST be assigned back to n, e.g.\n\n\tn.Left = o.expr(n.Left, lhs)\n" ^ir/Node [^{:tag (* orderState)} o ^ir/Node n ^ir/Node lhs]
+  (when (== n nil)
+    (return n))
+
+  (let [lno (ir/SetPos n)]
+    (set! n (.expr1 o n lhs))
+    (set! base/Pos lno)
+    ^{:line 1183} n))
+
+
+^{:go/end 1540} (go/method expr1 ^ir/Node [^{:tag (* orderState)} o ^ir/Node n ^ir/Node lhs]
+  (.init o n)
+
+  (switch (.Op n)
+    (default
+      (when (== (.-edit o) nil)
+        (set! (.-edit o) (.-exprNoLHS o))) ; create closure once
+
+      (ir/EditChildren n (.-edit o))
+      (return n))
+
+    ;; Addition of strings turns into a function call.
+    ;; Allocate a temporary to hold the strings.
+    ;; Fewer than 5 strings use direct runtime helpers.
+    (case [ir/OADDSTR]
+      (let [n (assert (* ir/AddStringExpr) n)]
+        (.exprList o (.-List n))
+
+        (when (> (len (.-List n)) 5)
+          (let [t (types/NewArray (aget types/Types types/TSTRING) (conv int64 (len (.-List n))))]
+            (set! (.-Prealloc n) (.newTemp o t false))))
+
+
+        ;; Mark string(byteSlice) arguments to reuse byteSlice backing
+        ;; buffer during conversion. String concatenation does not
+        ;; memorize the strings for later use, so it is safe.
+        ;; However, we can do it only if there is at least one non-empty string literal.
+        ;; Otherwise if all other arguments are empty strings,
+        ;; concatstrings will return the reference to the temp string
+        ;; to the caller.
+        (let [hasbyte false
+
+            ^{:line 1218} haslit false]
+          (range [_ n1 (.-List n)]
+            (set! hasbyte (or hasbyte (== (.Op n1) ir/OBYTES2STR)))
+            (set! haslit (or haslit (and (== (.Op n1) ir/OLITERAL) (!= (len (ir/StringVal n1)) 0)))))
+
+
+          (when (and haslit hasbyte)
+            (range [_ n2 (.-List n)]
+              (when (== (.Op n2) ir/OBYTES2STR)
+                (let [n2 (assert (* ir/ConvExpr) n2)]
+                  (.SetOp n2 ir/OBYTES2STRTMP)))))
+
+
+
+          (return n))))
+
+    (case [ir/OINDEXMAP]
+      (let [n (assert (* ir/IndexExpr) n)]
+        (set! (.-X n) (.expr o (.-X n) nil))
+        (set! (.-Index n) (.expr o (.-Index n) nil))
+        (let [needCopy false]
+
+          (when (not (.-Assigned n))
+            ;; Enforce that any []byte slices we are not copying
+            ;; can not be changed before the map index by forcing
+            ;; the map index to happen immediately following the
+            ;; conversions. See copyExpr a few lines below.
+            (set! needCopy (mapKeyReplaceStrConv (.-Index n)))
+
+            (when (.-Instrumenting (.-Cfg base/Flag))
+              ;; Race detector needs the copy.
+              (set! needCopy true)))
+
+
+
+          ;; key may need to be addressable
+          (set! (.-Index n) (.mapKeyTemp o ^{:go/via [miniExpr miniNode]} (.Pos n) (.Type (.-X n)) (.-Index n)))
+          (when needCopy
+            (return (.copyExpr o n)))
+
+          (return n))))
+
+    ;; concrete type (not interface) argument might need an addressable
+    ;; temporary to pass to the runtime conversion routine.
+    (case [ir/OCONVIFACE]
+      (let [n (assert (* ir/ConvExpr) n)]
+        (set! (.-X n) (.expr o (.-X n) nil))
+        (when (.IsInterface (.Type (.-X n)))
+          (return n))
+
+        (when [(values _ _ needsaddr) (dataWordFuncName (.Type (.-X n)))] (or needsaddr (isStaticCompositeLiteral (.-X n)))
+          ;; Need a temp if we need to pass the address to the conversion function.
+          ;; We also process static composite literal node here, making a named static global
+          ;; whose address we can put directly in an interface (see OCONVIFACE case in walk).
+          (set! (.-X n) (.addrTemp o (.-X n))))
+
+        (return n)))
+
+    (case [ir/OCONVNOP]
+      (let [n (assert (* ir/ConvExpr) n)]
+        (when (== (.Op (.-X n)) ir/OCALLMETH)
+          (base/FatalfAt (.Pos (.-X n)) "OCALLMETH missed by typecheck"))
+
+        (if (and (.IsKind ^{:go/via [miniExpr]} (.Type n) types/TUNSAFEPTR) (.IsKind (.Type (.-X n)) types/TUINTPTR) ^:go/paren (or (== (.Op (.-X n)) ir/OCALLFUNC) (== (.Op (.-X n)) ir/OCALLINTER)))
+          (let [call (assert (* ir/CallExpr) (.-X n))]
+            ;; When reordering unsafe.Pointer(f()) into a separate
+            ;; statement, the conversion and function call must stay
+            ;; together. See golang.org/issue/15329.
+            (.init o call)
+            (.call o call)
+            (when (or (== lhs nil) (!= (.Op lhs) ir/ONAME) (.-Instrumenting (.-Cfg base/Flag)))
+              (return (.copyExpr o n))))
+
+
+          (set! (.-X n) (.expr o (.-X n) nil)))
+
+        (return n)))
+
+    (case [ir/OANDAND ir/OOROR]
+      ;; ... = LHS && RHS
+      ;;
+      ;; var r bool
+      ;; r = LHS
+      ;; if r {       // or !r, for OROR
+      ;;     r = RHS
+      ;; }
+      ;; ... = r
+
+      (let [n (assert (* ir/LogicalExpr) n)
+          ^{:line 1307} r (.newTemp o ^{:go/via [miniExpr]} (.Type n) false)
+
+          ;; Evaluate left-hand side.
+          ^{:line 1310} lhs (.expr o (.-X n) nil)]
+        (set! (.-out o) (append (.-out o) (typecheck/Stmt (ir/NewAssignStmt base/Pos r lhs))))
+
+        ;; Evaluate right-hand side, save generated code.
+        (let [saveout (.-out o)]
+          (set! (.-out o) nil)
+          (let [t (.markTemp o)]
+            (.edge o)
+            (let [rhs (.expr o (.-Y n) nil)]
+              (set! (.-out o) (append (.-out o) (typecheck/Stmt (ir/NewAssignStmt base/Pos r rhs))))
+              (.popTemp o t)
+              (let [gen (.-out o)]
+                (set! (.-out o) saveout)
+
+                ;; If left-hand side doesn't cause a short-circuit, issue right-hand side.
+                (let [nif (ir/NewIfStmt base/Pos r nil nil)]
+                  (if (== ^{:go/via [miniExpr miniNode]} (.Op n) ir/OANDAND)
+                    (set! (.-Body nif) gen)
+
+                    (set! (.-Else nif) gen))
+
+                  (set! (.-out o) (append (.-out o) nif))
+                  (return r))))))))
+
+    (case [ir/OCALLMETH]
+      (base/FatalfAt (.Pos n) "OCALLMETH missed by typecheck")
+      (panic "unreachable"))
+
+    (case [ir/OCALLFUNC
+        ^{:line 1339} ir/OCALLINTER
+        ^{:line 1340} ir/OCAP
+        ^{:line 1341} ir/OCOMPLEX
+        ^{:line 1342} ir/OCOPY
+        ^{:line 1343} ir/OIMAG
+        ^{:line 1344} ir/OLEN
+        ^{:line 1345} ir/OMAKECHAN
+        ^{:line 1346} ir/OMAKEMAP
+        ^{:line 1347} ir/OMAKESLICE
+        ^{:line 1348} ir/OMAKESLICECOPY
+        ^{:line 1349} ir/OMAX
+        ^{:line 1350} ir/OMIN
+        ^{:line 1351} ir/ONEW
+        ^{:line 1352} ir/OREAL
+        ^{:line 1353} ir/ORECOVER
+        ^{:line 1354} ir/OSTR2BYTES
+        ^{:line 1355} ir/OSTR2BYTESTMP
+        ^{:line 1356} ir/OSTR2RUNES]
+
+      (if (isRuneCount n)
+        ;; len([]rune(s)) is rewritten to runtime.countrunes(s) later.
+        (let [conv (assert (* ir/ConvExpr) (.-X (assert (* ir/UnaryExpr) n)))]
+          (set! (.-X conv) (.expr o (.-X conv) nil)))
+
+        (.call o n))
+
+
+      (when (or (== lhs nil) (!= (.Op lhs) ir/ONAME) (.-Instrumenting (.-Cfg base/Flag)))
+        (return (.copyExpr o n)))
+
+      (return n))
+
+    (case [ir/OINLCALL]
+      (let [n (assert (* ir/InlinedCallExpr) n)]
+        (.stmtList o (.-Body n))
+        (return (.SingleResult n))))
+
+    (case [ir/OAPPEND]
+      ;; Check for append(x, make([]T, y)...) .
+      (let [n (assert (* ir/CallExpr) n)]
+        (if (isAppendOfMake n) (do
+            (aset (.-Args n) 0 (.expr o (aget (.-Args n) 0) nil)) ; order x
+            (let [mk (assert (* ir/MakeExpr) (aget (.-Args n) 1))]
+              (set! (.-Len mk) (.expr o (.-Len mk) nil)))) ; order y
+
+          (.exprList o (.-Args n)))
+
+
+        (when (or (== lhs nil) (and (!= (.Op lhs) ir/ONAME) (not (ir/SameSafeExpr lhs (aget (.-Args n) 0)))))
+          (return (.copyExpr o n)))
+
+        (return n)))
+
+    (case [ir/OSLICE ir/OSLICEARR ir/OSLICESTR ir/OSLICE3 ir/OSLICE3ARR]
+      (let [n (assert (* ir/SliceExpr) n)]
+        (set! (.-X n) (.expr o (.-X n) nil))
+        (set! (.-Low n) (.cheapExpr o (.expr o (.-Low n) nil)))
+        (set! (.-High n) (.cheapExpr o (.expr o (.-High n) nil)))
+        (set! (.-Max n) (.cheapExpr o (.expr o (.-Max n) nil)))
+        (when (or (== lhs nil) (and (!= (.Op lhs) ir/ONAME) (not (ir/SameSafeExpr lhs (.-X n)))))
+          (return (.copyExpr o n)))
+
+        (return n)))
+
+    (case [ir/OCLOSURE]
+      (let [n (assert (* ir/ClosureExpr) n)]
+        (when (and ^{:go/via [miniExpr]} (.Transient n) (> (len (.-ClosureVars (.-Func n))) 0))
+          (set! (.-Prealloc n) (.newTemp o (typecheck/ClosureType n) false)))
+
+        (return n)))
+
+    (case [ir/OMETHVALUE]
+      (let [n (assert (* ir/SelectorExpr) n)]
+        (set! (.-X n) (.expr o (.-X n) nil))
+        (when ^{:go/via [miniExpr]} (.Transient n)
+          (let [t (typecheck/MethodValueType n)]
+            (set! (.-Prealloc n) (.newTemp o t false))))
+
+        (return n)))
+
+    (case [ir/OSLICELIT]
+      (let [n (assert (* ir/CompLitExpr) n)]
+        (.exprList o (.-List n))
+        (when ^{:go/via [miniExpr]} (.Transient n)
+          (let [t (types/NewArray (.Elem ^{:go/via [miniExpr]} (.Type n)) (.-Len n))]
+            (set! (.-Prealloc n) (.newTemp o t false))))
+
+        (return n)))
+
+    (case [ir/ODOTTYPE ir/ODOTTYPE2]
+      (let [n (assert (* ir/TypeAssertExpr) n)]
+        (set! (.-X n) (.expr o (.-X n) nil))
+        (when (or (not (types/IsDirectIface ^{:go/via [miniExpr]} (.Type n))) (.-Instrumenting (.-Cfg base/Flag)))
+          (return (.copyExprClear o n)))
+
+        (return n)))
+
+    (case [ir/ORECV]
+      (let [n (assert (* ir/UnaryExpr) n)]
+        (set! (.-X n) (.expr o (.-X n) nil))
+        (return (.copyExprClear o n))))
+
+    (case [ir/OEQ ir/ONE ir/OLT ir/OLE ir/OGT ir/OGE]
+      (let [n (assert (* ir/BinaryExpr) n)]
+        (set! (.-X n) (.expr o (.-X n) nil))
+        (set! (.-Y n) (.expr o (.-Y n) nil))
+
+        (let [t (.Type (.-X n))]
+          (switch
+            (case [(.IsString t)]
+              ;; Mark string(byteSlice) arguments to reuse byteSlice backing
+              ;; buffer during conversion. String comparison does not
+              ;; memorize the strings for later use, so it is safe.
+              (when (== (.Op (.-X n)) ir/OBYTES2STR)
+                (.SetOp (assert (* ir/ConvExpr) (.-X n)) ir/OBYTES2STRTMP))
+
+              (when (== (.Op (.-Y n)) ir/OBYTES2STR)
+                (.SetOp (assert (* ir/ConvExpr) (.-Y n)) ir/OBYTES2STRTMP)))
+
+
+            (case [(or (.IsStruct t) (.IsArray t))]
+              ;; for complex comparisons, we need both args to be
+              ;; addressable so we can pass them to the runtime.
+              (set! (.-X n) (.addrTemp o (.-X n)))
+              (set! (.-Y n) (.addrTemp o (.-Y n)))))
+
+          (return n))))
+
+    (case [ir/OMAPLIT]
+      ;; Order map by converting:
+      ;;   map[int]int{
+      ;;     a(): b(),
+      ;;     c(): d(),
+      ;;     e(): f(),
+      ;;   }
+      ;; to
+      ;;   m := map[int]int{}
+      ;;   m[a()] = b()
+      ;;   m[c()] = d()
+      ;;   m[e()] = f()
+      ;; Then order the result.
+      ;; Without this special case, order would otherwise compute all
+      ;; the keys and values before storing any of them to the map.
+      ;; See issue 26552.
+      (let [n (assert (* ir/CompLitExpr) n)
+          ^{:line 1484} entries (.-List n)
+          ^{:line 1485} statics (subslice entries _ 0)
+          ^{:line 1486 :tag (slice (* ir/KeyExpr))} dynamics (zero (slice (* ir/KeyExpr)))]
+        (range [_ r entries]
+          (let [r (assert (* ir/KeyExpr) r)]
+
+            (when (or (not (isStaticCompositeLiteral (.-Key r))) (not (isStaticCompositeLiteral (.-Value r))))
+              (set! dynamics (append dynamics r))
+              (continue))
+
+
+            ;; Recursively ordering some static entries can change them to dynamic;
+            ;; e.g., OCONVIFACE nodes. See #31777.
+            (set! r (assert (* ir/KeyExpr) (.expr o r nil)))
+            (when (or (not (isStaticCompositeLiteral (.-Key r))) (not (isStaticCompositeLiteral (.-Value r))))
+              (set! dynamics (append dynamics r))
+              (continue))
+
+
+            (set! statics (append statics r))))
+
+        (set! (.-List n) statics)
+
+        (when (== (len dynamics) 0)
+          (return n))
+
+
+        ;; Emit the creation of the map (with all its static entries).
+        (let [m (.newTemp o ^{:go/via [miniExpr]} (.Type n) false)
+            ^{:line 1513} as (ir/NewAssignStmt base/Pos m n)]
+          (typecheck/Stmt as)
+          (.stmt o as)
+
+          ;; Emit eval+insert of dynamic entries, one at a time.
+          (range [_ r dynamics]
+            (let [lhs (assert (* ir/IndexExpr) (typecheck/AssignExpr (ir/NewIndexExpr base/Pos m (.-Key r))))]
+              (base/AssertfAt (== ^{:go/via [miniExpr miniNode]} (.Op lhs) ir/OINDEXMAP) ^{:go/via [miniExpr miniNode]} (.Pos lhs) "want OINDEXMAP, have %+v" lhs)
+              (set! (.-RType lhs) (.-RType n))
+
+              (let [as (ir/NewAssignStmt base/Pos lhs (.-Value r))]
+                (typecheck/Stmt as)
+                (.stmt o as))))
+
+
+          ;; Remember that we issued these assignments so we can include that count
+          ;; in the map alloc hint.
+          ;; We're assuming here that all the keys in the map literal are distinct.
+          ;; If any are equal, this will be an overcount. Probably not worth accounting
+          ;; for that, as equal keys in map literals are rare, and at worst we waste
+          ;; a bit of space.
+          (set! (.-Len n) + (conv int64 (len dynamics)))
+
+          (return m))))))
+
+
+;; No return - type-assertions above. Each case must return for itself.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 1569} (go/method as2func "as2func orders OAS2FUNC nodes. It creates temporaries to ensure left-to-right assignment.\nThe caller should order the right-hand side of the assignment before calling order.as2func.\nIt rewrites,\n\n\ta, b, a = ...\n\nas\n\n\ttmp1, tmp2, tmp3 = ...\n\ta, b, a = tmp1, tmp2, tmp3\n\nThis is necessary to ensure left to right assignment order.\n" [^{:tag (* orderState)} o ^{:tag (* ir/AssignListStmt)} n]
+  (let [results (.Type (aget (.-Rhs n) 0))
+      ^{:line 1556} as (ir/NewAssignListStmt ^{:go/via [miniStmt miniNode]} (.Pos n) ir/OAS2 nil nil)]
+    (range [i nl (.-Lhs n)]
+      (when (not (ir/IsBlank nl))
+        (let [typ (.-Type (.Field results i))
+            ^{:line 1560} tmp (.newTemp o typ (.HasPointers typ))]
+          (aset (.-Lhs n) i tmp)
+          (set! (.-Lhs as) (append (.-Lhs as) nl))
+          (set! (.-Rhs as) (append (.-Rhs as) tmp)))))
+
+
+
+    (set! (.-out o) (append (.-out o) n))
+    (.stmt o (typecheck/Stmt as))))
+
+
+
+
+^{:go/end 1596} (go/method as2ok "as2ok orders OAS2XXX with ok.\nJust like as2func, this also adds temporaries to ensure left-to-right assignment.\n" [^{:tag (* orderState)} o ^{:tag (* ir/AssignListStmt)} n]
+  (let [as (ir/NewAssignListStmt ^{:go/via [miniStmt miniNode]} (.Pos n) ir/OAS2 nil nil)
+
+      ^{:line 1576} do ^{:go/end 1589} (fn [^int i ^{:tag (* types/Type)} typ]
+        (when [nl (aget (.-Lhs n) i)] (not (ir/IsBlank nl))
+          (let [^ir/Node tmp (.newTemp o typ (.HasPointers typ))]
+            (aset (.-Lhs n) i tmp)
+            (set! (.-Lhs as) (append (.-Lhs as) nl))
+            (when (== i 1)
+              ;; The "ok" result is an untyped boolean according to the Go
+              ;; spec. We need to explicitly convert it to the LHS type in
+              ;; case the latter is a defined boolean type (#8475).
+              (set! tmp (typecheck/Conv tmp (.Type nl))))
+
+            (set! (.-Rhs as) (append (.-Rhs as) tmp)))))]
+
+
+
+    (go/call do 0 (.Type (aget (.-Rhs n) 0)))
+    (go/call do 1 (aget types/Types types/TBOOL))
+
+    (set! (.-out o) (append (.-out o) n))
+    (.stmt o (typecheck/Stmt as))))
