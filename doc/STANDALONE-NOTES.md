@@ -2696,3 +2696,70 @@ byte**, `b6f2e89e...`, the three builds one run each from the new stage 0, 561 s
   other. *Recommended: (a)*.
 - **SA163 a2g's edge outside the runtime key.** (a) Left out (built); (b) in the key (a
   re-recorded edge makes builds two runs until a re-seed). *Recommended: (a)*.
+
+## The build's speed, second round, part C: `jrt` split? (2026-10-15)
+
+Status: measured on the branch `speed2-jrt` (from main at `9942951`); no split built. The
+question: `jrt`, one Go package of 20 MB (914 files: about 840 translated JDK sources, a2g's
+shared files such as `a2g_classes.go` of 3.5 MB, about 70 hand-written forms), is the program's
+largest; is Go compiling it on the critical path of the host's builds, and would a split pay?
+
+### Measured (`.tmp/speed2/`, TamaGo's go1.27.1, the amd64 work module of a build at `9942951`)
+
+`go build -debug-trace` of `target/arbace-go/work-amd64/mod` as g2a runs it (`-trimpath`, the
+overlay of `bin/jrt overlay`), each compile timed by a `-toolexec` wrapper, on the shared host
+(the emulated arm64 VM busy):
+
+| case | wall | the chain |
+|---|---:|---|
+| a fresh build cache (the standard library too) | 96.9 s | `jrt` 54.7 s (from 5.0 s), then `lang` 21.0 s, the namespaces' packages about 9 s (`aot_arbace_core` last, 6.7 s), the link 4.4 s |
+| the standard library cached, every Arbace package changed | 103.9 s | `jrt` 64.1 s (wall 62.3, user 235.1 s, `-c=64`, peak RSS 8.8 GiB), `lang` 22.1 s (user 94.2 s, 3.7 GiB), the namespaces' about 10 s, `main` 2.2 s, the link |
+| everything cached (the output path new) | 5.2 s | the link alone, 4.9 s |
+
+`jrt`'s compile by phase (`-gcflags=arbace/jrt=-bench`, 53.6 s): the front end 30.5 s on one
+core (parsing and type checking 1,079,724 lines 18.1 s, devirtualizing and inlining 9.5 s, escape
+analysis 2.9 s), the back end 23.1 s (its functions, 202,064, compiled in parallel 14.6 s; the
+object written 8.5 s, one core). So Go uses about 3.8 cores on `jrt`; `lang` waits for its export
+data, and every namespace's package for `lang`'s.
+
+**But `jrt` is cached in the builds that matter for speed.** Go's cache is keyed by content:
+`jrt` compiles again only when its printed text changes, i.e. when the runtime does
+(`go/arbace/jrt`, `jdk/`, `overlay/jdk`, a2g's translation of them). A change to the namespaces
+leaves it as it was (the shipped build's and the test build's `jrt` are identical, `diff -r`,
+though the test build has more namespaces). The one-run build (the runtime the checkout's) and
+the fixpoint's G2 and G3 compile no `jrt`: g2a's step there is about 18 s (`bin/g2a build` on
+the current program, everything cached, 18.6 s wall, 76 s user): Go's part is about 5 s (the
+link), the rest g2a's own (reading the forms, printing with the print cache, writing 61 MB of
+Go). After a change to the runtime (two runs), `jrt` compiles once (the second run's `jrt` is the
+same text, cached): about 60 s of that build's 5.5 minutes. In the box's rebuild (a fresh cache
+in the guest), 94 s.
+
+### What a split could gain, and cost
+
+The bound: S5's graph ("S5: jrt as core and library", `tools/godeps`): with all edges the
+reached classes are one strongly connected component of 84% of `jrt`'s nodes, and by Java
+packages 74 of 75 are one component; only with bodies outlined (`-decls`, 13.7% of the nodes in
+the largest component) would the rest compile in parallel. At best the chain `jrt` → `lang`
+would lose about 45 s, and only in the builds where `jrt` changed: **0 s on the one-run build**,
+about 45 s once per change to the runtime. The cost, from S5: a2g writing several packages, the
+partition checked acyclic, linkname pulls or outlined bodies or hook variables for the upward
+edges (a call more per outlined method), `lang` the same (its cycles are calls), the seed and
+the fixpoint again: 5 to 10 days, decided against at S5 (SA100 (a)) on other grounds.
+
+Cheaper levers on `jrt`'s compile all change the output and the program (`-l`, no inlining:
+slower code; a smaller `jrt` means fewer reached JDK members, which reachability already
+minimizes) or do nothing (`-c` is already 64; GOGC raised in the first round was slower).
+
+Where g2a's 18 s on the one-run build goes is the next lever (g2a's own printing and writing,
+not Go): left for the round's other parts.
+
+### Amendments (proposed 2026-10-15)
+
+- **SA180 `jrt` split for the build's speed.** (a) Not split: `jrt` is cached in the one-run
+  build and the fixpoint's later stages, so a split gains nothing there; about 45 s at best once
+  per change to the runtime, for S5's 5 to 10 days of a2g's work; (b) split along S5's `-decls`
+  model (outlined bodies, linkname pulls), `lang` too. *Recommended: (a)*.
+- **SA181 What is measured as a build's Go step.** (a) The trace and the per-compile timing
+  above kept as the method (`.tmp/speed2/trace.sh`, `tx.sh`, `an.py`: `go build -debug-trace`, a
+  `-toolexec` timer, `-gcflags=<pkg>=-bench`), not committed as tools; (b) a `tools/` command for
+  it. *Recommended: (a)*: a measurement, not a check the build runs.
