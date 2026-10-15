@@ -7,13 +7,13 @@ The current state of the work. This file is rewritten as things change. For the 
 
 ## State
 
-- The bootstrap starts from the Go-source seed `seed/arbace-seed-go.tar.xz` (`c7f5e3d5…`), the
+- The bootstrap starts from the Go-source seed `seed/arbace-seed-go.tar.xz` (`79d4f552…`), the
   program printed by the Go-hosted fixpoint, its toolchain (TamaGo's go1.27.1) pinned by
   `seed/goroot.sha256`. `bin/seed --check`, `--build` (stage 0), `--make`, `--verify`.
 - Stage 0 hosts every Arbace tool (a2g, g2a, c2a, the suite's runner), compiled into it;
   `bin/arbace-go --build` is a Go-hosted build, `--fixpoint` the chain G1 → G2 → G3.
 - The program's namespaces are compiled to Go (`ARBACE_AOT=1`, the default since S6): the
-  executable 101.3 MB (amd64), a build about 4.5 minutes.
+  executable 101.4 MB (amd64), a build about 3 minutes.
 - The box: the same program as a TamaGo guest of go-whim's monitor (/dev/kvm on amd64; KVM/arm64
   and Hypervisor.framework on arm64), and the box rebuilding Arbace inside itself byte for byte
   (`bin/box-rebuild`, run by hand at milestones).
@@ -50,19 +50,19 @@ The current state of the work. This file is rewritten as things change. For the 
 ## Now
 
 - The journal started over after the milestone (the user, 2026-10-15).
+- Done (2026-10-15): the docs searched for sloppiness and fixed; the build's speed, first round
+  ([STANDALONE-NOTES.md](STANDALONE-NOTES.md), "After the milestone: the build's speed"): a
+  one-run build about 2:45 to 3:00 (was about 4:15), a2g alone about 100 s (was 160 to 210), the
+  seed remade (`79d4f552…`) and verified. SA160-SA163 proposed (the user's decision).
 - Running: the whole chain in the emulated arm64 VM, nothing given (BX117 (a), at `434021a`,
   since 2026-10-14 22:49); recorded when it ends.
-- The docs searched for sloppiness and fixed (the user's order, 2026-10-15).
-- Next: the build's speed (below, from "Later").
 - The Mac may move to macOS 26 (the user).
 
 ## Next
 
-- The build's speed (the user, 2026-10-15): a build keeps few of the host's 64 cores busy.
-  Measured on `dfe2e5e`: a2g is most of a one-run build (about 190 s: its load about 67 s, mostly
-  the compiled namespaces' analysis, nearly sequential; reach 21 s, translate 30 s, write 16 s),
-  g2a's builds 22 s (amd64) and 18 s (arm64), one after the other; the namespaces' compiling 70
-  s. Aim: 2 to 3 minutes.
+- The build's speed, further (if the user wants it): the host's compiling of the namespaces
+  (about 60 s, a2g waiting on it; its emit sequential), a2g's reachability (19 s) and sequential
+  translation steps (18 s), and `jrt` split into Go packages (the long pole of g2a's builds).
 - Left from earlier: reflection on a member typed by a sibling defined later reports `Object`
   (SA90 (b) if needed).
 

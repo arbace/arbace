@@ -60,3 +60,36 @@ Kept as decided: the user's git identity where the docs name the commits' author
 endpoints; HOST-VM-SURVEY's list of absent devices (no provider named). Dated history was
 annotated, not rewritten. Left: `arbace/c2a/rules.ae`'s `:why` for "Optional modules" (code)
 still names the runtime image.
+
+## 2026-10-15: the build's speed
+
+The user's order, after the docs: a build (about 4.5 minutes) kept few of the 64 cores busy; aim
+2 to 3 minutes. Branch `speed`, merged (`9b62cd2`); recorded in `doc/STANDALONE-NOTES.md`, "After
+the milestone: the build's speed". Measured on the shared host while the emulated arm64 VM ran
+(single timings vary by up to a fifth): each phase's cores sampled each second, a2g's CPU
+profiled (`ARBACE_CPUPROFILE`, `go tool pprof` of TamaGo's toolchain).
+
+Found and changed:
+- a2g's analysis spent 13% of its CPU (and much of its garbage) in one reflective call: the
+  class forms' `parse-method-desc` called `indexOf(String, int)` with a long; the analysis'
+  class-info cache (`arbace.classes.env/reflect-cache`) was untyped (reflective) and behind one
+  lock taken by every lookup from 16 threads; the back end's `registered?` lost a hint. Fixed
+  (40 reflection warnings in the tools' namespaces, the rest cold).
+- a2g loads in two rounds (the runtime's classes, then the compiled namespaces'), and with
+  `--await` starts while the host compiles the namespaces, analyzing the runtime meanwhile; its
+  output does not depend on the wait (checked: byte for byte with `--input`) (SA160).
+- a2g read every file of a tree whole, one after another, to find its package files (16 s for
+  the compiled namespaces' 28 MB): now their first form.
+- report.edn printed directly, not by `arbace.pprint` (18 s at the end) (SA161); g2a's
+  amd64 and arm64 builds at once (SA162); `jdk/edge.edn` out of the runtime key, as a2g's data
+  (SA163).
+Tried and left: `GOGC` higher within the same memory limit (slower), 32 jobs (no gain: bound by
+Go's collector).
+
+Results: a2g alone about 100 s (was 160 to 210); the fixpoint's one-run builds 2:57 and 2:44
+(were 4:13, 4:19); the essential gate passed on the branch (10:58); the fixpoint G1 = G2 = G3
+byte for byte. The seed remade from the fixpoint at `d23bc5e`, `79d4f552...` (was
+`c7f5e3d5...`), and verified (stage 0 = G1 = G2 = G3, `b6f2e89e...`). Left: the host's
+compiling of the namespaces (about 60 s; its emit sequential by its shared constant pools),
+a2g's reachability (19 s) and sequential translation steps (18 s), and `jrt`, one Go package,
+the long pole of g2a's builds. SA160-SA163 proposed for the user, recommended (a).
