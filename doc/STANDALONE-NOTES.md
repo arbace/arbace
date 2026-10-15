@@ -2794,10 +2794,15 @@ the toolchain's forms.
 ### Checks
 
 - `bin/toolchain-vendor check`: the nine tools identical (above).
-- `bin/toolchain-vendor verify`: VERIFY
-- `bin/tamago-vendor check amd64` (the printer changed, `regexp/backtrack.ae` changed): TVCHECK
+- `bin/toolchain-vendor verify`: a fresh conversion of the three configurations is `tamago/cmd/`
+  byte for byte (23 minutes).
+- `bin/tamago-vendor check amd64` (the printer changed, `regexp/backtrack.ae` changed): std
+  printed against GOROOT/src, no regressions against the round trip's reference; the goos
+  module 69 of 69 packages at all three levels; the box's guest from the printed forms
+  byte-identical to the one from the originals (`ea705851...`, cut `f6a0c8de...`).
 - `bin/g2a test`: 6 tests, 150 assertions, 0 failures.
-- The essential `bin/gate` on the branch: GATE
+- The essential `bin/gate` on `0db720f` (12m23s): the suite 20,506 of 20,520, no
+  regressions; the oracle 22,508 of 22,561, the 53 known, 0 new.
 
 ### Amendments (proposed 2026-10-15)
 
