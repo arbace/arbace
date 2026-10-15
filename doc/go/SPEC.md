@@ -775,7 +775,11 @@ statement list, and consecutive declarations share one `let`:
 - **Labeled declarations.** `L: x := 1` (legal Go, 20 in std, such as
   `internal/runtime/maps`) is `^{:go/label :L}` on the first target of the `let` binding that
   holds the declaration: `(let [^{:go/label :L} x 1] ...)` (amendment, accepted 2026-10-08).
-  `(label :L (let ...))` would make the `let`'s body the label's statement.
+  `(label :L (let ...))` would make the `let`'s body the label's statement. The label prints
+  on the line before the declaration; when it stands elsewhere (a comment or a blank line
+  between them: `regexp/backtrack.go`'s `Skip:`, three in `cmd/`), its line is
+  `:go/label-line` beside it, `^{:go/label :Skip :go/label-line 162}` (standalone S9, SA200;
+  gc records a label that starts a function's code at its own line).
 - **Explicit blocks** `{ ... }` are `(do ...)`. In a body, `(do ...)` always means a Go block.
 
 ### 7.4 Assignment
@@ -1442,7 +1446,7 @@ expressions) is for consumers.
 - **Groups.** In a file whose forms carry `:go/grouped`, names are grouped exactly as marked
   (§5.3); local `const` bindings marked `^:go/grouped` print as one `const ( ... )` group,
   those marked `^:go/implicit` without their type and init (§7.3). A binding with `:go/label`
-  prints with its label (`L: x := 1`). A `go/directive` element of `:imports` prints between
+  prints with its label (`L: x := 1`), at `:go/label-line` when given. A `go/directive` element of `:imports` prints between
   the import declarations where it stands (§4.3).
 - `(- -1)` prints `- -1` (or `-(-1)`): two `-` never touch. A type parameter list with one
   parameter whose constraint begins with `*` or `(` gets a trailing comma (`[P *T,]`).
