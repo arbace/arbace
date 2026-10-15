@@ -2642,6 +2642,16 @@ The fixpoint at `60a1502` (from the seed's stage 0, G1 in two runs, 5:39): a2g's
 G2 = G3, **G1 = G2 = G3 byte for byte** (`b9595144...`, 101,408,928 bytes); the essential gate
 passed (10:58: the suite and the oracle as recorded).
 
+### The seed
+
+Remade from the fixpoint at `d23bc5e` (the notes committed first; G1 in two runs, 5:21, G2 and G3
+3:45, 4:01, the host busier): `seed/arbace-seed-go.tar.xz`
+**`79d4f552e5c5490ed8b75886a11dd6201eded46e736ceedd0c519de1b3788848`** (5,384,408 bytes, 1,691
+files), was `c7f5e3d5...`: its stage 0 has a2g's two rounds compiled in and the runtime key
+without the edge, so that builds are one run again. **`bin/seed --verify`**: printed again at
+`d23bc5e`, the same tree (the tar `9d050f22...`) and archive; **stage 0 = G1 = G2 = G3 byte for
+byte**, `b6f2e89e...`, the three builds one run each from the new stage 0, 561 s in all.
+
 ### Left
 
 - The host's compiling of the namespaces (about 60 s, a2g waiting): loading them is sequential
