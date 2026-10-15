@@ -10,7 +10,12 @@
     --jdk DIR          input: the converted JDK closure (default $JRT_CONV, else jdk/forms:
                        the committed forms, bin/jrt-convert's output; its resource data in the
                        directory data beside it, jdk/data)
-    --input DIR        input: an extra tree of class forms files (test fixtures)
+    --input DIR        input: an extra tree of class forms files (test fixtures; a tree with a
+                       packages.edn: the compiled namespaces, arbace.aot, entered in the second
+                       round of the load, w/load-world)
+    --await DIR        --input DIR, read once DIR/aot.edn exists (a2g meanwhile loads and
+                       starts analyzing the other inputs; bin/arbace-go starts a2g while the
+                       host compiles the namespaces into DIR); the output is --input DIR's
     --slice REGEX      only classes whose internal names match one of the given regexes
                        (repeatable) are translated; everything else is outside the closed
                        world and the operations needing it throw (phase 1's slices)
@@ -54,8 +59,7 @@
             [arbace.a2g.embed :as embed]
             [arbace.a2g.edge :as edge]
             [arbace.a2g.zlib :as zlib]
-            [arbace.g2a.print :as gp]
-            [arbace.pprint]))
+            [arbace.g2a.print :as gp]))
 
 (defn- now [] (System/nanoTime))
 (defn- secs [t0] (/ (Math/round (/ (- (System/nanoTime) t0) 1e7)) 100.0))
@@ -68,6 +72,7 @@
       "--lang" (recur more (assoc opts :lang true))
       "--jdk" (recur (rest more) (assoc opts :jdk (first more)))
       "--input" (recur (rest more) (update opts :inputs conj (first more)))
+      "--await" (recur (rest more) (-> opts (update :inputs conj (first more)) (assoc :await (first more))))
       "--slice" (recur (rest more) (update opts :slice conj (re-pattern (first more))))
       "--root" (recur (rest more) (update opts :roots conj (first more)))
       "--tests" (recur more (assoc opts :tests true))
@@ -412,6 +417,20 @@
 
 (def default-edge "jdk/edge.edn")
 
+(defn- report-str
+  "report.edn's text: the map a key per line, a map or vector with more than one element an
+  element per line, the rest as pr-str prints it (arbace.pprint took half a minute on the
+  program's report, on the critical path at the end of the run)."
+  [report]
+  (let [big? #(and (coll? %) (not (seq? %)) (> (count %) 1))
+        val-str (fn [v]
+                  (cond
+                    (not (big? v)) (pr-str v)
+                    (map? v) (str "{" (str/join ",\n  " (for [[k x] v] (str (pr-str k) " " (pr-str x)))) "}")
+                    (vector? v) (str "[" (str/join "\n  " (map pr-str v)) "]")
+                    :else (pr-str v)))]
+    (str "{" (str/join ",\n " (for [[k v] report] (str (pr-str k) " " (val-str v)))) "}\n")))
+
 (defn run*
   "a2g's run, in the class environment run binds."
   [opts]
@@ -425,18 +444,29 @@
                         ;; the JDK's resource data, next to the converted JDK (jdk/data)
                         :embedded-data (embed/data (str (.getParent (io/file jdk)) "/data"))))
                opts)
-        _ (reset! nm/compiled-packages
-                  (apply merge {} (for [i (:inputs opts)
-                                        :let [f (io/file i "packages.edn")]
-                                        :when (.isFile f)]
-                                    (read-string (slurp f)))))
+        ;; the second round's inputs: the compiled namespaces' trees (their packages.edn)
+        late? (fn [i] (or (= i (:await opts)) (.isFile (io/file i "packages.edn"))))
+        compiled-packages! #(reset! nm/compiled-packages
+                                    (apply merge {} (for [i (:inputs opts)
+                                                          :let [f (io/file i "packages.edn")]
+                                                          :when (.isFile f)]
+                                                      (read-string (slurp f)))))
+        _ (compiled-packages!)
+        wait (fn []
+               (when-let [d (:await opts)]
+                 (let [t (now)]
+                   (while (not (.isFile (io/file d "aot.edn")))
+                     (Thread/sleep 100))
+                   (println (str "a2g: " d " ready after " (secs t) " s"))
+                   (compiled-packages!))))
         inputs (vec (concat
                       (when (or (:lang opts) (not (:jdk opts)))
                         ;; --program: the Java API arbace.java.api.Clojure too (a class of
                         ;; the runtime on the JVM; Clojure's suite calls it by reflection)
                         [{:root "arbace" :dirs (if (:program opts) ["lang" "java/api"] ["lang"])}])
                       (when (or (:jdk opts) (not (:lang opts))) (when (.isDirectory (io/file jdk)) [{:root jdk :tree true}]))
-                      (for [i (:inputs opts)] {:root i :tree true})))
+                      (for [i (:inputs opts) :when (not (late? i))] {:root i :tree true})))
+        late-inputs (vec (for [i (:inputs opts) :when (late? i)] {:root i :tree true}))
         clj-files (fn [dir] (let [d (io/file dir)]
                               (when (.isDirectory d)
                                 (sort (filter #(str/ends-with? (str %) ".ae") (.listFiles d))))))
@@ -445,7 +475,7 @@
                             (when (some #(= "arbace" (:root %)) inputs) (clj-files "arbace/lang/go"))
                             ;; the JDK closure's variants (jrt's, overlay/jdk/variants)
                             (when (some #(= jdk (:root %)) inputs) (clj-files "overlay/jdk/variants"))))
-        world (w/load-world inputs :variant-files variant-files)
+        world (w/load-world inputs :variant-files variant-files :late-inputs late-inputs :wait wait)
         _ (doseq [[n c] (sort (:variants world))]
             (println (str "a2g: variant of " n ": " (:replaced c) " replaced, " (:cut c) " cut, " (:added c) " added")))
         t-load (secs t0)
@@ -727,7 +757,7 @@
                              :race-candidates races
                              :package-private-overrides pp-overrides
                              :times times})
-                report-text (future (with-out-str (arbace.pprint/pprint (report-of ::times))))
+                report-text (future (report-str (report-of ::times)))
                 ;; write the generated tree
                 _ (when (.exists (io/file gen-dir)) (doseq [f (reverse (file-seq (io/file gen-dir)))] (io/delete-file f true)))
                 ;; the files' texts computed in parallel, written in order
@@ -852,7 +882,7 @@
               (after {:prog-dir prog-dir :T T :res res :world world}))
             (let [report (report-of {:load t-load :reach t-reach :translate t-trans :write (secs t3)
                                      :steps (do (lap :files) @steps)})]
-              ;; the text printed beside the writing (pprint is long on Go), its times put in
+              ;; the text printed beside the writing, its times put in
               (write! (str (:out opts) "/report.edn")
                       (str/replace @report-text (str ::times) (pr-str (:times report))))
               (println (str "a2g: steps (s): " (str/join ", " (for [[k v] @steps] (str (name k) " " v)))

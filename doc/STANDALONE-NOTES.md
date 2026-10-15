@@ -2590,3 +2590,109 @@ Proposed (2026-10-14); the recommended choice applied on `s6-size`.
   `init` function per class, as for every other class; (c) the same table for every class of
   the program (a `ClassInfo` of static data is about as large as the code it replaces).
   *Recommended: (a)*.
+
+## After the milestone: the build's speed (2026-10-15)
+
+The user's order after `arbace-inside-itself-v1`: a build (about 4.5 minutes, one run of a2g)
+kept few of the host's 64 cores busy; aim 2 to 3 minutes. Branch `speed`. Measured on the
+shared host while the emulated arm64 VM (BX117 (a)) kept about 10 cores busy: a run's time
+varies by up to a fifth from one run to the next, so the structure (what runs on one core)
+guided the changes more than single timings.
+
+### Where the time went (`dfe2e5e`)
+
+A one-run build: the host compiling the namespaces 53 to 96 s (one core: loading them 29 s, the
+back end's emit 28 s, the printing in parallel 10 s), a2g 160 to 210 s alone, g2a's builds 20 s
+(amd64) then 18 s (arm64), the image and the links seconds. In a2g (161 s, its own CPU sampled
+each second), about 130 s on one core: reading, entering and resolving the classes (30 s), the
+runtime's analysis on its thread beyond the compiled namespaces' (15 s), reachability (21 s),
+the translation's sequential steps (20 s), and report.edn's pretty printing at the end (18 s).
+A CPU profile (`ARBACE_CPUPROFILE`): half of a2g's CPU was Go's collector and allocation; 13% one
+reflective call.
+
+### What changed
+
+- **The analysis' hot reflection.** `arbace.classes.types/parse-method-desc`'s `(.indexOf d ";"
+  j)` with a long `j` matched no `indexOf(String, int)` exactly: every method descriptor parsed
+  went through `Reflector` (`Class.getMethods`, a new `Method` per member: 172 CPU-seconds of
+  1,355, and their garbage). `arbace.classes.env`'s `reflect-cache` had no type hint (its `get`
+  and `put` reflective) and one lock for every lookup, which a2g's 16 analysis threads took in
+  turn: now a `ConcurrentHashMap` read without the lock, filled under it. `arbace.aot.emit`'s
+  `registered?` lost its `Class` hint in a loop. The compiled namespaces' analysis 34 to 21 s.
+  (The tools' namespaces with `*warn-on-reflection*`: 40 warnings, the rest cold or the JVM's
+  class-file paths.)
+- **a2g loads in two rounds; `--await`** (SA160). The inputs, then the late ones (a tree with a
+  `packages.edn`: the compiled namespaces), each entered and resolved in order; the first
+  round's classes (the runtime's) analyzed on a thread of their own from the end of the first
+  round, in an id space of their own starting where the sequential part stands then, and with
+  a unit order of their own (the local and anonymous classes their analysis declares are
+  processed from it while the second round enters its classes; the unit's order rebuilt after,
+  as one round made it). `--await DIR` reads DIR once `DIR/aot.edn` exists; `bin/arbace-go`
+  starts a2g so as the host compiles the namespaces (killed if the compiling fails), and a2g
+  meanwhile loads the runtime and analyzes it. The rounds are the same without the wait: a2g's
+  program with `--await` = with `--input`, byte for byte (but `image.bin`, filled after).
+- **A tree's package files by their first form.** `source-files` read every file of a tree
+  whole, one after another, to leave out those with an `ns` form: 16 s of the compiled
+  namespaces' 28 MB before the parallel read; now the first form only (the 77 package files
+  in the trees all begin with it; none has one elsewhere). The read, the largest files first:
+  1.5 s.
+- **report.edn printed directly** (SA161): a key per line, a map or vector of more than one
+  element an element per line; `arbace.pprint` took about 18 s on the critical path. The
+  fixpoint's comparison (the line ` :times {...}` removed) is unchanged.
+- **g2a's architectures at once** (SA162): amd64 and arm64 built concurrently (their own work
+  modules; the print cache's entries are written by rename).
+- **The edge out of the runtime key** (SA163): `jdk/edge.edn` is a2g's data, not the runtime's;
+  its re-recording at the milestone (`c3fdd36`) had made every build two runs.
+
+Tried and left: Go's collector at `GOGC=1600` within the same 20 GiB limit (slower: 3:15
+against 2:43, the collector thrashing at the limit; 32 GiB gave 30.5 GiB peaks, too much beside
+the box's VM and the gate); `A2G_JOBS=32` (99.5 against 102.5 s, the same 18 GiB: the parallel
+parts are bound by the collector, not threads). Go's compiler already scales a package's
+compile to GOMAXPROCS (go1.27's `compilerConcurrency`).
+
+### Measured
+
+| | before (`dfe2e5e`) | after (`60a1502`) |
+|---|---|---|
+| a2g alone (the same compiled tree) | 160 to 210 s | about 100 s |
+| its load (analysis of the compiled namespaces) | 72 s (34 s) | 37 s (21 s), the runtime's overlapped |
+| a one-run build | about 268 s | 197 s: the host's compiling 61 s, a2g done at 158 s (ready after 54 s), g2a 33 s |
+| the fixpoint's one-run builds (G2 by G1, G3 by G2) | 4:13, 4:19 (S6's size work) | 2:57, 2:44 |
+
+The fixpoint at `60a1502` (from the seed's stage 0, G1 in two runs, 5:39): a2g's programs G1 =
+G2 = G3, **G1 = G2 = G3 byte for byte** (`b9595144...`, 101,408,928 bytes); the essential gate
+passed (10:58: the suite and the oracle as recorded).
+
+### The seed
+
+Remade from the fixpoint at `d23bc5e` (the notes committed first; G1 in two runs, 5:21, G2 and G3
+3:45, 4:01, the host busier): `seed/arbace-seed-go.tar.xz`
+**`79d4f552e5c5490ed8b75886a11dd6201eded46e736ceedd0c519de1b3788848`** (5,384,408 bytes, 1,691
+files), was `c7f5e3d5...`: its stage 0 has a2g's two rounds compiled in and the runtime key
+without the edge, so that builds are one run again. **`bin/seed --verify`**: printed again at
+`d23bc5e`, the same tree (the tar `9d050f22...`) and archive; **stage 0 = G1 = G2 = G3 byte for
+byte**, `b6f2e89e...`, the three builds one run each from the new stage 0, 561 s in all.
+
+### Left
+
+- The host's compiling of the namespaces (about 60 s, a2g waiting): loading them is sequential
+  (macros, side effects); the back end's emit (28 s) too, as its constant pools and fn names are
+  shared by the sources and their order is the output's.
+- a2g's reachability (19 s, one core, no single hotspot) and the translation's sequential steps
+  (18 s: dyn, registrations, packages, collisions; per package, parallelizable but jrt's first).
+- g2a's builds: Go compiling `jrt`, one package of the program's largest (94 s in the box): a
+  split into packages.
+
+### Amendments (proposed 2026-10-15)
+
+- **SA160 a2g loads in two rounds, and waits for the compiled namespaces.** (a) As above:
+  `--await`, `bin/arbace-go` overlapping a2g with the host's compiling (built); (b) one round
+  (the runtime's analysis begins after the compiled namespaces are entered). *Recommended: (a)*:
+  the output does not depend on the wait, and the runtime's half minute of analysis leaves the
+  critical path.
+- **SA161 report.edn's layout.** (a) Printed directly (built); (b) pretty-printed as before.
+  *Recommended: (a)*.
+- **SA162 g2a's architectures built at once.** (a) Concurrently (built); (b) one after the
+  other. *Recommended: (a)*.
+- **SA163 a2g's edge outside the runtime key.** (a) Left out (built); (b) in the key (a
+  re-recorded edge makes builds two runs until a re-seed). *Recommended: (a)*.
