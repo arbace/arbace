@@ -65,10 +65,12 @@ The current state of the work. This file is rewritten as things change. For the 
 - Running: the build's speed, second round (the user, 2026-10-15), on three branches: the host's
   compiling of the namespaces (`speed2-host`), a2g's single-core phases (`speed2-a2g`), `jrt`
   split into Go packages, measured first (`speed2-jrt`).
+- Running: S9, Go's toolchain as forms (the user, 2026-10-15; branch `s9`; STANDALONE-SURVEY.md
+  §7 b1', §8.1): `cmd/compile`, `cmd/link`, `cmd/asm` and `cmd/internal` converted by g2a, the
+  tools built from the forms byte-identical to the originals'.
 
 ## Later
 
-- S9: Go's toolchain as forms (STANDALONE-SURVEY.md).
 - The standalone Arbace: no Java binary compatibility, with Java at the source level through j2a.
   The language is Clojure plus class forms, and later forms for Go. The goal is a
   self-sustaining REPL in a virtual sandbox, in Arbace down to the bare metal ISA, in the style
