@@ -142,21 +142,36 @@ build() {
   # standalone S6, one a2g run (SA144): a host of the checkout's runtime (its version's
   # :runtime, bin/lib/version.bash) compiles the checkout's namespaces itself, as the program
   # built from them would
-  local saved1=("${a2g_args[@]}") onepass=
+  local saved1=("${a2g_args[@]}") onepass= a2g_pid=
   if [ "${ARBACE_AOT:-1}" = 1 ] && [ -z "${aot_phase2:-}" ] && [ -n "$variant" ] && aot_reusable "$hostexe"; then
     # the test build: the shipped build's compiled namespaces, when made from the same
     # namespaces and runtime (SA157)
     echo "== the namespaces compiled: the shipped build's ($dir/aot, key ${aot_key:0:12})" >&2
     onepass=1
     a2g_args+=(--input "$dir/aot")
-  elif [ "${ARBACE_AOT:-1}" = 1 ] && [ -z "${aot_phase2:-}" ] && host_compile "$hostexe" "$dir/aot$variant"; then
+  elif [ "${ARBACE_AOT:-1}" = 1 ] && [ -z "${aot_phase2:-}" ] && host_compiles "$hostexe"; then
+    # a2g started at once: it loads the runtime and analyzes it while the host compiles the
+    # namespaces, and reads them when they are there (--await: DIR/aot.edn, the compiling's
+    # last file)
     onepass=1
-    a2g_args+=(--input "$dir/aot$variant")
+    rm -rf "$dir/aot$variant" "$dir/aot$variant.key"
+    echo "== bin/a2g --program ${a2g_args[*]} --await $dir/aot$variant (on $hostexe), at the same time" >&2
+    (cd "$root" && bin/a2g --program "${a2g_args[@]}" --await "$dir/aot$variant" --out "$dir/a2g$variant") > "$dir/a2g$variant.log" 2>&1 &
+    a2g_pid=$!
+    if ! host_compile "$hostexe" "$dir/aot$variant"; then
+      kill "$a2g_pid" 2>/dev/null; wait "$a2g_pid" 2>/dev/null
+      return 1
+    fi
     aot_key_write "$dir/aot$variant"
   fi
-  echo "== bin/a2g --program ${a2g_args[*]} (on $hostexe)" >&2
-  (cd "$root" && bin/a2g --program "${a2g_args[@]}" --out "$dir/a2g$variant") > "$dir/a2g$variant.log" 2>&1 \
-    || { tail -20 "$dir/a2g$variant.log" >&2; echo "arbace-go: a2g failed ($dir/a2g$variant.log)" >&2; return 1; }
+  if [ -n "$a2g_pid" ]; then
+    wait "$a2g_pid" \
+      || { tail -20 "$dir/a2g$variant.log" >&2; echo "arbace-go: a2g failed ($dir/a2g$variant.log)" >&2; return 1; }
+  else
+    echo "== bin/a2g --program ${a2g_args[*]} (on $hostexe)" >&2
+    (cd "$root" && bin/a2g --program "${a2g_args[@]}" --out "$dir/a2g$variant") > "$dir/a2g$variant.log" 2>&1 \
+      || { tail -20 "$dir/a2g$variant.log" >&2; echo "arbace-go: a2g failed ($dir/a2g$variant.log)" >&2; return 1; }
+  fi
   echo "   a2g: $(since "$t0")" >&2
   local overlay host
   overlay=$(cd "$root" && bin/jrt overlay | tail -1) || return 1
@@ -239,9 +254,10 @@ aot_reusable() {
 # HOST's runtime is the checkout's (the :runtime of its version map, SA144): HOST prepares them
 # from the checkout's sources (ARBACE_PATH_FIRST, as embedded ones, analyzed afresh: no compiled
 # loader, no image), in the order the program's namespaces.txt lists them, then arbace.aot
-# compiles the units; status 1 (and nothing made) when HOST's runtime differs
-host_compile() {
-  local host=$1 out=$2 key hkey nss t0
+# compiles the units (host_compiles first: status 1 when HOST's runtime differs); status 2 when
+# the compiling failed
+host_compiles() {
+  local host=$1 key hkey
   . "$root/bin/lib/version.bash"
   key=$(arbace_runtime_key "$root")
   hkey=$(env -u ARBACE_NO_AOT "$host" -e '(print (:runtime *arbace-version*))' 2>/dev/null)
@@ -250,6 +266,9 @@ host_compile() {
     echo "== the namespaces compiled after a first build (the host's runtime is not the checkout's)" >&2
     return 1
   fi
+}
+host_compile() {
+  local host=$1 out=$2 nss t0
   t0=$(date +%s)
   echo "== the namespaces compiled by the host (arbace.aot; its runtime is the checkout's)" >&2
   mkdir -p "$dir"

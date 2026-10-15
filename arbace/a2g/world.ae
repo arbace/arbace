@@ -19,6 +19,14 @@
     (binding [*read-eval* false]
       (doall (take-while #(not= % ::eof) (repeatedly #(read {:eof ::eof :read-cond :allow} r)))))))
 
+(defn- first-form
+  "The first form of file f, or nil."
+  [f]
+  (with-open [r (LineNumberingPushbackReader. (io/reader f))]
+    (binding [*read-eval* false]
+      (let [x (read {:eof ::eof :read-cond :allow} r)]
+        (when-not (= x ::eof) x)))))
+
 (defn- class-form? [f] (and (seq? f) (symbol? (first f)) (= "defclass" (name (first f)))))
 
 (defn- class-forms [forms]
@@ -45,13 +53,15 @@
 
 (defn source-files
   "The class forms files of an input: {:root dir :dirs [subdir...]} or {:root dir :tree true}
-  (every .ae under root but package files holding ns forms)."
+  (every .ae under root but package files, whose first form is their ns form)."
   [{:keys [root dirs tree files]}]
   (cond
     files (map io/file files)
     tree (->> (file-seq (io/file root))
               (filter #(and (.isFile ^java.io.File %) (str/ends-with? (.getName ^java.io.File %) ".ae")))
-              (remove #(some (fn [f] (and (seq? f) (= 'ns (first f)))) (read-forms %)))
+              ;; the first form only: reading every file whole here, one after another, took
+              ;; 16 s of the compiled namespaces' 28 MB
+              (remove #(let [f (first-form %)] (and (seq? f) (= 'ns (first f)))))
               (sort-by str))
     :else (->> (for [d dirs ^java.io.File f (.listFiles (io/file root d))
                      :when (and (.isFile f) (str/ends-with? (.getName f) ".ae"))]
@@ -193,116 +203,150 @@
   "Reads, enters and analyzes the class forms of the inputs, each {:root :dirs|:tree|:files},
   with the Go-build variants of the variant files applied. Returns the world:
   {:compile-set atom :unit unit :from-source pred :files [...] :tops #{} :failed [[class
-  msg]...] :variants {class counts}}. Run translation inside (with-world w ...)."
-  [inputs & {:keys [variant-files]}]
+  msg]...] :variants {class counts}}. Run translation inside (with-world w ...).
+
+  In two rounds: the inputs, then the late ones (the compiled namespaces' tree, standalone
+  S6), each entered and resolved (headers, members, bridges) in order; the first round's classes
+  are analyzed on a thread of their own from the end of the first round, the late ones in
+  parallel after the second. Before the second round wait is called (a2g --await: the late
+  input is being written meanwhile; bin/arbace-go starts a2g as the host compiles the
+  namespaces). The rounds are the same with or without the wait: the output does not depend on
+  it."
+  [inputs & {:keys [variant-files late-inputs wait]}]
   (let [variants (read-variants variant-files)
         erased (get variants ::erase #{})
         variants (dissoc variants ::erase)
         applied (atom {})
-        files (vec (mapcat source-files inputs))
-        ;; read in parallel (reading class forms takes no ids: no #() or syntax-quote in them)
-        parsed (m/par-mapv (m/jobs) (fn [f] (let [forms (read-forms f)] {:file f :forms forms :ns (ns-of-forms forms)})) files)
-        tops (set (mapcat (fn [{:keys [ns forms]}] (when ns (top-names ns forms))) parsed))
+        ;; read in parallel (reading class forms takes no ids: no #() or syntax-quote in them),
+        ;; the largest files first (the compiled namespaces' are up to 2.6 MB)
+        parse (fn [ins]
+                (let [fs (vec (mapcat source-files ins))]
+                  (m/par-mapv (m/jobs) (fn [f] (let [forms (read-forms f)] {:file f :forms forms :ns (ns-of-forms forms)}))
+                              fs
+                              (sort-by #(- (.length (io/file (nth fs %)))) (range (count fs))))))
+        parsed (atom (parse inputs))
+        top-set (fn [ps] (set (mapcat (fn [{:keys [ns forms]}] (when ns (top-names ns forms))) ps)))
+        tops (atom (top-set @parsed))
         top-of (fn [^String n] (let [i (.indexOf n "$")] (if (neg? i) n (subs n 0 i))))
-        from-source (fn [n] (contains? tops (top-of n)))
+        from-source (fn [n] (contains? @tops (top-of n)))
         cs (atom {})
         unit (new-unit)
         failed (atom [])]
     (binding [env/*compile-set* cs
               a/*unit* unit
               env/*from-source* from-source]
-      ;; the sequential part (entering, headers, members, bridges, the runtime's analysis) in an
-      ;; id space of its own too: its temporaries' names then do not depend on what the running
-      ;; program evaluated before (a tool loaded from source compiles its fns as they are first
-      ;; called, taking ids; SA143)
+      ;; the sequential part (entering, headers, members, bridges) in an id space of its own
+      ;; too: its temporaries' names then do not depend on what the running program evaluated
+      ;; before (a tool loaded from source compiles its fns as they are first called, taking
+      ;; ids; SA143)
       (when-let [^ThreadLocal space (id-space)]
         (.set space (java.util.concurrent.atomic.AtomicInteger. (int analysis-id-base))))
-      (doseq [{:keys [file forms ns]} parsed :when ns]
-        (binding [*ns* *ns*]
-          (doseq [fm forms
-                  :when (and (seq? fm) (symbol? (first fm)) (#{"in-ns" "import"} (name (first fm))))]
-            (a/eval-ns-form! fm))
-          (let [nsobj *ns*]
-            (doseq [cf (class-forms forms)]
-              (try
-                (let [n (first (top-names ns [cf]))
-                      vfs (get variants n)
-                      [cf counts] (apply-variant cf (or vfs []) n #(get variants %) applied)
-                      _ (when vfs (swap! applied assoc n counts))
-                      pc (p/parse-class {:ns nsobj :nesting :top} (rest cf))]
-                  (when-not (a/decl (a/top-name nsobj pc))
-                    (a/declare-class! {:nesting :top} pc)))
-                (catch Throwable e
-                  (swap! failed conj [(str file) (str "parse: " (.getMessage e))])))))))
-      ;; process-classes! 0, with failures per class recorded rather than fatal
-      (let [names @(:order unit)
-            t (atom (System/nanoTime))
+      (let [t (atom (System/nanoTime))
             laps (atom [])
-            lap (fn [k] (let [x (System/nanoTime)] (swap! laps conj [k (/ (Math/round (/ (- x @t) 1e7)) 100.0)]) (reset! t x)))]
-        (lap :declare)
-        (doseq [n names :when (not (:headers-done (a/decl n)))]
-          (try (a/resolve-header! n) (catch Throwable e (swap! failed conj [n (str "header: " (.getMessage e))]))))
-        (lap :headers)
-        (doseq [n names]
-          (try (a/resolve-members! n) (catch Throwable e (swap! failed conj [n (str "members: " (.getMessage e))]))))
-        (lap :members)
-        (doseq [n (#'a/supertypes-first names)]
-          (try (a/add-bridges! n) (catch Throwable e (swap! failed conj [n (str "bridges: " (.getMessage e))]))))
-        (lap :bridges)
-        (doseq [n names]
-          (try (#'a/mark-enum-abstract! n) (catch Throwable e (swap! failed conj [n (str "enum: " (.getMessage e))]))))
-        ;; the code, in parallel by top-level class (a class and its nested ones in one task,
-        ;; as their analysis shares the nest's counters), each task in an id space of its own
-        ;; starting at the same value (RT.ID_SPACE: the gensyms that name temporaries depend on
-        ;; the class alone; standalone S6, SA143)
-        (let [analyze! (fn [n]
-                         (try (a/analyze-class! n)
-                              (catch Throwable e
-                                (swap! (:state (a/decl n)) assoc :analysis-failed (.getMessage e))
-                                (swap! failed conj [n (str "analysis: " (.getMessage e)
-                                                           (some->> (.getCause e) .getMessage (str " / ")))]))))
-              ;; the runtime's classes one after another, as before: javac's rules make the
-              ;; analysis of a class depend on others' (a local class's captured variables);
-              ;; the compiled namespaces' classes (S6) depend on none of theirs, and are
-              ;; analyzed meanwhile: the runtime's on a thread of their own, in this thread's id
-              ;; space continued
-              compiled? (fn [n] (nm/compiled-class? n))
-              rt-space (some-> ^ThreadLocal (id-space) .get)
-              ;; (a host without id spaces: first, as before)
-              runtime (if rt-space
-                        (future
-                          (.set ^ThreadLocal (id-space) rt-space)
-                          (try (run! analyze! (remove compiled? names))
-                               (finally (.remove ^ThreadLocal (id-space)))))
-                        (do (run! analyze! (remove compiled? names)) nil))
-              names (filter compiled? names)
-              ;; a group's member classes before the class enclosing them (a holder's analysis
-              ;; would analyze its members, and one member's failure would fail the holder)
-              ;; each member class a task of its own (a compiled namespace's classes have no
-              ;; local or anonymous classes, whose numbering is the nest's), the top-level ones
-              ;; (holders, deftypes, loaders) after them
-              tops? (fn [^String n] (not (str/includes? n "$")))
-              groups (vec (concat (for [n names :when (not (tops? n))] [n])))
-              top-groups (vec (for [n names :when (tops? n)] [n]))]
-          (if-let [^ThreadLocal space (id-space)]
-            (doseq [gs [groups top-groups]]
-              (m/par-mapv (m/jobs)
-                          (fn [g]
-                            (.set space (java.util.concurrent.atomic.AtomicInteger. (int analysis-id-base)))
-                            (try (run! analyze! g) (finally (.remove space))))
-                          gs))
-            ;; a host without id spaces (older than SA143): one after another, as before
-            (run! analyze! names))
-          (lap :analysis-compiled)
-          (some-> runtime deref)
-          (when-let [^ThreadLocal space (id-space)] (.remove space)))
+            lap (fn [k] (let [x (System/nanoTime)] (swap! laps conj [k (/ (Math/round (/ (- x @t) 1e7)) 100.0)]) (reset! t x)))
+            enter! (fn [ps]
+                     (doseq [{:keys [file forms ns]} ps :when ns]
+                       (binding [*ns* *ns*]
+                         (doseq [fm forms
+                                 :when (and (seq? fm) (symbol? (first fm)) (#{"in-ns" "import"} (name (first fm))))]
+                           (a/eval-ns-form! fm))
+                         (let [nsobj *ns*]
+                           (doseq [cf (class-forms forms)]
+                             (try
+                               (let [n (first (top-names ns [cf]))
+                                     vfs (get variants n)
+                                     [cf counts] (apply-variant cf (or vfs []) n #(get variants %) applied)
+                                     _ (when vfs (swap! applied assoc n counts))
+                                     pc (p/parse-class {:ns nsobj :nesting :top} (rest cf))]
+                                 (when-not (a/decl (a/top-name nsobj pc))
+                                   (a/declare-class! {:nesting :top} pc)))
+                               (catch Throwable e
+                                 (swap! failed conj [(str file) (str "parse: " (.getMessage e))]))))))))
+            ;; process-classes! 0 for names, with failures per class recorded rather than fatal
+            resolve! (fn [names]
+                       (lap :declare)
+                       (doseq [n names :when (not (:headers-done (a/decl n)))]
+                         (try (a/resolve-header! n) (catch Throwable e (swap! failed conj [n (str "header: " (.getMessage e))]))))
+                       (lap :headers)
+                       (doseq [n names]
+                         (try (a/resolve-members! n) (catch Throwable e (swap! failed conj [n (str "members: " (.getMessage e))]))))
+                       (lap :members)
+                       (doseq [n (#'a/supertypes-first names)]
+                         (try (a/add-bridges! n) (catch Throwable e (swap! failed conj [n (str "bridges: " (.getMessage e))]))))
+                       (lap :bridges)
+                       (doseq [n names]
+                         (try (#'a/mark-enum-abstract! n) (catch Throwable e (swap! failed conj [n (str "enum: " (.getMessage e))])))))
+            analyze! (fn [n]
+                       (try (a/analyze-class! n)
+                            (catch Throwable e
+                              (swap! (:state (a/decl n)) assoc :analysis-failed (.getMessage e))
+                              (swap! failed conj [n (str "analysis: " (.getMessage e)
+                                                         (some->> (.getCause e) .getMessage (str " / ")))]))))
+            _ (enter! @parsed)
+            names1 @(:order unit)
+            _ (resolve! names1)
+            ;; the first round's classes (the runtime's) one after another, as before: javac's
+            ;; rules make the analysis of a class depend on others' (a local class's captured
+            ;; variables); on a thread of their own, from here, in an id space of their own that
+            ;; starts where the sequential part stands now (the same with or without the wait),
+            ;; and with an order of their own: the local and anonymous classes their analysis
+            ;; declares are processed from it (process-classes!), while the second round enters
+            ;; its classes in the unit's; the compiled namespaces' classes (S6) depend on none of
+            ;; theirs
+            rt-start (some-> ^ThreadLocal (id-space) ^java.util.concurrent.atomic.AtomicInteger (.get) .get)
+            rt-order (atom names1)
+            runtime (if rt-start
+                      (future
+                        (.set ^ThreadLocal (id-space) (java.util.concurrent.atomic.AtomicInteger. (int rt-start)))
+                        (try (binding [a/*unit* (assoc unit :order rt-order)]
+                               (run! analyze! names1))
+                             (finally (.remove ^ThreadLocal (id-space)))))
+                      ;; (a host without id spaces: first, as before)
+                      (do (binding [a/*unit* (assoc unit :order rt-order)] (run! analyze! names1)) nil))
+            _ (lap :analysis-started)
+            _ (when wait (wait))
+            _ (lap :wait)
+            parsed2 (parse late-inputs)
+            _ (lap :read)
+            _ (swap! tops into (top-set parsed2))
+            _ (swap! parsed into parsed2)
+            _ (enter! parsed2)
+            names2 (vec (drop (count names1) @(:order unit)))
+            _ (resolve! names2)
+            ;; a group's member classes before the class enclosing them (a holder's analysis
+            ;; would analyze its members, and one member's failure would fail the holder)
+            ;; each member class a task of its own (a compiled namespace's classes have no
+            ;; local or anonymous classes, whose numbering is the nest's), the top-level ones
+            ;; (holders, deftypes, loaders) after them; each task in an id space of its own
+            ;; starting at the same value (RT.ID_SPACE: the gensyms that name temporaries depend
+            ;; on the class alone; standalone S6, SA143)
+            tops? (fn [^String n] (not (str/includes? n "$")))
+            groups (vec (for [n names2 :when (not (tops? n))] [n]))
+            top-groups (vec (for [n names2 :when (tops? n)] [n]))]
+        (if-let [^ThreadLocal space (id-space)]
+          (doseq [gs [groups top-groups]]
+            (m/par-mapv (m/jobs)
+                        (fn [g]
+                          (.set space (java.util.concurrent.atomic.AtomicInteger. (int analysis-id-base)))
+                          (try (run! analyze! g) (finally (.remove space))))
+                        gs))
+          ;; a host without id spaces (older than SA143): one after another, as before
+          (run! analyze! names2))
+        (lap :analysis-compiled)
+        (some-> runtime deref)
+        ;; the unit's order as one round made it: the first round's classes, the second's, the
+        ;; classes the first round's analysis declared, then any the second's did
+        (let [main @(:order unit)]
+          (reset! (:order unit) (vec (concat names1 names2 (drop (count names1) @rt-order)
+                                             (drop (+ (count names1) (count names2)) main)))))
+        (when-let [^ThreadLocal space (id-space)] (.remove space))
         (lap :analysis-runtime)
         (println (str "a2g: load (s): " (str/join ", " (for [[k v] @laps] (str (name k) " " v)))))))
     (doseq [n (keys variants) :when (not (contains? @applied n))]
       (swap! failed conj [n "a variant for a class not in the inputs"]))
-    {:compile-set cs :unit unit :from-source from-source :files files :tops tops
+    {:compile-set cs :unit unit :from-source from-source :files (mapv :file @parsed) :tops @tops
      ;; the class forms file of each top-level class (the Go file named after it, §4.3)
-     :source-of (into {} (for [{:keys [file ns forms]} parsed :when ns
+     :source-of (into {} (for [{:keys [file ns forms]} @parsed :when ns
                                n (top-names ns forms)]
                            [n (str file)]))
      :failed (vec (sort-by (juxt first second) @failed)) :variants @applied :erased erased}))
