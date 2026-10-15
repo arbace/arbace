@@ -31,7 +31,7 @@
                   profile-guided optimization (doc/go/SPEED-NOTES.md)
     --print-cache DIR  a cache of printed packages (with G2A_HOST_ID set, as bin/g2a sets it
                   for this option): a package the same host printed from the same forms
-                  is not printed again
+                  is not printed again, nor its forms read (DIR/collect/, the collect index)
     --goos        linux (default); darwin (the box's launcher on the Mac, cgo off: S4, BX61);
                   or tamago: a guest image for the box (doc/go/BOX-NOTES.md,
                   S1), built with GOOS=tamago and TamaGo's goos module as GOOSPKG
@@ -102,12 +102,15 @@
 (defn packages
   "The program's packages: the package files under DIR/go, each collected (arbace.g2a.print
   /collect) with :file (the package file) and :path; then those of each of the other roots
-  (--root), but their main packages."
-  ([^File dir] (packages dir nil))
-  ([^File dir roots]
-   (let [own (root-packages dir)
+  (--root), but their main packages. With print-cache (a directory) and the environment's
+  G2A_HOST_ID, a package whose files are unchanged since the same host collected it is taken
+  from the print cache's collect index, its forms read only if it must be printed (collected)."
+  ([^File dir] (packages dir nil nil))
+  ([^File dir roots] (packages dir roots nil))
+  ([^File dir roots print-cache]
+   (let [own (root-packages dir print-cache)
          more (for [r roots
-                    pkg (root-packages (File. (str r)))
+                    pkg (root-packages (File. (str r)) print-cache)
                     :when (not= "main" (str (:name pkg)))]
                 pkg)
          pkgs (vec (concat own more))]
@@ -127,28 +130,114 @@
       (let [k (.getAbsolutePath f)]
         (if (contains? cache k) (get cache k) (p/read-forms f))))))
 
+(defn- hex [^bytes bs]
+  (apply str (map #(format "%02x" (bit-and % 0xff)) bs)))
+
+(defn- file-sha
+  "The SHA-256 of a file's bytes, or nil when it is not a file."
+  [^File f]
+  (when (.isFile f)
+    (hex (.digest (MessageDigest/getInstance "SHA-256") (Files/readAllBytes (.toPath f))))))
+
+(defn- collect-package
+  "Package file f collected (arbace.g2a.print/collect), with :file, :path and :read (the forms
+  files it is made of: print-module's cache key)."
+  [^File dir ^File f read-fn]
+  (let [read (atom [])
+        pkg (p/collect f (fn [file] (swap! read conj file) (read-fn file)))
+        path (:path (:package pkg))]
+    (when-not (string? path)
+      (fail (str (rel-path dir f) ": go/package without :path")))
+    (assoc pkg :file f :path path :read @read)))
+
+;; The collect index (with --print-cache): per source root and host, what collecting found, so
+;; that a build whose packages are in the print cache reads no forms (reading is most of g2a's
+;; time on the Go executable): {:package-file? {sha bool} :packages {package file's path {:read
+;; [[path sha] ...] :pkg {:package :name :path}}}}. An entry holds while every file it read has
+;; the same SHA-256; collect and package-file? are functions of those files' contents and paths.
+
+(defn- collect-index-file ^File [print-cache host-id ^File dir]
+  (let [md (MessageDigest/getInstance "SHA-256")]
+    (.update md (.getBytes (str host-id "\n" (.getPath dir)) "UTF-8"))
+    (File. (File. (str print-cache) "collect") (hex (.digest md)))))
+
+(defn- read-index
+  "The collect index in f, or nil; its mtime set, as the print cache's entries' (trimmed alike)."
+  [^File f]
+  (when (.isFile f)
+    (.setLastModified f (System/currentTimeMillis))
+    (try (let [[m] (p/read-forms f)] (when (map? m) m))
+         (catch Throwable _ nil))))
+
+(defn- write-index!
+  "Writes the collect index atomically (a file renamed); an entry whose data does not print and
+  read back equal (metadata included) is left out."
+  [^File f index]
+  (let [printed #(binding [*print-meta* true *print-length* nil *print-level* nil] (pr-str %))
+        ok? #(try (= % (read-string (printed %))) (catch Throwable _ false))
+        index (update index :packages #(into (sorted-map) (filter (comp ok? :pkg val)) %))
+        tmp (File. (.getParentFile f) (str (.getName f) ".tmp." (System/nanoTime)))]
+    (.mkdirs (.getParentFile f))
+    (spit tmp (printed index))
+    (when-not (.renameTo tmp f) (.delete tmp))))
+
 (defn- root-packages
-  "The package files under DIR/go, collected."
-  [^File dir]
+  "The package files under DIR/go, collected (with print-cache, from the collect index when
+  their files are unchanged: :collected then delays the collection, collected-package)."
+  [^File dir print-cache]
   (let [root (File. dir "go")]
     (when-not (.isDirectory root)
       (fail (str "no " (.getPath root) ": the program's forms go under DIR/go (doc/go/BUILD.md)")))
     (let [files (clj-files root)
-          read-fn (read-all files)
-          pkgs (for [f files :when (package-file? f read-fn)]
-                 (let [read (atom [])
-                       pkg (p/collect f (fn [file] (swap! read conj file) (read-fn file)))
-                       path (:path (:package pkg))]
-                   (when-not (string? path)
-                     (fail (str (rel-path dir f) ": go/package without :path")))
-                   ;; :read, the forms files the package is made of (print-module's cache)
-                   (assoc pkg :file f :path path :read @read)))]
+          host-id (System/getenv "G2A_HOST_ID")
+          index-file (when (and print-cache (seq host-id)) (collect-index-file print-cache host-id dir))
+          index (when index-file (or (read-index index-file) {}))
+          shas (when index-file
+                 (let [m (zipmap (map #(.getPath ^File %) files) (pmap file-sha files))]
+                   (fn [^String path] (if (contains? m path) (get m path) (file-sha (File. path))))))
+          valid (when index-file
+                  (into {} (for [[path e] (:packages index)
+                                 :when (every? (fn [[rp sha]] (= sha (shas rp))) (:read e))]
+                             [path e])))
+          covered (set (for [[_ e] valid [rp] (:read e)] rp))
+          pf-index (:package-file? index)
+          known? #(and index-file (contains? pf-index (shas (.getPath ^File %))))
+          read-fn (read-all (filter #(not (and (known? %) (covered (.getPath ^File %)))) files))
+          pkg-file? (fn [^File f]
+                      (if (known? f) (get pf-index (shas (.getPath f))) (package-file? f read-fn)))
+          pkgs (vec (for [^File f files :when (pkg-file? f)]
+                      (if-let [e (get valid (.getPath f))]
+                        (assoc (:pkg e) :file f :read (mapv #(File. ^String (first %)) (:read e))
+                               :collected (delay (collect-package dir f p/read-forms)))
+                        (collect-package dir f read-fn))))]
       (when (empty? pkgs)
         (fail (str "no package files (ns and go/package) under " (.getPath root))))
       (doseq [[path ps] (group-by :path pkgs) :when (> (count ps) 1)]
         (fail (str "two package files for " path ": "
                    (str/join ", " (map #(rel-path dir (:file %)) ps)))))
-      (vec pkgs))))
+      (when index-file
+        (let [index' {:package-file? (into (sorted-map)
+                                           (for [^File f files :let [sha (shas (.getPath f))] :when sha]
+                                             [sha (boolean (pkg-file? f))]))
+                      :packages (into (sorted-map)
+                                      (for [pkg pkgs]
+                                        [(.getPath ^File (:file pkg))
+                                         {:read (mapv (fn [^File r] [(.getPath r) (shas (.getPath r))]) (:read pkg))
+                                          :pkg (select-keys pkg [:package :name :path])}]))}]
+          (when-not (= index' index)
+            (write-index! index-file index'))))
+      pkgs)))
+
+(defn- collected-package
+  "A package from the collect index collected, its forms read (to print it): the same package
+  as the index's."
+  [pkg]
+  (if-let [d (:collected pkg)]
+    (let [c @d]
+      (when-not (= (select-keys c [:package :name :path :read]) (select-keys pkg [:package :name :path :read]))
+        (fail (str (:path pkg) ": collected again, the package differs from the collect index's")))
+      c)
+    pkg))
 
 (defn- read-program-edn [^File dir]
   (let [f (File. dir "program.edn")]
@@ -255,7 +344,7 @@
   :go (opts) the language version when program.edn does not (else the toolchain's)."
   ([^File dir goroot] (program dir goroot {}))
   ([^File dir goroot {:keys [library? roots] :as opts}]
-  (let [pkgs (packages dir roots)
+  (let [pkgs (packages dir roots (:print-cache opts))
         mains (filter #(= "main" (str (:name %))) pkgs)
         _ (when-not (or (= 1 (count mains)) (and library? (empty? mains)))
             (fail (str "a program has one main package; found " (count mains)
@@ -327,15 +416,16 @@
     (apply str (map #(format "%02x" (bit-and % 0xff)) (.digest md)))))
 
 (defn- cached-texts
-  "The printed files of a package from the print cache (its entry's mtime set: bin/arbace-go
-  trims entries unused for hours), or nil."
+  "The printed files of a package from the print cache, each the File of its entry's copy (its
+  bytes copied as they are, not decoded and encoded again), or nil. The entry's mtime is set:
+  bin/arbace-go trims entries unused for hours."
   [^File entry]
   (let [names (File. entry "names")]
     (when (.isFile names)
       (.setLastModified entry (System/currentTimeMillis))
       (into (sorted-map)
             (for [n (str/split-lines (slurp names)) :when (seq n)]
-              [n (slurp (File. entry (str "f-" n)))])))))
+              [n (File. entry (str "f-" n))])))))
 
 (defn- cache-texts!
   "Records a package's printed files in the print cache, atomically (a directory renamed)."
@@ -376,15 +466,15 @@
                     opts (cond-> {:layout (or layout (if line-file :lines :gofmt))}
                            line-file (assoc :line-file true))
                     test-files (set (map str (:test-files (:package pkg))))
-                    pkg (if tests
-                          pkg
-                          (update pkg :files (fn [fs] (filterv #(not (test-files (str (:name %)))) fs))))
+                    printable #(if tests
+                                 %
+                                 (update % :files (fn [fs] (filterv (fn [f] (not (test-files (str (:name f))))) fs))))
                     host-id (System/getenv "G2A_HOST_ID")
                     entry (when (and print-cache (seq host-id))
                             (let [k (print-cache-key host-id pkg dir opts tests)]
                               (File. (File. (str print-cache) (subs k 0 2)) k)))
                     texts (or (when entry (cached-texts entry))
-                              (let [t (p/print-forms (cond-> pkg line-file with-line-files) opts)]
+                              (let [t (p/print-forms (cond-> (printable (collected-package pkg)) line-file with-line-files) opts)]
                                 (when entry
                                   (.mkdirs (.getParentFile entry))
                                   (cache-texts! entry t))
@@ -398,7 +488,9 @@
                              " but go/file forms " (pr-str (vec (keys texts))))))
                 (.mkdirs pdir)
                 (doseq [[n text] texts]
-                  (spit (File. pdir ^String n) text))
+                  (if (instance? File text)
+                    (copy-file text (File. pdir ^String n))
+                    (spit (File. pdir ^String n) text)))
                 (doseq [f (:other-files (:package pkg))]
                   (copy-file (File. src (str f)) (File. pdir (str f))))
                 (doseq [[f h] (:embed-files (:package pkg))]

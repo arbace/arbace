@@ -147,6 +147,16 @@ before each build of entries unused for six hours (`bin/lib/gocache.bash`,
 `ARBACE_GOCACHE_KEEP_MIN`). The printed module is the same either way (STANDALONE-NOTES.md, "The
 build's time (SA146-SA148)").
 
+The cache also keeps a collect index per source root and host (`DIR/collect/`, a file named by
+the SHA-256 of `G2A_HOST_ID` and the root's path; SA190): which forms files are package files
+(by their contents' SHA-256), and for each package file what collecting it found (its path, name
+and `go/package` options) and the files it read with their SHA-256. A package whose files all
+have the same SHA-256 is taken from the index without reading its forms; it is read and
+collected only if it must be printed (its printed files not in the cache), and must then equal
+the index's. Reading the forms was most of g2a's time on the Go executable: a build whose
+packages are all in the cache reads none. The printed files of a cached package are copied as
+they are. Indexes are trimmed with the entries (by mtime, set when read).
+
 Checked (2026-10-08) with the experiment's overlay of `.tmp/a2g-exp/gls/` (A2G-SPEC §13.3): a
 program of Go forms pulling `runtime.arbace_getLocal` with `//go:linkname` fails to link
 without the overlay (`relocation target runtime.arbace_getLocal not defined`) and builds and
