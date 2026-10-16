@@ -31,8 +31,11 @@ installation. The line's dependency closure is 485 packages, and the other 75 co
 `install_if`: the `-openrc` service scripts, the `-pyc` caches, `git-perl`, `gcc-gdb` and the
 like. apk adds those on its own when what they name is present.
 
-Packages installed on the host after 2026-10-12 for the user's own use (ffmpeg, for screen
-recordings; world holds 85 since) are outside Arbace's set and not in the line.
+Packages installed on the host after 2026-10-12 for the user's own use are outside Arbace's set
+and not in the line above: ffmpeg, installed to watch the user's screen recording about Moshi
+(the touch terminal, [IOS-REPL-SURVEY.md](IOS-REPL-SURVEY.md)), and kept by the user's choice
+(2026-10-16). With it world holds 85, `bin/alpine-env world` derives a line of 68 (the 67 and
+ffmpeg), and 636 packages are installed; `check` confirms that line.
 
 `bin/alpine-env` derives and checks it:
 
