@@ -80,6 +80,15 @@ The current state of the work. This file is rewritten as things change. For the 
   sequential load after the tree arrives (about 10 s: entering, headers, members, bridges), and
   reachability's scan (12 to 16 s, one core).
 
+- Running: Arbace independent of go-whim and of cgo (the user, 2026-10-16: go-whim is a vim
+  derivative, application level; its virtualization was a pilot and will be pruned). go-whim's
+  tests vendored into `box/` and adapted, its C guests rewritten in Go's assembly (GW2 (a)),
+  `bin/box-vendor`'s replay from go-whim retired (GW3 (a)), cgo dropped with the race detector
+  (CG1 (a)); branch `no-gowhim`.
+- Running: SA220 (b) (the compiled tree in several files) and SA230 (a) (ids independent of the
+  checkout's path), on the third round's integration branch `speed3` (parts A, B, C merged
+  there; SA210 (a), SA211 (a) decided).
+
 ## Later
 
 - The standalone Arbace: no Java binary compatibility, with Java at the source level through j2a.

@@ -269,3 +269,26 @@ merged: the benchmarks as a namespace, 9,000 deep, tail calls trampolined, endin
 deleted without a tag, by the user's decision: its numbers and design are in
 doc/STANDALONE-NOTES.md ("Benchmarks and T3 (SA139)"), whose two references to the branch now say
 the build was not kept.
+
+## 2026-10-16: Arbace to depend on neither go-whim nor cgo (the user)
+
+The user: "you should not depend on go-whim, that is a vim derivative, so it's at application
+level, not system level, the virtualization there was a pilot project, will be pruned, so vendor
+and adapt everything needed from go-whim, what's more: consider dropping cgo dependency
+altogether". What still needed go-whim (https://github.com/arbace/go-whim at `80c49bf`, in
+`/root/go-whim`): `box/`'s code was already vendored as forms (S0, S1); its checks were not:
+`bin/box-vendor kvm-tests` (in `--full`) and the arm64 VM's `hv` ran go-whim's own tests from a
+clone, `convert` and `check` replayed S0's derivation, and go-whim's module requirements sat in
+Go's module cache for that clone. cgo: no Arbace package imports "C" (the Mac's launcher binds
+its frameworks through purego); `CGO_ENABLED=1` only for the race detector (`bin/jrt test
+--race`, `bin/a2g-race`: hand-run, in no gate; Go's `-race` requires cgo), unconditionally in
+`bin/jrt test`, and the go-whim guest tests' C guests needed gcc and ld scripts. Decided, as
+recommended: GW2 (a) the C guests rewritten in Go's assembly, built by TamaGo's own asm and link
+(alternatives: drop them, or keep C with gcc); GW3 (a) the replay from go-whim retired, `box/`
+Arbace's own source, its origin recorded (alternative: keep it optional); CG1 (a) cgo dropped
+entirely with the race detector (alternative: keep it optional for `-race`), a2g's parallelism
+still guarded by its byte-for-byte checks and the fixpoint. Also decided for the speed's third
+round: SA210 (a), SA211 (a) (the loader in member parts of 100 units; their frames named by the
+part), SA220 (b) (the compiled tree in several files), SA230 (a) (an id slot only for sources
+loaded by a resource path, so the compiled program does not depend on the checkout's path:
+found when a worktree's path made G2 differ from G3).
