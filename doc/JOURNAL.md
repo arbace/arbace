@@ -366,3 +366,11 @@ the concurrency file 40 times on a loaded host and 10 times each at `GOMAXPROCS`
 the whole oracle five times (`GOMAXPROCS` 1, 2, 64, 1, 2): every run the 53 known mismatches,
 none new. Alternatives: rerunning a failed case (hides real races), or recording such cases as
 noisy (they test real semantics that hold whatever the order).
+
+## 2026-10-16: a note on the translators' names (the user)
+
+The user: "take note: \"g2a\" name is unfortunate and misleading, maybe \"g2g\" would be better,
+or how to name these converters/compilers?". Noted in the agenda (Later) as a survey: g2a is a
+two-way syntax bridge between Go and Go forms, not a translation into Arbace as j2a and c2a are;
+a2g compiles class forms into Go forms. No renaming yet; the 2026-10-11 renaming (j2c, g2c, c2g
+to j2a, g2a, a2g) is the precedent for how a rename is carried out.

@@ -93,6 +93,14 @@ The current state of the work. This file is rewritten as things change. For the 
 
 ## Later
 
+- The translators' names (the user, 2026-10-16: "\"g2a\" name is unfortunate and misleading,
+  maybe \"g2g\" would be better, or how to name these converters/compilers?"). g2a works both
+  ways between Go and Go forms (Go in Arbace's syntax), a syntax bridge, while the `x2a` names
+  read as translations into Arbace; a2g turns class forms into Go forms. To survey: a scheme
+  naming each forms dialect (class forms, Go forms) and each tool by what it does (the 2026-10-11
+  renaming from j2c, g2c, c2g is the precedent; CLAUDE.md, the frozen branches and the dated
+  records keep the names of their time).
+
 - The standalone Arbace: no Java binary compatibility, with Java at the source level through j2a.
   The language is Clojure plus class forms, and later forms for Go. The goal is a
   self-sustaining REPL in a virtual sandbox, in Arbace down to the bare metal ISA, in the style
