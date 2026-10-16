@@ -85,9 +85,11 @@ The current state of the work. This file is rewritten as things change. For the 
 
 ## Next
 
+- Running: the build's speed, fourth round (the user, 2026-10-16): reachability's scan in
+  mutable state (6 to 8 s; branch `speed4-reach`) and the analysis' member-class group (about
+  15 s on 16 jobs; branch `speed4-analysis`).
 - The user's choice among Later's surveys. Smaller: the box's checks on the Mac on
-  macOS 26. Left of the speed: the scan's 6 to 8 s (mutable sets), the analysis' member-class
-  group (about 15 s on 16 jobs).
+  macOS 26.
 
 ## Later
 
