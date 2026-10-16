@@ -112,8 +112,13 @@ These are built or fetched once, and pinned where Arbace depends on their bytes:
     `--check` checks the seed's own hash), and its tree by `bin/tamago-vendor`.
   - Since 2026-10-12 nothing runs Alpine's `go`, so an upgrade of the `go` package changes
     nothing.
-- **Go's module cache**: `/root/go/pkg/mod`. The builds run with `GOPROXY=off`, so it must hold
-  these modules, each checked against the go.sum hash its script names:
+- **Go's module cache**: `/root/go/pkg/mod`. No build needs it: the seed's module requires
+  nothing, and the box takes TamaGo's goos module, purego and Mozilla's roots from their forms
+  (`tamago/goos/`, `box/`, `x509roots/`; checked 2026-10-16 by building stage 0 with an empty
+  cache). Only the checks that compare a vendored tree with its original (`bin/tamago-vendor
+  verify`, `check`, `ARBACE_BOX_GO=orig`; `bin/box-vendor purego-check`; `bin/x509roots-vendor
+  verify`, `check`) need these modules there, with `GOPROXY=off`, each checked against the go.sum
+  hash its script names:
   - TamaGo's goos module `github.com/usbarmory/tamago v1.27.1`;
   - `github.com/ebitengine/purego v0.11.1`;
   - `golang.org/x/crypto/x509roots/fallback v0.0.0-20261011195143-3b414e3e8284`.

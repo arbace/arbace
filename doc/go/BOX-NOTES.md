@@ -3524,3 +3524,5 @@ directories and the C toolchain (`gcc`, `cc`, `clang`, `ld`, `as`, `readelf`, `o
 - **GW9 the C toolchain left on the host.** gcc, musl-dev and binutils still come with
   `alpine-sdk`, for building jdk26u alone: (a) keep `alpine-sdk` (jdk26u's build needs it);
   (b) split the line into Arbace's and jdk26u's builds. Recommended (a).
+
+**Decided (2026-10-16, the user):** GW4-GW9 (a), as built; GW4 applied by the lead (CLAUDE.md).

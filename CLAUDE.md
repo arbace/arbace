@@ -15,7 +15,8 @@ Direction:
     binary compatible with it;
   - Go: `arbace-for-golang` (tag `arbace-for-go1.27.1-v1`, 2026-10-11), Arbace as one static
     executable for Linux, its runtime and the part of jdk26u it needs translated into Go.
-- The box, Arbace built with TamaGo as a guest of go-whim's monitor, is two milestones on main
+- The box, Arbace built with TamaGo as a guest of its own monitor (vendored from go-whim, a pilot
+  Arbace no longer depends on), is two milestones on main
   (not freezes: no branch): on amd64 with /dev/kvm (tag `arbace-box-amd64-v1`, 2026-10-12) and
   on arm64 (tag `arbace-box-arm64-v1`, 2026-10-12): KVM/arm64, checked in an emulated aarch64
   VM, and Hypervisor.framework on an M2 Max (the bundle of `bin/box-mac-bundle`, 42 of 42).
@@ -126,9 +127,11 @@ Prior art:
 - The box (B1b, `doc/go/BOX-SURVEY.md`, `doc/go/BOX-NOTES.md`): the same program built with
   TamaGo (`GOOS=tamago`) as a guest of a monitor on /dev/kvm (amd64) and Hypervisor.framework
   (arm64; KVM/arm64 too). `box/` holds the hypervisor API, the monitor, the doorbell ABI and the
-  TamaGo board, vendored as Go forms from go-whim, and purego for the launcher on darwin/arm64
-  (`box/README.md` records the origins; `bin/box-vendor` reproduces and proves them); import
-  paths `arbace/box/*`. `tamago/` holds the guest's own Go as Go
+  TamaGo board, vendored as Go forms from go-whim (at `80c49bf`) and Arbace's own since, with
+  their KVM tests on the box's own test guests (`arbace/box/guest`: a runtime-less guest in Go's
+  assembly, a demo and a faulty Go guest; 2026-10-16, nothing of go-whim needed), and purego for
+  the launcher on darwin/arm64 (`box/README.md` records the origins; `bin/box-vendor` checks
+  them: `roundtrip`, `kvm-tests`, `purego-check`); import paths `arbace/box/*`. `tamago/` holds the guest's own Go as Go
   forms (S6): TamaGo's runtime and standard library (`tamago/goroot/`, GOROOT/src's layout) and
   its `goos` module (`tamago/goos/`), for tamago/amd64 and tamago/arm64 as one tree, converted by `bin/tamago-vendor`
   (`convert`, `verify`; `check` proves the guest image built from them byte-identical to one
@@ -141,13 +144,14 @@ Prior art:
   toolchain's tree). `bin/arbace-go --build --box` builds the
   guest image and Arbace's launcher `arbace-box` (`--smoke --box`, which runs `bin/box-smoke`;
   `bin/box-suite`; arm64 with `ARBACE_BOX_ARCHES`). `bin/box-arm64-vm` runs an emulated aarch64
-  VM with KVM/arm64 for the arm64 box's checks (`check`: its smoke test, go-whim's tests);
+  VM with KVM/arm64 for the arm64 box's checks (`check`: its smoke test, `box/`'s KVM tests);
   `bin/box-mac-bundle` packs the Mac's launcher, guest and checklist (`box/mac/`). The store (S3):
   blobs and refs in a host directory (`ARBACE_BOX_STORE`, `arbace-box --store DIR`, which is also
   its tool), the namespace `arbace.box` over it in the box and natively.
 - `doc/ALPINE.md`: the host's Alpine packages as one minimal `apk add` line (`bin/alpine-env
   world`, `check`, `simulate`), the subset Arbace uses, and what apk does not provide (jdk26u,
-  TamaGo's Go, go-whim, Go's module cache).
+  TamaGo's Go, Go's module cache: only `bin/gate --full`'s vendoring checks need it). No build
+  uses cgo (`CGO_ENABLED=0` everywhere, 2026-10-16).
 - `Makefile`: a familiar interface for newcomers, nothing more (`make help`): each target runs a
   script of `bin/`, which holds the logic. Keep it in step with `bin/`: when a script's name or
   options change, or a script becomes an objective of the repo, update its target and `##` line;
