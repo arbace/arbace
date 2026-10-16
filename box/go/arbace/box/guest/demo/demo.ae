@@ -1,0 +1,166 @@
+;; Package demo is the box's demo guest's program (Arbace's, doc/go/BOX-NOTES.md, "go-whim
+;; vendored whole"): what the Go editor was to go-whim's Go guest tests, a program that runs the
+;; same natively and as a guest (cmd/demo), on a Host: the bytes it writes and its exit code are a
+;; function of its arguments and of the bytes it reads, however its reads are cut, so that a
+;; guest's run is held to the native run's on the same scripted host. Its commands, from its
+;; arguments and then from its input's lines:
+;;
+;;	work      a sum of SHA-256 over chunks hashed in parallel, one goroutine each (SMP)
+;;	suspend   the terminal given back (Marker), a wait that does not read, then Suspend
+;;	exit N    the end, with the exit code N
+;;	others    echoed, quoted
+;;
+;; At the end of its input it exits 3. A deadly signal (the deathtrap Init gave the host) is said
+;; and counted, and the program goes on.
+(in-ns 'go.arbace.box.guest.demo) (go/file "demo.go" :doc "Package demo is the box's demo guest's program (Arbace's, doc/go/BOX-NOTES.md, \"go-whim\nvendored whole\"): what the Go editor was to go-whim's Go guest tests, a program that runs the\nsame natively and as a guest (cmd/demo), on a Host: the bytes it writes and its exit code are a\nfunction of its arguments and of the bytes it reads, however its reads are cut, so that a\nguest's run is held to the native run's on the same scripted host. Its commands, from its\narguments and then from its input's lines:\n\n\twork      a sum of SHA-256 over chunks hashed in parallel, one goroutine each (SMP)\n\tsuspend   the terminal given back (Marker), a wait that does not read, then Suspend\n\texit N    the end, with the exit code N\n\tothers    echoed, quoted\n\nAt the end of its input it exits 3. A deadly signal (the deathtrap Init gave the host) is said\nand counted, and the program goes on.\n" :imports [
+
+
+    ^{:line 18} [sha256 "crypto/sha256"]
+    ^{:line 19} [binary "encoding/binary"]
+    ^{:line 20} [fmt "fmt"]
+    ^{:line 21} [strconv "strconv"]
+    ^{:line 22} [strings "strings"]
+    ^{:line 23} [sync "sync"]])
+
+
+
+
+(go/type Host "Host is what the program asks of its host: the calls of go-whim's editor.Host that a guest's\nread-ahead concerns (the guest makes them hypercalls; cmd/demo).\n" (interface
+
+
+    (^{:doc "Init starts catching the signals the program handles: the host calls deathtrap with a\ndeadly one.\n"} Init [^{:tag (func [^int32 sig])} deathtrap])
+
+
+
+    (^{:doc "WaitForInput waits up to ms milliseconds (for ever when negative) and says whether input is\nthere; ReadInput reads into buf: the count, 0 at the end of input, -1 when a signal came\nfirst.\n"} WaitForInput ^bool [^int64 ms])
+    (ReadInput ^int32 [^{:tag (slice byte)} buf])
+
+    (^{:doc "Write writes the program's output and returns the count.\n"} Write ^int32 [^{:tag (slice byte)} p])
+
+    (^{:doc "Suspend stops the program as a terminal's ^Z does, until it is continued.\n"} Suspend [])))
+
+
+
+
+(go/const ^{:val 250 :doc "InputBytes is the most one read asks: a guest's read-ahead holds as much (go-whim's\neditor.INBUFLEN, the core's).\n"} InputBytes 250)
+
+
+
+(go/const ^{:val "\u001b[?1004l" :doc "Marker is what suspend writes before its wait: the terminal's focus reports off, as the editor's\nstoptermcap writes before it stops.\n"} Marker "\u001b[?1004l")
+
+
+(go/const ^{:val 16 :doc "Chunks is how many goroutines work hashes in parallel.\n"} Chunks 16)
+
+(go/type program (struct
+    ^{:line 55 :tag Host} h
+    ^{:line 56 :tag int} lines
+    ^{:line 57 :tag int} signals))
+
+
+^{:go/end 62} (go/method say [^{:tag (* program)} p ^string format & ^{:tag (slice any)} args]
+  (.Write (.-h p) (conv (slice byte) (fmt/Sprintf format (spread args)))))
+
+
+^{:go/end 67} (go/method deathtrap [^{:tag (* program)} p ^int32 sig]
+  (inc! (.-signals p))
+  (.say p "demo: signal %d\n" sig))
+
+
+
+
+^{:go/end 112} (go/func Main "Main runs the program on h with its command line args (args[0] its name) and returns its exit\ncode.\n" ^int [^Host h ^{:tag (slice string)} args]
+  (let [p (addr (lit program :h h))]
+    (.Init h (.-deathtrap p))
+    (.say p "demo: %q\n" (subslice args 1))
+    (range [_ a (subslice args 1)]
+      (when [(values code end) (.command p a)] end
+        (return code)))
+
+
+    ^{:go/breaks [5]} (let [^{:tag (array InputBytes byte)} buf (zero (array InputBytes byte))
+        ^{:line 81 :tag (slice byte)} line (zero (slice byte))]
+      (while true
+        (when (not (.WaitForInput h -1))
+          (continue))
+
+        (let [n (.ReadInput h (subslice buf))]
+          (when (== n 0)
+            (break))
+
+          (when (< n 0)
+            (continue))
+
+          (range [_ c (subslice buf _ n)]
+            (when (and (!= c \return) (!= c \newline))
+              (set! line (append line c))
+              (continue))
+
+            (let [(values code end) (.command p (conv string line))]
+              (set! line (subslice line _ 0))
+              (when end
+                (return code))))))
+
+
+
+      (when (> (len line) 0)
+        (when [(values code end) (.command p (conv string line))] end
+          (return code)))
+
+
+      (.say p "demo: the end: %d lines, %d signals\n" (.-lines p) (.-signals p))
+      3)))
+
+
+
+^{:go/end 135} (go/method command "command runs one command; end when the program ends, with code.\n" [^{:tag (* program)} p ^string c] :results [^int code ^bool end]
+  (inc! (.-lines p))
+  (switch [f (strings/Fields c)]
+    (case [(and (== (len f) 1) (== (aget f 0) "work"))]
+      (.say p "demo: work %x\n" (Work (<< 1 18))))
+    (case [(and (== (len f) 1) (== (aget f 0) "suspend"))]
+      (.say p "%s" Marker)
+      (.WaitForInput (.-h p) 0)
+      (.Suspend (.-h p)))
+    (case [(and (== (len f) 2) (== (aget f 0) "exit"))]
+      (let [(values n err) (strconv/Atoi (aget f 1))]
+        (when (== err nil)
+          (.say p "demo: exit %d\n" n)
+          (return n true))
+
+        (.say p "demo: %q?\n" c)))
+    (default
+      (.say p "demo: %q\n" c)))
+
+  (return 0 false))
+
+
+
+
+^{:go/end 167} (go/func Work "Work is SHA-256 over the Chunks sums of n bytes each, the chunk i's bytes a generator's from i,\neach chunk hashed by a goroutine of its own: the same sum however many CPUs run them.\n" ^{:tag (array 32 byte)} [^int n]
+  (let [^{:tag (array Chunks (array 32 byte))} sums (zero (array Chunks (array 32 byte)))
+      ^{:line 141 :tag sync/WaitGroup} wg (zero sync/WaitGroup)]
+    (range [i Chunks]
+      (.Add wg 1)
+      (go (^{:go/end 157} (fn []
+            (defer (.Done wg))
+            (let [h (sha256/New)
+                ^{:line 147 :tag (array 4096 byte)} b (zero (array 4096 byte))
+                ^{:line 148} x (+ (conv uint64 i) 1)]
+              (for [left n] (> left 0) (set! left - (len b))
+                (for [j 0] (< j (len b)) (set! j + 8)
+                  (set! x (+ (* x 6364136223846793005) 1442695040888963407))
+                  (.PutUint64 binary/LittleEndian (subslice b j) x))
+
+                (.Write h (subslice b _ (min left (len b)))))
+
+              (.Sum h (subslice (aget sums i) _ 0)))))))
+
+
+    (.Wait wg)
+    (let [all (sha256/New)]
+      (range [_ s sums]
+        (.Write all (subslice s)))
+
+      (let [^{:tag (array 32 byte)} r (zero (array 32 byte))]
+        (.Sum all (subslice r _ 0))
+        ^{:line 166} r))))

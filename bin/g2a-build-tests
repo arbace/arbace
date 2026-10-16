@@ -1,8 +1,9 @@
 #!/bin/bash
 # The tests of g2a's program build (bin/g2a build, arbace.g2a.build, doc/go/BUILD.md): each
 # program test/g2a/build/PROG (Go forms) is built for linux/amd64 and linux/arm64 and
-#   - checked static (file: "statically linked"; readelf: no INTERP segment, no dynamic
-#     section),
+#   - checked static and for the architecture (tools/elfstatic, Go's debug/elf: an ELF executable
+#     for ARCH, no interpreter, no dynamic segment or section; until 2026-10-16 file(1) and
+#     binutils' readelf),
 #   - built a second time from a copy of PROG at another path, with --line-file layout too,
 #     and compared byte for byte (reproducibility),
 #   - run on each case PROG/runs/NAME.args (the arguments, one per line), stdin NAME.in (none:
@@ -13,6 +14,7 @@
 # Usage: bin/g2a-build-tests [--arch amd64|arm64]... [PROG...]
 # Environment: G2A_GOROOT (default /root/tamago-go), as bin/g2a. Work in .tmp/g2a-build-tests/.
 set -euo pipefail
+export CGO_ENABLED=0 # Go's builds never use cgo (doc/go/BOX-NOTES.md, "... cgo dropped", 2026-10-16)
 root=$(cd "$(dirname "$0")/.." && pwd)
 qemu=${QEMU_AARCH64:-/usr/bin/qemu-aarch64}
 out=$root/.tmp/g2a-build-tests
@@ -32,6 +34,9 @@ fi
 
 rm -rf "$out"
 mkdir -p "$out/copy"
+goroot=${G2A_GOROOT:-/root/tamago-go}
+(cd "$root/tools/elfstatic" && env -u GOOS -u GOARCH GOROOT="$goroot" GOTOOLCHAIN=local GOFLAGS= GOWORK=off \
+   GOPROXY=off "$goroot/bin/go" build -o "$out/elfstatic" .)
 pass=0
 fails=0
 fail() { echo "FAIL $*"; fails=$((fails + 1)); }
@@ -53,18 +58,8 @@ for prog in "${progs[@]}"; do
     fi
     t1=$(date +%s.%N)
     ok
-    # static: no interpreter, no dynamic section
-    info=$(file -b "$exe")
-    if [[ $info == *"statically linked"* ]] && ! readelf -lW "$exe" | grep -q INTERP &&
-       readelf -d "$exe" | grep -q 'no dynamic section'; then
-      ok
-    else
-      fail "$prog $arch: not static: $info"
-    fi
-    case $arch in
-      amd64) [[ $info == *x86-64* ]] && ok || fail "$prog $arch: $info" ;;
-      arm64) [[ $info == *aarch64* ]] && ok || fail "$prog $arch: $info" ;;
-    esac
+    # static, and for the architecture: no interpreter, no dynamic segment or section
+    if info=$("$out/elfstatic" "$arch" "$exe" 2>&1); then ok; else fail "$prog $arch: $info"; fi
     # reproducible: from another path, byte for byte; --line-file too
     "$root/bin/g2a" build --arch "$arch" -o "$exe.again" "$out/copy/$prog" > "$exe.again.log" 2>&1 \
       && cmp -s "$exe" "$exe.again" && ok || fail "$prog $arch: a second build differs"

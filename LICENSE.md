@@ -102,6 +102,15 @@ covers what.
   go-whim, and the files carry no other copyright or licence notice. The user stated on
   2026-10-11 that these parts are licensed to Arbace under the Eclipse Public License 1.0
   (decision D8, doc/go/BOX-SURVEY.md §10). go-whim keeps its own copy under its own terms.
+  The test guests and their tests (`box/go/arbace/box/guest.ae`, `guest/`: the packages
+  `arbace/box/guest`, `guest/demo`, `guest/cmd/demo`, `guest/cmd/faulty` and `guest/cmd/bare`,
+  with `bare_amd64.s` and `bare_arm64.s`), added on 2026-10-16 when go-whim was vendored whole
+  (doc/go/BOX-NOTES.md, "go-whim vendored whole"), adapt more of the same commit: its
+  `guest/guest_test.go`, `smp_test.go`, `readahead_test.go`, `guest/tamago/main.go`,
+  `guest/tamago/faulty/main.go` and `guest/rt/` (`hello.c`, `rt.c`, `entry_amd64.S`,
+  `entry_arm64.S`, rewritten in Go's assembly), whose history in go-whim also has the user as
+  its single author; under the Eclipse Public License 1.0 on the same terms as D8 (the user's
+  decision of 2026-10-16 to vendor and adapt everything Arbace needs from go-whim).
   What these packages build with: on darwin, `hv` and `libsys` import purego (the next entry),
   and a guest built on `board` links TamaGo's `goos` module (https://github.com/usbarmory/tamago
   v1.27.1, BSD 3-Clause License, Copyright (c) The TamaGo Authors) and TamaGo's Go tree (Go's

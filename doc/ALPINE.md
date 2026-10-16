@@ -70,17 +70,24 @@ scripts and has not yet been tried on a fresh host.
 | The REPL's line editing (the executable runs its interactive REPL under it, doc/go/EXEC-NOTES.md; checked by `bin/arbace-go --smoke` and `bin/box-smoke`; optional) | `rlwrap` |
 | arm64 executables run on amd64 (`bin/arbace-go`, `bin/jrt`, `bin/a2g-evalproof`) | `qemu-aarch64` |
 | The arm64 box's checks (`bin/box-arm64-vm`) | `qemu-system-aarch64 openssh-client` |
-| go-whim's KVM tests and jrt's tests use cgo; `readelf` | `gcc musl-dev linux-headers binutils` |
 | jrt-convert's generator JDK, and the boot JDK for jdk26u | `openjdk25-jdk` (on this host by `openjdk25-src`) |
 | Building jdk26u (headless) | `alpine-sdk autoconf zip alsa-lib-dev cups-dev fontconfig-dev` |
 | Bootstrapping TamaGo's Go from source | `go` (Alpine's Go, used for nothing else) |
+
+Since 2026-10-16 nothing Arbace builds needs a C toolchain: go-whim's tests and their C guests
+(which needed `clang` and a linker), jrt's `--race` and `bin/a2g-race` (Go's race detector needs
+cgo) are gone, every Go build runs with `CGO_ENABLED=0`, and `bin/g2a-build-tests` checks its
+executables with Go's `debug/elf` (`tools/elfstatic`) instead of binutils' `readelf` and
+`file` (doc/go/BOX-NOTES.md, "go-whim vendored whole"). The row `gcc musl-dev linux-headers
+binutils` left the table and the line; gcc, musl-dev and binutils still come with `alpine-sdk`,
+for building jdk26u alone.
 
 As one line:
 
 ```sh
 apk add bash coreutils findutils grep sed diffutils tar xz cpio unzip python3 git curl \
-  ca-certificates rlwrap qemu-aarch64 qemu-system-aarch64 openssh-client gcc musl-dev \
-  linux-headers binutils openjdk25-jdk alpine-sdk autoconf zip alsa-lib-dev cups-dev fontconfig-dev go
+  ca-certificates rlwrap qemu-aarch64 qemu-system-aarch64 openssh-client openjdk25-jdk \
+  alpine-sdk autoconf zip alsa-lib-dev cups-dev fontconfig-dev go
 ```
 
 ## What apk does not provide
@@ -99,23 +106,20 @@ These are built or fetched once, and pinned where Arbace depends on their bytes:
     `jdk/`, not the checkout.
 - **TamaGo's Go**, go1.27.1 (https://github.com/usbarmory/tamago-go, VERSION 2026-08-28), in
   `/root/tamago-go` (`G2A_GOROOT`).
-  - It builds everything Go: the executables, the box, g2a's helpers and go-whim's monitor and
-    tests.
+  - It builds everything Go: the executables, the box (its monitor, its guests and their tests),
+    g2a's helpers. Always with `CGO_ENABLED=0`: nothing Arbace builds uses cgo or a C compiler.
   - Its `src/` is pinned by `seed/goroot.sha256` (checked by `bin/seed --build` and `--verify`;
     `--check` checks the seed's own hash), and its tree by `bin/tamago-vendor`.
   - Since 2026-10-12 nothing runs Alpine's `go`, so an upgrade of the `go` package changes
     nothing.
-- **go-whim**: https://github.com/arbace/go-whim at `80c49bf`, in `/root/go-whim`
-  (`bin/box-vendor`).
 - **Go's module cache**: `/root/go/pkg/mod`. The builds run with `GOPROXY=off`, so it must hold
   these modules, each checked against the go.sum hash its script names:
   - TamaGo's goos module `github.com/usbarmory/tamago v1.27.1`;
   - `github.com/ebitengine/purego v0.11.1`;
-  - `golang.org/x/crypto/x509roots/fallback v0.0.0-20261011195143-3b414e3e8284`;
-  - go-whim's requirements (`remyoudompheng/bigfft` and five `modernc.org` modules).
+  - `golang.org/x/crypto/x509roots/fallback v0.0.0-20261011195143-3b414e3e8284`.
 
   `bin/x509roots-vendor` and `bin/box-vendor` download theirs when missing.
 - **Fetched by the scripts into `.tmp/`**:
   - Clojure's suite's jars from Maven Central (`bin/clojure-tests`, checked by SHA-1);
   - Alpine 3.24.2's aarch64 netboot for the arm64 VM (`bin/box-arm64-vm`).
-- **/dev/kvm**, for the box on amd64 (`bin/arbace-go --smoke --box`, go-whim's tests).
+- **/dev/kvm**, for the box on amd64 (`bin/arbace-go --smoke --box`, `bin/box-vendor kvm-tests`).

@@ -3,7 +3,10 @@
 go-whim's box, vendored as Go forms (B1b stage S0, [doc/go/BOX-NOTES.md](../doc/go/BOX-NOTES.md);
 decisions D3 (a) and D8, [doc/go/BOX-SURVEY.md](../doc/go/BOX-SURVEY.md) §10): the hypervisor API,
 the monitor, the doorbell ABI and the TamaGo board on which a Go program runs as a guest of
-/dev/kvm or Hypervisor.framework. `box/` is a source root of Go forms of its own, laid out as
+/dev/kvm or Hypervisor.framework; since 2026-10-16 with go-whim's guest tests too, on guests of
+the box's own (`guest`, below), so that nothing of go-whim is needed to build or check the box
+(BOX-NOTES.md, "go-whim vendored whole: Arbace independent of it; cgo dropped"). `box/` is a
+source root of Go forms of its own, laid out as
 SPEC §4.1 lays out packages (`box/go/<import path>.ae`), like `overlay/`: outside `go/`, so that
 jrt's module (`bin/jrt`, which prints `go/`) and the Go build are unchanged until stage S1 brings
 the box into a program.
@@ -18,6 +21,10 @@ the box into a program.
 | `arbace/box/cmd/arbace-box` | `go/arbace/box/cmd/arbace_box.ae`, `arbace_box/` | Arbace's own (S1): the launcher, modelled on `vmm/cmd/whim-guest` |
 | `arbace/box/tree` | `go/arbace/box/tree.ae`, `tree/` | Arbace's own (S7): the store's file trees, a spawn's request and result |
 | `arbace/box/tool` | `go/arbace/box/tool.ae`, `tool/` | Arbace's own (S7): the tool guests' shim (GOOS=tamago) |
+| `arbace/box/guest` | `go/arbace/box/guest.ae`, `guest/` | go-whim's guest tests (`guest/guest_test.go`, `smp_test.go`, `readahead_test.go`), adapted to the guests below; their builder (2026-10-16) |
+| `arbace/box/guest/demo`, `.../guest/cmd/demo` | `guest/demo.ae`, `guest/demo/`, `guest/cmd/demo.ae`, `guest/cmd/demo/` | Arbace's own: the demo guest, in the Go editor guest's place; its host is go-whim's `guest/tamago/main.go`'s (2026-10-16) |
+| `arbace/box/guest/cmd/faulty` | `guest/cmd/faulty.ae`, `guest/cmd/faulty/` | `guest/tamago/faulty/` (2026-10-16) |
+| `arbace/box/guest/cmd/bare` | `guest/cmd/bare.ae`, `guest/cmd/bare/` (`bare_amd64.s`, `bare_arm64.s`) | go-whim's C guest (`guest/rt/`: `hello.c`, `rt.c`, `entry_*.S`, `link_*.ld`, the tests' stand-ins) rewritten in Go's assembly (2026-10-16) |
 | `arbace/box/purego`, `.../internal/fakecgo`, `.../internal/strings` | `go/arbace/box/purego.ae`, `purego/` | not go-whim's: purego v0.11.1 (S4, below) |
 
 `mac/` (S4): the Mac's checklist `mac.sh` (after go-whim's `guest/mac/mac.sh`), the hypervisor
@@ -35,10 +42,12 @@ carry no `:config`, and each file's build constraints select it, as gc does). Th
 (`board/*.s`) is copied as it is (SPEC §9.5). Go's other comments are `;` comments in the forms,
 which the printer does not reproduce (SPEC §10.4).
 
-`bin/box-vendor check` proves the tree: printed back (`bin/g2a build --print-only --tests
---layout lines`), each package equals go-whim's at gc's three levels (gocmp, the round trip's
-oracle), go-whim's monitor and TamaGo guests built from the printed files are byte-identical to
-go-whim's own (without build IDs), and go-whim's tests pass on them, on /dev/kvm.
+Until 2026-10-16 `bin/box-vendor check` proved the tree: printed back (`bin/g2a build --print-only
+--tests --layout lines`), each package equal to go-whim's at gc's three levels (gocmp, the round
+trip's oracle), go-whim's monitor and TamaGo guests built from the printed files byte-identical to
+go-whim's own (without build IDs), and go-whim's tests passing on them, on /dev/kvm (recorded in
+BOX-NOTES.md, S0). It, `convert` (the derivation's replay from a clone of go-whim) and the KVM
+tests run in a clone of go-whim are retired: `box/` is Arbace's own source.
 
 Since S1 (doc/go/BOX-NOTES.md) the packages are Arbace's to change and changed: `vmm` has a host
 interface of its own (`vmm.Host`, `vmm.TermHost`, `vmm.Exit`) and imports no part of go-whim's
@@ -74,6 +83,19 @@ levels), and the darwin/arm64 launcher built from the printed forms byte-identic
 from the renamed originals, and, at purego's own path, to one built from purego's module (both
 without DWARF and build IDs). Apache License 2.0 ([LICENSE.md](../LICENSE.md)).
 
+The test guests (2026-10-16): go-whim's guest tests at `80c49bf` (`guest/guest_test.go`,
+`smp_test.go`, `readahead_test.go`: TestHello, TestFault, TestWatchdog, TestGoGuest,
+TestGoGuestFault, TestGoGuestSMP, TestReadAheadGo, TestReadAheadC, TestReadAheadRuntime) without
+go-whim's editor: the Go editor guest's place taken by the demo guest (package `guest/demo`, a
+program that runs the same natively and as a guest, so that a guest's run is held to the native
+run's as the editor's was), the C guests' by the bare guest (Go's assembly, built by TamaGo's own
+`asm` and `link` with no C compiler: GOOS=linux, `-E _start`; Go's runtime linked in and never
+run, so the monitor takes it for a C guest), TestReadAheadC and TestReadAheadRuntime by
+TestReadAheadBare. `bin/box-vendor kvm-tests` runs them with hv's, vmm's and tree's tests on box/
+printed; `kvm-tests-arm64` compiles them for linux/arm64 with the guests built beforehand, for the
+aarch64 VM (`bin/box-arm64-vm hv`). `bin/box-vendor convert DIR PKG...` converted the packages
+from their Go (written in a printing of box/, `bin/box-vendor print`).
+
 Licence: the Eclipse Public License 1.0, as Arbace ([LICENSE.md](../LICENSE.md)): the user's own
 code, licensed so by the user on 2026-10-11 (D8). Maintained by hand from here on; go-whim keeps
-its own copy, and nothing flows between them automatically.
+its own copy, and nothing flows between them; Arbace's checks and builds read nothing of it.

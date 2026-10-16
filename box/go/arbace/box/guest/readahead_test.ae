@@ -1,0 +1,214 @@
+(in-ns 'go.arbace.box.guest) (go/file "readahead_test.go" :imports [
+
+
+    ^{:line 4} [bytes "bytes"]
+    ^{:line 5} [fmt "fmt"]
+    ^{:line 6} [strings "strings"]
+    ^{:line 7} [testing "testing"]
+
+    ^{:line 9} [demo "arbace/box/guest/demo"]
+    ^{:line 10} [vmm "arbace/box/vmm"]])
+
+
+;; go-whim's guest/readahead_test.go (80c49bf) on the box's own guests: the demo guest's read-ahead
+;; held to the program's native run, and the bare guest's buffer call by call.
+
+
+
+
+
+
+
+
+
+
+(go/type scripted "scripted is a host whose input is a script: chunks, each handed out by one read as a tty hands\nout what was typed at once. The first gate are there from the start; the next arrives during\nthe first wait after the program wrote marker (when there is one), as keys typed at that\nmoment; each after it arrives during a wait that waits (its ms not 0) when nothing else is\nthere, as keys typed while the program waits for them, or at a read that would block. A\nSIGWINCH is made pending once chunk winchAfter is handed out (its key sequence read first by\nthe next read), and a deadly signal comes at the read that would hand out chunk deadAt --\nbefore a byte of it. Its log is what the host was asked, in order: the chunks handed out, the\nsuspension, the signals.\n" (struct
+    ^{:line 26} recorder
+    ^{:line 27 :tag (slice string)} chunks
+    ^{:line 28 :tag int} next
+    ^{:line 29 :tag int} arrived
+    ^{:line 30 :tag int} gate
+    ^{:line 31 :tag string} marker
+    ^{:line 32 :tag bool} marked
+    ^{:line 33 :tag string} left
+    ^{:line 34 :tag int} winchAfter
+    ^{:line 35 :tag int} deadAt
+    ^{:line 36 :tag bool} winch
+    ^{:line 37 :tag (func [int32])} deathtrap
+    ^{:line 38 :tag (slice string)} log))
+
+
+^{:go/end 43} (go/func newScripted ^{:tag (* scripted)} [& ^{:tag (slice string)} chunks]
+  (addr (lit scripted :chunks chunks :arrived (len chunks) :gate -1 :winchAfter -1 :deadAt -1)))
+
+
+
+
+^{:go/end 50} (go/method gated "gated has only the first gate chunks there at the start, and the next one arrive after marker\nis written.\n" ^{:tag (* scripted)} [^{:tag (* scripted)} s ^int gate ^string marker]
+  (set! (values (.-arrived s) (.-gate s) (.-marker s)) (values gate gate marker))
+  ^{:line 49} s)
+
+
+^{:go/end 52} (go/method Init [^{:tag (* scripted)} s ^{:tag (func [int32])} d] (set! (.-deathtrap s) d))
+
+^{:go/end 54} (go/method Suspend [^{:tag (* scripted)} s] (set! (.-log s) (append (.-log s) "suspend")))
+
+^{:go/end 61} (go/method Write ^int32 [^{:tag (* scripted)} s ^{:tag (slice byte)} p]
+  (when (and (!= (.-marker s) "") (bytes/Contains p (conv (slice byte) (.-marker s))))
+    (set! (.-marked s) true))
+
+  (.Write (.-recorder s) p))
+
+
+
+^{:go/end 66} (go/method there "there is whether a read would not block: input, a signal, or the end.\n" ^bool [^{:tag (* scripted)} s]
+  (or (.-winch s) (!= (.-left s) "") (< (.-next s) (.-arrived s)) (== (.-next s) (len (.-chunks s)))))
+
+
+^{:go/end 79} (go/method WaitForInput ^bool [^{:tag (* scripted)} s ^int64 ms]
+  (when (not (.there s))
+    (cond (and (== (.-arrived s) (.-gate s)) (!= (.-marker s) ""))
+      (when (.-marked s)
+        (inc! (.-arrived s)))
+
+      (!= ms 0)
+      (inc! (.-arrived s))))
+
+
+  (.there s))
+
+
+^{:go/end 111} (go/method ReadInput ^int32 [^{:tag (* scripted)} s ^{:tag (slice byte)} buf]
+  (when (.-winch s)
+    (set! (.-winch s) false)
+    (set! (.-log s) (append (.-log s) "winch"))
+    (when (>= (len buf) 32)
+      (return (conv int32 (copy buf "\u001b[48;24;80;0;0t")))))
+
+
+  (when (== (.-left s) "")
+    (when (== (.-next s) (len (.-chunks s)))
+      (return 0))
+
+    (when (== (.-next s) (.-arrived s))
+      (inc! (.-arrived s)))
+
+    (when (== (.-next s) (.-deadAt s))
+      (set! (.-deadAt s) -1)
+      (set! (.-log s) (append (.-log s) "TERM"))
+      ((.-deathtrap s) 15))
+
+    (set! (.-left s) (aget (.-chunks s) (.-next s)))
+    (set! (.-log s) (append (.-log s) (fmt/Sprintf "%q" (.-left s))))
+    (when (== (.-next s) (.-winchAfter s))
+      (set! (.-winch s) true))
+
+    (inc! (.-next s)))
+
+  (let [n (copy buf (.-left s))]
+    (set! (.-left s) (subslice (.-left s) n))
+    (conv int32 n)))
+
+
+
+
+
+(go/var "The script: the keys after suspend are typed during its wait, after the marker; natively they\nare still the tty's while the program is suspended, the guest has read them already, at that\nwait, and hands them to the program after.\n"
+  ^{:line 117} [aheadKeys (lit (slice string) "suspend\r" "hello\r" "work\r" "exit 5\r")]
+
+  ^{:line 119} [^{:doc "ahead is the chunk read ahead across the suspension.\n"} ahead (fmt/Sprintf "%q" (aget aheadKeys 1))])
+
+
+
+
+^{:go/end 143} (go/func readAheadRun "readAheadRun runs the guest image img and the program natively on the same script, made by mk,\nand holds the guest to the native run's output and exit; it returns the two logs.\n" [^{:tag (* testing/T)} t ^{:tag (slice byte)} img ^string name ^{:tag (func [] [(* scripted)])} mk] :results [^{:tag (slice string)} guest ^{:tag (slice string)} native]
+  ^{:go/via [common]} (.Helper t)
+  (let [nat (mk)
+      ^{:line 127} want (demo/Main nat (lit (slice string) "demo"))
+      ^{:line 128} g (mk)
+      ^{:line 129 :tag bytes/Buffer} stats (zero bytes/Buffer)
+      (values code err) (vmm/Run (lit vmm/Config :Image img :Host g :Args (lit (slice string) "demo") :Stats (addr stats)))]
+    (when (!= err nil)
+      ^{:go/via [common]} (.Fatalf t "%s: %v" name err))
+
+    (when (or (!= code want) (!= (.String ^{:go/via [recorder]} (.-out g)) (.String ^{:go/via [recorder]} (.-out nat))))
+      ^{:go/via [common]} (.Fatalf t "%s: exit %d, %q; natively: exit %d, %q\nguest:  %v\nnative: %v"
+        ^{:line 136} name code (.String ^{:go/via [recorder]} (.-out g)) want (.String ^{:go/via [recorder]} (.-out nat)) (.-log g) (.-log nat)))
+
+    (when (or (not (strings/Contains (.String stats) "call wait_read ")) (strings/Contains (.String stats) "call wait_for_input "))
+      ^{:go/via [common]} (.Fatalf t "%s: the waits not merged:\n%s" name (.String stats)))
+
+    ^{:go/via [common]} (.Logf t "%s: exit %d, %d bytes; guest %v; native %v" name code (.Len ^{:go/via [recorder]} (.-out g)) (.-log g) (.-log nat))
+    (return (.-log g) (.-log nat))))
+
+
+^{:go/breaks [[4 151]] :go/end 152} (go/func indexOf ^int [^{:tag (slice string)} log ^string s]
+  (range [i l log]
+    (when (== l s)
+      (return i)))
+
+
+  -1)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 186} (go/func TestReadAheadGo "TestReadAheadGo is the three cases on the demo guest.\n\nsuspend: the keys after suspend sit in the guest's buffer across it -- read before the host's\nSuspend, where the native run reads them after -- and still reach the program, in order: the\nsame output, the same exit.\n\nwinch: a signal between -- SIGWINCH pending once the host has handed out those keys, which the\nguest holds unread across the suspension. The program still takes the keys first and the\nresize's sequence after, as natively.\n\nterm: a deadly signal during the merged call, at the read: delivered before a byte is read, the\nprogram's deathtrap run in the guest, and the call made again -- the same output and exit as\nnatively.\n" [^{:tag (* testing/T)} t]
+  (let [img (image t "demo")
+      (values g n) (readAheadRun t img "suspend" ^{:go/end 169} (fn ^{:tag (* scripted)} [] (.gated (newScripted (spread aheadKeys)) 1 demo/Marker)))]
+    (when [(values gi ni) (values (indexOf g ahead) (indexOf n ahead))] (or (< gi 0) (> gi (indexOf g "suspend")) (< ni (indexOf n "suspend")))
+      ^{:go/via [common]} (.Fatalf t "suspend: %s not read ahead across the suspension in the guest, or read before it natively" ahead))
+
+    (set! (values g _) (readAheadRun t img "winch" ^{:go/end 177} (fn ^{:tag (* scripted)} []
+          (let [s (.gated (newScripted (spread aheadKeys)) 1 demo/Marker)]
+            (set! (.-winchAfter s) 1)
+            ^{:line 176} s))))
+
+    (when (or (> (indexOf g ahead) (indexOf g "suspend")) (< (indexOf g "winch") (indexOf g "suspend")))
+      ^{:go/via [common]} (.Fatalf t "winch: not the case meant: %v" g))
+
+    (readAheadRun t img "term" ^{:go/end 185} (fn ^{:tag (* scripted)} []
+        (let [s (newScripted (spread aheadKeys))]
+          (set! (.-deadAt s) 1)
+          ^{:line 184} s)))))
+
+
+
+
+
+
+
+
+
+^{:go/end 216} (go/func TestReadAheadBare "TestReadAheadBare: the bare guest's buffer (go-whim's rt.c, in assembly), call by call, and the\nexits it costs: one a wait that reads, none for a wait or read the buffer answers. Its\nstand-in: a wait reads ahead; a read takes part of it; across a suspension a wait answers from\nit, with no exit, and a read takes the rest; then the signal pending since -- its key sequence\n-- comes from the next wait, more keys after it, the end of input (a read's 0, kept as the bytes\nare); and a read with nothing kept is a call of its own (go-whim's TestReadAheadRuntime).\n" [^{:tag (* testing/T)} t]
+  (let [img (image t "bare")
+      ^{:line 196} h (newScripted "abcdefgh" "ij")]
+    (set! (.-winchAfter h) 0)
+    (let [^bytes/Buffer stats (zero bytes/Buffer)
+        (values code err) (vmm/Run (lit vmm/Config :Image img :Host h :Args (lit (slice string) "bare" "ahead") :Stats (addr stats)))]
+      (when (!= err nil)
+        ^{:go/via [common]} (.Fatal t err))
+
+      (let [want "abc|defgh|\u001b[48;24;80;0;0t|ij|00"]
+        (when (or (!= code 0) (!= (.String ^{:go/via [recorder]} (.-out h)) want))
+          ^{:go/via [common]} (.Fatalf t "exit %d, %q, not %q" code (.String ^{:go/via [recorder]} (.-out h)) want))
+
+        ;; wait_read: abcdefgh, the resize, ij, and the end; read_input: the end again, its own call.
+        (range [_ s (lit (slice string) "exits 8 " "call wait_read 4\n" "call read_input 1\n" "call suspend 1\n" "calls 8\n")]
+          (when (not (strings/Contains (.String stats) s))
+            ^{:go/via [common]} (.Fatalf t "not %q:\n%s" s (.String stats))))
+
+
+        (when (!= (fmt/Sprint (.-log h)) "[\"abcdefgh\" suspend winch \"ij\"]")
+          ^{:go/via [common]} (.Fatalf t "the host's log: %v" (.-log h)))))))
