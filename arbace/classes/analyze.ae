@@ -361,7 +361,10 @@
 (defn declare-class!
   "Enters a parsed class form and its member classes into the compilation.
   ctx: {:nesting :outer :name (for local and anonymous classes) :static-context bool
-        :local-classes {} :enclosing-method {:name :desc}}. Returns the internal name."
+        :local-classes {} :enclosing-method {:name :desc} :parsed-members (nil, or the member
+        classes parsed ahead, [{:parsed parsed-class :members [...]}...] in their order: a2g's
+        load parses them in parallel, arbace.a2g.world/parse-member-classes)}. Returns the
+        internal name."
   [ctx parsed]
   (let [nesting (:nesting ctx)
         ns (:ns parsed)
@@ -389,33 +392,40 @@
                                  :anon-ctx nil})}))
     (swap! (:order *unit*) conj n)
     (let [mcs (doall
-                (for [m (:members parsed) :when (= :class (:kind m))]
-                  (let [pc (p/parse-class {:ns ns :nesting :member :outer (decl n)} (rest (:form m)))]
-                    [(:simple pc) (declare-class! {:nesting :member :outer n} pc)])))]
+                (map (fn [m pm]
+                       (let [pc (or (:parsed pm) (p/parse-class {:ns ns :nesting :member :outer (decl n)} (rest (:form m))))]
+                         [(:simple pc) (declare-class! {:nesting :member :outer n :parsed-members (:members pm)} pc)]))
+                     (filter #(= :class (:kind %)) (:members parsed))
+                     (concat (:parsed-members ctx) (repeat nil))))]
       (update-decl! n assoc :member-classes (into {} mcs)))
     n))
 
 (defn- bounds-of-scope
-  "Type variable bounds visible in class n: its own, those of the method creating a local or
-  anonymous class, and, unless static, its outer classes'."
-  [n]
-  (let [d (decl! n)]
-    (merge (when (and (:outer d) (or (:outer-instance? d) (#{:local :anon} (:nesting d))))
-             (:bounds (decl (:outer d))))
-           (:creation-bounds d)
-           (:own-bounds d))))
+  "Type variable bounds visible in class declaration d: its own, those of the method creating a
+  local or anonymous class, and, unless static, its outer classes'."
+  [d]
+  (merge (when (and (:outer d) (or (:outer-instance? d) (#{:local :anon} (:nesting d))))
+           (:bounds (decl (:outer d))))
+         (:creation-bounds d)
+         (:own-bounds d)))
+
+(defn- set-own-bounds!
+  "Sets class n's own type variable bounds (and more keys and values kvs), and the bounds visible
+  in it, in one update (a2g's load resolves the headers in parallel: fewer updates of the
+  compilation, fewer retries)."
+  [n own & kvs]
+  (let [d (apply assoc (decl! n) :own-bounds own kvs)]
+    (apply update-decl! n assoc :own-bounds own :bounds (bounds-of-scope d) kvs)))
 
 (defn resolve-header!
   "Resolves type parameters, superclass, interfaces and the class Signature of n."
   [n]
   (let [d (decl! n)
         tp-syms (map #(if (symbol? %) % (first %)) (get-in d [:opts :type-params]))
-        _ (update-decl! n assoc :own-bounds (zipmap tp-syms (repeat [])))
-        _ (update-decl! n assoc :bounds (bounds-of-scope n))
+        _ (set-own-bounds! n (zipmap tp-syms (repeat [])))
         scope (class-scope n)
         tps (t/parse-type-params (type-scope scope) (get-in d [:opts :type-params]))
-        _ (update-decl! n assoc :own-bounds (t/bounds-map tps) :tparams tps)
-        _ (update-decl! n assoc :bounds (bounds-of-scope n))
+        _ (set-own-bounds! n (t/bounds-map tps) :tparams tps)
         scope (class-scope n)
         pt #(parse-type scope %)
         kind (:kind d)
