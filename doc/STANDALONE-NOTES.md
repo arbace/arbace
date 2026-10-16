@@ -3582,3 +3582,110 @@ Proof (at `1805a559`):
   its runtime is not the checkout's, so it never compiles the namespaces (the two-run build: the
   first program, on the new runtime, compiles them). Builds it hosts take two runs until a
   re-seed, as after any change to the runtime.
+
+## The build's speed, fourth round, part B: the analysis' member classes (2026-10-16)
+
+The lead's order (a fourth round, part B): the analysis of the compiled namespaces' classes,
+which part A of the third round left at about 15 s, its first group (the member classes: fns,
+the loaders' parts) the longest. Branch `speed4-analysis` (from main at `06d183b`). Measured as
+`bin/arbace-go` runs a2g (`--await`, main's compiled tree copied aside and copied in 45 s after
+a2g starts, `.tmp/speed4-analysis/await.sh`), the lap `analysis-compiled` of `a2g: load (s)`; the
+tasks timed by an instrumented `world.ae` (kept as `A2G_ANALYSIS_TIMES=1`), the process' CPU
+time over each group (`/proc/self/stat`, not kept), CPU profiles (`ARBACE_CPUPROFILE`) of a run
+that exits right before the first group and of one that exits right after it, compared
+(`pprof -diff_base`: the group alone); on the shared host (part A's builds beside: single
+timings vary by a fifth or more).
+
+### Where the time went (`06d183b`)
+
+- **Not a few long tasks.** The first group: 8,431 tasks, the median 5.5 ms, the 99th
+  percentile 0.2 s, the longest 1.4 s (`arbace.a2g.main$run*`); all 16 threads busy until the
+  end, the last tasks ending within 0.03 s of each other. The second group (217 top-level
+  classes) 1.1 s, its tail one loader (`arbace.core.specs.alpha__init`, 0.84 s).
+- **Not contention.** A goroutine dump in the middle of the group (SIGQUIT, 32 jobs): every
+  worker runnable or running, none waiting on a lock or a channel; the shared compilation's atom
+  is only read here.
+- **Not the collector first.** A collection every 2 s or so, each 0.2 s concurrent (`gctrace`;
+  GOGC 400, GOMEMLIMIT 20 GiB as bin/a2g sets them): about a third of the CPU in the group, the
+  rest the analysis itself.
+- **The work.** The group's CPU 168 s for 9.2 s of wall (A2G_JOBS 16); with 4 jobs 28 s (CPU
+  171 s), with 32 jobs 8.2 s (CPU 187 s, each task twice as long): about 16 to 20 cores is what
+  this host gives one process, so the bound is the CPU the analysis takes. The group's profile:
+  `find-own-field` about 40% (every symbol not a local, a field of the class or of an enclosing
+  class, sought by a linear scan of the fields: a fn class's lookups go through its holder's
+  constants, hundreds to thousands of fields, and every class name, `RT` and the like, scans
+  them all to the end); `env/member-methods` about 55% with `all-supertypes` (each call walking
+  every supertype's methods, the runtime's large classes `RT`, `Numbers`, `AFn` included, for
+  the methods of one name); `types/parse-method-desc` about 14% (the candidates' descriptors
+  parsed again for every call); `param-tags-match?` 3% (each tag resolved again for each
+  candidate). (Overlapping: cumulative shares.)
+
+### What changed (`04a6a77`; a2g's output unchanged)
+
+- **`find-own-field` through an index** (`arbace.classes.analyze/field-index`): per class, its
+  fields by name, the first not derived of each name with its position (the first of the
+  name and of its munged name wins, as the scan's order made it), kept while the class's
+  `:fields` vector is the same object.
+- **`all-supertypes` and `member-methods` memoized** (`arbace.classes.env`): each result with
+  the class infos it was computed from (the supertypes', the only infos either reads), reused
+  while every one of them is still the class's info, by identity (a class declared, resolved
+  or bridged anew has a new info, and so does any other compilation or class environment), and
+  stored only when no info changed while it was computed. A class of the compilation is checked
+  against the compilation's map directly.
+- **`parse-method-desc` memoized** by descriptor (a pure function of a string).
+- **param-tags resolved once per call** (`select-method`): each tag's descriptor a delay,
+  resolved when first compared, as the scan resolved it, then reused for the other candidates.
+- **The groups** (`arbace.a2g.world`): a top-level class without member classes (most
+  loaders, the deftypes without nested classes) is analyzed in the first group, first, beside
+  the member classes; the second group keeps the holders and the split loaders (102 classes,
+  their own code small). Nothing a class's analysis writes is another's: it was already one task
+  per class in an id space of its own, so the order of the tasks changes nothing.
+
+The memos are global (`ConcurrentHashMap`s, strong, as `env/reflect-cache`; read without a
+lock), so the runtime's own uses of the class forms' front end (the evaluator's class forms, j2a)
+keep them too: SA260.
+
+### Measured
+
+| | before (`06d183b`) | after (`04a6a77`) |
+|---|---|---|
+| `analysis-compiled`, 3 alternating pairs, the host busy (load 15) | 16.5, 16.6, 15.7 s | 5.1, 5.5, 4.9 s |
+| the same, the host quiet (single runs) | 9.0 to 11.4 s | 4.3 to 5.5 s |
+| the first group: tasks, wall, CPU | 8,431, 8.3 to 9.2 s, 168 s | 8,546, 3.8 to 4.7 s, 63 to 76 s |
+| the second group: tasks, wall | 217, 1.1 s | 102, 0.2 to 0.5 s |
+| a2g's `:load` (after a wait of about 41 s), 3 pairs | 65.5, 70.9, 65.9 s | 52.9, 56.6, 53.9 s |
+
+The rest of a2g as before (reachability, the translation and the writing within the noise).
+a2g's output for the same compiled tree is the same, byte for byte, but its own embedded sources
+(`world.ae`, `analyze.ae`, `env.ae`, `types.ae`) and report.edn's `:times` (`diff -r` of the
+three pairs, and of every step on the way). The analysis of the compiled classes depends on the
+executable's `arbace.classes` (not a tool source), so G1's a2g (on the seed's stage 0) runs the
+old analysis and G2's the new: the fixpoint below shows them equal on the whole program.
+
+**Checks.** The essential `bin/gate` on `04a6a77` passed (10m04s: the suite 20,506 of 20,520, no
+regressions; the oracle 22,508 of 22,561, the 53 known, 0 new). `bin/arbace-go --fixpoint` (G1
+by the seed's stage 0, whose analysis is the old one): a2g's programs G1 = G2 = G3, **G1 = G2 =
+G3 byte for byte** (`a24fb44b...`, 102,457,504 bytes); the builds G1, G2, G3 192, 157, 143 s, their
+`analysis-compiled` 16.0 s (G1: the old analysis), 5.4, 5.4 s.
+
+### Left
+
+- The first group (about 4 s on 16 jobs): no hot spot left above a few percent; the generic
+  costs (dynamic vars, keyword lookups in nodes, lazy seqs, allocation and the collector)
+  spread over the analyzer. Next would be `select-method` (its `pick`, `applicable?` over the
+  overloads of `Numbers` and `RT`: about 15% now), `parse-type`/`type-desc` of the type
+  forms (about 10%), both per call site.
+- More than 16 jobs does not help on this host (its cores, not the threads, bound it).
+
+### Proposals
+
+- **SA260 The analysis' memos.** (a) As built: global and strong (`ConcurrentHashMap`s in
+  `arbace.classes.env` and `types`, checked by the infos' identity), kept for the life of the
+  process, the evaluator's and j2a's uses included (an entry per class and method name asked
+  for; a class declared again replaces its entries' infos at the next lookup); (b) the same
+  memos bound per run (a dynamic var a2g binds around its world, the other uses unmemoized; the
+  seed's stage 0 has no such var, so G1's `world.ae` would have to resolve it at run time);
+  (c) weak or bounded maps (jrt's maps hold their keys strongly: a bound would need its own
+  eviction). *Recommended: (a)*: the same rule as `env/reflect-cache`; the retained data are
+  vectors of the infos the compilation holds anyway, and a long-running REPL defines few
+  classes.
