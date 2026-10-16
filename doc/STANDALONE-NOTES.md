@@ -3143,3 +3143,105 @@ files), was `79d4f552...`. **`bin/seed --verify`**: printed again at `57a4428`, 
 s for the three (G1 219 s, G2 184 s, G3 189 s: a fresh worktree, g2a's print cache cold, the
 emulated arm64 VM busy beside). The essential gate on the seed's commit (`dd61501`): passed in
 8:07, the two builds 5:06 (were 6 to 8 minutes).
+
+## The build's speed, third round, part A: `arbace.core`'s loader split (2026-10-16)
+
+The user's order (a third round, part A): the back end splits `arbace.core`'s compiled loader so
+that a2g analyzes its parts in parallel. Branch `speed3-loader` (from main at `ecb5dfe`).
+Measured on the shared host (parts B and C's builds, the emulated arm64 VM beside: single
+timings vary by a fifth or more), as part B measured: a2g's load laps (`a2g: load (s)`, the
+lap `analysis-compiled`: the analysis of the compiled namespaces' classes after the tree is
+entered) and report.edn's `:times`; and `bin/a2g --program --await TREE` on a tree already
+written (no wait), main's tree and the branch's alternately, the same host (stage 0) and a2g
+(`.tmp/speed3-loader/bench.sh`).
+
+### Where the time went (main, `ecb5dfe`)
+
+The analysis of the compiled classes runs in two parallel groups: the member classes (fns,
+reifies), then the top-level ones (holders, deftypes, loaders), each class one task in an id
+space of its own. Timed per task (an instrumented a2g, not kept): `arbace.core__init`, 903
+methods and 1,588 fields, **9.5 s**, ending at 23.2 s, when the first group had ended at
+12.9 s and every other top-level task by 16.5 s; the next longest loaders
+`arbace.classes.analyze__init` (329 units) 3.0 s, `arbace.core.specs.alpha__init` 1.9 s,
+`arbace.a2g.code__init` 1.6 s. The analysis of one class is sequential (its temporaries are
+numbered in one id space), so the tail was one thread.
+
+### What changed (`arbace/aot/emit.ae`)
+
+- **A loader of more than 100 units in parts** (`loader-part-units`, SA210): its units in order,
+  100 to a part, each part a static member class `SCRIPTBASE__init$partP` holding its units'
+  methods (`unitK`, numbered across the source as before) and the constants they meet, its
+  own pool (`const-pool`, `Compiler$AOT/pool`). A source of 100 units or fewer is emitted as
+  before, byte for byte (the holders' and deftypes' pools too). The parts are member classes,
+  so a2g analyzes them in its first group, in parallel with the fns; the top-level loader is a
+  `load` method only. Eleven loaders split: `arbace.core` (10 parts),
+  `arbace.classes.analyze` (4), `arbace.spec.alpha`, `arbace.core-classes` (3), seven others
+  (2).
+- **The loading order and the constants as unsplit.** `load` calls each part's `init` (an empty
+  static method: a part's initialization decodes its pool, not benign, so a2g guards its
+  methods' entry) in order, then each part's `load`, which runs its units in order: every
+  constant of the source is made before the first unit runs, in first-use order, as the one
+  class's static initializer made them (vars interned before their `def`, as on the JVM).
+- **One object, one constant.** An object an earlier part already met is not decoded again: the
+  later part's field is set from the earlier part's (`const-field`'s `:prev`, an
+  IdentityHashMap of the source's constants by value; `pool-fields` takes `[sym type value
+  alias]`), so an identical object stays identical across parts, and the part's code reads its
+  own field unguarded. Tried first: the earlier part's field read where used (qualified
+  `SCRIPTBASE__init$part0/const-N`): 1,807 such reads in core's loader, each with the other
+  class's initialization guard, +113 KB of core's code (+364 KB the executable); with the
+  alias fields 41 distinct values copied, +18 KB.
+- The loader's reflective entry is unchanged (`Compiler$AOT/load`, `compiled-back-end`:
+  `Class.forName("SCRIPTBASE__init")`, its public static `load`). A frame of a loading error
+  now names the part (`arbace.core__init$part4.unit450`, was `arbace.core__init.unit450`;
+  SA211).
+
+### Measured
+
+| | main (`ecb5dfe`) | `speed3-loader` |
+|---|---|---|
+| a2g alone on a written tree, the analysis of the compiled classes (3 alternating runs) | 29.2, 24.9, 27.1 s | 14.8, 15.2, 17.2 s |
+| the longest analysis task | 9.5 s (`arbace.core__init`) | 1.7 s (a fn class; the loaders' parts 1.4 s at most) |
+| a build's a2g (`--await`): `analysis-compiled` | 24.9 s | 13.9 s (build), 13.9, 15.6, 16.2 s (the fixpoint's G1, G2, G3) |
+| a build's a2g after the tree is ready: load (`:load` minus the wait) | 48.5 s | 35.5 s (build), 36.4, 38.6, 37.9 s (G1, G2, G3) |
+| the executable (amd64) | 101,863,584 bytes | 102,031,520 bytes (+168 KB, +0.16%: the split loaders, and the back end's own new code) |
+| `aot_arbace_core`: text, rodata (`go tool nm -size` of the archive) | 2,758,933, 2,153,197 | 2,776,808 (+18 KB), 2,187,959 (+35 KB) |
+| `aot_arbace_core`: the archive | 48,359,908 bytes | 49,077,818 bytes (+1.5%) |
+| gc of `aot_arbace_core` alone, its imports cached (2 runs) | 11.1, 10.2 s | 9.3, 11.0 s (the same) |
+| gc of `aot_arbace_classes_analyze` alone | 5.4, 6.2 s | 5.9, 5.6 s (the same) |
+
+The rest of a2g is as before (reachability 19 to 23 s, the translation 13 to 16 s, the writing
+10 to 14 s, all within the noise): the parts add 10 classes to core's package, whose
+translation is per class too. The fixpoint's one-run builds (G2 by G1, G3 by G2) 190 and 178 s
+(were 184 and 189 at the seed's verify, on a quieter host: the 11 s the analysis saves are
+within the noise of a three-minute build).
+
+**Checks.** The essential `bin/gate` on `da6fd02` (10m09s): the suite 20,506 of 20,520, no
+regressions; the oracle 22,508 of 22,561, the 53 known, 0 new. `bin/arbace-go --fixpoint` (G1 by
+the seed's stage 0, whose back end is the previous one but runs the checkout's `emit.ae`):
+a2g's programs G1 = G2 = G3, **G1 = G2 = G3 byte for byte** (`53d34e01...`, 102,031,520
+bytes).
+
+### Left
+
+- The analysis now ends with its first group (the member classes, about 15 s on 16 jobs, bound
+  by allocation as part B found), the top-level group after it in under 2 s (its longest
+  `arbace.core.specs.alpha__init`, 88 units, 0.9 s). A lower bound (50) would split 25 loaders
+  and save little more.
+- After the analysis: reachability's sequential scan (19 to 23 s, one core) and the load's
+  sequential part (entering, headers, members, bridges: about 10 s), part B's "Left"; parts B
+  and C of this round.
+
+### Amendments (proposed 2026-10-16)
+
+- **SA210 `arbace.core`'s loader split.** (a) As built: a loader of more than 100 units in parts
+  of 100, static member classes `SCRIPTBASE__init$partP` with their own constants (an object an
+  earlier part met copied from that part's field), all initialized in order before the first
+  unit; (b) the parts as top-level classes (`SCRIPTBASE__init1` ...: a2g's second group, with
+  the holders, and a package name each would need its own rule in `packages.edn`); (c) the
+  bound by the units' size rather than their number; (d) left one class (the 9 to 14 s tail).
+  *Recommended: (a)*: the analysis of the compiled classes about 10 s shorter, the output as
+  before for the 89 sources of 100 units or fewer, +0.16% to the executable.
+- **SA211 A loading frame's class.** (a) The part's (`arbace.core__init$part4.unit450`), as
+  built; (b) mapped back to `arbace.core__init` in stack traces (a2g's frames table).
+  *Recommended: (a)*: only an error while a namespace loads shows it, and the line (`Compiler$AOT/at`)
+  is the same.
