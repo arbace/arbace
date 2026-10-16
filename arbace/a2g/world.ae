@@ -199,6 +199,35 @@
   []
   (try (.get (.getField arbace.lang.RT "ID_SPACE") nil) (catch Throwable _ nil)))
 
+;; ---------------------------------------------------------------------------------------
+;; the sequential part's steps in parallel (the build's speed, third round, part B)
+
+(defn- levels
+  "names in levels, a name in a level after those of the names it depends on (deps: a name's
+  names to process first; others ignored), each level in names' order. A cycle (an error the
+  steps report) is cut where it closes."
+  [names deps]
+  (let [in (set names)
+        memo (java.util.HashMap.)
+        lvl (fn lvl [n]
+              (or (.get memo n)
+                  (do (.put memo n 0)
+                      (let [l (inc (reduce max -1 (map lvl (filter in (deps n)))))]
+                        (.put memo n l)
+                        l))))]
+    (->> names (group-by lvl) (into (sorted-map)) vals)))
+
+(defn- supers-of
+  "The direct supertypes of class n in the compilation."
+  [n]
+  (let [d (a/decl n)] (cons (:super d) (:interfaces d))))
+
+(defn- par-levels
+  "(f n) for each of names, a level (levels) at a time, a level's names in parallel."
+  [names deps f]
+  (doseq [l (levels names deps)]
+    (m/par-mapv (m/jobs) f l)))
+
 (defn load-world
   "Reads, enters and analyzes the class forms of the inputs, each {:root :dirs|:tree|:files},
   with the Go-build variants of the variant files applied. Returns the world:
@@ -262,17 +291,25 @@
                                    (a/declare-class! {:nesting :top} pc)))
                                (catch Throwable e
                                  (swap! failed conj [(str file) (str "parse: " (.getMessage e))]))))))))
-            ;; process-classes! 0 for names, with failures per class recorded rather than fatal
+            ;; process-classes! 0 for names, with failures per class recorded rather than fatal;
+            ;; each step in parallel, level by level (levels): a class's header after its outer
+            ;; class's (its type variables' bounds), its members and bridges after its
+            ;; supertypes' (deftype's signature inference, the bridges' inherited methods); a
+            ;; class's step writes only its own declaration and takes no ids
             resolve! (fn [names]
                        (lap :declare)
-                       (doseq [n names :when (not (:headers-done (a/decl n)))]
-                         (try (a/resolve-header! n) (catch Throwable e (swap! failed conj [n (str "header: " (.getMessage e))]))))
+                       (par-levels names #(some-> (a/decl %) :outer vector)
+                                   (fn [n]
+                                     (when-not (:headers-done (a/decl n))
+                                       (try (a/resolve-header! n) (catch Throwable e (swap! failed conj [n (str "header: " (.getMessage e))]))))))
                        (lap :headers)
-                       (doseq [n names]
-                         (try (a/resolve-members! n) (catch Throwable e (swap! failed conj [n (str "members: " (.getMessage e))]))))
+                       (par-levels names supers-of
+                                   (fn [n]
+                                     (try (a/resolve-members! n) (catch Throwable e (swap! failed conj [n (str "members: " (.getMessage e))])))))
                        (lap :members)
-                       (doseq [n (#'a/supertypes-first names)]
-                         (try (a/add-bridges! n) (catch Throwable e (swap! failed conj [n (str "bridges: " (.getMessage e))]))))
+                       (par-levels names supers-of
+                                   (fn [n]
+                                     (try (a/add-bridges! n) (catch Throwable e (swap! failed conj [n (str "bridges: " (.getMessage e))])))))
                        (lap :bridges)
                        (doseq [n names]
                          (try (#'a/mark-enum-abstract! n) (catch Throwable e (swap! failed conj [n (str "enum: " (.getMessage e))])))))
