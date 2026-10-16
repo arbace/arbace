@@ -349,3 +349,20 @@ guest 8), `roundtrip`, `purego-check`, the box's build and smoke test; in the ar
 vmm 15, guest 8 (the bare guest's faults `0x96000047`). The essential gate passed on the
 branch at its second run: the first had one oracle mismatch, `test/oracle/forms/concurrency.ae:201`,
 whose result depends on which thread reaches a `CyclicBarrier` last (to make deterministic).
+
+## 2026-10-16: the oracle made independent of thread interleavings
+
+At the user's request ("make the oracle deterministic"), after the essential gate on the branch
+`no-gowhim` failed once on `test/oracle/forms/concurrency.ae:201` (`[1 (0 2)]` for `[2 (0 1)]`):
+that case returned the main thread's `CyclicBarrier` arrival index, which depends on which
+thread arrives first; it now compares the three indices as a set (`(0 1 2)`). A review of every
+case that starts threads (`concurrency.ae`, `native.ae`, `defclass.ae`) found one more:
+`ThreadPoolExecutor.shutdownNow` after a 20 ms sleep, assuming the pool's thread had taken the
+first task by then (on a loaded host `[3 ... 0]` instead of `[2 ... 1]`); the task now counts
+down a latch the main thread awaits. Both recorded again on the frozen JVM (the same values;
+`bin/oracle record forms/concurrency`), all 247 cases matching on Go; doc/go/ORACLE.md states
+the rule (no case depends on which thread arrives first, nor on a sleep for ordering). Checked:
+the concurrency file 40 times on a loaded host and 10 times each at `GOMAXPROCS` 1, 2 and 4, and
+the whole oracle five times (`GOMAXPROCS` 1, 2, 64, 1, 2): every run the 53 known mismatches,
+none new. Alternatives: rerunning a failed case (hides real races), or recording such cases as
+noisy (they test real semantics that hold whatever the order).

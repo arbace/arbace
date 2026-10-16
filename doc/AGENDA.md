@@ -77,14 +77,15 @@ The current state of the work. This file is rewritten as things change. For the 
   loader in parts (analysis 25 → 15 s), a2g's load parallel (10.7 → 5 s), reachability (19-21 →
   6 s), the compiled tree in several files (read 2 → 0.8 s), ids independent of the checkout's
   path (SA230); the seed remade (`5858e83c…`) and verified.
+- Done (2026-10-16): the oracle independent of thread interleavings (two concurrency cases;
+  ORACLE.md's rule).
 - Done (2026-10-16): Arbace independent of go-whim (its tests in `box/` on the box's own guests,
   the C guests in Go's assembly) and of cgo (dropped with the race detector); GW2-GW9 (a)
   (BOX-NOTES.md).
 
 ## Next
 
-- The user's choice among Later's surveys. Smaller: the oracle case
-  `test/oracle/forms/concurrency.ae:201` made deterministic (a `CyclicBarrier`'s last thread); the box's checks on the Mac on
+- The user's choice among Later's surveys. Smaller: the box's checks on the Mac on
   macOS 26. Left of the speed: the scan's 6 to 8 s (mutable sets), the analysis' member-class
   group (about 15 s on 16 jobs).
 
