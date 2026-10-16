@@ -94,8 +94,12 @@ The current state of the work. This file is rewritten as things change. For the 
 
 ## Next
 
-- The user's choice among Later's surveys. Smaller: the box's checks on the Mac on
-  macOS 26.
+- Running: the naming survey (the user, 2026-10-16: "Survey first, decide later";
+  doc/NAMING-SURVEY.md, branch `naming-survey`): the tools, the schemes, the rename's impact,
+  proposals N1...
+- After the printer's `:full` mode: the survey of Futamura's projections (the user's choice,
+  2026-10-16; Later's item).
+- Smaller: the box's checks on the Mac on macOS 26.
 
 ## Later
 
