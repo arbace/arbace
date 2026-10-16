@@ -3337,3 +3337,118 @@ oracle 22,508 of 22,561, the 53 known, 0 new).
   compiled tree's shape is the back end's; (c) depends on the reader's metadata).
 
 **Decided (2026-10-16, the user):** SA220 (b), to build.
+
+## The build's speed, third round, part C: reachability's scan (2026-10-16)
+
+The user's order (a third round, part C): a2g's reachability (`arbace.a2g.reach`), which part
+B of the second round left at 12 to 16 s, most of it the scan, on one core. Branch
+`speed3-reach`. Measured as part B did, on one compiled tree (the build's `target/arbace-go/aot`
+copied aside) given to `bin/a2g --program --input`, a2g run on executables built from the
+branch's sources (a namespace of the checkout that differs from the executable's runs evaluated,
+so each version of `reach.ae` was measured on a build of its own), on the shared host (the
+other agents' builds beside: single timings vary by a fifth or more).
+
+### Where the time went (`ecb5dfe`)
+
+Reachability 19 to 21 s: the batches' code flattened in parallel 1.6 to 1.9 s, the scan 15 to
+17 s on one core. The scan: 14 batches, 58,049 methods, 632,148 nodes acted on (243,000
+`:invoke`, 147,000 `:get-static`, 87,000 `:cast`, 26,000 `:new`), 1.83 million `use!`, 590,000
+`use-desc!`, 411,000 `reach!`, 182,000 `vcall!` (17,000 new), 10,014 instantiations, 266,000
+`java-impl-of`. The profile (`ARBACE_CPUPROFILE`) was flat: `instantiate!` 5.4 s (its
+`java-impl-of`s 3 s: the superclass chain a lazy seq, a key vector made for each lookup,
+`env/all-supertypes` again and again; `external-keys` a lazy `for` then `distinct`), the dynamic
+vars (`*st*`, `m/*w*` through `m/translated?`, `*flat*`: a binding frame's hash map each
+time) about 2.5 s, `use!` and `use-desc!` (a descriptor parsed at every use) 3.7 s, the nodes'
+own lookups (`acc/unaccess`, keyword lookups in the node maps, `vh-call?`) and
+`check-hw-call!` (`jrt/struct-methods` building a set at every call on String or another class
+of jrt) the rest.
+
+What depends on the visiting order, which ruled out a parallel fixpoint: not only the queue's
+order (the batches) but report.edn's `:unavailable`: a class that fails is noted differently
+the first time it is used (`class C failed analysis`, `class C: superclass S unavailable`) than
+after (`class C: analysis failed: ...`), under the method being scanned; the sets T, the reached
+methods and the instances are the same in any order, these texts are not. The scan stays
+sequential and in the queue's order; what moved is the work that does not depend on the run's
+state.
+
+### What changed (`8eb9be3`; a2g's output unchanged)
+
+- **The plans**: the batch's parallel step (`plan-code`, which replaces `flatten-code`) makes
+  for each node the scan acts on a *plan*, a function of the run's state, with what depends only
+  on the class environment and the world computed ahead: the accessor's node (`unaccess`), the
+  classes of the descriptors, the method and call keys as vectors (their hashes cached), whether
+  the call is a VarHandle's, whether jrt defines the owner (`check-hw-call!` asked only then),
+  whether jrt lacks a constructor or static field (asked of the world only when the class is
+  not translated, as before). The sequential scan runs the plans in the walk's order, each
+  doing what `scan-node!` did in the same order; the rare ops' plans call `scan-node!` itself.
+  The walk of the parallel step with `reduce-kv` and `reduce` (no seq of each map's entries; a
+  map's kv-reduce visits its entries in its seq's order).
+- **The state passed**: `use*`, `reach*`, `init*`, `vcall*`, `instantiate*` take the run's
+  state rather than reading `*st*` and `m/*w*` (the public `use!`, `reach!` ... call them);
+  `use*` answers at once for a class translated or jrt's own (not a stand-in, not failed); the
+  pure tests of `reach!` and `init!` first, the membership in the reached and initialized sets.
+- **The caches of the run** (`*cx*`, kept with the state: the environment and the world do not
+  change once loaded): `all-supertypes`, the types of an instance (`supertypes-of`), `interface?`,
+  `subclass?`, a descriptor's classes, the methods of each class indexed by `[name desc]` (a
+  HashMap, looked up with the caller's key), the external keys of each supertype (then the first
+  occurrence of each, as `distinct` did), and, for `java-impl-of`, the superclass chain's
+  non-private body of a method per class and key (`super-impl`: the chains of the 10,000
+  instantiated classes share their superclasses); `hw-method-exists?`'s yes for a class not
+  translated (what a2g adds only grows with T).
+
+Checked the strict way first: each version run with a trace of every change of the state, in
+order (the classes entering and leaving T, the queue, the initialized classes, the instances,
+the virtual calls, the lambdas' interfaces, the unavailable and missing notes: 109,323 events)
+against the old one's: the same, line for line; and the new walk's nodes against walk-nodes',
+by identity, for every method.
+
+### Measured
+
+| | before (`ecb5dfe`) | the caches | + the plans, the state passed | after (`8eb9be3`) |
+|---|---|---|---|---|
+| reachability | 19 to 21 s | 16 s | 12.2 to 12.5 s | 6.8 to 11.5 s |
+| the parallel step (flatten, plan) | 1.6 to 1.9 s | 1.8 s | 2.0 to 2.2 s | 1.2 to 1.7 s |
+| the scan | 15 to 17 s | 12.6 s | 8.9 s | 6.0 to 8.4 s |
+
+(The fixpoint's G2 and G3, a2g on the new executables: reachability 5.9 to 6.8 s; G1, a2g on
+stage 0 with the new `reach.ae` evaluated: 10 to 13 s.) a2g's output for
+the same compiled tree is the same, byte for byte, but its own embedded sources (`reach.ae.z`)
+and report.edn's times (`diff -r`, at every step). The essential gate passed on `8eb9be3`
+(9:23: the suite 20,506 of 20,520, no regressions; the oracle 22,508 of 22,561, the 53 known, 0
+new). The fixpoint at `8eb9be3` (G1 by the seed's stage 0, whose a2g is the old one): a2g's
+programs G1 = G2 = G3, **G1 = G2 = G3 byte for byte** (`d6b5089b...`, 102,047,904 bytes): the
+new reachability prints the program the old one printed.
+
+The first fixpoint, in the worktree `.tmp/worktrees/speed3-reach`, did not hold, for a reason
+outside reachability: G2's and G3's compiled trees differed in one namespace, `arbace.box.print`
+(its ids 1,463,000,000 and up in G2, 1,464,000,000 in G3), the same executable (G1 = G2)
+compiling them. `Compiler.load` gives each source loaded while the program compiles a slot of a
+million ids from its path's hash (the next free slot on a collision), and the host's compile
+script is loaded that way too, from its absolute path: `.../fixpoint/g3/host-compile.ae`
+there hashes to slot 1462, `arbace/box/print.ae`'s, which then moved to the next. The program
+depends on where the checkout is (main's own `target/arbace-go/fixpoint/g3/host-compile.ae`
+collides with `arbace/spec/gen/alpha.ae`'s slot). The same commit in another worktree
+(`.tmp/worktrees/speed3-fp`, no collision) gave the fixpoint above. Left as SA230.
+
+### Proposals
+
+- **SA230 The compile script's id slot.** (a) `Compiler.load` gives an id slot only to the
+  sources it loads by a resource path (the namespaces: `arbace/...`), the host's compile script
+  (an absolute path, evaluated, compiled into nothing) loading in the runtime's id space; (b)
+  `bin/arbace-go` loads the script from a fixed relative name (`host-compile.ae` in its own
+  directory, the working directory set to it), leaving `Compiler.load` as it is; (c) slots taken
+  in a fixed order (the program's namespaces first, from their sorted paths) before anything
+  loads. *Recommended: (a)*: the program then depends only on its sources, wherever the checkout
+  is; it touches the runtime (`arbace/lang/Compiler.ae`: a two-run build and, for stage 0, a new
+  seed eventually), so it belongs to part A's or a later change, not to this branch.
+
+**Decided (2026-10-16, the user):** SA230 (a), to build on the third round's branch.
+
+### Left
+
+- The scan's 6 to 8 s: `instantiate!` 2.5 s (`java-impl-of` 1.2 s, the rest the reached
+  set's lookups), `use*` 1.4 s, then the calls themselves (`IFn` dispatch, the runtime's type
+  tests): one more step would be the state in mutable sets (Java's) rather than atoms of
+  persistent ones, the results rebuilt in the same insertion order.
+- The rest of `:reach` (about 1 s): main's stand-in rounds and the subclass index, outside the
+  scan.
