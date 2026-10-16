@@ -3189,7 +3189,7 @@ numbered in one id space), so the tail was one thread.
   own field unguarded. Tried first: the earlier part's field read where used (qualified
   `SCRIPTBASE__init$part0/const-N`): 1,807 such reads in core's loader, each with the other
   class's initialization guard, +113 KB of core's code (+364 KB the executable); with the
-  alias fields 41 distinct values copied, +18 KB.
+  alias fields (41 distinct values, a field in each part that uses one), +18 KB.
 - The loader's reflective entry is unchanged (`Compiler$AOT/load`, `compiled-back-end`:
   `Class.forName("SCRIPTBASE__init")`, its public static `load`). A frame of a loading error
   now names the part (`arbace.core__init$part4.unit450`, was `arbace.core__init.unit450`;
@@ -3200,7 +3200,7 @@ numbered in one id space), so the tail was one thread.
 | | main (`ecb5dfe`) | `speed3-loader` |
 |---|---|---|
 | a2g alone on a written tree, the analysis of the compiled classes (3 alternating runs) | 29.2, 24.9, 27.1 s | 14.8, 15.2, 17.2 s |
-| the longest analysis task | 9.5 s (`arbace.core__init`) | 1.7 s (a fn class; the loaders' parts 1.4 s at most) |
+| the longest analysis task | 9.5 s (`arbace.core__init`) | 1.7 s (`arbace.a2g.main$run*`; the loaders' parts 1.7 s at most, `arbace.pprint.cl-format__init$part0`; timed on the first variant, below) |
 | a build's a2g (`--await`): `analysis-compiled` | 24.9 s | 13.9 s (build), 13.9, 15.6, 16.2 s (the fixpoint's G1, G2, G3) |
 | a build's a2g after the tree is ready: load (`:load` minus the wait) | 48.5 s | 35.5 s (build), 36.4, 38.6, 37.9 s (G1, G2, G3) |
 | the executable (amd64) | 101,863,584 bytes | 102,031,520 bytes (+168 KB, +0.16%: the split loaders, and the back end's own new code) |
