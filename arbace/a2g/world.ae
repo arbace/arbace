@@ -417,22 +417,35 @@
             names2 (vec (drop (count names1) @(:order unit)))
             _ (resolve! names2)
             ;; a group's member classes before the class enclosing them (a holder's analysis
-            ;; would analyze its members, and one member's failure would fail the holder)
+            ;; would analyze its members, and one member's failure would fail the holder); a
+            ;; top-level class without member classes (most loaders, deftypes) in the first
+            ;; group, first, beside the member classes (the build's speed, fourth round, part B)
             ;; each member class a task of its own (a compiled namespace's classes have no
             ;; local or anonymous classes, whose numbering is the nest's), the top-level ones
             ;; (holders, deftypes, loaders) after them; each task in an id space of its own
             ;; starting at the same value (RT.ID_SPACE: the gensyms that name temporaries depend
             ;; on the class alone; standalone S6, SA143)
             tops? (fn [^String n] (not (str/includes? n "$")))
-            groups (vec (for [n names2 :when (not (tops? n))] [n]))
-            top-groups (vec (for [n names2 :when (tops? n)] [n]))]
+            holder? (fn [n] (and (tops? n) (seq (:member-classes (a/decl n)))))
+            groups (vec (concat (for [n names2 :when (and (tops? n) (not (holder? n)))] [n])
+                                (for [n names2 :when (not (tops? n))] [n])))
+            top-groups (vec (for [n names2 :when (holder? n)] [n]))]
         (if-let [^ThreadLocal space (id-space)]
           (doseq [gs [groups top-groups]]
-            (m/par-mapv (m/jobs)
-                        (fn [g]
-                          (.set space (java.util.concurrent.atomic.AtomicInteger. (int analysis-id-base)))
-                          (try (run! analyze! g) (finally (.remove space))))
-                        gs))
+            (let [t0 (System/nanoTime)
+                  rs (m/par-mapv (m/jobs)
+                                 (fn [g]
+                                   (let [s (System/nanoTime)]
+                                     (.set space (java.util.concurrent.atomic.AtomicInteger. (int analysis-id-base)))
+                                     (try (run! analyze! g) (finally (.remove space)))
+                                     [(first g) (/ (- (System/nanoTime) s) 1e9)]))
+                                 gs)]
+              ;; A2G_ANALYSIS_TIMES=1: each group's wall time, its tasks' total, the longest ten
+              (when (System/getenv "A2G_ANALYSIS_TIMES")
+                (println (format "a2g: analysis group: %d tasks in %.2f s, the tasks %.2f s" (count rs)
+                                 (/ (- (System/nanoTime) t0) 1e9) (double (reduce + (map second rs)))))
+                (doseq [[n d] (take 10 (sort-by (comp - second) rs))]
+                  (println (format "a2g: analysis time %.3f s %s" d n))))))
           ;; a host without id spaces (older than SA143): one after another, as before
           (run! analyze! names2))
         (lap :analysis-compiled)

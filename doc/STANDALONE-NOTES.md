@@ -3582,3 +3582,228 @@ Proof (at `1805a559`):
   its runtime is not the checkout's, so it never compiles the namespaces (the two-run build: the
   first program, on the new runtime, compiles them). Builds it hosts take two runs until a
   re-seed, as after any change to the runtime.
+
+## The build's speed, fourth round, part A: reachability's scan, mutable (2026-10-16)
+
+The user's order (a fourth round, part A): what part C of the third round left in a2g's
+reachability (`arbace.a2g.reach`), the scan's state in Java's mutable collections rather than
+atoms of persistent ones, fewer dispatches and type tests on the hot path, `java-impl-of`
+cheaper. Branch `speed4-reach` (from main, `06d183b6`), only `arbace/a2g/reach.ae` changed
+(part B, the analysis, beside it on another branch). Measured as part C did: one compiled tree
+(the build's `target/arbace-go/aot` copied aside) given to `bin/a2g --program --input`, a2g on
+executables built from each version (an old checkout for the old one, so that each runs its
+`reach.ae` compiled), alternately, on the shared host (part B's builds beside: a single
+timing varies by half; the pairs below ran back to back).
+
+### Where the time went (`06d183b6`)
+
+`:reach` 5.6 to 6.6 s on a quiet host, 9 to 12 s with the other agent's builds running. In
+the profile the scan was 4.0 s on one core, flat: no function above a tenth of it; the
+`IFn` dispatch of each call through its var (`Var.getRawRoot`, `jrt.IsDynamic`), the hash
+lookups in the state's persistent sets and maps (the state itself a hash map of 14 keys, its
+fields looked up by keyword), the dynamic vars (`*st*`, `*current*` bound for each method,
+`*cx*`, `*flat*`). Making the state mutable alone gained little (scan 3.5 to 3.8 s): the
+lookups are memory-bound, a HashMap's as much as a HAMT's. What the scan did was mostly
+repeated work with no effect: of 632,000 nodes acted on, 43,357 distinct plans (the same call,
+field or cast in many methods), nearly all of whose runs found every class already in T, the
+method already reached, the call already seen. The rest of the scan is the real work:
+instantiation (`env/all-supertypes` the first time for each class, 0.45 s; the implementations
+of the calls seen), the new virtual calls (with, for each, the lambdas' interfaces that are
+subtypes of the receiver, 68 × 17,000 `subclass?`).
+
+### What changed (`2352fb2b`; a2g's output unchanged)
+
+- **The state** (`State`, a deftype, its fields hinted): T, the reached methods, the
+  instances, the virtual calls in `LinkedHashSet`s, the queue an `ArrayList`, the calls by
+  receiver type and the instances by supertype `HashMap`s of `ArrayList`s, the failed classes
+  a `LinkedHashMap`; the notes (`:unavailable`, `:missing`) and the lambdas' interfaces stay
+  atoms of persistent ones (rare; `vcall*` walks the interfaces in the set's order). `run`
+  returns persistent sets and maps rebuilt from them in insertion order: the same values and
+  the same seq order as before (a hash set's order is its hashes', ties in insertion order;
+  T's removals, a class whose superclass fails, happen in both in the same order). The world's
+  `:T` during the run is the `LinkedHashSet` (`m/translated?`'s `contains?` takes a
+  `java.util.Set`). A continued run (`:state`, main's stand-in rounds) gets a new `State` on
+  the same collections and caches.
+- **No dynamic vars on the hot path**: the method being scanned is a `Volatile` of the state
+  (set and restored around a method and a class's supertypes, as the binding was); the caches
+  are a `Cx` deftype of `HashMap`s in the state; the plans' map, jrt's classes, `slice?` and
+  the class environment (env/*compile-set*'s map, taken once; `run` checks at its end that it
+  did not change) are the state's. `*st*` and `*slice?*` remain for the public `use!`,
+  `reach!` ... and the rare ops' `scan-node!`; `*current*`, `*cx*`, `*flat*` and
+  `*methods-by-key*` are gone.
+- **The fast paths inline** (macros): `use*` (a class in T), `uses!`, `reach*` (a method
+  reached), `init*`, `instantiate*`, `vcall*` (a call seen) test the state's set and call a
+  function only when there is something to do.
+- **Plans shared and skipped** (`plan-once`, `interned`): a plan that cannot note anything
+  (no jrt member to check: not a call on jrt's class, not a `new` or static field jrt may
+  lack) is made once per key (`[:v owner mowner name desc]`, `[:u classes]` ...; a
+  `ConcurrentHashMap` of the run, filled by the parallel step) and shared by the nodes of that
+  key; it runs its checks in order, all of them, as before, and once a run found every check on
+  its fast path (no effect: the class in T or a class `use!` answers at once, nil, Object or
+  jrt's own, the method reached, the call seen), it is skipped from then on. That holds because
+  the state only grows: a class leaves T only inside the `use!` that added it, when its
+  superclass fails, and no plan runs inside a `use!`.
+- **Work moved to the parallel step**: the methods' code (`method-code`) and
+  `env/all-supertypes` of the classes the batch's code instantiates (into the cache: the same
+  answers), computed beside the plans.
+- **`java-impl-of` cheaper**: the superclass of each class cached, the superclass chain's
+  implementation cached as the vector `[c name desc]` (shared, its hash computed once), `body?`
+  and `private?` inline on the flags; the lambdas' interfaces that are subtypes of a receiver
+  type kept per type while the set of interfaces is the same, the test `subclass?` replaced by
+  membership in the set of an interface's supertypes (`supertypes-of`, the same graph
+  `env/subclass?` walks).
+
+Checked the strict way, as part C did: each version run with a trace of every change of the
+state, in order (the classes entering and leaving T, the queue, the initialized classes, the
+instances, the virtual calls, the lambdas' interfaces, the unavailable and missing notes):
+110,056 events, the same as the old one's line for line, at each of the five steps; and at
+each step a2g's program for the same compiled tree the same as the old one's (`diff -r`), but
+its own embedded sources (`reach.ae.z`) and report.edn's times.
+
+### Measured
+
+| | before (`06d183b6`) | after (`2352fb2b`) |
+|---|---|---|
+| `:reach`, quieter host (two pairs) | 6.7, 7.7 s | 3.0, 3.9 s |
+| `:reach`, the other agent's build beside (two pairs) | 9.2, 9.9 s | 4.3, 4.4 s |
+| the scan (one core) | about 4 s (profile) | 2.1 to 2.3 s |
+| the parallel step (plans, code, supertypes) | | 0.9 s |
+| the roots, before the batches | | 0.4 s |
+
+Steps between (scan, from a temporary timer): the state mutable 3.5 to 3.8 s; the fast paths
+inline about the same; the plans shared and skipped 3.3 to 3.8 s; with the parallel
+supertypes and the interfaces per receiver 2.3 to 2.7 s; with the code in parallel and the
+interfaces' sets 2.1 to 2.3 s. Evaluated (stage 0 hosting a2g with the new `reach.ae`, as a
+build by stage 0 does until a re-seed): about as before (the fixpoint's G1 11.9 s; part C's
+10 to 13 s).
+
+The essential gate passed on `2352fb2b` (9:30: the suite 20,506 of 20,520, no regressions;
+the oracle 22,508 of 22,561, the 53 known, 0 new). The fixpoint (G1 by the seed's stage 0,
+whose a2g is the old one): a2g's programs G1 = G2 = G3, **G1 = G2 = G3 byte for byte**
+(`b9700623...`, 102,903,968 bytes); reachability in G2 and G3 4.2 and 5.0 s.
+
+### Proposals
+
+- **SA250 What is left of `:reach`.** About 1 s is now outside the scan: the roots (0.4 s,
+  20,000 of them, each a `use!`, a `reach!` and a virtual call), main's stand-in rounds and
+  the subclass index (`arbace/a2g/main.ae`, outside this branch), and the parallel step's walk
+  of the nodes (0.9 s on 16 threads, bound by the 14 batches). (a) Leave it: reachability is
+  3 to 4 s of a2g's 70 to 100; (b) a fifth round on `main.ae`'s part and the walk. *Recommended:
+  (a)*; nothing built.
+
+**Decided (2026-10-16, the user):** SA250 (a).
+
+### Left
+
+- The scan's 2.1 to 2.3 s are now its real work: instantiation (the implementations of the
+  calls seen for each new instance, `env/all-supertypes` for a class the parallel step did not
+  see), the new virtual calls.
+
+## The build's speed, fourth round, part B: the analysis' member classes (2026-10-16)
+
+The lead's order (a fourth round, part B): the analysis of the compiled namespaces' classes,
+which part A of the third round left at about 15 s, its first group (the member classes: fns,
+the loaders' parts) the longest. Branch `speed4-analysis` (from main at `06d183b`). Measured as
+`bin/arbace-go` runs a2g (`--await`, main's compiled tree copied aside and copied in 45 s after
+a2g starts, `.tmp/speed4-analysis/await.sh`), the lap `analysis-compiled` of `a2g: load (s)`; the
+tasks timed by an instrumented `world.ae` (kept as `A2G_ANALYSIS_TIMES=1`), the process' CPU
+time over each group (`/proc/self/stat`, not kept), CPU profiles (`ARBACE_CPUPROFILE`) of a run
+that exits right before the first group and of one that exits right after it, compared
+(`pprof -diff_base`: the group alone); on the shared host (part A's builds beside: single
+timings vary by a fifth or more).
+
+### Where the time went (`06d183b`)
+
+- **Not a few long tasks.** The first group: 8,431 tasks, the median 5.5 ms, the 99th
+  percentile 0.2 s, the longest 1.4 s (`arbace.a2g.main$run*`); all 16 threads busy until the
+  end, the last tasks ending within 0.03 s of each other. The second group (217 top-level
+  classes) 1.1 s, its tail one loader (`arbace.core.specs.alpha__init`, 0.84 s).
+- **Not contention.** A goroutine dump in the middle of the group (SIGQUIT, 32 jobs): every
+  worker runnable or running, none waiting on a lock or a channel; the shared compilation's atom
+  is only read here.
+- **Not the collector first.** A collection every 2 s or so, each 0.2 s concurrent (`gctrace`;
+  GOGC 400, GOMEMLIMIT 20 GiB as bin/a2g sets them): about a third of the CPU in the group, the
+  rest the analysis itself.
+- **The work.** The group's CPU 168 s for 9.2 s of wall (A2G_JOBS 16); with 4 jobs 28 s (CPU
+  171 s), with 32 jobs 8.2 s (CPU 187 s, each task twice as long): about 16 to 20 cores is what
+  this host gives one process, so the bound is the CPU the analysis takes. The group's profile:
+  `find-own-field` about 40% (every symbol not a local, a field of the class or of an enclosing
+  class, sought by a linear scan of the fields: a fn class's lookups go through its holder's
+  constants, hundreds to thousands of fields, and every class name, `RT` and the like, scans
+  them all to the end); `env/member-methods` about 55% with `all-supertypes` (each call walking
+  every supertype's methods, the runtime's large classes `RT`, `Numbers`, `AFn` included, for
+  the methods of one name); `types/parse-method-desc` about 14% (the candidates' descriptors
+  parsed again for every call); `param-tags-match?` 3% (each tag resolved again for each
+  candidate). (Overlapping: cumulative shares.)
+
+### What changed (`04a6a77`; a2g's output unchanged)
+
+- **`find-own-field` through an index** (`arbace.classes.analyze/field-index`): per class, its
+  fields by name, the first not derived of each name with its position (the first of the
+  name and of its munged name wins, as the scan's order made it), kept while the class's
+  `:fields` vector is the same object.
+- **`all-supertypes` and `member-methods` memoized** (`arbace.classes.env`): each result with
+  the class infos it was computed from (the supertypes', the only infos either reads), reused
+  while every one of them is still the class's info, by identity (a class declared, resolved
+  or bridged anew has a new info, and so does any other compilation or class environment), and
+  stored only when no info changed while it was computed. A class of the compilation is checked
+  against the compilation's map directly.
+- **`parse-method-desc` memoized** by descriptor (a pure function of a string).
+- **param-tags resolved once per call** (`select-method`): each tag's descriptor a delay,
+  resolved when first compared, as the scan resolved it, then reused for the other candidates.
+- **The groups** (`arbace.a2g.world`): a top-level class without member classes (most
+  loaders, the deftypes without nested classes) is analyzed in the first group, first, beside
+  the member classes; the second group keeps the holders and the split loaders (102 classes,
+  their own code small). Nothing a class's analysis writes is another's: it was already one task
+  per class in an id space of its own, so the order of the tasks changes nothing.
+
+The memos are global (`ConcurrentHashMap`s, strong, as `env/reflect-cache`; read without a
+lock), so the runtime's own uses of the class forms' front end (the evaluator's class forms, j2a)
+keep them too: SA260.
+
+### Measured
+
+| | before (`06d183b`) | after (`04a6a77`) |
+|---|---|---|
+| `analysis-compiled`, 3 alternating pairs, the host busy (load 15) | 16.5, 16.6, 15.7 s | 5.1, 5.5, 4.9 s |
+| the same, the host quiet (single runs) | 9.0 to 11.4 s | 4.3 to 5.5 s |
+| the first group: tasks, wall, CPU | 8,431, 8.3 to 9.2 s, 168 s | 8,546, 3.8 to 4.7 s, 63 to 76 s |
+| the second group: tasks, wall | 217, 1.1 s | 102, 0.2 to 0.5 s |
+| a2g's `:load` (after a wait of about 41 s), 3 pairs | 65.5, 70.9, 65.9 s | 52.9, 56.6, 53.9 s |
+
+The rest of a2g as before (reachability, the translation and the writing within the noise).
+a2g's output for the same compiled tree is the same, byte for byte, but its own embedded sources
+(`world.ae`, `analyze.ae`, `env.ae`, `types.ae`) and report.edn's `:times` (`diff -r` of the
+three pairs, and of every step on the way). The analysis of the compiled classes depends on the
+executable's `arbace.classes` (not a tool source), so G1's a2g (on the seed's stage 0) runs the
+old analysis and G2's the new: the fixpoint below shows them equal on the whole program.
+
+**Checks.** The essential `bin/gate` on `04a6a77` passed (10m04s: the suite 20,506 of 20,520, no
+regressions; the oracle 22,508 of 22,561, the 53 known, 0 new). `bin/arbace-go --fixpoint` (G1
+by the seed's stage 0, whose analysis is the old one): a2g's programs G1 = G2 = G3, **G1 = G2 =
+G3 byte for byte** (`a24fb44b...`, 102,457,504 bytes); the builds G1, G2, G3 192, 157, 143 s, their
+`analysis-compiled` 16.0 s (G1: the old analysis), 5.4, 5.4 s.
+
+### Left
+
+- The first group (about 4 s on 16 jobs): no hot spot left above a few percent; the generic
+  costs (dynamic vars, keyword lookups in nodes, lazy seqs, allocation and the collector)
+  spread over the analyzer. Next would be `select-method` (its `pick`, `applicable?` over the
+  overloads of `Numbers` and `RT`: about 15% now), `parse-type`/`type-desc` of the type
+  forms (about 10%), both per call site.
+- More than 16 jobs does not help on this host (its cores, not the threads, bound it).
+
+### Proposals
+
+- **SA260 The analysis' memos.** (a) As built: global and strong (`ConcurrentHashMap`s in
+  `arbace.classes.env` and `types`, checked by the infos' identity), kept for the life of the
+  process, the evaluator's and j2a's uses included (an entry per class and method name asked
+  for; a class declared again replaces its entries' infos at the next lookup); (b) the same
+  memos bound per run (a dynamic var a2g binds around its world, the other uses unmemoized; the
+  seed's stage 0 has no such var, so G1's `world.ae` would have to resolve it at run time);
+  (c) weak or bounded maps (jrt's maps hold their keys strongly: a bound would need its own
+  eviction). *Recommended: (a)*: the same rule as `env/reflect-cache`; the retained data are
+  vectors of the infos the compilation holds anyway, and a long-running REPL defines few
+  classes.
+
+**Decided (2026-10-16, the user):** SA260 (a), as built.
