@@ -1258,6 +1258,28 @@
       {:op (if static? :get-static :get-field) :field f :owner (:owner f) :target target
        :type (:desc f)})))
 
+(def ^:private ^java.util.concurrent.ConcurrentHashMap field-indexes
+  ;; class name -> [fields index]: the index of a class's fields vector (field-index), kept
+  ;; while the class has that vector (identical); the build's speed, fourth round, part B
+  (java.util.concurrent.ConcurrentHashMap.))
+
+(defn- field-index
+  "{name [position field]} of the first field of each name in fields (a class's :fields) that is
+  not derived."
+  ^java.util.HashMap [c fields]
+  (let [e (.get field-indexes c)]
+    (if (and e (identical? fields (aget ^objects e 0)))
+      (aget ^objects e 1)
+      (let [m (java.util.HashMap.)]
+        (loop [i 0 fs (seq fields)]
+          (when fs
+            (let [f (first fs)]
+              (when (and (not (:derived f)) (not (.containsKey m (:name f))))
+                (.put m (:name f) [i f]))
+              (recur (inc i) (next fs)))))
+        (.put field-indexes c (object-array [fields m]))
+        m))))
+
 (defn find-own-field
   "A field of the current class or an enclosing class body, innermost first:
   [field class-name] or nil."
@@ -1268,12 +1290,17 @@
         mn (when (:clojure actx) (munge sn))]
     (loop [c (:class actx)]
       (when-let [d (and c (decl c))]
-        (if-let [f (some #(when (and (not (:derived %))
-                                     (or (= sn (:name %)) (and mn (= mn (:name %)))))
-                            %)
-                         (:fields d))]
-          [f c]
-          (recur (:outer d)))))))
+        ;; the first field named sn or mn (an index of the class's fields)
+        (let [idx (field-index c (:fields d))
+              a (.get idx sn)
+              b (when mn (.get idx mn))
+              f (cond (nil? a) (second b)
+                      (nil? b) (second a)
+                      (< (long (first b)) (long (first a))) (second b)
+                      :else (second a))]
+          (if f
+            [f c]
+            (recur (:outer d))))))))
 
 (defn this-node [actx]
   (when (:static actx) (fail "No this in a static context"))
@@ -1916,10 +1943,13 @@
         el (t/elem-type (last params))]
     (into fixed (repeat (- n (count fixed)) el))))
 
-(defn- param-tags-match? [actx tags m]
+(defn- param-tags-match?
+  "Do the param-tags match method m? tag-descs: each tag's descriptor as a delay (resolved once
+  for all the candidates, when first compared)."
+  [tags tag-descs m]
   (let [[ps _] (t/parse-method-desc (:desc m))]
     (and (= (count tags) (count ps))
-         (every? true? (map (fn [tag p] (or (= tag '_) (= p (actx-desc actx tag)))) tags ps)))))
+         (every? true? (map (fn [tag td p] (or (= tag '_) (= p @td))) tags tag-descs ps)))))
 
 ;; Clojure's choice among overloads (arbace.lang.Compiler's getMatchingParams and subsumes,
 ;; Reflector's paramArgTypeMatch), on descriptors
@@ -2070,7 +2100,10 @@
   loose, then variable arity invocation; then literal narrowing). Returns [method varargs?]."
   [actx cands args what param-tags]
   (let [n (count args)
-        cands (if param-tags (filter #(param-tags-match? actx param-tags %) cands) cands)
+        cands (if param-tags
+                (let [tds (mapv (fn [tag] (delay (actx-desc actx tag))) param-tags)]
+                  (filter #(param-tags-match? param-tags tds %) cands))
+                cands)
         pdescs (fn [m] (first (t/parse-method-desc (:desc m))))
         varargs? #(has? (:flags %) Opcodes/ACC_VARARGS)
         pick (fn [ms params-of]
