@@ -374,3 +374,26 @@ or how to name these converters/compilers?". Noted in the agenda (Later) as a su
 two-way syntax bridge between Go and Go forms, not a translation into Arbace as j2a and c2a are;
 a2g compiles class forms into Go forms. No renaming yet; the 2026-10-11 renaming (j2c, g2c, c2g
 to j2a, g2a, a2g) is the precedent for how a rename is carried out.
+
+## 2026-10-16: a tools-only seed measured, and not pursued (the user)
+
+The user asked whether the seed is minimal (it holds JDK data such as `tzdb.dat`), then for a
+measurement. The seed is the whole program by design (stage 0 = G1). Measured on a branch
+`tools-only` from `ad5e2a5a` (hacks behind environment variables: `A2G_EMBED_ONLY`,
+`A2G_JDK_REACH`), packed as `bin/seed --make` packs (today's seed reproduced so, byte for byte):
+the whole program 5,451,704 bytes of xz (85 namespaces, executable 102.4 MB); the bootstrap's
+tools (46 namespaces: a2g, the back end, the class forms' front end, g2a's build and print)
+4,692,972 (-13.9%, executable 90.7 MB); all the host's tools (63, adding c2a, the suite's
+runner, g2a's convert and read, `arbace.box`) 4,965,496 (-8.9%); the bootstrap's tools with the
+time, text, locale, net, security, sql and stream packages of the JDK reached rather than rooted
+4,535,488 (-16.8%); with no JDK roots 4,249,356 (-22.1%), not runnable (`RT.doInit` reaches
+`Properties.setProperty` by reflection); evaluated (`ARBACE_AOT=0`) 3,160,420 (-42%). `jrt`
+(20 MB) does not follow the namespaces: `--program` roots every public member of the JDK classes
+the REPL sees. The JDK's data (about 300 KB, 5% of the seed) stays in every variant that runs:
+`arbace.core` loads `arbace.instant`, which reaches `TimeZone` and the tzdb provider. The
+bootstrap-tools seed's stage 0 built the same G1 as today's stage 0, byte for byte, once the
+classes the host's compile cuts were taken from all of `arbace/` (else `arbace.repl`, the only
+user of `sun.misc.Signal`, compiled differently on a host that does not embed it). A minimal seed
+would need a named tools-only build and a longer check (G3 printing the seed again, its
+executable = stage 0). The user: "it isn't worth it for a 14-17% smaller seed"; the branch was
+dropped, its numbers kept here.
