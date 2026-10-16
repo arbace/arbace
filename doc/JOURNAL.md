@@ -258,3 +258,14 @@ output, whose `report.edn` holds its timings (its program equal). a2g took 103,5
 by hand from `box-steps.edn` and `host-steps.edn`. The chain thus holds on arm64 from nothing in
 the VM, as with the amd64 box's results given (BX117 (b)) and on the Mac. Details in
 doc/go/BOX-NOTES.md, BX117. Open: the waiting guest's 3.5 vCPUs under emulation.
+
+## 2026-10-16: the scratch cleared, the merged branches deleted
+
+At the user's request: `.tmp/box-rebuild/`'s stores removed (each run's `*-steps.edn`, logs and
+`tools.txt` kept; the results are in doc/go/BOX-NOTES.md), the merged worktrees and their
+branches (`s9`, `speed2-a2g`, `speed2-g2a`, `speed2-host`, `speed2-jrt`) and the speed rounds'
+scratch removed; about 36 GB freed. `s6-t3`, S6's T3 measurement build (three commits never
+merged: the benchmarks as a namespace, 9,000 deep, tail calls trampolined, ending at `694660d`),
+deleted without a tag, by the user's decision: its numbers and design are in
+doc/STANDALONE-NOTES.md ("Benchmarks and T3 (SA139)"), whose two references to the branch now say
+the build was not kept.

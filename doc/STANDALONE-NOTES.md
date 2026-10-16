@@ -2089,8 +2089,8 @@ of 22,558, the 53 known, 0 new.
 
 ### Benchmarks and T3 (SA139)
 
-`test/bench/eval-bench.ae`'s benchmarks compiled as a namespace (a measurement build, branch
-`s6-t3`; ms, best run, amd64): all evaluated (main before S6), the script evaluated with
+`test/bench/eval-bench.ae`'s benchmarks compiled as a namespace (a measurement build, not kept:
+the benchmarks wrapped as a namespace compiled into a test build; ms, best run, amd64): all evaluated (main before S6), the script evaluated with
 `arbace.core` compiled, the benchmarks compiled (T1), the same with T3, the frozen JVM.
 
 | benchmark | all evaluated | script evaluated | compiled (T1) | compiled (T3) | JVM |
@@ -2122,7 +2122,8 @@ Geometric means: compiled 3.2 times faster than all evaluated, 16 times slower t
 unchanged): 8% slower in the geometric mean, 13-67% on the sequence benchmarks (`seq-ops`,
 `lazy-walk`, `transduce`, `into-xform`, `closures`), 80% on the tail calls themselves; and a call
 in tail position inside a `try` body would leave the `try` before it runs. So T1 stays (SA139,
-D6: T4 with Arbace's own back end), and the T3 build is not merged (`s6-t3`).
+D6: T4 with Arbace's own back end), and the T3 build was not merged; its branch was deleted on
+2026-10-16 (the user), the trampoline being as described above.
 What makes compiled code slower than Go could be: boxed arithmetic through `Numbers`, a2g's
 class initialization guards on every static call, the casts (`IFn`) and interface assertions
 of each call.
