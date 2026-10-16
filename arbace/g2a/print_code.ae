@@ -40,8 +40,74 @@
   "True inside a generic declaration: field groups are kept (doc/go/ROUNDTRIP.md, known gaps)."
   false)
 
+(def ^:dynamic *return-pos*
+  "Mode :full: the position of the keyword of the implicit return of the function printed."
+  nil)
+
 (defn- fail [msg form]
   (throw (ex-info (str msg ": " (pr-str form)) {:form form :line (:line (meta form))})))
+
+;; ---------------------------------------------------------------------------------------
+;; Mode :full (SPEC §10.2, §12.3): positions of tokens
+
+(defrecord PL [v pos text parens])
+
+(defn pl?
+  "A literal child of mode :full (wrap-full): its value, position, spelling and parentheses."
+  [x]
+  (instance? PL x))
+
+(defn fp
+  "Mode :full: the recorded position of f's token k (its :go/pos), else nil."
+  [f k]
+  (when (e/full?) (get (:go/pos (meta f)) k)))
+
+(defn- ptok
+  "A token at position pos (mode :full)."
+  [s pos]
+  (e/at! pos)
+  (tok s))
+
+(defn ptok*
+  "A token at position pos (mode :full), for arbace.g2a.print."
+  [s pos]
+  (ptok s pos))
+
+(defn- child-pos
+  "Mode :full: the position of the literal child i of f (its parent's :go/apos)."
+  [f i]
+  (when (e/full?) (get (:go/apos (meta f)) i)))
+
+(defn wrap-full
+  "Mode :full: the forms with each literal child that carries a position (its parent's
+  :go/apos) replaced by a PL with its spelling (:go/atext) and parentheses (:go/aparens), in
+  the forms and in the type forms of :tag and :type-params metadata."
+  [x]
+  (let [wrap-meta (fn [m] (cond-> m
+                            (:tag m) (update :tag wrap-full)
+                            (:type-params m) (update :type-params wrap-full)))]
+    (cond
+      (or (seq? x) (vector? x))
+      (let [m (meta x)
+            apos (:go/apos m) atext (:go/atext m) apar (:go/aparens m)
+            kids (map-indexed (fn [i c]
+                                (let [c (wrap-full c)]
+                                  (if (and (contains? apos i) (not (keyword? c)) (not (symbol? c))
+                                           (not (coll? c)))
+                                    (->PL c (get apos i) (get atext i) (get apar i))
+                                    c)))
+                              x)]
+        (with-meta (if (seq? x) (apply list kids) (vec kids)) (wrap-meta m)))
+      (symbol? x) (let [m (meta x)]
+                    (if (or (:tag m) (:type-params m)) (with-meta x (wrap-meta m)) x))
+      :else x)))
+
+(defn- with-parens
+  "Prints (body) inside the parentheses ps, [[lparen rparen] ...] outermost first."
+  [ps body]
+  (doseq [[lp _] ps] (ptok "(" lp))
+  (body)
+  (doseq [[_ rp] (reverse ps)] (ptok ")" rp)))
 
 ;; ---------------------------------------------------------------------------------------
 ;; Classification (§4.4, §13.5)
@@ -190,6 +256,16 @@
     (go-sym? f) (str (second f))
     :else (fail "not a name" f)))
 
+(defn- name-tok
+  "A name's tokens: in mode :full at their positions (pkg.Name is three tokens)."
+  [f]
+  (if (e/full?)
+    (let [p (:go/pos (meta f))]
+      (if (and (symbol? f) (namespace f))
+        (do (ptok (namespace f) (:x-pos p)) (ptok "." (:dot p)) (ptok (name f) (:name-pos p)))
+        (ptok (ident-string f) (:name-pos p))))
+    (tok (ident-string f))))
+
 (defn- name-list
   "Names separated by commas (a group of parameters, results, fields, type parameters, or a
   spec's names), each on its recorded line: a name list may span lines (Go allows a break
@@ -197,7 +273,7 @@
   [nms]
   (doseq [[i nm] (map-indexed vector nms)]
     (when (pos? i) (tok ",") (sp) (e/break-to! (line-of nm)))
-    (tok (ident-string nm))))
+    (name-tok nm)))
 
 (defn- group-line
   "The recorded line of a group of entries: its first name's, else its type's."
@@ -207,8 +283,9 @@
 (defn- label-name [k]
   (if (keyword? k) (name k) (fail "not a label" k)))
 
-(defn- literal [f]
+(defn- literal [f & [spelling]]
   (cond
+    spelling (tok spelling)
     (nil? f) (tok "nil")
     (true? f) (tok "true")
     (false? f) (tok "false")
@@ -216,7 +293,7 @@
     ;; not say whether the source spelled it raw, and an interpreted string never pushes what
     ;; follows to later lines
     (string? f) (let [nl? (str/includes? f "\n")]
-                  (if (and nl? (not (e/lines?)) (text/raw-string-ok? f))
+                  (if (and nl? (not (e/lines?)) (not (e/full?)) (text/raw-string-ok? f))
                     (e/raw-tok (str "`" f "`"))
                     (tok (text/go-string f))))
     (char? f) (tok (text/go-rune (long (int f))))
@@ -233,8 +310,8 @@
   elements' indexes in their parent list (for :go/breaks); end, the line of close (:here:
   the line of the last element); target, when given, the recorded line of an element (for
   elements that are not forms: groups of parameters)."
-  [open close xs print-one {:keys [parent offset end target] :or {offset 1}}]
-  (tok open)
+  [open close xs print-one {:keys [parent offset end target open-pos close-pos] :or {offset 1}}]
+  (ptok open open-pos)
   (e/push-open!)
   (let [start (e/line)
         xs (vec xs)
@@ -263,8 +340,9 @@
                  (or (and (integer? end) (> (long end) (e/line)))
                      (and (nil? end) multi? (e/room? 1))))
         (tok ","))
+      (when (pos? n) (e/soft :trail ","))
       (e/close-break! end multi? false indent)
-      (tok close))))
+      (ptok close close-pos))))
 
 ;; ---------------------------------------------------------------------------------------
 ;; Types (§5)
@@ -298,6 +376,7 @@
   (and prev (:name prev) (:name cur)
        (not (:variadic? prev)) (not (:variadic? cur))
        (= (:type prev) (:type cur))
+       (or (not (e/full?)) (= (:go/pos (meta (:type prev))) (:go/pos (meta (:type cur)))))
        (= (:doc (:meta prev)) (:doc (:meta cur)))
        (= (:go/tag (:meta prev)) (:go/tag (:meta cur)))
        (let [t (line-of (:src cur))] (or (nil? t) (= t (line-of (:src prev)))))))
@@ -332,7 +411,7 @@
   "(a, b int, c ...T): the parameters of a vector; end, the line of the closing bracket when
   known. The vector's recorded line is its opening bracket's (a parameter list after type
   parameters that span lines: SA200)."
-  [v & [end]]
+  [v & [end open-pos close-pos]]
   (let [groups (group-entries (param-entries v))]
     (e/break-to! (line-of v))
     (element-list "(" ")" groups
@@ -341,9 +420,10 @@
                       (name-list (:names g))
                       (sp))
                     (if (:variadic? g)
-                      (do (tok "...") (type-expr (variadic-elem (:type g))))
+                      (do (ptok "..." (fp (:type g) :ellipsis)) (type-expr (variadic-elem (:type g))))
                       (type-expr (:type g))))
-                  {:target group-line :end end})))
+                  {:target group-line :end end
+                   :open-pos (or open-pos (fp v :opening)) :close-pos (or close-pos (fp v :closing))})))
 
 (defn- results-entries
   "The results of a signature: a vector's :tag (one unnamed result) or :results."
@@ -353,12 +433,19 @@
     (contains? (meta params) :tag) [{:name nil :type (:tag (meta params))}]
     :else []))
 
-(defn- print-results [entries]
+(defn- print-results
+  "The results of a signature: entries, of the vector rv (:results) or of the parameter
+  vector params' tag."
+  [entries rv params]
   (cond
     (empty? entries) nil
     (and (= 1 (count entries)) (nil? (:name (first entries))))
-    (do (sp) (type-expr (:type (first entries))))
-    :else (do (sp) (param-list (vec (map (fn [en] (or (:src en) (:type en))) entries))))))
+    (do (sp)
+        (if-let [o (or (fp params :results-opening) (fp rv :opening))]
+          (do (ptok "(" o) (type-expr (:type (first entries))) (ptok ")" (or (fp params :results-closing) (fp rv :closing))))
+          (type-expr (:type (first entries)))))
+    :else (do (sp) (param-list (vec (map (fn [en] (or (:src en) (:type en))) entries)) nil
+                               (fp rv :opening) (fp rv :closing)))))
 
 (defn- line-indent
   "The indentation of the line being written."
@@ -370,21 +457,23 @@
   first token follows it on its line: the line they record, else the last parameter's), and
   without results, when the parameters span lines, on a line of its own only if there is room
   before the body (its first recorded line)."
-  [params res body]
+  [params res body & [rv]]
   (let [r (when (seq res) (let [en (first res)] (or (line-of (or (:src en) (:type en))) :here)))]
     (binding [e/*next* (next-line body)]
       (param-list params r)
-      (print-results res))))
+      (print-results res rv params))))
 
 (defn- func-type-sig
   "(params) results of (func [params] [results]): the results vector holds names or types."
   [params results]
-  (signature params (if results (param-entries results) []) nil))
+  (signature params (if results (param-entries results) []) nil results))
 
-(defn- struct-tag [s]
-  (if (and (string? s) (not (str/includes? s "\n")) (text/raw-string-ok? s))
-    (tok (str "`" s "`"))
-    (tok (text/go-string s))))
+(defn- struct-tag [s & [m]]
+  (cond
+    (and (e/full?) (:go/tag-text m)) (ptok (:go/tag-text m) (:go/tag-pos m))
+    (and (string? s) (not (str/includes? s "\n")) (text/raw-string-ok? s))
+    (ptok (str "`" s "`") (when (e/full?) (:go/tag-pos m)))
+    :else (ptok (text/go-string s) (when (e/full?) (:go/tag-pos m)))))
 
 (defn- doc-lines [doc]
   (let [ls (str/split (str doc) #"\n" -1)
@@ -401,7 +490,10 @@
 
 (def ^:private non-directive-keys
   #{:go/tag :go/via :go/breaks :go/end :go/pos :go/apos :go/inst :go/grouped :go/implicit
-    :go/paren :go/label :go/label-line})
+    :go/paren :go/label :go/label-line
+    ;; mode :full (SPEC §10.2)
+    :go/atext :go/aparens :go/acolon :go/parens :go/ops :go/cond :go/text :go/tag-pos
+    :go/tag-text :go/comments :go/space :go/tail :go/semis :go/trails})
 
 (defn directives-of
   "The directive lines of a declared name's metadata (§9.1): :go/<name> true or text (a
@@ -435,7 +527,7 @@
   vector's tag."
   [params more]
   (let [results (when (= (first more) :results) (second more))]
-    (signature params (results-entries params results) nil)))
+    (signature params (results-entries params results) nil results)))
 
 (declare type-expr)
 
@@ -476,15 +568,15 @@
       (when-let [t (:go/tag (:meta g))]
         (when (and (seq (:names g)) (= sep vtab)) (sep))
         (sep)
-        (struct-tag t)))
+        (struct-tag t (:meta g))))
     (let [x (:src g)]
       (if (interface-method? x)
-        (do (tok (ident-string (first x))) (iface-method-sig (second x) (nnext x)))
+        (do (name-tok (first x)) (iface-method-sig (second x) (nnext x)))
         (type-expr x)))))
 
 (defn- field-list
   "struct{...} or interface{...} (go/printer's fieldList)."
-  [kw fs struct?]
+  [kw fs struct? & [f]]
   (let [groups (if struct?
                  (struct-fields fs)
                  (vec (for [x fs] {:src x :meta (meta (if (interface-method? x) (first x) x))})))
@@ -493,8 +585,10 @@
         breaks? (and (e/lines?) (some #(and % (> (long %) start)) ts))
         docs? (some (fn [g] (:doc (:meta g))) groups)]
     (cond
+      (and (e/full?) (empty? groups))
+      (do (ptok kw (fp f (keyword kw))) (ptok "{" (fp f :lbrace)) (ptok "}" (fp f :rbrace)))
       (empty? groups) (tok (str kw "{}"))
-      (and (not breaks?) (not docs?) (or (e/lines?) (one-line-fields? groups struct?)))
+      (and (not breaks?) (not docs?) (not (e/full?)) (or (e/lines?) (one-line-fields? groups struct?)))
       (do (tok (str kw "{")) (sp)
           (doseq [[i g] (map-indexed vector groups)]
             (when (pos? i) (tok ";") (sp))
@@ -504,7 +598,7 @@
       (let [indent (if (e/bol?) @(:indent e/*p*) (e/cur-indent))
             sep (if (and struct? (= 1 (count groups))) sp vtab)
             last-start (volatile! (e/line))]
-        (tok kw) (sp) (tok "{")
+        (ptok kw (fp f (keyword kw))) (sp) (ptok "{" (fp f :lbrace))
         (e/push-open! indent)
         (dotimes [i (count groups)]
           (let [g (nth groups i)
@@ -526,59 +620,72 @@
         (if (e/lines?)
           (when-not (e/close-break! nil true true indent) (sp))
           (e/nl indent true))
-        (tok "}")))))
+        (when (e/full?) (sp))
+        (ptok "}" (fp f :rbrace))))))
 
 (defn- chan-type [f]
   (let [[_ a b] f
         dir (when (keyword? a) a)
         elem (if dir b a)]
     (case dir
-      :recv (do (tok "<-") (tok "chan"))
-      :send (do (tok "chan") (tok "<-"))
-      nil (tok "chan")
+      :recv (do (ptok "<-" (fp f :begin)) (tok "chan"))
+      :send (do (ptok "chan" (fp f :begin)) (ptok "<-" (fp f :arrow)))
+      nil (ptok "chan" (fp f :begin))
       (fail "bad channel direction" f))
     (sp)
-    (if (and (not= dir :recv) (seq? elem) (= (op elem) "chan") (= (second elem) :recv) (nil? dir))
+    (if (and (not= dir :recv) (seq? elem) (= (op elem) "chan") (= (second elem) :recv) (nil? dir)
+             (not (e/full?)))
       (do (tok "(") (type-expr elem) (tok ")"))
       (type-expr elem))))
 
 (defn- type-list
-  "Type arguments [A, B]."
-  [ts]
-  (element-list "[" "]" ts (fn [t _] (type-expr t)) {}))
+  "Type arguments [A, B] (of f, whose brackets' positions mode :full takes)."
+  [ts & [f]]
+  (element-list "[" "]" ts (fn [t _] (type-expr t)) {:open-pos (fp f :lbrack) :close-pos (fp f :rbrack)}))
+
+(declare print-pl)
+
+(defn- op-pos
+  "Mode :full: the position of the i-th operator of an operator form f (a chain's :go/ops)."
+  [f i]
+  (when (e/full?)
+    (if-let [ops (:go/ops (meta f))] (get ops i) (fp f :op-pos))))
 
 (defn type-expr
   "Prints a type form (§5.1)."
   [f]
   (e/break-to! (line-of f))
   (cond
-    (symbol? f) (tok (ident-string f))
+    (pl? f) (print-pl f)
+    (and (e/full?) (:go/parens (meta f)))
+    (with-parens (:go/parens (meta f)) #(type-expr (vary-meta f dissoc :go/parens)))
+    (symbol? f) (name-tok f)
     (seq? f)
     (let [o (op f)]
       (case o
-        "*" (do (tok "*") (type-expr (second f)))
-        "slice" (do (tok "[") (tok "]") (type-expr (second f)))
+        "*" (do (ptok "*" (fp f :star)) (type-expr (second f)))
+        "slice" (do (ptok "[" (fp f :lbrack)) (tok "]") (type-expr (second f)))
         "array" (let [[_ n t] f]
-                  (tok "[")
-                  (if (= n '...) (tok "...") (binding [*header* false] (expr0 n 1)))
+                  (ptok "[" (fp f :lbrack))
+                  (if (= n '...) (ptok "..." (fp n :ellipsis)) (binding [*header* false] (expr0 n 1)))
                   (tok "]")
                   (type-expr t))
         "map" (let [[_ k v] f]
-                (tok "map") (tok "[") (type-expr k) (tok "]") (type-expr v))
+                (ptok "map" (fp f :map)) (tok "[") (type-expr k) (tok "]") (type-expr v))
         "chan" (chan-type f)
         "func" (let [[_ params results] f]
-                 (tok "func") (func-type-sig params results))
-        "struct" (field-list "struct" (args f) true)
-        "interface" (field-list "interface" (args f) false)
+                 (ptok "func" (fp f :func)) (func-type-sig params results))
+        "struct" (field-list "struct" (args f) true f)
+        "interface" (field-list "interface" (args f) false f)
         "|" (doseq [[i t] (map-indexed vector (args f))]
-              (when (pos? i) (sp) (tok "|") (sp))
+              (when (pos? i) (sp) (ptok "|" (op-pos f (dec i))) (sp))
               (type-expr t))
-        "tilde" (do (tok "~") (type-expr (second f)))
-        "inst" (do (type-expr (second f)) (type-list (nnext f)))
-        "go/id" (tok (ident-string f))
+        "tilde" (do (ptok "~" (fp f :op-pos)) (type-expr (second f)))
+        "inst" (do (type-expr (second f)) (type-list (nnext f) f))
+        "go/id" (name-tok f)
         ;; a generic type's instance (G T ...)
         (if (or (symbol? (first f)) (go-sym? (first f)))
-          (do (tok (ident-string (first f))) (type-list (rest f)))
+          (do (name-tok (first f)) (type-list (rest f) f))
           (fail "not a type" f))))
     :else (fail "not a type" f)))
 
@@ -604,7 +711,7 @@
                         :meta (meta p) :src p})
                      tps)
         groups (group-entries entries)]
-    (tok "[")
+    (ptok "[" (fp tps :opening))
     (doseq [[i g] (map-indexed vector groups)]
       (when (pos? i) (tok ",") (sp) (e/break-to! (group-line g)))
       (name-list (:names g))
@@ -612,8 +719,9 @@
       (type-expr (:type g)))
     (when (and (= 1 (count groups)) (= 1 (count (:names (first groups))))
                (begins-with-star-or-paren? (:type (first groups))))
-      (tok ","))
-    (tok "]")))
+      (if (e/full?) (e/soft :trail ",") (tok ",")))
+    (e/soft :trail ",")
+    (ptok "]" (fp tps :closing))))
 
 ;; ---------------------------------------------------------------------------------------
 ;; Expressions (§7.5-7.7)
@@ -674,10 +782,12 @@
   "An operand of && or || the source parenthesized (:go/paren, C3): gc removes dead branches
   by syntax and does not look through parentheses."
   [x]
-  (e/break-to! (line-of x))
-  (tok "(")
-  (binding [*header* false] (expr0 x 1))
-  (tok ")"))
+  (if (e/full?)
+    (expr0 x 1)
+    (do (e/break-to! (line-of x))
+        (tok "(")
+        (binding [*header* false] (expr0 x 1))
+        (tok ")"))))
 
 (defn- binary-expr
   "go/printer's binaryExpr. An n-ary form is a left-nested chain, (+ a b c) printed as
@@ -686,7 +796,7 @@
   operand, then its operator and right operand), without making the prefixes."
   [f prec1 cut depth]
   (let [prec (bin-prec f)]
-    (if (< prec prec1)
+    (if (and (< prec prec1) (not (e/full?)))
       (do (tok "(")
           (binding [*header* false] (expr0 f (reduce-depth depth)))
           (tok ")"))
@@ -707,7 +817,7 @@
           (let [blank? (< (long prec) (long (nth cuts i)))
                 y (nth xs (inc i))]
             (when blank? (sp))
-            (tok o)
+            (ptok o (op-pos f i))
             (let [yt (child-target f (+ i 2) y)]
               (if (and yt (or (= yt :break) (> (long yt) (e/line))))
                 (e/break-to! yt)
@@ -722,13 +832,13 @@
   (element-list "(" ")" xs
                 (fn [x _]
                   (if (and (seq? x) (= (op x) "spread"))
-                    (do (expr0 (second x) depth) (tok "..."))
+                    (do (expr0 (second x) depth) (ptok "..." (fp f :ellipsis)))
                     (expr0 x depth)))
-                {:parent f :offset offset}))
+                {:parent f :offset offset :open-pos (fp f :lparen) :close-pos (fp f :rparen)}))
 
 (defn- callee [h depth]
   (cond
-    (and (seq? h) (= (op h) "func")) (do (tok "(") (type-expr h) (tok ")"))
+    (and (seq? h) (= (op h) "func") (not (e/full?))) (do (tok "(") (type-expr h) (tok ")"))
     :else (expr1 h 7 depth)))
 
 (defn- lit-type-needs-parens? [t]
@@ -765,7 +875,7 @@
 
 (defn- composite-lit [f depth]
   (let [t (second f)
-        wrap? (and *header* (not= t '_) (lit-type-needs-parens? t))]
+        wrap? (and *header* (not= t '_) (lit-type-needs-parens? t) (not (e/full?)))]
     (when wrap? (tok "("))
     (binding [*header* false]
       (when-not (= t '_) (type-expr t))
@@ -775,7 +885,7 @@
             ts (mapv (fn [el] (child-target f (:i el) (or (:src el) (:value el)) brk)) els)
             nxt (next-targets ts)
             multi? (some (fn [tl] (and tl (or (= tl :break) (> (long tl) start)))) ts)]
-        (tok "{")
+        (ptok "{" (fp f :lbrace))
         (e/push-open!)
         (let [n (count els)]
           (doseq [[i el] (map-indexed vector els)]
@@ -785,15 +895,20 @@
               (binding [e/*next* (or (nth nxt i) e/*next*)]
                 (case (:kind el)
                   :pos (expr0 (:value el) 1)
-                  (do (if (= (:kind el) :field) (tok (name (:key el))) (expr0 (:key el) 1))
-                      (tok ":")
+                  (do (if (= (:kind el) :field)
+                        (ptok (name (:key el)) (child-pos f (:i el)))
+                        (expr0 (:key el) 1))
+                      (ptok ":" (if (= (:kind el) :field)
+                                  (when (e/full?) (get (:go/acolon (meta f)) (:i el)))
+                                  (fp (:src el) :colon)))
                       (if (and multi? (> n 1) (e/lines?)) (vtab) (sp))
                       (expr0 (:value el) 1))))))
           (let [indent (e/pop-open!)
                 multi (> (e/line) start)]
             (when (and (e/lines?) (pos? n) multi (e/room? 1)) (tok ","))
+            (when (pos? n) (e/soft :trail ","))
             (e/close-break! nil multi false indent)
-            (tok "}")))))
+            (ptok "}" (fp f :rbrace))))))
     (when wrap? (tok ")"))))
 
 (defn- slice-expr [f depth]
@@ -803,7 +918,7 @@
         present (filter #(not= % '_) idx)
         blanks? (and (<= depth 1) (> (count present) 1) (some binary? present))]
     (expr1 x 7 1)
-    (tok "[")
+    (ptok "[" (fp f :lbrack))
     (binding [*header* false]
       (doseq [[i ix] (map-indexed vector idx)]
         (when (pos? i)
@@ -811,7 +926,7 @@
           (tok ":")
           (when (and blanks? (not= ix '_)) (sp)))
         (when (not= ix '_) (expr0 ix (inc depth)))))
-    (tok "]")))
+    (ptok "]" (fp f :rbrack))))
 
 (defn- func-lit
   "(fn params results? body*)."
@@ -821,11 +936,13 @@
         res (results-entries params results)]
     (when-not (vector? params) (fail "fn needs a parameter vector" f))
     (let [indent (line-indent)]
-      (tok "func")
-      (binding [*header* false]
-        (signature params res body)
+      (ptok "func" (fp f :func))
+      (binding [*header* false
+                *return-pos* (fp f :return)]
+        (signature params res body results)
         (block-body body {:results? (seq res) :end (:go/end (meta f)) :func? true :sep sp
-                          :parent f :offset (body-offset f body) :indent indent})))))
+                          :parent f :offset (body-offset f body) :indent indent
+                          :lbrace (fp f :lbrace) :rbrace (fp f :rbrace)})))))
 
 (defn- new-arg [x]
   ;; new(T) or Go 1.26's new(value): a type unless the operand is clearly an expression
@@ -835,77 +952,101 @@
     (type-expr x)
     (expr0 x 1)))
 
+(defn- print-pl
+  "A literal of mode :full (wrap-full) at its position, in its spelling and parentheses."
+  [f]
+  (with-parens (:parens f)
+    (fn []
+      (let [v (:v f)]
+        (e/at! (:pos f))
+        (if (negative-literal? v)
+          (do (tok "-") (literal (unary-operand v) (:text f)))
+          (literal v (:text f)))))))
+
+(defn- lit-list-tok
+  "The token of a literal list ((rune n), (imaginary x), (byte-string ...)): its spelling in
+  mode :full (:go/text), else s."
+  [f s]
+  (ptok (or (when (e/full?) (:go/text (meta f))) s) (fp f :value-pos)))
+
 (defn expr1
   "go/printer's expr1: prints f as an operand of precedence at least prec1."
   [f prec1 depth]
   (e/break-to! (line-of f))
   (cond
+    (pl? f) (print-pl f)
+    (and (e/full?) (:go/parens (meta f)))
+    (with-parens (:go/parens (meta f)) #(expr1 (vary-meta f dissoc :go/parens) 0 depth))
     (binary? f) (binary-expr f prec1 (cutoff f depth) depth)
     (unary? f)
-    (if (< 6 prec1)
+    (if (and (< 6 prec1) (not (e/full?)))
       (do (tok "(") (binding [*header* false] (expr0 f 1)) (tok ")"))
       (let [o (unary-op f) x (unary-operand f)]
-        (tok o)
+        (ptok o (if (= o "*") (fp f :star) (fp f :op-pos)))
         (if (= o "*")
-          (if (< (prec-of x) 6)
+          (if (and (< (prec-of x) 6) (not (e/full?)))
             (do (tok "(") (binding [*header* false] (expr0 x 1)) (tok ")"))
             (expr1 x 6 1))
           (expr1 x 6 depth))))
-    (or (symbol? f) (go-sym? f)) (tok (ident-string f))
+    (or (symbol? f) (go-sym? f)) (name-tok f)
     (or (nil? f) (true? f) (false? f) (string? f) (char? f) (number? f)) (literal f)
     (seq? f)
     (let [o (op f)]
       (case o
         "lit" (composite-lit f depth)
         "conv" (let [[_ t x] f]
-                 (if (and (seq? t) (or (#{"*" "func" "chan"} (op t))))
+                 (if (and (seq? t) (or (#{"*" "func" "chan"} (op t))) (not (e/full?)))
                    (do (tok "(") (type-expr t) (tok ")"))
                    (type-expr t))
-                 (element-list "(" ")" [x] (fn [x _] (binding [*header* false] (expr0 x depth))) {:parent f :offset 2}))
+                 (element-list "(" ")" [x] (fn [x _] (binding [*header* false] (expr0 x depth)))
+                               {:parent f :offset 2 :open-pos (fp f :lparen) :close-pos (fp f :rparen)}))
         "assert" (let [[_ t x] f]
-                   (expr1 x 7 1) (tok ".") (tok "(") (type-expr t) (tok ")"))
+                   (expr1 x 7 1) (ptok "." (fp f :dot)) (ptok "(" (fp f :lparen)) (type-expr t)
+                   (ptok ")" (fp f :rparen)))
         "aget" (let [[_ x i] f]
-                 (expr1 x 7 1) (tok "[") (binding [*header* false] (expr0 i (inc depth))) (tok "]"))
+                 (expr1 x 7 1) (ptok "[" (fp f :lbrack)) (binding [*header* false] (expr0 i (inc depth)))
+                 (ptok "]" (fp f :rbrack)))
         "subslice" (slice-expr f depth)
         "inst" (let [[_ g & ts] f]
                  (expr1 g 7 depth)
-                 (binding [*header* false] (type-list ts)))
+                 (binding [*header* false] (type-list ts f)))
         "method-expr" (let [[_ t m] f]
-                        (if (and (seq? t) (#{"*" "func" "chan"} (op t)))
+                        (if (and (seq? t) (#{"*" "func" "chan"} (op t)) (not (e/full?)))
                           (do (tok "(") (type-expr t) (tok ")"))
                           (type-expr t))
-                        (tok ".") (tok (ident-string m)))
+                        (ptok "." (fp f :dot)) (name-tok m))
         "fn" (func-lit f)
-        "rune" (tok (text/go-rune (long (second f))))
+        "rune" (lit-list-tok f (text/go-rune (long (second f))))
         "imaginary" (let [x (second f)]
-                      (tok (str (text/go-number x) "i")))
-        "byte-string" (tok (text/go-byte-string (rest f)))
+                      (lit-list-tok f (str (text/go-number x) "i")))
+        "byte-string" (lit-list-tok f (text/go-byte-string (rest f)))
         "go/call" (let [[_ g & xs] f]
-                    (tok (ident-string g))
+                    (name-tok g)
                     (binding [*header* false] (call-args f xs (if (> (count xs) 1) (inc depth) depth) 2)))
-        "go/id" (tok (ident-string f))
+        "go/id" (name-tok f)
         "values" (fail "values outside a return, an assignment or a binding" f)
         "spread" (fail "spread outside the arguments of a call" f)
         "zero" (fail "zero outside a var binding" f)
         "make" (let [[_ t & xs] f
                      depth (if (> (count (rest f)) 1) (inc depth) depth)]
-                 (tok "make")
+                 (with-parens (when (e/full?) (:go/parens (meta (first f)))) #(name-tok (first f)))
                  (binding [*header* false]
                    (element-list "(" ")" (cons t xs)
                                  (fn [x i] (if (zero? i) (type-expr x) (expr0 x depth)))
-                                 {:parent f :offset 1})))
+                                 {:parent f :offset 1 :open-pos (fp f :lparen) :close-pos (fp f :rparen)})))
         "new" (let [[_ x] f]
-                (tok "new")
+                (with-parens (when (e/full?) (:go/parens (meta (first f)))) #(name-tok (first f)))
                 (binding [*header* false]
-                  (element-list "(" ")" [x] (fn [x _] (new-arg x)) {:parent f :offset 1})))
+                  (element-list "(" ")" [x] (fn [x _] (new-arg x))
+                                {:parent f :offset 1 :open-pos (fp f :lparen) :close-pos (fp f :rparen)})))
         (cond
           (contains? stmt-heads o) (fail "a statement in an expression position" f)
           (type-form? f) (type-expr f)
           (and o (str/starts-with? o ".-") (> (count o) 2))
-          (do (expr1 (second f) 7 depth) (tok ".") (tok (subs o 2)))
+          (do (expr1 (second f) 7 depth) (ptok "." (fp f :dot)) (ptok (subs o 2) (fp f :name-pos)))
           (and o (str/starts-with? o ".") (> (count o) 1) (not= o "..."))
           (let [[_ recv & xs] f]
-            (expr1 recv 7 depth) (tok ".") (tok (subs o 1))
+            (expr1 recv 7 depth) (ptok "." (fp f :dot)) (ptok (subs o 1) (fp f :name-pos))
             (binding [*header* false] (call-args f xs (if (> (count xs) 1) (inc depth) depth) 2)))
           :else
           (let [[h & xs] f
@@ -934,6 +1075,11 @@
 
 (defn- zero-form? [f] (and (seq? f) (= (op f) "zero")))
 
+(def ^:dynamic *in-group*
+  "Mode :full: true for a spec of a local var or type ( ... ) group (its keyword is the
+  group's)."
+  false)
+
 (defn- targets [t] (if (and (seq? t) (= (op t) "values")) (vec (rest t)) [t]))
 
 (defn binding-stmt
@@ -945,23 +1091,25 @@
         const? (or (:const tm) (some :const ms))
         var? (or (:var tm) (some :var ms))
         typ (some #(when (contains? % :tag) (:tag %)) ms)
-        names (fn [] (name-list ts))]
+        names (fn [] (name-list ts))
+        kw-pos (fp target :tok-pos)]
     (cond
-      const? (do (tok "const") (sp) (names)
+      const? (do (when-not *in-group* (ptok "const" kw-pos) (sp)) (names)
                  (when typ (sp) (type-expr typ))
                  (sp) (tok "=") (sp) (expr-list init 1))
-      (or var? typ) (do (tok "var") (sp) (names)
+      (or var? typ) (do (when-not *in-group* (ptok "var" kw-pos) (sp)) (names)
                         (when typ (sp) (type-expr typ))
                         (when-not (zero-form? init)
                           (sp) (tok "=") (sp) (expr-list init 1)))
       :else (let [depth (if (and (> (count ts) 1) (> (n-values init) 1)) 2 1)]
               (comma-list target 1 ts #(expr0 % depth))
-              (sp) (tok ":=") (sp) (expr-list init depth)))))
+              (sp) (ptok ":=" kw-pos) (sp) (expr-list init depth)))))
 
 (defn- type-binding-stmt [nm t]
   (let [tps (:type-params (meta nm))]
     (binding [*generic* (boolean tps)]
-      (tok "type") (sp) (tok (ident-string nm))
+      (when-not *in-group* (ptok "type" (fp nm :tok-pos)) (sp))
+      (name-tok nm)
       (when tps (type-params tps))
       (sp)
       (when (:alias (meta nm)) (tok "=") (sp))
@@ -971,10 +1119,10 @@
   (let [[_ place a b] f]
     (case (count f)
       3 (let [depth (if (and (> (n-values place) 1) (> (n-values a) 1)) 2 1)]
-          (expr-list place depth) (sp) (tok "=") (sp) (expr-list a depth))
+          (expr-list place depth) (sp) (ptok "=" (fp f :tok-pos)) (sp) (expr-list a depth))
       4 (let [aop (assign-ops (if (symbol? a) (name a) (str a)))]
           (when-not aop (fail "not an assignment operator" a))
-          (expr0 place 1) (sp) (tok aop) (sp) (expr0 b 1))
+          (expr0 place 1) (sp) (ptok aop (fp f :tok-pos)) (sp) (expr0 b 1))
       (fail "set! takes 2 or 3 arguments" f))))
 
 (defn simple-stmt
@@ -990,10 +1138,11 @@
     (case (op f)
       "set!" (assign-stmt f)
       "aset" (let [[_ a i v] f]
-               (expr1 a 7 1) (tok "[") (expr0 i 2) (tok "]") (sp) (tok "=") (sp) (expr0 v 1))
-      "inc!" (do (expr0 (second f) 2) (tok "++"))
-      "dec!" (do (expr0 (second f) 2) (tok "--"))
-      ">!" (let [[_ ch v] f] (expr0 ch 1) (sp) (tok "<-") (sp) (expr0 v 1))
+               (expr1 a 7 1) (ptok "[" (fp f :lbrack)) (expr0 i 2) (ptok "]" (fp f :rbrack))
+               (sp) (ptok "=" (fp f :tok-pos)) (sp) (expr0 v 1))
+      "inc!" (do (expr0 (second f) 2) (ptok "++" (fp f :tok-pos)))
+      "dec!" (do (expr0 (second f) 2) (ptok "--" (fp f :tok-pos)))
+      ">!" (let [[_ ch v] f] (expr0 ch 1) (sp) (ptok "<-" (fp f :arrow)) (sp) (expr0 v 1))
       (expr0 f 1))
     :else (expr0 f 1)))
 
@@ -1042,9 +1191,10 @@
     (case o
       "if" (let [[_ & xs] f
                  [init xs] (if (vector? (first xs)) [(first xs) (rest xs)] [nil xs])
-                 [c then & more] xs]
+                 [c then & more] xs
+                 braces {:lbrace (fp f :lbrace) :rbrace (fp f :rbrace)}]
              (when (> (count more) 1) (fail "if takes a condition, then and else" f))
-             (tok "if") (control-clause false init c nil)
+             (ptok "if" (fp f :if)) (control-clause false init c nil)
              (let [ti (if init 3 2)]
                (if (seq more)
                  (let [els (first more)]
@@ -1053,35 +1203,41 @@
                                                                      (when-not (if-like? els)
                                                                        (next-line (branch-forms els))))
                                                            :else-follows? (if-like? els)
-                                                           :else-block? (not (if-like? els))}))
-                   (else-part els (branch-opts f (inc ti) els)))
-                 (block-body (branch-forms then) (branch-opts f ti then)))))
+                                                           :else-block? (not (if-like? els))}
+                                                          braces))
+                   (else-part els (merge (branch-opts f (inc ti) els)
+                                         {:lbrace (fp f :else-lbrace) :rbrace (fp f :else-rbrace)})))
+                 (block-body (branch-forms then) (merge (branch-opts f ti then) braces)))))
       "when" (let [[_ & xs] f
                    [init xs] (if (vector? (first xs)) [(first xs) (rest xs)] [nil xs])
                    [c & body] xs]
-               (tok "if") (control-clause false init c nil)
-               (block-body (vec body) {:parent f :offset (body-offset f body)}))
-      "cond" (let [pairs (partition 2 (rest f))]
+               (ptok "if" (fp f :if)) (control-clause false init c nil)
+               (block-body (vec body) {:parent f :offset (body-offset f body)
+                                       :lbrace (fp f :lbrace) :rbrace (fp f :rbrace)}))
+      "cond" (let [pairs (partition 2 (rest f))
+                   cps (when (e/full?) (:go/cond (meta f)))
+                   braces (fn [k] (when-let [[_ lb rb] (get cps k)] {:lbrace lb :rbrace rb}))]
                (when (odd? (count (rest f))) (fail "cond takes test-branch pairs" f))
-               (loop [[[t b] & more] pairs bi 2]
+               (loop [[[t b] & more] pairs bi 2 k 0]
                  (if (= t :else)
-                   (block-body (branch-forms b) (branch-opts f bi b))
-                   (do (tok "if") (control-clause false nil t nil)
+                   (block-body (branch-forms b) (merge (branch-opts f bi b) (braces k)))
+                   (do (ptok "if" (first (get cps k))) (control-clause false nil t nil)
                        (if (seq more)
                          (let [[nt nb] (first more)
                                nl (if (= nt :else) (next-line (branch-forms nb)) (line-of nt))]
                            (block-body (branch-forms b) (merge (branch-opts f bi b)
                                                                {:next nl :else-follows? (not= nt :else)
-                                                                :else-block? (= nt :else)}))
+                                                                :else-block? (= nt :else)}
+                                                               (braces k)))
                            (sp) (tok "else") (sp)
-                           (recur more (+ bi 2)))
-                         (block-body (branch-forms b) (branch-opts f bi b))))))))))
+                           (recur more (+ bi 2) (inc k)))
+                         (block-body (branch-forms b) (merge (branch-opts f bi b) (braces k)))))))))))
 
 (defn- clause-list
-  "The clauses of a switch, type switch or select, between braces."
-  [clauses print-head]
+  "The clauses of a switch, type switch or select (f), between braces."
+  [clauses print-head & [f]]
   (let [indent (if (e/bol?) @(:indent e/*p*) (e/cur-indent))]
-    (sp) (tok "{")
+    (sp) (ptok "{" (fp f :lbrace))
     (e/push-open! indent)
     (let [clauses (vec clauses)]
       (dotimes [i (count clauses)]
@@ -1090,14 +1246,15 @@
           (binding [e/*next* (next-line (subvec clauses (inc i)))]
             (e/stmt-break! (line-of c) (zero? i) ";" indent)
             (if (= (op c) "default")
-              (do (tok "default") (tok ":")
+              (do (ptok "default" (fp c :case)) (ptok ":" (fp c :colon))
                   (stmt-list (vec (rest c)) {:indent (inc indent) :parent c :offset 1}))
               (let [[_ head & body] c]
-                (tok "case") (sp) (print-head head) (tok ":")
+                (ptok "case" (fp c :case)) (sp) (print-head head) (ptok ":" (fp c :colon))
                 (stmt-list (vec body) {:indent (inc indent) :parent c :offset 2})))))))
     (e/pop-open!)
     (e/close-break! nil true true indent)
-    (tok "}")))
+    (when (e/full?) (sp))
+    (ptok "}" (fp f :rbrace))))
 
 (defn- case-exprs [v]
   (when-not (vector? v) (fail "case needs a vector" v))
@@ -1113,13 +1270,13 @@
   (let [xs (rest f)
         [init xs] (if (vector? (first xs)) [(first xs) (rest xs)] [nil xs])
         [tag xs] (if (and (seq xs) (not (clause? (first xs)))) [(first xs) (rest xs)] [nil xs])]
-    (tok "switch")
+    (ptok "switch" (fp f :switch))
     (binding [*header* true]
       (cond
         (and init (some? tag)) (do (sp) (simple-stmt init) (tok ";") (sp) (expr0 tag 1))
         init (do (sp) (simple-stmt init) (tok ";"))
         (some? tag) (do (sp) (expr0 tag 1))))
-    (clause-list xs case-exprs)))
+    (clause-list xs case-exprs f)))
 
 (defn- type-switch-stmt [f]
   (let [[a b & more] (rest f)
@@ -1127,16 +1284,18 @@
                                (and (vector? a) (some? b) (not (clause? b))) [a b more]
                                :else [nil a (cons b more)])
         clauses (remove nil? clauses)]
-    (tok "switch")
+    (ptok "switch" (fp f :switch))
     (binding [*header* true]
       (when init (sp) (simple-stmt init) (tok ";"))
       (sp)
-      (if (vector? guard)
-        (let [[x g] guard]
-          (tok (ident-string x)) (sp) (tok ":=") (sp)
-          (expr1 g 7 1) (tok ".") (tok "(") (tok "type") (tok ")"))
-        (do (expr1 guard 7 1) (tok ".") (tok "(") (tok "type") (tok ")"))))
-    (clause-list clauses case-types)))
+      (let [assert-type (fn [] (ptok "." (fp f :guard-dot)) (ptok "(" (fp f :guard-lparen)) (tok "type")
+                          (ptok ")" (fp f :guard-rparen)))]
+        (if (vector? guard)
+          (let [[x g] guard]
+            (name-tok x) (sp) (ptok ":=" (fp f :guard-tok)) (sp)
+            (expr1 g 7 1) (assert-type))
+          (do (expr1 guard 7 1) (assert-type)))))
+    (clause-list clauses case-types f)))
 
 (defn- comm [c]
   (cond
@@ -1144,36 +1303,38 @@
     :else (simple-stmt c)))
 
 (defn- select-stmt [f]
-  (tok "select")
-  (if (and (empty? (rest f)) (not (e/lines?)))
+  (ptok "select" (fp f :select))
+  (if (and (empty? (rest f)) (not (e/lines?)) (not (e/full?)))
     (do (sp) (tok "{") (tok "}"))
-    (clause-list (rest f) comm)))
+    (clause-list (rest f) comm f)))
+
+(defn- braces-of [f] {:lbrace (fp f :lbrace) :rbrace (fp f :rbrace)})
 
 (defn- for-stmt [f]
   (let [[_ init c post & body] f]
     (when-not (vector? init) (fail "for needs an init vector" f))
-    (tok "for")
+    (ptok "for" (fp f :for))
     (control-clause true init c post)
-    (block-body (vec body) {:parent f :offset 5})))
+    (block-body (vec body) (merge {:parent f :offset 5} (braces-of f)))))
 
 (defn- while-stmt [f]
   (let [[_ c & body] f]
-    (tok "for")
+    (ptok "for" (fp f :for))
     (when-not (true? c) (binding [*header* true] (sp) (expr0 c 1)))
-    (block-body (vec body) {:parent f :offset 2})))
+    (block-body (vec body) (merge {:parent f :offset 2} (braces-of f)))))
 
 (defn- range-stmt [f]
   (let [[_ v & body] f
         assign? (:assign (meta f))]
     (when-not (vector? v) (fail "range needs a vector" f))
-    (tok "for") (sp)
+    (ptok "for" (fp f :for)) (sp)
     (binding [*header* true]
       (let [x (peek v) vars (pop v)]
         (when (seq vars)
           (comma-list v 0 vars #(expr0 % 1))
-          (sp) (tok (if assign? "=" ":=")) (sp))
-        (tok "range") (sp) (expr0 x 1)))
-    (block-body (vec body) {:parent f :offset 2})))
+          (sp) (ptok (if assign? "=" ":=") (fp f :tok-pos)) (sp))
+        (ptok "range" (fp f :range)) (sp) (expr0 x 1)))
+    (block-body (vec body) (merge {:parent f :offset 2} (braces-of f)))))
 
 (declare label-stmt)
 
@@ -1183,17 +1344,17 @@
   (let [o (op f)]
     (case o
       ("set!" "aset" "inc!" "dec!" ">!") (simple-stmt f)
-      "go" (do (tok "go") (sp) (expr0 (second f) 1))
-      "defer" (do (tok "defer") (sp) (expr0 (second f) 1))
-      "return" (do (tok "return")
+      "go" (do (ptok "go" (fp f :go)) (sp) (expr0 (second f) 1))
+      "defer" (do (ptok "defer" (fp f :defer)) (sp) (expr0 (second f) 1))
+      "return" (do (ptok "return" (fp f :return))
                    (when (seq (rest f))
                      (sp)
                      (comma-list f 1 (rest f) #(expr0 % 1))))
-      "break" (do (tok "break") (when-let [l (second f)] (sp) (tok (label-name l))))
-      "continue" (do (tok "continue") (when-let [l (second f)] (sp) (tok (label-name l))))
-      "goto" (do (tok "goto") (sp) (tok (label-name (second f))))
-      "fallthrough" (tok "fallthrough")
-      "do" (block-body (vec (rest f)) {:parent f :offset 1})
+      "break" (do (ptok "break" (fp f :tok-pos)) (when-let [l (second f)] (sp) (ptok (label-name l) (fp f :label))))
+      "continue" (do (ptok "continue" (fp f :tok-pos)) (when-let [l (second f)] (sp) (ptok (label-name l) (fp f :label))))
+      "goto" (do (ptok "goto" (fp f :tok-pos)) (sp) (ptok (label-name (second f)) (fp f :label)))
+      "fallthrough" (ptok "fallthrough" (fp f :tok-pos))
+      "do" (block-body (vec (rest f)) (merge {:parent f :offset 1} (braces-of f)))
       ("if" "when" "cond") (if-stmt f)
       "switch" (switch-stmt f)
       "type-switch" (type-switch-stmt f)
@@ -1245,7 +1406,7 @@
   follow (more?). Nested labels print in a row (L1: L2: s)."
   [f indent more?]
   (let [[_ l s] f]
-    (tok (label-name l)) (tok ":")
+    (ptok (label-name l) (fp f :label)) (ptok ":" (fp f :colon))
     (cond
       (some? s) (do (e/stmt-break! (line-of s) false nil
                                    (if (and (seq? s) (= (op s) "label")) (max 0 (dec indent)) indent))
@@ -1309,28 +1470,76 @@
   (let [specs (mapv :bind its)
         keep (keep-type-column (mapv (fn [[t x]] [t (if (:go/implicit (meta t)) ::none x)]) specs))
         nxts (next-targets (map :t its))]
-    (tok "const") (sp) (tok "(")
-    (e/push-open! indent)
-    (dotimes [j (count its)]
-      (binding [e/*next* (or (nth nxts j) e/*next*)]
-        (e/stmt-break! (or (:t (nth its j)) (when-not (e/lines?) :break)) (zero? j) ";" (inc indent))
-        (const-spec (nth specs j) (nth keep j))))
-    (e/pop-open!)
-    (if (e/lines?)
-      (e/close-break! nil true true indent)
-      (e/nl indent true))
-    (tok ")")))
+    (let [t0 (first (first specs))]
+      (ptok "const" (fp t0 :tok-pos)) (sp) (ptok "(" (fp t0 :lparen))
+      (e/push-open! indent)
+      (dotimes [j (count its)]
+        (binding [e/*next* (or (nth nxts j) e/*next*)]
+          (e/stmt-break! (or (:t (nth its j)) (when-not (e/lines?) :break)) (zero? j) ";" (inc indent))
+          (const-spec (nth specs j) (nth keep j))))
+      (e/pop-open!)
+      (if (e/lines?)
+        (e/close-break! nil true true indent)
+        (e/nl indent true))
+      (ptok ")" (fp t0 :rparen)))))
 
 (defn- group-target
   "The line of a const group's keyword: the line before its first spec when free."
   [t]
   (if (and (integer? t) (> (dec (long t)) (e/line))) (dec (long t)) t))
 
+(def ^:dynamic *group*
+  "Mode :full: an atom holding the local var or type ( ... ) group being printed: {:end
+  rparen}, or nil."
+  nil)
+
+(defn- item-group-pos
+  "Mode :full: the :go/pos of the first target of a let item (its declaration's keyword and
+  parentheses are there)."
+  [it]
+  (when (e/full?)
+    (cond
+      (:bind it) (:go/pos (meta (first (:bind it))))
+      (:type-bind it) (:go/pos (meta (first (:type-bind it)))))))
+
+(defn- item-start
+  "Mode :full: the position of the first name of a let item."
+  [it]
+  (let [t (or (first (:bind it)) (first (:type-bind it)))
+        t (if (and (seq? t) (= (op t) "values")) (second t) t)]
+    (get (:go/pos (meta t)) :name-pos)))
+
+(defn- full-in-group? [it]
+  (boolean (and *group* @*group* (or (:bind it) (:type-bind it)))))
+
+(defn- full-group-open!
+  "Mode :full: a local var or type declaration with parentheses starts its group: its keyword
+  and (."
+  [it]
+  (when (and *group* (or (:bind it) (:type-bind it)) (not (:const-group it)))
+    (let [p (item-group-pos it)]
+      (when (and (:lparen p) (not @*group*))
+        (ptok (cond (:type-bind it) "type" (const-bind? it) "const" :else "var") (:tok-pos p))
+        (sp) (ptok "(" (:lparen p))
+        (reset! *group* {:end (:rparen p)})))))
+
+(defn- full-group-close!
+  "Mode :full: after items' i-th, the group's ) when the next item is not in it."
+  [items i]
+  (when (and *group* @*group*)
+    (let [end (:end @*group*)
+          nx (get items (inc i))
+          st (when nx (item-start nx))]
+      (when-not (and st end (neg? (compare st end)))
+        (ptok ")" end)
+        (reset! *group* nil)))))
+
 (defn stmt-list
   "Prints a statement list at indent (opts :indent), each statement on its recorded line.
   :results? makes a final expression the function's return (§6.4). :parent and :offset
   locate the forms in their list (for :go/breaks)."
   [forms {:keys [indent results? parent offset] :as opts}]
+  (binding [*group* (when (e/full?) (atom nil))]
   (let [items (group-consts (flatten-stmts forms parent (or offset 0)))
         n (count items)
         nxts (next-targets (map item-t items))]
@@ -1357,17 +1566,21 @@
                 (e/push-open! indent)
                 (when decl-label
                   ;; L: on the line before the declaration when free, as gofmt writes it
-                  (tok (label-name decl-label)) (tok ":")
+                  (ptok (label-name decl-label) (fp (label-target it) :label))
+                  (ptok ":" (fp (label-target it) :label-colon))
                   (e/stmt-break! (if (:const-group it) (group-target (:t it)) (:t it)) false nil indent))
-                (cond
-                  (:const-group it) (const-group (:const-group it) indent)
-                  (:bind it) (apply binding-stmt (:bind it))
-                  (:type-bind it) (apply type-binding-stmt (:type-bind it))
-                  label? (label-stmt f indent (< i (dec n)))
-                  (and results? (= i (dec n)) (expression-form? f))
-                  (do (tok "return") (sp) (expr0 f 1))
-                  :else (print-stmt f))
-                (e/pop-open!)))))))))
+                (full-group-open! it)
+                (binding [*in-group* (full-in-group? it)]
+                  (cond
+                    (:const-group it) (const-group (:const-group it) indent)
+                    (:bind it) (apply binding-stmt (:bind it))
+                    (:type-bind it) (apply type-binding-stmt (:type-bind it))
+                    label? (label-stmt f indent (< i (dec n)))
+                    (and results? (= i (dec n)) (expression-form? f))
+                    (do (ptok "return" *return-pos*) (sp) (expr0 f 1))
+                    :else (print-stmt f)))
+                (full-group-close! items i)
+                (e/pop-open!))))))))))
 
 (defn block-body
   "{ statements } at one more indentation than the line of the brace. opts: :results?,
@@ -1387,7 +1600,7 @@
                            (or (seq forms) (nil? next) (room? 0))))
                     (and func? (empty? forms)))]
     (if one-line? ((or sep sp)) (sp))
-    (tok "{")
+    (ptok "{" (:lbrace opts))
     (e/push-open! indent)
     (binding [e/*next* (if (integer? end) end (or next e/*next*))]
       (when (seq forms)
@@ -1399,7 +1612,7 @@
           (stmt-list forms {:indent (inc indent) :results? results? :parent parent :offset offset})))
       (e/pop-open!)
       (if one-line?
-        (do (when (seq forms) (sp)) (tok "}"))
+        (do (when (seq forms) (sp)) (ptok "}" (:rbrace opts)))
         ;; before `else if`, the brace goes to the line of the else-if (its recorded line)
         ;; before a plain else block, the line before its first statement (when free)
         (let [close-end (or end
@@ -1408,7 +1621,7 @@
                             (when (and (:else-block? opts) (integer? next) (> (dec (long next)) (e/line)))
                               (dec (long next))))]
           (when-not (e/close-break! close-end (> (e/line) start) true indent) (sp))
-          (tok "}"))))))
+          (ptok "}" (:rbrace opts)))))))
 
 (defn- stmt-list-one-line
   "A function body on one line: statements separated by semicolons (go/printer's funcBody)."
@@ -1456,22 +1669,24 @@
         extern? (:extern m)
         [recv params] (if method? [(first params) (with-meta (vec (rest params)) (meta params))] [nil params])
         res (results-entries params results)]
-    (binding [*generic* (boolean (or tps (and recv (generic-type? (if (tagged? recv) (:tag (meta recv)) recv)))))]
+    (binding [*generic* (boolean (or tps (and recv (generic-type? (if (tagged? recv) (:tag (meta recv)) recv)))))
+              *return-pos* (fp f :return)]
       (let [indent (line-indent)]
-        (tok "func") (sp)
+        (ptok "func" (fp f :func)) (sp)
         (when method?
-          (tok "(")
+          (ptok "(" (fp params :recv-opening))
           (if (tagged? recv)
-            (do (tok (ident-string recv)) (sp) (type-expr (:tag (meta recv))))
+            (do (name-tok recv) (sp) (type-expr (:tag (meta recv))))
             (type-expr recv))
-          (tok ")") (sp))
-        (tok (ident-string nm))
+          (ptok ")" (fp params :recv-closing)) (sp))
+        (name-tok nm)
         (when tps (type-params tps))
-        (signature params res (when-not extern? body))
+        (signature params res (when-not extern? body) results)
         (when-not extern?
           (block-body (vec body) {:results? (seq res) :end (:go/end (meta f)) :func? true
                                   :parent f :offset (body-offset f body) :indent indent
-                                  :sep (if (e/lines?) vtab sp)}))))))
+                                  :sep (if (e/lines?) vtab sp)
+                                  :lbrace (fp f :lbrace) :rbrace (fp f :rbrace)}))))))
 
 (defn- spec-name [t] (if (and (seq? t) (= (op t) "values")) (second t) t))
 
@@ -1510,12 +1725,12 @@
   (or (line-of v) (line-of (spec-name (first v))) (when (seq? (second v)) (line-of (second v)))))
 
 (defn- group-decl
-  "kw ( specs ): print-spec prints one spec vector given its index."
-  [kw doc specs print-spec meta-of]
-  (tok kw) (sp) (tok "(")
+  "kw ( specs ): print-spec prints one spec vector given its index (f: the declaration)."
+  [kw doc specs print-spec meta-of & [f]]
+  (ptok kw (fp f :tok-pos)) (sp) (ptok "(" (fp f :lparen))
   (let [indent 0]
     (if (empty? specs)
-      (tok ")")
+      (ptok ")" (fp f :rparen))
       (let [specs (vec specs)
             last-start (volatile! (e/line))
             first-line (e/line)]
@@ -1544,7 +1759,7 @@
         (if (e/lines?)
           (e/close-break! nil true true indent)
           (e/nl 0 true))
-        (tok ")")))))
+        (ptok ")" (fp f :rparen))))))
 
 (defn- const-var-decl [f kw]
   (let [[_ & xs] f
@@ -1556,13 +1771,14 @@
             group? (> (count specs) 1)]
         (group-decl kw doc xs
                     (fn [v i] (let [[t init] (nth specs i)] (value-spec t init group? (nth keep i))))
-                    (fn [v] (meta (spec-name (first v))))))
+                    (fn [v] (meta (spec-name (first v))))
+                    f))
       (let [[t init] xs]
-        (tok kw) (sp)
+        (ptok kw (fp f :tok-pos)) (sp)
         (value-spec t (if (> (count xs) 1) init ::none) false false)))))
 
 (defn- type-spec [nm tps t group?]
-  (tok (ident-string nm))
+  (name-tok nm)
   (binding [*generic* (boolean tps)]
     (when tps (type-params tps))
     (if group? (vtab) (sp))
@@ -1582,9 +1798,10 @@
       (group-decl "type" gdoc gxs
                   (fn [v _] (let [[nm _ tps t] (parse-type-spec (seq v))]
                               (type-spec nm tps t (> (count gxs) 1))))
-                  (fn [v] (meta (first v))))
+                  (fn [v] (meta (first v)))
+                  f)
       (let [[nm _ tps t] (parse-type-spec xs)]
-        (tok "type") (sp)
+        (ptok "type" (fp f :tok-pos)) (sp)
         (type-spec nm tps t false)))))
 
 (defn decl-doc-and-directives

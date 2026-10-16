@@ -12,7 +12,7 @@ CLOJURE_TESTS_GO ?= target/arbace-go/amd64/arbace-tests
 .PHONY: help seed-check stage0 seed-verify reseed build build-tests smoke repl fixpoint \
   box box-smoke box-oracle box-suite box-tools box-rebuild mac-bundle arm64-vm-check \
   gate gate-full suite oracle verify jdk-verify edge-verify fixtures-verify tamago-verify \
-  toolchain-verify box-vendor-verify x509roots-verify g2a-roundtrip alpine-check clean \
+  toolchain-verify box-vendor-verify x509roots-verify g2a-roundtrip g2a-roundtrip-text alpine-check clean \
   check-makefile
 
 help: ## list the targets
@@ -75,7 +75,7 @@ oracle: ## the executable against the frozen JVM's results (bin/oracle check)
 
 ## Vendored trees and recorded data, converted or recorded afresh and compared byte for byte
 VERIFY := jdk-verify edge-verify fixtures-verify tamago-verify toolchain-verify \
-  box-vendor-verify x509roots-verify g2a-roundtrip
+  box-vendor-verify x509roots-verify g2a-roundtrip g2a-roundtrip-text
 verify: $(VERIFY) ## all of the below, one after another
 jdk-verify: ## jdk/'s forms by j2a, on the frozen JVM (bin/jrt-convert verify)
 	bin/jrt-convert verify
@@ -99,6 +99,9 @@ x509roots-verify: ## x509roots/, Mozilla's roots (bin/x509roots-vendor verify, c
 g2a-roundtrip: ## Go -> forms -> Go over std and GOROOT/test (bin/g2a roundtrip)
 	bin/g2a roundtrip amd64
 	bin/g2a roundtrip linux/amd64
+g2a-roundtrip-text: ## mode :full prints the original text back, byte for byte (bin/g2a roundtrip --text)
+	bin/g2a roundtrip --text amd64
+	bin/g2a roundtrip --text linux/amd64
 
 ## The host and housekeeping
 alpine-check: ## one minimal apk add line reinstalls exactly the host's packages (bin/alpine-env check)

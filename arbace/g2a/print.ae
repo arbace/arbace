@@ -6,8 +6,12 @@
     Reads the package file FORMS.ae (its ns, go/package and load forms, and the files it
     loads; or one file holding go/file forms and declarations) with *read-eval* false and
     writes one Go file per go/file into OUTDIR.
-    --layout lines|gofmt  lines (default when the forms carry lines): each form on its
-                          recorded line (§10.1, §12.3); gofmt: gofmt's layout, lines ignored
+    --layout lines|gofmt|full
+                          lines (default when the forms carry lines): each form on its
+                          recorded line (§10.1, §12.3); gofmt: gofmt's layout, lines ignored;
+                          full (default for a package of :positions :full): every token at
+                          its recorded line and column, with the file's comments and white
+                          space: the original text (§10.2, §12.3)
     --no-line-directives  never write //line or /*line*/ directives for lines layout cannot
                           reach
     --src DIR             the original package directory: copies :other-files and
@@ -159,6 +163,28 @@
               (write-import-decl (vec specs))
               (recur (seq more)))))))))
 
+(defn- write-imports-full
+  "Mode :full: the imports at their positions: specs (vectors, their literal paths wrapped by
+  wrap-full), each import declaration's keyword and parentheses on its first spec; the
+  directives among them are comments, which the file's comments hold."
+  [imports]
+  (let [open (volatile! nil)
+        close! (fn [] (when-let [d @open] (when (:lparen d) (code/ptok* ")" (:rparen d)))) (vreset! open nil))]
+    (doseq [v imports :when (vector? v)]
+      (let [p (:go/pos (meta v))
+            [nm path] v]
+        (if (:tok-pos p)
+          (do (close!)
+              (code/ptok* "import" (:tok-pos p)) (e/sp)
+              (when (:lparen p) (code/ptok* "(" (:lparen p)))
+              (vreset! open p))
+          (e/soft :sep ";"))
+        (when (or (:alias (meta v)) (#{"_" "."} (str nm)))
+          (code/ptok* (str nm) (:name-pos (:go/pos (meta nm)))) (e/sp))
+        (e/sp)
+        (code/expr0 path 1)))
+    (close!)))
+
 (defn- one-line-func?
   "Whether a declaration is a function printed on one line: its closing brace on its first
   line (mode :lines), or an empty body (gofmt's layout)."
@@ -236,12 +262,36 @@
                     (distinct))
               (range 0 n size))))))
 
+(defn- print-file-full
+  "Mode :full (SPEC §10.2, §12.3): the Go text of one file, every token at its recorded line
+  and column, with the file's comments and white space (go/file's :go/comments, :go/space,
+  :go/tail)."
+  [file opts decls pkg-name]
+  (let [m (meta file)
+        decls (mapv code/wrap-full decls)
+        imports (code/wrap-full (:imports opts))
+        p (:go/pos m)]
+    (binding [e/*p* (e/new-state {:lines? false :line-directives? false
+                                  :full {:comments (:go/comments m) :space (:go/space m) :semis (:go/semis m) :trails (:go/trails m)
+                                         :tail (:go/tail m)}})
+              e/*next* nil
+              code/*explicit-groups* (code/uses-grouped? decls)]
+      (code/ptok* "package" (:package p)) (e/sp)
+      (code/ptok* (str (or (:package opts) pkg-name)) (:name p))
+      (write-imports-full imports)
+      (doseq [f decls :when (not= (code/op f) "go/directive")]
+        (e/soft :sep ";")
+        (code/top-decl f))
+      (e/result))))
+
 (defn print-file
   "The Go text of one file: {:name :opts :decls} as collect gives it. pkg-name is the
   package clause's name unless the file's :package says otherwise. In mode :lines a file of
   many declarations is printed in chunks, in parallel (print-emit's join!); the text is the
   same."
   [{:keys [opts decls file src]} pkg-name {:keys [layout line-directives? line-file] :as popts}]
+  (if (= layout :full)
+    (print-file-full file opts decls pkg-name)
   (let [lines? (case layout :lines true :gofmt false
                  (boolean (:line (meta file))))
         state-opts {:lines? lines? :line-directives? (if (nil? line-directives?) true line-directives?)}]
@@ -286,7 +336,7 @@
                 (print-decl! decls a lines? popts false)
                 (doseq [i (range (inc a) b)] (print-decl! decls i lines? popts true)))))))
       (when-not (e/bol?) (e/nl 0))
-      (e/result))))
+      (e/result)))))
 
 (defn print-forms
   "The Go files of a collected package: {name text}, printed in parallel (each file's
@@ -370,7 +420,7 @@
   (let [pkg (collect path)
         out (File. (str out-dir))
         layout (:layout opts)
-        files (print-forms pkg (assoc opts :layout (or layout (when (= :full (:positions (:package pkg))) :lines))))]
+        files (print-forms pkg (assoc opts :layout (or layout (when (= :full (:positions (:package pkg))) :full))))]
     (.mkdirs out)
     (doseq [[n text] files]
       (spit (File. out ^String n) text))
@@ -393,7 +443,7 @@
         "--line-file" (recur (next as) (assoc opts :line-file true))
         (let [[forms out] as]
           (when-not (and forms out (= 2 (count as)))
-            (println "usage: bin/g2a-print [--layout lines|gofmt] [--no-line-directives] [--line-file] [--src DIR [--build]] [--gofmt] FORMS.ae OUTDIR")
+            (println "usage: bin/g2a-print [--layout lines|gofmt|full] [--no-line-directives] [--line-file] [--src DIR [--build]] [--gofmt] FORMS.ae OUTDIR")
             (System/exit 2))
           (let [{:keys [package files]} (print-package forms out opts)
                 outf (File. ^String out)]

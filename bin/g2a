@@ -55,6 +55,13 @@
 #                                 .tmp/g2a/cand-tests, checked with g2a-check --with-tests,
 #                                 reference test/g2a/roundtrip-tests.edn, known differences
 #                                 (with reasons) test/g2a/roundtrip-tests-known.edn
+#   bin/g2a roundtrip --text [[GOOS/]ARCH] [--tests]
+#                                 the text level (doc/go/SPEC.md §3.1): convert the same corpora
+#                                 with --full, print them in the full layout into
+#                                 .tmp/g2a/cand-text-[GOOS-]ARCH (or cand-text-tests) and compare
+#                                 every printed file with its original byte for byte; no build.
+#                                 Exits non-zero when a file differs that the known differences
+#                                 (with reasons) test/g2a/roundtrip-text-known.edn do not list
 #   bin/g2a print ARGS...         the printer (bin/g2a-print, arbace.g2a.print)
 #   bin/g2a test                  the converter's tests (test/g2a/convert_test.ae and the spec's
 #                                 examples, test/g2a/convert/)
@@ -178,7 +185,7 @@ convert_main() {
 }
 
 convert() {
-  local full="" tests="" out="" corpus="" print="" jobs cfg=()
+  local full="" tests="" out="" corpus="" print="" text=() jobs cfg=()
   jobs=${G2A_JOBS:-$(( $(nproc) / 2 ))}
   while [ $# -gt 0 ]; do
     case $1 in
@@ -187,6 +194,8 @@ convert() {
       --out) out=$2; shift 2 ;;
       --corpus) corpus=$2; shift 2 ;;
       --print) print=$2; shift 2 ;;
+      --text) text+=(--text); shift ;;
+      --text-known) text+=(--text-known "$2"); shift 2 ;;
       --goos) cfg+=(-goos "$2"); shift 2 ;;
       --goarch) cfg+=(-goarch "$2"); shift 2 ;;
       *) break ;;
@@ -201,7 +210,7 @@ convert() {
     out=${out:-$root/.tmp/g2a/forms/$corpus${full:+-full}}
     rm -rf "$out"
     convert_main --out "$out" --jobs "$jobs" --goroot "$goroot" --quiet $full ${print:+--print "$print"} \
-      --report "$out.report.edn" "$dumps"
+      ${text[@]+"${text[@]}"} --report "$out.report.edn" "$dumps"
   else
     [ $# -gt 0 ] || { echo "convert: packages or --corpus" >&2; return 2; }
     build
@@ -210,12 +219,46 @@ convert() {
     mkdir -p "$dumps"
     godump $tests ${cfg[@]+"${cfg[@]}"} -o "$dumps" "$@" > "$dumps.tsv" || true
     out=${out:-$root/.tmp/g2a/forms/pkgs}
-    convert_main --out "$out" --jobs "$jobs" --goroot "$goroot" $full ${print:+--print "$print"} "$dumps"
+    convert_main --out "$out" --jobs "$jobs" --goroot "$goroot" $full ${print:+--print "$print"} \
+      ${text[@]+"${text[@]}"} "$dumps"
   fi
 }
 
+# roundtrip_text GOOS ARCH PREFIX WITH_TESTS: the text level (roundtrip --text)
+roundtrip_text() {
+  local goos=$1 arch=$2 prefix=$3 with_tests=$4 cand status=0 s t0 t1 known
+  known=$root/test/g2a/roundtrip-text-known.edn
+  if [ -n "$with_tests" ]; then
+    [ "$goos/$arch" = tamago/amd64 ] || { echo "roundtrip --text --tests: tamago/amd64 only (the corpus tests)" >&2; return 2; }
+    cand=$root/.tmp/g2a/cand-text-tests
+  else
+    cand=$root/.tmp/g2a/cand-text-$prefix$arch
+  fi
+  rm -rf "$cand"
+  t0=$(date +%s.%N)
+  if [ -n "$with_tests" ]; then
+    set -- tests
+  else
+    local tests=test
+    [ "$arch" = arm64 ] && tests=test-arm64
+    set -- "$prefix$arch" "$prefix$tests"
+  fi
+  for c in "$@"; do
+    s=0
+    convert --full --corpus "$c" --print "$cand" --text --text-known "$known" || s=$?
+    if [ $s -ge 128 ]; then
+      echo "roundtrip --text: the converter died (exit status $s)" >&2
+      return 1
+    fi
+    [ $s -eq 0 ] || status=1
+  done
+  t1=$(date +%s.%N)
+  printf 'roundtrip --text %s: %.1f s\n' "$goos/$arch${with_tests:+ with tests}" "$(echo "$t1 - $t0" | bc)"
+  return $status
+}
+
 roundtrip() {
-  local goos=tamago arch=amd64 record="" cand ref t0 t1 t2 status with_tests="" check prefix
+  local goos=tamago arch=amd64 record="" cand ref t0 t1 t2 status with_tests="" check prefix text=""
   while [ $# -gt 0 ]; do
     case $1 in
       amd64|arm64) arch=$1; shift ;;
@@ -223,7 +266,8 @@ roundtrip() {
       --goos) goos=$2; shift 2 ;;
       --record) record=1; shift ;;
       --tests) with_tests=1; shift ;;
-      *) echo "roundtrip: [[GOOS/]amd64|arm64] [--goos tamago|linux] [--tests] [--record], not $1" >&2; return 2 ;;
+      --text) text=1; shift ;;
+      *) echo "roundtrip: [[GOOS/]amd64|arm64] [--goos tamago|linux] [--tests] [--record] [--text], not $1" >&2; return 2 ;;
     esac
   done
   case $goos in
@@ -231,6 +275,10 @@ roundtrip() {
     linux) prefix=linux- ;;
     *) echo "roundtrip: GOOS tamago or linux, not $goos" >&2; return 2 ;;
   esac
+  if [ -n "$text" ]; then
+    roundtrip_text "$goos" "$arch" "$prefix" "$with_tests"
+    return
+  fi
   cand=$root/.tmp/g2a/cand-$prefix$arch
   ref=$root/test/g2a/roundtrip-$prefix$arch.edn
   check=("$root/bin/g2a-check" --goos "$goos" --arch "$arch")

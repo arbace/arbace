@@ -43,8 +43,8 @@
       [x cursor]
       (let [lines? (= *mode* :lines)
             m (meta x)
-            [kids cursor breaks apos]
-            (loop [i 0 xs (seq x) cursor cursor acc [] breaks [] apos (sorted-map)]
+            [kids cursor breaks apos afull]
+            (loop [i 0 xs (seq x) cursor cursor acc [] breaks [] apos (sorted-map) afull {}]
               (if-let [c (first xs)]
                 (let [l (form-line c)
                       cursor0 cursor
@@ -65,12 +65,18 @@
                          ;; a literal on the line after the last written is a break; on a later
                          ;; one (blank or comment lines, a closing brace between), its line too
                          (if (and brk (lit/lit? c)) (conj breaks (if (= l (inc cursor0)) i [i l])) breaks)
-                         (if (and (lit/lit? c) (:pos c)) (assoc apos i (:pos c)) apos)))
-                [acc cursor breaks apos]))
+                         (if (and (lit/lit? c) (:pos c)) (assoc apos i (:pos c)) apos)
+                         ;; mode :full: a literal's spelling, parentheses and key colon
+                         (if (lit/lit? c)
+                           (reduce (fn [af [k mk]] (if-let [v (get c k)] (assoc-in af [mk i] v) af))
+                                   afull [[:spell :go/atext] [:parens :go/aparens] [:colon :go/acolon]])
+                           afull)))
+                [acc cursor breaks apos afull]))
             x' (if (seq? x) (apply list kids) kids)
             m (cond-> m
                 (and lines? (seq breaks)) (assoc :go/breaks breaks)
-                (and (= *mode* :full) (seq apos)) (assoc :go/apos apos))]
+                (and (= *mode* :full) (seq apos)) (assoc :go/apos apos)
+                (= *mode* :full) (merge (into {} (map (fn [[k v]] [k (into (sorted-map) v)])) afull)))]
         [(with-meta x' m) cursor]))
     :else [x cursor]))
 
@@ -110,7 +116,8 @@
         pm (if lines?
              pm
              (cond-> (dissoc pm :line :go/breaks :go/end)
-               (seq (:arbace.g2a.convert/pos m)) (assoc :go/pos (:arbace.g2a.convert/pos m))))]
+               (seq (:arbace.g2a.convert/pos m)) (assoc :go/pos (:arbace.g2a.convert/pos m))
+               (seq (:arbace.g2a.convert/full m)) (merge (:arbace.g2a.convert/full m))))]
     pm))
 
 (defn- meta-prefix [x]
@@ -151,10 +158,24 @@
     (ratio? x) (str x)
     :else (throw (ex-info (str "can't write " (class x)) {:x x}))))
 
+(defn- lit-children-meta
+  "Mode :full: the metadata of a list or vector for its literal children (positions,
+  spellings, parentheses, key colons), for one written in metadata (prep does the others)."
+  [x]
+  (reduce (fn [m [i c]]
+            (if (lit/lit? c)
+              (reduce (fn [m [k mk]] (if-let [v (get c k)] (update m mk #(assoc (or % (sorted-map)) i v)) m))
+                      m [[:pos :go/apos] [:spell :go/atext] [:parens :go/aparens] [:colon :go/acolon]])
+              m))
+          {} (map-indexed vector x)))
+
 (defn text
   "x as text on one line (metadata values, the package file)."
   [x]
-  (str (meta-prefix x)
+  (str (meta-prefix (if (and (= *mode* :full) (or (seq? x) (vector? x)) (not (:arbace.g2a.convert/raw (meta x))))
+                      (let [lm (lit-children-meta x)]
+                        (if (seq lm) (vary-meta x merge lm) x))
+                      x))
        (cond
          (lit/lit? x) (:text x)
          (and (seq? x) (:arbace.g2a.convert/raw (meta x))) (:arbace.g2a.convert/raw (meta x))

@@ -121,9 +121,47 @@
     nil
     (catch Throwable e (str (.getName (class e)) ": " (.getMessage e)))))
 
+(defn- first-difference
+  "The first line (from 1) where the bytes a and b differ, or nil when they are equal."
+  [^bytes a ^bytes b]
+  (when-not (java.util.Arrays/equals a b)
+    (let [n (min (alength a) (alength b))]
+      (loop [i 0 line 1]
+        (cond
+          (or (>= i n) (not= (aget a i) (aget b i))) line
+          (== 10 (aget a i)) (recur (inc i) (inc line))
+          :else (recur (inc i) line))))))
+
+(defn text-key
+  "The name of a Go file in the text level's results: its path under GOROOT (src/... or
+  test/...)."
+  [dump name]
+  (let [dir (:dir dump)]
+    (if (str/starts-with? dir "$GOROOT/")
+      (str (subs dir (count "$GOROOT/")) "/" name)
+      (let [dir (str/replace dir #"/+$" "")]
+        (str "test/" (if (or (= "." dir) (= "" dir)) "" (str dir "/")) name)))))
+
+(defn text-level
+  "The text level of the round trip (mode :full): each printed file of the dump compared
+  byte for byte with its original. {:files n :differ [[key line] ...]}."
+  [dump files text-dir cand-dir]
+  (let [rs (for [fl files
+                 :let [nm (:name fl)
+                       orig (File. ^String text-dir ^String nm)
+                       printed (File. ^String cand-dir ^String nm)]]
+             [(text-key dump nm)
+              (cond
+                (not (.isFile printed)) :missing
+                :else (first-difference (java.nio.file.Files/readAllBytes (.toPath orig))
+                                        (java.nio.file.Files/readAllBytes (.toPath printed))))])]
+    {:files (count rs)
+     :keys (mapv first rs)
+     :differ (vec (filter second rs))}))
+
 (defn convert-dump
   "Converts the dump at path into out; returns a result map."
-  [path rel {:keys [out positions goroot check print]}]
+  [path rel {:keys [out positions goroot check print text]}]
   (let [t0 (System/nanoTime)]
     (try
       (let [d (rd/read-dump path)
@@ -132,7 +170,12 @@
             ns-sym (if program? (program-ns rel) (ty/ns-name-of (:package d)))
             src-dir (when (and goroot (not program?))
                       (str/replace (:dir d) "$GOROOT" goroot))
-            r (cv/convert-package d {:positions positions :ns ns-sym :src-dir src-dir})
+            text-dir (when goroot
+                       (if program?
+                         (str goroot "/test/" (:dir d))
+                         (str/replace (:dir d) "$GOROOT" goroot)))
+            r (cv/convert-package d {:positions positions :ns ns-sym :src-dir src-dir
+                                     :text-dir text-dir})
             dir (ns-dir ns-sym)
             last-seg (last (str/split dir #"/"))
             layout-stats (atom {})
@@ -155,10 +198,12 @@
           (spit-file (File. (str out "/" dir "/" (:stem fl) ".ae")) (:text fl)))
         (let [print-fail (when print
                            (print-candidate (str out "/" dir ".ae") (candidate-dir print d)))
+              text-r (when (and text print text-dir (not print-fail))
+                       (text-level d files text-dir (candidate-dir print d)))
               dump-nodes (frequencies (map first (mapcat (comp rd/nodes :ast) (:files d))))]
           {:path path :package (:package d) :ns ns-sym :files (count files)
            :bytes @bytes :ms (/ (- (System/nanoTime) t0) 1e6) :read-ms (/ (- t1 t0) 1e6)
-           :stats (:stats r) :layout @layout-stats :dump-nodes dump-nodes
+           :stats (:stats r) :layout @layout-stats :dump-nodes dump-nodes :text text-r
            :unplaced (vec (for [fl files u (:unplaced fl)] [(:name fl) u]))
            :bad (vec (concat (keep (fn [fl] (when (:bad fl) [(:name fl) (:bad fl)])) files)
                              (when pkg-bad [["package" pkg-bad]])
@@ -198,6 +243,8 @@
                          "--print" (recur (assoc opts :print (first more)) (rest more))
                          "--report" (recur (assoc opts :report (first more)) (rest more))
                          "--quiet" (recur (assoc opts :quiet true) more)
+                         "--text" (recur (assoc opts :text true) more)
+                         "--text-known" (recur (assoc opts :text-known (first more)) (rest more))
                          [opts args]))
         files (dump-files paths)
         _ (when (:print opts) (require 'arbace.g2a.print))
@@ -234,12 +281,33 @@
     (println (format "converted %d of %d dumps (%d files, %.1f MB of forms) in %.1f s with %d threads; %d failed, %d did not read back"
                      (count ok) (count rs) (reduce + (map :files ok))
                      (/ (reduce + (map :bytes ok)) 1e6) wall (:jobs opts) (count fails) (count bad)))
-    (when-let [rf (:report opts)]
+    (let [text? (:text opts)
+          known (when-let [k (:text-known opts)]
+                  (when (.isFile (File. ^String k))
+                    (binding [*read-eval* false] (read-string (slurp k)))))
+          trs (keep :text ok)
+          differ (mapcat :differ trs)
+          unknown (remove (fn [[k _]] (contains? known k)) differ)
+          checked (set (mapcat :keys trs))
+          differing (set (map first differ))
+          ;; known differences of files checked that are now equal
+          fixed (sort (filter #(and (checked %) (not (differing %))) (keys known)))]
+      (when text?
+        (doseq [[k line] (sort differ)]
+          (println (if (contains? known k) "TEXT known" "TEXT") k "line" line
+                   (if (contains? known k) (str "(" (get known k) ")") "")))
+        (doseq [k fixed] (println "TEXT fixed" k "(known as differing: remove it from the known differences)"))
+        (println (format "text: %d files, %d byte-identical, %d differ (%d known, %d not known)"
+                         (reduce + (map :files trs)) (- (reduce + (map :files trs)) (count differ))
+                         (count differ) (- (count differ) (count unknown)) (count unknown))))
+      (when-let [rf (:report opts)]
       (spit rf (pr-str {:dumps (count rs) :failed (count fails) :bad (count bad)
                         :files (reduce + (map :files ok)) :bytes (reduce + (map :bytes ok))
                         :seconds wall :nodes (into (sorted-map) nodes)
                         :dump-nodes (into (sorted-map) dump-nodes)
                         :notes (into (sorted-map) notes) :layout (into (sorted-map) lay)
-                        :unplaced (vec unplaced)})))
-    (shutdown-agents)
-    (System/exit (if (or (seq fails) (seq bad)) 1 0))))
+                        :unplaced (vec unplaced)
+                        :text (when text? {:files (reduce + (map :files trs))
+                                           :differ (vec (sort differ))})})))
+      (shutdown-agents)
+      (System/exit (if (or (seq fails) (seq bad) (and text? (seq unknown))) 1 0)))))

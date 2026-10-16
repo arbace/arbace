@@ -157,6 +157,11 @@ with the same toolchain, configuration and flags (§12.4). They are **equivalent
    programs (`$GOROOT/test`, `// run`) and package tests, run with `GOOS=tamago` in the box
    (survey §6.3) or on the host configuration where the round trip is also run.
 
+Beside them, for forms converted in mode `:full` (§10.2), the **text level**: each printed
+file is byte-identical to its original, comments, literal spellings, white space and
+semicolons included. It needs no build (`bin/g2a roundtrip --text`, as built 2026-10-16:
+§10.2).
+
 Level 3 implies the others for what gc emits; levels 1 and 2 localize a difference. The gate
 of G2 was levels 1-3 over `$GOROOT/src` and `$GOROOT/test` (the tamago-go tree), and level 4
 for the run programs. As built, G2 was closed (2026-10-08) on levels 1-3 by the oracle
@@ -207,8 +212,8 @@ code levels.
   non-Go files of the package unchanged (§12.4).
 - Programs that inspect their own line numbers (`runtime.Caller`, panics' traces): go-lisp
   excluded 15 such run programs (survey §1.2, its F12). Mode `:lines` keeps the lines of
-  statements only, and the printer prints no `:full` (§10.2), so the oracle compares no line
-  numbers (ROUNDTRIP.md, "Positions").
+  statements only, so the oracle compares no line numbers (ROUNDTRIP.md, "Positions"); mode
+  `:full` gives the original text back (§10.2), which the oracle's levels do not use yet.
 
 ## 4. Packages, files, imports, names
 
@@ -1317,8 +1322,51 @@ Every position of the syntax tree is kept, for byte-identical export data and li
   literal's parts beyond its own position (`:go/apos` holds one position per child).
 
 This mode is for tools; it is not meant to be read. The converter writes it (`bin/g2a convert
---full`); the printer does not print it yet ([PRINTER-NOTES.md](PRINTER-NOTES.md): a package
-with `:positions :full` is printed in the lines layout), so G2 closed without it (§3.1).
+--full`), and the printer prints it in its own layout (`--layout full`, the default for a
+package of `:positions :full`, §12.3), which gives the original files back byte for byte (the
+text level, §3.1).
+
+**As built (2026-10-16).** The node positions above do not hold the whole text: go/ast keeps
+no comments' layout in the tree, no semicolons, no trailing commas, no parentheses (N1), no
+literal spellings (N4), no white space, and some positions the forms splice away. So mode
+`:full` also writes, only in that mode (the `:lines` output is unchanged):
+
+- On `go/file`: `:go/pos {:package :name}` (the package clause); `:go/comments [[line col
+  text] ...]`, every comment of the file as the source spells it (doc comments and directives
+  too: the printer takes them from here, not from `:doc` or the directive metadata; the `;`
+  lines stay, for reading); `:go/semis [[line col] ...]`, the semicolons the source writes;
+  `:go/trails`, its trailing commas (a comma followed by a closing bracket); `:go/space [[line
+  col ws] ...]`, the white space runs other than gofmt's (gofmt's: tabs at the start of a line,
+  spaces between tokens, nothing at the end); `:go/tail`, the white space after the last token
+  when it is not one newline. The converter reads them from the Go file (it has the package's
+  directory, or `$GOROOT/test`'s for a program); without it, comments come from the helper and
+  the rest is missing.
+- Literals: the spelling when the printer would spell the value otherwise, `:go/atext {index
+  text}` on the parent of a literal, `:go/text` on `(rune n)`, `(imaginary x)` and
+  `(byte-string ...)`; a struct tag's `:go/tag-pos` and `:go/tag-text` on its field's names.
+- Parentheses: `:go/parens [[lparen rparen] ...]` (outermost first) on a form, `:go/aparens
+  {index ...}` on the parent of a literal. A chain (§7.5) does not continue through
+  parentheses in this mode, and `-(1)` is `(- 1)`, not a negative literal: the forms differ
+  from `:lines`' there.
+- A chain's operators: `:go/ops [[line col] ...]` (the inner operators of §7.5 and of a union
+  `|`); `cond`'s `:go/cond [[if lbrace rbrace] ... [nil lbrace rbrace]]`, each `if`'s keyword
+  and braces and the final else block's.
+- More positions in `:go/pos`: an implicit return's `:return` on its function; the braces of
+  `struct` and `interface` (`:lbrace`, `:rbrace`); `:opening`/`:closing` of a type parameter
+  vector and of a function type's vectors, `:results-opening`/`:results-closing` for a single
+  result in parentheses, `:recv-opening`/`:recv-closing` of a receiver; `:label` of a label
+  and a branch, `:label`/`:label-colon` of a labeled declaration (A9); a key's `:colon` (a
+  `[k v]` element's own, a field key's in its literal's `:go/acolon {index pos}`); `aset`'s
+  `:lbrack`/`:rbrack`; `type-switch`'s `:guard-tok`, `:guard-dot`, `:guard-lparen`,
+  `:guard-rparen`; `:x-pos`/`:name-pos` of every qualified name; a method expression's name;
+  the first target of a local `var`, `const` or `type` declaration its keyword and
+  parentheses (`:tok-pos`, `:lparen`, `:rparen`); the first spec of each import declaration
+  its keyword and parentheses, an import's explicit name its `:name-pos`, its path its
+  position.
+
+Not kept: an empty declaration group (`import ( )`, a local `var ()`), which declares nothing
+and has no element in the forms (3 programs of `$GOROOT/test`, test/g2a/roundtrip-text-known.edn).
+The results are in [PRINTER-NOTES.md](PRINTER-NOTES.md), "Mode :full as built".
 
 ### 10.3 Line directives
 
@@ -1336,7 +1384,8 @@ warns, and the converter reports it and does not write it (none occurs in std; t
 - **Directives** are data (§9).
 - **Other comments** are written by the converter as `;` comments in the forms text, at their
   Go line where the layout allows, and are lost when the forms are read: the printer does not
-  reproduce them. They do not count for equivalence (N8). A comment is written at the end of
+  reproduce them, except in mode `:full`, where every comment is data too (`:go/comments`,
+  §10.2). They do not count for equivalence (N8). A comment is written at the end of
   its Go line (`; text`) or on a line of its own (`;; text`), each line of a block comment on
   its line. Line comments after fields and specs are among them (§6.5).
 
@@ -1478,7 +1527,13 @@ expressions) is for consumers.
   `text/tabwriter`); with no positions, its output is gofmt's fixed point.
 - **Mode `:full`**: every token at its recorded line and column, with newlines, spaces, and
   `/*line :L:C*/` directives where a position cannot be reached by layout (a token whose
-  column is left of the cursor). The output is not gofmt-formatted.
+  column is left of the cursor). The output is not gofmt-formatted. As built (2026-10-16,
+  §10.2): the file's comments, semicolons and trailing commas at their positions, its white
+  space (tabs at the start of a line, spaces elsewhere, unless `:go/space` says otherwise),
+  and tokens without a position (a comma, a spec's `=`, `else`, a slice's colon) placed after
+  the token before them as gofmt spaces them, within the room before the next positioned token;
+  no directive is written (a position never left of the cursor occurs in the corpora: the
+  output is the original text).
 - **No positions** (forms built by a program): the printer lays the code out as gofmt would.
 - Forms written by hand in an Arbace source: the printer may also emit
   `//line file.ae:N` directives, so that gc's positions name the forms file (a printer
@@ -2272,6 +2327,11 @@ build` (amendments B1-B4, [BUILD.md](BUILD.md), not the milestone B1); the user 
   `in-ns` and `go/file` on the package clause's line, explicit `:line` on lists placed after
   their line, `:line` on `@` forms (§10.1); `/*line*/` inside expressions reported, not
   written (§10.3); where ordinary comments go (§10.4).
+
+**Proposed (2026-10-16): mode `:full` as built.** Printing mode `:full` (the user's request of
+2026-10-16) added what that mode records (§10.2, "As built") and the text level (§3.1). The
+choices that are the user's are proposals G2F1-G2F8 in [PRINTER-NOTES.md](PRINTER-NOTES.md),
+"Mode :full as built", built as recommended and not yet accepted.
 
 Where two amendments disagreed, the later and more specific won (the converter's over the
 printer's over the helper's):
