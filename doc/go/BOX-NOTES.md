@@ -3323,7 +3323,11 @@ for byte" and "S8 in the emulated arm64 VM on the final program, byte for byte")
 
 So S8's exit criterion holds on the final program: byte for byte on amd64, in the emulated arm64
 VM and on the Mac. The whole chain in the VM (BX117 (a)) is running since 2026-10-14 22:49 (the
-namespaces compiled in 8,839 s; no result yet, as of 2026-10-15).
+namespaces compiled in 8,839 s; no result yet, as of 2026-10-15). On 2026-10-16 05:45, 28.5 h
+into a2g's step (the user: kept running): in the VM, the a2g tool guest's process 8 d 16 h of
+CPU (about 250 times the amd64 box's a2g of 303 s wall), 13.6 GB resident and flat; the
+requesting guest, waiting on the spawn, 3.5 of the VM's 16 vCPUs (5 d 3 h of CPU): its wait is
+not idle under emulation, to look at (WFI or the event area polled).
 
 ### The milestone (2026-10-15, `c3fdd36`)
 
