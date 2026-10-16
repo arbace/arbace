@@ -70,7 +70,8 @@ The current state of the work. This file is rewritten as things change. For the 
 - Done (2026-10-16): the whole chain in the emulated arm64 VM, nothing given (BX117 (a), at
   `434021a`): the image built in the box = the arm64 host step's, byte for byte (`5e4506de…`),
   in 40 h 29 min (about 247 times the host's 591 s; a2g alone 28.8 h). Seen there: the guest
-  waiting on a spawn takes 3.5 vCPUs under emulation (BOX-NOTES.md, BX117), to look at.
+  waiting on a spawn takes 3.5 vCPUs under emulation, an artifact of emulation (natively a few
+  percent of one core; BOX-NOTES.md, BX117; left as it is, the user).
 - The Mac moved to macOS 26 (the user, 2026-10-16); the box's checks there not yet run on it.
 - Done (2026-10-16): the build's speed, third round (STANDALONE-NOTES.md, "third round"): the
   loader in parts (analysis 25 → 15 s), a2g's load parallel (10.7 → 5 s), reachability (19-21 →
@@ -83,8 +84,7 @@ The current state of the work. This file is rewritten as things change. For the 
 ## Next
 
 - The user's choice among Later's surveys. Smaller: the oracle case
-  `test/oracle/forms/concurrency.ae:201` made deterministic (a `CyclicBarrier`'s last thread); the
-  guest waiting on a spawn takes 3.5 vCPUs under emulation; the box's checks on the Mac on
+  `test/oracle/forms/concurrency.ae:201` made deterministic (a `CyclicBarrier`'s last thread); the box's checks on the Mac on
   macOS 26. Left of the speed: the scan's 6 to 8 s (mutable sets), the analysis' member-class
   group (about 15 s on 16 jobs).
 

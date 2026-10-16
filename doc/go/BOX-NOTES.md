@@ -3345,6 +3345,15 @@ last check, that `target/arbace-go`'s program is these sources' (main had moved 
 So the whole chain holds on arm64 three ways: in the emulated VM from nothing, with the amd64
 box's results given (BX117 (b)), and on the Mac.
 
+**The waiting guest's CPU, measured natively (2026-10-16; left as it is, the user).** A guest
+idle in `(Thread/sleep 10000)` on this host: the native executable 10.1 s wall, 0.11 s of CPU;
+the box on 1 vCPU 10.5 s, 0.46 s; on 4 vCPUs 10.6 s, 0.72 s, most of it the guest's start
+(about 0.5 s): a few percent of one core over the sleep. The 3.5 vCPUs seen in the emulated VM
+are the same idle cycles (a 20 µs spin, then `abi.CPUPark` through the doorbell, woken by the
+runtime's sysmon, timers and stop-the-world waits) with every instruction of the guest, KVM/arm64
+and the monitor emulated, about 250 times slower. Parking sooner and longer would trade wake-up
+latency on the real targets for a shorter emulated run only: not done.
+
 ### The milestone (2026-10-15, `c3fdd36`)
 
 `bin/gate --full` passed at `c3fdd36` in 37 min 48 s, after two fixes of its first run's
