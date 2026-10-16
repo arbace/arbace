@@ -292,3 +292,60 @@ round: SA210 (a), SA211 (a) (the loader in member parts of 100 units; their fram
 part), SA220 (b) (the compiled tree in several files), SA230 (a) (an id slot only for sources
 loaded by a resource path, so the compiled program does not depend on the checkout's path:
 found when a worktree's path made G2 differ from G3).
+
+## 2026-10-16: the build's speed, third round; the seed remade
+
+At the user's request ("do what's left of the speed work"), four agents in worktrees, merged on
+an integration branch `speed3`, then into main (`2831811`); details in doc/STANDALONE-NOTES.md,
+"The build's speed, third round", parts A, B, C, SA220 (b), SA230 (a):
+- A (`speed3-loader`, `arbace/aot/emit.ae`): a loader of more than 100 units in member classes
+  `SCRIPTBASE__init$partP` of 100 units, each with its own constants (copied from an earlier
+  part's field when shared), all initialized before the first unit runs; a2g analyzes them in
+  parallel. The analysis after the tree arrives 25 → 15 s; the executable +168 KB. SA210 (a),
+  SA211 (a) (a loading error's frame names the part).
+- B (`speed3-load`, `arbace/a2g/world.ae`, `arbace/classes/analyze.ae`): the headers, members
+  and bridges in parallel one level of the hierarchy at a time, the class forms parsed in
+  parallel, declared in order. The sequential load 10.7 → about 5 s, a2g's output the same.
+- C (`speed3-reach`, `arbace/a2g/reach.ae`): each batch's code planned in parallel, the scan
+  sequential in the queue's order (`report.edn`'s texts depend on it), its state explicit, its
+  lookups cached per run. Reachability 19-21 → about 6 s, a2g's output the same (a trace of its
+  109,323 state changes the same line for line).
+- SA220 (b), SA240 (a) (`arbace/aot/main.ae`, `world.ae`): a class form past 256 KB written in
+  parts, `(aot/continue NAME k ...)` in `aot_NAME.k.ae`, joined by a2g after its parallel read.
+  The read about 2 → 0.8 s.
+- SA230 (a) (`arbace/lang/Compiler.ae`): an id slot only for sources loaded by a resource path:
+  the host's compile script had one from its absolute path, so the compiled program depended on
+  the checkout's location (part C's fixpoint broke in a worktree whose path collided with
+  `arbace/box/print.ae`'s slot; main's path collided with `arbace/spec/gen/alpha.ae`'s). Proven by
+  a colliding worktree building the same executable.
+The essential gate passed on `speed3` (8:53; the suite 20,506 of 20,520, the oracle's 53 known,
+0 new); the fixpoint G1 = G2 = G3 there (`848c3b02...`) and at the merge (`21519fbd...`,
+102,391,968 bytes). The seed remade from the merge's G3: `5858e83c...` (was `9b2a4687...`,
+`30f1656`), verified by `bin/seed --verify` (the same tree and archive printed again at
+`2831811`; stage 0 = G1 = G2 = G3 byte for byte, `21519fbd...`, 354 s). Left: the scan's 6 to
+8 s (mutable sets), the analysis' member-class group (about 15 s on 16 jobs).
+
+## 2026-10-16: Arbace independent of go-whim and of cgo
+
+Following the user's direction (entry above), on the branch `no-gowhim`, merged into main
+(`ff90747`); details in doc/go/BOX-NOTES.md, "go-whim vendored whole: Arbace independent of it;
+cgo dropped". From go-whim (https://github.com/arbace/go-whim at `80c49bf`) into
+`box/go/arbace/box/guest`: the guest tests (`guest/guest_test.go`, `smp_test.go`,
+`readahead_test.go`), the guest build (`guest/gotamago.go`, as `guest.Build`), `faulty`, and a
+demo guest adapted from `guest/tamago/main.go` in place of the editor; the C guests
+(`guest/rt`) rewritten in Go's assembly (`guest/cmd/bare`, amd64 and arm64, linked by TamaGo's
+own linker, GW2 (a), GW6 (a)). `bin/box-vendor`: `convert`, `check`, the go-whim clone retired
+(GW3 (a), GW7 (a): S0's replay stays runnable at the tag `arbace-inside-itself-v1`);
+`kvm-tests` and the arm64 VM's `hv` run box/'s own tests (GW8 (a)); `roundtrip` covers the
+guest packages (39 of 39). g2a's build takes several main packages in one printing, `--main`
+picking one. cgo: `bin/jrt test --race`, `bin/a2g-race` and `test/a2g/race/` removed,
+`CGO_ENABLED=0` in every script; `bin/g2a-build-tests` checks static linking with
+`tools/elfstatic` (Go's debug/elf) instead of `file` and `readelf`. LICENSE.md: the new parts
+under go-whim's EPL 1.0 entry (GW5 (a)). doc/ALPINE.md: cgo's row and go-whim gone; `alpine-sdk`
+stays for jdk26u (GW9 (a)); Go's module cache needed only by the vendoring checks (stage 0
+built with an empty cache). CLAUDE.md updated (GW4 (a)). Checked with /root/go-whim, go-whim's
+module-cache entries and every C tool masked (bwrap): the KVM tests (hv 4, vmm 15, tree 3,
+guest 8), `roundtrip`, `purego-check`, the box's build and smoke test; in the arm64 VM hv 4,
+vmm 15, guest 8 (the bare guest's faults `0x96000047`). The essential gate passed on the
+branch at its second run: the first had one oracle mismatch, `test/oracle/forms/concurrency.ae:201`,
+whose result depends on which thread reaches a `CyclicBarrier` last (to make deterministic).

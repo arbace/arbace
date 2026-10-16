@@ -7,13 +7,13 @@ The current state of the work. This file is rewritten as things change. For the 
 
 ## State
 
-- The bootstrap starts from the Go-source seed `seed/arbace-seed-go.tar.xz` (`9b2a4687…`), the
+- The bootstrap starts from the Go-source seed `seed/arbace-seed-go.tar.xz` (`5858e83c…`), the
   program printed by the Go-hosted fixpoint, its toolchain (TamaGo's go1.27.1) pinned by
   `seed/goroot.sha256`. `bin/seed --check`, `--build` (stage 0), `--make`, `--verify`.
 - Stage 0 hosts every Arbace tool (a2g, g2a, c2a, the suite's runner), compiled into it;
   `bin/arbace-go --build` is a Go-hosted build, `--fixpoint` the chain G1 → G2 → G3.
 - The program's namespaces are compiled to Go (`ARBACE_AOT=1`, the default since S6): the
-  executable 101.9 MB (amd64), a one-run build about 2.5 to 3 minutes.
+  executable 102.4 MB (amd64), a one-run build about 2.5 to 3 minutes.
 - The box: the same program as a TamaGo guest of go-whim's monitor (/dev/kvm on amd64; KVM/arm64
   and Hypervisor.framework on arm64), and the box rebuilding Arbace inside itself byte for byte
   (`bin/box-rebuild`, run by hand at milestones).
@@ -72,22 +72,21 @@ The current state of the work. This file is rewritten as things change. For the 
   in 40 h 29 min (about 247 times the host's 591 s; a2g alone 28.8 h). Seen there: the guest
   waiting on a spawn takes 3.5 vCPUs under emulation (BOX-NOTES.md, BX117), to look at.
 - The Mac moved to macOS 26 (the user, 2026-10-16); the box's checks there not yet run on it.
+- Done (2026-10-16): the build's speed, third round (STANDALONE-NOTES.md, "third round"): the
+  loader in parts (analysis 25 → 15 s), a2g's load parallel (10.7 → 5 s), reachability (19-21 →
+  6 s), the compiled tree in several files (read 2 → 0.8 s), ids independent of the checkout's
+  path (SA230); the seed remade (`5858e83c…`) and verified.
+- Done (2026-10-16): Arbace independent of go-whim (its tests in `box/` on the box's own guests,
+  the C guests in Go's assembly) and of cgo (dropped with the race detector); GW2-GW9 (a)
+  (BOX-NOTES.md).
 
 ## Next
 
-- Running: the build's speed, third round (the user, 2026-10-16): `arbace.core`'s loader split
-  by the back end so a2g analyzes its parts in parallel (9 to 14 s on one thread), a2g's
-  sequential load after the tree arrives (about 10 s: entering, headers, members, bridges), and
-  reachability's scan (12 to 16 s, one core).
-
-- Running: Arbace independent of go-whim and of cgo (the user, 2026-10-16: go-whim is a vim
-  derivative, application level; its virtualization was a pilot and will be pruned). go-whim's
-  tests vendored into `box/` and adapted, its C guests rewritten in Go's assembly (GW2 (a)),
-  `bin/box-vendor`'s replay from go-whim retired (GW3 (a)), cgo dropped with the race detector
-  (CG1 (a)); branch `no-gowhim`.
-- Running: SA220 (b) (the compiled tree in several files) and SA230 (a) (ids independent of the
-  checkout's path), on the third round's integration branch `speed3` (parts A, B, C merged
-  there; SA210 (a), SA211 (a) decided).
+- The user's choice among Later's surveys. Smaller: the oracle case
+  `test/oracle/forms/concurrency.ae:201` made deterministic (a `CyclicBarrier`'s last thread); the
+  guest waiting on a spawn takes 3.5 vCPUs under emulation; the box's checks on the Mac on
+  macOS 26. Left of the speed: the scan's 6 to 8 s (mutable sets), the analysis' member-class
+  group (about 15 s on 16 jobs).
 
 ## Later
 
