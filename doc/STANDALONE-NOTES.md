@@ -3689,3 +3689,5 @@ G3 byte for byte** (`a24fb44b...`, 102,457,504 bytes); the builds G1, G2, G3 192
   eviction). *Recommended: (a)*: the same rule as `env/reflect-cache`; the retained data are
   vectors of the infos the compilation holds anyway, and a long-running REPL defines few
   classes.
+
+**Decided (2026-10-16, the user):** SA260 (a), as built.
