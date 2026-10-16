@@ -3452,3 +3452,92 @@ collides with `arbace/spec/gen/alpha.ae`'s slot). The same commit in another wor
   persistent ones, the results rebuilt in the same insertion order.
 - The rest of `:reach` (about 1 s): main's stand-in rounds and the subclass index, outside the
   scan.
+
+## The build's speed, third round, SA220 (b): the compiled tree in several files (2026-10-16)
+
+The user's decision SA220 (b): the back end writes a namespace's classes across several files,
+so that a2g's parallel read of the compiled tree is no longer bound by one large file. Branch
+`speed3-split` (from `speed3`, parts A and B merged). Measured as parts A and B measured, on the
+shared host (another agent's builds beside it), `.tmp/speed3-split/`: one tree compiled twice by
+the same host from the same sources, written whole (`ARBACE_AOT_FILE_CHARS` large: as before)
+and split; a2g (this branch's executable) on each, written (`bench.sh`, alternating, three
+pairs) and arriving 60 s after a2g starts (`await.sh`); the lap `read` of `a2g: load (s)`.
+
+### Where the time went
+
+The tree: 217 files, 28 MB, read on a2g's threads, the largest first, each file by one reader at
+about 2 MB/s. The largest, `aot_arbace_core.ae` (arbace.core's holder, its 1,000-odd fn classes
+as member classes, 2.6 MB on one line), and `aot_arbace_classes_analyze.ae` (2.4 MB) took one
+thread 1.3 to 2 s while the others had finished: 16 threads at 2 MB/s read 28 MB in about
+0.9 s.
+
+### What changed (`arbace/aot/main.ae`, `arbace/a2g/world.ae`)
+
+- **A class form past 256 KB in parts** (`form-texts`, `file-chars`): a top-level class form
+  (a holder, a loader, a deftype) whose printed text is longer than 262,144 characters is cut
+  between its elements (before a field, a method or a member class: a seq element) into parts
+  of about equal size. The first part stays the class form, in `aot_NAME.ae`, with `:aot/parts
+  n` in its metadata; part k is `(aot/continue NAME k element...)` in `aot_NAME.k.ae`, laid
+  out as the class's file is (its header, `(in-ns 'arbace)`, the form on line 5, so the
+  reader's lines are the same). Each element is printed as the whole form printed it, so the
+  parts joined are the old text: checked textually on all 20 split forms (`t/join.py`), and the
+  197 files not split are byte for byte the whole tree's, `packages.edn`, `aot.edn` and
+  `arbace.ae` too (which lists the class files, not their continuations). A form of 256 KB or
+  less is written as before. Split: 20 class forms into 75 files (arbace.core's holder 11 of
+  about 245 KB, its loader 5); the tree 272 files; the largest 668 KB
+  (`aot_arbace_a2g_main.1.ae`: one fn class, `arbace.a2g.main$program_main_forms`, an element
+  not cut).
+- **a2g joins them after the read** (`world/join-continued`): the continuations' elements
+  appended to their class form in k's order, `:aot/parts` dropped, the continuations removed;
+  a missing part or a continuation of no class form fails the load. Then everything is as
+  before: the same class forms, declared in the same order (a continuation file holds no class
+  form; the files' order is the declaration's only through their class forms). Only the
+  reader's `:column`s of the moved elements differ, which nothing keeps (the class forms'
+  lowering and a2g's writer drop them).
+- Chosen over the member classes as top-level forms (each `defclass` with its outer class
+  named): `declare-class!` declares a class's member classes from its form, recursively, and
+  a2g's analysis groups and the unit's order follow it; top-level member classes would need
+  the class forms' front end (`arbace.classes`, part of the runtime: the seed's stage 0, which
+  runs G1's a2g, would not have it) and another declaration order. The join is a2g's only
+  (its namespace is loaded from the checkout when the host's differs: G1's a2g joins too), and
+  the tree's file names change nothing a2g prints.
+
+### Measured
+
+| | whole (as before) | split |
+|---|---|---|
+| a2g on a written tree (3 alternating pairs): `read` | 1.55, 1.11, 1.05 s | 0.77, 0.78, 0.76 s |
+| the same: `:load` (with the runtime's analysis beside) | 32.9, 28.4, 28.5 s | 29.0, 28.6, 28.4 s |
+| a2g, the tree arriving after 60 s (the gate running beside): `read` | 1.52 s | 1.19 s |
+| the same: load after the tree arrives (`:load` minus the wait) | 16.1 s | 15.7 s |
+| the fixpoint's builds (`--await`): `read` | (1.8 to 2.2 s at `ecb5dfe`, part B) | 0.87, 0.89, 0.91 s (G1, G2, G3) |
+| the fixpoint's builds: load after the tree arrives | | 16.0, 14.1, 13.1 s |
+
+The read is now near its throughput (28 MB on 16 threads, about 0.8 s): about 0.3 to 0.8 s
+saved, a second at most of a three-minute build. a2g's output on the two trees is the same,
+byte for byte, but report.edn's times (`diff -r` of the three pairs).
+
+**Checks.** The essential `bin/gate` on `9782a63` passed (6m26s: the suite 20,506 of 20,520, no
+regressions; the oracle 22,508 of 22,561, the 53 known, 0 new; the test build read the split
+tree as an input). `bin/arbace-go --fixpoint` (G1 by the seed's stage 0, which runs the
+checkout's `arbace.aot.main` and `arbace.a2g.world`): a2g's programs G1 = G2 = G3, **G1 = G2 =
+G3 byte for byte** (`140b54cb...`, 102,207,648 bytes); the builds G1, G2, G3 120, 114, 98 s.
+
+### Left
+
+- A single element past the bound is not cut (668 KB, one fn class with its nested classes):
+  its file bounds the read at about 0.35 s, under the throughput's 0.8 s.
+- The tree and the a2g that reads it go together: an a2g older than this one would take a
+  split class form's first part alone (its `class-forms` skips `aot/continue`). Both are built
+  from the same checkout (G1's a2g is the checkout's world.ae), and a build reuses a tree only
+  under the key of the sources that made it (`aot.key`, a2g's among them).
+
+### Proposals
+
+- **SA240 The compiled tree's split.** (a) As built: a top-level class form past 256 KB cut
+  between its elements into parts of about equal size, continuations `(aot/continue NAME k
+  ...)` in `aot_NAME.k.ae`, joined by a2g after the read; (b) the member classes as top-level
+  forms naming their outer class (the class forms' front end and its declaration order
+  change, and the seed's stage 0 could not run G1's a2g on such a tree); (c) a smaller bound
+  (128 KB: about twice the files, the read already near its throughput). *Recommended: (a)*:
+  the read about halved (0.8 to 0.9 s, was 1.1 to 2.2 s), a2g's output the same.
