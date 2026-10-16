@@ -71,13 +71,14 @@ The current state of the work. This file is rewritten as things change. For the 
   `434021a`): the image built in the box = the arm64 host step's, byte for byte (`5e4506de…`),
   in 40 h 29 min (about 247 times the host's 591 s; a2g alone 28.8 h). Seen there: the guest
   waiting on a spawn takes 3.5 vCPUs under emulation (BOX-NOTES.md, BX117), to look at.
-- The Mac may move to macOS 26 (the user).
+- The Mac moved to macOS 26 (the user, 2026-10-16); the box's checks there not yet run on it.
 
 ## Next
 
-- The user's choice among Later's surveys. Left of the build's speed: the analysis of
-  `arbace.core`'s loader (9 to 14 s on one thread; the class split by the back end), a2g's
-  sequential load after the tree arrives (about 10 s) and reachability's scan (12 to 16 s).
+- Running: the build's speed, third round (the user, 2026-10-16): `arbace.core`'s loader split
+  by the back end so a2g analyzes its parts in parallel (9 to 14 s on one thread), a2g's
+  sequential load after the tree arrives (about 10 s: entering, headers, members, bridges), and
+  reachability's scan (12 to 16 s, one core).
 
 ## Later
 
@@ -112,7 +113,7 @@ The current state of the work. This file is rewritten as things change. For the 
   any hardware, the guests only where virtualization is there. Prior art: Go's runtime as a user
   process; GoTEE (github.com/usbarmory/GoTEE: TamaGo unikernels and user-mode applets, TrustZone
   on arm), to check; unikernels with a privilege split.
-- The mapped start measured without nested KVM; the arm64 box's oracle subset and `box-suite` (an arm64 host with KVM).
+- The mapped start measured without nested KVM.
 - g2a's open ends: mode `:full` in the printer (columns; positions exact); `$GOROOT/test`'s
   directory tests.
 - A note from the user (2026-10-13): the tooling of the Mac GUI app Moshi Go may be useful for
