@@ -3541,3 +3541,5 @@ G3 byte for byte** (`140b54cb...`, 102,207,648 bytes); the builds G1, G2, G3 120
   change, and the seed's stage 0 could not run G1's a2g on such a tree); (c) a smaller bound
   (128 KB: about twice the files, the read already near its throughput). *Recommended: (a)*:
   the read about halved (0.8 to 0.9 s, was 1.1 to 2.2 s), a2g's output the same.
+
+**Decided (2026-10-16, the user):** SA240 (a), as built.
