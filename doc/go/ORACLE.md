@@ -362,7 +362,10 @@ rest of it being covered deterministically by the files named:
   `security` checks `randomUUID`'s shape and SecureRandom's lengths only).
 - Concurrency and timing: timings and interleavings (`concurrency` runs futures and threads that
   meet through joins, latches and timed waits, and prints only their results; agents and `pmap` are
-  not run concurrently); refs and atoms only single-threaded.
+  not run concurrently); refs and atoms only single-threaded. A case never depends on which
+  thread arrives first (a `CyclicBarrier`'s arrival indices compared as a set) nor on a sleep for
+  ordering (a latch counted down by the task itself instead): two cases did, and one failed the
+  gate on a loaded host (2026-10-16).
 - Identity: identity hashes and the printing of objects without value semantics (fns, atoms,
   transients, arrays, `PersistentQueue`'s `#object` form, regex patterns' hashes, `deftype`s
   without `hashCode`); what remains in messages and `#object[...]` is normalized (above).
