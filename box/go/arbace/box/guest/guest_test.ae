@@ -1,0 +1,232 @@
+(in-ns 'go.arbace.box.guest) (go/file "guest_test.go" :imports [
+
+
+    ^{:line 4} [bytes "bytes"]
+    ^{:line 5} [errors "errors"]
+    ^{:line 6} [fmt "fmt"]
+    ^{:line 7} [os "os"]
+    ^{:line 8} [filepath "path/filepath"]
+    ^{:line 9} [runtime "runtime"]
+    ^{:line 10} [strings "strings"]
+    ^{:line 11} [testing "testing"]
+    ^{:line 12} [time "time"]
+
+    ^{:line 14} [demo "arbace/box/guest/demo"]
+    ^{:line 15} [vmm "arbace/box/vmm"]])
+
+
+;; The tests are go-whim's guest tests (guest/guest_test.go, smp_test.go at 80c49bf) on the box's
+;; own guests: bare for its C guest, demo for its Go editor guest, faulty as it was.
+
+
+
+(go/type recorder "recorder is a vmm.TermHost (and a demo.Host) that keeps what the guest wrote and ends by vmm.Exit's\npanic, as an embedding host does.\n" (struct ^bytes/Buffer out))
+
+^{:go/end 25} (go/method Init [^{:tag (* recorder)} r (func [int32])])
+^{:go/end 26} (go/method WinSize [^{:tag (* recorder)} r] :results [int32 int32 bool] (return 24 80 true))
+^{:go/end 27} (go/method TermStart [^{:tag (* recorder)} r])
+^{:go/end 28} (go/method TermStop [^{:tag (* recorder)} r])
+^{:go/end 29} (go/method TTYKeys [^{:tag (* recorder)} r int32] :results [int32 int32 bool bool bool] (return 127 3 true true true))
+^{:go/end 30} (go/method NowMs ^int64 [^{:tag (* recorder)} r] 0)
+^{:go/end 31} (go/method Time ^int64 [^{:tag (* recorder)} r] 0)
+^{:go/end 32} (go/method Delay [^{:tag (* recorder)} r int64 bool])
+^{:go/end 33} (go/method WaitForInput ^bool [^{:tag (* recorder)} r int64] true)
+^{:go/end 34} (go/method ReadInput ^int32 [^{:tag (* recorder)} r (slice byte)] 0)
+^{:go/end 35} (go/method Raise [^{:tag (* recorder)} r int32])
+^{:go/end 36} (go/method Suspend [^{:tag (* recorder)} r])
+^{:go/end 37} (go/method Exit [^{:tag (* recorder)} r ^int32 code] (panic (conv vmm/Exit code)))
+^{:go/end 38} (go/method Message [^{:tag (* recorder)} r ^{:tag (slice byte)} m ^bool _] (.Write (.-out r) m))
+^{:go/end 39} (go/method Write ^int32 [^{:tag (* recorder)} r ^{:tag (slice byte)} p] (.Write (.-out r) p) (conv int32 (len p)))
+
+(go/var ^vmm/TermHost _ (conv (* recorder) nil))
+(go/var ^demo/Host _ (conv (* recorder) nil))
+
+
+
+
+^{:go/end 76} (go/func image "image is the guest name's image for this machine: from $ARBACE_BOX_GUESTS (NAME-ARCH.elf), else\nbuilt now from this module with TamaGo's go ($TAMAGO_ROOT). Skipped without /dev/kvm or a way to\nthe image.\n" ^{:tag (slice byte)} [^{:tag (* testing/T)} t ^string name]
+  ^{:go/via [common]} (.Helper t)
+  (when [(values _ err) (os/Stat "/dev/kvm")] (!= err nil)
+    ^{:go/via [common]} (.Skip t "no /dev/kvm"))
+
+  (when [d (os/Getenv "ARBACE_BOX_GUESTS")] (!= d "")
+    (let [(values b err) (os/ReadFile (filepath/Join d (+ name "-" runtime/GOARCH ".elf")))]
+      (when (!= err nil)
+        ^{:go/via [common]} (.Fatal t err))
+
+      (return b)))
+
+  (let [root (os/Getenv "TAMAGO_ROOT")]
+    (when (== root "")
+      ^{:go/via [common]} (.Skip t "no TAMAGO_ROOT: TamaGo's Go builds the guests"))
+
+    (let [(values mod err) (ModuleDir)]
+      (when (!= err nil)
+        ^{:go/via [common]} (.Fatal t err))
+
+      (let [out (filepath/Join ^{:go/via [common]} (.TempDir t) (+ name ".elf"))]
+        (when [err (Build root mod name runtime/GOARCH out)] (!= err nil)
+          ^{:go/via [common]} (.Fatal t err))
+
+        (let [(values b ^:assign err) (os/ReadFile out)]
+          (when (!= err nil)
+            ^{:go/via [common]} (.Fatal t err))
+
+          ^{:line 75} b)))))
+
+
+
+
+
+^{:go/end 95} (go/func TestImages "TestImages writes the guests' images for GOARCH $ARBACE_BOX_GUESTS_ARCH into the directory\n$ARBACE_BOX_GUESTS_OUT, for a machine without Go (bin/box-vendor kvm-tests-arm64); skipped\nunless both are set.\n" [^{:tag (* testing/T)} t]
+  (let [(values out arch) (values (os/Getenv "ARBACE_BOX_GUESTS_OUT") (os/Getenv "ARBACE_BOX_GUESTS_ARCH"))]
+    (when (or (== out "") (== arch ""))
+      ^{:go/via [common]} (.Skip t "ARBACE_BOX_GUESTS_OUT and ARBACE_BOX_GUESTS_ARCH not set"))
+
+    (let [(values mod err) (ModuleDir)]
+      (when (!= err nil)
+        ^{:go/via [common]} (.Fatal t err))
+
+      (range [name Programs]
+        (when [err (Build (os/Getenv "TAMAGO_ROOT") mod name arch (filepath/Join out (+ name "-" arch ".elf")))] (!= err nil)
+          ^{:go/via [common]} (.Fatal t err))))))
+
+
+
+
+
+
+
+(go/var ^{:doc "faults is what a fault of the guests is reported as, by architecture: a write to an address\nwith no page, the vector and its code (amd64: a page fault, vector 14, the code W; arm64: a\nsynchronous exception at EL1t, VBAR's entry 0, ESR_EL1 a data abort at the same level, EC 0x25).\n"} faults (lit (map string string) ["amd64" "exception 14 (code 0x2)"] ["arm64" "exception 0 (code 0x96"]))
+
+
+
+^{:go/end 118} (go/func TestHello "TestHello is go-whim's milestone 1: the bare guest writes \"hello\" by a call and exits 3 by\nanother -- one exit for each of the two calls, and no other.\n" [^{:tag (* testing/T)} t]
+  (let [img (image t "bare")
+      ^{:line 106} h (addr (lit recorder))
+      ^{:line 107 :tag bytes/Buffer} stats (zero bytes/Buffer)
+      (values code err) (vmm/Run (lit vmm/Config :Image img :Host h :Args (lit (slice string) "bare" "hello") :Stats (addr stats)))]
+    (when (!= err nil)
+      ^{:go/via [common]} (.Fatal t err))
+
+    (when (or (!= code 3) (!= (.String (.-out h)) "hello\n"))
+      ^{:go/via [common]} (.Fatalf t "exit %d, output %q" code (.String (.-out h))))
+
+    (when (or (not (strings/HasPrefix (.String stats) "exits 2 ")) (not (strings/Contains (.String stats) "calls 2\n")))
+      ^{:go/via [common]} (.Fatalf t "not one exit per call:\n%s" (.String stats)))))
+
+
+
+
+
+
+^{:go/end 136} (go/func TestFault "TestFault: an exception the bare guest takes is reported by its own call and ends the run as a\nFault: a page fault at the address it touched; and the stack's overflow too, on the vectors'\nstack.\n" [^{:tag (* testing/T)} t]
+  (let [img (image t "bare")]
+    (range [_ arg (lit (slice string) "null" "deep")]
+      (let [(values _ err) (vmm/Run (lit vmm/Config :Image img :Host (addr (lit recorder)) :Args (lit (slice string) "bare" arg)))
+          ^{:line 127 :tag (* vmm/Fault)} f (zero (* vmm/Fault))]
+        (when (or (not (errors/As err (addr f))) (not (strings/Contains (.-Msg f) (aget faults runtime/GOARCH))))
+          ^{:go/via [common]} (.Fatalf t "%s: %v, not a fault with %q" arg err (aget faults runtime/GOARCH)))
+
+        (when (and (== arg "null") (not (strings/Contains (.-Msg f) "address 0x0")))
+          ^{:go/via [common]} (.Fatalf t "%s: %s" arg (.-Msg f)))
+
+        ^{:go/via [common]} (.Logf t "%s: %s" arg (.-Msg f))))))
+
+
+
+
+
+^{:go/end 151} (go/func TestWatchdog "TestWatchdog: a guest that runs without a call is ended by the monitor's watchdog, as\nhv_vcpus_exit ends it on the framework.\n" [^{:tag (* testing/T)} t]
+  (let [img (image t "bare")
+      ^{:line 142} start (time/Now)
+      (values _ err) (vmm/Run (lit vmm/Config :Image img :Host (addr (lit recorder)) :Args (lit (slice string) "bare" "spin") :Watchdog (* 200 time/Millisecond)))
+      ^{:line 144 :tag (* vmm/Fault)} f (zero (* vmm/Fault))]
+    (when (or (not (errors/As err (addr f))) (not (strings/Contains (.-Msg f) "watchdog")))
+      ^{:go/via [common]} (.Fatalf t "%v, not the watchdog" err))
+
+    (when [d (time/Since start)] (> d (* 2 time/Second))
+      ^{:go/via [common]} (.Fatalf t "the watchdog took %s" d))))
+
+
+
+
+
+
+^{:go/end 174} (go/func TestGoGuest "TestGoGuest: the demo guest on a recording host answers exactly as the program does natively on\nthe same host: the same bytes and the same exit code, every call a call; and the runtime asked\nfor its random bytes.\n" [^{:tag (* testing/T)} t]
+  (let [img (image t "demo")
+      ^{:line 158} args (lit (slice string) "demo" "work" "hello")
+      ^{:line 159} native (addr (lit recorder))
+      ^{:line 160} want (demo/Main native args)
+      ^{:line 161} h (addr (lit recorder))
+      ^{:line 162 :tag bytes/Buffer} stats (zero bytes/Buffer)
+      (values code err) (vmm/Run (lit vmm/Config :Image img :Host h :Args args :Stats (addr stats)))]
+    (when (!= err nil)
+      ^{:go/via [common]} (.Fatal t err))
+
+    (when (or (!= code want) (!= (.String (.-out h)) (.String (.-out native))))
+      ^{:go/via [common]} (.Fatalf t "exit %d, %q; natively: exit %d, %q" code (.String (.-out h)) want (.String (.-out native))))
+
+    (when (not (strings/Contains (.String stats) "call random 1\n"))
+      ^{:go/via [common]} (.Fatalf t "no random bytes asked for:\n%s" (.String stats)))
+
+    ^{:go/via [common]} (.Logf t "exit %d, %d bytes; %s" code (.Len (.-out h)) (aget (strings/SplitN (.String stats) "\n" 2) 0))))
+
+
+
+
+
+^{:go/end 203} (go/func TestGoGuestFault "TestGoGuestFault: the board's own paths -- a null pointer written ends the run as a Fault\nthrough its vectors, as the bare guest's; a panic is the runtime's report on the console and\nexit 2; a spin is ended by the watchdog; and a line printed, then exit 7.\n" [^{:tag (* testing/T)} t]
+  (let [img (image t "faulty")]
+    (range [_ c (lit (slice (struct
+              ^{:line 182 :tag string} arg ^string fault ^string out
+              ^{:line 183 :tag int} code))
+
+          (lit _ "null" (aget faults runtime/GOARCH) "" 0)
+          (lit _ "panic" "" "panic: faulty: panic" 2)
+          (lit _ "spin" "watchdog" "" 0)
+          (lit _ "" "" "faulty: hello\n" 7))]
+
+      (let [h (addr (lit recorder))
+          (values code err) (vmm/Run (lit vmm/Config :Image img :Host h :Args (lit (slice string) "faulty" (.-arg c)) :Watchdog (* 500 time/Millisecond)))
+          ^{:line 192 :tag (* vmm/Fault)} f (zero (* vmm/Fault))]
+        (switch
+          (case [(!= (.-fault c) "")]
+            (when (or (not (errors/As err (addr f))) (not (strings/Contains (.-Msg f) (.-fault c))))
+              ^{:go/via [common]} (.Fatalf t "%s: %v, not a fault with %q" (.-arg c) err (.-fault c)))
+
+            ^{:go/via [common]} (.Logf t "%s: %s" (.-arg c) (.-Msg f)))
+          (case [(or (!= err nil) (!= code (.-code c)) (not (strings/Contains (.String (.-out h)) (.-out c))))]
+            ^{:go/via [common]} (.Fatalf t "%s: exit %d, %v, output %q" (.-arg c) code err (.String (.-out h)))))))))
+
+
+
+
+
+(go/var ^{:doc "smpKeys has the program hash in parallel twice, around a line echoed.\n"} smpKeys (lit (slice string) "work\r" "hello\r" "work\r"))
+
+
+
+
+^{:go/end 234} (go/func TestGoGuestSMP "TestGoGuestSMP: the demo guest on 1, 2 and 4 vCPUs answers a session whose work runs in parallel\ngoroutines exactly as the program does natively, on the same scripted host; on more than one,\nthe runtime started every AP and the guest parked and was woken through the monitor.\n" [^{:tag (* testing/T)} t]
+  (let [img (image t "demo")
+      ^{:line 213} nat (newScripted (spread smpKeys))
+      ^{:line 214} want (demo/Main nat (lit (slice string) "demo"))]
+    (range [_ n (lit (slice int) 1 2 4)]
+      (let [g (newScripted (spread smpKeys))
+          ^{:line 217 :tag bytes/Buffer} stats (zero bytes/Buffer)
+          (values code err) (vmm/Run (lit vmm/Config :Image img :Host g :Args (lit (slice string) "demo") :Stats (addr stats) :CPUs n))]
+        (when (!= err nil)
+          ^{:go/via [common]} (.Fatalf t "%d vCPUs: %v" n err))
+
+        (when (or (!= code want) (!= (.String ^{:go/via [recorder]} (.-out g)) (.String ^{:go/via [recorder]} (.-out nat))))
+          ^{:go/via [common]} (.Fatalf t "%d vCPUs: exit %d, %q; natively: exit %d, %q" n code (.String ^{:go/via [recorder]} (.-out g)) want (.String ^{:go/via [recorder]} (.-out nat))))
+
+        (let [st (.String stats)]
+          (when (and (> n 1) ^:go/paren (or (not (strings/Contains st (fmt/Sprintf "call cpu_start %d\n" (- n 1)))) (not (strings/Contains st "call cpu_park "))))
+            ^{:go/via [common]} (.Fatalf t "%d vCPUs: not all started, or none parked:\n%s" n st))
+
+          (when (and (== n 1) (strings/Contains st "cpu_"))
+            ^{:go/via [common]} (.Fatalf t "one vCPU made a vCPU's call:\n%s" st))
+
+          ^{:go/via [common]} (.Logf t "%d vCPUs: exit %d, %d bytes; %s" n code (.Len ^{:go/via [recorder]} (.-out g)) (strings/Join (strings/Fields st) " ")))))))

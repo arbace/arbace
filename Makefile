@@ -89,7 +89,7 @@ tamago-verify: ## tamago/goroot and goos; the guest from them (bin/tamago-vendor
 toolchain-verify: ## tamago/cmd, Go's toolchain; the tools from it (bin/toolchain-vendor verify, check)
 	bin/toolchain-vendor verify
 	bin/toolchain-vendor check
-box-vendor-verify: ## box/ from go-whim (bin/box-vendor roundtrip, kvm-tests, purego-check)
+box-vendor-verify: ## box/'s forms and KVM tests (bin/box-vendor roundtrip, kvm-tests, purego-check)
 	bin/box-vendor roundtrip
 	bin/box-vendor kvm-tests
 	bin/box-vendor purego-check

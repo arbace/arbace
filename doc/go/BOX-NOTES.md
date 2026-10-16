@@ -3366,3 +3366,163 @@ packages. Tagged `arbace-inside-itself-v1` on main (`e0ad476`).
 BX117 (b) now, (a) tried again after S6, the Mac running the whole chain on arm64; BX119 against
 the recommendation: `bin/box-rebuild` stays out of `bin/gate --full`, run by hand at milestones;
 the Mac's bundle run once, built from the program after S6.
+
+## go-whim vendored whole: Arbace independent of it; cgo dropped (2026-10-16)
+
+The user (2026-10-16): Arbace must not depend on go-whim, a vim derivative (application level,
+not system level; its virtualization was a pilot and will be pruned): vendor and adapt
+everything Arbace needs from it; and consider dropping cgo altogether. Decided, as recommended:
+GW2 (a), the C guests rewritten in Go's assembly; GW3 (a), `box/` Arbace's own source, the
+scripts that read go-whim retired; CG1 (a), no cgo anywhere.
+
+### What Arbace took from go-whim at run or build time, until now
+
+Searched in `bin/`, `tools/`, `test/`, `box/`, `arbace/`, `go/` and the docs: only
+`bin/box-vendor` read go-whim (`/root/go-whim`, cloned at `80c49bf`): `convert` and `check`
+(S0's replay and proof), `kvm-tests` (go-whim's tests on `box/` printed, in a renamed clone of
+go-whim, its editor given `ExitCode`) and `kvm-tests-arm64` (the same clone's hv and vmm tests
+compiled for linux/arm64, for `bin/box-arm64-vm hv`). Those needed go-whim's module, so Go's module
+cache had to hold go-whim's requirements (`remyoudompheng/bigfft`, five `modernc.org` modules),
+and its C guests needed `clang` and `ld` (guest/guest.go's `Image`), and the tests ran with
+`CGO_ENABLED=1`. `bin/box-mac-bundle`, `box/mac/mac.sh`, `bin/box-arm64-vm` (but its `hv` step,
+through `kvm-tests-arm64`), `arbace/g2a/build.ae`, `go/arbace/jrt/` name go-whim only in comments
+(their origin), which stay.
+
+### What was vendored, and how adapted
+
+From https://github.com/arbace/go-whim at `80c49bf53cd6340487ac623f3d6d135b77ac1db6` (read only,
+`/root/go-whim`), into a new package tree `arbace/box/guest` (`box/go/arbace/box/guest.ae`,
+`guest/`), Arbace's own from here on:
+
+- `guest/guest_test.go`, `guest/smp_test.go`, `guest/readahead_test.go` → `guest/guest_test.go`,
+  `guest/readahead_test.go` (package `arbace/box/guest`): the recording and scripted hosts as
+  they were (the recorder ends by `vmm.Exit`'s panic, which `vmm.Run` recovers, in place of the
+  editor's `editor.Exit`, so no adaptation of anything else is needed); TestHello, TestFault,
+  TestWatchdog, TestGoGuest, TestGoGuestFault, TestGoGuestSMP, TestReadAheadGo as they were but
+  on the guests below; TestReadAheadC (the C editor core, `src/whim-vim.c`) and
+  TestReadAheadRuntime (rt.c's buffer call by call, which `kvm-tests` never selected) become
+  TestReadAheadBare, the latter's checks on the bare guest. The faults' expected reports are by
+  architecture (amd64: vector 14, code 0x2; arm64: VBAR's entry 0, ESR a data abort at the same
+  level, `0x96...`), so the tests run on arm64 too.
+- go-whim's Go editor guest (`guest/tamago/main.go`, the editor `editor/`): gone. In its place
+  the demo guest: `arbace/box/guest/demo`, a small program that runs the same natively and as a
+  guest (its commands `work`, a SHA-256 of 16 chunks hashed by goroutines in parallel, the same
+  sum on any number of CPUs; `suspend`, the terminal's marker written, a wait that does not
+  read, then Suspend; `exit N`; anything else echoed), and `arbace/box/guest/cmd/demo`, its guest:
+  `guest/tamago/main.go`'s host (the hypercalls, the merged wait and read, the deathtrap's
+  repeat) on the program's five calls. The tests hold the guest's run to the program's native
+  run on the same host, as they held the editor guest to the Go editor: the same bytes, the same
+  exit, the read-ahead across a suspension, a SIGWINCH and a deadly signal, and the SMP session
+  on 1, 2 and 4 vCPUs (all started, parks made).
+- `guest/tamago/faulty/main.go` → `arbace/box/guest/cmd/faulty`, its import renamed.
+- go-whim's C guest (`guest/rt/`: `hello.c`, `rt.c`, `entry_amd64.S`, `entry_arm64.S`,
+  `link_amd64.ld`, `link_arm64.ld`; `bench.c` not needed; and the tests' C stand-ins: `faulty`
+  and `aheadStandIn`) → `arbace/box/guest/cmd/bare` (GW2 (a)): one program in Go's assembly per
+  architecture (`bare_amd64.s`, `bare_arm64.s`, with an empty `main.go`), its first argument
+  choosing hello (the default: "hello\n", exit 3), null, deep, spin or ahead; the entry state,
+  the call block (64-byte aligned in a 128-byte area), the doorbell store (from RAX; from X0),
+  rt.c's `whim_hcall`, `musl_wait_for_input` and `musl_read_input` (the read-ahead), and the
+  vectors (amd64: 32 gates 16 bytes apart; arm64: 16 entries of 128 bytes, 2 KiB aligned) as
+  entry_ISA.S had them. Built by TamaGo's own `asm` and `link` (`go build`, no C compiler):
+  GOOS=linux (GOOS=tamago's runtime needs the board's `runtime/goos` hooks), `-ldflags "-E _start
+  -T 0x201000 -R 0x1000"`. The linker keeps the part of Go's runtime its roots reach (1.5 MB;
+  never run: from `_start` on the code is the assembly's), and the image defines no
+  `runtime/goos.RamStart`, so the monitor takes it for a C guest (one vCPU, `plan`'s layout and
+  entry). Two lessons of arm64's assembler: a store through `(ZR)` is through SP (the null store
+  takes a register holding 0), and the linker's nosplit check counts a `SUB` from RSP, so `deep`
+  moves SP through a register.
+- `guest/gotamago.go`'s build of a guest (`tamagoBuild`: GOOS=tamago, GOOSPKG, the link at
+  `-T 0x201000 -R 0x1000`) → `guest.Build`, in package `guest` (not a test file): the tests build
+  each guest with `$TAMAGO_ROOT/bin/go` from the module they run in (box/ printed with
+  `--goos tamago`, so that its go.mod requires TamaGo's goos module), or take them from
+  `$ARBACE_BOX_GUESTS` (NAME-ARCH.elf), which `TestImages` writes for a machine with no Go.
+
+The Go was written in a printing of `box/`, then converted by `bin/box-vendor convert` (new,
+below) for linux/amd64 and linux/arm64 (`guest`, `guest/demo`, `guest/cmd/bare`) and tamago/amd64
+and tamago/arm64 (`guest/demo`, `guest/cmd/demo`, `guest/cmd/faulty`), the forms merged as
+before (the assembly as `:other-files`). hv's, vmm's, abi's and tree's tests were in `box/`
+already (vendored at S0, Arbace's since).
+
+### Changes beside box/
+
+- `bin/box-vendor`: `convert` (from go-whim), `check`, `all` and the go-whim clone behind
+  `kvm-tests` and `kvm-tests-arm64` retired, with the options `--src`, `--commit`, `--from`
+  (GW3 (a)); S0's replay and proof stay recorded above and runnable from the script as it was
+  at `arbace-inside-itself-v1`. New: `print DIR` (box/ printed with tests and TamaGo's goos
+  module, for editing as Go) and `convert DIR PKG...` (packages of such a module converted and
+  put in place of theirs: how the guests were added; a package edited as forms keeps its `;`
+  comments only if converted from its own Go, else the three-way merge of S5's notes). `kvm-tests`
+  runs box/'s own tests on box/ printed: hv, vmm, tree, and the guest tests (TamaGo builds the
+  guests as they run); `kvm-tests-arm64 DIR` compiles hv's, vmm's and the guest tests for
+  linux/arm64 and builds the guests for arm64 into DIR/guests. `roundtrip`'s configurations gain
+  the guest packages. `merge` replaces only its packages (a subpackage's package file beside its
+  parent's forms is left), so `convert` touches nothing else.
+- `bin/box-arm64-vm hv`: runs `guest.test` too, with `ARBACE_BOX_GUESTS`.
+- `arbace/g2a/build.ae`: a library printing (`--print-only --module`) may hold several main
+  packages (box/ holds the launcher and three guests); `--main PATH` chooses the main package
+  of a build among several (`bin/arbace-go --build --box` and `bin/box-mac-bundle` build the
+  launcher with `--main arbace/box/cmd/arbace-box`). The guest image's build is unchanged
+  (`--root box` takes no main package of a root).
+- cgo dropped (CG1 (a)): `bin/jrt test --race` removed (Go's race detector needs cgo; `bin/jrt`
+  set `CGO_ENABLED=1` only with `--race`, not for every test run) and `bin/a2g-race` with its
+  program `test/a2g/race/` deleted. The Go builds already set `CGO_ENABLED=0` (bin/g2a build,
+  bin/arbace-go, the seed, the guests); every script that runs Go now exports it too
+  (`bin/g2a*`, `bin/jrt`, `bin/arbace-go`, `bin/box-*`, `bin/tamago-vendor`,
+  `bin/toolchain-vendor`, `bin/x509roots-vendor`, `bin/gate`), so that no tool or test build
+  falls back on Go's default (cgo on when a C compiler is found). `bin/g2a-build-tests` checks its
+  executables with `tools/elfstatic` (Go's `debug/elf`: an ELF executable for the architecture,
+  no PT_INTERP or PT_DYNAMIC, no `.interp` or `.dynamic`) instead of `file` and binutils'
+  `readelf`. doc/ALPINE.md: the row `gcc musl-dev linux-headers binutils` left the table and the
+  line (the C toolchain comes with `alpine-sdk` for jdk26u alone), go-whim left "What apk does not
+  provide", and go-whim's requirements left the module cache's list.
+
+### Checks (amd64 here; arm64 in the emulated VM)
+
+Run with go-whim out of reach: under `bwrap`, `/root/go-whim`, go-whim's requirements in Go's
+module cache (`modernc.org`, `remyoudompheng`, `cache/download/github.com/arbace`) masked by empty
+directories and the C toolchain (`gcc`, `cc`, `clang`, `ld`, `as`, `readelf`, `objdump`, `nm`,
+`file`, `c++`) replaced by a stub that fails, so that a build asking for any of them would fail:
+
+- `bin/box-vendor kvm-tests`: hv 4, vmm 15, tree 3, guest 8 passed (TestImages skipped, as it is
+  without its variables); none failed.
+- `bin/box-vendor roundtrip`: 39 of 39 packages-by-configuration pass at all three levels (27
+  before, and the guests' 12).
+- `bin/box-vendor purego-check`: 3 of 3 by gocmp; the darwin/arm64 launcher byte-identical both
+  ways.
+- `bin/arbace-go --build --box` (amd64: the guest from `tamago/`'s forms, the launcher with
+  `--main`) and `--smoke --box`: passed.
+- `bin/gate` (essential): passed, the second run (2 min 4 s: the build cached by the first). The
+  first failed on one new oracle mismatch, `test/oracle/forms/concurrency.ae:201`, a
+  `CyclicBarrier`'s arrival indices (`[1 (0 2)]` for `[2 (0 1)]`): which party arrives last is a
+  race the case leaves open, under the host's load; no runtime source changed, and the rerun
+  matched.
+- `bin/g2a-build-tests` (with `tools/elfstatic`): 26 passed.
+- In the emulated arm64 VM (`bin/box-arm64-vm hv`, the guests built here by `kvm-tests-arm64`):
+  hv 4, vmm 15, guest 8 passed (TestFault: null and deep `exception 0 (code 0x96000047)`, the
+  bare guest's assembly on arm64 run, not only compiled; TestGoGuestSMP on 1, 2 and 4 vCPUs).
+- No script under `bin/`, `tools/`, `box/` or `arbace/` names `/root/go-whim` but as an origin in
+  a comment; none sets `CGO_ENABLED=1` (`jrt`'s test files mention `--race` in comments only).
+
+### Proposals (GW4-GW9, the user's; each built as recommended)
+
+- **GW4 CLAUDE.md.** Its box paragraph says `box/` is "vendored ... from go-whim" (true) and that
+  `bin/box-arm64-vm check` runs "go-whim's tests", and its ALPINE.md line lists go-whim among
+  what apk does not provide: (a) reword them (a patch is prepared, not applied: CLAUDE.md changes
+  are the user's or the lead's); (b) leave them. Recommended (a).
+- **GW5 the licence of the newly vendored parts.** go-whim's guest tests, `guest/tamago/main.go`,
+  `faulty` and `guest/rt/` (single author, the user), recorded in LICENSE.md under the Eclipse
+  Public License 1.0 on D8's terms: (a) as recorded; (b) otherwise. Recommended (a).
+- **GW6 the bare guest's dead runtime.** Go's linker keeps the runtime its roots reach (1.5 MB,
+  never run): (a) keep it (built by TamaGo's own tools, nothing else); (b) a writer of our own
+  for a minimal ELF from the assembler's object (Go's object format is internal to the
+  toolchain: fragile). Recommended (a).
+- **GW7 S0's replay.** `convert`/`check` from go-whim retired; S0's derivation stays recorded and
+  runnable from `bin/box-vendor` at `arbace-inside-itself-v1` with a clone of go-whim: (a) so;
+  (b) keep an opt-in `replay-s0` needing go-whim. Recommended (a): nothing of Arbace reads go-whim.
+- **GW8 the guest tests in `bin/box-arm64-vm check`.** Its `hv` step now runs the guest tests
+  too (about a minute more in the VM): (a) keep; (b) hv and vmm only. Recommended (a).
+- **GW9 the C toolchain left on the host.** gcc, musl-dev and binutils still come with
+  `alpine-sdk`, for building jdk26u alone: (a) keep `alpine-sdk` (jdk26u's build needs it);
+  (b) split the line into Arbace's and jdk26u's builds. Recommended (a).
+
+**Decided (2026-10-16, the user):** GW4-GW9 (a), as built; GW4 applied by the lead (CLAUDE.md).
