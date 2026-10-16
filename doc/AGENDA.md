@@ -7,7 +7,7 @@ The current state of the work. This file is rewritten as things change. For the 
 
 ## State
 
-- The bootstrap starts from the Go-source seed `seed/arbace-seed-go.tar.xz` (`5858e83c…`), the
+- The bootstrap starts from the Go-source seed `seed/arbace-seed-go.tar.xz` (`b566d53a…`), the
   program printed by the Go-hosted fixpoint, its toolchain (TamaGo's go1.27.1) pinned by
   `seed/goroot.sha256`. `bin/seed --check`, `--build` (stage 0), `--make`, `--verify`.
 - Stage 0 hosts every Arbace tool (a2g, g2a, c2a, the suite's runner), compiled into it;
@@ -83,11 +83,17 @@ The current state of the work. This file is rewritten as things change. For the 
   the C guests in Go's assembly) and of cgo (dropped with the race detector); GW2-GW9 (a)
   (BOX-NOTES.md).
 
+- Done (2026-10-16): the build's speed, fourth round (STANDALONE-NOTES.md, "fourth round"):
+  reachability's scan in mutable state with shared plans (`:reach` 7-10 → 3-4.5 s), the
+  analysis' fields indexed and supertypes memoized (16 → 5 s); SA250 (a), SA260 (a); the seed
+  remade (`b566d53a…`) and verified.
+- Done (2026-10-16): a tools-only seed measured (JOURNAL.md): -14% to -22% of xz, `tzdb.dat`
+  stays; not pursued (the user).
+- Running: g2a's printer mode `:full` (Go forms converted with `--full` printed back to the
+  original text, byte for byte; branch `g2a-full`).
+
 ## Next
 
-- Running: the build's speed, fourth round (the user, 2026-10-16): reachability's scan in
-  mutable state (6 to 8 s; branch `speed4-reach`) and the analysis' member-class group (about
-  15 s on 16 jobs; branch `speed4-analysis`).
 - The user's choice among Later's surveys. Smaller: the box's checks on the Mac on
   macOS 26.
 
@@ -100,6 +106,11 @@ The current state of the work. This file is rewritten as things change. For the 
   naming each forms dialect (class forms, Go forms) and each tool by what it does (the 2026-10-11
   renaming from j2c, g2c, c2g is the precedent; CLAUDE.md, the frozen branches and the dated
   records keep the names of their time).
+  The user's refinement (2026-10-16): translation is always between forms, so a language's
+  bridge to its forms is one tool with two verbs (for Java "jaf read / jaf print" in place of
+  j2a or j2c; for Go the same shape in place of g2a), and the translators run between forms
+  dialects only; the 2026-10-11 renaming came from the letter `c`, the start of both
+  "clojure" and "classes".
 
 - The standalone Arbace: no Java binary compatibility, with Java at the source level through j2a.
   The language is Clojure plus class forms, and later forms for Go. The goal is a

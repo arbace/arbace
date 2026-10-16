@@ -397,3 +397,40 @@ user of `sun.misc.Signal`, compiled differently on a host that does not embed it
 would need a named tools-only build and a longer check (G3 printing the seed again, its
 executable = stage 0). The user: "it isn't worth it for a 14-17% smaller seed"; the branch was
 dropped, its numbers kept here.
+
+## 2026-10-16: the build's speed, fourth round; the seed remade
+
+At the user's request ("do the rest of the build's speed"), two agents in worktrees, merged on
+`speed4`, then into main (`51300c0`); details in doc/STANDALONE-NOTES.md, "The build's speed,
+fourth round", parts A and B.
+- A (`arbace/a2g/reach.ae`): the run's state in Java's mutable collections (`LinkedHashSet`s,
+  an `ArrayList` queue), rebuilt as persistent values in insertion order at the end; no dynamic
+  vars on the hot path; the plans of nodes that cannot record anything shared by key and skipped
+  once a run of them had no effect (the state only grows: 43,357 distinct plans for 632,000
+  nodes); `java-impl-of`'s superclass and implementations cached, the lambdas' `subclass?` tests
+  lookups in each interface's supertypes. `:reach` 7-10 → 3-4.5 s; a2g's output the same byte
+  for byte, and a trace of its 110,056 state changes the same at each of five steps. SA250 (a):
+  the second left outside the scan stays (alternative: a fifth round on `main.ae`'s stand-in
+  rounds and the parallel walk).
+- B (`arbace/classes/analyze.ae`, `env.ae`, `types.ae`, `arbace/a2g/world.ae`): the time was the
+  analysis' own work (16 threads busy to the end, no lock waits, the collector a third), mostly
+  `find-own-field`'s linear scans through the holders' constant fields and the supertypes'
+  methods walked on every call. An index of each class's fields, `all-supertypes` and
+  `member-methods` memoized (each result reused only while the infos it came from are the same
+  objects), `parse-method-desc` memoized, the top-level classes without members analyzed in the
+  first group. The analysis of the compiled classes 16 → 5 s; a2g's output the same.
+  `A2G_ANALYSIS_TIMES=1` prints each group's longest tasks. SA260 (a): the memos live for the
+  process, as `env/reflect-cache` (alternatives: per a2g run; weak or bounded maps).
+The essential gate passed on `speed4` (7:15; the suite's 20,506 of 20,520, the oracle's 53
+known, 0 new) and the fixpoint held there (`9c22a730...`) and at the merge. The seed remade from
+the merge's G3: `b566d53a...` (was `5858e83c...`), 5,477,008 bytes, verified by `bin/seed
+--verify` (the same tree and archive printed again at `51300c0`; stage 0 = G1 = G2 = G3 byte for
+byte, `7b394f03...`, 336 s).
+
+## 2026-10-16: the naming note refined (the user)
+
+The user, on the translators' names: "translation is always between forms, so j2a or j2c might
+be better jaf read / jaf print instead. the earlier renaming stemmed from the confusion around
+the letter 'c' that starts \"clojure\" and also \"classes\"". Added to the agenda's survey: one
+bridge per language between its source and its forms (two verbs, read and print), translators
+between forms dialects only, no bare `c`.
