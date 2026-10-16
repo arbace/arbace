@@ -101,7 +101,7 @@ g2a-roundtrip: ## Go -> forms -> Go over std and GOROOT/test (bin/g2a roundtrip)
 	bin/g2a roundtrip linux/amd64
 
 ## The host and housekeeping
-alpine-check: ## the host's Alpine packages as doc/ALPINE.md's line (bin/alpine-env check)
+alpine-check: ## one minimal apk add line reinstalls exactly the host's packages (bin/alpine-env check)
 	bin/alpine-env check
 clean: ## remove target/ (rebuilt by the next build; .tmp/ and the gate's cache kept)
 	rm -rf target
