@@ -35,6 +35,41 @@
         :when (class-form? f)]
     f))
 
+(defn- continued? [f] (and (seq? f) (= 'aot/continue (first f))))
+
+(defn- join-continued
+  "The read files ps ([{:forms ...}...]) with each class form continued in other files joined:
+  arbace.aot writes a large top-level class form across several files (SA220: one large file
+  bounded the parallel read), the class form with :aot/parts n in its metadata and the rest of
+  its elements in n continuations (aot/continue NAME k element...), k from 1 to n; the
+  continuations' elements appended in that order, the class form as printed whole (but the
+  reader's columns), :aot/parts dropped, the continuations removed. A missing or unclaimed
+  continuation fails."
+  [ps]
+  (let [conts (into {} (for [{:keys [forms]} ps, f forms :when (continued? f)]
+                         [[(str (nth f 1)) (nth f 2)] (drop 3 f)]))]
+    (if (empty? conts)
+      ps
+      (let [claimed (atom #{})
+            ps (mapv (fn [p]
+                       (update p :forms
+                               (fn [forms]
+                                 (vec (for [f forms :when (not (continued? f))]
+                                        (if-let [n (and (class-form? f) (:aot/parts (meta f)))]
+                                          (let [c (str (second f))
+                                                ks (map #(vector c %) (range 1 (inc n)))]
+                                            (doseq [k ks :when (not (contains? conts k))]
+                                              (throw (ex-info (str "a2g: " c ": part " (second k) " of " n " missing (aot/continue)")
+                                                              {:class c})))
+                                            (swap! claimed into ks)
+                                            (with-meta (apply list (concat f (mapcat conts ks)))
+                                              (not-empty (dissoc (meta f) :aot/parts))))
+                                          f))))))
+                     ps)]
+        (when-let [u (seq (remove @claimed (keys conts)))]
+          (throw (ex-info (str "a2g: continuations of no class form: " (pr-str (sort u))) {})))
+        ps))))
+
 (defn- ns-of-forms [forms]
   (let [f (first (filter #(and (seq? %) (symbol? (first %)) (= "in-ns" (name (first %)))) forms))]
     (when f (let [n (second f)] (if (seq? n) (second n) n)))))
@@ -257,12 +292,14 @@
         variants (dissoc variants ::erase)
         applied (atom {})
         ;; read in parallel (reading class forms takes no ids: no #() or syntax-quote in them),
-        ;; the largest files first (the compiled namespaces' are up to 2.6 MB)
+        ;; the largest files first (the compiled namespaces' up to 256 KB, a larger class form
+        ;; continued in more files: join-continued)
         parse (fn [ins]
                 (let [fs (vec (mapcat source-files ins))]
-                  (m/par-mapv (m/jobs) (fn [f] (let [forms (read-forms f)] {:file f :forms forms :ns (ns-of-forms forms)}))
-                              fs
-                              (sort-by #(- (.length (io/file (nth fs %)))) (range (count fs))))))
+                  (join-continued
+                    (m/par-mapv (m/jobs) (fn [f] (let [forms (read-forms f)] {:file f :forms forms :ns (ns-of-forms forms)}))
+                                fs
+                                (sort-by #(- (.length (io/file (nth fs %)))) (range (count fs)))))))
         parsed (atom (parse inputs))
         top-set (fn [ps] (set (mapcat (fn [{:keys [ns forms]}] (when ns (top-names ns forms))) ps)))
         tops (atom (top-set @parsed))

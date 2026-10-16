@@ -7,7 +7,8 @@
   (run OUT SOURCES): SOURCES the source paths to compile (arbace/walk.ae ...), or nil for every
   source recorded. Writes OUT/arbace.ae (the namespace of the classes' package, loading the
   others), one file per loader class (aot_SCRIPTBASE__init.ae) and per holder class
-  (aot_HOLDER.ae), and OUT/aot.edn (the sources compiled, those that failed and why)."
+  (aot_HOLDER.ae), a large class form continued in more (aot_HOLDER.1.ae ..., form-texts,
+  SA220), and OUT/aot.edn (the sources compiled, those that failed and why)."
   (:require [arbace.string :as str]
             [arbace.set]
             [arbace.java.io :as io]
@@ -77,6 +78,49 @@
             *print-namespace-maps* false]
     (pr (forms->lists f))
     (.write w "\n\n")))
+
+(def ^:private file-chars
+  "A top-level class form printed longer than this many characters is written across several
+  files (SA220): a2g reads a tree's files in parallel, one reader a file, at about 2 MB/s, so
+  one large file (arbace.core's holder, 2.6 MB on one line) bounds the whole read.
+  ARBACE_AOT_FILE_CHARS sets another bound (measurements: a large one writes each class form
+  whole, as before)."
+  (or (some-> (System/getenv "ARBACE_AOT_FILE_CHARS") Long/parseLong) 262144))
+
+(defn- form-texts
+  "The texts of top-level class form f as the tree holds it: [text], its printed form; or, past
+  file-chars, its elements in about equal parts cut before a seq element (a field, a method, a
+  member class), [main continuation...]: main the class form with the first part and :aot/parts
+  n in its metadata, a continuation (aot/continue NAME k element...) for part k (1 to n), which
+  a2g appends to the class form in that order (arbace.a2g.world/join-continued), restoring the
+  form printed whole. Each part is printed as the whole form would print it, element by element
+  (the lines are the forms' own, forms->lists's: a file's text starts on the same line)."
+  [f]
+  (binding [*print-meta* true *print-length* nil *print-level* nil *print-dup* false
+            *print-namespace-maps* false]
+    (let [g (forms->lists f)
+          whole (pr-str g)]
+      (if (<= (count whole) file-chars)
+        [whole]
+        (let [[hd nm & els] g
+              texts (mapv pr-str els)
+              total (reduce + 0 (map count texts))
+              target (quot total (long (Math/ceil (/ total (double file-chars)))))
+              ;; [[element text]...] per part, a part closed before a seq element once it holds
+              ;; target characters
+              parts (loop [es (map vector els texts) cur [] size 0 acc []]
+                      (if-let [[[e t :as x] & more] (seq es)]
+                        (if (and (seq cur) (seq? e) (>= size target))
+                          (recur more [x] (count t) (conj acc cur))
+                          (recur more (conj cur x) (+ size (count t)) acc))
+                        (conj acc cur)))]
+          (if (< (count parts) 2)
+            [whole]
+            (cons (pr-str (with-meta (apply list hd nm (map first (first parts)))
+                            (assoc (meta g) :aot/parts (dec (count parts)))))
+                  (for [k (range 1 (count parts))]
+                    (str "(aot/continue " (symbol (str nm)) " " k " "
+                         (str/join " " (map second (nth parts k))) ")")))))))))
 
 (defn- file-name [^String cname]
   (str "aot_" (str/replace cname "." "_") ".ae"))
@@ -266,7 +310,8 @@
         (write-form w (list 'load (str "arbace/" (subs f 0 (- (count f) 3)))))))
     ;; the files printed in parallel (printing is most of the time here: half a minute
     ;; evaluated), on threads of their own (a future's pool would keep the program alive a
-    ;; minute after the run), each file by one of them
+    ;; minute after the run), each class form by one of them, with its continuation files
+    ;; (form-texts: aot_NAME.1.ae ..., which arbace.ae does not list: they are its class's file)
     (let [files (vec (concat loader-files class-files))
           n (min 16 (max 1 (.availableProcessors (Runtime/getRuntime))))
           err (atom nil)
@@ -275,13 +320,23 @@
                            ^Runnable
                            (bound-fn []
                              (try
-                               (doseq [[f src form] (take-nth n (drop k files))]
-                                 (with-open [w (io/writer (io/file dir "arbace" f))]
+                               (doseq [[f src form] (take-nth n (drop k files))
+                                       :let [[main & more] (form-texts form)
+                                             stem (subs f 0 (- (count f) 3))
+                                             parts (count more)]
+                                       [k' f' text] (cons [0 f main]
+                                                          (map-indexed (fn [i t] [(inc i) (str stem "." (inc i) ".ae") t]) more))]
+                                 (with-open [w (io/writer (io/file dir "arbace" f'))]
                                    (.write w (str ";; Compiled by arbace.aot (standalone S6)"
                                                   (if src (str " from " src ": its loader") ": the classes of a namespace")
+                                                  (when (pos? parts)
+                                                    (if (zero? k')
+                                                      (str ", continued in " stem ".1.ae to " stem "." parts ".ae")
+                                                      (str ", continuing " f " (" k' " of " parts ")")))
                                                   ". Regenerated by the build.\n\n"))
                                    (write-form w '(in-ns 'arbace))
-                                   (write-form w form)))
+                                   (.write w ^String text)
+                                   (.write w "\n\n")))
                                (catch Throwable t (reset! err t)))))))]
       (run! #(.start ^Thread %) threads)
       (run! #(.join ^Thread %) threads)
