@@ -3143,3 +3143,442 @@ files), was `79d4f552...`. **`bin/seed --verify`**: printed again at `57a4428`, 
 s for the three (G1 219 s, G2 184 s, G3 189 s: a fresh worktree, g2a's print cache cold, the
 emulated arm64 VM busy beside). The essential gate on the seed's commit (`dd61501`): passed in
 8:07, the two builds 5:06 (were 6 to 8 minutes).
+
+## The build's speed, third round, part A: `arbace.core`'s loader split (2026-10-16)
+
+The user's order (a third round, part A): the back end splits `arbace.core`'s compiled loader so
+that a2g analyzes its parts in parallel. Branch `speed3-loader` (from main at `ecb5dfe`).
+Measured on the shared host (parts B and C's builds, the emulated arm64 VM beside: single
+timings vary by a fifth or more), as part B measured: a2g's load laps (`a2g: load (s)`, the
+lap `analysis-compiled`: the analysis of the compiled namespaces' classes after the tree is
+entered) and report.edn's `:times`; and `bin/a2g --program --await TREE` on a tree already
+written (no wait), main's tree and the branch's alternately, the same host (stage 0) and a2g
+(`.tmp/speed3-loader/bench.sh`).
+
+### Where the time went (main, `ecb5dfe`)
+
+The analysis of the compiled classes runs in two parallel groups: the member classes (fns,
+reifies), then the top-level ones (holders, deftypes, loaders), each class one task in an id
+space of its own. Timed per task (an instrumented a2g, not kept): `arbace.core__init`, 903
+methods and 1,588 fields, **9.5 s**, ending at 23.2 s, when the first group had ended at
+12.9 s and every other top-level task by 16.5 s; the next longest loaders
+`arbace.classes.analyze__init` (329 units) 3.0 s, `arbace.core.specs.alpha__init` 1.9 s,
+`arbace.a2g.code__init` 1.6 s. The analysis of one class is sequential (its temporaries are
+numbered in one id space), so the tail was one thread.
+
+### What changed (`arbace/aot/emit.ae`)
+
+- **A loader of more than 100 units in parts** (`loader-part-units`, SA210): its units in order,
+  100 to a part, each part a static member class `SCRIPTBASE__init$partP` holding its units'
+  methods (`unitK`, numbered across the source as before) and the constants they meet, its
+  own pool (`const-pool`, `Compiler$AOT/pool`). A source of 100 units or fewer is emitted as
+  before, byte for byte (the holders' and deftypes' pools too). The parts are member classes,
+  so a2g analyzes them in its first group, in parallel with the fns; the top-level loader is a
+  `load` method only. Eleven loaders split: `arbace.core` (10 parts),
+  `arbace.classes.analyze` (4), `arbace.spec.alpha`, `arbace.core-classes` (3), seven others
+  (2).
+- **The loading order and the constants as unsplit.** `load` calls each part's `init` (an empty
+  static method: a part's initialization decodes its pool, not benign, so a2g guards its
+  methods' entry) in order, then each part's `load`, which runs its units in order: every
+  constant of the source is made before the first unit runs, in first-use order, as the one
+  class's static initializer made them (vars interned before their `def`, as on the JVM).
+- **One object, one constant.** An object an earlier part already met is not decoded again: the
+  later part's field is set from the earlier part's (`const-field`'s `:prev`, an
+  IdentityHashMap of the source's constants by value; `pool-fields` takes `[sym type value
+  alias]`), so an identical object stays identical across parts, and the part's code reads its
+  own field unguarded. Tried first: the earlier part's field read where used (qualified
+  `SCRIPTBASE__init$part0/const-N`): 1,807 such reads in core's loader, each with the other
+  class's initialization guard, +113 KB of core's code (+364 KB the executable); with the
+  alias fields (41 distinct values, a field in each part that uses one), +18 KB.
+- The loader's reflective entry is unchanged (`Compiler$AOT/load`, `compiled-back-end`:
+  `Class.forName("SCRIPTBASE__init")`, its public static `load`). A frame of a loading error
+  now names the part (`arbace.core__init$part4.unit450`, was `arbace.core__init.unit450`;
+  SA211).
+
+### Measured
+
+| | main (`ecb5dfe`) | `speed3-loader` |
+|---|---|---|
+| a2g alone on a written tree, the analysis of the compiled classes (3 alternating runs) | 29.2, 24.9, 27.1 s | 14.8, 15.2, 17.2 s |
+| the longest analysis task | 9.5 s (`arbace.core__init`) | 1.7 s (`arbace.a2g.main$run*`; the loaders' parts 1.7 s at most, `arbace.pprint.cl-format__init$part0`; timed on the first variant, below) |
+| a build's a2g (`--await`): `analysis-compiled` | 24.9 s | 13.9 s (build), 13.9, 15.6, 16.2 s (the fixpoint's G1, G2, G3) |
+| a build's a2g after the tree is ready: load (`:load` minus the wait) | 48.5 s | 35.5 s (build), 36.4, 38.6, 37.9 s (G1, G2, G3) |
+| the executable (amd64) | 101,863,584 bytes | 102,031,520 bytes (+168 KB, +0.16%: the split loaders, and the back end's own new code) |
+| `aot_arbace_core`: text, rodata (`go tool nm -size` of the archive) | 2,758,933, 2,153,197 | 2,776,808 (+18 KB), 2,187,959 (+35 KB) |
+| `aot_arbace_core`: the archive | 48,359,908 bytes | 49,077,818 bytes (+1.5%) |
+| gc of `aot_arbace_core` alone, its imports cached (2 runs) | 11.1, 10.2 s | 9.3, 11.0 s (the same) |
+| gc of `aot_arbace_classes_analyze` alone | 5.4, 6.2 s | 5.9, 5.6 s (the same) |
+
+The rest of a2g is as before (reachability 19 to 23 s, the translation 13 to 16 s, the writing
+10 to 14 s, all within the noise): the parts add 10 classes to core's package, whose
+translation is per class too. The fixpoint's one-run builds (G2 by G1, G3 by G2) 190 and 178 s
+(were 184 and 189 at the seed's verify, on a quieter host: the 11 s the analysis saves are
+within the noise of a three-minute build).
+
+**Checks.** The essential `bin/gate` on `da6fd02` (10m09s): the suite 20,506 of 20,520, no
+regressions; the oracle 22,508 of 22,561, the 53 known, 0 new. `bin/arbace-go --fixpoint` (G1 by
+the seed's stage 0, whose back end is the previous one but runs the checkout's `emit.ae`):
+a2g's programs G1 = G2 = G3, **G1 = G2 = G3 byte for byte** (`53d34e01...`, 102,031,520
+bytes).
+
+### Left
+
+- The analysis now ends with its first group (the member classes, about 15 s on 16 jobs, bound
+  by allocation as part B found), the top-level group after it in under 2 s (its longest
+  `arbace.core.specs.alpha__init`, 88 units, 0.9 s). A lower bound (50) would split 25 loaders
+  and save little more.
+- After the analysis: reachability's sequential scan (19 to 23 s, one core) and the load's
+  sequential part (entering, headers, members, bridges: about 10 s), part B's "Left"; parts B
+  and C of this round.
+
+### Amendments (proposed 2026-10-16)
+
+- **SA210 `arbace.core`'s loader split.** (a) As built: a loader of more than 100 units in parts
+  of 100, static member classes `SCRIPTBASE__init$partP` with their own constants (an object an
+  earlier part met copied from that part's field), all initialized in order before the first
+  unit; (b) the parts as top-level classes (`SCRIPTBASE__init1` ...: a2g's second group, with
+  the holders, and a package name each would need its own rule in `packages.edn`); (c) the
+  bound by the units' size rather than their number; (d) left one class (the 9 to 14 s tail).
+  *Recommended: (a)*: the analysis of the compiled classes about 10 s shorter, the output as
+  before for the 89 sources of 100 units or fewer, +0.16% to the executable.
+- **SA211 A loading frame's class.** (a) The part's (`arbace.core__init$part4.unit450`), as
+  built; (b) mapped back to `arbace.core__init` in stack traces (a2g's frames table).
+  *Recommended: (a)*: only an error while a namespace loads shows it, and the line (`Compiler$AOT/at`)
+  is the same.
+
+**Decided (2026-10-16, the user):** SA210 (a), SA211 (a), as built.
+
+## The build's speed, third round, part B: a2g's sequential load (2026-10-16)
+
+The lead's order (the third round, part B): the sequential part of a2g's load after the compiled
+namespaces' tree arrives (part B of the second round's "Left": about 10 s entering the classes,
+their headers, members and bridges, `arbace.classes` as `arbace.a2g.world/load-world` drives it).
+Branch `speed3-load`. Measured as `bin/arbace-go` runs a2g (`--await`, one fixed compiled tree,
+`.tmp/speed3-load/aot0`, copied in 60 s after a2g starts, so the runtime's analysis is done when
+it arrives), on the shared host (the other parts' builds beside it: single timings vary by a
+fifth or more).
+
+### Where the time went (`ecb5dfe`)
+
+After the tree arrived: reading it 2.6 s (in parallel already, bound by its largest file:
+`aot_arbace_core.ae`, arbace.core's classes, one 2.6 MB line read in 1.3 to 2 s by one reader),
+entering its 8,527 classes 1.4 s, the headers 0.8 s, the members 3.2 s (14,075 methods, 7,815
+constructors, 41,811 fields), the bridges 2.7 s: 10.7 s, all but the reading on one thread. A
+CPU profile of the steps alone (a driver of `load-world`'s steps, `ARBACE_CPUPROFILE`) showed no
+one hot spot: `enter-method`'s types (`parse-type`), `infer-signature`, the bridges' search
+through the supertypes' methods (`erased-params`) for every compiled fn class, each step much
+allocation and Go's collector. The first round's same steps (the runtime and the JDK, 2,793
+classes, about 9 s) run while the host compiles, off the critical path.
+
+None of the steps takes ids (the runtime's counter and the analyzer's stand still across them,
+checked), and each class's step writes only its own declaration; a class depends on few others:
+its header on its outer class's (the bounds of the type variables it sees), its members and its
+bridges on its supertypes' (deftype's signature inference, the inherited methods and bridges).
+
+### What changed (`34297cd`; a2g's output unchanged)
+
+- **Headers, members, bridges in parallel, level by level** (`world/par-levels`): the names in
+  levels, a class after the classes it depends on of the same round (its outer class for the
+  headers, its supertypes for the members and the bridges: the order `supertypes-first` gave
+  the bridges), each level's classes on a2g's threads (`m/par-mapv`, `A2G_JOBS`). The compiled
+  namespaces' classes extend the runtime's (the first round's), so they are one or two levels.
+  The members 3.2 → 0.6 to 0.9 s, the bridges 2.7 → 0.4 s.
+- **The class forms parsed in parallel**: the namespace forms (`in-ns`, `import`) evaluated
+  file by file first; then each class form, its variants applied and parsed, and its member
+  classes parsed too, recursively (`world/parse-member-classes`, as `declare-class!` parses
+  them: a member class's parse takes only its outer class's kind), on a2g's threads; then the
+  classes declared one after another in the files' order, as before. `declare-class!` takes the
+  member classes parsed ahead (its ctx's `:parsed-members`) and parses those it is not given (a
+  host whose `declare-class!` does not take them, the seed's stage 0: G1's a2g; a failed parse
+  of member classes, parsed again as it is declared, failing where it failed before). Entering
+  1.4 → 0.7 s. (The members' `:mid`s, which only tell a class's members apart, are taken from
+  the counter in another order; they were already, the runtime's analysis parsing its local
+  classes beside the second round.)
+- **A header's bounds set in one update** (`resolve-header!`, `set-own-bounds!`): the own bounds
+  and the bounds visible in the class, twice two updates of the compilation, now twice one,
+  the same values in the same keys' order. In parallel the headers were bound by the
+  compilation's atom (retried swaps, each copying the declaration): 0.8 → 0.5 to 1 s.
+
+Tried and left: reading the largest file in parts (the 2.6 MB line split at its member classes,
+read in parallel): the forms' `:column`s (read from a line's middle) would differ, and the reader
+cannot start at a column; see SA220.
+
+### Measured
+
+| | before (`ecb5dfe`) | after (`34297cd`) |
+|---|---|---|
+| after the tree: reading, entering, headers, members, bridges | 2.6, 1.4, 0.8, 3.2, 2.7 s (10.7 s) | 1.8 to 2.2, 0.7, 0.5 to 1.0, 0.6 to 0.9, 0.4 s (4.6 to 5.1 s) |
+| the first round's same steps (hidden by the wait) | 8.3 s | 1.6 to 2.6 s |
+| a2g's load after the tree arrives (with the analysis, 21 to 25 s) | 44.6 s | 32.0 s |
+| the fixpoint's one-run builds (G1, G2, G3) | (2:32, 2:15 at `cb834cf`) | 3:03, 3:11, 2:52 (the host busier) |
+
+a2g's output for the same compiled tree is the same, byte for byte, but its own embedded
+sources (`world.ae`, `analyze.ae`) and report.edn's times (`diff -r` against main's a2g on
+`aot0`: evaluated `world.ae` on stage 0, and all compiled on this branch's executable, with and
+without `--await`). The fixpoint at `34297cd` (G1 by the seed's stage 0, whose a2g is main's):
+a2g's programs G1 = G2 = G3, **G1 = G2 = G3 byte for byte** (`ea0782de...`, 101,871,776 bytes).
+The essential gate passed on `34297cd` (10:44: the suite 20,506 of 20,520, no regressions; the
+oracle 22,508 of 22,561, the 53 known, 0 new).
+
+### Left
+
+- Reading the tree: about 2 s, bound by `aot_arbace_core.ae` (arbace.core's classes in one
+  holder form, 2.6 MB on one line; the reader does about 2 MB/s). SA220.
+- The analysis of the compiled classes (21 to 30 s, in parallel): part A's split of
+  arbace.core's loader; then reachability (part C).
+
+### Proposals
+
+- SA220 (a) the compiled tree as it is: its reading stays bound by its largest file (about 2
+  s); (b) arbace.aot writes a namespace's classes in several files (a holder's member classes
+  split by size, each file a holder of its own, or the member classes as top-level forms), read
+  in parallel by a2g as they are; (c) a2g splits the largest files' forms itself, with the
+  reader's columns corrected after. Recommended: (b), with part A's split of the loader (the
+  compiled tree's shape is the back end's; (c) depends on the reader's metadata).
+
+**Decided (2026-10-16, the user):** SA220 (b), to build.
+
+## The build's speed, third round, part C: reachability's scan (2026-10-16)
+
+The user's order (a third round, part C): a2g's reachability (`arbace.a2g.reach`), which part
+B of the second round left at 12 to 16 s, most of it the scan, on one core. Branch
+`speed3-reach`. Measured as part B did, on one compiled tree (the build's `target/arbace-go/aot`
+copied aside) given to `bin/a2g --program --input`, a2g run on executables built from the
+branch's sources (a namespace of the checkout that differs from the executable's runs evaluated,
+so each version of `reach.ae` was measured on a build of its own), on the shared host (the
+other agents' builds beside: single timings vary by a fifth or more).
+
+### Where the time went (`ecb5dfe`)
+
+Reachability 19 to 21 s: the batches' code flattened in parallel 1.6 to 1.9 s, the scan 15 to
+17 s on one core. The scan: 14 batches, 58,049 methods, 632,148 nodes acted on (243,000
+`:invoke`, 147,000 `:get-static`, 87,000 `:cast`, 26,000 `:new`), 1.83 million `use!`, 590,000
+`use-desc!`, 411,000 `reach!`, 182,000 `vcall!` (17,000 new), 10,014 instantiations, 266,000
+`java-impl-of`. The profile (`ARBACE_CPUPROFILE`) was flat: `instantiate!` 5.4 s (its
+`java-impl-of`s 3 s: the superclass chain a lazy seq, a key vector made for each lookup,
+`env/all-supertypes` again and again; `external-keys` a lazy `for` then `distinct`), the dynamic
+vars (`*st*`, `m/*w*` through `m/translated?`, `*flat*`: a binding frame's hash map each
+time) about 2.5 s, `use!` and `use-desc!` (a descriptor parsed at every use) 3.7 s, the nodes'
+own lookups (`acc/unaccess`, keyword lookups in the node maps, `vh-call?`) and
+`check-hw-call!` (`jrt/struct-methods` building a set at every call on String or another class
+of jrt) the rest.
+
+What depends on the visiting order, which ruled out a parallel fixpoint: not only the queue's
+order (the batches) but report.edn's `:unavailable`: a class that fails is noted differently
+the first time it is used (`class C failed analysis`, `class C: superclass S unavailable`) than
+after (`class C: analysis failed: ...`), under the method being scanned; the sets T, the reached
+methods and the instances are the same in any order, these texts are not. The scan stays
+sequential and in the queue's order; what moved is the work that does not depend on the run's
+state.
+
+### What changed (`8eb9be3`; a2g's output unchanged)
+
+- **The plans**: the batch's parallel step (`plan-code`, which replaces `flatten-code`) makes
+  for each node the scan acts on a *plan*, a function of the run's state, with what depends only
+  on the class environment and the world computed ahead: the accessor's node (`unaccess`), the
+  classes of the descriptors, the method and call keys as vectors (their hashes cached), whether
+  the call is a VarHandle's, whether jrt defines the owner (`check-hw-call!` asked only then),
+  whether jrt lacks a constructor or static field (asked of the world only when the class is
+  not translated, as before). The sequential scan runs the plans in the walk's order, each
+  doing what `scan-node!` did in the same order; the rare ops' plans call `scan-node!` itself.
+  The walk of the parallel step with `reduce-kv` and `reduce` (no seq of each map's entries; a
+  map's kv-reduce visits its entries in its seq's order).
+- **The state passed**: `use*`, `reach*`, `init*`, `vcall*`, `instantiate*` take the run's
+  state rather than reading `*st*` and `m/*w*` (the public `use!`, `reach!` ... call them);
+  `use*` answers at once for a class translated or jrt's own (not a stand-in, not failed); the
+  pure tests of `reach!` and `init!` first, the membership in the reached and initialized sets.
+- **The caches of the run** (`*cx*`, kept with the state: the environment and the world do not
+  change once loaded): `all-supertypes`, the types of an instance (`supertypes-of`), `interface?`,
+  `subclass?`, a descriptor's classes, the methods of each class indexed by `[name desc]` (a
+  HashMap, looked up with the caller's key), the external keys of each supertype (then the first
+  occurrence of each, as `distinct` did), and, for `java-impl-of`, the superclass chain's
+  non-private body of a method per class and key (`super-impl`: the chains of the 10,000
+  instantiated classes share their superclasses); `hw-method-exists?`'s yes for a class not
+  translated (what a2g adds only grows with T).
+
+Checked the strict way first: each version run with a trace of every change of the state, in
+order (the classes entering and leaving T, the queue, the initialized classes, the instances,
+the virtual calls, the lambdas' interfaces, the unavailable and missing notes: 109,323 events)
+against the old one's: the same, line for line; and the new walk's nodes against walk-nodes',
+by identity, for every method.
+
+### Measured
+
+| | before (`ecb5dfe`) | the caches | + the plans, the state passed | after (`8eb9be3`) |
+|---|---|---|---|---|
+| reachability | 19 to 21 s | 16 s | 12.2 to 12.5 s | 6.8 to 11.5 s |
+| the parallel step (flatten, plan) | 1.6 to 1.9 s | 1.8 s | 2.0 to 2.2 s | 1.2 to 1.7 s |
+| the scan | 15 to 17 s | 12.6 s | 8.9 s | 6.0 to 8.4 s |
+
+(The fixpoint's G2 and G3, a2g on the new executables: reachability 5.9 to 6.8 s; G1, a2g on
+stage 0 with the new `reach.ae` evaluated: 10 to 13 s.) a2g's output for
+the same compiled tree is the same, byte for byte, but its own embedded sources (`reach.ae.z`)
+and report.edn's times (`diff -r`, at every step). The essential gate passed on `8eb9be3`
+(9:23: the suite 20,506 of 20,520, no regressions; the oracle 22,508 of 22,561, the 53 known, 0
+new). The fixpoint at `8eb9be3` (G1 by the seed's stage 0, whose a2g is the old one): a2g's
+programs G1 = G2 = G3, **G1 = G2 = G3 byte for byte** (`d6b5089b...`, 102,047,904 bytes): the
+new reachability prints the program the old one printed.
+
+The first fixpoint, in the worktree `.tmp/worktrees/speed3-reach`, did not hold, for a reason
+outside reachability: G2's and G3's compiled trees differed in one namespace, `arbace.box.print`
+(its ids 1,463,000,000 and up in G2, 1,464,000,000 in G3), the same executable (G1 = G2)
+compiling them. `Compiler.load` gives each source loaded while the program compiles a slot of a
+million ids from its path's hash (the next free slot on a collision), and the host's compile
+script is loaded that way too, from its absolute path: `.../fixpoint/g3/host-compile.ae`
+there hashes to slot 1462, `arbace/box/print.ae`'s, which then moved to the next. The program
+depends on where the checkout is (main's own `target/arbace-go/fixpoint/g3/host-compile.ae`
+collides with `arbace/spec/gen/alpha.ae`'s slot). The same commit in another worktree
+(`.tmp/worktrees/speed3-fp`, no collision) gave the fixpoint above. Left as SA230.
+
+### Proposals
+
+- **SA230 The compile script's id slot.** (a) `Compiler.load` gives an id slot only to the
+  sources it loads by a resource path (the namespaces: `arbace/...`), the host's compile script
+  (an absolute path, evaluated, compiled into nothing) loading in the runtime's id space; (b)
+  `bin/arbace-go` loads the script from a fixed relative name (`host-compile.ae` in its own
+  directory, the working directory set to it), leaving `Compiler.load` as it is; (c) slots taken
+  in a fixed order (the program's namespaces first, from their sorted paths) before anything
+  loads. *Recommended: (a)*: the program then depends only on its sources, wherever the checkout
+  is; it touches the runtime (`arbace/lang/Compiler.ae`: a two-run build and, for stage 0, a new
+  seed eventually), so it belongs to part A's or a later change, not to this branch.
+
+**Decided (2026-10-16, the user):** SA230 (a), to build on the third round's branch.
+
+### Left
+
+- The scan's 6 to 8 s: `instantiate!` 2.5 s (`java-impl-of` 1.2 s, the rest the reached
+  set's lookups), `use*` 1.4 s, then the calls themselves (`IFn` dispatch, the runtime's type
+  tests): one more step would be the state in mutable sets (Java's) rather than atoms of
+  persistent ones, the results rebuilt in the same insertion order.
+- The rest of `:reach` (about 1 s): main's stand-in rounds and the subclass index, outside the
+  scan.
+
+## The build's speed, third round, SA220 (b): the compiled tree in several files (2026-10-16)
+
+The user's decision SA220 (b): the back end writes a namespace's classes across several files,
+so that a2g's parallel read of the compiled tree is no longer bound by one large file. Branch
+`speed3-split` (from `speed3`, parts A and B merged). Measured as parts A and B measured, on the
+shared host (another agent's builds beside it), `.tmp/speed3-split/`: one tree compiled twice by
+the same host from the same sources, written whole (`ARBACE_AOT_FILE_CHARS` large: as before)
+and split; a2g (this branch's executable) on each, written (`bench.sh`, alternating, three
+pairs) and arriving 60 s after a2g starts (`await.sh`); the lap `read` of `a2g: load (s)`.
+
+### Where the time went
+
+The tree: 217 files, 28 MB, read on a2g's threads, the largest first, each file by one reader at
+about 2 MB/s. The largest, `aot_arbace_core.ae` (arbace.core's holder, its 1,000-odd fn classes
+as member classes, 2.6 MB on one line), and `aot_arbace_classes_analyze.ae` (2.4 MB) took one
+thread 1.3 to 2 s while the others had finished: 16 threads at 2 MB/s read 28 MB in about
+0.9 s.
+
+### What changed (`arbace/aot/main.ae`, `arbace/a2g/world.ae`)
+
+- **A class form past 256 KB in parts** (`form-texts`, `file-chars`): a top-level class form
+  (a holder, a loader, a deftype) whose printed text is longer than 262,144 characters is cut
+  between its elements (before a field, a method or a member class: a seq element) into parts
+  of about equal size. The first part stays the class form, in `aot_NAME.ae`, with `:aot/parts
+  n` in its metadata; part k is `(aot/continue NAME k element...)` in `aot_NAME.k.ae`, laid
+  out as the class's file is (its header, `(in-ns 'arbace)`, the form on line 5, so the
+  reader's lines are the same). Each element is printed as the whole form printed it, so the
+  parts joined are the old text: checked textually on all 20 split forms (`t/join.py`), and the
+  197 files not split are byte for byte the whole tree's, `packages.edn`, `aot.edn` and
+  `arbace.ae` too (which lists the class files, not their continuations). A form of 256 KB or
+  less is written as before. Split: 20 class forms into 75 files (arbace.core's holder 11 of
+  about 245 KB, its loader 5); the tree 272 files; the largest 668 KB
+  (`aot_arbace_a2g_main.1.ae`: one fn class, `arbace.a2g.main$program_main_forms`, an element
+  not cut).
+- **a2g joins them after the read** (`world/join-continued`): the continuations' elements
+  appended to their class form in k's order, `:aot/parts` dropped, the continuations removed;
+  a missing part or a continuation of no class form fails the load. Then everything is as
+  before: the same class forms, declared in the same order (a continuation file holds no class
+  form; the files' order is the declaration's only through their class forms). Only the
+  reader's `:column`s of the moved elements differ, which nothing keeps (the class forms'
+  lowering and a2g's writer drop them).
+- Chosen over the member classes as top-level forms (each `defclass` with its outer class
+  named): `declare-class!` declares a class's member classes from its form, recursively, and
+  a2g's analysis groups and the unit's order follow it; top-level member classes would need
+  the class forms' front end (`arbace.classes`, part of the runtime: the seed's stage 0, which
+  runs G1's a2g, would not have it) and another declaration order. The join is a2g's only
+  (its namespace is loaded from the checkout when the host's differs: G1's a2g joins too), and
+  the tree's file names change nothing a2g prints.
+
+### Measured
+
+| | whole (as before) | split |
+|---|---|---|
+| a2g on a written tree (3 alternating pairs): `read` | 1.55, 1.11, 1.05 s | 0.77, 0.78, 0.76 s |
+| the same: `:load` (with the runtime's analysis beside) | 32.9, 28.4, 28.5 s | 29.0, 28.6, 28.4 s |
+| a2g, the tree arriving after 60 s (the gate running beside): `read` | 1.52 s | 1.19 s |
+| the same: load after the tree arrives (`:load` minus the wait) | 16.1 s | 15.7 s |
+| the fixpoint's builds (`--await`): `read` | (1.8 to 2.2 s at `ecb5dfe`, part B) | 0.87, 0.89, 0.91 s (G1, G2, G3) |
+| the fixpoint's builds: load after the tree arrives | | 16.0, 14.1, 13.1 s |
+
+The read is now near its throughput (28 MB on 16 threads, about 0.8 s): about 0.3 to 0.8 s
+saved, a second at most of a three-minute build. a2g's output on the two trees is the same,
+byte for byte, but report.edn's times (`diff -r` of the three pairs).
+
+**Checks.** The essential `bin/gate` on `9782a63` passed (6m26s: the suite 20,506 of 20,520, no
+regressions; the oracle 22,508 of 22,561, the 53 known, 0 new; the test build read the split
+tree as an input). `bin/arbace-go --fixpoint` (G1 by the seed's stage 0, which runs the
+checkout's `arbace.aot.main` and `arbace.a2g.world`): a2g's programs G1 = G2 = G3, **G1 = G2 =
+G3 byte for byte** (`140b54cb...`, 102,207,648 bytes); the builds G1, G2, G3 120, 114, 98 s.
+
+### Left
+
+- A single element past the bound is not cut (668 KB, one fn class with its nested classes):
+  its file bounds the read at about 0.35 s, under the throughput's 0.8 s.
+- The tree and the a2g that reads it go together: an a2g older than this one would take a
+  split class form's first part alone (its `class-forms` skips `aot/continue`). Both are built
+  from the same checkout (G1's a2g is the checkout's world.ae), and a build reuses a tree only
+  under the key of the sources that made it (`aot.key`, a2g's among them).
+
+### Proposals
+
+- **SA240 The compiled tree's split.** (a) As built: a top-level class form past 256 KB cut
+  between its elements into parts of about equal size, continuations `(aot/continue NAME k
+  ...)` in `aot_NAME.k.ae`, joined by a2g after the read; (b) the member classes as top-level
+  forms naming their outer class (the class forms' front end and its declaration order
+  change, and the seed's stage 0 could not run G1's a2g on such a tree); (c) a smaller bound
+  (128 KB: about twice the files, the read already near its throughput). *Recommended: (a)*:
+  the read about halved (0.8 to 0.9 s, was 1.1 to 2.2 s), a2g's output the same.
+
+**Decided (2026-10-16, the user):** SA240 (a), as built.
+
+## The build's speed, third round, SA230 (a): ids independent of the checkout's path (2026-10-16)
+
+SA230 (a), decided by the user, on the branch `speed3-ids` (from `speed3`). `Compiler.load`
+(`arbace/lang/Compiler.ae`) gives an id slot (a million ids from the path's hash, part C's
+finding above) only to a source loaded by a resource path, as RT's loaders name the namespaces
+(`RT.load`, `RT.loadResourceScript`: relative, `arbace/...`, no scheme). Any other load keeps
+its caller's id space, the runtime's at the top: a script by its absolute path (the host's
+compile script `host-compile.ae`, `prepare.ae`, the box's `/c/compile.ae`; evaluated, compiled
+into nothing), a store's `ref:NAME` (`arbace.box/load-ref`), a reader without a path
+(`load-reader`, `load-string`, which had slot 0 before; inside a namespace's load they now take
+that namespace's ids). Nothing else keys on the slots: a2g's analysis has its own spaces
+(`analysis-id-base`, SA143), and without `ARBACE_COMPILE` (the evaluated build, `ARBACE_AOT=0`;
+the programs the oracle and the suite run) `Compiler.load` gives no slot at all.
+
+Proof (at `1805a559`):
+- Before (the old runtime, `speed3-reach`'s executable, the namespaces of `155d3fb1`), the
+  compile step alone (`bin/arbace-go`'s `host_compile`) in a worktree at
+  `.tmp/worktrees/speed3-ids-953`, chosen so that its `target/arbace-go/host-compile.ae` hashes
+  to slot 1462, `arbace/box/print.ae`'s, as part C's did: the compiled tree differs from the same
+  step's with the script in a directory that collides with nothing (`.tmp/c1`, slot 1485) in
+  `aot_arbace_box_print.ae` and its `__init`, part C's difference.
+- After (G1 below as the host, the same two script paths): the two trees are the same, and the
+  same as before's at the path without collision (the compiled program is unchanged where no
+  path collided).
+- The whole build (`bin/arbace-go --build`, its host G1) in that colliding worktree: its
+  compiled tree, a2g's program and its executable are those of the fixpoint's G2 (built by G1 in
+  `.tmp/worktrees/speed3-ids`), byte for byte (`15d1ead1...`).
+- The fixpoint (G1 by the seed's stage 0, two runs): a2g's programs G1 = G2 = G3, **G1 = G2 = G3
+  byte for byte** (`15d1ead1...`, 102,219,936 bytes).
+- The essential gate passed (8:15): the suite 20,506 of 20,520, no regressions; the oracle
+  22,508 of 22,561, the 53 known, 0 new.
+
+### Left
+
+- Stage 0 (the seed's) still has the old `Compiler.load`, which does not matter to the program:
+  its runtime is not the checkout's, so it never compiles the namespaces (the two-run build: the
+  first program, on the new runtime, compiles them). Builds it hosts take two runs until a
+  re-seed, as after any change to the runtime.

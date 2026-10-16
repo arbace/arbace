@@ -35,6 +35,41 @@
         :when (class-form? f)]
     f))
 
+(defn- continued? [f] (and (seq? f) (= 'aot/continue (first f))))
+
+(defn- join-continued
+  "The read files ps ([{:forms ...}...]) with each class form continued in other files joined:
+  arbace.aot writes a large top-level class form across several files (SA220: one large file
+  bounded the parallel read), the class form with :aot/parts n in its metadata and the rest of
+  its elements in n continuations (aot/continue NAME k element...), k from 1 to n; the
+  continuations' elements appended in that order, the class form as printed whole (but the
+  reader's columns), :aot/parts dropped, the continuations removed. A missing or unclaimed
+  continuation fails."
+  [ps]
+  (let [conts (into {} (for [{:keys [forms]} ps, f forms :when (continued? f)]
+                         [[(str (nth f 1)) (nth f 2)] (drop 3 f)]))]
+    (if (empty? conts)
+      ps
+      (let [claimed (atom #{})
+            ps (mapv (fn [p]
+                       (update p :forms
+                               (fn [forms]
+                                 (vec (for [f forms :when (not (continued? f))]
+                                        (if-let [n (and (class-form? f) (:aot/parts (meta f)))]
+                                          (let [c (str (second f))
+                                                ks (map #(vector c %) (range 1 (inc n)))]
+                                            (doseq [k ks :when (not (contains? conts k))]
+                                              (throw (ex-info (str "a2g: " c ": part " (second k) " of " n " missing (aot/continue)")
+                                                              {:class c})))
+                                            (swap! claimed into ks)
+                                            (with-meta (apply list (concat f (mapcat conts ks)))
+                                              (not-empty (dissoc (meta f) :aot/parts))))
+                                          f))))))
+                     ps)]
+        (when-let [u (seq (remove @claimed (keys conts)))]
+          (throw (ex-info (str "a2g: continuations of no class form: " (pr-str (sort u))) {})))
+        ps))))
+
 (defn- ns-of-forms [forms]
   (let [f (first (filter #(and (seq? %) (symbol? (first %)) (= "in-ns" (name (first %)))) forms))]
     (when f (let [n (second f)] (if (seq? n) (second n) n)))))
@@ -199,6 +234,45 @@
   []
   (try (.get (.getField arbace.lang.RT "ID_SPACE") nil) (catch Throwable _ nil)))
 
+;; ---------------------------------------------------------------------------------------
+;; the sequential part's steps in parallel (the build's speed, third round, part B)
+
+(defn- parse-member-classes
+  "The member classes of parsed class pc, parsed as arbace.classes.analyze/declare-class! parses
+  them (a member class's parse takes only the kind of its outer class), recursively:
+  [{:parsed member-class :members [...]}...] in their order, which declare-class! takes as its
+  ctx's :parsed-members (a host whose declare-class! does not take it parses them again)."
+  [pc]
+  (vec (for [m (:members pc) :when (= :class (:kind m))]
+         (let [mpc (p/parse-class {:ns (:ns pc) :nesting :member :outer pc} (rest (:form m)))]
+           {:parsed mpc :members (parse-member-classes mpc)}))))
+
+(defn- levels
+  "names in levels, a name in a level after those of the names it depends on (deps: a name's
+  names to process first; others ignored), each level in names' order. A cycle (an error the
+  steps report) is cut where it closes."
+  [names deps]
+  (let [in (set names)
+        memo (java.util.HashMap.)
+        lvl (fn lvl [n]
+              (or (.get memo n)
+                  (do (.put memo n 0)
+                      (let [l (inc (reduce max -1 (map lvl (filter in (deps n)))))]
+                        (.put memo n l)
+                        l))))]
+    (->> names (group-by lvl) (into (sorted-map)) vals)))
+
+(defn- supers-of
+  "The direct supertypes of class n in the compilation."
+  [n]
+  (let [d (a/decl n)] (cons (:super d) (:interfaces d))))
+
+(defn- par-levels
+  "(f n) for each of names, a level (levels) at a time, a level's names in parallel."
+  [names deps f]
+  (doseq [l (levels names deps)]
+    (m/par-mapv (m/jobs) f l)))
+
 (defn load-world
   "Reads, enters and analyzes the class forms of the inputs, each {:root :dirs|:tree|:files},
   with the Go-build variants of the variant files applied. Returns the world:
@@ -218,12 +292,14 @@
         variants (dissoc variants ::erase)
         applied (atom {})
         ;; read in parallel (reading class forms takes no ids: no #() or syntax-quote in them),
-        ;; the largest files first (the compiled namespaces' are up to 2.6 MB)
+        ;; the largest files first (the compiled namespaces' up to 256 KB, a larger class form
+        ;; continued in more files: join-continued)
         parse (fn [ins]
                 (let [fs (vec (mapcat source-files ins))]
-                  (m/par-mapv (m/jobs) (fn [f] (let [forms (read-forms f)] {:file f :forms forms :ns (ns-of-forms forms)}))
-                              fs
-                              (sort-by #(- (.length (io/file (nth fs %)))) (range (count fs))))))
+                  (join-continued
+                    (m/par-mapv (m/jobs) (fn [f] (let [forms (read-forms f)] {:file f :forms forms :ns (ns-of-forms forms)}))
+                                fs
+                                (sort-by #(- (.length (io/file (nth fs %)))) (range (count fs)))))))
         parsed (atom (parse inputs))
         top-set (fn [ps] (set (mapcat (fn [{:keys [ns forms]}] (when ns (top-names ns forms))) ps)))
         tops (atom (top-set @parsed))
@@ -244,35 +320,62 @@
       (let [t (atom (System/nanoTime))
             laps (atom [])
             lap (fn [k] (let [x (System/nanoTime)] (swap! laps conj [k (/ (Math/round (/ (- x @t) 1e7)) 100.0)]) (reset! t x)))
+            ;; the namespace forms (in-ns, import) file by file; the class forms with their
+            ;; variants applied and parsed, their member classes too, in parallel (pure: the
+            ;; parse resolves nothing but member macros, by the namespace's vars); then
+            ;; declared one after another, in the files' order (a failed parse of member classes
+            ;; is parsed again as it declares them, failing where it failed before)
             enter! (fn [ps]
-                     (doseq [{:keys [file forms ns]} ps :when ns]
-                       (binding [*ns* *ns*]
-                         (doseq [fm forms
-                                 :when (and (seq? fm) (symbol? (first fm)) (#{"in-ns" "import"} (name (first fm))))]
-                           (a/eval-ns-form! fm))
-                         (let [nsobj *ns*]
-                           (doseq [cf (class-forms forms)]
-                             (try
-                               (let [n (first (top-names ns [cf]))
-                                     vfs (get variants n)
-                                     [cf counts] (apply-variant cf (or vfs []) n #(get variants %) applied)
-                                     _ (when vfs (swap! applied assoc n counts))
-                                     pc (p/parse-class {:ns nsobj :nesting :top} (rest cf))]
-                                 (when-not (a/decl (a/top-name nsobj pc))
-                                   (a/declare-class! {:nesting :top} pc)))
-                               (catch Throwable e
-                                 (swap! failed conj [(str file) (str "parse: " (.getMessage e))]))))))))
-            ;; process-classes! 0 for names, with failures per class recorded rather than fatal
+                     (let [units (reduce (fn [acc {:keys [file forms ns]}]
+                                           (if-not ns
+                                             acc
+                                             (binding [*ns* *ns*]
+                                               (doseq [fm forms
+                                                       :when (and (seq? fm) (symbol? (first fm)) (#{"in-ns" "import"} (name (first fm))))]
+                                                 (a/eval-ns-form! fm))
+                                               (let [nsobj *ns*]
+                                                 (into acc (for [cf (class-forms forms)] [file ns nsobj cf]))))))
+                                         [] ps)
+                           parsed (m/par-mapv (m/jobs)
+                                              (fn [[file ns nsobj cf]]
+                                                (try
+                                                  (let [n (first (top-names ns [cf]))
+                                                        vfs (get variants n)
+                                                        [cf counts] (apply-variant cf (or vfs []) n #(get variants %) applied)
+                                                        _ (when vfs (swap! applied assoc n counts))
+                                                        pc (p/parse-class {:ns nsobj :nesting :top} (rest cf))]
+                                                    {:pc pc :nsobj nsobj
+                                                     :members (try (parse-member-classes pc) (catch Throwable _ nil))})
+                                                  (catch Throwable e
+                                                    {:error [(str file) (str "parse: " (.getMessage e))]})))
+                                              units)]
+                       (doseq [[[file] {:keys [pc nsobj members error]}] (map vector units parsed)]
+                         (if error
+                           (swap! failed conj error)
+                           (try
+                             (when-not (a/decl (a/top-name nsobj pc))
+                               (a/declare-class! {:nesting :top :parsed-members members} pc))
+                             (catch Throwable e
+                               (swap! failed conj [(str file) (str "parse: " (.getMessage e))])))))))
+            ;; process-classes! 0 for names, with failures per class recorded rather than fatal;
+            ;; each step in parallel, level by level (levels): a class's header after its outer
+            ;; class's (its type variables' bounds), its members and bridges after its
+            ;; supertypes' (deftype's signature inference, the bridges' inherited methods); a
+            ;; class's step writes only its own declaration and takes no ids
             resolve! (fn [names]
                        (lap :declare)
-                       (doseq [n names :when (not (:headers-done (a/decl n)))]
-                         (try (a/resolve-header! n) (catch Throwable e (swap! failed conj [n (str "header: " (.getMessage e))]))))
+                       (par-levels names #(some-> (a/decl %) :outer vector)
+                                   (fn [n]
+                                     (when-not (:headers-done (a/decl n))
+                                       (try (a/resolve-header! n) (catch Throwable e (swap! failed conj [n (str "header: " (.getMessage e))]))))))
                        (lap :headers)
-                       (doseq [n names]
-                         (try (a/resolve-members! n) (catch Throwable e (swap! failed conj [n (str "members: " (.getMessage e))]))))
+                       (par-levels names supers-of
+                                   (fn [n]
+                                     (try (a/resolve-members! n) (catch Throwable e (swap! failed conj [n (str "members: " (.getMessage e))])))))
                        (lap :members)
-                       (doseq [n (#'a/supertypes-first names)]
-                         (try (a/add-bridges! n) (catch Throwable e (swap! failed conj [n (str "bridges: " (.getMessage e))]))))
+                       (par-levels names supers-of
+                                   (fn [n]
+                                     (try (a/add-bridges! n) (catch Throwable e (swap! failed conj [n (str "bridges: " (.getMessage e))])))))
                        (lap :bridges)
                        (doseq [n names]
                          (try (#'a/mark-enum-abstract! n) (catch Throwable e (swap! failed conj [n (str "enum: " (.getMessage e))])))))

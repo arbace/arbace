@@ -46,38 +46,105 @@
 ;; ---------------------------------------------------------------------------------------
 ;; Java's method resolution, independent of the world
 
+(def ^:dynamic *cx*
+  "The run's caches of answers that depend only on the class environment and the world, which
+  do not change once the world is loaded (the supertypes, the superclass bodies of a method, the
+  classes a descriptor names, ...): {name java.util.HashMap}, kept with the state (run), or nil."
+  nil)
+
+(def ^:private none
+  "A cached nil."
+  (Object.))
+
+(defmacro ^:private cached
+  "The value of expr for key k in the run's cache named c (*cx*), computed once; expr itself
+  without the caches."
+  [c k expr]
+  `(if-let [^java.util.Map h# (get *cx* ~c)]
+     (let [k# ~k
+           v# (.get h# k#)]
+       (cond (identical? v# none) nil
+             (some? v#) v#
+             :else (let [v# ~expr] (.put h# k# (if (nil? v#) none v#)) v#)))
+     ~expr))
+
+(defn- new-caches []
+  (into {} (for [c [:supers :supers-of :interface? :subclass? :super-impl :ext-keys :desc-classes :hw-yes]]
+             [c (java.util.HashMap.)])))
+
+(defn- all-supers
+  "env/all-supertypes, cached."
+  [n]
+  (cached :supers n (env/all-supertypes n)))
+
+(defn- interface? [n] (cached :interface? n (env/interface? n)))
+
+(defn- subclass?
+  "env/subclass?, cached."
+  [a b]
+  (if-let [^java.util.HashMap h (get *cx* :subclass?)]
+    (let [^java.util.HashMap ha (or (.get h a) (let [x (java.util.HashMap.)] (.put h a x) x))
+          v (.get ha b)]
+      (if (nil? v)
+        (let [v (boolean (env/subclass? a b))] (.put ha b v) v)
+        v))
+    (env/subclass? a b)))
+
 (def ^:dynamic ^java.util.HashMap *methods-by-key*
   "Class -> {[name desc] method} of its methods in env/info's order (the first of a key), for
   java-impl-of's lookups in a run (instead of a scan of the class's methods each; the class
   environment does not change once the world is loaded), or nil."
   nil)
 
-(defn- find-method-of [c name desc]
-  (if-let [^java.util.HashMap cache *methods-by-key*]
-    (let [ix (or (.get cache c)
-                 (let [ix (reduce (fn [ix mm] (let [k [(:name mm) (:desc mm)]] (if (contains? ix k) ix (assoc ix k mm))))
-                                  {} (:methods (env/info c)))]
-                   (.put cache c ix)
-                   ix))]
-      (get ix [name desc]))
-    (some #(when (and (= name (:name %)) (= desc (:desc %))) %) (:methods (env/info c)))))
+(defn- find-method-of
+  "The first method [name desc] of class c (k, when given, is [name desc])."
+  ([c name desc] (find-method-of c name desc nil))
+  ([c name desc k]
+   (if-let [^java.util.HashMap cache *methods-by-key*]
+     (let [^java.util.HashMap ix (or (.get cache c)
+                                     (let [ix (java.util.HashMap.)]
+                                       (doseq [mm (:methods (env/info c))]
+                                         (let [k [(:name mm) (:desc mm)]]
+                                           (when-not (.containsKey ix k) (.put ix k mm))))
+                                       (.put cache c ix)
+                                       ix))]
+       (.get ix (or k [name desc])))
+     (some #(when (and (= name (:name %)) (= desc (:desc %))) %) (:methods (env/info c))))))
+
+(defn- body? [mm] (and mm (not (m/static? mm)) (not (m/abstract-m? mm))))
+
+(defn- super-impl
+  "The first class of the superclass chain from c with a body of method k ([name desc]) that is
+  not private (cached per class and key: the chains of many classes share their superclasses)."
+  [c k]
+  (when c
+    (let [f (fn [] (let [mm (find-method-of c (nth k 0) (nth k 1) k)]
+                     (if (and (body? mm) (not (m/private? mm)))
+                       c
+                       (super-impl (:super (env/info c)) k))))]
+      (if-let [^java.util.HashMap h (get *cx* :super-impl)]
+        (let [^java.util.HashMap hc (or (.get h c) (let [x (java.util.HashMap.)] (.put h c x) x))
+              v (.get hc k)]
+          (cond (identical? v none) nil
+                (some? v) v
+                :else (let [v (f)] (.put hc k (if (nil? v) none v)) v)))
+        (f)))))
 
 (defn java-impl-of
   "The [class name desc] implementing virtual method [name desc] for class n (a body in n or a
-  superclass, else an interface's default), by Java's rules on the class environment."
-  [n [name desc]]
-  (or (some (fn [c]
-              (when-let [mm (find-method-of c name desc)]
-                (when (and (not (m/static? mm)) (not (m/abstract-m? mm)) (or (not (m/private? mm)) (= c n)))
-                  [c name desc])))
-            (take-while some? (iterate #(:super (env/info %)) n)))
-      (let [cands (for [c (env/all-supertypes n)
-                        :when (and (not= c n) (env/interface? c))
-                        :let [mm (find-method-of c name desc)]
-                        :when (and mm (not (m/abstract-m? mm)) (not (m/static? mm)) (not (m/private? mm)))]
-                    c)
-            cands (remove (fn [x] (some #(and (not= % x) (env/subclass? % x)) cands)) cands)]
-        (when-let [c (first cands)] [c name desc]))))
+  superclass, else an interface's default), by Java's rules on the class environment: the first
+  class of n's superclass chain with a body of it (private only in n itself), else the first,
+  in env/all-supertypes' order, of the most specific interfaces of n with a default."
+  [n [name desc :as k]]
+  (or (when (body? (find-method-of n name desc k)) [n name desc])
+      (when-let [c (super-impl (:super (env/info n)) k)] [c name desc])
+      (let [cands (into [] (filter (fn [c]
+                                     (and (not= c n) (interface? c)
+                                          (let [mm (find-method-of c name desc k)]
+                                            (and (body? mm) (not (m/private? mm)))))))
+                        (all-supers n))]
+        (when-let [c (some (fn [x] (when-not (some #(and (not= % x) (subclass? % x)) cands) x)) cands)]
+          [c name desc]))))
 
 ;; ---------------------------------------------------------------------------------------
 ;; the analysis
@@ -117,7 +184,7 @@
   (cond
     (nil? n) true
     (= n "java/lang/Object") true
-    (m/translated? n) true
+    (contains? @(:T *st*) n) true
     (contains? @(:failed-classes *st*) n) (do (note-unavailable! (str "class " n ": " (get @(:failed-classes *st*) n))) false)
     (and (m/jrt-class n) (not (:standin (m/jrt-class n)))) true
     ;; a stand-in is replaced only by a translation of the slice (jrt's code needs its members)
@@ -153,79 +220,150 @@
               (note-unavailable! (str "class " (str/replace n "/" ".") " is not in the closed world"))
               false)))
 
+(defn- use*
+  "use! in the run whose state is st: at once for a class already translated or jrt's own (not a
+  stand-in) that has not failed, else use!."
+  [st n]
+  (cond
+    (nil? n) true
+    (= n "java/lang/Object") true
+    (contains? @(:T st) n) true
+    :else (let [j (get (:jc st) n)]
+            (if (and j (not (:standin j)) (not (contains? @(:failed-classes st) n)))
+              true
+              (use! n)))))
+
+(defn- uses!
+  "use* of each class of cs, in order."
+  [st cs]
+  (reduce (fn [_ c] (use* st c) nil) nil cs))
+
+(defn- desc-classes
+  "m/desc-classes, cached for a string."
+  [d]
+  (if (string? d) (cached :desc-classes d (m/desc-classes d)) (m/desc-classes d)))
+
 (defn- use-desc! [d]
-  (doseq [c (m/desc-classes d)] (use! c)))
+  (doseq [c (desc-classes d)] (use! c)))
+
+(defn- reach*
+  "reach! in the run whose state is st."
+  [st k]
+  (let [c (nth k 0)]
+    (when (and c (not (contains? @(:reached st) k)) (contains? @(:T st) c) (a/decl c) (*slice?* c))
+      (swap! (:reached st) conj k)
+      (swap! (:queue st) conj k))))
 
 (defn reach!
   "Marks method [c name desc] reached (its body will be translated)."
-  [[c name desc :as k]]
-  (when (and c (m/translated? c) (a/decl c) (*slice?* c) (not (contains? @(:reached *st*) k)))
-    (swap! (:reached *st*) conj k)
-    (swap! (:queue *st*) conj k)))
+  [k]
+  (reach* *st* k))
+
+(defn- init*
+  "init! in the run whose state is st."
+  [st c]
+  (when (and c (not (contains? @(:inited st) c)) (contains? @(:T st) c) (a/decl c))
+    (swap! (:inited st) conj c)
+    (when-let [s (:super (a/decl c))] (init* st s))
+    (reach* st [c "<clinit>" "()V"])))
 
 (defn init!
   "Class c is initialized: its static initializer is reached (and its superclass's)."
   [c]
-  (when (and c (m/translated? c) (a/decl c) (not (contains? @(:inited *st*) c)))
-    (swap! (:inited *st*) conj c)
-    (when-let [s (:super (a/decl c))] (init! s))
-    (reach! [c "<clinit>" "()V"])))
+  (init* *st* c))
+
+(defn- own-external-keys
+  "The virtual methods of type s that jrt's own code may call when s is Object, a hand-written
+  class or interface of jrt or a class jrt has a stand-in for, else none (cached)."
+  [s]
+  (cached :ext-keys s
+          (if (or (= s "java/lang/Object") (m/jrt-class s))
+            (vec (for [mm (:methods (env/info s))
+                       :when (and (not (m/static? mm)) (not (m/private? mm)) (not= "<init>" (:name mm)))]
+                   [(:name mm) (:desc mm)]))
+            [])))
 
 (defn- external-keys
   "The virtual methods of class d's supertypes that jrt's own code may call: those of Object,
-  of jrt's hand-written classes and interfaces and of the classes jrt has stand-ins for."
+  of jrt's hand-written classes and interfaces and of the classes jrt has stand-ins for; each
+  once, in the order of its first occurrence."
   [d]
-  (for [s (env/all-supertypes d)
-        :when (or (= s "java/lang/Object") (m/jrt-class s))
-        mm (:methods (env/info s))
-        :when (and (not (m/static? mm)) (not (m/private? mm)) (not= "<init>" (:name mm)))]
-    [(:name mm) (:desc mm)]))
+  (let [seen (java.util.HashSet.)
+        out (java.util.ArrayList.)]
+    (doseq [s (all-supers d) k (own-external-keys s)]
+      (when (.add seen k) (.add out k)))
+    out))
 
 (defn- supertypes-of
-  "The types class d is a subtype of (env/subclass?): d, its supertypes and Object."
+  "The types class d is a subtype of (env/subclass?): d, its supertypes and Object (cached)."
   [d]
-  (let [s (env/all-supertypes d)]
-    (if (some #(= "java/lang/Object" %) s) s (conj (vec s) "java/lang/Object"))))
+  (cached :supers-of d
+          (let [s (all-supers d)]
+            (if (some #(= "java/lang/Object" %) s) s (conj (vec s) "java/lang/Object")))))
 
-(defn- vcalls-on
-  "The virtual calls [name desc] whose receiver's static type is a supertype of d (indexed by
-  receiver type: the roots of --program are each a virtual call, about 20,000)."
-  [d]
-  (let [by @(:vcalls-by *st*)]
-    (for [s (supertypes-of d) nd (get by s)] nd)))
+(defn- reach-impls!
+  "Reaches the implementations for class d of the virtual calls whose receiver's static type is
+  a supertype of d (indexed by receiver type: the roots of --program are each a virtual call,
+  about 20,000), then of the methods jrt's own code may call (external-keys)."
+  [st d]
+  (let [by @(:vcalls-by st)]
+    (doseq [s (supertypes-of d) nd (get by s)]
+      (when-let [k (java-impl-of d nd)] (reach* st k))))
+  (doseq [k (external-keys d)]
+    (when-let [impl (java-impl-of d k)] (reach* st impl))))
+
+(defn- instantiate*
+  "instantiate! in the run whose state is st."
+  [st d]
+  (when (and (not (contains? @(:inst st) d)) (contains? @(:T st) d))
+    (swap! (:inst st) conj d)
+    (doseq [s (supertypes-of d)]
+      (swap! (:inst-by st) update s (fnil conj []) d))
+    (reach-impls! st d)))
 
 (defn instantiate!
   [d]
-  (when (and (m/translated? d) (not (contains? @(:inst *st*) d)))
-    (swap! (:inst *st*) conj d)
-    (doseq [s (supertypes-of d)]
-      (swap! (:inst-by *st*) update s (fnil conj []) d))
-    (doseq [nd (vcalls-on d)]
-      (when-let [k (java-impl-of d nd)] (reach! k)))
-    (doseq [k (distinct (external-keys d))]
-      (when-let [impl (java-impl-of d k)] (reach! impl)))))
+  (instantiate* *st* d))
+
+(defn- vcall*
+  "vcall! in the run whose state is st, of k [o name desc], nd [name desc]."
+  [st k nd]
+  (when-not (contains? @(:vcalls st) k)
+    (swap! (:vcalls st) conj k)
+    (let [o (nth k 0)
+          fis @(:lambda-fis st)]
+      (swap! (:vcalls-by st) update o (fnil conj []) nd)
+      (doseq [d (get @(:inst-by st) o)]
+        (when-let [impl (java-impl-of d nd)] (reach* st impl)))
+      (doseq [d fis :when (subclass? d o)]
+        (when-let [impl (java-impl-of d nd)] (reach* st impl))))))
 
 (defn vcall!
   "A virtual call of [name desc] on a receiver of static type o."
   [o name desc]
-  (let [k [o name desc]]
-    (when-not (contains? @(:vcalls *st*) k)
-      (swap! (:vcalls *st*) conj k)
-      (swap! (:vcalls-by *st*) update o (fnil conj []) [name desc])
-      (doseq [d (concat (get @(:inst-by *st*) o)
-                        (filter #(env/subclass? % o) @(:lambda-fis *st*)))]
-        (when-let [impl (java-impl-of d [name desc])] (reach! impl))))))
+  (vcall* *st* [o name desc] [name desc]))
 
 (defn lambda!
   "A lambda or method reference of functional interface fi: its adapter is an instance of fi,
   whose default methods virtual calls reach."
   [fi]
-  (when-not (contains? @(:lambda-fis *st*) fi)
-    (swap! (:lambda-fis *st*) conj fi)
-    (doseq [nd (vcalls-on fi)]
-      (when-let [impl (java-impl-of fi nd)] (reach! impl)))
-    (doseq [k (distinct (external-keys fi))]
-      (when-let [impl (java-impl-of fi k)] (reach! impl)))))
+  (let [st *st*]
+    (when-not (contains? @(:lambda-fis st) fi)
+      (swap! (:lambda-fis st) conj fi)
+      (reach-impls! st fi))))
+
+(defn- hw-method-exists?
+  "m/hw-method-exists? of class n and method mm; its yes for a class not translated kept (jrt's
+  Go name of the class and its scan do not change, and what a2g adds only grows with T)."
+  [n mm]
+  (let [^java.util.HashMap h (get *cx* :hw-yes)]
+    (if (or (nil? h) (contains? @(:T *st*) n))
+      (m/hw-method-exists? n mm)
+      (let [k [n (:name mm) (:desc mm)]]
+        (or (.containsKey h k)
+            (let [yes (m/hw-method-exists? n mm)]
+              (when yes (.put h k true))
+              yes))))))
 
 (defn- check-hw-call!
   "A call of a method of jrt's hand-written class: jrt must have it."
@@ -234,13 +372,12 @@
     (let [mm {:name name :desc desc}]
       (when-not (if (= kind :static)
                   (hw-has-static? owner name desc)
-                  (or (m/hw-method-exists? owner mm)
+                  (or (hw-method-exists? owner mm)
                       ;; inherited from a superclass jrt has
-                      (some #(and (m/in-world? %) (or (= % "java/lang/Object") (m/hw-method-exists? % mm)))
-                            (rest (env/all-supertypes owner)))))
+                      (some #(and (m/in-world? %) (or (= % "java/lang/Object") (hw-method-exists? % mm)))
+                            (rest (all-supers owner)))))
         (note-unavailable! (str "jrt lacks " (str/replace owner "/" ".") "." name desc))))))
 
-(defn- class-of-desc [d] (first (m/desc-classes d)))
 
 (defn- vh-const?
   "Is field f a constant VarHandle of the world (A2G-SPEC §8.5)?"
@@ -367,8 +504,8 @@
           (pat (:pattern l)))))))
 
 (def ^:dynamic ^java.util.IdentityHashMap *flat*
-  "Node -> the nodes in it scan-node! acts on, in walk-nodes' order (the run's batches of
-  methods computed in parallel ahead of their sequential scan), or nil."
+  "Node -> the plans of the nodes in it scan-node! acts on, in walk-nodes' order (plan-code: the
+  run's batches of methods planned in parallel ahead of their sequential scan), or nil."
   nil)
 
 (def ^:private scanned-ops
@@ -377,17 +514,148 @@
     :new-array :array-init :try :lambda :method-ref :java-str :for-each :assert :if-instance
     :var-deref :var-invoke :fi-adapter :switch})
 
-(defn- flatten-code
-  "The nodes of node scan-node! acts on, in walk-nodes' order."
+(defn- hw-owner?
+  "Can a call of a method of class c need check-hw-call! (does jrt define c)?"
+  [c]
+  (and (m/jrt-class c) (not= c "java/lang/Object")))
+
+(defn- plan-node
+  "scan-node! of node as a function of the run's state st, its answers that depend only on the
+  class environment and the world (which do not change during the run) computed ahead: the
+  descriptors' classes, the keys, the accessor's node, whether jrt defines a member. Pure: the
+  plans of a batch are made in parallel (no cache of the run: *cx* is one thread's), then run
+  one after another, each doing what scan-node! does, in the same order. The common ops; the
+  others run scan-node! itself."
+  [node]
+  (let [n (acc/unaccess node)]
+    (case (:op n)
+      :invoke
+      (let [mm (:method n)
+            owner (:owner n)
+            mowner (or (:owner mm) owner)
+            name (:name n)
+            desc (:desc n)]
+        (cond
+          (:array-clone n) (let [cs (m/desc-classes owner)] (fn [st] (uses! st cs)))
+          (vh-call? n) (let [cs (m/method-desc-classes desc)] (fn [st] (uses! st cs)))
+          :else
+          (let [ocs (m/desc-classes (str "L" owner ";"))
+                mdc (m/method-desc-classes desc)
+                pre (fn [st] (use* st owner) (use* st mowner) (uses! st ocs) (uses! st mdc))]
+            (case (:kind n)
+              :static (let [k [mowner name desc]
+                            hw (hw-owner? mowner)]
+                        (fn [st]
+                          (pre st) (init* st mowner) (reach* st k)
+                          (when hw (check-hw-call! mowner name desc :static))))
+              :special (let [k [mowner name desc]
+                             hw (hw-owner? mowner)]
+                         (fn [st]
+                           (pre st) (reach* st k)
+                           (when hw (check-hw-call! mowner name desc :special))))
+              (:virtual :interface)
+              (if (and mm (m/private? mm))
+                (let [k [mowner name desc]] (fn [st] (pre st) (reach* st k)))
+                (let [k [owner name desc]
+                      nd [name desc]
+                      hw (hw-owner? owner)]
+                  (fn [st]
+                    (pre st) (vcall* st k nd)
+                    (when hw (check-hw-call! owner name desc :virtual)))))))))
+      :new
+      (let [c (:class n)
+            d (:desc (:ctor n))
+            k [c "<init>" d]
+            jc (m/jrt-class c)
+            ;; as hand-written: jrt's Go name (m/go-name of a class not translated)
+            lacks? (and jc (not (contains? (:funcs (:jrt m/*w*)) (nm/new-name (or (:go jc) (nm/go-class-name c)) d))))]
+        (fn [st]
+          (when (use* st c)
+            (init* st c)
+            (reach* st k)
+            (instantiate* st c)
+            (when (and lacks? (not (contains? @(:T st) c)))
+              (note-unavailable! (str "jrt lacks constructor " c d))))))
+      :ctor-call
+      (let [c (:class n)
+            k [c "<init>" (:desc (:ctor n))]]
+        (fn [st] (use* st c) (reach* st k)))
+      (:get-static :set-static)
+      (let [f (:field n)
+            o (or (:declarer f) (:owner f))]
+        (if (vh-const? f)
+          (fn [st] nil)
+          (let [cs (m/desc-classes (:desc f))
+                jc (m/jrt-class o)
+                lacks? (and jc (let [g (or (:go jc) (nm/go-class-name o))
+                                     scan (:jrt m/*w*)]
+                                 (not (or (contains? (:vars scan) (nm/static-field-name g (:name f)))
+                                          (contains? (:consts scan) (nm/static-field-name g (:name f)))))))]
+            (fn [st]
+              (when (use* st o)
+                (init* st o)
+                (uses! st cs)
+                (when (and lacks? (not (contains? @(:T st) o)))
+                  (note-unavailable! (str "jrt lacks static field " o "." (:name f)))))))))
+      (:get-field :set-field)
+      (let [f (:field n)
+            o (or (:declarer f) (:owner f))
+            cs (m/desc-classes (:desc f))]
+        (fn [st] (use* st o) (uses! st cs)))
+      (:cast :instance? :class-lit)
+      (let [cs (m/desc-classes (:class n))] (fn [st] (uses! st cs)))
+      (:new-array :array-init)
+      (let [cs (m/desc-classes (:type n))] (fn [st] (uses! st cs)))
+      (fn [st] (scan-node! node)))))
+
+(def ^:private skipped-keys
+  "The keys of a node walk-nodes does not walk into."
+  #{:b :field :method :ctor :boundary :sam :hidden :temp :sel-binding :restart :var :frame :scope})
+
+(def ^:private skipped-plain-keys
+  "The keys of a plain map in a node (a catch, a case, a pattern) walk-nodes does not walk into."
+  #{:b :frame :scope :accessor :ctor})
+
+(defn- scanned-nodes
+  "The nodes of node scan-node! acts on, in walk-nodes' order (its walk, with reduce-kv and
+  reduce rather than seqs of the maps' entries: a map's kv-reduce visits its entries in the
+  order of its seq)."
   [node]
   (let [acc (java.util.ArrayList.)]
-    (walk-nodes (fn [n] (when (contains? scanned-ops (:op n)) (.add acc n))) node)
-    (vec acc)))
+    (letfn [(walk [n]
+              (when (contains? scanned-ops (:op n)) (.add acc n))
+              (reduce-kv walk-entry nil n))
+            (walk-entry [_ k v]
+              (when-not (contains? skipped-keys k) (walk-val v))
+              nil)
+            (walk-val [v]
+              (cond (node? v) (walk v)
+                    (sequential? v) (reduce walk-elem nil v)
+                    :else nil))
+            (walk-elem [_ x]
+              (cond (node? x) (walk x)
+                    (map? x) (walk-plain x)
+                    (sequential? x) (walk-val x))
+              nil)
+            (walk-plain [mp] (reduce-kv walk-plain-entry nil mp))
+            (walk-plain-entry [_ k v]
+              (when-not (contains? skipped-plain-keys k)
+                (cond (node? v) (walk v)
+                      (sequential? v) (walk-val v)
+                      (and (map? v) (= :pattern k)) (walk-plain v)))
+              nil)]
+      (when (node? node) (walk node)))
+    acc))
+
+(defn- plan-code
+  "The plans of the nodes of node scan-node! acts on, in walk-nodes' order."
+  [node]
+  (mapv plan-node (scanned-nodes node)))
 
 (defn scan-code! [node]
   (let [^java.util.IdentityHashMap flat *flat*]
-    (if-let [ns (and flat (.get flat node))]
-      (run! scan-node! ns)
+    (if-let [ps (and flat (.get flat node))]
+      (let [st *st*] (run! (fn [p] (p st)) ps))
       (walk-nodes scan-node! node))))
 
 (defn method-code
@@ -406,7 +674,7 @@
   (binding [*current* k]
     (let [d (a/decl c)
           st @(:state d)
-          mm (when-not (= name "<clinit>") (m/find-method c name desc))]
+          mm (when-not (= name "<clinit>") (find-method-of c name desc))]
       (when-let [why (:analysis-failed st)] (note-unavailable! (str "analysis failed: " why)))
       (when mm
         (doseq [cl (m/method-desc-classes desc)] (use! cl)))
@@ -448,15 +716,18 @@
   reachability is monotone, so a run from more roots is the previous one continued from the
   new ones (standalone S6: main's stand-in loop runs the closure once, not twice)."
   [{:keys [roots instantiate classes slice? fis state]}]
-  (let [st (or state
+  (let [st0 (or state
                {:T (atom #{}) :reached (atom #{}) :queue (atom []) :inst (atom #{}) :vcalls (atom #{})
                 :vcalls-by (atom {}) :inst-by (atom {})
                 :inited (atom #{}) :unavailable (atom {}) :missing (atom {}) :failed-classes (atom {})
-                :lambda-fis (atom #{})})]
+                :lambda-fis (atom #{})})
+        ;; the caches, kept with the state; jrt's classes (use*)
+        st (assoc st0 :cx (or (:cx st0) (new-caches)) :jc (:jrt-classes m/*w*))]
     (binding [*st* st
               *slice?* (or slice? (constantly true))
               m/*w* (assoc m/*w* :T (:T st))
               *flat* (java.util.IdentityHashMap.)
+              *cx* (:cx st)
               *methods-by-key* (java.util.HashMap.)]
       (doseq [c classes] (use! c))
       (doseq [[c name desc :as k] roots]
@@ -475,8 +746,8 @@
       (doseq [c instantiate] (when (use! c) (instantiate! c)))
       ;; functional interfaces whose adapters exist without a lambda (FromFn, A2G-SPEC §7.11)
       (doseq [fi fis] (when (use! fi) (lambda! fi)))
-      ;; the queue in batches: the methods queued so far, their code flattened in parallel
-      ;; (flatten-code: pure), then scanned one after another in the queue's order, the methods
+      ;; the queue in batches: the methods queued so far, their code planned in parallel
+      ;; (plan-code: pure), then scanned one after another in the queue's order, the methods
       ;; they reach queued for the next batch (the order of a scan one method at a time)
       (loop []
         (let [batch @(:queue st)]
@@ -489,7 +760,7 @@
                                         (method-code k))
                                    :when (not (or (.containsKey *flat* nd) (.containsKey seen nd)))]
                                (do (.put seen nd true) nd)))
-                  flats (m/par-mapv (m/jobs) flatten-code roots)]
+                  flats (m/par-mapv (m/jobs) plan-code roots)]
               (dotimes [i (count roots)]
                 (.put *flat* (nth roots i) (nth flats i))))
             (run! scan-method! batch)
