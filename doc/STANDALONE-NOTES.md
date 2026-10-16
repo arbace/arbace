@@ -3143,3 +3143,91 @@ files), was `79d4f552...`. **`bin/seed --verify`**: printed again at `57a4428`, 
 s for the three (G1 219 s, G2 184 s, G3 189 s: a fresh worktree, g2a's print cache cold, the
 emulated arm64 VM busy beside). The essential gate on the seed's commit (`dd61501`): passed in
 8:07, the two builds 5:06 (were 6 to 8 minutes).
+
+## The build's speed, third round, part B: a2g's sequential load (2026-10-16)
+
+The lead's order (the third round, part B): the sequential part of a2g's load after the compiled
+namespaces' tree arrives (part B of the second round's "Left": about 10 s entering the classes,
+their headers, members and bridges, `arbace.classes` as `arbace.a2g.world/load-world` drives it).
+Branch `speed3-load`. Measured as `bin/arbace-go` runs a2g (`--await`, one fixed compiled tree,
+`.tmp/speed3-load/aot0`, copied in 60 s after a2g starts, so the runtime's analysis is done when
+it arrives), on the shared host (the other parts' builds beside it: single timings vary by a
+fifth or more).
+
+### Where the time went (`ecb5dfe`)
+
+After the tree arrived: reading it 2.6 s (in parallel already, bound by its largest file:
+`aot_arbace_core.ae`, arbace.core's classes, one 2.6 MB line read in 1.3 to 2 s by one reader),
+entering its 8,527 classes 1.4 s, the headers 0.8 s, the members 3.2 s (14,075 methods, 7,815
+constructors, 41,811 fields), the bridges 2.7 s: 10.7 s, all but the reading on one thread. A
+CPU profile of the steps alone (a driver of `load-world`'s steps, `ARBACE_CPUPROFILE`) showed no
+one hot spot: `enter-method`'s types (`parse-type`), `infer-signature`, the bridges' search
+through the supertypes' methods (`erased-params`) for every compiled fn class, each step much
+allocation and Go's collector. The first round's same steps (the runtime and the JDK, 2,793
+classes, about 9 s) run while the host compiles, off the critical path.
+
+None of the steps takes ids (the runtime's counter and the analyzer's stand still across them,
+checked), and each class's step writes only its own declaration; a class depends on few others:
+its header on its outer class's (the bounds of the type variables it sees), its members and its
+bridges on its supertypes' (deftype's signature inference, the inherited methods and bridges).
+
+### What changed (`34297cd`; a2g's output unchanged)
+
+- **Headers, members, bridges in parallel, level by level** (`world/par-levels`): the names in
+  levels, a class after the classes it depends on of the same round (its outer class for the
+  headers, its supertypes for the members and the bridges: the order `supertypes-first` gave
+  the bridges), each level's classes on a2g's threads (`m/par-mapv`, `A2G_JOBS`). The compiled
+  namespaces' classes extend the runtime's (the first round's), so they are one or two levels.
+  The members 3.2 → 0.6 to 0.9 s, the bridges 2.7 → 0.4 s.
+- **The class forms parsed in parallel**: the namespace forms (`in-ns`, `import`) evaluated
+  file by file first; then each class form, its variants applied and parsed, and its member
+  classes parsed too, recursively (`world/parse-member-classes`, as `declare-class!` parses
+  them: a member class's parse takes only its outer class's kind), on a2g's threads; then the
+  classes declared one after another in the files' order, as before. `declare-class!` takes the
+  member classes parsed ahead (its ctx's `:parsed-members`) and parses those it is not given (a
+  host whose `declare-class!` does not take them, the seed's stage 0: G1's a2g; a failed parse
+  of member classes, parsed again as it is declared, failing where it failed before). Entering
+  1.4 → 0.7 s. (The members' `:mid`s, which only tell a class's members apart, are taken from
+  the counter in another order; they were already, the runtime's analysis parsing its local
+  classes beside the second round.)
+- **A header's bounds set in one update** (`resolve-header!`, `set-own-bounds!`): the own bounds
+  and the bounds visible in the class, twice two updates of the compilation, now twice one,
+  the same values in the same keys' order. In parallel the headers were bound by the
+  compilation's atom (retried swaps, each copying the declaration): 0.8 → 0.5 to 1 s.
+
+Tried and left: reading the largest file in parts (the 2.6 MB line split at its member classes,
+read in parallel): the forms' `:column`s (read from a line's middle) would differ, and the reader
+cannot start at a column; see SA220.
+
+### Measured
+
+| | before (`ecb5dfe`) | after (`34297cd`) |
+|---|---|---|
+| after the tree: reading, entering, headers, members, bridges | 2.6, 1.4, 0.8, 3.2, 2.7 s (10.7 s) | 1.8 to 2.2, 0.7, 0.5 to 1.0, 0.6 to 0.9, 0.4 s (4.6 to 5.1 s) |
+| the first round's same steps (hidden by the wait) | 8.3 s | 1.6 to 2.6 s |
+| a2g's load after the tree arrives (with the analysis, 21 to 25 s) | 44.6 s | 32.0 s |
+| the fixpoint's one-run builds (G1, G2, G3) | (2:32, 2:15 at `cb834cf`) | 3:03, 3:11, 2:52 (the host busier) |
+
+a2g's output for the same compiled tree is the same, byte for byte, but its own embedded
+sources (`world.ae`, `analyze.ae`) and report.edn's times (`diff -r` against main's a2g on
+`aot0`: evaluated `world.ae` on stage 0, and all compiled on this branch's executable, with and
+without `--await`). The fixpoint at `34297cd` (G1 by the seed's stage 0, whose a2g is main's):
+a2g's programs G1 = G2 = G3, **G1 = G2 = G3 byte for byte** (`ea0782de...`, 101,871,776 bytes).
+The essential gate passed on `34297cd` (10:44: the suite 20,506 of 20,520, no regressions; the
+oracle 22,508 of 22,561, the 53 known, 0 new).
+
+### Left
+
+- Reading the tree: about 2 s, bound by `aot_arbace_core.ae` (arbace.core's classes in one
+  holder form, 2.6 MB on one line; the reader does about 2 MB/s). SA220.
+- The analysis of the compiled classes (21 to 30 s, in parallel): part A's split of
+  arbace.core's loader; then reachability (part C).
+
+### Proposals
+
+- SA220 (a) the compiled tree as it is: its reading stays bound by its largest file (about 2
+  s); (b) arbace.aot writes a namespace's classes in several files (a holder's member classes
+  split by size, each file a holder of its own, or the member classes as top-level forms), read
+  in parallel by a2g as they are; (c) a2g splits the largest files' forms itself, with the
+  reader's columns corrected after. Recommended: (b), with part A's split of the loader (the
+  compiled tree's shape is the back end's; (c) depends on the reader's metadata).
