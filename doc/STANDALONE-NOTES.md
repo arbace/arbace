@@ -3543,3 +3543,42 @@ G3 byte for byte** (`140b54cb...`, 102,207,648 bytes); the builds G1, G2, G3 120
   the read about halved (0.8 to 0.9 s, was 1.1 to 2.2 s), a2g's output the same.
 
 **Decided (2026-10-16, the user):** SA240 (a), as built.
+
+## The build's speed, third round, SA230 (a): ids independent of the checkout's path (2026-10-16)
+
+SA230 (a), decided by the user, on the branch `speed3-ids` (from `speed3`). `Compiler.load`
+(`arbace/lang/Compiler.ae`) gives an id slot (a million ids from the path's hash, part C's
+finding above) only to a source loaded by a resource path, as RT's loaders name the namespaces
+(`RT.load`, `RT.loadResourceScript`: relative, `arbace/...`, no scheme). Any other load keeps
+its caller's id space, the runtime's at the top: a script by its absolute path (the host's
+compile script `host-compile.ae`, `prepare.ae`, the box's `/c/compile.ae`; evaluated, compiled
+into nothing), a store's `ref:NAME` (`arbace.box/load-ref`), a reader without a path
+(`load-reader`, `load-string`, which had slot 0 before; inside a namespace's load they now take
+that namespace's ids). Nothing else keys on the slots: a2g's analysis has its own spaces
+(`analysis-id-base`, SA143), and without `ARBACE_COMPILE` (the evaluated build, `ARBACE_AOT=0`;
+the programs the oracle and the suite run) `Compiler.load` gives no slot at all.
+
+Proof (at `1805a559`):
+- Before (the old runtime, `speed3-reach`'s executable, the namespaces of `155d3fb1`), the
+  compile step alone (`bin/arbace-go`'s `host_compile`) in a worktree at
+  `.tmp/worktrees/speed3-ids-953`, chosen so that its `target/arbace-go/host-compile.ae` hashes
+  to slot 1462, `arbace/box/print.ae`'s, as part C's did: the compiled tree differs from the same
+  step's with the script in a directory that collides with nothing (`.tmp/c1`, slot 1485) in
+  `aot_arbace_box_print.ae` and its `__init`, part C's difference.
+- After (G1 below as the host, the same two script paths): the two trees are the same, and the
+  same as before's at the path without collision (the compiled program is unchanged where no
+  path collided).
+- The whole build (`bin/arbace-go --build`, its host G1) in that colliding worktree: its
+  compiled tree, a2g's program and its executable are those of the fixpoint's G2 (built by G1 in
+  `.tmp/worktrees/speed3-ids`), byte for byte (`15d1ead1...`).
+- The fixpoint (G1 by the seed's stage 0, two runs): a2g's programs G1 = G2 = G3, **G1 = G2 = G3
+  byte for byte** (`15d1ead1...`, 102,219,936 bytes).
+- The essential gate passed (8:15): the suite 20,506 of 20,520, no regressions; the oracle
+  22,508 of 22,561, the 53 known, 0 new.
+
+### Left
+
+- Stage 0 (the seed's) still has the old `Compiler.load`, which does not matter to the program:
+  its runtime is not the checkout's, so it never compiles the namespaces (the two-run build: the
+  first program, on the new runtime, compiles them). Builds it hosts take two runs until a
+  re-seed, as after any change to the runtime.
