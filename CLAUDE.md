@@ -148,7 +148,12 @@ Prior art:
 - `doc/ALPINE.md`: the host's Alpine packages as one minimal `apk add` line (`bin/alpine-env
   world`, `check`, `simulate`), the subset Arbace uses, and what apk does not provide (jdk26u,
   TamaGo's Go, go-whim, Go's module cache).
-- `bin/gate` is the check every change to main must pass: the seed's hash, stage 0 built from
+- `Makefile`: a familiar interface for newcomers, nothing more (`make help`): each target runs a
+  script of `bin/`, which holds the logic. Keep it in step with `bin/`: when a script's name or
+  options change, or a script becomes an objective of the repo, update its target and `##` line;
+  `make check-makefile` (the essential gate's first step) checks the scripts it runs exist.
+- `bin/gate` is the check every change to main must pass: the Makefile's scripts (`make
+  check-makefile`), the seed's hash, stage 0 built from
   it (`bin/seed --build`), the executable and the test build by stage 0 (`bin/arbace-go
   --gate-build`, cached in `.tmp/arbace-go-gate` and keyed by a hash of what they are built from:
   `arbace/`, `go/`, `overlay/`, `jdk/`, `x509roots/`, the fixtures' forms, the build's scripts, the

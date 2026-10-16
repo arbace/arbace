@@ -79,6 +79,9 @@ bin/arbace-go --fixpoint                # G1 by stage 0, G2 by G1, G3 by G2: G2 
 bin/seed --verify                       # the seed printed again from its commit, and identical
 ```
 
+The same through `make` (`make help` lists every target, each one a script of `bin/`):
+`make stage0`, `make build`, `make repl`, `make fixpoint`, `make seed-verify`, `make gate`.
+
 ## Arbace in the box
 
 The tags `arbace-box-amd64-v1` and `arbace-box-arm64-v1` (2026-10-12, on main) mark the same

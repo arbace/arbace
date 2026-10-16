@@ -225,3 +225,21 @@ verified by `bin/seed --verify` (the same tree and archive; stage 0 = G1 = G2 = 
 `2ee89825...`); the essential gate passed on it (`dd61501`, 8:07, its two builds 5:06). Left:
 the analysis of `arbace.core`'s loader on one thread (9 to 14 s), a2g's sequential load after
 the tree arrives (about 10 s), reachability's scan (12 to 16 s).
+
+## 2026-10-16: a Makefile for newcomers
+
+At the user's request ("its purpose only is to provide a familiar interface for newcomers, but it
+should be maintained in sync with bin/ scripts"), after the targets were listed and accepted: a
+top-level `Makefile` whose every target runs a script of `bin/` (the logic stays in the scripts,
+which cache by content; all targets phony, no dependency tracking; the environment passes
+through). Groups: the bootstrap (`seed-check`, `stage0`, `seed-verify`, `reseed`), the Go build
+(`build`, `build-tests`, `smoke`, `repl`, `fixpoint`), the box (`box`, `box-smoke`, `box-oracle`,
+`box-suite`, `box-tools`, `box-rebuild`, `mac-bundle`, `arm64-vm-check`), the checks (`gate`,
+`gate-full`, `suite`, `oracle`), the vendored trees' and recorded data's verifications (`verify`
+and one target each), `alpine-check`, `clean` (`target/` only). `make help` (the default) lists
+them from their `##` comments. Kept in step: `make check-makefile` checks that every `bin/`
+script a recipe runs exists and is executable (tested failing on a misnamed script), run as the
+essential gate's first step (`makefile`); CLAUDE.md states the rule. The heavy lock of this host
+(`.tmp/heavy`) is not in it (`.tmp/heavy make gate`). Alternatives: a `justfile` (a tool apk
+would add), no check (the Makefile would drift), the Makefile carrying logic (two places to
+maintain). The README's build section names the main targets.
