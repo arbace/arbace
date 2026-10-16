@@ -3691,6 +3691,8 @@ whose a2g is the old one): a2g's programs G1 = G2 = G3, **G1 = G2 = G3 byte for 
   3 to 4 s of a2g's 70 to 100; (b) a fifth round on `main.ae`'s part and the walk. *Recommended:
   (a)*; nothing built.
 
+**Decided (2026-10-16, the user):** SA250 (a).
+
 ### Left
 
 - The scan's 2.1 to 2.3 s are now its real work: instantiation (the implementations of the
