@@ -3246,6 +3246,8 @@ bytes).
   *Recommended: (a)*: only an error while a namespace loads shows it, and the line (`Compiler$AOT/at`)
   is the same.
 
+**Decided (2026-10-16, the user):** SA210 (a), SA211 (a), as built.
+
 ## The build's speed, third round, part B: a2g's sequential load (2026-10-16)
 
 The lead's order (the third round, part B): the sequential part of a2g's load after the compiled
@@ -3333,3 +3335,5 @@ oracle 22,508 of 22,561, the 53 known, 0 new).
   in parallel by a2g as they are; (c) a2g splits the largest files' forms itself, with the
   reader's columns corrected after. Recommended: (b), with part A's split of the loader (the
   compiled tree's shape is the back end's; (c) depends on the reader's metadata).
+
+**Decided (2026-10-16, the user):** SA220 (b), to build.
