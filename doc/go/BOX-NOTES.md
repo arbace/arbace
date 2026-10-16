@@ -3322,12 +3322,28 @@ for byte" and "S8 in the emulated arm64 VM on the final program, byte for byte")
   on the Mac against 785 s in the amd64 box (nested KVM). The whole chain on arm64 hardware holds.
 
 So S8's exit criterion holds on the final program: byte for byte on amd64, in the emulated arm64
-VM and on the Mac. The whole chain in the VM (BX117 (a)) is running since 2026-10-14 22:49 (the
-namespaces compiled in 8,839 s; no result yet, as of 2026-10-15). On 2026-10-16 05:45, 28.5 h
-into a2g's step (the user: kept running): in the VM, the a2g tool guest's process 8 d 16 h of
-CPU (about 250 times the amd64 box's a2g of 303 s wall), 13.6 GB resident and flat; the
+VM and on the Mac. The whole chain in the VM (BX117 (a)) ran from 2026-10-14 22:49 (16 vCPUs,
+28 GiB). On 2026-10-16 05:45, 28.5 h into a2g's step (the user: kept running): in the VM, the a2g
+tool guest's process 8 d 16 h of CPU (about 250 times the amd64 box's a2g of 303 s wall), 13.6 GB resident and flat; the
 requesting guest, waiting on the spawn, 3.5 of the VM's 16 vCPUs (5 d 3 h of CPU): its wait is
 not idle under emulation, to look at (WFI or the event area polled).
+
+**BX117 (a), the result (2026-10-16 15:24, at `434021a`): the whole chain in the emulated arm64
+VM, nothing given, built the image byte for byte as the arm64 host step did:**
+`5e4506dee1c54183640df087a18e2508490741ac1da6a424618ce69237708000`, 98,464,042 bytes, booted by its
+ref ("arbace-seed-is-go-v1-154-g434021a aarch64"), in 145,762 s (40 h 29 min; the host step
+591 s, about 247 times). Every step's tree equal to the host's (`:src`, `:aot`, `:prog`, the
+printed GOROOT and program, `:goroot`, `:goos`, `:mod`, `:plan`, `:version`, `:image1`,
+`:image-bin`, `:linked`, `:image`) but `:a2g`, a2g's whole output, whose `report.edn` holds its
+timings (the program in it, `:prog`, equal). The steps in the VM: the namespaces compiled 8,839 s;
+a2g 103,558 s (load 19,495, reach 13,151, translate 32,364, write 19,012; on the host 73, 22, 38,
+23: 266 to 840 times); the two printings 4,926 s and 10,623 s; the plan (280 packages); the
+compiles, `arbace/jrt` alone 14,851 s and `arbace/lang` 1,380 s; the link 155 s; the namespaces
+prepared by the first image 39 s; the second link 146 s. `compare`'s exit status was 1 only by its
+last check, that `target/arbace-go`'s program is these sources' (main had moved on from
+`434021a`; at the host step it was): the steps' comparison itself, box against host, all equal.
+So the whole chain holds on arm64 three ways: in the emulated VM from nothing, with the amd64
+box's results given (BX117 (b)), and on the Mac.
 
 ### The milestone (2026-10-15, `c3fdd36`)
 
@@ -3342,7 +3358,6 @@ packages. Tagged `arbace-inside-itself-v1` on main (`e0ad476`).
 
 ### Left
 
-- The whole chain in the VM (BX117 (a)): running since 2026-10-14 (no result yet).
 - The guests' peak memory per step is not measured (the launcher's statistics report counts,
   not a guest's touched pages); BX116's sizes are SA101's and S7's.
 - `bin/box-rebuild` stays out of `bin/gate --full`, run by hand at milestones (BX119).

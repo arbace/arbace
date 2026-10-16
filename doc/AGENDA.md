@@ -67,10 +67,10 @@ The current state of the work. This file is rewritten as things change. For the 
   index (SA190; its step about 8 s, was 18 to 21), `jrt` not split (SA180). SA164, SA180, SA181,
   SA190, SA191 decided (a). The seed remade after S9's merge (`9b2a4687…`, was `79d4f552…`) and
   verified: stage 0 = G1 = G2 = G3 (`2ee89825…`).
-- Running: the whole chain in the emulated arm64 VM, nothing given (BX117 (a), at `434021a`,
-  since 2026-10-14 22:49; the user keeps it running: 28.5 h into a2g's step on 2026-10-16, no
-  progress visible from outside); recorded when it ends. Seen there: the guest waiting on a spawn
-  takes 3.5 vCPUs under emulation (BOX-NOTES.md, BX117).
+- Done (2026-10-16): the whole chain in the emulated arm64 VM, nothing given (BX117 (a), at
+  `434021a`): the image built in the box = the arm64 host step's, byte for byte (`5e4506de…`),
+  in 40 h 29 min (about 247 times the host's 591 s; a2g alone 28.8 h). Seen there: the guest
+  waiting on a spawn takes 3.5 vCPUs under emulation (BOX-NOTES.md, BX117), to look at.
 - The Mac may move to macOS 26 (the user).
 
 ## Next

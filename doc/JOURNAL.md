@@ -243,3 +243,18 @@ essential gate's first step (`makefile`); CLAUDE.md states the rule. The heavy l
 (`.tmp/heavy`) is not in it (`.tmp/heavy make gate`). Alternatives: a `justfile` (a tool apk
 would add), no check (the Makefile would drift), the Makefile carrying logic (two places to
 maintain). The README's build section names the main targets.
+
+## 2026-10-16: the whole chain in the emulated arm64 VM (BX117 (a))
+
+`bin/box-rebuild --arch arm64` at `434021a`, the whole chain in the box inside the emulated
+aarch64 VM with KVM/arm64 (`bin/box-arm64-vm`, 16 vCPUs, 28 GiB), nothing given, kept running by
+the user's choice: started 2026-10-14 22:49, ended 2026-10-16 15:24. The image built in the box
+equals the arm64 host step's byte for byte: `5e4506dee1c54183640df087a18e2508490741ac1da6a424618ce69237708000`
+(98,464,042 bytes), booted by its ref ("arbace-seed-is-go-v1-154-g434021a aarch64"), in 145,762 s
+against the host's 591 s (about 247 times). Every step's tree equals the host's but a2g's whole
+output, whose `report.edn` holds its timings (its program equal). a2g took 103,558 s of it,
+`arbace/jrt`'s compile 14,851 s. `compare` exited 1 only on its last check (that
+`target/arbace-go` is built from these sources: main had moved on since); the steps were compared
+by hand from `box-steps.edn` and `host-steps.edn`. The chain thus holds on arm64 from nothing in
+the VM, as with the amd64 box's results given (BX117 (b)) and on the Mac. Details in
+doc/go/BOX-NOTES.md, BX117. Open: the waiting guest's 3.5 vCPUs under emulation.
