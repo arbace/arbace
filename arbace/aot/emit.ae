@@ -16,7 +16,8 @@
     each arity an invoke method (doInvoke for the variadic one), its constants static fields;
   - a source's top-level forms are the static methods of its loader class SCRIPTBASE__init
     (arbace.walk__init), whose load() runs them in order; Compiler$AOT/load calls it in the
-    bindings Compiler.load makes;
+    bindings Compiler.load makes; past loader-part-units units, in parts, static member
+    classes SCRIPTBASE__init$partP (SA210);
   - each Expr becomes the class forms code its emit method's bytecode is: interop on the
     analyzer's resolved members (param-tags pin the overload), reflection where it was
     unresolved, Clojure's boxing and conversions (emitBoxReturn, emitTypedArgs)."
@@ -133,12 +134,19 @@
   no -, so no local, name__index, can shadow it)."
   [ctx v ctype]
   (let [cls (:cls ctx)
-        ^IdentityHashMap m (:const-map @cls)]
+        ^IdentityHashMap m (:const-map @cls)
+        ;; a part of a split loader (SA210): the constants its source's earlier parts made,
+        ;; by value, as their fields' qualified names
+        ^IdentityHashMap prev (:prev @cls)]
     (or (.get m v)
         (let [n (count (:consts @cls))
-              s (symbol (str (:const-prefix @cls) "const-" n))]
+              s (symbol (str (:const-prefix @cls) "const-" n))
+              ;; one an earlier part made: a field of this part too, set from that part's (one
+              ;; object, as unsplit; read here unguarded)
+              alias (when prev (.get prev v))]
           (.put m v s)
-          (swap! cls update :consts conj [s ctype v])
+          (when (and prev (not alias)) (.put prev v (symbol (:name @cls) (name s))))
+          (swap! cls update :consts conj [s ctype v alias])
           s))))
 
 (declare emit-value)
@@ -330,32 +338,37 @@
       sb)))
 
 (defn- pool-fields
-  "The static fields of constants consts ([sym type value] ...): the pool's array, decoded
-  once (Compiler$AOT/pool), then each constant's field, its element."
+  "The static fields of constants consts ([sym type value alias] ...): the pool's array, decoded
+  once (Compiler$AOT/pool), then each constant's field, its element, or for one with an alias
+  (a split loader's constant an earlier part made, SA210) that part's field."
   [consts]
   (when (seq consts)
-    (let [;; the keywords and symbols of the values, first met first (depth first)
+    (let [pooled (vec (remove #(nth % 3 nil) consts))
+          ;; the keywords and symbols of the values, first met first (depth first)
           seen (java.util.LinkedHashSet.)
           walk (fn walk [v]
                  (when (pool-shared? v) (.add seen v))
                  (run! walk (pool-parts v)))
-          _ (doseq [[_ _ v] consts] (walk v))
+          _ (doseq [[_ _ v] pooled] (walk v))
           sh (vec seen)
           shared (into {} (map-indexed (fn [i v] [v i]) sh))
           sb (StringBuilder.)
           _ (doseq [v sh] (pool-encode sb {} v))
           base (count sh)
           ;; a constant that is itself a shared value is that entry
-          _ (doseq [[_ _ v] consts] (pool-encode sb shared v))
-          n (+ base (count consts))]
-      (cons (list 'field (tagged (with-meta 'const-pool {:static true :final true :private true}) (class (object-array 0)))
-                  (list (with-meta 'arbace.lang.Compiler$AOT/pool {:param-tags '[java.lang.String int]})
-                        (str sb) (list 'unchecked-int n)))
-            (map-indexed (fn [i [s t _]]
-                           (list 'field (tagged (with-meta s {:static true :final true :aot/nn true}) t)
-                                 (let [e (list 'aget 'const-pool (list 'unchecked-int (+ base i)))]
-                                   (if (= t 'java.lang.Object) e (list 'cast t e)))))
-                         consts)))))
+          _ (doseq [[_ _ v] pooled] (pool-encode sb shared v))
+          n (+ base (count pooled))
+          index (into {} (map-indexed (fn [i [s]] [s i]) pooled))]
+      (concat
+        (when (seq pooled)
+          [(list 'field (tagged (with-meta 'const-pool {:static true :final true :private true}) (class (object-array 0)))
+                 (list (with-meta 'arbace.lang.Compiler$AOT/pool {:param-tags '[java.lang.String int]})
+                       (str sb) (list 'unchecked-int n)))])
+        (for [[s t _ alias] consts]
+          (list 'field (tagged (with-meta s {:static true :final true :aot/nn true}) t)
+                (or alias
+                    (let [e (list 'aget 'const-pool (list 'unchecked-int (+ base (index s))))]
+                      (if (= t 'java.lang.Object) e (list 'cast t e))))))))))
 
 (defn- const-type [v]
   (cond (var? v) 'arbace.lang.Var
@@ -1321,6 +1334,12 @@
       (= "def" (:op n)) (.-ns ^Var (:var n))
       :else nil)))
 
+(def loader-part-units
+  "The most units a source's loader class holds itself; a source of more is split into parts of
+  as many (SA210): a2g analyzes classes in parallel, one class on one thread (arbace.core's 903
+  units were one task of 9 to 14 s, the last of the analysis)."
+  100)
+
 (defn emit-source
   "The class forms of source path src (scriptbase.ae), compiled from its units: the loader
   class SCRIPTBASE__init's form and the fn classes made, into the atom classes (fn-names: the
@@ -1328,23 +1347,59 @@
   [classes runtime-classes fn-names pools src units]
   (let [base (subs src 0 (.lastIndexOf ^String src "."))
         lname (str (str/replace base "/" ".") "__init")
-        cls (pool {:pools pools} lname)
         ;; the source's file name, its classes' source file in stack traces (:aot/source)
         file (subs src (inc (.lastIndexOf ^String src "/")))
-        ctx {:classes classes :runtime-classes runtime-classes :cls cls :fn-names fn-names :pools pools
+        ctx {:classes classes :runtime-classes runtime-classes :fn-names fn-names :pools pools
              :source file}
-        ms (vec (map-indexed (fn [k [u um]]
-                               ;; the analysis resolved tags lazily, against *ns*: the unit's
-                               ;; namespace while it is emitted
-                               (binding [*ns* (or (unit-ns u) *ns*)]
-                                 (deep (unit-method (assoc ctx :unchecked-math um) k u))))
-                             units))]
-    {:name lname
-     :form (concat (list 'defclass (with-meta (symbol lname) {:public true :final true :aot/source file}))
-                   (pool-fields (:consts @cls))
-                   ms
-                   [(list 'method (with-meta 'load {:public true :static true}) []
-                          (concat (list 'do) (for [k (range (count ms))] (list (symbol lname (str "unit" k)))) [nil]))])}))
+        ;; the methods of the units ks, their constants in pool cls, in order
+        unit-methods (fn [cls ks]
+                       (mapv (fn [k]
+                               (let [[u um] (nth units k)]
+                                 ;; the analysis resolved tags lazily, against *ns*: the unit's
+                                 ;; namespace while it is emitted
+                                 (binding [*ns* (or (unit-ns u) *ns*)]
+                                   (deep (unit-method (assoc ctx :cls cls :unchecked-math um) k u)))))
+                             ks))
+        calls (fn [cname ks] (for [k ks] (list (symbol cname (str "unit" k)))))
+        n (count units)]
+    (if (<= n loader-part-units)
+      (let [cls (pool {:pools pools} lname)
+            ms (unit-methods cls (range n))]
+        {:name lname
+         :form (concat (list 'defclass (with-meta (symbol lname) {:public true :final true :aot/source file}))
+                       (pool-fields (:consts @cls))
+                       ms
+                       [(list 'method (with-meta 'load {:public true :static true}) []
+                              (concat (list 'do) (calls lname (range n)) [nil]))])})
+      ;; split (SA210): the units in parts of at most loader-part-units, each a static member
+      ;; class SCRIPTBASE__init$partP with its units and their constants (an object an earlier
+      ;; part met is a field set from that part's: one object, as unsplit), which a2g analyzes in
+      ;; parallel (the analysis of one class is sequential); load initializes the parts in
+      ;; order, so that every constant is made before the first unit runs, as unsplit, then
+      ;; runs their units in order
+      (let [prev (IdentityHashMap.)
+            parts (vec (for [[p ks] (map-indexed vector (partition-all loader-part-units (range n)))]
+                         (let [pname (str lname "$part" p)
+                               cls (atom {:name pname :consts [] :const-map (IdentityHashMap.) :const-prefix "" :prev prev})
+                               ms (unit-methods cls ks)]
+                           {:name pname
+                            :form (vary-meta
+                                    (concat (list 'defclass (with-meta (symbol (str "part" p))
+                                                              {:static true :final true :aot/source file}))
+                                            (pool-fields (:consts @cls))
+                                            ms
+                                            [(list 'method (with-meta 'init {:static true}) [] nil)
+                                             (list 'method (with-meta 'load {:static true}) []
+                                                   (concat (list 'do) (calls pname ks) [nil]))])
+                                    assoc :aot/line (:aot/line (meta (first ms))))})))]
+        {:name lname
+         :form (concat (list 'defclass (with-meta (symbol lname) {:public true :final true :aot/source file}))
+                       (map :form parts)
+                       [(list 'method (with-meta 'load {:public true :static true}) []
+                              (concat (list 'do)
+                                      (for [{pn :name} parts] (list (symbol pn "init")))
+                                      (for [{pn :name} parts] (list (symbol pn "load")))
+                                      [nil]))])}))))
 
 ;; ---------------------------------------------------------------------------------------
 ;; the holder classes: fn classes nested as their names nest
