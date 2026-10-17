@@ -460,3 +460,28 @@ bridge; a2g between two Arbace dialects), schemes A (the user's bridges `jaf`/`g
 print, translators `cf2gf`, `clj2ae`), A', B (long names), C (x2y), the rename's impact (6,959
 occurrences in 1,299 files, 225 paths; a re-seed), the 2026-10-11 precedent; proposals N1-N13,
 open.
+
+## 2026-10-17: the survey of Futamura's projections
+
+The user's choice (2026-10-16): doc/FUTAMURA-SURVEY.md, written on the branch `futamura-survey`
+(`5f4c3a6`); the document taken into main, its experiment (`test/futamura/`: it patches the
+seed's printed program) kept on that branch. Findings: Arbace has the projections' pairs made by
+hand: the evaluator's closure compiler is the first projection done by hand at run time,
+`arbace.aot.emit` the same ahead of time, a2g a compiler beside the class forms' interpreter;
+each pair shares its analysis and writes its back half twice (about 3,200 lines against 1,470;
+3,935 against 2,227), and no check compares the two halves on the same form. The experiment
+rebuilt the back end's Go for `fib` and `loop-long` in the seed's program (6.40 and 11.87 ms, as
+SA139's 6.36 and 12.21): on `fib` the call path is 13% and `Numbers`' boxed generic operations
+78%; a `Long` fast path 6.40 → 1.44 ms, with var speculation 0.78, with an unboxed worker behind
+type guards 0.168 (the JVM 0.16); on `loop-long` the class-initialization guard pushes even
+`x < y` past Go's inlining budget (81 against 80): inlined with the guards 2.81 ms, without them
+1.09 (the JVM 0.41); fns as Go closures (SA156 (c)) change no speed (6.46). The prepare run is a
+snapshot of the loaded program (3,161 vars, 2,601 holding fns, 108 dynamic), as Wizer and weval
+use one; Clojure's direct linking is the precedent for static var roots. The second projection
+by self-application is judged unrealistic for Java's semantics; one definition of the semantics
+is reachable by staging (LMS, "Collapsing towers of interpreters", Truffle's DSL). Proposals
+F1-F11, open: staging as the approach (F1), per-form differential checks (F2), arithmetic fast
+paths (F3), no initialization guards for classes initialized at start (F4), guarded direct
+linking (F5), primitive fns then unboxed workers (F6), a `defnode` prototype (F7), the class
+forms' pair kept with F2 (F8), closures later (F9), inline caches in the REPL (F10), the records
+(F11).

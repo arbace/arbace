@@ -95,8 +95,10 @@ The current state of the work. This file is rewritten as things change. For the 
 ## Next
 
 - The naming survey written (doc/NAMING-SURVEY.md): proposals N1-N13 open for the user.
-- Running: the survey of Futamura's projections (doc/FUTAMURA-SURVEY.md, branch
-  `futamura-survey`; the user's choice, 2026-10-16).
+- The survey of Futamura's projections written (doc/FUTAMURA-SURVEY.md; its experiment on the
+  local branch `futamura-survey`): proposals F1-F11 open for the user. Measured there: `fib`
+  6.40 → 0.168 ms (the JVM 0.16) by a `Long` fast path, var speculation and an unboxed worker;
+  `loop-long` 11.87 → 1.09 ms without the class-initialization guards.
 - Smaller: the box's checks on the Mac on macOS 26.
 
 ## Later
