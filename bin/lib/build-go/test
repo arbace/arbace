@@ -1,0 +1,105 @@
+#!/bin/bash
+# The tests of the program build (bin/build-go, arbace.build.go, doc/go/BUILD.md): each
+# program test/build/go/PROG (Go forms) is built for linux/amd64 and linux/arm64 and
+#   - checked static and for the architecture (tools/elfstatic, Go's debug/elf: an ELF executable
+#     for ARCH, no interpreter, no dynamic segment or section; until 2026-10-16 file(1) and
+#     binutils' readelf),
+#   - built a second time from a copy of PROG at another path, with --line-file layout too,
+#     and compared byte for byte (reproducibility),
+#   - run on each case PROG/runs/NAME.args (the arguments, one per line), stdin NAME.in (none:
+#     empty), natively on amd64 and under QEMU's user mode (/usr/bin/qemu-aarch64, or
+#     $QEMU_AARCH64) on arm64: stdout must equal NAME.out, the exit code NAME.code (default 0),
+#     and stderr begin with NAME.err (none: stderr empty).
+#
+# Usage: bin/build-go test [--arch amd64|arm64]... [PROG...]
+# Environment: ARBACE_GOROOT (default /root/tamago-go), as bin/build-go. Work in .tmp/build-go-tests/.
+set -euo pipefail
+export CGO_ENABLED=0 # Go's builds never use cgo (doc/go/BOX-NOTES.md, "... cgo dropped", 2026-10-16)
+root=$(cd "$(dirname "$0")/../../.." && pwd)
+. "$root/bin/lib/renamed-env.bash" # stops on a stale G2A_*, J2A_* or A2G_*
+qemu=${QEMU_AARCH64:-/usr/bin/qemu-aarch64}
+out=$root/.tmp/build-go-tests
+archs=()
+progs=()
+while [ $# -gt 0 ]; do
+  case $1 in
+    --arch) archs+=("$2"); shift 2 ;;
+    -*) sed -n '2,/^set -/p' "$0" | sed '$d; s/^# \{0,1\}//' >&2; exit 2 ;;
+    *) progs+=("$1"); shift ;;
+  esac
+done
+[ ${#archs[@]} -gt 0 ] || archs=(amd64 arm64)
+if [ ${#progs[@]} -eq 0 ]; then
+  for d in "$root"/test/build/go/*/; do progs+=("$(basename "$d")"); done
+fi
+
+rm -rf "$out"
+mkdir -p "$out/copy"
+goroot=${ARBACE_GOROOT:-/root/tamago-go}
+(cd "$root/tools/elfstatic" && env -u GOOS -u GOARCH GOROOT="$goroot" GOTOOLCHAIN=local GOFLAGS= GOWORK=off \
+   GOPROXY=off "$goroot/bin/go" build -o "$out/elfstatic" .)
+pass=0
+fails=0
+fail() { echo "FAIL $*"; fails=$((fails + 1)); }
+ok() { pass=$((pass + 1)); }
+
+for prog in "${progs[@]}"; do
+  src=$root/test/build/go/$prog
+  [ -d "$src/go" ] || { fail "$prog: no $src/go"; continue; }
+  # the same program at another path, for the reproducibility check
+  cp -r "$src" "$out/copy/$prog"
+  for arch in "${archs[@]}"; do
+    exe=$out/$arch/$prog
+    mkdir -p "$out/$arch"
+    t0=$(date +%s.%N)
+    if ! "$root/bin/build-go" --arch "$arch" -o "$exe" "$src" > "$exe.log" 2>&1; then
+      cat "$exe.log"
+      fail "$prog $arch: build"
+      continue
+    fi
+    t1=$(date +%s.%N)
+    ok
+    # static, and for the architecture: no interpreter, no dynamic segment or section
+    if info=$("$out/elfstatic" "$arch" "$exe" 2>&1); then ok; else fail "$prog $arch: $info"; fi
+    # reproducible: from another path, byte for byte; --line-file too
+    "$root/bin/build-go" --arch "$arch" -o "$exe.again" "$out/copy/$prog" > "$exe.again.log" 2>&1 \
+      && cmp -s "$exe" "$exe.again" && ok || fail "$prog $arch: a second build differs"
+    "$root/bin/build-go" --arch "$arch" --line-file -o "$exe.lf" "$src" > "$exe.lf.log" 2>&1 \
+      && "$root/bin/build-go" --arch "$arch" --line-file -o "$exe.lf.again" "$out/copy/$prog" > "$exe.lf.again.log" 2>&1 \
+      && cmp -s "$exe.lf" "$exe.lf.again" && ok || fail "$prog $arch: a second --line-file build differs"
+    run=()
+    [ "$arch" = arm64 ] && run=("$qemu")
+    ncases=0
+    for args_file in "$src"/runs/*.args; do
+      [ -e "$args_file" ] || continue
+      name=$(basename "$args_file" .args)
+      base=${args_file%.args}
+      mapfile -t args < "$args_file"
+      stdin=$base.in
+      [ -f "$stdin" ] || stdin=/dev/null
+      set +e
+      timeout 60 "${run[@]}" "$exe" "${args[@]}" < "$stdin" > "$out/$arch/$prog.$name.out" 2> "$out/$arch/$prog.$name.err"
+      code=$?
+      set -e
+      want=0
+      [ -f "$base.code" ] && want=$(cat "$base.code")
+      bad=""
+      [ "$code" = "$want" ] || bad="exit $code, expected $want"
+      cmp -s "$base.out" "$out/$arch/$prog.$name.out" || bad="$bad${bad:+; }stdout differs (diff $base.out $out/$arch/$prog.$name.out)"
+      if [ -f "$base.err" ]; then
+        n=$(stat -c %s "$base.err")
+        head -c "$n" "$out/$arch/$prog.$name.err" | cmp -s "$base.err" - ||
+          bad="$bad${bad:+; }stderr does not begin with $base.err ($out/$arch/$prog.$name.err)"
+      elif [ -s "$out/$arch/$prog.$name.err" ]; then
+        bad="$bad${bad:+; }stderr not empty ($out/$arch/$prog.$name.err)"
+      fi
+      if [ -n "$bad" ]; then fail "$prog $arch $name: $bad"; else ok; fi
+      ncases=$((ncases + 1))
+    done
+    printf '%s %s: %d bytes, %s, built in %.1f s, %d runs%s\n' "$prog" "$arch" "$(stat -c %s "$exe")" \
+      "$(sha256sum "$exe" | cut -c1-16)" "$(echo "$t1 - $t0" | bc)" "$ncases" \
+      "$([ "$arch" = arm64 ] && echo " (under $(basename "$qemu"))")"
+  done
+done
+echo "build-go tests: $pass passed, $fails failed"
+[ "$fails" -eq 0 ]

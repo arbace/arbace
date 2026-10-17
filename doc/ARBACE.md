@@ -1,16 +1,19 @@
 # arbace/
 
 What `arbace/` holds (all `.ae`, Arbace's source extension since 2026-10-11: Clojure plus the
-class forms, which Clojure cannot evaluate; VENDOR-NOTES.md, hand change 19): Arbace's Clojure
+Java forms, which Clojure cannot evaluate; VENDOR-NOTES.md, hand change 19): Arbace's Clojure
 code. Three kinds of things live here:
 
-- Arbace's own tools: `classes/` (the class forms' analysis and the Go build's interpreter of
+- Arbace's own tools: `classes/` (the Java forms' analysis and the Go build's interpreter of
   them, `arbace.classes.*`; the bytecode back end is on the branch `arbace-for-java-26`), `c2a/` (the
-  Clojure to Arbace translator, `arbace.c2a.*`; doc/C2A.md), `j2a/`
-  (the Java to class forms converter, `arbace.j2a.*`), `g2a/` (Go to Arbace forms,
-  `arbace.g2a.*`, with its Go helpers under `tools/godump/` and `tools/gocmp/`; doc/go/) and
-  `a2g/` (the class forms to Go forms translator of the Go build, `arbace.a2g.*`;
-  doc/go/A2G-SPEC.md), `aot/` (the back end compiling namespaces to class forms, `arbace.aot.*`;
+  Clojure to Arbace translator, `arbace.c2a.*`; doc/C2A.md), `repr/java.ae`
+  and `repr/java/` (repr/java, the Java to Java forms converter, `arbace.repr.java` and
+  `arbace.repr.java.*`), `repr/go.ae` and `repr/go/` (repr/go, Go to Go forms and back,
+  `arbace.repr.go` and `arbace.repr.go.*`, with its Go helpers under `tools/godump/` and
+  `tools/gocmp/`; doc/go/), `build/go.ae` (the build of a program held as Go forms,
+  `arbace.build.go`; doc/go/BUILD.md; until 2026-10-17 j2a, g2a and `arbace.g2a.build`) and
+  `j2g/` (the Java forms to Go forms translator of the Go build, `arbace.j2g.*`;
+  doc/go/J2G-SPEC.md), `aot/` (the back end compiling namespaces to Java forms, `arbace.aot.*`;
   doc/STANDALONE-NOTES.md, "S6: Arbace compiled to Go").
 - Arbace's own namespaces of the program, not derived from Clojure: `box.ae` and `box/`
   (`arbace.box`, the store, over its host layer `arbace.box.host`; the box's build driver
@@ -26,12 +29,12 @@ code. Three kinds of things live here:
   `arbace.lang.Main` (`lang/Main.ae`). A few files among them are Arbace's own, not derived from
   Clojure, and say so in their header (`lang/KeywordInvokeSite.ae`,
   `lang/ReflectorCallSite.ae`). `lang/go/` holds only the Go build's generated variants of `Compiler`,
-  `CompilerOps.ae` (by `test/a2g/eval_ops.ae`) and `CompilerAOTFn.ae` (by `test/aot/gen_fns.ae`);
+  `CompilerOps.ae` (by `test/j2g/eval_ops.ae`) and `CompilerAOTFn.ae` (by `test/aot/gen_fns.ae`);
   the hand-written variants it held of `RT`, `Main` and `Compiler` were merged into their bases
   (SA150).
 
 ASM (`asm.ae`, `asm/`, Clojure's `clojure.asm` renamed `arbace.asm`), the JVM's bytecode back end
-of `lang/Compiler.ae` and of the class forms compiler (`classes/emit.ae` ...), `lang/Compile.ae`,
+of `lang/Compiler.ae` and of the Java forms compiler (`classes/emit.ae` ...), `lang/Compile.ae`,
 `lang/DynamicClassLoader.ae` and `lang/Intrinsics.ae` left main on 2026-10-12 with the JVM build
 (doc/STANDALONE-NOTES.md, S4: the JVM removed); they remain on the branch `arbace-for-java-26`,
 whose `doc/ARBACE.md` records ASM's origin (below). The namespaces `genclass.ae`,
@@ -45,7 +48,7 @@ https://github.com/clojure/clojure at `98d735fab02f337cee654cb0629bddc09883a75a`
 the two seed fixes recorded in the journal on that branch
 ([JOURNAL.md](https://github.com/arbace/arbace/blob/arbace-for-java-26/doc/JOURNAL.md),
 2026-10-06). It was derived on 2026-10-07 by `bin/vendor-arbace` (on that branch; converter
-`arbace.j2c`, renaming `arbace.j2c.rename`; since renamed `arbace.j2a` and `arbace.c2a.rename`) and is maintained by hand since.
+`arbace.j2c`, renaming `arbace.j2c.rename`; since renamed `arbace.j2a` (2026-10-11), then `arbace.repr.java` (2026-10-17), and `arbace.c2a.rename`) and is maintained by hand since.
 
 Also vendored, renamed alike: clojure.spec, the two libraries upstream Clojure at that revision
 depends on (`pom.xml`), as `arbace.spec.alpha`, `arbace.spec.gen.alpha`, `arbace.spec.test.alpha`

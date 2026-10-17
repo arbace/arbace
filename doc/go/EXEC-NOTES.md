@@ -13,7 +13,7 @@ Go by default (`ARBACE_AOT=1`); the image holds only what stays evaluated (a sou
 cannot compile), and all of them with `ARBACE_AOT=0`. The sections below are as built.
 
 ```
-$ bin/arbace-go --build                    # a2g, the Go builds, the image, the links
+$ bin/arbace-go --build                    # j2g, the Go builds, the image, the links
 $ target/arbace-go/amd64/arbace -e '(+ 1 2)'
 3
 $ echo '(doc inc)' | target/arbace-go/amd64/arbace
@@ -86,7 +86,7 @@ program writes the image at exit; the build embeds it (the main package's `image
 `//go:embed`) and links the executables again.
 
 **The encoding** (`go/arbace/cmd/arbace/image.ae`, the main package, which knows every type of
-the program: a2g generates its table, `image_types.go`). A source's units are one stream; its
+the program: j2g generates its table, `image_types.go`). A source's units are one stream; its
 objects are numbered in order of first encounter, so the graph's sharing (a `LocalBinding` used
 by many nodes, a form's metadata) and cycles survive, also between units. Each object is:
 
@@ -134,9 +134,9 @@ the image's skipped fields. Start went from 0.33 s to 0.21 s, preparing the imag
 
 `bin/arbace-go --build` (amd64 and arm64 by default, `ARBACE_GO_ARCHES`):
 
-1. `bin/a2g --program` writes the program: the main package now has `image.go` (copied from
+1. `bin/j2g --program` writes the program: the main package now has `image.go` (copied from
    `go/arbace/cmd/arbace/image.ae`), `image_types.go` (generated) and an empty `image.bin`;
-2. `bin/g2a build` for each architecture, the host's first;
+2. `bin/build-go` for each architecture, the host's first;
 3. the host's executable prepares the namespaces (`ARBACE_PREPARE`; about 35 s at step 6, 11 s since EC6; all 41
    embedded sources, 27 namespaces);
 4. each executable is linked again with the image (`go build` in the printed module: only the
@@ -211,7 +211,7 @@ below.
 
 **When.** The main package's `main` calls `execRlwrap` first, before jrt's host is set and the
 image is replayed (`rlwrap_linux.go`, hand-written forms `go/arbace/cmd/arbace/rlwrap_linux.ae`,
-copied by `bin/a2g --program` beside `image.ae`). It replaces the process with rlwrap only when
+copied by `bin/j2g --program` beside `image.ae`). It replaces the process with rlwrap only when
 all of these hold, else it returns and the program runs as before, silently:
 
 1. `ARBACE_RLWRAP` is not `off` (the user's switch) and not `wrapped` (the marker the
@@ -265,16 +265,16 @@ would execute the arm64 executable directly.
 
 The smoke test itself is fast: `ARBACE_GO_ARCHES=amd64 bin/arbace-go --smoke` takes 3.5 s. Getting
 an executable is not. After the bootstrap, the chain is `bin/jrt-convert` (about 95 s; its output
-`.tmp/jrt/conv` is what `bin/a2g` translates), `bin/a2g --program` (about 75 s), `bin/g2a build`
+`.tmp/jrt/conv` is what `bin/j2g` translates), `bin/j2g --program` (about 75 s), `bin/build-go`
 amd64 (60 s of CPU with Go's build cache warm, minutes cold), the image (32 s then; 11 s since EC6) and the link (a
 few seconds): 4 to 5 minutes, against the 3.2 minutes the suite on stage 2 runs concurrently. It
 would add 1 to 2 minutes to the essential gate, and load the machine beside the suite. So, by the
 rule given, `bin/gate` is not changed. Options for the user:
 
-1. **The chain in the essential gate**, concurrently with the suite and the class forms tests:
+1. **The chain in the essential gate**, concurrently with the suite and the Java forms tests:
    +1 to 2 minutes, about 10 GB more at its peak.
 2. **A cached executable**: the gate keys the executable by the hash of its inputs (the git tree
-   hashes of `arbace/`, `go/`, `overlay/`, `test/jrt`, the scripts `bin/a2g`, `bin/g2a`,
+   hashes of `arbace/`, `go/`, `overlay/`, `test/jrt`, the scripts `bin/j2g`, `bin/repr-go`,
    `bin/jrt-convert`, `bin/arbace-go`, and the toolchain's version) and builds only when the key
    changed; a change to docs or tests costs seconds, a change to Arbace's sources the chain of 1.
    (`bin/jrt-convert`'s output can be cached the same way by its own inputs, saving 95 s of
@@ -290,11 +290,11 @@ check `go` runs `bin/arbace-go --gate`, concurrently with the suite on stage 2 a
 forms tests (not with `--full`, whose Go chain builds and smoke-tests anew). It computes a key,
 the SHA-256 of the contents of `arbace/`, `go/`, `overlay/` and `bin/lib/`, of
 `doc/go/java-surface.edn` and `test/jrt/jrt_sources.ae` (JC10), the seed's hash and the
-scripts of the build (`bin/arbace-go`, `a2g`, `g2a`, `j2a`, `jrt`, `jrt-convert`, `arbace-j`
+scripts of the build (`bin/arbace-go`, `j2g`, `repr-go`, `build-go`, `repr-java`, `jrt`, `jrt-convert`, `arbace-j`
 (then `arbace`), `build-arbace`), and of the toolchains (TamaGo's
 `VERSION`, `java -version`, jdk26u's commit): about 0.1 s. When `.tmp/arbace-go-gate/key` holds
 that key, it smoke-tests `.tmp/arbace-go-gate/amd64/arbace` (`--smoke` on amd64); otherwise it
-runs `bin/jrt-convert`'s steps `sources,generate,convert` (what `bin/a2g` reads: the javac
+runs `bin/jrt-convert`'s steps `sources,generate,convert` (what `bin/j2g` reads: the javac
 comparison, the check and the report are `--full`'s) and `--build` for amd64, copies the
 executable and the key into the cache, and smoke-tests it. Measured on this machine (shared):
 
@@ -308,11 +308,11 @@ At the first miss the machine's peak memory use was 25 GB of 62 (the suite's 24 
 forms tests, and the build's JVMs and `go build` beside them); during the second pair of runs,
 with other agents' work beside, it reached 40 GB, 6 GB left available.
 
-**Since standalone S1** (2026-10-12; JRT-SOURCES.md, "The committed forms"): the JDK's class forms
-and resource data are sources, `jdk/`, and `bin/a2g` reads them there. A miss no longer runs
+**Since standalone S1** (2026-10-12; JRT-SOURCES.md, "The committed forms"): the JDK's Java forms
+and resource data are sources, `jdk/`, and `bin/j2g` reads them there. A miss no longer runs
 `bin/jrt-convert` (about 75 s less); the key hashes `jdk/` with `arbace/`, `go/`, `overlay/` and
 `bin/lib/`, and drops what only the conversion read: `doc/go/java-surface.edn`,
-`test/jrt/jrt_sources.ae`, `bin/j2a`, `bin/jrt-convert` and jdk26u's commit (a change to them
+`test/jrt/jrt_sources.ae`, `bin/repr-java`, `bin/jrt-convert` and jdk26u's commit (a change to them
 changes the build only through `bin/jrt-convert update`, which rewrites `jdk/`).
 
 ## Results
@@ -333,9 +333,9 @@ changes the build only through `bin/jrt-convert update`, which rewrites `jdk/`).
   `arbace.core` loads `core.ae` again from another namespace, and the boot `ns` macro sets
   `*ns*` while it expands, which the image did not replay: the `ns` event.)
 - `bin/arbace-go --smoke`: amd64 and arm64 (`qemu-aarch64`) pass.
-- `bin/jrt test` (amd64) passes; `bin/a2g-evalproof` (amd64): as expected (31 forms).
+- `bin/jrt test` (amd64) passes; `bin/j2g-evalproof` (amd64): as expected (31 forms).
 - `bin/gate` was not run: this step changes no source the bootstrap compiles (the Go build's
-  variants `arbace/lang/go/` and a2g are read by a2g only), and by the user's rule (2026-10-09)
+  variants `arbace/lang/go/` and j2g are read by j2g only), and by the user's rule (2026-10-09)
   `--full` is for the freeze.
 
 ## Alternatives considered
@@ -366,7 +366,7 @@ independent of the architecture and of the environment at build time.
 Numbered U (a letter not used in `doc/`). All accepted by the user on 2026-10-09 and folded
 into their home documents, as noted under each.
 
-- **U1 (EVAL-PLAN §2.7, A2G-SPEC §10.3) The image of prepared namespaces.** `RT.load` of a
+- **U1 (EVAL-PLAN §2.7, J2G-SPEC §10.3) The image of prepared namespaces.** `RT.load` of a
   source embedded in the program replays it from the program's image (its units: the analyzed
   `Expr` trees with the events of their analysis) instead of reading and analyzing it;
   `bin/arbace-go --build` records the image with the built executable (`ARBACE_PREPARE`) and
@@ -374,38 +374,38 @@ into their home documents, as noted under each.
   `RT` (`load`, the boot `ns` macro's event) and `Main` (`started`), `genclass.ae` and
   `core_proxy.ae` recording their classes. A load from source is unchanged. (B1-PLAN's step 6
   said "pre-read or pre-analysed": pre-analysed, measured above.) *Accepted 2026-10-09, folded
-  into A2G-SPEC §10.3 and §16, EVAL-PLAN §2.7, B1-PLAN's step 6.*
-- **U2 (A2G-SPEC §5.8; jrt) A class's identity hash is its name's** `String.hashCode` (31 bits,
+  into J2G-SPEC §10.3 and §16, EVAL-PLAN §2.7, B1-PLAN's step 6.*
+- **U2 (J2G-SPEC §5.8; jrt) A class's identity hash is its name's** `String.hashCode` (31 bits,
   never 0), set when the `Class` is made (`jrt.presetClassHash`: `Define`, `DefineDynamic`, the
   primitive and array classes), instead of the next value of the global sequence. Hashed
   collections keyed by classes keep their layout in the image, and `(hash SomeClass)` and such
   orders are the same in every run (the AGENDA's "determinism issue"). Consequence on this
   branch: the oracle's `polymorphism.ae:176` mismatched in every run. *Accepted 2026-10-09,
-  folded into A2G-SPEC §5.8 and §16.* The case is moot since main's `ac8b971`: `MultiFn` names
+  folded into J2G-SPEC §5.8 and §16.* The case is moot since main's `ac8b971`: `MultiFn` names
   two ambiguous classes in the order of their names, on both builds, so the message no longer
   depends on any hash and `polymorphism.ae:176` passes (re-recorded there).
-- **U3 (A2G-SPEC §10.6) The main package's files**: besides
+- **U3 (J2G-SPEC §10.6) The main package's files**: besides
   `main.go` and `res/`, `image.go` (hand-written forms, `go/arbace/cmd/arbace/image.ae`, copied
-  by `bin/a2g --program`), `image_types.go` (generated: every exported non-generic struct type of
+  by `bin/j2g --program`), `image_types.go` (generated: every exported non-generic struct type of
   `arbace/lang` and `arbace/jrt`, by name) and the embedded `image.bin`; jrt's `ImageHooks`, set
   by the main package, through which `Compiler$Image`'s natives reach it. *Accepted 2026-10-09,
-  folded into A2G-SPEC §10.6 and §16.*
+  folded into J2G-SPEC §10.6 and §16.*
 - **U4 (D7, for step 7) The start's collector**: `GOGC=400` while the program starts, unless
   `GOGC` is set, back to the previous value when `Main.main` has loaded `arbace.main`.
-  *Accepted 2026-10-09, folded into A2G-SPEC §13.4 (step 7's plan, D7) and §16, and B1-PLAN's
+  *Accepted 2026-10-09, folded into J2G-SPEC §13.4 (step 7's plan, D7) and §16, and B1-PLAN's
   "Checks" paragraph (D7).*
 - **U5 (B1-PLAN, "Checks") The smoke test and the gate**: the smoke test gains the REPL session;
   its place in `bin/gate` is the user's choice among the options above (recommended: a cached
   executable in the essential gate). *Accepted 2026-10-09 with option 2 (the user's decision):
   implemented as the essential gate's check `go` ("The smoke test in the essential gate"
-  above), folded into B1-PLAN's "Checks", A2G-SPEC §16 and CLAUDE.md.*
+  above), folded into B1-PLAN's "Checks", J2G-SPEC §16 and CLAUDE.md.*
 
 ### The REPL under rlwrap (RL)
 
 Numbered RL (a prefix not used in `doc/`); proposed on branch `gorl` (2026-10-10). **All three
-accepted by the user 2026-10-10**, folded into A2G-SPEC §10.6 and §16 and B1-PLAN's "Checks".
+accepted by the user 2026-10-10**, folded into J2G-SPEC §10.6 and §16 and B1-PLAN's "Checks".
 
-- **RL1 (A2G-SPEC §10.6; the executable's environment) The interactive REPL under rlwrap.**
+- **RL1 (J2G-SPEC §10.6; the executable's environment) The interactive REPL under rlwrap.**
   The program's `main` first calls `execRlwrap`, which replaces the process (execve) with
   `rlwrap -m -r -q '\"' -b "(){}[],^%#@\";:'" EXE ARG...` (clj's flags, the executable's resolved
   path, the original arguments, `ARBACE_RLWRAP=wrapped` added) when the arguments start
@@ -414,11 +414,11 @@ accepted by the user 2026-10-10**, folded into A2G-SPEC §10.6 and §16 and B1-P
   `rlwrap` is on `PATH`; otherwise the program runs as before. New environment variable:
   `ARBACE_RLWRAP` (`off`: never; `wrapped`: set by the executable for its child). No message
   when rlwrap is missing ("Line editing: rlwrap" above, for why).
-- **RL2 (A2G-SPEC §10.6, U3) The main package's files**: besides `main.go`, `image.go`,
+- **RL2 (J2G-SPEC §10.6, U3) The main package's files**: besides `main.go`, `image.go`,
   `image_types.go`, `image.bin` and `res/`, `rlwrap_linux.go` and `rlwrap_other.go`
   (`//go:build linux` and `!linux`), from the hand-written forms
   `go/arbace/cmd/arbace/rlwrap_linux.ae` and `rlwrap_other.ae`, copied by
-  `bin/a2g --program` (`arbace.a2g.embed/rlwrap-forms`). The terminal checks are the main
+  `bin/j2g --program` (`arbace.j2g.embed/rlwrap-forms`). The terminal checks are the main
   package's, over `syscall`: they are the launcher's decision, before jrt is set up, so jrt's
   `Host` and its optional interfaces (§9.4) are unchanged and gain none.
 - **RL3 (B1-PLAN, "Checks") The smoke test on a terminal**: `bin/arbace-go --smoke` runs

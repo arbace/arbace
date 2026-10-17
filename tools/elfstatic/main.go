@@ -1,5 +1,5 @@
 // Command elfstatic checks that executables are static Linux ELF executables for an architecture,
-// with Go's debug/elf: what bin/g2a-build-tests asked of binutils' readelf and of file(1) until
+// with Go's debug/elf: what bin/build-go test asked of binutils' readelf and of file(1) until
 // 2026-10-16 (doc/go/BOX-NOTES.md, "... cgo dropped": the host's C toolchain no longer
 // needed).
 //

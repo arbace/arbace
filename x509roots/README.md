@@ -2,8 +2,8 @@
 
 Mozilla's trusted roots for jrt's TLS (doc/go/BOX-NOTES.md, "TLS (option 2)", BX73), vendored as
 Go forms: a source root of Go forms of its own (`x509roots/go/<import path>.ae`), like `box/`
-and `tamago/`, which the Go build adds to jrt's program (`bin/g2a build --root x509roots`: the
-native executables, the box's guest, `bin/jrt`, the a2g checks).
+and `tamago/`, which the Go build adds to jrt's program (`bin/build-go --root x509roots`: the
+native executables, the box's guest, `bin/jrt`, the j2g checks).
 
 | package (import path) | forms | from |
 |---|---|---|
@@ -21,7 +21,7 @@ roots to each connection instead: `jrt.TLSRoots`, go/arbace/jrt/tls.ae), nor `bu
 
 Derived on 2026-10-12 by `bin/x509roots-vendor convert`: the package copied into a module
 `arbace`, its import path rewritten to `arbace/x509roots/fallback/bundle` (the only change to its
-text: none of its files imports it, its tests name it), converted by `bin/g2a convert --tests` for
+text: none of its files imports it, its tests name it), converted by `bin/repr-go read --tests` for
 linux/amd64 (its files build alike for every target), the package file written as
 `bin/box-vendor` writes box/'s (no `:config`, no `:init-order`), `bundle.der` copied into the forms
 directory (SPEC §9.6; its hash is in `:embed-files`). Go's comments are `;` comments in the forms.

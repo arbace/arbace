@@ -1,33 +1,33 @@
-# Class forms: Java's class files written in Clojure
+# Java forms: Java's class files written in Clojure
 
 Status: accepted (2026-10-06), with the amendments found while implementing it folded in
 (2026-10-07 to 2026-10-09, §12). Implemented by `arbace/classes/` (the compiler, behind the
 special forms of `arbace.lang.Compiler` at every stage, the seed's stage 0 included, §9.5, §9.6)
-and `arbace/j2a/` (the converter).
+and `arbace/repr/java/` (the converter).
 
 Since 2026-10-12 (standalone S4, doc/STANDALONE-NOTES.md, "S4: the JVM removed") main has no
 bytecode back end: the compiler's front end (`parse`, `lower`, `analyze`, `env`, `types`,
-`native`) stays and analyzes the class forms as this spec says, the Go build runs what it
-analyzes with its interpreter (`arbace.classes.interp`, doc/go/CLASSFORMS-REPL.md) and a2g
-translates it to Go (doc/go/A2G-SPEC.md); the back end that wrote the class files (`emit`,
+`native`) stays and analyzes the Java forms as this spec says, the Go build runs what it
+analyzes with its interpreter (`arbace.classes.interp`, doc/go/CLASSFORMS-REPL.md) and j2g
+translates it to Go (doc/go/J2G-SPEC.md); the back end that wrote the class files (`emit`,
 `compiler`, `shape`, `verify`, `build`, `boot`, with ASM) is on the branch `arbace-for-java-26`,
-whose jar (the frozen `arbace-for-java-26-v4`) still compiles class forms to bytecode for j2a's
+whose jar (the frozen `arbace-for-java-26-v4`) still compiles Java forms to bytecode for repr/java's
 checks against javac. Where this spec says "the compiler emits" or names an attribute, it states
 the class file that the forms are equivalent to (§3), which that back end writes.
 
-This spec defines the **class forms**: how every construct javac can put into a class file is
+This spec defines the **Java forms**: how every construct javac can put into a class file is
 written as idiomatic Clojure, in ordinary Arbace sources (`.ae` files), and compiled by Arbace's own compiler
 to classes equivalent to javac's. It covers the forms, what they mean, what the compiler
 derives by itself (as javac does), and what the Java → Clojure converter must spell out.
 
 Words used throughout:
 
-- **class form**: `defclass` and the other forms that define classes (`anon`, `letclass`,
+- **Java form**: `defclass` and the other forms that define classes (`anon`, `letclass`,
   `defmodule`, `defpackage`).
-- **class body**: the member forms inside a class form.
+- **class body**: the member forms inside a Java form.
 - **the compiler**: Arbace's compiler. On the frozen `clojure/` (stage 0 until 2026-10-08) it
   was a bootstrap library emitting bytecode with `clojure.asm`. From stage 1 on, the same
-  implementation is part of Arbace's self-hosted compiler, which hands it the class forms
+  implementation is part of Arbace's self-hosted compiler, which hands it the Java forms
   (§9.5, §9.6).
 - **the converter**: the Java → Clojure converter (agenda step 3), working on javac's
   attributed trees.
@@ -46,7 +46,7 @@ Contents: 1 Principles · 2 A first example · 3 Equivalence · 4 Declarations �
    array class. The new names are vars in `arbace.core` (macros over a few new starred special
    forms, like `let` over `let*`), so a namespace can exclude or shadow them like any other core
    var.
-2. **Declarations mirror Java.** One class form per Java type declaration, one member form per
+2. **Declarations mirror Java.** One Java form per Java type declaration, one member form per
    member, in Java's order. Modifiers and types are metadata, as in Clojure. Java's defaults and
    implicit modifiers apply: no modifier means package access, as in Java.
 3. **javac's derivations are the compiler's job.** Whatever javac derives from declarations
@@ -83,7 +83,7 @@ public Object deref(){
 }
 ```
 
-As a class form:
+As a Java form:
 
 ```clojure
 (defclass ^:public ^:final Reduced
@@ -152,7 +152,7 @@ the code it must reproduce:
 
 - **Name.** A simple symbol names a class in the package of the current namespace, munged as
   `deftype` does (`my-app.core` gives package `my_app.core`). A dotted symbol is a full class
-  name: `(defclass clojure.lang.Keyword ...)`. A class form nested in another class body names
+  name: `(defclass clojure.lang.Keyword ...)`. A Java form nested in another class body names
   a member class, `Outer$Name`. The class name itself is not munged; characters the JVM forbids
   (`. ; [ / < >`) are an error.
 - **Kind.** Metadata on the name selects the kind, which in the class file is just flags and
@@ -406,7 +406,7 @@ place Java allows annotations:
 
 ### 4.8 Nested, inner, local and anonymous classes
 
-**Member classes** are class forms in a class body. Without `^:static` a member class is an
+**Member classes** are Java forms in a class body. Without `^:static` a member class is an
 inner class, as in Java.
 
 ```clojure
@@ -582,7 +582,7 @@ attribute, written like an element value (§4.4).
 ### 4.13 Sealed classes
 
 `^:sealed` with `:permits [A B]` gives `PermittedSubclasses`. As in Java, without `:permits` the
-permitted subclasses are those declared in the same top-level class form or source file.
+permitted subclasses are those declared in the same top-level Java form or source file.
 `^:non-sealed` is accepted and has no trace in the class file.
 
 ### 4.14 Modules and packages
@@ -1108,7 +1108,7 @@ can reach private members.
 
 The **Java subset** is what converted code uses and what needs no runtime (§1, principle 6):
 
-- the forms of this spec and the class forms;
+- the forms of this spec and the Java forms;
 - `do`, `let`, `loop`, `recur`, `if`, `when`, `when-not`, `if-not`, `cond`, `and`, `or`, `not`,
   `throw`, `try`, `locking`, `set!`, `new`, `.`, `..`, `doto`, the interop shorthands;
 - `instance?`, `cast`, `identical?`, `nil?`, `some?`, `==`, `<`, `<=`, `>`, `>=`, `=` on
@@ -1128,7 +1128,7 @@ primitive signatures a local class implementing the `IFn$...` interfaces.
 The forms state the source construct; the compiler derives the class file pattern the way javac
 does (javac's `Lower`, `TransTypes`, `TransPatterns`, `LambdaToMethod`, `Gen` and `ClassWriter`),
 with javac's names. The converter writes none of this. (On main the analysis derives the
-members, names and accessors of this table as data, which the Go build's interpreter and a2g
+members, names and accessors of this table as data, which the Go build's interpreter and j2g
 follow; the class file parts, attributes and bytecode patterns, are the back end's, on the
 branch `arbace-for-java-26`.)
 
@@ -1166,7 +1166,7 @@ branch `arbace-for-java-26`.)
 | calls of variable-arity methods with loose arguments | the argument array |
 | `module-info`, `package-info` | `Module` (with `MANDATED` `java.base`), the synthetic `package-info` interface |
 
-Two of these depend on more than the class form itself, as in javac. Enum switches use
+Two of these depend on more than the Java form itself, as in javac. Enum switches use
 ordinals directly only for enums declared in the same top-level class as the switch (javac's
 `Lower.mapForEnum` needs the enum's tree in the class being translated); enums compiled in the
 same compilation but in another top-level class go through the `$SwitchMap$` holder too.
@@ -1314,7 +1314,7 @@ nothing beyond what their translation shows.
 
 ### 9.1 Namespaces, packages and files
 
-A class form's package is its namespace's (munged), as for `deftype`. For Java packages with many
+A Java form's package is its namespace's (munged), as for `deftype`. For Java packages with many
 classes the recommended layout follows `clojure.core`, which loads `core_print.clj` and others
 into one namespace:
 
@@ -1324,7 +1324,7 @@ arbace/lang/Keyword.ae   (in-ns 'arbace.lang) (import ...) (defclass ^:public Ke
 arbace/lang/RT.ae        (in-ns 'arbace.lang) ...
 ```
 
-One file per Java source file, named after its top-level class, holding that file's class forms.
+One file per Java source file, named after its top-level class, holding that file's Java forms.
 When the source directory also has a `.clj` or `.ae` file of that name, `_class` is appended:
 `clojure/main.java` (class `clojure.main`) becomes `clojure/main_class.ae` (in the converted
 baseline; `.clj` before the `.ae` rename of 2026-10-11), since
@@ -1346,16 +1346,16 @@ from
 
 1. classes loaded or loadable from the class path (by reflection, plus reading class files for
    `ConstantValue` and generic signatures),
-2. the class forms of the current top-level form, entered before any body is compiled (so a
-   top-level `do` of mutually dependent class forms works, also at the REPL). Until 2026-10-08 stage
+2. the Java forms of the current top-level form, entered before any body is compiled (so a
+   top-level `do` of mutually dependent Java forms works, also at the REPL). Until 2026-10-08 stage
    0, the frozen compiler, evaluated the forms of a top-level `do` one by one, so a `defclass` macro
    could not see its siblings; there `(defclasses (defclass A ...) (defclass B ...))` compiled class
    forms together and evaluates to a vector of the classes. Arbace's own compiler (every stage
-   since) treats a top-level `do` as said: compiling each class form of the `do`, it enters the
+   since) treats a top-level `do` as said: compiling each Java form of the `do`, it enters the
    others as declarations (as for sources, 3). It keeps `defclasses` as the explicit form,
 3. **sources**: a class name that resolves to nothing is looked up as `p/C.ae` on the source
    path (javac's `-sourcepath` behaviour); the file's namespace form is evaluated and its
-   top-level class forms are entered, declarations only, without compiling their bodies or
+   top-level Java forms are entered, declarations only, without compiling their bodies or
    evaluating anything else. The bodies are compiled when the file itself is loaded.
 
 Bytecode refers to classes by name and the JVM resolves names lazily, so a class can be defined
@@ -1365,7 +1365,7 @@ cycles.
 
 ### 9.3 AOT
 
-On the JVM (the branch `arbace-for-java-26`): under `*compile-files*` every class a class form
+On the JVM (the branch `arbace-for-java-26`): under `*compile-files*` every class a Java form
 defines is written to `*compile-path*`, nested, local, anonymous and synthetic ones
 (`$SwitchMap$` holders) included, as `deftype` classes are. Loading the namespace's `__init`
 then defines nothing: the classes load from the class path. A `defclass` in AOT-compiled code
@@ -1377,7 +1377,7 @@ On main since 2026-10-12 there is no class-file AOT compilation (since S6 the pr
 namespaces are compiled to Go at build time, doc/STANDALONE-NOTES.md, "S6: Arbace compiled to
 Go"): no class file is written (`compile` loads
 the namespace, `*compile-files*` changes nothing); the classes of `arbace.lang` are translated to
-Go by a2g, and a class form evaluated at run time makes an interpreted class
+Go by j2g, and a Java form evaluated at run time makes an interpreted class
 (doc/go/CLASSFORMS-REPL.md). `defmodule` and `defpackage` do nothing.
 
 ### 9.4 Relation to `deftype`, `defrecord`, `reify`, `proxy`, `gen-class`
@@ -1419,31 +1419,31 @@ boxed result is a call of the method). Other operands are converted as Clojure c
 `set!`, `new`, `.`, `recur`) are listed in §1, principle 1.
 
 **One implementation.** Arbace's compiler knows these special forms but compiles none of them
-itself: the class forms compiler (§12, question 17), loaded on first use, does, at this boundary:
+itself: the Java forms compiler (§12, question 17), loaded on first use, does, at this boundary:
 
 - `(class* :top form)` and `(class* :tops forms)`, the expansions of `defclass` and
   `defclasses`, are compiled and defined while the compiler analyzes them, and stand for the
   imports of their classes and the classes.
-- A fn whose code uses any other class form, or one of the extensions above where Clojure's compiler
+- A fn whose code uses any other Java form, or one of the extensions above where Clojure's compiler
   reports an error (a primitive tag on a local with a primitive initializer, `set!` of a local,
-  `new` of an array class), is compiled whole by the class forms compiler: the innermost such `fn*`
+  `new` of an array class), is compiled whole by the Java forms compiler: the innermost such `fn*`
   becomes the same fn class (name, `AFunction` or `RestFn`, primitive interfaces), its code compiled
-  with Clojure's meaning (§5.13), the locals it uses passed to its constructor. A class form in a
+  with Clojure's meaning (§5.13), the locals it uses passed to its constructor. A Java form in a
   `def`'s initializer at the top level is compiled as a fn. So the code forms work in any fn, not
   only in class bodies.
-- A `deftype*` (of `deftype` or `defrecord`) one of whose method bodies uses a class form is
-  compiled whole by the class forms compiler into the class Clojure's compiler would make
+- A `deftype*` (of `deftype` or `defrecord`) one of whose method bodies uses a Java form is
+  compiled whole by the Java forms compiler into the class Clojure's compiler would make
   (`public final`, its fields public final, `volatile` for `^:volatile-mutable`,
   package-private for `^:unsynchronized-mutable`, primitive for a primitive hint and otherwise
   `Object`; the constructor taking the fields, and for records the two shorter ones and
   `create`; `getBasis`), its methods compiled with Clojure's meaning, and stands for `nil`.
 - `recur` out of tail position and across `try` stay errors in code Arbace's compiler compiles
   itself, as in Clojure (Clojure's test suite holds it to that); in class bodies and in fns
-  compiled by the class forms compiler `recur` has `continue`'s meaning, and `continue` works
+  compiled by the Java forms compiler `recur` has `continue`'s meaning, and `continue` works
   anywhere.
 
 In class bodies and in such fns, Clojure's `fn*`, `letfn*`, `case*`, `reify*`, `def` and `var`
-are compiled by rewriting them into class forms (a `fn` is an anonymous `AFunction`, a `reify` a
+are compiled by rewriting them into Java forms (a `fn` is an anonymous `AFunction`, a `reify` a
 local class), and a core operation whose operands do not fit an instruction compiles as Clojure
 compiles it (§5.13); so do calls of methods and constructors there: the overload is the one
 Clojure's compiler chooses (the only one of that arity, else `Compiler.getMatchingParams`, with
@@ -1466,21 +1466,21 @@ forms); its value is `nil`. `import*` imports into the current namespace at run 
 
 This is the JVM bootstrap, on the branch `arbace-for-java-26` since 2026-10-12. Main is
 bootstrapped from the Go-source seed instead (doc/STANDALONE-NOTES.md, "S4: the Go-source
-seed"): the Go executable embeds the class forms' analysis and interprets class forms; a2g
-(running on it) translates `arbace.lang`'s class forms to Go.
+seed"): the Go executable embeds the Java forms' analysis and interprets Java forms; j2g
+(running on it) translates `arbace.lang`'s Java forms to Go.
 
 - **Stage 0**: since 2026-10-08 (the user's decision), the binary seed `seed/arbace-seed.jar`:
-  Arbace as built at the tag `arbace-for-java-26-v1`, pinned by hash, whose own class forms
+  Arbace as built at the tag `arbace-for-java-26-v1`, pinned by hash, whose own Java forms
   compiler compiles stage 1. Until then stage 0 was, as on that branch, the frozen `clojure/`
-  with a bootstrap library implementing the class forms. Its
+  with a bootstrap library implementing the Java forms. Its
   `defclass` macro runs the library's own compiler on the form (the frozen `Compiler.java` knows
   nothing of `class*`), which compiles the bodies (the Java subset only) with `clojure.asm` and
   defines or writes the classes. The stage-0 driver interns the library's macros into the running
   `clojure.core` namespace (at run time; the frozen sources are not touched), so the same
   `arbace/**/*.ae` sources work at every stage without qualifying the new names.
-- **Stage 1**: stage 0 compiles the class forms of `arbace/`. Its classes are self-contained
+- **Stage 1**: stage 0 compiles the Java forms of `arbace/`. Its classes are self-contained
   `arbace.*` classes, `arbace.lang.Compiler` (converted, knowing the special forms of §9.5) among
-  them; `arbace.core` holds the names of §9.5, and the class forms compiler is loaded on first use,
+  them; `arbace.core` holds the names of §9.5, and the Java forms compiler is loaded on first use,
   from classes that each stage AOT-compiles into itself, as it does `arbace.core` and the other
   namespaces (so they too must reproduce). Clojure-level namespaces such as `arbace.core` are
   compiled by Arbace's own compiler (with the frozen stage 0, because it emitted references to
@@ -1498,7 +1498,7 @@ user=> (let [c (Counter.)] (.inc c) (.inc c))
 2
 ```
 
-- **Defining.** A class form typed at the REPL is compiled and defined at once, with all classes
+- **Defining.** A Java form typed at the REPL is compiled and defined at once, with all classes
   nested in it, and imported into the namespace. Its static initializer runs at first use, as in
   Java. The REPL namespace's package is used (`user.Counter`), so a class meant to be used from
   Clojure code is written `^:public`, with public members (Clojure's functions live in other
@@ -1507,7 +1507,7 @@ user=> (let [c (Counter.)] (.inc c) (.inc c))
   `DynamicClassLoader`, and a JVM runtime package is a package *and* a loader. Package access
   between classes defined by different forms or files would then fail. So the compiler keeps one
   loader per Java package, a **package loader**, and defines every class of that package in it.
-  All classes of one class form share a loader anyway, which nest membership requires.
+  All classes of one Java form share a loader anyway, which nest membership requires.
 - **Redefining.** A loader cannot define a name twice. Redefining a class starts a new
   generation: a fresh package loader becomes current for that package and receives the new class
   and every later one. Old instances keep their old class. Classes compiled earlier keep linking
@@ -1520,14 +1520,14 @@ user=> (let [c (Counter.)] (.inc c) (.inc c))
   `MethodHandles.Lookup.defineClass`: puts classes into an existing class's loader, so no
   redefinition. Hidden classes: cannot be named, so other code cannot refer to them. Widening
   package access to public at the REPL: changes the classes.
-- **Cycles at the REPL**: wrap the class forms in one `do` (or `defclasses`), or let
+- **Cycles at the REPL**: wrap the Java forms in one `do` (or `defclasses`), or let
   source path lookup (§9.2) find the others.
 - AOT-compiled classes are loaded by the application class loader; none of this applies to them.
   A REPL-defined class in the package of an AOT-compiled one has no package access to it, being
   in another loader.
-- **The Go build** has no bytecode and no class loader: its REPL gives the class forms their
+- **The Go build** has no bytecode and no class loader: its REPL gives the Java forms their
   meaning by the same analysis, classes made at run time and an interpreter of the analyzed code
-  (doc/go/CLASSFORMS-REPL.md, doc/go/A2G-SPEC.md §16).
+  (doc/go/CLASSFORMS-REPL.md, doc/go/J2G-SPEC.md §16).
 
 ## 11. Worked examples
 
@@ -2004,7 +2004,7 @@ with their date where they apply.
 
 **Amendment (2026-10-09):** B1a step 5 found one more, `COMPILER-NOTES.md` 15 (bridges computed
 under the subclass's bounds of a supertype's type variables; doc/go/EVAL-NOTES.md's B8,
-doc/go/A2G-SPEC.md's S8), accepted and folded into §6.
+doc/go/J2G-SPEC.md's S8), accepted and folded into §6.
 
 Each with the recommendation the spec follows.
 
@@ -2073,7 +2073,7 @@ Each with the recommendation the spec follows.
     arity, as `deftype` does, or always `Object`? *Recommendation: infer, as `deftype`.*
 16. **`cast`.** Compile `(cast T x)` to `checkcast` (same effect as `Class.cast`, other exception
     message), or add a new form? *Recommendation: reuse `cast`.*
-17. **One implementation of the class forms or two.** A throwaway stage-0 library plus a second
+17. **One implementation of the Java forms or two.** A throwaway stage-0 library plus a second
     implementation inside Arbace's compiler, or one implementation in plain Clojure that runs on
     stage 0 and is then compiled into stage 1? With one, the source names ASM by one package
     (`arbace.asm`) and the stage-0 driver maps it to `clojure.asm` while loading.

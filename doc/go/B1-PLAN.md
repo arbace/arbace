@@ -1,5 +1,16 @@
 # B1: Arbace on Go — plan
 
+> Names: since 2026-10-17 g2a is repr/go and j2a repr/java (doc/NAMING-SURVEY.md, "Decided"):
+> `arbace.g2a.*` is `arbace.repr.go(.*)`, its build `arbace.g2a.build` is `arbace.build.go`;
+> `bin/g2a convert` is `bin/repr-go read` (`bin/g2a read`: `read --dump`), `bin/g2a build`
+> `bin/build-go`, `bin/g2a-print` `bin/repr-go print`, `bin/g2a-check` `bin/repr-go check`,
+> `bin/g2a-convert-tests` and `-print-tests` `bin/repr-go test read` and `test print`,
+> `bin/g2a-build-tests` `bin/build-go test`; `G2A_GOROOT` is `ARBACE_GOROOT`, the other `G2A_*`
+> `REPR_GO_*`, `J2A_*` `REPR_JAVA_*`; `bin/j2a-check` is `bin/repr-java check`. a2g is j2g
+> (`arbace.a2g.*`, `bin/a2g*`, `A2G-SPEC.md`, `A2G_*`, the printed `a2g_*`, `A2g_*`, `a2g/*`: `j2g`
+> likewise), and class forms are Java forms (the front end keeps `arbace.classes.*`). This document
+> uses the current names throughout, its dated passages included; branch names keep theirs.
+
 Status: plan, revised at the user's proposal (2026-10-08); the user decided D1, D2, D4, D5 and D6
 the same day (below); D6 was partly reversed on 2026-10-09 and 2026-10-10 (`proxy`, the fork-join
 pool and streams, dates, `defclass`, files, sockets, processes, java.time, java.util.concurrent,
@@ -11,7 +22,7 @@ started the same day (below): S0, S1, S2 and S6's amd64 half done, S3 and S5 don
 `arbace-box-arm64-v1` (2026-10-12, [BOX-NOTES.md](BOX-NOTES.md)); then the standalone Arbace's
 S1-S8 ([../STANDALONE-NOTES.md](../STANDALONE-NOTES.md), BOX-NOTES.md): the milestones
 `arbace-seed-is-go-v1` (2026-10-13, S1-S4) and `arbace-inside-itself-v1` (2026-10-15, S5-S8, the
-box rebuilding Arbace inside itself byte for byte). B1 is the milestone after g2a's G0-G2
+box rebuilding Arbace inside itself byte for byte). B1 is the milestone after repr/go's G0-G2
 ([G2C-SURVEY.md](../G2C-SURVEY.md) §5.2, §7). The user's decisions of 2026-10-07 put the box built
 by gc + TamaGo first; on 2026-10-08 the user proposed to postpone the box and arm64, and to reach
 first **a standalone static `linux/amd64` Go executable of Arbace**, testable as an ordinary user
@@ -32,7 +43,7 @@ process on this machine. B1 is split accordingly:
 
 ## Where things stood (2026-10-08)
 
-- **g2a closes the round trip** for `tamago` (std and `$GOROOT/test`, amd64 and arm64, tree,
+- **repr/go closes the round trip** for `tamago` (std and `$GOROOT/test`, amd64 and arm64, tree,
   export data and object code; `bin/gate --full`). Any Go the executable needs can be held as
   Go forms and printed back to the same program. The helper and the oracle take the
   configuration as a parameter.
@@ -43,12 +54,12 @@ process on this machine. B1 is split accordingly:
   (`arbace.lang.Compiler`) analyses forms into `Expr` objects and emits JVM bytecode with ASM.
   `arbace/core.ae` and the other namespaces are Clojure on top.
 
-So B1a is mostly not g2a work: it is getting Arbace's *runtime and evaluator* onto Go.
+So B1a is mostly not repr/go work: it is getting Arbace's *runtime and evaluator* onto Go.
 
 ## The strategy (to decide: D1, D2)
 
-1. **The runtime by translation, not by rewrite (D1).** A converter **a2g** turns class forms
-   into Go forms, as j2a turned Java into class forms: classes become structs with method sets,
+1. **The runtime by translation, not by rewrite (D1).** A converter **j2g** turns Java forms
+   into Go forms, as repr/java turned Java into Java forms: classes become structs with method sets,
    interfaces stay interfaces, inheritance becomes embedding plus explicit virtual dispatch,
    exceptions become panics, static initialisers an init order, Java's arithmetic Go's with the
    needed wrapping and checks. Under it, **jrt**, a small Java runtime in Go forms covering
@@ -57,7 +68,7 @@ So B1a is mostly not g2a work: it is getting Arbace's *runtime and evaluator* on
    implementation of Clojure that drifts from Arbace's, and it gives up "Arbace represents its
    own implementation".
 2. **Evaluation by interpretation first (D2).** A Go executable cannot load JVM bytecode. Keep
-   `Compiler`'s analyser (translated by a2g) and replace its bytecode back end with an
+   `Compiler`'s analyser (translated by j2g) and replace its bytecode back end with an
    evaluator over the `Expr` tree: Clojure's `Expr` classes already have `eval`, which Compiler
    uses for top-level forms; `FnExpr` and the rest get closures (go-whim's closure backend for
    Joker is the model). Later, AOT: namespaces compiled to Go forms and built into the
@@ -73,16 +84,16 @@ So B1a is mostly not g2a work: it is getting Arbace's *runtime and evaluator* on
 ## Steps of B1a
 
 Each step has a gate; nothing advances on an open gate. Estimates are agent-assisted days at
-the pace of the class forms and g2a work, rough, growing with the step number.
+the pace of the Java forms and repr/go work, rough, growing with the step number.
 
 | step | content | gate | estimate |
 |---|---|---|---|
-| **0 g2a for linux** | the round trip and its references for `linux/amd64` and `linux/arm64` (std has more files there: syscalls, `os`, `net`); the build of a Go-forms program into a static executable for either architecture (`bin/g2a build`). *Done* | the round trip passes for both at all three levels; a hello program written as Go forms builds statically for both and runs (arm64 under `qemu-aarch64`) | 1 |
-| **1 Measure the Java surface** | every JDK class, method and field `arbace/lang` and the namespaces use (from the class forms compiler's resolution, not grep), grouped by package; what each needs in Go. *Done ([JAVA-SURFACE.md](JAVA-SURFACE.md))* | a table in the a2g spec; the user's review of what to translate, shim, or cut (reflection, `invokedynamic`, class loading) | 1 |
-| **2 a2g spec** | `doc/go/A2G-SPEC.md`: class forms → Go forms (types, objects and dispatch, exceptions, statics, primitives and arithmetic, strings (D4), arrays, threads and locks, reflection's subset). *Done; amended since (A2G-SPEC §16)* | the user's review, as for the class forms and Go forms specs | 2 |
-| **3 jrt** | the Java runtime subset in Go forms: `Object` protocol, `String`/`StringBuilder`, boxed numbers, `Math`, per [JAVA-SURFACE.md](JAVA-SURFACE.md) and its decisions: the plain Java of the measured closure translated from jdk26u's source with j2a (collections, `BigInteger`/`BigDecimal`, `Character`, `Formatter`, `java.util.regex` (D5), `ConcurrentHashMap`), hand-written the VM's edge (UTF-16 `String`/`StringBuilder`, reflection over a2g's member tables, atomics, locks, executors and threads over Go's `sync` and goroutines, `ThreadLocal` over a goroutine-local slot in the Go runtime, a small `Date` on Go's `time`); the host interface. *Done* | its own tests (regex: Java's behaviour, checked against the JVM on a corpus of patterns); the round trip of its forms | 10-15 |
-| **4 a2g converter** | class forms → Go forms, in dependency order: `Util`, `Murmur3`, `Numbers`, the persistent collections, `Symbol`/`Keyword`/`Var`/`Namespace`, seqs, `LispReader`, printing, `RT`. *Done* | per class, differential tests against the JVM Arbace: the same operations, the same results | 6-10 |
-| **5 The evaluator** | `Compiler`'s analyser through a2g, with an `Expr` evaluator in place of bytecode emission (closures for `fn*`, `loop`/`recur`, `try`, `letfn`; `deftype`/`reify` through jrt's dispatch). *Done 2026-10-09 (phase 2B)* | `arbace/core.ae` loads from source; a growing part of Clojure's test suite passes, recorded per namespace | 6-10 |
+| **0 repr/go for linux** | the round trip and its references for `linux/amd64` and `linux/arm64` (std has more files there: syscalls, `os`, `net`); the build of a Go-forms program into a static executable for either architecture (`bin/build-go`). *Done* | the round trip passes for both at all three levels; a hello program written as Go forms builds statically for both and runs (arm64 under `qemu-aarch64`) | 1 |
+| **1 Measure the Java surface** | every JDK class, method and field `arbace/lang` and the namespaces use (from the Java forms compiler's resolution, not grep), grouped by package; what each needs in Go. *Done ([JAVA-SURFACE.md](JAVA-SURFACE.md))* | a table in the j2g spec; the user's review of what to translate, shim, or cut (reflection, `invokedynamic`, class loading) | 1 |
+| **2 j2g spec** | `doc/go/J2G-SPEC.md`: Java forms → Go forms (types, objects and dispatch, exceptions, statics, primitives and arithmetic, strings (D4), arrays, threads and locks, reflection's subset). *Done; amended since (J2G-SPEC §16)* | the user's review, as for the Java forms and Go forms specs | 2 |
+| **3 jrt** | the Java runtime subset in Go forms: `Object` protocol, `String`/`StringBuilder`, boxed numbers, `Math`, per [JAVA-SURFACE.md](JAVA-SURFACE.md) and its decisions: the plain Java of the measured closure translated from jdk26u's source with repr/java (collections, `BigInteger`/`BigDecimal`, `Character`, `Formatter`, `java.util.regex` (D5), `ConcurrentHashMap`), hand-written the VM's edge (UTF-16 `String`/`StringBuilder`, reflection over j2g's member tables, atomics, locks, executors and threads over Go's `sync` and goroutines, `ThreadLocal` over a goroutine-local slot in the Go runtime, a small `Date` on Go's `time`); the host interface. *Done* | its own tests (regex: Java's behaviour, checked against the JVM on a corpus of patterns); the round trip of its forms | 10-15 |
+| **4 j2g converter** | Java forms → Go forms, in dependency order: `Util`, `Murmur3`, `Numbers`, the persistent collections, `Symbol`/`Keyword`/`Var`/`Namespace`, seqs, `LispReader`, printing, `RT`. *Done* | per class, differential tests against the JVM Arbace: the same operations, the same results | 6-10 |
+| **5 The evaluator** | `Compiler`'s analyser through j2g, with an `Expr` evaluator in place of bytecode emission (closures for `fn*`, `loop`/`recur`, `try`, `letfn`; `deftype`/`reify` through jrt's dispatch). *Done 2026-10-09 (phase 2B)* | `arbace/core.ae` loads from source; a growing part of Clojure's test suite passes, recorded per namespace | 6-10 |
 | **6 The executable** | `bin/arbace-go` (name to choose): static binaries for `linux/amd64` and `linux/arm64` with `arbace.main`'s REPL, `-e`, scripts; the core namespaces prepared at build time (pre-read or pre-analysed) to start fast. *Done 2026-10-09: pre-analysed, the image of prepared namespaces (EXEC-NOTES.md, amendment U1); start 4.2 s to 0.32 s on amd64* | a REPL as a user process: read, eval, print, `doc`, errors; start time and size measured against the JVM launcher (`bin/arbace`, then `bin/arbace-j`; removed from main in S4, on `arbace-for-java-26` as `bin/arbace`) and Joker; a smoke test in `bin/gate`; the arm64 binary passes the same under `qemu-aarch64` | 2-3 |
 | **7 Speed** | closure compilation of `Expr`s, then AOT of namespaces to Go forms built into the executable. *Done 2026-10-10: 7a the running program's speed (amendments O1, O2, O4, O5; O3 dropped), 7b the evaluator's closure compilation (EC1-EC6) ([SPEED-NOTES.md](SPEED-NOTES.md)); AOT of namespaces to Go not scheduled (the user, 2026-10-10; since done: standalone S6, the default)* | benchmarks (`bin/arbace-bench`'s workload, on `arbace-for-java-26`) against the JVM Arbace; the suite still passes | open |
 | **8 The freeze** | the docs, the gate, and a branch and tag for the static executables, as for `arbace-for-java-26`; the READMEs diverge as at that freeze: main's gains a section "Arbace for Golang" after "Arbace for Java 26" (the branch `arbace-for-golang`, its tags, a link to the branch's freeze document), and the branch's README describes it locally (its own freeze document, how to build and run the executables, the releases); main's journal starts over, as at the JVM freeze: the history up to the freeze stays on `arbace-for-golang`, its tag and in git, and main's new journal opens with a pointer to them. *Done 2026-10-11: the branch `arbace-for-golang` and the tag `arbace-for-go1.27.1-v1`* | the user's confirmation | 1 |
@@ -90,7 +101,7 @@ the pace of the class forms and g2a work, rough, growing with the step number.
 The `.ae` rename (Arbace's sources from `.clj` to `.ae`, one self-contained change; the user's
 decision of 2026-10-09) was step 8, the last before the freeze; the user moved it on 2026-10-10 to
 right after the freeze, as the first task (AGENDA.md), and it was done then: VENDOR-NOTES.md,
-hand change 19, and A2G-SPEC.md §10.3.
+hand change 19, and J2G-SPEC.md §10.3.
 
 Rough total (as planned): 25-43 days.
 
@@ -102,9 +113,9 @@ and its suite run to `--full`. The essential gate's smoke test (amendment U5, ac
 pseudo-terminal under rlwrap on amd64 (amendment RL3, accepted 2026-10-10; about 5 s).
 `bin/gate --full`'s suite on Go runs on the test build (amendment FX1, accepted 2026-10-10):
 `bin/arbace-go --build-tests` builds `arbace-tests`, the program with the suite's Java fixtures
-converted by j2a and translated in (the shipped executable does not carry them), beside the
+converted by repr/java and translated in (the shipped executable does not carry them), beside the
 shipped one (about 3 more minutes).
-**D7** (performance, deferred to step 7; A2G-SPEC §13.4): the start's collector setting is step
+**D7** (performance, deferred to step 7; J2G-SPEC §13.4): the start's collector setting is step
 6's (amendment U4: `GOGC=400` while the program starts); the running program's is step 7a's.
 *Closed by amendment O1 (accepted 2026-10-10, SPEED-NOTES.md):* `GOGC=200` and a 64 MiB
 minimum heap set by jrt's initialization, reference arrays and strings in one allocation (O2).
@@ -148,8 +159,8 @@ box, the sockets' oracle corpus and `bin/net-check` in the box, the socket REPL 
 
 ## Decisions (the user's, 2026-10-08)
 
-- **D1 The runtime.** a2g + jrt (recommended), or a hand-written runtime in Go forms.
-  *Decided: a2g + jrt.*
+- **D1 The runtime.** j2g + jrt (recommended), or a hand-written runtime in Go forms.
+  *Decided: j2g + jrt.*
 - **D2 Evaluation.** An evaluator over `Compiler`'s `Expr` tree first, AOT later
   (recommended), or AOT to Go forms first (fast code, but no `eval` until an evaluator exists
   anyway). *Decided: the evaluator first.*
@@ -159,36 +170,36 @@ box, the sockets' oracle corpus and `bin/net-check` in the box, the socket REPL 
 - **D5 Regex.** Go's `regexp` (RE2) with recorded differences from `java.util.regex`
   (recommended first: no backreferences or lookaround), or a port of `java.util.regex`.
   *Decided: a port of `java.util.regex`* (exact Java semantics; a larger part of jrt, step 3).
-- **D6 Scope of the first REPL.** Leave out at first: `defclass` and the class forms (their
+- **D6 Scope of the first REPL.** Leave out at first: `defclass` and the Java forms (their
   compiler emits JVM classes), `gen-class`, `proxy`, JVM interop beyond jrt's classes, agents'
   executors beyond goroutines (recommended); each comes back as its Go-side meaning is defined.
   *Decided: left out at first.* **Partly reversed (2026-10-09, B1a step 5):** `proxy` is back,
   over the evaluator's `Dyn` (the user's decision; for `Object`, interfaces and a fixed list of
-  non-leaf classes: A2G-SPEC §5.12, §10.4, amendments X1, X2), and the fork-join pool is real,
-  goroutine workers in jrt, so reducers' `fold` and parallel streams run in parallel (A2G-SPEC
+  non-leaf classes: J2G-SPEC §5.12, §10.4, amendments X1, X2), and the fork-join pool is real,
+  goroutine workers in jrt, so reducers' `fold` and parallel streams run in parallel (J2G-SPEC
   §8.4, amendment S5). **Reversed for sockets (2026-10-10, the user's decision of 2026-10-09;
   amendments NT1-NT5):** `java.net`'s sockets and addresses are translated over jrt's
   `HostSocketImpl` and the host's optional `NetHost`, and `arbace.core.server` (the socket REPL,
   `prepl`, `io-prepl`, `remote-prepl`) is in the executable, its servers started from the
-  `arbace.server.*` properties (from `JAVA_TOOL_OPTIONS`) as on the JVM (A2G-SPEC §4.1, §9.4,
+  `arbace.server.*` properties (from `JAVA_TOOL_OPTIONS`) as on the JVM (J2G-SPEC §4.1, §9.4,
   §10.6; JRT-NOTES.md, "Sockets (go-net)"). `gen-class` and JVM interop beyond the closed world
   stay out.
   **Reversed for `defclass` (2026-10-10, amendment CF3):** `defclass` and the code forms work at
-  the REPL, analyzed by the embedded class forms compiler and interpreted
-  ([CLASSFORMS-REPL.md](CLASSFORMS-REPL.md), A2G-SPEC §10.4).
+  the REPL, analyzed by the embedded Java forms compiler and interpreted
+  ([CLASSFORMS-REPL.md](CLASSFORMS-REPL.md), J2G-SPEC §10.4).
   **Reversed for processes (2026-10-10, the user's decision of that day; amendments PR1-PR7):**
   jdk26u's `Process`, `ProcessBuilder` (with `Redirect`), `ProcessHandle`, `ProcessHandleImpl`,
   `ProcessImpl` and `ProcessEnvironment` are translated over jrt's natives and the host's optional
   `HostProc` (fork and exec, pipes, reaping, signals; `/proc` for the handles), `Runtime.exec`
   is in `Runtime`'s member table, and `arbace.java.shell` and `arbace.java.process` are in the
-  executable (A2G-SPEC §4.1, §9.4; JRT-NOTES.md, "Processes").
+  executable (J2G-SPEC §4.1, §9.4; JRT-NOTES.md, "Processes").
   **Reversed for files, time, concurrency, security and text (2026-10-09 to 2026-10-10):** dates
   and `java.util.stream` (phase 2B), `Semaphore` (Y3); `java.io.File`, the file system and a
   small `java.nio.file` (FS1-FS7; FS6: files in the closed world); `java.time` translated with
   the zone data (TM1-TM9); `java.util.concurrent` translated (JC1-JC10); java.security's basics,
   digests, HMACs and `SecureRandom` (SC1-SC7; SC4 puts them in the closed world);
   `java.text`'s formats (TL1-TL8, the `gotext` branch); the suite's Java fixtures in a test
-  build (FX1) (JRT-NOTES.md; A2G-SPEC §16).
+  build (FX1) (JRT-NOTES.md; J2G-SPEC §16).
   **Not to be done (the user, 2026-10-10):** XML (SAX, `arbace.xml`), `gen-class`, Java
   serialization: they stay out of the Go build for good, as do Swing/AWT and loading classes
   from jars.

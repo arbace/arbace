@@ -6,15 +6,15 @@
 //
 //	godeps [-goos linux] [-goarch amd64] [-edn OUT] DIR
 //
-// DIR holds the package's .go files as a2g and g2a print them (for example
+// DIR holds the package's .go files as j2g and repr/go print them (for example
 // target/arbace-go/work-amd64/mod/jrt). The files the build constraints of
 // GOOS and GOARCH exclude are skipped.
 //
 // The graph's nodes are units: a translated Java source file (a file whose
-// name begins with java_, javax_, jdk_, sun_ or com_, one per class forms
-// file, A2G-SPEC §4.3) is one unit with every declaration in it; a
-// declaration a2g generates for a class into the package's shared files
-// (a2g_classes.go: the member table, invoker, class variable and the init
+// name begins with java_, javax_, jdk_, sun_ or com_, one per Java forms
+// file, J2G-SPEC §4.3) is one unit with every declaration in it; a
+// declaration j2g generates for a class into the package's shared files
+// (j2g_classes.go: the member table, invoker, class variable and the init
 // that registers them) joins the unit of its class, found by the longest
 // prefix of its name that is a type of a translated file; every other
 // top-level declaration (jrt's hand-written forms, the literal pool, the Up_
@@ -64,13 +64,13 @@ type decl struct {
 	objs map[*ast.Object]bool
 }
 
-// allClasses makes every file but a2g's shared ones a translated file (arbace/lang, whose files
-// are named after their class forms files).
+// allClasses makes every file but j2g's shared ones a translated file (arbace/lang, whose files
+// are named after their Java forms files).
 var allClasses bool
 
 func translated(file string) bool {
 	if allClasses {
-		return !strings.HasPrefix(file, "a2g_")
+		return !strings.HasPrefix(file, "j2g_")
 	}
 	for _, p := range []string{"java_", "javax_", "jdk_", "sun_", "com_"} {
 		if strings.HasPrefix(file, p) {
@@ -107,7 +107,7 @@ func main() {
 	linkname := flag.Bool("linkname", false, "a value named costs only the types of its declaration (the edges when every value is reached by a //go:linkname)")
 	why := flag.String("why", "", "A,B: print the declarations of unit A that name unit B's")
 	typesOnly := flag.Bool("types", false, "only the edges that name a type (the components when every value edge is cut)")
-	flag.BoolVar(&allClasses, "lang", false, "every file but a2g_*.go is a class forms file (arbace/lang)")
+	flag.BoolVar(&allClasses, "lang", false, "every file but j2g_*.go is a Java forms file (arbace/lang)")
 	flag.Parse()
 	if flag.NArg() != 1 {
 		fmt.Fprintln(os.Stderr, "usage: godeps [-goos G] [-goarch A] [-edn OUT] DIR")
@@ -353,7 +353,7 @@ func main() {
 				u = getUnit(d.file+":"+d.recv, d.file)
 			}
 		case d.name != "":
-			if f := prefixFile(d.name); f != "" && strings.HasPrefix(d.file, "a2g_") {
+			if f := prefixFile(d.name); f != "" && strings.HasPrefix(d.file, "j2g_") {
 				u = getUnit(unitName(d.name), f)
 			} else {
 				u = getUnit(d.file+":"+d.name, d.file)
@@ -372,7 +372,7 @@ func main() {
 		if place(d) == nil {
 			var u *unit
 			for _, t := range refs[i] {
-				if strings.HasPrefix(d.file, "a2g_") && strings.HasSuffix(t.name, "_class") {
+				if strings.HasPrefix(d.file, "j2g_") && strings.HasSuffix(t.name, "_class") {
 					if f := prefixFile(t.name); f != "" {
 						u = getUnit(unitName(t.name), f)
 						break
@@ -544,7 +544,7 @@ func tarjan(succ [][]int) [][]int {
 }
 
 // javaPackage is a unit's Java package as its file names it (java_util_HashMap.go: java.util), or
-// "jrt" for jrt's hand-written forms and "a2g" for the generated shared files.
+// "jrt" for jrt's hand-written forms and "j2g" for the generated shared files.
 func javaPackage(u *unit) string {
 	if allClasses && translated(u.file) {
 		return "arbace.lang"
@@ -560,8 +560,8 @@ func javaPackage(u *unit) string {
 		}
 		return strings.Join(p, ".")
 	}
-	if strings.HasPrefix(u.file, "a2g_") {
-		return "(a2g)"
+	if strings.HasPrefix(u.file, "j2g_") {
+		return "(j2g)"
 	}
 	return "(hand-written)"
 }

@@ -13,7 +13,7 @@ import java.security.SecureRandomParameters;
  * its name and calls its public constructor by reflection: the one taking the engine type's
  * constructor parameter class (SecureRandomParameters for SecureRandom) when it has one, else
  * the one without parameters (if the parameter is null). The Go build's closed world has no
- * reflection on the classes of non-exported packages (A2G-SPEC §10.6), so the services of the
+ * reflection on the classes of non-exported packages (J2G-SPEC §10.6), so the services of the
  * SUN and SunJCE providers are constructed here (SunJCE's by com.sun.crypto.provider.JceServices:
  * the classes are package-private), directly, with the same choice of
  * constructor, the same NoSuchMethodException when there is none, and whatever the constructor

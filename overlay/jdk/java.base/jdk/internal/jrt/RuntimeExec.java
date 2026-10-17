@@ -1,7 +1,7 @@
 /*
  * Arbace (overlay/jdk, doc/go/JRT-NOTES.md "Processes"): Runtime.exec for the Go build. jrt's
- * Runtime is hand-written Go, which cannot name the translated ProcessBuilder; a2g gives
- * Runtime's member table the six exec methods (arbace/a2g/out.ae), each a call of the method
+ * Runtime is hand-written Go, which cannot name the translated ProcessBuilder; j2g gives
+ * Runtime's member table the six exec methods (arbace/j2g/out.ae), each a call of the method
  * here of the same parameters. They do what jdk26u's Runtime.exec does (baf63fb,
  * src/java.base/share/classes/java/lang/Runtime.java; Copyright (c) 1995, 2025, Oracle and/or
  * its affiliates, GPL 2 with the Classpath Exception: LICENSE.md), through ProcessBuilder's

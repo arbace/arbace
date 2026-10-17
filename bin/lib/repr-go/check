@@ -1,0 +1,379 @@
+#!/bin/bash
+# The round-trip oracle of repr/go over a corpus (doc/go/ROUNDTRIP.md): compares a candidate's Go
+# sources with the originals by tools/gocmp, at the levels tree, export and code.
+#
+# Usage: bin/repr-go check [OPTIONS] CANDIDATE
+#        bin/repr-go check --make identity|reprint|canon DIR
+#        bin/repr-go check --mutations [OPTIONS]
+#
+# CANDIDATE is laid out like GOROOT: CANDIDATE/src/<package dir>/*.go and CANDIDATE/test/....
+# The corpus, for the configuration:
+#   - every package of `go list std` (cmd is not in std) with Go files: GOROOT/src/P against
+#     CANDIDATE/src/P;
+#   - every single-file program of GOROOT/test for the configuration, as `gocmp tests`
+#     selects them (the rule the helper's corpus uses too, bin/repr-go corpus test): in a
+#     directory of Go's test driver, action run, runoutput, build, buildrun, compile or
+#     asmcheck, no other GOEXPERIMENT, matched by go/build (build constraints, file name).
+#     GOROOT/test/F against CANDIDATE/test/F; a program of several files (F,G.go: the
+#     extra files its action line names) against the same files. The list is written to
+#     the work directory (corpus-tests.txt).
+# --list-tests prints that list and exits.
+# --make writes a candidate made without forms: identity (a copy of the .go files of
+# GOROOT/src and GOROOT/test), reprint (gocmp reprint: go/printer over the trees without
+# comments or positions, the directives kept) or canon (gocmp reprint -canon: reprint after
+# respelling the trees in every way the tree level normalizes).
+# --mutations checks the oracle itself: for each package, and each operation (swap, const,
+# drop), one seeded mutation (gocmp mutate) compared with the original at all levels; reports
+# which levels catch it.
+#
+# Options:
+#   --goos tamago|linux  GOOS (default $REPR_GO_GOOS, else tamago); cgo is off (CGO_ENABLED=0)
+#   --arch amd64|arm64   GOARCH (default $REPR_GO_GOARCH, else amd64); also GOOS/GOARCH, both at once
+#   --levels L,...       tree, export, code (default all three)
+#   -j N                 parallel comparisons (default the number of cores)
+#   --only REGEX         only the corpus entries (import paths, test paths) matching REGEX
+#   --no-tests           packages only; --no-packages: tests only
+#   --with-tests         packages with their _test.go files (gocmp -tests: the trees of all
+#                        files, the export data and code of the package and its test
+#                        variants), test-only packages included; work directory GOOS-GOARCH-tests
+#   --reference FILE     results to compare with: an entry passing a level there and not here
+#                        is a regression, and so is an entry missing here (default: none; any
+#                        failure fails the run)
+#   --record FILE        also write the results as a reference (without times or paths)
+#   --known FILE         the known differences, with their reasons (test/repr/go/roundtrip-known.edn):
+#                        failing levels listed there are expected (reported, not failures);
+#                        failing levels not listed are reported as unexpected
+#   --list-tests         print the test programs of the corpus for the configuration, exit
+#   --ops OPS --seed N   for --mutations (default swap,const,drop and 1)
+# Environment: ARBACE_GOROOT (default /root/tamago-go: TamaGo's go1.27.1, which builds linux too),
+# REPR_GO_GOOS (default tamago), REPR_GO_GOARCH;
+# REPR_GO_GOCMP_FLAGS, more flags for gocmp (e.g. -keep-positions).
+# Output under .tmp/repr-go-check/GOOS-GOARCH/: results.edn (read by the Clojure reader: one
+# entry per line, [:package|:test PATH {:tree :pass ...} "first line of the difference"]),
+# logs/ (gocmp's full output per entry), and a summary table on stdout.
+# Exit status: 0 when no entry fails (or, with --reference, nothing regressed).
+set -uo pipefail
+export CGO_ENABLED=0 # Go's builds never use cgo (doc/go/BOX-NOTES.md, "... cgo dropped", 2026-10-16)
+root=$(cd "$(dirname "$0")/../../.." && pwd)
+. "$root/bin/lib/renamed-env.bash" # stops on a stale G2A_*, J2A_* or A2G_*
+
+goroot=${ARBACE_GOROOT:-/root/tamago-go}
+goos=${REPR_GO_GOOS:-tamago}
+goarch=${REPR_GO_GOARCH:-amd64}
+levels=tree,export,code
+jobs=$(nproc)
+only=
+packages=1
+tests=1
+reference=
+record=
+known=
+with_tests=
+mode=check
+make_kind=
+ops=swap,const,drop
+seed=1
+
+if [ "${1:-}" = "--worker" ]; then
+  # --worker "KIND<tab>PATH<tab>A<tab>B<tab>LOG<tab>MUTDIR": one comparison (through xargs)
+  IFS=$'\t' read -r kind path a b log mutdir <<< "$2"
+  site=
+  if [ -n "$mutdir" ]; then
+    rm -rf "$mutdir"
+    out=$mutdir
+    first=${a%%,*}
+    [ -f "$first" ] && { mkdir -p "$mutdir"; out=$mutdir/$(basename "$first"); }
+    site=$("$GOCMP" mutate -op "$REPR_GO_OP" -seed "$REPR_GO_SEED" "$a" "$out" 2>&1 | tr '\t\n' '  ')
+    case $? in
+      0) b=$out; [ "$first" != "$a" ] && b=$out,${a#*,} ;;
+      4) printf '%s\t%s\tnosite\t\n' "$kind" "$path"; exit 0 ;;
+      *) printf '%s\t%s\terror\t%s\n' "$kind" "$path" "$(echo "$site" | head -1)"; exit 0 ;;
+    esac
+  fi
+  start=$(date +%s%N)
+  "$GOCMP" ${REPR_GO_GOCMP_FLAGS:-} -levels "$REPR_GO_LEVELS" "$a" "$b" > "$log" 2>&1
+  status=$?
+  ms=$(( ($(date +%s%N) - start) / 1000000 ))
+  result=$(grep '^RESULT ' "$log" | tail -1 | cut -c8-)
+  [ -n "$result" ] || result="tree=error export=error code=error"
+  # the first line of the first difference, for the results file
+  first=$(grep -v -e '^RESULT ' -e '^[a-z]*: pass$' -e '^[a-z]*: skip$' "$log" | sed -n '2p' | sed 's/^ *//' | tr '\t' ' ' | cut -c1-200)
+  [ -n "$site" ] && first="$site | $first"
+  [ -n "$mutdir" ] && rm -rf "$mutdir"
+  nocompile=0
+  grep -q '^  candidate does not compile' "$log" && nocompile=1
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$kind" "$path" "$result" "$status" "$ms" "$first" "$nocompile"
+  exit 0
+fi
+
+while [ $# -gt 0 ]; do
+  case $1 in
+    --goos) goos=$2; shift 2 ;;
+    --arch)
+      case $2 in */*) goos=${2%/*}; goarch=${2#*/} ;; *) goarch=$2 ;; esac
+      shift 2 ;;
+    --levels) levels=$2; shift 2 ;;
+    -j) jobs=$2; shift 2 ;;
+    --only) only=$2; shift 2 ;;
+    --no-tests) tests=0; shift ;;
+    --no-packages) packages=0; shift ;;
+    --with-tests) with_tests=1; shift ;;
+    --reference) reference=$2; shift 2 ;;
+    --record) record=$2; shift 2 ;;
+    --known) known=$2; shift 2 ;;
+    --make) mode=make; make_kind=$2; shift 2 ;;
+    --mutations) mode=mutations; shift ;;
+    --list-tests) mode=list-tests; shift ;;
+    --ops) ops=$2; shift 2 ;;
+    --seed) seed=$2; shift 2 ;;
+    -h|--help) sed -n '2,/^set -uo/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -*) echo "unknown option $1" >&2; exit 2 ;;
+    *) break ;;
+  esac
+done
+
+case $goos/$goarch in
+  tamago/amd64|tamago/arm64|linux/amd64|linux/arm64) ;;
+  *) echo "configuration $goos/$goarch: repr/go's are tamago and linux, amd64 and arm64" >&2; exit 2 ;;
+esac
+go=$goroot/bin/go
+[ -x "$go" ] || { echo "no Go toolchain at $goroot (set ARBACE_GOROOT)" >&2; exit 2; }
+work=$root/.tmp/repr-go-check/$goos-$goarch${with_tests:+-tests}
+if [ -n "$with_tests" ]; then
+  export REPR_GO_GOCMP_FLAGS="${REPR_GO_GOCMP_FLAGS:-} -tests"
+fi
+mkdir -p "$work"
+
+# gocmp, built for the host
+export GOCMP=$root/.tmp/repr-go-check/bin/gocmp
+(cd "$root/tools/gocmp" && env -u GOOS -u GOARCH GOROOT="$goroot" GOTOOLCHAIN=local GOFLAGS= \
+   "$go" build -o "$GOCMP" .) || { echo "cannot build tools/gocmp" >&2; exit 2; }
+
+# The configuration of every go command below
+export GOROOT=$goroot GOOS=$goos GOARCH=$goarch CGO_ENABLED=0 GOTOOLCHAIN=local GOFLAGS= GOWORK=off GOCMP_GO=$go
+version=$("$go" env GOVERSION)
+
+# The test programs (one rule for the helper's corpus and the oracle's)
+list_tests() {
+  "$GOCMP" tests "$goroot/test"
+}
+if [ "$mode" = list-tests ]; then
+  list_tests
+  exit
+fi
+
+if [ "$mode" = make ]; then
+  dir=${1:?--make $make_kind needs a directory}
+  mkdir -p "$dir"
+  case $make_kind in
+    identity)
+      (cd "$goroot" && find src test -name '*.go' -print0 | tar --null -T - -cf -) | tar -xf - -C "$dir" ;;
+    reprint|canon)
+      flag=; [ "$make_kind" = canon ] && flag=-canon
+      "$GOCMP" reprint $flag "$goroot/src" "$dir/src" 2> "$dir.copied.txt" &&
+        "$GOCMP" reprint $flag "$goroot/test" "$dir/test" 2>> "$dir.copied.txt"
+      st=$?
+      echo "files copied as they are: $dir.copied.txt"
+      exit $st ;;
+    *) echo "--make identity|reprint|canon" >&2; exit 2 ;;
+  esac
+  exit
+fi
+
+if [ "$mode" = check ]; then
+  cand=$(cd "${1:?usage: bin/repr-go check [OPTIONS] CANDIDATE}" && pwd) || exit 2
+fi
+
+# The corpus
+corpus=$work/corpus.txt
+: > "$corpus"
+if [ $packages = 1 ]; then
+  if [ -n "$with_tests" ]; then
+    filter='{{if or .GoFiles .TestGoFiles .XTestGoFiles}}{{if not .Error}}{{.ImportPath}} {{.Dir}}{{end}}{{end}}'
+  else
+    filter='{{if .GoFiles}}{{if not .Error}}{{.ImportPath}} {{.Dir}}{{end}}{{end}}'
+  fi
+  "$go" list -e -f "$filter" std |
+    while read -r ip dir; do printf 'package\t%s\t%s\n' "$ip" "${dir#$goroot/src/}"; done >> "$corpus"
+fi
+if [ $tests = 1 ]; then
+  tlist=$work/corpus-tests.txt
+  list_tests > "$tlist" || { echo "cannot list the test programs" >&2; exit 2; }
+  while read -r f; do printf 'test\t%s\t%s\n' "${f%%,*}" "$f"; done < "$tlist" >> "$corpus"
+fi
+if [ -n "$only" ]; then
+  awk -F'\t' -v re="$only" '$2 ~ re' "$corpus" > "$corpus.only" && mv "$corpus.only" "$corpus"
+fi
+total=$(wc -l < "$corpus")
+[ "$total" -gt 0 ] || { echo "empty corpus" >&2; exit 2; }
+
+export REPR_GO_LEVELS=$levels REPR_GO_OP= REPR_GO_SEED=$seed
+rm -rf "$work/logs"
+mkdir -p "$work/logs"
+
+# run_corpus TAG: compares every corpus entry, one line per entry into $work/raw-TAG.tsv
+run_corpus() {
+  local tag=$1 mutate=$2
+  awk -F'\t' -v goroot="$goroot" -v cand="${cand:-}" -v logs="$work/logs" -v tag="$tag" \
+      -v mut="$mutate" -v mutroot="$work/mut" '
+    {
+      id = tag "-" $1 "-" $2; gsub(/[\/ ]/, "_", id)
+      if ($1 == "package") { a = goroot "/src/" $3; b = cand "/src/" $3 }
+      else { a = goroot "/test/" $3; b = cand "/test/" $3 }
+      m = (mut == "1") ? mutroot "/" id : ""
+      print $1 "\t" $2 "\t" a "\t" b "\t" logs "/" id ".log\t" m
+    }' "$corpus" |
+    xargs -d '\n' -n 1 -P "$jobs" "$0" --worker > "$work/raw-$tag.tsv"
+}
+
+# summary TSV: prints the table of a raw file
+summary() {
+  awk -F'\t' -v levels="$levels" '
+    BEGIN { n = split(levels, L, ",") }
+    {
+      k = $1; total[k]++; kinds[k] = 1
+      split($3, parts, " ")
+      for (i in parts) { split(parts[i], kv, "="); c[k, kv[1], kv[2]]++ }
+    }
+    END {
+      printf "%-9s %6s", "", "total"
+      for (i = 1; i <= n; i++) printf "  %-26s", L[i] " pass/fail/err/skip"
+      printf "\n"
+      for (k in kinds) {
+        printf "%-9s %6d", k, total[k]
+        for (i = 1; i <= n; i++)
+          printf "  %-26s", sprintf("%d/%d/%d/%d", c[k, L[i], "pass"], c[k, L[i], "fail"], c[k, L[i], "error"], c[k, L[i], "skip"])
+        printf "\n"
+      }
+    }' "$1"
+}
+
+started=$(date +%s)
+if [ "$mode" = mutations ]; then
+  status=0
+  for op in ${ops//,/ }; do
+    export REPR_GO_OP=$op
+    run_corpus "mut-$op" 1
+    raw=$work/raw-mut-$op.tsv
+    echo "== mutation $op (seed $seed)"
+    awk -F'\t' -v levels="$levels" '
+      BEGIN { n = split(levels, L, ",") }
+      $3 == "nosite" { nosite++; next }
+      $3 == "error" { err++; next }
+      {
+        mutated++
+        delete r; split($3, parts, " ")
+        for (i in parts) { split(parts[i], kv, "="); r[kv[1]] = kv[2] }
+        for (i = 1; i <= n; i++) if (r[L[i]] == "fail") caught[L[i]]++
+        if ($7 == 1) nocompile++
+        if (r["tree"] != "fail") { missed++; print "  NOT CAUGHT BY TREE: " $1 " " $2 ": " $6 > "/dev/stderr" }
+      }
+      END {
+        printf "  mutated %d (no site %d, errors %d); candidate does not compile: %d\n", mutated, nosite, err, nocompile
+        for (i = 1; i <= n; i++) printf "  caught by %-6s %d\n", L[i], caught[L[i]]
+        exit missed > 0
+      }' "$raw" || status=1
+  done
+  echo "time: $(( $(date +%s) - started )) s, logs in $work/logs"
+  exit $status
+fi
+
+run_corpus check 0
+raw=$work/raw-check.tsv
+elapsed=$(( $(date +%s) - started ))
+
+# results.edn: one entry per line, sorted
+results=$work/results.edn
+{
+  echo ";; bin/repr-go check results (doc/go/ROUNDTRIP.md). One entry per line:"
+  echo ";; [KIND PATH {LEVEL STATUS ...} FIRST-LINE-OF-DIFFERENCE]"
+  printf '{:config {:goroot "%s" :goos "%s" :goarch "%s" :go "%s"}\n' "$goroot" "$goos" "$goarch" "$version"
+  printf ' :candidate "%s"\n :levels [%s]\n :date "%s"\n :seconds %d\n :results\n [\n' \
+    "$cand" ":${levels//,/ :}" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$elapsed"
+  sort -t$'\t' -k1,1 -k2,2 "$raw" | awk -F'\t' '{
+      n = split($3, parts, " "); m = ""
+      for (i = 1; i <= n; i++) { split(parts[i], kv, "="); m = m (i > 1 ? " " : "") ":" kv[1] " :" kv[2] }
+      first = $6; gsub(/\\/, "\\\\\\\\", first); gsub(/"/, "\\\"", first)
+      printf "  [:%s \"%s\" {%s :ms %s} \"%s\"]\n", $1, $2, m, $5, first
+    }'
+  echo " ]}"
+} > "$results"
+
+summary "$raw"
+echo "time: $elapsed s with $jobs jobs; results in ${results#$root/}, logs in ${work#$root/}/logs"
+
+# Known differences: lines "kind path level" of FILE's entries [KIND "PATH" [LEVEL ...] "reason"]
+known_levels() {
+  sed -n 's/^ *\[:\([a-z]*\) "\([^"]*\)" \[\([^]]*\)\].*/\1 \2 \3/p' "$1" |
+    awk '{ for (i = 3; i <= NF; i++) print $1, $2, substr($i, 2) }'
+}
+
+# Regressions against a reference, else failures
+key_status() { # FILE: lines "kind path level status"
+  sed -n 's/^  \[:\([a-z]*\) "\([^"]*\)" {\([^}]*\)}.*/\1 \2 \3/p' "$1" |
+    sed 's/ :ms [0-9]*//' |
+    awk '{ for (i = 3; i < NF; i += 2) print $1, $2, substr($i, 2), substr($(i+1), 2) }'
+}
+if [ -n "$record" ]; then
+  # the reference: results.edn without times, dates or the candidate's path
+  {
+    echo ";; The round trip's reference results (bin/repr-go roundtrip, doc/go/ROUNDTRIP.md):"
+    echo ";; an entry and level passing here and not in a later run is a regression."
+    echo ";; One entry per line: [KIND PATH {LEVEL STATUS ...} FIRST-LINE-OF-DIFFERENCE]."
+    printf '{:config {:goos "%s" :goarch "%s" :go "%s"}\n :levels [%s]\n :results\n [\n' \
+      "$goos" "$goarch" "$version" ":${levels//,/ :}"
+    grep '^  \[' "$results" | sed 's/ :ms [0-9]*}/}/'
+    echo " ]}"
+  } > "$record"
+  echo "recorded the reference ${record#$root/}"
+fi
+unexpected=0
+if [ -n "$known" ]; then
+  [ -f "$known" ] || { echo "no known differences file $known" >&2; exit 2; }
+  failing=$(key_status "$results" | awk '$4 == "fail" || $4 == "error" { print $1, $2, $3 }' | sort)
+  listed=$(known_levels "$known" | sort)
+  n_known=$(comm -12 <(echo "$failing") <(echo "$listed") | grep -c . || true)
+  unexp=$(comm -23 <(echo "$failing") <(echo "$listed") | grep . || true)
+  fixed=$(comm -13 <(echo "$failing") <(echo "$listed") |
+          while read -r k p l; do key_status "$results" | grep -q "^$k $p $l pass\$" && echo "  $k $p $l"; done)
+  echo "known differences (${known#$root/}): $n_known failing levels as expected"
+  [ -n "$fixed" ] && { echo "known differences that now pass (update ${known#$root/}):"; echo "$fixed"; }
+  if [ -n "$unexp" ]; then
+    unexpected=$(echo "$unexp" | wc -l)
+    echo "$unexpected unexpected failing entry levels; first ones:"
+    echo "$unexp" | head -10 | sed 's/^/  /'
+  fi
+fi
+if [ -n "$reference" ]; then
+  [ -f "$reference" ] || { echo "no reference $reference" >&2; exit 2; }
+  # an entry and level passing in the reference and not here, or missing here (when the
+  # run includes its kind and path), is a regression
+  regressions=$(join -j1 -a1 -e missing -o 0,1.2,2.2 \
+                  <(key_status "$reference" | awk '{print $1"|"$2"|"$3, $4}' | sort) \
+                  <(key_status "$results" | awk '{print $1"|"$2"|"$3, $4}' | sort) |
+                awk -v only="$only" -v packages=$packages -v tests=$tests -v levels=",$levels," '
+                  $2 == "pass" && $3 != "pass" {
+                    split($1, k, "|")
+                    if ($3 == "missing" && ((k[1] == "package" && !packages) || (k[1] == "test" && !tests) ||
+                                            (only != "" && k[2] !~ only) || index(levels, "," k[3] ",") == 0)) next
+                    print "  " k[1] " " k[2] " " k[3] ": " $2 " -> " $3
+                  }')
+  if [ -n "$regressions" ]; then
+    echo "regressions against ${reference#$root/}:"
+    echo "$regressions"
+    exit 1
+  fi
+  echo "no regressions against ${reference#$root/}"
+  exit 0
+fi
+if [ -n "$known" ]; then
+  [ "$unexpected" -eq 0 ] || exit 1
+  exit 0
+fi
+failures=$(key_status "$results" | awk '$4 == "fail" || $4 == "error"' | wc -l)
+if [ "$failures" -gt 0 ]; then
+  echo "$failures failing entry levels; first ones:"
+  key_status "$results" | awk '$4 == "fail" || $4 == "error" { print "  " $1, $2, $3 }' | head -10
+  exit 1
+fi
+exit 0

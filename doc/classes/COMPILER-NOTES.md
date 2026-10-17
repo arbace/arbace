@@ -1,4 +1,4 @@
-# Class forms compiler: implementation notes
+# Java forms compiler: implementation notes
 
 The implementation of [SPEC.md](SPEC.md) (agenda step 2): one plain-Clojure compiler of the class
 forms (§12 question 17) that emits bytecode with ASM. It first ran on the frozen baseline
@@ -15,10 +15,10 @@ SPEC.md, last section).
 > `opcodes` (the access flags, ASM's `Opcodes/ACC_*` values), `go` (ASM's `TypeReference`
 > arithmetic, and the Go build's generic signatures), `interp` (the Go build's interpreter of
 > the analyzed classes, doc/go/CLASSFORMS-REPL.md; formerly a namespace variant) and `jvm` (the
-> class file reading of `env` on a JVM, with ASM: loaded on demand only by a2g's edge
+> class file reading of `env` on a JVM, with ASM: loaded on demand only by j2g's edge
 > recording on the frozen jar). The back end (`emit`, `compiler`, `shape`, `verify`, `build`,
 > `boot`), its tests (`test/classes/*_test.ae`, `bin/class-forms-tests`) and ASM are on the
-> branch `arbace-for-java-26`; the frozen jar `arbace-for-java-26-v4` runs them where j2a's
+> branch `arbace-for-java-26`; the frozen jar `arbace-for-java-26-v4` runs them where repr/java's
 > checks compile converted forms to bytecode. The sections below describe the compiler as it was
 > there, the back end included.
 
@@ -29,13 +29,13 @@ SPEC.md, last section).
 | `arbace/classes/boot.ae` | `arbace.classes.boot` | driver: requires the others (until the freeze it also ran them at stage 0, the frozen Clojure, mapping `arbace.*` to `clojure.*` and loading `arbace/core_classes.ae` into `clojure.core`; that path is on the branch `arbace-for-java-26`) |
 | `arbace/classes/types.ae` | `arbace.classes.types` | type forms (§4.3), descriptors, erasure, `Signature` strings |
 | `arbace/classes/env.ae` | `arbace.classes.env` | class environment (§9.2): class infos from the compilation, from earlier definitions and by reflection (constants from class files); member lookup and access; package class loaders (§10) |
-| `arbace/classes/parse.ae` | `arbace.classes.parse` | syntax of class forms and members, class access flags |
+| `arbace/classes/parse.ae` | `arbace.classes.parse` | syntax of Java forms and members, class access flags |
 | `arbace/classes/analyze.ae` | `arbace.classes.analyze` | entering classes (headers, members, derived members), name resolution, code analysis into typed nodes |
 | `arbace/classes/emit.ae` | `arbace.classes.emit` | bytecode for nodes and classes, `InnerClasses` by a post-pass over the constant pool |
 | `arbace/classes/compiler.ae` | `arbace.classes.compiler` | one compilation: enter, analyze, emit; define and/or write the classes |
-| `arbace/classes/lower.ae` | `arbace.classes.lower` | Clojure's `fn*`, `reify*`, `deftype*`, `letfn*`, `case*` and `def` rewritten into class forms and other forms the compiler knows (section "Clojure in class bodies" below) |
-| `arbace/classes/build.ae` | `arbace.classes.build` | compiles trees of class forms files into class files at any stage, for `bin/build-arbace` (`doc/VENDOR-NOTES.md`) |
-| `arbace/classes/native.ae` | `arbace.classes.native` | the boundary with `arbace.lang.Compiler` (stage 1 on): what the compiler calls for the class forms' special forms (SPEC §9.5, section "Native class forms" below) |
+| `arbace/classes/lower.ae` | `arbace.classes.lower` | Clojure's `fn*`, `reify*`, `deftype*`, `letfn*`, `case*` and `def` rewritten into Java forms and other forms the compiler knows (section "Clojure in class bodies" below) |
+| `arbace/classes/build.ae` | `arbace.classes.build` | compiles trees of Java forms files into class files at any stage, for `bin/build-arbace` (`doc/VENDOR-NOTES.md`) |
+| `arbace/classes/native.ae` | `arbace.classes.native` | the boundary with `arbace.lang.Compiler` (stage 1 on): what the compiler calls for the Java forms' special forms (SPEC §9.5, section "Native Java forms" below) |
 | `arbace/core_classes.ae` | `arbace.core` | the user-facing macros and operators, loaded by `arbace/core.ae` (formerly `arbace.classes.core`) |
 | `arbace/classes/verify.ae` | `arbace.classes.verify` | the JDK's class file verifier (`java.lang.classfile`, JEP 484) as a test oracle over a tree of class files; run on every stage by `bin/build-arbace` and on run-time compiled classes by `test/native/verify_test.ae` |
 | `arbace/classes/shape.ae` | `arbace.classes.shape` | class shapes (§3) as data, and their differences, for comparing with javac |
@@ -48,9 +48,9 @@ metadata such as type hints), so the same sources ran on the frozen Clojure and 
 Its other dependencies are ordinary core functions, `proxy` (for ASM's `ClassWriter` and
 visitors) and `arbace.lang.DynamicClassLoader`/`RT` for the REPL loaders.
 
-The front end (`types`, `env`, `parse`, `lower`, `analyze`) also serves the Go build: a2g
-translates its analysis into Go forms (doc/go/A2G-SPEC.md), and the Go executable's REPL
-runs it for class forms (evaluated; compiled to Go since S6) (doc/go/CLASSFORMS-REPL.md). Amendment 15 came from that use.
+The front end (`types`, `env`, `parse`, `lower`, `analyze`) also serves the Go build: j2g
+translates its analysis into Go forms (doc/go/J2G-SPEC.md), and the Go executable's REPL
+runs it for Java forms (evaluated; compiled to Go since S6) (doc/go/CLASSFORMS-REPL.md). Amendment 15 came from that use.
 
 ## Use
 
@@ -64,14 +64,14 @@ user=> (let [c (Counter.)] (.inc c) (.inc c))
 2
 ```
 
-- The class forms are native (section "Native class forms" below): `arbace.core` holds their
+- The Java forms are native (section "Native Java forms" below): `arbace.core` holds their
   names and the compiler loads `arbace.classes` on first use. `(require 'arbace.classes.boot)`
   loads the compiler's namespaces at once.
 - `defclass` compiles at macroexpansion time, defines the classes in their package's loader,
   imports the top-level class and evaluates to it. Under `*compile-files*` (`compile`) the classes
   are also written to `*compile-path*`; the compiled namespace then imports them from the class
   path, and a JVM without the compiler can load it (tested).
-- `defclasses` compiles several class forms as one compilation (mutually referring classes).
+- `defclasses` compiles several Java forms as one compilation (mutually referring classes).
 - `arbace.classes.compiler/compile-forms` returns the bytes without defining anything.
 - Options (dynamic vars of `arbace.classes.emit`): `*version*`, the class file version (default:
   the running JDK's); `*string-concat*`, `:indy` (default) or `:inline` for javac's
@@ -85,7 +85,7 @@ edited compiler namespace loads from source; and with the frozen `clojure/`'s ja
 the class path, extracted once from the tag `arbace-for-java-26-v1` into `.tmp/frozen/` (both by
 `bin/lib/tools.bash`): some tests compare with them (`Keyword`, `Reduced`). Until the freeze they
 ran at stage 0. Most compare the classes
-compiled from class forms with javac's for the equivalent Java (in-process `javax.tools`), by
+compiled from Java forms with javac's for the equivalent Java (in-process `javax.tools`), by
 shape: flags, supertypes, signatures, nest and inner class attributes, fields, methods,
 `MethodParameters`, annotations and the symbolic content of code (member and class references,
 call sites, constants). The others load and run the classes.
@@ -97,13 +97,13 @@ hierarchy questions (for stack map frames and assignability) are answered by par
 from the tree first, then the JDK, never from classes loaded in the verifying runtime. From a
 stage: `java -cp target/stageN:. arbace.lang.Main -m arbace.classes.verify DIR [CLASS-DIR...]`
 (exit status 1 on any error, with a report grouped by kind). `bin/build-arbace` runs it on
-stages 1 and 2 (stage 3 equals stage 2): 5,091 classes each when it was added, the class forms'
+stages 1 and 2 (stage 3 equals stage 2): 5,091 classes each when it was added, the Java forms'
 and the Clojure compiler's, verified in about 0.9 s (1.7 s with the JVM launch); 5,756 each
 on 2026-10-07, 5,740 on 2026-10-08 (the journal on `arbace-for-golang`), 5,771 in `target/stage2` on 2026-10-11.
 
 ## How it works
 
-1. **Parse** (`parse.ae`): a class form becomes a declaration map: kind, modifiers, options,
+1. **Parse** (`parse.ae`): a Java form becomes a declaration map: kind, modifiers, options,
    members. Member macros are expanded and `do` spliced. Access flags (class file and
    `InnerClasses`) follow from the metadata and Java's implicit modifiers.
 2. **Enter** (`analyze.ae`): every class of the top-level form gets its binary name (member
@@ -195,7 +195,7 @@ Class bodies are Clojure (§5.13). Beyond the Java subset, at every stage:
   by Clojure's compiler (`Compiler/analyze`, in a fresh `Compiler/LOADER` as `eval` binds one,
   with `*ns*` the code's namespace), and is `nil`: its methods see only the fields
   (`NewInstanceExpr.build` binds `LOCAL_ENV` to them), never the enclosing locals, so nothing
-  of the enclosing code reaches it. One whose methods use the class forms is handed over to
+  of the enclosing code reaches it. One whose methods use the Java forms is handed over to
   `compile-deftype` as anywhere else (below). As in Clojure, the class is named by its full
   name until the macro's `import` has run. `import*` is Clojure's `ImportExpr`:
   `Namespace.importClass(RT.classForNameNonLoading(c))` on the namespace current at run time,
@@ -206,7 +206,7 @@ Class bodies are Clojure (§5.13). Beyond the Java subset, at every stage:
 
 ## Stage-0 limits (until the freeze)
 
-Until 2026-10-08, when stage 0 was the frozen Clojure (now the seed, with native class forms):
+Until 2026-10-08, when stage 0 was the frozen Clojure (now the seed, with native Java forms):
 
 - `anon`, `letclass`, `lambda`, `switch` and the other new code forms worked inside class bodies
   only (the frozen compiler did not know their special forms). From stage 1 on they worked in
@@ -215,10 +215,10 @@ Until 2026-10-08, when stage 0 was the frozen Clojure (now the seed, with native
   forms was seen form by form by the frozen compiler, hence `defclasses` (amendment 1). From
   stage 1 on a top-level `do` worked.
 
-## Native class forms (every stage)
+## Native Java forms (every stage)
 
-SPEC §9.5: the class forms' names are vars of `arbace.core` and their special forms are known to
-`arbace.lang.Compiler`; there is still one implementation of the class forms, `arbace.classes`
+SPEC §9.5: the Java forms' names are vars of `arbace.core` and their special forms are known to
+`arbace.lang.Compiler`; there is still one implementation of the Java forms, `arbace.classes`
 (§12 question 17), which the compiler loads on first use. Nothing needs `arbace.classes.boot`
 at any stage: `java -cp target/stage1:. arbace.lang.Main` and `(defclass ...)`.
 
@@ -246,23 +246,23 @@ at any stage: `java -cp target/stage1:. arbace.lang.Main` and `(defclass ...)`.
   calls the method, as for Clojure's own operators (`test/native/inline_test.ae` reads the
   instructions of AOT-compiled fns).
 - **Loading `arbace.classes`.** `bin/build-arbace` AOT-compiles the `arbace.classes`
-  namespaces (`compile 'arbace.classes.boot`, not `arbace.j2a`) into each stage with that
-  stage's runtime, after its class forms are built. Since 2026-10-07 this is one
+  namespaces (`compile 'arbace.classes.boot`, not `arbace.repr.java`) into each stage with that
+  stage's runtime, after its Java forms are built. Since 2026-10-07 this is one
   `arbace.lang.Compile` run with direct linking that first compiles `arbace.core` and the other
   namespaces Clojure ships compiled, so the libraries `arbace.classes` requires are classes too
-  (`doc/VENDOR-NOTES.md`, "The bootstrap"). So a stage loads the class forms compiler from
+  (`doc/VENDOR-NOTES.md`, "The bootstrap"). So a stage loads the Java forms compiler from
   classes on first use (and the next stage is built by these classes); a source newer than its
   classes is still loaded from source, as Clojure's `load` decides. The output is
   reproducible, stage 3 equals stage 2 with them (2,100 files), after two fixes to the vendored
   runtime (`doc/VENDOR-NOTES.md`, "After vendoring", item 5): closed-over locals in a fixed
-  order, and proxy constructors sorted. The first class form of a session (a `defclass` in a
+  order, and proxy constructors sorted. The first Java form of a session (a `defclass` in a
   script on stage 1, the time of the `eval`) went from about 1,040 ms to about 255 ms; the
   second costs 3 ms. What remains is loading and initializing the 1,285 classes of the eight
   namespaces (`analyze` about 85 ms, `types` 40, `emit` 35) and the first compilation (30 to
   45 ms). Measured by timing each `require` (the libraries they use are loaded at startup
   already): before, compiling from source took nearly all of it, `analyze` 470 ms and `emit`
   290 ms; ASM and the class environment cost nothing measurable.
-  With all namespaces AOT-compiled (2026-10-07) the first class form costs about 200 ms from
+  With all namespaces AOT-compiled (2026-10-07) the first Java form costs about 200 ms from
   `-cp target/stage2:.` and about 55 ms from `bin/arbace-j` (the jar with the JDK AOT cache, which
   has `arbace.classes` loaded and linked by its training run); the whole `defclass` script runs
   in 0.78 s and 0.26 s, against 2.3 s before.
@@ -278,13 +278,13 @@ at any stage: `java -cp target/stage1:. arbace.lang.Main` and `(defclass ...)`.
     class object as a constant, so classes of the unnamed package work too). AOT works: the
     classes are written to `*compile-path*` and the namespace's `__init` imports them.
   - Top-level `do`: `Compiler/eval` and `compile1` bind `Compiler/CLASS_FORM_SIBLINGS` to the
-    class forms of the outermost top-level `do` (found through nested `do`s, by `class*` or by
+    Java forms of the outermost top-level `do` (found through nested `do`s, by `class*` or by
     the head resolving to `arbace.core/defclass` or `defclasses`, without macroexpanding); each
     of them is compiled with the others entered as declarations only (like classes found by
-    source lookup, §9.2), so mutually referring class forms work. `Compiler/load` resets the
+    source lookup, §9.2), so mutually referring Java forms work. `Compiler/load` resets the
     binding for the files it loads.
-  - `compile-fn`: any other class form in code the compiler compiles itself, and the forms that
-    are errors for Clojure but class forms for the spec (a primitive tag on a local with a
+  - `compile-fn`: any other Java form in code the compiler compiles itself, and the forms that
+    are errors for Clojure but Java forms for the spec (a primitive tag on a local with a
     primitive initializer, `set!` of a local of the method, `new` of an array class), throw
     `Compiler$ClassFormsExpr$Signal`. `FnExpr/parse` catches it and hands the whole fn over,
     unless the fn is one of the compiler's own `(fn* ^:once [] ...)` wrappers (loops and `try`
@@ -341,7 +341,7 @@ at any stage: `java -cp target/stage1:. arbace.lang.Main` and `(defclass ...)`.
     keyword (unboxing primitive ones) and passing the rest as `__extmap`; the static `getBasis()`
     returning the fields before those four, with their metadata; the methods as for `reify`
     (above). The class is `:clojure-fn` (Clojure's meaning) with `:reflection :clojure`. Its
-    constants, keyword and protocol call sites are the class forms compiler's (`const__N`
+    constants, keyword and protocol call sites are the Java forms compiler's (`const__N`
     fields), not the compiler's `__site__`/`__thunk__`/`__cached_class__` fields; Clojure's
     `deftype` stub class (`compile__stub`) was already defined when the method threw, and stays
     unused. Tests in `test/native/deftype_test.ae` compare the members of such a deftype and
@@ -367,7 +367,7 @@ at any stage: `java -cp target/stage1:. arbace.lang.Main` and `(defclass ...)`.
 `bin/class-forms-check DIR [PACKAGE-DIR]` compiles converted files (one file per Java file:
 `in-ns`, `import`, `defclass` forms) without defining anything, and compares the shape of every
 class with the class of the same name on the class path. For `clojure/lang` and `clojure/asm`
-those are the baseline's javac classes (`CLASS_FORMS_CP`: `bin/j2a-check` puts the frozen tree
+those are the baseline's javac classes (`CLASS_FORMS_CP`: `bin/repr-java check` puts the frozen tree
 of `.tmp/frozen/` there). It runs on Arbace (`bin/lib/tools.bash`). On 2026-10-06 the converter's output for the 183 baseline
 files (read from its work area, not committed) first gave 138 of 139 `clojure/lang` files and
 4 of 5 `clojure/asm/commons` ones shape-identical to javac (the others all), after patching two
@@ -385,7 +385,7 @@ reference: `JAVA_OPTS='--add-modules ALL-SYSTEM' bin/class-forms-check <dir> <mo
 with the javac options the JDK build uses for that module (`make/modules/*/Java.gmk`:
 `CONCAT=inline` for `java.base`, `jdk.compiler`, `jdk.jfr`, `jdk.jartool`, `jdk.internal.vm.ci`;
 `PARAMETERS=1 VERSION=69` for `jdk.internal.vm.ci`). The first complete run over all modules
-(2026-10-06, 12,444 files with class forms) gave 11,351 files whose classes are all
+(2026-10-06, 12,444 files with Java forms) gave 11,351 files whose classes are all
 shape-identical to the JDK's (91%), 233 compile errors and 860 files with differences; a later
 partial run after more fixes gave 8,872 of 9,418 (94%). Each round of differences was triaged:
 compiler issues were fixed (bridges, `this$N`, holder classes, outer instances, annotations,
@@ -397,12 +397,12 @@ shape-identical (94%), 174 compile errors, 517 files with differences; the same 
 converter's earlier output (conservative pins) gave 11,745 / 177 / 522, and no file identical
 there differs with the new output.
 
-Since 2026-10-07 this is repeatable: `bin/j2a-check --jdk` (about 10 minutes on 64 cores) and
+Since 2026-10-07 this is repeatable: `bin/repr-java check --jdk` (about 10 minutes on 64 cores) and
 its report, with javac's classes compiled from the same sources as the reference rather than
 the JDK's own (results and remaining differences in CONVERTER-NOTES.md, "The converted JDK").
 It took the files whose classes are all shape-identical from 11,699 to 12,376 of 12,444, the
 compile errors from 173 to 3. The compiler gaps it found and fixed are listed in the
-commit `Class forms compiler: gaps found by compiling the converted jdk26u` and its follow-up:
+commit `Java forms compiler: gaps found by compiling the converted jdk26u` and its follow-up:
 literal narrowing in more contexts, constant instance fields, InnerClasses entries for
 constants and annotation types (javac's ClassReferenceVisitor), fields hidden from reflection
 read from class files, bridges (direct superclass, covariant casts, outer type arguments,
@@ -441,7 +441,7 @@ Status: **done** (implemented and tested), ≡ (compared with javac's classes in
 | `VARIABLE` | done ≡: fields, parameters, `let`/`loop` locals (`^:mutable`, `^:const`, primitive tags), catch parameters, resources, pattern bindings |
 | `BLOCK` | done ≡: bodies, `initializer`, `static-initializer` |
 | `MODIFIERS`, `ANNOTATION` | done ≡ (declaration annotations by retention, element values of every kind, defaults) |
-| `TYPE_ANNOTATION`, `ANNOTATED_TYPE` | done ≡ in declarations (field, return, parameter, receiver, type parameters and bounds, supertypes, throws, with type paths; `TYPE_USE` annotations on declared names) and in code (local variables, for-each and pattern bindings, `cast`, `instance?`, `new` of classes and arrays, catch parameters, explicit type arguments of calls and method references `^{:type-args [...]}`, qualifying types of method references `^{:qualifier T}`); bridges carry them (`test/j2a/java/sample/TypeAnns.java`) |
+| `TYPE_ANNOTATION`, `ANNOTATED_TYPE` | done ≡ in declarations (field, return, parameter, receiver, type parameters and bounds, supertypes, throws, with type paths; `TYPE_USE` annotations on declared names) and in code (local variables, for-each and pattern bindings, `cast`, `instance?`, `new` of classes and arrays, catch parameters, explicit type arguments of calls and method references `^{:type-args [...]}`, qualifying types of method references `^{:qualifier T}`); bridges carry them (`test/repr/java/java/sample/TypeAnns.java`) |
 | `TYPE_PARAMETER` | done ≡ (`Signature` of classes, methods, fields, record components) |
 | `PRIMITIVE_TYPE`, `ARRAY_TYPE`, `PARAMETERIZED_TYPE`, wildcards, `INTERSECTION_TYPE`, `UNION_TYPE` | done ≡ |
 | `IF`, `CONDITIONAL_EXPRESSION` | done ≡ |
@@ -492,11 +492,11 @@ Status: **done** (implemented and tested), ≡ (compared with javac's classes in
 | part | status |
 |---|---|
 | §9.1 one namespace per package, files loaded into it | done (converted files compile; `bin/class-forms-check`) |
-| §9.2 class environment: current form, defined classes, class path, source path | done (a name that resolves to nothing is looked up as `p/C.ae` on the class path; its `in-ns`/`ns`/`import` forms are evaluated and its class forms entered as declarations only; tested with two files referring to each other) |
+| §9.2 class environment: current form, defined classes, class path, source path | done (a name that resolves to nothing is looked up as `p/C.ae` on the class path; its `in-ns`/`ns`/`import` forms are evaluated and its Java forms entered as declarations only; tested with two files referring to each other) |
 | §9.3 AOT | done (tested: a baseline JVM without the compiler loads the compiled namespace) |
 | §10 REPL: package loaders, generations | done (tested) |
 | §5.13 Clojure in class bodies | done: vars (read, call, `set!`, `def`, `var`), keywords, quoted data and other constants, vector/map/set literals (constants in private static synthetic `const__N` fields set in `<clinit>`, collections built with `RT.vector`/`map`/`set`), core operations as instructions or their `:inline` expansions, any value called, `fn`, `letfn`, `case`, `reify`, `deftype` (section "Clojure in class bodies") |
-| §5.6 reflection is an error | done: unresolved members are compile errors; with `^{:reflection :warn}` on the class (or an enclosing one) unresolved instance method calls go through `arbace.lang.Reflector` with a warning; `^{:reflection :clojure}` (handed-over fns and deftypes) reflects as Clojure does (section "Native class forms") |
+| §5.6 reflection is an error | done: unresolved members are compile errors; with `^{:reflection :warn}` on the class (or an enclosing one) unresolved instance method calls go through `arbace.lang.Reflector` with a warning; `^{:reflection :clojure}` (handed-over fns and deftypes) reflects as Clojure does (section "Native Java forms") |
 | `access$NNN` accessors, `Outer/super` | done ≡ (protected members of a superclass in another package from nested classes and lambdas, `C/super` calls; javac's numbering) |
 
 ## Notes for the converter
@@ -565,8 +565,8 @@ All accepted by the user and folded into SPEC.md; the original texts are in git 
 15. **Bridges under the subclass's bounds.** When bridges are computed, a supertype method's
     class type variables are substituted by the subclass's view of them, so they are bounded as
     the subclass bounds them (`arbace.classes.analyze/erased-params`). With `Map` from source
-    (a2g's world), `Map.put(K, V)`'s own scope bounded `K` by `Object` over `EnumMap`'s `K
-    extends Enum<K>`, and `EnumMap` got no bridge `put(Object, Object)`; the class forms checks
+    (j2g's world), `Map.put(K, V)`'s own scope bounded `K` by `Object` over `EnumMap`'s `K
+    extends Enum<K>`, and `EnumMap` got no bridge `put(Object, Object)`; the Java forms checks
     compile against the JDK's classes by reflection, which carry no such scope, and the stages
     were unchanged by the fix. Found in B1a step 5 (doc/go/EVAL-NOTES.md, phase 2B, B8; S8 in
-    doc/go/A2G-SPEC.md §16). Accepted (2026-10-09), folded into SPEC §6.
+    doc/go/J2G-SPEC.md §16). Accepted (2026-10-09), folded into SPEC §6.

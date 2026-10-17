@@ -1,0 +1,460 @@
+(ns arbace.repr.go.print
+  "repr/go's printer: Go forms (doc/go/SPEC.md) to Go source, milestone G2
+  (doc/go/PRINTER-NOTES.md).
+
+  bin/repr-go print [OPTIONS] FORMS.ae OUTDIR
+    Reads the package file FORMS.ae (its ns, go/package and load forms, and the files it
+    loads; or one file holding go/file forms and declarations) with *read-eval* false and
+    writes one Go file per go/file into OUTDIR.
+    --layout lines|gofmt|full
+                          lines (default when the forms carry lines): each form on its
+                          recorded line (§10.1, §12.3); gofmt: gofmt's layout, lines ignored;
+                          full (default for a package of :positions :full): every token at
+                          its recorded line and column, with the file's comments and white
+                          space: the original text (§10.2, §12.3)
+    --no-line-directives  never write //line or /*line*/ directives for lines layout cannot
+                          reach
+    --src DIR             the original package directory: copies :other-files and
+                          :embed-files (hashes checked) into OUTDIR, and writes
+                          OUTDIR/overlay.json mapping DIR's Go files to the printed ones
+    --build               then compiles the package as §12.4 says: the toolchain of
+                          $ARBACE_GOROOT (default /root/tamago-go), the :config's environment,
+                          -trimpath, go build -overlay, in DIR
+    --gofmt               run each printed file through $ARBACE_GOROOT/bin/gofmt
+    --line-file           (layout lines) start each file with //line FORMS-FILE:1, so that
+                          gc's positions name the forms file and its lines (§12.3)
+
+  The library: print-package, print-forms (forms in memory to {name text}), print-file."
+  (:require [arbace.repr.go.print-code :as code]
+            [arbace.repr.go.print-emit :as e]
+            [arbace.string :as str])
+  (:import [java.io File FileInputStream InputStreamReader]
+           [java.nio.charset StandardCharsets]
+           [java.nio.file Files CopyOption StandardCopyOption]
+           [java.security MessageDigest]
+           [arbace.lang LineNumberingPushbackReader]))
+
+;; ---------------------------------------------------------------------------------------
+;; Reading (§12.1)
+
+(defn read-forms
+  "The forms of a file, read with line numbers and *read-eval* false."
+  [path]
+  (with-open [r (LineNumberingPushbackReader.
+                  (InputStreamReader. (FileInputStream. (str path)) StandardCharsets/UTF_8))]
+    (binding [*read-eval* false]
+      (let [eof (Object.)]
+        (loop [acc []]
+          (let [f (read r false eof)]
+            (if (identical? f eof) acc (recur (conj acc f)))))))))
+
+(defn- go-ns-aliases
+  "The qualifiers naming arbace.go in an ns form's :require."
+  [ns-form]
+  (into #{"go" "arbace.go"}
+        (for [clause (rest ns-form)
+              :when (and (seq? clause) (= :require (first clause)))
+              spec (rest clause)
+              :when (and (vector? spec) (= 'arbace.go (first spec)))
+              :let [m (apply hash-map (rest spec))]
+              :when (:as m)]
+          (name (:as m)))))
+
+(def ^:private ^:dynamic *src* "The forms file being collected." nil)
+
+(defn- add-form
+  "Adds one top-level form to the collected package state; load-fn handles load forms."
+  [state f load-fn]
+  (binding [code/*go-ns* (:aliases @state)]
+    (let [o (when (seq? f) (code/op f))]
+      (cond
+        (= o "ns") (vswap! state update :aliases into (go-ns-aliases f))
+        (= o "in-ns") nil
+        (= o "load") (doseq [p (rest f)] (load-fn (str p)))
+        (= o "go/package")
+        (let [[_ nm & opts] f]
+          (vswap! state assoc :package (apply hash-map opts) :name nm))
+        (= o "go/file")
+        (let [[_ nm & opts] f]
+          (vswap! state update :files conj {:name nm :file f :opts (apply hash-map opts) :decls []
+                                            :src *src*}))
+        (and (seq? f) (str/starts-with? (str o) "go/"))
+        (if (empty? (:files @state))
+          (throw (ex-info (str "a declaration before any go/file: " (pr-str f)) {:form f}))
+          (vswap! state update :files (fn [fs] (conj (pop fs) (update (peek fs) :decls conj f)))))
+        (nil? f) nil
+        :else (throw (ex-info (str "not a Go forms top-level form: " (pr-str f)) {:form f}))))))
+
+(defn- new-package-state []
+  (volatile! {:package nil :name nil :files [] :aliases #{"go" "arbace.go"}}))
+
+(defn collect-forms
+  "The package of top-level forms in memory (the converter's output: ns, go/package, go/file
+  and declaration forms, no load), as collect gives it."
+  [forms]
+  (let [state (new-package-state)]
+    (doseq [f forms]
+      (add-form state f (fn [p] (throw (ex-info (str "load in forms in memory: " p) {:path p})))))
+    (dissoc @state :aliases)))
+
+(defn collect
+  "The package of a forms file: {:package {opts} :name sym :files [{:name :file :opts
+  :decls}]}, following load forms (relative to the loading file's directory, which is
+  Clojure's rule for the package file's namespace, or with a leading / to the root the ns
+  name implies). read-fn (default read-forms) gives a file's forms: a cache of files read
+  beforehand (arbace.build.go reads a program's files once, in parallel)."
+  ([path] (collect path read-forms))
+  ([path read-fn]
+  (let [state (new-package-state)
+        root (volatile! nil)]
+    (letfn [(walk [^File file]
+              (doseq [f (binding [*src* (.getPath file)] (read-fn file))]
+                (when (and (nil? @root) (seq? f) (= 'ns (first f)))
+                  (let [depth (count (re-seq #"\." (str (second f))))]
+                    (vreset! root (nth (iterate #(.getParentFile ^File %) (.getAbsoluteFile file))
+                                       (inc depth)))))
+                (binding [*src* (.getPath file)]
+                  (add-form state f
+                          (fn [p]
+                            (walk (if (str/starts-with? p "/")
+                                    (File. ^File @root (str (subs p 1) ".ae"))
+                                    (File. (.getParentFile (.getAbsoluteFile file)) (str p ".ae")))))))))]
+      (walk (File. (str path)))
+      (dissoc @state :aliases)))))
+
+;; ---------------------------------------------------------------------------------------
+;; Files (§4.3, §12.2)
+
+(defn- import-spec [v]
+  (let [[nm path] v
+        explicit? (or (:alias (meta v)) (#{"_" "."} (str nm)))]
+    (when explicit? (e/tok (str nm)) (e/sp))
+    (e/tok (arbace.repr.go.print-text/go-string path))))
+
+(defn- write-import-decl [specs]
+  (if (= 1 (count specs))
+    (do (e/tok "import") (e/sp) (import-spec (first specs)) (e/nl 0))
+    (do (e/tok "import") (e/sp) (e/tok "(")
+        (e/nl 1)
+        (loop [[v & more] specs prev nil]
+          (when v
+            ;; a path sorting before the previous one starts a block of its own, which
+            ;; gofmt's import sorting then leaves in place
+            (when (and prev (neg? (compare (str (second v)) (str (second prev)))))
+              (e/nl 1))
+            (import-spec v)
+            (e/nl (if more 1 0))
+            (recur more v)))
+        (e/tok ")") (e/nl 0))))
+
+(defn- write-imports
+  "The imports: [name path] specs, and (go/directive \"...\") forms among them (C4), in
+  order; the specs between two directives are one import declaration."
+  [imports]
+  (when (seq imports)
+    (e/nl 0)
+    (let [directive? #(and (seq? %) (= (code/op %) "go/directive"))]
+      (loop [xs (seq imports)]
+        (when xs
+          (if (directive? (first xs))
+            (do (e/comment-line (str (second (first xs))) 0)
+                (recur (next xs)))
+            (let [[specs more] (split-with (complement directive?) xs)]
+              (write-import-decl (vec specs))
+              (recur (seq more)))))))))
+
+(defn- write-imports-full
+  "Mode :full: the imports at their positions: specs (vectors, their literal paths wrapped by
+  wrap-full), each import declaration's keyword and parentheses on its first spec; the
+  directives among them are comments, which the file's comments hold."
+  [imports]
+  (let [open (volatile! nil)
+        close! (fn [] (when-let [d @open] (when (:lparen d) (code/ptok* ")" (:rparen d)))) (vreset! open nil))]
+    (doseq [v imports :when (vector? v)]
+      (let [p (:go/pos (meta v))
+            [nm path] v]
+        (if (:tok-pos p)
+          (do (close!)
+              (code/ptok* "import" (:tok-pos p)) (e/sp)
+              (when (:lparen p) (code/ptok* "(" (:lparen p)))
+              (vreset! open p))
+          (e/soft :sep ";"))
+        (when (or (:alias (meta v)) (#{"_" "."} (str nm)))
+          (code/ptok* (str nm) (:name-pos (:go/pos (meta nm)))) (e/sp))
+        (e/sp)
+        (code/expr0 path 1)))
+    (close!)))
+
+(defn- one-line-func?
+  "Whether a declaration is a function printed on one line: its closing brace on its first
+  line (mode :lines), or an empty body (gofmt's layout)."
+  [f lines? t]
+  (and (#{"go/func" "go/method"} (code/op f))
+       (if lines?
+         (and t (= (:go/end (meta f)) t))
+         (let [[_ nm & xs] f
+               [_ _ xs] (code/parse-decl-head xs)
+               body (rest xs)
+               body (if (= (first body) :results) (nnext body) body)]
+           (and (empty? body) (not (:extern (meta nm))))))))
+
+(defn- decl-pre
+  "[directive? doc directives pre-lines] of a top-level declaration."
+  [f]
+  (let [directive? (= (code/op f) "go/directive")
+        [doc dirs] (if directive? [nil []] (code/decl-doc-and-directives f))]
+    [directive? doc dirs (code/pre-lines doc dirs)]))
+
+(defn- next-target
+  "The line the declaration after decls' i-th is placed on (its doc first), when known."
+  [decls i]
+  (some (fn [d] (when-let [t (e/target d)]
+                  (- (long t) (long (nth (decl-pre d) 3)))))
+        (subvec decls (inc i))))
+
+(defn- decl-sep!
+  "The separation of a declaration (recorded line t, pre comment lines before it) from what
+  precedes it: a new alignment section (form feed) unless a one-line function follows a line
+  at the left margin (go/printer's declList: one-line functions in a row align their
+  bodies); in mode :lines down to its line."
+  [f t pre lines?]
+  (let [ff (or (not (one-line-func? f lines? t)) (pos? (e/cur-indent)))]
+    (cond
+      (or (not lines?) (nil? t)) (do (when-not (e/bol?) (e/nl 0 ff)) (e/nl 0 ff))
+      :else (let [want (- (long t) (long pre))]
+              (when-not (e/bol?) (e/nl 0 ff))
+              (while (< (e/line) want) (e/nl 0 ff))))))
+
+(defn- print-decl!
+  "Prints decls' i-th declaration, after its separation from what precedes it unless
+  sep? is false (a chunk's first: start-at! placed it)."
+  [decls i lines? popts sep?]
+  (let [f (nth decls i)
+        t (e/target f)
+        [directive? doc dirs pre] (decl-pre f)]
+    (binding [e/*next* (next-target decls i)]
+      (when sep? (decl-sep! f t pre lines?))
+      (if directive?
+        (e/comment-line (str (second f)) 0)
+        (do
+          (code/write-pre doc dirs 0)
+          (when (and lines? t (not= (long t) (e/line)) (:line-directives? (or popts {}) true))
+            (cond
+              (> (long t) (e/line)) (while (< (e/line) (long t)) (e/nl 0))
+              :else (e/line-directive-own t)))
+          (code/top-decl f))))))
+
+(def ^:private chunk-min
+  "The fewest declarations of a chunk: a file of fewer than twice as many is printed whole."
+  48)
+
+(defn- chunk-starts
+  "The first declarations of decls' chunks (mode :lines): about two chunks per processor,
+  each starting at a declaration with a recorded line; none for a file of few declarations."
+  [decls]
+  (let [n (count decls)
+        k (min (* 2 (.availableProcessors (Runtime/getRuntime))) (quot n chunk-min))]
+    (when (>= k 2)
+      (let [size (quot (+ n (dec k)) k)]
+        (into []
+              (comp (map (fn [a] (first (filter #(e/target (nth decls %)) (range a n)))))
+                    (remove nil?)
+                    (distinct))
+              (range 0 n size))))))
+
+(defn- print-file-full
+  "Mode :full (SPEC §10.2, §12.3): the Go text of one file, every token at its recorded line
+  and column, with the file's comments and white space (go/file's :go/comments, :go/space,
+  :go/tail)."
+  [file opts decls pkg-name]
+  (let [m (meta file)
+        decls (mapv code/wrap-full decls)
+        imports (code/wrap-full (:imports opts))
+        p (:go/pos m)]
+    (binding [e/*p* (e/new-state {:lines? false :line-directives? false
+                                  :full {:comments (:go/comments m) :space (:go/space m) :semis (:go/semis m) :trails (:go/trails m)
+                                         :tail (:go/tail m)}})
+              e/*next* nil
+              code/*explicit-groups* (code/uses-grouped? decls)]
+      (code/ptok* "package" (:package p)) (e/sp)
+      (code/ptok* (str (or (:package opts) pkg-name)) (:name p))
+      (write-imports-full imports)
+      (doseq [f decls :when (not= (code/op f) "go/directive")]
+        (e/soft :sep ";")
+        (code/top-decl f))
+      (e/result))))
+
+(defn print-file
+  "The Go text of one file: {:name :opts :decls} as collect gives it. pkg-name is the
+  package clause's name unless the file's :package says otherwise. In mode :lines a file of
+  many declarations is printed in chunks, in parallel (print-emit's join!); the text is the
+  same."
+  [{:keys [opts decls file src]} pkg-name {:keys [layout line-directives? line-file] :as popts}]
+  (if (= layout :full)
+    (print-file-full file opts decls pkg-name)
+  (let [lines? (case layout :lines true :gofmt false
+                 (boolean (:line (meta file))))
+        state-opts {:lines? lines? :line-directives? (if (nil? line-directives?) true line-directives?)}]
+    (binding [e/*p* (e/new-state state-opts)
+              e/*next* nil
+              code/*explicit-groups* (code/uses-grouped? decls)]
+      ;; §12.3: gc's positions name the forms file (lines are the forms' in this layout)
+      (when (and lines? line-file src)
+        (e/comment-line (str "//line " src ":1") 0)
+        (e/set-line! 1))
+      (doseq [b (:build opts)] (e/comment-line (str b) 0))
+      (when (seq (:build opts)) (e/nl 0))
+      (doseq [d (:directives opts)] (e/comment-line (str d) 0))
+      (when (seq (:directives opts)) (e/nl 0))
+      (code/write-doc (:doc opts) 0)
+      (e/tok "package") (e/sp) (e/tok (str (or (:package opts) pkg-name)))
+      (e/nl 0)
+      (write-imports (:imports opts))
+      (let [decls (vec decls)
+            n (count decls)
+            starts (when lines? (chunk-starts decls))]
+        (if (empty? starts)
+          (dotimes [i n] (print-decl! decls i lines? popts true))
+          (let [chunks (map vector starts (conj (subvec starts 1) n))
+                ;; the line a chunk starts at: its first declaration's (doc first)
+                first-line (fn [a] (let [f (nth decls a)]
+                                     (- (long (e/target f)) (long (nth (decl-pre f) 3)))))
+                printed (pmap (fn [[a b]]
+                                (binding [e/*p* (e/new-state state-opts)]
+                                  (e/start-at! (first-line a))
+                                  (print-decl! decls a lines? popts false)
+                                  (doseq [i (range (inc a) b)] (print-decl! decls i lines? popts true))
+                                  (e/chunk-state)))
+                              chunks)]
+            ;; the declarations before the first with a recorded line, in the file's state
+            (dotimes [i (first starts)] (print-decl! decls i lines? popts true))
+            ;; then each chunk joined, or printed again in the file's state
+            (doseq [[[a b] c] (map vector chunks printed)]
+              (let [f (nth decls a)]
+                (decl-sep! f (e/target f) (nth (decl-pre f) 3) lines?))
+              (when-not (e/join! c (first-line a))
+                (print-decl! decls a lines? popts false)
+                (doseq [i (range (inc a) b)] (print-decl! decls i lines? popts true)))))))
+      (when-not (e/bol?) (e/nl 0))
+      (e/result)))))
+
+(defn print-forms
+  "The Go files of a collected package: {name text}, printed in parallel (each file's
+  printing is independent: its own emitter state)."
+  [pkg opts]
+  (into (sorted-map)
+        (pmap (fn [fl] [(str (:name fl)) (print-file fl (:name pkg) opts)])
+              (:files pkg))))
+
+;; ---------------------------------------------------------------------------------------
+;; The package build (§12.4)
+
+(defn- sha256 [^File f]
+  (let [md (MessageDigest/getInstance "SHA-256")
+        bs (Files/readAllBytes (.toPath f))]
+    (apply str (map #(format "%02x" (bit-and % 0xff)) (.digest md bs)))))
+
+(defn- copy-file [^File from ^File to]
+  (.mkdirs (.getParentFile to))
+  (Files/copy (.toPath from) (.toPath to)
+              ^"[Ljava.nio.file.CopyOption;" (into-array CopyOption [StandardCopyOption/REPLACE_EXISTING])))
+
+(defn- json-string [s]
+  (str "\"" (-> (str s) (str/replace "\\" "\\\\") (str/replace "\"" "\\\"")) "\""))
+
+(defn copy-files
+  "Copies the package's :other-files and :embed-files (checking the hashes) from src to
+  out; writes out/overlay.json for go build -overlay (src's Go files to out's)."
+  [pkg ^File src ^File out written]
+  (let [opts (:package pkg)]
+    (doseq [f (:other-files opts)]
+      (copy-file (File. src (str f)) (File. out (str f))))
+    (doseq [[f h] (:embed-files opts)]
+      (let [from (File. src (str f))
+            got (sha256 from)]
+        (when (and h (not= got (str h)))
+          (throw (ex-info (str "embedded file " f ": sha256 " got ", the forms say " h) {:file f})))
+        (copy-file from (File. out (str f)))))
+    (spit (File. out "overlay.json")
+          (str "{\"Replace\": {\n"
+               (str/join ",\n" (for [n written]
+                                 (str "  " (json-string (.getPath (File. (.getAbsoluteFile src) (str n))))
+                                      ": " (json-string (.getPath (File. (.getAbsoluteFile out) (str n)))))))
+               "\n}}\n"))))
+
+(defn build-env
+  "The environment of the package's configuration (§4.2, §12.4)."
+  [config goroot]
+  (cond-> {"GOROOT" goroot "GOTOOLCHAIN" "local" "GOFLAGS" "" "GOWORK" "off"
+           "CGO_ENABLED" (if (:cgo config) "1" "0")}
+    (:goos config) (assoc "GOOS" (:goos config))
+    (:goarch config) (assoc "GOARCH" (:goarch config))
+    (:goamd64 config) (assoc "GOAMD64" (:goamd64 config))
+    (:goarm64 config) (assoc "GOARM64" (:goarm64 config))
+    (some? (:goexperiment config)) (assoc "GOEXPERIMENT" (:goexperiment config))))
+
+(defn- run [cmd ^File dir env]
+  (let [pb (ProcessBuilder. ^java.util.List (map str cmd))]
+    (.directory pb dir)
+    (let [penv (.environment pb)]
+      (doseq [[k v] env] (.put penv k v)))
+    (.redirectErrorStream pb true)
+    (let [p (.start pb)
+          out (slurp (.getInputStream p))]
+      [(.waitFor p) out])))
+
+(defn build
+  "go build -trimpath -overlay out/overlay.json in src, under the package's configuration."
+  [pkg ^File src ^File out goroot]
+  (let [config (:config (:package pkg))
+        tags (:tags config)
+        cmd (concat [(str goroot "/bin/go") "build" "-trimpath" "-overlay"
+                     (.getPath (File. (.getAbsoluteFile out) "overlay.json"))]
+                    (when (seq tags) ["-tags" (str/join "," tags)])
+                    ["."])]
+    (run cmd src (build-env config goroot))))
+
+(defn print-package
+  "Prints the package of the forms file at path into out-dir; returns the file names."
+  [path out-dir opts]
+  (let [pkg (collect path)
+        out (File. (str out-dir))
+        layout (:layout opts)
+        files (print-forms pkg (assoc opts :layout (or layout (when (= :full (:positions (:package pkg))) :full))))]
+    (.mkdirs out)
+    (doseq [[n text] files]
+      (spit (File. out ^String n) text))
+    {:package pkg :files (keys files)}))
+
+(defn- gofmt-file [goroot ^File f]
+  (let [[status out] (run [(str goroot "/bin/gofmt") "-w" (.getPath (.getAbsoluteFile f))] (.getParentFile (.getAbsoluteFile f)) {})]
+    (when-not (zero? status)
+      (throw (ex-info (str "gofmt " f ": " out) {:file f})))))
+
+(defn -main [& argv]
+  (let [goroot (or (System/getenv "ARBACE_GOROOT") "/root/tamago-go")]
+    (loop [as argv opts {}]
+      (case (first as)
+        "--layout" (recur (nnext as) (assoc opts :layout (keyword (second as))))
+        "--no-line-directives" (recur (next as) (assoc opts :line-directives? false))
+        "--src" (recur (nnext as) (assoc opts :src (second as)))
+        "--build" (recur (next as) (assoc opts :build true))
+        "--gofmt" (recur (next as) (assoc opts :gofmt true))
+        "--line-file" (recur (next as) (assoc opts :line-file true))
+        (let [[forms out] as]
+          (when-not (and forms out (= 2 (count as)))
+            (println "usage: bin/repr-go print [--layout lines|gofmt|full] [--no-line-directives] [--line-file] [--src DIR [--build]] [--gofmt] FORMS.ae OUTDIR")
+            (System/exit 2))
+          (let [{:keys [package files]} (print-package forms out opts)
+                outf (File. ^String out)]
+            (doseq [f files] (println (str out "/" f)))
+            (when (:gofmt opts)
+              (doseq [f files] (gofmt-file goroot (File. outf ^String f))))
+            (when-let [src (:src opts)]
+              (copy-files package (File. ^String src) outf files)
+              (when (:build opts)
+                (let [[status text] (build package (File. ^String src) outf goroot)]
+                  (print text)
+                  (flush)
+                  (when-not (zero? status) (System/exit 1)))))
+            (shutdown-agents)))))))

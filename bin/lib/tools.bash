@@ -1,16 +1,16 @@
-# Shared by the scripts that run Arbace's tools and checks (bin/c2a, bin/clojure-tests, bin/g2a's
-# checks, bin/a2g-check, ...). Sourced, with $root set to the repository root. Defines:
+# Shared by the scripts that run Arbace's tools and checks (bin/c2a, bin/clojure-tests, bin/repr-go's
+# checks, bin/j2g-check, ...). Sourced, with $root set to the repository root. Defines:
 #
 #   arbace_tool [-p DIR]... [-s NS]... [-D NAME=VALUE]... ARG...
 #                   runs Arbace's Go executable, the host of the tools (bin/lib/host.bash's
 #                   arbace_host_exe: ARBACE_HOST_EXE, else stage 0 built from the Go seed), with
 #                   ARG... (e.g. -m NS ARGS..., -e EXPR, a script), from the current directory.
 #                   ARBACE_PATH is the checkout ($root), then each -p DIR (test/, a scratch tree),
-#                   then the caller's ARBACE_PATH. The tools a2g, g2a, c2a and arbace.aot are
+#                   then the caller's ARBACE_PATH. The tools j2g, repr/go, c2a and arbace.aot are
 #                   embedded in the executable and compiled since standalone S6 (SA133); a source
 #                   of theirs on ARBACE_PATH that differs from the embedded copy is loaded from it
 #                   instead, evaluated (RT.toolSource), so a change in the checkout runs until the
-#                   next build. The rest (arbace.j2a, test/'s) is not embedded and loads from the
+#                   next build. The rest (arbace.repr.java, test/'s) is not embedded and loads from the
 #                   checkout's sources, as all the tools did on the JVM's target/stage2 until S4
 #                   and on the executable until S6.
 #                   -s NS loads an embedded namespace from the checkout instead (its file under
@@ -24,8 +24,8 @@
 #                   executable, from the checkout
 #   frozen_clojure  prints the directory holding the frozen reference tree clojure/ (upstream
 #                   Clojure and ASM sources with their javac classes), extracted once from the
-#                   freeze tag arbace-for-java-26-v1 into .tmp/frozen/: j2a's
-#                   regression corpus, the class forms tests' javac classes, the reference runs
+#                   freeze tag arbace-for-java-26-v1 into .tmp/frozen/: repr/java's
+#                   regression corpus, the Java forms tests' javac classes, the reference runs
 #                   of Clojure's suite. Re-extracted when the tag
 #                   moves. Its classes are dated after its sources, so javac does not recompile
 #                   them.

@@ -5,7 +5,7 @@
 # Sourced, with $root set to the repository root. Defines:
 #
 #   box_fs_file           prints the patched fs_tamago.go's path, printed from its forms into
-#                         target/box-fs/ when missing or older than them (bin/g2a-print)
+#                         target/box-fs/ when missing or older than them (bin/repr-go print)
 #   box_overlay IN GOROOT OUT
 #                         writes the overlay file OUT: the overlay file IN (bin/jrt overlay's, or
 #                         one for another GOROOT) and the patched file replacing
@@ -15,7 +15,7 @@ box_fs_file() {
   f=$d/syscall/fs_tamago.go
   if [ ! -f "$f" ] || [ -n "$(find "$root/overlay/go/syscall.ae" "$root/overlay/go/syscall" -newer "$f")" ]; then
     rm -rf "$d"; mkdir -p "$d"
-    (cd "$root" && bin/g2a-print --layout gofmt overlay/go/syscall.ae "$d/syscall") > "$d/print.log" 2>&1 \
+    (cd "$root" && bin/repr-go print --layout gofmt overlay/go/syscall.ae "$d/syscall") > "$d/print.log" 2>&1 \
       || { tail -20 "$d/print.log" >&2; return 1; }
   fi
   echo "$f"

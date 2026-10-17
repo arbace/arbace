@@ -1,0 +1,354 @@
+#!/bin/bash
+# repr/go, Go's bridge: Go source as Go forms (read) and Go forms as Go source (print), through
+# the helper tools/godump (doc/go/HELPER-NOTES.md, CONVERTER-NOTES.md, PRINTER-NOTES.md). Building
+# a program held as Go forms is bin/build-go's (arbace.build.go, doc/go/BUILD.md).
+#
+#   bin/repr-go helper            build the helper into .tmp/godump/godump (TamaGo's go)
+#   bin/repr-go dump [FLAGS] ARGS...  run the helper (built first): godump's flags and packages, or
+#                                 -files and single-file programs; output in -o DIR (default
+#                                 .tmp/godump/out), one .edn per package
+#   bin/repr-go corpus [CORPUS]...
+#                                 dump a corpus into .tmp/godump/corpus/CORPUS, then read every
+#                                 dump on Arbace. CORPUS is [GOOS-]WHAT, GOOS tamago (the
+#                                 default, no prefix) or linux, WHAT one of: amd64, arm64 (std
+#                                 outside cmd for GOOS/ARCH), test, test-arm64 ($GOROOT/test's
+#                                 single-file programs, the oracle's list, bin/repr-go check
+#                                 --list-tests, for amd64 or arm64), tests (std for GOOS/amd64
+#                                 with its _test.go files, godump -tests). Default: amd64 arm64
+#                                 test. E.g. linux-amd64, linux-test-arm64. cgo is off.
+#   bin/repr-go read --dump [--jobs N] [--quiet] FILE|DIR...
+#                                 read dumps with Arbace's reader (arbace.repr.go.read), print a
+#                                 summary
+#   bin/repr-go read [--full] [--tests] [--goos GOOS] [--goarch ARCH] [--out DIR] PKG...
+#                                 dump the packages (godump [-tests], for GOOS/ARCH, default
+#                                 tamago/amd64) into .tmp/repr-go/dumps, then
+#                                 convert them to Go forms (arbace.repr.go) under DIR (default
+#                                 .tmp/repr-go/forms/pkgs), each file read back and checked
+#                                 (REPR_GO_DUMPS: the dumps' directory, for concurrent runs)
+#   bin/repr-go read [--full] --corpus CORPUS
+#                                 convert a corpus of `bin/repr-go corpus` (dumped first if missing)
+#                                 into .tmp/repr-go/forms/CORPUS[-full]; report in
+#                                 .tmp/repr-go/forms/CORPUS[-full].report.edn
+#   bin/repr-go roundtrip [[GOOS/]ARCH] [--goos GOOS] [--record]
+#                                 the round trip: convert std and $GOROOT/test's programs for
+#                                 GOOS/ARCH (default tamago/amd64; GOOS tamago or linux, ARCH
+#                                 amd64 or arm64), print the forms (arbace.repr.go.print) into the
+#                                 candidate .tmp/repr-go/cand-ARCH (tamago) or cand-GOOS-ARCH, and
+#                                 compare with bin/repr-go check against the reference
+#                                 test/repr/go/roundtrip-ARCH.edn (tamago) or
+#                                 roundtrip-GOOS-ARCH.edn: exits non-zero on a regression (an
+#                                 entry and level passing there and not now). --record writes
+#                                 the results as the new reference. --tests: std for
+#                                 tamago/amd64 with its _test.go files (corpus tests) into
+#                                 .tmp/repr-go/cand-tests, checked with bin/repr-go check --with-tests,
+#                                 reference test/repr/go/roundtrip-tests.edn, known differences
+#                                 (with reasons) test/repr/go/roundtrip-tests-known.edn
+#   bin/repr-go roundtrip --text [[GOOS/]ARCH] [--tests]
+#                                 the text level (doc/go/SPEC.md §3.1): convert the same corpora
+#                                 with --full, print them in the full layout into
+#                                 .tmp/repr-go/cand-text-[GOOS-]ARCH (or cand-text-tests) and compare
+#                                 every printed file with its original byte for byte; no build.
+#                                 Exits non-zero when a file differs that the known differences
+#                                 (with reasons) test/repr/go/roundtrip-text-known.edn do not list
+#   bin/repr-go print [--layout lines|gofmt] [--no-line-directives] [--line-file]
+#                     [--src DIR [--build]] [--gofmt] FORMS.ae OUTDIR
+#                                 the printer: Go forms -> Go source (doc/go/SPEC.md §12,
+#                                 doc/go/PRINTER-NOTES.md; arbace.repr.go.print, its options):
+#                                 one .go file per go/file form of the package FORMS.ae into
+#                                 OUTDIR. With --src, copies the package's .s/.h/.syso and
+#                                 embedded files from the original directory DIR and writes
+#                                 OUTDIR/overlay.json; --build then runs go build -trimpath
+#                                 -overlay in DIR under the forms' configuration. --line-file
+#                                 names the forms file in gc's positions (SPEC §12.3)
+#   bin/repr-go check [OPTIONS] CANDIDATE
+#                                 the round trip's oracle over a corpus (bin/lib/repr-go/check,
+#                                 doc/go/ROUNDTRIP.md; `bin/repr-go check --help`)
+#   bin/repr-go test read [--regen]
+#                                 the reader's tests (bin/lib/repr-go/test-read:
+#                                 test/repr/go/convert_test.ae and the spec's examples,
+#                                 test/repr/go/convert/)
+#   bin/repr-go test print [REGEX]
+#                                 the printer's tests (bin/lib/repr-go/test-print:
+#                                 test/repr/go/print_test.ae, the cases test/repr/go/cases/)
+#
+# Environment: ARBACE_GOROOT, the TamaGo Go tree (go1.27.1, default /root/tamago-go), also for
+# linux (its std differs from upstream's only by build constraints and GOOS tables);
+# REPR_GO_EXE, the Go executable that runs repr/go's namespaces (read, print; and bin/build-go's; default
+# the tools' host, bin/lib/host.bash: ARBACE_HOST_EXE, else stage 0; bin/lib/repr-go-host.bash;
+# doc/STANDALONE-NOTES.md, "S3: repr/go on Go"; the JVM host left with S4).
+set -euo pipefail
+export CGO_ENABLED=0 # Go's builds never use cgo (doc/go/BOX-NOTES.md, "... cgo dropped", 2026-10-16)
+root=$(cd "$(dirname "$0")/.." && pwd)
+. "$root/bin/lib/renamed-env.bash" # stops on a stale G2A_*, J2A_* or A2G_*
+goroot=${ARBACE_GOROOT:-/root/tamago-go}
+work=$root/.tmp/godump
+helper=$work/godump
+
+build() {
+  if [ ! -x "$goroot/bin/go" ]; then
+    echo "no $goroot/bin/go: set ARBACE_GOROOT to TamaGo's Go tree (go1.27.1)" >&2
+    return 1
+  fi
+  mkdir -p "$work"
+  # Concurrent runs (bin/gate --full runs two round trips) share the helper: build one at a
+  # time, into a temporary file moved into place, so a running helper is never overwritten.
+  (
+    flock 7
+    # for the host: GOOS=tamago is the configuration of the code converted, not of the helper
+    cd "$root/tools/godump" &&
+      env -u GOOS -u GOARCH GOROOT="$goroot" GOFLAGS= GOTOOLCHAIN=local CGO_ENABLED=0 \
+        "$goroot/bin/go" build -trimpath -o "$helper.new.$$" . &&
+      mv -f "$helper.new.$$" "$helper"
+  ) 7> "$work/build.lock"
+}
+
+godump() {
+  GOROOT="$goroot" "$helper" -go "$goroot/bin/go" "$@"
+}
+
+has_out_flag() {
+  local a
+  for a in "$@"; do
+    case $a in -o|-o=*|--o|--o=*) return 0 ;; esac
+  done
+  return 1
+}
+
+read_dumps() {
+  . "$root/bin/lib/repr-go-host.bash"
+  repr_go_run arbace.repr.go.read "$@"
+}
+
+# The single-file programs of $GOROOT/test for tamago/ARCH: the oracle's list (bin/repr-go check
+# --list-tests, `gocmp tests`), so that the helper's corpus and the oracle's agree: Go's test
+# driver's directories and actions that compile one program, no other GOEXPERIMENT, build
+# constraints and file names matched by go/build. Extra .go files named on the action line
+# join the program (FILE,FILE). Prints one argument per line.
+test_programs() {
+  "$root/bin/repr-go" check --arch "$1" --list-tests
+}
+
+# corpus_config CORPUS: sets cgoos, cwhat (amd64, arm64, test, test-arm64, tests) and carch
+corpus_config() {
+  cgoos=tamago
+  cwhat=$1
+  case $1 in
+    tamago-*) cwhat=${1#tamago-} ;;
+    linux-*) cgoos=linux; cwhat=${1#linux-} ;;
+  esac
+  case $cwhat in
+    amd64|test|tests) carch=amd64 ;;
+    arm64|test-arm64) carch=arm64 ;;
+    *) echo "corpus: [linux-]amd64, arm64, test, test-arm64 or tests, not $1" >&2; return 2 ;;
+  esac
+}
+
+# corpus_name GOOS WHAT: the corpus's directory name (tamago's without a prefix)
+corpus_name() {
+  if [ "$1" = tamago ]; then echo "$2"; else echo "$1-$2"; fi
+}
+
+corpus() {
+  local what out t0 t1 cgoos cwhat carch name
+  build
+  [ $# -gt 0 ] || set -- amd64 arm64 test
+  mkdir -p "$work/corpus"
+  for what in "$@"; do
+    corpus_config "$what"
+    name=$(corpus_name "$cgoos" "$cwhat")
+    out=$work/corpus/$name
+    rm -rf "$out"
+    t0=$(date +%s.%N)
+    case $cwhat in
+      amd64|arm64)
+        godump -goos "$cgoos" -goarch "$carch" -o "$out" std > "$out.tsv" || true ;;
+      tests)
+        godump -tests -goos "$cgoos" -goarch "$carch" -o "$out" std > "$out.tsv" || true ;;
+      test|test-arm64)
+        REPR_GO_GOOS=$cgoos test_programs "$carch" > "$work/corpus/$name-programs.txt"
+        (cd "$goroot/test" && xargs -a "$work/corpus/$name-programs.txt" \
+           env GOROOT="$goroot" "$helper" -go "$goroot/bin/go" -goos "$cgoos" -goarch "$carch" -files -o "$out") \
+          > "$out.tsv" || true ;;
+    esac
+    t1=$(date +%s.%N)
+    awk -F'\t' -v what="$name" -v secs="$(echo "$t1 - $t0" | bc)" '
+      { n[$1]++ } $1 == "ok" || $1 == "errors" { files += $3; bytes += $4 } $4 > max { max = $4; big = $2 }
+      END { printf "%s: %d dumped (%d ok, %d with type errors, %d failed, %d excluded by the configuration), %d files, %.1f MB (largest %s, %.1f MB), %.1f s\n",
+            what, n["ok"] + n["errors"], n["ok"], n["errors"], n["fail"], n["excluded"], files, bytes / 1e6, big, max / 1e6, secs }' "$out.tsv"
+    grep -v -P '^(ok|excluded)\t' "$out.tsv" || true
+  done
+  for what in "$@"; do
+    corpus_config "$what"
+    name=$(corpus_name "$cgoos" "$cwhat")
+    echo "reading $name on Arbace:"
+    read_dumps --jobs "$(nproc)" --quiet "$work/corpus/$name"
+  done
+}
+
+convert_main() {
+  . "$root/bin/lib/repr-go-host.bash"
+  repr_go_run arbace.repr.go read "$@"
+}
+
+convert() {
+  local full="" tests="" out="" corpus="" print="" text=() jobs cfg=()
+  jobs=${REPR_GO_JOBS:-$(( $(nproc) / 2 ))}
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --full) full=--full; shift ;;
+      --tests) tests=-tests; shift ;;
+      --out) out=$2; shift 2 ;;
+      --corpus) corpus=$2; shift 2 ;;
+      --print) print=$2; shift 2 ;;
+      --text) text+=(--text); shift ;;
+      --text-known) text+=(--text-known "$2"); shift 2 ;;
+      --goos) cfg+=(-goos "$2"); shift 2 ;;
+      --goarch) cfg+=(-goarch "$2"); shift 2 ;;
+      *) break ;;
+    esac
+  done
+  if [ -n "$corpus" ]; then
+    local cgoos cwhat carch
+    corpus_config "$corpus"
+    corpus=$(corpus_name "$cgoos" "$cwhat")
+    local dumps=$work/corpus/$corpus
+    [ -d "$dumps" ] || corpus "$corpus"
+    out=${out:-$root/.tmp/repr-go/forms/$corpus${full:+-full}}
+    rm -rf "$out"
+    convert_main --out "$out" --jobs "$jobs" --goroot "$goroot" --quiet $full ${print:+--print "$print"} \
+      ${text[@]+"${text[@]}"} --report "$out.report.edn" "$dumps"
+  else
+    [ $# -gt 0 ] || { echo "convert: packages or --corpus" >&2; return 2; }
+    build
+    local dumps=${REPR_GO_DUMPS:-$root/.tmp/repr-go/dumps}
+    rm -rf "$dumps"
+    mkdir -p "$dumps"
+    godump $tests ${cfg[@]+"${cfg[@]}"} -o "$dumps" "$@" > "$dumps.tsv" || true
+    out=${out:-$root/.tmp/repr-go/forms/pkgs}
+    convert_main --out "$out" --jobs "$jobs" --goroot "$goroot" $full ${print:+--print "$print"} \
+      ${text[@]+"${text[@]}"} "$dumps"
+  fi
+}
+
+# roundtrip_text GOOS ARCH PREFIX WITH_TESTS: the text level (roundtrip --text)
+roundtrip_text() {
+  local goos=$1 arch=$2 prefix=$3 with_tests=$4 cand status=0 s t0 t1 known
+  known=$root/test/repr/go/roundtrip-text-known.edn
+  if [ -n "$with_tests" ]; then
+    [ "$goos/$arch" = tamago/amd64 ] || { echo "roundtrip --text --tests: tamago/amd64 only (the corpus tests)" >&2; return 2; }
+    cand=$root/.tmp/repr-go/cand-text-tests
+  else
+    cand=$root/.tmp/repr-go/cand-text-$prefix$arch
+  fi
+  rm -rf "$cand"
+  t0=$(date +%s.%N)
+  if [ -n "$with_tests" ]; then
+    set -- tests
+  else
+    local tests=test
+    [ "$arch" = arm64 ] && tests=test-arm64
+    set -- "$prefix$arch" "$prefix$tests"
+  fi
+  for c in "$@"; do
+    s=0
+    convert --full --corpus "$c" --print "$cand" --text --text-known "$known" || s=$?
+    if [ $s -ge 128 ]; then
+      echo "roundtrip --text: the converter died (exit status $s)" >&2
+      return 1
+    fi
+    [ $s -eq 0 ] || status=1
+  done
+  t1=$(date +%s.%N)
+  printf 'roundtrip --text %s: %.1f s\n' "$goos/$arch${with_tests:+ with tests}" "$(echo "$t1 - $t0" | bc)"
+  return $status
+}
+
+roundtrip() {
+  local goos=tamago arch=amd64 record="" cand ref t0 t1 t2 status with_tests="" check prefix text=""
+  while [ $# -gt 0 ]; do
+    case $1 in
+      amd64|arm64) arch=$1; shift ;;
+      tamago/amd64|tamago/arm64|linux/amd64|linux/arm64) goos=${1%/*}; arch=${1#*/}; shift ;;
+      --goos) goos=$2; shift 2 ;;
+      --record) record=1; shift ;;
+      --tests) with_tests=1; shift ;;
+      --text) text=1; shift ;;
+      *) echo "roundtrip: [[GOOS/]amd64|arm64] [--goos tamago|linux] [--tests] [--record] [--text], not $1" >&2; return 2 ;;
+    esac
+  done
+  case $goos in
+    tamago) prefix= ;;
+    linux) prefix=linux- ;;
+    *) echo "roundtrip: GOOS tamago or linux, not $goos" >&2; return 2 ;;
+  esac
+  if [ -n "$text" ]; then
+    roundtrip_text "$goos" "$arch" "$prefix" "$with_tests"
+    return
+  fi
+  cand=$root/.tmp/repr-go/cand-$prefix$arch
+  ref=$root/test/repr/go/roundtrip-$prefix$arch.edn
+  check=("$root/bin/repr-go" check --goos "$goos" --arch "$arch")
+  if [ -n "$with_tests" ]; then
+    [ "$goos/$arch" = tamago/amd64 ] || { echo "roundtrip --tests: tamago/amd64 only (the corpus tests)" >&2; return 2; }
+    cand=$root/.tmp/repr-go/cand-tests
+    ref=$root/test/repr/go/roundtrip-tests.edn
+    check+=(--with-tests --no-tests --known "$root/test/repr/go/roundtrip-tests-known.edn")
+  fi
+  rm -rf "$cand"
+  t0=$(date +%s.%N)
+  # A conversion's failures are the check's to report; a converter killed by a signal (the
+  # out-of-memory killer, 137) leaves a partial candidate, so the round trip stops there.
+  converted() {
+    local s=0
+    convert "$@" || s=$?
+    if [ $s -ge 128 ]; then
+      echo "roundtrip: the converter died (exit status $s); the candidate is incomplete" >&2
+      return 1
+    fi
+  }
+  if [ -n "$with_tests" ]; then
+    converted --corpus tests --print "$cand" || return 1
+  else
+    local tests=test
+    [ "$arch" = arm64 ] && tests=test-arm64
+    converted --corpus "$prefix$arch" --print "$cand" || return 1
+    converted --corpus "$prefix$tests" --print "$cand" || return 1
+  fi
+  t1=$(date +%s.%N)
+  status=0
+  if [ -n "$record" ]; then
+    "${check[@]}" --record "$ref" "$cand" || status=$?
+  elif [ -f "$ref" ]; then
+    "${check[@]}" --reference "$ref" "$cand" || status=$?
+  else
+    echo "no reference ${ref#$root/} (bin/repr-go roundtrip ... --record): any failure fails" >&2
+    "${check[@]}" "$cand" || status=$?
+  fi
+  t2=$(date +%s.%N)
+  printf 'roundtrip %s: convert and print %.1f s, check %.1f s\n' "$goos/$arch${with_tests:+ with tests}" \
+    "$(echo "$t1 - $t0" | bc)" "$(echo "$t2 - $t1" | bc)"
+  return $status
+}
+
+cmd=${1:-}
+[ $# -gt 0 ] && shift
+case $cmd in
+  helper) build ;;
+  dump)
+    build
+    if has_out_flag "$@"; then godump "$@"; else godump -o "$work/out" "$@"; fi ;;
+  read)
+    if [ "${1:-}" = --dump ]; then shift; read_dumps "$@"; else convert "$@"; fi ;;
+  corpus) corpus "$@" ;;
+  roundtrip) roundtrip "$@" ;;
+  print)
+    . "$root/bin/lib/repr-go-host.bash"
+    repr_go_exec arbace.repr.go.print "$@" ;;
+  check) exec "$root/bin/lib/repr-go/check" "$@" ;;
+  test)
+    case ${1:-} in
+      read|print) t=$1; shift; exec "$root/bin/lib/repr-go/test-$t" "$@" ;;
+      *) echo "test: read or print, not ${1:-nothing}" >&2; exit 2 ;;
+    esac ;;
+  *) sed -n '2,/^set -/p' "$0" | sed '$d; s/^# \{0,1\}//' >&2; exit 2 ;;
+esac

@@ -23,11 +23,11 @@
 # in its runtime (standalone S6, doc/STANDALONE-NOTES.md, SA144, SA147): the runtime's class
 # forms and their Go-build variants (the compiler, the classes it resolves members of), jrt
 # (its classes and natives), the JDK's forms, data and jrt's own Java; not the namespaces'
-# sources, nor a2g and the class forms' front end (namespaces the compiling host loads from the
+# sources, nor j2g and the Java forms' front end (namespaces the compiling host loads from the
 # checkout; their translation of the runtime shows in the next build, and the fixpoint's G2 =
-# G3 proves it), nor a2g's edge (jdk/edge.edn: a2g's data, not the runtime's), Go's runtime
+# G3 proves it), nor j2g's edge (jdk/edge.edn: j2g's data, not the runtime's), Go's runtime
 # patches, the roots and Go's pin. Two programs of one runtime key
-# analyze a checkout's namespaces alike, so a build's host of that key compiles them (one a2g
+# analyze a checkout's namespaces alike, so a build's host of that key compiles them (one j2g
 # run).
 arbace_runtime_key() {
   (cd "$1" && find arbace/lang go overlay/jdk jdk -type f ! -path jdk/edge.edn 2>/dev/null \

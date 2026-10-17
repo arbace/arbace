@@ -1,5 +1,16 @@
 # The standalone Arbace — survey and plan
 
+> Names: since 2026-10-17 g2a is repr/go and j2a repr/java (doc/NAMING-SURVEY.md, "Decided"):
+> `arbace.g2a.*` is `arbace.repr.go(.*)`, its build `arbace.g2a.build` is `arbace.build.go`;
+> `bin/g2a convert` is `bin/repr-go read` (`bin/g2a read`: `read --dump`), `bin/g2a build`
+> `bin/build-go`, `bin/g2a-print` `bin/repr-go print`, `bin/g2a-check` `bin/repr-go check`,
+> `bin/g2a-convert-tests` and `-print-tests` `bin/repr-go test read` and `test print`,
+> `bin/g2a-build-tests` `bin/build-go test`; `G2A_GOROOT` is `ARBACE_GOROOT`, the other `G2A_*`
+> `REPR_GO_*`, `J2A_*` `REPR_JAVA_*`; `bin/j2a-check` is `bin/repr-java check`. a2g is j2g
+> (`arbace.a2g.*`, `bin/a2g*`, `A2G-SPEC.md`, `A2G_*`, the printed `a2g_*`, `A2g_*`, `a2g/*`: `j2g`
+> likewise), and class forms are Java forms (the front end keeps `arbace.classes.*`). This document
+> uses the current names throughout, its dated passages included; branch names keep theirs.
+
 Status: survey, 2026-10-12, for the main line after the box's milestones (`arbace-box-amd64-v1`,
 `arbace-box-arm64-v1`), by the user's decision of 2026-10-12 (the journal at the tag
 `arbace-inside-itself-v1`,
@@ -14,7 +25,7 @@ were taken on main at `a6a6b86` with its build outputs (`target/`, `.tmp/jrt`); 
 (§8) ran in `.tmp/standalone-survey/`.
 
 The goal, as CLAUDE.md states it: Arbace as a standalone ecosystem, not binary compatible with
-Java, Java usable at the source level through j2a; the language is Clojure plus the class forms,
+Java, Java usable at the source level through repr/java; the language is Clojure plus the Java forms,
 later the Go forms; a self-sustaining REPL inside the box, written in Arbace down to the bare
 metal ISA, in the way of Go plus TamaGo. This document asks what "standalone" removes, what the
 runtime should become, what the box must hold for Arbace to rebuild itself inside it, and what
@@ -23,16 +34,16 @@ runtime should become, what the box must hold for Arbace to rebuild itself insid
 ## Executive summary
 
 - **Today every Arbace program is built by the JVM.** The Go executable and the box's guest come
-  out of a chain whose every Arbace step runs on the JVM's `target/stage2`: j2a converts 836
-  jdk26u files with javac's front end (`bin/jrt-convert`, 108 s), a2g translates 3,040 classes
-  into Go forms (62 s), g2a prints them, and gc builds them. The seed is a jar. Standalone
+  out of a chain whose every Arbace step runs on the JVM's `target/stage2`: repr/java converts 836
+  jdk26u files with javac's front end (`bin/jrt-convert`, 108 s), j2g translates 3,040 classes
+  into Go forms (62 s), repr/go prints them, and gc builds them. The seed is a jar. Standalone
   starts by moving that chain onto Arbace's own Go build: **the bootstrap becomes Go-hosted**,
   and only then can the JVM leave main's path (§3, §4).
-- **What blocks a Go-hosted bootstrap is small and known**: (1) j2a needs javac, but its output
-  can be committed as forms, as `tamago/` holds TamaGo's Go (§4.2); (2) a2g's analyzer learns the
+- **What blocks a Go-hosted bootstrap is small and known**: (1) repr/java needs javac, but its output
+  can be committed as forms, as `tamago/` holds TamaGo's Go (§4.2); (2) j2g's analyzer learns the
   JDK's classes by reflection on the JVM and reads class files with ASM, while the Go build's
-  reflection lists only public members (§4.3); (3) g2a's build runs `go build` as a process, which
-  the native executable can do and the box cannot (§6). Measured: g2a's printer already runs on
+  reflection lists only public members (§4.3); (3) the build (build-go) runs `go build` as a process, which
+  the native executable can do and the box cannot (§6). Measured: repr/go's printer already runs on
   the Go executable with identical output, about 7 times slower than on the JVM (§8.3).
 - **jrt is mostly breadth, not need.** The runtime and the REPL's namespaces use 274 JDK classes
   (970 members), whose translation closure was 422 classes from 184 files; jrt today translates
@@ -50,7 +61,7 @@ runtime should become, what the box must hold for Arbace to rebuild itself insid
   recommended shape is **tool guests**: the monitor runs another guest image on the guest's
   request, inputs and outputs passing through the store (§6.3).
 - **The runtime: keep Go's.** The recommendation is to keep Go's runtime (TamaGo's, already held
-  as forms in `tamago/` and patched in `overlay/go/`), keep a2g's translation of `arbace.lang`,
+  as forms in `tamago/` and patched in `overlay/go/`), keep j2g's translation of `arbace.lang`,
   slim jrt, and give Arbace's compiler a third back end, **Arbace code compiled to Go forms**
   (namespaces ahead of time), since the closure evaluator is 54 times slower than the JVM
   (geometric mean, SPEED-NOTES). An Arbace-written collector or scheduler, and proper tail calls
@@ -58,9 +69,9 @@ runtime should become, what the box must hold for Arbace to rebuild itself insid
   stages (§5).
 - **Down to the ISA** is G2C-SURVEY's b1-b4, re-measured: the sources are held (b1) except Go's
   own toolchain (`cmd/compile` 626k lines with its generated rules, `cmd/link` 44k,
-  `cmd/internal/obj` 108k, `cmd/asm` 5.8k), which g2a can hold as `tamago/` was held. The rest,
+  `cmd/internal/obj` 108k, `cmd/asm` 5.8k), which repr/go can hold as `tamago/` was held. The rest,
   an Arbace back end, linker and runtime, is a multi-year horizon, outlined only (§7).
-- **Stages (§9.1):** S1 the JDK's forms committed; S2 a2g without the JVM's reflection; S3 the
+- **Stages (§9.1):** S1 the JDK's forms committed; S2 j2g without the JVM's reflection; S3 the
   Go-hosted fixpoint (native); S4 a Go seed, the JVM off main's path; S5 jrt split and slimmed;
   S6 namespaces compiled to Go; S7 the toolchain as tool guests; S8 the rebuild inside the box;
   S9 Go's toolchain as forms. About 40-70 agent-assisted days in all, the first four 11-21.
@@ -72,37 +83,37 @@ Three products, one source tree:
 | product | how it is built | where it stands |
 |---|---|---|
 | Arbace on the JVM | seed jar → stage 1 → stage 2 = stage 3 (5,777 classes), AOT cache, jlink image | frozen on `arbace-for-java-26`; on main it is the build host of everything else |
-| Arbace as a Go executable | stage 2 runs j2a (javac), a2g, g2a; gc links; the executable prepares its image | frozen on `arbace-for-golang`; on main, 66.8 MB on amd64 |
+| Arbace as a Go executable | stage 2 runs repr/java (javac), j2g, repr/go; gc links; the executable prepares its image | frozen on `arbace-for-golang`; on main, 66.8 MB on amd64 |
 | the box | the same program with `GOOS=tamago`, the board, `tamago/`'s Go | milestones `arbace-box-amd64-v1`, `arbace-box-arm64-v1`; the Mac run 42 of 42 |
 
 The Go build's chain, with the host of each step:
 
 ```
-jdk26u sources ──j2a (javac's front end; JVM)──▶ class forms of 836 files (.tmp/jrt/conv, untracked)
-arbace/lang/*.ae + overlay/jdk + go/arbace/jrt ──a2g (class forms analyzer; JVM)──▶ Go forms
-Go forms ──g2a print (JVM)──▶ Go source (1,063 files, 35 MB) ──gc go1.27.1 (host process)──▶ executable
+jdk26u sources ──repr/java (javac's front end; JVM)──▶ Java forms of 836 files (.tmp/jrt/conv, untracked)
+arbace/lang/*.ae + overlay/jdk + go/arbace/jrt ──j2g (Java forms analyzer; JVM)──▶ Go forms
+Go forms ──repr/go print (JVM)──▶ Go source (1,063 files, 35 MB) ──gc go1.27.1 (host process)──▶ executable
 executable ──ARBACE_PREPARE (the Go executable itself)──▶ the image of prepared namespaces, linked in
 ```
 
 Only the last step runs on Arbace's Go build. The gate's timings (`.tmp/gate/*.secs`):
-`jrt-convert` 207 s, the Go build 123 s (a2g 87 s, gc 23 s, prepare 11 s).
+`jrt-convert` 207 s, the Go build 123 s (j2g 87 s, gc 23 s, prepare 11 s).
 
 ## 2. What the program is made of (measured)
 
 | part | size | source |
 |---|---:|---|
-| `arbace/` (all `.ae`) | 115,708 lines | of which `arbace.lang` 46,796; ASM 14,708; class forms compiler 8,406; j2a 4,410; g2a 5,496; a2g 7,934 |
+| `arbace/` (all `.ae`) | 115,708 lines | of which `arbace.lang` 46,796; ASM 14,708; Java forms compiler 8,406; repr/java 4,410; repr/go 5,496; j2g 7,934 |
 | `arbace/lang/go/` (the Go build's variants) | 8,168 lines | `Compiler`'s evaluator and closure compiler, `ClassForms`, `RT` |
 | jrt hand-written (`go/arbace/jrt`) | 88 files, 28,681 lines | the VM's edge: `String`, reflection, threads, the host |
 | jrt's own Java (`overlay/jdk`) | 110 files | variants and additions to jdk26u |
 | jdk26u converted (`bin/jrt-convert`) | 836 files (31 generated), 2,222 classes, 202,034 lines of forms (11 MB) | all shape-identical to javac's but 5 known |
 | the edge (where translated JDK code stops) | 226 classes, 1,223 members | shim 99 classes (815 members), rework 9 (174), cut 81 (177), translate 36 (55); `Unsafe` alone 274 members |
-| a2g's closed world | 3,040 classes translated (905 `arbace.lang`, 2,134 JDK), 27,896 methods reached | `target/arbace-go/a2g/report.edn` |
+| j2g's closed world | 3,040 classes translated (905 `arbace.lang`, 2,134 JDK), 27,896 methods reached | `target/arbace-go/j2g/report.edn` |
 | the generated Go | `jrt` 1,055,778 lines, `lang` 284,414, `cmd/arbace` 1,644 | one Go package each |
 | Go's runtime patches (`overlay/go`) | 3 files: the goroutine-local slot, the box's event goroutine | `proc.go`, `runtime2.go`, `arbace_local.go` |
 | TamaGo's runtime and std as forms (`tamago/`) | 2,152 files, 32 MB | byte-identical guest (S6) |
 
-The JDK classes a2g translates, by package family (classes, inner classes included):
+The JDK classes j2g translates, by package family (classes, inner classes included):
 `java.util` 1,246 (of which `java.util.stream` 454 and `java.util.concurrent` 296),
 `jdk.internal` 164, `java.time` 124, `java.lang` 123, `sun.util` 74, `java.text` 72,
 `sun.security` 65, `java.io` 60, `java.net` 53, `java.nio` 44, `java.security` 42, others 67.
@@ -120,7 +131,7 @@ for interop at the REPL.
 
 What exists on main only because Arbace runs on the JVM:
 
-- bytecode: ASM (`arbace/asm`, 44 files, 14,708 lines), the class forms compiler's back end
+- bytecode: ASM (`arbace/asm`, 44 files, 14,708 lines), the Java forms compiler's back end
   (`emit`, `shape`, `verify`, `compiler`, `build`, `boot`: 2,724 lines), `Compiler`'s bytecode
   emission (`Compiler.ae`, 8,717 lines, shared with the Go variants that replace it),
   `gen-class` (760), `DynamicClassLoader`;
@@ -137,23 +148,23 @@ The first two can leave main once nothing depends on them; the frozen branch kee
   (`bin/oracle`, 22,232 of 22,278 natively). Once the seed is no longer a jar (§4.4), the
   reference is the frozen jar (`arbace-for-java-26-v*`), and every intended divergence of the
   standalone language is recorded in the known-mismatch files, as the 46 are today;
-- **j2a's front end.** j2a parses and attributes Java with javac's tree API (`com.sun.source`,
-  `com.sun.tools.javac`). Java at the source level means j2a; without the JVM it needs javac
+- **repr/java's front end.** repr/java parses and attributes Java with javac's tree API (`com.sun.source`,
+  `com.sun.tools.javac`). Java at the source level means repr/java; without the JVM it needs javac
   itself carried over (348 files, 162,441 lines of jdk26u's `jdk.compiler`, plain Java that the
-  same j2a → a2g path could translate) or a Java front end of Arbace's own. Neither is needed
-  for self-hosting if j2a's output is committed (§4.2): converting new Java is then a host-side
-  tool, as `tools/godump` is for g2a (D12).
+  same repr/java → j2g path could translate) or a Java front end of Arbace's own. Neither is needed
+  for self-hosting if repr/java's output is committed (§4.2): converting new Java is then a host-side
+  tool, as `tools/godump` is for repr/go (D12).
 
 ### 3.2 jrt's breadth
 
 jrt is Java's library as much as Java's runtime. Standalone keeps the library, because a Java
-program converted by j2a calls `java.util` and `java.time` as written, and drops what only served
+program converted by repr/java calls `java.util` and `java.time` as written, and drops what only served
 binary compatibility:
 
 | kind | today | standalone |
 |---|---|---|
 | the VM's edge, hand-written (`String`, `StringBuilder`, reflection over member tables, `Thread`, locks, atomics, `Unsafe`'s 274 members, the host) | Go forms in `go/arbace/jrt` | Arbace's own runtime already: keep, trimmed of what only bytecode needed |
-| the runtime's closure (collections, `Character` and Unicode tables, `java.math`, regex, `Formatter`, readers and writers) | translated by a2g from j2a's forms | the **core**: kept, translated as now |
+| the runtime's closure (collections, `Character` and Unicode tables, `java.math`, regex, `Formatter`, readers and writers) | translated by j2g from repr/java's forms | the **core**: kept, translated as now |
 | java.base's breadth (time, text, streams, concurrent, security, net, nio's files) | translated into the one `jrt` package, every program carries it | a **library**: per Java package or group, taken by the programs that use it |
 | `java.lang.invoke`, class loading, `Class` as the JVM's, serialization, `sun.misc` | reworked or cut (D6) | gone for good: no class files to load |
 
@@ -166,10 +177,10 @@ needs no java.time does not carry it, and the core's size shows what Arbace's ow
 
 ### 3.3 The class file and the JVM path
 
-They stay on the frozen branch. On main after S4 there is no class file: the class forms are
-compiled by a2g (ahead of time) or interpreted (at the REPL, CLASSFORMS-REPL.md), and the class
+They stay on the frozen branch. On main after S4 there is no class file: the Java forms are
+compiled by j2g (ahead of time) or interpreted (at the REPL, CLASSFORMS-REPL.md), and the class
 forms compiler's front end (`parse`, `lower`, `analyze`, `env`, `types`: 5,538 lines) is shared
-by both. The class forms' semantics stay Java's (they represent Java), but nothing is promised
+by both. The Java forms' semantics stay Java's (they represent Java), but nothing is promised
 about a JVM running their output.
 
 ## 4. The bootstrap without a JVM
@@ -177,29 +188,29 @@ about a JVM running their output.
 ### 4.1 The fixpoint
 
 Today: seed jar → stage 1 → stage 2 = stage 3. The Go-hosted analogue: an executable G1 (built
-by today's chain) runs a2g, prints the Go and builds G2; G2 does the same and builds G3; **G2's
+by today's chain) runs j2g, prints the Go and builds G2; G2 does the same and builds G3; **G2's
 printed Go equals G3's byte for byte**, and G2 = G3 as executables (RP1 already makes two builds
 of a commit byte-identical). The image of prepared namespaces is made by the executable itself
 already.
 
-### 4.2 j2a's output as sources
+### 4.2 repr/java's output as sources
 
-The converted JDK is regenerated on every build and untracked (the user's decision for j2a's
+The converted JDK is regenerated on every build and untracked (the user's decision for repr/java's
 output, JRT-SOURCES.md). For a Go-hosted build it becomes a source: the 909 forms files (11 MB,
 202,034 lines; the 31 sources the JDK's build generates among them) committed, as `tamago/` holds TamaGo's
-Go, with `bin/jrt-convert` turned into a check (`verify`: j2a on the JVM gives the same forms)
+Go, with `bin/jrt-convert` turned into a check (`verify`: repr/java on the JVM gives the same forms)
 run by `bin/gate --full`. Then no build needs javac, jdk26u's checkout or the JDK's generators
 (D2). The resource data the program embeds (`tzdb.dat`, `uniName.dat`, ICU's `nfc.nrm`,
 `java.security`) is committed the same way.
 
-### 4.3 a2g without the JVM's reflection
+### 4.3 j2g without the JVM's reflection
 
-a2g reuses the class forms analyzer, whose class environment (`arbace.classes.env`) learns
+j2g reuses the Java forms analyzer, whose class environment (`arbace.classes.env`) learns
 classes three ways: from the forms being compiled, from classes it defined, and from the class
 path by reflection (`getDeclaredFields`, `getDeclaredMethods`, constants read from class files
 with ASM's `ClassReader`). On the JVM the JDK's classes come by the third way; on the Go build,
 reflection lists only public members of the world (CLASSFORMS-REPL.md §7), not enough for
-translating jrt itself (package-private and protected members). And a2g's `access.ae` writes
+translating jrt itself (package-private and protected members). And j2g's `access.ae` writes
 javac-style accessor methods with ASM's `ClassWriter` to read back the one instruction each
 holds. Both are replaced by data:
 
@@ -212,7 +223,7 @@ holds. Both are replaced by data:
 - the analyzer keeping an accessor's target member as data beside its bytecode-writing
   function, so `access.ae` needs no ASM.
 
-Exit: a2g on the JVM with the class path's reflection refused for the world gives the same
+Exit: j2g on the JVM with the class path's reflection refused for the world gives the same
 program byte for byte (S2). Then it can run on the Go build.
 
 ### 4.4 The seed
@@ -234,7 +245,7 @@ its pin is a hash as now.
 
 Three layers: **Go's runtime** (TamaGo's in the box: its collector, scheduler, goroutines,
 stacks; held as forms in `tamago/`, three files patched in `overlay/go`), **jrt** (Java's object
-model, strings, reflection, threads on goroutines), **`arbace.lang`** translated by a2g. Arbace
+model, strings, reflection, threads on goroutines), **`arbace.lang`** translated by j2g. Arbace
 code runs on the evaluator: `Compiler`'s analyzer, then each method compiled once into a tree of
 `Code` closures (SPEED-NOTES.md, EC1-EC6): 5 to 500 times slower than the JVM's compiled code,
 54x as geometric mean; start 0.21 s natively, 0.17 s in the box on the Mac. In the box TamaGo has
@@ -251,11 +262,11 @@ goroutine-local slot, event wake-ups.
 
 ### 5.3 Options
 
-- **R1. Keep Go's runtime; Arbace's runtime by translation; compile Arbace to Go.** a2g keeps
+- **R1. Keep Go's runtime; Arbace's runtime by translation; compile Arbace to Go.** j2g keeps
   translating `arbace.lang` (one implementation of Clojure's runtime, the one the JVM proved);
   jrt slimmed into core and library (§3.2); `Compiler` gains a third back end beside bytecode
-  and the closure evaluator: **Expr → Go forms**, so namespaces (and the tools: a2g, g2a, the
-  class forms compiler) are built into the executable as Go, the evaluator staying for the REPL.
+  and the closure evaluator: **Expr → Go forms**, so namespaces (and the tools: j2g, repr/go, the
+  Java forms compiler) are built into the executable as Go, the evaluator staying for the REPL.
   G2C-SURVEY §5.2's option (ii); B1-PLAN step 7's unscheduled half.
 - **R2. A runtime written for Arbace, Joker's way.** A new, Go-shaped runtime (Go strings, Go
   interfaces, no Java object model) in Go forms or Arbace. Joker (candid82/joker v1.10.0, as
@@ -288,9 +299,9 @@ as `IFn.invoke` is now).
 
 ### 5.5 Strings
 
-jrt's `String` is UTF-16 (A2G-SPEC D4), as Java source semantics need (`charAt`, `length`,
+jrt's `String` is UTF-16 (J2G-SPEC D4), as Java source semantics need (`charAt`, `length`,
 surrogates). Go's strings are UTF-8 bytes. Standalone could switch Arbace's strings to Go's, at
-the price of Java's semantics in j2a-converted code and in `arbace.core`'s own interop. **Recommended:
+the price of Java's semantics in code converted by repr/java and in `arbace.core`'s own interop. **Recommended:
 keep UTF-16 for `java.lang.String`** (D11); Go strings enter as their own type when the Go forms
 join the language.
 
@@ -301,8 +312,8 @@ join the language.
 | step | today | natively, after S3 | in the box |
 |---|---|---|---|
 | the sources | a git checkout | the same | the store: a tree of blobs (§6.4) |
-| the JDK's forms | j2a on the JVM | committed (S1) | in the source tree |
-| a2g | the JVM | the executable (S2, S3) | the guest; 7-8 GB peaks are gc's, not a2g's: a2g's own heap to be measured |
+| the JDK's forms | repr/java on the JVM | committed (S1) | in the source tree |
+| j2g | the JVM | the executable (S2, S3) | the guest; 7-8 GB peaks are gc's, not j2g's: j2g's own heap to be measured |
 | printing Go | the JVM | the executable (§8.3: identical, about 7x slower) | the guest |
 | gc and the linker | a host process | a host process (`HostProc`) | **no processes**: §6.3 |
 | the image of prepared namespaces | the new executable | the same | the new guest, run once |
@@ -334,7 +345,7 @@ change). Recommended: the split first, the slot as the fallback (D8).
 **Recommended: P2** (D9). It needs: a guest `main` for each tool with the board (the experiment
 of §8.1 built them without one), a spawn call and its policy (which images, how many at once, the
 memory of each), and a driver in Arbace replacing `go build`'s (the order of packages, the
-action cache: `bin/g2a build`'s plan, held in the store by content hash).
+action cache: `bin/build-go`'s plan, held in the store by content hash).
 
 ### 6.4 The store as the source of truth
 
@@ -355,8 +366,8 @@ G2C-SURVEY §5.2's ladder, re-measured (go1.27.1, non-test lines):
 | step | Arbace owns | still Go's | state |
 |---|---|---|---|
 | b1 | every source as forms: Arbace, the JDK's forms, TamaGo's runtime and std (`tamago/`), the box | gc, the assembler, the linker | done but for Go's toolchain itself: `cmd/compile` 625,880 lines (with the generated SSA rules), `cmd/internal/obj` 108,447, `cmd/link` 44,109, `cmd/asm` 5,793 |
-| b1' | the toolchain as forms, the toolchain built from them byte-identical (S9, as S6 for `tamago/`) | none of the sources | not started; g2a's round trip covers the std these import |
-| b2 | the front end: Go forms type-checked and lowered to an SSA-like IR in Arbace | gc's back end | g2a's helper uses `go/types` (24,923 lines) |
+| b1' | the toolchain as forms, the toolchain built from them byte-identical (S9, as S6 for `tamago/`) | none of the sources | not started; repr/go's round trip covers the std these import |
+| b2 | the front end: Go forms type-checked and lowered to an SSA-like IR in Arbace | gc's back end | repr/go's helper uses `go/types` (24,923 lines) |
 | b3 | a back end for Arbace code first (the `Expr`s of §5.3 to amd64, then arm64), honouring Go's runtime contract: stack maps, write barriers, `morestack`, ABIInternal; proper tail calls as jumps (T4) | gc for Go code, the linker | |
 | b4 | the linker, `pclntab`, the object layout | none | |
 | b5 | the runtime's collector and scheduler as Arbace code, once b3 compiles the runtime (`runtime` 138,487 lines over all ports; the collector's `mgc*` 11,030; `proc.go` 8,233) | none | |
@@ -390,11 +401,11 @@ expected; the compilations are what was measured):
 
 ### 8.3 Arbace's tools on the Go executable
 
-g2a's printer (`arbace.g2a.print`, loaded from source through `ARBACE_PATH`) run by the native
-executable against `bin/g2a-print` on the JVM: `strconv` (5 files) 2.6 s against 1.8 s;
+repr/go's printer (`arbace.repr.go.print`, loaded from source through `ARBACE_PATH`) run by the native
+executable against `bin/repr-go print` on the JVM: `strconv` (5 files) 2.6 s against 1.8 s;
 `net/http` (29 files, 18,006 lines of Go) 12.0 s against 3.2 s, the output identical. Without
 the JVM's start (about 1.5 s), about 7 times slower: printing the whole program (1.34 million
-lines) would take about 15 minutes in the evaluator, against 2 on the JVM. a2g (62 s on the JVM:
+lines) would take about 15 minutes in the evaluator, against 2 on the JVM. j2g (62 s on the JVM:
 load 14 s, reach 5 s, translate 37 s, write 7 s) was not tried: it needs S2.
 
 ## 9. Plan and decisions
@@ -405,15 +416,15 @@ Each stage a gate, as B1a's steps and the box's. Estimates in agent-assisted day
 
 | stage | content | exit criteria | days |
 |---|---|---|---:|
-| **S1 the JDK's forms as sources** | j2a's output (909 forms files) and the embedded data committed (under `jdk/`, like `tamago/`); `bin/jrt-convert verify` in `bin/gate --full`; the provenance (jdk26u's commit) recorded as for `tamago/` | `bin/arbace-go --build` from the committed forms gives the same executable byte for byte, without javac or jdk26u's checkout | 1-2 |
-| **S2 a2g without the JVM's reflection** | the closed world entered from forms; the edge's declaration file; accessors as data, no ASM in a2g | a2g on the JVM with the world's reflection refused writes the same program byte for byte | 3-5 |
-| **S3 the Go-hosted fixpoint, native** | a2g, g2a and `bin/g2a build`'s driver run by the Go executable (linux/amd64, `go build` as a host process); a `bin/` script for the chain | G1 (today's chain) → G2 → G3: G2 = G3, their printed Go identical; time recorded | 4-8 |
-| **S4 the Go seed; the JVM off main's path** | the seed as the fixpoint's Go source (D3), pinned by hash, rebuilt from its tag; ASM, the bytecode back ends, `gen-class`, `bin/arbace-j`, the AOT cache, jlink and the three JVM stages leave main (kept on `arbace-for-java-26`); the JVM stays for the oracle (the frozen jar) and j2a | `bin/gate` runs no JVM except the oracle's reference side and j2a's checks; Clojure's suite on the Go build as the gate's suite | 3-6 |
+| **S1 the JDK's forms as sources** | repr/java's output (909 forms files) and the embedded data committed (under `jdk/`, like `tamago/`); `bin/jrt-convert verify` in `bin/gate --full`; the provenance (jdk26u's commit) recorded as for `tamago/` | `bin/arbace-go --build` from the committed forms gives the same executable byte for byte, without javac or jdk26u's checkout | 1-2 |
+| **S2 j2g without the JVM's reflection** | the closed world entered from forms; the edge's declaration file; accessors as data, no ASM in j2g | j2g on the JVM with the world's reflection refused writes the same program byte for byte | 3-5 |
+| **S3 the Go-hosted fixpoint, native** | j2g, repr/go and `bin/build-go`'s driver run by the Go executable (linux/amd64, `go build` as a host process); a `bin/` script for the chain | G1 (today's chain) → G2 → G3: G2 = G3, their printed Go identical; time recorded | 4-8 |
+| **S4 the Go seed; the JVM off main's path** | the seed as the fixpoint's Go source (D3), pinned by hash, rebuilt from its tag; ASM, the bytecode back ends, `gen-class`, `bin/arbace-j`, the AOT cache, jlink and the three JVM stages leave main (kept on `arbace-for-java-26`); the JVM stays for the oracle (the frozen jar) and repr/java | `bin/gate` runs no JVM except the oracle's reference side and repr/java's checks; Clojure's suite on the Go build as the gate's suite | 3-6 |
 | **S5 jrt as core and library** | the reached classes' package graph and its components measured; jrt split into Go packages; reachability per program; the core named | no package needs more than about 2.5 GB to compile; the suite and the oracle unchanged; sizes recorded | 5-10 |
-| **S6 Arbace compiled to Go** | `Compiler`'s Go-forms back end; namespaces and the tools built into the executable; the image reduced to what stays evaluated; T3 measured | Clojure's suite and the oracle unchanged; the benchmarks against the evaluator and the JVM; a2g's time on Go | 10-15 |
+| **S6 Arbace compiled to Go** | `Compiler`'s Go-forms back end; namespaces and the tools built into the executable; the image reduced to what stays evaluated; T3 measured | Clojure's suite and the oracle unchanged; the benchmarks against the evaluator and the JVM; j2g's time on Go | 10-15 |
 | **S7 tool guests** | the spawn call and its policy; gc, the linker and the assembler as guest images (amd64, arm64); file trees in the store (D10); a build driver in Arbace | in the box: a Go package compiled and linked into a guest image the launcher then boots from the store | 6-10 |
 | **S8 the rebuild in the box** | S3's chain inside the guest: sources from a tree ref, the new guest image to the store; the launcher boots by ref | the image built in the box equals the host-built one byte for byte; amd64 on /dev/kvm, then arm64 (the VM, the Mac's bundle) | 5-10 |
-| **S9 Go's toolchain as forms** | `cmd/compile`, `cmd/link`, `cmd/asm` and `cmd/internal` as Go forms (g2a), built from them | the tools built from the forms identical to the originals' | 3-5 |
+| **S9 Go's toolchain as forms** | `cmd/compile`, `cmd/link`, `cmd/asm` and `cmd/internal` as Go forms (repr/go), built from them | the tools built from the forms identical to the originals' | 3-5 |
 
 S1-S4 make Arbace build itself without a JVM, natively; S5-S6 make it small and fast enough for
 the box; S7-S8 close the loop in the box; S9 completes b1'. S9 can run at any time after S1.
@@ -425,15 +436,15 @@ the box; S7-S8 close the loop in the box; S9 completes b1'. S9 can run at any ti
   *Recommended: (a)*: every later stage runs on what S3 proves, and it retires the JVM from the
   build; (b) builds the box's loop on a JVM-made chain; (c) has nothing to measure against
   without (a).
-- **D2 j2a's output committed.** (a) the JDK's forms as sources in the repository (11 MB), j2a a
+- **D2 repr/java's output committed.** (a) the JDK's forms as sources in the repository (11 MB), repr/java a
   check; (b) regenerated on every build (today, the user's earlier decision). *Recommended: (a)*:
   without it no build is free of javac, and it matches `tamago/`.
 - **D3 The seed.** (a) the fixpoint's printed Go source, pinned by hash (4.4 MB compressed);
   (b) the executables per architecture; (c) the jar stays. *Recommended: (a)*.
-- **D4 The JVM on main after S4.** (a) only as the oracle's reference (the frozen jar) and j2a's
+- **D4 The JVM on main after S4.** (a) only as the oracle's reference (the frozen jar) and repr/java's
   front end, the JVM products removed from main; (b) kept built and gated beside the Go build.
   *Recommended: (a)*: the frozen branch takes fixes; keeping both doubles every change.
-- **D5 The runtime's direction.** (a) R1: Go's runtime, `arbace.lang` by a2g, jrt slimmed,
+- **D5 The runtime's direction.** (a) R1: Go's runtime, `arbace.lang` by j2g, jrt slimmed,
   Arbace compiled to Go forms; (b) R2: a new Go-shaped runtime; (c) R3: Arbace's own collector
   and scheduler now. *Recommended: (a)*; (c) after §7's b3.
 - **D6 Proper tail calls.** (a) T1 now, T4 with the own back end, T3 measured in S6; (b) T2 in
@@ -451,8 +462,8 @@ the box; S7-S8 close the loop in the box; S9 completes b1'. S9 can run at any ti
   exported to git by the host tool; (b) a tar per tree; (c) git in the box. *Recommended: (a)*.
 - **D11 Strings.** (a) UTF-16 `java.lang.String` kept; (b) Go's UTF-8 strings for Arbace.
   *Recommended: (a)*.
-- **D12 Java at the source level without the JVM.** (a) j2a stays a host-side tool on the JVM
-  for now, its outputs committed; (b) javac translated into the Go build through j2a and a2g
+- **D12 Java at the source level without the JVM.** (a) repr/java stays a host-side tool on the JVM
+  for now, its outputs committed; (b) javac translated into the Go build through repr/java and j2g
   (162,441 lines), after S6; (c) a Java front end of Arbace's own. *Recommended: (a) now, (b)
   as a later stage*: it is the same path as the JDK's, and javac stays the reference.
 - **D13 The language's divergence.** From S4 on, Arbace may differ from Clojure on the JVM where
@@ -466,7 +477,7 @@ the box; S7-S8 close the loop in the box; S9 completes b1'. S9 can run at any ti
 - **R1 Package cycles.** jrt's split may find one large component (java.lang, java.util and
   java.io reach each other everywhere); then the memory remedy is the slot (D8 (b)).
 - **R2 The evaluator's speed.** Before S6 the Go-hosted chain runs its tools on the evaluator
-  (§8.3: about 7x for the printer; a2g's ratio is unmeasured and may be closer to the 54x of
+  (§8.3: about 7x for the printer; j2g's ratio is unmeasured and may be closer to the 54x of
   the benchmarks). S3 is slower than today's chain; S6 is what makes S8 practical.
 - **R3 gc in a guest.** gc on TamaGo is built, not run: its use of the file system, `os/exec`
   (none expected in `compile`), temporary files and memory is unknown until S7.
@@ -481,10 +492,10 @@ the box; S7-S8 close the loop in the box; S9 completes b1'. S9 can run at any ti
 ## 10. Sources
 
 - Arbace at main `a6a6b86` (2026-10-12): CLAUDE.md, doc/AGENDA.md, doc/JOURNAL.md;
-  doc/G2C-SURVEY.md §5; doc/go/{B1-PLAN, BOX-SURVEY, BOX-NOTES, A2G-SPEC, JAVA-SURFACE,
+  doc/G2C-SURVEY.md §5; doc/go/{B1-PLAN, BOX-SURVEY, BOX-NOTES, J2G-SPEC, JAVA-SURFACE,
   JAVA-BASE, JRT-SOURCES, JRT-NOTES ("Size"), CLASSFORMS-REPL, SPEED-NOTES, EXEC-NOTES}.md;
-  `arbace/classes/env.ae`, `arbace/a2g/{access,reach,embed}.ae`, `arbace/g2a/build.ae`,
-  `bin/{arbace-go,jrt-convert,a2g,g2a-print}`; build outputs `target/arbace-go/a2g/report.edn`,
+  `arbace/classes/env.ae`, `arbace/j2g/{access,reach,embed}.ae`, `arbace/build/go.ae`,
+  `bin/{arbace-go,jrt-convert,j2g,repr-go}`; build outputs `target/arbace-go/j2g/report.edn`,
   `target/arbace-go/work-amd64/mod`, `.tmp/jrt/{report.md,edge.edn}`, `.tmp/gate/*.secs`.
 - TamaGo's Go distribution `/root/tamago-go` (go1.27.1): `src/cmd/{compile,link,asm,internal/obj,go}`,
   `src/runtime`, `src/go/types` (sizes).

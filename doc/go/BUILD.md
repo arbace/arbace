@@ -1,23 +1,34 @@
-# g2a's program build: Go forms → a static Linux executable
+# The program build (`arbace.build.go`, `bin/build-go`): Go forms → a static Linux executable
 
-A Go program held as Go forms ([SPEC.md](SPEC.md)) is printed back to Go (`arbace.g2a.print`,
+> Names: since 2026-10-17 g2a is repr/go and j2a repr/java (doc/NAMING-SURVEY.md, "Decided"):
+> `arbace.g2a.*` is `arbace.repr.go(.*)`, its build `arbace.g2a.build` is `arbace.build.go`;
+> `bin/g2a convert` is `bin/repr-go read` (`bin/g2a read`: `read --dump`), `bin/g2a build`
+> `bin/build-go`, `bin/g2a-print` `bin/repr-go print`, `bin/g2a-check` `bin/repr-go check`,
+> `bin/g2a-convert-tests` and `-print-tests` `bin/repr-go test read` and `test print`,
+> `bin/g2a-build-tests` `bin/build-go test`; `G2A_GOROOT` is `ARBACE_GOROOT`, the other `G2A_*`
+> `REPR_GO_*`, `J2A_*` `REPR_JAVA_*`; `bin/j2a-check` is `bin/repr-java check`. a2g is j2g
+> (`arbace.a2g.*`, `bin/a2g*`, `A2G-SPEC.md`, `A2G_*`, the printed `a2g_*`, `A2g_*`, `a2g/*`: `j2g`
+> likewise), and class forms are Java forms (the front end keeps `arbace.classes.*`). This document
+> uses the current names throughout, its dated passages included; branch names keep theirs.
+
+A Go program held as Go forms ([SPEC.md](SPEC.md)) is printed back to Go (`arbace.repr.go.print`,
 [PRINTER-NOTES.md](PRINTER-NOTES.md)) into a temporary module and built by gc into a static
 executable for `linux/amd64` or `linux/arm64`. This is B1a's step 0 ([B1-PLAN.md](B1-PLAN.md)):
 the path by which Arbace itself is built from forms (`bin/arbace-go`).
 
 ```sh
-bin/g2a build [--arch amd64|arm64] [--goos linux|tamago|darwin] [-o OUT] [--layout gofmt|lines]
+bin/build-go [--arch amd64|arm64] [--goos linux|tamago|darwin] [-o OUT] [--layout gofmt|lines]
               [--line-file] [--work DIR] [--overlay FILE] [--pgo FILE] [--print-cache DIR]
               [--root ROOT]... [--goos-dir DIR] DIR
-bin/g2a build --print-only --work DIR [--tests] [--module PATH] [--layout gofmt|lines]
+bin/build-go --print-only --work DIR [--tests] [--module PATH] [--layout gofmt|lines]
               [--line-file] SRC
-bin/g2a-build-tests [--arch amd64|arm64]... [PROG...]
+bin/build-go test [--arch amd64|arm64]... [PROG...]
 ```
 
-The logic is `arbace/g2a/build.ae` (`arbace.g2a.build`), run on Arbace's Go executable like
-the rest of `bin/g2a` (`bin/lib/g2a-host.bash`: `G2A_GO_EXE`, else the tools' host,
+The logic is `arbace/build/go.ae` (`arbace.build.go`), run on Arbace's Go executable like
+the rest of `bin/repr-go` (`bin/lib/repr-go-host.bash`: `REPR_GO_EXE`, else the tools' host,
 `bin/lib/host.bash`).
-`bin/g2a build` without arguments still builds g2a's helper (`tools/godump`).
+`bin/build-go` without arguments still builds repr/go's helper (`tools/godump`).
 
 ## The program's layout
 
@@ -55,9 +66,9 @@ DIR/
   path without `.ae` (`go/example_com/multi/greet/banner.txt`); embedded files are checked
   against the SHA-256 the forms record. (Amendment B2, accepted 2026-10-08, folded into SPEC
   §9.5, §9.6 and §12.4.)
-- **Data directories** (amendment M5 of A2G-SPEC §16, accepted 2026-10-09). A directory under
-  `DIR/go` holding a file `.g2a-data` holds data, not forms: its `.ae` files (and those of its
-  subdirectories) are not read as Go forms. `bin/a2g --program` marks so the main package's
+- **Data directories** (amendment M5 of J2G-SPEC §16, accepted 2026-10-09). A directory under
+  `DIR/go` holding a file `.build-go-data` holds data, not forms: its `.ae` files (and those of its
+  subdirectories) are not read as Go forms. `bin/j2g --program` marks so the main package's
   embedded namespace sources (`go/arbace/cmd/arbace/res/`, its `:embed-files`).
 - **Files.** One Go file per `go/file` form; when `go/package` has `:files`, the two must name
   the same files.
@@ -84,9 +95,9 @@ DIR/
    and `HOME` included):
 
    ```
-   GOROOT=$G2A_GOROOT GOTOOLCHAIN=local GOFLAGS= GOWORK=off GO111MODULE=on GOPROXY=off
+   GOROOT=$ARBACE_GOROOT GOTOOLCHAIN=local GOFLAGS= GOWORK=off GO111MODULE=on GOPROXY=off
    CGO_ENABLED=0 GOEXPERIMENT= GOOS=linux GOARCH=amd64|arm64 GOAMD64=v1 | GOARM64=v8.0
-   $G2A_GOROOT/bin/go build -trimpath -buildvcs=false [-tags ...] -o OUT <main package path>
+   $ARBACE_GOROOT/bin/go build -trimpath -buildvcs=false [-tags ...] -o OUT <main package path>
    ```
 
    `OUT` defaults to the main package path's last element in the current directory, as
@@ -94,16 +105,16 @@ DIR/
    `-overlay FILE` ("Overlays" below), `--pgo FILE` adds `-pgo FILE` (made absolute): a CPU
    profile for gc's profile-guided optimization (amendment O5, SPEED-NOTES.md).
 
-**Toolchain.** `$G2A_GOROOT/bin/go`, by default TamaGo's go1.27.1 at `/root/tamago-go`, the
-toolchain of the rest of g2a (the round trip); it builds `linux` targets like upstream Go.
-Alpine's own go1.27.1 (`/usr/lib/go`, `G2A_GOROOT=/usr/lib/go`) works too and passes the same
+**Toolchain.** `$ARBACE_GOROOT/bin/go`, by default TamaGo's go1.27.1 at `/root/tamago-go`, the
+toolchain of the rest of repr/go (the round trip); it builds `linux` targets like upstream Go.
+Alpine's own go1.27.1 (`/usr/lib/go`, `ARBACE_GOROOT=/usr/lib/go`) works too and passes the same
 tests, but its executables differ from TamaGo's (code and data, not only the build ID: the two
 trees differ in `cmd/` and std, TamaGo's additions and Alpine's patches); each is reproducible.
 
-**Host.** `bin/g2a build` (and `bin/g2a print`) runs on the native Go executable
-(`G2A_GO_EXE`, else the tools' host: `ARBACE_HOST_EXE`, else stage 0 built from the Go seed),
+**Host.** `bin/build-go` (and `bin/repr-go print`) runs on the native Go executable
+(`REPR_GO_EXE`, else the tools' host: `ARBACE_HOST_EXE`, else stage 0 built from the Go seed),
 with the output the JVM gave, byte for byte (standalone S3, [../STANDALONE-NOTES.md](../STANDALONE-NOTES.md),
-"S3: g2a on Go"; `bin/lib/g2a-host.bash`). The JVM host (`G2A_HOST=jvm`) left with S4.
+"S3: repr/go on Go"; `bin/lib/repr-go-host.bash`). The JVM host (`G2A_HOST=jvm`) left with S4.
 
 **Static.** `CGO_ENABLED=0` makes gc's internal linker write a static executable: `file` says
 "statically linked", `readelf -l` shows no `INTERP` segment and `readelf -d` no dynamic
@@ -125,39 +136,39 @@ as `../go/...`, would keep the host's directory).
 `--overlay FILE` passes `-overlay FILE` (made absolute) to `go build`: a JSON file in Go's
 overlay format, `{"Replace": {"/path/of/a/file/the/build/reads.go": "/path/of/its/replacement.go",
 ...}}`, which replaces or adds files of the build without changing the tree they belong to.
-This is how the patched Go runtime of A2G-SPEC §9.3 (the goroutine-local slot: a field of `g`,
+This is how the patched Go runtime of J2G-SPEC §9.3 (the goroutine-local slot: a field of `g`,
 its clearing in `gdestroy`, the new file `arbace_local.go`) enters a build: the overlay maps
-`$G2A_GOROOT/src/runtime/runtime2.go` and `proc.go` to the patched copies and adds
+`$ARBACE_GOROOT/src/runtime/runtime2.go` and `proc.go` to the patched copies and adds
 `arbace_local.go`, all printed from Go forms (the patch itself is jrt's phase 2). The option
-is A2G-SPEC §16 Q19's amendment of this file, accepted with the spec. The build stays
+is J2G-SPEC §16 Q19's amendment of this file, accepted with the spec. The build stays
 reproducible: the overlay's files are inputs of gc's build IDs like any source. The patch's
-forms are `overlay/go/runtime/` (jrt phase 2a, JRT-NOTES.md; A2G-SPEC §9.3, amendment T15);
-`bin/jrt overlay` prints them and writes the overlay file for `$G2A_GOROOT`, and `bin/jrt
+forms are `overlay/go/runtime/` (jrt phase 2a, JRT-NOTES.md; J2G-SPEC §9.3, amendment T15);
+`bin/jrt overlay` prints them and writes the overlay file for `$ARBACE_GOROOT`, and `bin/jrt
 overlay --check` compares them with the toolchain's runtime.
 
 ## The print cache (standalone S6, SA146)
 
 `--print-cache DIR` keeps the printed files of each package in `DIR`, keyed by the host's
-identity (`G2A_HOST_ID`, the executable's and `arbace/g2a/`'s sources' hashes, set by
-`bin/lib/g2a-host.bash` for this option), the options that change the printing (`--layout`,
+identity (`REPR_GO_HOST_ID`, the executable's and `arbace/repr/go/`'s sources' hashes, set by
+`bin/lib/repr-go-host.bash` for this option), the options that change the printing (`--layout`,
 `--line-file`, the tests) and the package's forms files (their paths and contents): a package
 the same host printed from the same forms is taken from the cache, not printed again. Without
-`G2A_HOST_ID` the option does nothing. `bin/arbace-go` passes `.tmp/g2a-print-cache` and trims it
+`REPR_GO_HOST_ID` the option does nothing. `bin/arbace-go` passes `.tmp/repr-go-print-cache` and trims it
 before each build of entries unused for six hours (`bin/lib/gocache.bash`,
 `ARBACE_GOCACHE_KEEP_MIN`). The printed module is the same either way (STANDALONE-NOTES.md, "The
 build's time (SA146-SA148)").
 
 The cache also keeps a collect index per source root and host (`DIR/collect/`, a file named by
-the SHA-256 of `G2A_HOST_ID` and the root's path; SA190): which forms files are package files
+the SHA-256 of `REPR_GO_HOST_ID` and the root's path; SA190): which forms files are package files
 (by their contents' SHA-256), and for each package file what collecting it found (its path, name
 and `go/package` options) and the files it read with their SHA-256. A package whose files all
 have the same SHA-256 is taken from the index without reading its forms; it is read and
 collected only if it must be printed (its printed files not in the cache), and must then equal
-the index's. Reading the forms was most of g2a's time on the Go executable: a build whose
+the index's. Reading the forms was most of repr/go's time on the Go executable: a build whose
 packages are all in the cache reads none. The printed files of a cached package are copied as
 they are. Indexes are trimmed with the entries (by mtime, set when read).
 
-Checked (2026-10-08) with the experiment's overlay of `.tmp/a2g-exp/gls/` (A2G-SPEC §13.3): a
+Checked (2026-10-08) with the experiment's overlay of `.tmp/j2g-exp/gls/` (J2G-SPEC §13.3): a
 program of Go forms pulling `runtime.arbace_getLocal` with `//go:linkname` fails to link
 without the overlay (`relocation target runtime.arbace_getLocal not defined`) and builds and
 runs with it, for amd64 and for arm64 under `qemu-aarch64`.
@@ -172,19 +183,19 @@ gives the module path when `SRC` has no `program.edn`. `--tests` also prints eac
 collected by the package file's `load`, but not printed). `bin/jrt`
 ([JRT-NOTES.md](JRT-NOTES.md)) builds, vets and tests jrt this way, with the environment of
 "The build" above, and `go test -exec qemu-aarch64` for arm64. (Amendment B6, proposed in
-JRT-NOTES.md and accepted 2026-10-08 with A2G-SPEC's amendments, §16; it adds options to
-`bin/g2a build` only and changes no form, so nothing of SPEC is amended.)
+JRT-NOTES.md and accepted 2026-10-08 with J2G-SPEC's amendments, §16; it adds options to
+`bin/build-go` only and changes no form, so nothing of SPEC is amended.)
 
 ## The box's guest and other roots (amendment BX6, accepted 2026-10-11)
 
 `--goos tamago` builds the program for B1b's box (doc/go/BOX-NOTES.md, S1): `GOOS=tamago` with
 TamaGo's `goos` module as `GOOSPKG` (`github.com/usbarmory/tamago` v1.27.1: the printed `go.mod`
 requires it, imported by no package, and `go.sum` holds its two hashes, taken from Go's module
-cache, `GOPROXY=off` as always, and checked against the ones `arbace.g2a.build/tamago-goos`
+cache, `GOPROXY=off` as always, and checked against the ones `arbace.build.go/tamago-goos`
 pins), linked with `-ldflags "-T 0x201000 -R 0x1000 -w"` (go-whim's addresses; the symbol table
 kept, which the monitor reads; DWARF dropped). `--root ROOT` (repeated) adds another source root
 of forms: its packages but a main one join the program (`box/`, whose board and `abi` the guest
-imports, and whose launcher is a program of its own: `bin/g2a build --module arbace box`).
+imports, and whose launcher is a program of its own: `bin/build-go --module arbace box`).
 `--print-only` takes `--root` too. No form changes, so SPEC is not amended. `bin/arbace-go
 --build --box` then cuts the guest's symbol table to the three symbols the monitor reads
 (`tools/elfsyms`; amendment BX12, BOX-NOTES.md, S2): 11 MB less, the rest of the file as gc wrote it.
@@ -213,17 +224,17 @@ build's (`GOOS=darwin`).
 gc cross-compiles without a C toolchain: `--arch arm64` gives an `ARM aarch64` executable on
 this amd64 host. It is tested under QEMU's user-mode emulation, `/usr/bin/qemu-aarch64 EXE
 ARGS...`, which runs a static Linux arm64 executable as a process here (Linux system calls
-translated, no system image needed); `bin/g2a-build-tests` runs the arm64 executables that way
+translated, no system image needed); `bin/build-go test` runs the arm64 executables that way
 and the amd64 ones natively, against the same expected files.
 
 ## Reproducibility of Arbace's executables (2026-10-11)
 
 The whole chain from a clean checkout is deterministic: `bin/jrt-convert` (its `--twice`; since
-standalone S1 its output is committed, `jdk/`, and the chain starts at a2g),
-`bin/a2g --program` (two runs, separate JVMs, give identical trees but `report.edn`'s timings),
-the image of prepared namespaces, and `go build -trimpath`. Two removed nondeterminisms: a2g's
+standalone S1 its output is committed, `jdk/`, and the chain starts at j2g),
+`bin/j2g --program` (two runs, separate JVMs, give identical trees but `report.edn`'s timings),
+the image of prepared namespaces, and `go build -trimpath`. Two removed nondeterminisms: j2g's
 member tables followed the JVM's overload order for classes whose order changes from one JVM
-process to the next (A2G-SPEC §5.11, RP1), and j2a's headers named its numbered scratch copies
+process to the next (J2G-SPEC §5.11, RP1), and repr/java's headers named its numbered scratch copies
 (JRT-SOURCES.md, convert). Checked at commit `fe7e878` (branch `determinism`): `bin/arbace-go
 --build` twice from the same tree, the first moved aside, the second with an empty `GOCACHE`
 (`ARBACE_GO_ARCHES=amd64`), then `--build --box` after each: the same bytes for
@@ -234,9 +245,9 @@ dirty tree, so builds compare only from the same clean commit.
 
 ## The test programs and the tests
 
-- `test/g2a/build/hello/`: one package, `main.go`: prints `hello, world`, then each argument
+- `test/build/go/hello/`: one package, `main.go`: prints `hello, world`, then each argument
   (`arg N: "..."`), and exits with the number of arguments.
-- `test/g2a/build/multi/`: the module `example.com/multi` (`program.edn`), three packages: the
+- `test/build/go/multi/`: the module `example.com/multi` (`program.edn`), three packages: the
   main package, `greet` (strings, a `//go:embed`ded banner, a panic on request) and
   `internal/wc` (counts lines, words and bytes of an `io.Reader` with `bufio.Scanner`; a type
   with a `String` method). `main` greets each argument in a goroutine of its own
@@ -248,8 +259,8 @@ dirty tree, so builds compare only from the same clean commit.
 Each program's `runs/NAME.args` (arguments, one per line), `NAME.in` (standard input; absent:
 empty), `NAME.out` (expected standard output), `NAME.err` (what standard error must begin with;
 absent: empty) and `NAME.code` (expected exit code; absent: 0) define a run.
-`bin/g2a-build-tests` builds every program for both architectures into
-`.tmp/g2a-build-tests/ARCH/`, checks the executable static and of the right machine, builds it
+`bin/build-go test` builds every program for both architectures into
+`.tmp/build-go-tests/ARCH/`, checks the executable static and of the right machine, builds it
 again from a copy at another path (also with `--line-file`, twice) and compares the bytes, and
 checks every run.
 

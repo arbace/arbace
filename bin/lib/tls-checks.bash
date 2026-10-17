@@ -19,10 +19,10 @@ tls_server_stop() {
   TLS_SERVER_FD="" TLS_SERVER_PID=""
 }
 
-# tls_build_server OUT [GOARCH]: tools/tlsserver built into OUT with Go's toolchain ($G2A_GOROOT,
+# tls_build_server OUT [GOARCH]: tools/tlsserver built into OUT with Go's toolchain ($ARBACE_GOROOT,
 # default /root/tamago-go), for GOARCH (default the host's)
 tls_build_server() {
-  local goroot=${G2A_GOROOT:-/root/tamago-go}
+  local goroot=${ARBACE_GOROOT:-/root/tamago-go}
   [ -x "$goroot/bin/go" ] || return 1
   (cd "$root/tools/tlsserver" && env -u GOOS GOARCH=${2:-$(go_arch_of_host)} GOROOT="$goroot" GOTOOLCHAIN=local GOFLAGS= \
      GOWORK=off GOPROXY=off CGO_ENABLED=0 "$goroot/bin/go" build -trimpath -o "$1" .)

@@ -1,0 +1,214 @@
+(ns arbace.j2g.names
+  "j2g's names (doc/go/J2G-SPEC.md §4.2, §4.4): Go packages of Java classes, Go identifiers of
+  classes, members and locals, the descriptor codes of mangled method names, and the Go type of
+  a Java type (§5.1) given the class facts of the closed world."
+  (:require [arbace.string :as str]
+            [arbace.classes.types :as t]))
+
+;; ---------------------------------------------------------------------------------------
+;; Go packages (§4.2)
+
+(def compiled-packages
+  "The Go packages of compiled namespaces' classes (standalone S6, SA142): top-level class
+  (internal name) → package name, from the packages.edn of the inputs (arbace.aot's tree);
+  set once by j2g's run, before any translation."
+  (atom {}))
+
+(defn- top-of [^String n] (let [i (.indexOf n "$")] (if (neg? i) n (subs n 0 i))))
+
+(defn pkg-of
+  "The Go package of a class (internal name): :jrt for the JDK's packages (java, javax, jdk,
+  sun, and com.sun since the SunJCE provider: amendment SC3), a compiled namespace's own
+  (compiled-packages: a keyword of its package name), else :lang for Arbace's."
+  [internal]
+  (cond
+    (or (str/starts-with? internal "java/") (str/starts-with? internal "jdk/")
+        (str/starts-with? internal "sun/") (str/starts-with? internal "javax/")
+        (str/starts-with? internal "com/sun/")) :jrt
+    :else (if-let [p (get @compiled-packages (top-of internal))] (keyword p) :lang)))
+
+(defn compiled-pkg? [pkg] (not (#{:jrt :lang} pkg)))
+
+(defn pkg-name [pkg] (name pkg))
+(defn pkg-path [pkg] (str "arbace/" (name pkg)))
+(defn pkg-ns [pkg] (str "go.arbace." (name pkg)))
+
+;; ---------------------------------------------------------------------------------------
+;; munging
+
+(def go-keywords
+  #{"break" "case" "chan" "const" "continue" "default" "defer" "else" "fallthrough" "for"
+    "func" "go" "goto" "if" "import" "interface" "map" "package" "range" "return" "select"
+    "struct" "switch" "type" "var"})
+
+(def go-predeclared
+  #{"any" "bool" "byte" "comparable" "complex64" "complex128" "error" "float32" "float64" "int"
+    "int8" "int16" "int32" "int64" "rune" "string" "uint" "uint8" "uint16" "uint32" "uint64"
+    "uintptr" "true" "false" "iota" "nil" "append" "cap" "clear" "close" "complex" "copy"
+    "delete" "imag" "len" "make" "max" "min" "new" "panic" "print" "println" "real" "recover"})
+
+(def reserved-locals
+  "Names j2g's generated code uses for itself (receivers, imports, temporaries)."
+  #{"t" "this" "jrt" "math" "atomic" "reflect" "unsafe" "lang" "exc" "ctl" "rv" "_"})
+
+(defn- memo-str
+  "f of one string argument, its results kept (j2g's names are asked for again and again,
+  from every thread translating)."
+  [f]
+  (let [cache (java.util.concurrent.ConcurrentHashMap.)]
+    (fn [^String k]
+      (or (.get cache k)
+          (let [v (f k)]
+            (.put cache k v)
+            v)))))
+
+(def ^:private munge-name*
+  (memo-str
+    (fn [s]
+      (let [m (str/replace (str (munge s)) "$" "_")]
+        ;; munge leaves characters Go rejects that Clojure allows in symbols only rarely;
+        ;; anything else not a letter, digit or _ becomes _
+        (apply str (map (fn [c] (if (or (Character/isLetterOrDigit (char c)) (= c \_)) c \_)) m))))))
+
+(defn munge-name
+  "A Java or Clojure name as a Go identifier fragment: Clojure's munge, $ as _."
+  [s]
+  (munge-name* (str s)))
+
+(defn local-name
+  "The Go name of a Java local or parameter (§4.4): munged, with _ appended when it would be a
+  Go keyword, a predeclared or reserved name, or would start with an upper-case letter (which
+  could shadow a type of the package)."
+  [sym]
+  (let [s (munge-name (name sym))
+        s (if (str/blank? s) "x" s)]
+    (if (or (go-keywords s) (go-predeclared s) (reserved-locals s)
+            (Character/isUpperCase (.charAt ^String s 0))
+            (str/starts-with? s "j2g_") (re-matches #"tmp\d+.*" s) (re-matches #"[lL]\d+" s))
+      (str s "_")
+      s)))
+
+;; ---------------------------------------------------------------------------------------
+;; classes (§4.4)
+
+(def renames
+  "The rename table (§4.4, Collisions): classes whose Go name would collide with another of the
+  closed world's or with jrt's own names."
+  {;; jrt's byte[] is ByteArray (§5.9)
+   "jdk/internal/util/ByteArray" "Jdk_ByteArray"
+   ;; jrt's java.util.Date is Date (JRT-NOTES.md, phase 2B "Dates")
+   "java/sql/Date" "Sql_Date"
+   ;; java.util.Tripwire's twin in java.util.stream (step 5 phase 2B, streams)
+   "java/util/stream/Tripwire" "Stream_Tripwire"
+   ;; java.net.URLConnection's subclass in sun.net.www, and the URL handlers, all named Handler
+   ;; (JRT-NOTES.md, "Files")
+   "sun/net/www/URLConnection" "Www_URLConnection"
+   "sun/net/www/protocol/file/Handler" "File_Handler"
+   "sun/net/www/protocol/http/Handler" "Http_Handler"
+   "sun/net/www/protocol/https/Handler" "Https_Handler"
+   "sun/net/www/protocol/jar/Handler" "Jar_Handler"
+   ;; jrt's java.lang.reflect.Proxy is Proxy; java.net.Proxy, which URL's members and
+   ;; Socket(Proxy) name (JRT-NOTES.md, "Files", "Sockets")
+   "java/net/Proxy" "Net_Proxy"
+   ;; java.text.Normalizer's internal twin, which Pattern calls for combining classes
+   ;; (JRT-NOTES.md, "The JDK's resource data")
+   "sun/text/Normalizer" "Sun_Normalizer"
+   ;; java.time.chrono.Era's namesake in sun.util.calendar, which ZoneInfo's calendars use
+   ;; (JRT-NOTES.md, "Time")
+   "sun/util/calendar/Era" "Calendar_Era"
+   ;; java.lang.annotation.Annotation's namesake in java.text, an attribute value's wrapper
+   ;; (JRT-NOTES.md, "Text and locales")
+   "java/text/Annotation" "Text_Annotation"
+   ;; java.security.SecureRandom's namesake in sun.security.provider, the SHA1PRNG
+   ;; (JRT-NOTES.md, "Security", amendment SC2)
+   "sun/security/provider/SecureRandom" "Sun_SecureRandom"})
+
+(defn compiled-class?
+  "Is class `internal` one of a namespace compiled to Java forms (standalone S6, arbace.aot):
+  Arbace's but not the runtime's (arbace/lang, the Java API)?"
+  [^String internal]
+  (and (str/starts-with? internal "arbace/") (not (str/starts-with? internal "arbace/lang/"))
+       (not (str/starts-with? internal "arbace/java/api/"))))
+
+(declare go-class-name*)
+
+(defn go-class-name
+  "The Go type name of a class: its binary name after the package, $ as _; X prepended when it
+  does not start with an upper-case letter. A compiled namespace's class (S6), in package lang
+  with the runtime's, is named by its whole binary name between A_ and _A (arbace.core.Vec is
+  A_arbace_core_Vec_A, the fn arbace.walk$walk A_arbace_walk_walk_A)."
+  [internal]
+  (go-class-name* internal))
+
+(defn- go-class-name** [internal]
+  (or (get renames internal)
+  (when (compiled-class? internal)
+    ;; _A at the end: j2g's suffixes (_class, _New, _Init ...) cannot make another one's name
+    (str "A_" (munge-name (str/replace internal "/" "_")) "_A"))
+  (let [s (subs internal (inc (.lastIndexOf ^String internal "/")))
+        s (munge-name s)]
+    (if (and (seq s) (Character/isUpperCase (.charAt ^String s 0)))
+      s
+      (str "X" s)))))
+
+(def ^:private go-class-name* (memo-str go-class-name**))
+
+(defn capitalize [^String s]
+  (if (empty? s) s (str (Character/toUpperCase (.charAt s 0)) (subs s 1))))
+
+;; ---------------------------------------------------------------------------------------
+;; descriptor codes (§4.4)
+
+(def ^:private method-bases
+  "[name desc] -> method-base's answer."
+  (java.util.concurrent.ConcurrentHashMap.))
+
+(defn desc-code
+  "The code of a parameter or return descriptor in a mangled name."
+  [d]
+  (cond
+    (t/array? d) (let [n (t/array-dims d)
+                       e (subs d n)]
+                   (str (desc-code e) n))
+    (= d "Ljava/lang/Object;") "O"
+    (t/class-desc? d) (go-class-name (t/desc->internal d))
+    :else d))
+
+(declare method-base*)
+
+(defn method-base
+  "The mangled method name without a class prefix: M_P1_..._Pn__R."
+  [name desc]
+  (let [^java.util.concurrent.ConcurrentHashMap c method-bases
+        k [name desc]]
+    (or (.get c k)
+        (let [v (method-base* name desc)]
+          (.put c k v)
+          v))))
+
+(defn- method-base* [name desc]
+  (let [[ps r] (t/parse-method-desc desc)
+        m (capitalize (munge-name name))
+        m (if (str/starts-with? m "_") (str "X" m) m)]
+    (str m (apply str (map #(str "_" (desc-code %)) ps)) "__" (desc-code r))))
+
+(defn ctor-base
+  "Ctor_P1_..._Pn, or Ctor; desc is the constructor's full descriptor (implicit parameters
+  included)."
+  [desc]
+  (let [[ps _] (t/parse-method-desc desc)]
+    (str "Ctor" (apply str (map #(str "_" (desc-code %)) ps)))))
+
+(defn new-name
+  "C_New_P1_..._Pn, or C_New."
+  [cls-go desc]
+  (let [[ps _] (t/parse-method-desc desc)]
+    (str cls-go "_New" (apply str (map #(str "_" (desc-code %)) ps)))))
+
+(defn field-name [fname] (str "F_" (munge-name fname)))
+
+(defn static-field-name [cls-go fname] (str cls-go "_" (munge-name fname)))
+
+(defn static-method-name [cls-go name desc] (str cls-go "_" (method-base name desc)))
+
+(defn impl-name [mbase] (str "Impl_" mbase))

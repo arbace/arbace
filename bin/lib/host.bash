@@ -1,5 +1,5 @@
 # The host of Arbace's tools (standalone S4, doc/STANDALONE-NOTES.md, "S4: the JVM removed"):
-# the Go executable that runs a2g, g2a, c2a and the other tools' namespaces, loaded from the
+# the Go executable that runs j2g, repr/go, c2a and the other tools' namespaces, loaded from the
 # checkout's sources (ARBACE_PATH), as the JVM's target/stage2 did until S4. Sourced, with $root
 # set to the repository root. Defines:
 #

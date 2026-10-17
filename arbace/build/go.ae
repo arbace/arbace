@@ -1,0 +1,601 @@
+(ns arbace.build.go
+  "The program build: a Go program held as Go forms (doc/go/SPEC.md) to a static Linux
+  executable (doc/go/BUILD.md).
+
+  bin/build-go [--arch amd64|arm64] [--goos linux|tamago|darwin] [-o OUT] [--layout gofmt|lines]
+                [--line-file] [--work DIR] [--overlay FILE] [--pgo FILE] [--print-cache DIR] [--root ROOT]...
+                [--goos-dir DIR] [--main PATH] DIR
+  bin/build-go --print-only --work DIR [--tests] [--module PATH] [--layout gofmt|lines]
+                [--line-file] SRC
+  runs -m arbace.build.go with the same arguments. DIR holds the program's packages as forms
+  under DIR/go/ (SPEC §4.1: go/<path>.ae, the package file, and the files it loads), and
+  optionally DIR/program.edn, {:module \"path\" :go \"1.N\"} (go.mod's module and go lines; by
+  default the main package's path and the toolchain's language version). Each package is
+  printed (arbace.repr.go.print) into a temporary module, its other and embedded files copied
+  from its forms directory (go/<path>/), and the main package is built with
+
+    CGO_ENABLED=0 GOOS=linux GOARCH=<arch> go build -trimpath -buildvcs=false -o OUT
+
+  into a static executable (GOOS=tamago: a TamaGo image, below). OUT defaults to the main package path's last element in the
+  current directory. The toolchain is $ARBACE_GOROOT/bin/go (default /root/tamago-go, go1.27.1).
+    --arch        amd64 (default) or arm64 (GOAMD64=v1, GOARM64=v8.0)
+    --layout      the printed Go's layout: gofmt (default) or lines (SPEC §12.3)
+    --line-file   layout lines, each file starting with a //line directive naming its forms
+                  file, so that gc's positions (panics' tracebacks) name the forms files and
+                  lines: <package path>/<file>.ae for DIR/go/<path>/<file>.ae
+    --work DIR    print the module into DIR (kept); by default a temporary directory, removed
+                  after the build
+    --overlay FILE  passed to go build as -overlay FILE (absolute): a JSON file replacing
+                  files of the build, such as patched Go runtime files (BUILD.md, \"Overlays\")
+    --pgo FILE    passed to go build as -pgo FILE (absolute): a CPU profile for gc's
+                  profile-guided optimization (doc/go/SPEED-NOTES.md)
+    --print-cache DIR  a cache of printed packages (with REPR_GO_HOST_ID set, as bin/build-go sets it
+                  for this option): a package the same host printed from the same forms
+                  is not printed again, nor its forms read (DIR/collect/, the collect index)
+    --goos        linux (default); darwin (the box's launcher on the Mac, cgo off: S4, BX61);
+                  or tamago: a guest image for the box (doc/go/BOX-NOTES.md,
+                  S1), built with GOOS=tamago and TamaGo's goos module as GOOSPKG
+                  (github.com/usbarmory/tamago, tamago-goos below: go.mod requires it and
+                  go.sum holds its hashes, taken from Go's module cache, GOPROXY=off, and
+                  checked against the pinned ones), linked at the box's addresses
+                  (-ldflags \"-T 0x201000 -R 0x1000\", go-whim's), symbols kept (the monitor
+                  reads them), DWARF dropped (-w)
+    --root ROOT   another source root of forms (ROOT/go/...), whose packages but a main one
+                  join the program (the box's, box/: the board the guest imports); repeated
+                  for several
+    --print-only  print the module into --work DIR/mod and stop: no build, and no main
+                  package required (a library such as jrt, built and tested by bin/jrt)
+    --tests       also print the packages' :test-files (SPEC §4.2), for go test
+    --main PATH   the main package's import path, when DIR holds several (box/: the launcher,
+                  arbace/box/cmd/arbace-box, and the test guests, doc/go/BOX-NOTES.md)
+    --module PATH the module path when SRC has no program.edn (a library has no main
+                  package to take it from); std prints the standard library's packages at
+                  their import paths, as GOROOT/src holds them, without go.mod
+    --goos-dir DIR  with --goos tamago: TamaGo's goos module is DIR (go.mod replaces it by
+                  DIR), not Go's module cache: the module printed from its Go forms
+                  (bin/tamago-vendor print)"
+  (:require [arbace.repr.go.print :as p]
+            [arbace.string :as str])
+  (:import [java.io File]
+           [java.nio.file Files CopyOption StandardCopyOption]
+           [java.nio.file.attribute FileAttribute]
+           [java.security MessageDigest]))
+
+(defn- fail [msg & [data]]
+  (throw (ex-info msg (merge {::user true} data))))
+
+;; ---------------------------------------------------------------------------------------
+;; The program: its packages
+
+(defn- data-dir?
+  "Whether f is under a directory of data, not forms: one holding a file .build-go-data (a
+  package's embedded files, such as j2g --program's sources, doc/go/EVAL-NOTES.md)."
+  [^File dir ^File f]
+  (loop [d (.getParentFile f)]
+    (cond (or (nil? d) (= (.getAbsoluteFile d) (.getAbsoluteFile dir))) false
+          (.isFile (File. d ".build-go-data")) true
+          :else (recur (.getParentFile d)))))
+
+(defn- clj-files [^File dir]
+  (->> (file-seq dir)
+       (filter #(and (.isFile ^File %) (str/ends-with? (.getName ^File %) ".ae")
+                     (not (data-dir? dir %))))
+       (sort-by #(.getPath ^File %))))
+
+(defn- package-file?
+  "Whether a forms file is a package file: it holds an ns form and a go/package form.
+  read-fn gives its forms."
+  [^File f read-fn]
+  (let [forms (read-fn f)
+        ns-form (first (filter #(and (seq? %) (= 'ns (first %))) forms))
+        aliases (when ns-form (#'p/go-ns-aliases ns-form))]
+    (boolean
+      (and ns-form
+           (some #(and (seq? %) (symbol? (first %))
+                       (= "package" (name (first %)))
+                       (contains? aliases (namespace (first %))))
+                 forms)))))
+
+(declare root-packages)
+
+(defn- rel-path [^File base ^File f]
+  (str (.relativize (.toPath (.getAbsoluteFile base)) (.toPath (.getAbsoluteFile f)))))
+
+(defn packages
+  "The program's packages: the package files under DIR/go, each collected (arbace.repr.go.print
+  /collect) with :file (the package file) and :path; then those of each of the other roots
+  (--root), but their main packages. With print-cache (a directory) and the environment's
+  REPR_GO_HOST_ID, a package whose files are unchanged since the same host collected it is taken
+  from the print cache's collect index, its forms read only if it must be printed (collected)."
+  ([^File dir] (packages dir nil nil))
+  ([^File dir roots] (packages dir roots nil))
+  ([^File dir roots print-cache]
+   (let [own (root-packages dir print-cache)
+         more (for [r roots
+                    pkg (root-packages (File. (str r)) print-cache)
+                    :when (not= "main" (str (:name pkg)))]
+                pkg)
+         pkgs (vec (concat own more))]
+     (doseq [[path ps] (group-by :path pkgs) :when (> (count ps) 1)]
+       (fail (str "two package files for " path ": "
+                  (str/join ", " (map #(.getPath ^File (:file %)) ps)))))
+     pkgs)))
+
+(defn- read-all
+  "A function of a forms file giving its forms (p/read-forms), the files given read
+  beforehand, in parallel, each once: reading is most of collecting a large program on the Go
+  executable, whose reader is slower than the JVM's (doc/STANDALONE-NOTES.md)."
+  [files]
+  (let [cache (zipmap (map #(.getAbsolutePath ^File %) files)
+                      (pmap p/read-forms files))]
+    (fn [^File f]
+      (let [k (.getAbsolutePath f)]
+        (if (contains? cache k) (get cache k) (p/read-forms f))))))
+
+(defn- hex [^bytes bs]
+  (apply str (map #(format "%02x" (bit-and % 0xff)) bs)))
+
+(defn- file-sha
+  "The SHA-256 of a file's bytes, or nil when it is not a file."
+  [^File f]
+  (when (.isFile f)
+    (hex (.digest (MessageDigest/getInstance "SHA-256") (Files/readAllBytes (.toPath f))))))
+
+(defn- collect-package
+  "Package file f collected (arbace.repr.go.print/collect), with :file, :path and :read (the forms
+  files it is made of: print-module's cache key)."
+  [^File dir ^File f read-fn]
+  (let [read (atom [])
+        pkg (p/collect f (fn [file] (swap! read conj file) (read-fn file)))
+        path (:path (:package pkg))]
+    (when-not (string? path)
+      (fail (str (rel-path dir f) ": go/package without :path")))
+    (assoc pkg :file f :path path :read @read)))
+
+;; The collect index (with --print-cache): per source root and host, what collecting found, so
+;; that a build whose packages are in the print cache reads no forms (reading is most of repr/go's
+;; time on the Go executable): {:package-file? {sha bool} :packages {package file's path {:read
+;; [[path sha] ...] :pkg {:package :name :path}}}}. An entry holds while every file it read has
+;; the same SHA-256; collect and package-file? are functions of those files' contents and paths.
+
+(defn- collect-index-file ^File [print-cache host-id ^File dir]
+  (let [md (MessageDigest/getInstance "SHA-256")]
+    (.update md (.getBytes (str host-id "\n" (.getPath dir)) "UTF-8"))
+    (File. (File. (str print-cache) "collect") (hex (.digest md)))))
+
+(defn- read-index
+  "The collect index in f, or nil; its mtime set, as the print cache's entries' (trimmed alike)."
+  [^File f]
+  (when (.isFile f)
+    (.setLastModified f (System/currentTimeMillis))
+    (try (let [[m] (p/read-forms f)] (when (map? m) m))
+         (catch Throwable _ nil))))
+
+(defn- write-index!
+  "Writes the collect index atomically (a file renamed); an entry whose data does not print and
+  read back equal (metadata included) is left out."
+  [^File f index]
+  (let [printed #(binding [*print-meta* true *print-length* nil *print-level* nil] (pr-str %))
+        ok? #(try (= % (read-string (printed %))) (catch Throwable _ false))
+        index (update index :packages #(into (sorted-map) (filter (comp ok? :pkg val)) %))
+        tmp (File. (.getParentFile f) (str (.getName f) ".tmp." (System/nanoTime)))]
+    (.mkdirs (.getParentFile f))
+    (spit tmp (printed index))
+    (when-not (.renameTo tmp f) (.delete tmp))))
+
+(defn- root-packages
+  "The package files under DIR/go, collected (with print-cache, from the collect index when
+  their files are unchanged: :collected then delays the collection, collected-package)."
+  [^File dir print-cache]
+  (let [root (File. dir "go")]
+    (when-not (.isDirectory root)
+      (fail (str "no " (.getPath root) ": the program's forms go under DIR/go (doc/go/BUILD.md)")))
+    (let [files (clj-files root)
+          host-id (System/getenv "REPR_GO_HOST_ID")
+          index-file (when (and print-cache (seq host-id)) (collect-index-file print-cache host-id dir))
+          index (when index-file (or (read-index index-file) {}))
+          shas (when index-file
+                 (let [m (zipmap (map #(.getPath ^File %) files) (pmap file-sha files))]
+                   (fn [^String path] (if (contains? m path) (get m path) (file-sha (File. path))))))
+          valid (when index-file
+                  (into {} (for [[path e] (:packages index)
+                                 :when (every? (fn [[rp sha]] (= sha (shas rp))) (:read e))]
+                             [path e])))
+          covered (set (for [[_ e] valid [rp] (:read e)] rp))
+          pf-index (:package-file? index)
+          known? #(and index-file (contains? pf-index (shas (.getPath ^File %))))
+          read-fn (read-all (filter #(not (and (known? %) (covered (.getPath ^File %)))) files))
+          pkg-file? (fn [^File f]
+                      (if (known? f) (get pf-index (shas (.getPath f))) (package-file? f read-fn)))
+          pkgs (vec (for [^File f files :when (pkg-file? f)]
+                      (if-let [e (get valid (.getPath f))]
+                        (assoc (:pkg e) :file f :read (mapv #(File. ^String (first %)) (:read e))
+                               :collected (delay (collect-package dir f p/read-forms)))
+                        (collect-package dir f read-fn))))]
+      (when (empty? pkgs)
+        (fail (str "no package files (ns and go/package) under " (.getPath root))))
+      (doseq [[path ps] (group-by :path pkgs) :when (> (count ps) 1)]
+        (fail (str "two package files for " path ": "
+                   (str/join ", " (map #(rel-path dir (:file %)) ps)))))
+      (when index-file
+        (let [index' {:package-file? (into (sorted-map)
+                                           (for [^File f files :let [sha (shas (.getPath f))] :when sha]
+                                             [sha (boolean (pkg-file? f))]))
+                      :packages (into (sorted-map)
+                                      (for [pkg pkgs]
+                                        [(.getPath ^File (:file pkg))
+                                         {:read (mapv (fn [^File r] [(.getPath r) (shas (.getPath r))]) (:read pkg))
+                                          :pkg (select-keys pkg [:package :name :path])}]))}]
+          (when-not (= index' index)
+            (write-index! index-file index'))))
+      pkgs)))
+
+(defn- collected-package
+  "A package from the collect index collected, its forms read (to print it): the same package
+  as the index's."
+  [pkg]
+  (if-let [d (:collected pkg)]
+    (let [c @d]
+      (when-not (= (select-keys c [:package :name :path :read]) (select-keys pkg [:package :name :path :read]))
+        (fail (str (:path pkg) ": collected again, the package differs from the collect index's")))
+      c)
+    pkg))
+
+(defn- read-program-edn [^File dir]
+  (let [f (File. dir "program.edn")]
+    (if (.isFile f)
+      (let [forms (p/read-forms f)]
+        (when-not (and (= 1 (count forms)) (map? (first forms)))
+          (fail "program.edn must hold one map, {:module \"path\" :go \"1.N\"}"))
+        (first forms))
+      {})))
+
+(defn- run
+  "Runs cmd in dir with env added to the JVM's; [exit output] with output captured, or
+  [exit nil] with the child's output on the JVM's when inherit?."
+  [cmd ^File dir env inherit?]
+  (let [pb (ProcessBuilder. ^java.util.List (map str cmd))]
+    (.directory pb dir)
+    (let [penv (.environment pb)]
+      (doseq [[k v] env] (.put penv k v)))
+    (if inherit?
+      (do (.inheritIO pb)
+          [(.waitFor (.start pb)) nil])
+      (do (.redirectErrorStream pb true)
+          (let [proc (.start pb)
+                out (slurp (.getInputStream proc))]
+            [(.waitFor proc) out])))))
+
+(declare tamago-goos)
+
+(defn go-env
+  "The build's environment: the toolchain, GOOS/ARCH (linux by default; tamago with TamaGo's
+  goos module as GOOSPKG), no cgo, nothing from the user's Go environment that could change
+  the output."
+  ([goroot arch] (go-env goroot arch "linux"))
+  ([goroot arch goos]
+   (merge {"GOROOT" goroot "GOTOOLCHAIN" "local" "GOFLAGS" "" "GOWORK" "off"
+           "GO111MODULE" "on" "GOPROXY" "off" "GOEXPERIMENT" "" "CGO_ENABLED" "0"
+           "GOOS" goos "GOARCH" arch}
+          (when (= goos "tamago") {"GOOSPKG" (:path tamago-goos)})
+          (case arch
+            "amd64" {"GOAMD64" "v1"}
+            "arm64" {"GOARM64" "v8.0"}))))
+
+;; ---------------------------------------------------------------------------------------
+;; GOOS=tamago: TamaGo's goos module (doc/go/BOX-NOTES.md, S1)
+
+(def tamago-goos
+  "TamaGo's goos module, the runtime/goos implementation a GOOS=tamago build names as GOOSPKG
+  (BSD-3-Clause, LICENSE.md): its version and its go.sum hashes, pinned (the module's zip, its
+  go.mod). The build takes it from Go's module cache (GOPROXY=off) and checks the hashes."
+  {:path "github.com/usbarmory/tamago" :version "v1.27.1"
+   :zip "h1:Zl4w3hu5DaogGvcLzunS4gjwNEqdjFFJedMO3pDQa5k="
+   :mod "h1:nLuV/bBHbtlpWOJftse7cr219b/Z6vitr5fyv/OHkK4="})
+
+(def tamago-ldflags
+  "A box guest's link: text at 0x201000, 4 KiB segments (go-whim's guest/gotamago.go), the
+  symbol table kept (the monitor finds the board's and the runtime's symbols in it), DWARF
+  dropped."
+  "-T 0x201000 -R 0x1000 -w")
+
+(defn- go-mod-cache [goroot]
+  (let [[status out] (run [(str goroot "/bin/go") "env" "GOMODCACHE"] (File. ".")
+                          {"GOROOT" goroot "GOTOOLCHAIN" "local"} false)]
+    (when-not (zero? status) (fail (str "go env GOMODCACHE: " out)))
+    (str/trim (str out))))
+
+(defn- h1-of-file
+  "go.sum's h1 hash of one file named name (golang.org/x/mod's dirhash.Hash1)."
+  [^bytes data name]
+  (let [hex (fn [^bytes b] (apply str (map #(format "%02x" (bit-and % 0xff)) b)))
+        sha (fn [^bytes b] (.digest (MessageDigest/getInstance "SHA-256") b))
+        summary (str (hex (sha data)) "  " name "\n")]
+    (str "h1:" (.encodeToString (java.util.Base64/getEncoder) ^bytes (sha (.getBytes summary "UTF-8"))))))
+
+(defn tamago-go-sum
+  "go.sum's lines for TamaGo's goos module, from Go's module cache, checked against the pinned
+  hashes."
+  [goroot]
+  (let [{:keys [path version zip mod]} tamago-goos
+        dir (File. (str (go-mod-cache goroot) "/cache/download/" path "/@v"))
+        zf (File. dir (str version ".ziphash"))
+        mf (File. dir (str version ".mod"))
+        _ (when-not (and (.isFile zf) (.isFile mf) (.isFile (File. dir (str version ".zip"))))
+            (fail (str path "@" version " is not in Go's module cache (" (.getPath dir) "): GOPROXY=off")))
+        zh (str/trim (slurp zf))
+        mh (h1-of-file (Files/readAllBytes (.toPath mf)) "go.mod")]
+    (when-not (and (= zh zip) (= mh mod))
+      (fail (str path "@" version " in Go's module cache has hashes " zh " " mh ", not the pinned " zip " " mod)))
+    (str path " " version " " zip "\n" path " " version "/go.mod " mod "\n")))
+
+(defn- toolchain-lang
+  "The toolchain's language version, 1.N (from go env GOVERSION)."
+  [goroot]
+  (let [[status out] (run [(str goroot "/bin/go") "env" "GOVERSION"] (File. ".")
+                          {"GOROOT" goroot "GOTOOLCHAIN" "local"} false)
+        v (str/trim (str out))]
+    (if-let [[_ l] (and (zero? status) (re-find #"^go(\d+\.\d+)" v))]
+      l
+      (fail (str "go env GOVERSION: " v)))))
+
+(defn program
+  "The program in DIR: {:module :go :main pkg :packages [pkg ...]}, every package with :dir,
+  its directory in the module (\"\" for the module's root). With :library? (opts), no main
+  package is required and :module (opts) gives the module path when program.edn does not; with
+  :module, a library may hold several (GOROOT/src's tree, module std: Go's toolchain, cmd/'s,
+  standalone S9; box/, module arbace: the launcher and the test guests, doc/go/BOX-NOTES.md);
+  :main-path (opts), the import path of the main package, chooses it among several;
+  :go (opts) the language version when program.edn does not (else the toolchain's)."
+  ([^File dir goroot] (program dir goroot {}))
+  ([^File dir goroot {:keys [library? roots] :as opts}]
+  (let [pkgs (packages dir roots (:print-cache opts))
+        mains (cond->> (filter #(= "main" (str (:name %))) pkgs)
+                (:main-path opts) (filter #(= (:main-path opts) (:path %))))
+        _ (when-not (or (= 1 (count mains)) (and library? (or (empty? mains) (:module opts))))
+            (fail (str "a program has one main package; found " (count mains)
+                       (when (seq mains) (str ": " (str/join ", " (map :path mains)))))))
+        main (first mains)
+        edn (read-program-edn dir)
+        module (or (:module edn) (:module opts) (:path main)
+                   (fail "no module path: give program.edn's :module or --module"))
+        ;; go.mod's go line: program.edn's, the caller's (:go), or the toolchain's (go env, a
+        ;; process: not in the box); the standard library has no go.mod
+        golang (or (:go edn) (:go opts) (when-not (= module "std") (toolchain-lang goroot)))
+        pkgs (vec (for [pkg pkgs]
+                    (let [path (:path pkg)]
+                      (cond
+                        ;; the standard library (GOROOT/src's module std): each package at its
+                        ;; import path, as GOROOT/src lays it out (bin/tamago-vendor)
+                        (= module "std") (assoc pkg :dir path)
+                        (= path module) (assoc pkg :dir "")
+                        (str/starts-with? path (str module "/"))
+                        (assoc pkg :dir (subs path (inc (count module))))
+                        :else (fail (str "package " path " is not in the module " module))))))]
+    {:module module :go (str golang) :packages pkgs
+     :main (first (filter #(= "main" (str (:name %))) pkgs))})))
+
+;; ---------------------------------------------------------------------------------------
+;; Printing the module
+
+(defn- sha256 [^File f]
+  (let [md (MessageDigest/getInstance "SHA-256")]
+    (apply str (map #(format "%02x" (bit-and % 0xff)) (.digest md (Files/readAllBytes (.toPath f)))))))
+
+(defn- copy-file [^File from ^File to]
+  (.mkdirs (.getParentFile to))
+  (Files/copy (.toPath from) (.toPath to)
+              ^"[Ljava.nio.file.CopyOption;" (into-array CopyOption [StandardCopyOption/REPLACE_EXISTING])))
+
+(defn- forms-dir
+  "The package's forms directory: its package file without .ae (SPEC §4.1), where its
+  other and embedded files are."
+  ^File [pkg]
+  (let [^File f (:file pkg)
+        n (.getName f)]
+    (File. (.getParentFile f) (subs n 0 (- (count n) 3)))))
+
+(defn- with-line-files
+  "The package's files with :src for --line-file: the forms file's path relative to the
+  package's forms directory (go/<path>/), which gc resolves in the package's directory, so
+  that -trimpath names it <package path>/<file>.ae, wherever DIR is. (A path outside the
+  package's directory would escape -trimpath's rewriting and keep the host's path.)"
+  [pkg]
+  (let [fdir (forms-dir pkg)]
+    (update pkg :files (fn [fs] (mapv #(update % :src (fn [s] (rel-path fdir (File. (str s))))) fs)))))
+
+(declare delete-tree)
+
+(defn- print-cache-key
+  "The key of a package's printed files in the print cache: the host's identity (REPR_GO_HOST_ID:
+  the executable's and repr/go's sources' hashes, bin/lib/repr-go-host.bash), the options that change
+  the printing, the package's path and its forms files (their paths in dir and contents)."
+  [host-id pkg ^File dir opts tests]
+  (let [md (MessageDigest/getInstance "SHA-256")
+        add (fn [^String x] (.update md (.getBytes (str x "\n") "UTF-8")))]
+    (add host-id)
+    (add (pr-str [(:layout opts) (boolean (:line-file opts)) (boolean tests) (:path pkg) (str (:name pkg))]))
+    (doseq [^File f (:read pkg)]
+      (add (rel-path dir f))
+      (.update md (Files/readAllBytes (.toPath f)))
+      (add ""))
+    (apply str (map #(format "%02x" (bit-and % 0xff)) (.digest md)))))
+
+(defn- cached-texts
+  "The printed files of a package from the print cache, each the File of its entry's copy (its
+  bytes copied as they are, not decoded and encoded again), or nil. The entry's mtime is set:
+  bin/arbace-go trims entries unused for hours."
+  [^File entry]
+  (let [names (File. entry "names")]
+    (when (.isFile names)
+      (.setLastModified entry (System/currentTimeMillis))
+      (into (sorted-map)
+            (for [n (str/split-lines (slurp names)) :when (seq n)]
+              [n (File. entry (str "f-" n))])))))
+
+(defn- cache-texts!
+  "Records a package's printed files in the print cache, atomically (a directory renamed)."
+  [^File entry texts]
+  (let [tmp (File. (.getParentFile entry) (str (.getName entry) ".tmp." (System/nanoTime)))]
+    (.mkdirs tmp)
+    (doseq [[n text] texts] (spit (File. tmp (str "f-" n)) text))
+    (spit (File. tmp "names") (str/join (map #(str % "\n") (keys texts))))
+    (when-not (.renameTo tmp entry) (delete-tree tmp))))
+
+(defn print-module
+  "Prints the program into the module directory out: go.mod, and per package its Go files
+  and the other and embedded files it names. Returns the printed files, relative to out.
+  The module std (the standard library, GOROOT/src) gets no go.mod: GOROOT/src's go.mod,
+  go.sum and vendor/modules.txt are files of the tree it is printed into (bin/tamago-vendor).
+  With goos-dir (GOOS=tamago), TamaGo's goos module is that directory (a replace), not Go's
+  module cache. Packages are printed in parallel. With print-cache (a directory) and the
+  environment's REPR_GO_HOST_ID, a package printed before by the same host from the same forms is
+  taken from the cache (standalone S6: a build reprints only what changed)."
+  [{:keys [module packages] golang :go} ^File dir ^File out {:keys [layout line-file tests goos goroot goos-dir print-cache]}]
+  (.mkdirs out)
+  (when-not (= module "std")
+    (spit (File. out "go.mod") (str "module " module "\n\ngo " golang "\n"
+                                    (when (= goos "tamago")
+                                      (str "\n// GOOSPKG, the runtime's goos (TamaGo's): imported by no package\nrequire "
+                                           (:path tamago-goos) " " (:version tamago-goos) "\n"
+                                           (when goos-dir
+                                             (str "\n// from its Go forms printed (bin/tamago-vendor), not Go's module cache\nreplace "
+                                                  (:path tamago-goos) " " (:version tamago-goos) " => "
+                                                  (.getPath (.getAbsoluteFile (File. (str goos-dir)))) "\n")))))))
+  (when (and (= goos "tamago") (not goos-dir))
+    (spit (File. out "go.sum") (tamago-go-sum goroot)))
+  (vec
+    (concat (when-not (= module "std") ["go.mod"])
+          (apply concat (pmap
+            (fn [pkg]
+              (let [pdir (if (= "" (:dir pkg)) out (File. out ^String (:dir pkg)))
+                    opts (cond-> {:layout (or layout (if line-file :lines :gofmt))}
+                           line-file (assoc :line-file true))
+                    test-files (set (map str (:test-files (:package pkg))))
+                    printable #(if tests
+                                 %
+                                 (update % :files (fn [fs] (filterv (fn [f] (not (test-files (str (:name f))))) fs))))
+                    host-id (System/getenv "REPR_GO_HOST_ID")
+                    entry (when (and print-cache (seq host-id))
+                            (let [k (print-cache-key host-id pkg dir opts tests)]
+                              (File. (File. (str print-cache) (subs k 0 2)) k)))
+                    texts (or (when entry (cached-texts entry))
+                              (let [t (p/print-forms (cond-> (printable (collected-package pkg)) line-file with-line-files) opts)]
+                                (when entry
+                                  (.mkdirs (.getParentFile entry))
+                                  (cache-texts! entry t))
+                                t))
+                    declared (when-let [fs (:files (:package pkg))]
+                               (concat fs (when tests (:test-files (:package pkg)))))
+                    rel #(if (= "" (:dir pkg)) % (str (:dir pkg) "/" %))
+                    src (forms-dir pkg)]
+                (when (and declared (not= (set (map str declared)) (set (keys texts))))
+                  (fail (str (:path pkg) ": go/package :files " (pr-str declared)
+                             " but go/file forms " (pr-str (vec (keys texts))))))
+                (.mkdirs pdir)
+                (doseq [[n text] texts]
+                  (if (instance? File text)
+                    (copy-file text (File. pdir ^String n))
+                    (spit (File. pdir ^String n) text)))
+                (doseq [f (:other-files (:package pkg))]
+                  (copy-file (File. src (str f)) (File. pdir (str f))))
+                (doseq [[f h] (:embed-files (:package pkg))]
+                  (let [from (File. src (str f))]
+                    (when-not (.isFile from)
+                      (fail (str (:path pkg) ": no embedded file " (rel-path dir from))))
+                    (when (and h (not= (sha256 from) (str h)))
+                      (fail (str (:path pkg) ": embedded file " f " has sha256 " (sha256 from)
+                                 ", the forms say " h)))
+                    (copy-file from (File. pdir (str f)))))
+                (map rel (concat (keys texts) (map str (:other-files (:package pkg)))
+                                 (map (comp str first) (:embed-files (:package pkg)))))))
+            packages)))))
+
+;; ---------------------------------------------------------------------------------------
+;; The build
+
+(defn- delete-tree [^File f]
+  (when (.isDirectory f)
+    (doseq [c (.listFiles f)] (delete-tree c)))
+  (.delete f))
+
+(defn build
+  "Builds the program in dir for linux/arch into out (a File); returns go build's exit
+  status, its output on the JVM's."
+  [^File dir arch ^File out {:keys [work goroot] :as opts}]
+  (let [prog (program dir goroot opts)
+        main (:main prog)
+        config (:config (:package main))
+        tmp? (nil? work)
+        ^File work (if work
+                     (File. (str work))
+                     (.toFile (Files/createTempDirectory "build-go" (make-array FileAttribute 0))))]
+    (try
+      (let [mod (File. work "mod")]
+        (when (.exists mod) (delete-tree mod))
+        (print-module prog dir mod opts)
+        (let [tags (:tags config)
+              tamago? (= (:goos opts) "tamago")
+              cmd (concat [(str goroot "/bin/go") "build" "-trimpath" "-buildvcs=false"]
+                          (when (seq tags) ["-tags" (str/join "," tags)])
+                          (when tamago? ["-ldflags" tamago-ldflags])
+                          (when-let [o (:overlay opts)]
+                            ["-overlay" (.getPath (.getAbsoluteFile (File. (str o))))])
+                          (when-let [f (:pgo opts)]
+                            ["-pgo" (.getPath (.getAbsoluteFile (File. (str f))))])
+                          ["-o" (.getPath (.getAbsoluteFile out)) (:path main)])
+              env (cond-> (go-env goroot arch (or (:goos opts) "linux"))
+                    (seq (:goexperiment config)) (assoc "GOEXPERIMENT" (:goexperiment config)))
+              [status] (run cmd mod env true)]
+          status))
+      (finally
+        (when tmp? (delete-tree work))))))
+
+(defn -main [& argv]
+  (let [goroot (or (System/getenv "ARBACE_GOROOT") "/root/tamago-go")
+        usage (str "usage: bin/build-go [--arch amd64|arm64] [--goos linux|tamago|darwin] [-o OUT] [--layout gofmt|lines] [--line-file] [--work DIR] [--overlay FILE] [--pgo FILE] [--root ROOT]... [--goos-dir DIR] [--main PATH] DIR\n"
+                   "       bin/build-go --print-only --work DIR [--tests] [--module PATH] [--layout gofmt|lines] [--line-file] SRC")]
+    (loop [as argv opts {:arch "amd64" :goroot goroot}]
+      (case (first as)
+        "--arch" (recur (nnext as) (assoc opts :arch (second as)))
+        "--goos" (recur (nnext as) (assoc opts :goos (second as)))
+        "--root" (recur (nnext as) (update opts :roots (fnil conj []) (second as)))
+        "-o" (recur (nnext as) (assoc opts :out (second as)))
+        "--layout" (recur (nnext as) (assoc opts :layout (keyword (second as))))
+        "--line-file" (recur (next as) (assoc opts :line-file true))
+        "--work" (recur (nnext as) (assoc opts :work (second as)))
+        "--overlay" (recur (nnext as) (assoc opts :overlay (second as)))
+        "--pgo" (recur (nnext as) (assoc opts :pgo (second as)))
+        "--print-only" (recur (next as) (assoc opts :print-only true))
+        "--tests" (recur (next as) (assoc opts :tests true))
+        "--module" (recur (nnext as) (assoc opts :module (second as)))
+        "--main" (recur (nnext as) (assoc opts :main-path (second as)))
+        "--goos-dir" (recur (nnext as) (assoc opts :goos-dir (second as)))
+        "--print-cache" (recur (nnext as) (assoc opts :print-cache (second as)))
+        (do
+          (when-not (and (= 1 (count as)) (not (str/starts-with? (first as) "-"))
+                         (#{"amd64" "arm64"} (:arch opts))
+                         (contains? #{nil "linux" "tamago" "darwin"} (:goos opts))
+                         (contains? #{nil :gofmt :lines} (:layout opts))
+                         (or (not (:print-only opts)) (:work opts)))
+            (binding [*out* *err*] (println usage))
+            (System/exit 2))
+          (let [dir (File. ^String (first as))
+                status (try
+                         (if (:print-only opts)
+                           (let [prog (program dir goroot {:library? true :module (:module opts) :roots (:roots opts)})
+                                 mod (File. (File. (str (:work opts))) "mod")]
+                             (when (.exists mod) (delete-tree mod))
+                             (print-module prog dir mod opts)
+                             0)
+                         (let [prog-main (when-not (:out opts) (:main (program dir goroot opts)))
+                               out (File. ^String (or (:out opts)
+                                                      (last (str/split (:path prog-main) #"/"))))]
+                           (build dir (:arch opts) out opts)))
+                         (catch arbace.lang.ExceptionInfo e
+                           (if (::user (ex-data e))
+                             (do (binding [*out* *err*] (println (str "build-go: " (.getMessage e))))
+                                 1)
+                             (throw e))))]
+            (shutdown-agents)
+            (System/exit status)))))))

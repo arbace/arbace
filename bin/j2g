@@ -1,0 +1,47 @@
+#!/bin/bash
+# j2g: Java forms to Go forms (doc/go/J2G-SPEC.md, doc/go/J2G-NOTES.md), on Arbace's Go
+# executable (standalone S3 and S4, doc/STANDALONE-NOTES.md).
+#
+# Usage: bin/j2g [OPTIONS] (see arbace/j2g/main.ae, or bin/j2g --help). The classes outside the
+# forms come from jdk/edge.edn (--edge; bin/j2g-edge, doc/STANDALONE-NOTES.md, S2), not from the
+# JVM's reflection.
+# Environment: JRT_CONV (the converted JDK closure, --jdk's default: by default jdk/forms, the
+# committed forms, jdk/README.md; .tmp/jrt/conv for bin/jrt-convert's latest output);
+# J2G_GO_EXE, the Go executable that runs j2g (default the tools' host, bin/lib/host.bash:
+# ARBACE_HOST_EXE, else stage 0 built from the Go seed), run from a copy in .tmp/j2g-host/ (a
+# build may replace the executable while j2g runs), the checkout first on ARBACE_PATH: j2g's
+# namespaces are embedded in the executable and compiled since S6 (SA133; until then they loaded
+# from the checkout's sources), a source of theirs in the checkout that differs from the
+# embedded copy loaded from the checkout instead, evaluated (RT.toolSource); the Java forms'
+# analysis (arbace.classes.*) is the executable's own. GOGC is
+# 400 unless set (j2g allocates much and keeps little of it), GOMEMLIMIT 20GiB (12GiB until S6's
+# compiled namespaces; the JVM's heap
+# was 12 GB).
+# J2G_JOBS, the threads that translate the classes and compute the files' texts (default: the
+# number of processors, at most 16: on Go 10 GB at most, 64 take 12 GB; 1: one after another).
+# The output does not depend on it: each class is translated on its own and the merge renames
+# and replays in class order what it did to the shared state (J2G-SPEC §4.1, "The run in
+# parallel"). J2G_CLASS_TIMES=1 prints the 25 classes that took longest to translate,
+# J2G_ANALYSIS_TIMES=1 the compiled classes' analysis groups and their ten longest tasks.
+set -euo pipefail
+root=$(cd "$(dirname "$0")/.." && pwd)
+. "$root/bin/lib/renamed-env.bash" # stops on a stale G2A_*, J2A_* or A2G_*
+cd "$root"
+# Without the JDK closure j2g still translates, but the JDK's types come out as any and the Go
+# does not build: say so up front
+conv=${JRT_CONV:-$root/jdk/forms}
+if [ ! -d "$conv" ]; then
+  echo "bin/j2g: no $conv (the JDK closure as Java forms; jdk/forms, or bin/jrt-convert's)" >&2
+  exit 1
+fi
+. "$root/bin/lib/host.bash"
+exe=${J2G_GO_EXE:-$(arbace_host_exe)} || exit 1
+[ -x "$exe" ] || { echo "bin/j2g: no executable $exe (J2G_GO_EXE)" >&2; exit 1; }
+host=$root/.tmp/j2g-host
+mkdir -p "$host"
+# one refresh at a time; a running copy is replaced by a rename, never written in place
+( flock 9
+  cmp -s "$exe" "$host/arbace" || { cp "$exe" "$host/arbace.new.$$" && mv -f "$host/arbace.new.$$" "$host/arbace"; }
+) 9> "$host/lock"
+ARBACE_PATH=$root${ARBACE_PATH:+:$ARBACE_PATH} GOGC=${GOGC:-400} GOMEMLIMIT=${GOMEMLIMIT:-20GiB} \
+  exec "$host/arbace" -m arbace.j2g.main "$@"

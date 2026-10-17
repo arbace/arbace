@@ -68,15 +68,15 @@ scripts and has not yet been tried on a fresh host.
 | Helpers in some scripts (`box-suite`, `box-smoke`, `tamago-vendor`, `arbace-go`'s REPL check, `box-vendor`, `box-arm64-vm`, `net-check`, `alpine-env`) | `python3` |
 | Sources, Clojure's suite's jars from Maven Central, the arm64 VM's netboot | `git curl ca-certificates` |
 | The REPL's line editing (the executable runs its interactive REPL under it, doc/go/EXEC-NOTES.md; checked by `bin/arbace-go --smoke` and `bin/box-smoke`; optional) | `rlwrap` |
-| arm64 executables run on amd64 (`bin/arbace-go`, `bin/jrt`, `bin/a2g-evalproof`) | `qemu-aarch64` |
+| arm64 executables run on amd64 (`bin/arbace-go`, `bin/jrt`, `bin/j2g-evalproof`) | `qemu-aarch64` |
 | The arm64 box's checks (`bin/box-arm64-vm`) | `qemu-system-aarch64 openssh-client` |
 | jrt-convert's generator JDK, and the boot JDK for jdk26u | `openjdk25-jdk` (on this host by `openjdk25-src`) |
 | Building jdk26u (headless) | `alpine-sdk autoconf zip alsa-lib-dev cups-dev fontconfig-dev` |
 | Bootstrapping TamaGo's Go from source | `go` (Alpine's Go, used for nothing else) |
 
 Since 2026-10-16 nothing Arbace builds needs a C toolchain: go-whim's tests and their C guests
-(which needed `clang` and a linker), jrt's `--race` and `bin/a2g-race` (Go's race detector needs
-cgo) are gone, every Go build runs with `CGO_ENABLED=0`, and `bin/g2a-build-tests` checks its
+(which needed `clang` and a linker), jrt's `--race` and `bin/j2g-race` (Go's race detector needs
+cgo) are gone, every Go build runs with `CGO_ENABLED=0`, and `bin/build-go test` checks its
 executables with Go's `debug/elf` (`tools/elfstatic`) instead of binutils' `readelf` and
 `file` (doc/go/BOX-NOTES.md, "go-whim vendored whole"). The row `gcc musl-dev linux-headers
 binutils` left the table and the line; gcc, musl-dev and binutils still come with `alpine-sdk`,
@@ -100,14 +100,14 @@ These are built or fetched once, and pinned where Arbace depends on their bytes:
     `/usr/lib/jvm/java-25-openjdk`.
   - Its image, `build/linux-x86_64-server-release/images/jdk`, is the `java` on PATH (26.0.2).
   - It ran the bootstrap, the tools and the oracle's reference until S4; since then (2026-10-12)
-    it runs only the frozen jar of `arbace-for-java-26-v4`: the oracle's reference, j2a, a2g's edge
-    (`bin/a2g-edge`), the fixtures' forms and the data generators.
-  - Its sources are j2a's input (`bin/jrt-convert update`). Since S1, the build itself reads
+    it runs only the frozen jar of `arbace-for-java-26-v4`: the oracle's reference, repr/java, j2g's edge
+    (`bin/j2g-edge`), the fixtures' forms and the data generators.
+  - Its sources are repr/java's input (`bin/jrt-convert update`). Since S1, the build itself reads
     `jdk/`, not the checkout.
 - **TamaGo's Go**, go1.27.1 (https://github.com/usbarmory/tamago-go, VERSION 2026-08-28), in
-  `/root/tamago-go` (`G2A_GOROOT`).
+  `/root/tamago-go` (`ARBACE_GOROOT`).
   - It builds everything Go: the executables, the box (its monitor, its guests and their tests),
-    g2a's helpers. Always with `CGO_ENABLED=0`: nothing Arbace builds uses cgo or a C compiler.
+    repr/go's helpers. Always with `CGO_ENABLED=0`: nothing Arbace builds uses cgo or a C compiler.
   - Its `src/` is pinned by `seed/goroot.sha256` (checked by `bin/seed --build` and `--verify`;
     `--check` checks the seed's own hash), and its tree by `bin/tamago-vendor`.
   - Since 2026-10-12 nothing runs Alpine's `go`, so an upgrade of the `go` package changes

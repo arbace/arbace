@@ -1,5 +1,16 @@
 # The box: notes
 
+> Names: since 2026-10-17 g2a is repr/go and j2a repr/java (doc/NAMING-SURVEY.md, "Decided"):
+> `arbace.g2a.*` is `arbace.repr.go(.*)`, its build `arbace.g2a.build` is `arbace.build.go`;
+> `bin/g2a convert` is `bin/repr-go read` (`bin/g2a read`: `read --dump`), `bin/g2a build`
+> `bin/build-go`, `bin/g2a-print` `bin/repr-go print`, `bin/g2a-check` `bin/repr-go check`,
+> `bin/g2a-convert-tests` and `-print-tests` `bin/repr-go test read` and `test print`,
+> `bin/g2a-build-tests` `bin/build-go test`; `G2A_GOROOT` is `ARBACE_GOROOT`, the other `G2A_*`
+> `REPR_GO_*`, `J2A_*` `REPR_JAVA_*`; `bin/j2a-check` is `bin/repr-java check`. a2g is j2g
+> (`arbace.a2g.*`, `bin/a2g*`, `A2G-SPEC.md`, `A2G_*`, the printed `a2g_*`, `A2g_*`, `a2g/*`: `j2g`
+> likewise), and class forms are Java forms (the front end keeps `arbace.classes.*`). This document
+> uses the current names throughout, its dated passages included; branch names keep theirs.
+
 B1b's stages ([BOX-SURVEY.md](BOX-SURVEY.md) §6), as they are done. The decisions D3, D8-D14
 are the user's of 2026-10-11 (BOX-SURVEY.md §10).
 
@@ -41,7 +52,7 @@ guest (`guest/tamago/main.go`), the test guest `guest/tamago/faulty` and the gue
   and their directories, laid out as SPEC §4.1 lays out packages, like `overlay/`. Not under
   `go/`: `bin/jrt` prints all of `go/` as jrt's module and builds and vets `./...`, which `vmm`
   (importing go-whim's editor) and the darwin files (purego) would break; S1 decides how the
-  box's packages join the program (the a2g program's module is `arbace`, `program.edn`).
+  box's packages join the program (the j2g program's module is `arbace`, `program.edn`).
 - **Import paths `arbace/box/...`**, in the module `arbace` of the Go build, so that S1's guest
   program imports `arbace/box/board` and `arbace/box/abi` from its own module, and the monitor
   is a program of the same module. go-whim's paths (`github.com/arbace/go-whim/...`) could not
@@ -53,7 +64,7 @@ guest (`guest/tamago/main.go`), the test guest `guest/tamago/faulty` and the gue
   `arbace/box/internal/libsys` would refuse go-whim's import in the proof below; nothing else
   changes by it.
 - **`guest/abi` and `guest/tamago/board` lose `guest/`**: `arbace/box/abi`, `arbace/box/board`.
-- **One tree for every target.** g2a converts one configuration at a time (SPEC §1, item 7);
+- **One tree for every target.** repr/go converts one configuration at a time (SPEC §1, item 7);
   the box's files span five (KVM on linux/amd64 and arm64, Hypervisor.framework on
   darwin/arm64, the board on tamago/amd64 and arm64). Converted five times, every file shared
   by configurations gave the same forms, byte for byte, so the trees merge: each file's forms
@@ -74,31 +85,31 @@ guest (`guest/tamago/main.go`), the test guest `guest/tamago/faulty` and the gue
    `crefactor` so that it builds alone); rewrite the import specs in every `.go` file of the
    clone (`sed`, five exact strings); go-whim's `go.mod`, `guest/tamago/go.mod` and
    `guest/joker/go.mod` require `arbace` and replace it by `_arbace`.
-3. `bin/g2a convert --tests --goos GOOS --goarch ARCH` per configuration: linux/amd64,
+3. `bin/repr-go read --tests --goos GOOS --goarch ARCH` per configuration: linux/amd64,
    linux/arm64 (`hv`, `vmm`, `abi`), darwin/arm64 (also `libsys`), from go-whim's module;
    tamago/amd64, tamago/arm64 (`board`, `abi`), from the guest module `guest/tamago`.
 4. Merge the five trees into `box/go/arbace/box` (above).
 
-One change to g2a for it: godump took a module's language version from its `go` line as
+One change to repr/go for it: godump took a module's language version from its `go` line as
 written, so a module saying `go 1.27.1` (go-whim's, and so the box's module in the clone) failed
 the pinned-language check ("go1.27.1 is newer than the pinned go1.27"). It now takes the line's
 language, `go/version.Lang` (`go1.27`), as the go command gives gc `-lang` (`tools/godump/load.go`).
-std's packages (no module) are not affected: the round trip `bin/g2a roundtrip amd64` has no
-regression against `test/g2a/roundtrip-amd64.edn`; g2a's converter and printer tests pass (150
+std's packages (no module) are not affected: the round trip `bin/repr-go roundtrip amd64` has no
+regression against `test/repr/go/roundtrip-amd64.edn`; repr/go's converter and printer tests pass (150
 and 256 assertions).
 
 ### The proofs (`bin/box-vendor check`, 2026-10-11)
 
-The forms printed back (`bin/g2a build --print-only --tests --module arbace --layout lines box`),
+The forms printed back (`bin/build-go --print-only --tests --module arbace --layout lines box`),
 then:
 
-1. **The round trip's oracle per package.** gocmp (the comparator of `bin/g2a roundtrip`,
+1. **The round trip's oracle per package.** gocmp (the comparator of `bin/repr-go roundtrip`,
    ROUNDTRIP.md) of each printed package against the renamed original, with its tests (`-tests`:
    the trees of all files, the export data and code of the package and its test variants), in
    each configuration it has files for: `hv`, `vmm`, `abi` on linux/amd64, linux/arm64 and
    darwin/arm64, `libsys` on darwin/arm64, `board`, `abi` on tamago/amd64 and tamago/arm64.
-   **14 of 14 pass at all three levels** (tree, export, code). g2a's round-trip corpus is std and
-   `$GOROOT/test` (GOROOT's layout, `bin/g2a-check`); the box's packages are not in it and have
+   **14 of 14 pass at all three levels** (tree, export, code). repr/go's round-trip corpus is std and
+   `$GOROOT/test` (GOROOT's layout, `bin/repr-go check`); the box's packages are not in it and have
    no reference file: this check is theirs.
 2. **go-whim's binaries, byte for byte.** go-whim's monitor (`vmm/cmd/whim-guest`, built by `go`,
    go-whim's toolchain, go1.27.1, for linux/amd64, linux/arm64 and darwin/arm64,
@@ -145,7 +156,7 @@ comparisons show that change, and S0's proof is this record.
 | go-whim's editor, `github.com/arbace/go-whim/editor` | `vmm` (`Config.Host editor.Host`, `editor.Exit`) | not vendored: S1 replaces the seam | (go-whim's; not Arbace's to take) |
 | purego, `github.com/ebitengine/purego` v0.11.1 (`h1:2zpWRSQNVKN4eKsKO9eM1ILDgWfYMY9GwqRmK6XeQ/0=`) | `hv/hvf_darwin.go`, `libsys` (darwin only), with its `internal/fakecgo` and `internal/strings` | not vendored; the proof built the darwin monitor from Go's module cache (`GOPROXY=off`); 8,052 lines of Go and 34,081 of assembly (mostly generated) | Apache-2.0 (its text is in `LICENSE.md`, Murmur3's) |
 | TamaGo's `goos` module, `github.com/usbarmory/tamago` v1.27.1 (`h1:Zl4w3hu5DaogGvcLzunS4gjwNEqdjFFJedMO3pDQa5k=`) | a guest's link (`GOOSPKG`), not imported by any vendored package | not vendored; module cache | BSD-3-Clause, "Copyright (c) The TamaGo Authors" |
-| TamaGo's Go distribution, `/root/tamago-go` (go1.27.1) | the board's `runtime/goos`; the guests' toolchain | already Arbace's toolchain (`G2A_GOROOT`) | Go's BSD-3-Clause (in `LICENSE.md`) |
+| TamaGo's Go distribution, `/root/tamago-go` (go1.27.1) | the board's `runtime/goos`; the guests' toolchain | already Arbace's toolchain (`ARBACE_GOROOT`) | Go's BSD-3-Clause (in `LICENSE.md`) |
 
 None of `golang.org/x/sys` or a seccomp library: KVM is raw `syscall.Syscall` ioctls, the
 seccomp filter hand-assembled BPF through `prctl`/`seccomp` system calls, and the signal calls
@@ -187,12 +198,12 @@ names and generic lines (`#include "textflag.h"`, the hooks' signatures). The us
   BOX-SURVEY §9.4's scratch host used. D10's wall clock adds a register at entry (`vmm`'s
   `tamago_ISA.go` and the board's `cpuinit`, an ABI addition), R3's bounded console read is the
   guest's (`WaitRead(ms)`), and the batched `Random` (S2) the board's.
-- **The build**: the guest is the a2g program built `GOOS=tamago` with
+- **The build**: the guest is the j2g program built `GOOS=tamago` with
   `GOOSPKG=github.com/usbarmory/tamago` (a `require` of v1.27.1 in its `go.mod`, today written
-  without dependencies by `bin/g2a build`) and `-ldflags "-T 0x201000 -R 0x1000"`, without `-s`
+  without dependencies by `bin/build-go`) and `-ldflags "-T 0x201000 -R 0x1000"`, without `-s`
   (the monitor reads the image's symbol table); the monitor a `linux` (or `darwin`, with purego)
-  program. `box/` joins the program's source root (copied as a2g's program copies jrt, or a
-  second root for `bin/g2a build`).
+  program. `box/` joins the program's source root (copied as j2g's program copies jrt, or a
+  second root for `bin/build-go`).
 
 ## S1: a boxed REPL on amd64 (2026-10-11)
 
@@ -260,7 +271,7 @@ The S0 proof (`bin/box-vendor check`) no longer holds byte for byte, by design: 
   `runtime.sigpanic` (TamaGo has none; the name makes the unwinder take the faulting frame as a
   signal's) as if the faulting instruction had called it, every register else as it was, as
   Linux's signal handler makes a SIGSEGV a panic; it panics with a `runtime.Error` whose message
-  is the runtime's, which jrt turns into Java's implicit `NullPointerException` (A2G-SPEC
+  is the runtime's, which jrt turns into Java's implicit `NullPointerException` (J2G-SPEC
   §7.9.5). Without it, a nil dereference ended the guest (the first box oracle run: 7 files
   stopped there). go-whim's guests do not call it: their faults still end the run (its
   `TestGoGuestFault`). arm64's vectors are unchanged (S4).
@@ -287,7 +298,7 @@ clj's flags, `ARBACE_RLWRAP`, which the guest also sees): the launcher is what r
 
 ### The guest: jrt's box host (BX1-BX5)
 
-The program is a2g's, unchanged: its `main` now sets `jrt.ProgramHost(resources)`, `OSHost`
+The program is j2g's, unchanged: its `main` now sets `jrt.ProgramHost(resources)`, `OSHost`
 on Linux and, with `GOOS=tamago`, the box's host (`go/arbace/jrt/hostbox_tamago.ae`, importing
 `arbace/box/board` and `abi`):
 
@@ -309,7 +320,7 @@ What failed to build for `GOOS=tamago` (BOX-SURVEY §7, §9.2) moved behind `//g
 `net_linux.ae`; and `host.ae`'s default `theHost` is `ProgramHost(nil)`, not an `OSHost`
 (whose `RandomBytes` is Linux's since `gosec`). R4 holds: jrt reaches `os.Stdout`/`os.Stderr`
 only in `OSHost` and in `throwable.ae`'s last-resort `StderrPrint` (on TamaGo: the board's
-`Printk`, standard error), and `time.Now()` is right in the box. a2g's view of jrt skips files
+`Printk`, standard error), and `time.Now()` is right in the box. j2g's view of jrt skips files
 named for another system (`_tamago.ae`), as a Linux Go build does, so the two `ProgramHost`s
 are not a collision (BX3).
 
@@ -341,14 +352,14 @@ cannot be preempted.
 ### The build (BX4, BX6)
 
 `bin/arbace-go --build --box` (after `--build`, which it runs first when there is no image):
-`bin/g2a build --goos tamago --root box --line-file` of a2g's program as the last `--build`
+`bin/build-go --goos tamago --root box --line-file` of j2g's program as the last `--build`
 wrote it, with its image of prepared namespaces (R6: the image is made by the Linux executable
 of the same program, so it is valid in the box; `box-<arch>/image.key` records the hash of the
 image and of the program's types it was built with), linked again with Arbace's version and
 `-T 0x201000 -R 0x1000 -w` (the symbol table kept for the monitor, DWARF dropped: 76.8 MB, the
-survey's unstripped 85 MB); then the launcher (`bin/g2a build --module arbace box`, 3.7 MB)
+survey's unstripped 85 MB); then the launcher (`bin/build-go --module arbace box`, 3.7 MB)
 with the guest appended: `target/arbace-go/box-amd64/arbace-box`, 80.5 MB. About 1 min 45 s
-on top of the Linux build (the guest's compile, mostly from Go's build cache). `bin/g2a build`
+on top of the Linux build (the guest's compile, mostly from Go's build cache). `bin/build-go`
 gained `--goos tamago` (TamaGo's `goos` module v1.27.1 required in `go.mod`, `go.sum` from Go's
 module cache, `GOPROXY=off`, checked against the pinned hashes) and `--root` (BUILD.md, BX6).
 `ARBACE_BOX_ARCHES=arm64` builds the arm64 box too (it runs on KVM/arm64 or the Mac only: S4).
@@ -409,8 +420,8 @@ module cache, `GOPROXY=off`, checked against the pinned hashes) and `--root` (BU
   Clojure's suite on the test build (`--build-tests`; 76 namespaces, 777 tests, 20,506 of 20,520
   assertions, no regression against `arbace-go-results.edn`): all as before. arm64 was not
   rebuilt here (its executable's code changes only by the moved file and the empty tick). The
-  essential `bin/gate` was not run: no source the bootstrap compiles changed (`arbace/a2g`,
-  `arbace/g2a` and `arbace/lang/go` are read by the tools only).
+  essential `bin/gate` was not run: no source the bootstrap compiles changed (`arbace/j2g`,
+  `arbace/repr/go` and `arbace/lang/go` are read by the tools only).
 
 ### Measured (amd64, nested KVM on the shared 64-core machine; best of 7)
 
@@ -431,18 +442,18 @@ image is read into the launcher and loaded into the slot, beside the heap the st
 
 Numbered BX (a prefix not used in `doc/`); proposed 2026-10-11, accepted by the user the same day.
 
-- **BX1 (A2G-SPEC §9.4) The program's host and the box's**: `jrt.ProgramHost(resources)`,
+- **BX1 (J2G-SPEC §9.4) The program's host and the box's**: `jrt.ProgramHost(resources)`,
   `OSHost` or (TamaGo) the box's host as tabled above; `theHost`'s default
   `ProgramHost(nil)`; no optional interface in the box.
-- **BX2 (A2G-SPEC §9.4) `OSHost`'s network is Linux's**: `net_linux.ae`.
-- **BX3 (A2G-SPEC §9.4; a2g) a2g's view of jrt leaves out other systems' files**
-  (`_tamago.ae`): `arbace.a2g.jrt/scan`.
-- **BX4 (A2G-SPEC §10.6) The main package's host by `ProgramHost`; the box's program** built
-  from a2g's output with `GOOS=tamago` and the Linux build's image.
-- **BX5 (A2G-SPEC §16; SPEED-NOTES' closure compiler) The evaluator's yield**:
+- **BX2 (J2G-SPEC §9.4) `OSHost`'s network is Linux's**: `net_linux.ae`.
+- **BX3 (J2G-SPEC §9.4; j2g) j2g's view of jrt leaves out other systems' files**
+  (`_tamago.ae`): `arbace.j2g.jrt/scan`.
+- **BX4 (J2G-SPEC §10.6) The main package's host by `ProgramHost`; the box's program** built
+  from j2g's output with `GOOS=tamago` and the Linux build's image.
+- **BX5 (J2G-SPEC §16; SPEED-NOTES' closure compiler) The evaluator's yield**:
   `Compiler$CodeRun.tick`, `runtime.Gosched` every 65,536 method runs and recurs on TamaGo,
   empty on Linux.
-- **BX6 (BUILD.md) `bin/g2a build --goos tamago` and `--root`**.
+- **BX6 (BUILD.md) `bin/build-go --goos tamago` and `--root`**.
 - **BX7 (box/: vmm) The seam**: `vmm.Host`, `vmm.TermHost`, `vmm.Exit` and the `ExitCode`
   protocol, the monitor's answers for a host without a terminal; go-whim's editor no longer
   imported.
@@ -470,7 +481,7 @@ Branch `box-mmap`, R1's first item, decided by the user 2026-10-11 (above): the 
 the 77 MB image appended to it into its own heap (`vmm.Appended`), and the monitor copied its
 segments into the guest's slot, so that both copies stayed resident beside the guest's memory
 (445 MB against the native executable's 163 MB). The box's packages were changed as in S1: Go
-in a printed copy of `box/`, converted back by `bin/g2a convert`; the converted forms of the
+in a printed copy of `box/`, converted back by `bin/repr-go read`; the converted forms of the
 changed files merged into `box/`'s by line, so that their comments and literals' text stay, and
 the line numbers after an edit follow it (`git diff` shows them).
 
@@ -570,7 +581,7 @@ heap and no symbol tables made thrice.
 ## S2, the rest: measured and hardened (2026-10-11)
 
 Branch `box-s2`, S2's items but R1 (the image mapped: branch `box-mmap`, BX11, the section
-before). The changes are in jrt, the evaluator's Go variants (`arbace/lang/go`, read by a2g
+before). The changes are in jrt, the evaluator's Go variants (`arbace/lang/go`, read by j2g
 only: no source the bootstrap compiles changed), `bin/arbace-go`, `bin/box-suite` and a new
 helper, `tools/elfsyms`; `box/` is unchanged.
 
@@ -768,13 +779,13 @@ The whole suite, 12 at a time: the box's subset (67 namespaces, 685 tests, 19,64
 
 - **BX12 (BUILD.md; bin/arbace-go) The guest's symbol table cut** to the monitor's three
   symbols by `tools/elfsyms` (`ARBACE_GO_SYMBOLS=1` keeps it).
-- **BX13 (A2G-SPEC §9.4: the box's host) The collector in the box**: `GOMEMLIMIT` applied, and
+- **BX13 (J2G-SPEC §9.4: the box's host) The collector in the box**: `GOMEMLIMIT` applied, and
   a default memory limit of the guest's RAM less 1 GiB; GOGC 200 and the 64 MiB minimum heap
   kept.
-- **BX14 (A2G-SPEC §16; SPEED-NOTES' closure compiler) A call in tail position clears the
+- **BX14 (J2G-SPEC §16; SPEED-NOTES' closure compiler) A call in tail position clears the
   method's object** (`CodeInvoke.clearThis`, `CodeRun.clearThis`), as `emitClearThis`;
   `Evaluator.trace` by the method's kind.
-- **BX15 (A2G-SPEC §10.3; EVAL-NOTES' RT.load) An embedded namespace loads once**
+- **BX15 (J2G-SPEC §10.3; EVAL-NOTES' RT.load) An embedded namespace loads once**
   (`RT.LOADED_EMBEDDED`), as the JVM initializes an AOT-compiled namespace once.
 - **BX16 (BX5) The evaluator's yield counted per thread** (`Thread.evalTicks`).
 - **BX17 (checks) `bin/box-suite`'s setup writes the suite directory's files into the guest's
@@ -822,8 +833,8 @@ architecture-dependent constants may not merge, unmeasured.
 ### How (`bin/tamago-vendor`, after `bin/box-vendor`)
 
 - `convert`: the toolchain's `src/` checked against a pinned digest (every file but `src/cmd/`),
-  std dumped afresh and converted (`bin/g2a convert --corpus amd64`), the goos module copied
-  from Go's module cache (its pinned hash checked) and converted (`bin/g2a convert --goos tamago
+  std dumped afresh and converted (`bin/repr-go read --corpus amd64`), the goos module copied
+  from Go's module cache (its pinned hash checked) and converted (`bin/repr-go read --goos tamago
   --goarch amd64 ./...`, the packages that dump without errors kept), assembled into `tamago/`
   with their other files and the headers included from outside the packages. About 25 s.
 - `verify`: a fresh conversion compared with `tamago/` (`diff -r`): identical. About 25 s.
@@ -834,23 +845,23 @@ architecture-dependent constants may not merge, unmeasured.
 - `check` (after `bin/arbace-go --build --box`): below.
 
 The host (standalone S4, 2026-10-12): `bin/box-vendor`, `bin/tamago-vendor` and
-`bin/x509roots-vendor` run g2a through `bin/g2a`, on Arbace's Go executable (`bin/lib/g2a-host.bash`:
-`G2A_GO_EXE`, else the tools' host, `bin/lib/host.bash`); the times above are the JVM's. On main's
-G3 as the host, amd64: `tamago-vendor verify` 383 s (5.9 GB), `print` 24 s, `check` 115 s (after `--build --box`, 1,644 s with a2g on Go: both guests identical); `box-vendor
+`bin/x509roots-vendor` run repr/go through `bin/repr-go`, on Arbace's Go executable (`bin/lib/repr-go-host.bash`:
+`REPR_GO_EXE`, else the tools' host, `bin/lib/host.bash`); the times above are the JVM's. On main's
+G3 as the host, amd64: `tamago-vendor verify` 383 s (5.9 GB), `print` 24 s, `check` 115 s (after `--build --box`, 1,644 s with j2g on Go: both guests identical); `box-vendor
 roundtrip` 51 s (20 of 20), `kvm-tests` 34 s, `purego-check` 10 s; `x509roots-vendor verify`
 4 s, `check` 7 s. All pass as on the JVM.
 
-`bin/g2a build` gained `--print-only --module std` (packages at their import paths, no
+`bin/build-go` gained `--print-only --module std` (packages at their import paths, no
 `go.mod`) and `--goos-dir DIR` (the goos module from DIR by a `replace`, no `go.sum`) (BX21).
 
 ### The proof (`bin/tamago-vendor check`)
 
-1. std printed against GOROOT/src, package by package (`bin/g2a-check`: gocmp's tree, export
+1. std printed against GOROOT/src, package by package (`bin/repr-go check`: gocmp's tree, export
    and code levels), against the round trip's reference: 371 of 371 pass (`unsafe` skipped at
    export and code, as in the reference), no regression.
 2. The goos module's 69 packages printed against the originals (gocmp): 69 of 69 at all three
    levels.
-3. The guest image: a2g's program of the box build (`target/arbace-go/work-box-amd64/mod`)
+3. The guest image: j2g's program of the box build (`target/arbace-go/work-box-amd64/mod`)
    built twice, as `bin/arbace-go` links it (`-T 0x201000 -R 0x1000 -w`, the version), with
    `-buildid=`: once with GOROOT `/root/tamago-go` and the goos module from Go's module cache,
    once with GOROOT the printed one and the printed module (by a `replace`, `-modfile`), each
@@ -881,7 +892,7 @@ closing brace, between, gc's line table differed (a hello program for `GOOS=tama
 of `.gopclntab`, 8 functions, such as `runtime.isMarkedOrNotInHeap` at `mbitmap.go:1291`
 printed `:1281`, `sync.(*Pool).getSlow` at `pool.go:197` printed `:196`). The round trip's code
 level compares the code, not the line tables, and did not see it. The converter now writes
-`[i line]` for such a literal (`arbace/g2a/layout.ae`) and the printer honours it
+`[i line]` for such a literal (`arbace/repr/go/layout.ae`) and the printer honours it
 (`print_code.ae`); SPEC §10.1 amended. `overlay/go/runtime/proc.ae` took the conversion's 10
 changed breaks (`bin/jrt overlay --check` passes), so the executables' `proc.go` lines are now
 the original's there too (the Linux executable's bytes change by it; nothing else does). `box/`'s
@@ -905,11 +916,11 @@ so that the proof is about what ships.
 - `bin/arbace-go --build` (amd64, 66,519,200 bytes after the merge) and `--build --box` (from the
   forms; the guest 65,909,070 bytes, the launcher with it 69,644,638), `--smoke --box`: 70 of 70
   on 4 and 1 vCPUs and on a terminal (64 of 64 before the merge).
-- `bin/g2a test` (150 assertions) and `bin/g2a-print-tests` (256): pass. `bin/jrt overlay
+- `bin/repr-go test read` (150 assertions) and `bin/repr-go test print` (256): pass. `bin/jrt overlay
   --check`: passes.
-- `bin/g2a roundtrip amd64`: no regression against `test/g2a/roundtrip-amd64.edn` (49 s);
+- `bin/repr-go roundtrip amd64`: no regression against `test/repr/go/roundtrip-amd64.edn` (49 s);
   `bin/box-vendor roundtrip`: 16 of 16 at all three levels.
-- The essential `bin/gate` was not run: no source the bootstrap compiles changed (`arbace/g2a`
+- The essential `bin/gate` was not run: no source the bootstrap compiles changed (`arbace/repr/go`
   is a tool's, `go/`, `test/jrt/`, `tamago/`, `bin/` are not compiled by it).
 - `test/jrt/tables.ae` follows RP1 (the JVM's order only for the CDS archive's classes, else by
   descriptor): regenerated, `reflect_tables.ae` changes order in five tables (`Thread$Builder$OfVirtual.name`,
@@ -922,7 +933,7 @@ so that the proof is about what ships.
 - **BX20 (SPEC §10.1) A literal break's line**: `:go/breaks` entries `[index line]` when the
   literal's Go line is not the line after the last written; the converter writes them, the
   printer honours them.
-- **BX21 (BUILD.md) `bin/g2a build --print-only --module std` and `--goos-dir`**.
+- **BX21 (BUILD.md) `bin/build-go --print-only --module std` and `--goos-dir`**.
 - **BX22 (box build) The guest's Go from `tamago/`** by default (`ARBACE_BOX_GO=forms|orig`),
   printed by `bin/tamago-vendor print`.
 - **BX23 (`tamago/`) What is held**: std's 371 packages for tamago/amd64 (not the 6 test-only
@@ -932,7 +943,7 @@ so that the proof is about what ships.
 - **BX24 (checks) `bin/tamago-vendor verify` and `check`**, proposed for `bin/gate --full`'s box
   step: `verify` (25 s) always; `check` after the Go chain's box build (about 2 minutes, plus the
   box build, about 1 min 40 s, which `--full` does not make today), or only when `tamago/`,
-  `arbace/g2a`, `overlay/go` or the toolchain change.
+  `arbace/repr/go`, `overlay/go` or the toolchain change.
 
 ### The user's decisions (2026-10-11)
 
@@ -1103,11 +1114,11 @@ microseconds either way (the lock, a write; natively a rename).
   of 69, the guest image from the originals and from the forms identical: 77,000,080 bytes as
   linked, 66,126,122 cut).
 - The essential `bin/gate` was not run: no source the bootstrap compiles changed
-  (`arbace/lang/go` and `overlay/jdk` are read by a2g and `bin/jrt-convert` only).
+  (`arbace/lang/go` and `overlay/jdk` are read by j2g and `bin/jrt-convert` only).
 
 How the box's packages were changed: as S1 (BOX-NOTES, S1, "How the box's packages were
 changed"): `vmm/store.go` and its test, unchanged since S0, edited from go-whim's own text (its
-comments and literals kept) and converted (`bin/g2a convert`), their forms taken whole; `abi`,
+comments and literals kept) and converted (`bin/repr-go read`), their forms taken whole; `abi`,
 the launcher's `main.go` and `rlwrap_linux.go` edited in a printing of `box/`, converted, and the
 converted forms merged with `box/`'s comments and literals' spellings; the new `store.go` of the
 launcher converted from its Go. `box/` printed again and the edited Go compared: the same code
@@ -1122,14 +1133,14 @@ launcher converted from its Go. `box/` printed again and the edited Go compared:
 - **BX31 (box/: the launcher) The store's settings and tool**: `--store DIR`,
   `ARBACE_BOX_STORE_MAX` (default 256 MiB), `ARBACE_BOX_FS` passed to the guest, `--store DIR
   put|get|ref|ls`.
-- **BX32 (A2G-SPEC §9.4) An optional `StoreHost`**: `jrt.Store`, `StoreHost`, `CurrentStore`; the
+- **BX32 (J2G-SPEC §9.4) An optional `StoreHost`**: `jrt.Store`, `StoreHost`, `CurrentStore`; the
   box's host over the calls, `OSHost` on Linux over `ARBACE_BOX_STORE` in the monitor's format
   (the lock, renames); jrt's own Java `jdk.internal.jrt.HostStore` and its natives.
-- **BX33 (A2G-SPEC §10.3; RT's variant, `ClassPathResources`) `ARBACE_PATH`'s store entries**
+- **BX33 (J2G-SPEC §10.3; RT's variant, `ClassPathResources`) `ARBACE_PATH`'s store entries**
   `store:PREFIX`, for `RT.load` and `getResourceAsStream`, not URLs; the split rule.
 - **BX34 (EVAL-NOTES' namespace variants) `arbace.box`**, a namespace of the Go build, and
   arbace.main's `ref:NAME` scripts and `-i` files.
-- **BX35 (A2G-SPEC §9.4: the box's host) Snapshots**: `SnapshotTar`, `RestoreTar` (a
+- **BX35 (J2G-SPEC §9.4: the box's host) Snapshots**: `SnapshotTar`, `RestoreTar` (a
   deterministic tar through the host's file calls), `save-fs!`, `load-fs!`, `ARBACE_BOX_FS` at the
   guest's start.
 - **BX36 (checks) The store's checks** in `--smoke` and `--smoke --box`, jrt's `store_test.ae`,
@@ -1216,7 +1227,7 @@ once end at 200 (no update lost); the JVM holding the refs' lock keeps the nativ
 on the JVM a directory's `data_readers.ae` and `io/resource`.
 The essential `bin/gate` passed (6m46s): the bootstrap (stage 2 = stage 3, 5,777 classes
 verified; the native tests 60 of 60, the six new included), Clojure's suite on stage 2 without
-regressions, `bin/class-forms-tests`, and the Go executable built again (a2g with the shared
+regressions, `bin/class-forms-tests`, and the Go executable built again (j2g with the shared
 `arbace.box`, its host variant and `RT`'s cut; 66,814,112 bytes) and smoke-tested: 67 of 67 on
 amd64, fourteen new (the nine store checks on the JVM, the five shared-directory checks).
 With `ARBACE_PATH`'s directories (branch `box-jvm-path`): the essential `bin/gate` passed again
@@ -1279,7 +1290,7 @@ TLS in the guest, go-whim's sketch); the socket REPL from the host". The design 
 
 ### The design note: a stream proxy or packets
 
-What jrt asks of a network is already narrow: `NetHost` (A2G-SPEC §9.4, `net.ae`) is `Listen`,
+What jrt asks of a network is already narrow: `NetHost` (J2G-SPEC §9.4, `net.ae`) is `Listen`,
 `Dial`, `LookupIP`, `LookupAddr`, `Hostname`, `HasFamily`, `SetOption`/`GetOption` (by
 `java.net.SocketOptions`' numbers) and `Available`, and gives back Go's `net.Listener` and
 `net.Conn` *interfaces*: anything that reads, writes, closes and has deadlines serves. jrt's
@@ -1296,7 +1307,7 @@ designs end in the same place in jrt: a `NetHost` for the box; they differ in wh
 | blocking (R2, R3) | no call waits: a dial and a lookup run in the monitor while the guest goes on, reads and writes take what the monitor's buffers hold or answer EAGAIN, and a waiting goroutine polls one count of events, sleeping 1 to 10 ms between polls, as the console does (S1, R3); a vCPU never stops in the monitor, the collector's stops of the world never wait for one | netstack's own timers (retransmission, delayed ACKs) run in the guest, which has no preemption (R2): a long evaluation on one vCPU delays them; packets arrive by polling the datagram call, as often, and a stream costs an exit per packet (1,500 bytes) where the proxy's costs one per call of up to 1 MiB |
 | the host's control | the policy sees what is asked: listen at an address and port, dial an address and port, resolve a name; dial patterns can name hosts (`*.example.org:443`), since the host resolves names and remembers which addresses an allowed name gave | the relay sees packets: addresses and ports; a policy by name needs the guest's DNS snooped, or the NAT's own resolver forced |
 | what the host sees | destinations and the bytes of each stream (plain text unless TLS) | the same destinations, and the same bytes unless TLS: the guest's netstack hides nothing from a host that relays its packets |
-| TLS | in the guest either way, over any `net.Conn`; jrt's build has no TLS (no `SunJSSE`, no `javax.net.ssl`: A2G-SPEC, the providers are SUN and SunJCE, amendment SC4), so out of S5 for both; when it comes, the proxy carries the ciphertext | the same |
+| TLS | in the guest either way, over any `net.Conn`; jrt's build has no TLS (no `SunJSSE`, no `javax.net.ssl`: J2G-SPEC, the providers are SUN and SunJCE, amendment SC4), so out of S5 for both; when it comes, the proxy carries the ciphertext | the same |
 | DNS | the host's resolver, under the policy (only names the dial patterns name, and `localhost`); the guest's lookups are calls | the guest's resolver, through the relay to the host's DNS server; the policy sees UDP to port 53 |
 | the socket REPL from the host | the guest listens (`arbace.server.repl`, as natively), the monitor's listener is on the host's loopback: a host client connects to it directly | a host-side port forward into the guest's stack (the NAT's) |
 | loopback inside the box | a guest connecting to its own listener goes through the host's loopback (the policy allows the box's own listeners): socket options, `shutdown`, timeouts and errors are the host kernel's, as natively, which is what `forms/net.ae` checks | netstack's own loopback: its options and errors are netstack's, not Linux's |
@@ -1463,7 +1474,7 @@ costs as much, S1). Throughput is about 330 MB/s in the box against 1.9 GB/s nat
   `bin/`, `test/`).
 
 How `box/` was changed: Go written in a printed copy of `box/` (the new files, and the edits to
-`vmm.go`, `abi.go`, `abi_test.go` and the launcher's `main.go`), converted by `bin/g2a convert` for
+`vmm.go`, `abi.go`, `abi_test.go` and the launcher's `main.go`), converted by `bin/repr-go read` for
 the five configurations as `bin/box-vendor` does; the new files' forms taken as converted, the
 changed files' forms three-way merged into `box/`'s (`git merge-file` of `box/`'s, the converted
 printing of `box/`, and the converted printing of the edit), so that their `;` comments stay; the
@@ -1477,10 +1488,10 @@ round trip and the KVM tests check the result.
   `vmm.Net` (`Config.Net`), the listen at every address made at the loopback's, the box's own
   listeners dialable, names resolved by the host and remembered for the dial, reverse lookups only
   with `dial=*`; `vmm.SeccompNet` (the filter with the sockets' calls only with a network).
-- **BX42 (A2G-SPEC §9.4; jrt) The box's `NetHost`** (`netbox_tamago.ae`): `boxNetHost` when the
+- **BX42 (J2G-SPEC §9.4; jrt) The box's `NetHost`** (`netbox_tamago.ae`): `boxNetHost` when the
   monitor gives a network, the poller of `NetEvents`, `Hostname` `localhost`, `HasFamily`
   `NetInfo`'s.
-- **BX43 (A2G-SPEC §9.4; jrt) The box's system properties made after the environment**:
+- **BX43 (J2G-SPEC §9.4; jrt) The box's system properties made after the environment**:
   `JAVA_TOOL_OPTIONS`' `-D` options in the box.
 - **BX44 (checks)** `--smoke --box`'s network checks, `bin/net-check --box`, `forms/net.ae` in
   the box's oracle (`ARBACE_BOX_NET=loopback`), `bin/box-suite`'s `ARBACE_BOX_NET=listen` and
@@ -1512,14 +1523,14 @@ conflicted where the Go did not: the forms carry the Go's line numbers (`:line`,
 each stage's additions moved the other's lines. So they were merged as Go, as S1-S5 changed
 `box/`:
 
-1. `box/` printed (`bin/g2a build --print-only --tests --layout lines`) at the merge base
+1. `box/` printed (`bin/build-go --print-only --tests --layout lines`) at the merge base
    (`4351f04`), at S3 (`f79e53a`) and at S5 (`b6addbc`), and the Go of `abi.go` and the
    launcher's `main.go` merged three ways (`git merge-file`): `main.go` merged cleanly (S3's
    `--store` and store opening, S5's `netConfig(&cfg)` after the filter's choice, so that a
    network's filter is `SeccompNet`); `abi.go` conflicted where both added constants after the
    calls, resolved by keeping S3's `Store*` block and S5's `NetErr*` block, the call numbers
    S5's (the network from 40, `NCalls` 53).
-2. The merged Go (with S3's and S5's other files) vetted and converted back (`bin/g2a convert
+2. The merged Go (with S3's and S5's other files) vetted and converted back (`bin/repr-go read
    --tests`, linux/amd64: the files' forms are the same for every configuration), and the
    decorations of the hand-kept forms carried over: S3's `;` comments and literal spellings from
    S3's forms against S3's printing converted, S5's likewise, onto the merged conversion, with
@@ -1599,7 +1610,7 @@ runtime to know, after it, which goroutine to run. Three parts:
 3. **The guest's runtime and jrt (BX52, BX53).** After a park the scheduler looks for work; the
    goroutines waiting for the host must then be runnable. TamaGo's runtime has no netpoll and
    its `beforeIdle` returns no goroutine; the board's `Idle` cannot ready one (it runs in the
-   scheduler, on g0, without the runtime's internals). So jrt's runtime overlay (A2G-SPEC §9.3,
+   scheduler, on g0, without the runtime's internals). So jrt's runtime overlay (J2G-SPEC §9.3,
    the goroutine-local slot's) gains the mechanism wasm's runtime has for its event handler
    (`beforeIdle` returning the handler's goroutine): `arbace_local.go` keeps one goroutine parked
    in `arbace_eventPark` (`gopark`) and a hook (`arbace_setEventHook`); one line of
@@ -1679,9 +1690,9 @@ evaluator's next `Gosched`, as the poller's timer was. A `-e` that used a future
   when a wake or an event ended it; `Stats.Events`.
 - **BX51 (box/: board) `board.EventArea`**: one idle vCPU parks without a timer until an event
   once there is an area, and returns to the scheduler after a park an event ended.
-- **BX52 (A2G-SPEC §9.3; overlay/go/runtime) The box's event goroutine in the runtime overlay**:
+- **BX52 (J2G-SPEC §9.3; overlay/go/runtime) The box's event goroutine in the runtime overlay**:
   `arbace_eventPark`, `arbace_setEventHook`, `findRunnable`'s line (`arbaceEventReady`).
-- **BX53 (A2G-SPEC §9.4; jrt) The box's waiters**: `boxEventArea`, `boxEventLoop`,
+- **BX53 (J2G-SPEC §9.4; jrt) The box's waiters**: `boxEventArea`, `boxEventLoop`,
   `boxWaiters` for the console's reader and the network's `boxRetry` (S5's `boxPoller` gone),
   polling kept only without an area.
 - **BX54 (box/: vmm, the launcher) `vmm.InputWatcher`**: a Host whose input the monitor may
@@ -1756,7 +1767,7 @@ parker over a channel (`park_other.go`, which the events' posts end), the image'
 copied (`mapfixed_darwin.go`), the guest's signal death by libsys; socket options answer
 `ENOPROTOOPT` (`net_other.go`).
 
-**`tamago/` for arm64.** std converted for tamago/arm64 (`bin/g2a convert --corpus arm64`: 378
+**`tamago/` for arm64.** std converted for tamago/arm64 (`bin/repr-go read --corpus arm64`: 378
 packages, 1,738 files, 9 s) against `tamago/goroot/go` (amd64): of the file forms both have,
 **1,683 are identical** and 11 differ; 41 files are amd64's only and 52 arm64's only (their
 build constraints: `_amd64`, `_arm64`, `_noasm`, `_generic` ...); all 370 package files differ
@@ -1826,7 +1837,7 @@ and the FIPS `cpu`'s) in ten, and in `poly1305.go` the embedded field a selector
      `isatty`), socket options on darwin (`vmm/net_darwin.go`: `java.net.SocketOptions`' numbers
      mapped to darwin's `setsockopt`, so that `forms/net.ae`'s options answer as natively), the
      image beside the launcher (`arbace-box.elf`: the code signature covers the Mach-O, so the
-     image is not appended there, as go-whim's Mac runs). Built here: `bin/g2a build --module
+     image is not appended there, as go-whim's Mac runs). Built here: `bin/build-go --module
      arbace --goos darwin --arch arm64` (`--goos darwin`, cgo off: new for the launcher).
    - **The bundle** (decision c): `bin/box-mac-bundle` makes
      `target/arbace-go/arbace-box-mac-arm64.tar.gz`: the launcher, the arm64 guest
@@ -1867,7 +1878,7 @@ and the FIPS `cpu`'s) in ten, and in `poly1305.go` the embedded field a selector
   test's nil check and the oracle on arm64.
 - **BX61 (box/: the launcher, vmm) The launcher on darwin/arm64**: the console and rlwrap for
   darwin, `vmm/net_darwin.go`'s socket options, the image beside the launcher on the Mac;
-  `bin/g2a build --goos darwin` for the launcher.
+  `bin/build-go --goos darwin` for the launcher.
 - **BX62 (box/, `bin/box-vendor`, LICENSE.md) purego v0.11.1 as Go forms**: `arbace/box/purego`
   (with `internal/fakecgo`, `internal/strings`), darwin/arm64, renamed imports; its proofs in
   `bin/box-vendor check`/`roundtrip` (gocmp; the darwin launcher byte-identical to the module's).
@@ -1958,7 +1969,7 @@ builds the arm64 guest from the forms too; the gate's `box-forms` builds and che
 
 | `bin/tamago-vendor check` | amd64 | arm64 |
 |---|---|---|
-| std printed (g2a-check, the round trip's reference) | no regression (371 + `unsafe`) | no regression (370 + `unsafe`) |
+| std printed (repr-go-check, the round trip's reference) | no regression (371 + `unsafe`) | no regression (370 + `unsafe`) |
 | the goos module (gocmp, three levels) | 69 of 69 | 62 of 62 |
 | the guest as linked, from the originals and from the forms | 77,080,005 bytes, identical | 74,904,477 bytes, identical |
 | the guest as shipped (symbols cut) | 66,199,850 bytes, identical | 64,037,162 bytes, identical |
@@ -1982,7 +1993,7 @@ tree is a fresh conversion, byte for byte.
   printer, in the lines layout, puts every parameter name on the list's first line and places
   the types by `/*line*/` directives, so the names' declaration lines move (the code and the line
   tables do not). So the proofs link with `-w`, as the box's guests are (S6); the printer's
-  placement of a parameter group's names is left as a note for g2a (the round trip's levels do
+  placement of a parameter group's names is left as a note for repr/go (the round trip's levels do
   not see it).
 - **The launcher for macOS**: `console.go` builds for Linux and macOS, its `select` through
   `selectRead` (`console_linux.go`; `console_darwin.go` counts the ready descriptors, as macOS's
@@ -1992,7 +2003,7 @@ tree is a fresh conversion, byte for byte.
   wrapping again); `vmm/net_linux.go` became `net_unix.go` (`linux || darwin`), `SO_REUSEPORT` in
   `net_linux.go` (15) and `net_darwin.go` (macOS's 0x200), `net_other.go` for neither. The forms
   were edited by hand where a file was renamed or a call changed (the lines kept), the new files'
-  forms converted from their Go. `bin/g2a build --goos darwin` builds it (cgo off). Not run on a
+  forms converted from their Go. `bin/build-go --goos darwin` builds it (cgo off). Not run on a
   Mac here: built, vetted (linux/amd64, linux/arm64, darwin/arm64) and its round trip passes.
 
 ### The Mac bundle (BX66)
@@ -2037,7 +2048,7 @@ the Mac (perl's alarm; `shasum`). The checklist ran here on Linux with the amd64
   (natively 222 s at `-j 12`: some hours there). `test/oracle/known-go-box-arm64.edn` is not
   made: the script writes it on a first complete run.
 - The essential `bin/gate` was not run: no source the bootstrap compiles changed (`box/`,
-  `tamago/`, `bin/`, `test/`, the docs; `arbace/g2a`, a tool's).
+  `tamago/`, `bin/`, `test/`, the docs; `arbace/repr/go`, a tool's).
 
 ### For the milestone
 
@@ -2083,7 +2094,7 @@ that `bin/box-vendor purego-check` compares the launchers with DWARF.
   directives (no line break is allowed after a name). gc declares a parameter at its name's
   line, so DWARF's `decl_line` moved (`collectStackArgs`' `keepAlive` and `pNumInts`... at 442
   instead of 444 and 445: the four differences); the code and line tables did not.
-- **The change** (`arbace/g2a/print_code.ae`; the forms are unchanged, so SPEC.md is, and so
+- **The change** (`arbace/repr/go/print_code.ae`; the forms are unchanged, so SPEC.md is, and so
   are `box/` and `tamago/`): each name of a parameter, result, type parameter or struct field
   group and of a const or var spec goes on its recorded line (`name-list`; a break after the
   comma); `element-list` takes the line of a group (its first name's, else its type's); a name
@@ -2095,15 +2106,15 @@ that `bin/box-vendor purego-check` compares the launchers with DWARF.
   declarations only, where the converter marks. The parameters' `)` stays on the line of the
   results; a function whose signature spans lines indents its body from the line `func` began
   on; the values of a spec or a return after the first follow their `:go/breaks` (`= 1, 2,\n
-  3`). Notes: PRINTER-NOTES.md, Layout. `test/g2a/golines` now also compares the line of every
+  3`). Notes: PRINTER-NOTES.md, Layout. `test/repr/go/golines` now also compares the line of every
   name a field list or a spec declares (named struct fields as their names), and the printer's
-  case `test/g2a/cases/s10_names` (struct fields, a var spec, parameters, results, a function
+  case `test/repr/go/cases/s10_names` (struct fields, a var spec, parameters, results, a function
   literal, an interface method, type parameters spanning lines) checks it.
 - **purego-check with DWARF**: the launcher links with `-ldflags=-buildid=` (no `-w`): the
   darwin/arm64 launcher from the printed purego is identical to one from the renamed originals
   (4,896,402 bytes with DWARF), and at purego's path to one from purego's module (4,897,554).
-- **Checks** (`g2a-params`, from main `a6a6b86`): `bin/g2a-print-tests` 5 tests, 262 assertions,
-  all pass; `bin/g2a roundtrip amd64` and `linux/amd64`: no regressions (std 373 and 376, the
+- **Checks** (`g2a-params`, from main `a6a6b86`): `bin/repr-go test print` 5 tests, 262 assertions,
+  all pass; `bin/repr-go roundtrip amd64` and `linux/amd64`: no regressions (std 373 and 376, the
   programs 1,707 and 1,713, every level as recorded); `bin/box-vendor roundtrip` 20 of 20;
   `bin/tamago-vendor verify` identical; `bin/arbace-go --build --box` for amd64 and arm64, then
   `bin/tamago-vendor check`: both guest images identical to the originals', as linked and with
@@ -2115,8 +2126,8 @@ that `bin/box-vendor purego-check` compares the launchers with DWARF.
   declaration's line (SPEC §10.1, lists inside metadata), so its fields are a line or more off.
   Neither carries a `decl_line` (struct members and interface methods have none in gc's DWARF),
   and the round trip's code level passes.
-- The essential `bin/gate` (the bootstrap compiles `arbace/g2a`): passed in 6 min 46 s (Clojure's
-  suite on stage 2 with no regressions, the class forms tests, the Go executable's smoke test).
+- The essential `bin/gate` (the bootstrap compiles `arbace/repr/go`): passed in 6 min 46 s (Clojure's
+  suite on stage 2 with no regressions, the Java forms tests, the Go executable's smoke test).
 
 ### The printer's expression lists: a case list over two lines (2026-10-12)
 
@@ -2127,7 +2138,7 @@ lines, the forms record the break (`(case ^{:go/breaks [9]} [\- ... \' \( ... \%
 the printer wrote the list on one line, which moved one `.gopclntab` line (the function is
 inlined into `parseAuthority`).
 
-- **The change** (`arbace/g2a/print_code.ae`, `print_emit.ae`; the forms are unchanged): case
+- **The change** (`arbace/repr/go/print_code.ae`, `print_emit.ae`; the forms are unchanged): case
   values and types, a return's results, `:=` targets and range variables follow `:go/breaks`
   and their own lines, as calls and composite literals did (`comma-list`); a case list may
   begin on the line after `case` (`go/parser`'s `case\n\ttoken.DEFINE, ...`). A break is now
@@ -2135,9 +2146,9 @@ inlined into `parseAuthority`).
   line after the cursor: otherwise `}, nil` (a composite literal's `}` the layout puts on its
   own line, then a result the forms record as a break) got `nil` a line further. A call's `)`
   after a function literal follows its `}`. PRINTER-NOTES.md, Layout.
-- **Checks** (`g2a-cases`, from main `cc76fbf`): `bin/g2a-print-tests` 5 tests, 268
+- **Checks** (`g2a-cases`, from main `cc76fbf`): `bin/repr-go test print` 5 tests, 268
   assertions (golines also compares case values, return results and assignment sides; the case
-  `s10_breaks`), all pass; `bin/g2a roundtrip amd64` and `linux/amd64` no regressions;
+  `s10_breaks`), all pass; `bin/repr-go roundtrip amd64` and `linux/amd64` no regressions;
   `bin/box-vendor roundtrip` 20 of 20; `bin/tamago-vendor verify` identical, and after
   `bin/arbace-go --build --box` for amd64 and arm64 `check`: both guests identical. On the TLS
   branch with this merged (a scratch branch, not kept): `bin/tamago-vendor check amd64`, the
@@ -2225,7 +2236,7 @@ file system, e.g. from `ARBACE_BOX_FS`); `:roots` per connection. Either replace
 (not adds to them), so that a test's CA alone is trusted.
 
 **Not offered: `javax.net.ssl` in the Go build.** An `SSLSocketFactory`/`SSLSocket` backed by
-`crypto/tls` would let translated Java (j2a) use TLS unchanged, but `javax.net.ssl` is not in the
+`crypto/tls` would let translated Java (repr/java) use TLS unchanged, but `javax.net.ssl` is not in the
 closed world: `SSLSocket` and `SSLSocketFactory` are abstract classes whose API names
 `SSLSession`, `SSLParameters`, `SNIServerName`, `HandshakeCompletedListener`,
 `java.security.cert.Certificate`/`X509Certificate` (and through them `java.security.cert`'s
@@ -2233,7 +2244,7 @@ parsing), `SSLContext` and its SPI with the providers' machinery; a minimal subs
 a socket with `startHandshake`, a session with protocol, suite and DER certificates) is perhaps
 1,000-1,500 lines of variants and stand-ins and a few hundred classes more in the program, for no
 present user (Arbace code has `arbace.tls`). Recommended: not now; revisit when a Java library
-translated by j2a needs it (`TlsSocket` is the place it would sit on).
+translated by repr/java needs it (`TlsSocket` is the place it would sit on).
 
 ### What was built
 
@@ -2247,9 +2258,9 @@ translated by j2a needs it (`TlsSocket` is the place it would sit on).
   not AOT-compiled by the bootstrap, loaded from source as `arbace.box` is; embedded in the Go
   build).
 - `x509roots/` (new forms root) and `bin/x509roots-vendor` (`convert`, `verify`, `check`); the
-  builds give it as a root (`bin/g2a build --root x509roots`): `bin/arbace-go` (the executables,
-  the box's guest; `gate_key` hashes it), `bin/jrt`, `bin/a2g-race`, `bin/a2g-evalproof`,
-  `test/a2g/check.ae`; `bin/gate --full`'s `box` step runs `x509roots-vendor verify` and `check`.
+  builds give it as a root (`bin/build-go --root x509roots`): `bin/arbace-go` (the executables,
+  the box's guest; `gate_key` hashes it), `bin/jrt`, `bin/j2g-race`, `bin/j2g-evalproof`,
+  `test/j2g/check.ae`; `bin/gate --full`'s `box` step runs `x509roots-vendor verify` and `check`.
   `LICENSE.md` records it (Go's BSD 3-Clause; the certificates are NSS's, as the module ships them).
 - `tools/tlsserver` (new, Go): the checks' TLS server on the loopback, a test CA and a wrong CA made
   at each start (no key kept in the repository), HTTPS (`/hello`, `/echo`, `/big`, `/chunked`,
@@ -2305,7 +2316,7 @@ The same natively. A name the policy does not dial (`example.org`) is `UnknownHo
   case's vector) but the printer writes the list on one line, so the inlined code's line in
   `parseAuthority` is 1295 where gc says 1296. Proven the only difference: with that one line split
   by hand in the printed tree, the two images are identical (as linked and cut). A printer defect
-  (g2a's `print`, the kind the `g2a-params` branch fixes for parameter lists), not of these forms or
+  (repr/go's `print`, the kind the `g2a-params` branch fixes for parameter lists), not of these forms or
   of this change; `bin/gate --full`'s `box-forms` step will fail on it until the printer keeps a
   case list's breaks.
 - The real request above; the loopback checks in `.tmp` before they went into the smoke tests.
@@ -2317,7 +2328,7 @@ The same natively. A name the policy does not dial (`example.org`) is `UnknownHo
 
 ### Amendments (proposed 2026-10-12)
 
-- **BX70 (A2G-SPEC §9.1, §9.4; jrt, overlay/jdk) TLS in jrt over the socket table**: Go's
+- **BX70 (J2G-SPEC §9.1, §9.4; jrt, overlay/jdk) TLS in jrt over the socket table**: Go's
   `crypto/tls` as a client over the table's connection (`netSock.raw` under the `tls.Conn`), the
   natives `HostNet.tls0`, `tlsInfo0`, `tlsPeer0`, the kinds `TLS_VERIFY`, `TLS`, `TLS_ROOTS`;
   jrt's own `TlsSocket` (a `java.net.Socket` upgraded in place); under TLS `available()` 0,
@@ -2360,9 +2371,9 @@ JVM" no longer applies).
 ## HV1 (b): RAM above 4 GiB (2026-10-13)
 
 Branch `hv1-ram`, from main `f7926f1`. HOST-VM-SURVEY §14 HV1, decided (b) by the user after
-its measurement (a2g under a 2 GiB collector limit 3.0× slower, 6.4× on 4 threads): give a Go
+its measurement (j2g under a 2 GiB collector limit 3.0× slower, 6.4× on 4 threads): give a Go
 guest RAM above 4 GiB with the doorbell where it is (`0xf0000000`, under 4 GiB), so that a tool
-guest runs a2g under `GOMEMLIMIT=12GiB` rather than in the 3 GiB slot. The experiment first, then
+guest runs j2g under `GOMEMLIMIT=12GiB` rather than in the 3 GiB slot. The experiment first, then
 the design it led to, built and checked on amd64 (nested KVM here) and on KVM/arm64 (the
 emulated aarch64 VM); the Mac's side prepared.
 
@@ -2399,7 +2410,7 @@ the high one, the doorbell in the hole between them.
   runtime's overlay (`overlay/go/`, the `-overlay` that jrt's runtime patches already use: a
   copy of `sys_tamago_amd64.s` with `MOVQ DI, DX; SHRQ $32, DX`). And it moves every address of
   the image: the symbols the monitor reads, the build's `-T` in three places (`bin/arbace-go`,
-  `arbace.g2a.build/tamago-ldflags`, `bin/tamago-vendor`), every existing image unbootable on the
+  `arbace.build.go/tamago-ldflags`, `bin/tamago-vendor`), every existing image unbootable on the
   new layout and the other way round.
 
 ### The design: the image where it is, the RAM above 4 GiB (BX80)
@@ -2438,7 +2449,7 @@ the doorbell goes above it:
 - **The launcher**: `ARBACE_BOX_RAM=SIZE` (`storeSize`'s units: bytes, KiB ... TiB; `off` or
   unset: 3 GiB), not passed to the guest. jrt is unchanged: its default collector limit is
   `RamSize` less 1 GiB (BX13), so `ARBACE_BOX_RAM=16GiB` gives `GOMEMLIMIT` 15 GiB, and
-  `ARBACE_BOX_RAM=14GiB GOMEMLIMIT=12GiB` is a2g's run as the survey measured it natively.
+  `ARBACE_BOX_RAM=14GiB GOMEMLIMIT=12GiB` is j2g's run as the survey measured it natively.
 - **arm64** (`setup_arm64.ae`): the guest's translation was a 32-bit space (TCR_EL1 T0SZ 32);
   now 36 bits (T0SZ 28, still 3 levels from level 1, IPS 36 bits as before), so the guest
   reaches 64 GiB of addresses: RAM up to 60 GiB above 4 GiB.
@@ -2464,8 +2475,8 @@ branch, `target/arbace-go/box-amd64/arbace-box`, against the native executable o
 Boundaries: `ARBACE_BOX_RAM=60GiB` boots (`maxMemory` + 1 GiB = 61,440 MiB; nothing touched);
 `1100GiB` is refused ("the guest's RAM ends at 0x11400000000, beyond this monitor's
 0x10000000000"); `3700MiB` still fits under the doorbell (one range, `maxMemory` 2,805,989,376);
-`ARBACE_BOX_RAM=1x` is refused by the launcher. `a2g --program` in the box was not run (not
-required); the probes above hold a larger live heap than a2g's (1.1-1.6 GB live, 10 GB peak).
+`ARBACE_BOX_RAM=1x` is refused by the launcher. `j2g --program` in the box was not run (not
+required); the probes above hold a larger live heap than j2g's (1.1-1.6 GB live, 10 GB peak).
 
 ### arm64: KVM/arm64 and Hypervisor.framework
 
@@ -2497,7 +2508,7 @@ fast the framework faults 10 GiB in.
 
 A form's position in its `.ae` file is its Go line (the converter's layout), and its explicit
 layout metadata (`:line`, `:go/end`, the lines in `:go/breaks`) are Go lines too. Edited by hand,
-the changed files first printed (`bin/g2a build --layout lines`, as `bin/box-vendor roundtrip`
+the changed files first printed (`bin/build-go --layout lines`, as `bin/box-vendor roundtrip`
 prints) with `//line` directives where a form came later than its line, and the first round trip
 failed on one: a directive in a one-line function's body (`board.go`'s `sigpanic`, after the
 package comment grew), which the converter takes back as a statement in an expression's place.
@@ -2548,7 +2559,7 @@ explicit metadata after any line inserted.
     host (HV2) a long-lived REPL keeps its peak;
   - (c) a fraction of the host's memory.
 
-  *Recommended: (a)*; a2g's tool guest asks 14 GiB with `GOMEMLIMIT=12GiB`.
+  *Recommended: (a)*; j2g's tool guest asks 14 GiB with `GOMEMLIMIT=12GiB`.
 - **BX82 (box/: vmm on arm64) The guest's addresses on arm64.** Options:
   - (a) 36 bits (T0SZ 28, built here): RAM up to 60 GiB, the framework's default IPA, no
     configuration;
@@ -2709,7 +2720,7 @@ the shared host), the launcher of main `38bcad1`:
 - **TamaGo's file system for the tool guests** (`overlay/go/syscall.ae`, `syscall/fs_tamago.ae`;
   BX95): the seek, write and truncation fixes above, and `syscall.MkLazy` (marked `//go:linkname`
   so the shim may reference it from outside the standard library). Converted from the patched
-  file (`bin/g2a convert --goos tamago syscall` from a GOROOT whose `fs_tamago.go` is the patched
+  file (`bin/repr-go read --goos tamago syscall` from a GOROOT whose `fs_tamago.go` is the patched
   one), the patch's lines marked "Arbace".
 - **The tool images** (`bin/box-tools build [ARCH...]`, `put STORE [ARCH...]`; BX96): box/ printed
   for tamago, the overlay written (the board at `cmd/internal`, `abi`, `tree`, `tool` under
@@ -2717,7 +2728,7 @@ the shared host), the launcher of main `38bcad1`:
   each tool's `main`), and each tool built with TamaGo's go as a box guest is linked; `put` stores
   them under the refs `tool.compile.amd64` ... Sizes: amd64 `compile` 28,114,072 bytes, `link`
   7,159,758, `asm` 5,407,243; arm64 26,386,992, 6,653,897, 5,147,626. About 70 s for both.
-- How the forms were made: the new files written in Go and converted (`bin/g2a convert --tests`,
+- How the forms were made: the new files written in Go and converted (`bin/repr-go read --tests`,
   every configuration that holds them, identical across them); the four changed files (`abi.go`,
   `vmm.go`, the launcher's `main.go` and `store.go`) edited in a printing of box/ with
   `--layout lines`, converted, and merged three ways into box/'s forms (base: the unedited
@@ -2963,7 +2974,7 @@ launcher then booted the image from the store by its ref.
 ### For S8
 
 - The driver builds what `go list` gives it. For Arbace's own program it needs:
-  - the printed module (a2g's output and box/'s forms printed, `overlay/go`'s runtime files given
+  - the printed module (j2g's output and box/'s forms printed, `overlay/go`'s runtime files given
     as an overlay: the plan's directories replaced per file);
   - `jrt` and `lang` compiled in a 12 GiB guest (SA101 (b): the request's `:ram`; through the
     host's `.tmp/heavy` here);
@@ -2984,12 +2995,12 @@ the byte-for-byte run is redone cheaply after it.
 ### The plan (written first)
 
 - **Every step an action.** The chain of `bin/arbace-go --build --box`, each step a spawned
-  guest kept in the action cache (BX98): a2g (`--program`), g2a's printing (tamago/'s standard
+  guest kept in the action cache (BX98): j2g (`--program`), repr/go's printing (tamago/'s standard
   library and goos module with overlay/go's runtime and file system patches; the program with
   box/ and x509roots/), the plan, compile and asm per package, the link, the namespaces
   prepared, the main package compiled and linked again with the image, the symbol table cut.
   The guest that runs the driver only orchestrates: a 6 GiB slot is enough for it.
-- **Arbace's guest is a tool guest too.** a2g and g2a need Arbace; the a2g step needs 14 GiB
+- **Arbace's guest is a tool guest too.** j2g and repr/go need Arbace; the j2g step needs 14 GiB
   (BX81). Rather than the REPL guest itself (`ARBACE_BOX_RAM`), Arbace's own image runs them as
   spawned guests: jrt's box host calls box/'s `tool.Start` (the request's trees mounted, the
   output stored at an exit with 0), so a request names Arbace's image as it names `compile`'s.
@@ -3007,10 +3018,10 @@ the byte-for-byte run is redone cheaply after it.
   build reads it), and `tools/elfsyms`'s cut in Arbace (`arbace.box.elf`).
 - **The host-built reference.** The driver's image is not `go build`'s (its flags, no build
   IDs, no module information; S7). The reference is the same steps run natively with the
-  host's tools: a2g, g2a and the preparing on the native executable, the toolchain's own
+  host's tools: j2g, repr/go and the preparing on the native executable, the toolchain's own
   compile, asm and link, each action a host process chrooted to the request's trees
   (`arbace.box.rebuild/host-run`, `tools/chrootrun`). Its intermediate results are compared
-  too, and a2g's program and the image of prepared namespaces with `bin/arbace-go --build`'s
+  too, and j2g's program and the image of prepared namespaces with `bin/arbace-go --build`'s
   (BX110).
 - **arm64.** The tool guests and the toolchain's facts for arm64; the box step in the aarch64 VM
   (every instruction emulated: hours), the host step on amd64 cross-compiling (GOARCH=arm64);
@@ -3052,18 +3063,18 @@ the byte-for-byte run is redone cheaply after it.
   `:archives`), `action` public (the rebuild's own steps are actions), `-embedcfg` from the
   plan's `:embed` (JSON, keys sorted, files at `/s`), per-package resources (`:resources`, and
   `:link`), and the executor as an option (`:run`).
-- **The printing** (`arbace.box.print`), run as an action in Arbace's guest with g2a's namespaces
+- **The printing** (`arbace.box.print`), run as an action in Arbace's guest with repr/go's namespaces
   from the sources (`ARBACE_PATH=/s`): `print-goroot` prints tamago/'s standard library and goos
   module as `bin/tamago-vendor print` does (each `go/` with `arch/amd64/go` laid over it, layout
   lines) and overlay/go's runtime and syscall as `bin/jrt overlay` and `box_overlay` do (layout
-  gofmt); `print-program` prints a2g's program as `bin/arbace-go --build --box` does (`--goos
-  tamago --line-file`, the roots box/ and x509roots/, the goos module named `/goos`). g2a's
+  gofmt); `print-program` prints j2g's program as `bin/arbace-go --build --box` does (`--goos
+  tamago --line-file`, the roots box/ and x509roots/, the goos module named `/goos`). repr/go's
   `program` takes `:go` (go.mod's go line) from its caller, and asks the toolchain (a process)
   only when neither program.edn nor the caller gives it and the module is not std.
 - **The symbol cut** (`arbace.box.elf/cut-symbols`; BX118): tools/elfsyms in Arbace. On the
   guest image linked by `go build`, the same bytes as elfsyms's (3.0 s natively).
 - **The rebuild** (`arbace.box.rebuild/steps`, `rebuild`): the chain above, every step an action
-  (a2g `--program` with `ARBACE_PATH=/s`, `GOGC=400`, `GOMEMLIMIT=12GiB`, `A2G_JOBS=8` in a
+  (j2g `--program` with `ARBACE_PATH=/s`, `GOGC=400`, `GOMEMLIMIT=12GiB`, `J2G_JOBS=8` in a
   14 GiB, 8-vCPU guest; the two printings at once, 8 GiB and 4 vCPUs each; jrt's and lang's
   compiles in 12 GiB, 4 vCPUs; the link in 8 GiB; the rest 3 GiB, 1 vCPU), GOROOT/src assembled
   from the printed trees (std, tamago/goroot/src's own files over it, the runtime overlay's
@@ -3085,11 +3096,11 @@ the byte-for-byte run is redone cheaply after it.
   arbace box go jdk overlay tamago x509roots`; the tool guests and facts; the image that runs the
   tools, bin/arbace-go's guest, as `arbace.<arch>`; one store for the box and one for the host,
   so that neither run takes the other's results from the action cache), `box` (arm64: in the
-  aarch64 VM, detached, its log followed), `host`, `compare` (every step's result; a2g's
+  aarch64 VM, detached, its log followed), `host`, `compare` (every step's result; j2g's
   program and the image of prepared namespaces against `bin/arbace-go --build`'s, which also
   proves that the host step prepared with an executable of the same program), `boot`, `smoke`
   (bin/box-smoke on a launcher with the rebuilt image appended). `--dev` loads the driver's
-  namespaces from the source tree over the image's; `--given DIR` takes a2g's output and the
+  namespaces from the source tree over the image's; `--given DIR` takes j2g's output and the
   two printings from another run's box step (their blobs copied into this run's store) and
   does not run them (`:given`; BX117); `plan-check` compares the box's plan with go list's on
   the box's printed trees. Redoing the byte-for-byte run after S6: `bin/arbace-go --build --box`
@@ -3118,7 +3129,7 @@ times are this machine's under that load, not the box's best):
 
 | step | in the box | on the host |
 |---|---:|---:|
-| a2g `--program` (8 jobs) | 407 s | 387 s |
+| j2g `--program` (8 jobs) | 407 s | 387 s |
 | the two printings, at once | 138 s | 47 s |
 | the plan (181 packages) | 3 s | 4 s |
 | 273 compiles and assemblies, 4 at once, and the link | 183 s | 150 s |
@@ -3128,11 +3139,11 @@ times are this machine's under that load, not the box's best):
 | all | 773 s | 623 s |
 
 - **The image built in the box equals the host's byte for byte**: `a3e7c069…`, 68,911,402 bytes,
-  and so does every step's result: the sources' tree, a2g's program (`d57cb321…`), GOROOT/src as
+  and so does every step's result: the sources' tree, j2g's program (`d57cb321…`), GOROOT/src as
   printed (`108bd7bc…`), the goos module, the module, the plan, the version, the first image, the
   image of prepared namespaces (`de06d439…`), the image before the cut.
-- a2g's program (but `image.bin`) and the image of prepared namespaces equal `bin/arbace-go
-  --build`'s: the box's a2g and the box-prepared image are the host's.
+- j2g's program (but `image.bin`) and the image of prepared namespaces equal `bin/arbace-go
+  --build`'s: the box's j2g and the box-prepared image are the host's.
 - Booted by its ref (`ARBACE_BOX_IMAGE=ref:rebuilt.box.amd64`): "booted by ref:
   arbace-seed-is-go-v1-62-g53d9b5d amd64", the version from the tree's `VERSION`.
 - `bin/box-smoke` on a launcher with the rebuilt image appended: 119 ok, none failed.
@@ -3146,15 +3157,15 @@ times are this machine's under that load, not the box's best):
 `bin/arbace-go --build` and `--build --box` (amd64 and arm64) at `90c6f70`, then:
 
 - **amd64** (`bin/box-rebuild --dir .tmp/box-rebuild/amd64-final prepare box host compare boot smoke
-  plan-check`): in the box 670 s (a2g 328 s; the printings 102 s; jrt's compile 90 s, lang's 37 s;
+  plan-check`): in the box 670 s (j2g 328 s; the printings 102 s; jrt's compile 90 s, lang's 37 s;
   the preparing 16 s), on the host 625 s. **The image built in the box = the host's, byte for
   byte**: `6c53c3b0432c0bafe633da0fb806d9c8f6c497e9b56032d5cf73f80b923ca9eb`, 68,911,402 bytes;
-  every step's result equal; a2g's program and the image of prepared namespaces equal `bin/arbace-go
+  every step's result equal; j2g's program and the image of prepared namespaces equal `bin/arbace-go
   --build`'s; booted by its ref ("booted by ref: arbace-seed-is-go-v1-66-g90c6f70 amd64");
   bin/box-smoke on it 119 ok, none failed; plan-check the same (181 packages).
 - **arm64, the host's reference** (`bin/box-rebuild --arch arm64 --dir .tmp/box-rebuild/arm64-final
   prepare host`, cross-compiled here with the arm64 tool guests' facts): 523 s, the image
-  `f78f49598272fbde58e3c5c045ebc78ac239eb26a6255eb575730f49dbf2a672`, 66,498,858 bytes. a2g's
+  `f78f49598272fbde58e3c5c045ebc78ac239eb26a6255eb575730f49dbf2a672`, 66,498,858 bytes. j2g's
   program and both printings are the amd64 runs' (`83011b56…`, `108bd7bc…`, `149a24de…`,
   `cbf675fa…`): they do not depend on the architecture.
 - **arm64 in the aarch64 VM** (`.tmp/s8/vm-run2.sh`: the VM with 16 vCPUs and 28 GiB, then
@@ -3194,9 +3205,9 @@ times are this machine's under that load, not the box's best):
 - **BX110 (S7's "For S8") What "the host-built image" is.** The driver's image is not `go
   build`'s: no build IDs (`-buildid=`), no module information, its own `-trimpath` mappings.
   Options:
-  - (a) the same steps run on the host with the host's tools: a2g, g2a and the preparing on the
+  - (a) the same steps run on the host with the host's tools: j2g, repr/go and the preparing on the
     native executable, the toolchain's own compile, asm and link, each action a host process
-    chrooted to its trees (`host-run`); its intermediate results compared too, and a2g's program
+    chrooted to its trees (`host-run`); its intermediate results compared too, and j2g's program
     and the image of prepared namespaces against `bin/arbace-go --build`'s (built);
   - (b) the driver's flags made `go build`'s: its action and content IDs computed as cmd/go
     computes them, the module information generated, so that the image equals
@@ -3206,13 +3217,13 @@ times are this machine's under that load, not the box's best):
   *Recommended: (a)*: every step's tool runs outside the box, so the equality says the box
   computes what the host computes; (b) reimplements cmd/go's build ID scheme for no gain in what
   is proved; (c) runs the same guests twice.
-- **BX111 (jrt) Arbace's guest as a tool guest.** a2g's step needs 14 GiB (BX81); the printing
+- **BX111 (jrt) Arbace's guest as a tool guest.** j2g's step needs 14 GiB (BX81); the printing
   and the preparing need Arbace. Options:
   - (a) jrt's box host calls `tool.Start`, its exit goes through `goos.Exit`: Arbace's image is
     spawned like `compile`, each Arbace step an action in its own guest and slot (built);
-  - (b) the REPL guest runs a2g and g2a itself, with `ARBACE_BOX_RAM=16GiB`, and only Go's tools
+  - (b) the REPL guest runs j2g and repr/go itself, with `ARBACE_BOX_RAM=16GiB`, and only Go's tools
     are spawned;
-  - (c) a separate image for the tools (a2g, g2a built into a program of their own).
+  - (c) a separate image for the tools (j2g, repr/go built into a program of their own).
 
   *Recommended: (a)*: the steps are cached and resumable like the compiles, the driver's guest
   stays small, and the new image prepares its own namespaces the same way; (b) has no action
@@ -3251,7 +3262,7 @@ times are this machine's under that load, not the box's best):
   *Recommended: (a)*: the filter stays as it is, and a short file left by a crash is still
   refused, after the wait.
 - **BX116 The steps' resources.** Options:
-  - (a) a2g 14 GiB and 8 vCPUs (`A2G_JOBS=8`); each printing 8 GiB, 4 vCPUs; jrt's and lang's
+  - (a) j2g 14 GiB and 8 vCPUs (`J2G_JOBS=8`); each printing 8 GiB, 4 vCPUs; jrt's and lang's
     compiles 12 GiB, 4 vCPUs (SA101 (b)); the main package 6 GiB; the link 8 GiB; the rest the
     3 GiB default; the driver's guest 6 GiB; the spawns' budget 40 GiB here, 60% of memory on the
     Mac, 20 GiB in the VM (built);
@@ -3262,18 +3273,18 @@ times are this machine's under that load, not the box's best):
   yet report a guest's peak).
 - **BX117 arm64 in the emulated VM.** Every instruction is emulated there: the evaluator ran 40
   times slower than in the amd64 box (24.9 s against 0.62 s for the same loop). The whole chain
-  was started in the VM (16 vCPUs, 32 GiB) and stopped after 2 h 15 min: a2g's guest was still
+  was started in the VM (16 vCPUs, 32 GiB) and stopped after 2 h 15 min: j2g's guest was still
   loading (1.4 GB touched, 15 CPU-hours of the guest's process), against 407 s in the amd64
   box; the whole chain would take well over ten hours there. Options:
   - (a) the whole chain in the VM, detached and followed (`bin/box-rebuild --arch arm64 box`);
   - (b) in the VM the architecture's own steps (the plan, the compiles, the link, the preparing
-    by the new image, the cut), a2g's output and the two printings taken from the amd64 box's
+    by the new image, the cut), j2g's output and the two printings taken from the amd64 box's
     run of the same sources (they are the same on both: the arm64 host step's equal the amd64
     box's), `bin/box-rebuild --arch arm64 --given DIR` (built); the whole chain on the Mac
     (`./mac.sh rebuild`);
   - (c) arm64 on the Mac only.
 
-  *Recommended: (b) now, (a) again after S6*, whose compiled a2g and g2a are what the VM is
+  *Recommended: (b) now, (a) again after S6*, whose compiled j2g and repr/go are what the VM is
   slowest at; the Mac runs the whole chain on arm64 hardware either way.
 - **BX118 The symbol cut in the box.** Options:
   - (a) `arbace.box.elf`, tools/elfsyms in Arbace, the same bytes (built);
@@ -3299,12 +3310,12 @@ for byte" and "S8 in the emulated arm64 VM on the final program, byte for byte")
 - **arm64, the host's reference** (`prepare host`): 656 s,
   `a733f9bc43971bbb78e56a10efeba25688d552b132919637c103359e6ffc3772`, 98,464,042 bytes.
 - **arm64 in the aarch64 VM** (16 vCPUs, 28 GiB; `--given .tmp/box-rebuild/amd64-v1 box boot`,
-  then `compare`): 30,039 s (8 h 21 min). The run began before `77b20b6`, so `--given` gave a2g's
+  then `compare`): 30,039 s (8 h 21 min). The run began before `77b20b6`, so `--given` gave j2g's
   program and the printings but not the compiled namespaces: the VM compiled them itself,
   emulated, 11,183 s (100 sources, 7,689 classes, the amd64 runs' `effde3ca…`). Then the plan
   (280 packages, `1e70e360…`) 146 s; jrt's compile 8,118 s and lang's 2,526 s (86 and 77 times
   the amd64 box's); the links 151 s and 148 s; the preparing 38 s. **The arm64 image built in the
-  box = the host's, byte for byte**: `a733f9bc…`, every step's result equal, a2g's program and the
+  box = the host's, byte for byte**: `a733f9bc…`, every step's result equal, j2g's program and the
   image of prepared namespaces equal `bin/arbace-go --build`'s; booted by its ref in the VM
   ("booted by ref: arbace-seed-is-go-v1-145-g3bf351b aarch64").
 - **The Mac** (Apple M2 Max, macOS 14.8.7): the bundle of `3bf351b` rebuilt `a733f9bc…` byte for
@@ -3323,8 +3334,8 @@ for byte" and "S8 in the emulated arm64 VM on the final program, byte for byte")
 
 So S8's exit criterion holds on the final program: byte for byte on amd64, in the emulated arm64
 VM and on the Mac. The whole chain in the VM (BX117 (a)) ran from 2026-10-14 22:49 (16 vCPUs,
-28 GiB). On 2026-10-16 05:45, 28.5 h into a2g's step (the user: kept running): in the VM, the a2g
-tool guest's process 8 d 16 h of CPU (about 250 times the amd64 box's a2g of 303 s wall), 13.6 GB resident and flat; the
+28 GiB). On 2026-10-16 05:45, 28.5 h into j2g's step (the user: kept running): in the VM, the j2g
+tool guest's process 8 d 16 h of CPU (about 250 times the amd64 box's j2g of 303 s wall), 13.6 GB resident and flat; the
 requesting guest, waiting on the spawn, 3.5 of the VM's 16 vCPUs (5 d 3 h of CPU): its wait is
 not idle under emulation, to look at (WFI or the event area polled).
 
@@ -3334,9 +3345,9 @@ VM, nothing given, built the image byte for byte as the arm64 host step did:**
 ref ("arbace-seed-is-go-v1-154-g434021a aarch64"), in 145,762 s (40 h 29 min; the host step
 591 s, about 247 times). Every step's tree equal to the host's (`:src`, `:aot`, `:prog`, the
 printed GOROOT and program, `:goroot`, `:goos`, `:mod`, `:plan`, `:version`, `:image1`,
-`:image-bin`, `:linked`, `:image`) but `:a2g`, a2g's whole output, whose `report.edn` holds its
+`:image-bin`, `:linked`, `:image`) but `:j2g`, j2g's whole output, whose `report.edn` holds its
 timings (the program in it, `:prog`, equal). The steps in the VM: the namespaces compiled 8,839 s;
-a2g 103,558 s (load 19,495, reach 13,151, translate 32,364, write 19,012; on the host 73, 22, 38,
+j2g 103,558 s (load 19,495, reach 13,151, translate 32,364, write 19,012; on the host 73, 22, 38,
 23: 266 to 840 times); the two printings 4,926 s and 10,623 s; the plan (280 packages); the
 compiles, `arbace/jrt` alone 14,851 s and `arbace/lang` 1,380 s; the link 155 s; the namespaces
 prepared by the first image 39 s; the second link 146 s. `compare`'s exit status was 1 only by its
@@ -3357,7 +3368,7 @@ latency on the real targets for a shorter emulated run only: not done.
 ### The milestone (2026-10-15, `c3fdd36`)
 
 `bin/gate --full` passed at `c3fdd36` in 37 min 48 s, after two fixes of its first run's
-failures: `jdk/edge.edn` recorded again (a2g's program unchanged), and the guest's RAM check moved
+failures: `jdk/edge.edn` recorded again (j2g's program unchanged), and the guest's RAM check moved
 from `vmm.go` to `vmm/guestram.go` (`mapGuest`), `vmm.go`'s vendored layout restored
 (`bin/box-vendor roundtrip` 27 of 27). `bin/box-rebuild` by hand at `c3fdd36` (amd64): in the box
 702 s, on the host 622 s, **the image built in the box = the host's, byte for byte**:
@@ -3394,7 +3405,7 @@ compiled for linux/arm64, for `bin/box-arm64-vm hv`). Those needed go-whim's mod
 cache had to hold go-whim's requirements (`remyoudompheng/bigfft`, five `modernc.org` modules),
 and its C guests needed `clang` and `ld` (guest/guest.go's `Image`), and the tests ran with
 `CGO_ENABLED=1`. `bin/box-mac-bundle`, `box/mac/mac.sh`, `bin/box-arm64-vm` (but its `hv` step,
-through `kvm-tests-arm64`), `arbace/g2a/build.ae`, `go/arbace/jrt/` name go-whim only in comments
+through `kvm-tests-arm64`), `arbace/build/go.ae`, `go/arbace/jrt/` name go-whim only in comments
 (their origin), which stay.
 
 ### What was vendored, and how adapted
@@ -3467,18 +3478,18 @@ already (vendored at S0, Arbace's since).
   the guest packages. `merge` replaces only its packages (a subpackage's package file beside its
   parent's forms is left), so `convert` touches nothing else.
 - `bin/box-arm64-vm hv`: runs `guest.test` too, with `ARBACE_BOX_GUESTS`.
-- `arbace/g2a/build.ae`: a library printing (`--print-only --module`) may hold several main
+- `arbace/build/go.ae`: a library printing (`--print-only --module`) may hold several main
   packages (box/ holds the launcher and three guests); `--main PATH` chooses the main package
   of a build among several (`bin/arbace-go --build --box` and `bin/box-mac-bundle` build the
   launcher with `--main arbace/box/cmd/arbace-box`). The guest image's build is unchanged
   (`--root box` takes no main package of a root).
 - cgo dropped (CG1 (a)): `bin/jrt test --race` removed (Go's race detector needs cgo; `bin/jrt`
-  set `CGO_ENABLED=1` only with `--race`, not for every test run) and `bin/a2g-race` with its
-  program `test/a2g/race/` deleted. The Go builds already set `CGO_ENABLED=0` (bin/g2a build,
+  set `CGO_ENABLED=1` only with `--race`, not for every test run) and `bin/j2g-race` with its
+  program `test/j2g/race/` deleted. The Go builds already set `CGO_ENABLED=0` (bin/build-go,
   bin/arbace-go, the seed, the guests); every script that runs Go now exports it too
-  (`bin/g2a*`, `bin/jrt`, `bin/arbace-go`, `bin/box-*`, `bin/tamago-vendor`,
+  (`bin/repr-go*`, `bin/jrt`, `bin/arbace-go`, `bin/box-*`, `bin/tamago-vendor`,
   `bin/toolchain-vendor`, `bin/x509roots-vendor`, `bin/gate`), so that no tool or test build
-  falls back on Go's default (cgo on when a C compiler is found). `bin/g2a-build-tests` checks its
+  falls back on Go's default (cgo on when a C compiler is found). `bin/build-go test` checks its
   executables with `tools/elfstatic` (Go's `debug/elf`: an ELF executable for the architecture,
   no PT_INTERP or PT_DYNAMIC, no `.interp` or `.dynamic`) instead of `file` and binutils'
   `readelf`. doc/ALPINE.md: the row `gcc musl-dev linux-headers binutils` left the table and the
@@ -3505,7 +3516,7 @@ directories and the C toolchain (`gcc`, `cc`, `clang`, `ld`, `as`, `readelf`, `o
   `CyclicBarrier`'s arrival indices (`[1 (0 2)]` for `[2 (0 1)]`): which party arrives last is a
   race the case leaves open, under the host's load; no runtime source changed, and the rerun
   matched.
-- `bin/g2a-build-tests` (with `tools/elfstatic`): 26 passed.
+- `bin/build-go test` (with `tools/elfstatic`): 26 passed.
 - In the emulated arm64 VM (`bin/box-arm64-vm hv`, the guests built here by `kvm-tests-arm64`):
   hv 4, vmm 15, guest 8 passed (TestFault: null and deep `exception 0 (code 0x96000047)`, the
   bare guest's assembly on arm64 run, not only compiled; TestGoGuestSMP on 1, 2 and 4 vCPUs).

@@ -1,0 +1,298 @@
+(ns arbace.j2g.zlib
+  "A zlib stream (RFC 1950) of DEFLATE data (RFC 1951) written in Arbace, for the resources
+  bin/j2g --program embeds compressed (amendment SZ2): the same bytes on every host, the JVM's
+  and the Go executable's (doc/STANDALONE-NOTES.md, S3, SA21), where the JVM's
+  java.util.zip.Deflater (zlib's C code) exists on the JVM only and Go's compress/flate writes
+  other bytes. jrt's InflaterInputStream (Go's compress/zlib) and the JDK's read it.
+
+  The compressor: LZ77 over the whole input (a 32 KB window, matches of 3 to 258 bytes, hash
+  chains of 3-byte prefixes searched to a fixed depth, one step of lazy matching, as zlib's
+  deflate_slow), then blocks of at most 16,384 symbols, each with its own Huffman codes
+  (dynamic blocks; lengths limited to 15 bits, 7 for the code length code, by halving the
+  frequencies until the code fits). Every choice is integer arithmetic and ties broken by
+  symbol, so the output depends on the input alone."
+  (:import (java.io ByteArrayOutputStream)))
+
+;; ---------------------------------------------------------------------------------------
+;; the bit writer: bits least significant first (RFC 1951 §3.1.1)
+
+(deftype Bits [^ByteArrayOutputStream out ^:unsynchronized-mutable ^long acc
+                         ^:unsynchronized-mutable ^long n]
+  arbace.lang.IFn
+  (invoke [this v k]
+    ;; append the k low bits of v
+    (set! acc (bit-or acc (bit-shift-left (long v) n)))
+    (set! n (+ n (long k)))
+    (loop []
+      (when (>= n 8)
+        (.write out (int (bit-and acc 0xff)))
+        (set! acc (unsigned-bit-shift-right acc 8))
+        (set! n (- n 8))
+        (recur)))
+    this)
+  (invoke [this]
+    ;; flush to a byte boundary
+    (when (pos? n) (.write out (int (bit-and acc 0xff))))
+    (set! acc 0) (set! n 0)
+    this))
+
+(defn- reverse-bits ^long [^long code ^long len]
+  (loop [c code r 0 i 0]
+    (if (< i len) (recur (bit-shift-right c 1) (bit-or (bit-shift-left r 1) (bit-and c 1)) (inc i)) r)))
+
+;; ---------------------------------------------------------------------------------------
+;; Huffman codes
+
+(defn- huffman-lengths
+  "The code lengths (a long array) of a Huffman code for the frequencies freqs (a long array),
+  at most limit bits each; 0 for an absent symbol. Ties are broken by symbol order. A single
+  used symbol gets length 1."
+  ^longs [^longs freqs ^long limit]
+  (let [n (alength freqs)]
+    (loop [^longs fs (aclone freqs)]
+      (let [syms (filterv #(pos? (aget fs (int %))) (range n))
+            lens (long-array n)]
+        (cond
+          (empty? syms) lens
+          (= 1 (count syms)) (do (aset lens (int (first syms)) 1) lens)
+          :else
+          ;; nodes: [weight order id]; leaves are symbols, inner nodes ids from n up; the parent
+          ;; of each node, then the depth of each leaf
+          (let [parent (long-array (* 2 n))
+                start (into (sorted-set) (map (fn [s] [(aget fs (int s)) (long s) (long s)]) syms))
+                _ (loop [q start next-id n order n]
+                    (when (> (count q) 1)
+                      (let [a (first q) q (disj q a) b (first q) q (disj q b)]
+                        (aset parent (int (nth a 2)) next-id)
+                        (aset parent (int (nth b 2)) next-id)
+                        (recur (conj q [(+ (long (nth a 0)) (long (nth b 0))) order next-id])
+                               (inc next-id) (inc order)))))
+                root (+ n (dec (count syms)) -1)
+                maxlen (reduce (fn [^long m s]
+                                 (let [d (long (loop [x (long s) d 0] (if (== x root) d (recur (aget parent (int x)) (inc d)))))]
+                                   (aset lens (int s) d)
+                                   (max m d)))
+                               0 syms)]
+            (if (<= maxlen limit)
+              lens
+              (let [f2 (long-array n)]
+                (dotimes [i n]
+                  (let [f (aget fs i)] (when (pos? f) (aset f2 i (max 1 (bit-shift-right f 1))))))
+                (recur f2)))))))))
+
+(defn- canonical-codes
+  "The codes (a long array, bit-reversed for writing) of the code lengths lens (RFC 1951
+  §3.2.2)."
+  ^longs [^longs lens]
+  (let [n (alength lens)
+        bl-count (long-array 16)
+        next-code (long-array 16)
+        codes (long-array n)]
+    (dotimes [i n] (let [l (aget lens i)] (when (pos? l) (aset bl-count (int l) (inc (aget bl-count (int l)))))))
+    (loop [bits 1 code 0]
+      (when (< bits 16)
+        (let [code (bit-shift-left (+ code (aget bl-count (dec bits))) 1)]
+          (aset next-code bits code)
+          (recur (inc bits) code))))
+    (dotimes [i n]
+      (let [l (aget lens i)]
+        (when (pos? l)
+          (aset codes i (reverse-bits (aget next-code (int l)) l))
+          (aset next-code (int l) (inc (aget next-code (int l)))))))
+    codes))
+
+;; ---------------------------------------------------------------------------------------
+;; lengths and distances (RFC 1951 §3.2.5)
+
+(def ^:private ^"[J" len-base (long-array [3 4 5 6 7 8 9 10 11 13 15 17 19 23 27 31 35 43 51 59 67 83 99 115 131 163 195 227 258]))
+(def ^:private ^"[J" len-extra (long-array [0 0 0 0 0 0 0 0 1 1 1 1 2 2 2 2 3 3 3 3 4 4 4 4 5 5 5 5 0]))
+(def ^:private ^"[J" dist-base (long-array [1 2 3 4 5 7 9 13 17 25 33 49 65 97 129 193 257 385 513 769 1025 1537 2049 3073
+                                      4097 6145 8193 12289 16385 24577]))
+(def ^:private ^"[J" dist-extra (long-array [0 0 0 0 1 1 2 2 3 3 4 4 5 5 6 6 7 7 8 8 9 9 10 10 11 11 12 12 13 13]))
+
+(defn- code-of
+  "The index of the last base in bases (a long array) at most v."
+  ^long [^longs bases ^long v]
+  (loop [i (dec (alength bases))] (if (> (aget bases i) v) (recur (dec i)) i)))
+
+;; ---------------------------------------------------------------------------------------
+;; LZ77
+
+;; zlib's level 9: chains searched 4096 deep, matches of 258 accepted at once; fewer here
+;; (the evaluator on Go is slow), for a stream about 0.5% larger than zlib's on Arbace's sources
+(def ^:private ^:const window 32768)
+(def ^:private ^:const max-chain 64)
+(def ^:private ^:const nice-length 64)
+
+(defn- match-length
+  "The length of the common prefix of b at i and at j (< i), at most max."
+  ^long [^bytes b ^long i ^long j ^long max]
+  (loop [k 0] (if (and (< k max) (== (aget b (+ i k)) (aget b (+ j k)))) (recur (inc k)) k)))
+
+(defn- insert!
+  "Enters position i of b (n bytes) into the hash chains: prev[i] is the last position before i
+  whose 3 bytes hash as i's, head[h] the last position of hash h."
+  [^bytes b ^ints head ^ints prev ^long i]
+  (when (<= (+ i 3) (alength b))
+    (let [h (bit-and (bit-xor (bit-shift-left (bit-and (aget b i) 0xff) 8)
+                              (bit-shift-left (bit-and (aget b (+ i 1)) 0xff) 4)
+                              (bit-and (aget b (+ i 2)) 0xff)
+                              (bit-shift-left (bit-and (aget b (+ i 2)) 0xff) 11))
+                     0xffff)]
+      (aset prev i (aget head h))
+      (aset head h (int i))))
+  nil)
+
+(defn- longest
+  "The longest match for position i of b along its hash chain: (length << 16 | distance), or
+  0 when none is 3 bytes long."
+  ^long [^bytes b ^ints prev ^long i]
+  (let [n (alength b)]
+    (if (> (+ i 3) n)
+      0
+      (let [maxl (min 258 (- n i))]
+        (loop [j (long (aget prev i)) chain 0 best 0 bestd 0]
+          (if (or (neg? j) (> (- i j) window) (>= chain max-chain) (>= best nice-length) (>= best maxl))
+            (if (>= best 3) (bit-or (bit-shift-left best 16) bestd) 0)
+            (let [l (if (== (aget b (+ j best)) (aget b (+ i best)))
+                      (match-length b i j maxl)
+                      0)]
+              (if (> l best)
+                (recur (long (aget prev j)) (inc chain) l (- i j))
+                (recur (long (aget prev j)) (inc chain) best bestd)))))))))
+
+(defn- lz77
+  "The symbols of b: a long array of entries, a literal byte v as v, a match as
+  (length << 16 | distance) with bit 40 set; and their count."
+  [^bytes b]
+  (let [n (alength b)
+        head (int-array 65536 -1)
+        prev (int-array (max n 1) -1)
+        out (long-array (inc n))
+        flag (bit-shift-left 1 40)]
+    ;; position i is entered before its match is looked up; pending is a match found at i-1
+    ;; not yet written (one step of lazy matching), or 0
+    (loop [i 0 k 0 pending 0]
+      (if (>= i n)
+        (if (pos? pending)
+          (do (aset out k (bit-or pending flag)) [out (inc k)])
+          [out k])
+        (do
+          (insert! b head prev i)
+          (let [m (longest b prev i)]
+            (cond
+              (pos? pending)
+              (if (> (bit-shift-right m 16) (bit-shift-right pending 16))
+                ;; a longer match at i: the byte at i-1 goes as a literal
+                (do (aset out k (long (bit-and (aget b (dec i)) 0xff)))
+                    (recur (inc i) (inc k) m))
+                ;; the match at i-1, its bytes after i entered
+                (let [end (+ (dec i) (bit-shift-right pending 16))]
+                  (aset out k (bit-or pending flag))
+                  (loop [x (inc i)] (when (< x end) (insert! b head prev x) (recur (inc x))))
+                  (recur end (inc k) 0)))
+              (pos? m) (recur (inc i) k m)
+              :else (do (aset out k (long (bit-and (aget b i) 0xff)))
+                        (recur (inc i) (inc k) 0)))))))))
+
+;; ---------------------------------------------------------------------------------------
+;; blocks
+
+(def ^:private ^:const block-symbols 16384)
+(def ^:private cl-order [16 17 18 0 8 7 9 6 10 5 11 4 12 3 13 2 14 1 15])
+
+(defn- rle-lengths
+  "The code length code's symbols for the lengths ls (RFC 1951 §3.2.7): [symbol extra-value]."
+  [ls]
+  (let [v (vec ls) n (count v)]
+    (loop [i 0 acc []]
+      (if (>= i n)
+        acc
+        (let [x (long (nth v i))
+              run (loop [j i] (if (and (< j n) (== x (long (nth v j)))) (recur (inc j)) (- j i)))]
+          (cond
+            (and (zero? x) (>= run 11)) (let [r (min run 138)] (recur (+ i r) (conj acc [18 (- r 11)])))
+            (and (zero? x) (>= run 3)) (let [r (min run 10)] (recur (+ i r) (conj acc [17 (- r 3)])))
+            (and (pos? x) (>= run 4)) (let [r (min (dec run) 6)] (recur (+ i 1 r) (conj acc [x 0] [16 (- r 3)])))
+            :else (recur (inc i) (conj acc [x 0]))))))))
+
+(defn- write-block!
+  "Writes the symbols syms[from, to) as one dynamic block (last? sets BFINAL)."
+  [^Bits w ^longs syms from to last?]
+  (let [from (long from) to (long to) lf (long-array 286) df (long-array 30)]
+    (loop [i from]
+      (when (< i to)
+        (let [s (aget syms (int i))]
+          (if (bit-test s 40)
+            (let [len (bit-and (bit-shift-right s 16) 0xffff) d (bit-and s 0xffff)]
+              (aset lf (+ 257 (code-of len-base len)) (inc (aget lf (+ 257 (code-of len-base len)))))
+              (aset df (code-of dist-base d) (inc (aget df (code-of dist-base d)))))
+            (aset lf (int s) (inc (aget lf (int s))))))
+        (recur (inc i))))
+    (aset lf 256 1)
+    ;; two distance codes at least, as some inflaters want (zlib writes one used code then)
+    (let [used (count (filter #(pos? (aget df (int %))) (range 30)))]
+      (cond (zero? used) (do (aset df 0 1) (aset df 1 1))
+            (== 1 used) (aset df (if (pos? (aget df 0)) 1 0) 1)))
+    (let [^longs ll (huffman-lengths lf 15)
+          ^longs dl (huffman-lengths df 15)
+          ^longs lc (canonical-codes ll)
+          ^longs dc (canonical-codes dl)
+          hlit (max 257 (inc (or (last (filter #(pos? (aget ll (int %))) (range 286))) 0)))
+          hdist (max 1 (inc (or (last (filter #(pos? (aget dl (int %))) (range 30))) 0)))
+          rle (rle-lengths (concat (take hlit (seq ll)) (take hdist (seq dl))))
+          cf (long-array 19)
+          _ (doseq [[s] rle] (aset cf (int s) (inc (aget cf (int s)))))
+          ^longs cl (huffman-lengths cf 7)
+          ^longs cc (canonical-codes cl)
+          hclen (max 4 (- 19 (count (take-while #(zero? (aget cl (int %))) (reverse cl-order)))))]
+      (w (if last? 1 0) 1)
+      (w 2 2)
+      (w (- hlit 257) 5)
+      (w (- hdist 1) 5)
+      (w (- hclen 4) 4)
+      (doseq [s (take hclen cl-order)] (w (aget cl (int s)) 3))
+      (doseq [[s x] rle]
+        (w (aget cc (int s)) (aget cl (int s)))
+        (case (int s) 16 (w x 2) 17 (w x 3) 18 (w x 7) nil))
+      (loop [i from]
+        (when (< i to)
+          (let [s (aget syms (int i))]
+            (if (bit-test s 40)
+              (let [len (bit-and (bit-shift-right s 16) 0xffff) d (bit-and s 0xffff)
+                    lcode (code-of len-base len) dcode (code-of dist-base d)]
+                (w (aget lc (+ 257 lcode)) (aget ll (+ 257 lcode)))
+                (when (pos? (aget len-extra lcode)) (w (- len (aget len-base lcode)) (aget len-extra lcode)))
+                (w (aget dc dcode) (aget dl dcode))
+                (when (pos? (aget dist-extra dcode)) (w (- d (aget dist-base dcode)) (aget dist-extra dcode))))
+              (w (aget lc (int s)) (aget ll (int s)))))
+          (recur (inc i))))
+      (w (aget lc 256) (aget ll 256)))))
+
+(defn- adler32 ^long [^bytes b]
+  (loop [i 0 a 1 s 0]
+    (if (< i (alength b))
+      (let [a (rem (+ a (bit-and (aget b i) 0xff)) 65521)]
+        (recur (inc i) a (rem (+ s a) 65521)))
+      (bit-or (bit-shift-left s 16) a))))
+
+(defn deflate
+  "bytes b as a zlib stream (RFC 1950): the header (deflate, a 32 KB window, the maximum
+  compression level's flag, as the JDK's Deflater at level 9), DEFLATE blocks, the Adler-32 of
+  b."
+  ^bytes [^bytes b]
+  (let [out (ByteArrayOutputStream.)
+        w (Bits. out 0 0)
+        [^longs syms k] (lz77 b)
+        k (long k)]
+    (.write out 0x78) (.write out 0xda)
+    (if (zero? k)
+      (write-block! w syms 0 0 true)
+      (loop [from 0]
+        (let [to (min k (+ from block-symbols))]
+          (write-block! w syms from to (== to k))
+          (when (< to k) (recur to)))))
+    (w)
+    (let [a (adler32 b)]
+      (doseq [sh [24 16 8 0]] (.write out (int (bit-and (bit-shift-right a sh) 0xff)))))
+    (.toByteArray out)))

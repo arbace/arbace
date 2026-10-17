@@ -1,0 +1,1193 @@
+(ns arbace.j2g.out
+  "j2g's output (J2G-SPEC §4.3): Go forms files, one per Java forms file, plus the generated
+  files of each package (j2g_classes: registrations and member tables, §5.11; j2g_strings: the
+  literal pool, §7.5; j2g_frames: the frame table, §7.9.6; j2g_support: j2g's helpers), and
+  the merge with jrt's hand-written forms into one program root for bin/build-go."
+  (:require [arbace.string :as str]
+            [arbace.java.io :as io]
+            [arbace.classes.types :as t]
+            [arbace.classes.env :as env]
+            [arbace.classes.analyze :as a]
+            [arbace.j2g.model :as m]
+            [arbace.j2g.names :as nm]
+            [arbace.j2g.jrt :as jrt]
+            [arbace.j2g.code :as c]
+            [arbace.j2g.decls :as d]
+            [arbace.j2g.edge :as edge]
+            [arbace.classes.opcodes :as Opcodes]))
+
+(defn- tag [sym type] (with-meta sym {:tag type}))
+
+;; ---------------------------------------------------------------------------------------
+;; printing forms
+
+(def ^:dynamic *renames*
+  "nil, or a map of symbols to the symbols clean writes in their place: the literals of the
+  classes translated in parallel, named apart (Lit?i_k), to their names in the package's
+  literal pool (Lit_n; arbace.j2g.main; J2G-SPEC §4.1, \"The run in parallel\")."
+  nil)
+
+(defn clean
+  "f without the reader's position metadata (quoted forms in j2g's source carry it), its
+  symbols renamed by *renames*."
+  [f]
+  (let [cm (fn [x] (let [mt (meta x)]
+                     (if mt
+                       (let [mt (dissoc mt :line :column :file :end-line :end-column)
+                             mt (if (contains? mt :tag) (update mt :tag clean) mt)]
+                         (with-meta x (if (empty? mt) nil mt)))
+                       x)))]
+    (cond
+      (symbol? f) (cm (if-let [r (and *renames* (get *renames* f))] (with-meta r (meta f)) f))
+      (seq? f) (cm (with-meta (apply list (map clean f)) (meta f)))
+      (vector? f) (cm (with-meta (mapv clean f) (meta f)))
+      (map? f) (into {} (map (fn [[k v]] [(clean k) (clean v)]) f))
+      :else f)))
+
+(declare write-form)
+
+;; The layout of the forms text (J2G-SPEC §4.3, §7.9.6): a form carrying :j2g/line (the class
+;; forms line of the statement or member it comes from) is written on that line of the file
+;; when the text has not passed it yet, so that the reader's position is that line; else it
+;; gets an explicit ^{:line n}, as does every list inside it without a line of its own. The
+;; printer's lines layout (bin/build-go --line-file) then gives gc's line tables the class
+;; forms' lines. The writer passes the layout, lay, along: nil (no layout), or {:line
+;; (volatile! current line) :forced line-or-nil :meta inside-metadata?}.
+
+(defn- newlines
+  "The number of newlines in s."
+  ^long [^String s]
+  (loop [i (long (.indexOf s "\n")) n 0]
+    (if (neg? i) n (recur (long (.indexOf s "\n" (unchecked-int (inc i)))) (inc n)))))
+
+(defn- out! [^StringBuilder sb lay ^String s]
+  (.append sb s)
+  (when lay
+    (let [n (newlines s)]
+      (when (pos? n) (vswap! (:line lay) + n)))))
+
+(defn- write-meta [^StringBuilder sb lay mt]
+  (let [mt (dissoc mt :j2g/line)]
+    (when (seq mt)
+      (let [lay (when lay (assoc lay :meta true))]
+        (if (and (= [:tag] (keys mt)) (symbol? (:tag mt)))
+          (do (out! sb lay "^") (write-form sb lay (:tag mt)) (out! sb lay " "))
+          (do (out! sb lay "^") (write-form sb lay mt) (out! sb lay " ")))))))
+
+(defn- write-items [^StringBuilder sb lay xs]
+  (loop [xs (seq xs) first? true]
+    (when xs
+      (when-not first? (out! sb lay " "))
+      (write-form sb lay (first xs))
+      (recur (next xs) false))))
+
+(defn- write-list [^StringBuilder sb lay f mt]
+  (let [own (:j2g/line mt)
+        forced (:forced lay)
+        cur (when lay @(:line lay))
+        explicit (cond
+                   (nil? lay) nil
+                   forced (or own forced)
+                   ;; inside metadata (tags): no padding, the line of the form around
+                   (:meta lay) nil
+                   (nil? own) nil
+                   (>= own cur) (do (out! sb lay (apply str (repeat (- own cur) "\n"))) nil)
+                   :else own)
+        lay (if (and explicit (not= explicit forced)) (assoc lay :forced explicit) lay)]
+    (write-meta sb lay (if explicit (assoc mt :line explicit) mt))
+    (out! sb lay "(") (write-items sb lay f) (out! sb lay ")")))
+
+(defn- write-form [^StringBuilder sb lay f]
+  (let [mt (when (or (symbol? f) (seq? f) (vector? f)) (meta f))]
+    (cond
+      (seq? f) (write-list sb lay f mt)
+      (vector? f) (do (write-meta sb lay mt)
+                      (out! sb lay "[") (write-items sb lay f) (out! sb lay "]"))
+      (map? f) (do (out! sb lay "{")
+                   (loop [es (seq f) first? true]
+                     (when es
+                       (let [[k v] (first es)]
+                         (when-not first? (out! sb lay " "))
+                         (write-form sb lay k) (out! sb lay " ") (write-form sb lay v))
+                       (recur (next es) false)))
+                   (out! sb lay "}"))
+      (symbol? f) (do (write-meta sb lay mt) (out! sb lay (str f)))
+      ;; a value without metadata prints the same whatever *print-meta* is
+      (instance? arbace.lang.IMeta f) (out! sb lay (binding [*print-meta* false] (pr-str f)))
+      :else (out! sb lay (pr-str f)))))
+
+(defn form-text [f]
+  (let [sb (StringBuilder.)]
+    (write-form sb nil (clean f))
+    (str sb)))
+
+(def import-paths
+  {"jrt" "arbace/jrt" "math" "math" "atomic" "sync/atomic" "reflect" "reflect" "unsafe" "unsafe"
+   "strings" "strings" "lang" "arbace/lang" "sync" "sync"})
+
+(defn- used-qualifiers [forms]
+  (let [acc (volatile! #{})]
+    (letfn [(w [x]
+              (cond
+                (symbol? x) (do (when-let [q (namespace x)] (vswap! acc conj q))
+                                (when-let [mt (meta x)] (w (:tag mt))))
+                (seq? x) (do (when-let [mt (meta x)] (w (:tag mt))) (run! w x))
+                (vector? x) (do (when-let [mt (meta x)] (w (:tag mt))) (run! w x))
+                (map? x) (run! w (vals x))
+                :else nil))]
+      (run! w forms))
+    @acc))
+
+(defn- lined?
+  "Does form f hold a list with a Java forms line (:j2g/line), its tags included? Then its
+  text depends on the line it starts on (write-list); else not."
+  [f]
+  (let [lined-meta? (fn [x] (when-let [mt (meta x)] (or (some? (:j2g/line mt)) (lined? (:tag mt)))))]
+    (cond (seq? f) (boolean (or (lined-meta? f) (some lined? f)))
+          (vector? f) (boolean (or (lined-meta? f) (some lined? f)))
+          (symbol? f) (boolean (lined-meta? f))
+          (map? f) (boolean (some (fn [[k v]] (or (lined? k) (lined? v))) f))
+          :else false)))
+
+(def ^:private split-min
+  "A file of this many forms or more has the texts of its forms without lines computed in
+  parallel (j2g_classes.go: 8,000 registrations), before it is laid out."
+  256)
+
+(defn- unlined-texts
+  "For the forms of a long file (split-min), by index, the text of each form that holds no line
+  (lined?), cleaned and written as file-text writes it (its text does not depend on where it
+  starts), or nil for the others; computed in parallel, by chunks. nil for a short file."
+  [forms]
+  (when (>= (count forms) split-min)
+    (let [one (fn [f]
+                (when-not (and (seq? f) (= 'j2g/comment (first f)))
+                  (let [f (clean f)]
+                    (when-not (lined? f)
+                      (let [sb (StringBuilder.)]
+                        (write-form sb {:line (volatile! 1) :forced nil} f)
+                        (str sb))))))
+          chunks (partition-all (max 16 (quot (count forms) (* 2 (m/jobs)))) forms)]
+      (into [] cat (m/par-mapv (m/jobs) (fn [fs] (mapv one fs)) chunks)))))
+
+(defn file-text
+  "The text of a Go forms file of package pkg named go-name holding forms (a long one's forms
+  without lines written in parallel first, unlined-texts)."
+  [pkg go-name forms & [header]]
+  (let [forms (vec forms)
+        pre (unlined-texts forms)
+        quals (used-qualifiers forms)
+        compiled (set (vals @nm/compiled-packages))
+        path-of (fn [q] (or (import-paths q) (when (contains? compiled q) (nm/pkg-path (keyword q)))))
+        imports (vec (for [q (sort quals)
+                           :when (path-of q)
+                           :when (not (= q (nm/pkg-name pkg)))
+                           :when (not (and (= q "arbace.core")))]
+                       [(symbol q) (path-of q)]))
+        sb (StringBuilder.)]
+    (let [lay {:line (volatile! 1) :forced nil}]
+      (out! sb lay (str ";; Generated by j2g (arbace/j2g, doc/go/J2G-SPEC.md); do not edit.\n"))
+      (when header (out! sb lay header))
+      (out! sb lay (str "(in-ns '" (nm/pkg-ns pkg) ")\n\n"))
+      (write-form sb lay (clean (list 'go/file go-name :imports imports)))
+      (out! sb lay "\n")
+      ;; Go's package-level declarations may come in any order: those with a Java forms line
+      ;; first, by line (so that each lands on its line), then the rest in their order
+      ;; (by index: pre is the text of the i-th form, or nil)
+      (doseq [i (let [line-of #(when (seq? (nth forms %)) (:j2g/line (meta (nth forms %))))
+                      lined (filter line-of (range (count forms)))]
+                  (concat (sort-by line-of lined) (remove line-of (range (count forms)))))
+              :let [f (nth forms i)]]
+        (if (and (seq? f) (= 'j2g/comment (first f)))
+          (out! sb lay (str "\n;; " (second f) "\n"))
+          (let [own (when (seq? f) (:j2g/line (meta f)))]
+            ;; a blank line between declarations, unless the next one's line comes later
+            (when-not (and own (>= own @(:line lay))) (out! sb lay "\n"))
+            (if-let [text (and pre (nth pre i))]
+              (out! sb lay text)
+              (write-form sb lay (clean f)))
+            (out! sb lay "\n")))))
+    (str sb)))
+
+(defn go-file-name
+  "The Go file of a Java forms file (§4.3): its name for arbace/lang, the Java source path
+  with _ for / in jrt; _j2g appended when the name would read as a build constraint."
+  [pkg top]
+  (let [base (if (= pkg :jrt)
+               (str/replace top "/" "_")
+               (subs top (inc (.lastIndexOf ^String top "/"))))
+        base (str/replace base "$" "_")
+        parts (str/split base #"_")
+        constraint #{"aix" "android" "darwin" "dragonfly" "freebsd" "hurd" "illumos" "ios" "js" "linux"
+                     "nacl" "netbsd" "openbsd" "plan9" "solaris" "wasip1" "windows" "zos" "tamago"
+                     "386" "amd64" "arm" "arm64" "loong64" "mips" "mipsle" "mips64" "mips64le" "ppc64"
+                     "ppc64le" "riscv64" "s390x" "wasm" "test"}]
+    (str base (if (and (> (count parts) 1) (constraint (last parts))) "_j2g" "") ".go")))
+
+;; ---------------------------------------------------------------------------------------
+;; generated package files
+
+(defn- lone-surrogate?
+  "Does string s hold a surrogate that is not half of a pair?"
+  [^String s]
+  (let [n (.length s)]
+    (loop [i 0]
+      (if (< i n)
+        (let [ch (.charAt s i)]
+          (cond
+            (Character/isHighSurrogate ch)
+            (if (and (< (inc i) n) (Character/isLowSurrogate (.charAt s (inc i)))) (recur (+ i 2)) true)
+            (Character/isLowSurrogate ch) true
+            :else (recur (inc i))))
+        false))))
+
+(defn strings-forms
+  "The literal pool (§7.5): Lit_n vars interned at package initialization."
+  [pkg lits]
+  (for [[s sym] (sort-by (comp #(Long/parseLong (subs (name %) 4)) val) lits)]
+    (let [units (map int s)
+          lone? (lone-surrogate? s)]
+      (list 'go/var (tag sym (list '* (m/jrt-sym pkg "String")))
+            (if lone?
+              (list (m/jrt-sym pkg "InternUTF16") (apply list 'lit '(slice uint16) units))
+              (list (m/jrt-sym pkg "Intern") s))))))
+
+(defn ups-forms
+  "The nil-preserving conversions Up_From_To (§5.6) the package's code needs."
+  [pkg ups]
+  (binding [c/*f* {:pkg pkg}]
+    (for [[from to] (sort ups)]
+      (list 'go/func (symbol (str "Up_" (nm/desc-code from) "_" (nm/desc-code to)))
+            (with-meta [(tag 'p (m/go-type pkg from))] {:tag (m/go-type pkg to)})
+            (list 'when (list '== 'p nil) (list 'return nil))
+            'p))))
+
+(defn adapter-forms
+  "The adapter F_Fn of functional interface fi (§7.11): its SAM calls Fn, default methods
+  forward to their functions."
+  [pkg key]
+  (let [[fi & markers] (if (vector? key) key [key])
+        g (m/go-name fi)
+        a (apply str g "_Fn" (map #(str "_" (m/go-name %)) markers))
+        sam (a/find-sam fi)
+        [ps r] (t/parse-method-desc (:desc sam))
+        pn (vec (for [i (range (count ps))] (symbol (str "p" i))))
+        recv (tag 't (list '* (symbol a)))
+        ftype (if (= "V" r)
+                (list 'func (vec (map #(m/go-type pkg %) ps)))
+                (list 'func (vec (map #(m/go-type pkg %) ps)) [(m/go-type pkg r)]))
+        call (apply list (list '.-Fn 't) pn)]
+    (concat
+      [(list 'j2g/comment (str "---- the lambda adapter of " (str/replace fi "/" ".")
+                               (apply str (map #(str " & " (str/replace % "/" ".")) markers))))
+       (list 'go/type (symbol a) (list 'struct (m/jrt-sym pkg "Object") (tag 'Fn ftype)))
+       (list 'go/method (symbol (nm/method-base (:name sam) (:desc sam)))
+             (cond-> (vec (cons recv (map #(tag %1 (m/go-type pkg %2)) pn ps)))
+               (not= "V" r) (vary-meta assoc :tag (m/go-type pkg r)))
+             (if (= "V" r) call (list 'return call)))]
+      (for [j (distinct (concat (cons fi (d/interface-closure fi))
+                                (mapcat #(cons % (d/interface-closure %)) markers)))]
+        (list 'go/method (symbol (str "Is_" (m/go-name j))) [recv]))
+      ;; default methods of the interface and its superinterfaces
+      (for [[[name desc :as k] mm] (m/vmethods fi)
+            :when (not= [name desc] [(:name sam) (:desc sam)])
+            :let [impl (m/impl-of fi k)
+                  [mps mr] (t/parse-method-desc desc)
+                  mpn (vec (for [i (range (count mps))] (symbol (str "p" i))))
+                  base (nm/method-base name desc)]]
+        (list 'go/method (symbol base)
+              (cond-> (vec (cons recv (map #(tag %1 (m/go-type pkg %2)) mpn mps)))
+                (not= "V" mr) (vary-meta assoc :tag (m/go-type pkg mr)))
+              (if (and impl (= :default (:kind impl)))
+                (apply list (m/class-sym pkg (:owner impl) (str "_" base)) 't mpn)
+                (list 'panic (list (m/jrt-sym pkg "J2g_NotTranslated") (str "abstract " name desc))))))
+      [(list 'go/method 'Ref (with-meta [recv] {:tag 'any}) (list 'when (list '== 't nil) (list 'return nil)) 't)
+       (list 'go/method 'GetClass__Class (with-meta [recv] {:tag (list '* (m/jrt-sym pkg "Class"))}) (symbol (str a "_class")))
+       (list 'go/method 'ToString__String (with-meta [recv] {:tag (list '* (m/jrt-sym pkg "String"))})
+             (list (m/jrt-sym pkg "Object_toString") 't))
+       (list 'go/method 'Clone__O (with-meta [recv] {:tag 'any}) (list 'panic (list (m/jrt-sym pkg "CloneNotSupported") 't)))
+       (list 'go/var (symbol (str a "_class"))
+             (list (m/jrt-sym pkg "Define")
+                   (list 'addr (list 'lit (m/jrt-sym pkg "ClassInfo")
+                                     :Name (apply str (str/replace fi "/" ".") "$$Lambda"
+                                                  (map #(str "$" (m/go-name %)) markers))
+                                     :Modifiers 0x1010 :Kind (m/jrt-sym pkg "KindClass")
+                                     :Super (m/jrt-sym pkg "Object_class")
+                                     :Interfaces (apply list 'lit (list 'slice (list '* (m/jrt-sym pkg "Class")))
+                                                        (map #(m/class-sym pkg % "_class") (cons fi markers)))
+                                     :Go (str (nm/pkg-path pkg) "." a)))))])))
+
+(def string-regex-methods
+  "String's methods over java.util.regex, which j2g writes into jrt's j2g_support when Pattern is
+  translated (jrt's String is hand-written; JRT-NOTES.md, \"waiting for the regex port\"): Go
+  method name, then its definition as jdk26u's String defines it (split's one-character fast
+  path gives what Pattern.split gives)."
+  [["Split_String__String1"
+    '(go/method Split_String__String1 "Split_String__String1 is String.split(regex).\n"
+       ^{:tag (* RefArray)} [^{:tag (* String)} t ^{:tag (* String)} regex]
+       (.Split_String_I__String1 t regex 0))]
+   ["Split_String_I__String1"
+    '(go/method Split_String_I__String1 "Split_String_I__String1 is String.split(regex, limit).\n"
+       ^{:tag (* RefArray)} [^{:tag (* String)} t ^{:tag (* String)} regex ^int32 limit]
+       (.Split_CharSequence_I__String1 (Pattern_Compile_String__Pattern regex) t limit))]
+   ["ReplaceAll_String_String__String"
+    '(go/method ReplaceAll_String_String__String "ReplaceAll_String_String__String is String.replaceAll.\n"
+       ^{:tag (* String)} [^{:tag (* String)} t ^{:tag (* String)} regex ^{:tag (* String)} replacement]
+       (.ReplaceAll_String__String (.Matcher_CharSequence__Matcher (Pattern_Compile_String__Pattern regex) t) replacement))]
+   ["ReplaceFirst_String_String__String"
+    '(go/method ReplaceFirst_String_String__String "ReplaceFirst_String_String__String is String.replaceFirst.\n"
+       ^{:tag (* String)} [^{:tag (* String)} t ^{:tag (* String)} regex ^{:tag (* String)} replacement]
+       (.ReplaceFirst_String__String (.Matcher_CharSequence__Matcher (Pattern_Compile_String__Pattern regex) t) replacement))]
+   ["Matches_String__Z"
+    '(go/method Matches_String__Z "Matches_String__Z is String.matches.\n"
+       ^bool [^{:tag (* String)} t ^{:tag (* String)} regex]
+       (Pattern_Matches_String_CharSequence__Z regex t))]])
+
+(def java-names
+  "Classes of jrt's own Java (overlay/jdk) that stand for a JDK class jrt cannot translate (a
+  nested class of a hand-written one): the name Class.getName answers for them."
+  {"jdk/internal/jrt/CaseInsensitiveComparator" "java.lang.String$CaseInsensitiveComparator"})
+
+(defn java-name [n] (or (java-names n) (str/replace n "/" ".")))
+
+(defn jrt-default-forwarders
+  "Forwarders on jrt's hand-written leaf classes to the default methods of translated
+  interfaces they implement and do not define themselves (CharSequence's chars and
+  codePoints on String, StringBuilder and StringBuffer once streams are in the world): Go's
+  interface satisfaction needs the methods, which jrt's own build cannot name (§5.4)."
+  []
+  (for [n (sort (keys (:jrt-classes m/*w*)))
+        :when (and (m/hand-written? n) (not (m/interface? n)) (not (m/abstract? n)) (m/leaf? n)
+                   (= :jrt (m/pkg n)))
+        :let [g (m/go-name n)
+              have (jrt/struct-methods (:jrt m/*w*) g)]
+        ;; a class jrt declares without a Go type of its own (statics only) has no methods
+        :when (contains? (:types (:jrt m/*w*)) g)
+        [[name desc :as k] _] (m/vmethods n)
+        :let [impl (m/impl-of n k)
+              base (nm/method-base name desc)]
+        :when (and impl (= :default (:kind impl)) (not (contains? have base)))
+        :let [[mps mr] (t/parse-method-desc desc)
+              mpn (vec (for [i (range (count mps))] (symbol (str "p" i))))
+              call (apply list (m/class-sym :jrt (:owner impl) (str "_" base)) 't mpn)]]
+    (list 'go/method (symbol base)
+          (cond-> (vec (cons (tag 't (list '* (symbol g))) (map #(tag %1 (m/go-type :jrt %2)) mpn mps)))
+            (not= "V" mr) (vary-meta assoc :tag (m/go-type :jrt mr)))
+          (if (= "V" mr) call (list 'return call)))))
+
+(def fjp-support-class "jdk/internal/jrt/ForkJoinPools")
+
+(def fjp-support-methods
+  "The methods of ExecutorService jrt's hand-written ForkJoinPool cannot define (their types are
+  translated), as [name desc]: j2g gives ForkJoinPool Go methods calling jrt's own
+  jdk.internal.jrt.ForkJoinPools (JRT-NOTES.md, \"Concurrency\", JC7)."
+  [["shutdownNow" "()Ljava/util/List;"]
+   ["invokeAll" "(Ljava/util/Collection;)Ljava/util/List;"]
+   ["invokeAll" "(Ljava/util/Collection;JLjava/util/concurrent/TimeUnit;)Ljava/util/List;"]
+   ["invokeAny" "(Ljava/util/Collection;)Ljava/lang/Object;"]
+   ["invokeAny" "(Ljava/util/Collection;JLjava/util/concurrent/TimeUnit;)Ljava/lang/Object;"]])
+
+(defn fjp-support-key
+  "The static method of ForkJoinPools behind ExecutorService method [name desc]: the pool first."
+  [[name desc]]
+  [fjp-support-class name (str "(Ljava/util/concurrent/ForkJoinPool;" (subs desc 1))])
+
+(defn fjp-support-forms
+  "ForkJoinPool's Go methods for fjp-support-methods, once ExecutorService and ForkJoinPools are
+  translated and ForkJoinPool is jrt's."
+  []
+  (when (and (m/translated? "java/util/concurrent/ExecutorService") (m/translated? fjp-support-class)
+             (m/hand-written? "java/util/concurrent/ForkJoinPool"))
+    (for [[name desc :as k] fjp-support-methods
+          :let [[ps r] (t/parse-method-desc desc)
+                [_ hn hd] (fjp-support-key k)
+                pn (vec (for [i (range (count ps))] (symbol (str "p" i))))]]
+      (list 'go/method (symbol (nm/method-base name desc))
+            (vary-meta (vec (cons (tag 't '(* ForkJoinPool)) (map #(tag %1 (m/go-type :jrt %2)) pn ps)))
+                       assoc :tag (m/go-type :jrt r))
+            (list 'return (apply list (m/class-sym :jrt fjp-support-class (str "_" (nm/method-base hn hd))) 't pn))))))
+
+(defn support-forms
+  "j2g's helpers in package jrt (j2g_support): what translated code calls besides jrt's API."
+  []
+  (let [bool-translated (m/translated? "java/lang/Boolean")
+        bool-init (and bool-translated (not (m/trivial-init? "java/lang/Boolean")))]
+    (concat
+     ;; String's regex methods
+     (when (m/translated? "java/util/regex/Pattern") (map second string-regex-methods))
+     (jrt-default-forwarders)
+     ;; ForkJoinPool's ExecutorService methods over translated types (JC7)
+     (fjp-support-forms)
+     ;; String's members over translated classes (jrt's String cannot name them): Constable's
+     ;; describeConstable once Optional is in the world, and lines() once streams are
+     (when (and (m/translated? "java/util/Optional") (m/translated? "java/lang/constant/Constable"))
+       ['(go/method DescribeConstable__Optional "DescribeConstable__Optional is String.describeConstable: Optional.of(this).\n"
+          ^{:tag (* Optional)} [^{:tag (* String)} t]
+          (Optional_Of_O__Optional t))])
+     (when (and (m/translated? "java/util/stream/Stream") (m/translated? "java/util/ArrayList"))
+       ['(go/method Lines__Stream "Lines__Stream is String.lines: the lines (split at \\n, \\r, \\r\\n) as a
+sequential stream (over an ArrayList: not jdk26u's lazy spliterator).\n"
+          ^Stream [^{:tag (* String)} t]
+          (let [l (ArrayList_New)]
+            (range [_ x (splitLines (.-value t))]
+              (.Add_O__Z l (NewStringUTF16 x)))
+            (.Stream__Stream l)))])
+     ;; Class.getResourceAsStream over the host's resources (the program's embedded data, then
+     ;; ARBACE_PATH: jrt's ResourceOrPath) once ByteArrayInputStream is translated (JRT-NOTES.md,
+     ;; "The JDK's resource data"); jrt's Class cannot name the translated InputStream
+     (when (m/translated? "java/io/ByteArrayInputStream")
+       [(list 'go/method 'GetResourceAsStream_String__InputStream
+              "GetResourceAsStream_String__InputStream is Class.getResourceAsStream: the resource name
+resolved as Class.resolveName resolves it (absolute without its /, else in the package of the
+class or of its arrays' element class), from the host's resources, as a ByteArrayInputStream; null
+when there is none.\n"
+              (with-meta [(tag 'c '(* Class)) (tag 'name '(* String))] {:tag (m/go-type :jrt "Ljava/io/InputStream;")})
+              '(let [n (.String (NN name))]
+                 (if (strings/HasPrefix n "/")
+                   (set! n (subslice n 1))
+                   (let [e c]
+                     (while (.IsArray__Z e)
+                       (set! e (.GetComponentType__Class e)))
+                     (let [cn (.-Name (.Info e))
+                           i (strings/LastIndexByte cn \.)]
+                       (when (>= i 0)
+                         (set! n (+ (strings/ReplaceAll (subslice cn _ i) "." "/") "/" n))))))
+                 (let [(values b ok) (ResourceOrPath n)]
+                   (when (not ok)
+                     (return nil))
+                   (let [a (NewByteArray (conv int32 (len b)))]
+                     (range [i x b]
+                       (aset (.-A a) i (conv int8 x)))
+                     (return (ByteArrayInputStream_New_B1 a))))))])
+     ;; java.util.Date's default zone (JRT-NOTES.md, "Time"): jrt's Date computes its local
+     ;; fields, toString's zone name and its local constructors through jrt's DateZone hooks,
+     ;; which jrt's own Java jdk.internal.jrt.DefaultZone answers over the translated TimeZone
+     ;; (jrt's Date cannot name them)
+     (when (m/translated? "jdk/internal/jrt/DefaultZone")
+       ['(go/func j2gSetDateZone "j2gSetDateZone sets jrt's DateZone hooks to DefaultZone's methods.\n" ^bool []
+          (set! DateZoneOffset DefaultZone_Offset_J__I)
+          (set! DateZoneOffsetByWall DefaultZone_OffsetByWall_J__I)
+          (set! DateZoneName (fn ^string [^int64 ms] (return (.String (DefaultZone_Name_J__String ms)))))
+          true)
+        '(go/var ^bool j2gDateZoneSet (j2gSetDateZone))])
+     (remove nil? [(list 'go/var (tag 'J2g_AssertionsDisabled 'bool) true)
+     (list 'go/func 'J2g_NotTranslated (with-meta [(tag 'what 'string)] {:tag 'Throwable_I})
+           (list 'UnsupportedOperationException_New_String (list 'Str (list '+ "j2g: not translated: " 'what))))
+     (list 'go/func 'J2g_Missing :type-params ['T] (with-meta [(tag 'why 'string)] {:tag 'T})
+           (list 'panic (list 'Thrown (list 'UnsupportedOperationException_New_String (list 'Str (list '+ "j2g: " 'why))))))
+     (list 'go/func 'J2g_NotNull :type-params ['T] (with-meta [(tag 'x 'T)] {:tag 'T})
+           (list 'when (list '== (list 'conv 'any 'x) nil) (list 'panic (list 'NPE)))
+           'x)
+     (apply list 'go/func 'J2g_Truth (with-meta [(tag 'x 'any)] {:tag 'bool})
+            (remove nil?
+                    [(list 'when (list '== 'x nil) (list 'return false))
+                     (when bool-init (list 'Boolean_Init))
+                     (list 'return (list '!= 'x (list 'conv 'any 'Boolean_FALSE)))]))
+     (list 'go/func 'J2g_CastArray :type-params ['T] (with-meta [(tag 'x 'any) (tag 'cls '(* Class))] {:tag 'T})
+           (list 'when (list '== 'x nil) (list 'let [(tag 'z 'T) (list 'zero 'T)] (list 'return 'z)))
+           ;; checkcast's ClassCastException, with HotSpot's message (jrt.ClassCast)
+           (list 'when (list 'not (list '.IsInstance_O__Z 'cls 'x)) (list 'panic (list 'ClassCast 'x 'cls)))
+           (list 'assert 'T 'x))
+     (list 'go/func 'J2g_Discard (with-meta [(tag 'x 'any)] {:tag 'bool}) false)
+     '(go/func J2g_RefP "J2g_RefP is a pointer as an any, nil-preserving (§5.6).\n"
+        :type-params [T] ^any [^{:tag (* T)} p]
+        (when (== p nil) (return nil))
+        p)
+     (when (and (m/translated? "java/util/Formatter")
+                (not (contains? (:funcs (arbace.j2g.jrt/scan-file (java.io.File. "go/arbace/jrt/string.ae"))) "String_Format_String_O1__String")))
+       '(go/func String_Format_String_O1__String
+          "String_Format_String_O1__String is String.format: a new Formatter's format (j2g's, over the
+translated java.util.Formatter).\n"
+          ^{:tag (* String)} [^{:tag (* String)} format ^{:tag (* RefArray)} args]
+          (.ToString__String (.Format_String_O1__Formatter (Formatter_New) format args))))
+     (when (m/translated? "java/util/Formatter")
+       '(go/method Formatted_O1__String
+          "Formatted_O1__String is String.formatted: String.format(this, args).\n"
+          ^{:tag (* String)} [^{:tag (* String)} t ^{:tag (* RefArray)} args]
+          (.ToString__String (.Format_String_O1__Formatter (Formatter_New) t args))))
+     ;; String.join over an Iterable (jrt's String cannot name the translated Iterable)
+     (when (and (m/translated? "java/lang/Iterable") (m/translated? "java/lang/CharSequence"))
+       '(go/func String_Join_CharSequence_Iterable__String
+          "String_Join_CharSequence_Iterable__String is String.join(CharSequence, Iterable): each
+element cast to CharSequence (the for loop's checkcast), then joined as the array overload joins.\n"
+          ^{:tag (* String)} [^CharSequence sep ^Iterable elements]
+          (when (== sep nil) (panic (NPE)))
+          (when (== elements nil) (panic (NPE)))
+          (let [^{:tag (slice any)} es nil
+                it (.Iterator__Iterator elements)]
+            (while (.HasNext__Z it)
+              (set! es (append es (CharSequence_Cast (.Next__O it)))))
+            (String_Join_CharSequence_CharSequence1__String sep (RefArrayOf CharSequence_class (spread es))))))
+     (when (m/translated? "java/util/Formatter")
+       '(go/func String_Format_Locale_String_O1__String
+          "String_Format_Locale_String_O1__String is String.format(Locale, ...).\n"
+          ^{:tag (* String)} [^{:tag (* Locale)} l ^{:tag (* String)} format ^{:tag (* RefArray)} args]
+          (.ToString__String (.Format_String_O1__Formatter (Formatter_New_Locale l) format args))))
+     ;; Throwable.printStackTrace(PrintStream|PrintWriter) and System.getenv() for the REPL's
+     ;; reflection (step 5 phase 2B): jrt cannot name the translated classes
+     (when (m/translated? "java/io/PrintWriter")
+       (list 'go/func 'J2g_PrintStackTraceWriter
+             "J2g_PrintStackTraceWriter is Throwable.printStackTrace(PrintWriter): the trace's text printed.\n"
+             [(tag 't 'Throwable_I) (tag 'w (m/go-type :jrt "Ljava/io/PrintWriter;"))]
+             '(.Print_String__V (NN w) (StackTraceString t))))
+     (when (m/translated? "java/io/PrintStream")
+       (list 'go/func 'J2g_PrintStackTraceStream
+             "J2g_PrintStackTraceStream is Throwable.printStackTrace(PrintStream).\n"
+             [(tag 't 'Throwable_I) (tag 's (m/go-type :jrt "Ljava/io/PrintStream;"))]
+             '(.Print_String__V (NN s) (StackTraceString t))))
+     (when (and (m/translated? "java/util/HashMap") (m/translated? "java/util/Collections"))
+       (list 'go/func 'J2g_SystemGetenv
+             "J2g_SystemGetenv is System.getenv(): the host's environment as an unmodifiable map.\n"
+             (with-meta [] {:tag (m/go-type :jrt "Ljava/util/Map;")})
+             '(let [m (HashMap_New)]
+                (range [_ kv (.Environ (CurrentHost))]
+                  (let [i (strings/IndexByte kv \=)]
+                    (when (> i 0)
+                      (.Put_O_O__O m (Str (subslice kv _ i)) (Str (subslice kv (+ i 1)))))))
+                (Collections_UnmodifiableMap_Map__Map m))))
+     ;; System.getProperties() (the socket server's start, arbace.core.server/start-servers;
+     ;; JRT-NOTES.md, "Sockets"): a Properties holding a copy of the properties
+     (when (m/translated? "java/util/Properties")
+       (list 'go/func 'J2g_SystemGetProperties
+             "J2g_SystemGetProperties is System.getProperties(): a Properties with the system properties
+(a copy: the Go build keeps them in jrt's table, System.setProperty's).\n"
+             (with-meta [] {:tag (m/go-type :jrt "Ljava/util/Properties;")})
+             '(let [p (Properties_New)]
+                (range [_ k (PropertyNames)]
+                  (let [v (System_GetProperty_String__String (Str k))]
+                    (when (!= v nil)
+                      (.SetProperty_String_String__O p (Str k) v))))
+                p)))
+     (when (m/translated? "java/util/Properties")
+       (list 'go/func 'System_GetProperties__Properties
+             "System_GetProperties__Properties is System.getProperties() as translated code calls it
+(m/j2g-static?).\n"
+             (with-meta [] {:tag (m/go-type :jrt "Ljava/util/Properties;")})
+             '(J2g_SystemGetProperties)))
+     ;; jrt's statics whose values are translated objects (J2G-NOTES.md, phase 2C)
+     (when (m/translated? "jdk/internal/jrt/StandardStreams")
+       (let [is (m/go-type :jrt "Ljava/io/InputStream;")
+             ps (m/go-type :jrt "Ljava/io/PrintStream;")]
+         (list 'go/var [(tag 'System_in is)] [(tag 'System_out ps)] [(tag 'System_err ps)])))
+     (when (m/translated? "jdk/internal/jrt/StandardStreams")
+       (list 'go/func 'System_SetIn_InputStream__V "System_SetIn_InputStream__V is System.setIn.\n"
+             [(tag 'in (m/go-type :jrt "Ljava/io/InputStream;"))] '(set! System_in in)))
+     (when (m/translated? "jdk/internal/jrt/StandardStreams")
+       (list 'go/func 'System_SetOut_PrintStream__V "System_SetOut_PrintStream__V is System.setOut.\n"
+             [(tag 'out (m/go-type :jrt "Ljava/io/PrintStream;"))] '(set! System_out out)))
+     (when (m/translated? "jdk/internal/jrt/StandardStreams")
+       (list 'go/func 'System_SetErr_PrintStream__V "System_SetErr_PrintStream__V is System.setErr.\n"
+             [(tag 'err (m/go-type :jrt "Ljava/io/PrintStream;"))] '(set! System_err err)))
+     (when (m/translated? "jdk/internal/jrt/CaseInsensitiveComparator")
+       (list 'go/var (tag 'String_CASE_INSENSITIVE_ORDER (m/go-type :jrt "Ljava/util/Comparator;"))))
+     (when (or (m/translated? "jdk/internal/jrt/StandardStreams") (m/translated? "jdk/internal/jrt/CaseInsensitiveComparator"))
+       (apply list 'go/func 'init []
+              (concat
+                (when (m/translated? "jdk/internal/jrt/CaseInsensitiveComparator")
+                  (concat (when-not (m/trivial-init? "jdk/internal/jrt/CaseInsensitiveComparator")
+                            ['(CaseInsensitiveComparator_Init)])
+                          ['(set! String_CASE_INSENSITIVE_ORDER CaseInsensitiveComparator_INSTANCE)]))
+                (when (m/translated? "jdk/internal/jrt/StandardStreams")
+                  ['(set! System_in (StandardStreams_In__InputStream))
+                   '(set! System_out (StandardStreams_Out__PrintStream))
+                   '(set! System_err (StandardStreams_Err__PrintStream))
+                   ;; printStackTrace() and uncaught exceptions print to System.err, as the
+                   ;; JVM's do (jrt's host stream while it is null)
+                   (list 'let [(tag 'host (list 'func ['string])) 'StderrPrint]
+                         (list 'set! 'StderrPrint
+                               (list 'fn [(tag 's 'string)]
+                                     (list 'when (list '== 'System_err nil)
+                                           '(host s)
+                                           '(return))
+                                     '(.Print_String__V System_err (Str s))
+                                     '(.Flush__V System_err))))]))))
+     ;; records' derived equals and hashCode (java.lang.runtime.ObjectMethods)
+     '(go/func J2g_ObjHash "J2g_ObjHash is Objects.hashCode.\n" ^int32 [^any x]
+        (when (== x nil) (return 0))
+        (HashCode x))
+     '(go/func J2g_ObjEquals "J2g_ObjEquals is Objects.equals.\n" ^bool [^any a ^any b]
+        (when (== a b) (return true))
+        (when (or (== a nil) (== b nil)) (return false))
+        (Equals a b))
+     '(go/func J2g_DoubleBits "J2g_DoubleBits is Double.doubleToLongBits (one NaN).\n" ^int64 [^float64 d]
+        (when (math/IsNaN d) (return 0x7ff8000000000000))
+        (conv int64 (math/Float64bits d)))
+     '(go/func J2g_BoolHash "J2g_BoolHash is Boolean.hashCode(boolean).\n" ^int32 [^bool b]
+        (when b (return 1231))
+        (return 1237))
+     '(go/func J2g_FloatBits "J2g_FloatBits is Float.floatToIntBits (one NaN).\n" ^int32 [^float32 f]
+        (when (!= f f) (return 0x7fc00000))
+        (conv int32 (math/Float32bits f)))
+     (list 'go/type 'J2gCloner (list 'interface (list 'CloneShallow (with-meta [] {:tag 'any}))))
+     (list 'go/func 'J2g_ObjectClone (with-meta [(tag 'x 'any)] {:tag 'any})
+           (list '.CloneShallow (list 'assert 'J2gCloner 'x)))]))))
+
+(defn- modifiers [n]
+  (let [dd (a/decl n)
+        fl (if (and dd (not= :top (:nesting dd))) (:inner-flags dd) (:flags (m/info n)))
+        fl (or fl 1)]
+    (bit-and fl 0x761f)))
+
+(defn- kind-sym [pkg n]
+  (let [dd (or (a/decl n) {:kind (if (m/interface? n) :interface :class)})]
+    (m/jrt-sym pkg (case (:kind dd)
+                     :interface "KindInterface" :annotation "KindAnnotation" :enum "KindEnum"
+                     :record "KindRecord" "KindClass"))))
+
+(defn- arg-conv [pkg d x]
+  (cond (t/prim? d) (list 'assert (m/go-type pkg d) x)
+        (= d "Ljava/lang/Object;") x
+        :else (list (list 'inst (m/jrt-sym pkg "As") (m/go-type pkg d)) x)))
+
+(defn- result-any [pkg d call]
+  (cond (= d "V") nil
+        (m/pointer-desc? d) (list (m/jrt-sym pkg "J2g_RefP") call)
+        :else call))
+
+(def ^:dynamic *absent-members*
+  "Whether member tables list the public methods that do not exist in Go (bin/j2g --program)."
+  false)
+
+(defn- method-order
+  "The order of the JVM's getDeclaredMethods for the overloads of class n among methods mms, when
+  it is stable (edge/archived-classes): {name [[parameter binary names] ...]} for each name of more
+  than one of mms, the parameter lists in the order of their (last) index; else nil."
+  [n mms]
+  (when-let [^Class jc (when (contains? @edge/archived-classes n)
+                         (try (Class/forName (java-name n) false (ClassLoader/getSystemClassLoader))
+                              (catch Throwable _ nil)))]
+    (let [order (into {} (map-indexed (fn [i ^java.lang.reflect.Method x]
+                                        [[(.getName x) (vec (map #(.getName ^Class %) (.getParameterTypes x)))] i])
+                                      (.getDeclaredMethods jc)))
+          names (for [[nme k] (frequencies (map :name mms)) :when (> k 1)] nme)
+          m (into {} (for [nme names
+                           :let [ps (mapv (comp second key) (sort-by val (filter #(= nme (first (key %))) order)))]
+                           :when (seq ps)]
+                       [nme ps]))]
+      (when (seq m) m))))
+
+(defn- dotted-desc
+  "A descriptor with binary names (java.util.Map$Entry), as jrt's member tables hold them."
+  [d]
+  (str/replace d "/" "."))
+
+(defn member-table-form
+  "The MemberTable of class g's tables {:methods :ctors :fields} (amendment SZ3): the members'
+  lines as data, and per kind one dispatch function, a switch over the member's index among
+  its kind's (a member without a :body has none: jrt throws); [the dispatch functions' forms,
+  the table's form], nil when there are no members."
+  [pkg g {:keys [methods ctors fields cut]}]
+  (when (or (seq methods) (seq ctors) (seq fields))
+    (let [dispatch (fn [kind params ret bodies]
+                     (let [cases (keep-indexed (fn [i b] (when b (apply list 'case [i] b))) bodies)]
+                       (when (seq cases)
+                         (let [sym (symbol (str g "_" kind))]
+                           [sym (list* 'go/func sym (if ret (with-meta params {:tag ret}) params)
+                                       (apply list 'switch 'i cases)
+                                       (when ret ['(return nil)]))]))))
+          inv (dispatch "invoke" [(tag 'i 'int32) (tag 'this 'any) (tag 'args '(slice any))] 'any (map :body methods))
+          nw (dispatch "new" [(tag 'i 'int32) (tag 'args '(slice any))] 'any (map :body ctors))
+          gt (dispatch "get" [(tag 'i 'int32) (tag 'o 'any)] 'any (map :get fields))
+          st (dispatch "set" [(tag 'i 'int32) (tag 'o 'any) (tag 'v 'any)] nil (map :set fields))]
+      [(keep second [inv nw gt st])
+       (list 'addr
+             (apply list 'lit (m/jrt-sym pkg "MemberTable")
+                    (concat
+                      [:Data (str/join "\n" (map :line (concat methods ctors fields)))]
+                      (when cut [:Cut true])
+                      (when inv [:Invoke (first inv)])
+                      (when nw [:New (first nw)])
+                      (when gt [:Get (first gt)])
+                      (when st [:Set (first st)]))))])))
+
+(defn member-tables
+  "The member tables (§5.11, amendment R12) of translated class n: its public members, as
+  {:methods :ctors :fields} of {:line (data) :body (the dispatch case's statements; none:
+  absent)} (fields: :get, :set)."
+  [pkg n]
+  (binding [c/*f* {:pkg pkg}]
+    (let [g (m/go-name n)
+          iface (m/interface? n)
+          leaf (and (not iface) (m/leaf? n))
+          rty (cond iface (symbol g) leaf (list '* (symbol g)) :else (symbol (str g "_I")))
+          abstract (m/has? (:flags (a/decl n)) Opcodes/ACC_ABSTRACT)
+          public? #(m/has? (:flags %) Opcodes/ACC_PUBLIC)
+          cls (fn [dd] (c/class-val dd))
+          methods (for [mm (d/class-methods n)
+                        :when (and (public? mm) (not= "<init>" (:name mm)))
+                        :let [[ps r] (t/parse-method-desc (:desc mm))
+                              base (nm/method-base (:name mm) (:desc mm))
+                              static (m/static? mm)
+                              args (map-indexed (fn [i p] (arg-conv pkg p (list 'aget 'args i))) ps)
+                              call (cond static (apply list (symbol (str g "_" base)) args)
+                                         :else (apply list (symbol (str "." base)) (list 'assert rty 'this) args))
+                              ]]
+                    (do (run! cls ps) (cls r)
+                        {:line (str "M" (bit-and (:flags mm) 0x1fff) " " (:name mm) " " (dotted-desc (:desc mm)))
+                         :body (if (= "V" r) [call '(return nil)] [(list 'return (result-any pkg r call))])}))
+          ;; --program: the public methods that do not exist in Go (their descriptors name
+          ;; classes outside the world), as entries that throw, so that code naming them
+          ;; analyzes (RT/toUrl) and fails when run (EVAL-NOTES.md, "Cut classes")
+          absent (when *absent-members*
+                   (let [present (set (map (juxt :name :desc) (d/class-methods n)))]
+                     (for [mm (:methods (a/decl n))
+                           :when (and (public? mm) (not= "<init>" (:name mm)) (not= "<clinit>" (:name mm))
+                                      (not (present [(:name mm) (:desc mm)])))
+                           :let [[ps r] (t/parse-method-desc (:desc mm))]]
+                       (do (run! cls ps) (cls r)
+                           ;; m: absent, jrt makes the throwing function (MemberTable)
+                           {:line (str "m" (bit-and (:flags mm) 0x1fff) " " (:name mm) " " (dotted-desc (:desc mm)))}))))
+          methods (concat methods absent)
+          ;; a name's overloads in the order the JVM's getDeclaredMethods gives them, which
+          ;; Reflector's choice among applicable overloads follows, when that order is stable:
+          ;; the class is on this JVM and in the JDK's CDS archive (archived-classes); else,
+          ;; and after it, by descriptor
+          mms (concat (for [mm (d/class-methods n) :when (and (public? mm) (not= "<init>" (:name mm)))] mm)
+                      (when *absent-members*
+                        (let [present (set (map (juxt :name :desc) (d/class-methods n)))]
+                          (for [mm (:methods (a/decl n))
+                                :when (and (public? mm) (not= "<init>" (:name mm)) (not= "<clinit>" (:name mm))
+                                           (not (present [(:name mm) (:desc mm)])))]
+                            mm))))
+          methods (let [jname (fn [d] (cond (t/prim? d) (t/prim-desc->name d)
+                                            (t/array? d) (str/replace d "/" ".")
+                                            :else (str/replace (t/desc->internal d) "/" ".")))
+                        jparams (fn [mm] (vec (map jname (first (t/parse-method-desc (:desc mm))))))
+                        ;; the JVM's order of the overloads of each name of more than one (the
+                        ;; edge's :method-order: their parameters, in getDeclaredMethods's order)
+                        order (edge/jvm :method-order n #(method-order n mms))]
+                    (assert (= (count mms) (count methods)))
+                    (map (fn [[_ i]] (nth (vec methods) i))
+                         (sort-by (fn [[mm i]]
+                                    [(:name mm)
+                                     (if-let [ps (get order (:name mm))]
+                                       (or (first (keep-indexed (fn [j p] (when (= p (jparams mm)) j)) ps))
+                                           Integer/MAX_VALUE)
+                                       0)
+                                     (:desc mm)
+                                     i])
+                                  (map vector mms (range)))))
+          absent-ctors (when (and *absent-members* (not abstract) (not iface))
+                         (let [present (set (map :desc (filter #(= "<init>" (:name %)) (d/class-methods n))))]
+                           (for [mm (:methods (a/decl n))
+                                 :when (and (public? mm) (= "<init>" (:name mm)) (not (present (:desc mm))))
+                                 :let [[ps _] (t/parse-method-desc (:desc mm))]]
+                             (do (run! cls ps)
+                                 {:line (str "c" (bit-and (:flags mm) 0x1fff) " " (dotted-desc (:desc mm)))}))))
+          ctors (for [mm (d/class-methods n)
+                      :when (and (public? mm) (= "<init>" (:name mm)) (not abstract) (not iface))
+                      :let [real (a/ctor-real-desc n mm)
+                            [ps _] (t/parse-method-desc (:desc mm))
+                            [rps _] (t/parse-method-desc real)]
+                      :when (= (count ps) (count rps))]
+                  (do (run! cls ps)
+                      {:line (str "C" (bit-and (:flags mm) 0x1fff) " " (dotted-desc (:desc mm)))
+                       :body [(list 'return (apply list (symbol (nm/new-name g real))
+                                                   (map-indexed (fn [i p] (arg-conv pkg p (list 'aget 'args i))) ps)))]}))
+          fields (for [f (d/class-fields n)
+                       :when (public? f)
+                       :let [static (m/static? f)
+                             place (if static (symbol (nm/static-field-name g (:name f)))
+                                       (list (symbol (str ".-" (nm/field-name (:name f))))
+                                             (if (or iface leaf) (list 'assert rty 'o)
+                                                 (list (symbol (str ".Self_" g)) (list 'assert rty 'o)))))
+                             vol (c/volatile-field? f)
+                             cval (env/const-value f)
+                             final (m/has? (:flags f) Opcodes/ACC_FINAL)]]
+                   (do (cls (:desc f))
+                       {:line (str (if final "G" "F") (bit-and (:flags f) 0x5fff) " " (:name f) " " (dotted-desc (:desc f)))
+                        :get [(list 'return (let [r (if vol (c/volatile-read place (:desc f)) place)]
+                                              (or (result-any pkg (:desc f) r) r)))]
+                        :set (when-not final
+                               [(if vol
+                                  (c/volatile-write place (:desc f) (arg-conv pkg (:desc f) 'v))
+                                  (list 'set! place (arg-conv pkg (:desc f) 'v)))])}))]
+      {:methods methods :ctors (concat ctors absent-ctors) :fields fields})))
+
+(defn class-registration
+  "C_class (Define, hierarchy only) and the init function setting its function and table
+  fields (§5.11, amendment J1)."
+  [pkg n]
+  (binding [c/*f* {:pkg pkg}]
+    (let [g (m/go-name n)
+          dd (or (a/decl n) (assoc (m/info n) :kind :interface :nesting (if (:outer (m/info n)) :member :top)
+                                   :simple (t/simple-name-of n) :reflected true))
+          iface (m/interface? n)
+          sup (:super dd)
+          ;; a superinterface outside the world stands for its own superinterfaces (JDK 21's
+          ;; SequencedCollection between List and Collection), so that getInterfaces still
+          ;; reaches Collection (core's print-method preferences: EVAL-NOTES.md)
+          ifaces (distinct (mapcat (fn up [i] (if (m/in-world? i) [i] (mapcat up (:interfaces (m/info i)))))
+                                   (:interfaces dd)))
+          ;; a compiled fn's code (S6, :aot/code) has none: nothing reflects on it, its fn's
+          ;; class is made at run time (SA154)
+          tables (if (or (:reflected dd) (:aot/code (:meta dd))) {} (member-tables pkg n))
+          cls-sym (symbol (str g "_class"))]
+      (if (m/code-class? n)
+        ;; a compiled fn's code (SA159): its variable, and its entry of the package's table of
+        ;; static data, which jrt.DefineCode registers (main/registrations)
+        [(list 'go/var (tag cls-sym (list '* (m/jrt-sym pkg "Class"))))
+         (list 'j2g/code-decl
+               (apply list 'lit (m/jrt-sym pkg "CodeDecl")
+                      (concat
+                        [:Out (list 'addr cls-sym) :Name (java-name n) :Modifiers (modifiers n)]
+                        (when-not (= :top (:nesting dd)) [:Simple (or (:simple dd) "")])
+                        [:Go (str (nm/pkg-path pkg) "." g)]
+                        (when-let [src (:aot/source (:meta dd))] [:Source src])
+                        (when (and (= :member (:nesting dd)) (m/in-world? (:outer dd)))
+                          [:Declaring (list 'addr (c/class-val (str "L" (:outer dd) ";")))])
+                        (when (seq ifaces)
+                          [:Interfaces (apply list 'lit (list 'slice (list '* (list '* (m/jrt-sym pkg "Class"))))
+                                              (map #(list 'addr (c/class-val (str "L" % ";"))) ifaces))]))))]
+      (vec (remove nil? (concat (when-let [[fns t] (member-table-form pkg g tables)]
+         (conj (vec fns) (list 'go/var (tag (symbol (str g "_members")) (list '* (m/jrt-sym pkg "MemberTable"))) t)))
+       [(list 'go/var cls-sym
+             (list (m/jrt-sym pkg "Define")
+                   (list 'addr
+                         (apply list 'lit (m/jrt-sym pkg "ClassInfo")
+                                (concat
+                                  [:Name (java-name n) :Modifiers (modifiers n) :Kind (kind-sym pkg n)]
+                                  (when (and sup (not iface)) [:Super (c/class-val (str "L" sup ";"))])
+                                  (when (seq ifaces)
+                                    [:Interfaces (apply list 'lit (list 'slice (list '* (m/jrt-sym pkg "Class")))
+                                                        (map #(c/class-val (str "L" % ";")) ifaces))])
+                                  (when (and (= :member (:nesting dd)) (m/in-world? (:outer dd)))
+                                    [:Declaring (c/class-val (str "L" (:outer dd) ";"))])
+                                  (when-not (= :top (:nesting dd))
+                                    [:Simple (or (:simple dd) "")])
+                                  [:Go (str (nm/pkg-path pkg) "." g)]
+                                  ;; a compiled namespace's class: its source file (standalone S6)
+                                  (when-let [src (:aot/source (:meta dd))] [:Source src]))))))
+       (list 'go/func 'init []
+             (list* 'let ['i (list '.Info cls-sym)]
+                    (concat
+                      [(list 'set! (list '.-IsInstance 'i) (symbol (str g "_InstanceOf")))]
+                      (when-not (m/trivial-init? n)
+                        [(list 'set! (list '.-Init 'i) (symbol (str g "_Init")))])
+                      (when (= :enum (:kind dd))
+                        [(list 'set! (list '.-Enum 'i)
+                               (list* 'fn (with-meta [] {:tag (list '* (m/jrt-sym pkg "RefArray"))})
+                                      (concat (when-not (m/trivial-init? n) [(list (symbol (str g "_Init")))])
+                                              [(symbol (str g "__VALUES"))])))])
+                      (when (member-table-form pkg g tables)
+                        [(list 'set! (list '.-Table 'i) (symbol (str g "_members")))])
+                      ;; (Unsafe's field offsets: not of a compiled namespace's classes, SA154)
+                      (when-not (or iface (nm/compiled-pkg? pkg))
+                        [(list (m/jrt-sym pkg "RegisterGoType") cls-sym (list (list 'inst 'reflect/TypeFor (symbol g))))]))))])))))))
+
+(defn cut-forms
+  "Class objects of classes outside the closed world that code names (class literals):
+  registered by name only, so that Class.forName finds them and nothing is their instance
+  (\"cut\" classes, J2G-SPEC §4.1)."
+  [pkg classes]
+  (for [n (sort classes)]
+    (list 'go/var (symbol (str (m/go-name n) "_class"))
+          (list (m/jrt-sym pkg "Define")
+                (list 'addr (list 'lit (m/jrt-sym pkg "ClassInfo")
+                                  :Name (java-name n)
+                                  :Modifiers 1 :Kind (if (env/interface? n) (m/jrt-sym pkg "KindInterface") (m/jrt-sym pkg "KindClass"))
+                                  :Super (when-not (env/interface? n) (m/jrt-sym pkg "Object_class"))
+                                  :Go (str (nm/pkg-path pkg) "." (m/go-name n) " (cut)")))))))
+
+(defn support-table-forms
+  "The member table entries of jrt's statics and methods that j2g writes (J2G-NOTES.md, phase
+  2C: String.format, String's regex methods, System.in, out, err and their setters), so that
+  reflection finds them at the REPL (System/out, String/format). In reflect_tables_j2g.go: its
+  init runs after reflect_tables.go's, which sets the hand-written classes' tables."
+  []
+  (let [sig (fn [nme params ret mods call]
+              (list 'lit 'MethodInfo :Name nme :Params (when (seq params) (apply list 'lit '(slice (* Class)) params))
+                    :Return ret :Modifiers mods
+                    :Invoke (list 'fn '^any [^any this ^{:tag (slice any)} args] call)))
+        s0 '((inst As (* String)) (aget args 0))
+        s1 '((inst As (* String)) (aget args 1))
+        str-ms (concat
+                 (when (m/translated? "java/util/Formatter")
+                   [(sig "format" '[String_class (.ArrayClass Object_class)] 'String_class 0x89
+                         (list 'String_Format_String_O1__String s0 '((inst As (* RefArray)) (aget args 1))))
+                    (sig "format" '[Locale_class String_class (.ArrayClass Object_class)] 'String_class 0x89
+                         (list 'String_Format_Locale_String_O1__String '((inst As (* Locale)) (aget args 0)) s1
+                               '((inst As (* RefArray)) (aget args 2))))
+                    (sig "formatted" '[(.ArrayClass Object_class)] 'String_class 0x81
+                         (list '.Formatted_O1__String '((inst As (* String)) this) '((inst As (* RefArray)) (aget args 0))))])
+                 (when (and (m/translated? "java/util/stream/Stream") (m/translated? "java/util/ArrayList"))
+                   [(sig "lines" [] 'Stream_class 0x1 '(.Lines__Stream ((inst As (* String)) this)))])
+                 (when (and (m/translated? "java/util/Optional") (m/translated? "java/lang/constant/Constable"))
+                   [(sig "describeConstable" [] 'Optional_class 0x1 '(.DescribeConstable__Optional ((inst As (* String)) this)))])
+                 (when (and (m/translated? "java/lang/Iterable") (m/translated? "java/lang/CharSequence"))
+                   [(sig "join" '[CharSequence_class Iterable_class] 'String_class 0x9
+                         (list 'String_Join_CharSequence_Iterable__String '((inst As CharSequence) (aget args 0))
+                               '((inst As Iterable) (aget args 1))))])
+                 (when (m/translated? "java/util/regex/Pattern")
+                   [(sig "matches" '[String_class] 'Prim_boolean 0x1
+                         (list '.Matches_String__Z '((inst As (* String)) this) s0))
+                    (sig "replaceAll" '[String_class String_class] 'String_class 0x1
+                         (list '.ReplaceAll_String_String__String '((inst As (* String)) this) s0 s1))
+                    (sig "replaceFirst" '[String_class String_class] 'String_class 0x1
+                         (list '.ReplaceFirst_String_String__String '((inst As (* String)) this) s0 s1))
+                    (sig "split" '[String_class] '(.ArrayClass String_class) 0x1
+                         (list '.Split_String__String1 '((inst As (* String)) this) s0))
+                    (sig "split" '[String_class Prim_int] '(.ArrayClass String_class) 0x1
+                         (list '.Split_String_I__String1 '((inst As (* String)) this) s0 '(assert int32 (aget args 1))))]))
+        streams? (m/translated? "jdk/internal/jrt/StandardStreams")
+        pst-w? (m/translated? "java/io/PrintWriter")
+        pst-s? (m/translated? "java/io/PrintStream")
+        getenv? (and (m/translated? "java/util/HashMap") (m/translated? "java/util/Collections"))
+        props? (m/translated? "java/util/Properties")
+        ;; Runtime.exec over the translated ProcessBuilder, through jrt's own Java RuntimeExec
+        ;; (JRT-NOTES.md, "Processes")
+        exec? (m/translated? "jdk/internal/jrt/RuntimeExec")
+        ;; the context class loader and resources (core's data_readers lookup, io/resource):
+        ;; the system loader; resources are the host's (the program's embedded sources, then
+        ;; ARBACE_PATH's files)
+        loaders? (and (m/translated? "java/util/Collections") (m/translated? "java/io/ByteArrayInputStream"))
+        ;; getResource and getResources by URL (the class path's embedded resources and
+        ;; ARBACE_PATH's files; JRT-NOTES.md, "Resources by URL")
+        cp-resources? (m/translated? "jdk/internal/jrt/ClassPathResources")
+        ci? (m/translated? "jdk/internal/jrt/CaseInsensitiveComparator")
+        ;; Date's members that name java.time.Instant, which jrt's own build cannot (JRT-NOTES.md,
+        ;; phase 2B "Dates")
+        instant? (m/translated? "java/time/Instant")]
+    (when (or (seq str-ms) streams? loaders? ci? pst-w? pst-s? getenv? instant? props? exec?)
+      [(apply list 'go/func 'init []
+              (concat
+                (when (or pst-w? pst-s?)
+                  [(apply list 'set! '(.-Methods (.Info Throwable_class))
+                          [(apply list 'append '(.-Methods (.Info Throwable_class))
+                                  (concat
+                                    (when pst-s?
+                                      [(sig "printStackTrace" '[PrintStream_class] 'Prim_void 0x1
+                                            '(do (J2g_PrintStackTraceStream (assert Throwable_I this) (PrintStream_Cast (aget args 0)))
+                                                 (return nil)))])
+                                    (when pst-w?
+                                      [(sig "printStackTrace" '[PrintWriter_class] 'Prim_void 0x1
+                                            '(do (J2g_PrintStackTraceWriter (assert Throwable_I this) (PrintWriter_Cast (aget args 0)))
+                                                 (return nil)))])))])])
+                (when getenv?
+                  ['(set! (.-Methods (.Info System_class))
+                          (append (.-Methods (.Info System_class))
+                                  (lit MethodInfo :Name "getenv" :Return Map_class :Modifiers 0x9
+                                       :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (J2g_SystemGetenv)))))])
+                (when exec?
+                  (let [s '((inst As (* String)) (aget args 0))
+                        a0 '((inst As (* RefArray)) (aget args 0))
+                        a1 '((inst As (* RefArray)) (aget args 1))
+                        f2 '((inst As (* File)) (aget args 2))
+                        sa '(.ArrayClass String_class)]
+                    [(list 'set! '(.-Methods (.Info Runtime_class))
+                           (list 'append '(.-Methods (.Info Runtime_class))
+                                 (sig "exec" '[String_class] 'Process_class 0x1
+                                      (list 'RuntimeExec_Exec_String__Process s))
+                                 (sig "exec" ['String_class sa] 'Process_class 0x1
+                                      (list 'RuntimeExec_Exec_String_String1__Process s a1))
+                                 (sig "exec" ['String_class sa 'File_class] 'Process_class 0x1
+                                      (list 'RuntimeExec_Exec_String_String1_File__Process s a1 f2))
+                                 (sig "exec" [sa] 'Process_class 0x1
+                                      (list 'RuntimeExec_Exec_String1__Process a0))
+                                 (sig "exec" [sa sa] 'Process_class 0x1
+                                      (list 'RuntimeExec_Exec_String1_String1__Process a0 a1))
+                                 (sig "exec" [sa sa 'File_class] 'Process_class 0x1
+                                      (list 'RuntimeExec_Exec_String1_String1_File__Process a0 a1 f2))))]))
+                (when props?
+                  ['(set! (.-Methods (.Info System_class))
+                          (append (.-Methods (.Info System_class))
+                                  (lit MethodInfo :Name "getProperties" :Return Properties_class :Modifiers 0x9
+                                       :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (J2g_SystemGetProperties)))))])
+                (when ci?
+                  ['(set! (.-Fields (.Info String_class))
+                          (append (.-Fields (.Info String_class))
+                                  (lit FieldInfo :Name "CASE_INSENSITIVE_ORDER" :Type Comparator_class :Modifiers 0x19
+                                       :Get (fn ^any [^any o] String_CASE_INSENSITIVE_ORDER))))])
+                (when loaders?
+                  [(list 'set! '(.-Methods (.Info Thread_class))
+                         (list 'append '(.-Methods (.Info Thread_class))
+                               (sig "getContextClassLoader" [] 'ClassLoader_class 0x1
+                                    '(ClassLoader_GetSystemClassLoader__ClassLoader))
+                               (sig "setContextClassLoader" '[ClassLoader_class] 'Prim_void 0x1 '(return nil))))
+                   (list 'set! '(.-Methods (.Info ClassLoader_class))
+                         (apply list 'append '(.-Methods (.Info ClassLoader_class))
+                               (concat
+                                 (if cp-resources?
+                                   ;; by URL: jdk.internal.jrt.ClassPathResources (overlay/jdk;
+                                   ;; JRT-NOTES.md, "Resources by URL"), a URLClassLoader's own
+                                   [(sig "getResource" '[String_class] 'URL_class 0x1
+                                         (list 'ClassPathResources_GetResource_ClassLoader_String__URL
+                                               '((inst As ClassLoader_I) this) s0))
+                                    (sig "getResources" '[String_class] 'Enumeration_class 0x1
+                                         (list 'ClassPathResources_GetResources_ClassLoader_String__Enumeration
+                                               '((inst As ClassLoader_I) this) s0))]
+                                   [(sig "getResources" '[String_class] 'Enumeration_class 0x1
+                                         '(Collections_EmptyEnumeration__Enumeration))])
+                                 [
+                               (sig "getResourceAsStream" '[String_class] 'InputStream_class 0x1
+                                    '(let [(values b ok) (ResourceOrPath (.String (NN ((inst As (* String)) (aget args 0)))))]
+                                       (when (not ok) (return nil))
+                                       (let [a (NewByteArray (conv int32 (len b)))]
+                                         (range [i x b] (aset (.-A a) i (conv int8 x)))
+                                         (return (ByteArrayInputStream_New_B1 a)))))])))])
+                (when instant?
+                  [(list 'set! '(.-Methods (.Info Date_class))
+                         (list 'append '(.-Methods (.Info Date_class))
+                               ;; jdk26u's Date.from: toEpochMilli's ArithmeticException
+                               ;; becomes the cause of an IllegalArgumentException
+                               (sig "from" '[Instant_class] 'Date_class 0x9
+                                    '(let [^any d nil
+                                           exc ((fn [] :results [^Throwable_I exc]
+                                                  (defer (Catch (addr exc)))
+                                                  (set! d (Date_New_J (.ToEpochMilli__J (NN ((inst As (* Instant)) (aget args 0))))))
+                                                  (return nil)))]
+                                       (when (!= exc nil)
+                                         (when (ArithmeticException_InstanceOf exc)
+                                           (panic (IllegalArgumentException_New_Throwable exc)))
+                                         (panic exc))
+                                       (return d)))
+                               (sig "toInstant" [] 'Instant_class 0x1
+                                    '(Instant_OfEpochMilli_J__Instant (.GetTime__J (assert Date_I this))))))])
+                (when (seq str-ms)
+                  [(list 'set! '(.-Methods (.Info String_class))
+                         (apply list 'append '(.-Methods (.Info String_class)) str-ms))])
+                (when streams?
+                  ['(set! (.-Fields (.Info System_class))
+                          (append (.-Fields (.Info System_class))
+                                  (lit FieldInfo :Name "err" :Type PrintStream_class :Modifiers 0x19
+                                       :Get (fn ^any [^any o] (.Ref System_err)))
+                                  (lit FieldInfo :Name "in" :Type InputStream_class :Modifiers 0x19
+                                       :Get (fn ^any [^any o] System_in))
+                                  (lit FieldInfo :Name "out" :Type PrintStream_class :Modifiers 0x19
+                                       :Get (fn ^any [^any o] (.Ref System_out)))))
+                   (list 'set! '(.-Methods (.Info System_class))
+                         (list 'append '(.-Methods (.Info System_class))
+                               (sig "setErr" '[PrintStream_class] 'Prim_void 0x9
+                                    '(do (System_SetErr_PrintStream__V (PrintStream_Cast (aget args 0))) (return nil)))
+                               (sig "setIn" '[InputStream_class] 'Prim_void 0x9
+                                    '(do (System_SetIn_InputStream__V (InputStream_Cast (aget args 0))) (return nil)))
+                               (sig "setOut" '[PrintStream_class] 'Prim_void 0x9
+                                    '(do (System_SetOut_PrintStream__V (PrintStream_Cast (aget args 0))) (return nil)))))])))])))
+
+(defn- cut-type-expr
+  "The Class expression of type descriptor d (a cut class's member names it) from pkg, or nil
+  when the Go build has no Class object for it there (a class outside the world that is not
+  cut, or one of arbace/lang named from jrt)."
+  [pkg cuts d]
+  (cond
+    (t/prim-desc->name d) (symbol (str (if (= pkg :jrt) "" "jrt/") "Prim_" (t/prim-desc->name d)))
+    (t/array? d) (when-let [e (cut-type-expr pkg cuts (subs d 1))] (list '.ArrayClass e))
+    :else (let [n (t/desc->internal d)]
+            (when (and (or (m/in-world? n) (contains? cuts n))
+                       (or (= :jrt (m/pkg n)) (= pkg (m/pkg n))
+                           (and (not= pkg :jrt) (= :lang (m/pkg n))))
+                       ;; jrt's hand-written classes without a Class object
+                       (or (not (m/hand-written? n)) (= n "java/lang/Object")
+                           (contains? (:vars (:jrt m/*w*)) (str (m/go-name n) "_class"))))
+              (if (= n "java/lang/Object") (m/jrt-sym pkg "Object_class") (m/class-sym pkg n "_class"))))))
+
+(defn- cut-constant
+  "The Go value of a cut class's constant (static final, of a primitive type or String: its
+  value, read by reflection when the edge was recorded), else nil: cut classes' constants are
+  readable (ASM's Opcodes in the Java forms compiler's analysis, doc/go/CLASSFORMS-REPL.md)."
+  [pkg {:keys [type const]}]
+  (when (some? const)
+    (case type
+      "I" (list 'conv 'int32 (long const))
+      "J" (list 'conv 'int64 (long const))
+      "S" (list 'conv 'int16 (long const))
+      "B" (list 'conv 'int8 (long const))
+      "C" (list 'conv 'uint16 (long const))
+      "Z" (boolean const)
+      "Ljava/lang/String;" (list (m/jrt-sym pkg "Str") const)
+      nil)))
+
+(defn- cut-class-members
+  "The public members class n declares on this JVM, as the edge's :cut records them, or nil:
+  {:methods [{:mods :name :params [desc] :ret desc}] :fields [{:mods :name :type desc :const v}]
+  :ctors [{:mods :params [desc]}]}, each in the order of the member tables."
+  [n]
+  (when-let [^Class c (try (Class/forName (str/replace n "/" ".") false (ClassLoader/getSystemClassLoader))
+                           (catch Throwable _ nil))]
+    (let [desc (fn [^Class c] (.descriptorString c))]
+      {:methods (vec (for [^java.lang.reflect.Method mt (sort-by #(str (.getName ^java.lang.reflect.Method %) (vec (map str (.getParameterTypes ^java.lang.reflect.Method %)))
+                                                                      " " (.getReturnType ^java.lang.reflect.Method %))
+                                                                 (.getMethods c))
+                            :when (= c (.getDeclaringClass mt))]
+                        {:mods (.getModifiers mt) :name (.getName mt)
+                         :params (mapv desc (.getParameterTypes mt)) :ret (desc (.getReturnType mt))}))
+       :fields (vec (for [^java.lang.reflect.Field fd (sort-by #(.getName ^java.lang.reflect.Field %) (.getFields c))
+                           :when (= c (.getDeclaringClass fd))
+                           :let [mods (.getModifiers fd)
+                                 t (.getType fd)
+                                 v (when (and (java.lang.reflect.Modifier/isStatic mods) (java.lang.reflect.Modifier/isFinal mods)
+                                              (or (.isPrimitive t) (= t String)))
+                                     (try (.get fd nil) (catch Throwable _ nil)))
+                                 v (condp = t
+                                     Integer/TYPE (some-> v long) Long/TYPE (some-> v long)
+                                     Short/TYPE (some-> v long) Byte/TYPE (some-> v long)
+                                     Character/TYPE (some-> v char int long)
+                                     Boolean/TYPE v
+                                     String v
+                                     nil)]]
+                       (cond-> {:mods mods :name (.getName fd) :type (desc t)}
+                         (some? v) (assoc :const v))))
+       :ctors (vec (for [^java.lang.reflect.Constructor k (sort-by #(vec (map str (.getParameterTypes ^java.lang.reflect.Constructor %))) (.getConstructors c))]
+                     {:mods (.getModifiers k) :params (mapv desc (.getParameterTypes k))}))})))
+
+(defn cut-table-forms
+  "The member tables of the cut classes of pkg (J2G-SPEC §4.1, D6; doc/go/EVAL-NOTES.md): their
+  public members as the JVM reports them (the edge's :cut), whose types the Go build can name,
+  each throwing UnsupportedOperationException when called, so that code naming them analyzes
+  (core's annotation support names ASM's Type) and fails only when run. As MemberTables
+  (amendment SZ3) whose functions are nil (jrt throws, MemberTable.Cut) but for a constant's
+  getter."
+  [pkg cuts classes]
+  (let [dotted (fn [d] (str/replace d "/" "."))
+        mdesc (fn [ps r] (str "(" (apply str (map dotted ps)) ")" (dotted r)))
+        tables (for [n (sort classes)
+                     :let [cm (edge/jvm :cut n #(cut-class-members n))]
+                     :when cm
+                     :let [texpr #(cut-type-expr pkg cuts %)
+                           ms (for [{:keys [mods name params ret]} (:methods cm)
+                                    :let [ps (map texpr params)
+                                          r (texpr ret)]
+                                    :when (and r (every? some? ps))]
+                                {:line (str "m" mods " " name " " (mdesc params ret))})
+                           fs (for [{:keys [mods name type] :as fd} (:fields cm)
+                                    :let [t (texpr type)]
+                                    :when t]
+                                (let [k (cut-constant pkg fd)]
+                                  {:line (str (if k "G" "f") mods " " name " " (dotted type))
+                                   :get (when k [(list 'return k)])}))
+                           ks (for [{:keys [mods params]} (:ctors cm)
+                                    :let [ps (map texpr params)]
+                                    :when (every? some? ps)]
+                                {:line (str "c" mods " " (mdesc params "V"))})]
+                     :when (or (seq ms) (seq fs) (seq ks))]
+                 [n (member-table-form pkg (m/go-name n) {:methods ms :ctors ks :fields fs :cut true})])]
+    (concat
+      (mapcat (fn [[n [fns t]]]
+                (conj (vec fns) (list 'go/var (tag (symbol (str (m/go-name n) "_members")) (list '* (m/jrt-sym pkg "MemberTable"))) t)))
+              tables)
+      (when (seq tables)
+        [(apply list 'go/func 'init []
+                (for [[n _] tables]
+                  (list 'set! (list '.-Table (list '.Info (m/class-sym pkg n "_class"))) (symbol (str (m/go-name n) "_members")))))]))))
+
+(defn frames-forms
+  "The frame table (§7.9.6, amendment J4): entries for methods whose Java names the demangler
+  cannot read back (names with _ or $)."
+  [pkg classes]
+  (let [entries (for [n classes
+                      :when (a/decl n)
+                      :let [g (m/go-name n)]
+                      mm (d/class-methods n)
+                      :when (and (not= "<init>" (:name mm)) (re-find #"[_$]" (:name mm)))
+                      :let [base (nm/method-base (:name mm) (:desc mm))
+                            static (m/static? mm)
+                            iface (m/interface? n)
+                            leaf (and (not iface) (m/leaf? n))
+                            gofn (str (nm/pkg-path pkg) "."
+                                      (cond (or static iface) (str g "_" base)
+                                            leaf (str "(*" g ")." base)
+                                            :else (str "(*" g ").Impl_" base)))]]
+                  (list 'lit '_ gofn (str/replace n "/" ".") (:name mm) 0))]
+    (when (seq entries)
+      [(list 'go/func 'init []
+             (list (m/jrt-sym pkg "RegisterFrames") (apply list 'lit (list 'slice (m/jrt-sym pkg "FrameInfo")) entries)))])))

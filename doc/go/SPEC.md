@@ -1,22 +1,23 @@
 # Go forms: Go programs written in Clojure
 
-> Names: g2a (`arbace/g2a/`, `bin/g2a*`, `test/g2a/`) was g2c until 2026-10-11, as the frozen
-> branches, the survey and the records before that date name it; this document uses the current
-> name throughout.
+> Names: repr/go (`arbace/repr/go.ae`, `arbace/repr/go/`, `bin/repr-go`, `test/repr/go/`) was g2a from
+> 2026-10-11 to 2026-10-17 (`arbace/g2a/`, `bin/g2a*`, `test/g2a/`; its build, `arbace.g2a.build`,
+> is now `arbace.build.go`, `bin/build-go`) and g2c before, as the frozen branches, the surveys and
+> the records before those dates name it; this document uses the current names throughout.
 
-Status: accepted (2026-10-08), milestone G0 of g2a ([G2C-SURVEY.md](../G2C-SURVEY.md) §7), with the
+Status: accepted (2026-10-08), milestone G0 of repr/go ([G2C-SURVEY.md](../G2C-SURVEY.md) §7), with the
 37 amendments found while implementing the helper, the printer and the converter and in B1a's step 0
 folded in (2026-10-08, §15). G0-G2 are done (the round trip closed on 2026-10-08,
-[ROUNDTRIP.md](ROUNDTRIP.md)). Implemented by `tools/godump` (the helper), `arbace.g2a.convert` (the
-converter) and `arbace.g2a.print` (the printer); a2g writes Go forms by this spec for the Go
-executable (`bin/arbace-go`, [A2G-SPEC.md](A2G-SPEC.md)). The decisions of 2026-10-07 (survey §9)
+[ROUNDTRIP.md](ROUNDTRIP.md)). Implemented by `tools/godump` (the helper), `arbace.repr.go.convert` (the
+converter) and `arbace.repr.go.print` (the printer); j2g writes Go forms by this spec for the Go
+executable (`bin/arbace-go`, [J2G-SPEC.md](J2G-SPEC.md)). The decisions of 2026-10-07 (survey §9)
 bind it; the user accepted the recommendation of each of the 20 questions of §15 on 2026-10-08.
 
 This spec defines the **Go forms**: how every construct of a Go package, as `go/parser` and
 `go/types` see it, is written as Clojure data in ordinary `.ae` sources. It says what the forms
 mean, what the converter writes out of the type checker's decisions, what a consumer derives by
 itself, and what the printer needs to give the Go toolchain a program that `gc` compiles to the
-same export data and object code. It is the counterpart of the class forms
+same export data and object code. It is the counterpart of the Java forms
 ([classes/SPEC.md](../classes/SPEC.md)) for Go, and follows it in structure and principles.
 
 Words used throughout:
@@ -25,14 +26,14 @@ Words used throughout:
   one package for one build configuration with `go/parser` and `go/types` and emits the typed
   syntax tree generically: every `go/ast` node with its position fields, plus the `types.Info`
   maps (survey §2.2). It decides nothing about forms.
-- **the converter**: `arbace.g2a.convert`, in Clojure. It reads the helper's output and writes Go
+- **the converter**: `arbace.repr.go.convert`, in Clojure. It reads the helper's output and writes Go
   forms. Every decision about forms is made here.
 - **the printer**: Go forms → Go source (G2). With the converter it makes the round trip
   *Go → forms → Go* (§3).
 - **a consumer**: anything that reads Go forms for their meaning: the printer, and later
   Arbace's own Go-forms compiler (survey §5.2, steps b2-b4).
-- **other writers**: a2g (`arbace.a2g`), which translates class forms and Clojure into Go forms,
-  and jrt's hand-written Go forms ([A2G-SPEC.md](A2G-SPEC.md)); both are printed by the printer.
+- **other writers**: j2g (`arbace.j2g`), which translates Java forms and Clojure into Go forms,
+  and jrt's hand-written Go forms ([J2G-SPEC.md](J2G-SPEC.md)); both are printed by the printer.
 - **Go forms**: the forms of this spec. **Go context**: the inside of a Go declaration form
   (§7.2), where the forms mean Go.
 - **gc**: Go's compiler, `cmd/compile`, as driven by the `go` command of the pinned toolchain.
@@ -49,11 +50,11 @@ what is derived · 12 The printer · 13 Coverage · 14 Worked examples · 15 Ope
    in namespaces of their own and are read by consumers that know them. Inside a Go declaration
    form, `+`, `<<`, `==` and the other operators are Go's operators at the operands' type, and
    `if`, `let`, `set!`, `range`, `for` are Go's statements (the user's decision of 2026-10-07,
-   a deliberate exception to class forms principle 1). No Clojure code runs inside Go context:
+   a deliberate exception to Java forms principle 1). No Clojure code runs inside Go context:
    there are no vars, no seqs, no Clojure functions there.
 2. **Declarations mirror Go.** One form per Go declaration, in Go's source order, in one file
    per Go file. Go's identifiers are written verbatim: capitalization is export, so nothing is
-   munged. Types are tags and type forms, as in the class forms.
+   munged. Types are tags and type forms, as in the Java forms.
 3. **go/types' decisions are written out.** Whatever a consumer could only learn by running a
    Go type checker is in the forms: constant values, inferred type arguments, embedded-field
    paths of selections, the redeclared names of `:=`, initialization order, the types of
@@ -159,13 +160,13 @@ with the same toolchain, configuration and flags (§12.4). They are **equivalent
 
 Beside them, for forms converted in mode `:full` (§10.2), the **text level**: each printed
 file is byte-identical to its original, comments, literal spellings, white space and
-semicolons included. It needs no build (`bin/g2a roundtrip --text`, as built 2026-10-16:
+semicolons included. It needs no build (`bin/repr-go roundtrip --text`, as built 2026-10-16:
 §10.2).
 
 Level 3 implies the others for what gc emits; levels 1 and 2 localize a difference. The gate
 of G2 was levels 1-3 over `$GOROOT/src` and `$GOROOT/test` (the tamago-go tree), and level 4
 for the run programs. As built, G2 was closed (2026-10-08) on levels 1-3 by the oracle
-(`bin/g2a-check`, `tools/gocmp`, [ROUNDTRIP.md](ROUNDTRIP.md)), which compares no positions at
+(`bin/repr-go check`, `tools/gocmp`, [ROUNDTRIP.md](ROUNDTRIP.md)), which compares no positions at
 any level: neither export data positions nor line tables, in either mode (ROUNDTRIP.md,
 "Positions: what is compared"). Level 4 is not run.
 
@@ -237,7 +238,7 @@ path `p_test` and the namespace `go.<path>_test`, `<path>` mapped as above (amen
 it, `command-line-arguments`, in `:path`; its namespace is `go.test.` followed by the file's
 path relative to `$GOROOT/test` without `.go`, mapped as above (amendment, accepted
 2026-10-08). Two paths of one conversion that map to one namespace are a converter error (none
-exists in the standard library). Layout follows class forms §9.1: the package file holds the
+exists in the standard library). Layout follows Java forms §9.1: the package file holds the
 `ns` form, the `go/package` form and one `load` per Go file in the package's file order; each
 Go file `x.go` becomes `<pkg-dir>/x.ae`, or `<pkg-dir>/x.go.ae` when the package's source
 directory has a subdirectory `x`, whose package's own file would be `<pkg-dir>/x.ae`
@@ -269,13 +270,13 @@ directory has a subdirectory `x`, whose package's own file would be `<pkg-dir>/x
 ```
 
 The forms of each configuration are a separate tree, one per pinned configuration (§1, item
-7), so four (amendment, accepted 2026-10-08). `bin/g2a` writes them under
-`.tmp/g2a/forms/CORPUS` (`amd64`, `arm64`, `linux-amd64` ...); `bin/arbace-go` writes a2g's
-program under `target/arbace-go/a2g`, one tree for every target (below). Converted output is
+7), so four (amendment, accepted 2026-10-08). `bin/repr-go` writes them under
+`.tmp/repr-go/forms/CORPUS` (`amd64`, `arm64`, `linux-amd64` ...); `bin/arbace-go` writes j2g's
+program under `target/arbace-go/j2g`, one tree for every target (below). Converted output is
 regenerated, not tracked (decision 9).
 
 **Programs written as Go forms** (amendment, accepted 2026-10-08). A program held as forms
-rather than converted (`bin/g2a build`, [BUILD.md](BUILD.md)) is a source root `DIR` with
+rather than converted (`bin/build-go`, [BUILD.md](BUILD.md)) is a source root `DIR` with
 the packages laid out as above under `DIR/go/`. Its module is stated outside the forms, in
 `DIR/program.edn`, read with the Clojure reader:
 
@@ -329,7 +330,7 @@ package with test files only (no Go files for the configuration) is named by the
 of its path, with `.` and `-` replaced by `_` (amendment, accepted 2026-10-08).
 
 **`:config` of a program built for several targets** (amendment, accepted 2026-10-08). A
-program written as Go forms (§4.1) is built for the target the build names (`bin/g2a build`:
+program written as Go forms (§4.1) is built for the target the build names (`bin/build-go`:
 `GOOS=linux`, `GOARCH` from `--arch amd64|arm64`): its packages' `:config` is optional, and
 `:goos` and `:goarch`, when present, are overridden by the build's target, so one tree
 builds for both architectures (files for one architecture only carry their `:build` lines,
@@ -1321,7 +1322,7 @@ Every position of the syntax tree is kept, for byte-identical export data and li
   of an implicit return (§6.4), of the inner operators of a merged chain (§7.5), and of a
   literal's parts beyond its own position (`:go/apos` holds one position per child).
 
-This mode is for tools; it is not meant to be read. The converter writes it (`bin/g2a convert
+This mode is for tools; it is not meant to be read. The converter writes it (`bin/repr-go read
 --full`), and the printer prints it in its own layout (`--layout full`, the default for a
 package of `:positions :full`, §12.3), which gives the original files back byte for byte (the
 text level, §3.1).
@@ -1365,7 +1366,7 @@ literal spellings (N4), no white space, and some positions the forms splice away
   position.
 
 Not kept: an empty declaration group (`import ( )`, a local `var ()`), which declares nothing
-and has no element in the forms (3 programs of `$GOROOT/test`, test/g2a/roundtrip-text-known.edn).
+and has no element in the forms (3 programs of `$GOROOT/test`, test/repr/go/roundtrip-text-known.edn).
 The results are in [PRINTER-NOTES.md](PRINTER-NOTES.md), "Mode :full as built".
 
 ### 10.3 Line directives
@@ -1562,7 +1563,7 @@ For levels 2-4 of §3.1 the printed package is compiled exactly as the original:
   from the build's target (§4.2, `:config`) ([BUILD.md](BUILD.md)) (amendment, accepted
   2026-10-08).
 - Comparison of export data and object files is the comparator's (`tools/gocmp`,
-  `bin/g2a-check`, [ROUNDTRIP.md](ROUNDTRIP.md)).
+  `bin/repr-go check`, [ROUNDTRIP.md](ROUNDTRIP.md)).
 
 ## 13. Coverage
 
@@ -1702,7 +1703,7 @@ once. Their layout is illustrative: the converter puts each form on its Go line 
 one line off, and `:go/end 15` is `Move`'s Go line, not its forms line). Doc strings ending in
 `...` are shortened.
 
-### 14.1 The survey's sample (`.tmp/g2a/sample/sample.go`)
+### 14.1 The survey's sample (`.tmp/repr-go/sample/sample.go`)
 
 ```go
 package sample
@@ -2273,7 +2274,7 @@ the documented choices of its notes that fix the spec. The user accepted all of 
 They are folded into the text above, marked "(amendment, accepted 2026-10-08)" where they apply.
 B1a's step 0 raised nine more, five from the round trip for `GOOS=linux` (L1-L5,
 [ROUNDTRIP.md](ROUNDTRIP.md), with [CONVERTER-NOTES.md](CONVERTER-NOTES.md),
-[HELPER-NOTES.md](HELPER-NOTES.md) and [PRINTER-NOTES.md](PRINTER-NOTES.md)) and four from `bin/g2a
+[HELPER-NOTES.md](HELPER-NOTES.md) and [PRINTER-NOTES.md](PRINTER-NOTES.md)) and four from `bin/repr-go
 build` (amendments B1-B4, [BUILD.md](BUILD.md), not the milestone B1); the user accepted them on
 2026-10-08 too, and they are folded and marked the same way:
 
@@ -2363,7 +2364,7 @@ printer's over the helper's):
    as data (`(go/comment ...)` forms between statements), which clutters the code forms.
    *Recommendation: as specified; doc comments on by default.*
 3. **Mutability.** Every Go variable is assignable, so `^:mutable` (the survey's sketch, and
-   the class forms' rule) is not written; captured variables are shared, as in Go.
+   the Java forms' rule) is not written; captured variables are shared, as in Go.
    *Recommendation: no `^:mutable` in Go context.*
 4. **Local declarations.** Nested `let` scoping over the rest of the block (the survey's choice,
    idiomatic Clojure), or flat Go-style declaration statements (`(var x e)` scoping to the end of
@@ -2376,7 +2377,7 @@ printer's over the helper's):
    Alternative: a `let` around the statement with a marker. *Recommendation: the vector.*
 7. **Go's `for` as `for`.** `(for init cond post body*)` takes Clojure's `for` name for Go's
    three-clause loop inside Go context; `while` and `range` cover the rest. Alternatives: a new
-   name (`for3`, `loop-for`), or `loop`/`recur` as j2a restructures Java, which loses the tree
+   name (`for3`, `loop-for`), or `loop`/`recur` as repr/java restructures Java, which loses the tree
    and the round trip. *Recommendation: `for` (Go context already gives Go meanings to names).*
 8. **Implicit return.** The body's last expression is returned (as in `defn` and the class
    forms); `return a, b` stays explicit. *Recommendation: as specified.*
@@ -2418,7 +2419,7 @@ printer's over the helper's):
 17. **Expression types written by the converter.** Only non-constant shifts of untyped
     constants get a `:tag` now (§8.3); everything else is local or derived. The compiler (b2)
     may find more places where go/types reasons non-locally. *Recommendation: add them as
-    amendments, as for the class forms.*
+    amendments, as for the Java forms.*
 18. **Helper output.** Types as structured data, not `TypeString` strings; raw positions and the
     selector dot; paths for promoted literal keys (§11.3). *Recommendation: ask the helper for
     these now, before the converter is written.* (Done: the helper's format 2, HELPER-NOTES.md.)
@@ -2453,9 +2454,9 @@ printer's over the helper's):
 - Directive counts: `grep` over `$GOROOT/src` outside `cmd` and `testdata` (`//go:linkname`
   1,342, `//go:nosplit` 1,232, `//go:cgo_import_dynamic` 1,673, `//go:fix` 312, `//go:embed`
   76 ...); calls of identifiers that are reserved heads (`fn` 169).
-- Experiments in `.tmp/g2a/` (survey §10): `godump/main.go`, `sample/sample.go` and
+- Experiments in `.tmp/repr-go/` (survey §10): `godump/main.go`, `sample/sample.go` and
   `sample-meta.edn`; `out/sort.edn` (`:inst` of `slices.Sort`); a probe package in
-  `.tmp/g2a-spec/t/` (redeclared `err` in `Uses`; `1 << s` typed `uint8`; promoted literal key
+  `.tmp/repr-go-spec/t/` (redeclared `err` in `Uses`; `1 << s` typed `uint8`; promoted literal key
   without path; `new(42)`; generic method `Apply` with inferred `F`; method path `[0 0]`).
 - Arbace's reader (`arbace/lang/LispReader.ae`, `MetaReader`): explicit `:line`/`:column`
   metadata is kept over the reader's; `~` is unquote, `^` metadata, `.5` a symbol, `1e400`

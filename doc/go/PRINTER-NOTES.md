@@ -1,4 +1,15 @@
-# g2a's printer: Go forms → Go
+# repr/go's printer: Go forms → Go
+
+> Names: since 2026-10-17 g2a is repr/go and j2a repr/java (doc/NAMING-SURVEY.md, "Decided"):
+> `arbace.g2a.*` is `arbace.repr.go(.*)`, its build `arbace.g2a.build` is `arbace.build.go`;
+> `bin/g2a convert` is `bin/repr-go read` (`bin/g2a read`: `read --dump`), `bin/g2a build`
+> `bin/build-go`, `bin/g2a-print` `bin/repr-go print`, `bin/g2a-check` `bin/repr-go check`,
+> `bin/g2a-convert-tests` and `-print-tests` `bin/repr-go test read` and `test print`,
+> `bin/g2a-build-tests` `bin/build-go test`; `G2A_GOROOT` is `ARBACE_GOROOT`, the other `G2A_*`
+> `REPR_GO_*`, `J2A_*` `REPR_JAVA_*`; `bin/j2a-check` is `bin/repr-java check`. a2g is j2g
+> (`arbace.a2g.*`, `bin/a2g*`, `A2G-SPEC.md`, `A2G_*`, the printed `a2g_*`, `A2g_*`, `a2g/*`: `j2g`
+> likewise), and class forms are Java forms (the front end keeps `arbace.classes.*`). This document
+> uses the current names throughout, its dated passages included; branch names keep theirs.
 
 The printer of milestone G2 ([SPEC.md](SPEC.md) §12): it reads Go forms with the Clojure reader
 (`*read-eval*` false, line numbers on) and writes Go source that gc compiles as the original
@@ -7,9 +18,9 @@ proven on hand-written forms (below) and on the converter's forms of all of std 
 `$GOROOT/test` ([CONVERTER-NOTES.md](CONVERTER-NOTES.md), "The round trip").
 
 ```sh
-bin/g2a-print [--layout lines|gofmt|full] [--no-line-directives] [--line-file] \
+bin/repr-go print [--layout lines|gofmt|full] [--no-line-directives] [--line-file] \
               [--src DIR [--build]] [--gofmt] FORMS.ae OUTDIR
-bin/g2a-print-tests [REGEX]
+bin/repr-go test print [REGEX]
 ```
 
 `FORMS.ae` is a package file (`ns`, `go/package`, `load`s, §4.1) or one file holding
@@ -17,8 +28,8 @@ bin/g2a-print-tests [REGEX]
 `OUTDIR`. `--src DIR` (the original package directory) copies `:other-files` and
 `:embed-files` (SHA-256 checked) and writes `OUTDIR/overlay.json`; `--build` then runs
 `go build -trimpath -overlay` in `DIR` under the forms' `:config` (§12.4). Both scripts run on
-Arbace's Go executable (`bin/lib/g2a-host.bash`: `G2A_GO_EXE`, else the tools' host; on
-`target/stage2` until standalone S4); `arbace.g2a` loaded from the checkout's sources until S6,
+Arbace's Go executable (`bin/lib/repr-go-host.bash`: `REPR_GO_EXE`, else the tools' host; on
+`target/stage2` until standalone S4); `arbace.repr.go` loaded from the checkout's sources until S6,
 compiled into the executable since (SA133), a source in the checkout that differs from the
 embedded copy loaded from it instead, evaluated.
 
@@ -26,10 +37,10 @@ embedded copy loaded from it instead, evaluated.
 
 | namespace | file | role |
 |---|---|---|
-| `arbace.g2a.print` | `print.ae` | reading (`read-forms`, `collect` following `load`, `collect-forms` for forms in memory), files (§4.3: build lines, header directives, package doc, imports, declarations), the package build (§12.4), the CLI |
-| `arbace.g2a.print-code` | `print_code.ae` | forms → tokens: classification by head (§4.4, §13.5), types (§5), declarations (§6), statements and expressions (§7), literals (§8), directives and doc comments (§9, §10.4) |
-| `arbace.g2a.print-emit` | `print_emit.ae` | the emitter: tokens, Go's semicolon rule, token separation, indentation, the line of the cursor, placing forms on recorded lines (§10.1, §12.3), `//line` and `/*line*/` corrections |
-| `arbace.g2a.print-text` | `print_text.ae` | literal spellings (strings, byte strings, runes, exact floats, §8.1, §12.2) and a port of `text/tabwriter` (gofmt's alignment) |
+| `arbace.repr.go.print` | `print.ae` | reading (`read-forms`, `collect` following `load`, `collect-forms` for forms in memory), files (§4.3: build lines, header directives, package doc, imports, declarations), the package build (§12.4), the CLI |
+| `arbace.repr.go.print-code` | `print_code.ae` | forms → tokens: classification by head (§4.4, §13.5), types (§5), declarations (§6), statements and expressions (§7), literals (§8), directives and doc comments (§9, §10.4) |
+| `arbace.repr.go.print-emit` | `print_emit.ae` | the emitter: tokens, Go's semicolon rule, token separation, indentation, the line of the cursor, placing forms on recorded lines (§10.1, §12.3), `//line` and `/*line*/` corrections |
+| `arbace.repr.go.print-text` | `print_text.ae` | literal spellings (strings, byte strings, runes, exact floats, §8.1, §12.2) and a port of `text/tabwriter` (gofmt's alignment) |
 
 The printer resolves no names and needs no types: every form is classified by its head and
 position, and the metadata for consumers (`:val`, `:inst`, `:go/via`, `:tag` on expressions)
@@ -116,7 +127,7 @@ by a program):
     free.
   - `--line-file` starts the file with `//line FORMS.ae:1`, so that gc's positions name the
     forms file with the forms' lines (§12.3's printer option for hand-written forms).
-    The build (`bin/g2a build`, [BUILD.md](BUILD.md)) names the forms file relative to the
+    The build (`bin/build-go`, [BUILD.md](BUILD.md)) names the forms file relative to the
     package's forms directory, which keeps
     `-trimpath` builds reproducible (amendment B3, accepted 2026-10-08, folded into SPEC
     §12.3).
@@ -129,7 +140,7 @@ by a program):
 
 ## Coverage
 
-Every form of the spec is printed; `test/g2a/cases/` covers each, and the test `spec-coverage`
+Every form of the spec is printed; `test/repr/go/cases/` covers each, and the test `spec-coverage`
 checks that every head of §13.5, the metadata the printer reads and the `go/package` and
 `go/file` options occur in a case.
 
@@ -157,18 +168,18 @@ checks that every head of §13.5, the metadata the printer reads and the `go/pac
 | errors | `values` in an expression, a statement in an expression, `let` without vector, bad `set!` operator, declarations before `go/file` | `e01`-`e05` |
 
 Mode `:full` is covered by the converter's test `positions-full-text` (the spec's sample and
-search and the unit files of each section, test/g2a/convert/, converted with `--full` and
+search and the unit files of each section, test/repr/go/convert/, converted with `--full` and
 printed back byte for byte) and by the text level of the round trip (below). Directives not
 spelled `//go:` are free-standing `go/directive` forms (A6 as accepted), covered by
 `s09_directives`.
 
 ## Tests
 
-`bin/g2a-print-tests` builds `tools/gocmp` and `test/g2a/golines` for the host into
-`.tmp/g2a-print-tests/bin/` and runs `test/g2a/print_test.ae` on Arbace. Each case
-`test/g2a/cases/NAME.ae` is printed in both layouts into `.tmp/g2a-print-tests/NAME/` and:
+`bin/repr-go test print` builds `tools/gocmp` and `test/repr/go/golines` for the host into
+`.tmp/repr-go-print-tests/bin/` and runs `test/repr/go/print_test.ae` on Arbace. Each case
+`test/repr/go/cases/NAME.ae` is printed in both layouts into `.tmp/repr-go-print-tests/NAME/` and:
 
-- `gofmt -l`: both outputs parse; the gofmt layout is gofmt's fixed point (`;; g2a-test:
+- `gofmt -l`: both outputs parse; the gofmt layout is gofmt's fixed point (`;; repr-go-test:
   nogofmt` waives it, for `s12_printer` only, A10);
 - when the original exists (`NAME.go`, the directory `NAME/`, or `original=FILE`), `gocmp`
   compares it with the printed files at the levels tree, export and code (`levels=`
@@ -272,12 +283,12 @@ wins over the printer's over the helper's; the cases are noted below.
 
 ## The round trip
 
-Closed (milestone G2, 2026-10-08): `bin/g2a roundtrip` converts std and `$GOROOT/test`, prints them
-in the lines layout and checks them with `bin/g2a-check` at the tree, export and code levels against
+Closed (milestone G2, 2026-10-08): `bin/repr-go roundtrip` converts std and `$GOROOT/test`, prints them
+in the lines layout and checks them with `bin/repr-go check` at the tree, export and code levels against
 a recorded reference; std (373 packages on amd64, 372 on arm64) and the `$GOROOT/test` programs
 (1,707 and 1,702) pass every level on both architectures, and so does std with its tests apart from
 nine known differences (embedded sources). For `GOOS=linux` (B1a, 2026-10-08) std (376 and 374
-packages) and the programs (1,713 and 1,707) pass every level too (`bin/g2a roundtrip linux/amd64`,
+packages) and the programs (1,713 and 1,707) pass every level too (`bin/repr-go roundtrip linux/amd64`,
 `linux/arm64`), with no change to the printer. The table, times and what it took are in
 [CONVERTER-NOTES.md](CONVERTER-NOTES.md), "The round trip".
 
@@ -292,7 +303,7 @@ What remains:
 ## Mode :full as built (2026-10-16)
 
 At the user's request (2026-10-16): Go forms converted with `--full` print back to the original
-Go text. `bin/g2a convert --full ...` then `bin/g2a print FORMS.ae OUT` (the full layout is the
+Go text. `bin/repr-go read --full ...` then `bin/repr-go print FORMS.ae OUT` (the full layout is the
 default for such a package) gives each file byte for byte.
 
 **What the converter adds.** The node positions of §10.2 do not hold the whole text, so mode
@@ -303,7 +314,7 @@ otherwise; parentheses; the inner operators of chains; `cond`'s branches; and th
 the forms spliced away (implicit returns, struct and interface braces, receivers' and type
 parameters' brackets, labels, key colons, the type switch's guard, qualified names, local and
 import declarations' keywords and parentheses). The converter reads the Go files themselves
-for the text (`:text-dir`, from `arbace.g2a.main`: the package's directory, or `$GOROOT/test`'s
+for the text (`:text-dir`, from `arbace.repr.go`: the package's directory, or `$GOROOT/test`'s
 for a program). Two shapes differ from `:lines`' in this mode: a chain does not continue
 through parentheses, and `-(1)` stays a negation of a parenthesized literal. The `:lines`
 output is unchanged.
@@ -328,10 +339,10 @@ is no room before it (`f(x /* c */, y)`). Grammar parentheses are not added (the
 are recorded), names of equal type are grouped only when they share the type node, and a local
 `var ( ... )` or `type ( ... )` group is printed as one.
 
-**The text level** (SPEC §3.1): `bin/g2a roundtrip --text [[GOOS/]ARCH] [--tests]` converts
-the round trip's corpora with `--full`, prints them into `.tmp/g2a/cand-text-...` and compares
-each printed file with its original byte for byte (`arbace.g2a.main --text`, no build); the
-known differences, with their reasons, are test/g2a/roundtrip-text-known.edn, shared by the
+**The text level** (SPEC §3.1): `bin/repr-go roundtrip --text [[GOOS/]ARCH] [--tests]` converts
+the round trip's corpora with `--full`, prints them into `.tmp/repr-go/cand-text-...` and compares
+each printed file with its original byte for byte (`arbace.repr.go --text`, no build); the
+known differences, with their reasons, are test/repr/go/roundtrip-text-known.edn, shared by the
 configurations. Results (2026-10-16, go1.27.1):
 
 | configuration | std (packages, files: byte-identical) | `$GOROOT/test` programs (files: byte-identical, known) | time |
@@ -342,10 +353,10 @@ configurations. Results (2026-10-16, go1.27.1):
 | tamago/amd64 with tests (`--tests`) | 554, 2,935: 2,935 | | 179 s |
 
 The forms of mode `:full` are about 3.4 times those of `:lines` (std on tamago/amd64: 103.9 MB
-against 30.7 MB), and converting std takes about twice as long (124 s against 61 s). The `:lines` output is unchanged: `bin/g2a roundtrip amd64` and
+against 30.7 MB), and converting std takes about twice as long (124 s against 61 s). The `:lines` output is unchanged: `bin/repr-go roundtrip amd64` and
 `linux/amd64` show no regression against their references, the converter's and printer's tests
 pass, and the Go printed from `tamago/`'s, `tamago/cmd/`'s and `box/`'s forms (2,504 files) and
-a2g's program (`bin/g2a build --print-only`, 1,572 files) is the same byte for byte before and
+j2g's program (`bin/build-go --print-only`, 1,572 files) is the same byte for byte before and
 after.
 
 The 3 known differences are the 3 programs with an empty declaration group (`import ( )` in
@@ -383,11 +394,11 @@ labels; a negative literal written `-(1e9)` (`encoding/json/v2`'s tests).
 - **G2F6. Empty declaration groups** (`import ( )`, a local `var ()`) stay unrepresented and are
   known differences (3 programs). Alternative: a form for them (`(go/var)` with no specs as a
   statement, an empty `:imports` decl marker). Recommended: as built.
-- **G2F7. The text level stays outside the gate.** `bin/g2a roundtrip --text` takes about 3
-  minutes per configuration and no build. Alternative: add `bin/g2a roundtrip --text` (amd64)
+- **G2F7. The text level stays outside the gate.** `bin/repr-go roundtrip --text` takes about 3
+  minutes per configuration and no build. Alternative: add `bin/repr-go roundtrip --text` (amd64)
   to `bin/gate --full`, beside the round trip's checks. Recommended: add it to `--full`.
 - **G2F8. Keys and names.** The new metadata keys of SPEC §10.2 ("As built"), the layout name
-  `full` and `bin/g2a roundtrip --text`. Recommended: as built.
+  `full` and `bin/repr-go roundtrip --text`. Recommended: as built.
 
 **Decided (2026-10-17, the user):** G2F1-G2F6 and G2F8 (a), as built; G2F7 against "stays
-outside": `bin/g2a roundtrip --text amd64` in `bin/gate --full` (its g2a step), as recommended.
+outside": `bin/repr-go roundtrip --text amd64` in `bin/gate --full` (its repr/go step), as recommended.

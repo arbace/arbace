@@ -1,8 +1,8 @@
 #!/bin/bash
 # The rebuild in the box (doc/go/BOX-NOTES.md, S8): Arbace's guest image built inside the box from
-# a source tree in the store (arbace.box.rebuild: a2g and g2a's printing in Arbace's own guest, the
+# a source tree in the store (arbace.box.rebuild: j2g and repr/go's printing in Arbace's own guest, the
 # plan in Arbace, Go's compile, asm and link in tool guests, the namespaces prepared by the new
-# image), and the same steps run on the host with the host's tools (a2g, g2a and the preparing on
+# image), and the same steps run on the host with the host's tools (j2g, repr/go and the preparing on
 # the native executable, the toolchain's own compile, asm and link): the two images must be equal
 # byte for byte.
 #
@@ -11,15 +11,15 @@
 # Steps (by default all, in this order):
 #   prepare   two stores in DIR (box/, host/): the commit REV's sources as a tree (git archive of
 #             what the build reads, VERSION filled; the ref src), the tool guests and the toolchain's facts (bin/box-tools put),
-#             and the image that runs a2g and g2a, bin/arbace-go --build --box's guest (the ref
+#             and the image that runs j2g and repr/go, bin/arbace-go --build --box's guest (the ref
 #             arbace.ARCH)
 #   box       the rebuild in the box: the launcher (ARBACE_BOX_SPAWN=1) runs it in its guest; the
 #             image under the ref rebuilt.box.ARCH, every step's result under
 #             rebuilt.box.ARCH.steps (DIR/box-steps.edn)
 #   host      the same steps natively, every action a host process (arbace.box.rebuild/host-run,
 #             tools/chrootrun): rebuilt.host.ARCH, DIR/host-steps.edn
-#   compare   the two runs' steps and images compared; a2g's program and the image of prepared
-#             namespaces also against bin/arbace-go --build's (target/arbace-go/a2g); status 0
+#   compare   the two runs' steps and images compared; j2g's program and the image of prepared
+#             namespaces also against bin/arbace-go --build's (target/arbace-go/j2g); status 0
 #             when the images are equal
 #   boot      the image built in the box booted by its ref (ARBACE_BOX_IMAGE=ref:rebuilt.box.ARCH)
 #   smoke     bin/box-smoke on a launcher with that image appended (DIR/arbace-box)
@@ -37,19 +37,20 @@
 #   --dev         the driver's namespaces (arbace/box/{build,plan,elf,rebuild}.ae) loaded from the
 #                 source tree over the image's embedded ones (the actions still run the image's)
 #   --jobs N      the compiles at once (default 4)
-#   --given DIR   the box step takes the compiled namespaces, a2g's output and the two printings
+#   --given DIR   the box step takes the compiled namespaces, j2g's output and the two printings
 #                 (the same for every architecture) from another run's box step (DIR/box-steps.edn, its store DIR/box,
 #                 for the same sources), their blobs copied into this run's box store, and does
 #                 not run them (BX117: the arm64 VM, where every instruction is emulated)
 # Environment: ARBACE_BOX_SPAWN_RAM (the box's budget for its spawned guests; by default 40GiB),
 # ARBACE_BOX_SPAWN_CPUS (by default 16). Prerequisites: bin/arbace-go --build --box (ARBACE_BOX_ARCHES
 # with ARCH) and the native executable it builds first, from the same commit (the host step's
-# preparing runs that executable: compare checks a2g's program against it), bin/box-tools build
-# ARCH. Memory: a2g's
+# preparing runs that executable: compare checks j2g's program against it), bin/box-tools build
+# ARCH. Memory: j2g's
 # guest asks 14 GiB, jrt's and lang's compiles 12 GiB each: run it through .tmp/heavy.
 set -uo pipefail
 export CGO_ENABLED=0 # Go's builds never use cgo (doc/go/BOX-NOTES.md, "... cgo dropped", 2026-10-16)
 root=$(cd "$(dirname "$0")/.." && pwd)
+. "$root/bin/lib/renamed-env.bash" # stops on a stale G2A_*, J2A_* or A2G_*
 arch=amd64 rev=HEAD dir="" dev=false jobs=4 steps=() given=""
 while [ $# -gt 0 ]; do
   case $1 in
@@ -69,12 +70,12 @@ harch=$(case $(uname -m) in aarch64) echo arm64 ;; *) echo amd64 ;; esac)
 dir=${dir:-$root/.tmp/box-rebuild/$arch}
 mkdir -p "$dir"
 dir=$(cd "$dir" && pwd)
-goroot=${G2A_GOROOT:-/root/tamago-go}
+goroot=${ARBACE_GOROOT:-/root/tamago-go}
 launcher=$root/target/arbace-go/box-$harch/arbace-box   # the host's launcher: the store's tool
-guest=$root/target/arbace-go/box-$arch/arbace.elf        # the image that runs a2g and g2a
+guest=$root/target/arbace-go/box-$arch/arbace.elf        # the image that runs j2g and repr/go
 native=$root/target/arbace-go/$harch/arbace             # the host step's Arbace
 bs=$dir/box hs=$dir/host
-# what the build reads of the commit (a2g: arbace, go, jdk, overlay; g2a's printing: tamago's
+# what the build reads of the commit (j2g: arbace, go, jdk, overlay; repr/go's printing: tamago's
 # goroot and goos (not tamago/cmd, Go's toolchain as forms, S9), box, x509roots; the version:
 # VERSION)
 src_dirs="VERSION arbace box go jdk overlay tamago/goroot tamago/goos x509roots"
@@ -115,10 +116,10 @@ box_opts() {
   ARBACE_BOX_STORE=$given/box "$native" -e "(require (quote [arbace.box :as box]) (quote [arbace.edn :as edn]))
 (let [b (edn/read-string (slurp \"$given/box-steps.edn\"))
       walk (fn walk [h] (cons h (mapcat (fn [[_ [k eh]]] (if (= k :dir) (walk eh) [eh])) (box/tree h))))]
-  (doseq [h (distinct (mapcat walk (keep b [:aot :a2g :printed-goroot :printed-program])))] (println h)))" > "$dir/given-blobs.txt" || return 1
+  (doseq [h (distinct (mapcat walk (keep b [:aot :j2g :printed-goroot :printed-program])))] (println h)))" > "$dir/given-blobs.txt" || return 1
   mkdir -p "$bs/blobs"
   (cd "$given/box/blobs" && xargs -a "$dir/given-blobs.txt" cp -n -t "$bs/blobs/") || return 1
-  "$native" -e "(require (quote [arbace.edn :as edn])) (let [b (edn/read-string (slurp \"$given/box-steps.edn\"))] (print (pr-str {:given (select-keys b [:aot :a2g :printed-goroot :printed-program])})))"
+  "$native" -e "(require (quote [arbace.edn :as edn])) (let [b (edn/read-string (slurp \"$given/box-steps.edn\"))] (print (pr-str {:given (select-keys b [:aot :j2g :printed-goroot :printed-program])})))"
 }
 
 box() {
@@ -188,17 +189,17 @@ host() {
 }
 
 compare() {
-  local a2g=$root/target/arbace-go/a2g/prog
+  local j2g=$root/target/arbace-go/j2g/prog
   [ -s "$dir/box-steps.edn" ] && [ -s "$dir/host-steps.edn" ] || { echo "box-rebuild: no steps to compare (box, host)" >&2; return 1; }
-  # bin/arbace-go --build's a2g program (its image.bin is the prepared one: compared apart) into the
+  # bin/arbace-go --build's j2g program (its image.bin is the prepared one: compared apart) into the
   # host's store, to compare with the steps' trees
   ARBACE_BOX_STORE=$hs "$native" -e "
 (require (quote [arbace.box :as box]) (quote [arbace.edn :as edn]) (quote arbace.box.rebuild))
 (let [b (edn/read-string (slurp \"$dir/box-steps.edn\"))
       h (edn/read-string (slurp \"$dir/host-steps.edn\"))
       ks [:src :prog :goroot :goos :mod :plan :version :image1 :image-bin :linked :image]
-      prog (when (.isDirectory (java.io.File. \"$a2g\")) (box/put-dir \"$a2g\"))
-      img-bin (java.io.File. \"$a2g/go/arbace/cmd/arbace/image.bin\")
+      prog (when (.isDirectory (java.io.File. \"$j2g\")) (box/put-dir \"$j2g\"))
+      img-bin (java.io.File. \"$j2g/go/arbace/cmd/arbace/image.bin\")
       same (atom true)]
   (doseq [k ks]
     (let [e (= (b k) (h k))]
@@ -207,7 +208,7 @@ compare() {
   (when prog
     (let [p (= (b :prog) (arbace.box.rebuild/put-at prog \"go/arbace/cmd/arbace/image.bin\" (box/tree-get (b :prog) \"go/arbace/cmd/arbace/image.bin\")))
           i (= (b :image-bin) (box/put (java.nio.file.Files/readAllBytes (.toPath img-bin))))]
-      (println \"a2g's program, but image.bin, = bin/arbace-go --build's:\" p)
+      (println \"j2g's program, but image.bin, = bin/arbace-go --build's:\" p)
       (println \"the image of prepared namespaces = bin/arbace-go --build's:\" i)
       ;; the host step prepared the namespaces with bin/arbace-go --build's executable: of no
       ;; worth unless it is the same program

@@ -2,7 +2,7 @@
  * Arbace (overlay/jdk, doc/go/JRT-NOTES.md "Phase 2C"): jrt's java.io.OutputStreamWriter,
  * written for jrt in place of jdk26u's (whose sun.nio.cs.StreamEncoder needs java.nio's
  * buffers and encoders, cut). It encodes in jrt's three charsets (UTF-8, ISO-8859-1,
- * US-ASCII; A2G-SPEC §12) as StreamEncoder does with the encoder's REPLACE actions: a
+ * US-ASCII; J2G-SPEC §12) as StreamEncoder does with the encoder's REPLACE actions: a
  * malformed (lone) surrogate or an unmappable character becomes '?', a surrogate pair
  * counting as one character; a high surrogate at the end of a write waits for the next one,
  * and close writes it as '?'. Copyright (c) the Arbace authors; Eclipse Public License 1.0.

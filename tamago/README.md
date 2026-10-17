@@ -2,7 +2,7 @@
 
 The box guest's own Go as Go forms (B1b stage S6, [doc/go/BOX-NOTES.md](../doc/go/BOX-NOTES.md),
 "S6"; [doc/go/BOX-SURVEY.md](../doc/go/BOX-SURVEY.md) §6): the standard library of TamaGo's Go
-distribution, the runtime included, and TamaGo's `goos` module, converted by g2a for
+distribution, the runtime included, and TamaGo's `goos` module, converted by repr/go for
 `tamago/amd64` and `tamago/arm64` and held as one tree (S4's BX63). These forms are the source of what the box's guest is built with: `bin/arbace-go
 --build --box` prints them back to Go (`bin/tamago-vendor print`) and builds the guest with that
 GOROOT and that module, for either architecture (`ARBACE_BOX_GO=orig` builds from the
@@ -19,14 +19,14 @@ lays out packages:
 
 Origin:
 - TamaGo's Go distribution, https://github.com/usbarmory/tamago-go, `VERSION` "go1.27.1" (time
-  2026-08-28T16:20:06Z), the local tree `/root/tamago-go` (Arbace's toolchain, `G2A_GOROOT`),
+  2026-08-28T16:20:06Z), the local tree `/root/tamago-go` (Arbace's toolchain, `ARBACE_GOROOT`),
   pinned by `bin/tamago-vendor` as the SHA-256 of the sorted SHA-256 list of every file of its
   `src/` but `src/cmd/`: `415d2301a19dfc6890100c6dc5e04496856c29cb77db3ab822168a916a6f5202`.
 - TamaGo's `goos` module, https://github.com/usbarmory/tamago v1.27.1 (go.sum
   `h1:Zl4w3hu5DaogGvcLzunS4gjwNEqdjFFJedMO3pDQa5k=`), from Go's module cache.
 
 Derived on 2026-10-11 (amd64) and 2026-10-12 (arm64, BX63) by `bin/tamago-vendor convert`
-(`bin/g2a convert --corpus ARCH` for std, `bin/g2a convert --goos tamago --goarch ARCH ./...` in a
+(`bin/repr-go read --corpus ARCH` for std, `bin/repr-go read --goos tamago --goarch ARCH ./...` in a
 copy of the module, for each architecture, then merged): each file's forms the converter's
 output as it writes it, the package files merged; Go's comments other than doc comments are `;`
 comments in the forms, which the printer does not reproduce (SPEC §10.4). Not converted: the
