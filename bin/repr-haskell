@@ -32,11 +32,12 @@
 #                                 into .tmp/repr-haskell/forms/CORPUS/PKG/ (SPEC §2.1);
 #                                 report .tmp/repr-haskell/forms/CORPUS.report.edn; --full: mode :full,
 #                                 into dumps/CORPUS-full/ and forms/CORPUS-full/
-#   bin/repr-haskell print [-o DIR] [--layout braces|full] FORMS.ae...
+#   bin/repr-haskell print [-o DIR] [--layout braces|layout|full] FORMS.ae...
 #                                 the printer (SPEC §7.4): one .hs per forms file into DIR (default
 #                                 .tmp/repr-haskell/printed), at the forms' :file; the braces layout,
 #                                 or for forms of mode :full the full layout (the original text, byte
-#                                 for byte; --layout braces: the braces layout)
+#                                 for byte; --layout braces: the braces layout); --layout layout: the
+#                                 layout layout (Haskell's layout rule, as a person writes it; R4)
 #   bin/repr-haskell roundtrip [--only REGEX] [CORPUS]
 #                                 the round trip's tree level (SPEC §9.1, §9.2) over the corpus:
 #                                 read, print into .tmp/repr-haskell/cand/CORPUS/PKG/, and compare
@@ -70,6 +71,19 @@
 #                                 listed one that no longer occurs. Report
 #                                 .tmp/repr-haskell/cand-text/CORPUS.report.edn. --text-only: the text
 #                                 level alone. With --iface too: tree, interface, text
+#   bin/repr-haskell roundtrip --layout [CORPUS]
+#                                 then the tree level of the layout layout (SPEC §7.4, 2; R4): the
+#                                 same forms printed by Haskell's layout rule into
+#                                 .tmp/repr-haskell/cand-layout/CORPUS/PKG/, GHC's trees and lines
+#                                 compared as the braces layout's; known differences
+#                                 test/haskell/roundtrip-CORPUS-layout-known.edn, report
+#                                 .tmp/repr-haskell/cand-layout/CORPUS.report.edn. With --iface, the
+#                                 interface level of both layouts, each package's three sides
+#                                 compiled concurrently (known differences
+#                                 test/haskell/roundtrip-CORPUS-layout-iface-known.edn, report
+#                                 .tmp/repr-haskell/iface/CORPUS.layout.report.edn). --layout-only:
+#                                 the layout layout alone (dump, convert, print, trees; with --iface
+#                                 its interfaces only)
 #   bin/repr-haskell test         the spec's cases (test/haskell/; bin/lib/repr-haskell/test): the
 #                                 reader's samples, the worked example converted and its round trip,
 #                                 the interface level's normalizations (test/haskell/iface/), the
@@ -250,22 +264,27 @@ genprimopcode_build() {
   echo "$key" > "$tw/key"
 }
 
-# iface_level CORPUS CAND: the round trip's interface level (SPEC §9.1, §9.3) over the modules
-# printed into CAND/PKG/: each package's source tree copied twice under .tmp/repr-haskell/iface/
-# CORPUS/{orig,cand}/PKG (the .hsc modules through hsc2hs, the generated ones by genprimopcode,
-# the same on both sides; the converted ones replaced by the printed in cand), each compiled by
-# ghc --make from inside its tree (the same relative paths: the spans name the same files), the
-# interfaces of the converted modules shown (ghc --show-iface) into {orig,cand}.ifaces/PKG/M.iface,
-# the objects removed, and the two compared (arbace.repr.haskell compare-iface)
+# iface_level CORPUS SIDE CAND [SIDE CAND]: the round trip's interface level (SPEC §9.1, §9.3)
+# over the modules printed into CAND/PKG/ (SIDE cand: the braces layout's; cand-layout: the layout
+# layout's, R4): each package's source tree copied under .tmp/repr-haskell/iface/CORPUS/{orig,SIDE}/PKG
+# (the .hsc modules through hsc2hs, the generated ones by genprimopcode, the same on every side; the
+# converted ones replaced by the printed on a printed side), each compiled by ghc --make from inside
+# its tree (the same relative paths: the spans name the same files), all sides of a package
+# concurrently, the interfaces of the converted modules shown (ghc --show-iface) into
+# {orig,SIDE}.ifaces/PKG/M.iface, the objects removed, and each printed side compared with the
+# originals (arbace.repr.haskell compare-iface)
 iface_level() {
-  local c=$1 cand=$2 ib=$rh/iface/$1 opt t0 t1 t2 name dir flags mods files hscs hflags gens
+  local c=$1 ib=$rh/iface/$1 opt t0 t1 t2 t3 name dir flags mods files hscs hflags gens
+  shift
+  local sides=() cands=()
+  while [ $# -gt 0 ]; do sides+=("$1"); cands+=("$2"); shift 2; done
   ghc_check
   genprimopcode_build "$c"
   opt=$(iface_conf "$c" :opt)
-  rm -rf "$ib"; mkdir -p "$ib/orig" "$ib/cand"
+  rm -rf "${ib:?}"; mkdir -p "$ib/orig"
   t0=$(date +%s)
   while IFS=$'\t' read -r name dir flags mods files hscs hflags gens; do
-    local o=$ib/orig/$name k=$ib/cand/$name h g mf
+    local o=$ib/orig/$name h g mf i k
     mkdir -p "$o"
     (cd "$srcroot/$dir" && tar --exclude=./tests -cf - .) | tar -xf - -C "$o"
     for h in $hscs; do
@@ -274,18 +293,22 @@ iface_level() {
         { cat "$o.hsc2hs.log" >&2; echo "repr-haskell: hsc2hs failed on $name/$h" >&2; return 1; }
     done
     for g in $gens; do "$genprimopcode" "${g#*=}" < "$primops" > "$o/${g%%=*}"; done
-    cp -a "$o" "$k"
-    for mf in $files; do
-      mf=${mf#*=}
-      if [ -f "$cand/$name/$mf" ]; then cp "$cand/$name/$mf" "$k/$mf"; else rm -f "$k/$mf"; fi
+    for i in "${!sides[@]}"; do
+      k=$ib/${sides[$i]}/$name
+      mkdir -p "$ib/${sides[$i]}"
+      cp -a "$o" "$k"
+      for mf in $files; do
+        mf=${mf#*=}
+        if [ -f "${cands[$i]}/$name/$mf" ]; then cp "${cands[$i]}/$name/$mf" "$k/$mf"; else rm -f "${k:?}/${mf:?}"; fi
+      done
     done
   done < <(iface_plan "$c")
   t1=$(date +%s)
-  echo "== repr-haskell roundtrip $c: interfaces: compile ($opt; $((t1 - t0)) s preparing)" >&2
-  # the two sides of each package concurrently, the packages in the corpus's order
+  echo "== repr-haskell roundtrip $c: interfaces: compile ($opt; orig ${sides[*]}; $((t1 - t0)) s preparing)" >&2
+  # all sides of each package concurrently, the packages in the corpus's order
   while IFS=$'\t' read -r name dir flags mods files hscs hflags gens; do
     local side
-    for side in orig cand; do
+    for side in orig "${sides[@]}"; do
       # shellcheck disable=SC2086
       (cd "$ib/$side/$name" && ghc --make $flags $opt -j"$jobs" -fkeep-going -no-link \
         -outputdir "../$name.out" $mods) > "$ib/$side/$name.build.log" 2>&1 &
@@ -296,24 +319,34 @@ iface_level() {
   echo "== repr-haskell roundtrip $c: interfaces: show and compare ($((t2 - t1)) s compiling)" >&2
   while IFS=$'\t' read -r name dir flags mods files hscs hflags gens; do
     local side
-    for side in orig cand; do
+    for side in orig "${sides[@]}"; do
       # one ghc --show-iface per converted module; a missing .hi leaves no .iface (reported)
       printf '%s\n' $files | sed 's/=.*//' | xargs -P "$jobs" -I{} sh -c \
         'm={}; hi=$1/$(echo "$m" | tr . /).hi; out=$2/$m.iface; mkdir -p "$2"
          [ -f "$hi" ] && ghc --show-iface "$hi" > "$out.part" 2>&1 && mv "$out.part" "$out"; rm -f "$out.part"; :' \
         _ "$ib/$side/$name.out" "$ib/$side.ifaces/$name"
-      rm -rf "$ib/$side/$name.out" "$ib/$side/$name"
+      rm -rf "${ib:?}/$side/$name.out" "${ib:?}/$side/${name:?}"
     done
   done < <(iface_plan "$c")
   t3=$(date +%s)
-  arbace_tool -m arbace.repr.haskell compare-iface --corpus "$(corpus_file "$c")" --orig "$ib/orig.ifaces" \
-    --cand "$ib/cand.ifaces" --printed "$cand" --builds "$ib" --prune \
-    --known "$root/test/haskell/roundtrip-$c-iface-known.edn" --report "$ib.report.edn" \
-    --times "prepare $((t1 - t0)) compile $((t2 - t1)) show $((t3 - t2))"
+  local st=0 n=${#sides[@]} keep
+  for i in "${!sides[@]}"; do
+    local side=${sides[$i]} known=$root/test/haskell/roundtrip-$c-iface-known.edn report=$ib.report.edn label=""
+    if [ "$side" = cand-layout ]; then
+      known=$root/test/haskell/roundtrip-$c-layout-iface-known.edn; report=$ib.layout.report.edn; label="the layout layout"
+    fi
+    # the originals' texts of the equal modules are pruned by the last comparison only
+    keep=""; [ "$i" -lt $((n - 1)) ] && keep=--keep-orig
+    arbace_tool -m arbace.repr.haskell compare-iface --corpus "$(corpus_file "$c")" --orig "$ib/orig.ifaces" \
+      --cand "$ib/$side.ifaces" --printed "${cands[$i]}" --builds "$ib" --side "$side" --prune $keep \
+      ${label:+--label "$label"} --known "$known" --report "$report" \
+      --times "prepare $((t1 - t0)) compile $((t2 - t1)) show $((t3 - t2))" || st=1
+  done
+  return $st
 }
 
 roundtrip() {
-  local c=ghc-9.14.1 only="" iface="" tree=1 text="" st=0
+  local c=ghc-9.14.1 only="" iface="" tree=1 text="" layout="" st=0
   while [ $# -gt 0 ]; do
     case $1 in
       --only) only=$2; shift 2 ;;
@@ -321,17 +354,28 @@ roundtrip() {
       --iface-only) iface=1; tree=""; shift ;;
       --text) text=1; shift ;;
       --text-only) text=1; tree=""; shift ;;
+      --layout) layout=1; shift ;;
+      --layout-only) layout=1; tree=""; shift ;;
       *) c=$1; shift ;;
     esac
   done
   build
   corpus_fetch "$c"
-  local cand=$rh/cand/$c
+  local cand=$rh/cand/$c lcand=$rh/cand-layout/$c sides=()
   if [ -n "$tree" ]; then tree_level "$c" "$only" || st=1; fi
+  if [ -n "$layout" ]; then tree_level "$c" "$only" layout ${tree:+reuse} || st=1; fi
   if [ -n "$iface" ]; then
     [ -z "$only" ] || { echo "repr-haskell: --only is for the tree and text levels" >&2; return 2; }
-    [ -d "$cand" ] || { echo "repr-haskell: no printed modules in $cand (run the tree level first)" >&2; return 1; }
-    iface_level "$c" "$cand" || st=1
+    # the braces layout's printed modules unless --layout-only, the layout layout's with --layout
+    if [ -n "$tree" ] || [ -z "$layout" ]; then
+      [ -d "$cand" ] || { echo "repr-haskell: no printed modules in $cand (run the tree level first)" >&2; return 1; }
+      sides+=(cand "$cand")
+    fi
+    if [ -n "$layout" ]; then
+      [ -d "$lcand" ] || { echo "repr-haskell: no printed modules in $lcand (run roundtrip --layout first)" >&2; return 1; }
+      sides+=(cand-layout "$lcand")
+    fi
+    iface_level "$c" "${sides[@]}" || st=1
   fi
   if [ -n "$text" ]; then text_level "$c" "$only" || st=1; fi
   return $st
@@ -384,37 +428,49 @@ text_level() {
     --times "dump $((t1 - t0)) convert $((t2 - t1)) print $((t3 - t2)) parse $((t4 - t3))"
 }
 
-# tree_level CORPUS ONLY: the tree level (SPEC §9.2): dump, convert, print into .tmp/repr-haskell/
-# cand/CORPUS/PKG/, the helper's trees and lines of both sides compared
+# tree_level CORPUS ONLY [LAYOUT [reuse]]: the tree level (SPEC §9.2): dump, convert, print into
+# .tmp/repr-haskell/cand/CORPUS/PKG/ (LAYOUT braces, the default) or cand-layout/CORPUS/PKG/ (layout:
+# the layout layout, R4), the helper's trees and lines of both sides compared; reuse: the dumps,
+# the forms and the originals' trees of the tree level just run
 tree_level() {
-  local c=$1 only=$2
-  local dumps=$rh/dumps/$c forms=$rh/forms/$c cand=$rh/cand/$c orig=$rh/orig/$c t0 t1 t2 t3 t4
+  local c=$1 only=$2 layout=${3:-braces} reuse=${4:-}
+  local dumps=$rh/dumps/$c forms=$rh/forms/$c orig=$rh/orig/$c cand=$rh/cand/$c t0 t1 t2 t3 t4
+  local known=$root/test/haskell/roundtrip-$c-known.edn label="" what=""
+  if [ "$layout" = layout ]; then
+    cand=$rh/cand-layout/$c; known=$root/test/haskell/roundtrip-$c-layout-known.edn
+    label="the layout layout"; what=" (the layout layout)"
+  fi
   t0=$(date +%s)
-  echo "== repr-haskell roundtrip $c: dump" >&2
-  dump_corpus "$c" "$dumps"
+  if [ -z "$reuse" ]; then
+    echo "== repr-haskell roundtrip $c$what: dump" >&2
+    dump_corpus "$c" "$dumps"
+  fi
   t1=$(date +%s)
-  echo "== repr-haskell roundtrip $c: convert ($((t1 - t0)) s dumping)" >&2
-  rm -rf "$forms"; mkdir -p "$(dirname "$forms")"
-  read_files --jobs "$jobs" -o "$forms" --report "$forms.report.edn" --root "$dumps" ${only:+--only "$only"} > "$forms.log" 2>&1 ||
-    { tail -20 "$forms.log" >&2; echo "repr-haskell: the conversion failed ($forms.log)" >&2; return 1; }
+  if [ -z "$reuse" ]; then
+    echo "== repr-haskell roundtrip $c$what: convert ($((t1 - t0)) s dumping)" >&2
+    rm -rf "${forms:?}"; mkdir -p "$(dirname "$forms")"
+    read_files --jobs "$jobs" -o "$forms" --report "$forms.report.edn" --root "$dumps" ${only:+--only "$only"} > "$forms.log" 2>&1 ||
+      { tail -20 "$forms.log" >&2; echo "repr-haskell: the conversion failed ($forms.log)" >&2; return 1; }
+  fi
   t2=$(date +%s)
-  echo "== repr-haskell roundtrip $c: print ($((t2 - t1)) s converting)" >&2
-  rm -rf "$cand"; mkdir -p "$(dirname "$cand")"
+  echo "== repr-haskell roundtrip $c$what: print ($((t2 - t1)) s converting)" >&2
+  rm -rf "${cand:?}"; mkdir -p "$(dirname "$cand")"
   # a module the printer fails on is reported by the comparison (not printed)
-  arbace_tool -m arbace.repr.haskell print --jobs "$jobs" -o "$cand" --root "$forms" > "$cand.print.log" 2>&1 ||
+  arbace_tool -m arbace.repr.haskell print --jobs "$jobs" --layout "$layout" -o "$cand" --root "$forms" > "$cand.print.log" 2>&1 ||
     grep -v '^error' "$cand.print.log" | tail -3 >&2
   t3=$(date +%s)
-  echo "== repr-haskell roundtrip $c: trees ($((t3 - t2)) s printing)" >&2
+  echo "== repr-haskell roundtrip $c$what: trees ($((t3 - t2)) s printing)" >&2
   # the trees: of the originals (in the corpus's tree) and of the printed modules (in the
   # candidate's), each parsed by the helper under its package's configuration
-  rm -rf "$orig"
-  mkdir -p "$orig"
+  if [ -z "$reuse" ]; then rm -rf "${orig:?}"; mkdir -p "$orig"; fi
   local name dir flags files
   while IFS=$'\t' read -r name dir flags files; do
     [ -n "$files" ] || continue
-    # shellcheck disable=SC2086
-    (cd "$srcroot/$dir" && printf '%s\n' $files | xargs -P "$jobs" -n 8 \
-      "$helper" tree -o "$orig/$name" --libdir "$libdir" --ghc $flags --files) 2> "$orig/$name.err" || true
+    if [ -z "$reuse" ]; then
+      # shellcheck disable=SC2086
+      (cd "$srcroot/$dir" && printf '%s\n' $files | xargs -P "$jobs" -n 8 \
+        "$helper" tree -o "$orig/$name" --libdir "$libdir" --ghc $flags --files) 2> "$orig/$name.err" || true
+    fi
     if [ -d "$cand/$name" ]; then
       # the printed modules under the original's relative paths, so that spans name the same files
       # shellcheck disable=SC2086
@@ -424,9 +480,9 @@ tree_level() {
     fi
   done < <(corpus_plan "$c" modules)
   t4=$(date +%s)
-  echo "== repr-haskell roundtrip $c: compare ($((t4 - t3)) s parsing)" >&2
+  echo "== repr-haskell roundtrip $c$what: compare ($((t4 - t3)) s parsing)" >&2
   arbace_tool -m arbace.repr.haskell compare --corpus "$(corpus_file "$c")" --orig "$orig" --cand "$cand" \
-    --forms-report "$forms.report.edn" --known "$root/test/haskell/roundtrip-$c-known.edn" \
+    --forms-report "$forms.report.edn" --known "$known" ${label:+--label "$label"} \
     --report "$cand.report.edn" ${only:+--only "$only"} \
     --times "dump $((t1 - t0)) convert $((t2 - t1)) print $((t3 - t2)) parse $((t4 - t3))"
 }

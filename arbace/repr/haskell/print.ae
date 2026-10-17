@@ -5,7 +5,17 @@
   ^{:line}, a literal's :hs/breaks entry, an equation's :hs/eq) printed on that line, a form
   whose line was passed preceded by a {-# LINE #-} pragma. Parentheses are those of the forms
   ((:paren ...)) and the implicit ones (arbace.repr.haskell.syntax). Documentation is printed as
-  Haddock comments where GHC's Haddock pass attaches them again."
+  Haddock comments where GHC's Haddock pass attaches them again.
+
+  The layout layout (SPEC §7.4, 2; doc/haskell/HASKELL-NOTES.md, \"R4\"): the same printing
+  code, every block (do, let, where, of, \\case, an instance's or a class's body, a GADT's
+  constructors, a closed family's equations, a multi-way if) laid out by Haskell's layout rule
+  instead of braces: its items aligned at one column, greater than the enclosing item's lines,
+  each item on a line of its own (a ; between two on one line), the lines inside an item
+  indented further. A block whose source wrote its { on another line than its first item
+  (:hs/brace) keeps its braces; a block that a token on the line of its end would continue
+  (anything but ) ] , then else of in and the like, which GHC's parse-error(t) rule closes it
+  on) is braced after the fact (layout-close!)."
   (:require [arbace.repr.haskell.syntax :as sx]
             [arbace.string :as str])
   (:import [java.lang StringBuilder]))
@@ -18,25 +28,39 @@
 
 (defn- line-now [] @(:line *o*))
 
+(defn- cp-count
+  "The code points of s from index i: GHC's columns (the printer writes no tab)"
+  [^String s i]
+  (.codePointCount s (int i) (.length s)))
+
 (defn- raw! [^String s]
   (.append ^StringBuilder (:sb *o*) s)
   (let [nl (sx/count-newlines s)]
     (if (pos? nl)
       (do (vswap! (:line *o*) + nl)
-          (vreset! (:col *o*) (- (count s) (inc (.lastIndexOf s "\n")))))
-      (vswap! (:col *o*) + (count s)))
+          (vreset! (:col *o*) (cp-count s (inc (.lastIndexOf s "\n")))))
+      (vswap! (:col *o*) + (cp-count s 0)))
     (vreset! (:bol *o*) (str/ends-with? s "\n"))))
 
 (def ^:dynamic *indent*
   "The column of the lines a newline begins (0: none), inside a layout block"
   0)
 
+(defn- layout?
+  "Whether the module is printed in the layout layout (SPEC §7.4, 2)"
+  []
+  (:layout *o*))
+
+(declare layout-newline!)
+
 (defn- indent! []
+  (vreset! (:lind *o*) (inc *indent*))
   (when (pos? *indent*)
     (raw! (apply str (repeat *indent* " ")))
     (vreset! (:bol *o*) true)))
 
 (defn- newline! []
+  (when (layout?) (layout-newline! (inc *indent*)))
   (raw! "\n")
   (indent!)
   (vreset! (:nl *o*) false))
@@ -50,17 +74,44 @@
   "The tokens the full layout takes from the forms' data (:hs/punct), never from the printer"
   #{"," ";" "{" "}"})
 
-(defn- t!
-  "Emits a token, a space before it unless glued or at the beginning of a line; in the full
-  layout, collects it (punctuation is the forms' data)"
-  [^String s]
+(declare layout-token!)
+
+(defn- tight?
+  "In the layout layout, whether the token s follows the token prev without a space: after ( and
+  [ (not before # or |: (# (| [| are tokens of their own), before ) ] , (not after # or a token
+  ending in |: #) |) |]), and after a lambda's \\ before a name, a literal or a bracket"
+  [prev ^String s]
+  (and prev (pos? (count s))
+       (let [c (.charAt s 0)]
+         (or (and (contains? #{"(" "["} prev) (not (contains? #{\# \|} c)))
+             (and (contains? #{")" "]" "," ";"} s) (not= prev "#") (not= prev "\\") (not (str/ends-with? prev "|")))
+             (and (= prev "{") (= s "}"))
+             (and (= prev "\\") (or (Character/isLetterOrDigit c) (contains? #{\_ \( \[ \" \'} c)))))))
+
+(defn- emit!
+  "Emits a token (or a comment), a space before it unless glued or at the beginning of a line;
+  in the full layout, collects it (punctuation is the forms' data)"
+  [^String s comment?]
   (if (full?)
     (when-not (contains? punct s) (vswap! (:toks *o*) conj s))
     (do
       (when @(:nl *o*) (newline!))
-      (when-not (or @(:glue *o*) @(:bol *o*)) (raw! " "))
+      (if (layout?)
+        (do
+          (when-not comment? (layout-token! s))
+          ;; a comment always after a space ({-- would open a block comment)
+          (when-not (or @(:bol *o*) (and (not comment?) (or @(:glue *o*) (tight? @(:prev *o*) s)))) (raw! " "))
+          (when-not comment? (vreset! (:prev *o*) s)))
+        (when-not (or @(:glue *o*) @(:bol *o*)) (raw! " ")))
       (vreset! (:glue *o*) false)
       (raw! s))))
+
+(defn- t! [^String s] (emit! s false))
+
+(defn- ct!
+  "A comment: in the layout layout, no token for the layout rule"
+  [^String s]
+  (emit! s true))
 
 (defn- toks!
   "Several tokens printed as one text in the braces layout (joined), one by one in the full layout"
@@ -95,10 +146,12 @@
   (when l
     (let [now (line-now)]
       (cond
-        (> l now) (do (raw! (apply str (repeat (- l now) "\n")))
+        (> l now) (do (when (layout?) (layout-newline! (inc *indent*)))
+                      (raw! (apply str (repeat (- l now) "\n")))
                       (indent!)
                       (vreset! (:nl *o*) false))
-        (< l now) (do (raw! "\n")
+        (< l now) (do (when (layout?) (layout-newline! (inc *indent*)))
+                      (raw! "\n")
                       (raw! (str "{-# LINE " l " \"" (:file *o*) "\" #-}\n"))
                       (indent!)
                       (vreset! (:line *o*) l)
@@ -115,6 +168,106 @@
     :else nil))
 
 (defn- at! [x] (goto! (line-of x)))
+
+;;; The layout layout's blocks (SPEC §7.4, 2)
+
+(def ^:private closers
+  "The tokens that cannot continue the last item of a block: GHC's parse-error(t) rule closes the
+  implicit blocks before them (the Haskell report's algorithm L)"
+  #{")" "]" "," "then" "else" "of" "in" "#)" "|]" "||]"})
+
+(defn- sb ^StringBuilder [] (:sb *o*))
+
+(defn- replace-at!
+  "Replaces the text want at offset o by s, as long"
+  [o ^String want ^String s]
+  (let [^StringBuilder b (sb) n (count want)]
+    (when-not (and (>= o 0) (<= (+ o n) (.length b)) (= want (.substring b (int o) (int (+ o n)))))
+      (throw (ex-info (str "repr-haskell: the layout layout cannot brace a block at line " (line-now)) {})))
+    (.replace b (int o) (int (+ o n)) s)))
+
+(defn- brace-pending!
+  "Braces the blocks closed since the last line began, which the next token would continue: a {
+  before the first item (in place of the two spaces before it when it began a line, of the space
+  before it when the lines after it are aligned to the columns of its line, else inserted), a ;
+  likewise before each item that began a line, a } after the last"
+  []
+  (let [ps @(:pending *o*) ^StringBuilder b (sb)]
+    (vreset! (:pending *o*) [])
+    ;; the blocks are nested, the innermost first: their offsets in decreasing order, so that an
+    ;; insertion moves only what is done
+    (doseq [{:keys [open seps]} ps]
+      (doseq [o (reverse seps)] (replace-at! (- o 2) "  " "; "))
+      (let [[kind o] open]
+        (cond
+          (= kind :line) (replace-at! (- o 2) "  " "{ ")
+          ;; on the current line: nothing after it is aligned yet
+          (neg? (.indexOf (.substring b (int o)) "\n")) (do (replace-at! o " " " ") (.insert b (int (inc o)) "{ "))
+          (and (< (inc o) (.length b)) (= \- (.charAt b (inc o))))
+          (throw (ex-info (str "repr-haskell: the layout layout cannot brace a block before - at line " (line-now)) {}))
+          :else (replace-at! o " " "{"))))
+    (let [s (.toString b)]
+      (vreset! (:col *o*) (cp-count s (inc (.lastIndexOf s "\n")))))
+    (doseq [_ ps] (raw! " }"))))
+
+(defn- layout-token!
+  "Before a token on the line where blocks closed: a closer ends them (parse-error(t)), any other
+  token would continue the last one's last item, so they are braced"
+  [s]
+  (when (seq @(:pending *o*))
+    (if (contains? closers s) (vreset! (:pending *o*) []) (brace-pending!))))
+
+(defn- layout-newline!
+  "Before a line that begins at column c: the blocks closed since the last line began end there
+  when c is less than their columns (as the printer's columns are), else they are braced"
+  [c]
+  (let [ps @(:pending *o*)]
+    (when (seq ps)
+      (if (some #(<= (:n %) c) ps) (brace-pending!) (vreset! (:pending *o*) [])))))
+
+(defn- next-col
+  "The column the next token begins at"
+  []
+  (cond @(:nl *o*) (inc *indent*)
+        (or @(:bol *o*) @(:glue *o*)) (inc @(:col *o*))
+        :else (+ 2 @(:col *o*))))
+
+(declare doc-form? lead! sep! lbrace! rbrace!)
+
+(defn- layout-block!
+  "Items as a layout block: the first on the keyword's line, or on a line of its own when its line
+  is later (or a comment ended the line), the block's column then the enclosing item's lines' + 2;
+  each later item at that column on its line, after a ; on the line before; the lines inside an
+  item at the column + 2. sep: items separated by ; (not a multi-way if's guards); explicit: in
+  braces, the { at the line brace (the source wrote it on another line than the first item)"
+  [items item! & {:keys [sep explicit brace] :or {sep true}}]
+  (when explicit (goto! brace) (t! "{"))
+  (let [l0 (line-of (first items))
+        nl0 (or @(:nl *o*) (and l0 (> l0 (line-now))))
+        ;; on a line of its own: 2 further than the line the block's keyword is on, and than the
+        ;; enclosing item's lines (which then close it)
+        n (if nl0 (max (+ *indent* 3) (+ 2 @(:lind *o*))) (next-col))
+        seps (volatile! []) open (volatile! nil)]
+    (loop [xs (seq items) i 0 prev? false]
+      (when xs
+        (let [x (first xs) l (line-of x) doc (doc-form? x)
+              new? (or (and l (> l (line-now))) @(:nl *o*) (and (zero? i) nl0))]
+          (if new?
+            (binding [*indent* (dec n)]
+              (when (and explicit prev? (not doc)) (t! ";"))
+              (if (and l (> l (line-now))) (goto! l) (newline!))
+              (let [o (.length (sb))]
+                (if (zero? i)
+                  (vreset! open [:line o])
+                  (when (and sep prev? (not doc)) (vswap! seps conj o)))))
+            (do (when (and sep prev? (not doc)) (t! ";"))
+                (when (zero? i) (vreset! open [:same (.length (sb))]))))
+          (binding [*indent* (inc n)] (item! x))
+          (recur (next xs) (inc i) (or prev? (not doc))))))
+    (if explicit
+      (t! "}")
+      (when (seq items)
+        (vswap! (:pending *o*) conj {:n n :open @open :seps @seps})))))
 
 (def ^:private lv sx/lv)
 
@@ -291,10 +444,10 @@
         items (if nested (subvec items 1) items)
         text (first items)]
     (cond
-      (nil? text) (do (t! (str "-- " (first dec))) (vreset! (:nl *o*) true))
-      nested (t! (str "{-" (first dec) text "-}"))
+      (nil? text) (do (ct! (str "-- " (first dec))) (vreset! (:nl *o*) true))
+      nested (ct! (str "{-" (first dec) text "-}"))
       :else (let [ls (str/split text #"\n" -1)]
-              (t! (str "-- " (first dec) (first ls)))
+              (ct! (str "-- " (first dec) (first ls)))
               (doseq [l (rest ls)]
                 (newline!)
                 (raw! (str "--" l)))
@@ -312,7 +465,7 @@
       (let [x (first xs)]
         (if (doc-form? x)
           (do (doc! x) (recur (next xs) first?))
-          (do (when-not first? (t! ","))
+          (do (when-not first? (sep! "," x))
               (f x)
               (recur (next xs) false)))))))
 
@@ -322,27 +475,27 @@
   (at! b)
   (let [x (lv b)]
     (cond
-      (and (seq? x) (= :sig (first x))) (do (t! "(") (name! (second x)) (t! "::") (type! (nth x 2) :top) (t! ")"))
+      (and (seq? x) (= :sig (first x))) (do (t! "(") (name! (second x)) (sep! "::" (nth x 2)) (type! (nth x 2) :top) (t! ")"))
       (and (seq? x) (= :inferred (first x)))
       (let [v (lv (second x))]
-        (t! "{")
+        (lbrace!)
         (if (and (seq? v) (= :sig (first v)))
-          (do (name! (second v)) (t! "::") (type! (nth v 2) :top))
+          (do (name! (second v)) (sep! "::" (nth v 2)) (type! (nth v 2) :top))
           (name! v))
-        (t! "}"))
+        (rbrace!))
       (sx/deref-form? x) (do (t! "@") (glue!) (tvb! (second x)))
       (= x '_) (t! "_")
       :else (name! b))))
 
 (defn- ctx!
-  "A context: (C1, C2) =>"
-  [cs]
+  "A context: (C1, C2) =>; body, the form after it"
+  [cs & [body]]
   (if (= 1 (count (remove doc-form? cs)))
     (comma-sep cs #(type! % :ctx))
     (do (t! "(")
         (comma-sep cs #(type! % :ctx))
         (t! ")")))
-  (t! "=>"))
+  (sep! "=>" body))
 
 (defn- type-args! [args]
   (doseq [a args]
@@ -391,6 +544,7 @@
             (let [v (lv x)
                   modded (and (seq? v) (= :mod (first v)) (< k (dec n)))]
               (when (pos? k)
+                (lead! (if modded (nth v 2) x))
                 (if (and (seq? (lv prev)) (= :mod (first (lv prev))))
                   (do (t! "%") (glue!) (type! (second (lv prev)) :arg) (t! "->"))
                   (if linear (toks! ["%" "1" "->"] "%1 ->") (t! "->"))))
@@ -432,17 +586,17 @@
                           (doseq [b bs] (tvb! b))
                           (if (seq body) (t! "->") (do (glue!) (t! ".")))
                           (type! (last args) :top))
-          (= h '=>) (do (ctx! (butlast args)) (type! (last args) :top))
+          (= h '=>) (do (ctx! (butlast args) (last args)) (type! (last args) :top))
           (= h :sig) (let [s (lv (first args))]
                        (if (and (symbol? s) (str/starts-with? (name s) "?"))
-                         (do (at! (first args)) (t! (name s)) (t! "::") (type! (second args) :top))
-                         (do (type! (first args) :sig-subj) (t! "::") (type! (second args) :top))))
+                         (do (at! (first args)) (t! (name s)) (sep! "::" (second args)) (type! (second args) :top))
+                         (do (type! (first args) :sig-subj) (sep! "::" (second args)) (type! (second args) :top))))
           (= h :infix) (chain-items! (vec args) type!)
           (= h :op) (if (= 2 (count v))
                       (nt! (value-name (list :name (second v))))
                       (chain-items! (interleave-op (list :name (second v)) (drop 2 v)) type!))
           (= h :splice) (do (t! "$") (glue!) (expr! (second v) :atom))
-          (= h :record) (do (t! "{") (comma-sep args (fn [f] (decl! f false :body))) (t! "}"))
+          (= h :record) (do (lbrace!) (comma-sep args (fn [f] (decl! f false :body))) (rbrace!))
           (contains? #{'! :lazy :unpack :nounpack} h) (field-wrapper! x pos)
           (= h :doc-type) (do (type! (second v) pos) (doc! (nth v 2)))
           (and (seq? h) (sx/quote-form? h) (sx/chain-head? (second h)))
@@ -460,6 +614,33 @@
       :else (throw (ex-info (str "not a type: " (pr-str v)) {})))))
 
 (defn- paren-line [x] (when (instance? arbace.lang.IObj x) (:hs/paren (meta x))))
+
+(defn- lead!
+  "In the layout layout, a separator without a position of its own (, = | -> :: =>) on the line
+  of the form x after it when x begins a later line (its implicit parentheses' line, :hs/paren,
+  or its own): separators lead their lines"
+  [x]
+  (when (layout?)
+    (let [l (or (paren-line (lv x)) (line-of x))]
+      (when (and l (> l (line-now))) (goto! l)))))
+
+(defn- lbrace!
+  "A record's {: in the layout layout, glued to what follows ({w = x}); first, the first field
+  (the { leads its line)"
+  [& [first]]
+  (when first (lead! first))
+  (t! "{")
+  (when (layout?) (glue!)))
+
+(defn- rbrace! []
+  (when (layout?) (glue!))
+  (t! "}"))
+
+(defn- sep!
+  "A separator token s before the form x (lead!)"
+  [s x]
+  (lead! x)
+  (t! s))
 
 (defn type! [x pos]
   (let [v (lv x)]
@@ -501,6 +682,12 @@
 
 (defn- where! [w]
   (at! w)
+  ;; the layout layout: where on a line of its own before the bindings' when there is one, else
+  ;; on the first binding's line
+  (when (layout?)
+    (let [l0 (line-of (second (lv w)))]
+      (when (and l0 (> l0 (line-now)))
+        (goto! (if (> l0 (inc (line-now))) (dec l0) l0)))))
   (t! "where")
   (decls-block! (rest (lv w)) false :body))
 
@@ -522,31 +709,43 @@
       [(drop-last (count gs) body) (concat gs (when w [w]))]
       [(butlast body) (concat [(last body)] (when w [w]))])))
 
+(defn- alt!
+  "A case alternative (-> pat... rhs); pos of the patterns"
+  [a pos]
+  (at! a)
+  (let [v (lv a)
+        [pats rhs] (alt-split (rest v))]
+    (doseq [p pats] (pat! p pos))
+    (rhs! rhs "->" (:hs/eq (meta v)))))
+
 (defn- alts!
-  "Case alternatives (-> pat... rhs) in braces; pos of the patterns"
+  "Case alternatives (-> pat... rhs) in braces (in the layout layout, a layout block); pos of the
+  patterns"
   [alts pos & [brace braces]]
   ;; no alternatives (EmptyCase): {} when the source wrote them (^:hs/braces), else none, as a
   ;; layout block that closes at once (its empty list has no position)
   (when (and (empty? alts) braces) (t! "{") (t! "}"))
   (when (seq alts)
-    (goto! (or brace (line-of (first alts))))
-    (t! "{")
-    (doseq [a alts]
-      (at! a)
-      (let [v (lv a)
-            [pats rhs] (alt-split (rest v))]
-        (doseq [p pats] (pat! p pos))
-        (rhs! rhs "->" (:hs/eq (meta v))))
-      (t! ";"))
-    (t! "}")))
+    (if (layout?)
+      (layout-block! alts #(alt! % pos) :explicit (some? brace) :brace brace)
+      (do
+        (goto! (or brace (line-of (first alts))))
+        (t! "{")
+        (doseq [a alts]
+          (alt! a pos)
+          (t! ";"))
+        (t! "}")))))
 
 (defn- stmts!
-  "Statements in braces"
+  "Statements in braces (in the layout layout, a layout block)"
   [ss & [brace]]
-  (goto! (or brace (line-of (first ss))))
-  (t! "{")
-  (doseq [s ss] (stmt! s :do) (t! ";"))
-  (t! "}"))
+  (if (layout?)
+    (layout-block! ss #(stmt! % :do) :explicit (some? brace) :brace brace)
+    (do
+      (goto! (or brace (line-of (first ss))))
+      (t! "{")
+      (doseq [s ss] (stmt! s :do) (t! ";"))
+      (t! "}"))))
 
 (defn- let-stmt? [x]
   (let [v (lv x)]
@@ -575,6 +774,19 @@
               (stmt! q :qual)
               (recur (next qs) false)))))))
 
+(defn- keyword-at!
+  "In the layout layout, a keyword without a position before the form x (then, else, in) to x's
+  line when it is later, at the column after spaces, but before the columns of the blocks
+  that closed since the line began (which the line then closes) and not before the enclosing
+  item's lines' column"
+  [x spaces]
+  (when (layout?)
+    (let [l (line-of x)
+          ns (seq (map :n @(:pending *o*)))
+          spaces (if ns (min spaces (- (apply min ns) 2)) spaces)]
+      (when (and l (> l (line-now)))
+        (binding [*indent* (max *indent* spaces)] (goto! l))))))
+
 (defn- app-args! [args]
   (let [n (count args)]
     (doseq [[i a] (map-indexed vector args)]
@@ -585,7 +797,7 @@
 (defn- fields!
   "Record fields: (= f e), f, .."
   [fs f]
-  (t! "{")
+  (lbrace! (first fs))
   (comma-sep fs (fn [x]
                   (at! x)
                   (let [v (lv x)]
@@ -598,7 +810,7 @@
                               (name! (second v))))
                           (t! "=") (f (nth v 2)))
                       :else (name! x)))))
-  (t! "}"))
+  (rbrace!))
 
 (defn- expr*! [x pos]
   (let [v (lv x)]
@@ -662,18 +874,29 @@
           (= h :lambda-case) (do (toks! ["\\" "case"] "\\case") (alts! args :alt (:hs/brace (meta v)) (:hs/braces (meta v))))
           (= h :lambda-cases) (do (toks! ["\\" "cases"] "\\cases") (alts! args :arg (:hs/brace (meta v))))
           (= h 'case) (do (t! "case") (expr! (first args) :top) (t! "of") (alts! (rest args) :alt (:hs/brace (meta v)) (:hs/braces (meta v))))
-          (= h 'if) (if (and (seq args) (every? guard? args))
+          (= h 'if) (cond
+                      (and (seq args) (every? guard? args) (layout?))
+                      ;; MultiWayIf's guards: a layout block without semicolons (GHC's layout_if)
+                      (do (t! "if") (layout-block! args #(guards! [%] "->") :sep false))
+                      (and (seq args) (every? guard? args))
                       (do (t! "if") (t! "{") (guards! args "->") (t! "}"))
-                      (do (t! "if") (expr! (first args) :top) (t! "then") (expr! (second args) :top)
-                          (t! "else") (expr! (nth args 2) :top)))
-          (= h 'let) (do (t! "let") (decls-block! (butlast args) false :body) (t! "in") (expr! (last args) :top))
+                      :else
+                      (let [c (next-col)]
+                        (t! "if") (expr! (first args) :top)
+                        (keyword-at! (second args) (inc c)) (t! "then") (expr! (second args) :top)
+                        (keyword-at! (nth args 2) (inc c)) (t! "else") (expr! (nth args 2) :top)))
+          (= h 'let) (let [c (next-col)]
+                       (t! "let") (decls-block! (butlast args) false :body)
+                       ;; in: at the let's column (before the block's)
+                       (keyword-at! (last args) (dec c))
+                       (t! "in") (expr! (last args) :top))
           (or (= h 'do) (= h 'mdo) (sx/qualified-do? h)) (do (t! (str h)) (stmts! args (:hs/brace (meta v))))
           (= h :rec) (do (name! (first args)) (fields! (rest args) #(expr! % :top)))
           (= h :update) (do (expr! (first args) :atom) (fields! (rest args) #(expr! % :top)))
           (= h :get) (do (expr! (first args) :atom)
                          (doseq [f (rest args)] (glue!) (t! ".") (glue!) (nt! (value-name f))))
           (= h :proj) (do (t! "(") (doseq [f args] (glue!) (t! ".") (glue!) (nt! (value-name f))) (t! ")"))
-          (= h :sig) (do (expr! (first args) :sig-subj) (t! "::") (type! (second args) :top))
+          (= h :sig) (do (expr! (first args) :sig-subj) (sep! "::" (second args)) (type! (second args) :top))
           (= h :quote) (do (t! "[|") (expr! (first args) :top) (t! "|]"))
           (= h :typed-quote) (do (t! "[||") (expr! (first args) :top) (t! "||]"))
           (= h :quote-pat) (do (t! "[p|") (pat! (first args) :top) (t! "|]"))
@@ -731,7 +954,7 @@
           (= h :as) (do (name! (first args)) (at! (second args)) (glue!) (t! "@") (glue!) (pat! (second args) :prefixed))
           (= h :rec) (do (name! (first args)) (fields! (rest args) #(pat! % :elem)))
           (= h '->) (do (expr! (first args) :top) (t! "->") (pat! (second args) :top))
-          (= h :sig) (do (pat! (first args) :sig-subj) (t! "::") (type! (second args) :top))
+          (= h :sig) (do (pat! (first args) :sig-subj) (sep! "::" (second args)) (type! (second args) :top))
           (and (= h '-) (= 1 (count args))) (do (t! "-") (glue!) (pat! (first args) :atom))
           (and (= h '+) (= 2 (count args))) (do (pat! (first args) :atom) (t! "+") (pat! (second args) :atom))
           (= h 'type) (do (t! "type") (type! (first args) :arg))
@@ -769,7 +992,7 @@
   (at! h)
   (let [v (lv h)]
     (cond
-      (and (seq? v) (= :sig (first v))) (do (decl-head! (second v)) (t! "::") (type! (nth v 2) :top))
+      (and (seq? v) (= :sig (first v))) (do (decl-head! (second v)) (sep! "::" (nth v 2)) (type! (nth v 2) :top))
       (and (seq? v) (= :infix (first v))) (do (tvb! (second v)) (op! (nth v 2)) (tvb! (nth v 3)))
       (and (seq? v) (seq? (lv (first v))) (= :infix (first (lv (first v)))))
       (do (t! "(") (decl-head! (first v)) (t! ")") (doseq [b (rest v)] (tvb! b)))
@@ -780,7 +1003,7 @@
 (defn- head-or-ctx! [x]
   (let [v (lv x)]
     (if (and (seq? v) (= '=> (lv (first v))))
-      (do (at! x) (ctx! (butlast (rest v))) (decl-head! (last v)))
+      (do (at! x) (ctx! (butlast (rest v)) (last v)) (decl-head! (last v)))
       (decl-head! x))))
 
 (defn- deriving! [d]
@@ -817,7 +1040,7 @@
         (t! c2))
       (and (seq? v) (= 'forall (lv (first v))))
       (do (t! "forall") (doseq [b (butlast (rest v))] (tvb! b)) (glue!) (t! ".") (con! (last v)))
-      (and (seq? v) (= '=> (lv (first v)))) (do (ctx! (butlast (rest v))) (con! (last v)))
+      (and (seq? v) (= '=> (lv (first v)))) (do (ctx! (butlast (rest v)) (last v)) (con! (last v)))
       (and (seq? v) (= :infix (first v)))
       (loop [xs (seq (rest v)) k 0]
         (when xs
@@ -826,12 +1049,12 @@
               (doc-form? x) (do (doc! x) (recur (next xs) k))
               (= k 1) (do (op! x) (recur (next xs) 2))
               :else (do (field-wrapper! x :op) (recur (next xs) (inc k)))))))
-      (and (seq? v) (= :rec (first v))) (do (name! (second v)) (goto! (:hs/brace (meta v))) (t! "{") (t! "}"))
+      (and (seq? v) (= :rec (first v))) (do (name! (second v)) (goto! (:hs/brace (meta v))) (lbrace!) (rbrace!))
       (seq? v)
       (let [fs (rest v)]
         (name! (first v))
         (if (and (seq fs) (every? #(or (doc-form? %) (let [fv (lv %)] (and (seq? fv) (= :sig (first fv))))) fs))
-          (do (goto! (:hs/brace (meta v))) (t! "{") (comma-sep fs (fn [f] (decl! f false :body))) (t! "}"))
+          (do (goto! (:hs/brace (meta v))) (lbrace!) (comma-sep fs (fn [f] (decl! f false :body))) (rbrace!))
           (con-fields! fs)))
       :else (name! c))))
 
@@ -845,7 +1068,7 @@
         (let [x (first xs)]
           (if (doc-form? x)
             (do (doc! x) (recur (next xs) first?))
-            (do (t! (if first? "=" "|")) (con! x) (recur (next xs) false))))))))
+            (do (sep! (if first? "=" "|") x) (con! x) (recur (next xs) false))))))))
 
 (defn- activation!
   "An activation: [] [2] [~2] [~] [~0]"
@@ -890,7 +1113,7 @@
           (do (t! "forall") (doseq [b (rest v)]
                               (let [bv (lv b)]
                                 (if (and (seq? bv) (= :sig (first bv)))
-                                  (do (t! "(") (name! (second bv)) (t! "::") (type! (nth bv 2) :top) (t! ")"))
+                                  (do (t! "(") (name! (second bv)) (sep! "::" (nth bv 2)) (type! (nth bv 2) :top) (t! ")"))
                                   (tvb! b))))
               (glue!) (t! ".") (recur (next xs)))
           :else (do (if (next xs)
@@ -951,7 +1174,7 @@
       (do (t! "(") (fam-lhs! (first v)) (t! ")") (type-args! (rest v)))
       (and (seq? v) (= 'forall (lv (first v))))
       (do (t! "forall") (doseq [b (butlast (rest v))] (tvb! b)) (glue!) (t! ".") (fam-lhs! (last v)))
-      (and (seq? v) (= :sig (first v))) (do (fam-lhs! (second v)) (t! "::") (type! (nth v 2) :top))
+      (and (seq? v) (= :sig (first v))) (do (fam-lhs! (second v)) (sep! "::" (nth v 2)) (type! (nth v 2) :top))
       (and (seq? v) (not (contains? #{:name :tuple-con} (first v))))
       (do (name! (first v)) (type-args! (rest v)))
       :else (name! l))))
@@ -970,7 +1193,9 @@
           (do (t! "where")
               (if (= '.. (lv (second v)))
                 (do (t! "{") (t! "..") (t! "}"))
-                (do (t! "{") (doseq [e (rest v)] (fam-eqn! e) (t! ";")) (t! "}")))))))))
+                (if (and (layout?) (seq (rest v)))
+                  (layout-block! (rest v) fam-eqn!)
+                  (do (t! "{") (doseq [e (rest v)] (fam-eqn! e) (t! ";")) (t! "}"))))))))))
 
 (defn- data-like!
   "data, newtype: items after the keyword (and instance): :ctype?, head-or-ctx, cons, derivings;
@@ -988,7 +1213,7 @@
 (defn- fam-lhs-or-ctx! [x]
   (let [v (lv x)]
     (if (and (seq? v) (= '=> (lv (first v))))
-      (do (at! x) (ctx! (butlast (rest v))) (fam-lhs! (last v)))
+      (do (at! x) (ctx! (butlast (rest v)) (last v)) (fam-lhs! (last v)))
       (fam-lhs! x))))
 
 (defn- class-head! [items]
@@ -1021,7 +1246,10 @@
   explicitly braced class body into it): its items at one column n, each on a line of its own
   (a ; between two on one line), the lines inside an item at n + 2"
   [body where?]
-  (when (or (seq body) where?)
+  (when (and (layout?) (or (seq body) where?))
+    (t! "where")
+    (when (seq body) (layout-block! body #(decl! % false :body))))
+  (when (and (not (layout?)) (or (seq body) where?))
     (t! "where")
     (let [nl? (and (line-of (first body)) (> (line-of (first body)) (line-now)))
           n (if nl? 3 (+ 2 @(:col *o*)))]
@@ -1056,18 +1284,18 @@
       (= h '=) (let [[lhs & rhs] args]
                  (pat! lhs :alt)
                  (rhs! rhs "=" (:hs/eq (meta v))))
-      (contains? #{'sig :sig} h) (do (comma-sep (butlast args) name!) (t! "::") (type! (last args) :top))
+      (contains? #{'sig :sig} h) (do (comma-sep (butlast args) name!) (sep! "::" (last args)) (type! (last args) :top))
       (and (= h 'default) (let [a (lv (first args))] (and (seq? a) (= :sig (first a)))))
       (do (t! "default") (decl! (first args) false :body))
       (= h 'pattern) (let [[lhs & more] args
                            lv1 (lv lhs)]
                        (t! "pattern")
                        (if (and (seq? lv1) (= :sig (first lv1)))
-                         (do (comma-sep (butlast (rest lv1)) name!) (t! "::") (type! (last lv1) :top))
+                         (do (comma-sep (butlast (rest lv1)) name!) (sep! "::" (last lv1)) (type! (last lv1) :top))
                          (do (at! lhs)
                              (cond
                                (and (seq? lv1) (= :infix (first lv1))) (do (name! (second lv1)) (op! (nth lv1 2)) (name! (nth lv1 3)))
-                               (and (seq? lv1) (= :rec (first lv1))) (do (name! (second lv1)) (t! "{") (comma-sep (drop 2 lv1) name!) (t! "}"))
+                               (and (seq? lv1) (= :rec (first lv1))) (do (name! (second lv1)) (lbrace!) (comma-sep (drop 2 lv1) name!) (rbrace!))
                                (seq? lv1) (do (name! (first lv1)) (doseq [a (rest lv1)] (name! a)))
                                :else (name! lhs))
                              (t! (str (lv (first more))))
@@ -1104,7 +1332,7 @@
           (and (seq? a0) (= '= (lv (first a0)))) (do (t! "type") (when (= ctx :top) (t! "instance")) (fam-eqn! (first args)))
           (and (seq? a0) (= 'forall (lv (first a0)))) (do (t! "type") (when (= ctx :top) (t! "instance")) (fam-eqn! (first args)))
           (and (= ctx :top) (= 1 (count args)) (seq? a0) (= :sig (first a0)))
-          (do (t! "type") (name! (second a0)) (t! "::") (type! (nth a0 2) :top))
+          (do (t! "type") (name! (second a0)) (sep! "::" (nth a0 2)) (type! (nth a0 2) :top))
           (and (= ctx :body) (= 1 (count args))) (do (t! "type") (family! args))
           (and (= ctx :body) (= 2 (count args))) (do (t! "type") (t! "instance") (fam-lhs! (first args)) (t! "=") (type! (second args) :top))
           :else (do (t! "type") (decl-head! (first args)) (t! "=")
@@ -1129,7 +1357,7 @@
                            (cond
                              (string? mv) (t! (hs-string mv))
                              (symbol? mv) (t! (str mv))
-                             :else (do (at! m) (name! (second mv)) (t! "::") (type! (nth mv 2) :top))))))
+                             :else (do (at! m) (name! (second mv)) (sep! "::" (nth mv 2)) (type! (nth mv 2) :top))))))
       (contains? #{'inline 'noinline 'inlinable 'opaque :inline :noinline :inlinable :opaque} h)
       (do (inline-pragma! h args) (t! "#-}"))
       (contains? #{'specialise :specialise} h)
@@ -1158,7 +1386,7 @@
                                      (doseq [b (rest xv)]
                                        (let [bv (lv b)]
                                          (if (and (seq? bv) (= :sig (first bv)))
-                                           (do (at! b) (t! "(") (name! (second bv)) (t! "::") (type! (nth bv 2) :top) (t! ")"))
+                                           (do (at! b) (t! "(") (name! (second bv)) (sep! "::" (nth bv 2)) (type! (nth bv 2) :top) (t! ")"))
                                            (tvb! b))))
                                      (glue!) (t! "."))
                                  :else (do (at! x) (expr! (second xv) :top) (t! "=") (expr! (nth xv 2) :top))))))
@@ -1178,17 +1406,20 @@
   "Declarations in braces, ; between them (not after the last: an empty case ends a block
   before })"
   [ds top? ctx]
-  (goto! (line-of (first ds)))
-  (t! "{")
-  (loop [ds (seq ds) first? true]
-    (when ds
-      (let [d (first ds)]
-        (if (doc-form? d)
-          (do (decl! d top? ctx) (recur (next ds) first?))
-          (do (when-not first? (t! ";"))
-              (decl! d top? ctx)
-              (recur (next ds) false))))))
-  (t! "}"))
+  (if (and (layout?) (seq ds))
+    (layout-block! ds #(decl! % top? ctx))
+    (do
+      (goto! (line-of (first ds)))
+      (t! "{")
+      (loop [ds (seq ds) first? true]
+        (when ds
+          (let [d (first ds)]
+            (if (doc-form? d)
+              (do (decl! d top? ctx) (recur (next ds) first?))
+              (do (when-not first? (t! ";"))
+                  (decl! d top? ctx)
+                  (recur (next ds) false))))))
+      (t! "}"))))
 
 ;;; Exports and imports
 
@@ -1206,7 +1437,7 @@
       (do (t! (str "{-# " (if (= :deprecated (first v)) "DEPRECATED" "WARNING"))) (msg! (second v)) (t! "#-}") (ie! (nth v 2)))
       (and (seq? v) (not (contains? #{:name :tuple-con :utuple-con} (first v))))
       (do (name! (first v))
-          (glue!) (t! "(")
+          (when-not (layout?) (glue!)) (t! "(")
           (let [subs (rest v)]
             (when-not (= [:_] (map lv subs))
               (comma-sep subs (fn [s] (if (= '.. (lv s)) (t! "..") (ie! s))))))
@@ -1284,6 +1515,7 @@
             warn (first (filter #(seq? (lv %)) (take-while #(not (keyword? (lv %))) mrest)))]
         (at! m)
         (when mname
+          (binding [*indent* (if (layout?) 2 0)]
           (t! "module") (at! mname) (t! (str (lv mname)))
           (when warn
             (let [w (lv warn)]
@@ -1293,7 +1525,7 @@
               (msg! (last w))
               (t! "#-}")))
           (when exports (items! exports))
-          (t! "where"))))
+          (t! "where")))))
     ;; the body in virtual layout at column 1, as the original's (GHC's Haddock pass takes
     ;; a documentation comment at column 1 into no declaration only then): each item on a
     ;; line of its own (a ; between two on one line), the lines inside an item at column 2
@@ -1304,18 +1536,19 @@
           (and l (> l (line-now))) (binding [*indent* 0] (goto! l))
           (zero? i) (when-not @(:bol *o*) (binding [*indent* 0] (newline!)))
           :else (t! ";"))
-        (binding [*indent* 1]
+        (binding [*indent* (if (layout?) 2 1)]
           (cond
             (doc-form? d) (binding [*indent* 0] (doc! d))
             (= h 'hs/import) (import! d)
             :else (decl! d true :top)))))))
 
 (defn- out-of
-  "The printer's state for forms"
-  [forms full]
+  "The printer's state for forms; layout: the layout layout's"
+  [forms full & [layout]]
   (let [{:keys [exts file]} (module-exts forms)]
     {:sb (StringBuilder.) :line (volatile! 1) :col (volatile! 0) :glue (volatile! false) :nl (volatile! false)
      :bol (volatile! true) :file file :exts exts :full full :toks (volatile! [])
+     :layout layout :pending (volatile! []) :prev (volatile! nil) :lind (volatile! 1)
      :star-type (not (contains? (set (map str (map lv (mapcat rest (filter #(= 'hs/language (lv (first (lv %)))) forms)))))
                                 "NoStarIsType"))}))
 
@@ -1443,14 +1676,15 @@
 
 (defn print-module
   "Haskell forms (as read from a forms file) to Haskell source: {:file :text}; forms of mode
-  :full in the full layout, the original text, unless layout is :braces"
+  :full in the full layout, the original text, unless layout is :braces or :layout; layout
+  :layout: the layout layout (SPEC §7.4, 2)"
   [forms & [layout]]
   (when (and (= layout :full) (not (full-forms? forms)))
     (throw (ex-info "repr-haskell: the full layout needs forms of mode :full (bin/repr-haskell read of a dump --full)" {})))
-  (if (and (full-forms? forms) (not= layout :braces))
+  (if (and (full-forms? forms) (not (contains? #{:braces :layout} layout)))
     (print-module-full forms)
     (let [forms (mapv lift-all forms)]
-      (binding [*o* (out-of forms false)]
+      (binding [*o* (out-of forms false (= layout :layout))]
         (print-body! forms)
         (raw! "\n")
         {:file (:file *o*) :text (str (:sb *o*))}))))
