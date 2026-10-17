@@ -11,6 +11,13 @@
 > before, `arbace.g2a`, `bin/g2a`), whose build is `arbace.build.go` (`bin/build-go`; was `bin/g2a
 > build`), and repr/java (j2a before; doc/NAMING-SURVEY.md). This document uses the current names
 > throughout, also where it records earlier work.
+>
+> Since 2026-10-17 too, c2a is repr/clojure (`arbace.c2a.*` is `arbace.repr.clojure(.*)`,
+> `bin/c2a` `bin/repr-clojure read`, `bin/c2a-check` `bin/repr-clojure check`, `test/c2a/`
+> `test/repr/clojure/`, `doc/C2A.md` `doc/REPR-CLOJURE.md`) and the back end `arbace.aot` is c2j
+> (`arbace/aot/` `arbace/c2j/`, its marks `:aot/*` `:c2j/*`, `test/aot/` `test/c2j/`); "AOT"
+> stays the compiled pipeline's name (`ARBACE_AOT`, the packages `aot_arbace_*`, the tree `aot/`;
+> doc/NAMING-SURVEY.md, "The second rename as built").
 
 Status: accepted (2026-10-08; the user took the recommendation of each of the 23 questions of
 §16), B1a step 2 ([B1-PLAN.md](B1-PLAN.md)), with every amendment set of §16 accepted by the user
@@ -768,7 +775,7 @@ differences are **variant files**, `arbace/lang/go/<Class>.ae` (and, for the tra
 whose Java forms repr/java regenerates, `overlay/jdk/variants/<Class>.ae`, in the class's package:
 amendment K1, accepted 2026-10-09), read by j2g only. (Since SA150, 2026-10-13/14, the
 hand-written variants of `arbace/lang` are merged into their bases by
-`test/aot/merge_variants.ae`, and `arbace/lang/go/` holds only the generated `CompilerOps.ae` and
+`test/c2j/merge_variants.ae`, and `arbace/lang/go/` holds only the generated `CompilerOps.ae` and
 `CompilerAOTFn.ae`; the mechanism and the JDK's variants stay: STANDALONE-NOTES.md, "The
 variants merged into their bases (SA150)".)
 
@@ -1523,11 +1530,31 @@ protocol:
   functions `C_clinit_p0` ... of at most 48, which `C_clinit` calls in order, unless one may
   leave early (`return`, `goto`, `defer`, a label) or declares locals for the rest; gc's stack
   maps of one function grow as its safepoints times its stack slots.
-- **A compiled fn's code** (`:aot/code`, standalone SA156, SA158, SA159): not a Java object in
+- **A compiled fn's code** (`:c2j/code`, standalone SA156, SA158, SA159): not a Java object in
   Go (a header word, its arities' methods, none of `Object`'s protocol, no member table, no
   instance check, registered by the package's static `jrt.CodeDecl` table); its `C_New`
   initializes its nest's top-level class, whose statics its methods then read unguarded.
 
+- **Classes initialized at start** (Futamura F4, 2026-10-17; doc/FUTAMURA-SURVEY.md, "F4 and
+  F2's j2g fixes as built"). `arbace.j2g.start/classes` lists, by their Go names, the classes
+  whose initialization the program has started when a compiled namespace's code first runs
+  (`test/j2g/start_classes.ae` derives it from the program's `ARBACE_TRACE_INIT` runs). For a
+  listed class `C` (translated, with non-trivial initialization) each static method `C_m` is
+  two functions: `C_m_NoInit`, the body without the guard, and `C_m`, the guard (when the method
+  has one) and a call of `C_m_NoInit`. Compiled code (arbace.c2j's classes,
+  `names/compiled-class?`) calls `C_m_NoInit` and reads and writes `C`'s statics unguarded;
+  every other caller is as before. `jrt.StartCheck`, called at the start of a compiled loader's
+  `load` and of every compiled class's static initializer, stops the program (status 70) when
+  a listed class has not started its initialization (`jrt.ClassInit.Started`: done, or in
+  progress by the current thread), so a stale list fails loudly. A stack trace leaves out
+  `C_m`'s frame above `C_m_NoInit`'s.
+
+
+*Deviation (2026-10-17, F4.3, the user):* compiled code calls the start classes' statics without
+the guard (`C_m_NoInit`, after `jrt.StartCheck`); code of a compiled namespace run by another
+thread while a start class is still being initialized by the main thread (during `arbace.core`'s
+loading) would see it half-initialized, where the JVM makes that thread wait. The startup starts
+no such thread (agents and futures run after it), so it is recorded, not prevented.
 ### 6.3 Go's package initialization
 
 Go's own package initialization runs only data: the class registrations of §5.11, the string

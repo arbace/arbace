@@ -774,6 +774,12 @@ element cast to CharSequence (the for loop's checkcast), then joined as the arra
                                  :let [[ps _] (t/parse-method-desc (:desc mm))]]
                              (do (run! cls ps)
                                  {:line (str "c" (bit-and (:flags mm) 0x1fff) " " (dotted-desc (:desc mm)))}))))
+          abstract-ctors (when (and abstract (not iface))
+                           (for [mm (d/class-methods n)
+                                 :when (and (public? mm) (= "<init>" (:name mm)))
+                                 :let [[ps _] (t/parse-method-desc (:desc mm))]]
+                             (do (run! cls ps)
+                                 {:line (str "c" (bit-and (:flags mm) 0x1fff) " " (dotted-desc (:desc mm)))})))
           ctors (for [mm (d/class-methods n)
                       :when (and (public? mm) (= "<init>" (:name mm)) (not abstract) (not iface))
                       :let [real (a/ctor-real-desc n mm)
@@ -802,7 +808,10 @@ element cast to CharSequence (the for loop's checkcast), then joined as the arra
                                [(if vol
                                   (c/volatile-write place (:desc f) (arg-conv pkg (:desc f) 'v))
                                   (list 'set! place (arg-conv pkg (:desc f) 'v)))])}))]
-      {:methods methods :ctors (concat ctors absent-ctors) :fields fields})))
+      ;; an abstract class's public constructors, so that reflection finds them as the JVM's
+      ;; (Constructor.newInstance: InstantiationException; the evaluator's new of an abstract
+      ;; class: InstantiationError), without a body: no object of the class is made in Go
+      {:methods methods :ctors (concat ctors absent-ctors abstract-ctors) :fields fields})))
 
 (defn class-registration
   "C_class (Define, hierarchy only) and the init function setting its function and table
@@ -819,9 +828,9 @@ element cast to CharSequence (the for loop's checkcast), then joined as the arra
           ;; reaches Collection (core's print-method preferences: EVAL-NOTES.md)
           ifaces (distinct (mapcat (fn up [i] (if (m/in-world? i) [i] (mapcat up (:interfaces (m/info i)))))
                                    (:interfaces dd)))
-          ;; a compiled fn's code (S6, :aot/code) has none: nothing reflects on it, its fn's
+          ;; a compiled fn's code (S6, :c2j/code) has none: nothing reflects on it, its fn's
           ;; class is made at run time (SA154)
-          tables (if (or (:reflected dd) (:aot/code (:meta dd))) {} (member-tables pkg n))
+          tables (if (or (:reflected dd) (:c2j/code (:meta dd))) {} (member-tables pkg n))
           cls-sym (symbol (str g "_class"))]
       (if (m/code-class? n)
         ;; a compiled fn's code (SA159): its variable, and its entry of the package's table of
@@ -833,7 +842,7 @@ element cast to CharSequence (the for loop's checkcast), then joined as the arra
                         [:Out (list 'addr cls-sym) :Name (java-name n) :Modifiers (modifiers n)]
                         (when-not (= :top (:nesting dd)) [:Simple (or (:simple dd) "")])
                         [:Go (str (nm/pkg-path pkg) "." g)]
-                        (when-let [src (:aot/source (:meta dd))] [:Source src])
+                        (when-let [src (:c2j/source (:meta dd))] [:Source src])
                         (when (and (= :member (:nesting dd)) (m/in-world? (:outer dd)))
                           [:Declaring (list 'addr (c/class-val (str "L" (:outer dd) ";")))])
                         (when (seq ifaces)
@@ -857,7 +866,7 @@ element cast to CharSequence (the for loop's checkcast), then joined as the arra
                                     [:Simple (or (:simple dd) "")])
                                   [:Go (str (nm/pkg-path pkg) "." g)]
                                   ;; a compiled namespace's class: its source file (standalone S6)
-                                  (when-let [src (:aot/source (:meta dd))] [:Source src]))))))
+                                  (when-let [src (:c2j/source (:meta dd))] [:Source src]))))))
        (list 'go/func 'init []
              (list* 'let ['i (list '.Info cls-sym)]
                     (concat
@@ -1170,6 +1179,19 @@ element cast to CharSequence (the for loop's checkcast), then joined as the arra
                 (for [[n _] tables]
                   (list 'set! (list '.-Table (list '.Info (m/class-sym pkg n "_class"))) (symbol (str (m/go-name n) "_members")))))]))))
 
+(defn start-forms
+  "The registration of the classes initialized at start (arbace.j2g.start; Futamura F4), in
+  their order, with jrt.RegisterStartClasses: their initialization states, C_Init functions and
+  Go names, for jrt.StartCheck."
+  [pkg classes]
+  (when (seq classes)
+    [(list 'go/func 'init []
+           (list (m/jrt-sym pkg "RegisterStartClasses")
+                 (apply list 'lit (list 'slice (list '* (m/jrt-sym pkg "ClassInit")))
+                        (for [n classes] (list 'addr (m/class-sym pkg n "_init"))))
+                 (apply list 'lit '(slice (func [])) (for [n classes] (m/class-sym pkg n "_Init")))
+                 (apply list 'lit '(slice string) (map m/go-qualified-name classes))))]))
+
 (defn frames-forms
   "The frame table (§7.9.6, amendment J4): entries for methods whose Java names the demangler
   cannot read back (names with _ or $)."
@@ -1186,8 +1208,11 @@ element cast to CharSequence (the for loop's checkcast), then joined as the arra
                             gofn (str (nm/pkg-path pkg) "."
                                       (cond (or static iface) (str g "_" base)
                                             leaf (str "(*" g ")." base)
-                                            :else (str "(*" g ").Impl_" base)))]]
-                  (list 'lit '_ gofn (str/replace n "/" ".") (:name mm) 0))]
+                                            :else (str "(*" g ").Impl_" base)))
+                            ;; a class initialized at start: the guard-free entry too (Futamura F4)
+                            gofns (if (and static (m/start-class? n)) [gofn (str gofn "_NoInit")] [gofn])]
+                      gf gofns]
+                  (list 'lit '_ gf (str/replace n "/" ".") (:name mm) 0))]
     (when (seq entries)
       [(list 'go/func 'init []
              (list (m/jrt-sym pkg "RegisterFrames") (apply list 'lit (list 'slice (m/jrt-sym pkg "FrameInfo")) entries)))])))

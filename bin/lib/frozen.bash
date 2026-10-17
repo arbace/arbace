@@ -17,8 +17,8 @@
 #                  reads .clj only, not .ae), .tmp/frozen-view/K:
 #                    test   test/'s namespaces (the oracle's runner, jrt's generators, ...)
 #                    tools  those, the tools' namespaces (arbace.repr.java, arbace.repr.go,
-#                           arbace.build.go, arbace.j2g, arbace.c2a), the Java forms' front end (arbace.classes.types, env,
-#                           parse, lower, analyze) and every namespace of the checkout the jar
+#                           arbace.repr.clojure, arbace.build.go, arbace.j2g), the Java forms'
+#                           front end (arbace.classes.types, env, parse, lower, analyze) and every namespace of the checkout the jar
 #                           lacks (arbace.box, a JVM-only part of env, the access flags ...)
 #                  arbace.core, the runtime (the jar's Java forms: arbace.lang, arbace.asm)
 #                  and every other namespace stay the jar's. The jar's sources and __init
@@ -98,7 +98,7 @@ frozen_view() {
       (cd "$root" && find arbace -name '*.ae' ! -path 'arbace/lang/go/*' | LC_ALL=C sort) | awk -v list="$list" '
         BEGIN { while ((getline l < list) > 0) jar[l] = 1 }
         { b = substr($0, 1, length($0) - 3) }
-        b ~ /^arbace\/(repr\/java|repr\/go|build|j2g|c2a)(\/|$)/ { print; next }
+        b ~ /^arbace\/(repr\/java|repr\/go|repr\/clojure|build|j2g)(\/|$)/ { print; next }
         b ~ /^arbace\/classes\/(types|env|parse|lower|analyze)$/ { print; next }
         b ~ /^arbace\/classes\/(native|boot|compiler|emit|shape|verify|build)$/ { next }
         !((b ".clj") in jar) && !((b "__init.class") in jar) { print }' |

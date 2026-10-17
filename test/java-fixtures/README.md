@@ -12,8 +12,8 @@ byte.
 
 | path | what | from |
 |---|---|---|
-| `forms/` | one Java forms file (`.ae`) per Java source, at its package's path, and one namespace file per package (`arbace/test.ae`, `compilation.ae`, `reflector.ae`), as repr/java writes them (`bin/repr-java read`, javac's class path the frozen JVM Arbace's jar since S4, `bin/lib/frozen.bash`, until then Arbace's `target/stage2`, for `arbace.lang.IFn` and the Java API; repr/java itself on the frozen jar since S4); the first line names the source (`;; Converted from clojure/clojure test/java/...`) | `test/java` of Clojure's repository (12 files: `compilation.TestDispatch`, `JDK8InterfaceMethods`, `ClassWithFailingStaticInitialiser`, `reflector.IBar`, and `clojure.test`'s `AdapterExerciser`, `ConcreteClass`, `FIConstructor`, `FIStatic`, `FunctionalTester`, `GenericInterface`, `ReflectorTryCatchFixture`, `SwissArmy`), renamed by c2a (`clojure.*` to `arbace.*`) as `bin/clojure-tests` renames the suite |
-| `provenance.edn` | Clojure's repository and commit; the JDK whose javac attributes the sources; the converters' versions (SHA-256 over `arbace/repr/java{.ae,/}` and `bin/repr-java`, as `jdk/provenance.edn`; over `arbace/c2a`) and repr/java's host (the frozen jar's name and SHA-256, since S4); the counts | `bin/clojure-tests --java-fixtures` |
+| `forms/` | one Java forms file (`.ae`) per Java source, at its package's path, and one namespace file per package (`arbace/test.ae`, `compilation.ae`, `reflector.ae`), as repr/java writes them (`bin/repr-java read`, javac's class path the frozen JVM Arbace's jar since S4, `bin/lib/frozen.bash`, until then Arbace's `target/stage2`, for `arbace.lang.IFn` and the Java API; repr/java itself on the frozen jar since S4); the first line names the source (`;; Converted from clojure/clojure test/java/...`) | `test/java` of Clojure's repository (12 files: `compilation.TestDispatch`, `JDK8InterfaceMethods`, `ClassWithFailingStaticInitialiser`, `reflector.IBar`, and `clojure.test`'s `AdapterExerciser`, `ConcreteClass`, `FIConstructor`, `FIStatic`, `FunctionalTester`, `GenericInterface`, `ReflectorTryCatchFixture`, `SwissArmy`), renamed by repr/clojure (`clojure.*` to `arbace.*`) as `bin/clojure-tests` renames the suite |
+| `provenance.edn` | Clojure's repository and commit; the JDK whose javac attributes the sources; the converters' versions (SHA-256 over `arbace/repr/java{.ae,/}` and `bin/repr-java`, as `jdk/provenance.edn`; over `arbace/repr/clojure{.ae,/}`) and repr/java's host (the frozen jar's name and SHA-256, since S4); the counts | `bin/clojure-tests --java-fixtures` |
 
 Origin: https://github.com/clojure/clojure at `98d735fab02f337cee654cb0629bddc09883a75a`, the
 revision `bin/clojure-tests` fetches for the suite (the upstream source of the frozen tree
@@ -22,8 +22,8 @@ revision `bin/clojure-tests` fetches for the suite (the upstream source of the f
 Arbace's main at `b0f5730` (the commit that first added this tree records the rest).
 
 When to regenerate (`bin/clojure-tests --java-fixtures update`, then commit this tree with the
-change): after a change to what the conversion reads: repr/java (`arbace/repr/java{.ae,/}`, `bin/repr-java`), c2a's
-renaming (`arbace/c2a`), the suite's revision (`rev` in `bin/clojure-tests`), the classes of
+change): after a change to what the conversion reads: repr/java (`arbace/repr/java{.ae,/}`, `bin/repr-java`), repr/clojure's
+renaming (`arbace/repr/clojure{.ae,/}`), the suite's revision (`rev` in `bin/clojure-tests`), the classes of
 Arbace or the JDK the fixtures name (javac attributes against them). `verify` fails until then.
 `bin/arbace-go --build-tests DIR` builds the test executable from other forms, for instance a
 fresh conversion (`bin/clojure-tests --java-fixtures DIR`).

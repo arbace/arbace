@@ -662,3 +662,195 @@ to c2j with repr/clojure". Confirmed: `arbace.aot` builds on Clojure's `Compiler
 and writes Java forms where Clojure's back end writes bytecode; `ARBACE_AOT=1` already denotes
 the whole compiled pipeline. To do with c2a → `repr/clojure`, after F2 and before F3 and F4, one
 re-seed; `ARBACE_AOT` and `aot_arbace_*` kept (alternative: renamed too, churn in the seed only).
+
+## 2026-10-17: Go forms to be first-class at the REPL (the user)
+
+The user: "go forms should be first class citizens like arbace and java forms: interpreted in
+the repl. bring arbace/clojure, java and go forms to the same level in repl when it is
+appropriate. haskell forms are good as data for now". Today Arbace forms are evaluated (the
+closure compiler's `Code` nodes, over the compiled program), Java forms are analyzed by
+`arbace.classes` and interpreted (`arbace.classes.interp`, classes made at run time), and Go
+forms are data only (read, transformed, printed by repr/go, built by Go's toolchain). Next: a
+survey of Go forms at the REPL (an interpreter of Go forms beside the compiled path through
+`repr/go print` and Go's compiler; their analysis; calls between the three dialects and the
+compiled program; prior art), then the build when the running work allows; Haskell forms stay
+data.
+
+## 2026-10-17: F2 built, the per-form differential checks
+
+As decided (doc/FUTAMURA-SURVEY.md, "Decided", F2 (a)), on the branch `f2-diff` from `d652647`:
+`bin/diffcheck` (`make diffcheck`; `test/diffcheck/`: `gen.ae`, `driver.ae`, `main.ae`, the
+exclusions and `known.edn`), a step of `bin/gate --full`. Design (survey, "F2 as built"): a
+program built for the check from the gate's executable, carrying both halves: the oracle's forms
+(53 corpus files, 11,758 cases) each a namespace of one `(diffcheck.driver/case ...)` macro per
+case, compiled by the back end with the runtime's namespaces into one tree and also evaluated,
+the two runs compared case by case; and the Java forms of defclass.ae, defclass_corpus.ae,
+native.ae and j2g's fixtures (713 cases; 134 classes given to j2g) interpreted against
+translated by j2g, the same evaluated cases calling them. Alternatives considered: the Java
+forms the back end emits run by the interpreter (cheaper, no Go build, but not the compiled
+build's path); the corpora compiled into the test build (Clojure's suite would run on a program
+twice its size); a compiling run per corpus file (no cross-file state at analysis, but 50 runs
+of the runtime's compilation). Found and fixed in `arbace/aot/emit.ae`: compiled `import`'s
+value (nil, where the evaluator and the JVM give the class; 21 cases) and a deftype's `this` in a
+fn's code (every compiled defrecord failed j2g's analysis); the shipped program changes in the
+back end and its import units only, no re-seed. Found and recorded: j2g's bugs with anonymous
+classes taking constructor arguments, a Go name collision for a reify in a nested anonymous fn,
+the stub of an unimplemented method throwing UnsupportedOperationException, an abstract class's
+constructors missing from reflection, Clojure constants in class bodies; the interpreter's
+lambdas without default methods; the back end's limits (code forms in fns, deftypes and reifys;
+namespaces of one segment; a proxy made at run time first). 12,449 of 12,471 cases agree, the
+22 others recorded with reasons; about 5 minutes from the gate's executable, 40 s cached.
+Proposals F2.1-F2.6 (survey) are the user's.
+
+## 2026-10-17: F2 merged; its proposals decided (the user)
+
+F2 (`bin/diffcheck`, merged from `f2-diff` `107b40a`; details in its own entry above and
+doc/FUTAMURA-SURVEY.md, "F2 as built"): 12,449 of 12,471 cases agree (11,758 of Clojure's pair,
+713 of the Java forms' pair), 22 known with reasons; two back-end fixes found by it (compiled
+`import` returned nil; a deftype inside a fn emitted its methods' `this` as the fn's), which
+change the shipped program until the next re-seed. Decided: F2.1 (a), F2.2, F2.3, F2.5, F2.6 as
+recommended, and F2.4 with the rest of F2.6 fixed too (the user, against "leave recorded"). The
+next batch, under one re-seed: the rename (c2a → repr/clojure, arbace.aot → c2j), F3 and F4,
+and these fixes; then `bin/diffcheck` in the essential gate.
+
+## 2026-10-17: the survey of Go forms at the REPL
+
+Following the user's direction (entry above): doc/GO-FORMS-REPL-SURVEY.md (from the branch
+`go-forms-repl-survey`, `cf1052e`). Findings: Go forms do not run at the REPL today (the
+namespace `arbace.go` their heads name does not exist); values cross cheaply since the compiled
+program is Go (an Arbace value is a Go `any`); a Go type checker in Arbace is needed either way
+(the converter's annotations cover go/types' non-local answers only; estimated 5,000-8,000
+lines, against `arbace.classes.analyze`'s 4,375); stock `reflect` cannot make named types,
+methods or interfaces, and a static Arbace cannot `dlopen` (Go's `plugin` needs cgo), so the
+program's compiled packages are reached through a build-time table, as every Go interpreter
+does; `$GOROOT/test`'s programs, already converted by repr/go, are a ready conformance corpus
+(interpreted against printed and compiled: F2 extended to Go forms). Measured (ms, fib 22):
+gc 0.09-0.15, typed Go closures (a sketch) 5.5, the Java forms interpreter 6.8-7.0, Arbace's
+evaluator 8.4-8.6, yaegi v0.16.1 38.8, go/ssa/interp 75. Options: (a) Arbace's own interpreter
+(checker and node builder in Arbace, typed closures in hand-written Go forms as jrt is, a table
+of compiled packages), (b) an SSA-like IR, (c) yaegi embedded (stale upstream, its own checker,
+5.7 times slower than the Java forms interpreter on fib), (d) the compiled path only (a child
+process or tool guest; rebuild and restart; a loader of gc's objects). Recommended (a), with a
+`go/run-compiled` command (d1); milestones GR0-GR6, 22 to 33 working days; proposals G1-G17
+(cited as GR where the fixpoint's G1-G3 could be confused), open.
+
+## 2026-10-17: the second rename carried out
+
+As decided (entries above; doc/NAMING-SURVEY.md, "The second rename as built"), on the branch
+`rename-c2j`, merged into main: c2a → `repr/clojure` (`arbace.repr.clojure`, `bin/repr-clojure
+read|check`, doc/REPR-CLOJURE.md, test/repr/clojure; `C2A_*` → `REPR_CLOJURE_*`, the guard
+extended), `arbace.aot` → `arbace.c2j` (`arbace/c2j/`, test/c2j; its marks on Java forms
+`:c2j/*`); kept as the pipeline's name: `ARBACE_AOT`, `ARBACE_NO_AOT`, the packages
+`aot_arbace_*`, the tree `target/arbace-go/aot/`, `aot.key`, `Compiler$AOT`, `AOTFn`. Regenerated:
+the fixtures' headers and provenance, jdk/'s provenance (911 forms equal), repr/clojure's
+`libs.out`. Checks on the branch: the essential gate, the fixpoint G1 = G2 = G3 (`e122ade3...`),
+`bin/repr-clojure check` (unit, `--suite`, `--libs`), `bin/diffcheck` (22 known, 0 new), repr/go's
+round trip, `bin/j2g-edge verify`. R6-R8 accepted (the user). The seed still embeds the old
+names until the next re-seed.
+
+## 2026-10-17: repr/haskell's milestone R1
+
+At the user's request (R1 beside F2), on the branch `repr-haskell-r1`, merged into main; details in
+doc/haskell/HASKELL-NOTES.md and doc/haskell/SPEC.md §10.4 ("As built: R1"). Built: the helper
+`tools/hsdump/HsDump.hs` on the host's GHC 9.14.1 (verbs dump, tree, lines; the pinned version
+checked; `-haddock` on; CPP through GHC's own driver, each dump recording the command, the
+included files' hashes and the output), the converter, writer and printer in Arbace
+(`arbace/repr/haskell{.ae,/}`), the command `bin/repr-haskell` (helper, corpus, dump, read,
+print, roundtrip, test), the corpus file `test/haskell/corpus-ghc-9.14.1.edn` (the source
+tarball pinned by SHA-256). Over `base`, `ghc-internal`, `ghc-prim`, `ghc-bignum`: 483 of 483
+modules give GHC's tree and every located node's start line equal to the original's (86 with
+CPP; 21,707 top-level forms, 639,097 located nodes), no known differences, about 40 s; 26 `.hsc`
+modules, 24 boot files and 2 generated ones left for R6. Departures from the spec, decided by the
+user as recommended (HR1-HR5): kept out of the executable (j2g's embed exclusions, as
+repr/java); the module body and class bodies printed in layout, since GHC's Haddock pass places
+doc comments by column only under layout; the stricter lines check and new `:lines` keys; tuple
+and unboxed-sum forms in constructor declarations; the round trip and tests in `bin/gate
+--full` (a step of their own). `ghc` added to doc/ALPINE.md as a check-only dependency.
+
+## 2026-10-17: Go forms at the REPL decided; GR0 started
+
+The survey's G1-G17 decided as recommended (doc/GO-FORMS-REPL-SURVEY.md, "Decided"): Arbace's
+own interpreter of Go forms, a type checker in Arbace, typed Go-closure nodes in hand-written Go
+forms, a table of the program's compiled packages, Go packages as namespaces of late-bound vars,
+the check over `$GOROOT/test`. GR0 (the spec) started on the branch `go-forms-spec`; GR1-GR6
+after the coming re-seed. The essential gate passed on main after repr/haskell R1's merge (7:38).
+
+## 2026-10-17: Go's build cache kept three hours (the user)
+
+The disk reached 87% (Go's build cache 32 GB, `.tmp/` 29 GB, with up to five agents building at
+once); the finished work's scratch removed and the cache trimmed of entries unused for two hours
+(to 19 GB; 58% used). At the user's request, `bin/lib/gocache.bash`'s default lowered from six
+hours to three (`ARBACE_GOCACHE_KEEP_MIN`, 180): Go refreshes an entry's time at most hourly, so
+three hours still keeps every build in progress.
+
+## 2026-10-17: GR0, goi's spec
+
+doc/go/GOI-SPEC.md (from the branch `go-forms-spec`, `85f3928`): the spec of `goi`, the
+interpreter of Go forms (Go package `arbace/goi`, driven by `arbace.go.*`), named as J2G-SPEC is
+after its component. Design: a package's declarations queued while it loads and checked whole
+at the end (one after-load hook in `arbace.core/load`); the checker written anew after go/types,
+verifying every annotation; nodes as Go closures typed by result, frames as windows of a
+per-goroutine stack, captured or address-taken variables in real `reflect.New` cells; calls
+through function cells (redefinition seen), bodies built on first call; named struct types
+distinct through a `goi:` tag on the first field; proxies with a fmt-aware `Format`, wrappers
+in compiled interfaces; no dynamic `MethodByName` (it would keep every exported method linked);
+a typed invoker per signature. Measured (Appendix A): fib 22 4.95 ms with frames per call, 2.87
+ms on a per-goroutine stack (gc 0.23); `strings.ToUpper` 331 ns through `reflect.Value.Call`, 39
+ns through a typed invoker (38 direct); `sort.Slice` of 1e5 550 ms with a `MakeFunc` less, 13.9
+ms with a typed adapter (11.1 native); a table of 35 listed packages' 1,081 functions and
+variables at most 3.9 MB. Milestones GR1-GR6, 24 to 34 days; decisions S1-S55; proposals
+GS1-GS15, open.
+
+## 2026-10-17: goi's GS1-GS15 decided (the user)
+
+All as recommended (doc/go/GOI-SPEC.md, "Decided"). GR1-GR6 after the coming re-seed.
+
+## 2026-10-17: the j2g batch merged (F4, F2's j2g and interpreter fixes)
+
+On the branch `j2g-batch` (`951c8eb`), merged into main; details in doc/FUTAMURA-SURVEY.md, "F4
+and F2's j2g fixes as built". F4 (a): `arbace/j2g/start.ae` lists the 82 runtime classes the
+program initializes before any user code (derived by `test/j2g/start_classes.ae` from
+`ARBACE_TRACE_INIT`'s trace of three runs); each static method of a listed class becomes a
+guard-free `C_m_NoInit` called only by compiled code (1,724 methods, 43,830 call sites), after
+`jrt.StartCheck` (status 70 when a listed class is not started). Benchmarks (eval-bench as a
+namespace): geometric mean 0.87; loop-long 12.20 → 4.37 ms, loop-double 1.55 → 0.53; fib 6.30 →
+6.68 (gc now inlines `Numbers`' boxed generic operations; F3 replaces them). F2.2 (anonymous
+classes with constructor arguments: `analyze-anon` built the constructor before the superclass's
+was chosen), F2.3 (`AbstractMethodError`), F2.4 (Clojure constants made at class
+initialization), F2.5 (the interpreter's lambdas get default methods), F2.6's collision (c2j's
+classes outside `arbace/` named `A_..._A`), abstract classes' constructors in the member tables
+(`InstantiationError`, reflection as the JVM's). diffcheck: 12,463 of 12,471 agree (known 22 →
+8, excluded 5 → 1, Java forms classes excluded 19 → 16); the essential gate passed; the fixpoint
+G1 = G2 = G3 on the branch. Decided by the user: F4.1 (a) the 82, F4.2 (a) re-measured with F3,
+F4.3 (a) a deviation recorded in J2G-SPEC §6.2. The agent once used `pgrep -f` by pattern,
+read-only, while waiting on a build (against the session's rule; nothing was signalled).
+
+## 2026-10-17: the survey of a kernel and a user part in the box
+
+At the user's choice: doc/go/KERNEL-USER-SURVEY.md (from the branch `kernel-user-survey`,
+`91598b3`). Findings: today the guest cannot run below ring 0/EL1 (amd64: DPL 0 segments only,
+no U/S bit, no SYSCALL setup, every IDT gate ends the guest; arm64: every page EL1-only and UXN,
+TTBR1 off; TamaGo has no signals or asynchronous preemption). An experiment (a scratch TamaGo
+guest on the box's board, the monitor unchanged) dropped to ring 3 on nested KVM: SYSCALL and
+SYSRETQ 24.5 ns, INT 0x80 and IRETQ 102 ns, a CR3 switch 96-136 ns, against the doorbell's
+13-18 µs and a spawned tool guest's 84-170 ms; Go ran unchanged at ring 3 with every page
+user-accessible, until a GC assist ran the collector at ring 3 and failed to unwind at the
+crossing. One shared heap cannot give isolation (every allocation a system call, or a collector
+trusting user pointers, which is only safe for memory-safe user code, and then the hardware adds
+nothing). Prior art: GoTEE (`813dc65a`, read only) runs a whole second TamaGo runtime in ARM user
+mode, values crossing as JSON-RPC; TamaGo's `user/linux` runs a `GOOS=tamago` program as a Linux
+process with about five system calls. Recommended: a TamaGo runtime per process at EL0 (the same
+image, a page table per process, the text shared: about 3.5 MB plus heap and stacks), language
+isolation inside processes, S7's guests where virtualization exists, behind one spawn request;
+the system calls the doorbell's call block by SYSCALL/SVC; the compilers and the REPL outside
+the kernel. Plan KU0-KU6, 17 to 27 days, no patch to Go's runtime. Proposals K1-K12, open.
+
+## 2026-10-17: repr/haskell R2 merged; the box's kernel/user split decided
+
+R2 (branch `repr-haskell-r2`, `530969d`): the interface level, each package built at `-O1` from
+the originals and from the printed modules in place, `ghc --show-iface` compared token by token:
+483 of 483 modules equal (1,072,106 lines), after the normalizations HR6 adopted into SPEC §9.3
+(fingerprints blanked, SrcLoc columns through `$WSrcLoc`, CPP's `addDependentFile` dropped, tokens
+not lines); HR7 (`-O1`) and HR8 (one build per side) as recommended; its `--full` step about 3.5
+minutes. The kernel/user survey's K1-K12 decided as recommended (doc/go/KERNEL-USER-SURVEY.md,
+"Decided"); KU0, its spec, started now (the user, against "after goi").

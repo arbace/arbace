@@ -1,0 +1,200 @@
+(ns arbace.repr.clojure.rules
+  "repr/clojure's rules: the table of rewrites that translate Clojure source into Arbace source
+  (doc/REPR-CLOJURE.md), and the dialect divergences they come from (doc/VENDOR-NOTES.md,
+  \"Dialect divergences\"), each with the rule that answers it or why none can.
+
+  A rule is a map:
+    :id       a keyword, its name on the command line (--skip ID)
+    :doc      what it rewrites
+    :applies  (fn [ctx]) whether it applies to a file; ctx holds :kind (:clj, :cljc, :java or
+              :text: a file renamed as text only), :to-ae (the file becomes a .ae file),
+              :features (the reader's platform features, #{:clj}) and :path
+    :rewrite  (fn [text ctx]) the file's new text
+  The rules apply in the table's order. Adding a rule (a later divergence of the dialects) is
+  adding an entry here, a unit test (test/repr/clojure/read_test.ae) and a line in
+  doc/REPR-CLOJURE.md."
+  (:require [arbace.repr.clojure.rename :as rename]
+            [arbace.repr.clojure.text :as text]
+            [arbace.string :as str]))
+
+(defn- clojure-source? [ctx] (contains? #{:clj :cljc} (:kind ctx)))
+
+;; :proxy-methods
+
+(def ^:private proxy-names
+  [[#"(?<![\w$])__(init|update|get)ClojureFnMappings(?![\w$])" "__$1ArbaceFnMappings"]
+   [#"(?<![\w$])__clojureFnMap(?![\w$])" "__arbaceFnMap"]])
+
+(defn proxy-methods
+  "The methods every proxy class has, and its field, as Arbace names them."
+  [s]
+  (reduce (fn [s [re to]] (str/replace s re to)) s proxy-names))
+
+;; :security-manager
+
+(def ^:private sm "SecurityManager")
+
+(defn- imports? [head] (contains? #{"import" ":import"} head))
+
+(defn security-manager
+  "Unqualified uses of the class SecurityManager qualified as java.lang.SecurityManager, which
+  Arbace does not import by default; a file that imports it is left as it is."
+  [^String s]
+  (if-not (str/includes? s sm)
+    s
+    (let [import-spans (text/list-spans s imports?)
+          in-import? (fn [i] (some (fn [[a b]] (and (<= a i) (< i b))) import-spans))
+          tokens (filter (fn [[a b]] (str/includes? (subs s a b) sm)) (text/code-tokens s))
+          imported? (some (fn [[a b]] (and (in-import? a)
+                                           (contains? #{sm (str "java.lang." sm)} (subs s a b))))
+                          tokens)
+          uses (filter (fn [[a b]]
+                         (let [t (subs s a b)]
+                           (and (not (in-import? a))
+                                (or (= t sm) (= t (str sm ".")) (str/starts-with? t (str sm "/"))))))
+                       tokens)]
+      (if (or imported? (empty? uses))
+        s
+        (let [sb (StringBuilder.)
+              end (reduce (fn [i [a _]]
+                            (.append sb s (int i) (int a))
+                            (.append sb "java.lang.")
+                            a)
+                          0 uses)]
+          (.append sb s (int end) (count s))
+          (str sb))))))
+
+;; :core-names
+
+(defn arbace-core-names
+  "The public names arbace.core has and clojure.core has not (their metadata says
+  {:added \"arbace\"}: the Java forms' macros and operators), as strings."
+  []
+  (into #{} (comp (filter #(= "arbace" (:added (meta %)))) (map #(name (.sym ^arbace.lang.Var %))))
+        (vals (ns-publics 'arbace.core))))
+
+(def ^:private def-heads
+  #{"def" "defn" "defn-" "defmacro" "defonce" "defmulti" "definline" "defprotocol" "defrecord"
+    "deftype" "definterface" "defstruct"})
+
+(defn- defined-names
+  "The names the def forms of s define (the token after the head, its metadata skipped)."
+  [^String s]
+  (for [[a _] (text/list-spans s def-heads)
+        :let [h (text/skip-ws s (inc a))
+              j (loop [j (text/skip-ws s (text/token-end s h))]
+                  ;; metadata: ^meta or #^meta before the name
+                  (cond (>= j (count s)) j
+                        (= \^ (.charAt s (int j)))
+                        (recur (text/skip-ws s (text/form-end s (text/skip-ws s (inc j)))))
+                        (.startsWith s "#^" (int j))
+                        (recur (text/skip-ws s (text/form-end s (text/skip-ws s (+ j 2)))))
+                        :else j))
+              t (subs s j (text/token-end s j))]
+        :when (seq t)]
+    t))
+
+(defn- insert-at [^String s i ^String x] (str (subs s 0 i) x (subs s i)))
+
+(defn core-names
+  "The names arbace.core adds (`added`, a set of strings) that the file defines, excluded from
+  its ns form's :refer-clojure, so they replace nothing (Arbace would warn \"return already
+  refers to: #'arbace.core/return\" and replace it): added to an :exclude, or a
+  (:refer-clojure :exclude [...]) added. A file without an ns form, or whose :refer-clojure
+  has :only, is left as it is."
+  [^String s added]
+  (let [names (sort (distinct (filter added (defined-names s))))
+        [ns-a ns-b] (first (text/list-spans s #{"ns"}))]
+    (if (or (empty? names) (nil? ns-a))
+      s
+      (let [ns-text (subs s ns-a ns-b)
+            names-text (str/join " " names)
+            [ra rb] (first (text/list-spans ns-text #{":refer-clojure"}))]
+        (cond
+          (nil? ra)
+          (insert-at s (dec ns-b) (str "\n  (:refer-clojure :exclude [" names-text "])"))
+          (str/includes? (subs ns-text ra rb) ":only")
+          s
+          :else
+          (let [rc (subs ns-text ra rb)
+                ex (str/index-of rc ":exclude")]
+            (if (nil? ex)
+              (insert-at s (+ ns-a ra (dec (count rc))) (str " :exclude [" names-text "]"))
+              (let [v (text/skip-ws rc (+ ex (count ":exclude")))
+                    ve (text/form-end rc v)]
+                (insert-at s (+ ns-a ra (dec ve)) (str " " names-text))))))))))
+
+(def rules
+  "The rules, in the order they apply."
+  [{:id :reader-conditionals
+    :doc "A .cljc file becoming a .ae file: each reader conditional (#?, #?@) replaced by the
+         text of the branch the reader selects on Arbace (features #{:clj}, then :default),
+         spliced for #?@, or by nothing; a .ae file is read without conditionals."
+    :applies (fn [ctx] (and (= :cljc (:kind ctx)) (:to-ae ctx)))
+    :rewrite (fn [s ctx] (text/resolve-conditionals s (:features ctx)))}
+   {:id :rename
+    :doc "The names of the vendored Clojure: clojure.* -> arbace.* for its namespaces, the
+         Java packages clojure.lang, clojure.asm (with commons, signature), clojure.java.api,
+         the keyword namespace clojure.error, the system properties clojure.*, spec; and
+         source paths clojure/<ns>.clj -> arbace/<ns>.ae (arbace.repr.clojure.rename)."
+    :applies (constantly true)
+    :rewrite (fn [s _] (rename/rename s))}
+   {:id :proxy-methods
+    :doc "A proxy's methods __initClojureFnMappings, __updateClojureFnMappings,
+         __getClojureFnMappings and its field __clojureFnMap: __initArbaceFnMappings and the
+         rest, __arbaceFnMap (VENDOR-NOTES.md, hand change 2)."
+    :applies (constantly true)
+    :rewrite (fn [s _] (proxy-methods s))}
+   {:id :core-names
+    :doc "Names arbace.core adds to Clojure's core (the Java forms' macros and operators:
+         return, switch, label, lambda, ...) that a file defines: excluded in its ns form's
+         :refer-clojure, as a library does for a core name it redefines."
+    :applies clojure-source?
+    :rewrite (fn [s ctx] (core-names s (or (:core-names ctx) (arbace-core-names))))}
+   {:id :security-manager
+    :doc "SecurityManager unqualified -> java.lang.SecurityManager (not a default import in
+         Arbace, VENDOR-NOTES.md, hand change 11), unless the file imports it."
+    :applies clojure-source?
+    :rewrite (fn [s _] (security-manager s))}])
+
+(def divergences
+  "The dialect divergences of doc/VENDOR-NOTES.md, in its order: the rule answering each, or
+  :none and why no source rewrite applies."
+  [{:divergence "reduce without an init on an IReduceInit-only reducible"
+    :rule :none
+    :why "Arbace reduces what upstream rejects: code that runs on Clojure runs the same."}
+   {:divergence "SecurityManager is not a default import"
+    :rule :security-manager}
+   {:divergence "A multimethod's ambiguity message"
+    :rule :none
+    :why "A message's wording; code does not depend on it (a test comparing it must be edited)."}
+   {:divergence "bean ignores explicit BeanInfo classes"
+    :rule :none
+    :why "What bean returns at run time; nothing in the source names it."}
+   {:divergence "Optional modules (java.sql, java.xml, java.desktop)"
+    :rule :none
+    :why "The JVM's runtime image, not the source (on arbace-for-java-26; on main since S4 the
+         three namespaces are removed, VENDOR-NOTES.md, \"Without the JVM\")."}
+   {:divergence "Source files are .ae"
+    :rule :reader-conditionals
+    :why "repr/clojure writes .ae files (a .cljc file's conditionals resolved); source paths of the
+         vendored namespaces are renamed by :rename."}
+   {:divergence "Names arbace.core adds (the Java forms' macros and operators)"
+    :rule :core-names
+    :why "A file defining one of them gets them excluded from its ns form's :refer-clojure."}
+   {:divergence "Runtime-visible names (threads, error report files, proxy methods)"
+    :rule :proxy-methods
+    :why "The proxy methods and field are names code calls; thread names and report file
+         prefixes are data in strings, left alone (doc/REPR-CLOJURE.md, limits)."}])
+
+(defn applicable
+  "The rules that apply to a file, without the skipped ones (a set of ids)."
+  [ctx skip]
+  (filter #(and (not (contains? skip (:id %))) ((:applies %) ctx)) rules))
+
+(defn translate
+  "Text s of a file translated by the rules that apply (ctx: see the namespace's doc), minus
+  the skipped ones."
+  ([s ctx] (translate s ctx #{}))
+  ([s ctx skip]
+   (reduce (fn [s r] ((:rewrite r) s ctx)) s (applicable ctx skip))))

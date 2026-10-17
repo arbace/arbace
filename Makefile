@@ -11,9 +11,10 @@ CLOJURE_TESTS_GO ?= target/arbace-go/amd64/arbace-tests
 
 .PHONY: help seed-check stage0 seed-verify reseed build build-tests smoke repl fixpoint \
   box box-smoke box-oracle box-suite box-tools box-rebuild mac-bundle arm64-vm-check \
-  gate gate-full suite oracle verify jdk-verify edge-verify fixtures-verify tamago-verify \
-  toolchain-verify box-vendor-verify x509roots-verify repr-go-roundtrip repr-go-roundtrip-text repr-java-roundtrip \
-  alpine-check clean check-makefile
+  gate gate-full suite oracle diffcheck verify jdk-verify edge-verify fixtures-verify tamago-verify \
+  toolchain-verify box-vendor-verify x509roots-verify repr-go-roundtrip repr-go-roundtrip-text \
+  repr-java-roundtrip repr-haskell-roundtrip repr-haskell-iface repr-haskell-test alpine-check clean \
+  check-makefile
 
 help: ## list the targets
 	@awk 'BEGIN {FS = ":.*## "} /^## / {printf "\n%s\n", substr($$0, 4)} \
@@ -73,6 +74,9 @@ oracle: ## the executable against the frozen JVM's results (bin/oracle check)
 	bin/oracle check 'target/arbace-go/amd64/arbace -' --timeout 900 \
 	  --expected test/oracle/known-go-amd64-frozen.edn
 
+diffcheck: ## each language's two halves on the same forms: evaluated against compiled, interpreted against j2g (bin/diffcheck)
+	bin/diffcheck
+
 ## Vendored trees and recorded data, converted or recorded afresh and compared byte for byte
 VERIFY := jdk-verify edge-verify fixtures-verify tamago-verify toolchain-verify \
   box-vendor-verify x509roots-verify repr-go-roundtrip repr-go-roundtrip-text repr-java-roundtrip
@@ -108,6 +112,12 @@ repr-go-roundtrip-text: ## mode :full prints the original text back, byte for by
 	bin/repr-go roundtrip --text --dirs linux/amd64
 repr-java-roundtrip: ## Java -> forms -> Java -> forms over Clojure's Java, the samples, jdk/forms (bin/repr-java roundtrip)
 	bin/repr-java roundtrip --corpus baseline,samples,jdk
+repr-haskell-roundtrip: ## Haskell -> forms -> Haskell over GHC 9.14.1's base, ghc-internal, ghc-prim, ghc-bignum: GHC's trees and lines (bin/repr-haskell roundtrip)
+	bin/repr-haskell roundtrip
+repr-haskell-iface: ## the same, then GHC's interfaces of the originals and the printed modules compiled, compared (bin/repr-haskell roundtrip --iface)
+	bin/repr-haskell roundtrip --iface
+repr-haskell-test: ## repr/haskell's cases: the reader's samples, the spec's worked example (bin/repr-haskell test)
+	bin/repr-haskell test
 
 ## The host and housekeeping
 alpine-check: ## one minimal apk add line reinstalls exactly the host's packages (bin/alpine-env check)

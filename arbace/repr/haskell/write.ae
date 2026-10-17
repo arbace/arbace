@@ -1,0 +1,214 @@
+(ns arbace.repr.haskell.write
+  "The converter's writer (doc/haskell/SPEC.md §3, §7.1): Haskell forms as .ae text that
+  Arbace's reader reads back, mode :lines: each form that carries a line (its :line, or a Lit's)
+  on that line of the file, so that the reader's :line of every list is its Haskell line; a
+  symbol or a vector that begins a line with ^{:line N}, a literal or a keyword that begins one in
+  its parent's :hs/breaks [[index line]...]; a list placed after its line with an explicit
+  :line. Strings and characters are written as SPEC §3.5 says; integers in their source's
+  radix (Lit's text)."
+  (:require [arbace.repr.haskell.convert :as cv]
+            [arbace.string :as str])
+  (:import [java.lang StringBuilder]))
+
+(defn- hex4 [n] (let [h (Integer/toHexString (int n))] (str (subs "0000" (count h)) h)))
+
+(defn- unprintable? [n]
+  (or (< n 0x20) (<= 0x7f n 0x9f) (<= 0xD800 n 0xDFFF) (= n 0x2028) (= n 0x2029) (= n 0xFEFF)
+      (= n 0xFFFE) (= n 0xFFFF) (= n 0x00AD) (<= 0x200B n 0x200F) (<= 0x202A n 0x202E)
+      (<= 0x2060 n 0x2064)))
+
+(defn string-text
+  "A string as the forms text writes it: \" and \\ escaped, \\n \\t \\r \\b \\f, other controls
+  and characters that do not print as \\uXXXX"
+  [^String s]
+  (let [sb (StringBuilder. "\"")]
+    (dotimes [i (count s)]
+      (let [c (.charAt s i) n (int c)]
+        (case c
+          \" (.append sb "\\\"")
+          \\ (.append sb "\\\\")
+          \newline (.append sb "\\n")
+          \tab (.append sb "\\t")
+          \return (.append sb "\\r")
+          \backspace (.append sb "\\b")
+          \formfeed (.append sb "\\f")
+          (if (unprintable? n)
+            (.append sb (str "\\u" (hex4 n)))
+            (.append sb c)))))
+    (.append sb "\"")
+    (str sb)))
+
+(defn char-text [c]
+  (let [n (int c)]
+    (case c
+      \newline "\\newline" \space "\\space" \tab "\\tab" \return "\\return"
+      \backspace "\\backspace" \formfeed "\\formfeed"
+      (if (or (unprintable? n) (= n 0x20) (Character/isWhitespace (char n)))
+        (str "\\u" (hex4 n))
+        (str "\\" c)))))
+
+(defn atom-text
+  "The text of an atom (not a list, vector or map)"
+  [x]
+  (cond
+    (cv/lit? x) (if (:text x) (:text x) (atom-text (:value x)))
+    (string? x) (string-text x)
+    (char? x) (char-text x)
+    (instance? java.math.BigDecimal x) (str x "M")
+    (instance? arbace.lang.BigInt x) (str x)
+    (instance? java.math.BigInteger x) (str x)
+    (double? x) (pr-str x)
+    :else (pr-str x)))
+
+(defn- line-of [x]
+  (cond
+    (cv/lit? x) (:line x)
+    (instance? arbace.lang.IObj x) (:line (meta x))
+    :else nil))
+
+(defn- extra-meta
+  "The metadata written besides :line (:hs/eq ...), sorted, without :line and :column"
+  [x]
+  (when (instance? arbace.lang.IObj x)
+    (not-empty (into (sorted-map) (dissoc (meta x) :line :column)))))
+
+(defn- map-text [m]
+  (str "{" (str/join " " (for [[k v] m] (str (pr-str k) " " (if (string? v) (string-text v) (pr-str v))))) "}"))
+
+(defn- form-text-flat
+  "A form on one line (no layout), for maps and metadata values"
+  [x]
+  (cond
+    (seq? x) (str "(" (str/join " " (map form-text-flat x)) ")")
+    (vector? x) (str "[" (str/join " " (map form-text-flat x)) "]")
+    (map? x) (str "{" (str/join " " (mapcat (fn [[k v]] [(form-text-flat k) (form-text-flat v)]) x)) "}")
+    :else (atom-text x)))
+
+(defn- mk-w [line] {:sb (StringBuilder.) :line (volatile! line)})
+(defn- wline [w] @(:line w))
+(defn- wtext [w] (str (:sb w)))
+
+(defn- emit [w ^String s]
+  (.append ^StringBuilder (:sb w) s)
+  (let [nl (count (filter #(= \newline %) s))]
+    (when (pos? nl) (vswap! (:line w) + nl))))
+
+(defn- goto-line
+  "Newlines up to line l (indented by depth); true when the form begins a line"
+  [w l depth]
+  (if (and l (> l (wline w)))
+    (do (emit w (apply str (repeat (- l (wline w)) "\n")))
+        (emit w (apply str (repeat (* 2 depth) " ")))
+        true)
+    false))
+
+(declare write-form)
+
+(defn- write-elems
+  "The elements of a list or vector, with their lines; returns the :hs/breaks entries"
+  [w xs depth head?]
+  (let [breaks (transient [])]
+    (doseq [[i x] (map-indexed vector xs)]
+      (let [l (line-of x)
+            ;; a list's head (an operator, which Haskell writes after an operand) is not moved
+            ;; to its line: its ^{:line} says it
+            began (if (and l (> l (wline w)) (or (pos? i) (not head?)))
+                    (goto-line w l depth)
+                    (do (when (pos? i) (emit w " ")) false))]
+        (when (and l (or began (and (zero? i) head? (not= l (wline w))))
+                   (or (cv/lit? x) (not (or (seq? x) (vector? x) (symbol? x) (map? x)))))
+          (conj! breaks [i l]))
+        (write-form w x depth began)))
+    (persistent! breaks)))
+
+(defn- write-form
+  "Writes x; began: whether x begins a line (a symbol or vector then gets ^{:line N})"
+  [w x depth began]
+  (let [l (line-of x)]
+    (cond
+      (cv/lit? x) (emit w (atom-text x))
+      (and (seq? x) (= 2 (count x)) (contains? #{'arbace.core/deref 'quote} (first x)) (nil? (extra-meta x)))
+      (let [inner (second x)
+            ;; the line of 'x or @x on x
+            inner (if (and l (nil? (line-of inner)) (instance? arbace.lang.IObj inner)) (vary-meta inner assoc :line l) inner)]
+        (emit w (if (= 'quote (first x)) "'" "@"))
+        (write-form w inner depth began))
+      (seq? x)
+      (let [sub (mk-w (wline w))
+            breaks (write-elems sub (seq x) (inc depth) true)
+            m (cond-> (or (extra-meta x) {})
+                (seq breaks) (assoc :hs/breaks breaks)
+                ;; the reader gives () no line
+                (and l (or (< l (wline w)) (and (empty? x) (or began (not= l (wline w)))))) (assoc :line l))]
+        (when (seq m) (emit w (str "^" (map-text m) " ")))
+        (emit w "(")
+        (emit w (wtext sub))
+        (emit w ")"))
+      (vector? x)
+      (let [sub (mk-w (wline w))
+            breaks (write-elems sub (seq x) (inc depth) false)
+            m (cond-> (or (extra-meta x) {})
+                (seq breaks) (assoc :hs/breaks breaks)
+                (and l (or began (< l (wline w)))) (assoc :line l))]
+        (when (seq m) (emit w (str "^" (map-text m) " ")))
+        (emit w "[")
+        (emit w (wtext sub))
+        (emit w "]"))
+      (map? x) (emit w (form-text-flat x))
+      (symbol? x)
+      (let [m (cond-> (or (extra-meta x) {})
+                (and l (or began (not= l (wline w)))) (assoc :line l))]
+        (when (seq m) (emit w (str "^" (map-text m) " ")))
+        (emit w (str x)))
+      :else (emit w (atom-text x)))))
+
+(defn forms-text
+  "The text of a module's forms: the ns form and the first form on line 1, then each top-level
+  form on its line"
+  [forms]
+  (let [w (mk-w 1)]
+    (doseq [[i f] (map-indexed vector forms)]
+      (let [l (line-of f)]
+        (cond
+          (zero? i) nil
+          (and l (> l (wline w))) (goto-line w l 0)
+          (= i 1) (emit w " ")
+          :else (emit w "\n"))
+        (write-form w f 0 false)))
+    (emit w "\n")
+    (wtext w)))
+
+(defn data-of
+  "The data a form reads back as: Lits by their values, without metadata"
+  [x]
+  (cond
+    (cv/lit? x) (data-of (:value x))
+    (seq? x) (apply list (map data-of x))
+    (vector? x) (mapv data-of x)
+    (map? x) (into {} (map (fn [[k v]] [(data-of k) (data-of v)])) x)
+    :else x))
+
+(defn read-all
+  "Every form of a forms text, with Arbace's reader (a line-numbering reader, as a consumer)"
+  [^String text]
+  (let [r (arbace.lang.LineNumberingPushbackReader. (java.io.StringReader. text))]
+    (loop [acc []]
+      (let [f (read {:eof ::eof} r)]
+        (if (= f ::eof) acc (recur (conj acc f)))))))
+
+(defn- first-diff [a b path]
+  (cond
+    (and (sequential? a) (sequential? b) (= (vector? a) (vector? b)))
+    (if (not= (count a) (count b))
+      [path a b]
+      (some identity (map-indexed (fn [i [x y]] (first-diff x y (conj path i))) (map vector a b))))
+    (= a b) nil
+    :else [path a b]))
+
+(defn check
+  "nil when text reads back as forms (their data), else the first difference [path wrote read]"
+  [forms text]
+  (let [r (read-all text)
+        d (mapv data-of forms)]
+    (when (not= d r)
+      (or (first-diff d r []) [[] :count (count r)]))))

@@ -1,0 +1,56 @@
+(ns arbace.c2j.check
+  "A quick check of the back end's output (standalone S6), without j2g: the Java forms of a
+  compiled tree analyzed in the running program, as one compilation, by the Java forms'
+  analysis the REPL uses (arbace.classes.interp/analyze-forms), against the program's classes
+  by reflection. j2g's analysis is the same code against the Java forms; this finds most of
+  what j2g's load would report, in seconds."
+  (:require [arbace.java.io :as io]
+            [arbace.classes.env :as env]
+            [arbace.classes.analyze :as a]
+            [arbace.classes.parse :as p]
+            [arbace.classes.interp :as interp]))
+
+(defn- read-all [f]
+  (with-open [r (java.io.PushbackReader. (io/reader f))]
+    (binding [*read-eval* false]
+      (doall (take-while #(not= ::eof %) (repeatedly #(read {:eof ::eof} r)))))))
+
+(defn check
+  "Analyzes the Java forms of every file under dir; prints and returns the failures."
+  [dir]
+  (let [files (sort (filter #(.endsWith (str %) ".ae") (file-seq (io/file dir "arbace"))))
+        forms (for [f files
+                    fm (read-all f)
+                    :when (and (seq? fm) (= 'defclass (first fm)))]
+                (rest fm))
+        ns (create-ns 'arbace)]
+    (binding [*ns* ns]
+      (refer 'arbace.core))
+    (binding [env/*compile-set* (atom {})
+              a/*unit* {:order (atom []) :counters (atom {}) :switch-maps (atom {})
+                        :switch-holders (atom {}) :source-tried (atom #{})
+                        :assert-holders (atom {}) :holder-first (atom {})}]
+      (with-redefs [a/accessorize (fn [_ node] node)]
+        (let [names (vec (for [f forms]
+                           (a/declare-class! {:nesting :top} (p/parse-class {:ns ns :nesting :top} f))))
+              order @(:order a/*unit*)
+              fails (atom [])
+              try! (fn [what n f]
+                     (try (f n) (catch Throwable t
+                                  (println "aot check: FAILED" what n (.getMessage t))
+                                  (swap! fails conj [n what (.getMessage t)]))))]
+          (let [t (atom (System/nanoTime))
+                lap (fn [k] (let [x (System/nanoTime)] (println "aot check:" k (/ (Math/round (/ (- x @t) 1e7)) 100.0) "s") (reset! t x)))]
+            (lap "parse and declare")
+            (doseq [n order :when (not (:headers-done (a/decl n)))] (try! "header" n a/resolve-header!))
+            (lap "headers")
+            (doseq [n order] (try! "members" n a/resolve-members!))
+            (lap "members")
+            (doseq [n (#'a/supertypes-first order)] (try! "bridges" n a/add-bridges!))
+            (lap "bridges")
+            (doseq [n order] (try! "enum" n #'a/mark-enum-abstract!))
+            (doseq [n order] (try! "analysis" n a/analyze-class!))
+            (lap "analysis"))
+          (println "aot check:" (count names) "top-level classes," (count order) "classes analyzed,"
+                   (count @fails) "failed")
+          @fails)))))

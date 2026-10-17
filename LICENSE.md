@@ -12,7 +12,7 @@ full in this file. Source files keep the copyright and license notices they came
 covers what.
 
 - `arbace/`: the vendored Clojure in it (everything outside the tools `arbace/classes/`,
-  `arbace/c2a/`, `arbace/repr/`, `arbace/build/` and `arbace/j2g/`, which are Arbace's own) is
+  `arbace/repr/`, `arbace/build/`, `arbace/j2g/` and `arbace/c2j/`, which are Arbace's own) is
   derived from Clojure, https://github.com/clojure/clojure at `98d735fab02f337cee654cb0629bddc09883a75a`,
   with ASM, https://gitlab.ow2.org/asm/asm at `0460f74ba64230e5b846967c81a52628b5dd0596`: the frozen tree `clojure/` that this repository
   held until the freeze (it remains on the branch `arbace-for-java-26`), renamed to `arbace.*`,
@@ -55,7 +55,7 @@ covers what.
 - `test/java-fixtures/forms/` (test/java-fixtures/README.md): the Java forms of Clojure's
   suite's Java fixtures, `test/java` of https://github.com/clojure/clojure at
   `98d735fab02f337cee654cb0629bddc09883a75a` (the files carry no notice of their own), renamed
-  by c2a and converted by repr/java: Copyright (c) Rich Hickey (Clojure's readme.txt), under the Eclipse
+  by repr/clojure and converted by repr/java: Copyright (c) Rich Hickey (Clojure's readme.txt), under the Eclipse
   Public License 1.0, as Clojure. `test/java-fixtures/provenance.edn` and `README.md`: Arbace's
   own, under the Eclipse Public License 1.0.
 - `overlay/go/runtime/proc.ae` and `overlay/go/runtime/runtime2.ae`: Go's runtime, the files
@@ -441,7 +441,7 @@ covers what.
 
   The test build, `target/arbace-go/<arch>/arbace-tests` (`bin/arbace-go --build-tests`), adds
   Clojure's suite's Java fixtures (`test/java` of https://github.com/clojure/clojure at
-  `98d735fab02f337cee654cb0629bddc09883a75a`, renamed by c2a and converted by repr/java, as committed in
+  `98d735fab02f337cee654cb0629bddc09883a75a`, renamed by repr/clojure and converted by repr/java, as committed in
   `test/java-fixtures/forms/`): under the Eclipse Public License 1.0, as Clojure.
 
   So a distribution of an executable carries this file (the texts of the Eclipse Public License

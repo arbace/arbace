@@ -1,0 +1,273 @@
+(ns arbace.repr.haskell.syntax
+  "What the converter and the printer of repr/haskell share (doc/haskell/SPEC.md §3, §5.2, §6;
+  doc/haskell/HASKELL-NOTES.md): the name rule (§3.2), the lexical classes of names, the
+  classification of Haskell forms, and the implicit parentheses (ghc-lisp's I5, its Parens.hs
+  as the model): the converter leaves an HsPar, ParPat or HsParTy implicit exactly when the
+  printer, from the forms alone, puts the parentheses back."
+  (:require [arbace.string :as str]))
+
+;;; Literals with a line or a spelling
+
+(defrecord Lit [value text line])
+
+(defn lit? [x] (instance? Lit x))
+
+(defn lv
+  "The form itself: a Lit's value"
+  [x]
+  (if (instance? Lit x) (:value x) x))
+
+;;; Names
+
+(def ^:private bare-cache (atom {}))
+
+(defn bare?
+  "Whether the Haskell name text t is written bare (SPEC §3.2): the reader reads t alone as one
+  symbol without a namespace whose name is t, or, for a constructor operator, as a keyword
+  without a namespace that prints as t (a keyword whose name begins with a letter or _ is a
+  form keyword)."
+  [^String t]
+  (let [c @bare-cache]
+    (if (contains? c t)
+      (get c t)
+      (let [r (try
+                (let [v (read-string (str "[" t "]"))]
+                  (boolean
+                    (and (= 1 (count v))
+                         (let [x (first v)]
+                           (or (and (symbol? x) (nil? (namespace x)) (= (name x) t)
+                                    (not (contains? #{"nil" "true" "false"} t)))
+                               (and (keyword? x) (nil? (namespace x)) (= (str x) t)
+                                    (not (re-matches #":[\p{L}_].*" t))))))))
+                (catch Throwable _ false))]
+        (swap! bare-cache assoc t r)
+        r))))
+
+(defn name-form
+  "The form of the Haskell name text t: the symbol or keyword when bare, else (:name \"t\")."
+  [^String t]
+  (if (bare? t)
+    (if (str/starts-with? t ":") (keyword (subs t 1)) (symbol t))
+    (list :name t)))
+
+(defn unqualified
+  "The name text without its module qualifier: M.N.x -> x, Prelude.. -> ."
+  [^String t]
+  (loop [t t]
+    (if-let [[_ rest] (re-matches #"[\p{Lu}][\p{L}\p{N}_']*\.(.+)" t)]
+      (recur rest)
+      t)))
+
+(defn op-text?
+  "Whether the name text t is an operator (variable or constructor operator)."
+  [^String t]
+  (let [u (unqualified t)]
+    (and (pos? (count u))
+         (let [c (.charAt u 0)]
+           (not (or (Character/isLetter c) (= c \_) (Character/isDigit c) (= c \') (= c \() (= c \[)))))))
+
+(defn conop-text? [^String t] (str/starts-with? (unqualified t) ":"))
+
+(defn con-text?
+  "A constructor or type constructor name (upper case), not an operator"
+  [^String t]
+  (let [u (unqualified t)]
+    (and (pos? (count u)) (Character/isUpperCase (.charAt u 0)))))
+
+(defn form-keyword?
+  "A keyword that is a form's head (:sig, :tuple, :cons...), not a constructor operator (:|)."
+  [x]
+  (and (keyword? x) (nil? (namespace x)) (boolean (re-matches #"[\p{L}_].*" (name x)))))
+
+(defn name-text
+  "The Haskell text of a name form: a symbol, a constructor-operator keyword, (:name \"t\"),
+  :cons; nil when x is no name form."
+  [x]
+  (let [x (lv x)]
+  (cond
+    (symbol? x) (if (namespace x) nil (name x))
+    (= x :cons) ":"
+    (and (keyword? x) (not (form-keyword? x))) (str x)
+    (and (seq? x) (= :name (first x)) (string? (second x))) (second x)
+    :else nil)))
+
+(defn op-form?
+  "Whether x is a name form whose text is an operator."
+  [x]
+  (let [t (name-text x)] (and (some? t) (op-text? t))))
+
+(defn chain-head?
+  "Whether x, the head of a list, makes the list an operator chain (op a b ...): a bare operator
+  symbol, a constructor-operator keyword, :cons. (:name \"t\") as a head is a prefix
+  application, (:op \"t\" ...) a chain of its own."
+  [x]
+  (let [x (lv x)]
+  (or (= x :cons)
+      (and (keyword? x) (not (form-keyword? x)))
+      (and (symbol? x) (nil? (namespace x)) (op-text? (name x))
+           (not (contains? #{"->" "=>" "->." "|" "=" "<-" ".." "!" "@" "~"} (name x)))))))
+
+;;; Forms
+
+(def block-heads
+  "Expression forms that extend as far to the right as they can (open) or that braces close"
+  {'case :closed 'do :closed 'mdo :closed :lambda-case :closed :lambda-cases :closed
+   :lambda :open 'let :open 'if :open 'proc :open :scc :open})
+
+(defn qualified-do? [h]
+  (and (symbol? h) (nil? (namespace h)) (boolean (re-matches #"(?:[\p{Lu}][\p{L}\p{N}_']*\.)+m?do" (name h)))))
+
+(defn deref-form? [x] (let [x (lv x)] (and (seq? x) (= 'arbace.core/deref (first x)) (= 2 (count x)))))
+(defn quote-form? [x] (let [x (lv x)] (and (seq? x) (= 'quote (first x)) (= 2 (count x)))))
+
+(defn expr-kind
+  "The kind of an expression form, for the implicit parentheses: :atom, :app, :neg, :op (an
+  operator chain), :sig (a signature, and the forms that bind as loosely: forall, =>, ->), :open
+  and :closed blocks, :section."
+  [x]
+  (let [x (lv x)]
+  (cond
+    (seq? x)
+    (let [h (lv (first x)) n (count x)]
+      (cond
+        (empty? x) :atom
+        (= h :name) :atom
+        (= h :paren) :atom
+        (#{:tuple :utuple :usum :rec :update :get :proj :quote :quote-pat :quote-type :quote-decls
+           :typed-quote :splice :typed-splice :qq :label :int# :word# :float# :double# :char#
+           :string# :int8# :int16# :int32# :int64# :word8# :word16# :word32# :word64# :char :string
+           :multiline :neg-literal :hex-float :tuple-con :utuple-con :usum-con} h) :atom
+        (#{:section-l :section-r} h) :section
+        (= h :sig) :sig
+        (#{'forall '=> '-> '->. 'type} h) :sig
+        (= h :infix) :op
+        (= h :op) (if (> n 2) :op :app)
+        (= h 'if) (if (and (> n 1) (every? #(and (seq? %) (= '| (first %))) (rest x))) :closed :open)
+        (contains? block-heads h) (get block-heads h)
+        (qualified-do? h) :closed
+        (= h 'static) :app
+        (= h '-) (if (= n 2) :neg :op)
+        (= h :cons) (if (> n 2) :op :app)
+        (deref-form? x) :atom
+        (quote-form? x) :atom
+        (chain-head? h) (if (> n 2) :op :app)
+        :else :app))
+    (vector? x) :atom
+    (and (number? x) (neg? x)) :negative
+    :else :atom)))
+
+(defn exp-needs-parens?
+  "Whether the expression form x needs parentheses at position pos: :top (nothing needed),
+  :sig-subj (e in e :: T), :op (a non-last operand), :op-last, :fun (the function of an
+  application), :arg (a non-last argument), :arg-last, :neg (the operand of a negation),
+  :section-l, :section-r, :atom (e.field, e { .. }). opts: the module's extensions, a set."
+  [opts pos x]
+  (let [k (expr-kind x)
+        block-args (contains? opts "BlockArguments")
+        neg-lits (or (contains? opts "NegativeLiterals") (contains? opts "LexicalNegation"))]
+    (case k
+      :atom false
+      :negative (case pos (:top :op-last :section-r :sig-subj) false
+                  (:op :section-l) false
+                  (not neg-lits))
+      :section false
+      :closed (case pos
+                (:top :op :op-last :section-l :section-r) false
+                (:arg :arg-last) (not block-args)
+                true)
+      :open (case pos
+              (:top :op-last :section-r) false
+              :arg-last (not block-args)
+              true)
+      :app (contains? #{:arg :arg-last :atom} pos)
+      :neg (contains? #{:fun :arg :arg-last :neg :atom} pos)
+      :op (contains? #{:op :op-last :fun :arg :arg-last :neg :atom} pos)
+      :sig (not= pos :top))))
+
+;;; Patterns
+
+(defn pat-kind
+  "The kind of a pattern form: :atom, :app (a constructor applied), :op (an infix chain), :sig,
+  :view, :neg (a negative literal or (- n))."
+  [x]
+  (let [x (lv x)]
+  (cond
+    (seq? x)
+    (let [h (lv (first x)) n (count x)]
+      (cond
+        (empty? x) :atom
+        (#{:name :paren :tuple :utuple :usum :rec :lazy :as :splice :qq :int# :word# :float# :double#
+           :char# :string# :int8# :int16# :int32# :int64# :word8# :word16# :word32# :word64# :char
+           :string :multiline :neg-literal :hex-float :tuple-con :utuple-con :usum-con} h) :atom
+        (= h '!) :atom
+        (= h :or) :view
+        (= h :sig) :sig
+        (= h 'type) :sig
+        (= h '->) :view
+        (= h :infix) :op
+        (= h :op) (if (> n 2) :op :app)
+        (= h '-) :neg
+        (= h '+) :op
+        (deref-form? x) :atom
+        (chain-head? h) (if (> n 2) :op :app)
+        :else :app))
+    (and (number? x) (neg? x)) :negative
+    :else :atom)))
+
+(defn pat-needs-parens?
+  "Whether the pattern form x needs parentheses at pos: :top (a bind statement, a guard), :alt
+  (a case alternative, a pattern binding), :arg (constructor, function and lambda arguments),
+  :op (an operand of an infix chain), :prefixed (inside ~p, !p, x@p), :sig-subj, :elem (tuple,
+  list, record field elements)."
+  [opts pos x]
+  (let [k (pat-kind x)
+        neg-lits (or (contains? opts "NegativeLiterals") (contains? opts "LexicalNegation"))]
+    (case k
+      :atom false
+      :negative (contains? #{:arg :prefixed} pos)
+      :neg (contains? #{:arg :prefixed :op} pos)
+      :app (contains? #{:arg :prefixed} pos)
+      :op (contains? #{:arg :prefixed :op :sig-subj} pos)
+      :sig (contains? #{:arg :prefixed :op :sig-subj :alt} pos)
+      :view (contains? #{:arg :prefixed :op :sig-subj :alt :top} pos))))
+
+;;; Types
+
+(defn type-kind
+  "The kind of a type form: :atom, :app, :op (a type operator chain), :fun (an arrow), :forall
+  (forall, =>), :sig (a kind signature, an implicit parameter)."
+  [x]
+  (let [x (lv x)]
+  (cond
+    (seq? x)
+    (let [h (lv (first x)) n (count x)]
+      (cond
+        (empty? x) :atom
+        (#{:name :paren :tuple :utuple :usum :splice :qq :tuple-con :utuple-con :usum-con :char :string} h) :atom
+        (#{'forall '=>} h) :forall
+        (#{'-> '->.} h) :fun
+        (= h :sig) :sig
+        (= h :infix) :op
+        (= h :op) (if (> n 2) :op :app)
+        (#{'! :lazy :unpack :nounpack} h) :atom
+        (quote-form? x) :atom
+        (deref-form? x) :atom
+        (and (seq? h) (quote-form? h) (chain-head? (second h))) (if (> n 2) :op :app)
+        (chain-head? h) (if (> n 2) :op :app)
+        :else :app))
+    :else :atom)))
+
+(defn type-needs-parens?
+  "Whether the type form x needs parentheses at pos: :top (a signature, an arrow's result, the
+  body of forall and =>), :arrow-arg (left of ->), :op (an operand of a type operator chain),
+  :fun (the head of an application), :arg (an argument), :ctx (a constraint in a context),
+  :sig-subj (t in t :: k), :elem (tuple and list elements)."
+  [pos x]
+  (let [k (type-kind x)]
+    (case k
+      :atom false
+      :app (contains? #{:arg} pos)
+      :op (contains? #{:arg :fun :op} pos)
+      :fun (contains? #{:arg :fun :op :arrow-arg :sig-subj} pos)
+      :forall (contains? #{:arg :fun :op :arrow-arg :sig-subj} pos)
+      :sig (contains? #{:arg :fun :op :arrow-arg :top :sig-subj} pos))))

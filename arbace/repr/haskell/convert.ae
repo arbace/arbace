@@ -1,0 +1,1528 @@
+(ns arbace.repr.haskell.convert
+  "repr/haskell's converter (doc/haskell/SPEC.md, doc/haskell/HASKELL-NOTES.md): a module's dump by
+  the helper tools/hsdump (GHC 9.14.1's HsModule GhcPs written generically: (Con field...), (L
+  span x), names (unqual ns \"occ\")...) into Haskell forms, mode :lines. Every decision about
+  forms is made here; ghc-lisp's compiler/GHC/Parser/Lisp/Printer.hs is the mapping checklist
+  (H14). Each form that stands for a located node carries the node's start line (:line in its
+  metadata; a literal or keyword in a Lit record until written), and the writer
+  (arbace.repr.haskell.write) places it on that line of the forms file."
+  (:require [arbace.repr.haskell.syntax :as sx]
+            [arbace.string :as str]))
+
+;;; Literals and their lines
+
+(def ->Lit sx/->Lit)
+(def lit? sx/lit?)
+(def lit-value sx/lv)
+
+(def ^:dynamic *exts*
+  "The extensions on in the module being converted (names as GHC spells them)"
+  #{})
+
+(def ^:dynamic *warnings* nil)
+
+(defn- warn! [what]
+  (when *warnings* (swap! *warnings* update what (fnil inc 0))))
+
+(defn- fail! [msg node]
+  (throw (ex-info (str "repr-haskell: " msg ": "
+                       (let [s (pr-str node)] (subs s 0 (min 400 (count s)))))
+                  {:node node})))
+
+;;; Dump access
+
+(defn L? [x] (and (seq? x) (= 'L (first x)) (= 3 (count x))))
+
+(defn un
+  "The node without its L wrappers"
+  [x]
+  (if (L? x) (recur (nth x 2)) x))
+
+(defn line-of
+  "The start line of a located node (the outermost L with a span in the module's file), or nil"
+  [x]
+  (when (L? x)
+    (let [s (nth x 1)]
+      (if (and (vector? s) (= 4 (count s)))
+        (first s)
+        (line-of (nth x 2))))))
+
+(defn end-line-of
+  "The end line of a located node, or nil"
+  [x]
+  (when (L? x)
+    (let [s (nth x 1)]
+      (if (and (vector? s) (= 4 (count s)))
+        (nth s 2)
+        (end-line-of (nth x 2))))))
+
+(defn pos-of
+  "[line col] of a located node, for ordering"
+  [x]
+  (when (L? x)
+    (let [s (nth x 1)]
+      (if (and (vector? s) (= 4 (count s)))
+        [(nth s 0) (nth s 1)]
+        (pos-of (nth x 2))))))
+
+(defn con [x]
+  (let [x (un x)]
+    (cond (seq? x) (first x) (symbol? x) x :else nil)))
+
+(defn fld
+  "Field i (1-based) of node x"
+  [x i]
+  (nth (un x) i))
+
+(defn attach
+  "form with the line l: in metadata, or a Lit for a literal or a keyword"
+  [form l]
+  (cond
+    (nil? l) form
+    (lit? form) (assoc form :line l)
+    (instance? arbace.lang.IObj form) (vary-meta form assoc :line l)
+    :else (->Lit form nil l)))
+
+(defn at
+  "form with the line of the located node node"
+  [form node]
+  (attach form (line-of node)))
+
+(defn- form-line [f]
+  (cond (lit? f) (:line f) (instance? arbace.lang.IObj f) (:line (meta f)) :else nil))
+
+(defn- block-line
+  "form, a block (case, do...), with :hs/brace, the line its located list of items begins on
+  (the { of explicit braces), when it is not its first item's"
+  [form lst]
+  (let [bl (line-of lst)
+        items (un lst)
+        fl (when (seq items) (line-of (first items)))]
+    (if (and bl fl (not= bl fl)) (vary-meta form assoc :hs/brace bl) form)))
+
+(defn- empty-braces
+  "form, a block without items, with ^:hs/braces when its source wrote {} (its list is
+  located; SPEC S12)"
+  [form lst]
+  (if (and (empty? (un lst)) (line-of lst)) (vary-meta form assoc :hs/braces true) form))
+
+(defn- implicit-paren
+  "form f standing for the parenthesized node (HsPar, ParPat, HsParTy) whose parentheses are
+  implicit: f keeps its own line; the line of ( in :hs/paren when it is another"
+  [f node]
+  (let [pl (line-of node)
+        fl (form-line f)]
+    (cond
+      (nil? fl) (at f node)
+      (and pl (not= pl fl) (instance? arbace.lang.IObj f)) (vary-meta f assoc :hs/paren pl)
+      :else f)))
+
+(defn at-if-none
+  "form with the line of node unless it has one"
+  [form node]
+  (if (or (and (lit? form) (:line form)) (and (instance? arbace.lang.IObj form) (:line (meta form))))
+    form
+    (at form node)))
+
+(defn sort-by-pos [xs] (sort-by #(or (pos-of %) [0 0]) xs))
+
+(defn just [x] (when (and (seq? x) (= 'Just (first x))) (second x)))
+
+;;; Names
+
+(defn rdr-text
+  "The Haskell text of a dumped RdrName"
+  [r]
+  (let [r (un r)]
+    (case (first r)
+      unqual (nth r 2)
+      qual (str (nth r 2) "." (nth r 3))
+      exact (nth r 2)
+      orig (nth r 4)
+      (fail! "a name" r))))
+
+(defn- exact-form
+  "The form of built-in syntax (SPEC §3.3), or nil"
+  [r]
+  (let [r (un r)]
+    (when (= 'exact (first r))
+      (let [t (nth r 2)]
+        (cond
+          (= t ":") :cons
+          (= t "[]") []
+          (= t "()") ()
+          (= t "List") []
+          (= t "Unit") ()
+          (= t "->") (list :name "->")
+          (= t "(##)") (list :utuple-con 0)
+          (= t "Unit#") (list :utuple-con 0)
+          (re-matches #"\(,+\)" t) (list :tuple-con (dec (count t)))
+          (re-matches #"\(#,+#\)" t) (list :utuple-con (- (count t) 3))
+          (re-matches #"Tuple\d+" t) (list :tuple-con (Long/parseLong (subs t 5)))
+          (re-matches #"Tuple\d+#" t) (list :utuple-con (Long/parseLong (subs t 5 (dec (count t)))))
+          (re-matches #"Sum\d+#" t) (list :usum-con (Long/parseLong (subs t 3 (dec (count t)))))
+          :else nil)))))
+
+(defn name-of
+  "The form of a located name node (L span RdrName)"
+  [n]
+  (at (or (exact-form n) (sx/name-form (rdr-text n))) n))
+
+(defn name-text-of [n] (rdr-text n))
+
+(defn prefix-name
+  "The form of a name used as the head of a prefix application (SPEC §5.2: ((:name \"t\") a b)
+  is (t) a b): an operator is always (:name \"t\")"
+  [n]
+  (let [f (name-of n)
+        t (rdr-text n)]
+    (if (and (sx/op-text? t) (not (exact-form n))) (at (list :name t) n) f)))
+
+;;; Literals (SPEC §3.5)
+
+(defn- src-text [s] (when (and (seq? s) (= 'src (first s))) (second s)))
+
+(defn int-text
+  "The forms text of an integer literal: the source's radix where the reader has one"
+  [src v]
+  (let [t (some-> src (str/replace "_" "") (str/replace #"#+$" "") (str/replace #"#(Int|Word)\d*$" ""))]
+    (cond
+      (nil? t) (str v)
+      (re-matches #"-?0[xX][0-9a-fA-F]+" t) t
+      (re-matches #"-?0[oO][0-7]+" t) (let [neg (str/starts-with? t "-")
+                                            d (str/replace (subs t (if neg 3 2)) #"^0+(?=.)" "")]
+                                        (if (= v 0) "0" (str (if neg "-" "") "0" d)))
+      (re-matches #"-?0[bB][01]+" t) (let [neg (str/starts-with? t "-")]
+                                       (str (if neg "-" "") "2r" (subs t (if neg 3 2))))
+      :else (str v))))
+
+(defn int-lit [src v]
+  (->Lit v (int-text src v) nil))
+
+(defn- ghc-fl
+  "GHC's lexer's significand and exponent of a decimal literal text (FL's fl_signi, fl_exp)"
+  [^String t]
+  (when-let [[_ s i f e] (re-matches #"(-?)(\d+)(?:\.(\d+))?(?:[eE]([+-]?\d+))?" t)]
+    [(* (if (= s "-") -1 1) (bigint (str i (or f ""))))
+     (- (if e (Long/parseLong (str/replace e "+" "")) 0) (count (or f "")))]))
+
+(defn frac-form
+  "An FL (FL src neg (:% n d) exp base) as a form: a double when its shortest text has the
+  source's significand and exponent, else a BigDecimal of exactly them; a hexadecimal float
+  (:hex-float s e) (SPEC §3.5, S7)"
+  [fl]
+  (let [[_ src neg [_ n d] e base] (un fl)
+        n (bigint n)]
+    (cond
+      (not= 1 d) (fail! "a fractional literal's significand" fl)
+      (= base 'Base2) (list :hex-float (->Lit n (let [t (src-text src)]
+                                                 (if (and t (re-find #"0[xX]" t)) (str (if (neg? n) "-" "") "0x" (str/upper-case (.toString (biginteger (if (neg? n) (- n) n)) 16))) (str n)))
+                                             nil)
+                            e)
+      (and neg (zero? n)) (list :neg-literal 0.0)
+      :else
+      (let [bd (java.math.BigDecimal. (biginteger n) (int (- e)))
+            dv (.doubleValue bd)]
+        (if (and (not (Double/isInfinite dv)) (= (ghc-fl (pr-str dv)) [n e]))
+          dv
+          bd)))))
+
+(defn- char-form [c]
+  (let [n (long c)]
+    (if (or (> n 0xFFFF) (<= 0xD800 n 0xDFFF))
+      (list :char n)
+      (char n))))
+
+(defn- string-form
+  "A dumped string (a Clojure string, or (ustr part...) with surrogate code points)"
+  [s]
+  (cond
+    (string? s) s
+    (and (seq? s) (= 'ustr (first s))) (apply list :string (rest s))
+    :else (fail! "a string" s)))
+
+(defn- dumped-char [c] (if (and (seq? c) (= 'char (first c))) (second c) (fail! "a char" c)))
+
+(defn lit-form
+  "An HsLit or an HsOverLit's value as a form"
+  [l]
+  (let [l (un l)]
+    (case (first l)
+      HsChar (char-form (dumped-char (nth l 2)))
+      HsCharPrim (list :char# (char-form (dumped-char (nth l 2))))
+      HsString (string-form (nth l 2))
+      HsMultilineString (list :multiline (string-form (nth l 2)))
+      HsStringPrim (list :string# (let [b (nth l 2)] (if (and (seq? b) (= 'bytes (first b))) (second b) b)))
+      HsIntPrim (list :int# (int-lit (src-text (nth l 1)) (nth l 2)))
+      HsWordPrim (list :word# (int-lit (src-text (nth l 1)) (nth l 2)))
+      HsInt8Prim (list :int8# (int-lit (src-text (nth l 1)) (nth l 2)))
+      HsInt16Prim (list :int16# (int-lit (src-text (nth l 1)) (nth l 2)))
+      HsInt32Prim (list :int32# (int-lit (src-text (nth l 1)) (nth l 2)))
+      HsInt64Prim (list :int64# (int-lit (src-text (nth l 1)) (nth l 2)))
+      HsWord8Prim (list :word8# (int-lit (src-text (nth l 1)) (nth l 2)))
+      HsWord16Prim (list :word16# (int-lit (src-text (nth l 1)) (nth l 2)))
+      HsWord32Prim (list :word32# (int-lit (src-text (nth l 1)) (nth l 2)))
+      HsWord64Prim (list :word64# (int-lit (src-text (nth l 1)) (nth l 2)))
+      HsFloatPrim (list :float# (frac-form (nth l 2)))
+      HsDoublePrim (list :double# (frac-form (nth l 2)))
+      OverLit (lit-form (nth l 2))
+      HsIntegral (let [[_ src neg v] (un (nth l 1))]
+                   (if (and neg (zero? v))
+                     (list :neg-literal 0)
+                     (int-lit (src-text src) v)))
+      HsFractional (frac-form (nth l 1))
+      HsIsString (string-form (nth l 2))
+      HsNumTy (int-lit (src-text (nth l 1)) (nth l 2))
+      HsStrTy (string-form (nth l 2))
+      HsCharTy (char-form (dumped-char (nth l 2)))
+      (fail! "a literal" l))))
+
+;;; Documentation (SPEC §4.12)
+
+(defn- doc-string
+  "[decorator-args text nested?] of a WithHsDocIdentifiers or HsDocString node"
+  [d]
+  (let [d (un d)
+        d (if (= 'WithHsDocIdentifiers (first d)) (un (nth d 1)) d)
+        chunk-text (fn [c] (let [c (un c)] (if (and (seq? c) (= 'chunk (first c))) (second c) (fail! "a doc chunk" c))))
+        dec-args (fn [dec]
+                   (let [dec (un dec)]
+                     (cond
+                       (= dec 'HsDocStringNext) [:next]
+                       (= dec 'HsDocStringPrevious) [:prev]
+                       (and (seq? dec) (= 'HsDocStringNamed (first dec))) [:named (second dec)]
+                       (and (seq? dec) (= 'HsDocStringGroup (first dec))) [:group (second dec)]
+                       :else (fail! "a doc decorator" dec))))]
+    (case (first d)
+      MultiLineDocString [(dec-args (nth d 1)) (str/join "\n" (map chunk-text (nth d 2))) false
+                          (mapv line-of (nth d 2))]
+      NestedDocString [(dec-args (nth d 1)) (chunk-text (nth d 2)) true [(line-of (nth d 2))]]
+      GeneratedDocString [[:next] (chunk-text (nth d 1)) false []]
+      (fail! "a doc string" d))))
+
+(defn doc-form
+  "(head decorator... :nested? text) of a located doc node; head :doc inside, hs/doc at top"
+  [head d]
+  (let [[dargs text nested] (doc-string d)]
+    (at (apply list head (concat dargs (when nested [:nested]) [text])) d)))
+
+;;; Types (SPEC §6)
+
+(declare type-form sig-type-form expr pat tvb-form)
+
+(defn- tparen
+  "A type node at position pos: an HsParTy implicit when the printer puts its parentheses back"
+  [node pos]
+  (if (= 'HsParTy (con node))
+    (let [inner (type-form (fld node 2) :elem)]
+      (if (sx/type-needs-parens? pos (lit-value inner))
+        (implicit-paren inner node)
+        (at (list :paren inner) node)))
+    (let [f (type-form node pos)]
+      (when (sx/type-needs-parens? pos (lit-value f)) (warn! [:unparenthesized-type (con node) pos]))
+      f)))
+
+(defn- doc-elems
+  "A type element followed by its documentation: HsDocTy as [t (:doc ...)]"
+  [node pos]
+  (if (= 'HsDocTy (con node))
+    (let [[dargs] (doc-string (fld node 3))
+          d (doc-form :doc (fld node 3))
+          t (tparen (fld node 2) pos)]
+      (if (= :prev (first dargs)) [t d] [d t]))
+    [(tparen node pos)]))
+
+(defn- app-spine
+  "The head and arguments of a left-nested application: [head [[kind arg]...]]"
+  [node app-cons]
+  (loop [n node args ()]
+    (let [c (con n)]
+      (if (contains? app-cons c)
+        (recur (fld n 2) (cons [c n] args))
+        [n (vec args)]))))
+
+(defn type-form
+  "The form of a type node (located or not) at position pos (the caller handles HsParTy)"
+  [node pos]
+  (let [t (un node)
+        c (con t)
+        f (case c
+            HsTyVar (let [n (name-of (nth t 3))]
+                      (if (= 'IsPromoted (nth t 2)) (list 'quote (lit-value n)) n))
+            (HsAppTy HsAppKindTy)
+            (let [[h args] (app-spine node #{'HsAppTy 'HsAppKindTy})
+                  hf (if (and (= 'HsTyVar (con h)) (= 'NotPromoted (fld h 2)))
+                       (if (= 1 (count args)) (name-of (fld h 3)) (prefix-name (fld h 3)))
+                       (tparen h :fun))]
+              (apply list hf
+                     (for [[k a] args]
+                       (if (= k 'HsAppKindTy)
+                         (list 'arbace.core/deref (lit-value (tparen (fld a 3) :arg)))
+                         (tparen (fld a 3) :arg)))))
+            HsFunTy
+            (let [arrow (un (nth t 2))]
+              (case (con arrow)
+                HsUnannotated
+                (loop [n node acc []]
+                  (if (and (= 'HsFunTy (con n)) (= 'HsUnannotated (con (fld n 2))))
+                    (recur (fld n 4) (into acc (doc-elems (fld n 3) :arrow-arg)))
+                    (apply list '-> (into acc (doc-elems n :top)))))
+                HsLinearAnn (apply list '->. (concat (doc-elems (nth t 3) :arrow-arg) (doc-elems (nth t 4) :top)))
+                HsExplicitMult (list '-> (list :mod (lit-value (tparen (fld arrow 2) :arg)) (lit-value (tparen (nth t 3) :arrow-arg)))
+                                     (tparen (nth t 4) :top))
+                (fail! "an arrow" arrow)))
+            HsListTy [(tparen (nth t 2) :elem)]
+            HsTupleTy (let [elems (mapcat #(doc-elems % :elem) (nth t 3))]
+                        (case (nth t 2)
+                          HsBoxedOrConstraintTuple (if (empty? elems) () (apply list :tuple elems))
+                          HsUnboxedTuple (apply list :utuple elems)
+                          (fail! "a tuple sort" t)))
+            HsSumTy (apply list :usum (map #(tparen % :elem) (nth t 2)))
+            HsOpTy (let [prom (= 'IsPromoted (nth t 2))
+                         opf (fn [n] (let [o (name-of (fld n 4))]
+                                       (if (= 'IsPromoted (fld n 2)) (at (list 'quote (lit-value o)) (fld n 4)) o)))
+                         ;; right-nested chains (GHC's parser builds type chains to the right)
+                         items (loop [n node acc []]
+                                 (if (= 'HsOpTy (con n))
+                                   (recur (fld n 5) (conj acc (tparen (fld n 3) :op) (opf n)))
+                                   (conj acc (tparen n :op))))
+                         ops (take-nth 2 (rest items))
+                         operands (take-nth 2 items)
+                         o (lit-value (first ops))]
+                     (cond
+                       (and (apply = (map lit-value ops)) (or (sx/chain-head? o) (and (sx/quote-form? o) (sx/chain-head? (second o)))))
+                       (apply list (first ops) operands)
+                       (and (apply = (map lit-value ops)) (seq? o) (= :name (first o)))
+                       (apply list :op (second o) operands)
+                       :else (apply list :infix items)))
+            HsIParamTy (list :sig (symbol (str "?" (second (un (nth t 2))))) (tparen (nth t 3) :top))
+            HsStarTy '*
+            HsKindSig (list :sig (tparen (nth t 2) :sig-subj) (tparen (nth t 3) :top))
+            HsSpliceTy (list :splice (expr (fld (nth t 2) 2) :atom))
+            ;; documentation on a type where no form has an element for it (none in the corpus:
+            ;; arrows, tuples, deriving lists, constructor fields and synonyms place it as an
+            ;; element, SPEC §4.12): (:doc-type T (:doc ...)), counted
+            HsDocTy (do (warn! [:doc-type pos])
+                        (list :doc-type (tparen (nth t 2) pos) (doc-form :doc (nth t 3))))
+            HsExplicitListTy (let [elems (mapv #(tparen % :elem) (nth t 3))]
+                               (if (= 'IsPromoted (nth t 2)) (list 'quote elems) elems))
+            HsExplicitTupleTy (let [elems (map #(tparen % :elem) (nth t 3))]
+                                (if (= 'IsPromoted (nth t 2)) (list 'quote (apply list :tuple elems)) (apply list :tuple elems)))
+            HsTyLit (lit-form (nth t 2))
+            HsWildCardTy '_
+            HsForAllTy (let [tele (un (nth t 2))]
+                         (case (first tele)
+                           HsForAllInvis (apply list 'forall (concat (map tvb-form (nth tele 2)) [(tparen (nth t 3) :top)]))
+                           HsForAllVis (apply list 'forall (concat (map tvb-form (nth tele 2)) ['-> (tparen (nth t 3) :top)]))
+                           (fail! "a forall" tele)))
+            HsQualTy (apply list '=> (concat (map #(tparen % :ctx) (un (nth t 2))) [(tparen (nth t 3) :top)]))
+            HsParTy (tparen node pos)
+            (fail! "a type" t))]
+    (at f node)))
+
+(defn tvb-form
+  "A type variable binder (HsTvb ann flag var kind)"
+  [b]
+  (let [t (un b)
+        [_ _ flag v k] t
+        vf (case (con v)
+             HsBndrVar (name-of (fld v 2))
+             HsBndrWildCard '_
+             (fail! "a binder" v))
+        kf (case (con k)
+             HsBndrNoKind vf
+             HsBndrKind (list :sig (lit-value vf) (tparen (fld k 2) :top))
+             (fail! "a binder's kind" k))
+        f (cond
+            (= flag 'InferredSpec) (list :inferred (lit-value kf))
+            (= (con flag) 'HsBndrInvisible) (list 'arbace.core/deref (lit-value kf))
+            :else kf)]
+    (at f b)))
+
+(defn sig-type-form
+  "An LHsSigType (HsSig x outer body), or an HsWC of one, at position pos"
+  [node pos]
+  (let [n (un node)]
+    (case (first n)
+      HsWC (sig-type-form (nth n 2) pos)
+      HsSig (let [outer (un (nth n 2))
+                  body (tparen (nth n 3) (if (= 'HsOuterExplicit (first outer)) :top pos))]
+              (at (case (first outer)
+                    HsOuterImplicit body
+                    HsOuterExplicit (apply list 'forall (concat (map tvb-form (nth outer 2)) [body]))
+                    (fail! "outer binders" outer))
+                  node))
+      HsPS (tparen (nth n 2) pos)
+      (tparen node pos))))
+
+;;; Expressions (SPEC §5.1, §5.2)
+
+(defn- paren-of
+  "An expression node at pos: an HsPar implicit when the printer puts it back"
+  [node pos]
+  (if (= 'HsPar (con node))
+    (let [inner (fld node 2)]
+      (if (contains? #{'SectionL 'SectionR} (con inner))
+        (at (expr inner :top) node)
+        (let [f (expr inner :top)]
+          (if (sx/exp-needs-parens? *exts* pos (lit-value f))
+            (implicit-paren f node)
+            (at (list :paren f) node)))))
+    (let [f (expr node pos)]
+      (when (sx/exp-needs-parens? *exts* pos (lit-value f)) (warn! [:unparenthesized-expr (con node) pos]))
+      f)))
+
+(declare match-rhs stmt-form local-binds rec-fields rhs-forms eq-meta pparen block-line form-line empty-braces)
+
+(defn- op-slot
+  "The form of an operator node in a chain: a name, :cons, or a backquoted name"
+  [op]
+  (case (con op)
+    HsVar (name-of (fld op 2))
+    HsHole '_
+    (fail! "an operator" op)))
+
+(defn- chain-form
+  "items: operands and operators alternating, as forms; nodes the operand nodes (for their end
+  lines). The chain's form: (op a b ...) when one bare operator, (:op \"t\" ...) when one
+  respelled, else (:infix ...); also :infix when an operator after the first is not on the last
+  line of its left operand, as the printer would put it (its line is then the slot's)"
+  [items & [nodes]]
+  (let [ops (take-nth 2 (rest items))
+        operands (take-nth 2 items)
+        o (lit-value (first ops))
+        placed (or (nil? nodes)
+                   (every? (fn [[op nd]] (let [ol (form-line op) el (end-line-of nd)] (or (nil? ol) (nil? el) (= ol el))))
+                           (map vector (rest ops) (rest nodes))))]
+    (cond
+      (not placed) (apply list :infix items)
+      (and (apply = (map lit-value ops)) (sx/chain-head? o)) (apply list (first ops) operands)
+      (and (apply = (map lit-value ops)) (seq? o) (= :name (first o)) (sx/op-text? (second o)))
+      (apply list :op (second o) operands)
+      :else (apply list :infix items))))
+
+(defn- grhs-stmts [stmts] (map #(stmt-form % :guard) stmts))
+
+(defn expr
+  "The form of an expression node at position pos (see arbace.repr.haskell.syntax)"
+  [node pos]
+  (let [e (un node)
+        c (con e)
+        f (case c
+            HsVar (let [n (fld e 2)] (name-of n))
+            HsIPVar (symbol (str "?" (second (un (nth e 2)))))
+            HsOverLabel (list :label (nth e 2))
+            (HsOverLit HsLit) (lit-form (nth e 2))
+            (HsApp HsAppType)
+            (let [[h args] (app-spine node #{'HsApp 'HsAppType})
+                  n (count args)
+                  hf (if (= 'HsVar (con h))
+                       (let [hn (name-of (fld h 2))]
+                         ;; (op e): the one-operand rule; (- e) is a negation
+                         (if (and (= 1 n) (sx/chain-head? (lit-value hn)) (not= '- (lit-value hn)))
+                           hn
+                           (prefix-name (fld h 2))))
+                       (paren-of h :fun))]
+              (apply list hf
+                     (map-indexed
+                       (fn [i [k a]]
+                         (if (= k 'HsAppType)
+                           (list 'arbace.core/deref (lit-value (sig-type-form (fld a 3) :arg)))
+                           (paren-of (fld a 3) (if (= i (dec n)) :arg-last :arg))))
+                       args)))
+            OpApp
+            (let [items (loop [n node acc ()]
+                          (if (= 'OpApp (con n))
+                            (recur (fld n 2) (concat [(op-slot (fld n 3)) (fld n 4)] acc))
+                            (cons n acc)))
+                  k (count items)
+                  forms (map-indexed (fn [i x]
+                                       (if (odd? i) x
+                                           (paren-of x (if (= i (dec k)) :op-last :op))))
+                                     items)]
+              (chain-form (vec forms) (vec (take-nth 2 items))))
+            NegApp (list '- (paren-of (nth e 2) :neg))
+            HsPar (paren-of node pos)
+            SectionL (list :section-l (paren-of (nth e 2) :section-l) (op-slot (nth e 3)))
+            SectionR (list :section-r (op-slot (nth e 2)) (paren-of (nth e 3) :section-r))
+            ExplicitTuple (let [elems (for [a (nth e 2)]
+                                        (case (con a)
+                                          Present (paren-of (fld a 2) :top)
+                                          Missing :_
+                                          (fail! "a tuple argument" a)))]
+                            (apply list (if (= 'Boxed (nth e 3)) :tuple :utuple) elems))
+            ExplicitSum (let [[_ _ alt arity x] e]
+                          (apply list :usum (concat (repeat (dec alt) :_) [(paren-of x :top)] (repeat (- arity alt) :_))))
+            HsCase (empty-braces
+                     (block-line (apply list 'case (paren-of (nth e 2) :top) (map #(match-rhs % :alt) (un (fld (nth e 3) 2))))
+                                 (fld (nth e 3) 2))
+                     (fld (nth e 3) 2))
+            HsIf (list 'if (paren-of (nth e 2) :top) (paren-of (nth e 3) :top) (paren-of (nth e 4) :top))
+            HsMultiIf (apply list 'if (for [g (nth e 2)]
+                                        (let [gr (un g)]
+                                          (at (apply list '| (concat (grhs-stmts (un (nth gr 2))) [(paren-of (nth gr 3) :top)])) g))))
+            HsLet (apply list 'let (concat (local-binds (nth e 2)) [(paren-of (nth e 3) :top)]))
+            HsLam (let [variant (nth e 2)
+                        ms (un (fld (nth e 3) 2))]
+                    (case variant
+                      LamSingle (let [m (un (first ms))
+                                      pats (un (nth m 3))
+                                      [rhs eql] (rhs-forms (nth m 4))]
+                                  (at (eq-meta (apply list :lambda (concat (map #(pparen % :arg) pats) rhs)) eql node)
+                                      (first ms)))
+                      LamCase (empty-braces (block-line (apply list :lambda-case (map #(match-rhs % :alt) ms)) (fld (nth e 3) 2))
+                                            (fld (nth e 3) 2))
+                      LamCases (block-line (apply list :lambda-cases (map #(match-rhs % :arg) ms)) (fld (nth e 3) 2))
+                      (fail! "a lambda" variant)))
+            HsDo (let [flav (un (nth e 2))
+                       stmts (un (nth e 3))]
+                   (cond
+                     (contains? #{'ListComp 'MonadComp} flav)
+                     (let [last-stmt (last stmts)
+                           body (paren-of (fld last-stmt 2) :top)
+                           quals (butlast stmts)]
+                       (if (and (= 1 (count quals)) (= 'ParStmt (con (first quals))))
+                         (into [body] (mapcat (fn [blk] (cons '| (map #(stmt-form % :qual) (un (nth (un blk) 2)))))
+                                              (un (fld (first quals) 2))))
+                         (into [body '|] (map #(stmt-form % :qual) quals))))
+                     (= (con flav) 'DoExpr) (block-line (apply list (if-let [m (just (fld flav 1))] (symbol (str (second (un m)) ".do")) 'do)
+                                                               (map #(stmt-form % :do) stmts))
+                                                        (nth e 3))
+                     (= (con flav) 'MDoExpr) (apply list (if-let [m (just (fld flav 1))] (symbol (str (second (un m)) ".mdo")) 'mdo)
+                                                    (map #(stmt-form % :do) stmts))
+                     :else (fail! "a do flavour" flav)))
+            ExplicitList (mapv #(paren-of % :top) (nth e 2))
+            ArithSeq (let [info (un (nth e 3))]
+                       (case (first info)
+                         From [(paren-of (nth info 1) :top) '..]
+                         FromThen [(paren-of (nth info 1) :top) (paren-of (nth info 2) :top) '..]
+                         FromTo [(paren-of (nth info 1) :top) '.. (paren-of (nth info 2) :top)]
+                         FromThenTo [(paren-of (nth info 1) :top) (paren-of (nth info 2) :top) '.. (paren-of (nth info 3) :top)]
+                         (fail! "an arithmetic sequence" info)))
+            RecordCon (apply list :rec (name-of (nth e 2)) (rec-fields (nth e 3) #(paren-of % :top)))
+            RecordUpd (let [flds (un (nth e 3))]
+                        (case (first flds)
+                          RegularRecUpdFields
+                          (apply list :update (paren-of (nth e 2) :atom)
+                                 (for [fb (nth flds 2)]
+                                   (let [[_ _ lhs rhs pun] (un fb)
+                                         fname (name-of (fld lhs 2))]
+                                     (at (if pun fname (list '= (lit-value fname) (paren-of rhs :top))) fb))))
+                          (fail! "record update fields" flds)))
+            HsGetField (loop [n node fs ()]
+                         (if (= 'HsGetField (con n))
+                           (recur (fld n 2) (cons (name-of (fld (fld n 3) 2)) fs))
+                           (apply list :get (paren-of n :atom) fs)))
+            HsProjection (apply list :proj (map #(name-of (fld % 2)) (nth e 2)))
+            ExprWithTySig (list :sig (paren-of (nth e 2) :sig-subj) (sig-type-form (nth e 3) :top))
+            HsUntypedBracket (let [q (un (nth e 2))]
+                               (case (first q)
+                                 ExpBr (list :quote (paren-of (nth q 2) :top))
+                                 PatBr (list :quote-pat (pat (nth q 2) :top))
+                                 TypBr (list :quote-type (tparen (nth q 2) :top))
+                                 VarBr (let [n (lit-value (name-of (nth q 3)))]
+                                         (if (nth q 2) (list 'quote n) (list 'quote (list 'quote n))))
+                                 (fail! "a quote" q)))
+            HsTypedBracket (list :typed-quote (paren-of (nth e 2) :top))
+            HsUntypedSplice (let [s (un (nth e 2))]
+                              (case (first s)
+                                HsUntypedSpliceExpr (list :splice (paren-of (nth s 2) :atom))
+                                HsQuasiQuote (list :qq (lit-value (name-of (nth s 2))) (second (un (nth s 3))))
+                                (fail! "a splice" s)))
+            HsTypedSplice (list :typed-splice (paren-of (fld (nth e 2) 2) :atom))
+            HsStatic (list 'static (paren-of (nth e 2) :arg-last))
+            HsPragE (let [p (un (nth e 2))]
+                      (case (first p)
+                        HsPragSCC (list :scc (let [sl (un (nth p 2))] (nth sl 2)) (paren-of (nth e 3) :top))
+                        (fail! "a pragma expression" p)))
+            HsEmbTy (list 'type (sig-type-form (nth e 2) :top))
+            HsHole '_
+            (fail! "an expression" e))]
+    (at f node)))
+
+(defn rec-fields
+  "The fields of an HsRecFields (construction or pattern): (= f x), a pun f, .. last"
+  [rf rhs-fn]
+  (let [[_ _ flds dotdot] (un rf)]
+    (concat
+      (for [fb flds]
+        (let [[_ _ lhs rhs pun] (un fb)
+              fname (name-of (fld lhs 2))]
+          (at (if pun fname (list '= (lit-value fname) (rhs-fn rhs))) fb)))
+      (when-let [d (just dotdot)] [(at '.. d)]))))
+
+;;; Patterns (SPEC §5.3)
+
+(defn- pparen [node pos]
+  (if (= 'ParPat (con node))
+    (let [inner (pat (fld node 2) :elem)]
+      (if (sx/pat-needs-parens? *exts* pos (lit-value inner))
+        (implicit-paren inner node)
+        (at (list :paren inner) node)))
+    (let [f (pat node pos)]
+      (when (sx/pat-needs-parens? *exts* pos (lit-value f)) (warn! [:unparenthesized-pat (con node) pos]))
+      f)))
+
+(defn- con-name-form [n] (name-of n))
+
+(defn- con-chain-items
+  "The operands and operators of an infix constructor pattern chain, flattened to the left"
+  [node]
+  (let [items (loop [n node acc ()]
+                (if (and (= 'ConPat (con n)) (= 'InfixCon (con (fld n 3))))
+                  (recur (fld (fld n 3) 1) (concat [(con-name-form (fld n 2)) (fld (fld n 3) 2)] acc))
+                  (cons n acc)))]
+    (vec (map-indexed (fn [i x] (if (odd? i) x (pparen x :op))) items))))
+
+(defn pat
+  "The form of a pattern node at position pos"
+  [node pos]
+  (let [p (un node)
+        c (con p)
+        f (case c
+            WildPat '_
+            VarPat (name-of (nth p 2))
+            LazyPat (list :lazy (pparen (nth p 2) :prefixed))
+            AsPat (list :as (lit-value (name-of (nth p 2))) (pparen (nth p 3) :prefixed))
+            ParPat (pparen node pos)
+            BangPat (list '! (pparen (nth p 2) :prefixed))
+            ListPat (mapv #(pparen % :elem) (nth p 2))
+            TuplePat (apply list (if (= 'Boxed (nth p 3)) :tuple :utuple) (map #(pparen % :elem) (nth p 2)))
+            SumPat (let [[_ _ x alt arity] p]
+                     (apply list :usum (concat (repeat (dec alt) :_) [(pparen x :elem)] (repeat (- arity alt) :_))))
+            OrPat (apply list :or (map #(pparen % :elem) (nth p 2)))
+            ConPat (let [cn (nth p 2)
+                         details (un (nth p 3))]
+                     (case (first details)
+                       PrefixCon (let [args (nth details 1)]
+                                   (cond
+                                     (empty? args) (con-name-form cn)
+                                     :else (apply list (let [f (con-name-form cn)]
+                                                         (if (and (= 1 (count args)) (sx/chain-head? (lit-value f))) f (prefix-name cn)))
+                                                  (map #(pparen % :arg) args))))
+                       InfixCon (let [items (loop [n node acc ()]
+                                              (if (and (= 'ConPat (con n)) (= 'InfixCon (con (fld n 3))))
+                                                (recur (fld (fld n 3) 1) (concat [(con-name-form (fld n 2)) (fld (fld n 3) 2)] acc))
+                                                (cons n acc)))]
+                                  (chain-form (vec (map-indexed (fn [i x] (if (odd? i) x (pparen x :op))) items)) (vec (take-nth 2 items))))
+                       RecCon (apply list :rec (con-name-form cn) (rec-fields (nth details 1) #(pparen % :elem)))
+                       (fail! "constructor pattern arguments" details)))
+            ViewPat (list '-> (paren-of (nth p 2) :top) (pparen (nth p 3) :top))
+            SplicePat (let [s (un (nth p 2))]
+                        (case (first s)
+                          HsUntypedSpliceExpr (list :splice (paren-of (nth s 2) :atom))
+                          HsQuasiQuote (list :qq (lit-value (name-of (nth s 2))) (second (un (nth s 3))))
+                          (fail! "a splice" s)))
+            LitPat (lit-form (nth p 2))
+            NPat (let [l (lit-form (nth p 2))]
+                   (if (just (nth p 3)) (list '- l) l))
+            NPlusKPat (list '+ (lit-value (name-of (nth p 2))) (lit-form (nth p 3)))
+            SigPat (list :sig (pparen (nth p 2) :sig-subj) (sig-type-form (nth p 3) :top))
+            EmbTyPat (list 'type (tparen (fld (nth p 2) 2) :top))
+            InvisPat (list 'arbace.core/deref (lit-value (tparen (fld (nth p 2) 2) :arg)))
+            (fail! "a pattern" p))]
+    (at f node)))
+
+;;; Bindings (SPEC §4.2)
+
+(defn- rhs-forms
+  "The right-hand side of a GRHSs: [body] or [(| ...)+], then (where ...) when it has bindings;
+  with the GRHS's line when unguarded (for :hs/eq)"
+  [grhss]
+  (let [[_ _ gs binds] (un grhss)
+        gs (un gs)
+        body (if (and (= 1 (count gs)) (empty? (un (fld (first gs) 2))))
+               [(paren-of (fld (first gs) 3) :top)]
+               (for [g gs]
+                 (at (apply list '| (concat (grhs-stmts (un (fld g 2))) [(paren-of (fld g 3) :top)])) g)))
+        lb (un binds)
+        wh (when-not (= 'EmptyLocalBinds (first lb))
+             [(apply list 'where (local-binds binds))])]
+    [(concat body wh)
+     (when (and (= 1 (count gs)) (empty? (un (fld (first gs) 2)))) (line-of (first gs)))]))
+
+(defn- eq-meta
+  "form with :hs/eq, the line of its unguarded rhs's = (or ->), when that is not form's line"
+  [form eq-line node]
+  (if (and eq-line (not= eq-line (line-of node)))
+    (vary-meta form assoc :hs/eq eq-line)
+    form))
+
+(defn match-rhs
+  "A case or \\cases alternative (Match ... [pats] GRHSs): (-> pat... rhs)"
+  [m pos]
+  (let [mm (un m)
+        pats (un (nth mm 3))
+        [rhs eql] (rhs-forms (nth mm 4))
+        f (apply list '-> (concat (map #(pparen % pos) pats) rhs))]
+    (at (eq-meta f eql m) m)))
+
+(defn- funlhs
+  "The left-hand side of an equation of fun (a located name): f, (f p*), (:infix p1 op p2),
+  ((:infix p1 op p2) p*); strict (! f)"
+  [fun m]
+  (let [[_ _ ctx pats-node] (un m)
+        ctx (un ctx)
+        fixity (if (= 'FunRhs (first ctx)) (nth ctx 2) 'Prefix)
+        strict (and (= 'FunRhs (first ctx)) (= 'SrcStrict (nth ctx 3)))
+        fname (if (= 'FunRhs (first ctx)) (nth ctx 1) fun)
+        pats (un pats-node)
+        lhs (cond
+              (and (= fixity 'Infix) (>= (count pats) 2))
+              (let [[l r & more] pats
+                    ;; an operand that is an unparenthesized constructor chain is spliced into
+                    ;; the chain, as GHC's parser saw it (ghc-lisp S14): f :+ g <*> a :+ b
+                    items (fn [p] (if (and (= 'ConPat (con p)) (= 'InfixCon (con (fld p 3))))
+                                    (con-chain-items p)
+                                    [(pparen p :op)]))
+                    inf (apply list :infix (concat (items l) [(name-of fname)] (items r)))]
+                (if (seq more) (apply list inf (map #(pparen % :arg) more)) inf))
+              (empty? pats) (name-of fname)
+              :else (apply list (prefix-name fname) (map #(pparen % :arg) pats)))]
+    ;; an infix left-hand side's operands are both at :op
+    (if strict (list '! (lit-value lhs)) lhs)))
+
+(defn bind-forms
+  "The forms of a binding node (FunBind: one per equation; PatBind; PatSynBind), head h (hs/=
+  at top level, = inside)"
+  [b h]
+  (let [bb (un b)]
+    (case (first bb)
+      FunBind (let [fun (nth bb 2)
+                    ms (un (fld (nth bb 3) 2))]
+                (for [m ms]
+                  (let [[rhs eql] (rhs-forms (fld m 4))]
+                    (at (eq-meta (apply list h (funlhs fun m) rhs) eql m) m))))
+      PatBind (let [[_ _ lhs mult grhss] bb
+                    [rhs eql] (rhs-forms grhss)
+                    lp (pparen lhs :alt)
+                    lp (case (con mult)
+                         HsUnannotated lp
+                         HsLinearAnn (list :mod 1 (lit-value lp))
+                         HsExplicitMult (list :mod (lit-value (tparen (fld mult 2) :arg)) (lit-value lp))
+                         (fail! "a multiplicity" mult))]
+                [(at (eq-meta (apply list h lp rhs) eql b) b)])
+      PatSynBind (let [psb (un (nth bb 2))
+                       [_ _ pname details ppat dir] psb
+                       d (un details)
+                       pn (name-of pname)
+                       lhs (case (first d)
+                             PrefixCon (if (empty? (nth d 1)) pn (apply list pn (map name-of (nth d 1))))
+                             InfixCon (list :infix (name-of (nth d 1)) pn (name-of (nth d 2)))
+                             RecCon (apply list :rec pn (map #(name-of (nth (un %) 2)) (nth d 1)))
+                             (fail! "pattern synonym arguments" d))
+                       pf (pparen ppat :top)
+                       dirn (un dir)
+                       ph (if (= h 'hs/=) 'hs/pattern 'pattern)]
+                   [(at (case (con dirn)
+                          ImplicitBidirectional (list ph lhs '= pf)
+                          Unidirectional (list ph lhs '<- pf)
+                          ExplicitBidirectional (list ph lhs '<- pf
+                                                      (block-line
+                                                       (apply list 'where
+                                                             (for [m (un (fld (fld dirn 1) 2))]
+                                                               (let [[rhs eql] (rhs-forms (fld m 4))]
+                                                                 (at (eq-meta (apply list '= (funlhs pname m) rhs) eql m) m))))
+                                                       (fld (fld dirn 1) 2)))
+                          (fail! "a pattern synonym direction" dirn))
+                        b)])
+      (fail! "a binding" bb))))
+
+;;; Signatures and pragmas (SPEC §4.2, §4.7, §4.11)
+
+(defn- activation
+  "[] or [activation] (a vector: [2], [:before 2], [:never], [])"
+  [act default]
+  (let [a (un act)]
+    (if (= a default)
+      nil
+      [(case (con a)
+        AlwaysActive []
+        NeverActive [:never]
+        ActiveAfter [(int-lit (src-text (fld a 1)) (fld a 2))]
+        ActiveBefore [:before (int-lit (src-text (fld a 1)) (fld a 2))]
+        FinalActive [:final]
+        (fail! "an activation" a))])))
+
+(defn- inline-head [spec]
+  (case (con spec)
+    Inline "inline"
+    NoInline "noinline"
+    Inlinable "inlinable"
+    Opaque "opaque"
+    NoUserInlinePrag nil
+    (fail! "an inline pragma" spec)))
+
+(defn- qual [top? n] (if top? (symbol "hs" n) (keyword n)))
+
+(defn- strlit [s] (let [s (un s)] (if (= 'StringLiteral (first s)) (nth s 2) (fail! "a string literal" s))))
+
+(defn sig-forms
+  "The forms of a Sig node; top? at top level (hs/ heads)"
+  [s top?]
+  (let [ss (un s)
+        f (case (first ss)
+            TypeSig (apply list (if top? 'hs/sig :sig) (concat (map name-of (nth ss 2)) [(sig-type-form (nth ss 3) :top)]))
+            ClassOpSig (let [sig (apply list :sig (concat (map name-of (nth ss 3)) [(sig-type-form (nth ss 4) :top)]))]
+                         (if (nth ss 2) (list 'default sig) sig))
+            PatSynSig (list (if top? 'hs/pattern 'pattern) (apply list :sig (concat (map name-of (nth ss 2)) [(sig-type-form (nth ss 3) :top)])))
+            FixSig (let [[_ ann [_ ns names [_ prec dir]]] ss
+                         prec-src (let [a (un ann)] (when (seq? a) (last a)))
+                         head (case dir InfixL "infixl" InfixR "infixr" InfixN "infix" (fail! "a fixity" dir))]
+                     (apply list (if top? (symbol "hs" head) (symbol head))
+                            (concat (when (src-text prec-src) [(int-lit (src-text prec-src) prec)])
+                                    (case ns
+                                      NoNamespaceSpecifier nil
+                                      (case (con ns) TypeNamespaceSpecifier ['type] DataNamespaceSpecifier ['data] nil))
+                                    (map name-of names))))
+            InlineSig (let [[_ _ n ip] ss
+                            [_ _ spec _ act rm] (un ip)
+                            h (inline-head spec)
+                            dflt (if (contains? #{"noinline" "opaque"} h) 'NeverActive 'AlwaysActive)]
+                        (apply list (qual top? h)
+                               (concat (activation act dflt)
+                                       (when (= 'ConLike rm) [:conlike])
+                                       [(name-of n)])))
+            SpecSig (let [[_ _ n tys ip] ss
+                          [_ _ spec _ act] (un ip)
+                          h (inline-head spec)]
+                      (apply list (qual top? "specialise")
+                             (concat (when h [(keyword h)]) (activation act 'AlwaysActive) [(name-of n)]
+                                     (map #(sig-type-form % :top) tys))))
+            SpecSigE (let [[_ _ bndrs e ip] ss
+                           [_ _ spec _ act] (un ip)
+                           h (inline-head spec)
+                           [_ _ tvs tms] (un bndrs)]
+                       (apply list (qual top? "specialise")
+                              (concat (when h [(keyword h)]) (activation act 'AlwaysActive)
+                                      (when-let [tv (just tvs)] [(apply list 'forall (map tvb-form tv))])
+                                      (when (seq tms) [(apply list 'forall (map #(let [rb (un %)]
+                                                                                   (case (first rb)
+                                                                                     RuleBndr (name-of (nth rb 2))
+                                                                                     RuleBndrSig (list :sig (lit-value (name-of (nth rb 2))) (sig-type-form (nth rb 3) :top))))
+                                                                                tms))])
+                                      [(paren-of e :top)])))
+            SpecInstSig (list :specialise 'instance (sig-type-form (nth ss 2) :top))
+            MinimalSig (letfn [(bf [b]
+                                 (let [x (un b)]
+                                   (at (case (first x)
+                                         Var (name-of (nth x 1))
+                                         And (apply list :and (map bf (nth x 1)))
+                                         Or (apply list :or (map bf (nth x 1)))
+                                         Parens (list :paren (bf (nth x 1)))
+                                         (fail! "a boolean formula" x))
+                                       b)))]
+                         (list (qual top? "minimal") (bf (nth ss 2))))
+            SCCFunSig (apply list (qual top? "scc") (name-of (nth ss 2)) (when-let [l (just (nth ss 3))] [(strlit l)]))
+            CompleteMatchSig (apply list (qual top? "complete")
+                                    (concat (map name-of (nth ss 2))
+                                            (when-let [t (just (nth ss 3))] [:sig (name-of t)])))
+            (fail! "a signature" ss))]
+    [(at f s)]))
+
+(defn local-binds
+  "The binding forms of an HsLocalBinds: bindings and signatures in source order"
+  [lb]
+  (let [x (un lb)]
+    (case (first x)
+      EmptyLocalBinds []
+      HsValBinds (let [[_ _ binds sigs] (un (nth x 2))]
+                   (mapcat (fn [n] (if (contains? #{'TypeSig 'FixSig 'InlineSig 'SpecSig 'SpecSigE 'SCCFunSig 'PatSynSig 'ClassOpSig 'MinimalSig 'CompleteMatchSig} (con n))
+                                     (sig-forms n false)
+                                     (bind-forms n '=)))
+                           (sort-by-pos (concat binds sigs))))
+      HsIPBinds (for [b (un (fld (nth x 2) 2))]
+                  (let [[_ _ n e] (un b)]
+                    (at (list '= (symbol (str "?" (second (un n)))) (paren-of e :top)) b)))
+      (fail! "local bindings" x))))
+
+(defn stmt-form
+  "A statement in a do block (:do), a guard (:guard), a comprehension qualifier (:qual)"
+  [s ctx]
+  (let [x (un s)
+        f (case (first x)
+            BindStmt (list '<- (pparen (nth x 2) :top) (paren-of (nth x 3) :top))
+            BodyStmt (paren-of (nth x 2) :top)
+            LastStmt (paren-of (nth x 2) :top)
+            LetStmt (apply list 'let (local-binds (nth x 2)))
+            RecStmt (apply list 'rec (map #(stmt-form % ctx) (un (nth x 2))))
+            (fail! "a statement" x))]
+    (at f s)))
+
+;;; Declarations (SPEC §4)
+
+(defn- decl-head
+  "A declaration head: T, (T tv*), (:infix tv1 op tv2)"
+  [n qtvs fixity]
+  (let [tvs (map tvb-form (un (fld qtvs 2)))
+        nf (name-of n)]
+    (cond
+      (and (= fixity 'Infix) (= 2 (count tvs))) (list :infix (first tvs) nf (second tvs))
+      (and (= fixity 'Infix) (> (count tvs) 2)) (apply list (list :infix (first tvs) nf (second tvs)) (drop 2 tvs))
+      (empty? tvs) nf
+      :else (apply list (if (= 1 (count tvs)) nf (if (sx/chain-head? (lit-value nf)) (list :name (rdr-text n)) nf)) tvs))))
+
+(defn- ctx-wrap
+  "head-or-ctx: (=> ctx+ head) when a context is given"
+  [ctx head]
+  (if-let [c (just ctx)]
+    (apply list '=> (concat (map #(tparen % :ctx) (un c)) [head]))
+    head))
+
+(defn- field-type
+  "A constructor field (CDF ann unpack strict mult type doc) as [type-form docs...]"
+  [cdf pos]
+  (let [[_ _ unpack strict mult t doc] (un cdf)
+        tf0 (tparen t (if (or (not= strict 'NoSrcStrict) (not= unpack 'NoSrcUnpack)) :arg pos))
+        tf (case strict
+             NoSrcStrict tf0
+             SrcStrict (list '! (lit-value tf0))
+             SrcLazy (list :lazy (lit-value tf0))
+             (fail! "a strictness" strict))
+        tf (case unpack
+             NoSrcUnpack tf
+             SrcUnpack (list :unpack tf)
+             SrcNoUnpack (list :nounpack tf)
+             (fail! "an unpackedness" unpack))
+        tf (case (con mult)
+             HsUnannotated tf
+             HsLinearAnn (list :mod 1 tf)
+             HsExplicitMult (list :mod (lit-value (tparen (fld mult 2) :arg)) tf)
+             (fail! "a multiplicity" mult))
+        d (when-let [dd (just doc)] (doc-form :doc dd))]
+    (if d
+      (if (= :prev (second d)) [tf d] [d tf])
+      [tf])))
+
+(defn- around
+  "[doc form] or [form doc] by the doc's decorator, or [form]"
+  [form d]
+  (cond (nil? d) [form] (= :prev (second d)) [form d] :else [d form]))
+
+(defn- rec-field
+  "A record field (HsConDeclRecField x [names] cdf): [(:sig f g T)] with its doc around"
+  [rf]
+  (let [[_ _ names cdf] (un rf)
+        ft (field-type cdf :top)
+        tf (first (remove #(and (seq? (lit-value %)) (= :doc (first (lit-value %)))) ft))
+        d (first (filter #(and (seq? (lit-value %)) (= :doc (first (lit-value %)))) ft))]
+    (around (at (apply list :sig (concat (map #(name-of (fld % 2)) names) [tf])) rf) d)))
+
+(defn- con-doc [d] (when-let [dd (just d)] (doc-form :doc dd)))
+
+(defn- con-decl
+  "A constructor declaration: [docs... form docs...]"
+  [cd]
+  (let [x (un cd)]
+    (case (first x)
+      ConDeclH98
+      (let [[_ _ n forall? tvbs ctx details doc] x
+            nf (name-of n)
+            d (un details)
+            ntext (rdr-text n)
+            core (case (first d)
+                   PrefixCon (let [fs (mapcat #(field-type % :arg) (nth d 1))
+                                   fe (mapcat #(field-type % :elem) (nth d 1))
+                                   nv (lit-value nf)]
+                               (cond
+                                 ;; tuple and sum syntax: data T a b = (a, b), (# a | #)
+                                 (and (seq? nv) (= :tuple-con (first nv)) (seq fs)) (apply list :tuple fe)
+                                 (and (seq? nv) (= :utuple-con (first nv)) (seq fs)) (apply list :utuple fe)
+                                 (re-matches #"\(#[ _|]*#\)" ntext)
+                                 (let [slots (filter #{\_ \|} ntext)
+                                       alts (count (filter #{\|} slots))
+                                       pos (count (filter #{\|} (take-while #(not= \_ %) slots)))]
+                                   (apply list :usum (concat (repeat pos :_) fe (repeat (- alts pos) :_))))
+                                 (empty? fs) nf
+                                 :else (apply list nf fs)))
+                   InfixCon (apply list :infix (concat (field-type (nth d 1) :op) [nf] (field-type (nth d 2) :op)))
+                   RecCon (let [flds (un (nth d 1))
+                                f (if (empty? flds) (list :rec nf) (apply list nf (mapcat rec-field flds)))
+                                bl (line-of (nth d 1))]
+                            ;; the line of { when it is not the constructor's
+                            (if (and bl (not= bl (line-of n))) (vary-meta f assoc :hs/brace bl) f))
+                   (fail! "constructor details" d))
+            withc (ctx-wrap ctx core)
+            f (if forall? (apply list 'forall (concat (map tvb-form tvbs) [withc])) withc)
+            dd (con-doc doc)]
+        (cond
+          (nil? dd) [(at f cd)]
+          (= :prev (second dd)) [(at f cd) dd]
+          :else [dd (at f cd)]))
+      ConDeclGADT
+      (let [[_ _ names outer inner ctx details res doc] x
+            argsf (let [d (un details)]
+                    (case (first d)
+                      PrefixConGADT (mapcat #(field-type % :arrow-arg) (nth d 2))
+                      RecConGADT [(at (apply list :record (mapcat rec-field (un (nth d 2)))) (nth d 2))]
+                      (fail! "GADT constructor details" d)))
+            body (if (empty? argsf) (tparen res :top) (apply list '-> (concat argsf [(tparen res :top)])))
+            withc (if-let [c (just ctx)] (apply list '=> (concat (map #(tparen % :ctx) (un c)) [body])) body)
+            withi (reduce (fn [acc tele]
+                            (let [t (un tele)]
+                              (case (first t)
+                                HsGadtForAll (let [tl (un (nth t 2))]
+                                               (apply list 'forall (concat (map tvb-form (nth tl 2)) [acc])))
+                                HsGadtPar (list :paren acc)
+                                (fail! "a GADT telescope" t))))
+                          withc (reverse (if (vector? inner) inner [])))
+            o (un outer)
+            ty (case (first o)
+                 HsOuterImplicit withi
+                 HsOuterExplicit (apply list 'forall (concat (map tvb-form (nth o 2)) [withi]))
+                 (fail! "outer binders" o))
+            f (apply list :sig (concat (map name-of names) [ty]))
+            dd (con-doc doc)]
+        (cond (nil? dd) [(at f cd)] (= :prev (second dd)) [(at f cd) dd] :else [dd (at f cd)]))
+      (fail! "a constructor" x))))
+
+(defn- deriving-form [dc]
+  (let [[_ _ strat clause] (un dc)
+        cl (un clause)
+        st (when-let [sn (just strat)]
+             (let [s (un sn)]
+               (case (con s)
+                 StockStrategy [(at 'stock sn)]
+                 AnyclassStrategy [(at 'anyclass sn)]
+                 NewtypeStrategy [(at 'newtype sn)]
+                 ViaStrategy nil
+                 (fail! "a strategy" s))))
+        via (when-let [sn (just strat)]
+              (let [s (un sn)] (when (= 'ViaStrategy (con s)) [(at 'via sn) (sig-type-form (fld (fld s 1) 2) :top)])))
+        sig-doc (fn [st] (let [h (un st)]
+                           (if (and (= 'HsSig (first h)) (= 'HsOuterImplicit (con (nth h 2))) (= 'HsDocTy (con (nth h 3))))
+                             (doc-elems (nth h 3) :top)
+                             [(sig-type-form st :top)])))
+        cls (case (first cl)
+              DctSingle (sig-doc (nth cl 2))
+              DctMulti [(at (vec (mapcat sig-doc (nth cl 2))) clause)]
+              (fail! "a deriving clause" cl))]
+    (at (apply list 'deriving (concat st cls via)) dc)))
+
+(defn- data-defn
+  "The body of a data declaration: [kind con-forms...]"
+  [defn-node]
+  (let [[_ _ ctx ctype ksig cons derivs] (un defn-node)
+        cs (un cons)
+        [kind cl] (case (first cs)
+                    DataTypeCons [(if (nth cs 1) :type-data :data) (nth cs 2)]
+                    NewTypeCon [:newtype [(nth cs 1)]]
+                    (fail! "data constructors" cs))
+        gadt? (some #(= 'ConDeclGADT (con %)) cl)
+        conforms (mapcat con-decl cl)]
+    {:kind kind :ctx ctx
+     :ctype (when-let [ct (just ctype)]
+              (let [[_ _ hdr [_ _ s]] (un ct)]
+                (apply list :ctype (concat (when-let [h (just hdr)] [(nth (un h) 2)]) [s]))))
+     :ksig (when-let [k (just ksig)] (tparen k :top))
+     :cons (if gadt? [(apply list 'where conforms)] conforms)
+     :derivs (map deriving-form (un derivs))}))
+
+(defn- fam-lhs
+  "A type family equation's left-hand side (F T*), (:infix a op b)"
+  [n args fixity]
+  (let [nf (name-of n)
+        argf (fn [a] (let [x (un a)]
+                       (case (first x)
+                         HsValArg (tparen (nth x 2) :arg)
+                         HsTypeArg (list 'arbace.core/deref (lit-value (tparen (nth x 2) :arg)))
+                         (fail! "a family argument" x))))
+        vals (filter #(= 'HsValArg (con %)) args)]
+    (cond
+      (and (= fixity 'Infix) (= 2 (count args))) (list :infix (tparen (fld (first vals) 2) :op) nf (tparen (fld (second vals) 2) :op))
+      (empty? args) nf
+      :else (apply list (if (= 1 (count args)) nf (if (sx/chain-head? (lit-value nf)) (list :name (rdr-text n)) nf)) (map argf args)))))
+
+(defn- fam-eqn
+  "(FamEqn ann name outer [args] fixity rhs) with rhs-fn for its right-hand side: (= lhs rhs),
+  (forall tv* (= ...))"
+  [eqn rhs-fn]
+  (let [[_ _ n outer args fixity rhs] (un eqn)
+        o (un outer)
+        e (list '= (fam-lhs n args fixity) (rhs-fn rhs))]
+    (at (case (first o)
+          HsOuterImplicit e
+          HsOuterExplicit (apply list 'forall (concat (map tvb-form (nth o 2)) [e]))
+          (fail! "outer binders" o))
+        eqn)))
+
+(defn- family-decl
+  "A FamilyDecl; in-class? for an associated family"
+  [fd top? in-class?]
+  (let [[_ _ info top n qtvs fixity res inj] (un fd)
+        info (un info)
+        hd (decl-head n qtvs fixity)
+        r (un res)
+        [hd' resf] (case (first r)
+                     NoSig [hd nil]
+                     KindSig [(list :sig (lit-value hd) (tparen (nth r 2) :top)) nil]
+                     TyVarSig [hd (list '= (lit-value (tvb-form (nth r 2))))]
+                     (fail! "a family result" r))
+        injf (when-let [i (just inj)]
+               (let [[_ _ l rs] (un i)] (apply list '| (lit-value (name-of l)) '-> (map name-of rs))))
+        kw (case (con info)
+             DataFamily (if (and in-class? (not= top 'TopLevel)) ['data] ['data 'family])
+             (if (and in-class? (not= top 'TopLevel)) ['type] ['type 'family]))
+        eqns (when (= 'ClosedTypeFamily (con info))
+               (if-let [es (just (fld info 1))]
+                 [(apply list 'where (map #(fam-eqn % (fn [r] (tparen r :top))) (un es)))]
+                 [(list 'where '..)]))
+        h (if top? (symbol "hs" (name (first kw))) (first kw))]
+    (apply list h (concat (rest kw) [hd'] (when resf [resf]) (when injf [injf]) eqns))))
+
+(declare decl-forms)
+
+(defn- body-forms
+  "The items of a class or instance body (lists of nodes), in source order"
+  [nodes]
+  (mapcat (fn [n] (decl-forms n false :body)) (sort-by-pos nodes)))
+
+(defn- data-family-instance [dfi top? in-inst?]
+  (let [eqn (un (nth (un dfi) 1))
+        [_ _ n outer args fixity defn-node] eqn
+        {:keys [kind ctx ctype ksig cons derivs]} (data-defn defn-node)
+        lhs (fam-lhs n args fixity)
+        o (un outer)
+        lhs (case (first o)
+              HsOuterImplicit lhs
+              HsOuterExplicit (apply list 'forall (concat (map tvb-form (nth o 2)) [lhs])))
+        lhs (if ksig (list :sig lhs ksig) lhs)
+        kw (if (= kind :newtype) "newtype" "data")]
+    (apply list (if top? (symbol "hs" kw) (symbol kw))
+           (concat (when-not in-inst? ['instance]) (when ctype [ctype]) [(ctx-wrap ctx lhs)] cons derivs))))
+
+(defn- overlap-kw [om]
+  (when-let [m (just om)]
+    (case (con m)
+      NoOverlap :no-overlap Overlappable :overlappable Overlapping :overlapping
+      Overlaps :overlaps Incoherent :incoherent NonCanonical :noncanonical
+      (fail! "an overlap mode" m))))
+
+(defn- warning-txt
+  "A WarningTxt or DeprecatedTxt: [kind category? msg]"
+  [w]
+  (let [x (un w)
+        msgs (map (fn [m] (at (strlit (fld m 1)) m)) (case (first x) WarningTxt (nth x 3) DeprecatedTxt (nth x 2)))
+        msg (if (= 1 (count msgs)) (first msgs) (vec msgs))]
+    (case (first x)
+      WarningTxt [:warning (when-let [c (just (nth x 1))] (let [cc (un c)] (second (un (nth cc 3))))) msg]
+      DeprecatedTxt [:deprecated nil msg]
+      (fail! "a warning text" x))))
+
+(defn- cconv [c]
+  (case (un c)
+    CCallConv 'ccall CApiConv 'capi StdCallConv 'stdcall PrimCallConv 'prim JavaScriptCallConv 'javascript
+    (fail! "a calling convention" c)))
+
+(defn- src-string
+  "The value of a string literal's source text \"...\""
+  [t]
+  (when t (read-string t)))
+
+(defn decl-forms
+  "The forms of a declaration node: top? at top level (hs/ heads); ctx :top, :body (class and
+  instance bodies)"
+  [d top? ctx]
+  (let [x (un d)
+        hs (fn [n] (if top? (symbol "hs" n) (symbol n)))]
+    (case (first x)
+      SigD (map #(at-if-none % d) (sig-forms (nth x 2) top?))
+      ValD (map #(at-if-none % d) (bind-forms (nth x 2) (if top? 'hs/= '=)))
+      DocD (let [dd (un (nth x 2))
+                 doc (case (first dd)
+                       (DocCommentNext DocCommentPrev) (nth dd 1)
+                       DocCommentNamed (nth dd 2)
+                       DocGroup (nth dd 2)
+                       (fail! "a doc declaration" dd))]
+             [(at (doc-form (if top? 'hs/doc :doc) doc) d)])
+      ;; the class body's docs are DocDecls, not DocDs
+      (DocCommentNext DocCommentPrev DocCommentNamed DocGroup)
+      (let [doc (if (contains? #{'DocCommentNamed 'DocGroup} (first x)) (nth x 2) (nth x 1))]
+        [(at (doc-form (if top? 'hs/doc :doc) doc) d)])
+      TyClD (map #(at-if-none % d) (decl-forms (nth x 2) top? ctx))
+      InstD (map #(at-if-none % d) (decl-forms (nth x 2) top? ctx))
+      KindSigD (let [[_ _ n st] (un (nth x 2))]
+                 [(at (list (hs "type") (list :sig (lit-value (name-of n)) (sig-type-form st :top))) d)])
+      StandaloneKindSig (let [[_ _ n st] x]
+                          [(at (list (hs "type") (list :sig (lit-value (name-of n)) (sig-type-form st :top))) d)])
+      SynDecl (let [[_ _ n qtvs fixity rhs] x]
+                [(at (apply list (hs "type") (decl-head n qtvs fixity) (doc-elems rhs :top)) d)])
+      DataDecl (let [[_ _ n qtvs fixity defn-node] x
+                     {:keys [kind ctx ctype ksig cons derivs]} (data-defn defn-node)
+                     hd (decl-head n qtvs fixity)
+                     hd (if ksig (list :sig (lit-value hd) ksig) hd)]
+                 [(at (apply list (case kind :data (hs "data") :newtype (hs "newtype") :type-data (hs "type"))
+                             (concat (when (= kind :type-data) ['data]) (when ctype [ctype]) [(ctx-wrap ctx hd)] cons derivs))
+                      d)])
+      ClassDecl (let [[_ _ ctx n qtvs fixity fundeps sigs meths ats atdefs docs] x
+                      hd (ctx-wrap ctx (decl-head n qtvs fixity))
+                      fds (when (seq fundeps)
+                            [(apply list '| (for [fd fundeps]
+                                              (let [[_ _ ls rs] (un fd)]
+                                                (at (apply list (concat (map name-of ls) ['->] (map name-of rs))) fd))))])
+                      body (mapcat (fn [n]
+                                     (case (con n)
+                                       FamilyDecl [(at (family-decl n false true) n)]
+                                       TyFamInstDecl (let [[_ _ eqn] (un n)
+                                                           [_ _ en outer args fixity rhs] (un eqn)]
+                                                       [(at (list 'type (list '= (fam-lhs en args fixity) (tparen rhs :top))) n)])
+                                       (decl-forms n false :body)))
+                                   (sort-by-pos (concat sigs meths ats atdefs docs)))]
+                  [(at (apply list (hs "class") hd (concat fds body)) d)])
+      FamDecl [(at (family-decl (nth x 2) top? false) d)]
+      FamilyDecl [(at (family-decl d top? (= ctx :body)) d)]
+      ClsInstD (let [[_ ext ty binds sigs tyfams datafams overlap] (un (nth x 2))
+                     items (sort-by-pos (concat binds sigs tyfams datafams))
+                     body (mapcat (fn [n]
+                                    (case (con n)
+                                      TyFamInstDecl (let [[_ _ eqn] (un n)]
+                                                      [(at (list 'type (fam-eqn eqn (fn [r] (tparen r :top)))) n)])
+                                      DataFamInstDecl [(at (data-family-instance n false true) n)]
+                                      (decl-forms n false :body)))
+                                  items)]
+                 [(at (apply list (hs "instance") (concat (when-let [o (overlap-kw overlap)] [o]) [(sig-type-form ty :top)] body)) d)])
+      TyFamInstD (let [[_ _ eqn] (un (nth x 2))]
+                   [(at (list (hs "type") 'instance (fam-eqn eqn (fn [r] (tparen r :top)))) d)])
+      DataFamInstD [(at (data-family-instance (nth x 2) top? false) d)]
+      DerivD (let [[_ ext ty strat overlap] (un (nth x 2))
+                   st (when-let [s (just strat)]
+                        (let [s (un s)]
+                          (case (con s)
+                            StockStrategy ['stock] AnyclassStrategy ['anyclass] NewtypeStrategy ['newtype]
+                            ViaStrategy ['via (sig-type-form (fld (fld s 1) 2) :top)]
+                            (fail! "a strategy" s))))]
+               [(at (apply list (hs "deriving") (concat st ['instance] (when-let [o (overlap-kw overlap)] [o]) [(sig-type-form ty :top)])) d)])
+      DefD (let [[_ _ cls tys] (un (nth x 2))]
+             [(at (apply list (hs "default") (concat (when-let [c (just cls)] [(name-of c)])
+                                                     (if (just cls) [(mapv #(tparen % :elem) tys)] (map #(tparen % :elem) tys))))
+                  d)])
+      ForD (let [fd (un (nth x 2))]
+             (case (first fd)
+               ForeignImport (let [[_ _ n st imp] fd
+                                   [_ src cc safety _ _] (un imp)
+                                   ent (src-string (src-text (un src)))]
+                               [(at (apply list (hs "foreign") 'import (cconv cc)
+                                           (concat (case (un safety)
+                                                     ;; safe is the default: written when the source has it (located)
+                                                     PlaySafe (when (line-of safety) [(at 'safe safety)])
+                                                     PlayRisky ['unsafe] PlayInterruptible ['interruptible]
+                                                     (fail! "a safety" safety))
+                                                   (when ent [ent])
+                                                   [(list :sig (lit-value (name-of n)) (sig-type-form st :top))]))
+                                    d)])
+               ForeignExport (let [[_ _ n st exp] fd
+                                   [_ src es] (un exp)
+                                   [_ _ ename cc] (un es)
+                                   ent (src-string (src-text (un src)))]
+                               [(at (apply list (hs "foreign") 'export (cconv cc)
+                                           (concat (when ent [ent]) [(list :sig (lit-value (name-of n)) (sig-type-form st :top))]))
+                                    d)])
+               (fail! "a foreign declaration" fd)))
+      WarningD (let [[_ _ ws] (un (nth x 2))]
+                 (for [w ws]
+                   (let [[_ ann names txt] (un w)
+                         ns (let [a (un ann)] (when (seq? a) (second a)))
+                         [k cat msg] (warning-txt txt)
+                         nsf (case (con ns) TypeNamespaceSpecifier ['type] DataNamespaceSpecifier ['data] nil)]
+                     (at (apply list (hs (name k)) (concat (when cat ['in cat]) nsf (map name-of names) [msg])) w))))
+      RuleD (let [[_ _ rules] (un (nth x 2))]
+              [(at (apply list (hs "rules")
+                          (for [r rules]
+                            (let [[_ _ rname act bndrs lhs rhs] (un r)
+                                  [_ _ tvs tms] (un bndrs)]
+                              (at (apply list (let [n (un rname)] (if (string? n) n (str n)))
+                                         (concat (activation act 'AlwaysActive)
+                                                 (when-let [tv (just tvs)] [(apply list 'forall (map tvb-form tv))])
+                                                 (when (or (seq tms) (just tvs))
+                                                   [(apply list 'forall (map #(let [rb (un %)]
+                                                                                (at (case (first rb)
+                                                                                      RuleBndr (name-of (nth rb 2))
+                                                                                      RuleBndrSig (list :sig (lit-value (name-of (nth rb 2))) (sig-type-form (nth rb 3) :top)))
+                                                                                    %))
+                                                                             tms))])
+                                                 [(list '= (paren-of lhs :top) (paren-of rhs :top))]))
+                                  r))))
+                   d)])
+      RoleAnnotD (let [[_ _ n roles] (un (nth x 2))]
+                   [(at (apply list (hs "type") 'role (name-of n)
+                               (for [r roles]
+                                 (at (if-let [rr (just (un r))]
+                                       (case (un rr) Nominal 'nominal Representational 'representational Phantom 'phantom
+                                         (fail! "a role" rr))
+                                       '_)
+                                     r)))
+                        d)])
+      AnnD (let [[_ _ prov e] (un (nth x 2))
+                 p (un prov)]
+             [(at (apply list (hs "ann")
+                         (concat (case (first p)
+                                   ValueAnnProvenance [(name-of (nth p 1))]
+                                   TypeAnnProvenance ['type (name-of (nth p 1))]
+                                   ModuleAnnProvenance ['module]
+                                   (fail! "an annotation target" p))
+                                 [(paren-of e :top)]))
+                  d)])
+      SpliceD (let [[_ _ sd] x
+                    [_ _ sp flag] (un sd)
+                    s (un sp)]
+                [(at (case (first s)
+                       HsUntypedSpliceExpr (if (= flag 'DollarSplice)
+                                             (list (hs "splice") (paren-of (nth s 2) :atom))
+                                             (list (hs "naked-splice") (paren-of (nth s 2) :top)))
+                       (fail! "a splice declaration" s))
+                     d)])
+      ;; bindings and signatures directly in a class or instance body
+      (FunBind PatBind PatSynBind) (bind-forms d (if top? 'hs/= '=))
+      (TypeSig ClassOpSig FixSig InlineSig SpecSig SpecSigE SpecInstSig MinimalSig SCCFunSig CompleteMatchSig PatSynSig) (sig-forms d top?)
+      (fail! "a declaration" x))))
+
+;;; Imports and exports (SPEC §2.5, §2.6)
+
+(defn- wrapped-name [w]
+  (let [x (un w)]
+    (at (case (first x)
+          IEName (name-of (nth x 2))
+          IEPattern (list 'pattern (lit-value (name-of (nth x 2))))
+          IEType (list 'type (lit-value (name-of (nth x 2))))
+          IEData (list 'data (lit-value (name-of (nth x 2))))
+          IEDefault (list 'default (lit-value (name-of (nth x 2))))
+          (fail! "an export name" x))
+        w)))
+
+(defn- with-dots
+  "(T ..) on a wrapped name: (type (T ..)) for (type T)"
+  [wf items]
+  (let [w (lit-value wf)]
+    (if (and (seq? w) (contains? #{'type 'pattern 'data} (first w)))
+      (list (first w) (apply list (second w) items))
+      (apply list wf items))))
+
+(defn ie-forms
+  "An export or import item: [form docs...]"
+  [ie]
+  (let [x (un ie)
+        doc (fn [d] (when-let [dd (just d)] [(doc-form :doc dd)]))
+        warn (fn [w f] (if-let [ww (just w)]
+                         (let [[k cat msg] (warning-txt ww)] (list k msg (lit-value f)))
+                         f))]
+    (case (first x)
+      IEVar (concat [(at (warn (nth x 1) (wrapped-name (nth x 2))) ie)] (doc (nth x 3)))
+      IEThingAbs (concat [(at (warn (nth x 1) (wrapped-name (nth x 2))) ie)] (doc (nth x 3)))
+      IEThingAll (concat [(at (warn (nth (un (nth x 1)) 1) (with-dots (wrapped-name (nth x 2)) ['..])) ie)] (doc (nth x 3)))
+      IEThingWith (let [[_ ext w wc subs d] x
+                        sf (map wrapped-name subs)
+                        sf (if (= 'IEWildcard (con wc))
+                             (let [i (fld wc 1)] (concat (take i sf) ['..] (drop i sf)))
+                             sf)
+                        sf (if (empty? sf) [:_] sf)]
+                    (concat [(at (warn (nth (un ext) 1) (with-dots (wrapped-name w) sf)) ie)] (doc d)))
+      IEModuleContents [(at (warn (nth (un (nth x 1)) 1) (list 'module (symbol (second (un (nth x 2)))))) ie)]
+      IEGroup [(at (doc-form :doc (nth x 3)) ie)]
+      IEDoc [(at (doc-form :doc (nth x 2)) ie)]
+      IEDocNamed [(at (list :doc :named (nth x 2)) ie)]
+      (fail! "an export item" x))))
+
+(defn import-form [imp]
+  (let [[_ ext m pkg src level safe qualified as hiding] (un imp)
+        mname (symbol (second (un m)))
+        lvl (case (con level)
+              NotLevelled nil
+              LevelStylePre [(if (= 'ImportDeclSplice (fld level 1)) 'splice 'quote) :pre]
+              LevelStylePost [(if (= 'ImportDeclSplice (fld level 1)) 'splice 'quote) :post]
+              nil)
+        items (when-let [h (just hiding)]
+                (let [[_ how lst] (un h)
+                      v (at (vec (mapcat ie-forms (un lst))) lst)]
+                  (if (= how 'EverythingBut) ['hiding v] [v])))]
+    (at (apply list 'hs/import
+               (concat (when (= src 'IsBoot) [:source])
+                       (when safe ['safe])
+                       (when (= :pre (second lvl)) [(first lvl)])
+                       (when (= qualified 'QualifiedPre) ['qualified])
+                       (when (= 'RawPkgQual (con pkg)) [(strlit (fld pkg 1))])
+                       [(at mname m)]
+                       (when (= :post (second lvl)) [(first lvl)])
+                       (when (= qualified 'QualifiedPost) ['qualified])
+                       (when-let [a (just as)] ['as (at (symbol (second (un a))) a)])
+                       items))
+        imp)))
+
+;;; The module (SPEC §2)
+
+(def language-editions #{"Haskell98" "Haskell2010" "GHC2021" "GHC2024"})
+
+(defn- module-exts
+  "The extensions on: the configuration's, then the pragmas' (No... turns one off)"
+  [config pragmas]
+  (reduce (fn [s e]
+            (let [e (str e)]
+              (cond
+                (contains? language-editions e) s
+                (str/starts-with? e "No") (disj s (subs e 2))
+                :else (conj s e))))
+          #{}
+          (concat (:extensions config)
+                  (mapcat (fn [[k _ v]] (when (= k 'language) v)) pragmas))))
+
+(defn module-name
+  "The namespace of a module (SPEC §2.1): hs.M; hs.main.PATH for a module without a header or
+  Main; .boot for a boot file"
+  [mname file]
+  (if (and mname (not= mname "Main"))
+    (symbol (str "hs." mname))
+    (symbol (str "hs.main." (-> file
+                                (str/replace #"\.[^./]+$" "")
+                                (str/replace #"[.-]" "_")
+                                (str/replace "/" "."))))))
+
+(defn convert-module
+  "A dump (its forms: (hsdump/config ...), (hsdump/pragmas ...), the tree) to Haskell forms:
+  {:ns sym :forms [...] :warnings {...}}"
+  [[cfg-form prag-form tree] file]
+  (when-not (and (seq? cfg-form) (= 'hsdump/config (first cfg-form)))
+    (if (and (seq? cfg-form) (= 'hsdump/error (first cfg-form)))
+      (throw (ex-info (str "the helper failed: " (second cfg-form)) {}))
+      (throw (ex-info "not a dump of tools/hsdump" {}))))
+  (let [config (second cfg-form)
+        pragmas (map (fn [p] (vec p)) (second prag-form))
+        warnings (atom {})]
+    (when-not (= "9.14.1" (:ghc config))
+      (throw (ex-info (str "the dump's GHC is " (:ghc config) ", the converter's 9.14.1 (tools/hsdump/GHC_VERSION)") {})))
+    (binding [*exts* (module-exts config pragmas)
+              *warnings* warnings]
+      (let [m (un tree)
+            [_ ext mname exports imports decls] m
+            [_ _ _ deprec header] (un ext)
+            mn (when-let [n (just mname)] (second (un n)))
+            ns-name (module-name mn file)
+            prag-forms (for [[k line v] pragmas]
+                         (attach (case k
+                                   language (apply list 'hs/language (map symbol v))
+                                   options-ghc (apply list 'hs/options-ghc v)
+                                   options (apply list 'hs/options v)
+                                   options-haddock (list 'hs/options-haddock v)
+                                   include (list 'hs/include v))
+                                 line))
+            hdr (when-let [h (just header)] [(doc-form 'hs/doc h)])
+            cfg (cond-> {:ghc (:ghc config) :ghc-unit (:ghc-unit config) :target (:target config)
+                         :os (:os config) :arch (:arch config) :language (:language config)}
+                  (seq (:extensions config)) (assoc :extensions (:extensions config))
+                  true (assoc :flags (:flags config))
+                  (:unit config) (assoc :unit (:unit config))
+                  (:corpus config) (assoc :corpus (:corpus config)))
+            exp-v (when-let [e (just exports)] (at (vec (mapcat ie-forms (un e))) e))
+            modf (apply list 'hs/module
+                        (concat [(if mname (at (symbol mn) (just mname)) nil)]
+                                (when-let [w (just deprec)]
+                                  (let [[k cat msg] (warning-txt w)]
+                                    [(at (apply list k (concat (when cat [cat]) [msg])) w)]))
+                                (when exp-v [exp-v])
+                                [:file file :positions :lines :config cfg]
+                                (when-let [c (:cpp config)] [:cpp c])))
+            modf (attach modf (or (some-> (just mname) line-of) 1))
+            body (concat (map import-form imports)
+                         (mapcat #(decl-forms % true :top) decls))]
+        {:ns ns-name
+         :forms (vec (concat [(list 'ns ns-name (list :require ['arbace.haskell :as 'hs]))]
+                             prag-forms hdr [modf] body))
+         :warnings @warnings}))))

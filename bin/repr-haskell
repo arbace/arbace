@@ -1,0 +1,413 @@
+#!/bin/bash
+# repr/haskell, Haskell's bridge (doc/haskell/SPEC.md, doc/haskell/HASKELL-NOTES.md): Haskell
+# modules as Haskell forms (read) and Haskell forms as Haskell modules (print), through the
+# helper tools/hsdump on the host's GHC (Alpine's ghc 9.14.1, pinned by tools/hsdump/GHC_VERSION;
+# SPEC §8, HS9). The converter and the printer are Arbace (arbace.repr.haskell, .convert,
+# .print), evaluated from the checkout: repr/haskell is not one of the tools the executable
+# embeds (arbace/j2g/embed.ae's excluded list).
+#
+#   bin/repr-haskell helper       build the helper into .tmp/hsdump/hsdump (the host's ghc; rebuilt
+#                                 when its sources, its pin or the ghc library's unit change)
+#   bin/repr-haskell corpus fetch [CORPUS]
+#                                 the corpus's tarball into .tmp/repr-haskell/corpus/ (downloaded
+#                                 once when missing, checked by its SHA-256), its packages
+#                                 extracted (default CORPUS ghc-9.14.1: test/haskell/corpus-ghc-9.14.1.edn)
+#   bin/repr-haskell corpus list [CORPUS]
+#                                 the corpus's modules, one per line: modules|hsc|boot, package, file
+#                                 (R1's, then R6's .hsc and boot files)
+#   bin/repr-haskell dump --corpus [CORPUS]   dump the corpus into .tmp/repr-haskell/dumps/CORPUS/PKG/
+#   bin/repr-haskell dump [--full] [-o DIR] FILE... [--ghc FLAG...]
+#                                 run the helper on modules (relative to the current directory) with
+#                                 GHC flags; one DIR/FILE.edn each (default .tmp/hsdump/out); --full
+#                                 keeps the exact-print annotations (for R3: the converter reads mode
+#                                 :lines dumps)
+#   bin/repr-haskell read [-o DIR] FILE.edn...
+#                                 convert dumps to Haskell forms: one .ae per module under DIR (default
+#                                 .tmp/repr-haskell/forms/files), each read back and compared
+#   bin/repr-haskell read --corpus [CORPUS]
+#                                 dump the corpus (.tmp/repr-haskell/dumps/CORPUS/PKG/) and convert it
+#                                 into .tmp/repr-haskell/forms/CORPUS/PKG/ (SPEC §2.1);
+#                                 report .tmp/repr-haskell/forms/CORPUS.report.edn
+#   bin/repr-haskell print [-o DIR] FORMS.ae...
+#                                 the printer (braces layout, SPEC §7.4): one .hs per forms file
+#                                 into DIR (default .tmp/repr-haskell/printed), at the forms' :file
+#   bin/repr-haskell roundtrip [--only REGEX] [CORPUS]
+#                                 the round trip's tree level (SPEC §9.1, §9.2) over the corpus:
+#                                 read, print into .tmp/repr-haskell/cand/CORPUS/PKG/, and compare
+#                                 GHC's trees (hsdump tree: showAstData BlankSrcSpan
+#                                 BlankEpAnnotations after eraseEpLayout) and the start lines of
+#                                 every located node (hsdump lines) of the original and the printed
+#                                 module; fails on a difference test/haskell/roundtrip-CORPUS-known.edn
+#                                 does not list, and on a listed one that no longer occurs. Report
+#                                 .tmp/repr-haskell/cand/CORPUS.report.edn
+#   bin/repr-haskell roundtrip --iface [CORPUS]
+#                                 the tree level, then the interface level (SPEC §9.1, §9.3; R2):
+#                                 each package compiled by ghc --make (the corpus's :iface :opt,
+#                                 -haddock), once from the originals and once with the printed
+#                                 modules in their places, under .tmp/repr-haskell/iface/CORPUS/;
+#                                 ghc --show-iface of each converted module's two interfaces, compared
+#                                 after the normalizations of mode :lines (the self-recompilation
+#                                 hashes dropped, spans and SrcLoc columns in unfoldings as lines,
+#                                 fingerprints blanked); fails on a difference
+#                                 test/haskell/roundtrip-CORPUS-iface-known.edn does not list, and on
+#                                 a listed one that no longer occurs. Report
+#                                 .tmp/repr-haskell/iface/CORPUS.report.edn. --iface-only: the
+#                                 interface level alone, over the modules printed by an earlier run
+#   bin/repr-haskell test         the spec's cases (test/haskell/; bin/lib/repr-haskell/test): the
+#                                 reader's samples, the worked example converted and its round trip,
+#                                 the interface level's normalizations (test/haskell/iface/)
+#
+# Environment: REPR_HASKELL_JOBS (parallel helper and converter runs, default the cores, at most
+# 32); ARBACE_HOST_EXE (the Arbace executable, bin/lib/host.bash; default stage 0).
+set -euo pipefail
+root=$(cd "$(dirname "$0")/.." && pwd)
+. "$root/bin/lib/tools.bash"
+work=$root/.tmp/hsdump
+helper=$work/hsdump
+rh=$root/.tmp/repr-haskell
+jobs=${REPR_HASKELL_JOBS:-$(nproc)}
+[ "$jobs" -gt 32 ] && jobs=32
+pin=$(cat "$root/tools/hsdump/GHC_VERSION")
+
+ghc_check() {
+  command -v ghc > /dev/null || { echo "repr-haskell: no ghc (Alpine's ghc package, doc/ALPINE.md)" >&2; return 1; }
+  local v
+  v=$(ghc --numeric-version)
+  if [ "$v" != "$pin" ]; then
+    echo "repr-haskell: the host's GHC is $v, tools/hsdump/GHC_VERSION pins $pin (SPEC §8.4: moving the pin is a recorded decision)" >&2
+    return 1
+  fi
+  libdir=$(ghc --print-libdir)
+}
+
+# the unit id of the ghc library: ghc-VERSION-HASH
+ghc_unit() {
+  local f
+  for f in "$libdir"/package.conf.d/ghc-"$pin"-*.conf; do basename "$f" .conf; return; done
+}
+
+helper_hash() {
+  cat "$root"/tools/hsdump/*.hs "$root/tools/hsdump/GHC_VERSION" | sha256sum | cut -c1-64
+}
+
+build() {
+  ghc_check
+  mkdir -p "$work"
+  local key
+  key="$(helper_hash) $(ghc_unit)"
+  (
+    flock 7
+    if [ -x "$helper" ] && [ "$(cat "$work/key" 2>/dev/null)" = "$key" ]; then exit 0; fi
+    echo "== repr-haskell: building the helper (ghc $pin, $(ghc_unit))" >&2
+    mkdir -p "$work/obj"
+    ghc -O1 -package ghc "-optP-DGHC_PIN=\"$pin\"" -outputdir "$work/obj" -o "$helper.new.$$" \
+      "$root/tools/hsdump/HsDump.hs" > "$work/build.log" 2>&1 ||
+      { cat "$work/build.log" >&2; rm -f "$helper.new.$$"; exit 1; }
+    mv -f "$helper.new.$$" "$helper"
+    echo "$key" > "$work/key"
+  ) 7> "$work/build.lock"
+}
+
+hsdump() {
+  "$helper" "$1" --libdir "$libdir" --helper-hash "sha256:$(helper_hash)" "${@:2}"
+}
+
+corpus_file() {
+  local c=${1:-ghc-9.14.1} f
+  f=$root/test/haskell/corpus-$c.edn
+  [ -f "$f" ] || { echo "repr-haskell: no corpus $c ($f)" >&2; return 1; }
+  echo "$f"
+}
+
+# corpus_plan CORPUS WHAT: one line per package, tab-separated: name, directory (in the tarball's
+# root), the GHC flags (space-separated, $libdir expanded), then the files (WHAT: modules, hsc, boot)
+corpus_plan() {
+  local f
+  f=$(corpus_file "$1")
+  arbace_tool -e "(let [c (read-string (slurp \"$f\")) what (keyword \"$2\")]
+    (doseq [p (:packages c)]
+      (println (str (:name p) \"\t\" (:dir p) \"\t\"
+        (apply str (interpose \" \" (concat [(str \"-X\" (:language p))] (map #(str \"-X\" %) (:extensions p)) [\"-haddock\"] (:ghc-flags p))))
+        \"\t\" (apply str (interpose \" \" (map #(if (vector? %) (second %) %) (get p what))))))))" |
+    sed "s|\\\$libdir|$libdir|g"
+}
+
+corpus_fetch() {
+  local c=${1:-ghc-9.14.1} f url sha size name dir tb
+  f=$(corpus_file "$c")
+  read -r url sha size name < <(arbace_tool -e "(let [t (:tarball (read-string (slurp \"$f\")))] (println (:url t) (:sha256 t) (:size t) (:root t)))")
+  dir=$rh/corpus
+  tb=$dir/$(basename "$url")
+  mkdir -p "$dir"
+  (
+    flock 8
+    if [ ! -f "$tb" ]; then
+      echo "== repr-haskell: fetching $url" >&2
+      curl -fsSL -o "$tb.part" "$url" && mv "$tb.part" "$tb"
+    fi
+    if [ "$(sha256sum < "$tb" | cut -c1-64)" != "$sha" ]; then
+      echo "repr-haskell: $tb: SHA-256 differs from the corpus's $sha" >&2
+      exit 1
+    fi
+    local dirs
+    dirs=$(corpus_plan "$c" modules | cut -f2 | sed "s|^|$name/|" | tr '\n' ' ')
+    # what the interface level needs of the tarball besides the packages (genprimopcode)
+    dirs="$dirs $(iface_conf "$c" :extract | tr ' ' '\n' | sed "s|^|$name/|" | tr '\n' ' ')"
+    if [ "$(cat "$dir/$name.extracted" 2>/dev/null)" != "$sha $dirs" ]; then
+      rm -rf "${dir:?}/$name"
+      # shellcheck disable=SC2086
+      tar -xJf "$tb" -C "$dir" $dirs
+      echo "$sha $dirs" > "$dir/$name.extracted"
+    fi
+  ) 8> "$dir/fetch.lock"
+  srcroot=$dir/$name
+}
+
+# dump_corpus CORPUS OUT: every module of the corpus dumped into OUT/PKG/FILE.edn (a module the
+# helper fails on is written as (hsdump/error ...), which the conversion reports)
+dump_corpus() {
+  local c=$1 out=$2 name dir flags files hh
+  rm -rf "$out"
+  mkdir -p "$out"
+  hh=sha256:$(helper_hash)
+  while IFS=$'\t' read -r name dir flags files; do
+    [ -n "$files" ] || continue
+    # shellcheck disable=SC2086
+    (cd "$srcroot/$dir" && printf '%s\n' $files | xargs -P "$jobs" -n 8 \
+      "$helper" dump -o "$out/$name" --libdir "$libdir" --corpus "$c" --helper-hash "$hh" \
+        --ghc $flags --files) 2> "$out/$name.err" || true
+  done < <(corpus_plan "$c" modules)
+}
+
+read_files() {
+  arbace_tool -m arbace.repr.haskell read "$@"
+}
+
+# iface_plan CORPUS: one line per package, tab-separated: name, directory, the GHC flags of the
+# parse (as corpus_plan's), the module names ghc --make builds (the converted, the .hsc, the
+# generated), the converted modules as NAME=FILE, the .hsc files, hsc2hs's flags, the generated
+# files as FILE=FLAG (genprimopcode's); $libdir expanded
+iface_plan() {
+  local f
+  f=$(corpus_file "$1")
+  arbace_tool -e "(let [c (read-string (slurp \"$f\")) j (fn [xs] (apply str (interpose \" \" xs)))]
+    (doseq [p (:packages c)]
+      (println (str (:name p) \"\t\" (:dir p) \"\t\"
+        (j (concat [(str \"-X\" (:language p))] (map #(str \"-X\" %) (:extensions p)) [\"-haddock\"] (:ghc-flags p)
+             (distinct (for [[m f] (:modules p)] (let [n (- (count f) (count (str m)) 3)] (if (pos? n) (str \"-i\" (subs f 0 (dec n))) \"-i.\"))))))
+        \"\t\" (j (concat (map first (:modules p)) (map first (:hsc p)) (:generated p)))
+        \"\t\" (j (map (fn [[m f]] (str m \"=\" f)) (:modules p)))
+        \"\t\" (j (map second (:hsc p)))
+        \"\t\" (j (:hsc-flags p))
+        \"\t\" (j (map (fn [[f g]] (str f \"=\" g)) (:genprimopcode p)))))))" |
+    sed "s|\\\$libdir|$libdir|g"
+}
+
+# iface_conf CORPUS KEY...: a value of the corpus's :iface, space-separated when a vector
+iface_conf() {
+  local f
+  f=$(corpus_file "$1"); shift
+  arbace_tool -e "(let [v (get-in (:iface (read-string (slurp \"$f\"))) [$*])] (println (cond (nil? v) \"\" (sequential? v) (apply str (interpose \" \" v)) :else v)))"
+}
+
+# genprimopcode_build CORPUS: GHC's genprimopcode (the tarball's utils/genprimopcode, with its
+# generated Lexer.hs and Parser.hs) built by the host's GHC into .tmp/repr-haskell/tools/, and
+# primops.txt from primops.txt.pp, as hadrian's rules do; sets genprimopcode and primops
+genprimopcode_build() {
+  local c=$1 d main pkgs pp cpp key tw=$rh/tools/$1
+  d=$(iface_conf "$c" :genprimopcode :dir); main=$(iface_conf "$c" :genprimopcode :main)
+  pkgs=$(iface_conf "$c" :genprimopcode :packages); pp=$(iface_conf "$c" :genprimopcode :primops)
+  cpp=$(iface_conf "$c" :genprimopcode :cpp)
+  genprimopcode=$tw/genprimopcode; primops=$tw/primops.txt
+  key="$(cat "$srcroot/$d"/*.hs "$srcroot/$pp" | sha256sum | cut -c1-64) $pkgs $cpp $(ghc_unit)"
+  if [ -x "$genprimopcode" ] && [ -f "$primops" ] && [ "$(cat "$tw/key" 2>/dev/null)" = "$key" ]; then return; fi
+  echo "== repr-haskell: building genprimopcode ($d)" >&2
+  rm -rf "$tw"; mkdir -p "$tw/obj"
+  # shellcheck disable=SC2046
+  ghc -O0 $(for p in $pkgs; do echo -package "$p"; done) -outputdir "$tw/obj" -o "$genprimopcode" \
+    -i"$srcroot/$d" "$srcroot/$d/$main" > "$tw/build.log" 2>&1 || { cat "$tw/build.log" >&2; return 1; }
+  # shellcheck disable=SC2086
+  $cpp "$srcroot/$pp" -o "$primops"
+  rm -rf "$tw/obj"
+  echo "$key" > "$tw/key"
+}
+
+# iface_level CORPUS CAND: the round trip's interface level (SPEC §9.1, §9.3) over the modules
+# printed into CAND/PKG/: each package's source tree copied twice under .tmp/repr-haskell/iface/
+# CORPUS/{orig,cand}/PKG (the .hsc modules through hsc2hs, the generated ones by genprimopcode,
+# the same on both sides; the converted ones replaced by the printed in cand), each compiled by
+# ghc --make from inside its tree (the same relative paths: the spans name the same files), the
+# interfaces of the converted modules shown (ghc --show-iface) into {orig,cand}.ifaces/PKG/M.iface,
+# the objects removed, and the two compared (arbace.repr.haskell compare-iface)
+iface_level() {
+  local c=$1 cand=$2 ib=$rh/iface/$1 opt t0 t1 t2 name dir flags mods files hscs hflags gens
+  ghc_check
+  genprimopcode_build "$c"
+  opt=$(iface_conf "$c" :opt)
+  rm -rf "$ib"; mkdir -p "$ib/orig" "$ib/cand"
+  t0=$(date +%s)
+  while IFS=$'\t' read -r name dir flags mods files hscs hflags gens; do
+    local o=$ib/orig/$name k=$ib/cand/$name h g mf
+    mkdir -p "$o"
+    (cd "$srcroot/$dir" && tar --exclude=./tests -cf - .) | tar -xf - -C "$o"
+    for h in $hscs; do
+      # shellcheck disable=SC2086
+      (cd "$o" && hsc2hs $hflags "$h" -o "${h%.hsc}.hs") > "$o.hsc2hs.log" 2>&1 ||
+        { cat "$o.hsc2hs.log" >&2; echo "repr-haskell: hsc2hs failed on $name/$h" >&2; return 1; }
+    done
+    for g in $gens; do "$genprimopcode" "${g#*=}" < "$primops" > "$o/${g%%=*}"; done
+    cp -a "$o" "$k"
+    for mf in $files; do
+      mf=${mf#*=}
+      if [ -f "$cand/$name/$mf" ]; then cp "$cand/$name/$mf" "$k/$mf"; else rm -f "$k/$mf"; fi
+    done
+  done < <(iface_plan "$c")
+  t1=$(date +%s)
+  echo "== repr-haskell roundtrip $c: interfaces: compile ($opt; $((t1 - t0)) s preparing)" >&2
+  # the two sides of each package concurrently, the packages in the corpus's order
+  while IFS=$'\t' read -r name dir flags mods files hscs hflags gens; do
+    local side
+    for side in orig cand; do
+      # shellcheck disable=SC2086
+      (cd "$ib/$side/$name" && ghc --make $flags $opt -j"$jobs" -fkeep-going -no-link \
+        -outputdir "../$name.out" $mods) > "$ib/$side/$name.build.log" 2>&1 &
+    done
+    wait || true
+  done < <(iface_plan "$c")
+  t2=$(date +%s)
+  echo "== repr-haskell roundtrip $c: interfaces: show and compare ($((t2 - t1)) s compiling)" >&2
+  while IFS=$'\t' read -r name dir flags mods files hscs hflags gens; do
+    local side
+    for side in orig cand; do
+      # one ghc --show-iface per converted module; a missing .hi leaves no .iface (reported)
+      printf '%s\n' $files | sed 's/=.*//' | xargs -P "$jobs" -I{} sh -c \
+        'm={}; hi=$1/$(echo "$m" | tr . /).hi; out=$2/$m.iface; mkdir -p "$2"
+         [ -f "$hi" ] && ghc --show-iface "$hi" > "$out.part" 2>&1 && mv "$out.part" "$out"; rm -f "$out.part"; :' \
+        _ "$ib/$side/$name.out" "$ib/$side.ifaces/$name"
+      rm -rf "$ib/$side/$name.out" "$ib/$side/$name"
+    done
+  done < <(iface_plan "$c")
+  t3=$(date +%s)
+  arbace_tool -m arbace.repr.haskell compare-iface --corpus "$(corpus_file "$c")" --orig "$ib/orig.ifaces" \
+    --cand "$ib/cand.ifaces" --printed "$cand" --builds "$ib" --prune \
+    --known "$root/test/haskell/roundtrip-$c-iface-known.edn" --report "$ib.report.edn" \
+    --times "prepare $((t1 - t0)) compile $((t2 - t1)) show $((t3 - t2))"
+}
+
+roundtrip() {
+  local c=ghc-9.14.1 only="" iface="" tree=1 st=0
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --only) only=$2; shift 2 ;;
+      --iface) iface=1; shift ;;
+      --iface-only) iface=1; tree=""; shift ;;
+      *) c=$1; shift ;;
+    esac
+  done
+  build
+  corpus_fetch "$c"
+  local cand=$rh/cand/$c
+  if [ -n "$tree" ]; then tree_level "$c" "$only" || st=1; fi
+  if [ -n "$iface" ]; then
+    [ -z "$only" ] || { echo "repr-haskell: --only is for the tree level" >&2; return 2; }
+    [ -d "$cand" ] || { echo "repr-haskell: no printed modules in $cand (run the tree level first)" >&2; return 1; }
+    iface_level "$c" "$cand" || st=1
+  fi
+  return $st
+}
+
+# tree_level CORPUS ONLY: the tree level (SPEC §9.2): dump, convert, print into .tmp/repr-haskell/
+# cand/CORPUS/PKG/, the helper's trees and lines of both sides compared
+tree_level() {
+  local c=$1 only=$2
+  local dumps=$rh/dumps/$c forms=$rh/forms/$c cand=$rh/cand/$c orig=$rh/orig/$c t0 t1 t2 t3 t4
+  t0=$(date +%s)
+  echo "== repr-haskell roundtrip $c: dump" >&2
+  dump_corpus "$c" "$dumps"
+  t1=$(date +%s)
+  echo "== repr-haskell roundtrip $c: convert ($((t1 - t0)) s dumping)" >&2
+  rm -rf "$forms"; mkdir -p "$(dirname "$forms")"
+  read_files --jobs "$jobs" -o "$forms" --report "$forms.report.edn" --root "$dumps" ${only:+--only "$only"} > "$forms.log" 2>&1 ||
+    { tail -20 "$forms.log" >&2; echo "repr-haskell: the conversion failed ($forms.log)" >&2; return 1; }
+  t2=$(date +%s)
+  echo "== repr-haskell roundtrip $c: print ($((t2 - t1)) s converting)" >&2
+  rm -rf "$cand"; mkdir -p "$(dirname "$cand")"
+  # a module the printer fails on is reported by the comparison (not printed)
+  arbace_tool -m arbace.repr.haskell print --jobs "$jobs" -o "$cand" --root "$forms" > "$cand.print.log" 2>&1 ||
+    grep -v '^error' "$cand.print.log" | tail -3 >&2
+  t3=$(date +%s)
+  echo "== repr-haskell roundtrip $c: trees ($((t3 - t2)) s printing)" >&2
+  # the trees: of the originals (in the corpus's tree) and of the printed modules (in the
+  # candidate's), each parsed by the helper under its package's configuration
+  rm -rf "$orig"
+  mkdir -p "$orig"
+  local name dir flags files
+  while IFS=$'\t' read -r name dir flags files; do
+    [ -n "$files" ] || continue
+    # shellcheck disable=SC2086
+    (cd "$srcroot/$dir" && printf '%s\n' $files | xargs -P "$jobs" -n 8 \
+      "$helper" tree -o "$orig/$name" --libdir "$libdir" --ghc $flags --files) 2> "$orig/$name.err" || true
+    if [ -d "$cand/$name" ]; then
+      # the printed modules under the original's relative paths, so that spans name the same files
+      # shellcheck disable=SC2086
+      (cd "$cand/$name" && printf '%s\n' $files | while read -r f; do [ -f "$f" ] && echo "$f"; done |
+        xargs -r -P "$jobs" -n 8 "$helper" tree -o "$cand/$name.trees" --libdir "$libdir" --ghc $flags --files) \
+        2> "$cand/$name.trees.err" || true
+    fi
+  done < <(corpus_plan "$c" modules)
+  t4=$(date +%s)
+  echo "== repr-haskell roundtrip $c: compare ($((t4 - t3)) s parsing)" >&2
+  arbace_tool -m arbace.repr.haskell compare --corpus "$(corpus_file "$c")" --orig "$orig" --cand "$cand" \
+    --forms-report "$forms.report.edn" --known "$root/test/haskell/roundtrip-$c-known.edn" \
+    --report "$cand.report.edn" ${only:+--only "$only"} \
+    --times "dump $((t1 - t0)) convert $((t2 - t1)) print $((t3 - t2)) parse $((t4 - t3))"
+}
+
+cmd=${1:-}
+[ $# -gt 0 ] && shift
+case $cmd in
+  helper) build ;;
+  corpus)
+    sub=${1:-list}; [ $# -gt 0 ] && shift
+    case $sub in
+      fetch) ghc_check; corpus_fetch "$@"; echo "$srcroot" ;;
+      list) ghc_check
+            for w in modules hsc boot; do
+              corpus_plan "${1:-ghc-9.14.1}" $w | while IFS=$'\t' read -r n _ _ fs; do
+                for f in $fs; do echo "$w $n $f"; done
+              done
+            done ;;
+      *) echo "usage: bin/repr-haskell corpus fetch|list [CORPUS]" >&2; exit 2 ;;
+    esac ;;
+  dump)
+    ghc_check; build
+    if [ "${1:-}" = --corpus ]; then
+      c=${2:-ghc-9.14.1}; corpus_fetch "$c"; dump_corpus "$c" "$rh/dumps/$c"
+      cat "$rh/dumps/$c"/*.err >&2; exit 0
+    fi
+    out=$work/out; full=""; files=(); gflags=()
+    while [ $# -gt 0 ]; do
+      case $1 in
+        -o) out=$2; shift 2 ;;
+        --full) full=--full; shift ;;
+        --ghc) shift; gflags=("$@"); break ;;
+        *) files+=("$1"); shift ;;
+      esac
+    done
+    hsdump dump $full -o "$out" --ghc "${gflags[@]}" --files "${files[@]}" ;;
+  read)
+    if [ "${1:-}" = --corpus ]; then
+      shift; c=${1:-ghc-9.14.1}
+      ghc_check; build; corpus_fetch "$c"
+      dump_corpus "$c" "$rh/dumps/$c"
+      out=$rh/forms/$c
+      rm -rf "$out"
+      read_files --jobs "$jobs" -o "$out" --report "$out.report.edn" --root "$rh/dumps/$c"
+    else
+      read_files --jobs "$jobs" "$@"
+    fi ;;
+  print) arbace_tool -m arbace.repr.haskell print --jobs "$jobs" "$@" ;;
+  roundtrip) ghc_check; roundtrip "$@" ;;
+  test) exec "$root/bin/lib/repr-haskell/test" "$@" ;;
+  *) sed -n '2,/^set -euo/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'; exit 2 ;;
+esac

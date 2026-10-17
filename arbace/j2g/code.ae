@@ -245,6 +245,11 @@
        (not (and (= :method-ref (:op node)) (= :bound (:kind node))))
        (not (guarded-static? node))))
 
+(defn- compiled-caller?
+  "Is the function being written in a class of a compiled namespace (arbace.c2j's)?"
+  []
+  (boolean (when-let [c (:class *f*)] (nm/compiled-class? c))))
+
 (defn- guarded-static?
   "A static access that runs C_Init() first (from code outside the class and its subclasses)."
   [node]
@@ -253,6 +258,9 @@
           o (or (:declarer f) (:owner f))]
       (and (m/translated? o) (not (m/trivial-init? o))
            (not (and (:class *f*) (env/subclass? (:class *f*) o)))
+           ;; compiled code reads the statics of a class initialized at start unguarded
+           ;; (Futamura F4, arbace.j2g.start)
+           (not (and (compiled-caller?) (m/start-class? o)))
            ;; a fn's code reads its nest's top-level class's statics (its namespace's
            ;; constants): its allocation initialized that class (SA158)
            (not (and (:class *f*) (not (:static *f*)) (= o (m/nest-top (:class *f*)))
@@ -726,10 +734,10 @@
           :class-lit (v (class-val (:class node)) "Ljava/lang/Class;" :nn true)
           :get-static (let [f (:field node)
                             place (static-place f)]
-                        ;; a compiled namespace's constant (:aot/nn) is never null once its class
+                        ;; a compiled namespace's constant (:c2j/nn) is never null once its class
                         ;; is initialized (SA158)
                         (v (if (volatile-field? f) (volatile-read place (:desc f)) place) (:desc f)
-                           :nn (boolean (or (:aot/nn (:meta f)) (:aot/nn (:meta (:member f)))))))
+                           :nn (boolean (or (:c2j/nn (:meta f)) (:c2j/nn (:meta (:member f)))))))
           :get-field (let [f (:field node)
                            [tv] (target-operands [(:target node)] [nil])
                            place (field-place tv f)]
@@ -1096,8 +1104,12 @@
 
       (= kind :static)
       (let [[_ args] (args-for desc (:args node))]
-        (rv (apply list (if (= mowner "java/lang/Object") (fail "static Object method")
-                            (m/class-sym (pkg) mowner (str "_" base)))
+        (rv (apply list (cond (= mowner "java/lang/Object") (fail "static Object method")
+                              ;; compiled code calls a class initialized at start through the
+                              ;; method's guard-free entry (Futamura F4, decls/method-forms)
+                              (and (compiled-caller?) (m/start-class? mowner))
+                              (m/class-sym (pkg) mowner (str "_" base "_NoInit"))
+                              :else (m/class-sym (pkg) mowner (str "_" base)))
                    (map :x args))))
 
       (= kind :special)
@@ -1580,7 +1592,7 @@
                           _ (when (guarded-static? node) (emit! (class-init-call o)))
                           place (static-place f)
                           x (if (volatile-field? f) (volatile-read place (:desc f)) place)]
-                      (assign-value! (coerce x (:desc f) (ctx-desc ctx) (boolean (or (:aot/nn (:meta f)) (:aot/nn (:meta (:member f)))))) ctx))
+                      (assign-value! (coerce x (:desc f) (ctx-desc ctx) (boolean (or (:c2j/nn (:meta f)) (:c2j/nn (:meta (:member f)))))) ctx))
         :aset (let [et (t/elem-type (vt (:array node)))
                     [a i val] (operands [(:array node) (:index node) (:val node)] [nil "I" et])
                     val (hoist-value val)]

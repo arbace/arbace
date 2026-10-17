@@ -94,15 +94,27 @@ The current state of the work. This file is rewritten as things change. For the 
 
 ## Next
 
+- The direction (the user, 2026-10-17): Go forms first-class at the REPL, interpreted like
+  Arbace and Java forms; the three dialects at the same level there "when it is appropriate";
+  Haskell forms stay data. The survey written (doc/GO-FORMS-REPL-SURVEY.md): recommended
+  Arbace's own interpreter of Go forms (a type checker in Arbace, typed closures, a table of the
+  program's compiled packages), milestones GR0-GR6, 22-33 days; proposals G1-G17 open; the build
+  after F3, F4 and the renames. G1-G17 decided as recommended (2026-10-17); GR0 done (doc/go/GOI-SPEC.md,
+  GS1-GS15 decided as recommended); GR1-GR6 after the coming re-seed, 24-34 days.
+
 - Done (2026-10-17): the rename (doc/NAMING-SURVEY.md, "The rename as built"): j2a → `repr/java`
   (`bin/repr-java`), g2a → `repr/go` (`bin/repr-go`), its build → `build/go` (`bin/build-go`),
   a2g → `j2g` (the printed `j2g_*` names, `J2G_*`), `G2A_GOROOT` → `ARBACE_GOROOT`, the old
   variables guarded; "Java forms" in prose; c2a and `arbace.classes.*` unchanged; R1-R5 decided.
   The seed remade (`56fabe20…`) and verified; R4 done (`tamago/` converted again, the guests
   identical). Done: repr/go's directory tests (`bin/repr-go roundtrip --dirs [--text]`, 251 to 254
-  tests per configuration, every level; D1-D3 decided, in `bin/gate --full`). Running: F2.
-- `repr/haskell`'s spec written (doc/haskell/SPEC.md; S1-S36; HS1-HS12 decided as recommended):
-  its build after F2, milestones R1-R6 (the tree and text levels over `base` first).
+  tests per configuration, every level; D1-D3 decided, in `bin/gate --full`). Done: F2 (`bin/diffcheck`, 12,449 of 12,471 cases agree; F2.1-F2.6 decided).
+- `repr/haskell`'s spec written (doc/haskell/SPEC.md; S1-S36; HS1-HS12 decided as recommended).
+  R1 done (2026-10-17: the tree and lines levels over GHC 9.14.1's base libraries, 483 of 483
+  modules; HR1-HR5); R2 done (the interface level, 483 of 483; HR6-HR8); next R3-R6 (`:full` and the text
+  level, the layout printer, the other boot libraries, .hsc/.lhs/boot files). Running:
+  `repr/java print` (Java forms → Java,
+  with a round trip; branch `repr-java-print`).
 - After the rename (the user, 2026-10-17: "Create jaf print after the naming debate settled"):
   `repr/java print`, Java's bridge printing back, class forms → Java source, with a round trip like
   repr/go's (Java → forms → Java → forms, the two forms equal; the text level as repr/go's
@@ -135,21 +147,11 @@ The current state of the work. This file is rewritten as things change. For the 
   projection, j2g derived from the interpreter, one definition of each language's semantics
   (Clojure, the class forms, later Go). The cost: binding times in a dynamic language (vars,
   `eval`, macros at load time).
-- A kernel and a user part in the box (the user, 2026-10-14): the infrastructure (the
-  collector, the scheduler, the compiler, I/O, the store) at EL1/ring 0 and the application
-  level at EL0/ring 3, inside one guest. Today the guest is one TamaGo program at EL1/ring 0, one
-  address space, one Go runtime for both. To survey: what crosses the boundary (a call ABI like
-  the doorbell's, one level down); one heap the kernel's collector scans across the privilege
-  levels, or a heap per user part; the scheduler's goroutines running user code at EL0 (the
-  page tables and exception vectors TamaGo's board sets up); the cost of the crossings for a
-  REPL's fine-grained calls; against the isolation S7 already has (a guest per tool, spawned) and
-  isolation in the language (namespaces, capabilities). A guest per tool needs a hypervisor
-  under Arbace: on bare metal (the box's long-term target, TamaGo's boards) there is none unless
-  Arbace is it (EL2 on arm64, VMX root on amd64: go-whim's monitor inside Arbace, where the
-  hardware boots it at EL2 or gives VT-x), so the EL1/EL0 split is the isolation that works on
-  any hardware, the guests only where virtualization is there. Prior art: Go's runtime as a user
-  process; GoTEE (github.com/usbarmory/GoTEE: TamaGo unikernels and user-mode applets, TrustZone
-  on arm), to check; unikernels with a privilege split.
+- A kernel and a user part in the box: the survey written (doc/go/KERNEL-USER-SURVEY.md,
+  2026-10-17): recommended a TamaGo runtime per process at EL0 (the same image, a page table per
+  process), language isolation inside processes, S7's guests where virtualization exists, one
+  spawn request; SYSCALL round trip 24.5 ns measured at ring 3; plan KU0-KU6, 17-27 days;
+  K1-K12 decided as recommended; running: KU0, the spec.
 - The mapped start measured without nested KVM.
 - A note from the user (2026-10-13): the tooling of the Mac GUI app Moshi Go may be useful for
   Arbace, to study when Arbace's REPL gets a user interface beyond the terminal. Its build info
