@@ -149,7 +149,7 @@ and the differences with their reasons, `CORPUS-known.edn`.
 | corpus | files | forms | ae | classes (Java files) | time |
 |---|---:|---:|---:|---:|---:|
 | baseline | 189 | 189 | 182 | 143 of 183 | 61 s |
-| samples | 17 | 17 | 17 | 11 of 14 | 42 s |
+| samples | 17 | 17 | 17 | 12 of 14 (11 before JP3) | 42 s |
 | jdk | 911 | 874 | 816 | 473 of 838 | 162 s |
 
 Times on 64 cores, the three runs one after the other; the JDK's originals are made once more
@@ -173,7 +173,7 @@ Every difference is listed with its reason in `CORPUS-known.edn`. By kind:
   so the printer cannot tell that the literal is a long.
 - **An integer's radix** (baseline 7, jdk 57 at the `ae` level; the forms are equal): the file
   writes the value in two radixes (`0x01` and `1`).
-- **The class files** (baseline 40, samples 3, jdk 326 Java files): the forms do not record the
+- **The class files** (baseline 40, samples 2, jdk 326 Java files): the forms do not record the
   source's choice of
   - a value's control flow (323 of them): `return c ? a : b` or `return switch (...)` in the
     original where the printer writes an `if` returning or a statement `switch`, or the other
@@ -184,8 +184,9 @@ Every difference is listed with its reason in `CORPUS-known.edn`. By kind:
   - a `switch` with fall-through (8): the converter repeats the following arms' code (SPEC §12,
     question 9), which the printer writes as separate arms,
   - an increment's place (4): `i++` inside an expression or as its own statement,
-  - the order of code or of the constant pool (13), a type annotation on an array creation's
-    dimension the converter does not keep (`new @A String @B [3]`, samples' `TypeAnns`).
+  - the order of code or of the constant pool (13). (Until JP3, below, also a type annotation on
+    an array creation's dimension the converter did not keep, `new @A String @B [3]`, samples'
+    `TypeAnns`.)
 
 ### The text level
 
@@ -198,7 +199,8 @@ declaration and statement, javac's source positions with the comments and tokens
 and a printer that lays a form out from its record when the form is the one recorded (and
 prints it anew otherwise). Since the converter's restructurings are not one-to-one with the
 text, the record would in effect be the original text per member: byte-identical, but by
-copying, not by printing. Not built (proposal JP2).
+copying, not by printing. Not built (JP2): the open end of repr/java, a `:full` mode of `read`
+later.
 
 ## Proposals
 
@@ -222,3 +224,23 @@ copying, not by printing. Not built (proposal JP2).
   of calls), which javac needs for the 39 rejected JDK files: (a) known differences (as built);
   (b) the converter records them as metadata (`^{:java-type (Comparator T)}` on a `cast` form, as
   `:type-args` already does for annotated ones). *Recommendation:* (a), with (b) under JP2's (b).
+
+### Decided (2026-10-17, the user)
+
+All as recommended:
+
+- **JP1** the provenance files' converter hash (`jdk/provenance.edn`, and
+  `test/java-fixtures/provenance.edn`, computed alike) covers only the reader's sources, what
+  converts Java into forms: `bin/lib/frozen.bash`'s `repr_java_reader_hash` (`arbace/repr/java.ae`
+  and `convert`, `forms`, `javac`, `jtypes`, `layout`, `names`, `resolve`, and `bin/repr-java`);
+  `bin/jrt-convert update` and `bin/clojure-tests --java-fixtures update` run once (the forms
+  unchanged, the provenance rewritten), their `verify` passing.
+- **JP2** and **JP4** one printer style now; the 39 JDK files javac rejects and the source's
+  choices the forms do not record stay known differences (`CORPUS-known.edn`). The open end: a
+  `:full` mode of `repr/java read` recording comments, spellings, layout and those choices (and
+  Java's type arguments in code), for a Java text level and exact class files, later.
+- **JP3** fixed in `read` (a commit of its own): `new String @B [3]` is
+  `(new ^{B true} (array String) 3)`, the dimensions' annotations from javac's tree
+  (`dimAnnotations`); `test/repr/java/expected` and the samples' references updated (`TypeAnns`'
+  classes now javac's: samples 12 of 14).
+
