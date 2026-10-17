@@ -6,7 +6,8 @@
 > rules `arbace.j2c.rename`, since moved into repr/clojure ([../REPR-CLOJURE.md](../REPR-CLOJURE.md)). This document uses
 > the current names, but where it records the derivation, replayed with the old ones.
 
-The converter of agenda step 3: it turns Java sources into the Java forms of [SPEC.md](SPEC.md),
+The converter of agenda step 3 (repr/java's `read`; its `print`, Java forms back to Java, is
+[PRINTER-NOTES.md](PRINTER-NOTES.md)): it turns Java sources into the Java forms of [SPEC.md](SPEC.md),
 making explicit what §7 lists. These notes say how it is built and used, what it was checked on,
 how its output compares with the spec's worked examples (§11), and where converting showed that
 the spec should change (amendments, accepted and folded into SPEC.md). The compiler side is in
@@ -21,7 +22,7 @@ the spec should change (amendments, accepted and folded into SPEC.md). The compi
 | `arbace/repr/java/forms.ae` | `arbace.repr.java.forms` | output data: forms, class references named later (`CRef`), raw tokens, ordered metadata |
 | `arbace/repr/java/convert.ae` | `arbace.repr.java.convert` | the conversion of attributed trees: declarations, code, control flow, patterns, switches, lambdas |
 | `arbace/repr/java/names.ae` | `arbace.repr.java.names` | one namespace per package: which class gets which simple name, imports, file layout |
-| `arbace/repr/java/print.ae` | `arbace.repr.java.print` | printing with metadata and a Clojure-style layout |
+| `arbace/repr/java/layout.ae` | `arbace.repr.java.layout` | writing the forms as `.ae` text, with metadata and a Clojure-style layout (until 2026-10-17 `print.ae`, `arbace.repr.java.print`: renamed by R1, doc/NAMING-SURVEY.md, for the printer) |
 | `arbace/repr/java.ae` | `arbace.repr.java` | command line: `convert`, `jdk` |
 | `arbace/repr/java/coverage.ae` | `arbace.repr.java.coverage` | coverage summary from run reports |
 | `arbace/repr/java/resolve.ae` | `arbace.repr.java.resolve` | asks the Java forms compiler's overload resolution where pins are needed, over class infos made from javac's symbols |

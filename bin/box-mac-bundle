@@ -22,10 +22,21 @@
 #                                                   host's tools (bin/box-rebuild --arch arm64 host:
 #                                                   the ref rebuilt.host.arm64 of its store)
 #
-#   bin/box-mac-bundle            build the arm64 guest when missing, the launcher and hv.test,
-#                                 and the tarball; the rebuild's expected image from
+#   bin/box-mac-bundle            build the arm64 guest when missing or stale, the launcher and
+#                                 hv.test, and the tarball; the rebuild's expected image from
 #                                 MAC_REBUILD_DIR (default .tmp/box-rebuild/arm64: bin/box-rebuild
 #                                 --arch arm64 [--dir DIR] prepare host first, for the commit HEAD)
+#
+# Everything bundled is HEAD's (bin/lib/fresh.bash): the arm64 guest, when it does not carry the
+# version of HEAD (clean unless the checkout is dirty) or was not linked from the program of the
+# last bin/arbace-go --build (its image.key), is built again, as bin/arbace-go --build --box
+# builds the guests: from that program, so the native executable that build made
+# (target/arbace-go/<host arch>/arbace) must be HEAD's, else the bundle stops (bin/arbace-go
+# --build: minutes, left to the user, as the expected image is); the store tool (the host's
+# launcher) must be HEAD's; the expected image must come from bin/box-rebuild's host step on
+# HEAD's executables (MAC_REBUILD_DIR/host.verified). A stale file stops the bundle with the
+# command that rebuilds it; ARBACE_BOX_STALE_OK=1 (experiments) only warns. The launcher and
+# hv.test are built here, always.
 #
 # On the Mac: tar xzf arbace-box-mac-arm64.tar.gz && cd arbace-box-mac-arm64 && ./mac.sh all;
 # then send back mac-results.tar.gz (README.txt).
@@ -39,10 +50,34 @@ name=arbace-box-mac-arm64
 b=$dir/$name
 . "$root/bin/lib/version.bash"
 v=$(arbace_version "$root")
+. "$root/bin/lib/fresh.bash"
+head=$(git -C "$root" rev-parse HEAD)
+harch=$(case $(uname -m) in aarch64) echo arm64 ;; *) echo amd64 ;; esac)
+elf=$dir/box-arm64/arbace.elf
+gcmd="ARBACE_BOX_ARCHES=arm64 bin/arbace-go --build --box"
 
-if [ ! -s "$dir/box-arm64/arbace.elf" ]; then
-  echo "== the arm64 guest (ARBACE_BOX_ARCHES=arm64 bin/arbace-go --build --box)" >&2
-  (cd "$root" && ARBACE_BOX_ARCHES=arm64 bin/arbace-go --build --box) >&2
+# the guest: HEAD's, else built again (from the last --build's program: HEAD's native executable)
+if ! (ARBACE_BOX_STALE_OK= arbace_fresh box-mac-bundle "$elf" "$head" "$gcmd" \
+      && ARBACE_BOX_STALE_OK= arbace_guest_key_fresh box-mac-bundle "$elf" "$gcmd") 2>/dev/null; then
+  if [ "${ARBACE_BOX_STALE_OK:-}" = 1 ] && [ -s "$elf" ]; then
+    arbace_fresh box-mac-bundle "$elf" "$head" "$gcmd"; arbace_guest_key_fresh box-mac-bundle "$elf" "$gcmd"
+  else
+    arbace_fresh box-mac-bundle "$dir/$harch/arbace" "$head" "bin/arbace-go --build, then bin/box-mac-bundle again"
+    echo "== the arm64 guest, missing or stale ($gcmd)" >&2
+    (cd "$root" && ARBACE_BOX_ARCHES=arm64 bin/arbace-go --build --box) >&2
+    arbace_fresh box-mac-bundle "$elf" "$head" "$gcmd"
+    arbace_guest_key_fresh box-mac-bundle "$elf" "$gcmd"
+  fi
+fi
+# the store tool (the rebuild's store, the tool guests' refs)
+l=$dir/box-$harch/arbace-box
+arbace_fresh box-mac-bundle "$l" "$head" "ARBACE_BOX_ARCHES=$harch bin/arbace-go --build --box"
+# the expected image: bin/box-rebuild's host step, on HEAD's executables
+rd=${MAC_REBUILD_DIR:-$root/.tmp/box-rebuild/arm64}
+if [ "$(cat "$rd/host.verified" 2>/dev/null)" != "$head" ]; then
+  arbace_stale box-mac-bundle "$rd/host" \
+    "its expected image not made by bin/box-rebuild's host step on HEAD's executables ($rd/host.verified: $(cat "$rd/host.verified" 2>/dev/null || echo none))" \
+    "bin/box-rebuild --arch arm64${MAC_REBUILD_DIR:+ --dir $rd} prepare host"
 fi
 rm -rf "$b" "$dir/$name.tar.gz"
 mkdir -p "$b"
@@ -58,13 +93,11 @@ echo "== hv's tests for darwin/arm64" >&2
   >> "$dir/build-box-mac.log" 2>&1 || { tail -20 "$dir/build-box-mac.log" >&2; exit 1; }
 cp "$dir/box-arm64/arbace.elf" "$b/arbace-box.elf"
 echo "== the rebuild's store (S8) and the expected image" >&2
-l=$dir/box-amd64/arbace-box
-hs=${MAC_REBUILD_DIR:-$root/.tmp/box-rebuild/arm64}/host
-[ -x "$l" ] || { echo "box-mac-bundle: no $l (bin/arbace-go --build --box)" >&2; exit 1; }
+hs=$rd/host
 want=$(ARBACE_BOX_STORE_MAX=off "$l" --store "$hs" ref rebuilt.host.arm64 2>/dev/null) \
   || { echo "box-mac-bundle: no rebuilt.host.arm64 in $hs (bin/box-rebuild --arch arm64 prepare host)" >&2; exit 1; }
 [ "$(ARBACE_BOX_STORE_MAX=off "$l" --store "$hs" tree ls src | sha256sum)" = \
-  "$(git -C "$root" archive --format=tar HEAD VERSION arbace box go jdk overlay tamago x509roots | ARBACE_BOX_STORE_MAX=off "$l" --store "$b/rebuild/store" tree tar - src > /dev/null && ARBACE_BOX_STORE_MAX=off "$l" --store "$b/rebuild/store" tree ls src | sha256sum)" ] \
+  "$(git -C "$root" archive --format=tar HEAD VERSION arbace box go jdk overlay tamago/goroot tamago/goos x509roots | ARBACE_BOX_STORE_MAX=off "$l" --store "$b/rebuild/store" tree tar - src > /dev/null && ARBACE_BOX_STORE_MAX=off "$l" --store "$b/rebuild/store" tree ls src | sha256sum)" ] \
   || { echo "box-mac-bundle: $hs's sources are not HEAD's (bin/box-rebuild --arch arm64 prepare host)" >&2; exit 1; }
 ARBACE_BOX_LAUNCHER=$l "$root/bin/box-tools" put "$b/rebuild/store" arm64 > /dev/null
 echo "$want" > "$b/rebuild/expected.txt"

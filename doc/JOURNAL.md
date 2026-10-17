@@ -804,3 +804,190 @@ GS1-GS15, open.
 ## 2026-10-17: goi's GS1-GS15 decided (the user)
 
 All as recommended (doc/go/GOI-SPEC.md, "Decided"). GR1-GR6 after the coming re-seed.
+
+## 2026-10-17: the j2g batch merged (F4, F2's j2g and interpreter fixes)
+
+On the branch `j2g-batch` (`951c8eb`), merged into main; details in doc/FUTAMURA-SURVEY.md, "F4
+and F2's j2g fixes as built". F4 (a): `arbace/j2g/start.ae` lists the 82 runtime classes the
+program initializes before any user code (derived by `test/j2g/start_classes.ae` from
+`ARBACE_TRACE_INIT`'s trace of three runs); each static method of a listed class becomes a
+guard-free `C_m_NoInit` called only by compiled code (1,724 methods, 43,830 call sites), after
+`jrt.StartCheck` (status 70 when a listed class is not started). Benchmarks (eval-bench as a
+namespace): geometric mean 0.87; loop-long 12.20 → 4.37 ms, loop-double 1.55 → 0.53; fib 6.30 →
+6.68 (gc now inlines `Numbers`' boxed generic operations; F3 replaces them). F2.2 (anonymous
+classes with constructor arguments: `analyze-anon` built the constructor before the superclass's
+was chosen), F2.3 (`AbstractMethodError`), F2.4 (Clojure constants made at class
+initialization), F2.5 (the interpreter's lambdas get default methods), F2.6's collision (c2j's
+classes outside `arbace/` named `A_..._A`), abstract classes' constructors in the member tables
+(`InstantiationError`, reflection as the JVM's). diffcheck: 12,463 of 12,471 agree (known 22 →
+8, excluded 5 → 1, Java forms classes excluded 19 → 16); the essential gate passed; the fixpoint
+G1 = G2 = G3 on the branch. Decided by the user: F4.1 (a) the 82, F4.2 (a) re-measured with F3,
+F4.3 (a) a deviation recorded in J2G-SPEC §6.2. The agent once used `pgrep -f` by pattern,
+read-only, while waiting on a build (against the session's rule; nothing was signalled).
+
+## 2026-10-17: the survey of a kernel and a user part in the box
+
+At the user's choice: doc/go/KERNEL-USER-SURVEY.md (from the branch `kernel-user-survey`,
+`91598b3`). Findings: today the guest cannot run below ring 0/EL1 (amd64: DPL 0 segments only,
+no U/S bit, no SYSCALL setup, every IDT gate ends the guest; arm64: every page EL1-only and UXN,
+TTBR1 off; TamaGo has no signals or asynchronous preemption). An experiment (a scratch TamaGo
+guest on the box's board, the monitor unchanged) dropped to ring 3 on nested KVM: SYSCALL and
+SYSRETQ 24.5 ns, INT 0x80 and IRETQ 102 ns, a CR3 switch 96-136 ns, against the doorbell's
+13-18 µs and a spawned tool guest's 84-170 ms; Go ran unchanged at ring 3 with every page
+user-accessible, until a GC assist ran the collector at ring 3 and failed to unwind at the
+crossing. One shared heap cannot give isolation (every allocation a system call, or a collector
+trusting user pointers, which is only safe for memory-safe user code, and then the hardware adds
+nothing). Prior art: GoTEE (`813dc65a`, read only) runs a whole second TamaGo runtime in ARM user
+mode, values crossing as JSON-RPC; TamaGo's `user/linux` runs a `GOOS=tamago` program as a Linux
+process with about five system calls. Recommended: a TamaGo runtime per process at EL0 (the same
+image, a page table per process, the text shared: about 3.5 MB plus heap and stacks), language
+isolation inside processes, S7's guests where virtualization exists, behind one spawn request;
+the system calls the doorbell's call block by SYSCALL/SVC; the compilers and the REPL outside
+the kernel. Plan KU0-KU6, 17 to 27 days, no patch to Go's runtime. Proposals K1-K12, open.
+
+## 2026-10-17: repr/haskell R2 merged; the box's kernel/user split decided
+
+R2 (branch `repr-haskell-r2`, `530969d`): the interface level, each package built at `-O1` from
+the originals and from the printed modules in place, `ghc --show-iface` compared token by token:
+483 of 483 modules equal (1,072,106 lines), after the normalizations HR6 adopted into SPEC §9.3
+(fingerprints blanked, SrcLoc columns through `$WSrcLoc`, CPP's `addDependentFile` dropped, tokens
+not lines); HR7 (`-O1`) and HR8 (one build per side) as recommended; its `--full` step about 3.5
+minutes. The kernel/user survey's K1-K12 decided as recommended (doc/go/KERNEL-USER-SURVEY.md,
+"Decided"); KU0, its spec, started now (the user, against "after goi").
+
+## 2026-10-17: KU0, the processes' spec; the Mac bundle rebuilt
+
+doc/go/PROCESS-SPEC.md (from the branch `ku0-spec`, `39d75da`): a process is a second TamaGo
+runtime at EL0 (one image, a page table per process, text and read-only data shared and
+user-executable, data, bss, heap and stacks private, the kernel EL1-only in every table); the
+system calls the doorbell's 64-byte block by SYSCALL/SVC, its address in RAX/X0; bytes and
+handles across; a process run by a kernel goroutine as one long `Exec` call, so the collector
+scans it in an ordinary frame; no patch to Go's runtime through KU5; one spawn request with
+`:process`, `:guest` and `:auto` back ends. Experiments: the ring-3 crossings measured again
+(SYSCALL and SYSRET 26-31 ns, a CR3 switch 145 ns, the doorbell 18 µs); a two-mode board
+prototype builds one image with a guest entry and a process entry, three LOAD segments (R E, R,
+RW). KU1-KU6 14 to 23 days; decisions S1-S40; proposals KS1-KS12, open.
+
+For the box's checks on the Mac under macOS 26 (the user): `bin/box-mac-bundle` refused since S9,
+comparing the rebuild's sources over all of `tamago/` (which holds `tamago/cmd`) where
+`bin/box-rebuild` archives `tamago/goroot` and `tamago/goos`; fixed (`7019817`). The bundle
+built at `7019817` (55 MB; the rebuild's expected image from `bin/box-rebuild --arch arm64
+prepare host` at that commit). Found on the way: `arbace.j2g.start` (the j2g batch's) is in the
+program's `namespaces.txt` but neither compiled nor embedded, so a prepare without ARBACE_PATH
+(the box's) reports it not prepared; given to the c2j integration.
+
+## 2026-10-17: repr/java print
+
+At the user's request ("Create jaf print after the naming debate settled"), on the branch
+`repr-java-print` (`eaaf817`), merged into main; details in doc/classes/PRINTER-NOTES.md and
+doc/classes/SPEC.md §14. R1 done with it: the `.ae` writer is now `arbace.repr.java.layout`; the
+new `arbace.repr.java.print` (about 3,200 lines, on stage 0, no javac) prints Java forms as Java:
+every declaration kind, lambdas and method references, switch patterns, try-with-resources;
+it undoes the converter's restructurings (loop/recur back to `for` with Java's sequential
+updates, do-while, `x++`, compound assignment) and adds back the casts and literal types javac
+needs from a declarations index (`--index jdk/forms`, the host's classes as a fallback).
+`bin/repr-java print`, `bin/repr-java roundtrip` (in `bin/gate --full`, about 5 minutes):
+
+| corpus | files | forms equal | .ae equal | class files equal (`-g:none`) |
+|---|---:|---:|---:|---:|
+| Clojure's Java | 189 | 189 | 182 | 143 of 183 |
+| samples | 17 | 17 | 17 | 12 of 14 |
+| the JDK's forms | 911 | 874 | 816 | 473 of 838 |
+
+The rest known with reasons: javac rejects 39 of the JDK's printed files (Java's type arguments
+in code are not in the forms), the radixes the reader drops, and source choices the forms do not
+record (`?:` against `if`, statement against expression `switch`, fall-through). Decided by the
+user: JP1 (the provenance hashes cover only the reader's sources, `repr_java_reader_hash`; both
+provenance files recorded again, the forms unchanged), JP2 and JP4 (a `:full` mode of
+`repr/java read` later), JP3 (the converter keeps an array creation's dimension annotations, its
+own commit `d6920df`).
+
+## 2026-10-17: the survey of repr/rust
+
+At the user's request ("spawn a survey about repr/rust, you may find resources in
+../rust-lisp/"): doc/REPR-RUST-SURVEY.md (from the branch `repr-rust-survey`, `9e1b090`; proposals
+RS1-RS17, uses RU1-RU4, since U was taken). rust-lisp (/root/rust-lisp at `f28e0de8c`, read only;
+a fork of rust master `602727f26`, 1.101.0-nightly): rustc with an s-expression front end, its
+tree round trip exact over 37,743 files, std built from 1,574 `.rsl` files; macros as forms when
+their arguments are expressions, else raw token trees. Arbace's reader reads 1 of its 5 `.rsl`
+files (paths `a::b` are invalid tokens; 41 of 128 lexemes fail, some misread silently). On the
+host's rustc 1.99.1: `RUSTC_BOOTSTRAP=1 rustc -Zunpretty=ast-tree` works with nothing installed;
+a 183-line rustc_private helper builds against Alpine's `rustc-dev-1.99.1-r0` (fetched into
+`.tmp/`, pinned by SHA-256, not installed) and dumped std's 1,074 files in 5.8 s (131 MB of forms,
+all read by Arbace's reader) and 12,141 of 12,144 files of the Cargo cache's crates; rustc's own
+pretty printer gives the same tree for 1,069 of std's 1,074 files, so a printer after
+`rustc_ast_pretty` is proven. Recommended: a bridge only, rust-lisp's grammar respelled, paths as
+`std.io/Write`, `rs/` heads, a generic helper on the host's rustc (its `rustc-dev` and `rust-src`
+pinned), lines-only and byte-for-byte modes, the tree, interface (rustdoc's JSON or HIR) and text
+levels over std's five crates, after repr/haskell's R-milestones, about 7 to 10 days. Proposals
+open.
+
+## 2026-10-17: the c2j batch merged; F3 and F4 measured together
+
+On the branch `c2j-batch` (`ea68010`, with main at `ca4d3ee` merged into it), merged into main;
+details in doc/FUTAMURA-SURVEY.md, "F3 and the back end's limits as built" and "F3 and F4
+measured together". F3: every call of `Numbers`' boxed operations carries an inline fast path on
+`Long` (and two `Double`) operands, answering only what `Numbers` would, every other case calling
+it (about 1,235 sites). The back end's limits fixed: one-segment namespaces (their classes in
+the unnamed package), proxies made before their analysis, deftypes, reifys, fns and defclasses
+using the Java forms' code forms (recorded while compiling and written into c2j's tree).
+Measured together (eval-bench as a namespace, ms, best of 5 interleaved rounds on a loaded host):
+the geometric mean 15.65 → 12.89 with F4 → 9.33 with F3 and F4 (1.68 times); fib 6.95 → 1.63,
+loop-long 13.31 → 3.90, loop-double 1.67 → 0.55, keyword-map 15.03 → 6.45, reduce-fn 24.92 →
+11.82; F4.2's regressions (fib, map-assoc-get) gone with F3 (decided: nothing more); F3.2: the
+primitive operations now inline through F4's guard-free entries (decided: no inline emission in
+c2j). diffcheck on the merged tree: 12,731 of 12,754 agree, the 23 others recorded with reasons,
+nothing excluded. The essential gate passed and the fixpoint G1 = G2 = G3 held on the branch.
+F3.1 (a), F3.3 (a) decided by the user, F3.2 and F3.4 as proposed.
+
+Found while building the Mac bundle: `bin/box-mac-bundle` builds the arm64 guest only when it is
+missing and `bin/box-rebuild`'s host step uses whatever executables `target/` holds, so the
+bundle built at `7019817` carried a guest of 2026-10-15 (before the renames) and an expected
+image from tools older than the commit; the user was asked not to run it. The "not prepared"
+line for `arbace.j2g.start` came from those stale tools: in a fresh build it is embedded and
+compiled. To do: both scripts to check that their executables are built from the commit.
+
+## 2026-10-17: the seed remade; diffcheck in the essential gate; KS and RS decided
+
+The seed remade from the fixpoint at `191adb3` (the c2j and j2g batches, the renames, repr/java
+print): `cf89f8a8...` (was `56fabe20...`), 5,633,352 bytes, verified by `bin/seed --verify` (the
+same archive printed again; stage 0 = G1 = G2 = G3, `78d13f88...`, 374 s). F2.1: `bin/diffcheck`
+moved into the essential gate, concurrently with the smoke test, the suite and the oracle.
+Decided by the user, as recommended: KS1-KS12 (doc/go/PROCESS-SPEC.md, "Decided"); RS1-RS15 and
+RS17 (doc/REPR-RUST-SURVEY.md, "Decided"), RS16 (b) (the spec now). Started concurrently (the
+user): the executable-freshness guard of `bin/box-rebuild` and `bin/box-mac-bundle`, repr/haskell
+R3, KU1, goi's GR1, repr/rust's spec; the Mac bundle rebuilt from this commit.
+
+## 2026-10-17: the Mac bundle rebuilt from one commit; the freshness guard
+
+The essential gate passed with `bin/diffcheck` in it (10:16; diffcheck 12,731 of 12,754, the 23
+known, 6:01). The Mac bundle built again at `73e35434`, every part from that commit: both
+architectures' executables and guests built first (the guest's version `73e35434`), the arm64
+rebuild prepared at it (no "not prepared" line), the bundle 55,994,612 bytes; handed to the user
+for `./mac.sh all` under macOS 26. Two lessons: the gate's first step rebuilds stage 0 into
+`target/seed/`, so nothing in the same checkout may use stage 0 while it runs (two attempts
+collided); and `bin/box-rebuild` and `bin/box-mac-bundle` now refuse stale executables (branch
+`fresh-guard`, `0c9bb6e`, merged: `bin/lib/fresh.bash` reads each executable's version from its
+bytes, the guest's image key checked against the last build's program, `host.verified` written
+by a verified host step; `ARBACE_BOX_STALE_OK=1` to override).
+
+## 2026-10-17: repr/rust's spec
+
+As decided (RS16 (b): the spec now), doc/rust/SPEC.md (from the branch `repr-rust-spec`,
+`cb30218`), with test/rust/ (291 reader samples, a census script, a forms reader, the worked
+example `shapes.rs`/`shapes.ae`). Key respellings: `std::io::Write` as `std.io/Write`, a leading
+`::` as `(:global ...)`, `::<>` as `(:turbofish ...)`, every `:` as `(:has ...)`, braces as
+`(:braces ...)`, attributes as `(:attr ...)` forms before what they attach to, doc comments as
+data, token trees as `(:tt "source text")`, `^` `bit-xor`, `/=` `div=`, `@` `:at`; lifetimes `'a`
+(read as `(quote a)`, so `quote` a reserved head); literals keep their tokens (a Clojure literal or
+value form where the printer's spelling reproduces the token, `(:lit "text" suffix)` otherwise).
+Checked: over std's five crates (1,074 files, the survey's helper) all 394,759 identifiers bare,
+all 27,945 multi-segment paths read back as `ns/name` but one, 78.3% of 33,174 literals plain
+Clojure literals; rustdoc's JSON of `core` with `option.rs` reprinted equal to the original's once
+spans are removed (the interface level). Decisions S1-S34; proposals RSS1-RSS10, open; the build
+in milestones RR1-RR6.
+
+## 2026-10-17: repr/rust's RSS1-RSS10 decided (the user)
+
+All as recommended (doc/rust/SPEC.md, "Decided"). Its build (RR1-RR6) follows repr/haskell's
+milestones, unless capacity allows sooner.

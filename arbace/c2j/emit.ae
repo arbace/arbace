@@ -108,7 +108,13 @@
   code."
   [^Class c ctx]
   (or (contains? @(:runtime-classes ctx) (destub (.getName c)))
-      (not (registered? c))))
+      (not (registered? c))
+      ;; a proxy's class made at run time before the analysis that names it (no proxy event
+      ;; of any source: (get-proxy-class C) evaluated, then (proxy [C] ...) analyzed): as one
+      ;; made with an event, it is made again before the unit runs (unit-method)
+      (when (.isAssignableFrom arbace.lang.IProxy c)
+        (when-let [ps (:unit-proxies ctx)] (swap! ps conj c))
+        true)))
 
 (defn- public? [^Class c]
   (java.lang.reflect.Modifier/isPublic (.getModifiers c)))
@@ -376,12 +382,20 @@
         (class? v) 'java.lang.Class
         :else 'java.lang.Object))
 
+(def ^:dynamic *late-classes*
+  "The names of the classes the Java forms compiler made while the program prepared (its
+  deftypes, fns and defclasses using the Java forms, arbace.c2j.main's java-forms-classes): in the
+  tree, but j2g may leave one out (Clojure in its body it cannot analyze, F2.4), so a constant
+  naming one is looked up where used, as a class made at run time, and the classes holding it
+  initialize without it."
+  #{})
+
 (defn- constant [ctx v]
   (cond
     (or (nil? v) (string? v)) v
     ;; a class made at run time may not exist yet when the class holding the constant is
     ;; initialized: looked up where used
-    (and (class? v) (runtime-class? v ctx))
+    (and (class? v) (or (runtime-class? v ctx) (contains? *late-classes* (destub (.getName ^Class v)))))
     (list (with-meta 'arbace.lang.RT/classForNameNonLoading {:param-tags '[java.lang.String]})
           (destub (.getName ^Class v)))
     :else (const-field ctx v (const-type v))))
@@ -628,12 +642,141 @@
               {:param-tags '[java.lang.Object java.lang.String java.lang.Object/1]})
             (emit ctx (:target n)) (:methodName n) (obj-array ctx (:args n))))))
 
+;; ---------------------------------------------------------------------------------------
+;; arithmetic intrinsics (Futamura F3, doc/FUTAMURA-SURVEY.md "F3 and the back end's limits as
+;; built"): a call of one of Numbers' boxed operations (an Object operand) gets an inline fast
+;; path for Long operands (and Double ones, both Double, for the (Object, Object) and (Object)
+;; operations), which computes what Numbers' LongOps (DoubleOps) would and boxes as they box
+;; (Long/valueOf, Double/valueOf); any other operand, and a Long case whose result Numbers
+;; would not make as a long (an overflow: thrown, or promoted to a BigInt by the ' operations; a
+;; zero divisor; a negation of Long/MIN_VALUE), calls the operation itself. So the fast path
+;; only ever answers what Numbers answers, ratios, bigints, Integers and the rest included.
+
+(def ^:private long-min 'java.lang.Long/MIN_VALUE)
+(def ^:private long-max 'java.lang.Long/MAX_VALUE)
+
+(defn- long-box [f] (list (with-meta 'java.lang.Long/valueOf {:param-tags '[long]}) f))
+(defn- double-box [f] (list (with-meta 'java.lang.Double/valueOf {:param-tags '[double]}) f))
+
+(defn- long-op2
+  "The Long case of Numbers' binary operation op on longs x, y (symbols; r the result's local):
+  a form of the operation's result type, slow where Numbers would not answer a long; nil: not
+  an intrinsic."
+  [op x y slow r]
+  (let [checked (fn [f ok] (list 'let [(tagged r Long/TYPE) f] (list 'if ok (long-box r) slow)))
+        add-ok (list '>= (list 'bit-and (list 'bit-xor x r) (list 'bit-xor y r)) 0)
+        ;; x - y: Numbers adds the negation of y, which overflows for Long/MIN_VALUE
+        sub-ok (list 'and (list 'not (list '== y long-min))
+                     (list '>= (list 'bit-and (list 'bit-xor x y) (list 'bit-xor x r)) 0))
+        ;; Numbers' own test (multiplyP's), exact for multiplyExact's overflow
+        mul-ok (list 'and (list 'not (list 'and (list '== x long-min) (list '< y 0)))
+                     (list 'or (list '== y 0) (list '== (list 'unchecked-divide r y) x)))]
+    (case op
+      ("add" "addP") (checked (list 'unchecked-add x y) add-ok)
+      "unchecked_add" (long-box (list 'unchecked-add x y))
+      ("minus" "minusP") (checked (list 'unchecked-subtract x y) sub-ok)
+      "unchecked_minus" (long-box (list 'unchecked-subtract x y))
+      ("multiply" "multiplyP") (checked (list 'unchecked-multiply x y) mul-ok)
+      "unchecked_multiply" (long-box (list 'unchecked-multiply x y))
+      ;; a zero divisor throws Numbers' ArithmeticException
+      "quotient" (list 'if (list '== y 0) slow (long-box (list 'unchecked-divide x y)))
+      "remainder" (list 'if (list '== y 0) slow (long-box (list 'unchecked-remainder x y)))
+      "and" (list 'bit-and x y)
+      "or" (list 'bit-or x y)
+      "xor" (list 'bit-xor x y)
+      "shiftLeft" (list 'bit-shift-left x y)
+      "shiftRight" (list 'bit-shift-right x y)
+      "lt" (list '< x y)
+      "lte" (list '<= x y)
+      "gt" (list '> x y)
+      "gte" (list '>= x y)
+      "equiv" (list '== x y)
+      nil)))
+
+(defn- double-op2
+  "The Double case (both operands Double) of Numbers' binary operation op (DoubleOps: the '
+  operations are the others, a difference the sum with the negation), or nil."
+  [op x y]
+  (case op
+    ("add" "addP" "unchecked_add") (double-box (list 'unchecked-add x y))
+    ("minus" "minusP" "unchecked_minus") (double-box (list 'unchecked-add x (list 'unchecked-negate y)))
+    ("multiply" "multiplyP" "unchecked_multiply") (double-box (list 'unchecked-multiply x y))
+    "lt" (list '< x y)
+    "lte" (list '<= x y)
+    "gt" (list '< y x)
+    "gte" (list '>= x y)
+    "equiv" (list '== x y)
+    nil))
+
+(defn- long-op1
+  "The Long case of Numbers' unary operation op on long x, as long-op2's."
+  [op x slow]
+  (let [guard (fn [bad f] (list 'if (list '== x bad) slow (long-box f)))]
+    (case op
+      ("inc" "incP") (guard long-max (list 'unchecked-inc x))
+      "unchecked_inc" (long-box (list 'unchecked-inc x))
+      ("dec" "decP") (guard long-min (list 'unchecked-dec x))
+      "unchecked_dec" (long-box (list 'unchecked-dec x))
+      ("minus" "minusP") (guard long-min (list 'unchecked-negate x))
+      "unchecked_minus" (long-box (list 'unchecked-negate x))
+      "isZero" (list '== x 0)
+      "isPos" (list '> x 0)
+      "isNeg" (list '< x 0)
+      nil)))
+
+(defn- double-op1
+  "The Double case of Numbers' unary operation op, as double-op2's."
+  [op x]
+  (case op
+    ("inc" "incP" "unchecked_inc") (double-box (list 'unchecked-add x 1.0))
+    ("dec" "decP" "unchecked_dec") (double-box (list 'unchecked-subtract x 1.0))
+    ("minus" "minusP" "unchecked_minus") (double-box (list 'unchecked-negate x))
+    "isZero" (list '== x 0.0)
+    "isPos" (list '> x 0.0)
+    "isNeg" (list '< x 0.0)
+    nil))
+
+(defn- numbers-intrinsic
+  "The call of Numbers' static method m on args with its fast paths, or nil when m is not one
+  of the boxed operations above."
+  [ctx ^java.lang.reflect.Method m args]
+  (when (= (.getDeclaringClass m) arbace.lang.Numbers)
+    (let [ps (vec (.getParameterTypes m))
+          sig (mapv #(cond (= % Object) :o (= % Long/TYPE) :j :else :x) ps)
+          op (.getName m)
+          probe (case (count ps)
+                  1 (when (= sig [:o]) (long-op1 op 'x 'slow))
+                  2 (when (and (some #{:o} sig) (every? #{:o :j} sig)) (long-op2 op 'x 'y 'slow 'r))
+                  nil)]
+      (when probe
+        (let [temps (mapv (fn [_] (gsym ctx "na-")) ps)
+              binds (vec (mapcat (fn [t p f] [(tagged t p) f]) temps ps (typed-args ctx ps args)))
+              slow (list* (with-meta (symbol "arbace.lang.Numbers" op) (param-tags ps)) temps)
+              lv (fn [t] (list '.longValue (list 'cast 'java.lang.Long t)))
+              dv (fn [t] (list '.doubleValue (list 'cast 'java.lang.Double t)))
+              objs (keep (fn [[t s]] (when (= s :o) t)) (map vector temps sig))
+              is (fn [c] (let [ts (map #(list 'instance? c %) objs)]
+                           (if (next ts) (cons 'and ts) (first ts))))
+              xs (mapv (fn [k] (gsym ctx (str "n" k "-"))) (range (count ps)))
+              ;; the operands as longs: an Object one unboxed, a long one as is
+              lbinds (vec (mapcat (fn [x t s] [(tagged x Long/TYPE) (if (= s :o) (lv t) t)]) xs temps sig))
+              lfast (if (= 1 (count ps)) (long-op1 op (xs 0) slow) (long-op2 op (xs 0) (xs 1) slow (gsym ctx "nr-")))
+              dfast (when (every? #{:o} sig)
+                      (if (= 1 (count ps)) (double-op1 op (xs 0)) (double-op2 op (xs 0) (xs 1))))
+              dbinds (vec (mapcat (fn [x t] [(tagged x Double/TYPE) (dv t)]) xs temps))]
+          (list 'let binds
+                (list 'if (is 'java.lang.Long)
+                      (list 'let lbinds lfast)
+                      (if dfast
+                        (list 'if (is 'java.lang.Double) (list 'let dbinds dfast) slow)
+                        slow))))))))
+
 (defn- emit-static-method [ctx n unboxed?]
   (let [^java.lang.reflect.Method m (:method n)]
     (cond
       (and m (public? (.getDeclaringClass m)) (not (runtime-class? (.getDeclaringClass m) ctx))
            (not (jrt-lacks? m)))
-      (let [f (method-call ctx m nil (:args n))]
+      (let [f (or (numbers-intrinsic ctx m (:args n)) (method-call ctx m nil (:args n)))]
         (if unboxed? f (box f (.getReturnType m))))
       (and m unboxed?)
       (unbox-arg ctx (emit-static-method ctx (assoc n :method nil) false) (.getReturnType m))
@@ -1287,7 +1430,8 @@
   "The static method unitK of a source's loader class: unit u's events made again, then its
   code."
   [ctx k [kind line column _ _ expr events]]
-  (let [ns-events (keep identity (for [ev events
+  (let [ctx (assoc ctx :unit-proxies (atom #{}))
+        ns-events (keep identity (for [ev events
                         :let [ev (vec ev)]]
                     (case (first ev)
                       "ns" (list '.set 'arbace.lang.RT/CURRENT_NS
@@ -1295,8 +1439,12 @@
                       ;; the class a deftype*, reify* or gen-interface made is compiled
                       ("stub" "type" "iface" "imethod")
                       (if-let [n (and (string? (nth ev 1)) (nth ev 1))]
-                        (if (runtime-class? (Class/forName (destub n)) ctx)
-                          (fail (str "an event of a class made at run time: " n))
+                        ;; none when the analysis that made the event was given up for the Java
+                        ;; forms compiler (a reify in a fn using the code forms: its stub)
+                        (if-let [c (try (Class/forName (destub n)) (catch Exception _ nil))]
+                          (if (runtime-class? c ctx)
+                            (fail (str "an event of a class made at run time: " n))
+                            nil)
                           nil)
                         nil)
                       ;; proxy's class, made again (Compiler$Image.replay)
@@ -1316,11 +1464,30 @@
                  (emit ctx' (:body m)))
                (if (= "def" (:op n))
                  (emit-def ctx n true)
-                 (emit ctx expr)))]
+                 (emit ctx expr)))
+        ;; realized in the order of the method's form, as before (the constants' numbers):
+        ;; the events, then the code
+        ns-events (doall ns-events)
+        code (deep code)
+        ;; the proxy classes made at run time before this unit was analyzed, which its code
+        ;; names (runtime-class?): made again unless they are (arbace.core's define-proxy, as
+        ;; get-proxy-class makes them, by their name: the namespace then may have been another)
+        proxies (for [^Class c (sort-by #(.getName ^Class %) @(:unit-proxies ctx))
+                      :let [pname (.getName c)]]
+                  (list 'when (list 'nil? (list (with-meta 'arbace.lang.RT/loadClassForName {:param-tags '[java.lang.String]}) pname))
+                        (list '.invoke
+                              (list 'cast 'arbace.lang.IFn (list '.getRawRoot (const-field ctx #'arbace.core/define-proxy 'arbace.lang.Var)))
+                              pname
+                              (constant ctx (.getSuperclass c))
+                              (list (with-meta 'arbace.lang.RT/seq {:param-tags '[java.lang.Object]})
+                                    (list 'new 'java.lang.Object/1
+                                          (vec (for [^Class i (.getInterfaces c) :when (not= i arbace.lang.IProxy)]
+                                                 (constant ctx i))))))))]
     (vary-meta
       (list 'method (with-meta (symbol (str "unit" k)) {:private true :static true}) []
             (concat (list 'do (list 'arbace.lang.Compiler$AOT/at (list 'unchecked-int line) (list 'unchecked-int column)))
                     ns-events
+                    (doall proxies)
                     [code]))
       assoc :c2j/line line)))
 
@@ -1340,6 +1507,16 @@
   as many (SA210): j2g analyzes classes in parallel, one class on one thread (arbace.core's 903
   units were one task of 9 to 14 s, the last of the analysis)."
   100)
+
+(defn unnamed-package
+  "The option placing top-level class nm in Java's unnamed package when its name has no
+  package: the classes of a namespace of one segment (user: its holder user, the fns
+  user$eval1$fn__2, the loader of a source user.ae, user__init), named as the JVM names them,
+  where the Java forms would put a simple name in the package of the namespace they are read in
+  (arbace). The tree's files import them (arbace.c2j.main), so that a class of a package can name
+  them, as Java could not."
+  [^String nm]
+  (when-not (str/includes? nm ".") [:package ""]))
 
 (defn emit-source
   "The Java forms of source path src (scriptbase.ae), compiled from its units: the loader
@@ -1368,6 +1545,7 @@
             ms (unit-methods cls (range n))]
         {:name lname
          :form (concat (list 'defclass (with-meta (symbol lname) {:public true :final true :c2j/source file}))
+                       (unnamed-package lname)
                        (pool-fields (:consts @cls))
                        ms
                        [(list 'method (with-meta 'load {:public true :static true}) []
@@ -1395,6 +1573,7 @@
                                     assoc :c2j/line (:c2j/line (meta (first ms))))})))]
         {:name lname
          :form (concat (list 'defclass (with-meta (symbol lname) {:public true :final true :c2j/source file}))
+                       (unnamed-package lname)
                        (map :form parts)
                        [(list 'method (with-meta 'load {:public true :static true}) []
                               (concat (list 'do)
@@ -1422,16 +1601,19 @@
         head (if top? (symbol nm) (symbol (simple-name nm)))
         ctx {:cls (atom {}) :runtime-classes (atom #{})}
         consts (when top? (when-let [p (get pools nm)] (:consts @p)))
-        const-forms (pool-fields consts)]
+        const-forms (pool-fields consts)
+        pkg (when top? (unnamed-package nm))]
     (vary-meta
       (case (:kind c)
-        :holder (concat (list 'defclass (with-meta head (mods {:public true :static true :final true}))) const-forms nested)
+        :holder (concat (list 'defclass (with-meta head (mods {:public true :static true :final true}))) pkg const-forms nested)
         :interface (concat (list 'defclass (with-meta head (mods {:public true :static true :interface true})))
+                           pkg
                            (when (seq (:extends c)) [:extends (:extends c)])
                            (:members c)
                            nested)
         (concat (list 'defclass (with-meta head (mods {:public true :static true :final true}))
                       :extends (:super c))
+                pkg
                 (when (seq (:interfaces c)) [:implements (:interfaces c)])
                 const-forms
                 (:members c)

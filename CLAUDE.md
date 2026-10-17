@@ -96,15 +96,20 @@ Prior art:
     runtime's (the compiled pipeline, AOT: c2j, j2g, repr/go's print, Go's compiler).
   - `arbace/repr/`: the bridges between a language's source text and its forms, each one
     namespace with its parts below it and one command with the verbs `read` and `print`:
-    `arbace.repr.java` (`arbace/repr/java{.ae,/}`), Java → Java forms (`bin/repr-java read`;
-    `print` to come; `check`), on the frozen JVM; `arbace.repr.go` (`arbace/repr/go{.ae,/}`), Go
-    as Go forms and back (spec `doc/go/SPEC.md`; mode `:full` keeps the text: comments,
-    spellings, layout, printed back byte for byte; helpers `tools/godump`, `tools/gocmp`;
+    `arbace.repr.java` (`arbace/repr/java{.ae,/}`), Java → Java forms (`bin/repr-java read`,
+    `check`) on the frozen JVM, and Java forms → Java (`print`, `arbace.repr.java.print`; the
+    `.ae` writer is `arbace.repr.java.layout`) on the tools' host, with its round trip Java →
+    forms → Java → forms at the levels forms, ae (the converted text) and classes (javac's, byte
+    for byte; `bin/repr-java roundtrip`, corpora baseline, samples and jdk/forms, references in
+    `test/repr/java/roundtrip/`; doc/classes/PRINTER-NOTES.md); `arbace.repr.go`
+    (`arbace/repr/go{.ae,/}`), Go as Go forms and back (spec `doc/go/SPEC.md`; mode `:full` keeps
+    the text: comments, spellings, layout, printed back byte for byte; helpers `tools/godump`, `tools/gocmp`;
     `bin/repr-go read`, `print`, `roundtrip`, `check`, `test`), on the tools' host
     (`REPR_GO_EXE` names another executable); `arbace.repr.haskell` (`arbace/repr/haskell{.ae,/}`),
     Haskell as Haskell forms and back (spec `doc/haskell/SPEC.md`, notes
     `doc/haskell/HASKELL-NOTES.md`; helper `tools/hsdump` on the host's GHC, pinned by
-    `tools/hsdump/GHC_VERSION`; `bin/repr-haskell read`, `print`, `roundtrip`, `test`; corpus GHC
+    `tools/hsdump/GHC_VERSION`; `bin/repr-haskell read`, `print`, `roundtrip` (`--iface`: GHC's
+    interfaces too), `test`; corpus GHC
     9.14.1's boot libraries, `test/haskell/corpus-ghc-9.14.1.edn`), evaluated from the checkout,
     not embedded.
   - `arbace/repr/clojure{.ae,/}`: `arbace.repr.clojure`, Clojure's bridge (`doc/REPR-CLOJURE.md`;
@@ -180,23 +185,24 @@ Prior art:
   `arbace/`, `go/`, `overlay/`, `jdk/`, `x509roots/`, the fixtures' forms, the build's scripts, the
   seed's and Go's pins; seconds when unchanged, else two Go-hosted builds, about 8 minutes: the
   test build reuses the executable's compiled namespaces), then
-  concurrently the smoke test, Clojure's suite on the test build (`test/arbace-go-results.edn`) and
+  concurrently the smoke test, the per-form differential check (`bin/diffcheck`, Futamura F2, since
+  2026-10-17 in the essential gate: the oracle's forms evaluated against compiled by c2j, the Java
+  forms interpreted against translated by j2g, against `test/diffcheck/known.edn`; about 5
+  minutes, 40 s cached), Clojure's suite on the test build (`test/arbace-go-results.edn`) and
   the oracle against the frozen reference. `bin/gate --full` adds, concurrently: on the frozen
-  JVM `bin/repr-java check --suite`, `bin/jrt-convert verify` (`jdk/` converted afresh, byte for byte),
+  JVM `bin/repr-java check --suite`, `bin/repr-java roundtrip --corpus baseline,samples,jdk`,
+  `bin/jrt-convert verify` (`jdk/` converted afresh, byte for byte),
   `bin/j2g-edge verify`, `bin/clojure-tests --java-fixtures verify`; the Go build afresh with its
   smoke test, the box's guests from `tamago/`'s forms byte-identical to TamaGo's originals'
   (`bin/arbace-go --build --box`, `bin/tamago-vendor check`), the box's smoke test, its oracle's
   subset and `bin/box-suite`, then
   `bin/arbace-go --fixpoint`; repr/go's round trips (`bin/repr-go roundtrip amd64`, `linux/amd64`, and
   `--text amd64`: mode `:full` printed back to the original text, byte for byte), repr/haskell's
-  (`bin/repr-haskell roundtrip`: GHC's trees and lines over GHC 9.14.1's boot libraries, and
-  `test`; on the host's GHC), the box's vendoring checks (`bin/box-vendor roundtrip`, `kvm-tests`, `purego-check`),
+  (`bin/repr-haskell roundtrip --iface`: GHC's trees and lines over GHC 9.14.1's boot
+  libraries, then their interfaces compiled at `-O1`, and `test`; on the host's GHC), the box's vendoring checks (`bin/box-vendor roundtrip`, `kvm-tests`, `purego-check`),
   `bin/tamago-vendor verify`, `bin/x509roots-vendor verify`, `check`; goi's checker (`bin/goi
-  annotations`, `test --gc`, after repr/go's round trips); Go's toolchain as forms (`bin/toolchain-vendor verify`, `check`); the per-form differential check (`bin/diffcheck`,
-  Futamura F2, doc/FUTAMURA-SURVEY.md "F2 as built": the oracle's forms evaluated against
-  compiled by c2j, the Java forms interpreted against translated by j2g, in a program
-  built for it from the gate's executable, against `test/diffcheck/known.edn`; about 5 minutes,
-  40 s cached). Run it when the Java forms'
+  annotations`, `test --gc`, after repr/go's round trips); Go's toolchain as forms
+  (`bin/toolchain-vendor verify`, `check`). Run it when the Java forms'
   front end, repr/java, repr/go, j2g or jrt change (after a change to `overlay/jdk/java.base`, jrt's closure
   or repr/java, `bin/jrt-convert update` first; after a change to what j2g asks of the JVM,
   `bin/j2g-edge update`). Logs in `.tmp/gate/`. Every gate run and every `bin/arbace-go --build`

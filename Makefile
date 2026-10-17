@@ -2,7 +2,8 @@
 # logic and caches by content (Make tracks no dependencies; all targets are phony). Keep it in
 # step with bin/: a target's line names the script and options it runs, and `make check-makefile`
 # (in bin/gate) checks that every script named here exists. The environment passes through
-# (ARBACE_GO_ARCHES, ARBACE_BOX_ARCHES, ARBACE_GOROOT, ...); see each script's header for its own.
+# (ARBACE_GO_ARCHES, ARBACE_BOX_ARCHES, ARBACE_GOROOT, ARBACE_BOX_STALE_OK, ...); see each script's
+# header for its own.
 # `make help` lists the targets from their `##` comments.
 
 .DEFAULT_GOAL := help
@@ -13,7 +14,7 @@ CLOJURE_TESTS_GO ?= target/arbace-go/amd64/arbace-tests
   box box-smoke box-oracle box-suite box-tools box-rebuild mac-bundle arm64-vm-check \
   gate gate-full suite oracle diffcheck verify jdk-verify edge-verify fixtures-verify tamago-verify \
   toolchain-verify box-vendor-verify x509roots-verify repr-go-roundtrip repr-go-roundtrip-text \
-  repr-haskell-roundtrip repr-haskell-test goi-annotations goi-test alpine-check clean \
+  repr-java-roundtrip repr-haskell-roundtrip repr-haskell-iface repr-haskell-test goi-annotations goi-test alpine-check clean \
   check-makefile
 
 help: ## list the targets
@@ -56,9 +57,9 @@ box-suite: ## Clojure's suite's subset in the box (bin/box-suite; after `make su
 	bin/box-suite
 box-tools: ## the tool guests (gc, the linker, the assembler) from tamago/cmd (bin/box-tools build)
 	bin/box-tools build
-box-rebuild: ## Arbace rebuilt inside the box, compared byte for byte (bin/box-rebuild)
+box-rebuild: ## Arbace rebuilt inside the box, compared byte for byte; stops on stale executables (bin/box-rebuild)
 	bin/box-rebuild
-mac-bundle: ## the Mac's launcher, guest and checklist (bin/box-mac-bundle)
+mac-bundle: ## the Mac's launcher, guest and checklist, all HEAD's (bin/box-mac-bundle; after box-rebuild for arm64)
 	bin/box-mac-bundle
 arm64-vm-check: ## the arm64 box in an emulated aarch64 VM: smoke, hv (bin/box-arm64-vm check)
 	bin/box-arm64-vm check
@@ -79,7 +80,7 @@ diffcheck: ## each language's two halves on the same forms: evaluated against co
 
 ## Vendored trees and recorded data, converted or recorded afresh and compared byte for byte
 VERIFY := jdk-verify edge-verify fixtures-verify tamago-verify toolchain-verify \
-  box-vendor-verify x509roots-verify repr-go-roundtrip repr-go-roundtrip-text
+  box-vendor-verify x509roots-verify repr-go-roundtrip repr-go-roundtrip-text repr-java-roundtrip
 verify: $(VERIFY) ## all of the below, one after another
 jdk-verify: ## jdk/'s forms by repr/java, on the frozen JVM (bin/jrt-convert verify)
 	bin/jrt-convert verify
@@ -110,8 +111,12 @@ repr-go-roundtrip-text: ## mode :full prints the original text back, byte for by
 	bin/repr-go roundtrip --text linux/amd64
 	bin/repr-go roundtrip --text --dirs amd64
 	bin/repr-go roundtrip --text --dirs linux/amd64
+repr-java-roundtrip: ## Java -> forms -> Java -> forms over Clojure's Java, the samples, jdk/forms (bin/repr-java roundtrip)
+	bin/repr-java roundtrip --corpus baseline,samples,jdk
 repr-haskell-roundtrip: ## Haskell -> forms -> Haskell over GHC 9.14.1's base, ghc-internal, ghc-prim, ghc-bignum: GHC's trees and lines (bin/repr-haskell roundtrip)
 	bin/repr-haskell roundtrip
+repr-haskell-iface: ## the same, then GHC's interfaces of the originals and the printed modules compiled, compared (bin/repr-haskell roundtrip --iface)
+	bin/repr-haskell roundtrip --iface
 repr-haskell-test: ## repr/haskell's cases: the reader's samples, the spec's worked example (bin/repr-haskell test)
 	bin/repr-haskell test
 goi-annotations: ## goi's checker over tamago/goroot, linux std, GOROOT/test: no error, every annotation verified (bin/goi annotations)

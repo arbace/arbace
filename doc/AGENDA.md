@@ -7,7 +7,7 @@ The current state of the work. This file is rewritten as things change. For the 
 
 ## State
 
-- The bootstrap starts from the Go-source seed `seed/arbace-seed-go.tar.xz` (`56fabe20…`), the
+- The bootstrap starts from the Go-source seed `seed/arbace-seed-go.tar.xz` (`cf89f8a8…`), the
   program printed by the Go-hosted fixpoint, its toolchain (TamaGo's go1.27.1) pinned by
   `seed/goroot.sha256`. `bin/seed --check`, `--build` (stage 0), `--make`, `--verify`.
 - Stage 0 hosts every Arbace tool (j2g, repr/go, build/go, c2a, the suite's runner), compiled into it;
@@ -111,10 +111,11 @@ The current state of the work. This file is rewritten as things change. For the 
   tests per configuration, every level; D1-D3 decided, in `bin/gate --full`). Done: F2 (`bin/diffcheck`, 12,449 of 12,471 cases agree; F2.1-F2.6 decided).
 - `repr/haskell`'s spec written (doc/haskell/SPEC.md; S1-S36; HS1-HS12 decided as recommended).
   R1 done (2026-10-17: the tree and lines levels over GHC 9.14.1's base libraries, 483 of 483
-  modules; HR1-HR5); next R2-R6 (the text level, interfaces, the rest of the corpus). Running:
-  `repr/java print` (Java forms → Java,
+  modules; HR1-HR5); R2 done (the interface level, 483 of 483; HR6-HR8); next R3-R6 (`:full` and the text
+  level, the layout printer, the other boot libraries, .hsc/.lhs/boot files). Done: `repr/java print` (the round trip over Clojure's Java, the samples and the JDK;
+  JP1-JP4); running: (Java forms → Java,
   with a round trip; branch `repr-java-print`).
-- After the rename (the user, 2026-10-17: "Create jaf print after the naming debate settled"):
+- Done (2026-10-17): repr/java print. Formerly planned: after the rename (the user, 2026-10-17: "Create jaf print after the naming debate settled"):
   `repr/java print`, Java's bridge printing back, class forms → Java source, with a round trip like
   repr/go's (Java → forms → Java → forms, the two forms equal; the text level as repr/go's
   `:full`); R1: today's `arbace.repr.java.print` (forms as `.ae` text) becomes `layout` with it.
@@ -126,9 +127,16 @@ The current state of the work. This file is rewritten as things change. For the 
   F6, F7. Measured there: `fib`
   6.40 → 0.168 ms (the JVM 0.16) by a `Long` fast path, var speculation and an unboxed worker;
   `loop-long` 11.87 → 1.09 ms without the class-initialization guards.
-- Smaller: the box's checks on the Mac on macOS 26.
+- The box's checks on the Mac on macOS 26: the bundle built again (`73e35434`, every part from that commit), waiting on the
+  user's run of `./mac.sh all` and its `mac-results.tar.gz`.
 
 ## Later
+
+- `repr/rust`: the survey written (doc/REPR-RUST-SURVEY.md, 2026-10-17; ../rust-lisp as prior
+  art): recommended a bridge only, rust-lisp's grammar respelled, a helper on the host's rustc
+  with its `rustc-dev` pinned; RS1-RS17 decided; its spec written (doc/rust/SPEC.md, RSS1-RSS10 decided as
+  recommended); the build in
+  RR1-RR6, 7-10 days.
 
 - The standalone Arbace: no Java binary compatibility, with Java at the source level through repr/java.
   The language is Clojure plus class forms, and later forms for Go. The goal is a
@@ -146,21 +154,12 @@ The current state of the work. This file is rewritten as things change. For the 
   projection, j2g derived from the interpreter, one definition of each language's semantics
   (Clojure, the class forms, later Go). The cost: binding times in a dynamic language (vars,
   `eval`, macros at load time).
-- A kernel and a user part in the box (the user, 2026-10-14): the infrastructure (the
-  collector, the scheduler, the compiler, I/O, the store) at EL1/ring 0 and the application
-  level at EL0/ring 3, inside one guest. Today the guest is one TamaGo program at EL1/ring 0, one
-  address space, one Go runtime for both. To survey: what crosses the boundary (a call ABI like
-  the doorbell's, one level down); one heap the kernel's collector scans across the privilege
-  levels, or a heap per user part; the scheduler's goroutines running user code at EL0 (the
-  page tables and exception vectors TamaGo's board sets up); the cost of the crossings for a
-  REPL's fine-grained calls; against the isolation S7 already has (a guest per tool, spawned) and
-  isolation in the language (namespaces, capabilities). A guest per tool needs a hypervisor
-  under Arbace: on bare metal (the box's long-term target, TamaGo's boards) there is none unless
-  Arbace is it (EL2 on arm64, VMX root on amd64: go-whim's monitor inside Arbace, where the
-  hardware boots it at EL2 or gives VT-x), so the EL1/EL0 split is the isolation that works on
-  any hardware, the guests only where virtualization is there. Prior art: Go's runtime as a user
-  process; GoTEE (github.com/usbarmory/GoTEE: TamaGo unikernels and user-mode applets, TrustZone
-  on arm), to check; unikernels with a privilege split.
+- A kernel and a user part in the box: the survey written (doc/go/KERNEL-USER-SURVEY.md,
+  2026-10-17): recommended a TamaGo runtime per process at EL0 (the same image, a page table per
+  process), language isolation inside processes, S7's guests where virtualization exists, one
+  spawn request; SYSCALL round trip 24.5 ns measured at ring 3; plan KU0-KU6, 17-27 days;
+  K1-K12 decided as recommended; KU0 done (doc/go/PROCESS-SPEC.md; KS1-KS12 decided as
+  recommended); KU1-KU6, 14-23 days.
 - The mapped start measured without nested KVM.
 - A note from the user (2026-10-13): the tooling of the Mac GUI app Moshi Go may be useful for
   Arbace, to study when Arbace's REPL gets a user interface beyond the terminal. Its build info

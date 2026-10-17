@@ -1,0 +1,307 @@
+(ns arbace.repr.java.roundtrip
+  "The oracle of repr/java's round trip (doc/classes/PRINTER-NOTES.md, \"The round trip\"):
+  Java -> forms (F1, repr/java read) -> Java (arbace.repr.java.print) -> forms (F2), judged
+  file by file at three levels:
+
+    forms    F1's and F2's files hold the same forms as data, metadata included (read with the
+             core's reader): what the printer must give back
+    ae       they are the same text, byte for byte (after their first line, which names the
+             Java file read): forms and also the spellings the converter keeps (0x7f)
+    classes  javac's class files of the original Java and of the printed Java, compiled with
+             -g:none (no LineNumberTable, LocalVariableTable or SourceFile), byte for byte
+
+  bin/repr-java roundtrip runs it (bin/lib/repr-java/roundtrip); this namespace compares:
+
+    -m arbace.repr.java.roundtrip compare OPTIONS
+      --f1 DIR --f2 DIR       the two forms trees
+      --c1 DIR --c2 DIR       the two class trees (optional)
+      --rejected 'F.java ...' the printed Java files javac rejected
+      --corpus NAME           the corpus's name in the results
+      --out FILE              the results, read with the core's reader
+      --known FILE            known differences [:file PATH [LEVEL ...] REASON] (expected)
+      --known-out FILE        write the differences with their reasons there
+      --javac-logs 'LOG ...'  javac's logs of the printed Java (the reasons of rejected files)
+      --reference FILE        an earlier result: fail only on regressions against it
+      --record FILE           write the results as a reference (no times)"
+  (:require [arbace.string :as str]
+            [arbace.java.io :as io]
+            [arbace.java.shell :as sh]
+            [arbace.repr.java.print :as pr])
+  (:import [java.io File]))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Forms
+
+(defn- kind [x]
+  (cond (seq? x) :list (vector? x) :vector (map? x) :map (set? x) :set (symbol? x) :symbol
+        (keyword? x) :keyword (string? x) :string (char? x) :char (integer? x) :integer
+        (float? x) :float (nil? x) :nil (boolean? x) :boolean :else (class x)))
+
+(declare diff)
+
+(defn- meta-of [x]
+  (when (instance? arbace.lang.IMeta x) (not-empty (dissoc (meta x) :line :column :end-line :end-column))))
+
+(defn diff
+  "nil when `a` and `b` are the same forms, metadata included; else [path a b] of the first
+  difference."
+  ([a b] (diff a b []))
+  ([a b path]
+   (let [ka (kind a) kb (kind b)]
+     (cond
+       (not= ka kb) [path a b]
+       (not= (some? (meta-of a)) (some? (meta-of b))) [(conj path :meta) (meta-of a) (meta-of b)]
+       (and (meta-of a) (diff (meta-of a) (meta-of b) (conj path :meta))) (diff (meta-of a) (meta-of b) (conj path :meta))
+       (#{:list :vector} ka)
+       (if (not= (count a) (count b))
+         [path a b]
+         (some (fn [[i x y]] (diff x y (conj path i))) (map vector (range) a b)))
+       (= ka :map)
+       (if (not= (set (keys a)) (set (keys b)))
+         [path a b]
+         (some (fn [k] (diff (get a k) (get b k) (conj path k))) (keys a)))
+       (= ka :set) (when (not= a b) [path a b])
+       :else (when (not= a b) [path a b])))))
+
+(defn- shorten [x]
+  (let [s (binding [*print-meta* true *print-length* 6 *print-level* 4] (pr-str x))]
+    (if (> (count s) 160) (str (subs s 0 160) "...") s)))
+
+(defn- body-text
+  "A converted file's text without its first line (the header naming the Java file read)."
+  [^String t]
+  (let [i (.indexOf t "\n")] (if (neg? i) "" (subs t i))))
+
+(defn- ae-files [dir]
+  (let [base (io/file dir)]
+    (sort (for [^File f (file-seq base)
+                :when (and (.isFile f) (str/ends-with? (.getName f) ".ae"))]
+            (str (.relativize (.toPath base) (.toPath f)))))))
+
+(defn compare-forms
+  "{path {:ae :pass|:fail :forms :pass|:fail|:missing :why s}} for the files of F1."
+  [f1 f2]
+  (into (sorted-map)
+        (for [p (ae-files f1)]
+          (let [a (io/file f1 p) b (io/file f2 p)]
+            [p (if-not (.exists b)
+                 {:ae :missing :forms :missing :why "not in F2 (no Java file printed, or not read)"}
+                 (let [ta (slurp a) tb (slurp b)
+                       text? (= (body-text ta) (body-text tb))
+                       d (when-not text?
+                           (try (diff (pr/read-all ta) (pr/read-all tb))
+                                (catch Throwable t [[] (str "unreadable: " (.getMessage t)) nil])))]
+                   (cond-> {:ae (if text? :pass :fail) :forms (if (and (not text?) d) :fail :pass)}
+                     d (assoc :why (str "at " (pr-str (first d)) ": " (shorten (second d)) " | " (shorten (nth d 2))))
+                     ;; the same forms, another text: the only spellings the converter keeps are
+                     ;; integers' radixes (the layout follows from the forms and their lengths)
+                     (and (not text?) (not d))
+                     (assoc :ae-why :radix)
+                     (and d (> (count (re-seq #"\^\[" tb)) (count (re-seq #"\^\[" ta))))
+                     (assoc :forms-why :pin))))]))))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Class files
+
+(defn- class-files [dir]
+  (let [base (io/file dir)]
+    (if (.isDirectory base)
+      (set (for [^File f (file-seq base)
+                 :when (and (.isFile f) (str/ends-with? (.getName f) ".class"))]
+             (str (.relativize (.toPath base) (.toPath f)))))
+      #{})))
+
+(defn- top-classes
+  "The class file stems (p/A, p/package-info, module-info) a converted file stands for."
+  [f1 p]
+  (let [u (pr/unit p (slurp (io/file f1 p)))
+        pkg (str/replace (or (:pkg u) "") "." "/")
+        pre (if (seq pkg) (str pkg "/") "")]
+    (concat
+     (for [f (:forms u) :when (and (seq? f) (= 'defclass (first f)))]
+       (let [n (str (second f))]
+         (if (str/includes? n ".") (str/replace n "." "/") (str pre n))))
+     (for [f (:forms u) :when (and (seq? f) (= 'defpackage (first f)))] (str pre "package-info"))
+     (for [f (:forms u) :when (and (seq? f) (= 'defmodule (first f)))] "module-info"))))
+
+(defn- io-bytes ^bytes [^File f]
+  (java.nio.file.Files/readAllBytes (.toPath f)))
+
+(defn compare-classes
+  "{path {:classes :pass|:fail|:missing :why s}}: the class files of each converted file of F1
+  (its top-level classes and their nested ones) in the two class trees; `rejected` the printed
+  Java files javac rejected (their classes come from the originals)."
+  [f1 c1 c2 rejected]
+  (let [cs1 (class-files c1)
+        cs2 (class-files c2)
+        of-stem (fn [cs stem] (set (filter #(or (= % (str stem ".class")) (str/starts-with? % (str stem "$"))) cs)))]
+    (into (sorted-map)
+          (for [p (ae-files f1)
+                :let [stems (top-classes f1 p)]
+                :when (seq stems)]
+            (let [a (set (mapcat #(of-stem cs1 %) stems))
+                  b (set (mapcat #(of-stem cs2 %) stems))
+                  jp (pr/out-path (pr/unit p (slurp (io/file f1 p))))]
+              [p (cond
+                   (some #(or (= % jp) (str/ends-with? jp (str "/" %)) (str/ends-with? % (str "/" jp))) rejected)
+                   {:classes :fail :why "javac rejects the printed Java"}
+                   (empty? a) {:classes :missing :why "javac made no class of the original"}
+                   (not= a b) {:classes :fail :why (str "classes " (sort (remove b a)) " only in the original, "
+                                                         (sort (remove a b)) " only in the printed")}
+                   :else (let [bad (sort (remove (fn [c] (java.util.Arrays/equals ^bytes (io-bytes (io/file c1 c)) ^bytes (io-bytes (io/file c2 c))))
+                                                 a))]
+                           (if (seq bad)
+                             {:classes :fail :why (str (count bad) " of " (count a) " class files differ: " (str/join " " (take 4 bad)))}
+                             {:classes :pass})))])))))
+
+
+;;; ------------------------------------------------------------------------------------------
+;;; What the class files' differences are (javap -c, the constant pool's indices left out)
+
+(defn- javap-code [^File f]
+  (let [{:keys [out]} (sh/sh "javap" "-c" "-p" "-constants" (str f))]
+    (vec (for [l (str/split-lines out)
+               :when (not (str/starts-with? l "Compiled from"))]
+           (-> l (str/replace #"#[0-9]+" "#") (str/replace #"^\s*[0-9]+: " ""))))))
+
+(defn class-differences
+  "Short reasons for the differences of class file `c` in trees `c1` and `c2`."
+  [c1 c2 c]
+  (let [a (javap-code (io/file c1 c)) b (javap-code (io/file c2 c))]
+    (if (= a b)
+      ["the constant pool's order or an attribute (the same code)"]
+      (let [ds (set (remove str/blank? (concat (remove (set b) a) (remove (set a) b))))
+            has (fn [re] (some #(re-find re %) ds))]
+        (cond-> []
+          (has #"\b(goto|[ailfd]?return)\b") (conj "a value's control flow: ?: or a switch expression on one side, if or a switch statement on the other")
+          (has #"\biinc\b") (conj "an increment's place (i++ in an expression or as a statement)")
+          (has #"\b([ail]const_0|aconst_null|lconst_0|fconst_0|dconst_0)\b") (conj "a local's initializer (Java's default value written or not)")
+          (has #"\b(lookupswitch|tableswitch)\b") (conj "a switch's arms (fall-through repeated)")
+          true (#(if (empty? %) [(if (seq ds) (str "code: " (str/trim (first (sort ds)))) "the order of the code (the same instructions)")] %)))))))
+
+(defn classify-classes
+  "Adds :class-why reasons to the results of files whose classes differ."
+  [results c1 c2]
+  (let [todo (for [[p r] results
+                   :when (= :fail (:classes r))
+                   :let [m (re-find #"differ: (.*)$" (or (:why r) ""))]
+                   :when m]
+               [p (str/split (second m) #" ")])
+        reasons (into {} (pmap (fn [[p cs]]
+                                 [p (str/join "; " (distinct (mapcat #(class-differences c1 c2 %) cs)))])
+                               todo))]
+    (into (sorted-map) (for [[p r] results] [p (if-let [w (get reasons p)] (assoc r :class-why w) r)]))))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Results, known differences, references
+
+(def levels [:forms :ae :classes])
+
+(defn- read-edn-file [path]
+  (pr/read-all (slurp path)))
+
+(defn- known-map
+  "{path {:levels #{...} :reason s}} of a known-differences file."
+  [path]
+  (if (and path (.exists (io/file path)))
+    (reduce (fn [m [k p ls reason]]
+              (if (= :file k) (update-in m [p :levels] (fnil into #{}) ls) m))
+            {} (read-edn-file path))
+    {}))
+
+(defn summarize [results]
+  (into {} (for [l levels]
+             [l (frequencies (keep #(get % l) (vals results)))])))
+
+(defn- write-results [file corpus results with-why?]
+  (spit file
+        (str ";; repr/java's round trip of corpus " corpus " (arbace.repr.java.roundtrip): one entry per\n"
+             ";; converted file, [:file PATH {LEVEL :pass|:fail|:missing} WHY].\n"
+             "{:corpus " (pr-str corpus) "\n :summary " (pr-str (summarize results)) "\n :results\n ["
+             (str/join "\n  " (for [[p r] results]
+                                (str "[:file " (pr-str p) " " (pr-str (select-keys r levels))
+                                     (when (and with-why? (:why r)) (str " " (pr-str (:why r)))) "]")))
+             "]}\n")))
+
+(defn- reference-map [path]
+  (when (and path (.exists (io/file path)))
+    (let [[m] (read-edn-file path)]
+      (into {} (for [[_ p r] (:results m)] [p r])))))
+
+(defn- javac-errors
+  "{java-path first-error-message} from javac logs."
+  [logs]
+  (reduce (fn [m log]
+            (reduce (fn [m [_ f msg]]
+                      (let [f (str/replace f #"^\./" "")]
+                        (if (contains? m f) m (assoc m f msg))))
+                    m (re-seq #"(?m)^([^ :]+\.java):\d+: error: (.*)$" (slurp log))))
+          {} logs))
+
+(defn- reason
+  "The reason of a difference at `level` of file `p` with result `r`."
+  [p r level errors f1]
+  (let [why (or (:why r) "")
+        jp (try (some-> (pr/unit p (slurp (io/file f1 p))) pr/out-path) (catch Throwable _ nil))
+        err (when jp (some (fn [[f msg]] (when (or (= f jp) (str/ends-with? f (str "/" jp)) (str/ends-with? jp (str "/" f))) msg)) errors))]
+    (cond
+      (str/includes? why "javac rejects")
+      (str "javac rejects the printed Java (" (or err "see the log")
+           "): Java's type arguments in code are not in the forms (SPEC §1, principle 4), and the printer's casts do not recover them here")
+      (and (= level :ae) (= :radix (:ae-why r)))
+      "an integer's radix: the file writes the value in two radixes (0x01 and 1), the reader keeps none, so the printer writes it in decimal (the layout follows the tokens' lengths)"
+      (and (= level :classes) (:class-why r)) (str "the class files differ: " (:class-why r))
+      (and (#{:forms :ae} level) (nil? jp))
+      "the package's namespace file loads its converted files: those of the Java files javac rejects (below) are missing"
+      (and (#{:forms :ae} level) (or (= :pin (:forms-why r)) (re-find #"\^\[|param-tags" why)))
+      (str "the overload of an integer literal argument: the printer has no declaration of the callee's class (in the corpus, jdk/forms or the host) to write the literal as a long or an int (" why ")")
+      (str/includes? why "not in F2") "the printed Java was not read (javac rejects it)"
+      :else why)))
+
+(defn- write-known [file corpus results errors f1]
+  (spit file
+        (str ";; The differences of repr/java's round trip of corpus " corpus " with their reasons: [:file PATH\n"
+             ";; [LEVEL ...] REASON] per difference (arbace.repr.java.roundtrip; bin/repr-java roundtrip --record).\n"
+             (str/join "\n" (for [[p r] results
+                                  l levels
+                                  :let [v (get r l)]
+                                  :when (and v (not= v :pass))]
+                              (pr-str [:file p [l] (reason p r l errors f1)])))
+             "\n")))
+
+(defn -main [cmd & args]
+  (let [opts (into {} (for [[k v] (partition 2 args)] [(keyword (subs k 2)) v]))
+        {:keys [f1 f2 c1 c2 corpus out known reference record known-out javac-logs]} opts
+        forms (compare-forms f1 f2)
+        classes (when (and c1 c2) (compare-classes f1 c1 c2 (remove str/blank? (str/split (or (:rejected opts) "") #" "))))
+        results (merge-with (fn [a b] (assoc (merge a b) :why (str/join "; " (keep :why [a b]))))
+                            forms (or classes {}))
+        results (into (sorted-map) (for [[p r] results] [p (cond-> r (str/blank? (:why r)) (dissoc :why))]))
+        results (if (and known-out c1 c2) (classify-classes results c1 c2) results)
+        km (known-map known)
+        ref (reference-map reference)
+        problems (for [[p r] results
+                       l levels
+                       :let [v (get r l)]
+                       :when (and v (not= v :pass))
+                       :when (not (contains? (get-in km [p :levels]) l))
+                       :when (or (nil? ref) (= :pass (get-in ref [p l])) (nil? (get ref p)))]
+                   [p l v (:why r)])
+        fixed (for [[p {ls :levels}] km, l ls
+                    :when (= :pass (get-in results [p l]))]
+                [p l])]
+    (when out (write-results out corpus results true))
+    (when record (write-results record corpus results false))
+    (when known-out
+      (write-known known-out corpus results
+                   (javac-errors (remove str/blank? (str/split (or javac-logs "") #" ")))
+                   f1))
+    (println (str "round trip of " corpus ": " (count results) " files"))
+    (doseq [l levels :let [fr (get (summarize results) l)] :when (seq fr)]
+      (println (format "  %-8s %s" (name l) (str/join ", " (for [[k n] (sort-by key fr)] (str n " " (name k)))))))
+    (doseq [[p l] fixed] (println "  known difference now passes:" p (name l)))
+    (doseq [[p l v why] (take 40 problems)]
+      (println "  UNEXPECTED" (name l) (name v) p (or why "")))
+    (when (> (count problems) 40) (println "  ..." (- (count problems) 40) "more"))
+    (shutdown-agents)
+    (System/exit (if (seq problems) 1 0))))
