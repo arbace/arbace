@@ -19,10 +19,13 @@
       --corpus NAME           the corpus's name in the results
       --out FILE              the results, read with the core's reader
       --known FILE            known differences [:file PATH [LEVEL ...] REASON] (expected)
+      --known-out FILE        write the differences with their reasons there
+      --javac-logs 'LOG ...'  javac's logs of the printed Java (the reasons of rejected files)
       --reference FILE        an earlier result: fail only on regressions against it
       --record FILE           write the results as a reference (no times)"
   (:require [arbace.string :as str]
             [arbace.java.io :as io]
+            [arbace.java.shell :as sh]
             [arbace.repr.java.print :as pr])
   (:import [java.io File]))
 
@@ -75,6 +78,12 @@
                 :when (and (.isFile f) (str/ends-with? (.getName f) ".ae"))]
             (str (.relativize (.toPath base) (.toPath f)))))))
 
+(defn- numbers-normalized
+  "Text `t` with every integer token as its decimal value (0x1f and 31 the same)."
+  [^String t]
+  (str/replace t #"(?<![A-Za-z0-9_.$/*+!?<>=&%:#'-])-?(?:0[xX][0-9a-fA-F]+|0[0-7]+|2r[01]+)(?![A-Za-z0-9_.$/])"
+               (fn [m] (str (#'pr/token-value m)))))
+
 (defn compare-forms
   "{path {:text :pass|:fail :forms :pass|:fail|:missing :why s}} for the files of F1."
   [f1 f2]
@@ -89,7 +98,9 @@
                            (try (diff (pr/read-all ta) (pr/read-all tb))
                                 (catch Throwable t [[] (str "unreadable: " (.getMessage t)) nil])))]
                    (cond-> {:text (if text? :pass :fail) :forms (if (and (not text?) d) :fail :pass)}
-                     d (assoc :why (str "at " (pr-str (first d)) ": " (short (second d)) " | " (short (nth d 2)))))))]))))
+                     d (assoc :why (str "at " (pr-str (first d)) ": " (short (second d)) " | " (short (nth d 2))))
+                     (and (not text?) (not d) (= (numbers-normalized (body-text ta)) (numbers-normalized (body-text tb))))
+                     (assoc :text-why :radix))))]))))
 
 ;;; ------------------------------------------------------------------------------------------
 ;;; Class files
@@ -147,6 +158,43 @@
 
 
 ;;; ------------------------------------------------------------------------------------------
+;;; What the class files' differences are (javap -c, the constant pool's indices left out)
+
+(defn- javap-code [^File f]
+  (let [{:keys [out]} (sh/sh "javap" "-c" "-p" "-constants" (str f))]
+    (vec (for [l (str/split-lines out)
+               :when (not (str/starts-with? l "Compiled from"))]
+           (-> l (str/replace #"#[0-9]+" "#") (str/replace #"^\s*[0-9]+: " ""))))))
+
+(defn class-differences
+  "Short reasons for the differences of class file `c` in trees `c1` and `c2`."
+  [c1 c2 c]
+  (let [a (javap-code (io/file c1 c)) b (javap-code (io/file c2 c))]
+    (if (= a b)
+      ["the constant pool's order or an attribute (the same code)"]
+      (let [ds (set (remove str/blank? (concat (remove (set b) a) (remove (set a) b))))
+            has (fn [re] (some #(re-find re %) ds))]
+        (cond-> []
+          (has #"\b(goto|[ailfd]?return)\b") (conj "a value's control flow: ?: or a switch expression on one side, if or a switch statement on the other")
+          (has #"\biinc\b") (conj "an increment's place (i++ in an expression or as a statement)")
+          (has #"\b([ail]const_0|aconst_null|lconst_0|fconst_0|dconst_0)\b") (conj "a local's initializer (Java's default value written or not)")
+          (has #"\b(lookupswitch|tableswitch)\b") (conj "a switch's arms (fall-through repeated)")
+          true (#(if (empty? %) [(if (seq ds) (str "code: " (str/trim (first (sort ds)))) "the order of the code (the same instructions)")] %)))))))
+
+(defn classify-classes
+  "Adds :class-why reasons to the results of files whose classes differ."
+  [results c1 c2]
+  (let [todo (for [[p r] results
+                   :when (= :fail (:classes r))
+                   :let [m (re-find #"differ: (.*)$" (or (:why r) ""))]
+                   :when m]
+               [p (str/split (second m) #" ")])
+        reasons (into {} (pmap (fn [[p cs]]
+                                 [p (str/join "; " (distinct (mapcat #(class-differences c1 c2 %) cs)))])
+                               todo))]
+    (into (sorted-map) (for [[p r] results] [p (if-let [w (get reasons p)] (assoc r :class-why w) r)]))))
+
+;;; ------------------------------------------------------------------------------------------
 ;;; Results, known differences, references
 
 (def levels [:text :forms :classes])
@@ -158,8 +206,9 @@
   "{path {:levels #{...} :reason s}} of a known-differences file."
   [path]
   (if (and path (.exists (io/file path)))
-    (into {} (for [[k p ls reason] (read-edn-file path) :when (= :file k)]
-               [p {:levels (set ls) :reason reason}]))
+    (reduce (fn [m [k p ls reason]]
+              (if (= :file k) (update-in m [p :levels] (fnil into #{}) ls) m))
+            {} (read-edn-file path))
     {}))
 
 (defn summarize [results]
@@ -181,14 +230,56 @@
     (let [[m] (read-edn-file path)]
       (into {} (for [[_ p r] (:results m)] [p r])))))
 
+(defn- javac-errors
+  "{java-path first-error-message} from javac logs."
+  [logs]
+  (reduce (fn [m log]
+            (reduce (fn [m [_ f msg]]
+                      (let [f (str/replace f #"^\./" "")]
+                        (if (contains? m f) m (assoc m f msg))))
+                    m (re-seq #"(?m)^([^ :]+\.java):\d+: error: (.*)$" (slurp log))))
+          {} logs))
+
+(defn- reason
+  "The reason of a difference at `level` of file `p` with result `r`."
+  [p r level errors f1]
+  (let [why (or (:why r) "")
+        jp (try (some-> (pr/unit p (slurp (io/file f1 p))) pr/out-path) (catch Throwable _ nil))
+        err (when jp (some (fn [[f msg]] (when (or (= f jp) (str/ends-with? f (str "/" jp)) (str/ends-with? jp (str "/" f))) msg)) errors))]
+    (cond
+      (str/includes? why "javac rejects")
+      (str "javac rejects the printed Java (" (or err "see the log")
+           "): Java's type arguments in code are not in the forms (SPEC §1, principle 4), and the printer's casts do not recover them here")
+      (and (= level :text) (= :radix (:text-why r)))
+      "an integer's radix: the file writes the value in two radixes (0x01 and 1), the reader keeps none, so the printer writes it in decimal"
+      (and (= level :classes) (:class-why r)) (str "the class files differ: " (:class-why r))
+      (and (#{:forms :text} level) (nil? jp))
+      "the package's namespace file loads its converted files: those of the Java files javac rejects (below) are missing"
+      (and (#{:forms :text} level) (re-find #"\^\[|param-tags" why))
+      (str "the overload of an integer literal argument: the printer has no declaration of the callee's class (in the corpus, jdk/forms or the host) to write the literal as a long or an int (" why ")")
+      (str/includes? why "not in F2") "the printed Java was not read (javac rejects it)"
+      :else why)))
+
+(defn- write-known [file corpus results errors f1]
+  (spit file
+        (str ";; The differences of repr/java's round trip of corpus " corpus " with their reasons: [:file PATH\n"
+             ";; [LEVEL ...] REASON] per difference (arbace.repr.java.roundtrip; bin/repr-java roundtrip --record).\n"
+             (str/join "\n" (for [[p r] results
+                                  l levels
+                                  :let [v (get r l)]
+                                  :when (and v (not= v :pass))]
+                              (pr-str [:file p [l] (reason p r l errors f1)])))
+             "\n")))
+
 (defn -main [cmd & args]
   (let [opts (into {} (for [[k v] (partition 2 args)] [(keyword (subs k 2)) v]))
-        {:keys [f1 f2 c1 c2 corpus out known reference record]} opts
+        {:keys [f1 f2 c1 c2 corpus out known reference record known-out javac-logs]} opts
         forms (compare-forms f1 f2)
         classes (when (and c1 c2) (compare-classes f1 c1 c2 (remove str/blank? (str/split (or (:rejected opts) "") #" "))))
         results (merge-with (fn [a b] (assoc (merge a b) :why (str/join "; " (keep :why [a b]))))
                             forms (or classes {}))
         results (into (sorted-map) (for [[p r] results] [p (cond-> r (str/blank? (:why r)) (dissoc :why))]))
+        results (if (and known-out c1 c2) (classify-classes results c1 c2) results)
         km (known-map known)
         ref (reference-map reference)
         problems (for [[p r] results
@@ -203,6 +294,10 @@
                 [p l])]
     (when out (write-results out corpus results true))
     (when record (write-results record corpus results false))
+    (when known-out
+      (write-known known-out corpus results
+                   (javac-errors (remove str/blank? (str/split (or javac-logs "") #" ")))
+                   f1))
     (println (str "round trip of " corpus ": " (count results) " files"))
     (doseq [l levels :let [fr (get (summarize results) l)] :when (seq fr)]
       (println (format "  %-8s %s" (name l) (str/join ", " (for [[k n] (sort-by key fr)] (str n " " (name k)))))))

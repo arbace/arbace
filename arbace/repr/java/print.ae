@@ -40,13 +40,13 @@
          tail-jump? uses-of fold-increment body-lines stmts rebinding? cond-leaves assigns-only-init?
          assign-chain-lines let-decls let-lines single-statement? if-else-lines has-postfix-temp? calls? hoistable-temp?
          if-lines if-instance-lines push-loop break-to break-lines continue-lines try-lines resources-text
-         pinned-cands ctor-call-lines letclass-lines st loop-jumps jump-form? loop-tail labeled
-         update-text recur-loop-lines empty-loop-lines for-each-coll-text loop-lines match-exception-default? switch-parts const-label-text
-         pattern-label? case-head arm-lines switch-lines switch-expr-text ns-sym fn-env stmt-expr-text
-         fi-cast-text lambda-text method-ref-text anon-text modifiers-text javadoc member-classes class-frame-env
-         param-text params-text receiver-param-text split-opts method-lines ctor-lines field-lines constants-lines
-         member-lines class-body-lines module-lines java-name out-path all-class-names java-text ae-files
-         load-units print-units)
+         pinned-cands ctor-call-lines letclass-lines st loop-jumps jump-form? loop-tail temp-numbers
+         labeled update-text mentions-sym? update-order recur-loop-lines empty-loop-lines for-each-coll-text loop-lines
+         match-exception-default? switch-parts const-label-text pattern-label? case-head arm-lines switch-lines switch-expr-text
+         ns-sym fn-env stmt-expr-text fi-cast-text lambda-text method-ref-text anon-text modifiers-text
+         javadoc member-classes class-frame-env param-text params-text receiver-param-text split-opts method-lines
+         ctor-lines field-lines constants-lines member-lines class-body-lines module-lines java-name out-path
+         all-class-names java-text ae-files load-units print-units)
 
 ;;; ------------------------------------------------------------------------------------------
 ;;; Reading converted files
@@ -529,8 +529,14 @@
           q (str/join "." (butlast parts))
           inner (str (annotations-text scope (meta b)) (last parts)
                      (when (seq? b) (str "<" (str/join ", " (map #(type-text scope %) (rest b))) ">")))
-          ;; a member class in scope is qualified by its outer class with type variables
-          outer-generic (when-let [o (:owner-type scope)] (when (= (:member-of scope) (str bare)) o))]
+          ;; an inner class of a generic class: qualified by the outer class with its type
+          ;; variables, as its type is (Outer<T>.Inner)
+          outer-generic (when (and (symbol? bare) (str/includes? bin "$"))
+                          (let [outer (subs bin 0 (.lastIndexOf ^String bin "$"))
+                                od (decl-of outer)
+                                d (decl-of bin)]
+                            (when (and (seq (:tparams od)) d (not (:static? d)))
+                              (str (canonical (simple-of outer)) "<" (str/join ", " (:tparams od)) ">"))))]
       (str (cond outer-generic (str outer-generic ".") (seq q) (str q ".") :else "")
            inner (apply str (map #(dim-text scope %) ds))))
     (type-text scope t)))
@@ -654,6 +660,7 @@
                     {:name "valueOf" :ps ["java.lang.String"] :ret bin :static? true}]))]
     (swap! acc assoc bin
            {:kind kind
+            :static? (boolean (or (:static m) (not= kind :class)))
             :nested (set (member-classes members))
             :tparams (mapv tparam-name tps)
             :super (cond
@@ -881,12 +888,14 @@
       (if (= "super" (name r)) (some-> b (#(get *decls* %)) :super) b))
     :else (type-of env r)))
 
-(defn- call-jtype [env owner mname args]
+(defn- call-jtype [env owner mname args & [pins]]
   (when owner
     (if (and (= mname "clone") (empty? args) (str/ends-with? (str owner) "[]"))
       owner
-      (let [owner (if (str/ends-with? owner "[]") "java.lang.Object" owner)]
-        (choose-ret (find-methods owner mname (count args)) (map #(type-of env %) args))))))
+      (let [owner (if (str/ends-with? owner "[]") "java.lang.Object" owner)
+            ms (find-methods owner mname (count args))
+            ms (if pins (or (seq (filter #(= pins (:ps %)) ms)) ms) ms)]
+        (choose-ret ms (map #(type-of env %) args))))))
 
 (defn type-of
   "The jtype of form `x`, or nil."
@@ -919,11 +928,12 @@
           (cond
             (nil? hn) nil
             (and (namespace h) (not (#{"arbace.core" "clojure.core"} (namespace h))))
-            (let [c (namespace h)]
+            (let [c (namespace h)
+                  pins (some->> (:param-tags (meta h)) (mapv #(erase (:scope env) %)))]
               (cond
                 (#{"new" "."} hn) (class-binary (:scope env) (ns-sym c))
-                (str/starts-with? hn ".") (call-jtype env (class-binary (:scope env) (ns-sym c)) (subs hn 1) (rest args))
-                :else (call-jtype env (class-binary (:scope env) (ns-sym c)) hn args)))
+                (str/starts-with? hn ".") (call-jtype env (class-binary (:scope env) (ns-sym c)) (subs hn 1) (rest args) pins)
+                :else (call-jtype env (class-binary (:scope env) (ns-sym c)) hn args pins)))
             (int-result-ops hn) "int"
             (float-result-ops hn) "float"
             (long-or-double-ops hn) (if (some #(= "double" (type-of env %)) args) "double" "long")
@@ -1113,18 +1123,24 @@
   [env a cands i]
   (when (and (seq cands)
              (every? #(let [j (min i (dec (count (:ps %))))] (or (get (:ps-ctvar %) j) (get (:ps-mtvar %) j))) cands)
-             (not (literal? a)) (not (and (seq? a) (#{"lambda" "method-ref" "cast" "new"} (str (head a))))))
+             (not (literal? a)) (not (and (seq? a) (#{"lambda" "method-ref" "new"} (str (head a))))))
     (let [sc (:scope env)
           tvs (filter #(= "java.lang.Object" (erase sc (symbol %))) (:tvars sc))
           at (type-of env a)
-          ps (keep #(param-at % i) cands)]
+          ps (keep #(param-at % i) cands)
+          ctv (when (is? a 'cast) (filter #(= (erase sc (second a)) (erase sc (symbol %))) (:tvars sc)))]
+      (cond
+        ;; (E) x for the converter's erasure cast (cast Enum x) where E extends Enum<E>
+        (and (is? a 'cast) (= 1 (count ctv)) (nil? (meta-tag a))) [:replace (first ctv)]
+        (is? a 'cast) nil
+        :else
       (when (and (= 1 (count tvs))
                  (not (and (symbol? a) (#{(symbol (first tvs)) (symbol (first tvs) "1")} (decl-form-of env a)))))
         (cond
           ;; T[] for Object[] where the parameters take arrays
           (and (= "java.lang.Object[]" at) (every? #(= "java.lang.Object[]" %) ps)) (str "(" (first tvs) "[]) ")
           (and (or (nil? at) (= "java.lang.Object" at)) (every? #(= "java.lang.Object" %) ps)) (str "(" (first tvs) ") ")
-          :else nil)))))
+          :else nil))))))
 
 (defn- args-text
   ([env args] (args-text env args nil))
@@ -1140,6 +1156,8 @@
                                                     a)]
                                             (cond
                                               (and (integer? a) (long-literal-arg? cands i ats)) (int-literal a true)
+                                              (vector? (tvar-arg-cast env a cands i))
+                                              (str "(" (second (tvar-arg-cast env a cands i)) ") " (ex-text env (nth a 2) P-UNARY))
                                               (tvar-arg-cast env a cands i) (str (tvar-arg-cast env a cands i) (ex-text env a P-UNARY))
                                               (fi-arg-cast env a cands) (str (fi-arg-cast env a cands) (ex-text env a P-UNARY))
                                               :else (ex-text env a P-ASSIGN))))
@@ -1334,7 +1352,14 @@
      ;; a lambda gets the target's type arguments for its intersection type (Comparator<T> &
      ;; Serializable)
      (and tform (seq? x) (or (#{"lambda" "method-ref"} (str (head x))) (and (is? x 'cast) (intersection-fn-cast x))))
-     (ex-text (assoc env :fi-target tform) (if (is? x 'cast) (intersection-fn-cast x) x) P-ASSIGN)
+     (let [y (if (is? x 'cast) (intersection-fn-cast x) x)
+           fi (second y)
+           sc (:scope env)]
+       (str (when (and (symbol? fi) (not= (erase sc fi) (erase sc tform))
+                       (let [b (class-binary sc fi)] (and b (decl-of b) (empty? (:tparams (decl-of b))))))
+              ;; the lambda's own interface, a subtype of the target's (javac's target was a cast)
+              (str "(" (type-text sc fi) ") "))
+            (ex-text (assoc env :fi-target tform) y (if (not= (erase sc fi) (erase sc tform)) P-UNARY P-ASSIGN))))
      ;; a field of another declared type for a parameterized or variable type: Java's
      ;; unchecked cast
      (and tform (generic-form? env tform) (or (field-read? env x) (local? env x) (is? x 'aget))
@@ -1518,7 +1543,13 @@
     :else
     (case (str (head x))
       ("let") (boolean (expand-temps env x))
-      ("do") (and (= 3 (count x)) (expr-form? env (nth x 1)) (let [l (nth x 2)] (or (symbol? l) (seq? l))))
+      ;; (do obj (C/m ...)) and (do obj C/f): obj.m(...), obj.f
+      ("do") (and (= 3 (count x)) (expr-form? env (nth x 1))
+                  (let [l (nth x 2)]
+                    (or (and (symbol? l) (namespace l))
+                        (and (seq? l) (symbol? (first l)) (namespace (first l))
+                             (not (str/starts-with? (name (first l)) "."))
+                             (not (#{"arbace.core" "clojure.core"} (namespace (first l))))))))
       ("loop" "while" "for-each" "try" "locking" "with-resources" "throw" "return" "break" "continue"
        "java-assert" "letclass" "label" "this." "super." ".super") false
       ("if" "if-not") (and (expr-form? env (nth x 2)) (expr-form? env (nth x 3 nil)))
@@ -2282,7 +2313,11 @@
     :else
     (let [lbl (get (:labels env) kw)]
       (cond
-        (= ::continue (:java lbl)) ["continue;"]
+        (= ::continue (:java lbl))
+        (let [fr (:frame lbl)]
+          (if (or (nil? fr) (identical? fr (first (:loops env))))
+            ["continue;"]
+            [(str "continue " (or @(:label fr) (reset! (:label fr) (fresh-label env))) ";")]))
         (:label lbl) [(break-to env lbl)]
         :else [(str "break " (or (:java lbl) (java-label kw)) ";")]))))
 
@@ -2396,7 +2431,7 @@
                       (block (str l ":") (body-lines (assoc-in env [:labels kw] {:java l}) body ctx)))))
         "break" (break-lines env x ctx)
         "continue" (continue-lines env x)
-        "return" (if (next x) [(str "return " (ex-text env (second x) P-ASSIGN) ";")] ["return;"])
+        "return" (if (next x) [(str "return " (target-text env (second x) (:ret-jt env) (:ret-tag env)) ";")] ["return;"])
         "throw" [(str "throw " (if-let [tv (first (filter #(tvar-throws? env %) (:throws env)))]
                                  (str "(" tv ") " (ex-text env (second x) P-UNARY))
                                  (ex-text env (second x) P-ASSIGN))
@@ -2475,6 +2510,16 @@
         (is? x 'switch) (switch-lines env x nil :loop)
         :else (into (st env x :stmt) (break-lines env '(break) :stmt))))))
 
+(defn- temp-numbers
+  "The numbers of the converter's temporaries bound in form `x` (old-3: 3)."
+  [x]
+  (cond
+    (and (is? x 'let) (vector? (second x)))
+    (concat (keep #(when (temp? %) (parse-long (last (str/split (name %) #"-")))) (take-nth 2 (second x)))
+            (mapcat temp-numbers (rest x)))
+    (coll? x) (mapcat temp-numbers x)
+    :else nil))
+
 (defn- labeled [frame lines]
   (if-let [l @(:label frame)]
     (into [(str l ": " (first lines))] (rest lines))
@@ -2484,6 +2529,22 @@
   "The for loop's update: binding `s` gets `v`."
   [env s v]
   (second (assign-text env s (ident s) v false)))
+
+(defn- mentions-sym? [x s]
+  (cond (= x s) true (coll? x) (some #(mentions-sym? % s) x) :else false))
+
+(defn- update-order
+  "The updates [sym value] of a loop/recur (parallel) in an order Java's sequential for update
+  gives the same values: an update reading a variable goes before that variable's own update."
+  [pairs]
+  (loop [todo (vec (remove (fn [[s a]] (= s a)) pairs)) out []]
+    (if (empty? todo)
+      out
+      (let [i (or (first (keep-indexed (fn [i [s _]]
+                                         (when (not-any? (fn [[s2 a2]] (and (not= s2 s) (mentions-sym? a2 s))) todo) i))
+                                       todo))
+                  0)]
+        (recur (vec (concat (subvec todo 0 i) (subvec todo (inc i)))) (conj out (todo i)))))))
 
 (defn- recur-loop-lines [env [_ bv & body] frame]
   (let [pairs (partition 2 bv)
@@ -2501,6 +2562,7 @@
         b1 (first body)
         [c inner] (cond
                     (and (= 1 (count body)) (is? b1 'when)) [(second b1) (drop 2 b1)]
+                    (and (= 1 (count body)) (is? b1 'when-not)) [(list 'not (second b1)) (drop 2 b1)]
                     (and (= 1 (count body)) (is? b1 'if) (= 4 (count b1)) (nil? (nth b1 3))) [(second b1) [(nth b1 2)]]
                     :else [nil body])
         env-b env]
@@ -2508,8 +2570,7 @@
       (let [init (when (seq pairs)
                    (str (first types) " "
                         (str/join ", " (for [[s i] pairs] (str (ident s) " = " (ex-text (assoc env :target (tag-of s)) i P-ASSIGN))))))
-            upd (str/join ", " (for [[[s _] a] (map vector pairs (or args (map first pairs)))
-                                     :when (not= a s)]
+            upd (str/join ", " (for [[s a] (update-order (map vector (map first pairs) (or args (map first pairs))))]
                                  (update-text env-b s a)))
             env' (push-loop env-b frame)
             inner (vec inner)
@@ -2531,7 +2592,7 @@
             pre (butlast body)
             ;; (label :do-body ...): a continue
             [pre env'] (if (and (= 1 (count pre)) (is? (first pre) 'label))
-                         (let [[_ kw & lb] (first pre)] [lb (assoc-in env [:labels kw] {:java ::continue})])
+                         (let [[_ kw & lb] (first pre)] [lb (assoc-in env [:labels kw] {:java ::continue :frame frame})])
                          [pre env])
             env' (push-loop env' frame)
             bl (body-lines env' pre :stmt)]
@@ -2580,9 +2641,22 @@
         env (if kw (assoc-in env [:labels kw] frame) env)]
     (case (str (head x))
       "while" (let [[_ c & body] x
+                    body (vec (mapcat forms-of body))
+                    ;; trailing statements with a postfix increment the converter would have
+                    ;; hoisted out of a statement: a for's update (javac's update is converted
+                    ;; without hoisting)
+                    nupd (count (take-while #(and (simple-statement? %) (not (is? % 'let)) (has-postfix-temp? %))
+                                            (rseq body)))
+                    [body upd] [(subvec body 0 (- (count body) nupd)) (subvec body (- (count body) nupd))]
                     env' (push-loop env frame)
-                    bl (body-lines env' body :stmt)]
-                (labeled frame (block (str "while (" (ex-text env c P-ASSIGN) ")") bl)))
+                    bl (body-lines env' body :stmt)
+                    ct (temp-numbers c) bt (temp-numbers body)
+                    for? (or (seq upd) (and (seq ct) (seq bt) (> (apply min ct) (apply max bt))))]
+                (labeled frame (block (if for?
+                                        (str "for (; " (ex-text env c P-ASSIGN) "; "
+                                             (str/join ", " (map #(stmt-expr-text env' %) upd)) ")")
+                                        (str "while (" (ex-text env c P-ASSIGN) ")"))
+                                      bl)))
       "for-each" (let [[_ [b coll] & body] x
                        t (tag-of b)
                        env' (push-loop (add-local env b :jt (when-not t "java.lang.Object")) frame)
