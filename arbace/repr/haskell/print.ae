@@ -34,6 +34,12 @@
   (.codePointCount s (int i) (.length s)))
 
 (defn- raw! [^String s]
+  ;; a CPP module is preprocessed again when GHC reads it: a line that ends in \ (an operator,
+  ;; containers' infixl 9 \\) would be joined with the next, so it ends in an empty comment (R5)
+  (when (and (str/starts-with? s "\n") (contains? (:exts *o*) "CPP"))
+    (let [^StringBuilder sb (:sb *o*) n (.length sb)]
+      (when (and (pos? n) (= \\ (.charAt sb (dec n))))
+        (.append sb " --"))))
   (.append ^StringBuilder (:sb *o*) s)
   (let [nl (sx/count-newlines s)]
     (if (pos? nl)
@@ -141,18 +147,29 @@
 (defn- glue! [] (vreset! (:glue *o*) true))
 
 (defn- goto!
-  "To line l: newlines; a {-# LINE #-} pragma when l was passed"
-  [l]
+  "To line l: newlines; a {-# LINE #-} pragma when l was passed, or when file, a form's :hs/file,
+  is not the one the output is in (R5: another file's nodes, a CPP inclusion's)"
+  [l & [file]]
   (when l
-    (let [now (line-now)]
+    (let [now (line-now)
+          cur (or @(:cur-file *o*) (:file *o*))]
       (cond
+        (and file (not= file cur) (not (full?)))
+        (do (when (layout?) (layout-newline! (inc *indent*)))
+            (when-not @(:bol *o*) (raw! "\n"))
+            (when (= cur (:file *o*)) (vreset! (:main-line *o*) (line-now)))
+            (raw! (str "{-# LINE " l " \"" file "\" #-}\n"))
+            (indent!)
+            (vreset! (:cur-file *o*) file)
+            (vreset! (:line *o*) l)
+            (vreset! (:nl *o*) false))
         (> l now) (do (when (layout?) (layout-newline! (inc *indent*)))
                       (raw! (apply str (repeat (- l now) "\n")))
                       (indent!)
                       (vreset! (:nl *o*) false))
         (< l now) (do (when (layout?) (layout-newline! (inc *indent*)))
                       (raw! "\n")
-                      (raw! (str "{-# LINE " l " \"" (:file *o*) "\" #-}\n"))
+                      (raw! (str "{-# LINE " l " \"" cur "\" #-}\n"))
                       (indent!)
                       (vreset! (:line *o*) l)
                       (vreset! (:nl *o*) false))
@@ -167,7 +184,7 @@
                                          (line-of (second x))))
     :else nil))
 
-(defn- at! [x] (goto! (line-of x)))
+(defn- at! [x] (goto! (line-of x) (when (instance? arbace.lang.IObj x) (:hs/file (meta x)))))
 
 ;;; The layout layout's blocks (SPEC §7.4, 2)
 
@@ -397,6 +414,12 @@
         (let [[_ alt n] x] (str "(#" (apply str (repeat (dec alt) "_|")) "_" (apply str (repeat (- n alt) "|_")) "#)")))
       :else nil)))
 
+(defn- ip-text?
+  "Whether t is an implicit parameter's name, ?x (not an operator beginning with ?: ?~, R5)"
+  [^String t]
+  (and (str/starts-with? t "?") (> (count t) 1)
+       (let [c (.charAt t 1)] (or (Character/isLetter c) (= c \_)))))
+
 (defn- value-name
   "A name as a value or a prefix head: x, (+), (:|)"
   [x]
@@ -404,7 +427,7 @@
       (let [t (sx/name-text x)]
         (cond
           (nil? t) (throw (ex-info (str "not a name: " (pr-str (lv x))) {}))
-          (and (str/starts-with? t "?") (> (count t) 1)) t
+          (ip-text? t) t
           (sx/op-text? t) (str "(" t ")")
           :else t))))
 
@@ -588,7 +611,7 @@
                           (type! (last args) :top))
           (= h '=>) (do (ctx! (butlast args) (last args)) (type! (last args) :top))
           (= h :sig) (let [s (lv (first args))]
-                       (if (and (symbol? s) (str/starts-with? (name s) "?"))
+                       (if (and (symbol? s) (ip-text? (name s)))
                          (do (at! (first args)) (t! (name s)) (sep! "::" (second args)) (type! (second args) :top))
                          (do (type! (first args) :sig-subj) (sep! "::" (second args)) (type! (second args) :top))))
           (= h :infix) (chain-items! (vec args) type!)
@@ -819,7 +842,7 @@
       (builtin-text v) (nt! (builtin-text v))
       (symbol? v) (cond
                     (= v '_) (t! "_")
-                    (str/starts-with? (name v) "?") (t! (name v))
+                    (ip-text? (name v)) (t! (name v))
                     :else (nt! (value-name v)))
       (keyword? v) (nt! (value-name v))
       (vector? v)
@@ -1063,12 +1086,18 @@
     (let [w (first (remove doc-form? cs))]
       (doseq [d (filter doc-form? cs)] (doc! d))
       (at! w) (t! "where") (decls-block! (rest (lv w)) false :body))
-    (loop [xs (seq cs) first? true]
+    (loop [xs (seq cs) first? true sep? false]
       (when xs
         (let [x (first xs)]
           (if (doc-form? x)
-            (do (doc! x) (recur (next xs) first?))
-            (do (sep! (if first? "=" "|") x) (con! x) (recur (next xs) false))))))))
+            ;; a later constructor's documentation after its |, as GHC's Haddock pass reads it:
+            ;; before it, after a -- ^ comment, it would continue that comment (R5: Cabal's
+            ;; | -- | When ...)
+            (let [s (and (not first?) (not sep?) (= :next (lv (second (lv x))))
+                         (some #(not (doc-form? %)) (next xs)))]
+              (when s (sep! "|" x))
+              (doc! x) (recur (next xs) first? (or sep? s)))
+            (do (when-not sep? (sep! (if first? "=" "|") x)) (con! x) (recur (next xs) false false))))))))
 
 (defn- activation!
   "An activation: [] [2] [~2] [~] [~0]"
@@ -1531,9 +1560,13 @@
     ;; line of its own (a ; between two on one line), the lines inside an item at column 2
     (doseq [[i d] (map-indexed vector decls)]
       (let [l (line-of d)
-            h (lv (first (lv d)))]
+            h (lv (first (lv d)))
+            ;; the file of a top-level form: its :hs/file, else the one before it's (R5)
+            fl (or (when (instance? arbace.lang.IObj d) (:hs/file (meta d))) @(:top-file *o*))
+            _ (when fl (vreset! (:top-file *o*) fl))]
         (cond
-          (and l (> l (line-now))) (binding [*indent* 0] (goto! l))
+          (and l (or (> l (line-now)) (and fl (not= fl (or @(:cur-file *o*) (:file *o*))))))
+          (binding [*indent* 0] (goto! l fl))
           (zero? i) (when-not @(:bol *o*) (binding [*indent* 0] (newline!)))
           :else (t! ";"))
         (binding [*indent* (if (layout?) 2 1)]
@@ -1547,7 +1580,7 @@
   [forms full & [layout]]
   (let [{:keys [exts file]} (module-exts forms)]
     {:sb (StringBuilder.) :line (volatile! 1) :col (volatile! 0) :glue (volatile! false) :nl (volatile! false)
-     :bol (volatile! true) :file file :exts exts :full full :toks (volatile! [])
+     :bol (volatile! true) :file file :cur-file (volatile! nil) :top-file (volatile! nil) :main-line (volatile! 1) :exts exts :full full :toks (volatile! [])
      :layout layout :pending (volatile! []) :prev (volatile! nil) :lind (volatile! 1)
      :star-type (not (contains? (set (map str (map lv (mapcat rest (filter #(= 'hs/language (lv (first (lv %)))) forms)))))
                                 "NoStarIsType"))}))
@@ -1686,5 +1719,11 @@
     (let [forms (mapv lift-all forms)]
       (binding [*o* (out-of forms false (= layout :layout))]
         (print-body! forms)
+        ;; the text ends in the module's file, as the original's (GHC's span of the module is in
+        ;; the file it ends in; R5: a module whose text is another file's)
+        (when-let [cur @(:cur-file *o*)]
+          (when (not= cur (:file *o*))
+            (when-not @(:bol *o*) (raw! "\n"))
+            (raw! (str "{-# LINE " (inc @(:main-line *o*)) " \"" (:file *o*) "\" #-}"))))
         (raw! "\n")
         {:file (:file *o*) :text (str (:sb *o*))}))))

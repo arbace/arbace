@@ -38,23 +38,39 @@
   [x]
   (if (L? x) (recur (nth x 2)) x))
 
+(defn- file-span?
+  "A span in another file than the module's: [\"file\" l1 c1 l2 c2] (a CPP inclusion of Haskell
+  source, a LINE pragma; R5)"
+  [s]
+  (and (vector? s) (= 5 (count s)) (string? (first s))))
+
 (defn line-of
-  "The start line of a located node (the outermost L with a span in the module's file), or nil"
+  "The start line of a located node (the outermost L with a span, in the module's file or, R5,
+  another), or nil"
   [x]
   (when (L? x)
     (let [s (nth x 1)]
-      (if (and (vector? s) (= 4 (count s)))
-        (first s)
-        (line-of (nth x 2))))))
+      (cond (and (vector? s) (= 4 (count s))) (first s)
+            (file-span? s) (nth s 1)
+            :else (line-of (nth x 2))))))
+
+(defn file-of
+  "The file of a located node's span: nil in the module's file, else its name (R5)"
+  [x]
+  (when (L? x)
+    (let [s (nth x 1)]
+      (cond (and (vector? s) (= 4 (count s))) nil
+            (file-span? s) (first s)
+            :else (file-of (nth x 2))))))
 
 (defn end-line-of
   "The end line of a located node, or nil"
   [x]
   (when (L? x)
     (let [s (nth x 1)]
-      (if (and (vector? s) (= 4 (count s)))
-        (nth s 2)
-        (end-line-of (nth x 2))))))
+      (cond (and (vector? s) (= 4 (count s))) (nth s 2)
+            (file-span? s) (nth s 3)
+            :else (end-line-of (nth x 2))))))
 
 (defn pos-of
   "[line col] of a located node, for ordering"
@@ -130,12 +146,55 @@
     0))
 
 (defn at
-  "form with the line of the located node node; in mode :full its span too"
+  "form with the line of the located node node; in mode :full its span too; the node's file in
+  ::file (\"\" for the module's), which with-files makes :hs/file where it changes (R5)"
   [form node]
-  (let [f (attach form (line-of node))]
+  (let [f (attach form (line-of node))
+        f (if (and (not (lit? f)) (instance? arbace.lang.IObj f) (line-of node))
+            (vary-meta f assoc ::file (or (file-of node) ""))
+            f)]
     (if (and *full* (not (lit? f)) (instance? arbace.lang.IObj f))
       (if-let [s (span-of node)] (vary-meta f assoc :hs/pos {:span s}) f)
       f)))
+
+(defn with-files
+  "The forms, each located form's ::file dropped, and :hs/file \"file\" (main-file the module's
+  :file) on a top-level form whose file is not the one of the top-level form before it, and on a
+  form inside one whose file is not the one of the located form before it, in order (R5: the
+  nodes of another file, which the printer puts there with {-# LINE #-}). No form of a module
+  without such spans changes."
+  [forms main-file]
+  (let [cur (volatile! "")
+        rebuild (fn [x f]
+                  (cond
+                    (seq? x) (with-meta (apply list (map f x)) (meta x))
+                    (vector? x) (with-meta (mapv f x) (meta x))
+                    :else x))
+        step (fn step [x]
+               (if (and (instance? arbace.lang.IObj x) (contains? (meta x) ::file))
+                 (let [fl (::file (meta x))
+                       m (dissoc (meta x) ::file)
+                       m (if (= fl @cur) m (assoc m :hs/file (if (= fl "") main-file fl)))]
+                   (vreset! cur fl)
+                   (rebuild (with-meta x m) step))
+                 (rebuild x step)))
+        first-file (fn first-file [x]
+                     (cond
+                       (and (instance? arbace.lang.IObj x) (contains? (meta x) ::file)) (::file (meta x))
+                       (or (seq? x) (vector? x)) (some first-file x)
+                       :else nil))]
+    (loop [fs (seq forms) top "" acc []]
+      (if-not fs
+        acc
+        (let [x (first fs)
+              fl (or (first-file x) top)]
+          ;; a top-level form against the top-level form before it, its inside in order
+          (vreset! cur fl)
+          (let [y (step x)
+                y (if (and (not= fl top) (instance? arbace.lang.IObj y))
+                    (vary-meta y assoc :hs/file (if (= fl "") main-file fl))
+                    y)]
+            (recur (next fs) fl (conj acc y))))))))
 
 (defn- full-where
   "Mode :full: form, a class, an instance or a data declaration, marked when it has no items,
@@ -242,11 +301,12 @@
 
 (defn prefix-name
   "The form of a name used as the head of a prefix application (SPEC §5.2: ((:name \"t\") a b)
-  is (t) a b): an operator is always (:name \"t\")"
+  is (t) a b): an operator is always (:name \"t\"), and so is the variable quote, whose
+  application (quote x) would read as the name quote 'x (R5: Cabal's quote (prettyShow tt))"
   [n]
   (let [f (name-of n)
         t (rdr-text n)]
-    (if (and (sx/op-text? t) (not (exact-form n))) (at (list :name t) n) f)))
+    (if (or (and (sx/op-text? t) (not (exact-form n))) (= t "quote")) (at (list :name t) n) f)))
 
 ;;; Literals (SPEC §3.5)
 
@@ -422,7 +482,7 @@
             (HsAppTy HsAppKindTy)
             (let [[h args] (app-spine node #{'HsAppTy 'HsAppKindTy})
                   hf (if (and (= 'HsTyVar (con h)) (= 'NotPromoted (fld h 2)))
-                       (if (= 1 (count args)) (name-of (fld h 3)) (prefix-name (fld h 3)))
+                       (if (and (= 1 (count args)) (not= "quote" (rdr-text (fld h 3)))) (name-of (fld h 3)) (prefix-name (fld h 3)))
                        (tparen h :fun))]
               (apply list hf
                      (for [[k a] args]
@@ -567,7 +627,11 @@
     (cond
       (not placed) (apply list :infix items)
       (and (apply = (map lit-value ops)) (sx/chain-head? o)) (apply list (first ops) operands)
-      (and (apply = (map lit-value ops)) (seq? o) (= :name (first o)) (sx/op-text? (second o)))
+      ;; (:op "t" ...) has no element for its first operator's line, which must then be the
+      ;; last line of the first operand, where the printer puts it (R5: Cabal-syntax's ^^^)
+      (and (apply = (map lit-value ops)) (seq? o) (= :name (first o)) (sx/op-text? (second o))
+           (or (nil? nodes) (let [ol (form-line (first ops)) el (end-line-of (first nodes))]
+                              (or (nil? ol) (nil? el) (= ol el)))))
       (apply list :op (second o) operands)
       :else (apply list :infix items))))
 
@@ -1036,7 +1100,10 @@
   "head-or-ctx: (=> ctx+ head) when a context is given"
   [ctx head]
   (if-let [c (just ctx)]
-    (apply list '=> (concat (map #(tparen % :ctx) (un c)) [head]))
+    ;; the context's line, where its ( is (R5: Cabal-syntax's class on a line of its own)
+    (let [f (apply list '=> (concat (map #(tparen % :ctx) (un c)) [head]))
+          l (line-of c)]
+      (if l (vary-meta f assoc :line l) f))
     head))
 
 (defn- field-type
@@ -1139,7 +1206,11 @@
             o (un outer)
             ty (case (first o)
                  HsOuterImplicit withi
-                 HsOuterExplicit (apply list 'forall (concat (map tvb-form (nth o 2)) [withi]))
+                 ;; the forall's line, when it begins a later line than the names (R5: Cabal's
+                 ;; StaticRuleCommand / :: forall ...)
+                 HsOuterExplicit (let [fa (apply list 'forall (concat (map tvb-form (nth o 2)) [withi]))
+                                       ol (line-of outer)]
+                                   (if ol (vary-meta fa assoc :line ol) fa))
                  (fail! "outer binders" o))
             f (apply list :sig (concat (map name-of names) [ty]))
             dd (con-doc doc)]
@@ -1407,7 +1478,11 @@
                          ns (let [a (un ann)] (when (seq? a) (second a)))
                          [k cat msg] (warning-txt txt)
                          nsf (case (con ns) TypeNamespaceSpecifier ['type] DataNamespaceSpecifier ['data] nil)]
-                     (at (apply list (hs (name k)) (concat (when cat ['in cat]) nsf (map name-of names) [msg])) w))))
+                     (cond-> (at (apply list (hs (name k)) (concat (when cat ['in cat]) nsf (map name-of names) [msg])) w)
+                       ;; the line of the pragma's {-# when it is not the warning's (R5: Cabal's
+                       ;; {-# DEPRECATED on a line of its own); the names keep theirs
+                       (and (= 1 (count ws)) (line-of d) (not= (line-of d) (line-of w)))
+                       (vary-meta assoc :line (line-of d))))))
       RuleD (let [[_ _ rules] (un (nth x 2))]
               [(at (apply list (hs "rules")
                           (for [r rules]
@@ -1603,9 +1678,12 @@
                                 [:file file :positions (if *full* :full :lines) :config cfg]
                                 (when-let [c (:cpp config)] [:cpp c])))
             modf (attach modf (or (some-> (just mname) line-of) 1))
+            ;; the file of the module's name (R5: a module whose text is another file's)
+            modf (if mname (vary-meta modf assoc ::file (or (file-of (just mname)) "")) modf)
             body (concat (map import-form imports)
                          (mapcat #(decl-forms % true :top) decls))]
         {:ns ns-name
-         :forms (vec (concat [(list 'ns ns-name (list :require ['arbace.haskell :as 'hs]))]
-                             prag-forms hdr [modf] body))
+         :forms (with-files (vec (concat [(list 'ns ns-name (list :require ['arbace.haskell :as 'hs]))]
+                                         prag-forms hdr [modf] body))
+                            file)
          :warnings @warnings}))))

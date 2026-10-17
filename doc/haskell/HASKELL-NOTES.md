@@ -6,7 +6,8 @@ departs from or adds to the spec, with the reasons. R1 was built on 2026-10-17 (
 its `ghc` library `ghc-9.14.1-f453`) and stage 0 of that commit. R2, the interface level, was built
 the same day (branch `repr-haskell-r2`, from main at `f515a959`; "R2" below), and R3, mode `:full`
 and the text level, too (branch `repr-haskell-r3`, from main at `73e35434`; "R3" below), and R4,
-the layout printer, too (branch `repr-haskell-r4`, from main at `80530da7`; "R4" below).
+the layout printer, too (branch `repr-haskell-r4`, from main at `80530da7`; "R4" below), and R5,
+the other boot libraries, too (branch `repr-haskell-r5`, from main at `10c7b293`; "R5" below).
 
 ## Decided (2026-10-17, the user)
 
@@ -606,3 +607,228 @@ As built: the layout printer's style (leading separators, `then`/`else`/`in` on 
 expression's line, `where` on its own line, items at column 5) (HR14); braces decided from the
 forms alone in `:lines`, R1-R3's forms unchanged (HR15); the gate runs the layout tree and
 interface levels (HR16).
+
+## R5: the other boot libraries
+
+Built on 2026-10-17 (branch `repr-haskell-r5`, from main at `10c7b293`), on the same GHC and the
+stage 0 of that commit. SPEC §10.1 (R5: "the other boot libraries", judged at all of the above
+levels) defines it; §10.8 records what the build changes in the spec.
+
+### What was built
+
+| part | file | what |
+|---|---|---|
+| corpus | `test/haskell/corpus-ghc-9.14.1.edn` | 37 packages after R1's four, their configurations (below), modules, `.hsc` modules and boot files for R6, generated modules |
+| configurations | `test/haskell/cabal-info/CabalInfo.hs` | a `.cabal` library's build info as Cabal configures it (Cabal-syntax's `finalizePD`), how the corpus's entries were made |
+| generated | `test/haskell/generated/ghc-9.14.1/` | `ghc-boot`'s `GHC.Version` and `GHC.Platform.Host` (hadrian's `Rules/Generate.hs`, the host's `ghc --info`), `Cabal`'s `Paths_Cabal` (after Cabal's template), `cabal_macros.h` (Cabal's macros for the installed packages, for hsc2hs) |
+| converter | `arbace/repr/haskell/convert.ae` (`file-of`, `with-files`; `prefix-name`, `chain-form`, `ctx-wrap`, `WarningD`, `ConDeclGADT`) | another file's nodes as `:hs/file`; the forms found on the way (below) |
+| writer | `arbace/repr/haskell/write.ae` (`displaced-line`, `forms-text`) | the lines of forms placed after their line |
+| printer | `arbace/repr/haskell/print.ae` (`goto!`, `ip-text?`, `cons!`, `raw!`) | `{-# LINE #-}` for another file's nodes; the printing found on the way |
+| command | `bin/repr-haskell` (`corpus_configure`, `tree_jobs`, `iface_level`), `bin/lib/repr-haskell/tree-job` | `:extract`, `:configure`, `:generated-files`; the trees as one job list, packages compiled four at a time, the interfaces shown as one job list |
+| comparison | `arbace/repr/haskell.ae` (`normalize-iface`) | mode `:lines` writes `./F` as `F` |
+| known differences | `test/haskell/roundtrip-ghc-9.14.1-text-known.edn` | the 12 modules whose nodes are in another file, at the text level |
+| cases | `test/haskell/r5/{Cases,Incl}.hs`, `bin/repr-haskell test`'s step 7 | the cases below, both layouts |
+
+### The corpus
+
+The packages are the tarball's `libraries/` that the host's GHC installs (`ghc-pkg list`): all but
+`Win32` (Windows only), and of `libraries/Cabal` and `libraries/containers` the libraries
+`Cabal`, `Cabal-syntax` and `containers` (not `cabal-install`, the test and benchmark packages).
+The compiler (`compiler/`, the hidden `ghc` library) and `utils/`'s packages (`ghc-toolchain`,
+`haddock-api`, `haddock-library`) are boot packages but not libraries of `libraries/`; they are
+for a later corpus (HR17). The modules are those the host's GHC installed for each package (`ghc-pkg
+field PKG exposed-modules,hidden-modules`, re-exports left out), as R1's, each found in the
+package's `hs-source-dirs` (`.hs`, else `.hsc`; a `.hs-boot` beside it a boot file); the modules
+with no source are the generated ones Cabal's `autogen-modules` names.
+
+Each package's configuration is its `.cabal` library's (HR19), evaluated by
+`test/haskell/cabal-info/CabalInfo.hs` (Cabal-syntax's `finalizePD` for linux/x86_64, GHC 9.14.1,
+the dependencies solved against the installed packages' versions; a `.cabal.in` with
+configure's substitutions) with the flags hadrian gives (`hadrian/src/Settings/Packages.hs` of the
+tarball: `unix` and `directory` `+os-string`, `ghci` `+internal-interpreter`, `text` `-simdutf`,
+`haskeline` `-examples +terminfo`, `ghc-boot` `-bootstrap`), recorded as `:cabal-flags`:
+
+- `:language` the `default-language`, Haskell98 when the `.cabal` names none (`pretty`; Cabal's
+  `fromMaybe Haskell98`); `:extensions` the `default-extensions` (also the old `extensions` field,
+  `pretty`'s `CPP`);
+- `:ghc-flags` `-this-unit-id NAME -hide-all-packages`, a `-package` for each `build-depends`
+  (every package compiles against the installed ones, R2's way), the `cpp-options`, `-I` for the
+  `include-dirs`, and the macros of Cabal's `cabal_macros.h` that a module tests: `Cabal`'s
+  `-DCURRENT_PACKAGE_KEY="Cabal-3.16.0.0"` (`Distribution.Simple.Utils` imports `Paths_Cabal`
+  when it is defined) and `ghc-heap`'s `MIN_TOOL_VERSION_ghc(...)` (`GHC.Exts.Stack`; undefined,
+  CPP fails); GHC defines the `MIN_VERSION_pkg` macros itself;
+- `:configure` the headers of the packages of Cabal's build-type Configure (`unix`, `directory`,
+  `process`, `time`: `HsUnixConfig.h`...), made by their `configure` scripts in the extracted
+  tree (`corpus fetch`), as Cabal makes them; `directory`'s and `process`'s are not installed;
+- `:extract` for `containers`: the tarball hard-links `containers/containers`' files to
+  `containers/containers-tests`' (tar cannot extract the first alone);
+- `:generated-files` the generated modules' sources, the same on every side of the interface
+  level; `:hsc-flags` the `include-dirs`, the installed `ghc-internal`'s and `rts`'s headers, and
+  Cabal's macros as a header (`--cflag=-include`), which hsc2hs's `#if`s test
+  (`MIN_VERSION_base`...).
+
+### Another file's nodes (HR18)
+
+Twelve modules have nodes whose spans are in another file than the module's: eleven are a CPP
+`#include` of Haskell source (`filepath`'s `System.FilePath.Posix` and `Windows` are `#define`s
+and `#include "Internal.hs"`, so are `System.OsPath`, `.Posix`, `.Windows` and their
+`.Internal`s; `os-string`'s `System.OsString.Posix` and `Windows` include `Common.hs`;
+`bytestring`'s `Data.ByteString.ReadInt` and `ReadNat` `Lazy/ReadInt.hs` and `Lazy/ReadNat.hs`),
+the twelfth is alex's output, `Cabal-syntax`'s `Distribution.Fields.Lexer`, whose `{-# LINE #-}`
+pragmas name `_build/.../Lexer.x`'s lines and its own. The dump writes such a span `["file" l1 c1
+l2 c2]` (SPEC §8.2); R1's corpus had none.
+
+- The converter takes their lines like others' (`line-of`) and their file (`file-of`); every
+  located form records its file, and `with-files` keeps it, as `:hs/file "file"`, only where it
+  changes: on a top-level form whose file is not the top-level form before it's, and inside one on
+  a form whose file is not the located form before it's, in order; back in the module's own file a
+  form carries its `:file`. A module without such spans gets no `:hs/file`.
+- The printer, at a form with `:hs/file` other than the file it prints in, writes `{-# LINE n
+  "file" #-}` (GHC's lexer then names that file, as CPP's markers did), and at the top level each
+  form switches to its file (or the one before it's); the text ends in the module's file (GHC's
+  span of the module is in the file it ends in). The writer gives a list without a line the
+  Haskell line of the form before it where the file's line is not it (a form placed after its
+  line), so another file's lines going back are kept.
+- The interface level: `ghc --make` names the files of a package under `-i.` `./F`, where the
+  helper (run with `F`) and the printed pragmas name `F`; mode `:lines` writes `./F` as `F` (5
+  modules' `SrcLoc` strings differed only so).
+- Mode `:full` does not convert them (12 known differences of the text level): the module view
+  (SPEC §2.8, S5) holds only the module's own lines, and the helper's token stream leaves other
+  files' tokens out, so the full layout's pairing (HR11) fails. A text level for them would need
+  the other files' texts and tokens in the forms.
+
+### Found on the way
+
+- **`quote`**: Cabal applies a variable named `quote` (`quote (prettyShow tt)`): `(quote x)` reads
+  as the name quote `'x` (SPEC §3.4), so the converter writes the head `(:name "quote")` (in
+  `prefix-name`, for left-hand sides too: `quote s = ...`).
+- **`(:op "t" ...)`** has no element for its first operator's line: when that operator begins a
+  later line than its first operand's last (`Cabal-syntax`'s `optionalFieldDef ...` / `^^^
+  availableSince ...`), the chain is `(:infix a (:name "t") b)`.
+- **Lines of tokens the forms had none for**: a declaration's context on its own lines (`class` /
+  `( c SpecVersion` ...) takes its `(`'s line; a `{-# DEPRECATED` on a line of its own the pragma's
+  line, its names keeping theirs; a GADT signature's `forall` on a later line than its names its
+  line.
+- **`?~`** (`Cabal-syntax`'s `Distribution.Compat.Lens`) is an operator, not an implicit parameter
+  (`?` and a letter): `(?~)` in an export list.
+- **CPP and `\`**: a printed module of a CPP module is preprocessed again by GHC; `infixl 9 \\`
+  ending a line would be joined with the next (`containers`' sources write `infixl 9 \\ --`), so
+  the printer ends such a line with an empty comment, in CPP modules only.
+- **A later constructor's documentation**: `| -- | When ...` after a `-- ^` comment; the printer
+  wrote the `-- |` before the `|`, where GHC took it as the `-- ^` comment's continuation; it now
+  writes the `|` first (three of R1's printed modules change, the same trees).
+- **A form placed after its line**: `stm`'s `TSem` has its module documentation before its
+  `LANGUAGE` pragma; the documentation is written after the pragma (SPEC §2.2) with its line, and
+  the module header was then put on the next line with an explicit line, its first export without
+  one; the writer now leaves a form of the current line on it after a form placed after its line
+  (two of R1's forms files change their text, not their data).
+- **Signatures documented whole** (`pretty`'s `semi :: Doc a -- ^ A ';' character`) take the
+  `(:doc-type T (:doc ...))` fallback (SPEC §6), 36 times in `pretty` and `ghc-boot-th`, R1's corpus
+  none.
+
+### Results
+
+`bin/repr-haskell roundtrip --iface --text --layout` over the corpus (R1's four packages and R5's
+37):
+
+| package | modules | with CPP | `.hsc` (R6) |
+|---|---|---|---|
+| `array` | 15 | 3 |  |
+| `deepseq` | 1 | 1 |  |
+| `pretty` | 6 | 6 |  |
+| `ghc-boot-th` | 10 | 1 |  |
+| `template-haskell` | 11 | 1 |  |
+| `bytestring` | 31 | 15 |  |
+| `containers` | 35 | 33 |  |
+| `binary` | 9 | 9 |  |
+| `transformers` | 24 | 24 |  |
+| `mtl` | 24 | 0 |  |
+| `stm` | 10 | 9 |  |
+| `exceptions` | 2 | 2 |  |
+| `os-string` | 11 | 6 |  |
+| `filepath` | 11 | 10 |  |
+| `time` | 46 | 6 | 1 |
+| `unix` | 5 | 3 | 48 |
+| `file-io` | 5 | 2 |  |
+| `directory` | 6 | 2 | 3 |
+| `ghc-platform` | 1 | 0 |  |
+| `ghc-boot` | 12 | 4 |  |
+| `ghc-compact` | 2 | 2 |  |
+| `ghc-experimental` | 11 | 0 |  |
+| `ghc-heap` | 13 | 6 | 5 |
+| `ghci` | 14 | 10 | 3 |
+| `process` | 7 | 7 | 1 |
+| `terminfo` | 7 | 6 |  |
+| `haskeline` | 25 | 25 | 2 |
+| `hpc` | 3 | 0 | 1 |
+| `integer-gmp` | 1 | 1 |  |
+| `text` | 54 | 39 |  |
+| `parsec` | 25 | 1 |  |
+| `semaphore-compat` | 1 | 1 |  |
+| `template-haskell-lift` | 1 | 1 |  |
+| `template-haskell-quasiquoter` | 1 | 1 |  |
+| `xhtml` | 15 | 0 |  |
+| `Cabal-syntax` | 139 | 7 |  |
+| `Cabal` | 149 | 17 |  |
+| R5 total | 743 | 261 | 64 |
+| R1 (`ghc-internal`, `base`, `ghc-prim`, `ghc-bignum`) | 483 | 86 | 26 |
+| total | 1,226 | 347 | 90 |
+
+| level | R1 | R5 | total |
+|---|---|---|---|
+| tree (trees and lines), the braces layout | 483 | 743 | 1,226 (69,048 forms, 1,985,781 located nodes) |
+| tree, the layout layout | 483 | 743 | 1,226 |
+| interface (mode `:lines`), both layouts | 483 | 743 | 1,226 (3,557,982 lines of `--show-iface` text) |
+| text, byte-identical | 483 | 731 | 1,214 (11,049,411 bytes) |
+| text, trees and lines of mode `:full` equal | 480 | 731 | 1,211 |
+
+Every package's modules are equal at the tree and interface levels in both layouts; the 12 modules
+whose nodes are in another file are the text level's known differences (with R3's three
+`CTypes.h` modules, 15). No known differences at the other levels. R1-R4's results are R1-R4's:
+483, 483, 483 and 480 of 483 at the text level.
+
+Times on this host (64 cores, shared, through the slot for heavy commands): the tree level about
+65 s (dumps 14 s, conversion 15 s, printing 9 s, GHC's parses 25 s), the layout layout's 25 s; the
+interface level about 4.5 minutes (preparing 26 s, the three sides of each package compiled, four
+packages at a time, 184 s, the interfaces shown 27 s, then the two comparisons); the text level
+about 2 minutes (dumps 18 s, conversion 46 s, printing 11 s, parses 35 s). The gate step
+(`roundtrip --iface --text --layout && test`) took 585 s, about 10 minutes (R4's 6.5 for R1's
+corpus): under the 15 that would call for a split (HR20). Before the job lists, GHC's parses took
+199 s package by package, and the interfaces' compiling 429 s for R5 alone. Scratch: about 4.3 GB under `.tmp/repr-haskell/` after a run (the `:full` trees 1.7 GB).
+
+### Checks and how to reproduce
+
+```sh
+bin/repr-haskell corpus fetch        # the tarball's 41 packages extracted, the configure scripts run
+bin/repr-haskell roundtrip --iface --text --layout
+bin/repr-haskell test                # step 7: test/haskell/r5/
+```
+
+The corpus's R5 entries: for each package, `CabalInfo` (built by `ghc -package Cabal-syntax
+test/haskell/cabal-info/CabalInfo.hs`) over its `.cabal` with `:cabal-flags`, the module list of
+`ghc-pkg field`, the sources found in the `hs-source-dirs` printed; then by hand the four Cabal
+macros, `:extract`, `:configure`, `:generated-files` and the `:hsc-flags`' header.
+
+### Choices for the user (HR17-HR20; built as recommended)
+
+- **HR17 R5's packages.** (a) As built: the 37 packages of the tarball's `libraries/` that the host's
+  GHC installs, the libraries of `Cabal` and `containers` only; (b) also the compiler's own `ghc`
+  library (`compiler/`, about 600 modules, the largest Haskell of the tarball) and `utils/`'s
+  libraries now. *Recommended: (a)*: SPEC §10.1's "boot libraries" are `libraries/`'s; the compiler
+  is a corpus of its own (its configuration is hadrian's, with generated modules of its own), for a
+  later milestone.
+- **HR18 Another file's nodes.** (a) As built: `:hs/file` where the file changes, printed with
+  `{-# LINE #-}`, the levels of mode `:lines` over them; mode `:full` not, 12 known differences at the
+  text level; (b) all 12 as known differences at every level (no `:hs/file`); (c) mode `:full` too,
+  the forms holding the other files' texts and tokens (their module view the whole inclusion).
+  *Recommended: (a)*, (c) when a consumer needs those modules' text.
+- **HR19 The configurations.** (a) As built: Cabal's view of each `.cabal` with hadrian's flags, the
+  Cabal macros a module needs as `-D`, the `configure` scripts run on extraction, the generated
+  modules committed, Cabal's macros as a header for hsc2hs; (b) Cabal's whole `cabal_macros.h`
+  given to every CPP module (`-optP-include`, as a Cabal build), which changes every R5 CPP
+  module's `:cpp` record for two macros' sake; (c) the installed packages' headers instead of the
+  `configure` scripts (`directory`'s and `process`'s are not installed). *Recommended: (a).*
+- **HR20 The gate.** (a) `bin/gate --full`'s `repr-haskell` step over the whole corpus (about 10
+  minutes); (b) a split: R1's four packages in `--full`, the rest by hand or weekly (a
+  `--packages` selection). *Recommended: (a)* while under about 15 minutes.
+

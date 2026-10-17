@@ -13,7 +13,9 @@ built the same day: all 483 modules' interfaces equal at `-O1` (§10.5). Milesto
 and the text level, was built the same day too: all 483 modules printed back byte for byte, 480
 of them with GHC's trees of mode `:full` equal (§10.6). Milestone R4, the layout printer, was built
 the same day too: all 483 modules printed by Haskell's layout rule parse to the original's trees
-and lines and compile to equal interfaces (§10.7). The experiments that
+and lines and compile to equal interfaces (§10.7). Milestone R5, the other boot libraries, was
+built the same day too: 41 packages, 1,226 modules equal at the tree and interface levels in both
+layouts, 1,214 printed back byte for byte (§10.8). The experiments that
 validate the spec's choices (Appendix A) were run on the host's GHC 9.14.1 (Alpine's
 `ghc-9.14.1-r2`) and the stage 0 of main at `f0d7fc2f` (`target/seed/amd64/arbace`, amd64);
 their scripts and inputs are `test/haskell/`.
@@ -1168,7 +1170,7 @@ bin/repr-haskell test                       the spec's cases (test/haskell/)
 | R2 | the interface level over R1's corpus (built 2026-10-17: 483 of 483 modules, §10.5) | interface level |
 | R3 | `:full`: the helper's annotations and comments, the converter's metadata, the full printer (built 2026-10-17: 483 of 483 modules byte-identical, 480 with equal trees of mode `:full`, §10.6) | text level, tree level in `:full` |
 | R4 | the layout printer (built 2026-10-17: 483 of 483 modules at the tree and interface levels, §10.7) | tree and interface levels |
-| R5 | the other boot libraries | all of the above |
+| R5 | the other boot libraries (built 2026-10-17: 37 packages, 743 modules, all at the tree and interface levels in both layouts, 731 at the text level, §10.8) | all of the above |
 | R6 | `.hsc` (hsc2hs), `.lhs` (unlit), boot files and signatures in the corpus | all of the above |
 | later | Core and code levels; behaviour over GHC's testsuite; a Stackage subset | |
 
@@ -1375,6 +1377,56 @@ survey's E3).
   `-layout-iface-known.edn`, none. `bin/gate --full`'s step runs `roundtrip --iface --text --layout`
   (HR16). `bin/repr-haskell test`'s step 6 checks the style on the worked example and
   `test/haskell/layout/Layout.hs` against `test/haskell/layout/expected/`.
+
+### 10.8 As built: R5 (2026-10-17)
+
+[HASKELL-NOTES.md](HASKELL-NOTES.md), "R5", records the build; what it changes in this text
+(HR17-HR20, built as recommended, for the user's decision):
+
+- **The corpus (§9.4)**: the other 37 packages of the tarball's `libraries/` that the host's GHC
+  installs, in dependency order after R1's four (HR17): `array`, `deepseq`, `pretty`,
+  `ghc-boot-th`, `template-haskell`, `bytestring`, `containers`, `binary`, `transformers`, `mtl`,
+  `stm`, `exceptions`, `os-string`, `filepath`, `time`, `unix`, `file-io`, `directory`,
+  `ghc-platform`, `ghc-boot`, `ghc-compact`, `ghc-experimental`, `ghc-heap`, `ghci`, `process`,
+  `terminfo`, `haskeline`, `hpc`, `integer-gmp`, `text`, `parsec`, `semaphore-compat`,
+  `template-haskell-lift`, `template-haskell-quasiquoter`, `xhtml`, `Cabal-syntax`, `Cabal`:
+  743 modules converted (261 with CPP), 64 `.hsc` modules and one boot file left for R6, three
+  generated modules. Not the compiler (`compiler/`, the `ghc` library), `utils/`'s packages
+  (`ghc-toolchain`, `haddock-api`, `haddock-library`), `Win32`, nor the test and benchmark
+  packages. Each package's configuration is its `.cabal` library's as Cabal configures it for this
+  platform with hadrian's flags (HR19): `default-language` (Haskell98 when none, as Cabal),
+  `default-extensions`, `cpp-options`, `include-dirs`, `build-depends` as `-package` (compiled
+  against the installed packages, as R2), the Cabal macros a module needs as `-D`, the headers a
+  package's `configure` script makes made in the extracted tree, the generated modules
+  (`GHC.Version`, `GHC.Platform.Host`, `Paths_Cabal`) committed as hadrian and Cabal make them.
+- **Another file's nodes (§2.8, §7.1, §8.2)** (HR18): 12 modules' nodes are in another file, 11
+  whose text a CPP `#include` of Haskell source brings (`filepath`'s `System.FilePath.Posix` is
+  `#include "Internal.hs"`) and alex's output `Distribution.Fields.Lexer`, whose `{-# LINE #-}`
+  pragmas name `Lexer.x`'s lines. In mode `:lines` a form whose node is in another file than the
+  located form before it (for a top-level form: the top-level form before it) carries
+  `:hs/file "file"`, the file's name as the dump's span names it, and the module's own `:file`
+  when it comes back; the printer puts it there with `{-# LINE n "file" #-}`, and ends the text in
+  the module's file. Mode `:full` does not convert them: the module view (S5) holds only the
+  module's own lines, and the helper's tokens leave other files' out (12 known differences of the
+  text level).
+- **The interface level (§9.3)**: mode `:lines` writes a file name `./F` as `F`: `ghc --make`
+  names a package's files under `-i.` `./F`, the helper's parse and the `{-# LINE #-}` pragmas
+  `F`.
+- **Forms and printing found on the way**: the variable `quote` applied is `((:name "quote") x)`
+  (`(quote x)` reads as the name quote `'x`); `(:op "t" ...)` only when its first operator stands on
+  its first operand's last line, else `:infix`; the line of a declaration's context (its `(`), of a
+  pragma's `{-#` before its warning's names, of a GADT signature's `forall`; an operator beginning
+  with `?` that is not an implicit parameter (`?~`); in a CPP module, a printed line ending in `\`
+  ends in an empty comment (`infixl 9 \\ --`), since CPP would join it with the next; a later
+  constructor's documentation after its `|` (after a `-- ^` comment, a `-- |` before the `|` would
+  continue it); a form placed after its line (a module's documentation before its `LANGUAGE`
+  pragma) leaves the next form on its line, and the lists without a line inside such a form get the
+  Haskell line explicitly. R1-R4's results are unchanged; of their forms, two files' texts changed
+  (the same data, `ghc-internal`'s documentation before a pragma), and three printed modules (the
+  `|` before a constructor's documentation).
+- **The levels (§9.6)**: the trees of both sides are parsed as one job list over the corpus, the
+  packages compiled four at a time at the interface level (`REPR_HASKELL_PACKAGES`), the interfaces
+  shown in one job list; `bin/gate --full`'s step over the whole corpus, about 10 minutes (HR20).
 
 ## 11. Decisions and open questions
 

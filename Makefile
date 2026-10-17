@@ -113,7 +113,7 @@ repr-go-roundtrip-text: ## mode :full prints the original text back, byte for by
 	bin/repr-go roundtrip --text --dirs linux/amd64
 repr-java-roundtrip: ## Java -> forms -> Java -> forms over Clojure's Java, the samples, jdk/forms (bin/repr-java roundtrip)
 	bin/repr-java roundtrip --corpus baseline,samples,jdk
-repr-haskell-roundtrip: ## Haskell -> forms -> Haskell over GHC 9.14.1's base, ghc-internal, ghc-prim, ghc-bignum: GHC's trees and lines (bin/repr-haskell roundtrip)
+repr-haskell-roundtrip: ## Haskell -> forms -> Haskell over GHC 9.14.1's boot libraries (41 packages): GHC's trees and lines (bin/repr-haskell roundtrip)
 	bin/repr-haskell roundtrip
 repr-haskell-iface: ## the same, then GHC's interfaces of the originals and the printed modules compiled, compared (bin/repr-haskell roundtrip --iface)
 	bin/repr-haskell roundtrip --iface
