@@ -434,3 +434,29 @@ be better jaf read / jaf print instead. the earlier renaming stemmed from the co
 the letter 'c' that starts \"clojure\" and also \"classes\"". Added to the agenda's survey: one
 bridge per language between its source and its forms (two verbs, read and print), translators
 between forms dialects only, no bare `c`.
+
+## 2026-10-17: g2a's printer mode `:full`; the naming survey
+
+At the user's request ("build the printer's :full mode"), on the branch `g2a-full`, merged into
+main (`6b6c0de`); details in doc/go/PRINTER-NOTES.md, "Mode :full as built", and doc/go/SPEC.md
+§10.2. A package converted with `--full` now prints back to its original Go files byte for byte:
+a layout `full` places each token at its recorded line and column; the converter records, in
+that mode only, every comment as spelled, the source's semicolons, trailing commas, white space
+other than gofmt's and the file's tail, literal spellings that differ from the printer's,
+parentheses, and the positions the forms had dropped (implicit returns, braces, labels...),
+reading the original files itself (G2F3). The text level (`bin/g2a roundtrip --text`): std
+1,742 of 1,742 files (tamago/amd64), 1,738 of 1,738 (arm64), 1,834 of 1,834 (linux/amd64),
+std with its tests 2,935 of 2,935; `$GOROOT/test`'s programs 1,705 of 1,708, the three known
+(an empty declaration group, `import ( )` and a local `var ()`, has nothing in the forms: G2F6).
+`:lines` unchanged: the round trips against their references, `tamago/`, `tamago/cmd/`, `box/`
+and a2g's program printed the same (`diff -r`). `:full` forms are about 3.4 times the size of
+`:lines`. Decided by the user: G2F1-G2F6, G2F8 as built; G2F7 the text round trip in
+`bin/gate --full`. The essential gate passed on main after the merge (7:27), and the text round
+trip there (1,705 of 1,708, the 3 known).
+
+The naming survey (doc/NAMING-SURVEY.md, the user's "survey first, decide later"), merged
+(`d2e220e`): the tools as they are (c2a right but for its bare `c`; j2a read only; g2a a two-way
+bridge; a2g between two Arbace dialects), schemes A (the user's bridges `jaf`/`gaf` with read and
+print, translators `cf2gf`, `clj2ae`), A', B (long names), C (x2y), the rename's impact (6,959
+occurrences in 1,299 files, 225 paths; a re-seed), the 2026-10-11 precedent; proposals N1-N13,
+open.

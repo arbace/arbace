@@ -89,16 +89,14 @@ The current state of the work. This file is rewritten as things change. For the 
   remade (`b566d53a…`) and verified.
 - Done (2026-10-16): a tools-only seed measured (JOURNAL.md): -14% to -22% of xz, `tzdb.dat`
   stays; not pursued (the user).
-- Running: g2a's printer mode `:full` (Go forms converted with `--full` printed back to the
-  original text, byte for byte; branch `g2a-full`).
+- Done (2026-10-17): g2a's printer mode `:full` (Go forms converted with `--full` printed back to
+  the original text byte for byte; the text round trip in `bin/gate --full`; G2F1-G2F8).
 
 ## Next
 
-- Running: the naming survey (the user, 2026-10-16: "Survey first, decide later";
-  doc/NAMING-SURVEY.md, branch `naming-survey`): the tools, the schemes, the rename's impact,
-  proposals N1...
-- After the printer's `:full` mode: the survey of Futamura's projections (the user's choice,
-  2026-10-16; Later's item).
+- The naming survey written (doc/NAMING-SURVEY.md): proposals N1-N13 open for the user.
+- Running: the survey of Futamura's projections (doc/FUTAMURA-SURVEY.md, branch
+  `futamura-survey`; the user's choice, 2026-10-16).
 - Smaller: the box's checks on the Mac on macOS 26.
 
 ## Later
@@ -148,8 +146,7 @@ The current state of the work. This file is rewritten as things change. For the 
   process; GoTEE (github.com/usbarmory/GoTEE: TamaGo unikernels and user-mode applets, TrustZone
   on arm), to check; unikernels with a privilege split.
 - The mapped start measured without nested KVM.
-- g2a's open ends: mode `:full` in the printer (columns; positions exact); `$GOROOT/test`'s
-  directory tests.
+- g2a's open end: `$GOROOT/test`'s directory tests.
 - A note from the user (2026-10-13): the tooling of the Mac GUI app Moshi Go may be useful for
   Arbace, to study when Arbace's REPL gets a user interface beyond the terminal. Its build info
   (`go version -m`, on the user's Mac): module `moshi-go` at `1516bf8173a5` (2026-10-12), go1.27.1
