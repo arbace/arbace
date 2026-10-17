@@ -1084,3 +1084,12 @@ modules: the tree and lines equal for all, the interfaces equal for all, no know
 R1-R3 unchanged (the braces printer's output byte for byte main's). The `--full` step about 6.5
 minutes. HR14-HR16 decided as built (the user). The agent ran two of its parse-only tree-level
 runs outside `.tmp/heavy` while the slots were held.
+
+## 2026-10-17: the next steps decided (the user)
+
+F5 (guarded direct linking) to be built after the j2g nondeterminism fix (it changes c2j and
+j2g), then F6 (primitive fns, then unboxed workers), then F7 (the `defnode` prototype); the
+re-seed after goi's GR1 and the j2g fix, one for both; `repr/clojure print` (Arbace → Clojure,
+a text round trip) and `repr/java`'s `:full` read mode (comments, layout and Java's type arguments
+recorded, so Java prints back byte for byte and the 39 rejected JDK files compile) both next,
+as agent slots free.

@@ -93,6 +93,9 @@ The current state of the work. This file is rewritten as things change. For the 
 
 ## Next
 
+- Decided (the user, 2026-10-17): F5 after the j2g fix, then F6, then F7; the re-seed after GR1
+  and the j2g fix; `repr/clojure print` and `repr/java`'s `:full` read mode next, as slots free.
+
 - The direction (the user, 2026-10-17): Go forms first-class at the REPL, interpreted like
   Arbace and Java forms; the three dialects at the same level there "when it is appropriate";
   Haskell forms stay data. The survey written (doc/GO-FORMS-REPL-SURVEY.md): recommended
