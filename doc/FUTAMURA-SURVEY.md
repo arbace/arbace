@@ -1138,12 +1138,38 @@ so the two are to be measured together (F4.2). The shipped executable grows by 1
   order's tail from where it stood (`process-classes! from`), so a task could resolve the
   members of, and analyze, another task's anonymous class declared meanwhile, before that task
   gave it its constructor: the F2.2 case again, by chance, and temporaries and literals numbered
-  in the wrong task's id space. Reproduced on the second of two runs (the Go of
-  `c57.PB` differed). Fixed by construction (`arbace.j2g.world/load-world`): each task has an
-  order of its own, as the first round's thread has, appended to the unit's in the tasks' order
-  after each group; j2g prints how many classes the second round's analysis declared. The
-  shipped program's second round (only the compiled namespaces, which declare no local or
-  anonymous classes) declares none, so its output does not change.
+  in the wrong task's id space. Reproduced on j2g alone over diffcheck's tree: the first two
+  runs differed (the Go of `c57.PB`). Three causes, each fixed by construction: (1) the shared
+  order (`arbace.j2g.world/load-world`): each task has an order of its own, as the first round's
+  thread has, appended to the unit's in the tasks' order after each group; j2g prints how many
+  classes the second round's analysis declared (77 there). (2) `arbace.classes.lower` numbered
+  the names it makes (`Fn<N>`, `Reify<N>`, its gensyms) from a counter of its own shared by all
+  threads, so in the order the tasks ran; now from `RT/nextID`, the calling task's id space
+  (RT.ID_SPACE), as gensym's. (3) With both fixed, about one run in ten still differed, in the
+  deftypes of `native.deftype` and `native.nested-deftype` alone: a class's Clojure constants
+  (`const__N`, F2.4) were kept in a map from their keys, `[:var v]` or `[:const datum]`, which
+  past eight entries iterates in its keys' hash order, a var's hash being its identity's; the
+  static initializer and the fields' declarations followed that order, and with them the
+  package's literal numbering (`Lit_N`, `j2g_strings`). The analyzer
+  (`analyze/constant-field!`) now keeps them as a vector in the order made (const__0,
+  const__1, ...) beside an index from key to field. Then the runs agreed at any number of jobs
+  but one: at `J2G_JOBS=1` `native.nested-deftype` differed, its failures (expected ones,
+  `test/diffcheck/known.edn`) with them, for two more reasons of the same kind, the tasks'
+  order deciding what a task's analysis did. A member class that is a holder too (c2j's fn in a
+  fn in a top-level form) was a task beside its own members: coming first, it analyzed them in
+  place (in its id space, their failure its own), else found them analyzed. The tasks now go
+  in groups by height in the nest, the classes without member classes first, then each holder
+  in the group after its members' highest, so that no task analyzes another's class. And
+  arbace.lang.Compiler loads `arbace.classes.native` on first use (`classForms`, for a deftype*
+  whose methods use Java forms): the task that first used it loaded it in its own id space,
+  and the others found its namespace already there, `compile-deftype` not yet bound ("unbound
+  fn" for "Unknown type"); `load-world` loads it before the tasks start, in an id space of its
+  own. (The check in `classForms` is racy in itself: any program's threads may meet it.)
+  Proved by 29 runs over that tree, at the default jobs, `J2G_JOBS` 1, 2 and 32, and two at a
+  time, all the same. The shipped program's translation does not change: its second round
+  (only the compiled namespaces, which declare no local or anonymous classes) declares none,
+  the runtime's classes hold no Clojure constants, and its j2g output differs from main's only
+  in the packages of the namespaces changed.
 - **F2.3, an unimplemented interface method**: j2g's dispatch method for a method without an
   implementation throws `AbstractMethodError` with HotSpot's message ("Receiver class C does
   not define or inherit an implementation of the resolved method 'abstract R m(P)' of
