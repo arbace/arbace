@@ -599,3 +599,10 @@ through the host's slot for heavy commands.
   --layout && test`, the layout layout's levels beside the braces layout's (396 s, R3's step 286 s); (b) the
   layout layout's tree level only (no third interface build). *Recommended: (a).*
 
+
+## Decided (2026-10-17, the user): HR14-HR16
+
+As built: the layout printer's style (leading separators, `then`/`else`/`in` on their
+expression's line, `where` on its own line, items at column 5) (HR14); braces decided from the
+forms alone in `:lines`, R1-R3's forms unchanged (HR15); the gate runs the layout tree and
+interface levels (HR16).

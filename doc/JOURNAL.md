@@ -1071,3 +1071,16 @@ no known differences, about 45 s; macro calls 6,626 as forms and 1,316 as `(:tt 
 fetched in 8 s, the round trip and the tests passing. Decided by the user, as recommended:
 RR-P1 (plain comments at RR3, from the lexer), RR-P2 and RR-P3 (the as-built `:lines` keys and
 named format arguments adopted into the spec).
+
+## 2026-10-17: repr/haskell R4, the layout printer
+
+On the branch `repr-haskell-r4` (`ee3b3d3`), merged into main; details in doc/haskell/SPEC.md
+§10.7 and HASKELL-NOTES's R4 section. `print --layout layout` lays out every block by Haskell's
+layout rule (do, let, where, of, `\case`, class and instance bodies, GADT constructors, closed
+families, multi-way if), ending blocks at a line left of their column or at the tokens GHC's
+parse-error(t) rule closes them on, with braces added after the fact as a safety net (never
+triggered over the corpus; 16 of 4,628 blocks keep their source's explicit braces). Over the 483
+modules: the tree and lines equal for all, the interfaces equal for all, no known differences;
+R1-R3 unchanged (the braces printer's output byte for byte main's). The `--full` step about 6.5
+minutes. HR14-HR16 decided as built (the user). The agent ran two of its parse-only tree-level
+runs outside `.tmp/heavy` while the slots were held.

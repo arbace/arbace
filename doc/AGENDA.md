@@ -111,8 +111,9 @@ The current state of the work. This file is rewritten as things change. For the 
 - `repr/haskell`'s spec written (doc/haskell/SPEC.md; S1-S36; HS1-HS12 decided as recommended).
   R1 done (2026-10-17: the tree and lines levels over GHC 9.14.1's base libraries, 483 of 483
   modules; HR1-HR5); R2 done (the interface level, 483 of 483; HR6-HR8); R3 done (`:full`, the
-  text level, 483 of 483 byte for byte; HR9-HR13); next R4-R6 (the layout printer, the other
-  boot libraries, .hsc/.lhs/boot files). Done: `repr/java print` (the round trip over Clojure's Java, the samples and the JDK;
+  text level, 483 of 483 byte for byte; HR9-HR13); R4 done (the layout printer, 483
+  of 483 at the tree and interface levels; HR14-HR16); next R5-R6 (the other boot libraries,
+  .hsc/.lhs/boot files). Done: `repr/java print` (the round trip over Clojure's Java, the samples and the JDK;
   JP1-JP4); running: (Java forms → Java,
   with a round trip; branch `repr-java-print`).
 - Done (2026-10-17): repr/java print. Formerly planned: after the rename (the user, 2026-10-17: "Create jaf print after the naming debate settled"):
