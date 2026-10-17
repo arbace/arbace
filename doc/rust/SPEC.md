@@ -777,9 +777,13 @@ The converter writes the arguments as forms exactly when the printer's tokens fo
 call's tokens: the same kinds and texts, the call's delimiter, spacing ignored (rust-lisp's own
 check, `mac_args_as_exprs`), and, in mode `:lines`, when every token the forms have no element for
 (the commas, the delimiters) stands where the printer puts it, but the closing delimiter, whose line
-the form carries (`:rs/close`, §9.1) (S16). A trailing comma, a `;`-separated argument, a pattern,
-a type or a format string written with named arguments (`a = 1`) therefore make the call `:tt`. The
-helper gives the parse (§10.3), the printer the tokens: no Rust lexer is needed in Arbace.
+the form carries (`:rs/close`, §9.1) (S16). A trailing comma, a `;`-separated argument, a pattern
+or a type therefore make the call `:tt`; named format arguments (`name = value`) are an assignment
+expression whose printed tokens are the call's, so they stay forms (RR-P3). The printer's tokens
+are compared as rustc's lexer glues them (`Token::glue`: `>` `>` printed joint is `>>`), and a
+nested call kept as `(:tt ...)` matches the source's group by its text. Brace-delimited calls are
+always `(:tt "{...}")`; an empty call is `(m!)` or `(m! [])`. The helper gives the parse (§10.3),
+the printer the tokens: no Rust lexer is needed in Arbace.
 
 ### 7.2 Token trees as text
 
@@ -890,13 +894,33 @@ Positions are lines, carried by the layout of the forms text, as Go forms' and H
   case is recorded in its parent's `:rs/breaks`, a vector of entries `[index line]` (by `nth`, the
   head 0), also for a head literal or keyword (Go's `:go/breaks`, Haskell's `:hs/breaks`).
 - **Token lines**: spans of tokens the forms have no element for get their line as metadata on the
-  form that implies the token, when it is not the line the printer would put it on (the line of the
-  token printed before it): `:rs/brace` on a form with a body block (a function, an `impl`, a
-  `trait`, a `mod`, an `extern` block, a loop, an `if`, a closure, `unsafe`, `async`), the line of the
-  block's `{` (`Block`'s span: rustfmt puts it on a line of its own after a `where` clause);
-  `:rs/open` and `:rs/close` on a macro call or attribute whose arguments are forms, the lines of
-  the delimiters (`DelimSpan`); `:rs/paren` on a form whose implicit parentheses open on another
-  line. The table of keys per node is the converter's, kept with the rustc version (S22).
+  form that implies the token, when it is not the line the printer would put it on: the line of the
+  latest span that starts before the token in the file (the printer reproduces every span's start
+  and adds no line of its own). The keys (RR-P2, as built at RR1):
+  - `:rs/brace` on a form with a block body (a function, a loop, an `if` or `else`, a closure with
+    a block body, `let`-`else`'s `else`), the line of the block's `{` (`Block`'s span: rustfmt puts
+    it on a line of its own after a `where` clause); the `{` of a `match`, an impl's, a trait's or
+    an enum's body has no span;
+  - `:rs/close`, the line of a closing delimiter: of a macro call or an attribute (or a nested meta
+    list) whose arguments are forms (`DelimSpan`); and of the delimiter that an empty span follows
+    on its line: the `)` of a function's or a function pointer's parameters before a missing return
+    type's span (`FnRetTy::Default`), the last delimiter before a missing `where` clause's span (`>`
+    of a generic name's parameters or a type's arguments, `)` of parameters, of a tuple struct's
+    fields or of a tuple type, `]` of a slice type);
+  - `:rs/paren` on a form whose implicit parentheses' `(` begins a line;
+  - `:rs/open` is defined for a call's open delimiter on another line; std needs none.
+- **Heads**: a list's head stands where Rust writes the token it stands for. A binary operator's
+  default line is its right operand's when that begins a later line, else the current one
+  (rustfmt's `a\n + b` needs no metadata); a binary head on another line gets `^{:line N}`, which
+  the writer writes whenever the head has one, and a chain `(+ a b c)` is flat only when its inner
+  operators need none. Any other head that stands for a span (a method's name `.m`, `=` and the
+  compound assignments, `:index`'s `[`, `:has`'s `:`, a range pattern's operator) gets its line
+  when it is not the current one (RSS9 (a)). A head that is a list (`(:turbofish .collect T)`) is
+  written on the current line with every line inside it as metadata, since Rust prints it after
+  elements the forms write after it. The table of keys per node is the converter's, kept with the
+  rustc version (S22).
+- **Lists without a span of their own** (a brace group of fields) are written where the text is,
+  their first element with its line.
 - **Unspanned tokens** (commas, `->`, `=>`, `;`, closing delimiters outside token streams, keywords
   the tree has no span for) go where the printer puts them: their lines are in no tree.
 - **Lists placed after their line** carry an explicit `:line`, which the reader keeps over its own
@@ -1230,8 +1254,8 @@ Not in 1.99.1 (rust-lisp's 1.101 has them): `ExprKind::GcaMacro`, `TyKind::GcaMa
 
 [RUST-NOTES.md](RUST-NOTES.md), "RR1", records the build: std's five crates, 1,074 files, equal at
 the tree level (trees and the start lines of all 1,660,638 spans) with no known difference, in
-about 45 s. What it changes in this text (the open points RR-P1-RR-P3 there, built as
-recommended):
+about 45 s. What it changes in this text (RR-P1-RR-P3 there, decided as recommended: §9.1 and
+§7.1 now say what RR-P2 and RR-P3 adopted):
 
 - **The helper (§10.2, §10.3, §10.5)**: `dump -o DIR` writes `DIR/FILE.edn` per file; `tree -o DIR`
   writes `FILE.tree` and `FILE.lines` from one parse; `lines FILE` prints. The macro arguments'
@@ -1648,3 +1672,10 @@ otherwise (RSS4); namespaces by the file's path (RSS5); `include!`d expression f
 (RSS6); rustdoc's JSON without spans as the interface level (RSS7); the helper written anew,
 nothing vendored (RSS8); line metadata on method chains (RSS9); converted forms not tracked
 (RSS10).
+
+## Decided (2026-10-17, the user): RR-P1-RR-P3
+
+RR-P1-RR-P3 ([RUST-NOTES.md](RUST-NOTES.md)) as recommended: plain comments in mode `:lines` come
+at RR3 from the helper's lexer (RR-P1); mode `:lines`' metadata keys and defaults as built at RR1
+adopted into §9.1 proper (RR-P2); §7.1 amended, named format arguments stay forms when the printed
+tokens match (RR-P3).

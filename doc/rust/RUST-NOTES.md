@@ -6,6 +6,12 @@ departs from or adds to the spec, with the reasons. RR1 was built on 2026-10-17 
 `rustc 1.99.1 (58cf8f9c3 2026-10-13)`, `librustc_driver-61690d3e4c729118.so`), `rustc-dev-1.99.1-r0`
 and `rust-src-1.99.1-r0` fetched as apks, and stage 0 of that commit.
 
+## Decided (2026-10-17, the user): RR-P1-RR-P3
+
+RR-P1-RR-P3 as recommended: RR-P1 plain comments in mode `:lines` at RR3, from the helper's lexer;
+RR-P2 the `:lines` metadata keys and defaults as built adopted into SPEC §9.1 proper; RR-P3 SPEC
+§7.1 amended: named format arguments stay forms when the printed tokens match.
+
 ## RR1: the helper, the converter, the lines printer, the tree level
 
 ### What was built
@@ -207,7 +213,7 @@ the conversion's `.tmp/repr-rust/forms/rustc-1.99.1.report.edn`, with its counts
 comparison; the dumps (146 MB) stay until the next run. `REPR_RUST_DEBUG=1` makes the converter
 print each macro call whose arguments parsed but did not print back.
 
-### Choices for the user (RR-P1-RR-P3; built as recommended)
+### Choices for the user (RR-P1-RR-P3; decided as recommended, below)
 
 - **RR-P1 Plain comments in mode `:lines`** (§9.3). (a) With RR3: the helper's `rustc_lexer` tokens
   and comments, which `:full` needs anyway, give the converter the comments' positions, and the
