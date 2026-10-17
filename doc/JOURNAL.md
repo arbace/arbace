@@ -652,3 +652,13 @@ them (milestones R1-R6).
 
 All as recommended (doc/haskell/SPEC.md, "Decided"). The build (milestones R1-R6) follows F2,
 as the user's H13 has it ("its spec in parallel with F2, the build after").
+
+## 2026-10-17: arbace.aot to become c2j (the user)
+
+The user: "confirm that arbace.aot is effectively a clojure forms to java forms compiler, while
+the term aot ought to mean the whole pipeline through j2g -> repr/go print -> gc compile, then
+the \"back end\" derived from the clojure compiler might be named \"c2j\"", then "yes, rename aot
+to c2j with repr/clojure". Confirmed: `arbace.aot` builds on Clojure's `Compiler`'s `Expr` trees
+and writes Java forms where Clojure's back end writes bytecode; `ARBACE_AOT=1` already denotes
+the whole compiled pipeline. To do with c2a → `repr/clojure`, after F2 and before F3 and F4, one
+re-seed; `ARBACE_AOT` and `aot_arbace_*` kept (alternative: renamed too, churn in the seed only).

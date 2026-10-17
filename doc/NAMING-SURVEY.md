@@ -658,3 +658,11 @@ next re-seed (with F3 and F4's); `repr/clojure print` (Arbace → Clojure: `arba
 `clojure.*`, `.ae` back to `.clj`, a text round trip, as repr/go's `:full`) later. Clojure and
 Arbace share the reader, so this bridge runs between two dialects' texts; the few one-way rules
 (a `.cljc`'s reader conditionals resolved) are recorded or documented when `print` is built.
+
+**Added (2026-10-17, the user):** the back end becomes `c2j` ("yes, rename aot to c2j with
+repr/clojure"): `arbace.aot` → `arbace.c2j` (Arbace forms, Clojure's semantics, → Java forms;
+derived from Clojure's compiler), its scripts, docs and "the back end" in prose; the two
+translators then read as a chain, c2j then j2g. "AOT" stays the name of the whole compiled
+pipeline (c2j → j2g → `repr/go print` → Go's compiler): `ARBACE_AOT` and the printed packages
+`aot_arbace_*` are kept. Done with c2a → `repr/clojure`, after F2 merges and before F3 and F4
+(which change `emit.ae`), all under the one re-seed of F3 and F4.
