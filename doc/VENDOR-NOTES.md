@@ -29,6 +29,13 @@
 > `arbace/core_proxy.ae`, `arbace/reflect/java.ae`, `arbace/main.ae` and `arbace/core/server.ae`
 > are the Go build's variants now. Where the sections below (the bootstrap, hand changes 7, 11,
 > 14, 16, ..., the binary seed) describe them, they describe that branch.
+>
+> Since 2026-10-17, c2a is repr/clojure (`arbace.c2a.*` is `arbace.repr.clojure(.*)`,
+> `bin/c2a` `bin/repr-clojure read`, `bin/c2a-check` `bin/repr-clojure check`, `test/c2a/`
+> `test/repr/clojure/`, `doc/C2A.md` `doc/REPR-CLOJURE.md`) and the back end `arbace.aot` is c2j
+> (`arbace/aot/` `arbace/c2j/`, its marks `:aot/*` `:c2j/*`, `test/aot/` `test/c2j/`); "AOT"
+> stays the compiled pipeline's name (`ARBACE_AOT`, the packages `aot_arbace_*`, the tree `aot/`;
+> doc/NAMING-SURVEY.md, "The second rename as built").
 
 The frozen baseline `clojure/` is vendored under `arbace/`, renamed `clojure.*` → `arbace.*`, all
 of it `.clj`: the Java files as Java forms (doc/classes/SPEC.md), Clojure's own `.clj` renamed.
@@ -48,7 +55,7 @@ and stage 2, and, since spec was vendored too (below, "Spec"), passes in full.
 | `arbace/asm.ae`, `arbace/asm/**.ae` | `arbace.asm`, `arbace.asm.commons`, `arbace.asm.signature` (ASM, BSD 3-Clause); on the branch `arbace-for-java-26` only since 2026-10-12 |
 | `arbace/java/api.ae`, `arbace/java/api/Clojure.ae` | `arbace.java.api` |
 | `arbace/lang/Main.ae` | the class `arbace.lang.Main`, Clojure's main class `clojure.main` (`clojure/main.java`); vendored as `arbace.main` in `arbace/main_class.clj` with the package file `arbace.clj`, moved after vendoring (below) |
-| `arbace/classes/`, `arbace/repr/java/` (then `arbace/j2c/`, from 2026-10-11 `arbace/j2a/`) | the tools (javalisp, `arbace/javalisp/`, was dropped later), unchanged in place; no vendored name clashes with them. Later tools there: `arbace/repr/go/`, `arbace/j2g/`, `arbace/c2a/` (the renaming rules below, now c2a's, doc/C2A.md) |
+| `arbace/classes/`, `arbace/repr/java/` (then `arbace/j2c/`, from 2026-10-11 `arbace/j2a/`) | the tools (javalisp, `arbace/javalisp/`, was dropped later), unchanged in place; no vendored name clashes with them. Later tools there: `arbace/repr/go/`, `arbace/j2g/`, `arbace/repr/clojure/` (the renaming rules below, now repr/clojure's, doc/REPR-CLOJURE.md) |
 | `doc/ARBACE.md` (was `arbace/README.md`) | what `arbace/` holds and its origin (licenses: `LICENSE.md`) |
 | `bin/vendor-arbace` | replays the derivation into `.tmp/vendor/` (never into `arbace/`) and checks it; on the branch `arbace-for-java-26` only |
 | `arbace/spec/**.ae`, `arbace/core/specs/alpha.ae` | spec.alpha and core.specs.alpha, vendored later and renamed alike (below, "Spec") |
@@ -97,9 +104,9 @@ README (now `doc/ARBACE.md`); since then the hand changes below differ too.
 
 ## What is renamed
 
-(Since 2026-10-11 these rules are c2a's rule `:rename`, `arbace.c2a.rename/rename`, unchanged;
-c2a, the Clojure → Arbace translator, adds the rules the dialect divergences below call for:
-doc/C2A.md.)
+(Since 2026-10-11 these rules are repr/clojure's rule `:rename`, `arbace.repr.clojure.rename/rename`, unchanged;
+repr/clojure, the Clojure → Arbace translator, adds the rules the dialect divergences below call for:
+doc/REPR-CLOJURE.md.)
 
 One function, `arbace.j2c.rename/rename`, a textual rewrite of `clojure` to `arbace` where it
 starts one of the names below. It is used for the vendored sources and for the renamed copy of
@@ -380,10 +387,10 @@ image: `-e`, a REPL, `#inst` read, printed and round-tripped (also through `arba
 > Standalone S4 (2026-10-12): the JVM stages left main, and with them these runs
 > (`CLOJURE_TESTS_RENAME`, `CLOJURE_TESTS_PRECOMPILED`, `test/arbace-results.edn`); they stay on
 > `arbace-for-java-26`. The renaming below lives on in `bin/clojure-tests`' Go mode
-> (`CLOJURE_TESTS_GO`), c2a on the tools' Go host.
+> (`CLOJURE_TESTS_GO`), repr/clojure on the tools' Go host.
 
 `bin/clojure-tests` has a rename mode, `CLOJURE_TESTS_RENAME=arbace` (since 2026-10-11 the
-suite and its libraries are translated by c2a, `bin/c2a --in-place --keep-ext`, doc/C2A.md:
+suite and its libraries are translated by repr/clojure, `bin/repr-clojure read --in-place --keep-ext`, doc/REPR-CLOJURE.md:
 the same trees, `arbace.j2c.rename`'s rules being its rule `:rename` and the second `sed` below
 its rule `:proxy-methods`):
 
@@ -988,23 +995,23 @@ step 4 (2026-10-07); the others came with later work, as each says:
 25. **Standalone S6: the variants of `RT`, `Main` and `Compiler` merged into their bases**
     (2026-10-14; doc/STANDALONE-NOTES.md, "S6: the compiled build as the default", SA150).
     `arbace/lang/go/{RT,Main,Compiler,CompilerCode,ClassForms,CompilerAST}.ae` are merged into
-    `arbace/lang/{RT,Main,Compiler}.ae` by `test/aot/merge_variants.ae`, as text: a replaced
+    `arbace/lang/{RT,Main,Compiler}.ae` by `test/c2j/merge_variants.ae`, as text: a replaced
     member's text takes the base member's place, an added member goes at the end of its class
     in j2g's order, the comments before a variant's member go with it, each file's header goes
     (reworded) before its first member; two base comments that only said the variant replaces
     the member are dropped. The merged Java forms equal, as data with their type hints, the
     bases with the variants applied by j2g's `apply-variant` (checked for the three classes).
     The generated variants stay: `CompilerOps.ae` (`test/j2g/eval_ops.ae`) and
-    `CompilerAOTFn.ae` (`test/aot/gen_fns.ae`). The JVM's `RT`, `Main` and `Compiler` are on the
+    `CompilerAOTFn.ae` (`test/c2j/gen_fns.ae`). The JVM's `RT`, `Main` and `Compiler` are on the
     branch `arbace-for-java-26`.
 
 ## Dialect divergences
 
 Where Arbace behaves differently from upstream Clojure on purpose, beyond the renaming
 (`clojure.*` → `arbace.*`) and Java 26: code written for one may not behave the same on the
-other. The list for c2a, the Clojure → Arbace translator (doc/C2A.md, which says per entry
+other. The list for repr/clojure, the Clojure → Arbace translator (doc/REPR-CLOJURE.md, which says per entry
 which rule answers it or why none can), and for anyone porting code. Included: differences in what code computes, prints or can name;
-the runtime-visible renames are listed once, as c2a's mechanical part.
+the runtime-visible renames are listed once, as repr/clojure's mechanical part.
 
 - **`reduce` without an init on an `IReduceInit`-only reducible** (hand change 18; on
   `arbace-for-java-26` from v4, hand change 17): Arbace reduces it, seeded with the first item;

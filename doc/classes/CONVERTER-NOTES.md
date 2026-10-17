@@ -3,7 +3,7 @@
 > Names: the converter is repr/java (`arbace/repr/java.ae`, `arbace/repr/java/`, `bin/repr-java`,
 > `bin/repr-java check`); from 2026-10-11 to 2026-10-17 it was j2a (`arbace/j2a/`, `bin/j2a`,
 > `bin/j2a-check`), and before that j2c, as the frozen branches and the records before that date name it, and its renaming
-> rules `arbace.j2c.rename`, since moved into c2a ([../C2A.md](../C2A.md)). This document uses
+> rules `arbace.j2c.rename`, since moved into repr/clojure ([../REPR-CLOJURE.md](../REPR-CLOJURE.md)). This document uses
 > the current names, but where it records the derivation, replayed with the old ones.
 
 The converter of agenda step 3: it turns Java sources into the Java forms of [SPEC.md](SPEC.md),
@@ -69,7 +69,7 @@ bin/repr-java check --jdk [MODULE...]
   under `.tmp/`.
 - `--rename clojure=arbace` renames the package prefix in every class name, namespace and path
   (agenda step 4). String literals are left alone (`"clojure.core"` in `RT` stays); step 4
-  renamed them afterwards with `arbace.j2c.rename` (now `arbace.c2a.rename`) (`doc/VENDOR-NOTES.md`; `bin/vendor-arbace`
+  renamed them afterwards with `arbace.j2c.rename` (now `arbace.repr.clojure.rename`) (`doc/VENDOR-NOTES.md`; `bin/vendor-arbace`
   on the branch `arbace-for-java-26`).
 - `--check` reads every output file back with the core's `read` and the EDN reader (on Arbace
   `arbace.core/read`, `arbace.edn/read`), and

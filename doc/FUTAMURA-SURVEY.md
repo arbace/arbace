@@ -1,5 +1,12 @@
 # Futamura's projections for Arbace — survey
 
+> Names: since 2026-10-17 c2a is repr/clojure (`arbace.c2a.*` is `arbace.repr.clojure(.*)`,
+> `bin/c2a` `bin/repr-clojure read`, `bin/c2a-check` `bin/repr-clojure check`, `test/c2a/`
+> `test/repr/clojure/`, `doc/C2A.md` `doc/REPR-CLOJURE.md`) and the back end `arbace.aot` is c2j
+> (`arbace/aot/` `arbace/c2j/`, its marks `:aot/*` `:c2j/*`, `test/aot/` `test/c2j/`); "AOT"
+> stays the compiled pipeline's name (`ARBACE_AOT`, the packages `aot_arbace_*`, the tree `aot/`;
+> doc/NAMING-SURVEY.md, "The second rename as built").
+
 Status: survey, 2026-10-17, the user's choice (2026-10-16) of the agenda's Later item "Futamura's
 projections (the user, 2026-10-14)". Nothing is adopted here; the decisions (§7, F1-F11) are the
 user's. Measured on main at `d2e220e3` (the seed `b566d53a...`, its stage 0 at
@@ -23,7 +30,7 @@ The user's note (doc/AGENDA.md, Later):
 - **Arbace already has two hand-made first projections and one hand-made second.** The
   evaluator's closure compiler (`CodeCompiler`, B1a step 7b) is the evaluator specialized to one
   method's `Expr` tree, done at run time by hand (the "closure generation" of Feeley and Lapalme);
-  the back end `arbace.aot.emit` is the same specialization written out as Java forms ahead of
+  the back end `arbace.c2j.emit` is the same specialization written out as Java forms ahead of
   time; j2g is a compiler of Java forms beside an interpreter of them (`Compiler$CF`), both
   after one shared analysis (`arbace.classes.analyze`). Each pair shares its front half (the
   analysis: what is static) and repeats its back half (what to do with it) by hand: about 1,530
@@ -96,7 +103,7 @@ Birkedal and Welinder), which is what staging systems do.
 
 | | interpreter `int` | program `p` | the specializer's role | today's hand-made counterpart |
 |---|---|---|---|---|
-| Clojure | the evaluator: `Expr.evalIn` and the closure compiler's `Code` nodes (`arbace/lang/Compiler.ae`, `Evaluator`, `Code*`, `CompilerOps.ae`) | a namespace's analyzed units (`Compiler$AST/UNITS`, the prepare run's) | specialize `Code.run` to the tree, ahead of time, with the vars' roots as speculated static data | `arbace.aot.emit` (T1) → Java forms → j2g → Go |
+| Clojure | the evaluator: `Expr.evalIn` and the closure compiler's `Code` nodes (`arbace/lang/Compiler.ae`, `Evaluator`, `Code*`, `CompilerOps.ae`) | a namespace's analyzed units (`Compiler$AST/UNITS`, the prepare run's) | specialize `Code.run` to the tree, ahead of time, with the vars' roots as speculated static data | `arbace.c2j.emit` (T1) → Java forms → j2g → Go |
 | Java forms | `Compiler$CF` (about 70 node classes) built by `arbace.classes.interp` | a class's analyzed typed nodes (`arbace.classes.analyze`) | specialize `CF$Node.eval` to the tree | j2g's `code.ae` (Java forms → Go forms) |
 | Go (later) | an interpreter of Go forms (none today) | Go forms (`repr/go`'s) | specialize to the package | gc (Go's own compiler) |
 
@@ -185,7 +192,7 @@ first projection done by hand, at run time, with the tree as static and the fram
 
 ### 3.2 The back end (S6)
 
-`arbace/aot/emit.ae` (1,470 lines) turns the same analyzed units, read as maps through
+`arbace/c2j/emit.ae` (1,470 lines) turns the same analyzed units, read as maps through
 `Compiler$AST/node`, into Java forms, following the JVM's `emit` methods one to one (SA130):
 a fn is a code class implementing `Compiler$AOTF<n>`/`$AOTR<k>` (SA141), held by a runtime
 `Compiler$AOTFn`; var reads are `getRawRoot` (or `get` for a var dynamic when compiled, SA138);
@@ -287,7 +294,7 @@ are compared with each other, not only with the JVM's record.
 - Cost: a test build with the forms compiled (the back end's failures are reported per source;
   forms that need the evaluator, such as `eval` and run-time classes, stay evaluated); j2g's
   time on more classes; a few minutes in the gate.
-- Risks: small; the harness exists (`arbace.aot.main/run` on a source list, `--build-tests
+- Risks: small; the harness exists (`arbace.c2j.main/run` on a source list, `--build-tests
   OUT`).
 - Plan: one corpus file first (`numbers`), then all; then the Java forms' pair; then in
   `bin/gate` or `--full`.
@@ -336,7 +343,7 @@ Changes to `emit.ae` and j2g that §5 shows carry most of the gap:
    does), the generic call otherwise (`fib`: 6.40 → 1.44 ms).
 2. **No class initialization guard for the classes initialized at start**: `Numbers`, `RT`,
    `Util`, `Var` are initialized before any compiled namespace runs. j2g could drop their guards
-   in compiled code (a list, or a mark like SA158's `:aot/nn`), or give `Numbers`' primitive
+   in compiled code (a list, or a mark like SA158's `:c2j/nn`), or give `Numbers`' primitive
    operations guard-free variants, so that gc inlines them (`loop-long`: 11.87 → 1.09 ms; with
    the guards inlined, 2.81).
 3. Protocol call sites with the JVM's inline class cache (`protocol` 7.93 ms against the JVM's
@@ -607,7 +614,7 @@ later derivation can be proven against what exists. The proposals:
   doc/go/EVAL-PLAN.md (§2.7, Q1); doc/go/CLASSFORMS-REPL.md; doc/go/ORACLE.md;
   doc/VENDOR-NOTES.md (direct linking on the JVM); `arbace/lang/Compiler.ae` (`CF` from line
   6108, `Evaluator`, `AST`, `Code*` from 10198), `arbace/lang/go/CompilerOps.ae`,
-  `arbace/aot/emit.ae`, `arbace/aot/main.ae`, `arbace/classes/interp.ae`, `arbace/j2g/code.ae`;
+  `arbace/c2j/emit.ae`, `arbace/c2j/main.ae`, `arbace/classes/interp.ae`, `arbace/j2g/code.ae`;
   the seed `seed/arbace-seed-go.tar.xz` (`b566d53a...`), its compiled packages' Go.
 
 ## Decided (2026-10-17)
@@ -651,7 +658,7 @@ from the gate's executable, whose runtime is the checkout's:
    or analyzed is found by a trial analysis first (of the text read again; its events but a
    proxy's not recorded) and expands to its exception chain, alike in both runs.
 2. The gate's executable prepares the runtime's namespaces and the corpora's with
-   `ARBACE_COMPILE` (as `bin/arbace-go`'s host compile) and `arbace.aot.main/run` compiles them
+   `ARBACE_COMPILE` (as `bin/arbace-go`'s host compile) and `arbace.c2j.main/run` compiles them
    all into one tree: each source in its own id space, so the runtime's part is the shipped
    build's tree.
 3. j2g translates the program with that tree and the Java forms' classes (below), and
@@ -682,7 +689,7 @@ all, so that the rest of their file compiles, are left out of both runs with the
 
 Run on 2026-10-17: 12,449 of 12,471 cases agree, 22 disagree, all recorded with their reasons.
 
-Fixed in `arbace.aot.emit` (small and clearly right; the only changes to the shipped program,
+Fixed in `arbace.c2j.emit` (small and clearly right; the only changes to the shipped program,
 below):
 
 - **`import`'s value**: compiled `(import ...)` was nil, where the evaluator (`ImportExpr.evalIn`)
@@ -752,7 +759,7 @@ executable it reuses).
 
 ### Changes to the shipped program
 
-`arbace/aot/emit.ae` only, the two fixes above. The back end is part of the program, so the
+`arbace/c2j/emit.ae` only, the two fixes above. The back end is part of the program, so the
 shipped executable changes; its compiled namespaces change in their import units alone (45
 files of the tree, each only by `(do (.importClass ...) nil)` becoming `(.importClass ...)`,
 checked against the tree of the unchanged back end). The seed stays as it is: stage 0 still
