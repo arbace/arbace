@@ -45,7 +45,14 @@
 # ARBACE_BOX_SPAWN_CPUS (by default 16). Prerequisites: bin/arbace-go --build --box (ARBACE_BOX_ARCHES
 # with ARCH) and the native executable it builds first, from the same commit (the host step's
 # preparing runs that executable: compare checks j2g's program against it), bin/box-tools build
-# ARCH. Memory: j2g's
+# ARCH. The executables must be the commit's (bin/lib/fresh.bash): prepare stops unless the native
+# executable, the guest (and its image.key: built from the last bin/arbace-go --build's program)
+# and the launcher carry the version of REV's commit, clean unless the checkout is dirty, naming
+# the stale file and the command that rebuilds it; box and host check the launchers and the
+# native executable against the commit prepared (DIR/prepared.commit); host, when it succeeds,
+# writes DIR/host.verified (that commit, or "stale" when ARBACE_BOX_STALE_OK let a stale one
+# through), which bin/box-mac-bundle requires. ARBACE_BOX_STALE_OK=1 (experiments) warns instead
+# of stopping. The tool guests (bin/box-tools) carry no version: not checked. Memory: j2g's
 # guest asks 14 GiB, jrt's and lang's compiles 12 GiB each: run it through .tmp/heavy.
 set -uo pipefail
 export CGO_ENABLED=0 # Go's builds never use cgo (doc/go/BOX-NOTES.md, "... cgo dropped", 2026-10-16)
@@ -83,6 +90,23 @@ export ARBACE_BOX_STORE_MAX=off
 
 need() { [ -e "$1" ] || { echo "box-rebuild: no $1 ($2)" >&2; exit 1; }; }
 since() { echo "$(( $(date +%s) - $1 )) s"; }
+. "$root/bin/lib/fresh.bash"
+
+# the commit the stores hold: prepare's REV, recorded for the later steps
+prepared_commit() {
+  if [ -s "$dir/prepared.commit" ]; then cat "$dir/prepared.commit"
+  else git -C "$root" rev-parse --verify "$rev^{commit}"; fi
+}
+# fresh FILE CMD COMMIT: FILE built from COMMIT (bin/lib/fresh.bash), else stop naming CMD (with
+# a checkout first when COMMIT is not HEAD: the executables are built from the checkout)
+fresh() {
+  local cmd=$2
+  [ "$3" = "$(git -C "$root" rev-parse HEAD)" ] || cmd="git checkout ${3:0:12}, then $cmd"
+  arbace_fresh box-rebuild "$1" "$3" "$cmd"
+}
+native_cmd="bin/arbace-go --build"
+guest_cmd="ARBACE_BOX_ARCHES=$arch bin/arbace-go --build --box"
+launcher_cmd="ARBACE_BOX_ARCHES=$harch bin/arbace-go --build --box"
 
 # the driver's namespaces from the source tree (--dev), before arbace.box.rebuild is required
 dev_loads() {
@@ -91,8 +115,15 @@ dev_loads() {
 }
 
 prepare() {
-  local s t0 src
-  need "$launcher" "bin/arbace-go --build --box"; need "$guest" "ARBACE_BOX_ARCHES=$arch bin/arbace-go --build --box"
+  local s t0 src c
+  c=$(git -C "$root" rev-parse --verify "$rev^{commit}") || return 1
+  # every executable the stores' contents and the later steps come from, REV's (the guest also
+  # from the program of the last --build, which the native executable is)
+  fresh "$native" "$native_cmd" "$c"
+  fresh "$guest" "$guest_cmd" "$c"
+  arbace_guest_key_fresh box-rebuild "$guest" "$guest_cmd"
+  fresh "$launcher" "$launcher_cmd" "$c"
+  rm -f "$dir/prepared.commit" "$dir/prepared.stale" "$dir/host.verified"
   t0=$(date +%s)
   for s in "$bs" "$hs"; do
     mkdir -p "$s"
@@ -100,6 +131,8 @@ prepare() {
     ARBACE_BOX_LAUNCHER=$launcher "$root/bin/box-tools" put "$s" "$arch" > "$dir/tools.txt" || return 1
     "$launcher" --store "$s" put "$guest" "arbace.$arch" > /dev/null || return 1
   done
+  echo "$c" > "$dir/prepared.commit"
+  [ "$arbace_stale_used" = 0 ] || : > "$dir/prepared.stale"
   echo "box-rebuild: prepared: $rev ($(git -C "$root" rev-parse "$rev")) as the tree $src; $(cat "$dir/tools.txt" | tr '\n' ' ')($(since "$t0"))"
 }
 
@@ -124,6 +157,7 @@ box_opts() {
 
 box() {
   local t0 st opts
+  fresh "$launcher" "$launcher_cmd" "$(prepared_commit)"
   t0=$(date +%s)
   opts=$(box_opts) || return 1
   if [ "$arch" != "$harch" ]; then
@@ -142,7 +176,7 @@ box() {
 # arm64: the box step in the aarch64 VM (bin/box-arm64-vm), the store copied in and back
 vm_box() {
   local vmrun=$root/bin/box-arm64-vm vl=$root/target/arbace-go/box-arm64/arbace-box st
-  need "$vl" "ARBACE_BOX_ARCHES=arm64 bin/arbace-go --build --box"
+  fresh "$vl" "ARBACE_BOX_ARCHES=arm64 bin/arbace-go --build --box" "$(prepared_commit)"
   "$vmrun" status > /dev/null 2>&1 || { echo "box-rebuild: start the VM first (bin/box-arm64-vm start; MEM)" >&2; return 1; }
   echo "== the rebuild in the box (arm64, in the aarch64 VM)"
   : > "$dir/box.log"
@@ -168,8 +202,11 @@ vm_box() {
 }
 
 host() {
-  local t0 st tools=$goroot/pkg/tool/linux_$harch cr=$dir/chrootrun opts env
-  need "$native" "bin/arbace-go --build"
+  local t0 st tools=$goroot/pkg/tool/linux_$harch cr=$dir/chrootrun opts env c
+  c=$(prepared_commit) || return 1
+  rm -f "$dir/host.verified"
+  fresh "$native" "$native_cmd" "$c"
+  fresh "$launcher" "$launcher_cmd" "$c"
   t0=$(date +%s)
   echo "== the same steps on the host ($arch)"
   (cd "$root/tools/chrootrun" && env -u GOOS -u GOARCH GOROOT="$goroot" GOTOOLCHAIN=local GOFLAGS= GOWORK=off GOPROXY=off \
@@ -184,6 +221,10 @@ host() {
   st=${PIPESTATUS[0]}
   "$launcher" --store "$hs" get "rebuilt.host.$arch.steps" > "$dir/host-steps.edn" 2>/dev/null
   rm -rf "$dir/host-work"
+  # what bin/box-mac-bundle requires of the expected image: made by the commit's executables
+  if [ "$st" = 0 ]; then
+    if [ "$arbace_stale_used" = 1 ] || [ -e "$dir/prepared.stale" ]; then echo stale; else echo "$c"; fi > "$dir/host.verified"
+  fi
   echo "box-rebuild: the host's run: status $st ($(since "$t0"))"
   return $st
 }
