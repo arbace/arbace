@@ -1,0 +1,185 @@
+;; repr/rust's spec (doc/rust/SPEC.md, Appendix A, E2): the spec's lexical rules over a corpus of
+;; rustc parse trees as the survey's helper dumps them (`rsdump`, doc/REPR-RUST-SURVEY.md, Appendix
+;; A). Reads every dump with Arbace's reader and counts, for the names, the paths and the literals
+;; of the trees, how the spec writes them (§3): bare, respelled, or `(:lit ...)`; every spelling the
+;; spec calls bare is checked by reading it back. Usage: arbace test/rust/census.ae FILES-LIST DUMP-DIR
+;; FILES-LIST holds one dump path per line, relative to DUMP-DIR.
+
+(require (quote [arbace.string :as s]))
+
+(def counts (atom {}))
+(defn bump! [k] (swap! counts update k (fnil inc 0)))
+(def samples (atom {}))
+(defn sample! [k x] (swap! samples update k (fn [v] (let [v (or v #{})] (if (< (count v) 12) (conj v x) v)))))
+
+;; ---- reading back
+
+(defn read1 [text]
+  (try (let [v (read-string (str "[" text "]"))] (when (= 1 (count v)) (first v)))
+       (catch Throwable _ ::fail)))
+
+(def bare-name?
+  (memoize (fn [t] (let [x (read1 t)] (and (symbol? x) (nil? (namespace x)) (= (name x) t))))))
+
+(def path-reads?
+  (memoize (fn [text ns nm] (let [x (read1 text)] (and (symbol? x) (= (namespace x) ns) (= (name x) nm))))))
+
+;; ---- Rust's escapes (cooked literals), for the value a symbol denotes
+
+(defn hexval [h] (Long/parseLong h 16))
+
+(defn unescape
+  "The code points a cooked literal's symbol denotes, or nil for an escape this does not know."
+  [sym]
+  (let [n (count sym)]
+    (loop [i 0 out []]
+      (if (>= i n)
+        out
+        (let [c (.charAt sym i)]
+          (if (not= c \\)
+            (let [cp (.codePointAt sym i)] (recur (+ i (Character/charCount cp)) (conj out cp)))
+            (let [e (.charAt sym (inc i))]
+              (case e
+                \n (recur (+ i 2) (conj out 10))
+                \r (recur (+ i 2) (conj out 13))
+                \t (recur (+ i 2) (conj out 9))
+                \0 (recur (+ i 2) (conj out 0))
+                \\ (recur (+ i 2) (conj out 92))
+                \' (recur (+ i 2) (conj out 39))
+                \" (recur (+ i 2) (conj out 34))
+                \x (recur (+ i 4) (conj out (hexval (subs sym (+ i 2) (+ i 4)))))
+                \u (let [j (.indexOf sym "}" (int i))]
+                     (recur (inc j) (conj out (hexval (s/replace (subs sym (+ i 3) j) "_" "")))))
+                \newline (let [j (loop [j (+ i 2)]
+                                   (if (and (< j n) (#{\space \tab \newline \return} (.charAt sym j))) (recur (inc j)) j))]
+                           (recur j out))
+                nil))))))))
+
+(defn hex [cp] (Long/toHexString cp))
+
+(defn esc-str
+  "The spec's canonical spelling of a cooked string's code points (§3.5): `\\\"`, `\\\\`, `\\n`, `\\r`,
+  `\\t`, `\\0`, other controls and DEL as `\\u{x}` (ctl :u) or `\\xNN` (ctl :x), the rest as itself."
+  [cps quote-ch ctl]
+  (apply str (map (fn [cp]
+                    (cond (= cp 34) (if (= quote-ch \") "\\\"" "\"")
+                          (= cp 39) (if (= quote-ch \') "\\'" "'")
+                          (= cp 92) "\\\\"
+                          (= cp 10) "\\n" (= cp 13) "\\r" (= cp 9) "\\t" (= cp 0) "\\0"
+                          (or (< cp 32) (= cp 127)) (if (= ctl :x) (format "\\x%02x" cp) (str "\\u{" (hex cp) "}"))
+                          :else (String. (Character/toChars cp))))
+                  cps)))
+
+(defn esc-bytes [cps quote-ch]
+  (apply str (map (fn [cp]
+                    (cond (= cp 34) (if (= quote-ch \") "\\\"" "\"")
+                          (= cp 39) (if (= quote-ch \') "\\'" "'")
+                          (= cp 92) "\\\\"
+                          (= cp 10) "\\n" (= cp 13) "\\r" (= cp 9) "\\t" (= cp 0) "\\0"
+                          (<= 32 cp 126) (str (char cp))
+                          :else (format "\\x%02x" cp)))
+                  cps)))
+
+;; ---- literals (token::Lit: kind, symbol, suffix)
+
+(defn lit! [tt kind sym suffix]
+  (let [kname (if (seq? kind) (str (first kind)) (str kind))
+        k (fn [& ws] (bump! (vec (cons (if tt :tt-lit :lit) (cons kname ws)))))]
+    (case kname
+      "Integer" (cond (and (nil? suffix) (re-matches #"0|[1-9][0-9]*" sym)) (k :bare)
+                      (re-matches #"0|[1-9][0-9]*" sym) (k :lit-number-suffix)
+                      :else (do (k (if suffix :lit-text-suffix :lit-text)) (sample! [:int-text] sym)))
+      "Float" (let [x (read1 sym)
+                    same (and (float? x) (= (str x) sym))]
+                (cond (and same (nil? suffix)) (k :bare)
+                      same (k :lit-number-suffix)
+                      :else (do (k (if suffix :lit-text-suffix :lit-text)) (sample! [:float-text] sym))))
+      "Bool" (k :bare)
+      ("Str" "CStr") (let [cps (unescape sym)]
+                       (cond (nil? cps) (k :unknown-escape)
+                             suffix (k :lit-suffix)
+                             (= sym (esc-str cps \" :u)) (do (k :bare) (when (= sym (esc-str cps \" :x)) (k :bare-both)))
+                             (= sym (esc-str cps \" :x)) (do (k :lit-text) (k :would-be-bare-with-x))
+                             :else (do (k :lit-text) (sample! [:str-text kname] sym))))
+      "Char" (let [cps (unescape sym)]
+               (cond (nil? cps) (k :unknown-escape)
+                     suffix (k :lit-suffix)
+                     (= sym (esc-str cps \' :u)) (k (if (> (first cps) 0xFFFF) :bare-char-form :bare))
+                     (= sym (esc-str cps \' :x)) (do (k :lit-text) (k :would-be-bare-with-x))
+                     :else (do (k :lit-text) (sample! [:char-text] sym))))
+      ("Byte" "ByteStr") (let [cps (unescape sym) q (if (= kname "Byte") \' \")]
+                           (cond (nil? cps) (k :unknown-escape)
+                                 suffix (k :lit-suffix)
+                                 (= sym (esc-bytes cps q)) (k :bare)
+                                 (= (s/lower-case sym) (esc-bytes cps q)) (do (k :lit-text) (k :upper-hex))
+                                 :else (do (k :lit-text) (sample! [:bytes-text kname] sym))))
+      ("StrRaw" "ByteStrRaw" "CStrRaw") (k (if suffix :lit-suffix :raw-form))
+      (k :other))))
+
+;; ---- paths
+
+(defn ident-text [x] (when (and (seq? x) (= 'id (first x))) (second x)))
+
+(defn field [m k] (second (drop-while #(not= % k) m)))
+
+(defn path! [segs]
+  (let [names (map #(ident-text (field % :ident)) segs)
+        args? (map #(not= 'None (field % :args)) segs)
+        global (= "{{root}}" (first names))
+        names (if global (rest names) names)
+        args? (if global (rest args?) args?)]
+    (bump! [:path :all])
+    (when global (bump! [:path :global]))
+    (cond
+      (not-any? true? args?)
+      (if (= 1 (count names))
+        (bump! [:path :one-segment])
+        (let [ns (s/join "." (butlast names)) nm (last names) text (str ns "/" nm)]
+          (bump! [:path (if (= 2 (count names)) :two-segments :more-segments)])
+          (if (path-reads? text ns nm)
+            (bump! [:path :reads])
+            (do (bump! [:path :does-not-read]) (sample! [:path-fail] text)))))
+      (and (true? (last args?)) (not-any? true? (butlast args?))) (bump! [:path :args-last-segment])
+      :else (bump! [:path :args-other-segment]))))
+
+;; ---- the walk
+
+(defn walk [x tt]
+  (cond
+    (seq? x)
+    (let [h (first x)]
+      (case h
+        id (let [t (second x)]
+             (cond (s/starts-with? t "'") (bump! [:lifetime])
+                   (= t "{{root}}") nil
+                   (re-matches #"[0-9]+" t) (bump! [:name :tuple-index])
+                   :else (do (bump! [:name :all])
+                             (when (= t "quote") (bump! [:name :quote]))
+                             (if (bare-name? t) (bump! [:name :bare])
+                                 (do (bump! [:name :respelled]) (sample! [:name-respelled] t))))))
+        Lit (when (some #{:symbol} x) (lit! tt (field x :kind) (field x :symbol) (let [sf (field x :suffix)] (when (seq? sf) (second sf)))))
+        Path (when (some #{:segments} x) (path! (field x :segments)))
+        DocComment (bump! [:doc (second x) (if (re-find #"\n" (str (nth x 2))) :multi-line :one-line)])
+        MacCall (bump! [:mac-call])
+        MacroDef (bump! [:macro-def])
+        nil)
+      (when (= 'Attribute h) (bump! [:attr (field x :style)]))
+      (when (and (= 'Ident h) (seq? (last x)) (= 'Some (first (last x)))) (bump! [:at-pattern]))
+      (when (and (= 'Binary h) (seq? (second x))) (bump! [:binary (field (second x) :node)]))
+      (when (and (= 'AssignOp h) (seq? (second x))) (bump! [:assign-op (field (second x) :node)]))
+      (let [tt (or tt (= h 'TokenStream) (= h 'AttrTokenStream))] (doseq [y (rest x)] (walk y tt))))
+    (vector? x) (doseq [y x] (walk y tt))
+    :else nil))
+
+(let [[list-file dir] *command-line-args*
+      files (remove s/blank? (s/split-lines (slurp list-file)))]
+  (doseq [f files]
+    (let [rdr (java.io.PushbackReader. (java.io.StringReader. (slurp (str dir "/" f))))]
+      (bump! [:files])
+      (loop []
+        (let [form (read {:eof ::eof} rdr)]
+          (when-not (= form ::eof)
+            (walk form false)
+            (recur))))))
+  (doseq [[k v] (sort-by (comp str key) @counts)] (println (pr-str k) v))
+  (doseq [[k v] (sort-by (comp str key) @samples)] (println (pr-str k) (pr-str (vec (sort v))))))
