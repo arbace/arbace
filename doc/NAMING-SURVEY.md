@@ -553,9 +553,10 @@ arbace.j2a from Clojure ..."); doc/AGENDA.md (the lead's).
   vendoring scripts' tree keys hash the same and both commands.
 - The guard (N11 (c)): `bin/lib/renamed-env.bash`, sourced by every script that reads
   `ARBACE_GOROOT` or `J2G_*` (`bin/arbace-go`, `build-go`, `repr-go`, `j2g`, `j2g-*`, `seed`,
-  `gate`, `jrt`, `jrt-coverage`, the box's and the vendoring scripts, the bridges' checks),
-  stops with a message when `G2A_GOROOT` is set and `ARBACE_GOROOT` is not, or when any `A2G_*`
-  is set.
+  `gate`, `jrt`, `jrt-coverage`, `jrt-convert`, `clojure-tests`, `repr-java`, the box's and
+  the vendoring scripts, the bridges' checks), stops (exit status 2) with a message naming the
+  new variable when `G2A_GOROOT` is set and `ARBACE_GOROOT` is not, or when any other `G2A_*`,
+  `J2A_*` or `A2G_*` is set (R2 below; until then only `G2A_GOROOT` and `A2G_*`).
 - The mains' verbs: `arbace.repr.go`'s `convert` is `read`; `arbace.repr.java`'s `convert` and
   `jdk` are `read` and `read-jdk`.
 - The first build after the rename runs the renamed tools evaluated on today's stage 0
@@ -608,8 +609,10 @@ had caught; `58428c77` the provenance again.
   `tamago/goroot`, which `53c65f69` (the printer's mode `:full`) made the reader write and
   `tamago/` was not converted again after; not the rename's (`bin/tamago-vendor convert` fixes
   it, a change of its own).
-- `make check-makefile`; the guard: `G2A_GOROOT=/x bin/repr-go helper` and `A2G_JOBS=3 bin/j2g`
-  stop with exit status 2 and their messages.
+- `make check-makefile`; the guard: `G2A_GOROOT=/x bin/repr-go helper`, `G2A_DUMPS=/x bin/repr-go
+  helper`, `J2A_JVM_OPTS=... bin/repr-java check`, `A2G_JOBS=2 bin/j2g` stop with exit status 2
+  and a message naming `ARBACE_GOROOT`, `REPR_GO_DUMPS`, `REPR_JAVA_JVM_OPTS`, `J2G_JOBS`;
+  `G2A_GOROOT` with `ARBACE_GOROOT` set passes.
 - Not run, as asked: the re-seed, `bin/gate --full`.
 
 ### What still says g2a, j2a or a2g
@@ -620,3 +623,24 @@ lead's) and this survey's sections before this one; `bin/lib/renamed-env.bash` (
 old names) and the guard's comment in each script; `doc/go/java-surface.edn` and its key in
 `test/jrt/java_surface.ae`; `arbace/lang.ae` and `arbace/java/api.ae`'s first lines (the
 derivation's provenance); the seed (until the re-seed).
+
+### Proposals of the rename as built
+
+- **R1** `arbace.repr.java.print`, which writes Java forms as `.ae` text, renamed
+  `arbace.repr.java.layout` (as repr/go's layout), so that `repr/java print` (Java forms → Java)
+  can take the name.
+- **R2** The guard extended to every old `G2A_*` and `J2A_*`, not only `G2A_GOROOT`.
+- **R3** `doc/go/java-surface.edn`'s treatment key `:a2g` kept (a record of the JVM's stages,
+  which S4 removed), or measured again.
+- **R4** `tamago/` converted again (`bin/tamago-vendor convert`), in a commit of its own, for
+  the `:go/label-line` drift since `53c65f69`.
+- **R5** The bridges' checks as verbs of their commands (`bin/repr-java check`, `bin/repr-go
+  check`, `test read|print`, `bin/build-go test`), not separate scripts.
+
+### Decided (2026-10-17, the user)
+
+- **R1** yes, with `repr/java print` (not in this rename).
+- **R2** yes, now: done on this branch (`bin/lib/renamed-env.bash`, above).
+- **R3** accepted: `:a2g` stays in `java-surface.edn` and `test/jrt/java_surface.ae`.
+- **R4** yes, as a separate commit after the merge (the lead's), not on this branch.
+- **R5** accepted.
