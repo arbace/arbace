@@ -4,17 +4,26 @@
 
     read [--jobs N] [-o DIR] [--report FILE] [--only REGEX] (--root DIR | DUMP...)
         each helper dump (tools/hsdump) to Haskell forms: DIR/[PKG/]hs/M.ae (SPEC §2.1), read back
-        and compared with the forms in memory (every bare name, literal and form checked, H3).
+        and compared with the forms in memory (every bare name, literal and form checked, H3); a
+        dump of mode :full (hsdump dump --full) to forms of mode :full (SPEC §7.2,
+        arbace.repr.haskell.full), the full layout's tokens checked against the source's.
         With --root, the dumps are ROOT/PKG/FILE.edn (bin/repr-haskell's corpus layout).
-    print [--jobs N] [-o DIR] (--root DIR | FORMS.ae...)
-        the printer (braces layout, SPEC §7.4): each forms file to DIR/[PKG/]FILE, FILE its
-        hs/module's :file.
+    print [--jobs N] [-o DIR] [--layout braces|full] (--root DIR | FORMS.ae...)
+        the printer (SPEC §7.4): each forms file to DIR/[PKG/]FILE, FILE its hs/module's :file;
+        forms of mode :full in the full layout (the original text, byte for byte), others (and
+        with --layout braces any) in the braces layout.
     compare --corpus FILE --orig DIR --cand DIR --known FILE --report FILE [--forms-report FILE]
             [--only REGEX] [--times TEXT]
         the round trip's tree level (SPEC §9.2): for each module of the corpus, the helper's tree
         and lines of the original (ORIG/PKG/FILE.tree, .lines) against the printed module's
         (CAND/PKG.trees/FILE.tree, .lines); the known differences FILE (a map from PKG/FILE to its
         reason) excuse a module, and a listed module that no longer differs is a failure.
+    compare-text --corpus FILE --src DIR --views DIR --cand DIR --trees DIR --known FILE
+            --report FILE [--forms-report FILE] [--only REGEX] [--times TEXT]
+        the round trip's text level (SPEC §9.1, mode :full): for each module of the corpus, the
+        printed file (CAND/PKG/FILE) against its original (SRC/DIR/FILE), or a CPP module's
+        module view (VIEWS/PKG/FILE.view), byte for byte; then the helper's trees in mode :full
+        and lines of both (TREES/orig/PKG/FILE.tree, .lines; TREES/cand/...).
     compare-iface --corpus FILE --orig DIR --cand DIR --printed DIR --builds DIR --known FILE
             --report FILE [--mode lines|full] [--only REGEX] [--times TEXT] [--prune]
         the round trip's interface level (SPEC §9.3): for each converted module, ghc --show-iface
@@ -23,6 +32,7 @@
         BUILDS the build logs (BUILDS/cand/PKG.build.log), for a module that did not compile;
         --prune removes the texts of the modules found equal."
   (:require [arbace.repr.haskell.convert :as cv]
+            [arbace.repr.haskell.full :as fl]
             [arbace.repr.haskell.write :as wr]
             [arbace.repr.haskell.print :as pr]
             [arbace.string :as str])
@@ -66,13 +76,36 @@
   [ns-sym]
   (str (str/join "/" (map #(str (munge %)) (str/split (str ns-sym) #"\."))) ".ae"))
 
+(defn- dumped
+  "The dump's form (sym ...)'s value, or nil"
+  [dump sym]
+  (some #(when (and (seq? %) (= sym (first %))) (second %)) dump))
+
+(defn convert-dump
+  "A dump's forms to Haskell forms: {:ns :forms :warnings}; a dump of mode :full (hsdump dump
+  --full) to forms of mode :full (arbace.repr.haskell.full), checked against the full layout's
+  tokens"
+  [dump module-file]
+  (if (= :full (:positions (dumped dump 'hsdump/config)))
+    (let [text (or (dumped dump 'hsdump/text) (throw (ex-info "a dump of mode :full without its text" {})))
+          toks (or (dumped dump 'hsdump/tokens)
+                   (throw (ex-info (str "a dump of mode :full without its tokens: " (pr-str (dumped dump 'hsdump/tokens-error))) {})))
+          source (fl/tokens-of text toks)
+          {:keys [ns forms warnings]} (binding [cv/*full* true cv/*tokens* (:toks source)]
+                                        (cv/convert-module dump module-file))
+          text0 (wr/forms-text forms)
+          read0 (wr/read-all text0)
+          _ (when-let [d (wr/check-read forms read0)] (throw (ex-info (str "the forms text misreads: " (pr-str d)) {})))]
+      {:ns ns :warnings warnings :forms (fl/full-forms forms read0 text source)})
+    (cv/convert-module dump module-file)))
+
 (defn read-dump
   "Converts one dump: {:dump :ns :out :status :error :warnings :forms}"
   [dump-path module-file out-file-fn]
   (try
     (let [text (slurp dump-path)
           forms (read-string (str "[" text "]"))
-          {:keys [ns forms warnings]} (cv/convert-module forms module-file)
+          {:keys [ns forms warnings]} (convert-dump forms module-file)
           out (out-file-fn ns)
           ftext (wr/forms-text forms)
           d (wr/check forms ftext)]
@@ -125,8 +158,11 @@
     (if (= (count results) (count (:ok by))) 0 1)))
 
 (defn- cmd-print [args]
-  (let [{:keys [opts args]} (parse-args args #{"--jobs" "-o" "--root" "--only"})
+  (let [{:keys [opts args]} (parse-args args #{"--jobs" "-o" "--root" "--only" "--layout"})
         jobs (Long/parseLong (get opts "--jobs" "8"))
+        layout (some-> (get opts "--layout") keyword)
+        _ (when-not (contains? #{nil :braces :full} layout)
+            (throw (ex-info (str "repr-haskell print: --layout braces|full, not " (name layout)) {})))
         out (get opts "-o" ".tmp/repr-haskell/printed")
         root (get opts "--root")
         only (some-> (get opts "--only") re-pattern)
@@ -138,7 +174,7 @@
                              (try
                                (let [pkg (when root (let [r (rel root f)] (subs r 0 (.indexOf ^String r "/"))))
                                      forms (wr/read-all (slurp f))
-                                     {:keys [file text]} (pr/print-module forms)
+                                     {:keys [file text]} (pr/print-module forms layout)
                                      o (str out "/" (when pkg (str pkg "/")) file)]
                                  (.mkdirs (.getParentFile (File. ^String o)))
                                  (spit o text)
@@ -232,6 +268,91 @@
                         :results (into (sorted-map) (for [[k r] results] [k (dissoc r :detail :cand)]))}))))
     (if (and (empty? unexpected) (empty? fixed)) 0 1)))
 
+;;; The round trip's text level (SPEC §9.1, mode :full; R3)
+
+(defn- file-bytes [^String f]
+  (let [x (File. f)] (when (.isFile x) (java.nio.file.Files/readAllBytes (.toPath x)))))
+
+(defn- first-byte-diff
+  "The first offset at which byte arrays a and b differ"
+  [^bytes a ^bytes b]
+  (let [n (min (alength a) (alength b))]
+    (loop [i 0] (if (and (< i n) (= (aget a i) (aget b i))) (recur (inc i)) i))))
+
+(defn- line-col-at
+  "[line col] (1-based, bytes) of offset i in bytes a"
+  [^bytes a i]
+  (loop [j 0 l 1 c 1]
+    (if (< j i) (if (= 10 (aget a j)) (recur (inc j) (inc l) 1) (recur (inc j) l (inc c))) [l c])))
+
+(defn compare-text
+  "The text level of one module: the printed file against its reference (the original, or a CPP
+  module's module view), byte for byte; then GHC's trees of mode :full (hsdump tree --full) and
+  lines of both: {:status :ok} or {:level :text|:tree|:lines :status ...}"
+  [printed reference orig-tree cand-tree orig-lines cand-lines]
+  (let [a (file-bytes reference) b (file-bytes printed)]
+    (cond
+      (nil? a) {:level :text :status :no-reference}
+      (nil? b) {:level :text :status :not-printed}
+      (not (java.util.Arrays/equals ^bytes a ^bytes b))
+      (let [i (first-byte-diff a b)
+            ctx (fn [^bytes x] (let [s (max 0 (- i 40)) e (min (alength x) (+ i 40))]
+                                 (String. x (int s) (int (- e s)) "UTF-8")))]
+        {:level :text :status :differs :at (line-col-at a i) :bytes [(alength a) (alength b)]
+         :detail (ctx a) :cand (ctx b)})
+      :else (assoc (compare-module orig-tree cand-tree orig-lines cand-lines) :size (alength a)))))
+
+(defn- cmd-compare-text [args]
+  (let [{:keys [opts]} (parse-args args #{"--corpus" "--src" "--views" "--cand" "--trees" "--known" "--report"
+                                          "--forms-report" "--only" "--times"})
+        corpus (read-string (slurp (get opts "--corpus")))
+        src (get opts "--src") views (get opts "--views") cand (get opts "--cand") trees (get opts "--trees")
+        known-file (get opts "--known")
+        known (if (and known-file (.exists (File. ^String known-file))) (read-string (slurp known-file)) {})
+        only (some-> (get opts "--only") re-pattern)
+        forms-report (when-let [f (get opts "--forms-report")] (when (.exists (File. ^String f)) (read-string (slurp f))))
+        mods (for [p (:packages corpus) [m f] (:modules p)
+                   :let [k (str (:name p) "/" f)]
+                   :when (or (nil? only) (re-find only k))]
+               [k p f])
+        results (pmap-jobs 16
+                           (fn [[k p f]]
+                             (let [conv (get-in forms-report [:modules k])
+                                   view (str views "/" (:name p) "/" f ".view")
+                                   cpp? (.isFile (File. view))]
+                               [k (assoc (if (and conv (not= :ok (:status conv)))
+                                           {:level :convert :status (:status conv) :detail (:error conv)}
+                                           (compare-text (str cand "/" (:name p) "/" f)
+                                                         (if cpp? view (str src "/" (:dir p) "/" f))
+                                                         (str trees "/orig/" (:name p) "/" f ".tree") (str trees "/cand/" (:name p) "/" f ".tree")
+                                                         (str trees "/orig/" (:name p) "/" f ".lines") (str trees "/cand/" (:name p) "/" f ".lines")))
+                                         :cpp cpp?)]))
+                           mods)
+        ok (filter #(= :ok (:status (second %))) results)
+        failing (remove #(= :ok (:status (second %))) results)
+        unexpected (remove #(contains? known (first %)) failing)
+        fixed (filter #(and (contains? known (first %)) (= :ok (:status (second %)))) results)
+        by-level (frequencies (map (comp :level second) failing))
+        same-text (filter #(:size (second %)) results)
+        bytes (reduce + 0 (keep #(:size (second %)) same-text))]
+    (doseq [[k r] unexpected]
+      (println "DIFFERS" k (pr-str (dissoc r :detail :cand)))
+      (when (:detail r) (println "  original:\n" (:detail r)))
+      (when (:cand r) (println "  printed:\n" (:cand r))))
+    (doseq [[k _] fixed] (println "FIXED (listed as known, no longer differs)" k))
+    (doseq [[k r] failing :when (contains? known k)] (println "known" k (pr-str (select-keys r [:level :status])) "--" (get known k)))
+    (println (format "repr-haskell roundtrip (text level): %d modules (%d with CPP: their module views), %d byte-identical (%d bytes), %d also with equal trees and lines of mode :full; %d differ (%s), %d known, %d unexpected, %d fixed%s"
+                     (count results) (count (filter #(:cpp (second %)) results)) (count same-text) bytes (count ok) (count failing) (pr-str by-level)
+                     (count (filter #(contains? known (first %)) failing)) (count unexpected) (count fixed)
+                     (if-let [t (get opts "--times")] (str "; seconds: " t) "")))
+    (when-let [rep (get opts "--report")]
+      (spit rep (with-out-str
+                  (prn {:modules (count results) :byte-identical (count same-text) :bytes bytes :equal (count ok) :differ (count failing)
+                        :by-level by-level :unexpected (mapv first unexpected) :fixed (mapv first fixed)
+                        :times (get opts "--times")
+                        :results (into (sorted-map) (for [[k r] results] [k (dissoc r :detail :cand)]))}))))
+    (if (and (empty? unexpected) (empty? fixed)) 0 1)))
+
 ;;; The round trip's interface level (SPEC §9.3)
 
 (def ^:private self-recomp-lines
@@ -309,16 +430,44 @@
                            "$1_"))
             (str sb) (sort @vars))))
 
+(defn- indent-of [^String l] (count (re-find #"^ *" l)))
+
+(defn sort-warnings
+  "The entries of the Deprecated names: and Deprecated exports: lists of ghc --show-iface's
+  text sorted: GHC prints them in an order that varies from build to build (a parallel build's
+  uniques; R3, HASKELL-NOTES \"R2\": base's Data.Enum)"
+  [^String t]
+  (let [ls (vec (str/split-lines t))
+        n (count ls)]
+    (loop [i 0 out (transient [])]
+      (if (< i n)
+        (if-let [[_ pre label e1] (re-matches #"( *)(Deprecated (?:names|exports): )(.*)" (nth ls i))]
+          (let [ind (count pre)
+                col (+ ind (count label))
+                j (loop [j (inc i)] (if (and (< j n) (> (indent-of (nth ls j)) ind)) (recur (inc j)) j))
+                ;; an entry: a line at the list's column, the deeper lines after it its own
+                entries (reduce (fn [acc l]
+                                  (if (and (seq acc) (> (indent-of l) col))
+                                    (conj (pop acc) (str (peek acc) "\n" l))
+                                    (conj acc (subs l (min (count l) col)))))
+                                [e1] (subvec ls (inc i) j))
+                sorted (sort entries)
+                lines (cons (str pre label (first sorted)) (map #(str (apply str (repeat col " ")) %) (rest sorted)))]
+            (recur j (reduce conj! out (mapcat str/split-lines lines))))
+          (recur (inc i) (conj! out (nth ls i))))
+        (str/join "\n" (persistent! out))))))
+
 (defn normalize-iface
   "ghc --show-iface's text as the interface level compares it (SPEC §9.3). Both modes drop the
-  self-recompilation lines; mode :lines also writes the spans of unfoldings' strings as lines
+  self-recompilation lines and sort the deprecation warnings' entries (sort-warnings); mode
+  :lines also writes the spans of unfoldings' strings as lines
   (N.hs:3:1-14 -> N.hs:3, N.hs:(3,1)-(5,20) -> N.hs:3-5), blanks the two columns of SrcLoc
   constructions (SrcLoc pkg mod file 3# 1# 5# 20# -> 3# _ 5# _, also through $WSrcLoc and boxed
   arguments), every fingerprint (the ABI, export, orphan, usage and declaration hashes, which
   cover the columns), and the usages of the files CPP included (addDependentFile: the printed
   module is the preprocessed text, which includes none, SPEC §2.8)."
   [^String text mode]
-  (let [t (str/join "\n" (remove #(re-find self-recomp-lines %) (str/split-lines text)))]
+  (let [t (sort-warnings (str/join "\n" (remove #(re-find self-recomp-lines %) (str/split-lines text))))]
     (if (= mode :full)
       t
       (-> t
@@ -424,7 +573,8 @@
                    "print" (cmd-print more)
                    "compare" (cmd-compare more)
                    "compare-iface" (cmd-compare-iface more)
-                   (do (println "usage: -m arbace.repr.haskell read|print|compare|compare-iface ...") 2))
+                   "compare-text" (cmd-compare-text more)
+                   (do (println "usage: -m arbace.repr.haskell read|print|compare|compare-iface|compare-text ...") 2))
                  (catch Throwable e
                    (.printStackTrace e)
                    1))]
