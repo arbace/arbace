@@ -12,8 +12,8 @@ CLOJURE_TESTS_GO ?= target/arbace-go/amd64/arbace-tests
 .PHONY: help seed-check stage0 seed-verify reseed build build-tests smoke repl fixpoint \
   box box-smoke box-oracle box-suite box-tools box-rebuild mac-bundle arm64-vm-check \
   gate gate-full suite oracle verify jdk-verify edge-verify fixtures-verify tamago-verify \
-  toolchain-verify box-vendor-verify x509roots-verify repr-go-roundtrip repr-go-roundtrip-text alpine-check clean \
-  check-makefile
+  toolchain-verify box-vendor-verify x509roots-verify repr-go-roundtrip repr-go-roundtrip-text repr-java-roundtrip \
+  alpine-check clean check-makefile
 
 help: ## list the targets
 	@awk 'BEGIN {FS = ":.*## "} /^## / {printf "\n%s\n", substr($$0, 4)} \
@@ -75,7 +75,7 @@ oracle: ## the executable against the frozen JVM's results (bin/oracle check)
 
 ## Vendored trees and recorded data, converted or recorded afresh and compared byte for byte
 VERIFY := jdk-verify edge-verify fixtures-verify tamago-verify toolchain-verify \
-  box-vendor-verify x509roots-verify repr-go-roundtrip repr-go-roundtrip-text
+  box-vendor-verify x509roots-verify repr-go-roundtrip repr-go-roundtrip-text repr-java-roundtrip
 verify: $(VERIFY) ## all of the below, one after another
 jdk-verify: ## jdk/'s forms by repr/java, on the frozen JVM (bin/jrt-convert verify)
 	bin/jrt-convert verify
@@ -106,6 +106,8 @@ repr-go-roundtrip-text: ## mode :full prints the original text back, byte for by
 	bin/repr-go roundtrip --text linux/amd64
 	bin/repr-go roundtrip --text --dirs amd64
 	bin/repr-go roundtrip --text --dirs linux/amd64
+repr-java-roundtrip: ## Java -> forms -> Java -> forms over Clojure's Java, the samples, jdk/forms (bin/repr-java roundtrip)
+	bin/repr-java roundtrip --corpus baseline,samples,jdk
 
 ## The host and housekeeping
 alpine-check: ## one minimal apk add line reinstalls exactly the host's packages (bin/alpine-env check)
