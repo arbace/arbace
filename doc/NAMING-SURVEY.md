@@ -651,3 +651,10 @@ derivation's provenance); the seed (until the re-seed).
 - **R3** accepted: `:a2g` stays in `java-surface.edn` and `test/jrt/java_surface.ae`.
 - **R4** yes, as a separate commit after the merge (the lead's), not on this branch.
 - **R5** accepted.
+
+**Added (2026-10-17, the user):** c2a becomes `repr/clojure` ("yes, rename c2a at the next
+re-seed, print later"): `arbace.repr.clojure`, `bin/repr-clojure read` (today's c2a), at the
+next re-seed (with F3 and F4's); `repr/clojure print` (Arbace → Clojure: `arbace.*` back to
+`clojure.*`, `.ae` back to `.clj`, a text round trip, as repr/go's `:full`) later. Clojure and
+Arbace share the reader, so this bridge runs between two dialects' texts; the few one-way rules
+(a `.cljc`'s reader conditionals resolved) are recorded or documented when `print` is built.

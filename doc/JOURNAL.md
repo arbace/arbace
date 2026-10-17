@@ -553,3 +553,11 @@ ghc-lisp's printer does not port to 9.14.1 (four constructors missing). Recommen
 only, ghc-lisp's grammar respelled by repr/go's rule, a generic helper with the converter and
 printer in Arbace, the tree, interface and text levels first, after `repr/java print` and
 F2-F7; about 6 to 9 days to the tree and text levels over `base`. Proposals H1-H14, open.
+
+## 2026-10-17: c2a to become repr/clojure (the user)
+
+The user, asked whether c2a should be `repr/clojure`: "yes, rename c2a at the next re-seed,
+print later". It fits the bridges' principle once it has a `print` verb (Arbace → Clojure, which
+would let Arbace's libraries be used from Clojure, with a text round trip since c2a keeps layout
+and comments); without one it would stay a translator named c2a. To do: the rename (about 307
+occurrences in 44 files) at the next re-seed, F3 and F4's; `repr/clojure print` later.
