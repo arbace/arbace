@@ -854,3 +854,24 @@ the originals and from the printed modules in place, `ghc --show-iface` compared
 not lines); HR7 (`-O1`) and HR8 (one build per side) as recommended; its `--full` step about 3.5
 minutes. The kernel/user survey's K1-K12 decided as recommended (doc/go/KERNEL-USER-SURVEY.md,
 "Decided"); KU0, its spec, started now (the user, against "after goi").
+
+## 2026-10-17: KU0, the processes' spec; the Mac bundle rebuilt
+
+doc/go/PROCESS-SPEC.md (from the branch `ku0-spec`, `39d75da`): a process is a second TamaGo
+runtime at EL0 (one image, a page table per process, text and read-only data shared and
+user-executable, data, bss, heap and stacks private, the kernel EL1-only in every table); the
+system calls the doorbell's 64-byte block by SYSCALL/SVC, its address in RAX/X0; bytes and
+handles across; a process run by a kernel goroutine as one long `Exec` call, so the collector
+scans it in an ordinary frame; no patch to Go's runtime through KU5; one spawn request with
+`:process`, `:guest` and `:auto` back ends. Experiments: the ring-3 crossings measured again
+(SYSCALL and SYSRET 26-31 ns, a CR3 switch 145 ns, the doorbell 18 µs); a two-mode board
+prototype builds one image with a guest entry and a process entry, three LOAD segments (R E, R,
+RW). KU1-KU6 14 to 23 days; decisions S1-S40; proposals KS1-KS12, open.
+
+For the box's checks on the Mac under macOS 26 (the user): `bin/box-mac-bundle` refused since S9,
+comparing the rebuild's sources over all of `tamago/` (which holds `tamago/cmd`) where
+`bin/box-rebuild` archives `tamago/goroot` and `tamago/goos`; fixed (`7019817`). The bundle
+built at `7019817` (55 MB; the rebuild's expected image from `bin/box-rebuild --arch arm64
+prepare host` at that commit). Found on the way: `arbace.j2g.start` (the j2g batch's) is in the
+program's `namespaces.txt` but neither compiled nor embedded, so a prepare without ARBACE_PATH
+(the box's) reports it not prepared; given to the c2j integration.

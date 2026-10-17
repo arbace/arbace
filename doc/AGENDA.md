@@ -127,7 +127,8 @@ The current state of the work. This file is rewritten as things change. For the 
   F6, F7. Measured there: `fib`
   6.40 → 0.168 ms (the JVM 0.16) by a `Long` fast path, var speculation and an unboxed worker;
   `loop-long` 11.87 → 1.09 ms without the class-initialization guards.
-- Smaller: the box's checks on the Mac on macOS 26.
+- The box's checks on the Mac on macOS 26: the bundle built (`7019817`), waiting on the
+  user's run of `./mac.sh all` and its `mac-results.tar.gz`.
 
 ## Later
 
@@ -151,7 +152,8 @@ The current state of the work. This file is rewritten as things change. For the 
   2026-10-17): recommended a TamaGo runtime per process at EL0 (the same image, a page table per
   process), language isolation inside processes, S7's guests where virtualization exists, one
   spawn request; SYSCALL round trip 24.5 ns measured at ring 3; plan KU0-KU6, 17-27 days;
-  K1-K12 decided as recommended; running: KU0, the spec.
+  K1-K12 decided as recommended; KU0 done (doc/go/PROCESS-SPEC.md; proposals KS1-KS12
+  open); KU1-KU6, 14-23 days.
 - The mapped start measured without nested KVM.
 - A note from the user (2026-10-13): the tooling of the Mac GUI app Moshi Go may be useful for
   Arbace, to study when Arbace's REPL gets a user interface beyond the terminal. Its build info
