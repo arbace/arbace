@@ -9,7 +9,9 @@ follows. Milestone R1 (§10.1) was built on 2026-10-17: the helper, the converte
 printer and the tree level over `base`, `ghc-internal`, `ghc-prim` and `ghc-bignum`, all 483
 modules equal; what it adds to this text and where it departs is §10.4 and
 [HASKELL-NOTES.md](HASKELL-NOTES.md). Milestone R2, the interface level over the same corpus, was
-built the same day: all 483 modules' interfaces equal at `-O1` (§10.5). The experiments that
+built the same day: all 483 modules' interfaces equal at `-O1` (§10.5). Milestone R3, mode `:full`
+and the text level, was built the same day too: all 483 modules printed back byte for byte, 480
+of them with GHC's trees of mode `:full` equal (§10.6). The experiments that
 validate the spec's choices (Appendix A) were run on the host's GHC 9.14.1 (Alpine's
 `ghc-9.14.1-r2`) and the stage 0 of main at `f0d7fc2f` (`target/seed/amd64/arbace`, amd64);
 their scripts and inputs are `test/haskell/`.
@@ -266,7 +268,7 @@ preprocessed text (§2.8; unlike ghc-lisp's D11, S4). Pragmas GHC does not recog
 | `:config` | the configuration (§2.7) |
 | `:cpp` | the preprocessing record, when the module was preprocessed (§2.8) |
 | `:unlit` | `true` for a literate module (`.lhs`), whose code GHC's `unlit` extracted (§8.5) |
-| `:hs/comments`, `:hs/space`, `:hs/tail`, `:hs/unicode` | in mode `:full` only: the text the tree does not hold (§7.2) |
+| `:hs/comments`, `:hs/space`, `:hs/tail`, `:hs/unicode` | in mode `:full` only: the text the tree does not hold (§7.2; as built, §10.6: metadata of the `hs/module` form, `:hs/unicode` folded into `:hs/text`) |
 
 ### 2.5 Export items
 
@@ -1161,7 +1163,7 @@ bin/repr-haskell test                       the spec's cases (test/haskell/)
 |---|---|---|
 | R1 | the helper; the converter and the braces printer in `:lines`; `base`, `ghc-internal`, `ghc-prim`, `ghc-bignum` without CPP, then with CPP (built 2026-10-17: 483 of 483 modules, §10.4) | tree level |
 | R2 | the interface level over R1's corpus (built 2026-10-17: 483 of 483 modules, §10.5) | interface level |
-| R3 | `:full`: the helper's annotations and comments, the converter's metadata, the full printer | text level, tree level in `:full` |
+| R3 | `:full`: the helper's annotations and comments, the converter's metadata, the full printer (built 2026-10-17: 483 of 483 modules byte-identical, 480 with equal trees of mode `:full`, §10.6) | text level, tree level in `:full` |
 | R4 | the layout printer | tree and interface levels |
 | R5 | the other boot libraries | all of the above |
 | R6 | `.hsc` (hsc2hs), `.lhs` (unlit), boot files and signatures in the corpus | all of the above |
@@ -1287,6 +1289,48 @@ survey's E3).
   mode `:full`'s normalization alone 237 are equal and 246 differ, the differences being columns
   and the hashes over them, and CPP's inclusions. No known differences. About 2.5 minutes on this
   host beyond the tree level, the two builds of the corpus at `-O1` 116 s.
+
+### 10.6 As built: R3 (2026-10-17)
+
+[HASKELL-NOTES.md](HASKELL-NOTES.md), "R3", records the build; what it changes in this text
+(HR9-HR13, built as recommended, for the user's decision):
+
+- **The helper (§8.2)**: `dump --full` writes the exact-print annotations as §8.2 says, each as a
+  discarded form (`#_`) after the `nil` a dump without `--full` has in its place, so that a dump of
+  either mode reads as the same tree; then `(hsdump/text "...")`, the text the positions refer to
+  (the source, or a CPP module's module view, §2.8), and `(hsdump/tokens [...])`, GHC's lexer's
+  tokens (`lexTokenStream`, the raw token stream `-dkeep-comments` keeps: comments marked `:c`,
+  the layout's virtual braces and semicolons and other files' tokens left out). The converter's
+  positions come from these tokens, not from the annotations (HR9). A CPP module's module view is
+  also written as `FILE.view`, the text level's reference.
+- **The metadata of mode `:full` (§7.2)**, as built (HR10): `:hs/pos {:span [l1 c1 l2 c2] :toks
+  [[l c]...]}` on a list, vector or symbol that stands for a located node, its span and the start of
+  each token inside it and inside none of its elements' spans, in order (a literal's and a
+  keyword's tokens are their parent's; parentheses are tokens like any other, so no `:hs/paren`
+  and no `:hs/apos`); `:hs/punct [[l c ","]...]`, likewise, the commas, semicolons and braces,
+  which the printer never prints in the full layout (so no `:hs/layout`: a layout block's
+  columns are its tokens' positions, explicit braces and semicolons are punctuation); `:hs/text
+  {[l c] "text"}`, likewise, the source's spelling of a token the printer spells otherwise, a
+  literal's, a pragma opener's, Unicode syntax's (in place of `:hs/atext`, `:hs/text` on a literal
+  form and `:hs/unicode`); on `hs/module` `:hs/comments [[l1 c1 l2 c2 "text"]...]`, `:hs/space [[l c
+  "ws"]...]` (the white space after the element ending at `l c` when it is not the full layout's
+  own: spaces to the next element on its line, else newlines and spaces to its column) and
+  `:hs/tail`, and the tokens no form's span holds; and two facts GHC keeps only in annotations:
+  `:hs/where` (a class, instance or data declaration without items written with `where`) and
+  `:hs/parens N` (the parentheses around a family equation's left-hand side).
+- **The full layout (§7.4, 3)**: the printing code of the braces layout, collecting its tokens,
+  which are paired in order with the forms' positions; the converter checks the pairing against
+  the source's tokens and fails a module whose tokens differ other than in spelling (HR11).
+- **The levels (§9.1, §9.3, §9.5, §9.6)**: `bin/repr-haskell roundtrip --text` (after the tree
+  level, and the interface level with `--iface`; `--text-only` alone): byte for byte against the
+  original or the module view, then `hsdump tree --full` and `lines` of both sides; known
+  differences `test/haskell/roundtrip-ghc-9.14.1-text-known.edn`: the three modules that include
+  `CTypes.h`, whose comments are in the original's tree and outside the module view, differ in the
+  tree of mode `:full` only (HR12). `bin/gate --full`'s step runs `roundtrip --iface --text`, about
+  5 minutes. `print` takes `--layout braces|full` (the full layout by default for forms of mode
+  `:full`), `read` and `dump` `--full --corpus`.
+- **The interface level (§9.3)**: both modes sort the entries of the deprecation warnings' lists
+  of `--show-iface`, whose order GHC varies from build to build (HR13).
 
 ## 11. Decisions and open questions
 

@@ -8,7 +8,12 @@
 -- Usage (bin/repr-haskell runs it):
 --   hsdump dump  [--full] -o OUTDIR [--libdir DIR] [--corpus NAME] [--ghc FLAG... --files] FILE...
 --       one OUTDIR/FILE.edn per module: (hsdump/config {...}) (hsdump/pragmas [...]) then the
---       tree (SPEC §8.2); with --full also the exact-print annotations (R3, not yet used)
+--       tree (SPEC §8.2); with --full (mode :full, R3) the tree's exact-print annotations too,
+--       each written as a discarded form #_(...) after the nil a dump without --full has in
+--       its place (so that the tree reads as without --full), then (hsdump/text "...") (the text
+--       the positions refer to: the source, or a CPP module's module view, SPEC §2.8) and
+--       (hsdump/tokens [...]) (GHC's lexer's tokens with comments, -dkeep-comments); and for a
+--       CPP module OUTDIR/FILE.view, its module view (the text level's reference)
 --   hsdump tree  [--full] -o OUTDIR [--libdir DIR] [--ghc FLAG... --files] FILE...
 --       one OUTDIR/FILE.tree per module: the tree level's normal form (SPEC §9.2): showAstData
 --       BlankSrcSpan BlankEpAnnotations after eraseEpLayout (NoBlank... with --full), and
@@ -29,7 +34,7 @@ import GHC.Driver.Errors.Types (DriverMessages, DriverMessage)
 import GHC.Parser.Errors.Types (PsMessage)
 import GHC.Utils.Logger (LogAction, Logger, pushLogHook, setLogFlags)
 import GHC.Driver.Config.Logger (initLogFlags)
-import GHC.Parser.Lexer (ParserOpts, initParserState, initPragState, unP, lexer, ParseResult(..), Token(..), getPsErrorMessages)
+import GHC.Parser.Lexer (ParserOpts, initParserState, initPragState, unP, lexer, lexTokenStream, ParseResult(..), Token(..), getPsErrorMessages)
 import qualified GHC.Parser as P
 import GHC.Parser.Header (toArgs)
 import GHC.Data.StringBuffer (StringBuffer, hGetStringBuffer, lexemeToString, atLine, stringToStringBuffer)
@@ -66,6 +71,7 @@ import Data.Maybe (fromMaybe, mapMaybe, catMaybes)
 import Data.Ratio (numerator, denominator)
 import Data.Word (Word8, Word32, Word64)
 import qualified Data.ByteString as B
+import qualified Data.Map.Strict as Map
 import qualified Data.ByteString.Builder as BB
 import qualified Data.ByteString.Char8 as BC
 import System.Directory (createDirectoryIfMissing, doesFileExist, listDirectory, makeAbsolute)
@@ -76,7 +82,7 @@ import System.IO
 
 -- The helper's version: bumped when its output changes (recorded in every dump's config).
 helperVersion :: Int
-helperVersion = 1
+helperVersion = 2
 
 -- The GHC this helper was written against (tools/hsdump/GHC_VERSION, passed by the build as
 -- -DGHC_PIN); the helper refuses to run on another (SPEC §8.4, H11).
@@ -151,6 +157,15 @@ main = do
               hPutBuilder' h (cfg <> BB.char7 '\n')
               hPutBuilder' h (pragmasOf p <> BB.char7 '\n')
               hPutBuilder' h (gen (oFull o) (mkFastString file) (pModule p) <> BB.char7 '\n')
+              when (oFull o) $ do
+                hPutBuilder' h (BB.string7 "(hsdump/text " <> str (pView p) <> BB.string7 ")\n")
+                hPutBuilder' h (tokensOf (mkFastString file) (pTokens p) <> BB.char7 '\n')
+          -- a CPP module's module view, the text level's reference (SPEC §2.8, §9.1)
+          when (oFull o) $ case res of
+            Right p | Just _ <- pCpp p -> do
+              vf <- outFile o file ".view"
+              withUtf8File vf $ \h -> hPutBuilder' h (BB.stringUtf8 (pView p))
+            _ -> return ()
         "tree" -> do
           out <- outFile o file ".tree"
           outl <- outFile o file ".lines"
@@ -203,7 +218,9 @@ data ModP = ModP
   , pText :: B.ByteString           -- the text parsed (the CPP output, or the original)
   , pPragmas :: [(String, Int, Either String [String])]  -- header pragmas: kind, line, value
   , pCpp :: Maybe CppRecord
-  , pDflags :: DynFlags }
+  , pDflags :: DynFlags
+  , pTokens :: Either String [Located Token]  -- GHC's lexer's tokens, comments included (mode :full)
+  , pView :: String }               -- the text the positions refer to: the source, or CPP's module view
 
 data CppRecord = CppRecord
   { cCommand :: [String], cArgs :: [String], cFiles :: [(String, String)]
@@ -253,8 +270,8 @@ parseOne hsc_env o file = do
                 , cFiles = fileHashes
                 , cMacros = fmap ("sha256:" ++) (case macros of (Just m : _) -> Just m; _ -> Nothing)
                 , cOutput = "sha256:" ++ sha256Hex (foldr (\m t -> replaceBS (BC.pack m) (BC.pack "<macros>") t) out macrosFile) }
-          parseText hsc_env dflagsC file src out (Just record)
-    else parseText hsc_env dflagsP file src src Nothing
+          parseText hsc_env dflagsC file src out (Just record) (moduleView file (decodeUtf8 out))
+    else parseText hsc_env dflagsP file src src Nothing (decodeUtf8 src)
   where
     dropPrefix (p : ps) (x : xs) | p == x = dropPrefix ps xs
     dropPrefix _ xs = xs
@@ -310,15 +327,19 @@ relLibdir :: Maybe FilePath -> FilePath -> FilePath
 relLibdir (Just d) f | d `isPrefixOf` f = "$libdir" ++ drop (length d) f
 relLibdir _ f = f
 
-parseText :: HscEnv -> DynFlags -> FilePath -> B.ByteString -> B.ByteString -> Maybe CppRecord -> IO (Either String ModP)
-parseText hsc_env dflagsIn file src text cpp = do
+parseText :: HscEnv -> DynFlags -> FilePath -> B.ByteString -> B.ByteString -> Maybe CppRecord -> String -> IO (Either String ModP)
+parseText hsc_env dflagsIn file src text cpp view = do
   let buf = bufferOf text
       popts = initParserOpts dflagsIn
       (prags, opts) = headerOptions popts dflagsIn buf file
   (dflags, _, _) <- parseDynamicFilePragma (hsc_logger hsc_env) dflagsIn opts
   let st = initParserState (initParserOpts dflags) buf (mkRealSrcLoc (mkFastString file) 1 1)
+      -- the raw token stream (comments kept), as -dkeep-comments keeps them (SPEC §8.2)
+      toks = case lexTokenStream (initParserOpts dflags) buf (mkRealSrcLoc (mkFastString file) 1 1) of
+        POk _ ts -> Right ts
+        PFailed _ -> Left "the lexer's token stream failed"
   case unP P.parseModule st of
-    POk _ m -> return (Right (ModP m src text prags cpp dflags))
+    POk _ m -> return (Right (ModP m src text prags cpp dflags toks view))
     PFailed pst -> return (Left ("parse failed: " ++ showSDocUnsafe (pprMessages (defaultDiagnosticOpts @PsMessage) (getPsErrorMessages pst))))
 
 bufferOf :: B.ByteString -> StringBuffer
@@ -470,10 +491,12 @@ tyName :: Data d => d -> String
 tyName x = tyConName (typeRepTyCon (typeOf x))
 
 gen :: forall d. Data d => Bool -> FastString -> d -> BB.Builder
-gen full modFile = go
+gen full modFile = go False
   where
-    go :: forall e. Data e => e -> BB.Builder
-    go x
+    -- inAnn: inside an exact-print annotation written whole (mode :full), where nothing is
+    -- discarded again
+    go :: forall e. Data e => Bool -> e -> BB.Builder
+    go inAnn x
       | Just (s :: String) <- cast x = str s
       | Just (f :: FastString) <- cast x = str (unpackFS f)
       | Just (b :: B.ByteString) <- cast x = BB.string7 "(bytes " <> str (map (toEnum . fromIntegral) (B.unpack b)) <> BB.char7 ')'
@@ -494,17 +517,19 @@ gen full modFile = go
       | Just (c :: Char) <- cast x = BB.string7 "(char " <> BB.intDec (ord c) <> BB.char7 ')'
       | Just (r :: Rational) <- cast x = BB.string7 "(:% " <> BB.integerDec (numerator r) <> BB.char7 ' ' <> BB.integerDec (denominator r) <> BB.char7 ')'
       | Just (d :: Double) <- cast x = BB.string7 (show d)
-      | tn == "GenLocated" = BB.string7 "(L " <> gmapQi 0 loc x <> BB.char7 ' ' <> gmapQi 1 go x <> BB.char7 ')'
-      | tn == "NonEmpty" = BB.char7 '[' <> gmapQi 0 go x <> rest (gmapQi 1 listElems x) <> BB.char7 ']'
-      | not full && isAnnType tn = BB.string7 "nil"
-      | tn == "EpAnnComments" && not full = BB.string7 "nil"
+      | tn == "GenLocated" = BB.string7 "(L " <> gmapQi 0 loc x <> BB.char7 ' ' <> gmapQi 1 (go inAnn) x
+          <> (if full && not inAnn then gmapQi 0 locAnn x else mempty) <> BB.char7 ')'
+      | tn == "NonEmpty" = BB.char7 '[' <> gmapQi 0 (go inAnn) x <> rest (gmapQi 1 (listElems inAnn) x) <> BB.char7 ']'
+      | not inAnn && (isAnnType tn || tn == "EpAnnComments") =
+          -- the nil of a dump without --full, the annotation discarded after it (mode :full)
+          if full then BB.string7 "nil #_" <> go True x else BB.string7 "nil"
       | otherwise = case dataTypeRep (dataTypeOf x) of
           AlgRep _ ->
             let c = showConstr (toConstr x)
-            in if c == "(:)" then BB.char7 '[' <> mconcat (sepBy (BB.char7 ' ') (listElems x)) <> BB.char7 ']'
+            in if c == "(:)" then BB.char7 '[' <> mconcat (sepBy (BB.char7 ' ') (listElems inAnn x)) <> BB.char7 ']'
                else if c == "[]" then BB.string7 "[]"
-               else if "(," `isPrefixOf` c then BB.string7 "(tuple " <> mconcat (sepBy (BB.char7 ' ') (gmapQ go x)) <> BB.char7 ')'
-               else let kids = gmapQ go x in
+               else if "(," `isPrefixOf` c then BB.string7 "(tuple " <> mconcat (sepBy (BB.char7 ' ') (gmapQ (go inAnn) x)) <> BB.char7 ')'
+               else let kids = gmapQ (go inAnn) x in
                  if null kids then BB.stringUtf8 (conName c)
                  else BB.char7 '(' <> BB.stringUtf8 (conName c) <> BB.char7 ' ' <> mconcat (sepBy (BB.char7 ' ') kids) <> BB.char7 ')'
           NoRep -> BB.string7 "(hsdump/opaque " <> str tn <> BB.char7 ')'
@@ -512,22 +537,62 @@ gen full modFile = go
       where tn = tyName x
     rest [] = mempty
     rest xs = BB.char7 ' ' <> mconcat (sepBy (BB.char7 ' ') xs)
-    listElems :: forall e. Data e => e -> [BB.Builder]
-    listElems y
-      | showConstr (toConstr y) == "(:)" = gmapQi 0 go y : gmapQi 1 listElems y
+    listElems :: forall e. Data e => Bool -> e -> [BB.Builder]
+    listElems inAnn y
+      | showConstr (toConstr y) == "(:)" = gmapQi 0 (go inAnn) y : gmapQi 1 (listElems inAnn) y
       | otherwise = []
     loc :: forall e. Data e => e -> BB.Builder
     loc l
       | Just (sp :: SrcSpan) <- cast l = spanB modFile sp
-      | Just (el :: EpaLocation) <- cast l = case el of
-          EpaSpan sp -> spanB modFile sp
-          EpaDelta sp _ _ -> spanB modFile sp
+      | tyName l == "EpaLocation'" = gmapQi 0 loc l
       | tyName l == "EpAnn" = gmapQi 0 loc l
       | otherwise = BB.string7 "nil"
+    -- mode :full: an EpAnn location's annotation and comments, discarded after the node
+    locAnn :: forall e. Data e => e -> BB.Builder
+    locAnn l
+      | tyName l == "EpAnn" = BB.string7 " #_(hsdump/ann " <> gmapQi 1 (go True) l <> BB.char7 ' ' <> gmapQi 2 (go True) l <> BB.char7 ')'
+      | otherwise = mempty
     conName c = case c of
       ":|" -> "nonempty"
       _ -> c
     mempty' = GHC.Data.Strict.Nothing
+
+-- mode :full: GHC's lexer's tokens in the module's file (SPEC §8.2), [l1 c1 l2 c2], a comment
+-- [l1 c1 l2 c2 :c]; the layout algorithm's virtual braces and semicolons (zero-width) left out
+tokensOf :: FastString -> Either String [Located Token] -> BB.Builder
+tokensOf _ (Left e) = BB.string7 "(hsdump/tokens-error " <> str e <> BB.char7 ')'
+tokensOf modFile (Right ts) =
+  BB.string7 "(hsdump/tokens [" <> mconcat (sepBy (BB.char7 ' ') [one r t | L (RealSrcSpan r _) t <- ts, keep r]) <> BB.string7 "])"
+  where
+    keep r = srcSpanFile r == modFile && (srcSpanStartLine r, srcSpanStartCol r) /= (srcSpanEndLine r, srcSpanEndCol r)
+    one r t = BB.char7 '[' <> BB.intDec (srcSpanStartLine r) <> BB.char7 ' ' <> BB.intDec (srcSpanStartCol r) <> BB.char7 ' '
+      <> BB.intDec (srcSpanEndLine r) <> BB.char7 ' ' <> BB.intDec (srcSpanEndCol r)
+      <> (if isCommentTok t then BB.string7 " :c" else mempty) <> BB.char7 ']'
+    isCommentTok = \case ITlineComment {} -> True; ITblockComment {} -> True; ITdocComment {} -> True; ITdocOptions {} -> True; _ -> False
+
+-- CPP's module view (SPEC §2.8, S5): for each line of the module, the output line the line
+-- markers (# N "file", #line N "file", {-# LINE N "file" #-}) attribute to it; the markers and
+-- the lines of other files dropped
+moduleView :: FilePath -> String -> String
+moduleView file out = concatMap (\n -> Map.findWithDefault "" n m ++ "\n") [1 .. maxL]
+  where
+    (m, maxL) = walk (lines out) file 1 Map.empty 0
+    walk [] _ _ acc mx = (acc, mx)
+    walk (l : ls) cur n acc mx = case marker l of
+      Just (n', f') -> walk ls f' n' acc mx
+      Nothing | cur == file -> walk ls cur (n + 1) (Map.insert n l acc) (max mx n)
+              | otherwise -> walk ls cur (n + 1) acc mx
+    marker l = case l of
+      '#' : r -> let r' = dropWhile (== ' ') (if "line" `isPrefixOf` r then drop 4 r else r) in num r'
+      '{' : '-' : '#' : r | (w, r') <- span (not . isSpace) (dropWhile isSpace r), map toUpper w == "LINE" -> num (dropWhile isSpace r')
+      _ -> Nothing
+    num r = case span isDigit r of
+      (ds@(_ : _), ' ' : '"' : q) -> Just (read ds, unq q)
+      _ -> Nothing
+    unq ('\\' : c : xs) = c : unq xs
+    unq ('"' : _) = []
+    unq (c : xs) = c : unq xs
+    unq [] = []
 
 -- spans: [l1 c1 l2 c2], the file name first when it is not the module's
 spanB :: FastString -> SrcSpan -> BB.Builder

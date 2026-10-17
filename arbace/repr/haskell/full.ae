@@ -1,0 +1,278 @@
+(ns arbace.repr.haskell.full
+  "Mode :full of repr/haskell's converter (doc/haskell/SPEC.md §7.2, doc/haskell/HASKELL-NOTES.md,
+  \"R3\"): the forms of a module converted from a dump of tools/hsdump dump --full keep, besides
+  mode :lines' lines, every position of the module's text, so that the printer's full layout
+  gives the text back byte for byte. The dump holds the text the positions refer to (the source,
+  or a CPP module's module view, SPEC §2.8) and GHC's lexer's tokens with their spans and the
+  comments (-dkeep-comments). The forms carry:
+
+    :hs/pos {:span [l1 c1 l2 c2] :toks [[l c]...]}  on a list, vector or symbol that stands for a
+        located node: its span, and the start of every token inside it that is not inside one of
+        its elements' spans, in order (a literal's and a keyword's tokens are their parent's)
+    :hs/punct [[l c \",\"]...]  likewise, the punctuation the printer does not decide: commas,
+        semicolons and braces (layout's virtual braces and semicolons are no tokens)
+    :hs/text {[l c] \"text\"}  likewise, a token's spelling where the printer spells it otherwise:
+        a literal's (0x1F, \"\\SOH\", 1e3), a pragma's opener ({-# INLINEABLE), Unicode syntax
+    on hs/module: :hs/comments [[l1 c1 l2 c2 \"text\"]...] (every comment, header pragmas and
+        documentation comments included), :hs/space [[l c \"ws\"]...] (the white space after the
+        element ending at l c when it is not what the printer would put: spaces to the next
+        element on its line, else newlines and the next element's column), :hs/tail (the text
+        after the last element when it is not one newline), and the tokens no form's span holds.
+    The converter adds two facts GHC keeps only in a node's annotation, found in the tokens:
+    :hs/where on a class, an instance or a data declaration without items whose source wrote
+    where, and :hs/parens on a family equation (= lhs rhs), the parentheses around its lhs.
+
+  The printer pairs its tokens (arbace.repr.haskell.print/print-tokens) with the positions in
+  order; the converter checks that pairing here, and records a spelling only where the two
+  texts are spellings of one token (a literal of one kind, a pragma's opener, Unicode syntax)."
+  (:require [arbace.repr.haskell.convert :as cv]
+            [arbace.repr.haskell.print :as pr]
+            [arbace.string :as str]))
+
+;;; The text and its positions
+
+(defn- line-starts
+  "The offsets at which the lines of text begin"
+  [^String text]
+  (loop [i 0 acc (transient [0])]
+    (let [j (.indexOf text "\n" i)]
+      (if (neg? j) (persistent! acc) (recur (inc j) (conj! acc (inc j)))))))
+
+(defn text-index
+  "A function from a position [l c] (GHC's columns: code points from 1, tab stops of 8) to the
+  offset of text it names"
+  [^String text]
+  (let [starts (line-starts text)
+        n (count text)
+        ;; without tabs and characters beyond the BMP, a column is a char
+        plain (and (neg? (.indexOf text "\t")) (= n (.codePointCount text 0 n)))]
+    (if plain
+      (fn [[l c]] (min n (+ (get starts (dec l) n) (dec c))))
+      (fn [[l c]]
+        (let [s (get starts (dec l) n)]
+          (loop [i s col 1]
+            (if (or (>= col c) (>= i n))
+              i
+              (let [ch (.charAt text i)]
+                (cond
+                  (= ch \newline) i
+                  (= ch \tab) (recur (inc i) (+ 1 (* 8 (quot (+ col 7) 8))))
+                  (and (Character/isHighSurrogate ch) (< (inc i) n)) (recur (+ i 2) (inc col))
+                  :else (recur (inc i) (inc col)))))))))))
+
+(def ^:private punct-texts #{"," ";" "{" "}"})
+
+(defn tokens-of
+  "The dump's tokens as {:toks [[pos text]...] :punct [[l c text]...] :comments [[l1 c1 l2 c2
+  text]...]}, each sorted by position"
+  [text dumped]
+  (let [idx (text-index text)
+        all (for [[l c l2 c2 k] dumped]
+              (let [t (subs text (idx [l c]) (idx [l2 c2]))]
+                (cond
+                  (= k :c) [:comment [l c l2 c2 t]]
+                  (contains? punct-texts t) [:punct [l c t]]
+                  :else [:tok [[l c] t]])))
+        by (group-by first all)]
+    {:toks (vec (sort-by first (map second (:tok by))))
+     :punct (vec (sort (map second (:punct by))))
+     :comments (vec (sort (map second (:comment by))))}))
+
+(defn space-of
+  "[:hs/space :hs/tail] of text with elements [[pos text]...] sorted: the white space after an
+  element (or before the first) that is not the printer's gap-text, and the text after the last
+  when it is not one newline"
+  [^String text elems]
+  (let [idx (text-index text)]
+    (loop [es (seq elems) cur [1 1] off 0 acc []]
+      (if es
+        (let [[p t] (first es)
+              o (idx p)
+              ws (subs text off o)
+              acc (if (pr/gap-text? ws cur p) acc (conj acc [(first cur) (second cur) ws]))]
+          (recur (next es) (pr/advance p t) (+ o (count t)) acc))
+        (let [tail (subs text off)]
+          [acc (when-not (= tail "\n") tail)])))))
+
+;;; Spellings
+
+(def unicode-syntax
+  "Unicode syntax and its ASCII spelling (GHC's UnicodeSyntax)"
+  {"∷" "::" "⇒" "=>" "→" "->" "←" "<-" "∀" "forall" "★" "*" "⤙" "-<" "⤚" ">-" "⤛" "-<<" "⤜" ">>-"
+   "⦇" "(|" "⦈" "|)" "⟦" "[|" "⟧" "|]" "⊸" "%1 ->"})
+
+(defn- lit-kind
+  "The kind of a literal token's text: :num, :str, :chr, or nil"
+  [^String t]
+  (cond
+    (re-find #"^-?[0-9]" t) :num
+    (str/starts-with? t "\"") :str
+    (and (str/starts-with? t "'") (> (count t) 2) (or (str/ends-with? t "'") (str/ends-with? t "'#"))) :chr
+    :else nil))
+
+(defn- pragma-key
+  "A pragma opener's words, normalized: {-#  inlineable -> [INLINABLE] (GHC's clean_pragma)"
+  [^String t]
+  (when (str/starts-with? t "{-#")
+    (mapv #(get {"INLINEABLE" "INLINABLE" "SPECIALIZE" "SPECIALISE" "NOTINLINE" "NOINLINE"} % %)
+          (remove empty? (str/split (str/upper-case (subs t 3)) #"\s+")))))
+
+(defn spelling?
+  "Whether src is another spelling of the token the printer prints as printed"
+  [^String printed ^String src]
+  (or (and (lit-kind printed) (= (lit-kind printed) (lit-kind src)))
+      (and (pragma-key printed) (= (pragma-key printed) (pragma-key src)))
+      (= printed (get unicode-syntax src))))
+
+(defn- context [xs i]
+  (str/join " " (map pr-str (subvec xs (max 0 (- i 8)) (min (count xs) (+ i 4))))))
+
+(defn spellings
+  "The source's spellings {pos text} where the printer's tokens (texts, in order) differ from the
+  source's tokens ([[pos text]...]); throws when they are not one token's spellings, or not as
+  many"
+  [printed toks]
+  (let [printed (vec printed)
+        srcs (mapv second toks)]
+    (loop [i 0 acc {}]
+      (if (< i (min (count printed) (count toks)))
+        (let [p (nth printed i) [pos s] (nth toks i)]
+          (cond
+            (= p s) (recur (inc i) acc)
+            (spelling? p s) (recur (inc i) (assoc acc pos s))
+            :else (throw (ex-info (str "repr-haskell: the full layout prints " (pr-str p) " where the source has "
+                                       (pr-str s) " at " (pr-str pos) "; printed: " (context printed i)
+                                       "; source: " (context srcs i))
+                                  {}))))
+        (if (= (count printed) (count toks))
+          acc
+          (throw (ex-info (str "repr-haskell: the full layout prints " (count printed) " tokens, the source has "
+                               (count toks) "; printed tail: " (context printed (min (count printed) (count toks)))
+                               "; source tail: " (context srcs (min (count printed) (count toks))))
+                          {})))))))
+
+;;; Positions on the forms
+
+(defn- span-start [s] [(nth s 0) (nth s 1)])
+(defn- span-end [s] [(nth s 2) (nth s 3)])
+
+(defn- pos< [[a b] [c d]] (or (< a c) (and (= a c) (< b d))))
+
+(defn- lower-bound
+  "The first index of the sorted positions ps at or after p"
+  [ps p]
+  (loop [lo 0 hi (count ps)]
+    (if (< lo hi)
+      (let [mid (quot (+ lo hi) 2)]
+        (if (pos< (nth ps mid) p) (recur (inc mid) hi) (recur lo mid)))
+      lo)))
+
+(defn- form-span [x]
+  (when (and (instance? arbace.lang.IObj x) (not (cv/lit? x)))
+    (:span (:hs/pos (meta x)))))
+
+(defn- walk-forms
+  "Calls f on each list, vector and symbol of the forms, depth first, parents first, with its
+  index in that order"
+  [forms f]
+  (let [n (volatile! 0)]
+    (letfn [(walk [x]
+              (when (and (or (seq? x) (vector? x) (symbol? x)) (not (cv/lit? x)))
+                (f x @n)
+                (vswap! n inc)
+                (when (or (seq? x) (vector? x)) (doseq [c x] (walk c)))))]
+      (doseq [x forms] (walk x)))))
+
+(defn- rebuild
+  "The forms with (g x index) in place of each list, vector and symbol (in walk-forms' order),
+  its elements rebuilt first"
+  [forms g]
+  (let [n (volatile! 0)]
+    (letfn [(walk [x]
+              (if (and (or (seq? x) (vector? x) (symbol? x)) (not (cv/lit? x)))
+                (let [i @n]
+                  (vswap! n inc)
+                  (let [y (cond
+                            (seq? x) (with-meta (apply list (map walk x)) (meta x))
+                            (vector? x) (with-meta (mapv walk x) (meta x))
+                            :else x)]
+                    (g y i)))
+                x))]
+      (mapv walk forms))))
+
+(defn- owners
+  "For each of the sorted positions ps, the index (walk-forms' order) of the form with the
+  innermost span holding it, or -1: one sweep over the spans sorted by start (the larger first)
+  and the positions, a stack of the spans open"
+  [forms ps]
+  (let [spans (volatile! [])]
+    (walk-forms forms (fn [x i] (when-let [s (form-span x)] (vswap! spans conj [(span-start s) (span-end s) i]))))
+    (let [spans (vec (sort (fn [[a1 e1 i1] [a2 e2 i2]]
+                             (cond (pos< a1 a2) -1 (pos< a2 a1) 1
+                                   (pos< e2 e1) -1 (pos< e1 e2) 1
+                                   :else (compare i1 i2)))
+                           @spans))
+          ns (count spans)
+          out (long-array (count ps) -1)]
+      (loop [k 0 si 0 stack ()]
+        (when (< k (count ps))
+          (let [p (nth ps k)
+                ;; open the spans that start at or before p
+                [si stack] (loop [si si stack stack]
+                             (if (and (< si ns) (not (pos< p (first (nth spans si)))))
+                               (recur (inc si) (cons (nth spans si) stack))
+                               [si stack]))
+                ;; close the spans that end at or before p
+                stack (drop-while (fn [[_ e _]] (not (pos< p e))) stack)]
+            (when-let [[_ _ i] (first stack)] (aset out k (long i)))
+            (recur (inc k) si stack))))
+      out)))
+
+(defn- add-entries
+  "Metadata m with entries [pos kind value] added (distribute)"
+  [m es]
+  (reduce (fn [m [p k v]]
+            (case k
+              :tok (update m :hs/pos (fn [x] (assoc x :toks (conj (vec (:toks x)) p))))
+              :punct (update m :hs/punct (fn [x] (conj (vec x) v)))
+              :text (update m :hs/text (fn [x] (assoc (or x {}) p v)))))
+          m es))
+
+(defn distribute
+  "The forms with each entry [pos kind value] (sorted by pos) in the metadata of the form whose
+  span holds it and no element's span does: kind :tok in :hs/pos's :toks, :punct in :hs/punct,
+  :text in :hs/text; the entries no form's span holds returned: [forms rest]"
+  [forms entries]
+  (let [owner (owners forms (mapv first entries))
+        by (group-by #(aget owner %) (range (count entries)))
+        forms' (rebuild forms (fn [x i]
+                                (if-let [js (get by i)]
+                                  (vary-meta x add-entries (mapv #(nth entries %) js))
+                                  x)))]
+    [forms' (mapv #(nth entries %) (get by -1))]))
+
+(defn- module-form? [f] (and (seq? f) (= 'hs/module (cv/lit-value (first f)))))
+
+(defn full-forms
+  "The forms of mode :full: forms (converted with cv/*full*, their spans on them) with the
+  dump's text and its tokens (tokens-of), checked against the printer's tokens of read-forms
+  (the forms as read back from their text)"
+  [forms read-forms ^String text source]
+  (let [{:keys [toks punct comments]} source
+        texts (spellings (pr/print-tokens read-forms) toks)
+        elems (sort-by first (concat toks (map (fn [[l c t]] [[l c] t]) punct)
+                                     (map (fn [[l c _ _ t]] [[l c] t]) comments)))
+        [space tail] (space-of text elems)
+        entries (sort-by first (concat (map (fn [[p _]] [p :tok nil]) toks)
+                                       (map (fn [[l c t]] [[l c] :punct [l c t]]) punct)
+                                       (map (fn [[p t]] [p :text t]) texts)))
+        [forms rest-entries] (distribute forms (vec entries))]
+    (mapv (fn [f]
+            (if (module-form? f)
+              (vary-meta f (fn [m]
+                             (cond-> (add-entries m rest-entries)
+                               (seq comments) (assoc :hs/comments comments)
+                               (seq space) (assoc :hs/space space)
+                               tail (assoc :hs/tail tail))))
+              f))
+          forms)))
