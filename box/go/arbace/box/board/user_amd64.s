@@ -241,3 +241,105 @@ TEXT userexit<>(SB),NOSPLIT|NOFRAME,$0
 	MOVQ	userCPU_kbp(GS), BP
 	MOVQ	userCPU_kg(GS), R14
 	RET
+
+// func sysentryBenchAddr() uintptr
+TEXT ·sysentryBenchAddr(SB),NOSPLIT,$0-8
+	LEAQ	sysentryBench<>(SB), AX
+	MOVQ	AX, ret+0(FP)
+	RET
+
+// sysentryBench is LSTAR while the kernel measures the crossings (BenchEntry; doc/go/PROCESS-SPEC.md,
+// "As built: KU2", KS13): RAX 1 is the bare SYSCALL+SYSRETQ, nothing saved; 2 the crossing's two
+// CR3 writes as built (the kernel's tables, then the process's again, its TLB entries kept); 3 the
+// same with the process's entries flushed (its CR3 without bit 63); 4 all the crossing's machine
+// state as built, the CR3 writes, the FPU states and the FS base, without the Go side; any other
+// RAX the ordinary entry, sysentry. The process's RAX is lost in 1-4, and RDX in 4, nothing else.
+TEXT sysentryBench<>(SB),NOSPLIT|NOFRAME,$0
+	CMPQ	AX, $1
+	JNE	cr3keep
+	BYTE	$0x48; BYTE $0x0f; BYTE $0x07	// SYSRETQ
+cr3keep:
+	CMPQ	AX, $2
+	JNE	cr3flush
+	SWAPGS
+	MOVQ	userCPU_kcr3(GS), AX
+	MOVQ	AX, CR3
+	MOVQ	userCPU_ctx(GS), AX
+	MOVQ	UserContext_CR3(AX), AX
+	MOVQ	AX, CR3
+	SWAPGS
+	BYTE	$0x48; BYTE $0x0f; BYTE $0x07	// SYSRETQ
+cr3flush:
+	CMPQ	AX, $3
+	JNE	ordinary
+	SWAPGS
+	MOVQ	userCPU_kcr3(GS), AX
+	MOVQ	AX, CR3
+	MOVQ	userCPU_ctx(GS), AX
+	MOVQ	UserContext_CR3(AX), AX
+	BTRQ	$63, AX
+	MOVQ	AX, CR3
+	SWAPGS
+	BYTE	$0x48; BYTE $0x0f; BYTE $0x07	// SYSRETQ
+ordinary:
+	CMPQ	AX, $4
+	JNE	entry
+	// 4: what the crossing does but the Go side: CR3 both ways, the FPU states swapped both ways,
+	// the kernel's FS base written and the process's again when it differs (RCX kept in scratch)
+	SWAPGS
+	MOVQ	CX, userCPU_scratch(GS)
+	MOVQ	userCPU_kcr3(GS), AX
+	MOVQ	AX, CR3
+	MOVQ	userCPU_ctx(GS), AX
+	MOVQ	UserContext_fx(AX), AX
+	FXSAVE64	(AX)
+	MOVQ	userCPU_kfx(GS), AX
+	FXRSTOR64	(AX)
+	MOVQ	userCPU_kfs(GS), AX
+	MOVQ	AX, DX
+	SHRQ	$32, DX
+	MOVL	$0xc0000100, CX
+	WRMSR
+	MOVQ	userCPU_kfx(GS), AX
+	FXSAVE64	(AX)
+	MOVQ	userCPU_ctx(GS), AX
+	MOVQ	UserContext_fx(AX), AX
+	FXRSTOR64	(AX)
+	MOVQ	userCPU_ctx(GS), AX
+	MOVQ	UserContext_FSBase(AX), AX
+	CMPQ	AX, userCPU_kfs(GS)
+	JEQ	samefs
+	MOVQ	AX, DX
+	SHRQ	$32, DX
+	MOVL	$0xc0000100, CX
+	WRMSR
+samefs:
+	MOVQ	userCPU_ctx(GS), AX
+	MOVQ	UserContext_CR3(AX), AX
+	MOVQ	AX, CR3
+	MOVQ	userCPU_scratch(GS), CX
+	SWAPGS
+	BYTE	$0x48; BYTE $0x0f; BYTE $0x07	// SYSRETQ
+entry:
+	JMP	sysentry<>(SB)
+
+// func benchCalls(ax uint64, n uint64) (ticks uint64): n SYSCALLs with RAX ax, from a process at
+// ring 3, and the counter's ticks they took. The registers it keeps across them (R12, R13) are
+// ones every way through the kernel restores.
+TEXT ·benchCalls(SB),NOSPLIT,$0-24
+	MOVQ	n+8(FP), R12
+	RDTSC
+	SHLQ	$32, DX
+	ORQ	DX, AX
+	MOVQ	AX, R13
+again:
+	MOVQ	ax+0(FP), AX
+	SYSCALL
+	DECQ	R12
+	JNZ	again
+	RDTSC
+	SHLQ	$32, DX
+	ORQ	DX, AX
+	SUBQ	R13, AX
+	MOVQ	AX, ticks+16(FP)
+	RET

@@ -16,15 +16,23 @@
 ;; the crossing code (board's sysentry and fault path) runs at ring 0 with the process's tables
 ;; loaded until it switches CR3 (§2.1, no KPTI, KS7).
 ;;
-;; KU1 runs on amd64 only (§9, K9); arm64 is KU3. This package builds only for tamago/amd64.
-(in-ns 'go.arbace.box.kernel) (go/file "kernel.go" :build ["//go:build amd64"] :doc "Package kernel runs processes under the box's kernel on amd64 (doc/go/PROCESS-SPEC.md, KU1):\nthe amd64 mechanics in a test guest. A process is a second TamaGo runtime at ring 3, in its own\naddress space, isolated from the kernel (the box's program at ring 0) by the MMU, talking to the\nkernel by system calls that are the doorbell's call block one level down (§1). KU1 is the\nmechanics: per-process page tables (text/rodata shared, data/bss/heap/stacks private), the GDT/\nTSS/SYSCALL set-up and the ring-3 entry (board.UserSetup, board.EnterUser), a SYSCALL served, a\nfault that ends the process, a nil dereference that becomes the process's own panic, and a CR3\nswitch between two processes of one image.\n\nb1 (§2.1, S6): one image is the kernel and every process. The kernel enters a process at\nwhim_uentry (board.UEntryAddr); the process's data and bss are at the kernel's virtual\naddresses for them but in the process's own private pages, so each process has its own page\ntables. The kernel's own mappings are present in every process's tables but supervisor-only, so\nthe crossing code (board's sysentry and fault path) runs at ring 0 with the process's tables\nloaded until it switches CR3 (§2.1, no KPTI, KS7).\n\nKU1 runs on amd64 only (§9, K9); arm64 is KU3. This package builds only for tamago/amd64.\n" :imports [
+;; KU2 (§10) adds the process's side of the call ABI as the kernel answers it (calls.go): every call
+;; validated against the process's memory, its policy applied (Config: its console, the one grant
+;; so far), then answered by the kernel or forwarded to the monitor as the kernel's own call; the
+;; console's streams (stdin, stdout, stderr) bridged to the box's console when granted and captured
+;; into Output always (§5.3, KS10); Run, the process to its end (RunSelf: this program as a process
+;; of itself, the KU2 check); a process's start and memory measured (Stats).
+;;
+;; KU1 and KU2 run on amd64 only (§9, K9); arm64 is KU3. This package builds only for tamago/amd64.
+(in-ns 'go.arbace.box.kernel) (go/file "kernel.go" :build ["//go:build amd64"] :doc "Package kernel runs processes under the box's kernel on amd64 (doc/go/PROCESS-SPEC.md, KU1):\nthe amd64 mechanics in a test guest. A process is a second TamaGo runtime at ring 3, in its own\naddress space, isolated from the kernel (the box's program at ring 0) by the MMU, talking to the\nkernel by system calls that are the doorbell's call block one level down (§1). KU1 is the\nmechanics: per-process page tables (text/rodata shared, data/bss/heap/stacks private), the GDT/\nTSS/SYSCALL set-up and the ring-3 entry (board.UserSetup, board.EnterUser), a SYSCALL served, a\nfault that ends the process, a nil dereference that becomes the process's own panic, and a CR3\nswitch between two processes of one image.\n\nb1 (§2.1, S6): one image is the kernel and every process. The kernel enters a process at\nwhim_uentry (board.UEntryAddr); the process's data and bss are at the kernel's virtual\naddresses for them but in the process's own private pages, so each process has its own page\ntables. The kernel's own mappings are present in every process's tables but supervisor-only, so\nthe crossing code (board's sysentry and fault path) runs at ring 0 with the process's tables\nloaded until it switches CR3 (§2.1, no KPTI, KS7).\n\nKU2 (§10) adds the process's side of the call ABI as the kernel answers it (calls.go): every call\nvalidated against the process's memory, its policy applied (Config: its console, the one grant\nso far), then answered by the kernel or forwarded to the monitor as the kernel's own call; the\nconsole's streams (stdin, stdout, stderr) bridged to the box's console when granted and captured\ninto Output always (§5.3, KS10); Run, the process to its end (RunSelf: this program as a process\nof itself, the KU2 check); a process's start and memory measured (Stats).\n\nKU1 and KU2 run on amd64 only (§9, K9); arm64 is KU3. This package builds only for tamago/amd64.\n" :imports [
 
 
-    ^{:line 23} [binary "encoding/binary"]
-    ^{:line 24} [errors "errors"]
+    ^{:line 30} [binary "encoding/binary"]
+    ^{:line 31} [errors "errors"]
+    ^{:line 32} [time "time"]
 
-    ^{:line 26} [abi "arbace/box/abi"]
-    ^{:line 27} [board "arbace/box/board"]])
+    ^{:line 34} [abi "arbace/box/abi"]
+    ^{:line 35} [board "arbace/box/board"]])
 
 
 (go/var errBadSnapshot (errors/New "kernel: no pristine data snapshot (board.hwinit1 did not run, or the writable segment is too large)"))
@@ -35,26 +43,26 @@
 
 
 (go/const "page and the image's layout (§2.1, §2.2). The box's image is linked at 0x201000 with its ELF\nheader a page below (board, vmm/layout.go's imageBase): one image serves the kernel and the\nprocess, so these are the kernel's own addresses, read from the linker's symbols at start\n(bounds): [imageBase, etext) shared text, [etext, rwStart) shared rodata, [rwStart, dataEnd)\nprivate initialized data, [dataEnd, imageEnd) private bss, all zeroed afresh.\n"
-  ^{:line 38} [^{:val 4096} page 0x1000]
-  ^{:line 39} [^{:val 2097152} imageBase 0x200000]
+  ^{:line 46} [^{:val 4096} page 0x1000]
+  ^{:line 47} [^{:val 2097152} imageBase 0x200000]
 
 
-  ^{:line 42} [^{:val 158 :doc "the Linux arch_prctl SYSCALL the process's settls makes at ring 3 (KS3).\n"} sysArchPrctl 158]
-  ^{:line 43} [^{:val 4098} archSetFS 0x1002]
-  ^{:line 44} [^{:val 22} einval 22])
+  ^{:line 50} [^{:val 158 :doc "the Linux arch_prctl SYSCALL the process's settls makes at ring 3 (KS3).\n"} sysArchPrctl 158]
+  ^{:line 51} [^{:val 4098} archSetFS 0x1002]
+  ^{:line 52} [^{:val 22} einval 22])
 
 
 
 (go/type bounds "bounds is the image's segment boundaries (§2.1), read once from the linker's symbols.\n" (struct
-    ^{:line 49 :tag uintptr} etext ; end of text
-    ^{:line 50 :tag uintptr} rwStart ; start of the writable segment (the page of noptrdata)
-    ^{:line 51 :tag uintptr} dataEnd ; end of the file-backed data (start of bss)
-    ^{:line 52 :tag uintptr} imageEnd)) ; end of the image (bss's end, page up)
+    ^{:line 57 :tag uintptr} etext ; end of text
+    ^{:line 58 :tag uintptr} rwStart ; start of the writable segment (the page of noptrdata)
+    ^{:line 59 :tag uintptr} dataEnd ; end of the file-backed data (start of bss)
+    ^{:line 60 :tag uintptr} imageEnd)) ; end of the image (bss's end, page up)
 
 
 (go/func ^:extern symaddrs [] :results [^uintptr text ^uintptr etext ^uintptr nd ^uintptr bss ^uintptr end])
 
-^{:go/end 65} (go/func segBounds ^bounds []
+^{:go/end 73} (go/func segBounds ^bounds []
   (let [(values _ etext nd bss end) (symaddrs)]
     ^{:go/breaks [2 4 6 8]} (lit bounds
       :etext (bit-and-not (- (+ etext page) 1) (- page 1))
@@ -66,110 +74,159 @@
 
 
 
-(go/type Proc "Proc is a process: its page tables, its RAM window, its vCPU context and how it ended (§3.1,\n§6.1). KU1 keeps one handle, stderr, bridged to the kernel's console (§5.3).\n" (struct
-    ^{:line 70 :tag (* tables)} tables ; the page tables, root in physical RAM (identity)
-    ^{:line 71 :tag (slice byte)} window ; the process's private RAM window (heap and stack), page-aligned
-    ^{:line 72 :tag uintptr} winVA ; the window's virtual address in the process (its goos.RamStart)
-    ^{:line 73 :tag (slice byte)} data ; the process's private data+bss pages, page-aligned
-    ^{:line 74 :tag (* board/UserContext)} ctx
-    ^{:line 75 :tag uint16} pcid
+(go/type Proc "Proc is a process: its page tables, its RAM window, its vCPU context and how it ended (§3.1,\n§6.1), and its policy (Config).\n" (struct
+    ^{:line 78 :tag (* tables)} tables ; the page tables, root in physical RAM (identity)
+    ^{:line 79 :tag (slice byte)} window ; the process's private RAM window (heap and stack), page-aligned
+    ^{:line 80 :tag uintptr} winVA ; the window's virtual address in the process (its goos.RamStart)
+    ^{:line 81 :tag (slice byte)} data ; the process's private data+bss pages, page-aligned
+    ^{:line 82 :tag (* board/UserContext)} ctx
+    ^{:line 83 :tag uint16} pcid
+    ^{:line 84 :tag Config} cfg
 
 
-    ^{:line 78 :tag bool :doc "what the run produced\n"} Exited
-    ^{:line 79 :tag int32} ExitCode
-    ^{:line 80 :tag (* FaultReport)} Fault
-    ^{:line 81 :tag (slice byte)} Output ; what the process wrote (handle 1 and 2), bounded (§5.3)
+    ^{:line 87 :tag bool :doc "what the run produced\n"} Exited
+    ^{:line 88 :tag int32} ExitCode
+    ^{:line 89 :tag (* FaultReport)} Fault
 
-    ^{:line 83 :tag uint64} sigpanicPC ; the process's sigpanic entry (NilHandler), 0 until it is named
-    ^{:line 84 :tag bounds} b))
+
+    ^{:line 92 :tag (slice byte) :doc "Output is what the process wrote to its stdout and stderr, in order, bounded (§5.3): its\nconsole captured, whether or not it was also bridged to the box's.\n"} Output
+
+    ^{:line 94 :tag Stats :doc "Stats is what the kernel measured of the process (§10, KU2: its start and its memory).\n"} Stats
+
+    ^{:line 96 :tag uint64} sigpanicPC ; the process's sigpanic entry (NilHandler), 0 until it is named
+    ^{:line 97 :tag bounds} b
+    ^{:line 98 :tag bool} started
+
+
+    ^{:line 101 :tag (slice uint64) :doc "touched is the window's pages the kernel has handed out as buffers (winBytes): written, it\nmay be, through the kernel's alias, so not dirty in the process's tables (Free)\n"} touched))
+
+
+
+
+(go/type Config "Config is what a process is given (§6.2: the part of S7's request KU2 uses): its command line,\nits environment, its RAM window, and its grants.\n" (struct
+    ^{:line 107 :tag (slice string)} Args
+    ^{:line 108 :tag (slice string)} Env
+
+
+    ^{:line 111 :tag uintptr :doc "RAM is the process's RAM window in bytes, its heap and stacks (§4.4, S12): 0 is DefaultRAM;\nat least MinRAM, rounded up to 2 MiB.\n"} RAM
+
+
+
+
+
+    ^{:line 117 :tag bool :doc "Console grants the process the box's console (§5.3, KS10): its stdout and stderr are the\nkernel's own (forwarded to the monitor as the kernel's Write and Message) besides captured,\nits stdin is the box's (the waits and reads forwarded), and the terminal's calls (HostInit,\nSuspend, the tty's) are made on its behalf. Without it stdout and stderr are only captured,\nstdin is at its end, and the terminal's calls are refused (KS14).\n"} Console))
+
+
+
+
+(go/const "The RAM window's default and least size (§4.4): TamaGo's heap arenas are 4 MiB, so a small\nruntime needs a few.\n"
+  ^{:line 123} [^{:val 67108864} DefaultRAM (<< 64 20)]
+  ^{:line 124} [^{:val 33554432} MinRAM (<< 32 20)])
 
 
 
 
 
 (go/type FaultReport "FaultReport is how a process ended on a fault the kernel does not return from (§8): the vector,\nits error code, the faulting instruction and the address it touched, or, for a call the kernel\ncould not make sense of (§4.5), a Note saying why.\n" (struct
-    ^{:line 91 :tag uint64} Vector ^uint64 Code ^uint64 IP ^uint64 Addr
-    ^{:line 92 :tag string} Note))
+    ^{:line 131 :tag uint64} Vector ^uint64 Code ^uint64 IP ^uint64 Addr
+    ^{:line 132 :tag string} Note))
 
 
 
 
 
-^{:go/end 98} (go/method CR3 "CR3 is the value the kernel loads into CR3 to run this process (its page-table root, its PCID):\ntwo processes of one image have different roots, so running both is a CR3 switch (§2.4, the KU1\ndata check).\n" ^uint64 [^{:tag (* Proc)} p] (.-CR3 (.-ctx p)))
+^{:go/end 138} (go/method CR3 "CR3 is the value the kernel loads into CR3 to run this process (its page-table root, its PCID):\ntwo processes of one image have different roots, so running both is a CR3 switch (§2.4, the KU1\ndata check).\n" ^uint64 [^{:tag (* Proc)} p] (.-CR3 (.-ctx p)))
 
-^{:go/end 105} (go/method Error ^string [^{:tag (* FaultReport)} f]
+^{:go/end 145} (go/method Error ^string [^{:tag (* FaultReport)} f]
   (when (!= (.-Note f) "")
     (return (+ "process ended: " (.-Note f) " at " (hex (.-IP f)))))
 
   (+ "process fault " (itoa (.-Vector f)) " (code " (hex (.-Code f)) ") at " (hex (.-IP f)) ", address " (hex (.-Addr f))))
 
 
-(go/var ^uint16 nextPCID 1)
 
 
 
-
-^{:go/end 167} (go/func NewProc "NewProc loads a process of this image (b1): its private data+bss, a RAM window of winBytes for\nits heap and stack, and page tables that share the image's text and rodata read-only and map the\nrest private (§2.1, §6.1). args is its command line. The process is entered at whim_uentry.\n" [^{:tag (slice string)} args ^uintptr winBytes] :results [(* Proc) error]
-  (when (< winBytes (* 32 0x200000))
-    (set! winBytes (* 32 0x200000))) ; 64 MiB: room for a small runtime's heap (4 MiB arenas) and stacks
-
-  (set! winBytes (bit-and-not (- (+ winBytes 0x200000) 1) (- 0x200000 1)))
-  (let [p (addr (lit Proc :b (segBounds)))
-
-      ;; the private data+bss (§2.1): the image's pristine file-backed data (the board snapshotted it
-      ;; before any init ran), then zeros for bss (make zeroes the rest).
-      (values img rwStart) (board/DataImage)]
-    (when (or (== (len img) 0) (!= rwStart (.-rwStart (.-b p))))
-      (return nil errBadSnapshot))
-
-    (set! (.-data p) (allocAligned (conv int (- (.-imageEnd (.-b p)) (.-rwStart (.-b p)))) page))
-    (copy (.-data p) img)
-
-    ;; the RAM window: the process's heap and first stack, contiguous, user read/write. Mapped at
-    ;; a fixed high virtual address of its own (winVA), well above the image.
-    (set! (.-window p) (allocAligned (conv int winBytes) 0x200000))
-    (set! (.-winVA p) 0x100000000) ; 4 GiB: above the kernel's identity map (idLimit), so the window's
-    ;;                       user mapping does not collide with the supervisor identity map (§2.1)
-
-    (when (board/PCIDs)
-      (set! (.-pcid p) nextPCID)
-      (inc! nextPCID))
+(go/var ^{:tag uint16 :doc "nextPCID is the PCID the next process gets, 1 to 4095 and round again: a PCID used again is\nflushed at its new process's first entry (UserCR3's flush), so only two processes alive at once\nwith the same one would share TLB entries -- beyond 4095 at once, which KU2 does not reach.\n"} nextPCID 1)
 
 
-    (let [(values t err) (buildTables p)]
-      (when (!= err nil)
-        (return nil err))
 
-      (set! (.-tables p) t)
-
-      ;; the entry registers (§3.3), as the board's cpuinit reads them (boot_amd64.s): the command
-      ;; line in the window's low bytes, RamStart/RamSize/RamStackOffset the window, the counter's
-      ;; rate and the wall clock the kernel's own (board reads them for the process too).
-      (let [(values argc argv) (writeArgs p args)
-          ^{:line 149} ip (conv uint64 (board/UEntryAddr))
-          ;; the heap (goos.RamStart) starts a block above the window's base, so the runtime never
-          ;; overwrites the command line, which sits at the window's base (argvReserve; the monitor keeps
-          ;; a guest's args below its heap likewise, vmm/layout.go's argsBase/imageBase).
-          ^{:line 153} heapStart (+ (conv uint64 (.-winVA p)) argvReserve)
-          ^{:line 154} top (+ (conv uint64 (.-winVA p)) (conv uint64 winBytes))]
-        (set! (.-ctx p) (board/NewUserContext ip top))
-        (set! (.-DI (.-ctx p)) argc)
-        (set! (.-SI (.-ctx p)) argv)
-        (set! (.-DX (.-ctx p)) heapStart) ; goos.RamStart
-        (set! (.-CX (.-ctx p)) (- top heapStart)) ; goos.RamSize
-        (set! (.-R8 (.-ctx p)) (conv uint64 stackReserve)) ; goos.RamStackOffset: SP = RamStart+RamSize - this
-        (set! (.-R9 (.-ctx p)) (board/TickKHz))
-        (set! (.-R10 (.-ctx p)) 1) ; one vCPU (KU1; SMP is KU5)
-        (set! (.-R11 (.-ctx p)) (board/WallBase))
-        (set! (.-FSBase (.-ctx p)) (board/KernelFSBase)) ; the same image, the same TLS address; its own pages
-        (set! (.-CR3 (.-ctx p)) (board/UserCR3 (conv uint64 (rootPA t)) (.-pcid p) true))
-        (return p nil)))))
+^{:go/end 156} (go/func NewProc "NewProc loads a process of this image with the command line args and a RAM window of winBytes\n(0: DefaultRAM), no grants: New's shorthand.\n" [^{:tag (slice string)} args ^uintptr winBytes] :results [(* Proc) error]
+  (New (lit Config :Args args :RAM winBytes)))
 
 
 
 
 
-(go/const ^{:val 1048576 :doc "stackReserve is how far below the window's top the process's first stack starts (goos.\nRamStackOffset): the runtime grows its heap from RamStart up and its first stack down from\nRamStart+RamSize-RamStackOffset. KU1 gives the window generously, so a modest reserve does.\n"} stackReserve 0x100000) ; 1 MiB below the window's top: the first (g0) stack, 64 KiB, fits
+^{:go/end 224} (go/func New "New loads a process of this image (b1): its private data+bss, a RAM window for its heap and\nstack, and page tables that share the image's text and rodata read-only and map the rest private\n(§2.1, §6.1). The process is entered at whim_uentry; Stats.Load is how long this took.\n" [^Config cfg] :results [(* Proc) error]
+  (let [t0 (time/Now)
+      ^{:line 163} winBytes (.-RAM cfg)]
+    (when (== winBytes 0)
+      (set! winBytes DefaultRAM))
+
+    (when (< winBytes MinRAM)
+      (set! winBytes MinRAM))
+
+    (set! winBytes (bit-and-not (- (+ winBytes 0x200000) 1) (- 0x200000 1)))
+    (let [p (addr (lit Proc :b (segBounds) :cfg cfg))
+        ;; the private data+bss (§2.1): the image's pristine file-backed data (the board snapshotted it
+        ;; before any init ran), then zeros for bss (make zeroes the rest).
+        (values img rwStart) (board/DataImage)]
+      (when (or (== (len img) 0) (!= rwStart (.-rwStart (.-b p))))
+        (return nil errBadSnapshot))
+
+      (set! (.-data p) (allocAligned (conv int (- (.-imageEnd (.-b p)) (.-rwStart (.-b p)))) page))
+      (copy (.-data p) img)
+      ;; the RAM window: the process's heap and first stack, contiguous, user read/write. Mapped at
+      ;; a fixed high virtual address of its own (winVA), well above the image.
+      (let [tw (time/Now)]
+        (set! (.-window p) (window winBytes))
+        (set! (.-touched p) (make (slice uint64) (/ (+ (/ winBytes page) 63) 64)))
+        (set! (.-winVA p) 0x100000000) ; 4 GiB: above the kernel's identity map (idLimit), so the window's
+        ;;                       user mapping does not collide with the supervisor identity map (§2.1)
+        (set! (.-LoadWindow (.-Stats p)) (time/Since tw))
+        (when (board/PCIDs)
+          (set! (.-pcid p) nextPCID)
+          (set! nextPCID (+ (% nextPCID 4095) 1)))
+
+
+        (let [(values t err) (buildTables p)]
+          (when (!= err nil)
+            (return nil err))
+
+          (set! (.-tables p) t)
+          ;; the entry registers (§3.3), as the board's cpuinit reads them (boot_amd64.s): the command
+          ;; line in the window's low bytes, RamStart/RamSize/RamStackOffset the window, the counter's
+          ;; rate and the wall clock the kernel's own (board reads them for the process too).
+          (let [(values argc argv ^:assign err) (writeArgs p (.-Args cfg) (.-Env cfg))]
+            (when (!= err nil)
+              (return nil err))
+
+            (let [ip (conv uint64 (board/UEntryAddr))
+                ;; the heap (goos.RamStart) starts a block above the window's base, so the runtime never
+                ;; overwrites the command line, which sits at the window's base (argvReserve; the monitor keeps
+                ;; a guest's args below its heap likewise, vmm/layout.go's argsBase/imageBase).
+                ^{:line 209} heapStart (+ (conv uint64 (.-winVA p)) argvReserve)
+                ^{:line 210} top (+ (conv uint64 (.-winVA p)) (conv uint64 winBytes))]
+              (set! (.-ctx p) (board/NewUserContext ip top))
+              (set! (.-DI (.-ctx p)) argc)
+              (set! (.-SI (.-ctx p)) argv)
+              (set! (.-DX (.-ctx p)) heapStart) ; goos.RamStart
+              (set! (.-CX (.-ctx p)) (- top heapStart)) ; goos.RamSize
+              (set! (.-R8 (.-ctx p)) (conv uint64 stackReserve)) ; goos.RamStackOffset: SP = RamStart+RamSize - this
+              (set! (.-R9 (.-ctx p)) (board/TickKHz))
+              (set! (.-R10 (.-ctx p)) 1) ; one vCPU (KU1; SMP is KU5)
+              (set! (.-R11 (.-ctx p)) (board/WallBase))
+              (set! (.-FSBase (.-ctx p)) (board/KernelFSBase)) ; the same image, the same TLS address; its own pages
+              (set! (.-CR3 (.-ctx p)) (board/UserCR3 (conv uint64 (rootPA t)) (.-pcid p) true))
+              (set! (.-Load (.-Stats p)) (time/Since t0))
+              (return p nil))))))))
+
+
+
+
+
+(go/const ^{:val 1048576 :doc "stackReserve is how far below the window's top the process's first stack starts (goos.\nRamStackOffset): the runtime grows its heap from RamStart up and its first stack down from\nRamStart+RamSize-RamStackOffset. KU1 gives the window generously, so a modest reserve does.\n"} stackReserve (<< 1 20))
 
 
 
@@ -178,21 +235,38 @@
 
 
 
-^{:go/end 196} (go/func writeArgs "writeArgs writes the command line into the window's low bytes (the pointers then the strings),\nas the monitor does for a guest (vmm/layout.go), and returns argc and the argv pointer, both\nas the process's own virtual addresses.\n" [^{:tag (* Proc)} p ^{:tag (slice string)} args] :results [^uint64 argc ^uint64 argv]
-  ;; layout in the window: [0] argv pointers (argc+1), then a null for env, then the strings.
+
+^{:go/end 270} (go/func writeArgs "writeArgs writes the command line and the environment into the window's low bytes (the\npointers, argv's then a 0 then env's then a 0, then the strings), as the monitor does for a\nguest (vmm/layout.go, guest/abi's entry state), and returns argc and the argv pointer, both as\nthe process's own virtual addresses.\n" [^{:tag (* Proc)} p ^{:tag (slice string)} args ^{:tag (slice string)} env] :results [^uint64 argc ^uint64 argv ^error err]
+  ;; layout in the window: [0] argv pointers (argc+1), then env's (and a null), then the strings.
   (let [ptrs (.-winVA p)
-      ^{:line 184} strs (+ ptrs (* (conv uintptr (+ (len args) 2)) 8))
-      ^{:line 185} off strs
-      ^{:line 186} put ^{:go/end 186} (fn [^uintptr va ^uint64 v] (.PutUint64 binary/LittleEndian (subslice (.-window p) (- va (.-winVA p))) v))]
-    (range [i a args]
-      (put (+ ptrs (* (conv uintptr i) 8)) (conv uint64 off))
-      (copy (subslice (.-window p) (- off (.-winVA p))) a)
-      (aset (.-window p) (+ (- off (.-winVA p)) (conv uintptr (len a))) 0)
-      (set! off + (+ (conv uintptr (len a)) 1)))
+      ^{:line 242} strs (+ ptrs (* (conv uintptr (+ (len args) (len env) 2)) 8))
+      ^{:line 243} need (- strs (.-winVA p))]
+    (range [_ a args]
+      (set! need + (+ (conv uintptr (len a)) 1)))
 
-    (put (+ ptrs (* (conv uintptr (len args)) 8)) 0) ; argv's null terminator
-    (put (+ ptrs (* (conv uintptr (+ (len args) 1)) 8)) 0) ; env's (empty): a null
-    (return (conv uint64 (len args)) (conv uint64 ptrs))))
+    (range [_ e env]
+      (set! need + (+ (conv uintptr (len e)) 1)))
+
+    (when (> need argvReserve)
+      (return 0 0 (errors/New "kernel: the command line and environment exceed the process's argument area")))
+
+    (let [off strs
+        ^{:line 254} put ^{:go/end 254} (fn [^uintptr va ^uint64 v] (.PutUint64 binary/LittleEndian (subslice (.-window p) (- va (.-winVA p))) v))
+        ^{:line 255} str ^{:go/end 260} (fn [^int i ^string s]
+          (put (+ ptrs (* (conv uintptr i) 8)) (conv uint64 off))
+          (copy (subslice (.-window p) (- off (.-winVA p))) s)
+          (aset (.-window p) (+ (- off (.-winVA p)) (conv uintptr (len s))) 0)
+          (set! off + (+ (conv uintptr (len s)) 1)))]
+
+      (range [i a args]
+        (str i a))
+
+      (put (+ ptrs (* (conv uintptr (len args)) 8)) 0) ; argv's null terminator
+      (range [i e env]
+        (str (+ (len args) 1 i) e))
+
+      (put (+ ptrs (* (conv uintptr (+ (len args) 1 (len env))) 8)) 0) ; env's null
+      (return (conv uint64 (len args)) (conv uint64 ptrs) nil))))
 
 
 
@@ -200,31 +274,37 @@
 
 
 
-(go/var ^{:tag bool :doc "Run runs the process until it exits or faults (§3.1, §6.1): the kernel's goroutine enters it\n(board.EnterUser) and, each time it leaves, serves the system call and re-enters, or records the\nend. One vCPU (KU1).\nTrace, when set, makes Run print a line per crossing (the call number or fault): a debugging\naid, off by default.\n"} Trace)
 
-^{:go/end 232} (go/method Run ^error [^{:tag (* Proc)} p]
-  (while true
-    (board/EnterUser (.-ctx p))
-    (when Trace
-      (let [nr (conv uint64 0)]
-        (when [(values b ok) (.winBytes p (conv uintptr (.-AX (.-ctx p))) abi/BlockSize)] ok
-          (set! nr (.Uint64 binary/LittleEndian (subslice b abi/BlockNr))))
+(go/var ^{:tag bool :doc "Run runs the process until it exits or faults (§3.1, §6.1): the kernel's goroutine enters it\n(board.EnterUser) and, each time it leaves, serves the system call and re-enters, or records the\nend. One vCPU (through KU4). The first entry flushes the process's PCID (its tables are new); the\nlater ones keep its TLB entries (bit 63), so a crossing's two CR3 writes reload no translation.\nTrace, when set, makes Run print a line per crossing (the call number or fault): a debugging\naid, off by default.\n"} Trace)
 
-        (println "  trap" (.-Trap (.-ctx p)) "ax" (hex (.-AX (.-ctx p))) "nr" nr "ip" (hex (.-IP (.-ctx p))) "cr2" (hex (.-CR2 (.-ctx p))))))
+^{:go/end 312} (go/method Run ^error [^{:tag (* Proc)} p]
+  (let [t0 (time/Now)]
+    (defer (^{:go/end 282} (fn [] (set! (.-Run (.-Stats p)) (time/Since t0)))))
+    (while true
+      (board/EnterUser (.-ctx p))
+      (inc! (.-Crossings (.-Stats p)))
+      (when (not (.-started p))
+        (set! (.-started p) true)
+        (when (board/PCIDs)
+          (set! (.-CR3 (.-ctx p)) bit-or (<< 1 63))))
 
-    (switch (.-Trap (.-ctx p))
-      (case [board/TrapSyscall]
-        (let [(values done err) (.syscall p)]
-          (when (!= err nil)
-            (return err))
 
-          (when done
-            (return nil))))
+      (when Trace
+        (let [nr (conv uint64 0)]
+          (when [(values b ok) (.winBytes p (conv uintptr (.-AX (.-ctx p))) abi/BlockSize)] ok
+            (set! nr (.Uint64 binary/LittleEndian (subslice b abi/BlockNr))))
 
-      (case [board/TrapFault]
-        (.onFault p)
-        (when (.-Exited p)
-          (return nil))))))
+          (println "  trap" (.-Trap (.-ctx p)) "ax" (hex (.-AX (.-ctx p))) "nr" nr "ip" (hex (.-IP (.-ctx p))) "cr2" (hex (.-CR2 (.-ctx p))))))
+
+      (switch (.-Trap (.-ctx p))
+        (case [board/TrapSyscall]
+          (when (.syscall p t0)
+            (return nil)))
+
+        (case [board/TrapFault]
+          (.onFault p)
+          (when (.-Exited p)
+            (return nil)))))))
 
 ;; a nil dereference was turned into the process's own panic: re-enter.
 
@@ -235,7 +315,7 @@
 
 
 
-^{:go/end 255} (go/method onFault "onFault handles a fault at ring 3 (§8): a page fault below the first page, once the process has\nnamed its sigpanic PC (NilHandler), is turned into the process's own run-time panic by rewriting\nits trap frame (as the board's vectors do for the kernel, BX60); any other fault ends the\nprocess with a report.\n" [^{:tag (* Proc)} p]
+^{:go/end 335} (go/method onFault "onFault handles a fault at ring 3 (§8): a page fault below the first page, once the process has\nnamed its sigpanic PC (NilHandler), is turned into the process's own run-time panic by rewriting\nits trap frame (as the board's vectors do for the kernel, BX60); any other fault ends the\nprocess with a report.\n" [^{:tag (* Proc)} p]
   (let [^:const ^{:val 14} pageFault 14]
     (when (and (== (.-Vector (.-ctx p)) pageFault) (< (.-CR2 (.-ctx p)) page) (!= (.-sigpanicPC p) 0))
       ;; push the faulting IP on the process's stack and resume at sigpanic, as if the faulting
@@ -254,81 +334,7 @@
     (set! (.-Fault p) (addr (lit FaultReport :Vector (.-Vector (.-ctx p)) :Code (.-Code (.-ctx p)) :IP (.-IP (.-ctx p)) :Addr (.-CR2 (.-ctx p)))))))
 
 
-
-(go/const ^{:val 65536 :doc "outputLimit bounds what the kernel keeps of a process's console (§5.3).\n"} outputLimit (<< 1 16))
-
-
-
-
-
-^{:go/end 329} (go/method syscall "syscall serves the process's system call (§4.3): it reads the call block from the process's\nmemory through the kernel alias of its RAM, checks the buffers it names lie in the process's\nRAM, serves the KU1 calls or refuses, and writes the result back. It returns done when the\nprocess has exited.\n" [^{:tag (* Proc)} p] :results [^bool done ^error err]
-  ;; settls' application path (the only raw SYSCALL TamaGo's runtime makes at ring 3,
-  ;; sys_tamago_amd64.s): arch_prctl(ARCH_SET_FS, addr), to set the vCPU's FS base for g (KS3,
-  ;; §3.3). The kernel sets the process's FS base (a process cannot WRMSR) and returns 0 in RAX,
-  ;; as the Linux call would. RAX is the syscall number here, never a call-block address (a block
-  ;; lives in the window at a high address).
-  (when (== (.-AX (.-ctx p)) sysArchPrctl)
-    (if (== (.-DI (.-ctx p)) archSetFS) (do
-        (set! (.-FSBase (.-ctx p)) (.-SI (.-ctx p)))
-        (set! (.-AX (.-ctx p)) 0))
-
-      (set! (.-AX (.-ctx p)) (+ (bit-not (conv uint64 einval)) 1))) ; -EINVAL
-
-    (return false nil))
-
-  ;; the block's address is in the process's RAX (board's Call put it there before SYSCALL).
-  (let [ba (conv uintptr (.-AX (.-ctx p)))
-      (values blk ok) (.winBytes p ba abi/BlockSize)]
-    (when (not ok)
-      (.endBadCall p "the call block is outside the process's RAM")
-      (return true nil))
-
-    (let [nr (.Uint64 binary/LittleEndian (subslice blk abi/BlockNr))
-        ^{:line 287 :tag (array 5 int64)} a (zero (array 5 int64))]
-      (range [i a]
-        (aset a i (conv int64 (.Uint64 binary/LittleEndian (subslice blk (+ abi/BlockArgs (* 8 i)))))))
-
-      (let [ret (conv int64 0)]
-        (switch nr
-          (case [abi/NilHandler]
-            (set! (.-sigpanicPC p) (conv uint64 (aget a 0))))
-          (case [abi/ProcExit abi/Exit]
-            (set! (.-Exited p) true)
-            (set! (.-ExitCode p) (conv int32 (aget a 0)))
-            (return true nil))
-          (case [abi/Message abi/Write]
-            ;; a[0] the buffer, a[1] its length (Message to a handle a[2]; Write likewise). KU1
-            ;; captures stdout/stderr into the process's output (§5.3).
-            (let [(values buf ok) (.winBytes p (conv uintptr (aget a 0)) (aget a 1))]
-              (when (not ok)
-                (.endBadCall p "a write buffer is outside the process's RAM")
-                (return true nil))
-
-              (when (< (len (.-Output p)) outputLimit)
-                (set! (.-Output p) (append (.-Output p) (spread buf))))
-
-              (set! ret (aget a 1))))
-          (case [abi/Random]
-            (let [(values buf ok) (.winBytes p (conv uintptr (aget a 0)) (aget a 1))]
-              (when (not ok)
-                (.endBadCall p "a random buffer is outside the process's RAM")
-                (return true nil))
-
-              (fillRandom buf)
-              (set! ret (aget a 1))))
-          (case [abi/Yield]
-            ;; one vCPU (KU1): nothing to schedule, so the process spins in its own idle; return at
-            ;; once (§7.1). KU6 adds the timer.
-            (set! ret 0))
-          (default
-            ;; a number the kernel does not serve for a process (§4.2): refuse it, the ABI's way.
-            (set! ret -1)))
-
-        (.PutUint64 binary/LittleEndian (subslice blk abi/BlockRet) (conv uint64 ret))
-        (return false nil)))))
-
-
-^{:go/end 334} (go/method endBadCall [^{:tag (* Proc)} p ^string note]
+^{:go/end 340} (go/method endBadCall [^{:tag (* Proc)} p ^string note]
   (set! (.-Exited p) true)
   (set! (.-Fault p) (addr (lit FaultReport :IP (.-IP (.-ctx p)) :Note note))))
 
@@ -337,12 +343,55 @@
 
 
 
-^{:go/end 352} (go/method winBytes "winBytes is the n bytes at the process's virtual address va, through the kernel alias of the\nprocess's RAM (§2.1, §4.3): the window (its heap and stack), or its private data+bss. The kernel\nnever dereferences a user VA; it reads and writes the process's memory at the kernel's own\naddress for the same physical page (one subtraction after a bounds check).\n" [^{:tag (* Proc)} p ^uintptr va ^int64 n] :results [(slice byte) bool]
+
+(go/var ^{:tag (slice (slice byte)) :doc "windows is the RAM windows of the processes that have ended (Free), clean, for the next ones:\nTamaGo's runtime clears the memory its heap grows into (sbrk), so a window the kernel allocates\nafresh is written whole before the process runs, which is most of a first process's load and\ncommits all of its pages on the host; a window used again was cleared of only the pages its\nprocess wrote (doc/go/PROCESS-SPEC.md, \"As built: KU2\").\n"} windows)
+
+
+^{:go/end 358} (go/func window "window is a clean RAM window of n bytes, 2 MiB-aligned: one a process freed, else a new one.\n" ^{:tag (slice byte)} [^uintptr n]
+  (range [i w windows]
+    (when (== (conv uintptr (len w)) n)
+      (set! windows (append (subslice windows _ i) (spread (subslice windows (+ i 1)))))
+      (return w)))
+
+
+  (allocAligned (conv int n) 0x200000))
+
+
+
+
+
+^{:go/end 376} (go/method Free "Free gives the process's RAM window back to the kernel once it has ended, cleared of what it\nheld: the pages its tables say it wrote (their dirty bits), those the kernel wrote on its behalf\n(winBytes), and its argument area. Its tables and data pages are the collector's.\n" [^{:tag (* Proc)} p]
+  (when (or (== (.-window p) nil) (not (.-Exited p)))
+    (return))
+
+  (clear (subslice (.-window p) _ argvReserve))
+  (for [pg (conv uintptr 0)] (< pg (/ (conv uintptr (len (.-window p))) page)) (inc! pg)
+    (let [dirty (!= (bit-and (.leaf (.-tables p) (conv uint64 (+ (.-winVA p) (* pg page)))) ptD) 0)]
+      (when (or dirty (!= (bit-and (aget (.-touched p) (/ pg 64)) ^uint64 (<< 1 (% pg 64))) 0))
+        (clear (subslice (.-window p) (* pg page) (* (+ pg 1) page))))))
+
+
+  (set! windows (append windows (.-window p)))
+  (set! (.-window p) nil))
+
+
+
+
+
+
+^{:go/end 401} (go/method winBytes "winBytes is the n bytes at the process's virtual address va, through the kernel alias of the\nprocess's RAM (§2.1, §4.3): the window (its heap and stack), or its private data+bss. The kernel\nnever dereferences a user VA; it reads and writes the process's memory at the kernel's own\naddress for the same physical page (one subtraction after a bounds check).\n" [^{:tag (* Proc)} p ^uintptr va ^int64 n] :results [(slice byte) bool]
   (when (< n 0)
     (return nil false))
 
+  (when (or (> (conv uintptr n) (conv uintptr (len (.-window p)))) (< (+ va (conv uintptr n)) va))
+    (return nil false))
+
   (when (and (>= va (.-winVA p)) (<= (+ va (conv uintptr n)) (+ (.-winVA p) (conv uintptr (len (.-window p))))))
-    (return (subslice (.-window p) (- va (.-winVA p)) (+ (- va (.-winVA p)) (conv uintptr n))) true))
+    (let [lo (- va (.-winVA p))]
+      (for [pg (/ lo page)] (and (<= pg (/ (+ lo (conv uintptr n)) page)) (< pg (/ (conv uintptr (len (.-window p))) page))) (inc! pg)
+        (set! (aget (.-touched p) (/ pg 64)) bit-or ^uint64 (<< 1 (% pg 64))))
+
+      (return (subslice (.-window p) lo (+ lo (conv uintptr n))) true)))
 
   (when (and (>= va (.-rwStart (.-b p))) (<= (+ va (conv uintptr n)) (.-imageEnd (.-b p))))
     (let [off (- va (.-rwStart (.-b p)))]
@@ -351,12 +400,12 @@
   (return nil false))
 
 
-^{:go/end 366} (go/func itoa ^string [^uint64 v]
+^{:go/end 415} (go/func itoa ^string [^uint64 v]
   (when (== v 0)
     (return "0"))
 
   (let [^{:tag (array 20 byte)} b (zero (array 20 byte))
-      ^{:line 359} i (len b)]
+      ^{:line 408} i (len b)]
     (while (> v 0)
       (dec! i)
       (aset b i (conv byte (+ \0 (% v 10))))
@@ -365,15 +414,15 @@
     (conv string (subslice b i))))
 
 
-^{:go/end 388} (go/func hex ^string [^uint64 v]
+^{:go/end 437} (go/func hex ^string [^uint64 v]
   (when (== v 0)
     (return "0x0"))
 
   (let [^{:tag (array 18 byte)} b (zero (array 18 byte))
-      ^{:line 373} i (len b)]
+      ^{:line 422} i (len b)]
     (while (> v 0)
       (dec! i)
-      (let [d (conv byte (bit-and v 0xf))]
+      (let [d (conv byte (bit-and v 15))]
         (if (< d 10)
           (aset b i (+ \0 d))
 

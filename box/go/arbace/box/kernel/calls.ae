@@ -1,0 +1,249 @@
+
+
+;; The kernel's call handler (doc/go/PROCESS-SPEC.md §4.3, KU2): a process's system call is the
+;; doorbell's block one level down (§4.1). The kernel reads it from the process's memory through its
+;; own alias of the process's RAM, checks every buffer it names lies in that RAM, applies the
+;; process's policy, then answers it itself or makes it to the monitor as its own call on the
+;; process's behalf (forward), and writes the answer back into the process's block (§4.3's steps
+;; 1-5). A call the kernel cannot make sense of -- a block or a buffer outside the process's RAM, a
+;; number no process may use -- ends the process with a report (§4.5, S25); one its policy refuses
+;; answers the ABI's refusal (S26).
+(in-ns 'go.arbace.box.kernel) (go/file "calls.go" :build ["//go:build amd64"] :doc "The kernel's call handler (doc/go/PROCESS-SPEC.md §4.3, KU2): a process's system call is the\ndoorbell's block one level down (§4.1). The kernel reads it from the process's memory through its\nown alias of the process's RAM, checks every buffer it names lies in that RAM, applies the\nprocess's policy, then answers it itself or makes it to the monitor as its own call on the\nprocess's behalf (forward), and writes the answer back into the process's block (§4.3's steps\n1-5). A call the kernel cannot make sense of -- a block or a buffer outside the process's RAM, a\nnumber no process may use -- ends the process with a report (§4.5, S25); one its policy refuses\nanswers the ABI's refusal (S26).\n" :imports [
+
+
+    ^{:line 14} [binary "encoding/binary"]
+    ^{:line 15} [time "time"]
+    ^{:line 16} [unsafe "unsafe"]
+
+    ^{:line 18} [abi "arbace/box/abi"]
+    ^{:line 19} [board "arbace/box/board"]])
+
+
+
+(go/const ^{:val 65536 :doc "outputLimit bounds what the kernel keeps of a process's console (§5.3).\n"} outputLimit (<< 1 16))
+
+
+
+^{:go/end 77} (go/method syscall "syscall serves the process's system call (§4.3) and reports whether the process has ended. t0 is\nwhen Run began, for Stats.\n" [^{:tag (* Proc)} p ^time/Time t0] :results [^bool done]
+  ;; settls' application path (the only raw SYSCALL TamaGo's runtime makes at ring 3,
+  ;; sys_tamago_amd64.s): arch_prctl(ARCH_SET_FS, addr), to set the vCPU's FS base for g (KS3,
+  ;; §3.3). The kernel sets the process's FS base (a process cannot WRMSR) and returns 0 in RAX,
+  ;; as the Linux call would. RAX is the syscall number here, never a call-block address (a block
+  ;; lives in the window at a high address).
+  (when (== (.-AX (.-ctx p)) sysArchPrctl)
+    (if (== (.-DI (.-ctx p)) archSetFS) (do
+        (set! (.-FSBase (.-ctx p)) (.-SI (.-ctx p)))
+        (set! (.-AX (.-ctx p)) 0))
+
+      (set! (.-AX (.-ctx p)) (+ (bit-not (conv uint64 einval)) 1))) ; -EINVAL
+
+    (return false))
+
+  ;; the block's address is in the process's RAX (board's Call put it there before SYSCALL).
+  (let [ba (conv uintptr (.-AX (.-ctx p)))
+      (values blk ok) (.winBytes p ba abi/BlockSize)]
+    (when (or (not ok) (!= (bit-and ba (- abi/BlockSize 1)) 0))
+      (.endBadCall p "the call block is outside the process's RAM, or not aligned")
+      (return true))
+
+    (let [nr (.Uint64 binary/LittleEndian (subslice blk abi/BlockNr))
+        ^{:line 50 :tag (array 5 int64)} a (zero (array 5 int64))]
+      (range [i a]
+        (aset a i (conv int64 (.Uint64 binary/LittleEndian (subslice blk (+ abi/BlockArgs (* 8 i)))))))
+
+      (inc! (.-Calls (.-Stats p)))
+      (when (== (.-FirstCall (.-Stats p)) 0)
+        (set! (.-FirstCall (.-Stats p)) (time/Since t0)))
+
+      (when (and (== (.-FirstIO (.-Stats p)) 0) (consoleCall nr))
+        (set! (.-FirstIO (.-Stats p)) (time/Since t0)))
+
+      ^{:go/breaks [[6 76]]} (let [(values ans how) (.answer p nr (addr a))]
+        (switch how
+          (case [ended]
+            (return true))
+          (case [exited]
+            (set! (.-Exited p) true)
+            (set! (.-ExitCode p) (conv int32 (aget a 0)))
+            (set! (.-Exit (.-Stats p)) (time/Since t0))
+            (return true)))
+
+        (.PutUint64 binary/LittleEndian (subslice blk abi/BlockRet) (conv uint64 (.-ret ans)))
+        (.PutUint64 binary/LittleEndian (subslice blk abi/BlockEvent) (.-event ans))
+        (range [i a]
+          (.PutUint64 binary/LittleEndian (subslice blk (+ abi/BlockArgs (* 8 i))) (conv uint64 (aget a i))))
+
+        false))))
+
+
+
+(go/const "The ways a call ends.\n"
+  ^{:line 81} [^{:val 0} answered iota]
+  ^{:line 82} [^{:val 1} exited]
+  ^{:line 83} [^{:val 2} ended])
+
+
+
+
+(go/type answer "answer is what a call's block gets back: ret and the event (a deadly signal the monitor caught\nduring a forwarded call, §4.3: the process's own deathtrap runs, as a guest's does).\n" (struct
+    ^{:line 89 :tag int64} ret
+    ^{:line 90 :tag uint64} event))
+
+
+
+
+^{:go/breaks [[5 101]] :go/end 102} (go/func consoleCall "consoleCall is whether nr is one of the console's (the process's stdio or terminal), the first of\nwhich marks the process's main at work (Stats.FirstIO).\n" ^bool [^uint64 nr]
+  (switch nr
+    (case [abi/HostInit abi/Write abi/WaitRead abi/ReadInput abi/WaitForInput abi/GetWinsize
+        ^{:line 98} abi/TermStart abi/TTYKeys]
+      (return true)))
+
+  false)
+
+
+
+
+^{:go/end 203} (go/method answer "answer answers call nr with arguments a (its out-arguments written back into a), by the\nprocess's policy (§4.2, §4.3).\n" [^{:tag (* Proc)} p ^uint64 nr ^{:tag (* (array 5 int64))} a] :results [answer int]
+  (let [con (.-Console (.-cfg p))]
+    (switch nr
+      ;; the process's own calls (§4.2, KS5)
+      (case [abi/NilHandler]
+        (set! (.-sigpanicPC p) (conv uint64 (aget a 0)))
+        (return (lit answer) answered))
+      (case [abi/ProcExit abi/Exit]
+        (return (lit answer) exited))
+      (case [abi/Yield abi/CPUPark]
+        ;; the vCPU given back (§7): the kernel's goroutine sleeps, its scheduler runs the rest
+        (when (> (aget a 0) 0)
+          (time/Sleep (conv time/Duration (aget a 0))))
+
+        (return (lit answer) answered))
+      (case [abi/SetFSBase]
+        (set! (.-FSBase (.-ctx p)) (conv uint64 (aget a 0)))
+        (return (lit answer) answered))
+
+      ;; one vCPU, the process's 0 (KU5 gives it more)
+      (case [abi/CPUSelf abi/CPUWake]
+        (return (lit answer) answered))
+      (case [abi/CPUStart]
+        (return (lit answer :ret -1) answered))
+
+      ;; the runtime's random bytes, from the monitor into the process's buffer
+      (case [abi/Random]
+        (return (.forward p nr a (lit buf 0 1))))
+
+      ;; the console (§5.3): stdout and stderr captured, and the box's when granted
+      (case [abi/Write abi/Message]
+        (let [(values b ok) (.winBytes p (conv uintptr (aget a 0)) (aget a 1))]
+          (when (not ok)
+            (.endBadCall p "a write's buffer is outside the process's RAM")
+            (return (lit answer) ended))
+
+          (when (< (len (.-Output p)) outputLimit)
+            (set! (.-Output p) (append (.-Output p) (spread (subslice b _ (min (len b) (- outputLimit (len (.-Output p)))))))))
+
+          (when con
+            (return (.forward p nr a (lit buf 0 1))))
+
+          (when (== nr abi/Message)
+            (return (lit answer) answered))
+
+          (return (lit answer :ret (aget a 1)) answered)))
+      (case [abi/WaitRead]
+        (when con
+          (when (<= (aget a 2) 0)
+            (.endBadCall p "a wait_read's buffer is empty")
+            (return (lit answer) ended))
+
+          (return (.forward p nr a (lit buf 1 2))))
+
+        (aset a 0 0) ; stdin at its end: there is input, and the read's answer is 0
+        (return (lit answer :ret 1) answered))
+      (case [abi/ReadInput]
+        (when con
+          (return (.forward p nr a (lit buf 0 -1))))
+
+        (return (lit answer) answered))
+      (case [abi/WaitForInput]
+        (when con
+          (return (.forward p nr a)))
+
+        (return (lit answer :ret 1) answered))
+      (case [abi/HostInit abi/GetWinsize abi/TermStart abi/TermStop abi/TTYKeys abi/Suspend abi/Raise]
+        (when con
+          (return (.forward p nr a)))
+
+        (return (lit answer :ret 0) answered))
+      (case [abi/Delay]
+        (when con
+          (return (.forward p nr a)))
+
+        (when (> (aget a 0) 0)
+          (time/Sleep (* (conv time/Duration (aget a 0)) time/Millisecond)))
+
+        (return (lit answer) answered))
+      (case [abi/NowMs abi/Time]
+        (return (.forward p nr a)))
+
+      ;; what KU2 grants no process (KU4: the store view, the spawns; the network later): refused
+      (case [abi/BlobPut abi/BlobSize abi/BlobGet abi/RefGet abi/RefSet]
+        (return (lit answer :ret abi/StoreRefused) answered))
+      (case [abi/Spawn abi/SpawnPoll abi/SpawnOut]
+        (return (lit answer :ret abi/SpawnRefused) answered))
+      (case [abi/EventArea]
+        (return (lit answer :ret -1) answered)))
+
+    (when (and (>= nr abi/NetInfo) (<= nr abi/NetLookup))
+      (return (lit answer :ret -1) answered)) ; without a network every call answers -1
+
+    ;; Fault (a process does not report its own faults: the kernel sees them, §8), Alloc and Free
+    ;; (never made), and any number neither the guest's nor a process's
+    (.endBadCall p (+ "a call no process may make (" (itoa nr) ")"))
+    (return (lit answer) ended)))
+
+
+
+
+(go/type buf "buf names a buffer argument of a call: the index of its address in a, and of its length (-1:\nReadInput's, the int32 in a[1] after a[0]).\n" (struct ^int ptr ^int n))
+
+
+
+(go/var ^{:tag (array 8 byte) :doc "noBytes is where a forwarded call's empty buffer points: an address in the kernel's own memory,\nso that the monitor's check of a zero-length buffer never ends the kernel for a process's call.\n"} noBytes)
+
+
+
+
+
+
+^{:go/end 250} (go/method forward "forward makes the process's call nr to the monitor as the kernel's own (§4.3 step 4): each\nbuffer bufs names checked to lie wholly in the process's RAM (or the process ends) and its\naddress translated to the kernel's alias of it, so the monitor reads and writes the process's\npages in place -- no copy; then the answer copied back: ret, the event, and the out-arguments,\nbut for the buffers' addresses, which stay the process's.\n" [^{:tag (* Proc)} p ^uint64 nr ^{:tag (* (array 5 int64))} a & ^{:tag (slice buf)} bufs] :results [answer int]
+  (let [k @a]
+    (range [_ b bufs]
+      (let [n (conv int64 0)]
+        (switch
+          (case [(>= (.-n b) 0)]
+            (set! n (aget a (.-n b))))
+          (default
+            (set! n (max (conv int64 (conv int32 (aget a 1))) 0))))
+
+        (when (== n 0)
+          (aset k (.-ptr b) (conv int64 (conv uintptr (conv unsafe/Pointer (addr (aget noBytes 0))))))
+          (continue))
+
+        (let [(values m ok) (.winBytes p (conv uintptr (aget a (.-ptr b))) n)]
+          (when (not ok)
+            (.endBadCall p (+ "a buffer of call " (itoa nr) " is outside the process's RAM"))
+            (return (lit answer) ended))
+
+          (aset k (.-ptr b) (conv int64 (conv uintptr (conv unsafe/Pointer (addr (aget m 0)))))))))
+
+    (let [r (board/Call nr (aget k 0) (aget k 1) (aget k 2) (aget k 3) (aget k 4))]
+      (range [i a]
+        (let [keep false]
+          (range [_ b bufs]
+            (set! keep (or keep (== (.-ptr b) i))))
+
+          (when (not keep)
+            (aset a i (aget (.-A r) i)))))
+
+
+      (return (lit answer :ret (.-Ret r) :event (.-Event r)) answered))))

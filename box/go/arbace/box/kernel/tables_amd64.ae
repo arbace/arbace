@@ -1,7 +1,7 @@
 ;; Per-process page tables on amd64 (doc/go/PROCESS-SPEC.md §2.1, §2.2, KU1). Each process has its
 ;; own 4-level tables: the kernel's whole address space identity-mapped supervisor-only (so the
 ;; crossing code runs at ring 0 with the process's tables loaded until it switches CR3, §2.1, no
-;; KPTI), except the image's own 2 MiB region, which is mapped page by page: text and rodata
+;; KPTI), except the image's own 2 MiB regions, which are mapped page by page: text and rodata
 ;; shared read-only and user-accessible (user-executable for text, SMEP off, §2.2), and data and
 ;; bss remapped to the process's private physical pages, user read/write. The RAM window (heap and
 ;; stacks) is mapped at the process's own high virtual address to its private physical pages, user
@@ -10,7 +10,7 @@
 ;; The box's guest runs with virtual = physical (the monitor identity-maps the slot, vmm/layout.go),
 ;; so a Go slice's address is its physical address: the kernel allocates tables and private pages as
 ;; Go memory and uses their addresses in page-table entries and CR3 (§2.1).
-(in-ns 'go.arbace.box.kernel) (go/file "tables_amd64.go" :doc "Per-process page tables on amd64 (doc/go/PROCESS-SPEC.md §2.1, §2.2, KU1). Each process has its\nown 4-level tables: the kernel's whole address space identity-mapped supervisor-only (so the\ncrossing code runs at ring 0 with the process's tables loaded until it switches CR3, §2.1, no\nKPTI), except the image's own 2 MiB region, which is mapped page by page: text and rodata\nshared read-only and user-accessible (user-executable for text, SMEP off, §2.2), and data and\nbss remapped to the process's private physical pages, user read/write. The RAM window (heap and\nstacks) is mapped at the process's own high virtual address to its private physical pages, user\nread/write.\n\nThe box's guest runs with virtual = physical (the monitor identity-maps the slot, vmm/layout.go),\nso a Go slice's address is its physical address: the kernel allocates tables and private pages as\nGo memory and uses their addresses in page-table entries and CR3 (§2.1).\n" :imports [
+(in-ns 'go.arbace.box.kernel) (go/file "tables_amd64.go" :doc "Per-process page tables on amd64 (doc/go/PROCESS-SPEC.md §2.1, §2.2, KU1). Each process has its\nown 4-level tables: the kernel's whole address space identity-mapped supervisor-only (so the\ncrossing code runs at ring 0 with the process's tables loaded until it switches CR3, §2.1, no\nKPTI), except the image's own 2 MiB regions, which are mapped page by page: text and rodata\nshared read-only and user-accessible (user-executable for text, SMEP off, §2.2), and data and\nbss remapped to the process's private physical pages, user read/write. The RAM window (heap and\nstacks) is mapped at the process's own high virtual address to its private physical pages, user\nread/write.\n\nThe box's guest runs with virtual = physical (the monitor identity-maps the slot, vmm/layout.go),\nso a Go slice's address is its physical address: the kernel allocates tables and private pages as\nGo memory and uses their addresses in page-table entries and CR3 (§2.1).\n" :imports [
 
     ^{:line 15} [unsafe "unsafe"]])
 
@@ -46,7 +46,7 @@
 ^{:go/end 46} (go/func setEntry [^{:tag (slice byte)} pg ^int i ^uint64 v] (stq (subslice pg (* i 8)) v))
 
 
-^{:go/end 107} (go/func buildTables "buildTables builds p's page tables (§2.1).\n" [^{:tag (* Proc)} p] :results [(* tables) error]
+^{:go/end 126} (go/func buildTables "buildTables builds p's page tables (§2.1).\n" [^{:tag (* Proc)} p] :results [(* tables) error]
   (let [t (addr (lit tables))
       (values pml4 _) (.allocPT t)
 
@@ -59,29 +59,38 @@
             ^{:line 59} pdpt (.sub t pml4 (conv int i4) (bit-or ptP ptRW ptUS))
             ^{:line 60} pd (.sub t pdpt (conv int i3) (bit-or ptP ptRW ptUS))
             ^{:line 61} pt (.sub t pd (conv int i2) (bit-or ptP ptRW ptUS))]
-          (setEntry pt (conv int i1) (bit-or (bit-and pa ptAddr) bits ptP))))]
+          (setEntry pt (conv int i1) (bit-or (bit-and pa ptAddr) bits ptP))))
 
 
-    ;; 1. the kernel's whole space, identity-mapped supervisor-only, 2 MiB leaves (§2.1): the
-    ;;    crossing code touches the kernel's heap and stacks here at ring 0; no user bit, so a
-    ;;    process cannot read it. The image's own 2 MiB region is left out and done page by page.
+
+
+
+      ;; 1. the kernel's whole space, identity-mapped supervisor-only, 2 MiB leaves (§2.1): the
+      ;;    crossing code touches the kernel's heap and stacks here at ring 0; no user bit, so a
+      ;;    process cannot read it. The image's own 2 MiB blocks are left out and done page by page:
+      ;;    all of them, however large the image (the box's program is about 100 MB: KU4).
+      ^{:line 72} imageTop (bit-and-not (- (+ (conv uint64 (.-imageEnd (.-b p))) 0x200000) 1) (- 0x200000 1))]
     (for [base (conv uint64 0)] (< base idLimit) (set! base + 0x200000)
-      (when (== base imageBase)
+      (when (and (>= base imageBase) (< base imageTop))
         (continue))
 
       (let [i4 (bit-and (>> base 39) 511)
-          ^{:line 73} i3 (bit-and (>> base 30) 511)
-          ^{:line 74} i2 (bit-and (>> base 21) 511)
-          ^{:line 75} pdpt (.sub t pml4 (conv int i4) (bit-or ptP ptRW ptUS))
-          ^{:line 76} pd (.sub t pdpt (conv int i3) (bit-or ptP ptRW ptUS))]
+          ^{:line 78} i3 (bit-and (>> base 30) 511)
+          ^{:line 79} i2 (bit-and (>> base 21) 511)
+          ^{:line 80} pdpt (.sub t pml4 (conv int i4) (bit-or ptP ptRW ptUS))
+          ^{:line 81} pd (.sub t pdpt (conv int i3) (bit-or ptP ptRW ptUS))]
         (setEntry pd (conv int i2) (bit-or base ptP ptRW ptPS)))) ; supervisor (no ptUS), executable
 
 
-    ;; 2. the image's 2 MiB region, page by page (§2.1):
+
+
+
+
+    ;; 2. the image's 2 MiB blocks, page by page (§2.1):
     ;;    - [imageBase, etext)   shared text:   user, read-only, executable
     ;;    - [etext, rwStart)     shared rodata: user, read-only, not executable
     ;;    - [rwStart, imageEnd)  private data+bss: user, read/write, not executable
-    (for [va (conv uint64 imageBase)] (< va (+ imageBase 0x200000)) (set! va + page)
+    (for [va (conv uint64 imageBase)] (< va imageTop) (set! va + page)
       (switch
         (case [(< va (conv uint64 (.-etext (.-b p))))]
           (mapPage va va ptUS)) ; text: shared, read-only, user-executable
@@ -91,24 +100,53 @@
           (let [pa (conv uint64 (conv uintptr (conv unsafe/Pointer (addr (aget (.-data p) (- va (conv uint64 (.-rwStart (.-b p)))))))))]
             (mapPage va pa (bit-or ptUS ptRW ptNX)))) ; data+bss: private, user read/write
         (default
-          ;; the rest of the image's 2 MiB region is the kernel's heap (it starts at the image's
-          ;; end, grows up): identity, supervisor, so the kernel reaches it at ring 0.
+          ;; the rest of the image's last 2 MiB block is the kernel's heap (it starts at the
+          ;; image's end, grows up): identity, supervisor, so the kernel reaches it at ring 0.
           (mapPage va va ptRW))))
 
 
 
+
+
     ;; 3. the RAM window (heap and stacks), at the process's own virtual address, to its private
-    ;;    physical pages, user read/write (§2.1).
+    ;;    physical pages, user read/write (§2.1): 2 MiB-aligned in both addresses, so a leaf table
+    ;;    per 2 MiB, filled in one go.
     (let [winPA (conv uint64 (conv uintptr (conv unsafe/Pointer (addr (aget (.-window p) 0)))))]
-      (for [off (conv uint64 0)] (< off (conv uint64 (len (.-window p)))) (set! off + page)
-        (mapPage (+ (conv uint64 (.-winVA p)) off) (+ winPA off) (bit-or ptUS ptRW ptNX)))
+      (for [off (conv uint64 0)] (< off (conv uint64 (len (.-window p)))) (set! off + 0x200000)
+        (let [va (+ (conv uint64 (.-winVA p)) off)
+            ^{:line 117} pdpt (.sub t pml4 (conv int (bit-and (>> va 39) 511)) (bit-or ptP ptRW ptUS))
+            ^{:line 118} pd (.sub t pdpt (conv int (bit-and (>> va 30) 511)) (bit-or ptP ptRW ptUS))
+            ^{:line 119} pt (.sub t pd (conv int (bit-and (>> va 21) 511)) (bit-or ptP ptRW ptUS))
+            ^{:line 120} ents (unsafe/Slice (conv (* uint64) (conv unsafe/Pointer (addr (aget pt 0)))) 512)]
+          (range [i ents]
+            (aset ents i (bit-or (bit-and (+ winPA off (* (conv uint64 i) page)) ptAddr) ptUS ptRW ptNX ptP)))))
+
 
       (return t nil))))
 
 
 
+(go/const "The bits the CPU sets in a leaf entry: accessed (the page touched) and dirty (written).\n"
+  ^{:line 130} [^{:val 32} ptA (<< 1 5)]
+  ^{:line 131} [^{:val 64} ptD (<< 1 6)])
 
-^{:go/end 121} (go/method sub "sub returns the page the entry i of pg points at, allocating and linking it when empty, and\nwidens its permission bits to link (a parent entry must allow what any child does).\n" ^{:tag (slice byte)} [^{:tag (* tables)} t ^{:tag (slice byte)} pg ^int i ^uint64 link]
+
+
+^{:go/end 145} (go/method leaf "leaf is the 4 KiB entry that maps va in t, or 0 (none, or a 2 MiB one).\n" ^uint64 [^{:tag (* tables)} t ^uint64 va]
+  (let [pg (aget (.-pages t) 0)]
+    (range [_ shift (lit (array 3 uint) 39 30 21)]
+      (let [e (entry pg (conv int (bit-and (>> va shift) 511)))]
+        (when (or (== (bit-and e ptP) 0) (!= (bit-and e ptPS) 0))
+          (return 0))
+
+        (set! pg (unsafe/Slice (conv (* byte) (conv unsafe/Pointer (conv uintptr (bit-and e ptAddr)))) page))))
+
+    (entry pg (conv int (bit-and (>> va 12) 511)))))
+
+
+
+
+^{:go/end 159} (go/method sub "sub returns the page the entry i of pg points at, allocating and linking it when empty, and\nwidens its permission bits to link (a parent entry must allow what any child does).\n" ^{:tag (slice byte)} [^{:tag (* tables)} t ^{:tag (slice byte)} pg ^int i ^uint64 link]
   (let [e (entry pg i)]
     (when (== (bit-and e ptP) 0)
       (let [(values child pa) (.allocPT t)]
@@ -120,12 +158,12 @@
       (unsafe/Slice (conv (* byte) (conv unsafe/Pointer pa)) page))))
 
 
-^{:go/end 126} (go/func ldq ^uint64 [^{:tag (slice byte)} b]
+^{:go/end 164} (go/func ldq ^uint64 [^{:tag (slice byte)} b]
   (bit-or (conv uint64 (aget b 0)) (<< (conv uint64 (aget b 1)) 8) (<< (conv uint64 (aget b 2)) 16) (<< (conv uint64 (aget b 3)) 24)
     (<< (conv uint64 (aget b 4)) 32) (<< (conv uint64 (aget b 5)) 40) (<< (conv uint64 (aget b 6)) 48) (<< (conv uint64 (aget b 7)) 56)))
 
 
-^{:go/end 137} (go/func stq [^{:tag (slice byte)} b ^uint64 v]
+^{:go/end 175} (go/func stq [^{:tag (slice byte)} b ^uint64 v]
   (aset b 0 (conv byte v))
   (aset b 1 (conv byte (>> v 8)))
   (aset b 2 (conv byte (>> v 16)))
