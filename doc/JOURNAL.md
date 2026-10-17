@@ -804,3 +804,23 @@ GS1-GS15, open.
 ## 2026-10-17: goi's GS1-GS15 decided (the user)
 
 All as recommended (doc/go/GOI-SPEC.md, "Decided"). GR1-GR6 after the coming re-seed.
+
+## 2026-10-17: the j2g batch merged (F4, F2's j2g and interpreter fixes)
+
+On the branch `j2g-batch` (`951c8eb`), merged into main; details in doc/FUTAMURA-SURVEY.md, "F4
+and F2's j2g fixes as built". F4 (a): `arbace/j2g/start.ae` lists the 82 runtime classes the
+program initializes before any user code (derived by `test/j2g/start_classes.ae` from
+`ARBACE_TRACE_INIT`'s trace of three runs); each static method of a listed class becomes a
+guard-free `C_m_NoInit` called only by compiled code (1,724 methods, 43,830 call sites), after
+`jrt.StartCheck` (status 70 when a listed class is not started). Benchmarks (eval-bench as a
+namespace): geometric mean 0.87; loop-long 12.20 → 4.37 ms, loop-double 1.55 → 0.53; fib 6.30 →
+6.68 (gc now inlines `Numbers`' boxed generic operations; F3 replaces them). F2.2 (anonymous
+classes with constructor arguments: `analyze-anon` built the constructor before the superclass's
+was chosen), F2.3 (`AbstractMethodError`), F2.4 (Clojure constants made at class
+initialization), F2.5 (the interpreter's lambdas get default methods), F2.6's collision (c2j's
+classes outside `arbace/` named `A_..._A`), abstract classes' constructors in the member tables
+(`InstantiationError`, reflection as the JVM's). diffcheck: 12,463 of 12,471 agree (known 22 →
+8, excluded 5 → 1, Java forms classes excluded 19 → 16); the essential gate passed; the fixpoint
+G1 = G2 = G3 on the branch. Decided by the user: F4.1 (a) the 82, F4.2 (a) re-measured with F3,
+F4.3 (a) a deviation recorded in J2G-SPEC §6.2. The agent once used `pgrep -f` by pattern,
+read-only, while waiting on a build (against the session's rule; nothing was signalled).
