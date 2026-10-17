@@ -191,8 +191,8 @@ Prior art:
   `--text amd64`: mode `:full` printed back to the original text, byte for byte), repr/haskell's
   (`bin/repr-haskell roundtrip`: GHC's trees and lines over GHC 9.14.1's boot libraries, and
   `test`; on the host's GHC), the box's vendoring checks (`bin/box-vendor roundtrip`, `kvm-tests`, `purego-check`),
-  `bin/tamago-vendor verify`, `bin/x509roots-vendor verify`, `check`; Go's toolchain as forms
-  (`bin/toolchain-vendor verify`, `check`); the per-form differential check (`bin/diffcheck`,
+  `bin/tamago-vendor verify`, `bin/x509roots-vendor verify`, `check`; goi's checker (`bin/goi
+  annotations`, `test --gc`, after repr/go's round trips); Go's toolchain as forms (`bin/toolchain-vendor verify`, `check`); the per-form differential check (`bin/diffcheck`,
   Futamura F2, doc/FUTAMURA-SURVEY.md "F2 as built": the oracle's forms evaluated against
   compiled by c2j, the Java forms interpreted against translated by j2g, in a program
   built for it from the gate's executable, against `test/diffcheck/known.edn`; about 5 minutes,

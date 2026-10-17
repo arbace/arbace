@@ -1746,13 +1746,14 @@ errors, the annotations verified), `code.ae` with `code_expr.ae`, `code_call.ae`
 statements, labels and branches), `decl.ae` (a package's declarations: collection, `objDecl`
 with go/types' colouring, lazy named types, methods, `validType`, initialization order after
 `initorder.go`) and `load.ae` (forms roots, build constraints and file names evaluated for the
-configuration, import paths): 5,950 lines. `bin/goi annotations` (§11.4) and `bin/goi test`
+configuration, import paths): 5,941 lines. `bin/goi annotations` (§11.4) and `bin/goi test`
 (`test/goi/check_test.ae`: `test/goi/errors/`, 9 files of invalid forms with 61 messages;
 `test/goi/annotations/`, converted forms whose `:val`, `:tag`, `:go/via`, `^:assign` and
 `:init-order` are wrong, the checker's disagreements (S16); `test/goi/checked/`, three programs
 and their checked trees; `--gc` prints the invalid forms with repr/go, builds them with gc and
 requires gc's messages to be the expected ones: `test/goi/gc_errors.ae`); `make
-goi-annotations`, `make goi-test`.
+goi-annotations`, `make goi-test`; `bin/gate --full` runs both after repr-go's round trips
+(§11.5), on their fresh conversions.
 
 **Imports from forms, not the digest.** Before GR1 there is no digest (§6.5): an imported
 package is checked from its forms, whole (bodies included), once per session and in parallel
