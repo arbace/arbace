@@ -17,7 +17,7 @@ end, `interp` and `go` (no longer variants: `arbace/classes/interp.ae`, `arbace/
 `native` requires `interp` itself, the access flags come from `arbace.classes.opcodes` (alias
 `Opcodes`, values not a cut class), and `TypeReference` is `arbace.classes.go` on every host.
 The variants `types`, `env`, `analyze` (generic signatures from the world, no source path lookup)
-stayed, for the front end still runs on a JVM: j2a and a2g's edge recording on the frozen jar.
+stayed, for the front end still runs on a JVM: repr/java and a2g's edge recording on the frozen jar.
 Since 2026-10-13 (35255c7) they are merged into their bases: `arbace.classes.go/go-build?`
 (`Compiler$CFGo` exists) selects the world's signatures on Go, reflection on the frozen JVM.
 `test/classforms/jvm_check.ae` is gone with the back end. The sections below are as built.

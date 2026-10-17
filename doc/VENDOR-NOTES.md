@@ -48,7 +48,7 @@ and stage 2, and, since spec was vendored too (below, "Spec"), passes in full.
 | `arbace/asm.ae`, `arbace/asm/**.ae` | `arbace.asm`, `arbace.asm.commons`, `arbace.asm.signature` (ASM, BSD 3-Clause); on the branch `arbace-for-java-26` only since 2026-10-12 |
 | `arbace/java/api.ae`, `arbace/java/api/Clojure.ae` | `arbace.java.api` |
 | `arbace/lang/Main.ae` | the class `arbace.lang.Main`, Clojure's main class `clojure.main` (`clojure/main.java`); vendored as `arbace.main` in `arbace/main_class.clj` with the package file `arbace.clj`, moved after vendoring (below) |
-| `arbace/classes/`, `arbace/j2a/` (then `arbace/j2c/`) | the tools (javalisp, `arbace/javalisp/`, was dropped later), unchanged in place; no vendored name clashes with them. Later tools there: `arbace/g2a/`, `arbace/a2g/`, `arbace/c2a/` (the renaming rules below, now c2a's, doc/C2A.md) |
+| `arbace/classes/`, `arbace/repr/java/` (then `arbace/j2c/`, from 2026-10-11 `arbace/j2a/`) | the tools (javalisp, `arbace/javalisp/`, was dropped later), unchanged in place; no vendored name clashes with them. Later tools there: `arbace/repr/go/`, `arbace/a2g/`, `arbace/c2a/` (the renaming rules below, now c2a's, doc/C2A.md) |
 | `doc/ARBACE.md` (was `arbace/README.md`) | what `arbace/` holds and its origin (licenses: `LICENSE.md`) |
 | `bin/vendor-arbace` | replays the derivation into `.tmp/vendor/` (never into `arbace/`) and checks it; on the branch `arbace-for-java-26` only |
 | `arbace/spec/**.ae`, `arbace/core/specs/alpha.ae` | spec.alpha and core.specs.alpha, vendored later and renamed alike (below, "Spec") |
@@ -978,7 +978,7 @@ step 4 (2026-10-07); the others came with later work, as each says:
     `java.util.stream` or `Proxy`: `canAccess` calls `Method.canAccess`, `instanceMethods`
     collects with a loop, `boxArg` adapts a fn to a functional interface with the native
     `adaptFn` (jrt's `AdaptFn`, A2G-SPEC §11). The class forms' front end, which runs both on
-    Go and on the frozen jar (j2a, the edge): `types/lang` is `"arbace/lang"`; `env`'s
+    Go and on the frozen jar (repr/java, the edge): `types/lang` is `"arbace/lang"`; `env`'s
     reflection cache is a `HashMap`, and the constructors jrt's reflection omits for abstract
     classes come from the world's signatures; `analyze` takes the generic signatures from
     `arbace.classes.go` and does no source lookup when `arbace.classes.go/go-build?`

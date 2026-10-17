@@ -2,7 +2,7 @@
 # logic and caches by content (Make tracks no dependencies; all targets are phony). Keep it in
 # step with bin/: a target's line names the script and options it runs, and `make check-makefile`
 # (in bin/gate) checks that every script named here exists. The environment passes through
-# (ARBACE_GO_ARCHES, ARBACE_BOX_ARCHES, G2A_GOROOT, ...); see each script's header for its own.
+# (ARBACE_GO_ARCHES, ARBACE_BOX_ARCHES, ARBACE_GOROOT, ...); see each script's header for its own.
 # `make help` lists the targets from their `##` comments.
 
 .DEFAULT_GOAL := help
@@ -12,12 +12,12 @@ CLOJURE_TESTS_GO ?= target/arbace-go/amd64/arbace-tests
 .PHONY: help seed-check stage0 seed-verify reseed build build-tests smoke repl fixpoint \
   box box-smoke box-oracle box-suite box-tools box-rebuild mac-bundle arm64-vm-check \
   gate gate-full suite oracle verify jdk-verify edge-verify fixtures-verify tamago-verify \
-  toolchain-verify box-vendor-verify x509roots-verify g2a-roundtrip g2a-roundtrip-text alpine-check clean \
+  toolchain-verify box-vendor-verify x509roots-verify repr-go-roundtrip repr-go-roundtrip-text alpine-check clean \
   check-makefile
 
 help: ## list the targets
 	@awk 'BEGIN {FS = ":.*## "} /^## / {printf "\n%s\n", substr($$0, 4)} \
-	  /^[a-z0-9-]+:.*## / {printf "  %-18s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
+	  /^[a-z0-9-]+:.*## / {printf "  %-22s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
 
 ## The bootstrap: the seed (seed/, bin/seed)
 seed-check: ## the seed has its pinned hash (bin/seed --check)
@@ -75,9 +75,9 @@ oracle: ## the executable against the frozen JVM's results (bin/oracle check)
 
 ## Vendored trees and recorded data, converted or recorded afresh and compared byte for byte
 VERIFY := jdk-verify edge-verify fixtures-verify tamago-verify toolchain-verify \
-  box-vendor-verify x509roots-verify g2a-roundtrip g2a-roundtrip-text
+  box-vendor-verify x509roots-verify repr-go-roundtrip repr-go-roundtrip-text
 verify: $(VERIFY) ## all of the below, one after another
-jdk-verify: ## jdk/'s forms by j2a, on the frozen JVM (bin/jrt-convert verify)
+jdk-verify: ## jdk/'s forms by repr/java, on the frozen JVM (bin/jrt-convert verify)
 	bin/jrt-convert verify
 edge-verify: ## a2g's edge, on the frozen JVM (bin/a2g-edge verify)
 	bin/a2g-edge verify
@@ -96,12 +96,12 @@ box-vendor-verify: ## box/'s forms and KVM tests (bin/box-vendor roundtrip, kvm-
 x509roots-verify: ## x509roots/, Mozilla's roots (bin/x509roots-vendor verify, check)
 	bin/x509roots-vendor verify
 	bin/x509roots-vendor check
-g2a-roundtrip: ## Go -> forms -> Go over std and GOROOT/test (bin/g2a roundtrip)
-	bin/g2a roundtrip amd64
-	bin/g2a roundtrip linux/amd64
-g2a-roundtrip-text: ## mode :full prints the original text back, byte for byte (bin/g2a roundtrip --text)
-	bin/g2a roundtrip --text amd64
-	bin/g2a roundtrip --text linux/amd64
+repr-go-roundtrip: ## Go -> forms -> Go over std and GOROOT/test (bin/repr-go roundtrip)
+	bin/repr-go roundtrip amd64
+	bin/repr-go roundtrip linux/amd64
+repr-go-roundtrip-text: ## mode :full prints the original text back, byte for byte (bin/repr-go roundtrip --text)
+	bin/repr-go roundtrip --text amd64
+	bin/repr-go roundtrip --text linux/amd64
 
 ## The host and housekeeping
 alpine-check: ## one minimal apk add line reinstalls exactly the host's packages (bin/alpine-env check)

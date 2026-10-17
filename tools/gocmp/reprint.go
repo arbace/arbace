@@ -1,6 +1,6 @@
 package main
 
-// gocmp reprint: a candidate made without forms, the stand-in for g2a's
+// gocmp reprint: a candidate made without forms, the stand-in for repr/go's
 // printer. Every Go file is parsed, its comments are dropped except the
 // directives, every position is reset, and go/printer prints it again; the
 // directives are put back before the declaration they preceded. The result is

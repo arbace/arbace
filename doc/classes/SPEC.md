@@ -3,7 +3,7 @@
 Status: accepted (2026-10-06), with the amendments found while implementing it folded in
 (2026-10-07 to 2026-10-09, §12). Implemented by `arbace/classes/` (the compiler, behind the
 special forms of `arbace.lang.Compiler` at every stage, the seed's stage 0 included, §9.5, §9.6)
-and `arbace/j2a/` (the converter).
+and `arbace/repr/java/` (the converter).
 
 Since 2026-10-12 (standalone S4, doc/STANDALONE-NOTES.md, "S4: the JVM removed") main has no
 bytecode back end: the compiler's front end (`parse`, `lower`, `analyze`, `env`, `types`,
@@ -11,7 +11,7 @@ bytecode back end: the compiler's front end (`parse`, `lower`, `analyze`, `env`,
 analyzes with its interpreter (`arbace.classes.interp`, doc/go/CLASSFORMS-REPL.md) and a2g
 translates it to Go (doc/go/A2G-SPEC.md); the back end that wrote the class files (`emit`,
 `compiler`, `shape`, `verify`, `build`, `boot`, with ASM) is on the branch `arbace-for-java-26`,
-whose jar (the frozen `arbace-for-java-26-v4`) still compiles class forms to bytecode for j2a's
+whose jar (the frozen `arbace-for-java-26-v4`) still compiles class forms to bytecode for repr/java's
 checks against javac. Where this spec says "the compiler emits" or names an attribute, it states
 the class file that the forms are equivalent to (§3), which that back end writes.
 

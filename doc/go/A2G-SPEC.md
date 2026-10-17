@@ -4,7 +4,10 @@
 > 2026-10-11 they were c2g and `C2G-SPEC.md`, as the frozen branch `arbace-for-golang` and the
 > records before that date name them. The overlays' directives (`a2g/add`, `a2g/variant`,
 > `a2g/cut`) and the generated program's support names (`a2g_*.go`, `A2g_*`) were renamed with
-> it. This document uses the current names throughout, also where it records earlier work.
+> it. Since 2026-10-17 the bridges it works with are repr/go (`arbace.repr.go`, `bin/repr-go`; g2a
+> before, `arbace.g2a`, `bin/g2a`), whose build is `arbace.build.go` (`bin/build-go`; was `bin/g2a
+> build`), and repr/java (j2a before; doc/NAMING-SURVEY.md). This document uses the current names
+> throughout, also where it records earlier work.
 
 Status: accepted (2026-10-08; the user took the recommendation of each of the 23 questions of
 §16), B1a step 2 ([B1-PLAN.md](B1-PLAN.md)), with every amendment set of §16 accepted by the user
@@ -32,9 +35,9 @@ concurrency mixed; thread identity by a goroutine-local slot in the Go runtime; 
 start; `#inst` over a small `Date`).
 
 This spec defines **a2g**, the compiler from **class forms** ([classes/SPEC.md](../classes/SPEC.md),
-the Java constructs as Clojure: the source of `arbace/lang/` and of j2a's output for the JDK
+the Java constructs as Clojure: the source of `arbace/lang/` and of repr/java's output for the JDK
 classes) to **Go forms** ([SPEC.md](SPEC.md), Go programs as Clojure data, printed and built by
-`bin/g2a build`). It says how Java's types, objects, statics and code become Go, what a2g writes
+`bin/build-go`). It says how Java's types, objects, statics and code become Go, what a2g writes
 and what it leaves to **jrt** (the Java runtime in Go forms under the translated classes), and
 how the evaluator of B1a step 5 sits on top. It is the counterpart for Go of the class forms
 compiler's JVM back end (`arbace.classes.emit`, on `arbace-for-java-26` since standalone S4), and
@@ -45,10 +48,10 @@ Words used throughout:
 - **class forms**, **the analyzer**: the forms of classes/SPEC.md and Arbace's class forms
   compiler `arbace.classes`, whose front end (entering, member resolution, the analysis of code
   into typed nodes, `arbace.classes.analyze`) a2g reuses unchanged (§4.1).
-- **Go forms**, **the printer**, **the build**: SPEC.md's forms, `arbace.g2a.print` and
-  `bin/g2a build` ([BUILD.md](BUILD.md)).
+- **Go forms**, **the printer**, **the build**: SPEC.md's forms, `arbace.repr.go.print` and
+  `bin/build-go` ([BUILD.md](BUILD.md)).
 - **jrt**: the Go package `arbace/jrt` holding the JDK classes of the closed world, translated by
-  a2g from j2a's conversion of jdk26u or hand-written in Go forms (the VM's edge:
+  a2g from repr/java's conversion of jdk26u or hand-written in Go forms (the VM's edge:
   JAVA-SURFACE.md, "shim"), and the run-time helpers a2g's output calls (§11).
 - **the closed world**: every class a2g translates or jrt hand-writes for one build (§4.1). No
   other class exists at run time, except the evaluator's dynamic types (§5.12).
@@ -206,7 +209,7 @@ class forms files and a jrt manifest:
 
 1. **Arbace's runtime**, `arbace/lang/*.ae`, with the Go-build variants of §4.6 (since SA150,
    2026-10-13/14, only the generated `CompilerOps.ae` and `CompilerAOTFn.ae`).
-2. **The translated JDK closure**: j2a's conversion of the jdk26u source files of the closure
+2. **The translated JDK closure**: repr/java's conversion of the jdk26u source files of the closure
    (JAVA-SURFACE.md, "The translation closure": 184 files, 422 classes; with D5's regex), with
    their own variants; since phase 2C, 223 files (below), and since step 5's phase 2B, 340
    (streams, the functional interfaces, `java.time.Instant`, `java.sql`'s `Timestamp` and
@@ -296,7 +299,7 @@ paths), which replaces or adds to jdk26u's files where a JDK class's source need
 `FileInputStream`, `FileOutputStream`, `OutputStreamWriter`, `InputStreamReader`, and
 `jdk.internal.jrt.HostFiles`, `StandardStreams`, `CaseInsensitiveComparator`. It is Java, not
 hand-written Go in jrt, because it extends translated classes (`Writer`, `OutputStream`), which
-jrt's own build cannot name; j2a converts it and it is checked against javac with the closure,
+jrt's own build cannot name; repr/java converts it and it is checked against javac with the closure,
 then a2g translates it like any JDK class. What only Go can do is a `native` method of it
 (static, with primitive and array parameters, so that jrt builds without the translated types:
 §9.1). A class of jrt's Java that stands for a JDK class jrt cannot translate (a nested class
@@ -556,7 +559,7 @@ use each other, and the hand-written `String` uses translated classes that use `
 
 `arbace/lang` imports `arbace/jrt`; jrt imports only Go's standard library and the patched
 runtime's two functions (§9.3). The module is `arbace` (`program.edn`: `{:module "arbace" :go
-"1.27"}`, BUILD.md); the build is `bin/g2a build` over the forms tree. The synthetic check of
+"1.27"}`, BUILD.md); the build is `bin/build-go` over the forms tree. The synthetic check of
 §13.6 shows that gc handles a package of jrt's size.
 
 ### 4.3 Files and layout
@@ -584,10 +587,10 @@ runtime's two functions (§9.3). The module is `arbace` (`program.edn`: `{:modul
   (`target/arbace-go/a2g/` for `bin/arbace-go`), `OUT/gen/go/arbace/jrt/java_util_HashMap.ae` and
   so on, and the program root `OUT/prog/` merging them with jrt's hand-written forms, with its
   `OUT/prog/go/arbace/jrt.ae` (`ns`, `go/package`, `load`s). It is
-  regenerated, not tracked, as converted Go is (g2a decision 9).
+  regenerated, not tracked, as converted Go is (repr/go decision 9).
 - **jrt's hand-written forms** are source, tracked, in a forms root of their own (§16 Q19),
   `go/arbace/jrt/*.ae`; the build merges the two trees into one program root before
-  `bin/g2a build`. a2g's files and jrt's are told apart by name: hand-written files never begin
+  `bin/build-go`. a2g's files and jrt's are told apart by name: hand-written files never begin
   with `java_`, `jdk_`, `sun_` or `a2g_`.
 - **Stand-ins** (amendment J9, accepted 2026-10-08). Until a2g's output joins the build, jrt's
   hand-written classes throw, catch and implement JDK classes a2g will translate (the
@@ -759,7 +762,7 @@ an error (a2g exits 1) listed in `report.edn` `:errors` (amendment W4, accepted 
 JAVA-SURFACE.md's "rework" (about 300 lines of `RT`, `Compiler` and `Reflector`) and the cuts
 need the Go build's `arbace.lang` to differ in places from the JVM's. The source stays one: the
 differences are **variant files**, `arbace/lang/go/<Class>.ae` (and, for the translated JDK,
-whose class forms j2a regenerates, `overlay/jdk/variants/<Class>.ae`, in the class's package:
+whose class forms repr/java regenerates, `overlay/jdk/variants/<Class>.ae`, in the class's package:
 amendment K1, accepted 2026-10-09), read by a2g only. (Since SA150, 2026-10-13/14, the
 hand-written variants of `arbace/lang` are merged into their bases by
 `test/aot/merge_variants.ae`, and `arbace/lang/go/` holds only the generated `CompilerOps.ae` and
@@ -849,7 +852,7 @@ variants merged into their bases (SA150)".)
   `ObjectInputStream` parameter, for the copy constructor, `clone`, `putAll` and
   `addAllForTreeSet`), `BitSet` (`valueOf(byte[])` and `toByteArray` by shifts, no
   `ByteBuffer`) and `RandomGenerator` (`isDeprecated` false: no annotations, §12) (amendment
-  JB2, accepted 2026-10-10). A replacing member's parameter tags are written as j2a writes the
+  JB2, accepted 2026-10-10). A replacing member's parameter tags are written as repr/java writes the
   original's, generics included (`^{:tag (SortedMap K (? extends V))}`): the variant finds the
   member by them.
 - Variants are class forms like any other and are analyzed with the class. a2g reports the
@@ -2403,18 +2406,18 @@ ThreadLocal`, unused by the closure's run-time paths, would be copied by jrt's `
 Checked with go1.27.1 (§13.3): the slot is per goroutine (100 goroutines, each reading back its
 own value), costs 3.7 ns per `currentThread()` (the linknamed function is not inlined), and
 works on arm64 (under `qemu-aarch64`). The build needs the three runtime files replaced: either
-`bin/g2a build` gains an overlay option (Go's `-overlay`) or the runtime package is part of the
+`bin/build-go` gains an overlay option (Go's `-overlay`) or the runtime package is part of the
 forms tree; that is an amendment to BUILD.md (§16 Q19), accepted as `--overlay` (BUILD.md,
 amendment B5).
 
 **Where the patch lives** (amendment T15, accepted 2026-10-08). The patched runtime files are Go
 forms in a forms root of their own, `overlay/go/runtime/`, outside `go/` (whose package files
-`bin/g2a build` collects): `overlay/go/runtime.ae` is the package file naming the three files,
+`bin/build-go` collects): `overlay/go/runtime.ae` is the package file naming the three files,
 `arbace_local.ae` is hand-written, and `proc.ae` and `runtime2.ae` are the toolchain's
-`proc.go` and `runtime2.go` as `bin/g2a convert --goos linux runtime` converts them, with the
+`proc.go` and `runtime2.go` as `bin/repr-go read --goos linux runtime` converts them, with the
 patch's two lines each marked `; Arbace` (the same forms serve amd64, arm64 and, having no
 build constraints, `GOOS=tamago`). `bin/jrt overlay` prints them and writes the overlay file
-for `$G2A_GOROOT`; `bin/jrt overlay --check` converts the toolchain's runtime again and requires
+for `$ARBACE_GOROOT`; `bin/jrt overlay --check` converts the toolchain's runtime again and requires
 the forms to equal the conversion but for the marked lines, so a toolchain update shows up as a
 failure. Without the overlay jrt fails to link (`relocation target runtime.arbace_setLocal not
 defined`), so a build cannot silently miss the patch.
@@ -2687,11 +2690,11 @@ embedded with `//go:embed`) or from the file system through the host, and evalua
 
 **Embedded sources** (amendment M5, accepted 2026-10-09). `bin/a2g --program` writes the
 namespaces' sources under the main package's forms directory
-(`go/arbace/cmd/arbace/res/arbace/...`), marked as data for `bin/g2a` by a file `.g2a-data`
+(`go/arbace/cmd/arbace/res/arbace/...`), marked as data for `bin/build-go` by a file `.build-go-data`
 (BUILD.md, "The program's layout"), lists them as the package's `:embed-files` and declares
 `//go:embed res`; `main` sets the host's `Resources` to `fs.Sub(resources, "res")` (§9.4)
 before `Main.main`. The embedded tree is `arbace/**/*.ae` less the tools (`classes`, but for
-the class forms' analysis, CF2 below; `j2a`, `g2a`, `a2g`), the runtime's class forms
+the class forms' analysis, CF2 below; `repr/java`, `repr/go`, `a2g`), the runtime's class forms
 (`arbace/lang`), ASM, and the namespaces the Go build
 leaves out (JAVA-SURFACE.md decision 6; D6's Swing and SAX: `inspector`, `xml`; processes,
 `arbace.java.shell` and `arbace.java.process`, are in since amendment PR1, accepted 2026-10-10)
@@ -2941,10 +2944,10 @@ a class of the program, not an embedded namespace's source.
 **The test build** (amendment FX1, accepted 2026-10-10; EVAL-NOTES.md, "The suite's Java
 fixtures"; it supersedes SL4). `bin/arbace-go --build-tests` makes a second program,
 `target/arbace-go/<arch>/arbace-tests`: the shipped program plus the suite's Java fixtures,
-converted by j2a from the renamed `test/java` (`bin/clojure-tests --java-fixtures`) and given to
+converted by repr/java from the renamed `test/java` (`bin/clojure-tests --java-fixtures`) and given to
 a2g as one more input; since 2026-10-12 the converted forms are committed in
 `test/java-fixtures/` (its README.md), which the test build reads without javac, and
-`bin/clojure-tests --java-fixtures verify` (in `bin/gate --full`) proves them j2a's output. `bin/clojure-tests` requires it of `CLOJURE_TESTS_GO`, and `bin/gate
+`bin/clojure-tests --java-fixtures verify` (in `bin/gate --full`) proves them repr/java's output. `bin/clojure-tests` requires it of `CLOJURE_TESTS_GO`, and `bin/gate
 --full`'s suite on Go uses it; `test/arbace-go-results.edn` is its reference, with the
 namespaces that need the fixtures (`compilation`, `generated-*`, `java-interop`, `param-tags`,
 `reflect`, `try-catch`) no longer skipped. The shipped executables do not hold the fixtures.
@@ -2964,7 +2967,7 @@ silently. The JVM launcher `bin/arbace-j` followed the same convention (until S4
 **The box's program** (amendment BX4, accepted 2026-10-11; BOX-NOTES.md, S1). `main` sets the
 host with `jrt.ProgramHost` (§9.4) rather than `OSHost`, so the same main package serves both
 systems: `bin/arbace-go --build --box` builds the program a2g wrote, unchanged, with
-`GOOS=tamago` (`bin/g2a build --goos tamago --root box`: the board's package and `abi` join the
+`GOOS=tamago` (`bin/build-go --goos tamago --root box`: the board's package and `abi` join the
 module, TamaGo's `goos` module is required for `GOOSPKG`), embedding the image of prepared
 namespaces the Linux build made from the same program (the image is valid for the program that
 made it: BOX-SURVEY R6), and links it at the box's addresses with its symbol table. `os.Args`,
@@ -3289,7 +3292,7 @@ taken). `bin/a2g-perf`'s workloads went from 3.7-49 times the JVM's time to 2.3-
 program run under `jrt.RunMain`; allocation sampling is off otherwise (its stack walks cost
 about 2% on the evaluator's deep stacks). `bin/arbace-go --build --pgo` runs the host's
 executable on `test/arbace-go-pgo.ae` with a CPU profile and builds every executable again
-with `go build -pgo` (`bin/g2a build --pgo FILE` for other programs): gc devirtualizes and
+with `go build -pgo` (`bin/build-go --pgo FILE` for other programs): gc devirtualizes and
 inlines the hot interface calls, 5-15% on the executable. Opt-in for ordinary builds; the
 freeze's executables are built with it.
 
@@ -3424,7 +3427,7 @@ interesting members are shown; every class also has its `Ref`, `GetClass__Class`
 the `Reduced` of §2, `Util`'s class initialization, a three-class
 hierarchy with implementations, forwarders and a `super` call (§5.4), and a minimal hand-written
 jrt (header, `String` over UTF-16, `Throwable`, `Catch` with the run-time error mapping of
-§7.9.5, `ClassInit`, `Volatile`, `RefArray`). `bin/g2a build` prints and builds it for
+§7.9.5, `ClassInit`, `Volatile`, `RefArray`). `bin/build-go` prints and builds it for
 linux/amd64 and linux/arm64; both executables print the same, and `hashInt`, `hashLong` and
 `hashCombine` give the JVM Arbace's values (`(Murmur3/hashInt 42)` is -1134849565,
 `(Murmur3/hashLong 1234567890123)` 1740798302, `(Util/hashCombine 17 99)` -1640530319). The
@@ -4199,7 +4202,7 @@ went to their own documents:
 - **Phase 1 (M), from EVAL-NOTES "Amendments", phase 1:** M1 namespace variants: §10.3. M2
   `getClass` by a field `a2g$class`, a run-time class per fn: §5.11, §10.2. M3 the REPL's cut
   classes and absent members: §4.1. M4 overloads in the JVM's order: §5.11. M5 embedded sources:
-  §10.3 (and BUILD.md, "The program's layout": `.g2a-data`). M6 evaluated frames: §10.7, §11. M7
+  §10.3 (and BUILD.md, "The program's layout": `.build-go-data`). M6 evaluated frames: §10.7, §11. M7
   the JDK variants for `VarHandle` and `SecureRandom`: §4.6, §11. M8 a2g's fixes from the whole
   world: §4.1, §5.11 (and §5.8's identity, which already compares as `any` when the Go types
   differ).
@@ -4207,7 +4210,7 @@ went to their own documents:
   V9. X2 `proxy` over `Dyn`: §10.4, §12 (and B1-PLAN.md D6, EVAL-PLAN.md §2.5). X3 a duplicate
   method is `ClassFormatError`: §5.12. X4 the oracle covers `proxy`: ORACLE.md.
 - **Phase 2B (S), from EVAL-NOTES "Phase 2B":** S1 the rename table's `Sql_Date` and
-  `Stream_Tripwire`: §4.4. S2 `bin/jrt-convert`'s other-module files, `J2A_PATCH_ALL` and
+  `Stream_Tripwire`: §4.4. S2 `bin/jrt-convert`'s other-module files, `REPR_JAVA_PATCH_ALL` and
   `known-differences`: JRT-SOURCES.md (and §4.1's count). S3 `Date` and `ForkJoinTask`
   non-leaf, T12 done, `String`'s `Constable` and `ConstantDesc`: §5.3, §5.4, §9.1. S4 jrt
   members naming translated classes, default-method forwarders: §5.4, §11. S5 the fork-join
@@ -4309,7 +4312,7 @@ namespaces". EC7 (un-skipping `transducers`' `seq-and-transducer`) not taken. EC
 
 **java.util completed** (JAVA-BASE.md, "java.util completed"; accepted by the user 2026-10-10):
 JB1 the java.util files of the closure, `util-sources`: JRT-SOURCES.md. JB2 the variants of
-`TreeMap`, `BitSet` and `RandomGenerator`, and a replacing member's tags as j2a writes them:
+`TreeMap`, `BitSet` and `RandomGenerator`, and a replacing member's tags as repr/java writes them:
 §4.6. JB3 FromFn's array results: §7.11. JB4 a forked task not yet done runs again: §8.4.
 JB5 lambdas with marker interfaces get adapters implementing them: §7.11. JB4 refines S5's "a
 task runs once".
@@ -4494,7 +4497,7 @@ text above follows:
 19. **Where jrt's forms live, and the runtime patch.** jrt's hand-written Go forms as a forms
     root `go/` at the repository's top (`go/arbace/jrt/*.ae`, the layout of BUILD.md), merged
     with a2g's generated tree for the build; the patched runtime files given to the build by an
-    overlay option added to `bin/g2a build` (an amendment of BUILD.md), the patch held as Go
+    overlay option added to `bin/build-go` (an amendment of BUILD.md), the patch held as Go
     forms (the runtime's converted files with the three changes of §9.3). Alternatives:
     hand-written jrt under `arbace/` (which holds Arbace's Clojure namespaces, not Go forms);
     a copy of the whole runtime in the tree. *Recommendation: as described.* (The overlay
@@ -4559,7 +4562,7 @@ text above follows:
   `qemu-aarch64`), `fma` (fusion per architecture), `alloc` (allocation), `big` (a synthetic
   package of a2g's shape), `modpath` (a main module named `arbace`), `leaves.ae` (the leaf
   classes of stage 2's `arbace.lang`); `.tmp/a2g-proto/` (the
-  prototype of §15, built with `bin/g2a build` for both architectures and compared with
+  prototype of §15, built with `bin/build-go` for both architectures and compared with
   the JVM Arbace, then `bin/arbace`, later `bin/arbace-j`, on `arbace-for-java-26` since S4).
 - JDK: jdk26u (`/root/jdk26u`): `java/util/function/Predicate.java` (default and static
   methods), `java/lang/runtime/ObjectMethods.java` (records' methods), JDK-8273914 (string

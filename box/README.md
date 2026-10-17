@@ -35,14 +35,14 @@ Origin: https://github.com/arbace/go-whim (local clone `/root/go-whim`) at
 `80c49bf53cd6340487ac623f3d6d135b77ac1db6` (2026-10-06; the box's files last changed at
 `815e11a`), the paths above, with their tests (`_test.go`). Derived on 2026-10-11 by
 `bin/box-vendor convert`: the packages moved to the module `arbace` under `arbace/box/`, every
-import of them rewritten (the only change to their text), and converted by `bin/g2a convert
+import of them rewritten (the only change to their text), and converted by `bin/repr-go read
 --tests` for linux/amd64, linux/arm64, darwin/arm64, tamago/amd64 and tamago/arm64, the five
 trees merged into one (the file forms are identical across configurations; the package files
 carry no `:config`, and each file's build constraints select it, as gc does). The assembly
 (`board/*.s`) is copied as it is (SPEC §9.5). Go's other comments are `;` comments in the forms,
 which the printer does not reproduce (SPEC §10.4).
 
-Until 2026-10-16 `bin/box-vendor check` proved the tree: printed back (`bin/g2a build --print-only
+Until 2026-10-16 `bin/box-vendor check` proved the tree: printed back (`bin/build-go --print-only
 --tests --layout lines`), each package equal to go-whim's at gc's three levels (gocmp, the round
 trip's oracle), go-whim's monitor and TamaGo guests built from the printed files byte-identical to
 go-whim's own (without build IDs), and go-whim's tests passing on them, on /dev/kvm (recorded in
@@ -76,7 +76,7 @@ purego (S4, BX62): https://github.com/ebitengine/purego v0.11.1 (go.sum
 `h1:2zpWRSQNVKN4eKsKO9eM1ILDgWfYMY9GwqRmK6XeQ/0=`, from Go's module cache), the files of its
 packages `purego`, `internal/fakecgo` and `internal/strings` that build for darwin/arm64 (the one
 configuration that imports it), their import paths renamed to `arbace/box/purego` (the only change
-to their text), converted by `bin/box-vendor purego` (`bin/g2a convert --goos darwin --goarch
+to their text), converted by `bin/box-vendor purego` (`bin/repr-go read --goos darwin --goarch
 arm64`) and merged as go-whim's packages are, the assembly and headers copied. `bin/box-vendor
 purego-check` proves them: each package printed against its renamed original (gocmp, three
 levels), and the darwin/arm64 launcher built from the printed forms byte-identical to one built

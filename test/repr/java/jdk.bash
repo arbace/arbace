@@ -1,15 +1,15 @@
 #!/bin/bash
-# bin/j2a-check --jdk [MODULE...]: jdk26u's modules converted by j2a, forms-level (no class files
+# bin/repr-java check --jdk [MODULE...]: jdk26u's modules converted by repr/java, forms-level (no class files
 # compiled or compared with javac's since standalone S4, doc/STANDALONE-NOTES.md, "S4: the JVM
-# removed", O2). Run through bin/j2a-check (from the repository root).
+# removed", O2). Run through bin/repr-java check (from the repository root).
 #
-# Per module M of $JDK_SRC/*/share/classes (largest first): bin/j2a ... jdk --check, the
+# Per module M of $JDK_SRC/*/share/classes (largest first): bin/repr-java ... jdk --check, the
 # module's Java files into class forms, $work/conv/M (no failures, no javac errors, every file
 # read back by arbace.core/read); then the totals.
 set -uo pipefail
 root=$(cd "$(dirname "$0")/../.." && pwd)
 cd "$root"
-work=.tmp/j2a-jdk
+work=.tmp/repr-java-jdk
 src=${JDK_SRC:-/root/jdk26u/src}
 steps=${JDK_STEPS:-convert}   # JDK_JOBS: parallel conversions (default 2, 10 GB each)
 mkdir -p "$work"
@@ -28,7 +28,7 @@ has() { case ",$steps," in *",$1,"*) return 0 ;; esac; return 1; }
 convert_one() {
   local m=$1
   rm -rf "$work/conv/$m"
-  J2A_THREADS=8 J2A_JVM_OPTS=-Xmx10g bin/j2a -m arbace.j2a.main jdk --check "$work/conv/$m" "$m" \
+  REPR_JAVA_THREADS=8 REPR_JAVA_JVM_OPTS=-Xmx10g bin/repr-java read-jdk --check "$work/conv/$m" "$m" \
     "$src/$m/share/classes" > "$work/log/convert-$m.log" 2>&1
   echo "convert $m: $(tail -1 "$work/log/convert-$m.log")"
 }

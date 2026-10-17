@@ -1,5 +1,5 @@
 // Command gocmp decides whether two Go sources of a package are the same
-// program: the round-trip oracle of g2a (doc/go/ROUNDTRIP.md).
+// program: the round-trip oracle of repr/go (doc/go/ROUNDTRIP.md).
 //
 // Usage:
 //
@@ -71,7 +71,7 @@ func defaultGo() string {
 }
 
 func main() {
-	// g2a's configurations have cgo off (tamago has none; linux is built static,
+	// repr/go's configurations have cgo off (tamago has none; linux is built static,
 	// CGO_ENABLED=0): unless the environment says otherwise, the go commands
 	// below and go/build (gocmp tests) take it off too
 	if _, ok := os.LookupEnv("CGO_ENABLED"); !ok {

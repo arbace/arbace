@@ -136,7 +136,7 @@ the image's skipped fields. Start went from 0.33 s to 0.21 s, preparing the imag
 
 1. `bin/a2g --program` writes the program: the main package now has `image.go` (copied from
    `go/arbace/cmd/arbace/image.ae`), `image_types.go` (generated) and an empty `image.bin`;
-2. `bin/g2a build` for each architecture, the host's first;
+2. `bin/build-go` for each architecture, the host's first;
 3. the host's executable prepares the namespaces (`ARBACE_PREPARE`; about 35 s at step 6, 11 s since EC6; all 41
    embedded sources, 27 namespaces);
 4. each executable is linked again with the image (`go build` in the printed module: only the
@@ -265,7 +265,7 @@ would execute the arm64 executable directly.
 
 The smoke test itself is fast: `ARBACE_GO_ARCHES=amd64 bin/arbace-go --smoke` takes 3.5 s. Getting
 an executable is not. After the bootstrap, the chain is `bin/jrt-convert` (about 95 s; its output
-`.tmp/jrt/conv` is what `bin/a2g` translates), `bin/a2g --program` (about 75 s), `bin/g2a build`
+`.tmp/jrt/conv` is what `bin/a2g` translates), `bin/a2g --program` (about 75 s), `bin/build-go`
 amd64 (60 s of CPU with Go's build cache warm, minutes cold), the image (32 s then; 11 s since EC6) and the link (a
 few seconds): 4 to 5 minutes, against the 3.2 minutes the suite on stage 2 runs concurrently. It
 would add 1 to 2 minutes to the essential gate, and load the machine beside the suite. So, by the
@@ -274,7 +274,7 @@ rule given, `bin/gate` is not changed. Options for the user:
 1. **The chain in the essential gate**, concurrently with the suite and the class forms tests:
    +1 to 2 minutes, about 10 GB more at its peak.
 2. **A cached executable**: the gate keys the executable by the hash of its inputs (the git tree
-   hashes of `arbace/`, `go/`, `overlay/`, `test/jrt`, the scripts `bin/a2g`, `bin/g2a`,
+   hashes of `arbace/`, `go/`, `overlay/`, `test/jrt`, the scripts `bin/a2g`, `bin/repr-go`,
    `bin/jrt-convert`, `bin/arbace-go`, and the toolchain's version) and builds only when the key
    changed; a change to docs or tests costs seconds, a change to Arbace's sources the chain of 1.
    (`bin/jrt-convert`'s output can be cached the same way by its own inputs, saving 95 s of
@@ -290,7 +290,7 @@ check `go` runs `bin/arbace-go --gate`, concurrently with the suite on stage 2 a
 forms tests (not with `--full`, whose Go chain builds and smoke-tests anew). It computes a key,
 the SHA-256 of the contents of `arbace/`, `go/`, `overlay/` and `bin/lib/`, of
 `doc/go/java-surface.edn` and `test/jrt/jrt_sources.ae` (JC10), the seed's hash and the
-scripts of the build (`bin/arbace-go`, `a2g`, `g2a`, `j2a`, `jrt`, `jrt-convert`, `arbace-j`
+scripts of the build (`bin/arbace-go`, `a2g`, `repr-go`, `build-go`, `repr-java`, `jrt`, `jrt-convert`, `arbace-j`
 (then `arbace`), `build-arbace`), and of the toolchains (TamaGo's
 `VERSION`, `java -version`, jdk26u's commit): about 0.1 s. When `.tmp/arbace-go-gate/key` holds
 that key, it smoke-tests `.tmp/arbace-go-gate/amd64/arbace` (`--smoke` on amd64); otherwise it
@@ -312,7 +312,7 @@ with other agents' work beside, it reached 40 GB, 6 GB left available.
 and resource data are sources, `jdk/`, and `bin/a2g` reads them there. A miss no longer runs
 `bin/jrt-convert` (about 75 s less); the key hashes `jdk/` with `arbace/`, `go/`, `overlay/` and
 `bin/lib/`, and drops what only the conversion read: `doc/go/java-surface.edn`,
-`test/jrt/jrt_sources.ae`, `bin/j2a`, `bin/jrt-convert` and jdk26u's commit (a change to them
+`test/jrt/jrt_sources.ae`, `bin/repr-java`, `bin/jrt-convert` and jdk26u's commit (a change to them
 changes the build only through `bin/jrt-convert update`, which rewrites `jdk/`).
 
 ## Results

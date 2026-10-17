@@ -3,7 +3,7 @@
 Go's toolchain as Go forms (standalone S9, [doc/STANDALONE-NOTES.md](../../doc/STANDALONE-NOTES.md),
 "S9: Go's toolchain as forms"; [doc/STANDALONE-SURVEY.md](../../doc/STANDALONE-SURVEY.md) §7, step
 b1'): the packages of TamaGo's go1.27.1 `src/cmd/` that `cmd/compile`, `cmd/link` and `cmd/asm`
-build from, converted by g2a for the three configurations Arbace builds the tools for, linux/amd64
+build from, converted by repr/go for the three configurations Arbace builds the tools for, linux/amd64
 (the host's tools) and tamago/amd64, tamago/arm64 (the box's tool guests, `bin/box-tools`), and
 held as one tree as `tamago/goroot/` is (S4's BX63). `bin/toolchain-vendor` converts, verifies,
 prints and checks them. Laid out as SPEC §4.1 lays out packages, at GOROOT/src's import paths:
@@ -15,12 +15,12 @@ prints and checks them. Laid out as SPEC §4.1 lays out packages, at GOROOT/src'
 | `src/cmd/` | GOROOT/src/cmd's files of no package that the build reads: `go.mod`, `go.sum`, `vendor/modules.txt`, and `compile/default.pgo` (the profile `cmd/compile` is built with, PGO), as they are |
 
 Origin: TamaGo's Go distribution, https://github.com/usbarmory/tamago-go, `VERSION` "go1.27.1",
-the local tree `/root/tamago-go` (Arbace's toolchain, `G2A_GOROOT`), its whole tree pinned by
+the local tree `/root/tamago-go` (Arbace's toolchain, `ARBACE_GOROOT`), its whole tree pinned by
 `seed/goroot.sha256` and its `src/cmd/` by `bin/toolchain-vendor` (the SHA-256 of the sorted
 SHA-256 list of every file under it). `cmd/vendor/golang.org/x/telemetry` is vendored there by Go
 from https://go.googlesource.com/telemetry at the version `src/cmd/go.mod` names.
 
-Derived on 2026-10-15 by `bin/toolchain-vendor convert` (`bin/g2a convert --goos GOOS --goarch
+Derived on 2026-10-15 by `bin/toolchain-vendor convert` (`bin/repr-go read --goos GOOS --goarch
 ARCH`, run in GOROOT/src/cmd, for each configuration; then merged): each file's forms the
 converter's output as it writes it, the package files merged; Go's comments other than doc
 comments are `;` comments in the forms, which the printer does not reproduce (SPEC §10.4). Not

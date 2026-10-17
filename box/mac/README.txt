@@ -17,7 +17,7 @@ then send back mac-results.tar.gz (in this directory): every step's output,
 its status, the idle CPU and the times.
 
 The rebuild (S8, doc/go/BOX-NOTES.md): Arbace's arm64 guest image rebuilt
-inside the box from the sources in rebuild/store, a2g and g2a in Arbace's own
+inside the box from the sources in rebuild/store, a2g and repr/go in Arbace's own
 guest, Go's compile, asm and link in tool guests; it must equal the image the
 same steps gave on Linux with the host's tools (rebuild/expected.txt). Its
 guests ask up to 14 GiB each; the spawns' budget is 60% of the Mac's memory.

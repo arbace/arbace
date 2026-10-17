@@ -38,7 +38,7 @@ bin/c2a --rules                      # the rules and the dialect divergences
   libraries merged into one `OUT` by `-o` still overwrite each other's `data_readers.ae`, as
   any two files at the same path do.
 - `project.clj` keeps its name, because Leiningen finds it by that name. Its text is renamed.
-- `.java` files are renamed as text and keep their names, since j2a reads them
+- `.java` files are renamed as text and keep their names, since repr/java reads them
   ([classes/CONVERTER-NOTES.md](classes/CONVERTER-NOTES.md)): `import clojure.lang.IFn;`
   becomes `import arbace.lang.IFn;`.
 - With `-o`, other files are copied as they are, except class files. In place, they stay as
@@ -167,7 +167,7 @@ What c2a cannot translate mechanically:
   is bytecode compiled against `clojure.lang`. c2a skips it, so the library loads from source.
   A jar that ships only classes cannot be translated.
 - **Java libraries.** Java code compiled against `clojure.lang` (a `.jar` of `.class` files)
-  needs its `.java` sources renamed (c2a does that) and compiled again, or converted by j2a
+  needs its `.java` sources renamed (c2a does that) and compiled again, or converted by repr/java
   for the Go build. `bin/clojure-tests --java-fixtures` does this for the suite's fixtures.
 - **`gen-class` on Go.** The Go build has no `gen-class` (go/B1-PLAN.md, D6; out for good,
   go/JAVA-SURFACE.md): a library using it loads only on the frozen JVM Arbace

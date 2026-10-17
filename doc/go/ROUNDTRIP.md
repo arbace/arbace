@@ -1,6 +1,15 @@
 # The round trip of Go through forms: the oracle
 
-g2a's milestone G2 ([G2C-SURVEY.md](../G2C-SURVEY.md) §6.1, §7) is the round trip
+> Names: since 2026-10-17 g2a is repr/go and j2a repr/java (doc/NAMING-SURVEY.md, "Decided"):
+> `arbace.g2a.*` is `arbace.repr.go(.*)`, its build `arbace.g2a.build` is `arbace.build.go`;
+> `bin/g2a convert` is `bin/repr-go read` (`bin/g2a read`: `read --dump`), `bin/g2a build`
+> `bin/build-go`, `bin/g2a-print` `bin/repr-go print`, `bin/g2a-check` `bin/repr-go check`,
+> `bin/g2a-convert-tests` and `-print-tests` `bin/repr-go test read` and `test print`,
+> `bin/g2a-build-tests` `bin/build-go test`; `G2A_GOROOT` is `ARBACE_GOROOT`, the other `G2A_*`
+> `REPR_GO_*`, `J2A_*` `REPR_JAVA_*`; `bin/j2a-check` is `bin/repr-java check`. This document
+> uses the current names throughout, its dated passages included; branch names keep theirs.
+
+repr/go's milestone G2 ([G2C-SURVEY.md](../G2C-SURVEY.md) §6.1, §7) is the round trip
 **original Go package → forms (converter) → Go (printer)**. This document describes the oracle
 that judges it, independently of forms: given the original source of a package and a candidate
 re-printed source, it decides whether they are the same program, with three checks of
@@ -16,28 +25,28 @@ The tools are Arbace's own code (EPL, standard library only):
 
 - `tools/gocmp/`, a Go module, the comparator (`gocmp`), plus two candidate makers used to prove
   it (`gocmp reprint`, `gocmp mutate`);
-- `bin/g2a-check`, the corpus driver.
+- `bin/repr-go check`, the corpus driver.
 
 ## How to run
 
 ```sh
-bin/g2a-check CANDIDATE                     # all of the corpus, three levels, tamago/amd64
-bin/g2a-check --arch arm64 CANDIDATE        # tamago/arm64
-bin/g2a-check --goos linux --arch arm64 CANDIDATE   # linux/arm64 (or --arch linux/arm64)
-bin/g2a-check --levels tree --only '^fmt$' CANDIDATE
-bin/g2a-check --reference OLD.edn CANDIDATE # fail only on regressions against OLD.edn
-bin/g2a-check --record REF.edn CANDIDATE    # also write the results as a reference
-bin/g2a-check --known KNOWN.edn CANDIDATE   # failures listed there (with reasons) expected
-bin/g2a-check --with-tests --no-tests CANDIDATE   # std with its _test.go files
-bin/g2a-check --list-tests                  # the test programs of the corpus
-bin/g2a-check --make identity|reprint|canon DIR   # candidates made without forms
-bin/g2a-check --mutations [--seed N]        # the oracle's self-test (below)
+bin/repr-go check CANDIDATE                     # all of the corpus, three levels, tamago/amd64
+bin/repr-go check --arch arm64 CANDIDATE        # tamago/arm64
+bin/repr-go check --goos linux --arch arm64 CANDIDATE   # linux/arm64 (or --arch linux/arm64)
+bin/repr-go check --levels tree --only '^fmt$' CANDIDATE
+bin/repr-go check --reference OLD.edn CANDIDATE # fail only on regressions against OLD.edn
+bin/repr-go check --record REF.edn CANDIDATE    # also write the results as a reference
+bin/repr-go check --known KNOWN.edn CANDIDATE   # failures listed there (with reasons) expected
+bin/repr-go check --with-tests --no-tests CANDIDATE   # std with its _test.go files
+bin/repr-go check --list-tests                  # the test programs of the corpus
+bin/repr-go check --make identity|reprint|canon DIR   # candidates made without forms
+bin/repr-go check --mutations [--seed N]        # the oracle's self-test (below)
 ```
 
 `CANDIDATE` is laid out like `GOROOT`: `CANDIDATE/src/<package dir>/*.go` and
-`CANDIDATE/test/...`. The driver builds `gocmp` for the host into `.tmp/g2a-check/bin/`, runs
+`CANDIDATE/test/...`. The driver builds `gocmp` for the host into `.tmp/repr-go-check/bin/`, runs
 one comparison per corpus entry in parallel (`-j`, default all cores), and writes under
-`.tmp/g2a-check/GOOS-GOARCH/`:
+`.tmp/repr-go-check/GOOS-GOARCH/`:
 
 - `results.edn`, read by the Clojure reader: `{:config ... :candidate ... :levels [...]
   :results [...]}` with one entry per line, `[:package "fmt" {:tree :pass :export :pass :code
@@ -49,11 +58,11 @@ With `--reference`, an entry and level passing in the reference and not now (or 
 a run that includes it) is a regression and fails the run; without, any failure does, or,
 with `--known`, any failure not listed in the known-differences file (`[KIND "PATH" [LEVEL
 ...] "reason"]` per line; the run also reports listed levels that now pass). `--record FILE`
-writes the results as a reference: `results.edn` without times, date or candidate path. g2a's
-round trip keeps its references under `test/g2a/` (`bin/g2a roundtrip`,
+writes the results as a reference: `results.edn` without times, date or candidate path. repr/go's
+round trip keeps its references under `test/repr/go/` (`bin/repr-go roundtrip`,
 [CONVERTER-NOTES.md](CONVERTER-NOTES.md)). The environment overrides the defaults:
-`G2A_GOROOT` (`/root/tamago-go`), `G2A_GOOS` (`tamago`), `G2A_GOARCH` (`amd64`), and
-`G2A_GOCMP_FLAGS` passes flags to gocmp. The driver runs every go command with
+`ARBACE_GOROOT` (`/root/tamago-go`), `REPR_GO_GOOS` (`tamago`), `REPR_GO_GOARCH` (`amd64`), and
+`REPR_GO_GOCMP_FLAGS` passes flags to gocmp. The driver runs every go command with
 `CGO_ENABLED=0`, `GOTOOLCHAIN=local`, `GOFLAGS=` and `GOWORK=off` (`CGO_ENABLED=0` explicitly:
 amendment L5, accepted 2026-10-08, folded into SPEC §12.4).
 
@@ -103,7 +112,7 @@ SPEC §4.2; cgo out of scope for every configuration, L3, SPEC §9.4.)
   `internal/coverage/test`, `internal/runtime/wasitest`, `net/internal/cgotest`). The files compared
   are the package's `GoFiles` for the configuration (not its `_test.go` files). `unsafe` has no
   export data or code: those two levels report `skip` for it.
-- **Test programs** (`gocmp tests`, the one rule for the oracle's corpus and the helper's, `bin/g2a
+- **Test programs** (`gocmp tests`, the one rule for the oracle's corpus and the helper's, `bin/repr-go
   corpus test`): the `.go` files of the directories of Go's test driver (`cmd/internal/testdir`,
   `dirs`) whose action (the first line after build constraints, read as the driver reads it, `//run`
   too) is `run`, `runoutput`, `build`, `buildrun`, `compile` or `asmcheck`, that need no other

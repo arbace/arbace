@@ -1,5 +1,14 @@
 # jrt: notes
 
+> Names: since 2026-10-17 g2a is repr/go and j2a repr/java (doc/NAMING-SURVEY.md, "Decided"):
+> `arbace.g2a.*` is `arbace.repr.go(.*)`, its build `arbace.g2a.build` is `arbace.build.go`;
+> `bin/g2a convert` is `bin/repr-go read` (`bin/g2a read`: `read --dump`), `bin/g2a build`
+> `bin/build-go`, `bin/g2a-print` `bin/repr-go print`, `bin/g2a-check` `bin/repr-go check`,
+> `bin/g2a-convert-tests` and `-print-tests` `bin/repr-go test read` and `test print`,
+> `bin/g2a-build-tests` `bin/build-go test`; `G2A_GOROOT` is `ARBACE_GOROOT`, the other `G2A_*`
+> `REPR_GO_*`, `J2A_*` `REPR_JAVA_*`; `bin/j2a-check` is `bin/repr-java check`. This document
+> uses the current names throughout, its dated passages included; branch names keep theirs.
+
 jrt is the Go build's Java runtime: hand-written Go forms in `go/arbace/jrt/` (the package
 `arbace/jrt`), jrt's own Java and the Go-build variants of JDK classes in `overlay/jdk/`, and
 jdk26u's sources that `bin/jrt-convert` converts ([JRT-SOURCES.md](JRT-SOURCES.md)), all
@@ -106,7 +115,7 @@ the repository's top. a2g will write its output into `target/a2g/go/` and the bu
 the two trees. The module is `arbace` (§4.2, Q20). Hand-written files never begin with
 `java_`, `jdk_`, `sun_` or `a2g_`.
 
-**`bin/jrt`** runs the printer through `bin/g2a build --print-only --tests --module arbace` (BUILD.md,
+**`bin/jrt`** runs the printer through `bin/build-go --print-only --tests --module arbace` (BUILD.md,
 amendment B6), which prints the module into `.tmp/jrt-go/mod`. Then:
 
 - `bin/jrt build [--arch amd64|arm64|all]` runs `go build ./...` and `go vet ./...` with BUILD.md's
@@ -116,7 +125,7 @@ amendment B6), which prints the module into `.tmp/jrt-go/mod`. Then:
 - `bin/jrt testdata [--check]` makes the differential tests' expected values (below).
 - `bin/jrt standins` and `bin/jrt manifest` regenerate the generated forms.
 
-**The overlay option** of `bin/g2a build` (A2G-SPEC §9.3, Q19) is in, documented as BUILD.md
+**The overlay option** of `bin/build-go` (A2G-SPEC §9.3, Q19) is in, documented as BUILD.md
 amendment B5 and checked with the runtime patch of the A2G-SPEC experiments. The patch itself,
 as Go forms, is phase 2's.
 
@@ -1041,7 +1050,7 @@ implemented; the 6 others wait for classes that are cut or not written yet (Cove
 |---|---|
 | `overlay/go/runtime.ae` | the patched runtime files as Go forms (not a package of the program): `ns go.runtime`, `go/package runtime :files [...]` naming the three |
 | `overlay/go/runtime/arbace_local.ae` | the new file `arbace_local.go`: `arbace_getLocal`, `arbace_setLocal` (one-argument `//go:linkname`, `//go:nosplit`) |
-| `overlay/go/runtime/proc.ae`, `runtime2.ae` | `proc.go` and `runtime2.go` of the toolchain's runtime, converted by `bin/g2a convert --goos linux runtime` (the same forms for amd64 and arm64), with the patch's two lines, each marked `; Arbace` |
+| `overlay/go/runtime/proc.ae`, `runtime2.ae` | `proc.go` and `runtime2.go` of the toolchain's runtime, converted by `bin/repr-go read --goos linux runtime` (the same forms for amd64 and arm64), with the patch's two lines, each marked `; Arbace` |
 | `go/arbace/jrt/thread.ae` | the slot (linkname pulls), thread numbers, `Thread` (non-leaf), `CurrentThread`, start/join/sleep/yield/interrupt, handlers, `RunMain`, `Go`, `RunnableOf`, `Thread.ofVirtual()`, `header` |
 | `threadlocal.ae` | `ThreadLocal` (non-leaf), `ThreadLocal$SuppliedThreadLocal`, `InheritableThreadLocal`, `ThreadLocalRandom`'s probes |
 | `threadid.ae` | `currentThreadID`, now the current `Thread`'s number (phase 1's file, body replaced) |
@@ -1068,21 +1077,21 @@ there), and `arbace_local.go` with the two linknamed functions.
 files plus the two lines; `arbace_local.go` as hand-written forms. This is §16 Q19's
 "the runtime's converted files with the three changes".
 
-**How it is built.** `bin/jrt overlay` prints the three files (`bin/g2a-print --layout gofmt`)
+**How it is built.** `bin/jrt overlay` prints the three files (`bin/repr-go print --layout gofmt`)
 into `$JRT_WORK/overlay/runtime/` and writes `$JRT_WORK/overlay/overlay.json`, which replaces
-`$G2A_GOROOT/src/runtime/proc.go` and `runtime2.go` and adds `arbace_local.go` (Go's `-overlay`,
+`$ARBACE_GOROOT/src/runtime/proc.go` and `runtime2.go` and adds `arbace_local.go` (Go's `-overlay`,
 BUILD.md amendment B5). `bin/jrt build` and `bin/jrt test` make it when it is missing or older
 than the forms, and pass it to `go build`, `go vet` and `go test` (`-race` included). A program
-built with `bin/g2a build --overlay $JRT_WORK/overlay/overlay.json DIR` links. Without the
+built with `bin/build-go --overlay $JRT_WORK/overlay/overlay.json DIR` links. Without the
 overlay, jrt fails to link (`relocation target runtime.arbace_setLocal not defined`), so a build
 cannot silently miss the patch. Checked with a small program of Go forms using `RunMain`, a
 thread and a thread local, built for amd64 and arm64 (run under `qemu-aarch64`).
 
 **Pinned to the toolchain.** The forms are TamaGo's go1.27.1 `proc.go` (which differs from
 upstream go1.27.1's by TamaGo's `GOOS=tamago` paths) and `runtime2.go` (identical to
-upstream's). `bin/jrt overlay --check` converts `$G2A_GOROOT`'s runtime again and requires the
+upstream's). `bin/jrt overlay --check` converts `$ARBACE_GOROOT`'s runtime again and requires the
 two forms files to equal the conversion but for the lines marked `; Arbace`: with Alpine's
-upstream tree (`G2A_GOROOT=/usr/lib/go`) it fails on `proc.go`, as it should, and a toolchain
+upstream tree (`ARBACE_GOROOT=/usr/lib/go`) it fails on `proc.go`, as it should, and a toolchain
 update shows up the same way. The same forms serve `GOOS=tamago` (B1b): the files have no
 build constraints.
 
@@ -1403,7 +1412,7 @@ All accepted 2026-10-08; A2G-SPEC names them T11-T16 (§16), apart from phase 2b
   defined with `PrintStream`/`InputStream` over these streams. *(T14; accepted 2026-10-08, folded
   into A2G-SPEC §9.4, §11.)*
 - **A15** (§9.3): the patched runtime files live in `overlay/go/runtime/` (a forms root of
-  their own, outside `go/`, whose package files `bin/g2a build` would otherwise collect), are
+  their own, outside `go/`, whose package files `bin/build-go` would otherwise collect), are
   printed by `bin/jrt overlay`, and are checked against the toolchain by `bin/jrt overlay
   --check`; BUILD.md's overlay section can name them. *(T15; accepted 2026-10-08, folded into
   A2G-SPEC §9.3, §16 Q19.)*
@@ -1719,11 +1728,11 @@ over the array, `List.copyOf`); `GathererOp`, `Gatherers` (above); `UUID.nameUUI
 (MD5 from the host: Go's `crypto/md5`, a native `UUID.md5`; that variant is gone with "Security",
 SC4: jdk26u's `MessageDigest`).
 
-**`bin/jrt-convert`**: `J2A_PATCH_ALL` (j2a's `jdk` conversion, `arbace/j2a/main.ae`): each
+**`bin/jrt-convert`**: `REPR_JAVA_PATCH_ALL` (repr/java's `jdk` conversion, `arbace/repr/java.ae`): each
 chunk of packages sees the other chunks' sources on its patch path, its own first. jrt's own
 Java in `jdk.internal.jrt` is used across packages (`java.io`), and with more files the chunks
 split them apart (javac: "package jdk.internal.jrt does not exist"). Opt-in, so
-`bin/j2a-check --jdk` is unchanged. And `known-differences`: files whose shapes differ from
+`bin/repr-java check --jdk` is unchanged. And `known-differences`: files whose shapes differ from
 javac's in known ways count as converted (the exit status): a lambda constructing a local
 class passes the class's captured variables in capture order, javac in reverse
 (`Collectors`, `Gatherers`, `MatchOps`: the synthetic lambda method's parameter order), and an

@@ -13,10 +13,10 @@ gocache_trim() {
   echo "   Go build cache trimmed (entries unused for $keep min): $before MB -> $(du -sm "$gocache" | cut -f1) MB"
 }
 
-# g2a_print_cache_trim DIR: g2a build's cache of printed packages (--print-cache, standalone
+# build_go_print_cache_trim DIR: the build's cache of printed packages (bin/build-go --print-cache, standalone
 # S6) trimmed alike, of entries unused for ARBACE_GOCACHE_KEEP_MIN minutes, and its collect
-# indexes (DIR/collect/, files: arbace.g2a.build's root-packages)
-g2a_print_cache_trim() {
+# indexes (DIR/collect/, files: arbace.build.go's root-packages)
+build_go_print_cache_trim() {
   local keep=${ARBACE_GOCACHE_KEEP_MIN:-360}
   [ -d "$1" ] || return 0
   find "$1" -mindepth 2 -maxdepth 2 -type d -mmin +"$keep" -exec rm -rf {} + 2>/dev/null || true

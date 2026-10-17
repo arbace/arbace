@@ -98,7 +98,7 @@ Birkedal and Welinder), which is what staging systems do.
 |---|---|---|---|---|
 | Clojure | the evaluator: `Expr.evalIn` and the closure compiler's `Code` nodes (`arbace/lang/Compiler.ae`, `Evaluator`, `Code*`, `CompilerOps.ae`) | a namespace's analyzed units (`Compiler$AST/UNITS`, the prepare run's) | specialize `Code.run` to the tree, ahead of time, with the vars' roots as speculated static data | `arbace.aot.emit` (T1) → class forms → a2g → Go |
 | class forms | `Compiler$CF` (about 70 node classes) built by `arbace.classes.interp` | a class's analyzed typed nodes (`arbace.classes.analyze`) | specialize `CF$Node.eval` to the tree | a2g's `code.ae` (class forms → Go forms) |
-| Go (later) | an interpreter of Go forms (none today) | Go forms (`g2a`'s) | specialize to the package | gc (Go's own compiler) |
+| Go (later) | an interpreter of Go forms (none today) | Go forms (`repr/go`'s) | specialize to the package | gc (Go's own compiler) |
 
 The evaluator itself runs on Go (a2g's translation of `Compiler`), so M is Go for the run-time
 part and class forms for what the back end emits. A specializer in Arbace would work on the

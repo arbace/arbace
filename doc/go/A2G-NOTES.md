@@ -1,18 +1,27 @@
 # a2g, phase 1: the core
 
+> Names: since 2026-10-17 g2a is repr/go and j2a repr/java (doc/NAMING-SURVEY.md, "Decided"):
+> `arbace.g2a.*` is `arbace.repr.go(.*)`, its build `arbace.g2a.build` is `arbace.build.go`;
+> `bin/g2a convert` is `bin/repr-go read` (`bin/g2a read`: `read --dump`), `bin/g2a build`
+> `bin/build-go`, `bin/g2a-print` `bin/repr-go print`, `bin/g2a-check` `bin/repr-go check`,
+> `bin/g2a-convert-tests` and `-print-tests` `bin/repr-go test read` and `test print`,
+> `bin/g2a-build-tests` `bin/build-go test`; `G2A_GOROOT` is `ARBACE_GOROOT`, the other `G2A_*`
+> `REPR_GO_*`, `J2A_*` `REPR_JAVA_*`; `bin/j2a-check` is `bin/repr-java check`. This document
+> uses the current names throughout, its dated passages included; branch names keep theirs.
+
 > Names: a2g and this file were c2g and `C2G-NOTES.md` until 2026-10-11 (A2G-SPEC.md, "Names");
 > the current names are used throughout.
 
 B1a step 4 ([B1-PLAN.md](B1-PLAN.md)), first phase: **a2g**, the translator of class forms into
-Go forms ([A2G-SPEC.md](A2G-SPEC.md)), printed by `arbace.g2a.print` and built with
-`bin/g2a build` against jrt ([JRT-NOTES.md](JRT-NOTES.md)). Phase 1 is the translator itself
+Go forms ([A2G-SPEC.md](A2G-SPEC.md)), printed by `arbace.repr.go.print` and built with
+`bin/build-go` against jrt ([JRT-NOTES.md](JRT-NOTES.md)). Phase 1 is the translator itself
 (types and objects, all code forms, concurrency, the generated tables, the manifest boundary),
 its differential harness `bin/a2g-check`, and the end-to-end proof: the oracle's class scripts
 and a2g's own fixtures, translated, built for linux/amd64 and linux/arm64, run, and compared
 with the JVM's results.
 
 State (2026-10-08, branch `a2g-core`): a2g translates every class of `arbace/lang` that the
-oracle's class scripts and the fixtures reach, with the JDK closure j2a converted
+oracle's class scripts and the fixtures reach, with the JDK closure repr/java converted
 (`.tmp/jrt/conv`, `bin/jrt-convert`), and replaces 38 of jrt's 64 stand-ins (all those whose
 classes have sources in the closure). The programs build for both architectures; the results
 per script are in "End-to-end results" below.
@@ -41,7 +50,7 @@ embedded copy loaded from it instead, evaluated; on `target/stage2` until standa
 [--main DIR]... --out DIR` writes the Go forms (`DIR/gen`), a program root `DIR/prog` (jrt's
 hand-written forms with the replaced stand-ins filtered out, the generated files merged in,
 `program.edn`) and `DIR/report.edn` (classes, reached methods, missing parts, stand-ins
-replaced, analysis failures, variants, times). `bin/g2a build DIR/prog` (or `bin/jrt` with the
+replaced, analysis failures, variants, times). `bin/build-go DIR/prog` (or `bin/jrt` with the
 overlay) builds it.
 
 `bin/a2g-check [SCRIPT...|fixtures] [-- A2G-OPTIONS]` is the differential harness (below).
@@ -145,7 +154,7 @@ switch).
 `bin/a2g-check` translates what the selected scripts call (each recorded step's member is a
 root), writes one Go `main` package per script (`prog-<script>`) that runs every step with
 the translated members by their Go names (direct calls, no reflection), builds it with
-`bin/g2a build` for each architecture in `A2G_ARCH` (default `amd64,arm64`; arm64 runs under
+`bin/build-go` for each architecture in `A2G_ARCH` (default `amd64,arm64`; arm64 runs under
 `qemu-aarch64`), runs it and compares each step with the JVM's record in
 `test/oracle/expected/classes/<script>.edn`. Steps print `@@a2g i W|N|U|T|V|S|P|X ...`;
 results are normalized as the oracle runner does. A step whose member is a stub, outside the
@@ -235,9 +244,9 @@ On this machine (64 cores), cold JVM, `-Xmx12g`:
 | translation (739 classes / 811 classes) | 21-22 s |
 | writing the forms | 1.3-3 s |
 | `bin/a2g` end to end, all of `arbace.lang` | 48 s wall |
-| Go lines of all of `arbace.lang` plus jrt (printed by g2a) | 248,000 |
+| Go lines of all of `arbace.lang` plus jrt (printed by repr/go) | 248,000 |
 | `go build` of the packages, cold cache | 25.7 s amd64, 21.4 s arm64 |
-| `bin/g2a build` of one check program, warm cache (cold: first program) | 10 s (32 s) |
+| `bin/build-go` of one check program, warm cache (cold: first program) | 10 s (32 s) |
 | a check program's executable (static, not stripped) | 26.5-26.8 MB amd64, 25.1-25.5 MB arm64 |
 | `bin/a2g-check`, all scripts and fixtures, both architectures | 8 min |
 | `bin/a2g`, the JDK slice alone (134 classes) | 12 s wall |
@@ -576,7 +585,7 @@ and the `java.util.regex` port run on the oracle's regex corpus. jrt's side is J
 | `arbace/a2g/main.ae` (shared, small) | the JDK's variant files (`overlay/jdk/variants`) when the JDK is an input; jrt's statics a2g writes (below) declared to the scan, their classes' members rooted |
 | `arbace/a2g/out.ae` (shared, small) | a2g's support writes `System_in`/`out`/`err`, `System.setIn`/`setOut`/`setErr` and their initialization (by `StandardStreams`), `StderrPrint` through `System.err`, `String_CASE_INSENSITIVE_ORDER`, and `String`'s `split` (2), `replaceAll`, `replaceFirst`, `matches` over `Pattern` (`string-regex-methods`), each only when its classes are translated; `java-names`: a class of jrt's Java registered under the JDK's name it stands for |
 | `arbace/a2g/code.ae` (shared, one form) | **bug fix**: a private method of a non-leaf class called on a receiver that is not a local or `this` evaluated the receiver twice (`Impl_` takes the struct and the receiver): `MutableBigInteger` became non-leaf with `SignedMutableBigInteger`, and `this.divideLongMagnitude(...).toLong()` divided twice, corrupting the quotient (21 `BigDecimal` steps threw `ArrayIndexOutOfBoundsException`). The receiver now goes to a temporary before the arguments |
-| `arbace/classes/analyze.ae` (the class forms compiler, one form) | **bug fix**, the ICU failure: an import of a nested class by its binary name (`(import '(jdk.internal.icu.util CodePointTrie$Fast16))`, as j2a writes `import ...CodePointTrie.Fast16`) of a class compiled from source was entered in `env/source-imports`, which `resolve-class-sym`'s `$` branch did not consult ("Unknown type: CodePointTrie$Fast16" in `NormalizerImpl`, then 7 more classes). Regression test `classes.loader-test/source-import-of-member-class` (two packages built from source by `arbace.classes.build`, as the bootstrap does). The world now analyzes without failures; the bootstrap still reproduces itself |
+| `arbace/classes/analyze.ae` (the class forms compiler, one form) | **bug fix**, the ICU failure: an import of a nested class by its binary name (`(import '(jdk.internal.icu.util CodePointTrie$Fast16))`, as repr/java writes `import ...CodePointTrie.Fast16`) of a class compiled from source was entered in `env/source-imports`, which `resolve-class-sym`'s `$` branch did not consult ("Unknown type: CodePointTrie$Fast16" in `NormalizerImpl`, then 7 more classes). Regression test `classes.loader-test/source-import-of-member-class` (two packages built from source by `arbace.classes.build`, as the bootstrap does). The world now analyzes without failures; the bootstrap still reproduces itself |
 | `arbace/lang/go/RT.ae`, `go/arbace/jrt/natives.ae` | A's interim `RT$HostWriter`/`RT$HostReader` and their natives are gone: `*out*`, `*err*`, `*in*` are RT's own (an `OutputStreamWriter` over `System.out` ...), all translated (P2A-4's interim part is superseded) |
 | `test/oracle/classes/BigNumbers.ae` (new) | 3,974 steps (below) |
 | `test/a2g/fixtures/FxStreams.ae` (new) | the streams, files and the comparator against the JVM |
@@ -629,7 +638,7 @@ The same on both architectures. All 29 failing cases need JDK resource data: 24 
 ## Decisions where the spec was silent
 
 - **jrt's own Java.** Where a JDK class's source needs what is cut, jrt's replacement is Java
-  (`overlay/jdk/java.base`, the JDK's path), converted by j2a and checked against javac with the
+  (`overlay/jdk/java.base`, the JDK's path), converted by repr/java and checked against javac with the
   closure, translated by a2g like any JDK class, rather than Go in jrt: it extends translated
   classes (`Writer`, `OutputStream` ...), which hand-written Go cannot name in jrt's own build.
   What only Go can do is a `native` method (static, primitive and array parameters, so that jrt
@@ -696,7 +705,7 @@ into the forms' positions: a form whose line the text has not passed is written 
 and so does every list inside it without a line of its own (the reader keeps an explicit
 `:line`). Package-level declarations are written sorted by line (Go does not care about their
 order), so explicit lines are rare. In `arbace/lang` the Go file is named after the class
-forms file (`FxClasses.go` for the fixtures' many classes), so that `bin/g2a build
+forms file (`FxClasses.go` for the fixtures' many classes), so that `bin/build-go
 --line-file` makes gc's line tables, Go's tracebacks, pprof and jrt's `StackTraceElement`s
 name the class forms file and line:
 
@@ -804,7 +813,7 @@ quieter moment):
 | | |
 |---|---|
 | `bin/a2g --program` | 668 classes, 5,022 methods reached, 329 with missing parts; 46-72 s wall, 2.9 GB peak |
-| `bin/g2a build --line-file`, cold (empty `GOCACHE`, std included) | amd64 33-55 s, arm64 30-48 s (2.5 GB peak) |
+| `bin/build-go --line-file`, cold (empty `GOCACHE`, std included) | amd64 33-55 s, arm64 30-48 s (2.5 GB peak) |
 | the same, warm | amd64 9.7-13 s, arm64 9.0-15.8 s |
 | executable (static, not stripped) | amd64 23.5 MB, arm64 22.3 MB |
 | start to the uncaught exception (`RT` initialized) | amd64 7 ms, 18 MB resident; arm64 under qemu 0.65 s |

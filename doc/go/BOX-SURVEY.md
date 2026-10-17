@@ -92,7 +92,7 @@ default locale data, stripped since amendment SZ1), against the 58 MB the survey
 B1a's executable is a2g's translation of `arbace.lang` plus the JDK closure, on jrt (hand-written
 Go forms), printed and built by gc as a static `linux/amd64` and `linux/arm64` program
 (EXEC-NOTES.md). Its build already uses TamaGo's distribution as `GOROOT` (`bin/arbace-go`,
-`go_env`: `G2A_GOROOT=/root/tamago-go`, `GOOS=linux`), and g2a's round trip covers std for
+`go_env`: `ARBACE_GOROOT=/root/tamago-go`, `GOOS=linux`), and repr/go's round trip covers std for
 `tamago` and `linux` (AGENDA.md). jrt reaches the operating system only through `jrt.Host`
 (A2G-SPEC §9.4), so that "B1b swaps one value" (`go/arbace/jrt/host.ae`).
 
@@ -376,7 +376,7 @@ each re-running S6's byte-identity proof; S4 (arm64, the Mac) and S6's arm64 hal
 
 | stage | content | gate |
 |---|---|---|
-| **S0 vendor** (after the freeze). *Done 2026-10-11 ([BOX-NOTES.md](BOX-NOTES.md), S0): copied unchanged as Go forms under `box/` (`arbace/box/{hv,vmm,abi,board,libsys}`), the dispatch left to S1 (D3's second step)* | `hv/`, `vmm/` (dispatch made a call table), `guest/abi`, the board, `internal/libsys` into Arbace as Go forms (g2a convert, round trip), or as a pinned checkout (D3, §10); `LICENSE.md`, `doc/ARBACE.md`, journal | go-whim's `hv` and `vmm` tests pass from Arbace's copy; a hello TamaGo image on the vendored board and monitor runs on /dev/kvm |
+| **S0 vendor** (after the freeze). *Done 2026-10-11 ([BOX-NOTES.md](BOX-NOTES.md), S0): copied unchanged as Go forms under `box/` (`arbace/box/{hv,vmm,abi,board,libsys}`), the dispatch left to S1 (D3's second step)* | `hv/`, `vmm/` (dispatch made a call table), `guest/abi`, the board, `internal/libsys` into Arbace as Go forms (repr/go convert, round trip), or as a pinned checkout (D3, §10); `LICENSE.md`, `doc/ARBACE.md`, journal | go-whim's `hv` and `vmm` tests pass from Arbace's copy; a hello TamaGo image on the vendored board and monitor runs on /dev/kvm |
 | **S1 the boxed REPL, amd64**. *Done 2026-10-11 ([BOX-NOTES.md](BOX-NOTES.md), S1): vmm's own host interface, the launcher `arbace-box`, jrt's box host, the wall clock at entry, the evaluator's yield, the console polled; checks: the box's smoke test, the oracle's subset (`known-go-box-amd64.edn`), Clojure's suite in the box (`bin/box-suite`, `test/arbace-box-results.edn`)* | jrt's `BoxHost` (console via `WaitRead`/`Write`/`Message`, `Exit`, `Random`, the wall clock, args, env, resources; no `NetHost`, `HostProc`, `HostFS`, `HostLinks`); the main package's box variant (no rlwrap, the board imported); the launcher `bin/arbace-box` (as built: `bin/arbace-go --build --box`, `target/arbace-go/box-<arch>/arbace-box`; image appended, rlwrap around it on a tty, an env allow-list); the evaluator's periodic yield (R2); files in TamaGo's in-memory fs (OSHost's file calls, unchanged; its `RandomBytes` is Linux-only since `gosec`, the box host's own); four vCPUs, the console read bounded (R3) | `-e`, `-m`, the REPL on stdin answer as the native executable on the smoke test's forms; the oracle's box subset; Clojure's suite in the box, its known exclusions recorded (`test/arbace-box-results.edn`) |
 | **S2 measured and hardened**. *Done 2026-10-11 ([BOX-NOTES.md](BOX-NOTES.md), S2): the image mapped (BX11), the symbol table cut to the monitor's three symbols, a default memory limit, the watchdog kept off, the suite's file tests and reducers in the box, `fold` 3.2-3.4x on 4 vCPUs; the times against native in BOX-NOTES* | the start (63 `Random` exits batched, the 85 MB image's DWARF: the box image keeps its symbol table, which the monitor reads, §9.4, while the native executables are stripped since SZ1; `-w` alone could drop the DWARF), the collector's setting in the box, the watchdog's setting for long evaluations, the suite's file tests over the in-memory fs, `ARBACE_PATH` inside it | the suite's file tests pass; reducers' `fold` scales on 4 vCPUs; start and suite times recorded against native |
 | **S3 the store**. *Done on amd64 2026-10-11 ([BOX-NOTES.md](BOX-NOTES.md), S3): `arbace.box` in the box and natively (one directory format, shareable), the monitor's refusals as answers of their own, scripts by `ref:NAME` and namespaces by `ARBACE_PATH`'s `store:PREFIX`, the in-memory file system's snapshot as a tar (`save-fs!`, `ARBACE_BOX_FS`), the launcher's `--store` and its tool; the store's checks in both smoke tests; S6's proof holds* | an `arbace.box` namespace (`put`, `get`, `ref`, `ref!` as Joker's `box`); scripts and namespaces loaded from refs; optionally the in-memory fs seeded from / saved to a ref (a tar or EDN snapshot) | a script run from a ref; `load` from the store; the store's refusals |
@@ -403,8 +403,8 @@ Not staged: processes (cut for good in the box), the terminal's raw mode.
   arm64 today (EXEC-NOTES.md, "Determinism"). A slimmer closure (no `java.net`, no processes:
   a smaller image) is a second a2g program with its own image, prepared by its own linux
   build: later, and only if the size matters (58 MB executable at the survey, 66.4 MB on 2026-10-11; go-whim's slot is 3 GiB).
-- **The tools.** `bin/g2a build` takes `--goos tamago` (it fixes `GOOS=linux` today:
-  `arbace.g2a.build/go-env`, `bin/arbace-go`'s `go_env`) and the go.mod's `require
+- **The tools.** `bin/build-go` takes `--goos tamago` (it fixes `GOOS=linux` today:
+  `arbace.build.go/go-env`, `bin/arbace-go`'s `go_env`) and the go.mod's `require
   github.com/usbarmory/tamago v1.27.1` with `GOOSPKG` (from the module cache, `GOPROXY=off`); the
   ldflags `-T 0x201000 -R 0x1000`. `bin/arbace-go --build` gains the box flavour
   (`ARBACE_GO_TARGETS=linux/amd64,linux/arm64,tamago/amd64,tamago/arm64`; as built: `bin/arbace-go
@@ -520,7 +520,7 @@ the board's clock offset by it; D11 memory, then the store; D12 at S5; D13 proce
 good in the box; D14 the monitor stays a Go program on the host.
 
 - **D3 How Arbace depends on go-whim.** (a) vendor `hv/`, `vmm/`, `guest/abi`, the board and
-  `internal/libsys` as Go forms under Arbace (g2a convert; the round trip proves them), the
+  `internal/libsys` as Go forms under Arbace (repr/go convert; the round trip proves them), the
   dispatch made generic, the origin recorded; (b) a checkout pinned by commit, built as Go;
   (c) a Go module dependency on `github.com/arbace/go-whim`. *Recommended: (a)*, on the
   CLAUDE.md line (Arbace in Arbace down to the metal; vendoring allowed), in two steps: first

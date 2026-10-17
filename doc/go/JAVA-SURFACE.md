@@ -1,5 +1,14 @@
 # The Java surface of Arbace
 
+> Names: since 2026-10-17 g2a is repr/go and j2a repr/java (doc/NAMING-SURVEY.md, "Decided"):
+> `arbace.g2a.*` is `arbace.repr.go(.*)`, its build `arbace.g2a.build` is `arbace.build.go`;
+> `bin/g2a convert` is `bin/repr-go read` (`bin/g2a read`: `read --dump`), `bin/g2a build`
+> `bin/build-go`, `bin/g2a-print` `bin/repr-go print`, `bin/g2a-check` `bin/repr-go check`,
+> `bin/g2a-convert-tests` and `-print-tests` `bin/repr-go test read` and `test print`,
+> `bin/g2a-build-tests` `bin/build-go test`; `G2A_GOROOT` is `ARBACE_GOROOT`, the other `G2A_*`
+> `REPR_GO_*`, `J2A_*` `REPR_JAVA_*`; `bin/j2a-check` is `bin/repr-java check`. This document
+> uses the current names throughout, its dated passages included; branch names keep theirs.
+
 B1a step 1 ([B1-PLAN.md](B1-PLAN.md)): every JDK class, method, constructor and field that
 Arbace's runtime and namespaces use, measured from the compiled classes, so that the scope of
 jrt (the Java runtime in Go forms under the a2g-translated runtime, decision D1) can be decided.
@@ -17,14 +26,14 @@ of `target/stage2`, which left main with the JVM Arbace; its last output,
 
 Summary for the reader in a hurry: the runtime plus the namespaces loaded at a REPL's start use
 **274 JDK classes and 970 distinct members**. Of these, 150 classes (511 members) are plain Java
-that j2a already converts exactly: translated with what they need in turn, they make a closure
+that repr/java already converts exactly: translated with what they need in turn, they make a closure
 of **422 JDK classes, 3,226 methods, 279 KB of bytecode, from 184 source files of which all
-176 that j2a-check covers convert to javac's class shapes** (the other 8 are generated at the
+176 that repr-java-check covers convert to javac's class shapes** (the other 8 are generated at the
 JDK's build). What is left for hand-written Go is 57 classes used directly (302 members) and
 the 69 classes (342 members) where the translated code stops, largely the same ones: the
 object model, strings, `Class` and reflection, threads, atomics and locks, `Unsafe`'s CAS, the
 host's files and clock. 7 `java.lang.invoke` classes and class loading are made unnecessary by
-the evaluator, and 58 classes are cut (D6). The port of `java.util.regex` (D5) is 5,148 code lines that j2a
+the evaluator, and 58 classes are cut (D6). The port of `java.util.regex` (D5) is 5,148 code lines that repr/java
 converts exactly; its closure is dominated by Unicode tables. The decisions for the user are
 in the last section.
 
@@ -96,14 +105,14 @@ touched, until it reaches a class not proposed for translation (the **boundary**
 translated code needs of the shims). JDK-internal classes count as translated (`jdk.internal.math`,
 `jdk.internal.util`, ICU), except the VM's interfaces (`Unsafe`, `VM`, `SharedSecrets`,
 `sun.nio.cs`, the locale providers), which count as shims. Each source file of the closure is
-looked up in a `bin/j2a-check --jdk java.base` run (2026-10-08: 3,002 of 3,025 compiled
+looked up in a `bin/repr-java check --jdk java.base` run (2026-10-08: 3,002 of 3,025 compiled
 files shape-identical; 2026-10-11: 3,003 of 3,025, as in [CONVERTER-NOTES.md](../classes/CONVERTER-NOTES.md),
 "The converted JDK").
 
 **Treatments.** Each JDK class gets one proposed treatment (the table `treatments` in the
 tool; by class, else by its top-level class, else by category):
 
-- **translate**: a2g over j2a's conversion of jdk26u's own source; exact Java semantics.
+- **translate**: a2g over repr/java's conversion of jdk26u's own source; exact Java semantics.
 - **shim**: hand-written Go forms over Go's std, or over jrt's host interface (plan, point 4).
 - **a2g**: a language feature a2g compiles itself, no jrt class: Java's string `+`
   (`StringConcatFactory`) and lambdas (`LambdaMetafactory`) in the class forms.
@@ -117,7 +126,7 @@ sites and units; the bootstraps, reflective sites, watched runtime classes, the 
 `arbace.lang` members, the closures (runtime + REPL, with shipped, and regex alone) and the
 javap check). Rerun: `bin/build-arbace`, then
 `bin/java-surface` (about 15 s; the tables below are written to `.tmp/java-surface-tables.md`;
-the j2a statuses come from a prior `bin/j2a-check --jdk java.base`, about 10 minutes, and are
+the repr/java statuses come from a prior `bin/repr-java check --jdk java.base`, about 10 minutes, and are
 `:unchecked` without it).
 
 ## Headline numbers
@@ -150,7 +159,7 @@ for `ModuleLayer.findModule` in `arbace.xml`, `arbace.inspector` and `arbace.jav
 | methods | 3,226 |
 | bytecode | 279,047 bytes |
 | source files | 184 (147,831 lines, 67,756 code lines, whole files) |
-| of which j2a-identical | 176 (62,090 code lines) |
+| of which identical by repr/java | 176 (62,090 code lines) |
 | of which generated at the JDK's build | 8 (`CharacterData*`, `CaseFolding`, `IndicConjunctBreak`; 5,666 code lines) |
 | boundary | 69 classes, 342 members |
 
@@ -257,10 +266,10 @@ lines, **5,148 code lines** (`Pattern` 3,668, `Matcher` 627, `CharPredicates` 33
 `MatchResult` 35). With it come `jdk.internal.util.regex.Grapheme` (221 code lines) and two
 generated files, `IndicConjunctBreak` (579) and `jdk.internal.lang.CaseFolding` (569).
 
-**j2a converts the package exactly**: in `bin/j2a-check --jdk java.base` every file of
+**repr/java converts the package exactly**: in `bin/repr-java check --jdk java.base` every file of
 `java/util/regex` and `jdk/internal/util/regex` compiles from its class forms to javac's class
-shapes. The generated files are not in `share/classes` and so not in `j2a-check`; they are
-plain tables and code (j2a converts them like the rest, one more step).
+shapes. The generated files are not in `share/classes` and so not in `repr-java-check`; they are
+plain tables and code (repr/java converts them like the rest, one more step).
 
 Its closure alone (from the 17 `Pattern`/`Matcher` members Arbace uses): 250 classes, 1,489
 methods, 162,584 bytes, of which `java.util.regex` 59 classes (28 KB), Unicode data 71 KB
@@ -329,12 +338,12 @@ serialization, `javax.swing` and `java.awt`, loading classes from jars.
 
 ## Effort per treatment
 
-Agent-assisted days, at the pace of the class forms and g2a work; they refine plan step 3
+Agent-assisted days, at the pace of the class forms and repr/go work; they refine plan step 3
 (6-10) and touch steps 4 and 5.
 
 | treatment | content | size | estimate |
 |---|---|---|---:|
-| translate | a2g over the closure; a2g's coverage of the JDK's idioms (nested and anonymous classes, generics, static initialization order, `switch`, arrays, intrinsic fallbacks); the 8 generated files through j2a; tests (regex against the JVM, `BigDecimal` and number printing, `Formatter`, the collections' contracts) | 422 classes, 3,223 methods, 279 KB bytecode, 184 files all convertible | 4-6 |
+| translate | a2g over the closure; a2g's coverage of the JDK's idioms (nested and anonymous classes, generics, static initialization order, `switch`, arrays, intrinsic fallbacks); the 8 generated files through repr/java; tests (regex against the JVM, `BigDecimal` and number printing, `Formatter`, the collections' contracts) | 422 classes, 3,223 methods, 279 KB bytecode, 184 files all convertible | 4-6 |
 | shim | the object model (`Object`, `Class`, identity hash, monitors), UTF-16 `String`/`StringBuilder`/`StringBuffer` (D4), `Math`, `System`, `Runtime`, `Thread` over goroutines, `ThreadLocal`, `Throwable` and stack traces, `Enum`, `Record`; reflection over a2g's tables; atomics, locks with `Condition`, executors, `CountDownLatch`, `LockSupport`; references over Go's `weak` and `runtime.AddCleanup`; `Unsafe`'s 25 members (CAS, array offsets) as used by the translated code; the host's files and streams, UTF-8 charsets, `Locale.ROOT`/`US` and `DecimalFormatSymbols`, `SecureRandom` over `crypto/rand`, `Date`, signals | 57 classes / 300 members used directly; boundary 69 classes / 342 members (largely the same classes) | 6-9 |
 | a2g | string `+` and lambdas | 255 sites in the runtime | in steps 2 and 4 |
 | rework | the evaluator instead of `invokedynamic`, `defineClass` and `__init` loading; `RT.load`/`classForName` over source and the registry; `Reflector`'s method-handle helpers and stream uses | 7 `java.lang.invoke` classes; `ReflectorCallSite`, `KeywordInvokeSite`, `DynamicClassLoader`, `FnLoaderThunk`, `Compile` (710 lines) not translated; about 300 lines of `RT`, `Compiler`, `Reflector` changed (an estimate) | 2-3 (with step 5) |
@@ -342,13 +351,13 @@ Agent-assisted days, at the pace of the class forms and g2a work; they refine pl
 | **all** | | | **13-19** |
 
 So jrt (plan step 3) is about 10-15 days rather than 6-10, the translated part being cheap
-because j2a already converts it exactly; the rest of the difference moves into steps 4 and 5.
+because repr/java already converts it exactly; the rest of the difference moves into steps 4 and 5.
 
 ## Decisions for the user
 
 **Decided (the user, 2026-10-08), each as recommended:** reflection hand-written in jrt over
 member tables generated by a2g, with `Compiler` and `Reflector` translated unchanged; all plain
-Java of the closure translated from jdk26u's source with j2a (`BigInteger`/`BigDecimal`
+Java of the closure translated from jdk26u's source with repr/java (`BigInteger`/`BigDecimal`
 translated, `Character` from the JDK's generated tables, `Formatter` with a root-locale shim),
 only the VM's edge hand-written; a hand-written UTF-16 `String`/`StringBuilder` over
 `[]uint16`; concurrency mixed (atomics, locks with `Condition`, executors and latches over Go's
@@ -374,7 +383,7 @@ the cut leaves out" above.)
    interop (breaks un-hinted code and `Reflector`'s overload choice by argument classes).
    *Recommended: (a).*
 2. **How much of the JDK to translate.** (a) Translate everything that is plain Java (the
-   closure above: 422 classes, all convertible by j2a), shim only at the VM's edge; (b) shim
+   closure above: 422 classes, all convertible by repr/java), shim only at the VM's edge; (b) shim
    more by hand over Go (`HashMap` over Go maps, `BigInteger` over `math/big`, `Character` over
    `unicode`): less code, but different behaviour (iteration order, hash codes,
    `BigDecimal`'s scale and printing, Unicode version) that the differential tests would keep
@@ -492,7 +501,7 @@ classes treated otherwise counted under "other treatments".
 | **all** | 422 | 3,226 | 279,047 |
 
 Source files touched: 184, 147,831 lines, 67,756 code lines (whole files).
-By j2a (`bin/j2a-check --jdk java.base`): 8 files generated (5,666 code lines), 176 files identical (62,090 code lines).
+By repr/java (`bin/repr-java check --jdk java.base`): 8 files generated (5,666 code lines), 176 files identical (62,090 code lines).
 Boundary (calls from translated code into shimmed, reworked or cut classes): 69 classes, 342 members.
 
 | boundary class | treatment | members | examples |
@@ -585,7 +594,7 @@ Boundary (calls from translated code into shimmed, reworked or cut classes): 69 
 | **all** | 423 | 3,232 | 279,169 |
 
 Source files touched: 185, 148,295 lines, 67,889 code lines (whole files).
-By j2a (`bin/j2a-check --jdk java.base`): 8 files generated (5,666 code lines), 177 files identical (62,223 code lines).
+By repr/java (`bin/repr-java check --jdk java.base`): 8 files generated (5,666 code lines), 177 files identical (62,223 code lines).
 Boundary (calls from translated code into shimmed, reworked or cut classes): 69 classes, 342 members.
 
 ### The translation closure, java.util.regex alone (Pattern and Matcher as used)
@@ -604,7 +613,7 @@ Boundary (calls from translated code into shimmed, reworked or cut classes): 69 
 | **all** | 250 | 1,489 | 162,584 |
 
 Source files touched: 90, 85,272 lines, 41,196 code lines (whole files).
-By j2a (`bin/j2a-check --jdk java.base`): 8 files generated (5,666 code lines), 82 files identical (35,530 code lines).
+By repr/java (`bin/repr-java check --jdk java.base`): 8 files generated (5,666 code lines), 82 files identical (35,530 code lines).
 Boundary (calls from translated code into shimmed, reworked or cut classes): 38 classes, 159 members.
 
 ### Runtime classes by treatment of what they use

@@ -1,3 +1,3 @@
-module arbace/test/g2a/golines
+module arbace/test/repr/go/golines
 
 go 1.27

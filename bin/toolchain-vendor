@@ -2,13 +2,13 @@
 # Go's toolchain as Go forms (standalone S9, doc/STANDALONE-NOTES.md, "S9: Go's toolchain as
 # forms"; tamago/cmd/README.md): the packages of TamaGo's go1.27.1 GOROOT/src/cmd that
 # cmd/compile, cmd/link and cmd/asm build from (105: cmd/compile/..., cmd/link/...,
-# cmd/asm/..., cmd/internal/... and cmd/vendor/golang.org/x/telemetry/...), converted by g2a
+# cmd/asm/..., cmd/internal/... and cmd/vendor/golang.org/x/telemetry/...), converted by repr/go
 # into tamago/cmd/, for the three configurations Arbace builds them for: linux/amd64 (the host's
 # tools) and tamago/amd64, tamago/arm64 (the box's tool guests, bin/box-tools); printed back to
 # GOROOT/src/cmd.
 #
 #   bin/toolchain-vendor convert  convert them into OUT (default tamago/cmd/) for each
-#                                 configuration (`bin/g2a convert --goos GOOS --goarch ARCH`,
+#                                 configuration (`bin/repr-go read --goos GOOS --goarch ARCH`,
 #                                 run in GOROOT/src/cmd, the packages of `go list -deps
 #                                 cmd/compile cmd/link cmd/asm` under cmd/ for that
 #                                 configuration), each package's other files (assembly)
@@ -40,11 +40,12 @@
 #   bin/toolchain-vendor all      convert, then check
 #
 # Options (before the command): --work DIR (default .tmp/toolchain-vendor), --out DIR (default
-# tamago/cmd). Environment: G2A_GOROOT / TAMAGO_ROOT (default /root/tamago-go: TamaGo's go1.27.1,
-# pinned by seed/goroot.sha256; GOROOT/src/cmd pinned below). g2a runs on the tools' host.
+# tamago/cmd). Environment: ARBACE_GOROOT / TAMAGO_ROOT (default /root/tamago-go: TamaGo's go1.27.1,
+# pinned by seed/goroot.sha256; GOROOT/src/cmd pinned below). repr/go runs on the tools' host.
 set -euo pipefail
 export CGO_ENABLED=0 # Go's builds never use cgo (doc/go/BOX-NOTES.md, "... cgo dropped", 2026-10-16)
 root=$(cd "$(dirname "$0")/.." && pwd)
+. "$root/bin/lib/goroot.bash" # stops on a stale G2A_GOROOT
 work=$root/.tmp/toolchain-vendor out=$root/tamago/cmd
 while [ $# -gt 0 ]; do
   case $1 in
@@ -57,10 +58,10 @@ cmd=${1:-}
 [ $# -gt 0 ] && shift
 case $work in /*) ;; *) work=$root/$work ;; esac
 case $out in /*) ;; *) out=$root/$out ;; esac
-tg=${TAMAGO_ROOT:-${G2A_GOROOT:-/root/tamago-go}}
+tg=${TAMAGO_ROOT:-${ARBACE_GOROOT:-/root/tamago-go}}
 confs="linux-amd64 tamago-amd64 tamago-arm64"
 tools="compile link asm"
-export G2A_GOROOT=$tg GOPROXY=off GOFLAGS= GOTOOLCHAIN=local
+export ARBACE_GOROOT=$tg GOPROXY=off GOFLAGS= GOTOOLCHAIN=local
 
 # The origin, pinned: TamaGo's go1.27.1 tree (https://github.com/usbarmory/tamago-go, VERSION
 # "go1.27.1"), the hash of every file of its src/cmd/ (sha256sum of the sorted list, then of
@@ -195,12 +196,12 @@ EOF
 
 convert_conf() {  # convert_conf CONF W: CONF's packages converted and assembled into W/CONF
   local c=$1 w=$2 o=${1%-*} a=${1#*-} n
-  echo "== cmd for $o/$a (bin/g2a convert --goos $o --goarch $a)" >&2
+  echo "== cmd for $o/$a (bin/repr-go read --goos $o --goarch $a)" >&2
   packages "$c" > "$work/pkgs-$c.txt"
   n=$(wc -l < "$work/pkgs-$c.txt")
   rm -rf "$work/forms-$c"
   # its own dumps' directory: bin/tamago-vendor converts beside it in bin/gate --full
-  (cd "$tg/src/cmd" && G2A_DUMPS=$work/dumps-$c "$root/bin/g2a" convert --goos "$o" --goarch "$a" --out "$work/forms-$c" $(cat "$work/pkgs-$c.txt")) \
+  (cd "$tg/src/cmd" && REPR_GO_DUMPS=$work/dumps-$c "$root/bin/repr-go" read --goos "$o" --goarch "$a" --out "$work/forms-$c" $(cat "$work/pkgs-$c.txt")) \
     > "$work/convert-$c.log" 2>&1 || { tail -20 "$work/convert-$c.log" >&2; fail "$c: the conversion failed ($work/convert-$c.log)"; }
   grep -q "^converted $n of $n dumps .*; 0 failed, 0 did not read back\$" "$work/convert-$c.log" \
     || { tail -3 "$work/convert-$c.log" >&2; fail "$c: packages failed to dump or convert ($work/convert-$c.log)"; }
@@ -223,10 +224,10 @@ convert() {
   echo "converted into ${o#$root/}: $(find "$o" -name '*.ae' | wc -l) forms files, $(find "$o" -type f | wc -l) files, $(du -sb "$o" | cut -f1) bytes" >&2
 }
 
-# tree_key CONF: the hash of OUT, of the printer (arbace/g2a, bin/g2a) and of CONF
+# tree_key CONF: the hash of OUT, of the printer (arbace.repr.go, arbace.build.go, their commands) and of CONF
 tree_key() {
   { (cd "$out" && find . -type f ! -name README.md | LC_ALL=C sort | xargs -d '\n' sha256sum)
-    (cd "$root" && find arbace/g2a bin/g2a -type f | LC_ALL=C sort | xargs -d '\n' sha256sum)
+    (cd "$root" && find arbace/repr/go.ae arbace/repr/go arbace/build bin/repr-go bin/build-go -type f | LC_ALL=C sort | xargs -d '\n' sha256sum)
     cat "$tg/VERSION"; echo "$1"; } | sha256sum | cut -c1-64
 }
 
@@ -251,7 +252,7 @@ print_tree() {
   rm -rf "$d/forms"; mkdir -p "$d/forms"
   cp -al "$out/go" "$d/forms/go"
   [ ! -d "$out/conf/$c/go" ] || cp -al "$out/conf/$c/go/." "$d/forms/go/"
-  "$root/bin/g2a" build --print-only --module std --layout lines --work "$d/print" "$d/forms" > "$d/print.log" 2>&1 \
+  "$root/bin/build-go" --print-only --module std --layout lines --work "$d/print" "$d/forms" > "$d/print.log" 2>&1 \
     || { tail -20 "$d/print.log" >&2; fail "$c: the printing failed ($d/print.log)"; }
   mv "$d/print/mod/cmd" "$d/goroot/src/cmd"
   rm -rf "$d/print" "$d/forms"

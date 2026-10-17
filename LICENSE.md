@@ -12,7 +12,7 @@ full in this file. Source files keep the copyright and license notices they came
 covers what.
 
 - `arbace/`: the vendored Clojure in it (everything outside the tools `arbace/classes/`,
-  `arbace/c2a/`, `arbace/j2a/`, `arbace/g2a/` and `arbace/a2g/`, which are Arbace's own) is
+  `arbace/c2a/`, `arbace/repr/`, `arbace/build/` and `arbace/a2g/`, which are Arbace's own) is
   derived from Clojure, https://github.com/clojure/clojure at `98d735fab02f337cee654cb0629bddc09883a75a`,
   with ASM, https://gitlab.ow2.org/asm/asm at `0460f74ba64230e5b846967c81a52628b5dd0596`: the frozen tree `clojure/` that this repository
   held until the freeze (it remains on the branch `arbace-for-java-26`), renamed to `arbace.*`,
@@ -55,26 +55,26 @@ covers what.
 - `test/java-fixtures/forms/` (test/java-fixtures/README.md): the class forms of Clojure's
   suite's Java fixtures, `test/java` of https://github.com/clojure/clojure at
   `98d735fab02f337cee654cb0629bddc09883a75a` (the files carry no notice of their own), renamed
-  by c2a and converted by j2a: Copyright (c) Rich Hickey (Clojure's readme.txt), under the Eclipse
+  by c2a and converted by repr/java: Copyright (c) Rich Hickey (Clojure's readme.txt), under the Eclipse
   Public License 1.0, as Clojure. `test/java-fixtures/provenance.edn` and `README.md`: Arbace's
   own, under the Eclipse Public License 1.0.
 - `overlay/go/runtime/proc.ae` and `overlay/go/runtime/runtime2.ae`: Go's runtime, the files
   `src/runtime/proc.go` and `runtime2.go` of TamaGo's go1.27.1 tree
   (https://github.com/usbarmory/tamago-go, `VERSION` "go1.27.1", 2026-08-28; the Go
-  distribution with TamaGo's changes), converted to Go forms by `bin/g2a convert` and patched
+  distribution with TamaGo's changes), converted to Go forms by `bin/repr-go read` and patched
   (doc/go/JRT-NOTES.md, phase 2a): Copyright 2009 The Go Authors, under Go's BSD 3-Clause
   License (text below). `overlay/go/runtime/arbace_local.ae` and `overlay/go/runtime.ae` are
   Arbace's own.
 - `overlay/go/syscall/fs_tamago.ae`: TamaGo's simulated file system, the file
   `src/syscall/fs_tamago.go` of the same TamaGo go1.27.1 tree (itself adapted from Go's
-  `fs_nacl.go`), patched and converted to Go forms by `bin/g2a convert` (doc/go/BOX-NOTES.md,
+  `fs_nacl.go`), patched and converted to Go forms by `bin/repr-go read` (doc/go/BOX-NOTES.md,
   S7): Copyright 2019 The Go Authors, under Go's BSD 3-Clause License (text below).
   `overlay/go/syscall.ae` is Arbace's own.
-- Excerpts of Go's standard library in g2a's cases, tests and spec: `test/g2a/cases/s14_2_utf8.go`
+- Excerpts of Go's standard library in repr/go's cases, tests and spec: `test/repr/go/cases/s14_2_utf8.go`
   (from `src/unicode/utf8/utf8.go`), `s14_3_sort.go` (from `src/sort/sort.go` and
   `zsortinterface.go`), `s02_search.go` (`sort.Search`, from `src/sort/search.go`), the Go forms
-  of the same names (`.ae`) that hold them converted, `test/g2a/convert/search.go`
-  (`sort.Search`) and the expected forms `test/g2a/convert/expected/s02_search.ae`,
+  of the same names (`.ae`) that hold them converted, `test/repr/go/convert/search.go`
+  (`sort.Search`) and the expected forms `test/repr/go/convert/expected/s02_search.ae`,
   `s14_2_utf8.ae` and `s14_3_sort.ae`, and their code and forms in doc/go/SPEC.md §2
   (`sort.Search`), §14.2 and §14.3: from TamaGo's go1.27.1 tree, as above, Copyright 2009
   (`utf8.go`, `sort.go`), 2010 (`search.go`) and 2022 (`zsortinterface.go`) The Go Authors,
@@ -94,7 +94,7 @@ covers what.
   the box of go-whim, https://github.com/arbace/go-whim at
   `80c49bf53cd6340487ac623f3d6d135b77ac1db6`, its `hv/`, `vmm/` (without `vmm/cmd/`),
   `guest/abi/`, `guest/tamago/board/` and `internal/libsys/`, converted to Go forms by
-  `bin/g2a convert` (`bin/box-vendor`): under the Eclipse Public License 1.0, as Arbace.
+  `bin/repr-go read` (`bin/box-vendor`): under the Eclipse Public License 1.0, as Arbace.
   go-whim's repository-wide `LICENSE` is Vim's licence, which covers the modified vim that
   go-whim's README names as its product; these parts are not derived from vim. Their history
   in go-whim (`git log --format=%an -- hv vmm guest/abi guest/tamago/board internal/libsys`)
@@ -120,12 +120,12 @@ covers what.
   assembly and headers; box/README.md, doc/go/BOX-NOTES.md, S4, BX62): purego,
   https://github.com/ebitengine/purego v0.11.1 (go.sum
   `h1:2zpWRSQNVKN4eKsKO9eM1ILDgWfYMY9GwqRmK6XeQ/0=`), its files that build for darwin/arm64,
-  their import paths renamed to `arbace/box/purego`, converted to Go forms by `bin/g2a convert`
+  their import paths renamed to `arbace/box/purego`, converted to Go forms by `bin/repr-go read`
   (`bin/box-vendor purego`): Copyright 2022 The Ebitengine Authors (each file's SPDX notice,
   kept as `;;` lines), under the Apache License 2.0 (section "purego" below). The box's launcher
   for macOS (`bin/box-mac-bundle`) contains it.
 - `tamago/` (tamago/README.md, doc/go/BOX-NOTES.md, S6): the box guest's own Go as Go forms,
-  converted by `bin/g2a convert` (`bin/tamago-vendor`), with the assembly, headers, embedded
+  converted by `bin/repr-go read` (`bin/tamago-vendor`), with the assembly, headers, embedded
   files and module files they came with, unchanged:
   - `tamago/goroot/`: the standard library of TamaGo's go1.27.1 tree
     (https://github.com/usbarmory/tamago-go, `VERSION` "go1.27.1", 2026-08-28; the Go
@@ -152,7 +152,7 @@ covers what.
   at `3b414e3e8284a71c817c4d1009acdd5d3a464ff9` (version
   `v0.0.0-20261011195143-3b414e3e8284`, go.sum `h1:vbII1qQTqQ3ya1k/bfJWuHiUNzCkFD7LRbGiO3gSwVE=`,
   from Go's module cache), its import path renamed to `arbace/x509roots/fallback/bundle`, converted
-  to Go forms by `bin/g2a convert` (`bin/x509roots-vendor`), its embedded `bundle.der` unchanged:
+  to Go forms by `bin/repr-go read` (`bin/x509roots-vendor`), its embedded `bundle.der` unchanged:
   Copyright 2023-2026 The Go Authors (each file's notice, kept as `;;` lines; the generated
   `bundle.go` carries none), under Go's BSD 3-Clause License (the module's `LICENSE` is the text
   below, "Go: BSD 3-Clause License", byte for byte). The certificates in `bundle.der` are the
@@ -169,7 +169,7 @@ covers what.
   `bin/jrt-convert verify` proves them) from https://github.com/openjdk/jdk26u at `baf63fb` and
   from jrt's own Java (`jdk/provenance.edn` records the commit; `jdk/sources.txt` lists each
   file's origin, which each form file's first line also names):
-  - `jdk/forms/`: class forms converted by j2a from jdk26u's Java sources (the closure of
+  - `jdk/forms/`: class forms converted by repr/java from jdk26u's Java sources (the closure of
     java.base's files jrt translates, 755 of `src/java.base/share/classes`, 6 of
     `src/java.base/unix/classes`, 2 of `src/java.sql/share/classes`), from the 31 sources the JDK
     build generates (`CharacterData*`, java.nio's buffers, `ScopedMemoryAccess`, the CLDR locale
@@ -403,8 +403,8 @@ covers what.
   GPLv2 with the Classpath Exception and, for their Unicode and ICU parts, by the licenses below.
 - The Go build's executables, `target/arbace-go/<arch>/arbace` (amd64 and arm64), which
   `bin/arbace-go --build` makes (doc/go/EVAL-NOTES.md, doc/go/EXEC-NOTES.md): `bin/a2g --program`
-  translates the program into Go forms and `bin/g2a build` builds them with TamaGo's go1.27.1
-  toolchain (`G2A_GOROOT`) into static executables (`CGO_ENABLED=0`: no C code, no libc). Each
+  translates the program into Go forms and `bin/build-go` builds them with TamaGo's go1.27.1
+  toolchain (`ARBACE_GOROOT`) into static executables (`CGO_ENABLED=0`: no C code, no libc). Each
   combines works under several licenses, each covering its part:
   - Arbace: the `arbace/` namespaces the executable carries (the vendored Clojure, spec.alpha,
     core.specs.alpha and Arbace's own, translated by a2g and embedded as sources with the image
@@ -441,7 +441,7 @@ covers what.
 
   The test build, `target/arbace-go/<arch>/arbace-tests` (`bin/arbace-go --build-tests`), adds
   Clojure's suite's Java fixtures (`test/java` of https://github.com/clojure/clojure at
-  `98d735fab02f337cee654cb0629bddc09883a75a`, renamed by c2a and converted by j2a, as committed in
+  `98d735fab02f337cee654cb0629bddc09883a75a`, renamed by c2a and converted by repr/java, as committed in
   `test/java-fixtures/forms/`): under the Eclipse Public License 1.0, as Clojure.
 
   So a distribution of an executable carries this file (the texts of the Eclipse Public License

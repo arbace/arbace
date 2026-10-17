@@ -1,7 +1,7 @@
 # The frozen JVM Arbace (standalone S4, doc/STANDALONE-NOTES.md, "S4: the JVM removed"): what
 # stays on a JVM after S4 runs on the jar of the frozen branch's last release, built from its
 # tag and pinned by hash, never on a JVM build of the checkout (main has none). It is the
-# oracle's reference (bin/oracle) and the host of the JVM-side tools: j2a (javac is its front
+# oracle's reference (bin/oracle) and the host of the JVM-side tools: repr/java (javac is its front
 # end), the edge's recording (bin/a2g-edge: the JVM's reflection), the data generators
 # (bin/jrt testdata|manifest|standins, bin/jrt-coverage, bin/net-check). Sourced, with $root
 # set to the repository root. Defines:
@@ -16,8 +16,8 @@
 #                  namespaces the frozen jar is to load from source, as .clj links (its loader
 #                  reads .clj only, not .ae), .tmp/frozen-view/K:
 #                    test   test/'s namespaces (the oracle's runner, jrt's generators, ...)
-#                    tools  those, the tools' namespaces (arbace.j2a, arbace.a2g, arbace.c2a,
-#                           arbace.g2a), the class forms' front end (arbace.classes.types, env,
+#                    tools  those, the tools' namespaces (arbace.repr.java, arbace.repr.go,
+#                           arbace.build.go, arbace.a2g, arbace.c2a), the class forms' front end (arbace.classes.types, env,
 #                           parse, lower, analyze) and every namespace of the checkout the jar
 #                           lacks (arbace.box, a JVM-only part of env, the access flags ...)
 #                  arbace.core, the runtime (the jar's class forms: arbace.lang, arbace.asm)
@@ -98,7 +98,7 @@ frozen_view() {
       (cd "$root" && find arbace -name '*.ae' ! -path 'arbace/lang/go/*' | LC_ALL=C sort) | awk -v list="$list" '
         BEGIN { while ((getline l < list) > 0) jar[l] = 1 }
         { b = substr($0, 1, length($0) - 3) }
-        b ~ /^arbace\/(j2a|a2g|c2a|g2a)\// { print; next }
+        b ~ /^arbace\/(repr\/java|repr\/go|build|a2g|c2a)(\/|$)/ { print; next }
         b ~ /^arbace\/classes\/(types|env|parse|lower|analyze)$/ { print; next }
         b ~ /^arbace\/classes\/(native|boot|compiler|emit|shape|verify|build)$/ { next }
         !((b ".clj") in jar) && !((b "__init.class") in jar) { print }' |

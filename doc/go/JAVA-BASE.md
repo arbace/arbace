@@ -2,7 +2,7 @@
 
 How much of the JDK's `java.base` module the Go build of Arbace implements (B1a, before the
 `arbace-for-golang` freeze; [B1-PLAN.md](B1-PLAN.md)). jrt is the Go build's Java runtime:
-jdk26u sources translated by `bin/jrt-convert` (j2a) and a2g, jrt's own Java in `overlay/`
+jdk26u sources translated by `bin/jrt-convert` (repr/java) and a2g, jrt's own Java in `overlay/`
 translated the same way, and hand-written Go forms in `go/arbace/jrt/`; a2g stubs what it does
 not translate ([JRT-SOURCES.md](JRT-SOURCES.md), [JRT-NOTES.md](JRT-NOTES.md),
 [A2G-SPEC.md](A2G-SPEC.md) §4.1).
@@ -441,7 +441,7 @@ completed"):
 - **JB1 (JRT-SOURCES.md, "The closure as grown") The java.util files**: the list above, as
   `util-sources` beside `added-sources`, each group with its reason. *Accepted 2026-10-10, folded into JRT-SOURCES.md, "The closure as grown".*
 - **JB2 (A2G-SPEC §4.6, the JDK's variants) `TreeMap`, `BitSet`, `RandomGenerator`**, as above.
-  A replacing member's parameter tags are written as j2a writes the original's (generic tags
+  A replacing member's parameter tags are written as repr/java writes the original's (generic tags
   included: `^{:tag (SortedMap K (? extends V))}`), since the variant finds the member by them. *Accepted 2026-10-10, folded into A2G-SPEC §4.6.*
 - **JB3 (A2G-SPEC §7.11, FromFn) An array result is checked against the return type's array
   class**, as `Dyn`'s results are. Before, the adapter checked the result against its own class

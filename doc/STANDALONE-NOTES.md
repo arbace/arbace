@@ -1,9 +1,19 @@
 # The standalone Arbace — notes
 
+> Names: since 2026-10-17 g2a is repr/go and j2a repr/java (doc/NAMING-SURVEY.md, "Decided"):
+> `arbace.g2a.*` is `arbace.repr.go(.*)`, its build `arbace.g2a.build` is `arbace.build.go`;
+> `bin/g2a convert` is `bin/repr-go read` (`bin/g2a read`: `read --dump`), `bin/g2a build`
+> `bin/build-go`, `bin/g2a-print` `bin/repr-go print`, `bin/g2a-check` `bin/repr-go check`,
+> `bin/g2a-convert-tests` and `-print-tests` `bin/repr-go test read` and `test print`,
+> `bin/g2a-build-tests` `bin/build-go test`; `G2A_GOROOT` is `ARBACE_GOROOT`, the other `G2A_*`
+> `REPR_GO_*`, `J2A_*` `REPR_JAVA_*`; `bin/j2a-check` is `bin/repr-java check`. This document
+> uses the current names throughout, its dated passages included; branch names keep theirs, and
+> so does `G2A_HOST` (the JVM's switch until S4, dropped with the rename).
+
 Working notes of the standalone stages ([STANDALONE-SURVEY.md](STANDALONE-SURVEY.md), §9.1; the
 user's decisions D1-D13 of 2026-10-12): what each stage did, how it is checked, and its
 amendments (SA1-SA9 for S4's preparation, SA10... for S2, SA20... for S3's fixpoint, SA30... for
-S3's g2a, SA40-SA88 for S4, SA90-SA92 and SA104-SA107 after S4, SA100-SA103 for S5, SA130-SA159
+S3's repr/go, SA40-SA88 for S4, SA90-SA92 and SA104-SA107 after S4, SA100-SA103 for S5, SA130-SA159
 for S6, its size included), proposed to the user, the recommended choice applied meanwhile. S1 (the
 JDK's forms committed in `jdk/`) is recorded in [go/JRT-SOURCES.md](go/JRT-SOURCES.md), "The
 committed forms", and `jdk/README.md`.
@@ -231,11 +241,11 @@ below.
 
 ### What the seed is (D3)
 
-Stage 0 of the bootstrap becomes **Arbace's Go program as a2g and g2a print it**: the module
+Stage 0 of the bootstrap becomes **Arbace's Go program as a2g and repr/go print it**: the module
 `arbace` that `bin/arbace-go --build` hands to `go build` (`target/arbace-go/work-<arch>/mod`),
 with the Go runtime's files that `overlay/go` patches, and nothing else Arbace-made. Built by
 Go's toolchain alone, it gives the executable `bin/arbace-go --build` gives, byte for byte. That
-executable then runs the chain (S3: a2g, g2a, `go build`) that builds stage 1 from the
+executable then runs the chain (S3: a2g, repr/go, `go build`) that builds stage 1 from the
 checkout's sources, and so on to the fixpoint.
 
 Contents of the archive, under one top directory `arbace-seed-go/`:
@@ -306,7 +316,7 @@ About 20 s with Go's build cache warm; minutes cold (gc needs 7-8 GB for `jrt`, 
   (one `go build` fewer, about 11 s; the archive 4.4 MB).
 - **SA4 The toolchain**, pinned by its version and its sources. The toolchain is TamaGo's Go
   distribution (`/root/tamago-go`, https://github.com/usbarmory/tamago-go, go1.27.1,
-  2026-08-28), the one every Arbace build uses (`G2A_GOROOT`). `seed/goroot.sha256` pins it as
+  2026-08-28), the one every Arbace build uses (`ARBACE_GOROOT`). `seed/goroot.sha256` pins it as
   `<SHA-256>  go1.27.1`, and `SEED.edn` records the same as `:go` and `:goroot-sha256`. The hash
   of GOROOT's sources is defined as: sha256sum's lines (`<SHA-256>  <path relative to GOROOT>`)
   of `VERSION` and every file under `src/`, sorted by path in the C locale's byte order, hashed
@@ -371,7 +381,7 @@ On the worktree `s4-seed` at `7498921` (main `b0f5730` plus the tooling), a clea
   build's. `*arbace-version*`: `{:describe "arbace-box-arm64-v1-28-g7498921", :commit
   "7498921…", :dirty false}`.
 - **Generation B**: `bin/seed --go-verify` (a fresh worktree at `7498921`: its own bootstrap,
-  a2g, g2a, gc, `--go-make`; 4m50s): the same tar byte for byte (SHA-256
+  a2g, repr/go, gc, `--go-make`; 4m50s): the same tar byte for byte (SHA-256
   `cc61aabbf4fcf5e050d58edb7f1ee735b2ff91eb0d7464dce720056ff294aca0`) and the same archive
   (`c4e00bf6…`); stage 0 built from B (amd64) is that worktree's own `--build` executable, byte
   for byte (`0793e34f…`). The seed is reproducible from its commit.
@@ -490,11 +500,11 @@ this branch, the diff only its six `.ae`-rename cases); recording them into
 ## S4: inventory for the JVM's removal
 
 What S4 removes from main or moves off the JVM, with what replaces each (D4: the JVM stays only
-as the oracle's reference, the frozen jar, and as j2a's front end). (Done at S4's end, the boxes
+as the oracle's reference, the frozen jar, and as repr/java's front end). (Done at S4's end, the boxes
 below left as planned: "S4: the JVM removed" records what was done and what is left.)
 Tags: **[P]** the JVM product, leaves main (kept on `arbace-for-java-26`); **[T]** a tool that
 runs on the JVM today and is hosted by the Go executable after S3; **[R]** stays on a JVM (the
-oracle's reference or j2a). Counts at `b0f5730`.
+oracle's reference or repr/java). Counts at `b0f5730`.
 
 ### Scripts
 
@@ -511,24 +521,24 @@ oracle's reference or j2a). Counts at `b0f5730`.
 - [ ] [P] `bin/class-forms-tests` (24, `test/classes` against javac's bytecode) → removed, or
   reduced to the front end's tests on Go.
 - [ ] [R/P] `bin/class-forms-check` (13: converted forms compiled to bytecode and compared with
-  javac's) → used by `bin/j2a-check` (steps 2-3) and `bin/jrt-convert check`: see open point O2.
+  javac's) → used by `bin/repr-java check` (steps 2-3) and `bin/jrt-convert check`: see open point O2.
 - [ ] [P] `bin/java-surface` (32, ASM over stage 2) → retired; its output
   `doc/go/java-surface.edn` stays as data.
 - [ ] [T] `bin/lib/tools.bash`'s `arbace_runtime` (`target/stage2`) → the Go executable
   (`ARBACE_PATH` to the checkout); `frozen_clojure` stays (git only).
-- [ ] [T] `bin/a2g`, `bin/a2g-check`, `bin/a2g-race`, `bin/a2g-evalproof`; `bin/g2a` (read,
-  convert, build's driver), `bin/g2a-print`, `-print-tests`, `-convert-tests`, `-build-tests`;
-  `bin/c2a`, `bin/c2a-check`; `bin/box-vendor`, `bin/tamago-vendor`, `bin/x509roots-vendor` (g2a);
-  `bin/jrt` build/test/print (g2a) → on the Go executable (S3).
+- [ ] [T] `bin/a2g`, `bin/a2g-check`, `bin/a2g-race`, `bin/a2g-evalproof`; `bin/repr-go` (read,
+  convert, build's driver), `bin/repr-go print`, `-print-tests`, `-convert-tests`, `-build-tests`;
+  `bin/c2a`, `bin/c2a-check`; `bin/box-vendor`, `bin/tamago-vendor`, `bin/x509roots-vendor` (repr/go);
+  `bin/jrt` build/test/print (repr/go) → on the Go executable (S3).
 - [ ] [T/R] `bin/clojure-tests` (369): c2a's translation and the listing/reports on stage 2 → on
-  Go; its stage modes [P] removed; `--java-fixtures` (j2a) [R]: done, the fixtures are committed
+  Go; its stage modes [P] removed; `--java-fixtures` (repr/java) [R]: done, the fixtures are committed
   as forms in `test/java-fixtures/` (merged 2026-10-12), `--java-fixtures verify` on the JVM.
 - [ ] [R] `bin/oracle` → the frozen jar (done, SA8); `ARBACE_ORACLE_REF=frozen` becomes the
   default and `main` goes.
 - [ ] [R] `bin/jrt testdata`, `manifest`, `standins`; `bin/jrt-coverage`; `bin/net-check`'s JVM
   side → on the frozen jar (data generators: their outputs are committed or regenerated rarely).
-- [ ] [R] `bin/j2a`, `bin/j2a-check`, `bin/jrt-convert` → stay on the JVM (javac), see O1, O2.
-- [ ] `bin/arbace-go`: `build` (a2g, g2a on the JVM) [T] → S3's chain; `jvm_store_checks` and the
+- [ ] [R] `bin/repr-java`, `bin/repr-java check`, `bin/jrt-convert` → stay on the JVM (javac), see O1, O2.
+- [ ] `bin/arbace-go`: `build` (a2g, repr/go on the JVM) [T] → S3's chain; `jvm_store_checks` and the
   JVM's `tls_checks` in `--smoke` [P] → removed; `gate_key` hashes `seed/arbace-seed.jar.sha256`,
   `bin/arbace-j`, `bin/build-arbace`, `java -version` → the Go seed's pin, the chain's scripts, Go
   only (plus `java` while a2g runs on it).
@@ -568,13 +578,13 @@ oracle's reference or j2a). Counts at `b0f5730`.
   or ported, per D13.
 - [ ] [P] `arbace/box/host.ae` (794, the store on the JVM, BX37), `arbace/tls/host.ae` (98,
   JSSE) → removed (the Go variants under `lang/go/ns/` stay).
-- [ ] [R] `arbace/j2a/` → stays; `j2a/build.ae` (bytecode, j2a-check's step 4) see O2.
+- [ ] [R] `arbace/repr/java/` → stays; `repr/java/build.ae` (bytecode, repr-java-check's step 4) see O2.
 
 ### Tests and data
 
 - [ ] [P] `test/aot-training.ae`; `test/arbace-results.edn` (the suite on stages 1, 2) → removed;
   `test/arbace-go-results.edn` becomes the gate's.
-- [ ] [R] `test/baseline-results.edn` → stays while `j2a-check --suite` runs on the JVM.
+- [ ] [R] `test/baseline-results.edn` → stays while `repr-java-check --suite` runs on the JVM.
 - [ ] [P] `test/native/` (19 files) → removed after the semantic ones move to the oracle.
 - [ ] [P] `test/classes/` (17 files and fixtures) → removed, except `check_converted.ae` (O2).
 - [ ] [P] `test/classforms/jvm_check.ae` → removed; `gen_corpus.ae`, `class_scripts.ae` [R] on
@@ -596,8 +606,8 @@ oracle's reference or j2a). Counts at `b0f5730`.
   `CLOJURE_TESTS_GO`, `test/arbace-go-results.edn`): the gate's suite (survey S4's exit).
 - [ ] `cft` (`bin/class-forms-tests`) [P] → removed or the front end's tests on Go.
 - [ ] `go` (`bin/arbace-go --gate`) → keyed without the JVM; no JVM checks in the smoke test.
-- [ ] `--full`: `suite-stage1` [P] removed; `j2a` (`j2a-check --suite`) and `jrt-convert verify`
-  [R] stay on the JVM (O1, O2); `oracle-go` → the frozen reference; g2a, box, go-build,
+- [ ] `--full`: `suite-stage1` [P] removed; `repr/java` (`repr-java-check --suite`) and `jrt-convert verify`
+  [R] stay on the JVM (O1, O2); `oracle-go` → the frozen reference; repr/go, box, go-build,
   go-build-tests, suite-go, box-forms, box-smoke [T] → on the Go-hosted tools; the converters
   no longer wait for `suite-stage1`.
 
@@ -616,45 +626,45 @@ oracle's reference or j2a). Counts at `b0f5730`.
 
 ### Open points for S4
 
-- **O1 Which JVM Arbace hosts j2a after S4.** j2a's Arbace side runs on `target/stage2` today.
-  Options: (a) the frozen v4 jar with `arbace.j2a` loaded from the checkout's source (it reads
-  `.clj` only: a view as the oracle's); (b) j2a's Arbace side on the Go executable, javac alone in
-  a JVM (a process boundary inside j2a). Recommended: (a) at S4, (b) with D12's later stage.
-- **O2 j2a's checks compile to bytecode.** `j2a-check` (steps 2-4) and `jrt-convert check`
+- **O1 Which JVM Arbace hosts repr/java after S4.** repr/java's Arbace side runs on `target/stage2` today.
+  Options: (a) the frozen v4 jar with `arbace.repr.java` loaded from the checkout's source (it reads
+  `.clj` only: a view as the oracle's); (b) repr/java's Arbace side on the Go executable, javac alone in
+  a JVM (a process boundary inside repr/java). Recommended: (a) at S4, (b) with D12's later stage.
+- **O2 repr/java's checks compile to bytecode.** `repr-java-check` (steps 2-4) and `jrt-convert check`
   compile converted forms with the class forms back end (emit, ASM's ClassReader) and compare
   with javac. Options: (a) run them on the frozen jar's own compiler (at the freeze's state);
-  (b) make them forms-level only (j2a's output compared with the committed forms, as `jrt-convert
-  verify` does); (c) keep emit, shape and ASM on main as a j2a-check toolkit. Recommended: (b),
+  (b) make them forms-level only (repr/java's output compared with the committed forms, as `jrt-convert
+  verify` does); (c) keep emit, shape and ASM on main as a repr-java-check toolkit. Recommended: (b),
   with (a) for the suite step.
 - **O3** `Opcodes`' constants need a home before ASM goes. **O4** a2g's two helpers from emit
   move first.
 - **O5** Done: the Go suite's Java fixtures are committed as forms (`test/java-fixtures/`), so the
-  test build needs no javac or j2a; `bin/clojure-tests --java-fixtures verify` (j2a on the JVM)
+  test build needs no javac or repr/java; `bin/clojure-tests --java-fixtures verify` (repr/java on the JVM)
   is a `--full` check, as `bin/a2g-edge verify` is.
 
-## S3: g2a on Go
+## S3: repr/go on Go
 
-The part of S3 that is g2a's (branch `s3-g2a`, 2026-10-12): g2a's printer, `bin/g2a build`'s
+The part of S3 that is repr/go's (branch `s3-g2a`, 2026-10-12): repr/go's printer, `bin/build-go`'s
 driver (printing a program's packages into a module, then `go build` as a host process through
 `ProcessBuilder`) and its converter run on the native Go executable, with the same output byte
 for byte. a2g on Go is the other half of S3 (branch `s3-fixpoint`).
 
 ### The host: `G2A_HOST`
 
-`bin/lib/g2a-host.bash` runs g2a's namespaces for `bin/g2a build`, `bin/g2a print`
-(`bin/g2a-print`) and `bin/g2a convert` (so the round trip) on the host `G2A_HOST` names:
+`bin/lib/repr-go-host.bash` runs repr/go's namespaces for `bin/build-go`, `bin/repr-go print`
+(`bin/repr-go print`) and `bin/repr-go read` (so the round trip) on the host `G2A_HOST` names:
 
 - `jvm`, the default: Arbace on the JVM, `target/stage2` plus the checkout, as before.
-- `go`: the native executable, `G2A_GO_EXE` or else `target/arbace-go/<host arch>/arbace` (built by
+- `go`: the native executable, `REPR_GO_EXE` or else `target/arbace-go/<host arch>/arbace` (built by
   `bin/arbace-go --build`), run as `arbace -m NS ARGS` with the checkout first on `ARBACE_PATH`.
-  `arbace.g2a` is not embedded in the executable (a2g's `embed.ae` leaves the tools out), so it
+  `arbace.repr.go` is not embedded in the executable (a2g's `embed.ae` leaves the tools out), so it
   loads from the checkout's sources, as on the JVM. The executable runs from a copy in
-  `.tmp/g2a-host/`, refreshed (by a rename, under a lock) when it differs: `bin/arbace-go
+  `.tmp/repr-go-host/`, refreshed (by a rename, under a lock) when it differs: `bin/arbace-go
   --build` replaces `target/arbace-go/<arch>/arbace` while its own printing runs.
 
 So `G2A_HOST=go bin/arbace-go --build` builds the Go executable with the Go executable, and
 `G2A_HOST=go bin/arbace-go --build --box` the box (`bin/tamago-vendor print`, the guest and the
-launcher through `bin/g2a build`). The JVM stays the default until S3's fixpoint replaces it.
+launcher through `bin/build-go`). The JVM stays the default until S3's fixpoint replaces it.
 
 ### Byte for byte
 
@@ -672,7 +682,7 @@ Proofs (main at `329af1a` merged; `.tmp/proof/`, removed after):
 - a2g's program printed by main's printer on the JVM equals the new printer's (both hosts);
   `box/` and `x509roots/` printed alone on both hosts and by main's printer, equal.
 - `bin/tamago-vendor check`: both guests identical to TamaGo's originals' (linked and cut).
-- `bin/g2a roundtrip amd64` and `linux/amd64`: no regressions; `G2A_HOST=go bin/g2a roundtrip
+- `bin/repr-go roundtrip amd64` and `linux/amd64`: no regressions; `G2A_HOST=go bin/repr-go roundtrip
   amd64` (converter and printer on Go) too.
 
 ### Speed
@@ -683,16 +693,16 @@ The program's line includes `go build` from a warm cache (a few seconds).
 
 | tree | JVM before | Go before | JVM after | Go after |
 |---|---:|---:|---:|---:|
-| a2g's program, amd64 (`bin/g2a build`, 34 MB of forms, 1,070 files) | 23.8 s | 378 s (6.2 GB) | 12.1 s | 32.3 s (4.6 GB) |
+| a2g's program, amd64 (`bin/build-go`, 34 MB of forms, 1,070 files) | 23.8 s | 378 s (6.2 GB) | 12.1 s | 32.3 s (4.6 GB) |
 | `tamago/` std, amd64 (print only, 371 packages) | 20.1 s | 235 s | 6.2 s | 21-24 s (3.7 GB) |
 | `tamago/` std, arm64 | 18.1 s | | 6.6 s | 24.1 s |
 | `tamago/` goos module | 2.5 s | 4.4 s | 2.2 s | 2.7 s |
 | `box/` (print only) | 2.3 s | 4.4 s | 2.2 s | 2.4 s |
 | `x509roots/` (print only) | 1.9 s | 3.5 s | 2.0 s | 2.4 s |
-| `net/http` alone (`bin/g2a-print`, 29 files) | 2.7 s | 10.1 s | | 3.8 s |
+| `net/http` alone (`bin/repr-go print`, 29 files) | 2.7 s | 10.1 s | | 3.8 s |
 | `bin/arbace-go --build`, amd64 and arm64 (a2g on the JVM in both) | | | 137 s | 153 s |
 | `bin/arbace-go --build --box`, amd64 and arm64 | | | 85 s | 97 s |
-| the round trip's conversion and printing (`bin/g2a roundtrip amd64`) | | | 36.7 s | 207 s (13 GB) |
+| the round trip's conversion and printing (`bin/repr-go roundtrip amd64`) | | | 36.7 s | 207 s (13 GB) |
 
 Go after is about 3 times the JVM's wall time on the large trees (CPU: about 2 times the JVM's
 on the program, 488 s against 237 s), against 16 times before; on small trees the
@@ -702,12 +712,12 @@ The converter was not tuned (left for S3's fixpoint, which needs only the printe
 ### What changed
 
 The survey's measure (§8.3, about 7 times slower) was of one package; the whole program was
-16 times slower, for reasons in g2a, mostly sequential work the evaluator makes long:
+16 times slower, for reasons in repr/go, mostly sequential work the evaluator makes long:
 
-1. **Reading once, in parallel.** `bin/g2a build` read every forms file twice (`package-file?`,
+1. **Reading once, in parallel.** `bin/build-go` read every forms file twice (`package-file?`,
    then `collect`), one at a time: 42 s of the 97 s left on Go once printing was parallel (the
    reader is Go code, but slower than the JVM's: `LispReader` through four `Reader` layers and
-   jrt's regex for each symbol). Now `arbace.g2a.build/read-all` reads the files once, in
+   jrt's regex for each symbol). Now `arbace.build.go/read-all` reads the files once, in
    parallel (`pmap`), and `print/collect` takes a reading function: 7 s.
 2. **Printing in parallel.** Packages were printed in parallel, but each package's files one
    after another, and a file whole: jrt's 910 files in a row, and `a2g_classes.ae` (4 MB, 8,249
@@ -746,7 +756,7 @@ The survey's measure (§8.3, about 7 times slower) was of one package; the whole
 
 Profiles (Go's pprof, `ARBACE_CPUPROFILE`) attribute the rest to the evaluator itself, spread
 thin (frames, `Code` dispatch, boxing, allocation; the collector 7-16%): no single hot spot
-remains in g2a. Tried and not kept: `GOGC=400` for g2a's runs (13% less CPU time, the same wall
+remains in repr/go. Tried and not kept: `GOGC=400` for repr/go's runs (13% less CPU time, the same wall
 time, a third more memory: the executable's own setting, 200, is used); per-function
 instrumentation (wrapped vars: its cost hid the costs measured).
 
@@ -754,10 +764,10 @@ instrumentation (wrapped vars: its cost hid the costs measured).
 
 - a2g on the Go executable (S2's a2g, `s3-fixpoint`), then the chain G1 → G2 → G3 with
   `G2A_HOST=go`. (Since done: "S3: the Go-hosted fixpoint", below.)
-- g2a embedded in the executable and prepared in its image would save its load from source (1.6
+- repr/go embedded in the executable and prepared in its image would save its load from source (1.6
   s per run); compiling the tools' namespaces to Go (B1-PLAN step 7's second half, AOT to Go
   forms) is what would close most of the remaining 2-3x: it needs a2g's embedding (`embed.ae`
-  excludes `arbace/g2a/`). (Since done: S6, the tools compiled into stage 0, SA133; "S6: the
+  excludes `arbace/repr/go/`). (Since done: S6, the tools compiled into stage 0, SA133; "S6: the
   compiled build as the default".)
 - The converter on Go (5.6x the JVM's time, 13 GB) is untuned; the round trip is not part of
   the build.
@@ -770,11 +780,11 @@ Proposed to the user; the recommended choice is applied on the branch `s3-g2a`.
 
 The user accepted SA30-SA32 as recommended (2026-10-12, after the merge into main).
 
-- **SA30 g2a's host chosen by `G2A_HOST`.** (a) `G2A_HOST=jvm|go` in `bin/lib/g2a-host.bash`
-  for `bin/g2a build`, `print`, `convert` (and everything built on them: `bin/arbace-go`,
+- **SA30 repr/go's host chosen by `G2A_HOST`.** (a) `G2A_HOST=jvm|go` in `bin/lib/repr-go-host.bash`
+  for `bin/build-go`, `bin/repr-go print`, `read` (and everything built on them: `bin/arbace-go`,
   `bin/jrt`, `bin/tamago-vendor`), the JVM the default until the fixpoint; the executable
-  `G2A_GO_EXE`, else the host architecture's `target/arbace-go`, run from a copy; (b) a separate
-  `bin/g2a-go`; (c) Go the default now. *Recommended: (a)*: one switch for every caller, which
+  `REPR_GO_EXE`, else the host architecture's `target/arbace-go`, run from a copy; (b) a separate
+  `bin/repr-go-go`; (c) Go the default now. *Recommended: (a)*: one switch for every caller, which
   S3's chain sets; the default moves with the fixpoint (S3/S4).
 - **SA31 The printer parallel within a package and a file.** (a) files of a package in
   parallel, a long file's declarations in chunks joined when the state matches, else printed
@@ -786,10 +796,10 @@ The user accepted SA30-SA32 as recommended (2026-10-12, after the merge into mai
 
 ## S3: the Go-hosted fixpoint
 
-The other half of S3 (branch `s3-fixpoint`, 2026-10-12; g2a's half is "S3: g2a on Go" above):
+The other half of S3 (branch `s3-fixpoint`, 2026-10-12; repr/go's half is "S3: repr/go on Go" above):
 a2g (`arbace/a2g`, with the class forms' analysis `arbace.classes.*`) run by the native Go
-executable, so that the whole build of the Go program runs on Arbace's Go build: a2g, g2a's
-printing and `bin/g2a build`'s driver on the executable, `go build` as a host process. The exit
+executable, so that the whole build of the Go program runs on Arbace's Go build: a2g, repr/go's
+printing and `bin/build-go`'s driver on the executable, `go build` as a host process. The exit
 criterion (survey §9.1): G1, built by today's JVM chain, builds G2; G2 builds G3; G2 = G3, and
 a2g's program tree on Go equal to the JVM's.
 
@@ -844,12 +854,12 @@ After both (the fixpoint's runs): a2g on Go 1,365 s (load 113, reach 56, transla
 through member tables, lazy seqs, boxing); the collector marks on other cores (GOGC 400: about
 105 collections of a 1.1 GB live heap, 25% of the CPU samples, under 1% of the wall time).
 The ratio, 15-20x, is the evaluator's on this kind of code (SPEED-NOTES: 5-500x, 54x geometric
-mean on benchmarks); what closes it is compiling Arbace to Go (S6): a2g, the analyzer and g2a
+mean on benchmarks); what closes it is compiling Arbace to Go (S6): a2g, the analyzer and repr/go
 built into the executable as Go rather than evaluated.
 
 ### The build on Go: `ARBACE_GO_HOST`, `A2G_HOST`
 
-- `bin/a2g` takes `A2G_HOST=jvm|go` (as `bin/g2a`'s `G2A_HOST`, SA30): `go` runs `-m
+- `bin/a2g` takes `A2G_HOST=jvm|go` (as `bin/repr-go`'s `G2A_HOST`, SA30): `go` runs `-m
   arbace.a2g.main` on `A2G_GO_EXE`, else `target/arbace-go/<host arch>/arbace`, from a copy in
   `.tmp/a2g-host/`, the checkout first on `ARBACE_PATH` (a2g's namespaces are not embedded: they
   load from source; the analysis is the executable's own, embedded and prepared), with
@@ -857,7 +867,7 @@ built into the executable as Go rather than evaluated.
 - `ARBACE_GO_HOST=go bin/arbace-go --build` sets both: the build's Arbace tools run on the
   executable of the previous build. The JVM stays the default until S4.
 - `bin/arbace-go --fixpoint` runs the chain (amd64): G1 by the JVM chain, G2 by G1, G3 by G2,
-  each a whole `--build` (a2g, `bin/g2a build`, the image, the final link) in
+  each a whole `--build` (a2g, `bin/build-go`, the image, the final link) in
   `target/arbace-go/fixpoint/g{1,2,3}`; then it compares a2g's trees (`diff -r`, `report.edn`
   without its times) and the executables byte for byte, prints their hashes, and writes
   `g3/printed-by`. `ARBACE_SEED_GO_BUILD=target/arbace-go/fixpoint/g3 bin/seed --go-make` packs
@@ -868,9 +878,9 @@ built into the executable as Go rather than evaluated.
 On `s3-fixpoint` with main at `aea0b98` merged (commit `f293ba7`), `bin/arbace-go --fixpoint`,
 48 min 46 s:
 
-| | built by | a2g | `bin/g2a build` | the build |
+| | built by | a2g | `bin/build-go` | the build |
 |---|---|---:|---:|---:|
-| G1 | the JVM chain (a2g and g2a on `target/stage2`) | 79 s | 9 s | 100 s |
+| G1 | the JVM chain (a2g and repr/go on `target/stage2`) | 79 s | 9 s | 100 s |
 | G2 | G1 (`A2G_HOST=go`, `G2A_HOST=go`) | 1,365 s | 31 s | 1,407 s |
 | G3 | G2 | 1,377 s | 31 s | 1,419 s |
 
@@ -912,7 +922,7 @@ uncompressed, the zlib not yet written).
   parallel (translation per class is independent but for the shared literal pools). (Since done:
   a2g in parallel in S4, SA50-SA53; S6 the remedy, "S6: the compiled build as the default".)
 - The edge (`bin/a2g-edge`) and its recording stay on the JVM (D4).
-- `bin/arbace-go --build-tests` (the test build) and `--build --box` on Go: the same a2g and g2a,
+- `bin/arbace-go --build-tests` (the test build) and `--build --box` on Go: the same a2g and repr/go,
   not separately proven here. (Since done: both built by stage 0 in S4's proofs, "S4: the JVM
   removed".)
 
@@ -962,10 +972,10 @@ and ASM). The inventory above ("S4: inventory for the JVM's removal") is done bu
 
 What changed, in one paragraph: the bootstrap starts from the Go-source seed
 `seed/arbace-seed-go.tar.xz` (the fixpoint's printed program, committed with this stage); Go's
-toolchain builds it into stage 0 (`bin/seed --build`), which hosts every Arbace tool (a2g, g2a,
+toolchain builds it into stage 0 (`bin/seed --build`), which hosts every Arbace tool (a2g, repr/go,
 c2a, the suite's runner) with their namespaces loaded from the checkout; `bin/arbace-go --build`
 is a Go-hosted build by stage 0, `--fixpoint` builds G1 by stage 0, G2 by G1, G3 by G2. The JVM
-runs only the frozen jar of `arbace-for-java-26-v4` (pinned by hash): the oracle's reference, j2a
+runs only the frozen jar of `arbace-for-java-26-v4` (pinned by hash): the oracle's reference, repr/java
 (javac), and the recording or checking of what the JVM answered (the edge, the JDK's forms, the
 fixtures' forms, data generators). The JVM Arbace's build and products, ASM, the bytecode back
 ends, the class loader and the JVM-only namespaces left main (they are on `arbace-for-java-26`):
@@ -984,10 +994,10 @@ ends, the class loader and the JVM-only namespaces left main (they are on `arbac
   names the procedure, not the host (SA43), so the reprint is identical.
 - **`bin/lib/host.bash`** (SA40): `arbace_host_exe`, the executable that hosts the tools:
   `ARBACE_HOST_EXE` when set, else stage 0, built from the seed when missing or when the seed
-  changed. `bin/a2g` and `bin/lib/g2a-host.bash` take it (`A2G_GO_EXE`, `G2A_GO_EXE` name another,
+  changed. `bin/a2g` and `bin/lib/repr-go-host.bash` take it (`A2G_GO_EXE`, `REPR_GO_EXE` name another,
   as the fixpoint does); `bin/lib/tools.bash`'s `arbace_tool` too (below). The executable runs
-  from a copy (`.tmp/a2g-host`, `.tmp/g2a-host`) as in S3.
-- **`bin/arbace-go`**: `--build` is Go-hosted (a2g and g2a on the host; `ARBACE_GO_HOST` left:
+  from a copy (`.tmp/a2g-host`, `.tmp/repr-go-host`) as in S3.
+- **`bin/arbace-go`**: `--build` is Go-hosted (a2g and repr/go on the host; `ARBACE_GO_HOST` left:
   there is no other host); `--fixpoint` (SA42) builds G1 by the host, G2 by G1, G3 by G2, and
   holds when G2 = G3 (a2g's trees and the executables); G1 = G2 and host = G1 are reported, and
   hold when the host is stage 0 of a seed printed from the same sources; `--gate-build` builds the
@@ -1007,7 +1017,7 @@ ends, the class loader and the JVM-only namespaces left main (they are on `arbac
   `tls/host` (the JVM's java.nio and `javax.net.ssl` host layers left: BOX-NOTES.md, "After
   standalone S4"), `core_bean`, `java/io`; `s4-backend` did the same for `genclass`, `core_proxy`,
   `main`, `core/server`, `reflect/java`, `classes/native`, `go`, `interp` (SA83). Left as variants:
-  `classes/{analyze,env,types}.subst.ae` (the front end still runs on the frozen JVM for j2a and
+  `classes/{analyze,env,types}.subst.ae` (the front end still runs on the frozen JVM for repr/java and
   the edge) and the class forms' variants `arbace/lang/go/*.ae` (SA82).
 
 ### a2g in parallel (`s4-a2gpar`, SA50-SA53)
@@ -1044,7 +1054,7 @@ temporaries in order) and the reach (about 165 of the 242 s): S6's to close.
 `bin/lib/tools.bash`'s `arbace_runtime` (`target/stage2`) gave way to `arbace_tool [-p DIR]...
 [-s NS]... [-D NAME=VALUE]... ARG...`: the tools' host run with the checkout, then the tool's
 directories, on `ARBACE_PATH`; system properties as `-e (System/setProperty ...)` (SA70). The
-tools' namespaces not embedded (g2a, a2g, j2a, test/'s) load from the checkout as on the JVM; c2a,
+tools' namespaces not embedded (repr/go, a2g, repr/java, test/'s) load from the checkout as on the JVM; c2a,
 embedded, is loaded from the checkout over the executable's copy (`-s`, SA71). `G2A_HOST` and
 `A2G_HOST` only guard against `jvm` now (SA73).
 
@@ -1053,15 +1063,15 @@ embedded, is loaded from the checkout over the executable's copy (`-s`, SA71). `
   listing and the report on the host (SA74), the jars unzipped; the rename runs on the JVM stages
   (`CLOJURE_TESTS_RENAME`, `CLOJURE_TESTS_PRECOMPILED`) are gone; the renamed suite, runner and six
   libraries equal the JVM's (`diff -r`).
-- g2a: `bin/g2a` (read, convert, build, roundtrip), `g2a-print`, `-print-tests` (268),
-  `-convert-tests` (150), `-build-tests` (30) on Go; `roundtrip amd64` 248 s, `linux/amd64` 255 s
+- repr/go: `bin/repr-go` (read, build, roundtrip; since 2026-10-17 the build is `bin/build-go`), `print`, `test print` (268),
+  `test read` (150), `bin/build-go test` (30) on Go; `roundtrip amd64` 248 s, `linux/amd64` 255 s
   (6.4-6.8 GB), no regressions.
 - a2g: `bin/a2g-check` on Go (2,184 s): 8,958 of 9,022 per architecture, its programs and counts
   identical to a JVM run; its programs run without the host's `ARBACE_PATH` (SA79); the fixtures'
   results recorded on a JVM, `test/a2g/fixtures.edn` (`bin/a2g-check --record-fixtures`, on the
   frozen jar, SA72); `a2g-evalproof` and `a2g-race` as before; `test/a2g/eval_ops.ae` on Go writes
   `CompilerOps.ae` byte for byte (SA78).
-- The vendoring tools through the Go-hosted g2a: `x509roots-vendor verify`, `check`;
+- The vendoring tools through the Go-hosted repr/go: `x509roots-vendor verify`, `check`;
   `box-vendor roundtrip` (20 of 20), `kvm-tests`, `purego-check`; `tamago-vendor verify` (383 s),
   `print`, `check` (both guests identical); `bin/jrt build`, `test`, `print`.
 - `bin/net-check`'s client on the host (SA77); `bin/java-surface` retired, its output
@@ -1074,20 +1084,20 @@ What stays on a JVM runs on the frozen jar of `arbace-for-java-26-v4` (`bin/lib/
 built once from the tag, pinned by `test/oracle/frozen-jar.sha256`), never on a JVM build of the
 checkout. The jar's loader reads `.clj` only, and loads a namespace from its source when the
 source is newer than its `__init` class (the jar's entries are dated 2000-01-01): `frozen_view`
-puts `.clj` links to the checkout's tool namespaces (j2a, a2g, c2a, g2a, the front end
+puts `.clj` links to the checkout's tool namespaces (repr/java, a2g, c2a, repr/go, the front end
 `arbace.classes.{types,env,parse,lower,analyze}`, and every namespace the jar lacks: `opcodes`,
 `go`, `jvm`, `interp`) *before* the jar on the class path; `arbace.core`, the runtime and the
 jar's own back end (`native`, `emit`, `compiler` ...) stay v4's (SA62). On it:
 
-- j2a (O1 (a)): `bin/j2a`, `bin/j2a-check`, `bin/jrt-convert`, `bin/clojure-tests
-  --java-fixtures`. j2a's checks are forms-level (O2 (b), SA63): the baseline converted with
-  `--check` against a SHA-256 manifest (`test/j2a/expected/baseline.sha256`, 189 files), the
-  samples against their committed forms (`test/j2a/expected/java`, `module`), `--update` to
+- repr/java (O1 (a)): `bin/repr-java`, `bin/repr-java check`, `bin/jrt-convert`, `bin/clojure-tests
+  --java-fixtures`. repr/java's checks are forms-level (O2 (b), SA63): the baseline converted with
+  `--check` against a SHA-256 manifest (`test/repr/java/expected/baseline.sha256`, 189 files), the
+  samples against their committed forms (`test/repr/java/expected/java`, `module`), `--update` to
   rewrite them; and `--suite` (O2 (a)): the converted baseline compiled by the jar's own compiler
-  (`test/j2a/build.ae`, SA67) and Clojure's suite run on it: 83 namespaces, 20,718 of 20,750, no
+  (`test/repr/java/build.ae`, SA67) and Clojure's suite run on it: 83 namespaces, 20,718 of 20,750, no
   regressions against `test/baseline-results.edn`. `bin/class-forms-check` and
   `test/classes/check_converted.ae` left; `jrt-convert`'s `check` step compares with the committed
-  forms as a report (SA64); `jdk/provenance.edn` and the fixtures' provenance name j2a's host
+  forms as a report (SA64); `jdk/provenance.edn` and the fixtures' provenance name repr/java's host
   (SA65).
 - a2g's edge (`bin/a2g-edge update`, `verify`, `trace`): a2g and the front end from the checkout;
   `--record-edge` reads class files through `arbace.classes.jvm` (ASM's ClassReader, in the jar);
@@ -1125,7 +1135,7 @@ ASM (`arbace/asm.ae`, `arbace/asm/`, 14,747 lines) and the JVM's bytecode back e
   `native`) with `opcodes`, `go`, `interp` (the Go build's interpreter, no longer a variant) and
   `jvm` (env's class-file reading with ASM's ClassReader, loaded by `requiring-resolve` only for a
   class read from a class file, i.e. on the frozen jar; left out of the embedded tree; SA84).
-  `emit`, `compiler`, `shape`, `verify`, `build`, `boot`, `arbace/j2a/build.ae`,
+  `emit`, `compiler`, `shape`, `verify`, `build`, `boot`, `arbace/repr/java/build.ae`,
   `bin/class-forms-tests` with `test/classes/`, `test/classforms/jvm_check.ae` left. The analyzer's
   accessors are data only.
 - `Compiler.ae` lost its 239 members that name ASM (the emit methods, ASM's fields and constants),
@@ -1166,9 +1176,9 @@ seed); `bin/arbace-go --gate-build` (the executable and the test build by stage 
 then concurrently the smoke test, Clojure's suite on the test build (against
 `test/arbace-go-results.edn`) and the oracle on the executable against the frozen reference
 (`test/oracle/known-go-amd64-frozen.edn`). `--full` adds, concurrently: on the frozen JVM
-`j2a-check --suite`, `jrt-convert verify`, `a2g-edge verify`, `--java-fixtures verify`; the Go
+`repr-java-check --suite`, `jrt-convert verify`, `a2g-edge verify`, `--java-fixtures verify`; the Go
 build afresh with its smoke test, the box's guests from `tamago/` (`tamago-vendor check`) and the
-box's smoke test, then `bin/arbace-go --fixpoint`; g2a's round trips, the box's vendoring checks,
+box's smoke test, then `bin/arbace-go --fixpoint`; repr/go's round trips, the box's vendoring checks,
 `tamago-vendor verify`, `x509roots-vendor`. The gate ignores `ARBACE_HOST_EXE`: its host is stage
 0. `bin/class-forms-tests` and the suite on stages 1 and 2 left with the JVM.
 
@@ -1241,13 +1251,13 @@ the JVM-only namespaces removed, ported when a use appears).
   of the analysis or the runtime); `--verify` requires all four equal for the seed's own commit.
   Accepted.
 - **SA43 `SEED.edn`'s `:printed-by` names the procedure.** (a) "the Go-hosted fixpoint ...: G3,
-  a2g and g2a on G2, G2 built by G1, G1 by the host executable", without the host's identity; (b)
+  a2g and repr/go on G2, G2 built by G1, G1 by the host executable", without the host's identity; (b)
   the host's hash. *Recommended: (a)*: `--verify` runs the same procedure from another host (the
   seed's stage 0) and must print the same tar; the fixpoint makes G3 independent of the host.
   Accepted.
 - **SA44 The gate.** (a) As above: the essential gate builds both executables by stage 0
   (cached by key), then smoke test, suite and oracle; `--full` adds the frozen JVM's checks, the
-  fresh build with the box, the fixpoint, g2a and the vendoring checks; (b) the fixpoint in the
+  fresh build with the box, the fixpoint, repr/go and the vendoring checks; (b) the fixpoint in the
   essential gate (three builds per change, about 15 minutes); (c) the suite and the oracle in
   `--full` only. *Recommended: (a)*: the survey's exit criterion makes the suite on Go the gate's
   suite, and a parallel a2g makes a cache miss about 10 minutes of builds. Accepted.
@@ -1285,20 +1295,20 @@ the JVM-only namespaces removed, ported when a use appears).
     `arbace.classes.native`; (b) without `native` (the jar's compiler's hook into its own back
     end), plus the tools' namespaces and every namespace the jar lacks, the view before the jar.
     *Recommended: (b)*. Accepted.
-  - **SA63 j2a-check's forms-level criterion.** (a) every expected form committed; (b) the
+  - **SA63 repr-java-check's forms-level criterion.** (a) every expected form committed; (b) the
     samples' forms and a SHA-256 manifest of the 2.2 MB baseline; (c) hashes only.
     *Recommended: (b)*. Accepted.
   - **SA64 jrt-convert's check step.** (a) dropped; (b) a comparison with the committed
     `jdk/forms`, as a report; (c) the forms analysed by the front end. *Recommended: (b)*;
     `verify` stays the proof. Accepted.
-  - **SA65 Provenance names j2a's host** (`:host "arbace-for-java-26-v4 <sha>"`), since the output
-    depends on the runtime running j2a; alternative: the j2a sources' hash only. *Recommended:
+  - **SA65 Provenance names repr/java's host** (`:host "arbace-for-java-26-v4 <sha>"`), since the output
+    depends on the runtime running repr/java; alternative: the repr/java sources' hash only. *Recommended:
     name it*. Accepted.
   - **SA66 What moved from `test/native`**: the nine named tests and the semantic parts of
     inline, reflect, virtual_threads; retired: aot, verify, version, box, shapes, opcodes and
     stack checks, the property opt-in; NPE messages compared by class only, `(shutdown-agents)`
     at the end. Accepted.
-  - **SA67 j2a's build driver** in `test/j2a/build.ae`, on the jar's own compiler. Accepted.
+  - **SA67 repr/java's build driver** in `test/repr/java/build.ae`, on the jar's own compiler. Accepted.
   - **SA68 gen_corpus and class_scripts.** class_scripts kept on the frozen jar; gen_corpus
     retired with `test/classes` (at integration), its corpus kept as data. Accepted.
   - **SA69 a2g-edge's fixtures** default to the committed `test/java-fixtures/forms`.
@@ -1573,7 +1583,7 @@ over too.
 Go refuses an import cycle and wants a type's methods in its package. A class-level split (the
 Java packages cannot be the unit) needs, besides a2g writing N packages (each its shared files,
 names qualified across packages, the partition computed from the components and checked
-acyclic, jrt's eager initializations and the registrations' `Go:` names, `bin/g2a build`'s
+acyclic, jrt's eager initializations and the registrations' `Go:` names, `bin/build-go`'s
 packages, the seed and the fixpoint), one of:
 
 - **linkname pulls** for the upward value edges: `//go:linkname f arbace/jrt/x.F` in the lower
@@ -1699,7 +1709,7 @@ S4 ("S4: the JVM removed", Left) and SA90 (b).
 - **`bin/box-vendor convert`** (S0's replay): it converts the packages the clone holds, so the
   replay from go-whim's commit no longer asks for the launcher, which is Arbace's own (S1) and
   comes only with an edited clone (`--from`). Run into `.tmp/s5/bv-out` (52 s): it succeeds;
-  against S0's commit `3fa588c` the forms differ only by g2a's later layout data
+  against S0's commit `3fa588c` the forms differ only by repr/go's later layout data
   (`:go/breaks [4]` → `[[4 123]]`) and purego, vendored after S0.
 
 ### Checks
@@ -1710,7 +1720,7 @@ S4 ("S4: the JVM removed", Left) and SA90 (b).
   known, 0 new.
 - The box (above): built, smoke test 113 ok, its oracle 22,052 of 22,105, 53 known, 0 new.
 - The merged front end on the frozen jar: `bin/a2g-edge verify` (`jdk/edge.edn` is the JVM's
-  answer) and `bin/j2a-check` (the baseline, samples and module forms as expected).
+  answer) and `bin/repr-java check` (the baseline, samples and module forms as expected).
 
 ### Amendments
 
@@ -1750,7 +1760,7 @@ decision; the recommended choice is applied meanwhile.
 ### The design
 
 **The route.** An analyzed namespace (`Compiler`'s `Expr` trees) is compiled to **class forms**,
-which a2g translates into Go forms like the runtime's own classes, which g2a prints and gc
+which a2g translates into Go forms like the runtime's own classes, which repr/go prints and gc
 builds. Not to Go forms directly: a2g already implements Java's semantics in Go (the object model
 and dispatch, exceptions and `finally`, monitors, boxing, statics and their initialization, the
 member tables reflection reads, stack traces mapped to class forms lines), and the JVM's bytecode
@@ -1820,7 +1830,7 @@ shadow the compiled ones by name, as a new class loader's do on the JVM (jrt's
 prepare run with `ARBACE_COMPILE`, which writes both the image and the compiled tree, then a2g
 again with the tree as one more input (`bin/a2g --input`, as the test build gives it the Java
 fixtures), gc (the runtime's packages but `lang` from its cache), and the final link with the
-image (now only the namespaces that stay evaluated). The tools (a2g, g2a, c2a, the suite's
+image (now only the namespaces that stay evaluated). The tools (a2g, repr/go, c2a, the suite's
 runner, the class forms' front end) are compiled the same way once they are among the program's
 namespaces: a2g's load (106 s) and reach (55 s) are the analyzer and a2g evaluated, and the
 measured target of this stage (SA133, SA134).
@@ -1869,7 +1879,7 @@ namespaces' Go and its stage 0 hosts the tools compiled.
   (`(conj "" 1)`'s `ClassCastException` message, 8 cases); a fn's `^long` return not converted
   (`hash-ordered-coll` returned an `Integer`, 13 cases of `hashing.ae`); two fns of one name
   (core's bootstrap `dotimes` and the final one) given one class, the first's (1 case).
-- **With the fixes and the tools** (a2g, g2a, `arbace.aot` embedded, SA133; 95 sources, 7,334
+- **With the fixes and the tools** (a2g, repr/go, `arbace.aot` embedded, SA133; 95 sources, 7,334
   classes): the oracle 22,504 of 22,558, the 53 known mismatches and 1 new
   (`(hash-ordered-coll "abc")`: `Iterable` taken for a functional interface; the back end now asks
   the analysis's `FISupport`, `Compiler$AST/fiMethod`). One compiled tool namespace failed a2g's
@@ -1959,8 +1969,8 @@ Proposed (2026-10-13); the recommended choice is applied meanwhile.
   the namespaces that use it breaks the bootstrap, and the result depends on the host;
   (c) the image only (no compilation). *Recommended: (a)*; the second a2g run shrinks when a2g
   is compiled (SA133) and can later reuse the first's world (its load).
-- **SA133 The tools in the program.** (a) a2g, g2a, c2a and `arbace.aot` embedded and compiled
-  like the namespaces (j2a stays out: it needs javac), the host running them compiled; a tool's
+- **SA133 The tools in the program.** (a) a2g, repr/go, c2a and `arbace.aot` embedded and compiled
+  like the namespaces (repr/java stays out: it needs javac), the host running them compiled; a tool's
   source on `ARBACE_PATH` that differs from the program's embedded copy is loaded from source
   (`RT.toolSource`: the checkout's change runs, evaluated, until the next build); (b) the tools
   embedded and compiled, the program's copy always used (a change in the checkout takes effect
@@ -2133,7 +2143,7 @@ of each call.
 `bin/arbace-go --build` for amd64 on the 64 GiB host (16 jobs; minutes:seconds, the steps in
 seconds; the host compile is the host's own preparing and compiling of the namespaces, SA144):
 
-| build | host compile | a2g | g2a build | total |
+| build | host compile | a2g | build-go | total |
 |---|---:|---:|---:|---:|
 | evaluated (`ARBACE_AOT=0`) on stage 0, today's (the tools evaluated) | | 214 | 101 | 5:40 |
 | compiled, two a2g runs, before the changes | | | | 12:00 |
@@ -2156,16 +2166,16 @@ makes that rarer). What changed:
   `Method.getName` keeps its interned name (the intern table's lock was a fifth of a2g's CPU on
   a compiled host). Left: parsing 18 s, analysis 60 s, reachability 30 s, translation 35 s,
   writing 40 s (the Go forms' texts 24 s).
-- **g2a build** keeps a cache of printed packages (`--print-cache DIR`, bin/arbace-go's
-  `.tmp/g2a-print-cache`, trimmed as Go's build cache is): a package's Go files by the SHA-256 of
-  the host's identity (the executable's and g2a's sources' hashes: `G2A_HOST_ID`, set by
-  `bin/lib/g2a-host.bash`), the printing options, the package's path and its forms files. Printing
-  is 550 CPU-seconds of g2a's run on a compiled host; with the cache a build reprints what
+- **build-go** keeps a cache of printed packages (`--print-cache DIR`, bin/arbace-go's
+  `.tmp/repr-go-print-cache`, trimmed as Go's build cache is): a package's Go files by the SHA-256 of
+  the host's identity (the executable's and repr/go's sources' hashes: `REPR_GO_HOST_ID`, set by
+  `bin/lib/repr-go-host.bash`), the printing options, the package's path and its forms files. Printing
+  is 550 CPU-seconds of repr/go's run on a compiled host; with the cache a build reprints what
   changed (37 s to 17 s for an unchanged program).
 - **Each source compiled in an id space of its own** (SA148). A fn's class is named by the id
   counter (`fn__123`), which ran over every namespace loaded before: a change to one namespace
-  renamed the classes of all those loaded after it, so a2g translated them anew, g2a printed
-  them anew and gc compiled them anew (g2a 69 s after `a2g/world.ae` changed). While a program
+  renamed the classes of all those loaded after it, so a2g translated them anew, repr/go printed
+  them anew and gc compiled them anew (repr/go 69 s after `a2g/world.ae` changed). While a program
   compiles namespaces (`ARBACE_COMPILE`), `Compiler.load` gives each source an id space
   (`RT.ID_SPACE`) of a million ids, its slot from the source path's hash (the next free slot
   when two collide: the sources of one namespace, `core.ae`, `core_print.ae` ..., must not share
@@ -2231,7 +2241,7 @@ The box's guest is 209.3 MB (the launcher with it 214.5 MB); its smoke test (`bi
 
 `ARBACE_AOT` defaults to 1 in bin/arbace-go (`ARBACE_AOT=0`: the namespaces evaluated, the image
 of prepared namespaces, as before S6), so the gate's builds, the fixpoint and the seed build the
-compiled program. A two-run build's second a2g and g2a run on the host, or on the first program
+compiled program. A two-run build's second a2g and repr/go run on the host, or on the first program
 when the host has no id spaces (a program older than S6): the second run then translates as a
 one-run build's host would.
 
@@ -2286,9 +2296,9 @@ Proposed (2026-10-14); the recommended choice applied on `s6-compile`.
   initializations.
 - **SA146 The build's time.** (a) The host compile's files printed on 16 threads; a2g's runtime
   analysis beside the compiled classes' and the stand-ins' reachability continued, not
-  recomputed; g2a build's cache of printed packages, keyed by the host's identity and the
+  recomputed; build-go's cache of printed packages, keyed by the host's identity and the
   package's forms (built: 4:46 for the usual build, 5:14 cold, against 5:40 today); (b) without
-  the print cache (g2a then prints every package: 48 s for the usual build's 26); (c) also reuse
+  the print cache (repr/go then prints every package: 48 s for the usual build's 26); (c) also reuse
   a2g's analysis of the runtime between builds (a cache of analyzed class forms: more machinery,
   for the runtime's analysis, which now runs beside the compiled classes').
   *Recommended: (a)*.
@@ -2302,7 +2312,7 @@ Proposed (2026-10-14); the recommended choice applied on `s6-compile`.
 - **SA148 Each source compiled in an id space of its own.** (a) While compiling
   (`ARBACE_COMPILE`), each source's load in a space of a million ids, its slot from the path's
   hash, the next free one on a collision (built: a namespace's change renames no other
-  namespace's classes; g2a reprints and gc recompiles that namespace's package alone);
+  namespace's classes; repr/go reprints and gc recompiles that namespace's package alone);
   (b) a space per namespace (the sources of one namespace, `core.ae` and `core_print.ae`, would
   then depend on each other's order); (c) the one counter, as before (one change recompiles every
   namespace loaded after it: about a minute more). *Recommended: (a)*.
@@ -2494,8 +2504,8 @@ as before. The gate's builds (`--gate-build`: the executable, then the test buil
   cold build 2:40 → 1:40. The packages' archives 2.15 GB → 1.35 GB, the compiled namespaces'
   1.37 GB → 0.50 GB (`aot_arbace_core` 186 MB → 48 MB).
 - **The build** (`bin/arbace-go --build`, amd64, 16 jobs), the usual case, one a2g run (the
-  host of the checkout's runtime): main 5:20 (host compile 50 s, a2g 268 s, g2a build 44 s);
-  now the fixpoint's G2 4:13 and G3 4:19 (host compile 54-55 s, a2g 222 s, g2a build 27 s). Two
+  host of the checkout's runtime): main 5:20 (host compile 50 s, a2g 268 s, build-go 44 s);
+  now the fixpoint's G2 4:13 and G3 4:19 (host compile 54-55 s, a2g 222 s, build-go 27 s). Two
   runs (a change to the runtime): main 9:31; now the fixpoint's G1 6:18.
 
 ### The fixpoint and the seed
@@ -2605,7 +2615,7 @@ guided the changes more than single timings.
 ### Where the time went (`dfe2e5e`)
 
 A one-run build: the host compiling the namespaces 53 to 96 s (one core: loading them 29 s, the
-back end's emit 28 s, the printing in parallel 10 s), a2g 160 to 210 s alone, g2a's builds 20 s
+back end's emit 28 s, the printing in parallel 10 s), a2g 160 to 210 s alone, build-go's builds 20 s
 (amd64) then 18 s (arm64), the image and the links seconds. In a2g (161 s, its own CPU sampled
 each second), about 130 s on one core: reading, entering and resolving the classes (30 s), the
 runtime's analysis on its thread beyond the compiled namespaces' (15 s), reachability (21 s),
@@ -2642,7 +2652,7 @@ reflective call.
 - **report.edn printed directly** (SA161): a key per line, a map or vector of more than one
   element an element per line; `arbace.pprint` took about 18 s on the critical path. The
   fixpoint's comparison (the line ` :times {...}` removed) is unchanged.
-- **g2a's architectures at once** (SA162): amd64 and arm64 built concurrently (their own work
+- **repr/go's architectures at once** (SA162): amd64 and arm64 built concurrently (their own work
   modules; the print cache's entries are written by rename).
 - **The edge out of the runtime key** (SA163): `jdk/edge.edn` is a2g's data, not the runtime's;
   its re-recording at the milestone (`c3fdd36`) had made every build two runs.
@@ -2659,7 +2669,7 @@ compile to GOMAXPROCS (go1.27's `compilerConcurrency`).
 |---|---|---|
 | a2g alone (the same compiled tree) | 160 to 210 s | about 100 s |
 | its load (analysis of the compiled namespaces) | 72 s (34 s) | 37 s (21 s), the runtime's overlapped |
-| a one-run build | about 268 s | 197 s: the host's compiling 61 s, a2g done at 158 s (ready after 54 s), g2a 33 s |
+| a one-run build | about 268 s | 197 s: the host's compiling 61 s, a2g done at 158 s (ready after 54 s), repr/go 33 s |
 | the fixpoint's one-run builds (G2 by G1, G3 by G2) | 4:13, 4:19 (S6's size work) | 2:57, 2:44 |
 
 The fixpoint at `60a1502` (from the seed's stage 0, G1 in two runs, 5:39): a2g's programs G1 =
@@ -2683,7 +2693,7 @@ byte**, `b6f2e89e...`, the three builds one run each from the new stage 0, 561 s
   shared by the sources and their order is the output's.
 - a2g's reachability (19 s, one core, no single hotspot) and the translation's sequential steps
   (18 s: dyn, registrations, packages, collisions; per package, parallelizable but jrt's first).
-- g2a's builds: Go compiling `jrt`, one package of the program's largest (94 s in the box): a
+- build-go's builds: Go compiling `jrt`, one package of the program's largest (94 s in the box): a
   split into packages.
 
 ### Amendments
@@ -2695,7 +2705,7 @@ byte**, `b6f2e89e...`, the three builds one run each from the new stage 0, 561 s
   critical path.
 - **SA161 report.edn's layout.** (a) Printed directly (built); (b) pretty-printed as before.
   *Recommended: (a)*.
-- **SA162 g2a's architectures built at once.** (a) Concurrently (built); (b) one after the
+- **SA162 repr/go's architectures built at once.** (a) Concurrently (built); (b) one after the
   other. *Recommended: (a)*.
 - **SA163 a2g's edge outside the runtime key.** (a) Left out (built); (b) in the key (a
   re-recorded edge makes builds two runs until a re-seed). *Recommended: (a)*.
@@ -2705,7 +2715,7 @@ byte**, `b6f2e89e...`, the three builds one run each from the new stage 0, 561 s
 ## After the milestone: the build's speed, second round, part A: the host's compiling (2026-10-15)
 
 The user's order after the first round: a second one, in three parts on branches of their own
-(A: the host's compiling of the namespaces; B: a2g; C: g2a's builds). Measured on the shared
+(A: the host's compiling of the namespaces; B: a2g; C: build-go's builds). Measured on the shared
 host, busy with the emulated arm64 VM and other builds: single timings vary by up to a half.
 
 ### A: the host's compiling of the namespaces (branch `speed2-host`)
@@ -2722,7 +2732,7 @@ the back end's namespaces and the ones they need when the program holds them for
 `ARBACE_PATH`: the closure of `arbace.aot.main` and `arbace.core` under `:require`, `:use` and
 top-level `load`, found from the sources' forms (23 sources: core's ten with
 `arbace.core.protocols`, `arbace.instant` and `arbace.uuid`, `arbace.java.io`, `string`, `set`,
-`classes.types`, `a2g.names`, `a2g.jrt`, `g2a.print`'s four, `aot.emit`, `aot.main`), each
+`classes.types`, `a2g.names`, `a2g.jrt`, `repr.go.print`'s four, `aot.emit`, `aot.main`), each
 source's text compared with the embedded one. The loaders run in the order the sources were
 loaded, in the bindings `Compiler$AOT/load` makes (a nested `load` is then a no-op: the source is
 loaded); their vars' roots become the compiled fns, and the units the back end reads are the
@@ -2845,7 +2855,7 @@ largest; is Go compiling it on the critical path of the host's builds, and would
 
 ### Measured (`.tmp/speed2/`, TamaGo's go1.27.1, the amd64 work module of a build at `9942951`)
 
-`go build -debug-trace` of `target/arbace-go/work-amd64/mod` as g2a runs it (`-trimpath`, the
+`go build -debug-trace` of `target/arbace-go/work-amd64/mod` as repr/go runs it (`-trimpath`, the
 overlay of `bin/jrt overlay`), each compile timed by a `-toolexec` wrapper, on the shared host
 (the emulated arm64 VM busy):
 
@@ -2866,9 +2876,9 @@ data, and every namespace's package for `lang`'s.
 (`go/arbace/jrt`, `jdk/`, `overlay/jdk`, a2g's translation of them). A change to the namespaces
 leaves it as it was (the shipped build's and the test build's `jrt` are identical, `diff -r`,
 though the test build has more namespaces). The one-run build (the runtime the checkout's) and
-the fixpoint's G2 and G3 compile no `jrt`: g2a's step there is about 18 s (`bin/g2a build` on
+the fixpoint's G2 and G3 compile no `jrt`: repr/go's step there is about 18 s (`bin/build-go` on
 the current program, everything cached, 18.6 s wall, 76 s user): Go's part is about 5 s (the
-link), the rest g2a's own (reading the forms, printing with the print cache, writing 61 MB of
+link), the rest repr/go's own (reading the forms, printing with the print cache, writing 61 MB of
 Go). After a change to the runtime (two runs), `jrt` compiles once (the second run's `jrt` is the
 same text, cached): about 60 s of that build's 5.5 minutes. In the box's rebuild (a fresh cache
 in the guest), 94 s.
@@ -2889,7 +2899,7 @@ Cheaper levers on `jrt`'s compile all change the output and the program (`-l`, n
 slower code; a smaller `jrt` means fewer reached JDK members, which reachability already
 minimizes) or do nothing (`-c` is already 64; GOGC raised in the first round was slower).
 
-Where g2a's 18 s on the one-run build goes is the next lever (g2a's own printing and writing,
+Where repr/go's 18 s on the one-run build goes is the next lever (repr/go's own printing and writing,
 not Go): left for the round's other parts.
 
 ### Amendments (proposed 2026-10-15)
@@ -2906,27 +2916,27 @@ not Go): left for the round's other parts.
 **Decided (2026-10-15, the user):** SA180 (a), `jrt` not split; SA181 (a), the scripts kept in
 `.tmp/speed2/`.
 
-## The build's speed, second round, part D: g2a's own work (2026-10-15)
+## The build's speed, second round, part D: repr/go's own work (2026-10-15)
 
-Status: on the branch `speed2-g2a` (from main at `1b24757`). Part C measured g2a's step in a
-one-run build at about 18.6 s, `jrt` cached: Go's link about 5 s, the rest g2a's own. Measured on
+Status: on the branch `speed2-g2a` (from main at `1b24757`). Part C measured repr/go's step in a
+one-run build at about 18.6 s, `jrt` cached: Go's link about 5 s, the rest repr/go's own. Measured on
 the shared host (the emulated arm64 VM and the other parts' builds running), `.tmp/speed2g/`
-(`bench.sh`: `bin/g2a build --line-file --arch amd64` of one fixed a2g program, Go's build cache
+(`bench.sh`: `bin/build-go --line-file --arch amd64` of one fixed a2g program, Go's build cache
 warm, the print cache as named).
 
 ### Where the time went
 
-A CPU profile of main's g2a with every package in the print cache (`ARBACE_CPUPROFILE`, 17.6 s,
+A CPU profile of main's repr/go with every package in the print cache (`ARBACE_CPUPROFILE`, 17.6 s,
 62.6 CPU-seconds): 62% in `LispReader` and the readers under it, the rest mostly Go's collector.
-g2a read every forms file of the program (77 MB, `read-all`, in parallel) on every build, cached
-or not: collecting a package (`arbace.g2a.print/collect`: its `go/package` options, its files
+repr/go read every forms file of the program (77 MB, `read-all`, in parallel) on every build, cached
+or not: collecting a package (`arbace.repr.go.print/collect`: its `go/package` options, its files
 and the files it loads) needs its forms, and `package-file?` reads every file to find the
 package files. The print cache then skipped only the printing.
 
 ### What changed
 
 - **The collect index** (SA190). With `--print-cache`, per source root and host
-  (`DIR/collect/<sha>`, the SHA-256 of `G2A_HOST_ID` and the root's path): which forms files
+  (`DIR/collect/<sha>`, the SHA-256 of `REPR_GO_HOST_ID` and the root's path): which forms files
   are package files, by their contents' SHA-256, and for each package file its collection
   (`:package`, `:name`, `:path`) and the files it read, each with its SHA-256. A package whose
   files all hash the same is taken from the index, its forms not read (`:collected`, a delay:
@@ -2941,18 +2951,18 @@ package files. The print cache then skipped only the printing.
 
 ### Measured
 
-| case (g2a build, amd64, one a2g program) | main | `speed2-g2a` |
+| case (build-go, amd64, one a2g program) | main | `speed2-g2a` |
 |---|---:|---:|
 | the print cache cold (every package printed) | 41.9 s | 37.6 s (the same, within the noise) |
-| every package in the print cache | 18.0 to 20.6 s | 6.0 to 7.1 s (g2a about 1.5 s, Go's link 4.6 s) |
+| every package in the print cache | 18.0 to 20.6 s | 6.0 to 7.1 s (repr/go about 1.5 s, Go's link 4.6 s) |
 | four packages changed, `lang` (9.2 MB) and `aot_arbace_core` among them | 20.3 s | 23.0 s (the same: printing them is the time) |
 
-`bin/arbace-go --build` on the branch, twice from the same sources: g2a's builds (amd64, arm64
+`bin/arbace-go --build` on the branch, twice from the same sources: build-go's builds (amd64, arm64
 at once) 60 and 63 s (its print cache cold: the host's identity new), then 6 and 7 s, the
 executables the same (`162c5fb6...`, `08154aca...`). Then a one-run build after a one-string
-change to `arbace/c2a/rules.ae` (reverted after): g2a 8 and 8 s, one package printed
+change to `arbace/c2a/rules.ae` (reverted after): repr/go 8 and 8 s, one package printed
 (`aot_arbace_c2a_rules`), where main reads every package's forms (about 18 to 20 s). The printed
-module is byte for byte main's: the branch's build of that program printed again by main's g2a
+module is byte for byte main's: the branch's build of that program printed again by main's repr/go
 with a cold cache (`diff -r` of both work modules, the first and the second build's), and on
 `bench.sh` the same executable from both (`e4026df7...`).
 
@@ -2967,9 +2977,9 @@ not done (SA191).
 
 ### Amendments (proposed 2026-10-15)
 
-- **SA190 g2a's collect index.** (a) As built: with `--print-cache`, a package whose files are
+- **SA190 repr/go's collect index.** (a) As built: with `--print-cache`, a package whose files are
   unchanged is not read; (b) the forms read on every build, as before. *Recommended: (a)*: the
-  printed module is the same; a one-run build's g2a about 10 to 12 s shorter.
+  printed module is the same; a one-run build's repr/go about 10 to 12 s shorter.
 - **SA191 `aot_arbace_core_protocols`.** (a) Left a package of its own; (b) merged into
   `aot_arbace_core` (the back end's packaging). *Recommended: (a)*: about 2 s, only when the
   runtime or the protocols change.
@@ -3010,7 +3020,7 @@ build reads, held beside `go.mod`, `go.sum` and `vendor/modules.txt`.
 
 ### The forms
 
-`bin/toolchain-vendor convert` (new; modelled on `bin/tamago-vendor`): `bin/g2a convert --goos
+`bin/toolchain-vendor convert` (new; modelled on `bin/tamago-vendor`): `bin/repr-go read --goos
 GOOS --goarch ARCH` run in GOROOT/src/cmd on each configuration's packages, by their go list paths
 (`cmd/vendor/golang.org/x/telemetry/...`, as std's vendored packages are `vendor/...`), each
 package's assembly copied into its forms directory, the three trees merged as BX63 merges two:
@@ -3042,7 +3052,7 @@ stores in a toolchain binary for its staleness checks (`-X=cmd/internal/objabi.b
 | tamago/amd64 | 28,114,036 `2d729aa8...` | 7,159,722 `3e66b2f3...` | 5,407,207 `dbe3dc82...` |
 | tamago/arm64 | 26,386,956 `84cba1b9...` | 6,653,861 `88ffa63d...` | 5,147,590 `727acff6...` |
 
-Found on the way, g2a's printing (lines layout) fixed, both cases that no form of std, the box,
+Found on the way, repr/go's printing (lines layout) fixed, both cases that no form of std, the box,
 `x509roots/` or Arbace's program had:
 - **A labeled declaration's own line.** `next:` then a comment line then `var tok ...`
   (`cmd/asm/internal/asm/parse.go:182`; `ssa/writebarrier.go:247`, `obj/mips/obj0.go`,
@@ -3059,7 +3069,7 @@ Found on the way, g2a's printing (lines layout) fixed, both cases that no form o
   `:line`, its `(`'s) only inside the first parameter's type, so `sb` stood at line 28, not 31:
   DWARF's declaration line of the parameter (only the linux build, unstripped, showed it). The
   printer now breaks to the vector's line before its `(`.
-- **Printing GOROOT's tree with several main packages.** `bin/g2a build --print-only --module
+- **Printing GOROOT's tree with several main packages.** `bin/build-go --print-only --module
   std` required no main package; GOROOT/src/cmd holds three.
 
 Outside `tamago/cmd/`: `bin/tamago-vendor`'s `verify` and its print key look at its own two roots,
@@ -3075,13 +3085,13 @@ the toolchain's forms.
   printed against GOROOT/src, no regressions against the round trip's reference; the goos
   module 69 of 69 packages at all three levels; the box's guest from the printed forms
   byte-identical to the one from the originals (`ea705851...`, cut `f6a0c8de...`).
-- `bin/g2a test`: 6 tests, 150 assertions, 0 failures.
+- `bin/repr-go test read`: 6 tests, 150 assertions, 0 failures.
 - The essential `bin/gate` on `0db720f` (12m23s): the suite 20,506 of 20,520, no
   regressions; the oracle 22,508 of 22,561, the 53 known, 0 new.
 
 ### Amendments
 
-- **SA200 g2a's two printing fixes.** (a) `:go/label-line` in the forms where a labeled
+- **SA200 repr/go's two printing fixes.** (a) `:go/label-line` in the forms where a labeled
   declaration's label stands apart, the parameter list's `(` at the vector's line, several main
   packages in `--module std` (as built); (b) the label's line always recorded (every labeled
   declaration's forms change, 20 in std). *Recommended: (a)*: the forms change only where the
@@ -3101,7 +3111,7 @@ the toolchain's forms.
   and the box's rebuild takes the toolchain's forms from its source tree. *Recommended: (b)*,
   next: it makes the forms the source, which is S9's point (and P1's, a gc edited as forms), at
   the cost of a printing of 21 MB of Go per change to the printer (cached by its key).
-- **SA204 In the gate.** (a) `bin/toolchain-vendor verify` and `check` in `bin/gate --full`'s g2a
+- **SA204 In the gate.** (a) `bin/toolchain-vendor verify` and `check` in `bin/gate --full`'s repr/go
   chain (the conversion of three configurations, 23 minutes on the shared host; the check about
   3 minutes a configuration: two prints and two builds of the three tools); (b) at milestones by hand. *Recommended: (a)*,
   as `bin/tamago-vendor`'s are.
@@ -3116,9 +3126,9 @@ the toolchain's forms.
   `bin/box-rebuild`, `go build`) are still the toolchain's binaries; the tool guests are built on
   the host and put into the box's store, as before (building them inside the box is not S9's).
 - SA204 (a): `bin/gate --full` runs a fourth chain, `toolchain` (`bin/toolchain-vendor verify`,
-  then `check`), concurrently with the JVM's, the Go build's and g2a's. `bin/g2a convert` takes
-  the dumps' directory from `G2A_DUMPS` (default `.tmp/g2a/dumps`), which `bin/toolchain-vendor`
-  sets to its own per configuration: `bin/tamago-vendor verify` in the g2a chain converts beside
+  then `check`), concurrently with the JVM's, the Go build's and repr/go's. `bin/repr-go read` takes
+  the dumps' directory from `REPR_GO_DUMPS` (default `.tmp/repr-go/dumps`), which `bin/toolchain-vendor`
+  sets to its own per configuration: `bin/tamago-vendor verify` in the repr/go chain converts beside
   it.
 
 Checked after main's merge (the speed's second round, `d45e718`): `bin/box-tools build amd64`
@@ -3126,21 +3136,21 @@ from the forms (28 s: the printing; Go's cache held the compiles); the box's smo
 them (`bin/arbace-go --smoke --box`: compile spawned with trees in and out, a failing compile,
 the spawn budget, an image booted from the store, all ok); `bin/toolchain-vendor check
 tamago-amd64` through the reworked `bin/box-tools` (`BOX_TOOLS_GOROOT`): identical; a one-run
-build (`ARBACE_GO_ARCHES=amd64 bin/arbace-go --build`, 4:49 on the busy host: one a2g run, g2a 59
+build (`ARBACE_GO_ARCHES=amd64 bin/arbace-go --build`, 4:49 on the busy host: one a2g run, repr/go 59
 s), and the print cache with its collect index after it (the gate's shipped build, the same
-program: g2a 9 s); the essential `bin/gate` on `84667f3` (10m04s): the suite 20,506 of 20,520, no
+program: repr/go 9 s); the essential `bin/gate` on `84667f3` (10m04s): the suite 20,506 of 20,520, no
 regressions; the oracle 22,508 of 22,561, the 53 known, 0 new.
 
 ## The second round merged; the seed (2026-10-15)
 
 The four branches merged into main (`d45e718`): the essential gate passed (11:02), the fixpoint
-G1 = G2 = G3 byte for byte (`fbacea35...`). S9 merged after (`57a4428`; its g2a is in stage 0
+G1 = G2 = G3 byte for byte (`fbacea35...`). S9 merged after (`57a4428`; its repr/go is in stage 0
 too), so the seed was remade once for both: the fixpoint at `57a4428` (11:29, G1 = G2 = G3,
 `2ee89825...`, 101,863,584 bytes), G3 packed: `seed/arbace-seed-go.tar.xz`
 **`9b2a46878d274182f165f7e6d5fb1483d1b665add65adeebba550bde9a262c23`** (5,415,076 bytes, 1,691
 files), was `79d4f552...`. **`bin/seed --verify`**: printed again at `57a4428`, the same tree
 (the tar `2496a2eb...`) and archive; **stage 0 = G1 = G2 = G3 byte for byte**, `2ee89825...`, 675
-s for the three (G1 219 s, G2 184 s, G3 189 s: a fresh worktree, g2a's print cache cold, the
+s for the three (G1 219 s, G2 184 s, G3 189 s: a fresh worktree, repr/go's print cache cold, the
 emulated arm64 VM busy beside). The essential gate on the seed's commit (`dd61501`): passed in
 8:07, the two builds 5:06 (were 6 to 8 minutes).
 
@@ -3758,7 +3768,7 @@ timings vary by a fifth or more).
   per class in an id space of its own, so the order of the tasks changes nothing.
 
 The memos are global (`ConcurrentHashMap`s, strong, as `env/reflect-cache`; read without a
-lock), so the runtime's own uses of the class forms' front end (the evaluator's class forms, j2a)
+lock), so the runtime's own uses of the class forms' front end (the evaluator's class forms, repr/java)
 keep them too: SA260.
 
 ### Measured
@@ -3797,7 +3807,7 @@ G3 byte for byte** (`a24fb44b...`, 102,457,504 bytes); the builds G1, G2, G3 192
 
 - **SA260 The analysis' memos.** (a) As built: global and strong (`ConcurrentHashMap`s in
   `arbace.classes.env` and `types`, checked by the infos' identity), kept for the life of the
-  process, the evaluator's and j2a's uses included (an entry per class and method name asked
+  process, the evaluator's and repr/java's uses included (an entry per class and method name asked
   for; a class declared again replaces its entries' infos at the next lookup); (b) the same
   memos bound per run (a dynamic var a2g binds around its world, the other uses unmemoized; the
   seed's stage 0 has no such var, so G1's `world.ae` would have to resolve it at run time);

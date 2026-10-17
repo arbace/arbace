@@ -6,7 +6,7 @@
 //
 //	godeps [-goos linux] [-goarch amd64] [-edn OUT] DIR
 //
-// DIR holds the package's .go files as a2g and g2a print them (for example
+// DIR holds the package's .go files as a2g and repr/go print them (for example
 // target/arbace-go/work-amd64/mod/jrt). The files the build constraints of
 // GOOS and GOARCH exclude are skipped.
 //

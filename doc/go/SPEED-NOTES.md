@@ -475,7 +475,7 @@ executable on `test/arbace-go-pgo.ae` (a training workload in the spirit of
 common libraries, collections, seqs and transducers, numbers, strings, regexes, printing,
 protocols, dynamic vars, exceptions, futures and agents; about 15 s) with a CPU profile, and
 builds every executable again in its work module with `go build -pgo` (as the image's link
-does; `bin/g2a build --pgo FILE` is new too, for other programs). gc then
+does; `bin/build-go --pgo FILE` is new too, for other programs). gc then
 devirtualizes the hot interface calls (a type test and a direct, inlinable call) and inlines
 more on hot paths. Micro workloads (fixed work, user Mcycles, a profile of the same
 workloads): hashing -37%, numbers -15%, vecEquiv -20%, hashMapAssoc -10%, the others -1 to
@@ -639,7 +639,7 @@ Before merging main (the branch at `14a9553`, linux/amd64 unless said):
 
 After merging main (`ad06cda`): `bin/jrt test` amd64 passes; the oracle 20,243 of 20,276
 against `test/oracle/known-go-amd64.edn`: 33 known, 0 new, 0 now passing; `bin/arbace-go --smoke` passes.
-`bin/gate` was not run: no source the bootstrap compiles changed (`arbace/a2g`, `arbace/g2a`
+`bin/gate` was not run: no source the bootstrap compiles changed (`arbace/a2g`, `arbace/repr/go`
 and `arbace/lang/go` are read by the tools, not compiled into the stages).
 
 Found on the way: gc for linux/arm64 (go1.27.1) reports a *constant* negative index into a
@@ -678,7 +678,7 @@ Letter O: every letter appeared somewhere in doc/; O was used only as A2G-SPEC �
   the interface's data word: every Java object is a pointer to a struct whose first field is
   the header, §5.2). *Accepted 2026-10-10, folded into A2G-SPEC §5.7 and §5.8.*
 
-- **O5 (§13.4, §13.6, BUILD.md) Profile-guided builds.** `bin/g2a build --pgo FILE` and
+- **O5 (§13.4, §13.6, BUILD.md) Profile-guided builds.** `bin/build-go --pgo FILE` and
   `bin/arbace-go --build --pgo` (a training run of `test/arbace-go-pgo.ae` with
   `ARBACE_CPUPROFILE`, then `go build -pgo`). Proposed: the freeze's executables are built so;
   the default build stays without, for build time. *Accepted 2026-10-10 (the freeze's executables are built with `--pgo`; ordinary builds stay without), folded into A2G-SPEC §13.4.*

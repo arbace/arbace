@@ -1,8 +1,17 @@
-# g2a's converter: notes
+# repr/go's converter: notes
 
-`arbace.g2a` turns the helper's typed syntax tree of a Go package ([HELPER-NOTES.md](HELPER-NOTES.md),
+> Names: since 2026-10-17 g2a is repr/go and j2a repr/java (doc/NAMING-SURVEY.md, "Decided"):
+> `arbace.g2a.*` is `arbace.repr.go(.*)`, its build `arbace.g2a.build` is `arbace.build.go`;
+> `bin/g2a convert` is `bin/repr-go read` (`bin/g2a read`: `read --dump`), `bin/g2a build`
+> `bin/build-go`, `bin/g2a-print` `bin/repr-go print`, `bin/g2a-check` `bin/repr-go check`,
+> `bin/g2a-convert-tests` and `-print-tests` `bin/repr-go test read` and `test print`,
+> `bin/g2a-build-tests` `bin/build-go test`; `G2A_GOROOT` is `ARBACE_GOROOT`, the other `G2A_*`
+> `REPR_GO_*`, `J2A_*` `REPR_JAVA_*`; `bin/j2a-check` is `bin/repr-java check`. This document
+> uses the current names throughout, its dated passages included; branch names keep theirs.
+
+`arbace.repr.go` turns the helper's typed syntax tree of a Go package ([HELPER-NOTES.md](HELPER-NOTES.md),
 format `:godump 2`) into Go forms ([SPEC.md](SPEC.md)), milestone G1 of
-[G2C-SURVEY.md](../G2C-SURVEY.md) §7. As in j2a ([classes/CONVERTER-NOTES.md](../classes/CONVERTER-NOTES.md)),
+[G2C-SURVEY.md](../G2C-SURVEY.md) §7. As in repr/java ([classes/CONVERTER-NOTES.md](../classes/CONVERTER-NOTES.md)),
 the front end is dumb and every decision about forms is made here, in Clojure. The forms are
 printed back to Go by [the printer](PRINTER-NOTES.md); the round trip is judged by the oracle
 ([ROUNDTRIP.md](ROUNDTRIP.md)).
@@ -10,32 +19,32 @@ printed back to Go by [the printer](PRINTER-NOTES.md); the round trip is judged 
 ## Running
 
 ```sh
-bin/g2a convert fmt sort              # dump (godump) and convert into .tmp/g2a/forms/pkgs
-bin/g2a convert --full --tests fmt    # mode :full; with the _test.go files and fmt_test
-bin/g2a convert --goos linux --goarch arm64 os   # for another configuration (default
+bin/repr-go read fmt sort              # dump (godump) and convert into .tmp/repr-go/forms/pkgs
+bin/repr-go read --full --tests fmt    # mode :full; with the _test.go files and fmt_test
+bin/repr-go read --goos linux --goarch arm64 os   # for another configuration (default
                                       # tamago/amd64)
-bin/g2a convert --corpus amd64        # a corpus of `bin/g2a corpus` ([linux-]amd64, arm64,
-                                      # test, test-arm64, tests) into .tmp/g2a/forms/CORPUS,
-                                      # report in .tmp/g2a/forms/CORPUS.report.edn
-bin/g2a convert --corpus test --print DIR   # and print each package into the candidate DIR
-bin/g2a roundtrip [amd64|arm64]       # convert + print std and $GOROOT/test into
-                                      # .tmp/g2a/cand-ARCH, bin/g2a-check against the
-                                      # reference test/g2a/roundtrip-ARCH.edn (tamago)
-bin/g2a roundtrip linux/amd64         # the same for linux (also --goos linux arm64):
-                                      # .tmp/g2a/cand-linux-ARCH, reference
-                                      # test/g2a/roundtrip-linux-ARCH.edn
-bin/g2a roundtrip --tests             # std amd64 with its tests (.tmp/g2a/cand-tests)
-bin/g2a roundtrip ... --record        # the same, recording the results as the reference
-bin/g2a print ...                     # the printer (bin/g2a-print)
-bin/g2a test                          # the converter's tests (bin/g2a-convert-tests)
+bin/repr-go read --corpus amd64        # a corpus of `bin/repr-go corpus` ([linux-]amd64, arm64,
+                                      # test, test-arm64, tests) into .tmp/repr-go/forms/CORPUS,
+                                      # report in .tmp/repr-go/forms/CORPUS.report.edn
+bin/repr-go read --corpus test --print DIR   # and print each package into the candidate DIR
+bin/repr-go roundtrip [amd64|arm64]       # convert + print std and $GOROOT/test into
+                                      # .tmp/repr-go/cand-ARCH, bin/repr-go check against the
+                                      # reference test/repr/go/roundtrip-ARCH.edn (tamago)
+bin/repr-go roundtrip linux/amd64         # the same for linux (also --goos linux arm64):
+                                      # .tmp/repr-go/cand-linux-ARCH, reference
+                                      # test/repr/go/roundtrip-linux-ARCH.edn
+bin/repr-go roundtrip --tests             # std amd64 with its tests (.tmp/repr-go/cand-tests)
+bin/repr-go roundtrip ... --record        # the same, recording the results as the reference
+bin/repr-go print ...                     # the printer (bin/repr-go print)
+bin/repr-go test read                          # the converter's tests (bin/repr-go test read)
 ```
 
-The tools run on Arbace's Go executable (`bin/lib/g2a-host.bash`: `G2A_GO_EXE`, else the
+The tools run on Arbace's Go executable (`bin/lib/repr-go-host.bash`: `REPR_GO_EXE`, else the
 tools' host, `bin/lib/host.bash`; on `target/stage2` until standalone S4, with a heap
-`G2A_JVM_OPTS`, default `-Xmx12g`); `arbace.g2a` loaded from the checkout's sources until S6,
+`REPR_GO_JVM_OPTS`, default `-Xmx12g`); `arbace.repr.go` loaded from the checkout's sources until S6,
 compiled into the executable since (SA133), a source in the checkout that differs from the
 embedded copy loaded from it instead, evaluated. Conversion
-runs one package per task on a thread pool (`G2A_JOBS`, default half the cores). Every file written is read back with Arbace's
+runs one package per task on a thread pool (`REPR_GO_JOBS`, default half the cores). Every file written is read back with Arbace's
 reader (`LineNumberingPushbackReader`, `*read-eval*` false) and compared with the forms in
 memory: data, every metadata key, and, in mode `:lines`, the line of every list (the reader's
 `:line` or an explicit one) against the Go line it stands for. A difference fails the run.
@@ -44,19 +53,19 @@ memory: data, every metadata key, and, in mode `:lines`, the line of every list 
 
 | namespace | role |
 |---|---|
-| `arbace.g2a.convert` | the converter: nodes → forms. Files (`convert-file`: imports, header directives, directive placement, comments), declarations (`func-decl`, `gen-decl`), statements (`stmts-forms`: the `let` scoping of §7.3, `stmt`, `if-form`, clauses), expressions (`expr`, `call`, `selector-form`, `composite`, `instantiation`), types from the source (`type-form`, `fields`, `signature`, `type-params`), and the package form |
-| `arbace.g2a.types` | type forms from the helper's type table (for `:inst` and `:tag`), qualification by import name or namespace (§4.4), constant kinds |
-| `arbace.g2a.lit` | literals (§8.1) and constant values (§8.2): integers with their radix, exact floats (double, `BigDecimal`, ratio), runes, strings and `byte-string`, Go's UTF-8 validity |
-| `arbace.g2a.layout` | the forms text: mode `:lines` places every form on its Go line (§10.1), mode `:full` writes `:go/pos`/`:go/apos` (§10.2); ordinary comments as `;` comments |
-| `arbace.g2a.main` | the command line, the read-back check, coverage counts, the `--print` hook into `arbace.g2a.print` |
-| `arbace.g2a.read` | reading dumps (the helper's, extended) |
+| `arbace.repr.go.convert` | the converter: nodes → forms. Files (`convert-file`: imports, header directives, directive placement, comments), declarations (`func-decl`, `gen-decl`), statements (`stmts-forms`: the `let` scoping of §7.3, `stmt`, `if-form`, clauses), expressions (`expr`, `call`, `selector-form`, `composite`, `instantiation`), types from the source (`type-form`, `fields`, `signature`, `type-params`), and the package form |
+| `arbace.repr.go.types` | type forms from the helper's type table (for `:inst` and `:tag`), qualification by import name or namespace (§4.4), constant kinds |
+| `arbace.repr.go.lit` | literals (§8.1) and constant values (§8.2): integers with their radix, exact floats (double, `BigDecimal`, ratio), runes, strings and `byte-string`, Go's UTF-8 validity |
+| `arbace.repr.go.layout` | the forms text: mode `:lines` places every form on its Go line (§10.1), mode `:full` writes `:go/pos`/`:go/apos` (§10.2); ordinary comments as `;` comments |
+| `arbace.repr.go` | the command line, the read-back check, coverage counts, the `--print` hook into `arbace.repr.go.print` |
+| `arbace.repr.go.read` | reading dumps (the helper's, extended) |
 
 In memory a form is Clojure data: lists, vectors and symbols carry the spec's public metadata
-and two private keys, `:arbace.g2a.convert/l` (the Go line the form begins on) and
-`.../pos` (its node's position fields, for `:full`). Literals are `arbace.g2a.lit/Lit`
+and two private keys, `:arbace.repr.go.convert/l` (the Go line the form begins on) and
+`.../pos` (its node's position fields, for `:full`). Literals are `arbace.repr.go.lit/Lit`
 records: the text written (`0x2A`, `2r1010`, `1E+400M`) and the value read back. The layout
 first decides the breaks (a form whose Go line is after everything written before it starts
-that line), then writes the text; `bin/g2a convert` checks that reading the text gives the
+that line), then writes the text; `bin/repr-go read` checks that reading the text gives the
 forms back.
 
 ## Decisions
@@ -216,7 +225,7 @@ names (§4.2), blank variables in `:init-order` (§6.3), doc text (§6.5), negat
 ## Coverage
 
 Every `go/ast` node kind of §13.1 that occurs is converted (`Bad*` never occurs: the helper
-reports type errors and there are none). `bin/g2a convert` counts the nodes it consumes per
+reports type errors and there are none). `bin/repr-go read` counts the nodes it consumes per
 kind against the dumps' nodes: equal for every kind in every corpus (std amd64: 2,308,308
 nodes). Notes counted (std amd64): implicit returns 12,435, attached directives 1,218,
 free-standing 131, `cond` 500, `go/call` 334, shift tags 269, negative literals 1,873,
@@ -242,7 +251,7 @@ checked (times include reading the dumps and the check):
 | `$GOROOT/test`, mode `:full` | 1,705 | 1,706 | 20.2 MB | 3.2 s | 0 | 0 |
 
 The linux rows were measured later the same day (2026-10-08) with the conversion's printing into the
-candidate included (`bin/g2a roundtrip`, `--print`); the tamago corpora measured that way take the
+candidate included (`bin/repr-go roundtrip`, `--print`); the tamago corpora measured that way take the
 same time as linux's (std about 20 s). Every node kind of the linux corpora is converted (nodes
 consumed equal the dumps' per kind; std linux/amd64: 2,357,789 nodes), with no node kind, directive
 or marker that tamago's corpora lacked. The JVM's start added about 2 s. Measured with `-Xmx16g`, the
@@ -253,12 +262,12 @@ Two runs give byte-identical forms trees (checked on std amd64).
 
 ## The round trip
 
-`bin/g2a roundtrip` converts, prints with `arbace.g2a.print/print-package` (lines layout) into a
-candidate tree and runs `bin/g2a-check` (tree, export, code; [ROUNDTRIP.md](ROUNDTRIP.md)) against a
-recorded reference, `test/g2a/roundtrip-ARCH.edn` for tamago and `test/g2a/roundtrip-linux-ARCH.edn`
+`bin/repr-go roundtrip` converts, prints with `arbace.repr.go.print/print-package` (lines layout) into a
+candidate tree and runs `bin/repr-go check` (tree, export, code; [ROUNDTRIP.md](ROUNDTRIP.md)) against a
+recorded reference, `test/repr/go/roundtrip-ARCH.edn` for tamago and `test/repr/go/roundtrip-linux-ARCH.edn`
 for linux (Clojure-reader format, one entry per line): it exits non-zero on a regression, an entry
 and level passing in the reference and not now (or missing). `--record` rewrites the reference. The
-`$GOROOT/test` programs are the oracle's list (`bin/g2a-check --list-tests`, `gocmp tests`), dumped
+`$GOROOT/test` programs are the oracle's list (`bin/repr-go check --list-tests`, `gocmp tests`), dumped
 by the helper as they are: one rule for both. Result (2026-10-08, closing milestone G2):
 
 | corpus | entries | tree pass/fail/err | export pass/fail/err/skip | code pass/fail/err/skip |
@@ -278,8 +287,8 @@ by the helper as they are: one rule for both. Result (2026-10-08, closing milest
 The linux rows (2026-10-08, B1a step 0) needed no change to the helper, the converter or the
 printer: the configuration was already a parameter of the helper (`-goos`), written into every
 dump and every package's `:config` (§4.2), and the printer's build takes its environment from
-there. What changed is the plumbing (`bin/g2a corpus linux-…`, `convert --goos/--goarch`,
-`roundtrip linux/ARCH`, `bin/g2a-check --goos`, `CGO_ENABLED=0` everywhere: on a linux host the
+there. What changed is the plumbing (`bin/repr-go corpus linux-…`, `convert --goos/--goarch`,
+`roundtrip linux/ARCH`, `bin/repr-go check --goos`, `CGO_ENABLED=0` everywhere: on a linux host the
 go command turns cgo on for `GOOS=linux` by default; amendments L1 and L5, accepted
 2026-10-08, folded into SPEC §1 item 7 and §12.4) and one fix in the oracle: two programs
 passed the code level vacuously, their listings empty from the build cache
@@ -289,13 +298,13 @@ code; 173 files not in tamago's configuration) hold no construct tamago's lacked
 assembly, like tamago's, is not converted (`:other-files`).
 
 The nine code differences of std with its tests are known and explained in
-`test/g2a/roundtrip-tests-known.edn`: TamaGo's `testdata_tamago_test.go` files embed the packages'
+`test/repr/go/roundtrip-tests-known.edn`: TamaGo's `testdata_tamago_test.go` files embed the packages'
 own Go sources (`//go:embed *.go` and the like), and the oracle compiles the candidate's sources in
 the original's place, so the test binaries embed other text. With `--tests` the oracle compares the
 `_test.go` files' trees and the export data and code of the package and its test variants (`gocmp
 -tests`).
 
-Times (64 cores, warm build cache): `bin/g2a roundtrip` amd64 about 40 s (convert and print
+Times (64 cores, warm build cache): `bin/repr-go roundtrip` amd64 about 40 s (convert and print
 std and `$GOROOT/test` 29 s, of which std 21 s; the check 11 s); arm64 the same; linux/amd64
 and linux/arm64 39 s each (28 s and 10 to 11 s; the first linux runs, dumping with a cold go
 list and checking with a cold build cache for the configuration, 93 s and 98 s: convert and

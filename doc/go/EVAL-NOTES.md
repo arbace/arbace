@@ -1,5 +1,14 @@
 # The evaluator (B1a step 5 and after): notes
 
+> Names: since 2026-10-17 g2a is repr/go and j2a repr/java (doc/NAMING-SURVEY.md, "Decided"):
+> `arbace.g2a.*` is `arbace.repr.go(.*)`, its build `arbace.g2a.build` is `arbace.build.go`;
+> `bin/g2a convert` is `bin/repr-go read` (`bin/g2a read`: `read --dump`), `bin/g2a build`
+> `bin/build-go`, `bin/g2a-print` `bin/repr-go print`, `bin/g2a-check` `bin/repr-go check`,
+> `bin/g2a-convert-tests` and `-print-tests` `bin/repr-go test read` and `test print`,
+> `bin/g2a-build-tests` `bin/build-go test`; `G2A_GOROOT` is `ARBACE_GOROOT`, the other `G2A_*`
+> `REPR_GO_*`, `J2A_*` `REPR_JAVA_*`; `bin/j2a-check` is `bin/repr-java check`. This document
+> uses the current names throughout, its dated passages included; branch names keep theirs.
+
 **Status (2026-10-11, main before the `arbace-for-golang` freeze).** Clojure's suite on the
 test build `arbace-tests` (below, "The suite's Java fixtures"): 76 namespaces, 777 tests,
 20,506 of 20,520 assertions (11 failures and 3 errors recorded in `test/arbace-go-results.edn`),
@@ -49,7 +58,7 @@ executable is about 37 MB.
 | `arbace/a2g/out.ae` | member tables: the public methods and constructors that do not exist in Go listed, throwing (`--program`); cut classes' tables from the JVM's reflection, throwing; overloads in the JVM's order; setters of volatile fields; out-of-world superinterfaces replaced by theirs; `reflect_tables_a2g.go` (jrt members a2g writes: `String.format`, the regex methods, `System.in/out/err`, `CASE_INSENSITIVE_ORDER`, the context class loader and resources) |
 | `arbace/a2g/dyn.ae` | `Dyn`'s natives `setStaticMethod`, `defineCtor`, `defineInterface`, `addInterfaceMethod`, `defineFnClass`, `hideField`; HotSpot's `AbstractMethodError` message |
 | `arbace/a2g/decls.ae`, `code.ae`, `world.ae` | `getClass` of a class with a field `a2g$class`; a `this(...)`/`super(...)` to a constructor outside the world is a missing operation; catch clauses of classes outside the world dropped; `identical?` of two interface types through `any`; variants' parameter keys skip `:throws` |
-| `arbace/g2a/build.ae` | a directory holding `.g2a-data` is data, not forms (the embedded sources) |
+| `arbace/build/go.ae` | a directory holding `.build-go-data` is data, not forms (the embedded sources) |
 | `go/arbace/jrt/` | the evaluator's natives (`natives.ae`: trace hook, monitors, checkcast, `RT.hostResource`, `UUID`'s random bytes); evaluated frames in stack traces (`throwable.ae`); `Box` maps a typed nil to null; `System`'s `Class` (`system.ae`) and member table; `WeakReference`'s constructors for subclasses; tables regenerated (`test/jrt/tables.ae`: overloads in the JVM's order) |
 | `overlay/jdk/variants/` | `UUID.randomUUID` from the host's random bytes; `ByteArray` and `ByteArrayLittleEndian` without `VarHandle`s (`UUID.toString`) |
 | `bin/arbace-go` (new) | build, run, smoke-test the executable (below) |
@@ -172,7 +181,7 @@ suite nor timed; `extend` on run-time classes works through `Class` objects as o
 package's forms (`go/arbace/cmd/arbace/res/arbace/...`, 41 files, 825 KB), lists them as the
 package's `:embed-files`, declares `//go:embed res`, and `main` sets the host's `Resources` to
 `fs.Sub(resources, "res")` before `Main.main`. The embedded tree (phase 1) is `arbace/**/*.ae` less
-the tools (`classes`, `j2a`, `g2a`, `a2g`), the runtime's class forms (`arbace/lang`, compiled into
+the tools (`classes`, `repr/java`, `repr/go`, `a2g`), the runtime's class forms (`arbace/lang`, compiled into
 the program), ASM, and the namespaces decision 6 leaves out (`core.server`, `repl.deps`,
 `java.basis`, `tools.deps.interop`, `java.process`, `java.shell`, `java.browse`, `java.javadoc`) and
 D6's Swing and SAX (`inspector`, `xml`). Since then (the list is `arbace.a2g.embed/excluded`):
@@ -269,7 +278,7 @@ On this machine (64 cores, shared), go1.27.1, `GOGC` default:
 | start to `-e nil` done (`arbace.core`, `spec.alpha`, `arbace.main`) | 4.2 s, 110 MB resident | 43.6 s, 190 MB resident |
 | `arbace.core` alone (`ARBACE_LOAD_TIMES`) | about 1.9 s | 18.8 s |
 | `bin/a2g --program` | 40-45 s wall | |
-| `bin/g2a build --line-file`, warm | about 60 s | about 60 s |
+| `bin/build-go --line-file`, warm | about 60 s | about 60 s |
 
 Load times per namespace on amd64 (`ARBACE_LOAD_TIMES=1`, nested loads included in their parent):
 
@@ -417,9 +426,9 @@ deviations V1-V13 (A2G-SPEC §16 has the scheme: phase 1 M, phase 2A X, phase 2B
   2026-10-09, folded into A2G-SPEC §5.11 as M4.*
 - **V5 (§10.3, §9.4) Embedded sources.** `--program` embeds the namespaces' sources in the main
   package (`//go:embed res`, the host's `Resources`); `RT.load` reads them, then `ARBACE_PATH`; a
-  forms directory holding `.g2a-data` is data to `bin/g2a` (amendment to SPEC §4: g2a's program
-  layout). *Accepted 2026-10-09, folded into A2G-SPEC §10.3 as M5; the `.g2a-data` rule into
-  BUILD.md, "The program's layout" (g2a's program layout is BUILD.md's, not SPEC §4's).*
+  forms directory holding `.build-go-data` is data to `bin/build-go` (amendment to SPEC §4: repr/go's program
+  layout). *Accepted 2026-10-09, folded into A2G-SPEC §10.3 as M5; the `.build-go-data` rule into
+  BUILD.md, "The program's layout" (repr/go's program layout is BUILD.md's, not SPEC §4's).*
 - **V6 (§10.7) Evaluated frames.** jrt's `EvalTrace` hook and the frame mapping above.
   *Accepted 2026-10-09, folded into A2G-SPEC §10.7 (and §11) as M6.*
 - **V7 (§9.1) JDK variants for VarHandle and SecureRandom**: `ByteArray`,
@@ -794,8 +803,8 @@ would shorten every process.
 ### For the gate (done, 2026-10-09; `bin/gate` unchanged)
 
 The user's decision (2026-10-09): `bin/gate --full` runs one more chain (each step its own log in
-`.tmp/gate/` and line in the summary), concurrently with g2a's round trips once the three suites
-(stages 1 and 2, j2a's) are done:
+`.tmp/gate/` and line in the summary), concurrently with repr/go's round trips once the three suites
+(stages 1 and 2, repr/java's) are done:
 
 1. `jrt-convert`: `bin/jrt-convert` (since standalone S1, 2026-10-12, `bin/jrt-convert verify`:
    the same run, then compared with the committed `jdk/`, which the build reads), then
@@ -820,12 +829,12 @@ about 285 s on the Go build. Measured (64 cores; the host's memory read 46 GB in
 GB in the afternoon):
 
 - The proposal's layout, everything concurrent from the start, does not fit: the three suites
-  (24 test JVMs each) use 40-59 GB at their peak by themselves, and the OOM killer took g2a's
+  (24 test JVMs each) use 40-59 GB at their peak by themselves, and the OOM killer took repr/go's
   converter in both runs that started converters beside them (once with jrt-convert's too);
-  `suite-stage1` crashed in the first. So g2a and the Go chain wait for the three suites
-  (`converters` in `bin/gate`), and g2a no longer runs beside them either.
+  `suite-stage1` crashed in the first. So repr/go and the Go chain wait for the three suites
+  (`converters` in `bin/gate`), and repr/go no longer runs beside them either.
 - With that: `bin/gate --full` passes in **21m24s** (the bootstrap 1m31s; the suites on stages
-  2 and 1 3m37s and 3m36s, j2a 5m12s; then g2a 1m27s, `jrt-convert` 1m32s, `go-build` 2m58s,
+  2 and 1 3m37s and 3m36s, repr/java 5m12s; then repr/go 1m27s, `jrt-convert` 1m32s, `go-build` 2m58s,
   `go-smoke` 31 s, `suite-go` 10m08s, the longest (`reducers` 345 s and `parse` 306 s of its
   namespaces), `oracle-go` 5m22s). Memory used (`free`, sampled each second): at most 59 GB
   in the suites' phase, as before; at most 26 GB once the converters and the Go checks run.
@@ -922,7 +931,7 @@ transcribed code under its license. JRT-NOTES.md's W1-W4 ("Dates") are B1, B2, B
   `java/util/stream/Tripwire` → `Stream_Tripwire`. *Accepted 2026-10-09, folded into A2G-SPEC
   §4.4 as S1.*
 - **B2 (JRT-SOURCES.md, the tool)** other modules' files (`added-module-sources`, KIND
-  `share:MODULE`: `java.sql.Timestamp`, `Date`); `J2A_PATCH_ALL` (each chunk sees the others'
+  `share:MODULE`: `java.sql.Timestamp`, `Date`); `REPR_JAVA_PATCH_ALL` (each chunk sees the others'
   sources); `known-differences` (shape differences of known kinds count as converted).
   *Accepted 2026-10-09, folded into JRT-SOURCES.md, "The closure as grown", as S2.*
 - **B3 (A2G-SPEC §5.3; the manifest)** `java.util.Date` and `ForkJoinTask` are non-leaf
@@ -1219,7 +1228,7 @@ elsewhere (`java.io`, `method-thunks`, `reader`'s and `sequences`' `File` errors
 
 | namespace | why | to fix | cost |
 |---|---|---|---|
-| `generated-all-fi-adapters-in-let`, `generated-functional-adapters-in-def`, `...-requiring-reflection` (3 × 99) | Java fixture `arbace.test.AdapterExerciser` | the suite's Java fixtures (`test/java`, 12 files, 709 lines) converted by j2a (tried: all 12 convert, 0 errors, in 1 s) and translated into a test build of the executable (`bin/a2g --program --input DIR`, a second link `arbace-tests`); the runner uses it; the gate's `suite-go` builds it (about 3 minutes more) | half a day (SL4) |
+| `generated-all-fi-adapters-in-let`, `generated-functional-adapters-in-def`, `...-requiring-reflection` (3 × 99) | Java fixture `arbace.test.AdapterExerciser` | the suite's Java fixtures (`test/java`, 12 files, 709 lines) converted by repr/java (tried: all 12 convert, 0 errors, in 1 s) and translated into a test build of the executable (`bin/a2g --program --input DIR`, a second link `arbace-tests`); the runner uses it; the gate's `suite-go` builds it (about 3 minutes more) | half a day (SL4) |
 | `param-tags` (136), `reflect` (7), `try-catch` (5) | Java fixtures `SwissArmy`, `ConcreteClass`; `reflector.IBar`; `ReflectorTryCatchFixture` | the same test build | with the above |
 | `java-interop` (337) | Java fixtures, and `arbace.inspector` (D6: Swing) | the test build, and the namespace loading with Swing's classes cut (as `metadata`); `test-proxy-method-order` reads class files with ASM, `test-proxy-super` extends `BitSet` (not a proxy superclass) | the above plus a day |
 | `compilation` (125) | Java fixtures; `compile` writes class files | the test build gives the fixtures; the AOT tests (`compile`, `*compile-path*`) cannot pass while the Go build writes no class files: a per-test skip as for `transducers` | the above plus an hour |
@@ -1309,7 +1318,7 @@ fixtures", below; processes were done too: JRT-NOTES.md, "Processes".)
   into "Phase 2C", "The runner", above; the timeouts done (`:timeouts {ns seconds}`). The skip
   stays: EC7, the timeout for `seq-and-transducer` after step 7 (574 s alone), was not taken
   (SPEED-NOTES.md, "Amendments").*
-- **SL4 (proposal; B1-PLAN D6, the gate) A test build with the suite's Java fixtures.** j2a
+- **SL4 (proposal; B1-PLAN D6, the gate) A test build with the suite's Java fixtures.** repr/java
   converts `test/java` (12 files, done in 1 s, no error); `bin/arbace-go --build-tests` would
   translate them with the program (`bin/a2g --program --input`) into a second executable
   `arbace-tests` that `suite-go` uses: `generated-*` (297 assertions), `param-tags` (136),
@@ -1348,7 +1357,7 @@ through the class loaders, JRT-NOTES.md "Resources by URL"), and two oracle diff
   `JDK8InterfaceMethods`, `ClassWithFailingStaticInitialiser`, `reflector.IBar`, and
   `arbace.test`'s `AdapterExerciser`, `FIConstructor`, `FIStatic`, `FunctionalTester`,
   `SwissArmy`, `ConcreteClass`, `GenericInterface`, `ReflectorTryCatchFixture`) into class forms
-  with j2a (javac's class path: stage 2, for `IFn` and the Java API): 12 of 12, no error.
+  with repr/java (javac's class path: stage 2, for `IFn` and the Java API): 12 of 12, no error.
   (2026-10-12, after standalone S1: the forms are committed in `test/java-fixtures/`, which
   `--build-tests` reads by default, without javac; `--java-fixtures verify` and `update` prove
   and regenerate them: test/java-fixtures/README.md.)
@@ -1465,7 +1474,7 @@ Java fixtures, resources by URL"); where each is folded is marked below.
 
 - **FX1 (B1-PLAN D6; A2G-SPEC §10.6; the gate) The test build.** `bin/arbace-go --build-tests`
   makes `arbace-tests`, the program with the suite's Java fixtures (`bin/clojure-tests
-  --java-fixtures`: j2a on the renamed `test/java`), which `bin/clojure-tests` requires of
+  --java-fixtures`: repr/java on the renamed `test/java`), which `bin/clojure-tests` requires of
   `CLOJURE_TESTS_GO` and `bin/gate --full`'s `suite-go` uses; `test/arbace-go-results.edn` is
   its reference, with `compilation`, `generated-*` ×3, `java-interop`, `param-tags`, `reflect`
   and `try-catch` no longer skipped. Supersedes SL4. *Accepted 2026-10-10, folded into

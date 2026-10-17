@@ -1,23 +1,23 @@
-(ns arbace.g2a.build
-  "g2a's program build: a Go program held as Go forms (doc/go/SPEC.md) to a static Linux
+(ns arbace.build.go
+  "The program build: a Go program held as Go forms (doc/go/SPEC.md) to a static Linux
   executable (doc/go/BUILD.md).
 
-  bin/g2a build [--arch amd64|arm64] [--goos linux|tamago|darwin] [-o OUT] [--layout gofmt|lines]
+  bin/build-go [--arch amd64|arm64] [--goos linux|tamago|darwin] [-o OUT] [--layout gofmt|lines]
                 [--line-file] [--work DIR] [--overlay FILE] [--pgo FILE] [--print-cache DIR] [--root ROOT]...
                 [--goos-dir DIR] [--main PATH] DIR
-  bin/g2a build --print-only --work DIR [--tests] [--module PATH] [--layout gofmt|lines]
+  bin/build-go --print-only --work DIR [--tests] [--module PATH] [--layout gofmt|lines]
                 [--line-file] SRC
-  runs -m arbace.g2a.build with the same arguments. DIR holds the program's packages as forms
+  runs -m arbace.build.go with the same arguments. DIR holds the program's packages as forms
   under DIR/go/ (SPEC §4.1: go/<path>.ae, the package file, and the files it loads), and
   optionally DIR/program.edn, {:module \"path\" :go \"1.N\"} (go.mod's module and go lines; by
   default the main package's path and the toolchain's language version). Each package is
-  printed (arbace.g2a.print) into a temporary module, its other and embedded files copied
+  printed (arbace.repr.go.print) into a temporary module, its other and embedded files copied
   from its forms directory (go/<path>/), and the main package is built with
 
     CGO_ENABLED=0 GOOS=linux GOARCH=<arch> go build -trimpath -buildvcs=false -o OUT
 
   into a static executable (GOOS=tamago: a TamaGo image, below). OUT defaults to the main package path's last element in the
-  current directory. The toolchain is $G2A_GOROOT/bin/go (default /root/tamago-go, go1.27.1).
+  current directory. The toolchain is $ARBACE_GOROOT/bin/go (default /root/tamago-go, go1.27.1).
     --arch        amd64 (default) or arm64 (GOAMD64=v1, GOARM64=v8.0)
     --layout      the printed Go's layout: gofmt (default) or lines (SPEC §12.3)
     --line-file   layout lines, each file starting with a //line directive naming its forms
@@ -29,7 +29,7 @@
                   files of the build, such as patched Go runtime files (BUILD.md, \"Overlays\")
     --pgo FILE    passed to go build as -pgo FILE (absolute): a CPU profile for gc's
                   profile-guided optimization (doc/go/SPEED-NOTES.md)
-    --print-cache DIR  a cache of printed packages (with G2A_HOST_ID set, as bin/g2a sets it
+    --print-cache DIR  a cache of printed packages (with REPR_GO_HOST_ID set, as bin/build-go sets it
                   for this option): a package the same host printed from the same forms
                   is not printed again, nor its forms read (DIR/collect/, the collect index)
     --goos        linux (default); darwin (the box's launcher on the Mac, cgo off: S4, BX61);
@@ -54,7 +54,7 @@
     --goos-dir DIR  with --goos tamago: TamaGo's goos module is DIR (go.mod replaces it by
                   DIR), not Go's module cache: the module printed from its Go forms
                   (bin/tamago-vendor print)"
-  (:require [arbace.g2a.print :as p]
+  (:require [arbace.repr.go.print :as p]
             [arbace.string :as str])
   (:import [java.io File]
            [java.nio.file Files CopyOption StandardCopyOption]
@@ -68,12 +68,12 @@
 ;; The program: its packages
 
 (defn- data-dir?
-  "Whether f is under a directory of data, not forms: one holding a file .g2a-data (a
+  "Whether f is under a directory of data, not forms: one holding a file .build-go-data (a
   package's embedded files, such as a2g --program's sources, doc/go/EVAL-NOTES.md)."
   [^File dir ^File f]
   (loop [d (.getParentFile f)]
     (cond (or (nil? d) (= (.getAbsoluteFile d) (.getAbsoluteFile dir))) false
-          (.isFile (File. d ".g2a-data")) true
+          (.isFile (File. d ".build-go-data")) true
           :else (recur (.getParentFile d)))))
 
 (defn- clj-files [^File dir]
@@ -102,10 +102,10 @@
   (str (.relativize (.toPath (.getAbsoluteFile base)) (.toPath (.getAbsoluteFile f)))))
 
 (defn packages
-  "The program's packages: the package files under DIR/go, each collected (arbace.g2a.print
+  "The program's packages: the package files under DIR/go, each collected (arbace.repr.go.print
   /collect) with :file (the package file) and :path; then those of each of the other roots
   (--root), but their main packages. With print-cache (a directory) and the environment's
-  G2A_HOST_ID, a package whose files are unchanged since the same host collected it is taken
+  REPR_GO_HOST_ID, a package whose files are unchanged since the same host collected it is taken
   from the print cache's collect index, its forms read only if it must be printed (collected)."
   ([^File dir] (packages dir nil nil))
   ([^File dir roots] (packages dir roots nil))
@@ -142,7 +142,7 @@
     (hex (.digest (MessageDigest/getInstance "SHA-256") (Files/readAllBytes (.toPath f))))))
 
 (defn- collect-package
-  "Package file f collected (arbace.g2a.print/collect), with :file, :path and :read (the forms
+  "Package file f collected (arbace.repr.go.print/collect), with :file, :path and :read (the forms
   files it is made of: print-module's cache key)."
   [^File dir ^File f read-fn]
   (let [read (atom [])
@@ -153,7 +153,7 @@
     (assoc pkg :file f :path path :read @read)))
 
 ;; The collect index (with --print-cache): per source root and host, what collecting found, so
-;; that a build whose packages are in the print cache reads no forms (reading is most of g2a's
+;; that a build whose packages are in the print cache reads no forms (reading is most of repr/go's
 ;; time on the Go executable): {:package-file? {sha bool} :packages {package file's path {:read
 ;; [[path sha] ...] :pkg {:package :name :path}}}}. An entry holds while every file it read has
 ;; the same SHA-256; collect and package-file? are functions of those files' contents and paths.
@@ -191,7 +191,7 @@
     (when-not (.isDirectory root)
       (fail (str "no " (.getPath root) ": the program's forms go under DIR/go (doc/go/BUILD.md)")))
     (let [files (clj-files root)
-          host-id (System/getenv "G2A_HOST_ID")
+          host-id (System/getenv "REPR_GO_HOST_ID")
           index-file (when (and print-cache (seq host-id)) (collect-index-file print-cache host-id dir))
           index (when index-file (or (read-index index-file) {}))
           shas (when index-file
@@ -407,8 +407,8 @@
 (declare delete-tree)
 
 (defn- print-cache-key
-  "The key of a package's printed files in the print cache: the host's identity (G2A_HOST_ID:
-  the executable's and g2a's sources' hashes, bin/lib/g2a-host.bash), the options that change
+  "The key of a package's printed files in the print cache: the host's identity (REPR_GO_HOST_ID:
+  the executable's and repr/go's sources' hashes, bin/lib/repr-go-host.bash), the options that change
   the printing, the package's path and its forms files (their paths in dir and contents)."
   [host-id pkg ^File dir opts tests]
   (let [md (MessageDigest/getInstance "SHA-256")
@@ -449,7 +449,7 @@
   go.sum and vendor/modules.txt are files of the tree it is printed into (bin/tamago-vendor).
   With goos-dir (GOOS=tamago), TamaGo's goos module is that directory (a replace), not Go's
   module cache. Packages are printed in parallel. With print-cache (a directory) and the
-  environment's G2A_HOST_ID, a package printed before by the same host from the same forms is
+  environment's REPR_GO_HOST_ID, a package printed before by the same host from the same forms is
   taken from the cache (standalone S6: a build reprints only what changed)."
   [{:keys [module packages] golang :go} ^File dir ^File out {:keys [layout line-file tests goos goroot goos-dir print-cache]}]
   (.mkdirs out)
@@ -475,7 +475,7 @@
                     printable #(if tests
                                  %
                                  (update % :files (fn [fs] (filterv (fn [f] (not (test-files (str (:name f))))) fs))))
-                    host-id (System/getenv "G2A_HOST_ID")
+                    host-id (System/getenv "REPR_GO_HOST_ID")
                     entry (when (and print-cache (seq host-id))
                             (let [k (print-cache-key host-id pkg dir opts tests)]
                               (File. (File. (str print-cache) (subs k 0 2)) k)))
@@ -529,7 +529,7 @@
         tmp? (nil? work)
         ^File work (if work
                      (File. (str work))
-                     (.toFile (Files/createTempDirectory "g2a-build" (make-array FileAttribute 0))))]
+                     (.toFile (Files/createTempDirectory "build-go" (make-array FileAttribute 0))))]
     (try
       (let [mod (File. work "mod")]
         (when (.exists mod) (delete-tree mod))
@@ -552,9 +552,9 @@
         (when tmp? (delete-tree work))))))
 
 (defn -main [& argv]
-  (let [goroot (or (System/getenv "G2A_GOROOT") "/root/tamago-go")
-        usage (str "usage: bin/g2a build [--arch amd64|arm64] [--goos linux|tamago|darwin] [-o OUT] [--layout gofmt|lines] [--line-file] [--work DIR] [--overlay FILE] [--pgo FILE] [--root ROOT]... [--goos-dir DIR] [--main PATH] DIR\n"
-                   "       bin/g2a build --print-only --work DIR [--tests] [--module PATH] [--layout gofmt|lines] [--line-file] SRC")]
+  (let [goroot (or (System/getenv "ARBACE_GOROOT") "/root/tamago-go")
+        usage (str "usage: bin/build-go [--arch amd64|arm64] [--goos linux|tamago|darwin] [-o OUT] [--layout gofmt|lines] [--line-file] [--work DIR] [--overlay FILE] [--pgo FILE] [--root ROOT]... [--goos-dir DIR] [--main PATH] DIR\n"
+                   "       bin/build-go --print-only --work DIR [--tests] [--module PATH] [--layout gofmt|lines] [--line-file] SRC")]
     (loop [as argv opts {:arch "amd64" :goroot goroot}]
       (case (first as)
         "--arch" (recur (nnext as) (assoc opts :arch (second as)))
@@ -594,7 +594,7 @@
                            (build dir (:arch opts) out opts)))
                          (catch arbace.lang.ExceptionInfo e
                            (if (::user (ex-data e))
-                             (do (binding [*out* *err*] (println (str "g2a build: " (.getMessage e))))
+                             (do (binding [*out* *err*] (println (str "build-go: " (.getMessage e))))
                                  1)
                              (throw e))))]
             (shutdown-agents)

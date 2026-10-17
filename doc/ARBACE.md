@@ -6,9 +6,12 @@ code. Three kinds of things live here:
 
 - Arbace's own tools: `classes/` (the class forms' analysis and the Go build's interpreter of
   them, `arbace.classes.*`; the bytecode back end is on the branch `arbace-for-java-26`), `c2a/` (the
-  Clojure to Arbace translator, `arbace.c2a.*`; doc/C2A.md), `j2a/`
-  (the Java to class forms converter, `arbace.j2a.*`), `g2a/` (Go to Arbace forms,
-  `arbace.g2a.*`, with its Go helpers under `tools/godump/` and `tools/gocmp/`; doc/go/) and
+  Clojure to Arbace translator, `arbace.c2a.*`; doc/C2A.md), `repr/java.ae`
+  and `repr/java/` (repr/java, the Java to class forms converter, `arbace.repr.java` and
+  `arbace.repr.java.*`), `repr/go.ae` and `repr/go/` (repr/go, Go to Go forms and back,
+  `arbace.repr.go` and `arbace.repr.go.*`, with its Go helpers under `tools/godump/` and
+  `tools/gocmp/`; doc/go/), `build/go.ae` (the build of a program held as Go forms,
+  `arbace.build.go`; doc/go/BUILD.md; until 2026-10-17 j2a, g2a and `arbace.g2a.build`) and
   `a2g/` (the class forms to Go forms translator of the Go build, `arbace.a2g.*`;
   doc/go/A2G-SPEC.md), `aot/` (the back end compiling namespaces to class forms, `arbace.aot.*`;
   doc/STANDALONE-NOTES.md, "S6: Arbace compiled to Go").
@@ -45,7 +48,7 @@ https://github.com/clojure/clojure at `98d735fab02f337cee654cb0629bddc09883a75a`
 the two seed fixes recorded in the journal on that branch
 ([JOURNAL.md](https://github.com/arbace/arbace/blob/arbace-for-java-26/doc/JOURNAL.md),
 2026-10-06). It was derived on 2026-10-07 by `bin/vendor-arbace` (on that branch; converter
-`arbace.j2c`, renaming `arbace.j2c.rename`; since renamed `arbace.j2a` and `arbace.c2a.rename`) and is maintained by hand since.
+`arbace.j2c`, renaming `arbace.j2c.rename`; since renamed `arbace.j2a` (2026-10-11), then `arbace.repr.java` (2026-10-17), and `arbace.c2a.rename`) and is maintained by hand since.
 
 Also vendored, renamed alike: clojure.spec, the two libraries upstream Clojure at that revision
 depends on (`pom.xml`), as `arbace.spec.alpha`, `arbace.spec.gen.alpha`, `arbace.spec.test.alpha`

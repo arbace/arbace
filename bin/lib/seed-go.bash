@@ -1,5 +1,5 @@
 # The Go-source seed of the bootstrap (doc/STANDALONE-NOTES.md, "S4: the Go-source seed"; the
-# standalone survey's D3): Arbace's Go program as a2g and g2a print it, the module that
+# standalone survey's D3): Arbace's Go program as a2g and repr/go print it, the module that
 # bin/arbace-go --build compiles, packed into one deterministic archive pinned by its SHA-256.
 # Sourced by bin/seed, with $root set to the repository root. Defines:
 #
@@ -8,7 +8,7 @@
 #                           a2g's list of namespaces, the version map) into ARCHIVE
 #   seed_go_build ARCHIVE OUT ARCH...
 #                           stage 0: unpack ARCHIVE into OUT/src and build OUT/<arch>/arbace with
-#                           Go's toolchain ($G2A_GOROOT, the version the seed names), as
+#                           Go's toolchain ($ARBACE_GOROOT, the version the seed names), as
 #                           bin/arbace-go --build links its executables
 #   seed_go_tar DIR         the deterministic tar of DIR's arbace-seed-go/ on standard output
 #
@@ -17,7 +17,7 @@
 # Inside, arbace-seed-go/:
 #   SEED.edn         what the seed is: its format, the version map linked into the executable,
 #                    Go's version, the build's settings, what made it (read with read)
-#   mod/             the module arbace, as bin/g2a build --line-file printed it: go.mod,
+#   mod/             the module arbace, as bin/build-go --line-file printed it: go.mod,
 #                    arbace/cmd/arbace (main, the image's types, the embedded namespaces' sources
 #                    res/), arbace/lang (a2g's translation of Clojure's runtime), arbace/jrt (jrt's
 #                    hand-written Go and the JDK's classes a2g translated, with their data files),
@@ -30,8 +30,8 @@
 seed_go_top=arbace-seed-go
 seed_go_format=1
 
-# the Go toolchain: TamaGo's Go distribution, the one bin/arbace-go builds with (G2A_GOROOT)
-seed_go_goroot() { echo "${G2A_GOROOT:-/root/tamago-go}"; }
+# the Go toolchain: TamaGo's Go distribution, the one bin/arbace-go builds with (ARBACE_GOROOT)
+seed_go_goroot() { echo "${ARBACE_GOROOT:-/root/tamago-go}"; }
 
 # the toolchain's pin (SA4): seed/goroot.sha256 names Go's version and the SHA-256 of GOROOT's
 # sources, defined as sha256sum's lines (SHA-256, two spaces, the path relative to GOROOT) of
@@ -98,7 +98,7 @@ seed_go_make() {
   nss=$dir/a2g/prog/namespaces.txt
   [ -f "$mod/go.mod" ] && [ -f "$nss" ] && [ -x "$dir/$host/arbace" ] \
     || { echo "bin/seed: no build in $dir: run bin/arbace-go --build first" >&2; return 1; }
-  # the overlay printed by g2a, on the packed build's own executable when no host is named
+  # the overlay printed by repr/go, on the packed build's own executable when no host is named
   ovl=$(cd "$root" && ARBACE_HOST_EXE=${ARBACE_HOST_EXE:-$dir/$host/arbace} bin/jrt overlay | tail -1) || return 1
   rt=$(dirname "$ovl")/runtime
   [ -d "$rt" ] || { echo "bin/seed: no patched runtime in $rt" >&2; return 1; }
@@ -107,7 +107,7 @@ seed_go_make() {
   case $version in *':dirty true'*) echo "bin/seed: warning: the checkout is dirty; the seed records it" >&2 ;; esac
   goversion=$(head -1 "$(seed_go_goroot)/VERSION")
   goroothash=$(seed_go_toolchain_check) || return 1
-  printedby="bin/arbace-go --build: a2g and g2a on the host executable"
+  printedby="bin/arbace-go --build: a2g and repr/go on the host executable"
   [ -s "$dir/printed-by" ] && printedby=$(cat "$dir/printed-by")
   t=$(mktemp -d "$root/.tmp/seed-go-make.XXXXXX") || return 1
   mkdir -p "$t/$seed_go_top/overlay"
