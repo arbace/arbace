@@ -1731,3 +1731,116 @@ decided after GR6 (GS8); goi's own `%T` at GR5 if frequent (GS9); `(.M v)` inter
 table at GR5 (GS10); `GoPanic` with jrt's exception as cause (GS11); an essential-gate subset if
 minutes (GS12); the check in the box after GR4 (GS13); `go:embed` after GR5 (GS14); interpreted
 Go writing to the process's own stdout (GS15).
+
+## As built: GR2 (2026-10-17)
+
+GR2, the checker, was built first, before GR1 (the user's choice of 2026-10-17), on the tools'
+host. What this text says of the checker (§3) holds, with the choices and findings below.
+
+**What was built.** `arbace.go.check` (`arbace/go/check.ae`) and its parts in
+`arbace/go/check/`: `types.ae` (types, predicates, gc's sizes, field and method lookup after
+`lookup.go`), `const.ae` (constants, §3.5: exact rationals, big.Float's 512 bits beyond
+`maxExp`, float32 and float64 rounding), `env.ae` (objects, scopes, the universe, `unsafe`,
+errors, the annotations verified), `code.ae` with `code_expr.ae`, `code_call.ae`,
+`code_stmt.ae`, `code_branch.ae` (type expressions, expressions, calls and builtins,
+statements, labels and branches), `decl.ae` (a package's declarations: collection, `objDecl`
+with go/types' colouring, lazy named types, methods, `validType`, initialization order after
+`initorder.go`) and `load.ae` (forms roots, build constraints and file names evaluated for the
+configuration, import paths): 5,950 lines. `bin/goi annotations` (§11.4) and `bin/goi test`
+(`test/goi/check_test.ae`: `test/goi/errors/`, 9 files of invalid forms with 61 messages;
+`test/goi/annotations/`, converted forms whose `:val`, `:tag`, `:go/via`, `^:assign` and
+`:init-order` are wrong, the checker's disagreements (S16); `test/goi/checked/`, three programs
+and their checked trees; `--gc` prints the invalid forms with repr/go, builds them with gc and
+requires gc's messages to be the expected ones: `test/goi/gc_errors.ae`); `make
+goi-annotations`, `make goi-test`.
+
+**Imports from forms, not the digest.** Before GR1 there is no digest (§6.5): an imported
+package is checked from its forms, whole (bodies included), once per session and in parallel
+(each package's imports first), in a forms root: `tamago/goroot` (with `arch/ARCH/` laid over
+it file by file; the merged tree's `:build` lines and file names evaluated for
+`tamago/ARCH`), or repr/go's conversions of the linux corpora (`.tmp/repr-go/forms/CORPUS`;
+the programs and directory tests import `linux-amd64`'s std; a directory test's packages by
+their `:path` and `:local-imports`). The digest is Go forms too (S55), so GR1 adds it as one
+more root of the same reader (GC1).
+
+**Not in the program yet.** `arbace/j2g/embed.ae` leaves `arbace/go.ae` and `arbace/go/` out of
+the embedded sources, as repr/haskell's: the checker runs evaluated from the checkout on stage
+0, and the program changes only by that list's text. The program carries goi from GR1/GR3, after
+the coming re-seed.
+
+**The corpora** (`bin/goi annotations`, 24 threads, shared machine): zero errors in every
+package, every annotation of a declaration without generics verified, the counts recorded in
+`test/goi/annotations-CORPUS.edn`:
+
+| corpus | packages | declarations checked | using generics (apart) | `:val` | `:tag` | `:go/via` | `^:assign` | `conv` | `:init-order` | time |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---|---:|
+| `tamago-amd64` | 371 | 34,520 | 1,263 | 9,021 | 243 | 3,844 | 671 | 21,118 | not written (merged tree) | 45 s |
+| `tamago-arm64` | 370 | 34,437 | 1,263 | 8,926 | 244 | 3,831 | 671 | 21,099 | not written | 41 s |
+| `linux-amd64` (std) | 376 | 37,072 | 1,294 | 10,905 | 256 | 3,779 | 702 | 22,642 | 376 packages, 2,560 initializers | 45 s |
+| `linux-test` (`$GOROOT/test`) | 1,713 | 8,480 | 1,290 | 627 | 45 | 143 | 36 | 3,080 | 1,713 packages, 932 initializers | 29 s |
+| `linux-dirtest` (directory tests) | 562 | 1,228 | 498 | 27 | 0 | 12 | 0 | 147 | 562 packages, 132 initializers | 23 s |
+
+A declaration is a spec: a function, a method, a type, a variable or a constant (a group's
+specs one each). The survey's 44,435 `:tag` (§2.1) counted every `:tag` of `tamago/goroot`,
+declarations included; the converter writes it on expressions only for non-constant shifts
+(SPEC §8.3): 269 there, 243 of them in declarations without generics. `:inst` occurs only in
+declarations that use generics (1,061 in `tamago/goroot`), so none is verified before GR6.
+
+**Generics (S53) as built.** A declaration uses generics when checking it meets a generic
+declaration, an instance, a type parameter or `:inst`. Such a declaration is checked all the
+same as far as its types go: instances are computed by substitution (with the converter's
+`:inst` for inferred type arguments: the one place an annotation stands in for the checker,
+only in declarations counted apart), so its dependents (a variable `var h = sync.OnceValue(f)`,
+a struct with an `atomic.Pointer[T]` field) have their right types, and its references, the
+imports it uses and its dependencies for initialization order are recorded; what GR2 does not
+check is marked unsupported, the operand invalid, and checking goes on. Its errors are counted
+apart (`:generic-errors`), never as errors. The unsupported constructs met in `tamago-amd64`:
+selectors (27), `len` (35), `range` (15), indexing (4), slicing (5), `append` (1) and composite
+literals (2) of type parameters, and type set terms (7).
+
+**Choices and findings.**
+
+- **gc's branch checks.** Labels, `goto`, `break`, `continue` and `fallthrough` are checked as
+  gc checks them before types2 (`cmd/compile/internal/syntax/branches.go`), with its messages
+  (`label L defined and not used`, `goto L jumps over declaration of x at FILE:LINE`, `goto L
+  jumps into block starting at ...`); go/types' `labels.go` words some of them otherwise.
+  Messages elsewhere are types2's (§3.8), checked against gc by `bin/goi test --gc`.
+- **Shift counts stay untyped**, as go/types leaves them (an untyped non-constant count is
+  integer and is not converted): `(<< x (<< 1 s))`'s count has no `:tag`. The `:tag` check found
+  the checker's first answer (the default type) wrong.
+- **Huge float literals** are big.Float's: its decimal scanning (math/big `floatconv.go`: the
+  mantissa exact, times 2^k, times or divided by 5^|k| computed at 576 bits, `pow5`) is followed
+  step by step, so `1E+646456992M` and its quotients have go/constant's `:val` exactly
+  (`fixedbugs/issue11326b.go`).
+- **A `let` that is not the last form of its statement list** is a block of its own, as the
+  printer prints it (SPEC §7.3 has every `let` last).
+- **The converter's typed float values were lossy**: `double-lit` converted a ratio with
+  `double`, which rounds through 16 decimal digits, so `const _ float32 = real(2.1)` had `:val
+  2.099999904632568` instead of float32(2.1)'s `2.0999999046325684` (`fixedbugs/issue11945.go`;
+  S16: "both are bugs"). Fixed in `arbace/repr/go/lit.ae` (the ratio divided exactly); no
+  tracked forms change: `tamago/goroot`'s typed float values are all verified exact, and those of
+  `tamago/cmd`, `box/` and `go/` (π, e, 2π, 2e9) read the same either way (GC2).
+- **`:init-order` entries named `true`, `false` or `nil`** (a directory test's package-level
+  variables) are written as those symbols, which the reader reads as literals; the checker reads
+  a literal there as the variable it names (GC3). Blank variables' entries (`["file.go" line
+  col]`) are compared by file and line: mode `:lines` keeps no columns.
+- **Method expressions carry no `:go/via`** in the converter's forms (SPEC §7.6 asks it of
+  selectors and literal keys): the checker computes the path and compares where present.
+- **Errors**: a package's errors are all reported, as data `{:file :line :msg :code}` (§3.8);
+  the REPL's `CompilerException` with at most ten of them, and the check of a single REPL
+  declaration against the package's state, come with GR3.
+
+**Proposals for the user** (each built as recommended):
+
+- **GC1 Imports at the REPL.** (a) as built: a session checks imported packages from their
+  forms when a forms root has them (the tools, the corpora), and GR1 adds the digest as one
+  more root for the compiled packages; (b) the digest only. *Recommended: (a)*: the tools keep
+  checking whole corpora without a program, and the REPL loses nothing.
+- **GC2 repr/go's typed floats.** (a) as built: `double-lit` exact (a fix to repr/go, an
+  embedded tool, so the program's copy changes with it: the next build compiles it); (b) keep
+  repr/go unchanged until a batch of its own. *Recommended: (a)*: the forms of `$GOROOT/test`
+  carried a wrong value; no tracked tree changes.
+- **GC3 Variables named `true`, `false`, `nil` in `:init-order`.** (a) the converter writes
+  `(go/id "true")` there, as SPEC §4.4 writes such names in symbol positions, the checker
+  accepting both meanwhile; (b) the literal stays the variable's spelling. *Recommended: (a)*
+  (a change to the converter for a later batch; GR2 accepts both).

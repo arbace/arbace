@@ -1,0 +1,400 @@
+(ns arbace.go.check.code
+  "goi's checker: Go context (doc/go/GOI-SPEC.md §3.4): type expressions, expressions, calls
+  and builtins, statements, as go/types checks them (typexpr.go, expr.go, call.go,
+  builtins.go, stmt.go, assignments.go ...). The checked tree's nodes (§3.7) are maps with :op,
+  :line, and for expressions :type and :mode (:value, :variable, :mapindex, :constant with :val,
+  :commaok, :novalue, :typexpr, :builtin, :invalid).
+
+  The parts: this file (helpers, names, type expressions), code_expr.ae (operands, untyped
+  constants, operators, conversions), code_call.ae (selectors, calls, builtins, literals),
+  code_stmt.ae (statements and function bodies)."
+  (:require [arbace.string :as str]
+            [arbace.go.check.types :as t]
+            [arbace.go.check.const :as c]
+            [arbace.go.check.env :as e :refer [o oset! err! error!]]))
+
+(declare check-branches! mark-addressed! call-form? expr expr-or-type multi-expr typexpr typexpr-generic byte-string-value literal const-node invalid-conversion! finish-comparison composite-lit builtin-call val-equal? val-form-str key-val stmt terminating? missing-cause implements? invalid invalid? signature rhs-values init-var assignment func-body check-fn-lit const-expr
+         convert-untyped update-type operand-str expr-str stmt-list)
+
+;;; Hooks set by arbace.go.check.decl
+
+(def ^:dynamic *obj-decl*
+  "A function checking a package-level object's declaration (go/types' objDecl)."
+  nil)
+
+(def ^:dynamic *package-of-ns*
+  "A function from a namespace name (go.x.y) to its package, for the qualified names of
+  annotations (doc/go/SPEC.md §4.4)."
+  nil)
+
+(def ^:dynamic *instantiate*
+  "A function [generic-named targs] -> the instance, bound by the checker."
+  nil)
+
+(def ^:dynamic *subst*
+  "A function [type {tparam type}] -> the type substituted, bound by the checker."
+  nil)
+
+;;; Forms
+
+(defn head-name
+  "The name of a list's head symbol, or nil: \"go/func\" for go/func, \"deref\" for
+  arbace.core/deref."
+  [f]
+  (when (and (seq? f) (symbol? (first f)))
+    (let [s (first f)]
+      (if (and (namespace s) (= "deref" (name s)) (#{"arbace.core" "clojure.core"} (namespace s)))
+        "deref"
+        (if (= "go" (namespace s)) (str "go/" (name s)) (when-not (namespace s) (name s)))))))
+
+(defn go-id?
+  "Whether f is (go/id \"x\")."
+  [f]
+  (and (seq? f) (= 'go/id (first f))))
+
+(defn ident-name
+  "The Go name of a symbol or (go/id \"x\")."
+  ^String [f]
+  (if (go-id? f) (second f) (name f)))
+
+(defn go-ident? [f] (or (and (symbol? f) (nil? (namespace f))) (go-id? f)))
+
+(defn fline [f] (e/line-of f))
+
+(defmacro with-line
+  "Binds the current line to form f's line (when it has one) for errors."
+  [f & body]
+  `(let [l# (fline ~f)]
+     (if l# (binding [e/*line* l#] ~@body) (do ~@body))))
+
+(def reserved-expr-heads
+  #{"+" "-" "*" "/" "%" "<<" ">>" "==" "!=" "<" "<=" ">" ">=" "and" "or" "not" "bit-and" "bit-or"
+    "bit-xor" "bit-not" "bit-and-not" "addr" "<!" "lit" "conv" "assert" "aget" "subslice" "spread"
+    "values" "inst" "method-expr" "fn" "zero" "rune" "imaginary" "byte-string" "deref"
+    "append" "cap" "clear" "close" "complex" "copy" "delete" "imag" "len" "make" "max" "min" "new"
+    "panic" "print" "println" "real" "recover" "go/call" "go/id"})
+
+;;; Language versions
+
+(defn lang-minor
+  "The minor version of a language version \"go1.N\" (27 for go1.27)."
+  ^long [v]
+  (if-let [[_ m] (and v (re-matches #"go1\.(\d+)(\..*)?" (str v)))]
+    (Long/parseLong m)
+    27))
+
+(defn allow-version? [cx minor] (>= (long (:lang cx 27)) (long minor)))
+
+;;; Names
+
+(defn pkg-path [] (o e/*pkg* :path))
+
+(defn package-level? [x] (o x :pkg-level))
+
+(defn note-ref!
+  "Records a reference to package-level object x in the current declaration: :refs, and the
+  dependencies of initialization order (vars, consts, funcs: go/types' addDeclDep)."
+  [x]
+  (when (and e/*decl* (package-level? x) (= (o x :pkg) (pkg-path)))
+    (vswap! e/*decl* update :refs (fnil conj #{}) x)
+    (when (#{:var :const :func} (o x :kind))
+      (vswap! e/*decl* update :deps (fnil conj #{}) x))))
+
+(defn use-var!
+  "Marks a variable used, and captured when referenced from a function literal other than its
+  own (the variables of other packages are left alone: they are complete)."
+  [cx x]
+  (when (and (= :var (o x :kind)) (or (o x :local?) (= (o x :pkg) (pkg-path))))
+    (when-not (o x :used) (oset! x :used true))
+    (when (and (o x :local?) (not= (o x :fn-id) (:fn-id cx)) (not (o x :captured?)))
+      (oset! x :captured? true))))
+
+(defn resolve-name
+  "The object a name denotes in cx's scopes (locals, the package, the file's imports, the
+  universe), declared and marked used; nil when undefined."
+  [cx ^String n]
+  (when-let [x (or (e/scope-lookup (:scope cx) n)
+                   (when-let [[x imp] (some-> (:file cx) :dots (.get n))]
+                     (oset! imp :used true)
+                     x)
+                   (e/scope-get e/universe n))]
+    (when (and (package-level? x) *obj-decl* (not (and (= :type (o x :kind)) (not (o x :alias)))))
+      (*obj-decl* x))
+    (when (= :pkg (o x :kind)) (oset! x :used true))
+    x))
+
+(defn package-by-qualifier
+  "The package a qualifier names: the file's import name, or a namespace (go.x.y) in the
+  forms' annotations."
+  [cx ^String q]
+  (if (str/includes? q ".")
+    (when *package-of-ns* (*package-of-ns* q))
+    (let [x (e/scope-get (:file-scope cx) q)]
+      (when (and x (= :pkg (o x :kind)))
+        (oset! x :used true)
+        (o x :imported)))))
+
+(defn qualified-obj
+  "The exported object pkg/Name names, with an error when there is none."
+  [cx sym]
+  (let [q (namespace sym) n (name sym)
+        p (package-by-qualifier cx q)]
+    (cond
+      (nil? p) (do (err! sym :UndeclaredName "undefined: %s" q) nil)
+      :else
+      (let [x (e/scope-get (o p :scope) n)]
+        (cond
+          (and (nil? x) (not (o p :fake)) (not (t/exported? n)) (nil? (e/scope-get (o p :scope) n)))
+          (do (err! sym :UndeclaredImportedName "undefined: %s.%s" (o p :name) n) nil)
+          (nil? x) (do (err! sym :UndeclaredImportedName "undefined: %s.%s" (o p :name) n) nil)
+          (and (not (t/exported? n)) (not (str/includes? q ".")) (not (o x :unsafe)) (not= "Pointer" n))
+          (do (err! sym :UnexportedName "name %s not exported by package %s" n (o p :name)) nil)
+          :else
+          (do (when (and (package-level? x) *obj-decl* (not (and (= :type (o x :kind)) (not (o x :alias)))))
+                (*obj-decl* x))
+              x))))))
+
+;;; Type expressions (typexpr.go)
+
+(defn- type-params-generic! [] (e/generic!))
+
+(defn type-of-obj
+  "The type a type name object denotes; generic types without instantiation are an error."
+  [f x]
+  (let [ty (o x :type)]
+    (cond
+      (nil? ty) :invalid
+      (and (t/named? ty) (or (seq (:tparams (t/info ty))) (o x :tparams-count)) (not (:targs (t/info ty))))
+      (do (err! f :WrongTypeArgCount "cannot use generic type %s without instantiation" (o x :name)) :invalid)
+      :else ty)))
+
+(defn ident-type
+  "The type a type name (a symbol, pkg/T, go.ns/T) denotes."
+  [cx f]
+  (let [x (if (and (symbol? f) (namespace f))
+            (qualified-obj cx f)
+            (let [n (ident-name f)]
+              (if (= "_" n)
+                (do (err! f :InvalidBlank "cannot use _ as value or type") nil)
+                (or (resolve-name cx n) (do (err! f :UndeclaredName "undefined: %s" n) nil)))))]
+    (cond
+      (nil? x) :invalid
+      (not= :type (o x :kind))
+      (do (err! f :NotAType "%s is not a type" (expr-str f)) :invalid)
+      :else
+      (do (note-ref! x)
+          (when (o x :generic-invalid) (e/generic!))
+          (when (and (o x :pkg-level) (o x :tparams-count)) (e/generic!))
+          (type-of-obj f x)))))
+
+(defn tag-type
+  "The type of a declared name: its :tag (a symbol or a type form)."
+  [cx sym]
+  (when-let [tg (:tag (meta sym))]
+    (typexpr cx tg)))
+
+(defn- struct-field-type? [x] (not (and (or (symbol? x) (go-id? x)) (:tag (meta x)))))
+
+(defn- embedded-name
+  "The field name of an embedded type form: T, pkg/T, (* T), (G args)."
+  [f]
+  (cond
+    (symbol? f) (name f)
+    (and (seq? f) (= '* (first f))) (embedded-name (second f))
+    (and (seq? f) (= 'inst (first f))) (embedded-name (second f))
+    (seq? f) (embedded-name (first f))
+    :else "?"))
+
+(defn struct-type
+  "A struct type form (struct field*)."
+  [cx f]
+  (let [p (pkg-path)
+        fields (vec
+                (for [x (rest f)]
+                  (if (struct-field-type? x)
+                    ;; an embedded field
+                    (let [ty (typexpr cx x)
+                          n (embedded-name x)]
+                      ;; embedded: a type name or a pointer to a non-interface type name
+                      (let [[base ptr] (t/deref-type ty)]
+                        (when (t/valid? ty)
+                          (cond
+                            (and ptr (t/interface? base))
+                            (err! x :InvalidPtrEmbed "embedded field type cannot be a pointer to an interface")
+                            (and ptr (t/pointer? base))
+                            (err! x :InvalidPtrEmbed "embedded field type cannot be a pointer")
+                            (= :unsafe-pointer base)
+                            (err! x :InvalidPtrEmbed "embedded field type cannot be unsafe.Pointer"))))
+                      {:name n :type ty :tag (when-let [tg (:go/tag (meta x))] (when (seq tg) (c/utf8-value tg)))
+                       :embedded true :pkg (when-not (t/exported? n) p) :line (fline x)})
+                    (let [n (ident-name x)]
+                      {:name n :type (tag-type cx x) :tag (when-let [tg (:go/tag (meta x))] (when (seq tg) (c/utf8-value tg)))
+                       :embedded false :pkg (when-not (t/exported? n) p) :line (fline x)}))))]
+    ;; duplicate field names
+    (reduce (fn [seen fd]
+              (let [n (:name fd)]
+                (if (and (not= "_" n) (contains? seen n))
+                  (do (error! (:line fd) :DuplicateDecl (format "%s redeclared" n)) seen)
+                  (conj seen n))))
+            #{} fields)
+    [:struct (mapv #(dissoc % :line) fields)]))
+
+(declare signature)
+
+(defn- method-elem? [x] (and (seq? x) (symbol? (first x)) (nil? (namespace (first x))) (vector? (second x))))
+
+(defn interface-type
+  "An interface type form (interface element*): its methods, embedded interfaces flattened."
+  [cx f]
+  (let [p (pkg-path)
+        own (for [x (rest f) :when (method-elem? x)]
+              (let [n (name (first x))
+                    [sig] (signature cx (rest x) nil)]
+                {:name n :pkg (when-not (t/exported? n) p) :type sig :line (fline x)}))
+        embedded (for [x (rest f) :when (not (method-elem? x))]
+                   (if (or (symbol? x) (and (seq? x) (not (#{'| 'tilde} (first x)))))
+                     (let [ty (typexpr cx x)
+                           u (t/under ty)]
+                       (cond
+                         (not (t/valid? ty)) nil
+                         (and (vector? u) (= :interface (nth u 0)))
+                         (do (when (nth u 2) (e/unsupported! "constraint interfaces"))
+                             (nth u 1))
+                         :else (e/unsupported! "type set terms")))
+                     (e/unsupported! "type set terms")))
+        ms (reduce (fn [acc m]
+                     (let [k [(:name m) (:pkg m)]]
+                       (if-let [prev (get acc k)]
+                         (do (when (and (not= (:type prev) (:type m)) (:line m))
+                               (error! (:line m) :DuplicateDecl (format "duplicate method %s" (:name m))))
+                             (when (and (:own prev) (:own m))
+                               (error! (:line m) :DuplicateDecl (format "duplicate method %s" (:name m))))
+                             acc)
+                         (assoc acc k m))))
+                   {}
+                   (concat (map #(assoc % :own true) own) (apply concat (remove nil? embedded))))]
+    [:interface (t/sort-methods (map #(dissoc % :own :line) (vals ms))) nil]))
+
+(defn array-length
+  "The length of an array type: a constant expression of integer value, representable as int."
+  [cx n]
+  (let [x (const-expr cx n)]
+    (cond
+      (= :invalid (:mode x)) -1
+      (not= :constant (:mode x))
+      (do (err! n :InvalidArrayLen "array length %s (%s) must be constant" (expr-str n) (operand-str x)) -1)
+      (and (t/untyped? (:type x)) (not (t/integer-type? (:type x))) (nil? (c/int-val (:val x))))
+      (do (err! n :InvalidArrayLen "array length %s must be integer" (operand-str x)) -1)
+      (and (t/typed? (:type x)) (not (t/integer-type? (:type x))))
+      (do (err! n :InvalidArrayLen "array length %s must be integer" (operand-str x)) -1)
+      :else
+      (let [v (c/int-val (:val x))]
+        (cond
+          (nil? v) (do (err! n :InvalidArrayLen "array length %s must be integer" (operand-str x)) -1)
+          (neg? (compare v 0)) (do (err! n :InvalidArrayLen "invalid array length %s" (operand-str x)) -1)
+          (>= (c/bit-len v) 63) (do (err! n :InvalidArrayLen "invalid array length %s" (operand-str x)) -1)
+          :else (long v))))))
+
+(defn chan-type [cx f]
+  (let [[_ a b] f]
+    (case a
+      :recv [:chan :recv (typexpr cx b)]
+      :send [:chan :send (typexpr cx b)]
+      [:chan :both (typexpr cx a)])))
+
+(defn typexpr
+  "The type a type form denotes (:invalid after an error)."
+  [cx f]
+  (with-line f
+    (cond
+      (or (symbol? f) (go-id? f)) (ident-type cx f)
+      (seq? f)
+      (let [h (first f)]
+        (cond
+          (= '* h) [:pointer (typexpr cx (second f))]
+          (= 'slice h) [:slice (typexpr cx (second f))]
+          (= 'array h) (let [[_ n el] f
+                             el (typexpr cx el)]
+                         (if (= '... n)
+                           (do (err! f :BadDotDotDotSyntax "invalid use of [...] array (outside a composite literal)") :invalid)
+                           (let [len (array-length cx n)]
+                             (if (neg? len) :invalid [:array len el]))))
+          (= 'map h) (let [k (typexpr cx (nth f 1)) v (typexpr cx (nth f 2))]
+                       (when (and (t/valid? k) (not (t/tparam? k)))
+                         ;; checked later: the key type may not be complete yet (go/types' later)
+                         (vswap! e/*decl* update :later (fnil conj [])
+                                 (fn []
+                                   (when-not (t/comparable? k)
+                                     (err! f :IncomparableMapKey "invalid map key type %s" (t/type-str k))))))
+                       [:map k v])
+          (= 'chan h) (chan-type cx f)
+          (= 'func h) (let [[_ ps rs] f
+                            [sig] (signature cx (if rs [ps :results rs] [ps]) nil)]
+                        sig)
+          (= 'struct h) (struct-type cx f)
+          (= 'interface h) (interface-type cx f)
+          (= 'inst h) (do (e/generic!)
+                          (let [g (typexpr-generic cx (second f))]
+                            (*instantiate* f g (mapv #(typexpr cx %) (nnext f)))))
+          (#{'| 'tilde} h) (do (e/unsupported! "type set terms") :invalid)
+          (symbol? h)
+          ;; a generic type's instance (G T...)
+          (do (e/generic!)
+              (let [g (typexpr-generic cx h)]
+                (*instantiate* f g (mapv #(typexpr cx %) (rest f)))))
+          :else (do (err! f :NotAType "%s is not a type" (expr-str f)) :invalid)))
+      :else (do (err! f :NotAType "%s is not a type" (expr-str f)) :invalid))))
+
+(defn typexpr-generic
+  "The generic named type a name denotes (for an instantiation)."
+  [cx f]
+  (let [x (if (and (symbol? f) (namespace f))
+            (qualified-obj cx f)
+            (resolve-name cx (ident-name f)))]
+    (cond
+      (nil? x) (do (err! f :UndeclaredName "undefined: %s" (expr-str f)) :invalid)
+      (not= :type (o x :kind)) (do (err! f :NotAType "%s is not a type" (expr-str f)) :invalid)
+      :else (do (note-ref! x) (o x :type)))))
+
+;;; Signatures (§5.3)
+
+(defn- param-name? [x] (and (or (symbol? x) (go-id? x)) (:tag (meta x))))
+
+(defn- params-of
+  "[{:name :type :form} ...] and variadic? of a parameter vector."
+  [cx v]
+  (let [xs (vec v)
+        amp (.indexOf ^java.util.List xs '&)
+        variadic (>= amp 0)
+        xs (if variadic (vec (concat (subvec xs 0 amp) (subvec xs (inc amp)))) xs)]
+    [(vec (for [x xs]
+            (if (param-name? x)
+              {:name (ident-name x) :type (tag-type cx x) :form x}
+              {:name nil :type (typexpr cx x) :form x})))
+     variadic]))
+
+(defn signature
+  "The signature of the forms after a function's name or a fn head: [type-params?] ^R? [params]
+  (:results [...])? ...: [[:func params results variadic?] param-specs result-specs rest-forms
+  results-named?]. recv, when given, is the receiver's form (the first parameter of a method)."
+  [cx forms recv]
+  (let [forms (if (= :type-params (first forms)) (do (e/unsupported! "generic functions") (drop 2 forms)) forms)
+        pv (first forms)
+        more (rest forms)
+        [results-v more] (if (= :results (first more)) [(second more) (nnext more)] [nil more])
+        [ps variadic] (params-of cx pv)
+        ps (if recv (vec (rest ps)) ps)
+        rs (cond
+             results-v (first (params-of cx results-v))
+             (:tag (meta pv)) [{:name nil :type (typexpr cx (:tag (meta pv))) :form nil}]
+             :else [])]
+    (when variadic
+      (let [lt (:type (peek ps))]
+        (when-not (and (vector? lt) (= :slice (nth lt 0)))
+          (err! pv :InvalidSyntaxTree "variadic parameter must be a slice"))))
+    [[:func (mapv :type ps) (mapv :type rs) variadic] ps rs more (boolean (and results-v (some :name rs)))]))
+
+(load "code_expr")
+(load "code_call")
+(load "code_stmt")
+(load "code_branch")

@@ -113,6 +113,9 @@ Prior art:
     divergences; `bin/clojure-tests` translates Clojure's suite with it.
   - `arbace/build/`: `arbace.build.go`, the build of a program held as Go forms: printed by
     repr/go into a module with its overlay, then `go build` (`bin/build-go`, `doc/go/BUILD.md`).
+  - `arbace/go/`: goi's checker, `arbace.go.check` (spec `doc/go/GOI-SPEC.md` §3, GR2; `bin/goi
+    annotations`, `test`), Go forms type-checked after go/types, the converter's annotations
+    verified; evaluated from the checkout, not embedded until the program carries goi.
   - `arbace/j2g/`: the Java forms → Go forms translator (spec `doc/go/J2G-SPEC.md`; `bin/j2g`),
     on the tools' host (`J2G_GO_EXE`), its classes translated in parallel (`J2G_JOBS`, default at
     most 16) with the sequential output byte for byte; the resources compressed by

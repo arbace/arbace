@@ -15,7 +15,10 @@ code. Three kinds of things live here:
   `arbace.build.go`; doc/go/BUILD.md; until 2026-10-17 j2a, g2a and `arbace.g2a.build`) and
   `j2g/` (the Java forms to Go forms translator of the Go build, `arbace.j2g.*`;
   doc/go/J2G-SPEC.md), `c2j/` (c2j, the back end compiling namespaces to Java forms, `arbace.c2j.*`;
-  `arbace.aot.*` until 2026-10-17; doc/STANDALONE-NOTES.md, "S6: Arbace compiled to Go").
+  `arbace.aot.*` until 2026-10-17; doc/STANDALONE-NOTES.md, "S6: Arbace compiled to Go"),
+  `go/check.ae` and `go/check/` (goi's checker, a type checker of Go forms written anew after
+  go/types, `arbace.go.check` and `arbace.go.check.*`; doc/go/GOI-SPEC.md §3, GR2; evaluated
+  from the checkout, not embedded, until the program carries goi).
 - Arbace's own namespaces of the program, not derived from Clojure: `box.ae` and `box/`
   (`arbace.box`, the store, over its host layer `arbace.box.host`; the box's build driver
   `arbace.box.build`, its plan `arbace.box.plan`, the rebuild in the box `arbace.box.rebuild`
