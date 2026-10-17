@@ -96,8 +96,9 @@ The current state of the work. This file is rewritten as things change. For the 
 
 - Running: the rename (decided 2026-10-17, doc/NAMING-SURVEY.md, "Decided"): j2a → `repr/java`
   (`arbace.repr.java`, `bin/repr-java`), g2a → `repr/go` (`arbace.repr.go`, `bin/repr-go`), its
-  build → `arbace.build.go`, `G2A_GOROOT` → `ARBACE_GOROOT`; a2g and c2a unchanged; then a
-  re-seed.
+  build → `arbace.build.go`, `G2A_GOROOT` → `ARBACE_GOROOT`; a2g → j2g ("class forms" →
+  "Java forms" in prose; `A2G_*` → `J2G_*`; the printed `a2g_*` names too); c2a unchanged; then
+  a re-seed. j2g and c2a to revisit later (the user).
 - After the rename (the user, 2026-10-17: "Create jaf print after the naming debate settled"):
   `repr/java print`, Java's bridge printing back, class forms → Java source, with a round trip like
   g2a's (Java → forms → Java → forms, the two forms equal; the text level as g2a's `:full`).

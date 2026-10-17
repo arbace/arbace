@@ -479,3 +479,10 @@ The user, in place of the survey's `jaf`/`gaf`: "i prefer something, like \"repr
   the regenerated records, the gate, the fixpoint), then one re-seed; then `repr/java print`.
 - What keeps the old names: the frozen branches, the tags, the dated journal entries, G2C-SURVEY,
   the provenance lines.
+
+**Added (2026-10-17, the user):** "the term \"class forms\" might be better as \"java forms\", i
+propose renaming a2g to j2g for now, then we may revisit both j2g and c2a later, much later".
+Decided with it: in the same rename and re-seed; the printed program's names follow (`a2g_*.go`
+→ `j2g_*.go`, `A2g_*` → `J2g_*`, the `a2g/*` directives); "class forms" → "Java forms" in docs
+and prose, the front end's namespaces `arbace.classes.*` kept for now; `A2G_*` → `J2G_*` with the
+same guard. c2a unchanged; j2g and c2a to revisit later.

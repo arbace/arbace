@@ -497,3 +497,12 @@ keep their names (alternatives: a parallel family `arbace.trans.*`, or the surve
 variables `REPR_GO_*`, `REPR_JAVA_*`; no shims, a guard for the old `G2A_GOROOT`; all at once,
 then one re-seed, then `repr/java print` (the user, earlier: "Create jaf print after the naming
 debate settled").
+
+## 2026-10-17: a2g to j2g, "class forms" to "Java forms" (the user)
+
+The user: "the term \"class forms\" might be better as \"java forms\", i propose renaming a2g to
+j2g for now, then we may revisit both j2g and c2a later, much later". Decided, as recommended:
+into the running rename (one re-seed; alternative: a second rename after); the printed
+program's names follow (`a2g_*.go`, `A2g_*`, the `a2g/*` directives → `j2g`; alternative: kept);
+the term changed in docs and prose, `arbace.classes.*` kept (alternative: the namespaces too);
+`A2G_*` → `J2G_*` with a guard (alternative: kept).
