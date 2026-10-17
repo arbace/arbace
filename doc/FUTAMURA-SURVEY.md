@@ -1131,6 +1131,19 @@ so the two are to be measured together (F4.2). The shipped executable grows by 1
   wrong constructors. The derived constructor now takes the chosen one's descriptor (flags and
   throws) when the members were made already. The analyzer is shared, so the interpreter's
   classes take the same constructor. `cfcorpus.c50.A2`, `c54.K` and `c57.PB` are translated.
+  *A race behind two later flakes (2026-10-17, `bin/diffcheck`: a build error in
+  `jf_cfcorpus_c50`, then `PB_1_New_PB` called with the wrong number of arguments).* j2g's
+  second round (the late inputs: the compiled namespaces' tree, and diffcheck's Java forms)
+  analyzes its classes in parallel tasks that shared the unit's order; `analyze-anon` takes the
+  order's tail from where it stood (`process-classes! from`), so a task could resolve the
+  members of, and analyze, another task's anonymous class declared meanwhile, before that task
+  gave it its constructor: the F2.2 case again, by chance, and temporaries and literals numbered
+  in the wrong task's id space. Reproduced on the second of two runs (the Go of
+  `c57.PB` differed). Fixed by construction (`arbace.j2g.world/load-world`): each task has an
+  order of its own, as the first round's thread has, appended to the unit's in the tasks' order
+  after each group; j2g prints how many classes the second round's analysis declared. The
+  shipped program's second round (only the compiled namespaces, which declare no local or
+  anonymous classes) declares none, so its output does not change.
 - **F2.3, an unimplemented interface method**: j2g's dispatch method for a method without an
   implementation throws `AbstractMethodError` with HotSpot's message ("Receiver class C does
   not define or inherit an implementation of the resolved method 'abstract R m(P)' of
