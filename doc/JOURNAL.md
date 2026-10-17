@@ -957,3 +957,100 @@ Decided by the user, as recommended: KS1-KS12 (doc/go/PROCESS-SPEC.md, "Decided"
 RS17 (doc/REPR-RUST-SURVEY.md, "Decided"), RS16 (b) (the spec now). Started concurrently (the
 user): the executable-freshness guard of `bin/box-rebuild` and `bin/box-mac-bundle`, repr/haskell
 R3, KU1, goi's GR1, repr/rust's spec; the Mac bundle rebuilt from this commit.
+
+## 2026-10-17: the Mac bundle rebuilt from one commit; the freshness guard
+
+The essential gate passed with `bin/diffcheck` in it (10:16; diffcheck 12,731 of 12,754, the 23
+known, 6:01). The Mac bundle built again at `73e35434`, every part from that commit: both
+architectures' executables and guests built first (the guest's version `73e35434`), the arm64
+rebuild prepared at it (no "not prepared" line), the bundle 55,994,612 bytes; handed to the user
+for `./mac.sh all` under macOS 26. Two lessons: the gate's first step rebuilds stage 0 into
+`target/seed/`, so nothing in the same checkout may use stage 0 while it runs (two attempts
+collided); and `bin/box-rebuild` and `bin/box-mac-bundle` now refuse stale executables (branch
+`fresh-guard`, `0c9bb6e`, merged: `bin/lib/fresh.bash` reads each executable's version from its
+bytes, the guest's image key checked against the last build's program, `host.verified` written
+by a verified host step; `ARBACE_BOX_STALE_OK=1` to override).
+
+## 2026-10-17: repr/rust's spec
+
+As decided (RS16 (b): the spec now), doc/rust/SPEC.md (from the branch `repr-rust-spec`,
+`cb30218`), with test/rust/ (291 reader samples, a census script, a forms reader, the worked
+example `shapes.rs`/`shapes.ae`). Key respellings: `std::io::Write` as `std.io/Write`, a leading
+`::` as `(:global ...)`, `::<>` as `(:turbofish ...)`, every `:` as `(:has ...)`, braces as
+`(:braces ...)`, attributes as `(:attr ...)` forms before what they attach to, doc comments as
+data, token trees as `(:tt "source text")`, `^` `bit-xor`, `/=` `div=`, `@` `:at`; lifetimes `'a`
+(read as `(quote a)`, so `quote` a reserved head); literals keep their tokens (a Clojure literal or
+value form where the printer's spelling reproduces the token, `(:lit "text" suffix)` otherwise).
+Checked: over std's five crates (1,074 files, the survey's helper) all 394,759 identifiers bare,
+all 27,945 multi-segment paths read back as `ns/name` but one, 78.3% of 33,174 literals plain
+Clojure literals; rustdoc's JSON of `core` with `option.rs` reprinted equal to the original's once
+spans are removed (the interface level). Decisions S1-S34; proposals RSS1-RSS10, open; the build
+in milestones RR1-RR6.
+
+## 2026-10-17: repr/rust's RSS1-RSS10 decided (the user)
+
+All as recommended (doc/rust/SPEC.md, "Decided"). Its build (RR1-RR6) follows repr/haskell's
+milestones, unless capacity allows sooner.
+
+## 2026-10-17: repr/haskell R3, the text level
+
+On the branch `repr-haskell-r3` (`3211d9a`), merged into main; details in doc/haskell/SPEC.md
+§10.6 and HASKELL-NOTES's R3 section. The helper's `dump --full` (version 2) writes the
+exact-print annotations, the text, GHC's lexer tokens and, for CPP modules, the module view; the
+converter's `:full` metadata (`:hs/pos` spans and tokens, `:hs/punct`, `:hs/text`,
+`:hs/comments`, `:hs/space`, `:hs/tail`, `:hs/where`, `:hs/parens`); the full printer places
+every token at its recorded position. Over the 483 modules (86 with CPP): all byte-identical to
+the source (4,018,293 bytes; CPP modules against their module view), the `:full` tree level 480
+equal, the 3 others the modules that include `CTypes.h` (its comments outside the module view);
+the `:lines` forms and printed modules unchanged. Found: R2's interface level was flaky (GHC
+lists deprecation warnings in a varying order), now sorted. The `--full` step about 5 minutes.
+HR9-HR13 decided as built (the user).
+
+## 2026-10-17: the box on the Mac under macOS 26
+
+The user ran the bundle of `73e35434` on the Mac (macOS 26.7.1, M2 Max): every step passed
+(`.tmp/mac-results.tar.gz`; recorded in doc/go/BOX-NOTES.md, before "The milestone"): the
+framework's tests, the checklist 46 of 46 on 4 and 1 vCPUs, the rebuild in the box equal byte for
+byte to Linux's (`beff33bf...`) in 180 s (352 s at the milestone), again from the action cache in
+61 s; idle 0.00 s of CPU; the clock about 5 ppm over an hour. So the box holds on macOS 26.
+
+## 2026-10-17: KU1, processes at ring 3 on amd64
+
+On the branch `ku1` (`c576e19`), merged into main; details in doc/go/PROCESS-SPEC.md, "As built:
+KU1". In box/ only (no change to Go's runtime or the monitor): the board is a guest or a process
+(`whim_uentry` starts a second TamaGo runtime at ring 3; then the doorbell is a SYSCALL and a nil
+dereference reported by a `NilHandler` call; the image's initial data copied before any `init`);
+the crossings (`UserSetup`: the user segments, STAR/LSTAR/FMASK/EFER.SCE, a per-vCPU area, SMAP,
+PCIDs; `EnterUser` runs a process as one long call between `entersyscall` and `exitsyscall`,
+IRETQ the first time, SYSRETQ after a call; ring-3 faults through the vector table); the kernel
+package (per-process page tables: the kernel supervisor-only, text and rodata shared, data and
+bss private, the heap and stack window at 4 GiB; the calls `arch_prctl`, `Write`/`Message`
+captured, `Random`, `Exit`/`ProcExit`, `Yield`, `NilHandler`); the process calls at 64 and up
+(KS5). `TestKernelKU1` on /dev/kvm: write (exit 7, output captured), a fault (vector 14), a nil
+dereference recovered (exit 5), two processes' data on their own CR3s. Departures: CR3 written on
+every crossing (one image puts a process's data at the kernel's addresses; KS13 (a), the user:
+kept, decided again with KU2's numbers); one two-mode board rather than a separate user board
+(the runtime's hooks link once per image); KS3 by serving the runtime's own `arch_prctl`. The
+box's checks (kvm-tests, roundtrip 41 of 41, the box's build and smoke test) and the essential
+gate passed; a first gate run failed once in diffcheck on a j2g build error in the corpus
+`jf_cfcorpus_c50` and passed alone and on rerun with nothing changed: to watch.
+
+## 2026-10-17: goi's GR2, the checker, merged
+
+On the branch `goi-check` (`f413425`), merged into main; details in doc/go/GOI-SPEC.md, "As built:
+GR2". `arbace.go.check`, 5,941 lines of Arbace written anew after go/types, gc's messages: over
+five corpora (tamago/goroot for amd64 and arm64, the linux std, `$GOROOT/test`'s programs and
+directory tests) zero errors and every annotation verified in every declaration without
+generics (34,520 declarations in tamago-amd64; 1,263 generic ones counted apart until GR6); its
+error tests' 61 messages match gc's. Done before GR1 (imports from their forms). Kept out of the
+executable (j2g's embed exclusions). `bin/goi annotations`, `bin/goi test [--gc]`, in `bin/gate
+--full` after repr/go's round trips. Found and fixed: repr/go rounded typed float constants
+through 16 digits (GC2, kept with GR2). GC3 (the user: fix now): a name spelled `true`,
+`false` or `nil` written `(go/id "...")` wherever it would read back as the literal (`:init-order`,
+`:go/via`, types in `:inst` and `:tag`, imports and package names), read by the printer and the
+checker; no tracked forms changed (the vendor verifies byte for byte). GC1 as recommended. The
+agent once used `pkill -f` on its own stuck run and once redirected output to /dev/null, against
+the session's rules; it kept to them after being reminded. A second diffcheck failure seen once
+on its branch: j2g's generated Go for `jf_cfcorpus_c57/defclass_corpus_c114` called
+`PB_1_New_PB` with the wrong arity (the anonymous class with constructor arguments of F2.2), not
+reproduced on rerun: with c50's, a sign of nondeterminism in j2g, to investigate.

@@ -109,7 +109,7 @@ Prior art:
     Haskell as Haskell forms and back (spec `doc/haskell/SPEC.md`, notes
     `doc/haskell/HASKELL-NOTES.md`; helper `tools/hsdump` on the host's GHC, pinned by
     `tools/hsdump/GHC_VERSION`; `bin/repr-haskell read`, `print`, `roundtrip` (`--iface`: GHC's
-    interfaces too), `test`; corpus GHC
+    interfaces too; `--text`: mode `:full` printed back to the original text, byte for byte), `test`; corpus GHC
     9.14.1's boot libraries, `test/haskell/corpus-ghc-9.14.1.edn`), evaluated from the checkout,
     not embedded.
   - `arbace/repr/clojure{.ae,/}`: `arbace.repr.clojure`, Clojure's bridge (`doc/REPR-CLOJURE.md`;
@@ -118,6 +118,9 @@ Prior art:
     divergences; `bin/clojure-tests` translates Clojure's suite with it.
   - `arbace/build/`: `arbace.build.go`, the build of a program held as Go forms: printed by
     repr/go into a module with its overlay, then `go build` (`bin/build-go`, `doc/go/BUILD.md`).
+  - `arbace/go/`: goi's checker, `arbace.go.check` (spec `doc/go/GOI-SPEC.md` §3, GR2; `bin/goi
+    annotations`, `test`), Go forms type-checked after go/types, the converter's annotations
+    verified; evaluated from the checkout, not embedded until the program carries goi.
   - `arbace/j2g/`: the Java forms → Go forms translator (spec `doc/go/J2G-SPEC.md`; `bin/j2g`),
     on the tools' host (`J2G_GO_EXE`), its classes translated in parallel (`J2G_JOBS`, default at
     most 16) with the sequential output byte for byte; the resources compressed by
@@ -195,9 +198,11 @@ Prior art:
   subset and `bin/box-suite`, then
   `bin/arbace-go --fixpoint`; repr/go's round trips (`bin/repr-go roundtrip amd64`, `linux/amd64`, and
   `--text amd64`: mode `:full` printed back to the original text, byte for byte), repr/haskell's
-  (`bin/repr-haskell roundtrip --iface`: GHC's trees and lines over GHC 9.14.1's boot
-  libraries, then their interfaces compiled at `-O1`, and `test`; on the host's GHC), the box's vendoring checks (`bin/box-vendor roundtrip`, `kvm-tests`, `purego-check`),
-  `bin/tamago-vendor verify`, `bin/x509roots-vendor verify`, `check`; Go's toolchain as forms
+  (`bin/repr-haskell roundtrip --iface --text`: GHC's trees and lines over GHC 9.14.1's boot
+  libraries, then their interfaces compiled at `-O1`, then mode `:full` printed back byte for
+  byte, and `test`; on the host's GHC), the box's vendoring checks (`bin/box-vendor roundtrip`, `kvm-tests`, `purego-check`),
+  `bin/tamago-vendor verify`, `bin/x509roots-vendor verify`, `check`; goi's checker (`bin/goi
+  annotations`, `test --gc`, after repr/go's round trips); Go's toolchain as forms
   (`bin/toolchain-vendor verify`, `check`). Run it when the Java forms'
   front end, repr/java, repr/go, j2g or jrt change (after a change to `overlay/jdk/java.base`, jrt's closure
   or repr/java, `bin/jrt-convert update` first; after a change to what j2g asks of the JVM,

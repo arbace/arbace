@@ -406,6 +406,9 @@ Go identifiers are symbols, verbatim: `RuneLen`, `rune1Max`, `_`, `ñ`. Other na
 
 A tagged `(go/id "x")` in a parameter, field or binding position is a name like a tagged
 symbol (amendment, accepted 2026-10-08): `text/template/parse` has a parameter named `true`.
+The same spelling holds in the converter's data, wherever a bare `true`, `false` or `nil` would
+read as the literal: `:init-order` entries, `:go/via` names, the type forms of `:inst` and of an
+expression's `:tag`, import names and the package name (GOI-SPEC GC3, decided 2026-10-17).
 
 **Resolution.** An unqualified symbol in Go context means what Go's scopes make of it: locals and
 parameters innermost first, then the package's declarations (from all its files), then the

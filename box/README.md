@@ -25,6 +25,8 @@ the box into a program.
 | `arbace/box/guest/demo`, `.../guest/cmd/demo` | `guest/demo.ae`, `guest/demo/`, `guest/cmd/demo.ae`, `guest/cmd/demo/` | Arbace's own: the demo guest, in the Go editor guest's place; its host is go-whim's `guest/tamago/main.go`'s (2026-10-16) |
 | `arbace/box/guest/cmd/faulty` | `guest/cmd/faulty.ae`, `guest/cmd/faulty/` | `guest/tamago/faulty/` (2026-10-16) |
 | `arbace/box/guest/cmd/bare` | `guest/cmd/bare.ae`, `guest/cmd/bare/` (`bare_amd64.s`, `bare_arm64.s`) | go-whim's C guest (`guest/rt/`: `hello.c`, `rt.c`, `entry_*.S`, `link_*.ld`, the tests' stand-ins) rewritten in Go's assembly (2026-10-16) |
+| `arbace/box/kernel` | `go/arbace/box/kernel.ae`, `kernel/` (amd64 only) | Arbace's own (KU1, doc/go/PROCESS-SPEC.md): the box's kernel, processes at ring 3 — per-process page tables, the ring-3 crossings, the call handler |
+| `arbace/box/guest/cmd/ktest` | `guest/cmd/ktest.ae`, `guest/cmd/ktest/` (amd64 only) | Arbace's own (KU1): the kernel test guest, one image that is the kernel at its ELF entry and a process at `whim_uentry` |
 | `arbace/box/purego`, `.../internal/fakecgo`, `.../internal/strings` | `go/arbace/box/purego.ae`, `purego/` | not go-whim's: purego v0.11.1 (S4, below) |
 
 `mac/` (S4): the Mac's checklist `mac.sh` (after go-whim's `guest/mac/mac.sh`), the hypervisor

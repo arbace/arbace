@@ -1,0 +1,57 @@
+;; repr/rust's spec (doc/rust/SPEC.md, Appendix A, E3): reads a Rust forms file with Arbace's reader
+;; as a consumer would (a line-numbering reader, nothing evaluated), prints each top-level form's
+;; head and :line, then every unqualified symbol the name rule (§3.2) would not write bare, which
+;; must be none. Given the survey helper's dump of the Rust file too (`rsdump FILE.rs`), it checks
+;; that the top-level forms after `ns` and `rs/file` stand on the start lines of the crate's inner
+;; attributes and of each item's outer attributes and the item, in order.
+;; Usage: arbace test/rust/read_forms.ae FILE.ae [DUMP.ae]
+
+(require (quote [arbace.string :as s]))
+
+(defn bare? [t]
+  (try
+    (let [v (read-string (str "[" t "]"))]
+      (and (= 1 (count v)) (let [x (first v)] (and (symbol? x) (nil? (namespace x)) (= (name x) t)))))
+    (catch Throwable _ false)))
+
+(defn syms [x]
+  (cond (symbol? x) [x]
+        (or (seq? x) (vector? x)) (mapcat syms x)
+        (map? x) (mapcat syms (concat (keys x) (vals x)))
+        :else []))
+
+(defn read-all [text line-numbers?]
+  (let [rdr (if line-numbers?
+              (arbace.lang.LineNumberingPushbackReader. (java.io.StringReader. text))
+              (java.io.PushbackReader. (java.io.StringReader. text)))]
+    (loop [acc []]
+      (let [f (read {:eof ::eof} rdr)]
+        (if (= f ::eof) acc (recur (conj acc f)))))))
+
+(defn field [m k] (second (drop-while #(not= % k) m)))
+
+(defn dump-lines
+  "The start lines of the crate's inner attributes, then of each item's outer attributes and the item."
+  [dump]
+  (let [krate (first (filter #(and (seq? %) (= 'Crate (first %))) dump))
+        attr-line (fn [a] (first (field a :span)))]
+    (concat (map attr-line (field krate :attrs))
+            (mapcat (fn [it] (concat (map attr-line (field it :attrs)) [(first (field it :span))]))
+                    (field krate :items)))))
+
+(let [[file dump-file] *command-line-args*
+      forms (read-all (slurp file) true)
+      body (remove #(and (seq? %) (#{'ns 'rs/file} (first %))) forms)
+      odd (->> (mapcat syms body)
+               (remove namespace)
+               (remove #(bare? (str %)))
+               distinct)]
+  (doseq [f forms]
+    (println (:line (meta f)) (if (seq? f) (first f) f)))
+  (println "forms" (count forms) "symbols not bare:" (pr-str (vec odd)))
+  (when dump-file
+    (let [want (vec (dump-lines (read-all (slurp dump-file) false)))
+          have (mapv #(:line (meta %)) body)]
+      (println "rustc's lines:" (pr-str want))
+      (println "forms' lines: " (pr-str have))
+      (println (if (= want have) "lines: equal" "lines: DIFFER")))))

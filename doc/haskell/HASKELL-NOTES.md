@@ -4,7 +4,8 @@ The build of repr/haskell's milestones ([SPEC.md](SPEC.md) §10.1), what each pa
 departs from or adds to the spec, with the reasons. R1 was built on 2026-10-17 (branch
 `repr-haskell-r1`, from main at `82345a08`), on the host's GHC 9.14.1 (Alpine's `ghc-9.14.1-r2`,
 its `ghc` library `ghc-9.14.1-f453`) and stage 0 of that commit. R2, the interface level, was built
-the same day (branch `repr-haskell-r2`, from main at `f515a959`; "R2" below).
+the same day (branch `repr-haskell-r2`, from main at `f515a959`; "R2" below), and R3, mode `:full`
+and the text level, too (branch `repr-haskell-r3`, from main at `73e35434`; "R3" below).
 
 ## Decided (2026-10-17, the user)
 
@@ -301,3 +302,175 @@ A fix to R1 found on the way: on a fresh `.tmp/`, `roundtrip` wrote the conversi
   wording), 483 builds. *Recommended: (a)*: in mode `:lines` the usages' hashes are blanked, so a
   difference in one module shows in that module (and in what inlines it), and (b) would cost
   hundreds of package builds for the same verdict when all are equal.
+
+## R3: mode `:full`, the text level
+
+Built on 2026-10-17 (branch `repr-haskell-r3`, from main at `73e35434`), on the same GHC and the
+stage 0 of that commit. SPEC §7.2 (mode `:full`), §7.4 (3, the full layout), §8.2 and §9.1 (the
+text level) define it; §10.6 records what the build changes in the spec.
+
+### What was built
+
+| part | file | what |
+|---|---|---|
+| helper | `tools/hsdump/HsDump.hs` (version 2) | `dump --full`: the tree's exact-print annotations (every `EpAnn`, `EpToken`, `AnnList`... with its positions, the comments `-dkeep-comments` keeps), then `(hsdump/text "...")`, the text the positions refer to, and `(hsdump/tokens [...])`, GHC's lexer's tokens with their spans, comments marked `:c`; a CPP module's module view as `FILE.view` |
+| converter | `arbace/repr/haskell/full.ae`; `convert.ae`'s `*full*`, `*tokens*` | the forms of mode `:full`: mode `:lines`' forms with every form's span, the tokens' positions on the forms, the punctuation, the spellings, the comments, the white space; checked against the printer's tokens |
+| printer | `arbace/repr/haskell/print.ae` (`print-tokens`, `full-data`, `layout`) | the full layout: the braces layout's printing code collecting tokens instead of laying them out, the tokens put at the forms' positions |
+| command | `bin/repr-haskell roundtrip --text`, `--text-only`; `arbace.repr.haskell compare-text`; `dump --full --corpus`, `read --full --corpus`, `print --layout braces\|full` | the text level (`make repr-haskell-text`) |
+| known differences | `test/haskell/roundtrip-ghc-9.14.1-text-known.edn` | the three modules that include `CTypes.h` (below) |
+| cases | `bin/repr-haskell test`'s step 5; `test/haskell/full/Space.hs` | the worked example byte for byte, and with a name changed in its forms; a module of white space and spellings |
+| gate | `bin/gate --full`'s `repr-haskell` step: `roundtrip --iface --text && test` | |
+
+### The helper
+
+- **Positions from GHC's lexer** (HR9): `lexTokenStream` over the text GHC parsed (the source, or
+  the CPP output), with the parse's options (the Haddock bit among them: documentation comments
+  are comment tokens), keeping the comments (`RawTokenStreamBit`, what `-dkeep-comments` does); the
+  layout algorithm's virtual braces and semicolons (zero-width) and the tokens of other files (CPP
+  inclusions) left out. These are the tokens the exact-print annotations locate, every one of
+  them by construction, where the annotations spread them over a hundred record types (a bare
+  `EpaLocation` is a token in `FixSig`'s and `NameAnn`'s, an anchor in `EpAnn`'s and `AnnList`'s,
+  names and literals are located by their nodes' spans).
+- **The annotations** are dumped as SPEC §8.2 says, each written as a discarded form after the `nil`
+  a dump without `--full` has in its place (`nil #_(EpTok (EpaSpan [4 11 4 12]))`, and `(L span x
+  #_(hsdump/ann anns comments))` for an `EpAnn` location): a full dump reads as the same tree, so the
+  converter's structure is the same in both modes. Fixed on the way: the comments' locations
+  (`NoCommentsLocation`) were `nil`, and an `EpAnn` location dropped its annotation and comments.
+- **The module view** (SPEC §2.8, S5) of a CPP module: for each line of the module the output line
+  the line markers (`# N "file"`, `#line`, `{-# LINE #-}`) attribute to it, the other files' lines
+  and the markers dropped; it is the dump's text and the text level's reference (`FILE.view`).
+
+### The converter (SPEC §7.2 as built)
+
+A dump of mode `:full` is converted as one of mode `:lines`, with `*full*` bound: `at` puts on each
+list, vector and symbol that stands for a located node its span, `:hs/pos {:span [l1 c1 l2 c2]}`.
+Then (`arbace.repr.haskell.full`):
+
+1. The dump's tokens, their texts read from the dump's text (GHC's columns: code points from 1,
+   tab stops of 8), are told apart: comments; the punctuation `,` `;` `{` `}`; the rest.
+2. The forms are written and read back, and the printer's full layout prints their tokens
+   (`print-tokens`); they are paired in order with the source's (the rest of 1). Equal texts, or two
+   spellings of one token: a literal of one kind (number, string, character), a pragma's opener
+   with the same words after GHC's `clean_pragma` (`{-# INLINEABLE` for `{-# INLINABLE`), Unicode
+   syntax (`∷` for `::`), recorded as `:hs/text {[l c] "text"}`; anything else, or another count, is
+   an error naming the position and the tokens around it on both sides, and the module fails to
+   convert (HR11). This pairing is what made the printer exact: the first corpus run found three
+   modules, below.
+3. Every token position, punctuation and spelling goes to the form whose span holds it and no
+   element's does (one sweep over the forms' spans, sorted, and the positions): `:hs/pos :toks
+   [[l c]...]`, `:hs/punct [[l c ","]...]`, `:hs/text`; a literal's and a keyword's are their
+   parent's; those of no form (`module`, `where`) the `hs/module` form's.
+4. On `hs/module`: `:hs/comments [[l1 c1 l2 c2 "text"]...]` (every comment, header pragmas and
+   documentation comments included), `:hs/space [[l c "ws"]...]` (the white space after the element
+   ending at `l c`, or before the first, when it is not the printer's: spaces to the next element on
+   its line, else newlines and spaces to its column), `:hs/tail` (the text after the last element,
+   when it is not one newline).
+
+Two facts GHC keeps only in a node's annotation, which the tree of mode `:lines` does not need,
+are found in the tokens: `:hs/where` on a class, an instance or a data declaration without items
+whose source wrote `where` (GHC's span of such a declaration may end before it:
+`instance Exception CompactionFailed where` in `GHC.Internal.IO.Exception`), and `:hs/parens N`
+on a family equation `(= lhs rhs)`, the parentheses around its left-hand side (`type (Item [a])
+= a` in `GHC.Internal.IsList`); the braces layout prints them too (only forms of mode `:full`
+carry them). The forms of mode `:lines` are unchanged: the corpus's are byte for byte those of
+main's converter at `73e35434`, and its printed modules those of main's printer.
+
+### The printer's full layout (SPEC §7.4, 3)
+
+The braces layout's printing code, unchanged in what it decides, with `t!` collecting each token's
+text instead of laying it out: punctuation is never printed (it is data), nor documentation and
+header pragmas (they are comments). What the braces layout writes as one text is several tokens:
+a name's adornments (`(+)` is `(`, `+`, `)`; `` `div` ``; `()`, `[]`, `(,,)`, `(# #)`), a pragma's
+closer (`{-# UNPACK #-}`), an activation (`[~2]`), `\case`, `%1 ->`; and two pragmas' openers are
+one token in GHC's lexer, `{-# INLINE CONLIKE` and `{-# SPECIALISE INLINE` (its `twoWordPrags`).
+The tokens are then paired in order with the forms' positions (the sorted `:toks` of every form),
+a recorded spelling in place of the printer's text, the punctuation and the comments added, and
+written in order of position: between two elements the recorded white space, else the gap rule.
+The printer resolves nothing: it puts at the forms' positions the tokens it prints from the forms
+(test step 5 prints the worked example's forms with a name changed, and gets the original with
+that name changed). `print --layout braces` prints forms of mode `:full` in the braces layout.
+
+### Results
+
+`bin/repr-haskell roundtrip --text` (also `make repr-haskell-text`, `--text-only` for the level
+alone) over R1's corpus:
+
+| package | modules | with CPP (module views) | byte-identical | trees and lines of mode `:full` equal |
+|---|---|---|---|---|
+| `ghc-internal` | 244 | 74 | 244 | 241 |
+| `base` | 237 | 12 | 237 | 237 |
+| `ghc-prim`, `ghc-bignum` | 1, 1 | 0 | 2 | 2 |
+| total | 483 | 86 | 483 (4,018,293 bytes) | 480 |
+
+The tree level in mode `:full` (`hsdump tree --full`: `showAstData NoBlankSrcSpan
+NoBlankEpAnnotations`, every span, annotation and comment) parses both sides under the package's
+configuration, a CPP module's printed module (its module view) through CPP again. The three known
+differences (HR12) are the modules that `#include "CTypes.h"` (`GHC.Internal.Foreign.C.Types`,
+`Foreign.Ptr`, `System.Posix.Types`): the header holds Haskell comments, which are in the
+original's tree with spans in `include/CTypes.h` and outside the module view (S5), so GHC attaches
+the module's own documentation comment before the inclusion elsewhere; their texts are
+byte-identical.
+
+What the forms hold for it: 417,988 token positions, 33,256 punctuation tokens, 16,622 comments,
+9,473 spellings (9,106 characters, the Unicode tables' `'\x...'`; 290 numbers, whose radix the
+forms text has and reading it loses, `0x80` reading as 128; 38 strings; 39 pragma openers, 22
+`{-# INLINEABLE` and 17 `{-# SPECIALIZE`), one white space run (a no-break space, U+00A0, which GHC's lexer
+takes as white space, in `GHC.Internal.Lexeme`'s line 45: the only gap of the corpus the rule
+does not give), and 138
+tails (modules that do not end in one newline). The dumps of mode `:full` are 87 MB (33 MB in
+mode `:lines`), the forms 24 MB (4.7 MB): 5.1 times. `test/haskell/full/Space.hs` adds what the
+corpus lacks: tabs, a CRLF, trailing blanks, a form feed, explicit braces with an empty item, Unicode
+syntax, a string gap, characters beyond the BMP in comments, no final newline.
+
+Times on this host (64 cores, shared): the text level about 80 s (the dumps 3 s, the conversion 30
+s, the printing 7 s, GHC's trees of mode `:full` of both sides 37 s); the gate step (`roundtrip
+--iface --text && test`) 286 s, about 5 minutes (R2's 211 s). The first conversion took 143 s,
+`GHC.Internal.Types` alone 112 s: the interpreted loops over characters (the writer's newline
+count, a column's offset, the white space's check) and three distributions; Java's string
+methods and one sweep made it 30 s, and the writer's newline count speeds up mode `:lines`'
+writing too.
+
+Found on the way, in R2's interface level: GHC's `--show-iface` lists a module's deprecation
+warnings in an order that varies from build to build (`base`'s `Data.Enum`: `maxBound` before
+`minBound` in one build of the same printed module, after it in the next); the comparison sorts the
+entries of `Deprecated names:` and `Deprecated exports:` in both modes now (`sort-warnings`, HR13).
+
+### Choices for the user (HR9-HR13; built as recommended)
+
+- **HR9 Where the positions come from.** (a) GHC's lexer's tokens (`lexTokenStream`, the raw token
+  stream that `-dkeep-comments` keeps), unnamed, on the innermost form by span, paired in order with
+  the printer's tokens; the annotations in the dump as discarded forms; (b) SPEC §7.2's named keys
+  (`:where`, `:eq`, `:comma`...) read from the exact-print annotations, a table per constructor
+  (S11); (c) the annotations as data the converter strips. *Recommended: (a)*: every token by
+  construction, no per-constructor table to keep with GHC's versions (the annotation types are what
+  changes most between releases), and the same forms structure in both modes; (b) names what (a)
+  pairs by order, for consumers that want a keyword's position by name, at the cost of the table.
+- **HR10 Mode `:full`'s keys as built.** (a) `:hs/pos {:span :toks}`, `:hs/punct`, `:hs/text`
+  by position on the owning form, `:hs/comments`, `:hs/space` (white space other than the gap rule's),
+  `:hs/tail`, `:hs/where`, `:hs/parens`; (b) SPEC §7.2's `:hs/apos`, `:hs/atext` (by element index),
+  `:hs/text` on a literal form, `:hs/paren`, `:hs/layout` (`{:braces true}`, `{:column c}`),
+  `:hs/unicode`. *Recommended: (a)*: parentheses are tokens like any other, layout needs no data
+  beyond positions once braces and semicolons are punctuation, and one spelling key covers
+  literals, pragmas and Unicode syntax.
+- **HR11 The converter checks the full layout.** (a) A module whose printer tokens are not the
+  source's (but for spellings) fails to convert, with the position and the tokens around it;
+  (b) the forms written unchecked, the text level alone finding the difference. *Recommended:
+  (a)*: the spellings need the pairing anyway, and its error is precise where a text difference
+  is only a byte offset.
+- **HR12 The modules that include `CTypes.h`** (3): (a) known differences of the tree level in mode
+  `:full`, their texts byte-identical; (b) the module view keeping an included header's comment
+  lines (no longer the module's lines); (c) a normalization dropping other files' comments
+  (insufficient: GHC attaches the module's own comment differently). *Recommended: (a).*
+- **HR13 The deprecation warnings' order at the interface level** (R2): (a) sorted in both modes;
+  (b) a known difference (unusable: the round trip fails when a listed difference does not occur,
+  and this one comes and goes); (c) building with `-j1` (slower, and the uniques need not be
+  stable). *Recommended: (a).*
+
+
+## Decided (2026-10-17, the user): HR9-HR13
+
+As built: token positions from GHC's lexer paired in order with the printer's tokens (HR9); the
+`:full` metadata keys as built (HR10); the converter failing a module whose printed tokens do not
+match the source's (HR11); the three modules that include `CTypes.h` kept as known differences of
+the `:full` tree level, their texts byte-identical (HR12); deprecation warnings sorted at the
+interface level (HR13).

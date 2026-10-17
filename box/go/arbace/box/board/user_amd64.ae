@@ -1,0 +1,247 @@
+;; The kernel's side of processes on amd64 (doc/go/PROCESS-SPEC.md §2.2, §3.2, KU1): the vCPU
+;; prepared for ring 3 (UserSetup), a process entered and left (EnterUser), its faults told from
+;; the kernel's own (boot_amd64.s's vector_common). Nothing here runs unless the kernel calls
+;; UserSetup: the box's guest is as it was.
+;;
+;; One image is the kernel and every process (b1): a process's data and bss are at the kernel's
+;; addresses for them, in its own pages. So the kernel's globals are not the kernel's while a
+;; process's tables are loaded, and every crossing writes CR3: into the process's tables on the
+;; way in, back into the kernel's on the way out (PROCESS-SPEC.md, "As built: KU1"). What the
+;; crossing touches meanwhile is all outside the image's data: the per-vCPU area (userCPU, named
+;; by GS), the context, the GDT, the kernel's stack, all on the kernel's heap.
+(in-ns 'go.arbace.box.board) (go/file "user_amd64.go" :doc "The kernel's side of processes on amd64 (doc/go/PROCESS-SPEC.md §2.2, §3.2, KU1): the vCPU\nprepared for ring 3 (UserSetup), a process entered and left (EnterUser), its faults told from\nthe kernel's own (boot_amd64.s's vector_common). Nothing here runs unless the kernel calls\nUserSetup: the box's guest is as it was.\n\nOne image is the kernel and every process (b1): a process's data and bss are at the kernel's\naddresses for them, in its own pages. So the kernel's globals are not the kernel's while a\nprocess's tables are loaded, and every crossing writes CR3: into the process's tables on the\nway in, back into the kernel's on the way out (PROCESS-SPEC.md, \"As built: KU1\"). What the\ncrossing touches meanwhile is all outside the image's data: the per-vCPU area (userCPU, named\nby GS), the context, the GDT, the kernel's stack, all on the kernel's heap.\n" :imports [
+
+
+    ^{:line 15} [errors "errors"]
+    ^{:line 16} [unsafe "unsafe"]])
+
+
+
+
+(go/const "The selectors (§2.2): the monitor's code 0x08, data 0x10, TSS 0x18 (two entries); then\nSYSRET's base 0x28, the user's data 0x30 and code 0x38, at RPL 3.\n"
+  ^{:line 22} [^{:val 8} selKernelCode 0x08]
+  ^{:line 23} [^{:val 40} selUserBase 0x28]
+  ^{:line 24} [^{:val 51} selUserData (bit-or 0x30 3)]
+  ^{:line 25} [^{:val 59} selUserCode (bit-or 0x38 3)])
+
+
+
+(go/const "The MSRs and the bits UserSetup sets.\n"
+  ^{:line 30} [^{:val 3221225600} msrEFER 0xc0000080]
+  ^{:line 31} [^{:val 3221225601} msrSTAR 0xc0000081]
+  ^{:line 32} [^{:val 3221225602} msrLSTAR 0xc0000082]
+  ^{:line 33} [^{:val 3221225604} msrFMASK 0xc0000084]
+  ^{:line 34} [^{:val 3221225728} msrFSBase 0xc0000100]
+  ^{:line 35} [^{:val 3221225729} msrGSBase 0xc0000101]
+  ^{:line 36} [^{:val 3221225730} msrKernelGSBase 0xc0000102]
+
+  ^{:line 38} [^{:val 1} eferSCE (<< 1 0)]
+
+  ^{:line 40} [^{:val 280320 :doc "FMASK: TF, IF, DF, NT and AC cleared on a SYSCALL\n"} fmask (bit-or (<< 1 8) (<< 1 9) (<< 1 10) (<< 1 14) (<< 1 18))]
+
+
+  ^{:line 43} [^{:val 265685 :doc "the flags a process keeps across a crossing: CF PF AF ZF SF TF DF OF AC; never IF or IOPL\n"} userFlags (bit-or (<< 1 0) (<< 1 2) (<< 1 4) (<< 1 6) (<< 1 7) (<< 1 8) (<< 1 10) (<< 1 11) (<< 1 18))]
+
+  ^{:line 45} [^{:val 131072} cr4PCIDE (<< 1 17)]
+  ^{:line 46} [^{:val 2097152} cr4SMAP (<< 1 21)])
+
+
+
+
+(go/type UserContext "UserContext is a process vCPU's state while the kernel runs (§3.1): the user's registers as\nthe crossing saved them, its FS base, its tables' root, and how it left.\n" (struct
+    ^{:line 52 :tag uint64} AX ^uint64 BX ^uint64 CX ^uint64 DX ^uint64 SI ^uint64 DI ^uint64 BP
+    ^{:line 53 :tag uint64} R8 ^uint64 R9 ^uint64 R10 ^uint64 R11 ^uint64 R12 ^uint64 R13 ^uint64 R14 ^uint64 R15
+    ^{:line 54 :tag uint64} SP ^uint64 IP ^uint64 Flags
+
+    ^{:line 56 :tag uint64 :doc "FSBase is the process's FS base, written on the way in when it is not the kernel's.\n"} FSBase
+
+
+    ^{:line 59 :tag uint64 :doc "CR3 is what the way in writes to CR3: the process's root, its PCID, and bit 63 when its\nTLB entries may be kept (UserCR3).\n"} CR3
+
+    ^{:line 61 :tag uint64 :doc "Trap is how the process left: TrapSyscall, or TrapFault with Vector, Code and CR2.\n"} Trap ^{:tag uint64 :doc "Trap is how the process left: TrapSyscall, or TrapFault with Vector, Code and CR2.\n"} Vector ^{:tag uint64 :doc "Trap is how the process left: TrapSyscall, or TrapFault with Vector, Code and CR2.\n"} Code ^{:tag uint64 :doc "Trap is how the process left: TrapSyscall, or TrapFault with Vector, Code and CR2.\n"} CR2
+
+
+    ^{:line 64 :tag uint64 :doc "Iret is non-zero when the way in is IRETQ with every register (the first entry, after a\nfault, a rewritten frame), else SYSRETQ (after a SYSCALL: RCX and R11 are IP and Flags).\n"} Iret
+    ^{:line 65 :tag uintptr} fx ; FXSAVE's area, 16-byte aligned, in fxa
+    ^{:line 66 :tag (array (+ 512 16) byte)} fxa))
+
+
+
+(go/const "How a process left the CPU.\n"
+  ^{:line 71} [^{:val 0} TrapSyscall 0]
+  ^{:line 72} [^{:val 1} TrapFault 1])
+
+
+
+
+^{:go/end 84} (go/func NewUserContext "NewUserContext is a context entered at ip with stack sp, by IRETQ, its FPU state the default\none (nothing of the kernel's).\n" ^{:tag (* UserContext)} [^uint64 ip ^uint64 sp]
+  (let [c (addr (lit UserContext :IP ip :SP sp :Flags 2 :Iret 1))]
+    (set! (.-fx c) (bit-and-not (+ (conv uintptr (conv unsafe/Pointer (addr (aget (.-fxa c) 0)))) 15) 15))
+    (let [fx (conv (* (array 512 byte)) (conv unsafe/Pointer (.-fx c)))]
+      (set! @(conv (* uint16) (conv unsafe/Pointer (addr (aget fx 0)))) 0x37f) ; FCW
+      (set! @(conv (* uint32) (conv unsafe/Pointer (addr (aget fx 24)))) 0x1f80) ; MXCSR
+      ^{:line 83} c)))
+
+
+
+
+(go/type userCPU "userCPU is a vCPU's area for the crossings, named by GS's base while the kernel runs (by\nKERNEL_GS_BASE while a process does): on the kernel's heap, outside the image.\n" (struct
+    ^{:line 89 :tag uintptr} self
+    ^{:line 90 :tag (* UserContext)} ctx
+    ^{:line 91 :tag uint64} ksp
+    ^{:line 92 :tag uint64} kbp
+    ^{:line 93 :tag uint64} kg
+    ^{:line 94 :tag uint64} kcr3
+    ^{:line 95 :tag uint64} kfs
+    ^{:line 96 :tag uint64} scratch
+    ^{:line 97 :tag uintptr} kfx ; FXSAVE's area for the kernel's own FPU state across a crossing
+    ^{:line 98 :tag (array (+ 512 16) byte)} kfxa))
+
+
+(go/var
+
+  ^{:line 103} [^{:tag (slice (* userCPU)) :doc "userCPUs keeps the areas (and the GDT) alive: the assembly names them only by address.\n"} userCPUs]
+  ^{:line 104} [^{:tag (* (array 8 uint64))} userGDT]
+  ^{:line 105} [^bool pcids]
+  ^{:line 106} [^bool smap])
+
+
+(go/func ^:extern rdmsr ^uint64 [^uint32 msr])
+(go/func ^:extern wrmsr [^uint32 msr ^uint64 v])
+(go/func ^:extern lgdt [^unsafe/Pointer p])
+(go/func ^:extern sgdt [^unsafe/Pointer p])
+(go/func ^:extern readCR3 ^uint64 [])
+(go/func ^:extern readCR4 ^uint64 [])
+(go/func ^:extern writeCR4 [^uint64 v])
+(go/func ^:extern cpuid [^uint32 leaf ^uint32 sub] :results [^uint32 a ^uint32 b ^uint32 c ^uint32 d])
+(go/func ^:extern sysentryAddr ^uintptr [])
+(go/func ^:extern enterUser [^{:tag (* UserContext)} c])
+
+
+
+
+
+
+
+(go/var "The pristine image of the writable segment's file-backed data (doc/go/PROCESS-SPEC.md §2.1, KU1):\nthe box's program is the kernel and every process (b1), so a process of it needs the image's\ninitial data, not the kernel's once it has run (the inittask states NotStarted, the runtime's\nglobals as linked). hwinit1 snapshots it before any package init runs, and the kernel copies it\ninto a new process's private data pages. A guest never reads it; the copy is a behaviour-neutral\nfew tens of KiB.\n"
+  ^{:line 127} [^{:tag (array (* 192 1024) byte)} dataSnap]
+  ^{:line 128} [^int dataLen]
+  ^{:line 129} [^uintptr dataLo]) ; the writable segment's first page (rwStart)
+
+
+(go/func ^:extern segData [] :results [^uintptr rwStart ^uintptr dataEnd])
+
+
+^{:go/end 144} (go/func ^:go/nosplit snapshotData []
+  (let [(values lo hi) (segData)
+      ^{:line 137} n (conv int (- hi lo))]
+    (when (or (< n 0) (> n (len dataSnap)))
+      (return)) ; too large to snapshot: the kernel reports it when it builds a process
+
+    (set! dataLo lo)
+    (set! dataLen n)
+    (copy (subslice dataSnap _ n) (unsafe/Slice (conv (* byte) (conv unsafe/Pointer lo)) n))))
+
+
+
+
+^{:go/end 148} (go/func DataImage "DataImage is the pristine file-backed data of the writable segment (snapshotData), and its first\nvirtual address: what the kernel copies into a new process's private data pages (§2.1).\n" [] :results [^{:tag (slice byte)} image ^uintptr rwStart] (return (subslice dataSnap _ dataLen) dataLo))
+
+
+
+
+
+^{:go/end 209} (go/func UserSetup "UserSetup prepares the calling vCPU for processes, once: the GDT with the user's segments,\nSYSCALL's MSRs, GS's base its own area, PCIDs and SMAP when the CPU has them (SMEP stays off:\na crossing runs the shared text, user pages, with the process's tables loaded). The caller is\nlocked to its vCPU (runtime.LockOSThread). KU1: one vCPU at a time is what is tested.\n" ^error []
+  (when (!= (rdmsr msrGSBase) 0)
+    (return nil))
+
+  (when (== userGDT nil)
+    (let [^{:tag (array 10 byte)} d (zero (array 10 byte))]
+      (sgdt (conv unsafe/Pointer (addr d)))
+      (let [limit @(conv (* uint16) (conv unsafe/Pointer (addr (aget d 0))))
+          ^{:line 162} base @(conv (* uint64) (conv unsafe/Pointer (addr (aget d 2))))]
+        (when (< (+ limit 1) (* 5 8))
+          (return (errors/New "board: the monitor's GDT has no TSS")))
+
+        (let [g (new (array 8 uint64))]
+          (for [i 0] (< i 5) (inc! i)
+            (aset g i @(conv (* uint64) (conv unsafe/Pointer (+ (conv uintptr base) (* 8 (conv uintptr i)))))))
+
+          (aset g 6 0x00cff3000000ffff) ; data, DPL 3
+          (aset g 7 0x00affb000000ffff) ; code, DPL 3, long mode
+          (set! userGDT g)
+          (let [(values _ _ c _) (cpuid 1 0)]
+            (set! pcids (!= (bit-and c (<< 1 17)) 0))
+            (let [(values _ b _ _) (cpuid 7 0)]
+              (set! smap (!= (bit-and b (<< 1 20)) 0))))))))
+
+  (let [^{:tag (array 10 byte)} d (zero (array 10 byte))]
+    (set! @(conv (* uint16) (conv unsafe/Pointer (addr (aget d 0)))) (- (* 8 8) 1))
+    (set! @(conv (* uint64) (conv unsafe/Pointer (addr (aget d 2)))) (conv uint64 (conv uintptr (conv unsafe/Pointer userGDT))))
+    (lgdt (conv unsafe/Pointer (addr d)))
+
+    (let [cr4 (readCR4)]
+      (when (and pcids (== (bit-and (readCR3) 0xfff) 0))
+        (set! cr4 bit-or cr4PCIDE))
+
+      (when smap
+        (set! cr4 bit-or cr4SMAP))
+
+      (writeCR4 cr4)
+
+      ^{:go/breaks [14]} (let [u (addr (lit userCPU))]
+        (set! (.-self u) (conv uintptr (conv unsafe/Pointer u)))
+        (set! (.-kfx u) (bit-and-not (+ (conv uintptr (conv unsafe/Pointer (addr (aget (.-kfxa u) 0)))) 15) 15))
+        (set! (.-kcr3 u) (bit-and-not (readCR3) 0xfff))
+        (when (!= (bit-and cr4 cr4PCIDE) 0)
+          (set! (.-kcr3 u) bit-or (<< 1 63))) ; the kernel's PCID 0: its tables never change
+
+        (set! (.-kfs u) (rdmsr msrFSBase))
+        (set! userCPUs (append userCPUs u))
+
+        (wrmsr msrEFER (bit-or (rdmsr msrEFER) eferSCE))
+        (wrmsr msrSTAR (bit-or (<< selUserBase 48) (<< selKernelCode 32)))
+        (wrmsr msrLSTAR (conv uint64 (sysentryAddr)))
+        (wrmsr msrFMASK fmask)
+        (wrmsr msrKernelGSBase 0)
+        (wrmsr msrGSBase (conv uint64 (.-self u)))
+        nil))))
+
+
+
+^{:go/end 212} (go/func PCIDs "PCIDs is whether UserSetup turned PCIDs on: a process's CR3 then carries its own, 1 to 4095.\n" ^bool [] pcids)
+
+
+
+^{:go/end 216} (go/func KernelFSBase "KernelFSBase is the kernel's FS base on this vCPU (after UserSetup): a process of the same\nimage whose FS base is the same names its own TLS at the same address.\n" ^uint64 [] (rdmsr msrFSBase))
+
+
+
+^{:go/end 229} (go/func UserCR3 "UserCR3 is what a process's context's CR3 is for root and pcid: flush when its entries on\nthis vCPU may be stale (its tables new or changed), else kept (bit 63).\n" ^uint64 [^uint64 root ^uint16 pcid ^bool flush]
+  (when (not pcids)
+    (return root))
+
+  (let [v (bit-or root (conv uint64 (bit-and pcid 0xfff)))]
+    (when (not flush)
+      (set! v bit-or (<< 1 63)))
+
+    ^{:line 228} v))
+
+
+
+
+
+
+
+^{:go/end 241} (go/func ^:go/nosplit EnterUser "EnterUser runs the process whose context is c on this vCPU until it makes a system call or\ntakes an exception, and returns with c saved (§3.1, §3.2): the kernel's goroutine, as one\nlong call. UserSetup has run on this vCPU.\n" [^{:tag (* UserContext)} c]
+  (set! (.-Flags c) (bit-or (bit-and (.-Flags c) userFlags) 2))
+  (entersyscall)
+  (enterUser c)
+  (exitsyscall))
+
+
+
+(go/func ^:extern ^{:go/linkname "entersyscall runtime.entersyscall"} entersyscall [])
+
+
+(go/func ^:extern ^{:go/linkname "exitsyscall runtime.exitsyscall"} exitsyscall [])

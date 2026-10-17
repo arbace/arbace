@@ -1,0 +1,126 @@
+(ns goi.check-test
+  "Tests of goi's checker (arbace.go.check, doc/go/GOI-SPEC.md §3, GR2), run by bin/goi test:
+
+  - test/goi/errors/*.ae: invalid forms, one package each; a ; ERROR \"message\" comment ends
+    each line on which the checker must report exactly that message (gc's: bin/goi test --gc
+    prints the forms with repr/go, builds them with gc and compares its messages too);
+  - test/goi/annotations/*.ae: valid forms whose converter's annotations are wrong, the
+    checker's disagreements as ERROR comments (§3.6, S16);
+  - test/goi/checked/*.ae: valid programs, their checked trees (§3.7) rendered as data against
+    test/goi/checked/*.edn (bin/goi test --regen rewrites them, to review)."
+  (:require [arbace.test :refer [deftest is testing]]
+            [arbace.string :as str]
+            [arbace.java.io :as io]
+            [arbace.go.check :as gc]
+            [arbace.go.check.types :as t]
+            [arbace.go.check.const :as c]
+            [arbace.go.check.env :as e]
+            [arbace.go.check.code :as code])
+  (:import (java.io File)))
+
+(def dir (or (System/getProperty "goi.test.dir") "test/goi"))
+
+(defn- files [sub]
+  (sort (filter #(str/ends-with? % ".ae") (map #(.getName ^File %) (.listFiles (File. (str dir "/" sub)))))))
+
+;;; Expected errors
+
+(defn expected-errors
+  "The ; ERROR \"...\" comments of a forms text: #{[line message]}."
+  [^String text]
+  (set (for [[i l] (map-indexed vector (str/split-lines text))
+             [_ m] (re-seq #";\s*ERROR\s+\"((?:[^\"\\]|\\.)*)\"" l)]
+         [(inc i) (str/replace (str/replace (str/replace m "\\n" "\n") "\\t" "\t") "\\\"" "\"")])))
+
+(defn check-file [path]
+  (let [text (slurp path)
+        r (gc/check-forms (gc/read-string-forms text) "tamago-amd64" {})]
+    {:want (expected-errors text)
+     :have (set (for [er (:errors r)] [(:line er) (:msg er)]))
+     :result r}))
+
+(deftest errors
+  (doseq [f (files "errors")]
+    (testing f
+      (let [{:keys [want have]} (check-file (str dir "/errors/" f))]
+        (is (= want have) (str "missing: " (pr-str (sort (remove have want)))
+                               "\nunexpected: " (pr-str (sort (remove want have)))))))))
+
+(deftest annotations
+  (doseq [f (files "annotations")]
+    (testing f
+      (let [{:keys [want have]} (check-file (str dir "/annotations/" f))]
+        (is (= want have) (str "missing: " (pr-str (sort (remove have want)))
+                               "\nunexpected: " (pr-str (sort (remove want have)))))))))
+
+;;; Checked trees (§3.7) as data
+
+(declare tree-data)
+
+(defn- obj-name [x] (symbol (str (e/o x :name))))
+
+(defn- type-data [ty]
+  (cond
+    (nil? ty) nil
+    (keyword? ty) ty
+    :else (t/type-str ty)))
+
+(def ^:private dropped #{:form :tag-form :tag-type :id :label-id :comma-ok :shift-lhs :sig :spread-node})
+
+(defn- obj-data
+  "A declared variable: its name, type and the flags the builder reads (§3.3)."
+  [x]
+  (if (e/obj? x)
+    (into (sorted-map :name (obj-name x) :type (type-data (e/o x :type)))
+          (for [k [:captured? :addressed? :per-iteration?] :when (e/o x k)] [k true]))
+    (tree-data x)))
+
+(defn tree-data
+  "A checked tree as data: objects by name (declared variables with their flags), types as
+  keywords (basic) or Go's text."
+  [x]
+  (binding [t/*qualify* (or t/*qualify* "main")]
+    (cond
+      (e/obj? x) (obj-name x)
+      (map? x)
+      (into (sorted-map)
+            (for [[k v] x :when (not (dropped k)) :when (some? v)]
+              [k (case k
+                   (:type :to :recv-type :iface :underlying) (type-data v)
+                   :val (if (string? v) (c/value-text v) (if (c/complex? v) (list 'complex (nth v 1) (nth v 2)) v))
+                   :field (:name v)
+                   :refs (vec (sort (map str (map obj-name v))))
+                   :method (if (e/obj? v) (obj-name v) (symbol (:name v)))
+                   (:objs :params) (mapv obj-data v)
+                   :recv (obj-data v)
+                   :results (mapv #(if (map? %) (cond-> {:type (type-data (:type %))} (:obj %) (assoc :obj (obj-data (:obj %)))) (tree-data %)) v)
+                   (tree-data v))]))
+      (vector? x) (mapv tree-data x)
+      (set? x) (vec (sort (map str (map tree-data x))))
+      (seq? x) (mapv tree-data x)
+      (instance? Object x) (if (or (number? x) (string? x) (keyword? x) (symbol? x) (boolean? x)) x (str x))
+      :else x)))
+
+(defn checked-trees [path]
+  (let [r (gc/check-forms (gc/read-string-forms (slurp path)) "tamago-amd64" {:keep-trees true})]
+    {:errors (:errors r)
+     :trees (binding [t/*qualify* (:path r)]
+              (mapv tree-data (sort-by :line (:trees r))))}))
+
+(defn regen-checked!
+  "Writes test/goi/checked/*.edn from the checker's trees (to review)."
+  []
+  (doseq [f (files "checked")]
+    (let [{:keys [trees errors]} (checked-trees (str dir "/checked/" f))]
+      (when (seq errors) (println f "has errors:" errors))
+      (spit (str dir "/checked/" (str/replace f #"\.ae$" ".edn"))
+            (str ";; The checked tree of " f " (bin/goi test --regen; reviewed)\n"
+                 (with-out-str (arbace.pprint/pprint trees)))))))
+
+(deftest checked
+  (doseq [f (files "checked")]
+    (testing f
+      (let [{:keys [trees errors]} (checked-trees (str dir "/checked/" f))
+            want (read-string (slurp (str dir "/checked/" (str/replace f #"\.ae$" ".edn"))))]
+        (is (empty? errors) (pr-str errors))
+        (is (= want trees))))))

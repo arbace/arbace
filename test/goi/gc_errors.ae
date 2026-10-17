@@ -1,0 +1,75 @@
+(ns goi.gc-errors
+  "bin/goi test --gc: gc's messages for test/goi/errors/*.ae, against their ERROR comments.
+  Each file is printed by repr/go (layout :lines, its positions the forms file's, SPEC §12.3)
+  into a module of its own under the work directory and built with gc (go build -gcflags=-e,
+  every error); each ERROR comment must be one of gc's messages at its line."
+  (:require [arbace.string :as str]
+            [arbace.java.io :as io]
+            [arbace.repr.go.print :as rp]
+            [arbace.go.check :as gc]
+            [goi.check-test :as ct])
+  (:import (java.io File)))
+
+(defn- run [^File dir & cmd]
+  (let [pb (ProcessBuilder. ^java.util.List (vec cmd))
+        env (.environment pb)
+        goroot (or (System/getenv "ARBACE_GOROOT") "/root/tamago-go")]
+    (.put env "GOROOT" goroot)
+    (.put env "GOFLAGS" "")
+    (.put env "GOTOOLCHAIN" "local")
+    (.put env "CGO_ENABLED" "0")
+    (.remove env "GOOS")
+    (.remove env "GOARCH")
+    (.directory pb dir)
+    (.redirectErrorStream pb true)
+    (let [p (.start pb)
+          out (slurp (.getInputStream p))]
+      (.waitFor p)
+      out)))
+
+(defn gc-messages
+  "gc's errors for the forms file: #{[line message]}, its lines the forms file's."
+  [^String path ^String work]
+  (let [name (str/replace (.getName (File. path)) #"\.ae$" "")
+        d (File. (str work "/" name))
+        forms (gc/read-string-forms (slurp path))
+        pkg (rp/collect-forms forms)
+        texts (rp/print-forms pkg {:layout :lines :line-file true})
+        goroot (or (System/getenv "ARBACE_GOROOT") "/root/tamago-go")]
+    (.mkdirs d)
+    (doseq [^File f (.listFiles d)] (.delete f))
+    (spit (str d "/go.mod") "module main\n\ngo 1.27\n")
+    (doseq [[fname text] texts]
+      ;; the positions name the forms file
+      (spit (str d "/" fname) (str/replace text #"^//line [^\n]*" (str "//line " name ".ae:1"))))
+    (let [out (run d (str goroot "/bin/go") "build" "-gcflags=-e" "-o" (str work "/" name ".exe") ".")
+          lines (str/split-lines out)]
+      (loop [ls lines acc #{} cur nil]
+        (if (empty? ls)
+          (if cur (conj acc cur) acc)
+          (let [l (first ls)]
+            (if-let [[_ ln msg] (re-matches #"^\S*\.(?:ae|go):(\d+):\d+: (.*)$" l)]
+              (recur (rest ls) (if cur (conj acc cur) acc)
+                     [(Long/parseLong ln) (str/replace msg #"\S*?([^/\s\[]+\.(?:go|ae)):(\d+)(?::\d+)?(?:\[[^\]]*\])?" "$1:$2")])
+              (if (and cur (str/starts-with? l "\t"))
+                (if (re-find #"^\t\S+\.(?:go|ae):\d+:\d+" l)
+                  (recur (rest ls) acc cur)
+                  (recur (rest ls) acc [(first cur) (str (second cur) "\n" l)]))
+                (recur (rest ls) (if cur (conj acc cur) acc) nil)))))))))
+
+(defn -main [& [work]]
+  (let [work (or work ".tmp/goi-test/gc")
+        bad (volatile! 0)]
+    (doseq [f (#'ct/files "errors")]
+      (let [p (str ct/dir "/errors/" f)
+            want (ct/expected-errors (slurp p))
+            have (gc-messages p work)
+            missing (remove have want)]
+        (if (empty? missing)
+          (println "ok" f (count want) "messages of gc")
+          (do (vswap! bad inc)
+              (println "FAIL" f)
+              (doseq [m (sort missing)] (println "  not gc's:" (pr-str m)))
+              (doseq [m (sort (remove want have))] (println "  gc says:" (pr-str m)))))))
+    (shutdown-agents)
+    (System/exit (if (zero? @bad) 0 1))))

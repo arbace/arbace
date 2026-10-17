@@ -83,10 +83,80 @@
     (instance? arbace.lang.IObj form) (vary-meta form assoc :line l)
     :else (->Lit form nil l)))
 
+(def ^:dynamic *full*
+  "Mode :full (SPEC §7.2): each form that stands for a located node also carries its span,
+  :hs/pos {:span [l1 c1 l2 c2]}, where arbace.repr.haskell.full puts the node's token positions"
+  false)
+
+(defn span-of
+  "The span [l1 c1 l2 c2] of a located node (the outermost L with a span in the module's file),
+  or nil"
+  [x]
+  (when (L? x)
+    (let [s (nth x 1)]
+      (if (and (vector? s) (= 4 (count s)))
+        s
+        (span-of (nth x 2))))))
+
+(def ^:dynamic *tokens*
+  "Mode :full: the source's tokens [[[l c] text]...] in order (arbace.repr.haskell.full/tokens-of,
+  without punctuation and comments), for what GHC keeps only in a node's annotation"
+  nil)
+
+(defn- pos-before? [[a b] [c d]] (or (< a c) (and (= a c) (< b d))))
+
+(defn- token-index
+  "The index of the first of *tokens* at or after position p"
+  [p]
+  (let [ts *tokens*]
+    (loop [lo 0 hi (count ts)]
+      (if (< lo hi)
+        (let [mid (quot (+ lo hi) 2)]
+          (if (pos-before? (first (nth ts mid)) p) (recur (inc mid) hi) (recur lo mid)))
+        lo))))
+
+(defn tokens-in
+  "Mode :full: the source's tokens inside span [l1 c1 l2 c2]"
+  [s]
+  (when (and *tokens* s)
+    (subvec *tokens* (token-index [(nth s 0) (nth s 1)]) (token-index [(nth s 2) (nth s 3)]))))
+
+(defn parens-before
+  "Mode :full: how many ( tokens come right before position p"
+  [p]
+  (if *tokens*
+    (loop [i (dec (token-index p)) n 0]
+      (if (and (>= i 0) (= "(" (second (nth *tokens* i)))) (recur (dec i) (inc n)) n))
+    0))
+
 (defn at
-  "form with the line of the located node node"
+  "form with the line of the located node node; in mode :full its span too"
   [form node]
-  (attach form (line-of node)))
+  (let [f (attach form (line-of node))]
+    (if (and *full* (not (lit? f)) (instance? arbace.lang.IObj f))
+      (if-let [s (span-of node)] (vary-meta f assoc :hs/pos {:span s}) f)
+      f)))
+
+(defn- full-where
+  "Mode :full: form, a class, an instance or a data declaration, marked when it has no items,
+  for where-written (its node may not be located)"
+  [form node items]
+  (if (and *full* (empty? items)) (vary-meta form assoc ::empty true) form))
+
+(defn- where-written
+  "Mode :full: form (marked by full-where), with :hs/where when the source of its located node
+  wrote where (GHC keeps it in the declaration's annotation)"
+  [form node]
+  (if (and (instance? arbace.lang.IObj form) (::empty (meta form)))
+    (let [s (span-of node)
+          f (vary-meta form dissoc ::empty)]
+      (if (and s
+               ;; GHC's span of a declaration without items may end before its where
+               (or (some #(= "where" (second %)) (tokens-in s))
+                   (= "where" (second (get *tokens* (token-index [(nth s 2) (nth s 3)]))))))
+        (vary-meta f assoc :hs/where true)
+        f))
+    form))
 
 (defn- form-line [f]
   (cond (lit? f) (:line f) (instance? arbace.lang.IObj f) (:line (meta f)) :else nil))
@@ -1133,13 +1203,25 @@
       (empty? args) nf
       :else (apply list (if (= 1 (count args)) nf (if (sx/chain-head? (lit-value nf)) (list :name (rdr-text n)) nf)) (map argf args)))))
 
+(defn- eqn-parens
+  "Mode :full: the equation form e (= lhs rhs) of a family equation with :hs/parens, the
+  parentheses around its left-hand side (name n, arguments args), which GHC keeps in the
+  equation's annotation"
+  [e n args]
+  (if *full*
+    (let [starts (keep #(let [s (span-of %)] (when s [(nth s 0) (nth s 1)])) (cons n (map #(let [x (un %)] (if (seq? x) (last x) x)) args)))
+          start (first (sort (fn [a b] (cond (pos-before? a b) -1 (pos-before? b a) 1 :else 0)) starts))
+          k (if start (parens-before start) 0)]
+      (if (pos? k) (vary-meta e assoc :hs/parens k) e))
+    e))
+
 (defn- fam-eqn
   "(FamEqn ann name outer [args] fixity rhs) with rhs-fn for its right-hand side: (= lhs rhs),
   (forall tv* (= ...))"
   [eqn rhs-fn]
   (let [[_ _ n outer args fixity rhs] (un eqn)
         o (un outer)
-        e (list '= (fam-lhs n args fixity) (rhs-fn rhs))]
+        e (eqn-parens (list '= (fam-lhs n args fixity) (rhs-fn rhs)) n args)]
     (at (case (first o)
           HsOuterImplicit e
           HsOuterExplicit (apply list 'forall (concat (map tvb-form (nth o 2)) [e]))
@@ -1239,8 +1321,8 @@
       (DocCommentNext DocCommentPrev DocCommentNamed DocGroup)
       (let [doc (if (contains? #{'DocCommentNamed 'DocGroup} (first x)) (nth x 2) (nth x 1))]
         [(at (doc-form (if top? 'hs/doc :doc) doc) d)])
-      TyClD (map #(at-if-none % d) (decl-forms (nth x 2) top? ctx))
-      InstD (map #(at-if-none % d) (decl-forms (nth x 2) top? ctx))
+      TyClD (map #(where-written (at-if-none % d) d) (decl-forms (nth x 2) top? ctx))
+      InstD (map #(where-written (at-if-none % d) d) (decl-forms (nth x 2) top? ctx))
       KindSigD (let [[_ _ n st] (un (nth x 2))]
                  [(at (list (hs "type") (list :sig (lit-value (name-of n)) (sig-type-form st :top))) d)])
       StandaloneKindSig (let [[_ _ n st] x]
@@ -1251,9 +1333,10 @@
                      {:keys [kind ctx ctype ksig cons derivs]} (data-defn defn-node)
                      hd (decl-head n qtvs fixity)
                      hd (if ksig (list :sig (lit-value hd) ksig) hd)]
-                 [(at (apply list (case kind :data (hs "data") :newtype (hs "newtype") :type-data (hs "type"))
-                             (concat (when (= kind :type-data) ['data]) (when ctype [ctype]) [(ctx-wrap ctx hd)] cons derivs))
-                      d)])
+                 [(full-where (at (apply list (case kind :data (hs "data") :newtype (hs "newtype") :type-data (hs "type"))
+                                         (concat (when (= kind :type-data) ['data]) (when ctype [ctype]) [(ctx-wrap ctx hd)] cons derivs))
+                                  d)
+                              d (remove #(let [v (lit-value %)] (and (seq? v) (= :doc (first v)))) cons))])
       ClassDecl (let [[_ _ ctx n qtvs fixity fundeps sigs meths ats atdefs docs] x
                       hd (ctx-wrap ctx (decl-head n qtvs fixity))
                       fds (when (seq fundeps)
@@ -1265,10 +1348,10 @@
                                        FamilyDecl [(at (family-decl n false true) n)]
                                        TyFamInstDecl (let [[_ _ eqn] (un n)
                                                            [_ _ en outer args fixity rhs] (un eqn)]
-                                                       [(at (list 'type (list '= (fam-lhs en args fixity) (tparen rhs :top))) n)])
+                                                       [(at (list 'type (eqn-parens (list '= (fam-lhs en args fixity) (tparen rhs :top)) en args)) n)])
                                        (decl-forms n false :body)))
                                    (sort-by-pos (concat sigs meths ats atdefs docs)))]
-                  [(at (apply list (hs "class") hd (concat fds body)) d)])
+                  [(full-where (at (apply list (hs "class") hd (concat fds body)) d) d body)])
       FamDecl [(at (family-decl (nth x 2) top? false) d)]
       FamilyDecl [(at (family-decl d top? (= ctx :body)) d)]
       ClsInstD (let [[_ ext ty binds sigs tyfams datafams overlap] (un (nth x 2))
@@ -1280,7 +1363,7 @@
                                       DataFamInstDecl [(at (data-family-instance n false true) n)]
                                       (decl-forms n false :body)))
                                   items)]
-                 [(at (apply list (hs "instance") (concat (when-let [o (overlap-kw overlap)] [o]) [(sig-type-form ty :top)] body)) d)])
+                 [(full-where (at (apply list (hs "instance") (concat (when-let [o (overlap-kw overlap)] [o]) [(sig-type-form ty :top)] body)) d) d body)])
       TyFamInstD (let [[_ _ eqn] (un (nth x 2))]
                    [(at (list (hs "type") 'instance (fam-eqn eqn (fn [r] (tparen r :top)))) d)])
       DataFamInstD [(at (data-family-instance (nth x 2) top? false) d)]
@@ -1517,7 +1600,7 @@
                                   (let [[k cat msg] (warning-txt w)]
                                     [(at (apply list k (concat (when cat [cat]) [msg])) w)]))
                                 (when exp-v [exp-v])
-                                [:file file :positions :lines :config cfg]
+                                [:file file :positions (if *full* :full :lines) :config cfg]
                                 (when-let [c (:cpp config)] [:cpp c])))
             modf (attach modf (or (some-> (just mname) line-of) 1))
             body (concat (map import-form imports)

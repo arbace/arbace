@@ -72,7 +72,6 @@ The current state of the work. This file is rewritten as things change. For the 
   in 40 h 29 min (about 247 times the host's 591 s; a2g alone 28.8 h). Seen there: the guest
   waiting on a spawn takes 3.5 vCPUs under emulation, an artifact of emulation (natively a few
   percent of one core; BOX-NOTES.md, BX117; left as it is, the user).
-- The Mac moved to macOS 26 (the user, 2026-10-16); the box's checks there not yet run on it.
 - Done (2026-10-16): the build's speed, third round (STANDALONE-NOTES.md, "third round"): the
   loader in parts (analysis 25 → 15 s), a2g's load parallel (10.7 → 5 s), reachability (19-21 →
   6 s), the compiled tree in several files (read 2 → 0.8 s), ids independent of the checkout's
@@ -111,8 +110,9 @@ The current state of the work. This file is rewritten as things change. For the 
   tests per configuration, every level; D1-D3 decided, in `bin/gate --full`). Done: F2 (`bin/diffcheck`, 12,449 of 12,471 cases agree; F2.1-F2.6 decided).
 - `repr/haskell`'s spec written (doc/haskell/SPEC.md; S1-S36; HS1-HS12 decided as recommended).
   R1 done (2026-10-17: the tree and lines levels over GHC 9.14.1's base libraries, 483 of 483
-  modules; HR1-HR5); R2 done (the interface level, 483 of 483; HR6-HR8); next R3-R6 (`:full` and the text
-  level, the layout printer, the other boot libraries, .hsc/.lhs/boot files). Done: `repr/java print` (the round trip over Clojure's Java, the samples and the JDK;
+  modules; HR1-HR5); R2 done (the interface level, 483 of 483; HR6-HR8); R3 done (`:full`, the
+  text level, 483 of 483 byte for byte; HR9-HR13); next R4-R6 (the layout printer, the other
+  boot libraries, .hsc/.lhs/boot files). Done: `repr/java print` (the round trip over Clojure's Java, the samples and the JDK;
   JP1-JP4); running: (Java forms → Java,
   with a round trip; branch `repr-java-print`).
 - Done (2026-10-17): repr/java print. Formerly planned: after the rename (the user, 2026-10-17: "Create jaf print after the naming debate settled"):
@@ -127,14 +127,13 @@ The current state of the work. This file is rewritten as things change. For the 
   F6, F7. Measured there: `fib`
   6.40 → 0.168 ms (the JVM 0.16) by a `Long` fast path, var speculation and an unboxed worker;
   `loop-long` 11.87 → 1.09 ms without the class-initialization guards.
-- The box's checks on the Mac on macOS 26: the bundle built (`7019817`), waiting on the
-  user's run of `./mac.sh all` and its `mac-results.tar.gz`.
-
-## Later
-
+- Done (2026-10-17): the box's checks on the Mac under macOS 26.7.1: all passed (the checklist 46
+  of 46, the rebuild in the box = Linux's byte for byte in 180 s, the clock about 5 ppm).
 - `repr/rust`: the survey written (doc/REPR-RUST-SURVEY.md, 2026-10-17; ../rust-lisp as prior
   art): recommended a bridge only, rust-lisp's grammar respelled, a helper on the host's rustc
-  with its `rustc-dev` pinned; RS1-RS17 decided (RS16: the spec now, the build after), 7-10 days.
+  with its `rustc-dev` pinned; RS1-RS17 decided; its spec written (doc/rust/SPEC.md, RSS1-RSS10 decided as
+  recommended); the build in
+  RR1-RR6, 7-10 days.
 
 - The standalone Arbace: no Java binary compatibility, with Java at the source level through repr/java.
   The language is Clojure plus class forms, and later forms for Go. The goal is a
@@ -157,7 +156,8 @@ The current state of the work. This file is rewritten as things change. For the 
   process), language isolation inside processes, S7's guests where virtualization exists, one
   spawn request; SYSCALL round trip 24.5 ns measured at ring 3; plan KU0-KU6, 17-27 days;
   K1-K12 decided as recommended; KU0 done (doc/go/PROCESS-SPEC.md; KS1-KS12 decided as
-  recommended); KU1-KU6, 14-23 days.
+  recommended); KU1 done (amd64 processes at ring 3; KS13 (a)); next KU2-KU6. To watch: a
+  diffcheck failure seen once (j2g build error in `jf_cfcorpus_c50`), not reproduced.
 - The mapped start measured without nested KVM.
 - A note from the user (2026-10-13): the tooling of the Mac GUI app Moshi Go may be useful for
   Arbace, to study when Arbace's REPL gets a user interface beyond the terminal. Its build info

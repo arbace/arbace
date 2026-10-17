@@ -1,0 +1,498 @@
+(ns arbace.go.check.types
+  "goi's checker: Go types (doc/go/GOI-SPEC.md §3.3), their predicates, printing, sizes, and
+  the lookup of fields and methods, after go/types (predicates.go, typestring.go, gcsizes.go,
+  lookup.go, methodset.go).
+
+  Basic types are keywords (:int, :untyped-float ...). Composite types are vectors compared by
+  structure: [:pointer T], [:slice T], [:array n T], [:map K V], [:chan dir T] (dir :both,
+  :send, :recv), [:func params results variadic?], [:struct fields] (each field {:name :type
+  :tag :embedded :pkg}, :pkg the package path of an unexported name), [:interface methods
+  terms] (methods the whole method set, embedded interfaces flattened, sorted by name and
+  package: {:name :type :pkg}; terms nil but for constraints), [:tuple T...]. Named types and
+  type parameters are [:named v] and [:tparam v], v a volatile holding their data, so that =
+  is identity on them (a volatile is equal only to itself).
+
+  A named type's volatile holds {:obj the type name's object, :name, :pkg path, :pkg-name,
+  :underlying, :methods [method objects], :origin and :targs for an instance, :tparams}."
+  (:require [arbace.string :as str]
+            [arbace.go.check.const :as c]))
+
+;;; Basic types
+
+(def basic-info
+  "{kind {:size :int? :unsigned? :float? :complex? :string? :bool? :untyped? :name}}"
+  (let [m (fn [n size & flags] [n (into {:size size :name n} (map (fn [f] [f true]) flags))])]
+    (into {}
+          [(m :bool 1 :bool?)
+           (m :int8 1 :int?) (m :int16 2 :int?) (m :int32 4 :int?) (m :int64 8 :int?) (m :int 8 :int?)
+           (m :uint8 1 :int? :unsigned?) (m :uint16 2 :int? :unsigned?) (m :uint32 4 :int? :unsigned?)
+           (m :uint64 8 :int? :unsigned?) (m :uint 8 :int? :unsigned?) (m :uintptr 8 :int? :unsigned?)
+           (m :float32 4 :float?) (m :float64 8 :float?)
+           (m :complex64 8 :complex?) (m :complex128 16 :complex?)
+           (m :string 16 :string?)
+           (m :unsafe-pointer 8)
+           (m :untyped-bool 0 :bool? :untyped?) (m :untyped-int 0 :int? :untyped?)
+           (m :untyped-rune 0 :int? :untyped?) (m :untyped-float 0 :float? :untyped?)
+           (m :untyped-complex 0 :complex? :untyped?) (m :untyped-string 0 :string? :untyped?)
+           (m :untyped-nil 0 :untyped?)])))
+
+(def basic-names
+  {:bool "bool" :int8 "int8" :int16 "int16" :int32 "int32" :int64 "int64" :int "int"
+   :uint8 "uint8" :uint16 "uint16" :uint32 "uint32" :uint64 "uint64" :uint "uint" :uintptr "uintptr"
+   :float32 "float32" :float64 "float64" :complex64 "complex64" :complex128 "complex128"
+   :string "string" :unsafe-pointer "unsafe.Pointer"
+   :untyped-bool "untyped bool" :untyped-int "untyped int" :untyped-rune "untyped rune"
+   :untyped-float "untyped float" :untyped-complex "untyped complex"
+   :untyped-string "untyped string" :untyped-nil "untyped nil" :invalid "invalid type"})
+
+;;; Named types and type parameters
+
+(def ^:private ids (java.util.concurrent.atomic.AtomicLong. 0))
+(defn next-id ^long [] (.incrementAndGet ids))
+
+(defn named? [t] (and (vector? t) (identical? :named (nth t 0))))
+(defn tparam? [t] (and (vector? t) (identical? :tparam (nth t 0))))
+(defn info [t] @(nth t 1))
+(defn update-info! [t f & args] (vreset! (nth t 1) (apply f @(nth t 1) args)) t)
+
+(defn new-named
+  "A new named type: data {:obj :name :pkg :pkg-name ...}; its underlying is set later."
+  [data]
+  [:named (volatile! (assoc data :id (next-id) :methods []))])
+
+(defn new-tparam [data] [:tparam (volatile! (assoc data :id (next-id)))])
+
+(def ^:dynamic *resolve-named*
+  "A function called with a named type whose underlying type is not known yet (its declaration
+  not checked), which checks its declaration; bound by the checker."
+  nil)
+
+(declare under)
+
+(defn- named-under [t]
+  (loop [t t seen #{}]
+    (let [i (info t)]
+      (if-let [u (:underlying i)]
+        (if (named? u)
+          ;; type A B: A's underlying is B's, resolved on demand (a cycle is invalid)
+          (if (contains? seen u)
+            :invalid
+            (recur u (conj seen t)))
+          u)
+        (if (and *resolve-named* (not (:resolving i)) (:obj i))
+          (do (*resolve-named* t)
+              (if (:underlying (info t)) (recur t seen) :invalid))
+          :invalid)))))
+
+(defn under
+  "The underlying type of t."
+  [t]
+  (cond
+    (keyword? t) t
+    (identical? :named (nth t 0)) (named-under t)
+    (identical? :tparam (nth t 0)) (or (:core (info t)) [:interface [] nil])
+    :else t))
+
+;;; Predicates
+
+(defn basic [t] (let [u (under t)] (when (keyword? u) u)))
+(defn- flag [t f] (let [b (basic t)] (boolean (and b (get (basic-info b) f)))))
+(defn integer-type? [t] (flag t :int?))
+(defn unsigned? [t] (flag t :unsigned?))
+(defn float-type? [t] (flag t :float?))
+(defn complex-type? [t] (flag t :complex?))
+(defn numeric? [t] (or (integer-type? t) (float-type? t) (complex-type? t)))
+(defn string-type? [t] (flag t :string?))
+(defn boolean-type? [t] (flag t :bool?))
+(defn untyped? [t] (and (keyword? t) (boolean (get (basic-info t) :untyped?))))
+(defn typed? [t] (not (untyped? t)))
+(defn const-type?
+  "Whether values of t can be constants: booleans, numbers and strings."
+  [t]
+  (let [b (basic t)] (and b (not (#{:unsafe-pointer :untyped-nil :invalid} b)))))
+(defn ordered? [t] (or (integer-type? t) (float-type? t) (string-type? t)))
+(defn interface? [t] (let [u (under t)] (and (vector? u) (= :interface (nth u 0)))))
+(defn pointer? [t] (let [u (under t)] (and (vector? u) (= :pointer (nth u 0)))))
+(defn unsafe-pointer? [t] (= :unsafe-pointer (basic t)))
+(defn uintptr? [t] (= :uintptr (basic t)))
+(defn valid? [t] (not= :invalid t))
+(defn kind-of [t] (let [u (under t)] (if (keyword? u) u (nth u 0))))
+(defn has-name? [t] (or (keyword? t) (named? t) (tparam? t)))
+(defn integer-or-float? [t] (or (integer-type? t) (float-type? t)))
+
+(defn has-nil?
+  "Whether t's values include nil: pointers, slices, maps, channels, funcs, interfaces,
+  unsafe.Pointer."
+  [t]
+  (let [u (under t)]
+    (or (= :unsafe-pointer u) (= :untyped-nil u)
+        (and (vector? u) (contains? #{:pointer :slice :map :chan :func :interface} (nth u 0))))))
+
+(defn empty-interface? [t]
+  (let [u (under t)] (and (vector? u) (= :interface (nth u 0)) (empty? (nth u 1)) (nil? (nth u 2)))))
+
+(defn default-type
+  "The default type of an untyped type (Go's Default)."
+  [t]
+  (case t
+    :untyped-bool :bool :untyped-int :int :untyped-rune :int32 :untyped-float :float64
+    :untyped-complex :complex128 :untyped-string :string
+    t))
+
+(defn ignore-tags
+  "t with the tags of its struct types dropped, deeply (for IdenticalIgnoreTags)."
+  [t]
+  (if (and (vector? t) (not (named? t)) (not (tparam? t)))
+    (case (nth t 0)
+      :struct [:struct (mapv #(assoc % :tag nil :type (ignore-tags (:type %))) (nth t 1))]
+      :pointer [:pointer (ignore-tags (nth t 1))]
+      :slice [:slice (ignore-tags (nth t 1))]
+      :array [:array (nth t 1) (ignore-tags (nth t 2))]
+      :map [:map (ignore-tags (nth t 1)) (ignore-tags (nth t 2))]
+      :chan [:chan (nth t 1) (ignore-tags (nth t 2))]
+      :func [:func (mapv ignore-tags (nth t 1)) (mapv ignore-tags (nth t 2)) (nth t 3)]
+      :tuple (into [:tuple] (map ignore-tags (rest t)))
+      t)
+    t))
+
+(defn identical-ignore-tags? [x y] (= (ignore-tags x) (ignore-tags y)))
+
+(declare comparable?)
+
+(defn comparable?
+  "Go's Comparable: whether values of t can be compared with == (interfaces are)."
+  ([t] (comparable? t #{}))
+  ([t seen]
+   (if (contains? seen t)
+     true
+     (let [u (under t) seen (conj seen t)]
+       (cond
+         (keyword? u) (not= u :untyped-nil)
+         :else
+         (case (nth u 0)
+           (:pointer :chan :interface) true
+           :struct (every? #(comparable? (:type %) seen) (nth u 1))
+           :array (comparable? (nth u 2) seen)
+           false))))))
+
+;;; Printing (go/types' TypeString)
+
+(def ^:dynamic *qualify*
+  "The current package's path: its named types print unqualified, the others by their
+  package's name."
+  nil)
+
+(declare type-str)
+
+(defn- params-str [ps variadic]
+  (str "("
+       (str/join ", " (map-indexed (fn [i p]
+                                     (if (and variadic (= i (dec (count ps))))
+                                       (str "..." (type-str (nth p 1)))
+                                       (type-str p)))
+                                   ps))
+       ")"))
+
+(defn sig-str
+  "A signature's text without the func keyword: (params) results."
+  [[_ ps rs variadic]]
+  (str (params-str ps variadic)
+       (case (count rs)
+         0 ""
+         1 (let [r (first rs)] (str " " (type-str r)))
+         (str " (" (str/join ", " (map type-str rs)) ")"))))
+
+(defn- field-str [f]
+  (str (if (:embedded f) "" (str (:name f) " ")) (type-str (:type f))
+       (when (:tag f) (str " " (pr-str (c/value-text (:tag f)))))))
+
+(defn named-str [t]
+  (let [i (info t)
+        base (if (and (:pkg i) (not= (:pkg i) *qualify*) (not (:local i)))
+               (str (:pkg-name i) "." (:name i))
+               (:name i))]
+    (if (seq (:targs i))
+      (str base "[" (str/join "," (map type-str (:targs i))) "]")
+      base)))
+
+(defn type-str
+  "Go's text of a type."
+  [t]
+  (cond
+    (keyword? t) (get basic-names t (name t))
+    (named? t) (named-str t)
+    (tparam? t) (:name (info t))
+    :else
+    (case (nth t 0)
+      :pointer (str "*" (type-str (nth t 1)))
+      :slice (str "[]" (type-str (nth t 1)))
+      :array (str "[" (nth t 1) "]" (type-str (nth t 2)))
+      :map (str "map[" (type-str (nth t 1)) "]" (type-str (nth t 2)))
+      :chan (let [e (nth t 2)
+                  es (type-str e)
+                  es (if (and (= :both (nth t 1)) (vector? e) (= :chan (nth e 0)) (= :recv (nth e 1)))
+                       (str "(" es ")") es)]
+              (case (nth t 1) :both (str "chan " es) :send (str "chan<- " es) :recv (str "<-chan " es)))
+      :func (str "func" (sig-str t))
+      :struct (str "struct{" (str/join "; " (map field-str (nth t 1))) "}")
+      :interface (let [ms (nth t 1)]
+                   (if (and (empty? ms) (nil? (nth t 2)))
+                     "interface {}"
+                     (str "interface {" (str/join "; " (for [m ms] (str (:name m) (sig-str (:type m))))) "}")))
+      :tuple (str "(" (str/join ", " (map type-str (rest t))) ")")
+      (pr-str t))))
+
+;;; Sizes (gc's, word 8, max alignment 8: amd64 and arm64)
+
+(def word-size 8)
+(def max-align 8)
+
+(declare sizeof)
+
+(defn- align-up ^long [^long x ^long a] (* a (quot (+ x (dec a)) a)))
+
+(defn sync-atomic-align64?
+  "Whether t is sync/atomic's align64 (or internal/runtime/atomic's), the empty struct gc
+  aligns to 8."
+  [t]
+  (and (named? t)
+       (let [i (info t)]
+         (and (= "align64" (:name i))
+              (contains? #{"sync/atomic" "internal/runtime/atomic"} (:pkg i))))))
+
+(defn alignof ^long [t]
+  (let [u (under t)]
+    (cond
+      (and (vector? u) (= :array (nth u 0))) (alignof (nth u 2))
+      (and (vector? u) (= :struct (nth u 0)))
+      (if (and (empty? (nth u 1)) (sync-atomic-align64? t))
+        8
+        (reduce (fn [m f] (max m (alignof (:type f)))) 1 (nth u 1)))
+      (and (vector? u) (contains? #{:slice :interface} (nth u 0))) word-size
+      (= :string u) word-size
+      :else
+      (let [a (sizeof t)
+            a (if (< a 1) 1 a)
+            a (if (complex-type? t) (quot a 2) a)]
+        (min a max-align)))))
+
+(defn offsetsof [fields]
+  (loop [fs fields offs 0 acc []]
+    (if (empty? fs)
+      acc
+      (let [f (first fs)
+            o (align-up offs (alignof (:type f)))]
+        (recur (rest fs) (+ o (sizeof (:type f))) (conj acc o))))))
+
+(defn sizeof ^long [t]
+  (let [u (under t)]
+    (cond
+      (keyword? u) (case u :string (* 2 word-size) (:size (basic-info u) word-size))
+      :else
+      (case (nth u 0)
+        :array (let [n (long (nth u 1))]
+                 (if (<= n 0) 0 (* n (sizeof (nth u 2)))))
+        :slice (* 3 word-size)
+        :struct (let [fs (nth u 1)]
+                  (if (empty? fs)
+                    0
+                    (let [offs (offsetsof fs)
+                          o (long (peek offs))
+                          s (sizeof (:type (peek fs)))
+                          s (if (and (pos? o) (zero? s)) 1 s)]
+                      (align-up (+ o s) (alignof t)))))
+        :interface (* 2 word-size)
+        word-size))))
+
+;;; Pointers and methods
+
+(defn deref-type
+  "[base true] for an unnamed pointer type [:pointer base], else [t false]."
+  [t]
+  (if (and (vector? t) (= :pointer (nth t 0))) [(nth t 1) true] [t false]))
+
+(defn methods-of
+  "The methods declared on named type t (objects): its declaration completed first."
+  [t]
+  (let [t (if (:origin (info t)) (:origin (info t)) t)]
+    (under t)
+    (:methods (info t))))
+
+(def ^:dynamic *fold-case*
+  "go/types' foldCase: names compared without case (and packages ignored), for messages."
+  false)
+
+(defn same-id?
+  "Whether a field or method named n (in package p when unexported) is the one named name
+  as seen from package pkg."
+  [n p name pkg]
+  (if (and *fold-case* (.equalsIgnoreCase ^String n ^String name))
+    true
+  (and (= n name)
+       (or (Character/isUpperCase (.charAt ^String name 0))
+           (= p pkg)
+           ;; a non-letter start (_): the package matters as for unexported names
+           false))))
+
+(defn exported? [^String n]
+  (let [cp (.codePointAt n 0)] (Character/isUpperCase cp)))
+
+(def ^:dynamic *method-obj*
+  "A function from a method object to its data {:name :pkg :type :ptr-recv}, which resolves its
+  declaration; bound by the checker."
+  nil)
+
+(def ^:dynamic *subst-method*
+  "A function [instance method-obj] -> method data of the instance (type arguments
+  substituted); bound by the checker for generic types."
+  nil)
+
+(defn named-method
+  "[index method-data] of named type t's method name (seen from pkg), or nil."
+  [t name pkg]
+  (let [ms (methods-of t)]
+    (loop [i 0]
+      (when (< i (count ms))
+        (let [m (nth ms i)
+              {mn :name mp :pkg} @m]
+          (if (same-id? mn mp name pkg)
+            [i m]
+            (recur (inc i))))))))
+
+(defn iface-method
+  "[index method] of interface type u's method name (seen from pkg), or nil."
+  [u name pkg]
+  (let [ms (nth u 1)]
+    (loop [i 0]
+      (when (< i (count ms))
+        (let [m (nth ms i)]
+          (if (same-id? (:name m) (:pkg m) name pkg)
+            [i m]
+            (recur (inc i))))))))
+
+(defn- consolidate
+  "go/types' consolidateMultiples: entries of one type merged, marked multiple."
+  [entries]
+  (loop [es entries acc [] idx {}]
+    (if (empty? es)
+      acc
+      (let [e (first es)
+            k (:type e)]
+        (if-let [j (get idx k)]
+          (recur (rest es) (assoc-in acc [j :multiples] true) idx)
+          (recur (rest es) (conj acc e) (assoc idx k (count acc))))))))
+
+(defn lookup-impl
+  "go/types' lookupFieldOrMethodImpl: {:kind :field|:method|:iface-method, :obj (a field map,
+  a method object or an interface method map), :index [i ...] (the path: field indexes, the
+  last the field's or method's), :via [embedded field names], :indirect}, or {:ambiguous
+  true}, {:ptr-recv true} (a pointer method on a non-addressable value), or nil."
+  [T addressable name pkg]
+  (let [[typ is-ptr] (deref-type T)]
+    (if (and is-ptr (interface? typ))
+      nil
+      (loop [current [{:type typ :index [] :via [] :indirect is-ptr :multiples false}]
+             seen #{}]
+        (if (empty? current)
+          nil
+          (let [[found next seen]
+                (reduce
+                 (fn [[found next seen] e]
+                   (let [typ (:type e)]
+                     (if (and (named? typ) (contains? seen typ))
+                       [found next seen]
+                       (let [seen (if (named? typ) (conj seen typ) seen)
+                             m (when (named? typ) (named-method typ name pkg))]
+                         (if m
+                           (if (or found (:multiples e))
+                             [{:ambiguous true} next seen]
+                             [{:kind :method :obj (second m) :recv-type typ :index (conj (:index e) (first m))
+                               :via (:via e) :indirect (:indirect e)} next seen])
+                           (let [u (under typ)]
+                             (cond
+                               (and (vector? u) (= :struct (nth u 0)))
+                               (let [fs (nth u 1)]
+                                 (loop [i 0 found found next next]
+                                   (if (>= i (count fs))
+                                     [found next seen]
+                                     (let [f (nth fs i)]
+                                       (cond
+                                         (same-id? (:name f) (:pkg f) name pkg)
+                                         (if (or found (:multiples e))
+                                           (recur (inc i) {:ambiguous true} next)
+                                           (recur (inc i) {:kind :field :obj f :index (conj (:index e) i)
+                                                           :via (:via e) :indirect (:indirect e)}
+                                                  next))
+                                         (and (nil? found) (:embedded f))
+                                         (let [[ft fp] (deref-type (:type f))]
+                                           (recur (inc i) found
+                                                  (conj next {:type ft :index (conj (:index e) i)
+                                                              :via (conj (:via e) (:name f))
+                                                              :indirect (or (:indirect e) fp)
+                                                              :multiples (:multiples e)})))
+                                         :else (recur (inc i) found next))))))
+                               (and (vector? u) (= :interface (nth u 0)))
+                               (if-let [m (iface-method u name pkg)]
+                                 (if (or found (:multiples e))
+                                   [{:ambiguous true} next seen]
+                                   [{:kind :iface-method :obj (second m) :iface typ :index (conj (:index e) (first m))
+                                     :via (:via e) :indirect (:indirect e)} next seen])
+                                 [found next seen])
+                               :else [found next seen])))))))
+                 [nil [] seen]
+                 current)]
+            (cond
+              (:ambiguous found) found
+              found
+              (if (and (= :method (:kind found)) (:ptr-recv (*method-obj* (:obj found)))
+                       (not (:indirect found)) (not addressable))
+                {:ptr-recv true :found found}
+                found)
+              :else (recur (consolidate next) seen))))))))
+
+(defn lookup
+  "go/types' LookupFieldOrMethod: lookup-impl, but a defined pointer type has fields only."
+  [T addressable name pkg]
+  (if (and (named? T) (pointer? T))
+    (let [r (lookup-impl (under T) false name pkg)]
+      (when-not (= :method (:kind r)) r))
+    (lookup-impl T addressable name pkg)))
+
+;;; Interfaces
+
+(defn sort-methods
+  "Interface methods in go/types' order: by name, unexported after package (Id order)."
+  [ms]
+  (vec (sort-by (fn [m] [(:name m) (or (:pkg m) "")]) ms)))
+
+(defn method-data
+  "The data of a method object or an interface method: {:name :pkg :type :ptr-recv}."
+  [m]
+  (if (map? m) m (*method-obj* m)))
+
+(defn missing-method
+  "go/types' missingMethod: nil when V implements interface type T (u its underlying), else
+  {:method m :cause kw}: :missing, :ptr-recv (found with a pointer receiver), :wrong-type
+  (with :have), :field (a field of that name), :unexported (other package's)."
+  [V T static]
+  (let [tu (under T)
+        vu (under V)]
+    (some
+     (fn [m]
+       (if (and (vector? vu) (= :interface (nth vu 0)))
+         (let [f (iface-method vu (:name m) (:pkg m))]
+           (cond
+             (nil? f) (when static {:method m :cause :missing})
+             (not= (:type (second f)) (:type m)) {:method m :cause :wrong-type :have (second f)}))
+         (let [r (lookup-impl V false (:name m) (:pkg m))]
+           (cond
+             (:ptr-recv r) {:method m :cause :ptr-recv}
+             (nil? r) {:method m :cause :missing}
+             (:ambiguous r) {:method m :cause :missing}
+             (= :field (:kind r)) {:method m :cause :field}
+             :else
+             (let [d (method-data (:obj r))
+                   d (if (and *subst-method* (= :method (:kind r))) (*subst-method* (:recv-type r) d) d)]
+               (when (not= (:type d) (:type m))
+                 {:method m :cause :wrong-type :have d}))))))
+     (nth tu 1))))

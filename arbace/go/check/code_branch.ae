@@ -1,0 +1,181 @@
+(in-ns 'arbace.go.check.code)
+
+;;; Labels and branches (doc/go/GOI-SPEC.md §3.4, SPEC.md §7.8), as gc checks them before its
+;;; type checker (cmd/compile/internal/syntax/branches.go, checkBranches, whose messages gc
+;;; reports): over a function body's forms, one label scope per function.
+
+(defn- branch-items
+  "A statement list's items as gc sees them: a let's binding pairs are statements of the list
+  ([:var line name label?] for a variable declaration, [:decl label?] for a constant or a type),
+  its body the rest of the list; a let that is not last is a block of its own ([:block f])."
+  [forms]
+  (let [forms (vec forms) n (count forms)]
+    (vec
+     (mapcat
+      (fn [i f]
+        (let [h (head-name f)]
+          (cond
+            (and (#{"let" "let-type"} h) (< i (dec n))) [[:block f]]
+            (= "let" h)
+            (concat
+             (for [[tf rf] (partition 2 (second f))
+                   :let [m (meta tf) lbl (:go/label m)
+                         names (if (= "values" (head-name tf)) (rest tf) [tf])]]
+               (if (:const m)
+                 [:decl lbl (or (fline tf) (fline f))]
+                 [:var (or (:go/label-line m) (fline tf) (fline f) e/*line*) (ident-name (first names)) lbl]))
+             (branch-items (nnext f)))
+            (= "let-type" h)
+            (concat (for [[nf] (partition 2 (second f))] [:decl (:go/label (meta nf)) (fline nf)])
+                    (branch-items (nnext f)))
+            :else [f])))
+      (range n) forms))))
+
+(defn check-branches!
+  "gc's checks of labels and branch statements over a function body (its forms)."
+  [body]
+  (let [labels (volatile! {})
+        file (:name e/*gofile*)
+        pos (fn [l] (str file ":" l))
+        errf (fn [line fmt & args] (e/error! line :BranchError (apply format fmt args)))]
+    (letfn [(declare-label [b lbl line lstmt-kind]
+              (let [nm (name lbl)]
+                (if-let [alt (get @labels nm)]
+                  (do (errf line "label %s already defined at %s" nm (pos (:line alt))) alt)
+                  (let [l {:name nm :block b :line line :kind lstmt-kind :used (volatile! false)}]
+                    (vswap! labels assoc nm l)
+                    l))))
+            (ancestor? [b x] (loop [x x] (cond (nil? x) false (identical? x b) true :else (recur (:parent x)))))
+            (goto-target [b nm]
+              (when-let [l (get @labels nm)]
+                (when (ancestor? (:block l) b) l)))
+            (enclosing-target [b nm]
+              (loop [x b]
+                (when x
+                  (if (and (:lstmt x) (= nm (:name (:lstmt x)))) (:lstmt x) (recur (:parent x))))))
+            (block-branches [parent ctxt lstmt start forms]
+              (let [b {:parent parent :start start :lstmt lstmt :id (Object.)}
+                    var-pos (volatile! nil)
+                    fwd (volatile! [])
+                    bad (volatile! [])
+                    record-var (fn [line nm] (vreset! var-pos [line nm]) (vreset! bad @fwd))
+                    inner (fn [ctxt start forms lstmt] (vswap! fwd into (block-branches b ctxt lstmt start forms)))
+                    items (branch-items forms)
+                    n (count items)]
+                (doseq [[idx item] (map-indexed vector items)]
+                  (letfn [(stmt [s lstmt]
+                            (cond
+                              (vector? s)
+                              (case (nth s 0)
+                                :block (inner (assoc ctxt :case-index -1) (fline (nth s 1)) [(nth s 1)] nil)
+                                :var (let [[_ line nm lbl] s]
+                                       (when lbl (label lbl line nil))
+                                       (record-var line nm))
+                                :decl (let [[_ lbl line] s] (when lbl (label lbl line nil))))
+                              :else
+                              (let [h (head-name s) line (or (fline s) e/*line*)]
+                                (case h
+                                  "label" (let [[_ kw st] s]
+                                            (let [k (head-name st)
+                                                  kind (cond (#{"for" "while" "range"} k) :for
+                                                             (#{"switch" "type-switch"} k) :switch
+                                                             (= "select" k) :select)
+                                                  l (label kw line kind)]
+                                              (when st (stmt st (when (not= "_" (name kw)) l)))))
+                                  ("break" "continue" "goto" "fallthrough")
+                                  (let [lbl (second s)]
+                                    (if (nil? lbl)
+                                      (case h
+                                        "break" (when-not (:breaks ctxt) (errf line "break is not in a loop, switch, or select"))
+                                        "continue" (when-not (:continues ctxt) (errf line "continue is not in a loop"))
+                                        "fallthrough"
+                                        (let [msg (cond
+                                                    (not= :switch (:breaks ctxt)) "fallthrough statement out of place"
+                                                    (:type-switch ctxt) "cannot fallthrough in type switch"
+                                                    (or (neg? (:case-index ctxt -1)) (< (inc idx) n)) "fallthrough statement out of place"
+                                                    (= (inc (:case-index ctxt)) (:ncases ctxt)) "cannot fallthrough final case in switch"
+                                                    :else nil)]
+                                          (when msg (errf line "%s" msg)))
+                                        nil)
+                                      (let [nm (name lbl)]
+                                        (case h
+                                          "break" (if-let [t (enclosing-target b nm)]
+                                                    (if (#{:for :switch :select} (:kind t))
+                                                      (vreset! (:used t) true)
+                                                      (errf line "invalid break label %s" nm))
+                                                    (errf line "break label not defined: %s" nm))
+                                          "continue" (if-let [t (enclosing-target b nm)]
+                                                       (if (= :for (:kind t))
+                                                         (vreset! (:used t) true)
+                                                         (errf line "invalid continue label %s" nm))
+                                                       (errf line "continue label not defined: %s" nm))
+                                          "goto" (if-let [t (goto-target b nm)]
+                                                   (vreset! (:used t) true)
+                                                   (vswap! fwd conj {:name nm :line line}))
+                                          nil))))
+                                  "do" (inner (assoc ctxt :case-index -1) line (rest s) nil)
+                                  ("if" "when")
+                                  (let [args (vec (rest s))
+                                        args (if (vector? (first args)) (subvec args 1) args)
+                                        ictx (assoc ctxt :case-index -1)
+                                        branch (fn [x] (if (= "do" (head-name x)) (rest x) [x]))]
+                                    (if (= "when" h)
+                                      (inner ictx line (rest args) nil)
+                                      (do (inner ictx line (branch (second args)) nil)
+                                          (when (> (count args) 2) (inner ictx line [(nth args 2)] nil)))))
+                                  "cond" (let [ictx (assoc ctxt :case-index -1)
+                                               branch (fn [x] (if (= "do" (head-name x)) (rest x) [x]))
+                                               pairs (partition 2 (rest s))]
+                                           ;; if a {} else if b {} else {}: each else is a block holding the rest
+                                           (letfn [(chain [ps]
+                                                     (when (seq ps)
+                                                       (let [[t br] (first ps)]
+                                                         (inner ictx line (branch br) nil)
+                                                         (when (seq (rest ps))
+                                                           (chain (rest ps))))))]
+                                             (chain pairs)))
+                                  ("for" "while" "range")
+                                  (let [body (case h "for" (drop 4 s) "while" (nnext s) "range" (nnext s))]
+                                    (inner {:breaks :for :continues true :case-index -1} line body lstmt))
+                                  ("switch" "type-switch")
+                                  (let [clauses (filter #(and (seq? %) (#{'case 'default} (first %))) (rest s))
+                                        nc (count clauses)]
+                                    (doseq [[i cl] (map-indexed vector clauses)]
+                                      (inner {:breaks :switch :continues (:continues ctxt) :case-index i :ncases nc
+                                              :type-switch (= "type-switch" h)}
+                                             (or (fline cl) line)
+                                             (if (= 'default (first cl)) (rest cl) (nnext cl))
+                                             lstmt)))
+                                  "select"
+                                  (doseq [cl (rest s)]
+                                    (inner {:breaks :select :continues (:continues ctxt) :case-index -1}
+                                           (or (fline cl) line)
+                                           (if (= 'default (first cl)) (rest cl) (nnext cl))
+                                           lstmt))
+                                  nil))))
+                          (label [kw line kind]
+                            (when (not= "_" (name kw))
+                              (let [l (declare-label b kw line kind)
+                                    nm (name kw)]
+                                ;; resolve the forward gotos to it
+                                (vreset! fwd
+                                         (vec (remove (fn [g]
+                                                        (when (= nm (:name g))
+                                                          (vreset! (:used l) true)
+                                                          (when (and @var-pos (some #(identical? % g) @bad))
+                                                            (errf (:line g) "goto %s jumps over declaration of %s at %s"
+                                                                  nm (second @var-pos) (pos (first @var-pos))))
+                                                          true))
+                                                      @fwd)))
+                                l)))]
+                    (stmt item nil)))
+                @fwd))]
+      (let [fwd (block-branches nil {:case-index -1} nil (or e/*line* 0) body)]
+        (doseq [g fwd]
+          (if-let [l (get @labels (:name g))]
+            (do (vreset! (:used l) true)
+                (errf (:line g) "goto %s jumps into block starting at %s" (:name g) (pos (:start (:block l)))))
+            (errf (:line g) "label %s not defined" (:name g))))
+        (doseq [l (sort-by :line (vals @labels))]
+          (when-not @(:used l)
+            (errf (:line l) "label %s defined and not used" (:name l))))))))

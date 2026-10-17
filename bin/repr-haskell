@@ -16,21 +16,27 @@
 #                                 the corpus's modules, one per line: modules|hsc|boot, package, file
 #                                 (R1's, then R6's .hsc and boot files)
 #   bin/repr-haskell dump --corpus [CORPUS]   dump the corpus into .tmp/repr-haskell/dumps/CORPUS/PKG/
+#   bin/repr-haskell dump [--full] --corpus [CORPUS]   the same with --full into dumps/CORPUS-full/
 #   bin/repr-haskell dump [--full] [-o DIR] FILE... [--ghc FLAG...]
 #                                 run the helper on modules (relative to the current directory) with
 #                                 GHC flags; one DIR/FILE.edn each (default .tmp/hsdump/out); --full
-#                                 keeps the exact-print annotations (for R3: the converter reads mode
-#                                 :lines dumps)
+#                                 (mode :full, SPEC §7.2, §8.2) adds the exact-print annotations (as
+#                                 discarded forms), the text and GHC's lexer's tokens with the comments,
+#                                 and a CPP module's module view (DIR/FILE.view)
 #   bin/repr-haskell read [-o DIR] FILE.edn...
 #                                 convert dumps to Haskell forms: one .ae per module under DIR (default
-#                                 .tmp/repr-haskell/forms/files), each read back and compared
-#   bin/repr-haskell read --corpus [CORPUS]
+#                                 .tmp/repr-haskell/forms/files), each read back and compared; a dump
+#                                 --full to forms of mode :full
+#   bin/repr-haskell read [--full] --corpus [CORPUS]
 #                                 dump the corpus (.tmp/repr-haskell/dumps/CORPUS/PKG/) and convert it
 #                                 into .tmp/repr-haskell/forms/CORPUS/PKG/ (SPEC §2.1);
-#                                 report .tmp/repr-haskell/forms/CORPUS.report.edn
-#   bin/repr-haskell print [-o DIR] FORMS.ae...
-#                                 the printer (braces layout, SPEC §7.4): one .hs per forms file
-#                                 into DIR (default .tmp/repr-haskell/printed), at the forms' :file
+#                                 report .tmp/repr-haskell/forms/CORPUS.report.edn; --full: mode :full,
+#                                 into dumps/CORPUS-full/ and forms/CORPUS-full/
+#   bin/repr-haskell print [-o DIR] [--layout braces|full] FORMS.ae...
+#                                 the printer (SPEC §7.4): one .hs per forms file into DIR (default
+#                                 .tmp/repr-haskell/printed), at the forms' :file; the braces layout,
+#                                 or for forms of mode :full the full layout (the original text, byte
+#                                 for byte; --layout braces: the braces layout)
 #   bin/repr-haskell roundtrip [--only REGEX] [CORPUS]
 #                                 the round trip's tree level (SPEC §9.1, §9.2) over the corpus:
 #                                 read, print into .tmp/repr-haskell/cand/CORPUS/PKG/, and compare
@@ -53,9 +59,21 @@
 #                                 a listed one that no longer occurs. Report
 #                                 .tmp/repr-haskell/iface/CORPUS.report.edn. --iface-only: the
 #                                 interface level alone, over the modules printed by an earlier run
+#   bin/repr-haskell roundtrip --text [CORPUS]
+#                                 then the text level (SPEC §9.1, mode :full; R3): the corpus dumped
+#                                 with --full, converted in mode :full, printed in the full layout into
+#                                 .tmp/repr-haskell/cand-text/CORPUS/PKG/, each module compared byte for
+#                                 byte with its original (a CPP module: its module view, SPEC §2.8),
+#                                 then GHC's trees in mode :full (hsdump tree --full: every span,
+#                                 annotation and comment) and lines of both; fails on a difference
+#                                 test/haskell/roundtrip-CORPUS-text-known.edn does not list, and on a
+#                                 listed one that no longer occurs. Report
+#                                 .tmp/repr-haskell/cand-text/CORPUS.report.edn. --text-only: the text
+#                                 level alone. With --iface too: tree, interface, text
 #   bin/repr-haskell test         the spec's cases (test/haskell/; bin/lib/repr-haskell/test): the
 #                                 reader's samples, the worked example converted and its round trip,
-#                                 the interface level's normalizations (test/haskell/iface/)
+#                                 the interface level's normalizations (test/haskell/iface/), the
+#                                 worked example in mode :full printed back byte for byte
 #
 # Environment: REPR_HASKELL_JOBS (parallel helper and converter runs, default the cores, at most
 # 32); ARBACE_HOST_EXE (the Arbace executable, bin/lib/host.bash; default stage 0).
@@ -166,7 +184,7 @@ corpus_fetch() {
 # dump_corpus CORPUS OUT: every module of the corpus dumped into OUT/PKG/FILE.edn (a module the
 # helper fails on is written as (hsdump/error ...), which the conversion reports)
 dump_corpus() {
-  local c=$1 out=$2 name dir flags files hh
+  local c=$1 out=$2 full=${3:-} name dir flags files hh
   rm -rf "$out"
   mkdir -p "$out"
   hh=sha256:$(helper_hash)
@@ -174,7 +192,7 @@ dump_corpus() {
     [ -n "$files" ] || continue
     # shellcheck disable=SC2086
     (cd "$srcroot/$dir" && printf '%s\n' $files | xargs -P "$jobs" -n 8 \
-      "$helper" dump -o "$out/$name" --libdir "$libdir" --corpus "$c" --helper-hash "$hh" \
+      "$helper" dump $full -o "$out/$name" --libdir "$libdir" --corpus "$c" --helper-hash "$hh" \
         --ghc $flags --files) 2> "$out/$name.err" || true
   done < <(corpus_plan "$c" modules)
 }
@@ -295,12 +313,14 @@ iface_level() {
 }
 
 roundtrip() {
-  local c=ghc-9.14.1 only="" iface="" tree=1 st=0
+  local c=ghc-9.14.1 only="" iface="" tree=1 text="" st=0
   while [ $# -gt 0 ]; do
     case $1 in
       --only) only=$2; shift 2 ;;
       --iface) iface=1; shift ;;
       --iface-only) iface=1; tree=""; shift ;;
+      --text) text=1; shift ;;
+      --text-only) text=1; tree=""; shift ;;
       *) c=$1; shift ;;
     esac
   done
@@ -309,11 +329,59 @@ roundtrip() {
   local cand=$rh/cand/$c
   if [ -n "$tree" ]; then tree_level "$c" "$only" || st=1; fi
   if [ -n "$iface" ]; then
-    [ -z "$only" ] || { echo "repr-haskell: --only is for the tree level" >&2; return 2; }
+    [ -z "$only" ] || { echo "repr-haskell: --only is for the tree and text levels" >&2; return 2; }
     [ -d "$cand" ] || { echo "repr-haskell: no printed modules in $cand (run the tree level first)" >&2; return 1; }
     iface_level "$c" "$cand" || st=1
   fi
+  if [ -n "$text" ]; then text_level "$c" "$only" || st=1; fi
   return $st
+}
+
+# text_level CORPUS ONLY: the text level (SPEC §9.1, mode :full; R3): the corpus dumped with
+# --full (.tmp/repr-haskell/dumps/CORPUS-full/PKG/, with CPP's module views as FILE.view),
+# converted in mode :full (.tmp/repr-haskell/forms/CORPUS-full/PKG/), printed in the full layout
+# (.tmp/repr-haskell/cand-text/CORPUS/PKG/), each printed module compared byte for byte with its
+# original (a CPP module: its module view), then GHC's trees in mode :full (hsdump tree --full:
+# showAstData NoBlankSrcSpan NoBlankEpAnnotations, comments kept) and lines of both
+# (.tmp/repr-haskell/trees-full/CORPUS/{orig,cand}/PKG/)
+text_level() {
+  local c=$1 only=$2
+  local dumps=$rh/dumps/$c-full forms=$rh/forms/$c-full cand=$rh/cand-text/$c trees=$rh/trees-full/$c t0 t1 t2 t3 t4
+  t0=$(date +%s)
+  echo "== repr-haskell roundtrip $c: text level: dump (--full)" >&2
+  dump_corpus "$c" "$dumps" --full
+  t1=$(date +%s)
+  echo "== repr-haskell roundtrip $c: text level: convert (mode :full; $((t1 - t0)) s dumping)" >&2
+  rm -rf "$forms"; mkdir -p "$(dirname "$forms")"
+  read_files --jobs "$jobs" -o "$forms" --report "$forms.report.edn" --root "$dumps" ${only:+--only "$only"} > "$forms.log" 2>&1 ||
+    { grep -v '^error' "$forms.log" | tail -5 >&2; grep -c '^error' "$forms.log" | sed 's/$/ modules failed to convert (see the report)/' >&2; }
+  t2=$(date +%s)
+  echo "== repr-haskell roundtrip $c: text level: print (the full layout; $((t2 - t1)) s converting)" >&2
+  rm -rf "$cand"; mkdir -p "$(dirname "$cand")"
+  arbace_tool -m arbace.repr.haskell print --jobs "$jobs" -o "$cand" --root "$forms" > "$cand.print.log" 2>&1 ||
+    grep -v '^error' "$cand.print.log" | tail -3 >&2
+  t3=$(date +%s)
+  echo "== repr-haskell roundtrip $c: text level: trees in mode :full ($((t3 - t2)) s printing)" >&2
+  rm -rf "$trees"; mkdir -p "$trees/orig" "$trees/cand"
+  local name dir flags files
+  while IFS=$'\t' read -r name dir flags files; do
+    [ -n "$files" ] || continue
+    # shellcheck disable=SC2086
+    (cd "$srcroot/$dir" && printf '%s\n' $files | xargs -P "$jobs" -n 8 \
+      "$helper" tree --full -o "$trees/orig/$name" --libdir "$libdir" --ghc $flags --files) 2> "$trees/orig/$name.err" || true
+    if [ -d "$cand/$name" ]; then
+      # shellcheck disable=SC2086
+      (cd "$cand/$name" && printf '%s\n' $files | while read -r f; do [ -f "$f" ] && echo "$f"; done |
+        xargs -r -P "$jobs" -n 8 "$helper" tree --full -o "$trees/cand/$name" --libdir "$libdir" --ghc $flags --files) \
+        2> "$trees/cand/$name.err" || true
+    fi
+  done < <(corpus_plan "$c" modules)
+  t4=$(date +%s)
+  echo "== repr-haskell roundtrip $c: text level: compare ($((t4 - t3)) s parsing)" >&2
+  arbace_tool -m arbace.repr.haskell compare-text --corpus "$(corpus_file "$c")" --src "$srcroot" --views "$dumps" \
+    --cand "$cand" --trees "$trees" --forms-report "$forms.report.edn" \
+    --known "$root/test/haskell/roundtrip-$c-text-known.edn" --report "$cand.report.edn" ${only:+--only "$only"} \
+    --times "dump $((t1 - t0)) convert $((t2 - t1)) print $((t3 - t2)) parse $((t4 - t3))"
 }
 
 # tree_level CORPUS ONLY: the tree level (SPEC §9.2): dump, convert, print into .tmp/repr-haskell/
@@ -381,6 +449,10 @@ case $cmd in
     esac ;;
   dump)
     ghc_check; build
+    if [ "${1:-}" = --full ] && [ "${2:-}" = --corpus ]; then
+      c=${3:-ghc-9.14.1}; corpus_fetch "$c"; dump_corpus "$c" "$rh/dumps/$c-full" --full
+      cat "$rh/dumps/$c-full"/*.err >&2; exit 0
+    fi
     if [ "${1:-}" = --corpus ]; then
       c=${2:-ghc-9.14.1}; corpus_fetch "$c"; dump_corpus "$c" "$rh/dumps/$c"
       cat "$rh/dumps/$c"/*.err >&2; exit 0
@@ -396,13 +468,15 @@ case $cmd in
     done
     hsdump dump $full -o "$out" --ghc "${gflags[@]}" --files "${files[@]}" ;;
   read)
+    full=""
+    if [ "${1:-}" = --full ] && [ "${2:-}" = --corpus ]; then full=--full; shift; fi
     if [ "${1:-}" = --corpus ]; then
       shift; c=${1:-ghc-9.14.1}
       ghc_check; build; corpus_fetch "$c"
-      dump_corpus "$c" "$rh/dumps/$c"
-      out=$rh/forms/$c
+      dump_corpus "$c" "$rh/dumps/$c${full:+-full}" $full
+      out=$rh/forms/$c${full:+-full}
       rm -rf "$out"
-      read_files --jobs "$jobs" -o "$out" --report "$out.report.edn" --root "$rh/dumps/$c"
+      read_files --jobs "$jobs" -o "$out" --report "$out.report.edn" --root "$rh/dumps/$c${full:+-full}"
     else
       read_files --jobs "$jobs" "$@"
     fi ;;

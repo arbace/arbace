@@ -1,0 +1,360 @@
+(ns arbace.go.check.const
+  "goi's checker: constant values (doc/go/GOI-SPEC.md §3.5), with go/constant's semantics.
+
+  A value's representation follows the kind of its type, as the checker carries the type
+  beside it (the operand's :type):
+
+  - booleans: true, false;
+  - strings: a String whose chars are the Go string's bytes (each 0-255, ISO-8859-1), so that
+    equality, order, concatenation and length are Go's byte-wise ones;
+  - integers (typed integer types, untyped int and rune): Long or BigInt;
+  - floats (typed floats, untyped float): an exact rational (Long, BigInt, Ratio) while
+    numerator and denominator stay below go/constant's maxExp (4096 bits), else a binary float
+    [:bf M E] (M·2^E, |M| odd below 2^512), as go/constant switches from big.Rat to big.Float
+    (prec 512); typed floats hold the rounded value, exactly;
+  - complex: [:c RE IM], each part a float as above;
+  - :unknown, the value of an operation that overflowed (go/constant's Unknown).")
+
+;;; Integers
+
+(defn bi
+  "x as a BigInteger."
+  ^BigInteger [x]
+  (cond
+    (instance? BigInteger x) x
+    (or (instance? Long x) (instance? Integer x) (instance? Short x) (instance? Byte x)) (BigInteger/valueOf (long x))
+    (instance? arbace.lang.BigInt x) (biginteger x)
+    :else (throw (ex-info (str "not an integer value: " (pr-str x) " " (class x)) {:x x}))))
+
+(defn norm-int
+  "A BigInteger as a Long when it fits, else a BigInt."
+  [^BigInteger b]
+  (if (< (.bitLength b) 64) (.longValue b) (bigint b)))
+
+(defn bit-len
+  "go/constant's BitLen of an integer: the bit length of its absolute value."
+  ^long [x]
+  (long (.bitLength (.abs (bi x)))))
+
+(def ^:private two (BigInteger/valueOf 2))
+
+(defn pow2 ^BigInteger [n] (.shiftLeft BigInteger/ONE (int n)))
+
+;;; Binary floats (big.Float, prec 512, ToNearestEven)
+
+(def prec 512)
+(def max-exp 4096)
+
+(defn bf? [x] (and (vector? x) (= :bf (nth x 0))))
+
+(defn- round-int
+  "Rounds the integer m (with sticky: any nonzero bits below it already dropped) to p bits,
+  to nearest even: [m' e'] with value m'·2^e' approximating m (the exponent offset e')."
+  [^BigInteger m sticky p]
+  (let [n (.bitLength (.abs m))]
+    (if (<= n p)
+      [m 0]
+      (let [sh (- n p)
+            neg (neg? (.signum m))
+            a (.abs m)
+            q (.shiftRight a (int sh))
+            half-bit (.testBit a (int (dec sh)))
+            below (or sticky (and (> sh 1) (< (.getLowestSetBit a) (dec sh))))
+            up (and half-bit (or below (.testBit q 0)))
+            q (if up (.add q BigInteger/ONE) q)
+            [q sh] (if (> (.bitLength q) p) [(.shiftRight q 1) (inc sh)] [q sh])]
+        [(if neg (.negate q) q) sh]))))
+
+(defn- bf-norm
+  "M·2^E rounded to prec bits, as [:bf M E] with M odd, or 0."
+  ([m e] (bf-norm m e false))
+  ([^BigInteger m e sticky]
+   (if (zero? (.signum m))
+     0
+     (let [[^BigInteger m sh] (round-int m sticky prec)
+           e (+ (long e) (long sh))
+           z (.getLowestSetBit m)]
+       [:bf (.shiftRight m (int z)) (+ e z)]))))
+
+(defn- rat-num-den [r]
+  (if (ratio? r) [(bi (numerator r)) (bi (denominator r))] [(bi r) BigInteger/ONE]))
+
+(defn rat->bf
+  "An exact rational rounded to a binary float of prec bits."
+  [r]
+  (let [[^BigInteger p ^BigInteger q] (rat-num-den r)]
+    (if (zero? (.signum p))
+      0
+      (let [k (+ prec 2 (- (.bitLength q) (.bitLength (.abs p))))
+            k (max k 0)
+            dr (.divideAndRemainder (.shiftLeft p (int k)) q)]
+        (bf-norm (aget dr 0) (- k) (not (zero? (.signum ^BigInteger (aget dr 1)))))))))
+
+(defn bf->rat
+  "The exact rational of a binary float (its integer may be huge)."
+  [[_ ^BigInteger m e]]
+  (let [e (long e)]
+    (if (neg? e)
+      (/ (bigint m) (bigint (pow2 (- e))))
+      (bigint (.shiftLeft m (int e))))))
+
+(defn- small-int? [x] (< (bit-len x) max-exp))
+
+(defn make-rat
+  "go/constant's makeRat: the rational r, or a binary float when its parts are too large."
+  [r]
+  (if (ratio? r)
+    (if (and (small-int? (numerator r)) (small-int? (denominator r))) r (rat->bf r))
+    (if (small-int? r) r (rat->bf r))))
+
+(defn bf-exp
+  "go/constant's MantExp of a binary float: the exponent e with 0.5 <= |x|/2^e < 1."
+  ^long [[_ ^BigInteger m e]]
+  (+ (long e) (.bitLength (.abs m))))
+
+(defn- to-bf [x] (if (bf? x) x (rat->bf x)))
+
+(defn- bf-sign ^long [x] (if (bf? x) (long (.signum ^BigInteger (nth x 1))) (long (compare x 0))))
+
+(defn- bf-add [x y]
+  (let [[_ ^BigInteger m1 e1] (to-bf x) [_ ^BigInteger m2 e2] (to-bf y)]
+    (cond
+      (= 0 x) (to-bf y)
+      (= 0 y) (to-bf x)
+      :else
+      (let [e1 (long e1) e2 (long e2)
+            [hi-m hi-e lo-m lo-e] (if (>= (+ e1 (.bitLength (.abs m1))) (+ e2 (.bitLength (.abs m2))))
+                                    [m1 e1 m2 e2] [m2 e2 m1 e1])
+            ^BigInteger hi-m hi-m ^BigInteger lo-m lo-m
+            hi-top (+ (long hi-e) (.bitLength (.abs hi-m)))
+            lo-top (+ (long lo-e) (.bitLength (.abs lo-m)))]
+        (if (> (- hi-top lo-top) (+ prec 8))
+          ;; the smaller is below half an ulp of the larger: the sum rounds to the larger (exact)
+          (bf-norm hi-m hi-e)
+          (let [e (min e1 e2)
+                s (.add (.shiftLeft m1 (int (- e1 e))) (.shiftLeft m2 (int (- e2 e))))]
+            (bf-norm s e)))))))
+
+(defn- bf-neg [x] (if (bf? x) [:bf (.negate ^BigInteger (nth x 1)) (nth x 2)] (- x)))
+
+(defn- bf-mul [x y]
+  (if (or (= 0 x) (= 0 y))
+    0
+    (let [[_ ^BigInteger m1 e1] (to-bf x) [_ ^BigInteger m2 e2] (to-bf y)]
+      (bf-norm (.multiply m1 m2) (+ (long e1) (long e2))))))
+
+(defn- bf-quo [x y]
+  (if (= 0 x)
+    0
+    (let [[_ ^BigInteger m1 e1] (to-bf x) [_ ^BigInteger m2 e2] (to-bf y)
+          k (max 0 (+ prec 2 (- (.bitLength (.abs m2)) (.bitLength (.abs m1)))))
+          dr (.divideAndRemainder (.shiftLeft m1 (int k)) m2)]
+      (bf-norm (aget dr 0) (- (long e1) (long e2) k) (not (zero? (.signum ^BigInteger (aget dr 1))))))))
+
+(defn- bf-cmp
+  "Compares two floats of which at least one is a binary float."
+  ^long [x y]
+  (bf-sign (bf-add x (bf-neg y))))
+
+;;; Floats: rationals and binary floats
+
+(defn float-val
+  "go/constant's ToFloat of an integer or float value."
+  [x]
+  (cond
+    (bf? x) x
+    (integer? x) (make-rat x)
+    :else x))
+
+(defn fadd [x y] (if (or (bf? x) (bf? y)) (bf-add x y) (make-rat (+ x y))))
+(defn fsub [x y] (if (or (bf? x) (bf? y)) (bf-add x (bf-neg y)) (make-rat (- x y))))
+(defn fmul [x y] (if (or (bf? x) (bf? y)) (bf-mul x y) (make-rat (* x y))))
+(defn fquo [x y] (if (or (bf? x) (bf? y)) (bf-quo x y) (make-rat (/ x y))))
+(defn fneg [x] (bf-neg x))
+(defn fsign ^long [x] (bf-sign x))
+(defn fcmp ^long [x y] (if (or (bf? x) (bf? y)) (bf-cmp x y) (long (compare x y))))
+(defn fzero? [x] (zero? (fsign x)))
+
+(defn int-val
+  "go/constant's ToInt of a float value: the integer when the value is integral, else nil.
+  A binary float within the rational range is integral when exact or when rounding it down or
+  up a little (to prec - 4 bits) gives an integer, as go/constant assumes rounding errors."
+  [x]
+  (cond
+    (integer? x) x
+    (ratio? x) nil
+    (bf? x)
+    (let [e (bf-exp x)]
+      (when (< (- max-exp) e max-exp)
+        (let [[_ ^BigInteger m ee] x
+              ee (long ee)]
+          (if (>= ee 0)
+            (norm-int (.shiftLeft m (int ee)))
+            ;; m is odd: not integral for ee < 0; try rounding to prec - 4 bits
+            (let [p (- prec 4)
+                  n (.bitLength (.abs m))
+                  try-round (fn [up?]
+                              (if (<= n p)
+                                nil
+                                (let [sh (- n p)
+                                      a (.abs m)
+                                      q (.shiftRight a (int sh))
+                                      q (if up? (.add q BigInteger/ONE) q)
+                                      ve (+ ee sh)]
+                                  (when (>= ve 0)
+                                    (let [v (.shiftLeft q (int ve))]
+                                      (norm-int (if (neg? (.signum m)) (.negate v) v)))))))]
+              (or (try-round false) (try-round true)))))))
+    :else nil))
+
+;;; Rounding to float32 and float64
+
+(defn- round-binary
+  "The exact rational nearest (ties to even) to x among the binary floats of mbits bits of
+  mantissa and minimum normal exponent emin (float64: 53, -1022; float32: 24, -126), or nil
+  when it overflows to infinity (beyond emax)."
+  [x mbits emin emax]
+  (let [r (if (bf? x) (bf->rat x) x)
+        [^BigInteger p ^BigInteger q] (rat-num-den r)]
+    (if (zero? (.signum p))
+      0
+      (let [neg (neg? (.signum p))
+            p (.abs p)
+            ;; e: 2^e <= p/q < 2^(e+1)
+            e0 (- (.bitLength p) (.bitLength q))
+            e (if (>= e0 0)
+                (if (neg? (.compareTo p (.shiftLeft q (int e0)))) (dec e0) e0)
+                (if (neg? (.compareTo (.shiftLeft p (int (- e0))) q)) (dec e0) e0))
+            ;; the quantum: 2^(qe), qe = max(e, emin) - (mbits - 1)
+            qe (- (max e emin) (dec mbits))
+            ;; m = round(p/q / 2^qe)
+            [num den] (if (neg? qe) [(.shiftLeft p (int (- qe))) q] [p (.shiftLeft q (int qe))])
+            dr (.divideAndRemainder ^BigInteger num ^BigInteger den)
+            m (aget dr 0) rm (aget dr 1)
+            c (.compareTo (.shiftLeft ^BigInteger rm 1) ^BigInteger den)
+            m (if (or (pos? c) (and (zero? c) (.testBit ^BigInteger m 0))) (.add ^BigInteger m BigInteger/ONE) m)
+            ;; m may have reached 2^mbits: still representable with the next exponent
+            top (+ qe (.bitLength ^BigInteger m) -1)]
+        (if (> top emax)
+          nil
+          (let [v (if (neg? qe)
+                    (/ (bigint m) (bigint (pow2 (- qe))))
+                    (bigint (.shiftLeft ^BigInteger m (int qe))))
+                v (if (ratio? v) v (norm-int (bi v)))]
+            (if neg (- v) v)))))))
+
+(defn round64 [x] (round-binary x 53 -1022 1023))
+(defn round32 [x] (round-binary x 24 -126 127))
+
+(defn exact-of-double
+  "The exact rational value of a finite double."
+  [^double d]
+  (if (zero? d)
+    0
+    (let [bits (Double/doubleToRawLongBits d)
+          neg (neg? bits)
+          ex (bit-and (bit-shift-right bits 52) 0x7ff)
+          frac (bit-and bits 0xfffffffffffff)
+          [m e] (if (zero? ex) [frac -1074] [(bit-or frac (bit-shift-left 1 52)) (- ex 1075)])
+          v (if (neg? e) (/ (bigint m) (bigint (pow2 (- e)))) (bigint (.shiftLeft (bi m) (int e))))
+          v (if (ratio? v) v (norm-int (bi v)))]
+      (if neg (- v) v))))
+
+(defn to-double
+  "The double nearest to a float value (infinite beyond the range)."
+  ^double [x]
+  (let [r (round64 x)]
+    (cond
+      (nil? r) (if (pos? (fsign x)) Double/POSITIVE_INFINITY Double/NEGATIVE_INFINITY)
+      (ratio? r) (.doubleValue ^BigDecimal (with-precision 40 (/ (bigdec (numerator r)) (bigdec (denominator r)))))
+      :else (double r))))
+
+;;; Literals and strings
+
+(defn latin1
+  "Go string bytes as a value (a String of byte chars)."
+  ^String [^bytes bs]
+  (String. bs java.nio.charset.StandardCharsets/ISO_8859_1))
+
+(defn utf8-value
+  "The value of a Go string that is the UTF-8 encoding of the String s."
+  ^String [^String s]
+  (latin1 (.getBytes s java.nio.charset.StandardCharsets/UTF_8)))
+
+(defn value-bytes ^bytes [^String v] (.getBytes v java.nio.charset.StandardCharsets/ISO_8859_1))
+
+(defn value-text
+  "A string value decoded as UTF-8 (invalid bytes as U+FFFD), for messages."
+  ^String [^String v]
+  (String. (value-bytes v) java.nio.charset.StandardCharsets/UTF_8))
+
+(defn rune-string
+  "string(r) of an integer r: its UTF-8 encoding, U+FFFD when not a valid code point."
+  ^String [r]
+  (let [r (if (and (instance? Long r) (<= 0 (long r) 0x10FFFF) (not (<= 0xD800 (long r) 0xDFFF)))
+            (long r) 0xFFFD)]
+    (utf8-value (String. (Character/toChars (int r))))))
+
+(defn- rnd
+  "m·2^e rounded to p bits (nearest even; sticky: nonzero bits dropped below m): [m' e']."
+  [^BigInteger m e p sticky]
+  (let [[m2 sh] (round-int m sticky p)] [m2 (+ (long e) (long sh))]))
+
+(defn- pmul [[^BigInteger m1 e1] [^BigInteger m2 e2] p] (rnd (.multiply m1 m2) (+ (long e1) (long e2)) p false))
+
+(defn- pquo [[^BigInteger m1 e1] [^BigInteger m2 e2] p]
+  (let [k (max 0 (+ p 2 (- (.bitLength (.abs m2)) (.bitLength (.abs m1)))))
+        dr (.divideAndRemainder (.shiftLeft m1 (int k)) m2)]
+    (rnd (aget dr 0) (- (long e1) (long e2) k) p (not (zero? (.signum ^BigInteger (aget dr 1)))))))
+
+(def ^:private five27 (.pow (BigInteger/valueOf 5) 27))
+
+(defn- pow5
+  "math/big's pow5: 5^n at precision prec (its multiplications rounded as big.Float's)."
+  [n prec]
+  (if (<= n 27)
+    [(.pow (BigInteger/valueOf 5) (int n)) 0]
+    (loop [z [five27 0] f [(BigInteger/valueOf 5) 0] n (- n 27)]
+      (if (zero? n)
+        z
+        (recur (if (odd? n) (pmul z f prec) z) (pmul f f (+ prec 64)) (quot n 2))))))
+
+(defn- big-float-decimal
+  "big.Float's SetString of a decimal D·10^k at precision 512 (math/big floatconv.go: the
+  mantissa exact, times 2^k, times or divided by 5^|k| computed at prec + 64 bits)."
+  [^BigInteger d k]
+  (let [p (pow5 (Math/abs (long k)) (+ prec 64))
+        [m e] (if (neg? k) (pquo [d k] p prec) (pmul [d k] p prec))]
+    (bf-norm m e)))
+
+(defn decimal-exact
+  "The value of a decimal literal (a BigDecimal): exact as a rational, or, beyond go/constant's
+  rational range, the binary float go/constant makes of it (big.Float's SetString)."
+  [^BigDecimal d]
+  (let [unscaled (.unscaledValue d)
+        scale (.scale d)
+        ;; the magnitude in bits, roughly
+        mag (- (* (- (.precision d) scale) 3.3219280948873626))]
+    (if (> (Math/abs (double mag)) (+ max-exp 64))
+      (if (zero? (.signum unscaled))
+        0
+        (big-float-decimal unscaled (- scale)))
+      (make-rat (rationalize d)))))
+
+(defn double-literal
+  "The exact value a Clojure double denotes in Go forms: its shortest text's decimal value."
+  [^double d]
+  (decimal-exact (BigDecimal. (Double/toString d))))
+
+(defn binary-float
+  "(binary-float M E) as a value."
+  [m e]
+  (bf-norm (bi m) (long e)))
+
+;;; Complex
+
+(defn complex? [x] (and (vector? x) (= :c (nth x 0))))
+(defn cplx [re im] [:c re im])
+(defn re-part [x] (if (complex? x) (nth x 1) x))
+(defn im-part [x] (if (complex? x) (nth x 2) 0))
+(defn complex-val [x] (if (complex? x) x [:c (float-val x) 0]))
