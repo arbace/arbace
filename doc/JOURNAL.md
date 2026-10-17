@@ -844,3 +844,13 @@ image, a page table per process, the text shared: about 3.5 MB plus heap and sta
 isolation inside processes, S7's guests where virtualization exists, behind one spawn request;
 the system calls the doorbell's call block by SYSCALL/SVC; the compilers and the REPL outside
 the kernel. Plan KU0-KU6, 17 to 27 days, no patch to Go's runtime. Proposals K1-K12, open.
+
+## 2026-10-17: repr/haskell R2 merged; the box's kernel/user split decided
+
+R2 (branch `repr-haskell-r2`, `530969d`): the interface level, each package built at `-O1` from
+the originals and from the printed modules in place, `ghc --show-iface` compared token by token:
+483 of 483 modules equal (1,072,106 lines), after the normalizations HR6 adopted into SPEC §9.3
+(fingerprints blanked, SrcLoc columns through `$WSrcLoc`, CPP's `addDependentFile` dropped, tokens
+not lines); HR7 (`-O1`) and HR8 (one build per side) as recommended; its `--full` step about 3.5
+minutes. The kernel/user survey's K1-K12 decided as recommended (doc/go/KERNEL-USER-SURVEY.md,
+"Decided"); KU0, its spec, started now (the user, against "after goi").

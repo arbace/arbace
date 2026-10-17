@@ -958,3 +958,14 @@ Results: §3.2 and §5.1. Two pitfalls from the run:
 
 The host's `getpid` figure came from a linux/amd64 program built with the same toolchain
 (`RawSyscall(SYS_GETPID)` and `syscall.Getpid`, 2·10⁶ calls, three rounds).
+
+## Decided (2026-10-17, the user)
+
+K1-K12 as recommended: a TamaGo runtime per process at EL0 (b1, the same image, a page table
+per process, text shared), language isolation inside processes (K1, K3); the doorbell's call
+block by SYSCALL/SVC (K2); bytes and handles across, never shared heap objects (K4); the
+compilers and the REPL outside the kernel (K5); one spawn request, guest or process (K6); faults:
+a nil dereference the process's panic, others end the process (K7); vCPUs per process first,
+timer preemption at KU6 (K8); the plan KU0-KU6, amd64 first (K9); the experiment ported to arm64
+and run on the Mac (K10); Arbace as hypervisor not now (K11); a capability evaluator later (K12).
+KU0, the spec, now.

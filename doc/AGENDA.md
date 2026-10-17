@@ -111,7 +111,8 @@ The current state of the work. This file is rewritten as things change. For the 
   tests per configuration, every level; D1-D3 decided, in `bin/gate --full`). Done: F2 (`bin/diffcheck`, 12,449 of 12,471 cases agree; F2.1-F2.6 decided).
 - `repr/haskell`'s spec written (doc/haskell/SPEC.md; S1-S36; HS1-HS12 decided as recommended).
   R1 done (2026-10-17: the tree and lines levels over GHC 9.14.1's base libraries, 483 of 483
-  modules; HR1-HR5); next R2-R6 (the text level, interfaces, the rest of the corpus). Running:
+  modules; HR1-HR5); R2 done (the interface level, 483 of 483; HR6-HR8); next R3-R6 (`:full` and the text
+  level, the layout printer, the other boot libraries, .hsc/.lhs/boot files). Running:
   `repr/java print` (Java forms → Java,
   with a round trip; branch `repr-java-print`).
 - After the rename (the user, 2026-10-17: "Create jaf print after the naming debate settled"):
@@ -150,7 +151,7 @@ The current state of the work. This file is rewritten as things change. For the 
   2026-10-17): recommended a TamaGo runtime per process at EL0 (the same image, a page table per
   process), language isolation inside processes, S7's guests where virtualization exists, one
   spawn request; SYSCALL round trip 24.5 ns measured at ring 3; plan KU0-KU6, 17-27 days;
-  proposals K1-K12 open.
+  K1-K12 decided as recommended; running: KU0, the spec.
 - The mapped start measured without nested KVM.
 - A note from the user (2026-10-13): the tooling of the Mac GUI app Moshi Go may be useful for
   Arbace, to study when Arbace's REPL gets a user interface beyond the terminal. Its build info
