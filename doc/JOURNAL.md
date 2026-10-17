@@ -970,3 +970,19 @@ collided); and `bin/box-rebuild` and `bin/box-mac-bundle` now refuse stale execu
 `fresh-guard`, `0c9bb6e`, merged: `bin/lib/fresh.bash` reads each executable's version from its
 bytes, the guest's image key checked against the last build's program, `host.verified` written
 by a verified host step; `ARBACE_BOX_STALE_OK=1` to override).
+
+## 2026-10-17: repr/rust's spec
+
+As decided (RS16 (b): the spec now), doc/rust/SPEC.md (from the branch `repr-rust-spec`,
+`cb30218`), with test/rust/ (291 reader samples, a census script, a forms reader, the worked
+example `shapes.rs`/`shapes.ae`). Key respellings: `std::io::Write` as `std.io/Write`, a leading
+`::` as `(:global ...)`, `::<>` as `(:turbofish ...)`, every `:` as `(:has ...)`, braces as
+`(:braces ...)`, attributes as `(:attr ...)` forms before what they attach to, doc comments as
+data, token trees as `(:tt "source text")`, `^` `bit-xor`, `/=` `div=`, `@` `:at`; lifetimes `'a`
+(read as `(quote a)`, so `quote` a reserved head); literals keep their tokens (a Clojure literal or
+value form where the printer's spelling reproduces the token, `(:lit "text" suffix)` otherwise).
+Checked: over std's five crates (1,074 files, the survey's helper) all 394,759 identifiers bare,
+all 27,945 multi-segment paths read back as `ns/name` but one, 78.3% of 33,174 literals plain
+Clojure literals; rustdoc's JSON of `core` with `option.rs` reprinted equal to the original's once
+spans are removed (the interface level). Decisions S1-S34; proposals RSS1-RSS10, open; the build
+in milestones RR1-RR6.
