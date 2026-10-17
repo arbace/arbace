@@ -101,8 +101,10 @@ The current state of the work. This file is rewritten as things change. For the 
   The seed remade (`56fabe20…`) and verified; R4 done (`tamago/` converted again, the guests
   identical). Done: repr/go's directory tests (`bin/repr-go roundtrip --dirs [--text]`, 251 to 254
   tests per configuration, every level; D1-D3 decided, in `bin/gate --full`). Running: F2.
-- `repr/haskell`'s spec written (doc/haskell/SPEC.md; S1-S36; HS1-HS12 decided as recommended):
-  its build after F2, milestones R1-R6 (the tree and text levels over `base` first).
+- `repr/haskell`'s spec written (doc/haskell/SPEC.md; S1-S36; HS1-HS12 decided as recommended).
+  Running beside F2 (the user, 2026-10-17): its milestone R1 (`tools/hsdump`, the converter, the
+  tree level over `base`; branch `repr-haskell-r1`), and `repr/java print` (Java forms → Java,
+  with a round trip; branch `repr-java-print`).
 - After the rename (the user, 2026-10-17: "Create jaf print after the naming debate settled"):
   `repr/java print`, Java's bridge printing back, class forms → Java source, with a round trip like
   repr/go's (Java → forms → Java → forms, the two forms equal; the text level as repr/go's
