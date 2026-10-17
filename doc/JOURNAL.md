@@ -1054,3 +1054,20 @@ the session's rules; it kept to them after being reminded. A second diffcheck fa
 on its branch: j2g's generated Go for `jf_cfcorpus_c57/defclass_corpus_c114` called
 `PB_1_New_PB` with the wrong arity (the anonymous class with constructor arguments of F2.2), not
 reproduced on rerun: with c50's, a sign of nondeterminism in j2g, to investigate.
+
+## 2026-10-17: repr/rust RR1
+
+On the branch `repr-rust-rr1` (`514b8aa`), merged into main; details in doc/rust/RUST-NOTES.md and
+doc/rust/SPEC.md §12.4. The helper `tools/rsdump/rsdump.rs` (verbs dump, tree, lines; §10.3's
+facts) refuses any rustc but the pinned 1.99.1 build, commit and driver hash; it links against
+Alpine's `rustc-dev` apk through a sysroot of links under `.tmp/repr-rust/`, the `rustc-dev` and
+`rust-src` apks fetched by `bin/repr-rust corpus fetch` (by name, the file checked against the
+pin and its SHA-256; `REPR_RUST_APKS` a local cache), never installed. The converter, printer and
+writer in Arbace (`arbace/repr/rust{.ae,/}`, kept out of the executable); `bin/repr-rust`
+(helper, corpus, dump, read, print, roundtrip, test); the corpus file pinning std's five crates.
+Over the 1,074 files: rustc's tree and every span's start line equal for all (1,660,638 spans),
+no known differences, about 45 s; macro calls 6,626 as forms and 1,316 as `(:tt ...)`. In `bin/gate
+--full` (a step of its own, 48 s). Tested from a fresh worktree with an empty `.tmp/`: the apks
+fetched in 8 s, the round trip and the tests passing. Decided by the user, as recommended:
+RR-P1 (plain comments at RR3, from the lexer), RR-P2 and RR-P3 (the as-built `:lines` keys and
+named format arguments adopted into the spec).
