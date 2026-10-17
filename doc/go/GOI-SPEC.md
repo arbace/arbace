@@ -1761,16 +1761,19 @@ executables of `bin/arbace-go --build`:
 | | bytes |
 |---|---:|
 | the executable before GR1 (main `73e35434`, = stage 0 of seed `cf89f8a8`) | 104,845,472 |
-| the executable after GR1 (`bin/arbace-go --build`) | 110,555,296 (+5,709,824, 5.4%) |
+| the executable after GR1, before GC14 (the generator `arbace.go.table` embedded and compiled) | 110,555,296 (+5,709,824) |
 | of which the table, all invokers (the first build: one per signature, 763) | 4,247,552 |
 | of which the invokers in it | 1,630,208 |
-| the table with `:min-sharing 2` (233 invokers), as built | 3,477,504 |
+| the table with `:min-sharing 2` (233 invokers), before GC14 | 3,477,504 |
 | of which the invokers in it | 860,160 |
-| goi, GoInterp's classes, `arbace.go` and `arbace.go.table` compiled (the executable without the table, but for its image) | 2,232,320 |
+| **the executable as built, since GC14** (the generator and the checker not embedded: they run on the tools' host) | **108,822,688 (+3,977,216, 3.8%)** |
+| of which the table (235 invokers) | 3,485,696 |
+| of which the invokers in it | 864,256 |
+| goi, GoInterp's classes and `arbace.go` (the executable without the table, but for its image) | 491,520 |
 
 The invokers of every signature cost 1.63 MB, above GS4's 1 MB: so GS4 (b), the threshold
 variant, as decided: a typed invoker for each signature at least two members share (in one
-configuration), 233 of 782; the other members (most of them methods of one type) are called by
+configuration), 235 of 782 (233 before GC14); the other members (most of them methods of one type) are called by
 `reflect.Value.Call`. The thresholds measured with linux/amd64's table alone: shared by 2, 231
 invokers, 856,064 bytes (860,160 as built, the four configurations' table); by 3, 121, 667,648 bytes; by 5, 54, 512,000 bytes. The table's members without the
 invokers cost 2.6 MB: the program links most of the listed packages already, but not every
