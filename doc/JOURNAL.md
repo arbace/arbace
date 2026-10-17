@@ -800,3 +800,7 @@ ns through a typed invoker (38 direct); `sort.Slice` of 1e5 550 ms with a `MakeF
 ms with a typed adapter (11.1 native); a table of 35 listed packages' 1,081 functions and
 variables at most 3.9 MB. Milestones GR1-GR6, 24 to 34 days; decisions S1-S55; proposals
 GS1-GS15, open.
+
+## 2026-10-17: goi's GS1-GS15 decided (the user)
+
+All as recommended (doc/go/GOI-SPEC.md, "Decided"). GR1-GR6 after the coming re-seed.

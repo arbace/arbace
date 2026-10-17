@@ -1719,3 +1719,15 @@ body := Seq(
 `ConvI32toI64` is the identity on a normalized `I` (an `int32` held sign-extended is already its
 `int64` value), so the builder drops it; `IncI32` normalizes. These are the survey's typed-closure sketch's nodes (its Appendix A), which ran
 `sumSq 1e6` in 22 ms (survey §5.6) against Arbace's Java forms interpreter's 95-127 ms.
+
+## Decided (2026-10-17, the user)
+
+GS1-GS15 as recommended: compiled packages' namespaces `require`d (GS1); explicit imports,
+auto-import reconsidered after GR5 (GS2); `go/eval`'s locals local (GS3); an invoker per listed
+signature unless GR1 measures them above 1 MB (GS4); the listed set grown by need, unlisted
+pure-Go packages interpreted from their forms (GS5); explicit `go/slice` and `go/map` copies
+(GS6); Go values read-only in Arbace's collection protocols at GR5 (GS7); the runtime overlay
+decided after GR6 (GS8); goi's own `%T` at GR5 if frequent (GS9); `(.M v)` interop through the
+table at GR5 (GS10); `GoPanic` with jrt's exception as cause (GS11); an essential-gate subset if
+minutes (GS12); the check in the box after GR4 (GS13); `go:embed` after GR5 (GS14); interpreted
+Go writing to the process's own stdout (GS15).
