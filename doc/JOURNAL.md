@@ -824,3 +824,23 @@ classes outside `arbace/` named `A_..._A`), abstract classes' constructors in th
 G1 = G2 = G3 on the branch. Decided by the user: F4.1 (a) the 82, F4.2 (a) re-measured with F3,
 F4.3 (a) a deviation recorded in J2G-SPEC §6.2. The agent once used `pgrep -f` by pattern,
 read-only, while waiting on a build (against the session's rule; nothing was signalled).
+
+## 2026-10-17: the survey of a kernel and a user part in the box
+
+At the user's choice: doc/go/KERNEL-USER-SURVEY.md (from the branch `kernel-user-survey`,
+`91598b3`). Findings: today the guest cannot run below ring 0/EL1 (amd64: DPL 0 segments only,
+no U/S bit, no SYSCALL setup, every IDT gate ends the guest; arm64: every page EL1-only and UXN,
+TTBR1 off; TamaGo has no signals or asynchronous preemption). An experiment (a scratch TamaGo
+guest on the box's board, the monitor unchanged) dropped to ring 3 on nested KVM: SYSCALL and
+SYSRETQ 24.5 ns, INT 0x80 and IRETQ 102 ns, a CR3 switch 96-136 ns, against the doorbell's
+13-18 µs and a spawned tool guest's 84-170 ms; Go ran unchanged at ring 3 with every page
+user-accessible, until a GC assist ran the collector at ring 3 and failed to unwind at the
+crossing. One shared heap cannot give isolation (every allocation a system call, or a collector
+trusting user pointers, which is only safe for memory-safe user code, and then the hardware adds
+nothing). Prior art: GoTEE (`813dc65a`, read only) runs a whole second TamaGo runtime in ARM user
+mode, values crossing as JSON-RPC; TamaGo's `user/linux` runs a `GOOS=tamago` program as a Linux
+process with about five system calls. Recommended: a TamaGo runtime per process at EL0 (the same
+image, a page table per process, the text shared: about 3.5 MB plus heap and stacks), language
+isolation inside processes, S7's guests where virtualization exists, behind one spawn request;
+the system calls the doorbell's call block by SYSCALL/SVC; the compilers and the REPL outside
+the kernel. Plan KU0-KU6, 17 to 27 days, no patch to Go's runtime. Proposals K1-K12, open.
