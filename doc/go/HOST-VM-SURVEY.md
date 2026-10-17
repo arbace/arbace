@@ -73,7 +73,7 @@ what the host VM's design teaches.
 
   | what runs | peak memory |
   |---|---:|
-  | a2g on Go | 10.1 GB RSS |
+  | j2g on Go | 10.1 GB RSS |
   | gc compiling `jrt` | 7.1-8.0 GB |
   | the program's printing | 4.6 GB |
 
@@ -468,14 +468,14 @@ The memory needs of the tools are measured; the rest follows from §6 of
 
 | need of S5-S8 | measured or stated need | the box today | gap |
 |---|---|---|---|
-| **memory for a2g** (S8: the Go-hosted chain inside) | peak RSS 10.1 GB with 16 threads, 12.2 GB with 64, 9.6 GB sequential; live heap 1.1-1.6 GB; run with `GOGC=400 GOMEMLIMIT=12GiB` (STANDALONE-NOTES, "a2g in parallel", SA20) | 3 GiB slot, 2 GiB limit | the live heap fits, but only with a collector limit of about 2 GiB. Unmeasured: a2g at `GOMEMLIMIT=2GiB` may spend most of its time collecting (BX13's table: past the limit "the collector runs continuously") |
+| **memory for j2g** (S8: the Go-hosted chain inside) | peak RSS 10.1 GB with 16 threads, 12.2 GB with 64, 9.6 GB sequential; live heap 1.1-1.6 GB; run with `GOGC=400 GOMEMLIMIT=12GiB` (STANDALONE-NOTES, "j2g in parallel", SA20) | 3 GiB slot, 2 GiB limit | the live heap fits, but only with a collector limit of about 2 GiB. Unmeasured: j2g at `GOMEMLIMIT=2GiB` may spend most of its time collecting (BX13's table: past the limit "the collector runs continuously") |
 | **memory for gc** (S7: tool guests) | `jrt` 7.1 GB (`-c=1`) to 8.0 GB; `lang` 3.1-4.1 GB; the link 1.1 GB (STANDALONE-SURVEY §8.2) | 3 GiB per guest | S5's split is to bring each package under about 2.5 GB (D8 (a)); until then no guest compiles `jrt` |
-| **memory for printing** | the program's printing 4.6 GB; the round trip 13 GB (STANDALONE-NOTES, "Speed") | 3 GiB | the same question as a2g's |
+| **memory for printing** | the program's printing 4.6 GB; the round trip 13 GB (STANDALONE-NOTES, "Speed") | 3 GiB | the same question as j2g's |
 | **a writable file system for a build** | sources about 50 MB of forms; the printed Go 35 MB; gc's objects and cache per build (STANDALONE-SURVEY §6.4, R6); `tamago/` alone 32 MB | in-memory, in the heap of the same 3 GiB, empty at start; the store's blobs at most 256 MiB, read whole | trees in memory compete with the tool's heap; nothing reads on demand; outputs persist only by an explicit snapshot or put |
 | **a compiler toolchain inside** | `cmd/compile`, `cmd/link`, `cmd/asm` build for `GOOS=tamago` (36.7, 9.8 and 7.0 MB) but were never run in a guest (STANDALONE-SURVEY §8.1, R3) | no processes (D13), no spawn call | S7's tool guests (D9): the spawn call, its policy, a board `main` per tool, a build driver in Arbace |
-| **several guests at once** | gc compiles packages in parallel; a2g's 16 threads | 1-32 vCPUs per guest; no budget across guests | a budget in the monitor for memory and vCPUs across the tool guests it starts |
+| **several guests at once** | gc compiles packages in parallel; j2g's 16 threads | 1-32 vCPUs per guest; no budget across guests | a budget in the monitor for memory and vCPUs across the tool guests it starts |
 | **network for fetching** | `GOPROXY=off`; every input already pinned and local (ALPINE.md, "What apk does not provide") | none by default; a proxy with an allow-list | **none needed** if inputs reach the box through the store, imported by the host tool (D10) |
-| **time** | a Go-hosted build takes 4 min 47 s natively (a2g 258 s); in the box the evaluator runs at about 1.15-1.2 times native, plus nested exits | the wall clock at entry, the TSC after; no watchdog by default | adequate. A long run's drift is unmeasured beyond a minute, and file times are the epoch in snapshots anyway (BX35) |
+| **time** | a Go-hosted build takes 4 min 47 s natively (j2g 258 s); in the box the evaluator runs at about 1.15-1.2 times native, plus nested exits | the wall clock at entry, the TSC after; no watchdog by default | adequate. A long run's drift is unmeasured beyond a minute, and file times are the epoch in snapshots anyway (BX35) |
 | **entropy** | seeds, `SecureRandom`, TLS | `Random` | none |
 | **CPU features** | gc and the runtime run on SSE; AVX only speeds some code | no AVX (no XSAVE) | none required. Builds are byte-identical whatever the CPU (gc's output does not depend on the build host's features) *(inferred)* |
 | **surviving the host's reboot** | the host VM rebooted 15 times in 8 weeks | the store survives on ext4; a run does not | long runs must be resumable from the store (S7's action cache keyed by content hash) |
@@ -564,13 +564,13 @@ Not a design: the shape the proposals below add up to, if accepted.
 Numbered HV (a prefix not used in `doc/`). Each lists options with one *Recommended*.
 
 **Decided (the user, 2026-10-13): HV1-HV9 all accepted as recommended.** HV1's measurement
-(a2g natively under `GOMEMLIMIT=2GiB`) and HV6's (an hour's drift) come first; their results
+(j2g natively under `GOMEMLIMIT=2GiB`) and HV6's (an hour's drift) come first; their results
 are recorded below each.
 
-- **HV1 The guest's RAM beyond 3 GiB.** a2g's run (S8) needs a 1.1-1.6 GB live heap and has
+- **HV1 The guest's RAM beyond 3 GiB.** j2g's run (S8) needs a 1.1-1.6 GB live heap and has
   peaked at 10 GB under `GOMEMLIMIT=12GiB`. gc's `jrt` needs 7-8 GB until S5 splits it (D8).
   Options:
-  - (a) keep the 3 GiB slot and fit the tools to it: S5's split, and a2g and the printer run
+  - (a) keep the 3 GiB slot and fit the tools to it: S5's split, and j2g and the printer run
     under a 2 GiB collector limit;
   - (b) RAM above 4 GiB, the doorbell unchanged: the image linked and loaded above 4 GiB, the
     slot's size set by the launcher (or the spawn call). This needs an experiment first: a
@@ -579,12 +579,12 @@ are recorded below each.
   - (c) move the doorbell above RAM (STANDALONE-SURVEY D8 (b)), a change to the ABI shared
     with go-whim.
 
-  *Recommended: (a) measured first, (b) as the fallback.* Run a2g natively under
+  *Recommended: (a) measured first, (b) as the fallback.* Run j2g natively under
   `GOMEMLIMIT=2GiB` (one cheap run on the host) and record its time. If it is within about 1.5
-  times the 12 GiB run, the slot is enough for a2g and D8 stands as decided. Otherwise try (b),
+  times the 12 GiB run, the slot is enough for j2g and D8 stands as decided. Otherwise try (b),
   which keeps the doorbell and go-whim's guests as they are, before (c).
 
-  **Measured (2026-10-13), HV1's test:** `bin/a2g --program` natively on stage 0, sequential
+  **Measured (2026-10-13), HV1's test:** `bin/j2g --program` natively on stage 0, sequential
   runs, the host otherwise idle; all three outputs byte for byte the same (`diff -r`, the report's
   times aside):
 
@@ -594,7 +594,7 @@ are recorded below each.
   | `GOMEMLIMIT=2GiB`, 16 threads | 12m03s (3.0×) | 2.34 GB | 113 / 67 / 226 / 157 |
   | `GOMEMLIMIT=2GiB`, 4 threads (a box's vCPUs) | 25m55s (6.4×) | 2.32 GB | 113 / 66 / 800 / 496 |
 
-  a2g fits in the slot but the collector runs constantly in translate and write: beyond the
+  j2g fits in the slot but the collector runs constantly in translate and write: beyond the
   1.5× criterion, so by the user's decision HV1 goes to (b), RAM above 4 GiB with the doorbell
   unchanged, starting with its experiment (a TamaGo guest linked and loaded above 4 GiB on amd64;
   the IPA limits on KVM/arm64 and Hypervisor.framework). (Since done: BOX-NOTES "HV1 (b): RAM
@@ -715,6 +715,6 @@ are recorded below each.
   - `box/go/arbace/box/{abi/abi.ae,vmm/{layout,tamago,smp,seccomp_linux_amd64,dontneed_linux}.ae,hv/{kvm_linux_amd64,tsc_linux_amd64}.ae}`;
   - doc/go/BOX-SURVEY.md, doc/go/BOX-NOTES.md (S1-S6, the store, the network, wake on events,
     TLS, BX1-BX75);
-  - doc/STANDALONE-SURVEY.md (§6, §8, §9), doc/STANDALONE-NOTES.md ("Speed", "a2g in parallel"),
+  - doc/STANDALONE-SURVEY.md (§6, §8, §9), doc/STANDALONE-NOTES.md ("Speed", "j2g in parallel"),
     doc/ALPINE.md, doc/AGENDA.md, doc/JOURNAL.md (D8-D10; since 2026-10-15 the journal at the tag
     `arbace-inside-itself-v1`).

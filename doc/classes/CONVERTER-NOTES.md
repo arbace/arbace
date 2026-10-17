@@ -1,4 +1,4 @@
-# Java → class forms converter: implementation notes
+# Java → Java forms converter: implementation notes
 
 > Names: the converter is repr/java (`arbace/repr/java.ae`, `arbace/repr/java/`, `bin/repr-java`,
 > `bin/repr-java check`); from 2026-10-11 to 2026-10-17 it was j2a (`arbace/j2a/`, `bin/j2a`,
@@ -6,7 +6,7 @@
 > rules `arbace.j2c.rename`, since moved into c2a ([../C2A.md](../C2A.md)). This document uses
 > the current names, but where it records the derivation, replayed with the old ones.
 
-The converter of agenda step 3: it turns Java sources into the class forms of [SPEC.md](SPEC.md),
+The converter of agenda step 3: it turns Java sources into the Java forms of [SPEC.md](SPEC.md),
 making explicit what §7 lists. These notes say how it is built and used, what it was checked on,
 how its output compares with the spec's worked examples (§11), and where converting showed that
 the spec should change (amendments, accepted and folded into SPEC.md). The compiler side is in
@@ -24,11 +24,11 @@ the spec should change (amendments, accepted and folded into SPEC.md). The compi
 | `arbace/repr/java/print.ae` | `arbace.repr.java.print` | printing with metadata and a Clojure-style layout |
 | `arbace/repr/java.ae` | `arbace.repr.java` | command line: `convert`, `jdk` |
 | `arbace/repr/java/coverage.ae` | `arbace.repr.java.coverage` | coverage summary from run reports |
-| `arbace/repr/java/resolve.ae` | `arbace.repr.java.resolve` | asks the class forms compiler's overload resolution where pins are needed, over class infos made from javac's symbols |
-| `bin/repr-java` | | starts the frozen JVM Arbace (`bin/lib/frozen.bash`) with access to javac's internals, repr/java and the class forms' front end loaded from the checkout's sources |
+| `arbace/repr/java/resolve.ae` | `arbace.repr.java.resolve` | asks the Java forms compiler's overload resolution where pins are needed, over class infos made from javac's symbols |
+| `bin/repr-java` | | starts the frozen JVM Arbace (`bin/lib/frozen.bash`) with access to javac's internals, repr/java and the Java forms' front end loaded from the checkout's sources |
 | `bin/repr-java check` | | the checks (below) |
 | `test/repr/java/expected/` | | the expected output of the checks: `java/` and `module/` (the samples' forms), `baseline.sha256` (the baseline's, by hash) |
-| `test/repr/java/build.ae` | `repr.java.build` | compiles converted files with the frozen jar's own class forms compiler into class files (`bin/repr-java check --suite`; until S4 `arbace.repr.java.build`) |
+| `test/repr/java/build.ae` | `repr.java.build` | compiles converted files with the frozen jar's own Java forms compiler into class files (`bin/repr-java check --suite`; until S4 `arbace.repr.java.build`) |
 | `test/repr/java/java/sample/` | | Java constructs the baseline does not use (records, sealed types, patterns, switch expressions, lambdas, method references, local and anonymous classes, annotation types), including §11.4; `Pins.java`: overloads that need pins and that must not get them, constructor calls of every kind, `o.new Inner(...) {...}` |
 | `test/repr/java/module/` | | a module declaration and package annotations |
 
@@ -42,7 +42,7 @@ tag and pinned by hash (`bin/lib/frozen.bash`, `test/oracle/frozen-jar.sha256`),
 no JVM build any more and javac, repr/java's front end, needs a JVM. The jar's loader reads `.clj`
 only and loads a namespace from its source when the source is newer than its `__init` class (the
 jar's entries are dated 2000-01-01): `frozen_view tools` puts `.clj` links to the checkout's
-`arbace.repr.java`, the class forms' front end (`arbace.classes.types`, `env`, `parse`, `lower`,
+`arbace.repr.java`, the Java forms' front end (`arbace.classes.types`, `env`, `parse`, `lower`,
 `analyze`: `arbace.repr.java.resolve` asks its overload resolution) and every namespace the jar lacks
 before the jar on the class path, so those load from the checkout's sources and the rest
 (`arbace.core`, the runtime, the jar's own back end) is the jar's. The converter's output is the
@@ -90,13 +90,13 @@ bin/repr-java check --jdk [MODULE...]
   with javac's).
 - `test/repr/java/build.ae` (`repr.java.build`, run by `bin/repr-java check --suite` on the frozen jar with the
   jar's own `arbace.classes`; until S4 `bin/repr-java -m arbace.repr.java.build`, the checkout's compiler)
-  compiles converted files with the class forms compiler and writes the class files. Classes it
+  compiles converted files with the Java forms compiler and writes the class files. Classes it
   does not compile are looked up on the class path (`FROZEN_CP`: `bin/repr-java check` passes the
   frozen tree's javac classes).
 
 Output layout (§9.1): for package `p.q`, `p/q.ae` holds `(ns p.q)` and a `(load "q/File")` per
 Java file, supertypes in the same package first; `p/q/File.ae` holds `(in-ns 'p.q)`, an
-`(import ...)` of the classes it uses, and the file's class forms. A comment line names the Java
+`(import ...)` of the classes it uses, and the file's Java forms. A comment line names the Java
 file; Java's comments are not carried over.
 
 ## How it works
@@ -113,7 +113,7 @@ file; Java's comments are not carried over.
    *instantiated* parameter types, qualifiers to the erasure of their type, results of generic
    members), unboxing from non-wrapper types, boxing of literals, narrowing, constant
    promotions (`(unchecked-multiply-float c (float 2.0))`, `(< side 0.0)`).
-3. **Overloads.** Pins are decided by the class forms compiler's own resolution (SPEC §5.6,
+3. **Overloads.** Pins are decided by the Java forms compiler's own resolution (SPEC §5.6,
    §7.3; `arbace.repr.java.resolve`): for every call, constructor call and method reference the
    converter asks `arbace.classes.analyze/select-method`, with the compiler's candidates
    (`instance-candidates`, `static-candidates`, `ctor-candidates`), what the compiler will
@@ -174,8 +174,8 @@ On 2026-10-06 (the table) and 2026-10-07 (as dated below), jdk26u at the system 
 | jdk26u `src/*/share/classes`, all 68 modules (module-infos skipped) | 12,730 | 12,730 | 0 | 0 |
 | `test/repr/java/java`, `test/repr/java/module` (14 files since: `Pins`, `TypeAnns`) | 9 | 9 | 0 | 0 |
 
-- **Compiled with the class forms compiler** (`bin/class-forms-check`, compiler at `origin/main`
-  of the same day): every one of the 183 converted baseline files with class forms compiles, and
+- **Compiled with the Java forms compiler** (`bin/class-forms-check`, compiler at `origin/main`
+  of the same day): every one of the 183 converted baseline files with Java forms compiles, and
   every class (812, the same names as javac's) has the same shape as javac's: flags, supertypes,
   signatures, nest and inner class attributes, fields, methods, and the symbolic content of code
   (member and class references, call sites, constants).
@@ -213,7 +213,7 @@ baseline and ran Clojure's test suite on it.
 
 ### The checks since S4: forms-level
 
-Main has no class forms back end since S4 (it compiled to JVM bytecode, which only the JVM
+Main has no Java forms back end since S4 (it compiled to JVM bytecode, which only the JVM
 build used), so repr/java's checks no longer compile its output and compare the classes with javac's
 (doc/STANDALONE-NOTES.md, "S4: the JVM removed", open point O2: (b) forms-level, with (a), the
 frozen jar's own compiler, for the suite). `bin/repr-java check`:
@@ -225,7 +225,7 @@ frozen jar's own compiler, for the suite). `bin/repr-java check`:
 2. converts `test/repr/java/java` and compares the output with `test/repr/java/expected/java/`, byte for
    byte (the samples' forms are small and are what a change to repr/java should be reviewed by);
 3. the same for `test/repr/java/module` and `test/repr/java/expected/module/`;
-4. with `--suite`: compiles the converted baseline with the frozen jar's own class forms
+4. with `--suite`: compiles the converted baseline with the frozen jar's own Java forms
    compiler (`test/repr/java/build.ae`, on the jar alone: its `arbace.classes` at the freeze, which
    compiled these forms to javac's shapes) and runs Clojure's suite on the classes against
    `test/baseline-results.edn` (no regressions).
@@ -234,8 +234,8 @@ The first line of each converted file names its source; the checkout's path is l
 (`clojure/lang/RT.java`, `test/repr/java/java/sample/Shapes.java`), so that the expected files do not
 depend on where the check runs. `bin/repr-java check --update` rewrites `test/repr/java/expected/` after a
 change to repr/java or the samples (commit it with the change). What the converted forms mean is
-checked downstream as well: a2g compiles `jdk/forms` (the JDK closure) and the suite's fixtures
-through the class forms' front end into the Go build, and the oracle and Clojure's suite run it.
+checked downstream as well: j2g compiles `jdk/forms` (the JDK closure) and the suite's fixtures
+through the Java forms' front end into the Go build, and the oracle and Clojure's suite run it.
 
 ### The converted JDK
 
@@ -249,22 +249,22 @@ compiles the same Java files twice with javac (`--patch-module` against the runn
 is built from the same sources, with the options of the JDK build for the module:
 `-XDstringConcat=inline` for `java.base`, `jdk.compiler`, `jdk.jfr`, `jdk.jartool`,
 `jdk.internal.vm.ci`, and `-parameters` for the latter), compiles the converted forms with the
-class forms compiler in parallel chunks (`bin/class-forms-check` with `REF`, `FILES`, and the
+Java forms compiler in parallel chunks (`bin/class-forms-check` with `REF`, `FILES`, and the
 converted module on the class path for classes found nowhere else) and compares every class's
 shape with javac's (SPEC §3). Classes whose two javac runs differ are not compared (2 do);
 classes javac made from a Java file (by `SourceFile`) that the forms did not make count as
 differences; `defpackage` forms are compiled and compared too. The report,
 `.tmp/repr-java-jdk/report.md`, counts per module the Java files converted, the converted files with
-class forms compiled without error, those whose classes are all shape-identical, those with
+Java forms compiled without error, those whose classes are all shape-identical, those with
 differences, and the compile errors, and lists differences and errors by kind with an example.
 
 Results (2026-10-07; "before" is the first run, with the compiler and converter of
 `origin/main` at `f425bc8`, where one chunk of 60 `java.base` files did not finish because
 `java.lang.Object` sent the compiler into a loop; "after" is `bin/repr-java check --jdk` at the end of
-the work). Files are converted Java files with class forms; 286 have none (no annotations in a
+the work). Files are converted Java files with Java forms; 286 have none (no annotations in a
 `package-info.java`):
 
-| module | Java files | with class forms | identical before | identical after | differing before | differing after | errors before | errors after |
+| module | Java files | with Java forms | identical before | identical after | differing before | differing after | errors before | errors after |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
 | java.base | 3,088 | 3,026 | 2,755 | 3,002 | 144 | 23 | 67 | 1 |
 | java.desktop | 2,287 | 2,235 | 2,168 | 2,223 | 53 | 12 | 14 | 0 |
@@ -343,7 +343,7 @@ met was converted without failure. Generated by `arbace.repr.java.coverage` (rou
 
 Access flags and attributes (§8.2, §8.3) follow from the metadata written: modifiers as Java
 wrote them, `^:deprecated` for the javadoc tag, annotations other than `SOURCE` ones,
-`:throws`, `:default`, generic types for `Signature`. The class forms compiler derives the rest,
+`:throws`, `:default`, generic types for `Signature`. The Java forms compiler derives the rest,
 and the shape comparison above covers it for the baseline.
 
 ## Comparison with the worked examples (§11)

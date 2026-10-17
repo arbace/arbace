@@ -1,11 +1,11 @@
 # The evaluator: plan (B1a step 5)
 
-Status: decided 2026-10-09 (proposed in a2g phase 2B; the user decided Q1-Q7 as recommended,
+Status: decided 2026-10-09 (proposed in j2g phase 2B; the user decided Q1-Q7 as recommended,
 §9), built in step 5 ([EVAL-NOTES.md](EVAL-NOTES.md), whose "Deviations from EVAL-PLAN" list
 where the evaluator differs from this plan) and amended through step 7. Amendments folded here,
 each noted where it touches this plan: M1-M8, X1-X4, S1-S8 (2026-10-09), U1 (step 6,
 2026-10-09), SL1-SL2, EC1-EC6 (step 7b), FX3-FX4 (2026-10-10); EVAL-NOTES.md and SPEED-NOTES.md
-list them, A2G-SPEC §16 too. B1a step 5
+list them, J2G-SPEC §16 too. B1a step 5
 ([B1-PLAN.md](B1-PLAN.md), decision D2): Arbace on Go evaluates the `Expr` trees of its
 translated `Compiler` instead of emitting bytecode. This document fixes the evaluator's design
 over the translated tree, records what phase 2B built and proved, estimates the rest, and asks
@@ -14,13 +14,13 @@ the questions the user should decide (§9).
 ## 1. Where things stand (phase 2B)
 
 - (Since 2026-10-12, standalone S4: the back end is gone from `Compiler.ae` itself, nothing is
-  erased, and the variant's back-end replacements are the base's: A2G-SPEC §10.1. The rest of
+  erased, and the variant's back-end replacements are the base's: J2G-SPEC §10.1. The rest of
   this section is as of phase 2B.)
-- **`Compiler` translates as a whole.** `bin/a2g --root 'arbace.lang.Compiler$*'` translates 94
+- **`Compiler` translates as a whole.** `bin/j2g --root 'arbace.lang.Compiler$*'` translates 94
   of `Compiler`'s 96 classes (its analyzer: `analyze`, macroexpansion, resolution, every `Expr`
   class and its parser, `eval`, `load`), about 17,400 lines of Go; the two left are the back
   end's (`Compiler$2`, a `ClassWriter`; `SourceDebugExtensionAttribute`). The variant
-  (`arbace/lang/go/Compiler.ae`, 356 lines) erases ASM (`(a2g/erase "arbace/asm/")`: every
+  (`arbace/lang/go/Compiler.ae`, 356 lines) erases ASM (`(j2g/erase "arbace/asm/")`: every
   value of an ASM type is nil, its computation skipped, its stores dropped; members whose
   signatures name ASM do not exist in Go, so the `emit` methods disappear), replaces
   `ObjExpr.compile` (no class is generated), `getCompiledClass`, `ObjExpr.eval` (a `fn*` is an
@@ -32,12 +32,12 @@ the questions the user should decide (§9).
   when reached): `loadFile` and the `eval-file` name in `eval` (`java.io.File`, files: phase 2C
   or jrt), `NewInstanceExpr.compileStub` (deftype's stub class: step 5, on `Dyn`), and
   `StaticMethodExpr.isBoxedMath` (annotations' values; only with `:warn-on-boxed`).
-- **The evaluator's interface** is in the variant, as class forms translated like the rest:
+- **The evaluator's interface** is in the variant, as Java forms translated like the rest:
   `Compiler$Frame` (the slots of one invocation), `Compiler$EvalFn extends RestFn` (a `fn*`
   value: its `FnExpr` and closed-over values), `Compiler$Evaluator` (the walk:
-  `eval(Expr, Frame)`, `invokeFn`), `Compiler$Dyn` (classes made at run time, natives a2g
+  `eval(Expr, Frame)`, `invokeFn`), `Compiler$Dyn` (classes made at run time, natives j2g
   writes).
-- **The proof**, `bin/a2g-evalproof` (`test/a2g/eval/`): a Go program reads forms with the
+- **The proof**, `bin/j2g-evalproof` (`test/j2g/eval/`): a Go program reads forms with the
   translated `LispReader`, analyzes them with the translated `Compiler`, prints their `Expr`
   trees from Go (a type switch over the translated `Expr` types) and evaluates them, by
   `Expr.eval` and by `Compiler.eval` through `EvalFn`; it builds and gives the recorded output on
@@ -72,7 +72,7 @@ The design follows what Clojure's `Compiler` already decides; the evaluator adds
 run-time side the bytecode had.
 
 **As built in step 7** (amendment EC1, accepted 2026-10-10; SPEED-NOTES.md, "The evaluator:
-closure compilation"; A2G-SPEC §10.1): the tree is not walked at each call. Each method is
+closure compilation"; J2G-SPEC §10.1): the tree is not walked at each call. Each method is
 compiled at its first call into `Code` nodes, closures over the method's decisions (slot
 indexes, unboxed `long` and `double` locals, constants, direct static calls, resolved members),
 with the semantics described below; `evalIn` evaluates top-level forms and, in compat mode, node
@@ -99,7 +99,7 @@ kinds the compiler does not know.
   nothing for it). `ObjExpr.compile`'s variant makes `closesExprs` as the JVM's does, so the
   analysis sees a closure's creation as a use, and capturing clears the creating frame's local
   where its entry says so. A lazy seq's head held in a local is then not retained. Each fn's
-  class declares its closed-over locals as fields (A2G-SPEC §10.2), which reflection reads
+  class declares its closed-over locals as fields (J2G-SPEC §10.2), which reflection reads
   (Clojure's `clearing` tests).
 - **As built in step 7** (amendments EC1, EC4, accepted 2026-10-10): `long` and `double`
   locals of a compiled method live unboxed in the frame's `prims` (a `long[]`, a `double` as its
@@ -119,9 +119,9 @@ kinds the compiler does not know.
   evaluated fn with Go's interface call `(.Invoke_O__O f x)`, through `RestFn`'s dispatch.
 - Metadata (`MetaExpr` over a `FnExpr`): `AFunction.withMeta`, as on the JVM.
 - `ArityException` names the fn by its analyzed name.
-- **As built** (amendment M2, accepted 2026-10-09; A2G-SPEC §10.2): each `FnExpr` has a class
+- **As built** (amendment M2, accepted 2026-10-09; J2G-SPEC §10.2): each `FnExpr` has a class
   made at run time, a subclass of `EvalFn` named as the JVM names the fn's class
-  (`arbace.core$map`), which `getClass` answers through `EvalFn`'s field `a2g$class`; `EvalFn`
+  (`arbace.core$map`), which `getClass` answers through `EvalFn`'s field `j2g$class`; `EvalFn`
   binds the arguments from `RestFn`'s seq, the rest parameter unrealized (EVAL-NOTES.md,
   "Functions").
 - Step 7 was to replace `doInvoke`'s seq with per-arity `invoke` methods (Q3) and the tree walk
@@ -141,7 +141,7 @@ kinds the compiler does not know.
   loop's (or the fn method's parameter) slots and returns a sentinel (`Evaluator.RECUR`) that the
   loop or `invokeFn` restarts on; the analyzer guarantees tail position, so the sentinel cannot
   escape into a value. No exception and no Go `goto` is needed.
-- `try`/`catch`/`finally` (`TryExpr`): a Java `try` in the evaluator's class forms (a2g makes
+- `try`/`catch`/`finally` (`TryExpr`): a Java `try` in the evaluator's Java forms (j2g makes
   it Go's panics and recovers), each `catch` matching by `Class.isInstance`, its binding stored
   in its slot; `finally` as Java's. `throw` (`ThrowExpr`) throws.
 - `letfn*` (`LetFnExpr`): create the `EvalFn`s first with their closed-over values pending,
@@ -149,7 +149,7 @@ kinds the compiler does not know.
   the bytecode's `emitLetFnInits` does.
 - `case*` (`CaseExpr`): the analyzer's tests, shift and mask, `int`/hash/identity modes,
   looked up in the `thens` map as `CaseExpr.emit` does (a direct translation of its switch).
-- `monitor-enter`/`monitor-exit`: `jrt.MonitorEnter`/`Exit` through `locking` in class forms
+- `monitor-enter`/`monitor-exit`: `jrt.MonitorEnter`/`Exit` through `locking` in Java forms
   (the analyzer pairs them in `try`/`finally`).
 
 ### 2.4 Vars, `def`, `set!`, constants
@@ -176,7 +176,7 @@ kinds the compiler does not know.
   `LocalBindingExpr`s of the fields, which the evaluator maps to field indexes); each becomes
   an `EvalFn`-like method object set by `Compiler$Dyn.setMethod(class, name, params, ret,
   impl)`. `deftype` constructors (`NewExpr` of a run-time class) call `newInstance`.
-- a2g's Go type `Dyn` has a method for every method of every interface of the closed world (76
+- j2g's Go type `Dyn` has a method for every method of every interface of the closed world (76
   interfaces, 252 methods in the proof's world) and every marker, so translated code calls a
   run-time object exactly as it calls a translated one; a method dispatches to its slot's fn,
   else to the interface's default method, else throws `AbstractMethodError`. `instance?` and
@@ -190,13 +190,13 @@ kinds the compiler does not know.
 - Record fields: `defrecord`'s `ILookup`, `IPersistentMap` and the rest are the evaluated
   methods `defrecord` writes, as on the JVM.
 - **`proxy`** (amendments X1-X3, accepted 2026-10-09; the user's decision reversing D6 for it;
-  A2G-SPEC §5.12, §10.4): a proxy of `Object` is a `Dyn`; a proxy of a class of a fixed list
+  J2G-SPEC §5.12, §10.4): a proxy of `Object` is a `Dyn`; a proxy of a class of a fixed list
   (`Writer`, `Reader`, `PushbackReader`, `InputStream`, `OutputStream`, `APersistentMap`, jrt's
-  `ThreadLocal`) is a `DynSub_C`, which a2g writes ahead of time; the namespace variant
+  `ThreadLocal`) is a `DynSub_C`, which j2g writes ahead of time; the namespace variant
   `core_proxy.ae` replaces only `generate-proxy`. A class made at run time that defines a
   method twice throws `ClassFormatError`, as on the JVM. The list is
-  `arbace.a2g.model/proxy-supers`; it gained `BufferedWriter` (amendment Z1, accepted
-  2026-10-10), and the class forms' superclasses (`arbace.a2g.dyn/class-supers`, CF4;
+  `arbace.j2g.model/proxy-supers`; it gained `BufferedWriter` (amendment Z1, accepted
+  2026-10-10), and the Java forms' superclasses (`arbace.j2g.dyn/class-supers`, CF4;
   CLASSFORMS-REPL.md §7) get `DynSub_C` types too, so they can be proxied as well.
 - **The JVM's errors of `new` and of a stub's name** (amendment FX4, accepted 2026-10-10;
   EVAL-NOTES.md, "The suite's Java fixtures"): the resolved `new` of an abstract class throws
@@ -218,12 +218,12 @@ kinds the compiler does not know.
   `Reflector.boxArg` adapts it), no selection, no `boxArgs` copy, an exception propagating as it
   is (what Reflector's unwrapping of `InvocationTargetException` gave); a method of a non-public
   class keeps Reflector's path (its accessible-base search). Step 7 was to call the invoker with
-  Go values (A2G-SPEC §10.1); it did in part: hot static methods called directly (EC2), other
+  Go values (J2G-SPEC §10.1); it did in part: hot static methods called directly (EC2), other
   resolved members through their invoker (EC5; §6 below).
 - Un-hinted calls: `Reflector` at run time, as on the JVM.
 - Functional interfaces: `Reflector.boxArg` adapts an `IFn` with `jrt.AdaptFn`, which is the
-  interface's `ClassInfo.FromFn` that a2g now generates (A2G-SPEC §7.11; A2G-NOTES.md, phase
-  2B, amendment B5, E5 in A2G-SPEC); inside class bodies the analyzer's `:fi-adapter` is
+  interface's `ClassInfo.FromFn` that j2g now generates (J2G-SPEC §7.11; J2G-NOTES.md, phase
+  2B, amendment B5, E5 in J2G-SPEC); inside class bodies the analyzer's `:fi-adapter` is
   translated.
 - **Functional interfaces of let and loop locals** (amendment FX3, accepted 2026-10-10;
   EVAL-NOTES.md, "The suite's Java fixtures"): the init of an object local whose tag names a
@@ -245,12 +245,12 @@ kinds the compiler does not know.
   `reduce`, `print-method`'s multimethods, `IKVReduce`) need §2.5; `gen-interface` is used
   by `defprotocol` (Q5).
 - `*compiler-options*`, direct linking: off (the variant); `:static` fns are ordinary fns.
-- **As built** (amendments M1, M3, M5, accepted 2026-10-09; A2G-SPEC §10.3, §4.1): `bin/a2g
+- **As built** (amendments M1, M3, M5, accepted 2026-10-09; J2G-SPEC §10.3, §4.1): `bin/j2g
   --program` embeds the namespaces' sources with the Go build's namespace variants applied
   (`arbace/lang/go/ns/`; gone since 2026-10-13, every variant applied to its source, SA150,
   35255c7); `RT.load` reads them, then the directories of `ARBACE_PATH`; the
   classes the namespaces name outside the world are cut classes whose members throw.
-- **Since step 6** (amendment U1, accepted 2026-10-09; A2G-SPEC §10.3, EXEC-NOTES.md): the
+- **Since step 6** (amendment U1, accepted 2026-10-09; J2G-SPEC §10.3, EXEC-NOTES.md): the
   embedded namespaces are analyzed at build time; `RT.load` replays them from the program's
   image (the `Expr` trees and the events of their analysis), skipping reading and analysis.
   Since S6 only with `ARBACE_AOT=0`: by default the namespaces are compiled to Go
@@ -258,14 +258,14 @@ kinds the compiler does not know.
 
 ### 2.8 Recursion depth and errors
 
-- A2G-SPEC §10.5: Go's stack overflow is fatal, so `invokeFn` counts depth per thread (a field
+- J2G-SPEC §10.5: Go's stack overflow is fatal, so `invokeFn` counts depth per thread (a field
   of the frame chain, or a jrt goroutine-local counter) and throws `StackOverflowError` beyond a
   limit (Q4).
 - Errors: `CompilerException` with phase `:execution` around invokes and interop, as the
   bytecode's line tables give it on the JVM (done for invoke and the method calls). Stack
   traces: before Q6, the evaluator's Go frames, not the Clojure fns; Q6 decided for the Clojure
   frames (below).
-- **As built** (EVAL-NOTES.md, deviation 5; amendment M6, accepted 2026-10-09, A2G-SPEC §10.7):
+- **As built** (EVAL-NOTES.md, deviation 5; amendment M6, accepted 2026-10-09, J2G-SPEC §10.7):
   exceptions are not wrapped in `CompilerException` inside fns, as compiled code does not wrap
   them; stack traces show the evaluated Clojure frames (Q6's (a)), which jrt's frame mapping
   puts in place of the evaluator's Go frames.
@@ -285,11 +285,11 @@ same; `IFn$LL` and the rest stay in the closed world for translated code (Q1).
 
 - RT (phase 2A): `*out*`/`*err*` writers, `print-method` once `arbace.core` loads, the reader's
   data readers, `RT.load` from embedded sources.
-- Reflector (2A): `boxArg` through `jrt.AdaptFn` (a2g now writes `FromFn`), method selection
+- Reflector (2A): `boxArg` through `jrt.AdaptFn` (j2g now writes `FromFn`), method selection
   without streams (`(. foo (valAt :k))` on a run-time class reaches `getMethods`' stream code
   today).
 - jrt (2C): files (`Compiler.loadFile`), the rest of the JDK closure the namespaces name.
-- a2g (2D): the whole-program `--program` (every public member as a root, Q2), line positions for
+- j2g (2D): the whole-program `--program` (every public member as a root, Q2), line positions for
   stack traces, unused locals when an operation is missing (seen with `removeIf` on a world
   without `Predicate`: `declared and not used`).
 
@@ -327,20 +327,20 @@ Arbace compiled to Go").
 
 ## 7. Checks
 
-- `bin/a2g-evalproof`: grows with each node kind (a form per case, its tree and value),
+- `bin/j2g-evalproof`: grows with each node kind (a form per case, its tree and value),
   amd64 and arm64.
 - Differential: the same forms evaluated by the JVM Arbace (`bin/oracle`'s form scripts),
-  compared as `bin/a2g-check` compares class scripts.
+  compared as `bin/j2g-check` compares class scripts.
 - Clojure's suite per namespace once `arbace.core` loads.
 
-## 8. Amendments found (listed with reasons in A2G-NOTES.md, phase 2B)
+## 8. Amendments found (listed with reasons in J2G-NOTES.md, phase 2B)
 
-By their A2G-SPEC names (A2G-NOTES.md proposed them as B1-B8, not EVAL-NOTES.md's phase 2B
+By their J2G-SPEC names (J2G-NOTES.md proposed them as B1-B8, not EVAL-NOTES.md's phase 2B
 amendments, which became S1-S8): E1 nested-class variants, E2 erased packages, E3 the
 evaluator's classes in the `Compiler` variant, E4 `Dyn` as built (its API, `jrt.Dynamic`,
-`jrt.DefineDynamic`), E5 `FromFn` from a2g in `arbace/lang`, E6 natives in their class's
+`jrt.DefineDynamic`), E5 `FromFn` from j2g in `arbace/lang`, E6 natives in their class's
 package, E7 the root spec `CLASS$*`, E8 `clj-fi-method` for classes from source. Accepted
-2026-10-09 and folded into A2G-SPEC, with the decisions of §9 that touch its §10 (A2G-SPEC
+2026-10-09 and folded into J2G-SPEC, with the decisions of §9 that touch its §10 (J2G-SPEC
 §16).
 
 ## 9. Open questions, with recommendations
@@ -360,7 +360,7 @@ package, E7 the root spec `CLASS$*`, E8 `clj-fi-method` for classes from source.
 - **Q3 `EvalFn`'s shape.** (a) One class over `RestFn` with seq-packed arguments now, per-arity
   `invoke` in step 7 (recommended); (b) an `AFunction` with the 21 `invoke` arities now
   (faster calls, more code before anything runs); (c) separate `EvalFn`/`EvalRestFn` as
-  A2G-SPEC §10.2's example (`(instance? RestFn f)` would then tell variadic fns as on the JVM;
+  J2G-SPEC §10.2's example (`(instance? RestFn f)` would then tell variadic fns as on the JVM;
   nothing in the namespaces asks).
 - **Q4 Recursion limit.** (a) A per-thread depth counter in `invokeFn` with a fixed limit
   (recommended: 10,000 evaluator frames, about the JVM's default on simple recursion; Go's
@@ -374,6 +374,6 @@ package, E7 the root spec `CLASS$*`, E8 `clj-fi-method` for classes from source.
 - **Q6 Stack traces.** (a) The evaluator records the Clojure fn and line per frame (a field of
   `Frame`) and `StackTraceElement`s come from the frame chain (recommended for step 5's
   REPL); (b) Go frames only (the evaluator's functions, unreadable to the user).
-- **Q7 ASM's erasure.** (a) Erasure as an a2g rule (`a2g/erase`, done: no line of `Compiler`
+- **Q7 ASM's erasure.** (a) Erasure as an j2g rule (`j2g/erase`, done: no line of `Compiler`
   copied into the variant) (recommended); (b) cut each back-end member by name in the variant
   (about 150 methods and 120 fields listed, drifting with `Compiler`).

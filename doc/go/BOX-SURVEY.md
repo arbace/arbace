@@ -55,13 +55,13 @@ default locale data, stripped since amendment SZ1), against the 58 MB the survey
   wall clock is the one gap (`Time` says seconds), best closed by an offset at entry rather
   than a call. Files, sockets, processes have no host surface at all, by design.
 - **Most of arbace-go needs nothing from the host**: the language, collections, numbers,
-  strings, regex, the image, class forms at the REPL, time zones (tzdb is embedded), text
+  strings, regex, the image, Java forms at the REPL, time zones (tzdb is embedded), text
   once `gotext` lands (merged 2026-10-11). Files can be TamaGo's in-memory file system with no host surface
   (Go's `os` works on it), later backed by the store. Sockets and the socket REPL need a
   network design (go-whim sketched netstack in the guest over a datagram call); processes do
   not make sense in a box and stay cut; rlwrap moves to the host side (rlwrap runs the
   launcher).
-- **Recommended first target (S1)**: the same a2g program, built `GOOS=tamago` with a jrt
+- **Recommended first target (S1)**: the same j2g program, built `GOOS=tamago` with a jrt
   host over the doorbell (console, clocks, random, exit, embedded resources; no net or
   proc interface; files in memory, since Go's `os` gives them for free), amd64 on /dev/kvm,
   go-whim's default of four vCPUs, the console read bounded so that it yields: `arbace -e`,
@@ -89,12 +89,12 @@ default locale data, stripped since amendment SZ1), against the 58 MB the survey
 
 ## 1. Context
 
-B1a's executable is a2g's translation of `arbace.lang` plus the JDK closure, on jrt (hand-written
+B1a's executable is j2g's translation of `arbace.lang` plus the JDK closure, on jrt (hand-written
 Go forms), printed and built by gc as a static `linux/amd64` and `linux/arm64` program
 (EXEC-NOTES.md). Its build already uses TamaGo's distribution as `GOROOT` (`bin/arbace-go`,
 `go_env`: `ARBACE_GOROOT=/root/tamago-go`, `GOOS=linux`), and repr/go's round trip covers std for
 `tamago` and `linux` (AGENDA.md). jrt reaches the operating system only through `jrt.Host`
-(A2G-SPEC §9.4), so that "B1b swaps one value" (`go/arbace/jrt/host.ae`).
+(J2G-SPEC §9.4), so that "B1b swaps one value" (`go/arbace/jrt/host.ae`).
 
 B1b: the same program built with `GOOS=tamago`, its host answered by go-whim's doorbell
 through a TamaGo board, run by go-whim's monitor; amd64 on /dev/kvm here, arm64 under QEMU
@@ -341,7 +341,7 @@ answered in the guest or absent.
 | regex (the `java.util.regex` port), its resources | `java.util.regex` | works (resources embedded) | nothing |
 | `java.util` (collections, `Random`, `UUID`, `BitSet`, `TreeMap`), `arbace.set`, `walk`, `zip`, `data`, `edn`, `pprint`, `spec`, `test`, `test.check` | | works | `UUID.randomUUID`: `Random` |
 | the image of prepared namespaces | `cmd/arbace/image.ae` | works (embedded; architecture-independent, as arm64 reuses amd64's) | nothing |
-| class forms at the REPL (`defclass`) | `arbace.classes` | works (interpreted, CLASSFORMS-REPL.md) | nothing |
+| Java forms at the REPL (`defclass`) | `arbace.classes` | works (interpreted, CLASSFORMS-REPL.md) | nothing |
 | concurrency: futures, agents, atoms, refs, `pmap`, fork-join | `java.util.concurrent`, jrt `thread.ae`, `executor.ae`, `forkjoin.ae` | works (§9: `@(future ...)`), but **cooperatively**: no preemption (§2.7); on 1 vCPU nothing else runs while the REPL waits for a line (§9.6), on several a background `println` waits for it | an evaluator yield (R2), a bounded console read (R3) |
 | timed waits, `Thread/sleep`, `deref` with timeout | Go timers | works (board idle spins or parks) | nothing |
 | `System/nanoTime` | | works | nothing |
@@ -398,17 +398,17 @@ Not staged: processes (cut for good in the box), the terminal's raw mode.
   to a `//go:build linux` file with a stub beside it (`goproc`'s `hostproc_linux.ae` is
   already tagged).
 - **The closure stays the same at first.** Cutting by build configuration (no `NetHost`, no
-  `HostProc` on `tamago`) leaves a2g's program and its type table (`image_types.go`) identical,
+  `HostProc` on `tamago`) leaves j2g's program and its type table (`image_types.go`) identical,
   so the image prepared by the linux/amd64 executable is valid in the box, as it is for
   arm64 today (EXEC-NOTES.md, "Determinism"). A slimmer closure (no `java.net`, no processes:
-  a smaller image) is a second a2g program with its own image, prepared by its own linux
+  a smaller image) is a second j2g program with its own image, prepared by its own linux
   build: later, and only if the size matters (58 MB executable at the survey, 66.4 MB on 2026-10-11; go-whim's slot is 3 GiB).
 - **The tools.** `bin/build-go` takes `--goos tamago` (it fixes `GOOS=linux` today:
   `arbace.build.go/go-env`, `bin/arbace-go`'s `go_env`) and the go.mod's `require
   github.com/usbarmory/tamago v1.27.1` with `GOOSPKG` (from the module cache, `GOPROXY=off`); the
   ldflags `-T 0x201000 -R 0x1000`. `bin/arbace-go --build` gains the box flavour
   (`ARBACE_GO_TARGETS=linux/amd64,linux/arm64,tamago/amd64,tamago/arm64`; as built: `bin/arbace-go
-  --build --box`, the box's architectures in `ARBACE_BOX_ARCHES`), sharing a2g's output, the
+  --build --box`, the box's architectures in `ARBACE_BOX_ARCHES`), sharing j2g's output, the
   overlay (the patched `proc.go`/`runtime2.go` are TamaGo's own files, converted from
   `/root/tamago-go`, so they carry the `GOOS == "tamago"` branches already) and the image.
   `bin/jrt-convert` is unchanged. The monitor is a separate, ordinary `linux` (or `darwin`) Go
@@ -578,7 +578,7 @@ Risks:
   through the host only, or the board's clock carries the offset.
 - **R5 Go-version coupling.** TamaGo is pinned at go1.27.1, as Arbace's toolchain is; a Go
   upgrade waits for TamaGo's release.
-- **R6 Image and closure.** The image is valid in the box only while the a2g program is
+- **R6 Image and closure.** The image is valid in the box only while the j2g program is
   the same; a different closure needs its own preparation (§7).
 - **R7 KVM here is nested** (16-18 µs an exit): the box's start and per-line costs measured
   here are worst cases; the Mac's numbers are the realistic ones.
@@ -612,4 +612,4 @@ the main package or the build. What could be done without disturbing it:
 - purego `github.com/ebitengine/purego@v0.11.1` (`LICENSE`).
 - Arbace: `go/arbace/jrt/{host,hostfs,hostfs_linux,net,timezone,tuning,throwable}.ae`,
   `go/arbace/cmd/arbace/{rlwrap_linux,rlwrap_other,image}.ae`, branch `goproc`'s
-  `go/arbace/jrt/hostproc.ae`; `bin/arbace-go`, `bin/jrt`; `doc/go/{B1-PLAN,A2G-SPEC,EXEC-NOTES,JAVA-BASE}.md`.
+  `go/arbace/jrt/hostproc.ae`; `bin/arbace-go`, `bin/jrt`; `doc/go/{B1-PLAN,J2G-SPEC,EXEC-NOTES,JAVA-BASE}.md`.

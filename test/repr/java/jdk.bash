@@ -4,7 +4,7 @@
 # removed", O2). Run through bin/repr-java check (from the repository root).
 #
 # Per module M of $JDK_SRC/*/share/classes (largest first): bin/repr-java ... jdk --check, the
-# module's Java files into class forms, $work/conv/M (no failures, no javac errors, every file
+# module's Java files into Java forms, $work/conv/M (no failures, no javac errors, every file
 # read back by arbace.core/read); then the totals.
 set -uo pipefail
 root=$(cd "$(dirname "$0")/../.." && pwd)

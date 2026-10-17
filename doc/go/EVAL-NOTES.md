@@ -6,7 +6,9 @@
 > `bin/build-go`, `bin/g2a-print` `bin/repr-go print`, `bin/g2a-check` `bin/repr-go check`,
 > `bin/g2a-convert-tests` and `-print-tests` `bin/repr-go test read` and `test print`,
 > `bin/g2a-build-tests` `bin/build-go test`; `G2A_GOROOT` is `ARBACE_GOROOT`, the other `G2A_*`
-> `REPR_GO_*`, `J2A_*` `REPR_JAVA_*`; `bin/j2a-check` is `bin/repr-java check`. This document
+> `REPR_GO_*`, `J2A_*` `REPR_JAVA_*`; `bin/j2a-check` is `bin/repr-java check`. a2g is j2g
+> (`arbace.a2g.*`, `bin/a2g*`, `A2G-SPEC.md`, `A2G_*`, the printed `a2g_*`, `A2g_*`, `a2g/*`: `j2g`
+> likewise), and class forms are Java forms (the front end keeps `arbace.classes.*`). This document
 > uses the current names throughout, its dated passages included; branch names keep theirs.
 
 **Status (2026-10-11, main before the `arbace-for-golang` freeze).** Clojure's suite on the
@@ -25,7 +27,7 @@ fixtures.
 ([B1-PLAN.md](B1-PLAN.md)), first phase (branch `eval-core`, 2026-10-09): the evaluator over the
 translated `Compiler`'s `Expr` tree ([EVAL-PLAN.md](EVAL-PLAN.md), the user's decisions Q1-Q7),
 loading `arbace.core` and the namespaces `arbace.main` needs from sources embedded in the
-executable, and the checks: the program from `bin/a2g --program` starts, loads `arbace.core`, and
+executable, and the checks: the program from `bin/j2g --program` starts, loads `arbace.core`, and
 runs `arbace.main` (`-e`, scripts, `-` for stdin, the REPL) on linux/amd64 and, under
 `qemu-aarch64`, linux/arm64.
 
@@ -41,7 +43,7 @@ user=> 49
 
 Phase 1's results (2026-10-09; details below): the oracle's forms corpus passes 9,364 of 9,652 cases
 (97.0%); its class scripts and regex corpus run through the evaluator too (8,940 of 8,943 and 1,204
-of 1,233; identical on arm64); `bin/a2g-check` with `arbace.core` loaded passes all 9,002 steps, the
+of 1,233; identical on arm64); `bin/j2g-check` with `arbace.core` loaded passes all 9,002 steps, the
 47 that needed `arbace.core` among them; `bin/arbace-go --smoke` passes on both architectures.
 `arbace.core` loads in about 1.9 s (amd64), the whole start of `arbace.main` takes about 4.2 s; the
 executable is about 37 MB.
@@ -53,17 +55,17 @@ executable is about 37 MB.
 | `arbace/lang/go/Compiler.ae` | the evaluator (below): `Compiler$Frame`, `EvalFn`, `EvalMethod`, `EvalState`, `Dyn` (natives), `Evaluator`; an `evalIn(Frame)` method for every node kind that can hold locals, in the variants of the `Expr` classes; `ObjExpr.compile` defines the classes of `deftype`/`reify`; `NewInstanceExpr.compileStub`; `FnMethod.primInterface` (nil, Q1); `loadFile` without `java.io.File` |
 | `arbace/lang/go/RT.ae` | `RT.load` over `resourceAsStream`: the program's embedded sources (jrt's host `Resource`), then the directories of `ARBACE_PATH`; RT's initialization loads `arbace.core` when the program has its sources; `doInit` without the socket server (phase 1; since sockets it starts the `arbace.server.*` servers, JRT-NOTES.md "Sockets"); `ARBACE_LOAD_TIMES` |
 | `arbace/lang/go/ns/` (new) | the Go build's namespace variants (below): `genclass.ae` (`gen-interface` at run time), `core_proxy.ae` (`proxy` throws when evaluated), `instant.ae` (decision 7, over `java.util.Date`), `main.after.ae`, `main.subst.ae`, `java/io.subst.ae` |
-| `arbace/a2g/embed.ae` (new) | `bin/a2g --program`: the embedded sources, the namespace variants applied, and the classes the namespaces name outside the world |
-| `arbace/a2g/main.ae` | `--program`: the REPL's world (every public member of every class with class forms, Q2), the embedded sources (`go:embed` of `res/`, the host's `Resources`), the cut classes the namespaces name; registrations of both packages before the cut classes; the `:after` hook last |
-| `arbace/a2g/out.ae` | member tables: the public methods and constructors that do not exist in Go listed, throwing (`--program`); cut classes' tables from the JVM's reflection, throwing; overloads in the JVM's order; setters of volatile fields; out-of-world superinterfaces replaced by theirs; `reflect_tables_a2g.go` (jrt members a2g writes: `String.format`, the regex methods, `System.in/out/err`, `CASE_INSENSITIVE_ORDER`, the context class loader and resources) |
-| `arbace/a2g/dyn.ae` | `Dyn`'s natives `setStaticMethod`, `defineCtor`, `defineInterface`, `addInterfaceMethod`, `defineFnClass`, `hideField`; HotSpot's `AbstractMethodError` message |
-| `arbace/a2g/decls.ae`, `code.ae`, `world.ae` | `getClass` of a class with a field `a2g$class`; a `this(...)`/`super(...)` to a constructor outside the world is a missing operation; catch clauses of classes outside the world dropped; `identical?` of two interface types through `any`; variants' parameter keys skip `:throws` |
+| `arbace/j2g/embed.ae` (new) | `bin/j2g --program`: the embedded sources, the namespace variants applied, and the classes the namespaces name outside the world |
+| `arbace/j2g/main.ae` | `--program`: the REPL's world (every public member of every class with Java forms, Q2), the embedded sources (`go:embed` of `res/`, the host's `Resources`), the cut classes the namespaces name; registrations of both packages before the cut classes; the `:after` hook last |
+| `arbace/j2g/out.ae` | member tables: the public methods and constructors that do not exist in Go listed, throwing (`--program`); cut classes' tables from the JVM's reflection, throwing; overloads in the JVM's order; setters of volatile fields; out-of-world superinterfaces replaced by theirs; `reflect_tables_j2g.go` (jrt members j2g writes: `String.format`, the regex methods, `System.in/out/err`, `CASE_INSENSITIVE_ORDER`, the context class loader and resources) |
+| `arbace/j2g/dyn.ae` | `Dyn`'s natives `setStaticMethod`, `defineCtor`, `defineInterface`, `addInterfaceMethod`, `defineFnClass`, `hideField`; HotSpot's `AbstractMethodError` message |
+| `arbace/j2g/decls.ae`, `code.ae`, `world.ae` | `getClass` of a class with a field `j2g$class`; a `this(...)`/`super(...)` to a constructor outside the world is a missing operation; catch clauses of classes outside the world dropped; `identical?` of two interface types through `any`; variants' parameter keys skip `:throws` |
 | `arbace/build/go.ae` | a directory holding `.build-go-data` is data, not forms (the embedded sources) |
 | `go/arbace/jrt/` | the evaluator's natives (`natives.ae`: trace hook, monitors, checkcast, `RT.hostResource`, `UUID`'s random bytes); evaluated frames in stack traces (`throwable.ae`); `Box` maps a typed nil to null; `System`'s `Class` (`system.ae`) and member table; `WeakReference`'s constructors for subclasses; tables regenerated (`test/jrt/tables.ae`: overloads in the JVM's order) |
 | `overlay/jdk/variants/` | `UUID.randomUUID` from the host's random bytes; `ByteArray` and `ByteArrayLittleEndian` without `VarHandle`s (`UUID.toString`) |
 | `bin/arbace-go` (new) | build, run, smoke-test the executable (below) |
-| `test/a2g/check.ae` | `bin/a2g-check -- --program`: the check programs load `arbace.core` |
-| `test/a2g/eval/` | the proof grows by the other node kinds |
+| `test/j2g/check.ae` | `bin/j2g-check -- --program`: the check programs load `arbace.core` |
+| `test/j2g/eval/` | the proof grows by the other node kinds |
 
 ## The evaluator
 
@@ -101,7 +103,7 @@ chunking as on the JVM). The method is chosen as the JVM's classes choose (a fix
 the variadic one; `ArityException` with the fn's class name, which `Compiler.macroexpand1`
 recognizes for macros). Each `FnExpr` has a **run-time class** (`Dyn.defineFnClass`), a subclass
 of `EvalFn` named as the JVM names the fn's class (`arbace.core$map`, `user$eval12$fn__13`),
-answered by `getClass` (a2g's rule for a field `a2g$class`, proposed amendment V2): messages,
+answered by `getClass` (j2g's rule for a field `j2g$class`, proposed amendment V2): messages,
 `class`, printing and stack traces show the JVM's names.
 
 **Primitive fns** (Q1): `FnMethod.primInterface` returns nil, so the analyzer makes no fn
@@ -127,7 +129,7 @@ forms) differs from what the compiled code does, which is what the JVM runs insi
   private to reflection.
 
 **Control.** `recur` assigns the loop's slots (converted to the loop locals' primitive types)
-and returns a sentinel the loop or the method restarts on. `try` is a class forms `try` catching
+and returns a sentinel the loop or the method restarts on. `try` is a Java forms `try` catching
 `Throwable` and choosing the clause by `Class.isInstance`, else rethrowing; `finally` as Java's.
 `letfn*` makes the fns, then fills each one's closed-over letfn locals. `case*` is
 `CaseExpr.doEmit`'s switch (ints with the expression's primitive type, hashes with `skipCheck`,
@@ -177,16 +179,16 @@ suite nor timed; `extend` on run-time classes works through `Class` objects as o
 
 ## Loading
 
-**The sources** are embedded in the executable: `bin/a2g --program` writes them under the main
+**The sources** are embedded in the executable: `bin/j2g --program` writes them under the main
 package's forms (`go/arbace/cmd/arbace/res/arbace/...`, 41 files, 825 KB), lists them as the
 package's `:embed-files`, declares `//go:embed res`, and `main` sets the host's `Resources` to
 `fs.Sub(resources, "res")` before `Main.main`. The embedded tree (phase 1) is `arbace/**/*.ae` less
-the tools (`classes`, `repr/java`, `repr/go`, `a2g`), the runtime's class forms (`arbace/lang`, compiled into
+the tools (`classes`, `repr/java`, `repr/go`, `j2g`), the runtime's Java forms (`arbace/lang`, compiled into
 the program), ASM, and the namespaces decision 6 leaves out (`core.server`, `repl.deps`,
 `java.basis`, `tools.deps.interop`, `java.process`, `java.shell`, `java.browse`, `java.javadoc`) and
-D6's Swing and SAX (`inspector`, `xml`). Since then (the list is `arbace.a2g.embed/excluded`):
+D6's Swing and SAX (`inspector`, `xml`). Since then (the list is `arbace.j2g.embed/excluded`):
 `arbace.core.server` is embedded (2026-10-09, sockets), `java.process` and `java.shell` (2026-10-10,
-processes), and the class forms' analysis (only the compiler's bytecode back end and its tools stay
+processes), and the Java forms' analysis (only the compiler's bytecode back end and its tools stay
 out; CLASSFORMS-REPL.md); `arbace/java/api` is translated instead (SL6) and `instant_timestamp.ae`
 left out (the Go `instant.ae` holds its part). Alternatives considered: reading the checkout at run
 time (not standalone), pre-read forms (step 6's start-up work).
@@ -199,7 +201,7 @@ evaluator's proof, run as before). `RT.doInit` has no socket server (phase 1; si
 loads `arbace.core.server` and starts the `arbace.server.*` servers). `Compiler.loadFile` works
 without `java.io.File`.
 
-**Namespace variants** (`arbace/lang/go/ns/`, amendment V1, M1 in A2G-SPEC §10.3): the Go
+**Namespace variants** (`arbace/lang/go/ns/`, amendment V1, M1 in J2G-SPEC §10.3): the Go
 build's differences in the namespaces, applied when the sources are embedded: `P.ae` replaces
 `arbace/P.ae`, `P.after.ae` is appended to it, `P.subst.ae` (a vector of strings, old and
 new) replaces text found exactly once. Each file's header says why; as of 2026-10-11 (since
@@ -225,12 +227,12 @@ every variant is applied to its source (`core_bean.subst.ae`, `instant.ae`, `box
 | `java/io.subst.ae` | no reflection warnings at every start; the escape of `+` written out (`URLEncoder` is outside the world); `copy` between files through streams, not channels |
 | `core/server.subst.ae` | prepl makes no `DynamicClassLoader` for its thread (sockets, JRT-NOTES.md "Sockets") |
 | `reflect/java.subst.ae` | `arbace.reflect` without ASM: the names ASM's `Type` gives, computed (FX5, "The suite's Java fixtures") |
-| `classes/go.ae`, `classes/interp.ae` | the class forms at the REPL: ASM's `TypeReference` and the world's generic signatures; the interpreter's nodes (CLASSFORMS-REPL.md) |
-| `classes/{analyze,env,native,types}.subst.ae` | the class forms' analysis on the Go build: no weak references, no `Package` objects, classes interpreted, not compiled (CLASSFORMS-REPL.md) |
+| `classes/go.ae`, `classes/interp.ae` | the Java forms at the REPL: ASM's `TypeReference` and the world's generic signatures; the interpreter's nodes (CLASSFORMS-REPL.md) |
+| `classes/{analyze,env,native,types}.subst.ae` | the Java forms' analysis on the Go build: no weak references, no `Package` objects, classes interpreted, not compiled (CLASSFORMS-REPL.md) |
 
 **Cut classes.** The namespaces name classes outside the world (`(:import (java.nio.file
 Files))`, `^java.util.stream.BaseStream`, `arbace.asm.Type/getDescriptor` in core's annotation
-support until 2026-10-12). `bin/a2g --program` reads the embedded sources, collects the class names their forms
+support until 2026-10-12). `bin/j2g --program` reads the embedded sources, collects the class names their forms
 mention (qualified symbols, a qualified symbol's namespace, import lists, metadata), keeps those
 the JVM has from the JDK or `arbace.lang`/`arbace.asm` and the world lacks, adds the JDK classes
 their public members name (one level: `Files/createTempFile` returns a `Path`), and registers
@@ -248,7 +250,7 @@ and the regex methods, `System.out`, `CASE_INSENSITIVE_ORDER`; a nil pointer res
 and overloads are listed in the JVM's order, which `Reflector`'s choice among applicable overloads
 follows (`(Math/floorDiv c 1461)` with `c` an `Object` chose `(int, int)` before); since
 2026-10-11 only for the classes of the JDK's CDS archive, whose order is stable, the others' by
-descriptor (A2G-SPEC §5.11, RP1).
+descriptor (J2G-SPEC §5.11, RP1).
 
 ## Deviations from EVAL-PLAN
 
@@ -258,8 +260,8 @@ descriptor (A2G-SPEC §5.11, RP1).
    realizing a lazy argument list changed the meaning of `apply` and `mapcat`.
 3. A local's place is decided by identity among the closes (§2.1: the method's locals), see
    above.
-4. Each fn has a run-time class named as the JVM's (§2.2 had one class): needs a2g's
-   `a2g$class` rule (V2).
+4. Each fn has a run-time class named as the JVM's (§2.2 had one class): needs j2g's
+   `j2g$class` rule (V2).
 5. Exceptions are not wrapped in `CompilerException` (§2.8 said "with phase :execution around
    invokes and interop", which phase 2B did): compiled code does not wrap, and `catch` of the
    original class must work.
@@ -277,7 +279,7 @@ On this machine (64 cores, shared), go1.27.1, `GOGC` default:
 | executable (static, not stripped) | 37.4 MB | 35.5 MB |
 | start to `-e nil` done (`arbace.core`, `spec.alpha`, `arbace.main`) | 4.2 s, 110 MB resident | 43.6 s, 190 MB resident |
 | `arbace.core` alone (`ARBACE_LOAD_TIMES`) | about 1.9 s | 18.8 s |
-| `bin/a2g --program` | 40-45 s wall | |
+| `bin/j2g --program` | 40-45 s wall | |
 | `bin/build-go --line-file`, warm | about 60 s | about 60 s |
 
 Load times per namespace on amd64 (`ARBACE_LOAD_TIMES=1`, nested loads included in their parent):
@@ -339,14 +341,14 @@ differ), the regex corpus 1,204 of 1,233 (the 29 cases of phase 2C that need the
 data). **linux/arm64 under `qemu-aarch64` gives the same results file for file** (each file about
 10x slower to run: the start under qemu is about 44 s).
 
-**`bin/a2g-check -- --program`**: the check programs embed the sources and load `arbace.core`,
+**`bin/j2g-check -- --program`**: the check programs embed the sources and load `arbace.core`,
 binding `*print-namespace-maps*` as `arbace.main` does: 9,002 of 9,002 steps pass on linux/amd64 and
 linux/arm64 alike, the 47 that needed `arbace.core` among them (a check program is 38 MB; each
 builds in about 14 s once the packages are cached). Without `--program` the check is as before
-(`test/a2g/needs-core.edn` still applies to it): 8,955 pass, 47 need core, 0 fail (amd64; no
-regression from the a2g changes).
+(`test/j2g/needs-core.edn` still applies to it): 8,955 pass, 47 need core, 0 fail (amd64; no
+regression from the j2g changes).
 
-**`bin/a2g-evalproof`**: the proof grows by `try`/`catch`/`finally`, `letfn*`, `case*`,
+**`bin/j2g-evalproof`**: the proof grows by `try`/`catch`/`finally`, `letfn*`, `case*`,
 collection literals with locals, keyword invokes, monitors, `instance?` and `StackOverflowError`:
 31 forms, the recorded output on amd64 and arm64.
 
@@ -378,7 +380,7 @@ lazy arguments, the bytecode's conversions, constants, error locations).
 ## A split for phase 2
 
 Parallel parts, each with its own check (the agents should work on separate files where they
-can; the shared files are `arbace/lang/go/Compiler.ae`, `arbace/a2g/out.ae` and jrt's tables):
+can; the shared files are `arbace/lang/go/Compiler.ae`, `arbace/j2g/out.ae` and jrt's tables):
 
 1. **Types made at run time** (EVAL-PLAN §2.5, Q5): `deftype`/`reify`/`defrecord`/protocols
    checked against the oracle's `polymorphism` and the suite's `protocols`, `data_structures`
@@ -392,7 +394,7 @@ can; the shared files are `arbace/lang/go/Compiler.ae`, `arbace/a2g/out.ae` and 
    `Thread`, `ClassLoader`; the JDK 21 sequenced collections (`LinkedHashMap`'s views need
    `SequencedSet`); more charsets (`UTF-16BE`); `java.time.Instant`, `Calendar`, `Timestamp`
    (decision 7's rest); the helpful `NullPointerException` messages or their acceptance in the
-   oracle as `bin/a2g-check` accepts them (V11); the REPL's `(source f)` (a `NullPointerException`:
+   oracle as `bin/j2g-check` accepts them (V11); the REPL's `(source f)` (a `NullPointerException`:
    `source-fn` reads the resource through the base loader). Files: `go/arbace/jrt`, `test/jrt`,
    `bin/jrt-convert`'s sources.
 3. **Clojure's test suite on the Go build**: a runner (`bin/clojure-tests` with the Go executable,
@@ -405,40 +407,40 @@ can; the shared files are `arbace/lang/go/Compiler.ae`, `arbace/a2g/out.ae` and 
 
 ## Amendments (accepted 2026-10-09)
 
-All accepted 2026-10-09 and folded, renamed M1-M8 so as not to collide with A2G-SPEC's
-deviations V1-V13 (A2G-SPEC §16 has the scheme: phase 1 M, phase 2A X, phase 2B S).
+All accepted 2026-10-09 and folded, renamed M1-M8 so as not to collide with J2G-SPEC's
+deviations V1-V13 (J2G-SPEC §16 has the scheme: phase 1 M, phase 2A X, phase 2B S).
 
-- **V1 (A2G-SPEC §10.3) Namespace variants.** The Go build's differences in the namespaces live
+- **V1 (J2G-SPEC §10.3) Namespace variants.** The Go build's differences in the namespaces live
   in `arbace/lang/go/ns/`: `P.ae` replaces `arbace/P.ae` in the executable, `P.after.ae` is
-  appended, `P.subst.ae` replaces strings found exactly once; applied by `bin/a2g --program`
-  when it embeds the sources. *Accepted 2026-10-09, folded into A2G-SPEC §10.3 as M1.*
-- **V2 (§5.11, §10.2) A run-time class per fn.** A class with an instance field `a2g$class`
+  appended, `P.subst.ae` replaces strings found exactly once; applied by `bin/j2g --program`
+  when it embeds the sources. *Accepted 2026-10-09, folded into J2G-SPEC §10.3 as M1.*
+- **V2 (§5.11, §10.2) A run-time class per fn.** A class with an instance field `j2g$class`
   answers `getClass` with it when set; the evaluator gives each `FnExpr` a class made at run
   time, a subclass of `EvalFn` named as the JVM names the fn's class. *Accepted 2026-10-09,
-  folded into A2G-SPEC §5.11 and §10.2 as M2 (and EVAL-PLAN §2.2).*
+  folded into J2G-SPEC §5.11 and §10.2 as M2 (and EVAL-PLAN §2.2).*
 - **V3 (§4.1, §10.6) The REPL's cut classes and absent members.** `--program` registers the
   classes the embedded namespaces name outside the world as cut classes, with member tables from
   the JVM's reflection whose members throw, and lists the public members of translated classes
   that do not exist in Go in their tables, throwing; the code naming them analyzes. *Accepted
-  2026-10-09, folded into A2G-SPEC §4.1 as M3.*
-- **V4 (§5.11) Overload order.** Member tables (a2g's and jrt's) list a name's overloads in the
+  2026-10-09, folded into J2G-SPEC §4.1 as M3.*
+- **V4 (§5.11) Overload order.** Member tables (j2g's and jrt's) list a name's overloads in the
   order the JVM's reflection gives them; `Reflector` chooses by that order. *Accepted
-  2026-10-09, folded into A2G-SPEC §5.11 as M4.*
+  2026-10-09, folded into J2G-SPEC §5.11 as M4.*
 - **V5 (§10.3, §9.4) Embedded sources.** `--program` embeds the namespaces' sources in the main
   package (`//go:embed res`, the host's `Resources`); `RT.load` reads them, then `ARBACE_PATH`; a
   forms directory holding `.build-go-data` is data to `bin/build-go` (amendment to SPEC §4: repr/go's program
-  layout). *Accepted 2026-10-09, folded into A2G-SPEC §10.3 as M5; the `.build-go-data` rule into
+  layout). *Accepted 2026-10-09, folded into J2G-SPEC §10.3 as M5; the `.build-go-data` rule into
   BUILD.md, "The program's layout" (repr/go's program layout is BUILD.md's, not SPEC §4's).*
 - **V6 (§10.7) Evaluated frames.** jrt's `EvalTrace` hook and the frame mapping above.
-  *Accepted 2026-10-09, folded into A2G-SPEC §10.7 (and §11) as M6.*
+  *Accepted 2026-10-09, folded into J2G-SPEC §10.7 (and §11) as M6.*
 - **V7 (§9.1) JDK variants for VarHandle and SecureRandom**: `ByteArray`,
   `ByteArrayLittleEndian` and `UUID.randomUUID` (overlay/jdk/variants). *Accepted 2026-10-09,
-  folded into A2G-SPEC §4.6, where the JDK's variants are (and §11, `UUID`'s natives), as M7.*
-- **V8 (A2G-SPEC §7) a2g fixes** found with the whole world: a `this(...)`/`super(...)` call of a
+  folded into J2G-SPEC §4.6, where the JDK's variants are (and §11, `UUID`'s natives), as M7.*
+- **V8 (J2G-SPEC §7) j2g fixes** found with the whole world: a `this(...)`/`super(...)` call of a
   constructor outside the world is a missing operation; catch clauses of classes outside the
   world are dropped; `identical?` of two interface types compares as `any`; volatile fields have
   setters in member tables; a superinterface outside the world stands for its superinterfaces.
-  *Accepted 2026-10-09, folded into A2G-SPEC §4.1 and §5.11 as M8 (the identity rule was
+  *Accepted 2026-10-09, folded into J2G-SPEC §4.1 and §5.11 as M8 (the identity rule was
   already §5.8's).*
 
 ## Phase 2A: types made at run time
@@ -449,10 +451,10 @@ decision of 2026-10-09, reversing D6 for `proxy`; `gen-class` stays out), and `d
 
 ### proxy
 
-**The Go side** (`arbace/a2g/dyn.ae`). A proxy of `Object` is a `Dyn`. A proxy of a class `C`
+**The Go side** (`arbace/j2g/dyn.ae`). A proxy of `Object` is a `Dyn`. A proxy of a class `C`
 must be a Go value of `C_I` (translated code calls it as a `C`: `(PrintWriter. proxy-writer)`,
-`*out*` bound to a proxy), so for each class of `proxy-supers` a2g writes a Go type
-**`DynSub_C`** in `a2g_dyn.go`: a struct embedding `C`'s struct (so `Self_C`, `C`'s fields and its
+`*out*` bound to a proxy), so for each class of `proxy-supers` j2g writes a Go type
+**`DynSub_C`** in `j2g_dyn.go`: a struct embedding `C`'s struct (so `Self_C`, `C`'s fields and its
 `Impl_` methods are promoted), with `Dyn`'s `D` (the run-time class) and `F` (the fields), and a
 method for every method of every interface of the world (as `Dyn`) and every virtual method of
 `C`. Each method calls its slot's fn; when the slot is unset or the fn answers the marker
@@ -603,27 +605,27 @@ the case re-recorded. Clojure's suite on the Go build (`ARBACE_PATH` the renamed
 for other reasons (`java_interop`: `arbace.inspector`, the suite's Java classes;
 `data_structures`: `clojure.test.generative`; `reflect`: the suite's Java classes; `pprint`:
 `java.util.concurrent.Semaphore`; `vectors`: `Collectors`) are part 2's and 3's.
-`bin/arbace-go --smoke` (amd64), `bin/a2g-evalproof` (amd64), `bin/jrt test` (amd64) and
-`bin/a2g-check -- --program` (amd64: 9,002 of 9,002 steps) pass.
+`bin/arbace-go --smoke` (amd64), `bin/j2g-evalproof` (amd64), `bin/jrt test` (amd64) and
+`bin/j2g-check -- --program` (amd64: 9,002 of 9,002 steps) pass.
 
 ### Amendments (accepted 2026-10-09)
 
-All accepted 2026-10-09 and folded, renamed X1-X4 (A2G-SPEC §16).
+All accepted 2026-10-09 and folded, renamed X1-X4 (J2G-SPEC §16).
 
-- **A1 (A2G-SPEC §5.12, §5.3) Proxies of a class: `DynSub_C`.** For each class of a configured
-  list (`arbace.a2g.dyn/proxy-supers`: translated, not final, not a leaf), a2g writes a Go type
+- **A1 (J2G-SPEC §5.12, §5.3) Proxies of a class: `DynSub_C`.** For each class of a configured
+  list (`arbace.j2g.dyn/proxy-supers`: translated, not final, not a leaf), j2g writes a Go type
   embedding the class's struct, with `Dyn`'s methods and the class's virtual methods, each
   calling its slot's fn and else the class's implementation; `Compiler$Dyn.defineProxyClass` and
   `superMarker`; a slot fn answering the marker runs the superclass's implementation. §5.3's
   "nothing can subclass a class at run time" then reads: nothing but a proxy of a listed class.
-  *Accepted 2026-10-09, folded into A2G-SPEC §5.12 and §5.3 (and V9) as X1. The list's classes
+  *Accepted 2026-10-09, folded into J2G-SPEC §5.12 and §5.3 (and V9) as X1. The list's classes
   may be hand-written too (jrt's `ThreadLocal`), as above, not only translated.*
-- **A2 (A2G-SPEC §10.4; B1-PLAN D6) `proxy` over `Dyn`**, the namespace variant
+- **A2 (J2G-SPEC §10.4; B1-PLAN D6) `proxy` over `Dyn`**, the namespace variant
   `core_proxy.ae` above; `bean` by reflection; `gen-class` stays out. *Accepted 2026-10-09,
-  folded into A2G-SPEC §10.4 and §12 as X2, B1-PLAN D6 (partly reversed) and EVAL-PLAN §2.5.*
-- **A3 (A2G-SPEC §5.12) A duplicate method is `ClassFormatError`** when a class is made at run
+  folded into J2G-SPEC §10.4 and §12 as X2, B1-PLAN D6 (partly reversed) and EVAL-PLAN §2.5.*
+- **A3 (J2G-SPEC §5.12) A duplicate method is `ClassFormatError`** when a class is made at run
   time, with the JVM's message; jrt's stand-in `ClassFormatError`. *Accepted 2026-10-09,
-  folded into A2G-SPEC §5.12 as X3.*
+  folded into J2G-SPEC §5.12 as X3.*
 - **A4 (ORACLE.md) The oracle covers proxy** (`types.ae`), no longer excluded. *Accepted
   2026-10-09, folded into ORACLE.md ("Exclusions") as X4; the harvest still leaves out the
   suite's `proxy` namespace and forms naming `proxy` (`harvest.ae`).*
@@ -644,7 +646,7 @@ counts the cases that match only so (`N by V11` per file and in the summary). Ex
 `NullPointerException`s (a message the code chose, or none) are compared as before.
 [ORACLE.md](ORACLE.md), "Helpful NullPointerException messages", has the details. Re-recorded:
 12 expected files, 54 entries marked (52 forms, 2 class script steps), nothing else changed. (The
-rule is the user's decision, so no amendment: ORACLE.md describes it, and A2G-SPEC §7.9.5 and
+rule is the user's decision, so no amendment: ORACLE.md describes it, and J2G-SPEC §7.9.5 and
 V11 refer to it. The gate proposal below was then open; done: "For the gate", below.)
 
 Results: `bin/oracle check jvm` 19,828 of 19,828 (none by V11). On the Go build (amd64) the 52
@@ -808,7 +810,7 @@ The user's decision (2026-10-09): `bin/gate --full` runs one more chain (each st
 
 1. `jrt-convert`: `bin/jrt-convert` (since standalone S1, 2026-10-12, `bin/jrt-convert verify`:
    the same run, then compared with the committed `jdk/`, which the build reads), then
-   `go-build`: `ARBACE_GO_ARCHES=amd64 bin/arbace-go --build` (a2g and the Go build, the Go cache
+   `go-build`: `ARBACE_GO_ARCHES=amd64 bin/arbace-go --build` (j2g and the Go build, the Go cache
    warm);
 2. then concurrently: `go-smoke` (`ARBACE_GO_ARCHES=amd64 bin/arbace-go --smoke`); `suite-go`
    (`CLOJURE_TESTS_GO=target/arbace-go/amd64/arbace bin/clojure-tests -j 12`, against
@@ -841,7 +843,7 @@ GB in the afternoon):
   Before: about 7 minutes.
 
 arm64 (qemu) stays out of the gate (the smoke test there takes minutes, the suite hours). The
-essential gate stays as it is: the Go build depends on nothing it checks, and an a2g or jrt
+essential gate stays as it is: the Go build depends on nothing it checks, and an j2g or jrt
 change is what the Go checks guard.
 
 ## Phase 2B: jrt's surface for the REPL
@@ -908,73 +910,73 @@ phases 2A and 2C: 1,874 assertions passing): **18,781 of 18,806 assertions pass*
 skipped). Left: `clearing` (19 failures, part 4), `java.io.File` (cut by D6: 3 errors in
 `method-thunks`, 2 in `reader`'s `temp-file`, 1 in `sequences`' `test-iteration`; `java.io`
 does not load: `ServerSocket`, D6), `pprint` (`Semaphore`: `AbstractQueuedSynchronizer` was tried
-and left out, a2g leaves its inner class `ConditionObject` untranslated while emitting the
+and left out, j2g leaves its inner class `ConditionObject` untranslated while emitting the
 members that name it), `api` (`arbace.java.api.Clojure`, a class of the JVM build), and
 `transducers` now loads but its `seq-and-transducer` (200,000 `test.check` trials) runs out of
 the 900 s a namespace may take: it is skipped in the reference with that reason (part 4). The
 reference, `test/arbace-go-results.edn`, is updated.
 
-**Checks**: `bin/gate` passes (the class forms compiler's bridge fix leaves the stages
-unchanged); `bin/jrt test` on amd64 (and `--race` for the pool) and arm64; `bin/a2g-check --
+**Checks**: `bin/gate` passes (the Java forms compiler's bridge fix leaves the stages
+unchanged); `bin/jrt test` on amd64 (and `--race` for the pool) and arm64; `bin/j2g-check --
 --program` 9,010 of 9,010 steps (amd64).
 
 **Costs**: the executable is 58 MB on amd64 (was 38: streams and the functional interfaces most
-of it), 56 MB on arm64; `bin/a2g --program` about 55 s; `bin/jrt-convert` 340 files in about
+of it), 56 MB on arm64; `bin/j2g --program` about 55 s; `bin/jrt-convert` 340 files in about
 85 s; start-up unchanged.
 
 ### Amendments (accepted 2026-10-09)
 
-All accepted 2026-10-09 and folded, renamed S1-S8 (A2G-SPEC §16); B7 by keeping the
+All accepted 2026-10-09 and folded, renamed S1-S8 (J2G-SPEC §16); B7 by keeping the
 transcribed code under its license. JRT-NOTES.md's W1-W4 ("Dates") are B1, B2, B3 and B7.
 
-- **B1 (A2G-SPEC §4.4, Collisions)** the rename table: `java/sql/Date` → `Sql_Date`,
-  `java/util/stream/Tripwire` → `Stream_Tripwire`. *Accepted 2026-10-09, folded into A2G-SPEC
+- **B1 (J2G-SPEC §4.4, Collisions)** the rename table: `java/sql/Date` → `Sql_Date`,
+  `java/util/stream/Tripwire` → `Stream_Tripwire`. *Accepted 2026-10-09, folded into J2G-SPEC
   §4.4 as S1.*
 - **B2 (JRT-SOURCES.md, the tool)** other modules' files (`added-module-sources`, KIND
   `share:MODULE`: `java.sql.Timestamp`, `Date`); `REPR_JAVA_PATCH_ALL` (each chunk sees the others'
   sources); `known-differences` (shape differences of known kinds count as converted).
   *Accepted 2026-10-09, folded into JRT-SOURCES.md, "The closure as grown", as S2.*
-- **B3 (A2G-SPEC §5.3; the manifest)** `java.util.Date` and `ForkJoinTask` are non-leaf
+- **B3 (J2G-SPEC §5.3; the manifest)** `java.util.Date` and `ForkJoinTask` are non-leaf
   hand-written classes; `AtomicInteger` and `AtomicLong` embed the translated `Number` (T12
   done); `String` implements `Constable` and `ConstantDesc`. *Accepted 2026-10-09, folded into
-  A2G-SPEC §5.3, §5.4 and §9.1 as S3.*
-- **B4 (A2G-SPEC §11, a2g's support)** a2g writes, into jrt's package, the members of
+  J2G-SPEC §5.3, §5.4 and §9.1 as S3.*
+- **B4 (J2G-SPEC §11, j2g's support)** j2g writes, into jrt's package, the members of
   hand-written classes that name translated classes (`String.join(CharSequence, Iterable)`,
   `formatted`, `lines`, `describeConstable`; `Date.toInstant`, `from`;
   `Throwable.printStackTrace(PrintStream|PrintWriter)`; `System.getenv()`) and forwarders on
   hand-written leaf classes to the translated interfaces' default methods they lack (§5.4).
-  *Accepted 2026-10-09, folded into A2G-SPEC §11 and §5.4 as S4.*
-- **B5 (A2G-SPEC §8.2) the fork-join pool**: jrt's `ForkJoinPool` runs tasks on worker threads
+  *Accepted 2026-10-09, folded into J2G-SPEC §11 and §5.4 as S4.*
+- **B5 (J2G-SPEC §8.2) the fork-join pool**: jrt's `ForkJoinPool` runs tasks on worker threads
   (goroutines), the claim/await protocol above, a fork without a free worker running in the
   forking thread; reducers' `fold` and parallel streams are parallel (JAVA-SURFACE.md decision
-  6 had cut the pool). *Accepted 2026-10-09, folded into A2G-SPEC §8.4 as S5 (§8.2 is
+  6 had cut the pool). *Accepted 2026-10-09, folded into J2G-SPEC §8.4 as S5 (§8.2 is
   `volatile`; the pool's cut was D6's, in JAVA-SURFACE.md's "What the cut leaves out", not its
   decision 6), with B1-PLAN D6 and JAVA-SURFACE.md.*
 - **B6 (JRT-NOTES V9)** jrt has six charsets (`UTF-16`, `UTF-16BE`, `UTF-16LE` added); the
-  stream readers and writers keep three. *Accepted 2026-10-09, folded into A2G-SPEC §12 and V9
-  as S6 (V9 is A2G-SPEC's deviation, which JRT-NOTES cites).*
+  stream readers and writers keep three. *Accepted 2026-10-09, folded into J2G-SPEC §12 and V9
+  as S6 (V9 is J2G-SPEC's deviation, which JRT-NOTES cites).*
 - **B7 (LICENSE.md)** jrt's own Java for `Calendar`, `GregorianCalendar`, `TimeZone` and
   `TimeText` transcribes parts of jdk26u (GPL version 2 with the Classpath Exception), or those
   parts are rewritten from the documented behaviour: the user's call (JRT-NOTES.md, "Dates").
   *Accepted 2026-10-09 as S7: the transcribed parts are kept under the GPL version 2 with the
   Classpath Exception, as LICENSE.md records them (completed: `java/time/LocalDate.java` among
   the sources, and jrt's FdLibm port).*
-- **B8 (the class forms compiler, classes/SPEC.md §9's bridges)** a supertype method's class type
+- **B8 (the Java forms compiler, classes/SPEC.md §9's bridges)** a supertype method's class type
   variables are bounded as the subclass bounds them when bridges are computed. *Accepted
   2026-10-09, folded into classes/SPEC.md §6 (the derived bridges; not §9) as
-  COMPILER-NOTES.md's amendment 15, S8 in A2G-SPEC §16.*
+  COMPILER-NOTES.md's amendment 15, S8 in J2G-SPEC §16.*
 
 ## Phase 2B follow-up: Semaphore, Dyn's jrt interfaces, the proxy harvest
 
 Branch `smalls` (2026-10-09), three small items left by phase 2B.
 
-**`Semaphore`** (JRT-NOTES.md, "Semaphore"): why a2g left
+**`Semaphore`** (JRT-NOTES.md, "Semaphore"): why j2g left
 `AbstractQueuedSynchronizer$ConditionObject` untranslated (jrt registers that JDK name for
-`ReentrantLock`'s conditions under another Go name, and a2g named the type by the derived name:
-fixed in a2g, amendment Y1), and the decision for a hand-written `Semaphore` in jrt over the
+`ReentrantLock`'s conditions under another Go name, and j2g named the type by the derived name:
+fixed in j2g, amendment Y1), and the decision for a hand-written `Semaphore` in jrt over the
 translated AQS (amendment Y3).
 
-**Dyn implements jrt's hand-written interfaces** (`arbace/a2g/dyn.ae`, `interfaces`). With
+**Dyn implements jrt's hand-written interfaces** (`arbace/j2g/dyn.ae`, `interfaces`). With
 `Semaphore` the pprint tests loaded but `(future-cancel f)` threw `ClassCastException`:
 `future-call` reifies `java.util.concurrent.Future`, an interface jrt hand-writes, and Dyn had
 the methods of the translated interfaces only, so a reify of `Future` was not a Go `jrt.Future`
@@ -985,7 +987,7 @@ slot fn's result is cast): `Future`, `ExecutorService` (with `Executor`), `Lock`
 none; 549 interfaces and 1,029 methods
 (were 542 and 996), the executable about 200 KB larger. The Go assertion to such an interface
 now succeeds for every Dyn, so jrt's `C_InstanceOf` and `C_Cast` of its hand-written interfaces
-make the nominal check a2g's make for the translated ones (`jrt.dynNominal`: a Dyn's class
+make the nominal check j2g's make for the translated ones (`jrt.dynNominal`: a Dyn's class
 must implement the interface). Amendment Y2.
 
 **The oracle's harvest takes the forms naming `proxy`** (ORACLE.md, "Exclusions"): the suite's
@@ -999,7 +1001,7 @@ only renumbers their `fn*` argument gensyms, so they were not rewritten). Amendm
 
 - **The pprint namespace loads** on the Go build: 58 tests, 474 assertions, 470 pass, 4 errors:
   the four `flush-underlying` tests make a proxy of `java.io.BufferedWriter`, which is not one
-  of a2g's proxy superclasses (`dyn/proxy-supers`): a proxy superclass must not be a leaf
+  of j2g's proxy superclasses (`dyn/proxy-supers`): a proxy superclass must not be a leaf
   (§5.3), and `BufferedWriter` is one in the closed world (no subclass); adding it means making
   it a non-leaf class (its values `BufferedWriter_I`), not done. **Clojure's suite** (amd64):
   646 tests, 19,280 assertions, 19,251 pass, 19 fail, 10 errors (were 588, 18,806, 18,781, 19,
@@ -1025,7 +1027,7 @@ only renumbers their `fn*` argument gensyms, so they were not rewritten). Amendm
   small work; it also gives the REPL `Character/getName` and `Character/codePointOf`. Worth it.
 - **24 cases, `CANON_EQ`** (`unicode.ae` 161-195): `Pattern` normalizes with
   `java.text.Normalizer` (NFD), not in the world. Tried: with `java/text/Normalizer` and
-  `jdk/internal/icu/text/NormalizerBase` in the closure, a2g finds the ICU loader
+  `jdk/internal/icu/text/NormalizerBase` in the closure, j2g finds the ICU loader
   (`ICUBinary`, `NormalizerImpl.load`, `CodePointTrie.fromBinary`) needing `java.nio.ByteBuffer`,
   `IntBuffer` and `Buffer` (the JDK generates them from templates; none is in the world),
   `UCharacterIterator`, `UTF16`, `UCharacterProperty`, `java.text.CharacterIterator`, and
@@ -1039,36 +1041,36 @@ only renumbers their `fn*` argument gensyms, so they were not rewritten). Amendm
 
 ### Amendments (accepted 2026-10-09)
 
-- **Y1 (A2G-SPEC §4.4, Names)** a2g names a class jrt provides, and does not translate, by the
+- **Y1 (J2G-SPEC §4.4, Names)** j2g names a class jrt provides, and does not translate, by the
   Go name jrt registers for it (the class variable's name less `_class`), which may differ from
   the name derived from the Java name (`ReentrantLock_ConditionObject` for
   `AbstractQueuedSynchronizer$ConditionObject`).
-- **Y2 (A2G-SPEC §5.12, Dynamic objects)** Dyn implements, besides the translated public
+- **Y2 (J2G-SPEC §5.12, Dynamic objects)** Dyn implements, besides the translated public
   interfaces, jrt's public hand-written interfaces that have a cast function; jrt's instance
   checks and casts of its hand-written interfaces make the nominal check (`jrt.dynNominal`).
-- **Y3 (A2G-SPEC §8.4; JAVA-SURFACE.md decision 4)** `java.util.concurrent.Semaphore` is
+- **Y3 (J2G-SPEC §8.4; JAVA-SURFACE.md decision 4)** `java.util.concurrent.Semaphore` is
   hand-written in jrt, as the locks are, not `AbstractQueuedSynchronizer` translated (which needs
   `Unsafe` additions and has a two-word race on `Node.waiter`); fairness is not kept.
 - **Y4 (ORACLE.md, Exclusions)** the harvest keeps the assertions of `java_interop.clj` that
   name the proxy functions (the suite's proxy tests), the rest of that namespace staying out.
 
-Accepted by the user (2026-10-09) and folded: Y1 A2G-SPEC §4.4, Y2 §5.12, Y3 §8.4 and
-JAVA-SURFACE.md decision 4, Y4 ORACLE.md (Exclusions); listed in A2G-SPEC §16.
+Accepted by the user (2026-10-09) and folded: Y1 J2G-SPEC §4.4, Y2 §5.12, Y3 §8.4 and
+JAVA-SURFACE.md decision 4, Y4 ORACLE.md (Exclusions); listed in J2G-SPEC §16.
 
 ## Proxies of BufferedWriter: pprint passes
 
 Branch `pprint-bw` (2026-10-09). The last 4 errors of the suite's `pprint` namespace (the
 `flush-underlying` tests) made a proxy of `java.io.BufferedWriter` that counts its flushes
 (`(proxy [java.io.BufferedWriter] [o] (flush [] (proxy-super flush) (swap! n inc)))`), and
-`BufferedWriter` was not one of a2g's proxy superclasses: a class of `proxy-supers` had to be
+`BufferedWriter` was not one of j2g's proxy superclasses: a class of `proxy-supers` had to be
 non-leaf already, and `BufferedWriter` is a leaf of the closed world (nothing extends it).
 
 **The general way: a class of `proxy-supers` is not a leaf.** Its `DynSub_C` extends it, so it has
 a subclass in the program, and leafness (§5.3) now counts it: `model/leaf?` answers false for a
-translated, non-final class of the list, which moves from `arbace.a2g.dyn` to `arbace.a2g.model`
+translated, non-final class of the list, which moves from `arbace.j2g.dyn` to `arbace.j2g.model`
 (`m/proxy-supers`; `dyn/proxy-supers` refers to it) and gains `java/io/BufferedWriter`. A listed
 class then gets its class interface `C_I`, its values are `C_I` wherever the static type is `C`,
-its methods split into `Impl_` and dispatch methods, and a2g writes `DynSub_C` over it with no
+its methods split into `Impl_` and dispatch methods, and j2g writes `DynSub_C` over it with no
 other change: the rule a class must be non-leaf to be listed becomes a consequence of being
 listed. (A hand-written class stays as jrt declares it: `ThreadLocal` is non-leaf in jrt.) For
 `BufferedWriter` the change touches its own file, `PrintStream` (which holds one) and the class
@@ -1092,17 +1094,17 @@ and nil (flushes counted as the JVM counts them), `pprint` (the pretty writer ov
   to 59,584,911 bytes, +981 KB (+1.7%): `DynSub_BufferedWriter` and `BufferedWriter`'s split.
 - **The oracle**: `bin/oracle check jvm` 20,276 of 20,276. The Go build (amd64): 20,243 of
   20,276 (the 13 new cases match); the 33 mismatches are those `known-go-amd64.edn` records.
-- **Checks**: `bin/a2g-check -- --program` 9,010 of 9,010 steps on amd64 and on arm64; `bin/jrt
-  test` (amd64) passes. The change is in a2g only (not compiled by the bootstrap), so `bin/gate` was
+- **Checks**: `bin/j2g-check -- --program` 9,010 of 9,010 steps on amd64 and on arm64; `bin/jrt
+  test` (amd64) passes. The change is in j2g only (not compiled by the bootstrap), so `bin/gate` was
   not needed.
 
 ### Amendments (accepted 2026-10-10)
 
-- **Z1 (A2G-SPEC §5.3, §5.12; accepted by the user 2026-10-10, folded there and in §16)** A
+- **Z1 (J2G-SPEC §5.3, §5.12; accepted by the user 2026-10-10, folded there and in §16)** A
   translated, non-final class of `proxy-supers` is not a leaf: its `DynSub_C` is a subclass in the
   program, so leafness counts it (it was a condition on the list, now a consequence of it; X1's
-  "leafness stays a property of the closed world" reads: of the closed world and the proxy types a2g
-  adds to it). The list moves to `arbace.a2g.model/proxy-supers` and gains `java.io.BufferedWriter`
+  "leafness stays a property of the closed world" reads: of the closed world and the proxy types j2g
+  adds to it). The list moves to `arbace.j2g.model/proxy-supers` and gains `java.io.BufferedWriter`
   (pprint's tests); §5.12's "a proxy of a leaf class throws (`BufferedWriter` ...)" keeps `BitSet`
   as its example.
 
@@ -1110,7 +1112,7 @@ and nil (flushes counted as the JVM counts them), `pprint` (the pretty writer ov
 
 Branch `suite-last` (2026-10-09, the user's decision): the failures of Clojure's suite on the Go
 build that no other agent owns (`java.io.File`, sockets, pprint's `BufferedWriter` proxy, regex
-resources, class forms at the REPL and general speed are others').
+resources, Java forms at the REPL and general speed are others').
 
 ### Locals clearing (`clearing`: 12 of 31 before, 31 of 31 now)
 
@@ -1144,8 +1146,8 @@ The evaluator now does the same (`arbace/lang/go/Compiler.ae`):
 - `BodyExpr.evalIn` skips a local in a statement position (compiled code emits nothing for it).
 - An evaluated fn's class declares its closed-over locals as fields, named and typed as
   `ObjExpr.compile` declares them (not public; primitive ones with their primitive type), whose
-  reflective `get` reads the `EvalFn`'s captured value (`Dyn.defineFnField`, a native a2g
-  writes, `arbace/a2g/dyn.ae`).
+  reflective `get` reads the `EvalFn`'s captured value (`Dyn.defineFnField`, a native j2g
+  writes, `arbace/j2g/dyn.ae`).
 
 Effect beyond the tests: a lazy seq's head held in a local is no longer retained.
 `(defn f [n] (let [s (map inc (range n))] (count s)))` with `n` 5,000,000 runs in 121 MB
@@ -1156,9 +1158,9 @@ is still read and cleared: harmless, as nothing reads it after; seen by no test.
 ### The Java API (`api`: loads now)
 
 `clojure.test-clojure.api` imports `arbace.java.api.Clojure` (the Java API for calling Arbace,
-a class of the runtime on the JVM, class forms in `arbace/java/api/Clojure.ae`), which the Go
-program did not have. `bin/a2g --program` now translates it with `arbace/lang`
-(`arbace/a2g/main.ae`): `Clojure/var`, `Clojure/read` work (its static initializer requires
+a class of the runtime on the JVM, Java forms in `arbace/java/api/Clojure.ae`), which the Go
+program did not have. `bin/j2g --program` now translates it with `arbace/lang`
+(`arbace/j2g/main.ae`): `Clojure/var`, `Clojure/read` work (its static initializer requires
 `arbace.edn` at first use, as on the JVM). The namespace has no `deftest`s, only three
 test.generative specs (`api-can-read`, `api-can-find-var`, `api-can-find-var-str`): see
 "test.generative" below.
@@ -1170,8 +1172,8 @@ Upstream's second phase (`ant test-generative`: 27 specs in `data-structures`, `
 and `clojure.java.classpath`, which import `java.util.jar.JarFile` and `JarEntry`,
 `java.io.FileReader` and extend `java.net.URLClassLoader`; `clojure.tools.reader` names
 `java.text.SimpleDateFormat`. These libraries are loaded from `ARBACE_PATH`, not embedded, so
-a2g's cut classes (the classes the embedded namespaces name outside the world) did not include
-them. `arbace.a2g.embed/library-cuts` adds them to the cut classes (their members throw when
+j2g's cut classes (the classes the embedded namespaces name outside the world) did not include
+them. `arbace.j2g.embed/library-cuts` adds them to the cut classes (their members throw when
 called; the runner, given the namespace list, calls none).
 
 Result (amd64, `-e` setting `clojure.test.generative.msec` to 60,000 as upstream's build does):
@@ -1228,7 +1230,7 @@ elsewhere (`java.io`, `method-thunks`, `reader`'s and `sequences`' `File` errors
 
 | namespace | why | to fix | cost |
 |---|---|---|---|
-| `generated-all-fi-adapters-in-let`, `generated-functional-adapters-in-def`, `...-requiring-reflection` (3 × 99) | Java fixture `arbace.test.AdapterExerciser` | the suite's Java fixtures (`test/java`, 12 files, 709 lines) converted by repr/java (tried: all 12 convert, 0 errors, in 1 s) and translated into a test build of the executable (`bin/a2g --program --input DIR`, a second link `arbace-tests`); the runner uses it; the gate's `suite-go` builds it (about 3 minutes more) | half a day (SL4) |
+| `generated-all-fi-adapters-in-let`, `generated-functional-adapters-in-def`, `...-requiring-reflection` (3 × 99) | Java fixture `arbace.test.AdapterExerciser` | the suite's Java fixtures (`test/java`, 12 files, 709 lines) converted by repr/java (tried: all 12 convert, 0 errors, in 1 s) and translated into a test build of the executable (`bin/j2g --program --input DIR`, a second link `arbace-tests`); the runner uses it; the gate's `suite-go` builds it (about 3 minutes more) | half a day (SL4) |
 | `param-tags` (136), `reflect` (7), `try-catch` (5) | Java fixtures `SwissArmy`, `ConcreteClass`; `reflector.IBar`; `ReflectorTryCatchFixture` | the same test build | with the above |
 | `java-interop` (337) | Java fixtures, and `arbace.inspector` (D6: Swing) | the test build, and the namespace loading with Swing's classes cut (as `metadata`); `test-proxy-method-order` reads class files with ASM, `test-proxy-super` extends `BitSet` (not a proxy superclass) | the above plus a day |
 | `compilation` (125) | Java fixtures; `compile` writes class files | the test build gives the fixtures; the AOT tests (`compile`, `*compile-path*`) cannot pass while the Go build writes no class files: a per-test skip as for `transducers` | the above plus an hour |
@@ -1289,18 +1291,18 @@ assertions for `transducers` there).
 
 Prefix SL (this branch). **Decided by the user 2026-10-10:** SL1, SL2, SL3 (the per-test skip
 and the per-namespace timeouts, both done), SL6 and SL7 accepted and folded (each marked below
-with where it went, and in A2G-SPEC §16); SL4 and SL5 not taken for now (nor `ProcessBuilder`
+with where it went, and in J2G-SPEC §16); SL4 and SL5 not taken for now (nor `ProcessBuilder`
 for `java.shell`/`java.process`). (SL4 was taken later the same day as FX1, "The suite's Java
 fixtures", below; processes were done too: JRT-NOTES.md, "Processes".)
 
-- **SL1 (EVAL-PLAN §2.1; A2G-SPEC §10.2) Locals clearing.** The evaluator clears locals as
+- **SL1 (EVAL-PLAN §2.1; J2G-SPEC §10.2) Locals clearing.** The evaluator clears locals as
   compiled code does: `ObjExpr.compile`'s variant makes `closesExprs` (the analysis's clear
   sites of a closure's creation), `LocalBindingExpr.evalIn` and `Evaluator.capture` null a slot,
   or a `^:once` fn's closed-over value, after a use the analyzer marks `shouldClear`; a local in
   a statement position is not evaluated. An evaluated fn's class declares its closed-over locals
   as (non-public) fields read by reflection from the `EvalFn` (the native
   `Compiler$Dyn.defineFnField`). EVAL-PLAN §2.1 said nothing of clearing; "A split for phase 2"
-  listed it for part 4. *Accepted 2026-10-10, folded into EVAL-PLAN §2.1 and A2G-SPEC §10.2.*
+  listed it for part 4. *Accepted 2026-10-10, folded into EVAL-PLAN §2.1 and J2G-SPEC §10.2.*
 - **SL2 (EVAL-PLAN §2.6) Hinted calls through the invoker.** A resolved method of a public class
   is called through jrt's member-table invoker (`Evaluator.invokeResolved`, jrt's native
   `Compiler_Evaluator_InvokeDirect_..._native`), not `Reflector.invokeMatchingMethod`: no
@@ -1320,7 +1322,7 @@ fixtures", below; processes were done too: JRT-NOTES.md, "Processes".)
   (SPEED-NOTES.md, "Amendments").*
 - **SL4 (proposal; B1-PLAN D6, the gate) A test build with the suite's Java fixtures.** repr/java
   converts `test/java` (12 files, done in 1 s, no error); `bin/arbace-go --build-tests` would
-  translate them with the program (`bin/a2g --program --input`) into a second executable
+  translate them with the program (`bin/j2g --program --input`) into a second executable
   `arbace-tests` that `suite-go` uses: `generated-*` (297 assertions), `param-tags` (136),
   `reflect` (7), `try-catch` (5) and most of `compilation` could run. Cost: half a day, and
   about 3 minutes more in the gate's Go chain (a second link with the fixtures, or the fixtures
@@ -1332,17 +1334,17 @@ fixtures", below; processes were done too: JRT-NOTES.md, "Processes".)
   `java-interop` gets past its `require`; a REPL user gets "not in the Go build" errors when
   calling them instead of a missing namespace. Half a day; it reverses part of D6. *Not taken
   (the user, 2026-10-10).*
-- **SL6 (A2G-SPEC §10.6) The Java API in the program.** `bin/a2g --program` translates
+- **SL6 (J2G-SPEC §10.6) The Java API in the program.** `bin/j2g --program` translates
   `arbace/java/api/Clojure.ae` with `arbace/lang`: `arbace.java.api.Clojure` exists in the Go
   build as on the JVM (it is not among the embedded namespaces' sources). *Accepted 2026-10-10,
-  folded into A2G-SPEC §10.6.*
-- **SL7 (A2G-SPEC §4.1, M3; the runner) Library cuts and test.generative on Go.** Besides the
-  classes the embedded namespaces name, a2g cuts a fixed list of JDK classes that libraries
-  loaded from `ARBACE_PATH` import (`arbace.a2g.embed/library-cuts`: `java.util.jar.JarFile`,
+  folded into J2G-SPEC §10.6.*
+- **SL7 (J2G-SPEC §4.1, M3; the runner) Library cuts and test.generative on Go.** Besides the
+  classes the embedded namespaces name, j2g cuts a fixed list of JDK classes that libraries
+  loaded from `ARBACE_PATH` import (`arbace.j2g.embed/library-cuts`: `java.util.jar.JarFile`,
   `JarEntry`, `java.net.URLClassLoader`, `java.io.FileReader`, `java.text.SimpleDateFormat`, for
   test.generative's runner, tools.namespace, java.classpath and tools.reader), so test.generative
   runs on the Go build; `bin/clojure-tests` runs its phase there by default, and the reference
-  holds its result. *Accepted 2026-10-10, folded into A2G-SPEC §4.1.*
+  holds its result. *Accepted 2026-10-10, folded into J2G-SPEC §4.1.*
 
 ## The suite's Java fixtures (branch `gofix`)
 
@@ -1356,15 +1358,15 @@ through the class loaders, JRT-NOTES.md "Resources by URL"), and two oracle diff
   own run, `java-fixtures`) and converts `test/java` (12 files: `compilation.TestDispatch`,
   `JDK8InterfaceMethods`, `ClassWithFailingStaticInitialiser`, `reflector.IBar`, and
   `arbace.test`'s `AdapterExerciser`, `FIConstructor`, `FIStatic`, `FunctionalTester`,
-  `SwissArmy`, `ConcreteClass`, `GenericInterface`, `ReflectorTryCatchFixture`) into class forms
+  `SwissArmy`, `ConcreteClass`, `GenericInterface`, `ReflectorTryCatchFixture`) into Java forms
   with repr/java (javac's class path: stage 2, for `IFn` and the Java API): 12 of 12, no error.
   (2026-10-12, after standalone S1: the forms are committed in `test/java-fixtures/`, which
   `--build-tests` reads by default, without javac; `--java-fixtures verify` and `update` prove
   and regenerate them: test/java-fixtures/README.md.)
-- `bin/arbace-go --build-tests [DIR]` translates them with the program (`bin/a2g --program --input
+- `bin/arbace-go --build-tests [DIR]` translates them with the program (`bin/j2g --program --input
   DIR`, every public member a root as for the rest of the REPL's world) into
-  `target/arbace-go/<arch>/arbace-tests`, with its own a2g output, work modules and image
-  (`a2g-tests`, `work-tests-<arch>`); the shipped executable does not carry them. The test build
+  `target/arbace-go/<arch>/arbace-tests`, with its own j2g output, work modules and image
+  (`j2g-tests`, `work-tests-<arch>`); the shipped executable does not carry them. The test build
   is 63.7 MB against the shipped 62.1 MB (amd64): the fixtures, their 100-odd functional
   interfaces' adapters and `Dyn` slots.
 - `bin/clojure-tests` with `CLOJURE_TESTS_GO` checks that the executable holds the fixtures
@@ -1372,7 +1374,7 @@ through the class loaders, JRT-NOTES.md "Resources by URL"), and two oracle diff
   is the test build's reference. `bin/gate --full`'s Go chain builds the test build after the
   shipped one and runs the suite on it (`go-build-tests`, then `suite-go`), beside the smoke
   test and the oracle on the shipped executable.
-- Found on the way, in a2g: a derived method's body (a bridge's casts) named the classes as
+- Found on the way, in j2g: a derived method's body (a bridge's casts) named the classes as
   jrt's own package does, unqualified, which is right only in jrt: `ConcreteClass`' bridge in
   `arbace/lang` did not build. `derived-body` now qualifies them as its package sees them.
 
@@ -1455,11 +1457,11 @@ Other checks: `bin/arbace-go --smoke` passes; the whole oracle on the shipped ex
 `--expected test/oracle/known-go-amd64.edn`: 21,794 of 21,800, the 6 recorded, none new (after
 `gosec`: 22,118 cases, 7 recorded); the JVM's suite on stage 2 is unchanged by the runner's change
 (`java.io`, `reflect`, `try-catch` checked, and the reference has no `:skipped-tests`). No source
-the bootstrap compiles changed (the Go variants, a2g, the overlay and jrt are the Go build's).
+the bootstrap compiles changed (the Go variants, j2g, the overlay and jrt are the Go build's).
 
 ### The gate's cost
 
-The test build is a second a2g run and Go build: 154 s (a2g 84 s, the Go build 47 s with go's
+The test build is a second j2g run and Go build: 154 s (j2g 84 s, the Go build 47 s with go's
 cache warm from the shipped build, the image 15 s, the fixtures' conversion about 10 s), 195 s
 when the shipped build changed the cache's packages too. In `bin/gate --full` it runs between
 the shipped build and the suite on Go, beside the smoke test and the oracle, so the Go chain's
@@ -1472,39 +1474,39 @@ is unchanged (its Go check is the shipped executable's smoke test).
 Prefix FX (unique to this branch). Accepted by the user 2026-10-10 (the journal on `arbace-for-golang`, "the suite's
 Java fixtures, resources by URL"); where each is folded is marked below.
 
-- **FX1 (B1-PLAN D6; A2G-SPEC §10.6; the gate) The test build.** `bin/arbace-go --build-tests`
+- **FX1 (B1-PLAN D6; J2G-SPEC §10.6; the gate) The test build.** `bin/arbace-go --build-tests`
   makes `arbace-tests`, the program with the suite's Java fixtures (`bin/clojure-tests
   --java-fixtures`: repr/java on the renamed `test/java`), which `bin/clojure-tests` requires of
   `CLOJURE_TESTS_GO` and `bin/gate --full`'s `suite-go` uses; `test/arbace-go-results.edn` is
   its reference, with `compilation`, `generated-*` ×3, `java-interop`, `param-tags`, `reflect`
   and `try-catch` no longer skipped. Supersedes SL4. *Accepted 2026-10-10, folded into
-  B1-PLAN D6 and A2G-SPEC §10.6 and §16 ("The suite's Java fixtures").*
+  B1-PLAN D6 and J2G-SPEC §10.6 and §16 ("The suite's Java fixtures").*
 - **FX2 (EVAL-NOTES "Phase 2C", the runner; SL3) Skipped tests are not compiled**, and a
   stand-in `arbace.inspector` on the suite's `ARBACE_PATH` for the Go runs (`test/suite-go`).
   *Accepted 2026-10-10, folded into "Phase 2C", "The runner", above.*
-- **FX3 (EVAL-PLAN §2; A2G-SPEC §10.2) Functional interfaces of let and loop locals.** The
+- **FX3 (EVAL-PLAN §2; J2G-SPEC §10.2) Functional interfaces of let and loop locals.** The
   evaluator adapts or casts the init of an object local tagged with a functional interface, as
-  `LetExpr.doEmit` compiles it. *Accepted 2026-10-10, folded into EVAL-PLAN §2.6 and A2G-SPEC
+  `LetExpr.doEmit` compiles it. *Accepted 2026-10-10, folded into EVAL-PLAN §2.6 and J2G-SPEC
   §10.2 ("Functional interfaces of `let` and `loop` locals"; §16, "The suite's Java fixtures").*
-- **FX4 (EVAL-PLAN §2.5, A2G-SPEC §10.2) The JVM's errors of `new` and of a stub's name.** The
+- **FX4 (EVAL-PLAN §2.5, J2G-SPEC §10.2) The JVM's errors of `new` and of a stub's name.** The
   resolved `new` of an abstract class throws `InstantiationError` before its arguments; a
   `deftype*` stub whose name has `/` or a leading `[` is `NoClassDefFoundError: IllegalName:
   NAME`, as `ClassLoader.preDefineClass` refuses it; `java.lang.InstantiationError` joins the
-  closure. *Accepted 2026-10-10, folded into EVAL-PLAN §2.5 and A2G-SPEC §10.2 ("The JVM's errors
+  closure. *Accepted 2026-10-10, folded into EVAL-PLAN §2.5 and J2G-SPEC §10.2 ("The JVM's errors
   of `new` and of a stub's name"; §16, "The suite's Java fixtures").*
-- **FX5 (A2G-SPEC §10.3, namespace variants) `arbace.reflect` without ASM**: the variant
+- **FX5 (J2G-SPEC §10.3, namespace variants) `arbace.reflect` without ASM**: the variant
   `arbace/lang/go/ns/reflect/java.subst.ae`. *Accepted 2026-10-10, listed in "Namespace
-  variants", above, and folded into A2G-SPEC §10.3 (§16, "The suite's Java fixtures").*
-- **FX6 (A2G-SPEC §10.3, M5, RD1; §4.1, SL7) Resources by URL**: JRT-NOTES.md "Resources by URL"
+  variants", above, and folded into J2G-SPEC §10.3 (§16, "The suite's Java fixtures").*
+- **FX6 (J2G-SPEC §10.3, M5, RD1; §4.1, SL7) Resources by URL**: JRT-NOTES.md "Resources by URL"
   (`ClassPathResources`, the class loaders' `getResource` and `getResources`, `URLClassLoader`
   in the world and out of the library cuts, `VM.isSystemDomainLoader`, the optional host
-  interface `HostExecutable`). *Accepted 2026-10-10, folded into A2G-SPEC §4.1 (the world),
+  interface `HostExecutable`). *Accepted 2026-10-10, folded into J2G-SPEC §4.1 (the world),
   §9.4 (`HostExecutable`), §10.3 (resources by URL) and §11 (the loaders' table entries); §16,
   "The suite's Java fixtures".*
 - **FX7 (JRT-NOTES "Files", FS2) `Files.newDirectoryStream`** in jrt's `Files`, with jdk26u's
   `DirectoryStream`, `NotDirectoryException` and `Globs`; the entries listed when the stream is
   opened. *Accepted 2026-10-10, folded into JRT-NOTES.md "Files" ("What was done" and its
-  amendments); A2G-SPEC §16 ("The suite's Java fixtures") cites it there.*
+  amendments); J2G-SPEC §16 ("The suite's Java fixtures") cites it there.*
 
 Not done, proposed for after the freeze or for the user to choose: annotations on interfaces
 made at run time and `AdaptFn` for them (2 java-interop tests); `java.util.BitSet` among the

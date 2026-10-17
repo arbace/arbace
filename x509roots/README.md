@@ -3,7 +3,7 @@
 Mozilla's trusted roots for jrt's TLS (doc/go/BOX-NOTES.md, "TLS (option 2)", BX73), vendored as
 Go forms: a source root of Go forms of its own (`x509roots/go/<import path>.ae`), like `box/`
 and `tamago/`, which the Go build adds to jrt's program (`bin/build-go --root x509roots`: the
-native executables, the box's guest, `bin/jrt`, the a2g checks).
+native executables, the box's guest, `bin/jrt`, the j2g checks).
 
 | package (import path) | forms | from |
 |---|---|---|

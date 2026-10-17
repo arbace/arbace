@@ -2,9 +2,9 @@
 
 Arbace is a Clojure derivative written entirely in Clojure.
 
-- **Extended to represent its own implementation.** Clojure gained the class forms
+- **Extended to represent its own implementation.** Clojure gained the Java forms
   ([spec](doc/classes/SPEC.md)): every construct of a Java class file as idiomatic Clojure
-  (`defclass`, `method`, `switch`, `label`, ...). With them, and the Java → class forms converter
+  (`defclass`, `method`, `switch`, `label`, ...). With them, and the Java → Java forms converter
   repr/java, Clojure's Java half became Clojure too. Arbace is that vendored Clojure, all `.ae`,
   bootstrapping itself in stages that rebuild each other byte for byte and pass Clojure's whole
   test suite.
@@ -45,7 +45,7 @@ the JVM hosts repr/java's Java front end (javac).
 
 The branch `arbace-for-golang` (tag `arbace-for-go1.27.1-v1`, 2026-10-11) holds Arbace as one
 static executable for Linux, amd64 and arm64, with no JVM ([doc/go/B1-PLAN.md](doc/go/B1-PLAN.md),
-milestone B1a): a2g (c2g on the branch) translates Arbace's runtime and the part of jdk26u it needs (`java.base`'s
+milestone B1a): j2g (c2g on the branch) translates Arbace's runtime and the part of jdk26u it needs (`java.base`'s
 collections, concurrency, time, text, regex, files, sockets, processes and security basics,
 among others) into Go, built with TamaGo's go1.27.1; the evaluator analyses forms and runs them
 as compiled closures; the core namespaces are prepared at build time, so it starts in about 0.2
@@ -64,7 +64,7 @@ Since standalone S4 (2026-10-12; the milestone `arbace-seed-is-go-v1`, 2026-10-1
 Its seed is Arbace's own Go program as Arbace printed it, `seed/arbace-seed-go.tar.xz` (5.4 MB
 as xz, 61 MB of Go source, pinned by its SHA-256; the Go toolchain that builds it, TamaGo's go1.27.1,
 pinned by the hash of its sources). Go's toolchain alone builds it into stage 0, an Arbace
-executable; stage 0 runs a2g and repr/go on Arbace's sources and prints and builds the program
+executable; stage 0 runs j2g and repr/go on Arbace's sources and prints and builds the program
 again; that program does the same, and the third generation is the second byte for byte (the
 fixpoint). The seed is that fixpoint's printed source, so the executable built from it rebuilds
 itself exactly (`bin/seed --verify`). The JDK's classes Arbace needs are committed as class
@@ -97,7 +97,7 @@ runs on a Linux host with /dev/kvm; arm64 on KVM/arm64, checked here in an emula
 forms) and a bundle with a checklist (`bin/box-mac-bundle`), which passed on an M2 Max.
 
 The tag `arbace-inside-itself-v1` (2026-10-15, on main) marks the box rebuilding Arbace inside
-itself: a guest runs a2g, repr/go's printing, the plan and Go's compiler and linker as spawned tool
+itself: a guest runs j2g, repr/go's printing, the plan and Go's compiler and linker as spawned tool
 guests over the store, and the image it builds is the host's byte for byte, on amd64, in the
 emulated arm64 VM and on the Mac (`bin/box-rebuild`; [doc/go/BOX-NOTES.md](doc/go/BOX-NOTES.md),
 "S8").
@@ -127,13 +127,13 @@ bin/c2a -o lib/ae path/to/library/src                       # .clj/.cljc -> .ae,
 ARBACE_PATH=lib/ae bin/arbace-go -e "(require 'my.lib)"
 ```
 
-The translators name Arbace (`a`) as their target or source: c2a (Clojure → Arbace) and a2g
-(Arbace's class forms → Go forms, for the Go executable). The bridges between a language's text
+The translators are c2a (Clojure → Arbace) and j2g (Java forms → Go forms, for the Go
+executable). The bridges between a language's text
 and its forms are the `repr` family, one command each with the verbs `read` and `print`:
-repr/java (Java → class forms, `bin/repr-java`) and repr/go (Go → Go forms, and back,
+repr/java (Java → Java forms, `bin/repr-java`) and repr/go (Go → Go forms, and back,
 `bin/repr-go`); the build of a program held as Go forms is `bin/build-go` (`arbace.build.go`).
-From 2026-10-11 to 2026-10-17 the bridges were j2a and g2a (the build `bin/g2a build`), and until
-2026-10-11 j2c, g2c and c2g (a2g), as the frozen branches, the journals and the dated records
+From 2026-10-11 to 2026-10-17 the bridges were j2a and g2a (the build `bin/g2a build`) and j2g
+was a2g (Java forms were "class forms"), and until 2026-10-11 j2c, g2c and c2g, as the frozen branches, the journals and the dated records
 name them (doc/NAMING-SURVEY.md).
 
 ## Arbace's version
@@ -159,8 +159,8 @@ seed was printed from (the seed's `SEED.edn`).
   (on `arbace-for-golang`): Arbace for Golang: build, run, verify, the frozen branch
 - [doc/JOURNAL.md](doc/JOURNAL.md): every decision and action, append-only (since 2026-10-15;
   the earlier history at the tag `arbace-inside-itself-v1` and on the frozen branches)
-- [doc/classes/SPEC.md](doc/classes/SPEC.md): the class forms
-- [doc/go/B1-PLAN.md](doc/go/B1-PLAN.md): the Go executable's plan; [doc/go/A2G-SPEC.md](doc/go/A2G-SPEC.md),
+- [doc/classes/SPEC.md](doc/classes/SPEC.md): the Java forms
+- [doc/go/B1-PLAN.md](doc/go/B1-PLAN.md): the Go executable's plan; [doc/go/J2G-SPEC.md](doc/go/J2G-SPEC.md),
   its translation; [doc/go/EXEC-NOTES.md](doc/go/EXEC-NOTES.md), the executable;
   [doc/go/JAVA-BASE.md](doc/go/JAVA-BASE.md), how much of `java.base` it implements;
   [doc/go/SPEED-NOTES.md](doc/go/SPEED-NOTES.md), its speed; [doc/go/BOX-SURVEY.md](doc/go/BOX-SURVEY.md)

@@ -23,7 +23,7 @@
 > JVM back end: ASM (`arbace/asm.ae`, `arbace/asm/`), the bytecode emitters of
 > `arbace/lang/Compiler.ae` (the `emit*` methods, the class generation of `ObjExpr`,
 > `SourceDebugExtensionAttribute`, the ASM-typed fields and constants), `arbace/lang/Compile.ae`,
-> `arbace/lang/DynamicClassLoader.ae`, `arbace/lang/Intrinsics.ae`, and the class forms
+> `arbace/lang/DynamicClassLoader.ae`, `arbace/lang/Intrinsics.ae`, and the Java forms
 > compiler's back end (`arbace/classes/emit.ae`, `compiler.ae`, `shape.ae`, `verify.ae`,
 > `build.ae`, `boot.ae`) are on the branch `arbace-for-java-26` only; `arbace/genclass.ae`,
 > `arbace/core_proxy.ae`, `arbace/reflect/java.ae`, `arbace/main.ae` and `arbace/core/server.ae`
@@ -31,7 +31,7 @@
 > 14, 16, ..., the binary seed) describe them, they describe that branch.
 
 The frozen baseline `clojure/` is vendored under `arbace/`, renamed `clojure.*` → `arbace.*`, all
-of it `.clj`: the Java files as class forms (doc/classes/SPEC.md), Clojure's own `.clj` renamed.
+of it `.clj`: the Java files as Java forms (doc/classes/SPEC.md), Clojure's own `.clj` renamed.
 The vendored tree is the source of truth from now on and is maintained by hand; how it was
 derived is recorded below and can be replayed with `bin/vendor-arbace` on the branch
 `arbace-for-java-26` (main, without `clojure/` since the freeze, no longer has it). The bootstrap of SPEC
@@ -48,7 +48,7 @@ and stage 2, and, since spec was vendored too (below, "Spec"), passes in full.
 | `arbace/asm.ae`, `arbace/asm/**.ae` | `arbace.asm`, `arbace.asm.commons`, `arbace.asm.signature` (ASM, BSD 3-Clause); on the branch `arbace-for-java-26` only since 2026-10-12 |
 | `arbace/java/api.ae`, `arbace/java/api/Clojure.ae` | `arbace.java.api` |
 | `arbace/lang/Main.ae` | the class `arbace.lang.Main`, Clojure's main class `clojure.main` (`clojure/main.java`); vendored as `arbace.main` in `arbace/main_class.clj` with the package file `arbace.clj`, moved after vendoring (below) |
-| `arbace/classes/`, `arbace/repr/java/` (then `arbace/j2c/`, from 2026-10-11 `arbace/j2a/`) | the tools (javalisp, `arbace/javalisp/`, was dropped later), unchanged in place; no vendored name clashes with them. Later tools there: `arbace/repr/go/`, `arbace/a2g/`, `arbace/c2a/` (the renaming rules below, now c2a's, doc/C2A.md) |
+| `arbace/classes/`, `arbace/repr/java/` (then `arbace/j2c/`, from 2026-10-11 `arbace/j2a/`) | the tools (javalisp, `arbace/javalisp/`, was dropped later), unchanged in place; no vendored name clashes with them. Later tools there: `arbace/repr/go/`, `arbace/j2g/`, `arbace/c2a/` (the renaming rules below, now c2a's, doc/C2A.md) |
 | `doc/ARBACE.md` (was `arbace/README.md`) | what `arbace/` holds and its origin (licenses: `LICENSE.md`) |
 | `bin/vendor-arbace` | replays the derivation into `.tmp/vendor/` (never into `arbace/`) and checks it; on the branch `arbace-for-java-26` only |
 | `arbace/spec/**.ae`, `arbace/core/specs/alpha.ae` | spec.alpha and core.specs.alpha, vendored later and renamed alike (below, "Spec") |
@@ -56,7 +56,7 @@ and stage 2, and, since spec was vendored too (below, "Spec"), passes in full.
 | `test/arbace-results.edn` | the suite's reference for Arbace's stages (`test/baseline-results.edn` is the frozen baseline's); on the branch `arbace-for-java-26` only since 2026-10-12; main's is the Go build's, `test/arbace-go-results.edn` |
 | `seed/arbace-seed.jar`, `seed/arbace-seed.jar.sha256`, `bin/seed` | the binary seed, stage 0 of the bootstrap since 2026-10-08, and its pinned SHA-256 (below, "The binary seed"); the jar on the branch `arbace-for-java-26` only since 2026-10-12: main's seed is `seed/arbace-seed-go.tar.xz`, `bin/seed` its tool (hand change 23) |
 | `bin/build-arbace` | builds stages 1 to 3 into `target/` and checks the fixpoint; `--suite` runs the test suite on stages 1 and 2; on the branch `arbace-for-java-26` only since 2026-10-12 |
-| `target/stage1`, `target/stage2`, `target/stage3` | build output (gitignored, `/target/`): each stage's classes, those of the class forms under `arbace/` and the stage's AOT-compiled namespaces (below, "Compiled namespaces"; 5,756 classes per stage on 2026-10-08, the seed's); on the branch `arbace-for-java-26` only since 2026-10-12 |
+| `target/stage1`, `target/stage2`, `target/stage3` | build output (gitignored, `/target/`): each stage's classes, those of the Java forms under `arbace/` and the stage's AOT-compiled namespaces (below, "Compiled namespaces"; 5,756 classes per stage on 2026-10-08, the seed's); on the branch `arbace-for-java-26` only since 2026-10-12 |
 
 `clojure/version.properties` is not vendored (below). Nothing under `clojure/` changed.
 
@@ -88,7 +88,7 @@ seeded, with the two seed fixes of the journal). `bin/vendor-arbace` replays exa
 
 Check (step 3 of `bin/vendor-arbace`): the Java of `clojure/` renamed by the same rules (plus
 `package clojure;` → `package arbace;` in `main.java`, a single-segment package the rules leave
-alone) and compiled by javac gives 812 classes; the vendored class forms compiled at stage 0 give
+alone) and compiled by javac gives 812 classes; the vendored Java forms compiled at stage 0 give
 812 classes of the same names, all with javac's class shapes (SPEC §3: flags, signatures,
 attributes, members, symbolic content of code). Since the strings of the renamed Java are what the
 rules make of the original strings, this also checks that the converted files' strings are renamed
@@ -217,12 +217,12 @@ The first recommendation of `doc/MODERN-COMPILER.md` (§1, §3.1, §4.15), in `b
   `-Darbace.compile.path=target/stageN -Darbace.compiler.direct-linking=true` compiles, in
   order, the 35 namespaces of upstream `build.xml`'s `compile-clojure` (renamed; the list
   `bin/clojure-tests` also uses: `arbace.core` ... `arbace.repl.deps`), then
-  `arbace.classes.boot` (the class forms compiler). Direct linking, as Clojure's release jar.
+  `arbace.classes.boot` (the Java forms compiler). Direct linking, as Clojure's release jar.
   4,276 classes per stage (2,941 of them the 35 namespaces, 1,335 `arbace.classes`), in about
   6 s. `arbace.j2c` stays source (a stage-0 tool, run by the frozen `clojure/`; since 2026-10-08
   on `target/stage2`); the package
   files `arbace/lang.ae`, `arbace/asm.ae`, `arbace/java/api.ae` are not namespaces to compile
-  (they load the class forms). The next stage is built by these classes.
+  (they load the Java forms). The next stage is built by these classes.
 - **The fixpoint covers them**: stages 1, 2 and 3 are byte-identical, 5,091 classes each (815
   class-form classes, 4,276 namespace classes). No further nondeterminism had to be fixed:
   the two fixes made for `arbace.classes` (`LocalBinding.hashCode`, sorted proxy
@@ -286,7 +286,7 @@ during the runs; hyperfine, 3 warmups, 20 runs; noise about ±5 %):
 | `bin/arbace -e 1` (the last, through bash) | 0.17 s | 0.16 s |
 | frozen `clojure/` (`java -cp . clojure.main`) | 2.11 s | 1.95 s |
 
-- First class form of a session (a `defclass` in a script, the `eval` timed): 255 ms before,
+- First Java form of a session (a `defclass` in a script, the `eval` timed): 255 ms before,
   about 200 ms from `-cp target/stage2:.`, about 55 ms from `bin/arbace` (the cache has
   `arbace.classes` loaded and linked). The whole script: 2.33 s → 0.78 s → 0.26 s.
 - Compact object headers: no launch difference, and no throughput difference within the noise
@@ -440,10 +440,10 @@ compiled are the running runtime's own. Changes:
 2. **`arbace.classes.boot` works at every stage.** At stage 0 it reads the compiler's sources
    mapping every `arbace.X` symbol to `clojure.X` (it mapped only `arbace.asm` before), except the
    tools' own `arbace.classes.*`, `arbace.j2c.*` (and then `arbace.javalisp.*`). From stage 1 on it just
-   requires them. It interns the class forms' names into the running core namespace
+   requires them. It interns the Java forms' names into the running core namespace
    (`clojure.core` or `arbace.core`). The file itself names neither runtime (it finds the running
    core as ``(namespace `ns)``).
-3. **`arbace.classes.build`** (new): compiles trees of class forms files into class files at any
+3. **`arbace.classes.build`** (new): compiles trees of Java forms files into class files at any
    stage; `bin/build-arbace` and `bin/vendor-arbace` use it. It binds
    `arbace.classes.env/*from-source*` to the packages being built: their classes are never taken
    from the class path, even when loaded, so a stage compiling itself sees the classes of its
@@ -539,8 +539,8 @@ step 4 (2026-10-07); the others came with later work, as each says:
    language, and `CLOJURE_*` constants (not visible). The suite's `test-proxy-method-order`
    expects the `IProxy` method names; the harness adjusts it (above).
 
-3. **The class forms native** (SPEC §9.5; `doc/classes/COMPILER-NOTES.md`, "Native class
-   forms"): `arbace/core.clj` loads the new `arbace/core_classes.clj` (the class forms' names in
+3. **The Java forms native** (SPEC §9.5; `doc/classes/COMPILER-NOTES.md`, "Native class
+   forms"): `arbace/core.clj` loads the new `arbace/core_classes.clj` (the Java forms' names in
    `arbace.core`), and `arbace/lang/Compiler.clj` knows their special forms (`class*`,
    `switch*`, ...), handing them to `arbace.classes` through `arbace.classes.native`: new parser
    `Compiler$ClassFormsExpr`, the signal it throws caught by `FnExpr/parse`, `eval` and
@@ -562,8 +562,8 @@ step 4 (2026-10-07); the others came with later work, as each says:
    `generate-proxy` (`arbace/core_proxy.clj`) emits the superclass's constructors sorted by
    parameter types, not in reflection order (which varies between JVM runs; methods were
    sorted already).
-6. **Deftypes with class forms** (SPEC §9.5; COMPILER-NOTES, "Native class forms"):
-   `Compiler$NewInstanceExpr$DeftypeParser/parse` catches the class forms' signal from a
+6. **Deftypes with Java forms** (SPEC §9.5; COMPILER-NOTES, "Native Java forms"):
+   `Compiler$NewInstanceExpr$DeftypeParser/parse` catches the Java forms' signal from a
    method body of `deftype*` and analyzes `nil` in its place after
    `arbace.classes.native/compile-deftype` has compiled and defined the class.
 
@@ -635,7 +635,7 @@ step 4 (2026-10-07); the others came with later work, as each says:
       name. Field assignment (`setInstanceField`) keeps `Reflector`: it is rare, and a cached
       setter would be the place where JEP 500's final-field rules bite. Reflection warnings are
       made at analysis, unchanged; `eval` of top-level forms uses `Reflector` as before.
-    - `arbace/lang/ReflectorCallSite.clj` (new, Arbace's own class form): a `MutableCallSite`
+    - `arbace/lang/ReflectorCallSite.clj` (new, Arbace's own Java form): a `MutableCallSite`
       per site. Its fallback goes through `Reflector`'s unchanged path for the first call of a
       site (a site run once never links), and from the second call on it first links an entry:
       it finds the member `Reflector` would call with `Reflector`'s own code, unreflects it from
@@ -702,7 +702,7 @@ step 4 (2026-10-07); the others came with later work, as each says:
     `RT.java:119`) is gone, since JEP 486 (Java 24) disabled the Security Manager for good.
     Upstream still imports it (`clojure/clojure` master `4278bcea`, 2026-10-07); nothing in
     `arbace/`, its tools or Clojure's test suite names the class unqualified. The class still
-    exists in JDK 26, so `java.lang.SecurityManager` resolves; the class forms compiler's own
+    exists in JDK 26, so `java.lang.SecurityManager` resolves; the Java forms compiler's own
     `java.lang` fallback (SPEC §9.1) is unaffected. Test: `test/native/imports_test.clj`.
 
 12. **Keyword invoke sites are `invokedynamic`** (`doc/MODERN-COMPILER.md` §4.1; 2026-10-07):
@@ -887,7 +887,7 @@ step 4 (2026-10-07); the others came with later work, as each says:
     the loader (the namespaces' classes name `core.ae` in `SourceFile` and their vars
     `arbace/core.ae` in `:file`). Scripts run by path, whatever their extension. Not changed:
     `data_readers.clj`/`.cljc` (data, Clojure's convention), the reader's `:clj` feature.
-    The class forms tools (`arbace.classes.build`, the source path lookup `p/C.ae`, j2c's
+    The Java forms tools (`arbace.classes.build`, the source path lookup `p/C.ae`, j2c's
     output, c2g, g2c) read and write `.ae` only; j2c's `_class` rule (SPEC §9.1) looks for a
     sibling `.clj` or `.ae`. The bootstrap's stage 0, the seed, reads `.clj` only: it compiles
     from `target/seed-view` ("The binary seed", above).
@@ -900,7 +900,7 @@ step 4 (2026-10-07); the others came with later work, as each says:
     `:commit` (the full hash, nil when unknown) and `:dirty` (true when tracked files differed
     from the commit; false in a tarball; nil when unknown); and `(arbace-version)`, the
     describe. Both `{:added "arbace"}`. Its source: the system property `arbace.version` (the
-    Go program sets it from its link-time `main.arbaceVersion`, doc/go/A2G-SPEC.md §10.6), else the
+    Go program sets it from its link-time `main.arbaceVersion`, doc/go/J2G-SPEC.md §10.6), else the
     resource `arbace/version.edn`, which `bin/build-arbace` writes into every stage (so into
     `target/arbace.jar`); both hold the map's text, from `bin/lib/version.bash`. The REPL's
     banner (`arbace/main.ae`, `repl-opt`) says `Arbace <describe> (<first 7 of the commit>)`
@@ -958,7 +958,7 @@ step 4 (2026-10-07); the others came with later work, as each says:
     SA80-SA88). Main builds no JVM Arbace: ASM (`arbace/asm.ae`, `arbace/asm/`), the bytecode
     back end of `arbace/lang/Compiler.ae` (the emit methods, `ObjExpr`'s class generation, the
     ASM-typed fields, `SourceDebugExtensionAttribute`, `StaticInvokeExpr` and direct linking, the
-    annotation hooks), `Compile.ae`, `DynamicClassLoader.ae`, `Intrinsics.ae` and the class forms
+    annotation hooks), `Compile.ae`, `DynamicClassLoader.ae`, `Intrinsics.ae` and the Java forms
     compiler's back end (`arbace/classes/{emit,compiler,shape,verify,build,boot}.ae`) are removed;
     the access flags are `arbace.classes.opcodes`, required as `Opcodes`. The Go build's variants
     with no JVM counterpart left became the sources: `genclass` (gen-class a no-op, gen-interface
@@ -977,7 +977,7 @@ step 4 (2026-10-07); the others came with later work, as each says:
     of a bound var; doc/go/SPEED-NOTES.md). `arbace/lang/Reflector.ae`: no `java.lang.invoke`,
     `java.util.stream` or `Proxy`: `canAccess` calls `Method.canAccess`, `instanceMethods`
     collects with a loop, `boxArg` adapts a fn to a functional interface with the native
-    `adaptFn` (jrt's `AdaptFn`, A2G-SPEC §11). The class forms' front end, which runs both on
+    `adaptFn` (jrt's `AdaptFn`, J2G-SPEC §11). The Java forms' front end, which runs both on
     Go and on the frozen jar (repr/java, the edge): `types/lang` is `"arbace/lang"`; `env`'s
     reflection cache is a `HashMap`, and the constructors jrt's reflection omits for abstract
     classes come from the world's signatures; `analyze` takes the generic signatures from
@@ -990,11 +990,11 @@ step 4 (2026-10-07); the others came with later work, as each says:
     `arbace/lang/go/{RT,Main,Compiler,CompilerCode,ClassForms,CompilerAST}.ae` are merged into
     `arbace/lang/{RT,Main,Compiler}.ae` by `test/aot/merge_variants.ae`, as text: a replaced
     member's text takes the base member's place, an added member goes at the end of its class
-    in a2g's order, the comments before a variant's member go with it, each file's header goes
+    in j2g's order, the comments before a variant's member go with it, each file's header goes
     (reworded) before its first member; two base comments that only said the variant replaces
-    the member are dropped. The merged class forms equal, as data with their type hints, the
-    bases with the variants applied by a2g's `apply-variant` (checked for the three classes).
-    The generated variants stay: `CompilerOps.ae` (`test/a2g/eval_ops.ae`) and
+    the member are dropped. The merged Java forms equal, as data with their type hints, the
+    bases with the variants applied by j2g's `apply-variant` (checked for the three classes).
+    The generated variants stay: `CompilerOps.ae` (`test/j2g/eval_ops.ae`) and
     `CompilerAOTFn.ae` (`test/aot/gen_fns.ae`). The JVM's `RT`, `Main` and `Compiler` are on the
     branch `arbace-for-java-26`.
 
@@ -1025,7 +1025,7 @@ the runtime-visible renames are listed once, as c2a's mechanical part.
 - **Source files** (hand change 19): Arbace's own sources are `.ae`; a namespace loads from
   its `.ae` before its `.clj` (a library may ship both: Arbace takes the `.ae`), and the
   not-found message names four files.
-- **Names `arbace.core` adds** (hand change 3 and the class forms since): the class forms'
+- **Names `arbace.core` adds** (hand change 3 and the Java forms since): the Java forms'
   macros and operators (`return`, `switch`, `label`, `lambda`, `bit-and-int`, ..., marked
   `{:added "arbace"}`) are public in `arbace.core` and referred into every namespace: a file
   defining a var of one of those names replaces the referral with a warning (`return already
@@ -1085,7 +1085,7 @@ expects `arbace.spec.alpha`'s keywords and `arbace.core/let`'s spec errors. `clo
 its name.
 
 **One hand edit** in the vendored files: `arbace/spec/gen/alpha.ae` excludes `return` from
-`arbace.core` (`:refer-clojure :exclude`), since `arbace.core` has the class form `return` and
+`arbace.core` (`:refer-clojure :exclude`), since `arbace.core` has the Java form `return` and
 `gen/return` would replace it with a warning on every load. (test.check's
 `clojure.test.check.generators` gives the same warning; it is not vendored and stays as it is.)
 
@@ -1150,8 +1150,8 @@ seed, as Go bootstraps from a previous Go toolchain: `seed/arbace-seed.jar`, the
     561b4cc5f5a340b9da5ee07f7d2c193017890e1a5799396dbb901131b1239f4d  arbace-seed.jar
 
 **What it is.** A Clojure runtime under `arbace.*` (7.5 MB, 6,023 entries): stage 2's classes at
-the freeze (the class forms of `arbace.lang`, `arbace.asm`, `arbace.java.api`, and the
-namespaces AOT-compiled with direct linking, the class forms compiler `arbace.classes` and spec
+the freeze (the Java forms of `arbace.lang`, `arbace.asm`, `arbace.java.api`, and the
+namespaces AOT-compiled with direct linking, the Java forms compiler `arbace.classes` and spec
 included) and the tag's `arbace/*.clj` sources; its main class is `arbace.lang.Main`. It holds
 code under the licenses of the `arbace/` files it comes from (`LICENSE.md`).
 
@@ -1174,14 +1174,14 @@ which its own build needs as its stage 0; the chain thus goes back to the frozen
       (arbace.classes.build/-main ROOT target/stage1 arbace/lang arbace/asm ...)"
 
 The seed's own `arbace.classes` (the compiler as it was at the freeze, AOT-compiled into the jar)
-compiles the checkout's class forms into `target/stage1`, reading them as files under ROOT;
+compiles the checkout's Java forms into `target/stage1`, reading them as files under ROOT;
 then, as at every stage, stage 1's runtime AOT-compiles the checkout's namespaces into
 `target/stage1`. Stage 1 builds stage 2 and stage 2 builds stage 3 as before.
 
 Since the `.ae` rename (hand change 19) ROOT is `target/seed-view`: the seed's compiler lists a
-package's class forms as its `*.clj` files, and the checkout's are `*.ae`, so `bin/build-arbace`
+package's Java forms as its `*.clj` files, and the checkout's are `*.ae`, so `bin/build-arbace`
 makes a mirror of the five package directories whose `.clj` files are symbolic links to the
-`.ae` sources (the seed stays as it is). The class forms compiler writes no `SourceFile`
+`.ae` sources (the seed stays as it is). The Java forms compiler writes no `SourceFile`
 attribute, so the view's names leave no trace in stage 1's classes. Stage 1's namespaces are
 compiled by stage 1's own runtime, which reads the `.ae` sources directly, as stages 2 and 3
 do.
@@ -1206,11 +1206,11 @@ Stage 1 = stage 2 is reported but no longer required: it holds as long as the co
 for these sources has not changed since the freeze, and breaks legitimately when it does (as
 Go's toolchain1 differs from toolchain2). On 2026-10-08 `arbace/` is unchanged since the tag, so
 stages 1, 2 and 3 are byte-identical, all 5,756 classes, and the built `target/arbace.jar` equals
-the seed byte for byte. Compiling stage 1's class forms takes about 14 s with the seed, against
+the seed byte for byte. Compiling stage 1's Java forms takes about 14 s with the seed, against
 about 22 s on the frozen `clojure/` (whose stage 0 loaded the compiler from source).
 
-**When the seed must move.** The seed must be able to compile the current class forms: as with
-Go's minimum bootstrap toolchain, if the class forms come to use a construct the seed's compiler
+**When the seed must move.** The seed must be able to compile the current Java forms: as with
+Go's minimum bootstrap toolchain, if the Java forms come to use a construct the seed's compiler
 does not know, either the change waits or the seed is replaced by a newer reproducible jar (a
 new tag), recorded in the journal with its hash.
 
@@ -1220,4 +1220,4 @@ new tag), recorded in the journal with its hash.
 2. (decided, above) the leftover `clojure` identifiers.
 3. (done, `9cfc9b9`) `CLAUDE.md`'s layout section names the vendored tree and
    `bin/build-arbace`.
-4. (done, item 3 of "After vendoring") the class forms native at stage 1.
+4. (done, item 3 of "After vendoring") the Java forms native at stage 1.

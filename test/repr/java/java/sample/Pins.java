@@ -4,7 +4,7 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * Overloads where the class forms compiler's resolution (integer literals are long) differs
+ * Overloads where the Java forms compiler's resolution (integer literals are long) differs
  * from javac's, so the converter must pin them, and calls where it agrees, so it must not;
  * constructor calls of every kind; an anonymous subclass of an inner class with an explicit
  * outer instance.

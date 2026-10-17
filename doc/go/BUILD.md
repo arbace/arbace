@@ -6,7 +6,9 @@
 > `bin/build-go`, `bin/g2a-print` `bin/repr-go print`, `bin/g2a-check` `bin/repr-go check`,
 > `bin/g2a-convert-tests` and `-print-tests` `bin/repr-go test read` and `test print`,
 > `bin/g2a-build-tests` `bin/build-go test`; `G2A_GOROOT` is `ARBACE_GOROOT`, the other `G2A_*`
-> `REPR_GO_*`, `J2A_*` `REPR_JAVA_*`; `bin/j2a-check` is `bin/repr-java check`. This document
+> `REPR_GO_*`, `J2A_*` `REPR_JAVA_*`; `bin/j2a-check` is `bin/repr-java check`. a2g is j2g
+> (`arbace.a2g.*`, `bin/a2g*`, `A2G-SPEC.md`, `A2G_*`, the printed `a2g_*`, `A2g_*`, `a2g/*`: `j2g`
+> likewise), and class forms are Java forms (the front end keeps `arbace.classes.*`). This document
 > uses the current names throughout, its dated passages included; branch names keep theirs.
 
 A Go program held as Go forms ([SPEC.md](SPEC.md)) is printed back to Go (`arbace.repr.go.print`,
@@ -64,9 +66,9 @@ DIR/
   path without `.ae` (`go/example_com/multi/greet/banner.txt`); embedded files are checked
   against the SHA-256 the forms record. (Amendment B2, accepted 2026-10-08, folded into SPEC
   §9.5, §9.6 and §12.4.)
-- **Data directories** (amendment M5 of A2G-SPEC §16, accepted 2026-10-09). A directory under
+- **Data directories** (amendment M5 of J2G-SPEC §16, accepted 2026-10-09). A directory under
   `DIR/go` holding a file `.build-go-data` holds data, not forms: its `.ae` files (and those of its
-  subdirectories) are not read as Go forms. `bin/a2g --program` marks so the main package's
+  subdirectories) are not read as Go forms. `bin/j2g --program` marks so the main package's
   embedded namespace sources (`go/arbace/cmd/arbace/res/`, its `:embed-files`).
 - **Files.** One Go file per `go/file` form; when `go/package` has `:files`, the two must name
   the same files.
@@ -134,13 +136,13 @@ as `../go/...`, would keep the host's directory).
 `--overlay FILE` passes `-overlay FILE` (made absolute) to `go build`: a JSON file in Go's
 overlay format, `{"Replace": {"/path/of/a/file/the/build/reads.go": "/path/of/its/replacement.go",
 ...}}`, which replaces or adds files of the build without changing the tree they belong to.
-This is how the patched Go runtime of A2G-SPEC §9.3 (the goroutine-local slot: a field of `g`,
+This is how the patched Go runtime of J2G-SPEC §9.3 (the goroutine-local slot: a field of `g`,
 its clearing in `gdestroy`, the new file `arbace_local.go`) enters a build: the overlay maps
 `$ARBACE_GOROOT/src/runtime/runtime2.go` and `proc.go` to the patched copies and adds
 `arbace_local.go`, all printed from Go forms (the patch itself is jrt's phase 2). The option
-is A2G-SPEC §16 Q19's amendment of this file, accepted with the spec. The build stays
+is J2G-SPEC §16 Q19's amendment of this file, accepted with the spec. The build stays
 reproducible: the overlay's files are inputs of gc's build IDs like any source. The patch's
-forms are `overlay/go/runtime/` (jrt phase 2a, JRT-NOTES.md; A2G-SPEC §9.3, amendment T15);
+forms are `overlay/go/runtime/` (jrt phase 2a, JRT-NOTES.md; J2G-SPEC §9.3, amendment T15);
 `bin/jrt overlay` prints them and writes the overlay file for `$ARBACE_GOROOT`, and `bin/jrt
 overlay --check` compares them with the toolchain's runtime.
 
@@ -166,7 +168,7 @@ the index's. Reading the forms was most of repr/go's time on the Go executable: 
 packages are all in the cache reads none. The printed files of a cached package are copied as
 they are. Indexes are trimmed with the entries (by mtime, set when read).
 
-Checked (2026-10-08) with the experiment's overlay of `.tmp/a2g-exp/gls/` (A2G-SPEC §13.3): a
+Checked (2026-10-08) with the experiment's overlay of `.tmp/j2g-exp/gls/` (J2G-SPEC §13.3): a
 program of Go forms pulling `runtime.arbace_getLocal` with `//go:linkname` fails to link
 without the overlay (`relocation target runtime.arbace_getLocal not defined`) and builds and
 runs with it, for amd64 and for arm64 under `qemu-aarch64`.
@@ -181,7 +183,7 @@ gives the module path when `SRC` has no `program.edn`. `--tests` also prints eac
 collected by the package file's `load`, but not printed). `bin/jrt`
 ([JRT-NOTES.md](JRT-NOTES.md)) builds, vets and tests jrt this way, with the environment of
 "The build" above, and `go test -exec qemu-aarch64` for arm64. (Amendment B6, proposed in
-JRT-NOTES.md and accepted 2026-10-08 with A2G-SPEC's amendments, §16; it adds options to
+JRT-NOTES.md and accepted 2026-10-08 with J2G-SPEC's amendments, §16; it adds options to
 `bin/build-go` only and changes no form, so nothing of SPEC is amended.)
 
 ## The box's guest and other roots (amendment BX6, accepted 2026-10-11)
@@ -228,11 +230,11 @@ and the amd64 ones natively, against the same expected files.
 ## Reproducibility of Arbace's executables (2026-10-11)
 
 The whole chain from a clean checkout is deterministic: `bin/jrt-convert` (its `--twice`; since
-standalone S1 its output is committed, `jdk/`, and the chain starts at a2g),
-`bin/a2g --program` (two runs, separate JVMs, give identical trees but `report.edn`'s timings),
-the image of prepared namespaces, and `go build -trimpath`. Two removed nondeterminisms: a2g's
+standalone S1 its output is committed, `jdk/`, and the chain starts at j2g),
+`bin/j2g --program` (two runs, separate JVMs, give identical trees but `report.edn`'s timings),
+the image of prepared namespaces, and `go build -trimpath`. Two removed nondeterminisms: j2g's
 member tables followed the JVM's overload order for classes whose order changes from one JVM
-process to the next (A2G-SPEC §5.11, RP1), and repr/java's headers named its numbered scratch copies
+process to the next (J2G-SPEC §5.11, RP1), and repr/java's headers named its numbered scratch copies
 (JRT-SOURCES.md, convert). Checked at commit `fe7e878` (branch `determinism`): `bin/arbace-go
 --build` twice from the same tree, the first moved aside, the second with an empty `GOCACHE`
 (`ARBACE_GO_ARCHES=amd64`), then `--build --box` after each: the same bytes for

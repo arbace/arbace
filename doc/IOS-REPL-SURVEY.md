@@ -173,7 +173,7 @@ a check that a build can pass (§7).
   in the box: the native program, built for `ios/arm64` (Go supports it), sandboxed by iOS
   itself. Arbace's evaluator interprets and its code is compiled ahead of time (S6), so no JIT,
   which the App Store forbids; an interpreter is allowed. The program is large (101.3 MB
-  compiled, S6; 72.4 MB evaluated) and uses gigabytes for a2g, but the REPL alone fits a
+  compiled, S6; 72.4 MB evaluated) and uses gigabytes for j2g, but the REPL alone fits a
   phone's limits (to measure).
 - Both: one interface over two transports, local (a pipe to the in-process REPL) and remote.
 
@@ -182,7 +182,7 @@ a check that a build can pass (§7).
 1. **The terminal core**, platform-free: the escape-sequence parser (a state machine after
    Paul Williams' published VT500 parser diagram), the screen grid with attributes, scrollback,
    the alternate screen, wide and combining characters (Unicode widths), the modes the REPL and a
-   shell need. Arbace (class forms or Clojure), so it runs and is tested headless on the host.
+   shell need. Arbace (Java forms or Clojure), so it runs and is tested headless on the host.
 2. **The transport**: mosh's protocol (UDP, AES-128-OCB, its state-synchronization over
    datagrams, the client's predictive local echo), or SSH, or a REPL protocol of Arbace's own
    (§5.4). Also Arbace.

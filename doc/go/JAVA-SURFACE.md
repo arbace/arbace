@@ -6,16 +6,18 @@
 > `bin/build-go`, `bin/g2a-print` `bin/repr-go print`, `bin/g2a-check` `bin/repr-go check`,
 > `bin/g2a-convert-tests` and `-print-tests` `bin/repr-go test read` and `test print`,
 > `bin/g2a-build-tests` `bin/build-go test`; `G2A_GOROOT` is `ARBACE_GOROOT`, the other `G2A_*`
-> `REPR_GO_*`, `J2A_*` `REPR_JAVA_*`; `bin/j2a-check` is `bin/repr-java check`. This document
+> `REPR_GO_*`, `J2A_*` `REPR_JAVA_*`; `bin/j2a-check` is `bin/repr-java check`. a2g is j2g
+> (`arbace.a2g.*`, `bin/a2g*`, `A2G-SPEC.md`, `A2G_*`, the printed `a2g_*`, `A2g_*`, `a2g/*`: `j2g`
+> likewise), and class forms are Java forms (the front end keeps `arbace.classes.*`). This document
 > uses the current names throughout, its dated passages included; branch names keep theirs.
 
 B1a step 1 ([B1-PLAN.md](B1-PLAN.md)): every JDK class, method, constructor and field that
 Arbace's runtime and namespaces use, measured from the compiled classes, so that the scope of
-jrt (the Java runtime in Go forms under the a2g-translated runtime, decision D1) can be decided.
+jrt (the Java runtime in Go forms under the j2g-translated runtime, decision D1) can be decided.
 Measured on main at `c8f271b` (2026-10-08), JDK 26.0.2.1, jdk26u's sources at `/root/jdk26u`;
 the figures and tables regenerated on 2026-10-11 against main at `9f15aea` (the decisions below
 were taken on the first measurement; what changed: `bean` by reflection, without `java.beans`,
-the version, `data_readers.ae`, the class forms compiler's own changes; the translation closure
+the version, `data_readers.ae`, the Java forms compiler's own changes; the translation closure
 of runtime + REPL kept its 422 classes and 184 files).
 
 Retired with standalone S4 (2026-10-12): `bin/java-surface` measured the JVM's compiled classes
@@ -64,17 +66,17 @@ method is inherited from the JDK (`Ratio.byteValue`, from `Number`) counts for t
 JDK class; a JDK reference keeps its owner and records its declaring class
 (`StringBuilder.length`, declared in `AbstractStringBuilder`).
 
-Every class belongs to a **unit** (the top-level class of a class form; for AOT-compiled
+Every class belongs to a **unit** (the top-level class of a Java form; for AOT-compiled
 namespace classes the namespace, found from the file's `ns` or `in-ns` form) and every unit to
 a **group**:
 
 | group | what | classes | units |
 |---|---|---:|---:|
-| runtime | `arbace.lang`, the class forms of the runtime | 774 | 142 |
+| runtime | `arbace.lang`, the Java forms of the runtime | 774 | 142 |
 | REPL | `arbace.core` and the 21 namespaces loaded at a REPL's start (measured: stage 2's REPL, `loaded-libs` at the first prompt) | 2,811 | 22 |
 | shipped | the other namespaces Clojure ships (pprint's parts are in REPL), spec, `arbace.java.api` | 693 | 18 |
 | asm | `arbace.asm`, the vendored ASM | 45 | 42 |
-| class forms | `arbace.classes`, the class forms compiler (AOT-compiled into the stage) | 1,454 | 11 |
+| Java forms | `arbace.classes`, the Java forms compiler (AOT-compiled into the stage) | 1,454 | 11 |
 
 The REPL's start loads, besides `arbace.core`: `core.protocols`, `core.server`, `edn`,
 `instant`, `java.basis`, `java.basis.impl`, `java.browse`, `java.io`, `java.javadoc`,
@@ -89,7 +91,7 @@ evaluator does not emit them; jrt has each anyway, the runtime uses them all).
 
 **Cross-checks.** (1) `javap -v -p` over the 774 runtime classes: the JDK member references in
 their constant pools (573) are exactly those the tool collects with a JDK owner (573; none only
-on either side; recorded in the data as `:javap-check`). (2) The class forms compiler's own
+on either side; recorded in the data as `:javap-check`). (2) The Java forms compiler's own
 resolution: the runtime's classes are its output, so the bytecode records what its analyzer
 resolved for every member reference of `arbace/lang/*.ae` (owner, name, descriptor, as
 `arbace.classes.analyze` chose them); the javap check confirms the tool reads them back exactly.
@@ -112,10 +114,10 @@ files shape-identical; 2026-10-11: 3,003 of 3,025, as in [CONVERTER-NOTES.md](..
 **Treatments.** Each JDK class gets one proposed treatment (the table `treatments` in the
 tool; by class, else by its top-level class, else by category):
 
-- **translate**: a2g over repr/java's conversion of jdk26u's own source; exact Java semantics.
+- **translate**: j2g over repr/java's conversion of jdk26u's own source; exact Java semantics.
 - **shim**: hand-written Go forms over Go's std, or over jrt's host interface (plan, point 4).
-- **a2g**: a language feature a2g compiles itself, no jrt class: Java's string `+`
-  (`StringConcatFactory`) and lambdas (`LambdaMetafactory`) in the class forms.
+- **j2g**: a language feature j2g compiles itself, no jrt class: Java's string `+`
+  (`StringConcatFactory`) and lambdas (`LambdaMetafactory`) in the Java forms.
 - **rework**: Arbace's runtime changed to do without it; here the call sites and method
   handles (`java.lang.invoke`) and class loading, which the evaluator replaces.
 - **cut**: left out of the first REPL (D6), with what breaks listed below.
@@ -138,7 +140,7 @@ the repr/java statuses come from a prior `bin/repr-java check --jdk java.base`, 
 | runtime + REPL | **274** | **970** |
 | runtime + REPL + shipped | 305 | 1,095 |
 | asm (cut) | 39 | 125 |
-| class forms compiler (cut) | 59 | 145 |
+| Java forms compiler (cut) | 59 | 145 |
 
 By proposed treatment, runtime + REPL:
 
@@ -146,7 +148,7 @@ By proposed treatment, runtime + REPL:
 |---|---:|---:|---|
 | translate | 150 | 511 | boxed numbers, `Character`, exceptions, the collections, `Arrays`, `Collections`, `Objects`, the functional interfaces, `java.math`, `java.util.regex`, readers and writers, `ConcurrentHashMap`, the blocking queues, `TimeUnit`, `UUID`, `Random`, `Formatter`, `Properties` |
 | shim | 57 | 302 | `Object`, `String`, `StringBuilder`, `Math`, `Class`, `java.lang.reflect`, `System`, `Runtime`, `Thread`, `ThreadLocal`, `Throwable`, `Enum`, atomics, locks, executors, `CountDownLatch`, references, `File` and its streams, `PrintStream`, the charset readers and writers, `Date`, `Locale`, `Charset`, `sun.misc.Signal` |
-| a2g | 2 | 2 | `StringConcatFactory`, `LambdaMetafactory` (the runtime's own string `+` and lambdas: 247 and 9 sites) |
+| j2g | 2 | 2 | `StringConcatFactory`, `LambdaMetafactory` (the runtime's own string `+` and lambdas: 247 and 9 sites) |
 | rework | 7 | 47 | `ClassLoader`; `CallSite`, `MutableCallSite`, `MethodHandle`, `MethodHandles`, `Lookup`, `MethodType` |
 | cut | 58 | 108 | `java.net`, `java.nio`, processes, `java.sql`, `java.time`, `java.text`, calendars, streams, serialization, XML, the VM-only error classes of `RT`'s default imports, annotations |
 
@@ -192,7 +194,7 @@ from the compiler's plumbing) and the 560 JDK members above. Measured uses:
 | `Modifier` | 5 | 6 | `Compiler`, `Reflector` |
 | `Array` | 4 | 12 | `RT`, `ArraySeq`, `ArrayIter` (`aget`/`aset` reflective paths, `make-array`) |
 | `Proxy`, `InvocationHandler` | 1, 1 | | `Reflector.boxArg`: Clojure 1.12's adaptation of an `IFn` to a functional interface |
-| `ParameterizedType` and the generic types | | | none in runtime + REPL (`arbace.reflect`, shipped; the class forms compiler) |
+| `ParameterizedType` and the generic types | | | none in runtime + REPL (`arbace.reflect`, shipped; the Java forms compiler) |
 
 What depends on reflection at the Clojure level: all interop (analysis and evaluation), un-hinted
 calls and `set!` of fields (`Reflector`), functional-interface adaptation, `instance?`,
@@ -202,7 +204,7 @@ calls and `set!` of fields (`Reflector`), functional-interface adaptation, `inst
 sites** (REPL group; 8 shipped): Clojure's own code is hinted, so on the JVM reflection is rare
 at run time; in the evaluator every call is resolved at run time anyway.
 
-Proposed: **shim `java.lang.reflect` over member tables that a2g generates** for every class it
+Proposed: **shim `java.lang.reflect` over member tables that j2g generates** for every class it
 translates and that jrt's shims declare: per class, its methods, constructors and fields with
 names, parameter and return classes, modifiers, and a Go function that invokes each (boxing as
 `Method.invoke` does). `Compiler` and `Reflector` are then translated unchanged; the closed
@@ -213,7 +215,7 @@ The generic-type reflection (`ParameterizedType`, ...) is cut.
 
 ### invokedynamic
 
-| bootstrap | runtime | REPL | shipped | asm | class forms |
+| bootstrap | runtime | REPL | shipped | asm | Java forms |
 |---|---:|---:|---:|---:|---:|
 | `KeywordInvokeSite.bootstrap` (hand change 12) | | 579 | 104 | | 2,648 |
 | `ReflectorCallSite.bootstrap` (hand change 10) | | 32 | 8 | | 6 |
@@ -226,7 +228,7 @@ these become the `eval` of `KeywordInvokeExpr` (`RT.get`), of `StrConcatExpr` (`
 the interop exprs (reflection above): no call sites, no method handles. `ReflectorCallSite`
 (354 lines) and `KeywordInvokeSite` (131 lines) are not translated; `KeywordLookupSite`,
 `ILookupSite`, `ILookupThunk` stay (records implement `getLookupThunk`). The runtime's own sites
-are Java-level string `+` and lambdas in the class forms: a2g compiles both directly. So
+are Java-level string `+` and lambdas in the Java forms: j2g compiles both directly. So
 `java.lang.invoke` needs no jrt counterpart: the 7 classes and 47 members are all used by
 `ReflectorCallSite`, `KeywordInvokeSite`, `Reflector`'s method-handle helpers and `Compiler`'s
 `MethodType` use for emission (rework).
@@ -255,7 +257,7 @@ Only `Compiler` and `Intrinsics` (the opcode table of the §5.4 operators) refer
 `arbace.asm`. With the evaluator, `Compiler`'s back end (its `emit*` methods: about 1,730 of its
 8,717 lines, plus `ObjExpr`'s class generation) is not translated, `Intrinsics` is cut, and
 ASM (45 classes) is not needed in the Go build. Its JDK surface (39 classes, 125 members)
-does not count. The class forms compiler (`arbace.classes`, cut by D6) uses ASM,
+does not count. The Java forms compiler (`arbace.classes`, cut by D6) uses ASM,
 `java.lang.classfile` and generic reflection.
 
 ## The regex finding (D5)
@@ -267,7 +269,7 @@ lines, **5,148 code lines** (`Pattern` 3,668, `Matcher` 627, `CharPredicates` 33
 generated files, `IndicConjunctBreak` (579) and `jdk.internal.lang.CaseFolding` (569).
 
 **repr/java converts the package exactly**: in `bin/repr-java check --jdk java.base` every file of
-`java/util/regex` and `jdk/internal/util/regex` compiles from its class forms to javac's class
+`java/util/regex` and `jdk/internal/util/regex` compiles from its Java forms to javac's class
 shapes. The generated files are not in `share/classes` and so not in `repr-java-check`; they are
 plain tables and code (repr/java converts them like the rest, one more step).
 
@@ -304,7 +306,7 @@ As decided on 2026-10-08; most of it was undone since (below the table).
 
 `ProxyHandler` (53 lines) is unused upstream legacy and cut with `proxy`.
 
-**Since B1a step 5 (2026-10-09)** part of this cut is undone (A2G-SPEC §16, the amendments of
+**Since B1a step 5 (2026-10-09)** part of this cut is undone (J2G-SPEC §16, the amendments of
 EVAL-NOTES.md): `ForkJoinPool` and `ForkJoinTask` are jrt's, with real parallelism (amendment
 S5); `java.util.stream` is translated whole with `java.util.function`; `java.time.Instant`,
 `java.sql.Timestamp` and `java.sql.Date` are translated, and `Calendar`, `GregorianCalendar`
@@ -324,7 +326,7 @@ JRT-NOTES.md, the part named; JAVA-BASE.md measures the result):
   `java.nio.file` (FS1-FS7, "Files"), resources by URL and `URLClassLoader` over directories
   (FX6, "Resources by URL");
 - java.nio's heap buffers (RD4, "The JDK's resource data");
-- `defclass` and the class forms at the REPL (CF3, CLASSFORMS-REPL.md);
+- `defclass` and the Java forms at the REPL (CF3, CLASSFORMS-REPL.md);
 - processes, `arbace.java.process` and `arbace.java.shell` (PR1-PR7, "Processes");
 - `java.time` whole but the non-ISO chronologies, with jdk26u's `TimeZone`, `Calendar` staying
   jrt's own Java (TM1-TM9, "Time");
@@ -338,14 +340,14 @@ serialization, `javax.swing` and `java.awt`, loading classes from jars.
 
 ## Effort per treatment
 
-Agent-assisted days, at the pace of the class forms and repr/go work; they refine plan step 3
+Agent-assisted days, at the pace of the Java forms and repr/go work; they refine plan step 3
 (6-10) and touch steps 4 and 5.
 
 | treatment | content | size | estimate |
 |---|---|---|---:|
-| translate | a2g over the closure; a2g's coverage of the JDK's idioms (nested and anonymous classes, generics, static initialization order, `switch`, arrays, intrinsic fallbacks); the 8 generated files through repr/java; tests (regex against the JVM, `BigDecimal` and number printing, `Formatter`, the collections' contracts) | 422 classes, 3,223 methods, 279 KB bytecode, 184 files all convertible | 4-6 |
-| shim | the object model (`Object`, `Class`, identity hash, monitors), UTF-16 `String`/`StringBuilder`/`StringBuffer` (D4), `Math`, `System`, `Runtime`, `Thread` over goroutines, `ThreadLocal`, `Throwable` and stack traces, `Enum`, `Record`; reflection over a2g's tables; atomics, locks with `Condition`, executors, `CountDownLatch`, `LockSupport`; references over Go's `weak` and `runtime.AddCleanup`; `Unsafe`'s 25 members (CAS, array offsets) as used by the translated code; the host's files and streams, UTF-8 charsets, `Locale.ROOT`/`US` and `DecimalFormatSymbols`, `SecureRandom` over `crypto/rand`, `Date`, signals | 57 classes / 300 members used directly; boundary 69 classes / 342 members (largely the same classes) | 6-9 |
-| a2g | string `+` and lambdas | 255 sites in the runtime | in steps 2 and 4 |
+| translate | j2g over the closure; j2g's coverage of the JDK's idioms (nested and anonymous classes, generics, static initialization order, `switch`, arrays, intrinsic fallbacks); the 8 generated files through repr/java; tests (regex against the JVM, `BigDecimal` and number printing, `Formatter`, the collections' contracts) | 422 classes, 3,223 methods, 279 KB bytecode, 184 files all convertible | 4-6 |
+| shim | the object model (`Object`, `Class`, identity hash, monitors), UTF-16 `String`/`StringBuilder`/`StringBuffer` (D4), `Math`, `System`, `Runtime`, `Thread` over goroutines, `ThreadLocal`, `Throwable` and stack traces, `Enum`, `Record`; reflection over j2g's tables; atomics, locks with `Condition`, executors, `CountDownLatch`, `LockSupport`; references over Go's `weak` and `runtime.AddCleanup`; `Unsafe`'s 25 members (CAS, array offsets) as used by the translated code; the host's files and streams, UTF-8 charsets, `Locale.ROOT`/`US` and `DecimalFormatSymbols`, `SecureRandom` over `crypto/rand`, `Date`, signals | 57 classes / 300 members used directly; boundary 69 classes / 342 members (largely the same classes) | 6-9 |
+| j2g | string `+` and lambdas | 255 sites in the runtime | in steps 2 and 4 |
 | rework | the evaluator instead of `invokedynamic`, `defineClass` and `__init` loading; `RT.load`/`classForName` over source and the registry; `Reflector`'s method-handle helpers and stream uses | 7 `java.lang.invoke` classes; `ReflectorCallSite`, `KeywordInvokeSite`, `DynamicClassLoader`, `FnLoaderThunk`, `Compile` (710 lines) not translated; about 300 lines of `RT`, `Compiler`, `Reflector` changed (an estimate) | 2-3 (with step 5) |
 | cut | stubs that throw `UnsupportedOperationException` where a name must exist, the REPL's start set, `instant` over the `Date` shim | 62 classes | 1 |
 | **all** | | | **13-19** |
@@ -356,7 +358,7 @@ because repr/java already converts it exactly; the rest of the difference moves 
 ## Decisions for the user
 
 **Decided (the user, 2026-10-08), each as recommended:** reflection hand-written in jrt over
-member tables generated by a2g, with `Compiler` and `Reflector` translated unchanged; all plain
+member tables generated by j2g, with `Compiler` and `Reflector` translated unchanged; all plain
 Java of the closure translated from jdk26u's source with repr/java (`BigInteger`/`BigDecimal`
 translated, `Character` from the JDK's generated tables, `Formatter` with a root-locale shim),
 only the VM's edge hand-written; a hand-written UTF-16 `String`/`StringBuilder` over
@@ -368,15 +370,15 @@ start trimmed of the namespaces that need processes, URLs and sockets; `#inst` o
 hand-written `Date` on Go's `time`. (Decisions 2, 4 and 7 as applied since B1a step 5: the
 closure grew beyond the measured one, streams included, by the files listed in
 JRT-SOURCES.md, "The closure as grown"; the fork-join pool joined the hand-written concurrency
-(A2G-SPEC §8.4, amendment S5); `Calendar`, `Timestamp` and `Instant` joined the world around
-the small `Date`, which became non-leaf (A2G-SPEC §5.3, S3). Decisions 4, 6 and 7 as applied
+(J2G-SPEC §8.4, amendment S5); `Calendar`, `Timestamp` and `Instant` joined the world around
+the small `Date`, which became non-leaf (J2G-SPEC §5.3, S3). Decisions 4, 6 and 7 as applied
 since 2026-10-09 and 2026-10-10: `java.util.concurrent` translated, its executors over AQS
 (amendments JC1-JC10); `core.server`, `java.process` and `java.shell` in the REPL's executable
 (sockets, processes; `repl.deps`, `java.basis`, `tools.deps.interop`, `java.browse` and
 `java.javadoc` stay out); `java.time` translated beside the `Date` (TM1-TM9); the list in "What
 the cut leaves out" above.)
 
-1. **Reflection.** (a) Shim `java.lang.reflect` and `Class` over member tables a2g generates
+1. **Reflection.** (a) Shim `java.lang.reflect` and `Class` over member tables j2g generates
    for every class built in, translating `Compiler` and `Reflector` unchanged (closed world, as
    D6 says); (b) rework the analyzer and `Reflector` onto a jrt registry with its own API
    (smaller tables, but `Compiler` and `Reflector` drift from Arbace's); (c) only hinted
@@ -400,14 +402,14 @@ the cut leaves out" above.)
    queues over a shim of `Unsafe`'s CAS; (b) translate `java.util.concurrent.locks` (AQS) too,
    over `LockSupport` and `Unsafe` (exact, more code); (c) shim `ConcurrentHashMap` as a locked
    map (less code, different iteration). *Recommended: (a).* `Semaphore` joined the shims in step 5
-   (A2G-SPEC amendment Y3, accepted 2026-10-09): (b) was measured for it and not taken. Since
+   (J2G-SPEC amendment Y3, accepted 2026-10-09): (b) was measured for it and not taken. Since
    JC6 (2026-10-10) `AbstractQueuedSynchronizer` is translated, for the translated executors'
    workers; jrt's locks stay hand-written.
 5. **Thread identity** (`Thread.currentThread`, `ThreadLocal`: `Var`'s dynamic bindings,
    `LockingTransaction`, `Agent`'s nesting; Go has no goroutine-local storage). (a) A
    goroutine-local slot in the Go runtime held as forms (one field of `g` and two functions;
    a patched runtime for linux and later TamaGo builds); (b) an explicit thread argument that
-   a2g threads through every method (no runtime patch, every signature changes); (c) the
+   j2g threads through every method (no runtime patch, every signature changes); (c) the
    goroutine id parsed from `runtime.Stack` with a map (no patch, about a microsecond per
    lookup, paid on every dynamic var access). *Recommended: (a); (c) as a stopgap for the
    first REPL if the patch waits.*
@@ -436,7 +438,7 @@ declarations.
 | REPL | 2,811 | 22 | 158 | 564 | 20 | 45,527 |
 | shipped | 693 | 18 | 75 | 220 | 13 | 10,805 |
 | asm | 45 | 42 | 39 | 125 | 15 | 1,533 |
-| class forms | 1,454 | 11 | 59 | 145 | 18 | 27,436 |
+| Java forms | 1,454 | 11 | 59 | 145 | 18 | 27,436 |
 | **runtime + REPL** |  |  | 274 | 970 |  |  |
 | **runtime + REPL + shipped** |  |  | 305 | 1,095 |  |  |
 
@@ -445,14 +447,14 @@ declarations.
 Classes / distinct members per group; the treatment is the category's default, with the
 classes treated otherwise counted under "other treatments".
 
-| category | treatment | runtime | REPL | shipped | asm | class forms | other treatments |
+| category | treatment | runtime | REPL | shipped | asm | Java forms | other treatments |
 |---|---|---:|---:|---:|---:|---:|---|
 | lang-core | translate | 28 / 118 | 23 / 110 | 11 / 66 | 13 / 68 | 14 / 47 | cut 3, shim 7 |
 | lang-exceptions | translate | 52 / 25 | 12 / 15 | 6 / 9 | 10 / 14 | 6 / 3 | shim 1 |
 | lang-system | shim | 14 / 27 | 8 / 52 | 2 / 7 | 1 / 2 | 3 / 3 | cut 5 |
 | class | shim | 5 / 34 | 3 / 28 | 3 / 10 | 2 / 11 | 5 / 34 | rework 1, cut 3 |
 | reflect | shim | 8 / 35 | 5 / 32 | 3 / 15 | 2 / 4 | 9 / 27 | cut 5, translate 1 |
-| invoke | rework | 8 / 36 | 1 / 1 | 1 / 1 | 1 / 1 | 1 / 1 | a2g 2 |
+| invoke | rework | 8 / 36 | 1 / 1 | 1 / 1 | 1 / 1 | 1 / 1 | j2g 2 |
 | ref | shim | 4 / 5 |  |  |  |  |  |
 | lang-misc | cut | 4 / 0 |  |  |  |  |  |
 | regex | translate | 2 / 10 | 2 / 17 | 1 / 1 | 1 / 1 | 1 / 1 |  |
@@ -479,7 +481,7 @@ classes treated otherwise counted under "other treatments".
 |---|---:|---:|---:|---:|---:|
 | translate | 150 | 511 | 17,663 | 151 | 512 |
 | shim | 57 | 302 | 41,731 | 57 | 345 |
-| a2g | 2 | 2 | 557 | 2 | 2 |
+| j2g | 2 | 2 | 557 | 2 | 2 |
 | rework | 7 | 47 | 176 | 7 | 47 |
 | cut | 58 | 108 | 310 | 88 | 189 |
 
@@ -556,7 +558,7 @@ Boundary (calls from translated code into shimmed, reworked or cut classes): 69 
 | `java.lang.Record` | shim | 1 | `<init>` |
 | `java.lang.StringLatin1` | shim | 1 | `newString` |
 | `java.lang.ThreadLocal` | shim | 1 | `withInitial` |
-| `java.lang.invoke.LambdaMetafactory` | a2g | 1 | `metafactory` |
+| `java.lang.invoke.LambdaMetafactory` | j2g | 1 | `metafactory` |
 | `java.lang.invoke.MethodHandles` | rework | 1 | `byteArrayViewVarHandle` |
 | `java.lang.ref.WeakReference` | shim | 1 | `<init>` |
 | `java.lang.reflect.Array` | shim | 1 | `newInstance` |
@@ -620,7 +622,7 @@ Boundary (calls from translated code into shimmed, reworked or cut classes): 38 
 
 JDK members used by each `arbace.lang` class (with its nested classes), by treatment.
 
-| class | translate | shim | a2g | rework | cut | uses arbace.asm |
+| class | translate | shim | j2g | rework | cut | uses arbace.asm |
 |---|---:|---:|---:|---:|---:|---|
 | AFn | 2 | 3 |  |  |  |  |
 | AFunction | 3 |  |  |  |  |  |
@@ -710,7 +712,7 @@ JDK members used by each `arbace.lang` class (with its nested classes), by treat
 
 ### invokedynamic bootstraps
 
-| bootstrap | runtime | REPL | shipped | asm | class forms |
+| bootstrap | runtime | REPL | shipped | asm | Java forms |
 |---|---:|---:|---:|---:|---:|
 | `arbace.lang.KeywordInvokeSite.bootstrap` |  | 581 | 104 |  | 2,665 |
 | `arbace.lang.ReflectorCallSite.bootstrap` |  | 32 | 8 |  | 10 |
@@ -723,7 +725,7 @@ JDK members used by each `arbace.lang` class (with its nested classes), by treat
 |---|---:|---:|---|
 | REPL | 32 | 18 | arbace.core, arbace.java.browse, arbace.main, arbace.repl, arbace.spec.gen.alpha |
 | shipped | 8 | 6 | arbace.inspector, arbace.java.browse-ui, arbace.test.junit, arbace.xml |
-| class forms | 10 | 7 | arbace.classes.analyze, arbace.classes.emit, arbace.classes.env, arbace.classes.shape, arbace.classes.types |
+| Java forms | 10 | 7 | arbace.classes.analyze, arbace.classes.emit, arbace.classes.env, arbace.classes.shape, arbace.classes.types |
 
 ### arbace.lang members the namespaces reference
 
@@ -735,12 +737,12 @@ JDK (members the compiler emits on its own: fn classes, `Var` roots, literals) a
 |---|---:|---:|---:|---:|
 | REPL | 97 | 589 | 143 | 53,255 |
 | shipped | 34 | 124 | 68 | 16,100 |
-| class forms | 28 | 174 | 83 | 24,189 |
+| Java forms | 28 | 174 | 83 | 24,189 |
 | REPL + shipped | 99 | 602 | 144 | 69,355 |
 
 ### Per JDK class
 
-Distinct members used per group (R runtime, P REPL, S shipped, A asm, K class forms; `t`
+Distinct members used per group (R runtime, P REPL, S shipped, A asm, K Java forms; `t`
 for a type-only use: a cast, an `instanceof`, a catch, a descriptor, a supertype, a class
 constant); the runtime's users; the code lines of the class's jdk26u source file.
 
@@ -861,13 +863,13 @@ constant); the runtime's users; the code lines of the class's jdk26u source file
 | `java.lang.reflect.TypeVariable` | reflect | cut |  |  |  |  | 2 |  | 7 |
 | `java.lang.reflect.WildcardType` | reflect | cut |  |  |  |  | 2 |  | 5 |
 | `java.lang.invoke.CallSite` | invoke | rework | 1 |  |  |  |  | KeywordInvokeSite, ReflectorCallSite | 127 |
-| `java.lang.invoke.LambdaMetafactory` | invoke | a2g | 1 |  |  |  |  | Compiler, Reflector | 115 |
+| `java.lang.invoke.LambdaMetafactory` | invoke | j2g | 1 |  |  |  |  | Compiler, Reflector | 115 |
 | `java.lang.invoke.MethodHandle` | invoke | rework | 7 |  |  |  |  | KeywordInvokeSite, Reflector, ReflectorCallSite | 411 |
 | `java.lang.invoke.MethodHandles` | invoke | rework | 6 |  |  |  |  | KeywordInvokeSite, Reflector, ReflectorCallSite | 2,082 |
 | `java.lang.invoke.MethodHandles$Lookup` | invoke | rework | 5 |  |  |  |  | KeywordInvokeSite, Reflector, ReflectorCallSite | 2,082 |
 | `java.lang.invoke.MethodType` | invoke | rework | 11 |  |  |  |  | Compiler, KeywordInvokeSite, Reflector, ReflectorCallSite | 625 |
 | `java.lang.invoke.MutableCallSite` | invoke | rework | 4 |  |  |  |  | KeywordInvokeSite, ReflectorCallSite | 28 |
-| `java.lang.invoke.StringConcatFactory` | invoke | a2g | 1 | 1 | 1 | 1 | 1 | ArityException, Compile, Compiler, EdnReader +20 | 733 |
+| `java.lang.invoke.StringConcatFactory` | invoke | j2g | 1 | 1 | 1 | 1 | 1 | ArityException, Compile, Compiler, EdnReader +20 | 733 |
 | `java.lang.ref.Reference` | ref | shim | 1 |  |  |  |  | DynamicClassLoader, Keyword, Util | 146 |
 | `java.lang.ref.ReferenceQueue` | ref | shim | 2 |  |  |  |  | DynamicClassLoader, Keyword, Util | 120 |
 | `java.lang.ref.SoftReference` | ref | shim | 1 |  |  |  |  | DynamicClassLoader | 19 |

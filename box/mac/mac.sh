@@ -17,7 +17,7 @@
 #                        CPU at the prompt (20 s), and times (the start, three evaluations)
 #   ./mac.sh rebuild     S8 (doc/go/BOX-NOTES.md, "S8: the rebuild in the box"): Arbace's arm64
 #                        guest image rebuilt inside the box from the sources in rebuild/store
-#                        (a2g and repr/go in Arbace's guest, Go's compile, asm and link in tool guests,
+#                        (j2g and repr/go in Arbace's guest, Go's compile, asm and link in tool guests,
 #                        each a spawned guest), timed (HV7); the image must equal the one built on
 #                        Linux by the host's tools (rebuild/expected.txt), byte for byte; then booted
 #                        by its ref
@@ -192,16 +192,16 @@ do_checklist() {
 
 # the rebuild (S8): the store rebuild/store holds the sources (the ref src: the commit's
 # directories the build reads, VERSION filled), the arm64 tool guests and the toolchain's facts
-# (tool.*.arm64, tool.config.arm64) and the image that runs a2g and repr/go (arbace.arm64, the
+# (tool.*.arm64, tool.config.arm64) and the image that runs j2g and repr/go (arbace.arm64, the
 # bundle's arbace-box.elf); rebuild/expected.txt the image built on Linux by the host's tools
 do_rebuild() {
   local m budget st d0 d want got
   m=$(sysctl -n hw.memsize 2>/dev/null || echo 0)
-  # the spawned guests' budget: 60% of the Mac's memory (a2g's guest asks 14 GiB, jrt's and lang's
+  # the spawned guests' budget: 60% of the Mac's memory (j2g's guest asks 14 GiB, jrt's and lang's
   # compiles 12 GiB each; the rest 3 GiB)
   budget=$(( m * 6 / 10 / 1048576 ))MiB
   want=$(cat rebuild/expected.txt)
-  # the image that runs a2g and repr/go: the bundle's guest
+  # the image that runs j2g and repr/go: the bundle's guest
   "$B" --store rebuild/store put arbace-box.elf arbace.arm64 > /dev/null || return 1
   echo "hw.memsize $m, the spawns' budget $budget, $(sysctl -n hw.ncpu) CPUs"
   d0=$(ms)

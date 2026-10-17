@@ -6,7 +6,9 @@
 > `bin/build-go`, `bin/g2a-print` `bin/repr-go print`, `bin/g2a-check` `bin/repr-go check`,
 > `bin/g2a-convert-tests` and `-print-tests` `bin/repr-go test read` and `test print`,
 > `bin/g2a-build-tests` `bin/build-go test`; `G2A_GOROOT` is `ARBACE_GOROOT`, the other `G2A_*`
-> `REPR_GO_*`, `J2A_*` `REPR_JAVA_*`; `bin/j2a-check` is `bin/repr-java check`. This document
+> `REPR_GO_*`, `J2A_*` `REPR_JAVA_*`; `bin/j2a-check` is `bin/repr-java check`. a2g is j2g
+> (`arbace.a2g.*`, `bin/a2g*`, `A2G-SPEC.md`, `A2G_*`, the printed `a2g_*`, `A2g_*`, `a2g/*`: `j2g`
+> likewise), and class forms are Java forms (the front end keeps `arbace.classes.*`). This document
 > uses the current names throughout, its dated passages included; branch names keep theirs.
 
 The printer of milestone G2 ([SPEC.md](SPEC.md) §12): it reads Go forms with the Clojure reader
@@ -354,7 +356,7 @@ The forms of mode `:full` are about 3.4 times those of `:lines` (std on tamago/a
 against 30.7 MB), and converting std takes about twice as long (124 s against 61 s). The `:lines` output is unchanged: `bin/repr-go roundtrip amd64` and
 `linux/amd64` show no regression against their references, the converter's and printer's tests
 pass, and the Go printed from `tamago/`'s, `tamago/cmd/`'s and `box/`'s forms (2,504 files) and
-a2g's program (`bin/build-go --print-only`, 1,572 files) is the same byte for byte before and
+j2g's program (`bin/build-go --print-only`, 1,572 files) is the same byte for byte before and
 after.
 
 The 3 known differences are the 3 programs with an empty declaration group (`import ( )` in

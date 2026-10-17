@@ -6,7 +6,9 @@
 > `bin/build-go`, `bin/g2a-print` `bin/repr-go print`, `bin/g2a-check` `bin/repr-go check`,
 > `bin/g2a-convert-tests` and `-print-tests` `bin/repr-go test read` and `test print`,
 > `bin/g2a-build-tests` `bin/build-go test`; `G2A_GOROOT` is `ARBACE_GOROOT`, the other `G2A_*`
-> `REPR_GO_*`, `J2A_*` `REPR_JAVA_*`; `bin/j2a-check` is `bin/repr-java check`. This document
+> `REPR_GO_*`, `J2A_*` `REPR_JAVA_*`; `bin/j2a-check` is `bin/repr-java check`. a2g is j2g
+> (`arbace.a2g.*`, `bin/a2g*`, `A2G-SPEC.md`, `A2G_*`, the printed `a2g_*`, `A2g_*`, `a2g/*`: `j2g`
+> likewise), and class forms are Java forms (the front end keeps `arbace.classes.*`). This document
 > uses the current names throughout, its dated passages included; branch names keep theirs, and
 > so does `G2A_HOST` (the JVM's switch until S4, dropped with the rename).
 
@@ -18,13 +20,13 @@ for S6, its size included), proposed to the user, the recommended choice applied
 JDK's forms committed in `jdk/`) is recorded in [go/JRT-SOURCES.md](go/JRT-SOURCES.md), "The
 committed forms", and `jdk/README.md`.
 
-## S2: a2g without the JVM's reflection and ASM
+## S2: j2g without the JVM's reflection and ASM
 
-### What a2g took from the JVM
+### What j2g took from the JVM
 
-a2g ran on the JVM's `target/stage2` and learned what it could not read from the class forms by
+j2g ran on the JVM's `target/stage2` and learned what it could not read from the Java forms by
 asking the running JVM (survey §4.3). Measured on main at `ff53e17`, by recording every such
-question of a `bin/a2g --program` run and of the test build's (`--input` the suite's Java
+question of a `bin/j2g --program` run and of the test build's (`--input` the suite's Java
 fixtures):
 
 - **the class environment** (`arbace.classes.env/info`): classes neither compiled from the
@@ -34,19 +36,19 @@ fixtures):
   hand-written ones (`java/lang/Object`, `String`, `Class`, `Thread`, `System` ...), the JDK's
   classes the world names without holding them (annotation types, `jdk/internal` classes behind
   cut code, `java/sql`, `org/xml` ...), and ASM's own classes, which `arbace/lang`'s compiler
-  names and the Go variants erase (A2G-SPEC §4.6);
+  names and the Go variants erase (J2G-SPEC §4.6);
 - **the analyzer's other questions** (`arbace.classes.analyze`): a class's existence, its type
   parameters, generic signatures (javac's bridges), an annotation type's `@Retention` and
   `@Target`, whether an interface is a `@FunctionalInterface` and its method (Clojure's
   `FISupport`), a record's components; and `FnInvokers`' invoker methods, by `getMethod` on the
   JVM's own `arbace.lang.FnInvokers`;
-- **a2g's own questions**: an enum constant's ordinal (`Enum/valueOf`), whether an interface is
+- **j2g's own questions**: an enum constant's ordinal (`Enum/valueOf`), whether an interface is
   functional (`fromfn`), the JVM's order of a class's overloads (`getDeclaredMethods` of the
   JDK's CDS-archived classes: the member tables follow it, as `Reflector` does), the public
   members and constants of the cut classes (their member tables), which classes the embedded
   namespaces name exist on the JVM and the types their members name (the cut candidates), and
   which JDK packages their modules do not export (the REPL's world);
-- **ASM writing classes**: `arbace.a2g.access` undid javac's accessor methods (`access$NNN`) by
+- **ASM writing classes**: `arbace.j2g.access` undid javac's accessor methods (`access$NNN`) by
   writing each class's accessors with ASM's `ClassWriter` and reading back the one member
   instruction each holds.
 
@@ -55,21 +57,21 @@ world's classes (CLASSFORMS-REPL.md §7), it has no class files, and ASM is cut 
 
 ### The edge: the JVM's answers as data
 
-`jdk/edge.edn` holds the answers (amendments SA11, SA12). One a2g run records them
-(`bin/a2g --record-edge FILE`: `arbace.classes.env`'s `*recorded*` and `arbace.a2g.edge`'s
-`*recording*`), `bin/a2g-edge update` merges the records of the builds' two worlds (the program,
-`--program`; the test build, `--program --input FIXTURES`) into it, and every other a2g run reads
+`jdk/edge.edn` holds the answers (amendments SA11, SA12). One j2g run records them
+(`bin/j2g --record-edge FILE`: `arbace.classes.env`'s `*recorded*` and `arbace.j2g.edge`'s
+`*recording*`), `bin/j2g-edge update` merges the records of the builds' two worlds (the program,
+`--program`; the test build, `--program --input FIXTURES`) into it, and every other j2g run reads
 it (by default; `--edge FILE` names another) and binds `arbace.classes.env/*declared*` to its
 classes. With it bound, `env/load-class` loads nothing, `env/info` answers from the declared
 infos, and every other question goes through one function, `env/reflected` (a class's facet:
 `:tparams`, `:generics`, `:retention`, `:targets`, `:fi-method`, `:record-components`,
-`:functional`, `:enum-constants`), or, for a2g's own, `arbace.a2g.edge/jvm` and `jvm?`
+`:functional`, `:enum-constants`), or, for j2g's own, `arbace.j2g.edge/jvm` and `jvm?`
 (`:method-order`, `:cut`, `:exists`, `:member-types`, `:unexported`). A class neither compiled
 nor declared does not exist; a declared class whose facet was never recorded is an error that
-names it (`bin/a2g-edge update`). The class path's sources are not looked up either
-(`analyze/*source-lookup*` false, as on the Go build), which no a2g run needed.
+names it (`bin/j2g-edge update`). The class path's sources are not looked up either
+(`analyze/*source-lookup*` false, as on the Go build), which no j2g run needed.
 
-The file (Clojure-reader data, `arbace.a2g.edge/edge-text`):
+The file (Clojure-reader data, `arbace.j2g.edge/edge-text`):
 
 ```clojure
 {:classes
@@ -92,7 +94,7 @@ owner of each member (the class), a field's nil constant, a method's empty `:thr
 `:annotations` and `:param-annotations` (a constructor has neither); reading restores them, the
 constants to their field's type, the annotations delayed. Maps are written with sorted keys,
 sets sorted, strings with `\uXXXX` escapes outside printable ASCII, one member per line.
-A class's methods keep the JVM's order when the class is in the JDK's CDS archive (a2g's output
+A class's methods keep the JVM's order when the class is in the JDK's CDS archive (j2g's output
 depends on it: the order of an enum's `compareTo` forwarder among its methods follows
 `java/lang/Enum`'s); for the others (ASM's, the JDK's outside the archive), whose order
 HotSpot varies from one process to the next, they are sorted by name and descriptor.
@@ -100,84 +102,84 @@ HotSpot varies from one process to the next, they are sorted by name and descrip
 Size: 403 classes with about 10,300 members (whole member lists: overload resolution and the
 interfaces' method sets need every member, not only the ones used), 114 cut classes,
 1.40 MB, 14,619 lines. The survey's 226 classes and 1,223 members counted the members the
-translated JDK classes reference across the edge, not what a2g asks.
+translated JDK classes reference across the edge, not what j2g asks.
 
 ### Accessors as data
 
 `arbace.classes.analyze/add-accessor!` keeps, beside each accessor's bytecode-writing function,
 its member instruction as data in the class state's `:accessors` (`{:insn :getfield ... :owner
-:name :desc :itf}`), and `arbace.a2g.access` reads it: no class is written. `FnInvokers`' invoker
-is looked up in its class info (`env/info!`: its class forms in a2g's world, reflection on the
+:name :desc :itf}`), and `arbace.j2g.access` reads it: no class is written. `FnInvokers`' invoker
+is looked up in its class info (`env/info!`: its Java forms in j2g's world, reflection on the
 JVM's compiler) rather than by `Class/getMethod`.
 
 ### The id floor (SA13)
 
-a2g's output names the analyzer's and the translator's temporaries by the runtime's id counter
-(`gensym`, `RT/nextID`: `arr_10021`, `t_14172`), and the counter's value when a2g starts depends
-on how much code the running Arbace compiled before: a2g's own namespaces load from source, so
-any change to a2g renumbered every temporary of the program (S2's code, 458 ids more, would
-have), and a2g on the Go executable (S3) would not reproduce the JVM's program. a2g now advances
-the counter to a fixed value, `arbace.a2g.main/id-floor` (100000), before anything else; its
+j2g's output names the analyzer's and the translator's temporaries by the runtime's id counter
+(`gensym`, `RT/nextID`: `arr_10021`, `t_14172`), and the counter's value when j2g starts depends
+on how much code the running Arbace compiled before: j2g's own namespaces load from source, so
+any change to j2g renumbered every temporary of the program (S2's code, 458 ids more, would
+have), and j2g on the Go executable (S3) would not reproduce the JVM's program. j2g now advances
+the counter to a fixed value, `arbace.j2g.main/id-floor` (100000), before anything else; its
 output depends on its inputs alone.
 
 ### Checks
 
-- `bin/a2g-edge verify` records the edge afresh and compares it with `jdk/edge.edn` byte for
+- `bin/j2g-edge verify` records the edge afresh and compares it with `jdk/edge.edn` byte for
   byte; `bin/gate --full` runs it in its go chain, after `jrt-convert` (SA15).
-- `bin/a2g-edge trace` runs `bin/a2g --program` under JFR's method tracing (JEP 520) of the
+- `bin/j2g-edge trace` runs `bin/j2g --program` under JFR's method tracing (JEP 520) of the
   JVM's reflection and class loading (`Class.forName`, `getDeclared*`, `getMethods`,
   `getFields`, `getConstructors`, `getTypeParameters`, the generic types, annotations, enum
   constants, record components, the nest host, the declaring class, `Field.get`, the class
   path's resources, the module layer, `RT.classForName`) and of ASM's classes (`ClassReader`,
   `ClassWriter`, the visitors, `Type`, `TypeReference`), and fails when a traced call is made
-  inside a2g's run (a frame of `arbace.a2g.main$run` on its stack), but for the runtime's own
-  member lookup (`arbace.lang.Reflector`, behind a2g's own untyped interop) and
+  inside j2g's run (a frame of `arbace.j2g.main$run` on its stack), but for the runtime's own
+  member lookup (`arbace.lang.Reflector`, behind j2g's own untyped interop) and
   `TypeReference`'s arithmetic (below).
 - What stays: the analyzer still computes type annotations' target values with ASM's
   `TypeReference` (integer arithmetic: no class file; the Go build substitutes
-  `arbace.classes.go`'s), and a2g's and the analyzer's code use `Opcodes`' constants. Both leave
-  with ASM in S4. a2g itself runs on the JVM until S3.
+  `arbace.classes.go`'s), and j2g's and the analyzer's code use `Opcodes`' constants. Both leave
+  with ASM in S4. j2g itself runs on the JVM until S3.
 
 ### Results (2026-10-12)
 
 On the branch `standalone-s2`, with main at `2035f7b` (TLS merged) merged in; "main+floor" is
-main's a2g with the same `id-floor` added to its `run` (eight lines, nothing else), in a second
+main's j2g with the same `id-floor` added to its `run` (eight lines, nothing else), in a second
 worktree.
 
-- **The translation.** a2g with the edge against main+floor (JVM reflection, ASM): the program
-  trees (`bin/a2g --program`, and with `--input` the suite's Java fixtures) identical but for the
+- **The translation.** j2g with the edge against main+floor (JVM reflection, ASM): the program
+  trees (`bin/j2g --program`, and with `--input` the suite's Java fixtures) identical but for the
   two embedded sources the stage changes (`res/arbace/classes/analyze.ae.z`, `env.ae.z`); with
   S2's two sources on main+floor's side as well, identical, `report.edn` too (but the times).
-  a2g in `--record-edge` mode and with the edge give the same tree; a2g-check's fixture world
-  and a2g-evalproof's roots give the same tree with the edge as with `--jvm-reflection`.
+  j2g in `--record-edge` mode and with the edge give the same tree; j2g-check's fixture world
+  and j2g-evalproof's roots give the same tree with the edge as with `--jvm-reflection`.
 - **The executables** (`--build` amd64, arm64; `--build-tests`; `--build --box` amd64, arm64),
   S2 against main+floor with S2's two sources, both linked with one version string (the -X
   version is the checkout's): byte-identical, sha256 `656fa77e…` (amd64), `574dc30c…` (arm64),
   `8b581a03…`/`1aa47d7f…` (tests), `5ef3ba3c…`/`1fc238c7…` (box amd64 launcher/guest),
   `e1384a59…`/`0b591ba5…` (box arm64). Two builds of the branch are identical (RP1): amd64
   `ed6c6de0…`, arm64 `8712ab5c…`.
-- **The JVM's class forms compiler** is unchanged: stage 2's `arbace/lang` (774 classes),
+- **The JVM's Java forms compiler** is unchanged: stage 2's `arbace/lang` (774 classes),
   `arbace/asm` (45) and `arbace/java/api` byte-identical to main's; stage 2 = stage 3.
-- **The trace** (`bin/a2g-edge trace`): 305,188 traced calls, 25,763 inside a2g's run: 8,466
+- **The trace** (`bin/j2g-edge trace`): 305,188 traced calls, 25,763 inside j2g's run: 8,466
   `TypeReference` objects, 17,162 `getInterfaces` of protocol dispatch, 15 by `Reflector`'s
-  lookup, 120 by the JVM's linkage, stack traces and class constants; by a2g: **0**. With
-  `--jvm-reflection` the same trace counts 13.3 million calls by a2g (4.4 million class loads by
+  lookup, 120 by the JVM's linkage, stack traces and class constants; by j2g: **0**. With
+  `--jvm-reflection` the same trace counts 13.3 million calls by j2g (4.4 million class loads by
   `env/load-class` alone).
 - **The edge's drift is caught**: main's TLS merge made the embedded namespaces name
   `java.io.IOException` and `java.net.InetSocketAddress`, two more cut candidates;
-  `bin/a2g-edge update` added them (`:exists`), and `verify` then passed.
+  `bin/j2g-edge update` added them (`:exists`), and `verify` then passed.
 - `bin/arbace-go --smoke`: 117 ok (amd64, arm64), none failed; `--smoke --box` (amd64): 111 ok;
   the oracle on amd64: 22,232 of 22,278, the 46 known mismatches, 0 new;
-  `bin/jrt-convert verify` passed (`edge.edn` left to `bin/a2g-edge`); `bin/a2g-edge verify`
+  `bin/jrt-convert verify` passed (`edge.edn` left to `bin/j2g-edge`); `bin/j2g-edge verify`
   passed (3 min 14 s).
-- **Time** (`bin/a2g --program`, three runs each, alternated): main 93.1-95.8 s (analysis
+- **Time** (`bin/j2g --program`, three runs each, alternated): main 93.1-95.8 s (analysis
   15.1-16.2 s); S2 78.6-89.2 s (reading the edge 0.2 s, analysis 11.4-12.5 s: no class loading
   nor reflection).
 
-Left for S3: a2g, its namespaces and the analyzer loaded and run by the Go executable (the edge
+Left for S3: j2g, its namespaces and the analyzer loaded and run by the Go executable (the edge
 read there as here; `Opcodes` and `TypeReference` are the Go build's already); the analyzer's
 own reflective interop on its values (`arbace.classes.types/parse-method-desc`) works on Go's
-`Reflector` but is slow; `bin/a2g-edge` itself and the edge's recording stay on the JVM (D4).
+`Reflector` but is slow; `bin/j2g-edge` itself and the edge's recording stay on the JVM (D4).
 `jrt-convert`'s step `edge` (the members jrt hand-writes, `.tmp/jrt/edge.edn`) is another list,
 of the translated JDK classes' references across the edge.
 
@@ -189,18 +191,18 @@ The user accepted SA10-SA15 as recommended (2026-10-12). S2 numbered them SA1-SA
 branch; renumbered at the merge, since S4's preparation had taken SA1-SA9.
 
 - **SA10 Where S2's notes live.** (a) This file, `doc/STANDALONE-NOTES.md`, the standalone
-  stages' notes from S2 on, with a paragraph in A2G-SPEC §4.1 pointing here; (b) a new section of
-  A2G-SPEC.md (4,455 lines already); (c) A2G-NOTES.md. *Recommended: (a)*: S3 and S4 change the
-  bootstrap, not only a2g.
-- **SA11 The edge as a recorded file in `jdk/`.** (a) `jdk/edge.edn`, recorded from what a2g's
-  runs for the builds ask the JVM (`bin/a2g --record-edge`, `bin/a2g-edge update`), verified by
-  recording again (`bin/a2g-edge verify`, in `bin/gate --full`); (b) a closed definition (every
+  stages' notes from S2 on, with a paragraph in J2G-SPEC §4.1 pointing here; (b) a new section of
+  J2G-SPEC.md (4,455 lines already); (c) J2G-NOTES.md. *Recommended: (a)*: S3 and S4 change the
+  bootstrap, not only j2g.
+- **SA11 The edge as a recorded file in `jdk/`.** (a) `jdk/edge.edn`, recorded from what j2g's
+  runs for the builds ask the JVM (`bin/j2g --record-edge`, `bin/j2g-edge update`), verified by
+  recording again (`bin/j2g-edge verify`, in `bin/gate --full`); (b) a closed definition (every
   class the world's forms name outside the world, with its supertypes), generated without
-  running a2g: larger, and it would still miss a2g's own questions (cut classes, overload
-  order); (c) the file beside jrt's manifest (`go/arbace/jrt/`) or in `arbace/a2g/` (which holds
+  running j2g: larger, and it would still miss j2g's own questions (cut classes, overload
+  order); (c) the file beside jrt's manifest (`go/arbace/jrt/`) or in `arbace/j2g/` (which holds
   only `.ae`). *Recommended: (a)*, in `jdk/` beside the forms it completes: like them generated
   on the JVM, committed, verified, and hashed by the gate's key. The edge covers the builds'
-  two worlds; a2g's other worlds (bin/a2g-check's fixtures, bin/a2g-evalproof's roots) gave the
+  two worlds; j2g's other worlds (bin/j2g-check's fixtures, bin/j2g-evalproof's roots) gave the
   same program with the edge as with the JVM's reflection; another world that asks more names
   the missing class or facet, and `--jvm-reflection` runs it on the JVM.
 - **SA12 Whole classes, the JVM's order kept where it is stable.** (a) every member of each class
@@ -208,26 +210,26 @@ branch; renumbered at the merge, since S4's preparation had taken SA1-SA9.
   CDS-archived classes in the JVM's order, the others sorted; (b) only the members used (the
   survey's estimate, 1,223): overload resolution and interface method sets need them all, and
   the program changed. *Recommended: (a)*. ASM's 15 classes in it go with ASM in S4.
-- **SA13 The id floor.** (a) a2g advances the runtime's id counter to 100000 before it starts, so
-  that its output depends on its inputs alone (needed by S3, whose G2 = G3 compares a2g on the
-  Go executable with a2g on the JVM); every temporary of the program is renumbered once
+- **SA13 The id floor.** (a) j2g advances the runtime's id counter to 100000 before it starts, so
+  that its output depends on its inputs alone (needed by S3, whose G2 = G3 compares j2g on the
+  Go executable with j2g on the JVM); every temporary of the program is renumbered once
   (`arr_10021` becomes `arr_1xxxxx`); (b) the floor at main's value (9022), which kept the
-  program's names: impossible, S2's a2g itself loads 458 ids more (9480); (c) no floor: every
-  change to a2g renumbers the program's temporaries, as today, and S3's comparison fails;
-  (d) a2g's own counter for the analyzer's names: a change of the analyzer the JVM's compiler
+  program's names: impossible, S2's j2g itself loads 458 ids more (9480); (c) no floor: every
+  change to j2g renumbers the program's temporaries, as today, and S3's comparison fails;
+  (d) j2g's own counter for the analyzer's names: a change of the analyzer the JVM's compiler
   shares. *Recommended: (a)*.
 - **SA14 The exit criterion as met.** The survey's "the same program byte for byte" cannot hold
-  literally: the Go executable embeds the class forms' analysis (`arbace/classes/env.ae`,
-  `analyze.ae`, for the REPL's class forms, CLASSFORMS-REPL.md), which S2 changes, and SA13
-  renumbers. Proven instead (Results): a2g's program tree equals main's a2g's, run with the same
+  literally: the Go executable embeds the Java forms' analysis (`arbace/classes/env.ae`,
+  `analyze.ae`, for the REPL's Java forms, CLASSFORMS-REPL.md), which S2 changes, and SA13
+  renumbers. Proven instead (Results): j2g's program tree equals main's j2g's, run with the same
   id floor, but for the two embedded sources; with S2's two sources on both sides, the
   executables (`--build` amd64 and arm64, `--build-tests`, `--build --box` amd64 and arm64) are
-  byte-identical; the class forms compiler's output on the JVM (stage 2's `arbace/lang`,
+  byte-identical; the Java forms compiler's output on the JVM (stage 2's `arbace/lang`,
   `arbace/asm`, `arbace/java/api`) is unchanged. *Recommended: accept*; the alternatives
   (freezing a copy of main's analyzer as the Go build's variant, or the analyzer's changes
-  undone by a2g at run time) would cost more than they prove.
-- **SA15 `bin/a2g-edge verify` in `bin/gate --full`.** (a) in the go chain after `jrt-convert`
-  (two a2g runs, about 3.5 minutes, sequential for memory); (b) only by hand, like `trace`.
+  undone by j2g at run time) would cost more than they prove.
+- **SA15 `bin/j2g-edge verify` in `bin/gate --full`.** (a) in the go chain after `jrt-convert`
+  (two j2g runs, about 3.5 minutes, sequential for memory); (b) only by hand, like `trace`.
   *Recommended: (a)*: a change that asks the JVM something new must update the edge, and only
   the JVM can tell.
 
@@ -241,11 +243,11 @@ below.
 
 ### What the seed is (D3)
 
-Stage 0 of the bootstrap becomes **Arbace's Go program as a2g and repr/go print it**: the module
+Stage 0 of the bootstrap becomes **Arbace's Go program as j2g and repr/go print it**: the module
 `arbace` that `bin/arbace-go --build` hands to `go build` (`target/arbace-go/work-<arch>/mod`),
 with the Go runtime's files that `overlay/go` patches, and nothing else Arbace-made. Built by
 Go's toolchain alone, it gives the executable `bin/arbace-go --build` gives, byte for byte. That
-executable then runs the chain (S3: a2g, repr/go, `go build`) that builds stage 1 from the
+executable then runs the chain (S3: j2g, repr/go, `go build`) that builds stage 1 from the
 checkout's sources, and so on to the fixpoint.
 
 Contents of the archive, under one top directory `arbace-seed-go/`:
@@ -254,17 +256,17 @@ Contents of the archive, under one top directory `arbace-seed-go/`:
 |---|---|---:|
 | `SEED.edn` | what the seed is: its format, the version map of the commit it was printed from (linked as `main.arbaceVersion`), Go's version, the build's settings, what printed it (read with `read`) | 1 KB |
 | `mod/go.mod` | `module arbace`, `go 1.27`; no requirements (no `go.sum`, no module cache) | |
-| `mod/cmd/arbace/` | the main package: `main.go`, the image's types and loader, `rlwrap_*.go`, the embedded namespaces' sources `res/` (47 namespaces, a2g's compressed `.ae.z`, SZ2); `image.bin` empty (SA3) | 0.6 MB |
-| `mod/lang/` | a2g's translation of Clojure's runtime (`arbace.lang`) | |
-| `mod/jrt/` | jrt's hand-written Go and the JDK classes a2g translated from `jdk/forms`, with their data files (`tzdb.dat`, `uniName.dat`, ICU's `nfc.nrm`, ...) | |
+| `mod/cmd/arbace/` | the main package: `main.go`, the image's types and loader, `rlwrap_*.go`, the embedded namespaces' sources `res/` (47 namespaces, j2g's compressed `.ae.z`, SZ2); `image.bin` empty (SA3) | 0.6 MB |
+| `mod/lang/` | j2g's translation of Clojure's runtime (`arbace.lang`) | |
+| `mod/jrt/` | jrt's hand-written Go and the JDK classes j2g translated from `jdk/forms`, with their data files (`tzdb.dat`, `uniName.dat`, ICU's `nfc.nrm`, ...) | |
 | `mod/x509roots/` | Mozilla's roots (`x509roots/`, BX72) | |
 | `overlay/runtime/` | `arbace_local.go`, `proc.go`, `runtime2.go`: Go's runtime as `overlay/go` patches it (`bin/jrt overlay`) | 0.4 MB |
-| `namespaces.txt` | the embedded namespaces the image prepares (a2g's `prog/namespaces.txt`) | |
+| `namespaces.txt` | the embedded namespaces the image prepares (j2g's `prog/namespaces.txt`) | |
 
 1,148 files, 29.2 MB unpacked (1,070 Go files, 28.4 MB). It is the same for every architecture:
 the work modules of amd64 and arm64 are identical (checked, `diff -r`), so one seed builds both.
 It holds no tests, no box (the box's guest is built by a later stage from `box/`, `tamago/` and
-the same a2g output), and no host tools (`tools/elfsyms`, `tools/tlsserver` are plain Go in the
+the same j2g output), and no host tools (`tools/elfsyms`, `tools/tlsserver` are plain Go in the
 checkout).
 
 ### Format and pin (SA1, SA2)
@@ -381,7 +383,7 @@ On the worktree `s4-seed` at `7498921` (main `b0f5730` plus the tooling), a clea
   build's. `*arbace-version*`: `{:describe "arbace-box-arm64-v1-28-g7498921", :commit
   "7498921…", :dirty false}`.
 - **Generation B**: `bin/seed --go-verify` (a fresh worktree at `7498921`: its own bootstrap,
-  a2g, repr/go, gc, `--go-make`; 4m50s): the same tar byte for byte (SHA-256
+  j2g, repr/go, gc, `--go-make`; 4m50s): the same tar byte for byte (SHA-256
   `cc61aabbf4fcf5e050d58edb7f1ee735b2ff91eb0d7464dce720056ff294aca0`) and the same archive
   (`c4e00bf6…`); stage 0 built from B (amd64) is that worktree's own `--build` executable, byte
   for byte (`0793e34f…`). The seed is reproducible from its commit.
@@ -448,7 +450,7 @@ is `target/arbace.jar` from the bootstrap, which leaves main at S4. It now takes
 
 **SA8 The reference is the frozen branch's last release, v4, not the seed jar (v1).** The seed
 jar is `arbace-for-java-26-v1`, which still compares NaN wrongly (`(< ##NaN 1)` true, `(long
-##NaN)` throwing: the class forms compiler's `dcmpg`, fixed in v2, `398f01b`); recorded from it,
+##NaN)` throwing: the Java forms compiler's `dcmpg`, fixed in v2, `398f01b`); recorded from it,
 `forms/numbers` alone differs from the expected files in 8 cases. `bin/oracle` builds the jar of
 `ARBACE_ORACLE_TAG` (default `arbace-for-java-26-v4`, `c4095d1`) once from the tag, with the
 tag's own `bin/build-arbace` in a temporary worktree (about 2 minutes), into
@@ -526,7 +528,7 @@ oracle's reference or repr/java). Counts at `b0f5730`.
   `doc/go/java-surface.edn` stays as data.
 - [ ] [T] `bin/lib/tools.bash`'s `arbace_runtime` (`target/stage2`) → the Go executable
   (`ARBACE_PATH` to the checkout); `frozen_clojure` stays (git only).
-- [ ] [T] `bin/a2g`, `bin/a2g-check`, `bin/a2g-race`, `bin/a2g-evalproof`; `bin/repr-go` (read,
+- [ ] [T] `bin/j2g`, `bin/j2g-check`, `bin/j2g-race`, `bin/j2g-evalproof`; `bin/repr-go` (read,
   convert, build's driver), `bin/repr-go print`, `-print-tests`, `-convert-tests`, `-build-tests`;
   `bin/c2a`, `bin/c2a-check`; `bin/box-vendor`, `bin/tamago-vendor`, `bin/x509roots-vendor` (repr/go);
   `bin/jrt` build/test/print (repr/go) → on the Go executable (S3).
@@ -538,16 +540,16 @@ oracle's reference or repr/java). Counts at `b0f5730`.
 - [ ] [R] `bin/jrt testdata`, `manifest`, `standins`; `bin/jrt-coverage`; `bin/net-check`'s JVM
   side → on the frozen jar (data generators: their outputs are committed or regenerated rarely).
 - [ ] [R] `bin/repr-java`, `bin/repr-java check`, `bin/jrt-convert` → stay on the JVM (javac), see O1, O2.
-- [ ] `bin/arbace-go`: `build` (a2g, repr/go on the JVM) [T] → S3's chain; `jvm_store_checks` and the
+- [ ] `bin/arbace-go`: `build` (j2g, repr/go on the JVM) [T] → S3's chain; `jvm_store_checks` and the
   JVM's `tls_checks` in `--smoke` [P] → removed; `gate_key` hashes `seed/arbace-seed.jar.sha256`,
   `bin/arbace-j`, `bin/build-arbace`, `java -version` → the Go seed's pin, the chain's scripts, Go
-  only (plus `java` while a2g runs on it).
+  only (plus `java` while j2g runs on it).
 
 ### Code
 
 - [ ] [P] ASM: `arbace/asm.ae` and `arbace/asm/` (45 files, 14,747 lines) → removed, after
   `Opcodes`' access-flag constants (used by `classes/{parse,analyze,compiler}`,
-  `lang/Intrinsics`, `a2g/{checks,decls,dyn,fromfn,model,out,reach}`) move into a constants
+  `lang/Intrinsics`, `j2g/{checks,decls,dyn,fromfn,model,out,reach}`) move into a constants
   namespace of Arbace's own (O3).
 - [ ] [P] `arbace/lang/Compiler.ae`'s bytecode back end (8,717 lines; 105 `emit*` methods,
   `ObjExpr.compile`) → the analyzer stays; the emitters removed (the Go variant
@@ -564,16 +566,16 @@ oracle's reference or repr/java). Counts at `b0f5730`.
   removed or no-ops, each a recorded divergence (D13).
 - [ ] [P] `arbace/reflect/java.ae` (267, ClassReader) → `lang/go/ns/reflect/java.subst.ae`.
 - [ ] [P] `arbace/core_classes.ae`'s `write-module!`, `write-package!` → removed.
-- [ ] [P] the class forms compiler's back end: `classes/emit.ae` (2,187; first move a2g's
-  `ctor-real-desc`, `this0-name`, used in 6 a2g files, O4), `compiler.ae` (169), `shape.ae` (161),
+- [ ] [P] the Java forms compiler's back end: `classes/emit.ae` (2,187; first move j2g's
+  `ctor-real-desc`, `this0-name`, used in 6 j2g files, O4), `compiler.ae` (169), `shape.ae` (161),
   `verify.ae` (102), `build.ae` (74), `boot.ae` (31) → removed; the front end (`parse`, `lower`,
   `analyze`, `env`, `types`, `native`) stays.
-- [x] [T] ASM and reflection in a2g's run: `env.ae`'s class path reflection and ClassReader,
-  a2g's `access.ae`, the accessors → S2 done (merged 2026-10-12): the edge as data
-  (`jdk/edge.edn`, `bin/a2g-edge`, its `verify` on the JVM), accessors as data, 0 reflective calls
-  by a2g. Left: the analyzer's accessor bytecode is still emitted for the JVM back end (goes with
+- [x] [T] ASM and reflection in j2g's run: `env.ae`'s class path reflection and ClassReader,
+  j2g's `access.ae`, the accessors → S2 done (merged 2026-10-12): the edge as data
+  (`jdk/edge.edn`, `bin/j2g-edge`, its `verify` on the JVM), accessors as data, 0 reflective calls
+  by j2g. Left: the analyzer's accessor bytecode is still emitted for the JVM back end (goes with
   it), and `Opcodes`/`TypeReference` stay as the Go build's classes (O3).
-- [ ] [P] the JVM namespaces a2g already leaves out (`repl/deps`, `java/basis`, `tools/deps`,
+- [ ] [P] the JVM namespaces j2g already leaves out (`repl/deps`, `java/basis`, `tools/deps`,
   `java/browse*`, `java/javadoc`, `inspector`, `xml`, `instant_timestamp`, `java/api`) → removed
   or ported, per D13.
 - [ ] [P] `arbace/box/host.ae` (794, the store on the JVM, BX37), `arbace/tls/host.ae` (98,
@@ -593,8 +595,8 @@ oracle's reference or repr/java). Counts at `b0f5730`.
   files re-recorded from v4 at S4.
 - [ ] [R] `test/jrt/testdata*.ae`, `tables.ae`, `manifest.ae`, `standins*.ae`,
   `jrt_coverage.ae`, `jrt_sources.ae` → on the frozen jar; `java_surface.ae` [P] retired.
-- [ ] [T] `test/a2g/eval_ops.ae` (generates `lang/go/CompilerOps.ae` on stage 2),
-  `test/a2g/check.ae` → on Go.
+- [ ] [T] `test/j2g/eval_ops.ae` (generates `lang/go/CompilerOps.ae` on stage 2),
+  `test/j2g/check.ae` → on Go.
 - [ ] `test/c2a/c2a_test.ae` names `arbace.asm.commons.Method` as data → check after ASM goes.
 
 ### `bin/gate`
@@ -620,8 +622,8 @@ oracle's reference or repr/java). Counts at `b0f5730`.
 - [ ] doc/VENDOR-NOTES.md (the bootstrap, the jar and AOT cache, the runtime image, the suite on
   stages 1 and 2, the binary seed: marked as the frozen branch's), doc/classes/{SPEC (§6, §8.3,
   §9.3, §9.4, §9.6), COMPILER-NOTES, CONVERTER-NOTES}.md, doc/ARBACE.md, doc/C2A.md,
-  doc/go/{A2G-SPEC, EVAL-NOTES, CLASSFORMS-REPL, JAVA-SURFACE, BOX-NOTES (BX37, TLS on the JVM),
-  EVAL-PLAN, EXEC-NOTES, ORACLE, A2G-NOTES, B1-PLAN, JRT-NOTES, JRT-SOURCES, SPEED-NOTES, BUILD,
+  doc/go/{J2G-SPEC, EVAL-NOTES, CLASSFORMS-REPL, JAVA-SURFACE, BOX-NOTES (BX37, TLS on the JVM),
+  EVAL-PLAN, EXEC-NOTES, ORACLE, J2G-NOTES, B1-PLAN, JRT-NOTES, JRT-SOURCES, SPEED-NOTES, BUILD,
   ...}.md; doc/AGENDA.md; a JOURNAL entry.
 
 ### Open points for S4
@@ -631,23 +633,23 @@ oracle's reference or repr/java). Counts at `b0f5730`.
   `.clj` only: a view as the oracle's); (b) repr/java's Arbace side on the Go executable, javac alone in
   a JVM (a process boundary inside repr/java). Recommended: (a) at S4, (b) with D12's later stage.
 - **O2 repr/java's checks compile to bytecode.** `repr-java-check` (steps 2-4) and `jrt-convert check`
-  compile converted forms with the class forms back end (emit, ASM's ClassReader) and compare
+  compile converted forms with the Java forms back end (emit, ASM's ClassReader) and compare
   with javac. Options: (a) run them on the frozen jar's own compiler (at the freeze's state);
   (b) make them forms-level only (repr/java's output compared with the committed forms, as `jrt-convert
   verify` does); (c) keep emit, shape and ASM on main as a repr-java-check toolkit. Recommended: (b),
   with (a) for the suite step.
-- **O3** `Opcodes`' constants need a home before ASM goes. **O4** a2g's two helpers from emit
+- **O3** `Opcodes`' constants need a home before ASM goes. **O4** j2g's two helpers from emit
   move first.
 - **O5** Done: the Go suite's Java fixtures are committed as forms (`test/java-fixtures/`), so the
   test build needs no javac or repr/java; `bin/clojure-tests --java-fixtures verify` (repr/java on the JVM)
-  is a `--full` check, as `bin/a2g-edge verify` is.
+  is a `--full` check, as `bin/j2g-edge verify` is.
 
 ## S3: repr/go on Go
 
 The part of S3 that is repr/go's (branch `s3-g2a`, 2026-10-12): repr/go's printer, `bin/build-go`'s
 driver (printing a program's packages into a module, then `go build` as a host process through
 `ProcessBuilder`) and its converter run on the native Go executable, with the same output byte
-for byte. a2g on Go is the other half of S3 (branch `s3-fixpoint`).
+for byte. j2g on Go is the other half of S3 (branch `s3-fixpoint`).
 
 ### The host: `G2A_HOST`
 
@@ -657,7 +659,7 @@ for byte. a2g on Go is the other half of S3 (branch `s3-fixpoint`).
 - `jvm`, the default: Arbace on the JVM, `target/stage2` plus the checkout, as before.
 - `go`: the native executable, `REPR_GO_EXE` or else `target/arbace-go/<host arch>/arbace` (built by
   `bin/arbace-go --build`), run as `arbace -m NS ARGS` with the checkout first on `ARBACE_PATH`.
-  `arbace.repr.go` is not embedded in the executable (a2g's `embed.ae` leaves the tools out), so it
+  `arbace.repr.go` is not embedded in the executable (j2g's `embed.ae` leaves the tools out), so it
   loads from the checkout's sources, as on the JVM. The executable runs from a copy in
   `.tmp/repr-go-host/`, refreshed (by a rename, under a lock) when it differs: `bin/arbace-go
   --build` replaces `target/arbace-go/<arch>/arbace` while its own printing runs.
@@ -671,7 +673,7 @@ launcher through `bin/build-go`). The JVM stays the default until S3's fixpoint 
 Proofs (main at `329af1a` merged; `.tmp/proof/`, removed after):
 
 - `bin/arbace-go --build` and `--build --box` for amd64 and arm64, once with `G2A_HOST=jvm` and
-  once with `G2A_HOST=go`: the printed modules (`work-amd64/mod`, `work-arm64/mod`: a2g's
+  once with `G2A_HOST=go`: the printed modules (`work-amd64/mod`, `work-arm64/mod`: j2g's
   program with `x509roots/`; `work-box-<arch>/mod`, the guests with `box/`;
   `work-box-launcher-<arch>/mod`; the printed `tamago/` tree, `target/arbace-go/tamago`) equal by
   `diff -r`, and the eight executables identical: `amd64/arbace`, `arm64/arbace`, and for amd64
@@ -679,7 +681,7 @@ Proofs (main at `329af1a` merged; `.tmp/proof/`, removed after):
 - `tamago/`'s std and goos module, each architecture's forms root (`tamago/goroot/go` with
   `arch/<arch>/go` over it, as `bin/tamago-vendor` lays it): printed on Go, on the JVM, and on
   the JVM by main's printer (`329af1a`), all equal, for amd64 and for arm64.
-- a2g's program printed by main's printer on the JVM equals the new printer's (both hosts);
+- j2g's program printed by main's printer on the JVM equals the new printer's (both hosts);
   `box/` and `x509roots/` printed alone on both hosts and by main's printer, equal.
 - `bin/tamago-vendor check`: both guests identical to TamaGo's originals' (linked and cut).
 - `bin/repr-go roundtrip amd64` and `linux/amd64`: no regressions; `G2A_HOST=go bin/repr-go roundtrip
@@ -693,14 +695,14 @@ The program's line includes `go build` from a warm cache (a few seconds).
 
 | tree | JVM before | Go before | JVM after | Go after |
 |---|---:|---:|---:|---:|
-| a2g's program, amd64 (`bin/build-go`, 34 MB of forms, 1,070 files) | 23.8 s | 378 s (6.2 GB) | 12.1 s | 32.3 s (4.6 GB) |
+| j2g's program, amd64 (`bin/build-go`, 34 MB of forms, 1,070 files) | 23.8 s | 378 s (6.2 GB) | 12.1 s | 32.3 s (4.6 GB) |
 | `tamago/` std, amd64 (print only, 371 packages) | 20.1 s | 235 s | 6.2 s | 21-24 s (3.7 GB) |
 | `tamago/` std, arm64 | 18.1 s | | 6.6 s | 24.1 s |
 | `tamago/` goos module | 2.5 s | 4.4 s | 2.2 s | 2.7 s |
 | `box/` (print only) | 2.3 s | 4.4 s | 2.2 s | 2.4 s |
 | `x509roots/` (print only) | 1.9 s | 3.5 s | 2.0 s | 2.4 s |
 | `net/http` alone (`bin/repr-go print`, 29 files) | 2.7 s | 10.1 s | | 3.8 s |
-| `bin/arbace-go --build`, amd64 and arm64 (a2g on the JVM in both) | | | 137 s | 153 s |
+| `bin/arbace-go --build`, amd64 and arm64 (j2g on the JVM in both) | | | 137 s | 153 s |
 | `bin/arbace-go --build --box`, amd64 and arm64 | | | 85 s | 97 s |
 | the round trip's conversion and printing (`bin/repr-go roundtrip amd64`) | | | 36.7 s | 207 s (13 GB) |
 
@@ -720,7 +722,7 @@ The survey's measure (§8.3, about 7 times slower) was of one package; the whole
    jrt's regex for each symbol). Now `arbace.build.go/read-all` reads the files once, in
    parallel (`pmap`), and `print/collect` takes a reading function: 7 s.
 2. **Printing in parallel.** Packages were printed in parallel, but each package's files one
-   after another, and a file whole: jrt's 910 files in a row, and `a2g_classes.ae` (4 MB, 8,249
+   after another, and a file whole: jrt's 910 files in a row, and `j2g_classes.ae` (4 MB, 8,249
    declarations) alone took 44 s on Go. Now `print-forms` prints a package's files in parallel,
    and `print-file` a long file's declarations in chunks (mode `:lines`, about two per
    processor): each chunk is printed in an emitter state of its own, started at the line its
@@ -762,11 +764,11 @@ instrumentation (wrapped vars: its cost hid the costs measured).
 
 ### Left for S3
 
-- a2g on the Go executable (S2's a2g, `s3-fixpoint`), then the chain G1 → G2 → G3 with
+- j2g on the Go executable (S2's j2g, `s3-fixpoint`), then the chain G1 → G2 → G3 with
   `G2A_HOST=go`. (Since done: "S3: the Go-hosted fixpoint", below.)
 - repr/go embedded in the executable and prepared in its image would save its load from source (1.6
   s per run); compiling the tools' namespaces to Go (B1-PLAN step 7's second half, AOT to Go
-  forms) is what would close most of the remaining 2-3x: it needs a2g's embedding (`embed.ae`
+  forms) is what would close most of the remaining 2-3x: it needs j2g's embedding (`embed.ae`
   excludes `arbace/repr/go/`). (Since done: S6, the tools compiled into stage 0, SA133; "S6: the
   compiled build as the default".)
 - The converter on Go (5.6x the JVM's time, 13 GB) is untuned; the round trip is not part of
@@ -789,7 +791,7 @@ The user accepted SA30-SA32 as recommended (2026-10-12, after the merge into mai
 - **SA31 The printer parallel within a package and a file.** (a) files of a package in
   parallel, a long file's declarations in chunks joined when the state matches, else printed
   again (exact by construction, proven on every tree above); (b) files only (the critical path
-  then a2g's `a2g_classes.ae`, 44 s on Go); (c) splitting a2g's large files in a2g instead.
+  then j2g's `j2g_classes.ae`, 44 s on Go); (c) splitting j2g's large files in j2g instead.
   *Recommended: (a)*; the JVM gains too (the program 23.8 → 12.1 s).
 - **SA32 The evaluator's method cache on calls through a seq** (runtime, `Compiler.ae`): a fix,
   recorded as an amendment because it changes the Go build's runtime. *Recommended: accept.*
@@ -797,78 +799,78 @@ The user accepted SA30-SA32 as recommended (2026-10-12, after the merge into mai
 ## S3: the Go-hosted fixpoint
 
 The other half of S3 (branch `s3-fixpoint`, 2026-10-12; repr/go's half is "S3: repr/go on Go" above):
-a2g (`arbace/a2g`, with the class forms' analysis `arbace.classes.*`) run by the native Go
-executable, so that the whole build of the Go program runs on Arbace's Go build: a2g, repr/go's
+j2g (`arbace/j2g`, with the Java forms' analysis `arbace.classes.*`) run by the native Go
+executable, so that the whole build of the Go program runs on Arbace's Go build: j2g, repr/go's
 printing and `bin/build-go`'s driver on the executable, `go build` as a host process. The exit
 criterion (survey §9.1): G1, built by today's JVM chain, builds G2; G2 builds G3; G2 = G3, and
-a2g's program tree on Go equal to the JVM's.
+j2g's program tree on Go equal to the JVM's.
 
-### What kept a2g off the Go executable
+### What kept j2g off the Go executable
 
-S2 had removed a2g's questions to the JVM (the edge); what remained were names and classes the
-Go build does not have, found by loading a2g's namespaces on the executable:
+S2 had removed j2g's questions to the JVM (the edge); what remained were names and classes the
+Go build does not have, found by loading j2g's namespaces on the executable:
 
-1. **The bytecode back end.** a2g required `arbace.classes.emit` (ASM's visitors, proxies of
+1. **The bytecode back end.** j2g required `arbace.classes.emit` (ASM's visitors, proxies of
    `arbace.asm` classes the Go world does not hold) for two functions of javac's rules:
    `ctor-real-desc` (a constructor's descriptor with its implicit parameters: the outer
    instance, the enum's name and ordinal, captured locals) and `this0-name` (the outer instance
    field, `this$N`). They are analysis, not emission: they move to `arbace.classes.analyze`
-   (with `outer-level`), `emit` and a2g call them there, and a2g no longer requires `emit`
-   (SA22). `analyze.ae` is embedded in the executable (the REPL's class forms), so its source
-   and the image change; the JVM's class forms compiler compiles the same code.
+   (with `outer-level`), `emit` and j2g call them there, and j2g no longer requires `emit`
+   (SA22). `analyze.ae` is embedded in the executable (the REPL's Java forms), so its source
+   and the image change; the JVM's Java forms compiler compiles the same code.
 2. **The JVM's module layer.** `repl-visible?` named `java.lang.Module` and `ModuleLayer` in a
    fallback only `--record-edge` and `--jvm-reflection` call; the Go build has neither class, and
    a hint or a class name the compiler cannot resolve fails the namespace's load. The question
-   moves to `arbace.a2g.jvm`, loaded on demand (`requiring-resolve`) by that fallback (SA23).
-3. **`java.util.zip.Deflater`.** a2g compresses the embedded resources (SZ2) with the JDK's
+   moves to `arbace.j2g.jvm`, loaded on demand (`requiring-resolve`) by that fallback (SA23).
+3. **`java.util.zip.Deflater`.** j2g compresses the embedded resources (SZ2) with the JDK's
    Deflater, zlib's C code: the Go build has no Deflater (jrt inflates with Go's
-   `compress/zlib`), and Go's compressor writes other bytes than zlib's, so a2g on Go could not
-   write the JVM's tree. a2g now writes them with `arbace.a2g.zlib`, a DEFLATE compressor in
+   `compress/zlib`), and Go's compressor writes other bytes than zlib's, so j2g on Go could not
+   write the JVM's tree. j2g now writes them with `arbace.j2g.zlib`, a DEFLATE compressor in
    Arbace (LZ77 over a 32 KB window with hash chains searched 64 deep and one step of lazy
    matching, dynamic Huffman blocks of 16,384 symbols, lengths limited by halving the
    frequencies, ties by symbol): the same bytes on every host, read by jrt's inflater and the
    JDK's. Its output is 0.5-0.7% larger than zlib's level 9 (the resources 666,535 bytes against
    662,014; the executable +8 KB); 35 ms for `core.ae` (286 KB) on the JVM (SA21).
 
-With these, a2g on the executable translates the program exactly as on the JVM, from the first
-run: every Go form identical (`diff -r` of a2g's output trees).
+With these, j2g on the executable translates the program exactly as on the JVM, from the first
+run: every Go form identical (`diff -r` of j2g's output trees).
 
 ### Speed (and what the evaluator was doing)
 
-a2g on the JVM: about 80 s (load 12-14 s, reach 4-7, translate 33-50, write 7-9). On Go, main's
+j2g on the JVM: about 80 s (load 12-14 s, reach 4-7, translate 33-50, write 7-9). On Go, main's
 executable: 34 min 46 s (load 228 s, reach 74, translate 995, write 265), 9.6 GB of RSS, 26 times
-the JVM. Go's profiles (`ARBACE_CPUPROFILE`) showed two faults of the evaluator, not of a2g:
+the JVM. Go's profiles (`ARBACE_CPUPROFILE`) showed two faults of the evaluator, not of j2g:
 
 - **Calls through a seq compiled the method every time** (`Evaluator.invokeFn` of a variadic fn
   or `apply`): 15% of the CPU time. Fixed on `s3-g2a` as SA32 (the same fix was made here and
   dropped at the merge).
 - **Static fields were looked up by name at every read** (`StaticFieldExpr` evaluated by
   `evalIn`: `Reflector.getStaticField` lists the class's fields, building a `Field` per member,
-  at each read; a2g and the analyzer read `Opcodes/ACC_*` everywhere): 4%. The closure compiler
+  at each read; j2g and the analyzer read `Opcodes/ACC_*` everywhere): 4%. The closure compiler
   now compiles it into `CodeStaticField`, which reads the analyzer's resolved `Field`, a static
   final field of a primitive type or `String` (a constant) once (SA24).
 
-After both (the fixpoint's runs): a2g on Go 1,365 s (load 113, reach 56, translate 742-747, write
+After both (the fixpoint's runs): j2g on Go 1,365 s (load 113, reach 56, translate 742-747, write
 160), 9.6 GB of RSS at most (GOGC 400; a live heap of 1.1-1.6 GB), against 79 s on the JVM (12,
 4.5, 33.5, 6.9): 17 times, the translation 22 times, the reach and the load 9-12. The rest is the evaluator itself, spread thin (frames, `Code` dispatch, calls
 through member tables, lazy seqs, boxing); the collector marks on other cores (GOGC 400: about
 105 collections of a 1.1 GB live heap, 25% of the CPU samples, under 1% of the wall time).
 The ratio, 15-20x, is the evaluator's on this kind of code (SPEED-NOTES: 5-500x, 54x geometric
-mean on benchmarks); what closes it is compiling Arbace to Go (S6): a2g, the analyzer and repr/go
+mean on benchmarks); what closes it is compiling Arbace to Go (S6): j2g, the analyzer and repr/go
 built into the executable as Go rather than evaluated.
 
-### The build on Go: `ARBACE_GO_HOST`, `A2G_HOST`
+### The build on Go: `ARBACE_GO_HOST`, `J2G_HOST`
 
-- `bin/a2g` takes `A2G_HOST=jvm|go` (as `bin/repr-go`'s `G2A_HOST`, SA30): `go` runs `-m
-  arbace.a2g.main` on `A2G_GO_EXE`, else `target/arbace-go/<host arch>/arbace`, from a copy in
-  `.tmp/a2g-host/`, the checkout first on `ARBACE_PATH` (a2g's namespaces are not embedded: they
+- `bin/j2g` takes `J2G_HOST=jvm|go` (as `bin/repr-go`'s `G2A_HOST`, SA30): `go` runs `-m
+  arbace.j2g.main` on `J2G_GO_EXE`, else `target/arbace-go/<host arch>/arbace`, from a copy in
+  `.tmp/j2g-host/`, the checkout first on `ARBACE_PATH` (j2g's namespaces are not embedded: they
   load from source; the analysis is the executable's own, embedded and prepared), with
   `GOGC=400` and `GOMEMLIMIT=12GiB` unless set (the JVM's heap is 12 GB) (SA20).
 - `ARBACE_GO_HOST=go bin/arbace-go --build` sets both: the build's Arbace tools run on the
   executable of the previous build. The JVM stays the default until S4.
 - `bin/arbace-go --fixpoint` runs the chain (amd64): G1 by the JVM chain, G2 by G1, G3 by G2,
-  each a whole `--build` (a2g, `bin/build-go`, the image, the final link) in
-  `target/arbace-go/fixpoint/g{1,2,3}`; then it compares a2g's trees (`diff -r`, `report.edn`
+  each a whole `--build` (j2g, `bin/build-go`, the image, the final link) in
+  `target/arbace-go/fixpoint/g{1,2,3}`; then it compares j2g's trees (`diff -r`, `report.edn`
   without its times) and the executables byte for byte, prints their hashes, and writes
   `g3/printed-by`. `ARBACE_SEED_GO_BUILD=target/arbace-go/fixpoint/g3 bin/seed --go-make` packs
   G3's printed module as the seed (SA7), its `SEED.edn`'s `:printed-by` from that file (SA25).
@@ -878,15 +880,15 @@ built into the executable as Go rather than evaluated.
 On `s3-fixpoint` with main at `aea0b98` merged (commit `f293ba7`), `bin/arbace-go --fixpoint`,
 48 min 46 s:
 
-| | built by | a2g | `bin/build-go` | the build |
+| | built by | j2g | `bin/build-go` | the build |
 |---|---|---:|---:|---:|
-| G1 | the JVM chain (a2g and repr/go on `target/stage2`) | 79 s | 9 s | 100 s |
-| G2 | G1 (`A2G_HOST=go`, `G2A_HOST=go`) | 1,365 s | 31 s | 1,407 s |
+| G1 | the JVM chain (j2g and repr/go on `target/stage2`) | 79 s | 9 s | 100 s |
+| G2 | G1 (`J2G_HOST=go`, `G2A_HOST=go`) | 1,365 s | 31 s | 1,407 s |
 | G3 | G2 | 1,377 s | 31 s | 1,419 s |
 
-- a2g's program trees (`a2g/`: the generated forms, the program root with jrt's files, the
+- j2g's program trees (`j2g/`: the generated forms, the program root with jrt's files, the
   embedded resources, `namespaces.txt`, `report.edn` but its times): G1 = G2 = G3 (`diff -r`). So
-  a2g on Go writes the JVM's tree.
+  j2g on Go writes the JVM's tree.
 - The printed modules (`work-amd64/mod`, what the seed packs): G1 = G2 = G3 (`diff -r`).
 - The executables: **G1 = G2 = G3 byte for byte**, SHA-256
   `2f19b3d1c64525db0b11e71c58a7aca750d95f35da8fb6a0ad3f9b6388540f8d`, 69,202,080 bytes.
@@ -894,7 +896,7 @@ On `s3-fixpoint` with main at `aea0b98` merged (commit `f293ba7`), `bin/arbace-g
   bytes, 1,148 files, 29,168,488 bytes unpacked, `:printed-by` the fixpoint (SHA-256
   `2471d77c…`, a dry run in `.tmp`, not committed: SA7).
 
-Before the fixes of the speed section, a2g on main's executable (with the three changes above
+Before the fixes of the speed section, j2g on main's executable (with the three changes above
 loaded over it) already wrote the JVM's translation (every Go form; the resources then
 uncompressed, the zlib not yet written).
 
@@ -905,24 +907,24 @@ uncompressed, the zlib not yet written).
   22,232 of 22,278, the 46 recorded mismatches, 0 new, 0 now passing.
 - `bin/build-arbace`: stage 2 = stage 3; stage 2's `arbace/lang`, `arbace/asm`, `arbace/java/api`
   byte-identical to main's (moving the two functions changes no class the compiler emits).
-- `arbace.a2g.zlib` on the JVM: its streams inflate to their input (the JDK's `Inflater`, Python's
+- `arbace.j2g.zlib` on the JVM: its streams inflate to their input (the JDK's `Inflater`, Python's
   zlib) for the sources, `tzdb.dat`, the empty input and runs; on Go the executable's image step
   reads every compressed source through jrt's inflater (`prepare`).
 - The essential `bin/gate` (main at `aea0b98` merged): passed (5m19s).
 
 ### Left for S4
 
-- The default: `ARBACE_GO_HOST=go` (and `A2G_HOST`, `G2A_HOST`) becomes the build's, the seed's
+- The default: `ARBACE_GO_HOST=go` (and `J2G_HOST`, `G2A_HOST`) becomes the build's, the seed's
   executable as G1 (`bin/seed --build`, then `--fixpoint` from it, not from the JVM); the
   `--fixpoint`'s first step then is stage 0 instead of the JVM chain. (Since done: "S4: the JVM
   removed", the tools on stage 0.)
-- The time: a Go-hosted `--build` takes about 24 minutes against 2 on the JVM (a2g 23 of them).
+- The time: a Go-hosted `--build` takes about 24 minutes against 2 on the JVM (j2g 23 of them).
   `bin/gate`'s cached executable hides it when nothing changed; a change to `arbace/` costs a
-  full a2g run. S6 (Arbace compiled to Go) is the remedy; until then, a2g's phases could run in
+  full j2g run. S6 (Arbace compiled to Go) is the remedy; until then, j2g's phases could run in
   parallel (translation per class is independent but for the shared literal pools). (Since done:
-  a2g in parallel in S4, SA50-SA53; S6 the remedy, "S6: the compiled build as the default".)
-- The edge (`bin/a2g-edge`) and its recording stay on the JVM (D4).
-- `bin/arbace-go --build-tests` (the test build) and `--build --box` on Go: the same a2g and repr/go,
+  j2g in parallel in S4, SA50-SA53; S6 the remedy, "S6: the compiled build as the default".)
+- The edge (`bin/j2g-edge`) and its recording stay on the JVM (D4).
+- `bin/arbace-go --build-tests` (the test build) and `--build --box` on Go: the same j2g and repr/go,
   not separately proven here. (Since done: both built by stage 0 in S4's proofs, "S4: the JVM
   removed".)
 
@@ -930,23 +932,23 @@ uncompressed, the zlib not yet written).
 
 Provisional at first (the user, away, asked for the recommended choice applied and marked so, 2026-10-12); accepted by the user as applied, 2026-10-13.
 
-- **SA20 a2g's host chosen by `A2G_HOST`; `ARBACE_GO_HOST` for the build.** (a) `A2G_HOST=jvm|go`
-  in `bin/a2g` as SA30's `G2A_HOST`, and `ARBACE_GO_HOST=go` in `bin/arbace-go` setting both;
+- **SA20 j2g's host chosen by `J2G_HOST`; `ARBACE_GO_HOST` for the build.** (a) `J2G_HOST=jvm|go`
+  in `bin/j2g` as SA30's `G2A_HOST`, and `ARBACE_GO_HOST=go` in `bin/arbace-go` setting both;
   the JVM the default until S4; (b) one variable for both tools only; (c) Go the default now (24
   minutes a build). *Recommended: (a)*. Accepted.
 - **SA21 The embedded resources compressed by a DEFLATE compressor in Arbace.** (a)
-  `arbace.a2g.zlib`, the same bytes on every host (output 0.5-0.7% larger than zlib's; the
-  executable +8 KB); (b) a2g writes the resources plain and the image step compresses them with
-  Go's `compress/zlib` in the executable (a jrt native; a2g's tree then differs from today's
+  `arbace.j2g.zlib`, the same bytes on every host (output 0.5-0.7% larger than zlib's; the
+  executable +8 KB); (b) j2g writes the resources plain and the image step compresses them with
+  Go's `compress/zlib` in the executable (a jrt native; j2g's tree then differs from today's
   shape, the build's steps change, the box's too); (c) no compression (+1.2 MB, SZ2 undone);
   (d) zlib's C algorithm ported to give the JDK's bytes (large, fragile). *Recommended: (a)*.
   Accepted.
 - **SA22 javac's implicit constructor parameters in the analysis.** (a) `ctor-real-desc`,
   `this0-name` (and `outer-level`) move from `arbace.classes.emit` to `arbace.classes.analyze`;
-  a2g no longer loads the bytecode back end; the embedded `analyze.ae` and the image change;
-  (b) a copy in a2g (two definitions of javac's rule); (c) `emit` loadable on Go (ASM in the Go
+  j2g no longer loads the bytecode back end; the embedded `analyze.ae` and the image change;
+  (b) a copy in j2g (two definitions of javac's rule); (c) `emit` loadable on Go (ASM in the Go
   world). *Recommended: (a)*. Accepted.
-- **SA23 The JVM-only question in `arbace.a2g.jvm`, loaded on demand.** (a) the module layer's
+- **SA23 The JVM-only question in `arbace.j2g.jvm`, loaded on demand.** (a) the module layer's
   exports asked through `requiring-resolve` when recording the edge or with `--jvm-reflection`;
   (b) reflection by name (`Class/forName` of `java.lang.ModuleLayer`). *Recommended: (a)*: S4's
   removal of the JVM paths then deletes one file. Accepted.
@@ -965,14 +967,14 @@ Status: done on the branch `s4-final` (2026-10-12/13), from main at `6cb552a`, f
 `arbace-seed-is-go-v1`; the amendments SA40-SA88 below are provisional (the user, away, asked for
 the recommended choices applied and marked so). The work ran as five branches merged into
 `s4-final`: the coordinator's (the seed, the build, the gate, the JVM's products and the
-JVM-only namespaces), `s4-a2gpar` (a2g in parallel), `s4-frozen` (what stays on a JVM, on the
+JVM-only namespaces), `s4-a2gpar` (j2g in parallel), `s4-frozen` (what stays on a JVM, on the
 frozen jar), `s4-tools` (the tools on the Go executable) and `s4-backend` (the bytecode back ends
 and ASM). The inventory above ("S4: inventory for the JVM's removal") is done but for what
 "Left" below names.
 
 What changed, in one paragraph: the bootstrap starts from the Go-source seed
 `seed/arbace-seed-go.tar.xz` (the fixpoint's printed program, committed with this stage); Go's
-toolchain builds it into stage 0 (`bin/seed --build`), which hosts every Arbace tool (a2g, repr/go,
+toolchain builds it into stage 0 (`bin/seed --build`), which hosts every Arbace tool (j2g, repr/go,
 c2a, the suite's runner) with their namespaces loaded from the checkout; `bin/arbace-go --build`
 is a Go-hosted build by stage 0, `--fixpoint` builds G1 by stage 0, G2 by G1, G3 by G2. The JVM
 runs only the frozen jar of `arbace-for-java-26-v4` (pinned by hash): the oracle's reference, repr/java
@@ -994,12 +996,12 @@ ends, the class loader and the JVM-only namespaces left main (they are on `arbac
   names the procedure, not the host (SA43), so the reprint is identical.
 - **`bin/lib/host.bash`** (SA40): `arbace_host_exe`, the executable that hosts the tools:
   `ARBACE_HOST_EXE` when set, else stage 0, built from the seed when missing or when the seed
-  changed. `bin/a2g` and `bin/lib/repr-go-host.bash` take it (`A2G_GO_EXE`, `REPR_GO_EXE` name another,
+  changed. `bin/j2g` and `bin/lib/repr-go-host.bash` take it (`J2G_GO_EXE`, `REPR_GO_EXE` name another,
   as the fixpoint does); `bin/lib/tools.bash`'s `arbace_tool` too (below). The executable runs
-  from a copy (`.tmp/a2g-host`, `.tmp/repr-go-host`) as in S3.
-- **`bin/arbace-go`**: `--build` is Go-hosted (a2g and repr/go on the host; `ARBACE_GO_HOST` left:
+  from a copy (`.tmp/j2g-host`, `.tmp/repr-go-host`) as in S3.
+- **`bin/arbace-go`**: `--build` is Go-hosted (j2g and repr/go on the host; `ARBACE_GO_HOST` left:
   there is no other host); `--fixpoint` (SA42) builds G1 by the host, G2 by G1, G3 by G2, and
-  holds when G2 = G3 (a2g's trees and the executables); G1 = G2 and host = G1 are reported, and
+  holds when G2 = G3 (j2g's trees and the executables); G1 = G2 and host = G1 are reported, and
   hold when the host is stage 0 of a seed printed from the same sources; `--gate-build` builds the
   executable and the test build (amd64) into `.tmp/arbace-go-gate`, again only when `gate_key`
   changed (Arbace's sources, `go/`, `overlay/`, `jdk/`, `x509roots/`, `bin/lib`, the fixtures'
@@ -1018,19 +1020,19 @@ ends, the class loader and the JVM-only namespaces left main (they are on `arbac
   standalone S4"), `core_bean`, `java/io`; `s4-backend` did the same for `genclass`, `core_proxy`,
   `main`, `core/server`, `reflect/java`, `classes/native`, `go`, `interp` (SA83). Left as variants:
   `classes/{analyze,env,types}.subst.ae` (the front end still runs on the frozen JVM for repr/java and
-  the edge) and the class forms' variants `arbace/lang/go/*.ae` (SA82).
+  the edge) and the Java forms' variants `arbace/lang/go/*.ae` (SA82).
 
-### a2g in parallel (`s4-a2gpar`, SA50-SA53)
+### j2g in parallel (`s4-a2gpar`, SA50-SA53)
 
-On the Go executable a2g took 1,365 s (load 113, reach 56, translate 742, write 160), and a build
-needs two runs (the program, the test build). The classes are now translated on `A2G_JOBS` threads
+On the Go executable j2g took 1,365 s (load 113, reach 56, translate 742, write 160), and a build
+needs two runs (the program, the test build). The classes are now translated on `J2G_JOBS` threads
 (default the processors, at most 16: SA51), each apart: its string literals named apart
 (`Lit?i_k`), its additions to the package's sets (`Up_` conversions, lambda adapters, cut
 classes) and to the race candidates recorded in order, its output captured. A merge in class order
 then does what the sequential loop did: it appends the forms, replays the additions one by one,
 and numbers the literals in the package's pool, the renames applied when the files are written
 (`out/*renames*`): the output is the sequential translation's byte for byte (SA50). The printed
-temporaries' ids are all taken by the analysis in the load; a2g's own gensyms are never printed;
+temporaries' ids are all taken by the analysis in the load; j2g's own gensyms are never printed;
 the caches memoize pure functions. The registrations and the dynamic class's slot methods run the
 same way; writing computes each file's text in parallel (a long file lays out its unlined forms in
 parallel first); resources are compressed in parallel and `report.edn` is pprinted beside the
@@ -1038,7 +1040,7 @@ writing (SA52); the load reads its files and scans the embedded sources in paral
 quadratic steps became linear (`operands` of an array initializer: `Character$UnicodeScript` 12 s
 → 2 s on the JVM; `package-private-overrides`; `collisions`' sort).
 
-| a2g on Go | total | load | reach | translate | write | peak RSS |
+| j2g on Go | total | load | reach | translate | write | peak RSS |
 |---|---:|---:|---:|---:|---:|---:|
 | sequential (S3) | 1,365 s | 113 | 56 | 742 | 160 | 9.6 GB |
 | 64 threads | 242 s | 108.5 | 57.5 | 26.0 | 37.0 | 12.2 GB |
@@ -1054,9 +1056,9 @@ temporaries in order) and the reach (about 165 of the 242 s): S6's to close.
 `bin/lib/tools.bash`'s `arbace_runtime` (`target/stage2`) gave way to `arbace_tool [-p DIR]...
 [-s NS]... [-D NAME=VALUE]... ARG...`: the tools' host run with the checkout, then the tool's
 directories, on `ARBACE_PATH`; system properties as `-e (System/setProperty ...)` (SA70). The
-tools' namespaces not embedded (repr/go, a2g, repr/java, test/'s) load from the checkout as on the JVM; c2a,
+tools' namespaces not embedded (repr/go, j2g, repr/java, test/'s) load from the checkout as on the JVM; c2a,
 embedded, is loaded from the checkout over the executable's copy (`-s`, SA71). `G2A_HOST` and
-`A2G_HOST` only guard against `jvm` now (SA73).
+`J2G_HOST` only guard against `jvm` now (SA73).
 
 - c2a: `bin/c2a`, `bin/c2a-check` (unit 120 of 120; `--suite` as recorded; `--libs` against the
   JVM's output, `test/c2a/libs.out`, SA75). `bin/clojure-tests`' Go mode needs no JVM: c2a, the
@@ -1066,10 +1068,10 @@ embedded, is loaded from the checkout over the executable's copy (`-s`, SA71). `
 - repr/go: `bin/repr-go` (read, build, roundtrip; since 2026-10-17 the build is `bin/build-go`), `print`, `test print` (268),
   `test read` (150), `bin/build-go test` (30) on Go; `roundtrip amd64` 248 s, `linux/amd64` 255 s
   (6.4-6.8 GB), no regressions.
-- a2g: `bin/a2g-check` on Go (2,184 s): 8,958 of 9,022 per architecture, its programs and counts
+- j2g: `bin/j2g-check` on Go (2,184 s): 8,958 of 9,022 per architecture, its programs and counts
   identical to a JVM run; its programs run without the host's `ARBACE_PATH` (SA79); the fixtures'
-  results recorded on a JVM, `test/a2g/fixtures.edn` (`bin/a2g-check --record-fixtures`, on the
-  frozen jar, SA72); `a2g-evalproof` and `a2g-race` as before; `test/a2g/eval_ops.ae` on Go writes
+  results recorded on a JVM, `test/j2g/fixtures.edn` (`bin/j2g-check --record-fixtures`, on the
+  frozen jar, SA72); `j2g-evalproof` and `j2g-race` as before; `test/j2g/eval_ops.ae` on Go writes
   `CompilerOps.ae` byte for byte (SA78).
 - The vendoring tools through the Go-hosted repr/go: `x509roots-vendor verify`, `check`;
   `box-vendor roundtrip` (20 of 20), `kvm-tests`, `purego-check`; `tamago-vendor verify` (383 s),
@@ -1084,7 +1086,7 @@ What stays on a JVM runs on the frozen jar of `arbace-for-java-26-v4` (`bin/lib/
 built once from the tag, pinned by `test/oracle/frozen-jar.sha256`), never on a JVM build of the
 checkout. The jar's loader reads `.clj` only, and loads a namespace from its source when the
 source is newer than its `__init` class (the jar's entries are dated 2000-01-01): `frozen_view`
-puts `.clj` links to the checkout's tool namespaces (repr/java, a2g, c2a, repr/go, the front end
+puts `.clj` links to the checkout's tool namespaces (repr/java, j2g, c2a, repr/go, the front end
 `arbace.classes.{types,env,parse,lower,analyze}`, and every namespace the jar lacks: `opcodes`,
 `go`, `jvm`, `interp`) *before* the jar on the class path; `arbace.core`, the runtime and the
 jar's own back end (`native`, `emit`, `compiler` ...) stay v4's (SA62). On it:
@@ -1099,7 +1101,7 @@ jar's own back end (`native`, `emit`, `compiler` ...) stay v4's (SA62). On it:
   `test/classes/check_converted.ae` left; `jrt-convert`'s `check` step compares with the committed
   forms as a report (SA64); `jdk/provenance.edn` and the fixtures' provenance name repr/java's host
   (SA65).
-- a2g's edge (`bin/a2g-edge update`, `verify`, `trace`): a2g and the front end from the checkout;
+- j2g's edge (`bin/j2g-edge update`, `verify`, `trace`): j2g and the front end from the checkout;
   `--record-edge` reads class files through `arbace.classes.jvm` (ASM's ClassReader, in the jar);
   the fixtures default to the committed `test/java-fixtures/forms` (SA69).
 - The oracle: the frozen reference only (`ARBACE_ORACLE_REF=main` and `bin/arbace-j` left); the
@@ -1129,9 +1131,9 @@ ASM (`arbace/asm.ae`, `arbace/asm/`, 14,747 lines) and the JVM's bytecode back e
 
 - O3 (SA80): the access flags in `arbace.classes.opcodes` (25 `^:const` `ACC_*` ints), required
   `:as Opcodes` so that `Opcodes/ACC_PUBLIC` reads as before, by `classes/{parse,analyze,env}`
-  and a2g. `TypeReference` is `arbace.classes.go`, required `:as TypeReference` on every host
+  and j2g. `TypeReference` is `arbace.classes.go`, required `:as TypeReference` on every host
   (SA81).
-- The class forms compiler keeps its front end (`types`, `env`, `parse`, `lower`, `analyze`,
+- The Java forms compiler keeps its front end (`types`, `env`, `parse`, `lower`, `analyze`,
   `native`) with `opcodes`, `go`, `interp` (the Go build's interpreter, no longer a variant) and
   `jvm` (env's class-file reading with ASM's ClassReader, loaded by `requiring-resolve` only for a
   class read from a class file, i.e. on the frozen jar; left out of the embedded tree; SA84).
@@ -1146,7 +1148,7 @@ ASM (`arbace/asm.ae`, `arbace/asm/`, 14,747 lines) and the JVM's bytecode back e
   `Compile.ae`, `DynamicClassLoader.ae`, `Intrinsics.ae` removed; `RT.ae` took its variant's
   `makeClassLoader` and `classForName`.
 - `jdk/edge.edn`: ASM's, `DynamicClassLoader`'s, `Compile`'s and `Intrinsics`' 39 entries
-  pruned (SA87), then recorded again on the frozen jar at integration (`bin/a2g-edge update`).
+  pruned (SA87), then recorded again on the frozen jar at integration (`bin/j2g-edge update`).
 
 **The language's divergences (D13)**, each a recorded divergence of Arbace from Clojure on the
 JVM (doc/VENDOR-NOTES.md, hand change 23, "Dialect divergences"):
@@ -1155,7 +1157,7 @@ JVM (doc/VENDOR-NOTES.md, hand change 23, "Dialect divergences"):
 - `gen-interface`, `definterface`, `defprotocol`'s interface and `proxy`'s class are made at run
   time (the evaluator's `Dyn`), as they were in the Go build; no class file.
 - `compile` loads the namespace with `*compile-files*` true and writes nothing.
-- `defmodule`, `defpackage` do nothing (SA86); `defclass` and the class forms are interpreted.
+- `defmodule`, `defpackage` do nothing (SA86); `defclass` and the Java forms are interpreted.
 - Annotations in deftype or defrecord metadata are carried by no class file.
 - `add-classpath` / `RT.addURL` throw; `*loader*` and `Compiler/LOADER` are nil; the REPL and
   prepl set no `DynamicClassLoader` as the thread's context loader.
@@ -1176,7 +1178,7 @@ seed); `bin/arbace-go --gate-build` (the executable and the test build by stage 
 then concurrently the smoke test, Clojure's suite on the test build (against
 `test/arbace-go-results.edn`) and the oracle on the executable against the frozen reference
 (`test/oracle/known-go-amd64-frozen.edn`). `--full` adds, concurrently: on the frozen JVM
-`repr-java-check --suite`, `jrt-convert verify`, `a2g-edge verify`, `--java-fixtures verify`; the Go
+`repr-java-check --suite`, `jrt-convert verify`, `j2g-edge verify`, `--java-fixtures verify`; the Go
 build afresh with its smoke test, the box's guests from `tamago/` (`tamago-vendor check`) and the
 box's smoke test, then `bin/arbace-go --fixpoint`; repr/go's round trips, the box's vendoring checks,
 `tamago-vendor verify`, `x509roots-vendor`. The gate ignores `ARBACE_HOST_EXE`: its host is stage
@@ -1188,8 +1190,8 @@ On `s4-final` (2026-10-13), the sources at `ed892a1`, the seed committed alone i
 
 - The fixpoint (`bin/arbace-go --fixpoint`, host S3's G3 `2f19b3d1…`, which embeds main's older
   analyzer, so host ≠ G1): G1 = G2 = G3 byte for byte,
-  `f114b6bd943a508b8cb6e3b0bb8d7b0728d35b531fd612326ee4fb40073fce8a` (68,972,704 bytes), a2g's
-  trees equal; 280, 274 and 273 s a build (a2g load 106-108 s, reach 55 s, translate 29 s, write
+  `f114b6bd943a508b8cb6e3b0bb8d7b0728d35b531fd612326ee4fb40073fce8a` (68,972,704 bytes), j2g's
+  trees equal; 280, 274 and 273 s a build (j2g load 106-108 s, reach 55 s, translate 29 s, write
   19 s).
 - The seed: `ARBACE_SEED_GO_BUILD=target/arbace-go/fixpoint/g3 bin/seed --make`:
   `seed/arbace-seed-go.tar.xz`, 3,058,352 bytes, 1,145 files (29,069,147 bytes unpacked),
@@ -1212,20 +1214,20 @@ On `s4-final` (2026-10-13), the sources at `ed892a1`, the seed committed alone i
   `ForkJoinTask.adapt`'s overloads): regenerate it deliberately (it changes the Go build).
   (Since done in S5: "After S4: the known issues".)
 - Two Go-build bugs found by the moved native tests (a top-level `do` of mutually referring
-  `defclass`es; a class forms `lambda` called in a handed-over fn): fixed after S4 (below, "After
+  `defclass`es; a Java forms `lambda` called in a handed-over fn): fixed after S4 (below, "After
   S4: two Go-build bugs"). By design: eval fns implement no primitive `IFn$LL` interfaces
   (`native.ae:233`, `:234`, `:237`); no `java.lang.SecurityManager` (`:412`); jrt's
   `Method.invoke` wrong-receiver message (`:652`).
 - `test/oracle/known-go-box-amd64.edn` has the new groups but was not run on the box. (Since
   done in S5: run on the box, 0 new; "After S4: the known issues".)
-- The class forms' Go variants (`arbace/lang/go/*.ae`) and the front end's `.subst` variants stay
+- The Java forms' Go variants (`arbace/lang/go/*.ae`) and the front end's `.subst` variants stay
   (SA82, SA83): merging them waits until nothing else reads the bases. (Since done: `Var`,
   `Reflector` and the `.subst` variants in S5, SA105, "After S4: the known issues"; `RT`, `Main`
   and `Compiler` in S6, SA150; the generated `CompilerOps.ae` and `CompilerAOTFn.ae` stay.)
 - JVM-only code paths kept in shared sources (the version resource in `arbace.core`,
   `RT.inArbacePath`'s class path case): harmless on Go, to trim with the variants' merge. (Since:
   `RT.inArbacePath` gone with SA150's merge, `f862ece`; the version resource stays.)
-- The load's analysis and the reach in a2g stay sequential (S6).
+- The load's analysis and the reach in j2g stay sequential (S6).
 
 ### Amendments
 
@@ -1251,7 +1253,7 @@ the JVM-only namespaces removed, ported when a use appears).
   of the analysis or the runtime); `--verify` requires all four equal for the seed's own commit.
   Accepted.
 - **SA43 `SEED.edn`'s `:printed-by` names the procedure.** (a) "the Go-hosted fixpoint ...: G3,
-  a2g and repr/go on G2, G2 built by G1, G1 by the host executable", without the host's identity; (b)
+  j2g and repr/go on G2, G2 built by G1, G1 by the host executable", without the host's identity; (b)
   the host's hash. *Recommended: (a)*: `--verify` runs the same procedure from another host (the
   seed's stage 0) and must print the same tar; the fixpoint makes G3 independent of the host.
   Accepted.
@@ -1260,7 +1262,7 @@ the JVM-only namespaces removed, ported when a use appears).
   fresh build with the box, the fixpoint, repr/go and the vendoring checks; (b) the fixpoint in the
   essential gate (three builds per change, about 15 minutes); (c) the suite and the oracle in
   `--full` only. *Recommended: (a)*: the survey's exit criterion makes the suite on Go the gate's
-  suite, and a parallel a2g makes a cache miss about 10 minutes of builds. Accepted.
+  suite, and a parallel j2g makes a cache miss about 10 minutes of builds. Accepted.
 - **SA45 The JVM-only namespaces removed, not ported.** (a) `repl/deps`, `java/basis`,
   `tools/deps`, `java/browse`, `browse_ui`, `javadoc`, `inspector`, `xml` removed (D13; the Go
   build never had them), `instant_timestamp` folded into `instant`; (b) kept as sources that fail
@@ -1281,8 +1283,8 @@ the JVM-only namespaces removed, ported when a use appears).
   - **SA52 `report.edn`'s times.** (a) pprinted beside the writing, `:times` (with `:steps`) put
     in at the end on one line; (b) pprinted at the end. *Recommended: (a)* (30 s less on Go).
     Accepted.
-  - **SA53 The load's reading in parallel.** (a) The class forms files read and the embedded
-    sources scanned in parallel (no reader construct in class forms takes ids; the scan takes the
+  - **SA53 The load's reading in parallel.** (a) The Java forms files read and the embedded
+    sources scanned in parallel (no reader construct in Java forms takes ids; the scan takes the
     same number in any order); (b) sequential (8 s more). *Recommended: (a)*. Accepted.
 - SA60-SA69 (`s4-frozen`):
   - **SA60 The expected files from v4.** (a) v4's record wholesale; (b) v4's values where main
@@ -1311,7 +1313,7 @@ the JVM-only namespaces removed, ported when a use appears).
   - **SA67 repr/java's build driver** in `test/repr/java/build.ae`, on the jar's own compiler. Accepted.
   - **SA68 gen_corpus and class_scripts.** class_scripts kept on the frozen jar; gen_corpus
     retired with `test/classes` (at integration), its corpus kept as data. Accepted.
-  - **SA69 a2g-edge's fixtures** default to the committed `test/java-fixtures/forms`.
+  - **SA69 j2g-edge's fixtures** default to the committed `test/java-fixtures/forms`.
     Accepted.
 - SA70-SA79 (`s4-tools`):
   - **SA70 The tools' runner `arbace_tool`** in `bin/lib/tools.bash` (a); each script invoking
@@ -1319,11 +1321,11 @@ the JVM-only namespaces removed, ported when a use appears).
   - **SA71 c2a loaded from the checkout over the embedded copy** (a, `-s`: `load-file`, then
     marked loaded); the embedded c2a (b: an edit takes effect only after a build); c2a left out of
     the embedded tree (c). *Recommended: (a)*. Accepted.
-  - **SA72 a2g-check's fixtures recorded on a JVM and committed** (`test/a2g/fixtures.edn`, by
-    `test/a2g/record_fixtures.ae` on the frozen jar) (a); recorded on the Go host at each run (b:
-    not possible, the Go build's class forms cannot evaluate three of them); dropped (c).
+  - **SA72 j2g-check's fixtures recorded on a JVM and committed** (`test/j2g/fixtures.edn`, by
+    `test/j2g/record_fixtures.ae` on the frozen jar) (a); recorded on the Go host at each run (b:
+    not possible, the Go build's Java forms cannot evaluate three of them); dropped (c).
     *Recommended: (a)*. Accepted.
-  - **SA73 `G2A_HOST`/`A2G_HOST` kept as guards** (a: unset or `go`; `jvm` fails naming S4);
+  - **SA73 `G2A_HOST`/`J2G_HOST` kept as guards** (a: unset or `go`; `jvm` fails naming S4);
     removed (b); `jvm` kept (c). *Recommended: (a)*. Accepted.
   - **SA74 The suite's listing and report on the tools' host** (a), not on the build under test
     (b). *Recommended: (a)*; `CLOJURE_TESTS_RENAME` is no longer a setting. Accepted.
@@ -1335,17 +1337,17 @@ the JVM-only namespaces removed, ported when a use appears).
     (a)*. Accepted.
   - **SA78 `eval_ops.ae` reflects the Go executable's own classes** (a: run on an executable
     built from the checkout; two builds when `Numbers`, `RT`, `Util` or `Math` change); listed
-    from the class forms by the analysis (b, later). *Recommended: (a) now*. Accepted.
-  - **SA79 a2g-check's programs run without the host's `ARBACE_PATH`** (a: check's `sh`
-    removes it); (b) another way in `bin/a2g-check`. *Recommended: (a)*. Accepted.
+    from the Java forms by the analysis (b, later). *Recommended: (a) now*. Accepted.
+  - **SA79 j2g-check's programs run without the host's `ARBACE_PATH`** (a: check's `sh`
+    removes it); (b) another way in `bin/j2g-check`. *Recommended: (a)*. Accepted.
 - SA80-SA88 (`s4-backend`):
   - **SA80 Opcodes' home**: `arbace.classes.opcodes`, `^:const` ints required `:as Opcodes` (a);
-    an interface class form translated into the Go world (b); flags as keywords (c).
+    an interface Java form translated into the Go world (b); flags as keywords (c).
     *Recommended: (a)*. Accepted.
   - **SA81 TypeReference**: `arbace.classes.go` the source, required as `TypeReference` on every
     host (a); split into a host-neutral and a Go-only namespace (b). *Recommended: (a)*.
     Accepted.
-  - **SA82 The class forms' Go variants stay variants** (a; the members the base kept only to be
+  - **SA82 The Java forms' Go variants stay variants** (a; the members the base kept only to be
     replaced take the variant's text; `ObjExpr.compile` and `compileStub` throw in the base and
     stay replaced); merge every variant now (b, about 8,000 lines); only delete the emitters (c).
     *Recommended: (a)*. Accepted.
@@ -1353,7 +1355,7 @@ the JVM-only namespaces removed, ported when a use appears).
     `core/server`, `reflect/java`, `classes/native`, `go`, `interp` (a), the front end's `.subst`
     staying variants for the frozen JVM; all of them (b). *Recommended: (a)*. Accepted.
   - **SA84 env's JVM part**: the class-file reading with ASM in `arbace.classes.jvm`, loaded on
-    demand on a JVM only, `getDeclared*` kept in env for the Go REPL's class forms (a); all
+    demand on a JVM only, `getDeclared*` kept in env for the Go REPL's Java forms (a); all
     reflection moved (b). *Recommended: (a)*. Accepted.
   - **SA85 gen-class** a no-op (a); throws, as the Go variant did (b); removed with the ns clause
     (c). *Recommended: (a)*. Accepted.
@@ -1374,10 +1376,10 @@ tests moved into the oracle; the frozen v4 jar (the oracle's reference) answered
 
 `(do (defclass Even ... (Odd/odd ...)) (defclass Odd ... (Even/even ...)))` failed on Go with `No
 method user/Odd.odd(I)Z` (`native.ae:29`, `:32`, `:50`). The compiler evaluates the do's forms
-one by one, each class form compiled with the others entered as declarations (SPEC §9.2:
+one by one, each Java form compiled with the others entered as declarations (SPEC §9.2:
 `ClassFormsExpr/pushSiblings`, `compile-top`'s `siblings`), which worked: Even's code was
 analyzed against Odd's declaration. The cause was in `arbace.classes.interp/define!`, the Go
-build's class forms: it built every method's interpreter tree right after defining the classes
+build's Java forms: it built every method's interpreter tree right after defining the classes
 ("as the JVM compiles them all"), and building a call resolves its target, the `Klass` of an
 interpreted class or a reflective `Method`. Odd, declared but not yet defined (its form comes
 next in the do), had neither, and the build failed. On the JVM the bytecode names Odd and the
@@ -1394,22 +1396,22 @@ own, built and called on the class's initialization. While `define!` builds (`*e
 sibling is pending even when a class of that name exists, so a do evaluated again binds the new
 classes, as the JVM's lazy resolution does (case `native.ae:750`, `:753`). At a first call
 where the sibling is still not defined (a later form of the do threw), the call throws "Class X
-(a class form of the enclosing do) is not defined yet" where the JVM throws
+(a Java form of the enclosing do) is not defined yet" where the JVM throws
 `NoClassDefFoundError`. The member types the host needs at definition (parameters, return,
 fields: `meth-classes`, `publish!`) take `Object` for a sibling not yet defined (`sig-class`,
 SA90): calls and values are right, reflection reports `Object` for that type
 (`native.ae:745`, a known mismatch).
 
-### A `lambda` called by class forms code
+### A `lambda` called by Java forms code
 
 `(.apply (lambda java.util.function.Function [s] (str s "!")) "hi")` at the top level (the form
-handed over to the class forms as an eval fn) threw `ArrayIndexOutOfBoundsException -1`
+handed over to the Java forms as an eval fn) threw `ArrayIndexOutOfBoundsException -1`
 (`native.ae:184`). The interpreter's virtual call `CF$CallV` (`arbace/lang/go/ClassForms.ae`),
 finding the receiver's interpreted method by its class's vtable, stored the receiver in the
 callee's frame at `(.-self m)` unconditionally; a lambda's (or method reference's) method has
 no receiver slot (`self` -1; its object holds the captured values, which `Meth.invoke` copies
 into the frame with `Meth/capture`). The existing cases called lambdas only from Clojure code or
-from the world (`ArrayList.sort`), through `Meth.invoke`; no class forms code had called one.
+from the world (`ArrayList.sort`), through `Meth.invoke`; no Java forms code had called one.
 The fix: `CallV.enter`, used by `eval`, `evalJ` and `evalD`, makes the callee's frame as
 `Meth.invoke` does: the receiver when the method has a slot for it, then the captured values.
 Without it a capturing lambda called this way would also have lost its captures.
@@ -1458,9 +1460,9 @@ Accepted by the user as recommended (2026-10-13).
   analysis, which has run on every body; (c) needs a new node kind in the runtime for the same
   effect. Accepted.
 - **SA92 The error when a sibling is never defined.** (a) The pending signal's `ExceptionInfo`
-  ("Class X (a class form of the enclosing do) is not defined yet") at the first call, where the
+  ("Class X (a Java form of the enclosing do) is not defined yet") at the first call, where the
   JVM throws `NoClassDefFoundError`; (b) a `NoClassDefFoundError` with the class's name.
-  *Recommended: (a)* (as done): a compile error of the class forms, as the other build failures
+  *Recommended: (a)* (as done): a compile error of the Java forms, as the other build failures
   are; (b) when code needs to catch the JVM's error (no case covers it). Accepted.
 
 ## S5: jrt as core and library
@@ -1468,7 +1470,7 @@ Accepted by the user as recommended (2026-10-13).
 Status: measured on the branch `s5-jrt` (2026-10-13), from main at `38bcad1`; the split is not
 built. R1 (STANDALONE-SURVEY §9.3) bites: the reached classes form one strongly connected component
 however the graph is cut at the level of Java packages, and the cuts that would make a core small
-enough need a cross-package mechanism a2g does not have. The amendments SA100-SA103 ask what to do
+enough need a cross-package mechanism j2g does not have. The amendments SA100-SA103 ask what to do
 (decided 2026-10-13, below: no split); meanwhile HV1 (b) (RAM above 4 GiB for a guest,
 BOX-NOTES.md) has removed the premise that a package must compile in 3 GiB.
 
@@ -1481,14 +1483,14 @@ when two declarations are put apart: a unit names a top-level declaration of ano
 (identifiers resolved by go/parser's scopes: locals, parameters, fields and selectors are not
 references). The units: with `-classes`, a class of a translated file (its struct or interface
 type, its methods, which Go requires in the type's package, its `C_` functions), the
-declarations a2g writes for it into the shared files (`a2g_classes.go`: its invoker, member
+declarations j2g writes for it into the shared files (`j2g_classes.go`: its invoker, member
 table, class variable and registering `init`) joining it by their name's longest class prefix;
 without `-classes`, a translated Java source file; each other top-level declaration (jrt's
 hand-written forms, the literal pool, the `Up_` conversions, the adapters) a unit of its own, a
 method with its type. Tarjan's algorithm (iterative) gives the components. Four models of which
 edges count:
 
-- all edges (`godeps -classes`): the program as a2g writes it;
+- all edges (`godeps -classes`): the program as j2g writes it;
 - `-linkname`: a value (function, variable) reached through a `//go:linkname` pull from a lower
   package costs only the types its declaration names (its signature, the variable's type);
 - `-types`: only the edges that name a type: every value edge cut (a function variable the
@@ -1511,21 +1513,21 @@ reader. Measured on main's printed program of `38d4827` (the sources of the seed
 
 A unit per Java source file (all edges): 10,052 units, the largest component 8,367 of them,
 85.6% of the bytes. **By Java package** (a package depends on another when one of its classes'
-units does): of the 75 (73 Java packages, jrt's hand-written forms and a2g's shared files), 74
+units does): of the 75 (73 Java packages, jrt's hand-written forms and j2g's shared files), 74
 are one component with all edges (`java.sql` alone outside), 72 with `-linkname`, 57 with
-`-types`, 49 with `-decls`. A split along Java packages, as A2G-SPEC §4.2 planned it, is not
+`-types`, 49 with `-decls`. A split along Java packages, as J2G-SPEC §4.2 planned it, is not
 possible.
 
 The largest component's content (all edges, by nodes): `java.util` 573k, `java.util.stream`
 436k, `java.util.concurrent` 167k, `java.text` 128k, `java.lang` 102k, `java.time` 80k,
 `java.math` 79k, `java.time.format` 71k, jrt's hand-written 65k, `java.io` 63k,
-`java.util.regex` 61k, `java.net` 56k, a2g's shared 55k, `java.nio` 48k, the security
+`java.util.regex` 61k, `java.net` 56k, j2g's shared 55k, `java.nio` 48k, the security
 providers, the locale providers, ICU's normalizer ... : everything but a few leaves
 (`ConcurrentHashMap`'s spliterators, ICU's `Normalizer2Impl`, a few concurrent classes).
 
 lang (unit per class, `-lang`): all edges, the largest component 449 of 2,587 units, 4.6 MB,
 820,698 nodes (65.9%; 938,258 with what it reaches); with `-types` it falls apart (the largest
-component is one class: `a2g_dyn.go`'s `dynCore` 117k nodes, `RestFn` 107k): lang's cycles are
+component is one class: `j2g_dyn.go`'s `dynCore` 117k nodes, `RestFn` 107k): lang's cycles are
 calls (`RT`, `Util`, `Numbers` ...), not types.
 
 ### Why one component
@@ -1581,7 +1583,7 @@ over too.
 ### What a split would take
 
 Go refuses an import cycle and wants a type's methods in its package. A class-level split (the
-Java packages cannot be the unit) needs, besides a2g writing N packages (each its shared files,
+Java packages cannot be the unit) needs, besides j2g writing N packages (each its shared files,
 names qualified across packages, the partition computed from the components and checked
 acyclic, jrt's eager initializations and the registrations' `Go:` names, `bin/build-go`'s
 packages, the seed and the fixpoint), one of:
@@ -1593,13 +1595,13 @@ packages, the seed and the fixpoint), one of:
   `-linkname`, 3.2 GiB: not enough alone.
 - **outlined bodies** with them: a core method whose body names the library becomes a stub, its
   body a function of a higher package reached by linkname. Bound: `-decls` (1.4 GiB), at the
-  cost of a call per outlined method and a table of them (or rules) in a2g.
+  cost of a call per outlined method and a table of them (or rules) in j2g.
 - **function variables** (hooks) the library's `init` sets, their types erased to the core's:
   bound `-types` (2.2 GiB); every call from the core to what is not in it (`Arrays`, `TreeMap`,
   the streams) goes through a variable, and initialization order matters.
 
 In each case lang needs the same (its calls form the cycle). Estimate: S5's 5-10 days, most of
-it in a2g, for a result that the box can now do without (below).
+it in j2g, for a result that the box can now do without (below).
 
 ### HV1 (b) and the premise
 
@@ -1612,9 +1614,9 @@ GiB depending on the balloon; the Mac (M2 Max) has more.
 
 ### Reachability per program and the core
 
-a2g already translates per program: its reach phase (A2G-SPEC §4.1) keeps the methods reachable
+j2g already translates per program: its reach phase (J2G-SPEC §4.1) keeps the methods reachable
 from the program's roots (27,896 of the closed world's, report.edn), and Go's linker drops
-what is unreferenced, except that every translated class's registration (`a2g_classes.go`'s
+what is unreferenced, except that every translated class's registration (`j2g_classes.go`'s
 `init`) keeps the class's member table and invokers live. Packages would let a program that
 imports no `java.time` not carry it; with one package, the member tables decide.
 
@@ -1643,12 +1645,12 @@ below).
 
 - **SA100 S5's split.** The reached classes are one component at the level of Java packages
   (74 of 75), 84% of jrt at the level of classes; a core under 2.5 GiB needs a cross-package
-  mechanism in a2g, and lang needs splitting too. (a) No split now: tool guests compile jrt and
+  mechanism in j2g, and lang needs splitting too. (a) No split now: tool guests compile jrt and
   lang as they are, with RAM above 4 GiB (HV1 (b)); S5 closes with the measurement, the graph
   tool and the core named; (b) a class-level split with linkname pulls and outlined bodies,
-  computed by a2g from the components (5-10 days, lang included); (c) a split with function
+  computed by j2g from the components (5-10 days, lang included); (c) a split with function
   variables set by the library's `init`, types erased at the hooks. *Recommended: (a)*: the
-  box no longer needs it, (b) and (c) change a2g's output everywhere for a memory gain HV1 (b)
+  box no longer needs it, (b) and (c) change j2g's output everywhere for a memory gain HV1 (b)
   already gives, and (c) costs every call from the core to the rest; (b) stays the way to
   modularity when a program should not carry `java.time` or the streams.
 - **SA101 How gc runs in a tool guest.** (a) `-c=1` and `GOGC=25` for jrt and lang (5.2 and
@@ -1674,7 +1676,7 @@ S4 ("S4: the JVM removed", Left) and SA90 (b).
   classes waiting for each of them again (`republish!`), in their own compilation's context
   (its compile set, its classes merged with the ones just defined), after the host forgot
   their members: `CF$Host.clearMembers` (a no-op by default, the test host's), the Go host's
-  `CFGo.clearMembers` (a native in `arbace.a2g.dyncf`: the class info's `Methods`, `Ctors` and
+  `CFGo.clearMembers` (a native in `arbace.j2g.dyncf`: the class info's `Methods`, `Ctors` and
   `Fields` emptied, and `jrt.ClearReflectionCaches`, new in `go/arbace/jrt/reflect.ae`, which
   empties the public members' lists of every class, since a subclass's include the class's).
   The dynamic class's slots and methods by key are set again by the second publication.
@@ -1694,13 +1696,13 @@ S4 ("S4: the JVM removed", Left) and SA90 (b).
   22,052 of 22,105 cases match, the 53 known, 0 new, 0 now passing: the file was right but for
   the case SA90 (b) fixed; its `:about` says so.
 - **Variants merged into their bases** (VENDOR-NOTES hand change 24): `arbace/lang/go/Var.ae`
-  and `Reflector.ae` applied to `arbace/lang/{Var,Reflector}.ae` (nothing but a2g reads those
+  and `Reflector.ae` applied to `arbace/lang/{Var,Reflector}.ae` (nothing but j2g reads those
   bases since S4); the front end's `classes/{types,env,analyze}.subst.ae` merged so that one
   source runs on Go and on the frozen jar: `types/lang` is the constant `"arbace/lang"`, `env`'s
   reflection cache a `HashMap` and its constructors of abstract classes from the world's
   signatures when jrt lists none (on the JVM every class lists its own, and nothing is added),
   `analyze`'s generic signatures from `arbace.classes.go` and no source lookup when
-  `arbace.classes.go/go-build?`. a2g's output before and after (`bin/a2g --program`, the
+  `arbace.classes.go/go-build?`. j2g's output before and after (`bin/j2g --program`, the
   commits `3f31072` and the merge's): the same but for the analyzer's gensym numbers
   (`i_101061` → `i_101062`), lines, the order of `Reflector`'s and `Var`'s members, the
   embedded front end's text and report.edn's variant counts; `Var`'s and `Reflector`'s forms
@@ -1719,7 +1721,7 @@ S4 ("S4: the JVM removed", Left) and SA90 (b).
   20,506 of 20,520, no regressions; the oracle against the frozen v4 22,505 of 22,558, the 53
   known, 0 new.
 - The box (above): built, smoke test 113 ok, its oracle 22,052 of 22,105, 53 known, 0 new.
-- The merged front end on the frozen jar: `bin/a2g-edge verify` (`jdk/edge.edn` is the JVM's
+- The merged front end on the frozen jar: `bin/j2g-edge verify` (`jdk/edge.edn` is the JVM's
   answer) and `bin/repr-java check` (the baseline, samples and module forms as expected).
 
 ### Amendments
@@ -1736,7 +1738,7 @@ Proposed, for the user's decision.
   substitutions now; `RT`, `Main` and `Compiler`'s four after S6, which changes them; (b) all
   now. *Recommended: (a)*: merging S6's files under it would only make conflicts.
 - **SA106 The front end's host test.** (a) `arbace.classes.go/go-build?`, true when
-  `arbace.lang.Compiler$CFGo` (the Go build's class forms host) exists; (b) a system property
+  `arbace.lang.Compiler$CFGo` (the Go build's Java forms host) exists; (b) a system property
   the Go program sets; (c) the substitutions kept. *Recommended: (a)*: no new property, and
   the class is the thing whose presence makes the difference.
 - **SA107 S0's replay.** (a) `bin/box-vendor convert` converts the packages the clone holds (as
@@ -1759,15 +1761,15 @@ decision; the recommended choice is applied meanwhile.
 
 ### The design
 
-**The route.** An analyzed namespace (`Compiler`'s `Expr` trees) is compiled to **class forms**,
-which a2g translates into Go forms like the runtime's own classes, which repr/go prints and gc
-builds. Not to Go forms directly: a2g already implements Java's semantics in Go (the object model
+**The route.** An analyzed namespace (`Compiler`'s `Expr` trees) is compiled to **Java forms**,
+which j2g translates into Go forms like the runtime's own classes, which repr/go prints and gc
+builds. Not to Go forms directly: j2g already implements Java's semantics in Go (the object model
 and dispatch, exceptions and `finally`, monitors, boxing, statics and their initialization, the
-member tables reflection reads, stack traces mapped to class forms lines), and the JVM's bytecode
+member tables reflection reads, stack traces mapped to Java forms lines), and the JVM's bytecode
 back end (`Compiler.clj` on `arbace-for-java-26`: `ObjExpr.compile`, the `emit` methods) is the
-specification of what each `Expr` compiles to. Class forms are Java's class files written in
+specification of what each `Expr` compiles to. Java forms are Java's class files written in
 Clojure (classes/SPEC.md), so the port is one to one: each `emit` method becomes a function that
-returns class forms where it wrote bytecode (SA130).
+returns Java forms where it wrote bytecode (SA130).
 
 **The analysis as data.** The `Expr` classes are package-private members of `Compiler`; the back
 end is Arbace code outside `arbace.lang`. A Go-build variant of `Compiler`,
@@ -1785,13 +1787,13 @@ from source, each top-level form (a *unit*) analyzed, recorded, then evaluated
 (`Compiler$Image`, EXEC-NOTES.md). With `ARBACE_COMPILE` set, the same run also keeps every unit
 it records (`Compiler$AST/UNITS`, with the source and `*unchecked-math*` as the analysis saw
 them); when the namespaces are loaded, `arbace.aot.main/run` compiles the units of each source
-into a tree of class forms. So the compiled code is a function of the sources alone, analyzed by
+into a tree of Java forms. So the compiled code is a function of the sources alone, analyzed by
 the program built from those same sources, as the image is: the host executable does not enter
 into it (SA132).
 
 **What is emitted** (each the bytecode back end's counterpart):
 
-| analyzed | class forms |
+| analyzed | Java forms |
 |---|---|
 | a source's top-level forms | the static methods `unitK` of its loader class `SCRIPTBASE__init` (`arbace.walk__init`, the JVM's name), whose `load()` runs them in order; a unit `(fn* [] form)` is its body inline; each starts with `Compiler$AOT/at` (the line for errors) and the unit's events made again (below) |
 | `fn*` (`FnExpr`) | a class named as the JVM names it (`arbace.walk$walk`, `arbace.walk$walk$fn__4307`), a static member class nested as its name nests, in a holder class per namespace (`arbace.walk`; holders made for missing levels); `extends AFunction`, `RestFn` when variadic (`doInvoke`, `getRequiredArity`); an `invoke` per arity; the closed-over locals as fields set by the constructor (primitive ones typed); with literal metadata a `__meta` field, `meta`, `withMeta` |
@@ -1826,18 +1828,18 @@ load as before (from the image or from source). A compiled namespace loaded agai
 shadow the compiled ones by name, as a new class loader's do on the JVM (jrt's
 `DefineDynamic`) (SA136).
 
-**The build.** Today's chain gains one step: a2g (the runtime), the first link, then the
-prepare run with `ARBACE_COMPILE`, which writes both the image and the compiled tree, then a2g
-again with the tree as one more input (`bin/a2g --input`, as the test build gives it the Java
+**The build.** Today's chain gains one step: j2g (the runtime), the first link, then the
+prepare run with `ARBACE_COMPILE`, which writes both the image and the compiled tree, then j2g
+again with the tree as one more input (`bin/j2g --input`, as the test build gives it the Java
 fixtures), gc (the runtime's packages but `lang` from its cache), and the final link with the
-image (now only the namespaces that stay evaluated). The tools (a2g, repr/go, c2a, the suite's
-runner, the class forms' front end) are compiled the same way once they are among the program's
-namespaces: a2g's load (106 s) and reach (55 s) are the analyzer and a2g evaluated, and the
+image (now only the namespaces that stay evaluated). The tools (j2g, repr/go, c2a, the suite's
+runner, the Java forms' front end) are compiled the same way once they are among the program's
+namespaces: j2g's load (106 s) and reach (55 s) are the analyzer and j2g evaluated, and the
 measured target of this stage (SA133, SA134).
 
 **The fixpoint and the seed.** The compiled tree is a function of the sources (the prepare run
 is deterministic, the back end numbers its own temporaries and never uses the program's gensym
-counter, constants are ordered by first use); the program a2g writes from it is a2g's
+counter, constants are ordered by first use); the program j2g writes from it is j2g's
 translation, as before. So `bin/arbace-go --fixpoint` (G2 = G3) and `bin/seed --verify` (stage
 0 = G1 = G2 = G3 for the seed's commit) keep their meaning; the seed grows by the compiled
 namespaces' Go and its stage 0 hosts the tools compiled.
@@ -1851,7 +1853,7 @@ namespaces' Go and its stage 0 hosts the tools compiled.
   stack trace names `arbace.walk$walk.invoke` and the source's line. 23 classes.
 - **Every embedded namespace** (`ARBACE_AOT=1 bin/arbace-go --build`, amd64, Go-hosted by stage
   0): 66 sources, 4,826 classes, none left evaluated; the image of what stays evaluated is empty
-  (16 bytes), preparing it takes no time. The compiled tree is 17 MB of class forms. The program
+  (16 bytes), preparing it takes no time. The compiled tree is 17 MB of Java forms. The program
   starts, loads `arbace.core` compiled and runs Clojure code (the checks below).
 - **Start** (`-e nil`, amd64): 0.41 s with the image → 0.16 s compiled.
 - **The benchmarks** (`test/bench/eval-bench.ae`, ms, best run; the benchmarks' own fns are
@@ -1869,8 +1871,8 @@ namespaces' Go and its stage 0 hosts the tools compiled.
   | `closures` | 83.1 | 51.1 | 1.6x |
   | `fib`, `fib-prim`, `loop-long`, `protocol`, `multimethod`, `str-build` | | | 1.0x (the script's own code) |
 
-- **a2g on the compiled program** (`A2G_GO_EXE`, `bin/a2g --program`; a2g's own namespaces still
-  evaluated from the checkout, the class forms' analysis `arbace.classes.*` and `arbace.core`
+- **j2g on the compiled program** (`J2G_GO_EXE`, `bin/j2g --program`; j2g's own namespaces still
+  evaluated from the checkout, the Java forms' analysis `arbace.classes.*` and `arbace.core`
   compiled): load 105.7 → 54.9 s, reach 55.7 → 35.7 s, translate 29.6 → 20.7 s, write 29.3 →
   17.9 s (the machine shared with other agents' builds).
 - **The oracle on the compiled program** (before the fixes below; `bin/oracle check`, against
@@ -1879,26 +1881,26 @@ namespaces' Go and its stage 0 hosts the tools compiled.
   (`(conj "" 1)`'s `ClassCastException` message, 8 cases); a fn's `^long` return not converted
   (`hash-ordered-coll` returned an `Integer`, 13 cases of `hashing.ae`); two fns of one name
   (core's bootstrap `dotimes` and the final one) given one class, the first's (1 case).
-- **With the fixes and the tools** (a2g, repr/go, `arbace.aot` embedded, SA133; 95 sources, 7,334
+- **With the fixes and the tools** (j2g, repr/go, `arbace.aot` embedded, SA133; 95 sources, 7,334
   classes): the oracle 22,504 of 22,558, the 53 known mismatches and 1 new
   (`(hash-ordered-coll "abc")`: `Iterable` taken for a functional interface; the back end now asks
-  the analysis's `FISupport`, `Compiler$AST/fiMethod`). One compiled tool namespace failed a2g's
+  the analysis's `FISupport`, `Compiler$AST/fiMethod`). One compiled tool namespace failed j2g's
   analysis (a local named `const` met the constant fields `const__N`: they are `const-N` now).
 - **The last build** (all fixes, `ARBACE_AOT=1`, 95 sources, 7,327 classes): the oracle 22,505
   of 22,558, **the 53 known mismatches, 0 new, 0 now passing**, as recorded.
-- **a2g compiled** (`A2G_GO_EXE` = that build, `bin/a2g --program`; the same run on stage 0 at the
+- **j2g compiled** (`J2G_GO_EXE` = that build, `bin/j2g --program`; the same run on stage 0 at the
   same time, the machine shared):
 
-  | a2g | load | reach | translate | write |
+  | j2g | load | reach | translate | write |
   |---|---:|---:|---:|---:|
   | stage 0 (evaluated) | 119.0 s | 59.8 s | 32.9 s | 34.9 s |
   | compiled | 38.2 s | 15.9 s | 12.4 s | 12.2 s |
 
   Their program trees are identical (`diff -r`, `report.edn` without its times): the compiled
-  a2g writes the evaluated one's program byte for byte.
+  j2g writes the evaluated one's program byte for byte.
 - **The cost today**: the compiled program is 243 MB (69 MB evaluated; 347 MB with the tools): 4,826 classes, each with
-  a2g's member tables and the forwarders of `IFn`'s 21 `invoke` arities; gc compiles `lang` in
-  455-492 s; a2g's second run, its analyzer evaluated on stage 0, takes 1,100-1,500 s. A build is
+  j2g's member tables and the forwarders of `IFn`'s 21 `invoke` arities; gc compiles `lang` in
+  455-492 s; j2g's second run, its analyzer evaluated on stage 0, takes 1,100-1,500 s. A build is
   about 45 minutes until the tools run compiled on their host (SA133) and the size is worked on.
 
 ### Left (next steps)
@@ -1910,7 +1912,7 @@ namespaces' Go and its stage 0 hosts the tools compiled.
   `ARBACE_AOT=1` the default (SA140) and the gate's. (Done: "Clojure's suite and the oracle
   (2026-10-14)", SA140, SA151.)
 - The build's time: the tools' host compiled (a build hosted by a compiled one; the seed remade
-  from a compiled fixpoint makes stage 0 compiled), a2g's second run reusing the first's world;
+  from a compiled fixpoint makes stage 0 compiled), j2g's second run reusing the first's world;
   gc's time and memory for `lang` (455-606 s); the program's size (the compiled classes are
   rooted as the REPL's world, every public member in the member tables, and each fn class gets
   forwarders for `IFn`'s arities). (Done: SA144, SA146-SA148; the size, SA153-SA159.)
@@ -1918,8 +1920,8 @@ namespaces' Go and its stage 0 hosts the tools compiled.
   sources: to prove). (Done: SA151.)
 - T3 measured (SA139): the benchmarks compiled (a script's code is evaluated; a namespace of
   them compiled into a test build). (Done: "Benchmarks and T3 (SA139)".)
-- Stack traces name the class forms file (`aot_arbace_core.ae:49`) with the source's line; the
-  source's file name per member (a2g's line file) is to do. (Done: SA149.)
+- Stack traces name the Java forms file (`aot_arbace_core.ae:49`) with the source's line; the
+  source's file name per member (j2g's line file) is to do. (Done: SA149.)
 - Primitive fns (`invokePrim`): the analysis makes none in the Go build (EVAL-PLAN Q1); compiled
   code could have them, the analysis's variant permitting. (Open.)
 - The variants of `RT`, `Main` and `Compiler` merged into their bases (the milestone, after S6).
@@ -1928,16 +1930,16 @@ namespaces' Go and its stage 0 hosts the tools compiled.
 ### Checking the back end's output
 
 - `arbace.aot.check` (`(arbace.aot.check/check DIR)` in the executable): the compiled tree's
-  class forms analyzed in the running program by the class forms' analysis the REPL uses,
+  Java forms analyzed in the running program by the Java forms' analysis the REPL uses,
   against the program's classes by reflection, every class's failure reported; minutes, not a
-  build, but it sees the classes made at run time where a2g sees the class forms, so it reports
-  some failures a2g does not have.
-- The build: a2g's analysis failures (`report.edn`, `:analysis-failures`) and translation errors
+  build, but it sees the classes made at run time where j2g sees the Java forms, so it reports
+  some failures j2g does not have.
+- The build: j2g's analysis failures (`report.edn`, `:analysis-failures`) and translation errors
   are the reference; a source list can be compiled alone (`arbace.aot.main/run OUT [SOURCES]`)
   and built as the test build's extra input (`bin/arbace-go --build-tests OUT`).
 
 Fixed in the runtime's translation on the way (each a change to shared code, small):
-a2g casts to a class jrt writes by hand without a `C_Cast` (`ForkJoinPool`) with `jrt.As`; its
+j2g casts to a class jrt writes by hand without a `C_Cast` (`ForkJoinPool`) with `jrt.As`; its
 "unexpected primitive coercion" names the method; jrt's `DefineDynamic` lets the evaluator
 define a compiled namespace's class again (SA136). One finding about the analysis: a fn's
 `closes` map, keyed by `LocalBinding`s that hash by their index (Arbace's deterministic
@@ -1948,11 +1950,11 @@ renumbered a direct fn's arguments; the back end reads the keys by identity.
 
 Proposed (2026-10-13); the recommended choice is applied meanwhile.
 
-- **SA130 The route of compiled code.** (a) `Expr` → class forms → a2g → Go forms (as done):
-  a2g's translation of Java's semantics is reused, the bytecode back end is the specification;
-  (b) `Expr` → Go forms directly: a second translator of Java's semantics beside a2g (the object
+- **SA130 The route of compiled code.** (a) `Expr` → Java forms → j2g → Go forms (as done):
+  j2g's translation of Java's semantics is reused, the bytecode back end is the specification;
+  (b) `Expr` → Go forms directly: a second translator of Java's semantics beside j2g (the object
   model, exceptions, monitors, boxing, reflection's tables, stack traces), faster to build but
-  twice the code to keep equal; (c) Clojure source → class forms by the class forms compiler's
+  twice the code to keep equal; (c) Clojure source → Java forms by the Java forms compiler's
   own Clojure lowering (`arbace.classes.native/compile-fn`, SPEC §5.13): no use of `Compiler`'s
   analysis, whose rules (protocol call sites, `recur`, locals, boxing) it would have to repeat.
   *Recommended: (a)*.
@@ -1963,13 +1965,13 @@ Proposed (2026-10-13); the recommended choice is applied meanwhile.
   each change a rebuild. *Recommended: (a)*; the view is also the input of an own code
   generator (§7).
 - **SA132 Where namespaces are compiled.** (a) In the prepare run of the program built from the
-  same sources (as done): the compiled code is a function of the sources; a build runs a2g
+  same sources (as done): the compiled code is a function of the sources; a build runs j2g
   twice (the runtime, then the program with the compiled tree); (b) on the host executable: one
-  a2g run, but the host's runtime must analyze the new sources, so a change of the runtime with
+  j2g run, but the host's runtime must analyze the new sources, so a change of the runtime with
   the namespaces that use it breaks the bootstrap, and the result depends on the host;
-  (c) the image only (no compilation). *Recommended: (a)*; the second a2g run shrinks when a2g
+  (c) the image only (no compilation). *Recommended: (a)*; the second j2g run shrinks when j2g
   is compiled (SA133) and can later reuse the first's world (its load).
-- **SA133 The tools in the program.** (a) a2g, repr/go, c2a and `arbace.aot` embedded and compiled
+- **SA133 The tools in the program.** (a) j2g, repr/go, c2a and `arbace.aot` embedded and compiled
   like the namespaces (repr/java stays out: it needs javac), the host running them compiled; a tool's
   source on `ARBACE_PATH` that differs from the program's embedded copy is loaded from source
   (`RT.toolSource`: the checkout's change runs, evaluated, until the next build); (b) the tools
@@ -1977,7 +1979,7 @@ Proposed (2026-10-13); the recommended choice is applied meanwhile.
   only after a rebuild); (c) the tools stay loaded from the checkout, evaluated (no speed gain for
   the build). *Recommended: (a)*.
 - **SA134 The Go package of compiled classes.** (a) Package `lang`, beside the runtime, each
-  class named by its whole binary name, `A_..._A` (as done: the suffixes a2g appends cannot make
+  class named by its whole binary name, `A_..._A` (as done: the suffixes j2g appends cannot make
   another name; `lang` grows by the compiled namespaces); (b) a package of their own: needs the
   evaluator's `Dyn` (in `lang`, implementing every interface of the world) to implement the
   compiled protocols' interfaces across packages, or those interfaces kept in `lang`; (c) a
@@ -1986,7 +1988,7 @@ Proposed (2026-10-13); the recommended choice is applied meanwhile.
 - **SA135 A namespace's holder class.** A namespace's fns are member classes of a class named as
   the namespace (`arbace.walk`), so that their binary names are the JVM's (`arbace.walk$walk`,
   printed by `class`, `pr` and stack traces). (a) The holder is a class of the program like the
-  others, `Class/forName "arbace.walk"` finds it (where the JVM finds none); (b) a2g leaves
+  others, `Class/forName "arbace.walk"` finds it (where the JVM finds none); (b) j2g leaves
   holder classes out of the registry (a flag on the class). *Recommended: (a)* now, recorded as a
   divergence; (b) if a case depends on it.
 - **SA136 A compiled namespace loaded from source.** (a) The evaluator's classes may replace a
@@ -1995,9 +1997,9 @@ Proposed (2026-10-13); the recommended choice is applied meanwhile.
   cannot be replaced) (as done); (b) an error, as before. *Recommended: (a)*: `ARBACE_NO_AOT`,
   `:reload` and a tool's changed source need it.
 - **SA137 Members jrt lacks.** Some members of the classes jrt writes by hand exist only in the
-  member tables (`Thread.getContextClassLoader`): a2g turns a direct call of one into a throw.
-  (a) The back end reads jrt's forms (`arbace.a2g.jrt/scan`) and calls such a member by
-  reflection (as done); (b) a2g calls a missing member through the member tables itself, for
+  member tables (`Thread.getContextClassLoader`): j2g turns a direct call of one into a throw.
+  (a) The back end reads jrt's forms (`arbace.j2g.jrt/scan`) and calls such a member by
+  reflection (as done); (b) j2g calls a missing member through the member tables itself, for
   every class it translates. *Recommended: (a)* now; (b) when the runtime's own code needs it.
 - **SA138 Var reads in compiled code.** (a) `getRawRoot`, or `get` for a var dynamic when
   compiled (the bytecode's rule; the flag read after the namespaces are loaded, not at
@@ -2015,7 +2017,7 @@ Proposed (2026-10-13); the recommended choice is applied meanwhile.
 measured, the choice on the numbers; SA140 (a), sharpened: `ARBACE_AOT=1` becomes the default
 (the build, the gate, the fixpoint, the seed) once Clojure's suite and the oracle pass on it and
 a build takes no longer than today's (about 5 minutes); the work to get there (a compiled tools
-host, the second a2g pass reusing the first's world, `lang` smaller) is in the milestone.
+host, the second j2g pass reusing the first's world, `lang` smaller) is in the milestone.
 
 ## S6: the compiled build as the default
 
@@ -2028,8 +2030,8 @@ the recommended choice applied; the user accepted all as (a) (2026-10-14).
 
 ### A compiled fn's representation (SA141)
 
-The first build gave each fn a class extending `AFunction` (or `RestFn`): a2g writes, for every
-class, a forwarder of every virtual method it inherits (A2G-SPEC §5.4: `IFn`'s 21 `invoke`
+The first build gave each fn a class extending `AFunction` (or `RestFn`): j2g writes, for every
+class, a forwarder of every virtual method it inherits (J2G-SPEC §5.4: `IFn`'s 21 `invoke`
 arities, `Comparator`'s defaults, `applyTo`, `meta` ...), about 45 Go methods per fn, 72,000 in
 `arbace.core` alone. Now a fn's code is a class that implements only the interfaces of its
 arities, `Compiler$AOTF<n>` (`invoke(self, a1..an)`) and `Compiler$AOTR<k>` (`doInvoke(self,
@@ -2038,7 +2040,7 @@ a1..ak, rest)`), and holds the closed-over values; the fn is a `Compiler$AOTFn` 
 code object and the fn's class, whose `invoke` asks the code for the arity (else `throwArity`).
 `self` is the fn (its name in its own body). The fn's class, as `class` and printing name it
 (`arbace.walk$walk`), is made at run time once per code class as a subclass of `AOTFn` (the
-evaluator's `defineFnClass`; `getClass` answers it through the field `a2g$class`, as for
+evaluator's `defineFnClass`; `getClass` answers it through the field `j2g$class`, as for
 evaluated fns), and replaces the code class's registration by name (SA136). Stack traces show
 the code's `invoke` frames (`arbace.walk$walk.invoke`); `AOTFn`'s are hidden as the evaluator's
 are. The classes are generated (`test/aot/gen_fns.ae`, `arbace/lang/go/CompilerAOTFn.ae`).
@@ -2048,29 +2050,29 @@ are. The classes are generated (`test/aot/gen_fns.ae`, `arbace/lang/go/CompilerA
 A compiled namespace's classes form a Go package of their own, `arbace/aot_<munged namespace>`
 (a holder and its fns, the namespace's deftypes and interfaces; a source's loader with its
 namespace, or its own for a loaded file such as `core_print`), named in the tree's
-`packages.edn`, which a2g reads (`arbace.a2g.names/compiled-packages`); a2g handles any number of
+`packages.edn`, which j2g reads (`arbace.j2g.names/compiled-packages`); j2g handles any number of
 packages (registrations, literal pools, frames per package; the main package imports them for
 their registration). So gc compiles them in parallel and caches each, and `lang` is the
 runtime's again. The evaluator's `Dyn` (in `lang`) implements the runtime's interfaces only (a
 compiled interface's package imports `lang`); an object of a class made at run time is an
-instance of a compiled interface by its class (a2g's `C_InstanceOf` asks `DynImplements`), and
+instance of a compiled interface by its class (j2g's `C_InstanceOf` asks `DynImplements`), and
 compiled code calls a compiled interface's methods by reflection on such objects (a proxy over
 `PrettyFlush`, an evaluated deftype of a compiled protocol). `Compiler$AOT/isDyn` tells them
 apart.
 
 ### The build (SA143, SA144)
 
-- **One a2g run when the host's runtime is the checkout's** (SA144). The version map linked into
+- **One j2g run when the host's runtime is the checkout's** (SA144). The version map linked into
   the program carries `:runtime`, the SHA-256 of the runtime's sources (`bin/lib/version.bash`'s
-  `arbace_runtime_key`: first `arbace/lang`, `arbace/a2g`, `arbace/classes`, `go`, `overlay`,
+  `arbace_runtime_key`: first `arbace/lang`, `arbace/j2g`, `arbace/classes`, `go`, `overlay`,
   `jdk`, `x509roots`, Go's pin; since SA147 only what compiling namespaces depends on,
   `arbace/lang`, `go`, `overlay/jdk`, `jdk`). When the host's equals the checkout's, the host compiles the checkout's
   namespaces itself (`host_compile`: `ARBACE_PATH_FIRST` reads them from the checkout as embedded
   sources, analyzed and recorded afresh, no compiled loader, no image), in the order the program's
-  `namespaces.txt` lists them; else the first program is built and compiles them (SA132), and a2g
+  `namespaces.txt` lists them; else the first program is built and compiles them (SA132), and j2g
   runs again. The two give the same tree when the runtimes are the same: the analysis is the
   runtime's.
-- **a2g analyzes the compiled classes in parallel** (SA143): the runtime's classes one after
+- **j2g analyzes the compiled classes in parallel** (SA143): the runtime's classes one after
   another as before (javac's rules make a class's analysis depend on others'), then each
   compiled member class apart, then the top-level ones, each task in an id space of its own
   starting at the same value (`RT.ID_SPACE`, a per-thread id counter that `RT.nextID` takes when
@@ -2079,7 +2081,7 @@ apart.
   its namespace's holder (one pool per top-level class), not of each fn class.
 - Compiled fns' code classes are not the REPL's roots (they are reached by their interfaces'
   calls); jrt's `Method.getName` keeps its interned name (compiled tools reflect from many
-  threads: the intern table's lock was a fifth of a2g's CPU); a2g's limit 20 GiB.
+  threads: the intern table's lock was a fifth of j2g's CPU); j2g's limit 20 GiB.
 
 ### Clojure's suite and the oracle (2026-10-14)
 
@@ -2089,9 +2091,9 @@ On the compiled test build (`ARBACE_AOT=1 bin/arbace-go --build-tests`, 100 sour
 
 Again after the changes below (the build's time, the variants merged, the id spaces, the stack
 traces; 7,660 classes): the suite 20,506 of 20,520, no regressions; the oracle first showed 8 new
-mismatches, all one cause: a `defrecord` whose method the class forms compile (`defclass.ae`
+mismatches, all one cause: a `defrecord` whose method the Java forms compile (`defclass.ae`
 555-556, `native.ae` 108-440) failed with "No static field identical? in arbace/core". A compiled
-namespace's holder class is named as the namespace (`arbace.core`), and the class forms'
+namespace's holder class is named as the namespace (`arbace.core`), and the Java forms'
 analyzer took a qualified symbol whose qualifier names a class as a static field, where
 Clojure's `analyzeSymbol` takes the var when the class has no such field (the calls' rule
 already preferred the var); `arbace.classes.analyze` now does the same. Then the oracle: 22,505
@@ -2134,7 +2136,7 @@ unchanged): 8% slower in the geometric mean, 13-67% on the sequence benchmarks (
 in tail position inside a `try` body would leave the `try` before it runs. So T1 stays (SA139,
 D6: T4 with Arbace's own back end), and the T3 build was not merged; its branch was deleted on
 2026-10-16 (the user), the trampoline being as described above.
-What makes compiled code slower than Go could be: boxed arithmetic through `Numbers`, a2g's
+What makes compiled code slower than Go could be: boxed arithmetic through `Numbers`, j2g's
 class initialization guards on every static call, the casts (`IFn`) and interface assertions
 of each call.
 
@@ -2143,10 +2145,10 @@ of each call.
 `bin/arbace-go --build` for amd64 on the 64 GiB host (16 jobs; minutes:seconds, the steps in
 seconds; the host compile is the host's own preparing and compiling of the namespaces, SA144):
 
-| build | host compile | a2g | build-go | total |
+| build | host compile | j2g | build-go | total |
 |---|---:|---:|---:|---:|
 | evaluated (`ARBACE_AOT=0`) on stage 0, today's (the tools evaluated) | | 214 | 101 | 5:40 |
-| compiled, two a2g runs, before the changes | | | | 12:00 |
+| compiled, two j2g runs, before the changes | | | | 12:00 |
 | compiled, one run (host of the same runtime), before the changes | 82 | 318 | 45 | 7:30 |
 | compiled, one run, the print cache cold | 50 | 208 | 48 | 5:14 |
 | compiled, one run after a namespace changed (the usual case) | 50 | 203 | 26 | 4:46 |
@@ -2155,15 +2157,15 @@ seconds; the host compile is the host's own preparing and compiling of the names
 So a build takes no longer than today's (SA140's condition) but when the runtime changed (SA147
 makes that rarer). What changed:
 
-- **The host compile, 82 s to 50 s.** Printing the class forms was 35 of its seconds (the
+- **The host compile, 82 s to 50 s.** Printing the Java forms was 35 of its seconds (the
   printer evaluated: the host compiles with `ARBACE_NO_AOT`, so `arbace.core` itself runs
   evaluated); the files are printed on 16 threads of their own (not futures: their pool kept the
   program alive a minute after the run). Left: preparing the namespaces 18 s, the back end 21 s.
-- **a2g, 318 s to about 205 s.** The runtime's classes are analyzed one after another on a
+- **j2g, 318 s to about 205 s.** The runtime's classes are analyzed one after another on a
   thread of their own while the compiled ones are analyzed in parallel (the load 121 s to 92 s;
   the output is the same byte for byte); the stand-in roots' reachability continues the first
   closure (reachability is monotone) rather than computing it again (50 s to 27-42 s); jrt's
-  `Method.getName` keeps its interned name (the intern table's lock was a fifth of a2g's CPU on
+  `Method.getName` keeps its interned name (the intern table's lock was a fifth of j2g's CPU on
   a compiled host). Left: parsing 18 s, analysis 60 s, reachability 30 s, translation 35 s,
   writing 40 s (the Go forms' texts 24 s).
 - **build-go** keeps a cache of printed packages (`--print-cache DIR`, bin/arbace-go's
@@ -2174,8 +2176,8 @@ makes that rarer). What changed:
   changed (37 s to 17 s for an unchanged program).
 - **Each source compiled in an id space of its own** (SA148). A fn's class is named by the id
   counter (`fn__123`), which ran over every namespace loaded before: a change to one namespace
-  renamed the classes of all those loaded after it, so a2g translated them anew, repr/go printed
-  them anew and gc compiled them anew (repr/go 69 s after `a2g/world.ae` changed). While a program
+  renamed the classes of all those loaded after it, so j2g translated them anew, repr/go printed
+  them anew and gc compiled them anew (repr/go 69 s after `j2g/world.ae` changed). While a program
   compiles namespaces (`ARBACE_COMPILE`), `Compiler.load` gives each source an id space
   (`RT.ID_SPACE`) of a million ids, its slot from the source path's hash (the next free slot
   when two collide: the sources of one namespace, `core.ae`, `core_print.ae` ..., must not share
@@ -2183,11 +2185,11 @@ makes that rarer). What changed:
   its own too. A namespace's change now recompiles its own package and the main package.
 - **The runtime key narrowed** (SA147): `arbace_runtime_key` hashes what compiling the
   namespaces depends on in the runtime, `arbace/lang`, `go` (jrt's classes and natives),
-  `overlay/jdk`, `jdk`; no longer a2g, the class forms' front end (namespaces, loaded from the
-  checkout by the compiling host), Go's runtime patches, the roots, Go's pin. A change to a2g is
-  the usual change; it now builds in one a2g run. The program the host's translation made
-  compiles the namespaces; were a2g's change to alter how the runtime's compiler behaves, the
-  next build would show it, and the fixpoint (G2 by G1, whose runtime a2g translated afresh)
+  `overlay/jdk`, `jdk`; no longer j2g, the Java forms' front end (namespaces, loaded from the
+  checkout by the compiling host), Go's runtime patches, the roots, Go's pin. A change to j2g is
+  the usual change; it now builds in one j2g run. The program the host's translation made
+  compiles the namespaces; were j2g's change to alter how the runtime's compiler behaves, the
+  next build would show it, and the fixpoint (G2 by G1, whose runtime j2g translated afresh)
   proves the build's stable.
 
 gc on the compiled program, cold (`go build -toolexec time`, the whole program, 2:40 on 16
@@ -2199,14 +2201,14 @@ archives: 2.15 GB, of which the compiled namespaces' 1.37 GB (`aot_arbace_core` 
 
 ### Stack traces of compiled code (SA149)
 
-A compiled fn's frames showed a2g's Go names (`arbace.aot_arbace_walk.A_arbace_walk_walk_A
+A compiled fn's frames showed j2g's Go names (`arbace.aot_arbace_walk.A_arbace_walk_walk_A
 Invoke_O_O_O_O__O aot_arbace_walk.ae 50`): jrt finds a frame's class by its Go type among the
 registered classes, and the fn's class made at run time (SA141) replaces the code class's
 registration by name. jrt now keeps the compiled namespaces' classes by their Go names apart
 (`compiledByGo`, filled by `Define`), and their `ClassInfo` carries `Source`, the source file
-the back end compiled them from (the class forms' `:aot/source`, a2g's `ClassInfo.Source`): the
+the back end compiled them from (the Java forms' `:aot/source`, j2g's `ClassInfo.Source`): the
 frame reads `arbace.walk$walk invoke walk.ae 50`, as on the JVM; the lines were the source's
-already (the forms carry them, and a2g lays the Go text out on them). A holder class has no
+already (the forms carry them, and j2g lays the Go text out on them). A holder class has no
 source (its fns may come from several files: `core.ae`, `core_print.ae`).
 
 ### The variants merged into their bases (SA150)
@@ -2215,20 +2217,20 @@ The Go build's hand-written variants of `RT`, `Main` and `Compiler`
 (`arbace/lang/go/{RT,Main,Compiler,CompilerCode,ClassForms,CompilerAST}.ae`) are merged into
 `arbace/lang/{RT,Main,Compiler}.ae` (doc/VENDOR-NOTES.md, hand change 25) by
 `test/aot/merge_variants.ae`, as text: a replaced member's text in the base member's place, an
-added member at the end of its class in a2g's order (`apply-variant`'s), a cut member removed,
+added member at the end of its class in j2g's order (`apply-variant`'s), a cut member removed,
 the comments before a variant's member with it, each file's header reworded before its first
-member. Checked: each merged class form equals, as data with its type hints, the base with the
-variants applied by a2g's own `apply-variant`. The generated variants stay
-(`CompilerOps.ae`, `test/a2g/eval_ops.ae`; `CompilerAOTFn.ae`, `test/aot/gen_fns.ae`): a
+member. Checked: each merged Java form equals, as data with its type hints, the base with the
+variants applied by j2g's own `apply-variant`. The generated variants stay
+(`CompilerOps.ae`, `test/j2g/eval_ops.ae`; `CompilerAOTFn.ae`, `test/aot/gen_fns.ae`): a
 generator writes a file, not a part of `Compiler.ae`. `RT.ID_SPACE` moved before RT's static
 initializer afterwards (an added member had landed at the class's end).
 
 ### The rebuild in the box (SA152)
 
 `arbace.box.rebuild` compiles the namespaces first, as bin/arbace-go's host does: an action
-lists the namespaces (the tools' image, `arbace.a2g.embed`), another prepares them from the
+lists the namespaces (the tools' image, `arbace.j2g.embed`), another prepares them from the
 sources and compiles them (`ARBACE_COMPILE`, `ARBACE_NO_AOT`, `ARBACE_PATH_FIRST`, the back end
-reading jrt's forms under `/s/go`), and a2g takes the tree (`--input /i`); the tools' image is
+reading jrt's forms under `/s/go`), and j2g takes the tree (`--input /i`); the tools' image is
 the program of the same sources (`bin/arbace-go --build --box`), so its runtime is theirs.
 `:aot false` rebuilds the evaluated program. The compiled packages' compiles get guests of
 6 GiB (`arbace.core`'s 8 GiB): a compile's guest holds, besides gc, the archives of jrt and lang
@@ -2241,12 +2243,12 @@ The box's guest is 209.3 MB (the launcher with it 214.5 MB); its smoke test (`bi
 
 `ARBACE_AOT` defaults to 1 in bin/arbace-go (`ARBACE_AOT=0`: the namespaces evaluated, the image
 of prepared namespaces, as before S6), so the gate's builds, the fixpoint and the seed build the
-compiled program. A two-run build's second a2g and repr/go run on the host, or on the first program
+compiled program. A two-run build's second j2g and repr/go run on the host, or on the first program
 when the host has no id spaces (a program older than S6): the second run then translates as a
 one-run build's host would.
 
 - **The fixpoint from the old stage 0** (the evaluated seed `f7d27e48...`, `cef4f0c`): G1 in
-  two runs (17:40), G2 and G3 in one each (4:54, 5:44): a2g's programs G1 = G2 = G3 (diff -r), G2
+  two runs (17:40), G2 and G3 in one each (4:54, 5:44): j2g's programs G1 = G2 = G3 (diff -r), G2
   = G3 byte for byte (`80207dbf...`, 209,875,104 bytes; G1 differed by its version map only).
 - **The fixpoint at `e3b5792`** hosted by that G3 (each G in one run, 5:26, 5:39, 4:57): G1 = G2 =
   G3 byte for byte, `d380df44...`, 209,887,392 bytes.
@@ -2258,12 +2260,12 @@ one-run build's host would.
   (each G in one run); printed again, the same tree (the tar `859f58ec...`) and the same archive
   `62c699af...`; **stage 0 = G1 = G2 = G3 byte for byte**, `d380df44...`.
 - **`bin/box-rebuild`** (amd64, `e3b5792`, 39 min with the build): the namespaces compiled in the
-  box (65 s), a2g there (500 s), the image built in the box **= the host's, byte for byte**
-  (`9c802100...`, 209,322,282 bytes; the box's run 16 min, the host's 16 min), a2g's program and
+  box (65 s), j2g there (500 s), the image built in the box **= the host's, byte for byte**
+  (`9c802100...`, 209,322,282 bytes; the box's run 16 min, the host's 16 min), j2g's program and
   the image of prepared namespaces = bin/arbace-go --build's, and the image booted by its ref.
   (The first run, before the 6 GiB guests, stopped at `arbace.pprint`'s compile: out of memory.)
 - **The essential gate** at `0e4c7e4` (the new seed), 12:00: stage 0 from the seed in 13 s
-  (`d380df44...`), the executable and the test build by stage 0 in one a2g run each (9:51), the
+  (`d380df44...`), the executable and the test build by stage 0 in one j2g run each (9:51), the
   smoke test, Clojure's suite 20,506 of 20,520 (no regressions), the oracle 22,505 of 22,558
   (the 53 known, 0 new): passed.
 
@@ -2282,32 +2284,32 @@ Proposed (2026-10-14); the recommended choice applied on `s6-compile`.
   compiled code reaching `Dyn` objects of compiled interfaces by reflection (built); (b) every
   compiled class in `lang` (the first build: `lang` 3 times larger, gc's longest step); (c) one
   package for all compiled namespaces. *Recommended: (a)*: gc compiles and caches them apart.
-- **SA143 a2g's analysis of compiled classes in parallel.** (a) The runtime's classes in order,
+- **SA143 j2g's analysis of compiled classes in parallel.** (a) The runtime's classes in order,
   each compiled member class and then each top-level one a task, each task in an id space of its
   own from the same value (`RT.ID_SPACE`), so temporaries' names depend on the class alone
   (built); (b) all in order, as before (90 s more); (c) parallel without id spaces (names then
   depend on the schedule: no fixpoint). *Recommended: (a)*.
-- **SA144 One a2g run when the host's runtime is the checkout's.** (a) The version map's
+- **SA144 One j2g run when the host's runtime is the checkout's.** (a) The version map's
   `:runtime` key; a host of the checkout's key compiles the namespaces itself, else the first
-  program does and a2g runs again (built; the two ways give the same program byte for byte);
+  program does and j2g runs again (built; the two ways give the same program byte for byte);
   (b) always two runs; (c) always one, whatever the host. *Recommended: (a)*.
 - **SA145 Constants per top-level class.** (a) A holder's fns share its constant pool (built);
   (b) a pool per fn class, as the JVM's. *Recommended: (a)*: fewer static fields and
   initializations.
-- **SA146 The build's time.** (a) The host compile's files printed on 16 threads; a2g's runtime
+- **SA146 The build's time.** (a) The host compile's files printed on 16 threads; j2g's runtime
   analysis beside the compiled classes' and the stand-ins' reachability continued, not
   recomputed; build-go's cache of printed packages, keyed by the host's identity and the
   package's forms (built: 4:46 for the usual build, 5:14 cold, against 5:40 today); (b) without
   the print cache (repr/go then prints every package: 48 s for the usual build's 26); (c) also reuse
-  a2g's analysis of the runtime between builds (a cache of analyzed class forms: more machinery,
+  j2g's analysis of the runtime between builds (a cache of analyzed Java forms: more machinery,
   for the runtime's analysis, which now runs beside the compiled classes').
   *Recommended: (a)*.
 - **SA147 The runtime key.** (a) What compiling namespaces depends on in the runtime:
-  `arbace/lang`, `go`, `overlay/jdk`, `jdk` (built: a change to a2g or the class forms' front end
-  builds in one a2g run; were it to change how the translated compiler behaves, the next build and
-  the fixpoint show it); (b) everything the runtime is translated from, as SA144 first had (a2g's
+  `arbace/lang`, `go`, `overlay/jdk`, `jdk` (built: a change to j2g or the Java forms' front end
+  builds in one j2g run; were it to change how the translated compiler behaves, the next build and
+  the fixpoint show it); (b) everything the runtime is translated from, as SA144 first had (j2g's
   change: two runs, 9:31); (c) no key: the host always compiles (a host of another runtime may
-  then compile against members that changed: a2g's failure, or a fixpoint one build later).
+  then compile against members that changed: j2g's failure, or a fixpoint one build later).
   *Recommended: (a)*.
 - **SA148 Each source compiled in an id space of its own.** (a) While compiling
   (`ARBACE_COMPILE`), each source's load in a space of a million ids, its slot from the path's
@@ -2317,8 +2319,8 @@ Proposed (2026-10-14); the recommended choice applied on `s6-compile`.
   then depend on each other's order); (c) the one counter, as before (one change recompiles every
   namespace loaded after it: about a minute more). *Recommended: (a)*.
 - **SA149 Compiled code in stack traces.** (a) jrt keeps the compiled namespaces' classes by Go
-  name, and their `ClassInfo.Source` names the source file (the class forms' `:aot/source`):
-  `arbace.walk$walk invoke walk.ae 50` (built); (b) a2g registers a frame per compiled method
+  name, and their `ClassInfo.Source` names the source file (the Java forms' `:aot/source`):
+  `arbace.walk$walk invoke walk.ae 50` (built); (b) j2g registers a frame per compiled method
   (a table of about 15,000 entries); (c) the Go names, as before. *Recommended: (a)*.
 - **SA150 The Go-build variants of `RT`, `Main` and `Compiler`.** (a) The hand-written ones
   merged into their bases (`test/aot/merge_variants.ae`, checked as data against
@@ -2332,7 +2334,7 @@ Proposed (2026-10-14); the recommended choice applied on `s6-compile`.
   user's decision on SA140 once its conditions hold: Clojure's suite and the oracle pass, a build
   takes no longer than today's.
 - **SA152 The rebuild in the box compiles the namespaces.** (a) The box's chain lists and
-  compiles the namespaces in the tools' guest before a2g, as bin/arbace-go's host does, the
+  compiles the namespaces in the tools' guest before j2g, as bin/arbace-go's host does, the
   compiled packages' compiles in 6 GiB guests, `arbace.core`'s in 8 (built); (b) the box rebuilds the
   evaluated program (`:aot false`), which is no longer the build's; (c) the box takes the
   compiled tree from the host. *Recommended: (a)*: the box rebuilds what the host builds, from
@@ -2387,7 +2389,7 @@ of the program's 262,448 functions). The compiled packages' code by kind:
 
 And the funcdata: **39.4 MB of gc's stack maps were in 14 functions** (the archives'
 `gclocals`): the constant pools' static initializers (`arbace.core`'s loader 13.5 MB, the holder
-of `arbace.a2g.dyn` 7.2 MB, `arbace.core.specs.alpha` 3.0, ...) and the main package's table of
+of `arbace.j2g.dyn` 7.2 MB, `arbace.core.specs.alpha` 3.0, ...) and the main package's table of
 the image's types (2.5 MB, in the evaluated program too). A function's stack maps are about its
 safepoints times its stack slots: a pool's thousands of constants made in one function are
 quadratic. Per function, the rest of the function table (name, entry, pc tables) is about 230
@@ -2406,7 +2408,7 @@ Each step measured on the program it built (stripped, MB):
 | SA159 fns' code registered by a table of static data, without markers and instance checks | 103.1 |
 | SA156 fns' code without `Ref` (converted to `Object` directly) | 101.3 |
 
-- **Static initializers in parts** (SA153, a2g): a static initializer of more than 96 calls
+- **Static initializers in parts** (SA153, j2g): a static initializer of more than 96 calls
   is cut into functions of at most 48 (`C_clinit_p0` ...), which `C_clinit` calls in order;
   not when it may leave early (`return`, `goto`, `defer`, a label) and not inside a block that
   declares locals (a `let` holds the rest of its block). The table of the image's types is made
@@ -2426,7 +2428,7 @@ Each step measured on the program it built (stripped, MB):
   code classes have no member tables (nothing reflects on them: their fn's class is made at run
   time), the loaders' units are private (only `load` is called by reflection), and the compiled
   packages' classes register no Go types for `Unsafe`.
-- **A fn's code is not a Java object in Go** (SA156, a2g): a class marked `:aot/code` by the
+- **A fn's code is not a Java object in Go** (SA156, j2g): a class marked `:aot/code` by the
   back end gets a struct starting with a header word that stays zero (`jrt.IsDynamic` reads an
   object's first word), its constructor and its arities' methods, and nothing of `Object`'s
   protocol: no `Equals`, `HashCode`, `ToString`, `GetClass`, `Clone`, `CloneShallow`,
@@ -2435,12 +2437,12 @@ Each step measured on the program it built (stripped, MB):
   never null). `AOTFn`'s `body` is no longer public, and `jrt`'s `notObject` throws
   `UnsupportedOperationException` instead of a Go panic, should a code object reach `Object`'s
   methods (`(.hashCode x)` on it: no path but reflection on internals).
-- **A namespace's constants read unguarded** (SA158, a2g): a fn's code reads its namespace's
+- **A namespace's constants read unguarded** (SA158, j2g): a fn's code reads its namespace's
   constants (statics of its nest's top-level class, the holder); its constructor initializes the
   holder (`Holder_Init()` in `C_New`), so its methods read them without the class initialization
   guard (81,016 guards to 13,670). The pools' fields are marked `:aot/nn` (never null once
   initialized), so calls on them are not null-checked (`jrt.NN`).
-- **Fns' code registered by static data** (SA159, a2g and jrt): a compiled package's code
+- **Fns' code registered by static data** (SA159, j2g and jrt): a compiled package's code
   classes are one table of `jrt.CodeDecl` (their names, modifiers, Go name, source file, and the
   addresses of their class variable, declaring class and interfaces), which `jrt.DefineCode`
   registers at the package's variable initialization (first in the package's order, the other
@@ -2458,12 +2460,12 @@ program without its image (code +18.6 MB, function table +14.8, types +3.0, stri
 +1.3). Of the compiled packages' 17.9 MB of code (34,157 functions):
 
 - **The fns' code itself**, 10.0 MB (9,267 methods), and its share of the function table (pc
-  tables and funcdata grow with the code; a2g lays the Go text out on the forms' lines, so the
+  tables and funcdata grow with the code; j2g lays the Go text out on the forms' lines, so the
   line table changes at every form). It shrinks only with better code: unboxed arithmetic,
   fewer casts and interface assertions per call (T4, Arbace's own back end).
 - **A Go type per fn**: 7,800 code classes, each a type descriptor, a constructor (1.0 MB), a
   `CodeDecl` and their names, about 1 KB each with their function table entries. A fn's code as
-  a Go closure (a2g's lambdas: one adapter per interface, A2G-SPEC §7.11) would have none; it
+  a Go closure (j2g's lambdas: one adapter per interface, J2G-SPEC §7.11) would have none; it
   needs `^:once`'s clearing (a captured local set to null), `letfn`'s mutual references, locals
   of a `loop` captured by value, and stack traces that name the fn (the closure's Go name is its
   enclosing method's); not done.
@@ -2503,15 +2505,15 @@ as before. The gate's builds (`--gate-build`: the executable, then the test buil
   as before, now the build's critical path; the link 6 s and 2.9 GB → 4 s and 1.8 GB; the whole
   cold build 2:40 → 1:40. The packages' archives 2.15 GB → 1.35 GB, the compiled namespaces'
   1.37 GB → 0.50 GB (`aot_arbace_core` 186 MB → 48 MB).
-- **The build** (`bin/arbace-go --build`, amd64, 16 jobs), the usual case, one a2g run (the
-  host of the checkout's runtime): main 5:20 (host compile 50 s, a2g 268 s, build-go 44 s);
-  now the fixpoint's G2 4:13 and G3 4:19 (host compile 54-55 s, a2g 222 s, build-go 27 s). Two
+- **The build** (`bin/arbace-go --build`, amd64, 16 jobs), the usual case, one j2g run (the
+  host of the checkout's runtime): main 5:20 (host compile 50 s, j2g 268 s, build-go 44 s);
+  now the fixpoint's G2 4:13 and G3 4:19 (host compile 54-55 s, j2g 222 s, build-go 27 s). Two
   runs (a change to the runtime): main 9:31; now the fixpoint's G1 6:18.
 
 ### The fixpoint and the seed
 
 - **The fixpoint from the old stage 0** (the seed `62c699af...`, at `bf8c461`): G1 in two runs
-  (6:18; its runtime is not the host's), G2 and G3 in one each (4:13, 4:19): a2g's programs G1 =
+  (6:18; its runtime is not the host's), G2 and G3 in one each (4:13, 4:19): j2g's programs G1 =
   G2 = G3 (diff -r), **G1 = G2 = G3 byte for byte**, `79ae1ef6...`, 101,322,912 bytes (main's
   fixpoint: 209,887,392).
 - **The seed remade** from that G3 (`ARBACE_SEED_GO_BUILD=target/arbace-go/fixpoint/g3 bin/seed
@@ -2534,15 +2536,15 @@ as before. The gate's builds (`--gate-build`: the executable, then the test buil
   this program: BOX-NOTES.md, "The runs again on the final program", byte for byte,
   `a733f9bc…`.)
 - **`bin/box-rebuild`** (amd64, at `761a781`, the new seed's commit, 23:38 with `bin/box-tools
-  build`): the namespaces compiled in the box (67 s), a2g there (307 s, was 500), the image built
+  build`): the namespaces compiled in the box (67 s), j2g there (307 s, was 500), the image built
   in the box **= the host's, byte for byte** (`4f394cc6...`, 100,757,802 bytes; the box's run
-  12:34, was 16 min; the host's 11:00), a2g's program and the image of prepared namespaces =
+  12:34, was 16 min; the host's 11:00), j2g's program and the image of prepared namespaces =
   bin/arbace-go --build's, and the image booted by its ref.
 
 ### The gate
 
 The essential gate at `9d46cb8` (the new seed), 9:50 (S6's: 12:00): stage 0 from the seed in 8 s
-(`a72f08b2...`); the executable and the test build by stage 0 in one a2g run each (7:47, was
+(`a72f08b2...`); the executable and the test build by stage 0 in one j2g run each (7:47, was
 9:51: the executable 5:10, the test build 3:31 with the executable's compiled namespaces,
 SA157); the smoke test; Clojure's suite 20,506 of 20,520, no regressions; the oracle 22,505 of
 22,558, the 53 known, 0 new: passed.
@@ -2551,7 +2553,7 @@ SA157); the smoke test; Clojure's suite 20,506 of 20,520, no regressions; the or
 
 Proposed (2026-10-14); the recommended choice applied on `s6-size`.
 
-- **SA153 Long static initializers in parts.** (a) a2g cuts a static initializer of more than
+- **SA153 Long static initializers in parts.** (a) j2g cuts a static initializer of more than
   96 calls into functions of at most 48, called in order (not one that may leave early, and not
   inside a block declaring locals); the main package's table of the image's types in init
   functions of 128 (built: gc's stack maps 55.8 MB to 14 MB; with SA155 `aot_arbace_core`'s
@@ -2579,7 +2581,7 @@ Proposed (2026-10-14); the recommended choice applied on `s6-size`.
   do not embed `jrt.Object_I`; `AOTFn`'s `body` not public; `jrt.notObject` throws
   `UnsupportedOperationException` (built: 8 functions less per fn, 121.8 to 101.3 MB with
   SA158-SA159); (b) the code classes keep the object model (66,728 functions of `Object`'s
-  protocol); (c) a fn's code as a Go closure through one adapter per arity (A2G-SPEC §7.11): no
+  protocol); (c) a fn's code as a Go closure through one adapter per arity (J2G-SPEC §7.11): no
   Go type per fn either, but `^:once`'s clearing, `letfn`, captured loop locals and stack
   traces' names to solve. *Recommended: (a)*; (c) later, if the size of a Go type per fn matters.
 - **SA157 The test build reuses the compiled namespaces.** (a) `bin/arbace-go` keys the
@@ -2606,7 +2608,7 @@ Proposed (2026-10-14); the recommended choice applied on `s6-size`.
 
 ## After the milestone: the build's speed (2026-10-15)
 
-The user's order after `arbace-inside-itself-v1`: a build (about 4.5 minutes, one run of a2g)
+The user's order after `arbace-inside-itself-v1`: a build (about 4.5 minutes, one run of j2g)
 kept few of the host's 64 cores busy; aim 2 to 3 minutes. Branch `speed`. Measured on the
 shared host while the emulated arm64 VM (BX117 (a)) kept about 10 cores busy: a run's time
 varies by up to a fifth from one run to the next, so the structure (what runs on one core)
@@ -2615,12 +2617,12 @@ guided the changes more than single timings.
 ### Where the time went (`dfe2e5e`)
 
 A one-run build: the host compiling the namespaces 53 to 96 s (one core: loading them 29 s, the
-back end's emit 28 s, the printing in parallel 10 s), a2g 160 to 210 s alone, build-go's builds 20 s
-(amd64) then 18 s (arm64), the image and the links seconds. In a2g (161 s, its own CPU sampled
+back end's emit 28 s, the printing in parallel 10 s), j2g 160 to 210 s alone, build-go's builds 20 s
+(amd64) then 18 s (arm64), the image and the links seconds. In j2g (161 s, its own CPU sampled
 each second), about 130 s on one core: reading, entering and resolving the classes (30 s), the
 runtime's analysis on its thread beyond the compiled namespaces' (15 s), reachability (21 s),
 the translation's sequential steps (20 s), and report.edn's pretty printing at the end (18 s).
-A CPU profile (`ARBACE_CPUPROFILE`): half of a2g's CPU was Go's collector and allocation; 13% one
+A CPU profile (`ARBACE_CPUPROFILE`): half of j2g's CPU was Go's collector and allocation; 13% one
 reflective call.
 
 ### What changed
@@ -2629,20 +2631,20 @@ reflective call.
   j)` with a long `j` matched no `indexOf(String, int)` exactly: every method descriptor parsed
   went through `Reflector` (`Class.getMethods`, a new `Method` per member: 172 CPU-seconds of
   1,355, and their garbage). `arbace.classes.env`'s `reflect-cache` had no type hint (its `get`
-  and `put` reflective) and one lock for every lookup, which a2g's 16 analysis threads took in
+  and `put` reflective) and one lock for every lookup, which j2g's 16 analysis threads took in
   turn: now a `ConcurrentHashMap` read without the lock, filled under it. `arbace.aot.emit`'s
   `registered?` lost its `Class` hint in a loop. The compiled namespaces' analysis 34 to 21 s.
   (The tools' namespaces with `*warn-on-reflection*`: 40 warnings, the rest cold or the JVM's
   class-file paths.)
-- **a2g loads in two rounds; `--await`** (SA160). The inputs, then the late ones (a tree with a
+- **j2g loads in two rounds; `--await`** (SA160). The inputs, then the late ones (a tree with a
   `packages.edn`: the compiled namespaces), each entered and resolved in order; the first
   round's classes (the runtime's) analyzed on a thread of their own from the end of the first
   round, in an id space of their own starting where the sequential part stands then, and with
   a unit order of their own (the local and anonymous classes their analysis declares are
   processed from it while the second round enters its classes; the unit's order rebuilt after,
   as one round made it). `--await DIR` reads DIR once `DIR/aot.edn` exists; `bin/arbace-go`
-  starts a2g so as the host compiles the namespaces (killed if the compiling fails), and a2g
-  meanwhile loads the runtime and analyzes it. The rounds are the same without the wait: a2g's
+  starts j2g so as the host compiles the namespaces (killed if the compiling fails), and j2g
+  meanwhile loads the runtime and analyzes it. The rounds are the same without the wait: j2g's
   program with `--await` = with `--input`, byte for byte (but `image.bin`, filled after).
 - **A tree's package files by their first form.** `source-files` read every file of a tree
   whole, one after another, to leave out those with an `ns` form: 16 s of the compiled
@@ -2654,12 +2656,12 @@ reflective call.
   fixpoint's comparison (the line ` :times {...}` removed) is unchanged.
 - **repr/go's architectures at once** (SA162): amd64 and arm64 built concurrently (their own work
   modules; the print cache's entries are written by rename).
-- **The edge out of the runtime key** (SA163): `jdk/edge.edn` is a2g's data, not the runtime's;
+- **The edge out of the runtime key** (SA163): `jdk/edge.edn` is j2g's data, not the runtime's;
   its re-recording at the milestone (`c3fdd36`) had made every build two runs.
 
 Tried and left: Go's collector at `GOGC=1600` within the same 20 GiB limit (slower: 3:15
 against 2:43, the collector thrashing at the limit; 32 GiB gave 30.5 GiB peaks, too much beside
-the box's VM and the gate); `A2G_JOBS=32` (99.5 against 102.5 s, the same 18 GiB: the parallel
+the box's VM and the gate); `J2G_JOBS=32` (99.5 against 102.5 s, the same 18 GiB: the parallel
 parts are bound by the collector, not threads). Go's compiler already scales a package's
 compile to GOMAXPROCS (go1.27's `compilerConcurrency`).
 
@@ -2667,12 +2669,12 @@ compile to GOMAXPROCS (go1.27's `compilerConcurrency`).
 
 | | before (`dfe2e5e`) | after (`60a1502`) |
 |---|---|---|
-| a2g alone (the same compiled tree) | 160 to 210 s | about 100 s |
+| j2g alone (the same compiled tree) | 160 to 210 s | about 100 s |
 | its load (analysis of the compiled namespaces) | 72 s (34 s) | 37 s (21 s), the runtime's overlapped |
-| a one-run build | about 268 s | 197 s: the host's compiling 61 s, a2g done at 158 s (ready after 54 s), repr/go 33 s |
+| a one-run build | about 268 s | 197 s: the host's compiling 61 s, j2g done at 158 s (ready after 54 s), repr/go 33 s |
 | the fixpoint's one-run builds (G2 by G1, G3 by G2) | 4:13, 4:19 (S6's size work) | 2:57, 2:44 |
 
-The fixpoint at `60a1502` (from the seed's stage 0, G1 in two runs, 5:39): a2g's programs G1 =
+The fixpoint at `60a1502` (from the seed's stage 0, G1 in two runs, 5:39): j2g's programs G1 =
 G2 = G3, **G1 = G2 = G3 byte for byte** (`b9595144...`, 101,408,928 bytes); the essential gate
 passed (10:58: the suite and the oracle as recorded).
 
@@ -2681,25 +2683,25 @@ passed (10:58: the suite and the oracle as recorded).
 Remade from the fixpoint at `d23bc5e` (the notes committed first; G1 in two runs, 5:21, G2 and G3
 3:45, 4:01, the host busier): `seed/arbace-seed-go.tar.xz`
 **`79d4f552e5c5490ed8b75886a11dd6201eded46e736ceedd0c519de1b3788848`** (5,384,408 bytes, 1,691
-files), was `c7f5e3d5...`: its stage 0 has a2g's two rounds compiled in and the runtime key
+files), was `c7f5e3d5...`: its stage 0 has j2g's two rounds compiled in and the runtime key
 without the edge, so that builds are one run again. **`bin/seed --verify`**: printed again at
 `d23bc5e`, the same tree (the tar `9d050f22...`) and archive; **stage 0 = G1 = G2 = G3 byte for
 byte**, `b6f2e89e...`, the three builds one run each from the new stage 0, 561 s in all.
 
 ### Left
 
-- The host's compiling of the namespaces (about 60 s, a2g waiting): loading them is sequential
+- The host's compiling of the namespaces (about 60 s, j2g waiting): loading them is sequential
   (macros, side effects); the back end's emit (28 s) too, as its constant pools and fn names are
   shared by the sources and their order is the output's.
-- a2g's reachability (19 s, one core, no single hotspot) and the translation's sequential steps
+- j2g's reachability (19 s, one core, no single hotspot) and the translation's sequential steps
   (18 s: dyn, registrations, packages, collisions; per package, parallelizable but jrt's first).
 - build-go's builds: Go compiling `jrt`, one package of the program's largest (94 s in the box): a
   split into packages.
 
 ### Amendments
 
-- **SA160 a2g loads in two rounds, and waits for the compiled namespaces.** (a) As above:
-  `--await`, `bin/arbace-go` overlapping a2g with the host's compiling (built); (b) one round
+- **SA160 j2g loads in two rounds, and waits for the compiled namespaces.** (a) As above:
+  `--await`, `bin/arbace-go` overlapping j2g with the host's compiling (built); (b) one round
   (the runtime's analysis begins after the compiled namespaces are entered). *Recommended: (a)*:
   the output does not depend on the wait, and the runtime's half minute of analysis leaves the
   critical path.
@@ -2707,7 +2709,7 @@ byte**, `b6f2e89e...`, the three builds one run each from the new stage 0, 561 s
   *Recommended: (a)*.
 - **SA162 repr/go's architectures built at once.** (a) Concurrently (built); (b) one after the
   other. *Recommended: (a)*.
-- **SA163 a2g's edge outside the runtime key.** (a) Left out (built); (b) in the key (a
+- **SA163 j2g's edge outside the runtime key.** (a) Left out (built); (b) in the key (a
   re-recorded edge makes builds two runs until a re-seed). *Recommended: (a)*.
 
 **Decided (2026-10-15, the user):** SA160-SA163 (a) as recommended, all as built.
@@ -2715,14 +2717,14 @@ byte**, `b6f2e89e...`, the three builds one run each from the new stage 0, 561 s
 ## After the milestone: the build's speed, second round, part A: the host's compiling (2026-10-15)
 
 The user's order after the first round: a second one, in three parts on branches of their own
-(A: the host's compiling of the namespaces; B: a2g; C: build-go's builds). Measured on the shared
+(A: the host's compiling of the namespaces; B: j2g; C: build-go's builds). Measured on the shared
 host, busy with the emulated arm64 VM and other builds: single timings vary by up to a half.
 
 ### A: the host's compiling of the namespaces (branch `speed2-host`)
 
 **Where the time went** (`9942951`, stage 0 the host, alone): loading the 100 sources (85
 namespaces) about 19 s, the back end about 32 s (`compile-all` 27 s on one core, the printing
-8.5 s on 16 threads), about 53 s in all (56 to 64 s in a build, beside a2g). A CPU profile: four
+8.5 s on 16 threads), about 53 s in all (56 to 64 s in a build, beside j2g). A CPU profile: four
 fifths of it the evaluator. The host prepares the namespaces from source (`ARBACE_NO_AOT`, so
 that their units are recorded), so the back end, and `arbace.core` and the other namespaces it
 calls, ran evaluated, not as the host's compiled code.
@@ -2732,7 +2734,7 @@ the back end's namespaces and the ones they need when the program holds them for
 `ARBACE_PATH`: the closure of `arbace.aot.main` and `arbace.core` under `:require`, `:use` and
 top-level `load`, found from the sources' forms (23 sources: core's ten with
 `arbace.core.protocols`, `arbace.instant` and `arbace.uuid`, `arbace.java.io`, `string`, `set`,
-`classes.types`, `a2g.names`, `a2g.jrt`, `repr.go.print`'s four, `aot.emit`, `aot.main`), each
+`classes.types`, `j2g.names`, `j2g.jrt`, `repr.go.print`'s four, `aot.emit`, `aot.main`), each
 source's text compared with the embedded one. The loaders run in the order the sources were
 loaded, in the bindings `Compiler$AOT/load` makes (a nested `load` is then a no-op: the source is
 loaded); their vars' roots become the compiled fns, and the units the back end reads are the
@@ -2774,29 +2776,29 @@ driver laid out differently prints another tree; not changed.
 
 **Decided (2026-10-15, the user):** SA164 (a), as built.
 
-## The build's speed, second round, part B: a2g (2026-10-15)
+## The build's speed, second round, part B: j2g (2026-10-15)
 
-The user's order (a second round, part B): a2g's phases after the compiled namespaces arrive,
-which ran on few cores. Branch `speed2-a2g`. Measured as `bin/arbace-go` runs a2g (`--await`, the
-same compiled tree copied in 60 s after a2g starts), on the shared host (the emulated arm64 VM
+The user's order (a second round, part B): j2g's phases after the compiled namespaces arrive,
+which ran on few cores. Branch `speed2-a2g`. Measured as `bin/arbace-go` runs j2g (`--await`, the
+same compiled tree copied in 60 s after j2g starts), on the shared host (the emulated arm64 VM
 and other builds beside it: single timings vary by a fifth or more).
 
 ### Where the time went (`9942951`)
 
-After the compiled tree was ready, a2g took 123 s: loading it 31 s (the sequential part 10 s,
+After the compiled tree was ready, j2g took 123 s: loading it 31 s (the sequential part 10 s,
 the analysis 22 s, of which `arbace.core`'s loader alone, 903 methods and 1,588 fields, the last
 9 to 14 s), reachability 23 s on one core, the translation 41 s (the classes 17 s in parallel;
 then dyn 6, registrations 6, the packages 11, collisions 3, one after another) and the writing
 24 s (the files' texts 19 s in parallel). The parallel steps were bound by allocation (Go's
 collector), not threads.
 
-### What changed (`cb834cf`; a2g's output unchanged)
+### What changed (`cb834cf`; j2g's output unchanged)
 
-- **The writer** (`arbace.a2g.out`): the layout passed along as an argument, not a dynamic var
+- **The writer** (`arbace.j2g.out`): the layout passed along as an argument, not a dynamic var
   bound for every tag; a text's newlines counted with `indexOf`, not a lazy seq per character;
   no `map-indexed` per list; `*print-meta*` bound only for a value with metadata. The texts
   19 → 4.3 s.
-- **`simple?` and `effects?`** (`arbace.a2g.code`) kept per node, by identity, while a class is
+- **`simple?` and `effects?`** (`arbace.j2g.code`) kept per node, by identity, while a class is
   translated (`*node-memo*`, bound by `apart`; with the class and staticness of the function
   being written, on which `guarded-static?` depends): each walked an operand's whole subtree,
   and `operands` asks them again at every level of an expression. With the names below, the
@@ -2826,16 +2828,16 @@ split into several classes (the compiler's emit, part A's) would let it run in p
 
 | | before (`9942951`) | after (`cb834cf`) |
 |---|---|---|
-| a2g after the tree is ready | 123 s | 66 to 75 s |
+| j2g after the tree is ready | 123 s | 66 to 75 s |
 | reachability | 23 s | 12 to 16 s |
 | the translation (its steps after the classes) | 41 s (27 s) | 10 to 14 s (2 to 3 s) |
 | the writing (the texts) | 24 s (19 s) | 8 to 11 s (4 to 5 s) |
 | the fixpoint's one-run builds (G2 by G1, G3 by G2) | 2:57, 2:44 | 2:32, 2:15 |
 
-a2g's output for the same compiled tree is the same, byte for byte, but its own embedded
+j2g's output for the same compiled tree is the same, byte for byte, but its own embedded
 sources and report.edn's times (`diff -r`). The fixpoint at `cb834cf` (G1 by the seed's stage
-0, whose a2g is the previous one): a2g's programs G1 = G2 = G3, **G1 = G2 = G3 byte for byte**
-(`bb9a9bf7...`, 101,515,424 bytes): the new a2g prints the program the old one printed. The
+0, whose j2g is the previous one): j2g's programs G1 = G2 = G3, **G1 = G2 = G3 byte for byte**
+(`bb9a9bf7...`, 101,515,424 bytes): the new j2g prints the program the old one printed. The
 essential gate passed on `cb834cf` (9:08: the suite 20,506 of 20,520, no regressions; the
 oracle 22,505 of 22,558, the 53 known, 0 new).
 
@@ -2849,8 +2851,8 @@ oracle 22,505 of 22,558, the 53 known, 0 new).
 ## The build's speed, second round, part C: `jrt` split? (2026-10-15)
 
 Status: measured on the branch `speed2-jrt` (from main at `9942951`); no split built. The
-question: `jrt`, one Go package of 20 MB (914 files: about 840 translated JDK sources, a2g's
-shared files such as `a2g_classes.go` of 3.5 MB, about 70 hand-written forms), is the program's
+question: `jrt`, one Go package of 20 MB (914 files: about 840 translated JDK sources, j2g's
+shared files such as `j2g_classes.go` of 3.5 MB, about 70 hand-written forms), is the program's
 largest; is Go compiling it on the critical path of the host's builds, and would a split pay?
 
 ### Measured (`.tmp/speed2/`, TamaGo's go1.27.1, the amd64 work module of a build at `9942951`)
@@ -2873,7 +2875,7 @@ data, and every namespace's package for `lang`'s.
 
 **But `jrt` is cached in the builds that matter for speed.** Go's cache is keyed by content:
 `jrt` compiles again only when its printed text changes, i.e. when the runtime does
-(`go/arbace/jrt`, `jdk/`, `overlay/jdk`, a2g's translation of them). A change to the namespaces
+(`go/arbace/jrt`, `jdk/`, `overlay/jdk`, j2g's translation of them). A change to the namespaces
 leaves it as it was (the shipped build's and the test build's `jrt` are identical, `diff -r`,
 though the test build has more namespaces). The one-run build (the runtime the checkout's) and
 the fixpoint's G2 and G3 compile no `jrt`: repr/go's step there is about 18 s (`bin/build-go` on
@@ -2890,7 +2892,7 @@ reached classes are one strongly connected component of 84% of `jrt`'s nodes, an
 packages 74 of 75 are one component; only with bodies outlined (`-decls`, 13.7% of the nodes in
 the largest component) would the rest compile in parallel. At best the chain `jrt` → `lang`
 would lose about 45 s, and only in the builds where `jrt` changed: **0 s on the one-run build**,
-about 45 s once per change to the runtime. The cost, from S5: a2g writing several packages, the
+about 45 s once per change to the runtime. The cost, from S5: j2g writing several packages, the
 partition checked acyclic, linkname pulls or outlined bodies or hook variables for the upward
 edges (a call more per outlined method), `lang` the same (its cycles are calls), the seed and
 the fixpoint again: 5 to 10 days, decided against at S5 (SA100 (a)) on other grounds.
@@ -2906,7 +2908,7 @@ not Go): left for the round's other parts.
 
 - **SA180 `jrt` split for the build's speed.** (a) Not split: `jrt` is cached in the one-run
   build and the fixpoint's later stages, so a split gains nothing there; about 45 s at best once
-  per change to the runtime, for S5's 5 to 10 days of a2g's work; (b) split along S5's `-decls`
+  per change to the runtime, for S5's 5 to 10 days of j2g's work; (b) split along S5's `-decls`
   model (outlined bodies, linkname pulls), `lang` too. *Recommended: (a)*.
 - **SA181 What is measured as a build's Go step.** (a) The trace and the per-compile timing
   above kept as the method (`.tmp/speed2/trace.sh`, `tx.sh`, `an.py`: `go build -debug-trace`, a
@@ -2921,7 +2923,7 @@ not Go): left for the round's other parts.
 Status: on the branch `speed2-g2a` (from main at `1b24757`). Part C measured repr/go's step in a
 one-run build at about 18.6 s, `jrt` cached: Go's link about 5 s, the rest repr/go's own. Measured on
 the shared host (the emulated arm64 VM and the other parts' builds running), `.tmp/speed2g/`
-(`bench.sh`: `bin/build-go --line-file --arch amd64` of one fixed a2g program, Go's build cache
+(`bench.sh`: `bin/build-go --line-file --arch amd64` of one fixed j2g program, Go's build cache
 warm, the print cache as named).
 
 ### Where the time went
@@ -2951,7 +2953,7 @@ package files. The print cache then skipped only the printing.
 
 ### Measured
 
-| case (build-go, amd64, one a2g program) | main | `speed2-g2a` |
+| case (build-go, amd64, one j2g program) | main | `speed2-g2a` |
 |---|---:|---:|
 | the print cache cold (every package printed) | 41.9 s | 37.6 s (the same, within the noise) |
 | every package in the print cache | 18.0 to 20.6 s | 6.0 to 7.1 s (repr/go about 1.5 s, Go's link 4.6 s) |
@@ -3136,7 +3138,7 @@ from the forms (28 s: the printing; Go's cache held the compiles); the box's smo
 them (`bin/arbace-go --smoke --box`: compile spawned with trees in and out, a failing compile,
 the spawn budget, an image booted from the store, all ok); `bin/toolchain-vendor check
 tamago-amd64` through the reworked `bin/box-tools` (`BOX_TOOLS_GOROOT`): identical; a one-run
-build (`ARBACE_GO_ARCHES=amd64 bin/arbace-go --build`, 4:49 on the busy host: one a2g run, repr/go 59
+build (`ARBACE_GO_ARCHES=amd64 bin/arbace-go --build`, 4:49 on the busy host: one j2g run, repr/go 59
 s), and the print cache with its collect index after it (the gate's shipped build, the same
 program: repr/go 9 s); the essential `bin/gate` on `84667f3` (10m04s): the suite 20,506 of 20,520, no
 regressions; the oracle 22,508 of 22,561, the 53 known, 0 new.
@@ -3157,23 +3159,23 @@ emulated arm64 VM busy beside). The essential gate on the seed's commit (`dd6150
 ## The build's speed, third round, part A: `arbace.core`'s loader split (2026-10-16)
 
 The user's order (a third round, part A): the back end splits `arbace.core`'s compiled loader so
-that a2g analyzes its parts in parallel. Branch `speed3-loader` (from main at `ecb5dfe`).
+that j2g analyzes its parts in parallel. Branch `speed3-loader` (from main at `ecb5dfe`).
 Measured on the shared host (parts B and C's builds, the emulated arm64 VM beside: single
-timings vary by a fifth or more), as part B measured: a2g's load laps (`a2g: load (s)`, the
+timings vary by a fifth or more), as part B measured: j2g's load laps (`j2g: load (s)`, the
 lap `analysis-compiled`: the analysis of the compiled namespaces' classes after the tree is
-entered) and report.edn's `:times`; and `bin/a2g --program --await TREE` on a tree already
-written (no wait), main's tree and the branch's alternately, the same host (stage 0) and a2g
+entered) and report.edn's `:times`; and `bin/j2g --program --await TREE` on a tree already
+written (no wait), main's tree and the branch's alternately, the same host (stage 0) and j2g
 (`.tmp/speed3-loader/bench.sh`).
 
 ### Where the time went (main, `ecb5dfe`)
 
 The analysis of the compiled classes runs in two parallel groups: the member classes (fns,
 reifies), then the top-level ones (holders, deftypes, loaders), each class one task in an id
-space of its own. Timed per task (an instrumented a2g, not kept): `arbace.core__init`, 903
+space of its own. Timed per task (an instrumented j2g, not kept): `arbace.core__init`, 903
 methods and 1,588 fields, **9.5 s**, ending at 23.2 s, when the first group had ended at
 12.9 s and every other top-level task by 16.5 s; the next longest loaders
 `arbace.classes.analyze__init` (329 units) 3.0 s, `arbace.core.specs.alpha__init` 1.9 s,
-`arbace.a2g.code__init` 1.6 s. The analysis of one class is sequential (its temporaries are
+`arbace.j2g.code__init` 1.6 s. The analysis of one class is sequential (its temporaries are
 numbered in one id space), so the tail was one thread.
 
 ### What changed (`arbace/aot/emit.ae`)
@@ -3183,12 +3185,12 @@ numbered in one id space), so the tail was one thread.
   methods (`unitK`, numbered across the source as before) and the constants they meet, its
   own pool (`const-pool`, `Compiler$AOT/pool`). A source of 100 units or fewer is emitted as
   before, byte for byte (the holders' and deftypes' pools too). The parts are member classes,
-  so a2g analyzes them in its first group, in parallel with the fns; the top-level loader is a
+  so j2g analyzes them in its first group, in parallel with the fns; the top-level loader is a
   `load` method only. Eleven loaders split: `arbace.core` (10 parts),
   `arbace.classes.analyze` (4), `arbace.spec.alpha`, `arbace.core-classes` (3), seven others
   (2).
 - **The loading order and the constants as unsplit.** `load` calls each part's `init` (an empty
-  static method: a part's initialization decodes its pool, not benign, so a2g guards its
+  static method: a part's initialization decodes its pool, not benign, so j2g guards its
   methods' entry) in order, then each part's `load`, which runs its units in order: every
   constant of the source is made before the first unit runs, in first-use order, as the one
   class's static initializer made them (vars interned before their `def`, as on the JVM).
@@ -3209,17 +3211,17 @@ numbered in one id space), so the tail was one thread.
 
 | | main (`ecb5dfe`) | `speed3-loader` |
 |---|---|---|
-| a2g alone on a written tree, the analysis of the compiled classes (3 alternating runs) | 29.2, 24.9, 27.1 s | 14.8, 15.2, 17.2 s |
-| the longest analysis task | 9.5 s (`arbace.core__init`) | 1.7 s (`arbace.a2g.main$run*`; the loaders' parts 1.7 s at most, `arbace.pprint.cl-format__init$part0`; timed on the first variant, below) |
-| a build's a2g (`--await`): `analysis-compiled` | 24.9 s | 13.9 s (build), 13.9, 15.6, 16.2 s (the fixpoint's G1, G2, G3) |
-| a build's a2g after the tree is ready: load (`:load` minus the wait) | 48.5 s | 35.5 s (build), 36.4, 38.6, 37.9 s (G1, G2, G3) |
+| j2g alone on a written tree, the analysis of the compiled classes (3 alternating runs) | 29.2, 24.9, 27.1 s | 14.8, 15.2, 17.2 s |
+| the longest analysis task | 9.5 s (`arbace.core__init`) | 1.7 s (`arbace.j2g.main$run*`; the loaders' parts 1.7 s at most, `arbace.pprint.cl-format__init$part0`; timed on the first variant, below) |
+| a build's j2g (`--await`): `analysis-compiled` | 24.9 s | 13.9 s (build), 13.9, 15.6, 16.2 s (the fixpoint's G1, G2, G3) |
+| a build's j2g after the tree is ready: load (`:load` minus the wait) | 48.5 s | 35.5 s (build), 36.4, 38.6, 37.9 s (G1, G2, G3) |
 | the executable (amd64) | 101,863,584 bytes | 102,031,520 bytes (+168 KB, +0.16%: the split loaders, and the back end's own new code) |
 | `aot_arbace_core`: text, rodata (`go tool nm -size` of the archive) | 2,758,933, 2,153,197 | 2,776,808 (+18 KB), 2,187,959 (+35 KB) |
 | `aot_arbace_core`: the archive | 48,359,908 bytes | 49,077,818 bytes (+1.5%) |
 | gc of `aot_arbace_core` alone, its imports cached (2 runs) | 11.1, 10.2 s | 9.3, 11.0 s (the same) |
 | gc of `aot_arbace_classes_analyze` alone | 5.4, 6.2 s | 5.9, 5.6 s (the same) |
 
-The rest of a2g is as before (reachability 19 to 23 s, the translation 13 to 16 s, the writing
+The rest of j2g is as before (reachability 19 to 23 s, the translation 13 to 16 s, the writing
 10 to 14 s, all within the noise): the parts add 10 classes to core's package, whose
 translation is per class too. The fixpoint's one-run builds (G2 by G1, G3 by G2) 190 and 178 s
 (were 184 and 189 at the seed's verify, on a quieter host: the 11 s the analysis saves are
@@ -3228,7 +3230,7 @@ within the noise of a three-minute build).
 **Checks.** The essential `bin/gate` on `da6fd02` (10m09s): the suite 20,506 of 20,520, no
 regressions; the oracle 22,508 of 22,561, the 53 known, 0 new. `bin/arbace-go --fixpoint` (G1 by
 the seed's stage 0, whose back end is the previous one but runs the checkout's `emit.ae`):
-a2g's programs G1 = G2 = G3, **G1 = G2 = G3 byte for byte** (`53d34e01...`, 102,031,520
+j2g's programs G1 = G2 = G3, **G1 = G2 = G3 byte for byte** (`53d34e01...`, 102,031,520
 bytes).
 
 ### Left
@@ -3246,25 +3248,25 @@ bytes).
 - **SA210 `arbace.core`'s loader split.** (a) As built: a loader of more than 100 units in parts
   of 100, static member classes `SCRIPTBASE__init$partP` with their own constants (an object an
   earlier part met copied from that part's field), all initialized in order before the first
-  unit; (b) the parts as top-level classes (`SCRIPTBASE__init1` ...: a2g's second group, with
+  unit; (b) the parts as top-level classes (`SCRIPTBASE__init1` ...: j2g's second group, with
   the holders, and a package name each would need its own rule in `packages.edn`); (c) the
   bound by the units' size rather than their number; (d) left one class (the 9 to 14 s tail).
   *Recommended: (a)*: the analysis of the compiled classes about 10 s shorter, the output as
   before for the 89 sources of 100 units or fewer, +0.16% to the executable.
 - **SA211 A loading frame's class.** (a) The part's (`arbace.core__init$part4.unit450`), as
-  built; (b) mapped back to `arbace.core__init` in stack traces (a2g's frames table).
+  built; (b) mapped back to `arbace.core__init` in stack traces (j2g's frames table).
   *Recommended: (a)*: only an error while a namespace loads shows it, and the line (`Compiler$AOT/at`)
   is the same.
 
 **Decided (2026-10-16, the user):** SA210 (a), SA211 (a), as built.
 
-## The build's speed, third round, part B: a2g's sequential load (2026-10-16)
+## The build's speed, third round, part B: j2g's sequential load (2026-10-16)
 
-The lead's order (the third round, part B): the sequential part of a2g's load after the compiled
+The lead's order (the third round, part B): the sequential part of j2g's load after the compiled
 namespaces' tree arrives (part B of the second round's "Left": about 10 s entering the classes,
-their headers, members and bridges, `arbace.classes` as `arbace.a2g.world/load-world` drives it).
-Branch `speed3-load`. Measured as `bin/arbace-go` runs a2g (`--await`, one fixed compiled tree,
-`.tmp/speed3-load/aot0`, copied in 60 s after a2g starts, so the runtime's analysis is done when
+their headers, members and bridges, `arbace.classes` as `arbace.j2g.world/load-world` drives it).
+Branch `speed3-load`. Measured as `bin/arbace-go` runs j2g (`--await`, one fixed compiled tree,
+`.tmp/speed3-load/aot0`, copied in 60 s after j2g starts, so the runtime's analysis is done when
 it arrives), on the shared host (the other parts' builds beside it: single timings vary by a
 fifth or more).
 
@@ -3285,21 +3287,21 @@ checked), and each class's step writes only its own declaration; a class depends
 its header on its outer class's (the bounds of the type variables it sees), its members and its
 bridges on its supertypes' (deftype's signature inference, the inherited methods and bridges).
 
-### What changed (`34297cd`; a2g's output unchanged)
+### What changed (`34297cd`; j2g's output unchanged)
 
 - **Headers, members, bridges in parallel, level by level** (`world/par-levels`): the names in
   levels, a class after the classes it depends on of the same round (its outer class for the
   headers, its supertypes for the members and the bridges: the order `supertypes-first` gave
-  the bridges), each level's classes on a2g's threads (`m/par-mapv`, `A2G_JOBS`). The compiled
+  the bridges), each level's classes on j2g's threads (`m/par-mapv`, `J2G_JOBS`). The compiled
   namespaces' classes extend the runtime's (the first round's), so they are one or two levels.
   The members 3.2 → 0.6 to 0.9 s, the bridges 2.7 → 0.4 s.
-- **The class forms parsed in parallel**: the namespace forms (`in-ns`, `import`) evaluated
-  file by file first; then each class form, its variants applied and parsed, and its member
+- **The Java forms parsed in parallel**: the namespace forms (`in-ns`, `import`) evaluated
+  file by file first; then each Java form, its variants applied and parsed, and its member
   classes parsed too, recursively (`world/parse-member-classes`, as `declare-class!` parses
-  them: a member class's parse takes only its outer class's kind), on a2g's threads; then the
+  them: a member class's parse takes only its outer class's kind), on j2g's threads; then the
   classes declared one after another in the files' order, as before. `declare-class!` takes the
   member classes parsed ahead (its ctx's `:parsed-members`) and parses those it is not given (a
-  host whose `declare-class!` does not take them, the seed's stage 0: G1's a2g; a failed parse
+  host whose `declare-class!` does not take them, the seed's stage 0: G1's j2g; a failed parse
   of member classes, parsed again as it is declared, failing where it failed before). Entering
   1.4 → 0.7 s. (The members' `:mid`s, which only tell a class's members apart, are taken from
   the counter in another order; they were already, the runtime's analysis parsing its local
@@ -3319,14 +3321,14 @@ cannot start at a column; see SA220.
 |---|---|---|
 | after the tree: reading, entering, headers, members, bridges | 2.6, 1.4, 0.8, 3.2, 2.7 s (10.7 s) | 1.8 to 2.2, 0.7, 0.5 to 1.0, 0.6 to 0.9, 0.4 s (4.6 to 5.1 s) |
 | the first round's same steps (hidden by the wait) | 8.3 s | 1.6 to 2.6 s |
-| a2g's load after the tree arrives (with the analysis, 21 to 25 s) | 44.6 s | 32.0 s |
+| j2g's load after the tree arrives (with the analysis, 21 to 25 s) | 44.6 s | 32.0 s |
 | the fixpoint's one-run builds (G1, G2, G3) | (2:32, 2:15 at `cb834cf`) | 3:03, 3:11, 2:52 (the host busier) |
 
-a2g's output for the same compiled tree is the same, byte for byte, but its own embedded
-sources (`world.ae`, `analyze.ae`) and report.edn's times (`diff -r` against main's a2g on
+j2g's output for the same compiled tree is the same, byte for byte, but its own embedded
+sources (`world.ae`, `analyze.ae`) and report.edn's times (`diff -r` against main's j2g on
 `aot0`: evaluated `world.ae` on stage 0, and all compiled on this branch's executable, with and
-without `--await`). The fixpoint at `34297cd` (G1 by the seed's stage 0, whose a2g is main's):
-a2g's programs G1 = G2 = G3, **G1 = G2 = G3 byte for byte** (`ea0782de...`, 101,871,776 bytes).
+without `--await`). The fixpoint at `34297cd` (G1 by the seed's stage 0, whose j2g is main's):
+j2g's programs G1 = G2 = G3, **G1 = G2 = G3 byte for byte** (`ea0782de...`, 101,871,776 bytes).
 The essential gate passed on `34297cd` (10:44: the suite 20,506 of 20,520, no regressions; the
 oracle 22,508 of 22,561, the 53 known, 0 new).
 
@@ -3342,7 +3344,7 @@ oracle 22,508 of 22,561, the 53 known, 0 new).
 - SA220 (a) the compiled tree as it is: its reading stays bound by its largest file (about 2
   s); (b) arbace.aot writes a namespace's classes in several files (a holder's member classes
   split by size, each file a holder of its own, or the member classes as top-level forms), read
-  in parallel by a2g as they are; (c) a2g splits the largest files' forms itself, with the
+  in parallel by j2g as they are; (c) j2g splits the largest files' forms itself, with the
   reader's columns corrected after. Recommended: (b), with part A's split of the loader (the
   compiled tree's shape is the back end's; (c) depends on the reader's metadata).
 
@@ -3350,10 +3352,10 @@ oracle 22,508 of 22,561, the 53 known, 0 new).
 
 ## The build's speed, third round, part C: reachability's scan (2026-10-16)
 
-The user's order (a third round, part C): a2g's reachability (`arbace.a2g.reach`), which part
+The user's order (a third round, part C): j2g's reachability (`arbace.j2g.reach`), which part
 B of the second round left at 12 to 16 s, most of it the scan, on one core. Branch
 `speed3-reach`. Measured as part B did, on one compiled tree (the build's `target/arbace-go/aot`
-copied aside) given to `bin/a2g --program --input`, a2g run on executables built from the
+copied aside) given to `bin/j2g --program --input`, j2g run on executables built from the
 branch's sources (a namespace of the checkout that differs from the executable's runs evaluated,
 so each version of `reach.ae` was measured on a build of its own), on the shared host (the
 other agents' builds beside: single timings vary by a fifth or more).
@@ -3381,7 +3383,7 @@ methods and the instances are the same in any order, these texts are not. The sc
 sequential and in the queue's order; what moved is the work that does not depend on the run's
 state.
 
-### What changed (`8eb9be3`; a2g's output unchanged)
+### What changed (`8eb9be3`; j2g's output unchanged)
 
 - **The plans**: the batch's parallel step (`plan-code`, which replaces `flatten-code`) makes
   for each node the scan acts on a *plan*, a function of the run's state, with what depends only
@@ -3404,7 +3406,7 @@ state.
   occurrence of each, as `distinct` did), and, for `java-impl-of`, the superclass chain's
   non-private body of a method per class and key (`super-impl`: the chains of the 10,000
   instantiated classes share their superclasses); `hw-method-exists?`'s yes for a class not
-  translated (what a2g adds only grows with T).
+  translated (what j2g adds only grows with T).
 
 Checked the strict way first: each version run with a trace of every change of the state, in
 order (the classes entering and leaving T, the queue, the initialized classes, the instances,
@@ -3420,12 +3422,12 @@ by identity, for every method.
 | the parallel step (flatten, plan) | 1.6 to 1.9 s | 1.8 s | 2.0 to 2.2 s | 1.2 to 1.7 s |
 | the scan | 15 to 17 s | 12.6 s | 8.9 s | 6.0 to 8.4 s |
 
-(The fixpoint's G2 and G3, a2g on the new executables: reachability 5.9 to 6.8 s; G1, a2g on
-stage 0 with the new `reach.ae` evaluated: 10 to 13 s.) a2g's output for
+(The fixpoint's G2 and G3, j2g on the new executables: reachability 5.9 to 6.8 s; G1, j2g on
+stage 0 with the new `reach.ae` evaluated: 10 to 13 s.) j2g's output for
 the same compiled tree is the same, byte for byte, but its own embedded sources (`reach.ae.z`)
 and report.edn's times (`diff -r`, at every step). The essential gate passed on `8eb9be3`
 (9:23: the suite 20,506 of 20,520, no regressions; the oracle 22,508 of 22,561, the 53 known, 0
-new). The fixpoint at `8eb9be3` (G1 by the seed's stage 0, whose a2g is the old one): a2g's
+new). The fixpoint at `8eb9be3` (G1 by the seed's stage 0, whose j2g is the old one): j2g's
 programs G1 = G2 = G3, **G1 = G2 = G3 byte for byte** (`d6b5089b...`, 102,047,904 bytes): the
 new reachability prints the program the old one printed.
 
@@ -3466,91 +3468,91 @@ collides with `arbace/spec/gen/alpha.ae`'s slot). The same commit in another wor
 ## The build's speed, third round, SA220 (b): the compiled tree in several files (2026-10-16)
 
 The user's decision SA220 (b): the back end writes a namespace's classes across several files,
-so that a2g's parallel read of the compiled tree is no longer bound by one large file. Branch
+so that j2g's parallel read of the compiled tree is no longer bound by one large file. Branch
 `speed3-split` (from `speed3`, parts A and B merged). Measured as parts A and B measured, on the
 shared host (another agent's builds beside it), `.tmp/speed3-split/`: one tree compiled twice by
 the same host from the same sources, written whole (`ARBACE_AOT_FILE_CHARS` large: as before)
-and split; a2g (this branch's executable) on each, written (`bench.sh`, alternating, three
-pairs) and arriving 60 s after a2g starts (`await.sh`); the lap `read` of `a2g: load (s)`.
+and split; j2g (this branch's executable) on each, written (`bench.sh`, alternating, three
+pairs) and arriving 60 s after j2g starts (`await.sh`); the lap `read` of `j2g: load (s)`.
 
 ### Where the time went
 
-The tree: 217 files, 28 MB, read on a2g's threads, the largest first, each file by one reader at
+The tree: 217 files, 28 MB, read on j2g's threads, the largest first, each file by one reader at
 about 2 MB/s. The largest, `aot_arbace_core.ae` (arbace.core's holder, its 1,000-odd fn classes
 as member classes, 2.6 MB on one line), and `aot_arbace_classes_analyze.ae` (2.4 MB) took one
 thread 1.3 to 2 s while the others had finished: 16 threads at 2 MB/s read 28 MB in about
 0.9 s.
 
-### What changed (`arbace/aot/main.ae`, `arbace/a2g/world.ae`)
+### What changed (`arbace/aot/main.ae`, `arbace/j2g/world.ae`)
 
-- **A class form past 256 KB in parts** (`form-texts`, `file-chars`): a top-level class form
+- **A Java form past 256 KB in parts** (`form-texts`, `file-chars`): a top-level Java form
   (a holder, a loader, a deftype) whose printed text is longer than 262,144 characters is cut
   between its elements (before a field, a method or a member class: a seq element) into parts
-  of about equal size. The first part stays the class form, in `aot_NAME.ae`, with `:aot/parts
+  of about equal size. The first part stays the Java form, in `aot_NAME.ae`, with `:aot/parts
   n` in its metadata; part k is `(aot/continue NAME k element...)` in `aot_NAME.k.ae`, laid
   out as the class's file is (its header, `(in-ns 'arbace)`, the form on line 5, so the
   reader's lines are the same). Each element is printed as the whole form printed it, so the
   parts joined are the old text: checked textually on all 20 split forms (`t/join.py`), and the
   197 files not split are byte for byte the whole tree's, `packages.edn`, `aot.edn` and
   `arbace.ae` too (which lists the class files, not their continuations). A form of 256 KB or
-  less is written as before. Split: 20 class forms into 75 files (arbace.core's holder 11 of
+  less is written as before. Split: 20 Java forms into 75 files (arbace.core's holder 11 of
   about 245 KB, its loader 5); the tree 272 files; the largest 668 KB
-  (`aot_arbace_a2g_main.1.ae`: one fn class, `arbace.a2g.main$program_main_forms`, an element
+  (`aot_arbace_j2g_main.1.ae`: one fn class, `arbace.j2g.main$program_main_forms`, an element
   not cut).
-- **a2g joins them after the read** (`world/join-continued`): the continuations' elements
-  appended to their class form in k's order, `:aot/parts` dropped, the continuations removed;
-  a missing part or a continuation of no class form fails the load. Then everything is as
-  before: the same class forms, declared in the same order (a continuation file holds no class
-  form; the files' order is the declaration's only through their class forms). Only the
-  reader's `:column`s of the moved elements differ, which nothing keeps (the class forms'
-  lowering and a2g's writer drop them).
+- **j2g joins them after the read** (`world/join-continued`): the continuations' elements
+  appended to their Java form in k's order, `:aot/parts` dropped, the continuations removed;
+  a missing part or a continuation of no Java form fails the load. Then everything is as
+  before: the same Java forms, declared in the same order (a continuation file holds no class
+  form; the files' order is the declaration's only through their Java forms). Only the
+  reader's `:column`s of the moved elements differ, which nothing keeps (the Java forms'
+  lowering and j2g's writer drop them).
 - Chosen over the member classes as top-level forms (each `defclass` with its outer class
   named): `declare-class!` declares a class's member classes from its form, recursively, and
-  a2g's analysis groups and the unit's order follow it; top-level member classes would need
-  the class forms' front end (`arbace.classes`, part of the runtime: the seed's stage 0, which
-  runs G1's a2g, would not have it) and another declaration order. The join is a2g's only
-  (its namespace is loaded from the checkout when the host's differs: G1's a2g joins too), and
-  the tree's file names change nothing a2g prints.
+  j2g's analysis groups and the unit's order follow it; top-level member classes would need
+  the Java forms' front end (`arbace.classes`, part of the runtime: the seed's stage 0, which
+  runs G1's j2g, would not have it) and another declaration order. The join is j2g's only
+  (its namespace is loaded from the checkout when the host's differs: G1's j2g joins too), and
+  the tree's file names change nothing j2g prints.
 
 ### Measured
 
 | | whole (as before) | split |
 |---|---|---|
-| a2g on a written tree (3 alternating pairs): `read` | 1.55, 1.11, 1.05 s | 0.77, 0.78, 0.76 s |
+| j2g on a written tree (3 alternating pairs): `read` | 1.55, 1.11, 1.05 s | 0.77, 0.78, 0.76 s |
 | the same: `:load` (with the runtime's analysis beside) | 32.9, 28.4, 28.5 s | 29.0, 28.6, 28.4 s |
-| a2g, the tree arriving after 60 s (the gate running beside): `read` | 1.52 s | 1.19 s |
+| j2g, the tree arriving after 60 s (the gate running beside): `read` | 1.52 s | 1.19 s |
 | the same: load after the tree arrives (`:load` minus the wait) | 16.1 s | 15.7 s |
 | the fixpoint's builds (`--await`): `read` | (1.8 to 2.2 s at `ecb5dfe`, part B) | 0.87, 0.89, 0.91 s (G1, G2, G3) |
 | the fixpoint's builds: load after the tree arrives | | 16.0, 14.1, 13.1 s |
 
 The read is now near its throughput (28 MB on 16 threads, about 0.8 s): about 0.3 to 0.8 s
-saved, a second at most of a three-minute build. a2g's output on the two trees is the same,
+saved, a second at most of a three-minute build. j2g's output on the two trees is the same,
 byte for byte, but report.edn's times (`diff -r` of the three pairs).
 
 **Checks.** The essential `bin/gate` on `9782a63` passed (6m26s: the suite 20,506 of 20,520, no
 regressions; the oracle 22,508 of 22,561, the 53 known, 0 new; the test build read the split
 tree as an input). `bin/arbace-go --fixpoint` (G1 by the seed's stage 0, which runs the
-checkout's `arbace.aot.main` and `arbace.a2g.world`): a2g's programs G1 = G2 = G3, **G1 = G2 =
+checkout's `arbace.aot.main` and `arbace.j2g.world`): j2g's programs G1 = G2 = G3, **G1 = G2 =
 G3 byte for byte** (`140b54cb...`, 102,207,648 bytes); the builds G1, G2, G3 120, 114, 98 s.
 
 ### Left
 
 - A single element past the bound is not cut (668 KB, one fn class with its nested classes):
   its file bounds the read at about 0.35 s, under the throughput's 0.8 s.
-- The tree and the a2g that reads it go together: an a2g older than this one would take a
-  split class form's first part alone (its `class-forms` skips `aot/continue`). Both are built
-  from the same checkout (G1's a2g is the checkout's world.ae), and a build reuses a tree only
-  under the key of the sources that made it (`aot.key`, a2g's among them).
+- The tree and the j2g that reads it go together: an j2g older than this one would take a
+  split Java form's first part alone (its `class-forms` skips `aot/continue`). Both are built
+  from the same checkout (G1's j2g is the checkout's world.ae), and a build reuses a tree only
+  under the key of the sources that made it (`aot.key`, j2g's among them).
 
 ### Proposals
 
-- **SA240 The compiled tree's split.** (a) As built: a top-level class form past 256 KB cut
+- **SA240 The compiled tree's split.** (a) As built: a top-level Java form past 256 KB cut
   between its elements into parts of about equal size, continuations `(aot/continue NAME k
-  ...)` in `aot_NAME.k.ae`, joined by a2g after the read; (b) the member classes as top-level
-  forms naming their outer class (the class forms' front end and its declaration order
-  change, and the seed's stage 0 could not run G1's a2g on such a tree); (c) a smaller bound
+  ...)` in `aot_NAME.k.ae`, joined by j2g after the read; (b) the member classes as top-level
+  forms naming their outer class (the Java forms' front end and its declaration order
+  change, and the seed's stage 0 could not run G1's j2g on such a tree); (c) a smaller bound
   (128 KB: about twice the files, the read already near its throughput). *Recommended: (a)*:
-  the read about halved (0.8 to 0.9 s, was 1.1 to 2.2 s), a2g's output the same.
+  the read about halved (0.8 to 0.9 s, was 1.1 to 2.2 s), j2g's output the same.
 
 **Decided (2026-10-16, the user):** SA240 (a), as built.
 
@@ -3564,7 +3566,7 @@ its caller's id space, the runtime's at the top: a script by its absolute path (
 compile script `host-compile.ae`, `prepare.ae`, the box's `/c/compile.ae`; evaluated, compiled
 into nothing), a store's `ref:NAME` (`arbace.box/load-ref`), a reader without a path
 (`load-reader`, `load-string`, which had slot 0 before; inside a namespace's load they now take
-that namespace's ids). Nothing else keys on the slots: a2g's analysis has its own spaces
+that namespace's ids). Nothing else keys on the slots: j2g's analysis has its own spaces
 (`analysis-id-base`, SA143), and without `ARBACE_COMPILE` (the evaluated build, `ARBACE_AOT=0`;
 the programs the oracle and the suite run) `Compiler.load` gives no slot at all.
 
@@ -3579,9 +3581,9 @@ Proof (at `1805a559`):
   same as before's at the path without collision (the compiled program is unchanged where no
   path collided).
 - The whole build (`bin/arbace-go --build`, its host G1) in that colliding worktree: its
-  compiled tree, a2g's program and its executable are those of the fixpoint's G2 (built by G1 in
+  compiled tree, j2g's program and its executable are those of the fixpoint's G2 (built by G1 in
   `.tmp/worktrees/speed3-ids`), byte for byte (`15d1ead1...`).
-- The fixpoint (G1 by the seed's stage 0, two runs): a2g's programs G1 = G2 = G3, **G1 = G2 = G3
+- The fixpoint (G1 by the seed's stage 0, two runs): j2g's programs G1 = G2 = G3, **G1 = G2 = G3
   byte for byte** (`15d1ead1...`, 102,219,936 bytes).
 - The essential gate passed (8:15): the suite 20,506 of 20,520, no regressions; the oracle
   22,508 of 22,561, the 53 known, 0 new.
@@ -3595,12 +3597,12 @@ Proof (at `1805a559`):
 
 ## The build's speed, fourth round, part A: reachability's scan, mutable (2026-10-16)
 
-The user's order (a fourth round, part A): what part C of the third round left in a2g's
-reachability (`arbace.a2g.reach`), the scan's state in Java's mutable collections rather than
+The user's order (a fourth round, part A): what part C of the third round left in j2g's
+reachability (`arbace.j2g.reach`), the scan's state in Java's mutable collections rather than
 atoms of persistent ones, fewer dispatches and type tests on the hot path, `java-impl-of`
-cheaper. Branch `speed4-reach` (from main, `06d183b6`), only `arbace/a2g/reach.ae` changed
+cheaper. Branch `speed4-reach` (from main, `06d183b6`), only `arbace/j2g/reach.ae` changed
 (part B, the analysis, beside it on another branch). Measured as part C did: one compiled tree
-(the build's `target/arbace-go/aot` copied aside) given to `bin/a2g --program --input`, a2g on
+(the build's `target/arbace-go/aot` copied aside) given to `bin/j2g --program --input`, j2g on
 executables built from each version (an old checkout for the old one, so that each runs its
 `reach.ae` compiled), alternately, on the shared host (part B's builds beside: a single
 timing varies by half; the pairs below ran back to back).
@@ -3621,7 +3623,7 @@ instantiation (`env/all-supertypes` the first time for each class, 0.45 s; the i
 of the calls seen), the new virtual calls (with, for each, the lambdas' interfaces that are
 subtypes of the receiver, 68 × 17,000 `subclass?`).
 
-### What changed (`2352fb2b`; a2g's output unchanged)
+### What changed (`2352fb2b`; j2g's output unchanged)
 
 - **The state** (`State`, a deftype, its fields hinted): T, the reached methods, the
   instances, the virtual calls in `LinkedHashSet`s, the queue an `ArrayList`, the calls by
@@ -3667,7 +3669,7 @@ Checked the strict way, as part C did: each version run with a trace of every ch
 state, in order (the classes entering and leaving T, the queue, the initialized classes, the
 instances, the virtual calls, the lambdas' interfaces, the unavailable and missing notes):
 110,056 events, the same as the old one's line for line, at each of the five steps; and at
-each step a2g's program for the same compiled tree the same as the old one's (`diff -r`), but
+each step j2g's program for the same compiled tree the same as the old one's (`diff -r`), but
 its own embedded sources (`reach.ae.z`) and report.edn's times.
 
 ### Measured
@@ -3683,22 +3685,22 @@ its own embedded sources (`reach.ae.z`) and report.edn's times.
 Steps between (scan, from a temporary timer): the state mutable 3.5 to 3.8 s; the fast paths
 inline about the same; the plans shared and skipped 3.3 to 3.8 s; with the parallel
 supertypes and the interfaces per receiver 2.3 to 2.7 s; with the code in parallel and the
-interfaces' sets 2.1 to 2.3 s. Evaluated (stage 0 hosting a2g with the new `reach.ae`, as a
+interfaces' sets 2.1 to 2.3 s. Evaluated (stage 0 hosting j2g with the new `reach.ae`, as a
 build by stage 0 does until a re-seed): about as before (the fixpoint's G1 11.9 s; part C's
 10 to 13 s).
 
 The essential gate passed on `2352fb2b` (9:30: the suite 20,506 of 20,520, no regressions;
 the oracle 22,508 of 22,561, the 53 known, 0 new). The fixpoint (G1 by the seed's stage 0,
-whose a2g is the old one): a2g's programs G1 = G2 = G3, **G1 = G2 = G3 byte for byte**
+whose j2g is the old one): j2g's programs G1 = G2 = G3, **G1 = G2 = G3 byte for byte**
 (`b9700623...`, 102,903,968 bytes); reachability in G2 and G3 4.2 and 5.0 s.
 
 ### Proposals
 
 - **SA250 What is left of `:reach`.** About 1 s is now outside the scan: the roots (0.4 s,
   20,000 of them, each a `use!`, a `reach!` and a virtual call), main's stand-in rounds and
-  the subclass index (`arbace/a2g/main.ae`, outside this branch), and the parallel step's walk
+  the subclass index (`arbace/j2g/main.ae`, outside this branch), and the parallel step's walk
   of the nodes (0.9 s on 16 threads, bound by the 14 batches). (a) Leave it: reachability is
-  3 to 4 s of a2g's 70 to 100; (b) a fifth round on `main.ae`'s part and the walk. *Recommended:
+  3 to 4 s of j2g's 70 to 100; (b) a fifth round on `main.ae`'s part and the walk. *Recommended:
   (a)*; nothing built.
 
 **Decided (2026-10-16, the user):** SA250 (a).
@@ -3714,9 +3716,9 @@ whose a2g is the old one): a2g's programs G1 = G2 = G3, **G1 = G2 = G3 byte for 
 The lead's order (a fourth round, part B): the analysis of the compiled namespaces' classes,
 which part A of the third round left at about 15 s, its first group (the member classes: fns,
 the loaders' parts) the longest. Branch `speed4-analysis` (from main at `06d183b`). Measured as
-`bin/arbace-go` runs a2g (`--await`, main's compiled tree copied aside and copied in 45 s after
-a2g starts, `.tmp/speed4-analysis/await.sh`), the lap `analysis-compiled` of `a2g: load (s)`; the
-tasks timed by an instrumented `world.ae` (kept as `A2G_ANALYSIS_TIMES=1`), the process' CPU
+`bin/arbace-go` runs j2g (`--await`, main's compiled tree copied aside and copied in 45 s after
+j2g starts, `.tmp/speed4-analysis/await.sh`), the lap `analysis-compiled` of `j2g: load (s)`; the
+tasks timed by an instrumented `world.ae` (kept as `J2G_ANALYSIS_TIMES=1`), the process' CPU
 time over each group (`/proc/self/stat`, not kept), CPU profiles (`ARBACE_CPUPROFILE`) of a run
 that exits right before the first group and of one that exits right after it, compared
 (`pprof -diff_base`: the group alone); on the shared host (part A's builds beside: single
@@ -3725,16 +3727,16 @@ timings vary by a fifth or more).
 ### Where the time went (`06d183b`)
 
 - **Not a few long tasks.** The first group: 8,431 tasks, the median 5.5 ms, the 99th
-  percentile 0.2 s, the longest 1.4 s (`arbace.a2g.main$run*`); all 16 threads busy until the
+  percentile 0.2 s, the longest 1.4 s (`arbace.j2g.main$run*`); all 16 threads busy until the
   end, the last tasks ending within 0.03 s of each other. The second group (217 top-level
   classes) 1.1 s, its tail one loader (`arbace.core.specs.alpha__init`, 0.84 s).
 - **Not contention.** A goroutine dump in the middle of the group (SIGQUIT, 32 jobs): every
   worker runnable or running, none waiting on a lock or a channel; the shared compilation's atom
   is only read here.
 - **Not the collector first.** A collection every 2 s or so, each 0.2 s concurrent (`gctrace`;
-  GOGC 400, GOMEMLIMIT 20 GiB as bin/a2g sets them): about a third of the CPU in the group, the
+  GOGC 400, GOMEMLIMIT 20 GiB as bin/j2g sets them): about a third of the CPU in the group, the
   rest the analysis itself.
-- **The work.** The group's CPU 168 s for 9.2 s of wall (A2G_JOBS 16); with 4 jobs 28 s (CPU
+- **The work.** The group's CPU 168 s for 9.2 s of wall (J2G_JOBS 16); with 4 jobs 28 s (CPU
   171 s), with 32 jobs 8.2 s (CPU 187 s, each task twice as long): about 16 to 20 cores is what
   this host gives one process, so the bound is the CPU the analysis takes. The group's profile:
   `find-own-field` about 40% (every symbol not a local, a field of the class or of an enclosing
@@ -3746,7 +3748,7 @@ timings vary by a fifth or more).
   parsed again for every call); `param-tags-match?` 3% (each tag resolved again for each
   candidate). (Overlapping: cumulative shares.)
 
-### What changed (`04a6a77`; a2g's output unchanged)
+### What changed (`04a6a77`; j2g's output unchanged)
 
 - **`find-own-field` through an index** (`arbace.classes.analyze/field-index`): per class, its
   fields by name, the first not derived of each name with its position (the first of the
@@ -3761,14 +3763,14 @@ timings vary by a fifth or more).
 - **`parse-method-desc` memoized** by descriptor (a pure function of a string).
 - **param-tags resolved once per call** (`select-method`): each tag's descriptor a delay,
   resolved when first compared, as the scan resolved it, then reused for the other candidates.
-- **The groups** (`arbace.a2g.world`): a top-level class without member classes (most
+- **The groups** (`arbace.j2g.world`): a top-level class without member classes (most
   loaders, the deftypes without nested classes) is analyzed in the first group, first, beside
   the member classes; the second group keeps the holders and the split loaders (102 classes,
   their own code small). Nothing a class's analysis writes is another's: it was already one task
   per class in an id space of its own, so the order of the tasks changes nothing.
 
 The memos are global (`ConcurrentHashMap`s, strong, as `env/reflect-cache`; read without a
-lock), so the runtime's own uses of the class forms' front end (the evaluator's class forms, repr/java)
+lock), so the runtime's own uses of the Java forms' front end (the evaluator's Java forms, repr/java)
 keep them too: SA260.
 
 ### Measured
@@ -3779,18 +3781,18 @@ keep them too: SA260.
 | the same, the host quiet (single runs) | 9.0 to 11.4 s | 4.3 to 5.5 s |
 | the first group: tasks, wall, CPU | 8,431, 8.3 to 9.2 s, 168 s | 8,546, 3.8 to 4.7 s, 63 to 76 s |
 | the second group: tasks, wall | 217, 1.1 s | 102, 0.2 to 0.5 s |
-| a2g's `:load` (after a wait of about 41 s), 3 pairs | 65.5, 70.9, 65.9 s | 52.9, 56.6, 53.9 s |
+| j2g's `:load` (after a wait of about 41 s), 3 pairs | 65.5, 70.9, 65.9 s | 52.9, 56.6, 53.9 s |
 
-The rest of a2g as before (reachability, the translation and the writing within the noise).
-a2g's output for the same compiled tree is the same, byte for byte, but its own embedded sources
+The rest of j2g as before (reachability, the translation and the writing within the noise).
+j2g's output for the same compiled tree is the same, byte for byte, but its own embedded sources
 (`world.ae`, `analyze.ae`, `env.ae`, `types.ae`) and report.edn's `:times` (`diff -r` of the
 three pairs, and of every step on the way). The analysis of the compiled classes depends on the
-executable's `arbace.classes` (not a tool source), so G1's a2g (on the seed's stage 0) runs the
+executable's `arbace.classes` (not a tool source), so G1's j2g (on the seed's stage 0) runs the
 old analysis and G2's the new: the fixpoint below shows them equal on the whole program.
 
 **Checks.** The essential `bin/gate` on `04a6a77` passed (10m04s: the suite 20,506 of 20,520, no
 regressions; the oracle 22,508 of 22,561, the 53 known, 0 new). `bin/arbace-go --fixpoint` (G1
-by the seed's stage 0, whose analysis is the old one): a2g's programs G1 = G2 = G3, **G1 = G2 =
+by the seed's stage 0, whose analysis is the old one): j2g's programs G1 = G2 = G3, **G1 = G2 =
 G3 byte for byte** (`a24fb44b...`, 102,457,504 bytes); the builds G1, G2, G3 192, 157, 143 s, their
 `analysis-compiled` 16.0 s (G1: the old analysis), 5.4, 5.4 s.
 
@@ -3809,7 +3811,7 @@ G3 byte for byte** (`a24fb44b...`, 102,457,504 bytes); the builds G1, G2, G3 192
   `arbace.classes.env` and `types`, checked by the infos' identity), kept for the life of the
   process, the evaluator's and repr/java's uses included (an entry per class and method name asked
   for; a class declared again replaces its entries' infos at the next lookup); (b) the same
-  memos bound per run (a dynamic var a2g binds around its world, the other uses unmemoized; the
+  memos bound per run (a dynamic var j2g binds around its world, the other uses unmemoized; the
   seed's stage 0 has no such var, so G1's `world.ae` would have to resolve it at run time);
   (c) weak or bounded maps (jrt's maps hold their keys strongly: a bound would need its own
   eviction). *Recommended: (a)*: the same rule as `env/reflect-cache`; the retained data are

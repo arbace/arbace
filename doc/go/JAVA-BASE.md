@@ -2,17 +2,17 @@
 
 How much of the JDK's `java.base` module the Go build of Arbace implements (B1a, before the
 `arbace-for-golang` freeze; [B1-PLAN.md](B1-PLAN.md)). jrt is the Go build's Java runtime:
-jdk26u sources translated by `bin/jrt-convert` (repr/java) and a2g, jrt's own Java in `overlay/`
-translated the same way, and hand-written Go forms in `go/arbace/jrt/`; a2g stubs what it does
+jdk26u sources translated by `bin/jrt-convert` (repr/java) and j2g, jrt's own Java in `overlay/`
+translated the same way, and hand-written Go forms in `go/arbace/jrt/`; j2g stubs what it does
 not translate ([JRT-SOURCES.md](JRT-SOURCES.md), [JRT-NOTES.md](JRT-NOTES.md),
-[A2G-SPEC.md](A2G-SPEC.md) §4.1).
+[J2G-SPEC.md](J2G-SPEC.md) §4.1).
 Measured on the branch `jbase` (2026-10-10), first from main at `6a33be8`, then after
 "java.util completed" (from main at `8ace8b1`); measured again on the branch `go-juc` from main
 at `d97e0f9` (2026-10-10: sockets, the JDK's resource data, java.time and java.util.concurrent
 merged), on the branch `gosec` (2026-10-10, java.security's basics, with main at `7cc3637`
 merged: processes), and last on the branch `gotext` (2026-10-11, java.text and the locales,
 with main at `6cbed45` merged: gosec and gofix's resources by URL; the default `JRT_LOCALES=none`
-build): a2g's program output made there (`bin/a2g --program`), JDK 26.0.2.1 built from
+build): j2g's program output made there (`bin/j2g --program`), JDK 26.0.2.1 built from
 `/root/jdk26u`. The numbers below are the last measurement's (`gotext`), as in
 `doc/go/java-base-coverage.edn`, unless a section says otherwise.
 
@@ -47,8 +47,8 @@ java.security's basics (9,124 members, 52.0%, on `gosec`) and, on `gotext`
 - `.tmp/jrt-coverage/members.edn`: every class and member with its status;
 - `.tmp/jrt-coverage/summary.md`: the tables of this document.
 
-Inputs: a2g's output for the program (`A2G_OUT`, default `target/arbace-go/a2g`, written by
-`bin/arbace-go --build`, or `bin/a2g --program --out DIR`; since S1 a2g reads the committed
+Inputs: j2g's output for the program (`J2G_OUT`, default `target/arbace-go/j2g`, written by
+`bin/arbace-go --build`, or `bin/j2g --program --out DIR`; since S1 j2g reads the committed
 `jdk/forms`), jrt's forms (`go/arbace/jrt/`, its `manifest.edn`), `bin/jrt-convert`'s
 `sources.txt` (`JRT_WORK`'s, default the committed `jdk/sources.txt`) and Arbace's use
 (`SURFACE`, default `doc/go/java-surface.edn`, the last output of `bin/java-surface`, retired
@@ -60,20 +60,20 @@ the sources jrt translates): the packages `java.base` exports to every module
 those the public classes and the public or protected member classes of accessible classes (not
 synthetic, anonymous or local), and of each class its *declared* public and protected methods,
 constructors and fields (protected ones only in non-final classes), without synthetic members
-and bridges. Members are named as the JVM names them, name and descriptor, which is how a2g
+and bridges. Members are named as the JVM names them, name and descriptor, which is how j2g
 names them too (its stubs, its report, its Go names, §4.4). Reflection rather than jdk26u's
 sources: it gives the compiled API exactly (implicit members such as an enum's `values`,
-generated classes, no doc-comment conventions to apply) in the descriptors a2g uses; the jmods
+generated classes, no doc-comment conventions to apply) in the descriptors j2g uses; the jmods
 hold the same class files. Inherited members are counted once, on the declaring class.
 
 **The Go build**, per class:
 
 | status | meaning |
 |---|---|
-| translated | a2g translated it (report's `:translated`) from jdk26u's source, or from jrt's own Java (`overlay/jdk`, KIND `overlay` in `sources.txt`) |
-| declared | a2g declared it from reflection (a JDK marker interface without source) |
+| translated | j2g translated it (report's `:translated`) from jdk26u's source, or from jrt's own Java (`overlay/jdk`, KIND `overlay` in `sources.txt`) |
+| declared | j2g declared it from reflection (a JDK marker interface without source) |
 | hand-written | jrt defines it (a `Define` registration in `go/arbace/jrt/`, or the manifest) |
-| cut | a name only: a2g registers it for the evaluator (`a2g_cut.go`), its members throw `UnsupportedOperationException` (D6; A2G-SPEC §4.1, amendment M3) |
+| cut | a name only: j2g registers it for the evaluator (`j2g_cut.go`), its members throw `UnsupportedOperationException` (D6; J2G-SPEC §4.1, amendment M3) |
 | absent | not in the Go build |
 
 and per member:
@@ -81,10 +81,10 @@ and per member:
 | status | meaning |
 |---|---|
 | translated | translated with its body (abstract: declared in the Go interface) |
-| partial | translated, but an operation in it names a class or member outside the build and throws when reached (an operation-level stub; a2g's report, `:unavailable`) |
-| hand-written | jrt implements it: in the manifest, or its Go name (§4.4) defined in the program's jrt package, or in a member table of jrt's classes (`reflect_tables`, `reflect_tables_a2g`, `a2g_support`) |
-| stub | exists in Go and throws `a2g: not translated` (not reached from the program's roots, or its translation failed) |
-| outside type | not in Go: its descriptor names a class outside the build (A2G-SPEC §4.1) |
+| partial | translated, but an operation in it names a class or member outside the build and throws when reached (an operation-level stub; j2g's report, `:unavailable`) |
+| hand-written | jrt implements it: in the manifest, or its Go name (§4.4) defined in the program's jrt package, or in a member table of jrt's classes (`reflect_tables`, `reflect_tables_j2g`, `j2g_support`) |
+| stub | exists in Go and throws `j2g: not translated` (not reached from the program's roots, or its translation failed) |
+| outside type | not in Go: its descriptor names a class outside the build (J2G-SPEC §4.1) |
 | cut | a member of a cut class |
 | absent | not in the build: of an absent class, a member jrt does not implement, or a member the translated source lacks (jrt's own Java is a subset; a variant cut it) |
 
@@ -93,8 +93,8 @@ translated class, its Go name (§4.4: the method, `Impl_` method, static functio
 function or `Ctor` method, static variable) is looked up in the program's forms; it must exist
 exactly when the status says the member is in Go. 0 mismatches.
 
-**Reachability.** With `--program` a2g roots every public member of every class with class forms
-(A2G-SPEC §10.6), so a translated class's public members are all reached and translated; `stub`
+**Reachability.** With `--program` j2g roots every public member of every class with Java forms
+(J2G-SPEC §10.6), so a translated class's public members are all reached and translated; `stub`
 catches protected members not reached and failed translations. What Arbace itself reaches is
 measured instead from its references: the members the runtime (`arbace.lang`) and the namespaces
 loaded at a REPL's start reference (java-surface.edn, groups `:runtime` and `:repl`; regenerated
@@ -244,12 +244,12 @@ provided since the earlier measurements.
   `java.nio.file`'s `Paths`, options and exceptions; java.security's basics (`MessageDigest`
   and its streams, `SecureRandom`, `Provider`, `Security`, `javax.crypto.Mac`, `SecretKeySpec`,
   the SUN and SunJCE providers' digests, generators and HMACs; JRT-NOTES.md, "Security").
-- **jrt's own Java** (overlay, translated by a2g): `FileDescriptor`, `FileInputStream`,
+- **jrt's own Java** (overlay, translated by j2g): `FileDescriptor`, `FileInputStream`,
   `FileOutputStream`, `InputStreamReader`, `OutputStreamWriter`, `java.nio.file.Path` and
   `Files` (a subset), `Calendar`, `GregorianCalendar`, `ResourceBundle` and its `Control`,
   `java.util.zip.InflaterInputStream`, `URLClassLoader` (over directories), and outside the API
   `jdk.internal.jrt.ClassPathResources` (the class path's resources; "Resources by URL").
-- **Hand-written Go**: `Object`, `Class` and `java.lang.reflect` (over a2g's member tables),
+- **Hand-written Go**: `Object`, `Class` and `java.lang.reflect` (over j2g's member tables),
   `String`, `StringBuilder`, `StringBuffer` (UTF-16, D4), `Math`, `StrictMath`, `System`,
   `Runtime`, `Thread`, `ThreadLocal`, `Throwable`, `StackTraceElement`, `Enum`, `Record`;
   references; atomics (`AtomicBoolean`, `Integer`, `Long`, `Reference`), locks
@@ -288,7 +288,7 @@ constructors, `PrintStream`'s and `PrintWriter`'s `setError`/`clearError`, `Cale
 `TimeUnit.timedWait`. A subclass the evaluator makes (`proxy`) calling one of them throws.
 
 **Partial (25 members).** Translated, with one operation that names a class or member outside
-the build and throws when that path runs (a2g's report, `:unavailable`, gives each reason):
+the build and throws when that path runs (j2g's report, `:unavailable`, gives each reason):
 
 | members | outside the build | what throws |
 |---|---|---|
@@ -314,18 +314,18 @@ attribute, channel and directory-stream members, `getChannel`, the `ByteBuffer`,
 ## Cut, and why
 
 D6 ([B1-PLAN.md](B1-PLAN.md)) left out of the first REPL what has no Go-side meaning yet;
-JAVA-SURFACE.md lists what of Arbace each cut breaks, A2G-SPEC §12 what is out of scope. The
+JAVA-SURFACE.md lists what of Arbace each cut breaks, J2G-SPEC §12 what is out of scope. The
 cut classes Arbace names exist as names whose members throw; everything else is absent.
 
 | area | in the Go build | why |
 |---|---|---|
 | class loading, `java.lang.invoke`, `java.lang.classfile`, `java.lang.constant` (but `Constable`, `ConstantDesc`) | absent or cut | the evaluator replaces bytecode, call sites and method handles (D2); no class files |
-| `java.lang.reflect`'s generic and annotated types, annotations at run time | absent | closed world over a2g's member tables (JAVA-SURFACE.md decision 1; amendment R16) |
+| `java.lang.reflect`'s generic and annotated types, annotations at run time | absent | closed world over j2g's member tables (JAVA-SURFACE.md decision 1; amendment R16) |
 | processes (`Process`, `ProcessBuilder`), `ProcessHandle` | translated (since 2026-10-10) | D6 reversed for them (amendments PR1-PR7; JRT-NOTES.md, "Processes"): over the host's `HostProc`; `sh` and `arbace.java.process` are in |
 | `java.net`'s URL connections but `file:`, `HttpURLConnection`, `DatagramSocket`, `NetworkInterface`, `Proxy`, `URLEncoder` | cut or absent | D6; sockets, `InetAddress` and the socket REPL are translated since 2026-10-10 (amendments NT1-NT5; JRT-NOTES.md, "Sockets (go-net)"), `URLClassLoader` over directories is jrt's own Java ("Resources by URL") |
 | `java.nio`'s direct and mapped buffers and the `Long`, `Short`, `Float`, `Double` buffers, channels, charset coders, most of `java.nio.file` | absent or cut | D6; the heap `ByteBuffer`, `CharBuffer` and `IntBuffer` are translated (amendment RD4); the file system is reached through `File` and jrt's `Path`/`Files` (FS2) |
 | `java.time` (but its non-ISO chronologies, absent), `java.text` | translated (since 2026-10-10, 2026-10-11) | D6 reversed for them (amendments TM1-TM9, TL1-TL8; JRT-NOTES.md, "Time", "Text and locales"); the shipped build's locale data are java.base's root and English (`JRT_LOCALES=none`), `common` or `all` add jdk.localedata's |
-| serialization (`ObjectInputStream`, `ObjectOutputStream`) | absent | D6, A2G-SPEC §12 |
+| serialization (`ObjectInputStream`, `ObjectOutputStream`) | absent | D6, J2G-SPEC §12 |
 | `java.security`, `javax.crypto` beyond their basics (signatures, ciphers, keys, key stores, certificates, the providers but SUN and SunJCE); `javax.net`, `javax.security` (but `Destroyable`) | absent | not used by Arbace; the basics (`MessageDigest`, `SecureRandom`, `Mac`, `SecretKeySpec`, `Provider`, `Security`) are translated since 2026-10-10 (amendments SC1-SC7; JRT-NOTES.md, "Security") |
 | `java.util.jar`, `java.util.zip` (but `CRC32`, `Checksum`, `ZipException` and jrt's `InflaterInputStream`), `ServiceLoader`, `java.util.spi` (but the locale service providers), `java.lang.module`, `Module`, `Package` | absent or cut | no jars or modules in a static executable; `ResourceBundle` is jrt's own Java (amendments TM4, TL5), `InflaterInputStream` too (RD3) |
 | `java.lang.foreign`, `ScopedValue`, `StructuredTaskScope`, `StackWalker` | absent or cut | VM features without a Go counterpart yet |
@@ -367,7 +367,7 @@ What it would take, roughly by cost (agent-assisted days at the pace of B1a):
    JC1-JC10, JRT-NOTES.md "Concurrency"; as planned here): JDK 26's concurrent classes use
    `VarHandle` (`ConcurrentLinkedQueue`, `ConcurrentSkipListMap`, `CompletableFuture`,
    `Exchanger`, the atomic arrays and field updaters, `Striped64`/`LongAdder`) or AQS over
-   `Unsafe` (`AbstractQueuedSynchronizer`, `StampedLock`). a2g would compile field `VarHandle`s
+   `Unsafe` (`AbstractQueuedSynchronizer`, `StampedLock`). j2g would compile field `VarHandle`s
    (`MethodHandles.lookup().findVarHandle` constants and their access modes) to Go atomics, as
    jrt's `Unsafe` does for `ConcurrentHashMap`; then the classes translate. `ThreadPoolExecutor`,
    `Executors` and `AbstractExecutorService` are plain Java over AQS and could replace the
@@ -412,7 +412,7 @@ before the freeze (java.time and java.util.concurrent are other branches'). Done
   constructor, `clone`, `putAll` and `addAllForTreeSet`), `BitSet` (`valueOf(byte[])` and
   `toByteArray` by shifts instead of a little-endian `ByteBuffer`), `RandomGenerator`
   (`isDeprecated` is false: no annotations in the Go build, R16).
-- **a2g**: FromFn's array results (amendment JB3) and lambdas with marker interfaces
+- **j2g**: FromFn's array results (amendment JB3) and lambdas with marker interfaces
   (amendment JB5); **jrt**: forked tasks not yet done run again (amendment JB4).
 - **The oracle**: `test/oracle/forms/java_util.ae`, 161 cases recorded on the JVM: all pass on
   Go but the three `nextProbablePrime` cases (`ThreadLocalRandom.current`, listed in
@@ -427,43 +427,43 @@ before the freeze (java.time and java.util.concurrent are other branches'). Done
 | executable, amd64 | 80,126,079 bytes | 82,283,432 bytes (+2.16 MB, +2.7%) |
 
 Checks (amd64; arm64 not built on this branch): `bin/jrt-convert` (414 files, shape check as
-above), `bin/a2g --program`, `bin/arbace-go --build` and `--smoke` pass; Clojure's suite on Go
+above), `bin/j2g --program`, `bin/arbace-go --build` and `--smoke` pass; Clojure's suite on Go
 19,506 of 19,506 assertions, no regression against `test/arbace-go-results.edn`; the oracle
 against `known-go-amd64.edn`: the only new mismatches besides the three recorded above are the
-271 `defclass`/`defclass_corpus` cases that main at `8ace8b1` has too (the class forms at the
+271 `defclass`/`defclass_corpus` cases that main at `8ace8b1` has too (the Java forms at the
 REPL, checked on an executable built from `8ace8b1`: the same 271), not recorded here.
 
 ### Amendments (JB)
 
-All accepted by the user 2026-10-10 and folded where they belong (A2G-SPEC §16, "java.util
+All accepted by the user 2026-10-10 and folded where they belong (J2G-SPEC §16, "java.util
 completed"):
 
 - **JB1 (JRT-SOURCES.md, "The closure as grown") The java.util files**: the list above, as
   `util-sources` beside `added-sources`, each group with its reason. *Accepted 2026-10-10, folded into JRT-SOURCES.md, "The closure as grown".*
-- **JB2 (A2G-SPEC §4.6, the JDK's variants) `TreeMap`, `BitSet`, `RandomGenerator`**, as above.
+- **JB2 (J2G-SPEC §4.6, the JDK's variants) `TreeMap`, `BitSet`, `RandomGenerator`**, as above.
   A replacing member's parameter tags are written as repr/java writes the original's (generic tags
-  included: `^{:tag (SortedMap K (? extends V))}`), since the variant finds the member by them. *Accepted 2026-10-10, folded into A2G-SPEC §4.6.*
-- **JB3 (A2G-SPEC §7.11, FromFn) An array result is checked against the return type's array
+  included: `^{:tag (SortedMap K (? extends V))}`), since the variant finds the member by them. *Accepted 2026-10-10, folded into J2G-SPEC §4.6.*
+- **JB3 (J2G-SPEC §7.11, FromFn) An array result is checked against the return type's array
   class**, as `Dyn`'s results are. Before, the adapter checked the result against its own class
   through the generic `jrt.NN`, which Go cannot instantiate on an `any`, and wrote the call
   twice; no functional interface with an array result had been in the world
-  (`DualPivotQuicksort`'s private `PartitionOperation` is the first). *Accepted 2026-10-10, folded into A2G-SPEC §7.11.*
-- **JB4 (A2G-SPEC §8.4, the fork-join pool) A forked task not yet done runs again.** jrt ran a
+  (`DualPivotQuicksort`'s private `PartitionOperation` is the first). *Accepted 2026-10-10, folded into J2G-SPEC §7.11.*
+- **JB4 (J2G-SPEC §8.4, the fork-join pool) A forked task not yet done runs again.** jrt ran a
   task once (claimed `fjNew` to `fjRunning`); a `CountedCompleter` whose `exec` returned
   without completing and that is forked again (`ArrayPrefixHelpers`' cumulation reforks its
   parent) never ran again, and `parallelPrefix` deadlocked. Forking now runs `exec` whenever
   the task is not done, as the JDK's `doExec`; joining is unchanged. (A change to jrt's
-  `forkjoin.ae`, which the java.util.concurrent branch also owns.) *Accepted 2026-10-10, folded into A2G-SPEC §8.4.*
-- **JB5 (A2G-SPEC §7.11, lambdas) A lambda whose target is an intersection with marker
+  `forkjoin.ae`, which the java.util.concurrent branch also owns.) *Accepted 2026-10-10, folded into J2G-SPEC §8.4.*
+- **JB5 (J2G-SPEC §7.11, lambdas) A lambda whose target is an intersection with marker
   interfaces** (`(lambda (& Comparator Serializable) ...)`, javac's
   `(Comparator<T> & Serializable)`) gets an adapter that implements them, `F_Fn_M1_..._Mn`,
   registered as `F$$Lambda$M1...`. Before, the adapter implemented only `F`, and the cast to
   `Serializable` that javac writes threw `ClassCastException`: `Comparator.comparing`,
-  `comparingInt`, `thenComparing`, `Map.Entry.comparingByKey` and the like failed on Go. *Accepted 2026-10-10, folded into A2G-SPEC §7.11.*
+  `comparingInt`, `thenComparing`, `Map.Entry.comparingByKey` and the like failed on Go. *Accepted 2026-10-10, folded into J2G-SPEC §7.11.*
 
 ## Decisions for the user
 
 - Whether `doc/go/java-base-coverage.edn` is regenerated in the freeze's checklist (it needs
-  a2g's output: `bin/arbace-go --build`, then `bin/jrt-coverage`), or kept as this measurement.
+  j2g's output: `bin/arbace-go --build`, then `bin/jrt-coverage`), or kept as this measurement.
   Decided since: regenerated at the freeze (step 8; [AGENDA.md](../AGENDA.md)), with this
   document's tables.

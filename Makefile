@@ -79,8 +79,8 @@ VERIFY := jdk-verify edge-verify fixtures-verify tamago-verify toolchain-verify 
 verify: $(VERIFY) ## all of the below, one after another
 jdk-verify: ## jdk/'s forms by repr/java, on the frozen JVM (bin/jrt-convert verify)
 	bin/jrt-convert verify
-edge-verify: ## a2g's edge, on the frozen JVM (bin/a2g-edge verify)
-	bin/a2g-edge verify
+edge-verify: ## j2g's edge, on the frozen JVM (bin/j2g-edge verify)
+	bin/j2g-edge verify
 fixtures-verify: ## the suite's Java fixtures, on the frozen JVM (bin/clojure-tests --java-fixtures verify)
 	bin/clojure-tests --java-fixtures verify
 tamago-verify: ## tamago/goroot and goos; the guest from them (bin/tamago-vendor verify, check)

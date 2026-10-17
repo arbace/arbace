@@ -9,15 +9,15 @@ Status: accepted (2026-10-08), milestone G0 of repr/go ([G2C-SURVEY.md](../G2C-S
 37 amendments found while implementing the helper, the printer and the converter and in B1a's step 0
 folded in (2026-10-08, §15). G0-G2 are done (the round trip closed on 2026-10-08,
 [ROUNDTRIP.md](ROUNDTRIP.md)). Implemented by `tools/godump` (the helper), `arbace.repr.go.convert` (the
-converter) and `arbace.repr.go.print` (the printer); a2g writes Go forms by this spec for the Go
-executable (`bin/arbace-go`, [A2G-SPEC.md](A2G-SPEC.md)). The decisions of 2026-10-07 (survey §9)
+converter) and `arbace.repr.go.print` (the printer); j2g writes Go forms by this spec for the Go
+executable (`bin/arbace-go`, [J2G-SPEC.md](J2G-SPEC.md)). The decisions of 2026-10-07 (survey §9)
 bind it; the user accepted the recommendation of each of the 20 questions of §15 on 2026-10-08.
 
 This spec defines the **Go forms**: how every construct of a Go package, as `go/parser` and
 `go/types` see it, is written as Clojure data in ordinary `.ae` sources. It says what the forms
 mean, what the converter writes out of the type checker's decisions, what a consumer derives by
 itself, and what the printer needs to give the Go toolchain a program that `gc` compiles to the
-same export data and object code. It is the counterpart of the class forms
+same export data and object code. It is the counterpart of the Java forms
 ([classes/SPEC.md](../classes/SPEC.md)) for Go, and follows it in structure and principles.
 
 Words used throughout:
@@ -32,8 +32,8 @@ Words used throughout:
   *Go → forms → Go* (§3).
 - **a consumer**: anything that reads Go forms for their meaning: the printer, and later
   Arbace's own Go-forms compiler (survey §5.2, steps b2-b4).
-- **other writers**: a2g (`arbace.a2g`), which translates class forms and Clojure into Go forms,
-  and jrt's hand-written Go forms ([A2G-SPEC.md](A2G-SPEC.md)); both are printed by the printer.
+- **other writers**: j2g (`arbace.j2g`), which translates Java forms and Clojure into Go forms,
+  and jrt's hand-written Go forms ([J2G-SPEC.md](J2G-SPEC.md)); both are printed by the printer.
 - **Go forms**: the forms of this spec. **Go context**: the inside of a Go declaration form
   (§7.2), where the forms mean Go.
 - **gc**: Go's compiler, `cmd/compile`, as driven by the `go` command of the pinned toolchain.
@@ -50,11 +50,11 @@ what is derived · 12 The printer · 13 Coverage · 14 Worked examples · 15 Ope
    in namespaces of their own and are read by consumers that know them. Inside a Go declaration
    form, `+`, `<<`, `==` and the other operators are Go's operators at the operands' type, and
    `if`, `let`, `set!`, `range`, `for` are Go's statements (the user's decision of 2026-10-07,
-   a deliberate exception to class forms principle 1). No Clojure code runs inside Go context:
+   a deliberate exception to Java forms principle 1). No Clojure code runs inside Go context:
    there are no vars, no seqs, no Clojure functions there.
 2. **Declarations mirror Go.** One form per Go declaration, in Go's source order, in one file
    per Go file. Go's identifiers are written verbatim: capitalization is export, so nothing is
-   munged. Types are tags and type forms, as in the class forms.
+   munged. Types are tags and type forms, as in the Java forms.
 3. **go/types' decisions are written out.** Whatever a consumer could only learn by running a
    Go type checker is in the forms: constant values, inferred type arguments, embedded-field
    paths of selections, the redeclared names of `:=`, initialization order, the types of
@@ -238,7 +238,7 @@ path `p_test` and the namespace `go.<path>_test`, `<path>` mapped as above (amen
 it, `command-line-arguments`, in `:path`; its namespace is `go.test.` followed by the file's
 path relative to `$GOROOT/test` without `.go`, mapped as above (amendment, accepted
 2026-10-08). Two paths of one conversion that map to one namespace are a converter error (none
-exists in the standard library). Layout follows class forms §9.1: the package file holds the
+exists in the standard library). Layout follows Java forms §9.1: the package file holds the
 `ns` form, the `go/package` form and one `load` per Go file in the package's file order; each
 Go file `x.go` becomes `<pkg-dir>/x.ae`, or `<pkg-dir>/x.go.ae` when the package's source
 directory has a subdirectory `x`, whose package's own file would be `<pkg-dir>/x.ae`
@@ -271,8 +271,8 @@ directory has a subdirectory `x`, whose package's own file would be `<pkg-dir>/x
 
 The forms of each configuration are a separate tree, one per pinned configuration (§1, item
 7), so four (amendment, accepted 2026-10-08). `bin/repr-go` writes them under
-`.tmp/repr-go/forms/CORPUS` (`amd64`, `arm64`, `linux-amd64` ...); `bin/arbace-go` writes a2g's
-program under `target/arbace-go/a2g`, one tree for every target (below). Converted output is
+`.tmp/repr-go/forms/CORPUS` (`amd64`, `arm64`, `linux-amd64` ...); `bin/arbace-go` writes j2g's
+program under `target/arbace-go/j2g`, one tree for every target (below). Converted output is
 regenerated, not tracked (decision 9).
 
 **Programs written as Go forms** (amendment, accepted 2026-10-08). A program held as forms
@@ -2364,7 +2364,7 @@ printer's over the helper's):
    as data (`(go/comment ...)` forms between statements), which clutters the code forms.
    *Recommendation: as specified; doc comments on by default.*
 3. **Mutability.** Every Go variable is assignable, so `^:mutable` (the survey's sketch, and
-   the class forms' rule) is not written; captured variables are shared, as in Go.
+   the Java forms' rule) is not written; captured variables are shared, as in Go.
    *Recommendation: no `^:mutable` in Go context.*
 4. **Local declarations.** Nested `let` scoping over the rest of the block (the survey's choice,
    idiomatic Clojure), or flat Go-style declaration statements (`(var x e)` scoping to the end of
@@ -2419,7 +2419,7 @@ printer's over the helper's):
 17. **Expression types written by the converter.** Only non-constant shifts of untyped
     constants get a `:tag` now (§8.3); everything else is local or derived. The compiler (b2)
     may find more places where go/types reasons non-locally. *Recommendation: add them as
-    amendments, as for the class forms.*
+    amendments, as for the Java forms.*
 18. **Helper output.** Types as structured data, not `TypeString` strings; raw positions and the
     selector dot; paths for promoted literal keys (§11.3). *Recommendation: ask the helper for
     these now, before the converter is written.* (Done: the helper's format 2, HELPER-NOTES.md.)

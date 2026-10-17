@@ -1,6 +1,6 @@
 # test/java-fixtures/
 
-The class forms of Clojure's suite's Java fixtures, the input the Go build's test build adds to
+The Java forms of Clojure's suite's Java fixtures, the input the Go build's test build adds to
 the program (doc/go/EVAL-NOTES.md, "The suite's Java fixtures"; amendment FX1): `bin/arbace-go
 --build-tests` translates them with the program into `target/arbace-go/<arch>/arbace-tests`, the
 executable Clojure's suite runs on (`CLOJURE_TESTS_GO`). Committed as the JDK's forms are in
@@ -12,7 +12,7 @@ byte.
 
 | path | what | from |
 |---|---|---|
-| `forms/` | one class forms file (`.ae`) per Java source, at its package's path, and one namespace file per package (`arbace/test.ae`, `compilation.ae`, `reflector.ae`), as repr/java writes them (`bin/repr-java read`, javac's class path the frozen JVM Arbace's jar since S4, `bin/lib/frozen.bash`, until then Arbace's `target/stage2`, for `arbace.lang.IFn` and the Java API; repr/java itself on the frozen jar since S4); the first line names the source (`;; Converted from clojure/clojure test/java/...`) | `test/java` of Clojure's repository (12 files: `compilation.TestDispatch`, `JDK8InterfaceMethods`, `ClassWithFailingStaticInitialiser`, `reflector.IBar`, and `clojure.test`'s `AdapterExerciser`, `ConcreteClass`, `FIConstructor`, `FIStatic`, `FunctionalTester`, `GenericInterface`, `ReflectorTryCatchFixture`, `SwissArmy`), renamed by c2a (`clojure.*` to `arbace.*`) as `bin/clojure-tests` renames the suite |
+| `forms/` | one Java forms file (`.ae`) per Java source, at its package's path, and one namespace file per package (`arbace/test.ae`, `compilation.ae`, `reflector.ae`), as repr/java writes them (`bin/repr-java read`, javac's class path the frozen JVM Arbace's jar since S4, `bin/lib/frozen.bash`, until then Arbace's `target/stage2`, for `arbace.lang.IFn` and the Java API; repr/java itself on the frozen jar since S4); the first line names the source (`;; Converted from clojure/clojure test/java/...`) | `test/java` of Clojure's repository (12 files: `compilation.TestDispatch`, `JDK8InterfaceMethods`, `ClassWithFailingStaticInitialiser`, `reflector.IBar`, and `clojure.test`'s `AdapterExerciser`, `ConcreteClass`, `FIConstructor`, `FIStatic`, `FunctionalTester`, `GenericInterface`, `ReflectorTryCatchFixture`, `SwissArmy`), renamed by c2a (`clojure.*` to `arbace.*`) as `bin/clojure-tests` renames the suite |
 | `provenance.edn` | Clojure's repository and commit; the JDK whose javac attributes the sources; the converters' versions (SHA-256 over `arbace/repr/java{.ae,/}` and `bin/repr-java`, as `jdk/provenance.edn`; over `arbace/c2a`) and repr/java's host (the frozen jar's name and SHA-256, since S4); the counts | `bin/clojure-tests --java-fixtures` |
 
 Origin: https://github.com/clojure/clojure at `98d735fab02f337cee654cb0629bddc09883a75a`, the

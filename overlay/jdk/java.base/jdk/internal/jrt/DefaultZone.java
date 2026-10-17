@@ -13,7 +13,7 @@ import sun.util.calendar.ZoneInfo;
  * "Time"): Date's local fields, toString's zone name and its deprecated local constructors are
  * the default zone's, as the JDK's Date computes them (its BaseCalendar over
  * TimeZone.getDefaultRef: a ZoneInfo's offsets by the instant and by the wall time, another
- * zone's raw offset and daylight saving). jrt's Date cannot name the translated TimeZone; a2g sets
+ * zone's raw offset and daylight saving). jrt's Date cannot name the translated TimeZone; j2g sets
  * jrt's DateZone hooks to these methods.
  */
 public final class DefaultZone {
