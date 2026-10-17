@@ -1,0 +1,227 @@
+;; goi: Arbace calling compiled Go (GOI-SPEC.md §7.2, S47): a Callable is a member of the table
+;; (or a Go func value that reached Arbace) with its call node, made once from its invoker
+;; over a small frame whose slots hold the converted arguments; without an invoker,
+;; reflect.Value.Call.
+(in-ns 'go.arbace.goi)
+
+(go/file "call.go"
+  :imports [[fmt "fmt"] [reflect "reflect"] [sync "sync"] [jrt "arbace/jrt"]])
+
+(go/type Callable
+  "Callable is a compiled Go function as Arbace calls it: Fn its value (a method expression's
+receiver first), RT its type, Inv its invoker; the call node and the slots are made on the
+first call.\n"
+  (struct ^string Name ^any Fn ^{:tag reflect/Type} RT ^Invoker Inv ^bool Method
+          ^{:tag sync/Once} once ^any node
+          ^{:tag (slice byte)} pk ^{:tag (slice int32)} ps ^{:tag (slice byte)} rk ^{:tag (slice int32)} rs
+          ^int32 ni ^int32 nf ^int32 ns ^int32 nr))
+
+(go/func NewCallable
+  "NewCallable is the callable of member value fn named name (a method expression when
+method), called through inv when it is not nil.\n"
+  ^{:tag (* Callable)} [^string name ^any fn ^Invoker inv ^bool method]
+  (addr (lit Callable :Name name :Fn fn :RT (reflect/TypeOf fn) :Inv inv :Method method)))
+
+(go/var ^{:tag (map reflect/Type Invoker)} invokersByType)
+
+(go/var ^{:tag sync/Once} invokersOnce)
+
+(go/func invokerOf
+  "invokerOf is the invoker of a func value's type: the table's functions' invokers, by their
+types (a Go func that reached Arbace, S35), or nil.\n"
+  ^Invoker [^{:tag reflect/Type} t]
+  (.Do invokersOnce
+       (fn []
+         (set! invokersByType (make (map reflect/Type Invoker)))
+         (range [_ p packages]
+           (range [_ m (.-Funcs p)]
+             (when (!= (.-Inv m) nil)
+               (aset invokersByType (reflect/TypeOf (.-Value m)) (.-Inv m)))))))
+  (aget invokersByType t))
+
+(go/func FuncCallable
+  "FuncCallable is the callable of a Go func value f that reached Arbace (a GoFn's).\n"
+  ^{:tag (* Callable)} [^any f ^string name]
+  (NewCallable name f (invokerOf (reflect/TypeOf f)) false))
+
+(go/func slotKind "slotKind is the frame slot kind of a value of type t: I, F, S or R.\n"
+  ^byte [^{:tag reflect/Type} t]
+  (switch (.Kind t)
+    (case [reflect/Bool reflect/Int reflect/Int8 reflect/Int16 reflect/Int32 reflect/Int64
+           reflect/Uint reflect/Uint8 reflect/Uint16 reflect/Uint32 reflect/Uint64 reflect/Uintptr]
+      (return \I))
+    (case [reflect/Float32 reflect/Float64] (return \F))
+    (case [reflect/String] (return \S)))
+  \R)
+
+(go/method prepare
+  "prepare numbers the slots (parameters, then results) and makes the call node from the
+invoker.\n"
+  [^{:tag (* Callable)} c]
+  (let [t (.-RT c)
+        n (.NumIn t)
+        next (fn ^int32 [^byte k]
+               (switch k
+                 (case [\I] (inc! (.-ni c)) (return (- (.-ni c) 1)))
+                 (case [\F] (inc! (.-nf c)) (return (- (.-nf c) 1)))
+                 (case [\S] (inc! (.-ns c)) (return (- (.-ns c) 1))))
+               (inc! (.-nr c))
+               (- (.-nr c) 1))
+        args (make (slice any) n)]
+    (for [i 0] (< i n) (inc! i)
+      (let [k (slotKind (.In t i))]
+        (when (or (and (.-Method c) (== i 0)) (and (.IsVariadic t) (== i (- n 1))))
+          (set! k \R))
+        (let [s (next k)]
+          (set! (.-pk c) (append (.-pk c) k))
+          (set! (.-ps c) (append (.-ps c) s))
+          (switch k
+            (case [\I] (aset args i (LocalI s)))
+            (case [\F] (aset args i (LocalF s)))
+            (case [\S] (aset args i (LocalS s)))
+            (default (aset args i (LocalR s)))))))
+    (for [i 0] (< i (.NumOut t)) (inc! i)
+      (let [k (slotKind (.Out t i))]
+        (set! (.-rk c) (append (.-rk c) k))
+        (set! (.-rs c) (append (.-rs c) (next k)))))
+    (when (!= (.-Inv c) nil)
+      (set! (.-node c) ((.-Inv c) (.-Fn c) args (.-rs c))))))
+
+(go/func store "store writes v to slot s of kind k.\n"
+  [^{:tag (* Frame)} fr ^byte k ^int32 s ^{:tag reflect/Value} v]
+  (switch k
+    (case [\I]
+      (switch (.Kind v)
+        (case [reflect/Bool] (aset (.-I fr) s (B2I (.Bool v))))
+        (case [reflect/Uint reflect/Uint8 reflect/Uint16 reflect/Uint32 reflect/Uint64 reflect/Uintptr]
+          (aset (.-I fr) s (conv int64 (.Uint v))))
+        (default (aset (.-I fr) s (.Int v)))))
+    (case [\F] (aset (.-F fr) s (.Float v)))
+    (case [\S] (aset (.-S fr) s (.String v)))
+    (default (aset (.-R fr) s (.Interface v)))))
+
+(go/func load "load reads slot s of kind k as a value of type t.\n"
+  ^{:tag reflect/Value} [^{:tag (* Frame)} fr ^byte k ^int32 s ^{:tag reflect/Type} t]
+  (let [e (zeroOf t)]
+    (switch k
+      (case [\I]
+        (switch (.Kind t)
+          (case [reflect/Bool] (.SetBool e (!= (aget (.-I fr) s) 0)))
+          (case [reflect/Uint reflect/Uint8 reflect/Uint16 reflect/Uint32 reflect/Uint64 reflect/Uintptr]
+            (.SetUint e (conv uint64 (aget (.-I fr) s))))
+          (default (.SetInt e (aget (.-I fr) s)))))
+      (case [\F] (.SetFloat e (aget (.-F fr) s)))
+      (case [\S] (.SetString e (aget (.-S fr) s)))
+      (default
+        (let [x (aget (.-R fr) s)]
+          (when (!= x nil)
+            (.Set e (reflect/ValueOf x))))))
+    e))
+
+(go/method Call
+  "Call calls c with Arbace's arguments args, converted by the parameters' types (§5.6), and
+returns its results converted to Arbace. A method's receiver given as a pointer to the
+receiver's type is dereferenced (Go's implicit *); (go/spread xs) as the last argument of a
+variadic function passes the slice xs.\n"
+  ^{:tag (slice any)} [^{:tag (* Callable)} c ^{:tag (slice any)} args]
+  (.Do (.-once c) (fn [] (.prepare c)))
+  (let [t (.-RT c)
+        n (.NumIn t)
+        va (.IsVariadic t)
+        nargs (len args)]
+    (when (or (and (not va) (!= nargs n)) (and va (< nargs (- n 1))))
+      (panic (jrt/IllegalArgumentException_New_String
+               (jrt/Str (fmt/Sprintf "%s takes %d arguments (%s), got %d" (.-Name c) n (.String t) nargs)))))
+    (let [fixed n
+          vals (make (slice reflect/Value) n)
+          spreadUsed false]
+      (when va
+        (dec! fixed))
+      (for [i 0] (< i fixed) (inc! i)
+        (let [x (aget args i)
+              what (fmt/Sprintf "argument %d of %s" (+ i 1) (.-Name c))]
+          (when (and (.-Method c) (== i 0) (!= x nil))
+            (let [rv (reflect/ValueOf x)]
+              (when (and (== (.Kind rv) reflect/Pointer) (== (.Elem (.Type rv)) (.In t 0)) (not (.IsNil rv)))
+                (set! x (.Interface (.Elem rv))))))
+          (aset vals i (FromArbace x (.In t i) what))))
+      (when va
+        (let [st (.In t (- n 1))
+              rest (subslice args fixed)
+              what (fmt/Sprintf "argument %d of %s" n (.-Name c))]
+          (when (== (len rest) 1)
+            (let [(values sp ok) (assert spreadArg (aget rest 0))]
+              (when ok
+                (set! spreadUsed true)
+                (aset vals (- n 1) (FromArbace (.-V sp) st what)))))
+          (when (not spreadUsed)
+            (let [sv (reflect/MakeSlice st (len rest) (len rest))]
+              (range [j x rest]
+                (.Set (.Index sv j) (FromArbace x (.Elem st) (fmt/Sprintf "argument %d of %s" (+ fixed j 1) (.-Name c)))))
+              (aset vals (- n 1) sv)))))
+      (when (== (.-node c) nil)
+        (let [fv (reflect/ValueOf (.-Fn c))
+              ^{:tag (slice reflect/Value)} out nil]
+          (if va
+            (set! out (.CallSlice fv vals))
+            (set! out (.Call fv vals)))
+          (let [res (make (slice any) (len out))]
+            (range [i o out]
+              (aset res i (ToArbace o)))
+            (return res))))
+      (let [fr (addr (lit Frame :I (make (slice int64) (.-ni c)) :F (make (slice float64) (.-nf c))
+                          :S (make (slice string) (.-ns c)) :R (make (slice any) (.-nr c))))]
+        (range [i v vals]
+          (store fr (aget (.-pk c) i) (aget (.-ps c) i) v))
+        (let [nout (len (.-rk c))]
+          (when (== nout 1)
+            (let [k (aget (.-rk c) 0)
+                  s (aget (.-rs c) 0)]
+              (switch k
+                (case [\I] (aset (.-I fr) s ((assert I (.-node c)) fr)))
+                (case [\F] (aset (.-F fr) s ((assert F (.-node c)) fr)))
+                (case [\S] (aset (.-S fr) s ((assert S (.-node c)) fr)))
+                (default (aset (.-R fr) s ((assert R (.-node c)) fr))))))
+          (when (!= nout 1)
+            ((assert T (.-node c)) fr))
+          (let [res (make (slice any) nout)]
+            (for [i 0] (< i nout) (inc! i)
+              (aset res i (ToArbace (load fr (aget (.-rk c) i) (aget (.-rs c) i) (.Out t i)))))
+            res))))))
+
+;; ---------------------------------------------------------------------------------------
+;; The boundary for panics (§10.4, GR1's part: GoPanic and GoExit are made by GoInterp)
+
+(go/type exitPanic "exitPanic is os.Exit's panic at the REPL (S12): the deferred calls run.\n"
+  (struct ^int Code))
+
+(go/func Exit
+  "Exit is the table's os.Exit (§6.7): at the REPL it ends the goi call with GoExit, the
+deferred calls run (S12).\n"
+  [^int code]
+  (panic (lit exitPanic code)))
+
+(go/func panicText "panicText is a panic's value as gc prints it after \"panic: \".\n"
+  ^string [^any p]
+  (type-switch [v p]
+    (case [error] (return (.Error v)))
+    (case [fmt/Stringer] (return (.String v)))
+    (case [string] (return v)))
+  (fmt/Sprint p))
+
+(go/func guarded
+  "guarded runs f and gives Arbace's caller its outcome: [0 results...]; [1 message type value]
+for a panic (a GoPanic); [2 status] for os.Exit (a GoExit). A Java exception goes on as it is.\n"
+  ^{:tag (slice any)} [^{:tag (func [] [(slice any)])} f] :results [^{:tag (slice any)} out]
+  (defer ((fn []
+            (let [p (recover)]
+              (when (!= p nil)
+                (type-switch [e p]
+                  (case [jrt/Throwable_I] (panic e))
+                  (case [exitPanic]
+                    (set! out (lit (slice any) (jrt/Box (conv int64 2)) (jrt/Box (conv int64 (.-Code e))))))
+                  (default
+                    (set! out (lit (slice any) (jrt/Box (conv int64 1)) (jrt/Str (panicText p))
+                                   (jrt/Str (fmt/Sprintf "%T" p)) (ContentToArbace p))))))))))
+  (let [rs (f)]
+    (append (lit (slice any) (jrt/Box (conv int64 0))) (spread rs))))

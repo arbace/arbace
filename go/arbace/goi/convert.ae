@@ -1,0 +1,360 @@
+;; goi: the boundary conversions between Arbace's values and Go's (GOI-SPEC.md §5.1, §5.6), by
+;; the static Go type at the boundary: a parameter's or result's declared type, a variable's.
+(in-ns 'go.arbace.goi)
+
+(go/file "convert.go"
+  :imports [[fmt "fmt"] [reflect "reflect"] [strconv "strconv"] [sync "sync"] [jrt "arbace/jrt"]])
+
+;; ---------------------------------------------------------------------------------------
+;; What arbace.lang.GoInterp hands goi beside plain values, and what goi hands back for it to
+;; finish (goi cannot make arbace/lang's objects: §1.3)
+
+(go/type bigArg
+  "bigArg is an Arbace BigInt or BigInteger argument: its decimal text, and the object itself
+(for a parameter of interface type, which takes it as it is).\n"
+  (struct ^string S ^any Orig))
+
+(go/type structArg
+  "structArg is an Arbace map of keywords given for a struct (§7.1): its keys' names and its
+values, and the map itself (for a parameter of interface type).\n"
+  (struct ^{:tag (slice string)} Names ^{:tag (slice any)} Values ^any Orig))
+
+(go/type spreadArg
+  "spreadArg is (go/spread xs): the last argument of a variadic call passed as the slice.\n"
+  (struct ^any V))
+
+(go/type bigResult
+  "bigResult is a uint64 value of 2^63 or more going to Arbace, which GoInterp makes a BigInt.\n"
+  (struct ^uint64 U))
+
+(go/type funcResult
+  "funcResult is a Go func going to Arbace, which GoInterp wraps in a GoFn (S35).\n"
+  (struct ^any F))
+
+;; ---------------------------------------------------------------------------------------
+;; Go values whose == can panic (as built: GR1): Arbace compares references with Go's == on any
+;; (identical?, the fast paths of equals, the collections), which panics on a slice, a map, a
+;; func, or a struct or array holding one or holding an interface. Such a value is in Arbace a
+;; *Boxed around it: still a Go value (GoValue), its protocol the value's, unwrapped whenever it
+;; goes back to Go.
+
+(go/type Boxed
+  "Boxed is a Go value whose Go == could panic, as Arbace holds it (V the value itself).\n"
+  (struct ^any V))
+
+(go/var ^{:tag sync/Map :doc "boxedTypes caches needsBox by type.\n"} boxedTypes)
+
+(go/func mayPanicEq
+  "mayPanicEq says whether Go's == on values of type t can panic: an uncomparable type, or a
+struct or array holding an interface (whose content may be uncomparable).\n"
+  ^bool [^{:tag reflect/Type} t]
+  (when (not (.Comparable t))
+    (return true))
+  (switch (.Kind t)
+    (case [reflect/Interface] (return true))
+    (case [reflect/Array] (return (mayPanicEq (.Elem t))))
+    (case [reflect/Struct]
+      (for [i 0] (< i (.NumField t)) (inc! i)
+        (when (mayPanicEq (.-Type (.Field t i)))
+          (return true)))))
+  false)
+
+(go/func needsBox "needsBox says whether a value of type t goes to Arbace as a Boxed.\n"
+  ^bool [^{:tag reflect/Type} t]
+  (switch (.Kind t)
+    (case [reflect/Slice reflect/Map reflect/Func] (return true))
+    (case [reflect/Struct reflect/Array]
+      (let [(values v ok) (.Load boxedTypes t)]
+        (when ok
+          (return (assert bool v))))
+      (let [b (mayPanicEq t)]
+        (.Store boxedTypes t b)
+        (return b))))
+  false)
+
+(go/func boxed "boxed is Go value x as Arbace holds it: itself, or a Boxed (needsBox).\n"
+  ^any [^any x]
+  (when (and (!= x nil) (needsBox (reflect/TypeOf x)))
+    (return (addr (lit Boxed x))))
+  x)
+
+(go/func Unbox "Unbox is an Arbace value as Go takes it: a Boxed's value, else x itself.\n"
+  ^any [^any x]
+  (let [(values b ok) (assert (* Boxed) x)]
+    (when ok
+      (return (.-V b))))
+  x)
+
+;; ---------------------------------------------------------------------------------------
+;; Errors
+
+(go/func arbaceText "arbaceText is x as Arbace's str shows it, for messages.\n" ^string [^any x]
+  (set! x (Unbox x))
+  (when (== x nil)
+    (return "nil"))
+  (type-switch [v x]
+    (case [bigArg] (return (.-S v)))
+    (case [structArg] (return (arbaceText (.-Orig v)))))
+  (let [(values _ ok) (assert jrt/Object_I x)]
+    (when ok
+      (return (.String (jrt/ToString x)))))
+  (fmt/Sprintf "%#v" x))
+
+(go/func arbaceType "arbaceType is x's class name, or its Go type for a Go value.\n" ^string [^any x]
+  (set! x (Unbox x))
+  (when (== x nil)
+    (return "nil"))
+  (type-switch [v x]
+    (case [bigArg] (return (arbaceType (.-Orig v))))
+    (case [structArg] (return (arbaceType (.-Orig v)))))
+  (let [(values _ ok) (assert jrt/Object_I x)]
+    (when ok
+      (return (.GoName (jrt/GetClass x)))))
+  (fmt/Sprintf "%T" x))
+
+(go/func rangeError
+  "rangeError is the IllegalArgumentException of a value out of the parameter's range (§5.6).\n"
+  ^any [^string what ^{:tag reflect/Type} t ^any x]
+  (jrt/IllegalArgumentException_New_String (jrt/Str (fmt/Sprintf "%s: %s overflows %s" what (arbaceText x) (.String t)))))
+
+(go/func castError
+  "castError is the ClassCastException of a value of the wrong kind (§5.6).\n"
+  ^any [^string what ^{:tag reflect/Type} t ^any x]
+  (jrt/ClassCastException_New_String (jrt/Str (fmt/Sprintf "%s: expected %s, got %s" what (.String t) (arbaceType x)))))
+
+;; ---------------------------------------------------------------------------------------
+;; Arbace to Go
+
+(go/func intOf
+  "intOf is the integer of Arbace number x (Long, Integer, Short, Byte, a Character's code
+point).\n"
+  [^any x] :results [^int64 n ^bool ok]
+  (type-switch [v x]
+    (case [(* jrt/Long)] (return (.-F_value v) true))
+    (case [(* jrt/Integer)] (return (conv int64 (.-F_value v)) true))
+    (case [(* jrt/Short)] (return (conv int64 (.-F_value v)) true))
+    (case [(* jrt/Byte)] (return (conv int64 (.-F_value v)) true))
+    (case [(* jrt/Character)] (return (conv int64 (.-F_value v)) true)))
+  (return 0 false))
+
+(go/func anyOf
+  "anyOf is x for a parameter of type any (§5.1): Arbace's Long, Double, Boolean, String and
+Character as Go's int, float64, bool, string and rune; a BigInt or a map as itself; anything
+else as it is.\n"
+  ^any [^any x]
+  (type-switch [v x]
+    (case [(* jrt/Long)] (return (conv int (.-F_value v))))
+    (case [(* jrt/Double)] (return (.-F_value v)))
+    (case [(* jrt/Boolean)] (return (.-F_value v)))
+    (case [(* jrt/String)] (return (.String v)))
+    (case [(* jrt/Character)] (return (conv rune (.-F_value v))))
+    (case [bigArg] (return (.-Orig v)))
+    (case [structArg] (return (.-Orig v))))
+  x)
+
+(go/func javaArray
+  "javaArray is the elements of a Java primitive array (its Go slice), or nil.\n"
+  ^any [^any x]
+  (type-switch [v x]
+    (case [(* jrt/ByteArray)] (return (.-A v)))
+    (case [(* jrt/BooleanArray)] (return (.-A v)))
+    (case [(* jrt/CharArray)] (return (.-A v)))
+    (case [(* jrt/ShortArray)] (return (.-A v)))
+    (case [(* jrt/IntArray)] (return (.-A v)))
+    (case [(* jrt/LongArray)] (return (.-A v)))
+    (case [(* jrt/FloatArray)] (return (.-A v)))
+    (case [(* jrt/DoubleArray)] (return (.-A v))))
+  nil)
+
+(go/func family "family groups kinds whose values Java's arrays give a Go slice (S34).\n"
+  ^int [^{:tag reflect/Kind} k]
+  (switch k
+    (case [reflect/Bool] (return 1))
+    (case [reflect/Int8 reflect/Int16 reflect/Int32 reflect/Int64 reflect/Int
+           reflect/Uint8 reflect/Uint16 reflect/Uint32 reflect/Uint64 reflect/Uint] (return 2))
+    (case [reflect/Float32 reflect/Float64] (return 3)))
+  0)
+
+(go/func zeroOf "zeroOf is a new settable zero value of t.\n" ^{:tag reflect/Value} [^{:tag reflect/Type} t]
+  (.Elem (reflect/New t)))
+
+(go/func FromArbace
+  "FromArbace converts Arbace's x to a value of Go type t (§5.1's last column, §5.6), what
+naming it in errors (\"argument 1 of strings.Repeat\"): IllegalArgumentException out of range,
+ClassCastException of the wrong kind.\n"
+  ^{:tag reflect/Value} [^any x ^{:tag reflect/Type} t ^string what]
+  (set! x (Unbox x))
+  (let [k (.Kind t)
+        e (zeroOf t)]
+    (switch k
+      (case [reflect/Bool]
+        (let [(values b ok) (assert (* jrt/Boolean) x)]
+          (when (and ok (!= b nil))
+            (.SetBool e (.-F_value b))
+            (return e))))
+      (case [reflect/Int reflect/Int8 reflect/Int16 reflect/Int32 reflect/Int64]
+        (let [(values n ok) (intOf x)]
+          (when ok
+            (when (.OverflowInt e n)
+              (panic (rangeError what t x)))
+            (.SetInt e n)
+            (return e)))
+        (let [(values b ok) (assert bigArg x)]
+          (when ok
+            (let [(values n err) (strconv/ParseInt (.-S b) 10 64)]
+              (when (or (!= err nil) (.OverflowInt e n))
+                (panic (rangeError what t x)))
+              (.SetInt e n)
+              (return e)))))
+      (case [reflect/Uint reflect/Uint8 reflect/Uint16 reflect/Uint32 reflect/Uint64 reflect/Uintptr]
+        (let [(values n ok) (intOf x)]
+          (when ok
+            (when (or (< n 0) (.OverflowUint e (conv uint64 n)))
+              (panic (rangeError what t x)))
+            (.SetUint e (conv uint64 n))
+            (return e)))
+        (let [(values b ok) (assert bigArg x)]
+          (when ok
+            (let [(values u err) (strconv/ParseUint (.-S b) 10 64)]
+              (when (or (!= err nil) (.OverflowUint e u))
+                (panic (rangeError what t x)))
+              (.SetUint e u)
+              (return e)))))
+      (case [reflect/Float32 reflect/Float64]
+        (type-switch [v x]
+          (case [(* jrt/Double)] (.SetFloat e (.-F_value v)) (return e))
+          (case [(* jrt/Float)] (.SetFloat e (conv float64 (.-F_value v))) (return e))
+          (case [bigArg]
+            (let [(values f err) (strconv/ParseFloat (.-S v) 64)]
+              (when (or (!= err nil) (!= (strconv/FormatFloat f \f -1 64) (.-S v)))
+                (panic (rangeError what t x)))
+              (.SetFloat e f)
+              (return e))))
+        (let [(values n ok) (intOf x)
+              (values _ ch) (assert (* jrt/Character) x)]
+          (when (and ok (not ch))
+            (let [f (conv float64 n)]
+              (when (or (> f 9007199254740992.0) (< f -9007199254740992.0))
+                (panic (rangeError what t x)))
+              (.SetFloat e f)
+              (return e)))))
+      (case [reflect/Complex64 reflect/Complex128]
+        (when (!= x nil)
+          (let [v (reflect/ValueOf x)]
+            (when (or (== (.Kind v) reflect/Complex64) (== (.Kind v) reflect/Complex128))
+              (.SetComplex e (.Complex v))
+              (return e)))))
+      (case [reflect/String]
+        (let [(values s ok) (assert (* jrt/String) x)]
+          (when (and ok (!= s nil))
+            (.SetString e (.String s))
+            (return e))))
+      (case [reflect/Interface]
+        (when (== x nil)
+          (return e))
+        (when (== (.NumMethod t) 0)
+          (.Set e (reflect/ValueOf (anyOf x)))
+          (return e))
+        (let [v (reflect/ValueOf x)]
+          (when (.Implements (.Type v) t)
+            (.Set e v)
+            (return e))))
+      (case [reflect/Struct]
+        (let [(values sa ok) (assert structArg x)]
+          (when ok
+            (range [i n (.-Names sa)]
+              (let [(values f found) (.FieldByName t n)]
+                (when (or (not found) (!= (.-PkgPath f) ""))
+                  (panic (jrt/IllegalArgumentException_New_String
+                           (jrt/Str (fmt/Sprintf "%s: %s has no exported field %s" what (.String t) n)))))
+                (.Set (.FieldByIndex e (.-Index f)) (FromArbace (aget (.-Values sa) i) (.-Type f) (+ what "." n)))))
+            (return e)))
+        (when (!= x nil)
+          (let [v (reflect/ValueOf x)]
+            (when (.AssignableTo (.Type v) t)
+              (.Set e v)
+              (return e)))))
+      (case [reflect/Slice]
+        (when (== x nil)
+          (return e))
+        (let [a (javaArray x)]
+          (when (!= a nil)
+            (let [src (reflect/ValueOf a)
+                  et (.Elem t)]
+              (when (and (!= (family (.Kind et)) 0) (== (family (.Kind et)) (family (.Kind (.Elem (.Type src)))))
+                         (== (.Size et) (.Size (.Elem (.Type src)))))
+                (let [n (.Len src)
+                      out (reflect/MakeSlice t n n)]
+                  (for [i 0] (< i n) (inc! i)
+                    (.Set (.Index out i) (.Convert (.Index src i) et)))
+                  (return out))))))
+        (let [v (reflect/ValueOf x)]
+          (when (.AssignableTo (.Type v) t)
+            (.Set e v)
+            (return e))))
+      (case [reflect/Pointer reflect/Map reflect/Chan reflect/Func reflect/UnsafePointer reflect/Array]
+        (when (== x nil)
+          (when (!= k reflect/Array)
+            (return e)))
+        (when (!= x nil)
+          (let [v (reflect/ValueOf x)]
+            (when (.AssignableTo (.Type v) t)
+              (.Set e v)
+              (return e))))))
+    (panic (castError what t x))))
+
+;; ---------------------------------------------------------------------------------------
+;; Go to Arbace
+
+(go/func ToArbace
+  "ToArbace converts Go value v to Arbace by its static type (§5.1, §5.6): bool a Boolean, the
+integers a Long (a uint64 of 2^63 or more a BigInt, through GoInterp), the floats a Float or a
+Double, a string a String, an interface by its content, a func a GoFn (through GoInterp), nil
+pointers, maps, slices, channels and funcs nil, anything else the Go value itself.\n"
+  ^any [^{:tag reflect/Value} v]
+  (switch (.Kind v)
+    (case [reflect/Bool] (return (jrt/Box (.Bool v))))
+    (case [reflect/Int reflect/Int8 reflect/Int16 reflect/Int32 reflect/Int64] (return (jrt/Box (.Int v))))
+    (case [reflect/Uint reflect/Uint8 reflect/Uint16 reflect/Uint32 reflect/Uint64 reflect/Uintptr]
+      (let [u (.Uint v)]
+        (when (>= u (<< (conv uint64 1) 63))
+          (return (lit bigResult u)))
+        (return (jrt/Box (conv int64 u)))))
+    (case [reflect/Float32] (return (jrt/Box (conv float32 (.Float v)))))
+    (case [reflect/Float64] (return (jrt/Box (.Float v))))
+    (case [reflect/String] (return (jrt/Str (.String v))))
+    (case [reflect/Interface]
+      (when (.IsNil v)
+        (return nil))
+      (return (ContentToArbace (.Interface v))))
+    (case [reflect/Func]
+      (when (.IsNil v)
+        (return nil))
+      (return (lit funcResult (.Interface v))))
+    (case [reflect/Pointer reflect/Map reflect/Slice reflect/Chan reflect/UnsafePointer]
+      (when (.IsNil v)
+        (return nil))
+      (return (boxed (.Interface v)))))
+  (boxed (.Interface v)))
+
+(go/func ContentToArbace
+  "ContentToArbace converts the content x of an interface value (§5.1): nil, a Java object as
+itself, a Go scalar or string converted as its type, a func as a GoFn, anything else the Go
+value itself.\n"
+  ^any [^any x]
+  (when (== x nil)
+    (return nil))
+  (let [(values _ ok) (assert jrt/Object_I x)]
+    (when ok
+      (return x)))
+  (let [v (reflect/ValueOf x)]
+    ;; a value of a named type with methods (an error such as hex.InvalidByteError, a
+    ;; Stringer) stays a Go value: its methods are what it is for (as built: GR1)
+    (when (and (!= (.PkgPath (.Type v)) "") (> (.NumMethod (.Type v)) 0))
+      (return (boxed x)))
+    (switch (.Kind v)
+      (case [reflect/Bool reflect/Int reflect/Int8 reflect/Int16 reflect/Int32 reflect/Int64
+             reflect/Uint reflect/Uint8 reflect/Uint16 reflect/Uint32 reflect/Uint64 reflect/Uintptr
+             reflect/Float32 reflect/Float64 reflect/String reflect/Func]
+        (return (ToArbace v))))
+    (boxed x)))

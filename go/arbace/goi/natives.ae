@@ -1,0 +1,238 @@
+;; goi: the natives of arbace.lang.GoInterp (GOI-SPEC.md §4.11, S32): j2g translates a native
+;; method of GoInterp into a call of goi's GoInterp_<name>_native, an extension of J2G-SPEC
+;; §9.1's rule. GR1's: the table's namespaces, calls, variables, types and the values that
+;; cross. They take and return what goi can name: primitives, *jrt.String, any, *jrt.RefArray,
+;; *jrt.Class.
+(in-ns 'go.arbace.goi)
+
+(go/file "natives.go"
+  :imports [[fmt "fmt"] [reflect "reflect"] [strconv "strconv"] [sync "sync"] [jrt "arbace/jrt"]])
+
+;; ---------------------------------------------------------------------------------------
+;; Types (§5.2; GR1: compiled types, the descriptor its reflect.Type)
+
+(go/type Type
+  "Type is a Go type's descriptor (§5.2). GR1 has compiled types only: RT is the type itself.\n"
+  (struct ^{:tag reflect/Type} RT))
+
+(go/var ^{:tag sync/Mutex} typesMu)
+
+(go/var ^{:tag (map reflect/Type (* Type))} types (make (map reflect/Type (* Type))))
+
+(go/func TypeOf "TypeOf is the descriptor of t, one per type.\n" ^{:tag (* Type)} [^{:tag reflect/Type} t]
+  (.Lock typesMu)
+  (defer (.Unlock typesMu))
+  (let [d (aget types t)]
+    (when (== d nil)
+      (set! d (addr (lit Type t)))
+      (aset types t d))
+    d))
+
+;; ---------------------------------------------------------------------------------------
+;; Helpers
+
+(go/func gostr "gostr is s as a Go string (\"\" for null).\n" ^string [^{:tag (* jrt/String)} s]
+  (when (== s nil)
+    (return ""))
+  (.String s))
+
+(go/func objects "objects is xs as an Object[].\n" ^{:tag (* jrt/RefArray)} [^{:tag (slice any)} xs]
+  (let [a (jrt/NewRefArray jrt/Object_class (conv int32 (len xs)))]
+    (copy (.-A a) xs)
+    a))
+
+(go/func typeArg "typeArg is the descriptor a GoType holds.\n" ^{:tag (* Type)} [^any t]
+  (let [(values d ok) (assert (* Type) t)]
+    (when (not ok)
+      (panic (jrt/ClassCastException_New_String (jrt/Str (fmt/Sprintf "not a Go type: %s" (arbaceType t))))))
+    d))
+
+;; ---------------------------------------------------------------------------------------
+;; The natives
+
+(go/func GoInterp_Init0_Class__Z_native
+  "GoInterp_Init0_Class__Z_native is GoInterp's static initializer's: it gives jrt the class
+of Go values, arbace.lang.GoValue (§5.5).\n"
+  ^bool [^{:tag (* jrt/Class)} c]
+  (set! jrt/GoValueClass c)
+  true)
+
+(go/func GoInterp_PackagePath0_String__String_native
+  "GoInterp_PackagePath0_String__String_native is the listed package whose namespace's
+resource base is base (RT.load's go/strings), or null.\n"
+  ^{:tag (* jrt/String)} [^{:tag (* jrt/String)} base]
+  (let [p (PathOfResource (gostr base))]
+    (when (== p "")
+      (return nil))
+    (jrt/Str p)))
+
+(go/func GoInterp_Paths0__O1_native "GoInterp_Paths0__O1_native is the listed packages' paths.\n"
+  ^{:tag (* jrt/RefArray)} []
+  (let [ps (Paths)
+        xs (make (slice any) (len ps))]
+    (range [i p ps]
+      (aset xs i (jrt/Str p)))
+    (objects xs)))
+
+(go/func GoInterp_Members0_String__O1_native
+  "GoInterp_Members0_String__O1_native is the members of listed package path as [kind name
+handle ...]: kind \"func\", \"method\" (the handle a Callable), \"var\" (the variable's address)
+or \"type\" (its descriptor); null when the package is not listed.\n"
+  ^{:tag (* jrt/RefArray)} [^{:tag (* jrt/String)} path]
+  (let [p (Lookup (gostr path))]
+    (when (== p nil)
+      (return nil))
+    (let [xs (make (slice any) 0)]
+      (range [_ m (.-Funcs p)]
+        (set! xs (append xs (jrt/Str "func") (jrt/Str (.-Name m))
+                         (NewCallable (+ (.-Path p) "." (.-Name m)) (.-Value m) (.-Inv m) false))))
+      (range [_ m (.-Methods p)]
+        (set! xs (append xs (jrt/Str "method") (jrt/Str (.-Name m))
+                         (NewCallable (+ (.-Path p) "." (.-Name m)) (.-Value m) (.-Inv m) true))))
+      (range [_ m (.-Vars p)]
+        (set! xs (append xs (jrt/Str "var") (jrt/Str (.-Name m)) (.-Value m))))
+      (range [_ m (.-Types p)]
+        (set! xs (append xs (jrt/Str "type") (jrt/Str (.-Name m)) (TypeOf (.-Type m)))))
+      (objects xs))))
+
+(go/func GoInterp_Call0_O_O1__O1_native
+  "GoInterp_Call0_O_O1__O1_native calls callable c with args (§7.2) and gives its outcome:
+[0 results...], [1 message type value] for a panic, [2 status] for os.Exit.\n"
+  ^{:tag (* jrt/RefArray)} [^any c ^{:tag (* jrt/RefArray)} args]
+  (let [(values cl ok) (assert (* Callable) c)]
+    (when (not ok)
+      (panic (jrt/ClassCastException_New_String (jrt/Str (fmt/Sprintf "not a Go function: %s" (arbaceType c))))))
+    (let [as (make (slice any) 0)]
+      (when (!= args nil)
+        (set! as (.-A args)))
+      (objects (guarded (fn ^{:tag (slice any)} [] (.Call cl as)))))))
+
+(go/func varCell "varCell is a variable's address, a pointer.\n" ^{:tag reflect/Value} [^any cell]
+  (let [v (reflect/ValueOf cell)]
+    (when (!= (.Kind v) reflect/Pointer)
+      (panic (jrt/ClassCastException_New_String (jrt/Str (fmt/Sprintf "not a Go variable: %s" (arbaceType cell))))))
+    v))
+
+(go/func GoInterp_Load0_O__O_native
+  "GoInterp_Load0_O__O_native reads the variable at cell (a GoVar's deref), converted.\n"
+  ^any [^any cell]
+  (ToArbace (.Elem (varCell cell))))
+
+(go/func GoInterp_Store0_O_O__V_native
+  "GoInterp_Store0_O_O__V_native assigns Arbace's v, converted by the variable's type
+(go/assign!).\n"
+  [^any cell ^any v]
+  (let [e (.Elem (varCell cell))]
+    (.Set e (FromArbace v (.Type e) (+ "the value of " (.String (.Type e)) " variable")))))
+
+(go/func GoInterp_TypeOf0_O__O_native
+  "GoInterp_TypeOf0_O__O_native is the descriptor of a Go value's dynamic type (go/type-of),
+or null.\n"
+  ^any [^any v]
+  (set! v (Unbox v))
+  (when (== v nil)
+    (return nil))
+  (TypeOf (reflect/TypeOf v)))
+
+(go/func GoInterp_TypeName0_O__String_native "GoInterp_TypeName0_O__String_native is the type's name, as gc writes it.\n"
+  ^{:tag (* jrt/String)} [^any t]
+  (jrt/Str (.String (.-RT (typeArg t)))))
+
+(go/func GoInterp_Convert0_O_O__O_native
+  "GoInterp_Convert0_O_O__O_native is (T v), Go's conversion T(v) of Arbace's v converted by T's
+underlying type, or the struct of a map of keywords (§7.1); the result goes back to Arbace by T.\n"
+  ^any [^any t ^any v]
+  (let [rt (.-RT (typeArg t))
+        what (+ "the value of " (.String rt))]
+    (let [(values _ ok) (assert structArg v)]
+      (when ok
+        (return (ToArbace (FromArbace v rt what)))))
+    (let [u rt]
+      (when (!= (.PkgPath rt) "")
+        (switch (.Kind rt)
+          (case [reflect/Bool] (set! u ((inst reflect/TypeFor bool))))
+          (case [reflect/Int] (set! u ((inst reflect/TypeFor int))))
+          (case [reflect/Int8] (set! u ((inst reflect/TypeFor int8))))
+          (case [reflect/Int16] (set! u ((inst reflect/TypeFor int16))))
+          (case [reflect/Int32] (set! u ((inst reflect/TypeFor int32))))
+          (case [reflect/Int64] (set! u ((inst reflect/TypeFor int64))))
+          (case [reflect/Uint] (set! u ((inst reflect/TypeFor uint))))
+          (case [reflect/Uint8] (set! u ((inst reflect/TypeFor uint8))))
+          (case [reflect/Uint16] (set! u ((inst reflect/TypeFor uint16))))
+          (case [reflect/Uint32] (set! u ((inst reflect/TypeFor uint32))))
+          (case [reflect/Uint64] (set! u ((inst reflect/TypeFor uint64))))
+          (case [reflect/Uintptr] (set! u ((inst reflect/TypeFor uintptr))))
+          (case [reflect/Float32] (set! u ((inst reflect/TypeFor float32))))
+          (case [reflect/Float64] (set! u ((inst reflect/TypeFor float64))))
+          (case [reflect/String] (set! u ((inst reflect/TypeFor string))))))
+      (let [x (FromArbace v u what)]
+        (when (not (.ConvertibleTo (.Type x) rt))
+          (panic (castError what rt v)))
+        (ToArbace (.Convert x rt))))))
+
+(go/func GoInterp_Zero0_O__O_native "GoInterp_Zero0_O__O_native is the zero value of type t, to Arbace by t (go/zero, (T)).\n"
+  ^any [^any t]
+  (ToArbace (zeroOf (.-RT (typeArg t)))))
+
+(go/func GoInterp_New0_O__O_native "GoInterp_New0_O__O_native is Go's new(T): a pointer to a new zero T (go/new).\n"
+  ^any [^any t]
+  (.Interface (reflect/New (.-RT (typeArg t)))))
+
+(go/func GoInterp_StructArg0_O1_O1_O__O_native
+  "GoInterp_StructArg0_O1_O1_O__O_native is a map of keywords given for a struct: its keys' names,
+its values, the map.\n"
+  ^any [^{:tag (* jrt/RefArray)} names ^{:tag (* jrt/RefArray)} values ^any orig]
+  (let [ns (make (slice string) (len (.-A names)))]
+    (range [i n (.-A names)]
+      (aset ns i (gostr (assert (* jrt/String) n))))
+    (lit structArg ns (.-A values) orig)))
+
+(go/func GoInterp_BigArg0_String_O__O_native "GoInterp_BigArg0_String_O__O_native is a BigInt argument: its decimal text and itself.\n"
+  ^any [^{:tag (* jrt/String)} s ^any orig]
+  (lit bigArg (gostr s) orig))
+
+(go/func GoInterp_Spread0_O__O_native "GoInterp_Spread0_O__O_native is (go/spread xs).\n"
+  ^any [^any v]
+  (lit spreadArg (Unbox v)))
+
+(go/func GoInterp_Marker0_O__I_native
+  "GoInterp_Marker0_O__I_native says what GoInterp must make of a value from goi: 1 a BigInt
+(bigResult), 2 a GoFn (funcResult), 0 nothing.\n"
+  ^int32 [^any x]
+  (type-switch x
+    (case [bigResult] (return 1))
+    (case [funcResult] (return 2)))
+  0)
+
+(go/func GoInterp_BigText0_O__String_native "GoInterp_BigText0_O__String_native is a bigResult's decimal text.\n"
+  ^{:tag (* jrt/String)} [^any x]
+  (jrt/Str (strconv/FormatUint (.-U (assert bigResult x)) 10)))
+
+(go/func GoInterp_FuncCallable0_O_String__O_native
+  "GoInterp_FuncCallable0_O_String__O_native is the callable of a funcResult's func (a GoFn's).\n"
+  ^any [^any x ^{:tag (* jrt/String)} name]
+  (let [f (.-F (assert funcResult x))]
+    (FuncCallable f (+ (gostr name) " (" (.String (reflect/TypeOf f)) ")"))))
+
+(go/func GoInterp_FuncValue0_O__O_native "GoInterp_FuncValue0_O__O_native is a callable's Go func (a GoFn going back to Go, S35).\n"
+  ^any [^any c]
+  (.-Fn (assert (* Callable) c)))
+
+(go/func GoInterp_GoString0_O__String_native "GoInterp_GoString0_O__String_native is a Go value's %#v.\n"
+  ^{:tag (* jrt/String)} [^any v]
+  (jrt/Str (GoString (Unbox v))))
+
+(go/func GoInterp_Str0_O__String_native "GoInterp_Str0_O__String_native is fmt.Sprint(v) (go/str).\n"
+  ^{:tag (* jrt/String)} [^any v]
+  (jrt/Str (fmt/Sprint (anyOf (Unbox v)))))
+
+(go/func GoInterp_Digest0__String_native "GoInterp_Digest0__String_native is the digest's text (§6.5), or null.\n"
+  ^{:tag (* jrt/String)} []
+  (let [d (Digest)]
+    (when (== d nil)
+      (return nil))
+    (jrt/Str (conv string d))))
+
+(go/func GoInterp_Complex0_D_D__O_native "GoInterp_Complex0_D_D__O_native is complex(re, im), a Go value.\n"
+  ^any [^float64 re ^float64 im]
+  (complex re im))

@@ -1004,6 +1004,19 @@ step 4 (2026-10-07); the others came with later work, as each says:
     The generated variants stay: `CompilerOps.ae` (`test/j2g/eval_ops.ae`) and
     `CompilerAOTFn.ae` (`test/c2j/gen_fns.ae`). The JVM's `RT`, `Main` and `Compiler` are on the
     branch `arbace-for-java-26`.
+26. **goi's GR1: the packages of the table of compiled Go packages as namespaces** (2026-10-17;
+    doc/go/GOI-SPEC.md §2.1, §5.5, §7.2, "As built: GR1"). `arbace/lang/RT.ae`: `load` of a
+    resource base `go/...` that names a package of goi's table (`go/strings`) makes the
+    namespace from the table, before any source (`arbace.lang.GoInterp/loadTable`, which
+    requires `arbace.go` and calls its `table-ns!`). `arbace/lang/Namespace.ae`: a namespace may
+    have a resolver (`setResolver`, an `IFn`) that makes its vars on demand (S9):
+    `findInternedVar` and `getMapping` ask it for a symbol without a mapping, `getMappings` (so
+    `ns-map`, `ns-publics`, `refer`) has it make all of them first and drops it; the class's own
+    updates of its mappings read them directly (`mappings0`). `arbace/core_print.ae`: a Go value,
+    of the class `arbace.lang.GoValue`, prints `#go` and the string of its `%#v` (S42). New in
+    `arbace.lang` (Arbace's, no upstream counterpart): `GoInterp.ae`'s classes `GoInterp`,
+    `GoFn`, `GoVar`, `GoType`, `GoValue`, `GoPanic`, `GoExit`; and the namespace `arbace.go`
+    (`arbace/go.ae`) with the table's generator `arbace.go.table` (`arbace/go/table.ae`).
 
 ## Dialect divergences
 

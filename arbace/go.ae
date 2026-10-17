@@ -1,0 +1,195 @@
+(ns arbace.go
+  "Go forms at the REPL (doc/go/GOI-SPEC.md), milestone GR1: Arbace calling compiled Go.
+
+  A package of goi's table of compiled packages (go/arbace/gotable.edn: strings, strconv, math,
+  time, fmt ...) is a namespace, go. and its import path (go.strings, go.math.rand.v2), made
+  from the table when it is required (§2.1, §7.2; arbace.lang.RT's load asks
+  arbace.lang.GoInterp first):
+
+    (require '[go.strings :as strings])
+    (strings/ToUpper \"go\")                      ;=> \"GO\"
+    (strings/Cut \"k=v\" \"=\")                     ;=> [\"k\" \"v\" true]
+    (let [b (go/new go.strings/Builder)]
+      (strings/Builder.WriteString b \"x\")       ; a method: T.M, the receiver first
+      (strings/Builder.String b))               ;=> \"x\"
+
+  Its vars are made on first use (S9): each function a GoFn, each method T.M a GoFn of its
+  method expression, each variable a GoVar (deref it), each type a GoType (an IFn: (T) its zero
+  value, (T v) a conversion, (T {:Field v}) a struct), each constant its value. Arguments and
+  results convert by the Go types (§5.6): Long, Double, Boolean, String, Character for Go's
+  scalars and strings, Go values (of the class arbace.lang.GoValue, printed #go \"...\") for the
+  rest; several results are a vector; a panic is an arbace.lang.GoPanic, os.Exit an
+  arbace.lang.GoExit.
+
+  The macros of Go forms (go/func, go/type ...), the checker and the interpreter come with GR2
+  and GR3."
+  (:refer-clojure :exclude [new str])
+  (:import (arbace.lang GoInterp GoFn GoVar GoType Namespace)
+           (java.io PushbackReader StringReader)))
+
+;; ---------------------------------------------------------------------------------------
+;; The digest (§6.5): the listed packages' declarations as Go forms, without bodies
+
+(defn path->ns
+  "The namespace of Go import path p (SPEC.md §4.1): go. and the path, / as ., . and - inside an
+  element as _."
+  [^String p]
+  (symbol (arbace.core/str "go." (apply arbace.core/str (interpose "." (map #(.replaceAll ^String % "[.-]" "_") (.split p "/")))))))
+
+(def ^:private digest-index
+  (delay
+    (when-let [^String s (GoInterp/digest)]
+      (let [nl (.indexOf s "\n")]
+        {:index (read-string (subs s 0 nl)) :text s :start (inc nl)}))))
+
+(defn digest-forms
+  "The forms of the digest of listed package path p (§6.5): its go/package, go/file and
+  declaration forms, or nil."
+  [p]
+  (when-let [{:keys [index ^String text start]} @digest-index]
+    (when-let [[a b] (get index p)]
+      (let [r (PushbackReader. (StringReader. (subs text (+ start a) (+ start b))))]
+        (binding [*read-eval* false]
+          (loop [acc []]
+            (let [f (read {:eof ::eof} r)]
+              (if (= f ::eof) acc (recur (conj acc f))))))))))
+
+(defn- params-of
+  "The parameter names of a signature's vector (Go's names; p1 ... for unnamed ones)."
+  [pv]
+  (vec (map-indexed (fn [i x]
+                      (cond
+                        (= '& x) '&
+                        (and (symbol? x) (:tag (meta x)) (not= '_ x)) (symbol (name x))
+                        :else (symbol (arbace.core/str "p" (inc i)))))
+                    pv)))
+
+(defn- strip-doc [xs] (if (string? (first xs)) [(first xs) (rest xs)] [nil xs]))
+
+(defn- const-value
+  "A constant's :val as an Arbace value (§2.1, §5.6): integers as Long or BigInt, floats as a
+  Double (a Float for a float32 constant), runes as their Long, strings as String, complex
+  values as Go values."
+  [v underlying]
+  (cond
+    (integer? v) v
+    (char? v) (long (int v))
+    (or (float? v) (ratio? v) (decimal? v)) (if (= 'float32 underlying) (float v) (double v))
+    (seq? v) (case (arbace.core/str (first v))
+               "rune" (long (second v))
+               "byte-string" (String. (byte-array (mapcat (fn [x] (if (string? x) (seq (.getBytes ^String x "UTF-8")) [(unchecked-byte x)])) (rest v)))
+                                      "UTF-8")
+               "complex" (GoInterp/complex (double (second v)) (double (nth v 2)))
+               "binary-float" (* (double (second v)) (Math/pow 2.0 (double (nth v 2))))
+               v)
+    :else v))
+
+(defn- digest-info
+  "What the digest says of package p's exported names: {name {:doc :arglists :const value}}."
+  [p]
+  (reduce
+    (fn [acc f]
+      (if-not (and (seq? f) (symbol? (first f)) (= "go" (namespace (first f))))
+        acc
+        (case (name (first f))
+          "func" (let [[doc xs] (strip-doc (drop 2 f))
+                       xs (if (= :type-params (first xs)) (drop 2 xs) xs)]
+                   (assoc acc (arbace.core/str (second f)) {:doc doc :arglists (list (params-of (first xs)))}))
+          "method" (let [[doc xs] (strip-doc (drop 2 f))
+                         xs (if (= :type-params (first xs)) (drop 2 xs) xs)
+                         pv (first xs)
+                         r (first pv)
+                         rt (if (and (symbol? r) (:tag (meta r))) (:tag (meta r)) r)
+                         rt (if (seq? rt) (second rt) rt)]
+                     (if (symbol? rt)
+                       (assoc acc (arbace.core/str rt "." (second f)) {:doc doc :arglists (list (params-of pv))})
+                       acc))
+          "const" (let [n (second f) m (meta n)]
+                    (assoc acc (arbace.core/str n) {:doc (:doc m) :const (const-value (:val m) (:go/underlying m))}))
+          "type" (assoc acc (arbace.core/str (second f)) {:doc (let [d (nth f 2 nil)] (when (string? d) d))})
+          "var" (assoc acc (arbace.core/str (second f)) {:doc (:doc (meta (second f)))})
+          acc)))
+    {}
+    (digest-forms p)))
+
+;; ---------------------------------------------------------------------------------------
+;; The namespaces of the table's packages (§2.1, §7.2)
+
+(defn- member-var
+  "Interns the var of member name (kind, handle, digest info) in ns."
+  [ns ^String path ^String nm kind handle info]
+  (let [full (arbace.core/str path "." nm)
+        m (cond-> {:go/kind kind :go/package path}
+            (:doc info) (assoc :doc (:doc info))
+            (:arglists info) (assoc :arglists (:arglists info)))]
+    (intern ns (with-meta (symbol nm) m)
+            (case kind
+              (:func :method) (GoFn. handle full)
+              :var (GoVar. handle full)
+              :type (GoType. handle)
+              :const (:const info)))))
+
+(defn table-ns!
+  "Makes the namespace of listed package path p (arbace.lang.GoInterp's loadTable, for
+  RT.load): its vars are made when first resolved, all of them when the namespace's mappings
+  are asked for (ns-publics, refer: S9)."
+  [p]
+  (let [ns (create-ns (path->ns p))
+        ms (GoInterp/members p)
+        members (into {} (for [[k n h] (partition 3 ms)] [n [(keyword k) h]]))
+        info (delay (digest-info p))
+        consts (delay (into {} (for [[n i] @info :when (contains? i :const) :when (not (contains? members n))] [n i])))
+        make (fn [^String n]
+               (if-let [[kind h] (get members n)]
+                 (member-var ns p n kind h (get @info n))
+                 (when-let [i (get @consts n)]
+                   (member-var ns p n :const nil i))))
+        resolver (fn
+                   ([_]
+                    (doseq [n (sort (concat (keys members) (keys @consts)))]
+                      (make n)))
+                   ([_ sym]
+                    (make (name sym))))]
+    (.setResolver ^Namespace ns resolver)
+    ns))
+
+(defn packages
+  "The import paths of the table's packages (go/arbace/gotable.edn, §6.6)."
+  []
+  (vec (GoInterp/paths)))
+
+;; ---------------------------------------------------------------------------------------
+;; Go values from Arbace (§7.1, §2.8)
+
+(defn new
+  "Go's new(T) for GoType t: a pointer to a new zero T (a Go value)."
+  [^GoType t]
+  (GoInterp/newValue (.-handle t)))
+
+(defn zero
+  "The zero value of GoType t, converted to Arbace by t."
+  [^GoType t]
+  (GoInterp/zero (.-handle t)))
+
+(defn type-of
+  "The Go type (a GoType) of Go value v, or nil."
+  [v]
+  (GoInterp/typeOf v))
+
+(defn str
+  "fmt.Sprint of v (a Go value; an Arbace scalar or string as Go's) as a String."
+  [v]
+  (GoInterp/str v))
+
+(defn spread
+  "(go/spread xs) as the last argument of a variadic Go function passes the Go slice xs as its
+  variadic parameter (Go's f(a, xs...))."
+  [xs]
+  (GoInterp/spread xs))
+
+(defn assign!
+  "Assigns the package variable of GoVar v (a var's root: (go/assign! go.x/V 3)) the Arbace
+  value x, converted by the variable's type."
+  [^GoVar v x]
+  (GoInterp/store (.-cell v) x)
+  x)
