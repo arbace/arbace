@@ -921,3 +921,28 @@ pretty printer gives the same tree for 1,069 of std's 1,074 files, so a printer 
 pinned), lines-only and byte-for-byte modes, the tree, interface (rustdoc's JSON or HIR) and text
 levels over std's five crates, after repr/haskell's R-milestones, about 7 to 10 days. Proposals
 open.
+
+## 2026-10-17: the c2j batch merged; F3 and F4 measured together
+
+On the branch `c2j-batch` (`ea68010`, with main at `ca4d3ee` merged into it), merged into main;
+details in doc/FUTAMURA-SURVEY.md, "F3 and the back end's limits as built" and "F3 and F4
+measured together". F3: every call of `Numbers`' boxed operations carries an inline fast path on
+`Long` (and two `Double`) operands, answering only what `Numbers` would, every other case calling
+it (about 1,235 sites). The back end's limits fixed: one-segment namespaces (their classes in
+the unnamed package), proxies made before their analysis, deftypes, reifys, fns and defclasses
+using the Java forms' code forms (recorded while compiling and written into c2j's tree).
+Measured together (eval-bench as a namespace, ms, best of 5 interleaved rounds on a loaded host):
+the geometric mean 15.65 → 12.89 with F4 → 9.33 with F3 and F4 (1.68 times); fib 6.95 → 1.63,
+loop-long 13.31 → 3.90, loop-double 1.67 → 0.55, keyword-map 15.03 → 6.45, reduce-fn 24.92 →
+11.82; F4.2's regressions (fib, map-assoc-get) gone with F3 (decided: nothing more); F3.2: the
+primitive operations now inline through F4's guard-free entries (decided: no inline emission in
+c2j). diffcheck on the merged tree: 12,731 of 12,754 agree, the 23 others recorded with reasons,
+nothing excluded. The essential gate passed and the fixpoint G1 = G2 = G3 held on the branch.
+F3.1 (a), F3.3 (a) decided by the user, F3.2 and F3.4 as proposed.
+
+Found while building the Mac bundle: `bin/box-mac-bundle` builds the arm64 guest only when it is
+missing and `bin/box-rebuild`'s host step uses whatever executables `target/` holds, so the
+bundle built at `7019817` carried a guest of 2026-10-15 (before the renames) and an expected
+image from tools older than the commit; the user was asked not to run it. The "not prepared"
+line for `arbace.j2g.start` came from those stale tools: in a fresh build it is embedded and
+compiled. To do: both scripts to check that their executables are built from the commit.
