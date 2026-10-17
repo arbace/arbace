@@ -4,7 +4,9 @@ The build of repr/rust's milestones ([SPEC.md](SPEC.md) §12.1), what each part 
 departs from or adds to the spec, with the reasons. RR1 was built on 2026-10-17 (branch
 `repr-rust-rr1`, from main at `80530da7`), on the host's rustc 1.99.1 (Alpine's `rust-1.99.1-r0`,
 `rustc 1.99.1 (58cf8f9c3 2026-10-13)`, `librustc_driver-61690d3e4c729118.so`), `rustc-dev-1.99.1-r0`
-and `rust-src-1.99.1-r0` fetched as apks, and stage 0 of that commit.
+and `rust-src-1.99.1-r0` fetched as apks, and stage 0 of that commit; RR2 on the same day (branch
+`repr-rust-rr2`, from main at `10c7b293`), on the same rustc, its `rustdoc` and the host's
+sysroot.
 
 ## Decided (2026-10-17, the user): RR-P1-RR-P3
 
@@ -233,3 +235,128 @@ print each macro call whose arguments parsed but did not print back.
 - **RR-P3 Named format arguments.** (a) §7.1 amended: arguments are forms whenever the printer's
   tokens are the call's, `name = value` included (an assignment expression, the same tokens); (b)
   the spec's text: `name = value` makes the call `(:tt ...)`. *Recommended: (a)*, as built.
+
+## RR2: the interface level
+
+### What was built
+
+| part | file | what |
+|---|---|---|
+| comparison | `arbace/repr/rust.ae` (`compare-iface`, `strip-spans`, `strip-debug-spans`) | rustdoc's JSON of the originals against the printed files', spans removed (SPEC §11.3) |
+| command | `bin/repr-rust` (`roundtrip --iface`: `iface_plan`, `rustdoc_json`, `iface_level`), `make repr-rust-iface` | the interface level after the tree level |
+| corpus | `test/rust/corpus-rustc-1.99.1.edn` (each crate's `:iface`; `test/rust/corpus_make.ae` writes it) | how each crate is documented |
+| known differences | `test/rust/roundtrip-rustc-1.99.1-iface-known.edn` | none (`{}`), keyed by crate |
+| cases | `bin/lib/repr-rust/test` case 5, `test/rust/sample/attrs.rs` | the normalization on two small crates, and a changed doc comment found |
+
+### Results
+
+`bin/repr-rust roundtrip --iface` (also `make repr-rust-iface`), after the tree level's 1,074 of
+1,074:
+
+| crate | items | span fields removed | spans in attributes' texts removed | JSON without spans | equal |
+|---|---|---|---|---|---|
+| `core` | 61,777 | 61,777 | 48,857 | 58.9 MB | yes |
+| `alloc` | 5,119 | 5,119 | 682 | 4.9 MB | yes |
+| `std` | 10,934 | 10,934 | 1,216 | 10.2 MB | yes |
+| `proc_macro` | 691 | 691 | 1 | 0.6 MB | yes |
+| `test` | 850 | 850 | 1 | 0.6 MB | yes |
+| total | 79,371 | 79,371 | 50,757 | 75.1 MB | 5 of 5 |
+
+No known differences. On this host (64 cores) the ten rustdoc runs (five crates, two sides, all at
+once; `core` the longest, about 20 s) take about 25 s, the comparison about 20 s (the tools' start
+and 150 MB of JSON read twice); `bin/repr-rust roundtrip --iface` about 80 s in all, `bin/repr-rust
+test` 10 s. The JSON of the files found equal is removed after the comparison (the scratch keeps
+the mirror of links and the reports, 4.5 MB).
+
+### How each crate is documented (SPEC §11.3)
+
+From `rust-src`'s `library/` directory (the originals) or its mirror (the printed side), with the
+paths relative to it as rustc is given them:
+
+```sh
+RUSTC_BOOTSTRAP=1 [STD_ENV_ARCH=x86_64] rustdoc --edition 2024 --crate-name C --crate-type lib \
+  -Zforce-unstable-if-unmarked -Zunstable-options --output-format json -o OUT \
+  --extern D=$(rustc --print sysroot)/lib/rustlib/x86_64-alpine-linux-musl/lib/libD-HASH.rmeta... \
+  --cfg ... C/src/lib.rs
+```
+
+- **Dependencies**: the direct dependencies of the crate's `Cargo.toml` for this target, each the
+  host sysroot's `.rmeta` (exactly one per name, else the run fails): rustdoc does not find them
+  alone (only `std` and `core` are in the extern prelude, and the library's crates use `alloc`,
+  `cfg_if`, `hashbrown`... by name), and the sysroot's `.rlib`s are metadata stubs (rustdoc
+  refuses them: "only metadata stub found for `rlib` dependency"). `core` takes none, `alloc`
+  `core` and `compiler_builtins`, `std` 13, `proc_macro` `std`, `core` and
+  `rustc_literal_escaper`, `test` `getopts`, `std`, `core` and `libc`. The sysroot is the build of
+  the very sources of `rust-src` (the same apk version), so the documented crate and its
+  dependencies agree.
+- **Flags**: `-Zforce-unstable-if-unmarked`, as rust's bootstrap builds and documents the library:
+  without it, std is rejected for calling `libc`'s `const fn`s in constants ("`libc::CMSG_SPACE`
+  is not yet stable as a const fn"). The `--cfg`s: std's `backtrace_in_libstd` (its `build.rs`
+  sets it on every target), `feature="backtrace"` and `feature="panic-unwind"` (bootstrap's std
+  features); proc_macro's `feature="rustc-dep-of-std"` (its default). `test`'s `build.rs` sets
+  `enable_unstable_features` only when `rustc -vV` says nightly or dev: not for 1.99.1. std's
+  `build.rs` also sets `STD_ENV_ARCH` (`env!` in std), here `x86_64`. All in the corpus file's
+  `:iface`, written by `test/rust/corpus_make.ae` from a table that cites these sources.
+- **The printed side**: `cp -rs` mirrors `library/` as symbolic links into
+  `.tmp/repr-rust/iface/CORPUS/src/`, and each corpus file becomes a link to its printed file in
+  `.tmp/repr-rust/cand/CORPUS/` (RR1's printing; a file that did not print has no link, so its
+  crate fails to document instead of passing on the original). rustc resolves `#[path]`,
+  `include!` and `include_str!` against the path it was given, not the link's target, so the
+  files outside the corpus (`stdarch`'s `core_arch`, `portable-simd`, `backtrace`, the Markdown
+  of `#![doc = include_str!(..)]`) are the originals', as in rustc's own build.
+- The JSON is deterministic: two runs over the same sources gave byte-identical files for all five
+  crates (measured before the build), so a difference after normalization is the sources'.
+
+### The normalization (SPEC §11.3, RR-P4)
+
+`strip-spans` removes, as text (the JSON is one line per crate, 69 MB for `core`), every member
+`"span":null` or `"span":{"filename":"..","begin":[l,c],"end":[l,c]}` that is a key (after `{` or
+`,`; inside a JSON string the quotes would be escaped) with the comma after it. The first run with
+only that gave `alloc`, `proc_macro` and `test` equal and `core` and `std` different, each at an
+attribute's text: rustdoc writes the attributes it has no structure for as `{"other":"#[attr =
+CfgTrace([Not(All([NameValue { name: \"doc\", value: None, span: core/src/os/mod.rs:18:5: 18:8
+(#0) }, ...` (rustc's `Debug` of the parsed `#[cfg]` predicates, kept on every item that a `cfg`
+leaves), whose columns move when the printer lays the file out again (here `18:5` against
+`18:1`). `strip-debug-spans` writes each such `PATH:L:C: L:C (#N)` as `_` (50,757 over the
+corpus); with it all five crates are equal. Nothing else needed normalizing:
+
+- **Ids**: the JSON's ids are assigned in the order rustdoc meets the items; the printed files
+  give the same items in the same order, so the same ids (an id normalization would be needed only
+  for a printer that reorders items, which the tree level already forbids).
+- `external_crates` names the sysroot's `.rmeta` files by absolute path, the same on both sides;
+  `target`, `format_version` (61) and `crate_version` (none) likewise.
+
+The comparison is of the normalized texts; on a difference the report names the crate, the
+position and the item (`{"id":N` before it) with its text on both sides. `bin/repr-rust test`'s
+case 5 documents the worked example (a binary, 66 items) and `test/rust/sample/attrs.rs` (cfg'd
+items indented by two spaces, so the printed file's columns differ: 7 spans in attributes' texts)
+and their printed files, equal; and a copy of `shapes.rs` with one doc comment changed, found
+different (item 6).
+
+### Checks and how to reproduce
+
+```sh
+bin/repr-rust roundtrip --iface      # the tree level, then rustdoc's JSON of both sides compared
+bin/repr-rust test                   # case 5: the interface level's normalization and its check
+```
+
+The report is `.tmp/repr-rust/iface/rustc-1.99.1.report.edn`; rustdoc's logs are
+`.tmp/repr-rust/iface/rustc-1.99.1/{orig,cand}/C/C.log`, its JSON stays there for a crate that
+differs. `bin/repr-rust roundtrip --iface && bin/repr-rust test` is the step `repr-rust` of `bin/gate
+--full` (about 1.5 minutes).
+
+### Choices for the user (RR-P4, RR-P5; open, built as recommended)
+
+- **RR-P4 The spans in attributes' texts** (SPEC §11.3). (a) Amend §11.3: the normalization
+  removes every `span` member and every span rustc's `Debug` writes in the attributes' texts
+  (`PATH:L:C: L:C (#N)` as `_`), as built; (b) keep their start lines (`PATH:L` only), a stronger
+  check in mode `:lines`, which keeps lines, but one the `span` members do not get (their lines
+  are removed too) and that mode `:full` makes moot; (c) drop the `"other"` attributes altogether,
+  which loses the `cfg`s they record. *Recommended: (a)*, the spec's own rule ("every span
+  removed") applied to the spans rustdoc prints as text.
+- **RR-P5 Private items** (SPEC §11.1). (a) The public items only, rustdoc's default and §11.1's
+  "the public items"; (b) also `--document-private-items`, which covers the private modules
+  (std's `sys`, most of `core`'s internals): measured equal for all five crates too (104,991
+  items, 53,176 spans in attributes' texts removed; its ten runs took 18 s on their own).
+  *Recommended: (a)*: the tree level already compares every item of every file, and the
+  interface level checks what other crates see; (b) is a flag away if wanted.

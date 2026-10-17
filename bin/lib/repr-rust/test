@@ -9,7 +9,11 @@
 #   3. its round trip: printed, parsed by rustc to the same tree and lines (rsdump tree);
 #   4. the round trip of test/rust/sample/constructs.rs, constructs std's five crates use rarely or
 #      not at all (shebang, unions, trait aliases, C variadics, labeled blocks, let-else, try
-#      blocks, literals of every kind, attributes on expressions...).
+#      blocks, literals of every kind, attributes on expressions...);
+#   5. the interface level (SPEC §11.3, RR2): rustdoc's JSON of the worked example and of
+#      test/rust/sample/attrs.rs (cfg'd items, whose attributes' texts hold spans; indented by two
+#      spaces, so the printed file's columns differ) equal to their printed files' without spans,
+#      and that of a copy of shapes.rs with one doc comment changed found different.
 # Usage: bin/lib/repr-rust/test (from bin/repr-rust test). Scratch in .tmp/repr-rust/test.
 set -euo pipefail
 root=$(cd "$(dirname "$0")/../../.." && pwd)
@@ -74,5 +78,35 @@ if cmp -s "$work/orig/constructs.rs.tree" "$work/cand/constructs.rs.tree" && cmp
   echo "ok: the printed file parses to the same tree and lines ($(wc -l < "$work/orig/constructs.rs.lines") spans)"
 else
   echo "FAIL: the printed file ($work/printed/constructs.rs) parses to another tree or other lines"; fail=1
+fi
+echo "== 5. the interface level of the worked example and of test/rust/sample/attrs.rs"
+(cd "$root/test/rust/sample" && "$helper" dump -o "$work/dumps" --edition 2024 attrs.rs)
+(cd "$root" && arbace_tool -m arbace.repr.rust read --pin "$root/tools/rsdump/RUSTC_VERSION" -o "$work/forms" \
+   "$work/dumps/attrs.rs.edn") > "$work/read5.log" || { cat "$work/read5.log"; fail=1; }
+(cd "$root" && arbace_tool -m arbace.repr.rust print -o "$work/printed" "$work/forms/rs/main/attrs.ae") > "$work/print5.log" || { cat "$work/print5.log"; fail=1; }
+doc() { # DIR OUT CRATE TYPE: rustdoc's JSON of DIR/CRATE.rs into OUT/CRATE/CRATE.json
+  mkdir -p "$2/$3"
+  (cd "$1" && RUSTC_BOOTSTRAP=1 rustdoc --edition 2024 --crate-name "$3" --crate-type "$4" -Zunstable-options \
+     --output-format json -o "$2/$3" "$3.rs") > "$2/$3/$3.log" 2>&1 || { echo "FAIL: rustdoc failed ($2/$3/$3.log)"; fail=1; }
+}
+mkdir -p "$work/mutated"
+sed 's|^/// A shape\.$|/// A form.|' "$root/test/rust/sample/shapes.rs" > "$work/mutated/shapes.rs"
+doc "$root/test/rust/sample" "$work/iface/orig" shapes bin; doc "$work/printed" "$work/iface/cand" shapes bin
+doc "$work/mutated" "$work/iface/mutated" shapes bin
+doc "$root/test/rust/sample" "$work/iface/orig" attrs lib; doc "$work/printed" "$work/iface/cand" attrs lib
+iface() { (cd "$root" && arbace_tool -m arbace.repr.rust compare-iface --crates "$1" --orig "$work/iface/orig" --cand "$work/iface/$2"); }
+for c in shapes attrs; do
+  if iface $c cand > "$work/iface/$c.log" 2>&1; then
+    echo "ok: rustdoc's JSON of the printed $c.rs is the original's without spans: $(grep "^ok $c" "$work/iface/$c.log" | cut -d' ' -f3-)"
+  else
+    cat "$work/iface/$c.log"; echo "FAIL: rustdoc's JSON of the printed $c.rs differs"; fail=1
+  fi
+done
+if iface shapes mutated > "$work/iface/mutated.log" 2>&1; then
+  echo "FAIL: a changed doc comment was not found ($work/iface/mutated.log)"; fail=1
+elif grep -q '^DIFFERS shapes .*:differs' "$work/iface/mutated.log"; then
+  echo "ok: a changed doc comment is found (shapes.rs, item $(sed -n 's/^  original, item \([0-9]*\).*/\1/p' "$work/iface/mutated.log"))"
+else
+  cat "$work/iface/mutated.log"; echo "FAIL: the changed copy's comparison failed otherwise"; fail=1
 fi
 exit $fail

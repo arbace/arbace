@@ -31,7 +31,7 @@
 #   bin/repr-rust print [-o DIR] FORMS.ae...
 #                                 the printer (SPEC §9.4): one .rs per forms file into DIR (default
 #                                 .tmp/repr-rust/printed), at its rs/file's :path; mode :lines' layout
-#   bin/repr-rust roundtrip [--only REGEX] [CORPUS]
+#   bin/repr-rust roundtrip [--only REGEX | --iface] [CORPUS]
 #                                 the round trip's tree level (SPEC §11.1, §11.2; RR1) over the
 #                                 corpus: dump, read, print into .tmp/repr-rust/cand/CORPUS/, and
 #                                 compare rustc's trees (rsdump tree: the parsed tree's Debug text
@@ -40,7 +40,15 @@
 #                                 tree's .lines) of the original and the printed file; fails on a
 #                                 difference test/rust/roundtrip-CORPUS-known.edn does not list, and
 #                                 on a listed one that no longer occurs. Report
-#                                 .tmp/repr-rust/cand/CORPUS.report.edn
+#                                 .tmp/repr-rust/cand/CORPUS.report.edn. With --iface, then the
+#                                 interface level (SPEC §11.3; RR2): each crate of the corpus
+#                                 documented by rustdoc as JSON (the corpus's :iface: its root,
+#                                 externs from the host's sysroot, --cfg flags, environment) from
+#                                 the originals and from a mirror of the library with every corpus
+#                                 file printed in its place (.tmp/repr-rust/iface/CORPUS/), compared
+#                                 without spans; fails on a difference
+#                                 test/rust/roundtrip-CORPUS-iface-known.edn does not list. Report
+#                                 .tmp/repr-rust/iface/CORPUS.report.edn
 #   bin/repr-rust test            the spec's cases (test/rust/; bin/lib/repr-rust/test): the reader's
 #                                 samples, the worked example converted and its round trip
 #
@@ -184,13 +192,15 @@ read_files() {
 }
 
 roundtrip() {
-  local c=rustc-1.99.1 only=""
+  local c=rustc-1.99.1 only="" iface=0 st=0
   while [ $# -gt 0 ]; do
     case $1 in
       --only) only=$2; shift 2 ;;
+      --iface) iface=1; shift ;;
       *) c=$1; shift ;;
     esac
   done
+  if [ "$iface" = 1 ] && [ -n "$only" ]; then echo "repr-rust: --iface documents whole crates: not with --only" >&2; return 2; fi
   build
   corpus_root "$c"
   local dumps=$work/dumps/$c forms=$work/forms/$c cand=$work/cand/$c orig=$work/orig/$c t0 t1 t2 t3 t4
@@ -226,7 +236,72 @@ roundtrip() {
   arbace_tool -m arbace.repr.rust compare --corpus "$(corpus_file "$c")" --orig "$orig" --cand "$cand" \
     --forms-report "$forms.report.edn" --known "$root/test/rust/roundtrip-$c-known.edn" \
     --report "$cand.report.edn" ${only:+--only "$only"} --prune \
-    --times "dump $((t1 - t0)) convert $((t2 - t1)) print $((t3 - t2)) parse $((t4 - t3))"
+    --times "dump $((t1 - t0)) convert $((t2 - t1)) print $((t3 - t2)) parse $((t4 - t3))" || st=1
+  if [ "$iface" = 1 ]; then
+    iface_level "$c" || st=1
+  fi
+  return $st
+}
+
+# iface_plan CORPUS: one line per crate, fields separated by | (they may be empty): name, edition,
+# crate type, root, the externs, the --cfg values, the environment (NAME=VALUE), space-separated
+iface_plan() {
+  local f
+  f=$(corpus_file "$1")
+  arbace_tool -e "(let [c (read-string (slurp \"$f\"))
+                        j (fn [xs] (apply str (interpose \" \" xs)))]
+    (doseq [k (:crates c) :let [i (:iface k)] :when i]
+      (println (str (:name k) \"|\" (:edition k) \"|\" (:crate-type k) \"|\" (:root i) \"|\" (j (:externs i)) \"|\"
+                    (j (:cfg i)) \"|\" (j (for [[n v] (:env i)] (str n \"=\" v)))))))"
+}
+
+# rustdoc_json DIR OUT NAME EDITION TYPE ROOT EXTERNS CFGS ENV: rustdoc's JSON of one crate (SPEC
+# §11.3) documented from DIR into OUT/NAME/NAME.json, its log OUT/NAME/NAME.log; the externs the
+# host sysroot's .rmeta of each name (exactly one)
+rustdoc_json() {
+  local dir=$1 out=$2/$3 name=$3 ed=$4 type=$5 croot=$6 externs=$7 cfgs=$8 envs=$9 args=() n m lib
+  lib=$host_sysroot/lib/rustlib/$target/lib
+  rm -rf "$out"; mkdir -p "$out"
+  for n in $externs; do
+    m=("$lib/lib$n"-*.rmeta)
+    [ ${#m[@]} -eq 1 ] && [ -f "${m[0]}" ] || { echo "repr-rust: not one $lib/lib$n-*.rmeta (${m[*]})" > "$out/$name.log"; return 1; }
+    args+=(--extern "$n=${m[0]}")
+  done
+  for n in $cfgs; do args+=(--cfg "$n"); done
+  # shellcheck disable=SC2086
+  (cd "$dir" && env RUSTC_BOOTSTRAP=1 $envs rustdoc --edition "$ed" --crate-name "$name" --crate-type "$type" \
+     -Zforce-unstable-if-unmarked -Zunstable-options --output-format json -o "$out.part" "${args[@]}" "$croot") > "$out/$name.log" 2>&1 &&
+    mv "$out.part/$name.json" "$out/$name.json"
+  local st=$?
+  rm -rf "$out.part"
+  return $st
+}
+
+# iface_level CORPUS: the round trip's interface level (SPEC §11.1, §11.3; RR2), after the tree
+# level printed the corpus into $work/cand/CORPUS: the library tree mirrored as links into
+# $work/iface/CORPUS/src, each corpus file a link to its printed file (none when it was not
+# printed), then each crate documented by rustdoc as JSON from the originals (orig/) and from the
+# mirror (cand/), all ten runs at once, and compared without spans (arbace.repr.rust
+# compare-iface); report $work/iface/CORPUS.report.edn
+iface_level() {
+  local c=$1 ib=$work/iface/$1 cand=$work/cand/$1 t0 t1 f name ed type croot externs cfgs envs pids=()
+  t0=$(date +%s)
+  echo "== repr-rust roundtrip $c: interface level (rustdoc's JSON of the originals and of the printed files)" >&2
+  rm -rf "$ib" "$ib.report.edn"; mkdir -p "$ib"
+  cp -rs "$srcroot/." "$ib/src"
+  while read -r _ f; do
+    rm -f "$ib/src/$f"
+    if [ -f "$cand/$f" ]; then ln -s "$cand/$f" "$ib/src/$f"; fi
+  done < <(corpus_plan "$c" | while IFS=$'\t' read -r n _ fs; do for f in $fs; do echo "$n $f"; done; done)
+  while IFS='|' read -r name ed type croot externs cfgs envs; do
+    rustdoc_json "$srcroot" "$ib/orig" "$name" "$ed" "$type" "$croot" "$externs" "$cfgs" "$envs" & pids+=($!)
+    rustdoc_json "$ib/src" "$ib/cand" "$name" "$ed" "$type" "$croot" "$externs" "$cfgs" "$envs" & pids+=($!)
+  done < <(iface_plan "$c")
+  for f in "${pids[@]}"; do wait "$f" || true; done
+  t1=$(date +%s)
+  arbace_tool -m arbace.repr.rust compare-iface --corpus "$(corpus_file "$c")" --orig "$ib/orig" --cand "$ib/cand" \
+    --known "$root/test/rust/roundtrip-$c-iface-known.edn" --report "$ib.report.edn" --prune \
+    --times "rustdoc $((t1 - t0))" || return 1
 }
 
 cmd=${1:-}
