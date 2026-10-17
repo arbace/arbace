@@ -1743,8 +1743,8 @@ SPEC.md's amendments were); proposals for the user are GC10-GC14 (GC1-GC9 are GR
 | part | where | as built |
 |---|---|---|
 | the list | `go/arbace/gotable.edn` | §6.6's 41 packages; `:exclude` (reflect's `Value.Method`, `MethodByName`, `Methods`, `Type.Method`, `MethodByName`, `Methods`: S39), `:overrides` (`os.Exit` → `goi.Exit`), `:min-sharing 2` (GS4 (b), below), `:resolve` (empty) |
-| the generator | `arbace/go/table.ae` (`arbace.go.table`), `bin/goi table` | on the tools' host, before j2g in `bin/arbace-go`'s `build` (kept when its inputs are unchanged: `DIR/key`); 31 s for the four configurations on stage 0, the linux forms converted once by `bin/repr-go read` and cached (`.tmp/goi-table/KEY/linux-ARCH`, KEY the list's, repr/go's, godump's and Go's hashes: S44) |
-| the table | `target/arbace-go/gotable/` → j2g `--gotable DIR` | the package `arbace/gotable`, imported (blank) by the main package; for linux/amd64: 829 functions, 347 variables, 244 types, 999 methods; 782 distinct signatures (functions' and methods' without the receiver), 233 typed invokers |
+| the generator | `arbace/go/table.ae` (`arbace.go.table`), `bin/goi table` | on the tools' host, before j2g in `bin/arbace-go`'s `build` (kept when its inputs are unchanged: `DIR/key`), on goi's checker since the merge with GR2 (amendment 5): 155 s for the four configurations on stage 0, linux's std converted once by `bin/repr-go read` and cached (`.tmp/goi-table/KEY/linux-ARCH`, KEY repr/go's, godump's and Go's hashes: S44) |
+| the table | `target/arbace-go/gotable/` → j2g `--gotable DIR` | the package `arbace/gotable`, imported (blank) by the main package; for linux/amd64: 829 functions, 347 variables, 244 types, 997 methods; 782 distinct signatures (functions' and methods' without the receiver), 235 typed invokers (233 with the stand-in) |
 | the digest | `gotable/digest_GOOS_GOARCH.edn.z` | one per configuration, embedded by that configuration's `register_sN.go`, 1,305,312 bytes (317,430 zlib-compressed) for linux/amd64 |
 | goi | `go/arbace/goi.ae`, `go/arbace/goi/` | `frame` (Frame, I F S R T, LocalI ..., As, B2I), `table` (Member, Package, Register, Lookup, the digest), `convert` (§5.6 both ways), `call` (Callable: a member's call node from its invoker over a small frame, S47; reflect.Value.Call without one; the boundary for panics), `value` (GoValue's protocol), `natives` (GoInterp's, Type) |
 | `arbace.lang` | `arbace/lang/GoInterp.ae` | `GoInterp` (natives and their Arbace side), `GoFn`, `GoVar`, `GoType`, `GoValue`, and GR1's minimal `GoPanic`, `GoExit` |
@@ -1809,15 +1809,30 @@ the table cost 21.5 MB, not 4.2 (the list excludes them).
    consumers that need no type resolution). A variable without `:tag` keeps its initializer,
    marked `:go/digest-init`, so that a checker can type it. Doc strings are kept (they make
    `doc` work on the table's vars; 212 KB of the compressed digest).
-5. **The declaration layer is a stand-in in `arbace.go.table`** (GR2 builds the checker in
-   parallel, `arbace/go/check*`): it resolves type forms through files' imports and aliases,
-   finds underlying types and slot kinds, method sets with promotion (through the listed
-   packages' types: no embedding was left unresolved), the types of constants (a small typer:
-   literals, names, `conv`, operators), and the build constraints of the tamago tree (`:build`
-   lines and file name suffixes, gc's tags: GOOS, GOARCH, `unix`, `gc`, `go1.N`, the
-   architecture level; cgo, `purego` and experiments off). A signature with a type the table
-   cannot name (internal, unexported, a generic instance whose kind the stand-in cannot tell:
-   `iter.Seq[string]`) gets no invoker. GR2's checker is its successor (GC14).
+5. **The declaration layer is goi's checker's** (GC14, decided: at GR2's merge). Built first
+   as a stand-in in `arbace.go.table` while GR2 was being built in parallel, it was replaced at
+   the merge by `arbace.go.check`'s: the configuration's forms read and their build constraints
+   evaluated by `arbace.go.check.load` (`package-source`: the root, tamago's `arch/ARCH/` laid
+   over it, `:build` lines and file names, gc's tags with go1.27.1's default experiments), the
+   listed packages checked with their imports in one session per configuration (so linux's whole
+   std is converted, `bin/repr-go read ... std`, cached under `.tmp/goi-table/`), and their
+   objects' types, method sets (the checker's `lookup`: Go's depth rules, ambiguity, pointer
+   receivers, promotion through embedded fields) and constants' types the checker's. The
+   generator itself still reads syntax: which declaration forms the digest keeps and their
+   bodies stripped. A signature with a type the table cannot name (internal, unexported, a
+   generic type's name, an invalid type) gets no invoker. **The table as the checker makes it,
+   against the stand-in's** (all four configurations, the same members and signatures: 829
+   functions, 347 variables, 244 types, 997 methods and 782 signatures on linux/amd64): (a) more
+   signatures get an invoker (233 → 235): the stand-in could not tell the kind of a type of
+   a package it had not read (`hash.Hash` of `md5.New` and the other hashes' `New`,
+   `syscall.RawConn` of the `SyscallConn` methods), the checker reads every import, and so every
+   later invoker's number moves (`invN`, `minvN`): the other differences of the package files are
+   these numbers only; (b) the digest: constants whose type the stand-in's typer could not
+   compute (`compress/zlib`'s levels, defined by `compress/flate`'s, `runtime`'s from
+   `internal/...`) lost their `:go/digest-init` initializer, the checker giving their type; and
+   `runtime`'s `mgcmark_greenteagc.go` is in it (the `goexperiment.greenteagc` tag is set by
+   default in go1.27.1, which the stand-in had off: the checker's tags are gc's). The generator
+   takes 155 s for the four configurations on stage 0, std's conversion cached (the stand-in 31 s).
 6. **Go values whose `==` can panic are boxed** (§5.1, §5.5): Arbace compares references with
    Go's `==` on `any` (`identical?`, the fast path of `=`, the collections), which panics on a
    slice, a map, a func, or a struct or array holding one or an interface. Such a value reaches
@@ -1859,7 +1874,15 @@ the table cost 21.5 MB, not 4.2 (the list excludes them).
     (§6.3); `runtime.GOOS` is `"tamago"` there. The box's smoke test does not run
     `test/goi/calls.ae` (GR1's test is the native executable's).
 
-**Proposals for the user** (each built as recommended):
+**Decided (2026-10-17, the user).** GC10 (a), GC11 (a), GC12 (a), GC13 (a), as built; GC14 (a),
+now, at GR2's merge: the stand-in removed, the generator on `arbace.go.check` (amendment 5).
+Since the merge, j2g's embedded sources leave out exactly the build's tools of `arbace/go/`, the
+checker (`arbace/go/check.ae`, `arbace/go/check/`) and the table's generator
+(`arbace/go/table.ae`), which run evaluated from the checkout on the tools' host; `arbace.go`
+(`arbace/go.ae`), which the program runs, is embedded (GR2's list had left out all of
+`arbace/go.ae` and `arbace/go/`).
+
+**Proposals for the user** (each built as recommended; decided above):
 
 - **GC10 Named scalars with methods in interfaces.** (a) as built, they stay Go values
   (amendment 7); (b) §5.1's rule as written, converted by their kind. *Recommended: (a)*.
