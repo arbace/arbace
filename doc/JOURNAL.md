@@ -1034,3 +1034,23 @@ kept, decided again with KU2's numbers); one two-mode board rather than a separa
 box's checks (kvm-tests, roundtrip 41 of 41, the box's build and smoke test) and the essential
 gate passed; a first gate run failed once in diffcheck on a j2g build error in the corpus
 `jf_cfcorpus_c50` and passed alone and on rerun with nothing changed: to watch.
+
+## 2026-10-17: goi's GR2, the checker, merged
+
+On the branch `goi-check` (`f413425`), merged into main; details in doc/go/GOI-SPEC.md, "As built:
+GR2". `arbace.go.check`, 5,941 lines of Arbace written anew after go/types, gc's messages: over
+five corpora (tamago/goroot for amd64 and arm64, the linux std, `$GOROOT/test`'s programs and
+directory tests) zero errors and every annotation verified in every declaration without
+generics (34,520 declarations in tamago-amd64; 1,263 generic ones counted apart until GR6); its
+error tests' 61 messages match gc's. Done before GR1 (imports from their forms). Kept out of the
+executable (j2g's embed exclusions). `bin/goi annotations`, `bin/goi test [--gc]`, in `bin/gate
+--full` after repr/go's round trips. Found and fixed: repr/go rounded typed float constants
+through 16 digits (GC2, kept with GR2). GC3 (the user: fix now): a name spelled `true`,
+`false` or `nil` written `(go/id "...")` wherever it would read back as the literal (`:init-order`,
+`:go/via`, types in `:inst` and `:tag`, imports and package names), read by the printer and the
+checker; no tracked forms changed (the vendor verifies byte for byte). GC1 as recommended. The
+agent once used `pkill -f` on its own stuck run and once redirected output to /dev/null, against
+the session's rules; it kept to them after being reminded. A second diffcheck failure seen once
+on its branch: j2g's generated Go for `jf_cfcorpus_c57/defclass_corpus_c114` called
+`PB_1_New_PB` with the wrong arity (the anonymous class with constructor arguments of F2.2), not
+reproduced on rerun: with c50's, a sign of nondeterminism in j2g, to investigate.
