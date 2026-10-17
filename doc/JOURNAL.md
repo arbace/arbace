@@ -766,3 +766,11 @@ repr/java); the module body and class bodies printed in layout, since GHC's Hadd
 doc comments by column only under layout; the stricter lines check and new `:lines` keys; tuple
 and unboxed-sum forms in constructor declarations; the round trip and tests in `bin/gate
 --full` (a step of their own). `ghc` added to doc/ALPINE.md as a check-only dependency.
+
+## 2026-10-17: Go forms at the REPL decided; GR0 started
+
+The survey's G1-G17 decided as recommended (doc/GO-FORMS-REPL-SURVEY.md, "Decided"): Arbace's
+own interpreter of Go forms, a type checker in Arbace, typed Go-closure nodes in hand-written Go
+forms, a table of the program's compiled packages, Go packages as namespaces of late-bound vars,
+the check over `$GOROOT/test`. GR0 (the spec) started on the branch `go-forms-spec`; GR1-GR6
+after the coming re-seed. The essential gate passed on main after repr/haskell R1's merge (7:38).
