@@ -972,6 +972,67 @@ known mismatches, none new), and `bin/arbace-go --fixpoint` holds: G1 = G2 = G3 
 - **F3.4 `bin/diffcheck` in the essential gate** (F2.1's decision: once F3 and F4 change the back
   end): after both merge, with the re-seed. *Recommended:* then, as decided.
 
+**Decided (2026-10-17, the user):** F3.1 (a), as built; F3.2 as proposed (measured after F4
+merged: below); F3.3 (a), the symbols shared, `(identical? 'a 'a)` recorded as known; F3.4 as
+proposed, `bin/diffcheck` in the essential gate after both merge, with the re-seed.
+
+### F3 and F4 measured together
+
+Main's j2g batch (`ca4d3eed`: F4's guard-free start classes, F2.2-F2.6's j2g fixes) merged into
+`c2j-batch`. Three measurement programs as above, each with the merged tree's j2g and the gate's
+executable of the merged tree: before, main at `30e9f246` (neither); F4, main's back end with
+F4's j2g; F3 + F4, the merged tree. ms, the best of five interleaved rounds; the machine was
+loaded this time (load average 15-25, other builds), so every column is slower than the quiet
+measurement above (`fib` before: 6.95 against 6.26), the ratios within a round comparable:
+
+| benchmark | before | F4 | F3 + F4 | speed-up |
+|---|---:|---:|---:|---:|
+| `fib` | 6.95 | 7.47 | 1.63 | 4.26 |
+| `fib-prim` | 2.59 | 2.33 | 2.28 | 1.14 |
+| `loop-long` | 13.31 | 4.77 | 3.90 | 3.41 |
+| `loop-double` | 1.67 | 0.57 | 0.55 | 3.04 |
+| `dotimes-array` | 13.56 | 10.02 | 10.33 | 1.31 |
+| `reduce-range` | 77.13 | 70.12 | 40.23 | 1.92 |
+| `reduce-fn` | 24.92 | 24.35 | 11.82 | 2.11 |
+| `vector-conj` | 23.00 | 22.39 | 18.18 | 1.27 |
+| `map-assoc-get` | 27.82 | 31.64 | 21.14 | 1.32 |
+| `keyword-map` | 15.03 | 12.15 | 6.45 | 2.33 |
+| `str-build` | 7.73 | 6.71 | 6.53 | 1.18 |
+| `seq-ops` | 54.64 | 48.87 | 41.82 | 1.31 |
+| `lazy-walk` | 31.81 | 30.50 | 24.45 | 1.30 |
+| `transduce` | 21.65 | 21.59 | 15.47 | 1.40 |
+| `into-xform` | 18.70 | 15.80 | 13.76 | 1.36 |
+| `protocol` | 8.27 | 6.69 | 5.31 | 1.56 |
+| `multimethod` | 9.83 | 8.54 | 7.95 | 1.24 |
+| `destructure` | 35.71 | 32.94 | 25.09 | 1.42 |
+| `closures` | 31.33 | 27.76 | 18.31 | 1.71 |
+| geometric mean | 15.65 | 12.89 | 9.33 | 1.68 |
+
+- **F4.2** (`fib` and `map-assoc-get` slower with F4 alone: here 6.95 → 7.47 and 27.82 → 31.64):
+  gone with F3. The boxed generic calls gc inlined are now the fast paths' slow branches only
+  (`Numbers_Add_O_O__Number_NoInit` and the like, reached by a non-`Long`); `fib` 1.63,
+  `map-assoc-get` 21.14, both faster than before. *Recommended for F4.2:* nothing more (no
+  out-of-line mark).
+- **F3.2** (the primitive `(long, long)` operations): with F4 they inline. gc (`-m`) reports
+  `Numbers_Lt_J_J__Z_NoInit` (cost 4), `Xor` (4), `Add_J_J__J_NoInit` (62),
+  `Multiply_J_J__J_NoInit` (62), `Inc_J__J_NoInit` (74) inlinable and inlines them into the
+  benchmarks' compiled code (`loop-long`: 13.31 → 3.90; `loop-double` 1.67 → 0.55). What is left
+  of `loop-long` (the experiment's exact inline loop: 1.09 on a quiet machine) is
+  `Math.*Exact`'s own code, which `Numbers` calls and the back end would emit the same.
+  *Recommended for F3.2:* not emitting them inline in the back end; revisit `Math.*Exact`'s Go
+  (jrt) if `loop-long` matters.
+
+On the merged tree: `bin/diffcheck` 12,731 of 12,754 cases agree, 23 disagree, every one recorded
+with its reason (`known.edn` and `excluded.edn` recorded afresh from the merged run; no case
+excluded: the Go-name collision is fixed). F2.4 turned 44 of the `native.ae` copy's 58 into
+agreements; 14 are left: the 11 of the classes j2g's analysis still leaves out (Clojure code
+naming the namespace's vars, a `deftype*` in a handed-over fn: F2.4 made Clojure constants, not
+these, which `jforms-excluded.edn` keeps excluded in the Java forms' pair too), and 3 where the
+compiled code now answers as the JVM and the evaluator by design does not (a `^long` fn of the
+Java forms compiler is an `IFn$LL` compiled, not interpreted: the oracle's known mismatch of the
+same cases). The other 9: compilation's semantics (4, `(resolve 'map)` among them), F3.3 (1),
+an identity hash, a message's position, the interpreter's two known limits.
+
 ## F4 and F2's j2g fixes as built (2026-10-17)
 
 F4 (a) and the j2g-side fixes of F2's findings, as decided (F2.2, F2.3, F2.4, F2.5, F2.6's name
