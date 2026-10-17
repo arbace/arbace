@@ -23,6 +23,32 @@
             [arbace.classes.lower :as lower]
             [arbace.classes.interp :as compiler]))
 
+(def compiled
+  "While the program records the units of the namespaces it prepares to compile them
+  (ARBACE_COMPILE, Compiler$AST; the back end arbace.c2j), the Java forms compiled here, in
+  order: {:ns the namespace's name, :imports its class imports then (symbol -> binary name),
+  :forms the Java forms (each the rest of a defclass form), :names the top-level classes'
+  binary names}. The back end puts them in the compiled tree, so that a deftype, a fn (a reify
+  in it) or a defclass using the Java forms is a class of the compiled program, as the
+  namespace's other classes are (Futamura F2.6, doc/FUTAMURA-SURVEY.md \"F3 and the back end's
+  limits as built\"). Else nil."
+  (when (System/getenv "ARBACE_COMPILE") (atom [])))
+
+(defn- compile-and-load!
+  "compiler/compile-and-load!, its classes recorded in compiled."
+  [ns forms & {:keys [siblings]}]
+  (let [loaded (compiler/compile-and-load! ns forms :siblings siblings)]
+    (when compiled
+      (swap! compiled conj
+             {:ns (ns-name ns)
+              :imports (into (sorted-map)
+                             (for [[sym ^Class c] (ns-imports ns)
+                                   :when (not (identical? c (get arbace.lang.RT/DEFAULT_IMPORTS sym)))]
+                               [sym (.getName c)]))
+              :forms (vec forms)
+              :names (mapv first loaded)}))
+    loaded))
+
 (defn compile-top
   "(class* :top form) or (class* :tops forms), each form the rest of a defclass form, in
   namespace ns: compiles the classes as one compilation, with `siblings` (the Java forms of
@@ -31,7 +57,7 @@
   the classes (:tops) after importing them."
   [ns kind forms siblings]
   (let [forms (if (= :top kind) [forms] (vec forms))
-        loaded (compiler/compile-and-load! ns forms :siblings siblings)]
+        loaded (compile-and-load! ns forms :siblings siblings)]
     ;; the classes themselves, not their names: a name in the unnamed package would not resolve
     `(do ~@(for [[n] loaded] (list 'arbace.core/import* n))
          ~(if (= :top kind) (second (first loaded)) (mapv second loaded)))))
@@ -45,7 +71,7 @@
   under *compile-files*). Returns nil, the form to analyze in place of deftype*."
   [ns form]
   (binding [*ns* ns]
-    (compiler/compile-and-load! ns [(lower/deftype-class-form form)]))
+    (compile-and-load! ns [(lower/deftype-class-form form)]))
   nil)
 
 ;; ---------------------------------------------------------------------------------------------
@@ -127,7 +153,7 @@
       (let [captured (mapv (fn [s] [s (host s)]) syms)
             r (try
                 (binding [*ns* ns]
-                  (compiler/compile-and-load! ns [(fn-class-form cname form captured)]))
+                  (compile-and-load! ns [(fn-class-form cname form captured)]))
                 (catch arbace.lang.ExceptionInfo e
                   ;; a local of the compiler's environment used though not in the form (a
                   ;; macro's expansion): capture it too

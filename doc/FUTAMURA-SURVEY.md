@@ -805,6 +805,234 @@ against the recommendation ("leave recorded"): fixed too (Clojure constants in J
 classes outside the runtime; the back end's limits: one-segment namespaces, reifys and deftypes
 using code forms, proxies made at run time before their analysis).
 
+## F3 and the back end's limits as built (2026-10-17)
+
+F3 (a) and the rest of F2.6 as decided, in `arbace.c2j` (`arbace/c2j/emit.ae`, `main.ae`) and
+`arbace.classes.native`; on the branch `c2j-batch`. F4 (j2g's initialization guards) is another
+branch's; the two are measured together after both merge, and the re-seed follows them.
+
+### F3: Numbers' boxed operations with inline fast paths
+
+A call of one of `Numbers`' boxed operations (an operand of type `Object`) is emitted with an
+inline fast path (`numbers-intrinsic`, in `emit-static-method`): the operands are bound once, in
+order; when the `Object` ones are `Long`s the operation is computed on longs, boxed with
+`Long/valueOf`; for the `(Object, Object)` and `(Object)` operations, when they are `Double`s, on
+doubles, boxed with `Double/valueOf`; anything else calls the operation itself. The operations:
+`+ +' - -' * *'` and their `unchecked-` forms (`add addP minus minusP multiply multiplyP
+unchecked_*`, signatures `(O,O)`, `(O,J)`, `(J,O)`), `inc inc' dec dec'`, negation, `quot rem`,
+`bit-and bit-or bit-xor bit-shift-left bit-shift-right`, `< <= > >= ==`, `zero? pos? neg?`.
+
+The fast path only ever answers what `Numbers` answers: it is `LongOps`' (`DoubleOps`') own
+computation and boxing (`Numbers.num(long)` is `Long.valueOf`, with its cache of -128 to 127, so
+boxing identity is the same), and every case where `Numbers` would not answer a long calls
+`Numbers`: an overflow (which `+ - * inc dec` throw and the `'` forms promote to a `BigInt`;
+tested as `Numbers.addP` and `multiplyP` test it), a subtraction of `Long/MIN_VALUE` (`Numbers`
+adds the negation, which overflows), a negation of `Long/MIN_VALUE`, a zero divisor; and every
+other operand (`Integer`, `Short`, `Byte`, ratios, bigints, `BigDecimal`, a `Long` mixed with a
+`Double`, `nil`, a non-number, whose errors are `Numbers`' own). `==` stays `Numbers.equiv` (`=`
+is `Util.equiv`, not an operation of `Numbers`, and is untouched); `*unchecked-math*` chooses
+`unchecked_*` in the analysis, as before. Not intrinsics: the `(double, Object)` overloads (a cast
+and `doubleValue` already), `max`/`min`, the primitive `(long, long)` operations (their cost is
+the initialization guard, F4).
+
+`fib`'s code (j2g's Go, abridged): `if jrt.Long_InstanceOf(n) { var n0 int64 = ...LongValue__J();
+tmp1 = n0 < 2 } else { tmp1 = lang.Numbers_Lt_O_J__Z(n, 2) }`, and `+` as `nr := n0 + n1; if
+(n0^nr)&(n1^nr) >= 0 { return jrt.Long_ValueOf_J__Long(nr).Ref() } else { return
+lang.Numbers_Add_O_O__Number(a, b) }`.
+
+Checked: Clojure's suite and the oracle (the essential gate); `bin/diffcheck` (all the numbers
+corpora agree); and, once, a namespace of 26 values (0, ±1, 2, `Long/MAX_VALUE`,
+`Long/MIN_VALUE` and their neighbours, values whose products overflow, 1.5, -0.0, 0.0, `##NaN`,
+`##Inf`, 1/2, 3N, an `int`, a `short`, a `byte`, 1.5M, `nil`, a string, a `float`) through 37
+unary and literal forms and, for each of the 676 pairs, 22 binary forms (and `identical?` of
+results), each result or exception printed: compiled with the fast paths (61 sites) and evaluated
+in the same program, 745,131 bytes of results, the same byte for byte (277 overflows, 182 zero
+divisors among them).
+
+**Measured** as SA139 measured T1 (`test/bench/eval-bench.ae` as the namespace `bench.eval`,
+compiled with the runtime's namespaces into a measurement program by the gate's executable, j2g
+and `bin/build-go`; before: main's `arbace/c2j`, after: this branch's; ms, the best of two runs
+of each, each the benchmark's best over at least 1 s and 3 runs; amd64, the machine shared):
+
+| benchmark | before | after | speed-up |
+|---|---:|---:|---:|
+| `fib` | 6.26 | 1.53 | 4.09 |
+| `fib-prim` | 2.33 | 2.49 | 0.94 |
+| `loop-long` | 12.20 | 12.58 | 0.97 |
+| `loop-double` | 1.53 | 1.50 | 1.02 |
+| `dotimes-array` | 11.60 | 11.03 | 1.05 |
+| `reduce-range` | 63.08 | 37.46 | 1.68 |
+| `reduce-fn` | 21.32 | 11.56 | 1.84 |
+| `vector-conj` | 18.07 | 18.38 | 0.98 |
+| `map-assoc-get` | 21.15 | 19.64 | 1.08 |
+| `keyword-map` | 13.20 | 6.75 | 1.96 |
+| `str-build` | 6.59 | 6.24 | 1.06 |
+| `seq-ops` | 43.71 | 40.91 | 1.07 |
+| `lazy-walk` | 28.22 | 25.31 | 1.11 |
+| `transduce` | 19.44 | 16.11 | 1.21 |
+| `into-xform` | 15.36 | 14.61 | 1.05 |
+| `protocol` | 7.52 | 5.51 | 1.36 |
+| `multimethod` | 8.94 | 8.24 | 1.08 |
+| `destructure` | 30.22 | 23.27 | 1.30 |
+| `closures` | 26.97 | 17.15 | 1.57 |
+| geometric mean | 13.46 | 10.45 | 1.29 |
+
+`fib` as the experiment predicted (§5: 6.40 → 1.44). The sequence and reduction benchmarks gain
+through `arbace.core`'s own compiled arithmetic (`reduce +`, `range`'s steps, counters); the
+benchmarks of primitive arithmetic (`fib-prim`, `loop-long`, `loop-double`, `dotimes-array`)
+have no boxed operation and are unchanged within the noise (`loop-long`'s 3% in both runs is
+code layout): their cost is F4's. The program: 1,235 sites with a fast path in the measurement
+program's tree (the shipped namespaces' and the benchmarks'; 676 with a `Double` one); the gate's executable 103,837,856 → 104,673,440
+bytes (+0.8%, the back end's own new code included); the constant pools unchanged (the fast
+paths make no constants).
+
+### One-segment namespaces
+
+Code analyzed in a namespace of one segment (`user`) is compiled: its holder class (`user`,
+nesting `user$eval1$fn__2`) and the loader of a source of one segment (`user__init`) are in
+Java's unnamed package (`:package ""`, `e/unnamed-package`; a simple name would be read in the
+tree's namespace, `arbace`, as `arbace.user`), and every file of the tree imports them (`(import
+user)`, which the Java forms' front end records as a source import: Java could not name a class
+of the unnamed package from a package, the Java forms can), so that the loader of
+`dcf/state_errors.ae` names `user$eval1$fn__2`. The fns' classes keep their JVM names. The
+shipped tree has no such namespace and does not change. `test/diffcheck/gen.ae` no longer renames
+the corpora's `user` to `dcf.user`; the renaming hid cases: `dcf.user`, made bare by `in-ns`,
+had no `arbace.core` referred, so a case such as `(identical? 'a 'a)` failed alike in both
+runs. Run in `user` they show two disagreements, recorded: `(resolve 'map)` (compilation's
+semantics, as the JVM's AOT: the loader interns `user/map`, which a later `(def map 1)` defines,
+when its constants are made) and `(identical? 'a 'a)` (F3.3 below); and `(arbace.set/union #{1}
+#{2})`, recorded as the check's own, agrees.
+
+### Proxies made at run time before their analysis
+
+A class implementing `IProxy` that no source's events made (`(get-proxy-class Object)` evaluated,
+then `(proxy [Object] [] ...)` analyzed, which finds it made) is a class made at run time
+(`runtime-class?`): compiled code reaches it by reflection, and the unit naming it makes it
+again first, unless it exists, with `arbace.core`'s `define-proxy` by its own name (not by
+`get-proxy-class`, whose name depends on the namespace current then), as an event's replay
+does. `test/diffcheck/excluded.edn`'s case (`harvest/java_interop.ae:13`) is back and agrees.
+
+### The Java forms compiler's classes
+
+A deftype, defrecord, reify or fn whose code uses the Java forms' code forms is compiled by the
+Java forms compiler (`arbace.classes.native`, SPEC §9.5), and so is a top-level `defclass`: the
+class is the interpreter's, made at run time, unrecorded, so compiled code named a class the
+program lacked. Now, while the program records the units it prepares (`ARBACE_COMPILE`),
+`arbace.classes.native/compiled` keeps each compilation (the namespace, its class imports then,
+the Java forms, the classes' names), and the back end writes them into its tree
+(`aot_jf_NAME.ae`: `(in-ns 'NS)`, `(import ...)`, the `defclass` forms), each in its namespace's
+Go package; the compiled code names them as before, and they are classes of the program. A
+constant naming one is looked up where used (`*late-classes*`), so a class j2g leaves out (below)
+fails the code that runs it, not the namespace's loader; an event of a class the analysis never
+made (a reify's stub, its fn given to the Java forms compiler) is skipped. The shipped program's
+namespaces have no such class: its tree does not change.
+
+In `bin/diffcheck`, `native.ae` is in Clojure's pair too, as a copy (`dcf/native_c2j.ae`, its
+cases named `c2j:test/oracle/forms/native.ae:LINE`): its `defclass` cases left out (the Java
+forms' pair's subject, whose classes `jforms/` holds and the copy would define again), each case's
+fn made inside the thunk (`(fn* [] ((fn* [] FORM)))`, `diffcheck.driver/case`'s `deferred`), so
+that a class initialization's error is the case's. Of its 283 cases 225 agree; 58 disagree, all
+j2g's F2.4 met in compiled code (recorded): the Java forms compiler's classes hold Clojure data
+(`#'arbace.core/str`, keywords, quoted symbols), "j2g: Clojure constant ..." when initialized;
+and five classes whose Clojure code names the namespace's vars or holds a `deftype*` j2g's
+analysis leaves out ("not in the closed world"), as `jforms-excluded.edn`'s `dcf.defclass.Clj`
+and `native.nested_deftype.Host`. They are the measure of F2.4's j2g side: each should agree once
+it is built.
+
+### The check
+
+`bin/diffcheck`: 12,673 of 12,754 cases agree, 81 disagree, all recorded in
+`test/diffcheck/known.edn` (before: 12,449 of 12,471, 22). Of the corpora checked before, 23
+disagree (22, less `arbace.set/union`, plus the two found in `user`); the other 58 are
+`native.ae`'s copy (283 cases new to Clojure's pair). `test/diffcheck/excluded.edn`: 4 cases (5
+before: the proxy's is back; the 4 are j2g's Go-name collision, F2.6's, the other branch's).
+
+The essential gate passed (the smoke test; Clojure's suite, no regressions; the oracle, 53
+known mismatches, none new), and `bin/arbace-go --fixpoint` holds: G1 = G2 = G3 byte for byte
+(104,706,208 bytes), stage 0 = G1 not, as expected until the re-seed (the back end and
+`arbace.classes.native` changed).
+
+### Proposals (the user's to decide)
+
+- **F3.1 Where the fast paths stop.** (a) As built: `Long` operands, and two `Double`s for the
+  `(Object, Object)` and `(Object)` operations, everything else `Numbers`; (b) also a `Long`
+  mixed with a `Double` and the `(double, Object)` overloads; (c) also `Util.equiv` (`=`) on two
+  `Long`s. *Recommended: (a)*: the measured gain is the `Long` case; (b) and (c) add code at every
+  site for cases the benchmarks do not show.
+- **F3.2 The primitive operations.** With F4's guards gone gc may inline `Numbers`' `(long, long)`
+  operations (§5: `loop-long` 2.81 → 1.09 ms needs both); the back end could also emit them as
+  the Java forms' operators directly (exact: `Math/addExact` for `+`, as `Numbers` does).
+  *Recommended:* measure after F4 merges; emit them inline only if gc's inliner still leaves
+  them out.
+- **F3.3 Symbols in the constant pools.** (a) Kept as SA155 made them: a class's symbols without
+  metadata made once, so `(identical? 'a 'a)` is true in compiled code (recorded); (b) a symbol
+  per constant, as the JVM's `emitValue` and the evaluator make them (more objects at each
+  class's initialization, every pool of the tree rewritten). *Recommended: (a)*: Clojure leaves
+  symbols' identity unspecified, and no code of the runtime depends on it.
+- **F3.4 `bin/diffcheck` in the essential gate** (F2.1's decision: once F3 and F4 change the back
+  end): after both merge, with the re-seed. *Recommended:* then, as decided.
+
+**Decided (2026-10-17, the user):** F3.1 (a), as built; F3.2 as proposed (measured after F4
+merged: below); F3.3 (a), the symbols shared, `(identical? 'a 'a)` recorded as known; F3.4 as
+proposed, `bin/diffcheck` in the essential gate after both merge, with the re-seed.
+
+### F3 and F4 measured together
+
+Main's j2g batch (`ca4d3eed`: F4's guard-free start classes, F2.2-F2.6's j2g fixes) merged into
+`c2j-batch`. Three measurement programs as above, each with the merged tree's j2g and the gate's
+executable of the merged tree: before, main at `30e9f246` (neither); F4, main's back end with
+F4's j2g; F3 + F4, the merged tree. ms, the best of five interleaved rounds; the machine was
+loaded this time (load average 15-25, other builds), so every column is slower than the quiet
+measurement above (`fib` before: 6.95 against 6.26), the ratios within a round comparable:
+
+| benchmark | before | F4 | F3 + F4 | speed-up |
+|---|---:|---:|---:|---:|
+| `fib` | 6.95 | 7.47 | 1.63 | 4.26 |
+| `fib-prim` | 2.59 | 2.33 | 2.28 | 1.14 |
+| `loop-long` | 13.31 | 4.77 | 3.90 | 3.41 |
+| `loop-double` | 1.67 | 0.57 | 0.55 | 3.04 |
+| `dotimes-array` | 13.56 | 10.02 | 10.33 | 1.31 |
+| `reduce-range` | 77.13 | 70.12 | 40.23 | 1.92 |
+| `reduce-fn` | 24.92 | 24.35 | 11.82 | 2.11 |
+| `vector-conj` | 23.00 | 22.39 | 18.18 | 1.27 |
+| `map-assoc-get` | 27.82 | 31.64 | 21.14 | 1.32 |
+| `keyword-map` | 15.03 | 12.15 | 6.45 | 2.33 |
+| `str-build` | 7.73 | 6.71 | 6.53 | 1.18 |
+| `seq-ops` | 54.64 | 48.87 | 41.82 | 1.31 |
+| `lazy-walk` | 31.81 | 30.50 | 24.45 | 1.30 |
+| `transduce` | 21.65 | 21.59 | 15.47 | 1.40 |
+| `into-xform` | 18.70 | 15.80 | 13.76 | 1.36 |
+| `protocol` | 8.27 | 6.69 | 5.31 | 1.56 |
+| `multimethod` | 9.83 | 8.54 | 7.95 | 1.24 |
+| `destructure` | 35.71 | 32.94 | 25.09 | 1.42 |
+| `closures` | 31.33 | 27.76 | 18.31 | 1.71 |
+| geometric mean | 15.65 | 12.89 | 9.33 | 1.68 |
+
+- **F4.2** (`fib` and `map-assoc-get` slower with F4 alone: here 6.95 → 7.47 and 27.82 → 31.64):
+  gone with F3. The boxed generic calls gc inlined are now the fast paths' slow branches only
+  (`Numbers_Add_O_O__Number_NoInit` and the like, reached by a non-`Long`); `fib` 1.63,
+  `map-assoc-get` 21.14, both faster than before. *Recommended for F4.2:* nothing more (no
+  out-of-line mark).
+- **F3.2** (the primitive `(long, long)` operations): with F4 they inline. gc (`-m`) reports
+  `Numbers_Lt_J_J__Z_NoInit` (cost 4), `Xor` (4), `Add_J_J__J_NoInit` (62),
+  `Multiply_J_J__J_NoInit` (62), `Inc_J__J_NoInit` (74) inlinable and inlines them into the
+  benchmarks' compiled code (`loop-long`: 13.31 → 3.90; `loop-double` 1.67 → 0.55). What is left
+  of `loop-long` (the experiment's exact inline loop: 1.09 on a quiet machine) is
+  `Math.*Exact`'s own code, which `Numbers` calls and the back end would emit the same.
+  *Recommended for F3.2:* not emitting them inline in the back end; revisit `Math.*Exact`'s Go
+  (jrt) if `loop-long` matters.
+
+On the merged tree: `bin/diffcheck` 12,731 of 12,754 cases agree, 23 disagree, every one recorded
+with its reason (`known.edn` and `excluded.edn` recorded afresh from the merged run; no case
+excluded: the Go-name collision is fixed). F2.4 turned 44 of the `native.ae` copy's 58 into
+agreements; 14 are left: the 11 of the classes j2g's analysis still leaves out (Clojure code
+naming the namespace's vars, a `deftype*` in a handed-over fn: F2.4 made Clojure constants, not
+these, which `jforms-excluded.edn` keeps excluded in the Java forms' pair too), and 3 where the
+compiled code now answers as the JVM and the evaluator by design does not (a `^long` fn of the
+Java forms compiler is an `IFn$LL` compiled, not interpreted: the oracle's known mismatch of the
+same cases). The other 9: compilation's semantics (4, `(resolve 'map)` among them), F3.3 (1),
+an identity hash, a message's position, the interpreter's two known limits.
+
 ## F4 and F2's j2g fixes as built (2026-10-17)
 
 F4 (a) and the j2g-side fixes of F2's findings, as decided (F2.2, F2.3, F2.4, F2.5, F2.6's name
