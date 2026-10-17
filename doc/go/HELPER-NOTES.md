@@ -28,9 +28,11 @@ bin/repr-go dump fmt runtime             # .tmp/godump/out/fmt.edn, .tmp/godump/
 bin/repr-go dump -goarch arm64 -o DIR std
 bin/repr-go dump -tests fmt              # fmt.edn with fmt's _test.go files, and fmt_test.edn
 bin/repr-go dump -files prog.go a.go,b.go   # single-file programs; a.go,b.go is one program
+(cd $ARBACE_GOROOT/test && godump -dirs -o DIR fixedbugs/issue10066.go ...)   # directory tests
 bin/repr-go read --dump .tmp/godump/out         # read on Arbace (the Go executable), print a summary
 bin/repr-go corpus [amd64|arm64|test|test-arm64|tests]  # the coverage runs below, into .tmp/godump/corpus/
 bin/repr-go corpus linux-amd64 linux-test linux-arm64 linux-test-arm64   # the same for GOOS=linux
+bin/repr-go corpus dirtest dirtest-arm64 linux-dirtest linux-dirtest-arm64   # the directory tests
 bin/repr-go dump -goos linux -goarch arm64 -o DIR std
 ```
 
@@ -127,7 +129,9 @@ written when not empty: `:go-files` (gc's order: sorted, the package's files), `
 of its contents in lower-case hex (SPEC §9.6). The dump of a package with tests also has
 `:test-go-files` (its `:files` are `:go-files` then these), `:test-embed-patterns` and
 `:test-embed-files`; an external test package has only `:go-files`, `:embed-patterns` and
-`:embed-files`, its own. Single files have `:go-files` only.
+`:embed-files`, its own. Single files have `:go-files` only. A package of a directory test
+(`-dirs`, below) has `:go-files` (and builddir's `:s-files`), or go list's lists for a runindir
+test's, then `:dir-test` and `:local-imports`.
 
 **The tree.** Every `go/ast` node is `(:kebab-type {:kebab-field value ...})`, with the fields
 in `go/ast`'s order, for example `(:binary-expr {:x ... :op-pos "3:9" :op "+" :y ...})`. Values:
@@ -385,8 +389,9 @@ three, in 1.4 s, 1.3 s and 0.8 s, read in 5.7 s, 5.5 s and 2.5 s: the type ids m
   `cmplxdivide1.go` its action line names. Of the 1,745, 1,705 are dumped. 35 are excluded by
   their build constraints or file names (linux-only, cgo, `simd`, ...). 5 need another
   `GOEXPERIMENT` (`arenas`, `fieldtrack`, ...) and are left out as another configuration. Not
-  taken: the 290 directory tests (`*dir` actions, several packages each) and the 678 error
-  tests (`errorcheck*`, which must not compile).
+  taken: the 290 directory tests (`*dir` actions, several packages each; since 2026-10-17 a
+  corpus of their own, "Directory tests" below) and the 678 error tests (`errorcheck*`, which
+  must not compile).
 
   Since 2026-10-08 (closing the round trip) the list is the oracle's, `bin/repr-go check
   --list-tests` (`gocmp tests`, [ROUNDTRIP.md](ROUNDTRIP.md)): one rule, in one place, for
@@ -412,6 +417,61 @@ three, in 1.4 s, 1.3 s and 0.8 s, read in 5.7 s, 5.5 s and 2.5 s: the type ids m
 - **Reading on Arbace:** every dump of the corpora reads with `arbace.core/read`
   (`*read-eval*` false) as exactly one form, and its type table is in dependency order.
   Constants exercise every value encoding, `(:float M E)` included (3 dumps).
+
+## Directory tests
+
+`godump -dirs FILE.go...` (2026-10-17; run in `$GOROOT/test`, the paths relative to it) dumps
+`$GOROOT/test`'s directory tests: a test `FILE.go` whose action line is a `*dir` one and whose
+packages are the files of `FILE.dir`, importing each other by local paths (`"./a"`). The
+helper reads the action line as Go's test driver does (`cmd/internal/testdir`, go1.27.1:
+`goDirPackages`, `compileInDir`, the importcfg; the first line that is not a build constraint,
+fields split as `splitQuoted` splits them) and matches `FILE.go` against the configuration with
+go/build (its constraints and name; the driver does not filter the `.dir`'s files). It takes:
+
+- **compiledir, rundir**: the `.dir`'s `.go` files, in directory order, grouped into packages
+  by their package clause (the driver's regular expression `^package (\w+)`), each file a
+  package of its own with `-s`. A package other than `main` is compiled by the driver as `go
+  tool compile -e -D test -importcfg CFG -p test/STEM`, STEM its first file's name without
+  `.go`, so that `"./a"` resolves (gc's `-D`) to `test/a`; `main` as `-p main`. The helper
+  compiles the packages other than `main` the same way, in the driver's order, into a temporary
+  directory (the action line's compiler flags too: `-l=4`, `-c=2`), with an importcfg of the
+  standard library's export data for the configuration (`go list -export -deps` of every import
+  of the tests, one run) and of the test's earlier packages; it then type-checks each package
+  with an importer that resolves its files' local paths as gc does (`path.Join("test", p)`)
+  and reads the earlier packages' archives. The package's path is gc's (`test/a`, `main`).
+- **builddir, buildrundir**: every `.go` file of the directory as one package `main` (`-D .`),
+  with the directory's `.s` files (`:s-files`).
+- **runindir**: the driver copies the `.dir` into a module of its own named by its base name
+  (`issue29612.dir`), `go` line 1.14 or the action's `-gomodversion`, and runs `go run .` there.
+  The helper makes the same copy (in a temporary GOPATH, `GO111MODULE=on`, `GOPROXY=off`), lists
+  it with `go list -e -json -export -deps ./...`, and dumps the module's packages as packages
+  (go list's file lists, `ImportMap` and export data; the language version the module's: go1.14
+  for most), reading their files from the original directory.
+- Left out: `errorcheckdir` and `errorcheckandrundir` (the program, or one package, must not
+  compile: like the single-file error tests), tests that need another `GOEXPERIMENT`
+  (`-goexperiment fieldtrack`: two runindir tests); a test the configuration excludes is
+  `excluded`, and one whose packages do not compile `fail`.
+
+Each package is a dump keyed by the test's directory and the package's key in it: the first
+file's stem, `fixedbugs/issue10066.dir/a` (`DIR/fixedbugs/issue10066.dir/a.edn`), or for runindir
+the package's directory in the module (`fixedbugs/issue29612.dir/p1/ssa`; the module's root
+package is `fixedbugs/issue29612.dir`). `:dir` is the package's directory relative to
+`$GOROOT/test`, like a single-file program's. Two keys are added:
+
+```clojure
+ :dir-test {:test "fixedbugs/issue10066.go" :action "compiledir" :local-prefix "test"
+            :packages [["test/a" "a"] ["test/b" "b"]]}   ; the test's packages: gc's path, key
+ :local-imports {"./a" "test/a"}                         ; the files' local import paths, resolved
+```
+
+A runindir test's `:dir-test` has `:module "issue29612.dir"` instead of `:local-prefix`, its
+`:packages` keyed by directory (`""` for the root), and no `:local-imports` (its imports are
+module paths). Other dumps do not change. The 246 directory tests for tamago/amd64 (253 with
+runindir's 7) give 561 dumps, 586 files, 4.6 MB, all `ok`, no type errors, in under a second
+after the first `go list` (`bin/repr-go corpus dirtest`); tamago/arm64 251 tests, 559 dumps;
+linux/amd64 254, 562; linux/arm64 251, 559. `bin/repr-go check --list-dirtests` (`gocmp tests
+-dirs`) is the list, one rule for the helper's corpus and the oracle's (ROUNDTRIP.md,
+"Directory tests").
 
 ## Spec amendments (accepted 2026-10-08)
 
@@ -447,9 +507,6 @@ helper's (SPEC §15, "Amendments (2026-10-08)").
   for an itab cache), `go/types`' scopes (`Info.Scopes`, not needed: SPEC §11.2), a
   signature's receiver and receiver type parameters in the type table (the method objects carry
   `:recv`), and the underlying types of imported named types (in their packages' dumps).
-- **Directory tests** of `$GOROOT/test` (`rundir`, `compiledir`, ...): several packages per
-  test, importing each other by local path. They need a small driver over the `.dir`
-  directories.
 - **Positions of imported objects** are not written. An imported object is identified by
   `:pkg` and `:name` (and, for fields and methods, its receiver), and found in that package's
   dump. Imported local types and type parameters have their export data position in the type

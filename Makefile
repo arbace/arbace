@@ -96,12 +96,16 @@ box-vendor-verify: ## box/'s forms and KVM tests (bin/box-vendor roundtrip, kvm-
 x509roots-verify: ## x509roots/, Mozilla's roots (bin/x509roots-vendor verify, check)
 	bin/x509roots-vendor verify
 	bin/x509roots-vendor check
-repr-go-roundtrip: ## Go -> forms -> Go over std and GOROOT/test (bin/repr-go roundtrip)
+repr-go-roundtrip: ## Go -> forms -> Go over std, GOROOT/test and its directory tests (bin/repr-go roundtrip [--dirs])
 	bin/repr-go roundtrip amd64
 	bin/repr-go roundtrip linux/amd64
-repr-go-roundtrip-text: ## mode :full prints the original text back, byte for byte (bin/repr-go roundtrip --text)
+	bin/repr-go roundtrip --dirs amd64
+	bin/repr-go roundtrip --dirs linux/amd64
+repr-go-roundtrip-text: ## mode :full prints the original text back, byte for byte (bin/repr-go roundtrip --text [--dirs])
 	bin/repr-go roundtrip --text amd64
 	bin/repr-go roundtrip --text linux/amd64
+	bin/repr-go roundtrip --text --dirs amd64
+	bin/repr-go roundtrip --text --dirs linux/amd64
 
 ## The host and housekeeping
 alpine-check: ## one minimal apk add line reinstalls exactly the host's packages (bin/alpine-env check)

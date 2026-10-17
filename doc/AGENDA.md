@@ -99,7 +99,8 @@ The current state of the work. This file is rewritten as things change. For the 
   a2g → `j2g` (the printed `j2g_*` names, `J2G_*`), `G2A_GOROOT` → `ARBACE_GOROOT`, the old
   variables guarded; "Java forms" in prose; c2a and `arbace.classes.*` unchanged; R1-R5 decided.
   The seed remade (`56fabe20…`) and verified; R4 done (`tamago/` converted again, the guests
-  identical). Running: F2 and repr/go's directory tests side by side.
+  identical). Done: repr/go's directory tests (`bin/repr-go roundtrip --dirs [--text]`, 251 to 254
+  tests per configuration, every level; D1-D3 decided, in `bin/gate --full`). Running: F2.
 - Running: `repr/haskell`'s spec (decided 2026-10-17, doc/REPR-HASKELL-SURVEY.md "Decided": a
   bridge, ghc-lisp's grammar respelled, a helper on the host's GHC; the spec beside F2, the build
   after it).
@@ -150,7 +151,6 @@ The current state of the work. This file is rewritten as things change. For the 
   process; GoTEE (github.com/usbarmory/GoTEE: TamaGo unikernels and user-mode applets, TrustZone
   on arm), to check; unikernels with a privilege split.
 - The mapped start measured without nested KVM.
-- repr/go's open end: `$GOROOT/test`'s directory tests (running beside F2).
 - A note from the user (2026-10-13): the tooling of the Mac GUI app Moshi Go may be useful for
   Arbace, to study when Arbace's REPL gets a user interface beyond the terminal. Its build info
   (`go version -m`, on the user's Mac): module `moshi-go` at `1516bf8173a5` (2026-10-12), go1.27.1

@@ -41,6 +41,8 @@ bin/repr-go check --record REF.edn CANDIDATE    # also write the results as a re
 bin/repr-go check --known KNOWN.edn CANDIDATE   # failures listed there (with reasons) expected
 bin/repr-go check --with-tests --no-tests CANDIDATE   # std with its _test.go files
 bin/repr-go check --list-tests                  # the test programs of the corpus
+bin/repr-go check --dirtests CANDIDATE          # $GOROOT/test's directory tests, four levels
+bin/repr-go check --list-dirtests               # the directory tests of the corpus
 bin/repr-go check --make identity|reprint|canon DIR   # candidates made without forms
 bin/repr-go check --mutations [--seed N]        # the oracle's self-test (below)
 ```
@@ -73,7 +75,8 @@ amendment L5, accepted 2026-10-08, folded into SPEC §12.4).
 ```sh
 GOROOT=/root/tamago-go GOOS=tamago GOARCH=amd64 \
   gocmp [-levels tree,export,code] [-keep-positions] [-tests] A B
-GOOS=linux GOARCH=amd64 gocmp tests [-v] $GOROOT/test
+GOOS=linux GOARCH=amd64 gocmp tests [-v] [-dirs] $GOROOT/test
+GOOS=linux GOARCH=amd64 gocmp -dirtest [-levels tree,export,code,run] $GOROOT/test/F.go CAND/test/F.dir
 ```
 
 A is the original, a package directory or a program (a `.go` file, or `F.go,G.go,...`: files of one
@@ -129,6 +132,64 @@ SPEC §4.2; cgo out of scope for every configuration, L3, SPEC §9.4.)
   directory and the programs that `go list -export F.go` compiles, which applies no build
   constraints to named files: 19 programs differed from the helper's list either way.) The list is
   written to `corpus-tests.txt`.
+
+## Directory tests
+
+Since 2026-10-17 (`bin/repr-go check --dirtests`, `bin/repr-go roundtrip --dirs`), the oracle
+also takes `$GOROOT/test`'s directory tests: a test `F.go` whose action is a `*dir` one, its
+packages the files of `F.dir`, which import each other by local paths (`"./a"`), so that the go
+command cannot build them as packages. `gocmp tests -dirs` lists them (one rule for the oracle's
+corpus and the helper's, `godump -dirs`, HELPER-NOTES.md "Directory tests"): the test files of
+the driver's directories whose action is `compiledir`, `rundir`, `builddir`, `buildrundir` or
+`runindir`, with no other `GOEXPERIMENT`, matched by go/build for the configuration. Left out:
+`errorcheckdir` (26) and `errorcheckandrundir` (5), error tests like the single-file
+`errorcheck` ones; the two runindir tests that need `GOEXPERIMENT=fieldtrack`; and those the
+configuration's build constraints exclude (`wasmmemsize.go`, `fixedbugs/issue19507.go` (arm),
+`issue47185.go` (cgo), and on tamago or arm64 `issue37513.go`, `linknameasm.go`,
+`issue74648.go`). For tamago/amd64 that is 253 tests (125 compiledir, 116 rundir, 2 builddir,
+3 buildrundir, 7 runindir), linux/amd64 254 (4 buildrundir), tamago/arm64 and linux/arm64 251
+(2 buildrundir, 6 runindir); `gocmp tests -v -dirs` says why each other one is left out.
+
+`gocmp -dirtest F.go B` compares the test with a candidate directory `B` (the candidate's
+`test/F.dir`) as Go's test driver compiles it (`cmd/internal/testdir`, go1.27.1: `goDirPackages`,
+`compileInDir`, the importcfg, `linkFile`, the cases `builddir` and `runindir`):
+
+- **compiledir, rundir:** the directory's `.go` files grouped into packages by their package
+  clause, in file order (each file its own package with the action's `-s`); each package
+  compiled by `go tool compile -e -D test -importcfg CFG -p P`, `P` `test/STEM` (its first
+  file's name without `.go`, which `"./a"` resolves to under `-D test`) or `main`, in that
+  order, each side against its own earlier packages. **builddir, buildrundir:** every `.go`
+  file as one package `main` (`-D .`), with the directory's assembly (`go tool asm
+  -gensymabis`, the compiler's `-symabis` and `-asmhdr`; for the program, `asm`, `pack` and
+  `link` as the driver does). Both sides are compiled from the canonical layout (flattened
+  copies, unless `-keep-positions`) positioned at the original's directory (`-trimpath
+  COPY=>ORIG`), with the action line's compiler flags (`-l=4`, `-c=2`), `-S` and
+  `-d=syncframes=0`; the standard library from one importcfg of `go list -export
+  -gcflags=all=-d=syncframes=0 std` for the configuration (written once per run by `bin/repr-go
+  check`, `GOCMP_STDCFG`). The export data and the code are compared per package, by gc's path.
+- **runindir:** the driver copies `F.dir` into a module of its own, named by the directory's
+  base name, `go` line 1.14 (or the action's `-gomodversion`), and runs `go run .` there. gocmp
+  makes that copy for each side (the candidate's with its printed `.go` files in place of the
+  original's, both flattened), lists both with `go list -export -deps -trimpath ./...` (so that
+  positions are module-relative on both sides, and the build cache's replay is guarded as for
+  packages), and compares the export data and `-S` listings of every package of the module.
+- **The level `run`** (only `-dirtest`'s): for `rundir`, `buildrundir` and `runindir`, both
+  sides linked (or built) from their own positions, not the canonical layout (a test may check
+  its own line numbers: `fixedbugs/issue29919.go` checks `runtime.Callers`' lines), run in their
+  directory with the action's arguments, and the candidate's output compared with `F.out`
+  (empty when there is none), as the driver's `checkExpectedOutput`; `skip` when the original
+  does not give the expected output, for the actions that only compile, and where the
+  configuration does not run on this machine (tamago; linux/arm64 on amd64 runs through
+  `GOCMP_EXEC`, a command prefix such as the driver's `go_GOOS_GOARCH_exec`: `bin/repr-go check`
+  sets `qemu-aarch64` when it is installed). The level relies on the printed lines being the
+  original's, as the `:lines` layout keeps them ("Positions" below).
+
+The tree level compares every file of every package, as for packages. The results' kind is
+`:dirtest`, keyed by `F.go`; the work directory `.tmp/repr-go-check/GOOS-GOARCH-dirtests/`.
+The identity candidate (`--make identity`) passes every level of every test in the four
+configurations, and hand-made mutations of a dependency package (a reordered operand: tree;
+a statement added: tree, export, code) and of a runindir test's main (a changed argument:
+tree, code and run) are caught; `--mutations` does not take directory tests.
 
 ## Level 1: the trees
 

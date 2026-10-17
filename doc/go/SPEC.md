@@ -231,13 +231,21 @@ replaced by `.` and, inside a path element, `.` and `-` replaced by `_`:
 | `main` packages (`cmd/gofmt`) | `go.cmd.gofmt` | |
 | the external test package of `fmt` (`fmt_test`, §15 Q14) | `go.fmt_test` | `go/fmt_test.ae`, `go/fmt_test/*.ae` |
 | a single-file program `$GOROOT/test/fixedbugs/bug257.go` | `go.test.fixedbugs.bug257` | |
+| a package of a directory test, `$GOROOT/test/fixedbugs/issue10066.dir/a.go` (path `test/a`) | `go.test.fixedbugs.issue10066_dir.a` | |
 
 The path is kept exactly in `go/package` (§4.2). An external test package `p_test` has the
 path `p_test` and the namespace `go.<path>_test`, `<path>` mapped as above (amendment, accepted
 2026-10-08). A single-file program (`$GOROOT/test`) keeps the import path the go command gives
 it, `command-line-arguments`, in `:path`; its namespace is `go.test.` followed by the file's
 path relative to `$GOROOT/test` without `.go`, mapped as above (amendment, accepted
-2026-10-08). Two paths of one conversion that map to one namespace are a converter error (none
+2026-10-08). A package of a directory test of `$GOROOT/test` (`F.go` whose packages are the
+files of `F.dir`, HELPER-NOTES.md "Directory tests") keeps the path gc compiles it under, as Go's
+test driver compiles it: `test/STEM` (STEM its first file's name without `.go`) or `main`, or
+for a `runindir` test the module's import path (`issue29612.dir/p1/ssa`); its namespace is
+`go.test.` followed by `F.dir`'s path and the package's key in it, the first file's stem or
+the package's directory in the module, mapped as above (`go.test.fixedbugs.issue10066_dir.a`,
+`go.test.fixedbugs.issue29612_dir.p1.ssa`, the module's root `go.test.fixedbugs.issue29612_dir`;
+amendment D1, proposed 2026-10-17). Two paths of one conversion that map to one namespace are a converter error (none
 exists in the standard library). Layout follows Java forms §9.1: the package file holds the
 `ns` form, the `go/package` form and one `load` per Go file in the package's file order; each
 Go file `x.go` becomes `<pkg-dir>/x.ae`, or `<pkg-dir>/x.go.ae` when the package's source
@@ -305,6 +313,7 @@ packages of the module import each other by those paths, as in any module
 | `:other-files` | the non-Go files the build uses, copied by the printer: `.s`, `.h`, `.syso` (§9.5); one sorted vector, the union of the helper's separate lists |
 | `:embed-files` | the files matched by `//go:embed` patterns, with their SHA-256 (§9.6), the test files' included |
 | `:test-files` | when tests are converted, the package's `_test.go` files, loaded after `:files` (§15 Q14) |
+| `:local-imports` | the local import paths of the package's files (`"./a"`) and the paths they resolve to, a map: `{"./a" "test/a"}` (§4.3; amendment D1, proposed 2026-10-17) |
 | `:init-order` | go/types' `InitOrder` (§6.3) |
 | `:positions` | `:lines` (the default) or `:full` (§10) |
 
@@ -371,6 +380,13 @@ accepted 2026-10-08). `crypto/internal/fips140/mlkem`'s `mlkem768.go` has a `//g
 line between its package clause and its imports, so its `go/file` has
 `:imports [(go/directive "//go:generate go run generate1024.go ...") [bytes "bytes"] ...]`
 (the text shortened). The printer writes the directive where it stands.
+
+**Local import paths** (amendment D1, proposed 2026-10-17). A path that `go/build`'s
+`IsLocalImport` takes for local (`"./a"`, `"../b"`, as in `$GOROOT/test`'s directory tests) is
+kept verbatim in the spec, `[a "./a"]`, and printed as written. What it names is the package's
+`:local-imports` (§4.2): the path gc resolves it to, `"./a"` joined to gc's `-D` prefix (`test`
+for the test driver's compiles: `test/a`), which is the `:path` of the imported package. Names
+the converter qualifies by an imported package's path (§4.4) find the file's import through it.
 
 Imports are file-scoped, as in Go: `utf8/RuneLen` resolves through the imports of the file it is
 in, so two files may import different packages under one name. The forms do not use Clojure's
@@ -1363,7 +1379,9 @@ literal spellings (N4), no white space, and some positions the forms splice away
   the first target of a local `var`, `const` or `type` declaration its keyword and
   parentheses (`:tok-pos`, `:lparen`, `:rparen`); the first spec of each import declaration
   its keyword and parentheses, an import's explicit name its `:name-pos`, its path its
-  position.
+  position; a receive-only channel type's keyword `:chan` when white space separates it from
+  the arrow (`<- chan T`: go/ast keeps the arrow's position only, so the converter finds the
+  keyword in the source; amendment D2, proposed 2026-10-17).
 
 Not kept: an empty declaration group (`import ( )`, a local `var ()`), which declares nothing
 and has no element in the forms (3 programs of `$GOROOT/test`, test/repr/go/roundtrip-text-known.edn).
@@ -2433,6 +2451,11 @@ printer's over the helper's):
     accepted 2026-10-08: the text said one tree per architecture, of `tamago` only).
     *Recommendation: keep them separate; sharing is a later optimization (a diff of the trees
     shows what differs).* A program written as Go forms is one tree for every target (§4.2).
+
+**Amendments (2026-10-17, proposed).** Bringing `$GOROOT/test`'s directory tests into the round
+trip (ROUNDTRIP.md, "Directory tests") raised two, built as recommended and awaiting the user's
+decision: D1, the paths, namespaces and local imports of a directory test's packages (§4.1,
+§4.2, §4.3), and D2, the position of `chan` in `<- chan T` in mode `:full` (§10.2).
 
 ## 16. Sources
 

@@ -14,7 +14,9 @@
 #                                 outside cmd for GOOS/ARCH), test, test-arm64 ($GOROOT/test's
 #                                 single-file programs, the oracle's list, bin/repr-go check
 #                                 --list-tests, for amd64 or arm64), tests (std for GOOS/amd64
-#                                 with its _test.go files, godump -tests). Default: amd64 arm64
+#                                 with its _test.go files, godump -tests), dirtest,
+#                                 dirtest-arm64 ($GOROOT/test's directory tests, bin/repr-go
+#                                 check --list-dirtests: godump -dirs). Default: amd64 arm64
 #                                 test. E.g. linux-amd64, linux-test-arm64. cgo is off.
 #   bin/repr-go read --dump [--jobs N] [--quiet] FILE|DIR...
 #                                 read dumps with Arbace's reader (arbace.repr.go.read), print a
@@ -42,8 +44,14 @@
 #                                 tamago/amd64 with its _test.go files (corpus tests) into
 #                                 .tmp/repr-go/cand-tests, checked with bin/repr-go check --with-tests,
 #                                 reference test/repr/go/roundtrip-tests.edn, known differences
-#                                 (with reasons) test/repr/go/roundtrip-tests-known.edn
-#   bin/repr-go roundtrip --text [[GOOS/]ARCH] [--tests]
+#                                 (with reasons) test/repr/go/roundtrip-tests-known.edn.
+#                                 --dirs: $GOROOT/test's directory tests for GOOS/ARCH (corpus
+#                                 [linux-]dirtest[-arm64]: several packages each, local imports)
+#                                 into .tmp/repr-go/cand-dirtest-[GOOS-]ARCH, checked with
+#                                 bin/repr-go check --dirtests (levels tree, export, code, run),
+#                                 reference test/repr/go/roundtrip-dirtest-[GOOS-]ARCH.edn, known
+#                                 differences test/repr/go/roundtrip-dirtest-known.edn
+#   bin/repr-go roundtrip --text [[GOOS/]ARCH] [--tests|--dirs]
 #                                 the text level (doc/go/SPEC.md §3.1): convert the same corpora
 #                                 with --full, print them in the full layout into
 #                                 .tmp/repr-go/cand-text-[GOOS-]ARCH (or cand-text-tests) and compare
@@ -128,7 +136,15 @@ test_programs() {
   "$root/bin/repr-go" check --arch "$1" --list-tests
 }
 
-# corpus_config CORPUS: sets cgoos, cwhat (amd64, arm64, test, test-arm64, tests) and carch
+# The directory tests of $GOROOT/test for GOOS/ARCH (bin/repr-go check --list-dirtests, `gocmp
+# tests -dirs`): FILE.go whose action is compiledir, rundir, builddir or buildrundir, its
+# packages in FILE.dir. Prints one per line.
+dir_tests() {
+  "$root/bin/repr-go" check --arch "$1" --list-dirtests
+}
+
+# corpus_config CORPUS: sets cgoos, cwhat (amd64, arm64, test, test-arm64, tests, dirtest,
+# dirtest-arm64) and carch
 corpus_config() {
   cgoos=tamago
   cwhat=$1
@@ -137,9 +153,9 @@ corpus_config() {
     linux-*) cgoos=linux; cwhat=${1#linux-} ;;
   esac
   case $cwhat in
-    amd64|test|tests) carch=amd64 ;;
-    arm64|test-arm64) carch=arm64 ;;
-    *) echo "corpus: [linux-]amd64, arm64, test, test-arm64 or tests, not $1" >&2; return 2 ;;
+    amd64|test|tests|dirtest) carch=amd64 ;;
+    arm64|test-arm64|dirtest-arm64) carch=arm64 ;;
+    *) echo "corpus: [linux-]amd64, arm64, test, test-arm64, tests, dirtest or dirtest-arm64, not $1" >&2; return 2 ;;
   esac
 }
 
@@ -168,6 +184,11 @@ corpus() {
         REPR_GO_GOOS=$cgoos test_programs "$carch" > "$work/corpus/$name-programs.txt"
         (cd "$goroot/test" && xargs -a "$work/corpus/$name-programs.txt" \
            env GOROOT="$goroot" "$helper" -go "$goroot/bin/go" -goos "$cgoos" -goarch "$carch" -files -o "$out") \
+          > "$out.tsv" || true ;;
+      dirtest|dirtest-arm64)
+        REPR_GO_GOOS=$cgoos dir_tests "$carch" > "$work/corpus/$name-list.txt"
+        (cd "$goroot/test" && xargs -a "$work/corpus/$name-list.txt" \
+           env GOROOT="$goroot" "$helper" -go "$goroot/bin/go" -goos "$cgoos" -goarch "$carch" -dirs -o "$out") \
           > "$out.tsv" || true ;;
     esac
     t1=$(date +%s.%N)
@@ -230,11 +251,13 @@ convert() {
   fi
 }
 
-# roundtrip_text GOOS ARCH PREFIX WITH_TESTS: the text level (roundtrip --text)
+# roundtrip_text GOOS ARCH PREFIX WITH_TESTS DIRS: the text level (roundtrip --text)
 roundtrip_text() {
-  local goos=$1 arch=$2 prefix=$3 with_tests=$4 cand status=0 s t0 t1 known
+  local goos=$1 arch=$2 prefix=$3 with_tests=$4 dirs=$5 cand status=0 s t0 t1 known
   known=$root/test/repr/go/roundtrip-text-known.edn
-  if [ -n "$with_tests" ]; then
+  if [ -n "$dirs" ]; then
+    cand=$root/.tmp/repr-go/cand-text-dirtest-$prefix$arch
+  elif [ -n "$with_tests" ]; then
     [ "$goos/$arch" = tamago/amd64 ] || { echo "roundtrip --text --tests: tamago/amd64 only (the corpus tests)" >&2; return 2; }
     cand=$root/.tmp/repr-go/cand-text-tests
   else
@@ -242,7 +265,9 @@ roundtrip_text() {
   fi
   rm -rf "$cand"
   t0=$(date +%s.%N)
-  if [ -n "$with_tests" ]; then
+  if [ -n "$dirs" ]; then
+    if [ "$arch" = arm64 ]; then set -- "${prefix}dirtest-arm64"; else set -- "${prefix}dirtest"; fi
+  elif [ -n "$with_tests" ]; then
     set -- tests
   else
     local tests=test
@@ -259,12 +284,12 @@ roundtrip_text() {
     [ $s -eq 0 ] || status=1
   done
   t1=$(date +%s.%N)
-  printf 'roundtrip --text %s: %.1f s\n' "$goos/$arch${with_tests:+ with tests}" "$(echo "$t1 - $t0" | bc)"
+  printf 'roundtrip --text %s: %.1f s\n' "$goos/$arch${with_tests:+ with tests}${dirs:+, directory tests}" "$(echo "$t1 - $t0" | bc)"
   return $status
 }
 
 roundtrip() {
-  local goos=tamago arch=amd64 record="" cand ref t0 t1 t2 status with_tests="" check prefix text=""
+  local goos=tamago arch=amd64 record="" cand ref t0 t1 t2 status with_tests="" check prefix text="" dirs=""
   while [ $# -gt 0 ]; do
     case $1 in
       amd64|arm64) arch=$1; shift ;;
@@ -273,7 +298,8 @@ roundtrip() {
       --record) record=1; shift ;;
       --tests) with_tests=1; shift ;;
       --text) text=1; shift ;;
-      *) echo "roundtrip: [[GOOS/]amd64|arm64] [--goos tamago|linux] [--tests] [--record] [--text], not $1" >&2; return 2 ;;
+      --dirs) dirs=1; shift ;;
+      *) echo "roundtrip: [[GOOS/]amd64|arm64] [--goos tamago|linux] [--tests|--dirs] [--record] [--text], not $1" >&2; return 2 ;;
     esac
   done
   case $goos in
@@ -281,8 +307,9 @@ roundtrip() {
     linux) prefix=linux- ;;
     *) echo "roundtrip: GOOS tamago or linux, not $goos" >&2; return 2 ;;
   esac
+  [ -n "$dirs" ] && [ -n "$with_tests" ] && { echo "roundtrip: --tests or --dirs, not both" >&2; return 2; }
   if [ -n "$text" ]; then
-    roundtrip_text "$goos" "$arch" "$prefix" "$with_tests"
+    roundtrip_text "$goos" "$arch" "$prefix" "$with_tests" "$dirs"
     return
   fi
   cand=$root/.tmp/repr-go/cand-$prefix$arch
@@ -293,6 +320,11 @@ roundtrip() {
     cand=$root/.tmp/repr-go/cand-tests
     ref=$root/test/repr/go/roundtrip-tests.edn
     check+=(--with-tests --no-tests --known "$root/test/repr/go/roundtrip-tests-known.edn")
+  fi
+  if [ -n "$dirs" ]; then
+    cand=$root/.tmp/repr-go/cand-dirtest-$prefix$arch
+    ref=$root/test/repr/go/roundtrip-dirtest-$prefix$arch.edn
+    check+=(--dirtests --known "$root/test/repr/go/roundtrip-dirtest-known.edn")
   fi
   rm -rf "$cand"
   t0=$(date +%s.%N)
@@ -306,7 +338,11 @@ roundtrip() {
       return 1
     fi
   }
-  if [ -n "$with_tests" ]; then
+  if [ -n "$dirs" ]; then
+    local dt=dirtest
+    [ "$arch" = arm64 ] && dt=dirtest-arm64
+    converted --corpus "$prefix$dt" --print "$cand" || return 1
+  elif [ -n "$with_tests" ]; then
     converted --corpus tests --print "$cand" || return 1
   else
     local tests=test
@@ -325,7 +361,7 @@ roundtrip() {
     "${check[@]}" "$cand" || status=$?
   fi
   t2=$(date +%s.%N)
-  printf 'roundtrip %s: convert and print %.1f s, check %.1f s\n' "$goos/$arch${with_tests:+ with tests}" \
+  printf 'roundtrip %s: convert and print %.1f s, check %.1f s\n' "$goos/$arch${with_tests:+ with tests}${dirs:+, directory tests}" \
     "$(echo "$t1 - $t0" | bc)" "$(echo "$t2 - $t1" | bc)"
   return $status
 }

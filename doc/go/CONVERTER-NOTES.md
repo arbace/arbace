@@ -334,8 +334,37 @@ programs without `-complete`, as Go's test driver does, and takes programs of se
 2 programs whose action line is `//run` without a space, which the helper's old reading
 missed.
 
+### Directory tests (2026-10-17)
+
+`bin/repr-go roundtrip --dirs [[GOOS/]ARCH]` takes `$GOROOT/test`'s directory tests: the corpus
+`[linux-]dirtest[-arm64]` (`godump -dirs`, HELPER-NOTES.md "Directory tests"; one dump per
+package of each test), converted and printed into `.tmp/repr-go/cand-dirtest-[GOOS-]ARCH`, then
+`bin/repr-go check --dirtests` (each test compiled package by package as Go's test driver
+compiles it, and run: ROUNDTRIP.md "Directory tests") against the reference
+`test/repr/go/roundtrip-dirtest-[GOOS-]ARCH.edn` and the known differences
+`test/repr/go/roundtrip-dirtest-known.edn` (none). `--text --dirs` is their text level. What the
+converter needed (amendments D1 and D2, proposed 2026-10-17, SPEC §4.1-§4.3, §10.2): a dump with
+`:dir-test` is a program like a single-file one, its namespace from its dump's path
+(`go.test.fixedbugs.issue10066_dir.a`), the other packages of its test mapped to theirs
+(`types/*namespaces*`, for the names it qualifies by namespace); a file's local import paths are
+resolved through the dump's `:local-imports` for the names it qualifies by import (`a/T` for a
+type of `test/a` imported as `"./a"`), and the map is the package's `:local-imports`; in mode
+`:full`, a receive-only channel type spelled `<- chan T` gets the position of its `chan`, found
+in the source (go/ast has the arrow's only), so that the printer keeps the space (2 files of
+`import2.dir`). The `:lines` output of every other corpus is unchanged.
+
+| configuration | tests (packages, files) | tree pass/fail/err | export pass/fail/err/skip | code pass/fail/err/skip | run pass/fail/err/skip | text (files: byte-identical) |
+|---|---:|---|---|---|---|---|
+| tamago/amd64 | 253 (561, 586) | 253 / 0 / 0 | 253 / 0 / 0 / 0 | 253 / 0 / 0 / 0 | 0 / 0 / 0 / 253 | 586: 586 |
+| tamago/arm64 | 251 (559, 584) | 251 / 0 / 0 | 251 / 0 / 0 / 0 | 251 / 0 / 0 / 0 | 0 / 0 / 0 / 251 | 584: 584 |
+| linux/amd64 | 254 (562, 587) | 254 / 0 / 0 | 254 / 0 / 0 / 0 | 254 / 0 / 0 / 0 | 127 / 0 / 0 / 127 | 587: 587 |
+| linux/arm64 | 251 (559, 584) | 251 / 0 / 0 | 251 / 0 / 0 / 0 | 251 / 0 / 0 / 0 | 124 / 0 / 0 / 127 | 584: 584 |
+
+The level run is skip for tamago (it does not run on this machine) and for the tests that only
+compile (125 compiledir, 2 builddir); linux/arm64 runs through qemu-aarch64. Each configuration
+takes about 10 s (dump under a second, convert and print 3 s, check 3 to 9 s).
+
 ## What remains
 
 - Mode `:full` is written but not consumed by the printer yet: columns would make the
   positions (and `-keep-positions`' last differences) exact.
-- Directory tests of `$GOROOT/test` (several packages each) are in neither corpus.

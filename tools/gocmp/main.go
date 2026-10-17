@@ -6,7 +6,8 @@
 //	gocmp [-go CMD] [-levels tree,export,code] [-keep-positions] A B
 //	gocmp reprint [-canon] SRCROOT DSTROOT
 //	gocmp mutate -op swap|const|drop [-seed N] A OUTDIR
-//	gocmp tests [-v] TESTDIR
+//	gocmp tests [-v] [-dirs] TESTDIR
+//	gocmp -dirtest [-levels tree,export,code,run] [-keep-positions] FILE.go B
 //
 // A is the original: a package directory, or a program of .go files of one
 // directory (F.go, or F.go,G.go,... with the other files' names relative to
@@ -27,6 +28,10 @@
 // -overlay, so both sides have the same import path, file names, flags and
 // dependencies (the original ones). Both sides compile from the canonical
 // layout of their tokens (flatten.go) unless -keep-positions is given.
+//
+// With -dirtest, A is a directory test of GOROOT/test (FILE.go, its packages in FILE.dir) and
+// B the candidate's directory of the same files; both are compiled as Go's test driver
+// compiles them, and the level run compares the candidate's output with FILE.out (dirtest.go).
 //
 // Diagnostic knobs: GOCMP_GCFLAGS (more compiler flags for the package
 // compared, both sides), GOCMP_KEEP=DIR (keep both -S listings as a.s, b.s),
@@ -58,6 +63,7 @@ var (
 	goCmd         string
 	keepPositions bool
 	withTests     bool
+	dirTestMode   bool
 )
 
 func defaultGo() string {
@@ -98,8 +104,10 @@ func usage(fs *flag.FlagSet, text string) func() {
 }
 
 const compareUsage = `usage: gocmp [-go CMD] [-levels tree,export,code] A B
+       gocmp -dirtest [-levels tree,export,code,run] FILE.go B
 
-A is the original package directory or .go file, B the candidate.
+A is the original package directory or .go file, B the candidate; with
+-dirtest, A is a directory test of GOROOT/test and B the candidate's FILE.dir.
 Exit status: 0 equal, 1 different, 2 error, 3 A does not build.
 `
 
@@ -109,6 +117,7 @@ func mainCompare(args []string) int {
 	levels := fs.String("levels", "tree,export,code", "levels to compare: tree, export, code (comma-separated) or all")
 	fs.BoolVar(&keepPositions, "keep-positions", false, "compile with the sources' own positions (default: flattened; the code level then ignores DWARF)")
 	fs.BoolVar(&withTests, "tests", false, "a package directory with its _test.go files: the trees of all, and the export data and code of the package and its test variants (go list -test)")
+	fs.BoolVar(&dirTestMode, "dirtest", false, "A is a directory test FILE.go of GOROOT/test (FILE.dir), B the candidate's directory; adds the level run")
 	fs.Usage = usage(fs, compareUsage)
 	fs.Parse(args)
 	if fs.NArg() != 2 {
@@ -122,13 +131,27 @@ func mainCompare(args []string) int {
 			want["tree"], want["export"], want["code"] = true, true, true
 		case "tree", "export", "code":
 			want[l] = true
+		case "run":
+			if !dirTestMode {
+				fmt.Fprintln(os.Stderr, "gocmp: the level run is -dirtest's")
+				return 2
+			}
+			want[l] = true
 		default:
 			fmt.Fprintf(os.Stderr, "gocmp: unknown level %q\n", l)
 			return 2
 		}
 	}
-	res := compare(fs.Arg(0), fs.Arg(1), want)
-	for _, l := range []string{"tree", "export", "code"} {
+	var res *result
+	if dirTestMode {
+		res = compareDirTest(fs.Arg(0), fs.Arg(1), want)
+		if stdcfgTemp != "" {
+			os.Remove(stdcfgTemp)
+		}
+	} else {
+		res = compare(fs.Arg(0), fs.Arg(1), want)
+	}
+	for _, l := range []string{"tree", "export", "code", "run"} {
 		if r, ok := res.status[l]; ok {
 			if msg := res.msg[l]; msg != "" {
 				fmt.Printf("%s: %s\n%s\n", l, r, indent(msg))
@@ -139,7 +162,7 @@ func mainCompare(args []string) int {
 	}
 	var parts []string
 	code := 0
-	for _, l := range []string{"tree", "export", "code"} {
+	for _, l := range []string{"tree", "export", "code", "run"} {
 		r, ok := res.status[l]
 		if !ok {
 			continue

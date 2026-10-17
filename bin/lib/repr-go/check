@@ -18,6 +18,12 @@
 #     extra files its action line names) against the same files. The list is written to
 #     the work directory (corpus-tests.txt).
 # --list-tests prints that list and exits.
+# With --dirtests, the corpus is instead GOROOT/test's directory tests for the configuration
+# (gocmp tests -dirs; --list-dirtests prints them): FILE.go whose action is compiledir, rundir,
+# builddir or buildrundir, against CANDIDATE/test/FILE.dir, compared by gocmp -dirtest (both
+# sides compiled package by package as Go's test driver compiles them), at the levels tree,
+# export, code and run (the candidate run, its output compared with FILE.out, when the
+# configuration runs on this machine; ROUNDTRIP.md, "Directory tests").
 # --make writes a candidate made without forms: identity (a copy of the .go files of
 # GOROOT/src and GOROOT/test), reprint (gocmp reprint: go/printer over the trees without
 # comments or positions, the directives kept) or canon (gocmp reprint -canon: reprint after
@@ -29,7 +35,8 @@
 # Options:
 #   --goos tamago|linux  GOOS (default $REPR_GO_GOOS, else tamago); cgo is off (CGO_ENABLED=0)
 #   --arch amd64|arm64   GOARCH (default $REPR_GO_GOARCH, else amd64); also GOOS/GOARCH, both at once
-#   --levels L,...       tree, export, code (default all three)
+#   --levels L,...       tree, export, code (default all three), and run with --dirtests (its
+#                        default: all four)
 #   -j N                 parallel comparisons (default the number of cores)
 #   --only REGEX         only the corpus entries (import paths, test paths) matching REGEX
 #   --no-tests           packages only; --no-packages: tests only
@@ -43,10 +50,14 @@
 #   --known FILE         the known differences, with their reasons (test/repr/go/roundtrip-known.edn):
 #                        failing levels listed there are expected (reported, not failures);
 #                        failing levels not listed are reported as unexpected
+#   --dirtests           the directory tests only (above); work directory GOOS-GOARCH-dirtests
 #   --list-tests         print the test programs of the corpus for the configuration, exit
+#   --list-dirtests      print the directory tests for the configuration, exit
 #   --ops OPS --seed N   for --mutations (default swap,const,drop and 1)
 # Environment: ARBACE_GOROOT (default /root/tamago-go: TamaGo's go1.27.1, which builds linux too),
-# REPR_GO_GOOS (default tamago), REPR_GO_GOARCH;
+# REPR_GO_GOOS (default tamago), REPR_GO_GOARCH; GOCMP_EXEC, a command running the programs of
+# another GOARCH for --dirtests' level run (default for linux/arm64 on amd64: qemu-aarch64, when
+# installed);
 # REPR_GO_GOCMP_FLAGS, more flags for gocmp (e.g. -keep-positions).
 # Output under .tmp/repr-go-check/GOOS-GOARCH/: results.edn (read by the Clojure reader: one
 # entry per line, [:package|:test PATH {:tree :pass ...} "first line of the difference"]),
@@ -60,7 +71,7 @@ root=$(cd "$(dirname "$0")/../../.." && pwd)
 goroot=${ARBACE_GOROOT:-/root/tamago-go}
 goos=${REPR_GO_GOOS:-tamago}
 goarch=${REPR_GO_GOARCH:-amd64}
-levels=tree,export,code
+levels=
 jobs=$(nproc)
 only=
 packages=1
@@ -69,6 +80,7 @@ reference=
 record=
 known=
 with_tests=
+dirtests=
 mode=check
 make_kind=
 ops=swap,const,drop
@@ -91,7 +103,9 @@ if [ "${1:-}" = "--worker" ]; then
     esac
   fi
   start=$(date +%s%N)
-  "$GOCMP" ${REPR_GO_GOCMP_FLAGS:-} -levels "$REPR_GO_LEVELS" "$a" "$b" > "$log" 2>&1
+  dirflag=
+  [ "$kind" = dirtest ] && dirflag=-dirtest
+  "$GOCMP" ${REPR_GO_GOCMP_FLAGS:-} $dirflag -levels "$REPR_GO_LEVELS" "$a" "$b" > "$log" 2>&1
   status=$?
   ms=$(( ($(date +%s%N) - start) / 1000000 ))
   result=$(grep '^RESULT ' "$log" | tail -1 | cut -c8-)
@@ -118,12 +132,14 @@ while [ $# -gt 0 ]; do
     --no-tests) tests=0; shift ;;
     --no-packages) packages=0; shift ;;
     --with-tests) with_tests=1; shift ;;
+    --dirtests) dirtests=1; shift ;;
     --reference) reference=$2; shift 2 ;;
     --record) record=$2; shift 2 ;;
     --known) known=$2; shift 2 ;;
     --make) mode=make; make_kind=$2; shift 2 ;;
     --mutations) mode=mutations; shift ;;
     --list-tests) mode=list-tests; shift ;;
+    --list-dirtests) mode=list-dirtests; shift ;;
     --ops) ops=$2; shift 2 ;;
     --seed) seed=$2; shift 2 ;;
     -h|--help) sed -n '2,/^set -uo/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'; exit 0 ;;
@@ -138,7 +154,17 @@ case $goos/$goarch in
 esac
 go=$goroot/bin/go
 [ -x "$go" ] || { echo "no Go toolchain at $goroot (set ARBACE_GOROOT)" >&2; exit 2; }
-work=$root/.tmp/repr-go-check/$goos-$goarch${with_tests:+-tests}
+if [ -z "$levels" ]; then
+  levels=tree,export,code
+  [ -n "$dirtests" ] && levels=tree,export,code,run
+fi
+if [ -n "$dirtests" ]; then
+  [ -n "$with_tests" ] && { echo "--dirtests or --with-tests, not both" >&2; exit 2; }
+  [ "$mode" = mutations ] && { echo "--mutations: packages and test programs only, not --dirtests" >&2; exit 2; }
+  packages=0
+  tests=0
+fi
+work=$root/.tmp/repr-go-check/$goos-$goarch${with_tests:+-tests}${dirtests:+-dirtests}
 if [ -n "$with_tests" ]; then
   export REPR_GO_GOCMP_FLAGS="${REPR_GO_GOCMP_FLAGS:-} -tests"
 fi
@@ -159,6 +185,13 @@ list_tests() {
 }
 if [ "$mode" = list-tests ]; then
   list_tests
+  exit
+fi
+list_dirtests() {
+  "$GOCMP" tests -dirs "$goroot/test"
+}
+if [ "$mode" = list-dirtests ]; then
+  list_dirtests
   exit
 fi
 
@@ -201,6 +234,20 @@ if [ $tests = 1 ]; then
   list_tests > "$tlist" || { echo "cannot list the test programs" >&2; exit 2; }
   while read -r f; do printf 'test\t%s\t%s\n' "${f%%,*}" "$f"; done < "$tlist" >> "$corpus"
 fi
+if [ -n "$dirtests" ]; then
+  dlist=$work/corpus-dirtests.txt
+  list_dirtests > "$dlist" || { echo "cannot list the directory tests" >&2; exit 2; }
+  while read -r f; do printf 'dirtest\t%s\t%s\n' "$f" "$f"; done < "$dlist" >> "$corpus"
+  # the level run of linux/arm64 on an amd64 machine: through qemu's user mode, when installed
+  if [ "$goos" = linux ] && [ "$goarch" = arm64 ] && [ "$(uname -m)" = x86_64 ] && [ -z "${GOCMP_EXEC:-}" ] &&
+     command -v qemu-aarch64 > /dev/null; then
+    export GOCMP_EXEC=qemu-aarch64
+  fi
+  # the standard library's importcfg, once for every comparison (gocmp -dirtest)
+  export GOCMP_STDCFG=$work/std.importcfg
+  "$go" list -export -gcflags=all=-d=syncframes=0 -f '{{if .Export}}packagefile {{.ImportPath}}={{.Export}}{{end}}' std \
+    > "$GOCMP_STDCFG" || { echo "cannot list the standard library's export data" >&2; exit 2; }
+fi
 if [ -n "$only" ]; then
   awk -F'\t' -v re="$only" '$2 ~ re' "$corpus" > "$corpus.only" && mv "$corpus.only" "$corpus"
 fi
@@ -219,6 +266,7 @@ run_corpus() {
     {
       id = tag "-" $1 "-" $2; gsub(/[\/ ]/, "_", id)
       if ($1 == "package") { a = goroot "/src/" $3; b = cand "/src/" $3 }
+      else if ($1 == "dirtest") { a = goroot "/test/" $3; d = $3; sub(/\.go$/, ".dir", d); b = cand "/test/" d }
       else { a = goroot "/test/" $3; b = cand "/test/" $3 }
       m = (mut == "1") ? mutroot "/" id : ""
       print $1 "\t" $2 "\t" a "\t" b "\t" logs "/" id ".log\t" m
