@@ -662,3 +662,16 @@ to c2j with repr/clojure". Confirmed: `arbace.aot` builds on Clojure's `Compiler
 and writes Java forms where Clojure's back end writes bytecode; `ARBACE_AOT=1` already denotes
 the whole compiled pipeline. To do with c2a → `repr/clojure`, after F2 and before F3 and F4, one
 re-seed; `ARBACE_AOT` and `aot_arbace_*` kept (alternative: renamed too, churn in the seed only).
+
+## 2026-10-17: Go forms to be first-class at the REPL (the user)
+
+The user: "go forms should be first class citizens like arbace and java forms: interpreted in
+the repl. bring arbace/clojure, java and go forms to the same level in repl when it is
+appropriate. haskell forms are good as data for now". Today Arbace forms are evaluated (the
+closure compiler's `Code` nodes, over the compiled program), Java forms are analyzed by
+`arbace.classes` and interpreted (`arbace.classes.interp`, classes made at run time), and Go
+forms are data only (read, transformed, printed by repr/go, built by Go's toolchain). Next: a
+survey of Go forms at the REPL (an interpreter of Go forms beside the compiled path through
+`repr/go print` and Go's compiler; their analysis; calls between the three dialects and the
+compiled program; prior art), then the build when the running work allows; Haskell forms stay
+data.

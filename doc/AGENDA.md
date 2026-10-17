@@ -94,6 +94,11 @@ The current state of the work. This file is rewritten as things change. For the 
 
 ## Next
 
+- The direction (the user, 2026-10-17): Go forms first-class at the REPL, interpreted like
+  Arbace and Java forms; the three dialects at the same level there "when it is appropriate";
+  Haskell forms stay data. First a survey (doc/GO-FORMS-REPL-SURVEY.md), then the build after
+  F2-F4 and the rename.
+
 - Done (2026-10-17): the rename (doc/NAMING-SURVEY.md, "The rename as built"): j2a → `repr/java`
   (`bin/repr-java`), g2a → `repr/go` (`bin/repr-go`), its build → `build/go` (`bin/build-go`),
   a2g → `j2g` (the printed `j2g_*` names, `J2G_*`), `G2A_GOROOT` → `ARBACE_GOROOT`, the old
