@@ -103,7 +103,12 @@ Prior art:
     as Go forms and back (spec `doc/go/SPEC.md`; mode `:full` keeps the text: comments,
     spellings, layout, printed back byte for byte; helpers `tools/godump`, `tools/gocmp`;
     `bin/repr-go read`, `print`, `roundtrip`, `check`, `test`), on the tools' host
-    (`REPR_GO_EXE` names another executable).
+    (`REPR_GO_EXE` names another executable); `arbace.repr.haskell` (`arbace/repr/haskell{.ae,/}`),
+    Haskell as Haskell forms and back (spec `doc/haskell/SPEC.md`, notes
+    `doc/haskell/HASKELL-NOTES.md`; helper `tools/hsdump` on the host's GHC, pinned by
+    `tools/hsdump/GHC_VERSION`; `bin/repr-haskell read`, `print`, `roundtrip`, `test`; corpus GHC
+    9.14.1's boot libraries, `test/haskell/corpus-ghc-9.14.1.edn`), evaluated from the checkout,
+    not embedded.
   - `arbace/build/`: `arbace.build.go`, the build of a program held as Go forms: printed by
     repr/go into a module with its overlay, then `go build` (`bin/build-go`, `doc/go/BUILD.md`).
   - `arbace/j2g/`: the Java forms → Go forms translator (spec `doc/go/J2G-SPEC.md`; `bin/j2g`),

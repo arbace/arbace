@@ -1,0 +1,58 @@
+#!/bin/bash
+# repr/haskell's own cases (bin/repr-haskell test; doc/haskell/HASKELL-NOTES.md, "Checks"):
+#   1. the reader's samples (test/haskell/reader-samples.txt, SPEC Appendix A, E1): read again by
+#      test/haskell/reader_samples.ae, the same as test/haskell/reader-samples.out;
+#   2. the worked example (SPEC Appendix B): test/haskell/sample/Shape.hs dumped by the helper and
+#      converted, the same forms as the spec's hand-written test/haskell/sample/Shape.ae (as data,
+#      its :config the keys the spec writes), and at the same lines;
+#   3. its round trip: printed (braces layout), parsed by GHC to the same tree and lines.
+# Usage: bin/lib/repr-haskell/test (from bin/repr-haskell test). Scratch in .tmp/repr-haskell/test.
+set -euo pipefail
+root=$(cd "$(dirname "$0")/../../.." && pwd)
+. "$root/bin/lib/tools.bash"
+"$root/bin/repr-haskell" helper
+helper=$root/.tmp/hsdump/hsdump
+libdir=$(ghc --print-libdir)
+work=$root/.tmp/repr-haskell/test
+rm -rf "$work"; mkdir -p "$work"
+fail=0
+
+echo "== 1. the reader's samples (test/haskell/reader-samples.txt)"
+(cd "$root" && arbace_tool test/haskell/reader_samples.ae test/haskell/reader-samples.txt) > "$work/reader-samples.out" 2>&1
+if diff -u "$root/test/haskell/reader-samples.out" "$work/reader-samples.out" > "$work/reader-samples.diff"; then
+  echo "ok: $(grep -c '=>\|!!' "$work/reader-samples.out") samples read as recorded"
+else
+  echo "FAIL: the reader's samples differ ($work/reader-samples.diff)"; fail=1
+fi
+
+echo "== 2. the worked example converted (test/haskell/sample/Shape.hs)"
+(cd "$root/test/haskell/sample" && "$helper" dump -o "$work/dumps" --libdir "$libdir" --ghc -haddock --files Shape.hs)
+(cd "$root" && arbace_tool -m arbace.repr.haskell read -o "$work/forms" "$work/dumps/Shape.hs.edn") > "$work/read.log"
+(cd "$root" && arbace_tool -e '
+(let [rd (fn [f] (let [r (arbace.lang.LineNumberingPushbackReader. (java.io.StringReader. (slurp f)))]
+                   (loop [acc []] (let [x (read {:eof ::e} r)] (if (= x ::e) acc (recur (conj acc x)))))))
+      spec (rd "test/haskell/sample/Shape.ae")
+      conv (rd "'"$work"'/forms/hs/Data/Shape.ae")
+      ;; the spec writes :config with fewer keys
+      trim (fn [f] (if (and (seq? f) (= (quote hs/module) (first f)))
+                     (let [v (vec f) i (.indexOf v :config) c (get v (inc i))]
+                       (with-meta (apply list (assoc v (inc i) (select-keys c (keys (get (vec (first (filter #(and (seq? %) (= (quote hs/module) (first %))) spec))) (inc i))))))
+                                  (meta f)))
+                     f))
+      conv (mapv trim conv)
+      bad (remove (fn [[a b]] (and (= a b) (= (:line (meta a)) (:line (meta b))))) (map vector spec conv))]
+  (doseq [[a b] bad] (println "spec:     " (:line (meta a)) (pr-str a)) (println "converted:" (:line (meta b)) (pr-str b)))
+  (if (and (empty? bad) (= (count spec) (count conv)))
+    (println "ok:" (count conv) "forms, as the spec writes them, at the same lines")
+    (do (println "FAIL: the converted forms differ from the spec'"'"'s") (System/exit 1))))') || fail=1
+
+echo "== 3. the worked example's round trip"
+(cd "$root" && arbace_tool -m arbace.repr.haskell print -o "$work/printed" "$work/forms/hs/Data/Shape.ae") > "$work/print.log"
+(cd "$root/test/haskell/sample" && "$helper" tree -o "$work/orig" --libdir "$libdir" --ghc -haddock --files Shape.hs)
+(cd "$work/printed" && "$helper" tree -o "$work/cand" --libdir "$libdir" --ghc -haddock --files Shape.hs)
+if cmp -s "$work/orig/Shape.hs.tree" "$work/cand/Shape.hs.tree" && cmp -s "$work/orig/Shape.hs.lines" "$work/cand/Shape.hs.lines"; then
+  echo "ok: the printed module parses to the same tree and lines ($(wc -l < "$work/orig/Shape.hs.lines") located nodes)"
+else
+  echo "FAIL: the printed module ($work/printed/Shape.hs) parses to another tree or other lines"; fail=1
+fi
+exit $fail

@@ -5,7 +5,10 @@ Status: draft for the user's review, 2026-10-17: milestone H0 of repr/haskell
 spec now, in parallel with F2; the build after it"). It is bound by the survey's decisions H1-H14
 (its section "Decided (2026-10-17, the user)"); the choices made while writing it are S1-S36
 (§11.1), the questions for the user HS1-HS12 (§11.2), each with the recommendation this text
-follows. Nothing of the bridge is built: no helper, converter or printer. The experiments that
+follows. Milestone R1 (§10.1) was built on 2026-10-17: the helper, the converter, the braces
+printer and the tree level over `base`, `ghc-internal`, `ghc-prim` and `ghc-bignum`, all 483
+modules equal; what it adds to this text and where it departs is §10.4 and
+[HASKELL-NOTES.md](HASKELL-NOTES.md). The experiments that
 validate the spec's choices (Appendix A) were run on the host's GHC 9.14.1 (Alpine's
 `ghc-9.14.1-r2`) and the stage 0 of main at `f0d7fc2f` (`target/seed/amd64/arbace`, amd64);
 their scripts and inputs are `test/haskell/`.
@@ -1139,7 +1142,7 @@ bin/repr-haskell test                       the spec's cases (test/haskell/)
 
 | | what | judge |
 |---|---|---|
-| R1 | the helper; the converter and the braces printer in `:lines`; `base`, `ghc-internal`, `ghc-prim`, `ghc-bignum` without CPP, then with CPP | tree level |
+| R1 | the helper; the converter and the braces printer in `:lines`; `base`, `ghc-internal`, `ghc-prim`, `ghc-bignum` without CPP, then with CPP (built 2026-10-17: 483 of 483 modules, §10.4) | tree level |
 | R2 | the interface level over R1's corpus | interface level |
 | R3 | `:full`: the helper's annotations and comments, the converter's metadata, the full printer | text level, tree level in `:full` |
 | R4 | the layout printer | tree and interface levels |
@@ -1208,6 +1211,31 @@ it meets it.
 Not in 9.14.1 (ghc-lisp's 10.1 has them): `HsQualLit`, the expression `HsStar`, `QualLitPat`,
 `ModifiedPat`, `IEWholeNamespace`; `PrefixCon` takes one argument in 9.14.1 and two in 10.1 (the
 survey's E3).
+
+### 10.4 As built: R1 (2026-10-17)
+
+[HASKELL-NOTES.md](HASKELL-NOTES.md) records the build; what it changes in this text:
+
+- **The printer's braces layout (§7.4, S14)** keeps two blocks in layout, the module's body (items
+  at column 1) and a class's body (column 3), with the lines inside them indented: GHC's Haddock
+  pass restricts the documentation comments a block takes by column only under virtual braces, so
+  with explicit braces a `-- |` after a class went into its body and a top-level `-- ^` after a
+  signature into its type. Every other block is braced.
+- **The lines (§7.1, §8.2, §9.2 N1)**: every form that stands for a located node carries its start
+  line, and `hsdump lines` lists the start line of every located node, compared position by
+  position (not only the nodes that begin a line). Metadata for the tokens the forms have no
+  element for: `:hs/eq` (the `=` or `->` of an unguarded right-hand side), `:hs/brace` (a block's or
+  a record's `{`, a pattern synonym's `where`), `:hs/paren` (the `(` of implicit parentheses on
+  another line), `^:hs/braces` (S12, for an empty `case` written `{}`); `:hs/breaks` entries are
+  always `[index line]`, also for a list's head.
+- **The tree level (§9.2 N3)** makes every `SourceText` `NoSourceText` before `showAstData`, whose
+  `numericLit` prints the source text of `HsIntPrim` and `HsWordPrim` literals.
+- **Forms the text does not give**: tuple and sum syntax in constructor declarations
+  (`(:tuple a b)`, `(:usum a :_)`); `(:doc-type T (:doc ...))` for documentation on a type no form
+  has an element for (none in the corpus); an infix left-hand side with constructor-chain operands
+  as one `:infix` (ghc-lisp S14); a `foreign import`'s `safe` kept when written.
+- **Commands (§9.6)**: `bin/repr-haskell helper`, `corpus fetch|list`, `dump`, `read`, `print`,
+  `roundtrip`, `test` as sketched; `check` (the interface level) is R2's.
 
 ## 11. Decisions and open questions
 
