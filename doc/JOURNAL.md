@@ -561,3 +561,13 @@ print later". It fits the bridges' principle once it has a `print` verb (Arbace 
 would let Arbace's libraries be used from Clojure, with a text round trip since c2a keeps layout
 and comments); without one it would stay a translator named c2a. To do: the rename (about 307
 occurrences in 44 files) at the next re-seed, F3 and F4's; `repr/clojure print` later.
+
+## 2026-10-17: repr/haskell decided; its spec started
+
+The survey's proposals (doc/REPR-HASKELL-SURVEY.md, "Decided"): H1-H12 and H14 as recommended
+(a bridge only, ghc-lisp's grammar respelled, a generic helper on the host's GHC with the
+converter and printer in Arbace, `hs.` namespaces and `hs/` heads, layout with `:lines` and
+`:full`, the tree, interface and text levels over `base` first, one configuration per
+conversion with CPP by the helper); H13 against the recommendation (after `repr/java print` and
+F2-F7): the spec now, beside F2, the build after it. Also: R4 done (`tamago/` converted again,
+the guests identical on amd64 and arm64, `819dccc`).

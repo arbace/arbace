@@ -636,3 +636,15 @@ main = do
 
 (The listing drops four unused imports of the measured file, `occNameString`, `intercalate`,
 `liftIO` and their modules; it compiles and behaves the same.)
+
+## Decided (2026-10-17, the user)
+
+H1 (a) a bridge only; H12 (a) no translator now; H2 (a) ghc-lisp's grammar, respelled; H3 (a)
+repr/go's rule plus a table, every bare name checked by reading it back; H4 (a) one namespace
+per module (`hs.Data.Map.Strict`), `hs/` heads at the top level, ghc-lisp's heads inside; H5 (a)
+a generic helper on GHC's API with the converter and printer in Arbace; H11 (a) the host's GHC,
+its version recorded and checked; H14 (a) ghc-lisp a reference, not a dependency; H6 (a) an
+Arbace printer with layout, explicit braces first; H7 (a) `:lines` and `:full`; H8 (a) the
+tree, interface and text levels first; H10 (a) `base` and the boot libraries first; H9 (a) one
+configuration per conversion, CPP run by the helper and recorded. H13: sooner than recommended:
+the spec now, in parallel with F2; the build after it.

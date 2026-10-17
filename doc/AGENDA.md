@@ -98,10 +98,11 @@ The current state of the work. This file is rewritten as things change. For the 
   (`bin/repr-java`), g2a → `repr/go` (`bin/repr-go`), its build → `build/go` (`bin/build-go`),
   a2g → `j2g` (the printed `j2g_*` names, `J2G_*`), `G2A_GOROOT` → `ARBACE_GOROOT`, the old
   variables guarded; "Java forms" in prose; c2a and `arbace.classes.*` unchanged; R1-R5 decided.
-  The seed remade (`56fabe20…`) and verified. Next: R4 (`tamago/` reconverted: `:go/label-line`
-  since the `:full` mode), then F2 and repr/go's directory tests side by side.
-- The survey of `repr/haskell` written (doc/REPR-HASKELL-SURVEY.md; ghc-lisp as prior art):
-  proposals H1-H14 open; recommended after `repr/java print` and F2-F7.
+  The seed remade (`56fabe20…`) and verified; R4 done (`tamago/` converted again, the guests
+  identical). Running: F2 and repr/go's directory tests side by side.
+- Running: `repr/haskell`'s spec (decided 2026-10-17, doc/REPR-HASKELL-SURVEY.md "Decided": a
+  bridge, ghc-lisp's grammar respelled, a helper on the host's GHC; the spec beside F2, the build
+  after it).
 - After the rename (the user, 2026-10-17: "Create jaf print after the naming debate settled"):
   `repr/java print`, Java's bridge printing back, class forms → Java source, with a round trip like
   repr/go's (Java → forms → Java → forms, the two forms equal; the text level as repr/go's
