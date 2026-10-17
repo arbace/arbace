@@ -72,9 +72,14 @@ kind, attributes on expressions, slice and box patterns) round-trips likewise (8
 
 ### The helper (SPEC §10)
 
-- Built by `bin/repr-rust helper`: the apks of `tools/rsdump/apks.sha256` fetched once into
-  `.tmp/repr-rust/apks/` (`apk fetch NAME=VERSION`, nothing installed), checked by their SHA-256 and
-  each extracted into its own directory; a sysroot of links (the host's
+- Built by `bin/repr-rust helper` (and by every verb that needs it, so that a fresh checkout's
+  `bin/repr-rust roundtrip` sets up `.tmp/repr-rust/` itself): the apks of
+  `tools/rsdump/apks.sha256` fetched once into `.tmp/repr-rust/apks/` (taken from
+  `REPR_RUST_APKS`, a local cache directory, when it holds them with the pinned hashes; else `apk
+  fetch NAME`, by name, since apk cannot select `NAME=VERSION` alone: the repositories' build must
+  be the pinned one, else the script refuses; nothing installed), checked by their SHA-256 and
+  each extracted into its own directory (checked 2026-10-17 in a fresh worktree with an empty
+  `.tmp/`: fetched in 8 s, the round trip and the test passed); a sysroot of links (the host's
   `/usr/lib/rustlib/x86_64-alpine-linux-musl/lib/*`, then `rustc-dev`'s 252 `.rmeta`/`.rlib` files
   and its `librustc_driver-61690d3e4c729118.so`, byte-identical to the host's) in
   `.tmp/repr-rust/sysroot/`; then `RUSTC_BOOTSTRAP=1 rustc --edition 2024 -O --sysroot ...
