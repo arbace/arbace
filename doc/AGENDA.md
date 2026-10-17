@@ -96,8 +96,10 @@ The current state of the work. This file is rewritten as things change. For the 
 
 - The direction (the user, 2026-10-17): Go forms first-class at the REPL, interpreted like
   Arbace and Java forms; the three dialects at the same level there "when it is appropriate";
-  Haskell forms stay data. First a survey (doc/GO-FORMS-REPL-SURVEY.md), then the build after
-  F2-F4 and the rename.
+  Haskell forms stay data. The survey written (doc/GO-FORMS-REPL-SURVEY.md): recommended
+  Arbace's own interpreter of Go forms (a type checker in Arbace, typed closures, a table of the
+  program's compiled packages), milestones GR0-GR6, 22-33 days; proposals G1-G17 open; the build
+  after F3, F4 and the renames.
 
 - Done (2026-10-17): the rename (doc/NAMING-SURVEY.md, "The rename as built"): j2a → `repr/java`
   (`bin/repr-java`), g2a → `repr/go` (`bin/repr-go`), its build → `build/go` (`bin/build-go`),

@@ -712,3 +712,24 @@ change the shipped program until the next re-seed. Decided: F2.1 (a), F2.2, F2.3
 recommended, and F2.4 with the rest of F2.6 fixed too (the user, against "leave recorded"). The
 next batch, under one re-seed: the rename (c2a → repr/clojure, arbace.aot → c2j), F3 and F4,
 and these fixes; then `bin/diffcheck` in the essential gate.
+
+## 2026-10-17: the survey of Go forms at the REPL
+
+Following the user's direction (entry above): doc/GO-FORMS-REPL-SURVEY.md (from the branch
+`go-forms-repl-survey`, `cf1052e`). Findings: Go forms do not run at the REPL today (the
+namespace `arbace.go` their heads name does not exist); values cross cheaply since the compiled
+program is Go (an Arbace value is a Go `any`); a Go type checker in Arbace is needed either way
+(the converter's annotations cover go/types' non-local answers only; estimated 5,000-8,000
+lines, against `arbace.classes.analyze`'s 4,375); stock `reflect` cannot make named types,
+methods or interfaces, and a static Arbace cannot `dlopen` (Go's `plugin` needs cgo), so the
+program's compiled packages are reached through a build-time table, as every Go interpreter
+does; `$GOROOT/test`'s programs, already converted by repr/go, are a ready conformance corpus
+(interpreted against printed and compiled: F2 extended to Go forms). Measured (ms, fib 22):
+gc 0.09-0.15, typed Go closures (a sketch) 5.5, the Java forms interpreter 6.8-7.0, Arbace's
+evaluator 8.4-8.6, yaegi v0.16.1 38.8, go/ssa/interp 75. Options: (a) Arbace's own interpreter
+(checker and node builder in Arbace, typed closures in hand-written Go forms as jrt is, a table
+of compiled packages), (b) an SSA-like IR, (c) yaegi embedded (stale upstream, its own checker,
+5.7 times slower than the Java forms interpreter on fib), (d) the compiled path only (a child
+process or tool guest; rebuild and restart; a loader of gc's objects). Recommended (a), with a
+`go/run-compiled` command (d1); milestones GR0-GR6, 22 to 33 working days; proposals G1-G17
+(cited as GR where the fixpoint's G1-G3 could be confused), open.
