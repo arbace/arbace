@@ -1,0 +1,180 @@
+#!/bin/bash
+# repr/java's round trip (doc/classes/PRINTER-NOTES.md, "The round trip"): Java -> forms F1 (repr/java
+# read, on the frozen JVM) -> Java (repr/java print, arbace.repr.java.print, on the tools' host) -> forms
+# F2 (read again), judged per converted file by arbace.repr.java.roundtrip at three levels: forms (F1's
+# and F2's files the same forms as data, metadata included), ae (the same text, byte for byte, after
+# the first line naming the Java file), classes (javac's class files of the original and of the
+# printed Java, -g:none, byte for byte). Writes under .tmp/repr-java-roundtrip/CORPUS/.
+#
+# Usage: bin/repr-java roundtrip [--corpus C,...] [--no-classes] [--record]
+#   --corpus     baseline (Clojure's Java, the frozen clojure/: 183 files), samples
+#                (test/repr/java/java and module), jdk (jdk/forms: java.base's closure, F1 the
+#                committed forms; its originals made by bin/jrt-convert's sources and generate
+#                steps). Default: baseline,samples
+#   --no-classes the forms and ae levels only
+#   --record     write each corpus's results as its reference, test/repr/java/roundtrip/CORPUS.edn,
+#                and its differences with their reasons, test/repr/java/roundtrip/CORPUS-known.edn
+# Each corpus's results are compared with its reference, test/repr/java/roundtrip/CORPUS.edn (an
+# entry and level passing there and not now fails the run); its known differences with their
+# reasons, CORPUS-known.edn, are expected. Results: .tmp/repr-java-roundtrip/CORPUS/results.edn.
+# Environment: REPR_JAVA_JVM_OPTS (bin/repr-java), JDK (jdk26u's checkout, default /root/jdk26u),
+# JRT_WORK_RT (the jdk corpus's originals, default .tmp/repr-java-roundtrip/jdk-originals).
+set -uo pipefail
+root=$(cd "$(dirname "$0")/../../.." && pwd)
+. "$root/bin/lib/renamed-env.bash" # stops on a stale G2A_*, J2A_* or A2G_*
+cd "$root"
+. bin/lib/tools.bash
+
+corpora=baseline,samples classes=1 record=
+while [ $# -gt 0 ]; do
+  case $1 in
+    --corpus) corpora=$2; shift 2 ;;
+    --no-classes) classes=; shift ;;
+    --record) record=1; shift ;;
+    *) sed -n '9,16p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2 ;;
+  esac
+done
+work=.tmp/repr-java-roundtrip
+ref=test/repr/java/roundtrip
+status=0
+
+# print F1 OUT: the forms into Java (on the tools' host)
+print() {
+  local t0=$SECONDS
+  arbace_tool -m arbace.repr.java.print --quiet --index jdk/forms "$1" "$2" | tail -3
+  echo "print: $((SECONDS - t0)) s"
+}
+
+# read NAME OUT ROOT [PATH...]: Java into forms, the first lines without ROOT's path
+read_forms() {
+  local name=$1 out=$2 src=$3 t0=$SECONDS
+  shift 3
+  bin/repr-java read --check "$out" "$src" "$@" | grep -v '^slowest' | grep -v '^arbace.edn' | tee "$work/$name.read.log"
+  find "$out" -name '*.ae' -exec sed -i "1s|^;; Converted from $src/|;; Converted from |" {} +
+  echo "read: $((SECONDS - t0)) s"
+}
+
+# compile OUT SRC [JAVAC-OPTION...]: every .java under SRC, -g:none (no LineNumberTable,
+# LocalVariableTable, SourceFile), into OUT
+compile() {
+  local out=$1 src=$2 t0=$SECONDS
+  shift 2
+  rm -rf "$out"; mkdir -p "$out"
+  (cd "$src" && find . -name '*.java' | sed 's|^\./||' | LC_ALL=C sort > "$root/$out.list" &&
+     javac -J-Xmx4g -Xmaxerrs 100000 -g:none -nowarn -XDsuppressNotes -proc:none -implicit:none -d "$root/$out" "$@" "@$root/$out.list") \
+     > "$out.log" 2>&1 || echo "javac failed in $src: $out.log ($(grep -c 'error:' "$out.log") errors)"
+  echo "javac $src: $(find "$out" -name '*.class' | wc -l) classes, $((SECONDS - t0)) s"
+}
+
+# compile_printed OUT PRINTED ORIGINAL [JAVAC-OPTION...]: the printed tree compiled; the files
+# javac rejects are listed in OUT.rejected and replaced by their originals (in a copy), so that
+# the other files' classes are compiled and compared all the same
+compile_printed() {
+  local out=$1 printed=$2 orig=$3 tree=$1.tree n
+  shift 3
+  compile "$out" "$printed" "$@"
+  cp "$out.log" "$out.first.log"
+  : > "$out.rejected"
+  rm -rf "$tree"; cp -r "$printed" "$tree"
+  # javac reports the errors of a phase at a time: again until it accepts the tree
+  for n in 1 2 3 4 5 6; do
+    grep -q 'error:' "$out.log" || break
+    grep -o '^[^ :]*\.java:[0-9]*: error:' "$out.log" | sed 's/:[0-9]*: error:$//; s|^\./||' |
+      sed "s|^$root/$printed/||; s|^$root/$tree/||" >> "$out.rejected"
+    sort -u -o "$out.rejected" "$out.rejected"
+    while read -r f; do cp "$orig/$f" "$tree/$f"; done < "$out.rejected"
+    echo "javac rejects $(wc -l < "$out.rejected") printed files ($out.rejected): compiled again with their originals"
+    compile "$out" "$tree" "${@//$printed/$tree}"
+  done
+}
+
+# judge NAME F1 F2 [C1 C2]
+judge() {
+  local name=$1 f1=$2 f2=$3 c1=${4:-} c2=${5:-} r=() o=()
+  [ -f "$ref/$name.edn" ] && [ -z "$record" ] && r=(--reference "$ref/$name.edn")
+  [ -n "$record" ] && o=(--record "$ref/$name.edn")
+  [ -n "$c1" ] && o+=(--c1 "$c1" --c2 "$c2" --rejected "$(cat "$w"/c2.rejected "$w"/c2/*.rejected 2>/dev/null | sort -u | tr '\n' ' ')"
+                     --javac-logs "$(ls "$w"/c2.first.log "$w"/c2/*.first.log 2>/dev/null | tr '\n' ' ')")
+  [ -n "$record" ] && o+=(--known-out "$ref/$name-known.edn")
+  arbace_tool -m arbace.repr.java.roundtrip compare --corpus "$name" --f1 "$f1" --f2 "$f2" \
+    --out "$work/$name/results.edn" --known "$ref/$name-known.edn" "${r[@]}" "${o[@]}" || status=1
+}
+
+for corpus in ${corpora//,/ }; do
+  w=$work/$corpus
+  rm -rf "$w"; mkdir -p "$w"
+  echo "== $corpus"
+  case $corpus in
+    baseline)
+      frozen=$(frozen_clojure) || exit 1
+      bin/repr-java read --check "$w/f1" "$frozen" clojure | grep -v '^slowest' | grep -v '^arbace.edn'
+      find "$w/f1" -name '*.ae' -exec sed -i "1s|^;; Converted from $frozen/|;; Converted from |" {} +
+      print "$w/f1" "$w/java"
+      # a Java file named like a .clj beside it converts to NAME_class.ae (SPEC §9.1): the .clj
+      # files that do so come along
+      (cd "$frozen" && find clojure -name '*.java') | while read -r f; do
+        [ -f "$frozen/${f%.java}.clj" ] && cp "$frozen/${f%.java}.clj" "$w/java/${f%.java}.clj"
+      done
+      read_forms baseline "$w/f2" "$root/$w/java" clojure
+      if [ -n "$classes" ]; then
+        compile "$w/c1" "$frozen" -sourcepath "$frozen"
+        compile_printed "$w/c2" "$w/java" "$frozen" -sourcepath "$root/$w/java"
+        judge baseline "$w/f1" "$w/f2" "$w/c1" "$w/c2"
+      else
+        judge baseline "$w/f1" "$w/f2"
+      fi ;;
+    samples)
+      for s in java module; do
+        bin/repr-java read --check "$w/f1/$s" "$root/test/repr/java/$s" | grep -v '^slowest' | grep -v '^arbace.edn'
+        find "$w/f1/$s" -name '*.ae' -exec sed -i "1s|^;; Converted from $root/test/repr/java/$s/|;; Converted from |" {} +
+        print "$w/f1/$s" "$w/java/$s"
+        read_forms samples-$s "$w/f2/$s" "$root/$w/java/$s"
+        [ -n "$classes" ] && { compile "$w/c1/$s" "test/repr/java/$s"; compile_printed "$w/c2/$s" "$w/java/$s" "test/repr/java/$s"; }
+      done
+      rm -f "$w"/f1/*/repr-java-report.edn "$w"/f2/*/repr-java-report.edn
+      if [ -n "$classes" ]; then
+        mkdir -p "$w/c1all" "$w/c2all"
+        for s in java module; do cp -r "$w/c1/$s/." "$w/c1all/"; cp -r "$w/c2/$s/." "$w/c2all/"; done
+        judge samples "$w/f1" "$w/f2" "$w/c1all" "$w/c2all"
+      else
+        judge samples "$w/f1" "$w/f2"
+      fi ;;
+    jdk)
+      jdk=${JDK:-/root/jdk26u}
+      orig=${JRT_WORK_RT:-$work/jdk-originals}
+      if [ -n "$classes" ] && [ ! -d "$orig/src/java.base" ]; then
+        echo "the originals: bin/jrt-convert's sources and generate steps into $orig"
+        JRT_WORK=$orig JRT_STEPS=sources,generate bin/jrt-convert > "$w/jrt.log" 2>&1 || { echo "bin/jrt-convert failed: $w/jrt.log"; status=1; continue; }
+      fi
+      cp -r jdk/forms "$w/f1"
+      print "$w/f1" "$w/java/java.base"
+      # the headers name each file as bin/jrt-convert's origins do (jdk/sources.txt)
+      while read -r _ kind rel; do
+        case $kind in
+          share) echo "\"$rel\" \"jdk26u src/java.base/share/classes/$rel\"" ;;
+          share:*) echo "\"$rel\" \"jdk26u src/${kind#share:}/share/classes/$rel\"" ;;
+          unix) echo "\"$rel\" \"jdk26u src/java.base/unix/classes/$rel\"" ;;
+          overlay) echo "\"$rel\" \"overlay/jdk/java.base/$rel\"" ;;
+          gensrc) echo "\"$rel\" \"jdk26u support/gensrc/java.base/$rel (generated by bin/jrt-convert)\"" ;;
+          gensrc:*) echo "\"$rel\" \"jdk26u support/gensrc/${kind#gensrc:}/$rel (generated by bin/jrt-convert)\"" ;;
+          jrtgen) echo "\"$rel\" \"$rel (generated by bin/jrt-convert)\"" ;;
+        esac
+      done < jdk/sources.txt | { echo "{"; cat; echo "}"; } > "$w/origins.edn"
+      t0=$SECONDS
+      (cd "$w" && REPR_JAVA_THREADS=4 REPR_JAVA_PATCH_ALL=1 REPR_JAVA_JVM_OPTS=${REPR_JAVA_JVM_OPTS:--Xmx8g} \
+         "$root/bin/repr-java" read-jdk --check --origins "$root/$w/origins.edn" "$root/$w/f2" java.base "$root/$w/java/java.base") \
+         > "$w/jdk.read.log" 2>&1
+      tail -1 "$w/jdk.read.log"; echo "read: $((SECONDS - t0)) s"
+      rm -f "$w"/f1/repr-java-report.edn "$w"/f2/repr-java-report.edn
+      if [ -n "$classes" ]; then
+        jopts=(-XDstringConcat=inline --enable-preview -source 26)
+        compile "$w/c1" "$orig/src/java.base" --patch-module "java.base=$root/$orig/src/java.base" "${jopts[@]}"
+        compile_printed "$w/c2" "$w/java/java.base" "$orig/src/java.base" --patch-module "java.base=$root/$w/java/java.base" "${jopts[@]}"
+        judge jdk "$w/f1" "$w/f2" "$w/c1" "$w/c2"
+      else
+        judge jdk "$w/f1" "$w/f2"
+      fi ;;
+    *) echo "unknown corpus $corpus" >&2; exit 2 ;;
+  esac
+done
+exit $status

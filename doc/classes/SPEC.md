@@ -3,7 +3,8 @@
 Status: accepted (2026-10-06), with the amendments found while implementing it folded in
 (2026-10-07 to 2026-10-09, §12). Implemented by `arbace/classes/` (the compiler, behind the
 special forms of `arbace.lang.Compiler` at every stage, the seed's stage 0 included, §9.5, §9.6)
-and `arbace/repr/java/` (the converter).
+and `arbace/repr/java/` (the converter, repr/java's `read`, and since 2026-10-17 its printer,
+`print`, §14).
 
 Since 2026-10-12 (standalone S4, doc/STANDALONE-NOTES.md, "S4: the JVM removed") main has no
 bytecode back end: the compiler's front end (`parse`, `lower`, `analyze`, `env`, `types`,
@@ -36,7 +37,8 @@ Words used throughout:
 
 Contents: 1 Principles · 2 A first example · 3 Equivalence · 4 Declarations · 5 Code ·
 6 What the compiler derives · 7 What the converter makes explicit · 8 Coverage ·
-9 Compilation model · 10 The REPL · 11 Worked examples · 12 Open questions · 13 Sources.
+9 Compilation model · 10 The REPL · 11 Worked examples · 12 Open questions · 13 Sources ·
+14 Printing Java forms as Java.
 
 ## 1. Principles
 
@@ -2109,3 +2111,34 @@ Studied for this spec:
 - The Java Virtual Machine Specification, chapter 4 (class file format, access flags,
   attributes), and the Java Language Specification: 5 (conversions), 13.1 (qualifying types),
   14 (statements), 15.29 (constant expressions), 8.10 and 9.6 (records, annotation types).
+
+## 14. Printing Java forms as Java
+
+repr/java's `print` (`arbace.repr.java.print`, `bin/repr-java print`, since 2026-10-17;
+[PRINTER-NOTES.md](PRINTER-NOTES.md)) writes Java forms as Java source. Its contract:
+
+1. **Compilable.** javac compiles the printed Java of the converter's output, with the
+   compiler options of the corpus it came from, into classes equivalent to the forms' (§3).
+2. **Converted back to the same forms.** repr/java's `read` of the printed Java gives the forms
+   printed, as data, metadata included: Java → forms → Java → forms is a fixpoint (the round
+   trip, `bin/repr-java roundtrip`). No normalization is applied.
+3. **What the forms do not hold is chosen, not recorded.** The forms keep no comments, layout or
+   spellings but integers' radixes (§5.4), and no record of the source's choices that javac
+   compiles to other code but that give the same forms: `c ? a : b` or an `if` returning,
+   statement or expression `switch`, `var` or a declared type of the same erasure, an
+   initializer of Java's default value, `i++` inside an expression or after it, raw or
+   parameterized local types. The printer writes one choice, the one that converts back to the
+   same forms; the class files are then javac's for that choice (the round trip's class level).
+4. **What §7 makes explicit stays explicit; what the converter added goes.** Casts, conversions
+   and pins the converter wrote because javac had them implicitly are left to javac where javac
+   inserts them again (erasure casts of arguments of generic methods, branch hints of
+   conditionals, the `float` promotion of comparisons, `MatchException`'s default); the
+   converter's temporaries become Java's operators again (§7.6); restructured control flow
+   becomes Java's (§7.10: `loop`/`recur` a `for`, folded `if`s an `if`/`else`).
+5. **Java's types where the forms have erasures.** Code positions carry erased types (§1,
+   principle 4); where javac needs a type argument back (a cast to `T`, to `List<T>`, a typed
+   `for` over a raw collection, a lambda's intersection type with its target's type arguments),
+   the printer writes a cast that erases to what the forms say, so that the forms are unchanged.
+   Where javac's typing needs more than that (inference from captured wildcard types, explicit
+   type arguments of calls), the printed Java is rejected: a known limit (PRINTER-NOTES.md, JP4).
+

@@ -13,7 +13,7 @@ CLOJURE_TESTS_GO ?= target/arbace-go/amd64/arbace-tests
   box box-smoke box-oracle box-suite box-tools box-rebuild mac-bundle arm64-vm-check \
   gate gate-full suite oracle diffcheck verify jdk-verify edge-verify fixtures-verify tamago-verify \
   toolchain-verify box-vendor-verify x509roots-verify repr-go-roundtrip repr-go-roundtrip-text \
-  repr-haskell-roundtrip repr-haskell-iface repr-haskell-test alpine-check clean \
+  repr-java-roundtrip repr-haskell-roundtrip repr-haskell-iface repr-haskell-test alpine-check clean \
   check-makefile
 
 help: ## list the targets
@@ -79,7 +79,7 @@ diffcheck: ## each language's two halves on the same forms: evaluated against co
 
 ## Vendored trees and recorded data, converted or recorded afresh and compared byte for byte
 VERIFY := jdk-verify edge-verify fixtures-verify tamago-verify toolchain-verify \
-  box-vendor-verify x509roots-verify repr-go-roundtrip repr-go-roundtrip-text
+  box-vendor-verify x509roots-verify repr-go-roundtrip repr-go-roundtrip-text repr-java-roundtrip
 verify: $(VERIFY) ## all of the below, one after another
 jdk-verify: ## jdk/'s forms by repr/java, on the frozen JVM (bin/jrt-convert verify)
 	bin/jrt-convert verify
@@ -110,6 +110,8 @@ repr-go-roundtrip-text: ## mode :full prints the original text back, byte for by
 	bin/repr-go roundtrip --text linux/amd64
 	bin/repr-go roundtrip --text --dirs amd64
 	bin/repr-go roundtrip --text --dirs linux/amd64
+repr-java-roundtrip: ## Java -> forms -> Java -> forms over Clojure's Java, the samples, jdk/forms (bin/repr-java roundtrip)
+	bin/repr-java roundtrip --corpus baseline,samples,jdk
 repr-haskell-roundtrip: ## Haskell -> forms -> Haskell over GHC 9.14.1's base, ghc-internal, ghc-prim, ghc-bignum: GHC's trees and lines (bin/repr-haskell roundtrip)
 	bin/repr-haskell roundtrip
 repr-haskell-iface: ## the same, then GHC's interfaces of the originals and the printed modules compiled, compared (bin/repr-haskell roundtrip --iface)

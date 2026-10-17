@@ -124,3 +124,13 @@ frozen_host() {
   j=$(frozen_jar) || return 1
   echo "$(basename "$j" .jar) $(sha256sum "$j" | cut -c1-64)"
 }
+
+# repr_java_reader_hash: the SHA-256 the provenance files (jdk/provenance.edn,
+# test/java-fixtures/provenance.edn) give repr/java as converter: of its reader's sources, what
+# converts Java into forms (arbace/repr/java.ae and convert, javac, jtypes, resolve, forms, names,
+# layout) and bin/repr-java; not the printer or the round trip's comparator, which change no forms
+# (PRINTER-NOTES.md, JP1). Run from the repository root.
+repr_java_reader_hash() {
+  (cd "$root" && for f in arbace/repr/java.ae arbace/repr/java/{convert,forms,javac,jtypes,layout,names,resolve}.ae bin/repr-java; do
+     echo "$f"; done | LC_ALL=C sort | xargs sha256sum | sha256sum | cut -c1-64)
+}
