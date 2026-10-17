@@ -1318,9 +1318,8 @@ there, open, built as recommended):
   (the direct dependencies of its `Cargo.toml` for the target; the sysroot's `.rlib`s are metadata
   stubs), its `--cfg` flags (std's `backtrace_in_libstd` of its `build.rs`; the features of rust's
   bootstrap for this target: std's `backtrace` and `panic-unwind`, proc_macro's default
-  `rustc-dep-of-std`; test's
-  `enable_unstable_features` is set by its `build.rs` only on a nightly or dev rustc) and
-  environment (std's `STD_ENV_ARCH`); and `-Zforce-unstable-if-unmarked`, as rust's bootstrap
+  `rustc-dep-of-std`; test's `enable_unstable_features` is set by its `build.rs` only on a nightly
+  or dev rustc) and environment (std's `STD_ENV_ARCH`); and `-Zforce-unstable-if-unmarked`, as rust's bootstrap
   documents the library (without it std's calls to its dependencies' `const fn`s are rejected).
 - **The printed side (§11.3)**: the library tree mirrored as symbolic links, each corpus file a
   link to its printed file (a file not printed is missing, and its crate fails), so that the files

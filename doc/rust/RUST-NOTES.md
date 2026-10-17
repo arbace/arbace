@@ -342,8 +342,9 @@ bin/repr-rust test                   # case 5: the interface level's normalizati
 
 The report is `.tmp/repr-rust/iface/rustc-1.99.1.report.edn`; rustdoc's logs are
 `.tmp/repr-rust/iface/rustc-1.99.1/{orig,cand}/C/C.log`, its JSON stays there for a crate that
-differs. `bin/repr-rust roundtrip --iface && bin/repr-rust test` is the step `repr-rust` of `bin/gate
---full` (about 1.5 minutes).
+differs. `bin/repr-rust roundtrip --iface && bin/repr-rust test`, the step `repr-rust` of `bin/gate
+--full`, took 151 s on the gate's stage 0 with the host busy with other builds (the rustdoc runs
+39 s), about 90 s on a quieter host.
 
 ### Choices for the user (RR-P4, RR-P5; open, built as recommended)
 
