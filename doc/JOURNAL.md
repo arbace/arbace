@@ -538,3 +538,29 @@ user: R1 (repr/java's `.ae` writer renamed `layout` with `repr/java print`), R2,
 in java-surface.edn, a record of removed stages), R4, R5 (the checks as verbs of one command).
 The seed remade from the merge's G3: `56fabe20...` (was `b566d53a...`), 5,530,756 bytes,
 verified (the same archive printed again at `8c3a289`; stage 0 = G1 = G2 = G3, `79eb9ef9...`).
+
+## 2026-10-17: F2 built, the per-form differential checks
+
+As decided (doc/FUTAMURA-SURVEY.md, "Decided", F2 (a)), on the branch `f2-diff` from `d652647`:
+`bin/diffcheck` (`make diffcheck`; `test/diffcheck/`: `gen.ae`, `driver.ae`, `main.ae`, the
+exclusions and `known.edn`), a step of `bin/gate --full`. Design (survey, "F2 as built"): a
+program built for the check from the gate's executable, carrying both halves: the oracle's forms
+(53 corpus files, 11,758 cases) each a namespace of one `(diffcheck.driver/case ...)` macro per
+case, compiled by the back end with the runtime's namespaces into one tree and also evaluated,
+the two runs compared case by case; and the Java forms of defclass.ae, defclass_corpus.ae,
+native.ae and j2g's fixtures (713 cases; 134 classes given to j2g) interpreted against
+translated by j2g, the same evaluated cases calling them. Alternatives considered: the Java
+forms the back end emits run by the interpreter (cheaper, no Go build, but not the compiled
+build's path); the corpora compiled into the test build (Clojure's suite would run on a program
+twice its size); a compiling run per corpus file (no cross-file state at analysis, but 50 runs
+of the runtime's compilation). Found and fixed in `arbace/aot/emit.ae`: compiled `import`'s
+value (nil, where the evaluator and the JVM give the class; 21 cases) and a deftype's `this` in a
+fn's code (every compiled defrecord failed j2g's analysis); the shipped program changes in the
+back end and its import units only, no re-seed. Found and recorded: j2g's bugs with anonymous
+classes taking constructor arguments, a Go name collision for a reify in a nested anonymous fn,
+the stub of an unimplemented method throwing UnsupportedOperationException, an abstract class's
+constructors missing from reflection, Clojure constants in class bodies; the interpreter's
+lambdas without default methods; the back end's limits (code forms in fns, deftypes and reifys;
+namespaces of one segment; a proxy made at run time first). 12,449 of 12,471 cases agree, the
+22 others recorded with reasons; about 5 minutes from the gate's executable, 40 s cached.
+Proposals F2.1-F2.6 (survey) are the user's.

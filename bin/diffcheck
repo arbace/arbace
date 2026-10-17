@@ -1,0 +1,125 @@
+#!/bin/bash
+# The per-form differential check (Futamura proposal F2 (a); doc/FUTAMURA-SURVEY.md, "F2 as
+# built"): each language's two hand-written halves compared on the same forms, in one program.
+#   Clojure's pair    the oracle's forms (test/oracle/forms, forms/harvest), each corpus file a
+#                     namespace, evaluated (the evaluator, its closure compiler) against the same
+#                     namespace compiled by the back end (arbace.aot, then j2g) into the program
+#   the Java forms'   the Java forms of defclass.ae, defclass_corpus.ae and j2g's fixtures
+#   pair              (test/j2g/fixtures, their cases), interpreted (arbace.classes.interp)
+#                     against translated by j2g into the program, the same Clojure cases calling
+#                     them
+# result by result, case by case, against the known disagreements test/diffcheck/known.edn.
+#
+# Usage: bin/diffcheck [-j JOBS] [--timeout S] [--write-expected] [SEL...]
+#   SEL      parts of corpus paths (forms/numbers, harvest/, fixtures); default all
+#   --write-expected  rewrite test/diffcheck/known.edn from this run (the reasons of the cases
+#            still disagreeing kept, new ones given a placeholder)
+# Steps (doc/FUTAMURA-SURVEY.md, "F2 as built"):
+#   1. the gate's executable (bin/arbace-go --gate-build: cached, a hit after bin/gate), whose
+#      runtime is the checkout's: it runs the steps below
+#   2. test/diffcheck/gen.ae writes the corpora's namespaces and Java forms (.tmp/diffcheck/gen)
+#   3. the executable prepares the runtime's namespaces and the corpora's (ARBACE_COMPILE, as
+#      bin/arbace-go's host compile) and arbace.aot compiles them all (.tmp/diffcheck/aot)
+#   4. j2g translates the program with that tree and the Java forms (.tmp/diffcheck/j2g), and
+#      bin/build-go builds it: .tmp/diffcheck/arbace-diff (not shipped, not the test build)
+#   5. test/diffcheck/main.ae runs each corpus twice on it and compares (.tmp/diffcheck/check.txt)
+# Steps 2-4 are cached in .tmp/diffcheck, keyed by the executable and the check's sources
+# (test/diffcheck, the corpora); the build uses Go's build cache and repr/go's print cache.
+# Environment: ARBACE_GOROOT (TamaGo's Go, default /root/tamago-go). Logs in .tmp/diffcheck/.
+set -uo pipefail
+export CGO_ENABLED=0 # Go's builds never use cgo (doc/go/BOX-NOTES.md, "... cgo dropped", 2026-10-16)
+root=$(cd "$(dirname "$0")/.." && pwd)
+. "$root/bin/lib/renamed-env.bash" # stops on a stale G2A_*, J2A_* or A2G_*
+cd "$root"
+work=$root/.tmp/diffcheck
+known=$root/test/diffcheck/known.edn
+args=() write=
+while [ $# -gt 0 ]; do
+  case $1 in
+    --write-expected) write=1; shift ;;
+    -j|--timeout) args+=("$1" "$2"); shift 2 ;;
+    -h|--help) sed -n '2,/^set -/p' "$0" | sed '$d; s/^# \{0,1\}//' >&2; exit 2 ;;
+    *) args+=("$1"); shift ;;
+  esac
+done
+since() { echo "$(( $(date +%s) - $1 )) s"; }
+t00=$(date +%s)
+mkdir -p "$work"
+
+# 1. the gate's executable
+bin/arbace-go --gate-build > "$work/gate-build.log" 2>&1 \
+  || { tail -20 "$work/gate-build.log"; echo "diffcheck: bin/arbace-go --gate-build failed" >&2; exit 1; }
+exe=$root/.tmp/arbace-go-gate/amd64/arbace
+
+key=$( { sha256sum < "$exe"
+         find test/diffcheck/driver.ae test/diffcheck/gen.ae test/diffcheck/excluded.edn test/diffcheck/jforms-excluded.edn test/oracle/forms test/oracle/driver.ae test/oracle/runner.ae test/j2g/fixtures \
+              test/j2g/fixtures.edn -type f | LC_ALL=C sort | xargs -d '\n' sha256sum
+         sha256sum bin/diffcheck; } | sha256sum | cut -c1-64)
+if [ -x "$work/arbace-diff" ] && [ "$(cat "$work/key" 2>/dev/null)" = "$key" ]; then
+  echo "diffcheck: the cached diff build (key ${key:0:12})"
+else
+  rm -f "$work/key" "$work/arbace-diff"
+  # 2. the corpora's sources
+  t0=$(date +%s)
+  ARBACE_PATH=$root/test "$exe" -m diffcheck.gen "$work/gen" > "$work/gen.log" 2>&1 \
+    || { tail -20 "$work/gen.log"; echo "diffcheck: test/diffcheck/gen.ae failed" >&2; exit 1; }
+  cat "$work/gen.log"
+  # 3. compiled by the back end, with the runtime's namespaces (as the build compiles them: one
+  # tree, each source in its own id space, so the runtime's part is the shipped build's)
+  t0=$(date +%s)
+  nss=$(ARBACE_PATH=$root "$exe" -e '(require (quote arbace.j2g.embed) (quote arbace.string))
+(doseq [[p text] (sort (arbace.j2g.embed/sources "."))
+        :when (and (arbace.string/starts-with? p "arbace/") (arbace.string/ends-with? p ".ae") (re-find #"(?m)^\(ns( |$)" text))]
+  (println (-> (subs p 0 (- (count p) 3)) (arbace.string/replace "/" ".") (arbace.string/replace "_" "-"))))' | tr '\n' ' ') \
+    || { echo "diffcheck: the runtime's namespaces not listed" >&2; exit 1; }
+  srcs=$(tr '\n' ' ' < "$work/gen/compiled.txt")
+  rm -rf "$work/aot"
+  cat > "$work/compile.ae" <<EOF
+(doseq [n (quote [$nss])]
+  (try (require n) (catch Throwable e (println "image: not prepared:" n (.getMessage e)))))
+;; a corpus's (shutdown-agents) would stop the agents of the corpora loaded after it: kept
+;; for the end
+(def real-shutdown-agents shutdown-agents)
+(alter-var-root (var shutdown-agents) (constantly (fn [] nil)))
+(doseq [s (quote [$srcs])]
+  (try (load (str "/" s)) (catch Throwable e (println "diffcheck: not loaded:" s (.getMessage e)))))
+(require (quote arbace.aot.main))
+(let [srcs (remove #{"oracle/driver.ae" "diffcheck/driver.ae"}
+                   (distinct (map #(aget ^objects % 0) (arbace.lang.Compiler\$AST/units))))
+      r (arbace.aot.main/run "$work/aot" srcs)]
+  (println "aot:" (count (:compiled r)) "sources compiled," (:classes r) "classes;" (count (:failed r)) "failed")
+  (doseq [[s m] (:failed r)] (println "aot: not compiled:" s m)))
+(real-shutdown-agents)
+EOF
+  env GOGC=400 ARBACE_COMPILE=1 ARBACE_NO_AOT=1 ARBACE_NO_IMAGE=1 ARBACE_PATH_FIRST=1 \
+    ARBACE_PATH="$root:$work/gen/src:$root/test" ARBACE_AOT_ROOT="$root" ARBACE_PREPARE="$work/compile.image" \
+    "$exe" "$work/compile.ae" > "$work/compile.log" 2>&1 \
+    || { tail -20 "$work/compile.log"; echo "diffcheck: the compiling failed ($work/compile.log)" >&2; exit 1; }
+  grep '^aot:\|^diffcheck: not\|^image: not' "$work/compile.log"
+  [ -f "$work/aot/packages.edn" ] || { echo "diffcheck: nothing compiled ($work/compile.log)" >&2; exit 1; }
+  if grep -q '^aot: not compiled: dcf/' "$work/compile.log"; then
+    echo "diffcheck: a corpus was not compiled by the back end ($work/compile.log)" >&2; exit 1
+  fi
+  echo "   compiled: $(since "$t0")"
+  # 4. j2g and the build
+  t0=$(date +%s)
+  J2G_GO_EXE=$exe REPR_GO_EXE=$exe bin/j2g --program --input "$work/gen/jforms" --input "$work/aot" --out "$work/j2g" \
+    > "$work/j2g.log" 2>&1 || { tail -20 "$work/j2g.log"; echo "diffcheck: j2g failed ($work/j2g.log)" >&2; exit 1; }
+  grep '^j2g: .*classes analyzed\|^j2g: error' "$work/j2g.log" | head -20
+  echo "   j2g: $(since "$t0")"
+  t0=$(date +%s)
+  overlay=$(bin/jrt overlay | tail -1) || exit 1
+  REPR_GO_EXE=$exe bin/build-go --line-file --arch amd64 --work "$work/work" -o "$work/arbace-diff" \
+    --print-cache "$root/.tmp/repr-go-print-cache" --overlay "$overlay" --root "$root/x509roots" "$work/j2g/prog" \
+    > "$work/build.log" 2>&1 || { grep -v '^==' "$work/build.log" | tail -20; echo "diffcheck: the build failed ($work/build.log)" >&2; exit 1; }
+  echo "   build-go: $(since "$t0")"
+  echo "$key" > "$work/key"
+fi
+
+# 5. each corpus twice, compared
+t0=$(date +%s)
+if [ -n "$write" ]; then exp=(--write-expected "$known"); else exp=(--expected "$known"); fi
+ARBACE_PATH=$root/test "$exe" -m diffcheck.main run "$work/arbace-diff" "$work/gen" "${args[@]}" "${exp[@]}"
+st=$?
+echo "diffcheck: the runs in $(since "$t0"), all in $(since "$t00")"
+exit $st

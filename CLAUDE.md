@@ -181,7 +181,11 @@ Prior art:
   `--text amd64`: mode `:full` printed back to the original text, byte for byte), the
   box's vendoring checks (`bin/box-vendor roundtrip`, `kvm-tests`, `purego-check`),
   `bin/tamago-vendor verify`, `bin/x509roots-vendor verify`, `check`; Go's toolchain as forms
-  (`bin/toolchain-vendor verify`, `check`). Run it when the Java forms'
+  (`bin/toolchain-vendor verify`, `check`); the per-form differential check (`bin/diffcheck`,
+  Futamura F2, doc/FUTAMURA-SURVEY.md "F2 as built": the oracle's forms evaluated against
+  compiled by the back end, the Java forms interpreted against translated by j2g, in a program
+  built for it from the gate's executable, against `test/diffcheck/known.edn`; about 5 minutes,
+  40 s cached). Run it when the Java forms'
   front end, repr/java, repr/go, j2g or jrt change (after a change to `overlay/jdk/java.base`, jrt's closure
   or repr/java, `bin/jrt-convert update` first; after a change to what j2g asks of the JVM,
   `bin/j2g-edge update`). Logs in `.tmp/gate/`. Every gate run and every `bin/arbace-go --build`
