@@ -584,7 +584,7 @@ wraps it, `(:sig (T a) K)` (ghc-lisp S8).
 | GHC | form |
 |---|---|
 | `DataDecl` | `(hs/data :ctype? head-or-ctx con* deriving*)`, `head-or-ctx` the head or `(=> ctx+ head)` |
-| H98 constructor | `C`, `(C T*)`, `(:infix T1 :+ T2)`, record `(C (:sig f g T)+)`, no fields `(:rec C)` (S12); existentials `(forall tv+ (=> ctx+ con))`; a field type wrapped in `(! T)`, `(:lazy T)`, `(:unpack T)`, `(:nounpack T)`; a multiplicity `(:sig f (:mod m T))` |
+| H98 constructor | `C`, `(C T*)`, `(:infix T1 :+ T2)`, record `(C (:sig f g T)+)`, no fields `(:rec C)` (S12); built-in syntax as the constructor (HR5): `()`, `(:tuple a b)` for `(a, b)`, `(:utuple a b)`, `(:usum a :_)` for `(# a | #)`; existentials `(forall tv+ (=> ctx+ con))`; a field type wrapped in `(! T)`, `(:lazy T)`, `(:unpack T)`, `(:nounpack T)`; a multiplicity `(:sig f (:mod m T))` |
 | GADT body | `(where (:sig C+ type)*)`; a record GADT constructor `(:sig C (-> (:record (:sig f T)+) R))` (S13); `(:paren ...)` for a parenthesized GADT signature |
 | `type data` | `(hs/type data head con*)` |
 | `newtype` | `(hs/newtype head-or-ctx con deriving*)` |
@@ -816,7 +816,7 @@ ghc-lisp's §7 with the respellings applied. Kinds are types.
 | `HsStarTy` | `*` (`StarIsType`) | |
 | `HsKindSig` | `(:sig T K)` | |
 | `HsSpliceTy` | `(:splice e)`, `(:qq q "text")` | |
-| `HsDocTy` | the type followed by `(:doc :prev "text")` (§4.12) | |
+| `HsDocTy` | the type followed by `(:doc :prev "text")` (§4.12), an element of the arrow, tuple, deriving list, constructor or synonym the type is in; elsewhere `(:doc-type T (:doc ...))` (HR5) | |
 | `HsExplicitListTy`, `HsExplicitTupleTy` | `'[T*]`, `[T T+]` (two or more elements, unpromoted); `'(:tuple T*)` | |
 | `HsTyLit` | `42`, `"sym"`, `\c` (§3.5) | |
 | `HsWildCardTy` | `_` | |
@@ -838,17 +838,27 @@ E3). The forms keep positions in one of two modes (H7), recorded as `hs/module`'
 Positions are lines, carried by the layout of the forms text, as Go forms' `:lines` (Go SPEC
 §10.1):
 
-- **The forms file has the Haskell file's lines.** The converter writes each form that begins a
-  Haskell line on that line of the `.ae` file. A Haskell file never has fewer lines than its
+- **The forms file has the Haskell file's lines.** Every form that stands for a located node
+  carries the node's start line, and the converter writes it on that line of the `.ae` file (HR3),
+  so that the reader's `:line` of every list is its node's; a list's head is not moved to its
+  line (an operator's head stands where Haskell writes the first operand) and gets its line as a
+  symbol's or a literal's below. A Haskell file never has fewer lines than its
   forms need, since any form can be written on one line. `ns` shares the line of the first form
   (the first header pragma, or `hs/module`); `hs/module` begins on the line of the `module`
   keyword, its exports on their lines, and its options with no Haskell position (`:file`,
   `:config`, `:cpp`) after the last export, on the line of `where`.
 - The reader attaches `:line` to every list. **Symbols and vectors** that begin a Haskell line
   get it written: `^{:line 5} area`. A **literal** or keyword that begins a Haskell line is
-  recorded in its parent's `:hs/breaks`, a vector of the child indexes (by `nth`, the head 0) that
-  begin a line, an entry `[index line]` when the line is a later one than the next (Go's
-  `:go/breaks`).
+  recorded in its parent's `:hs/breaks`, a vector of entries `[index line]` (by `nth`, the head 0;
+  HR3), also for a head literal or keyword whose line is not its list's (Go's `:go/breaks`).
+  `()`, which the reader gives no line, gets `^{:line N}` like a symbol.
+- **Token lines** (HR3): the located nodes that begin with a token the forms have no element for
+  get their line in metadata on the form that has the token: `:hs/eq` on an equation, a case
+  alternative or a lambda, the line of the `=` or `->` of an unguarded right-hand side when it is
+  not the form's; `:hs/brace` on a record constructor (its `{`), a `case`, `\case`, `do` or a
+  pattern synonym's `where` (the line its located list of items begins on) when it is not the first
+  item's; `:hs/paren` on a form whose implicit parentheses begin on another line than it;
+  `^:hs/braces` (S12) on a `case` or `\case` without alternatives whose source wrote `{}`.
 - **Lists placed after their line** carry an explicit `:line`, which the reader keeps over its own
   (Go SPEC §10.1): the case of a form that must follow another the Haskell line puts before it.
 - **The lines of the end of a node** (a multi-line span's last line) reach run-time messages
@@ -925,8 +935,13 @@ The printer writes Haskell from forms with no knowledge but the forms (it resolv
 one of three layouts (H6):
 
 1. **Braces** (the first milestone, S14): every block in explicit braces and semicolons,
-   `module M (...) where {`, `do {`, `let {`, `where {`, `of {`, a class or instance body's
-   `where {`, with a `;` between items. GHC parses it to the same tree after `eraseEpLayout`,
+   `do {`, `let {`, `where {`, `of {`, an instance body's `where {`, with a `;` between items,
+   **except the module's body and a class's body**, which are in layout (HR2): their items at
+   column 1 and 3, each on a line of its own (a `;` only between two items on one line), the lines
+   inside an item indented further (2 and 5). GHC's Haddock pass restricts the documentation
+   comments a block takes by their column only under virtual braces (`addHaddockInterleaveItems`,
+   `mkDocDecl`), and it interleaves only these two blocks: under explicit braces a `-- |` after a
+   class goes into the class body and a top-level `-- ^` after a signature into its type. GHC parses it to the same tree after `eraseEpLayout`,
    which is what the tree level compares (check-ppr's method, §9.3). In mode `:lines` each form
    that carries a line is printed on that line (Haskell's tokens can always share a line, except
    after a `--` comment, which the printer does not write in this layout); a form whose line was
@@ -985,7 +1000,8 @@ as unknown ones), not the helper (survey §3.2 (b)).
 `hsdump tree [--lines|--full] FILE`: the tree level's normal form of a module (§9.2), the text of
 `showAstData BlankSrcSpan BlankEpAnnotations` after `eraseEpLayout` with the normalizations of mode
 `:lines`, or `showAstData NoBlankSrcSpan NoBlankEpAnnotations` (what `-ddump-parsed-ast` prints)
-for `:full`, and `hsdump lines FILE`, the start line of every located node that begins a line. The
+for `:full`, and `hsdump lines FILE`, the start line of every located node, in the tree's order,
+with its constructor (HR3: the two lists compared position by position). The
 comparison is a text comparison of two such outputs, so no separate comparator program is needed
 (S15; repr/go has `tools/gocmp` because its levels need gc's object files read).
 
@@ -1058,7 +1074,7 @@ NoBlankEpAnnotations`). In mode `:lines`:
 
 | N | difference | how it is normalized |
 |---|---|---|
-| N1 | spans | blanked (`BlankSrcSpan`); instead, `hsdump lines` compares the start lines of the located nodes that begin a line |
+| N1 | spans | blanked (`BlankSrcSpan`); instead, `hsdump lines` compares the start lines of every located node (HR3) |
 | N2 | exact-print annotations: token positions, Unicode spelling, comments, explicit braces against layout | blanked (`BlankEpAnnotations`) after `eraseEpLayout` |
 | N3 | source texts: literal spellings (`IL`'s, `FL`'s `SourceText`, strings', characters'), pragma openers (ghc-lisp's N2), the spelling of `StringLiteral`s (foreign entities, rule names, warning texts) | every `SourceText` blanked to `NoSourceText` |
 
@@ -1259,7 +1275,7 @@ alternatives).
 | S11 | `:full`'s position keys: `:span` plus tokens by name, a per-constructor table kept with the GHC version (§7.2) | GHC's annotation types change across releases |
 | S12 | `^:hs/braces` in `:lines` as a layout hint (§7.2) | the layout printer can keep the source's choice at no cost to the tree level |
 | S13 | Columns as GHC counts them (code points, tab stops of 8); tabs in `:hs/space` (§7.2) | GHC's lexer |
-| S14 | The braces layout as the printer's first milestone, `{-# LINE #-}` for overflow (§7.4) | H6 (c) first; GHC's tree equal after `eraseEpLayout` |
+| S14 | The braces layout as the printer's first milestone, `{-# LINE #-}` for overflow (§7.4); the module's and the classes' bodies in layout (HR2) | H6 (c) first; GHC's tree equal after `eraseEpLayout`; GHC's Haddock pass |
 | S15 | One helper with verbs `dump`, `tree`, `lines`; no comparator program (§8.2) | the levels compare text |
 | S16 | `::` is `:sig` inside, `hs/sig` at top level (§3.4) | one word for every use of `::`; HS1 |
 | S17 | `\` is `:lambda`, `\case` `:lambda-case`, `\cases` `:lambda-cases` (§3.4) | keyword heads never collide with names (ghc-lisp D1) |
@@ -1560,3 +1576,9 @@ literals exact (HS3); the corpus from GHC 9.14.1's source tarball, pinned by SHA
 `.hsc` and `.lhs` in R6 (HS5); no resolved fixities now (HS6); an optional `{-# LINE #-}` to the
 `.ae` file (HS7); the helper written anew after check-ppr (HS8); Alpine's GHC with version
 checks (HS9); `hs.main.<path>` (HS10); converted forms not tracked (HS11); `-haddock` on (HS12).
+
+On R1 as built (2026-10-17, the user): HR1-HR5 as recommended (doc/haskell/HASKELL-NOTES.md,
+"Decided"): repr/haskell not embedded in the executable (HR1); the module's and the classes'
+bodies in layout in the braces printer (HR2, §7.4, S14); every located node's line compared and
+the `:lines` metadata keys of §7.1 (HR3); `bin/repr-haskell roundtrip` and `test` in `bin/gate
+--full` (HR4); built-in syntax in constructor declarations and `(:doc-type ...)` (HR5, §4.3, §6).

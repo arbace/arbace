@@ -185,8 +185,9 @@ Prior art:
   (`bin/arbace-go --build --box`, `bin/tamago-vendor check`), the box's smoke test, its oracle's
   subset and `bin/box-suite`, then
   `bin/arbace-go --fixpoint`; repr/go's round trips (`bin/repr-go roundtrip amd64`, `linux/amd64`, and
-  `--text amd64`: mode `:full` printed back to the original text, byte for byte), the
-  box's vendoring checks (`bin/box-vendor roundtrip`, `kvm-tests`, `purego-check`),
+  `--text amd64`: mode `:full` printed back to the original text, byte for byte), repr/haskell's
+  (`bin/repr-haskell roundtrip`: GHC's trees and lines over GHC 9.14.1's boot libraries, and
+  `test`; on the host's GHC), the box's vendoring checks (`bin/box-vendor roundtrip`, `kvm-tests`, `purego-check`),
   `bin/tamago-vendor verify`, `bin/x509roots-vendor verify`, `check`; Go's toolchain as forms
   (`bin/toolchain-vendor verify`, `check`); the per-form differential check (`bin/diffcheck`,
   Futamura F2, doc/FUTAMURA-SURVEY.md "F2 as built": the oracle's forms evaluated against

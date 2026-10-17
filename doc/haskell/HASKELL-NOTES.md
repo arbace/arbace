@@ -5,6 +5,17 @@ departs from or adds to the spec, with the reasons. R1 was built on 2026-10-17 (
 `repr-haskell-r1`, from main at `82345a08`), on the host's GHC 9.14.1 (Alpine's `ghc-9.14.1-r2`,
 its `ghc` library `ghc-9.14.1-f453`) and stage 0 of that commit.
 
+## Decided (2026-10-17, the user)
+
+HR1-HR5 as recommended: HR1 repr/haskell stays out of the executable (excluded by
+`arbace/j2g/embed.ae`, evaluated from the checkout, as built); HR2 the spec amended for the
+layout of the module's and the classes' bodies in the braces printer (S14, §7.4); HR3 the
+stricter lines check (every located node) and the `:lines` metadata keys (`:hs/eq`, `:hs/brace`,
+`:hs/paren`, `^:hs/braces`, `:hs/breaks` as `[index line]`) adopted into the spec proper; HR4
+`bin/repr-haskell roundtrip` and `test` a step of `bin/gate --full` (`repr-haskell`, beside
+repr/go's); HR5 the constructor-declaration forms for tuple and sum syntax and the `(:doc-type
+...)` fallback adopted into the spec.
+
 ## R1: the helper, the converter, the braces printer, the tree level
 
 ### What was built
