@@ -609,3 +609,20 @@ later derivation can be proven against what exists. The proposals:
   6108, `Evaluator`, `AST`, `Code*` from 10198), `arbace/lang/go/CompilerOps.ae`,
   `arbace/aot/emit.ae`, `arbace/aot/main.ae`, `arbace/classes/interp.ae`, `arbace/a2g/code.ae`;
   the seed `seed/arbace-seed-go.tar.xz` (`b566d53a...`), its compiled packages' Go.
+
+## Decided (2026-10-17)
+
+The user: "start the Futamura proposals F1–F11 when you see fit as your suggestion". The lead's
+suggestion, so decided: F1 (a) staging as the direction, judged on F7's prototype, the
+hand-written pairs as the fallback; F8 (b) the Java forms' pair kept as two implementations with
+F2's check, the staged approach after F7; F9 (a) closures later, if size matters; F10 (a)
+inline caches when the REPL's speed matters; F11 (a) as done. The order of the work, after the
+rename of 2026-10-17 (j2g and the bridges `repr/java`, `repr/go`; it touches the same files):
+1. F2 (a): per-form differential checks (the oracle's forms compiled by the back end against
+   their evaluation; the Java forms interpreted against j2g's translation), in `bin/gate
+   --full` first; no change to the program, no re-seed.
+2. F3 (a) and F4 (a) together: arithmetic fast paths in the back end with Clojure's exact
+   semantics, and no initialization guards for the classes initialized at start (a fixed list,
+   checked at start); measured on the whole benchmark set, checked by F2; one re-seed.
+3. F5 (guarded direct linking) decided on the numbers after F3 and F4; F6 (primitive fns, then
+   unboxed workers) and F7 (the `defnode` prototype) after that.

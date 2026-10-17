@@ -103,7 +103,9 @@ The current state of the work. This file is rewritten as things change. For the 
   `repr/java print`, Java's bridge printing back, class forms → Java source, with a round trip like
   g2a's (Java → forms → Java → forms, the two forms equal; the text level as g2a's `:full`).
 - The survey of Futamura's projections written (doc/FUTAMURA-SURVEY.md; its experiment on the
-  local branch `futamura-survey`): proposals F1-F11 open for the user. Measured there: `fib`
+  local branch `futamura-survey`); decided as suggested (the user, 2026-10-17): after the rename,
+  F2 (per-form differential checks), then F3 and F4 (arithmetic fast paths, no initialization
+  guards for the classes initialized at start; one re-seed), then F5 on the numbers, F6, F7. Measured there: `fib`
   6.40 → 0.168 ms (the JVM 0.16) by a `Long` fast path, var speculation and an unboxed worker;
   `loop-long` 11.87 → 1.09 ms without the class-initialization guards.
 - Smaller: the box's checks on the Mac on macOS 26.

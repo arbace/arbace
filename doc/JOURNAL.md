@@ -506,3 +506,10 @@ into the running rename (one re-seed; alternative: a second rename after); the p
 program's names follow (`a2g_*.go`, `A2g_*`, the `a2g/*` directives → `j2g`; alternative: kept);
 the term changed in docs and prose, `arbace.classes.*` kept (alternative: the namespaces too);
 `A2G_*` → `J2G_*` with a guard (alternative: kept).
+
+## 2026-10-17: Futamura's proposals decided as suggested (the user)
+
+The user: "start the Futamura proposals F1–F11 when you see fit as your suggestion". Decided
+(doc/FUTAMURA-SURVEY.md, "Decided"): F1 (a), F8 (b), F9 (a), F10 (a), F11 (a); the order F2,
+then F3 with F4 (one re-seed), then F5 on the numbers, F6 and F7 after; started after the
+running rename, which changes the same files (j2g, the back end's callers).
