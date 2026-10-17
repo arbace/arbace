@@ -733,3 +733,17 @@ of compiled packages), (b) an SSA-like IR, (c) yaegi embedded (stale upstream, i
 process or tool guest; rebuild and restart; a loader of gc's objects). Recommended (a), with a
 `go/run-compiled` command (d1); milestones GR0-GR6, 22 to 33 working days; proposals G1-G17
 (cited as GR where the fixpoint's G1-G3 could be confused), open.
+
+## 2026-10-17: the second rename carried out
+
+As decided (entries above; doc/NAMING-SURVEY.md, "The second rename as built"), on the branch
+`rename-c2j`, merged into main: c2a → `repr/clojure` (`arbace.repr.clojure`, `bin/repr-clojure
+read|check`, doc/REPR-CLOJURE.md, test/repr/clojure; `C2A_*` → `REPR_CLOJURE_*`, the guard
+extended), `arbace.aot` → `arbace.c2j` (`arbace/c2j/`, test/c2j; its marks on Java forms
+`:c2j/*`); kept as the pipeline's name: `ARBACE_AOT`, `ARBACE_NO_AOT`, the packages
+`aot_arbace_*`, the tree `target/arbace-go/aot/`, `aot.key`, `Compiler$AOT`, `AOTFn`. Regenerated:
+the fixtures' headers and provenance, jdk/'s provenance (911 forms equal), repr/clojure's
+`libs.out`. Checks on the branch: the essential gate, the fixpoint G1 = G2 = G3 (`e122ade3...`),
+`bin/repr-clojure check` (unit, `--suite`, `--libs`), `bin/diffcheck` (22 known, 0 new), repr/go's
+round trip, `bin/j2g-edge verify`. R6-R8 accepted (the user). The seed still embeds the old
+names until the next re-seed.

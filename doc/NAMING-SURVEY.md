@@ -790,3 +790,6 @@ Hex constants that spell `C2A` (jdk/, tamago/) are not names.
 - **R8** c2j's marks renamed `:c2j/*` (and `c2j/continue`) rather than kept as `:aot/*`, as the
   first rename renamed `:a2g/line`: they are what c2j writes and j2g reads. *Recommended: keep
   the rename (done).*
+
+**Decided (2026-10-17, the user):** R6-R8 accepted as built (`test/c2j/merge_variants.ae` stays
+where it moved; "AOT" kept on the runtime's side as the pipeline's name; c2j's marks `:c2j/*`).
