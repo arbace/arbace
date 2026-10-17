@@ -45,7 +45,7 @@ print, parse with rustc without errors, and give rustc's tree of the original un
 start lines of every one of its spans: 1,660,638 spans compared. No known differences. On this
 host (64 cores, 32 jobs), about 45 s: the dumps 3 s, the conversion 20 s, the printing 5 s, the
 trees of both sides 7 s, the rest the tools' start. `bin/repr-rust roundtrip && bin/repr-rust test`,
-the step `repr-rust` of `bin/gate --full`, took 54 s.
+the step `repr-rust` of `bin/gate --full`, took 48 s on the gate's stage 0 (54 s on main's).
 
 What the forms hold (counted over the corpus's forms): 6,626 macro calls with their arguments as
 forms and 1,316 as `(:tt ...)` (rustc's parser did not take their tokens as `expr (, expr)*`, they
