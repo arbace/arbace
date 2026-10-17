@@ -1524,3 +1524,11 @@ parentheses as `:paren` (§5.3); `(subtract 1) 3` likewise, since a function app
 position needs none; `1e3` is `1E+3M` (§3.5) and `0x1F` keeps its radix (HS2); `(read @Int "42")`
 reads as `(read (arbace.core/deref Int) "42")`; `1# +# 2#` is a chain of `+#` over primitive
 literals.
+
+## Decided (2026-10-17, the user)
+
+HS1-HS12 as recommended: `:sig` and `:lambda` (HS1); an integer's radix kept (HS2); fractional
+literals exact (HS3); the corpus from GHC 9.14.1's source tarball, pinned by SHA-256 (HS4);
+`.hsc` and `.lhs` in R6 (HS5); no resolved fixities now (HS6); an optional `{-# LINE #-}` to the
+`.ae` file (HS7); the helper written anew after check-ppr (HS8); Alpine's GHC with version
+checks (HS9); `hs.main.<path>` (HS10); converted forms not tracked (HS11); `-haddock` on (HS12).

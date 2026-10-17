@@ -647,3 +647,8 @@ a BigDecimal). Found in GHC: re-laying out a module changes only its interface's
 ABI hash, so the interface level normalizes span columns in `:lines`. The corpus: GHC 9.14.1's
 source tarball, pinned by SHA-256. Decisions S1-S36; proposals HS1-HS12, open; the build after
 them (milestones R1-R6).
+
+## 2026-10-17: repr/haskell's HS1-HS12 decided (the user)
+
+All as recommended (doc/haskell/SPEC.md, "Decided"). The build (milestones R1-R6) follows F2,
+as the user's H13 has it ("its spec in parallel with F2, the build after").
