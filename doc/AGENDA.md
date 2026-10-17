@@ -7,10 +7,10 @@ The current state of the work. This file is rewritten as things change. For the 
 
 ## State
 
-- The bootstrap starts from the Go-source seed `seed/arbace-seed-go.tar.xz` (`b566d53a…`), the
+- The bootstrap starts from the Go-source seed `seed/arbace-seed-go.tar.xz` (`56fabe20…`), the
   program printed by the Go-hosted fixpoint, its toolchain (TamaGo's go1.27.1) pinned by
   `seed/goroot.sha256`. `bin/seed --check`, `--build` (stage 0), `--make`, `--verify`.
-- Stage 0 hosts every Arbace tool (a2g, g2a, c2a, the suite's runner), compiled into it;
+- Stage 0 hosts every Arbace tool (j2g, repr/go, build/go, c2a, the suite's runner), compiled into it;
   `bin/arbace-go --build` is a Go-hosted build, `--fixpoint` the chain G1 → G2 → G3.
 - The program's namespaces are compiled to Go (`ARBACE_AOT=1`, the default since S6): the
   executable 102.4 MB (amd64), a one-run build about 2.5 to 3 minutes.
@@ -18,7 +18,7 @@ The current state of the work. This file is rewritten as things change. For the 
   and Hypervisor.framework on arm64), and the box rebuilding Arbace inside itself byte for byte
   (`bin/box-rebuild`, run by hand at milestones).
 - The JVM runs only the frozen jar of `arbace-for-java-26-v4` (pinned by hash): the oracle's
-  reference, j2a (javac), the edge, the fixtures' forms and the data generators.
+  reference, repr/java (javac), the edge, the fixtures' forms and the data generators.
 - `LICENSE.md` holds all licenses and which files each covers.
 - The host: Alpine edge on amd64 with /dev/kvm ([ALPINE.md](ALPINE.md); `bin/alpine-env`).
 
@@ -94,14 +94,18 @@ The current state of the work. This file is rewritten as things change. For the 
 
 ## Next
 
-- Running: the rename (decided 2026-10-17, doc/NAMING-SURVEY.md, "Decided"): j2a → `repr/java`
-  (`arbace.repr.java`, `bin/repr-java`), g2a → `repr/go` (`arbace.repr.go`, `bin/repr-go`), its
-  build → `arbace.build.go`, `G2A_GOROOT` → `ARBACE_GOROOT`; a2g → j2g ("class forms" →
-  "Java forms" in prose; `A2G_*` → `J2G_*`; the printed `a2g_*` names too); c2a unchanged; then
-  a re-seed. j2g and c2a to revisit later (the user).
+- Done (2026-10-17): the rename (doc/NAMING-SURVEY.md, "The rename as built"): j2a → `repr/java`
+  (`bin/repr-java`), g2a → `repr/go` (`bin/repr-go`), its build → `build/go` (`bin/build-go`),
+  a2g → `j2g` (the printed `j2g_*` names, `J2G_*`), `G2A_GOROOT` → `ARBACE_GOROOT`, the old
+  variables guarded; "Java forms" in prose; c2a and `arbace.classes.*` unchanged; R1-R5 decided.
+  The seed remade (`56fabe20…`) and verified. Next: R4 (`tamago/` reconverted: `:go/label-line`
+  since the `:full` mode), then F2 and repr/go's directory tests side by side.
+- Running: the survey of `repr/haskell` (the user, 2026-10-17; ../ghc-lisp, GHC with an
+  s-expression front end, as prior art; branch `repr-haskell-survey`).
 - After the rename (the user, 2026-10-17: "Create jaf print after the naming debate settled"):
   `repr/java print`, Java's bridge printing back, class forms → Java source, with a round trip like
-  g2a's (Java → forms → Java → forms, the two forms equal; the text level as g2a's `:full`).
+  repr/go's (Java → forms → Java → forms, the two forms equal; the text level as repr/go's
+  `:full`); R1: today's `arbace.repr.java.print` (forms as `.ae` text) becomes `layout` with it.
 - The survey of Futamura's projections written (doc/FUTAMURA-SURVEY.md; its experiment on the
   local branch `futamura-survey`); decided as suggested (the user, 2026-10-17): after the rename,
   F2 (per-form differential checks), then F3 and F4 (arithmetic fast paths, no initialization
@@ -112,7 +116,7 @@ The current state of the work. This file is rewritten as things change. For the 
 
 ## Later
 
-- The standalone Arbace: no Java binary compatibility, with Java at the source level through j2a.
+- The standalone Arbace: no Java binary compatibility, with Java at the source level through repr/java.
   The language is Clojure plus class forms, and later forms for Go. The goal is a
   self-sustaining REPL in a virtual sandbox, in Arbace down to the bare metal ISA, in the style
   of Go plus TamaGo. Targets: /dev/kvm on amd64 (Alpine edge Linux host) and
@@ -121,11 +125,11 @@ The current state of the work. This file is rewritten as things change. For the 
 - Futamura's projections (the user, 2026-10-14): Arbace's compiler is written by hand, not
   derived, but it has the pairs the projections relate: the evaluated build (the evaluator and
   the image) against the compiled one (S6), and the class forms' interpreter
-  (`arbace/classes/interp`) against a2g, kept in step by the suite and the oracle, not by
+  (`arbace/classes/interp`) against j2g, kept in step by the suite and the oracle, not by
   construction. To survey: fns as Go closures (SA156 (c), closure generation, also a Go type
   fewer per fn); code generation (T4) by partial evaluation of the evaluator, ahead of time, in
   the way of Truffle/Graal (speculating on vars, falling back when one is redefined); the second
-  projection, a2g derived from the interpreter, one definition of each language's semantics
+  projection, j2g derived from the interpreter, one definition of each language's semantics
   (Clojure, the class forms, later Go). The cost: binding times in a dynamic language (vars,
   `eval`, macros at load time).
 - A kernel and a user part in the box (the user, 2026-10-14): the infrastructure (the
@@ -144,7 +148,7 @@ The current state of the work. This file is rewritten as things change. For the 
   process; GoTEE (github.com/usbarmory/GoTEE: TamaGo unikernels and user-mode applets, TrustZone
   on arm), to check; unikernels with a privilege split.
 - The mapped start measured without nested KVM.
-- g2a's open end: `$GOROOT/test`'s directory tests.
+- repr/go's open end: `$GOROOT/test`'s directory tests (running beside F2).
 - A note from the user (2026-10-13): the tooling of the Mac GUI app Moshi Go may be useful for
   Arbace, to study when Arbace's REPL gets a user interface beyond the terminal. Its build info
   (`go version -m`, on the user's Mac): module `moshi-go` at `1516bf8173a5` (2026-10-12), go1.27.1

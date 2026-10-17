@@ -513,3 +513,28 @@ The user: "start the Futamura proposals F1–F11 when you see fit as your sugges
 (doc/FUTAMURA-SURVEY.md, "Decided"): F1 (a), F8 (b), F9 (a), F10 (a), F11 (a); the order F2,
 then F3 with F4 (one re-seed), then F5 on the numbers, F6 and F7 after; started after the
 running rename, which changes the same files (j2g, the back end's callers).
+
+## 2026-10-17: the rename carried out; the seed remade
+
+As decided (entries above; doc/NAMING-SURVEY.md, "The rename as built"), on the branch
+`repr-rename`, merged into main (`8c3a289`), done as the 2026-10-11 rename: `git mv` commits,
+then the callers, then the regenerated records. j2a → `repr/java` (`arbace.repr.java`,
+`bin/repr-java read|read-jdk|coverage|check`), g2a → `repr/go` (`arbace.repr.go`, `bin/repr-go
+read|print|dump|corpus|roundtrip|check|test`), g2a's build → `arbace.build.go` (`bin/build-go`),
+a2g → j2g (`arbace.j2g.*`, `bin/j2g`, `j2g-check`, `j2g-edge`, `j2g-evalproof`, J2G-SPEC.md,
+J2G-NOTES.md; the printed program's `j2g_*.go`, `J2g_*`, `j2g_header`, `j2g/*` directives);
+`G2A_GOROOT` → `ARBACE_GOROOT`, `G2A_*`, `J2A_*`, `A2G_*` → `REPR_GO_*`, `REPR_JAVA_*`, `J2G_*`,
+an old one set stopping a script with the new name (`bin/lib/renamed-env.bash`, R2); `RT.toolSource`
+lists `arbace/repr/`, `arbace/build/`, `arbace/j2g/`; "class form(s)" → "Java form(s)" in prose.
+Regenerated: jdk/'s headers and provenance (`bin/jrt-convert update`), the fixtures' forms,
+`bin/repr-java check --update` (headers only), `jdk/edge.edn` (`bin/j2g-edge update`; it had been
+stale on main since `2352fb2` of 2026-10-16: 7 `java.util` classes the new reachability code
+names, which only `--full`'s edge verify would have caught). Checks on the branch: the
+essential gate (10:18), the fixpoint G1 = G2 = G3, repr/go's round trips (code; text 1,705 of
+1,708, 1,742 of 1,742), its tests, repr/java's checks, the vendoring verifies. Found on main
+too: `bin/tamago-vendor verify` fails since the `:full` mode (`53c65f6`): a fresh conversion
+adds `:go/label-line` to four labelled declarations (R4: reconverted separately). Decided by the
+user: R1 (repr/java's `.ae` writer renamed `layout` with `repr/java print`), R2, R3 (`:a2g` kept
+in java-surface.edn, a record of removed stages), R4, R5 (the checks as verbs of one command).
+The seed remade from the merge's G3: `56fabe20...` (was `b566d53a...`), 5,530,756 bytes,
+verified (the same archive printed again at `8c3a289`; stage 0 = G1 = G2 = G3, `79eb9ef9...`).
