@@ -1,0 +1,160 @@
+(ns diffcheck.main
+  "The per-form differential check (doc/FUTAMURA-SURVEY.md, \"F2 as built\"; bin/diffcheck): runs
+  the corpora test/diffcheck/gen.ae wrote (GEN/corpora.edn) on the diff build EXE, each corpus
+  twice, and compares the two runs' records case by case:
+
+    Clojure's pair   a corpus without Java forms: its namespace evaluated (load from source: the
+                     evaluator, its closure compiler) against the same namespace compiled into
+                     EXE by the back end (Compiler$AOT/load: arbace.c2j's Java forms, j2g's Go)
+    the Java forms'  defclass.ae, defclass_corpus.ae and j2g's fixtures: evaluated with their
+    pair             classes interpreted (arbace.classes.interp, the classes defined again at
+                     run time shadow the compiled ones by name, SA136) against evaluated with the
+                     classes j2g translated into EXE
+
+  Usage: run EXE GEN [-j JOBS] [--timeout S] [--expected FILE | --write-expected FILE] [SEL...]
+  (SEL: parts of corpus paths). Prints a line per corpus, the first mismatches of each; all of
+  them in .tmp/diffcheck/check.txt. With --expected FILE (test/diffcheck/known.edn) it passes
+  when the mismatching cases are exactly those FILE records, with their reasons (the oracle's
+  format, oracle.runner/check-known); --write-expected FILE rewrites it (oracle.runner/write-known)."
+  (:require [arbace.string :as str]
+            [arbace.java.io :as io]
+            [arbace.walk :as walk]
+            [oracle.runner :as runner]))
+
+(def ^:private result-keys [:value :class :out :err :ex :print-ex])
+
+(defn- shell-quote [^String s] (str "'" (str/replace s "'" "'\\''") "'"))
+
+(defn- run-one
+  "One run of a corpus: the records by id, done, noise, stderr, exit. The j2g run loads
+  dcj/STEM.ae, the interpreted run dcf/STEM.ae: the source paths in its messages are made the
+  latter's."
+  [exe gen ^String form timeout]
+  (let [cmd (str "ARBACE_PATH=" (shell-quote (str gen "/src")) ":" (shell-quote (str runner/root "/test"))
+                 " " (shell-quote exe) " -")
+        input (str "(do (require 'diffcheck.driver) " form " (shutdown-agents))\n")
+        {:keys [records noise err exit]} (runner/run-impl cmd input timeout)]
+    {:by (into {} (for [r records :when (:id r)]
+                    [(:id r) (walk/postwalk #(if (string? %)
+                                               ;; and the numbers of the classes of fns the two
+                                               ;; runs name apart (oracle.runner/normalize's
+                                               ;; for any fn's name: native.fn$evalN$fn__N$sq__N)
+                                               (-> (str/replace % "dcj/" "dcf/")
+                                                   (str/replace #"(\$[\w*+!?<>=-]+)__\d+" "$1__N"))
+                                               %)
+                                            (runner/normalize (select-keys r result-keys)))]))
+     :done (some :done records) :noise noise :err err :exit exit}))
+
+(defn- runs
+  "The two runs of corpus c: [name-a form-a name-b form-b]."
+  [{:keys [src jsrc compiled]}]
+  (if compiled
+    ["evaluated" (str "(load " (pr-str (str "/" src)) ")")
+     "compiled" (str "(arbace.lang.Compiler$AOT/load " (pr-str src) " " (pr-str (str src ".ae")) " "
+                     (pr-str (str (subs src (inc (.lastIndexOf ^String src "/"))) ".ae")) ")")]
+    ["interpreted" (str "(load " (pr-str (str "/" src)) ")")
+     "j2g" (str "(load " (pr-str (str "/" jsrc)) ")")]))
+
+(defn- canon [x] (oracle.driver/emit (walk/postwalk #(if (map? %) (into (sorted-map) %) %) x)))
+
+(defn- short-str [x n]
+  (let [s (if (string? x) x (pr-str x))]
+    (if (> (count s) n) (str (subs s 0 n) "...") s)))
+
+(defn- selected? [sel {:keys [file]}]
+  (or (empty? sel) (some #(str/includes? file %) sel)))
+
+(defn check
+  "Runs the selected corpora; {:ok :mismatches [{:case :form}...] :incomplete n
+  :incomplete-files #{} :files #{}} as oracle.runner/check returns."
+  [exe gen jobs timeout sel]
+  (let [corpora (filter #(selected? sel %) (runner/read-expected (io/file gen "corpora.edn")))
+        work (for [c corpora, k [0 1]] [c k])
+        results (@#'runner/pool-map jobs (fn [[c k]]
+                                        (let [[na fa nb fb] (runs c)
+                                              t0 (System/nanoTime)
+                                              r (run-one exe gen (if (zero? k) fa fb) timeout)]
+                                          (assoc r :ms (quot (- (System/nanoTime) t0) 1000000))))
+                                 (vec work))
+        by-corpus (partition 2 results)
+        report (StringBuilder.)
+        total (atom 0) bad (atom 0) incomplete (atom 0) ids (atom []) cut (atom (sorted-set))
+        pair-totals (atom {})]
+    (doseq [[c [a b]] (map vector corpora by-corpus)]
+      (let [[na _ nb _] (runs c)
+            pair (if (:compiled c) :clojure :java)
+            mism (doall
+                   (for [e (:cases c)
+                         :let [x (get (:by a) (:id e) {:missing true})
+                               y (get (:by b) (:id e) {:missing true})]
+                         :when (not= (canon x) (canon y))]
+                     [e x y]))
+            done? (and (:done a) (:done b))
+            line (format "%-44s %-7s %5d/%5d agree %6d ms %6d ms%s" (:file c) (name pair)
+                         (- (count (:cases c)) (count mism)) (count (:cases c)) (:ms a) (:ms b)
+                         (str (when-not (:done a) (str ", " na " run incomplete (exit " (:exit a) ")"))
+                              (when-not (:done b) (str ", " nb " run incomplete (exit " (:exit b) ")"))))]
+        (swap! total + (count (:cases c))) (swap! bad + (count mism))
+        (swap! pair-totals update pair (fnil (fn [[n m]] [(+ n (count (:cases c))) (+ m (count mism))]) [0 0]))
+        (when-not done? (swap! incomplete inc) (swap! cut conj (:file c)))
+        (println line)
+        (.append report (str "== " line "\n"))
+        (doseq [[r nm] [[a na] [b nb]] :when (not (:done r))]
+          (.append report (str nm " stderr: " (short-str (:err r) 4000) "\n")))
+        (doseq [[[e x y] i] (map vector mism (range))]
+          (let [id (str (:file c) ":" (:line e))]
+            (swap! ids conj {:case id :form (short-str (:text e) 100)})
+            (let [what (str "  " id " " (short-str (:text e) 200) "\n"
+                            (str/join (for [k (conj result-keys :missing) :when (not= (get x k) (get y k))]
+                                        (str "    " k "\n      " na (apply str (repeat (- 12 (count na)) " ")) (short-str (get x k) 600)
+                                             "\n      " nb (apply str (repeat (- 12 (count nb)) " ")) (short-str (get y k) 600) "\n"))))]
+              (.append report what)
+              (when (< i 5) (print what)))))))
+    (.mkdirs (io/file runner/root ".tmp/diffcheck"))
+    (spit (io/file runner/root ".tmp/diffcheck/check.txt") (str report))
+    (doseq [[pair [n m]] (sort @pair-totals)]
+      (println (format "== %s's pair: %d of %d cases agree, %d disagree" (name pair) (- n m) n m)))
+    (println (format "== %d of %d cases agree, %d disagree (all in .tmp/diffcheck/check.txt)%s"
+                     (- @total @bad) @total @bad
+                     (if (pos? @incomplete) (str "; " @incomplete " corpora incomplete") "")))
+    {:ok (and (zero? @bad) (zero? @incomplete))
+     :mismatches @ids
+     :incomplete @incomplete
+     :incomplete-files @cut
+     :files (into #{} (map :file) corpora)}))
+
+(defn write-known
+  "Rewrites the known disagreements f from a check's (oracle.runner/write-known's rules: a
+  recorded case keeps its group's reason while it still disagrees, a new one goes into a group
+  of its own, to be given a reason by hand). True when every run completed."
+  [^java.io.File f r]
+  (let [ok (runner/write-known f "bin/diffcheck" r)
+        text (slurp f :encoding "UTF-8")
+        body (subs text (.indexOf ^String text "{:impl"))]
+    (spit f (str ";; The known disagreements of the per-form differential check (bin/diffcheck,\n"
+                 ";; doc/FUTAMURA-SURVEY.md, \"F2 as built\"): it passes when the disagreeing cases are\n"
+                 ";; exactly these. Rewritten by bin/diffcheck --write-expected, which keeps the reasons\n"
+                 ";; of the cases still disagreeing; edit the reasons by hand.\n"
+                 body)
+          :encoding "UTF-8")
+    ok))
+
+(defn -main [& args]
+  (let [[cmd & args] args
+        opts (loop [args args o {:jobs 16 :timeout 600 :sel []}]
+               (cond
+                 (empty? args) o
+                 (= "-j" (first args)) (recur (nnext args) (assoc o :jobs (Long/parseLong (second args))))
+                 (= "--timeout" (first args)) (recur (nnext args) (assoc o :timeout (Long/parseLong (second args))))
+                 (= "--expected" (first args)) (recur (nnext args) (assoc o :expected (second args)))
+                 (= "--write-expected" (first args)) (recur (nnext args) (assoc o :write-expected (second args)))
+                 :else (recur (next args) (update o :sel conj (first args)))))
+        [exe gen & sel] (:sel opts)
+        ok (case cmd
+             "run" (let [r (check exe gen (:jobs opts) (:timeout opts) (vec sel))]
+                     (cond
+                       (:write-expected opts) (write-known (io/file (:write-expected opts)) r)
+                       (:expected opts) (runner/check-known (io/file (:expected opts)) r)
+                       :else (:ok r))))]
+    (shutdown-agents)
+    (System/exit (if ok 0 1))))

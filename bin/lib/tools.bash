@@ -1,4 +1,4 @@
-# Shared by the scripts that run Arbace's tools and checks (bin/c2a, bin/clojure-tests, bin/repr-go's
+# Shared by the scripts that run Arbace's tools and checks (bin/repr-clojure, bin/clojure-tests, bin/repr-go's
 # checks, bin/j2g-check, ...). Sourced, with $root set to the repository root. Defines:
 #
 #   arbace_tool [-p DIR]... [-s NS]... [-D NAME=VALUE]... ARG...
@@ -6,7 +6,7 @@
 #                   arbace_host_exe: ARBACE_HOST_EXE, else stage 0 built from the Go seed), with
 #                   ARG... (e.g. -m NS ARGS..., -e EXPR, a script), from the current directory.
 #                   ARBACE_PATH is the checkout ($root), then each -p DIR (test/, a scratch tree),
-#                   then the caller's ARBACE_PATH. The tools j2g, repr/go, c2a and arbace.aot are
+#                   then the caller's ARBACE_PATH. The tools j2g, repr/go, repr/clojure and c2j are
 #                   embedded in the executable and compiled since standalone S6 (SA133); a source
 #                   of theirs on ARBACE_PATH that differs from the embedded copy is loaded from it
 #                   instead, evaluated (RT.toolSource), so a change in the checkout runs until the
@@ -16,12 +16,13 @@
 #                   -s NS loads an embedded namespace from the checkout instead (its file under
 #                   $root, by load-file, then marked loaded, so that requires keep it): the
 #                   executable's embedded sources come before ARBACE_PATH, and a tool embedded
-#                   with them (c2a) must run as checked out, not as the executable was built; the
+#                   with them (repr/clojure) must run as checked out, not as the executable was built; the
 #                   namespaces in the order of their requires. -D sets a system property before
 #                   ARG... (as the JVM's -D did; the executable takes no -D). The exit status is
 #                   the executable's.
-#   c2a_sources     the arguments -s NS... of arbace_tool for c2a (doc/C2A.md), embedded in the
-#                   executable, from the checkout
+#   repr_clojure_sources
+#                   the arguments -s NS... of arbace_tool for repr/clojure (doc/REPR-CLOJURE.md),
+#                   embedded in the executable, from the checkout
 #   frozen_clojure  prints the directory holding the frozen reference tree clojure/ (upstream
 #                   Clojure and ASM sources with their javac classes), extracted once from the
 #                   freeze tag arbace-for-java-26-v1 into .tmp/frozen/: repr/java's
@@ -30,7 +31,7 @@
 #                   moves. Its classes are dated after its sources, so javac does not recompile
 #                   them.
 
-c2a_sources=(-s arbace.c2a.text -s arbace.c2a.rename -s arbace.c2a.rules -s arbace.c2a.main)
+repr_clojure_sources=(-s arbace.repr.clojure.text -s arbace.repr.clojure.rename -s arbace.repr.clojure.rules -s arbace.repr.clojure)
 
 arbace_tool() {
   local exe path=$root init=() srcs="" kv f n

@@ -10,6 +10,13 @@
 > (`arbace.a2g.*`, `bin/a2g*`, `A2G-SPEC.md`, `A2G_*`, the printed `a2g_*`, `A2g_*`, `a2g/*`: `j2g`
 > likewise), and class forms are Java forms (the front end keeps `arbace.classes.*`). This document
 > uses the current names throughout, its dated passages included; branch names keep theirs.
+>
+> Since 2026-10-17 too, c2a is repr/clojure (`arbace.c2a.*` is `arbace.repr.clojure(.*)`,
+> `bin/c2a` `bin/repr-clojure read`, `bin/c2a-check` `bin/repr-clojure check`, `test/c2a/`
+> `test/repr/clojure/`, `doc/C2A.md` `doc/REPR-CLOJURE.md`) and the back end `arbace.aot` is c2j
+> (`arbace/aot/` `arbace/c2j/`, its marks `:aot/*` `:c2j/*`, `test/aot/` `test/c2j/`); "AOT"
+> stays the compiled pipeline's name (`ARBACE_AOT`, the packages `aot_arbace_*`, the tree `aot/`;
+> doc/NAMING-SURVEY.md, "The second rename as built").
 
 **Status (2026-10-11, main before the `arbace-for-golang` freeze).** Clojure's suite on the
 test build `arbace-tests` (below, "The suite's Java fixtures"): 76 namespaces, 777 tests,
@@ -663,9 +670,9 @@ it; since `gofix` (FX1, "The suite's Java fixtures", below) that is the test bui
     CLOJURE_TESTS_GO=$PWD/target/arbace-go/amd64/arbace-tests bin/clojure-tests -j 16
 
 It implies rename mode: the suite and the test libraries renamed as for the JVM (the same
-`arbace.j2c.rename`, on the JVM; since 2026-10-11 c2a, doc/C2A.md), into `.tmp/clojure-tests/go/` (`CLOJURE_TESTS_RUN`, default `go`).
+`arbace.j2c.rename`, on the JVM; since 2026-10-11 repr/clojure, doc/REPR-CLOJURE.md), into `.tmp/clojure-tests/go/` (`CLOJURE_TESTS_RUN`, default `go`).
 Listing the namespaces and the report run on the JVM's `target/stage2` (`CLOJURE_SRC`; since
-standalone S4 they, and c2a, run on the tools' Go host, `bin/lib/host.bash`: no JVM); each test
+standalone S4 they, and repr/clojure, run on the tools' Go host, `bin/lib/host.bash`: no JVM); each test
 namespace runs in its own Go process (`TMPDIR` the run's `tmp/`, `ARBACE_PATH` the renamed libraries
 then the suite's `test/`), which, as upstream's JVM does, requires every test namespace first. The
 fixtures step is skipped: the Go build loads no class files, so the AOT fixtures load from source;

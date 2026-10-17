@@ -1,0 +1,109 @@
+;; The per-form differential check's driver (doc/FUTAMURA-SURVEY.md, "F2 as built";
+;; bin/diffcheck): the namespaces test/diffcheck/gen.ae writes from the oracle's forms call it,
+;; one top-level form per case, (diffcheck.driver/case ID FILE LINE TEXT). It runs in the
+;; program under test, evaluated in every run (never compiled), and prints each case's record as
+;; the oracle's driver does (test/oracle/driver.ae: "@@oracle " and the record by
+;; oracle.driver/emit).
+;;
+;; case is a macro: it reads the case's text when the form is analyzed (by the evaluator when
+;; the namespace is evaluated, by the compiling program's evaluator when the back end compiles
+;; it), in the namespace current then, and expands to (diffcheck.driver/form* ID FILE (fn []
+;; FORM)), so that FORM is analyzed as a fn's body and run by the half under test (the
+;; evaluator's closure compiler, or the back end's compiled code). A case that cannot be read
+;; or analyzed (its analysis is tried first, on the text read again) expands to
+;; (diffcheck.driver/failed* ID CHAIN), its exception chain as data: both halves report it alike.
+(ns diffcheck.driver
+  (:refer-clojure :exclude [case])
+  (:require [oracle.driver])
+  (:import (java.io StringWriter StringReader)
+           (arbace.lang LineNumberingPushbackReader)))
+
+(set! *warn-on-reflection* false)
+
+(def ^:private ex-chain @#'oracle.driver/ex-chain)
+(def ^:private out-record @#'oracle.driver/out-record)
+
+(defn- read-case [^String text line]
+  (let [r (LineNumberingPushbackReader. (StringReader. text))]
+    (.setLineNumber r (int line))
+    (read {:read-cond :allow} r)))
+
+(defn- trial
+  "nil when (fn [] form) analyzes, else the exception. Analyzed as Compiler.eval analyzes a
+  form, the fn made but not called. form is read again for the trial, so that nothing the
+  trial's analysis leaves on its forms reaches the case's own. While the back end's units are
+  recorded (Compiler$Image/RECORDER), the trial's events are not, but for its proxies': the case's
+  own analysis records the others again (deftypes, interfaces), but a proxy's class is made
+  once by name (get-proxy-class), by the trial."
+  [form]
+  (let [^objects rec (.deref arbace.lang.Compiler$Image/RECORDER)
+        evs (java.util.ArrayList.)
+        keep! #(when rec (.addAll ^java.util.ArrayList (aget rec 1) (filterv (fn [^objects e] (= "proxy" (aget e 0))) evs)))]
+    (push-thread-bindings {arbace.lang.Compiler$Image/RECORDER (when rec (object-array [(aget rec 0) evs]))})
+    (try
+      (eval (list 'fn* [] form))
+      (keep!)
+      nil
+      (catch Throwable t (keep!) t)
+      (finally (pop-thread-bindings)))))
+
+(defmacro case
+  "A case of the oracle's corpus file (its path) at line, its text read now."
+  [id file line text]
+  (let [form (try {:form (read-case text line)} (catch Throwable t {:ex t}))
+        t (or (:ex form) (trial (read-case text line)))]
+    (if t
+      `(failed* ~id ~file '~(ex-chain t))
+      `(form* ~id ~file (fn* [] ~(:form form))))))
+
+(defn form*
+  "Calls thunk as oracle.driver/form evaluates a case: the printed value (pr-str) and its
+  class, or the exception chain, and what it printed to *out* and *err*."
+  [id file thunk]
+  (let [out (StringWriter.) err (StringWriter.)
+        r (binding [*out* out *err* err *file* file *source-path* file]
+            (try
+              (let [v (thunk)]
+                (try
+                  {:value (pr-str v) :class (if (nil? v) "nil" (.getName (class v)))}
+                  (catch Throwable t {:print-ex (ex-chain t)})))
+              (catch Throwable t {:ex (ex-chain t)})))
+        o (str out) e (str err)
+        r (if (= o "") r (assoc r :out o))
+        r (if (= e "") r (assoc r :err e))]
+    (out-record (assoc r :id id))))
+
+(defn failed*
+  "A case that could not be read or analyzed: its exception chain."
+  [id file chain]
+  (out-record {:id id :ex (vec chain) :static true}))
+
+(defn classes*
+  "A case defining classes of the Java forms' pair, run with the classes compiled into the program
+  (test/diffcheck/gen.ae, the :jforms variant): the top-level classes of names (not initialized,
+  as a definition leaves them) imported into the current namespace, as defclass imports them;
+  its value as the definition's: ret :last the last class (defclass), :vector all (defclasses),
+  :nil nil (a file loaded)."
+  [id file names ret]
+  (form* id file
+         (fn [] (let [cs (mapv #(Class/forName ^String % false nil) names)]
+                  (doseq [c cs] (.importClass ^arbace.lang.Namespace *ns* c))
+                  (condp = ret :last (peek cs) :vector cs :nil nil)))))
+
+(defn excluded*
+  "A case left out of both runs (test/diffcheck/excluded.edn)."
+  [id file]
+  (out-record {:id id :excluded true}))
+
+(defn load*
+  "A file of Java forms loaded (j2g's fixtures): its classes interpreted. Its namespace (ns) is
+  made first with arbace.core referred, as test/j2g/record_fixtures.ae makes it (the file's
+  in-ns makes a bare one)."
+  [id file ns path]
+  (form* id file (fn []
+                   (binding [*ns* (create-ns ns)] (refer 'arbace.core))
+                   (load-file path)
+                   nil)))
+
+(defn done [n]
+  (out-record {:done n}))

@@ -10,6 +10,13 @@
 > (`arbace.a2g.*`, `bin/a2g*`, `A2G-SPEC.md`, `A2G_*`, the printed `a2g_*`, `A2g_*`, `a2g/*`: `j2g`
 > likewise), and class forms are Java forms (the front end keeps `arbace.classes.*`). This document
 > uses the current names throughout, its dated passages included; branch names keep theirs.
+>
+> Since 2026-10-17 too, c2a is repr/clojure (`arbace.c2a.*` is `arbace.repr.clojure(.*)`,
+> `bin/c2a` `bin/repr-clojure read`, `bin/c2a-check` `bin/repr-clojure check`, `test/c2a/`
+> `test/repr/clojure/`, `doc/C2A.md` `doc/REPR-CLOJURE.md`) and the back end `arbace.aot` is c2j
+> (`arbace/aot/` `arbace/c2j/`, its marks `:aot/*` `:c2j/*`, `test/aot/` `test/c2j/`); "AOT"
+> stays the compiled pipeline's name (`ARBACE_AOT`, the packages `aot_arbace_*`, the tree `aot/`;
+> doc/NAMING-SURVEY.md, "The second rename as built").
 
 Status: survey, 2026-10-12, for the main line after the box's milestones (`arbace-box-amd64-v1`,
 `arbace-box-arm64-v1`), by the user's decision of 2026-10-12 (the journal at the tag
@@ -469,7 +476,7 @@ the box; S7-S8 close the loop in the box; S9 completes b1'. S9 can run at any ti
 - **D13 The language's divergence.** From S4 on, Arbace may differ from Clojure on the JVM where
   standalone requires it (no `gen-class`, no class loading, no bytecode-level interop).
   (a) each divergence recorded as an amendment and as a known mismatch of the oracle, Clojure's
-  suite (through c2a) staying the yardstick; (b) divergence free, the oracle retired.
+  suite (through repr/clojure) staying the yardstick; (b) divergence free, the oracle retired.
   *Recommended: (a)*.
 
 ### 9.3 Risks

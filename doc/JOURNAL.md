@@ -662,3 +662,88 @@ to c2j with repr/clojure". Confirmed: `arbace.aot` builds on Clojure's `Compiler
 and writes Java forms where Clojure's back end writes bytecode; `ARBACE_AOT=1` already denotes
 the whole compiled pipeline. To do with c2a → `repr/clojure`, after F2 and before F3 and F4, one
 re-seed; `ARBACE_AOT` and `aot_arbace_*` kept (alternative: renamed too, churn in the seed only).
+
+## 2026-10-17: Go forms to be first-class at the REPL (the user)
+
+The user: "go forms should be first class citizens like arbace and java forms: interpreted in
+the repl. bring arbace/clojure, java and go forms to the same level in repl when it is
+appropriate. haskell forms are good as data for now". Today Arbace forms are evaluated (the
+closure compiler's `Code` nodes, over the compiled program), Java forms are analyzed by
+`arbace.classes` and interpreted (`arbace.classes.interp`, classes made at run time), and Go
+forms are data only (read, transformed, printed by repr/go, built by Go's toolchain). Next: a
+survey of Go forms at the REPL (an interpreter of Go forms beside the compiled path through
+`repr/go print` and Go's compiler; their analysis; calls between the three dialects and the
+compiled program; prior art), then the build when the running work allows; Haskell forms stay
+data.
+
+## 2026-10-17: F2 built, the per-form differential checks
+
+As decided (doc/FUTAMURA-SURVEY.md, "Decided", F2 (a)), on the branch `f2-diff` from `d652647`:
+`bin/diffcheck` (`make diffcheck`; `test/diffcheck/`: `gen.ae`, `driver.ae`, `main.ae`, the
+exclusions and `known.edn`), a step of `bin/gate --full`. Design (survey, "F2 as built"): a
+program built for the check from the gate's executable, carrying both halves: the oracle's forms
+(53 corpus files, 11,758 cases) each a namespace of one `(diffcheck.driver/case ...)` macro per
+case, compiled by the back end with the runtime's namespaces into one tree and also evaluated,
+the two runs compared case by case; and the Java forms of defclass.ae, defclass_corpus.ae,
+native.ae and j2g's fixtures (713 cases; 134 classes given to j2g) interpreted against
+translated by j2g, the same evaluated cases calling them. Alternatives considered: the Java
+forms the back end emits run by the interpreter (cheaper, no Go build, but not the compiled
+build's path); the corpora compiled into the test build (Clojure's suite would run on a program
+twice its size); a compiling run per corpus file (no cross-file state at analysis, but 50 runs
+of the runtime's compilation). Found and fixed in `arbace/aot/emit.ae`: compiled `import`'s
+value (nil, where the evaluator and the JVM give the class; 21 cases) and a deftype's `this` in a
+fn's code (every compiled defrecord failed j2g's analysis); the shipped program changes in the
+back end and its import units only, no re-seed. Found and recorded: j2g's bugs with anonymous
+classes taking constructor arguments, a Go name collision for a reify in a nested anonymous fn,
+the stub of an unimplemented method throwing UnsupportedOperationException, an abstract class's
+constructors missing from reflection, Clojure constants in class bodies; the interpreter's
+lambdas without default methods; the back end's limits (code forms in fns, deftypes and reifys;
+namespaces of one segment; a proxy made at run time first). 12,449 of 12,471 cases agree, the
+22 others recorded with reasons; about 5 minutes from the gate's executable, 40 s cached.
+Proposals F2.1-F2.6 (survey) are the user's.
+
+## 2026-10-17: F2 merged; its proposals decided (the user)
+
+F2 (`bin/diffcheck`, merged from `f2-diff` `107b40a`; details in its own entry above and
+doc/FUTAMURA-SURVEY.md, "F2 as built"): 12,449 of 12,471 cases agree (11,758 of Clojure's pair,
+713 of the Java forms' pair), 22 known with reasons; two back-end fixes found by it (compiled
+`import` returned nil; a deftype inside a fn emitted its methods' `this` as the fn's), which
+change the shipped program until the next re-seed. Decided: F2.1 (a), F2.2, F2.3, F2.5, F2.6 as
+recommended, and F2.4 with the rest of F2.6 fixed too (the user, against "leave recorded"). The
+next batch, under one re-seed: the rename (c2a → repr/clojure, arbace.aot → c2j), F3 and F4,
+and these fixes; then `bin/diffcheck` in the essential gate.
+
+## 2026-10-17: the survey of Go forms at the REPL
+
+Following the user's direction (entry above): doc/GO-FORMS-REPL-SURVEY.md (from the branch
+`go-forms-repl-survey`, `cf1052e`). Findings: Go forms do not run at the REPL today (the
+namespace `arbace.go` their heads name does not exist); values cross cheaply since the compiled
+program is Go (an Arbace value is a Go `any`); a Go type checker in Arbace is needed either way
+(the converter's annotations cover go/types' non-local answers only; estimated 5,000-8,000
+lines, against `arbace.classes.analyze`'s 4,375); stock `reflect` cannot make named types,
+methods or interfaces, and a static Arbace cannot `dlopen` (Go's `plugin` needs cgo), so the
+program's compiled packages are reached through a build-time table, as every Go interpreter
+does; `$GOROOT/test`'s programs, already converted by repr/go, are a ready conformance corpus
+(interpreted against printed and compiled: F2 extended to Go forms). Measured (ms, fib 22):
+gc 0.09-0.15, typed Go closures (a sketch) 5.5, the Java forms interpreter 6.8-7.0, Arbace's
+evaluator 8.4-8.6, yaegi v0.16.1 38.8, go/ssa/interp 75. Options: (a) Arbace's own interpreter
+(checker and node builder in Arbace, typed closures in hand-written Go forms as jrt is, a table
+of compiled packages), (b) an SSA-like IR, (c) yaegi embedded (stale upstream, its own checker,
+5.7 times slower than the Java forms interpreter on fib), (d) the compiled path only (a child
+process or tool guest; rebuild and restart; a loader of gc's objects). Recommended (a), with a
+`go/run-compiled` command (d1); milestones GR0-GR6, 22 to 33 working days; proposals G1-G17
+(cited as GR where the fixpoint's G1-G3 could be confused), open.
+
+## 2026-10-17: the second rename carried out
+
+As decided (entries above; doc/NAMING-SURVEY.md, "The second rename as built"), on the branch
+`rename-c2j`, merged into main: c2a → `repr/clojure` (`arbace.repr.clojure`, `bin/repr-clojure
+read|check`, doc/REPR-CLOJURE.md, test/repr/clojure; `C2A_*` → `REPR_CLOJURE_*`, the guard
+extended), `arbace.aot` → `arbace.c2j` (`arbace/c2j/`, test/c2j; its marks on Java forms
+`:c2j/*`); kept as the pipeline's name: `ARBACE_AOT`, `ARBACE_NO_AOT`, the packages
+`aot_arbace_*`, the tree `target/arbace-go/aot/`, `aot.key`, `Compiler$AOT`, `AOTFn`. Regenerated:
+the fixtures' headers and provenance, jdk/'s provenance (911 forms equal), repr/clojure's
+`libs.out`. Checks on the branch: the essential gate, the fixpoint G1 = G2 = G3 (`e122ade3...`),
+`bin/repr-clojure check` (unit, `--suite`, `--libs`), `bin/diffcheck` (22 known, 0 new), repr/go's
+round trip, `bin/j2g-edge verify`. R6-R8 accepted (the user). The seed still embeds the old
+names until the next re-seed.

@@ -1,4 +1,4 @@
-(ns arbace.aot.emit
+(ns arbace.c2j.emit
   "Standalone S6 (doc/STANDALONE-NOTES.md, \"S6: Arbace compiled to Go\"): the back end that
   compiles analyzed namespaces to Java forms, which j2g translates into Go like the runtime's
   own classes.
@@ -365,7 +365,7 @@
                  (list (with-meta 'arbace.lang.Compiler$AOT/pool {:param-tags '[java.lang.String int]})
                        (str sb) (list 'unchecked-int n)))])
         (for [[s t _ alias] consts]
-          (list 'field (tagged (with-meta s {:static true :final true :aot/nn true}) t)
+          (list 'field (tagged (with-meta s {:static true :final true :c2j/nn true}) t)
                 (or alias
                     (let [e (list 'aget 'const-pool (list 'unchecked-int (+ base (index s))))]
                       (if (= t 'java.lang.Object) e (list 'cast t e))))))))))
@@ -502,7 +502,7 @@
 
 (defn- line-meta [f n]
   (if (and (seq? f) (pos? (or (:line n) 0)))
-    (vary-meta f assoc :aot/line (:line n))
+    (vary-meta f assoc :c2j/line (:line n))
     f))
 
 (defn- emit-local [ctx n unboxed?]
@@ -914,9 +914,9 @@
             "the-var" (const-field ctx (:var n) 'arbace.lang.Var)
             "def" (emit-def ctx n false)
             "set!" (emit-assign ctx n)
-            "import" (list 'do (list '.importClass (list 'cast 'arbace.lang.Namespace (list '.deref 'arbace.lang.RT/CURRENT_NS))
-                                     (list 'arbace.lang.RT/classForNameNonLoading (:c n)))
-                           nil)
+            ;; the class, as ImportExpr.emit leaves it (and the evaluator's ImportExpr.evalIn)
+            "import" (list '.importClass (list 'cast 'arbace.lang.Namespace (list '.deref 'arbace.lang.RT/CURRENT_NS))
+                           (list 'arbace.lang.RT/classForNameNonLoading (:c n)))
             "instance-field" (emit-instance-field ctx n false)
             "static-field" (emit-static-field ctx n false)
             "instance-method" (emit-instance-method ctx n false)
@@ -1138,7 +1138,8 @@
       (swap! (:classes ctx) assoc cname ::pending)
       (let [cls (pool ctx cname)
             fields (vec (keys (:closes ox)))
-            ctx' (assoc ctx :cls cls :objx ox :once false :closed (identity-set fields))
+            ;; its methods' this is this, also when the deftype is in a fn's code (self there)
+            ctx' (assoc ctx :cls cls :objx ox :once false :closed (identity-set fields) :self-sym 'this)
             fbs (mapv node fields)
             ftype (fn [b] (or (:bindingPrim b) Object))
             fsym (fn [b] (symbol (:name b)))
@@ -1186,7 +1187,7 @@
                       (vary-meta
                         (list 'method (with-meta (symbol (:name mn)) {:public true}) (tagged ps (:retClass mn))
                               (method-body ctx' mn ps))
-                        assoc :aot/line (:line mn)))
+                        assoc :c2j/line (:line mn)))
             fields-forms (for [lb fields :let [b (node lb)]]
                            (list 'field (tagged (with-meta (fsym b) (field-mods ox lb)) (ftype b))))
             members (deep (concat fields-forms [ctor] alt-ctors [basis] (when create [create]) methods))]
@@ -1242,7 +1243,7 @@
                 (vary-meta
                   (list 'method (with-meta (if (:isVariadic mn) 'doInvoke 'invoke) {:public true}) ps
                         (method-body ctx' mn ps))
-                  assoc :aot/line (:line mn)))
+                  assoc :c2j/line (:line mn)))
               (for [m (:methods ox)
                     :let [mn (node m)
                           als (:argLocals mn)
@@ -1321,7 +1322,7 @@
             (concat (list 'do (list 'arbace.lang.Compiler$AOT/at (list 'unchecked-int line) (list 'unchecked-int column)))
                     ns-events
                     [code]))
-      assoc :aot/line line)))
+      assoc :c2j/line line)))
 
 (defn- unit-ns
   "The namespace unit u was analyzed in: its fn's (kind 1) or its def's, else nil."
@@ -1347,7 +1348,7 @@
   [classes runtime-classes fn-names pools src units]
   (let [base (subs src 0 (.lastIndexOf ^String src "."))
         lname (str (str/replace base "/" ".") "__init")
-        ;; the source's file name, its classes' source file in stack traces (:aot/source)
+        ;; the source's file name, its classes' source file in stack traces (:c2j/source)
         file (subs src (inc (.lastIndexOf ^String src "/")))
         ctx {:classes classes :runtime-classes runtime-classes :fn-names fn-names :pools pools
              :source file}
@@ -1366,7 +1367,7 @@
       (let [cls (pool {:pools pools} lname)
             ms (unit-methods cls (range n))]
         {:name lname
-         :form (concat (list 'defclass (with-meta (symbol lname) {:public true :final true :aot/source file}))
+         :form (concat (list 'defclass (with-meta (symbol lname) {:public true :final true :c2j/source file}))
                        (pool-fields (:consts @cls))
                        ms
                        [(list 'method (with-meta 'load {:public true :static true}) []
@@ -1385,15 +1386,15 @@
                            {:name pname
                             :form (vary-meta
                                     (concat (list 'defclass (with-meta (symbol (str "part" p))
-                                                              {:static true :final true :aot/source file}))
+                                                              {:static true :final true :c2j/source file}))
                                             (pool-fields (:consts @cls))
                                             ms
                                             [(list 'method (with-meta 'init {:static true}) [] nil)
                                              (list 'method (with-meta 'load {:static true}) []
                                                    (concat (list 'do) (calls pname ks) [nil]))])
-                                    assoc :aot/line (:aot/line (meta (first ms))))})))]
+                                    assoc :c2j/line (:c2j/line (meta (first ms))))})))]
         {:name lname
-         :form (concat (list 'defclass (with-meta (symbol lname) {:public true :final true :aot/source file}))
+         :form (concat (list 'defclass (with-meta (symbol lname) {:public true :final true :c2j/source file}))
                        (map :form parts)
                        [(list 'method (with-meta 'load {:public true :static true}) []
                               (concat (list 'do)
@@ -1415,9 +1416,9 @@
         ;; the source file a class was compiled from (not a holder's: its fns may come from
         ;; several), its frames' file in stack traces (j2g's ClassInfo.Source)
         mods (fn [m] (cond-> (if top? (dissoc m :static) m)
-                       (:source c) (assoc :aot/source (:source c))
+                       (:source c) (assoc :c2j/source (:source c))
                        ;; a fn's code: no member table (SA154), reflection sees its fn's class
-                       (= :fn (:kind c)) (assoc :aot/code true)))
+                       (= :fn (:kind c)) (assoc :c2j/code true)))
         head (if top? (symbol nm) (symbol (simple-name nm)))
         ctx {:cls (atom {}) :runtime-classes (atom #{})}
         consts (when top? (when-let [p (get pools nm)] (:consts @p)))
@@ -1435,7 +1436,7 @@
                 const-forms
                 (:members c)
                 nested))
-      assoc :aot/line (:line c))))
+      assoc :c2j/line (:line c))))
 
 (defn class-forms
   "The top-level Java forms holding every class of classes (name → record), nested as their

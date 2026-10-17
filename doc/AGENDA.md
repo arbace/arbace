@@ -94,15 +94,24 @@ The current state of the work. This file is rewritten as things change. For the 
 
 ## Next
 
+- The direction (the user, 2026-10-17): Go forms first-class at the REPL, interpreted like
+  Arbace and Java forms; the three dialects at the same level there "when it is appropriate";
+  Haskell forms stay data. The survey written (doc/GO-FORMS-REPL-SURVEY.md): recommended
+  Arbace's own interpreter of Go forms (a type checker in Arbace, typed closures, a table of the
+  program's compiled packages), milestones GR0-GR6, 22-33 days; proposals G1-G17 open; the build
+  after F3, F4 and the renames.
+
 - Done (2026-10-17): the rename (doc/NAMING-SURVEY.md, "The rename as built"): j2a → `repr/java`
   (`bin/repr-java`), g2a → `repr/go` (`bin/repr-go`), its build → `build/go` (`bin/build-go`),
   a2g → `j2g` (the printed `j2g_*` names, `J2G_*`), `G2A_GOROOT` → `ARBACE_GOROOT`, the old
   variables guarded; "Java forms" in prose; c2a and `arbace.classes.*` unchanged; R1-R5 decided.
   The seed remade (`56fabe20…`) and verified; R4 done (`tamago/` converted again, the guests
   identical). Done: repr/go's directory tests (`bin/repr-go roundtrip --dirs [--text]`, 251 to 254
-  tests per configuration, every level; D1-D3 decided, in `bin/gate --full`). Running: F2.
-- `repr/haskell`'s spec written (doc/haskell/SPEC.md; S1-S36; HS1-HS12 decided as recommended):
-  its build after F2, milestones R1-R6 (the tree and text levels over `base` first).
+  tests per configuration, every level; D1-D3 decided, in `bin/gate --full`). Done: F2 (`bin/diffcheck`, 12,449 of 12,471 cases agree; F2.1-F2.6 decided).
+- `repr/haskell`'s spec written (doc/haskell/SPEC.md; S1-S36; HS1-HS12 decided as recommended).
+  Running beside F2 (the user, 2026-10-17): its milestone R1 (`tools/hsdump`, the converter, the
+  tree level over `base`; branch `repr-haskell-r1`), and `repr/java print` (Java forms → Java,
+  with a round trip; branch `repr-java-print`).
 - After the rename (the user, 2026-10-17: "Create jaf print after the naming debate settled"):
   `repr/java print`, Java's bridge printing back, class forms → Java source, with a round trip like
   repr/go's (Java → forms → Java → forms, the two forms equal; the text level as repr/go's
