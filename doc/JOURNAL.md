@@ -1013,3 +1013,24 @@ The user ran the bundle of `73e35434` on the Mac (macOS 26.7.1, M2 Max): every s
 framework's tests, the checklist 46 of 46 on 4 and 1 vCPUs, the rebuild in the box equal byte for
 byte to Linux's (`beff33bf...`) in 180 s (352 s at the milestone), again from the action cache in
 61 s; idle 0.00 s of CPU; the clock about 5 ppm over an hour. So the box holds on macOS 26.
+
+## 2026-10-17: KU1, processes at ring 3 on amd64
+
+On the branch `ku1` (`c576e19`), merged into main; details in doc/go/PROCESS-SPEC.md, "As built:
+KU1". In box/ only (no change to Go's runtime or the monitor): the board is a guest or a process
+(`whim_uentry` starts a second TamaGo runtime at ring 3; then the doorbell is a SYSCALL and a nil
+dereference reported by a `NilHandler` call; the image's initial data copied before any `init`);
+the crossings (`UserSetup`: the user segments, STAR/LSTAR/FMASK/EFER.SCE, a per-vCPU area, SMAP,
+PCIDs; `EnterUser` runs a process as one long call between `entersyscall` and `exitsyscall`,
+IRETQ the first time, SYSRETQ after a call; ring-3 faults through the vector table); the kernel
+package (per-process page tables: the kernel supervisor-only, text and rodata shared, data and
+bss private, the heap and stack window at 4 GiB; the calls `arch_prctl`, `Write`/`Message`
+captured, `Random`, `Exit`/`ProcExit`, `Yield`, `NilHandler`); the process calls at 64 and up
+(KS5). `TestKernelKU1` on /dev/kvm: write (exit 7, output captured), a fault (vector 14), a nil
+dereference recovered (exit 5), two processes' data on their own CR3s. Departures: CR3 written on
+every crossing (one image puts a process's data at the kernel's addresses; KS13 (a), the user:
+kept, decided again with KU2's numbers); one two-mode board rather than a separate user board
+(the runtime's hooks link once per image); KS3 by serving the runtime's own `arch_prctl`. The
+box's checks (kvm-tests, roundtrip 41 of 41, the box's build and smoke test) and the essential
+gate passed; a first gate run failed once in diffcheck on a j2g build error in the corpus
+`jf_cfcorpus_c50` and passed alone and on rerun with nothing changed: to watch.

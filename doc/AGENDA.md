@@ -156,7 +156,8 @@ The current state of the work. This file is rewritten as things change. For the 
   process), language isolation inside processes, S7's guests where virtualization exists, one
   spawn request; SYSCALL round trip 24.5 ns measured at ring 3; plan KU0-KU6, 17-27 days;
   K1-K12 decided as recommended; KU0 done (doc/go/PROCESS-SPEC.md; KS1-KS12 decided as
-  recommended); KU1-KU6, 14-23 days.
+  recommended); KU1 done (amd64 processes at ring 3; KS13 (a)); next KU2-KU6. To watch: a
+  diffcheck failure seen once (j2g build error in `jf_cfcorpus_c50`), not reproduced.
 - The mapped start measured without nested KVM.
 - A note from the user (2026-10-13): the tooling of the Mac GUI app Moshi Go may be useful for
   Arbace, to study when Arbace's REPL gets a user interface beyond the terminal. Its build info

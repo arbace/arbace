@@ -962,3 +962,7 @@ no KPTI-like split (KS7); spawn's `:where :auto`, with a guest-only switch while
 (KS8); the kernel a mode of the one box image (KS9); a process's stdio as captured handles
 (KS10); a per-process budget and the monitor's watchdog before KU6 (KS11); KU7 surveyed after KU4
 (KS12).
+
+**Decided (2026-10-17, the user):** KS13 (a): CR3 written on every crossing (one image puts a
+process's data at the kernel's addresses; with PCIDs the TLB is kept), decided again with KU2's
+numbers.
