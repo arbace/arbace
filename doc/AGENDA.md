@@ -105,7 +105,7 @@ The current state of the work. This file is rewritten as things change. For the 
   variables guarded; "Java forms" in prose; c2a and `arbace.classes.*` unchanged; R1-R5 decided.
   The seed remade (`56fabe20…`) and verified; R4 done (`tamago/` converted again, the guests
   identical). Done: repr/go's directory tests (`bin/repr-go roundtrip --dirs [--text]`, 251 to 254
-  tests per configuration, every level; D1-D3 decided, in `bin/gate --full`). Running: F2.
+  tests per configuration, every level; D1-D3 decided, in `bin/gate --full`). Done: F2 (`bin/diffcheck`, 12,449 of 12,471 cases agree; F2.1-F2.6 decided).
 - `repr/haskell`'s spec written (doc/haskell/SPEC.md; S1-S36; HS1-HS12 decided as recommended).
   Running beside F2 (the user, 2026-10-17): its milestone R1 (`tools/hsdump`, the converter, the
   tree level over `base`; branch `repr-haskell-r1`), and `repr/java print` (Java forms → Java,

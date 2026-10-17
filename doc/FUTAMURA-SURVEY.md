@@ -626,3 +626,174 @@ rename of 2026-10-17 (j2g and the bridges `repr/java`, `repr/go`; it touches the
    checked at start); measured on the whole benchmark set, checked by F2; one re-seed.
 3. F5 (guarded direct linking) decided on the numbers after F3 and F4; F6 (primitive fns, then
    unboxed workers) and F7 (the `defnode` prototype) after that.
+
+## F2 as built (2026-10-17)
+
+F2 (a) as decided: each language's two hand-written halves run on the same forms, in one
+program, and compared case by case. `bin/diffcheck` (`make diffcheck`), in `bin/gate --full`;
+on the branch `f2-diff`.
+
+### The design: one program built for the check
+
+The cheapest sound shape is the one §4 (a) sketched: a program that carries both halves of each
+pair, so that a case runs twice in the same executable and only the half under test differs.
+It is neither the shipped program nor the test build (Clojure's suite keeps its own); it is built
+from the gate's executable, whose runtime is the checkout's:
+
+1. `test/diffcheck/gen.ae` writes each corpus file as a namespace (`dcf.STEM`): one top-level
+   form per case, `(diffcheck.driver/case ID FILE LINE TEXT)`. `case` is a macro
+   (`test/diffcheck/driver.ae`): it reads the case's text when the form is analyzed, by the
+   evaluator when the namespace is evaluated and by the compiling program's evaluator when the
+   back end compiles it, and expands to `(form* ID FILE (fn* [] FORM))`. The case is a fn's
+   body, so the evaluated run takes the evaluator's closure compiler (`Code` nodes) and the
+   compiled run the back end's Java forms translated by j2g; `form*` records it as the oracle's
+   driver does (value and class, exception chain, `*out*`, `*err*`). A case that cannot be read
+   or analyzed is found by a trial analysis first (of the text read again; its events but a
+   proxy's not recorded) and expands to its exception chain, alike in both runs.
+2. The gate's executable prepares the runtime's namespaces and the corpora's with
+   `ARBACE_COMPILE` (as `bin/arbace-go`'s host compile) and `arbace.aot.main/run` compiles them
+   all into one tree: each source in its own id space, so the runtime's part is the shipped
+   build's tree.
+3. j2g translates the program with that tree and the Java forms' classes (below), and
+   `bin/build-go` builds it: `.tmp/diffcheck/arbace-diff` (280 MB: 153 sources, 21,370 compiled
+   classes, against the shipped 100 and 8,141).
+4. `test/diffcheck/main.ae` runs each corpus twice on it, 16 runs at a time, and compares the
+   two runs' records (normalized as the oracle normalizes, and the numbers of fn classes),
+   against the known disagreements `test/diffcheck/known.edn` (the oracle's format and rules:
+   `check-known`, `--write-expected`).
+
+The pairs:
+
+| pair | run A | run B | corpora | cases |
+|---|---|---|---|---:|
+| Clojure's | the namespace loaded from source: evaluated | `Compiler$AOT/load`: compiled | 53 (the oracle's forms but three, the harvest) | 11,758 |
+| the Java forms' | evaluated, the classes interpreted (`arbace.classes.interp`; defined again at run time, they shadow the compiled ones by name, SA136) | evaluated, each defining case replaced by `classes*`: the classes j2g translated into the program, imported as `defclass` imports them | `defclass.ae`, `defclass_corpus.ae`, `native.ae`, j2g's fixtures (`test/j2g/fixtures`, their 79 recorded calls) | 713 |
+
+134 top-level classes of 86 defining cases are given to j2g (`jforms/`, a Go package per Java
+package, `jforms/packages.edn`: in `lang` two simple names of two packages collide). A class
+defined twice (`Again`) or listed in `test/diffcheck/jforms-excluded.edn` stays interpreted in
+both runs; `native.ae` is in the Java forms' pair only, since the back end cannot compile its
+code forms in fns, deftypes and reifys (below). Cases the back end or j2g cannot compile at
+all, so that the rest of their file compiles, are left out of both runs with their reasons
+(`test/diffcheck/excluded.edn`, 5 cases), and the oracle's namespace `user` is named
+`dcf.user` in Clojure's pair (below).
+
+### What it found
+
+Run on 2026-10-17: 12,449 of 12,471 cases agree, 22 disagree, all recorded with their reasons.
+
+Fixed in `arbace.aot.emit` (small and clearly right; the only changes to the shipped program,
+below):
+
+- **`import`'s value**: compiled `(import ...)` was nil, where the evaluator (`ImportExpr.evalIn`)
+  and the JVM's `ImportExpr.emit` leave the class: 21 cases, `definterface` among them (it
+  expands to an import).
+- **A deftype in a fn's code**: its methods' `this` was emitted as the enclosing fn's `self`
+  (`emit-deftype-class!` kept the fn's `:self-sym`). A top-level `defrecord` is such a deftype
+  (its expansion is a `let`, which a compiled loader runs as a fn), so every compiled record
+  failed j2g's analysis (`Unable to resolve symbol: self`). The runtime's namespaces have no
+  deftype that names `this` there, so their tree did not change.
+
+Known, recorded in `test/diffcheck/known.edn`:
+
+| kind | cases | what |
+|---|---:|---|
+| j2g, a real divergence | 5 | an interface method a deftype or reify leaves unimplemented throws `UnsupportedOperationException` ("j2g: not translated: abstract ...") where the evaluator and the JVM throw `AbstractMethodError` (F2.3) |
+| j2g, a real divergence | 1 | reflection finds no constructor of a translated abstract class (`(Base.)`: "No matching ctor found" where the interpreted class fails with `InstantiationError`) |
+| j2g, a limit | 7 | Clojure data in a class body (`:k`, `#'arbace.core/map`): "j2g: Clojure constant ..." when the class is initialized (F2.4) |
+| the interpreter, a real divergence | 1 | a lambda of an interface made at run time lacks its default method (`negate`: `AbstractMethodError`) (F2.5) |
+| the interpreter, known limits | 2 | a class made at run time cannot extend `StringReader` nor reach `MethodHandles` (why j2g's fixtures are recorded on the JVM) |
+| compilation's semantics | 3 | compiled code interns the vars it names when its constants are made, at the loader's start (as the JVM's AOT) |
+| the check's own | 3 | the compiling program had loaded `arbace.set`; an identity hash; `eval`'s error position (a compiled loader sets no `Compiler/LINE`, as the JVM's `__init`) |
+
+Found by the build itself, recorded with their reasons in the two exclusion files (they stop
+the build, so they cannot be disagreements):
+
+- **j2g bugs**: anonymous classes with constructor arguments (`(anon K ^{:param-tags [int]}
+  [9])`, `(anon In [k] :outer o ...)`: the arguments dropped or passed to the wrong
+  constructor, Go does not compile; `(anon In [2] ...)` of a member class reading the outer
+  field: "no Go type for nil") (F2.2).
+- **j2g's Go names collide** for a reify inside an anonymous fn inside a fn: `X$fn__N$fn` (the
+  reify's declaring class) gets `X_fn__N_fn_class`, the Go name of the static field `fn-class`
+  of the code class `X$fn__N` (SA154); j2g reports it (J2G-SPEC §4.4) and stops (4 cases) (F2.6).
+- **The back end's limits**: no class for a reify or deftype whose methods use code forms (the
+  Java forms compiler makes it at run time, unrecorded): `native.ae` is in the Java forms' pair
+  only; code analyzed in a namespace of one segment (`user`) cannot be compiled, its holder
+  class being in Java's default package, which Java forms of the package `arbace` cannot name
+  (the corpora's `user` is named `dcf.user`); a proxy whose class was made at run time before
+  its form is analyzed records no event, and compiled code names a class the program lacks (1
+  case).
+- **Clojure in class bodies** that names the namespace's vars or defines a deftype at run
+  time, classes the Java forms compiler's tests expect not to compile, classes naming
+  test files the corpus does not keep, a native method: interpreted in both runs
+  (`jforms-excluded.edn`, 19 classes).
+
+The halves agree on all else: numbers, strings, printing, the reader, sequences and
+transducers, collections, destructuring and macros, protocols and multimethods, types,
+concurrency, files, processes, sockets, java.time and java.text, the harvest of Clojure's suite;
+the Java forms' arithmetic, control flow, arrays, statics, inheritance, nested and anonymous
+classes, lambdas, switch, records, enums and exceptions, as far as the classes are defined.
+
+### Cost, and the gate
+
+| step | time |
+|---|---:|
+| the corpora's sources | 5 s |
+| prepared and compiled (all 153 sources; the corpora are evaluated once here) | 125-185 s |
+| j2g | 80-90 s |
+| `bin/build-go` (Go's build cache and repr/go's print cache warm) | 20 s |
+| the runs (114 runs, 16 at a time; reducers.ae 30 s alone) | 30-45 s |
+| in all, from the gate's executable | about 4.5-6 minutes |
+
+Steps 1-3 are cached (`.tmp/diffcheck`, keyed by the gate's executable and the check's sources):
+unchanged, `bin/diffcheck` takes the runs' 30-45 s. It is a step of `bin/gate --full`
+(`diffcheck`, concurrently with the other chains, after the essential gate's builds, whose
+executable it reuses).
+
+### Changes to the shipped program
+
+`arbace/aot/emit.ae` only, the two fixes above. The back end is part of the program, so the
+shipped executable changes; its compiled namespaces change in their import units alone (45
+files of the tree, each only by `(do (.importClass ...) nil)` becoming `(.importClass ...)`,
+checked against the tree of the unchanged back end). The seed stays as it is: stage 0 still
+builds the program, compiling the namespaces with the checkout's back end (its source differs
+from stage 0's embedded one, so it is loaded from the checkout: `compiled-back-end`); the
+fixpoint's stage 0 = G1 is then reported different until a re-seed, and the change rides with
+F3 and F4's.
+
+### Proposals (the user's to decide)
+
+- **F2.1 Where the check runs.** (a) In `bin/gate --full` only (as built); (b) also in the
+  essential gate, concurrently with the suite and the oracle (about 5 minutes on a change to the
+  sources, 40 s when cached); (c) only by hand. *Recommended: (b)* once F3 and F4 change the back
+  end: they are the changes it is for.
+- **F2.2 j2g's anonymous classes with constructor arguments.** (a) Fixed in j2g (the arguments
+  of a `(anon C [args] ...)` and of `:param-tags`, and the outer instance of `:outer`), the
+  three classes taken off `jforms-excluded.edn`; (b) left recorded. *Recommended: (a)*, with F3
+  and F4's re-seed (j2g is in the program). The runtime has no such anonymous classes.
+- **F2.3 An unimplemented interface method.** (a) j2g's stub throws `AbstractMethodError`, as the
+  JVM and the evaluator; (b) kept as `UnsupportedOperationException`, recorded. *Recommended:
+  (a)*, with the re-seed.
+- **F2.4 Clojure constants in a class of Java forms outside the runtime.** (a) j2g makes them
+  as the back end makes a namespace's constants (a pool read at class initialization); (b) left
+  to the interpreter (Clojure in class bodies stays a REPL feature). *Recommended: (b)* now: no
+  compiled class needs it yet.
+- **F2.5 The interpreter's lambdas and default methods.** (a) A lambda of an interface made at
+  run time gets its default methods (as `Dyn`'s classes fall back to them); (b) recorded.
+  *Recommended: (a)*: small, and the interpreter is the REPL's Java.
+- **F2.6 The back end's names and limits found here.** (a) The `fn-class` field renamed so no
+  class name can collide (a reify in a nested anonymous fn), a namespace of one segment given a
+  holder in a package, a reify or deftype with code forms compiled by the Java forms' own
+  compiler into the tree; each with the corpora's cases put back; (b) recorded as they are: the
+  runtime's namespaces need none of them. *Recommended: (a) for the name collision* (small, with
+  the re-seed), *(b) for the others* until a user namespace is compiled (T4, the box's
+  compiled user code).
+
+**Decided (2026-10-17, the user), F2's proposals:** F2.1 (a): `bin/diffcheck` in `bin/gate --full`
+now, in the essential gate once F3 and F4 change the back end; F2.2, F2.3 and F2.6's name
+collision: fixed with the next re-seed (j2g's anonymous classes with constructor arguments, its
+stub throwing `AbstractMethodError`, the Go-name collision of a reify in an anonymous fn); F2.5:
+the interpreter's lambdas get their interface's default methods; F2.4 and the rest of F2.6,
+against the recommendation ("leave recorded"): fixed too (Clojure constants in Java forms
+classes outside the runtime; the back end's limits: one-segment namespaces, reifys and deftypes
+using code forms, proxies made at run time before their analysis).
