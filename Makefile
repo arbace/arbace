@@ -2,7 +2,8 @@
 # logic and caches by content (Make tracks no dependencies; all targets are phony). Keep it in
 # step with bin/: a target's line names the script and options it runs, and `make check-makefile`
 # (in bin/gate) checks that every script named here exists. The environment passes through
-# (ARBACE_GO_ARCHES, ARBACE_BOX_ARCHES, ARBACE_GOROOT, ...); see each script's header for its own.
+# (ARBACE_GO_ARCHES, ARBACE_BOX_ARCHES, ARBACE_GOROOT, ARBACE_BOX_STALE_OK, ...); see each script's
+# header for its own.
 # `make help` lists the targets from their `##` comments.
 
 .DEFAULT_GOAL := help
@@ -56,9 +57,9 @@ box-suite: ## Clojure's suite's subset in the box (bin/box-suite; after `make su
 	bin/box-suite
 box-tools: ## the tool guests (gc, the linker, the assembler) from tamago/cmd (bin/box-tools build)
 	bin/box-tools build
-box-rebuild: ## Arbace rebuilt inside the box, compared byte for byte (bin/box-rebuild)
+box-rebuild: ## Arbace rebuilt inside the box, compared byte for byte; stops on stale executables (bin/box-rebuild)
 	bin/box-rebuild
-mac-bundle: ## the Mac's launcher, guest and checklist (bin/box-mac-bundle)
+mac-bundle: ## the Mac's launcher, guest and checklist, all HEAD's (bin/box-mac-bundle; after box-rebuild for arm64)
 	bin/box-mac-bundle
 arm64-vm-check: ## the arm64 box in an emulated aarch64 VM: smoke, hv (bin/box-arm64-vm check)
 	bin/box-arm64-vm check
