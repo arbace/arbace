@@ -628,3 +628,22 @@ D1 (a directory test's packages: gc's `:path`, the namespace `go.test.<dir>_dir.
 imports verbatim with `go/package`'s `:local-imports`), D2 (the `:chan` position of `<- chan T`
 in mode `:full`), D3 (the directory tests' round trips in `bin/gate --full`'s repr/go step and
 the Makefile's targets): accepted as built. Merged into main.
+
+## 2026-10-17: repr/haskell's spec
+
+As decided (the survey's H13: the spec beside F2), doc/haskell/SPEC.md, merged from the branch
+`repr-haskell-spec` (`522d4a6`), with test/haskell/ (328 reader samples and their output, the
+name rule and a forms reader as scripts, a worked example `Shape.hs`/`Shape.ae`). The forms are
+GHC's parsed tree only (no fixity, scopes or types). The name rule: a name is bare only if
+Arbace's reader reads its text back as the same one symbol (or a keyword, for constructor
+operators), else `(:name "t")`, a respelled operator's chain `(:op "t" a b ...)`; over GHC
+9.14.1's `base` and `ghc-internal` (445 of 535 modules dumped) it keeps 6,900 of 6,995 names
+bare, 28 respelled (0.35% of occurrences). Respellings: `::` as `:sig` (`hs/sig` at top level),
+`\` as `:lambda`, `:` as `:cons`, `~` as `:lazy`, `#foo` as `(:label "foo")`; characters `\c`;
+strings with their escapes resolved; primitive literals `(:int# n)`...; fractional literals
+exact (a double only when its shortest text gives GHC the same significand and exponent, else
+a BigDecimal). Found in GHC: re-laying out a module changes only its interface's `src hash` and
+`interface hash`, while moving an inlined equation by two columns changes its unfolding and the
+ABI hash, so the interface level normalizes span columns in `:lines`. The corpus: GHC 9.14.1's
+source tarball, pinned by SHA-256. Decisions S1-S36; proposals HS1-HS12, open; the build after
+them (milestones R1-R6).
