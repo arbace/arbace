@@ -112,10 +112,10 @@ The current state of the work. This file is rewritten as things change. For the 
 - `repr/haskell`'s spec written (doc/haskell/SPEC.md; S1-S36; HS1-HS12 decided as recommended).
   R1 done (2026-10-17: the tree and lines levels over GHC 9.14.1's base libraries, 483 of 483
   modules; HR1-HR5); R2 done (the interface level, 483 of 483; HR6-HR8); next R3-R6 (`:full` and the text
-  level, the layout printer, the other boot libraries, .hsc/.lhs/boot files). Running:
-  `repr/java print` (Java forms → Java,
+  level, the layout printer, the other boot libraries, .hsc/.lhs/boot files). Done: `repr/java print` (the round trip over Clojure's Java, the samples and the JDK;
+  JP1-JP4); running: (Java forms → Java,
   with a round trip; branch `repr-java-print`).
-- After the rename (the user, 2026-10-17: "Create jaf print after the naming debate settled"):
+- Done (2026-10-17): repr/java print. Formerly planned: after the rename (the user, 2026-10-17: "Create jaf print after the naming debate settled"):
   `repr/java print`, Java's bridge printing back, class forms → Java source, with a round trip like
   repr/go's (Java → forms → Java → forms, the two forms equal; the text level as repr/go's
   `:full`); R1: today's `arbace.repr.java.print` (forms as `.ae` text) becomes `layout` with it.

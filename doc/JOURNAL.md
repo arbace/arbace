@@ -875,3 +875,29 @@ built at `7019817` (55 MB; the rebuild's expected image from `bin/box-rebuild --
 prepare host` at that commit). Found on the way: `arbace.j2g.start` (the j2g batch's) is in the
 program's `namespaces.txt` but neither compiled nor embedded, so a prepare without ARBACE_PATH
 (the box's) reports it not prepared; given to the c2j integration.
+
+## 2026-10-17: repr/java print
+
+At the user's request ("Create jaf print after the naming debate settled"), on the branch
+`repr-java-print` (`eaaf817`), merged into main; details in doc/classes/PRINTER-NOTES.md and
+doc/classes/SPEC.md §14. R1 done with it: the `.ae` writer is now `arbace.repr.java.layout`; the
+new `arbace.repr.java.print` (about 3,200 lines, on stage 0, no javac) prints Java forms as Java:
+every declaration kind, lambdas and method references, switch patterns, try-with-resources;
+it undoes the converter's restructurings (loop/recur back to `for` with Java's sequential
+updates, do-while, `x++`, compound assignment) and adds back the casts and literal types javac
+needs from a declarations index (`--index jdk/forms`, the host's classes as a fallback).
+`bin/repr-java print`, `bin/repr-java roundtrip` (in `bin/gate --full`, about 5 minutes):
+
+| corpus | files | forms equal | .ae equal | class files equal (`-g:none`) |
+|---|---:|---:|---:|---:|
+| Clojure's Java | 189 | 189 | 182 | 143 of 183 |
+| samples | 17 | 17 | 17 | 12 of 14 |
+| the JDK's forms | 911 | 874 | 816 | 473 of 838 |
+
+The rest known with reasons: javac rejects 39 of the JDK's printed files (Java's type arguments
+in code are not in the forms), the radixes the reader drops, and source choices the forms do not
+record (`?:` against `if`, statement against expression `switch`, fall-through). Decided by the
+user: JP1 (the provenance hashes cover only the reader's sources, `repr_java_reader_hash`; both
+provenance files recorded again, the forms unchanged), JP2 and JP4 (a `:full` mode of
+`repr/java read` later), JP3 (the converter keeps an array creation's dimension annotations, its
+own commit `d6920df`).
