@@ -99,8 +99,8 @@ The current state of the work. This file is rewritten as things change. For the 
   Haskell forms stay data. The survey written (doc/GO-FORMS-REPL-SURVEY.md): recommended
   Arbace's own interpreter of Go forms (a type checker in Arbace, typed closures, a table of the
   program's compiled packages), milestones GR0-GR6, 22-33 days; proposals G1-G17 open; the build
-  after F3, F4 and the renames. G1-G17 decided as recommended (2026-10-17); running: GR0, the
-  spec (branch `go-forms-spec`); GR1-GR6 after the coming re-seed.
+  after F3, F4 and the renames. G1-G17 decided as recommended (2026-10-17); GR0 done (doc/go/GOI-SPEC.md,
+  proposals GS1-GS15 open); GR1-GR6 after the coming re-seed, 24-34 days.
 
 - Done (2026-10-17): the rename (doc/NAMING-SURVEY.md, "The rename as built"): j2a → `repr/java`
   (`bin/repr-java`), g2a → `repr/go` (`bin/repr-go`), its build → `build/go` (`bin/build-go`),

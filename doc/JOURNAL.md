@@ -782,3 +782,21 @@ once); the finished work's scratch removed and the cache trimmed of entries unus
 (to 19 GB; 58% used). At the user's request, `bin/lib/gocache.bash`'s default lowered from six
 hours to three (`ARBACE_GOCACHE_KEEP_MIN`, 180): Go refreshes an entry's time at most hourly, so
 three hours still keeps every build in progress.
+
+## 2026-10-17: GR0, goi's spec
+
+doc/go/GOI-SPEC.md (from the branch `go-forms-spec`, `85f3928`): the spec of `goi`, the
+interpreter of Go forms (Go package `arbace/goi`, driven by `arbace.go.*`), named as J2G-SPEC is
+after its component. Design: a package's declarations queued while it loads and checked whole
+at the end (one after-load hook in `arbace.core/load`); the checker written anew after go/types,
+verifying every annotation; nodes as Go closures typed by result, frames as windows of a
+per-goroutine stack, captured or address-taken variables in real `reflect.New` cells; calls
+through function cells (redefinition seen), bodies built on first call; named struct types
+distinct through a `goi:` tag on the first field; proxies with a fmt-aware `Format`, wrappers
+in compiled interfaces; no dynamic `MethodByName` (it would keep every exported method linked);
+a typed invoker per signature. Measured (Appendix A): fib 22 4.95 ms with frames per call, 2.87
+ms on a per-goroutine stack (gc 0.23); `strings.ToUpper` 331 ns through `reflect.Value.Call`, 39
+ns through a typed invoker (38 direct); `sort.Slice` of 1e5 550 ms with a `MakeFunc` less, 13.9
+ms with a typed adapter (11.1 native); a table of 35 listed packages' 1,081 functions and
+variables at most 3.9 MB. Milestones GR1-GR6, 24 to 34 days; decisions S1-S55; proposals
+GS1-GS15, open.
