@@ -479,3 +479,144 @@ The user, in place of the survey's `jaf`/`gaf`: "i prefer something, like \"repr
   the regenerated records, the gate, the fixpoint), then one re-seed; then `repr/java print`.
 - What keeps the old names: the frozen branches, the tags, the dated journal entries, G2C-SURVEY,
   the provenance lines.
+
+## The rename as built (2026-10-17)
+
+On the branch `repr-rename` (from main at `11bf490e`), as the precedent (§5): a `git mv`-only
+commit, a content commit for every caller, then the regenerated records; the gate and the
+fixpoint after. The re-seed and the journal are the lead's, after the merge.
+
+The user added on the same day (binding): a2g becomes **j2g**, the translator from Java forms to
+Go forms, the printed program's names with it (`j2g_*.go`, `J2g_*`, `j2g_header`, the
+directives `j2g/*`), its variables `J2G_*` with a guard for the old `A2G_*`; and the term
+**class forms becomes Java forms** in documents, comments, messages and prose, while the front
+end keeps `arbace.classes.*` and doc/classes/SPEC.md its name (to revisit with j2g and c2a).
+c2a keeps its name. Built on the same branch as two more commits of the same kinds (a `git mv`,
+then the content), before the gate and the fixpoint.
+
+### Names
+
+| before | after |
+|---|---|
+| j2a: `arbace.j2a.main`, `arbace.j2a.*` (`arbace/j2a/`) | repr/java: `arbace.repr.java` (`arbace/repr/java.ae`), `arbace.repr.java.*` (`arbace/repr/java/`) |
+| g2a: `arbace.g2a.main`, `arbace.g2a.*` (`arbace/g2a/`) | repr/go: `arbace.repr.go` (`arbace/repr/go.ae`), `arbace.repr.go.*` (`arbace/repr/go/`) |
+| `arbace.g2a.build` (`arbace/g2a/build.ae`) | `arbace.build.go` (`arbace/build/go.ae`) |
+| `bin/j2a -m arbace.j2a.main convert` / `jdk`, `-m arbace.j2a.coverage` | `bin/repr-java read`, `read-jdk`, `coverage` (`main ARGS...`: arbace.lang.Main's arguments) |
+| `bin/j2a-check` | `bin/repr-java check` (`bin/lib/repr-java/check`) |
+| `bin/g2a convert`, `read`, `build` (no argument: the helper) | `bin/repr-go read`, `read --dump`, `helper` |
+| `bin/g2a build ARGS` | `bin/build-go ARGS` |
+| `bin/g2a dump`, `corpus`, `roundtrip` | `bin/repr-go dump`, `corpus`, `roundtrip` |
+| `bin/g2a print`, `bin/g2a-print` | `bin/repr-go print` |
+| `bin/g2a-check` | `bin/repr-go check` (`bin/lib/repr-go/check`) |
+| `bin/g2a test`, `bin/g2a-convert-tests`; `bin/g2a-print-tests` | `bin/repr-go test read`; `test print` (`bin/lib/repr-go/test-read`, `test-print`) |
+| `bin/g2a-build-tests` | `bin/build-go test` (`bin/lib/build-go/test`) |
+| `bin/lib/g2a-host.bash` (`g2a_run`, `g2a_exec`) | `bin/lib/repr-go-host.bash` (`repr_go_run`, `repr_go_exec`), shared by `bin/repr-go` and `bin/build-go` |
+| `test/g2a/`, `test/g2a/build/`, `test/j2a/` | `test/repr/go/`, `test/build/go/`, `test/repr/java/` |
+| test namespaces `g2a.convert-test`, `g2a.print-test`, `j2a.build`; properties `g2a.*` | `repr.go.convert-test`, `repr.go.print-test`, `repr.java.build`; `repr.go.*` |
+| the print tests' directive `;; g2a-test:` | `;; repr-go-test:` |
+| the program's data marker `res/.g2a-data` | `res/.build-go-data` (the build reads it) |
+| `G2A_GOROOT` | `ARBACE_GOROOT` |
+| `G2A_GO_EXE`, `G2A_HOST_ID`, `G2A_DUMPS`, `G2A_JOBS`, `G2A_GOOS`, `G2A_GOARCH`, `G2A_GOCMP_FLAGS`, `G2A_OP`, `G2A_SEED`, `G2A_LEVELS` | `REPR_GO_EXE`, `REPR_GO_HOST_ID`, `REPR_GO_DUMPS`, `REPR_GO_JOBS`, `REPR_GO_GOOS`, `REPR_GO_GOARCH`, `REPR_GO_GOCMP_FLAGS`, `REPR_GO_OP`, `REPR_GO_SEED`, `REPR_GO_LEVELS` |
+| `G2A_HOST` (only `go` allowed since S4) | dropped |
+| `J2A_JVM_OPTS`, `J2A_CP`, `J2A_THREADS`, `J2A_PATCH_ALL`, `J2A_TEST_JOBS`, `J2A_DEBUG` | `REPR_JAVA_JVM_OPTS`, `REPR_JAVA_CP`, `REPR_JAVA_THREADS`, `REPR_JAVA_PATCH_ALL`, `REPR_JAVA_TEST_JOBS`, `REPR_JAVA_DEBUG` |
+| `.tmp/g2a/`, `g2a-host`, `g2a-print-cache`, `g2a-check`, `g2a-*-tests`, `j2a-check`, `j2a-jdk`, `j2a-patch`; `j2a-report.edn` | `.tmp/repr-go/`, `repr-go-host`, `repr-go-print-cache`, `repr-go-check`, `repr-go-read-tests`, `repr-go-print-tests`, `build-go-tests`, `repr-java-check`, `repr-java-jdk`, `repr-java-patch`; `repr-java-report.edn` |
+| the Makefile's `g2a-roundtrip`, `g2a-roundtrip-text` | `repr-go-roundtrip`, `repr-go-roundtrip-text` |
+| the gate's steps `j2a`, `g2a` (logs `.tmp/gate/`) | `repr-java`, `repr-go` |
+| provenance key `:converter {:j2a ...}` (jdk/, the fixtures) | `:converter {:repr-java ...}`, over `arbace/repr/java.ae`, `arbace/repr/java/` and `bin/repr-java` |
+| a2g: `arbace.a2g.*` (`arbace/a2g/`), `test/a2g/` (`a2g.*`) | j2g: `arbace.j2g.*` (`arbace/j2g/`), `test/j2g/` (`j2g.*`) |
+| `bin/a2g`, `a2g-check`, `a2g-edge`, `a2g-evalproof` | `bin/j2g`, `j2g-check`, `j2g-edge`, `j2g-evalproof` |
+| `doc/go/A2G-SPEC.md`, `A2G-NOTES.md` | `doc/go/J2G-SPEC.md`, `J2G-NOTES.md` |
+| the printed program: `a2g_*.go`, `reflect_tables_a2g.go`, `A2g_*` (jrt's support names), `a2g_header`; the overlays' `a2g/variant`, `a2g/cut`, `a2g/add`...; `:a2g/line` | `j2g_*.go`, `reflect_tables_j2g.go`, `J2g_*`, `j2g_header`; `j2g/variant`, `j2g/cut`, `j2g/add`...; `:j2g/line` |
+| `aot_arbace_a2g_*` (the compiled namespaces' packages) | `aot_arbace_j2g_*` |
+| `target/arbace-go/a2g/`, `.tmp/a2g-host` | `target/arbace-go/j2g/`, `.tmp/j2g-host` |
+| `A2G_JOBS`, `A2G_GO_EXE`, `A2G_OUT`, `A2G_ARCH`, `A2G_SHOW`, `A2G_ANALYSIS_TIMES`, `A2G_CLASS_TIMES`, `A2G_JVM_OPTS`, `A2G_EDGE_WORK`, `A2G_EDGE_TRACE_ARGS`, `A2G_PROF`, `A2G_FIXTURES`, `A2G_TRACE`, `A2G_JDK_REACH`, `A2G_EMBED_ONLY` | `J2G_*` likewise |
+| `A2G_HOST` (only `go` since S4) | dropped |
+| class forms (the term) | Java forms (`arbace.classes.*`, doc/classes/SPEC.md's name, and hyphenated identifiers and data keys such as `class-forms` kept) |
+
+Kept: c2a and its names; the frozen branches and the tags; doc/JOURNAL.md, doc/G2C-SURVEY.md, this survey's sections above; the
+branch names the notes cite (`s3-g2a`, `speed2-g2a`, `g2a-params`, `g2a-cases`, `speed2-a2g`,
+`s4-a2gpar`, `a2g-core`, `a2g-2a`...`a2g-2d`); `doc/go/java-surface.edn`, a record measured on
+2026-10-11 (on the JVM's stages, which S4 removed), and its treatment key `:a2g` in
+`test/jrt/java_surface.ae`, which writes and reads it; the provenance
+lines of the vendored derivation (`arbace/lang.ae`, `arbace/java/api.ae`: "written by
+arbace.j2a from Clojure ..."); doc/AGENDA.md (the lead's).
+
+### What changed besides the spelling
+
+- `RT.toolSource` names `arbace/repr/` and `arbace/build/` (beside `arbace/j2g/`, `c2a/`,
+  `aot/`): the bridges' main namespaces are files beside their directories
+  (`arbace/repr/go.ae` next to `arbace/repr/go/`), so the prefixes are the parents'. a2g's
+  `embed/excluded` leaves out `arbace/repr/java.ae` and `arbace/repr/java/` (javac);
+  `bin/lib/frozen.bash`'s tools view links `arbace/repr/{java,go}`, `arbace/build`.
+- The print cache's host identity (`REPR_GO_HOST_ID`) hashes `arbace/repr/go.ae`,
+  `arbace/repr/go/*.ae` and `arbace/build/*.ae` (g2a's directory held all three before); the
+  vendoring scripts' tree keys hash the same and both commands.
+- The guard (N11 (c)): `bin/lib/renamed-env.bash`, sourced by every script that reads
+  `ARBACE_GOROOT` or `J2G_*` (`bin/arbace-go`, `build-go`, `repr-go`, `j2g`, `j2g-*`, `seed`,
+  `gate`, `jrt`, `jrt-coverage`, the box's and the vendoring scripts, the bridges' checks),
+  stops with a message when `G2A_GOROOT` is set and `ARBACE_GOROOT` is not, or when any `A2G_*`
+  is set.
+- The mains' verbs: `arbace.repr.go`'s `convert` is `read`; `arbace.repr.java`'s `convert` and
+  `jdk` are `read` and `read-jdk`.
+- The first build after the rename runs the renamed tools evaluated on today's stage 0
+  (§4.3.2): its seed embeds and compiles `arbace.g2a.*` and `arbace.a2g.*`, not
+  `arbace.repr.go.*` and `arbace.j2g.*`.
+- The term's change caught three uses of the class `Class` in code (`^Class form`,
+  `(instance? Class form)`, `(cast Class form)` in `arbace/classes/types.ae` and
+  `arbace/lang/Compiler.ae`), restored at once (the edge's recording failed on the first).
+
+### Regenerated
+
+- `jdk/` (the 911 headers name `arbace.repr.java`; `provenance.edn`'s `:converter
+  {:repr-java ...}`): `bin/jrt-convert update`, run twice (after the bridges' commit, and again
+  after the term's change touched repr/java's comments, which its provenance hash covers). Only
+  the header lines and the provenance changed.
+- `test/java-fixtures/` (headers, provenance): `bin/clojure-tests --java-fixtures update`, twice
+  likewise; `test/repr/java/expected/` (headers): `bin/repr-java check --update`. The baseline's
+  new SHA-256 list equals the old one with the headers spelled back (checked).
+- `jdk/edge.edn`: `bin/j2g-edge update`, then `verify`. Besides its header naming j2g, its
+  `:exists` gained seven `java.util` classes (`ArrayList`, `HashMap`, `HashSet`,
+  `LinkedHashMap`, `LinkedHashSet`, `concurrent.ConcurrentHashMap`, `atomic.AtomicInteger`)
+  that j2g's reachability has named since `2352fb2b` (2026-10-16): main's edge was stale since
+  then, which only `bin/gate --full`'s edge verify would have shown.
+- Not regenerated, edited with their generators: the reader tests' expected units' headers,
+  the round trip's references' first lines, `arbace/lang/go/`'s generated files,
+  `test/oracle/forms/defclass_corpus.ae`'s header.
+
+### Commits
+
+`789b8534` the bridges' `git mv`; `42737178` their callers; `1e242417` the records; for j2g its
+`git mv` (`cc9e0b73`), then `ae758429` the callers, the printed names, the
+variables, the term; `b4a7b38c` the edge, and three `Class` hints the term
+had caught; `58428c77` the provenance again.
+
+### Checks (all on the branch, amd64)
+
+- `bin/gate`: passed in 10m18s (stage 0 from the seed, the executables built in 490 s with the
+  renamed tools evaluated on stage 0; Clojure's suite 20,506 of 20,520, no regressions; the
+  oracle 53 known mismatches, 0 new).
+- `bin/arbace-go --fixpoint`: holds, G1 = G2 = G3 byte for byte (`425c4369...`, 103,760,032
+  bytes; j2g's program G1 = G2 = G3 too), 6m19s.
+- `bin/repr-go roundtrip amd64`: no regressions; `--text amd64`: 1,705 of 1,708 test files and
+  1,742 of 1,742 std files byte-identical, the 3 differences known. `bin/repr-go test read` 7
+  tests, 164 assertions; `test print` 5 tests, 268 assertions; `bin/build-go test` 26 passed.
+- `bin/repr-java check` (its default checks, on the frozen JVM): baseline 189 files, java 11,
+  module 6, as expected.
+- `bin/j2g-edge verify`, `bin/box-vendor roundtrip`, `bin/toolchain-vendor verify`: pass.
+  `bin/tamago-vendor verify` fails, as it does on main at `11bf490e` with the same 20-line diff
+  (checked in a worktree of that commit): `:go/label-line` on four labeled declarations of
+  `tamago/goroot`, which `53c65f69` (the printer's mode `:full`) made the reader write and
+  `tamago/` was not converted again after; not the rename's (`bin/tamago-vendor convert` fixes
+  it, a change of its own).
+- `make check-makefile`; the guard: `G2A_GOROOT=/x bin/repr-go helper` and `A2G_JOBS=3 bin/j2g`
+  stop with exit status 2 and their messages.
+- Not run, as asked: the re-seed, `bin/gate --full`.
+
+### What still says g2a, j2a or a2g
+
+The "Names:" notes of the living documents (they give the old names on purpose); the dated
+records and the branch names above; doc/JOURNAL.md, doc/G2C-SURVEY.md, doc/AGENDA.md (the
+lead's) and this survey's sections before this one; `bin/lib/renamed-env.bash` (the guard's
+old names) and the guard's comment in each script; `doc/go/java-surface.edn` and its key in
+`test/jrt/java_surface.ae`; `arbace/lang.ae` and `arbace/java/api.ae`'s first lines (the
+derivation's provenance); the seed (until the re-seed).
