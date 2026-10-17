@@ -1535,6 +1535,26 @@ protocol:
   instance check, registered by the package's static `jrt.CodeDecl` table); its `C_New`
   initializes its nest's top-level class, whose statics its methods then read unguarded.
 
+- **Classes initialized at start** (Futamura F4, 2026-10-17; doc/FUTAMURA-SURVEY.md, "F4 and
+  F2's j2g fixes as built"). `arbace.j2g.start/classes` lists, by their Go names, the classes
+  whose initialization the program has started when a compiled namespace's code first runs
+  (`test/j2g/start_classes.ae` derives it from the program's `ARBACE_TRACE_INIT` runs). For a
+  listed class `C` (translated, with non-trivial initialization) each static method `C_m` is
+  two functions: `C_m_NoInit`, the body without the guard, and `C_m`, the guard (when the method
+  has one) and a call of `C_m_NoInit`. Compiled code (arbace.c2j's classes,
+  `names/compiled-class?`) calls `C_m_NoInit` and reads and writes `C`'s statics unguarded;
+  every other caller is as before. `jrt.StartCheck`, called at the start of a compiled loader's
+  `load` and of every compiled class's static initializer, stops the program (status 70) when
+  a listed class has not started its initialization (`jrt.ClassInit.Started`: done, or in
+  progress by the current thread), so a stale list fails loudly. A stack trace leaves out
+  `C_m`'s frame above `C_m_NoInit`'s.
+
+
+*Deviation (2026-10-17, F4.3, the user):* compiled code calls the start classes' statics without
+the guard (`C_m_NoInit`, after `jrt.StartCheck`); code of a compiled namespace run by another
+thread while a start class is still being initialized by the main thread (during `arbace.core`'s
+loading) would see it half-initialized, where the JVM makes that thread wait. The startup starts
+no such thread (agents and futures run after it), so it is recorded, not prevented.
 ### 6.3 Go's package initialization
 
 Go's own package initialization runs only data: the class registrations of §5.11, the string

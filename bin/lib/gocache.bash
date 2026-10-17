@@ -1,10 +1,10 @@
 # gocache_trim: trim Go's build cache (GOCACHE, as `go env` resolves it) of entries unused for
-# ARBACE_GOCACHE_KEEP_MIN minutes (default 360, six hours). Go keeps entries five days and
-# refreshes an entry's time when it uses it (at most hourly), so six hours is safe for builds in
+# ARBACE_GOCACHE_KEEP_MIN minutes (default 180, three hours; six until 2026-10-17). Go keeps entries five days and
+# refreshes an entry's time when it uses it (at most hourly), so three hours is safe for builds in
 # progress; j2g's programs, the round trips and parallel agents fill the cache by tens of GB in
 # hours. Sourced by bin/gate and bin/arbace-go; prints one line.
 gocache_trim() {
-  local go=${1:-go} gocache before keep=${ARBACE_GOCACHE_KEEP_MIN:-360}
+  local go=${1:-go} gocache before keep=${ARBACE_GOCACHE_KEEP_MIN:-180}
   gocache=$("$go" env GOCACHE 2>/dev/null || true)
   [ -n "$gocache" ] && [ -d "$gocache" ] || return 0
   before=$(du -sm "$gocache" | cut -f1)
@@ -17,7 +17,7 @@ gocache_trim() {
 # S6) trimmed alike, of entries unused for ARBACE_GOCACHE_KEEP_MIN minutes, and its collect
 # indexes (DIR/collect/, files: arbace.build.go's root-packages)
 build_go_print_cache_trim() {
-  local keep=${ARBACE_GOCACHE_KEEP_MIN:-360}
+  local keep=${ARBACE_GOCACHE_KEEP_MIN:-180}
   [ -d "$1" ] || return 0
   find "$1" -mindepth 2 -maxdepth 2 -type d -mmin +"$keep" -exec rm -rf {} + 2>/dev/null || true
   [ -d "$1/collect" ] && find "$1/collect" -type f -mmin +"$keep" -delete 2>/dev/null || true

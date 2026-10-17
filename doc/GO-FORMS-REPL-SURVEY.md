@@ -970,3 +970,18 @@ the host's local cache (`GOPROXY=file://…`, no network) and `GOSUMDB=off`.
 - The Arbace rows: `target/seed/amd64/arbace test/classforms/bench.ae` (two passes; both shown as
   ranges).
 - Counts: grep over `tamago/goroot/**/*.ae` (E5) and over the seed's extracted module (E2).
+
+## Decided (2026-10-17, the user)
+
+G1-G17 as recommended: Arbace's own interpreter (G1), its nodes as typed Go closures in
+hand-written Go forms, `go/arbace/goi/` (G2); the checker `arbace.go.check` for converted and
+hand-typed forms, verifying the converter's annotations (G3); typed slots and real Go values (G4);
+a build-time table of a listed set of compiled packages, measured at GR1 (G5); a small `arbace`
+Go package for Go forms to call Arbace (G6); generics per type-argument list at GR6 (G7);
+wrappers for listed interfaces, the runtime-overlay named types later (G8); Go packages as
+namespaces, declarations as late-bound vars (G9); `arbace.lang.GoValue` (G10); declarations in
+`go.*` namespaces and `go/eval`, no Go code inside Clojure fns (G11); Go panics and Go frames in
+traces (G12); `reify` of Go interfaces after GR5 (G13); the check over `$GOROOT/test` interpreted
+against printed and compiled, in `bin/gate --full` (G14); `go/run-compiled` at GR5 (G15);
+unification with the Java forms' interpreter after F7 (G16); the records (G17). Schedule: GR0,
+the spec, now; GR1-GR6 after the coming re-seed.

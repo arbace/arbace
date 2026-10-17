@@ -747,3 +747,80 @@ the fixtures' headers and provenance, jdk/'s provenance (911 forms equal), repr/
 `bin/repr-clojure check` (unit, `--suite`, `--libs`), `bin/diffcheck` (22 known, 0 new), repr/go's
 round trip, `bin/j2g-edge verify`. R6-R8 accepted (the user). The seed still embeds the old
 names until the next re-seed.
+
+## 2026-10-17: repr/haskell's milestone R1
+
+At the user's request (R1 beside F2), on the branch `repr-haskell-r1`, merged into main; details in
+doc/haskell/HASKELL-NOTES.md and doc/haskell/SPEC.md §10.4 ("As built: R1"). Built: the helper
+`tools/hsdump/HsDump.hs` on the host's GHC 9.14.1 (verbs dump, tree, lines; the pinned version
+checked; `-haddock` on; CPP through GHC's own driver, each dump recording the command, the
+included files' hashes and the output), the converter, writer and printer in Arbace
+(`arbace/repr/haskell{.ae,/}`), the command `bin/repr-haskell` (helper, corpus, dump, read,
+print, roundtrip, test), the corpus file `test/haskell/corpus-ghc-9.14.1.edn` (the source
+tarball pinned by SHA-256). Over `base`, `ghc-internal`, `ghc-prim`, `ghc-bignum`: 483 of 483
+modules give GHC's tree and every located node's start line equal to the original's (86 with
+CPP; 21,707 top-level forms, 639,097 located nodes), no known differences, about 40 s; 26 `.hsc`
+modules, 24 boot files and 2 generated ones left for R6. Departures from the spec, decided by the
+user as recommended (HR1-HR5): kept out of the executable (j2g's embed exclusions, as
+repr/java); the module body and class bodies printed in layout, since GHC's Haddock pass places
+doc comments by column only under layout; the stricter lines check and new `:lines` keys; tuple
+and unboxed-sum forms in constructor declarations; the round trip and tests in `bin/gate
+--full` (a step of their own). `ghc` added to doc/ALPINE.md as a check-only dependency.
+
+## 2026-10-17: Go forms at the REPL decided; GR0 started
+
+The survey's G1-G17 decided as recommended (doc/GO-FORMS-REPL-SURVEY.md, "Decided"): Arbace's
+own interpreter of Go forms, a type checker in Arbace, typed Go-closure nodes in hand-written Go
+forms, a table of the program's compiled packages, Go packages as namespaces of late-bound vars,
+the check over `$GOROOT/test`. GR0 (the spec) started on the branch `go-forms-spec`; GR1-GR6
+after the coming re-seed. The essential gate passed on main after repr/haskell R1's merge (7:38).
+
+## 2026-10-17: Go's build cache kept three hours (the user)
+
+The disk reached 87% (Go's build cache 32 GB, `.tmp/` 29 GB, with up to five agents building at
+once); the finished work's scratch removed and the cache trimmed of entries unused for two hours
+(to 19 GB; 58% used). At the user's request, `bin/lib/gocache.bash`'s default lowered from six
+hours to three (`ARBACE_GOCACHE_KEEP_MIN`, 180): Go refreshes an entry's time at most hourly, so
+three hours still keeps every build in progress.
+
+## 2026-10-17: GR0, goi's spec
+
+doc/go/GOI-SPEC.md (from the branch `go-forms-spec`, `85f3928`): the spec of `goi`, the
+interpreter of Go forms (Go package `arbace/goi`, driven by `arbace.go.*`), named as J2G-SPEC is
+after its component. Design: a package's declarations queued while it loads and checked whole
+at the end (one after-load hook in `arbace.core/load`); the checker written anew after go/types,
+verifying every annotation; nodes as Go closures typed by result, frames as windows of a
+per-goroutine stack, captured or address-taken variables in real `reflect.New` cells; calls
+through function cells (redefinition seen), bodies built on first call; named struct types
+distinct through a `goi:` tag on the first field; proxies with a fmt-aware `Format`, wrappers
+in compiled interfaces; no dynamic `MethodByName` (it would keep every exported method linked);
+a typed invoker per signature. Measured (Appendix A): fib 22 4.95 ms with frames per call, 2.87
+ms on a per-goroutine stack (gc 0.23); `strings.ToUpper` 331 ns through `reflect.Value.Call`, 39
+ns through a typed invoker (38 direct); `sort.Slice` of 1e5 550 ms with a `MakeFunc` less, 13.9
+ms with a typed adapter (11.1 native); a table of 35 listed packages' 1,081 functions and
+variables at most 3.9 MB. Milestones GR1-GR6, 24 to 34 days; decisions S1-S55; proposals
+GS1-GS15, open.
+
+## 2026-10-17: goi's GS1-GS15 decided (the user)
+
+All as recommended (doc/go/GOI-SPEC.md, "Decided"). GR1-GR6 after the coming re-seed.
+
+## 2026-10-17: the j2g batch merged (F4, F2's j2g and interpreter fixes)
+
+On the branch `j2g-batch` (`951c8eb`), merged into main; details in doc/FUTAMURA-SURVEY.md, "F4
+and F2's j2g fixes as built". F4 (a): `arbace/j2g/start.ae` lists the 82 runtime classes the
+program initializes before any user code (derived by `test/j2g/start_classes.ae` from
+`ARBACE_TRACE_INIT`'s trace of three runs); each static method of a listed class becomes a
+guard-free `C_m_NoInit` called only by compiled code (1,724 methods, 43,830 call sites), after
+`jrt.StartCheck` (status 70 when a listed class is not started). Benchmarks (eval-bench as a
+namespace): geometric mean 0.87; loop-long 12.20 → 4.37 ms, loop-double 1.55 → 0.53; fib 6.30 →
+6.68 (gc now inlines `Numbers`' boxed generic operations; F3 replaces them). F2.2 (anonymous
+classes with constructor arguments: `analyze-anon` built the constructor before the superclass's
+was chosen), F2.3 (`AbstractMethodError`), F2.4 (Clojure constants made at class
+initialization), F2.5 (the interpreter's lambdas get default methods), F2.6's collision (c2j's
+classes outside `arbace/` named `A_..._A`), abstract classes' constructors in the member tables
+(`InstantiationError`, reflection as the JVM's). diffcheck: 12,463 of 12,471 agree (known 22 →
+8, excluded 5 → 1, Java forms classes excluded 19 → 16); the essential gate passed; the fixpoint
+G1 = G2 = G3 on the branch. Decided by the user: F4.1 (a) the 82, F4.2 (a) re-measured with F3,
+F4.3 (a) a deviation recorded in J2G-SPEC §6.2. The agent once used `pgrep -f` by pattern,
+read-only, while waiting on a build (against the session's rule; nothing was signalled).
