@@ -109,8 +109,9 @@ The current state of the work. This file is rewritten as things change. For the 
   identical). Done: repr/go's directory tests (`bin/repr-go roundtrip --dirs [--text]`, 251 to 254
   tests per configuration, every level; D1-D3 decided, in `bin/gate --full`). Done: F2 (`bin/diffcheck`, 12,449 of 12,471 cases agree; F2.1-F2.6 decided).
 - `repr/haskell`'s spec written (doc/haskell/SPEC.md; S1-S36; HS1-HS12 decided as recommended).
-  Running beside F2 (the user, 2026-10-17): its milestone R1 (`tools/hsdump`, the converter, the
-  tree level over `base`; branch `repr-haskell-r1`), and `repr/java print` (Java forms → Java,
+  R1 done (2026-10-17: the tree and lines levels over GHC 9.14.1's base libraries, 483 of 483
+  modules; HR1-HR5); next R2-R6 (the text level, interfaces, the rest of the corpus). Running:
+  `repr/java print` (Java forms → Java,
   with a round trip; branch `repr-java-print`).
 - After the rename (the user, 2026-10-17: "Create jaf print after the naming debate settled"):
   `repr/java print`, Java's bridge printing back, class forms → Java source, with a round trip like

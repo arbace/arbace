@@ -747,3 +747,22 @@ the fixtures' headers and provenance, jdk/'s provenance (911 forms equal), repr/
 `bin/repr-clojure check` (unit, `--suite`, `--libs`), `bin/diffcheck` (22 known, 0 new), repr/go's
 round trip, `bin/j2g-edge verify`. R6-R8 accepted (the user). The seed still embeds the old
 names until the next re-seed.
+
+## 2026-10-17: repr/haskell's milestone R1
+
+At the user's request (R1 beside F2), on the branch `repr-haskell-r1`, merged into main; details in
+doc/haskell/HASKELL-NOTES.md and doc/haskell/SPEC.md §10.4 ("As built: R1"). Built: the helper
+`tools/hsdump/HsDump.hs` on the host's GHC 9.14.1 (verbs dump, tree, lines; the pinned version
+checked; `-haddock` on; CPP through GHC's own driver, each dump recording the command, the
+included files' hashes and the output), the converter, writer and printer in Arbace
+(`arbace/repr/haskell{.ae,/}`), the command `bin/repr-haskell` (helper, corpus, dump, read,
+print, roundtrip, test), the corpus file `test/haskell/corpus-ghc-9.14.1.edn` (the source
+tarball pinned by SHA-256). Over `base`, `ghc-internal`, `ghc-prim`, `ghc-bignum`: 483 of 483
+modules give GHC's tree and every located node's start line equal to the original's (86 with
+CPP; 21,707 top-level forms, 639,097 located nodes), no known differences, about 40 s; 26 `.hsc`
+modules, 24 boot files and 2 generated ones left for R6. Departures from the spec, decided by the
+user as recommended (HR1-HR5): kept out of the executable (j2g's embed exclusions, as
+repr/java); the module body and class bodies printed in layout, since GHC's Haddock pass places
+doc comments by column only under layout; the stricter lines check and new `:lines` keys; tuple
+and unboxed-sum forms in constructor declarations; the round trip and tests in `bin/gate
+--full` (a step of their own). `ghc` added to doc/ALPINE.md as a check-only dependency.
