@@ -14,7 +14,7 @@ CLOJURE_TESTS_GO ?= target/arbace-go/amd64/arbace-tests
   box box-smoke box-oracle box-suite box-tools box-rebuild mac-bundle arm64-vm-check \
   gate gate-full suite oracle diffcheck verify jdk-verify edge-verify fixtures-verify tamago-verify \
   toolchain-verify box-vendor-verify x509roots-verify repr-go-roundtrip repr-go-roundtrip-text \
-  repr-java-roundtrip repr-haskell-roundtrip repr-haskell-iface repr-haskell-text repr-haskell-test alpine-check clean \
+  repr-java-roundtrip repr-haskell-roundtrip repr-haskell-iface repr-haskell-text repr-haskell-test goi-annotations goi-test alpine-check clean \
   check-makefile
 
 help: ## list the targets
@@ -121,6 +121,10 @@ repr-haskell-text: ## the same in mode :full: each module printed back byte for 
 	bin/repr-haskell roundtrip --text-only
 repr-haskell-test: ## repr/haskell's cases: the reader's samples, the spec's worked example, mode :full (bin/repr-haskell test)
 	bin/repr-haskell test
+goi-annotations: ## goi's checker over tamago/goroot, linux std, GOROOT/test: no error, every annotation verified (bin/goi annotations)
+	bin/goi annotations
+goi-test: ## goi's checker's tests: invalid forms with gc's messages, checked trees (bin/goi test --gc)
+	bin/goi test --gc
 
 ## The host and housekeeping
 alpine-check: ## one minimal apk add line reinstalls exactly the host's packages (bin/alpine-env check)

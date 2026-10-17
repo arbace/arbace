@@ -1,0 +1,876 @@
+(in-ns 'arbace.go.check.code)
+
+;;; Locals
+
+(defn new-local
+  "A new local variable object (not yet declared in a scope)."
+  [cx nm ty f & {:as more}]
+  (let [x (e/obj (merge {:kind :var :name nm :type ty :pkg (pkg-path) :local? true :fn-id (:fn-id cx)
+                         :line (or (fline f) e/*line*) :file (:name e/*gofile*)
+                         :per-iteration? false}
+                        more))]
+    (when (and (:locals cx) (not= "_" nm) (not (:param? more)) (not (:result? more)))
+      (vswap! (:locals cx) conj x))
+    x))
+
+(defn declare!
+  "Declares object x named nm in cx's block scope (redeclaration is an error)."
+  [cx nm x f]
+  (when (not= "_" nm)
+    (if-let [alt (e/scope-get (:scope cx) nm)]
+      (err! f :DuplicateDecl "%s redeclared in this block" nm)
+      (e/scope-put! (:scope cx) nm x))))
+
+(defn block-cx [cx] (assoc cx :scope (e/scope (:scope cx) :block)))
+
+;;; Assignment targets and statements (assignments.go)
+
+(defn- blank? [f] (and (symbol? f) (nil? (namespace f)) (= "_" (name f))))
+
+(defn lhs-place
+  "An assignment's left-hand side: a place node ({:op :place-...}), or :blank."
+  [cx f]
+  (if (blank? f)
+    :blank
+    (let [x (if (go-ident? f)
+              ;; an assignment to a variable is not a use of it (but captures it)
+              (let [n (ident-name f)
+                    v (resolve-name cx n)]
+                (if (and v (= :var (o v :kind)))
+                  (do (when (and (o v :local?) (not= (o v :fn-id) (:fn-id cx))) (oset! v :captured? true))
+                      (note-ref! v)
+                      {:op (if (o v :local?) :local :global) :obj v :mode :variable :type (o v :type) :form f :line (fline f)})
+                  (expr cx f)))
+              (expr cx f))]
+      (cond
+        (invalid? x) x
+        (= :variable (:mode x))
+        (assoc x :op (case (:op x)
+                       :local :place-local :global :place-global :field :place-field :index :place-index
+                       :deref :place-deref (:op x)))
+        (= :mapindex (:mode x)) (assoc x :op :place-map)
+        :else
+        (do (if (and (= :field (:op x)) (= :mapindex (:mode (:x x))))
+              (err! f :UnaddressableFieldAssign "cannot assign to struct field %s in map" (expr-str f))
+              (err! f :UnassignableOperand "cannot assign to %s (neither addressable nor a map index expression)" (expr-str f)))
+            (assoc x :mode :invalid :type :invalid))))))
+
+(defn- values-forms [f] (if (= "values" (head-name f)) (vec (rest f)) [f]))
+
+(defn- count-str [n what] (str n " " what (when (not= 1 n) "s")))
+
+(defn- mismatch!
+  [f nl rhs-forms nodes call?]
+  (if call?
+    (err! f :WrongAssignCount "assignment mismatch: %s but %s returns %s" (count-str nl "variable")
+          (let [cf (first rhs-forms)] (expr-str (if (seq? cf) (if (= "go/call" (head-name cf)) (second cf) (first cf)) cf)))
+          (count-str (count nodes) "value"))
+    (err! f :WrongAssignCount "assignment mismatch: %s but %s" (count-str nl "variable")
+          (count-str (count rhs-forms) "value"))))
+
+(defn call-form?
+  "Whether a form is a Go call expression: a call, a conversion or a builtin's call."
+  [f]
+  (and (seq? f)
+       (let [h (head-name f)]
+         (or (nil? h)
+             (not (contains? #{"+" "-" "*" "/" "%" "<<" ">>" "==" "!=" "<" "<=" ">" ">=" "and" "or" "not" "bit-and"
+                               "bit-or" "bit-xor" "bit-not" "bit-and-not" "addr" "<!" "lit" "assert" "aget" "subslice"
+                               "spread" "values" "inst" "method-expr" "fn" "zero" "rune" "imaginary" "byte-string"
+                               "deref" "go/id"} h))))
+       (not (and (= "-" (head-name f)) (= 2 (count f))))
+       (not (str/starts-with? (str (head-name f)) ".-"))))
+
+(defn rhs-values
+  "The values of the right-hand side forms for nl targets: a vector of nodes (a single call or
+  comma-ok expression expanded), or nil after a count mismatch. hints: the targets' types for
+  elided literals (nil allowed)."
+  [cx f nl rhs-forms]
+  (if (and (= 1 (count rhs-forms)) (or (not= 1 nl) (call-form? (first rhs-forms))))
+    (let [[nodes] (multi-expr cx (first rhs-forms) (= 2 nl))]
+      (cond
+        (some invalid? nodes) (vec (repeat nl (invalid f)))
+        (= nl (count nodes)) nodes
+        :else (do (mismatch! f nl rhs-forms nodes (call-form? (first rhs-forms))) nil)))
+    (if (not= nl (count rhs-forms))
+      (do (doseq [r rhs-forms] (expr cx r))
+          (mismatch! f nl rhs-forms rhs-forms false)
+          nil)
+      (mapv #(expr cx %) rhs-forms))))
+
+(defn init-var
+  "go/types' initVar: the value n for variable x (its type inferred from n when nil)."
+  [cx x n context]
+  (if (invalid? n)
+    (do (when (nil? (o x :type)) (oset! x :type :invalid)) n)
+    (do
+      (when (nil? (o x :type))
+        (let [ty (:type n)]
+          (if (= :untyped-nil ty)
+            (do (err! (:form n) :UntypedNilUse "use of untyped nil in %s" context) (oset! x :type :invalid))
+            (oset! x :type (t/default-type ty)))))
+      (if (= :invalid (o x :type))
+        n
+        (assignment cx n (o x :type) context)))))
+
+(defn assign-stmt
+  "(set! place value), (set! (values p ...) init)."
+  [cx f]
+  (let [[_ lf rf] f
+        lhs (values-forms lf)
+        rhs (values-forms rf)
+        places (mapv #(lhs-place cx %) lhs)
+        vals (rhs-values cx f (count lhs) rhs)]
+    (if (nil? vals)
+      {:op :assign :lhs places :rhs [] :line (fline f)}
+      {:op :assign :line (fline f)
+       :lhs places
+       :rhs (vec (map (fn [p v]
+                        (cond
+                          (= :blank p) (assignment cx v nil "assignment")
+                          (invalid? p) v
+                          :else (assignment cx v (:type p) "assignment")))
+                      places vals))})))
+
+(def ^:private op-assign-ops
+  '#{+ - * / % << >> bit-and bit-or bit-xor bit-and-not})
+
+(defn op-assign-stmt
+  "(set! place op value)."
+  [cx f]
+  (let [[_ pf opf vf] f
+        place (lhs-place cx pf)
+        ;; the place is read too: a use
+        _ (when (and (map? place) (#{:place-local :place-global} (:op place))) (use-var! cx (:obj place)))
+        x (if (map? place) (assoc place :mode :variable :op :place-read) (invalid pf))
+        y (expr cx vf)
+        r (binary-nodes cx (list (symbol (name opf)) pf vf) (name opf) x y)]
+    (if (or (invalid? r) (invalid? place))
+      {:op :op-assign :go/op (name opf) :place place :value y :line (fline f)}
+      (let [r (assignment cx r (:type place) "assignment")]
+        {:op :op-assign :go/op (name opf) :place place :value (:y r y) :type (:type r) :line (fline f)}))))
+
+(defn incdec-stmt [cx f inc]
+  (let [pf (second f)
+        place (lhs-place cx pf)]
+    (when (and (map? place) (#{:place-local :place-global} (:op place))) (use-var! cx (:obj place)))
+    (cond
+      (or (= :blank place) (invalid? place))
+      (do (when (= :blank place) (err! f :InvalidBlank "cannot use _ as value"))
+          {:op :incdec :inc inc :place place :line (fline f)})
+      (not (t/numeric? (:type place)))
+      (do (err! f :NonNumericIncDec "invalid operation: %s%s (non-numeric type %s)" (expr-str pf) (if inc "++" "--") (t/type-str (:type place)))
+          {:op :incdec :inc inc :place place :line (fline f)})
+      :else {:op :incdec :inc inc :place place :line (fline f)})))
+
+;;; Declarations in function bodies (let, let-type)
+
+(defn- target-names [t] (if (= "values" (head-name t)) (vec (rest t)) [t]))
+
+(defn- verify-const-val!
+  "Compares a constant's computed value with its :val (§3.6)."
+  [f nm n]
+  (let [say (find (meta f) :val)]
+    (cond
+      (and (nil? say) (:annotated cx-flags) (= :constant (:mode n)) (not= :unknown (:val n)))
+      (e/annotation-error! f ":val" nm "none" (val-form-str (:val n) (:type n)))
+      say
+      (if (val-equal? (val (find (meta f) :val)) n)
+        (e/verified! :val f)
+        (when (= :constant (:mode n))
+          (e/annotation-error! f ":val" nm (pr-str (val say)) (val-form-str (:val n) (:type n))))))))
+
+(defn local-const
+  "A local constant (^:const binding): its node."
+  [cx tf init iota]
+  (let [nm (ident-name tf)
+        T (when (:tag (meta tf)) (typexpr cx (:tag (meta tf))))
+        cxi (assoc cx :iota iota)
+        n (expr cxi init)
+        n (cond
+            (invalid? n) n
+            (not= :constant (:mode n))
+            (do (err! init :InvalidConstInit "%s is not constant" (operand-str n)) (invalid init))
+            (and T (not (t/const-type? T)))
+            (do (err! tf :InvalidConstType "invalid constant type %s" (t/type-str T)) (invalid init))
+            T (assignment cx n T "constant declaration")
+            :else n)
+        x (e/obj {:kind :const :name nm :type (if (invalid? n) :invalid (:type n)) :val (:val n) :local? true
+                  :line (fline tf) :pkg (pkg-path)})]
+    (when-not (invalid? n) (verify-const-val! tf nm n))
+    [x n]))
+
+(defn- zero-form? [f] (= "zero" (head-name f)))
+
+(defn short-var-decl
+  "x := e, (values a b) := ...: [lhs-objects rhs-nodes]."
+  [cx f tf rf]
+  (let [targets (target-names tf)
+        rhs (values-forms rf)
+        seen (volatile! #{})
+        ;; reused names (in this block): assigned, marked ^:assign
+        lhs (vec (for [x targets]
+                   (if-not (go-ident? x)
+                     (do (err! x :BadDecl "non-name %s on left side of :=" (expr-str x)) nil)
+                     (let [nm (ident-name x)
+                           rep (and (not= "_" nm) (contains? @seen nm))
+                           alt (when (not= "_" nm) (e/scope-get (:scope cx) nm))
+                           say (:assign (meta x))]
+                       (vswap! seen conj nm)
+                       (when rep (err! x :RepeatedDecl "%s repeated on left side of :=" nm))
+                       ;; ^:assign verified (§3.6)
+                       (cond
+                         (= (boolean say) (boolean alt)) (when say (e/verified! :assign x))
+                         (or say (:annotated cx-flags))
+                         (e/annotation-error! x "^:assign" nm (if say "assigned" "declared") (if alt "assigned" "declared")))
+                       (cond
+                         (and alt (= :var (o alt :kind))) {:obj alt :reused true :form x}
+                         alt (do (err! x :UnassignableOperand "cannot assign to %s" (expr-str x)) {:obj nil :form x})
+                         :else {:obj (new-local cx nm nil x) :new true :form x})))))
+        vals (rhs-values cx f (count lhs) rhs)
+        nodes (if (nil? vals)
+                (do (doseq [l lhs] (when (and (:new l) (:obj l)) (oset! (:obj l) :type :invalid))) [])
+                (vec (map (fn [l v]
+                            (cond
+                              (nil? l) v
+                              (nil? (:obj l)) v
+                              (:reused l) (assignment cx v (o (:obj l) :type) "assignment")
+                              (= "_" (o (:obj l) :name)) (init-var cx (:obj l) v "assignment")
+                              :else (init-var cx (:obj l) v "assignment")))
+                          lhs vals)))
+        new-vars (filter #(and (:new %) (not= "_" (o (:obj %) :name))) lhs)]
+    (when (and (empty? new-vars) (every? some? lhs) (every? :obj lhs))
+      (err! f :NoNewVar "no new variables on left side of :="))
+    (doseq [l new-vars] (declare! cx (o (:obj l) :name) (:obj l) (:form l)))
+    {:op :decl :short true :objs (mapv :obj lhs) :init nodes :line (fline f)}))
+
+(defn var-decl
+  "var x T = e, var x T, var x = e, var a, b = f(): the declaration node."
+  [cx f tf rf]
+  (let [targets (target-names tf)
+        T (some #(when (:tag (meta %)) (typexpr cx (:tag (meta %)))) targets)
+        objs (mapv (fn [x] (new-local cx (ident-name x) T x)) targets)
+        no-init (zero-form? rf)
+        nodes (if no-init
+                []
+                (let [vals (rhs-values cx f (count objs) (values-forms rf))]
+                  (if (nil? vals)
+                    (do (doseq [x objs] (when (nil? (o x :type)) (oset! x :type :invalid))) [])
+                    (vec (map (fn [x v] (init-var cx x v "variable declaration")) objs vals)))))]
+    (when no-init
+      (let [zt (typexpr cx (second rf))]
+        (when (and T (t/valid? T) (t/valid? zt) (not= zt T))
+          (e/annotation-error! rf "(zero T)" (expr-str tf) (t/type-str zt) (t/type-str T)))))
+    (doseq [[x tf] (map vector objs targets)] (declare! cx (o x :name) x tf))
+    {:op :decl :objs objs :init nodes :line (fline f)}))
+
+(defn local-type
+  "A local type declaration Name T (let-type)."
+  [cx nf tf]
+  (when (:type-params (meta nf)) (e/unsupported! "local generic types"))
+  (let [nm (ident-name nf)
+        alias (:alias (meta nf))]
+    (if alias
+      (let [ty (typexpr cx tf)
+            x (e/obj {:kind :type :name nm :type ty :alias true :local? true :line (fline nf)})]
+        (declare! cx nm x nf)
+        {:op :local-type :obj x :type ty :line (fline nf)})
+      (let [nt (t/new-named {:name nm :pkg (pkg-path) :pkg-name (o e/*pkg* :name) :local true})
+            x (e/obj {:kind :type :name nm :type nt :local? true :line (fline nf)})
+            _ (t/update-info! nt assoc :obj x :resolving true)
+            _ (declare! cx nm x nf)
+            u (typexpr cx tf)]
+        (t/update-info! nt assoc :underlying (if (t/named? u) u u) :resolving false)
+        {:op :local-type :obj x :type nt :underlying u :line (fline nf)}))))
+
+(declare stmt stmt* branch-stmts)
+
+(defn let-stmt
+  "(let [bindings] body...): each pair a Go statement in the current block, the body the rest
+  of the block."
+  [cx f tail]
+  (let [[_ bv & body] f
+        pairs (partition 2 bv)
+        nodes (loop [ps pairs acc [] iota -1]
+                (if (empty? ps)
+                  acc
+                  (let [[tf rf] (first ps)
+                        m (meta tf)
+                        label (:go/label m)
+                        _ nil]
+                    (let [[node iota]
+                          (with-line tf
+                            (cond
+                              (:const m)
+                              (let [iota (if (:go/grouped m) (inc iota) 0)
+                                    [x n] (local-const cx tf rf iota)]
+                                (declare! cx (o x :name) x tf)
+                                [{:op :decl :const true :objs [x] :init [n] :line (fline tf)} iota])
+                              (or (:var m) (some #(:tag (meta %)) (target-names tf)) (zero-form? rf))
+                              [(var-decl cx tf tf rf) -1]
+                              :else
+                              [(short-var-decl cx tf tf rf) -1]))]
+                      (recur (rest ps) (conj acc node) iota)))))]
+    {:op :block :let true :decls nodes :stmts (stmt-list cx body tail) :line (fline f)}))
+
+(defn let-type-stmt [cx f tail]
+  (let [[_ bv & body] f
+        nodes (mapv (fn [[nf tf]] (local-type cx nf tf)) (partition 2 bv))]
+    {:op :block :let-type true :decls nodes :stmts (stmt-list cx body tail) :line (fline f)}))
+
+;;; Control flow
+
+(defn- clause? [f] (and (seq? f) (#{'case 'default} (first f))))
+
+(defn- init-stmt
+  "An init vector: [] none, [target expr] a := declaration, [stmt] a simple statement."
+  [cx v]
+  (case (count v)
+    0 nil
+    1 (stmt cx (first v) false false)
+    2 (let [[tf rf] v] (short-var-decl cx v tf rf))
+    (do (err! v :InvalidSyntaxTree "invalid init statement") nil)))
+
+(defn condition [cx f what]
+  (let [c (expr cx f)]
+    (cond
+      (invalid? c) c
+      (not (t/boolean-type? (:type c)))
+      (do (err! f :InvalidCond "non-boolean condition in %s statement" what) c)
+      :else (default-final c))))
+
+(defn branch
+  "A branch (then, else, a cond value): one statement or (do ...), in a block of its own."
+  [cx f tail]
+  (let [bcx (block-cx cx)]
+    (if (= "do" (head-name f))
+      {:op :block :stmts (stmt-list bcx (rest f) tail) :line (fline f)}
+      {:op :block :stmts (stmt-list bcx [f] tail) :line (fline f)})))
+
+(defn if-stmt [cx f tail]
+  (let [args (vec (rest f))
+        [init args] (if (vector? (first args)) [(first args) (subvec args 1)] [nil args])
+        icx (block-cx cx)
+        in (when init (init-stmt icx init))
+        c (condition icx (first args) "if")
+        then (branch icx (second args) tail)
+        els (when (> (count args) 2) (branch icx (nth args 2) tail))]
+    {:op :if :init in :cond c :then then :else els :line (fline f)}))
+
+(defn when-stmt [cx f tail]
+  (let [args (vec (rest f))
+        [init args] (if (vector? (first args)) [(first args) (subvec args 1)] [nil args])
+        icx (block-cx cx)
+        in (when init (init-stmt icx init))
+        c (condition icx (first args) "if")
+        bcx (block-cx icx)]
+    {:op :if :init in :cond c :then {:op :block :stmts (stmt-list bcx (rest args) tail)} :line (fline f)}))
+
+(defn cond-stmt [cx f tail]
+  (let [pairs (partition 2 (rest f))]
+    (letfn [(chain [ps]
+              (when (seq ps)
+                (let [[tf bf] (first ps)]
+                  (if (= :else tf)
+                    (branch cx bf tail)
+                    (let [c (condition cx tf "if")
+                          then (branch cx bf tail)
+                          els (chain (rest ps))]
+                      {:op :if :cond c :then then :else els :line (fline tf)})))))]
+      (or (chain pairs) {:op :block :stmts []}))))
+
+(defn- loop-cx [cx node-id label]
+  (assoc cx :breakable node-id :continuable node-id :loop-label label))
+
+(defn- note-break! [cx target]
+  (when-let [bs (:breaks cx)] (vswap! bs conj target)))
+
+(defn switch-stmt [cx f tail label]
+  (let [args (vec (rest f))
+        [init args] (if (vector? (first args)) [(first args) (subvec args 1)] [nil args])
+        [tag-f clauses] (if (and (seq args) (not (clause? (first args)))) [(first args) (rest args)] [nil args])
+        icx (block-cx cx)
+        in (when init (init-stmt icx init))
+        tag (if tag-f
+              (let [x (expr icx tag-f)
+                    x (assignment icx x nil "switch expression")]
+                (when (and (not (invalid? x)) (not (t/comparable? (:type x))) (not (t/has-nil? (:type x))))
+                  (err! tag-f :InvalidExprSwitch "cannot switch on %s (%s is not comparable)" (operand-str x) (t/type-str (:type x))))
+                x)
+              (assoc (const-node true :bool true) :form 'true))
+        id (Object.)
+        scx (assoc icx :breakable id :switch-label label)
+        n (count clauses)
+        seen (volatile! {})
+        defaults (volatile! 0)
+        cls (vec
+             (map-indexed
+              (fn [i cl]
+               (with-line cl
+                (let [default (= 'default (first cl))
+                      _ (when default (vswap! defaults inc)
+                              (when (> @defaults 1) (err! cl :DuplicateDefault "multiple defaults in switch")))
+                      vals (when-not default
+                             (vec (for [vf (second cl)]
+                                    (let [v (expr icx vf)
+                                          v (if (or (invalid? v) (invalid? tag)) v (convert-untyped v (:type tag)))]
+                                      (if (or (invalid? v) (invalid? tag))
+                                        v
+                                        (let [r (comparison icx vf "==" v tag true)]
+                                          (if (invalid? r)
+                                            v
+                                            (let [v (:x r)]
+                                              ;; duplicate constant cases
+                                              (when (and (= :constant (:mode v)) (not= :unknown (:val v))
+                                                         (not (t/boolean-type? (:type v))) (not (t/complex-type? (:type v))))
+                                                (let [k [(t/type-str (:type v)) (key-val v)]]
+                                                  (if (get @seen k)
+                                                    (err! vf :DuplicateCase "duplicate case %s in expression switch" (operand-str v))
+                                                    (vswap! seen assoc k true))))
+                                              v))))))))
+                      body (if default (rest cl) (nnext cl))
+                      bcx (assoc (block-cx scx) :fallthrough-ok (< i (dec n)))]
+                  {:op :case :default default :values vals :body (stmt-list bcx body tail) :line (fline cl)})))
+              clauses))]
+    {:op :switch :id id :label-id (:id label) :init in :tag tag :clauses cls :line (fline f)}))
+
+(defn type-switch-stmt [cx f tail label]
+  (let [args (vec (rest f))
+        [init guard clauses] (if (and (vector? (first args)) (not (clause? (second args))))
+                               [(first args) (second args) (nnext args)]
+                               [nil (first args) (next args)])
+        icx (block-cx cx)
+        in (when init (init-stmt icx init))
+        [bind gf] (if (vector? guard) [(first guard) (second guard)] [nil guard])
+        x (expr icx gf)
+        ok (and (not (invalid? x)) (t/interface? (:type x)) (not (t/tparam? (:type x))))
+        _ (when (and (not (invalid? x)) (not ok))
+            (err! gf :InvalidTypeSwitch "%s is not an interface" (operand-str x)))
+        id (Object.)
+        scx (assoc icx :breakable id :switch-label label)
+        seen (volatile! #{})
+        vars (volatile! [])
+        defaults (volatile! 0)
+        cls (vec
+             (for [cl clauses]
+              (with-line cl
+               (let [default (= 'default (first cl))
+                     _ (when default (vswap! defaults inc)
+                             (when (> @defaults 1) (err! cl :DuplicateDefault "multiple defaults in switch")))
+                     types (when-not default
+                             (vec (for [tf (second cl)]
+                                    (if (nil? tf)
+                                      (do (when (contains? @seen :nil) (err! cl :DuplicateCase "multiple nil cases in type switch (first at line ?)"))
+                                          (vswap! seen conj :nil)
+                                          :untyped-nil)
+                                      (let [T (typexpr icx tf)]
+                                        (when (and ok (t/valid? T))
+                                          (when (contains? @seen T)
+                                            (err! tf :DuplicateCase "duplicate case %s in type switch" (expr-str tf)))
+                                          (vswap! seen conj T)
+                                          (when (and (not (t/interface? T)) (t/missing-method T (:type x) false))
+                                            (err! tf :ImpossibleAssert "impossible type switch case: %s\n\t%s cannot have dynamic type %s %s"
+                                                  (expr-str tf) (operand-str x) (t/type-str T)
+                                                  (missing-cause T (:type x) (t/missing-method T (:type x) false)))))
+                                        T)))))
+                     bcx (block-cx scx)
+                     v (when bind
+                         (let [T (if (and (= 1 (count types)) (not= :untyped-nil (first types))) (first types) (:type x))
+                               v (new-local bcx (ident-name bind) (if ok T :invalid) bind :type-switch-var true)]
+                           (vswap! vars conj v)
+                           (e/scope-put! (:scope bcx) (ident-name bind) v)
+                           v))
+                     body (if default (rest cl) (nnext cl))]
+                 {:op :case :default default :types types :var v :body (stmt-list bcx body tail) :line (fline cl)}))))]
+    (when (and bind (not= "_" (ident-name bind)) (not-any? #(o % :used) @vars))
+      (err! bind :UnusedVar "%s declared and not used" (ident-name bind)))
+    {:op :type-switch :id id :label-id (:id label) :init in :x x :clauses cls :line (fline f)}))
+
+(defn select-stmt [cx f tail label]
+  (let [id (Object.)
+        scx (assoc cx :breakable id :switch-label label)
+        cls (vec
+             (for [cl (rest f)]
+               (let [default (= 'default (first cl))
+                     bcx (block-cx scx)
+                     comm (when-not default (second cl))
+                     cnode (cond
+                             default nil
+                             (vector? comm)
+                             (let [[tf rf] comm]
+                               (when-not (= "<!" (head-name rf))
+                                 (err! comm :InvalidSelectCase "select case must be send or receive (possibly with assignment)"))
+                               (short-var-decl bcx comm tf rf))
+                             (= ">!" (head-name comm)) (stmt bcx comm false false)
+                             (= "<!" (head-name comm)) {:op :expr :x (expr bcx comm)}
+                             (= "set!" (head-name comm))
+                             (do (when-not (= "<!" (head-name (nth comm 2)))
+                                   (err! comm :InvalidSelectCase "select case must be send or receive (possibly with assignment)"))
+                                 (assign-stmt bcx comm))
+                             :else (do (err! comm :InvalidSelectCase "select case must be send or receive (possibly with assignment)") nil))
+                     body (if default (rest cl) (nnext cl))]
+                 {:op :comm :default default :comm cnode :body (stmt-list bcx body tail) :line (fline cl)})))]
+    {:op :select :id id :label-id (:id label) :clauses cls :line (fline f)}))
+
+(defn- per-iteration! [cx objs]
+  (when (allow-version? cx 22)
+    (doseq [x objs] (when x (oset! x :per-iteration? true)))))
+
+(defn for-stmt [cx f label]
+  (let [[_ init cf pf & body] f
+        lcx (block-cx cx)
+        in (init-stmt lcx init)
+        _ (when (and in (= :decl (:op in))) (per-iteration! lcx (:objs in)))
+        c (when-not (= '_ cf) (condition lcx cf "for"))
+        id (Object.)
+        bcx (assoc (block-cx lcx) :breakable id :continuable id :loop-label label)
+        post (when-not (= '_ pf)
+               (let [p (stmt (assoc lcx :no-decl true) pf false false)]
+                 (when (and p (= :decl (:op p))) (err! pf :InvalidPostDecl "cannot declare in post statement of for loop"))
+                 p))]
+    {:op :for :id id :label-id (:id label) :init in :cond c :post post :body (stmt-list bcx body false) :line (fline f)}))
+
+(defn while-stmt [cx f label]
+  (let [[_ cf & body] f
+        c (if (true? cf) nil (condition cx cf "for"))
+        id (Object.)
+        bcx (assoc (block-cx cx) :breakable id :continuable id :loop-label label)]
+    {:op :for :id id :label-id (:id label) :cond c :body (stmt-list bcx body false) :while true :line (fline f)}))
+
+(defn- range-types
+  "[kind key-type value-type] of ranging over node x, or nil (cannot range)."
+  [cx x]
+  (let [ty (:type x)
+        u (t/under ty)
+        u (if (and (vector? u) (= :pointer (nth u 0)) (let [b (t/under (nth u 1))] (and (vector? b) (= :array (nth b 0)))))
+            [:ptr-array (t/under (nth u 1))]
+            u)]
+    (cond
+      (t/tparam? ty) (e/unsupported! "range over type parameters")
+      (t/string-type? u) [:string :int :int32]
+      (t/integer-type? u) (when (allow-version? cx 22) [:int (if (t/untyped? ty) :int ty) nil])
+      (not (vector? u)) nil
+      :else
+      (case (nth u 0)
+        :array [:array :int (nth u 2)]
+        :ptr-array [:ptr-array :int (nth (nth u 1) 2)]
+        :slice [:slice :int (nth u 1)]
+        :map [:map (nth u 1) (nth u 2)]
+        :chan (when (not= :send (nth u 1)) [:chan (nth u 2) nil])
+        :func (when (allow-version? cx 23)
+                (let [[_ ps rs] u]
+                  ;; func(yield func(K, V) bool)
+                  (when (and (= 1 (count ps)) (empty? rs))
+                    (let [yu (t/under (first ps))]
+                      (when (and (vector? yu) (= :func (nth yu 0)) (= [:bool] (mapv t/under (nth yu 2))) (<= (count (nth yu 1)) 2))
+                        (let [yps (nth yu 1)]
+                          [:func (first yps) (second yps) (count yps)]))))))
+        nil))))
+
+(defn range-stmt [cx f label]
+  (let [[_ bv & body] f
+        assign (:assign (meta f))
+        n (count bv)
+        xf (peek bv)
+        targets (pop bv)
+        lcx (block-cx cx)
+        x (expr lcx xf)
+        rt (when-not (invalid? x) (range-types lcx x))
+        id (Object.)
+        bcx0 (fn [] (assoc (block-cx lcx) :breakable id :continuable id :loop-label label))]
+    (when (and (not (invalid? x)) (nil? rt))
+      (err! xf :InvalidRangeExpr "cannot range over %s" (operand-str x)))
+    (let [[kind kt vt nyield] rt
+          ;; how many iteration variables the kind permits
+          maxv (cond (= kind :func) (or nyield 0) (#{:chan :int} kind) 1 :else 2)
+          _ (when (and rt (> (count targets) maxv))
+              (err! f :InvalidIterVar "range over %s permits only one iteration variable" (operand-str x)))
+          x (if (and (= kind :int) (t/untyped? (:type x)))
+              (let [want (when (and assign (seq targets) (not (blank? (first targets))))
+                           (:type (lhs-place lcx (first targets))))]
+                (convert-untyped x (or want (t/default-type (:type x)))))
+              x)
+          kt (if (and (= kind :int) rt) (:type x) kt)
+          types [kt vt]]
+      (if assign
+        (let [places (mapv (fn [tf ty]
+                             (let [p (lhs-place lcx tf)]
+                               (when (and (map? p) (not (invalid? p)) ty (t/valid? ty)
+                                          (not (first (assignable? {:mode :value :type ty} (:type p)))))
+                                 (err! tf :IncompatibleAssign "cannot assign %s to %s in range" (t/type-str ty) (expr-str tf)))
+                               p))
+                           targets types)
+              bcx (bcx0)]
+          {:op :range :id id :label-id (:id label) :over kind :x x :places places :body (stmt-list bcx body false) :line (fline f)})
+        (let [objs (mapv (fn [tf ty]
+                           (new-local lcx (ident-name tf) (or ty :invalid) tf))
+                         targets types)
+              _ (per-iteration! lcx objs)
+              _ (doseq [[x tf] (map vector objs targets)] (declare! lcx (o x :name) x tf))
+              bcx (bcx0)]
+          {:op :range :id id :label-id (:id label) :over kind :x x :objs objs :body (stmt-list bcx body false) :line (fline f)})))))
+
+;;; return, go, defer, send, branches
+
+(defn return-stmt [cx f]
+  (let [rs (:results cx)
+        vals (rest f)
+        want (mapv :type rs)
+        want-str (fn [] (str "(" (str/join ", " (map t/type-str want)) ")"))]
+    (cond
+      (and (empty? vals) (seq rs) (:named-results cx))
+      ;; a naked return: the named results must be in scope
+      (do (doseq [r rs]
+            (when-let [obj (:obj r)]
+              (let [alt (resolve-name cx (o obj :name))]
+                (when (and alt (not (identical? alt obj)))
+                  (err! f :OutOfScopeResult "result parameter %s not in scope at return\n\tinner declaration of %s" (o obj :name) (o obj :name))))))
+          {:op :return :named true :values [] :line (fline f)})
+      (and (empty? vals) (seq rs))
+      (do (err! f :WrongResultCount "not enough return values\n\thave ()\n\twant %s" (want-str))
+          {:op :return :values [] :line (fline f)})
+      (and (seq vals) (empty? rs))
+      (let [nodes (mapv #(expr cx %) vals)]
+        (when-not (some invalid? nodes)
+          (err! f :WrongResultCount "too many return values\n\thave (%s)\n\twant ()"
+                (str/join ", " (map #(type-summary (:type %)) nodes))))
+        {:op :return :values nodes :line (fline f)})
+      (empty? vals) {:op :return :values [] :line (fline f)}
+      :else
+      (let [nodes (if (and (= 1 (count vals)) (> (count rs) 1))
+                    (first (multi-expr cx (first vals) false))
+                    (mapv #(expr cx %) vals))]
+        (if (some invalid? nodes)
+          {:op :return :values nodes :line (fline f)}
+          (if (not= (count nodes) (count rs))
+            (do (err! f :WrongResultCount "%s return values\n\thave (%s)\n\twant %s"
+                      (if (< (count nodes) (count rs)) "not enough" "too many")
+                      (str/join ", " (map #(type-summary (:type %)) nodes))
+                      (want-str))
+                {:op :return :values nodes :line (fline f)})
+            {:op :return :line (fline f)
+             :values (vec (map (fn [n r] (assignment cx n (:type r) "return statement")) nodes rs))}))))))
+
+(def ^:private discarding-builtins
+  #{"append" "cap" "complex" "imag" "len" "make" "new" "real" "min" "max"})
+
+(defn go-defer-stmt [cx f kw]
+  (let [cf (second f)
+        n (expr-internal cx cf nil)]
+    (cond
+      (invalid? n) {:op kw :call n :line (fline f)}
+      (= :conv (:op n))
+      (do (err! f :InvalidDefer "%s requires function call, not conversion %s" (name kw) (operand-str n)) {:op kw :call n :line (fline f)})
+      (and (= :call (:op n)) (= :builtin (:kind n)) (discarding-builtins (:builtin n)))
+      (do (err! f :UnusedResults "%s discards result of %s" (name kw) (operand-str n)) {:op kw :call n :line (fline f)})
+      (not= :call (:op n))
+      (do (err! f :InvalidCall "expression in %s must be function call" (name kw)) {:op kw :call n :line (fline f)})
+      :else {:op kw :call n :line (fline f)})))
+
+(defn send-stmt [cx f]
+  (let [[_ chf vf] f
+        ch (expr cx chf)
+        v (expr cx vf)]
+    (if (or (invalid? ch) (invalid? v))
+      {:op :send :ch ch :value v :line (fline f)}
+      (let [u (t/under (:type ch))]
+        (cond
+          (not (and (vector? u) (= :chan (nth u 0))))
+          (do (err! f :InvalidSend "invalid operation: cannot send to non-channel %s" (operand-str ch))
+              {:op :send :ch ch :value v :line (fline f)})
+          (= :recv (nth u 1))
+          (do (err! f :InvalidSend "invalid operation: cannot send to receive-only channel %s" (operand-str ch))
+              {:op :send :ch ch :value v :line (fline f)})
+          :else {:op :send :ch ch :value (assignment cx v (nth u 2) "send") :line (fline f)})))))
+
+(defn branch-stmt
+  "break, continue, goto, fallthrough: their targets for the terminating analysis (the errors
+  are gc's branch checks', check-branches!)."
+  [cx f kind]
+  (let [lbl (second f)]
+    (case kind
+      :break (cond
+               lbl (when (contains? (:enclosing-labels cx) (name lbl))
+                     (note-break! cx (get (:label-ids cx) (name lbl))))
+               (:breakable cx) (note-break! cx (:breakable cx))
+               :else nil)
+      nil)
+    {:op kind :label (when lbl (name lbl)) :line (fline f)}))
+
+(defn label-stmt [cx f tail last]
+  (let [[_ kw s] f
+        nm (name kw)]
+    (if (nil? s)
+      {:op :label :label nm :line (fline f)}
+      (let [h (head-name s)
+            loop? (#{"for" "while" "range"} h)
+            breakable (#{"for" "while" "range" "switch" "type-switch" "select"} h)
+            id (Object.)
+            cx2 (cond-> (assoc cx :label-ids (assoc (:label-ids cx) nm id) :pending-label {:name nm :id id})
+                  breakable (update :enclosing-labels (fnil conj #{}) nm)
+                  loop? (update :loop-labels (fnil conj #{}) nm))]
+        {:op :label :label nm :stmt (stmt cx2 s tail last) :id id :line (fline f)}))))
+
+;;; Statements
+
+(defn expr-stmt
+  "An expression in a statement position: a call or a receive (else an error)."
+  [cx f]
+  (let [n (expr-internal cx f nil)]
+    (cond
+      (invalid? n) {:op :expr :x n :line (fline f)}
+      (= :builtin (:mode n)) (do (err! f :UncalledBuiltin "%s (built-in) must be called" (expr-str f)) {:op :expr :x n})
+      (= :typexpr (:mode n)) (do (err! f :NotAnExpr "%s (type) is not an expression" (expr-str f)) {:op :expr :x n})
+      (or (and (= :call (:op n)) (not (and (= :builtin (:kind n)) (discarding-builtins (:builtin n)))))
+          (= :recv (:op n)))
+      {:op :expr :x n :line (fline f)}
+      :else (do (err! f :UnusedExpr "%s is not used" (operand-str (exclude n #{}))) {:op :expr :x n :line (fline f)}))))
+
+(defn- panic-call? [f] (= "panic" (head-name f)))
+
+(def statement-heads
+  #{"let" "let-type" "set!" "aset" "inc!" "dec!" ">!" "go" "defer" "return" "break" "continue" "goto"
+    "fallthrough" "label" "do" "if" "when" "cond" "switch" "type-switch" "select" "for" "while" "range"
+    "go/directive"})
+
+(defn stmt
+  "A statement form (tail: the function's last statement position; last: the last of its
+  list)."
+  [cx f tail last]
+  (try
+    (stmt* cx f tail last)
+    (catch Exception ex
+      (if (or (e/unsupported? ex) (::where (ex-data ex)))
+        (throw ex)
+        (throw (ex-info (str (.getMessage ex) " at " (:name e/*gofile*) ":" (or (fline f) e/*line*))
+                        {::where true} ex))))))
+
+(defn stmt*
+  [cx f tail last]
+  (with-line f
+    (let [h (head-name f)
+          label (:pending-label cx)
+          cx (dissoc cx :pending-label)]
+      (case h
+        "let" (let-stmt cx f tail)
+        "let-type" (let-type-stmt cx f tail)
+        "set!" (if (= 4 (count f)) (op-assign-stmt cx f) (assign-stmt cx f))
+        "aset" (let [[_ a i v] f] (assign-stmt cx (with-meta (list 'set! (with-meta (list 'aget a i) (meta f)) v) (meta f))))
+        "inc!" (incdec-stmt cx f true)
+        "dec!" (incdec-stmt cx f false)
+        ">!" (send-stmt cx f)
+        "go" (go-defer-stmt cx f :go)
+        "defer" (go-defer-stmt cx f :defer)
+        "return" (return-stmt cx f)
+        "break" (branch-stmt cx f :break)
+        "continue" (branch-stmt cx f :continue)
+        "goto" (branch-stmt cx f :goto)
+        "fallthrough" (branch-stmt (assoc cx :fallthrough-here (and last (:fallthrough-ok cx))) f :fallthrough)
+        "label" (label-stmt cx f tail last)
+        "do" {:op :block :stmts (stmt-list (block-cx cx) (rest f) false) :line (fline f)}
+        "if" (if-stmt cx f false)
+        "when" (when-stmt cx f false)
+        "cond" (cond-stmt cx f false)
+        "switch" (switch-stmt cx f false label)
+        "type-switch" (type-switch-stmt cx f false label)
+        "select" (select-stmt cx f false label)
+        "for" (for-stmt cx f label)
+        "while" (while-stmt cx f label)
+        "range" (range-stmt cx f label)
+        "go/directive" {:op :directive :line (fline f)}
+        (if (and tail last (seq (:results cx)) (not (panic-call? f)))
+          ;; the implicit return of the body's last expression (SPEC §6.4)
+          (assoc (return-stmt cx (with-meta (list 'return f) (meta f))) :implicit true)
+          (expr-stmt cx f))))))
+
+(defn stmt-list
+  "The statements of a list (tail: whether the list ends the function body)."
+  [cx forms tail]
+  (let [forms (vec forms)
+        n (count forms)]
+    (vec (keep-indexed (fn [i f]
+                         (let [last (= i (dec n))]
+                           (if (and (not last) (#{"let" "let-type"} (head-name f)))
+                             ;; a let not last in its list is a block of its own (as the printer prints it)
+                             (assoc (stmt (block-cx cx) f false false) :nested true)
+                             (stmt cx f (and tail last) last))))
+                       forms))))
+
+;;; Terminating statements (return.go)
+
+(declare terminating?)
+
+(def ^:dynamic *term-cx* "The function context of the terminating analysis (its breaks)." nil)
+
+(defn- list-terminating? [stmts]
+  (let [s (last (remove #(= :directive (:op %)) stmts))]
+    (and s (terminating? s))))
+
+(defn- has-break? [cx id] (contains? @(:breaks cx) id))
+
+(defn terminating?
+  "go/types' isTerminating of a checked statement (breaks: the ids broken out of)."
+  ([s] (terminating? *term-cx* s))
+  ([cx s]
+   (case (:op s)
+     (:return :goto) true
+     :expr (let [x (:x s)] (and (= :call (:op x)) (= :builtin (:kind x)) (= "panic" (:builtin x))))
+     :block (if (or (:let s) (:let-type s))
+              (list-terminating? (:stmts s))
+              (list-terminating? (:stmts s)))
+     :if (and (:else s) (terminating? cx (:then s)) (terminating? cx (:else s)))
+     :label (terminating? cx (:stmt s))
+     :for (and (nil? (:cond s)) (not (has-break? cx (:id s))) (not (and (:label-id s) (has-break? cx (:label-id s)))))
+     :range false
+     (:switch :type-switch :select)
+     (and (not (has-break? cx (:id s)))
+          (not (and (:label-id s) (has-break? cx (:label-id s))))
+          (or (= :select (:op s)) (some :default (:clauses s)))
+          (every? (fn [cl] (let [b (:body cl)
+                                 l (last (remove #(= :directive (:op %)) b))]
+                             (or (and l (= :fallthrough (:op l))) (list-terminating? b))))
+                  (:clauses s)))
+     false)))
+
+
+;;; Function bodies
+
+(defn- declare-params!
+  "Declares a function's parameters and named results in its scope: [param-objs result-specs]."
+  [cx ps rs recv]
+  (let [mk (fn [spec kind]
+             (when (:name spec)
+               (let [x (new-local cx (:name spec) (:type spec) (:form spec) (if (= kind :param) :param? :result?) true)]
+                 (declare! cx (:name spec) x (:form spec))
+                 x)))
+        recv-obj (when recv (mk recv :param))
+        pobjs (mapv #(mk % :param) ps)
+        robjs (mapv (fn [r] (assoc r :obj (mk r :result))) rs)]
+    [recv-obj pobjs robjs]))
+
+(defn report-unused! [cx]
+  (doseq [x (sort-by #(o % :line) @(:locals cx))]
+    (when (and (not (o x :used)) (not= "_" (o x :name)) (not (o x :type-switch-var)))
+      (e/error! (o x :file) (o x :line) :UnusedVar (str "declared and not used: " (o x :name))))))
+
+(defn func-body
+  "A function's body (a package function, a method, a literal): its node. cx is the enclosing
+  context (the file's for declarations); f the declaring form (for :go/end)."
+  ([cx f sig ps rs body named] (func-body cx f sig ps rs body named nil))
+  ([cx f sig ps rs body named recv]
+   (let [fid (Object.)
+         fcx (assoc cx :scope (e/scope (:scope cx) :func) :fn-id fid
+                    :locals (volatile! [])
+                    :breaks (volatile! #{})
+                    :breakable nil :continuable nil :loop-labels #{} :enclosing-labels #{} :label-ids {}
+                    :fallthrough-ok false)
+         [recv-obj pobjs robjs] (declare-params! fcx ps rs recv)
+         fcx (assoc fcx :results robjs :named-results named)
+         stmts (stmt-list fcx body true)]
+     (when (and (seq rs) (not (:extern cx)))
+       (when-not (binding [*term-cx* fcx] (list-terminating? stmts))
+         (e/error! (or (:go/end (meta f)) (fline f) e/*line*) :MissingReturn "missing return")))
+     (report-unused! fcx)
+     (check-branches! body)
+     {:op (if (= "fn" (head-name f)) :fn :body) :recv recv-obj :params pobjs :results robjs
+      :sig sig :body {:op :block :stmts stmts} :mode :value :type sig :form f :line (fline f)})))

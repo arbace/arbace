@@ -1,0 +1,82 @@
+#!/bin/bash
+# goi, the interpreter of Go forms (doc/go/GOI-SPEC.md): its checks. As built at GR2 (the checker,
+# arbace.go.check, §3) the checker runs evaluated from the checkout: it is not one of the tools
+# the executable embeds (arbace/j2g/embed.ae's excluded list) until the program carries goi (GR1,
+# GR3). `run`, `check` and `table` (§11) come with GR1 and GR3.
+#
+#   bin/goi annotations [--record] [--jobs N] [CORPUS...]
+#                                 the annotation check (§11.4): every package of the corpora
+#                                 type-checked by goi's checker, without running anything: zero
+#                                 errors on these valid packages and every annotation of §3.6
+#                                 verified (:val, :tag, :go/via, ^:assign, conv, :init-order) in
+#                                 every declaration that uses no generics; the others are counted
+#                                 apart (S53). CORPUS: tamago-amd64, tamago-arm64 (tamago/goroot,
+#                                 its arch/ARCH/ laid over it), linux-amd64 (std), linux-test
+#                                 ($GOROOT/test's single-file programs), linux-dirtest (its
+#                                 directory tests); default all five. The linux corpora are
+#                                 repr/go's conversions (bin/repr-go read --corpus CORPUS, run first
+#                                 when .tmp/repr-go/forms/CORPUS is missing). The counts are
+#                                 compared with test/goi/annotations-CORPUS.edn (--record writes it);
+#                                 reports in .tmp/goi/annotations-CORPUS.report.edn
+#   bin/goi test [--gc] [--regen]
+#                                 the checker's tests (test/goi/check_test.ae): the invalid forms of
+#                                 test/goi/errors/ (each ; ERROR comment the checker's message at its
+#                                 line) and the checked trees of test/goi/checked/ against their
+#                                 .edn; --gc also builds the invalid forms printed by repr/go with gc
+#                                 and requires its messages to be the ERROR comments'
+#                                 (test/goi/gc_errors.ae); --regen rewrites test/goi/checked/*.edn
+#
+# Environment: ARBACE_HOST_EXE (the tools' host, bin/lib/host.bash), ARBACE_GOROOT (TamaGo's Go
+# tree, for --gc and the linux corpora's conversion).
+set -euo pipefail
+export CGO_ENABLED=0 # Go's builds never use cgo (doc/go/BOX-NOTES.md, "... cgo dropped", 2026-10-16)
+root=$(cd "$(dirname "$0")/.." && pwd)
+. "$root/bin/lib/renamed-env.bash"
+. "$root/bin/lib/tools.bash"
+cd "$root"
+
+usage() { sed -n '2,/^set -euo/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'; }
+
+cmd=${1:-}
+[ $# -gt 0 ] && shift
+case $cmd in
+  annotations)
+    corpora=()
+    for a in "$@"; do case $a in --*|[0-9]*) ;; *) corpora+=("$a") ;; esac; done
+    [ ${#corpora[@]} -gt 0 ] || corpora=(tamago-amd64 tamago-arm64 linux-amd64 linux-test linux-dirtest)
+    for c in "${corpora[@]}"; do
+      case $c in
+        linux-*)
+          [ -d "$root/.tmp/repr-go/forms/$c" ] || "$root/bin/repr-go" read --corpus "$c" > "$root/.tmp/goi-$c-read.log" 2>&1 ||
+            { echo "bin/goi: bin/repr-go read --corpus $c failed (.tmp/goi-$c-read.log)" >&2; exit 1; }
+          # the directory tests and the programs import std: its forms too
+          [ "$c" = linux-amd64 ] || [ -d "$root/.tmp/repr-go/forms/linux-amd64" ] ||
+            "$root/bin/repr-go" read --corpus linux-amd64 > "$root/.tmp/goi-linux-amd64-read.log" 2>&1 ;;
+      esac
+    done
+    arbace_tool -m arbace.go.check annotations "$@" ;;
+  test)
+    gc="" regen=""
+    for a in "$@"; do
+      case $a in
+        --gc) gc=1 ;;
+        --regen) regen=1 ;;
+        *) echo "bin/goi test: unknown option $a" >&2; exit 2 ;;
+      esac
+    done
+    if [ -n "$regen" ]; then
+      arbace_tool -p "$root/test" -e "(require 'goi.check-test) (goi.check-test/regen-checked!) (shutdown-agents)"
+      exit
+    fi
+    arbace_tool -p "$root/test" -e "
+(require 'arbace.test 'goi.check-test)
+(let [r (arbace.test/run-tests 'goi.check-test)]
+  (shutdown-agents)
+  (System/exit (if (zero? (+ (:fail r) (:error r))) 0 1)))"
+    if [ -n "$gc" ]; then
+      mkdir -p "$root/.tmp/goi-test"
+      arbace_tool -p "$root/test" -m goi.gc-errors "$root/.tmp/goi-test/gc"
+    fi ;;
+  ""|-h|--help|help) usage ;;
+  *) echo "bin/goi: unknown command $cmd (bin/goi --help)" >&2; exit 2 ;;
+esac

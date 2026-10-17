@@ -1,0 +1,889 @@
+(in-ns 'arbace.go.check.code)
+
+;;; Printing expressions and operands for messages (go/types' ExprString, operandString)
+
+(def ^:private binop-text
+  {"+" "+" "-" "-" "*" "*" "/" "/" "%" "%" "<<" "<<" ">>" ">>" "bit-and" "&" "bit-or" "|"
+   "bit-xor" "^" "bit-and-not" "&^" "and" "&&" "or" "||" "==" "==" "!=" "!=" "<" "<" "<=" "<="
+   ">" ">" ">=" ">="})
+
+(defn- lit-str [v]
+  (cond
+    (string? v) (pr-str v)
+    (char? v) (str "'" v "'")
+    (nil? v) "nil"
+    (instance? Double v) (str v)
+    (instance? java.math.BigDecimal v) (str v)
+    :else (str v)))
+
+(defn expr-str
+  "Go's text of an expression form (abridged where long)."
+  [f]
+  (cond
+    (symbol? f) (if (namespace f) (str (let [q (namespace f)] (if (str/includes? q ".") (last (str/split q #"\.")) q)) "." (name f)) (name f))
+    (go-id? f) (second f)
+    (vector? f) (str/join ", " (map expr-str f))
+    (keyword? f) (name f)
+    (not (seq? f)) (lit-str f)
+    :else
+    (let [h (head-name f) args (rest f)]
+      (cond
+        (and h (binop-text h) (= 2 (count args)))
+        (str (expr-str (first args)) " " (binop-text h) " " (expr-str (second args)))
+        (and h (binop-text h) (> (count args) 2))
+        (str/join (str " " (binop-text h) " ") (map expr-str args))
+        (and (= h "-") (= 1 (count args))) (str "-" (expr-str (first args)))
+        (and (= h "+") (= 1 (count args))) (str "+" (expr-str (first args)))
+        (= h "not") (str "!" (expr-str (first args)))
+        (= h "bit-not") (str "^" (expr-str (first args)))
+        (= h "addr") (str "&" (expr-str (first args)))
+        (= h "deref") (str "*" (expr-str (first args)))
+        (= h "<!") (str "<-" (expr-str (first args)))
+        (= h "conv") (str (expr-str (first args)) "(" (expr-str (second args)) ")")
+        (= h "assert") (str (expr-str (second args)) ".(" (expr-str (first args)) ")")
+        (= h "aget") (str (expr-str (first args)) "[" (expr-str (second args)) "]")
+        (= h "subslice") (str (expr-str (first args)) "[" (str/join ":" (map #(if (= '_ %) "" (expr-str %)) (rest args)))
+                              (when (= 1 (count (rest args))) ":") (when (empty? (rest args)) ":") "]")
+        (= h "lit") (str (if (= '_ (first args)) "" (expr-str (first args))) (if (next args) "{…}" "{}"))
+        (= h "fn") "func literal"
+        (= h "*") (if (= 1 (count args)) (str "*" (expr-str (first args))) (str/join " * " (map expr-str args)))
+        (= h "slice") (str "[]" (expr-str (first args)))
+        (= h "array") (str "[" (expr-str (first args)) "]" (expr-str (second args)))
+        (= h "map") (str "map[" (expr-str (first args)) "]" (expr-str (second args)))
+        (= h "chan") (str "chan " (expr-str (last args)))
+        (= h "func") "func(…)"
+        (= h "struct") "struct{…}"
+        (= h "interface") "interface{…}"
+        (= h "spread") (str (expr-str (first args)) "...")
+        (= h "method-expr") (str (expr-str (first args)) "." (expr-str (second args)))
+        (= h "rune") (str (second f))
+        (= h "imaginary") (str (expr-str (second f)) "i")
+        (= h "byte-string") "\"…\""
+        (= h "go/call") (str (expr-str (second f)) "(" (str/join ", " (map expr-str (nnext f))) ")")
+        (= h "inst") (str (expr-str (second f)) "[" (str/join ", " (map expr-str (nnext f))) "]")
+        (and h (str/starts-with? h ".-")) (str (expr-str (first args)) "." (subs h 2))
+        (and h (str/starts-with? h ".") (not= h "...")) (str (expr-str (first args)) "." (subs h 1) "("
+                                                             (str/join ", " (map expr-str (rest args))) ")")
+        :else (str (expr-str (first f)) "(" (str/join ", " (map expr-str args)) ")")))))
+
+(defn val-str
+  "go/constant's String of a value at type t (for messages)."
+  [v ty]
+  (cond
+    (= :unknown v) "unknown"
+    (boolean? v) (str v)
+    (string? v) (let [s (pr-str (c/value-text v))] (if (> (count s) 72) (str (subs s 0 70) "...\"") s))
+    (c/complex? v) (str "(" (val-str (nth v 1) :untyped-float) " + " (val-str (nth v 2) :untyped-float) "i)")
+    (c/bf? v) (let [d (c/to-double v)] (if (Double/isInfinite d) "1e+huge" (str d)))
+    (and (t/float-type? ty) (ratio? v))
+    (let [d (c/to-double v)
+          s (format "%.6g" d)]
+      (str/replace s #"(\.\d*?)0+(e|$)" "$1$2"))
+    (and (t/integer-type? ty) (= :untyped-rune ty) (integer? v)) (str v)
+    :else (str v)))
+
+(def mode-names
+  {:invalid "invalid operand" :novalue "no value" :builtin "built-in" :typexpr "type"
+   :constant "constant" :variable "variable" :mapindex "map index expression" :value "value"
+   :commaok "comma, ok expression" :nil "nil"})
+
+(defn- composite-kind [ty]
+  (let [u (t/under ty)]
+    (when (vector? u)
+      (case (nth u 0)
+        :array "array" :slice "slice" :struct "struct" :pointer "pointer" :func "func"
+        :interface "interface" :map "map" :chan "chan" :tuple "tuple" nil))))
+
+(defn operand-str
+  "go/types' operandString of a node."
+  [n]
+  (let [ex (when-let [f (:form n)] (expr-str f))
+        m (:mode n)
+        ty (:type n)]
+    (if (and (= :untyped-nil ty) (not= :invalid m))
+      "nil"
+      (let [sb (StringBuilder.)]
+        (when ex (.append sb ex) (.append sb " ("))
+        (let [has-type (and (not (#{:invalid :novalue :builtin :typexpr} m)) ty
+                            (not (t/untyped? ty)))]
+          (when (and (not (#{:invalid :novalue :builtin :typexpr} m)) (t/untyped? ty))
+            (.append sb (t/type-str ty)) (.append sb " "))
+          (.append sb (get mode-names m (name m)))
+          (when (= :constant m)
+            (let [s (val-str (:val n) ty)] (when (not= s ex) (.append sb " ") (.append sb s))))
+          (when has-type
+            (if (t/valid? ty)
+              (let [ck (when (t/named? ty) (composite-kind ty))]
+                (.append sb (str " of " (when ck (str ck " ")) "type " (t/type-str ty))))
+              (.append sb " with invalid type"))))
+        (when ex (.append sb ")"))
+        (str sb)))))
+
+(defn type-summary
+  "types2's typesSummary of one argument's type: untyped numbers are \"number\", other untyped
+  kinds without \"untyped\"."
+  [ty]
+  (cond
+    (not (t/valid? ty)) "unknown type"
+    (t/untyped? ty) (if (t/numeric? ty) "number" (str/replace (t/type-str ty) "untyped " ""))
+    :else (t/type-str ty)))
+
+;;; Nodes
+
+(defn invalid [f] {:op :invalid :mode :invalid :type :invalid :form f :line (fline f)})
+(defn invalid? [n] (= :invalid (:mode n)))
+
+(defn const-node [f ty v] {:op :const :mode :constant :type ty :val v :form f :line (fline f)})
+
+;;; Constant arithmetic (go/constant at the operands' type)
+
+(defn- int-of
+  "The integer value of a numeric constant value of type ty, or nil (go/constant's ToInt)."
+  [v ty]
+  (cond
+    (= :unknown v) nil
+    (t/integer-type? ty) v
+    (t/float-type? ty) (c/int-val v)
+    (t/complex-type? ty) (when (c/fzero? (c/im-part v)) (c/int-val (c/re-part v)))
+    :else (when (integer? v) v)))
+
+(defn- float-of [v ty]
+  (cond
+    (t/integer-type? ty) (c/float-val v)
+    (t/float-type? ty) v
+    (t/complex-type? ty) (when (c/fzero? (c/im-part v)) (c/re-part v))
+    :else nil))
+
+(defn- complex-of [v ty]
+  (cond
+    (t/complex-type? ty) v
+    (or (t/integer-type? ty) (t/float-type? ty)) (c/cplx (c/float-val v) 0)
+    :else nil))
+
+(defn- int-range-ok? [v kind]
+  (let [b (c/bi v)
+        n (.bitLength b)
+        neg (neg? (.signum b))]
+    (case kind
+      (:int8) (<= -128 v 127)
+      (:int16) (<= -32768 v 32767)
+      (:int32) (<= -2147483648 v 2147483647)
+      (:int64 :int) (< n 64)
+      (:uint8) (<= 0 v 255)
+      (:uint16) (<= 0 v 65535)
+      (:uint32) (<= 0 v 4294967295)
+      (:uint64 :uint :uintptr) (and (not neg) (<= n 64))
+      (:untyped-int :untyped-rune) true)))
+
+(defn representation
+  "go/types' representation: [value nil] of constant value v (of type src) at basic type
+  kind, or [nil code]."
+  [v src kind]
+  (if (= :unknown v)
+    [v nil]
+    (let [numeric (and (t/numeric? src) (t/numeric? kind))
+          fail (fn [] [nil (if numeric
+                             (if (and (not (t/integer-type? src)) (t/integer-type? kind)) :TruncatedFloat :NumericOverflow)
+                             :InvalidConstVal)])]
+      (cond
+        (t/integer-type? kind)
+        (let [i (int-of v src)]
+          (if (and i (int-range-ok? i kind)) [i nil] (fail)))
+        (t/float-type? kind)
+        (let [f (float-of v src)]
+          (if (nil? f)
+            (fail)
+            (case kind
+              :float32 (if-let [r (c/round32 f)] [r nil] (fail))
+              :float64 (if-let [r (c/round64 f)] [r nil] (fail))
+              [f nil])))
+        (t/complex-type? kind)
+        (let [z (complex-of v src)]
+          (if (nil? z)
+            (fail)
+            (case kind
+              :complex64 (let [re (c/round32 (nth z 1)) im (c/round32 (nth z 2))]
+                           (if (and re im) [(c/cplx re im) nil] (fail)))
+              :complex128 (let [re (c/round64 (nth z 1)) im (c/round64 (nth z 2))]
+                            (if (and re im) [(c/cplx re im) nil] (fail)))
+              [z nil])))
+        (t/string-type? kind) (if (and (string? v) (t/string-type? src)) [v nil] (fail))
+        (t/boolean-type? kind) (if (and (boolean? v) (t/boolean-type? src)) [v nil] (fail))
+        :else (fail)))))
+
+(defn- cmul [[_ a b] [_ x y]] (c/cplx (c/fsub (c/fmul a x) (c/fmul b y)) (c/fadd (c/fmul a y) (c/fmul b x))))
+(defn- cquo [[_ a b] [_ x y]]
+  (let [d (c/fadd (c/fmul x x) (c/fmul y y))]
+    (c/cplx (c/fquo (c/fadd (c/fmul a x) (c/fmul b y)) d)
+            (c/fquo (c/fsub (c/fmul b x) (c/fmul a y)) d))))
+
+(defn const-binary
+  "x op y of constant values of type ty (one type: both converted already)."
+  [op x y ty]
+  (cond
+    (or (= :unknown x) (= :unknown y)) :unknown
+    (t/integer-type? ty)
+    (case op
+      "+" (+' x y) "-" (-' x y) "*" (*' x y)
+      "/" (quot x y) "%" (rem x y)
+      "bit-and" (c/norm-int (.and (c/bi x) (c/bi y)))
+      "bit-or" (c/norm-int (.or (c/bi x) (c/bi y)))
+      "bit-xor" (c/norm-int (.xor (c/bi x) (c/bi y)))
+      "bit-and-not" (c/norm-int (.andNot (c/bi x) (c/bi y))))
+    (t/float-type? ty)
+    (case op "+" (c/fadd x y) "-" (c/fsub x y) "*" (c/fmul x y) "/" (c/fquo x y))
+    (t/complex-type? ty)
+    (let [x (c/complex-val x) y (c/complex-val y)]
+      (case op
+        "+" (c/cplx (c/fadd (nth x 1) (nth y 1)) (c/fadd (nth x 2) (nth y 2)))
+        "-" (c/cplx (c/fsub (nth x 1) (nth y 1)) (c/fsub (nth x 2) (nth y 2)))
+        "*" (cmul x y)
+        "/" (cquo x y)))
+    (t/string-type? ty) (str x y)
+    (t/boolean-type? ty) (case op "and" (and x y) "or" (or x y))
+    :else :unknown))
+
+(defn const-compare
+  "x op y of constant values of type ty."
+  [op x y ty]
+  (let [c (cond
+            (or (t/integer-type? ty)) (compare x y)
+            (t/float-type? ty) (c/fcmp x y)
+            (t/string-type? ty) (compare x y)
+            (t/boolean-type? ty) (if (= x y) 0 1)
+            (t/complex-type? ty) (let [x (c/complex-val x) y (c/complex-val y)]
+                                   (if (and (zero? (c/fcmp (nth x 1) (nth y 1))) (zero? (c/fcmp (nth x 2) (nth y 2)))) 0 1))
+            :else (if (= x y) 0 1))]
+    (case op
+      "==" (zero? c) "!=" (not (zero? c))
+      "<" (neg? c) "<=" (<= c 0) ">" (pos? c) ">=" (>= c 0))))
+
+(defn- val-sign [v ty]
+  (cond
+    (= :unknown v) 1
+    (t/complex-type? ty) (let [z (c/complex-val v)] (if (and (c/fzero? (nth z 1)) (c/fzero? (nth z 2))) 0 1))
+    (t/float-type? ty) (c/fsign v)
+    (integer? v) (compare v 0)
+    :else 1))
+
+;;; Untyped operands and their final types (go/types' updateExprType, implicitTypeAndValue)
+
+(def comparison-ops #{"==" "!=" "<" "<=" ">" ">="})
+(def shift-ops #{"<<" ">>"})
+
+(defn- max-type
+  "go/types' maxType of two untyped numeric kinds, or nil."
+  [x y]
+  (let [rank {:untyped-int 1 :untyped-rune 2 :untyped-float 3 :untyped-complex 4}]
+    (if (and (rank x) (rank y))
+      (if (>= (rank x) (rank y)) x y)
+      (when (= x y) x))))
+
+(defn implicit-type
+  "go/types' implicitTypeAndValue: [type value nil] or [nil nil code] for untyped node n in a
+  context of type target."
+  [n target]
+  (let [ty (:type n)]
+    (cond
+      (or (invalid? n) (t/typed? ty) (not (t/valid? target))) [ty nil nil]
+      (t/untyped? target)
+      (if-let [m (max-type ty target)] [m nil nil] [nil nil :InvalidUntypedConversion])
+      :else
+      (let [u (t/under target)]
+        (cond
+          (keyword? u)
+          (if (= :constant (:mode n))
+            (let [[v code] (representation (:val n) ty u)]
+              (if code [nil nil code] [target v nil]))
+            (case ty
+              :untyped-bool (if (t/boolean-type? target) [target nil nil] [nil nil :InvalidUntypedConversion])
+              (:untyped-int :untyped-rune :untyped-float :untyped-complex)
+              (if (t/numeric? target) [target nil nil] [nil nil :InvalidUntypedConversion])
+              :untyped-string (if (t/string-type? target) [target nil nil] [nil nil :InvalidUntypedConversion])
+              :untyped-nil (if (t/has-nil? target) [:untyped-nil nil nil] [nil nil :InvalidUntypedConversion])
+              [nil nil :InvalidUntypedConversion]))
+          (= :interface (nth u 0))
+          (cond
+            (= :untyped-nil ty) [:untyped-nil nil nil]
+            (not (t/empty-interface? u))
+            ;; a non-empty interface: only for the default type's methods (none for basic types)
+            [nil nil :InvalidUntypedConversion]
+            :else [(t/default-type ty) nil nil])
+          (#{:pointer :func :slice :map :chan} (nth u 0))
+          (if (= :untyped-nil ty) [:untyped-nil nil nil] [nil nil :InvalidUntypedConversion])
+          :else [nil nil :InvalidUntypedConversion])))))
+
+(defn update-type
+  "Node n (untyped) with its type updated to ty, and its untyped operands with it (go/types'
+  updateExprType); constants checked representable at a final type."
+  [n ty final]
+  (if (or (invalid? n) (not (t/untyped? (:type n))))
+    n
+    (let [n (if (= :constant (:mode n))
+              n
+              (case (:op n)
+                :unary (assoc n :x (update-type (:x n) ty final))
+                :binary (let [op (:go/op n)]
+                          (cond
+                            (comparison-ops op) n
+                            (shift-ops op) (assoc n :x (update-type (:x n) ty final))
+                            :else (assoc n :x (update-type (:x n) ty final) :y (update-type (:y n) ty final))))
+                :paren (assoc n :x (update-type (:x n) ty final))
+                n))]
+      (if (and (not final) (t/untyped? ty))
+        (assoc n :type ty)
+        (cond
+          (and (:shift-lhs n) (not (t/integer-type? ty)))
+          (do (err! (:form n) :InvalidShiftOperand "invalid operation: shifted operand %s (type %s) must be integer"
+                    (expr-str (:form n)) (t/type-str ty))
+              (assoc n :type ty))
+          (= :constant (:mode n))
+          (let [[nt v code] (implicit-type n ty)]
+            (if code
+              (do (invalid-conversion! code n (t/under ty)) (assoc n :type ty))
+              (assoc n :type ty :val (or v (:val n)))))
+          :else (assoc n :type ty))))))
+
+(defn invalid-conversion! [code n target]
+  (err! (:form n) code
+        (case code
+          :TruncatedFloat "%s truncated to %s"
+          :NumericOverflow "%s overflows %s"
+          "cannot convert %s to type %s")
+        (if (and (= :constant (:mode n)) (#{:TruncatedFloat :NumericOverflow} code))
+          (let [s (operand-str n)] s)
+          (operand-str n))
+        (t/type-str target)))
+
+(defn convert-untyped
+  "go/types' convertUntyped: n converted to target's type when untyped, else invalid."
+  [n target]
+  (let [[nt v code] (implicit-type n target)]
+    (if code
+      (do (invalid-conversion! code n (if (t/tparam? target) target (t/under target)))
+          (assoc n :mode :invalid :type :invalid))
+      (let [n (if (and v (= nt (:type n))) (assoc n :val v) n)
+            ;; an untyped constant moving to a larger untyped kind (int -> float -> complex)
+            n (if (and (nil? v) (= :constant (:mode n)) (= :untyped-complex nt) (not (c/complex? (:val n)))
+                       (not= :unknown (:val n)))
+                (assoc n :val (c/cplx (c/float-val (:val n)) 0))
+                n)]
+        (if (not= nt (:type n))
+          (update-type n nt false)
+          n)))))
+
+(defn default-final
+  "n with the default type of its untyped type, final (a value materialized)."
+  [n]
+  (if (t/untyped? (:type n))
+    (update-type n (t/default-type (:type n)) true)
+    n))
+
+;;; Operand contexts
+
+(defn single-value
+  "An error for a tuple in a single-value context."
+  [n]
+  (if (and (= :value (:mode n)) (vector? (:type n)) (= :tuple (nth (:type n) 0)))
+    (do (err! (:form n) :TooManyValues "multiple-value %s (value of type %s) in single-value context"
+              (expr-str (:form n)) (t/type-str (:type n)))
+        (assoc n :mode :invalid :type :invalid))
+    n))
+
+(defn exclude
+  "n, or invalid with an error when its mode is among modes."
+  [n modes]
+  (if (contains? modes (:mode n))
+    (do (case (:mode n)
+          :novalue (err! (:form n) :TooManyValues "%s (no value) used as value" (expr-str (:form n)))
+          :builtin (err! (:form n) :UncalledBuiltin "%s (built-in) must be called" (expr-str (:form n)))
+          :typexpr (err! (:form n) :NotAnExpr "%s (type) is not an expression" (expr-str (:form n))))
+        (assoc n :mode :invalid :type :invalid))
+    n))
+
+(declare expr-internal)
+
+(defn expr
+  "A single-valued expression (go/types' expr)."
+  ([cx f] (expr cx f nil))
+  ([cx f hint]
+   (let [n (expr-internal cx f hint)
+         n (exclude n #{:novalue :builtin :typexpr})
+         n (single-value n)]
+     (if (= :commaok (:mode n)) (assoc n :mode :value) n))))
+
+(defn expr-or-type
+  "An expression or a type (go/types' exprOrType)."
+  [cx f]
+  (let [n (expr-internal cx f nil)
+        n (exclude n #{:novalue})
+        n (single-value n)]
+    (if (= :commaok (:mode n)) (assoc n :mode :value) n)))
+
+(defn multi-expr
+  "The values of an expression: [nodes comma-ok?] (a call's results; a comma-ok expression
+  gives two values when allowed)."
+  [cx f allow-comma-ok]
+  (let [n (expr-internal cx f nil)
+        n (exclude n #{:novalue :builtin :typexpr})]
+    (cond
+      (invalid? n) [[n] false]
+      (and (vector? (:type n)) (= :tuple (nth (:type n) 0)))
+      [(vec (map-indexed (fn [i ty] {:op :result :index i :call n :mode :value :type ty :form (:form n)})
+                         (rest (:type n))))
+       false]
+      (and allow-comma-ok (#{:commaok :mapindex} (:mode n)))
+      [[(assoc n :mode :value :comma-ok true) {:op :ok :mode :value :type :untyped-bool :form (:form n)}] true]
+      :else [[(if (= :commaok (:mode n)) (assoc n :mode :value) n)] false])))
+
+(defn const-expr
+  "A constant expression (array lengths, ...)."
+  [cx f]
+  (expr cx f))
+
+;;; Assignability (operand.go)
+
+(declare implements?)
+
+(defn assignable?
+  "go/types' assignableTo: [ok code cause] of node n to type T."
+  [n T]
+  (let [V (:type n)]
+    (if (= V T)
+      [true nil nil]
+      (let [Vu (t/under V) Tu (t/under T)]
+        (cond
+          (t/untyped? Vu)
+          (let [[nt] (implicit-type n T)] [(some? nt) :IncompatibleAssign nil])
+          (and (= Vu Tu) (or (not (t/has-name? V)) (not (t/has-name? T)))
+               (not (t/tparam? V)) (not (t/tparam? T)))
+          [true nil nil]
+          (and (vector? Tu) (= :interface (nth Tu 0)) (not (t/tparam? T)))
+          (let [mm (t/missing-method V T false)]
+            (if (nil? mm) [true nil nil] [false :InvalidIfaceAssign mm]))
+          (and (vector? Vu) (= :interface (nth Vu 0)) (not (t/tparam? V)))
+          [false :IncompatibleAssign (when (and (vector? Tu) (nil? (t/missing-method T V false))) :need-assert)]
+          (and (vector? Vu) (= :chan (nth Vu 0)) (= :both (nth Vu 1))
+               (vector? Tu) (= :chan (nth Tu 0)) (= (nth Vu 2) (nth Tu 2)))
+          [(or (not (t/has-name? V)) (not (t/has-name? T))) :InvalidChanAssign nil]
+          :else [false :IncompatibleAssign nil])))))
+
+(defn missing-cause
+  "The text of a missing-method cause (go/types' missingMethodCause, abridged)."
+  [V T mm]
+  (let [m (:method mm)]
+    (case (:cause mm)
+      :ptr-recv (format "(method %s has pointer receiver)" (:name m))
+      :field (format "(%s.%s is a field, not a method)" (t/type-str V) (:name m))
+      :wrong-type (format "(wrong type for method %s)\n\t\thave %s%s\n\t\twant %s%s"
+                          (:name m) (:name m) (t/sig-str (:type (:have mm))) (:name m) (t/sig-str (:type m)))
+      (format "(missing method %s)" (:name m)))))
+
+(defn implements? [V T] (nil? (t/missing-method V T false)))
+
+(defn wrap-iface
+  "n converted implicitly to interface type T when its type is not an interface (§3.7)."
+  [n T]
+  (if (and (t/interface? T) (not (invalid? n)) (not= :untyped-nil (:type n)) (not (t/interface? (:type n))))
+    {:op :convert-iface :to T :x n :mode :value :type T :form (:form n) :line (:line n)}
+    n))
+
+(defn assignment
+  "go/types' assignment: n assigned to a variable of type T (nil: the blank identifier) in
+  context (a string for messages); the converted node or invalid."
+  [cx n T context]
+  (cond
+    (invalid? n) n
+    (#{:typexpr :builtin :novalue} (:mode n))
+    (do (err! (:form n) :IncompatibleAssign "cannot assign %s to %s in %s" (operand-str n)
+              (if T (t/type-str T) "_") context)
+        (assoc n :mode :invalid :type :invalid))
+    :else
+    (let [n (if (t/untyped? (:type n))
+              (cond
+                (and (= :untyped-nil (:type n)) (nil? T))
+                (do (err! (:form n) :UntypedNilUse "use of untyped nil in %s" context)
+                    (assoc n :mode :invalid :type :invalid))
+                :else
+                (let [target (if (or (nil? T) (and (t/interface? T) (not (t/tparam? T)))) (t/default-type (:type n)) T)
+                      target (if (and (= :untyped-nil (:type n)) T) T target)
+                      [nt v code] (implicit-type n target)]
+                  (if code
+                    (do (err! (:form n) (case code (:TruncatedFloat :NumericOverflow) code :IncompatibleAssign)
+                              (str (format "cannot use %s as %s value in %s" (operand-str n) (t/type-str target) context)
+                                   (case code :TruncatedFloat " (truncated)" :NumericOverflow " (overflows)" "")))
+                        (assoc n :mode :invalid :type :invalid))
+                    (if (not= nt (:type n))
+                      (update-type (if (and (= :untyped-complex nt) (= :constant (:mode n)) (not (c/complex? (:val n))) (not= :unknown (:val n)))
+                                     (assoc n :val (c/cplx (c/float-val (:val n)) 0)) n)
+                                   nt false)
+                      (if v (assoc n :val v) n)))))
+              n)]
+      (cond
+        (invalid? n) n
+        (nil? T) n
+        :else
+        (let [[ok code cause] (assignable? n T)]
+          (if ok
+            (wrap-iface n T)
+            (do (err! (:form n) (or code :IncompatibleAssign)
+                      (str (format "cannot use %s as %s value in %s" (operand-str n) (t/type-str T) context)
+                           (cond
+                             (map? cause) (str ": " (t/type-str (:type n)) " does not implement " (t/type-str T) " "
+                                               (missing-cause (:type n) T cause))
+                             (= :need-assert cause) (str ": need type assertion")
+                             :else "")))
+                (assoc n :mode :invalid :type :invalid))))))))
+
+;;; Conversions (conversions.go)
+
+(defn bytes-or-runes? [ty]
+  (let [u (t/under ty)]
+    (and (vector? u) (= :slice (nth u 0))
+         (#{:uint8 :int32} (t/under (nth u 1))))))
+
+(defn convertible?
+  "go/types' convertibleTo of node n to type T (non-constant rules)."
+  [cx n T]
+  (let [V (:type n)]
+    (or (first (assignable? n T))
+        (let [Vu (t/under V) Tu (t/under T)]
+          (or (and (t/identical-ignore-tags? Vu Tu) (not (t/tparam? V)) (not (t/tparam? T)))
+              (and (vector? V) (= :pointer (nth V 0)) (vector? T) (= :pointer (nth T 0))
+                   (t/identical-ignore-tags? (t/under (nth V 1)) (t/under (nth T 1))))
+              (and (t/integer-or-float? Vu) (t/integer-or-float? Tu))
+              (and (t/complex-type? Vu) (t/complex-type? Tu))
+              (and (or (t/integer-type? Vu) (bytes-or-runes? Vu)) (t/string-type? Tu))
+              (and (t/string-type? Vu) (bytes-or-runes? Tu))
+              (and (or (t/pointer? Vu) (t/uintptr? Vu)) (t/unsafe-pointer? Tu))
+              (and (t/unsafe-pointer? Vu) (or (t/pointer? Tu) (t/uintptr? Tu)))
+              (and (vector? Vu) (= :slice (nth Vu 0))
+                   (or (and (vector? Tu) (= :array (nth Tu 0)) (= (nth Vu 1) (nth Tu 2)) (allow-version? cx 20))
+                       (and (vector? Tu) (= :pointer (nth Tu 0))
+                            (let [a (t/under (nth Tu 1))]
+                              (and (vector? a) (= :array (nth a 0)) (= (nth Vu 1) (nth a 2))))
+                            (allow-version? cx 17)))))))))
+
+(defn conversion
+  "T(x): node n converted to type T (go/types' conversion)."
+  [cx f n T]
+  (let [const-arg (= :constant (:mode n))
+        u (t/basic T)]
+    (cond
+      (invalid? n) n
+      (and const-arg (t/const-type? T))
+      (let [[v code] (representation (:val n) (:type n) u)
+            v (cond
+                (nil? code) v
+                (and (t/integer-type? (:type n)) (t/string-type? T))
+                (let [i (:val n)] (if (integer? i) (c/rune-string i) (c/rune-string 0xFFFD)))
+                :else nil)]
+        (cond
+          (some? v)
+          (let [n (if (t/untyped? (:type n))
+                    (update-type n (if (and (t/integer-type? (:type n)) (t/string-type? T)) (:type n) T) true)
+                    n)]
+            {:op :conv :to T :x n :mode :constant :type T :val v :form f :line (fline f)})
+          (and (t/integer-type? (:type n)) (t/integer-type? T))
+          (do (err! f :InvalidConversion "constant %s overflows %s" (val-str (:val n) (:type n)) (t/type-str T))
+              (invalid f))
+          :else
+          (do (err! f :InvalidConversion "cannot convert %s to type %s%s" (operand-str n) (t/type-str T)
+                    (if (and (t/float-type? (:type n)) (t/integer-type? T)) " (truncated)" ""))
+              (invalid f))))
+      (convertible? cx n T)
+      (let [n (if (t/untyped? (:type n))
+                (update-type n (if (or (and (t/interface? T) (not (t/tparam? T))) (and const-arg (not (t/const-type? T)))
+                                       (= :untyped-nil (:type n)))
+                                 (t/default-type (:type n))
+                                 T)
+                             true)
+                n)]
+        {:op :conv :to T :x n :mode :value :type T :form f :line (fline f)})
+      :else
+      (do (err! f :InvalidConversion "cannot convert %s to type %s" (operand-str n) (t/type-str T))
+          (invalid f)))))
+
+;;; Unary and binary operators (expr.go)
+
+(defn- op-allowed?
+  "Whether operator op is defined on type ty (go/types' opPredicates)."
+  [op ty unary]
+  (if unary
+    (case op
+      ("+" "-") (t/numeric? ty)
+      "bit-not" (t/integer-type? ty)
+      "not" (t/boolean-type? ty)
+      true)
+    (case op
+      "+" (or (t/numeric? ty) (t/string-type? ty))
+      ("-" "*" "/") (t/numeric? ty)
+      ("%" "bit-and" "bit-or" "bit-xor" "bit-and-not") (t/integer-type? ty)
+      ("and" "or") (t/boolean-type? ty)
+      true)))
+
+(def ^:private op-go
+  {"+" "+" "-" "-" "*" "*" "/" "/" "%" "%" "bit-and" "&" "bit-or" "|" "bit-xor" "^"
+   "bit-and-not" "&^" "and" "&&" "or" "||" "bit-not" "^" "not" "!" "<<" "<<" ">>" ">>"
+   "==" "==" "!=" "!=" "<" "<" "<=" "<=" ">" ">" ">=" ">="})
+
+(defn overflow
+  "go/types' overflow: a constant result checked (typed: representable; untyped integers at
+  most 512 bits)."
+  [n op]
+  (let [ty (:type n) v (:val n)]
+    (cond
+      (= :unknown v) (do (err! (:form n) :InvalidConstVal "constant result is not representable") n)
+      (t/typed? ty)
+      (let [[v2 code] (representation v ty (t/basic ty))]
+        (if code
+          (do (err! (:form n) code (if (= code :NumericOverflow)
+                                     (format "cannot use %s (untyped %s constant %s) as %s value in %s (overflows)"
+                                             (expr-str (:form n)) "int" (val-str v ty) (t/type-str ty) "expression")
+                                     "constant %s overflows %s")
+                    (val-str v ty) (t/type-str ty))
+              (assoc n :mode :invalid :type :invalid))
+          (assoc n :val v2)))
+      (and (t/integer-type? ty) (integer? v) (> (c/bit-len v) 512))
+      (do (err! (:form n) :InvalidConstVal "constant %soverflow" (if op (str (get {"+" "addition" "-" "subtraction" "*" "multiplication" "<<" "shift"} op "") " ") ""))
+          (assoc n :val :unknown))
+      :else n)))
+
+(defn unary
+  "A unary operator op (- + bit-not not) on the operand form."
+  [cx f op x-form]
+  (let [x (expr cx x-form)]
+    (cond
+      (invalid? x) (assoc x :form f)
+      (not (op-allowed? op (:type x) true))
+      (do (err! f :UndefinedOp "invalid operation: operator %s not defined on %s" (op-go op) (operand-str x))
+          (invalid f))
+      (= :constant (:mode x))
+      (let [ty (:type x) v (:val x)
+            v (cond
+                (= :unknown v) v
+                (= op "+") v
+                (= op "-") (cond (t/integer-type? ty) (-' v) (t/float-type? ty) (c/fneg v)
+                                 :else (let [z (c/complex-val v)] (c/cplx (c/fneg (nth z 1)) (c/fneg (nth z 2)))))
+                (= op "not") (not v)
+                (= op "bit-not") (if (t/unsigned? ty)
+                                   (let [bits (* 8 (t/sizeof ty))]
+                                     (c/norm-int (.andNot (.not (c/bi v)) (.shiftLeft (c/bi -1) (int bits)))))
+                                   (c/norm-int (.not (c/bi v)))))]
+        (overflow {:op :unary :go/op op :x x :mode :constant :type ty :val v :form f :line (fline f)} op))
+      :else {:op :unary :go/op op :x x :mode :value :type (:type x) :form f :line (fline f)})))
+
+(defn- may-convert? [x y]
+  (let [tx (:type x) ty (:type y)]
+    (cond
+      (and (t/typed? tx) (t/typed? ty)) false
+      (not= (t/numeric? tx) (t/numeric? ty)) false
+      (or (and (t/interface? tx) (not (t/tparam? tx))) (and (t/interface? ty) (not (t/tparam? ty)))) true
+      (not= (t/boolean-type? tx) (t/boolean-type? ty)) false
+      (not= (t/string-type? tx) (t/string-type? ty)) false
+      (= :untyped-nil tx) (t/has-nil? ty)
+      (= :untyped-nil ty) (t/has-nil? tx)
+      (or (t/pointer? tx) (t/pointer? ty)) false
+      :else true)))
+
+(defn match-types
+  "go/types' matchTypes: [x y] with untyped operands converted to each other's types."
+  [x y]
+  (if (may-convert? x y)
+    (let [x (convert-untyped x (:type y))]
+      (if (invalid? x)
+        [x y]
+        (let [y (convert-untyped y (:type x))]
+          (if (invalid? y) [(assoc x :mode :invalid :type :invalid) y] [x y]))))
+    [x y]))
+
+(defn comparison
+  "x op y, a comparison (expr.go comparison); switch-case: a switch case against its tag."
+  [cx f op x y switch-case]
+  (if (or (not (t/valid? (:type x))) (not (t/valid? (:type y))))
+    (invalid f)
+    (let [opx (if switch-case "==" op)
+          [ok] (assignable? x (:type y))
+          ok (or ok (first (assignable? y (:type x))))
+          fail (fn [err-op cause]
+                 (let [cause (or cause
+                                 (let [what (or (composite-kind (:type err-op)) (t/type-str (:type err-op)))]
+                                   (format "operator %s not defined on %s" (op-go opx) what)))]
+                   (if switch-case
+                     (err! (:form x) :MismatchedTypes "invalid case %s in switch on %s (%s)" (expr-str (:form x)) (expr-str (:form y)) cause)
+                     (err! f :MismatchedTypes "invalid operation: %s %s %s (%s)" (expr-str (:form x)) (op-go opx) (expr-str (:form y)) cause))
+                   (invalid f)))
+          incomparable (fn [ty]
+                         (let [u (t/under ty)]
+                           (when (and (vector? u) (#{:slice :func :map} (nth u 0)))
+                             (str (composite-kind ty) " can only be compared to nil"))))]
+      (cond
+        (not ok) (fail y (format "mismatched types %s and %s" (t/type-str (:type x)) (t/type-str (:type y))))
+        (#{"==" "!="} opx)
+        (cond
+          (or (= :untyped-nil (:type x)) (= :untyped-nil (:type y)))
+          (let [ty (if (= :untyped-nil (:type x)) (:type y) (:type x))]
+            (if (t/has-nil? ty) (finish-comparison f op x y) (fail y nil)))
+          (not (t/comparable? (:type x))) (fail x (incomparable (:type x)))
+          (not (t/comparable? (:type y))) (fail y (incomparable (:type y)))
+          :else (finish-comparison f op x y))
+        :else
+        (cond
+          (not (t/ordered? (:type x))) (fail x nil)
+          (not (t/ordered? (:type y))) (fail y nil)
+          :else (finish-comparison f op x y))))))
+
+(defn finish-comparison [f op x y]
+  (if (and (= :constant (:mode x)) (= :constant (:mode y)))
+    {:op :binary :go/op op :x x :y y :mode :constant :type :untyped-bool
+     :val (if (or (= :unknown (:val x)) (= :unknown (:val y))) :unknown (const-compare op (:val x) (:val y) (:type x)))
+     :form f :line (fline f)}
+    {:op :binary :go/op op :x (default-final x) :y (default-final y) :mode :value :type :untyped-bool
+     :form f :line (fline f)}))
+
+(defn shift
+  "x << y, x >> y (expr.go shift)."
+  [cx f op x y]
+  (let [xval (when (= :constant (:mode x)) (int-of (:val x) (:type x)))]
+    (cond
+      (not (or (t/integer-type? (:type x)) (and (t/untyped? (:type x)) (some? xval))))
+      (do (err! (:form x) :InvalidShiftOperand "invalid operation: shifted operand %s must be integer" (operand-str x))
+          (invalid f))
+      :else
+      (let [yval (when (= :constant (:mode y)) (int-of (:val y) (:type y)))
+            y (cond
+                (= :constant (:mode y))
+                (cond
+                  (and yval (neg? (compare yval 0)))
+                  (do (err! (:form y) :InvalidShiftCount "invalid operation: negative shift count %s" (operand-str y))
+                      (assoc y :mode :invalid))
+                  (t/untyped? (:type y))
+                  (let [[_ code] (representation (:val y) (:type y) :uint)]
+                    (if code
+                      (do (invalid-conversion! code y :uint) (assoc y :mode :invalid))
+                      y))
+                  :else y)
+                (t/integer-type? (:type y))
+                (if (and (not (t/unsigned? (:type y))) (not (allow-version? cx 13)))
+                  (do (err! (:form y) :UnsupportedFeature "invalid operation: signed shift count %s requires go1.13 or later" (operand-str y))
+                      (assoc y :mode :invalid))
+                  y)
+                (t/untyped? (:type y)) (convert-untyped y :uint)
+                :else
+                (do (err! (:form y) :InvalidShiftCount "invalid operation: shift count %s must be integer" (operand-str y))
+                    (assoc y :mode :invalid)))]
+        (cond
+          (invalid? y) (invalid f)
+          (= :constant (:mode x))
+          (if (= :constant (:mode y))
+            (if (or (= :unknown (:val x)) (= :unknown (:val y)))
+              {:op :binary :go/op op :x x :y y :mode :constant :val :unknown
+               :type (if (t/integer-type? (:type x)) (:type x) :untyped-int) :form f :line (fline f)}
+              (let [s (int-of (:val y) (:type y))]
+                (if (or (nil? s) (> (compare s 1074) 0))
+                  (do (err! (:form y) :InvalidShiftCount "invalid operation: invalid shift count %s" (operand-str y))
+                      (invalid f))
+                  (let [ty (if (t/integer-type? (:type x)) (:type x) :untyped-int)
+                        v (if (= op "<<")
+                            (c/norm-int (.shiftLeft (c/bi xval) (int s)))
+                            (c/norm-int (.shiftRight (c/bi xval) (int s))))]
+                    (overflow {:op :binary :go/op op :x x :y y :mode :constant :type ty :val v :form f :line (fline f)} op)))))
+            (if (t/untyped? (:type x))
+              ;; a non-constant shift of an untyped constant: its type is the context's
+              {:op :binary :go/op op :x (assoc x :shift-lhs true) :y y :mode :value :type (:type x)
+               :form f :line (fline f)}
+              {:op :binary :go/op op :x x :y y :mode :value :type (:type x) :form f :line (fline f)}))
+          (not (t/integer-type? (:type x)))
+          (do (err! (:form x) :InvalidShiftOperand "invalid operation: shifted operand %s must be integer" (operand-str x))
+              (invalid f))
+          :else {:op :binary :go/op op :x x :y y :mode :value :type (:type x) :form f :line (fline f)})))))
+
+(defn binary-nodes
+  "x op y of checked operands (expr.go binary)."
+  [cx f op x y]
+  (cond
+    (invalid? x) (invalid f)
+    (invalid? y) (invalid f)
+    (shift-ops op) (shift cx f op x y)
+    :else
+    (let [[x y] (match-types x y)]
+      (cond
+        (or (invalid? x) (invalid? y)) (invalid f)
+        (comparison-ops op) (comparison cx f op x y false)
+        (not= (:type x) (:type y))
+        (do (when (and (t/valid? (:type x)) (t/valid? (:type y)))
+              (err! f :MismatchedTypes "invalid operation: %s (mismatched types %s and %s)" (expr-str f)
+                    (t/type-str (:type x)) (t/type-str (:type y))))
+            (invalid f))
+        (not (op-allowed? op (:type x) false))
+        (do (err! f :UndefinedOp "invalid operation: operator %s not defined on %s" (op-go op) (operand-str x))
+            (invalid f))
+        (and (#{"/" "%"} op) (or (= :constant (:mode x)) (t/integer-type? (:type x)))
+             (= :constant (:mode y)) (zero? (val-sign (:val y) (:type y))))
+        (do (err! (:form y) :DivByZero "invalid operation: division by zero") (invalid f))
+        (and (= :constant (:mode x)) (= :constant (:mode y)))
+        (let [v (const-binary op (:val x) (:val y) (:type x))]
+          (overflow {:op :binary :go/op op :x x :y y :mode :constant :type (:type x) :val v :form f :line (fline f)} op))
+        :else {:op :binary :go/op op :x x :y y :mode :value :type (:type x) :form f :line (fline f)}))))
+
+(defn binary
+  "An operator form (op a b c ...): n-ary chains folded left."
+  [cx f op args]
+  (if (and (#{"and" "or"} op))
+    (let [xs (mapv #(expr cx %) args)]
+      (reduce (fn [x y] (binary-nodes cx f op x y)) xs))
+    (let [x (expr cx (first args))]
+      (loop [x x more (rest args)]
+        (if (empty? more)
+          x
+          (let [y (expr cx (first more))]
+            (recur (binary-nodes cx (if (next more) f f) op x y) (rest more))))))))
+
+;;; Constant values against :val (§3.6, doc/go/SPEC.md §8.2)
+
+(defn- val-float
+  "The exact value a float part of :val denotes: typed floats' doubles are their binary
+  values, untyped ones' their shortest decimal text's."
+  [v typed]
+  (cond
+    (instance? Double v) (if typed (c/exact-of-double v) (c/double-literal v))
+    (instance? java.math.BigDecimal v) (c/decimal-exact v)
+    (ratio? v) v
+    (integer? v) v
+    (and (seq? v) (= 'binary-float (first v))) (c/binary-float (second v) (nth v 2))
+    :else ::bad))
+
+(defn val-equal?
+  "Whether a :val form denotes the value of constant node n at its type."
+  [say n]
+  (let [ty (:type n) v (:val n)]
+    (cond
+      (= :unknown v) false
+      (t/boolean-type? ty) (= say v)
+      (t/string-type? ty) (= v (cond (string? say) (c/utf8-value say)
+                                     (and (seq? say) (= 'byte-string (first say))) (byte-string-value (rest say))
+                                     :else ::bad))
+      (t/integer-type? ty) (let [s (cond (char? say) (long (int say))
+                                         (and (seq? say) (= 'rune (first say))) (second say)
+                                         (integer? say) say
+                                         :else nil)]
+                             (and (some? s) (== s v)))
+      (t/float-type? ty) (let [s (val-float say (t/typed? ty))]
+                           (and (not= ::bad s) (zero? (c/fcmp s v))))
+      (t/complex-type? ty) (and (seq? say) (= 'complex (first say))
+                                (let [z (c/complex-val v)
+                                      re (val-float (nth say 1) (t/typed? ty))
+                                      im (val-float (nth say 2) (t/typed? ty))]
+                                  (and (not= ::bad re) (not= ::bad im)
+                                       (zero? (c/fcmp re (nth z 1))) (zero? (c/fcmp im (nth z 2))))))
+      :else false)))
+
+(defn val-form-str
+  "A constant value as the checker computes it, for messages."
+  [v ty]
+  (cond
+    (string? v) (pr-str (c/value-text v))
+    (c/complex? v) (str "(complex " (val-form-str (nth v 1) :float64) " " (val-form-str (nth v 2) :float64) ")")
+    (c/bf? v) (str "(binary-float " (nth v 1) " " (nth v 2) ")")
+    (and (t/float-type? ty) (t/typed? ty)) (str (c/to-double v))
+    :else (pr-str v)))

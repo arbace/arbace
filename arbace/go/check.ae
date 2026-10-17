@@ -1,0 +1,574 @@
+(ns arbace.go.check
+  "goi's checker (doc/go/GOI-SPEC.md §3): Go forms type-checked as go/types checks Go, with
+  the converter's annotations verified (§3.6) and the checked tree (§3.7) as its output.
+
+  GR2, built before GR1 (the user's choice, 2026-10-17): an imported package is checked from its
+  forms (the forms root's, tamago/goroot's or a corpus's), not from GR1's digest; the spec
+  allows both (§3.1). Generic code is GR6's: a declaration that uses generics is checked as far
+  as its types go, counted apart and its errors not counted (S53).
+
+  Parts: arbace.go.check.types (types), .const (constants), .env (objects, scopes, errors),
+  .code (type expressions, expressions, statements), .decl (a package's declarations, init
+  order), .load (forms roots, build constraints).
+
+  Use: (check-package session src) checks one package; (annotations corpus) checks a corpus
+  and reports the annotations verified (bin/goi annotations, §11.4)."
+  (:require [arbace.string :as str]
+            [arbace.java.io :as io]
+            [arbace.pprint :as pp]
+            [arbace.go.check.types :as t]
+            [arbace.go.check.const :as c]
+            [arbace.go.check.env :as e :refer [o oset!]]
+            [arbace.go.check.code :as code]
+            [arbace.go.check.decl :as decl]
+            [arbace.go.check.load :as load]
+            [arbace.repr.go.types])
+  (:import (java.io File)))
+
+;;; Annotations present in forms (the counts §11.4 reports)
+
+(defn annotations-present
+  "The converter's annotations in a declaration form, by kind: :val (on constant names), :tag
+  (on expressions: lists), :go/via (selections, literal keys), :assign (:= targets), :inst
+  (generic uses), :conv (conversions)."
+  [form]
+  (let [acc (volatile! {})
+        add! (fn [k n] (vswap! acc update k (fnil + 0) n))]
+    (letfn [(walk [f in-meta]
+              (cond
+                (seq? f)
+                (do (let [m (meta f)]
+                      (when (and (:tag m) (not in-meta) (not= 'go/id (first f))) (add! :tag 1))
+                      (when (and (= 'go/id (first f)) (contains? m :val)) (add! :val 1))
+                      (when (and (= 'go/id (first f)) (:assign m)) (add! :assign 1))
+                      (when-let [v (:go/via m)] (add! :go/via (if (map? v) (count v) 1))))
+                    (when (= 'conv (first f)) (add! :conv 1))
+                    (doseq [x f] (walk x in-meta))
+                    (when-let [tg (:tag (meta f))] (walk tg true)))
+                (symbol? f)
+                (let [m (meta f)]
+                  (when (contains? m :val) (add! :val 1))
+                  (when (:assign m) (add! :assign 1))
+                  (when (:inst m) (add! :inst 1))
+                  (when-let [tg (:tag m)] (walk tg true)))
+                (vector? f) (do (doseq [x f] (walk x in-meta))
+                                (when-let [tg (:tag (meta f))] (walk tg true)))
+                (map? f) nil
+                :else nil))]
+      (walk form false))
+    @acc))
+
+;;; The :tag annotations (§3.6), verified on the checked tree
+
+(defn- nodes-seq
+  "The nodes of a checked tree (maps with :op), depth first."
+  [tree]
+  (let [acc (java.util.ArrayList.)
+        seen (java.util.IdentityHashMap.)]
+    (letfn [(walk [x]
+              (cond
+                (map? x) (when (nil? (.put seen x true))
+                           (when (:op x) (.add acc x))
+                           (doseq [[k v] x :when (not (#{:form :type :obj :method :field :val :to :recv-type :iface
+                                                          :sig :tag-type :refs :params :results :recv :objs :lhs :var} k))]
+                             (walk v)))
+                (vector? x) (doseq [y x] (walk y))
+                :else nil))]
+      (walk tree))
+    acc))
+
+(defn verify-tags!
+  "Compares the type of every expression the forms tag (:tag on a list) with the checker's;
+  in annotated forms, a non-constant shift of an untyped constant with a typed type must carry
+  one (doc/go/SPEC.md §8.3)."
+  [tree]
+  (doseq [n (nodes-seq tree)]
+    (cond
+      (:tag-form n)
+      (let [want (:tag-type n)]
+        (if (and want (= want (:type n)))
+          (e/verified! :tag (:tag-form n))
+          (when (and want (t/valid? (:type n)))
+            (e/annotation-error! (:tag-form n) ":tag" (code/expr-str (:tag-form n))
+                                 (t/type-str want) (t/type-str (:type n))))))
+      (and (:annotated code/cx-flags) (= :binary (:op n)) (code/shift-ops (:go/op n)) (:shift-lhs (:x n))
+           (t/typed? (:type n)) (not= :invalid (:type n)))
+      (e/annotation-error! (:form n) ":tag" (code/expr-str (:form n)) "none" (t/type-str (:type n))))))
+
+;;; Checking a package
+
+(defn- file-info [pkg-scope fi config]
+  {:name (:name fi) :scope (e/scope pkg-scope :file)
+   ;; the file's language version, else the package's (a module's go line)
+   :lang (code/lang-minor (or (get-in fi [:opts :lang]) (:lang config)))
+   :line (code/fline (:file fi))
+   :imports (:imports (:opts fi)) :decls (:decls fi)
+   :dots (java.util.HashMap.) :dot-imports (volatile! []) :import-objs (volatile! [])})
+
+(defn- mark-qualifiers-used!
+  "Marks the imports a skipped declaration's forms name as used (its code was not checked)."
+  [fi form]
+  (letfn [(walk [f]
+            (cond
+              (symbol? f) (when-let [q (namespace f)]
+                            (when-let [x (e/scope-get (:scope fi) q)]
+                              (when (= :pkg (o x :kind)) (oset! x :used true)))
+                            (when-let [[_ imp] (.get ^java.util.HashMap (:dots fi) (name f))] (oset! imp :used true)))
+              (seq? f) (doseq [x f] (walk x))
+              (vector? f) (doseq [x f] (walk x))
+              :else nil)
+            (when (instance? arbace.lang.IMeta f)
+              (when-let [tg (:tag (meta f))] (walk tg))))]
+    (walk form)
+    ;; dot-imported names used unqualified
+    (when (seq @(:dot-imports fi))
+      (letfn [(walk2 [f]
+                (cond
+                  (symbol? f) (when-let [[_ imp] (.get ^java.util.HashMap (:dots fi) (name f))] (oset! imp :used true))
+                  (or (seq? f) (vector? f)) (doseq [x f] (walk2 x))
+                  :else nil))]
+        (walk2 form)))))
+
+(defn- syntactic-deps!
+  "The package-level objects a skipped declaration's forms name (for initialization order)."
+  [d pkg-scope]
+  (letfn [(walk [f]
+            (cond
+              (and (symbol? f) (nil? (namespace f)))
+              (when-let [x (e/scope-get pkg-scope (name f))]
+                (when (#{:var :const :func} (o x :kind))
+                  (vswap! d update :deps conj x)))
+              (seq? f) (do (when-let [h (code/head-name f)]
+                             (when (and (str/starts-with? h ".") (not (str/starts-with? h ".-")) (> (count h) 1))
+                               ;; a method call: any method of that name in the package
+                               nil))
+                           (doseq [x f] (walk x)))
+              (vector? f) (doseq [x f] (walk x))
+              :else nil))]
+    (walk (if (#{:var :const} (:kind @d)) (:init @d) (:spec @d)))))
+
+(defn check-package
+  "Checks the package of source src (load/package-source) in session: the package (a
+  volatile, its :scope its objects) with :result {:errors :decls ...}. resolve: path, file ->
+  the imported package (checked)."
+  [src resolve & {:keys [keep-trees]}]
+  (let [pkg-scope (e/scope nil :package)
+        pkg (volatile! {:path (:path src) :name (:name src) :scope pkg-scope :config (:config src)})
+        errors (volatile! [])
+        annotated (contains? (:opts src) :positions)
+        ctx {:objs (volatile! []) :methods (volatile! {}) :bodies (volatile! []) :inits (volatile! [])
+             :flags {:annotated annotated}}
+        fis (mapv #(file-info pkg-scope % (:config src)) (:files src))]
+    (binding [e/*pkg* pkg
+              e/*errors* errors
+              e/*seen* (java.util.IdentityHashMap.)
+              decl/*ctx* ctx
+              code/cx-flags {:annotated annotated}
+              t/*resolve-named* decl/resolve-named!
+              t/*method-obj* decl/method-data!
+              t/*qualify* (:path src)
+              t/*subst-method* decl/subst-method
+              code/*obj-decl* decl/obj-decl!
+              code/*instantiate* decl/instantiate
+              code/*subst* decl/subst]
+      (doseq [fi fis] (decl/declare-imports! fi resolve))
+      (doseq [fi fis] (decl/collect-file! fi))
+      (decl/resolve-method-bases!)
+      (let [objs @(:objs ctx)]
+        (doseq [[i x] (map-indexed vector objs)] (oset! x :decl-order i))
+        ;; go/types' packageObjects: non-alias types, aliases, the rest
+        (doseq [x objs :when (and (= :type (o x :kind)) (not (o x :alias)))] (decl/obj-decl! x))
+        (doseq [x objs :when (and (= :type (o x :kind)) (o x :alias))] (decl/obj-decl! x))
+        (doseq [x objs :when (not= :type (o x :kind))] (decl/obj-decl! x))
+        ;; the bodies, then what each declaration left for later
+        (doseq [x @(:bodies ctx)] (decl/check-body! x))
+        (let [decls (distinct (map #(o % :decl) objs))]
+          (doseq [d decls]
+            (loop []
+              (let [ls (:later @d)]
+                (when (seq ls)
+                  (vswap! d assoc :later [])
+                  (binding [e/*decl* d e/*gofile* (:file @d) e/*line* (some-> (:obj @d) (o :line))]
+                    (try (doseq [l ls] (l))
+                         (catch Exception ex (if (e/unsupported? ex) (vswap! d assoc :unsupported (::e/unsupported (ex-data ex))) (throw ex)))))
+                  (recur)))))
+          ;; the :tag annotations
+          (doseq [d decls :when (:tree @d)]
+            (binding [e/*decl* d e/*gofile* (:file @d)]
+              (verify-tags! (:tree @d))))
+          ;; skipped declarations: their imports used, their dependencies by name
+          (doseq [d decls :when (or (:generic @d) (:unsupported @d))]
+            (mark-qualifiers-used! (:file @d) (:spec @d)))
+          (doseq [fi fis] (decl/unused-imports! fi))
+          ;; initialization order
+          (let [order (decl/init-order objs)
+                say (get-in src [:opts :init-order])
+                init-entry (fn [lhs]
+                             (let [one (fn [v] (if (= "_" (o v :name)) [(o v :file) (o v :line)] (arbace.repr.go.types/name-form (o v :name))))]
+                               (if (= 1 (count lhs)) (one (first lhs)) (apply list 'values (map one lhs)))))
+                have (mapv init-entry order)
+                ;; a variable named true, false or nil is (go/id "true") (SPEC §4.4)
+                norm (fn [x] (cond
+                               (vector? x) [(nth x 0) (nth x 1)]
+                               (= "values" (code/head-name x))
+                               (apply list 'values (map #(if (vector? %) [(nth % 0) (nth % 1)] %) (rest x)))
+                               :else x))
+                init-result (when (some? say)
+                              (if (= (mapv norm say) have)
+                                {:verified true :count (count say)}
+                                (do (e/error! (if (:pf src) (.getName (File. ^String (:pf src))) (:name (first (:files src))))
+                                              (or (:pkg-line src) 0) :AnnotationMismatch
+                                              (format "annotation :init-order on package %s disagrees with goi's checker: forms say %s, the checker says %s"
+                                                      (:path src) (pr-str say) (pr-str have)))
+                                    {:verified false})))
+                ;; the results by declaration
+                generic-ids (set (keep #(when (or (:generic @%) (:unsupported @%)) (:id @%)) decls))
+                errs @errors
+                counted (remove #(contains? generic-ids (:decl %)) errs)
+                ;; grouped by the identity of the form (forms equal but for metadata are two)
+                forms (let [m (java.util.IdentityHashMap.)
+                            order (java.util.ArrayList.)]
+                        (doseq [d decls]
+                          (let [f (:spec @d)]
+                            (when-not (.containsKey m f) (.add order f) (.put m f []))
+                            (.put m f (conj (.get m f) d))))
+                        (mapv (fn [f] [f (.get m f)]) order))
+                stats (reduce
+                       (fn [acc [form ds]]
+                         (let [gen (some #(or (:generic @%) (:unsupported @%)) ds)
+                               present (annotations-present form)
+                               verified (apply merge-with + (map #(:verified @%) ds))]
+                           (if gen
+                             (-> acc
+                                 (update :generic-forms inc)
+                                 (update :generic-decls + (count ds))
+                                 (update :generic-present #(merge-with + % present))
+                                 (update :unsupported #(reduce (fn [m d] (if-let [u (:unsupported @d)] (update m u (fnil inc 0)) m)) % ds)))
+                             (let [unver (into {} (for [[k n] present
+                                                         :let [v (get verified k 0)]
+                                                         :when (and (not= k :inst) (not= n v))]
+                                                     [k (- n v)]))]
+                               (-> acc
+                                   (update :forms inc)
+                                   (update :decls + (count ds))
+                                   (update :present #(merge-with + % present))
+                                   (update :verified #(merge-with + % verified))
+                                   (update :unverified #(merge-with + % unver))
+                                   (update :unverified-at #(if (seq unver) (conj % [(:name (:file @(first ds))) (code/fline form) unver]) %)))))))
+                       {:forms 0 :decls 0 :generic-forms 0 :generic-decls 0 :present {} :verified {} :unverified {}
+                        :generic-present {} :unsupported {} :unverified-at []}
+                       forms)]
+            (when-not keep-trees
+              (doseq [d decls] (vswap! d dissoc :tree :cx :body :sig-forms)))
+            (vswap! pkg assoc :result
+                    (assoc stats
+                           :path (:path src)
+                           :errors (vec (sort-by (juxt :file :line) counted))
+                           :generic-errors (- (count errs) (count counted))
+                           :init-order init-result
+                           :trees (when keep-trees (vec (keep #(:tree @%) decls)))))
+            pkg))))))
+
+;;; Sessions: packages checked once, their imports first
+
+(defn session
+  "A checking session over roots: resolve-src is path, importer-src -> the source of an imported
+  package (or nil)."
+  [resolve-src]
+  {:resolve-src resolve-src :cache (java.util.concurrent.ConcurrentHashMap.)})
+
+(declare ensure-package)
+
+(defn- resolver
+  "The import resolver of a package being checked in session s (chain: the import path)."
+  [s src chain]
+  (let [deps (java.util.HashMap.)]
+    (fn [path fi]
+      (if (= "unsafe" path)
+        e/unsafe-package
+        (let [lp (get-in src [:opts :local-imports path] path)
+              ;; the standard library's vendored packages
+              p (or (ensure-package s lp src chain)
+                    (when (and (not (str/includes? (first (str/split lp #"/")) ".")) false) nil)
+                    (ensure-package s (str "vendor/" lp) src chain))]
+          p)))))
+
+(defn ensure-package
+  "The checked package of import path in session s (checked on first use), or nil."
+  [s path importer chain]
+  (when (some #{path} chain)
+    (throw (ex-info (str "import cycle not allowed: " (str/join " -> " (conj chain path))) {:path path})))
+  (if-let [d (and (:delegate s) (not ((:local s) path)) (:delegate s))]
+    ;; a package of the session's base (a directory test's standard library)
+    (ensure-package d path importer chain)
+  (let [^java.util.concurrent.ConcurrentHashMap cache (:cache s)
+        p (promise)
+        prev (.putIfAbsent cache path p)]
+    (if prev
+      @prev
+      (let [src ((:resolve-src s) path importer)
+            pkg (when (and src (seq (:files src)))
+                  (try
+                    (check-package src (resolver s src (conj (vec chain) path)))
+                    (catch Throwable ex
+                      (deliver p nil)
+                      (throw (ex-info (str "checking " path ": " (.getMessage ex)) {:path path} ex)))))]
+        (when pkg (vswap! pkg assoc :scope-entries (into {} (:names (o pkg :scope)))))
+        (deliver p pkg)
+        pkg)))))
+
+;;; Corpora (§11.4)
+
+(def ^:dynamic *root* "The checkout." ".")
+
+(defn corpus-config [corpus]
+  (case corpus
+    "tamago-amd64" {:roots [{:dir (str *root* "/tamago/goroot") :overlay (str *root* "/tamago/goroot/arch/amd64")}]
+                    :config {:goos "tamago" :goarch "amd64" :goamd64 "v1"}}
+    "tamago-arm64" {:roots [{:dir (str *root* "/tamago/goroot") :overlay (str *root* "/tamago/goroot/arch/arm64")}]
+                    :config {:goos "tamago" :goarch "arm64" :goarm64 "v8.0"}}
+    "linux-amd64" {:roots [{:dir (str *root* "/.tmp/repr-go/forms/linux-amd64")}]
+                   :config {:goos "linux" :goarch "amd64" :goamd64 "v1"}}
+    "linux-test" {:roots [{:dir (str *root* "/.tmp/repr-go/forms/linux-amd64")}]
+                  :programs {:dir (str *root* "/.tmp/repr-go/forms/linux-test") :sub "test"}
+                  :config {:goos "linux" :goarch "amd64" :goamd64 "v1"}}
+    "linux-dirtest" {:roots [{:dir (str *root* "/.tmp/repr-go/forms/linux-amd64")}]
+                     :dirtests {:dir (str *root* "/.tmp/repr-go/forms/linux-dirtest") :sub "test"}
+                     :config {:goos "linux" :goarch "amd64" :goamd64 "v1"}}
+    (throw (ex-info (str "unknown corpus " corpus) {:corpus corpus}))))
+
+(defn- std-session [{:keys [roots config]}]
+  (session (fn [path importer]
+             (some #(load/package-source % path config) roots))))
+
+(def ^:dynamic *progress*
+  "When set, a function called with each item done and its time (ms), for long runs."
+  nil)
+
+(defn- run-parallel
+  "Applies f to each x of xs on up to n threads, the results in order."
+  [n f xs]
+  (let [xs (vec xs)
+        q (java.util.concurrent.atomic.AtomicLong. 0)
+        out (object-array (count xs))
+        workers (doall (for [_ (range n)]
+                         (future
+                           (loop []
+                             (let [i (.getAndIncrement q)]
+                               (when (< i (count xs))
+                                 (let [t0 (System/nanoTime)]
+                                   (when *progress* (*progress* (nth xs i) -1))
+                                   (aset out i (f (nth xs i)))
+                                   (when *progress* (*progress* (nth xs i) (quot (- (System/nanoTime) t0) 1000000))))
+                                 (recur)))))))]
+    (doseq [w workers] @w)
+    (vec out)))
+
+(defn- result-of [pkg] (when pkg (o pkg :result)))
+
+(defn- error-result [what ex]
+  {:path what :errors [{:file what :line 0 :msg (str "checker crash: " (.getMessage ^Throwable ex)
+                                                     (when-let [c (.getCause ^Throwable ex)] (str " / " (.getMessage c))))
+                        :code :Crash}]
+   :forms 0 :decls 0 :generic-forms 0 :generic-decls 0 :present {} :verified {} :unverified {} :generic-present {} :unsupported {}
+   :crash true})
+
+(defn check-corpus
+  "Checks every package of a corpus: their results."
+  [corpus jobs]
+  (let [cc (corpus-config corpus)
+        s (std-session cc)
+        ;; the packages of the roots
+        std-pkgs (when-not (or (:programs cc) (:dirtests cc))
+                   (let [root (first (:roots cc))]
+                     (vec (for [pf (load/package-files root "")]
+                            (load/package-path-of pf)))))]
+    (cond
+      std-pkgs
+      (run-parallel jobs
+                    (fn [path]
+                      (try (or (result-of (ensure-package s path nil []))
+                               {:path path :skipped true})
+                           (catch Throwable ex (error-result path ex))))
+                    std-pkgs)
+      (:programs cc)
+      (let [{:keys [dir sub]} (:programs cc)
+            root {:dir dir}]
+        (run-parallel jobs
+                      (fn [^File pf]
+                        (try
+                          (let [src (load/package-source root nil (:config cc) pf)]
+                            (if (empty? (:files src))
+                              {:path (.getPath pf) :skipped true}
+                              (assoc (result-of (check-package src (resolver s src [])))
+                                     :path (subs (.getPath pf) (inc (count dir))))))
+                          (catch Throwable ex (error-result (.getPath pf) ex))))
+                      (load/package-files root sub)))
+      (:dirtests cc)
+      (let [{:keys [dir sub]} (:dirtests cc)
+            root {:dir dir}
+            pfs (load/package-files root sub)
+            ;; one test: the package files of one .dir directory
+            tests (group-by (fn [^File pf]
+                              (let [p (.getPath pf)]
+                                (if-let [[_ t] (re-find #"^(.*?_dir)(?:/|\.ae$)" p)] t p)))
+                            pfs)]
+        (vec (apply concat
+                    (run-parallel jobs
+                                  (fn [[tdir pfs]]
+                                    (try
+                                      (let [by-path (into {} (for [pf pfs] [(load/package-path-of pf) pf]))
+                                            ;; the test's packages, the standard library's from the corpus's session
+                                            ts (assoc (session (fn [path importer]
+                                                                 (when-let [pf (get by-path path)]
+                                                                   (load/package-source root path (:config cc) pf))))
+                                                      :delegate s :local #(contains? by-path %))]
+                                        (vec (for [[path pf] (sort-by key by-path)]
+                                               (try
+                                                 (assoc (or (result-of (ensure-package ts path nil [])) {:skipped true})
+                                                        :path (str (subs tdir (inc (count dir))) " " path))
+                                                 (catch Throwable ex (error-result (str tdir " " path) ex))))))
+                                      (catch Throwable ex [(error-result tdir ex)])))
+                                  (sort-by key tests))))))))
+
+(defn summarize
+  "The corpus's counts: packages, declarations, errors, annotations."
+  [corpus results]
+  (let [rs (remove :skipped results)
+        sum (fn [k] (reduce + 0 (keep k rs)))
+        msum (fn [k] (apply merge-with + {} (map k rs)))]
+    {:corpus corpus
+     :packages (count rs)
+     :declarations {:checked (sum :decls) :forms (sum :forms)
+                    :generic (sum :generic-decls) :generic-forms (sum :generic-forms)}
+     :errors (sum #(count (:errors %)))
+     :generic-errors (sum :generic-errors)
+     :crashes (count (filter #(or (:crash %) (nil? (:decls %))) rs))
+     :crashed (vec (keep #(when (or (:crash %) (nil? (:decls %))) (:path %)) rs))
+     :annotations {:verified (into (sorted-map) (msum :verified))
+                   :present (into (sorted-map) (msum :present))
+                   :unverified (into (sorted-map) (msum :unverified))
+                   :in-generic (into (sorted-map) (msum :generic-present))
+                   :init-order {:packages (count (filter #(get-in % [:init-order :verified]) rs))
+                                :initializers (sum #(get-in % [:init-order :count] 0))
+                                :mismatches (count (filter #(false? (get-in % [:init-order :verified])) rs))}}
+     :unsupported (into (sorted-map) (msum :unsupported))}))
+
+(defn report-errors
+  "The errors of the results as lines FILE:LINE: MESSAGE, per package."
+  [results]
+  (for [r results e (:errors r)]
+    (str (:path r) ": " (:file e) ":" (:line e) ": " (:msg e))))
+
+;;; Forms in memory (the tests, the REPL's single files)
+
+(defn forms-source
+  "The source of a package given as forms in memory (go/package, go/file and declaration
+  forms, as one file holds them; arbace.repr.go.print's collect-forms)."
+  [forms config]
+  (let [{:keys [package name files]} (arbace.repr.go.print/collect-forms forms)
+        config (merge {:lang "go1.27"} (:config package) config)]
+    {:path (or (:path package) "main") :name (arbace.repr.go.print/name-text name) :config config :opts package
+     :pkg-line (some #(when (and (seq? %) (= 'go/package (first %))) (code/fline %)) forms)
+     :files (vec (for [fi files] (assoc fi :opts (:opts fi))))}))
+
+(defn read-string-forms
+  "The forms of a text, read with line numbers."
+  [^String text]
+  (let [r (arbace.lang.LineNumberingPushbackReader. (java.io.StringReader. text))
+        eof (Object.)]
+    (binding [*read-eval* false]
+      (loop [acc []]
+        (let [f (read r false eof)]
+          (if (identical? f eof) acc (recur (conj acc f))))))))
+
+(def ^:private std-sessions (atom {}))
+
+(defn std
+  "A session over a corpus's standard library (cached), for checking forms that import it."
+  [corpus]
+  (or (get @std-sessions corpus)
+      (let [s (std-session (corpus-config corpus))]
+        (swap! std-sessions assoc corpus s)
+        s)))
+
+(defn check-forms
+  "Checks the package of forms (in memory) against the standard library of corpus (default
+  tamago-amd64): the package's result."
+  ([forms] (check-forms forms "tamago-amd64" {}))
+  ([forms corpus opts]
+   (let [s (std corpus)
+         src (forms-source forms (:config (corpus-config corpus)))
+         pkg (check-package src (resolver s src []) :keep-trees (:keep-trees opts))]
+     (o pkg :result))))
+
+;;; bin/goi annotations (§11.4)
+
+(def corpora
+  "The corpora of the annotation check, in order."
+  ["tamago-amd64" "tamago-arm64" "linux-amd64" "linux-test" "linux-dirtest"])
+
+(defn- write-edn [path x]
+  (io/make-parents path)
+  (spit path (with-out-str (pp/pprint x))))
+
+(defn reference-path [corpus] (str *root* "/test/goi/annotations-" corpus ".edn"))
+
+(defn annotations
+  "Checks a corpus, writes its report under work, compares its counts with the reference
+  (test/goi/annotations-CORPUS.edn; record: writes it). True when it passes: no error, no
+  crash, every annotation of a declaration without generics verified, :init-order verified in
+  every package that has one, and the counts as recorded."
+  [corpus {:keys [jobs record work]}]
+  (let [t0 (System/nanoTime)
+        rs (check-corpus corpus jobs)
+        sm (summarize corpus rs)
+        secs (/ (Math/round (/ (- (System/nanoTime) t0) 1e7)) 100.0)
+        ref-file (File. (reference-path corpus))
+        ref (when (.isFile ref-file) (read-string (slurp ref-file)))
+        clean (and (zero? (:errors sm)) (zero? (:crashes sm)) (empty? (get-in sm [:annotations :unverified]))
+                   (zero? (get-in sm [:annotations :init-order :mismatches])))
+        same (= (dissoc ref :note) (dissoc sm :crashed))]
+    (write-edn (str work "/annotations-" corpus ".report.edn")
+               {:summary sm :seconds secs
+                :errors (vec (report-errors rs))
+                :unverified (vec (for [r rs u (:unverified-at r)] [(:path r) u]))})
+    (println (format "goi annotations %s: %d packages, %d declarations checked (%d using generics, counted apart), %d errors; verified %s; init-order %d packages, %d initializers; %.1f s"
+                     corpus (:packages sm) (get-in sm [:declarations :checked]) (get-in sm [:declarations :generic])
+                     (:errors sm) (pr-str (get-in sm [:annotations :verified]))
+                     (get-in sm [:annotations :init-order :packages]) (get-in sm [:annotations :init-order :initializers]) secs))
+    (doseq [l (take 20 (report-errors rs))] (println "  " l))
+    (when (seq (get-in sm [:annotations :unverified]))
+      (println "   annotations not verified:" (pr-str (get-in sm [:annotations :unverified]))))
+    (cond
+      record (do (write-edn (reference-path corpus) (assoc (dissoc sm :crashed) :note "bin/goi annotations --record"))
+                 (println "   recorded" (reference-path corpus))
+                 clean)
+      (not clean) false
+      (nil? ref) (do (println "   no reference" (reference-path corpus) "(bin/goi annotations --record)") false)
+      (not same) (do (println "   the counts differ from the reference" (reference-path corpus) ":")
+                     (println "   recorded:" (pr-str (dissoc ref :note)))
+                     (println "   now:     " (pr-str (dissoc sm :crashed)))
+                     false)
+      :else true)))
+
+(defn -main
+  "bin/goi's Arbace side: annotations [--record] [--jobs N] [--work DIR] [CORPUS...]."
+  [& args]
+  (let [[cmd & args] args]
+    (case cmd
+      "annotations"
+      (let [opts (loop [as args o {:jobs 24 :work (str *root* "/.tmp/goi") :corpora []}]
+                   (if (empty? as)
+                     o
+                     (case (first as)
+                       "--record" (recur (rest as) (assoc o :record true))
+                       "--jobs" (recur (nnext as) (assoc o :jobs (Long/parseLong (second as))))
+                       "--work" (recur (nnext as) (assoc o :work (second as)))
+                       (recur (rest as) (update o :corpora conj (first as))))))
+            cs (if (seq (:corpora opts)) (:corpora opts) corpora)
+            ok (doall (for [c cs] (annotations c opts)))]
+        (shutdown-agents)
+        (System/exit (if (every? true? ok) 0 1)))
+      (do (println "usage: arbace.go.check annotations [--record] [--jobs N] [--work DIR] [CORPUS...]")
+          (System/exit 2)))))

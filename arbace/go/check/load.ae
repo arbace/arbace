@@ -1,0 +1,166 @@
+(ns arbace.go.check.load
+  "goi's checker: Go packages read as forms from forms roots (doc/go/GOI-SPEC.md §3.1, §3.9;
+  doc/go/SPEC.md §4.1): the package file and its files, each file's build constraints and name
+  evaluated against the configuration as gc does, and import paths resolved to packages of the
+  roots (the standard library's vendored packages, a directory test's local paths).
+
+  A root is {:dir D :overlay D2?}: packages at D/go/<path>.ae (SPEC §4.1), with D2/go/ laid over
+  them file by file (tamago/goroot's arch/ARCH/)."
+  (:require [arbace.string :as str]
+            [arbace.java.io :as io]
+            [arbace.repr.go.print :as rp])
+  (:import (java.io File)))
+
+;;; Paths and namespaces (SPEC §4.1)
+
+(defn path->ns
+  "The namespace name of an import path."
+  ^String [^String path]
+  (str "go." (str/join "." (map #(str/replace % #"[.-]" "_") (str/split path #"/")))))
+
+(defn ns->file
+  "The package file of a namespace, relative to a root."
+  ^String [^String ns]
+  (str (str/replace ns "." "/") ".ae"))
+
+;;; Build constraints (go/build's matchTag, go/constraint)
+
+(def known-os #{"aix" "android" "darwin" "dragonfly" "freebsd" "hurd" "illumos" "ios" "js" "linux" "nacl"
+                "netbsd" "openbsd" "plan9" "solaris" "tamago" "wasip1" "windows" "zos"})
+(def unix-os #{"aix" "android" "darwin" "dragonfly" "freebsd" "hurd" "illumos" "ios" "linux" "netbsd"
+               "openbsd" "solaris"})
+(def known-arch #{"386" "amd64" "amd64p32" "arm" "armbe" "arm64" "arm64be" "loong64" "mips" "mipsle" "mips64"
+                  "mips64le" "mips64p32" "mips64p32le" "ppc" "ppc64" "ppc64le" "riscv" "riscv64" "s390" "s390x"
+                  "sparc" "sparc64" "wasm"})
+
+(def default-experiments
+  "go1.27.1's baseline experiments on amd64 and arm64 (internal/buildcfg/exp.go)."
+  ["regabiwrappers" "regabiargs" "dwarf5" "randomizedheapbase64" "greenteagc" "jsonv2" "sizespecializedmalloc"])
+
+(defn tag-set
+  "The build tags satisfied by a configuration {:goos :goarch :goamd64 :goarm64 :tags}."
+  [{:keys [goos goarch goamd64 goarm64 tags]}]
+  (into #{goos goarch "gc"}
+        (concat (for [i (range 1 28)] (str "go1." i))
+                (when (unix-os goos) ["unix"])
+                (when (= "amd64" goarch)
+                  (let [lv (Long/parseLong (subs (or goamd64 "v1") 1))]
+                    (for [i (range 1 (inc lv))] (str "amd64.v" i))))
+                (when (= "arm64" goarch) ["arm64.v8.0"])
+                (map #(str "goexperiment." %) default-experiments)
+                tags)))
+
+(defn- tokens [^String s]
+  (re-seq #"\(|\)|&&|\|\||!|[A-Za-z0-9_.]+" s))
+
+(defn eval-build
+  "The value of a //go:build expression for the satisfied tags."
+  [^String line tags]
+  (let [toks (vec (tokens (str/replace line #"^//go:build\s*" "")))
+        pos (volatile! 0)
+        peek* (fn [] (get toks @pos))
+        next* (fn [] (let [t (get toks @pos)] (vswap! pos inc) t))]
+    (letfn [(or-expr [] (loop [v (and-expr)]
+                          (if (= "||" (peek*)) (do (next*) (let [w (and-expr)] (recur (or v w)))) v)))
+            (and-expr [] (loop [v (not-expr)]
+                           (if (= "&&" (peek*)) (do (next*) (let [w (not-expr)] (recur (and v w)))) v)))
+            (not-expr [] (if (= "!" (peek*)) (do (next*) (not (not-expr))) (atom*)))
+            (atom* [] (let [t (next*)]
+                        (if (= "(" t)
+                          (let [v (or-expr)] (next*) v)
+                          (contains? tags t))))]
+      (or-expr))))
+
+(defn good-os-arch-file?
+  "go/build's goodOSArchFile: a file name's _GOOS, _GOARCH, _GOOS_GOARCH suffixes."
+  [^String fname goos goarch]
+  (let [n (str/replace fname #"\.go$" "")
+        n (if-let [i (str/index-of n "_")] (subs n i) "")
+        parts (vec (rest (str/split n #"_")))
+        l (count parts)
+        parts (if (and (>= l 1) (= "test" (peek parts))) (pop parts) parts)
+        l (count parts)]
+    (cond
+      (and (>= l 2) (known-os (nth parts (- l 2))) (known-arch (nth parts (- l 1))))
+      (and (= goarch (nth parts (- l 1))) (or (= goos (nth parts (- l 2))) (and (= "android" (nth parts (- l 2))) (= goos "linux"))))
+      (and (>= l 1) (known-os (nth parts (- l 1))))
+      (let [o (nth parts (- l 1))]
+        (or (= o goos) (and (= o "android") (= goos "linux")) (and (= o "illumos") (= goos "solaris"))))
+      (and (>= l 1) (known-arch (nth parts (- l 1)))) (= goarch (nth parts (- l 1)))
+      :else true)))
+
+(defn file-included?
+  "Whether a file (its go/file options) is part of the package for the configuration."
+  [fname opts config tags]
+  (and (good-os-arch-file? fname (:goos config) (:goarch config))
+       (every? (fn [^String b] (if (str/starts-with? b "//go:build") (eval-build b tags) true))
+               (:build opts))))
+
+;;; Reading packages
+
+(def ^:private read-cache (java.util.concurrent.ConcurrentHashMap.))
+
+(defn read-forms
+  "A file's forms, cached by path (the roots are read once per session)."
+  [^File f]
+  (let [k (.getPath f)]
+    (or (.get read-cache k)
+        (let [v (rp/read-forms f)]
+          (.put read-cache k v)
+          v))))
+
+(defn clear-cache! [] (.clear read-cache))
+
+(defn- overlay-file
+  "A file of the root, or its overlay's when the overlay has it."
+  ^File [root ^String rel]
+  (let [ov (when (:overlay root) (File. (str (:overlay root) "/" rel)))]
+    (if (and ov (.isFile ov)) ov (File. (str (:dir root) "/" rel)))))
+
+(defn collect-package
+  "The package of the forms file pf in root: arbace.repr.go.print's collect, with files
+  replaced by the overlay's."
+  [root ^File pf]
+  (let [base (.getCanonicalPath (File. (str (:dir root))))]
+    (rp/collect pf (fn [^File f]
+                     (let [p (.getCanonicalPath f)
+                           rel (if (str/starts-with? p base) (subs p (inc (count base))) nil)]
+                       (read-forms (if rel (overlay-file root rel) f)))))))
+
+(defn package-source
+  "The source of the package with import path in root for config: {:path :name :config
+  :opts (go/package's) :files [{:name :opts :decls}] :pf}, or nil when the root has none;
+  pf the package file when known (test programs)."
+  ([root path config] (package-source root path config nil))
+  ([root path config ^File pf]
+   (let [pf (or pf (File. (str (:dir root) "/" (ns->file (path->ns path)))))]
+     (when (.isFile pf)
+       (let [{:keys [package name files]} (collect-package root pf)
+             config (merge {:lang "go1.27"} (:config package) config)
+             tags (tag-set config)
+             files (vec (for [fi files
+                              :let [opts (:opts fi)]
+                              :when (file-included? (:name fi) opts config tags)]
+                          (assoc fi :opts opts)))]
+         {:path (or (:path package) path) :name (arbace.repr.go.print/name-text name) :config config :opts package
+          :files files :pf (.getPath pf)
+          :pkg-line (some #(when (and (seq? %) (= 'go/package (first %))) (:line (meta %))) (read-forms pf))})))))
+
+(defn package-files
+  "The package files (whose first form is ns) under root's dir/go/sub, sorted."
+  [root sub]
+  (let [d (File. (str (:dir root) "/go/" sub))]
+    (->> (file-seq d)
+         (filter (fn [^File f] (and (.isFile f) (str/ends-with? (.getName f) ".ae"))))
+         (filter (fn [^File f]
+                   (with-open [r (io/reader f)]
+                     (let [l (first (remove #(or (str/blank? %) (str/starts-with? % ";")) (line-seq r)))]
+                       (and l (str/starts-with? l "(ns "))))))
+         (sort-by (fn [^File f] (.getPath f))))))
+
+(defn package-path-of
+  "The import path a package file declares (its go/package :path)."
+  [^File pf]
+  (let [fs (read-forms pf)
+        gp (first (filter #(and (seq? %) (= 'go/package (first %))) fs))]
+    (:path (apply hash-map (nnext gp)))))
