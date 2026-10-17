@@ -1821,27 +1821,26 @@ literals (2) of type parameters, and type set terms (7).
   S16: "both are bugs"). Fixed in `arbace/repr/go/lit.ae` (the ratio divided exactly); no
   tracked forms change: `tamago/goroot`'s typed float values are all verified exact, and those of
   `tamago/cmd`, `box/` and `go/` (π, e, 2π, 2e9) read the same either way (GC2).
-- **`:init-order` entries named `true`, `false` or `nil`** (a directory test's package-level
-  variables) are written as those symbols, which the reader reads as literals; the checker reads
-  a literal there as the variable it names (GC3). Blank variables' entries (`["file.go" line
-  col]`) are compared by file and line: mode `:lines` keeps no columns.
+- **Names spelled `true`, `false` or `nil`** (a directory test's package-level variables,
+  `fixedbugs/issue4252.dir`) were written bare in `:init-order`, which the reader reads as the
+  literals. Since GC3 the converter writes such a name `(go/id "true")` wherever it would
+  otherwise write the bare symbol (SPEC §4.4): `:init-order` entries, `:go/via` names, the
+  names of `:inst` and `:tag` type forms (types, type parameters, fields, interface methods),
+  import names and package names; the printer and the checker read that spelling, and the
+  checker no longer takes a literal in `:init-order` for a variable
+  (`test/goi/annotations/literals.ae`; `test/repr/go/convert/units/s4_names.go`). No tracked
+  forms change (`bin/tamago-vendor verify`, `bin/toolchain-vendor verify`, `bin/x509roots-vendor
+  verify`: byte for byte). Blank variables' entries (`["file.go" line col]`) are compared by file
+  and line: mode `:lines` keeps no columns.
 - **Method expressions carry no `:go/via`** in the converter's forms (SPEC §7.6 asks it of
   selectors and literal keys): the checker computes the path and compares where present.
 - **Errors**: a package's errors are all reported, as data `{:file :line :msg :code}` (§3.8);
   the REPL's `CompilerException` with at most ten of them, and the check of a single REPL
   declaration against the package's state, come with GR3.
 
-**Proposals for the user** (each built as recommended):
-
-- **GC1 Imports at the REPL.** (a) as built: a session checks imported packages from their
-  forms when a forms root has them (the tools, the corpora), and GR1 adds the digest as one
-  more root for the compiled packages; (b) the digest only. *Recommended: (a)*: the tools keep
-  checking whole corpora without a program, and the REPL loses nothing.
-- **GC2 repr/go's typed floats.** (a) as built: `double-lit` exact (a fix to repr/go, an
-  embedded tool, so the program's copy changes with it: the next build compiles it); (b) keep
-  repr/go unchanged until a batch of its own. *Recommended: (a)*: the forms of `$GOROOT/test`
-  carried a wrong value; no tracked tree changes.
-- **GC3 Variables named `true`, `false`, `nil` in `:init-order`.** (a) the converter writes
-  `(go/id "true")` there, as SPEC §4.4 writes such names in symbol positions, the checker
-  accepting both meanwhile; (b) the literal stays the variable's spelling. *Recommended: (a)*
-  (a change to the converter for a later batch; GR2 accepts both).
+**Decided (2026-10-17, the user).** GC1 (a): imported packages from their forms when a forms
+root has them, the digest one more root at GR1, as built. GC2 (a): repr/go's `double-lit`
+exact, with GR2, as built (its tests' expected value corrected: `float32(0.1)` is
+`0.10000000149011612`). GC3 (a), now rather than later: the converter writes `(go/id "...")`
+for these names everywhere a bare symbol would read as a literal, the printer and the checker
+read it, and the checker accepts no literal there (above).
