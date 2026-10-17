@@ -946,3 +946,14 @@ bundle built at `7019817` carried a guest of 2026-10-15 (before the renames) and
 image from tools older than the commit; the user was asked not to run it. The "not prepared"
 line for `arbace.j2g.start` came from those stale tools: in a fresh build it is embedded and
 compiled. To do: both scripts to check that their executables are built from the commit.
+
+## 2026-10-17: the seed remade; diffcheck in the essential gate; KS and RS decided
+
+The seed remade from the fixpoint at `191adb3` (the c2j and j2g batches, the renames, repr/java
+print): `cf89f8a8...` (was `56fabe20...`), 5,633,352 bytes, verified by `bin/seed --verify` (the
+same archive printed again; stage 0 = G1 = G2 = G3, `78d13f88...`, 374 s). F2.1: `bin/diffcheck`
+moved into the essential gate, concurrently with the smoke test, the suite and the oracle.
+Decided by the user, as recommended: KS1-KS12 (doc/go/PROCESS-SPEC.md, "Decided"); RS1-RS15 and
+RS17 (doc/REPR-RUST-SURVEY.md, "Decided"), RS16 (b) (the spec now). Started concurrently (the
+user): the executable-freshness guard of `bin/box-rebuild` and `bin/box-mac-bundle`, repr/haskell
+R3, KU1, goi's GR1, repr/rust's spec; the Mac bundle rebuilt from this commit.

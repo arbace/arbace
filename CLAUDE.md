@@ -182,7 +182,10 @@ Prior art:
   `arbace/`, `go/`, `overlay/`, `jdk/`, `x509roots/`, the fixtures' forms, the build's scripts, the
   seed's and Go's pins; seconds when unchanged, else two Go-hosted builds, about 8 minutes: the
   test build reuses the executable's compiled namespaces), then
-  concurrently the smoke test, Clojure's suite on the test build (`test/arbace-go-results.edn`) and
+  concurrently the smoke test, the per-form differential check (`bin/diffcheck`, Futamura F2, since
+  2026-10-17 in the essential gate: the oracle's forms evaluated against compiled by c2j, the Java
+  forms interpreted against translated by j2g, against `test/diffcheck/known.edn`; about 5
+  minutes, 40 s cached), Clojure's suite on the test build (`test/arbace-go-results.edn`) and
   the oracle against the frozen reference. `bin/gate --full` adds, concurrently: on the frozen
   JVM `bin/repr-java check --suite`, `bin/repr-java roundtrip --corpus baseline,samples,jdk`,
   `bin/jrt-convert verify` (`jdk/` converted afresh, byte for byte),
@@ -195,11 +198,7 @@ Prior art:
   (`bin/repr-haskell roundtrip --iface`: GHC's trees and lines over GHC 9.14.1's boot
   libraries, then their interfaces compiled at `-O1`, and `test`; on the host's GHC), the box's vendoring checks (`bin/box-vendor roundtrip`, `kvm-tests`, `purego-check`),
   `bin/tamago-vendor verify`, `bin/x509roots-vendor verify`, `check`; Go's toolchain as forms
-  (`bin/toolchain-vendor verify`, `check`); the per-form differential check (`bin/diffcheck`,
-  Futamura F2, doc/FUTAMURA-SURVEY.md "F2 as built": the oracle's forms evaluated against
-  compiled by c2j, the Java forms interpreted against translated by j2g, in a program
-  built for it from the gate's executable, against `test/diffcheck/known.edn`; about 5 minutes,
-  40 s cached). Run it when the Java forms'
+  (`bin/toolchain-vendor verify`, `check`). Run it when the Java forms'
   front end, repr/java, repr/go, j2g or jrt change (after a change to `overlay/jdk/java.base`, jrt's closure
   or repr/java, `bin/jrt-convert update` first; after a change to what j2g asks of the JVM,
   `bin/j2g-edge update`). Logs in `.tmp/gate/`. Every gate run and every `bin/arbace-go --build`

@@ -7,7 +7,7 @@ The current state of the work. This file is rewritten as things change. For the 
 
 ## State
 
-- The bootstrap starts from the Go-source seed `seed/arbace-seed-go.tar.xz` (`56fabe20…`), the
+- The bootstrap starts from the Go-source seed `seed/arbace-seed-go.tar.xz` (`cf89f8a8…`), the
   program printed by the Go-hosted fixpoint, its toolchain (TamaGo's go1.27.1) pinned by
   `seed/goroot.sha256`. `bin/seed --check`, `--build` (stage 0), `--make`, `--verify`.
 - Stage 0 hosts every Arbace tool (j2g, repr/go, build/go, c2a, the suite's runner), compiled into it;
@@ -134,8 +134,7 @@ The current state of the work. This file is rewritten as things change. For the 
 
 - `repr/rust`: the survey written (doc/REPR-RUST-SURVEY.md, 2026-10-17; ../rust-lisp as prior
   art): recommended a bridge only, rust-lisp's grammar respelled, a helper on the host's rustc
-  with its `rustc-dev` pinned; after repr/haskell's R-milestones, 7-10 days; proposals RS1-RS17
-  open.
+  with its `rustc-dev` pinned; RS1-RS17 decided (RS16: the spec now, the build after), 7-10 days.
 
 - The standalone Arbace: no Java binary compatibility, with Java at the source level through repr/java.
   The language is Clojure plus class forms, and later forms for Go. The goal is a
@@ -157,8 +156,8 @@ The current state of the work. This file is rewritten as things change. For the 
   2026-10-17): recommended a TamaGo runtime per process at EL0 (the same image, a page table per
   process), language isolation inside processes, S7's guests where virtualization exists, one
   spawn request; SYSCALL round trip 24.5 ns measured at ring 3; plan KU0-KU6, 17-27 days;
-  K1-K12 decided as recommended; KU0 done (doc/go/PROCESS-SPEC.md; proposals KS1-KS12
-  open); KU1-KU6, 14-23 days.
+  K1-K12 decided as recommended; KU0 done (doc/go/PROCESS-SPEC.md; KS1-KS12 decided as
+  recommended); KU1-KU6, 14-23 days.
 - The mapped start measured without nested KVM.
 - A note from the user (2026-10-13): the tooling of the Mac GUI app Moshi Go may be useful for
   Arbace, to study when Arbace's REPL gets a user interface beyond the terminal. Its build info

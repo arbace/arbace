@@ -877,3 +877,14 @@ to its output as a guest (KU2's exit criterion); the per-process CR3 switch exer
 survey measured the switch's cost in A.1; KU1 wires it into a kernel). `whim_uentry` is
 dead-code-eliminated here because nothing references it yet, as `whim_apentry` would be without the
 board's `LEAQ`; KU1's kernel references it and keeps it.
+
+## Decided (2026-10-17, the user)
+
+KS1-KS12 as recommended: one TTBR0 on arm64, the kernel EL1-only in every table (KS1); a
+process's `osInit` trusting the kernel's CPU features (KS2); the FS base set by the kernel,
+`settls` a `SetFSBase` call (KS3); the heap window mapped in full, no `Grow` in KU1-KU2 (KS4); new
+process-call numbers above `NCalls` (KS5); bytes copied, shared pages later by measurement (KS6);
+no KPTI-like split (KS7); spawn's `:where :auto`, with a guest-only switch while KU4 is young
+(KS8); the kernel a mode of the one box image (KS9); a process's stdio as captured handles
+(KS10); a per-process budget and the monitor's watchdog before KU6 (KS11); KU7 surveyed after KU4
+(KS12).

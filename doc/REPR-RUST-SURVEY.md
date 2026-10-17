@@ -960,3 +960,14 @@ fn main() {
     rustc_driver::run_compiler(&args, &mut Dump { file, debug });
 }
 ```
+
+## Decided (2026-10-17, the user)
+
+RS1-RS15 and RS17 as recommended: a bridge only, no translator (RS1, RS15); rust-lisp's grammar
+respelled by repr/go's rule (RS2, RS3); paths as `std.io/Write` (RS4); a namespace per file with
+qualified top-level heads (RS5); macro arguments as forms when they print back to the same
+tokens, else `(:tt "...")` (RS6); `(:attr ...)` forms (RS7); `tools/rsdump` on the host's rustc
+with `rustc-dev` and `rust-src` fetched and pinned (RS8, RS9); a printer after
+`rustc_ast_pretty`, modes `:lines` and `:full` (RS10, RS11); the tree, interface and text levels
+over std's five crates, one conversion per file under the rustc version and edition (RS12-RS14);
+rust-lisp a reference (RS17). RS16 (b): the spec (doc/rust/SPEC.md) now, the build after.
