@@ -1124,7 +1124,7 @@ real one on the other is N1's (the survey's E6 met three).
 | level | how | normalization |
 |---|---|---|
 | tree | `rsdump tree` of the original and of the printed file, compared as text; `rsdump lines` of both in `:lines` | §11.2 |
-| interface | each crate documented as its build compiles it, once from the originals and once with all the crate's printed files in their places (Haskell forms' HR8), under the same relative paths: `RUSTC_BOOTSTRAP=1 rustdoc --edition E --crate-name C --crate-type lib -Zunstable-options --output-format json`, the crate's `--cfg` and feature flags, its dependencies the host sysroot's (the same build as `rust-src`); the two JSON files compared after removing every `span` | in `:lines`, also the line numbers inside docs' code blocks are not compared (rustdoc's JSON has none outside `span`); in `:full` everything must be equal |
+| interface | each crate documented as its build compiles it, once from the originals and once with all the crate's printed files in their places (Haskell forms' HR8), under the same relative paths: `RUSTC_BOOTSTRAP=1 rustdoc --edition E --crate-name C --crate-type lib -Zunstable-options --output-format json`, the crate's `--cfg` and feature flags, its dependencies the host sysroot's (the same build as `rust-src`); the two JSON files compared after removing every `span` | every `span` field removed (E4: a file reprinted with other lines and layout gives equal JSON without them); in `:full` everything must be equal |
 | text | the printed file against the original, byte for byte | none |
 | lowered, code (later) | `-Zunpretty=hir`, `-Zunpretty=mir` of both, then objects | spans removed; columns of `Location` constants in `:lines` |
 
@@ -1406,7 +1406,15 @@ bare, and checks that the top-level forms after `ns` and `rs/file` stand on the 
 file's inner attributes and of each item's outer attributes and the item, as the helper's dump of
 `shapes.rs` gives them: `[1 2 4 5 7 8 9 15 20 30 36 43 47 59]`, equal.
 
-**E4: rustdoc's JSON of `core`.** RESULT-E4
+**E4: rustdoc's JSON of `core`** (§11.3, RSS7). `RUSTC_BOOTSTRAP=1 rustdoc --edition 2024
+--crate-name core --crate-type lib -Zunstable-options --output-format json core/src/lib.rs`, run
+in the extracted `library/` (core needs `stdarch` and `portable-simd` beside it, from the same apk,
+and no dependency): 28.5 s, 1.47 GB resident, a 68.8 MB JSON file of format version 61, 61,777
+items. Then the same in a copy of the tree whose `core/src/option.rs` (3,054 lines) was replaced by
+rustc's own printing of it (`-Zunpretty=normal`, 2,823 lines: other lines, other layout, plain
+comments gone, the same tree, survey §4.3): the two JSON files differ (19 bytes in size), and are
+equal once every `span` field is removed (`.tmp/repr-rust-spec/e4/cmp.py`). The interface level's
+normalization is therefore exactly the spans, for a printed file whose tree is the original's.
 
 ## Appendix B: the worked example
 
