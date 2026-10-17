@@ -57,7 +57,7 @@ versions cannot be pinned there. Arbace's own inputs that must not move are pinn
 
 ## What Arbace uses
 
-Most of the 67 serve other work on this host: GHC and cabal, Rust, OCaml, Chez Scheme, joker,
+Most of the 67 serve other work on this host: cabal (GHC itself is repr/haskell's, below), Rust, OCaml, Chez Scheme, joker,
 cloud-init, the editors and the shells' tools. The table below lists what Arbace's scripts
 (`bin/`) call, and what builds the inputs that apk does not provide. It is derived from the
 scripts and has not yet been tried on a fresh host.
@@ -73,6 +73,7 @@ scripts and has not yet been tried on a fresh host.
 | jrt-convert's generator JDK, and the boot JDK for jdk26u | `openjdk25-jdk` (on this host by `openjdk25-src`) |
 | Building jdk26u (headless) | `alpine-sdk autoconf zip alsa-lib-dev cups-dev fontconfig-dev` |
 | Bootstrapping TamaGo's Go from source | `go` (Alpine's Go, used for nothing else) |
+| repr/haskell's helper `tools/hsdump` and its checks (`bin/repr-haskell`, since 2026-10-17): GHC's parser through its `ghc` library, CPP through GHC's driver | `ghc` (9.14.1, pinned by `tools/hsdump/GHC_VERSION` and checked; on this host by `cabal`; its CPP runs `cc` from `gcc`, a dependency of `ghc`) |
 
 Since 2026-10-16 nothing Arbace builds needs a C toolchain: go-whim's tests and their C guests
 (which needed `clang` and a linker), jrt's `--race` and `bin/j2g-race` (Go's race detector needs

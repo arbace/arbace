@@ -101,7 +101,12 @@ Prior art:
     as Go forms and back (spec `doc/go/SPEC.md`; mode `:full` keeps the text: comments,
     spellings, layout, printed back byte for byte; helpers `tools/godump`, `tools/gocmp`;
     `bin/repr-go read`, `print`, `roundtrip`, `check`, `test`), on the tools' host
-    (`REPR_GO_EXE` names another executable).
+    (`REPR_GO_EXE` names another executable); `arbace.repr.haskell` (`arbace/repr/haskell{.ae,/}`),
+    Haskell as Haskell forms and back (spec `doc/haskell/SPEC.md`, notes
+    `doc/haskell/HASKELL-NOTES.md`; helper `tools/hsdump` on the host's GHC, pinned by
+    `tools/hsdump/GHC_VERSION`; `bin/repr-haskell read`, `print`, `roundtrip`, `test`; corpus GHC
+    9.14.1's boot libraries, `test/haskell/corpus-ghc-9.14.1.edn`), evaluated from the checkout,
+    not embedded.
   - `arbace/repr/clojure{.ae,/}`: `arbace.repr.clojure`, Clojure's bridge (`doc/REPR-CLOJURE.md`;
     `bin/repr-clojure read`, `print` to come, `check`): Clojure source into Arbace's, the names
     of the vendored Clojure, `.clj`/`.cljc` into `.ae`, a table of rules for the dialects'
@@ -180,8 +185,9 @@ Prior art:
   (`bin/arbace-go --build --box`, `bin/tamago-vendor check`), the box's smoke test, its oracle's
   subset and `bin/box-suite`, then
   `bin/arbace-go --fixpoint`; repr/go's round trips (`bin/repr-go roundtrip amd64`, `linux/amd64`, and
-  `--text amd64`: mode `:full` printed back to the original text, byte for byte), the
-  box's vendoring checks (`bin/box-vendor roundtrip`, `kvm-tests`, `purego-check`),
+  `--text amd64`: mode `:full` printed back to the original text, byte for byte), repr/haskell's
+  (`bin/repr-haskell roundtrip`: GHC's trees and lines over GHC 9.14.1's boot libraries, and
+  `test`; on the host's GHC), the box's vendoring checks (`bin/box-vendor roundtrip`, `kvm-tests`, `purego-check`),
   `bin/tamago-vendor verify`, `bin/x509roots-vendor verify`, `check`; Go's toolchain as forms
   (`bin/toolchain-vendor verify`, `check`); the per-form differential check (`bin/diffcheck`,
   Futamura F2, doc/FUTAMURA-SURVEY.md "F2 as built": the oracle's forms evaluated against
