@@ -1,0 +1,78 @@
+#!/bin/bash
+# repr/rust's own cases (bin/repr-rust test; doc/rust/RUST-NOTES.md, "Checks"):
+#   1. the reader's samples (test/rust/reader-samples.txt, SPEC Appendix A, E1): read again by
+#      test/rust/reader_samples.ae, the same as test/rust/reader-samples.out;
+#   2. the worked example (SPEC Appendix B): test/rust/sample/shapes.rs dumped by the helper and
+#      converted (the crate shapes, a binary, the namespace rs.sample.shapes), the same forms as the
+#      spec's hand-written test/rust/sample/shapes.ae (as data, rs/file and its :config on the keys
+#      the spec writes), each top-level form at the same line;
+#   3. its round trip: printed, parsed by rustc to the same tree and lines (rsdump tree);
+#   4. the round trip of test/rust/sample/constructs.rs, constructs std's five crates use rarely or
+#      not at all (shebang, unions, trait aliases, C variadics, labeled blocks, let-else, try
+#      blocks, literals of every kind, attributes on expressions...).
+# Usage: bin/lib/repr-rust/test (from bin/repr-rust test). Scratch in .tmp/repr-rust/test.
+set -euo pipefail
+root=$(cd "$(dirname "$0")/../../.." && pwd)
+. "$root/bin/lib/tools.bash"
+"$root/bin/repr-rust" helper
+helper=$root/.tmp/repr-rust/rsdump
+work=$root/.tmp/repr-rust/test
+rm -rf "$work"; mkdir -p "$work"
+fail=0
+
+echo "== 1. the reader's samples (test/rust/reader-samples.txt)"
+(cd "$root" && arbace_tool test/rust/reader_samples.ae test/rust/reader-samples.txt) > "$work/reader-samples.out" 2>&1
+if diff -u "$root/test/rust/reader-samples.out" "$work/reader-samples.out" > "$work/reader-samples.diff"; then
+  echo "ok: $(grep -c '=>\|!!' "$work/reader-samples.out") samples read as recorded"
+else
+  echo "FAIL: the reader's samples differ ($work/reader-samples.diff)"; fail=1
+fi
+
+echo "== 2. the worked example converted (test/rust/sample/shapes.rs)"
+(cd "$root/test/rust/sample" && "$helper" dump -o "$work/dumps" --edition 2024 shapes.rs)
+(cd "$root" && arbace_tool -m arbace.repr.rust read --pin "$root/tools/rsdump/RUSTC_VERSION" -o "$work/forms" --crate shapes --crate-type bin \
+   --ns-root rs.sample "$work/dumps/shapes.rs.edn") > "$work/read.log" || { cat "$work/read.log"; fail=1; }
+(cd "$root" && arbace_tool -e '
+(let [rd (fn [f] (let [r (arbace.lang.LineNumberingPushbackReader. (java.io.StringReader. (slurp f)))]
+                   (loop [acc []] (let [x (read {:eof ::e} r)] (if (= x ::e) acc (recur (conj acc x)))))))
+      spec (rd "test/rust/sample/shapes.ae")
+      conv (rd "'"$work"'/forms/rs/sample/shapes.ae")
+      file-of (fn [fs] (first (filter #(and (seq? %) (= (quote rs/file) (first %))) fs)))
+      opts (fn [f] (apply hash-map (rest f)))
+      want (opts (file-of spec))
+      ;; the spec writes rs/file and its :config with fewer keys
+      trim (fn [f] (if (and (seq? f) (= (quote rs/file) (first f)))
+                     (let [o (opts f)
+                           o (select-keys o (keys want))
+                           o (update o :config select-keys (keys (:config want)))]
+                       (with-meta (apply list (quote rs/file) (mapcat (fn [k] [k (get o k)]) (map first (partition 2 (rest (file-of spec)))))) (meta f)))
+                     f))
+      conv (mapv trim conv)
+      bad (remove (fn [[a b]] (and (= a b) (= (:line (meta a)) (:line (meta b))))) (map vector spec conv))]
+  (doseq [[a b] bad] (println "spec:     " (:line (meta a)) (pr-str a)) (println "converted:" (:line (meta b)) (pr-str b)))
+  (if (and (empty? bad) (= (count spec) (count conv)))
+    (println "ok:" (count conv) "forms, as the spec writes them, at the same lines")
+    (do (println "FAIL: the converted forms differ from the spec'"'"'s") (System/exit 1))))') || fail=1
+
+echo "== 3. the worked example's round trip"
+(cd "$root" && arbace_tool -m arbace.repr.rust print -o "$work/printed" "$work/forms/rs/sample/shapes.ae") > "$work/print.log" || { cat "$work/print.log"; fail=1; }
+(cd "$root/test/rust/sample" && "$helper" tree -o "$work/orig" --edition 2024 shapes.rs)
+(cd "$work/printed" && "$helper" tree -o "$work/cand" --edition 2024 shapes.rs) || true
+if cmp -s "$work/orig/shapes.rs.tree" "$work/cand/shapes.rs.tree" && cmp -s "$work/orig/shapes.rs.lines" "$work/cand/shapes.rs.lines"; then
+  echo "ok: the printed file parses to the same tree and lines ($(wc -l < "$work/orig/shapes.rs.lines") spans)"
+else
+  echo "FAIL: the printed file ($work/printed/shapes.rs) parses to another tree or other lines"; fail=1
+fi
+echo "== 4. the round trip of test/rust/sample/constructs.rs"
+(cd "$root/test/rust/sample" && "$helper" dump -o "$work/dumps" --edition 2024 constructs.rs)
+(cd "$root" && arbace_tool -m arbace.repr.rust read --pin "$root/tools/rsdump/RUSTC_VERSION" -o "$work/forms" \
+   "$work/dumps/constructs.rs.edn") > "$work/read4.log" || { cat "$work/read4.log"; fail=1; }
+(cd "$root" && arbace_tool -m arbace.repr.rust print -o "$work/printed" "$work/forms/rs/main/constructs.ae") > "$work/print4.log" || { cat "$work/print4.log"; fail=1; }
+(cd "$root/test/rust/sample" && "$helper" tree -o "$work/orig" --edition 2024 constructs.rs)
+(cd "$work/printed" && "$helper" tree -o "$work/cand" --edition 2024 constructs.rs) || true
+if cmp -s "$work/orig/constructs.rs.tree" "$work/cand/constructs.rs.tree" && cmp -s "$work/orig/constructs.rs.lines" "$work/cand/constructs.rs.lines"; then
+  echo "ok: the printed file parses to the same tree and lines ($(wc -l < "$work/orig/constructs.rs.lines") spans)"
+else
+  echo "FAIL: the printed file ($work/printed/constructs.rs) parses to another tree or other lines"; fail=1
+fi
+exit $fail

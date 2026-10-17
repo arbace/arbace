@@ -1,0 +1,294 @@
+(ns arbace.repr.rust
+  "Command line of repr/rust (doc/rust/SPEC.md, doc/rust/RUST-NOTES.md), run by bin/repr-rust as
+  -m arbace.repr.rust VERB ...:
+
+    read [--jobs N] [-o DIR] [--report FILE] [--only REGEX] [--corpus FILE]
+         [--crate NAME --crate-type T --ns-root NS] (--root DIR | DUMP...)
+        each helper dump (tools/rsdump) to Rust forms: DIR/rs/CRATE/PATH.ae (SPEC §2.1), read back
+        and compared with the forms in memory (every bare name, path, literal and form checked,
+        principle 3). With --root, the dumps are ROOT/FILE.edn, FILE the path rustc was given
+        (CRATE-DIR/src/...), each file's crate and configuration from the corpus file; without a
+        corpus, the crate NAME (default main) and type, the namespace NS-ROOT + the file's path.
+    print [--jobs N] [-o DIR] (--root DIR | FORMS.ae...)
+        the printer (SPEC §9.4): each forms file to DIR/PATH, PATH its rs/file's :path; mode
+        :lines' layout.
+    compare --corpus FILE --orig DIR --cand DIR --known FILE --report FILE [--forms-report FILE]
+            [--only REGEX] [--times TEXT]
+        the round trip's tree level (SPEC §11.2): for each file of the corpus, the helper's tree and
+        lines of the original (ORIG/FILE.tree, .lines) against the printed file's
+        (CAND.trees/FILE.tree, .lines); the known differences FILE (a map from FILE to its reason)
+        excuse a file, and a listed file that no longer differs is a failure."
+  (:require [arbace.repr.rust.convert :as cv]
+            [arbace.repr.rust.write :as wr]
+            [arbace.repr.rust.print :as pr]
+            [arbace.repr.rust.syntax :as sx]
+            [arbace.string :as str])
+  (:import [java.io File]))
+
+(defn- parse-args
+  "{:opts {...} :args [...]}; flags with a value: those in with-value"
+  [args with-value]
+  (loop [as args opts {} pos []]
+    (if (empty? as)
+      {:opts opts :args pos}
+      (let [[a & more] as]
+        (cond
+          (contains? with-value a) (recur (rest more) (assoc opts a (first more)) pos)
+          (str/starts-with? a "--") (recur more (assoc opts a true) pos)
+          :else (recur more opts (conj pos a)))))))
+
+(defn- files-under [^String dir ext]
+  (->> (file-seq (File. dir))
+       (filter #(and (.isFile ^File %) (str/ends-with? (.getName ^File %) ext)))
+       (map #(.getPath ^File %))
+       sort))
+
+(defn- rel [^String root ^String path]
+  (let [r (str (.getCanonicalPath (File. root)) "/")
+        p (.getCanonicalPath (File. path))]
+    (if (str/starts-with? p r) (subs p (count r)) path)))
+
+(defn- pmap-jobs
+  "f over xs on n threads, in order"
+  [n f xs]
+  (let [xs (vec xs)
+        pool (java.util.concurrent.Executors/newFixedThreadPool (max 1 n))
+        futs (mapv (fn [x] (.submit pool ^java.util.concurrent.Callable (fn [] (f x)))) xs)
+        res (mapv #(.get ^java.util.concurrent.Future %) futs)]
+    (.shutdown pool)
+    res))
+
+(defn ns-path
+  "The forms file of a namespace (SPEC §2.1): its segments munged, rs/core/num/dec2flt.ae"
+  [ns-sym]
+  (str (str/join "/" (map #(str (munge %)) (str/split (str ns-sym) #"\."))) ".ae"))
+
+(defn- dumped [dump sym]
+  (some #(when (and (seq? %) (= sym (first %))) (second %)) dump))
+
+(defn- read-pin
+  "tools/rsdump/RUSTC_VERSION's pins: {:rustc :commit :driver}"
+  [^String f]
+  (when (and f (.exists (File. f)))
+    (into {} (for [l (str/split-lines (slurp f))
+                   :let [[k v] (str/split (str/trim l) #"\s+" 2)]
+                   :when v]
+               [(keyword (if (= k "version") "rustc" k)) v]))))
+
+(defn crate-of
+  "The corpus's crate of a file (its path as rustc was given it), with the file's kind"
+  [corpus ^String file]
+  (when corpus
+    (when-let [c (first (filter #(str/starts-with? file (str (:dir %) "/")) (:crates corpus)))]
+      (let [r (subs file (inc (count (:dir c))))]
+        (assoc c :rel r
+                 :kind (cond
+                         (contains? (set (:roots c)) file) :root
+                         (contains? (set (:path-files c)) file) :path
+                         (contains? (set (:include-files c)) file) :include
+                         :else nil))))))
+
+(defn read-dump
+  "Converts one dump: {:dump :ns :out :status :error :warnings :forms}"
+  [dump-path out-file-fn corpus opts]
+  (try
+    (let [text (slurp dump-path)
+          dump (read-string (str "[" text "]"))
+          cfg (dumped dump 'rsdump/config)
+          file (:file cfg)
+          c (crate-of corpus file)
+          src (slurp (:abs cfg))
+          src-lines (vec (str/split src #"\n" -1))
+          conf (if c
+                 {:crate (:name c) :crate-type (:crate-type c) :kind (:kind c) :rel (:rel c)
+                  :corpus (:name corpus)}
+                 {:crate (get opts "--crate" "main") :crate-type (get opts "--crate-type")
+                  :rel file :ns-root (get opts "--ns-root")})
+          {:keys [ns forms warnings]} (cv/convert-file dump (assoc conf :src-lines src-lines :pin (read-pin (get opts "--pin"))))
+          ns (if-let [r (:ns-root conf)]
+               (symbol (str r "." (str/replace (str/replace file #"\.rs$" "") #"[/]" ".")))
+               ns)
+          forms (if (:ns-root conf)
+                  (assoc forms 0 (list 'ns ns (list :require ['arbace.rust :as 'rs])))
+                  forms)
+          out (out-file-fn ns)
+          ftext (wr/forms-text forms)
+          d (wr/check forms ftext)]
+      (.mkdirs (.getParentFile (File. ^String out)))
+      (spit out ftext)
+      (if d
+        {:dump dump-path :ns ns :out out :status :misread :error (pr-str d) :warnings warnings}
+        {:dump dump-path :ns ns :out out :status :ok :warnings warnings :forms (count forms)}))
+    (catch Throwable e
+      {:dump dump-path :status :error :error (or (.getMessage e) (str e))})))
+
+(defn- cmd-read [args]
+  (let [{:keys [opts args]} (parse-args args #{"--jobs" "-o" "--report" "--root" "--only" "--corpus"
+                                               "--crate" "--crate-type" "--ns-root" "--pin"})
+        jobs (Long/parseLong (get opts "--jobs" "8"))
+        out (get opts "-o" ".tmp/repr-rust/forms/files")
+        root (get opts "--root")
+        corpus (when-let [f (get opts "--corpus")] (read-string (slurp f)))
+        only (some-> (get opts "--only") re-pattern)
+        dumps (if root (files-under root ".edn") args)
+        dumps (if only (filter #(re-find only (str %)) dumps) dumps)
+        t0 (System/currentTimeMillis)
+        results (pmap-jobs jobs (fn [d]
+                                  (let [r (read-dump d (fn [ns] (str out "/" (ns-path ns))) corpus opts)]
+                                    (assoc r :file (if root (str/replace (rel root d) #"\.edn$" "") (.getName (File. ^String d))))))
+                           dumps)
+        t1 (System/currentTimeMillis)
+        ;; two files of one conversion that map to one namespace (SPEC §2.1): an error each
+        clash (set (for [[ns rs] (group-by :ns (filter :ns results)) :when (> (count rs) 1) r rs] (:dump r)))
+        results (mapv #(if (contains? clash (:dump %))
+                         (assoc % :status :error :error (str "another file of the conversion maps to the namespace " (:ns %)))
+                         %)
+                      results)
+        by (group-by :status results)
+        warnings (apply merge-with + (map :warnings results))]
+    (doseq [r results :when (not= :ok (:status r))]
+      (println (name (:status r)) (:dump r) (:error r)))
+    (println (format "repr-rust read: %d dumps, %d converted, %d misread, %d failed, %d forms, in %.1f s"
+                     (count results) (count (:ok by)) (count (:misread by)) (count (:error by))
+                     (reduce + (keep :forms results)) (/ (- t1 t0) 1000.0)))
+    (doseq [[k n] (sort-by (comp - val) warnings)] (println "warning" (pr-str k) n))
+    (when-let [rep (get opts "--report")]
+      (spit rep (with-out-str
+                  (prn {:dumps (count results) :ok (count (:ok by)) :misread (count (:misread by))
+                        :errors (count (:error by)) :seconds (/ (- t1 t0) 1000.0)
+                        :forms (reduce + (keep :forms results))
+                        :warnings warnings
+                        :files (into (sorted-map) (for [r results] [(:file r)
+                                                                    (cond-> {:status (:status r)}
+                                                                      (:ns r) (assoc :ns (str (:ns r)) :out (:out r))
+                                                                      (:error r) (assoc :error (:error r)))]))}))))
+    (if (= (count results) (count (:ok by))) 0 1)))
+
+(defn- cmd-print [args]
+  (let [{:keys [opts args]} (parse-args args #{"--jobs" "-o" "--root" "--only"})
+        jobs (Long/parseLong (get opts "--jobs" "8"))
+        out (get opts "-o" ".tmp/repr-rust/printed")
+        root (get opts "--root")
+        only (some-> (get opts "--only") re-pattern)
+        files (if root (files-under root ".ae") args)
+        files (if only (filter #(re-find only (str %)) files) files)
+        t0 (System/currentTimeMillis)
+        results (pmap-jobs jobs
+                           (fn [f]
+                             (try
+                               (let [forms (wr/read-all (slurp f))
+                                     {:keys [path text]} (binding [pr/*warnings* (atom {})] (pr/print-file forms))
+                                     o (str out "/" path)]
+                                 (.mkdirs (.getParentFile (File. ^String o)))
+                                 (spit o text)
+                                 {:file f :status :ok :out o})
+                               (catch Throwable e
+                                 {:file f :status :error :error (or (.getMessage e) (str e))})))
+                           files)
+        t1 (System/currentTimeMillis)
+        bad (remove #(= :ok (:status %)) results)]
+    (doseq [r bad] (println "error" (:file r) (:error r)))
+    (println (format "repr-rust print: %d forms files, %d printed, %d failed, in %.1f s"
+                     (count results) (- (count results) (count bad)) (count bad) (/ (- t1 t0) 1000.0)))
+    (if (empty? bad) 0 1)))
+
+;;; The round trip's comparison
+
+(defn- read-lines-file [^String f]
+  (when (.exists (File. f)) (str/split-lines (slurp f))))
+
+(defn- first-line-diff
+  "The first difference between two line vectors: [index a b]"
+  [a b]
+  (let [n (max (count a) (count b))]
+    (loop [i 0]
+      (when (< i n)
+        (let [x (get a i) y (get b i)]
+          (if (= x y) (recur (inc i)) [i x y]))))))
+
+(defn- context-of [lines i]
+  (str/join "\n" (subvec lines (max 0 (- i 8)) (min (count lines) (+ i 4)))))
+
+(defn compare-file
+  "The tree level of one file: {:status :ok} or {:level :tree|:lines :status ...}"
+  [orig-tree cand-tree orig-lines cand-lines]
+  (let [ot (some-> (read-lines-file orig-tree) vec)
+        ct (some-> (read-lines-file cand-tree) vec)
+        ol (some-> (read-lines-file orig-lines) vec)
+        cl (some-> (read-lines-file cand-lines) vec)]
+    (cond
+      (nil? ot) {:level :tree :status :no-original}
+      (str/starts-with? (or (first ot) "") "rsdump/error") {:level :tree :status :original-fails-to-parse :detail (first ot)}
+      (nil? ct) {:level :tree :status :not-printed}
+      (str/starts-with? (or (first ct) "") "rsdump/error") {:level :tree :status :printed-fails-to-parse :detail (first ct)}
+      (not= ot ct) (let [[i a b] (first-line-diff ot ct)]
+                     {:level :tree :status :differs :at i :detail (context-of ot i) :cand (context-of ct i)})
+      (not= ol cl) (let [[i a b] (first-line-diff ol cl)
+                         n (count (filter (fn [[x y]] (not= x y)) (map vector ol cl)))]
+                     {:level :lines :status :differs :at i :orig a :cand b :count n})
+      :else {:status :ok :spans (count ol)})))
+
+(defn- cmd-compare [args]
+  (let [{:keys [opts]} (parse-args args #{"--corpus" "--orig" "--cand" "--known" "--report" "--forms-report" "--only" "--times"})
+        corpus (read-string (slurp (get opts "--corpus")))
+        orig (get opts "--orig")
+        cand (get opts "--cand")
+        known-file (get opts "--known")
+        known (if (and known-file (.exists (File. ^String known-file))) (read-string (slurp known-file)) {})
+        only (some-> (get opts "--only") re-pattern)
+        forms-report (when-let [f (get opts "--forms-report")] (when (.exists (File. ^String f)) (read-string (slurp f))))
+        files (for [c (:crates corpus) f (:files c)
+                    :when (or (nil? only) (re-find only f))]
+                f)
+        results (pmap-jobs 16
+                           (fn [f]
+                             (let [conv (get-in forms-report [:files f])]
+                               [f (if (and conv (not= :ok (:status conv)))
+                                    {:level :convert :status (:status conv) :detail (:error conv)}
+                                    (compare-file (str orig "/" f ".tree") (str cand ".trees/" f ".tree")
+                                                  (str orig "/" f ".lines") (str cand ".trees/" f ".lines")))]))
+                           files)
+        ok (filter #(= :ok (:status (second %))) results)
+        failing (remove #(= :ok (:status (second %))) results)
+        unexpected (remove #(contains? known (first %)) failing)
+        fixed (filter #(and (contains? known (first %)) (= :ok (:status (second %)))) results)
+        by-level (frequencies (map (comp :level second) failing))]
+    (when (get opts "--prune")
+      ;; the trees of the files found equal removed (the scratch stays small)
+      (doseq [[f _] ok
+              x [(str orig "/" f ".tree") (str orig "/" f ".lines") (str cand ".trees/" f ".tree") (str cand ".trees/" f ".lines")]]
+        (.delete (File. ^String x))))
+    (doseq [[i [k r]] (map-indexed vector unexpected)]
+      (println "DIFFERS" k (pr-str (dissoc r :detail :cand)))
+      (when (< i 10)
+        (when (:detail r) (println "  original:\n" (:detail r)))
+        (when (:cand r) (println "  printed:\n" (:cand r)))))
+    (doseq [[k _] fixed] (println "FIXED (listed as known, no longer differs)" k))
+    (doseq [[k r] failing :when (contains? known k)] (println "known" k (pr-str (select-keys r [:level :status])) "--" (get known k)))
+    (println (format "repr-rust roundtrip (tree level): %d files, %d equal (trees and lines; %d spans), %d differ (%s), %d known, %d unexpected, %d fixed%s"
+                     (count results) (count ok) (reduce + (keep (comp :spans second) ok)) (count failing) (pr-str by-level)
+                     (count (filter #(contains? known (first %)) failing)) (count unexpected) (count fixed)
+                     (if-let [t (get opts "--times")] (str "; seconds: " t) "")))
+    (when-let [rep (get opts "--report")]
+      (spit rep (with-out-str
+                  (prn {:files (count results) :equal (count ok) :differ (count failing)
+                        :spans (reduce + (keep (comp :spans second) ok))
+                        :by-level by-level :unexpected (mapv first unexpected) :fixed (mapv first fixed)
+                        :times (get opts "--times")
+                        :results (into (sorted-map) (for [[k r] results] [k (dissoc r :detail :cand)]))}))))
+    (if (and (empty? unexpected) (empty? fixed)) 0 1)))
+
+(defn -main [& args]
+  (let [[verb & more] args
+        status (try
+                 (case verb
+                   "read" (cmd-read more)
+                   "print" (cmd-print more)
+                   "compare" (cmd-compare more)
+                   (do (println "usage: -m arbace.repr.rust read|print|compare ...") 2))
+                 (catch Throwable e
+                   (.printStackTrace e)
+                   1))]
+    (shutdown-agents)
+    (flush)
+    (System/exit status)))

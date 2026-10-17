@@ -1,0 +1,58 @@
+;; repr/rust's corpus file (doc/rust/SPEC.md §11.4, RS14; doc/rust/RUST-NOTES.md, "RR1"): prints
+;; test/rust/corpus-rustc-1.99.1.edn from the extracted rust-src apk's library/ directory.
+;; Usage: arbace test/rust/corpus_make.ae LIBRARY-DIR
+;; For each of std's five crates (core, alloc, std, proc_macro, test; edition 2024 by their
+;; Cargo.toml, a library each): every .rs file under CRATE/src, sorted; the crate roots (src/lib.rs
+;; and src/lib.miri.rs, miri's alternative root); the files a #[path = "..."] attribute or a
+;; cfg_attr(..., path = "...") names (resolved against the naming file's directory, the rule for a
+;; mod declared at a file's top level); the .rs files include!d. Paths are relative to library/,
+;; as rustc is given them.
+
+(require (quote [arbace.string :as s]))
+(import (quote [java.io File]))
+
+(defn rs-files [^File d]
+  (->> (file-seq d) (filter #(and (.isFile ^File %) (s/ends-with? (.getName ^File %) ".rs")))
+       (map #(.getPath ^File %)) sort))
+
+(defn norm [^String p]
+  (let [parts (reduce (fn [acc seg] (cond (= seg "..") (pop acc) (= seg ".") acc :else (conj acc seg)))
+                      [] (s/split p #"/"))]
+    (s/join "/" parts)))
+
+(defn dir-of [^String p] (subs p 0 (.lastIndexOf p "/")))
+
+(let [lib (first *command-line-args*)
+      crates ["core" "alloc" "std" "proc_macro" "test"]
+      rel (fn [^String p] (subs p (inc (count lib))))
+      all (into {} (for [c crates] [c (mapv rel (rs-files (File. (str lib "/" c "/src"))))]))
+      every (set (apply concat (vals all)))
+      named (fn [pat]
+              (sort (distinct (for [c crates f (get all c)
+                                    m (re-seq pat (slurp (str lib "/" f)))
+                                    :let [t (norm (str (dir-of f) "/" (second m)))]
+                                    :when (contains? every t)]
+                                t))))
+      path-files (set (named #"(?m)^\s*(?:#\[\s*path\s*=|(?:[^/\n]*\bcfg_attr\([^\n]*,\s*)?path\s*=)\s*\"([^\"]+\.rs)\""))
+      include-files (set (named #"(?m)^\s*include!\(\s*\"([^\"]+\.rs)\"\s*\)"))]
+  (println ";; repr/rust's first corpus (doc/rust/SPEC.md §11.4, RS14; doc/rust/RUST-NOTES.md): std's five")
+  (println ";; crates of the pinned rustc, from Alpine's rust-src-1.99.1-r0 (its SHA-256 below, as")
+  (println ";; tools/rsdump/apks.sha256 pins it), extracted into .tmp/repr-rust/apks/rust-src/; paths relative")
+  (println ";; to its usr/src/rust/library/, as rustc is given them. Made by test/rust/corpus_make.ae.")
+  (println "{:name \"rustc-1.99.1\"")
+  (println " :apk {:file \"rust-src-1.99.1-r0.apk\" :sha256 \"0849c88c92333bdbe4f1867872db3499f33100851989a0760eb79685a4936cfb\"")
+  (println "       :root \"usr/src/rust/library\"}")
+  (println " :crates")
+  (println " [")
+  (doseq [c crates]
+    (let [fs (get all c)
+          roots (filter #(contains? #{(str c "/src/lib.rs") (str c "/src/lib.miri.rs")} %) fs)]
+      (println (str "  {:name " c " :dir \"" c "\" :edition 2024 :crate-type lib"))
+      (println (str "   :roots " (pr-str (vec roots))))
+      (println (str "   :path-files " (pr-str (vec (filter #(s/starts-with? % (str c "/")) (sort path-files))))))
+      (println (str "   :include-files " (pr-str (vec (filter #(s/starts-with? % (str c "/")) (sort include-files))))))
+      (println (str "   :files ;; " (count fs)))
+      (println "   [")
+      (doseq [f fs] (println (str "    " (pr-str f))))
+      (println "   ]}")))
+  (println " ]}"))
