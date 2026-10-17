@@ -94,9 +94,12 @@ The current state of the work. This file is rewritten as things change. For the 
 
 ## Next
 
-- The naming survey written (doc/NAMING-SURVEY.md): proposals N1-N13 open for the user.
-- After the naming is settled (the user, 2026-10-17: "Create jaf print after the naming debate
-  settled"): Java's bridge printing back, class forms → Java source, with a round trip like
+- Running: the rename (decided 2026-10-17, doc/NAMING-SURVEY.md, "Decided"): j2a → `repr/java`
+  (`arbace.repr.java`, `bin/repr-java`), g2a → `repr/go` (`arbace.repr.go`, `bin/repr-go`), its
+  build → `arbace.build.go`, `G2A_GOROOT` → `ARBACE_GOROOT`; a2g and c2a unchanged; then a
+  re-seed.
+- After the rename (the user, 2026-10-17: "Create jaf print after the naming debate settled"):
+  `repr/java print`, Java's bridge printing back, class forms → Java source, with a round trip like
   g2a's (Java → forms → Java → forms, the two forms equal; the text level as g2a's `:full`).
 - The survey of Futamura's projections written (doc/FUTAMURA-SURVEY.md; its experiment on the
   local branch `futamura-survey`): proposals F1-F11 open for the user. Measured there: `fib`
@@ -105,19 +108,6 @@ The current state of the work. This file is rewritten as things change. For the 
 - Smaller: the box's checks on the Mac on macOS 26.
 
 ## Later
-
-- The translators' names (the user, 2026-10-16: "\"g2a\" name is unfortunate and misleading,
-  maybe \"g2g\" would be better, or how to name these converters/compilers?"). g2a works both
-  ways between Go and Go forms (Go in Arbace's syntax), a syntax bridge, while the `x2a` names
-  read as translations into Arbace; a2g turns class forms into Go forms. To survey: a scheme
-  naming each forms dialect (class forms, Go forms) and each tool by what it does (the 2026-10-11
-  renaming from j2c, g2c, c2g is the precedent; CLAUDE.md, the frozen branches and the dated
-  records keep the names of their time).
-  The user's refinement (2026-10-16): translation is always between forms, so a language's
-  bridge to its forms is one tool with two verbs (for Java "jaf read / jaf print" in place of
-  j2a or j2c; for Go the same shape in place of g2a), and the translators run between forms
-  dialects only; the 2026-10-11 renaming came from the letter `c`, the start of both
-  "clojure" and "classes".
 
 - The standalone Arbace: no Java binary compatibility, with Java at the source level through j2a.
   The language is Clojure plus class forms, and later forms for Go. The goal is a

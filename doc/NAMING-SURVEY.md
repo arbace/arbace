@@ -457,3 +457,25 @@ program's names moved once to a prefix tied to no tool; then a re-seed. The prop
 - `arbace/lang/RT.ae` (`toolSource`), `bin/lib/frozen.bash`, `bin/lib/version.bash`,
   `arbace/j2a/names.ae` (the jdk headers), the scripts' headers in `bin/`.
 - The seed `seed/arbace-seed-go.tar.xz` at `a8431399` (`SEED.edn`: printed from `51300c07`).
+
+## Decided (2026-10-17, the user)
+
+The user, in place of the survey's `jaf`/`gaf`: "i prefer something, like \"repr/java\" and
+\"repr/go\", where \"repr\" stands fo read/print and prefixes \"representation\"". Decided:
+
+- **The bridges** are the `repr` family: `repr/java` (today j2a) and `repr/go` (today g2a), as
+  spoken and in the docs; namespaces `arbace.repr.java` and `arbace.repr.go`; two commands,
+  `bin/repr-java` and `bin/repr-go`, each with the verbs `read` and `print` (and the bridge's
+  checks beside them).
+- **The translators keep their names:** a2g (class forms → Go forms) and c2a (Clojure →
+  Arbace); so N6 and N7 are not taken, and the printed program's `a2g_*` names (N9) stay.
+- **g2a's `build`** (running `go build` on a printed module with its overlay) is not a
+  representation: it becomes its own namespace, `arbace.build.go`.
+- **Environment variables:** `G2A_GOROOT` becomes `ARBACE_GOROOT` (every build's Go); the
+  bridges' own become `REPR_GO_*` and `REPR_JAVA_*`; a2g's and c2a's are unchanged.
+- **No shims;** a guard stops a script with a message when `G2A_GOROOT` is set and
+  `ARBACE_GOROOT` is not.
+- **All at once** on a branch, as the 2026-10-11 rename (a `git mv` commit, a content commit,
+  the regenerated records, the gate, the fixpoint), then one re-seed; then `repr/java print`.
+- What keeps the old names: the frozen branches, the tags, the dated journal entries, G2C-SURVEY,
+  the provenance lines.

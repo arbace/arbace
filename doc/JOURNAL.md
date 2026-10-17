@@ -485,3 +485,15 @@ paths (F3), no initialization guards for classes initialized at start (F4), guar
 linking (F5), primitive fns then unboxed workers (F6), a `defnode` prototype (F7), the class
 forms' pair kept with F2 (F8), closures later (F9), inline caches in the REPL (F10), the records
 (F11).
+
+## 2026-10-17: the bridges' names settled: repr/java, repr/go (the user)
+
+The user: "i prefer something, like \"repr/java\" and \"repr/go\", where \"repr\" stands fo
+read/print and prefixes \"representation\"". Decided with it (doc/NAMING-SURVEY.md, "Decided"):
+namespaces `arbace.repr.java` (j2a) and `arbace.repr.go` (g2a), commands `bin/repr-java` and
+`bin/repr-go` with `read` and `print` (alternative: one command `bin/repr java|go`); a2g and c2a
+keep their names (alternatives: a parallel family `arbace.trans.*`, or the survey's `cf2gf`,
+`clj2ae`); g2a's build as `arbace.build.go`; `G2A_GOROOT` → `ARBACE_GOROOT`, the bridges'
+variables `REPR_GO_*`, `REPR_JAVA_*`; no shims, a guard for the old `G2A_GOROOT`; all at once,
+then one re-seed, then `repr/java print` (the user, earlier: "Create jaf print after the naming
+debate settled").
