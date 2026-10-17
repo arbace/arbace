@@ -35,17 +35,18 @@
          own-form decl-form-of tvar-throws? tvar-target? target-text same-form? compound assign-text
          let-temps subst expand-temps postfix-text fallback-expr boxing-call? non-wrapper-ref? unbox-branches
          cond-text expr-form? if-instance-text intersection-fn-cast ex binding-mods pattern-text indent
-         block simple-statement? value-stmt java-label fresh-label assigned? default-value? tag-only-without-init?
-         int-literalish? untagged-jtype local-type-text lambda-use? decl-line tail-jump? body-lines stmts
-         rebinding? cond-leaves assigns-only-init? assign-chain-lines let-decls let-lines single-statement? if-else-lines
-         has-postfix-temp? calls? hoistable-temp? if-lines if-instance-lines push-loop break-to break-lines
-         continue-lines try-lines resources-text pinned-cands ctor-call-lines letclass-lines st loop-jumps
-         jump-form? loop-tail labeled update-text recur-loop-lines empty-loop-lines for-each-coll-text loop-lines
-         match-exception-default? switch-parts const-label-text pattern-label? case-head arm-lines switch-lines switch-expr-text
-         ns-sym fn-env stmt-expr-text fi-cast-text lambda-text method-ref-text anon-text modifiers-text
-         javadoc member-classes class-frame-env param-text params-text receiver-param-text split-opts method-lines
-         ctor-lines field-lines constants-lines member-lines class-body-lines module-lines java-name out-path
-         all-class-names java-text ae-files load-units print-units)
+         block simple-statement? value-stmt java-label fresh-label assigned? default-value? da-flow
+         assigning-chain? definitely-assigned? tag-only-without-init? int-literalish? untagged-jtype local-type-text lambda-use? decl-line
+         tail-jump? uses-of fold-increment body-lines stmts rebinding? cond-leaves assigns-only-init?
+         assign-chain-lines let-decls let-lines single-statement? if-else-lines has-postfix-temp? calls? hoistable-temp?
+         if-lines if-instance-lines push-loop break-to break-lines continue-lines try-lines resources-text
+         pinned-cands ctor-call-lines letclass-lines st loop-jumps jump-form? loop-tail labeled
+         update-text recur-loop-lines empty-loop-lines for-each-coll-text loop-lines match-exception-default? switch-parts const-label-text
+         pattern-label? case-head arm-lines switch-lines switch-expr-text ns-sym fn-env stmt-expr-text
+         fi-cast-text lambda-text method-ref-text anon-text modifiers-text javadoc member-classes class-frame-env
+         param-text params-text receiver-param-text split-opts method-lines ctor-lines field-lines constants-lines
+         member-lines class-body-lines module-lines java-name out-path all-class-names java-text ae-files
+         load-units print-units)
 
 ;;; ------------------------------------------------------------------------------------------
 ;;; Reading converted files
@@ -102,6 +103,7 @@
                    :when (and (= 1 (count kinds)) (not (re-matches #"-?[0-9]+" (first kinds)))
                               (not (re-matches #"-?0" (first kinds))))]
                [v (first kinds)]))))
+
 
 (def ^:dynamic *radix* "The radix map of the file being printed." {})
 
@@ -1852,6 +1854,88 @@
 (defn- default-value? [x]
   (or (= 0 x) (false? x) (nil? x) (= 0.0 x) (= '(float 0.0) x) (= '(unchecked-char 0) x)))
 
+(defn- da-flow
+  "Definite assignment of local `x` through form `f` (JLS 16, as far as the forms show it):
+  [ok? assigned?] given `a?` assigned before; ok? false when `f` may read `x` unassigned."
+  [x f a?]
+  (letfn [(seq-flow [fs a?] (reduce (fn [[ok a] g] (if ok (da-flow x g a) (reduced [false a]))) [true a?] fs))
+          (jump? [g] (and (seq? g) (#{"return" "throw" "break" "continue" "recur"} (str (head g)))))]
+    (cond
+      (= f x) [a? a?]
+      (not (coll? f)) [true a?]
+      (vector? f) (seq-flow f a?)
+      (map? f) [true a?]
+      (not (seq? f)) [true a?]
+      :else
+      (let [hn (str (head f)) args (rest f)]
+        (case hn
+          "set!" (let [[p v] args
+                       [ok a] (da-flow x v a?)]
+                   (if (= p x) [ok true] (let [[ok2 a2] (da-flow x p a)] [(and ok ok2) a2])))
+          ("if" "if-not") (let [[c t e] args
+                                [ok a] (da-flow x c a?)
+                                [ok1 a1] (da-flow x t a)
+                                [ok2 a2] (da-flow x e a)]
+                            [(and ok ok1 ok2) (and (or a1 (jump? t)) (or a2 (jump? e)))])
+          ("when" "when-not") (let [[c & body] args
+                                    [ok a] (da-flow x c a?)
+                                    [ok1 _] (seq-flow body a)]
+                                [(and ok ok1) a])
+          "cond" (let [pairs (partition 2 args)]
+                   (loop [[[c v] & more] pairs a a? ok true outs []]
+                     (if (nil? c)
+                       [ok (and (seq outs) (= :else (first (last pairs))) (every? true? outs))]
+                       (let [[okc ac] (if (= :else c) [true a] (da-flow x c a))
+                             [okv av] (da-flow x v ac)]
+                         (recur more ac (and ok okc okv) (conj outs (or av (jump? v))))))))
+          ("and" "or") (let [[ok a] (da-flow x (first args) a?)
+                             [ok2 _] (seq-flow (rest args) a)]
+                         [(and ok ok2) a])
+          ("let" "loop") (let [[bv & body] args
+                               [ok a] (seq-flow (take-nth 2 (rest bv)) a?)]
+                           (if (= hn "loop")
+                             (let [[ok2 _] (seq-flow body a)] [(and ok ok2) a])
+                             (let [[ok2 a2] (seq-flow body a)] [(and ok ok2) a2])))
+          ("while" "for-each") (let [[c & body] args
+                                     [ok a] (if (= hn "while") (da-flow x c a?) (da-flow x (second c) a?))
+                                     [ok2 _] (seq-flow body a)]
+                                 [(and ok ok2) a])
+          ("lambda" "anon" "letclass" "method-ref") (let [[ok _] (seq-flow args a?)] [ok a?])
+          "try" (let [[body clauses] (split-with #(not (or (is? % 'catch) (is? % 'finally))) args)
+                      [ok a] (seq-flow body a?)
+                      cs (map (fn [c] (da-flow x (apply list 'do (drop 3 c)) a?)) (filter #(is? % 'catch) clauses))
+                      fin (first (filter #(is? % 'finally) clauses))
+                      [okf af] (if fin (da-flow x (apply list 'do (rest fin)) a?) [true false])]
+                  [(and ok okf (every? first cs)) (or af (and a (every? second cs)))])
+          "switch" (let [[sel & clauses] args
+                         [ok a] (da-flow x sel a?)
+                         n (count clauses)
+                         bodies (concat (map second (partition 2 (if (odd? n) (butlast clauses) clauses)))
+                                        (when (odd? n) [(last clauses)]))
+                         rs (map #(da-flow x % a) bodies)]
+                     [(and ok (every? first rs)) (and (odd? n) (every? identity (map (fn [[_ a2] b] (or a2 (jump? b))) rs bodies)))])
+          ("quote") [true a?]
+          (seq-flow args a?))))))
+
+(defn- assigning-chain?
+  "Is form `f` an if chain whose every branch is just (set! x e), with a final else (which the
+  converter folds into x's initializer when x is declared without one, SPEC §5.3)?"
+  [x f]
+  (letfn [(single [b] (let [b (if (and (is? b 'do) (= 2 (count b))) (second b) b)]
+                        (and (is? b 'set!) (= x (second b)))))]
+    (cond
+      (is? f 'if) (let [[_ _ a b] f] (and (= 4 (count f)) (single a) (or (single b) (assigning-chain? x b))))
+      (is? f 'cond) (let [pairs (partition 2 (rest f))]
+                      (and (= :else (first (last pairs))) (every? (comp single second) pairs)))
+      (is? f 'if-instance) (let [[_ _ a b] f] (and (single a) (or (single b) (assigning-chain? x b))))
+      :else false)))
+
+(defn- definitely-assigned?
+  "Is local `x` assigned before every read in forms `body` (so that Java may declare it without
+  initializer)?"
+  [x body]
+  (first (da-flow x (apply list 'do body) false)))
+
 (defn- tag-only-without-init?
   "Is local `s`'s tag one the converter writes only for a local declared without initializer?
   With Java's default value as initializer, a char, boolean, long, float or double local would be
@@ -1938,11 +2022,55 @@
       "cond" (some tail-jump? (take-nth 2 (drop 2 x)))
       false)))
 
+(defn- uses-of
+  "[all unconditional] occurrences of symbol `v` in form `x` (unconditional: evaluated whenever
+  `x` is, as the converter's hoistable-increments sees them)."
+  [v x]
+  (let [all (volatile! 0) unc (volatile! 0)]
+    (letfn [(walk [y cond?]
+              (cond
+                (= y v) (do (vswap! all inc) (when-not cond? (vswap! unc inc)))
+                (seq? y)
+                (let [hn (str (head y))]
+                  (cond
+                    (#{"lambda" "anon" "letclass" "method-ref" "switch" "label"} hn) (run! #(walk % true) (rest y))
+                    (#{"if" "if-not" "when" "when-not" "cond" "if-instance" "when-instance"} hn)
+                    (do (walk (second y) cond?) (run! #(walk % true) (drop 2 y)))
+                    (#{"and" "or"} hn) (do (walk (second y) cond?) (run! #(walk % true) (drop 2 y)))
+                    :else (run! #(walk % cond?) y)))
+                (vector? y) (run! #(walk % cond?) y)
+                :else nil))]
+      (walk x false))
+    [@all @unc]))
+
+(defn- fold-increment
+  "For statement `s` followed by `nxt`, (set! v (unchecked-inc-int v)): `s` with its one use of v
+  as v++ (the converter moves such an increment after the statement, SPEC §7.6), or nil."
+  [env s nxt]
+  (when (and (is? nxt 'set!) (symbol? (second nxt)) (seq? s)
+             (or (is? s 'set!) (is? s 'aset)
+                 (let [hn (str (head s))] (and (str/starts-with? hn ".") (not (str/starts-with? hn ".-"))))))
+    (let [v (second nxt)
+          [op _] (compound env v (nth nxt 2))]
+      (when (and (#{"++" "--"} op) (local? env v)
+                 (= [1 1] (uses-of v s))
+                 ;; not the assigned variable itself
+                 (not (and (is? s 'set!) (= v (second s)))))
+        (subst {v [:postfix-of v nxt]} s)))))
+
 (defn body-lines
   "The forms `xs` as statements, the last one in `ctx`; `more?`: more statements follow them."
   ([env xs ctx] (body-lines env xs ctx false))
   ([env xs ctx more?]
   (let [xs (vec (mapcat forms-of xs))
+        xs (if true
+             (loop [i 0 out []]
+               (cond
+                 (>= i (count xs)) out
+                 (and (< (inc i) (count xs)) (fold-increment env (xs i) (xs (inc i))))
+                 (recur (+ i 2) (conj out (fold-increment env (xs i) (xs (inc i)))))
+                 :else (recur (inc i) (conj out (xs i)))))
+             xs)
         n (count xs)]
     (vec (mapcat (fn [i x]
                    (let [last? (and (= i (dec n)) (not more?))
@@ -2048,7 +2176,9 @@
             ;; without initializer
             no-init? (and (:mutable m) (default-value? init) (tag-of s)
                           (or (tag-only-without-init? s init)
-                              (not (assigned? s (concat (map second more) body)))))
+                              (not (assigned? s (concat (map second more) body)))
+                              (and (definitely-assigned? s (concat (map second more) body))
+                                   (not (and (empty? more) (assigning-chain? s (first body)))))))
             line (decl-line env s init (not no-init?) (concat (map second more) body))]
         (recur (add-local env s :jt (when-not (tag-of s) (untagged-jtype env init))) more (conj lines line)))))))
 
@@ -2110,13 +2240,15 @@
                             :else nil))]
          (every? (fn [t] (let [g (last (second t))] (or (local? env g) (not (calls? x))))) (temps x)))))
 
+
 (defn- if-lines [env c a b ctx]
-  (if (and (#{:return :yield} ctx) (or (hoistable-temp? env a) (hoistable-temp? env b))
+  (if (and (#{:return :yield} ctx)
+           (or (hoistable-temp? env a) (hoistable-temp? env b))
            (expr-form? env (list 'if c a b)))
     ;; a branch value with a postfix increment, x[i++]: in a ?: (an if's return would have its
     ;; increment hoisted before it, SPEC §7.6)
     (value-stmt env (list 'if c a b) ctx)
-  (if (and (nil? b) (#{:return :yield} ctx) (is? c 'some?))
+  (if (and (nil? b) (#{:return :yield} ctx) (is? c 'some?) (:inverted-when env))
     ;; (when (some? x) a) is the converter's simplification of (if (nil? x) nil a), Java's
     ;; if (x == null) return null; written so
     (if-lines env (list 'nil? (second c)) nil a ctx)
@@ -2224,7 +2356,9 @@
 (defn st
   "Form `x` as statement lines in `ctx`."
   [env x ctx]
-  (if-not (seq? x)
+  (if (or (not (seq? x))
+          ;; a hinted conditional value: Java's cast of a ?: ((R) (c ? a : b))
+          (and (#{:return :yield} ctx) (meta-tag x) (not= 'void (meta-tag x)) (expr-form? env (strip-tag x))))
     (value-stmt env x ctx)
     (let [h (head x)
           hn (when (and h (nil? (namespace h))) (name h))]
@@ -2234,7 +2368,12 @@
         "letclass" (letclass-lines env x ctx)
         "if" (let [[_ c a b] x] (if-lines env c a b ctx))
         "if-not" (let [[_ c a b] x] (if-lines env (list 'not c) a b ctx))
-        "when" (let [[_ c & body] x] (if-lines env c (apply list 'do body) nil ctx))
+        "when" (let [[w c & body] x
+                     ;; (arbace.core/when (some? x) ...) without a local named when in scope: the
+                     ;; converter's simplification of (if (nil? x) nil ...), Java's if (x == null)
+                     ;; return null; ... (an if-else would give it the head of its scope)
+                     inv (and (= "arbace.core" (namespace w)) (not (local? env 'when)) (not (contains? (:fields env) "when")))]
+                 (if-lines (assoc env :inverted-when inv) c (apply list 'do body) nil ctx))
         "when-not" (let [[_ c & body] x]
                      (if (#{:return :yield} ctx)
                        (if-lines env c nil (apply list 'do body) ctx)
@@ -2423,8 +2562,9 @@
         raw? (or (is? coll 'cast)
                  ;; a call on a receiver declared raw (a generic one gives a generic result)
                  (and (seq? coll) (str/starts-with? (str (head coll)) ".") (not (str/starts-with? (str (head coll)) ".-"))
-                      (symbol? (second coll))
-                      (let [df (decl-form-of env (second coll))] (and df (not (seq? df)))))
+                      (or (and (is? (second coll) 'cast) (symbol? (second (second coll))))
+                          (and (symbol? (second coll))
+                               (let [df (decl-form-of env (second coll))] (and df (not (seq? df)))))))
                  (and (symbol? coll) (let [lt (or (:tag (get (:locals env) (name coll))) (tag-of coll))]
                                        (or (nil? lt) (symbol? lt)))))]
     (if (and ct (not (str/ends-with? ct "[]")) (generic1? ct) raw?)
