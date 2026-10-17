@@ -8,12 +8,13 @@
         dump of mode :full (hsdump dump --full) to forms of mode :full (SPEC §7.2,
         arbace.repr.haskell.full), the full layout's tokens checked against the source's.
         With --root, the dumps are ROOT/PKG/FILE.edn (bin/repr-haskell's corpus layout).
-    print [--jobs N] [-o DIR] [--layout braces|full] (--root DIR | FORMS.ae...)
+    print [--jobs N] [-o DIR] [--layout braces|layout|full] (--root DIR | FORMS.ae...)
         the printer (SPEC §7.4): each forms file to DIR/[PKG/]FILE, FILE its hs/module's :file;
         forms of mode :full in the full layout (the original text, byte for byte), others (and
-        with --layout braces any) in the braces layout.
+        with --layout braces any) in the braces layout; with --layout layout any in the layout
+        layout (Haskell's layout rule, R4).
     compare --corpus FILE --orig DIR --cand DIR --known FILE --report FILE [--forms-report FILE]
-            [--only REGEX] [--times TEXT]
+            [--only REGEX] [--times TEXT] [--label TEXT]
         the round trip's tree level (SPEC §9.2): for each module of the corpus, the helper's tree
         and lines of the original (ORIG/PKG/FILE.tree, .lines) against the printed module's
         (CAND/PKG.trees/FILE.tree, .lines); the known differences FILE (a map from PKG/FILE to its
@@ -25,12 +26,14 @@
         module view (VIEWS/PKG/FILE.view), byte for byte; then the helper's trees in mode :full
         and lines of both (TREES/orig/PKG/FILE.tree, .lines; TREES/cand/...).
     compare-iface --corpus FILE --orig DIR --cand DIR --printed DIR --builds DIR --known FILE
-            --report FILE [--mode lines|full] [--only REGEX] [--times TEXT] [--prune]
+            --report FILE [--mode lines|full] [--only REGEX] [--times TEXT] [--prune [--keep-orig]]
+            [--side NAME] [--label TEXT]
         the round trip's interface level (SPEC §9.3): for each converted module, ghc --show-iface
         of its original's interface (ORIG/PKG/M.iface) against its printed module's (CAND/PKG/M.iface),
         compared after normalize-iface (mode :lines by default); PRINTED holds the printed modules,
-        BUILDS the build logs (BUILDS/cand/PKG.build.log), for a module that did not compile;
-        --prune removes the texts of the modules found equal."
+        BUILDS the build logs (BUILDS/SIDE/PKG.build.log, SIDE cand by default), for a module that
+        did not compile; --prune removes the texts of the modules found equal (--keep-orig: the
+        printed side's only, for a second comparison against the same originals)."
   (:require [arbace.repr.haskell.convert :as cv]
             [arbace.repr.haskell.full :as fl]
             [arbace.repr.haskell.write :as wr]
@@ -161,8 +164,8 @@
   (let [{:keys [opts args]} (parse-args args #{"--jobs" "-o" "--root" "--only" "--layout"})
         jobs (Long/parseLong (get opts "--jobs" "8"))
         layout (some-> (get opts "--layout") keyword)
-        _ (when-not (contains? #{nil :braces :full} layout)
-            (throw (ex-info (str "repr-haskell print: --layout braces|full, not " (name layout)) {})))
+        _ (when-not (contains? #{nil :braces :layout :full} layout)
+            (throw (ex-info (str "repr-haskell print: --layout braces|layout|full, not " (name layout)) {})))
         out (get opts "-o" ".tmp/repr-haskell/printed")
         root (get opts "--root")
         only (some-> (get opts "--only") re-pattern)
@@ -225,7 +228,7 @@
       :else {:status :ok})))
 
 (defn- cmd-compare [args]
-  (let [{:keys [opts]} (parse-args args #{"--corpus" "--orig" "--cand" "--known" "--report" "--forms-report" "--only" "--times"})
+  (let [{:keys [opts]} (parse-args args #{"--corpus" "--orig" "--cand" "--known" "--report" "--forms-report" "--only" "--times" "--label"})
         corpus (read-string (slurp (get opts "--corpus")))
         orig (get opts "--orig")
         cand (get opts "--cand")
@@ -256,8 +259,8 @@
       (when (:cand r) (println "  printed:\n" (:cand r))))
     (doseq [[k _] fixed] (println "FIXED (listed as known, no longer differs)" k))
     (doseq [[k r] failing :when (contains? known k)] (println "known" k (pr-str (select-keys r [:level :status])) "--" (get known k)))
-    (println (format "repr-haskell roundtrip (tree level): %d modules, %d equal (trees and lines), %d differ (%s), %d known, %d unexpected, %d fixed%s"
-                     (count results) (count ok) (count failing) (pr-str by-level)
+    (println (format "repr-haskell roundtrip (tree level%s): %d modules, %d equal (trees and lines), %d differ (%s), %d known, %d unexpected, %d fixed%s"
+                     (if-let [l (get opts "--label")] (str ", " l) "") (count results) (count ok) (count failing) (pr-str by-level)
                      (count (filter #(contains? known (first %)) failing)) (count unexpected) (count fixed)
                      (if-let [t (get opts "--times")] (str "; seconds: " t) "")))
     (when-let [rep (get opts "--report")]
@@ -514,14 +517,14 @@
                    :detail (around a) :cand-detail (around b)}))))))
 
 (defn- cmd-compare-iface [args]
-  (let [{:keys [opts]} (parse-args args #{"--corpus" "--orig" "--cand" "--printed" "--builds" "--known" "--report" "--only" "--times" "--mode"})
+  (let [{:keys [opts]} (parse-args args #{"--corpus" "--orig" "--cand" "--printed" "--builds" "--side" "--known" "--report" "--only" "--times" "--mode" "--label"})
         corpus (read-string (slurp (get opts "--corpus")))
         mode (keyword (get opts "--mode" "lines"))
         known-file (get opts "--known")
         known (if (and known-file (.exists (File. ^String known-file))) (read-string (slurp known-file)) {})
         only (some-> (get opts "--only") re-pattern)
         logs (into {} (for [p (:packages corpus)
-                            :let [f (File. (str (get opts "--builds") "/cand/" (:name p) ".build.log"))]
+                            :let [f (File. (str (get opts "--builds") "/" (get opts "--side" "cand") "/" (:name p) ".build.log"))]
                             :when (.exists f)]
                         [(:name p) (slurp f)]))
         mods (for [p (:packages corpus) [m f] (:modules p)
@@ -543,7 +546,7 @@
     (when (get opts "--prune")
       ;; the texts of the equal modules removed (the scratch stays small; SPEC §9.3)
       (doseq [[k r] ok :let [[_ pkg m] (first (filter #(= k (first %)) mods))]]
-        (.delete (File. (str (get opts "--orig") "/" pkg "/" m ".iface")))
+        (when-not (get opts "--keep-orig") (.delete (File. (str (get opts "--orig") "/" pkg "/" m ".iface"))))
         (.delete (File. (str (get opts "--cand") "/" pkg "/" m ".iface")))))
     (doseq [[i [k r]] (map-indexed vector unexpected)]
       (println "DIFFERS" k (pr-str (dissoc r :detail :cand-detail)))
@@ -552,8 +555,8 @@
         (when (:cand-detail r) (println "  printed:\n" (:cand-detail r)))))
     (doseq [[k _] fixed] (println "FIXED (listed as known, no longer differs)" k))
     (doseq [[k r] failing :when (contains? known k)] (println "known" k (pr-str (select-keys r [:status :at])) "--" (get known k)))
-    (println (format "repr-haskell roundtrip (interface level, %s): %d modules, %d equal, %d differ (%s), %d known, %d unexpected, %d fixed; %d lines of interfaces compared%s"
-                     (name mode) (count results) (count ok) (count failing) (pr-str by-status)
+    (println (format "repr-haskell roundtrip (interface level%s, %s): %d modules, %d equal, %d differ (%s), %d known, %d unexpected, %d fixed; %d lines of interfaces compared%s"
+                     (if-let [l (get opts "--label")] (str ", " l) "") (name mode) (count results) (count ok) (count failing) (pr-str by-status)
                      (count (filter #(contains? known (first %)) failing)) (count unexpected) (count fixed)
                      (reduce + (keep (comp :lines second) results))
                      (if-let [t (get opts "--times")] (str "; seconds: " t) "")))

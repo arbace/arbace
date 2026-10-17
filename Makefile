@@ -14,7 +14,7 @@ CLOJURE_TESTS_GO ?= target/arbace-go/amd64/arbace-tests
   box box-smoke box-oracle box-suite box-tools box-rebuild mac-bundle arm64-vm-check \
   gate gate-full suite oracle diffcheck verify jdk-verify edge-verify fixtures-verify tamago-verify \
   toolchain-verify box-vendor-verify x509roots-verify repr-go-roundtrip repr-go-roundtrip-text \
-  repr-java-roundtrip repr-haskell-roundtrip repr-haskell-iface repr-haskell-text repr-haskell-test repr-rust-roundtrip repr-rust-test goi-annotations goi-test alpine-check clean \
+  repr-java-roundtrip repr-haskell-roundtrip repr-haskell-iface repr-haskell-text repr-haskell-layout repr-haskell-test repr-rust-roundtrip repr-rust-test goi-annotations goi-test alpine-check clean \
   check-makefile
 
 help: ## list the targets
@@ -119,7 +119,9 @@ repr-haskell-iface: ## the same, then GHC's interfaces of the originals and the 
 	bin/repr-haskell roundtrip --iface
 repr-haskell-text: ## the same in mode :full: each module printed back byte for byte, GHC's trees of mode :full compared (bin/repr-haskell roundtrip --text-only)
 	bin/repr-haskell roundtrip --text-only
-repr-haskell-test: ## repr/haskell's cases: the reader's samples, the spec's worked example, mode :full (bin/repr-haskell test)
+repr-haskell-layout: ## the same forms printed by Haskell's layout rule, as a person writes them: GHC's trees and lines, then interfaces (bin/repr-haskell roundtrip --layout-only --iface)
+	bin/repr-haskell roundtrip --layout-only --iface
+repr-haskell-test: ## repr/haskell's cases: the reader's samples, the spec's worked example, mode :full, the layout layout (bin/repr-haskell test)
 	bin/repr-haskell test
 repr-rust-roundtrip: ## Rust -> forms -> Rust over std's five crates of rustc 1.99.1: rustc's trees and lines (bin/repr-rust roundtrip)
 	bin/repr-rust roundtrip

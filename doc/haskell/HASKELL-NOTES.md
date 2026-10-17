@@ -5,7 +5,8 @@ departs from or adds to the spec, with the reasons. R1 was built on 2026-10-17 (
 `repr-haskell-r1`, from main at `82345a08`), on the host's GHC 9.14.1 (Alpine's `ghc-9.14.1-r2`,
 its `ghc` library `ghc-9.14.1-f453`) and stage 0 of that commit. R2, the interface level, was built
 the same day (branch `repr-haskell-r2`, from main at `f515a959`; "R2" below), and R3, mode `:full`
-and the text level, too (branch `repr-haskell-r3`, from main at `73e35434`; "R3" below).
+and the text level, too (branch `repr-haskell-r3`, from main at `73e35434`; "R3" below), and R4,
+the layout printer, too (branch `repr-haskell-r4`, from main at `80530da7`; "R4" below).
 
 ## Decided (2026-10-17, the user)
 
@@ -474,3 +475,127 @@ As built: token positions from GHC's lexer paired in order with the printer's to
 match the source's (HR11); the three modules that include `CTypes.h` kept as known differences of
 the `:full` tree level, their texts byte-identical (HR12); deprecation warnings sorted at the
 interface level (HR13).
+
+## R4: the layout printer
+
+Built on 2026-10-17 (branch `repr-haskell-r4`, from main at `80530da7`), on the same GHC and the
+stage 0 of that commit. SPEC §7.4 (2, the layout layout) defines it; §10.7 records what the build
+changes in the spec.
+
+### What was built
+
+| part | file | what |
+|---|---|---|
+| printer | `arbace/repr/haskell/print.ae` (`layout-block!`, `brace-pending!`, `layout-token!`, `layout-newline!`, `lead!`, `keyword-at!`, `tight?`) | the layout layout: the braces layout's printing code with its blocks laid out by Haskell's layout rule |
+| command | `print --layout layout`; `bin/repr-haskell roundtrip --layout`, `--layout-only` | the tree level and, with `--iface`, the interface level of the layout layout (`make repr-haskell-layout`) |
+| known differences | `test/haskell/roundtrip-ghc-9.14.1-layout-known.edn`, `-layout-iface-known.edn` | none (`{}`) |
+| cases | `test/haskell/layout/Layout.hs`, `test/haskell/layout/expected/{Shape,Layout}.hs`; `bin/repr-haskell test`'s step 6 | the style, byte for byte; blocks ended by a line, by a closer, braced after the fact, explicit braces kept |
+| gate | `bin/gate --full`'s `repr-haskell` step: `roundtrip --iface --text --layout && test` | |
+
+### The layout layout
+
+The printing code of the braces layout decides what is printed; the layout layout changes only
+where blocks begin and end, the line breaks of tokens without positions, and the spaces. The
+braces layout's output is byte for byte main's (the corpus's 483 printed modules compared), and
+the full layout's tokens are unchanged.
+
+- **Blocks** (`layout-block!`): every block the braces layout braces, and the class bodies, which
+  it already lays out (HR2), go through one function. The block's column is its first item's when
+  that item is on the keyword's line; when the item's line is later, the column is the larger of
+  the enclosing item's continuation column + 2 and the column of the line the keyword is on + 2.
+  An item's continuation lines are at its block's column + 2 (spaces: the block's column + 1), the
+  module's items at column 1 and their continuation lines at 3. So a block that begins a line is
+  always right of the lines that continue the item around it, and those close it; a block whose
+  first item shares the keyword's line is right of the keyword, which is at the item's continuation
+  column or further. Items that share a line are separated by `;` (allowed under layout); a
+  multi-way `if`'s guards, which GHC's lexer lays out without generating semicolons
+  (`layout_if`), by nothing.
+- **Ends**: a block is *pending* from its last item to the next token. A line that begins left of
+  every pending block's column ends them (`layout-newline!`); so does a token on the same line that
+  cannot continue the last item, which GHC's parser closes the blocks on by the report's
+  parse-error(t) rule: `)`, `]`, `,`, `then`, `else`, `of`, `in`, `#)`, `|]`, `||]`
+  (`layout-token!`; checked by `test/haskell/layout/Layout.hs`'s `h`). Any other token, `;` and
+  `where` among them, would continue the block: then the pending blocks are braced after the fact
+  (`brace-pending!`): `{` in place of the two spaces before the first item when it began a line, or
+  inserted before it when the block began on the current line (nothing after it is aligned yet),
+  `;` in place of the two spaces before every later item that began a line, ` }` at the end; the
+  offsets are recorded as the block is printed, the nested pending blocks done innermost first. A
+  line that begins at or right of a pending block's column braces it too: the columns as built
+  never do it, it is a safety net. In the corpus no block is braced after the fact: the first build
+  braced two in `GHC.Internal.IO.Handle.Internals` (an `else` aligned with its `if`, right of the
+  `do` block of its `then`), and `then`, `else` and `in` are now placed left of the pending blocks'
+  columns (`keyword-at!`).
+- **Explicit braces**: a `case`, `\case`, `do` whose source wrote its `{` on another line than its
+  first item (`:hs/brace`) keeps its braces there: the located list of its items begins at the `{`,
+  and the layout rule has no token to put on that line. 16 blocks of the corpus (in `RULES`
+  pragmas and the like); the `{` and `;` as the braces layout writes them, the items at a column.
+  An empty `case` keeps `{}` when `^:hs/braces` says so (S12), as in the braces layout; an empty
+  `let` or `where` is `{}`.
+- **Positions without a token**: separators lead the line of the form after them when that form
+  begins a later line (`lead!`: `,`, a constructor's `=` and `|`, a type's `->`, `::`, `=>`), so
+  that lists, data declarations and signatures read in GHC's style (`  , area`, `  = Circle
+  Double`, `  | Rect {w, h :: !Double}`); the line is the form's implicit parentheses' when
+  `:hs/paren` gives one. Three tokens are moved the same way where a person breaks the line before
+  them: `then` and `else` to their expression's line at the `if`'s column + 2, `in` to its body's
+  at the `let`'s, but left of the blocks still pending (`keyword-at!`). A `where` of bindings
+  stands on a line of its own before them when the source left a line for it (the `where`
+  keyword has no position in the forms: the converter writes it on the line before), else on the
+  first binding's line. Record braces keep their positions: the converter's `:hs/brace` on a
+  constructor declaration is relative to the constructor's line, and a GADT record's `{` begins a
+  located node, so a record's `{` never leads the first field's line (the first corpus run moved
+  them, 15 modules' lines differed).
+- **Spaces** (`tight?`): none after `(` and `[` and before `)`, `]`, `,`, `;`, except where the two
+  tokens would read as another one (`(#`, `(|` before `#` or `|`; `#)`, `|)`, `|]` after `#` or a
+  token ending in `|`), none inside a record's or an inferred binder's braces (`{w = x, h}`,
+  `forall {k}.`), none after a lambda's `\` before a name, a literal or a bracket (`\m s ->`, not
+  before `!`, `~`, `-`, which would make an operator). A comment always follows a space (`{--`
+  would open a block comment).
+- **Columns** are counted in code points, as GHC counts them (`raw!`; the braces layout's class
+  bodies too, which changes none of the corpus's).
+
+What it looks like: `test/haskell/layout/expected/Shape.hs` is the worked example printed from its
+forms; `test/haskell/layout/expected/Layout.hs` the layout cases'. The lines are the original's,
+so blank lines remain where comments were (ordinary comments are not in the forms of mode
+`:lines`, SPEC §7.3).
+
+### Results
+
+`bin/repr-haskell roundtrip --iface --layout` over R1's corpus:
+
+| package | modules | trees and lines equal (the layout layout) | interfaces equal (mode `:lines`) |
+|---|---|---|---|
+| `ghc-internal` | 244 | 244 | 244 |
+| `base` | 237 | 237 | 237 |
+| `ghc-prim`, `ghc-bignum` | 1, 1 | 2 | 2 |
+| total | 483 | 483 | 483 (1,072,106 lines) |
+
+4,628 blocks (the module bodies apart), 16 of them in their source's explicit braces,
+none braced after the fact. No known differences at either level; the braces layout's levels
+unchanged (483 and 483), its printed modules byte for byte main's, and the text level's as R3's
+(483 byte-identical, 480 with equal trees of mode `:full`, the three known).
+
+Times on this host (64 cores, shared): the layout layout's tree level after the braces layout's,
+over the same forms, about 15 s (printing 6 s, GHC's parses 9 s); the interface level's three
+sides of each package compiled concurrently in 122 s (R2's two, 116 s). The gate step
+(`roundtrip --iface --text --layout && test`) took 396 s, about 6.5 minutes (R3's 286 s), run
+through the host's slot for heavy commands.
+
+### Choices for the user (HR14-HR16; built as recommended)
+
+- **HR14 The layout layout's style.** (a) As built: block columns 2 beyond the line and the
+  enclosing item (items of a top-level `where`, `do` or class body at column 5, continuation lines
+  2 further), leading separators, `then`/`else`/`in` on their expressions' lines, `where` on its own
+  line, tight brackets and commas; (b) GHC's `ppr` style, a block's items aligned after its keyword
+  (`do x` / `   y`), trailing separators, as the braces layout spaces tokens. *Recommended: (a)*:
+  it is the style of the boot libraries' sources and of most Haskell, and it needs no wider lines
+  than the original's.
+- **HR15 Braced blocks in mode `:lines`.** (a) As built: the printer decides from the forms alone,
+  braces kept where the source's `{` was on its own line (`:hs/brace`) and added where a token would
+  continue a block; `^:hs/braces` stays on an empty `case` only (HR3), the forms of mode `:lines`
+  unchanged; (b) the converter marks every block the source braced (S12 as §7.2 wrote it), and the
+  layout layout keeps them all. *Recommended: (a)*: the layout layout is the readable rendering, and
+  (b) would change R1-R3's forms for a hint the levels do not need.
+- **HR16 The gate.** (a) `bin/gate --full`'s `repr-haskell` step runs `roundtrip --iface --text
+  --layout && test`, the layout layout's levels beside the braces layout's (396 s, R3's step 286 s); (b) the
+  layout layout's tree level only (no third interface build). *Recommended: (a).*
+

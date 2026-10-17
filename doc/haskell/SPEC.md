@@ -11,7 +11,9 @@ modules equal; what it adds to this text and where it departs is §10.4 and
 [HASKELL-NOTES.md](HASKELL-NOTES.md). Milestone R2, the interface level over the same corpus, was
 built the same day: all 483 modules' interfaces equal at `-O1` (§10.5). Milestone R3, mode `:full`
 and the text level, was built the same day too: all 483 modules printed back byte for byte, 480
-of them with GHC's trees of mode `:full` equal (§10.6). The experiments that
+of them with GHC's trees of mode `:full` equal (§10.6). Milestone R4, the layout printer, was built
+the same day too: all 483 modules printed by Haskell's layout rule parse to the original's trees
+and lines and compile to equal interfaces (§10.7). The experiments that
 validate the spec's choices (Appendix A) were run on the host's GHC 9.14.1 (Alpine's
 `ghc-9.14.1-r2`) and the stage 0 of main at `f0d7fc2f` (`target/seed/amd64/arbace`, amd64);
 their scripts and inputs are `test/haskell/`.
@@ -957,7 +959,8 @@ one of three layouts (H6):
    algorithm L, so that every line it starts opens, continues or closes the right block;
    `NondecreasingIndentation` (11 modules of `base`/`ghc-internal`) is never needed by the
    printer's own output. Blocks marked `^:hs/braces` keep their braces. In mode `:lines` the
-   recorded lines are kept as in the braces layout.
+   recorded lines are kept as in the braces layout. (As built, §10.7: the block columns, the
+   blocks that keep or take braces, the style.)
 3. **Full**: every token at its recorded line and column (§7.2), comments and white space from
    `hs/module`'s records; the output is the original text (the text level). Layout is not
    computed: the original's columns are valid layout.
@@ -1164,7 +1167,7 @@ bin/repr-haskell test                       the spec's cases (test/haskell/)
 | R1 | the helper; the converter and the braces printer in `:lines`; `base`, `ghc-internal`, `ghc-prim`, `ghc-bignum` without CPP, then with CPP (built 2026-10-17: 483 of 483 modules, §10.4) | tree level |
 | R2 | the interface level over R1's corpus (built 2026-10-17: 483 of 483 modules, §10.5) | interface level |
 | R3 | `:full`: the helper's annotations and comments, the converter's metadata, the full printer (built 2026-10-17: 483 of 483 modules byte-identical, 480 with equal trees of mode `:full`, §10.6) | text level, tree level in `:full` |
-| R4 | the layout printer | tree and interface levels |
+| R4 | the layout printer (built 2026-10-17: 483 of 483 modules at the tree and interface levels, §10.7) | tree and interface levels |
 | R5 | the other boot libraries | all of the above |
 | R6 | `.hsc` (hsc2hs), `.lhs` (unlit), boot files and signatures in the corpus | all of the above |
 | later | Core and code levels; behaviour over GHC's testsuite; a Stackage subset | |
@@ -1331,6 +1334,47 @@ survey's E3).
   `:full`), `read` and `dump` `--full --corpus`.
 - **The interface level (§9.3)**: both modes sort the entries of the deprecation warnings' lists
   of `--show-iface`, whose order GHC varies from build to build (HR13).
+
+### 10.7 As built: R4 (2026-10-17)
+
+[HASKELL-NOTES.md](HASKELL-NOTES.md), "R4", records the build; what it changes in this text
+(HR14-HR16, built as recommended, for the user's decision):
+
+- **The layout layout (§7.4, 2)**, `print --layout layout`: the braces layout's printing code, every
+  block (`do`, `mdo`, `rec`, `let`, `where`, `of`, `\case`, `\cases`, a class's or an instance's
+  body, a GADT's constructors, a closed family's equations, a multi-way `if`'s guards, which GHC
+  lays out without semicolons) a layout block. Its first item on the keyword's line, the block's
+  column that item's; or, when the item's line is later, on a line of its own, the column 2 further
+  than both the line the keyword is on and the enclosing item's continuation lines, so that those
+  lines close it. Every later item at the column on its line, after a `;` when it shares the
+  previous item's line; the lines inside an item 2 further than its column. The module's items are
+  at column 1, their continuation lines at 3, so a top-level `where`, `do` or class body has its
+  items at 5. A block ends where the next line begins left of its column, or at a token GHC's
+  parse-error(t) rule closes it on (`)`, `]`, `,`, `then`, `else`, `of`, `in`, `#)`,
+  `|]`, `||]`); a block that any other token on the line of its end would continue is braced
+  after the fact (a `{` before its first item, `;` before its items that begin lines, `}` after the
+  last), and so is one a line would continue (a safety net: the columns as built never need it).
+  None of the corpus's 4,628 blocks is braced so.
+- **Explicit braces (§7.2, S12)**: a block whose `{` the source wrote on another line than its first
+  item (`:hs/brace`, HR3) keeps its braces there, since the located list of its items begins at the
+  `{` (16 blocks in the corpus); `^:hs/braces` stays as built, on an empty `case` only: the
+  converter does not mark the other braced blocks, and the forms of mode `:lines` are unchanged
+  (HR15).
+- **The style**: separators without a position of their own lead the line of the form after them
+  when it begins a later line (`,`, `=` and `|` of constructors, `->` of types, `::`, `=>`); `then`,
+  `else` and `in` go to the line of their expression, at the `if`'s column + 2 or the `let`'s
+  column; a `where` of bindings on a line of its own before them when the source left one, else on
+  the first binding's line; no space after `(` and `[` or before `)`, `]`, `,`, `;` (but where it
+  would make another token: `(#`, `(|`, `[|`, `#)`, `|)`, `|]`), none in records' braces and after a
+  lambda's `\` before a name (HR14). Ordinary comments are not in the forms of mode `:lines` (§7.3)
+  and not printed; documentation comments are, items' at the block's column.
+- **The levels (§9.1, §9.5, §9.6)**: `bin/repr-haskell roundtrip --layout` (after the braces
+  layout's tree level, over the same forms; `--layout-only` alone), with `--iface` the interfaces
+  of both layouts against the originals', each package's three sides compiled concurrently; known
+  differences `test/haskell/roundtrip-ghc-9.14.1-layout-known.edn` and
+  `-layout-iface-known.edn`, none. `bin/gate --full`'s step runs `roundtrip --iface --text --layout`
+  (HR16). `bin/repr-haskell test`'s step 6 checks the style on the worked example and
+  `test/haskell/layout/Layout.hs` against `test/haskell/layout/expected/`.
 
 ## 11. Decisions and open questions
 
