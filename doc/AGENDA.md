@@ -95,6 +95,9 @@ The current state of the work. This file is rewritten as things change. For the 
 ## Next
 
 - The naming survey written (doc/NAMING-SURVEY.md): proposals N1-N13 open for the user.
+- After the naming is settled (the user, 2026-10-17: "Create jaf print after the naming debate
+  settled"): Java's bridge printing back, class forms → Java source, with a round trip like
+  g2a's (Java → forms → Java → forms, the two forms equal; the text level as g2a's `:full`).
 - The survey of Futamura's projections written (doc/FUTAMURA-SURVEY.md; its experiment on the
   local branch `futamura-survey`): proposals F1-F11 open for the user. Measured there: `fib`
   6.40 → 0.168 ms (the JVM 0.16) by a `Long` fast path, var speculation and an unboxed worker;
