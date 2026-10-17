@@ -127,7 +127,7 @@ The current state of the work. This file is rewritten as things change. For the 
   F6, F7. Measured there: `fib`
   6.40 → 0.168 ms (the JVM 0.16) by a `Long` fast path, var speculation and an unboxed worker;
   `loop-long` 11.87 → 1.09 ms without the class-initialization guards.
-- The box's checks on the Mac on macOS 26: the bundle built (`7019817`), waiting on the
+- The box's checks on the Mac on macOS 26: the bundle built again (`73e35434`, every part from that commit), waiting on the
   user's run of `./mac.sh all` and its `mac-results.tar.gz`.
 
 ## Later

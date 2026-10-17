@@ -957,3 +957,16 @@ Decided by the user, as recommended: KS1-KS12 (doc/go/PROCESS-SPEC.md, "Decided"
 RS17 (doc/REPR-RUST-SURVEY.md, "Decided"), RS16 (b) (the spec now). Started concurrently (the
 user): the executable-freshness guard of `bin/box-rebuild` and `bin/box-mac-bundle`, repr/haskell
 R3, KU1, goi's GR1, repr/rust's spec; the Mac bundle rebuilt from this commit.
+
+## 2026-10-17: the Mac bundle rebuilt from one commit; the freshness guard
+
+The essential gate passed with `bin/diffcheck` in it (10:16; diffcheck 12,731 of 12,754, the 23
+known, 6:01). The Mac bundle built again at `73e35434`, every part from that commit: both
+architectures' executables and guests built first (the guest's version `73e35434`), the arm64
+rebuild prepared at it (no "not prepared" line), the bundle 55,994,612 bytes; handed to the user
+for `./mac.sh all` under macOS 26. Two lessons: the gate's first step rebuilds stage 0 into
+`target/seed/`, so nothing in the same checkout may use stage 0 while it runs (two attempts
+collided); and `bin/box-rebuild` and `bin/box-mac-bundle` now refuse stale executables (branch
+`fresh-guard`, `0c9bb6e`, merged: `bin/lib/fresh.bash` reads each executable's version from its
+bytes, the guest's image key checked against the last build's program, `host.verified` written
+by a verified host step; `ARBACE_BOX_STALE_OK=1` to override).
