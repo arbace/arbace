@@ -694,6 +694,80 @@ KU6 changes the board's interrupt policy (§7.2).
 **Effort to KU6: 14-23 working days**, within the survey's 17-27 for the whole staged plan (the
 survey counted KU0 and KU7 too).
 
+### As built: KU1 (2026-10-17)
+
+KU1 is done, on amd64, in a kernel test guest, on /dev/kvm. All of the KU1 row's exit criteria are
+met. The work is in `box/` only; no runtime patch; the essential gate's runtime key is unchanged
+(S1, S31).
+
+What was built, as the spec describes it, with the small deviations noted:
+
+- **The board's two-mode entry** (`box/go/arbace/box/board/`, the KU0 prototype folded into the box's
+  own board, S3, §2.5): `whim_uentry` (`boot_amd64.s`), a process's first instruction — it sets a
+  `process` flag, keeps the entry registers (cpuinit's contract), touches nothing privileged, and
+  jumps to `_rt0_tamago_start`; `board.Process`, `board.UEntryAddr`. The `process` flag is `0` in
+  every shipped guest, so their path is unchanged (one `CMPB` added to `doorbell`, which issues a
+  SYSCALL in place of the store when a process). `board.NilPanics`, when a process, tells the
+  kernel its `sigpanic` PC by the new `NilHandler` call (§4.2, §8). The board snapshots the image's
+  pristine writable data at `hwinit1` (before any package `init` runs), so the kernel can give a
+  process the image's initial data (the inittask states `NotStarted`, not the kernel's once it has
+  run) — the one point §2.1 ("the RW segment is copied into the process's RAM at load") needed to
+  make work for a second runtime of the same image.
+- **The crossings** (`board/user_amd64.go`, `user_amd64.s`): `UserSetup` (the GDT's user data/code
+  segments at `0x30`/`0x38`, STAR/LSTAR/FMASK/EFER.SCE, GS its per-vCPU area, SMAP and PCIDs when
+  the CPU has them; SMEP left off because a crossing runs the shared text as user pages with the
+  process's tables loaded, §2.2); `UserContext` and `EnterUser` (the kernel goroutine runs a process
+  as one long call, `entersyscall`/`exitsyscall` bracketed, S4, S22); `enterUser` (IRETQ first,
+  SYSRETQ after a call — written as the bytes `0x48 0x0f 0x07`, S33), `sysentry` (SYSCALL's entry,
+  the context saved), `whim_ufault` (a fault from ring 3, reached from `vector_common`'s new
+  ring-3 branch, S21). The FS base and (new) the kernel's and the process's FPU state are saved and
+  restored across a crossing; a call that returns to the same process writes CR3 anyway, because b1
+  puts the process's data at the kernel's virtual addresses (one image), so the kernel's globals are
+  not addressable while the process's tables are loaded — the one departure from S23 ("a call
+  returning to the same process writes no CR3"): KU1 writes CR3 on every crossing. The cost is a TLB
+  reload per crossing where S23 wanted none; with PCIDs on (the host has them) the reload keeps the
+  TLB, so it is a CR3 write, not a flush. Revisited at KU2 if it shows in the numbers (KS13 below).
+- **The kernel** (`box/go/arbace/box/kernel/`, amd64 only): `NewProc` loads a process of this image
+  — private data+bss (the board's pristine snapshot, then zeroed bss), a RAM window for heap and
+  stacks, and per-process 4-level page tables (`tables_amd64.go`): the whole kernel space
+  identity-mapped supervisor-only, the image's 2 MiB region page by page (text shared user-exec,
+  rodata shared user-read, data/bss private user-rw), the window mapped at its own high VA to private
+  pages. `Run` enters the process and serves its calls: `arch_prctl` (settls' `SetFSBase`, KS3) and
+  the block ABI (`Write`/`Message` captured to the process's output, `Random` forwarded to the
+  monitor, `ProcExit`/`Exit`, `Yield`, `NilHandler`). A fault below the first page with the process's
+  `sigpanic` named is turned into the process's own panic (the trap frame rewritten, as the board's
+  BX60 does for the kernel); any other fault ends the process with a report (§8).
+- **The test** (`box/guest/cmd/ktest`, `box/guest/ku1_test.go`): one image that is the kernel at its
+  ELF entry and a process at `whim_uentry`. `TestKernelKU1`, on /dev/kvm, checks all four: a SYSCALL
+  served (a `Write`, then exit 7); a page fault at ring 3 ends the process with a vector-14 report;
+  a nil dereference becomes the process's own panic, recovered; two processes of one image with
+  distinct data (`alpha`/`bravo`) on different CR3s. It is part of `bin/box-vendor kvm-tests` and the
+  box's suite.
+
+Measurements (TamaGo go1.27.1, amd64, /dev/kvm, the machine shared): a process's RAM window 64 MiB
+(the default; TamaGo's heap arenas are 4 MiB, so a small runtime needs a few); `TestKernelKU1` runs
+all four checks, each spawning a fresh process (new page tables, a copy of the ~27 KiB data image),
+in about 0.35 s total. The crossing cost itself (SYSCALL/SYSRET plus the register and FPU save)
+was not separately re-measured here beyond the survey's and Appendix A's 24-31 ns for the bare
+round trip; KU2 measures a process's start time and RSS against a guest's, as its exit criterion asks.
+
+Deviations from the spec's letter, each sound: KU1 writes CR3 on every crossing (b1's shared virtual
+addresses, above; S23 revisited at KU2); the user board is not a separate `arbace/box/uboard`
+package but the two-mode board (S3, Appendix A, §2.5: the goos hooks are linknamed once, so one
+image cannot link both a board and a uboard — the prototype's two-mode board is the realisable form
+of b1). KS3's `SetFSBase` is served by interpreting settls' `arch_prctl` SYSCALL rather than a new
+call number, since TamaGo's runtime issues `arch_prctl` and KU1 adds no runtime patch; `SetFSBase`
+(64) is reserved for a future explicit path. The new process-call numbers (`NilHandler` 64 and the
+reserved `ProcExit`/`Yield`/`SetFSBase`) sit above the box's `NCalls` (KS5), in `arbace/box/abi`.
+
+New proposals for the user: **KS13** (the per-crossing CR3 write). b1 (one image, the process's data
+at the kernel's addresses) forces a CR3 switch on every crossing, not only at a process switch
+(§3.5's S23 wanted none for a same-process call). Options: (a) keep it — with PCIDs the switch keeps
+the TLB, and the measured cost is small; the KU2 numbers decide whether it matters (*recommended*,
+built); (b) a KPTI-like split or a per-process kernel alias at distinct addresses, to let a
+same-process call avoid the CR3 write, at the cost of a second set of kernel mappings. Recommend (a),
+revisit at KU2 with the numbers.
+
 ## 11. Decisions and open questions
 
 ### 11.1 Decisions taken while writing (S1-S40)

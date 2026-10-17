@@ -72,12 +72,49 @@ TEXT whim_apentry(SB),NOSPLIT|NOFRAME,$0
 	CALL	SI
 	BYTE	$0x0f; BYTE $0x0b	// UD2: a fault the vectors report
 
-// func doorbell(cb unsafe.Pointer): the hypercall, one 64-bit store from RAX to
-// the doorbell, which exits to the monitor; it resumes after the store.
+// whim_uentry is a process's first instruction (doc/go/PROCESS-SPEC.md §3.3, KU1): the kernel
+// has put the vCPU at ring 3 with the entry registers (as cpuinit's: DI argc, SI argv, DX
+// RamStart, CX RamSize, R8 RamStackOffset, R9 tickKHz, R10 ncpu, R11 wallBase). Nothing
+// privileged: the kernel holds CR0/CR4 (a process cannot, and SSE is on already). It records
+// that it is a process, so doorbell makes a SYSCALL, keeps the entry state, sets the stack and
+// starts the runtime -- a second TamaGo runtime, in the process's own address space.
+TEXT whim_uentry(SB),NOSPLIT|NOFRAME,$0
+	MOVB	$1, ·process(SB)
+	MOVQ	DI, ·bootArgc(SB)
+	MOVQ	SI, ·bootArgv(SB)
+	MOVQ	DX, runtime∕goos·RamStart(SB)
+	MOVQ	CX, runtime∕goos·RamSize(SB)
+	MOVQ	R8, runtime∕goos·RamStackOffset(SB)
+	MOVQ	R9, ·tickKHz(SB)
+	MOVQ	R10, ·ncpu(SB)
+	MOVQ	R11, ·wallBase(SB)
+	MOVQ	DX, SP
+	ADDQ	CX, SP
+	SUBQ	R8, SP
+	RDTSC
+	SHLQ	$32, DX
+	ORQ	DX, AX
+	MOVQ	AX, ·tickBase(SB)
+	JMP	_rt0_tamago_start(SB)
+
+// func UEntryAddr() uintptr
+TEXT ·UEntryAddr(SB),NOSPLIT,$0-8
+	LEAQ	whim_uentry(SB), AX
+	MOVQ	AX, ret+0(FP)
+	RET
+
+// func doorbell(cb unsafe.Pointer): a guest's hypercall is one 64-bit store from RAX to the
+// doorbell, which exits to the monitor and resumes after the store; a process's (process set,
+// whim_uentry) is a SYSCALL with RAX the block's address, which the kernel serves (§3.4, §4.1).
 TEXT ·doorbell(SB),NOSPLIT,$0-8
 	MOVQ	cb+0(FP), AX
+	CMPB	·process(SB), $0
+	JNE	sys
 	MOVQ	$const_doorbellAddr, BX
 	MOVQ	AX, (BX)
+	RET
+sys:
+	SYSCALL
 	RET
 
 // func ticks() uint64: the time-stamp counter
@@ -225,6 +262,10 @@ TEXT whim_vectors(SB),NOSPLIT|NOFRAME,$0
 // interrupted stack, every register else as it was -- as Linux's signal
 // handler makes a SIGSEGV a run-time panic.
 TEXT vector_common<>(SB),NOSPLIT|NOFRAME,$0
+	// 0 the vector, 8 the error code, 16 RIP, 24 CS: an exception at ring 3 is a process's,
+	// the kernel's to answer (user_amd64.s; doc/go/PROCESS-SPEC.md §8, KU1)
+	TESTB	$3, 24(SP)
+	JNZ	user
 	CMPQ	0(SP), $14
 	JNE	report
 	PUSHQ	AX
@@ -266,3 +307,5 @@ report:
 again:
 	MOVQ	AX, (BX)
 	JMP	again
+user:
+	JMP	whim_ufault(SB)
