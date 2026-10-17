@@ -388,3 +388,6 @@ labels; a negative literal written `-(1e9)` (`encoding/json/v2`'s tests).
   to `bin/gate --full`, beside the round trip's checks. Recommended: add it to `--full`.
 - **G2F8. Keys and names.** The new metadata keys of SPEC §10.2 ("As built"), the layout name
   `full` and `bin/g2a roundtrip --text`. Recommended: as built.
+
+**Decided (2026-10-17, the user):** G2F1-G2F6 and G2F8 (a), as built; G2F7 against "stays
+outside": `bin/g2a roundtrip --text amd64` in `bin/gate --full` (its g2a step), as recommended.
