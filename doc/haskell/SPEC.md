@@ -1090,7 +1090,7 @@ known-differences entry here (§9.5).
 | level | how | normalization |
 |---|---|---|
 | tree | `hsdump tree` of the original and of the printed module, compared as text; `hsdump lines` in `:lines` | §9.2 |
-| interface | each module compiled as its package compiles it (`ghc --make`, the package's `-this-unit-id`, extensions and flags, `-haddock`, `-O` as the corpus says), once from the originals and once with the printed module in its place, under the same relative paths; `ghc --show-iface` of the two `.hi`, compared as text | drop the lines `src hash:`, `interface hash:` and `flags: fingerprint:` (self-recompilation data: the source's hash, a hash over the rest, and a hash of the flags, which include the output directory: E3, E5). In `:full` the ABI hash and everything else must be equal. In `:lines` also: the source spans inside unfoldings' strings normalized to lines (`N.hs:3:1-14` → `N.hs:3`, `N.hs:(3,1)-(5,20)` → `N.hs:3-5`), the columns of `SrcLoc` constructions in unfoldings likewise, and the hashes that cover them (ABI, export, orphan, usage fingerprints) not compared |
+| interface | each module compiled as its package compiles it (`ghc --make`, the package's `-this-unit-id`, extensions and flags, `-haddock`, `-O` as the corpus says), once from the originals and once with all the package's printed modules in their places (HR8), under the same relative paths, at `-O1` (the corpus's `:iface :opt`, HR7); `ghc --show-iface` of the two `.hi`, compared as text (in `:lines`, token by token) | drop the lines `src hash:`, `interface hash:` and `flags: fingerprint:` (self-recompilation data: the source's hash, a hash over the rest, and a hash of the flags, which include the output directory: E3, E5). In `:full` the ABI hash and everything else must be equal. In `:lines` also: the source spans inside unfoldings' strings normalized to lines (`N.hs:3:1-14` → `N.hs:3`, `N.hs:(3,1)-(5,20)` → `N.hs:3-5`), the two columns of every `SrcLoc` construction in unfoldings blanked (also through its wrapper `$WSrcLoc`, boxed arguments `(I# 7#)` and let-bound ones, `let { $dIP5 :: Int = I# 47# } in ... $WSrcLoc ... $dIP5`), every fingerprint blanked (ABI, export, orphan, usage and the declarations' own hashes, which cover them), the usages of the files CPP included (`addDependentFile`) dropped (the printed module is the preprocessed text, §2.8, which includes none), and the texts compared by tokens, not lines (`--show-iface` breaks lines by width, and a column's digits change it) (HR6) |
 | text | the printed file against the original (or the CPP module view), byte for byte | none |
 | Core (later) | `-ddump-simpl -dsuppress-uniques -dsuppress-ticks` of both | as the interface level for spans in `:lines` |
 
@@ -1273,7 +1273,7 @@ survey's E3).
   the tarball's `utils/genprimopcode`, over `compiler/GHC/Builtin/primops.txt.pp` through `cc -E
   -undef -traditional -P`). The printed side has every converted module of the package in its
   place at once, one build per side (HR8), not one printed module at a time.
-- **Mode `:lines`'s normalizations (§9.3)**, as built (HR6): besides the three dropped lines and
+- **Mode `:lines`'s normalizations (§9.3)**, as built and adopted into §9.3 (HR6): besides the three dropped lines and
   the spans in unfoldings' strings, (1) the comparison is of the texts' tokens, not their lines:
   `--show-iface`'s pretty printer breaks lines by width, and a column's digits change the width;
   (2) *every* fingerprint is blanked, the declarations' own hashes too (they cover their
@@ -1328,7 +1328,7 @@ alternatives).
 | S29 | Top-level naked splices as `(hs/naked-splice e)` (§4.1) | with qualified heads, a bare top-level form cannot be told apart |
 | S30 | `:config` keys (§2.7): `:ghc`, `:ghc-unit`, `:target`, `:os`, `:arch`, `:language`, `:extensions`, `:flags`, `:unit`, `:corpus` | H9, H11 |
 | S31 | The tree level normalizes in `:lines` only spans (lines compared apart), annotations and source texts (§9.2) | the fewest normalizations that `:lines` needs |
-| S32 | The interface level drops `src hash`, `interface hash`, `flags: fingerprint`; in `:lines` also spans' columns in unfoldings and the hashes over them (§9.3) | measured (E3, E5) |
+| S32 | The interface level drops `src hash`, `interface hash`, `flags: fingerprint`; in `:lines` also spans' columns in unfoldings and the hashes over them (§9.3); as built (HR6): `SrcLoc` columns through wrappers, boxing and lets, every fingerprint, CPP's `addDependentFile` usages, tokens for lines | measured (E3, E5) |
 | S33 | Converted forms not tracked (§2.1) | as Go forms' decision 9; HS11 |
 | S34 | The helper written anew, GHC's `check-ppr` and `check-exact` its models (§8.1) | nothing to vendor beyond a few lines; HS8 |
 | S35 | `.hsc` converted from hsc2hs's output, recorded like CPP (§8.5) | hsc2hs is not GHC's driver's; HS5 |
@@ -1617,3 +1617,8 @@ On R1 as built (2026-10-17, the user): HR1-HR5 as recommended (doc/haskell/HASKE
 bodies in layout in the braces printer (HR2, §7.4, S14); every located node's line compared and
 the `:lines` metadata keys of §7.1 (HR3); `bin/repr-haskell roundtrip` and `test` in `bin/gate
 --full` (HR4); built-in syntax in constructor declarations and `(:doc-type ...)` (HR5, §4.3, §6).
+
+On R2 as built (2026-10-17, the user): HR6-HR8 as recommended (doc/haskell/HASKELL-NOTES.md,
+"Decided"): mode `:lines`'s four added normalizations of the interface level adopted into §9.3
+(HR6); the interface level at `-O1` (HR7); all of a package's printed modules in their places at
+once, one build per side (HR8, §9.3).

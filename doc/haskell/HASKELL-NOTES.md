@@ -17,6 +17,12 @@ stricter lines check (every located node) and the `:lines` metadata keys (`:hs/e
 repr/go's); HR5 the constructor-declaration forms for tuple and sum syntax and the `(:doc-type
 ...)` fallback adopted into the spec.
 
+On R2 (2026-10-17, the user): HR6-HR8 as recommended: HR6 the four normalizations mode `:lines`
+adds at the interface level (tokens for lines; every fingerprint; `SrcLoc` columns through
+`$WSrcLoc`, boxed and let-bound arguments; CPP's `addDependentFile` usages dropped) adopted into
+SPEC §9.3 proper; HR7 the interface level at `-O1`; HR8 all of a package's printed modules in
+their places at once, one build per side (SPEC §9.3).
+
 ## R1: the helper, the converter, the braces printer, the tree level
 
 ### What was built
@@ -277,7 +283,7 @@ interfaces.
 A fix to R1 found on the way: on a fresh `.tmp/`, `roundtrip` wrote the conversion's log into
 `.tmp/repr-haskell/forms/` before creating it, and failed; it creates it now.
 
-### Choices for the user (HR6-HR8)
+### Choices for the user (HR6-HR8; decided as recommended, "Decided" above)
 
 - **HR6 The normalizations of mode `:lines` as built.** (a) Adopt §10.5's four into §9.3: tokens,
   every fingerprint, `SrcLoc` columns through the wrapper, boxing and let-bound variables, CPP's
