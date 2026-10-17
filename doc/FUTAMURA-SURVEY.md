@@ -804,3 +804,164 @@ the interpreter's lambdas get their interface's default methods; F2.4 and the re
 against the recommendation ("leave recorded"): fixed too (Clojure constants in Java forms
 classes outside the runtime; the back end's limits: one-segment namespaces, reifys and deftypes
 using code forms, proxies made at run time before their analysis).
+
+## F4 and F2's j2g fixes as built (2026-10-17)
+
+F4 (a) and the j2g-side fixes of F2's findings, as decided (F2.2, F2.3, F2.4, F2.5, F2.6's name
+collision, and the abstract class's constructor); on the branch `j2g-batch`. The back end
+(`arbace/c2j`) is untouched: F3 is built apart, and the two are measured together after both
+merge, with one re-seed.
+
+### F4: no initialization guards for the classes initialized at start
+
+**The list.** `arbace/j2g/start.ae` (`arbace.j2g.start/classes`): the runtime's classes
+(packages `arbace/lang` and `arbace/jrt`) that the program initializes before any user code, by
+their Go names, in the order it initializes them: 82 classes, from `Boolean` ... `Main`, `RT`,
+`Var`, `Keyword`, the collections, `Compiler`, `Util`, `LispReader` to `Numbers`,
+`PersistentTreeMap`, `MultiFn`, `Ref`, `LockingTransaction`, `Compiler$C`. It is derived, not
+written: `test/j2g/start_classes.ae EXE [--write]` runs the program three ways with a user
+program that does nothing (`-e nil`, a script, the REPL on its standard input) with
+`ARBACE_TRACE_INIT` set, under which jrt prints each class's initialization as it starts
+(`jrt.ClassInit.Run`), and keeps the classes all three initialize, in the order of the first.
+
+**What j2g does with it** (J2G-SPEC §6.2, "Classes initialized at start"). For a listed class
+`C` (translated, with non-trivial initialization), each static method `C_m` becomes two
+functions: `C_m_NoInit`, the body without the guard, and `C_m`, the guard (when the method has
+one, as before) and a call of `C_m_NoInit`. Compiled code (arbace.c2j's classes) calls
+`C_m_NoInit`, and reads and writes `C`'s statics without the guard; every other caller, the
+runtime's own code above all, calls `C_m` as before, so the runtime's semantics do not change.
+In the shipped program, 1,724 static methods have the two entries, and compiled code calls the
+guard-free ones at 43,830 sites (`Compiler$AOT.fnClass`, `RT.intCast`, `RT.nth`, `Util.equiv`,
+`Numbers.lt` ...). A stack trace leaves out `C_m`'s frame above `C_m_NoInit`'s (jrt's
+`stackTrace`), so traces are as before.
+
+**The check at start.** `jrt.StartCheck` runs at the start of a compiled loader's `load` and of
+every compiled class's static initializer; the first call, before any compiled code runs,
+initializes the listed classes whose initialization has not started, in the list's order, and
+then requires each to be started (`jrt.ClassInit.Started`: done, or in progress by the current
+thread, as JVMS 5.5 lets that thread see it half-initialized); otherwise the program stops
+(status 70, naming the class and the stale list). j2g registers the list's classes with jrt
+(`j2g_start.go`: their `ClassInit`s, `C_Init`s and names).
+
+Why the first compiled code initializes some: the program starts compiled code early, inside
+`RT`'s static initializer (`arbace.core`'s loader); 58 of the 82 classes have started by then,
+and the other 24 the program initialized while loading the startup namespaces, `Numbers` among
+them (from `arbace.core`'s first compiled unit). Restricting the list to the 58 would leave out
+`Numbers`, the class the measurements are about; initializing the 24 a little earlier, at the
+first compiled code instead of at their first use during the startup namespaces' loading, is
+the one change of order (F4.1). Their static initializers make constants and intern vars; one
+that needed a namespace the startup loads would fail when the program starts (loudly), and the
+gate's checks (the smoke test, Clojure's suite, the oracle, `bin/diffcheck`) pass.
+
+**Measured** (`test/bench/eval-bench.ae` compiled as a namespace into a build of the runtime's
+namespaces, as SA139 measured T1: c2j, j2g `--program`, `bin/build-go`; the same procedure on
+`30e9f246` and on this branch; the two builds run in turn three times, the best of each; ms,
+amd64, the machine shared with other builds, load 7-13 on 64 threads):
+
+| benchmark | before | after | after/before |
+|---|---:|---:|---:|
+| `fib` | 6.30 | 6.68 | 1.06 |
+| `fib-prim` | 2.33 | 2.04 | 0.88 |
+| `loop-long` | 12.20 | 4.37 | 0.36 |
+| `loop-double` | 1.55 | 0.53 | 0.34 |
+| `dotimes-array` | 11.60 | 9.54 | 0.82 |
+| `reduce-range` | 62.86 | 64.12 | 1.02 |
+| `reduce-fn` | 21.22 | 21.65 | 1.02 |
+| `vector-conj` | 17.95 | 18.45 | 1.03 |
+| `map-assoc-get` | 19.99 | 21.46 | 1.07 |
+| `keyword-map` | 13.15 | 11.20 | 0.85 |
+| `str-build` | 6.57 | 6.32 | 0.96 |
+| `seq-ops` | 43.51 | 43.72 | 1.00 |
+| `lazy-walk` | 29.15 | 26.74 | 0.92 |
+| `transduce` | 19.30 | 20.15 | 1.04 |
+| `into-xform` | 15.96 | 15.86 | 0.99 |
+| `protocol` | 7.70 | 6.37 | 0.83 |
+| `multimethod` | 9.03 | 8.54 | 0.95 |
+| `destructure` | 29.53 | 30.23 | 1.02 |
+| `closures` | 26.52 | 26.99 | 1.02 |
+
+Geometric mean: 0.87 (13% faster). The primitive loops gain most (`loop-long` 2.8 times,
+`loop-double` 2.9), as §5 predicted for the guard; `loop-long` stops at 4.37 ms rather than §5's
+1.09 because gc inlines `Numbers`' `lt` and `xor` now but not `add`, `multiply` and `inc` (costs
+139 to 151 with their overflow checks, over the budget of 80 with or without the guard): inline
+exact arithmetic is F3's (the back end's fast paths). Calls through the runtime's statics gain
+10-17% (`keyword-map`, `protocol`, `dotimes-array`, `fib-prim`). The boxed `fib` is 6-8% slower
+in every run (measured again: 6.18-6.38 against 6.77-6.91), `map-assoc-get` 2-7%: their
+compiled code calls `Numbers`' generic boxed operations, which gc now inlines into the fn's
+code (they were over the budget with the guard); F3's fast paths replace exactly those calls,
+so the two are to be measured together (F4.2). The shipped executable grows by 139 KB (0.13%).
+
+### F2's j2g-side findings, fixed
+
+- **F2.2, anonymous classes with constructor arguments.** One cause for the three classes: the
+  analyzer (`arbace.classes.analyze/analyze-anon`) made the anonymous class's derived
+  constructor before it knew the superclass constructor chosen, whenever choosing it asked
+  whether the superclass's package-private constructors are accessible from the anonymous
+  class (which made its members): the constructor kept no parameters, so `(anon K
+  ^{:param-tags [int]} [9])` called `K_1_New` with an argument it did not take and `K`'s
+  `Ctor_I` without one, and `(anon In [k] :outer o ...)` mixed the outer instance into the
+  wrong constructors. The derived constructor now takes the chosen one's descriptor (flags and
+  throws) when the members were made already. The analyzer is shared, so the interpreter's
+  classes take the same constructor. `cfcorpus.c50.A2`, `c54.K` and `c57.PB` are translated.
+- **F2.3, an unimplemented interface method**: j2g's dispatch method for a method without an
+  implementation throws `AbstractMethodError` with HotSpot's message ("Receiver class C does
+  not define or inherit an implementation of the resolved method 'abstract R m(P)' of
+  interface I."), as the evaluator's classes (`dynAbstract`) and the JVM do
+  (`decls/dispatch-forms`, `model/abstract-method-error-text`).
+- **F2.4, Clojure constants in a class of Java forms**: the static initializer makes them as
+  the interpreter does, `RT.var(ns, name)` for a var and `RT.readString(text)` for a datum,
+  cast to the field's type (`decls/clj-const-store`); reachability already reached both. The
+  runtime's classes hold none, so the shipped program does not change by it.
+- **F2.5, the interpreter's lambdas**: a lambda's class made at run time takes its interfaces'
+  default methods made at run time, as a class does (`interp/lambda-done!` calls `vtable!`):
+  `(.negate p)` of an `FxPredicate` lambda works.
+- **F2.6, the Go name collision**: a class of arbace.c2j's tree outside `arbace/` (a package
+  `aot_...` in the tree's `packages.edn`: a user's namespace, the corpora's `dcf.*`) is named
+  as the runtime's compiled namespaces are, by its whole binary name between `A_` and `_A`
+  (`names/compiled-class?`), so a reify in an anonymous fn's class `X$fn__N$fn` and the static
+  field `fn-class` of `X$fn__N` no longer meet; it is j2g's naming, the back end's field keeps
+  its name. The shipped program's names do not change (its compiled classes are all under
+  `arbace/`).
+- **The abstract class's constructors**: j2g's member tables list an abstract class's public
+  constructors (without a body: Go makes no object of it), so reflection finds them as on the
+  JVM; `(Base.)` fails with `InstantiationError` (the evaluator's `NewExpr`), and
+  `Constructor.newInstance` with `InstantiationException` (jrt). This one changes the runtime's
+  reflection: `getConstructors` of the runtime's abstract classes (`AFn`, `ASeq` ...) now
+  answers as the JVM's.
+
+`bin/diffcheck`: 12,463 of 12,471 cases agree, 8 disagree, all recorded, 0 new (before: 22
+known); `test/diffcheck/known.edn` keeps 8 cases (compilation's semantics 3, the check's own 3,
+the interpreter's two known limits), `excluded.edn` 1 case (the proxy made at run time; 5
+before), `jforms-excluded.edn` 16 classes (19 before). The back end's limits of F2.6 (one-segment
+namespaces, reifys and deftypes using code forms, a proxy made at run time before its analysis)
+are c2j's, left to its batch.
+
+### Checks
+
+The essential gate (`bin/gate`): passed (the smoke test; Clojure's suite, no regressions against
+`test/arbace-go-results.edn`; the oracle, 53 known mismatches, 0 new). `bin/arbace-go
+--fixpoint`: holds, G1 = G2 = G3 byte for byte (103,977,120 bytes, sha256 `898825d8...`), stage
+0 different from G1 as expected until the re-seed. No re-seed: stage 0 still builds the program (the checkout's
+j2g, jrt and runtime are loaded or compiled from the checkout), and the lead re-seeds after F3
+and F4 merge. j2g asks nothing new of the JVM, so `jdk/edge.edn` does not change.
+
+### Proposals (the user's to decide)
+
+- **F4.1 Where the list ends.** (a) As built: the classes the program initializes before any
+  user code, those not started when compiled code first runs (24, `Numbers` among them)
+  initialized then, in the program's order; (b) only the classes already started when compiled
+  code first runs (58), with no initialization moved, but without `Numbers` (no gain on the
+  arithmetic benchmarks); (c) (b) plus `Numbers` named by hand. *Recommended: (a)*: derived,
+  checked at start, and the order changes only for classes whose static initializers make
+  constants.
+- **F4.2 The boxed calls inlined.** `fib` (+6-8%) and `map-assoc-get` (+2-7%) are slower since
+  gc inlines `Numbers`' generic boxed operations into compiled code. (a) Measured again with
+  F3, whose fast paths replace those calls, before deciding anything; (b) keep the guard-free
+  calls to `Numbers`' boxed generic operations out of line (`//go:noinline`-like, a j2g mark);
+  (c) accept. *Recommended: (a)*.
+- **F4.3 Threads during start.** A compiled namespace's code run by another thread while a
+  listed class is still being initialized by the main thread (`RT`, during `arbace.core`'s
+  loading) would see it half-initialized, where the JVM makes that thread wait. The startup
+  starts no such thread (agents and futures run after it). (a) Accept, recorded as a deviation
+  of §6.2; (b) `jrt.StartCheck` on every compiled loader's call to wait for the classes in
+  progress by other threads. *Recommended: (a)*.

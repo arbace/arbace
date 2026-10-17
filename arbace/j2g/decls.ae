@@ -536,9 +536,24 @@
               :else
               [(vec (for [i (range (count ps))] (symbol (str "p" i)))) (stub-body n (:name mm) (:desc mm))])
             plist (param-list pkg ps pnames)
-            plist (with-ret plist pkg r)]
+            plist (with-ret plist pkg r)
+            ;; a compiled namespace's loader: the classes initialized at start checked before
+            ;; its code runs (Futamura F4, jrt.StartCheck)
+            body (if (and static (= "load" (:name mm)) (nm/compiled-class? n) (str/ends-with? n "__init"))
+                   (cons (list (m/jrt-sym pkg "StartCheck")) body)
+                   body)]
         (at-line mm
          (cond
+          ;; a class initialized at start (Futamura F4, arbace.j2g.start): the body in a
+          ;; guard-free entry C_m_NoInit, which compiled code calls (code/invoke-val), and C_m
+          ;; its guard and a call of it
+          (and static (m/start-class? n))
+          (let [noinit (symbol (str g "_" base "_NoInit"))
+                call (apply list noinit (map #(with-meta % nil) plist))]
+            [(list* 'go/func noinit plist body)
+             (list* 'go/func (symbol (str g "_" base)) plist
+                    (concat (when (and (not native) (needs-entry-guard? n ab)) [(list (symbol (str g "_Init")))])
+                            [(if (= "V" r) call (list 'return call))]))])
           static
           [(list* 'go/func (symbol (str g "_" base)) plist
                   (concat (when (and (not native) (needs-entry-guard? n ab)) [(list (symbol (str g "_Init")))]) body))]
@@ -615,7 +630,9 @@
                           pn (vec (for [i (range (count ps))] (symbol (str "p" i))))]
                       (list* 'go/method (symbol (nm/method-base name desc))
                              (with-ret (vec (cons (tag 't (list '* (symbol (m/go-name n)))) (param-list pkg ps pn))) pkg r)
-                             [(list 'panic (list (m/jrt-sym pkg "J2g_NotTranslated") (str "abstract " (str/replace n "/" ".") "." name desc)))]))
+                             ;; F2.3: as the JVM (and the evaluator's classes) throw
+                             [(list 'panic (list (m/jrt-sym pkg "AbstractMethodError_New_String")
+                                                 (list (m/jrt-sym pkg "Str") (m/abstract-method-error-text n (:owner mm) k))))]))
                     (#{:promoted :object} (:kind impl)) nil
                     :else (forwarder pkg n k impl))]
           :when f]
@@ -683,6 +700,25 @@
         [(mapv list names)
          (mapv (fn [nm {:keys [sts]}] (list* 'go/func nm [] sts)) names parts)]))))
 
+(defn- clj-const-store
+  "The static initializer's store of Clojure constant f ({:name :desc :init}) of class n:
+  RT.var(ns, name) for a var, RT.readString(text) for a datum (a keyword, a symbol or quoted
+  data), cast to the field's type."
+  [n {:keys [desc init] :as f}]
+  (let [rt (t/lang-class "RT")
+        sd "Ljava/lang/String;"
+        strc (fn [s] {:op :const :type sd :val s})
+        call (case (:kind init)
+               :var {:op :invoke :kind :static :owner rt :itf false :name "var" :target nil
+                     :desc (str "(" sd sd ")" (t/lang-desc "Var"))
+                     :args [(strc (:ns init)) (strc (:name init))] :type (t/lang-desc "Var")}
+               :read {:op :invoke :kind :static :owner rt :itf false :name "readString" :target nil
+                      :desc (str "(" sd ")Ljava/lang/Object;")
+                      :args [(strc (:text init))] :type "Ljava/lang/Object;"})
+        v (if (= desc (:type call)) call {:op :cast :class desc :expr call :type desc})]
+    {:op :set-static :owner n :type desc :val v
+     :field {:owner n :name (:name f) :desc desc :flags (bit-or Opcodes/ACC_STATIC Opcodes/ACC_FINAL)}}))
+
 (defn init-forms
   "C_init, C_Init and C_clinit of a class with non-trivial initialization (§6.2)."
   [pkg n]
@@ -696,15 +732,19 @@
                  (binding [c/*f* (assoc c/*f* :method-fn (:fn-id c/*f*))]
                    (c/with-block
                      (fn []
+                       ;; a compiled namespace's class: its static initializer is compiled
+                       ;; code (Futamura F4, jrt.StartCheck)
+                       (when (nm/compiled-class? n)
+                         (c/emit! (list (m/jrt-sym pkg "StartCheck"))))
                        (when (and sup (m/translated? sup) (not (m/trivial-init? sup)))
                          (c/emit! (list (m/class-sym pkg sup "_Init"))))
                        (if-not reached
                          (c/emit! (list 'panic (list (m/jrt-sym pkg "J2g_NotTranslated") (str (str/replace n "/" ".") ".<clinit>"))))
                          (do
-                           (doseq [[_ {:keys [name desc init]}] (:clj-consts st)]
-                             (c/emit! (list 'set! (symbol (nm/static-field-name g name))
-                                            (c/missing-expr (str "Clojure constant " (case (:kind init) :var (str "#'" (:ns init) "/" (:name init)) (:text init)))
-                                                            desc))))
+                           ;; Clojure data and vars in the class body (§5.13; F2.4): made as the
+                           ;; interpreter makes them, RT.var and RT.readString of the printed datum
+                           (doseq [[_ {:keys [name desc init] :as f}] (:clj-consts st)]
+                             (c/stmt! (clj-const-store n f)))
                            (doseq [nd (:clinit st)] (c/stmt! nd))))))))
           [body parts] (split-clinit g body)]
       (into [(list 'go/var (tag (symbol (str g "_init")) (m/jrt-sym pkg "ClassInit")))

@@ -430,6 +430,8 @@ wrapping it (the exception itself if it is an Error).\n"
           (.Store (.-state c) initRunning)
           (set! (.-owner c) me)
           (.Unlock (.-mu c))
+          (when (TraceInit)
+            (.WriteString Stderr (+ "init: " (clinitClassName clinit) "\n")))
           (let [exc (runCatching clinit)]
             (.Lock (.-mu c))
             (set! (.-owner c) 0)
@@ -446,6 +448,76 @@ wrapping it (the exception itself if it is an Error).\n"
             (when (Error_InstanceOf exc)
               (panic exc))
             (panic (ExceptionInInitializerError_New_Throwable exc))))))))
+
+(go/method Started
+  "Started reports whether the class is initialized or being initialized by the current thread
+(JVMS 5.5: then its code sees it as it is, half-initialized): whether code may use its statics
+without the guard C_Init.\n"
+  ^bool [^{:tag (* ClassInit)} c]
+  (switch (.Load (.-state c))
+    (case [initDone] (return true))
+    (case [initRunning]
+      (.Lock (.-mu c))
+      (let [mine (== (.-owner c) (currentThreadID))]
+        (.Unlock (.-mu c))
+        (return mine))))
+  (return false))
+
+;; ---------------------------------------------------------------------------------------
+;; The classes initialized at start (Futamura F4, doc/FUTAMURA-SURVEY.md, "F4 and F2's j2g fixes
+;; as built"): compiled code (arbace.c2j's classes) calls their static methods and reads their
+;; statics without the guard C_Init. j2g registers them (RegisterStartClasses, from the list
+;; arbace/j2g/start.ae, in the order the program initializes them); a compiled namespace's
+;; loader calls StartCheck before its code runs: the first call initializes those not started
+;; yet, in that order, and stops the program when one is still not started. ARBACE_TRACE_INIT
+;; set: each class's initialization printed as it starts (init: NAME), and the first StartCheck
+;; (init: -- compiled code), what test/j2g/start_classes.ae derives the list from.
+
+(go/var ^{:tag atomic/Int32 :doc "traceInit: 0 not read yet, 1 off, 2 on (ARBACE_TRACE_INIT).\n"} traceInit)
+
+(go/func TraceInit "TraceInit reports whether ARBACE_TRACE_INIT is set (read once).\n" ^bool []
+  (let [t (.Load traceInit)]
+    (when (== t 0)
+      (let [(values _ on) (.Getenv (CurrentHost) "ARBACE_TRACE_INIT")]
+        (set! t 1)
+        (when on
+          (set! t 2))
+        (.Store traceInit t)))
+    (return (== t 2))))
+
+(go/var ^{:tag (slice (* ClassInit))} startInits)
+(go/var ^{:tag (slice (func []))} startFns)
+(go/var ^{:tag (slice string)} startNames)
+(go/var ^{:tag atomic/Bool} startChecked)
+
+(go/func RegisterStartClasses
+  "RegisterStartClasses names the classes initialized at start, in order: their states, their
+C_Init functions and their Go names (j2g's j2g_start.go).\n"
+  [^{:tag (slice (* ClassInit))} cs ^{:tag (slice (func []))} fns ^{:tag (slice string)} names]
+  (set! startInits cs)
+  (set! startFns fns)
+  (set! startNames names))
+
+(go/func StartCheck
+  "StartCheck runs before a compiled namespace's code: the first time, it initializes the
+classes initialized at start whose initialization has not started (in their order: as the
+program would initialize them later, at their first use), then requires each to be started
+(Started); else the program stops (status 70): j2g's list (arbace/j2g/start.ae) no longer says
+what the program initializes.\n"
+  []
+  (when (.Load startChecked)
+    (return))
+  (.Store startChecked true)
+  (when (TraceInit)
+    (.WriteString Stderr "init: -- compiled code\n"))
+  (range [i c startInits]
+    (when (not (.Started c))
+      ((aget startFns i))))
+  (range [i c startInits]
+    (when (not (.Started c))
+      (.WriteString Stderr (+ "arbace: the class " (aget startNames i) " is not initialized before compiled code runs: "
+                              "j2g's list of the classes initialized at start (arbace/j2g/start.ae) is stale\n"))
+      (.Exit (CurrentHost) 70))))
 
 (go/func runCatching [^{:tag (func [])} f] :results [^Throwable_I exc]
   (defer (Catch (addr exc)))
