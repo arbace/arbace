@@ -25,7 +25,7 @@ var testDirs = []string{".", "ken", "chan", "interface", "internal/runtime/sys",
 var programActions = map[string]bool{"run": true, "runoutput": true, "build": true,
 	"buildrun": true, "compile": true, "asmcheck": true}
 
-const testsUsage = `usage: gocmp tests [-v] TESTDIR
+const testsUsage = `usage: gocmp tests [-v] [-dirs] TESTDIR
 Prints the single-file programs of TESTDIR (GOROOT/test) for the configuration
 in the environment (GOOS, GOARCH), one per line, relative to TESTDIR:
 FILE, or FILE,EXTRA.go,... when the action line names more files of the
@@ -34,12 +34,15 @@ action (the first line that is not a build constraint, as the driver reads it)
 is run, runoutput, build, buildrun, compile or asmcheck, it needs no other
 GOEXPERIMENT (-goexperiment), and go/build matches it for the configuration
 (build constraints and file name, cgo off). -v prints the files left out and
-why on stderr.
+why on stderr. -dirs lists the directory tests instead: FILE.go whose action is
+compiledir, rundir, builddir or buildrundir (FILE.dir holding its packages), with
+no other GOEXPERIMENT, matched by go/build.
 `
 
 func mainTests(args []string) int {
 	fs := flag.NewFlagSet("gocmp tests", flag.ExitOnError)
 	verbose := fs.Bool("v", false, "print the files left out, and why, on stderr")
+	dirs := fs.Bool("dirs", false, "list the directory tests instead (dirtest.go): FILE.go per line, its action compiledir, rundir, builddir or buildrundir")
 	fs.Usage = usage(fs, testsUsage)
 	fs.Parse(args)
 	if fs.NArg() != 1 {
@@ -49,6 +52,17 @@ func mainTests(args []string) int {
 	root := fs.Arg(0)
 	ctxt := build.Default
 	ctxt.CgoEnabled = false
+	if *dirs {
+		list, err := dirTestsList(&ctxt, root, *verbose)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 2
+		}
+		for _, e := range list {
+			fmt.Println(e)
+		}
+		return 0
+	}
 	var out []string
 	for _, d := range testDirs {
 		names, err := filepath.Glob(filepath.Join(root, d, "*.go"))

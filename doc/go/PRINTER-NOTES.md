@@ -339,7 +339,7 @@ is no room before it (`f(x /* c */, y)`). Grammar parentheses are not added (the
 are recorded), names of equal type are grouped only when they share the type node, and a local
 `var ( ... )` or `type ( ... )` group is printed as one.
 
-**The text level** (SPEC §3.1): `bin/repr-go roundtrip --text [[GOOS/]ARCH] [--tests]` converts
+**The text level** (SPEC §3.1): `bin/repr-go roundtrip --text [[GOOS/]ARCH] [--tests|--dirs]` converts
 the round trip's corpora with `--full`, prints them into `.tmp/repr-go/cand-text-...` and compares
 each printed file with its original byte for byte (`arbace.repr.go --text`, no build); the
 known differences, with their reasons, are test/repr/go/roundtrip-text-known.edn, shared by the
@@ -351,6 +351,12 @@ configurations. Results (2026-10-16, go1.27.1):
 | tamago/arm64 | 378, 1,738: 1,738 | 1,703: 1,700, 3 | 168 s |
 | linux/amd64 | 382, 1,834: 1,834 | 1,714: 1,711, 3 | 168 s |
 | tamago/amd64 with tests (`--tests`) | 554, 2,935: 2,935 | | 179 s |
+
+`$GOROOT/test`'s directory tests (`--dirs`, 2026-10-17, CONVERTER-NOTES.md "Directory tests"):
+586 files of 586 byte-identical on tamago/amd64, 587 on linux/amd64, 584 on tamago/arm64 and
+linux/arm64, with no known difference, once the printer writes a receive-only channel type's
+`chan` at its recorded `:chan` position (SPEC §10.2, amendment D2): `import2.dir` spells `<- chan
+int`, which the printer wrote `<-chan`, padded to the element's column.
 
 The forms of mode `:full` are about 3.4 times those of `:lines` (std on tamago/amd64: 103.9 MB
 against 30.7 MB), and converting std takes about twice as long (124 s against 61 s). The `:lines` output is unchanged: `bin/repr-go roundtrip amd64` and

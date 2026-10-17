@@ -538,3 +538,53 @@ user: R1 (repr/java's `.ae` writer renamed `layout` with `repr/java print`), R2,
 in java-surface.edn, a record of removed stages), R4, R5 (the checks as verbs of one command).
 The seed remade from the merge's G3: `56fabe20...` (was `b566d53a...`), 5,530,756 bytes,
 verified (the same archive printed again at `8c3a289`; stage 0 = G1 = G2 = G3, `79eb9ef9...`).
+
+## 2026-10-17: repr/go's round trip over `$GOROOT/test`'s directory tests
+
+At the user's request ("do the directory tests beside F2"), on the branch `repr-go-dirtests`
+(from `d652647`). Source studied: Go's test driver, `/root/tamago-go/src/cmd/internal/testdir/testdir_test.go`
+(TamaGo's go1.27.1): `goDirPackages` (a `.dir`'s files grouped by package clause in file order,
+`-s` one per file), `compileInDir` (`go tool compile -e -D test -importcfg CFG -p test/STEM`, or
+`-p main`), the importcfg, `linkFile`, and the cases `builddir`/`buildrundir` (one package main
+with the `.s` files: `asm -gensymabis`, `-symabis`/`-asmhdr`, `pack`, `link`) and `runindir`
+(a copy of the `.dir` in a module named by its base name, `go 1.14` or `-gomodversion`, `go run .`).
+
+Built:
+- `godump -dirs FILE.go...` (tools/godump/dirs.go): reads the action line as the driver does,
+  compiles the packages other than main in the driver's order into a temporary directory, and
+  type-checks each package with an importer that resolves its local paths (`./a` → `test/a`)
+  to the earlier packages' archives; runindir tests are listed by `go list -export -deps ./...`
+  in such a module copy and dumped as packages. Dumps of a directory test's package add
+  `:dir-test` and `:local-imports`; other dumps are unchanged.
+- `gocmp tests -dirs` (the corpus: compiledir, rundir, builddir, buildrundir, runindir; no
+  other GOEXPERIMENT; go/build's match) and `gocmp -dirtest F.go B` (tools/gocmp/dirtest.go):
+  both sides compiled per package as the driver compiles them (flattened, `-trimpath` to the
+  original's directory, each side against its own earlier packages), export and code compared
+  per package; runindir through module copies and `go list -export -trimpath`; a fourth level
+  `run` (both sides linked from their own positions, the output compared with `F.out`; for the
+  configurations this machine runs, linux/arm64 through qemu-aarch64, `GOCMP_EXEC`).
+- `bin/repr-go corpus [linux-]dirtest[-arm64]`, `bin/repr-go check --dirtests`
+  (`--list-dirtests`), `bin/repr-go roundtrip --dirs [--text] [[GOOS/]ARCH]`, references
+  `test/repr/go/roundtrip-dirtest-{amd64,arm64,linux-amd64,linux-arm64}.edn`, known differences
+  `test/repr/go/roundtrip-dirtest-known.edn` (none).
+- The converter: a dump with `:dir-test` gets its namespace from its dump's path
+  (`go.test.fixedbugs.issue10066_dir.a`), the test's other packages mapped to theirs; local import
+  paths resolved through `:local-imports` (written into `go/package`); in mode `:full`, the
+  position of `chan` in `<- chan T` (go/ast keeps the arrow's only), which the printer uses.
+  Proposed as amendments D1 and D2 (SPEC §4.1-§4.3, §10.2, §15). Alternatives considered for D1:
+  the paths as written (`./a`) in `:path`, which names no package gc compiles; resolving the
+  import specs to `test/a` in the forms, which would print another source. For D2: a known
+  text difference (2 files of `import2.dir`); a new helper field (the converter already reads
+  the source in mode `:full`).
+- D3 (proposed, built): `bin/gate --full`'s repr/go step and the Makefile's round-trip targets
+  also run `roundtrip --dirs amd64`, `--dirs linux/amd64`, `--text --dirs amd64` (about 20 s).
+
+Results (every level, no known difference): tamago/amd64 253 tests (561 packages, 586 files),
+tamago/arm64 and linux/arm64 251, linux/amd64 254: tree, export and code pass for all; run
+127 pass on linux/amd64, 124 on linux/arm64, the rest skip (tamago, and the tests that only
+compile); text 586, 584, 587, 584 files byte-identical. Left out: errorcheckdir (26) and
+errorcheckandrundir (5), the two fieldtrack runindir tests, and the tests the configuration's
+build constraints exclude. Checked unchanged: the round trips `amd64`, `linux/amd64` (no
+regressions) and `--text amd64`; repr/go's tests (`test read`, `test print`); the Go printed
+from `tamago/`, `tamago/cmd/` (linux-amd64) and `box/`'s forms, byte for byte with the base's
+printer and with this one.

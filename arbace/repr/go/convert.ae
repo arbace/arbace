@@ -23,6 +23,7 @@
 (def ^:dynamic *full* false)       ; mode :full: the metadata only that mode writes (::full)
 (def ^:dynamic *return-pos* nil)   ; atom: the position of an implicit return's keyword (:full)
 (def ^:dynamic *text-dir* nil)     ; the directory of the Go files (mode :full reads them)
+(def ^:dynamic *src* nil)          ; mode :full: the bytes of the Go file converted, when read
 
 (defn note! [k] (when *stats* (swap! *stats* update-in [:notes k] (fnil inc 0))))
 (defn count-node! [n] (when *stats* (swap! *stats* update-in [:nodes (first n)] (fnil inc 0))))
@@ -47,6 +48,30 @@
       [(Long/parseLong (subs s 0 i)) (Long/parseLong (subs s (inc i)))])))
 
 (defn pos-line [s] (first (parse-pos s)))
+
+(defn recv-chan-pos
+  "Mode :full: the position \"L:C\" of the keyword chan of a receive-only channel type whose
+  arrow is at arrow, when white space separates them (`<- chan T`): go/ast keeps the arrow's
+  position only, and the printer writes chan right after it otherwise. nil when they are
+  adjacent or the source is not at hand."
+  [arrow]
+  (when-let [^bytes bs *src*]
+    (when-let [[l c] (parse-pos arrow)]
+      (let [n (alength bs)
+            line-start (loop [i 0 line 1]
+                         (cond (== line l) i
+                               (>= i n) nil
+                               :else (recur (inc i) (if (== 10 (aget bs i)) (inc line) line))))]
+        (when line-start
+          (loop [i (+ line-start (dec c) 2) line l col (+ c 2) moved false]
+            (cond
+              (>= i n) nil
+              (== 10 (aget bs i)) (recur (inc i) (inc line) 1 true)
+              (#{9 13 32} (long (aget bs i))) (recur (inc i) line (inc col) true)
+              (and moved (<= (+ i 4) n)
+                   (= "chan" (String. bs (int i) (int 4) java.nio.charset.StandardCharsets/UTF_8)))
+              (str line ":" col)
+              :else nil)))))))
 
 (defn start
   "The position string of a node's start, go/ast's Pos()."
@@ -421,7 +446,8 @@
       :chan-type (case (:dir f)
                    :both (form n l 'chan (type-form (:value f)))
                    :send (form n l 'chan :send (type-form (:value f)))
-                   :recv (form n l 'chan :recv (type-form (:value f))))
+                   :recv (-> (form n l 'chan :recv (type-form (:value f)))
+                             (with-pos {:chan (recv-chan-pos (:arrow f))})))
       :func-type (let [ps (fields (:params f) {})
                        rs (when (:results f) (fields (:results f) {}))
                        fl-pos (fn [v fl] (with-pos v (select-keys (nf fl) [:opening :closing])))]
@@ -1600,6 +1626,10 @@
                                        (not= "\n" (:tail st)) (assoc :go/tail (:tail st)))))))
         _ (swap! placed into (map (fn [[l c]] [l c]) header))
         decl-forms (binding [*groups* groups
+                             *src* (when (and *full* *text-dir*)
+                                     (let [src (java.io.File. ^String *text-dir* ^String name)]
+                                       (when (.isFile src)
+                                         (java.nio.file.Files/readAllBytes (.toPath src)))))
                              *kept-docs* kept
                              *placed* placed
                              *fn-dirs* (:inner plan)]
@@ -1679,6 +1709,7 @@
             (when (seq others) [:other-files others])
             (when (seq embeds) [:embed-files (vec (map vec embeds))])
             (when (seq (:test-go-files dump)) [:test-files (vec (:test-go-files dump))])
+            (when (seq (:local-imports dump)) [:local-imports (into (sorted-map) (:local-imports dump))])
             [:init-order (init-order dump)
              :positions positions]))))
 
@@ -1694,7 +1725,9 @@
 
 (defn convert-package
   "Converts a dump. opts: :positions (:lines or :full), :ns (the namespace symbol, default from
-  the import path), :src-dir (the package's source directory, for file-name collisions).
+  the import path), :namespaces ({path ns-sym} of other packages whose namespace is not their
+  path's: a directory test's), :src-dir (the package's source directory, for file-name
+  collisions).
   Returns {:ns sym :package form :files [{:name :stem :forms :comments :unplaced}] :stats}."
   [dump opts]
   (let [stats (atom {})
@@ -1706,15 +1739,19 @@
               *text-dir* (:text-dir opts)
               ty/*table* (:type-table dump)
               ty/*pkg* (:package dump)
+              ty/*namespaces* (or (:namespaces opts) {})
               ty/*underlying* underlying]
       (let [files (vec (for [fe (:files dump)]
                          (binding [ty/*imports*
+                                   ;; local import paths ("./a") by the paths they resolve to
+                                   ;; (the dump's :local-imports, a directory test's)
                                    (into {} (for [d (:decls (nf (:ast fe)))
                                                   :when (and (= :gen-decl (nt d)) (= "import" (:tok (nf d))))
                                                   sp (:specs (nf d))
                                                   :let [nm (if-let [n (:name (nf sp))] (ident-name n) (:name (:implicit (an sp))))]
                                                   :when (not (#{"_" "."} nm))]
-                                              [(string-value (:path (nf sp))) nm]))]
+                                              (let [p (string-value (:path (nf sp)))]
+                                                [(get (:local-imports dump) p p) nm])))]
                            (assoc (convert-file dump fe ns-sym)
                                   :stem (file-stem (:file fe) (:src-dir opts))))))]
         {:ns ns-sym

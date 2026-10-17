@@ -103,6 +103,9 @@ func dump(cfg *config, exports *exportMap, j *job) (r result) {
 		FileVersions: map[*ast.File]string{},
 	}
 	lookup := func(path string) (io.ReadCloser, error) {
+		if f, ok := j.local[path]; ok {
+			return os.Open(f) // a package of the directory test, compiled (dirs.go)
+		}
 		f, ok := exports.export[path]
 		if !ok {
 			return nil, fmt.Errorf("no export data for %q in this configuration", path)
@@ -193,6 +196,9 @@ func (d *dumper) write(files []*ast.File, errs []string) {
 		d.fileLists(p, j)
 	} else {
 		d.list(" :go-files ", j.files)
+	}
+	if t := j.dirTest; t != nil {
+		d.dirTestView(t, j)
 	}
 	w.WriteString("\n :imports ")
 	var imps []string
@@ -682,4 +688,63 @@ func (d *dumper) embedFiles(key, dir string, files []string) {
 		w.WriteByte(']')
 	}
 	w.WriteByte(']')
+}
+
+// dirTestView writes what a package of a directory test (-dirs) adds:
+//
+//	:s-files [...]                     builddir's assembly files, when any
+//	:dir-test {:test "fixedbugs/issueN.go" :action "rundir" :local-prefix "test"
+//	           :packages [["test/a" "a"] ... ["main" "main"]]}
+//	:local-imports {"./a" "test/a"}    the files' local import paths, resolved (gc's -D)
+//
+// :packages are the test's packages in the driver's order, by gc's -p path and the key (the
+// first file's name without .go) of their dumps in the test's directory. A runindir test has
+// :module (its module path, the directory's base name) instead of :local-prefix, and its
+// packages are the module's, in go list's order, keyed by their directories in the module
+// ("" for its root), with go list's file lists (as packages).
+func (d *dumper) dirTestView(t *dirTest, j *job) {
+	w := d.w
+	if j.dirPkg != nil {
+		d.list(" :s-files ", j.dirPkg.sFiles)
+	}
+	w.WriteString("\n :dir-test {:test ")
+	w.str(fileKey(d.cfg, t.test))
+	w.WriteString(" :action ")
+	w.str(t.action)
+	if t.action == "runindir" {
+		w.WriteString(" :module ")
+		w.str(filepath.Base(t.dir))
+	} else {
+		w.WriteString(" :local-prefix ")
+		w.str(t.localPrefix())
+	}
+	w.WriteString(" :packages [")
+	for i, p := range t.pkgs {
+		if i > 0 {
+			w.WriteByte(' ')
+		}
+		w.WriteByte('[')
+		w.str(p.path)
+		w.WriteByte(' ')
+		w.str(p.stem)
+		w.WriteByte(']')
+	}
+	w.WriteString("]}")
+	if len(j.importMap) > 0 && t.action != "runindir" {
+		var keys []string
+		for k := range j.importMap {
+			keys = append(keys, k)
+		}
+		slices.Sort(keys)
+		w.WriteString("\n :local-imports {")
+		for i, k := range keys {
+			if i > 0 {
+				w.WriteByte(' ')
+			}
+			w.str(k)
+			w.WriteByte(' ')
+			w.str(j.importMap[k])
+		}
+		w.WriteString("}")
+	}
 }

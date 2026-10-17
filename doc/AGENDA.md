@@ -148,7 +148,10 @@ The current state of the work. This file is rewritten as things change. For the 
   process; GoTEE (github.com/usbarmory/GoTEE: TamaGo unikernels and user-mode applets, TrustZone
   on arm), to check; unikernels with a privilege split.
 - The mapped start measured without nested KVM.
-- repr/go's open end: `$GOROOT/test`'s directory tests (running beside F2).
+- repr/go's directory tests done on the branch `repr-go-dirtests` (to merge; journal
+  2026-10-17): `bin/repr-go roundtrip --dirs [--text]`, 251 to 254 tests per configuration, every
+  level passing, the level run on linux. To decide: D1 (directory tests' paths, namespaces and
+  `:local-imports`), D2 (`:chan` of `<- chan T` in mode `:full`), D3 (in `bin/gate --full`).
 - A note from the user (2026-10-13): the tooling of the Mac GUI app Moshi Go may be useful for
   Arbace, to study when Arbace's REPL gets a user interface beyond the terminal. Its build info
   (`go version -m`, on the user's Mac): module `moshi-go` at `1516bf8173a5` (2026-10-12), go1.27.1

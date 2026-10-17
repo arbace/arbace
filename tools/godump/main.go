@@ -12,6 +12,8 @@
 //	                               -tests, each with its _test.go files, and its PATH_test
 //	godump [flags] -files FILE...  single-file programs ($GOROOT/test); FILE,FILE... is one
 //	                               program of several files (the others in the first one's directory)
+//	godump [flags] -dirs FILE...   directory tests ($GOROOT/test): FILE.go's action line and the
+//	                               packages of FILE.dir, as Go's test driver compiles them (dirs.go)
 //
 // The output format is described in doc/go/HELPER-NOTES.md.
 package main
@@ -45,6 +47,7 @@ var (
 	flagFiles  = flag.Bool("files", false, "arguments are single-file programs, not packages")
 	flagDeps   = flag.Bool("deps", false, "also dump the dependencies of the named packages")
 	flagTests  = flag.Bool("tests", false, "dump packages with their _test.go files, and external test packages (PATH_test)")
+	flagDirs   = flag.Bool("dirs", false, "arguments are directory tests of $GOROOT/test (FILE.go with FILE.dir), not packages")
 )
 
 // A job is one package to dump.
@@ -61,6 +64,10 @@ type job struct {
 	tests     bool                  // with -tests: the package with its in-package test files
 	xtest     bool                  // with -tests: the external test package of pkg
 	forTest   string                // the package tested, for tests and xtest
+
+	dirTest *dirTest          // with -dirs: the directory test of the package
+	dirPkg  *dirPkg           // with -dirs: the package
+	local   map[string]string // with -dirs: the export data of the test's packages compiled
 }
 
 // A result is one line of the summary.
@@ -75,6 +82,11 @@ type result struct {
 }
 
 func main() {
+	run()
+	os.Exit(exitCode)
+}
+
+func run() {
 	flag.Usage = func() {
 		fmt.Fprintln(os.Stderr, "usage: godump [flags] PACKAGE... | godump [flags] -files FILE...")
 		flag.PrintDefaults()
@@ -96,6 +108,12 @@ func main() {
 	var exports *exportMap
 	if *flagFiles {
 		jobs, results, exports, err = fileJobs(cfg, flag.Args())
+	} else if *flagDirs {
+		var cleanup func()
+		jobs, results, exports, cleanup, err = dirJobs(cfg, flag.Args())
+		if cleanup != nil {
+			defer cleanup()
+		}
 	} else {
 		jobs, exports, err = packageJobs(cfg, flag.Args())
 	}
@@ -143,9 +161,12 @@ func main() {
 	fmt.Fprintf(os.Stderr, "godump %s/%s: %d dumped (%d files, %.1f MB), %d with errors, %d results, %.1f s\n",
 		cfg.goos, cfg.goarch, n, nfiles, float64(bytes)/1e6, nerr, len(results), time.Since(t0).Seconds())
 	if nerr > 0 {
-		os.Exit(1)
+		exitCode = 1
 	}
 }
+
+// exitCode is main's exit status, set before its deferred clean-up runs.
+var exitCode int
 
 func fatalf(format string, args ...any) {
 	fmt.Fprintf(os.Stderr, "godump: "+format+"\n", args...)
