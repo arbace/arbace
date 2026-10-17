@@ -1,0 +1,114 @@
+#!/bin/bash
+# repr/clojure's checks (doc/REPR-CLOJURE.md; bin/c2a-check until 2026-10-17), run as
+# bin/repr-clojure check, on Arbace's Go executable (bin/lib/tools.bash's arbace_tool: the host
+# of the tools, arbace.repr.clojure loaded from the checkout).
+#
+# Usage: bin/repr-clojure check          the unit tests (test/repr/clojure/read_test.ae)
+#        bin/repr-clojure check --suite  Clojure's test suite (test/, src/script/ and the top-level
+#                                 files at the pinned revision bin/clojure-tests uses) translated
+#                                 in place with --keep-ext, as bin/clojure-tests does; the tree's
+#                                 digest must equal test/repr/clojure/suite.sha256 (the
+#                                 translation by arbace.j2c.rename and bin/clojure-tests' sed
+#                                 before c2a, which it reproduced exactly on 2026-10-11)
+#        bin/repr-clojure check --libs [GO-EXE]
+#                                 the suite's test libraries (test.check, test.generative,
+#                                 tools.namespace, data.generators, tools.reader, java.classpath:
+#                                 the jars bin/clojure-tests downloads) and a small library with a
+#                                 data_readers.cljc translated into .ae files,
+#                                 then test/repr/clojure/libs.ae run on them by the tools' host
+#                                 (the Go executable arbace_tool runs) and by the Go build GO-EXE
+#                                 (default target/arbace-go/<host arch>/arbace): every check must
+#                                 hold and each standard output must equal
+#                                 test/repr/clojure/libs.out, the JVM's (recorded on main's last
+#                                 target/stage2, 2026-10-12; after a change to libs.ae, record the
+#                                 host's .tmp/repr-clojure-check/host.out once it is checked);
+#                                 standard error is shown. Skips GO-EXE when it is missing. (Until
+#                                 standalone S4 the JVM build ran beside the Go one.)
+# Writes under .tmp/repr-clojure-check/. Exit status 0 when every check passed.
+set -euo pipefail
+root=$(cd "$(dirname "$0")/../../.." && pwd)
+. "$root/bin/lib/renamed-env.bash" # stops on a stale G2A_*, J2A_*, A2G_* or C2A_*
+. "$root/bin/lib/tools.bash"
+. "$root/bin/lib/host.bash"
+work=$root/.tmp/repr-clojure-check
+mkdir -p "$work"
+rev=98d735fab02f337cee654cb0629bddc09883a75a   # bin/clojure-tests' revision of Clojure
+
+digest() { (cd "$1" && find . -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum | sha256sum | cut -c1-64); }
+
+case ${1:-} in
+"")
+  rm -rf "$work"/unit*
+  arbace_tool -p "$root/test" "${repr_clojure_sources[@]}" -D repr.clojure.work="$work" -e "
+(require 'arbace.test 'repr.clojure.read-test)
+(let [r (arbace.test/run-tests 'repr.clojure.read-test)]
+  (System/exit (if (zero? (+ (:fail r) (:error r))) 0 1)))" ;;
+--suite)
+  src=$work/clojure
+  if [ "$(git -C "$src" rev-parse HEAD 2>/dev/null || true)" != "$rev" ]; then
+    echo "== fetch clojure/clojure $rev"
+    rm -rf "$src"; mkdir -p "$src"
+    git -C "$src" init -q
+    git -C "$src" remote add origin https://github.com/clojure/clojure
+    git -C "$src" fetch -q --depth 1 origin "$rev"
+    git -C "$src" checkout -q -f FETCH_HEAD
+  fi
+  t=$work/suite
+  rm -rf "$t"; mkdir -p "$t/src"
+  cp -r "$src/test" "$t/"; cp -r "$src/src/script" "$t/src/"
+  find "$src" -maxdepth 1 -type f -exec cp {} "$t/" \;
+  "$root/bin/repr-clojure" read --in-place --keep-ext "$t"
+  got=$(digest "$t") want=$(cat "$root/test/repr/clojure/suite.sha256")
+  echo "suite digest $got"
+  if [ "$got" = "$want" ]; then echo "repr-clojure suite: as recorded"; else echo "repr-clojure suite: DIFFERS from test/repr/clojure/suite.sha256 ($want)"; exit 1; fi ;;
+--libs)
+  go=${2:-$root/target/arbace-go/$(arbace_host_arch)/arbace}
+  libs=$root/.tmp/clojure-tests/lib
+  jars="test.check-1.1.3 test.generative-1.1.1 tools.namespace-1.5.1 data.generators-1.1.1 tools.reader-1.6.0 java.classpath-1.1.1"
+  for j in $jars; do
+    [ -f "$libs/$j.jar" ] || { echo "no $libs/$j.jar: run bin/clojure-tests once (it downloads the jars)" >&2; exit 2; }
+  done
+  rm -rf "$work/jars" "$work/ae"; mkdir -p "$work/jars"
+  for j in $jars; do mkdir -p "$work/jars/$j"; unzip -q "$libs/$j.jar" -d "$work/jars/$j"; done
+  # a library with a data_readers.cljc (none of the jars has one): it must become a
+  # data_readers.ae, its conditionals resolved, whose tag test/repr/clojure/libs.ae reads
+  r=$work/jars/readers-lib
+  mkdir -p "$r/repr_clojure_readers"
+  cat > "$r/data_readers.cljc" <<'EOR'
+{repr-clojure/point #?(:cljs repr-clojure-readers.point/read-point-js :clj repr-clojure-readers.point/read-point)}
+EOR
+  cat > "$r/repr_clojure_readers/point.cljc" <<'EOR'
+(ns repr-clojure-readers.point
+  (:require [clojure.string :as str]))
+
+(defn read-point
+  "#repr-clojure/point [x y] reads as {:x x :y y :s \"x,y\"}."
+  [[x y]]
+  {:x x :y y :s (str/join "," [x y]) :ns #?(:clj (namespace `str/join) :cljs "cljs")})
+EOR
+  "$root/bin/repr-clojure" read -o "$work/ae" "$work/jars"/*
+  # nothing of Clojure's own may be left (the jars' .clj and .cljc files all became .ae)
+  if find "$work/ae" -name '*.clj' -o -name '*.cljc' | grep -q .; then
+    echo "repr-clojure libs: .clj or .cljc files left in $work/ae" >&2; exit 1
+  fi
+  status=0
+  host=$(arbace_host_exe)
+  echo "== the tools' host ($host)"
+  (cd "$work" && ARBACE_PATH=$work/ae "$host" "$root/test/repr/clojure/libs.ae") > "$work/host.out" 2> "$work/host.err" || status=1
+  cat "$work/host.out" "$work/host.err"
+  tail -1 "$work/host.out" | grep -q '^repr-clojure libs: all' || status=1
+  if cmp -s "$root/test/repr/clojure/libs.out" "$work/host.out"; then echo "the host's output equals test/repr/clojure/libs.out (the JVM's)"
+  else echo "the host's output differs from test/repr/clojure/libs.out:"; diff "$root/test/repr/clojure/libs.out" "$work/host.out" || true; status=1; fi
+  if [ -x "$go" ]; then
+    echo "== Go ($go)"
+    (cd "$work" && ARBACE_PATH=$work/ae "$go" "$root/test/repr/clojure/libs.ae") > "$work/go.out" 2> "$work/go.err" || status=1
+    if cmp -s "$root/test/repr/clojure/libs.out" "$work/go.out"; then echo "the Go build's output equals test/repr/clojure/libs.out"
+    else echo "the Go build's output differs from test/repr/clojure/libs.out:"; diff "$root/test/repr/clojure/libs.out" "$work/go.out" || true; status=1; fi
+    # warnings (standard error) are reported, not compared
+    cmp -s "$work/host.err" "$work/go.err" || { echo "standard error (not compared):"; diff "$work/host.err" "$work/go.err" || true; }
+  else
+    echo "== Go: no $go, skipped (bin/arbace-go --build)"
+  fi
+  exit $status ;;
+*) echo "usage: bin/repr-clojure check [--suite | --libs [GO-EXE]]" >&2; exit 2 ;;
+esac

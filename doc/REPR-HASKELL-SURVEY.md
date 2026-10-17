@@ -10,7 +10,8 @@ tree at `db7adf93` (branch `ghc-lisp`, 2026-10-03), read only. The experiments' 
 The family, as the user named it on 2026-10-17 ([NAMING-SURVEY.md](NAMING-SURVEY.md),
 "Decided", "The rename as built"): `repr/java` and `repr/go` are **bridges** between a
 language's source and its forms in Arbace, one tool each with the verbs `read` and `print`;
-**translators** run between forms dialects (j2g: Java forms → Go forms; c2a: Clojure → Arbace).
+**translators** run between forms dialects (j2g: Java forms → Go forms; c2j: Arbace's
+namespaces → Java forms; c2a, Clojure → Arbace, is the bridge repr/clojure since 2026-10-17).
 `repr/haskell` would be the third bridge: Haskell source ↔ **Haskell forms**.
 
 ## Executive summary

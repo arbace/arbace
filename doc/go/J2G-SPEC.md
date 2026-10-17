@@ -11,6 +11,13 @@
 > before, `arbace.g2a`, `bin/g2a`), whose build is `arbace.build.go` (`bin/build-go`; was `bin/g2a
 > build`), and repr/java (j2a before; doc/NAMING-SURVEY.md). This document uses the current names
 > throughout, also where it records earlier work.
+>
+> Since 2026-10-17 too, c2a is repr/clojure (`arbace.c2a.*` is `arbace.repr.clojure(.*)`,
+> `bin/c2a` `bin/repr-clojure read`, `bin/c2a-check` `bin/repr-clojure check`, `test/c2a/`
+> `test/repr/clojure/`, `doc/C2A.md` `doc/REPR-CLOJURE.md`) and the back end `arbace.aot` is c2j
+> (`arbace/aot/` `arbace/c2j/`, its marks `:aot/*` `:c2j/*`, `test/aot/` `test/c2j/`); "AOT"
+> stays the compiled pipeline's name (`ARBACE_AOT`, the packages `aot_arbace_*`, the tree `aot/`;
+> doc/NAMING-SURVEY.md, "The second rename as built").
 
 Status: accepted (2026-10-08; the user took the recommendation of each of the 23 questions of
 §16), B1a step 2 ([B1-PLAN.md](B1-PLAN.md)), with every amendment set of §16 accepted by the user
@@ -768,7 +775,7 @@ differences are **variant files**, `arbace/lang/go/<Class>.ae` (and, for the tra
 whose Java forms repr/java regenerates, `overlay/jdk/variants/<Class>.ae`, in the class's package:
 amendment K1, accepted 2026-10-09), read by j2g only. (Since SA150, 2026-10-13/14, the
 hand-written variants of `arbace/lang` are merged into their bases by
-`test/aot/merge_variants.ae`, and `arbace/lang/go/` holds only the generated `CompilerOps.ae` and
+`test/c2j/merge_variants.ae`, and `arbace/lang/go/` holds only the generated `CompilerOps.ae` and
 `CompilerAOTFn.ae`; the mechanism and the JDK's variants stay: STANDALONE-NOTES.md, "The
 variants merged into their bases (SA150)".)
 
@@ -1523,7 +1530,7 @@ protocol:
   functions `C_clinit_p0` ... of at most 48, which `C_clinit` calls in order, unless one may
   leave early (`return`, `goto`, `defer`, a label) or declares locals for the rest; gc's stack
   maps of one function grow as its safepoints times its stack slots.
-- **A compiled fn's code** (`:aot/code`, standalone SA156, SA158, SA159): not a Java object in
+- **A compiled fn's code** (`:c2j/code`, standalone SA156, SA158, SA159): not a Java object in
   Go (a header word, its arities' methods, none of `Object`'s protocol, no member table, no
   instance check, registered by the package's static `jrt.CodeDecl` table); its `C_New`
   initializes its nest's top-level class, whose statics its methods then read unguarded.

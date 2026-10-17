@@ -10,6 +10,13 @@
 > (`arbace.a2g.*`, `bin/a2g*`, `A2G-SPEC.md`, `A2G_*`, the printed `a2g_*`, `A2g_*`, `a2g/*`: `j2g`
 > likewise), and class forms are Java forms (the front end keeps `arbace.classes.*`). This document
 > uses the current names throughout, its dated passages included; branch names keep theirs.
+>
+> Since 2026-10-17 too, c2a is repr/clojure (`arbace.c2a.*` is `arbace.repr.clojure(.*)`,
+> `bin/c2a` `bin/repr-clojure read`, `bin/c2a-check` `bin/repr-clojure check`, `test/c2a/`
+> `test/repr/clojure/`, `doc/C2A.md` `doc/REPR-CLOJURE.md`) and the back end `arbace.aot` is c2j
+> (`arbace/aot/` `arbace/c2j/`, its marks `:aot/*` `:c2j/*`, `test/aot/` `test/c2j/`); "AOT"
+> stays the compiled pipeline's name (`ARBACE_AOT`, the packages `aot_arbace_*`, the tree `aot/`;
+> doc/NAMING-SURVEY.md, "The second rename as built").
 
 B1b's stages ([BOX-SURVEY.md](BOX-SURVEY.md) §6), as they are done. The decisions D3, D8-D14
 are the user's of 2026-10-11 (BOX-SURVEY.md §10).
@@ -1105,7 +1112,7 @@ microseconds either way (the lock, a write; natively a rename).
   store on its directory, a snapshot restored and taken again), `bin/jrt build --arch arm64`.
 - The oracle, native, against `known-go-amd64.edn`: 22,232 of 22,278, the 46 recorded; the box's
   subset against `known-go-box-amd64.edn`: 21,696 of 21,742, the 46 recorded.
-- `bin/box-suite` (`BOX_SUITE_RUN` main's renamed suite: c2a and the suite are unchanged): 67
+- `bin/box-suite` (`BOX_SUITE_RUN` main's renamed suite: repr/clojure and the suite are unchanged): 67
   namespaces, 19,645 of 19,646, as the reference.
 - `bin/box-vendor roundtrip`: 16 of 16 at all three levels; `kvm-tests`: hv, vmm (with the new
   `TestDirStoreLimits`: the limit, the lock file not a ref, a second store on the directory) and

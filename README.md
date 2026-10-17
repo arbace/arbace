@@ -115,26 +115,28 @@ ARBACE_BOX_ARCHES=amd64,arm64 bin/arbace-go --build --box && bin/box-arm64-vm ch
 
 ## Clojure code on Arbace
 
-c2a translates Clojure source into Arbace's: the names of the Clojure Arbace vendors
+repr/clojure translates Clojure source into Arbace's: the names of the Clojure Arbace vendors
 (`clojure.core` → `arbace.core`, `clojure.lang` → `arbace.lang`, ...), `.clj` and `.cljc` files
 into `.ae` files (a `.cljc` file's reader conditionals resolved for `:clj`), and the source
 changes the dialects' few divergences call for, by a table of rules; layout and comments are
-kept ([doc/C2A.md](doc/C2A.md)). Clojure's test suite and its libraries run on Arbace through
+kept ([doc/REPR-CLOJURE.md](doc/REPR-CLOJURE.md)). Clojure's test suite and its libraries run on Arbace through
 it.
 
 ```sh
-bin/c2a -o lib/ae path/to/library/src                       # .clj/.cljc -> .ae, into lib/ae
+bin/repr-clojure read -o lib/ae path/to/library/src          # .clj/.cljc -> .ae, into lib/ae
 ARBACE_PATH=lib/ae bin/arbace-go -e "(require 'my.lib)"
 ```
 
-The translators are c2a (Clojure → Arbace) and j2g (Java forms → Go forms, for the Go
-executable). The bridges between a language's text
-and its forms are the `repr` family, one command each with the verbs `read` and `print`:
-repr/java (Java → Java forms, `bin/repr-java`) and repr/go (Go → Go forms, and back,
-`bin/repr-go`); the build of a program held as Go forms is `bin/build-go` (`arbace.build.go`).
-From 2026-10-11 to 2026-10-17 the bridges were j2a and g2a (the build `bin/g2a build`) and j2g
-was a2g (Java forms were "class forms"), and until 2026-10-11 j2c, g2c and c2g, as the frozen branches, the journals and the dated records
-name them (doc/NAMING-SURVEY.md).
+The translators are c2j (Arbace's namespaces → Java forms: the back end, derived from Clojure's
+compiler) and j2g (Java forms → Go forms), a chain that compiles Arbace to Go for the
+executable. The bridges between a language's text and its forms are the `repr` family, one
+command each with the verbs `read` and `print`: repr/java (Java → Java forms, `bin/repr-java`),
+repr/go (Go → Go forms, and back, `bin/repr-go`) and repr/clojure (Clojure → Arbace,
+`bin/repr-clojure`; `print` to come); the build of a program held as Go forms is `bin/build-go` (`arbace.build.go`).
+From 2026-10-11 to 2026-10-17 the bridges were j2a and g2a (the build `bin/g2a build`), j2g
+was a2g (Java forms were "class forms"), repr/clojure was c2a (`bin/c2a`) and c2j the namespace
+`arbace.aot`; and until 2026-10-11 j2c, g2c and c2g, as the frozen branches, the journals and the
+dated records name them (doc/NAMING-SURVEY.md).
 
 ## Arbace's version
 
@@ -165,7 +167,7 @@ seed was printed from (the seed's `SEED.edn`).
   [doc/go/JAVA-BASE.md](doc/go/JAVA-BASE.md), how much of `java.base` it implements;
   [doc/go/SPEED-NOTES.md](doc/go/SPEED-NOTES.md), its speed; [doc/go/BOX-SURVEY.md](doc/go/BOX-SURVEY.md)
   and [doc/go/BOX-NOTES.md](doc/go/BOX-NOTES.md), the box (B1b); the rest of `doc/go/`, the notes of each part
-- [doc/C2A.md](doc/C2A.md): c2a, Clojure source translated into Arbace's
+- [doc/REPR-CLOJURE.md](doc/REPR-CLOJURE.md): repr/clojure, Clojure source translated into Arbace's
 - [doc/G2C-SURVEY.md](doc/G2C-SURVEY.md): the survey for repr/go (then g2c, from 2026-10-11 to 2026-10-17 g2a), Go as Arbace forms
 - [doc/STANDALONE-SURVEY.md](doc/STANDALONE-SURVEY.md) and [doc/STANDALONE-NOTES.md](doc/STANDALONE-NOTES.md):
   the standalone Arbace, the Go-hosted bootstrap and the seed
