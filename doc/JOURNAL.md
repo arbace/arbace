@@ -1005,3 +1005,11 @@ equal, the 3 others the modules that include `CTypes.h` (its comments outside th
 the `:lines` forms and printed modules unchanged. Found: R2's interface level was flaky (GHC
 lists deprecation warnings in a varying order), now sorted. The `--full` step about 5 minutes.
 HR9-HR13 decided as built (the user).
+
+## 2026-10-17: the box on the Mac under macOS 26
+
+The user ran the bundle of `73e35434` on the Mac (macOS 26.7.1, M2 Max): every step passed
+(`.tmp/mac-results.tar.gz`; recorded in doc/go/BOX-NOTES.md, before "The milestone"): the
+framework's tests, the checklist 46 of 46 on 4 and 1 vCPUs, the rebuild in the box equal byte for
+byte to Linux's (`beff33bf...`) in 180 s (352 s at the milestone), again from the action cache in
+61 s; idle 0.00 s of CPU; the clock about 5 ppm over an hour. So the box holds on macOS 26.

@@ -72,7 +72,6 @@ The current state of the work. This file is rewritten as things change. For the 
   in 40 h 29 min (about 247 times the host's 591 s; a2g alone 28.8 h). Seen there: the guest
   waiting on a spawn takes 3.5 vCPUs under emulation, an artifact of emulation (natively a few
   percent of one core; BOX-NOTES.md, BX117; left as it is, the user).
-- The Mac moved to macOS 26 (the user, 2026-10-16); the box's checks there not yet run on it.
 - Done (2026-10-16): the build's speed, third round (STANDALONE-NOTES.md, "third round"): the
   loader in parts (analysis 25 → 15 s), a2g's load parallel (10.7 → 5 s), reachability (19-21 →
   6 s), the compiled tree in several files (read 2 → 0.8 s), ids independent of the checkout's
@@ -128,11 +127,8 @@ The current state of the work. This file is rewritten as things change. For the 
   F6, F7. Measured there: `fib`
   6.40 → 0.168 ms (the JVM 0.16) by a `Long` fast path, var speculation and an unboxed worker;
   `loop-long` 11.87 → 1.09 ms without the class-initialization guards.
-- The box's checks on the Mac on macOS 26: the bundle built again (`73e35434`, every part from that commit), waiting on the
-  user's run of `./mac.sh all` and its `mac-results.tar.gz`.
-
-## Later
-
+- Done (2026-10-17): the box's checks on the Mac under macOS 26.7.1: all passed (the checklist 46
+  of 46, the rebuild in the box = Linux's byte for byte in 180 s, the clock about 5 ppm).
 - `repr/rust`: the survey written (doc/REPR-RUST-SURVEY.md, 2026-10-17; ../rust-lisp as prior
   art): recommended a bridge only, rust-lisp's grammar respelled, a helper on the host's rustc
   with its `rustc-dev` pinned; RS1-RS17 decided; its spec written (doc/rust/SPEC.md, RSS1-RSS10 decided as

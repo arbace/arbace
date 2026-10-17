@@ -3372,6 +3372,21 @@ runtime's sysmon, timers and stop-the-world waits) with every instruction of the
 and the monitor emulated, about 250 times slower. Parking sooner and longer would trade wake-up
 latency on the real targets for a shorter emulated run only: not done.
 
+**The Mac on macOS 26 (2026-10-17, `73e35434`).** The user's Mac moved to macOS 26.7.1 (M2
+Max, 12 cores, 96 GiB); the bundle of `bin/box-mac-bundle` at `73e35434` (every part built from
+that commit: the launcher, the arm64 guest of version `73e35434`, `hv.test`, the rebuild's store
+and expected image), `./mac.sh all`: `check`, `sign` (ad hoc, the hypervisor entitlement), `hv`
+(the framework's tests, all passing), the checklist **46 of 46** on 4 and 1 vCPUs (the earlier 42
+plus the checks added since), the rebuild (S8) **the image rebuilt on the Mac = the one built on
+Linux by the host's tools, byte for byte** (`beff33bf...`, 101,998,890 bytes), booted by its
+ref, in 180 s inside the box (236 s with the store's preparation; HV7 was 352 s at the
+milestone: the build's speed rounds), again from the action cache in 61 s, the same image. Idle
+at the prompt: 0.00 s of CPU over 20 s on 4 vCPUs and on 1. Times: `nil` 85 ms (the start), the
+`reduce` of a million 74-77 ms, `(fib 25)` 31 ms, sorting 200,000 strings 44-47 ms; 16 GiB with
+10 GiB touched in 5.2 s (7.1 s at the milestone). HV6's hour: the guest's clock 6 ms behind the
+Mac's at the start, 19 to 24 ms behind after an hour (about 5 ppm, as at the milestone; one
+reading 81 ms), no resync.
+
 ### The milestone (2026-10-15, `c3fdd36`)
 
 `bin/gate --full` passed at `c3fdd36` in 37 min 48 s, after two fixes of its first run's
