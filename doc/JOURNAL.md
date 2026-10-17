@@ -901,3 +901,23 @@ user: JP1 (the provenance hashes cover only the reader's sources, `repr_java_rea
 provenance files recorded again, the forms unchanged), JP2 and JP4 (a `:full` mode of
 `repr/java read` later), JP3 (the converter keeps an array creation's dimension annotations, its
 own commit `d6920df`).
+
+## 2026-10-17: the survey of repr/rust
+
+At the user's request ("spawn a survey about repr/rust, you may find resources in
+../rust-lisp/"): doc/REPR-RUST-SURVEY.md (from the branch `repr-rust-survey`, `9e1b090`; proposals
+RS1-RS17, uses RU1-RU4, since U was taken). rust-lisp (/root/rust-lisp at `f28e0de8c`, read only;
+a fork of rust master `602727f26`, 1.101.0-nightly): rustc with an s-expression front end, its
+tree round trip exact over 37,743 files, std built from 1,574 `.rsl` files; macros as forms when
+their arguments are expressions, else raw token trees. Arbace's reader reads 1 of its 5 `.rsl`
+files (paths `a::b` are invalid tokens; 41 of 128 lexemes fail, some misread silently). On the
+host's rustc 1.99.1: `RUSTC_BOOTSTRAP=1 rustc -Zunpretty=ast-tree` works with nothing installed;
+a 183-line rustc_private helper builds against Alpine's `rustc-dev-1.99.1-r0` (fetched into
+`.tmp/`, pinned by SHA-256, not installed) and dumped std's 1,074 files in 5.8 s (131 MB of forms,
+all read by Arbace's reader) and 12,141 of 12,144 files of the Cargo cache's crates; rustc's own
+pretty printer gives the same tree for 1,069 of std's 1,074 files, so a printer after
+`rustc_ast_pretty` is proven. Recommended: a bridge only, rust-lisp's grammar respelled, paths as
+`std.io/Write`, `rs/` heads, a generic helper on the host's rustc (its `rustc-dev` and `rust-src`
+pinned), lines-only and byte-for-byte modes, the tree, interface (rustdoc's JSON or HIR) and text
+levels over std's five crates, after repr/haskell's R-milestones, about 7 to 10 days. Proposals
+open.

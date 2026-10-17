@@ -132,6 +132,11 @@ The current state of the work. This file is rewritten as things change. For the 
 
 ## Later
 
+- `repr/rust`: the survey written (doc/REPR-RUST-SURVEY.md, 2026-10-17; ../rust-lisp as prior
+  art): recommended a bridge only, rust-lisp's grammar respelled, a helper on the host's rustc
+  with its `rustc-dev` pinned; after repr/haskell's R-milestones, 7-10 days; proposals RS1-RS17
+  open.
+
 - The standalone Arbace: no Java binary compatibility, with Java at the source level through repr/java.
   The language is Clojure plus class forms, and later forms for Go. The goal is a
   self-sustaining REPL in a virtual sandbox, in Arbace down to the bare metal ISA, in the style
