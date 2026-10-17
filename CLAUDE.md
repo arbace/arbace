@@ -97,7 +97,8 @@ Prior art:
     the names of the vendored Clojure, `.clj`/`.cljc` into `.ae`, a table of rules for the
     dialects' divergences; `bin/clojure-tests` translates Clojure's suite with it.
   - `arbace/j2a/`: the Java → class forms converter.
-  - `arbace/g2a/`: Go as Go forms and back (spec `doc/go/SPEC.md`; helpers `tools/godump`,
+  - `arbace/g2a/`: Go as Go forms and back (spec `doc/go/SPEC.md`; mode `:full` keeps the text:
+    comments, spellings, layout, printed back byte for byte; helpers `tools/godump`,
     `tools/gocmp`; `bin/g2a`), on the tools' host (`G2A_GO_EXE` names another executable).
   - `arbace/a2g/`: the class forms → Go forms translator (spec `doc/go/A2G-SPEC.md`; `bin/a2g`),
     on the tools' host (`A2G_GO_EXE`), its classes translated in parallel (`A2G_JOBS`, default at
@@ -170,7 +171,8 @@ Prior art:
   smoke test, the box's guests from `tamago/`'s forms byte-identical to TamaGo's originals'
   (`bin/arbace-go --build --box`, `bin/tamago-vendor check`), the box's smoke test, its oracle's
   subset and `bin/box-suite`, then
-  `bin/arbace-go --fixpoint`; g2a's round trips (`bin/g2a roundtrip amd64`, `linux/amd64`), the
+  `bin/arbace-go --fixpoint`; g2a's round trips (`bin/g2a roundtrip amd64`, `linux/amd64`, and
+  `--text amd64`: mode `:full` printed back to the original text, byte for byte), the
   box's vendoring checks (`bin/box-vendor roundtrip`, `kvm-tests`, `purego-check`),
   `bin/tamago-vendor verify`, `bin/x509roots-vendor verify`, `check`; Go's toolchain as forms
   (`bin/toolchain-vendor verify`, `check`). Run it when the class forms'

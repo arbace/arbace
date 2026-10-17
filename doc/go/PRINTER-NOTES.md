@@ -7,7 +7,7 @@ proven on hand-written forms (below) and on the converter's forms of all of std 
 `$GOROOT/test` ([CONVERTER-NOTES.md](CONVERTER-NOTES.md), "The round trip").
 
 ```sh
-bin/g2a-print [--layout lines|gofmt] [--no-line-directives] [--line-file] \
+bin/g2a-print [--layout lines|gofmt|full] [--no-line-directives] [--line-file] \
               [--src DIR [--build]] [--gofmt] FORMS.ae OUTDIR
 bin/g2a-print-tests [REGEX]
 ```
@@ -54,8 +54,9 @@ go/printer starts a new section; `print-text/align` is `text/tabwriter`'s `forma
 
 ## Layout
 
-Two layouts; the default is `lines` when the `go/file` form carries a `:line` (it was read
-from text) and `gofmt` otherwise (forms built by a program):
+Three layouts; the default is `full` for a package of `:positions :full`, else `lines` when
+the `go/file` form carries a `:line` (it was read from text) and `gofmt` otherwise (forms built
+by a program):
 
 - **`gofmt`**: lines are ignored and the code is laid out as go/printer lays out a tree
   without positions, except that function bodies with statements always span lines
@@ -123,8 +124,8 @@ from text) and `gofmt` otherwise (forms built by a program):
   The lines layout is gofmt's only when the forms leave gofmt's room (the converter's forms
   do: they have the lines of gofmt'd Go). Running gofmt over it is not safe in general: gofmt
   keeps lines only where the layout is already its own (A10).
-- **`:full`** (§10.2, columns): not implemented; a package with `:positions :full` is printed
-  in the lines layout.
+- **`full`** (§10.2, §12.3): every token at its recorded line and column; the original text
+  (below, "Mode :full as built").
 
 ## Coverage
 
@@ -155,8 +156,11 @@ checks that every head of §13.5, the metadata the printer reads and the `go/pac
 | §14 | 14.1 (both as the spec writes it and on Go's lines), 14.2 utf8 excerpts, 14.3 sort excerpts, all in the lines layout; 14.5 the amended forms | `s14_1_sample`, `s14_1_sample_lines`, `s14_2_utf8`, `s14_3_sort`, `s14_5_amended` |
 | errors | `values` in an expression, a statement in an expression, `let` without vector, bad `set!` operator, declarations before `go/file` | `e01`-`e05` |
 
-Not covered: mode `:full`. Directives not spelled `//go:` are free-standing `go/directive`
-forms (A6 as accepted), covered by `s09_directives`.
+Mode `:full` is covered by the converter's test `positions-full-text` (the spec's sample and
+search and the unit files of each section, test/g2a/convert/, converted with `--full` and
+printed back byte for byte) and by the text level of the round trip (below). Directives not
+spelled `//go:` are free-standing `go/directive` forms (A6 as accepted), covered by
+`s09_directives`.
 
 ## Tests
 
@@ -279,10 +283,111 @@ packages) and the programs (1,713 and 1,707) pass every level too (`bin/g2a roun
 
 What remains:
 
-1. Mode `:full` (columns, `:go/pos`, `:go/apos`): the converter writes it, the printer prints
-   such a package in the lines layout. With columns the positions would be the original's
-   (`gocmp -keep-positions` leaves 1 std package and 3 programs on amd64 that differ by
-   columns or by `/*line*/` directives inside expressions).
-2. Comments other than doc comments and directives are not reproduced (§10.4, N8); go/printer
-   reformats doc comments (lists, code blocks), which only matters for the doc text, which no
-   level compares.
+1. Mode `:full` is printed since 2026-10-16 (below). The oracle's levels still compare no
+   positions; with the full layout they could (`gocmp -keep-positions`).
+2. In mode `:lines` comments other than doc comments and directives are not reproduced
+   (§10.4, N8); go/printer reformats doc comments (lists, code blocks), which only matters for
+   the doc text, which no level compares. Mode `:full` reproduces all of them.
+
+## Mode :full as built (2026-10-16)
+
+At the user's request (2026-10-16): Go forms converted with `--full` print back to the original
+Go text. `bin/g2a convert --full ...` then `bin/g2a print FORMS.ae OUT` (the full layout is the
+default for such a package) gives each file byte for byte.
+
+**What the converter adds.** The node positions of §10.2 do not hold the whole text, so mode
+`:full` writes more, only in that mode (SPEC §10.2, "As built", lists the keys): every comment
+as the source spells it, the source's semicolons and trailing commas, its white space beyond
+gofmt's rule, the file's tail; literal spellings where the printer would spell the value
+otherwise; parentheses; the inner operators of chains; `cond`'s branches; and the positions
+the forms spliced away (implicit returns, struct and interface braces, receivers' and type
+parameters' brackets, labels, key colons, the type switch's guard, qualified names, local and
+import declarations' keywords and parentheses). The converter reads the Go files themselves
+for the text (`:text-dir`, from `arbace.g2a.main`: the package's directory, or `$GOROOT/test`'s
+for a program). Two shapes differ from `:lines`' in this mode: a chain does not continue
+through parentheses, and `-(1)` stays a negation of a parenthesized literal. The `:lines`
+output is unchanged.
+
+**What the printer does** (`print-file-full`, `print-emit`'s full mode). The forms are read as
+in the other layouts; `print-code/wrap-full` replaces each literal child that has a position
+by a record of its value, position, spelling and parentheses. The forms are then printed by
+the same code as the other layouts, with each token given its position (`e/at!`; names,
+keywords, brackets, operators); the emitter collects the tokens instead of writing them, with
+separators it cannot decide (`e/soft`: a `;` between statements, a trailing comma) and
+whether gofmt would put a blank before each. Comment-lines, doc comments, directives and
+`//line` corrections are not written: the file's comments are data. At the end
+(`full-result`) the comments, semicolons and trailing commas are merged in by position, the
+printer's own semicolons and trailing commas dropped, and the tokens laid out: a positioned
+token at its line and column, white space as tabs at the start of a line and spaces elsewhere
+unless `:go/space` records the source's run, and an unpositioned token (a comma between
+elements, a spec's `=`, `else`, a slice's colon, `type` in `.(type)`) after the token before it
+as gofmt spaces it; when the next positioned token is on its line, the room between them is
+shared: blanks beyond gofmt's go before the first token gofmt separates by a blank (an aligned
+`=`), missing ones are dropped from the left, and a run goes after a block comment when there
+is no room before it (`f(x /* c */, y)`). Grammar parentheses are not added (the source's
+are recorded), names of equal type are grouped only when they share the type node, and a local
+`var ( ... )` or `type ( ... )` group is printed as one.
+
+**The text level** (SPEC §3.1): `bin/g2a roundtrip --text [[GOOS/]ARCH] [--tests]` converts
+the round trip's corpora with `--full`, prints them into `.tmp/g2a/cand-text-...` and compares
+each printed file with its original byte for byte (`arbace.g2a.main --text`, no build); the
+known differences, with their reasons, are test/g2a/roundtrip-text-known.edn, shared by the
+configurations. Results (2026-10-16, go1.27.1):
+
+| configuration | std (packages, files: byte-identical) | `$GOROOT/test` programs (files: byte-identical, known) | time |
+|---|---|---|---|
+| tamago/amd64 | 379, 1,742: 1,742 | 1,708: 1,705, 3 | 156 s |
+| tamago/arm64 | 378, 1,738: 1,738 | 1,703: 1,700, 3 | 168 s |
+| linux/amd64 | 382, 1,834: 1,834 | 1,714: 1,711, 3 | 168 s |
+| tamago/amd64 with tests (`--tests`) | 554, 2,935: 2,935 | | 179 s |
+
+The forms of mode `:full` are about 3.4 times those of `:lines` (std on tamago/amd64: 103.9 MB
+against 30.7 MB), and converting std takes about twice as long (124 s against 61 s). The `:lines` output is unchanged: `bin/g2a roundtrip amd64` and
+`linux/amd64` show no regression against their references, the converter's and printer's tests
+pass, and the Go printed from `tamago/`'s, `tamago/cmd/`'s and `box/`'s forms (2,504 files) and
+a2g's program (`bin/g2a build --print-only`, 1,572 files) is the same byte for byte before and
+after.
+
+The 3 known differences are the 3 programs with an empty declaration group (`import ( )` in
+`test/empty.go`, a local `var ()` in `fixedbugs/issue49611.go` and `typeparam/issue49611.go`):
+an empty group declares nothing, and the forms have no element to hold it (G2F6).
+
+Found on the way: ordinary semicolons are in no node (`x := 1;` in the old tests, `if ; c`),
+nor are trailing commas (`[]int{1, 2, }`, `int(1.0,)`); a comment between a token and an
+unpositioned comma (`crypto.Hash(0) /* no pre-hashing */, false`); labeled declarations'
+labels; a negative literal written `-(1e9)` (`encoding/json/v2`'s tests).
+
+**Proposals** (the user's decisions, built as recommended; not yet accepted):
+
+- **G2F1. Comments as data in mode `:full`.** Every comment of a file is `go/file`'s
+  `:go/comments [[line col text] ...]`, as the source spells it (doc comments and directives
+  too), and the printer takes all comments from there; the `;` lines stay for reading.
+  Alternative: read the `;` lines from the forms text, which lose columns, `/* */` against
+  `//`, and the spelling of doc comments. Recommended: data.
+- **G2F2. The source's text beyond positions.** White space runs other than gofmt's
+  (`:go/space`), the tail (`:go/tail`), semicolons (`:go/semis`) and trailing commas
+  (`:go/trails`), read from the source by the converter. Alternative: record every comma's
+  position too (no placement rule for commas; larger forms), or have the helper emit the token
+  stream. Recommended: as built (the corpora need nothing more).
+- **G2F3. The converter reads the Go files** in mode `:full` (`:text-dir`), since the dump has
+  no source text. Alternative: the helper (`tools/godump`) adds the text's data to the dump.
+  Recommended: the converter (the helper stays dumb; without the files, comments come from the
+  dump and the rest is missing, and the text is not the original's).
+- **G2F4. Shapes that differ from `:lines`.** In mode `:full` a chain stops at parentheses
+  (`(a + b) + c` is `(+ ^{:go/parens ...} (+ a b) c)`) and `-(1)` is `(- 1)` with its
+  parentheses. Alternative: keep `:lines`' shapes and record the parentheses of sub-chains
+  apart. Recommended: as built (gc's tree is the same; the forms stay simple).
+- **G2F5. Literal spellings only where they differ** from the printer's spelling of the value
+  (`:go/atext`, `:go/text`); struct tags always (`:go/tag-text`). Alternative: always.
+  Recommended: as built (most literals need nothing).
+- **G2F6. Empty declaration groups** (`import ( )`, a local `var ()`) stay unrepresented and are
+  known differences (3 programs). Alternative: a form for them (`(go/var)` with no specs as a
+  statement, an empty `:imports` decl marker). Recommended: as built.
+- **G2F7. The text level stays outside the gate.** `bin/g2a roundtrip --text` takes about 3
+  minutes per configuration and no build. Alternative: add `bin/g2a roundtrip --text` (amd64)
+  to `bin/gate --full`, beside the round trip's checks. Recommended: add it to `--full`.
+- **G2F8. Keys and names.** The new metadata keys of SPEC §10.2 ("As built"), the layout name
+  `full` and `bin/g2a roundtrip --text`. Recommended: as built.
+
+**Decided (2026-10-17, the user):** G2F1-G2F6 and G2F8 (a), as built; G2F7 against "stays
+outside": `bin/g2a roundtrip --text amd64` in `bin/gate --full` (its g2a step), as recommended.
