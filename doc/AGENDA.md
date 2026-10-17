@@ -134,7 +134,8 @@ The current state of the work. This file is rewritten as things change. For the 
 
 - `repr/rust`: the survey written (doc/REPR-RUST-SURVEY.md, 2026-10-17; ../rust-lisp as prior
   art): recommended a bridge only, rust-lisp's grammar respelled, a helper on the host's rustc
-  with its `rustc-dev` pinned; RS1-RS17 decided; its spec written (doc/rust/SPEC.md, RSS1-RSS10 open); the build in
+  with its `rustc-dev` pinned; RS1-RS17 decided; its spec written (doc/rust/SPEC.md, RSS1-RSS10 decided as
+  recommended); the build in
   RR1-RR6, 7-10 days.
 
 - The standalone Arbace: no Java binary compatibility, with Java at the source level through repr/java.

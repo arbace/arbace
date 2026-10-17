@@ -986,3 +986,8 @@ all 27,945 multi-segment paths read back as `ns/name` but one, 78.3% of 33,174 l
 Clojure literals; rustdoc's JSON of `core` with `option.rs` reprinted equal to the original's once
 spans are removed (the interface level). Decisions S1-S34; proposals RSS1-RSS10, open; the build
 in milestones RR1-RR6.
+
+## 2026-10-17: repr/rust's RSS1-RSS10 decided (the user)
+
+All as recommended (doc/rust/SPEC.md, "Decided"). Its build (RR1-RR6) follows repr/haskell's
+milestones, unless capacity allows sooner.

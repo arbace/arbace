@@ -1592,3 +1592,12 @@ Points of interest:
   (its body's `{` stands alone on line 50, after the `where` clause), and on the last `println!`
   `:rs/breaks [[1 74]]` (the format string begins line 74), `^{:line 76} total` and `:rs/close 77`
   (the `)` stands alone on line 77, and it is a span of the call's token stream).
+
+## Decided (2026-10-17, the user)
+
+RSS1-RSS10 as recommended: one head `:has` for `:` (RSS1); `div=` for `/=` (RSS2);
+`rs/macro-call` for item macro calls (RSS3); literals by S10's canonical rule, `(:lit "text")`
+otherwise (RSS4); namespaces by the file's path (RSS5); `include!`d expression files at RR6
+(RSS6); rustdoc's JSON without spans as the interface level (RSS7); the helper written anew,
+nothing vendored (RSS8); line metadata on method chains (RSS9); converted forms not tracked
+(RSS10).
