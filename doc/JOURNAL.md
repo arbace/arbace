@@ -774,3 +774,11 @@ own interpreter of Go forms, a type checker in Arbace, typed Go-closure nodes in
 forms, a table of the program's compiled packages, Go packages as namespaces of late-bound vars,
 the check over `$GOROOT/test`. GR0 (the spec) started on the branch `go-forms-spec`; GR1-GR6
 after the coming re-seed. The essential gate passed on main after repr/haskell R1's merge (7:38).
+
+## 2026-10-17: Go's build cache kept three hours (the user)
+
+The disk reached 87% (Go's build cache 32 GB, `.tmp/` 29 GB, with up to five agents building at
+once); the finished work's scratch removed and the cache trimmed of entries unused for two hours
+(to 19 GB; 58% used). At the user's request, `bin/lib/gocache.bash`'s default lowered from six
+hours to three (`ARBACE_GOCACHE_KEEP_MIN`, 180): Go refreshes an entry's time at most hourly, so
+three hours still keeps every build in progress.
