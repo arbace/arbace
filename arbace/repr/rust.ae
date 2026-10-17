@@ -66,14 +66,14 @@
 (defn- dumped [dump sym]
   (some #(when (and (seq? %) (= sym (first %))) (second %)) dump))
 
-(def ^:private pin
-  (delay
-    (let [f (File. "tools/rsdump/RUSTC_VERSION")]
-      (when (.exists f)
-        (into {} (for [l (str/split-lines (slurp f))
-                       :let [[k v] (str/split (str/trim l) #"\s+" 2)]
-                       :when v]
-                   [(keyword (if (= k "version") "rustc" k)) v]))))))
+(defn- read-pin
+  "tools/rsdump/RUSTC_VERSION's pins: {:rustc :commit :driver}"
+  [^String f]
+  (when (and f (.exists (File. f)))
+    (into {} (for [l (str/split-lines (slurp f))
+                   :let [[k v] (str/split (str/trim l) #"\s+" 2)]
+                   :when v]
+               [(keyword (if (= k "version") "rustc" k)) v]))))
 
 (defn crate-of
   "The corpus's crate of a file (its path as rustc was given it), with the file's kind"
@@ -104,7 +104,7 @@
                   :corpus (:name corpus)}
                  {:crate (get opts "--crate" "main") :crate-type (get opts "--crate-type")
                   :rel file :ns-root (get opts "--ns-root")})
-          {:keys [ns forms warnings]} (cv/convert-file dump (assoc conf :src-lines src-lines :pin @pin))
+          {:keys [ns forms warnings]} (cv/convert-file dump (assoc conf :src-lines src-lines :pin (read-pin (get opts "--pin"))))
           ns (if-let [r (:ns-root conf)]
                (symbol (str r "." (str/replace (str/replace file #"\.rs$" "") #"[/]" ".")))
                ns)
@@ -124,7 +124,7 @@
 
 (defn- cmd-read [args]
   (let [{:keys [opts args]} (parse-args args #{"--jobs" "-o" "--report" "--root" "--only" "--corpus"
-                                               "--crate" "--crate-type" "--ns-root"})
+                                               "--crate" "--crate-type" "--ns-root" "--pin"})
         jobs (Long/parseLong (get opts "--jobs" "8"))
         out (get opts "-o" ".tmp/repr-rust/forms/files")
         root (get opts "--root")
@@ -138,6 +138,12 @@
                                     (assoc r :file (if root (str/replace (rel root d) #"\.edn$" "") (.getName (File. ^String d))))))
                            dumps)
         t1 (System/currentTimeMillis)
+        ;; two files of one conversion that map to one namespace (SPEC §2.1): an error each
+        clash (set (for [[ns rs] (group-by :ns (filter :ns results)) :when (> (count rs) 1) r rs] (:dump r)))
+        results (mapv #(if (contains? clash (:dump %))
+                         (assoc % :status :error :error (str "another file of the conversion maps to the namespace " (:ns %)))
+                         %)
+                      results)
         by (group-by :status results)
         warnings (apply merge-with + (map :warnings results))]
     (doseq [r results :when (not= :ok (:status r))]

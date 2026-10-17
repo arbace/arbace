@@ -111,6 +111,12 @@ Prior art:
     `tools/hsdump/GHC_VERSION`; `bin/repr-haskell read`, `print`, `roundtrip` (`--iface`: GHC's
     interfaces too; `--text`: mode `:full` printed back to the original text, byte for byte), `test`; corpus GHC
     9.14.1's boot libraries, `test/haskell/corpus-ghc-9.14.1.edn`), evaluated from the checkout,
+    not embedded; `arbace.repr.rust` (`arbace/repr/rust{.ae,/}`), Rust as Rust forms and back
+    (spec `doc/rust/SPEC.md`, notes `doc/rust/RUST-NOTES.md`; helper `tools/rsdump`, a
+    `rustc_private` driver on the host's rustc, pinned by `tools/rsdump/RUSTC_VERSION`, built
+    against `rustc-dev` fetched as an apk into `.tmp/` and pinned by `tools/rsdump/apks.sha256`;
+    `bin/repr-rust read`, `print`, `roundtrip` (rustc's trees and lines), `test`; corpus std's five
+    crates of `rust-src` 1.99.1, `test/rust/corpus-rustc-1.99.1.edn`), evaluated from the checkout,
     not embedded.
   - `arbace/repr/clojure{.ae,/}`: `arbace.repr.clojure`, Clojure's bridge (`doc/REPR-CLOJURE.md`;
     `bin/repr-clojure read`, `print` to come, `check`): Clojure source into Arbace's, the names
@@ -200,7 +206,8 @@ Prior art:
   `--text amd64`: mode `:full` printed back to the original text, byte for byte), repr/haskell's
   (`bin/repr-haskell roundtrip --iface --text`: GHC's trees and lines over GHC 9.14.1's boot
   libraries, then their interfaces compiled at `-O1`, then mode `:full` printed back byte for
-  byte, and `test`; on the host's GHC), the box's vendoring checks (`bin/box-vendor roundtrip`, `kvm-tests`, `purego-check`),
+  byte, and `test`; on the host's GHC), repr/rust's (`bin/repr-rust roundtrip`: rustc's trees and
+  lines over std's five crates, and `test`; on the host's rustc), the box's vendoring checks (`bin/box-vendor roundtrip`, `kvm-tests`, `purego-check`),
   `bin/tamago-vendor verify`, `bin/x509roots-vendor verify`, `check`; goi's checker (`bin/goi
   annotations`, `test --gc`, after repr/go's round trips); Go's toolchain as forms
   (`bin/toolchain-vendor verify`, `check`). Run it when the Java forms'
