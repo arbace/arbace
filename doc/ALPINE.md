@@ -73,7 +73,7 @@ scripts and has not yet been tried on a fresh host.
 | jrt-convert's generator JDK, and the boot JDK for jdk26u | `openjdk25-jdk` (on this host by `openjdk25-src`) |
 | Building jdk26u (headless) | `alpine-sdk autoconf zip alsa-lib-dev cups-dev fontconfig-dev` |
 | Bootstrapping TamaGo's Go from source | `go` (Alpine's Go, used for nothing else) |
-| repr/haskell's helper `tools/hsdump` and its checks (`bin/repr-haskell`, since 2026-10-17): GHC's parser through its `ghc` library, CPP through GHC's driver | `ghc` (9.14.1, pinned by `tools/hsdump/GHC_VERSION` and checked; on this host by `cabal`; its CPP runs `cc` from `gcc`, a dependency of `ghc`) |
+| repr/haskell's helper `tools/hsdump` and its checks (`bin/repr-haskell`, since 2026-10-17): GHC's parser through its `ghc` library, CPP through GHC's driver; the interface level (`roundtrip --iface`, since R2): `ghc --make`, `ghc --show-iface`, `hsc2hs` | `ghc` (9.14.1, pinned by `tools/hsdump/GHC_VERSION` and checked; on this host by `cabal`; its CPP and `hsc2hs` run `cc` from `gcc`, a dependency of `ghc`; `hsc2hs` ships in `ghc`) |
 
 Since 2026-10-16 nothing Arbace builds needs a C toolchain: go-whim's tests and their C guests
 (which needed `clang` and a linker), jrt's `--race` and `bin/j2g-race` (Go's race detector needs

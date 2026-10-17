@@ -14,7 +14,14 @@
         the round trip's tree level (SPEC §9.2): for each module of the corpus, the helper's tree
         and lines of the original (ORIG/PKG/FILE.tree, .lines) against the printed module's
         (CAND/PKG.trees/FILE.tree, .lines); the known differences FILE (a map from PKG/FILE to its
-        reason) excuse a module, and a listed module that no longer differs is a failure."
+        reason) excuse a module, and a listed module that no longer differs is a failure.
+    compare-iface --corpus FILE --orig DIR --cand DIR --printed DIR --builds DIR --known FILE
+            --report FILE [--mode lines|full] [--only REGEX] [--times TEXT] [--prune]
+        the round trip's interface level (SPEC §9.3): for each converted module, ghc --show-iface
+        of its original's interface (ORIG/PKG/M.iface) against its printed module's (CAND/PKG/M.iface),
+        compared after normalize-iface (mode :lines by default); PRINTED holds the printed modules,
+        BUILDS the build logs (BUILDS/cand/PKG.build.log), for a module that did not compile;
+        --prune removes the texts of the modules found equal."
   (:require [arbace.repr.haskell.convert :as cv]
             [arbace.repr.haskell.write :as wr]
             [arbace.repr.haskell.print :as pr]
@@ -225,6 +232,190 @@
                         :results (into (sorted-map) (for [[k r] results] [k (dissoc r :detail :cand)]))}))))
     (if (and (empty? unexpected) (empty? fixed)) 0 1)))
 
+;;; The round trip's interface level (SPEC §9.3)
+
+(def ^:private self-recomp-lines
+  "The lines of ghc --show-iface dropped in both modes: the source's hash, the hash over the rest,
+  and the hash of the flags (which include the output directory)"
+  #"^\s*(src hash|interface hash|flags: fingerprint):")
+
+(defn- core-arg-end
+  "The end of the Core argument that starts at i in an unfolding's text: a parenthesized group, a
+  string literal or an atom; nil at a closing bracket (no argument there)"
+  [^String s i]
+  (let [n (count s)]
+    (loop [j i depth 0 in-str false]
+      (if (>= j n)
+        j
+        (let [c (.charAt s j)]
+          (cond
+            in-str (cond (= c \\) (recur (+ j 2) depth true)
+                         (= c \") (recur (inc j) depth false)
+                         :else (recur (inc j) depth true))
+            (= c \") (recur (inc j) depth true)
+            (= c \() (recur (inc j) (inc depth) false)
+            (contains? #{\) \] \}} c) (cond (pos? depth) (if (= depth 1) (inc j) (recur (inc j) (dec depth) false))
+                                            (= j i) nil
+                                            :else j)
+            (and (zero? depth) (or (Character/isWhitespace c) (= c \,))) (if (= j i) nil j)
+            :else (recur (inc j) depth false)))))))
+
+(defn- skip-ws [^String s i]
+  (loop [i i] (if (and (< i (count s)) (Character/isWhitespace (.charAt s i))) (recur (inc i)) i)))
+
+(defn- core-args
+  "The [start end] of the n Core arguments after position i, or nil when there are fewer"
+  [^String s i n]
+  (loop [i i acc []]
+    (if (= (count acc) n)
+      acc
+      (let [b (skip-ws s i) e (when (< b (count s)) (core-arg-end s b))]
+        (when (and e (> e b)) (recur e (conj acc [b e])))))))
+
+(def ^:private srcloc-con
+  "A construction of GHC.Internal.Stack.Types.SrcLoc in an unfolding: its constructor or its
+  wrapper ($WSrcLoc), applied to package, module, file, start line, start column, end line, end
+  column; not in a type (after ::, -> or =>) nor a declaration's head"
+  #"(?<![\w.$'])(?:GHC\.Internal\.Stack\.Types\.)?\$?W?SrcLoc(?=\s)")
+
+(defn blank-srcloc-columns
+  "Every SrcLoc construction's two columns written _ (SPEC §9.3, mode :lines): the arguments
+  themselves, and when an argument is a local variable (a stable unfolding of an INLINE function
+  let-binds the call stack's parts: let { $dIP5 :: Int ... = I# 47# } in ... $WSrcLoc ... $dIP5 ...),
+  the literal its let binds"
+  [^String s]
+  (let [m (re-matcher srcloc-con s)
+        sb (StringBuilder.)
+        vars (volatile! #{})]
+    (loop [from 0]
+      (if (.find m)
+        (let [st (.start m) e (.end m)
+              before (str/trimr (subs s (max 0 (- st 12)) st))
+              args (when-not (or (< st from) (re-find #"(::|->|=>|data|type|newtype)$" before)) (core-args s e 7))]
+          (if args
+            (let [[[c1 c2] _ [c3 c4]] (subvec args 4 7)]
+              (doseq [[b e] [[c1 c2] [c3 c4]]
+                      :let [a (subs s b e)]
+                      :when (re-matches #"[\p{L}_$][\w$'.]*" a)]
+                (vswap! vars conj a))
+              (.append sb (subs s from c1)) (.append sb "_")
+              (.append sb (subs s c2 c3)) (.append sb "_")
+              (recur c4))
+            (recur from)))
+        (.append sb (subs s from))))
+    (reduce (fn [t v]
+              (str/replace t (re-pattern (str "(let \\{\\s*" (java.util.regex.Pattern/quote v)
+                                              " :: [^=]*=\\s*(?:GHC\\.Internal\\.Types\\.I#\\s+)?)-?\\d+#"))
+                           "$1_"))
+            (str sb) (sort @vars))))
+
+(defn normalize-iface
+  "ghc --show-iface's text as the interface level compares it (SPEC §9.3). Both modes drop the
+  self-recompilation lines; mode :lines also writes the spans of unfoldings' strings as lines
+  (N.hs:3:1-14 -> N.hs:3, N.hs:(3,1)-(5,20) -> N.hs:3-5), blanks the two columns of SrcLoc
+  constructions (SrcLoc pkg mod file 3# 1# 5# 20# -> 3# _ 5# _, also through $WSrcLoc and boxed
+  arguments), every fingerprint (the ABI, export, orphan, usage and declaration hashes, which
+  cover the columns), and the usages of the files CPP included (addDependentFile: the printed
+  module is the preprocessed text, which includes none, SPEC §2.8)."
+  [^String text mode]
+  (let [t (str/join "\n" (remove #(re-find self-recomp-lines %) (str/split-lines text)))]
+    (if (= mode :full)
+      t
+      (-> t
+          (str/replace #"([\w./'-]+\.(?:hs|hsc|lhs|hs-boot)):\((\d+),\d+\)-\((\d+),\d+\)" "$1:$2-$3")
+          (str/replace #"([\w./'-]+\.(?:hs|hsc|lhs|hs-boot)):(\d+):\d+(?:-\d+)?" "$1:$2")
+          blank-srcloc-columns
+          (str/replace #"\b[0-9a-f]{32}\b" "<fingerprint>")
+          (str/replace #"\s*addDependentFile \"[^\"]*\" <fingerprint>," "")
+          (str/replace #",\s*addDependentFile \"[^\"]*\" <fingerprint>(?=\])" "")
+          (str/replace #"\[\s*addDependentFile \"[^\"]*\" <fingerprint>\]" "[]")))))
+
+(defn iface-units
+  "What is compared of a normalized text: its lines in mode :full; in mode :lines its tokens
+  (split at white space: the pretty printer's line breaks follow the widths of the columns)"
+  [^String t mode]
+  (if (= mode :full) (str/split-lines t) (str/split (str/trim t) #"\s+")))
+
+(defn- build-error
+  "The first error ghc --make reported for a module in a build log, or nil"
+  [^String log ^String file]
+  (when log
+    (let [ls (str/split-lines log)
+          i (first (keep-indexed (fn [i l] (when (and (str/starts-with? l file) (re-find #": error:" l)) i)) ls))]
+      (when i (str/join "\n" (subvec ls i (min (count ls) (+ i 6))))))))
+
+(defn compare-iface-module
+  "The interface level of one module: {:status :ok|:differs|...}; a difference at the index of
+  the first unit (line or token, iface-units) that differs, with the units around it"
+  [orig-iface cand-iface printed log file mode]
+  (let [o (when (.exists (File. ^String orig-iface)) (slurp orig-iface))
+        c (when (.exists (File. ^String cand-iface)) (slurp cand-iface))]
+    (cond
+      (nil? o) {:level :iface :status :no-original}
+      (not (.exists (File. ^String printed))) {:level :iface :status :not-printed}
+      (nil? c) {:level :iface :status :printed-fails-to-compile :detail (build-error log file)}
+      :else (let [a (iface-units (normalize-iface o mode) mode)
+                  b (iface-units (normalize-iface c mode) mode)]
+              (if (= a b)
+                {:status :ok :lines (count (str/split-lines o))}
+                (let [[i x y] (first-line-diff a b)
+                      sep (if (= mode :full) "\n" " ")
+                      around (fn [v] (str/join sep (subvec v (max 0 (- i 30)) (min (count v) (+ i 12)))))]
+                  {:level :iface :status :differs :at i :orig x :cand y
+                   :detail (around a) :cand-detail (around b)}))))))
+
+(defn- cmd-compare-iface [args]
+  (let [{:keys [opts]} (parse-args args #{"--corpus" "--orig" "--cand" "--printed" "--builds" "--known" "--report" "--only" "--times" "--mode"})
+        corpus (read-string (slurp (get opts "--corpus")))
+        mode (keyword (get opts "--mode" "lines"))
+        known-file (get opts "--known")
+        known (if (and known-file (.exists (File. ^String known-file))) (read-string (slurp known-file)) {})
+        only (some-> (get opts "--only") re-pattern)
+        logs (into {} (for [p (:packages corpus)
+                            :let [f (File. (str (get opts "--builds") "/cand/" (:name p) ".build.log"))]
+                            :when (.exists f)]
+                        [(:name p) (slurp f)]))
+        mods (for [p (:packages corpus) [m f] (:modules p)
+                   :let [k (str (:name p) "/" f)]
+                   :when (or (nil? only) (re-find only k))]
+               [k (:name p) (str m) f])
+        results (pmap-jobs 16
+                           (fn [[k pkg m f]]
+                             [k (compare-iface-module (str (get opts "--orig") "/" pkg "/" m ".iface")
+                                                      (str (get opts "--cand") "/" pkg "/" m ".iface")
+                                                      (str (get opts "--printed") "/" pkg "/" f)
+                                                      (get logs pkg) f mode)])
+                           mods)
+        ok (filter #(= :ok (:status (second %))) results)
+        failing (remove #(= :ok (:status (second %))) results)
+        unexpected (remove #(contains? known (first %)) failing)
+        fixed (filter #(and (contains? known (first %)) (= :ok (:status (second %)))) results)
+        by-status (frequencies (map (comp :status second) failing))]
+    (when (get opts "--prune")
+      ;; the texts of the equal modules removed (the scratch stays small; SPEC §9.3)
+      (doseq [[k r] ok :let [[_ pkg m] (first (filter #(= k (first %)) mods))]]
+        (.delete (File. (str (get opts "--orig") "/" pkg "/" m ".iface")))
+        (.delete (File. (str (get opts "--cand") "/" pkg "/" m ".iface")))))
+    (doseq [[i [k r]] (map-indexed vector unexpected)]
+      (println "DIFFERS" k (pr-str (dissoc r :detail :cand-detail)))
+      (when (< i 20)
+        (when (:detail r) (println "  original:\n" (:detail r)))
+        (when (:cand-detail r) (println "  printed:\n" (:cand-detail r)))))
+    (doseq [[k _] fixed] (println "FIXED (listed as known, no longer differs)" k))
+    (doseq [[k r] failing :when (contains? known k)] (println "known" k (pr-str (select-keys r [:status :at])) "--" (get known k)))
+    (println (format "repr-haskell roundtrip (interface level, %s): %d modules, %d equal, %d differ (%s), %d known, %d unexpected, %d fixed; %d lines of interfaces compared%s"
+                     (name mode) (count results) (count ok) (count failing) (pr-str by-status)
+                     (count (filter #(contains? known (first %)) failing)) (count unexpected) (count fixed)
+                     (reduce + (keep (comp :lines second) results))
+                     (if-let [t (get opts "--times")] (str "; seconds: " t) "")))
+    (when-let [rep (get opts "--report")]
+      (spit rep (with-out-str
+                  (prn {:modules (count results) :equal (count ok) :differ (count failing) :mode mode
+                        :by-status by-status :unexpected (mapv first unexpected) :fixed (mapv first fixed)
+                        :times (get opts "--times")
+                        :results (into (sorted-map) (for [[k r] results] [k (dissoc r :detail :cand-detail)]))}))))
+    (if (and (empty? unexpected) (empty? fixed)) 0 1)))
+
 (defn -main [& args]
   (let [[verb & more] args
         status (try
@@ -232,7 +423,8 @@
                    "read" (cmd-read more)
                    "print" (cmd-print more)
                    "compare" (cmd-compare more)
-                   (do (println "usage: -m arbace.repr.haskell read|print|compare ...") 2))
+                   "compare-iface" (cmd-compare-iface more)
+                   (do (println "usage: -m arbace.repr.haskell read|print|compare|compare-iface ...") 2))
                  (catch Throwable e
                    (.printStackTrace e)
                    1))]
