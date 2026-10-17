@@ -804,3 +804,43 @@ GS1-GS15, open.
 ## 2026-10-17: goi's GS1-GS15 decided (the user)
 
 All as recommended (doc/go/GOI-SPEC.md, "Decided"). GR1-GR6 after the coming re-seed.
+
+## 2026-10-17: the j2g batch merged (F4, F2's j2g and interpreter fixes)
+
+On the branch `j2g-batch` (`951c8eb`), merged into main; details in doc/FUTAMURA-SURVEY.md, "F4
+and F2's j2g fixes as built". F4 (a): `arbace/j2g/start.ae` lists the 82 runtime classes the
+program initializes before any user code (derived by `test/j2g/start_classes.ae` from
+`ARBACE_TRACE_INIT`'s trace of three runs); each static method of a listed class becomes a
+guard-free `C_m_NoInit` called only by compiled code (1,724 methods, 43,830 call sites), after
+`jrt.StartCheck` (status 70 when a listed class is not started). Benchmarks (eval-bench as a
+namespace): geometric mean 0.87; loop-long 12.20 → 4.37 ms, loop-double 1.55 → 0.53; fib 6.30 →
+6.68 (gc now inlines `Numbers`' boxed generic operations; F3 replaces them). F2.2 (anonymous
+classes with constructor arguments: `analyze-anon` built the constructor before the superclass's
+was chosen), F2.3 (`AbstractMethodError`), F2.4 (Clojure constants made at class
+initialization), F2.5 (the interpreter's lambdas get default methods), F2.6's collision (c2j's
+classes outside `arbace/` named `A_..._A`), abstract classes' constructors in the member tables
+(`InstantiationError`, reflection as the JVM's). diffcheck: 12,463 of 12,471 agree (known 22 →
+8, excluded 5 → 1, Java forms classes excluded 19 → 16); the essential gate passed; the fixpoint
+G1 = G2 = G3 on the branch. Decided by the user: F4.1 (a) the 82, F4.2 (a) re-measured with F3,
+F4.3 (a) a deviation recorded in J2G-SPEC §6.2. The agent once used `pgrep -f` by pattern,
+read-only, while waiting on a build (against the session's rule; nothing was signalled).
+
+## 2026-10-17: the survey of a kernel and a user part in the box
+
+At the user's choice: doc/go/KERNEL-USER-SURVEY.md (from the branch `kernel-user-survey`,
+`91598b3`). Findings: today the guest cannot run below ring 0/EL1 (amd64: DPL 0 segments only,
+no U/S bit, no SYSCALL setup, every IDT gate ends the guest; arm64: every page EL1-only and UXN,
+TTBR1 off; TamaGo has no signals or asynchronous preemption). An experiment (a scratch TamaGo
+guest on the box's board, the monitor unchanged) dropped to ring 3 on nested KVM: SYSCALL and
+SYSRETQ 24.5 ns, INT 0x80 and IRETQ 102 ns, a CR3 switch 96-136 ns, against the doorbell's
+13-18 µs and a spawned tool guest's 84-170 ms; Go ran unchanged at ring 3 with every page
+user-accessible, until a GC assist ran the collector at ring 3 and failed to unwind at the
+crossing. One shared heap cannot give isolation (every allocation a system call, or a collector
+trusting user pointers, which is only safe for memory-safe user code, and then the hardware adds
+nothing). Prior art: GoTEE (`813dc65a`, read only) runs a whole second TamaGo runtime in ARM user
+mode, values crossing as JSON-RPC; TamaGo's `user/linux` runs a `GOOS=tamago` program as a Linux
+process with about five system calls. Recommended: a TamaGo runtime per process at EL0 (the same
+image, a page table per process, the text shared: about 3.5 MB plus heap and stacks), language
+isolation inside processes, S7's guests where virtualization exists, behind one spawn request;
+the system calls the doorbell's call block by SYSCALL/SVC; the compilers and the REPL outside
+the kernel. Plan KU0-KU6, 17 to 27 days, no patch to Go's runtime. Proposals K1-K12, open.

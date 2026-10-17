@@ -146,21 +146,11 @@ The current state of the work. This file is rewritten as things change. For the 
   projection, j2g derived from the interpreter, one definition of each language's semantics
   (Clojure, the class forms, later Go). The cost: binding times in a dynamic language (vars,
   `eval`, macros at load time).
-- A kernel and a user part in the box (the user, 2026-10-14): the infrastructure (the
-  collector, the scheduler, the compiler, I/O, the store) at EL1/ring 0 and the application
-  level at EL0/ring 3, inside one guest. Today the guest is one TamaGo program at EL1/ring 0, one
-  address space, one Go runtime for both. To survey: what crosses the boundary (a call ABI like
-  the doorbell's, one level down); one heap the kernel's collector scans across the privilege
-  levels, or a heap per user part; the scheduler's goroutines running user code at EL0 (the
-  page tables and exception vectors TamaGo's board sets up); the cost of the crossings for a
-  REPL's fine-grained calls; against the isolation S7 already has (a guest per tool, spawned) and
-  isolation in the language (namespaces, capabilities). A guest per tool needs a hypervisor
-  under Arbace: on bare metal (the box's long-term target, TamaGo's boards) there is none unless
-  Arbace is it (EL2 on arm64, VMX root on amd64: go-whim's monitor inside Arbace, where the
-  hardware boots it at EL2 or gives VT-x), so the EL1/EL0 split is the isolation that works on
-  any hardware, the guests only where virtualization is there. Prior art: Go's runtime as a user
-  process; GoTEE (github.com/usbarmory/GoTEE: TamaGo unikernels and user-mode applets, TrustZone
-  on arm), to check; unikernels with a privilege split.
+- A kernel and a user part in the box: the survey written (doc/go/KERNEL-USER-SURVEY.md,
+  2026-10-17): recommended a TamaGo runtime per process at EL0 (the same image, a page table per
+  process), language isolation inside processes, S7's guests where virtualization exists, one
+  spawn request; SYSCALL round trip 24.5 ns measured at ring 3; plan KU0-KU6, 17-27 days;
+  proposals K1-K12 open.
 - The mapped start measured without nested KVM.
 - A note from the user (2026-10-13): the tooling of the Mac GUI app Moshi Go may be useful for
   Arbace, to study when Arbace's REPL gets a user interface beyond the terminal. Its build info

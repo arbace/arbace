@@ -245,6 +245,11 @@
        (not (and (= :method-ref (:op node)) (= :bound (:kind node))))
        (not (guarded-static? node))))
 
+(defn- compiled-caller?
+  "Is the function being written in a class of a compiled namespace (arbace.c2j's)?"
+  []
+  (boolean (when-let [c (:class *f*)] (nm/compiled-class? c))))
+
 (defn- guarded-static?
   "A static access that runs C_Init() first (from code outside the class and its subclasses)."
   [node]
@@ -253,6 +258,9 @@
           o (or (:declarer f) (:owner f))]
       (and (m/translated? o) (not (m/trivial-init? o))
            (not (and (:class *f*) (env/subclass? (:class *f*) o)))
+           ;; compiled code reads the statics of a class initialized at start unguarded
+           ;; (Futamura F4, arbace.j2g.start)
+           (not (and (compiled-caller?) (m/start-class? o)))
            ;; a fn's code reads its nest's top-level class's statics (its namespace's
            ;; constants): its allocation initialized that class (SA158)
            (not (and (:class *f*) (not (:static *f*)) (= o (m/nest-top (:class *f*)))
@@ -1096,8 +1104,12 @@
 
       (= kind :static)
       (let [[_ args] (args-for desc (:args node))]
-        (rv (apply list (if (= mowner "java/lang/Object") (fail "static Object method")
-                            (m/class-sym (pkg) mowner (str "_" base)))
+        (rv (apply list (cond (= mowner "java/lang/Object") (fail "static Object method")
+                              ;; compiled code calls a class initialized at start through the
+                              ;; method's guard-free entry (Futamura F4, decls/method-forms)
+                              (and (compiled-caller?) (m/start-class? mowner))
+                              (m/class-sym (pkg) mowner (str "_" base "_NoInit"))
+                              :else (m/class-sym (pkg) mowner (str "_" base)))
                    (map :x args))))
 
       (= kind :special)
