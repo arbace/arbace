@@ -3,7 +3,8 @@
 The build of repr/haskell's milestones ([SPEC.md](SPEC.md) §10.1), what each part does and where it
 departs from or adds to the spec, with the reasons. R1 was built on 2026-10-17 (branch
 `repr-haskell-r1`, from main at `82345a08`), on the host's GHC 9.14.1 (Alpine's `ghc-9.14.1-r2`,
-its `ghc` library `ghc-9.14.1-f453`) and stage 0 of that commit.
+its `ghc` library `ghc-9.14.1-f453`) and stage 0 of that commit. R2, the interface level, was built
+the same day (branch `repr-haskell-r2`, from main at `f515a959`; "R2" below).
 
 ## Decided (2026-10-17, the user)
 
@@ -195,3 +196,102 @@ The converter reads every forms file it writes back with Arbace's reader and com
 forms in memory (H3: every bare name, literal and form), and counts the places where a node the
 printer would parenthesize has no parentheses in the source (warnings in its log; none in the
 corpus).
+
+## R2: the interface level
+
+Built on 2026-10-17 (branch `repr-haskell-r2`, from main at `f515a959`), on the same GHC and the
+stage 0 of that commit. SPEC §9.1 (level 2) and §9.3 define the level; §10.5 records what the
+build changes in the spec.
+
+### What was built
+
+| part | file | what |
+|---|---|---|
+| command | `bin/repr-haskell roundtrip --iface`, `--iface-only` | the tree level, then the interface level over the modules it printed (`make repr-haskell-iface`) |
+| comparison | `arbace/repr/haskell.ae` (`compare-iface`, `normalize-iface`) | `ghc --show-iface` of both sides, normalized and compared |
+| corpus | `test/haskell/corpus-ghc-9.14.1.edn` (`:iface`, a package's `:hsc-flags`, `:genprimopcode`) | the optimization level, what the level extracts of the tarball, how the modules R1 does not convert are made |
+| known differences | `test/haskell/roundtrip-ghc-9.14.1-iface-known.edn` | none (`{}`) |
+| cases | `test/haskell/iface/{layout,braces,changed}/N.hs`, `bin/repr-haskell test`'s step 4 | the normalizations checked both ways |
+| gate | `bin/gate --full`'s `repr-haskell` step: `roundtrip --iface && test` | |
+
+### How it runs
+
+1. **The tools** (once, keyed by their sources): genprimopcode, built by the host's GHC from the
+   tarball's `utils/genprimopcode` (its `Lexer.hs` and `Parser.hs` are shipped generated, so no
+   alex or happy), and `primops.txt` from `compiler/GHC/Builtin/primops.txt.pp` through `cc -E
+   -undef -traditional -P -x c`, as hadrian's rules make them, into `.tmp/repr-haskell/tools/`.
+   `corpus fetch` extracts these two paths (the corpus's `:iface :extract`) with the packages.
+2. **The trees**: each package's directory copied (without `tests/`) to
+   `.tmp/repr-haskell/iface/CORPUS/orig/PKG`; its `.hsc` modules through `hsc2hs` with the
+   package's `:hsc-flags` (its own and the installed `ghc-internal`'s and `rts`'s include
+   directories, for `HsBaseConfig.h` and `MachDeps.h`, which the tarball has only as `.in`
+   templates or not at all); `GHC/Internal/Prim.hs` and `PrimopWrappers.hs` from genprimopcode
+   (`--make-haskell-source`, `--make-haskell-wrappers`). The tree is copied to `cand/PKG` and
+   every converted module replaced by its printed one (a module that did not print is removed,
+   and reported as such).
+3. **The builds**: per package, the two sides concurrently, `ghc --make` from inside the tree with
+   the parse's flags, `-i` of the source root, `-O1`, `-fkeep-going -no-link -j`; `ghc-internal`
+   292 modules (its 244 converted, 22 `.hsc`, 2 generated, 24 boot files), `base` 241, `ghc-prim`
+   and `ghc-bignum` one each. No module fails on either side.
+4. **The texts**: `ghc --show-iface` of each converted module's `.hi`, into
+   `{orig,cand}.ifaces/PKG/M.iface`; the objects and the trees are removed, and after the
+   comparison the texts of the equal modules too (`--prune`), so the scratch keeps only the logs
+   and the texts of modules that differ (208 KB after a run with none; the two builds' outputs
+   peak at about 120 MB of texts and 50 MB of objects).
+5. **The comparison** (`compare-iface`): both texts normalized as SPEC §9.3 and §10.5 say, mode
+   `:lines`, and compared token by token; the report `.tmp/repr-haskell/iface/CORPUS.report.edn`.
+
+### Results
+
+| package | modules | interfaces equal (mode `:lines`) | equal under mode `:full`'s normalization alone |
+|---|---|---|---|
+| `ghc-internal` | 244 | 244 | 42 |
+| `base` | 237 | 237 | 193 |
+| `ghc-prim`, `ghc-bignum` | 1, 1 | 2 | 2 |
+| total | 483 | 483 (1,072,106 lines) | 237 |
+
+The normalizations at work: 279 modules have spans in their unfoldings' strings, 52 build
+`SrcLoc`s in theirs, 86 (the CPP modules) list included files among their usages; every module
+whose text has a span or a column differs in its fingerprints. The first run, with §9.3's
+normalizations as the spec wrote them (lines, `SrcLoc` with literal arguments, the hashes over
+them), left 48 modules differing: the 44 CPP modules whose originals include files besides the
+two every CPP run includes (`ghcversion.h`, `stdc-predef.h`; `addDependentFile`), and four with
+columns the rule did not reach: `GHC.Internal.Control.Monad.ST.Imp` (a `SrcLoc` broken over lines
+differently, the columns' widths), `GHC.Internal.Foreign.Marshal.Alloc` and `GHC.Internal.List`
+(`$WSrcLoc` with boxed arguments), `GHC.Internal.Foreign.Marshal.Array` (an `INLINE` function's
+let-bound `$dIP5 = I# 47#`). SPEC §10.5's four additions (HR6) make them equal. No known
+differences.
+
+Times on this host (64 cores, shared): preparing the trees 5 s, the two builds at `-O1` 116 s,
+the texts 11 s, the comparison about 35 s; the tree level as R1, about 35 s; `bin/repr-haskell
+test` about 15 s. The gate step (`roundtrip --iface && test`) took 211 s, about 3.5 minutes
+(R1's, about a minute).
+
+`bin/repr-haskell test`'s step 4 checks the normalizations both ways on `test/haskell/iface/`:
+`braces/N.hs` is `layout/N.hs` in explicit braces with its columns moved (an `INLINE` function
+with a pattern-match failure's span, a `HasCallStack` call): equal in mode `:lines`, different in
+mode `:full` (the ABI hash, the span, the `SrcLoc`'s columns); `changed/N.hs` changes one value,
+and differs in mode `:lines`. The worked example's original and printed modules compile to equal
+interfaces.
+
+A fix to R1 found on the way: on a fresh `.tmp/`, `roundtrip` wrote the conversion's log into
+`.tmp/repr-haskell/forms/` before creating it, and failed; it creates it now.
+
+### Choices for the user (HR6-HR8)
+
+- **HR6 The normalizations of mode `:lines` as built.** (a) Adopt §10.5's four into §9.3: tokens,
+  every fingerprint, `SrcLoc` columns through the wrapper, boxing and let-bound variables, CPP's
+  `addDependentFile` usages; (b) keep §9.3's list as written and list the modules they cover as
+  known differences (44 CPP modules, one let-bound case, the reflowed ones). *Recommended: (a)*:
+  each follows from what `:lines` already gives up (columns) or from S4/S5 (the forms are the
+  preprocessed text), and known differences would hide real ones in those modules.
+- **HR7 The optimization level.** (a) `-O1`, the corpus's `:iface :opt` (Cabal's default):
+  unfoldings in the interfaces, so the level judges the code GHC inlines across modules, 116 s
+  for both builds; (b) `-O0` (E5's): no unfoldings, the span and `SrcLoc` normalizations idle,
+  about a minute less; (c) `-O2` (hadrian's release builds): slower, more unfoldings.
+  *Recommended: (a).*
+- **HR8 The printed modules in place.** (a) All of a package's printed modules in their places
+  at once, one build per side; (b) one printed module at a time among the originals (§9.3's
+  wording), 483 builds. *Recommended: (a)*: in mode `:lines` the usages' hashes are blanked, so a
+  difference in one module shows in that module (and in what inlines it), and (b) would cost
+  hundreds of package builds for the same verdict when all are equal.

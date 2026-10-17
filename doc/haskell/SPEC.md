@@ -8,7 +8,8 @@ spec now, in parallel with F2; the build after it"). It is bound by the survey's
 follows. Milestone R1 (§10.1) was built on 2026-10-17: the helper, the converter, the braces
 printer and the tree level over `base`, `ghc-internal`, `ghc-prim` and `ghc-bignum`, all 483
 modules equal; what it adds to this text and where it departs is §10.4 and
-[HASKELL-NOTES.md](HASKELL-NOTES.md). The experiments that
+[HASKELL-NOTES.md](HASKELL-NOTES.md). Milestone R2, the interface level over the same corpus, was
+built the same day: all 483 modules' interfaces equal at `-O1` (§10.5). The experiments that
 validate the spec's choices (Appendix A) were run on the host's GHC 9.14.1 (Alpine's
 `ghc-9.14.1-r2`) and the stage 0 of main at `f0d7fc2f` (`target/seed/amd64/arbace`, amd64);
 their scripts and inputs are `test/haskell/`.
@@ -1159,7 +1160,7 @@ bin/repr-haskell test                       the spec's cases (test/haskell/)
 | | what | judge |
 |---|---|---|
 | R1 | the helper; the converter and the braces printer in `:lines`; `base`, `ghc-internal`, `ghc-prim`, `ghc-bignum` without CPP, then with CPP (built 2026-10-17: 483 of 483 modules, §10.4) | tree level |
-| R2 | the interface level over R1's corpus | interface level |
+| R2 | the interface level over R1's corpus (built 2026-10-17: 483 of 483 modules, §10.5) | interface level |
 | R3 | `:full`: the helper's annotations and comments, the converter's metadata, the full printer | text level, tree level in `:full` |
 | R4 | the layout printer | tree and interface levels |
 | R5 | the other boot libraries | all of the above |
@@ -1251,7 +1252,41 @@ survey's E3).
   has an element for (none in the corpus); an infix left-hand side with constructor-chain operands
   as one `:infix` (ghc-lisp S14); a `foreign import`'s `safe` kept when written.
 - **Commands (§9.6)**: `bin/repr-haskell helper`, `corpus fetch|list`, `dump`, `read`, `print`,
-  `roundtrip`, `test` as sketched; `check` (the interface level) is R2's.
+  `roundtrip`, `test` as sketched; the interface level is R2's (§10.5).
+
+### 10.5 As built: R2 (2026-10-17)
+
+[HASKELL-NOTES.md](HASKELL-NOTES.md), "R2", records the build; what it changes in this text:
+
+- **The command (§9.6)**: the interface level is `bin/repr-haskell roundtrip --iface` (the tree
+  level, then the interface level over the modules it printed; `--iface-only` over those of an
+  earlier run), not a separate `check --levels` verb; its known differences are
+  `test/haskell/roundtrip-ghc-9.14.1-iface-known.edn` (§9.5: one file per corpus and level).
+- **How a package is compiled (§9.3)**: `ghc --make` from inside a copy of the package's tree (the
+  same relative paths on both sides), with the flags the helper parses with (language,
+  extensions, `-haddock`, `-this-unit-id`, CPP's `-D` and `-I`), `-i` of the modules' source
+  root, and the corpus's `:iface :opt`, `-O1` (HR7). `ghc-internal` is compiled as its own unit
+  against `rts` alone; `base`, `ghc-prim` and `ghc-bignum` against the host's installed
+  `ghc-internal`. The modules R1 does not convert are the same on both sides: the `.hsc` modules
+  through the host's `hsc2hs`, the boot files as they are, and `GHC.Internal.Prim` and
+  `GHC.Internal.PrimopWrappers` generated as hadrian generates them (genprimopcode, built from
+  the tarball's `utils/genprimopcode`, over `compiler/GHC/Builtin/primops.txt.pp` through `cc -E
+  -undef -traditional -P`). The printed side has every converted module of the package in its
+  place at once, one build per side (HR8), not one printed module at a time.
+- **Mode `:lines`'s normalizations (§9.3)**, as built (HR6): besides the three dropped lines and
+  the spans in unfoldings' strings, (1) the comparison is of the texts' tokens, not their lines:
+  `--show-iface`'s pretty printer breaks lines by width, and a column's digits change the width;
+  (2) *every* fingerprint is blanked, the declarations' own hashes too (they cover their
+  unfoldings); (3) a `SrcLoc` construction's two columns are blanked through its wrapper
+  (`$WSrcLoc`), boxed arguments (`(I# 7#)`) and let-bound ones (a stable unfolding of an `INLINE`
+  function binds the call stack's parts, `let { $dIP5 :: Int = I# 47# } in`, before
+  `$WSrcLoc ... $dIP5 ...`); (4) the usages of the files CPP included (`addDependentFile`) are
+  dropped: the printed module is the preprocessed text (§2.8), which includes none, and the
+  forms record those files in `:cpp`'s `:files`.
+- **Results**: all 483 modules' interfaces equal (1,072,106 lines of `--show-iface` text); with
+  mode `:full`'s normalization alone 237 are equal and 246 differ, the differences being columns
+  and the hashes over them, and CPP's inclusions. No known differences. About 2.5 minutes on this
+  host beyond the tree level, the two builds of the corpus at `-O1` 116 s.
 
 ## 11. Decisions and open questions
 

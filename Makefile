@@ -13,7 +13,7 @@ CLOJURE_TESTS_GO ?= target/arbace-go/amd64/arbace-tests
   box box-smoke box-oracle box-suite box-tools box-rebuild mac-bundle arm64-vm-check \
   gate gate-full suite oracle diffcheck verify jdk-verify edge-verify fixtures-verify tamago-verify \
   toolchain-verify box-vendor-verify x509roots-verify repr-go-roundtrip repr-go-roundtrip-text \
-  repr-haskell-roundtrip repr-haskell-test alpine-check clean \
+  repr-haskell-roundtrip repr-haskell-iface repr-haskell-test alpine-check clean \
   check-makefile
 
 help: ## list the targets
@@ -112,6 +112,8 @@ repr-go-roundtrip-text: ## mode :full prints the original text back, byte for by
 	bin/repr-go roundtrip --text --dirs linux/amd64
 repr-haskell-roundtrip: ## Haskell -> forms -> Haskell over GHC 9.14.1's base, ghc-internal, ghc-prim, ghc-bignum: GHC's trees and lines (bin/repr-haskell roundtrip)
 	bin/repr-haskell roundtrip
+repr-haskell-iface: ## the same, then GHC's interfaces of the originals and the printed modules compiled, compared (bin/repr-haskell roundtrip --iface)
+	bin/repr-haskell roundtrip --iface
 repr-haskell-test: ## repr/haskell's cases: the reader's samples, the spec's worked example (bin/repr-haskell test)
 	bin/repr-haskell test
 
