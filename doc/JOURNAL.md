@@ -991,3 +991,17 @@ in milestones RR1-RR6.
 
 All as recommended (doc/rust/SPEC.md, "Decided"). Its build (RR1-RR6) follows repr/haskell's
 milestones, unless capacity allows sooner.
+
+## 2026-10-17: repr/haskell R3, the text level
+
+On the branch `repr-haskell-r3` (`3211d9a`), merged into main; details in doc/haskell/SPEC.md
+§10.6 and HASKELL-NOTES's R3 section. The helper's `dump --full` (version 2) writes the
+exact-print annotations, the text, GHC's lexer tokens and, for CPP modules, the module view; the
+converter's `:full` metadata (`:hs/pos` spans and tokens, `:hs/punct`, `:hs/text`,
+`:hs/comments`, `:hs/space`, `:hs/tail`, `:hs/where`, `:hs/parens`); the full printer places
+every token at its recorded position. Over the 483 modules (86 with CPP): all byte-identical to
+the source (4,018,293 bytes; CPP modules against their module view), the `:full` tree level 480
+equal, the 3 others the modules that include `CTypes.h` (its comments outside the module view);
+the `:lines` forms and printed modules unchanged. Found: R2's interface level was flaky (GHC
+lists deprecation warnings in a varying order), now sorted. The `--full` step about 5 minutes.
+HR9-HR13 decided as built (the user).

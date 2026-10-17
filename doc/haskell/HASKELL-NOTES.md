@@ -466,3 +466,11 @@ entries of `Deprecated names:` and `Deprecated exports:` in both modes now (`sor
   and this one comes and goes); (c) building with `-j1` (slower, and the uniques need not be
   stable). *Recommended: (a).*
 
+
+## Decided (2026-10-17, the user): HR9-HR13
+
+As built: token positions from GHC's lexer paired in order with the printer's tokens (HR9); the
+`:full` metadata keys as built (HR10); the converter failing a module whose printed tokens do not
+match the source's (HR11); the three modules that include `CTypes.h` kept as known differences of
+the `:full` tree level, their texts byte-identical (HR12); deprecation warnings sorted at the
+interface level (HR13).
