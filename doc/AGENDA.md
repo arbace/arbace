@@ -100,8 +100,8 @@ The current state of the work. This file is rewritten as things change. For the 
   variables guarded; "Java forms" in prose; c2a and `arbace.classes.*` unchanged; R1-R5 decided.
   The seed remade (`56fabe20…`) and verified. Next: R4 (`tamago/` reconverted: `:go/label-line`
   since the `:full` mode), then F2 and repr/go's directory tests side by side.
-- Running: the survey of `repr/haskell` (the user, 2026-10-17; ../ghc-lisp, GHC with an
-  s-expression front end, as prior art; branch `repr-haskell-survey`).
+- The survey of `repr/haskell` written (doc/REPR-HASKELL-SURVEY.md; ghc-lisp as prior art):
+  proposals H1-H14 open; recommended after `repr/java print` and F2-F7.
 - After the rename (the user, 2026-10-17: "Create jaf print after the naming debate settled"):
   `repr/java print`, Java's bridge printing back, class forms → Java source, with a round trip like
   repr/go's (Java → forms → Java → forms, the two forms equal; the text level as repr/go's

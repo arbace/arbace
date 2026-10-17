@@ -538,3 +538,18 @@ user: R1 (repr/java's `.ae` writer renamed `layout` with `repr/java print`), R2,
 in java-surface.edn, a record of removed stages), R4, R5 (the checks as verbs of one command).
 The seed remade from the merge's G3: `56fabe20...` (was `b566d53a...`), 5,530,756 bytes,
 verified (the same archive printed again at `8c3a289`; stage 0 = G1 = G2 = G3, `79eb9ef9...`).
+
+## 2026-10-17: the survey of repr/haskell
+
+At the user's request ("spawn a survey about repr/haskell, you may find resources in
+../ghc-lisp/"): doc/REPR-HASKELL-SURVEY.md (from the branch `repr-haskell-survey`, `fa3d318`).
+Prior art: ghc-lisp (/root/ghc-lisp at `db7adf93`, read only), GHC with a second front end for
+Haskell as s-expressions (`.hsl`), its round trip exact over 4,863 of GHC's files and 99.6% of
+its testsuite. Measured: Arbace's reader reads 1 of ghc-lisp's 11 `.hsl` files (the others stop
+at their first signature, `Invalid token: ::`), and misreads some silently (`'a'`, `"\1234"`,
+`x@y`), so its forms need respelling; an 86-line generic helper on the host's GHC 9.14.1 dumped
+659 of `base`'s 799 files (the rest mostly CPP) in 4.9 s, 20 MB of forms Arbace reads in 12 s;
+ghc-lisp's printer does not port to 9.14.1 (four constructors missing). Recommended: a bridge
+only, ghc-lisp's grammar respelled by repr/go's rule, a generic helper with the converter and
+printer in Arbace, the tree, interface and text levels first, after `repr/java print` and
+F2-F7; about 6 to 9 days to the tree and text levels over `base`. Proposals H1-H14, open.
