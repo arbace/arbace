@@ -1549,6 +1549,12 @@ protocol:
   progress by the current thread), so a stale list fails loudly. A stack trace leaves out
   `C_m`'s frame above `C_m_NoInit`'s.
 
+
+*Deviation (2026-10-17, F4.3, the user):* compiled code calls the start classes' statics without
+the guard (`C_m_NoInit`, after `jrt.StartCheck`); code of a compiled namespace run by another
+thread while a start class is still being initialized by the main thread (during `arbace.core`'s
+loading) would see it half-initialized, where the JVM makes that thread wait. The startup starts
+no such thread (agents and futures run after it), so it is recorded, not prevented.
 ### 6.3 Go's package initialization
 
 Go's own package initialization runs only data: the class registrations of §5.11, the string

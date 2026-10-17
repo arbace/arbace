@@ -965,3 +965,6 @@ and F4 merge. j2g asks nothing new of the JVM, so `jdk/edge.edn` does not change
   starts no such thread (agents and futures run after it). (a) Accept, recorded as a deviation
   of §6.2; (b) `jrt.StartCheck` on every compiled loader's call to wait for the classes in
   progress by other threads. *Recommended: (a)*.
+
+**Decided (2026-10-17, the user):** F4.1 (a) the 82 classes, as built; F4.2 (a) re-measured with F3
+before deciding; F4.3 (a) recorded as a deviation of J2G-SPEC §6.2.
