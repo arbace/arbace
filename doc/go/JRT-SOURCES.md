@@ -112,7 +112,7 @@ directories equal).
    doubles the work per level. The generated `CharacterData*` tables are string concatenations
    of hundreds of lines (nested `+`), and their conversion did not finish in 10 minutes. `pp`
    is now memoized per form (by identity) and column within `form-text`
-   (`arbace/repr/java/print.ae`, `*pp-cache*`); the 8 generated files convert in 14 s, and the
+   (`arbace/repr/java/print.ae`, `*pp-cache*`; since 2026-10-17 `layout.ae`); the 8 generated files convert in 14 s, and the
    output is unchanged (the 176 other files converted with and without the change: identical
    trees; `bin/repr-java check` passes).
 2. **The Java forms compiler wrote NaN constants with the sign bit set.** `Double.NaN` is
