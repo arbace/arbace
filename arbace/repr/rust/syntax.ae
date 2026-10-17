@@ -1,0 +1,350 @@
+(ns arbace.repr.rust.syntax
+  "What the converter and the printer of repr/rust share (doc/rust/SPEC.md §3, §7.1;
+  doc/rust/RUST-NOTES.md): the name rule (§3.2), paths as symbols (§3.3), literals and their
+  canonical spellings (§3.6, S10), and Rust's token gluing (rustc_ast's Token::glue), by which
+  the converter compares the printer's tokens for macro arguments and attribute meta items with
+  rustc's (§7.1, S16)."
+  (:require [arbace.string :as str])
+  (:import [java.lang StringBuilder]))
+
+;;; Atoms with a line (the converter's; the writer writes their values)
+
+(defrecord Lit [value line])
+
+(defn lit? [x] (instance? Lit x))
+
+(defn lv
+  "The form itself: a Lit's value"
+  [x]
+  (if (instance? Lit x) (:value x) x))
+
+(defn count-newlines
+  "The number of newlines in s"
+  [^String s]
+  (loop [i (.indexOf s "\n") n 0]
+    (if (neg? i) n (recur (.indexOf s "\n" (inc i)) (inc n)))))
+
+;;; Names (SPEC §3.2)
+
+(def ^:private bare-cache (java.util.concurrent.ConcurrentHashMap.))
+
+(defn- read1
+  "The one form text t reads as between delimiters, or ::none"
+  [^String t]
+  (try
+    (let [v (read-string (str "[" t "]"))]
+      (if (= 1 (count v)) (first v) ::none))
+    (catch Throwable _ ::none)))
+
+(defn bare?
+  "Whether the Rust name text t is written bare: the reader reads t alone as one symbol without a
+  namespace whose name is t"
+  [^String t]
+  (let [c (.get bare-cache t)]
+    (if (some? c)
+      c
+      (let [x (read1 t)
+            r (boolean (and (symbol? x) (nil? (namespace x)) (= (name x) t)))]
+        (.put bare-cache t r)
+        r))))
+
+(defn name-form
+  "The form of a Rust name: the symbol when bare, else (:name \"t\")"
+  [^String t]
+  (if (bare? t) (symbol t) (list :name t)))
+
+(def ^:private qual-cache (java.util.concurrent.ConcurrentHashMap.))
+
+(defn qualified-reads?
+  "Whether ns/nm reads back as the qualified symbol with that namespace and name"
+  [^String ns ^String nm]
+  (let [k (str ns "/" nm)
+        c (.get qual-cache k)]
+    (if (some? c)
+      c
+      (let [x (read1 k)
+            r (boolean (and (symbol? x) (= (namespace x) ns) (= (name x) nm)))]
+        (.put qual-cache k r)
+        r))))
+
+(defn path-symbol
+  "The symbol of a path of name texts (no generic arguments), or nil when it does not read back:
+  one segment by the name rule, several as ns/name, the segments but the last joined by ."
+  [names]
+  (let [n (count names)]
+    (cond
+      (zero? n) nil
+      (= 1 n) (when (bare? (first names)) (symbol (first names)))
+      :else (let [ns (str/join "." (butlast names)) nm (last names)]
+              (when (and (every? #(and (pos? (count %)) (not (str/includes? % ".")) (not (str/includes? % "/"))) names)
+                         (qualified-reads? ns nm))
+                (symbol ns nm))))))
+
+(defn chain-reads?
+  "Whether the field chain text t (a.b.0) reads back as the one symbol t"
+  [^String t]
+  (bare? t))
+
+;;; Literals (SPEC §3.6)
+
+(defn- hexval [^String h] (Long/parseLong h 16))
+
+(defn unescape
+  "The code points a cooked literal's symbol denotes (Rust's escapes: \\n \\r \\t \\\\ \\0 \\' \\\"
+  \\xNN \\u{...}, a line continuation), or nil for an escape it does not know"
+  [^String sym]
+  (let [n (count sym)]
+    (loop [i 0 out (transient [])]
+      (if (>= i n)
+        (persistent! out)
+        (let [c (.charAt sym i)]
+          (if (not= c \\)
+            (let [cp (.codePointAt sym (int i))] (recur (+ i (Character/charCount cp)) (conj! out (long cp))))
+            (if (>= (inc i) n)
+              nil
+              (let [e (.charAt sym (inc i))]
+                (case e
+                  \n (recur (+ i 2) (conj! out 10))
+                  \r (recur (+ i 2) (conj! out 13))
+                  \t (recur (+ i 2) (conj! out 9))
+                  \0 (recur (+ i 2) (conj! out 0))
+                  \\ (recur (+ i 2) (conj! out 92))
+                  \' (recur (+ i 2) (conj! out 39))
+                  \" (recur (+ i 2) (conj! out 34))
+                  \x (if (<= (+ i 4) n)
+                       (recur (+ i 4) (conj! out (hexval (subs sym (+ i 2) (+ i 4)))))
+                       nil)
+                  \u (let [j (.indexOf sym "}" (int i))]
+                       (if (neg? j) nil (recur (inc j) (conj! out (hexval (str/replace (subs sym (+ i 3) j) "_" ""))))))
+                  \newline (let [j (loop [j (+ i 2)]
+                                     (if (and (< j n) (contains? #{\space \tab \newline \return} (.charAt sym j))) (recur (inc j)) j))]
+                             (recur j out))
+                  nil)))))))))
+
+(defn- cp-str [cp] (String. (Character/toChars (int cp))))
+
+(defn esc-text
+  "The printer's canonical spelling of a cooked string's (q \\\") or a character's (q \\') code points
+  (SPEC §3.6.1): the quote, \\\\, \\n, \\r, \\t, \\0 escaped, the other controls and DEL as \\u{x}, every
+  other character as itself"
+  [cps q]
+  (let [sb (StringBuilder.)]
+    (doseq [cp cps]
+      (cond
+        (= cp 34) (.append sb (if (= q \") "\\\"" "\""))
+        (= cp 39) (.append sb (if (= q \') "\\'" "'"))
+        (= cp 92) (.append sb "\\\\")
+        (= cp 10) (.append sb "\\n")
+        (= cp 13) (.append sb "\\r")
+        (= cp 9) (.append sb "\\t")
+        (= cp 0) (.append sb "\\0")
+        (or (< cp 32) (= cp 127)) (.append sb (str "\\u{" (Long/toHexString cp) "}"))
+        :else (.append sb (cp-str cp))))
+    (str sb)))
+
+(defn esc-bytes
+  "The canonical spelling of a byte or byte string's bytes (SPEC §3.6.1)"
+  [bs q]
+  (let [sb (StringBuilder.)]
+    (doseq [b bs]
+      (cond
+        (= b 34) (.append sb (if (= q \") "\\\"" "\""))
+        (= b 39) (.append sb (if (= q \') "\\'" "'"))
+        (= b 92) (.append sb "\\\\")
+        (= b 10) (.append sb "\\n")
+        (= b 13) (.append sb "\\r")
+        (= b 9) (.append sb "\\t")
+        (= b 0) (.append sb "\\0")
+        (<= 32 b 126) (.append sb (char b))
+        :else (.append sb (let [h (Long/toHexString b)] (str "\\x" (if (= 1 (count h)) "0" "") h)))))
+    (str sb)))
+
+(defn cps->string [cps] (let [sb (StringBuilder.)] (doseq [cp cps] (.appendCodePoint sb (int cp))) (str sb)))
+
+(defn string->cps [^String s]
+  (let [n (count s)]
+    (loop [i 0 out (transient [])]
+      (if (>= i n) (persistent! out)
+          (let [cp (.codePointAt s (int i))] (recur (+ i (Character/charCount cp)) (conj! out cp)))))))
+
+(defn- bytes-of [^String s] (mapv int s))
+
+(defn- bytes->string [bs] (apply str (map char bs)))
+
+(defn- decimal-text? [^String s] (boolean (re-matches #"0|[1-9][0-9]*" s)))
+
+(defn- read-number [^String s]
+  (try (let [x (read-string s)] (when (number? x) x)) (catch Throwable _ nil)))
+
+(defn float-canonical?
+  "Whether the float symbol s is the text its double prints as"
+  [^String s]
+  (boolean (when (re-matches #"[0-9][0-9.eE+-]*" s)
+             (let [x (read-number s)] (and (double? x) (= (str x) s))))))
+
+(defn- raw-n [kind] (when (seq? kind) (second kind)))
+
+(defn kind-name [kind] (str (if (seq? kind) (first kind) kind)))
+
+(defn lit-text
+  "The token text of a literal without its suffix: kind (Integer, Str, (StrRaw n)...), symbol"
+  [kind ^String sym]
+  (let [k (kind-name kind) n (raw-n kind) hs (when n (apply str (repeat n "#")))]
+    (case k
+      ("Integer" "Float" "Bool" "Err") sym
+      "Str" (str "\"" sym "\"")
+      "Char" (str "'" sym "'")
+      "Byte" (str "b'" sym "'")
+      "ByteStr" (str "b\"" sym "\"")
+      "CStr" (str "c\"" sym "\"")
+      "StrRaw" (str "r" hs "\"" sym "\"" hs)
+      "ByteStrRaw" (str "br" hs "\"" sym "\"" hs)
+      "CStrRaw" (str "cr" hs "\"" sym "\"" hs)
+      (throw (ex-info (str "repr-rust: a literal of kind " k) {})))))
+
+(defn lit-form
+  "The form of a literal token (SPEC §3.6, S10): kind, symbol, suffix (a string or nil)"
+  [kind ^String sym suffix]
+  (let [k (kind-name kind)
+        sfx (when suffix (symbol suffix))
+        text-form (fn [] (if sfx (list :lit (lit-text kind sym) sfx) (list :lit (lit-text kind sym))))]
+    (case k
+      "Bool" (if sfx (text-form) (= sym "true"))
+      "Integer" (if (decimal-text? sym)
+                  (let [x (read-number sym)]
+                    (if (and (integer? x) (= (str x) sym)) (if sfx (list :lit x sfx) x) (text-form)))
+                  (text-form))
+      "Float" (if (float-canonical? sym)
+                (let [x (read-number sym)] (if sfx (list :lit x sfx) x))
+                (text-form))
+      ("Str" "CStr") (let [cps (unescape sym)]
+                       (if (and cps (nil? sfx) (= sym (esc-text cps \")))
+                         (let [s (cps->string cps)] (if (= k "Str") s (list :cstr s)))
+                         (text-form)))
+      "Char" (let [cps (unescape sym)]
+               (if (and cps (= 1 (count cps)) (nil? sfx) (= sym (esc-text cps \')))
+                 (let [cp (first cps)]
+                   (if (> cp 0xFFFF) (list :char cp) (char cp)))
+                 (text-form)))
+      "Byte" (let [bs (unescape sym)]
+               (if (and bs (= 1 (count bs)) (<= (first bs) 255) (nil? sfx) (= sym (esc-bytes bs \')))
+                 (list :byte (char (first bs)))
+                 (text-form)))
+      "ByteStr" (let [bs (unescape sym)]
+                  (if (and bs (every? #(<= % 255) bs) (nil? sfx) (= sym (esc-bytes bs \")))
+                    (list :bytes (bytes->string bs))
+                    (text-form)))
+      ("StrRaw" "ByteStrRaw" "CStrRaw") (if sfx
+                                          (text-form)
+                                          (list (case k "StrRaw" :raw "ByteStrRaw" :raw-bytes :raw-cstr) sym (raw-n kind)))
+      (text-form))))
+
+(defn number-text
+  "The token text of a non-negative number form"
+  [x]
+  (cond
+    (double? x) (str x)
+    :else (str x)))
+
+(defn lit-form-text
+  "The token text of a literal form (SPEC §3.6), or nil when x is not one: a number, string,
+  character, boolean, or a (:lit ...), (:char n), (:byte c), (:bytes s), (:cstr s), (:raw s n),
+  (:raw-bytes s n), (:raw-cstr s n) form"
+  [x]
+  (let [x (lv x)]
+    (cond
+      (string? x) (str "\"" (esc-text (string->cps x) \") "\"")
+      (char? x) (str "'" (esc-text [(int x)] \') "'")
+      (true? x) "true"
+      (false? x) "false"
+      (number? x) (when-not (neg? x) (number-text x))
+      (seq? x)
+      (let [[h a b] (map lv x)]
+        (case h
+          :lit (if (string? a) (str a (when b (str b))) (str (number-text a) (when b (str b))))
+          :char (str "'" (esc-text [a] \') "'")
+          :byte (str "b'" (esc-bytes [(int a)] \') "'")
+          :bytes (str "b\"" (esc-bytes (bytes-of a) \") "\"")
+          :cstr (str "c\"" (esc-text (string->cps a) \") "\"")
+          :raw (let [hs (apply str (repeat b "#"))] (str "r" hs "\"" a "\"" hs))
+          :raw-bytes (let [hs (apply str (repeat b "#"))] (str "br" hs "\"" a "\"" hs))
+          :raw-cstr (let [hs (apply str (repeat b "#"))] (str "cr" hs "\"" a "\"" hs))
+          nil))
+      :else nil)))
+
+(def lit-heads #{:lit :char :byte :bytes :cstr :raw :raw-bytes :raw-cstr})
+
+(defn lit-form?
+  "Whether x is a literal form (a number, string, character, boolean or a literal's value form)"
+  [x]
+  (let [x (lv x)]
+    (or (string? x) (char? x) (true? x) (false? x) (number? x)
+        (and (seq? x) (contains? lit-heads (lv (first x)))))))
+
+;;; Tokens (rustc_ast::token, Token::glue)
+
+(def punct-texts
+  "The texts of rustc's punctuation token kinds"
+  {"Eq" "=" "Lt" "<" "Le" "<=" "EqEq" "==" "Ne" "!=" "Ge" ">=" "Gt" ">" "AndAnd" "&&" "OrOr" "||"
+   "Bang" "!" "Tilde" "~" "Plus" "+" "Minus" "-" "Star" "*" "Slash" "/" "Percent" "%" "Caret" "^"
+   "And" "&" "Or" "|" "Shl" "<<" "Shr" ">>" "PlusEq" "+=" "MinusEq" "-=" "StarEq" "*=" "SlashEq" "/="
+   "PercentEq" "%=" "CaretEq" "^=" "AndEq" "&=" "OrEq" "|=" "ShlEq" "<<=" "ShrEq" ">>=" "At" "@"
+   "Dot" "." "DotDot" ".." "DotDotDot" "..." "DotDotEq" "..=" "Comma" "," "Semi" ";" "Colon" ":"
+   "PathSep" "::" "RArrow" "->" "LArrow" "<-" "FatArrow" "=>" "Pound" "#" "Dollar" "$" "Question" "?"
+   "SingleQuote" "'"})
+
+(def ^:private glue-table
+  {["=" "="] "==" ["=" ">"] "=>" ["<" "="] "<=" ["<" "<"] "<<" ["<" "<="] "<<=" ["<" "-"] "<-"
+   [">" "="] ">=" [">" ">"] ">>" [">" ">="] ">>=" ["!" "="] "!=" ["+" "="] "+=" ["-" "="] "-="
+   ["-" ">"] "->" ["*" "="] "*=" ["/" "="] "/=" ["%" "="] "%=" ["^" "="] "^=" ["&" "="] "&="
+   ["&" "&"] "&&" ["|" "="] "|=" ["|" "|"] "||" ["<<" "="] "<<=" [">>" "="] ">>=" ["." "."] ".."
+   ["." ".."] "..." [".." "."] "..." [".." "="] "..=" [":" ":"] "::"})
+
+(def ^:private punct-chars (set "=<>!+-*/%^&|.:~@#$?,;"))
+
+(defn punct? [^String t]
+  (and (pos? (count t)) (every? #(contains? punct-chars %) t)))
+
+(defn glue
+  "The tokens rustc's lexer makes of printed tokens [[text joint-with-previous?]...]: punctuation
+  split into single characters and glued left to right where joint (Token::glue); returns their
+  texts"
+  [toks]
+  (let [singles (mapcat (fn [[t joint?]]
+                          (if (and (punct? t) (> (count t) 1))
+                            (map-indexed (fn [i c] [(str c) (if (zero? i) joint? true)]) t)
+                            [[t joint?]]))
+                        toks)
+        out (transient [])]
+    (loop [ts (seq singles) prev nil]
+      (if (empty? ts)
+        (persistent! (if prev (conj! out prev) out))
+        (let [[t joint?] (first ts)
+              g (when (and joint? prev) (get glue-table [prev t]))]
+          (if g
+            (recur (rest ts) g)
+            (do (when prev (conj! out prev)) (recur (rest ts) t))))))))
+
+(defn token-text
+  "The text of a token of the dump (its kind: Comma, (Ident \"x\" No), (Literal (Lit ...)),
+  (Lifetime \"'a\" No), (DocComment Line Outer \" x\"))"
+  [kind]
+  (cond
+    (symbol? kind) (or (get punct-texts (name kind))
+                       (throw (ex-info (str "repr-rust: a token of kind " kind) {})))
+    (seq? kind)
+    (let [[h a b c] kind]
+      (case (str h)
+        "Ident" (if (= 'Yes b) (str "r#" a) a)
+        "Lifetime" (if (= 'Yes b) (str "'r#" (subs a 1)) a)
+        "Literal" (let [l a
+                        f (fn [k] (second (drop-while #(not= % k) l)))
+                        sfx (f :suffix)]
+                    (str (lit-text (f :kind) (f :symbol)) (when (seq? sfx) (second sfx))))
+        "DocComment" (case [(str a) (str b)]
+                       ["Line" "Outer"] (str "///" c)
+                       ["Line" "Inner"] (str "//!" c)
+                       ["Block" "Outer"] (str "/**" c "*/")
+                       ["Block" "Inner"] (str "/*!" c "*/"))
+        (throw (ex-info (str "repr-rust: a token of kind " (pr-str kind)) {}))))
+    :else (throw (ex-info (str "repr-rust: a token of kind " (pr-str kind)) {}))))

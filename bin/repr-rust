@@ -1,0 +1,266 @@
+#!/bin/bash
+# repr/rust, Rust's bridge (doc/rust/SPEC.md, doc/rust/RUST-NOTES.md): Rust files as Rust forms
+# (read) and Rust forms as Rust files (print), through the helper tools/rsdump, a rustc_private
+# driver on the host's rustc (Alpine's rust 1.99.1, pinned by tools/rsdump/RUSTC_VERSION; SPEC
+# §10, RS8, RS9), linked to its librustc_driver dynamically against rustc-dev's metadata (fetched
+# as an apk, pinned by tools/rsdump/apks.sha256; nothing installed on the host). The converter and
+# the printer are Arbace (arbace.repr.rust, .convert, .print), evaluated from the checkout:
+# repr/rust is not one of the tools the executable embeds (arbace/j2g/embed.ae's excluded list).
+#
+#   bin/repr-rust helper          build the helper into .tmp/repr-rust/rsdump (the host's rustc,
+#                                 with a sysroot of links to its std and rustc-dev's crates; rebuilt
+#                                 when its source, its pins or rustc --version change)
+#   bin/repr-rust corpus fetch [CORPUS]
+#                                 the apks rustc-dev and rust-src into .tmp/repr-rust/apks/ (apk fetch
+#                                 once when missing, checked by their SHA-256), each extracted into a
+#                                 directory of its own (default CORPUS rustc-1.99.1:
+#                                 test/rust/corpus-rustc-1.99.1.edn, std's five crates in rust-src)
+#   bin/repr-rust corpus list [CORPUS]
+#                                 the corpus's files, one per line: crate, file
+#   bin/repr-rust dump --corpus [CORPUS]   dump the corpus into .tmp/repr-rust/dumps/CORPUS/FILE.edn
+#   bin/repr-rust dump [-o DIR] [--edition E] FILE...
+#                                 run the helper on files (relative to the current directory; their
+#                                 path is the name of every span): DIR/FILE.edn each (default
+#                                 .tmp/repr-rust/out), edition 2024 by default
+#   bin/repr-rust read [-o DIR] [--crate NAME --crate-type T --ns-root NS] DUMP.edn...
+#                                 convert dumps to Rust forms: one .ae per file under DIR (default
+#                                 .tmp/repr-rust/forms/files), each read back and compared
+#   bin/repr-rust read --corpus [CORPUS]
+#                                 dump the corpus and convert it into .tmp/repr-rust/forms/CORPUS/
+#                                 (SPEC §2.1); report .tmp/repr-rust/forms/CORPUS.report.edn
+#   bin/repr-rust print [-o DIR] FORMS.ae...
+#                                 the printer (SPEC §9.4): one .rs per forms file into DIR (default
+#                                 .tmp/repr-rust/printed), at its rs/file's :path; mode :lines' layout
+#   bin/repr-rust roundtrip [--only REGEX] [CORPUS]
+#                                 the round trip's tree level (SPEC §11.1, §11.2; RR1) over the
+#                                 corpus: dump, read, print into .tmp/repr-rust/cand/CORPUS/, and
+#                                 compare rustc's trees (rsdump tree: the parsed tree's Debug text
+#                                 without spans, node and attribute ids, token spacing and collected
+#                                 token streams, N1-N4) and the start lines of every span (rsdump
+#                                 tree's .lines) of the original and the printed file; fails on a
+#                                 difference test/rust/roundtrip-CORPUS-known.edn does not list, and
+#                                 on a listed one that no longer occurs. Report
+#                                 .tmp/repr-rust/cand/CORPUS.report.edn
+#   bin/repr-rust test            the spec's cases (test/rust/; bin/lib/repr-rust/test): the reader's
+#                                 samples, the worked example converted and its round trip
+#
+# Environment: REPR_RUST_JOBS (parallel helper and converter runs, default the cores, at most
+# 32); ARBACE_HOST_EXE (the Arbace executable, bin/lib/host.bash; default stage 0).
+set -euo pipefail
+root=$(cd "$(dirname "$0")/.." && pwd)
+. "$root/bin/lib/tools.bash"
+work=$root/.tmp/repr-rust
+helper=$work/rsdump
+apks=$work/apks
+sysroot=$work/sysroot
+jobs=${REPR_RUST_JOBS:-$(nproc)}
+[ "$jobs" -gt 32 ] && jobs=32
+pin() { sed -n "s/^$1 //p" "$root/tools/rsdump/RUSTC_VERSION"; }
+catf() { if [ -f "$1" ]; then cat "$1"; fi; }
+
+rustc_check() {
+  [ -n "$(command -v rustc)" ] || { echo "repr-rust: no rustc (Alpine's rust package, doc/ALPINE.md)" >&2; return 1; }
+  local v want
+  v=$(rustc --version)
+  want="rustc $(pin version) ($(pin commit) "
+  case $v in
+    "$want"*) ;;
+    *) echo "repr-rust: the host's rustc is '$v'; tools/rsdump/RUSTC_VERSION pins $(pin version) ($(pin commit)) (SPEC §10.5: moving the pin is a recorded decision)" >&2
+       return 1 ;;
+  esac
+  host_sysroot=$(rustc --print sysroot)
+  target=$(rustc -vV | sed -n 's/^host: //p')
+  if [ ! -f "$host_sysroot/lib/librustc_driver-$(pin driver).so" ]; then
+    echo "repr-rust: no $host_sysroot/lib/librustc_driver-$(pin driver).so (tools/rsdump/RUSTC_VERSION pins that build)" >&2
+    return 1
+  fi
+}
+
+# apks_fetch: rustc-dev and rust-src of the pinned build into $apks/, checked by their SHA-256,
+# each extracted into $apks/NAME/ (an apk is a gzip'd tar; nothing is installed)
+apks_fetch() {
+  mkdir -p "$apks"
+  (
+    flock 8
+    local sha f name
+    while read -r sha f; do
+      name=${f%-*-r*.apk}
+      if [ ! -f "$apks/$f" ] || [ "$(sha256sum < "$apks/$f" | cut -c1-64)" != "$sha" ]; then
+        local pkg=${f%.apk}
+        echo "== repr-rust: apk fetch ${name}=${pkg#"$name"-}" >&2
+        rm -f "$apks/$f"
+        apk fetch --no-cache -o "$apks" "${name}=${pkg#"$name"-}" >&2 || { echo "repr-rust: apk fetch $f failed" >&2; exit 1; }
+      fi
+      if [ "$(sha256sum < "$apks/$f" | cut -c1-64)" != "$sha" ]; then
+        echo "repr-rust: $apks/$f: SHA-256 differs from tools/rsdump/apks.sha256's $sha" >&2
+        exit 1
+      fi
+      if [ "$(catf "$apks/$name.extracted")" != "$sha" ]; then
+        rm -rf "${apks:?}/$name"; mkdir -p "$apks/$name"
+        tar --warning=no-unknown-keyword -xzf "$apks/$f" -C "$apks/$name"
+        echo "$sha" > "$apks/$name.extracted"
+      fi
+    done < "$root/tools/rsdump/apks.sha256"
+  ) 8> "$work/fetch.lock"
+}
+
+helper_hash() {
+  cat "$root/tools/rsdump/rsdump.rs" "$root/tools/rsdump/RUSTC_VERSION" "$root/tools/rsdump/apks.sha256" | sha256sum | cut -c1-64
+}
+
+build() {
+  rustc_check
+  mkdir -p "$work"
+  apks_fetch
+  local key
+  key="$(helper_hash) $(rustc --version)"
+  (
+    flock 7
+    if [ -x "$helper" ] && [ "$(catf "$work/key")" = "$key" ]; then exit 0; fi
+    echo "== repr-rust: building the helper (rustc $(pin version), librustc_driver-$(pin driver))" >&2
+    local lib=$sysroot/lib/rustlib/$target/lib f
+    rm -rf "$sysroot"; mkdir -p "$lib"
+    for f in "$host_sysroot/lib/rustlib/$target/lib/"*; do ln -s "$f" "$lib/"; done
+    for f in "$apks/rustc-dev/usr/lib/rustlib/$target/lib/"*; do ln -sf "$f" "$lib/"; done
+    RUSTC_BOOTSTRAP=1 rustc --edition 2024 -O --sysroot "$sysroot" "$root/tools/rsdump/rsdump.rs" \
+      -o "$helper.new.$$" > "$work/build.log" 2>&1 ||
+      { cat "$work/build.log" >&2; rm -f "$helper.new.$$"; exit 1; }
+    mv -f "$helper.new.$$" "$helper"
+    echo "$key" > "$work/key"
+  ) 7> "$work/build.lock"
+}
+
+corpus_file() {
+  local c=${1:-rustc-1.99.1} f
+  f=$root/test/rust/corpus-$c.edn
+  [ -f "$f" ] || { echo "repr-rust: no corpus $c ($f)" >&2; return 1; }
+  echo "$f"
+}
+
+# corpus_plan CORPUS: one line per crate, tab-separated: name, edition, the files (space-separated)
+corpus_plan() {
+  local f
+  f=$(corpus_file "$1")
+  arbace_tool -e "(let [c (read-string (slurp \"$f\"))]
+    (doseq [k (:crates c)]
+      (println (str (:name k) \"\t\" (:edition k) \"\t\" (apply str (interpose \" \" (:files k)))))))"
+}
+
+corpus_root() {
+  local f
+  f=$(corpus_file "$1")
+  srcroot=$apks/rust-src/$(arbace_tool -e "(println (:root (:apk (read-string (slurp \"$f\")))))")
+  [ -d "$srcroot" ] || { echo "repr-rust: no $srcroot (bin/repr-rust corpus fetch)" >&2; return 1; }
+}
+
+# run_helper VERB OUT EDITION FILE...: the helper over files in parallel (relative to the current
+# directory); a file it fails on is written as (rsdump/error ...), which the steps after report
+run_helper() {
+  local verb=$1 out=$2 ed=$3; shift 3
+  printf '%s\n' "$@" | xargs -r -P "$jobs" -n 8 "$helper" "$verb" -o "$out" --edition "$ed" --helper-hash "sha256:$(helper_hash)"
+}
+
+# dump_corpus CORPUS OUT
+dump_corpus() {
+  local c=$1 out=$2 name ed files
+  rm -rf "$out" "$out.err"; mkdir -p "$out"
+  while IFS=$'\t' read -r name ed files; do
+    # shellcheck disable=SC2086
+    (cd "$srcroot" && run_helper dump "$out" "$ed" $files) 2>> "$out.err" || true
+  done < <(corpus_plan "$c")
+}
+
+read_files() {
+  arbace_tool -m arbace.repr.rust read "$@"
+}
+
+roundtrip() {
+  local c=rustc-1.99.1 only=""
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --only) only=$2; shift 2 ;;
+      *) c=$1; shift ;;
+    esac
+  done
+  build
+  corpus_root "$c"
+  local dumps=$work/dumps/$c forms=$work/forms/$c cand=$work/cand/$c orig=$work/orig/$c t0 t1 t2 t3 t4
+  t0=$(date +%s)
+  echo "== repr-rust roundtrip $c: dump" >&2
+  dump_corpus "$c" "$dumps"
+  t1=$(date +%s)
+  echo "== repr-rust roundtrip $c: convert ($((t1 - t0)) s dumping)" >&2
+  rm -rf "$forms"; mkdir -p "$(dirname "$forms")"
+  read_files --jobs "$jobs" -o "$forms" --report "$forms.report.edn" --root "$dumps" --corpus "$(corpus_file "$c")" \
+    ${only:+--only "$only"} > "$forms.log" 2>&1 ||
+    { grep -v '^error\|^misread' "$forms.log" | tail -5 >&2; grep -c '^error\|^misread' "$forms.log" | sed 's/$/ files failed to convert (see the report)/' >&2; }
+  t2=$(date +%s)
+  echo "== repr-rust roundtrip $c: print ($((t2 - t1)) s converting)" >&2
+  rm -rf "$cand" "$cand.trees" "$cand.trees.err"; mkdir -p "$cand"
+  # a file the printer fails on is reported by the comparison (not printed)
+  arbace_tool -m arbace.repr.rust print --jobs "$jobs" -o "$cand" --root "$forms" > "$cand.print.log" 2>&1 ||
+    grep -v '^error' "$cand.print.log" | tail -3 >&2
+  t3=$(date +%s)
+  echo "== repr-rust roundtrip $c: trees ($((t3 - t2)) s printing)" >&2
+  # the trees: of the originals (in the corpus's tree) and of the printed files (in the
+  # candidate's, under the same relative paths: the spans name the same files)
+  rm -rf "$orig" "$orig.err"; mkdir -p "$orig" "$cand.trees"
+  local name ed files f
+  while IFS=$'\t' read -r name ed files; do
+    # shellcheck disable=SC2086
+    (cd "$srcroot" && run_helper tree "$orig" "$ed" $files) 2>> "$orig.err" || true
+    # shellcheck disable=SC2086
+    (cd "$cand" && run_helper tree "$cand.trees" "$ed" $(for f in $files; do [ -f "$f" ] && echo "$f"; done)) 2>> "$cand.trees.err" || true
+  done < <(corpus_plan "$c")
+  t4=$(date +%s)
+  echo "== repr-rust roundtrip $c: compare ($((t4 - t3)) s parsing)" >&2
+  arbace_tool -m arbace.repr.rust compare --corpus "$(corpus_file "$c")" --orig "$orig" --cand "$cand" \
+    --forms-report "$forms.report.edn" --known "$root/test/rust/roundtrip-$c-known.edn" \
+    --report "$cand.report.edn" ${only:+--only "$only"} --prune \
+    --times "dump $((t1 - t0)) convert $((t2 - t1)) print $((t3 - t2)) parse $((t4 - t3))"
+}
+
+cmd=${1:-}
+[ $# -gt 0 ] && shift
+case $cmd in
+  helper) build ;;
+  corpus)
+    sub=${1:-list}; [ $# -gt 0 ] && shift
+    case $sub in
+      fetch) mkdir -p "$work"; apks_fetch; corpus_root "${1:-rustc-1.99.1}"; echo "$srcroot" ;;
+      list) corpus_plan "${1:-rustc-1.99.1}" | while IFS=$'\t' read -r n _ fs; do
+              for f in $fs; do echo "$n $f"; done
+            done ;;
+      *) echo "usage: bin/repr-rust corpus fetch|list [CORPUS]" >&2; exit 2 ;;
+    esac ;;
+  dump)
+    build
+    if [ "${1:-}" = --corpus ]; then
+      c=${2:-rustc-1.99.1}; corpus_root "$c"; dump_corpus "$c" "$work/dumps/$c"
+      cat "$work/dumps/$c.err" >&2; exit 0
+    fi
+    out=$work/out; ed=2024; files=()
+    while [ $# -gt 0 ]; do
+      case $1 in
+        -o) out=$2; shift 2 ;;
+        --edition) ed=$2; shift 2 ;;
+        *) files+=("$1"); shift ;;
+      esac
+    done
+    "$helper" dump -o "$out" --edition "$ed" --helper-hash "sha256:$(helper_hash)" "${files[@]}" ;;
+  read)
+    if [ "${1:-}" = --corpus ]; then
+      shift; c=${1:-rustc-1.99.1}
+      build; corpus_root "$c"
+      dump_corpus "$c" "$work/dumps/$c"
+      out=$work/forms/$c
+      rm -rf "$out"
+      read_files --jobs "$jobs" -o "$out" --report "$out.report.edn" --root "$work/dumps/$c" --corpus "$(corpus_file "$c")"
+    else
+      read_files --jobs "$jobs" "$@"
+    fi ;;
+  print) arbace_tool -m arbace.repr.rust print --jobs "$jobs" "$@" ;;
+  roundtrip) rustc_check; roundtrip "$@" ;;
+  test) exec "$root/bin/lib/repr-rust/test" "$@" ;;
+  *) sed -n '2,/^set -euo/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'; exit 2 ;;
+esac

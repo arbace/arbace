@@ -1,0 +1,1564 @@
+(ns arbace.repr.rust.convert
+  "repr/rust's converter (doc/rust/SPEC.md, doc/rust/RUST-NOTES.md): a file's dump by the helper
+  tools/rsdump (rustc 1.99.1's parsed tree, rustc_ast::Crate before expansion, written
+  generically: (Name :field value...), (Name value...), spans [l1 c1 l2 c2]) and the Rust file
+  itself into Rust forms, mode :lines. Every decision about forms is made here; rust-lisp's
+  compiler/rustc_parse/src/lisp/printer.rs and printer_expr.rs are the mapping checklist (RS17).
+  Each form that stands for a node with a span carries the line its span starts on (:line in its
+  metadata; a literal or keyword in a Lit record until written), and the writer
+  (arbace.repr.rust.write) places it on that line of the forms file. Spans of tokens the forms
+  have no element for get metadata when the printer would not put them on their line by itself
+  (SPEC §9.1, S22: :rs/brace, :rs/close, :rs/open, :rs/paren and the head lines)."
+  (:require [arbace.repr.rust.syntax :as sx]
+            [arbace.repr.rust.print :as pr]
+            [arbace.string :as str])
+  (:import [java.lang StringBuilder]))
+
+;;; State of one conversion
+
+(def ^:dynamic *src*
+  "The Rust file's lines (strings without their newline), for (:tt ...) texts"
+  nil)
+
+(def ^:dynamic *starts*
+  "Every span's start [line col] in the file, sorted (a long array of line*2^20+col)"
+  nil)
+
+(def ^:dynamic *mac*
+  "The helper's macro arguments parsed as expressions: {[l c] [:exprs|:repeat [Expr...]]}"
+  {})
+
+(def ^:dynamic *warnings* nil)
+
+(defn- warn! [what]
+  (when *warnings* (swap! *warnings* update what (fnil inc 0))))
+
+(defn- fail! [msg node]
+  (throw (ex-info (str "repr-rust: " msg ": "
+                       (let [s (pr-str node)] (subs s 0 (min 600 (count s)))))
+                  {:node node})))
+
+;;; Dump access
+
+(defn hd [x] (when (seq? x) (first x)))
+
+(defn fld
+  "Field k (a keyword) of node x"
+  [x k]
+  (loop [s (next x)]
+    (cond
+      (nil? s) nil
+      (= k (first s)) (second s)
+      :else (recur (next s)))))
+
+(defn arg
+  "Positional value i (1-based) of node x"
+  [x i]
+  (nth x i nil))
+
+(defn opt
+  "The value of an Option: (Some x) -> x, None -> nil"
+  [x]
+  (when (and (seq? x) (= 'Some (first x))) (second x)))
+
+(defn ident
+  "The text of an identifier (id \"x\" 0)"
+  [x]
+  (if (and (seq? x) (= 'id (first x))) (second x) (fail! "an identifier" x)))
+
+(defn span? [s] (and (vector? s) (>= (count s) 4) (integer? (first s))))
+
+(defn sline [s] (when (span? s) (first s)))
+
+(defn spos [s] (when (span? s) [(nth s 0) (nth s 1)]))
+
+(defn s-end [s] (when (span? s) [(nth s 2) (nth s 3)]))
+
+(defn span-of [x] (fld x :span))
+
+(defn line-of [x] (sline (span-of x)))
+
+;;; Lines
+
+(defn attach
+  "form with the line l: in metadata, or a Lit for a literal or a keyword"
+  [form l]
+  (cond
+    (nil? l) form
+    (sx/lit? form) (assoc form :line l)
+    (instance? arbace.lang.IObj form) (vary-meta form assoc :line l)
+    :else (sx/->Lit form l)))
+
+(defn at
+  "form with the line of span s"
+  [form s]
+  (attach form (sline s)))
+
+(defn form-line [f]
+  (cond (sx/lit? f) (:line f) (instance? arbace.lang.IObj f) (:line (meta f)) :else nil))
+
+(defn- pack ^long [[l c]] (+ (* (long l) 1048576) (long c)))
+
+(defn collect-starts
+  "Every span start of a dump's tree, packed and sorted"
+  [tree]
+  (let [acc (java.util.ArrayList.)]
+    (letfn [(walk [x]
+              (cond
+                (span? x) (.add acc (pack x))
+                (seq? x) (doseq [y x] (walk y))
+                (vector? x) (doseq [y x] (walk y))
+                :else nil))]
+      (walk tree))
+    (let [a (long-array (.size acc))]
+      (dotimes [i (.size acc)] (aset a i (long (.get acc i))))
+      (java.util.Arrays/sort a)
+      a)))
+
+(defn prev-line
+  "The line of the latest span start before position p ([line col]) in the file: the line the
+  printer is on when it reaches a token at p that the forms do not place (SPEC §9.1)"
+  [p]
+  (let [^longs a *starts*
+        k (pack p)]
+    (loop [lo 0 hi (alength a)]
+      (if (< lo hi)
+        (let [mid (quot (+ lo hi) 2)]
+          (if (< (aget a mid) k) (recur (inc mid) hi) (recur lo mid)))
+        (if (zero? lo) 1 (quot (aget a (dec lo)) 1048576))))))
+
+(defn hidden-line
+  "The line of a token the forms have no element for, at position p on line l, when the printer
+  would not put it there by itself (it begins a line); else nil"
+  [p]
+  (when p
+    (let [l (first p)]
+      (when (> l (prev-line p)) l))))
+
+(defn with-meta-line
+  "form with metadata key k = the hidden line of position p, when needed"
+  [form k p]
+  (if-let [l (hidden-line p)]
+    (vary-meta form assoc k l)
+    form))
+
+;;; Source text
+
+(defn src-text
+  "The source text from position [l1 c1] to [l2 c2] (columns in characters from 1, end
+  exclusive)"
+  [[l1 c1] [l2 c2]]
+  (let [^java.util.List ls *src*
+        cut (fn [^String s a b] (let [cps (sx/string->cps s)]
+                                  (sx/cps->string (subvec cps (min a (count cps)) (min b (count cps))))))]
+    (if (= l1 l2)
+      (cut (.get ls (dec l1)) (dec c1) (dec c2))
+      (let [sb (StringBuilder.)]
+        (.append sb (let [s (.get ls (dec l1))] (cut s (dec c1) Integer/MAX_VALUE)))
+        (loop [l (inc l1)]
+          (when (< l l2)
+            (.append sb "\n") (.append sb ^String (.get ls (dec l)))
+            (recur (inc l))))
+        (.append sb "\n")
+        (.append sb (cut (.get ls (dec l2)) 0 (dec c2)))
+        (str sb)))))
+
+(defn delim-text
+  "The source text of a delimited token tree, its delimiters included (DelimSpan)"
+  [dspan]
+  (src-text (spos (fld dspan :open)) (s-end (fld dspan :close))))
+
+(defn tt-form
+  "(:tt \"text\") for a delimited token tree, at its open delimiter's line"
+  [dspan]
+  (attach (list :tt (delim-text dspan)) (sline (fld dspan :open))))
+
+;;; Attributes (SPEC §8)
+
+(declare expr-form path-form ty-form pat-form generic-args mac-args token-texts check-tokens stream-trees mac-call-form field-form builtin-tt field-mods item-forms stmts-forms head-line
+         block-stmts generic-param bounds-forms)
+
+(defn- attr-style [a] (fld a :style))
+
+(defn outer-attrs [attrs] (filter #(= 'Outer (attr-style %)) attrs))
+(defn inner-attrs [attrs] (filter #(= 'Inner (attr-style %)) attrs))
+
+(defn- split-commas
+  "A token stream's trees split at top-level commas; nil when one part is empty (a trailing
+  comma)"
+  [trees]
+  (let [parts (reduce (fn [acc t]
+                        (if (and (= 'Token (hd t)) (= 'Comma (fld (arg t 1) :kind)))
+                          (conj acc [])
+                          (conj (pop acc) (conj (peek acc) t))))
+                      [[]] trees)]
+    (cond
+      (and (= 1 (count parts)) (empty? (first parts))) []
+      (some empty? parts) nil
+      :else parts)))
+
+(defn- tok-kind [t] (when (= 'Token (hd t)) (fld (arg t 1) :kind)))
+(defn- tok-span [t] (when (= 'Token (hd t)) (fld (arg t 1) :span)))
+
+(defn- meta-path
+  "A meta item's path from its tokens: [symbol rest-trees], or nil"
+  [tts]
+  (loop [ts tts names [] first-span nil global false]
+    (let [k (tok-kind (first ts))]
+      (cond
+        (and (= 'PathSep k) (empty? names)) (recur (rest ts) names (tok-span (first ts)) true)
+        (and (seq? k) (= 'Ident (first k)))
+        (let [t (if (= 'Yes (nth k 2)) (str "r#" (second k)) (second k))
+              ns (conj names t)
+              sp (or first-span (tok-span (first ts)))]
+          (if (= 'PathSep (tok-kind (second ts)))
+            (recur (drop 2 ts) ns sp global)
+            (when-let [s (sx/path-symbol ns)]
+              [(attach (if global (list :global s) s) (sline sp)) (rest ts)])))
+        :else nil))))
+
+(declare meta-inner where-form hidden-line)
+
+(defn- lit-token-form
+  "The form of a literal token (Literal (Lit :kind :symbol :suffix)) at its line"
+  [t]
+  (let [k (tok-kind t)
+        l (second k)]
+    (attach (sx/lit-form (fld l :kind) (fld l :symbol) (some-> (fld l :suffix) opt))
+            (sline (tok-span t)))))
+
+(defn- meta-inner
+  "A meta item's form from its tokens (rust-lisp's meta_inner): a literal, a path, (= path lit),
+  (path meta...); nil when the tokens are no meta item"
+  [tts]
+  (let [k (tok-kind (first tts))]
+    (if (and (= 1 (count tts)) (seq? k) (= 'Literal (first k)))
+      (lit-token-form (first tts))
+      (when-let [[p rest-ts] (meta-path tts)]
+        (cond
+          (empty? rest-ts) p
+          (and (= 2 (count rest-ts)) (= 'Eq (tok-kind (first rest-ts)))
+               (let [k2 (tok-kind (second rest-ts))] (and (seq? k2) (= 'Literal (first k2)))))
+          (attach (list (attach '= (sline (tok-span (first rest-ts)))) p (lit-token-form (second rest-ts)))
+                  (form-line p))
+          (and (= 1 (count rest-ts)) (= 'Delimited (hd (first rest-ts))) (= 'Parenthesis (arg (first rest-ts) 3)))
+          (let [d (first rest-ts)
+                parts (split-commas (stream-trees (arg d 4)))]
+            (when (seq parts)
+              (let [ms (map meta-inner parts)]
+                (when (every? some? ms)
+                  (with-meta-line (attach (apply list p ms) (form-line p)) :rs/close (spos (fld (arg d 1) :close)))))))
+          :else nil)))))
+
+(defn stream-trees
+  "The trees of a token stream (TokenStream [...])"
+  [ts]
+  (if (= 'TokenStream (hd ts)) (vec (second ts)) (fail! "a token stream" ts)))
+
+(defn- meta-args
+  "Attribute arguments as meta forms (SPEC §8.1), when they are a parenthesized, comma-separated
+  list of meta items; else nil (the printer's tokens are checked by the caller)"
+  [d]
+  (when (= 'Parenthesis (fld d :delim))
+    (let [parts (split-commas (stream-trees (fld d :tokens)))]
+      (when (seq parts)
+        (let [ms (map meta-inner parts)]
+          (when (every? some? ms)
+            (vec ms)))))))
+
+(defn attr-form
+  "An attribute's form (SPEC §8.1, §8.3); top: the head qualified by rs"
+  [a top]
+  (let [inner? (= 'Inner (attr-style a))
+        k (fld a :kind)
+        h (fn [w] (let [w (str w (when inner? "!"))] (if top (symbol "rs" w) (keyword w))))]
+    (at
+      (case (hd k)
+        DocComment (list (h (if (= 'Line (arg k 1)) "doc" "doc-block")) (arg k 2))
+        Normal
+        (let [item (fld (arg k 1) :item)
+              unsafe? (= 'Unsafe (hd (fld item :unsafety)))
+              p (path-form (fld item :path) :mod)
+              args (fld item :args)
+              head (h "attr")
+              pre (concat [head] (when unsafe? [(at 'unsafe (arg (fld item :unsafety) 1))]) [p])]
+          (case (hd args)
+            nil (apply list pre)
+            Empty (apply list pre)
+            Eq (apply list (concat pre [(at '= (fld args :eq_span)) (expr-form (fld args :expr) :plain)]))
+            Delimited
+            (let [d (arg args 1)
+                  ms (meta-args d)
+                  form (when ms
+                         (with-meta-line (attach (apply list (concat pre ms)) (sline (span-of a)))
+                           :rs/close (spos (fld (fld d :dspan) :close))))
+                  form (when form
+                         (if (check-tokens pr/attr-arg-tokens form d)
+                           form
+                           (do (warn! :attribute-args-as-text) nil)))]
+              (if form
+                (do (warn! :attribute-args-as-meta) form)
+                (do (warn! :attribute-args-tt) (apply list (concat pre [(tt-form (fld d :dspan))])))))
+            (fail! "attribute arguments" args)))
+        (fail! "an attribute" k))
+      (span-of a))))
+
+(defn with-attrs
+  "form with outer attribute forms to stand before it (transparent elements, SPEC S19)"
+  [form attrs]
+  (if (empty? attrs)
+    form
+    (let [fs (mapv #(attr-form % false) attrs)]
+      (if (and (instance? arbace.lang.IObj form) (not (sx/lit? form)))
+        (vary-meta form update ::attrs (fnil into []) fs)
+        (let [l (if (sx/lit? form) form (sx/->Lit form nil))]
+          (update l ::attrs (fnil into []) fs))))))
+
+(defn splice
+  "The elements xs with each one's attribute forms before it"
+  [xs]
+  (vec (mapcat (fn [x]
+                 (let [as (if (sx/lit? x) (::attrs x) (when (instance? arbace.lang.IObj x) (::attrs (meta x))))]
+                   (if as
+                     (concat as [(if (sx/lit? x) (dissoc x ::attrs) (vary-meta x dissoc ::attrs))])
+                     [x])))
+               xs)))
+
+(defn lst
+  "A list of the elements xs, their attributes spliced"
+  [& xs]
+  (apply list (splice (remove nil? (apply concat (map #(if (and (sequential? %) (not (vector? %)) (not (seq? %))) % [%]) xs))))))
+
+(defn ls
+  "A list of the elements xs (a seq), their attributes spliced"
+  [xs]
+  (apply list (splice (remove nil? xs))))
+
+(defn vc
+  "A vector of the elements xs, their attributes spliced"
+  [xs]
+  (splice (remove nil? xs)))
+
+;;; Paths (SPEC §3.3)
+
+(defn- seg-name [seg] (ident (fld seg :ident)))
+(defn- seg-args [seg] (opt (fld seg :args)))
+
+(defn- names-symbol
+  "A path symbol of name texts, or nil"
+  [names]
+  (sx/path-symbol names))
+
+(defn- path-sym-form
+  "The symbol (or (:path seg...) when it does not read back) of name texts"
+  [names]
+  (or (names-symbol names) (apply list :path (map sx/name-form names))))
+
+(defn path-form
+  "A path's form in context ctx (:expr, :pat, :type, :mod)"
+  [p ctx]
+  (let [segs (vec (fld p :segments))
+        global (= "{{root}}" (seg-name (first segs)))
+        segs (if global (subvec segs 1) segs)
+        n (count segs)
+        names (mapv seg-name segs)
+        argsv (mapv seg-args segs)
+        glob (fn [f] (if global (list :global f) f))
+        form (cond
+               (zero? n) (list :global [])
+               (every? nil? argsv) (glob (path-sym-form names))
+               (and (some? (peek argsv)) (every? nil? (pop argsv)))
+               (let [base (glob (path-sym-form names))
+                     as (generic-args (peek argsv))]
+                 (if (contains? #{:type :mod} ctx)
+                   (if (and (symbol? base) (pr/special-type-head? (str base)))
+                     (list :path (apply list base as))
+                     (apply list base as))
+                   (apply list :turbofish base as)))
+               :else
+               (let [k (count (take-while nil? argsv))
+                     first-p (glob (path-sym-form (subvec names 0 (inc k))))
+                     first-f (apply list first-p (generic-args (nth argsv k)))
+                     rest-f (for [i (range (inc k) n)]
+                              (if-let [a (nth argsv i)]
+                                (apply list (sx/name-form (nth names i)) (generic-args a))
+                                (sx/name-form (nth names i))))]
+                 (apply list :path first-f rest-f)))]
+    (at form (span-of p))))
+
+(defn qpath-form
+  "A possibly qualified path (QSelf): (:qself T Tr rest)"
+  [qself p ctx]
+  (if-let [q (opt qself)]
+    (let [segs (vec (fld p :segments))
+          pos (fld q :position)
+          tr (when (pos? pos) (path-form (list 'Path :span (span-of p) :segments (subvec segs 0 pos)) :type))
+          rest-segs (subvec segs pos)
+          rest-f (cond
+                   (every? #(nil? (seg-args %)) rest-segs) (path-sym-form (mapv seg-name rest-segs))
+                   (= 1 (count rest-segs)) (apply list (sx/name-form (seg-name (first rest-segs))) (generic-args (seg-args (first rest-segs))))
+                   :else (apply list :path (for [s rest-segs]
+                                             (if-let [a (seg-args s)]
+                                               (apply list (sx/name-form (seg-name s)) (generic-args a))
+                                               (sx/name-form (seg-name s))))))]
+      (at (lst :qself (ty-form (fld q :ty) :plain) tr rest-f) (span-of p)))
+    (path-form p ctx)))
+
+(defn lifetime-form
+  "'a for a lifetime (lifetime \"'a\") or a label (label (id \"'a\" 0))"
+  [x]
+  (let [t (case (hd x)
+            lifetime (second x)
+            label (ident (second x))
+            id (second x)
+            (fail! "a lifetime" x))
+        nm (subs t 1)]
+    (if (sx/bare? nm) (list 'quote (symbol nm)) (list :lifetime nm))))
+
+(defn- const-arg [anon] (expr-form (fld anon :value) :plain))
+
+(defn generic-args
+  "The elements after a path's head for its generic arguments (SPEC §3.3, §6)"
+  [ga]
+  (case (hd ga)
+    AngleBracketed
+    (let [ab (arg ga 1)
+          out (vec (for [a (fld ab :args)]
+                     (case (hd a)
+                       Arg (let [g (arg a 1)]
+                             (case (hd g)
+                               Lifetime (lifetime-form (arg g 1))
+                               Type (ty-form (arg g 1) :plain)
+                               Const (const-arg (arg g 1))
+                               (fail! "a generic argument" g)))
+                       Constraint
+                       (let [c (arg a 1)
+                             nm (sx/name-form (ident (fld c :ident)))
+                             nm (if-let [g (opt (fld c :gen_args))] (apply list nm (generic-args g)) nm)
+                             k (fld c :kind)]
+                         (at (case (hd k)
+                               Equality (let [t (fld k :term)]
+                                          (list '= nm (case (hd t) Ty (ty-form (arg t 1) :plain) Const (const-arg (arg t 1)))))
+                               Bound (apply list :has nm (bounds-forms (fld k :bounds))))
+                             (span-of c)))
+                       (fail! "a generic argument" a))))]
+      (if (and (= 1 (count out)) (vector? (first out)))
+        (into [:of] out)
+        out))
+    Parenthesized
+    (let [pa (arg ga 1)
+          ins (at (vc (for [p (fld pa :inputs)]
+                        (if (= 'Missing (fld (fld p :pat) :kind))
+                          (ty-form (fld p :ty) :plain)
+                          (at (list :has (pat-form (fld p :pat) :param) (ty-form (fld p :ty) :plain)) (span-of p)))))
+                  (fld pa :inputs_span))
+          out (fld pa :output)]
+      (if (= 'Ty (hd out))
+        [ins '-> (ty-form (arg out 1) :fnret)]
+        [ins]))
+    ParenthesizedElided [(at ['..] (arg ga 1))]
+    (fail! "generic arguments" ga)))
+
+;;; Types (SPEC §6)
+
+(defn- mutbl [m] (= 'Mut m))
+
+(defn- multi-bound? [t]
+  (let [k (fld t :kind)]
+    (and (contains? #{'TraitObject 'ImplTrait} (hd k))
+         (> (count (arg k 1)) 1))))
+
+(defn- fn-ptr-params [decl]
+  (vc (for [p (fld decl :inputs)]
+        (let [pat (fld p :pat)]
+          (with-attrs
+            (if (= 'Missing (fld pat :kind))
+              (if (= 'CVarArgs (fld (fld p :ty) :kind)) (at '... (span-of p)) (ty-form (fld p :ty) :plain))
+              (at (list :has (pat-form pat :param) (ty-form (fld p :ty) :plain)) (span-of p)))
+            (outer-attrs (fld p :attrs)))))))
+
+(defn- safety-words [s]
+  (case (hd s)
+    Unsafe [(at 'unsafe (arg s 1))]
+    Safe [(at 'safe (arg s 1))]
+    []))
+
+(defn- extern-words [e]
+  (case (hd e)
+    Implicit [(at 'extern (arg e 1))]
+    Explicit (let [sl (arg e 1)]
+               [(at 'extern (arg e 2))
+                (attach (sx/lit-form (if (= 'Cooked (fld sl :style)) 'Str (list 'StrRaw (arg (fld sl :style) 1)))
+                                     (fld sl :symbol) (some-> (fld sl :suffix) opt))
+                        (line-of sl))])
+    []))
+
+(defn- generic-params-vec [ps]
+  (vc (map generic-param ps)))
+
+(defn ty-form
+  "A type's form; pos :plain, :ref (after & or *), :fnret, :cast (SPEC §6, §5.2)"
+  [t pos]
+  (let [k (fld t :kind)
+        s (span-of t)
+        f (case (if (seq? k) (first k) k)
+            Slice [(ty-form (arg k 1) :plain)]
+            Array [(ty-form (arg k 1) :plain) (const-arg (arg k 2))]
+            Ptr (let [mt (arg k 1)] (list (if (mutbl (fld mt :mutbl)) '*mut '*const) (ty-form (fld mt :ty) :ref)))
+            Ref (let [lt (opt (arg k 1)) mt (arg k 2)]
+                  (lst (if (mutbl (fld mt :mutbl)) '&mut '&) (when lt (lifetime-form lt)) (ty-form (fld mt :ty) :ref)))
+            PinnedRef (let [lt (opt (arg k 1)) mt (arg k 2)]
+                        (lst '&pin (when lt (lifetime-form lt)) (if (mutbl (fld mt :mutbl)) 'mut 'const) (ty-form (fld mt :ty) :ref)))
+            FnPtr (let [fp (arg k 1)
+                        gps (fld fp :generic_params)
+                        decl (fld fp :decl)
+                        out (fld decl :output)]
+                    (ls (concat (when (seq gps) ['for (generic-params-vec gps)])
+                                (safety-words (fld fp :safety))
+                                (extern-words (fld fp :ext))
+                                [(at 'fn (fld fp :decl_span))
+                                 (let [ps (fn-ptr-params decl)]
+                                   (if (= 'Default (hd out)) (with-meta-line ps :rs/close (spos (arg out 1))) ps))]
+                                (when (= 'Ty (hd out)) ['-> (ty-form (arg out 1) :fnret)]))))
+            UnsafeBinder (let [b (arg k 1)]
+                           (list 'unsafe (generic-params-vec (fld b :generic_params)) (ty-form (fld b :inner_ty) :plain)))
+            Never '!
+            Tup (if (empty? (arg k 1)) () (ls (cons :tuple (map #(ty-form % :plain) (arg k 1)))))
+            Path (qpath-form (arg k 1) (arg k 2) :type)
+            TraitObject (ls (cons (if (= 'Dyn (arg k 2)) 'dyn :bare) (bounds-forms (arg k 1))))
+            ImplTrait (ls (cons 'impl (bounds-forms (arg k 1))))
+            Paren (with-meta (list :paren (ty-form (arg k 1) :plain)) {:rs/paren-line (hidden-line (spos s))})
+            Infer '_
+            ImplicitSelf 'Self
+            MacCall (mac-call-form (arg k 1) s)
+            CVarArgs '...
+            FieldOf (list :builtin 'field_of (builtin-tt s "field_of"))
+            (fail! "a type" t))]
+    (at f s)))
+
+;;; Generics and bounds (SPEC §4.4)
+
+(defn bound-form [b]
+  (case (hd b)
+    Trait
+    (let [ptr (arg b 1)
+          m (fld ptr :modifiers)
+          p (path-form (fld (fld ptr :trait_ref) :path) :type)
+          pol (fld m :polarity)
+          p (case (hd pol) Negative (list (at '! (arg pol 1)) p) Maybe (list (at '? (arg pol 1)) p) p)
+          as (fld m :asyncness)
+          p (if (= 'Async (hd as)) (list (at 'async (arg as 1)) p) p)
+          c (fld m :constness)
+          p (case (hd c) Always (list (at 'const (arg c 1)) p) Maybe (list (at :maybe-const (arg c 1)) p) p)
+          gps (fld ptr :bound_generic_params)
+          p (if (seq gps) (list 'for (generic-params-vec gps) p) p)
+          p (if (= 'Yes (fld ptr :parens)) (list :paren p) p)]
+      (at p (span-of ptr)))
+    Outlives (lifetime-form (arg b 1))
+    Use (at (ls (cons 'use (for [a (arg b 1)]
+                             (case (hd a)
+                               Lifetime (lifetime-form (arg a 1))
+                               Arg (path-form (arg a 1) :mod)))))
+            (arg b 2))
+    (fail! "a bound" b)))
+
+(defn bounds-forms [bs] (map bound-form bs))
+
+(defn generic-param [p]
+  (let [nm-t (ident (fld p :ident))
+        k (fld p :kind)
+        nm (if (str/starts-with? nm-t "'") (lifetime-form (fld p :ident)) (sx/name-form nm-t))
+        bs (fld p :bounds)
+        colon (opt (fld p :colon_span))
+        f (case (if (seq? k) (first k) k)
+            (Lifetime Type)
+            (let [base (if (or (seq bs) colon)
+                         (ls (concat [(head-line :has colon nil false) nm] (bounds-forms bs)))
+                         nm)]
+              (if-let [d (and (seq? k) (= 'Type (first k)) (opt (fld k :default)))]
+                (list '= base (ty-form d :plain))
+                base))
+            Const (at (lst 'const nm (ty-form (fld k :ty) :plain) (when-let [d (opt (fld k :default))] (const-arg d)))
+                      (fld k :span))
+            (fail! "a generic parameter" p))]
+    (with-attrs f (outer-attrs (fld p :attrs)))))
+
+(defn generic-name
+  "Name or (Name params...) (SPEC §4.4)"
+  [nm generics]
+  (let [ps (fld generics :params)
+        n (sx/name-form nm)]
+    (if (empty? ps)
+      n
+      (ls (cons n (map generic-param ps))))))
+
+(defn close-last
+  "form with :rs/close l on the form that prints its last closing delimiter (> of generic
+  parameters or arguments, ) of parameters or tuple fields, ] of a slice), for the empty span of
+  a missing where clause that follows it on a line of its own"
+  [f l]
+  (let [v (sx/lv f)]
+    (cond
+      (vector? v) (vary-meta f assoc :rs/close l)
+      (and (seq? v) (seq v))
+      (let [h (sx/lv (first v))
+            xs (vec v)
+            fi (.indexOf ^java.util.List (mapv sx/lv xs) 'fn)]
+        (cond
+          (and (>= fi 0) (vector? (sx/lv (nth xs (inc fi) nil))))
+          (if (= '-> (sx/lv (nth xs (+ fi 2) nil)))
+            (with-meta (apply list (assoc xs (+ fi 3) (close-last (nth xs (+ fi 3)) l))) (meta f))
+            (with-meta (apply list (assoc xs (inc fi) (close-last (nth xs (inc fi)) l))) (meta f)))
+          (contains? #{'& '&mut '*const '*mut 'dyn 'impl :bare :has '&pin '? '! 'for 'async 'const :maybe-const :paren :global} h)
+          (with-meta (apply list (conj (pop xs) (close-last (peek xs) l))) (meta f))
+          (= 1 (count xs)) f
+          :else (vary-meta f assoc :rs/close l)))
+      :else f)))
+
+(defn where-mark
+  "The elements standing for a where clause in an item: the where form, or a marker that
+  fix-wheres resolves (the previous element's :rs/close)"
+  [w]
+  (if-let [f (where-form w)]
+    [f]
+    (if-let [l (hidden-line (spos (span-of w)))]
+      [(list ::where l)]
+      [])))
+
+(defn fix-wheres
+  "An item form with its where markers resolved"
+  [f]
+  (if (and (seq? f) (some #(and (seq? %) (= ::where (first %))) f))
+    (with-meta (apply list (reduce (fn [acc x]
+                                     (if (and (seq? x) (= ::where (first x)))
+                                       (if (seq acc) (conj (pop acc) (close-last (peek acc) (second x))) acc)
+                                       (conj acc x)))
+                                   [] f))
+      (meta f))
+    f))
+
+(defn where-form [w]
+  (when (or (fld w :has_where_token) (seq (fld w :predicates)))
+    (at (ls (cons 'where
+                  (for [p (fld w :predicates)]
+                    (let [k (fld p :kind)
+                          f (case (hd k)
+                              BoundPredicate
+                              (let [bp (arg k 1)
+                                    pred (ls (concat [:has (ty-form (fld bp :bounded_ty) :plain)] (bounds-forms (fld bp :bounds))))
+                                    gps (fld bp :bound_generic_params)]
+                                (if (seq gps) (list 'for (generic-params-vec gps) pred) pred))
+                              RegionPredicate
+                              (let [rp (arg k 1)]
+                                (ls (concat [:has (lifetime-form (fld rp :lifetime))] (bounds-forms (fld rp :bounds)))))
+                              (fail! "a where predicate" p))]
+                      (with-attrs (at f (span-of p)) (outer-attrs (fld p :attrs)))))))
+        (span-of w))))
+
+;;; Patterns (SPEC §5.7)
+
+(defn binding-words
+  "The words of a binding mode (BindingMode ByRef Mut): mut, then ref, ref mut, ref pin const..."
+  [bm]
+  (let [by-ref (arg bm 1) m (arg bm 2)]
+    (concat (when (mutbl m) ['mut])
+            (when (= 'Yes (hd by-ref))
+              (concat ['ref]
+                      (if (= 'Pinned (arg by-ref 1))
+                        ['pin (if (mutbl (arg by-ref 2)) 'mut 'const)]
+                        (when (mutbl (arg by-ref 2)) ['mut])))))))
+
+(defn- binding-form [bm nm]
+  (let [ws (binding-words bm) n (sx/name-form nm)]
+    (if (empty? ws) n (ls (concat ws [n])))))
+
+(defn pat-form
+  "A pattern's form; pos :top, :nested, :param, :at, :or, :ref (SPEC §5.7, §5.2)"
+  [p pos]
+  (let [k (fld p :kind)
+        s (span-of p)
+        f (case (if (seq? k) (first k) k)
+            Missing :_
+            Wild '_
+            Ident (let [b (binding-form (arg k 1) (ident (arg k 2)))]
+                    (if-let [sub (opt (arg k 3))]
+                      (list :at b (pat-form sub :at))
+                      b))
+            Struct (let [head (qpath-form (arg k 1) (arg k 2) :expr)
+                         items (mapcat (fn [pf]
+                                         (let [fp (fld pf :pat)
+                                               nm (keyword (ident (fld pf :ident)))
+                                               parts (if (fld pf :is_shorthand)
+                                                       (let [[bx inner] (if (= 'Box (hd (fld fp :kind))) [['box] (arg (fld fp :kind) 1)] [[] fp])
+                                                             ik (fld inner :kind)]
+                                                         (if (= 'Ident (hd ik))
+                                                           (concat bx (binding-words (arg ik 1)) [nm])
+                                                           (fail! "a shorthand field pattern" pf)))
+                                                       [nm (pat-form fp :nested)])
+                                               parts (vec parts)
+                                               parts (assoc parts 0 (at (nth parts 0) (span-of pf)))]
+                                           (assoc parts 0 (with-attrs (nth parts 0) (outer-attrs (fld pf :attrs))))))
+                                       (arg k 3))
+                         rest (arg k 4)
+                         items (if (= 'Rest (hd rest)) (concat items [(at '.. (arg rest 1))]) items)]
+                     (list head (ls (cons :braces items))))
+            TupleStruct (let [head (qpath-form (arg k 1) (arg k 2) :expr)
+                              head (if (and (symbol? (sx/lv head)) (pr/special-pat-head? (str (sx/lv head)))) (list :path head) head)]
+                          (ls (cons head (map #(pat-form % :nested) (arg k 3)))))
+            Or (ls (cons '| (map #(pat-form % :or) (arg k 1))))
+            Path (qpath-form (arg k 1) (arg k 2) :expr)
+            Tuple (if (empty? (arg k 1)) () (ls (cons :tuple (map #(pat-form % :nested) (arg k 1)))))
+            Box (list 'box (pat-form (arg k 1) :ref))
+            Deref (list :deref (pat-form (arg k 1) :top))
+            Ref (let [sub (pat-form (arg k 1) :ref)]
+                  (if (= 'Pinned (arg k 2))
+                    (list '&pin (if (mutbl (arg k 3)) 'mut 'const) sub)
+                    (list (if (mutbl (arg k 3)) '&mut '&) sub)))
+            Expr (expr-form (arg k 1) :plain)
+            Range (let [re (arg k 3)
+                        node (fld re :node)
+                        op (case (hd node)
+                             Included (if (= 'DotDotDot (arg node 1)) '... '..=)
+                             Excluded '..
+                             (if (= 'Excluded node) '.. (fail! "a range end" re)))]
+                    (list (at op (fld re :span))
+                          (if-let [a (opt (arg k 1))] (expr-form a :plain) :_)
+                          (if-let [b (opt (arg k 2))] (expr-form b :plain) :_)))
+            Slice (vc (map #(pat-form % :nested) (arg k 1)))
+            Rest '..
+            Never '!
+            Guard (list :guard (pat-form (arg k 1) :top) (expr-form (fld (arg k 2) :cond) :plain))
+            Paren (with-meta (list :paren (pat-form (arg k 1) :top)) {:rs/paren-line (hidden-line (spos s))})
+            MacCall (mac-call-form (arg k 1) s)
+            (fail! "a pattern" p))]
+    (at f s)))
+
+;;; Expressions (SPEC §5)
+
+(defn- binop-sym [k]
+  (case (str k)
+    "Add" '+ "Sub" '- "Mul" '* "Div" '/ "Rem" '% "And" '&& "Or" '|| "BitXor" 'bit-xor
+    "BitAnd" '& "BitOr" '| "Shl" '<< "Shr" '>> "Eq" '== "Lt" '< "Le" '<= "Ne" '!= "Ge" '>= "Gt" '>
+    (fail! "a binary operator" k)))
+
+(defn- assignop-sym [k]
+  (case (str k)
+    "AddAssign" '+= "SubAssign" '-= "MulAssign" '*= "DivAssign" 'div= "RemAssign" '%=
+    "BitXorAssign" 'bit-xor= "BitAndAssign" '&= "BitOrAssign" '|= "ShlAssign" '<<= "ShrAssign" '>>=
+    (fail! "an assignment operator" k)))
+
+(defn- lit-of [l]
+  (sx/lit-form (fld l :kind) (fld l :symbol) (some-> (fld l :suffix) opt)))
+
+(defn builtin-tt
+  "(:tt \"(...)\") of a builtin # name(...) form from the source: from the ( after the name to
+  the end of the span"
+  [s nm]
+  (let [text (src-text (spos s) (s-end s))
+        i (.indexOf ^String text "(" (int (+ (.indexOf ^String text ^String nm) (count nm))))]
+    (when (neg? i) (fail! "a builtin form without (" text))
+    (list :tt (subs text i))))
+
+(defn- label-of [l] (when-let [lb (opt l)] (lifetime-form lb)))
+
+(defn- attrs-line [f]
+  (let [as (if (sx/lit? f) (::attrs f) (when (instance? arbace.lang.IObj f) (::attrs (meta f))))]
+    (when (seq as) (form-line (first as)))))
+
+(defn head-line
+  "head with the line of the operator token at span s when the printer would not put it there by
+  itself: by default a binary operator stands on its right operand's line when that begins a
+  later one (rustfmt's style; the writer writes such a head's line whenever it has one), any
+  other head on the current line (SPEC §9.1)"
+  [head s right binary?]
+  (let [l (sline s)
+        p (spos s)
+        cur (when p (prev-line p))
+        rl (when right (or (attrs-line right) (form-line right)))
+        dflt (if (and binary? rl cur (> rl cur)) rl cur)]
+    (if (and l (not= l dflt))
+      (let [h (attach head l)] (if binary? (vary-meta h assoc ::op true) h))
+      head)))
+
+(defn- head-has-line? [f]
+  (let [h (first f)] (some? (form-line h))))
+
+(declare closure-form if-form arm-form stmts-forms)
+
+(defn- block-of
+  "The body elements of a block: the inner attributes (of the expression or item that owns it),
+  then its statements"
+  [block inner]
+  (concat (map #(attr-form % false) inner) (stmts-forms (fld block :stmts))))
+
+(defn- with-brace
+  "form with :rs/brace, the line of its body block's {, when the printer would not put it there"
+  [form block]
+  (with-meta-line form :rs/brace (spos (span-of block))))
+
+(defn expr-form
+  "An expression's form (SPEC §5); ctx is unused but documents the position"
+  [e ctx]
+  (let [k (fld e :kind)
+        s (span-of e)
+        attrs (fld e :attrs)
+        inner (inner-attrs attrs)
+        kk (if (seq? k) (first k) k)
+        f (case kk
+            Array (vc (map #(expr-form % :plain) (arg k 1)))
+            ConstBlock (let [v (expr-form (fld (arg k 1) :value) :plain)
+                             ;; the block's inner attributes belong to the const block's expression
+                             v (if (and (seq inner) (seq? v) (= 'do (first v)))
+                                 (with-meta (ls (concat ['do] (map #(attr-form % false) inner) (rest v))) (meta v))
+                                 v)]
+                         (list 'const v))
+            Call (let [callee (expr-form (arg k 1) :callee)
+                       c (sx/lv callee)
+                       callee (if (and (symbol? c) (pr/special-expr-head? (str c))) (attach (list :path c) (form-line callee)) callee)]
+                   (ls (cons callee (map #(expr-form % :plain) (arg k 2)))))
+            MethodCall (let [mc (arg k 1)
+                             seg (fld mc :seg)
+                             nm (symbol (str "." (ident (fld seg :ident))))
+                             head (if-let [a (opt (fld seg :args))] (apply list :turbofish nm (generic-args a)) nm)
+                             recv (expr-form (fld mc :receiver) :plain)
+                             head (head-line head (fld mc :span) nil false)]
+                         (ls (concat [head recv] (map #(expr-form % :plain) (fld mc :args)))))
+            Tup (if (empty? (arg k 1)) () (ls (cons :tuple (map #(expr-form % :plain) (arg k 1)))))
+            Binary (let [op (arg k 1)
+                         sym (binop-sym (fld op :node))
+                         l (expr-form (arg k 2) :plain)
+                         r (expr-form (arg k 3) :plain)
+                         head (head-line sym (fld op :span) r true)
+                         ;; a left operand with the same operator, no attributes and no head line joins the chain
+                         lv (sx/lv l)]
+                     (if (and (seq? lv) (= sym (sx/lv (first lv))) (> (count lv) 2)
+                              (not (head-has-line? lv)) (nil? (::attrs (meta lv)))
+                              (= 'Binary (hd (fld (arg k 2) :kind))))
+                       (ls (concat [head] (rest lv) [r]))
+                       (list head l r)))
+            Unary (let [op (arg k 1) x (arg k 2) xk (fld x :kind)]
+                    (if (and (= 'Neg op) (empty? (fld x :attrs)) (= 'Lit (hd xk))
+                             (let [v (lit-of (arg xk 1))] (and (number? v) (not (zero? v)))))
+                      (let [v (lit-of (arg xk 1))]
+                        (if (double? v) (- v) (- v)))
+                      (list (case (str op) "Neg" '- "Not" '! "Deref" '*) (expr-form x :plain))))
+            AddrOf (let [bk (arg k 1) m (mutbl (arg k 2)) x (expr-form (arg k 3) :plain)]
+                     (case (str bk)
+                       "Ref" (list (if m '&mut '&) x)
+                       "Raw" (list '&raw (if m 'mut 'const) x)
+                       "Pin" (list '&pin (if m 'mut 'const) x)))
+            Lit (lit-of (arg k 1))
+            Cast (list 'as (expr-form (arg k 1) :plain) (ty-form (arg k 2) :cast))
+            Type (list :builtin 'type_ascribe (builtin-tt s "type_ascribe"))
+            Let (list 'let (pat-form (arg k 1) :top) (expr-form (arg k 2) :plain))
+            If (if-form e)
+            While (with-brace (ls (concat ['while (label-of (arg k 3)) (expr-form (arg k 1) :cond)] (block-of (arg k 2) inner))) (arg k 2))
+            ForLoop (let [fl (arg k 1)]
+                      (with-brace (ls (concat ['for (label-of (fld fl :label))]
+                                              (when (= 'ForAwait (fld fl :kind)) ['await])
+                                              [(pat-form (fld fl :pat) :top) (expr-form (fld fl :iter) :cond)]
+                                              (block-of (fld fl :body) inner)))
+                                  (fld fl :body)))
+            Loop (with-brace (ls (concat [(at 'loop (arg k 3)) (label-of (arg k 2))] (block-of (arg k 1) inner))) (arg k 1))
+            Match (let [kind (arg k 3)
+                        arms (map arm-form (arg k 2))]
+                    (ls (concat (if (= 'Postfix kind)
+                                  [(symbol ".match") (expr-form (arg k 1) :plain)]
+                                  ['match (expr-form (arg k 1) :cond)])
+                                (map #(attr-form % false) inner)
+                                arms)))
+            Closure (closure-form (arg k 1))
+            Block (let [b (arg k 1)
+                        lb (label-of (arg k 2))]
+                    (if (= 'Unsafe (hd (fld b :rules)))
+                      (do (when lb (fail! "a labeled unsafe block" e))
+                          (ls (concat ['unsafe] (block-of b inner))))
+                      (ls (concat ['do lb] (block-of b inner)))))
+            Gen (let [cap (arg k 1) b (arg k 2) gk (arg k 3)]
+                  (ls (concat (case (str gk) "Async" ['async] "Gen" ['gen] "AsyncGen" ['async 'gen])
+                              (case (hd cap) Value [(at 'move (fld cap :move_kw))] Use [(at 'use (fld cap :use_kw))] [])
+                              (block-of b inner))))
+            Await (list (symbol ".await") (expr-form (arg k 1) :plain))
+            Use (list (symbol ".use") (expr-form (arg k 1) :plain))
+            TryBlock (let [b (arg k 1) t (opt (arg k 2))]
+                       (ls (concat ['try] (when t [:bikeshed (ty-form t :plain)]) (block-of b inner))))
+            Assign (let [r (expr-form (arg k 2) :plain)]
+                     (list (head-line '= (arg k 3) r false) (expr-form (arg k 1) :plain) r))
+            AssignOp (let [op (arg k 1) r (expr-form (arg k 3) :plain)]
+                       (list (head-line (assignop-sym (fld op :node)) (fld op :span) r false) (expr-form (arg k 2) :plain) r))
+            Field (field-form e)
+            Index (list (head-line :index (arg k 3) nil false) (expr-form (arg k 1) :plain) (expr-form (arg k 2) :plain))
+            Range (let [a (opt (arg k 1)) b (opt (arg k 2)) lim (arg k 3)]
+                    (if (and (nil? a) (nil? b) (= 'HalfOpen lim))
+                      '..
+                      (list (if (= 'Closed lim) '..= '..)
+                            (if a (expr-form a :plain) :_)
+                            (if b (expr-form b :plain) :_))))
+            Underscore '_
+            Path (qpath-form (arg k 1) (arg k 2) :expr)
+            Break (lst 'break (label-of (arg k 1)) (when-let [v (opt (arg k 2))] (expr-form v :plain)))
+            Continue (lst 'continue (label-of (arg k 1)))
+            Ret (lst 'return (when-let [v (opt (arg k 1))] (expr-form v :plain)))
+            Yield (let [y (arg k 1)]
+                    (case (hd y)
+                      Prefix (lst 'yield (when-let [v (opt (arg y 1))] (expr-form v :plain)))
+                      Postfix (list (symbol ".yield") (expr-form (arg y 1) :plain))))
+            Yeet (lst 'do 'yeet (when-let [v (opt (arg k 1))] (expr-form v :plain)))
+            Become (list 'become (expr-form (arg k 1) :plain))
+            MacCall (mac-call-form (arg k 1) s)
+            Struct (let [se (arg k 1)
+                         head (qpath-form (fld se :qself) (fld se :path) :expr)
+                         fields (mapcat (fn [ef]
+                                          (let [nm (with-attrs (at (keyword (ident (fld ef :ident))) (span-of ef)) (outer-attrs (fld ef :attrs)))]
+                                            (if (fld ef :is_shorthand) [nm] [nm (expr-form (fld ef :expr) :plain)])))
+                                        (fld se :fields))
+                         rest (fld se :rest)
+                         fields (case (hd rest)
+                                  Base (concat fields ['.. (expr-form (arg rest 1) :plain)])
+                                  Rest (concat fields [(at '.. (arg rest 1))])
+                                  fields)]
+                     (list head (ls (cons :braces fields))))
+            Repeat (list :repeat (expr-form (arg k 1) :plain) (const-arg (arg k 2)))
+            Paren (with-meta (list :paren (expr-form (arg k 1) :plain)) {:rs/paren-line (hidden-line (spos s))})
+            Try (list '? (expr-form (arg k 1) :plain))
+            Move (list :move (expr-form (arg k 1) :plain))
+            UnsafeBinderCast (list :builtin (if (= 'Wrap (arg k 1)) 'wrap_binder 'unwrap_binder)
+                                   (builtin-tt s (if (= 'Wrap (arg k 1)) "wrap_binder" "unwrap_binder")))
+            OffsetOf (list :builtin 'offset_of (builtin-tt s "offset_of"))
+            (fail! "an expression" e))]
+    (with-attrs (at f s) (outer-attrs attrs))))
+
+(defn field-form
+  "A field access: a chain symbol a.b.0 on a one-segment path, else (. e f g) (SPEC §5.3, S13)"
+  [e]
+  (let [[base fields] (loop [b e fs ()]
+                        (let [k (fld b :kind)]
+                          (if (and (= 'Field (hd k)) (or (identical? b e) (empty? (fld b :attrs))))
+                            (recur (arg k 1) (cons (ident (arg k 2)) fs))
+                            [b fs])))
+        bk (fld base :kind)
+        segs (when (and (= 'Path (hd bk)) (= 'None (arg bk 1))) (fld (arg bk 2) :segments))]
+    (if (and segs (= 1 (count segs)) (nil? (opt (fld (first segs) :args))) (empty? (fld base :attrs))
+             (not= "{{root}}" (seg-name (first segs)))
+             (not (pr/special-expr-head? (seg-name (first segs))))
+             (sx/chain-reads? (str/join "." (cons (seg-name (first segs)) fields))))
+      (symbol (str/join "." (cons (seg-name (first segs)) fields)))
+      (ls (concat ['. (expr-form base :plain)]
+                  (map #(if (re-matches #"0|[1-9][0-9]*" %) (Long/parseLong %) (sx/name-form %)) fields))))))
+
+(defn if-form [e]
+  (let [k (fld e :kind)
+        inner (inner-attrs (fld e :attrs))
+        then (arg k 2)
+        head (with-brace (ls (concat ['if (expr-form (arg k 1) :cond)] (block-of then inner))) then)]
+    (loop [acc [] els (opt (arg k 3))]
+      (if (nil? els)
+        (with-meta (ls (concat head acc)) (meta head))
+        (let [ek (fld els :kind)]
+          (cond
+            (and (= 'If (hd ek)) (empty? (fld els :attrs)))
+            (recur (conj acc (with-brace (at (ls (concat ['else 'if (expr-form (arg ek 1) :cond)] (block-of (arg ek 2) []))) (span-of els)) (arg ek 2)))
+                   (opt (arg ek 3)))
+            (and (= 'Block (hd ek)) (empty? (fld els :attrs)) (= 'None (arg ek 2)) (= 'Default (fld (arg ek 1) :rules)))
+            (recur (conj acc (at (ls (cons 'else (block-of (arg ek 1) []))) (span-of els))) nil)
+            :else (fail! "an unusual else branch" els)))))))
+
+(defn arm-form [a]
+  (let [g (opt (fld a :guard))
+        body (opt (fld a :body))]
+    (with-attrs
+      (at (lst '=> (pat-form (fld a :pat) :top)
+               (when g (at (list 'if (expr-form (fld g :cond) :plain)) (fld g :span_with_leading_if)))
+               (cond body (expr-form body :arm) g :_ :else nil))
+          (span-of a))
+      (outer-attrs (fld a :attrs)))))
+
+(defn- closure-params [decl]
+  (vc (for [p (fld decl :inputs)]
+        (let [pat (pat-form (fld p :pat) :param)
+              t (fld p :ty)]
+          (with-attrs
+            (if (= 'Infer (fld t :kind)) pat (at (list :has pat (ty-form t :plain)) (span-of p)))
+            (outer-attrs (fld p :attrs)))))))
+
+(defn closure-form [c]
+  (let [binder (fld c :binder)
+        ck (opt (fld c :coroutine_kind))
+        cap (fld c :capture_clause)
+        decl (fld c :fn_decl)
+        out (fld decl :output)
+        body (fld c :body)
+        bk (fld body :kind)
+        quals (concat (when (= 'For (hd binder)) ['for (generic-params-vec (fld binder :generic_params))])
+                      (when (= 'Yes (hd (fld c :constness))) [(at 'const (arg (fld c :constness) 1))])
+                      (when (= 'Static (hd (fld c :movability))) ['static])
+                      (when ck (case (hd ck)
+                                 Async [(at 'async (fld ck :span))]
+                                 Gen [(at 'gen (fld ck :span))]
+                                 AsyncGen [(at 'async (fld ck :span)) 'gen]))
+                      (case (hd cap) Value [(at 'move (fld cap :move_kw))] Use [(at 'use (fld cap :use_kw))] []))
+        params (at (closure-params decl) (fld c :fn_decl_span))
+        block-body? (and (= 'Block (hd bk)) (empty? (fld body :attrs)) (= 'None (arg bk 2)) (= 'Default (fld (arg bk 1) :rules)))]
+    (if (= 'Ty (hd out))
+      (do (when-not block-body? (fail! "a closure with a return type and no block" c))
+          (with-brace (ls (concat quals ['fn params '-> (ty-form (arg out 1) :fnret)] (block-of (arg bk 1) [])))
+            (arg bk 1)))
+      (if (and block-body? (>= (count (fld (arg bk 1) :stmts)) 2))
+        (with-brace (ls (concat quals ['fn params] (block-of (arg bk 1) []))) (arg bk 1))
+        (ls (concat quals ['fn params (expr-form body :plain)]))))))
+
+;;; Macro calls (SPEC §7)
+
+(defn token-list
+  "The tokens of a token stream as [text line] (delimiters as tokens, at their spans' lines)"
+  [ts]
+  (vec (mapcat (fn [t]
+                 (case (hd t)
+                   Token (let [tk (arg t 1)] [[(sx/token-text (fld tk :kind)) (sline (fld tk :span))]])
+                   Delimited (let [ds (arg t 1)
+                                   [o c] (case (str (arg t 3)) "Parenthesis" ["(" ")"] "Bracket" ["[" "]"] "Brace" ["{" "}"])]
+                               (concat [[o (sline (fld ds :open))]] (token-list (arg t 4)) [[c (sline (fld ds :close))]]))
+                   (fail! "a token tree" t)))
+               (stream-trees ts))))
+
+
+(defn token-entries
+  "The tokens of a token stream as entries [:tok text line], [:open text line source end-index]
+  for a delimited group (its source text and the index of its close), [:close text line]"
+  [ts]
+  (let [out (transient [])]
+    (letfn [(walk [ts]
+              (doseq [t (stream-trees ts)]
+                (case (hd t)
+                  Token (let [tk (arg t 1)] (conj! out [:tok (sx/token-text (fld tk :kind)) (sline (fld tk :span))]))
+                  Delimited (let [ds (arg t 1)
+                                  [o c] (case (str (arg t 3)) "Parenthesis" ["(" ")"] "Bracket" ["[" "]"] "Brace" ["{" "}"])
+                                  i (count out)]
+                              (conj! out [:open o (sline (fld ds :open)) (delim-text ds) nil])
+                              (walk (arg t 4))
+                              (conj! out [:close c (sline (fld ds :close))])
+                              (let [e (nth out i)] (assoc! out i (assoc e 4 (dec (count out))))))
+                  (fail! "a token tree" t))))]
+      (walk ts))
+    (persistent! out)))
+
+(defn glue-printed
+  "Printed tokens [[text line joint? tt?]...] as rustc's lexer would make them: punctuation glued
+  (Token::glue), each [text line tt?] at its first part's line"
+  [printed]
+  (let [singles (mapcat (fn [[t l j tt]] (if (and (not tt) (sx/punct? t) (> (count t) 1))
+                                           (map-indexed (fn [i c] [(str c) l (if (zero? i) j true) false]) t)
+                                           [[t l j tt]]))
+                        printed)]
+    (loop [ts (seq singles) prev nil out (transient [])]
+      (if (empty? ts)
+        (persistent! (if prev (conj! out prev) out))
+        (let [[t l j tt] (first ts)
+              g (when (and j prev (not tt) (not (nth prev 2)))
+                  (let [r (sx/glue [[(first prev) false] [t true]])] (when (= 1 (count r)) (first r))))]
+          (if g
+            (recur (rest ts) [g (second prev) false] out)
+            (do (when prev (conj! out prev)) (recur (rest ts) [t l tt] out))))))))
+
+(defn check-tokens
+  "Whether the printer's tokens for the arguments of form (printed by (print-fn form) as
+  [[text line joint? tt?]...], the call's or attribute's delimiters included) are those of the
+  delimited arguments d (DelimArgs): the same texts after Rust's gluing (a (:tt ...) text the
+  source text of a delimited group at its line), each at its line, but the closing delimiter's
+  (which form carries as :rs/close, SPEC §7.1, S16)"
+  [print-fn form d]
+  (let [printed (try (print-fn form) (catch Throwable ex (warn! [:printer-check-failed (or (.getMessage ex) (str ex))]) nil))]
+    (when printed
+      (let [ds (fld d :dspan)
+            [o c] (case (str (fld d :delim)) "Parenthesis" ["(" ")"] "Bracket" ["[" "]"] "Brace" ["{" "}"])
+            inner (token-entries (fld d :tokens))
+            want (vec (concat [[:tok o (sline (fld ds :open))]] inner [[:close c (sline (fld ds :close))]]))
+            got (glue-printed printed)
+            n (count want)]
+        (loop [i 0 j 0]
+          (cond
+            (and (= i n) (= j (count got))) true
+            (or (= i n) (= j (count got))) false
+            :else
+            (let [[k wt wl src end] (nth want i)
+                  [gt gl tt] (nth got j)]
+              (if tt
+                (if (and (= k :open) (= src gt) (= wl gl)) (recur (+ 2 end) (inc j)) false)
+                (if (and (= wt gt) (or (= i (dec n)) (= wl gl))) (recur (inc i) (inc j)) false)))))))))
+
+(defn- mac-path-form [p]
+  (let [f (path-form p :mod)
+        v (sx/lv f)
+        bang (fn [x] (cond
+                       (symbol? x) (symbol (namespace x) (str (name x) "!"))
+                       :else nil))]
+    (cond
+      (symbol? v) (attach (bang v) (form-line f))
+      (and (seq? v) (= :global (first v)) (symbol? (second v))) (attach (list :global (bang (second v))) (form-line f))
+      :else (fail! "a macro path" p))))
+
+(defn- arg-forms
+  "A macro call's arguments as forms from the helper's parse ([:exprs|:repeat [Expr...]], nil for
+  an empty stream), or nil when the forms would mean another delimiter (SPEC §7.1)"
+  [fact delim]
+  (let [[kind es] fact
+        forms (mapv #(expr-form % :plain) es)]
+    (case (str delim)
+      "Parenthesis" (when-not (or (= kind :repeat)
+                                  (and (= 1 (count forms))
+                                       (let [v (sx/lv (first forms))]
+                                         (or (vector? v)
+                                             (and (seq? v) (contains? #{:braces :repeat} (sx/lv (first v))))))))
+                      forms)
+      "Bracket" (if (= kind :repeat)
+                  [[(list :repeat (first forms) (second forms))]]
+                  [(vc forms)])
+      nil)))
+
+(defn mac-call-form
+  "A macro call (MacCall :path :args) at span s: (path! args...), the arguments expression forms
+  when the printer's tokens for them are the call's (SPEC §7.1, S16), else (:tt \"...\")"
+  [mac s]
+  (let [head (mac-path-form (fld mac :path))
+        d (fld mac :args)
+        ds (fld d :dspan)
+        delim (fld d :delim)
+        empty-stream? (empty? (stream-trees (fld d :tokens)))
+        fact (or (get *mac* (spos (fld ds :open)))
+                 (when (and empty-stream? (not= 'Brace delim)) [:exprs []]))
+        args (when fact (arg-forms fact delim))
+        call (when args
+               (let [c (with-meta-line (ls (cons head args)) :rs/close (spos (fld ds :close)))]
+                 (if (check-tokens pr/mac-arg-tokens c d)
+                   c
+                   (do (warn! :macro-args-as-text)
+                       (when (System/getenv "REPR_RUST_DEBUG")
+                         (binding [*out* *err*]
+                           (println "macro args as text:" (pr-str (delim-text ds)) "\n  printed:" (pr-str (mapv (juxt first second) (pr/mac-arg-tokens c))))))
+                       nil))))]
+    (if call
+      (do (warn! :macro-args-as-forms) call)
+      (do (warn! :macro-args-tt) (ls [head (tt-form ds)])))))
+
+;;; Statements (SPEC §5.6)
+
+(defn- expr-requires-semi?
+  "classify::expr_requires_semi_to_be_stmt on a dumped expression"
+  [e]
+  (let [k (fld e :kind) kk (if (seq? k) (first k) k)]
+    (case kk
+      MacCall (not= 'Brace (fld (fld (arg k 1) :args) :delim))
+      (If Match Block While Loop ForLoop TryBlock ConstBlock) false
+      true)))
+
+(defn- semi [f s]
+  (let [attrs (if (sx/lit? f) (::attrs f) (::attrs (meta f)))
+        inner (if (sx/lit? f) (dissoc f ::attrs) (vary-meta f dissoc ::attrs))
+        w (at (list :semi inner) s)]
+    (if attrs
+      (vary-meta w assoc ::attrs attrs)
+      w)))
+
+(declare item-forms)
+
+(defn local-form [l]
+  (let [pat (fld l :pat)
+        pk (fld pat :kind)
+        t (opt (fld l :ty))
+        k (fld l :kind)
+        sup (opt (fld l :super_))
+        p (cond
+            t [(at (list (head-line :has (opt (fld l :colon_sp)) nil false) (pat-form pat :top) (ty-form t :plain)) (span-of pat))]
+            (and (= 'Ident (hd pk)) (= '(BindingMode No Mut) (arg pk 1)) (= 'None (arg pk 3)))
+            [(at 'mut (span-of pat)) (sx/name-form (ident (arg pk 2)))]
+            :else [(pat-form pat :top)])]
+    (with-attrs
+      (at (ls (concat (when sup [(at 'super sup)])
+                      ['let]
+                      p
+                      (case (if (seq? k) (first k) k)
+                        Decl []
+                        Init [(expr-form (arg k 1) :plain)]
+                        InitElse [(expr-form (arg k 1) :plain)
+                                  (with-brace (ls (cons 'else (block-of (arg k 2) []))) (arg k 2))])))
+          (span-of l))
+      (outer-attrs (fld l :attrs)))))
+
+(defn stmts-forms
+  "A block's statements as body elements (SPEC §5.6)"
+  [stmts]
+  (let [n (count stmts)]
+    (mapcat (fn [i st]
+              (let [last? (= i (dec n))
+                    k (fld st :kind)
+                    s (span-of st)]
+                (case (if (seq? k) (first k) k)
+                  Let [(local-form (arg k 1))]
+                  Item (item-forms (arg k 1) :body)
+                  Empty [(at (list :semi) s)]
+                  Expr (let [e (arg k 1)]
+                         (when (and (not last?) (expr-requires-semi? e)) (fail! "an expression statement without ;" st))
+                         [(expr-form e :stmt)])
+                  Semi (let [e (arg k 1) f (expr-form e :stmt)]
+                         (if (and (not last?) (expr-requires-semi? e)) [f] [(semi f s)]))
+                  MacCall (let [m (arg k 1)
+                                mac (fld m :mac)
+                                f (with-attrs (at (mac-call-form mac s) s) (outer-attrs (fld m :attrs)))
+                                brace? (= 'Brace (fld (fld mac :args) :delim))]
+                            (case (str (fld m :style))
+                              "Semicolon" (if (and (not last?) (not brace?)) [f] [(semi f s)])
+                              "Braces" [f]
+                              "NoBraces" (if last? [f] (fail! "a macro statement without ;" st))))
+                  (fail! "a statement" st))))
+            (range n) stmts)))
+
+;;; Items (SPEC §4)
+
+(defn- vis-words [v]
+  (let [k (fld v :kind) s (span-of v)]
+    (case (if (seq? k) (first k) k)
+      Public [(at 'pub s)]
+      Restricted (let [p (path-form (fld k :path) :mod)]
+                   [(at 'pub s) (if (fld k :shorthand) (list p) (list 'in p))])
+      Inherited []
+      (fail! "a visibility" v))))
+
+(defn- defaultness-words [d]
+  (case (hd d)
+    Default [(at 'default (arg d 1))]
+    Final [(at 'final (arg d 1))]
+    []))
+
+(defn- const-words [c] (if (= 'Yes (hd c)) [(at 'const (arg c 1))] []))
+
+(defn- header-words [h]
+  (let [ck (opt (fld h :coroutine_kind))]
+    (concat (const-words (fld h :constness))
+            (when ck (case (hd ck)
+                       Async [(at 'async (fld ck :span))]
+                       Gen [(at 'gen (fld ck :span))]
+                       AsyncGen [(at 'async (fld ck :span)) 'gen]))
+            (safety-words (fld h :safety))
+            (extern-words (fld h :ext)))))
+
+(defn- self-param
+  "A self parameter's form (SPEC §4.3), or nil when p is none"
+  [p]
+  (let [pat (fld p :pat) pk (fld pat :kind) t (fld p :ty) tk (fld t :kind)]
+    (when (and (= 'Ident (hd pk)) (= "self" (ident (arg pk 2))) (= 'None (arg pk 3)))
+      (let [m (mutbl (arg (arg pk 1) 2))
+            sv (if m (list 'mut 'self) 'self)]
+        (cond
+          (= 'ImplicitSelf tk) sv
+          (and (= 'Ref (hd tk)) (= 'ImplicitSelf (fld (fld (arg tk 2) :ty) :kind)))
+          (let [lt (opt (arg tk 1)) mm (mutbl (fld (arg tk 2) :mutbl))]
+            (if (and (nil? lt) (not mm)) '&self (lst (if mm '&mut '&) (when lt (lifetime-form lt)) 'self)))
+          (and (= 'PinnedRef (hd tk)) (= 'ImplicitSelf (fld (fld (arg tk 2) :ty) :kind)))
+          (let [lt (opt (arg tk 1)) mm (mutbl (fld (arg tk 2) :mutbl))]
+            (lst '&pin (when lt (lifetime-form lt)) (if mm 'mut 'const) 'self))
+          :else (list :has sv (ty-form t :plain)))))))
+
+(defn fn-params
+  "A function's parameters (SPEC §4.3): flat pattern/type pairs, a self parameter alone"
+  [decl]
+  (vc (mapcat (fn [i p]
+                (let [attrs (outer-attrs (fld p :attrs))
+                      pat (fld p :pat)
+                      t (fld p :ty)
+                      sp (when (zero? i) (self-param p))]
+                  (cond
+                    sp [(with-attrs (at sp (span-of p)) attrs)]
+                    (and (= 'CVarArgs (fld t :kind)) (= 'Missing (fld pat :kind)))
+                    [(with-attrs (at '... (span-of p)) attrs)]
+                    :else
+                    [(with-attrs (if (= 'Missing (fld pat :kind)) (at :_ (span-of p)) (at (pat-form pat :param) (span-of p))) attrs)
+                     (ty-form t :plain)])))
+              (range) (fld decl :inputs))))
+
+(defn- fn-parts
+  "The elements of a function from its fn keyword: fn name [params] -> T (where ...) body"
+  [func inner]
+  (let [sig (fld func :sig)
+        decl (fld sig :decl)
+        out (fld decl :output)
+        generics (fld func :generics)
+        params (fn-params decl)
+        ;; the ) of the parameters when the empty span of a missing return type follows it on
+        ;; another line
+        params (if (= 'Default (hd out)) (with-meta-line params :rs/close (spos (arg out 1))) params)
+        body (opt (fld func :body))]
+    (concat ['fn (generic-name (ident (fld func :ident)) generics) params]
+            (when (= 'Ty (hd out)) ['-> (ty-form (arg out 1) :plain)])
+            (where-mark (fld generics :where_clause))
+            (when body
+              (let [els (block-of body inner)]
+                (if (empty? els) [(at (list :braces) (span-of body))] els))))))
+
+(defn- fn-item [func vis inner]
+  (let [body (opt (fld func :body))
+        f (ls (concat vis (defaultness-words (fld func :defaultness)) (header-words (fld (fld func :sig) :header))
+                      (fn-parts func inner)))]
+    (when (opt (fld func :contract)) (throw (ex-info "contract" {::rust true})))
+    (when (opt (fld func :eii_impl)) (throw (ex-info "eii" {::rust true})))
+    (if (and body (seq (fld body :stmts)))
+      (with-brace f body)
+      (if body (with-brace f body) f))))
+
+(defn- tuple-fields [fields]
+  (vc (mapcat (fn [fd]
+                (let [ex (opt (fld fd :extras))
+                      parts (vec (concat (vis-words (fld fd :vis))
+                                         (field-mods ex)
+                                         [(ty-form (fld fd :ty) :plain)]
+                                         (when-let [d (some-> ex (fld :default) opt)] ['= (const-arg d)])))
+                      parts (assoc parts 0 (at (nth parts 0) (span-of fd)))]
+                  (assoc parts 0 (with-attrs (nth parts 0) (outer-attrs (fld fd :attrs))))))
+              fields)))
+
+(defn field-mods [ex]
+  (when ex
+    (concat (let [mr (fld (fld ex :mut_restriction) :kind)]
+              (when (= 'Restricted (hd mr))
+                (let [p (path-form (fld mr :path) :mod)]
+                  ['mut (if (fld mr :shorthand) (list p) (list 'in p))])))
+            (safety-words (fld ex :safety)))))
+
+(defn- named-fields [fields]
+  (ls (cons :braces
+            (mapcat (fn [fd]
+                      (let [ex (opt (fld fd :extras))
+                            parts (vec (concat (vis-words (fld fd :vis))
+                                               (field-mods ex)
+                                               [(keyword (ident (opt (fld fd :ident)))) (ty-form (fld fd :ty) :plain)]
+                                               (when-let [d (some-> ex (fld :default) opt)] ['= (const-arg d)])))
+                            parts (assoc parts 0 (at (nth parts 0) (span-of fd)))]
+                        (assoc parts 0 (with-attrs (nth parts 0) (outer-attrs (fld fd :attrs))))))
+                    fields))))
+
+(defn- variant-form [v]
+  (let [vis (vis-words (fld v :vis))
+        nm (sx/name-form (ident (fld v :ident)))
+        data (fld v :data)
+        base (case (hd data)
+               Unit (if (empty? vis) nm (ls (concat vis [nm])))
+               Tuple (ls (concat vis [nm] (tuple-fields (arg data 1))))
+               Struct (ls (concat vis [nm (named-fields (fld data :fields))]))
+               (if (= 'Unit data) (if (empty? vis) nm (ls (concat vis [nm]))) (fail! "a variant" v)))
+        base (at base (span-of v))
+        f (if-let [d (opt (fld v :disr_expr))] (at (list '= base (const-arg d)) (span-of v)) base)]
+    (with-attrs f (outer-attrs (fld v :attrs)))))
+
+(defn use-tree [t]
+  (let [prefix (fld t :prefix)
+        segs (vec (fld prefix :segments))
+        names (mapv seg-name segs)
+        global (and (seq names) (= "{{root}}" (first names)))
+        names (if global (subvec names 1) names)
+        glob (fn [f] (if global (list :global f) f))
+        psym (fn [ns] (at (path-sym-form ns) (span-of prefix)))
+        k (fld t :kind)]
+    (case (hd k)
+      Simple (let [p (glob (psym names))]
+               (if-let [r (opt (arg k 1))] (list 'as p (sx/name-form (ident r))) p))
+      Glob (cond
+             (empty? names) (glob (at '* (arg k 1)))
+             :else (glob (at (let [ns (str/join "." names)]
+                               (if (sx/qualified-reads? ns "*") (symbol ns "*") (apply list :path (concat (map sx/name-form names) ['*]))))
+                             (span-of prefix))))
+      Nested (let [subs (map (fn [it] (use-tree (arg it 1))) (fld k :items))]
+               (if (empty? names)
+                 (glob (at (vc subs) (fld k :span)))
+                 (glob (ls (cons (psym names) subs)))))
+      (fail! "a use tree" t))))
+
+(defn- assoc-or-item-kind
+  "The elements of an item's kind (ItemKind, AssocItemKind, ForeignItemKind) after the
+  visibility"
+  [item k inner vis]
+  (let [kk (if (seq? k) (first k) k)
+        s (span-of item)]
+    (case kk
+      ExternCrate (let [orig (opt (arg k 1)) nm (sx/name-form (ident (arg k 2)))]
+                    (ls (concat vis ['extern 'crate] (if orig [(sx/name-form orig) 'as nm] [nm]))))
+      Use (ls (concat vis ['use (use-tree (arg k 1))]))
+      Static (let [st (arg k 1)]
+               (ls (concat vis (safety-words (fld st :safety)) ['static]
+                           (when (mutbl (fld st :mutability)) ['mut])
+                           [(sx/name-form (ident (fld st :ident))) (ty-form (fld st :ty) :plain)]
+                           (when-let [e (opt (fld st :expr))] [(expr-form e :plain)]))))
+      Const (let [c (arg k 1)
+                  g (fld c :generics)]
+              (when (not= 'Body (fld c :kind)) (throw (ex-info "type const" {::rust true})))
+              (ls (concat vis (defaultness-words (fld c :defaultness)) ['const
+                           (generic-name (ident (fld c :ident)) g) (ty-form (fld c :ty) :plain)]
+                          (when-let [e (opt (fld c :body))] [(expr-form e :plain)])
+                          (where-mark (fld g :where_clause)))))
+      ConstBlock (let [cb (arg k 1) b (fld cb :block)]
+                   (ls (concat vis ['const (at (ls (cons 'do (block-of b inner))) (span-of b))])))
+      Fn (fn-item (arg k 1) vis inner)
+      Mod (let [mk (arg k 3)]
+            (ls (concat vis (safety-words (arg k 1)) ['mod (sx/name-form (ident (arg k 2)))]
+                        (when (= 'Loaded (hd mk))
+                          (let [items (mapcat #(item-forms % :body) (arg mk 1))
+                                els (concat (map #(attr-form % false) inner) items)]
+                            (if (empty? els) [(list :braces)] els))))))
+      ForeignMod (let [fm (arg k 1) abi (opt (fld fm :abi))]
+                   (ls (concat vis (safety-words (fld fm :safety)) [(at 'extern (fld fm :extern_span))]
+                               (when abi [(attach (sx/lit-form (if (= 'Cooked (fld abi :style)) 'Str (list 'StrRaw (arg (fld abi :style) 1)))
+                                                               (fld abi :symbol) (some-> (fld abi :suffix) opt))
+                                                  (line-of abi))])
+                               (map #(attr-form % false) inner)
+                               (mapcat #(item-forms % :foreign) (fld fm :items)))))
+      (TyAlias Type)
+      (let [ta (arg k 1)
+            g (fld ta :generics)
+            nm (generic-name (ident (fld ta :ident)) g)
+            bs (fld ta :bounds)]
+        (ls (concat vis (defaultness-words (fld ta :defaultness)) ['type
+                     (if (seq bs) (ls (concat [:has nm] (bounds-forms bs))) nm)]
+                    (where-mark (fld g :where_clause))
+                    (when-let [t (opt (fld ta :ty))] [(ty-form t :plain)])
+                    (where-mark (fld ta :after_where_clause)))))
+      Enum (let [g (arg k 2)]
+             (ls (concat vis ['enum (generic-name (ident (arg k 1)) g)]
+                         (where-mark (fld g :where_clause))
+                         (map variant-form (fld (arg k 3) :variants)))))
+      (Struct Union)
+      (let [g (arg k 2) data (arg k 3)
+            w (where-mark (fld g :where_clause))]
+        (ls (concat vis [(if (= 'Struct kk) 'struct 'union) (generic-name (ident (arg k 1)) g)]
+                    (case (hd data)
+                      Struct (concat w [(named-fields (fld data :fields))])
+                      Tuple (concat [(tuple-fields (arg data 1))] w)
+                      (if (= 'Unit (hd data)) w (fail! "variant data" data))))))
+      Trait (let [t (arg k 1)
+                  g (fld t :generics)
+                  ir (fld t :impl_restriction)
+                  irk (fld ir :kind)
+                  nm (generic-name (ident (fld t :ident)) g)
+                  bs (fld t :bounds)]
+              (ls (concat vis
+                          (when (= 'Restricted (hd irk))
+                            (let [p (path-form (fld irk :path) :mod)]
+                              [(at 'impl (span-of ir)) (if (fld irk :shorthand) (list p) (list 'in p))]))
+                          (const-words (fld t :constness))
+                          (safety-words (fld t :safety))
+                          (when (= 'Yes (fld t :is_auto)) ['auto])
+                          ['trait (if (seq bs) (ls (concat [:has nm] (bounds-forms bs))) nm)]
+                          (where-mark (fld g :where_clause))
+                          (map #(attr-form % false) inner)
+                          (mapcat #(item-forms % :assoc) (fld t :items)))))
+      TraitAlias (let [t (arg k 1) g (fld t :generics)]
+                   (ls (concat vis (const-words (fld t :constness))
+                               ['trait (generic-name (ident (fld t :ident)) g) '=]
+                               (bounds-forms (fld t :bounds))
+                               (where-mark (fld g :where_clause)))))
+      Impl (let [im (arg k 1)
+                 g (fld im :generics)
+                 h (opt (fld im :of_trait))
+                 ps (fld g :params)]
+             (ls (concat vis
+                         (when h (defaultness-words (fld h :defaultness)))
+                         (const-words (fld im :constness))
+                         (when h (safety-words (fld h :safety)))
+                         ['impl]
+                         (when (seq ps) [(ls (cons :generics (map generic-param ps)))])
+                         (when h
+                           (let [tr (path-form (fld (fld h :trait_ref) :path) :type)]
+                             [(if (= "negative" (fld h :polarity)) (list '! tr) tr) 'for]))
+                         [(ty-form (fld im :self_ty) :plain)]
+                         (where-mark (fld g :where_clause))
+                         (map #(attr-form % false) inner)
+                         (mapcat #(item-forms % :assoc) (fld im :items)))))
+      MacroDef (let [nm (sx/name-form (ident (arg k 1)))
+                     md (arg k 2)
+                     body (fld md :body)
+                     ds (fld body :dspan)
+                     o (fld ds :open)]
+                 (when (opt (fld md :eii_declaration)) (throw (ex-info "eii" {::rust true})))
+                 (if (fld md :macro_rules)
+                   (ls (concat vis ['macro_rules! nm (tt-form ds)]))
+                   (if (= (spos o) (s-end o))
+                     ;; macro m(args) { body }: the parser's joined stream from the source's two groups (S18)
+                     (let [trees (stream-trees (fld body :tokens))
+                           [a _ b] trees]
+                       (ls (concat vis ['macro nm (tt-form (arg a 1)) (tt-form (arg b 1))])))
+                     (ls (concat vis ['macro nm (tt-form ds)])))))
+      (Delegation DelegationMac) (throw (ex-info "delegation" {::rust true}))
+      (fail! "an item" item))))
+
+(defn item-forms
+  "An item's forms (an item, associated item or foreign item): its outer attributes' forms, then
+  the item's; ctx :top (heads qualified by rs), :body, :assoc, :foreign"
+  [item ctx]
+  (let [top (= ctx :top)
+        attrs (fld item :attrs)
+        k (fld item :kind)
+        inner (inner-attrs attrs)
+        outer (outer-attrs attrs)
+        vis (vis-words (fld item :vis))
+        s (span-of item)
+        f (try
+            (if (= 'MacCall (hd k))
+              (do (when (seq vis) (throw (ex-info "visibility on a macro call" {::rust true})))
+                  (let [m (mac-call-form (arg k 1) s)]
+                    (if top (with-meta (ls (cons 'rs/macro-call (seq m))) (meta m)) m)))
+              (let [f (fix-wheres (assoc-or-item-kind item k inner vis))]
+                (if top
+                  (with-meta (apply list (symbol "rs" (name (sx/lv (first f)))) (rest f)) (meta f))
+                  f)))
+            (catch arbace.lang.ExceptionInfo ex
+              (if (::rust (ex-data ex))
+                (do (warn! [:rust-escape (.getMessage ex)])
+                    (list (if top 'rs/rust :rust) (src-text (spos s) (s-end s))))
+                (throw ex))))
+        f (if (and top (sx/lit? (first f))) f f)]
+    (concat (map #(attr-form % top) outer) [(at f s)])))
+
+;;; Files (SPEC §2)
+
+(defn ns-of
+  "The namespace of a file (SPEC §2.1, S3): rs. + the crate + the path in the crate's directory
+  (path relative to the crate's directory)"
+  [crate ^String rel]
+  (let [segs (vec (str/split (str/replace rel #"\.rs$" "") #"/"))
+        segs (if (= "src" (first segs))
+               (let [s (subvec segs 1)]
+                 (if (contains? #{"mod" "lib" "main"} (peek s)) (pop s) s))
+               segs)
+        segs (map #(str/replace % #"[.-]" "_") segs)]
+    (symbol (str/join "." (concat ["rs" (str crate)] segs)))))
+
+(defn- dumped [dump sym]
+  (some #(when (and (seq? %) (= sym (first %))) (second %)) dump))
+
+(defn convert-file
+  "A dump (its forms) and the file's configuration {:crate :crate-type :kind :rel :corpus} to Rust
+  forms: {:ns sym :forms [...] :warnings {...}}"
+  [dump {:keys [crate crate-type kind rel corpus src-lines pin]}]
+  (let [cfg (dumped dump 'rsdump/config)
+        err (dumped dump 'rsdump/error)
+        tree (first (filter #(and (seq? %) (= 'Crate (first %))) dump))
+        warnings (atom {})]
+    (when err (throw (ex-info (str "the helper failed: " err) {})))
+    (when-not cfg (throw (ex-info "not a dump of tools/rsdump" {})))
+    (when (and pin (not= (:rustc pin) (:rustc cfg)))
+      (throw (ex-info (str "the dump's rustc is " (:rustc cfg) ", the converter's " (:rustc pin) " (tools/rsdump/RUSTC_VERSION)") {})))
+    (binding [*src* src-lines
+              *starts* (collect-starts tree)
+              *mac* (into {} (for [[sp k es] (dumped dump 'rsdump/mac-exprs)] [(spos sp) [k es]]))
+              *warnings* warnings]
+      (let [ns-name (ns-of crate rel)
+            attrs (fld tree :attrs)
+            file-form (list 'rs/file :path (:file cfg) :crate (symbol (str crate)) :edition (:edition cfg)
+                            :kind kind :positions :lines
+                            :config (cond-> {:rustc (:rustc cfg) :rustc-commit (:rustc-commit cfg) :rustc-driver (:rustc-driver cfg)}
+                                      crate-type (assoc :crate-type (symbol (str crate-type)))
+                                      corpus (assoc :corpus corpus)))
+            file-form (if (nil? kind) (apply list (concat (take 7 file-form) (drop 9 file-form))) file-form)
+            body (concat (map #(attr-form % true) (inner-attrs attrs))
+                         (mapcat #(item-forms % :top) (fld tree :items)))
+            body (pr/implicit-parens (vec body))]
+        {:ns ns-name
+         :forms (vec (concat [(list 'ns ns-name (list :require ['arbace.rust :as 'rs])) file-form] body))
+         :warnings @warnings}))))
