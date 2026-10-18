@@ -16,7 +16,7 @@ first call.\n"
           ^{:tag sync/Once} once ^any node
           ^{:tag (slice byte)} pk ^{:tag (slice int32)} ps ^{:tag (slice byte)} rk ^{:tag (slice int32)} rs
           ^int32 ni ^int32 nf ^int32 ns ^int32 nr
-          ^{:tag (* Func)} interp ^{:tag (* Type)} ft))
+          ^{:tag (* Func)} interp ^{:tag (* Type)} ft ^{:tag (* Method)} im))
 
 (go/func NewCallable
   "NewCallable is the callable of member value fn named name (a method expression when
@@ -128,6 +128,8 @@ variadic function passes the slice xs.\n"
   ^{:tag (slice any)} [^{:tag (* Callable)} c ^{:tag (slice any)} args]
   (when (!= (.-interp c) nil)
     (return (CallFunc (.-interp c) (.-ft c) args (.-Name c))))
+  (when (!= (.-im c) nil)
+    (return (callMethodArbace (.-im c) args (.-Name c))))
   (.Do (.-once c) (fn [] (.prepare c)))
   (let [t (.-RT c)
         n (.NumIn t)
@@ -193,30 +195,94 @@ variadic function passes the slice xs.\n"
               (aset res i (ToArbace (load fr (aget (.-rk c) i) (aget (.-rs c) i) (.Out t i)))))
             res))))))
 
-;; ---------------------------------------------------------------------------------------
-;; The boundary for panics (§10.4, GR1's part: GoPanic and GoExit are made by GoInterp)
+;; Interpreted methods from Arbace (§2.1, §7.1; GR5): the receiver first
 
-(go/func panicText "panicText is a panic's value as gc prints it after \"panic: \".\n"
+(go/func callMethodArbace
+  "callMethodArbace calls interpreted method m from Arbace, args its receiver (a Go value of the
+receiver's type; a pointer to it for a value receiver, dereferenced: Go's implicit *; a proxy's
+value) and its arguments, converted by the parameters' types (§5.6); its results back.\n"
+  ^{:tag (slice any)} [^{:tag (* Method)} m ^{:tag (slice any)} args ^string name]
+  (let [sig (.-Sig m)
+        np (len (.-Ins sig))]
+    (when (or (== (len args) 0) (and (not (.-Variadic sig)) (!= (len args) (+ np 1)))
+              (and (.-Variadic sig) (< (len args) np)))
+      (panic (jrt/IllegalArgumentException_New_String
+               (jrt/Str (fmt/Sprintf "%s takes %d arguments (the receiver and %s), got %d" name (+ np 1) (.String sig) (len args))))))
+    (let [r (Unbox (aget args 0))]
+      (let [(values p ok) (proxyOf r)]
+        (when ok
+          (set! r (.-V p))))
+      (when (!= r nil)
+        (let [rv (reflect/ValueOf r)
+              want (.mem (.-RT m))]
+          (when (and (== (.Kind rv) reflect/Pointer) (!= (.Type rv) want) (== (.Elem (.Type rv)) want) (not (.IsNil rv)))
+            (set! r (.Interface (.Elem rv))))))
+      (let [recv (FromArbace r (.mem (.-RT m)) (+ "the receiver of " name))
+            th (CurrentThread)
+            (values _ ps rs) (slotCounts sig)
+            c (.Code (.-Fn m))
+            mk (.save th)
+            nf (.enter th c (.-Fn m))]
+        (setRecv nf (.-RK m) (.-RS m) (.-RT m) (.Interface recv))
+        (range [i pt (.-Ins sig)]
+          (let [what (fmt/Sprintf "argument %d of %s" (+ i 1) name)]
+            (if (and (.-Variadic sig) (== i (- np 1)))
+              (let [rest (subslice args (+ i 1))
+                    sv (reflect/MakeSlice (.mem pt) (len rest) (len rest))]
+                (range [j x rest]
+                  (.Set (.Index sv j) (FromArbace x (.mem (.elem pt)) what)))
+                (aset (.-R nf) (aget ps i) (.Interface sv)))
+              (setSlotValue nf (.-K pt) (aget ps i) pt (FromArbace (aget args (+ i 1)) (.mem pt) what)))))
+        (run c nf)
+        (let [out (make (slice any) (len rs))]
+          (range [i s rs]
+            (aset out i (ToArbace (slotValue nf (aget (.-Outs sig) i) s))))
+          (.restore th mk)
+          out)))))
+
+;; ---------------------------------------------------------------------------------------
+;; The boundary for panics (§10.4; GoPanic and GoExit are made by GoInterp)
+
+(go/func panicText "panicText is a panic's value as gc prints it after \"panic: \" (PanicText).\n"
   ^string [^any p]
-  (type-switch [v p]
-    (case [error] (return (.Error v)))
-    (case [fmt/Stringer] (return (.String v)))
-    (case [string] (return v)))
-  (fmt/Sprint p))
+  (PanicText p))
 
 (go/func guarded
-  "guarded runs f and gives Arbace's caller its outcome: [0 results...]; [1 message type value]
-for a panic (a GoPanic); [2 status] for os.Exit (a GoExit). A Java exception goes on as it is.\n"
+  "guarded runs f and gives Arbace's caller its outcome: [0 results...]; [1 message type value
+trace cause raw] for a panic (a GoPanic: its text as gc prints it, its dynamic type, its value
+converted, its interpreted frames as StackTraceElements, the Java exception of a run-time error
+or nil, the value itself, which a GoPanic going back into Go panics with again: S50); [2 status]
+for os.Exit (a GoExit). A Java exception goes on as it is. The thread's stacks are restored to
+their state at entry when a panic leaves (§4.3).\n"
   ^{:tag (slice any)} [^{:tag (func [] [(slice any)])} f] :results [^{:tag (slice any)} out]
-  (defer ((fn []
-            (let [p (recover)]
-              (when (!= p nil)
-                (type-switch [e p]
-                  (case [jrt/Throwable_I] (panic e))
-                  (case [exitPanic]
-                    (set! out (lit (slice any) (jrt/Box (conv int64 2)) (jrt/Box (conv int64 (.-Code e))))))
-                  (default
-                    (set! out (lit (slice any) (jrt/Box (conv int64 1)) (jrt/Str (panicText p))
-                                   (jrt/Str (fmt/Sprintf "%T" p)) (ContentToArbace p))))))))))
-  (let [rs (f)]
-    (append (lit (slice any) (jrt/Box (conv int64 0))) (spread rs))))
+  (let [th (CurrentThread)
+        m (.save th)]
+    (defer ((fn []
+              (let [p (recover)]
+                (when (!= p nil)
+                  (let [tr (.trace th (.-d m))]
+                    (.restore th m)
+                    (set! (.-chain th) nil)
+                    (type-switch [e p]
+                      (case [jrt/Throwable_I] (panic e))
+                      (case [exitPanic]
+                        (set! out (lit (slice any) (jrt/Box (conv int64 2)) (jrt/Box (conv int64 (.-Code e))))))
+                      (default
+                        (set! out (lit (slice any) (jrt/Box (conv int64 1)) (jrt/Str (panicText p))
+                                       (jrt/Str (dynTypeName p)) (ContentToArbace p) (traceElements tr)
+                                       (panicCause p) p))))))))))
+    (let [rs (f)]
+      (append (lit (slice any) (jrt/Box (conv int64 0))) (spread rs)))))
+
+(go/func dynTypeName "dynTypeName is the name of panic value p's dynamic type, as gc's %T (an interpreted type's own).\n"
+  ^string [^any p]
+  (let [(values pr ok) (proxyOf p)]
+    (when ok
+      (return (.String (.-T pr)))))
+  (let [rt (reflect/TypeOf p)]
+    (.Lock typesMu)
+    (let [d (aget interp rt)]
+      (.Unlock typesMu)
+      (when (!= d nil)
+        (return (.String d))))
+    (fmt/Sprintf "%T" p)))

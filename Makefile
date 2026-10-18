@@ -55,7 +55,7 @@ box-smoke: ## the box's smoke test on /dev/kvm (bin/arbace-go --smoke --box)
 	bin/arbace-go --smoke --box
 box-oracle: ## the oracle's subset in the box, against its known mismatches (as bin/gate --full)
 	ARBACE_BOX_NET=loopback bin/oracle check 'target/arbace-go/box-amd64/arbace-box -' -j 8 \
-	  --timeout 900 --exclude forms/files. --exclude forms/processes. \
+	  --timeout 900 --exclude forms/files. --exclude forms/processes. --exclude forms/go. \
 	  --expected test/oracle/known-go-box-amd64.edn
 box-suite: ## Clojure's suite's subset in the box (bin/box-suite; after `make suite`)
 	bin/box-suite

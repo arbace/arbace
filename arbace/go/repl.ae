@@ -230,10 +230,17 @@
   (let [base (:name (t/info (e/o m :recv-named)))]
     (if (e/o m :ptr-recv) (str "(*" base ")." (e/o m :name)) (str base "." (e/o m :name)))))
 
+(defn- display-file
+  "The file a frame of a declaration of Go file fname shows in traces (§10.6): the Go file of
+  converted forms, the forms' source for the REPL's implicit file (REPL at the REPL)."
+  [fname]
+  (if (or (nil? fname) (= "repl.go" fname)) (repl-source) fname))
+
 (defn build-context
   "The builder's context for the package of state st."
   [st]
   {:path (:path @st) :name (:name @st)
+   :source (let [ns (str (:ns @st))] (fn [fname] [ns (display-file fname)]))
    :compiled? listed?
    :types (java.util.HashMap.)
    :methods-done (java.util.IdentityHashMap.)
@@ -306,7 +313,7 @@
                                 [nm {:cell cell :key k :tree (:tree d) :obj x}])))
             init-cells (vec (for [x (:inits r)]
                               (let [d (some #(when (identical? (:obj %) x) %) decls)]
-                                {:cell (b/op "FuncCell" "init" (:name old) nil) :tree (:tree d)})))]
+                                {:cell (b/op "FuncCell" "init" (:name old) nil) :tree (:tree d) :obj x})))]
         (swap! st assoc :funcs new-funcs)
         ;; methods: a cell per T.M, kept while its signature is (G9)
         (let [new-methods (into {}
@@ -318,7 +325,12 @@
                                             prev (get-in old [:methods nm])
                                             cell (if (and prev (= k (:key prev))) (:cell prev) (b/op "FuncCell" nm (:name old) nil))]]
                                   [nm {:cell cell :key k :tree (:tree d) :obj m :generic (:generic d)}]))]
-          (swap! st assoc :methods new-methods))
+          (swap! st assoc :methods new-methods)
+          ;; the functions' sources in traces (§10.6)
+          (let [fsrc (fn [cell x] (let [[ns f] ((:source ctx) (when x (e/o x :file)))] (b/op "FuncSource" cell ns f)))]
+            (doseq [[_ {:keys [cell obj kept]}] new-funcs :when (not kept)] (fsrc cell obj))
+            (doseq [[_ {:keys [cell obj]}] new-methods] (fsrc cell obj))
+            (doseq [{:keys [cell obj]} init-cells] (fsrc cell obj))))
         ;; variables: a cell per name, kept while its type is (S10)
         (let [var-objs (for [d decls :when (= :var (:kind d)) x (or (:lhs d) [(:obj d)]) :when (not= "_" (e/o x :name))] x)
               new-vars (volatile! [])
@@ -368,6 +380,19 @@
                                                       doc (assoc :doc doc)))
                           (GoFn. (b/op "InterpCallable" cell (b/desc (e/o obj :type)) (str (:path old) "." nm))
                                  (str (:path old) "." nm))))
+                ;; methods: T.M, the receiver first (§2.1), (*T).M's var T.M too
+                (doseq [[_ {:keys [cell obj generic]}] (:methods @st)
+                        :when (not generic)
+                        :let [vname (str (:name (t/info (e/o obj :recv-named))) "." (e/o obj :name))
+                              full (str (:path old) "." vname)
+                              c (try (b/method-callable obj cell full)
+                                     (catch Exception ex (when-not (:goi/unsupported (ex-data ex)) (throw ex))))]
+                        :when c]
+                  (intern ns (with-meta (symbol vname) {:go/kind :method :go/package (:path old) :line (e/o obj :line)
+                                                        :file (e/o obj :file)
+                                                        :private (not (and (t/exported? (e/o obj :name))
+                                                                           (t/exported? (:name (t/info (e/o obj :recv-named))))))})
+                          (GoFn. c full)))
                 (doseq [[nm {:keys [ptr obj]}] globals]
                   (intern ns (with-meta (symbol nm) {:go/kind :var :go/package (:path old) :private (not (t/exported? nm))})
                           (GoVar. (b/op "GlobalPtr" (b/desc (e/o obj :type)) ptr) (str (:path old) "." nm))))
@@ -563,3 +588,75 @@
   [ns-sym]
   (let [st (package-state ns-sym false)]
     (:errors (check-source (source-of st) nil))))
+
+;;; go/run-compiled (G15)
+
+(defn- form-text
+  "Form f as readable text with its metadata (the forms root build/go reads)."
+  [f]
+  (binding [*print-meta* true *print-length* nil *print-level* nil *print-namespace-maps* false]
+    (pr-str f)))
+
+(defn- write-package!
+  "Writes package state st as a forms root's package file and its files under dir (SPEC.md §4.1)."
+  [^File dir st]
+  (let [s @st
+        path (:path s)
+        ns-sym (symbol (load/path->ns path))
+        segs (str/split path #"/")
+        stems (vec (for [fi (:files s)] (str/replace (:name fi) #"\.go$" "")))
+        pf (File. dir (str "go/" (str/join "/" segs) ".ae"))
+        fdir (last segs)
+        opts (dissoc (or (:opts s) {}) :files :path)]
+    (.mkdirs (.getParentFile pf))
+    (spit pf (str (form-text (list 'ns ns-sym '(:require [arbace.go :as go]))) "\n"
+                  (form-text (apply list 'go/package (symbol (:name s)) :path path
+                                    :files (vec (map :name (:files s)))
+                                    (mapcat identity opts))) "\n"
+                  (str/join "\n" (for [st stems] (form-text (list 'load (str fdir "/" st))))) "\n"))
+    (doseq [[fi stem] (map vector (:files s) stems)]
+      (let [f (File. (.getParentFile pf) (str fdir "/" stem ".ae"))]
+        (.mkdirs (.getParentFile f))
+        (spit f (str (form-text (list 'in-ns (list 'quote ns-sym))) "\n"
+                     (form-text (apply list 'go/file (:name fi) (mapcat identity (assoc (or (:opts fi) {}) :imports (vec (:imports fi))))))
+                     "\n\n"
+                     (str/join "\n\n" (map form-text (:decls fi))) "\n"))))))
+
+(defn- interpreted-closure
+  "Package state st and the interpreted packages it imports, transitively."
+  [st]
+  (loop [todo [st] seen #{} out []]
+    (if-let [s (first todo)]
+      (if (contains? seen (:path @s))
+        (recur (rest todo) seen out)
+        (let [imps (for [fi (:files @s) [_ p] (:imports fi)
+                         :when (and (string? p) (not (listed? p)))
+                         :let [is (get @packages p)] :when is] is)]
+          (recur (concat (rest todo) imps) (conj seen (:path @s)) (conj out s))))
+      out)))
+
+(defn run-compiled!
+  "go/run-compiled: package ns-sym's program (it and the interpreted packages it imports) as
+  Go forms, printed by repr/go and built by build/go (arbace.build.go) with the toolchain of
+  ARBACE_GOROOT (default /root/tamago-go), run with args as a child process (G15):
+  {:out :err :exit}; a build that fails throws its status."
+  [ns-sym args]
+  (let [st (package-state ns-sym false)]
+    (when-not st
+      (throw (ex-info (str ns-sym " is not an interpreted Go package") {:ns ns-sym})))
+    (let [tmp (.toFile (java.nio.file.Files/createTempDirectory "goi-run-compiled" (make-array java.nio.file.attribute.FileAttribute 0)))
+          src (File. tmp "src")
+          out (File. tmp "prog")
+          goroot (or (System/getenv "ARBACE_GOROOT") "/root/tamago-go")
+          build (requiring-resolve 'arbace.build.go/build)
+          sh (requiring-resolve 'arbace.java.shell/sh)]
+      (try
+        (doseq [s (interpreted-closure st)]
+          (write-package! src s))
+        (let [status (build src (:goarch @config "amd64") out {:goroot goroot :work (File. tmp "work")})]
+          (when-not (= 0 status)
+            (throw (ex-info (str "go/run-compiled: go build of " ns-sym " failed (status " status ")") {:go/status status})))
+          (let [r (apply sh (.getPath out) (map str args))]
+            {:out (:out r) :err (:err r) :exit (:exit r)}))
+        (finally
+          (doseq [^File f (reverse (file-seq tmp))] (.delete f)))))))

@@ -1,0 +1,288 @@
+;; goi: compiled Go calling interpreted code and Arbace (GOI-SPEC.md §6.4, §7.3, §7.5; GR5): the
+;; typed adapters (a real Go func of a function type around a target: an interpreted closure or
+;; method value, an Arbace fn; the table's, one per function type it lists, else
+;; reflect.MakeFunc), the typed calls of the wrappers' methods (GC22), the bridge to Arbace
+;; (arbace.lang.GoBridge, given at initialization: goi cannot import arbace/lang, §1.3), and the
+;; package arbace's hooks (§7.3).
+(in-ns 'go.arbace.goi)
+
+(go/file "adapt.go"
+  :imports [[fmt "fmt"] [reflect "reflect"] [sync "sync"] [jrt "arbace/jrt"] [arbace "arbace"]])
+
+;; ---------------------------------------------------------------------------------------
+;; The bridge to Arbace: arbace.lang.GoBridge's methods, as j2g names them
+
+(go/type langBridge
+  "langBridge is arbace.lang.GoBridge (GoInterp.ae): what goi asks of Arbace.\n"
+  (interface
+    (Apply_O_O1_I__O1 ^{:tag (* jrt/RefArray)} [^any f ^{:tag (* jrt/RefArray)} args ^int32 nres])
+    (IsFn_O__Z ^bool [^any x])
+    (Keyword_String__O ^any [^{:tag (* jrt/String)} s])
+    (Symbol_String__O ^any [^{:tag (* jrt/String)} s])
+    (FindVar_String__O ^any [^{:tag (* jrt/String)} s])
+    (DerefOf_O__O ^any [^any x])
+    (LongOf_O__J ^int64 [^any x])
+    (DoubleOf_O__D ^float64 [^any x])
+    (Truth_O__Z ^bool [^any x])
+    (SeqOf_O__O ^any [^any x])
+    (FirstOf_O__O ^any [^any x])
+    (NextOf_O__O ^any [^any x])
+    (InvokeMethod_O_String_O1__O ^any [^any obj ^{:tag (* jrt/String)} name ^{:tag (* jrt/RefArray)} args])
+    (FromGo_O__O ^any [^any x])))
+
+(go/var ^{:tag langBridge :doc "bridge is Arbace's GoBridge, set by GoInterp's initialization (init0).\n"} bridge)
+
+(go/func callArbace
+  "callArbace applies Arbace's f (an IFn, a Var, a Symbol or a String naming a var) to Arbace's
+args (goi's markers finished by the bridge: GoInterp.fromGo): with nres < 0 its result as it is;
+else its nres results (nres > 1: the elements of the sequential it returns), each as goi takes
+an Arbace value (GoInterp.toGo). A GoPanic that goi made panics with its Go value again (S50),
+a GoExit is os.Exit's panic again; any other exception goes on as it is (§10.5).\n"
+  ^{:tag (slice any)} [^any f ^{:tag (slice any)} args ^int nres]
+  (when (== bridge nil)
+    (panic (jrt/IllegalStateException_New_String (jrt/Str "goi: Arbace is not initialized"))))
+  (let [r (.Apply_O_O1_I__O1 bridge f (objects args) (conv int32 nres))
+        a (.-A r)]
+    (switch (argInt (aget a 0))
+      (case [1] (panic (aget a 1)))
+      (case [2] (panic (lit exitPanic (conv int (argInt (aget a 1)))))))
+    (subslice a 1)))
+
+(go/func isArbaceFn "isArbaceFn says whether x is an Arbace fn (an IFn that is not a Go func).\n" ^bool [^any x]
+  (when (or (== x nil) (== bridge nil))
+    (return false))
+  (let [(values _ ok) (assert jrt/Object_I x)]
+    (and ok (.IsFn_O__Z bridge x))))
+
+;; ---------------------------------------------------------------------------------------
+;; Targets and typed adapters (§4.6, §6.4, §7.5)
+
+(go/type Target
+  "Target is what a typed adapter calls: Enter takes the frame of one call of signature sig (its
+parameters' and results' slots laid out as slotCounts lays them); RunCall runs it, Leave
+releases it.\n"
+  (interface (Enter ^{:tag (* Frame)} [^{:tag (* Type)} sig])))
+
+(go/type AdapterFunc
+  "AdapterFunc makes a typed adapter: a real Go func of one function type (sig's) calling target t.\n"
+  (func [Target (* Type)] [any]))
+
+(go/var ^{:tag sync/Map :doc "typedAdapters are the table's typed adapters by function type (reflect.Type to AdapterFunc).\n"}
+  typedAdapters)
+
+(go/func RegisterAdapter "RegisterAdapter records the table's typed adapter of function type rt.\n"
+  [^{:tag reflect/Type} rt ^AdapterFunc mk]
+  (.Store typedAdapters rt mk))
+
+(go/func adapterOf "adapterOf is the table's typed adapter of function type rt, or nil.\n" ^AdapterFunc [^{:tag reflect/Type} rt]
+  (let [(values mk ok) (.Load typedAdapters rt)]
+    (when (not ok)
+      (return nil))
+    (assert AdapterFunc mk)))
+
+(go/method Enter "Enter is a call of the closure from compiled code: its frame at the thread's next depth, its cells in place.\n"
+  ^{:tag (* Frame)} [^{:tag (* Closure)} c ^{:tag (* Type)} sig]
+  (let [th (CurrentThread)
+        m (.save th)
+        code (.Code (.-F c))
+        nf (.enter th code (.-F c))]
+    (copy (.-C nf) (.-Cells c))
+    (set! (.-saved nf) m)
+    (set! (.-sig nf) sig)
+    (set! (.-ifn nf) nil)
+    nf))
+
+(go/method Enter "Enter is a call of the interpreted method value from compiled code: its frame, the receiver in its slot.\n"
+  ^{:tag (* Frame)} [^{:tag (* Bound)} b ^{:tag (* Type)} sig]
+  (let [th (CurrentThread)
+        m (.save th)
+        fn (.-Fn (.-M b))
+        code (.Code fn)
+        nf (.enter th code fn)]
+    (.setRecvOf b nf)
+    (set! (.-saved nf) m)
+    (set! (.-sig nf) sig)
+    (set! (.-ifn nf) nil)
+    nf))
+
+(go/func EnterMethod
+  "EnterMethod is a call of proxy p's interpreted method key from compiled code (a wrapper's
+method, GC22): its frame, the receiver in its slot, the arguments' slots the signature's.\n"
+  ^{:tag (* Frame)} [^Proxy p ^string key]
+  (let [m (aget (.-Methods (.-T p)) key)]
+    (when (== m nil)
+      (panic (fmt/Sprintf "goi: the type %s has no method %s" (typeName (.-T p)) key)))
+    (let [th (CurrentThread)
+          mk (.save th)
+          code (.Code (.-Fn m))
+          nf (.enter th code (.-Fn m))]
+      (setRecv nf (.-RK m) (.-RS m) (.-RT m) (.-V p))
+      (set! (.-saved nf) mk)
+      (set! (.-sig nf) (.-Sig m))
+      (set! (.-ifn nf) nil)
+      nf)))
+
+(go/func RunCall "RunCall runs the call of frame fr (an adapter's, Enter's).\n" [^{:tag (* Frame)} fr]
+  (when (!= (.-ifn fr) nil)
+    (.run (.-ifn fr) fr)
+    (return))
+  (run (.Code (.-Fn fr)) fr))
+
+(go/func Leave "Leave releases frame fr after its call: the thread's state restored.\n" [^{:tag (* Frame)} fr]
+  (when (== (.-ifn fr) nil)
+    (.restore (.-Th fr) (.-saved fr))))
+
+(go/func SetArgR "SetArgR writes Go value v (Go memory's) of parameter i into R slot s of fr, as a frame holds it.\n"
+  [^{:tag (* Frame)} fr ^int i ^int32 s ^any v]
+  (aset (.-R fr) s (fromMem (aget (.-Ins (.-sig fr)) i) v)))
+
+(go/func ResR "ResR is R slot s of fr, result i, as Go memory holds it.\n" ^any [^{:tag (* Frame)} fr ^int i ^int32 s]
+  (toMem (aget (.-Outs (.-sig fr)) i) (aget (.-R fr) s)))
+
+(go/func callTargetValues
+  "callTargetValues calls target t of signature sig with reflect.Values (reflect.MakeFunc's
+adapter, without a typed one): its results.\n"
+  ^{:tag (slice reflect/Value)} [^Target t ^{:tag (* Type)} sig ^{:tag (slice reflect/Value)} in]
+  (let [fr (.Enter t sig)
+        (values _ ps rs) (slotCounts sig)]
+    (range [i v in]
+      (let [pt (aget (.-Ins sig) i)]
+        (when (and (.-Variadic sig) (== i (- (len (.-Ins sig)) 1)))
+          (set! pt (TypeOf (.Type v))))
+        (setSlotValue fr (.-K pt) (aget ps i) pt v)))
+    (RunCall fr)
+    (let [out (make (slice reflect/Value) (len rs))]
+      (range [i s rs]
+        (aset out i (slotValue fr (aget (.-Outs sig) i) s)))
+      (Leave fr)
+      out)))
+
+(go/func adaptTarget
+  "adaptTarget is target t as a real Go func of signature sig: the table's typed adapter of its
+type, else reflect.MakeFunc.\n"
+  ^any [^Target t ^{:tag (* Type)} sig]
+  (let [rt (.mem sig)
+        mk (adapterOf rt)]
+    (when (!= mk nil)
+      (return (mk t sig)))
+    (.Interface (reflect/MakeFunc rt (fn ^{:tag (slice reflect/Value)} [^{:tag (slice reflect/Value)} in]
+                                       (callTargetValues t sig in))))))
+
+;; ---------------------------------------------------------------------------------------
+;; Arbace fns as Go funcs (§7.5)
+
+(go/type ifnTarget
+  "ifnTarget is an Arbace fn F called as a Go func of signature sig: its frame's slots (n, the
+parameters' ps and results' rs) hold the arguments and results, converted at the call (§5.6).\n"
+  (struct ^any F ^{:tag (* Type)} sig ^{:tag (array 4 int32)} n ^{:tag (slice int32)} ps ^{:tag (slice int32)} rs))
+
+(go/method Enter ^{:tag (* Frame)} [^{:tag (* ifnTarget)} t ^{:tag (* Type)} sig]
+  (addr (lit Frame :I (make (slice int64) (aget (.-n t) 0)) :F (make (slice float64) (aget (.-n t) 1))
+             :S (make (slice string) (aget (.-n t) 2)) :R (make (slice any) (aget (.-n t) 3))
+             :sig (.-sig t) :ifn t)))
+
+(go/method run
+  "run calls the Arbace fn with the frame's arguments converted to Arbace (a variadic
+parameter's elements as arguments of their own), its results converted back by the result
+types.\n"
+  [^{:tag (* ifnTarget)} t ^{:tag (* Frame)} fr]
+  (let [sig (.-sig t)
+        ins (.-Ins sig)
+        args (make (slice any) 0 (len ins))]
+    (range [i pt ins]
+      (let [v (slotValue fr pt (aget (.-ps t) i))]
+        (if (and (.-Variadic sig) (== i (- (len ins) 1)))
+          (for [j 0] (< j (.Len v)) (inc! j)
+            (set! args (append args (ToArbace (.Index v j)))))
+          (set! args (append args (ToArbace v))))))
+    (let [outs (.-Outs sig)
+          res (callArbace (.-F t) args (len outs))]
+      (range [i ot outs]
+        (setSlotValue fr (.-K ot) (aget (.-rs t) i) ot
+                      (FromArbace (aget res i) (.mem ot) (fmt/Sprintf "result %d of the Arbace fn given as a %s" (+ i 1) (typeName sig))))))))
+
+(go/func sigOf "sigOf is the descriptor of compiled function type rt with its parameters' and results' descriptors.\n"
+  ^{:tag (* Type)} [^{:tag reflect/Type} rt]
+  (let [ins (make (slice (* Type)) (.NumIn rt))
+        outs (make (slice (* Type)) (.NumOut rt))]
+    (for [i 0] (< i (.NumIn rt)) (inc! i) (aset ins i (TypeOf (.In rt i))))
+    (for [i 0] (< i (.NumOut rt)) (inc! i) (aset outs i (TypeOf (.Out rt i))))
+    (TFunc ins outs (.IsVariadic rt))))
+
+(go/func adaptArbaceFn "adaptArbaceFn is Arbace fn f as a Go func of function type rt (§7.5).\n"
+  ^{:tag reflect/Value} [^any f ^{:tag reflect/Type} rt]
+  (let [sig (sigOf rt)
+        (values n ps rs) (slotCounts sig)
+        t (addr (lit ifnTarget :F f :sig sig :n n :ps ps :rs rs))
+        g (adaptTarget t sig)
+        v (reflect/ValueOf g)]
+    (when (!= (.Type v) rt)
+      (return (.Convert v rt)))
+    v))
+
+;; ---------------------------------------------------------------------------------------
+;; The package arbace (§7.3): Go forms calling Arbace
+
+(go/type apiHooks "apiHooks is arbace.Hooks: the package arbace's calls into Arbace.\n" (struct))
+
+(go/func arbaceArgs "arbaceArgs are Go values as Arbace takes them, each by its dynamic type (§5.6).\n"
+  ^{:tag (slice any)} [^{:tag (slice any)} args]
+  (let [out (make (slice any) (len args))]
+    (range [i a args]
+      (aset out i (ContentToArbace a)))
+    out))
+
+(go/method Call ^any [^apiHooks h ^any f ^{:tag (slice any)} args]
+  (aget (callArbace (ContentToArbace f) (arbaceArgs args) -1) 0))
+
+(go/method Invoke ^any [^apiHooks h ^any obj ^string name ^{:tag (slice any)} args]
+  (let [as (arbaceArgs args)]
+    (range [i a as]
+      (aset as i (.FromGo_O__O bridge a)))
+    (.InvokeMethod_O_String_O1__O bridge (.FromGo_O__O bridge (ContentToArbace obj)) (jrt/Str name) (objects as))))
+
+(go/func arb "arb is Go value x as Arbace holds it (by its dynamic type, §5.6), its markers finished.\n"
+  ^any [^any x]
+  (.FromGo_O__O bridge (ContentToArbace x)))
+
+(go/method Str ^any [^apiHooks h ^string s] (jrt/Str s))
+
+(go/method GoStr ^string [^apiHooks h ^any x]
+  (when (== x nil)
+    (return ""))
+  (let [(values s ok) (assert (* jrt/String) x)]
+    (when ok
+      (return (.String s))))
+  (let [(values s ok) (assert string x)]
+    (when ok
+      (return s)))
+  (.String (jrt/ToString x)))
+
+(go/method Kw ^any [^apiHooks h ^string name] (.Keyword_String__O bridge (jrt/Str name)))
+(go/method Sym ^any [^apiHooks h ^string name] (.Symbol_String__O bridge (jrt/Str name)))
+(go/method Var ^any [^apiHooks h ^string name] (.FindVar_String__O bridge (jrt/Str name)))
+(go/method Deref ^any [^apiHooks h ^any x] (.DerefOf_O__O bridge (arb x)))
+
+(go/method Fn ^any [^apiHooks h ^{:tag (func [& (slice any)] [any])} f]
+  (.FromGo_O__O bridge (ContentToArbace f)))
+
+(go/method Long ^int64 [^apiHooks h ^any x] (.LongOf_O__J bridge (arb x)))
+
+(go/method Float64 ^float64 [^apiHooks h ^any x] (.DoubleOf_O__D bridge (arb x)))
+
+(go/method Bool ^bool [^apiHooks h ^any x]
+  (let [(values b ok) (assert bool x)]
+    (when ok
+      (return b)))
+  (.Truth_O__Z bridge (arb x)))
+
+(go/method Seq ^{:tag (func [(func [any] [bool])])} [^apiHooks h ^any coll]
+  (fn [^{:tag (func [any] [bool])} yield]
+    (let [s (.SeqOf_O__O bridge (arb coll))]
+      (while (!= s nil)
+        (when (not (yield (.FirstOf_O__O bridge s)))
+          (return))
+        (set! s (.NextOf_O__O bridge s))))))
+
+(go/func init []
+  (set! arbace/Hooks (lit apiHooks)))

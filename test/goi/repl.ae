@@ -122,6 +122,117 @@
 (goi.repl-test/is 1 (One))
 
 ;; ---------------------------------------------------------------------------------------
+;; GR5: the crossings (§7.3, §7.5, §7.6, §10.4, §10.6, §5.7, GS7, GS10, G15)
+
+(in-ns 'goi.repl-test)
+(require '[go.strings] '[go.sort])
+
+(ns go.rt.cross (:require [arbace.go :as go]))
+(go/import [fmt "fmt"] [strings "strings"] [arbace "arbace"] [errors "errors"])
+
+;; Arbace fns as Go func values (§7.5): for an interpreted function's parameter, for compiled Go's
+(go/func Apply ^int [^{:tag (func [int] [int])} f ^int x] (f x))
+(goi.repl-test/is 42 (Apply (fn [x] (* 2 x)) 21))
+(goi.repl-test/is "HELLO" (go.strings/Map (fn [r] (- r 32)) "hello"))
+(go/func Ints ^{:tag (slice int)} [] (lit (slice int) 3 1 2))
+(goi.repl-test/is [1 2 3] (let [xs (Ints)] (go.sort/Slice xs (fn [i j] (< (nth xs i) (nth xs j)))) (vec (seq xs))))
+(goi.repl-test/is "boom" (try (Apply (fn [x] (throw (ex-info "boom" {}))) 1) (catch Exception e (ex-message e))))
+(goi.repl-test/is arbace.lang.ExceptionInfo
+                  (try (Apply (fn [x] (throw (ex-info "boom" {}))) 1) (catch Exception e (class e))))
+(goi.repl-test/is "java.lang.ClassCastException"
+                  (try (Apply (fn [x] "s") 1) (catch Exception e (.getName (class e)))))
+;; a GoPanic that goi made, thrown back into Go by an Arbace fn, panics with its Go value (S50)
+(go/func Div ^int [^int a ^int b] (/ a b))
+(go/func Catch [^{:tag (func [])} f] :results [^string r] (defer ((fn [] (set! r (fmt/Sprint (recover)))))) (f) (return))
+(goi.repl-test/is "runtime error: integer divide by zero" (Catch (fn [] (Div 1 0))))
+(goi.repl-test/is "<nil>" (Catch (fn [] nil)))
+
+;; GoPanic (§10.4): gc's text, the Java exception of a run-time error as its cause (GS11), the
+;; interpreted frames in its ex-data and first in its stack trace (§10.6)
+(go/func Deep ^int [^int n] (when (== n 0) (return (/ 1 n))) (Deep (- n 1)))
+(goi.repl-test/is ["runtime error: integer divide by zero" java.lang.ArithmeticException
+                   '[go.rt.cross/Deep go.rt.cross/Deep go.rt.cross/Deep] "go.rt.cross" "Deep" true]
+                  (try (Deep 2)
+                       (catch arbace.lang.GoPanic e
+                         (let [tr (:go/trace (ex-data e))
+                               st (first (.getStackTrace e))]
+                           [(ex-message e) (class (ex-cause e)) (mapv first tr) (.getClassName st) (.getMethodName st)
+                            (= (nth (first tr) 2) (:line (meta #'Deep)))]))))
+(go/type MyErr (struct ^string M))
+(go/method Error ^string [^MyErr e] (+ "my error: " (.-M e)))
+(go/func Fail [^int k]
+  (switch k
+    (case [0] (panic (fmt/Errorf "e%d" 7)))
+    (case [1] (panic 1.5))
+    (case [2] (panic (lit MyErr "x")))
+    (case [3] (panic (errors/New "plain")))))
+(goi.repl-test/is ["e7" "+1.500000e+000" "my error: x" "plain"]
+                  (mapv #(try (Fail %) (catch arbace.lang.GoPanic e (ex-message e))) [0 1 2 3]))
+(goi.repl-test/is nil (try (Fail 2) (catch arbace.lang.GoPanic e (ex-cause e))))
+
+;; methods as vars T.M, the receiver first (§2.1, §7.1)
+(go/type P (struct ^int X ^int Y))
+(goi.repl-test/is 'go.rt.cross/P.Sum (symbol (go/method Sum ^int [^P p] (+ (.-X p) (.-Y p)))))
+(go/method Scale [^{:tag (* P)} p ^int k] (set! (.-X p) (* k (.-X p))) (set! (.-Y p) (* k (.-Y p))))
+(go/func MkP ^P [^int x ^int y] (lit P x y))
+(goi.repl-test/is 3 (go.rt.cross/P.Sum (MkP 1 2)))
+(go/func NewP ^{:tag (* P)} [^int x ^int y] (addr (lit P x y)))
+(goi.repl-test/is 9 (let [p (NewP 1 2)] (go.rt.cross/P.Scale p 3) (go.rt.cross/P.Sum p)))
+
+;; Go values printed with goi's type names (§5.7), an old generation's with its number
+(goi.repl-test/is "#go \"cross.P{X:1, Y:2}\"" (pr-str (MkP 1 2)))
+(def old-p (MkP 5 6))
+(go/type P (struct ^int X ^int Y ^int Z))
+(go/func MkP ^P [^int x ^int y] (lit P x y 0))
+(goi.repl-test/is ["cross.P#1{X:5, Y:6}" "cross.P{X:1, Y:2, Z:0}"] [(str old-p) (str (MkP 1 2))])
+
+;; interop on Go values (GS10): methods (the table's for compiled types), fields
+(goi.repl-test/is [2 "ab"] (let [b (go/new go.strings/Builder)] (.WriteString b "ab") [(.Len b) (.String b)]))
+(go/method Sum ^int [^P p] (+ (.-X p) (.-Y p) (.-Z p)))
+(goi.repl-test/is [3 1 2] (let [p (MkP 1 2)] [(.Sum p) (.-X p) (.Y p)]))
+
+;; Go values in Arbace's collection protocols, read-only (GS7)
+(go/func M ^{:tag (map string int)} [] (lit (map string int) ["a" 1] ["b" 2]))
+(goi.repl-test/is [3 3 [3 1 2] 2 nil 9] (let [xs (Ints)] [(count xs) (nth xs 0) (vec xs) (get (M) "b") (get (M) "z") (get xs 5 9)]))
+(goi.repl-test/is [{"a" 1 "b" 2} 2 1 2 nil] (let [p (MkP 1 2)] [(into {} (M)) (count (M)) (:X p) (get p :Y) (:x p)]))
+
+;; Go forms calling Arbace: the package arbace (§7.3)
+(go/func CallInc ^int64 [^int64 x] (arbace/Long (arbace/Call (arbace/Var "arbace.core/inc") x)))
+(goi.repl-test/is 42 (CallInc 41))
+(go/func Names ^string [] (arbace/GoStr (arbace/Call "arbace.core/str" (arbace/Kw "a/b") (arbace/Sym "s") 1)))
+(goi.repl-test/is ":a/bs1" (Names))
+(go/func SumSeq ^int64 [^any coll] (let [t (conv int64 0)] (range [x (arbace/Seq coll)] (set! t + (arbace/Long x))) t))
+(goi.repl-test/is [6 0] [(SumSeq [1 2 3]) (SumSeq nil)])
+(go/func Upper ^string [^any s] (arbace/GoStr (arbace/Invoke s "toUpperCase")))
+(goi.repl-test/is "ABC" (Upper "abc"))
+(go/func Truthy ^bool [^any x] (arbace/Bool x))
+(goi.repl-test/is [false false true true] (mapv Truthy [nil false 0 ""]))
+(go/func MkFn ^any [] (arbace/Fn (fn ^any [& ^{:tag (slice any)} xs] (len xs))))
+(goi.repl-test/is 3 ((MkFn) 1 2 3))
+(go/func Deref1 ^any [^any v] (arbace/Deref v))
+(goi.repl-test/is 5 (Deref1 (atom 5)))
+
+;; Java forms and Go forms through vars (§7.6)
+(in-ns 'goi.repl-test)
+(defclass ^:public CrossGo
+  (constructor ^:public [this])
+  (method ^:public ^:static twice ^Object [x]
+    (.invoke (arbace.lang.RT/var "go.rt.cross" "Apply") (arbace.lang.RT/var "arbace.core" "inc") x))
+  (method ^:public shout ^String [this ^String s] (.toUpperCase s)))
+(is 8 (CrossGo/twice 7))
+(def cross-obj (CrossGo.))
+(in-ns 'go.rt.cross)
+(go/func Shout ^string [^any obj] (arbace/GoStr (arbace/Invoke obj "shout" "hi")))
+(goi.repl-test/is "HI" (Shout goi.repl-test/cross-obj))
+
+;; go/run-compiled (G15): the package's program built by gc and run as a child process
+(ns go.rt.hello (:require [arbace.go :as go]))
+(go/package main)
+(go/import [fmt "fmt"] [os "os"])
+(go/func main [] (fmt/Println "hello from gc" (len os/Args)) (os/Exit 3))
+(goi.repl-test/is {:out "hello from gc 2\n" :err "" :exit 3} (go/run-compiled 'go.rt.hello "x"))
+
+;; ---------------------------------------------------------------------------------------
 
 (in-ns 'goi.repl-test)
 (doseq [[form expected actual] @failed]

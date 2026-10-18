@@ -20,7 +20,7 @@ defers: S30) and its epilogue (named results held in cells copied to their resul
 (go/type Func
   "Func is a function's cell (§4.6): its code, replaced when the function is defined again (G9)
 and built on its first call (S18) by build.\n"
-  (struct ^string Name ^string Pkg
+  (struct ^string Name ^string Pkg ^string NS ^string File
           ^{:tag (atomic/Pointer Code)} code
           ^{:tag (func [] [(* Code)])} build
           ^{:tag sync/Mutex} mu))
@@ -28,6 +28,14 @@ and built on its first call (S18) by build.\n"
 (go/func NewFunc "NewFunc is a new function cell named name of package pkg, built by build.\n"
   ^{:tag (* Func)} [^string name ^string pkg ^{:tag (func [] [(* Code)])} build]
   (addr (lit Func :Name name :Pkg pkg :build build)))
+
+(go/func FuncSource
+  "FuncSource gives function cell f the namespace and file its frames show in traces (§10.6;
+as built: GR5): the package's namespace (go.demo) and the Go file of converted forms, the forms'
+source for forms written by hand (REPL at the REPL).\n"
+  [^{:tag (* Func)} f ^string ns ^string file]
+  (set! (.-NS f) ns)
+  (set! (.-File f) file))
 
 (go/method Code "Code is f's code, built now when it has none (S18).\n" ^{:tag (* Code)} [^{:tag (* Func)} f]
   (let [c (.Load (.-code f))]
@@ -63,6 +71,7 @@ calls in them take frames above it).\n"
     (set! (.-depth th) d)
     (set! (.-depth nf) d)
     (set! (.-Fn nf) fn)
+    (set! (.-Line nf) 0)
     (set! (.-rec nf) nil)
     (when (> (.-NI c) 0) (set! (.-I nf) (.takeI th (.-NI c))))
     (when (> (.-NF c) 0) (set! (.-F nf) (.takeF th (.-NF c))))
@@ -195,8 +204,8 @@ into the first C slots of its frame at entry). gofns are its Go funcs by type (a
   adapters)
 
 (go/method goFunc
-  "goFunc is the closure as a real Go func of type t (reflect.MakeFunc: as built, GR3, the
-table's typed adapters come with GR5), made once per type and recorded.\n"
+  "goFunc is the closure as a real Go func of type t (the table's typed adapter of t, else
+reflect.MakeFunc: GR5), made once per type and recorded.\n"
   ^any [^{:tag (* Closure)} c ^{:tag (* Type)} t]
   (.Lock (.-mu c))
   (defer (.Unlock (.-mu c)))
@@ -204,8 +213,7 @@ table's typed adapters come with GR5), made once per type and recorded.\n"
         g (aget (.-gofns c) rt)]
     (when (!= g nil)
       (return g))
-    (set! g (.Interface (reflect/MakeFunc rt (fn ^{:tag (slice reflect/Value)} [^{:tag (slice reflect/Value)} in]
-                                                 (.callValues c t in)))))
+    (set! g (adaptTarget c t))
     (when (== (.-gofns c) nil)
       (set! (.-gofns c) (make (map reflect/Type any))))
     (aset (.-gofns c) rt g)
@@ -710,10 +718,14 @@ parameters' types (§5.6), its results back; the call guarded as compiled calls 
         (let [what (fmt/Sprintf "argument %d of %s" (+ i 1) name)]
           (if (and (.-Variadic ft) (== i (- np 1)))
             (let [rest (subslice args i)
-                  sv (reflect/MakeSlice (.mem pt) (len rest) (len rest))]
-              (range [j x rest]
-                (.Set (.Index sv j) (FromArbace x (.mem (.elem pt)) what)))
-              (aset (.-R nf) (aget ps i) (.Interface sv)))
+                  (values sp spread) (spreadOf rest)]
+              (if spread
+                ;; (go/spread xs): the slice xs itself (Go's f(a, xs...))
+                (aset (.-R nf) (aget ps i) (.Interface (FromArbace (.-V sp) (.mem pt) what)))
+                (let [sv (reflect/MakeSlice (.mem pt) (len rest) (len rest))]
+                  (range [j x rest]
+                    (.Set (.Index sv j) (FromArbace x (.mem (.elem pt)) what)))
+                  (aset (.-R nf) (aget ps i) (.Interface sv)))))
             (setSlotValue nf (.-K pt) (aget ps i) pt (FromArbace (aget args i) (.mem pt) what)))))
       (run c nf)
       (let [out (make (slice any) (len rs))]
@@ -721,6 +733,12 @@ parameters' types (§5.6), its results back; the call guarded as compiled calls 
           (aset out i (ToArbace (slotValue nf (aget (.-Outs ft) i) s))))
         (.restore th m)
         out))))
+
+(go/func spreadOf "spreadOf is the trailing arguments rest as (go/spread xs), or false.\n"
+  [^{:tag (slice any)} rest] :results [^spreadArg sp ^bool ok]
+  (when (== (len rest) 1)
+    (set! (values sp ok) (assert spreadArg (aget rest 0))))
+  (return))
 
 (go/func SetOSArgs "SetOSArgs makes os.Args the program's arguments (program mode, §6.7).\n" [^{:tag (slice string)} args]
   (set! os/Args args))

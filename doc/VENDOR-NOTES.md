@@ -1029,6 +1029,18 @@ step 4 (2026-10-07); the others came with later work, as each says:
     `classForms` loads `arbace.classes` on the first Java form). New in `arbace.go`: the macros
     of Go forms (`go/package`, `go/file`, `go/func` ...); new namespaces `arbace.go.repl`,
     `arbace.go.build`, `arbace.go.run` (`arbace/go/`).
+28. **goi's GR5: Go values in Arbace's protocols, Go panics in error reports** (2026-10-18;
+    doc/go/GOI-SPEC.md GS7, GS10, §10.4, "As built: GR5"). `arbace/lang/RT.ae`: `seqFrom`,
+    `countFrom`, `getFrom` (both arities), `nthFrom` (both) and `toArray` answer for a Go value (of the
+    class `arbace.lang.GoValue`) through `GoInterp`'s `seqOf`, `countOf`, `getOf`, `nthOf`: a
+    slice's or an array's elements, a map's entries, a struct's exported fields by keyword,
+    read-only, converted by their Go types (GS7). `arbace/lang/Reflector.ae`:
+    `invokeInstanceMethodOfClass`, `getInstanceField`, `invokeNoArgInstanceMember` and
+    `invokeInstanceMember` of a Go value call its Go method (an interpreted type's, or a
+    compiled type's through goi's table) or read its exported field (`(.Len buf)`, `(.-X p)`:
+    GS10). `arbace/main.ae`: `ex-triage` reports a `GoPanic` in the cause chain as the error,
+    at its innermost interpreted frame, not its cause (a run-time error's Java exception, GS11),
+    so the REPL prints `Execution error (GoPanic) at go.demo/Div (REPL:8).` as §1.4 shows.
 
 ## Dialect divergences
 

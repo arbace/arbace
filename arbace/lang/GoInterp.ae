@@ -5,7 +5,9 @@
 ;; GoType (a Go type as an IFn), GoValue (the class of every Go value in Arbace), GoPanic and
 ;; GoExit (a panic and os.Exit leaving Go). GR3: GoInterp's op, the factories of the
 ;; interpreter's nodes, descriptors and functions by name; an interpreted function's GoFn is
-;; GR1's over its Callable.
+;; GR1's over its Callable. GR5: GoBridge, what goi asks of Arbace (Arbace fns called as Go
+;; funcs, §7.5; the package arbace, §7.3); a GoPanic's trace, cause and Go value (§10.4, §10.6);
+;; Go values' methods and fields from Arbace (GS10) and their collection protocols (GS7).
 
 (in-ns 'arbace.lang)
 
@@ -18,11 +20,15 @@
   (constructor ^:private [this]))
 
 ;; A Go panic that left Go into Arbace (§10.4): the message is the panic's text as gc prints it
-;; after "panic: "; ex-data holds :go/value (the value, converted by its dynamic type) and
-;; :go/type.
+;; after "panic: "; ex-data holds :go/value (the value, converted by its dynamic type), :go/type
+;; and :go/trace (the interpreted frames, innermost first: [go.demo/Div "REPL" 8]); its stack trace
+;; begins with those frames; a run-time error's cause is the Java exception jrt maps it to (GS11);
+;; goValue is the value itself, which Go code given the GoPanic again panics with (S50).
 (defclass ^:public GoPanic
   :extends ExceptionInfo
-  (constructor ^:public [this ^String s ^IPersistentMap data] (super. s data)))
+  (field ^:public goValue)
+  (constructor ^:public [this ^String s ^IPersistentMap data] (super. s data))
+  (constructor ^:public [this ^String s ^IPersistentMap data ^Throwable cause] (super. s data cause)))
 
 ;; os.Exit called from Go at the REPL (§2.7, S12): ex-data holds :go/status.
 (defclass ^:public GoExit
@@ -115,6 +121,72 @@
             (.invoke this (.first args))
             (.throwArity this (RT/count args))))))
 
+;; What goi asks of Arbace (GR5; goi cannot import arbace/lang, §1.3): an instance is given to goi
+;; at GoInterp's initialization, and goi calls its methods through an interface of its own
+;; (go/arbace/goi/adapt.ae's langBridge: the names j2g gives them).
+(defclass ^:public ^:final GoBridge
+  (constructor ^:public [this])
+
+  (method ^:static varOf ^Var [^Symbol s]
+    (let [v (.invoke (RT/var "arbace.core" "requiring-resolve") s)]
+      (when-not (instance? Var v)
+        (throw (IllegalArgumentException. (java-str "no var " s))))
+      (cast Var v)))
+
+  (method ^:static fnOf ^IFn [f]
+    (cond
+      (nil? f) (throw (NullPointerException. "nil is not an Arbace fn"))
+      (instance? IFn f) (cast IFn f)
+      (instance? Symbol f) (GoBridge/varOf (cast Symbol f))
+      (instance? String f) (GoBridge/varOf (Symbol/intern (cast String f)))
+      :else (throw (ClassCastException. (java-str "not an Arbace fn: " (.getName (.getClass f)))))))
+
+  ;; f (an IFn, a Var, a Symbol or a String naming a var) applied to goi's args (finished by
+  ;; fromGo): [0 result] as it is (nres < 0), [0] (nres 0), [0 results...] each as goi takes it
+  ;; (toGo; nres > 1: the elements of the sequential result); [1 value] for a GoPanic goi made
+  ;; (S50), [2 status] for a GoExit
+  (method ^:public apply ^Object/1 [this f ^Object/1 args ^int nres]
+    (let [n (alength args)]
+      (loop [^int i 0]
+        (when (< i n)
+          (aset args i (GoInterp/fromGo (aget args i)))
+          (recur (unchecked-inc-int i))))
+      (try
+        (let [r (.applyTo (GoBridge/fnOf f) (RT/seq args))]
+          (cond
+            (< nres 0) (new Object/1 [(Integer/valueOf 0) r])
+            (== nres 0) (new Object/1 [(Integer/valueOf 0)])
+            (== nres 1) (new Object/1 [(Integer/valueOf 0) (GoInterp/toGo r)])
+            :else
+              (let [out (new Object/1 (unchecked-inc-int nres))]
+                (aset out 0 (Integer/valueOf 0))
+                (loop [^int i 0]
+                  (when (< i nres)
+                    (aset out (unchecked-inc-int i) (GoInterp/toGo (RT/nth r i)))
+                    (recur (unchecked-inc-int i))))
+                out)))
+        (catch GoPanic e
+          (if (some? (.-goValue e))
+              (new Object/1 [(Integer/valueOf 1) (.-goValue e)])
+              (throw e)))
+        (catch GoExit e (new Object/1 [(Integer/valueOf 2) (Integer/valueOf (.status e))])))))
+
+  (method ^:public isFn ^boolean [this x] (instance? IFn x))
+  (method ^:public keyword [this ^String s] (Keyword/intern (Symbol/intern s)))
+  (method ^:public symbol [this ^String s] (Symbol/intern s))
+  (method ^:public findVar [this ^String s] (GoBridge/varOf (Symbol/intern s)))
+  (method ^:public derefOf [this x] (.deref (cast IDeref x)))
+  (method ^:public longOf ^long [this x] (.longValue (cast Number x)))
+  (method ^:public doubleOf ^double [this x] (.doubleValue (cast Number x)))
+  (method ^:public truth ^boolean [this x]
+    (if (instance? Boolean x) (.booleanValue (cast Boolean x)) (some? x)))
+  (method ^:public seqOf [this x] (RT/seq x))
+  (method ^:public firstOf [this x] (RT/first x))
+  (method ^:public nextOf [this x] (RT/next x))
+  (method ^:public invokeMethod [this obj ^String name ^Object/1 args]
+    (Reflector/invokeInstanceMethod obj name args))
+  (method ^:public fromGo [this x] (GoInterp/fromGo x)))
+
 ;; goi's natives and their Arbace side (§4.11). GR1: the namespaces of the table's packages
 ;; (loadTable, members), Arbace calling compiled Go (call), variables (load, store), types
 ;; (typeOf, convert, zero, newValue) and the values that cross (spread, str, digest).
@@ -122,6 +194,7 @@
   (constructor ^:private [this])
 
   (field ^:private ^:static ^:final ^boolean READY (GoInterp/init0 GoValue))
+  (field ^:private ^:static ^:final ^boolean BRIDGED (GoInterp/init1 (GoBridge.)))
 
   (method ^:private ^:static ^:native init0 ^boolean [^Class goValue])
   (method ^:private ^:static ^:native packagePath0 ^String [^String base])
@@ -147,6 +220,14 @@
   (method ^:private ^:static ^:native digest0 ^String [])
   (method ^:private ^:static ^:native complex0 [^double re ^double im])
   (method ^:private ^:static ^:native op0 [^String name ^Object/1 args])
+  (method ^:private ^:static ^:native init1 ^boolean [bridge])
+  (method ^:private ^:static ^:native count0 ^int [v])
+  (method ^:private ^:static ^:native nth0 ^Object/1 [v ^int n])
+  (method ^:private ^:static ^:native lookup0 ^Object/1 [v key ^String kw])
+  (method ^:private ^:static ^:native seq0 ^Object/1 [v])
+  (method ^:private ^:static ^:native field0 ^Object/1 [v ^String name])
+  (method ^:private ^:static ^:native method0 [v ^String name])
+  (method ^:private ^:static ^:native interpType0 ^Object/1 [v])
 
   ;; RT.load's hook (doc/VENDOR-NOTES.md): the namespace of a listed package (go/strings) is
   ;; made from the table (§2.1, §2.3: the table first), by arbace.go/table-ns!
@@ -209,9 +290,15 @@
             status (.intValue (cast Number (aget r 0)))]
         (cond
           (== status 1)
-            (throw (GoPanic. (cast String (aget r 1))
-                             (^[Object/1] RT/map (new Object/1 [(Keyword/intern "go" "value") (GoInterp/fromGo (aget r 3))
-                                                                (Keyword/intern "go" "type") (aget r 2)]))))
+            (let [frames (cast Object/1 (aget r 4))
+                  e (GoPanic. (cast String (aget r 1))
+                              (^[Object/1] RT/map (new Object/1 [(Keyword/intern "go" "value") (GoInterp/fromGo (aget r 3))
+                                                                 (Keyword/intern "go" "type") (aget r 2)
+                                                                 (Keyword/intern "go" "trace") (GoInterp/traceData frames)]))
+                              (cast Throwable (aget r 5)))]
+              (set! (.-goValue e) (aget r 6))
+              (GoInterp/prependTrace e frames)
+              (throw e))
           (== status 2)
             (throw (GoExit. (java-str "os.Exit(" (aget r 1) ")")
                             (^[Object/1] RT/map (new Object/1 [(Keyword/intern "go" "status") (aget r 1)]))))
@@ -227,6 +314,31 @@
                         (aset out i (GoInterp/fromGo (aget r (unchecked-inc-int i))))
                         (recur (unchecked-inc-int i))))
                     (LazilyPersistentVector/createOwning out))))))))
+
+  ;; a GoPanic's :go/trace: the interpreted frames as [go.demo/Div "REPL" 8]
+  (method ^:static traceData [^Object/1 frames]
+    (let [n (alength frames)
+          out (new Object/1 n)]
+      (loop [^int i 0]
+        (when (< i n)
+          (let [el (cast StackTraceElement (aget frames i))]
+            (aset out i (LazilyPersistentVector/createOwning
+                          (new Object/1 [(Symbol/intern (.getClassName el) (.getMethodName el)) (.getFileName el)
+                                         (Long/valueOf (long (.getLineNumber el)))]))))
+          (recur (unchecked-inc-int i))))
+      (LazilyPersistentVector/createOwning out)))
+
+  ;; the interpreted frames first in e's stack trace (§10.6)
+  (method ^:static prependTrace ^void [^Throwable e ^Object/1 frames]
+    (let [own (.getStackTrace e)
+          n (alength frames)
+          out (new StackTraceElement/1 (unchecked-add-int n (alength own)))]
+      (loop [^int i 0]
+        (when (< i n)
+          (aset out i (cast StackTraceElement (aget frames i)))
+          (recur (unchecked-inc-int i))))
+      (System/arraycopy own 0 out n (alength own))
+      (.setStackTrace e out)))
 
   (method ^:public ^:static load [cell] (GoInterp/fromGo (GoInterp/load0 cell)))
 
@@ -255,4 +367,99 @@
 
   ;; GR3 (§4.1, §4.11): the builder's and the REPL's factories of goi's nodes, descriptors and
   ;; functions, by name (go/arbace/goi/registry.ae), and what they ask of the table
-  (method ^:public ^:static op [^String name ^Object/1 args] (GoInterp/op0 name args)))
+  (method ^:public ^:static op [^String name ^Object/1 args] (GoInterp/op0 name args))
+
+  ;; GR5, GS7: Go values in Arbace's collection protocols, read-only (RT's count, nth, get,
+  ;; seq: doc/VENDOR-NOTES.md), elements converted by their types (§5.6)
+  (method ^:static status ^int [^Object/1 r] (.intValue (cast Number (aget r 0))))
+
+  (method ^:public ^:static countOf ^int [v]
+    (let [n (GoInterp/count0 v)]
+      (when (< n 0)
+        (throw (UnsupportedOperationException. (java-str "count not supported on this Go value: " (GoInterp/goString v)))))
+      n))
+
+  (method ^:public ^:static nthOf [v ^int n]
+    (let [r (GoInterp/nth0 v n)
+          st (GoInterp/status r)]
+      (cond
+        (== st 0) (GoInterp/fromGo (aget r 1))
+        (== st 1) (throw (IndexOutOfBoundsException. (java-str "Index " n " out of bounds for length " (GoInterp/count0 v))))
+        :else (throw (UnsupportedOperationException. (java-str "nth not supported on this Go value: " (GoInterp/goString v)))))))
+
+  (method ^:public ^:static nthOf [v ^int n notFound]
+    (let [r (GoInterp/nth0 v n)
+          st (GoInterp/status r)]
+      (cond
+        (== st 0) (GoInterp/fromGo (aget r 1))
+        (== st 1) notFound
+        :else (throw (UnsupportedOperationException. (java-str "nth not supported on this Go value: " (GoInterp/goString v)))))))
+
+  (method ^:public ^:static getOf [v key notFound]
+    (let [r (GoInterp/lookup0 v (GoInterp/toGo key) (when (instance? Keyword key) (.getName (cast Keyword key))))]
+      (if (== (GoInterp/status r) 0) (GoInterp/fromGo (aget r 1)) notFound)))
+
+  (method ^:public ^:static seqOf ^ISeq [v]
+    (let [r (GoInterp/seq0 v)
+          st (GoInterp/status r)
+          n (unchecked-dec-int (alength r))]
+      (cond
+        (== st 0)
+          (let [out (new Object/1 n)]
+            (loop [^int i 0]
+              (when (< i n)
+                (aset out i (GoInterp/fromGo (aget r (unchecked-inc-int i))))
+                (recur (unchecked-inc-int i))))
+            (RT/seq out))
+        (== st 1)
+          (let [m (unchecked-divide-int n 2)
+                out (new Object/1 m)]
+            (loop [^int i 0]
+              (when (< i m)
+                (aset out i (MapEntry/create (GoInterp/fromGo (aget r (unchecked-add-int 1 (unchecked-multiply-int 2 i))))
+                                             (GoInterp/fromGo (aget r (unchecked-add-int 2 (unchecked-multiply-int 2 i))))))
+                (recur (unchecked-inc-int i))))
+            (RT/seq out))
+        :else (throw (IllegalArgumentException. "Don't know how to create ISeq from: arbace.lang.GoValue")))))
+
+  ;; GS10: (.M v) and (.-F v) on a Go value, Reflector's fallback (doc/VENDOR-NOTES.md): its
+  ;; dynamic type's method (an interpreted type's method set, the table's for a compiled type)
+  ;; or exported field
+  ;; an interpreted type's method by its var T.M in the type's namespace (its method set may not
+  ;; be made yet), or nil
+  (method ^:static methodVar [target ^String name]
+    (let [tp (GoInterp/interpType0 target)]
+      (when (some? tp)
+        (let [ns (.invoke (RT/var "arbace.go" "path->ns") (aget tp 0))
+              v (Namespace/find (cast Symbol ns))]
+          (when (some? v)
+            (let [x (.findInternedVar (cast Namespace v) (Symbol/intern (java-str (aget tp 1) "." name)))]
+              (when (and (some? x) (instance? GoFn (.deref (cast Var x))))
+                (.deref (cast Var x)))))))))
+
+  (method ^:public ^:static hasMethod ^boolean [target ^String name]
+    (or (some? (GoInterp/method0 target name)) (some? (GoInterp/methodVar target name))))
+
+  (method ^:public ^:static invokeMethod [target ^String name ^Object/1 args]
+    (let [c (GoInterp/method0 target name)
+          n (alength args)
+          all (new Object/1 (unchecked-inc-int n))]
+      (aset all 0 target)
+      (System/arraycopy args 0 all 1 n)
+      (when (nil? c)
+        (let [f (GoInterp/methodVar target name)]
+          (when (nil? f)
+            (throw (IllegalArgumentException. (java-str "No method " name " found for the Go value " (GoInterp/goString target)))))
+          (return (.applyTo (cast IFn f) (RT/seq all)))))
+      (GoInterp/call c all)))
+
+  (method ^:public ^:static fieldOf [target ^String name]
+    (let [r (GoInterp/field0 target name)]
+      (when-not (== (GoInterp/status r) 0)
+        (throw (IllegalArgumentException. (java-str "No field " name " found for the Go value " (GoInterp/goString target)))))
+      (GoInterp/fromGo (aget r 1))))
+
+  (method ^:public ^:static memberOf [target ^String name]
+    (if (GoInterp/hasMethod target name)
+        (GoInterp/invokeMethod target name RT/EMPTY_ARRAY)
+        (GoInterp/fieldOf target name))))

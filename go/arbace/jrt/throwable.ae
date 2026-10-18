@@ -37,6 +37,7 @@ use.\n"
           ^bool causeSet
           ^{:tag (slice uintptr)} pcs
           ^{:tag (* RefArray)} evalTrace
+          ^{:tag (slice GoiFrame)} goiTrace
           ^{:tag (* RefArray)} stackTrace
           ^{:tag (slice Throwable_I)} suppressed
           ^bool noSuppression
@@ -137,6 +138,7 @@ nothing (no JFR).\n"
   (when (not (.-notWritable t))
     (set! (.-pcs t) (callers 2))
     (set! (.-evalTrace t) (evalTrace))
+    (set! (.-goiTrace t) (goiTrace))
     (set! (.-stackTrace t) nil))
   this)
 
@@ -145,7 +147,7 @@ nothing (no JFR).\n"
 
 (go/method ourStackTrace ^{:tag (* RefArray)} [^{:tag (* Throwable)} t]
   (when (== (.-stackTrace t) nil)
-    (set! (.-stackTrace t) (javaFrames (.-pcs t) (.-evalTrace t))))
+    (set! (.-stackTrace t) (javaFrames (.-pcs t) (.-evalTrace t) (.-goiTrace t))))
   (.-stackTrace t))
 
 (go/method Impl_SetStackTrace_StackTraceElement1__V
@@ -512,6 +514,22 @@ the evaluated frames of the current thread, innermost first, as a StackTraceElem
 (J2G-SPEC §10.7).\n"}
   EvalTrace)
 
+(go/type GoiFrame
+  "GoiFrame is an interpreted Go frame (goi's, doc/go/GOI-SPEC.md §10.6): its namespace (go.demo),
+the Go function's name as gc names it, its file and line.\n"
+  (struct ^string NS ^string Name ^string File ^int Line))
+
+(go/var ^{:tag (func [] [(slice GoiFrame)])
+          :doc "GoiTrace, set by goi (arbace/goi), gives the current goroutine's interpreted Go frames,
+innermost first (GOI-SPEC.md §10.6).\n"}
+  GoiTrace)
+
+(go/func goiTrace "goiTrace: the interpreted Go frames when an exception is made, or nil.\n"
+  ^{:tag (slice GoiFrame)} []
+  (when (== GoiTrace nil)
+    (return nil))
+  (GoiTrace))
+
 (go/func evalTrace "evalTrace: the evaluated frames when an exception is made, or nil.\n"
   ^{:tag (* RefArray)} []
   (when (== EvalTrace nil)
@@ -586,7 +604,7 @@ the last runtime.gopanic dropped (an exception made while a run-time error panic
 frames of fillInStackTrace and of the exception's constructors dropped at the top, as
 HotSpot drops them, elided frames left out, a function literal's frame merged with the frame
 of the function that called it.\n"
-  ^{:tag (* RefArray)} [^{:tag (slice uintptr)} pcs ^{:tag (* RefArray)} evals]
+  ^{:tag (* RefArray)} [^{:tag (slice uintptr)} pcs ^{:tag (* RefArray)} evals ^{:tag (slice GoiFrame)} goi]
   (let [^{:tag (slice runtime/Frame)} raw nil
         ^{:tag (slice any)} ev nil
         frames (runtime/CallersFrames pcs)]
@@ -622,6 +640,17 @@ of the function that called it.\n"
             (isEvalInterop (.-Function fr))
             (while (and (> (len fs) 0) (.-refl (aget fs (- (len fs) 1))))
               (set! fs (subslice fs _ (- (len fs) 1))))
+            ;; an interpreted Go function's run (goi's call body): its Go frame, goi's other
+            ;; frames (its nodes) and the table's (invokers, adapters) elided (GOI-SPEC.md §10.6)
+            (== (.-Function fr) "arbace/goi.run")
+            (when (> (len goi) 0)
+              (let [g (aget goi 0)]
+                (set! goi (subslice goi 1))
+                (set! top false)
+                (set! fs (append fs (lit jframe :cls (.-NS g) :method (.-Name g) :file (.-File g) :line (.-Line g))))))
+            (or (strings/HasPrefix (.-Function fr) "arbace/goi.") (strings/HasPrefix (.-Function fr) "arbace/goi/")
+                (strings/HasPrefix (.-Function fr) "arbace/gotable."))
+            (do)
             (isEvalInternal (.-Function fr)) (do)
             (.-elide f) (do)
             ;; a forwarder: its callee is the implementation Impl_M of its method M

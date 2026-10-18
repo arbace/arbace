@@ -464,6 +464,108 @@
              (list 'let bindings node)])))
 
 ;; ---------------------------------------------------------------------------------------
+;; Typed adapters and the wrappers' typed calls (§6.4, §7.5, GC22; GR5): a call of an
+;; interpreted target (a closure, a method value, an Arbace fn, a proxy's method) from compiled
+;; code through goi's frame of the signature's layout, without reflect
+
+(defn- bool-type? [ct] (boolean (t/boolean-type? (t/under ct))))
+
+(defn- slot-numbers
+  "The slots of parameters of kinds pk and results of kinds rk: numbered per kind in order (goi's
+slotCounts)."
+  [pk rk]
+  (let [cnt (volatile! {:I 0 :F 0 :S 0 :R 0})
+        take! (fn [k] (let [n (get @cnt k)] (vswap! cnt update k inc) n))]
+    [(mapv take! pk) (mapv take! rk)]))
+
+(defn frame-call-body
+  "The body of a typed call through the frame enter gives (a goi.Target's Enter, goi.EnterMethod):
+the arguments args (written types tps, kinds and booleans of cft) written to their slots, the call
+run, the results (written types trs) read and returned."
+  [enter args tps trs cft]
+  (let [[_ ps rs] cft
+        {pk :params rk :results} (sig-kinds cft)
+        [pslots rslots] (slot-numbers pk rk)
+        fr 'fr
+        writes (for [i (range (count tps))]
+                 (let [k (nth pk i) t (nth tps i) a (nth args i) sl (nth pslots i)]
+                   (case k
+                     :I (list 'aset (list '.-I fr) sl (if (bool-type? (nth ps i))
+                                                        (list 'goi/B2I (if (= t 'bool) a (list 'conv 'bool a)))
+                                                        (list 'conv 'int64 a)))
+                     :F (list 'aset (list '.-F fr) sl (list 'conv 'float64 a))
+                     :S (list 'aset (list '.-S fr) sl (list 'conv 'string a))
+                     :R (list 'goi/SetArgR fr i sl a))))
+        outs (vec (for [i (range (count trs))] (symbol (str "x" i))))
+        reads (vec (for [i (range (count trs))]
+                     (let [k (nth rk i) t (nth trs i) sl (nth rslots i)]
+                       (case k
+                         :I (let [x (list 'aget (list '.-I fr) sl)]
+                              (if (bool-type? (nth rs i))
+                                (if (= t 'bool) (list '!= x 0) (list 'conv t (list '!= x 0)))
+                                (list 'conv t x)))
+                         :F (list 'conv t (list 'aget (list '.-F fr) sl))
+                         :S (list 'conv t (list 'aget (list '.-S fr) sl))
+                         :R (list (list 'inst 'goi/As t) (list 'goi/ResR fr i sl))))))
+        tail (case (count trs)
+               0 [(list 'goi/Leave fr)]
+               1 [(list 'let [(first outs) (first reads)] (list 'goi/Leave fr) (first outs))]
+               [(list 'let (vec (interleave outs reads)) (list 'goi/Leave fr) (apply list 'return outs))])]
+    (concat (list 'let [fr enter])
+            writes
+            [(list 'goi/RunCall fr)]
+            tail)))
+
+(defn- fn-params
+  "The parameter vector of written types tps (a variadic one's last), named args."
+  [args tps va]
+  (vec (mapcat (fn [i t] (if (and va (= i (dec (count tps))))
+                           ['& (with-meta (nth args i) {:tag t})]
+                           [(with-meta (nth args i) {:tag t})]))
+               (range) tps)))
+
+(defn adapter-form
+  "The typed adapter named nm of function type cft (written types tps, trs): a goi.AdapterFunc
+making a Go func of that type that calls its target through goi's frame."
+  [nm cft tps trs]
+  (let [va (nth cft 3)
+        args (vec (for [i (range (count tps))] (symbol (str "a" i))))
+        params (fn-params args tps va)
+        body (frame-call-body '(.Enter t sig) args tps trs cft)
+        lit (case (count trs)
+              0 (list 'fn params body)
+              1 (list 'fn (with-meta params {:tag (first trs)}) body)
+              (list 'fn params :results (vec trs) body))]
+    (list 'go/func nm (with-meta [(with-meta 't {:tag 'goi/Target}) (with-meta 'sig {:tag '(* goi/Type)})] {:tag 'any})
+          lit)))
+
+(def common-func-types
+  "Function types every configuration's table adapts (§6.4, besides its members'): the common
+callbacks of sort, strings, slices and Arbace's own fns given to Go."
+  [[:func [] [] false] [:func [] [:bool] false] [:func [:int] [:bool] false] [:func [:int :int] [:bool] false]
+   [:func [:int] [:int] false] [:func [:int :int] [:int] false] [:func [:int32] [:int32] false]
+   [:func [:int32] [:bool] false] [:func [:string] [:string] false] [:func [:string] [:bool] false]
+   [:func [:string] [] false] [:func [:int] [] false] [:func [:float64] [:float64] false]
+   [:func [:float64 :float64] [:float64] false]])
+
+(defn- func-types-in
+  "The unnamed function types of the checker's types cts and their parts (parameters and results
+of function types, elements of composites), each with its data."
+  [cts]
+  (let [acc (volatile! {})]
+    (letfn [(walk [ct depth]
+              (when (and (vector? ct) (< depth 4))
+                (case (nth ct 0)
+                  :func (do (vswap! acc assoc (data ct) ct)
+                            (doseq [x (concat (nth ct 1) (nth ct 2))] (walk x (inc depth))))
+                  (:pointer :slice) (walk (nth ct 1) (inc depth))
+                  (:array :chan) (walk (nth ct 2) (inc depth))
+                  :map (do (walk (nth ct 1) (inc depth)) (walk (nth ct 2) (inc depth)))
+                  nil)))]
+      (doseq [ct cts] (walk ct 0)))
+    @acc))
+
+;; ---------------------------------------------------------------------------------------
 ;; The digest (§6.5)
 
 (def ^:private position-keys #{:line :column :end-line :end-column :go/end :go/breaks :go/label-line})
@@ -687,6 +789,17 @@
 
 (defn- cfg-name [{:keys [goos goarch]}] (str goos "_" goarch))
 
+(def ^:private program-root
+  "The forms root of the program's own listed package arbace (§6.3: go/'s forms, GR5)."
+  {:dir "."})
+
+(defn- source-of
+  "The source of listed package path: the root's, the package arbace go/'s (§7.3)."
+  [root path config]
+  (if (= path "arbace")
+    (load/package-source program-root path config)
+    (load/package-source root path config)))
+
 (defn load-env
   "The listed packages (and the list's :resolve ones) in one configuration, checked by goi's
   checker from the root's forms with their imports: {:cfg :session :pkgs {path pkg}}, each
@@ -694,13 +807,13 @@
   [list-cfg cfg root]
   (let [config (merge {:goos (:goos cfg) :goarch (:goarch cfg)}
                       (if (= "amd64" (:goarch cfg)) {:goamd64 "v1"} {:goarm64 "v8.0"}))
-        session (ck/session (fn [path _] (load/package-source root path config)))
+        session (ck/session (fn [path _] (source-of root path config)))
         paths (vec (distinct (concat (:packages list-cfg) (:resolve list-cfg))))
         ;; the packages checked in parallel, each its imports first (the session's cache)
         checked (with-checker (doall (pmap #(ck/ensure-package session % nil []) paths)))
         pkgs (into {} (for [[p cp] (map vector paths checked)
                             :when cp
-                            :let [pk (source-package (load/package-source root p config))]]
+                            :let [pk (source-package (source-of root p config))]]
                         [p (assoc pk :index (index-package pk))]))]
     {:cfg cfg :session session :pkgs pkgs}))
 
@@ -745,7 +858,8 @@
 (defn- wrapper-forms
   "The wrappers of package p's interfaces (§5.3 rule 3, §6.4): for each exported interface type
   whose methods the table can write (members m in env), a struct embedding goi.Proxy whose
-  methods call the proxy's interpreted methods (goi.CallProxy), registered at init."
+  methods call the proxy's interpreted methods (a typed call through goi's frame, GC22),
+  registered at init."
   [p m al env]
   (let [a (al p)
         by-type (group-by :type (filter :iface (:methods m)))]
@@ -768,14 +882,12 @@
                                                               ['& (with-meta (nth args i) {:tag t})]
                                                               [(with-meta (nth args i) {:tag t})]))
                                                   (range) tps)))
-                      call (list 'goi/CallProxy '(.-Proxy w) (:mname mm) (apply list 'lit '(slice any) args))]
+                      ;; a typed call of the interpreted method through goi's frame (GC22)
+                      body (frame-call-body (list 'goi/EnterMethod '(.-Proxy w) (:mname mm)) args tps trs (:cft mm))]
                   (case (count trs)
-                    0 (list 'go/method (symbol (:mname mm)) params call)
-                    1 (list 'go/method (symbol (:mname mm)) (with-meta params {:tag (first trs)})
-                            (list (list 'inst 'goi/As (first trs)) (list 'aget call 0)))
-                    (list 'go/method (symbol (:mname mm)) params :results (vec trs)
-                          (list 'let ['r call]
-                                (apply list 'return (for [i (range (count trs))] (list (list 'inst 'goi/As (nth trs i)) (list 'aget 'r i)))))))))
+                    0 (list 'go/method (symbol (:mname mm)) params body)
+                    1 (list 'go/method (symbol (:mname mm)) (with-meta params {:tag (first trs)}) body)
+                    (list 'go/method (symbol (:mname mm)) params :results (vec trs) body))))
               [(list 'go/func 'init []
                      (list 'goi/RegisterWrapper (list (list 'inst 'reflect/TypeFor (symbol a tn)))
                            (list 'fn (with-meta [(with-meta 'p {:tag 'goi/Proxy})] {:tag 'any}) (list 'lit w 'p))))])]
@@ -860,10 +972,29 @@
                             :when (writable e)]
                         [k e]))
         inv-name (into {} (map-indexed (fn [i k] [k (symbol (str (if (:method (get invoked k)) "minv" "inv") i))]) (keys invoked)))
+        ;; the typed adapters (GR5): the function types of the members' parameters and results, and
+        ;; the common ones, each writable one in the configurations that have it
+        adapt-entries (let [acc (volatile! (sorted-map))]
+                        (doseq [[env pd] (map vector envs pkg-data)
+                                :let [cts (concat common-func-types
+                                                  (for [[_ m] pd x (concat (:funcs m) (:methods m))
+                                                        :let [cft (:cft x)] :when (vector? cft)
+                                                        y (concat (nth cft 1) (nth cft 2))] y))]
+                                [d ct] (func-types-in cts)
+                                :when (let [[_ ps rs] d
+                                            a (fn [q] (str "P" (Math/abs (hash q))))]
+                                        (and (every? some? (map #(emit-type env a %) (concat ps rs)))
+                                             (sig-kinds ct)))]
+                          (vswap! acc update (pr-str d)
+                                  (fn [e] (-> (or e {:data d :ct ct :env env})
+                                              (update :cfgs (fnil conj #{}) (:cfg env))))))
+                        @acc)
+        adapt-name (into {} (map-indexed (fn [i k] [k (symbol (str "adapt" i))]) (keys adapt-entries)))
         ;; the paths the table's files import
         all-paths (volatile! #{})
         alias-of (fn [p] (vswap! all-paths conj p) p)
         _ (doseq [[k e] invoked] (let [[_ ps rs] (:ftype e)] (doseq [t (concat ps rs)] (emit-type (:env e) alias-of t))))
+        _ (doseq [[_ e] adapt-entries] (let [[_ ps rs] (:data e)] (doseq [t (concat ps rs)] (emit-type (:env e) alias-of t))))
         _ (doseq [pd pkg-data [p _] pd] (alias-of p))
         ;; the wrappers' method types (GR4)
         _ (doseq [[env pd] (map vector envs pkg-data) [_ m] pd mm (:methods m) :when (:iface mm)
@@ -881,6 +1012,14 @@
                                         [(vec (cons 'Rcv tps)) (update (sig-kinds (:cft e)) :params #(vec (cons :R %)))]
                                         [tps (sig-kinds (:cft e))])]
                       [(:cfgs e) (invoker-form (inv-name k) (:method e) tps trs kinds va)]))
+        ;; the adapters' forms and their registration, grouped by the configurations that have them
+        adapt-forms (for [[k e] adapt-entries]
+                      (let [[_ ps rs] (:data e)
+                            env (:env e)
+                            tps (mapv #(emit-type env al %) ps)
+                            trs (mapv #(emit-type env al %) rs)
+                            ftype (emit-type env al (:data e))]
+                        [(:cfgs e) (adapter-form (adapt-name k) (:ct e) tps trs) ftype (adapt-name k)]))
         ;; (configuration set, file stem) -> forms; the packages' tables grouped by identical text
         files (volatile! (sorted-map))
         add-file! (fn [stem cfgs forms]
@@ -894,6 +1033,12 @@
                 (add-file! (str (str/replace p #"[/.-]" "_")) (map first entries) forms))))
         _ (doseq [[cfgs fs] (group-by first inv-forms)]
             (add-file! "invokers" cfgs (map second fs)))
+        _ (doseq [[cfgs fs] (group-by first adapt-forms)]
+            (add-file! "adapters" cfgs
+                       (concat (map second fs)
+                               [(apply list 'go/func 'init []
+                                       (for [[_ _ ftype nm] fs]
+                                         (list 'goi/RegisterAdapter (list (list 'inst 'reflect/TypeFor ftype)) nm)))])))
         ;; the digests, one per configuration, embedded by its own file
         digests (vec (for [env envs]
                        (let [chunks (for [p (:packages list-cfg)]
@@ -972,6 +1117,7 @@
                   :invokers (count invoked)
                   :invokers-functions (count (remove (comp :method val) invoked))
                   :invokers-methods (count (filter (comp :method val) invoked))
+                  :adapters (count adapt-entries)
                   :files (count all-texts)
                   :members (into (sorted-map)
                                  (for [[env pd] (map vector envs pkg-data)]
@@ -986,7 +1132,7 @@
                   :seconds (quot (- (System/currentTimeMillis) t0) 1000)}]
       (write! (io/file out "report.edn") (str (form-text (dissoc report :seconds)) "\n"))
       (println (str "goi table: " (:packages report) " packages, " (:signatures report) " signatures, "
-                    (:invokers report) " invokers, " (:files report) " files; digests "
+                    (:invokers report) " invokers, " (:adapters report) " adapters, " (:files report) " files; digests "
                     (str/join ", " (for [d digest-files] (str (cfg-name (:cfg d)) " " (:bytes d) " bytes (" (:compressed d) " compressed)")))
                     "; " (:seconds report) " s"))
       report)))
