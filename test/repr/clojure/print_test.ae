@@ -1,0 +1,164 @@
+(ns repr.clojure.print-test
+  "The unit tests of repr/clojure's print (bin/repr-clojure check, doc/REPR-CLOJURE.md, \"Print\"):
+  each rule reversed, the samples of read's tests read and printed back byte for byte, the plan
+  of what becomes of an Arbace file, a tree printed, and the round trip over a tree."
+  (:require [arbace.test :refer :all]
+            [arbace.repr.clojure.rename :as rename]
+            [arbace.repr.clojure.rules :as rules]
+            [arbace.repr.clojure :as main]
+            [arbace.java.io :as io]
+            [arbace.string :as str])
+  (:import [java.nio.file Files]
+           [java.nio.file.attribute FileAttribute]))
+
+(def ^:private ae {:kind :clj :to-ae true :features #{:clj}})
+
+(defn- clj [s] (rules/translate s ae))
+(defn- back [s] (rules/print-text s ae))
+
+(deftest unrename
+  (are [from to] (and (= from (rename/unrename to)) (= to (rename/rename from)))
+    "clojure.core/map" "arbace.core/map"
+    ":clojure.core/x" ":arbace.core/x"
+    "(require '[clojure.string :as str])" "(require '[arbace.string :as str])"
+    "clojure.lang.RT" "arbace.lang.RT"
+    "Lclojure/lang/Var;" "Larbace/lang/Var;"
+    "[Lclojure.lang.Var;" "[Larbace.lang.Var;"
+    "#\"clojure\\.lang\\.Agent\"" "#\"arbace\\.lang\\.Agent\""
+    "clojure.asm.commons.Method" "arbace.asm.commons.Method"
+    ":clojure.error/phase" ":arbace.error/phase"
+    "-Dclojure.compiler.direct-linking=true" "-Darbace.compiler.direct-linking=true"
+    "clojure.core$map" "arbace.core$map"
+    "\"clojure/core.clj\"" "\"arbace/core.ae\""
+    "\"clojure/pprint/cl_format.clj\"" "\"arbace/pprint/cl_format.ae\""
+    "clojure/core__init" "arbace/core__init"
+    "clojure.spec.alpha" "arbace.spec.alpha"
+    "clojure.core.specs.alpha" "arbace.core.specs.alpha")
+  (testing "Arbace's own names, and the other libraries' names, left alone"
+    (are [s] (= s (rename/unrename s))
+      "arbace.classes.parse" "arbace.repr.clojure" "arbace.core.foo" "arbace-version"
+      "clojure.test.check" "clojure.core.async")))
+
+(deftest unproxy-methods
+  (is (= "(.__getClojureFnMappings p) \"__initClojureFnMappings\" __updateClojureFnMappings __clojureFnMap"
+         (back "(.__getArbaceFnMappings p) \"__initArbaceFnMappings\" __updateArbaceFnMappings __arbaceFnMap")))
+  (is (= "x__getArbaceFnMappings __arbaceFnMapX" (back "x__getArbaceFnMappings __arbaceFnMapX"))))
+
+(deftest unqualify-security-manager
+  (is (= "(SecurityManager.) (SecurityManager/x) ^SecurityManager s"
+         (back "(java.lang.SecurityManager.) (java.lang.SecurityManager/x) ^java.lang.SecurityManager s")))
+  (testing "strings, comments, keywords and a file importing it left alone"
+    (are [s] (= s (back s))
+      "\"java.lang.SecurityManager\" ; java.lang.SecurityManager\n:java.lang.SecurityManager"
+      "(ns a (:import [java.lang SecurityManager]))\n(java.lang.SecurityManager.)"))
+  (testing "one way: a qualified use in Clojure comes back unqualified"
+    (is (= "(SecurityManager.) (SecurityManager.)"
+           (back (clj "(java.lang.SecurityManager.) (SecurityManager.)"))))))
+
+(deftest uncore-names
+  (let [added #{"return" "switch" "label"}
+        cn (fn [s] (rules/core-names s added))
+        un (fn [s] (rules/uncore-names s added))]
+    (testing "each of the three exclusions read adds is removed again"
+      (are [s] (= s (un (cn s)))
+        "(ns a\n  (:require b))\n(defn ^:private return [])\n(defmacro ^{:m 1} switch [])\n(def other 1)"
+        "(ns a (:refer-clojure :exclude [map])) (def label 1)"
+        "(ns a (:refer-clojure :rename {map m})) (def label 1)"
+        "(ns a (:refer-clojure :exclude [label])) (def label 1)"
+        "(ns a (:refer-clojure :only [map])) (def label 1)"
+        "(ns a) (def labels 1) (let [return 1] return)"))
+    (testing "an exclusion read would not add is kept"
+      (are [s] (= s (un s))
+        "(ns a (:refer-clojure :exclude [return map])) (def return 1)"
+        "(ns a (:refer-clojure :exclude [map])) (def return 1)"))))
+
+(def ^:private samples
+  "Clojure texts of read's tests (read_test.ae), each read as a .clj file and printed back."
+  ["(f #?(:cljs 2 :clj 1))"
+   "(ns a (:require [b] #?(:cljs [goog.string])))"
+   "clojure.core/map :clojure.core/x (require '[clojure.string :as str]) clojure.lang.RT"
+   "Lclojure/lang/Var; [Lclojure.lang.Var; #\"clojure\\.lang\\.Agent\" clojure.asm.commons.Method"
+   ":clojure.error/phase -Dclojure.compiler.direct-linking=true clojure.core$map"
+   "\"clojure/core.clj\" clojure/core__init clojure.spec.alpha clojure.core.specs.alpha"
+   "clojure.test.check clojure.tools.namespace.find clojure.core.async clojure.test-clojure.reader"
+   "refer-clojure *clojure-version* https://clojure.org"
+   "(.__getClojureFnMappings p) \"__initClojureFnMappings\" __updateClojureFnMappings __clojureFnMap"
+   "x__getClojureFnMappings __clojureFnMapX"
+   "(SecurityManager.) (SecurityManager/x) ^SecurityManager s"
+   "\"SecurityManager\" ; SecurityManager\n:SecurityManager"
+   "(ns a (:import (java.io File) (java.lang SecurityManager)))\n(SecurityManager.)"
+   "(ns a (:import [java.lang SecurityManager]))\n(SecurityManager.)"
+   "(import 'java.lang.SecurityManager)\n(SecurityManager.)"
+   "(ns a\n  (:require b))\n(defn ^:private return [])\n(defmacro ^{:m 1} switch [])\n(def other 1)"
+   "(ns a (:refer-clojure :exclude [map label])) (def label 1)"
+   "(ns a (:refer-clojure :rename {map m})) (def label 1)"
+   "(ns a.b (:require [clojure.string :as s]))\n;; clojure.set\n"
+   "import clojure.lang.IFn;\n"])
+
+(deftest samples-round-trip
+  (doseq [s samples]
+    (is (= s (back (clj s))) s))
+  (testing "a .cljc file kept .cljc keeps its conditionals both ways"
+    (let [k {:kind :cljc :to-ae false :features #{:clj}}
+          s "#?(:clj clojure.core :cljs cljs.core)"]
+      (is (= s (rules/print-text (rules/translate s k) k)))))
+  (testing "one way: a .cljc file read as .ae is printed as its :clj reading"
+    (is (= "(f 1)" (back (rules/translate "(f #?(:cljs 2 :clj 1))" {:kind :cljc :to-ae true :features #{:clj}}))))))
+
+(deftest the-table
+  (is (every? #(and (#{:reversible :one-way} (:way %)) (string? (:loss %)) (fn? (:print %))) rules/rules))
+  (is (= [:reader-conditionals :security-manager] (map :id (filter #(= :one-way (:way %)) rules/rules))))
+  (is (= "arbace.core" (rules/print-text "arbace.core" ae #{:rename}))))
+
+(deftest plans
+  (let [p #(main/print-plan %1 (set %2) (merge {:text []} %3))]
+    (is (= {:kind :clj :to-ae true :out "a.clj"} (p "a.ae" ["a.ae"] {})))
+    (is (= {:kind :clj :to-ae false :out "a.clj"} (p "a.clj" ["a.clj"] {})))
+    (is (= {:kind :cljc :to-ae false :out "a.cljc"} (p "a.cljc" ["a.cljc"] {})))
+    (is (:skip (p "a.clj" ["a.clj" "a.ae"] {})))
+    (is (:skip (p "a.cljc" ["a.cljc" "a.ae"] {})))
+    (is (= {:kind :clj :to-ae true :out "data_readers.clj"} (p "data_readers.ae" ["data_readers.ae"] {})))
+    (testing "data_readers files: Clojure merges data_readers.clj and .cljc"
+      (is (= {:kind :clj :to-ae true :out "data_readers.cljc"}
+             (p "data_readers.ae" ["data_readers.ae" "data_readers.clj"] {})))
+      (is (:skip (p "data_readers.ae" ["data_readers.ae" "data_readers.clj" "data_readers.cljc"] {})))
+      (is (= {:kind :cljc :to-ae false :out "data_readers.cljc"}
+             (p "data_readers.cljc" ["data_readers.ae" "data_readers.cljc"] {}))))
+    (is (= {:kind :clj :to-ae false :out "project.clj"} (p "project.clj" [] {})))
+    (is (= {:kind :java :to-ae false :out "A.java"} (p "A.java" [] {})))
+    (is (= {:copy true} (p "deps.edn" [] {})))
+    (is (= {:kind :text :to-ae false :out "deps.edn"} (p "deps.edn" [] {:text [".edn"]})))))
+
+(defn- temp-dir []
+  (let [d (io/file (System/getProperty "repr.clojure.work" ".tmp/repr-clojure-check"))]
+    (.mkdirs d)
+    (.toFile (Files/createTempDirectory (.toPath d) "unit" (make-array FileAttribute 0)))))
+
+(def ^:private tree-files
+  {"a/b.clj" "(ns a.b (:require [clojure.string :as s]))\n;; clojure.set\n"
+   "a/c.clj" "(ns a.c)\n(defn return [] (SecurityManager.))\n"
+   "a/C.java" "import clojure.lang.IFn;\n"
+   "res/x.txt" "clojure.core\n"
+   "data_readers.clj" "{a/b clojure.core/identity}\n"
+   "data_readers.cljc" "{a/c #?(:clj clojure.core/str)}\n"})
+
+(deftest trees
+  (let [d (temp-dir) src (io/file d "src") ae (io/file d "ae") out (io/file d "out")
+        put (fn [path s] (let [f (io/file src path)] (io/make-parents f) (spit f s)))]
+    (doseq [[path s] tree-files] (put path s))
+    (main/run :read [(str src)] (str ae) {:text []})
+    (let [stats (main/run :print [(str ae)] (str out) {:text []})]
+      (is (= {:translated 5 :to-ae 3 :copied 1 :skipped 0 :unchanged 0 :errors 0} stats))
+      (doseq [[path s] tree-files]
+        (is (= s (slurp (io/file out path))) path)))
+    (testing "in place"
+      (main/run :print [(str ae)] nil {:text []})
+      (doseq [[path s] tree-files]
+        (is (= s (slurp (io/file ae path))) path))
+      (is (not (.exists (io/file ae "a/b.ae")))))
+    (testing "the round trip"
+      (is (= {:files 5 :equal 5 :differ {}} (main/roundtrip [(str src)] {:text []})))
+      (put "a/d.cljc" "(f #?(:cljs 2 :clj 1))\n")
+      (is (= {:why :one-way}
+             (get-in (main/roundtrip [(str src)] {:text []}) [:differ "a/d.cljc"])))
+      (is (= 0 (count (:differ (main/roundtrip [(str src)] {:text [] :keep-ext true}))))))))

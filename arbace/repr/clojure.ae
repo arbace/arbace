@@ -1,15 +1,22 @@
 (ns arbace.repr.clojure
   "repr/clojure, Clojure's bridge (doc/REPR-CLOJURE.md; c2a until 2026-10-17): read, Clojure
   source files or trees rewritten into Arbace's by the rules of arbace.repr.clojure.rules, their
-  layout and comments kept (print, Arbace back to Clojure, is to come). bin/repr-clojure runs it.
+  layout and comments kept; print, Arbace's back into Clojure's, each rule reversed (a text
+  round trip). bin/repr-clojure runs it.
 
     read [OPTION...] -o OUT SRC...       translate files and trees into the directory OUT
     read --in-place [OPTION...] SRC...   translate them where they are
     read --stdin [--kind K] [--ae]       translate standard input to standard output
-    read --rules                         list the rules and the dialect divergences
+    read --rules                         list the rules (and how print reverses each) and the
+                                         dialect divergences
+    print [OPTION...] -o OUT SRC...      print Arbace files and trees back as Clojure into OUT
+    print --in-place [OPTION...] SRC...  print them where they are (x.ae becomes x.clj)
+    print --stdin [--kind K] [--ae]      print standard input to standard output
+    roundtrip [OPTION...] SRC...         read then print each tree in memory (--from-arbace:
+                                         print then read), every file back byte for byte
 
   A directory SRC is translated into OUT with its relative paths (its contents, not itself).
-  .clj and .cljc files become .ae files: a .cljc file's reader conditionals resolved for
+  read: .clj and .cljc files become .ae files: a .cljc file's reader conditionals resolved for
   Arbace's features (#{:clj}); a .clj and a .cljc of the same name give the .clj's .ae (the
   reader prefers the .clj), and a .ae already there is kept as it is (the reader prefers it).
   data_readers.clj/.cljc become data_readers.ae too (Arbace reads it first), but as Arbace reads
@@ -18,18 +25,27 @@
   are renamed as text and keep their names (repr/java reads them). With -o, other files are copied
   as they are, but class files (AOT output cannot be translated: their sources are); in place,
   they stay.
+  print: the same plan reversed (print-plan): .ae files become .clj files (data_readers.ae a
+  data_readers.cljc beside a data_readers.clj); .clj and .cljc files are printed keeping their
+  names, but one beside a .ae of its name is left out; .java and --text files as read's. What
+  print cannot restore (the one-way rules, :reader-conditionals and :security-manager) is
+  listed by read --rules.
 
   Options:
-    --keep-ext       .clj and .cljc files keep their names (and so a .cljc its conditionals,
-                     which Arbace's reader resolves with the feature :clj), as bin/clojure-tests
-                     translates Clojure's test suite
+    --keep-ext       read: .clj and .cljc files keep their names (and so a .cljc its
+                     conditionals, which Arbace's reader resolves with the feature :clj), as
+                     bin/clojure-tests translates Clojure's test suite; roundtrip: read so
     --text EXT       files ending in EXT are renamed as text (rule :rename and the like) too,
                      keeping their names (repeatable; e.g. --text .edn)
     --skip ID,...    leave these rules out
-    --kind K         --stdin's kind: clj (default), cljc, java or text
-    --ae             --stdin: the text becomes a .ae file (a .cljc's conditionals resolved)
-    -q               quiet: no summary"
+    --kind K         --stdin's kind: clj (default), cljc, java or text (the Clojure file's)
+    --ae             --stdin: the Clojure text is a .ae file's (a .cljc's conditionals resolved)
+    -q               quiet: no summary
+    roundtrip's: --from-arbace; --known EDN --corpus NAME, the known differences ({corpus {path
+    reason}}; exit status 1 on another, or on one that no longer differs); -v, each
+    difference's first differing line"
   (:require [arbace.repr.clojure.rules :as rules]
+            [arbace.repr.clojure.text :as text]
             [arbace.java.io :as io]
             [arbace.string :as str])
   (:import [java.io File]))
@@ -70,10 +86,49 @@
       (= e ".class") {:skip "a class file (AOT output) cannot be translated"}
       :else {:copy true})))
 
+(defn print-plan
+  "What becomes of the Arbace file named name when printed back as Clojure, among its siblings
+  (a set of names), with the options: read's plan reversed (doc/REPR-CLOJURE.md, \"Print\").
+  A .ae file becomes a .clj file, data_readers.ae a data_readers.clj (a data_readers.cljc when
+  a data_readers.clj is there, as Clojure merges them; left out when both are); its :kind and
+  :to-ae are those of the Clojure file read made it from, as far as print knows (a .clj). A
+  .clj or .cljc file keeps its name (read kept it), but one beside a .ae of the same name is
+  left out, as read left it (the .ae is printed instead). .java files and the --text files
+  keep their names; class files are left out; the rest is copied."
+  [^String name siblings {:keys [text]}]
+  (let [e (ext name) b (base name)]
+    (cond
+      (contains? keep-names name) {:kind (if (= e ".cljc") :cljc :clj) :to-ae false :out name}
+      (= e ".ae")
+      (if (= "data_readers" b)
+        (cond (not (contains? siblings "data_readers.clj"))
+              {:kind :clj :to-ae true :out "data_readers.clj"}
+              (not (contains? siblings "data_readers.cljc"))
+              {:kind :clj :to-ae true :out "data_readers.cljc"}
+              :else {:skip "data_readers.clj and data_readers.cljc are both there"})
+        {:kind :clj :to-ae true :out (str b ".clj")})
+      (#{".clj" ".cljc"} e)
+      (if (and (contains? siblings (str b ".ae")) (not= "data_readers" b))
+        {:skip (str b ".ae is printed instead, as Arbace's loader prefers it")}
+        {:kind (keyword (subs e 1)) :to-ae false :out name})
+      (= e ".java") {:kind :java :to-ae false :out name}
+      (some #(str/ends-with? name %) text) {:kind :text :to-ae false :out name}
+      (= e ".class") {:skip "a class file cannot be printed"}
+      :else {:copy true})))
+
 (defn translate-text
   "Text s translated as a file of the plan p."
   [s p path skip]
   (rules/translate s {:kind (:kind p) :to-ae (:to-ae p) :features #{:clj} :path path} skip))
+
+(defn print-text
+  "Arbace text s printed back as Clojure, as a file of the print plan p."
+  [s p path skip]
+  (rules/print-text s {:kind (:kind p) :to-ae (:to-ae p) :features #{:clj} :path path} skip))
+
+(def ^:private verbs
+  {:read {:plan plan :text translate-text}
+   :print {:plan print-plan :text print-text}})
 
 (defn- files
   "[root-dir relative-path] of every file under src (a file: its directory and its name)."
@@ -86,48 +141,153 @@
     [[(or (.getParentFile (.getAbsoluteFile src)) (File. ".")) (.getName src)]]))
 
 (defn run
-  "Translates the sources (paths) into out (a directory path), or in place when out is nil.
-  Returns the counts {:translated :to-ae :copied :skipped :unchanged} and prints what was
-  skipped, and errors, to *err*. Throws when a file cannot be read as source."
-  [sources out opts]
-  (let [skip (:skip opts #{})
-        stats (atom {:translated 0 :to-ae 0 :copied 0 :skipped 0 :unchanged 0 :errors 0})]
-    (doseq [src sources
-            :let [srcf (io/file src)]
-            [^File dir rel] (files srcf)
-            :let [f (io/file dir rel)
-                  parent (.getParentFile f)
-                  siblings (set (.list parent))
-                  p (plan (.getName f) siblings opts)
-                  rel-out (let [d (.getParent (io/file rel))] (if d (str d "/" (:out p)) (:out p)))]]
-      (cond
-        (:skip p)
-        (do (swap! stats update :skipped inc)
-            (binding [*out* *err*] (println "repr-clojure: skipped" (str f) "-" (:skip p))))
-        (:copy p)
-        (do (when out
-              (let [t (io/file out rel)]
-                (io/make-parents t)
-                (io/copy f t)))
-            (swap! stats update :copied inc))
-        :else
-        (let [s (slurp f)
-              r (try (translate-text s p (str f) skip)
-                     (catch Exception e
-                       (swap! stats update :errors inc)
-                       (binding [*out* *err*] (println "repr-clojure: error in" (str f) "-" (ex-message e)))
-                       nil))]
-          (when r
-            (swap! stats update (if (= s r) :unchanged :translated) inc)
-            (when (:to-ae p) (swap! stats update :to-ae inc))
-            (if out
-              (let [t (io/file out rel-out)]
-                (io/make-parents t)
-                (spit t r))
-              (do (when (or (not= s r) (:to-ae p))
-                    (spit (io/file parent (:out p)) r))
-                  (when (:to-ae p) (.delete f))))))))
-    @stats))
+  "Translates the sources (paths) into out (a directory path), or in place when out is nil:
+  read (Clojure to Arbace), or print with the verb :print (Arbace back to Clojure). Returns the
+  counts {:translated :to-ae :copied :skipped :unchanged} (:to-ae: the files renamed, .clj to
+  .ae or back) and prints what was skipped, and errors, to *err*. A directory's names are taken
+  before any of its files is renamed."
+  ([sources out opts] (run :read sources out opts))
+  ([verb sources out opts]
+   (let [skip (:skip opts #{})
+         {plan :plan translate-text :text} (verbs verb)
+         listing (memoize (fn [^File d] (set (.list d))))
+         stats (atom {:translated 0 :to-ae 0 :copied 0 :skipped 0 :unchanged 0 :errors 0})]
+     (doseq [src sources
+             :let [srcf (io/file src)]
+             [^File dir rel] (files srcf)
+             :let [f (io/file dir rel)
+                   parent (.getParentFile f)
+                   siblings (listing parent)
+                   p (plan (.getName f) siblings opts)
+                   rel-out (let [d (.getParent (io/file rel))] (if d (str d "/" (:out p)) (:out p)))]]
+       (cond
+         (:skip p)
+         (do (swap! stats update :skipped inc)
+             (binding [*out* *err*] (println "repr-clojure: skipped" (str f) "-" (:skip p))))
+         (:copy p)
+         (do (when out
+               (let [t (io/file out rel)]
+                 (io/make-parents t)
+                 (io/copy f t)))
+             (swap! stats update :copied inc))
+         :else
+         (let [s (slurp f)
+               r (try (translate-text s p (str f) skip)
+                      (catch Exception e
+                        (swap! stats update :errors inc)
+                        (binding [*out* *err*] (println "repr-clojure: error in" (str f) "-" (ex-message e)))
+                        nil))]
+           (when r
+             (swap! stats update (if (= s r) :unchanged :translated) inc)
+             (when (:to-ae p) (swap! stats update :to-ae inc))
+             (if out
+               (let [t (io/file out rel-out)]
+                 (io/make-parents t)
+                 (spit t r))
+               (let [moved (not= (.getName f) (:out p))]
+                 (when (or (not= s r) moved)
+                   (spit (io/file parent (:out p)) r))
+                 (when moved (.delete f))))))))
+     @stats)))
+
+(defn- tree
+  "{relative-path File} of the files under the sources (as run walks them)."
+  [sources]
+  (into (sorted-map)
+        (for [src sources [^File dir rel] (files (io/file src))] [rel (io/file dir rel)])))
+
+(defn- parent-of [^String rel] (let [i (.lastIndexOf rel "/")] (when (pos? i) (subs rel 0 i))))
+(defn- name-of [^String rel] (subs rel (inc (.lastIndexOf rel "/"))))
+(defn- under [d n] (if d (str d "/" n) n))
+
+(defn- half
+  "One half of a round trip over an in-memory tree {rel text-or-File}: each file planned by the
+  verb among its directory's names and translated. {:tree {rel text-or-File} :from {rel rel}}:
+  the tree the verb makes (copied files as they were) and, for each file translated, the
+  file it was made from and (:plans) its plan; :errors {rel message}, the files it could not
+  translate."
+  [verb t opts]
+  (let [{plan :plan translate-text :text} (verbs verb)
+        dirs (reduce (fn [m rel] (update m (parent-of rel) (fnil conj #{}) (name-of rel))) {} (keys t))]
+    (reduce (fn [acc [rel x p r]]
+              (cond (:skip p) acc
+                    (:copy p) (assoc-in acc [:tree rel] x)
+                    :else (let [out (under (parent-of rel) (:out p))]
+                            (if (string? r)
+                              (-> acc (assoc-in [:tree out] r) (assoc-in [:from out] rel)
+                                  (assoc-in [:plans out] p))
+                              (assoc-in acc [:errors rel] (:error r))))))
+            {:tree (sorted-map) :from {} :plans {} :errors {}}
+            ;; the files translated in parallel, the tree made in order
+            (pmap (fn [[rel x]]
+                    (let [p (plan (name-of rel) (dirs (parent-of rel)) opts)]
+                      [rel x p (when (:kind p)
+                                 (try (translate-text (if (string? x) x (slurp x)) p rel (:skip opts #{}))
+                                      (catch Exception e {:error (ex-message e)})))]))
+                  t))))
+
+(defn- first-difference [^String a ^String b]
+  (let [n (min (count a) (count b))
+        i (loop [i 0] (if (and (< i n) (= (.charAt a i) (.charAt b i))) (recur (inc i)) i))
+        line (inc (count (filter #(= \newline %) (subs a 0 i))))
+        ln (fn [^String s] (let [st (inc (.lastIndexOf s "\n" (int (max 0 (dec i)))))
+                                 e (.indexOf s "\n" (int i))]
+                             (subs s (min st (count s)) (if (neg? e) (count s) e))))]
+    (str "line " line ": " (pr-str (ln a)) " / " (pr-str (ln b)))))
+
+(defn roundtrip
+  "The round trip over the trees of the sources: read then print (from :clojure, the default:
+  Clojure -> Arbace -> Clojure), or print then read (from :arbace). Every file the first half
+  translates must come back, by the second, under its name with its text, byte for byte.
+  Returns {:files N :equal N :differ {rel {:why WHY :at TEXT}}}, WHY :name (back under another
+  name), :text, :missing, :error, :one-way (a .cljc read into a .ae, back as a .clj holding
+  exactly its :clj reading: the conditionals resolved, the rest as it was), or from Arbace
+  :not-read: a text read itself changes (one that names clojure.*, say), which no Clojure text
+  reads as, so print cannot give it back, but whose printed text makes the round trip from
+  Clojure."
+  [sources opts]
+  (let [[v1 v2] (if (= :arbace (:from opts)) [:print :read] [:read :print])
+        t (tree sources)
+        a (half v1 t opts)
+        b (half v2 (:tree a) opts)
+        ;; from Arbace, the printed tree's own round trip (Clojure -> Arbace -> Clojure)
+        c (when (= :arbace (:from opts)) (half v1 (:tree b) opts))
+        back2 (into {} (for [[out rel] (:from c)] [rel out]))
+        ;; the name each file of a's tree comes back under
+        back (into {} (for [[out rel] (:from b)] [rel out]))
+        results (for [[out rel] (:from a)
+                      :let [orig (slurp (t rel))
+                            out2 (back out)
+                            txt (when out2 (get-in b [:tree out2]))
+                            p (get-in a [:plans out])]]
+                  [rel (cond (nil? out2) {:why :missing}
+                             ;; a .cljc read into a .ae: its :clj reading comes back, as a .clj
+                             (and (= :cljc (:kind p)) (:to-ae p) (not= :arbace (:from opts)))
+                             (let [want (under (parent-of rel) (str (base (name-of rel)) ".clj"))
+                                   resolved (text/resolve-conditionals orig #{:clj})]
+                               (cond (not= out2 want) {:why :name :as out2}
+                                     (not= txt resolved) {:why :text :at (first-difference resolved txt)}
+                                     :else {:why :one-way}))
+                             (not= out2 rel) {:why :name :as out2}
+                             (= txt orig) nil
+                             ;; from Arbace: a text read would change itself (it names
+                             ;; clojure.*, defines return, ...) is not one read makes
+                             (and (= :arbace (:from opts))
+                                  (let [p ((:plan (verbs :read)) (name-of out) #{} opts)]
+                                    (and (:kind p)
+                                         (not= orig (translate-text orig p rel (:skip opts #{})))))
+                                  ;; but printed, it goes back and forth as Clojure text
+                                  (= (get-in a [:tree out]) (get-in c [:tree (back2 out2)])))
+                             {:why :not-read :at (first-difference orig txt)}
+                             :else {:why :text :at (first-difference orig txt)})])]
+    {:files (+ (count results) (count (:errors a)))
+     :equal (count (remove second results))
+     :differ (into (sorted-map)
+                   (concat (filter second results)
+                           (for [[rel m] (:errors a)] [rel {:why :error :at m}])
+                           ;; a file of the second half's errors
+                           (for [[out m] (:errors b) :let [rel ((:from a) out)]]
+                             [rel {:why :error :at m}])))}))
 
 (defn- parse-args [args]
   (loop [[a & more :as args] args o {:sources [] :text [] :skip #{} :kind :clj}]
@@ -140,6 +300,10 @@
       (= a "--keep-ext") (recur more (assoc o :keep-ext true))
       (= a "--ae") (recur more (assoc o :ae true))
       (= a "-q") (recur more (assoc o :quiet true))
+      (= a "-v") (recur more (assoc o :verbose true))
+      (= a "--from-arbace") (recur more (assoc o :from :arbace))
+      (= a "--known") (recur (rest more) (assoc o :known (first more)))
+      (= a "--corpus") (recur (rest more) (assoc o :corpus (keyword (first more))))
       (= a "--text") (recur (rest more) (update o :text conj (first more)))
       (= a "--kind") (recur (rest more) (assoc o :kind (keyword (first more))))
       (= a "--skip") (recur (rest more) (update o :skip into (map keyword (str/split (first more) #","))))
@@ -147,20 +311,67 @@
       :else (recur more (update o :sources conj a)))))
 
 (defn- print-rules []
-  (println "Rules, in the order they apply:")
+  (println "Rules, in the order they apply (print reverses them in the reverse order):")
   (doseq [r rules/rules]
-    (println (str "  " (name (:id r)) ": " (str/replace (:doc r) #"\s+" " "))))
+    (println (str "  " (name (:id r)) " (" (name (:way r)) "): " (str/replace (:doc r) #"\s+" " ")))
+    (println (str "      lost by print: " (str/replace (:loss r) #"\s+" " "))))
   (println "Dialect divergences (doc/VENDOR-NOTES.md):")
   (doseq [d rules/divergences]
     (println (str "  " (:divergence d) ": "
                   (if (= :none (:rule d)) "no rule" (name (:rule d)))
                   (when (:why d) (str " - " (str/replace (:why d) #"\s+" " ")))))))
 
+(defn- usage []
+  (binding [*out* *err*] (println (:doc (meta (the-ns 'arbace.repr.clojure)))))
+  (System/exit 2))
+
+(defn roundtrips
+  "roundtrip over each of the sources apart, their results merged, each file's path prefixed by
+  its source's name (libraries whose trees share paths); one source: roundtrip's."
+  [sources opts]
+  (if (< (count sources) 2)
+    (roundtrip sources opts)
+    (reduce (fn [acc src]
+              (let [r (roundtrip [src] opts) n (.getName (io/file src))]
+                (-> acc (update :files + (:files r)) (update :equal + (:equal r))
+                    (update :differ into (for [[rel d] (:differ r)] [(str n "/" rel) d])))))
+            {:files 0 :equal 0 :differ (sorted-map)} sources)))
+
+(defn- run-roundtrip
+  "roundtrip's command: the counts, each difference with its reason from the known ones (an
+  EDN map {corpus {rel reason}}, its section --corpus), and exit status 1 on a difference not
+  known or a known one that no longer differs."
+  [o]
+  (let [r (roundtrips (:sources o) o)
+        known (if (:known o) (get (read-string (slurp (:known o))) (:corpus o) {}) {})
+        outside (into (sorted-map) (filter #(= :not-read (:why (val %))) (:differ r)))
+        one-way (into (sorted-map) (filter #(= :one-way (:why (val %))) (:differ r)))
+        diff (apply dissoc (:differ r) (concat (keys outside) (keys one-way)))
+        new (remove #(contains? known %) (keys diff))
+        stale (remove #(contains? diff %) (keys known))]
+    (doseq [[rel d] diff]
+      (println (str "  " (if (contains? known rel) "known " "NEW   ") rel " - " (name (:why d))
+                    (when (:as d) (str " (back as " (:as d) ")"))
+                    (when-let [k (known rel)] (str ": " k))
+                    (when (and (:at d) (or (:verbose o) (not (contains? known rel)))) (str "\n      " (:at d))))))
+    (doseq [rel stale] (println (str "  STALE " rel " - known, but it comes back equal")))
+    (when (:verbose o)
+      (doseq [[rel d] outside] (println (str "  outside " rel "\n      " (:at d)))))
+    (println (format "repr-clojure roundtrip%s (%s): %d files, %d equal, %s%d differ (%d known, %d new), %d stale"
+                     (if (:corpus o) (str " " (name (:corpus o))) "")
+                     (if (= :arbace (:from o)) "Arbace -> Clojure -> Arbace" "Clojure -> Arbace -> Clojure")
+                     (:files r) (:equal r)
+                     (if (= :arbace (:from o))
+                       (format "%d outside read's image (texts read itself changes), " (count outside))
+                       (format "%d .cljc back as their :clj reading, " (count one-way)))
+                     (count diff) (- (count diff) (count new)) (count new) (count stale)))
+    (shutdown-agents) ; pmap's threads
+    (when (or (seq new) (seq stale)) (System/exit 1))))
+
 (defn -main [& args]
   (let [[cmd & args] args
-        _ (when (not= cmd "read")
-            (binding [*out* *err*] (println (:doc (meta (the-ns 'arbace.repr.clojure)))))
-            (System/exit 2))
+        verb (get {"read" :read "print" :print "roundtrip" :roundtrip} cmd)
+        _ (when-not verb (usage))
         o (parse-args args)
         known (set (map :id rules/rules))]
     (when-let [bad (seq (remove known (:skip o)))]
@@ -168,17 +379,18 @@
     (cond
       (:rules o) (print-rules)
       (:stdin o) (let [p {:kind (:kind o) :to-ae (boolean (:ae o))}]
-                   (print (translate-text (slurp *in*) p "<stdin>" (:skip o)))
+                   (print ((:text (verbs verb)) (slurp *in*) p "<stdin>" (:skip o)))
                    (flush))
-      (empty? (:sources o))
-      (do (binding [*out* *err*] (println (:doc (meta (the-ns 'arbace.repr.clojure)))))
-          (System/exit 2))
+      (empty? (:sources o)) (usage)
+      (= verb :roundtrip) (run-roundtrip o)
       (not (or (:out o) (:in-place o)))
       (do (binding [*out* *err*] (println "repr-clojure: give -o OUT or --in-place")) (System/exit 2))
       :else
-      (let [s (run (:sources o) (when-not (:in-place o) (:out o)) o)]
+      (let [s (run verb (:sources o) (when-not (:in-place o) (:out o)) o)]
         (when-not (:quiet o)
           (binding [*out* *err*]
-            (println (format "repr-clojure: %d translated (%d to .ae), %d unchanged, %d copied, %d skipped, %d errors"
-                             (:translated s) (:to-ae s) (:unchanged s) (:copied s) (:skipped s) (:errors s)))))
+            (println (format "repr-clojure: %d %s (%d %s), %d unchanged, %d copied, %d skipped, %d errors"
+                             (:translated s) (if (= verb :print) "printed" "translated")
+                             (:to-ae s) (if (= verb :print) ".ae to .clj" "to .ae")
+                             (:unchanged s) (:copied s) (:skipped s) (:errors s)))))
         (when (pos? (:errors s)) (System/exit 1))))))

@@ -121,9 +121,12 @@ Prior art:
     crates of `rust-src` 1.99.1, `test/rust/corpus-rustc-1.99.1.edn`), evaluated from the checkout,
     not embedded.
   - `arbace/repr/clojure{.ae,/}`: `arbace.repr.clojure`, Clojure's bridge (`doc/REPR-CLOJURE.md`;
-    `bin/repr-clojure read`, `print` to come, `check`): Clojure source into Arbace's, the names
-    of the vendored Clojure, `.clj`/`.cljc` into `.ae`, a table of rules for the dialects'
-    divergences; `bin/clojure-tests` translates Clojure's suite with it.
+    `bin/repr-clojure read`, `print`, `roundtrip`, `check`): Clojure source into Arbace's, the
+    names of the vendored Clojure, `.clj`/`.cljc` into `.ae`, a table of rules for the dialects'
+    divergences, and back (`print`, each rule reversed; its two one-way rules documented: a
+    `.cljc`'s conditionals resolved, `SecurityManager`'s spelling), Clojure → Arbace → Clojure
+    byte for byte over the frozen `clojure/`, the suite and its libraries (`check --roundtrip`,
+    `test/repr/clojure/roundtrip-known.edn`); `bin/clojure-tests` translates Clojure's suite with it.
   - `arbace/build/`: `arbace.build.go`, the build of a program held as Go forms: printed by
     repr/go into a module with its overlay, then `go build` (`bin/build-go`, `doc/go/BUILD.md`).
   - `arbace/go/`: goi's checker, `arbace.go.check` (spec `doc/go/GOI-SPEC.md` §3, GR2; `bin/goi
@@ -208,7 +211,8 @@ Prior art:
   `--text amd64`: mode `:full` printed back to the original text, byte for byte), repr/haskell's
   (`bin/repr-haskell roundtrip --iface --text --layout`: GHC's trees and lines over GHC 9.14.1's
   boot libraries, in the braces and the layout layouts, then their interfaces compiled at `-O1`,
-  then mode `:full` printed back byte for byte, and `test`; on the host's GHC), repr/rust's (`bin/repr-rust roundtrip --iface`: rustc's trees and
+  then mode `:full` printed back byte for byte, and `test`; on the host's GHC), repr/clojure's
+  (`bin/repr-clojure check`, `--suite`, `--roundtrip`), repr/rust's (`bin/repr-rust roundtrip --iface`: rustc's trees and
   lines over std's five crates, then rustdoc's JSON of the crates without spans, and `test`; on the host's rustc), the box's vendoring checks (`bin/box-vendor roundtrip`, `kvm-tests`, `purego-check`),
   `bin/tamago-vendor verify`, `bin/x509roots-vendor verify`, `check`; goi's checker (`bin/goi
   annotations`, `test --gc`, after repr/go's round trips); Go's toolchain as forms

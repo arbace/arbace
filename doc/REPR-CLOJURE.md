@@ -1,7 +1,7 @@
-# repr/clojure: Clojure → Arbace
+# repr/clojure: Clojure ↔ Arbace
 
 > Names: this bridge is repr/clojure (`arbace/repr/clojure.ae`, `arbace/repr/clojure/`,
-> `bin/repr-clojure read`, `bin/repr-clojure check`, this file `REPR-CLOJURE.md`) since 2026-10-17
+> `bin/repr-clojure read`, `print` (since 2026-10-18), `roundtrip`, `bin/repr-clojure check`, this file `REPR-CLOJURE.md`) since 2026-10-17
 > (the user's decision; doc/NAMING-SURVEY.md, "The second rename as built"); from 2026-10-11 it
 > was c2a (`arbace.c2a.*`, `bin/c2a`, `bin/c2a-check`, `test/c2a/`, `C2A.md`), as the records of
 > those days name it. This document uses the current names throughout, also where it records
@@ -9,9 +9,9 @@
 
 repr/clojure is Clojure's bridge, one of the `repr` family (read and print, as repr/java and
 repr/go). Its `read` translates Clojure source into Arbace source: `.clj` and `.cljc` files in,
-`.ae` files out, their layout and comments kept; `print`, Arbace back to Clojure (`arbace.*` to
-`clojure.*`, `.ae` to `.clj`, a text round trip), is to come. Clojure and Arbace share the
-reader, so the bridge runs between two dialects' texts. Arbace is a Clojure derivative ([VENDOR-NOTES.md](VENDOR-NOTES.md)):
+`.ae` files out, their layout and comments kept; its `print`, Arbace back to Clojure (`arbace.*`
+to `clojure.*`, `.ae` to `.clj`), reverses each rule, so that Clojure read and printed back is
+the same text byte for byte (below, "Print"). Clojure and Arbace share the reader, so the bridge runs between two dialects' texts. Arbace is a Clojure derivative ([VENDOR-NOTES.md](VENDOR-NOTES.md)):
 its core and the rest of Clojure's namespaces are named `arbace.*`, its sources are `.ae` files,
 and it differs from Clojure in a few places on purpose (VENDOR-NOTES.md, "Dialect divergences").
 repr/clojure makes the source changes these call for, by a table of rules
@@ -29,7 +29,12 @@ bin/repr-clojure read -o OUT SRC...                # translate files and trees i
 bin/repr-clojure read --in-place SRC...            # translate them where they are (x.clj becomes x.ae)
 bin/repr-clojure read --in-place --keep-ext SRC... # rename in place, names kept (bin/clojure-tests' mode)
 bin/repr-clojure read --stdin [--kind cljc --ae]   # standard input to standard output
-bin/repr-clojure read --rules                      # the rules and the dialect divergences
+bin/repr-clojure read --rules                      # the rules, what print cannot restore, the divergences
+bin/repr-clojure print -o OUT SRC...               # print Arbace files and trees back as Clojure into OUT
+bin/repr-clojure print --in-place SRC...           # print them where they are (x.ae becomes x.clj)
+bin/repr-clojure print --stdin [--kind cljc --ae]  # standard input to standard output
+bin/repr-clojure roundtrip [--keep-ext] SRC...     # read then print in memory, each file back byte for byte
+bin/repr-clojure roundtrip --from-arbace SRC...    # print then read
 ```
 
 - A directory `SRC` is translated with its relative paths: its contents land in `OUT`, so
@@ -65,16 +70,21 @@ bin/repr-clojure read --rules                      # the rules and the dialect d
   sources come before `ARBACE_PATH`: `bin/repr-clojure` loads its four namespaces from the checkout
   (`load-file`, then marked loaded: `repr_clojure_sources`), so the checked-out repr/clojure runs, not the one
   the executable was built with.
-- The namespaces are `arbace.repr.clojure` (the command line, its verb `read`, and the trees), `arbace.repr.clojure.rules`
-  (the table), `arbace.repr.clojure.text` (the lexical reader) and `arbace.repr.clojure.rename` (the rename's
+- `print` takes `read`'s options (`--keep-ext` aside: it keeps the names `read` kept) and its
+  plan reversed (below, "Print"). `roundtrip` takes `--known EDN --corpus NAME` (the
+  differences expected, `{corpus {path reason}}`), `--from-arbace` and `-v`.
+- The namespaces are `arbace.repr.clojure` (the command line, its verbs `read`, `print` and
+  `roundtrip`, and the trees), `arbace.repr.clojure.rules`
+  (the table, each rule with its reversal), `arbace.repr.clojure.text` (the lexical reader) and `arbace.repr.clojure.rename` (the rename's
   patterns).
 
 ## The rules
 
 They apply in this order. Each is a map in `arbace.repr.clojure.rules/rules` with `:id`, `:doc`,
 `:applies` (whether the rule applies to a file, given its kind `:clj`, `:cljc`, `:java` or
-`:text`, whether it becomes a `.ae` file, and the reader's features) and `:rewrite` (text to
-text).
+`:text`, whether it becomes a `.ae` file, and the reader's features), `:rewrite` (text to
+text), and for `print` `:print` (the rewrite reversed), `:way` (`:reversible` or `:one-way`)
+and `:loss` (what `print` cannot restore; below, "Print").
 
 | rule | applies to | what it rewrites |
 |---|---|---|
@@ -104,9 +114,9 @@ source rewrite can:
 
 A later divergence that a source rewrite can answer becomes:
 
-1. an entry in `rules` at its place in the order;
+1. an entry in `rules` at its place in the order, with its `:print`, `:way` and `:loss`;
 2. its divergence in `divergences`, and in VENDOR-NOTES.md's list;
-3. unit tests in `test/repr/clojure/read_test.ae`;
+3. unit tests in `test/repr/clojure/read_test.ae`, and of its reversal in `print_test.ae`;
 4. a row above.
 
 If the rule changes what the suite or its libraries become, `bin/repr-clojure check --suite`'s digest
@@ -131,13 +141,118 @@ and on tokens outside strings and comments. `:rename` and `:proxy-methods` are r
 expressions over the whole text, comments and strings included, as names in strings
 (`(require 'clojure.string)` built at run time, `"clojure.lang.RT"`) must change too.
 
+## Print
+
+`print` is `read` reversed: Arbace text back to Clojure's, file by file (`print-text`), and
+the trees with read's plan reversed (`print-plan`). Built 2026-10-18, as the user decided on
+2026-10-17 (doc/NAMING-SURVEY.md, "Added (2026-10-17, the user)": "rename c2a at the next
+re-seed, print later", then "both next"). As `read` it rewrites text and keeps everything
+else; the rules' `:print` functions apply in the reverse order of their `:rewrite`s.
+
+### Each rule, reversed
+
+| rule | way | `print` |
+|---|---|---|
+| `:reader-conditionals` | one way | Nothing to undo: the branches not selected are gone. A `.ae` made from a `.cljc` is printed as a `.clj` holding the `.cljc`'s `:clj` reading. |
+| `:rename` | reversible | `arbace.repr.clojure.rename/unrename`: the same patterns, in the same contexts, finding `arbace` instead of `clojure` (`arbace.core` → `clojure.core`, `arbace.lang.RT`, `Larbace/lang/Var;`, `:arbace.error/phase`, ...), and the source paths `arbace/<ns>.ae` → `clojure/<ns>.clj`. |
+| `:proxy-methods` | reversible | `__initArbaceFnMappings` and the rest, `__arbaceFnMap`, back to Clojure's names. |
+| `:core-names` | reversible | `uncore-names`: what `core-names` added is one of three texts, by what the `ns` form had (a `(:refer-clojure :exclude [...])` at its end, an `:exclude [...]` at its `:refer-clojure`'s end, the names at its `:exclude`'s end). Each is tried, and kept only when `core-names` gives the text back from what is left, so `print` inverts `read` exactly; with none, the text is left as it is (Arbace source that excludes the names itself). |
+| `:security-manager` | one way | `java.lang.SecurityManager` outside imports, in a file that does not import it, unqualified again (Clojure imports it by default). A Clojure file that wrote it qualified comes back unqualified: the same class. |
+
+### The one-way rules
+
+Decided here (the brief left it to this work): **the losses are documented, not recorded.**
+
+- `:reader-conditionals`. Recording what `read` drops would mean keeping the whole conditional
+  (every branch's text, and where it stood) beside the `.ae`: as metadata the `.ae` would no
+  longer be the text it is (a `.ae` is read without conditionals, so they cannot stay in it),
+  and as a side file a second source to keep in step. Neither is needed: the lossless path
+  exists already, `--keep-ext`, which keeps a `.cljc` as a `.cljc` (Arbace's reader selects its
+  `:clj` branches, as Clojure's does) and is what `bin/clojure-tests` uses; `print` then gives
+  it back whole. What a `.ae` loses is exactly the other platforms' code, which Arbace cannot
+  run. The round trip checks the loss is only that: a `.cljc` read into a `.ae` must come back
+  as a `.clj` whose text is the `.cljc` with its conditionals resolved, byte for byte. A
+  `--full` mode recording the conditionals is proposal CP1 (below), if wanted.
+- `:security-manager`. Which uses were written qualified is lost, and nothing in the source of
+  Clojure's sources, suite or libraries writes `SecurityManager` at all. `print` writes the
+  short name, which is what Clojure code writes and means the same.
+
+### Plans
+
+| Arbace file | becomes |
+|---|---|
+| `x.ae` | `x.clj` (as `read` cannot tell, a `.ae` made from a `.cljc` too) |
+| `data_readers.ae` | `data_readers.clj`; `data_readers.cljc` when a `data_readers.clj` is beside it (Clojure merges the two); left out when both are |
+| `x.clj`, `x.cljc` | printed, keeping their names (read kept them: `--keep-ext`, `data_readers` files, `project.clj`); left out beside an `x.ae`, which is printed instead, as `read` left a `.cljc` beside a `.clj` (in place it stays as it was) |
+| `.java`, `--text` files | printed, keeping their names |
+| class files | left out |
+| anything else | copied (with `-o`) |
+
+A directory's names are taken before any of its files is renamed (`run`'s listing, for `read`
+too), so the plan does not depend on the order files are written in place.
+
+### Where print is not read's inverse
+
+`read` maps Clojure's names onto Arbace's; it does not touch an `arbace.*` that is already
+there. So `print` inverts it on what `read` makes, but an Arbace text that names `clojure.*`
+itself (a provenance comment, "Converted from clojure/lang/Var.java"; a docstring about
+upstream) or that defines `return` with no exclusion is not something `read` makes: printed
+and read again, its `clojure.*` become `arbace.*`. The same holds the other way for a Clojure
+text naming `arbace.*` (none of the corpora does). Such texts are outside `read`'s image; the
+round trip from Arbace counts them apart and requires that their printed text makes the round
+trip from Clojure.
+
+### The round trip
+
+`bin/repr-clojure check --roundtrip` (in `bin/gate --full`) runs `bin/repr-clojure roundtrip`
+over each corpus, in memory: every file `read` translates must come back from `print` under
+its name, byte for byte, except the known differences, `test/repr/clojure/roundtrip-known.edn`
+(none; a new difference, or a known one that comes back equal, fails). On 2026-10-18:
+
+| corpus | way | files | equal | apart |
+|---|---|---|---|---|
+| the frozen tree's `clojure/` (`frozen_clojure`: Clojure's `.clj` and `.java`, ASM's `.java`) | Clojure → Arbace → Clojure | 231 | 231 | |
+| Clojure's suite (`98d735f`: `test/`, `src/script/`, the top-level files), `--keep-ext` | Clojure → Arbace → Clojure | 103 | 103 | |
+| the suite into `.ae` files | Clojure → Arbace → Clojure | 103 | 102 | 1 `.cljc` (`reader.cljc`) back as its `:clj` reading |
+| the suite's six test libraries (the jars of `--libs`), `--keep-ext` | Clojure → Arbace → Clojure | 33 | 33 | |
+| the libraries into `.ae` files | Clojure → Arbace → Clojure | 33 | 21 | 12 `.cljc` (test.check, tools.reader) back as their `:clj` readings |
+| `arbace/` | Arbace → Clojure → Arbace | 283 | 133 | 150 outside `read`'s image (they name `clojure.*` themselves: the Java forms' provenance lines, "Converted from clojure/lang/Var.java", spec's "Vendored from" lines, code and docstrings naming both dialects, as repr/clojure's own; `core.ae` defines `return` without excluding it), each printed text making the round trip from Clojure |
+
+0 differences in all. `bin/repr-clojure check --suite` also prints the translated suite back in
+place with the command (`print --in-place`) and compares the tree with Clojure's, byte for byte;
+`bin/repr-clojure check` holds `print`'s unit tests (`test/repr/clojure/print_test.ae`: each
+rule reversed, the samples of `read`'s tests read and printed back byte for byte, the plans, a
+tree printed with `-o` and in place, the round trip of a tree).
+
+The round trip found one fault of `read`, fixed with it: a `#?@` nested in a spliced branch
+(the suite's `reader.cljc`, `[#?@(:clj [:a #?@(:clj [:b ...])])]`) failed with "splicing not
+allowed at the top level", as the branch's text was resolved as if at the top level; it is now
+resolved at the conditional's depth. The suite's digest (`--keep-ext`) is unchanged.
+
+From Arbace the round trip is meaningful in that sense only: `arbace/` is hand-maintained since
+the derivation, not `read`'s output, so most of its vendored namespaces are outside `read`'s
+image; the 133 that are not come back byte for byte.
+
+### Proposals
+
+- **CP1** A `read --full` mode keeping a `.cljc`'s conditionals for `print` (a side file
+  `x.cljc.ae-conditionals`, or the original `.cljc` kept beside the `.ae`), so that `.cljc` →
+  `.ae` → `.cljc` is byte for byte too; not built, as `--keep-ext` is that path already.
+
+Until the next re-seed the executable embeds the repr/clojure before `print`: `bin/repr-clojure`
+loads the checkout's namespaces (`repr_clojure_sources`), so `print` runs on today's stage 0.
+
 ## Checks
 
 ```sh
-bin/repr-clojure check          # the unit tests (test/repr/clojure/read_test.ae): the reader, each rule, the file plans, trees
-bin/repr-clojure check --suite  # Clojure's suite translated, against the digest test/repr/clojure/suite.sha256
-bin/repr-clojure check --libs   # the suite's test libraries as .ae, run on the tools' host and a Go build
+bin/repr-clojure check             # the unit tests (test/repr/clojure/read_test.ae, print_test.ae): the reader, each rule and its reversal, the file plans, trees
+bin/repr-clojure check --suite     # Clojure's suite translated, against the digest test/repr/clojure/suite.sha256, then printed back byte for byte
+bin/repr-clojure check --roundtrip # the round trips (above, "The round trip"), against test/repr/clojure/roundtrip-known.edn
+bin/repr-clojure check --libs      # the suite's test libraries as .ae, run on the tools' host and a Go build
 ```
+
+`bin/gate --full` runs the first three (its step `repr-clojure`, about 1 minute on the tools'
+host: 51 s on 2026-10-18).
 
 - `--suite`: the suite at the revision `bin/clojure-tests` pins (`98d735f`: `test/`,
   `src/script/` and the top-level files) is translated in place with `--keep-ext`. Its digest

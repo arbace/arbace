@@ -3,13 +3,25 @@
 # bin/repr-clojure check, on Arbace's Go executable (bin/lib/tools.bash's arbace_tool: the host
 # of the tools, arbace.repr.clojure loaded from the checkout).
 #
-# Usage: bin/repr-clojure check          the unit tests (test/repr/clojure/read_test.ae)
+# Usage: bin/repr-clojure check          the unit tests (test/repr/clojure/read_test.ae and
+#                                 print_test.ae: each rule and its reversal, read's samples read
+#                                 and printed back byte for byte, the plans, trees)
 #        bin/repr-clojure check --suite  Clojure's test suite (test/, src/script/ and the top-level
 #                                 files at the pinned revision bin/clojure-tests uses) translated
 #                                 in place with --keep-ext, as bin/clojure-tests does; the tree's
 #                                 digest must equal test/repr/clojure/suite.sha256 (the
 #                                 translation by arbace.j2c.rename and bin/clojure-tests' sed
-#                                 before c2a, which it reproduced exactly on 2026-10-11)
+#                                 before c2a, which it reproduced exactly on 2026-10-11); then
+#                                 printed back in place, equal to the suite byte for byte
+#        bin/repr-clojure check --roundtrip
+#                                 the round trips (bin/repr-clojure roundtrip), against
+#                                 test/repr/clojure/roundtrip-known.edn: Clojure -> Arbace ->
+#                                 Clojure over the frozen tree's clojure/ (bin/lib/tools.bash's
+#                                 frozen_clojure) and the suite, with --keep-ext (bin/clojure-tests'
+#                                 mode) and into .ae files, and the suite's test libraries (the
+#                                 jars of --libs, when bin/clojure-tests has downloaded them) both
+#                                 ways too; Arbace -> Clojure -> Arbace over arbace/ (about 1
+#                                 minute together)
 #        bin/repr-clojure check --libs [GO-EXE]
 #                                 the suite's test libraries (test.check, test.generative,
 #                                 tools.namespace, data.generators, tools.reader, java.classpath:
@@ -33,18 +45,12 @@ root=$(cd "$(dirname "$0")/../../.." && pwd)
 work=$root/.tmp/repr-clojure-check
 mkdir -p "$work"
 rev=98d735fab02f337cee654cb0629bddc09883a75a   # bin/clojure-tests' revision of Clojure
+lib_jars="test.check-1.1.3 test.generative-1.1.1 tools.namespace-1.5.1 data.generators-1.1.1 tools.reader-1.6.0 java.classpath-1.1.1"
 
-digest() { (cd "$1" && find . -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum | sha256sum | cut -c1-64); }
-
-case ${1:-} in
-"")
-  rm -rf "$work"/unit*
-  arbace_tool -p "$root/test" "${repr_clojure_sources[@]}" -D repr.clojure.work="$work" -e "
-(require 'arbace.test 'repr.clojure.read-test)
-(let [r (arbace.test/run-tests 'repr.clojure.read-test)]
-  (System/exit (if (zero? (+ (:fail r) (:error r))) 0 1)))" ;;
---suite)
-  src=$work/clojure
+# suite_tree DIR: Clojure's suite as bin/clojure-tests takes it (test/, src/script/ and the
+# top-level files at the pinned revision), fetched once into $work/clojure, copied afresh to DIR
+suite_tree() {
+  local src=$work/clojure t=$1
   if [ "$(git -C "$src" rev-parse HEAD 2>/dev/null || true)" != "$rev" ]; then
     echo "== fetch clojure/clojure $rev"
     rm -rf "$src"; mkdir -p "$src"
@@ -53,18 +59,64 @@ case ${1:-} in
     git -C "$src" fetch -q --depth 1 origin "$rev"
     git -C "$src" checkout -q -f FETCH_HEAD
   fi
-  t=$work/suite
   rm -rf "$t"; mkdir -p "$t/src"
   cp -r "$src/test" "$t/"; cp -r "$src/src/script" "$t/src/"
   find "$src" -maxdepth 1 -type f -exec cp {} "$t/" \;
+}
+
+digest() { (cd "$1" && find . -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum | sha256sum | cut -c1-64); }
+
+case ${1:-} in
+"")
+  rm -rf "$work"/unit*
+  arbace_tool -p "$root/test" "${repr_clojure_sources[@]}" -D repr.clojure.work="$work" -e "
+(require 'arbace.test 'repr.clojure.read-test 'repr.clojure.print-test)
+(let [r (arbace.test/run-tests 'repr.clojure.read-test 'repr.clojure.print-test)]
+  (System/exit (if (zero? (+ (:fail r) (:error r))) 0 1)))" ;;
+--suite)
+  suite_tree "$work/suite"
+  t=$work/suite-ae
+  rm -rf "$t"; cp -r "$work/suite" "$t"
   "$root/bin/repr-clojure" read --in-place --keep-ext "$t"
   got=$(digest "$t") want=$(cat "$root/test/repr/clojure/suite.sha256")
   echo "suite digest $got"
-  if [ "$got" = "$want" ]; then echo "repr-clojure suite: as recorded"; else echo "repr-clojure suite: DIFFERS from test/repr/clojure/suite.sha256 ($want)"; exit 1; fi ;;
+  if [ "$got" = "$want" ]; then echo "repr-clojure suite: as recorded"; else echo "repr-clojure suite: DIFFERS from test/repr/clojure/suite.sha256 ($want)"; exit 1; fi
+  # print: the translated suite printed back in place is Clojure's, byte for byte
+  "$root/bin/repr-clojure" print --in-place "$t"
+  if diff -r "$work/suite" "$t" > "$work/suite-print.diff"; then
+    echo "repr-clojure suite: printed back, equal to Clojure's byte for byte"
+  else
+    echo "repr-clojure suite: printed back, DIFFERS from Clojure's ($work/suite-print.diff)"; head -20 "$work/suite-print.diff"; exit 1
+  fi ;;
+--roundtrip)
+  # the corpora; each against its section of the known differences
+  known=$root/test/repr/clojure/roundtrip-known.edn
+  frozen=$(frozen_clojure)/clojure
+  suite_tree "$work/suite"
+  status=0
+  rt() { local corpus=$1; shift
+         echo "== $corpus"
+         "$root/bin/repr-clojure" roundtrip --known "$known" --corpus "$corpus" "$@" || status=1; }
+  rt frozen "$frozen"
+  rt suite-keep-ext --keep-ext "$work/suite"
+  rt suite-ae "$work/suite"
+  # the suite's test libraries, the jars bin/clojure-tests downloads, each tree apart
+  libs=$root/.tmp/clojure-tests/lib
+  have=1; for j in $lib_jars; do [ -f "$libs/$j.jar" ] || have=; done
+  if [ -n "$have" ]; then
+    rm -rf "$work/rt-jars"; mkdir -p "$work/rt-jars"
+    for j in $lib_jars; do mkdir -p "$work/rt-jars/$j"; unzip -q "$libs/$j.jar" -d "$work/rt-jars/$j"; done
+    rt libs-keep-ext --keep-ext "$work/rt-jars"/*
+    rt libs-ae "$work/rt-jars"/*
+  else
+    echo "== libs: no jars in $libs, skipped (bin/clojure-tests downloads them)"
+  fi
+  rt arbace --from-arbace "$root/arbace"
+  exit $status ;;
 --libs)
   go=${2:-$root/target/arbace-go/$(arbace_host_arch)/arbace}
   libs=$root/.tmp/clojure-tests/lib
-  jars="test.check-1.1.3 test.generative-1.1.1 tools.namespace-1.5.1 data.generators-1.1.1 tools.reader-1.6.0 java.classpath-1.1.1"
+  jars=$lib_jars
   for j in $jars; do
     [ -f "$libs/$j.jar" ] || { echo "no $libs/$j.jar: run bin/clojure-tests once (it downloads the jars)" >&2; exit 2; }
   done
@@ -110,5 +162,5 @@ EOR
     echo "== Go: no $go, skipped (bin/arbace-go --build)"
   fi
   exit $status ;;
-*) echo "usage: bin/repr-clojure check [--suite | --libs [GO-EXE]]" >&2; exit 2 ;;
+*) echo "usage: bin/repr-clojure check [--suite | --roundtrip | --libs [GO-EXE]]" >&2; exit 2 ;;
 esac

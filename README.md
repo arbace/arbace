@@ -131,8 +131,8 @@ The translators are c2j (Arbace's namespaces → Java forms: the back end, deriv
 compiler) and j2g (Java forms → Go forms), a chain that compiles Arbace to Go for the
 executable. The bridges between a language's text and its forms are the `repr` family, one
 command each with the verbs `read` and `print`: repr/java (Java → Java forms, `bin/repr-java`),
-repr/go (Go → Go forms, and back, `bin/repr-go`) and repr/clojure (Clojure → Arbace,
-`bin/repr-clojure`; `print` to come); the build of a program held as Go forms is `bin/build-go` (`arbace.build.go`).
+repr/go (Go → Go forms, and back, `bin/repr-go`) and repr/clojure (Clojure → Arbace, and back,
+`bin/repr-clojure`); the build of a program held as Go forms is `bin/build-go` (`arbace.build.go`).
 From 2026-10-11 to 2026-10-17 the bridges were j2a and g2a (the build `bin/g2a build`), j2g
 was a2g (Java forms were "class forms"), repr/clojure was c2a (`bin/c2a`) and c2j the namespace
 `arbace.aot`; and until 2026-10-11 j2c, g2c and c2g, as the frozen branches, the journals and the
