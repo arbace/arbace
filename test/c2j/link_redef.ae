@@ -1,0 +1,88 @@
+;; Futamura F5 (doc/FUTAMURA-SURVEY.md, "F5 as built"): a compiled caller of a var linked to its
+;; fn's code (arbace.c2j.emit/link-form) still sees the var redefined: a defn evaluated at run
+;; time (the REPL's), with-redefs, alter-var-root, a ^:dynamic var bound, a def run again by the
+;; loader, and a call of an arity the code lacks. The namespace is compiled into a program with
+;; the runtime's namespaces (as test/bench/eval-bench.ae is measured, SA139) and run twice, its
+;; loader compiled and (ARBACE_NO_AOT set) evaluated: each prints the same lines, and exits 1 on
+;; a check that fails.
+;;
+;; Usage: PROGRAM -m test.c2j.link-redef
+(ns test.c2j.link-redef)
+
+(def results (atom []))
+
+(defn check [what got want]
+  (swap! results conj [what (= got want)])
+  (println (if (= got want) "ok  " "FAIL") what (pr-str got) (if (= got want) "" (str "(want " (pr-str want) ")"))))
+
+(defn callee [] :compiled)
+(defn caller [] (callee))
+
+(defn other [] :other-compiled)
+
+(defn ^:dynamic dcallee [] :dynamic-root)
+(defn dcaller [] (dcallee))
+
+(defn ^:redef rcallee [] :redef-root)
+(defn rcaller [] (rcallee))
+
+(defn fib [n] (if (< n 2) n (+ (fib (- n 1)) (fib (- n 2)))))
+
+(defn multi ([] :zero) ([x] [:one x]) ([x & more] [:more x more]))
+(defn multi-caller [] [(multi) (multi 1) (multi 1 2 3)])
+
+(defn arity-1 [x] x)
+(defn bad-arity [] (arity-1 1 2))
+
+;; a def the loader runs again: the prepare run's root is the second fn's, the first call sees
+;; the first
+(defn again [] :first)
+(defn again-caller [] (again))
+(def before-again (again-caller))
+(defn again [] :second)
+(def after-again (again-caller))
+
+;; a closure's code: every fn of it has the code's class
+(def closure (let [k 42] (fn [] k)))
+(defn closure-caller [] (closure))
+
+;; a call into another namespace's fn (arbace.core's)
+(defn core-caller [xs] (vec (map inc xs)))
+
+(defn in-test-ns
+  "Form evaluated in this namespace, as the REPL evaluates it there."
+  [form]
+  (binding [*ns* (the-ns 'test.c2j.link-redef)] (eval form)))
+
+(defn -main [& _]
+  (check "fib" (fib 15) 610)
+  (check "linked call" (caller) :compiled)
+  (check "fixed arities of a variadic fn" (multi-caller) [:zero [:one 1] [:more 1 '(2 3)]])
+  (check "a def run again: before" before-again :first)
+  (check "a def run again: after" after-again :second)
+  (check "a closure's code" (closure-caller) 42)
+  (check "with-redefs" (with-redefs [callee (fn [] :with-redefs)] (caller)) :with-redefs)
+  (check "after with-redefs" (caller) :compiled)
+  (check "with-redefs to another compiled fn" (with-redefs [callee other] (caller)) :other-compiled)
+  (check "with-redefs of arbace.core/vec" (with-redefs [vec (fn [_] :vec-redefined)] (core-caller [1 2])) :vec-redefined)
+  (check "arbace.core/vec after" (core-caller [1 2]) [2 3])
+  (check "binding a ^:dynamic var" (binding [dcallee (fn [] :bound)] (dcaller)) :bound)
+  (check "the ^:dynamic var's root" (dcaller) :dynamic-root)
+  (check "alter-var-root of a ^:redef var" (do (alter-var-root #'rcallee (constantly (fn [] :altered))) (rcaller)) :altered)
+  (check "an arity the code lacks"
+         (try (bad-arity) (catch arbace.lang.ArityException e (.getMessage e)))
+         "Wrong number of args (2) passed to: test.c2j.link-redef/arity-1")
+  (check "alter-var-root to with-meta (the same code)"
+         (do (alter-var-root #'callee with-meta {:k 1}) [(caller) (:k (meta callee))]) [:compiled 1])
+  (check "alter-var-root to another fn" (do (alter-var-root #'callee (constantly other)) (caller)) :other-compiled)
+  (check "a defn evaluated at run time (the REPL)"
+         (do (in-test-ns '(defn callee [] :evaluated)) (caller)) :evaluated)
+  (check "alter-var-root to a fn of another code"
+         (do (alter-var-root #'callee (constantly (fn [] :evaluated-fn))) (caller)) :evaluated-fn)
+  (check "the compiled fib after fib is redefined at run time (its calls see the new one)"
+         (let [compiled fib]
+           (in-test-ns '(defn fib [n] (if (< n 2) 1 (+ (fib (- n 1)) (fib (- n 2))))))
+           [(compiled 5) (fib 5)])
+         [8 8])
+  (shutdown-agents)
+  (System/exit (if (every? second @results) 0 1)))

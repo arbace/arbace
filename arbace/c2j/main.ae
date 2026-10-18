@@ -57,14 +57,21 @@
         m (if (and l (pos? l)) (assoc m :line l) m)]
     (not-empty m)))
 
+(def ^:private ^:dynamic *link*
+  "The resolution of a call site's link marker (arbace.c2j.emit's emit-link-site) into its code,
+  once every class is made (run*), or nil."
+  nil)
+
 (defn- forms->lists
   "Form f with every seq a list, for printing; metadata as clean-meta leaves it, a list without
   a line of its own given the enclosing form's (line): the Java forms' analysis gives a form
   without one the reader's line in the printed file, and j2g lays the Go text out on the lines
-  (J2G-SPEC §4.3), so lines that went back and forth would pad it."
+  (J2G-SPEC §4.3), so lines that went back and forth would pad it. A link marker becomes its
+  code (*link*)."
   ([f] (forms->lists f nil))
   ([f line]
    (cond
+     (and (seq? f) (= 'c2j/link (first f))) (forms->lists (vary-meta (*link* f) merge (meta f)) line)
      (seq? f) (let [m (clean-meta (meta f))
                     l (or (:line m) line)]
                 (with-meta (apply list (map #(forms->lists % l) f))
@@ -140,18 +147,20 @@
             classes (atom (apply merge {} (map (comp interfaces second) compiled)))
             fn-names (java.util.IdentityHashMap.)
             pools (atom {})
+            sites (atom [])
             results (doall
                       (for [[src ss] compiled]
-                        (let [before @classes]
-                          (try
-                            {:src src :loader (e/emit-source classes rt fn-names pools src ss)}
-                            (catch Throwable t
-                              (reset! classes before)
-                              {:src src :error (str (.getMessage t)
-                                                    (when-let [d (not-empty (ex-data t))] (str " " (pr-str d))))})))))
+                        (binding [e/*link* sites]
+                          (let [before @classes]
+                            (try
+                              {:src src :loader (e/emit-source classes rt fn-names pools src ss)}
+                              (catch Throwable t
+                                (reset! classes before)
+                                {:src src :error (str (.getMessage t)
+                                                      (when-let [d (not-empty (ex-data t))] (str " " (pr-str d))))}))))))
             bad (set (map :src (filter :error results)))]
         (if (empty? bad)
-          [(concat results (for [src failed] {:src src :error (get-in (meta failed) [:errors src])})) @classes @pools]
+          [(concat results (for [src failed] {:src src :error (get-in (meta failed) [:errors src])})) @classes @pools fn-names @sites]
           (recur (with-meta (into failed bad)
                    {:errors (merge (:errors (meta failed))
                                    (into {} (for [r results :when (:error r)] [(:src r) (:error r)])))})))))))
@@ -319,13 +328,108 @@
              (when (seq (:imports r)) [(cons 'import (map symbol (vals (:imports r))))])
              (for [f (:forms r)] (cons 'defclass f)))]))
 
+(defn- class-ns
+  "The namespace (a holder, a loader's source) or package (a deftype, an interface) whose Go
+  package holds top-level class c, given the classes made (name → record): the package is aot_
+  and its munged name (j2g's names/compiled-packages, SA142)."
+  [classes ^String c]
+  (cond
+    (str/ends-with? c "__init") (subs c 0 (- (count c) 6))
+    (contains? classes c) (if (= :holder (:kind (get classes c)))
+                            c
+                            (subs c 0 (max 0 (.lastIndexOf c "."))))
+    :else c))
+
+(defn- package-name
+  "The Go package of the compiled classes of namespace or package n (class-ns)."
+  [n]
+  (str "aot_" (str/replace (str/replace (str n) "." "_") "-" "_")))
+
+(defn- top-of [^String n] (let [i (.indexOf n "$")] (if (neg? i) n (subs n 0 i))))
+
+(defn- form-refs
+  "The names of the classes form f names (its symbols, as a class, a class's member or a
+  constructor, their tags and param-tags, and the classes of array tags), into the
+  java.util.HashSet acc; a link marker's root and arguments (the code of both its outcomes)."
+  [f ^java.util.HashSet acc]
+  (letfn [(sym! [s]
+            (when (symbol? s)
+              (let [nm (name s) ns (namespace s)]
+                (.add acc (if (str/ends-with? nm ".") (subs nm 0 (dec (count nm))) nm))
+                (when ns (.add acc ns))))
+            (when (string? s)
+              (doseq [[_ c] (re-seq #"L([^;\[]+);" s)] (.add acc c))))
+          (walk [x]
+            (when-let [m (meta x)]
+              (sym! (:tag m))
+              (run! sym! (:param-tags m)))
+            (cond
+              (and (seq? x) (= 'c2j/link (first x))) (let [{:keys [root args]} (second x)] (walk root) (run! walk args))
+              (or (seq? x) (vector? x)) (run! walk x)
+              (symbol? x) (sym! x)
+              :else nil))]
+    (walk f)))
+
+(defn- reaches?
+  "Does node a reach node b in graph g (node → set of nodes)?"
+  [g a b]
+  (loop [todo [a] seen #{}]
+    (if-let [n (peek todo)]
+      (cond
+        (= n b) true
+        (seen n) (recur (pop todo) seen)
+        :else (recur (into (pop todo) (get g n)) (conj seen n)))
+      false)))
+
+(defn- link-plan
+  "Which link sites (by :id) are linked (Futamura F5): a site whose var's root at the end of the
+  prepare run was a fn whose code class was made (link-target), with a fixed arity of the
+  call's argument count. A direct call names the code's Go type, so it imports the code's Go
+  package, and the compiled namespaces' packages must not import each other in a cycle: a site
+  in another package than its code's is linked only when the packages' graph, the classes the
+  tree's top-level forms (tops: [package form]) name and the links taken so far, does not reach
+  the caller's package from the code's; the sites are taken in the order emitted. The result:
+  id → [cname variadic]."
+  [sites classes fn-names tops pkg-of-class]
+  (let [g (atom {})]
+    (doseq [[p f] tops
+            :let [acc (java.util.HashSet.)]]
+      (form-refs f acc)
+      (doseq [c acc
+              :let [q (pkg-of-class c)]
+              :when (and q (not= q p))]
+        (swap! g update p (fnil conj #{}) q)))
+    (into {}
+          (for [{:keys [id key caller args]} sites
+                :let [[cname rec] (e/link-target key classes fn-names)
+                      p (pkg-of-class caller)
+                      q (when cname (pkg-of-class cname))]
+                :when (and cname p q
+                           (some #{(symbol (str "arbace.lang.Compiler$AOTF" (count args)))} (:interfaces rec))
+                           (or (= p q)
+                               (contains? (get @g p) q)
+                               (when-not (reaches? @g q p)
+                                 (swap! g update p (fnil conj #{}) q)
+                                 true)))]
+            [id [cname (:variadic rec)]]))))
+
+(defn- linker
+  "The resolution of link markers (arbace.c2j.emit/link-form) by plan (link-plan): the guarded
+  direct call, or the generic one. Counts the sites in links (:linked, :generic)."
+  [plan links]
+  (fn [m]
+    (let [[cname variadic] (get plan (:id (second m)))]
+      (swap! links update (if cname :linked :generic) (fnil inc 0))
+      (e/link-form m cname variadic))))
+
 (defn- run*
   "Compiles sources (or all recorded) into directory out; returns the report."
   [out sources]
   (let [us (units)
         want (if sources (set sources) (set (map first us)))
-        [results classes pools] (binding [e/*late-classes* (set (mapcat :names (java-forms-records)))]
-                                  (compile-all us want))
+        [results classes pools fn-names sites] (binding [e/*late-classes* (set (mapcat :names (java-forms-records)))]
+                                                 (compile-all us want))
+        links (atom {})
         ok (filter :loader results)
         dir (io/file out)
         tops (e/class-forms classes pools)
@@ -339,64 +443,69 @@
                             :let [nm (str (second f))]
                             :when (e/unnamed-package nm)]
                         (symbol nm)))
-        ns-forms (cons '(in-ns 'arbace) (when (seq unnamed) [(cons 'import unnamed)]))]
-    (.mkdirs (io/file dir "arbace"))
-    (with-open [w (io/writer (io/file dir "arbace.ae"))]
-      (write-form w '(ns arbace))
-      (doseq [f (concat (map first loader-files) (map first class-files) (map (comp first java-forms-file) jfs))]
-        (write-form w (list 'load (str "arbace/" (subs f 0 (- (count f) 3)))))))
-    ;; the Java forms compiler's classes, in their namespaces, as it compiled them
-    (doseq [r jfs
-            :let [[f fs] (java-forms-file r)]]
-      (with-open [w (io/writer (io/file dir "arbace" f))]
-        (.write w (str ";; Compiled by arbace.classes.native (the Java forms compiler) in " (:ns r)
-                       " while the program prepared it; kept by arbace.c2j. Regenerated by the build.\n\n"))
-        (doseq [x fs] (write-form w x))))
-    ;; the files printed in parallel (printing is most of the time here: half a minute
-    ;; evaluated), on threads of their own (a future's pool would keep the program alive a
-    ;; minute after the run), each Java form by one of them, with its continuation files
-    ;; (form-texts: aot_NAME.1.ae ..., which arbace.ae does not list: they are its class's file)
-    (let [files (vec (concat loader-files class-files))
-          n (min 16 (max 1 (.availableProcessors (Runtime/getRuntime))))
-          err (atom nil)
-          threads (vec (for [k (range n)]
-                         (Thread.
-                           ^Runnable
-                           (bound-fn []
-                             (try
-                               (doseq [[f src form] (take-nth n (drop k files))
-                                       :let [[main & more] (form-texts form)
-                                             stem (subs f 0 (- (count f) 3))
-                                             parts (count more)]
-                                       [k' f' text] (cons [0 f main]
-                                                          (map-indexed (fn [i t] [(inc i) (str stem "." (inc i) ".ae") t]) more))]
-                                 (with-open [w (io/writer (io/file dir "arbace" f'))]
-                                   (.write w (str ";; Compiled by arbace.c2j (standalone S6)"
-                                                  (if src (str " from " src ": its loader") ": the classes of a namespace")
-                                                  (when (pos? parts)
-                                                    (if (zero? k')
-                                                      (str ", continued in " stem ".1.ae to " stem "." parts ".ae")
-                                                      (str ", continuing " f " (" k' " of " parts ")")))
-                                                  ". Regenerated by the build.\n\n"))
-                                   (doseq [f ns-forms] (write-form w f))
-                                   (.write w ^String text)
-                                   (.write w "\n\n")))
-                               (catch Throwable t (reset! err t)))))))]
-      (run! #(.start ^Thread %) threads)
-      (run! #(.join ^Thread %) threads)
-      (when-let [t @err] (throw t)))
+        ns-forms (cons '(in-ns 'arbace) (when (seq unnamed) [(cons 'import unnamed)]))
+        ;; each compiled top-level class's Go package (packages.edn, below)
+        top-pkgs (merge (into {} (for [t (concat (map (comp :name :loader) ok) (map #(str (second %)) tops))]
+                                   [t (package-name (class-ns classes t))]))
+                        (into {} (for [r jfs, n (:names r)] [n (package-name (:ns r))])))
+        pkg-of-class (fn [^String c] (or (get top-pkgs c) (get top-pkgs (top-of c))))
+        plan (link-plan sites classes fn-names
+                        (concat (for [[_ _ f] loader-files] [(pkg-of-class (str (second f))) f])
+                                (for [[_ _ f] class-files] [(pkg-of-class (str (second f))) f])
+                                (for [r jfs] [(package-name (:ns r)) (second (java-forms-file r))]))
+                        pkg-of-class)]
+    (binding [*link* (linker plan links)]
+      (.mkdirs (io/file dir "arbace"))
+      (with-open [w (io/writer (io/file dir "arbace.ae"))]
+        (write-form w '(ns arbace))
+        (doseq [f (concat (map first loader-files) (map first class-files) (map (comp first java-forms-file) jfs))]
+          (write-form w (list 'load (str "arbace/" (subs f 0 (- (count f) 3)))))))
+      ;; the Java forms compiler's classes, in their namespaces, as it compiled them
+      (doseq [r jfs
+              :let [[f fs] (java-forms-file r)]]
+        (with-open [w (io/writer (io/file dir "arbace" f))]
+          (.write w (str ";; Compiled by arbace.classes.native (the Java forms compiler) in " (:ns r)
+                         " while the program prepared it; kept by arbace.c2j. Regenerated by the build.\n\n"))
+          (doseq [x fs] (write-form w x))))
+      ;; the files printed in parallel (printing is most of the time here: half a minute
+      ;; evaluated), on threads of their own (a future's pool would keep the program alive a
+      ;; minute after the run), each Java form by one of them, with its continuation files
+      ;; (form-texts: aot_NAME.1.ae ..., which arbace.ae does not list: they are its class's file)
+      (let [files (vec (concat loader-files class-files))
+            n (min 16 (max 1 (.availableProcessors (Runtime/getRuntime))))
+            err (atom nil)
+            threads (vec (for [k (range n)]
+                           (Thread.
+                             ^Runnable
+                             (bound-fn []
+                               (try
+                                 (doseq [[f src form] (take-nth n (drop k files))
+                                         :let [[main & more] (form-texts form)
+                                               stem (subs f 0 (- (count f) 3))
+                                               parts (count more)]
+                                         [k' f' text] (cons [0 f main]
+                                                            (map-indexed (fn [i t] [(inc i) (str stem "." (inc i) ".ae") t]) more))]
+                                   (with-open [w (io/writer (io/file dir "arbace" f'))]
+                                     (.write w (str ";; Compiled by arbace.c2j (standalone S6)"
+                                                    (if src (str " from " src ": its loader") ": the classes of a namespace")
+                                                    (when (pos? parts)
+                                                      (if (zero? k')
+                                                        (str ", continued in " stem ".1.ae to " stem "." parts ".ae")
+                                                        (str ", continuing " f " (" k' " of " parts ")")))
+                                                    ". Regenerated by the build.\n\n"))
+                                     (doseq [f ns-forms] (write-form w f))
+                                     (.write w ^String text)
+                                     (.write w "\n\n")))
+                                 (catch Throwable t (reset! err t)))))))]
+        (run! #(.start ^Thread %) threads)
+        (run! #(.join ^Thread %) threads)
+        (when-let [t @err] (throw t))))
     ;; each top-level class's Go package (j2g's names/compiled-packages, SA142): its namespace's,
     ;; aot_ and the munged name (a holder: its own name; a loader: its source's; a deftype or
     ;; an interface: its package)
-    (let [ns-of (fn [^String c]
-                  (cond
-                    (str/ends-with? c "__init") (subs c 0 (- (count c) 6))
-                    (contains? classes c) (if (= :holder (:kind (get classes c)))
-                                            c
-                                            (subs c 0 (max 0 (.lastIndexOf c "."))))
-                    :else c))
+    (let [ns-of (partial class-ns classes)
           tops (concat (map (comp :name :loader) ok) (map #(str (second %)) tops))
-          pkg (fn [n] (str "aot_" (str/replace (str/replace (str n) "." "_") "-" "_")))]
+          pkg package-name]
       (spit (io/file dir "packages.edn")
             (with-out-str
               (prn (into (sorted-map)
@@ -406,7 +515,8 @@
                            (for [r jfs, n (:names r)] [(str/replace n "." "/") (pkg (:ns r))])))))))
     (let [report (cond-> {:compiled (vec (sort (map :src ok)))
                           :failed (into (sorted-map) (for [r results :when (:error r)] [(:src r) (:error r)]))
-                          :classes (count (remove #(= :holder (:kind %)) (vals classes)))}
+                          :classes (count (remove #(= :holder (:kind %)) (vals classes)))
+                          :links (into (sorted-map) @links)}
                    (seq jfs) (assoc :java-forms-classes (count (mapcat :names jfs))))]
       (spit (io/file dir "aot.edn") (with-out-str (prn report)))
       report)))

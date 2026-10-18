@@ -531,9 +531,87 @@
       (and (zero? (:idx b)) (not (:isArg b))) (or (:self-sym ctx) 'this)
       :else (local-sym b))))
 
+;; ---------------------------------------------------------------------------------------
+;; guarded direct linking (Futamura F5 (a), doc/FUTAMURA-SURVEY.md, "F5 as built")
+
+(def ^:dynamic *link*
+  "While the call sites of vars may be linked, an atom of the sites' data in the order emitted
+  (arbace.c2j.main's compile-all binds it, and resolves the sites, link-form, once every class
+  is known); else nil."
+  nil)
+
+(defn- link-key
+  "The key of the compiled fn var v's root is at the end of the prepare run, for a call site
+  of v: the FnExpr of an evaluated fn (Compiler$EvalFn), or the class name of a compiled one
+  (Compiler$AOTFn, Compiler$AOTRestFn: the back end's own namespaces, compiled-back-end); nil
+  when v is dynamic, ^:dynamic, ^:redef or a macro, or its root is no such fn."
+  [^Var v]
+  (when-not (or (.isDynamic v) (let [m (meta v)] (or (:dynamic m) (:redef m) (:macro m))))
+    (let [r (.getRawRoot v)]
+      (cond
+        (instance? arbace.lang.Compiler$EvalFn r) (.-fe ^arbace.lang.Compiler$EvalFn r)
+        (or (instance? arbace.lang.Compiler$AOTFn r) (instance? arbace.lang.Compiler$AOTRestFn r))
+        (.getName (class r))
+        :else nil))))
+
+(declare deep)
+
+(defn- emit-link-site
+  "A call of var fexpr (its node fnode) with args (at most 20), linked when its root's code is
+  known (link-key): a marker (c2j/link {...}) holding the emitted root, arguments and
+  temporaries, which link-form resolves into the guarded direct call or the generic one."
+  [ctx fnode args key]
+  (let [root (deep (var-value ctx (:var fnode)))
+        as (mapv #(deep (emit ctx %)) args)
+        site {:id (count @*link*)
+              :key key
+              :caller (top-name (:name @(:cls ctx)))
+              :root root
+              :args as
+              :syms {:r (gsym ctx "root-") :w (gsym ctx "linked-") :f (gsym ctx "ifn-")
+                     :as (mapv (fn [_] (gsym ctx "arg-")) as)}}]
+    (swap! *link* conj site)
+    (list 'c2j/link site)))
+
+(defn link-form
+  "The code of link marker m (emit-link-site): with cname, the code class of the fn the site
+  expects (its fixed arity of the call's argument count, variadic its required count or nil),
+  the guarded direct call; without, the generic call T1 makes. The guard: the root is a
+  compiled fn (Compiler$AOTFn, or Compiler$AOTRestFn for variadic code) whose class is the code
+  class's fn class (fn-class, one Class per code: Compiler$AOT/fnClass), one pointer compare
+  (Compiler$AOTFn/linked, which answers the fn's body or nil); then the code's invoke is called
+  directly with the fn as self, as the fn's invoke would call it. The root is read once, and
+  cast to IFn before the arguments when the guard fails, as the generic call casts it."
+  [m cname variadic]
+  (let [{:keys [root args syms]} (second m)]
+    (if (nil? cname)
+      (list* '.invoke (list 'cast 'arbace.lang.IFn root) args)
+      (let [{:keys [r w f as]} syms
+            wt (if variadic 'arbace.lang.Compiler$AOTRestFn 'arbace.lang.Compiler$AOTFn)]
+        (list 'let (vec (concat
+                          [(tagged r Object) root
+                           (tagged w Object) (list (symbol (str wt) "linked") r (symbol cname "fn-class"))
+                           (tagged f 'arbace.lang.IFn) (list 'if (list 'nil? w) (list 'cast 'arbace.lang.IFn r) nil)]
+                          (mapcat (fn [s a] [(tagged s Object) a]) as args)))
+              (list 'if (list 'nil? w)
+                    (list* '.invoke f as)
+                    (list* '.invoke (list 'cast (symbol cname) w) r as)))))))
+
+(defn link-target
+  "The class name and record of the code class link key k names (link-key), given the classes
+  made (name → record) and the fns' class names by FnExpr (fn-names); nil when none was made."
+  [k classes ^IdentityHashMap fn-names]
+  (let [cname (if (string? k) k (.get fn-names k))
+        rec (when cname (get classes cname))]
+    (when (= :fn (:kind rec)) [cname rec])))
+
 (defn- emit-invoke [ctx n]
   (let [args (:args n)
         fexpr (:fexpr n)
+        fnode (node fexpr)
+        key (when (and *link* (= "var" (:op fnode)) (<= (count args) 20)
+                       (not (and (:isProtocol n) (:protocolOn n))))
+              (link-key (:var fnode)))
         call (fn [f]
                (if (> (count args) 20)
                  (list '.applyTo (list 'cast 'arbace.lang.IFn f)
@@ -559,7 +637,9 @@
                          (.getReturnType m))
                     (list* '.invoke (list 'cast 'arbace.lang.IFn (emit ctx fexpr)) t
                            (map #(emit ctx %) rest-args)))))
-      (call (emit ctx fexpr)))))
+      (if key
+        (emit-link-site ctx fnode args key)
+        (call (emit ctx fexpr))))))
 
 (defn- descriptor [^Class c]
   (cond
