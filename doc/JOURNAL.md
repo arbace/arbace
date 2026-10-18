@@ -1211,3 +1211,29 @@ patching the runtime (S1 forbids that). So the kernel would answer the trapped r
 values it trusts. That is proposal KS15, against KS2's letter; the user left it to decide when
 KU3 resumes. A Mac step would need the guest package in `bin/box-vendor`'s darwin/arm64
 configuration and `image()` not skipping without /dev/kvm.
+
+## 2026-10-18: KU4 parked
+
+KU4 (the process manager on amd64, doc/go/PROCESS-SPEC.md §10) was started in the worktree `ku4`
+(branch `ku4`, from `728440fe`). A safety classifier stopped the agent, as it had stopped KU3's
+two agents, before it wrote anything. KU4 is parked like KU3, and the KU series waits for
+the user's direction. The agent's findings, from reading only:
+
+1. Tool images cannot run as processes today. KU1/KU2's kernel runs processes of its own image
+   only. The tool images are separate ELFs linked at the kernel's addresses (0x201000), so they
+   would cover the kernel code a crossing runs while the process's tables are loaded. Proposed
+   fix: a small position-independent crossing stub in the board's assembly, mapped at an alias
+   in the unused 0x100000-0x200000 range with the per-vCPU area and copies of the descriptor
+   tables. The kernel would then need its own page tables (an identity map keeping the
+   monitor's W^X, plus the alias).
+2. TamaGo has no way to lock a goroutine to a vCPU (`LockOSThread` is a no-op), so the per-vCPU
+   set-up must run before every entry, and the TLB tags must be tracked per vCPU.
+3. A fresh RAM window commits its whole size: it comes from the kernel's Go heap, which TamaGo
+   clears as it grows. The in-box rebuild's requests ask 6-14 GiB each. Proposed: map windows on
+   demand, 2 MiB at a time on a process's page fault.
+4. Without sysmon a process holds its P, so at most ncpu-1 processes run at once.
+5. The store view and results can follow the launcher's (`toolStore`, `tree.Result`).
+6. `spawn`'s `:where` needs a new `HostSpawn` native (`start(byte[], int where)`), and KS8's
+   guest-only switch a guest variable passed through like `ARBACE_BOX_FS`. With `:auto`
+   defaulting to processes, the smoke test's no-spawn check needs `:where :guest`, and the
+   in-box rebuild might keep the guest-only switch on (a question for the user).

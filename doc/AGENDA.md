@@ -102,7 +102,10 @@ The current state of the work. This file is rewritten as things change. For the 
   ID_AA64PFR0_EL1, which trap at EL0, so the kernel must answer them (proposal KS15, against
   KS2's letter, to decide when KU3 resumes); a Mac step needs the guest package in
   box-vendor's darwin/arm64 configuration and `image()` not skipping without /dev/kvm.
-  KU4-KU6 go on, on amd64 alone.
+  KU4-KU6 were to go on, on amd64 alone.
+- Parked (2026-10-18): KU4 (the process manager, amd64). The classifier stopped its agent too,
+  before it wrote anything (worktree `ku4`, clean at `728440fe`). Its findings are in the journal
+  (2026-10-18, "KU4 parked"). The KU series waits for the user's direction.
 
 - Done (2026-10-18): F5 (guarded direct linking, geometric mean 1.10), `repr/clojure print`, `repr/java`'s
   `:full` mode, the evaluator's compile race fixed. F5.2 found (code layout), CP1 built, the seed
@@ -173,7 +176,7 @@ The current state of the work. This file is rewritten as things change. For the 
   spawn request; SYSCALL round trip 24.5 ns measured at ring 3; plan KU0-KU6, 17-27 days;
   K1-K12 decided as recommended; KU0 done (doc/go/PROCESS-SPEC.md; KS1-KS12 decided as
   recommended); KU1 and KU2 done (amd64 processes at ring 3, a process on the user board equal to
-  a guest byte for byte; KS13 (a), KS14 (a)); next KU4-KU6 on amd64 (KU3 parked). The diffcheck flakes' cause, j2g's
+  a guest byte for byte; KS13 (a), KS14 (a)); KU3 and KU4 parked (the classifier). The diffcheck flakes' cause, j2g's
   second round, fixed (2026-10-18).
 - The mapped start measured without nested KVM.
 - A note from the user (2026-10-13): the tooling of the Mac GUI app Moshi Go may be useful for
