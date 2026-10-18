@@ -10,7 +10,7 @@
 SHELL := /bin/bash
 CLOJURE_TESTS_GO ?= target/arbace-go/amd64/arbace-tests
 
-.PHONY: help seed-check stage0 seed-verify reseed build build-tests smoke repl fixpoint \
+.PHONY: help seed-check stage0 seed-verify reseed build build-tests smoke repl fixpoint goi-table goi-table-size \
   box box-smoke box-oracle box-suite box-tools box-rebuild mac-bundle arm64-vm-check \
   gate gate-full suite oracle diffcheck verify jdk-verify edge-verify fixtures-verify tamago-verify \
   toolchain-verify box-vendor-verify x509roots-verify repr-go-roundtrip repr-go-roundtrip-text \
@@ -43,6 +43,10 @@ repl: ## Arbace's REPL (bin/arbace-go, built first when needed)
 	bin/arbace-go
 fixpoint: ## G1 by stage 0, G2 by G1, G3 by G2; G2 = G3 required (bin/arbace-go --fixpoint)
 	bin/arbace-go --fixpoint
+goi-table: ## goi's table of compiled packages and its digests (bin/goi table; the build runs it)
+	bin/goi table
+goi-table-size: ## the table's size in the executable, the invokers' part (bin/goi table --size; after `make build`)
+	bin/goi table --size
 
 ## The box: Arbace as a TamaGo guest (bin/arbace-go --box, bin/box-*)
 box: ## the guest images and the launcher arbace-box (bin/arbace-go --build --box)

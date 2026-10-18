@@ -1,0 +1,75 @@
+;; goi: the protocol of Go values in Arbace (GOI-SPEC.md §5.5, G10): what jrt's Object protocol
+;; asks of an any that is no Java object, through jrt.GoValueOps.
+(in-ns 'go.arbace.goi)
+
+(go/file "value.go"
+  :imports [[fmt "fmt"] [maphash "hash/maphash"] [reflect "reflect"] [jrt "arbace/jrt"]])
+
+(go/var ^{:tag maphash/Seed :doc "hashSeed is the process's one seed of GoValue's hash codes (S41).\n"}
+  hashSeed (maphash/MakeSeed))
+
+(go/func GoString "GoString is a Go value's toString: its %#v, as gc prints it (§5.5, §5.7).\n"
+  ^string [^any x]
+  (fmt/Sprintf "%#v" x))
+
+(go/func comparableEqual
+  "comparableEqual is Go's == on two values of one comparable type; false when it panics (an
+uncomparable dynamic type inside).\n"
+  ^bool [^any a ^any b] :results [^bool eq]
+  (defer ((fn []
+            (when (!= (recover) nil)
+              (set! eq false)))))
+  (== a b))
+
+(go/func GoEquals
+  "GoEquals is a Go value's equals (§5.5): Go's == when the type is comparable, identity
+otherwise (slices: the same array, length and capacity; maps and funcs: the same one).\n"
+  ^bool [^any a ^any b]
+  (when (or (== a nil) (== b nil))
+    (return (and (== a nil) (== b nil))))
+  (let [ta (reflect/TypeOf a)]
+    (when (!= ta (reflect/TypeOf b))
+      (return false))
+    (when (.Comparable ta)
+      (return (comparableEqual a b)))
+    (let [va (reflect/ValueOf a)
+          vb (reflect/ValueOf b)]
+      (switch (.Kind va)
+        (case [reflect/Slice]
+          (return (and (== (.Pointer va) (.Pointer vb)) (== (.Len va) (.Len vb)) (== (.Cap va) (.Cap vb)))))
+        (case [reflect/Map reflect/Func]
+          (return (== (.Pointer va) (.Pointer vb)))))
+      false)))
+
+(go/func comparableHash "comparableHash is maphash.Comparable of x, or false when it panics.\n"
+  [^any x] :results [^uint64 h ^bool ok]
+  (defer ((fn []
+            (when (!= (recover) nil)
+              (set! ok false)))))
+  (return (maphash/Comparable hashSeed x) true))
+
+(go/func GoHash
+  "GoHash is a Go value's hashCode, consistent with GoEquals: maphash.Comparable with the
+process's seed for comparable values, the address for the others (S41).\n"
+  ^int32 [^any x]
+  (when (== x nil)
+    (return 0))
+  (when (.Comparable (reflect/TypeOf x))
+    (let [(values h ok) (comparableHash x)]
+      (when ok
+        (return (conv int32 (bit-xor h (>> h 32)))))))
+  (let [v (reflect/ValueOf x)]
+    (switch (.Kind v)
+      (case [reflect/Slice reflect/Map reflect/Func reflect/Pointer reflect/Chan reflect/UnsafePointer]
+        (let [p (conv uint64 (.Pointer v))]
+          (return (conv int32 (bit-xor p (>> p 32)))))))
+    0))
+
+(go/type valueOps "valueOps is jrt.GoValueOps: the GoValue protocol.\n" (struct))
+
+(go/method String ^string [^valueOps o ^any x] (GoString (Unbox x)))
+(go/method Equals ^bool [^valueOps o ^any a ^any b] (GoEquals (Unbox a) (Unbox b)))
+(go/method Hash ^int32 [^valueOps o ^any x] (GoHash (Unbox x)))
+
+(go/func init []
+  (set! jrt/GoValueOps (lit valueOps)))

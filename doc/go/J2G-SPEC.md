@@ -2365,7 +2365,13 @@ the translated code may use, as the analyzer needs it:
   return only types jrt can name (jrt cannot import `arbace/lang`). **Otherwise it is in the
   class's own Go package, where j2g writes it**: `Compiler$Dyn`'s `defineClass`, `setMethod`,
   `newInstance`, `getField` and `setField`, in `arbace/lang`'s `j2g_dyn.go` (§5.12). The
-  manifest does not list these (it declares jrt's classes).
+  manifest does not list these (it declares jrt's classes). **`arbace.lang.GoInterp`'s natives
+  are goi's** (amendment GR1-1, from GOI-SPEC.md S32, 2026-10-17): a call of
+  `(goi/GoInterp_M..._native ...)` in the package `arbace/goi`, goi's back end, hand-written Go
+  forms that j2g copies into the program as it copies jrt's (`go/arbace/goi.ae`,
+  `go/arbace/goi/`); goi imports jrt and std, never `arbace/lang`, so these natives too take and
+  return only what jrt can name. `arbace.lang.GoValue`'s `instanceof` is `jrt.IsGoValue` (a
+  non-null value that is no Java object: the class of Go values in Arbace, GOI-SPEC.md §5.5).
 
 - **Members the program's support code provides** (amendment TL3, accepted 2026-10-11): a
   method of a hand-written class that j2g writes or forwards in the program counts as jrt's:

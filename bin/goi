@@ -1,9 +1,27 @@
 #!/bin/bash
-# goi, the interpreter of Go forms (doc/go/GOI-SPEC.md): its checks. As built at GR2 (the checker,
-# arbace.go.check, §3) the checker runs evaluated from the checkout: it is not one of the tools
-# the executable embeds (arbace/j2g/embed.ae's excluded list) until the program carries goi (GR1,
-# GR3). `run`, `check` and `table` (§11) come with GR1 and GR3.
+# goi, the interpreter of Go forms (doc/go/GOI-SPEC.md): its tools. The checker (arbace.go.check,
+# GR2, §3) and the table's generator (arbace.go.table, GR1, §6) run on the tools' host evaluated
+# from the checkout: they are not among the namespaces the executable embeds (arbace/j2g/embed.ae's
+# excluded list); arbace.go, which the program runs, is. `run` and `check` (§11) come with GR3.
 #
+#   bin/goi table [--out DIR] [--configs C,...] [--no-invokers] [--min-sharing N]
+#                      the table and the digests (arbace.go.table on the tools' host): from the
+#                      list go/arbace/gotable.edn and the listed packages' Go forms for each
+#                      configuration C (GOOS/GOARCH; default linux/amd64, linux/arm64,
+#                      tamago/amd64, tamago/arm64): linux's converted by bin/repr-go read (cached
+#                      under .tmp/goi-table/, keyed by the list, repr/go's sources, godump and Go's
+#                      version), tamago's tamago/goroot's (its arch/ARCH files laid over). Writes
+#                      DIR (default target/arbace-go/gotable): go/arbace/gotable.ae and
+#                      go/arbace/gotable/ (the package arbace/gotable, its digests embedded),
+#                      report.edn; DIR/key names its inputs, and an unchanged key keeps DIR.
+#                      bin/arbace-go --build runs it and gives j2g --gotable DIR
+#        bin/goi table --size [WORK]
+#                      the table's cost (§6.6, GS4): the work module of the last build (default
+#                      target/arbace-go/work-amd64/mod) linked as the build links it (stripped),
+#                      without the table (an empty arbace/gotable) and with the table but no
+#                      typed invokers (every call by reflect.Value.Call), the sizes printed:
+#                      the table's whole size and the invokers' part (GS4: above 1 MB, the
+#                      threshold variant, --min-sharing)
 #   bin/goi annotations [--record] [--jobs N] [CORPUS...]
 #                                 the annotation check (§11.4): every package of the corpora
 #                                 type-checked by goi's checker, without running anything: zero
@@ -26,8 +44,9 @@
 #                                 and requires its messages to be the ERROR comments'
 #                                 (test/goi/gc_errors.ae); --regen rewrites test/goi/checked/*.edn
 #
-# Environment: ARBACE_HOST_EXE (the tools' host, bin/lib/host.bash), ARBACE_GOROOT (TamaGo's Go
-# tree, for --gc and the linux corpora's conversion).
+# Environment: ARBACE_HOST_EXE (the tools' host, bin/lib/host.bash; GOI_EXE runs the table's
+# generator instead), ARBACE_GOROOT (TamaGo's Go tree, for --gc and the linux corpora's
+# conversion).
 set -euo pipefail
 export CGO_ENABLED=0 # Go's builds never use cgo (doc/go/BOX-NOTES.md, "... cgo dropped", 2026-10-16)
 root=$(cd "$(dirname "$0")/.." && pwd)
@@ -35,11 +54,121 @@ root=$(cd "$(dirname "$0")/.." && pwd)
 . "$root/bin/lib/tools.bash"
 cd "$root"
 
+goroot=${ARBACE_GOROOT:-/root/tamago-go}
+list=$root/go/arbace/gotable.edn
+
+# the generator's host executable
+host_exe() {
+  if [ -n "${GOI_EXE:-}" ]; then echo "$GOI_EXE"; return; fi
+  . "$root/bin/lib/host.bash"
+  arbace_host_exe
+}
+
+# linux_forms ARCH EXE: std converted for linux/ARCH (cached under .tmp/goi-table/, keyed by
+# repr/go's sources, godump and Go's version); prints the root. The checker reads the listed
+# packages and their imports from it (GC14: arbace.go.check's declaration layer)
+linux_forms() {
+  local a=$1 exe=$2 key dir
+  key=$( { echo std; cat "$goroot/VERSION"
+           (cd "$root" && find arbace/repr/go.ae arbace/repr/go tools/godump -type f | LC_ALL=C sort | xargs sha256sum); } \
+         | sha256sum | cut -c1-16)
+  dir=$root/.tmp/goi-table/$key/linux-$a
+  if [ ! -f "$dir/.done" ]; then
+    echo "== bin/repr-go read --goos linux --goarch $a std (cached in $dir)" >&2
+    rm -rf "$dir" "$dir.dumps"
+    mkdir -p "$(dirname "$dir")"
+    (cd "$root" && REPR_GO_EXE=$exe REPR_GO_DUMPS=$dir.dumps bin/repr-go read --goos linux --goarch "$a" --out "$dir" std) \
+      > "$dir.log" 2>&1 || { tail -20 "$dir.log" >&2; echo "goi table: converting std for linux/$a failed ($dir.log)" >&2; return 1; }
+    rm -rf "$dir.dumps"
+    touch "$dir/.done"
+  fi
+  echo "$dir"
+}
+
+# tamago_hash: the hash of tamago/goroot's forms (for the key: the checker reads the listed
+# packages and their imports)
+tamago_hash() {
+  (cd "$root" && find tamago/goroot -type f -name '*.ae' | LC_ALL=C sort | xargs sha256sum) | sha256sum | cut -c1-64
+}
+
+table() {
+  local out=$root/target/arbace-go/gotable configs=linux/amd64,linux/arm64,tamago/amd64,tamago/arm64 extra=() exe c args=() key
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --out) out=$2; shift 2 ;;
+      --configs) configs=$2; shift 2 ;;
+      --no-invokers) extra+=(--no-invokers); shift ;;
+      --min-sharing) extra+=(--min-sharing "$2"); shift 2 ;;
+      --no-docs) extra+=(--no-docs); shift ;;
+      --size) shift; size "$@"; return ;;
+      *) echo "goi table: unknown option $1" >&2; return 2 ;;
+    esac
+  done
+  exe=$(host_exe) || return 1
+  for c in ${configs//,/ }; do
+    case $c in
+      linux/*) args+=(--config "$c=$(linux_forms "${c#linux/}" "$exe")") || return 1 ;;
+      tamago/*) args+=(--config "$c=$root/tamago/goroot,$root/tamago/goroot/arch/${c#tamago/}") ;;
+      *) echo "goi table: no configuration $c" >&2; return 2 ;;
+    esac
+  done
+  # what the table is made from: the list, the forms (linux's by their cache's key, tamago's by
+  # their hash), the generator, its options
+  key=$( { echo "${args[*]} ${extra[*]:-}"; cat "$list" "$root/arbace/go/table.ae"; (cd "$root" && find arbace/go/check.ae arbace/go/check -type f | LC_ALL=C sort | xargs cat); tamago_hash; } | sha256sum | cut -c1-64)
+  if [ -f "$out/key" ] && [ "$(cat "$out/key")" = "$key" ] && [ -f "$out/go/arbace/gotable.ae" ]; then
+    echo "goi table: $out unchanged (key ${key:0:12})" >&2
+    return 0
+  fi
+  rm -rf "$out"
+  mkdir -p "$out"
+  (cd "$root" && ARBACE_PATH=$root "$exe" -m arbace.go.table --list "$list" --out "$out" "${args[@]}" ${extra[@]+"${extra[@]}"}) >&2 \
+    || { echo "goi table: the generator failed" >&2; return 1; }
+  echo "$key" > "$out/key"
+}
+
+# size [WORK]: the executable of the work module WORK linked as built, without the table and
+# without the invokers
+size() {
+  local work=${1:-$root/target/arbace-go/work-amd64/mod} t ovl full none noinv
+  [ -d "$work/gotable" ] || { echo "goi table --size: no work module with the table ($work)" >&2; return 1; }
+  t=$root/.tmp/goi-size
+  rm -rf "$t"; mkdir -p "$t"
+  ovl=$(cd "$root" && bin/jrt overlay | tail -1)
+  . "$root/bin/lib/version.bash"
+  local v; v=$(arbace_version "$root")
+  link() { # link MOD OUT
+    (cd "$1" && env GOROOT="$goroot" GOTOOLCHAIN=local GOFLAGS= GOWORK=off GO111MODULE=on GOPROXY=off GOEXPERIMENT= \
+       CGO_ENABLED=0 GOOS=linux GOARCH=amd64 GOAMD64=v1 "$goroot/bin/go" build -trimpath -buildvcs=false \
+       "-ldflags=-s -w -X 'main.arbaceVersion=$v'" -overlay "$ovl" -o "$2" arbace/cmd/arbace) >> "$t/build.log" 2>&1
+  }
+  # the module as built, its gotable package replaced: empty (no table), or printed without invokers
+  cp -a "$work" "$t/mod-none"
+  rm -rf "$t/mod-none/gotable"; mkdir -p "$t/mod-none/gotable"
+  printf 'package gotable\n' > "$t/mod-none/gotable/gotable.go"
+  echo "== linked without the table" >&2
+  link "$t/mod-none" "$t/none" || { tail "$t/build.log" >&2; return 1; }
+  echo "== the table without invokers" >&2
+  table --out "$t/table-noinv" --configs linux/amd64 --no-invokers || return 1
+  cp -a "$work" "$t/mod-noinv"
+  rm -rf "$t/mod-noinv/gotable"
+  (cd "$root" && REPR_GO_EXE=$(host_exe) bin/repr-go print "$t/table-noinv/go/arbace/gotable.ae" "$t/mod-noinv/gotable") > "$t/print.log" 2>&1 \
+    || { tail "$t/print.log" >&2; return 1; }
+  cp "$t/table-noinv/go/arbace/gotable/"*.edn.z "$t/mod-noinv/gotable/"
+  echo "== linked with the table, without invokers" >&2
+  link "$t/mod-noinv" "$t/noinv" || { tail "$t/build.log" >&2; return 1; }
+  echo "== linked as built" >&2
+  link "$work" "$t/full" || { tail "$t/build.log" >&2; return 1; }
+  full=$(stat -c %s "$t/full"); none=$(stat -c %s "$t/none"); noinv=$(stat -c %s "$t/noinv")
+  echo "goi table --size: the executable $full bytes (linked without the image of prepared namespaces); without the table $none (the table: $((full - none)) bytes);"
+  echo "goi table --size: with the table but no typed invokers $noinv (the invokers: $((full - noinv)) bytes)"
+}
+
 usage() { sed -n '2,/^set -euo/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'; }
 
 cmd=${1:-}
 [ $# -gt 0 ] && shift
 case $cmd in
+  table) table "$@" ;;
   annotations)
     corpora=()
     for a in "$@"; do case $a in --*|[0-9]*) ;; *) corpora+=("$a") ;; esac; done

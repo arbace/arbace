@@ -1,0 +1,443 @@
+;; goi's milestone GR1 (doc/go/GOI-SPEC.md §12): Arbace calling compiled Go through the table of
+;; compiled packages, against expected values written by hand. Run by bin/arbace-go --smoke:
+;; `arbace test/goi/calls.ae` prints each failure, then "goi calls: N passed, M failed", and
+;; exits 1 when one failed.
+(ns goi.calls
+  (:require [arbace.go :as go]
+            [go.archive.tar :as tar]
+            [go.bytes :as bytes]
+            [go.context :as context]
+            [go.crypto.md5 :as md5]
+            [go.crypto.sha256 :as sha256]
+            [go.crypto.tls :as tls]
+            [go.encoding.hex :as hex]
+            [go.errors :as errors]
+            [go.fmt :as fmt]
+            [go.hash.crc32 :as crc32]
+            [go.io :as io]
+            [go.io.fs :as fs]
+            [go.math :as math]
+            [go.math.bits :as bits]
+            [go.math.rand.v2 :as rand]
+            [go.net :as net]
+            [go.net.netip :as netip]
+            [go.os :as os]
+            [go.path :as path]
+            [go.path.filepath :as filepath]
+            [go.reflect :as reflect]
+            [go.runtime :as runtime]
+            [go.sort :as sort]
+            [go.strconv :as strconv]
+            [go.strings :as strings]
+            [go.sync :as sync]
+            [go.sync.atomic :as atomic]
+            [go.time :as time]
+            [go.unicode :as unicode]
+            [go.unicode.utf16 :as utf16]
+            [go.unicode.utf8 :as utf8]))
+
+(def ^:private passed (atom 0))
+(def ^:private failed (atom []))
+
+(defn- check* [form expected f]
+  (let [actual (try (f) (catch Throwable e [:threw (.getName (class e)) (ex-message e)]))]
+    (if (= expected actual)
+      (swap! passed inc)
+      (swap! failed conj [form expected actual]))))
+
+(defmacro ^:private is
+  "expr's value is expected (=)."
+  [expected expr]
+  `(check* '~expr ~expected (fn [] ~expr)))
+
+(defmacro ^:private throws
+  "expr throws an exception of class cls (its name) with message msg."
+  [cls msg expr]
+  `(check* '~expr [:threw ~cls ~msg] (fn [] ~expr)))
+
+(defn- bs "A String's UTF-8 bytes, a Java byte[] (a []byte argument, copied: S34)." [^String s]
+  (.getBytes s "UTF-8"))
+
+;; ---------------------------------------------------------------------------------------
+;; strings
+
+(is "HELLO, GO" (strings/ToUpper "hello, go"))
+(is "hello" (strings/ToLower "HeLLo"))
+(is "ababab" (strings/Repeat "ab" 3))
+(is "" (strings/Repeat "ab" 0))
+(is true (strings/Contains "seafood" "foo"))
+(is false (strings/Contains "seafood" "bar"))
+(is true (strings/ContainsAny "failure" "ui"))
+(is true (strings/ContainsRune "abc" \b))
+(is true (strings/ContainsRune "abc" 98))
+(is true (strings/HasPrefix "golang" "go"))
+(is false (strings/HasSuffix "golang" "go"))
+(is 4 (strings/Index "chicken" "ken"))
+(is -1 (strings/Index "chicken" "dmr"))
+(is 3 (strings/LastIndex "go gopher" "go"))
+(is 2 (strings/IndexByte "golang" 108))
+(is 4 (strings/IndexRune "chicken" \k))
+(is 2 (strings/IndexAny "golang" "ly"))
+(is 3 (strings/Count "cheese" "e"))
+(is 5 (strings/Count "five" ""))
+(is "a-b-c" (strings/Join (strings/Split "a,b,c" ",") "-"))
+(is "[a b c]" (go/str (strings/Split "a,b,c" ",")))
+(is "[\"a\" \"b,c\"]" (fmt/Sprintf "%q" (strings/SplitN "a,b,c" "," 2)))
+(is "[foo bar baz]" (go/str (strings/Fields "  foo bar  baz   ")))
+(is "Hello, Gophers" (strings/TrimSpace " \t Hello, Gophers \n"))
+(is "Hello, Gophers" (strings/Trim "¡¡¡Hello, Gophers!!!" "!¡"))
+(is "Hello, Gophers!!!" (strings/TrimLeft "¡¡¡Hello, Gophers!!!" "!¡"))
+(is "Gophers" (strings/TrimPrefix "Hello, Gophers" "Hello, "))
+(is "Hello" (strings/TrimSuffix "Hello, Gophers" ", Gophers"))
+(is "oinky oinky oink" (strings/Replace "oink oink oink" "k" "ky" 2))
+(is "moo moo moo" (strings/ReplaceAll "oink oink oink" "oink" "moo"))
+(is true (strings/EqualFold "Go" "GO"))
+(is -1 (strings/Compare "a" "b"))
+(is 0 (strings/Compare "b" "b"))
+(is ["k" "v" true] (strings/Cut "k=v" "="))
+(is ["kv" "" false] (strings/Cut "kv" "="))
+(is ["x" true] (strings/CutPrefix "go:x" "go:"))
+(is "&lt;b&gt;x&lt;/b&gt; &amp; y" (strings/Replacer.Replace (strings/NewReplacer "<" "&lt;" ">" "&gt;" "&" "&amp;")
+                                                 "<b>x</b> & y"))
+(is "Lalala" (strings/Title "lalala"))
+(is "a�b" (strings/ToValidUTF8 "a�b" "�"))
+(is "a-b" (strings/Join (strings/Fields "a b") "-"))
+
+;; strings.Builder and strings.Reader: methods, their receiver a Go value (go/new)
+(is ["abc!é" 6 3 nil]
+    (let [b (go/new strings/Builder)]
+      (strings/Builder.WriteString b "abc")
+      (strings/Builder.WriteByte b 33)
+      (let [[n err] (strings/Builder.WriteRune b \é)]
+        [(strings/Builder.String b) (strings/Builder.Len b) (+ n 1) err])))
+(is ["" 0] (let [b (go/new strings/Builder)]
+             (strings/Builder.WriteString b "x")
+             (strings/Builder.Reset b)
+             [(strings/Builder.String b) (strings/Builder.Len b)]))
+(is true (let [b (go/new strings/Builder)] (strings/Builder.Grow b 64) (>= (strings/Builder.Cap b) 64)))
+(is [5 [104 nil] 4] (let [r (strings/NewReader "hello")]
+                      [(strings/Reader.Len r) (strings/Reader.ReadByte r) (strings/Reader.Len r)]))
+(is [3 "abc"] (let [r (strings/NewReader "abc")] [(strings/Reader.Size r) (fmt/Sprintf "%s" (first (io/ReadAll r)))]))
+
+;; ---------------------------------------------------------------------------------------
+;; strconv
+
+(is "42" (strconv/Itoa 42))
+(is "-7" (strconv/Itoa -7))
+(is [42 nil] (strconv/Atoi "42"))
+(is [0 "strconv.Atoi: parsing \"x\": invalid syntax"]
+    (let [[n err] (strconv/Atoi "x")] [n (go/str err)]))
+(is [255 nil] (strconv/ParseInt "ff" 16 64))
+(is [-128 nil] (strconv/ParseInt "-128" 10 8))
+(is "strconv.ParseInt: parsing \"128\": value out of range" (go/str (second (strconv/ParseInt "128" 10 8))))
+(is [18446744073709551615N nil] (strconv/ParseUint "18446744073709551615" 10 64))
+(is [3.25 nil] (strconv/ParseFloat "3.25" 64))
+(is [true nil] (strconv/ParseBool "true"))
+(is "ff" (strconv/FormatInt 255 16))
+(is "-11" (strconv/FormatInt -3 2))
+(is "18446744073709551615" (strconv/FormatUint 18446744073709551615N 10))
+(is "3.14" (strconv/FormatFloat 3.14159 \f 2 64))
+(is "1e+06" (strconv/FormatFloat 1000000.0 \g -1 64))
+(is "true" (strconv/FormatBool true))
+(is "\"hi\\n\"" (strconv/Quote "hi\n"))
+(is ["hi\n" nil] (strconv/Unquote "\"hi\\n\""))
+(is "'☺'" (strconv/QuoteRune \☺))
+(is 64 strconv/IntSize)
+
+;; ---------------------------------------------------------------------------------------
+;; math, math/bits
+
+(is 3.0 (math/Sqrt 9.0))
+(is 3.0 (math/Sqrt 9))
+(is 1024.0 (math/Pow 2.0 10.0))
+(is 2.5 (math/Abs -2.5))
+(is 2.0 (math/Floor 2.7))
+(is 3.0 (math/Ceil 2.1))
+(is -2.0 (math/Trunc -2.7))
+(is 3.0 (math/Round 2.5))
+(is 2.0 (math/RoundToEven 2.5))
+(is 3.0 (math/Max 1.0 3.0))
+(is 1.0 (math/Min 1.0 3.0))
+(is 1.0 (math/Mod 7.0 3.0))
+(is 5.0 (math/Hypot 3.0 4.0))
+(is 0.0 (math/Log 1.0))
+(is 1.0 (math/Exp 0.0))
+(is 0.0 (math/Sin 0.0))
+(is true (math/IsNaN (math/NaN)))
+(is true (math/IsInf (math/Inf 1) 1))
+(is Double/POSITIVE_INFINITY (math/Inf 1))
+(is true (math/Signbit -0.0))
+(is -3.0 (math/Copysign 3.0 -1.0))
+(is 3.141592653589793 math/Pi)
+(is 2.718281828459045 math/E)
+(is 9223372036854775807 math/MaxInt64)
+(is -9223372036854775808 math/MinInt64)
+(is 18446744073709551615N math/MaxUint64)
+(is 2147483647 math/MaxInt32)
+(is 255 math/MaxUint8)
+(is 1.7976931348623157E308 math/MaxFloat64)
+(is 4.9E-324 math/SmallestNonzeroFloat64)
+(is 4607182418800017408 (math/Float64bits 1.0))
+(is 13830554455654793216N (math/Float64bits -1.0))
+(is 1.0 (math/Float64frombits 4607182418800017408))
+(is 1065353216 (math/Float32bits 1.0))
+(is (float 1.5) (math/Float32frombits 1069547520))
+(is [0.5 1] (math/Frexp 1.0))
+(is [2.0 0.5] (math/Modf 2.5))
+(is 8 (bits/Len 255))
+(is 64 (bits/OnesCount64 18446744073709551615N))
+(is 3 (bits/TrailingZeros 8))
+(is 128 (bits/Reverse8 1))
+(is 64 bits/UintSize)
+(is [0 1] (bits/Add64 18446744073709551615N 1 0))
+
+;; ---------------------------------------------------------------------------------------
+;; bytes
+
+(is true (bytes/Equal (bs "go") (bs "go")))
+(is false (bytes/Equal (bs "go") (bs "Go")))
+(is true (bytes/Contains (bs "seafood") (bs "foo")))
+(is 1 (bytes/Compare (bs "b") (bs "a")))
+(is 2 (bytes/Index (bs "chicken") (bs "ic")))
+(is "[71 79]" (go/str (bytes/ToUpper (bs "go"))))
+(is "GO" (fmt/Sprintf "%s" (bytes/ToUpper (bs "go"))))
+(is ["hi there" 8] (let [b (go/new bytes/Buffer)]
+                     (bytes/Buffer.WriteString b "hi")
+                     (bytes/Buffer.Write b (bs " there"))
+                     [(bytes/Buffer.String b) (bytes/Buffer.Len b)]))
+(is ["hi" "hi there!"] (let [b (bytes/NewBufferString "hi there")]
+                         (bytes/Buffer.WriteByte b 33)
+                         (let [s (bytes/Buffer.String b)]
+                           (bytes/Buffer.Truncate b 2)
+                           [(bytes/Buffer.String b) s])))
+(is [104 nil] (bytes/Buffer.ReadByte (bytes/NewBufferString "hey")))
+(is ["ey" nil] (let [b (bytes/NewBufferString "hey")] (bytes/Buffer.ReadByte b) [(bytes/Buffer.String b) nil]))
+(is "[1 2 3]" (go/str (bytes/Buffer.Bytes (bytes/NewBuffer (byte-array [1 2 3])))))
+(is 0 (bytes/Buffer.Len (go/new bytes/Buffer)))
+
+;; ---------------------------------------------------------------------------------------
+;; unicode, unicode/utf8, unicode/utf16
+
+(is 2 (utf8/RuneLen \é))
+(is 4 (utf8/RuneLen 128512))
+(is 5 (utf8/RuneCountInString "héllo"))
+(is true (utf8/ValidString "héllo"))
+(is false (utf8/Valid (byte-array [-1 -2])))
+(is [233 2] (utf8/DecodeRuneInString "é!"))
+(is [65533 1] (utf8/DecodeRune (byte-array [-1])))
+(is 65533 utf8/RuneError)
+(is 4 utf8/UTFMax)
+(is true (utf8/ValidRune 65))
+(is false (utf8/ValidRune 55296))
+(is true (utf8/FullRuneInString "é"))
+(is true (unicode/IsUpper \A))
+(is false (unicode/IsUpper \a))
+(is true (unicode/IsDigit \5))
+(is true (unicode/IsSpace \tab))
+(is true (unicode/IsLetter \é))
+(is 97 (unicode/ToLower \A))
+(is 65 (unicode/ToUpper 97))
+(is 1114111 unicode/MaxRune)
+(is true (utf16/IsSurrogate 55296))
+(is 128512 (utf16/DecodeRune 55357 56832))
+
+;; ---------------------------------------------------------------------------------------
+;; time
+
+(is 1000000000 time/Second)
+(is 3600000000000 time/Hour)
+(is "1.5s" (time/Duration.String 1500000000))
+(is "1h30m0s" (time/Duration.String (* 90 time/Minute)))
+(is 1.5 (time/Duration.Hours (* 90 time/Minute)))
+(is [5400000000000 nil] (time/ParseDuration "1h30m"))
+(is "time: invalid duration \"x\"" (go/str (second (time/ParseDuration "x"))))
+(is "March" (time/Month.String 3))
+(is "Sunday" (time/Weekday.String 0))
+(is 3 time/March)
+(is "2020-03-01T00:00:00Z" (time/Time.Format (time/Date 2020 3 1 0 0 0 0 @time/UTC) time/RFC3339))
+(is [1970 1 1] (let [t (time/Time.UTC (time/Unix 0 0))] [(time/Time.Year t) (time/Time.Month t) (time/Time.Day t)]))
+(is 0 (time/Time.Weekday (time/Date 2023 1 1 12 0 0 0 @time/UTC)))
+(is 86400 (time/Time.Unix (time/Date 1970 1 2 0 0 0 0 @time/UTC)))
+(is 7200000000000 (time/Time.Sub (time/Date 2000 1 1 2 0 0 0 @time/UTC) (time/Date 2000 1 1 0 0 0 0 @time/UTC)))
+(is "2000-01-01 01:00:00 +0000 UTC"
+    (time/Time.String (time/Time.Add (time/Date 2000 1 1 0 0 0 0 @time/UTC) time/Hour)))
+(is true (time/Time.IsZero (time/Time)))
+(is "UTC" (go/str @time/UTC))
+(is [true nil] (let [[t err] (time/Parse time/DateOnly "2024-02-29")] [(= 60 (time/Time.YearDay t)) err]))
+(is "2006-01-02" time/DateOnly)
+
+;; ---------------------------------------------------------------------------------------
+;; sort (Java arrays as Go slices are copies: S34; Go values alias)
+
+(is 2 (sort/SearchInts (long-array [1 3 5 7]) 5))
+(is true (sort/IntsAreSorted (long-array [1 2 2 9])))
+(is false (sort/IntsAreSorted (long-array [3 1])))
+(is true (sort/Float64sAreSorted (double-array [0.5 1.5])))
+(is "a,b,c" (let [xs (strings/Split "c,a,b" ",")] (sort/Strings xs) (strings/Join xs ",")))
+(is 1 (sort/SearchStrings (strings/Split "a,c,e" ",") "b"))
+(is true (sort/StringsAreSorted (strings/Fields "a b c")))
+
+;; ---------------------------------------------------------------------------------------
+;; errors, fmt
+
+(is "boom" (go/str (errors/New "boom")))
+(is "&errors.errorString{s:\"boom\"}" (str (errors/New "boom")))
+(is true (let [e (errors/New "x")] (errors/Is e e)))
+(is false (errors/Is (errors/New "x") (errors/New "x")))
+(is true (let [e (errors/New "inner")] (errors/Is (fmt/Errorf "outer: %w" e) e)))
+(is "outer: inner" (go/str (fmt/Errorf "outer: %w" (errors/New "inner"))))
+(is true (let [e (errors/New "inner")] (= e (errors/Unwrap (fmt/Errorf "w: %w" e)))))
+(is nil (errors/Unwrap (errors/New "x")))
+(is "a\nb" (go/str (errors/Join (errors/New "a") (errors/New "b"))))
+(is "3-x" (fmt/Sprintf "%d-%s" 3 "x"))
+(is "3.14" (fmt/Sprintf "%.2f" 3.14159))
+(is "\"hi\"" (fmt/Sprintf "%q" "hi"))
+(is "ff" (fmt/Sprintf "%x" 255))
+(is "   42" (fmt/Sprintf "%5d" 42))
+(is "true" (fmt/Sprintf "%t" true))
+(is "A" (fmt/Sprintf "%c" \A))
+(is "int float64 string bool int32" (fmt/Sprintf "%T %T %T %T %T" 1 1.5 "s" true \c))
+(is "1 2" (fmt/Sprint 1 " " 2))
+(is "1 2\n" (fmt/Sprintln 1 2))
+(is "no args" (fmt/Sprintf "no args"))
+(is "[1 2]" (fmt/Sprintf "%v" (strings/Fields "1 2")))
+(is "%!d(string=x)" (fmt/Sprintf "%d" "x"))
+(is "<nil>" (fmt/Sprint nil))
+(is "1e+21" (fmt/Sprint 1.0E21))
+
+;; ---------------------------------------------------------------------------------------
+;; io, os, path, path/filepath, io/fs
+
+(is "EOF" (go/str @io/EOF))
+(is true (errors/Is @io/EOF @io/EOF))
+(is 0 io/SeekStart)
+(is ["abc" nil] (let [[b err] (io/ReadAll (strings/NewReader "abc"))] [(fmt/Sprintf "%s" b) err]))
+(is [3 nil] (io/WriteString (go/new strings/Builder) "abc"))
+(is 47 os/PathSeparator)
+(is 2147483648 os/ModeDir)
+(is "" (os/Getenv "ARBACE_GOI_CALLS_UNSET"))
+(is ["" false] (os/LookupEnv "ARBACE_GOI_CALLS_UNSET"))
+(is true (pos? (os/Getpagesize)))
+(is "file does not exist" (go/str @os/ErrNotExist))
+(is true (let [[_ err] (os/Stat "/nonexistent/goi")] (errors/Is err @os/ErrNotExist)))
+(is "a/c" (path/Join "a" "b" "../c"))
+(is "c.txt" (path/Base "/a/b/c.txt"))
+(is "/a/b" (path/Dir "/a/b/c.txt"))
+(is ".txt" (path/Ext "x.txt"))
+(is "/a/c" (path/Clean "/a/./b/../c/"))
+(is true (path/IsAbs "/x"))
+(is [true nil] (path/Match "*.go" "a.go"))
+(is "a/b" (filepath/Join "a" "b"))
+(is ".ae" (filepath/Ext "x.ae"))
+(is true (fs/ValidPath "a/b"))
+(is false (fs/ValidPath "/a"))
+(is 511 fs/ModePerm)
+
+;; ---------------------------------------------------------------------------------------
+;; hex, hashes, archive/tar, crypto/tls
+
+(is "0102ff" (hex/EncodeToString (byte-array [1 2 -1])))
+(is ["[1 2]" nil] (let [[b err] (hex/DecodeString "0102")] [(go/str b) err]))
+(is "encoding/hex: invalid byte: U+0078 'x'" (go/str (second (hex/DecodeString "xx"))))
+(is "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+    (fmt/Sprintf "%x" (sha256/Sum256 (bs "abc"))))
+(is "900150983cd24fb0d6963f7d28e17f72" (fmt/Sprintf "%x" (md5/Sum (bs "abc"))))
+(is 907060870 (crc32/ChecksumIEEE (bs "hello")))
+(is 48 tar/TypeReg)
+(is 772 tls/VersionTLS13)
+
+;; ---------------------------------------------------------------------------------------
+;; net, net/netip
+
+(is "h:80" (net/JoinHostPort "h" "80"))
+(is "[::1]:80" (net/JoinHostPort "::1" "80"))
+(is ["a" "1" nil] (net/SplitHostPort "a:1"))
+(is "127.0.0.1" (net/IP.String (net/ParseIP "127.0.0.1")))
+(is true (net/IP.IsLoopback (net/ParseIP "127.0.0.1")))
+(is nil (net/ParseIP "not an ip"))
+(is [true false] (let [[a _] (netip/ParseAddr "10.0.0.1")] [(netip/Addr.Is4 a) (netip/Addr.Is6 a)]))
+(is "10.0.0.1:53" (netip/AddrPort.String (netip/MustParseAddrPort "10.0.0.1:53")))
+(is "{<nil> 80 }" (go/str (net/TCPAddr {:Port 80})))
+
+;; ---------------------------------------------------------------------------------------
+;; sync, sync/atomic, context, runtime, reflect, math/rand/v2
+
+(is 5 (let [n (go/new atomic/Int64)] (atomic/Int64.Add n 2) (atomic/Int64.Add n 3) (atomic/Int64.Load n)))
+(is true (let [b (go/new atomic/Bool)] (atomic/Bool.Store b true) (atomic/Bool.Load b)))
+(is nil (let [wg (go/new sync/WaitGroup)] (sync/WaitGroup.Add wg 1) (sync/WaitGroup.Done wg) (sync/WaitGroup.Wait wg)))
+(is true (let [m (go/new sync/Mutex)] (sync/Mutex.Lock m) (let [ok (sync/Mutex.TryLock m)] (sync/Mutex.Unlock m) (not ok))))
+(is "context.Background" (go/str (context/Background)))
+(is [nil "context canceled"]
+    (let [[ctx cancel] (context/WithCancel (context/Background))
+          before (context/Context.Err ctx)]
+      (cancel)
+      [before (go/str (context/Context.Err ctx))]))
+(is true (instance? arbace.lang.GoFn (second (context/WithCancel (context/Background)))))
+(is true (contains? #{"amd64" "arm64"} runtime/GOARCH))
+(is "linux" runtime/GOOS)
+(is true (pos? (runtime/NumCPU)))
+(is "int" (reflect/Type.String (reflect/TypeOf 1)))
+(is "string" (reflect/Type.String (reflect/TypeOf "s")))
+(is 2 (reflect/Type.Kind (reflect/TypeOf 1)))
+(is "int" (reflect/Kind.String 2))
+(is 0 (rand/IntN 1))
+
+;; ---------------------------------------------------------------------------------------
+;; the values crossing: GoValue, GoType, GoFn, conversions and their errors
+
+(is true (instance? arbace.lang.GoValue (go/new strings/Builder)))
+(is false (instance? arbace.lang.GoValue "a string"))
+(is false (instance? arbace.lang.GoValue nil))
+(is arbace.lang.GoValue (class (strings/Split "a" ",")))
+(is "#go \"[]string{\\\"a\\\"}\"" (pr-str (strings/Split "a" ",")))
+(is "[]string{\"a\", \"b\"}" (str (strings/Split "a,b" ",")))
+(is true (let [x (strings/Split "a" ",")] (= x x)))
+(is false (= (strings/Split "a" ",") (strings/Split "a" ",")))
+(is false (= (net/ParseIP "::1") (net/ParseIP "::1")))
+(is true (= (first (netip/ParseAddr "::1")) (first (netip/ParseAddr "::1"))))
+(is true (= (time/Date 2000 1 1 0 0 0 0 @time/UTC) (time/Date 2000 1 1 0 0 0 0 @time/UTC)))
+(is true (let [t (time/Date 2000 1 1 0 0 0 0 @time/UTC)] (= (hash t) (hash (time/Date 2000 1 1 0 0 0 0 @time/UTC)))))
+(is 2 (count (set [(time/Unix 1 0) (time/Unix 1 0) (time/Unix 2 0)])))
+(is "*strings.Builder" (.getName ^arbace.lang.GoType (go/type-of (go/new strings/Builder))))
+(is "#go/type time.Duration" (str time/Duration))
+(is 5 (time/Duration 5))
+(is 0 (time/Duration))
+(is "{<nil> []}" (go/str (strings/Builder)))
+(is true (instance? arbace.lang.GoFn strings/ToUpper))
+(is "ABC" (apply strings/ToUpper ["abc"]))
+(is ["ABC" "DEF"] (mapv strings/ToUpper ["abc" "def"]))
+(is #'go.strings/ToUpper (resolve 'strings/ToUpper))
+(is :func (:go/kind (meta #'strings/ToUpper)))
+(is :method (:go/kind (meta #'strings/Builder.WriteString)))
+(is :var (:go/kind (meta #'io/EOF)))
+(is :type (:go/kind (meta #'strings/Builder)))
+(is '([s]) (:arglists (meta #'strings/ToUpper)))
+(is true (contains? (ns-publics 'go.strings) 'Builder.WriteString))
+(is true (string? (:doc (meta #'strings/ToUpper))))
+(throws "java.lang.IllegalArgumentException" "strings.ToUpper takes 1 arguments (func(string) string), got 0"
+        (strings/ToUpper))
+(throws "java.lang.ClassCastException" "argument 1 of strings.ToUpper: expected string, got java.lang.Long"
+        (strings/ToUpper 1))
+(throws "java.lang.ClassCastException" "argument 1 of strconv.Itoa: expected int, got java.lang.Double"
+        (strconv/Itoa 1.5))
+(throws "java.lang.IllegalArgumentException" "argument 1 of unicode/utf8.RuneLen: 4294967296 overflows int32"
+        (utf8/RuneLen 4294967296))
+(throws "java.lang.IllegalArgumentException" "argument 1 of math/bits.Len: -1 overflows uint"
+        (bits/Len -1))
+(throws "arbace.lang.GoPanic" "strings: negative Repeat count" (strings/Repeat "x" -1))
+(is ["runtime error: index out of range [0] with length 0" "runtime.boundsError"]
+    (try (utf8/EncodeRune (byte-array 0) 65)
+         (catch arbace.lang.GoPanic e [(ex-message e) (:go/type (ex-data e))])))
+(is "strings: negative Repeat count" (try (strings/Repeat "x" -1) (catch arbace.lang.GoPanic e (:go/value (ex-data e)))))
+(is [3 "os.Exit(3)"] (try (os/Exit 3) (catch arbace.lang.GoExit e [(.status e) (ex-message e)])))
+(throws "java.lang.ClassCastException" "argument 1 of strings.Builder.Len: expected *strings.Builder, got java.lang.String"
+        (strings/Builder.Len "x"))
+
+;; ---------------------------------------------------------------------------------------
+
+(doseq [[form expected actual] @failed]
+  (println "FAIL" (pr-str form))
+  (println "  expected:" (pr-str expected))
+  (println "  got:     " (pr-str actual)))
+(println (str "goi calls: " @passed " passed, " (count @failed) " failed"))
+(when (seq @failed) (System/exit 1))

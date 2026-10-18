@@ -1,0 +1,966 @@
+(ns arbace.go.table
+  "goi's table of compiled packages and its declarations digest (doc/go/GOI-SPEC.md §6),
+  milestone GR1: run on the tools' host by bin/goi table (bin/arbace-go --build runs it before
+  j2g). From the list go/arbace/gotable.edn and the Go forms of the listed packages for each
+  configuration (linux/amd64 and linux/arm64 converted by bin/repr-go read at build time,
+  tamago/amd64 and tamago/arm64 from tamago/goroot), it writes:
+
+  - the package arbace/gotable as Go forms (go/arbace/gotable.ae, go/arbace/gotable/*.ae): per
+    listed package its members (exported functions, variables, types, the methods of its
+    types and interfaces as method expressions), registered with goi at init; the typed
+    invokers, one per distinct signature (§6.4); a file per set of configurations whose
+    tables are alike, with its build line;
+  - the digest of each configuration (§6.5): the listed packages' declarations as Go forms
+    without bodies, zlib-compressed into the package's directory and embedded by the
+    configuration's file (digest_GOOS_GOARCH.edn.z);
+  - report.edn: the counts, what was left out and why.
+
+  The declaration layer it needs is goi's checker's (arbace.go.check, GR2; GC14): the
+  configuration's forms read and their build constraints evaluated by arbace.go.check.load,
+  the listed packages and their imports checked, and their objects' types, method sets (Go's
+  lookup, with promotion), constants' types and values the checker's. What this namespace
+  reads of the forms itself is syntax: which declaration forms the digest keeps, without
+  their bodies.
+
+  Usage (bin/goi table): arbace -m arbace.go.table --list FILE --out DIR
+                         [--config GOOS/GOARCH=ROOT[,OVERLAY]]... [--no-invokers]
+                         [--min-sharing N] [--no-docs]
+  ROOT holds the configuration's forms as SPEC.md §4.1 lays them out (go/strings.ae ...);
+  OVERLAY, files laid over them (tamago/goroot/arch/ARCH)."
+  (:require [arbace.string :as str]
+            [arbace.java.io :as io]
+            [arbace.repr.go.print :as gp]
+            [arbace.j2g.zlib :as zlib]
+            [arbace.go.check :as ck]
+            [arbace.go.check.decl :as cdecl]
+            [arbace.go.check.env :as e]
+            [arbace.go.check.load :as load]
+            [arbace.go.check.types :as t])
+  (:import [java.io File]))
+
+;; ---------------------------------------------------------------------------------------
+;; Paths, namespaces, files
+
+
+(defn path->ns
+  "The namespace of import path p (SPEC.md §4.1)."
+  [p]
+  (str "go." (str/join "." (map #(str/replace % #"[.-]" "_") (str/split p #"/")))))
+
+(defn exported? [^String n] (and (pos? (count n)) (Character/isUpperCase (.charAt n 0))))
+
+(defn- head [f] (when (and (seq? f) (symbol? (first f))) (first f)))
+(defn- head-name [f] (when-let [h (head f)] (name h)))
+
+;; ---------------------------------------------------------------------------------------
+;; A package's forms, as the checker reads them (arbace.go.check.load: the root, its overlay,
+;; the files the configuration's build constraints select)
+
+(defn- import-specs
+  "The import specs of a go/file's options: [[name path] ...], directives left out."
+  [opts]
+  (vec (for [s (:imports opts) :when (vector? s)] [(str (first s)) (second s)])))
+
+(defn- decl-forms [forms] (filter #(and (seq? %) (#{"type" "func" "method" "var" "const"} (head-name %))
+                                        (= "go" (namespace (head %))))
+                                  forms))
+
+(defn source-package
+  "The package of a checker's source src (load/package-source): {:path :name :files [{:name
+  :imports {name path} :specs :forms}]}, its files the configuration's."
+  [src]
+  {:path (:path src) :name (:name src)
+   :files (vec (for [fi (:files src)
+                     :let [specs (import-specs (:opts fi))]]
+                 {:name (:name fi)
+                  :specs specs
+                  :imports (into {} (for [[n path] specs :when (not (#{"_" "."} n))] [n path]))
+                  :forms (vec (decl-forms (:decls fi)))}))})
+
+;; ---------------------------------------------------------------------------------------
+;; Declaration forms (syntax: what the digest keeps of each)
+
+(defn- strip-doc [xs] (if (string? (first xs)) [(first xs) (rest xs)] [nil xs]))
+
+(defn- take-tparams [xs]
+  (if (= :type-params (first xs)) [(second xs) (drop 2 xs)] [nil xs]))
+
+(defn parse-sig
+  "A signature's parts from a params vector and what follows it: {:params [[name type] ...]
+  :variadic bool :results [[name type] ...] :rest body-forms}."
+  [pv more]
+  (let [elems (vec pv)
+        amp (.indexOf ^java.util.List elems '&)
+        fixed (if (neg? amp) elems (subvec elems 0 amp))
+        va (when-not (neg? amp) (nth elems (inc amp)))
+        param (fn [x] (if (and (or (symbol? x) (seq? x)) (:tag (meta x)) (or (symbol? x) (= 'go/id (first x))))
+                        [(if (symbol? x) x (symbol (second x))) (:tag (meta x))]
+                        [nil x]))
+        ps (mapv param fixed)
+        ps (if va (conj ps (param va)) ps)
+        [results more] (cond
+                         (= :results (first more)) [(mapv param (second more)) (drop 2 more)]
+                         (:tag (meta pv)) [[[nil (:tag (meta pv))]] more]
+                         :else [[] more])]
+    {:params ps :variadic (boolean va) :results results :rest more}))
+
+(defn- name-of [x] (cond (symbol? x) x (and (seq? x) (= 'go/id (first x))) (symbol (second x)) :else nil))
+
+(defn- type-specs
+  "go/type form f as specs [{:name :alias :tparams :type :doc}]."
+  [f]
+  (let [[doc xs] (strip-doc (rest f))]
+    (if (vector? (first xs))
+      (for [v xs :let [nm (first v) [tps more] (take-tparams (rest v))]]
+        {:name (str nm) :alias (boolean (:alias (meta nm))) :tparams tps :type (first more) :doc (:doc (meta nm))})
+      (let [nm (second f)
+            [doc xs] (strip-doc (drop 2 f))
+            [tps more] (take-tparams xs)]
+        [{:name (str nm) :alias (boolean (:alias (meta nm))) :tparams tps :type (first more) :doc doc}]))))
+
+(defn- var-specs
+  "go/var and go/const forms as specs [{:names [sym ...] :init expr-or-nil :doc}]; a group's
+  doc string goes to its specs without one."
+  [f]
+  (let [one (fn [target init doc]
+              (let [names (if (and (seq? target) (= 'values (first target))) (vec (rest target)) [target])]
+                {:names names :init init :has-init (some? init) :doc (or (:doc (meta (first names))) doc)}))
+        xs (rest f)
+        [gdoc ys] (strip-doc xs)]
+    (if (and (seq ys) (every? vector? ys) (or gdoc (vector? (first xs))))
+      (for [v ys] (one (first v) (second v) nil))
+      [(one (first xs) (second xs) nil)])))
+
+(defn- recv-of
+  "The receiver of a method's params vector: [base-name ptr? generic?] or nil."
+  [pv]
+  (let [r (first pv)
+        t (if (and (symbol? r) (:tag (meta r))) (:tag (meta r)) r)
+        [ptr t] (if (and (seq? t) (= '* (first t))) [true (second t)] [false t])]
+    (cond
+      (symbol? t) [(str t) ptr false]
+      (seq? t) [(str (first t)) ptr true]
+      :else nil)))
+
+(defn index-package
+  "The package's declarations: {:types {name spec+ctx} :funcs {name ...} :vars {name ...}
+  :consts {name ...} :methods {base {name ...}}}, each with :file (the file map)."
+  [pkg]
+  (reduce
+    (fn [acc [file f]]
+      (case (head-name f)
+        "type" (reduce (fn [acc s] (assoc-in acc [:types (:name s)] (assoc s :file file :form f))) acc (type-specs f))
+        "func" (let [nm (name-of (second f))
+                     [doc xs] (strip-doc (drop 2 f))
+                     [tps xs] (take-tparams xs)
+                     sig (parse-sig (first xs) (rest xs))]
+                 (if (= "init" (str nm))
+                   acc
+                   (assoc-in acc [:funcs (str nm)] {:name (str nm) :doc doc :tparams tps :sig (dissoc sig :rest)
+                                                    :file file :form f :extern (boolean (:extern (meta nm)))})))
+        "method" (let [nm (name-of (second f))
+                       [doc xs] (strip-doc (drop 2 f))
+                       [tps xs] (take-tparams xs)
+                       pv (first xs)
+                       sig (parse-sig (with-meta (vec (rest pv)) (meta pv)) (rest xs))
+                       [base ptr generic] (recv-of pv)]
+                   (if base
+                     (assoc-in acc [:methods base (str nm)] {:name (str nm) :doc doc :ptr ptr :generic (or generic (some? tps))
+                                                             :sig (dissoc sig :rest) :file file :form f :recv base})
+                     acc))
+        "var" (reduce (fn [acc s]
+                        (reduce (fn [acc [i n]]
+                                  (let [nm (name-of n)]
+                                    (assoc-in acc [:vars (str nm)] (assoc s :name (str nm) :tag (:tag (meta n)) :index i :file file :form f))))
+                                acc (map-indexed vector (:names s))))
+                      acc (var-specs f))
+        "const" (:acc
+                  (reduce (fn [{:keys [acc prev]} s]
+                            (let [prev (if (:has-init s) s (assoc s :init (:init prev) :rep-tag (or (:rep-tag prev) (:tag (meta (first (:names prev))))) :rep prev))]
+                              {:acc (reduce (fn [acc [i n]]
+                                              (let [nm (name-of n)
+                                                    mt (meta n)]
+                                                (assoc-in acc [:consts (str nm)]
+                                                          {:name (str nm) :tag (or (:tag mt) (when-not (:has-init s) (:rep-tag prev)))
+                                                           :val (:val mt) :has-val (contains? mt :val) :index i
+                                                           :init (:init prev) :doc (or (:doc mt) (:doc s)) :file file :form f})))
+                                            acc (map-indexed vector (:names s)))
+                               :prev (if (:has-init s) (assoc s :rep-tag (:tag (meta (first (:names s))))) prev)}))
+                          {:acc acc :prev nil} (var-specs f)))
+        acc))
+    {:types {} :funcs {} :vars {} :consts {} :methods {}}
+    (for [file (:files pkg) f (:forms file)] [file f])))
+
+;; ---------------------------------------------------------------------------------------
+;; Types: the checker's, and their data as the table keys and writes them
+
+(defn- pkg-of [env p] (get (:pkgs env) p))
+
+(defmacro ^:private with-checker
+  "Runs body with the checker's hooks bound, as checking a package binds them, so that its
+  types answer (lazy named types, method data, instances)."
+  [& body]
+  `(binding [e/*pkg* (volatile! {:path "arbace/gotable"})
+             t/*resolve-named* cdecl/resolve-named!
+             t/*method-obj* cdecl/method-data!
+             t/*subst-method* cdecl/subst-method]
+     ~@body))
+
+(defn chk-obj
+  "The checker's object of package-level name n of package p (checked in env's session), or nil."
+  [env p n]
+  (when-let [cp (ck/ensure-package (:session env) p nil [])]
+    (get (:scope-entries @cp) n)))
+
+(defn data
+  "The checker's type ct as the table's data, which keys the invokers and from which it
+  writes types: basic keywords, [:named path name] (\"\" for the universe's), [:pointer T],
+  [:slice T], [:array n T], [:map K V], [:chan dir T], [:func params results variadic],
+  [:struct [{:name :embedded :tag :type}]] (an embedded field's :name nil), [:interface
+  [[name func] ...] []] (its whole method set), [:inst G [T ...]], [:tparam name]."
+  [ct]
+  (cond
+    (keyword? ct) (if (= ct :invalid) [:unknown :invalid] ct)
+    :else
+    (case (nth ct 0)
+      :named (let [i (t/info ct)]
+               (if-let [o (:origin i)]
+                 [:inst (data o) (mapv data (:targs i))]
+                 [:named (or (:pkg i) "") (:name i)]))
+      :tparam [:tparam (:name (t/info ct))]
+      :pointer [:pointer (data (nth ct 1))]
+      :slice [:slice (data (nth ct 1))]
+      :array [:array (nth ct 1) (data (nth ct 2))]
+      :map [:map (data (nth ct 1)) (data (nth ct 2))]
+      :chan [:chan (nth ct 1) (data (nth ct 2))]
+      :func [:func (mapv data (nth ct 1)) (mapv data (nth ct 2)) (boolean (nth ct 3))]
+      :struct [:struct (vec (for [f (nth ct 1)]
+                              {:name (when-not (:embedded f) (:name f)) :embedded (boolean (:embedded f))
+                               :tag (:tag f) :type (data (:type f))}))]
+      :interface [:interface (vec (for [m (nth ct 1)] [(:name m) (data (:type m))])) []]
+      [:unknown (nth ct 0)])))
+
+(defn slot-kind
+  "The frame slot kind of the checker's type ct (GOI-SPEC.md §4.2, §5.1): :I, :F, :S or :R;
+  nil when it is invalid."
+  [ct]
+  (let [u (t/under ct)]
+    (cond
+      (= u :invalid) nil
+      (or (t/integer-type? u) (t/boolean-type? u)) :I
+      (t/float-type? u) :F
+      (t/string-type? u) :S
+      :else :R)))
+
+(defn- generic-named?
+  "Is [:named p n] (data) a generic type's name (not an instance)?"
+  [env [_ p n]]
+  (boolean (when (not= p "") (some-> (chk-obj env p n) (e/o :tparams-count)))))
+
+;;; Method sets (the checker's lookup: Go's depth rules, ambiguity, pointer receivers)
+
+(defn- candidate-names
+  "The names of the methods and fields that a lookup on named type ct may find: its own
+  methods', and those of its embedded fields' types, at every depth."
+  [ct]
+  (let [acc (volatile! #{})]
+    (loop [todo [ct] seen #{}]
+      (when-let [x (first todo)]
+        (if (contains? seen x)
+          (recur (rest todo) seen)
+          (let [more (volatile! [])]
+            (when (t/named? x)
+              (doseq [m (t/methods-of x)] (vswap! acc conj (e/o m :name))))
+            (let [u (t/under x)]
+              (cond
+                (and (vector? u) (= :interface (nth u 0)))
+                (doseq [m (nth u 1)] (vswap! acc conj (:name m)))
+                (and (vector? u) (= :struct (nth u 0)))
+                (doseq [f (nth u 1)]
+                  (vswap! acc conj (:name f))
+                  (when (:embedded f) (vswap! more conj (first (t/deref-type (:type f))))))))
+            (recur (concat (rest todo) @more) (conj seen x))))))
+    @acc))
+
+(defn method-set
+  "The exported methods of named type ct ([:named p n]'s checker type) as Go's lookup finds
+  them, promoted ones included: {name {:sig func-data :pointer bool (only *T has it) :cft
+  the checker's func type}}."
+  [ct]
+  (let [p (:pkg (t/info ct))]
+    (into {}
+          (for [n (candidate-names ct)
+                :when (and n (exported? n))
+                :let [r (t/lookup ct false n p)]
+                :when (and r (not (:ambiguous r))
+                           (or (#{:method :iface-method} (:kind r)) (:ptr-recv r)))
+                :let [f (if (:ptr-recv r) (:found r) r)
+                      d (t/method-data (:obj f))
+                      d (if (and t/*subst-method* (= :method (:kind f))) (t/*subst-method* (:recv-type f) d) d)]
+                :when (not (some-> (:obj d) (e/o :generic)))]
+            [n {:sig (data (:type d)) :cft (:type d) :pointer (boolean (:ptr-recv r))}]))))
+
+;; ---------------------------------------------------------------------------------------
+;; Writing types in the table's files
+
+(defn- importable? [^String p]
+  (and (not= p "main") (not (str/starts-with? p "internal/")) (not (str/includes? p "/internal/"))
+       (not (str/starts-with? p "vendor/")) (not= p "internal")))
+
+(defn emit-type
+  "The Go form of resolved type t in the table's files, aliasing its packages through
+  alias-of (path -> import name); nil when the table cannot name it (an unexported or
+  internal type, a type parameter, an invalid type)."
+  [env alias-of t]
+  (letfn [(e [t]
+            (cond
+              (keyword? t) (if (= t :unsafe-pointer) (symbol (alias-of "unsafe") "Pointer") (symbol (name t)))
+              :else
+              (case (first t)
+                :named (let [[_ p n] t]
+                         (cond
+                           (= p "") (symbol n)
+                           (and (exported? n) (importable? p) (not (generic-named? env t))) (symbol (alias-of p) n)
+                           :else nil))
+                :pointer (when-let [x (e (second t))] (list '* x))
+                :slice (when-let [x (e (second t))] (list 'slice x))
+                :array (let [[_ n x] t] (when (integer? n) (when-let [y (e x)] (list 'array n y))))
+                :map (let [k (e (nth t 1)) v (e (nth t 2))] (when (and k v) (list 'map k v)))
+                :chan (let [[_ dir x] t y (e x)] (when y (if (= dir :both) (list 'chan y) (list 'chan dir y))))
+                :func (let [[_ ps rs va] t
+                            ps' (map e ps) rs' (map e rs)]
+                        (when (and (every? some? ps') (every? some? rs'))
+                          (let [pv (vec (if va (concat (butlast ps') ['&] [(last ps')]) ps'))]
+                            (if (seq rs') (list 'func pv (vec rs')) (list 'func pv)))))
+                :struct (let [fs (for [{:keys [name embedded tag type]} (second t)]
+                                   (let [x (e type)]
+                                     (cond
+                                       (nil? x) nil
+                                       (and name (not (exported? name))) nil
+                                       embedded (if tag (vary-meta x assoc :go/tag tag) x)
+                                       :else (with-meta (symbol name) (cond-> {:tag x} tag (assoc :go/tag tag))))))]
+                          (when (every? some? fs) (apply list 'struct fs)))
+                :interface (let [[_ ms es] t
+                                 ms' (for [[n s] ms] (when (exported? n)
+                                                       (when-let [f (e s)]
+                                                         (let [[_ pv rv] f] (if rv (list (symbol n) pv :results rv) (list (symbol n) pv))))))
+                                 es' (map e es)]
+                             (when (and (every? some? ms') (every? some? es')) (apply list 'interface (concat ms' es'))))
+                :inst (let [g (e (second t)) as (map e (nth t 2))]
+                        (when (and g (every? some? as)) (apply list g as)))
+                nil)))]
+    (e t)))
+
+;; ---------------------------------------------------------------------------------------
+;; The listed members of one configuration (the checker's objects)
+
+(defn- sig-kinds
+  "The slot kinds of the checker's func type cft's parameters (the variadic one's slice: :R)
+  and results, or nil when one is invalid."
+  [cft]
+  (let [[_ ps rs va] cft
+        pk (map-indexed (fn [i p] (if (and va (= i (dec (count ps)))) :R (slot-kind p))) ps)
+        rk (map slot-kind rs)]
+    (when (and (every? some? pk) (every? some? rk))
+      {:params (vec pk) :results (vec rk)})))
+
+(defn package-members
+  "The members of listed package p in env: {:funcs [{:name :value :ftype :cft}] :vars [...]
+  :types [...] :methods [{:name :type :mname :pointer :iface :sig :cft}]} and what was left out."
+  [env p list-cfg]
+  (let [cp (ck/ensure-package (:session env) p nil [])
+        objs (into (sorted-map) (:scope-entries @cp))
+        excluded (set (get-in list-cfg [:exclude p]))
+        overrides (get-in list-cfg [:overrides p] {})
+        skip (volatile! {})
+        skip! (fn [why n] (vswap! skip update why (fnil conj []) n))
+        of-kind (fn [k] (for [[n x] objs :when (= k (e/o x :kind)) :when (exported? n)] [n x]))
+        funcs (vec (for [[n x] (of-kind :func)
+                         :when (not= "init" n)
+                         :when (or (not (excluded n)) (do (skip! :excluded n) false))
+                         :when (or (not (e/o x :tparams-count)) (do (skip! :generic n) false))]
+                     {:name n :value (if-let [o (get overrides n)] (symbol "goi" o) [:member p n])
+                      :ftype (data (e/o x :type)) :cft (e/o x :type)}))
+        vars (vec (for [[n _] (of-kind :var)
+                        :when (or (not (excluded n)) (do (skip! :excluded n) false))]
+                    {:name n}))
+        types (vec (for [[n x] (of-kind :type)
+                         :when (or (not (excluded n)) (do (skip! :excluded n) false))
+                         :when (or (not (e/o x :tparams-count)) (do (skip! :generic n) false))
+                         :when (or (not (e/o x :alias))
+                                   (let [ct (e/o x :type)]
+                                     (or (not (and (t/named? ct) (e/o (:obj (t/info ct)) :tparams-count)
+                                                   (not (:origin (t/info ct)))))
+                                         (do (skip! :alias n) false))))]
+                     {:name n :alias (boolean (e/o x :alias)) :ct (e/o x :type)}))
+        methods (vec (for [{n :name al :alias ct :ct} types
+                           :when (not al)
+                           :let [iface (t/interface? ct)]
+                           [mn m] (sort-by key (method-set ct))
+                           :let [full (str n "." mn)]
+                           :when (or (not (excluded full)) (do (skip! :excluded full) false))]
+                       {:name full :type n :mname mn :pointer (:pointer m) :iface iface :sig (:sig m) :cft (:cft m)}))]
+    {:funcs funcs :vars vars :types (mapv #(dissoc % :ct) types) :methods methods :skipped @skip}))
+
+;; ---------------------------------------------------------------------------------------
+;; Invokers (§6.4): one per distinct signature, a node factory over goi's frames
+
+(defn- sig-key
+  "The invoker's key of [:func ps rs va] (a method's without its receiver): its data, printed."
+  [ft]
+  (pr-str ft))
+
+(defn- slot-field [k] ({:I '.-I :F '.-F :S '.-S :R '.-R} k))
+
+(defn- node-type [k] (symbol "goi" (name k)))
+
+(defn invoker-form
+  "The invoker named nm of signature ft (written types tps, trs; kinds), generic over the
+  receiver type Rcv when method?: (go/func nm [f a r] ...) returning the call node."
+  [nm method? tps trs kinds va]
+  (let [n (count tps)
+        args (vec (for [i (range n)] (symbol (str "a" i))))
+        res (vec (for [i (range (count trs))] (symbol (str "r" i))))
+        outs (vec (for [i (range (count trs))] (symbol (str "x" i))))
+        fr (with-meta 'fr {:tag '(* goi/Frame)})
+        pkinds (:params kinds)
+        rkinds (:results kinds)
+        arg-expr (fn [i]
+                   (let [t (nth tps i) k (nth pkinds i) a (list (nth args i) 'fr)]
+                     (cond
+                       (and va (= i (dec n))) (list 'spread (list (list 'inst 'goi/As t) a))
+                       (= k :I) (if (= t 'bool) (list '!= a 0) (if (= t 'int64) a (list 'conv t a)))
+                       (= k :F) (if (= t 'float64) a (list 'conv t a))
+                       (= k :S) (if (= t 'string) a (list 'conv t a))
+                       (= t 'any) a
+                       :else (list (list 'inst 'goi/As t) a))))
+        call (apply list 'g (map arg-expr (range n)))
+        to-slot (fn [k t x]
+                  (case k
+                    :I (cond (= t 'bool) (list 'goi/B2I x) (= t 'int64) x :else (list 'conv 'int64 x))
+                    :F (if (= t 'float64) x (list 'conv 'float64 x))
+                    :S (if (= t 'string) x (list 'conv 'string x))
+                    :R x))
+        ftype (if (seq trs) (list 'func (vec (if va (concat (butlast tps) ['&] [(last tps)]) tps)) trs)
+                  (list 'func (vec (if va (concat (butlast tps) ['&] [(last tps)]) tps))))
+        node (case (count trs)
+               0 (list 'conv 'goi/T (list 'fn [fr] call))
+               1 (let [k (first rkinds) t (first trs)]
+                   (list 'conv (node-type k)
+                         (list 'fn (with-meta [fr] {:tag ({:I 'int64 :F 'float64 :S 'string :R 'any} k)})
+                               (to-slot k t call))))
+               (list 'conv 'goi/T
+                     (list 'fn [fr]
+                           (concat (list 'let [(apply list 'values outs) call])
+                                   (for [i (range (count trs))]
+                                     (list 'aset (list (slot-field (nth rkinds i)) 'fr) (nth res i)
+                                           (to-slot (nth rkinds i) (nth trs i) (nth outs i))))))))
+        bindings (vec (concat ['g (list 'assert ftype 'f)]
+                              (mapcat (fn [i] [(nth args i) (list 'assert (node-type (if (and va (= i (dec n))) :R (nth pkinds i))) (list 'aget 'a i))]) (range n))
+                              (mapcat (fn [i] [(nth res i) (list 'aget 'r i)]) (when (> (count trs) 1) (range (count trs))))))]
+    (concat (list 'go/func nm)
+            (when method? [:type-params ['Rcv]])
+            [(with-meta [(with-meta 'f {:tag 'any}) (with-meta 'a {:tag '(slice any)}) (with-meta 'r {:tag '(slice int32)})] {:tag 'any})
+             (list 'let bindings node)])))
+
+;; ---------------------------------------------------------------------------------------
+;; The digest (§6.5)
+
+(def ^:private position-keys #{:line :column :end-line :end-column :go/end :go/breaks :go/label-line})
+
+(defn- clean
+  "Form x without position metadata (and without docs unless docs?)."
+  [x docs?]
+  (let [cm (fn [m] (let [m (apply dissoc m position-keys)
+                         m (if docs? m (dissoc m :doc))]
+                     (when (seq m) (into {} (for [[k v] m] [k (if (= k :tag) (clean v docs?) v)])))))
+        wm (fn [y m] (if (instance? arbace.lang.IObj y) (with-meta y (cm m)) y))]
+    (cond
+      (seq? x) (wm (apply list (map #(clean % docs?) x)) (meta x))
+      (vector? x) (wm (mapv #(clean % docs?) x) (meta x))
+      (symbol? x) (wm x (meta x))
+      (map? x) (into {} (for [[k v] x] [k (clean v docs?)]))
+      :else x)))
+
+(defn- local-refs
+  "The unqualified symbols of form x (with its metadata's tags)."
+  [x]
+  (let [acc (volatile! #{})]
+    (letfn [(w [x]
+              (when-let [m (meta x)] (when (:tag m) (w (:tag m))))
+              (cond
+                (symbol? x) (when-not (namespace x) (vswap! acc conj (str x)))
+                (or (seq? x) (vector? x)) (run! w x)
+                (map? x) (run! w (vals x))
+                :else nil))]
+      (w x))
+    @acc))
+
+(defn- used-quals [x]
+  (let [acc (volatile! #{})]
+    (letfn [(w [x]
+              (when-let [m (meta x)] (when (:tag m) (w (:tag m))))
+              (cond
+                (symbol? x) (when-let [q (namespace x)] (vswap! acc conj q))
+                (or (seq? x) (vector? x)) (run! w x)
+                (map? x) (run! w (vals x))
+                :else nil))]
+      (w x))
+    @acc))
+
+(defn- strip-body
+  "A go/func or go/method form without its body, its name ^:extern."
+  [f]
+  (let [h (first f) nm (second f)
+        [doc xs] (strip-doc (drop 2 f))
+        [tps xs] (take-tparams xs)
+        pv (first xs)
+        more (rest xs)
+        res (when (= :results (first more)) (take 2 more))]
+    (apply list (concat [h (vary-meta nm assoc :extern true)]
+                        (when doc [doc])
+                        (when tps [:type-params tps])
+                        [pv] res))))
+
+(defn const-type
+  "The checker's type of constant n of package p: :untyped, the type, or :unknown (invalid)."
+  [env p n]
+  (let [ct (some-> (chk-obj env p n) (e/o :type))]
+    (cond
+      (nil? ct) :unknown
+      (= :invalid ct) :unknown
+      (t/untyped? ct) :untyped
+      :else ct)))
+
+(defn- type-form-in-file
+  "Type data t written in package p's file ctx (its import names; another package's type
+  qualified by its namespace when the file does not import it), or nil."
+  [env p file t]
+  (let [rev (into {} (for [[n path] (:imports file)] [path n]))]
+    (emit-type env (fn [q] (cond (= q p) nil (rev q) (rev q) :else (path->ns q)))
+               t)))
+
+(defn- unqualify [x]
+  ;; (symbol nil "X") from emit-type's alias of the package itself
+  (cond
+    (symbol? x) (if (and (namespace x) (= "" (namespace x))) (symbol (name x)) x)
+    (seq? x) (with-meta (apply list (map unqualify x)) (meta x))
+    (vector? x) (with-meta (mapv unqualify x) (meta x))
+    :else x))
+
+(defn digest-forms
+  "The digest of listed package p: forms (in-ns, go/package, then per file its go/file with the
+  imports used and the declarations kept: the exported ones and the unexported ones they
+  reach, bodies and initializers dropped but for generic declarations; constants one per form
+  with :tag and :val, no init)."
+  [env p docs?]
+  (let [pk (pkg-of env p)
+        idx (:index pk)
+        ;; package-level names -> [kind entry]
+        decl-of (fn [n] (or (when-let [x (get-in idx [:types n])] [:type x])
+                            (when-let [x (get-in idx [:funcs n])] [:func x])
+                            (when-let [x (get-in idx [:vars n])] [:var x])
+                            (when-let [x (get-in idx [:consts n])] [:const x])))
+        roots (concat (for [k [:types :funcs :vars :consts] [n _] (get idx k) :when (exported? n)] n))
+        refs-of (fn [n]
+                  (let [[k x] (decl-of n)]
+                    (case k
+                      :type (into (local-refs (:type x))
+                                  (mapcat (fn [[_ m]] (local-refs (if (:generic m) (:form m) (strip-body (:form m)))))
+                                          (get-in idx [:methods n])))
+                      :func (local-refs (if (:tparams x) (:form x) (strip-body (:form x))))
+                      :var (into (local-refs (:tag x)) (when-not (:tag x) (local-refs (:init x))))
+                      :const (into (local-refs (:tag x)) (when-not (:tag x) (local-refs (:init x))))
+                      #{})))
+        kept (loop [todo (vec roots) kept #{}]
+               (if (empty? todo)
+                 kept
+                 (let [n (peek todo) todo (pop todo)]
+                   (if (or (contains? kept n) (nil? (decl-of n)))
+                     (recur todo kept)
+                     (recur (into todo (remove kept (refs-of n))) (conj kept n))))))
+        cfg (:cfg env)]
+    (concat
+      [(list 'in-ns (list 'quote (symbol (path->ns p))))
+       (list 'go/package (symbol (:name pk)) :path p
+             :config {:goos (:goos cfg) :goarch (:goarch cfg)}
+             :files (vec (map :name (:files pk))))]
+      (mapcat
+        (fn [file]
+          (let [decls (for [f (:forms file)
+                            out (case (head-name f)
+                                  "type" (for [s (type-specs f) :when (kept (:name s))]
+                                           (let [nm (with-meta (symbol (:name s)) (cond-> {} (:alias s) (assoc :alias true)))]
+                                             (apply list (concat ['go/type nm] (when (and docs? (:doc s)) [(:doc s)])
+                                                                 (when (:tparams s) [:type-params (:tparams s)]) [(:type s)]))))
+                                  "func" (let [n (str (name-of (second f)))]
+                                           (when (kept n)
+                                             [(if (get-in idx [:funcs n :tparams]) f (strip-body f))]))
+                                  "method" (let [pv (first (second (take-tparams (second (strip-doc (drop 2 f))))))
+                                                 [base _ generic] (recv-of pv)]
+                                             (when (kept base)
+                                               [(if (or generic (some #{:type-params} f)) f (strip-body f))]))
+                                  "var" (for [s (var-specs f) [i n] (map-indexed vector (:names s))
+                                              :let [nm (str (name-of n))] :when (kept nm)]
+                                          (let [tag (:tag (meta n))]
+                                            (if tag
+                                              (list 'go/var (with-meta (symbol nm) (cond-> {:tag tag} (and docs? (:doc s)) (assoc :doc (:doc s)))))
+                                              ;; untagged: the initializer kept for its type,
+                                              ;; marked
+                                              (list 'go/var (with-meta (symbol nm) (cond-> {:go/digest-init true} (and docs? (:doc s)) (assoc :doc (:doc s))))
+                                                    (let [init (:init s)]
+                                                      (if (and (seq? init) (= 'values (first init)) (> (count (:names s)) 1))
+                                                        (nth init (inc i))
+                                                        init))))))
+                                  "const" (for [s (var-specs f) n (:names s)
+                                                :let [nm (str (name-of n)) c (get-in idx [:consts nm])]
+                                                :when (and (kept nm) c (= (:file c) file))]
+                                            (let [t (const-type env p nm)
+                                                  tf (cond (:tag c) (:tag c)
+                                                           (or (= t :untyped) (= t :unknown)) nil
+                                                           :else (unqualify (type-form-in-file env p file (data t))))
+                                                  u (when-not (#{:untyped :unknown} t) (t/basic t))
+                                                  mt (cond-> {:val (:val c)}
+                                                       tf (assoc :tag tf)
+                                                       (keyword? u) (assoc :go/underlying (symbol (name u)))
+                                                       (and docs? (:doc c)) (assoc :doc (:doc c)))]
+                                              (if (and (= t :unknown) (not (:tag c)))
+                                                (list 'go/const (with-meta (symbol nm) (assoc mt :go/digest-init true)) (:init c))
+                                                (list 'go/const (with-meta (symbol nm) mt)))))
+                                  nil)
+                            :when out]
+                        (clean (if (and (not docs?) (#{"func" "method"} (head-name out)) (string? (nth out 2 nil)))
+                                 (with-meta (apply list (concat (take 2 out) (drop 3 out))) (meta out))
+                                 out)
+                               docs?))]
+            (when (seq decls)
+              (let [quals (reduce into #{} (map used-quals decls))
+                    specs (vec (for [[n path] (:specs file) :when (contains? quals n)] [(symbol n) path]))]
+                (cons (list 'go/file (:name file) :imports specs) decls)))))
+        (:files pk)))))
+
+;; ---------------------------------------------------------------------------------------
+;; Writing forms
+
+(defn form-text
+  "Form f as text, metadata included (^T for a symbol tag alone, ^:k for a true flag alone, a
+  map otherwise), readable by the Clojure reader."
+  [f]
+  (let [sb (StringBuilder.)]
+    (letfn [(atom-text [x] (binding [*print-length* nil *print-level* nil *print-namespace-maps* false] (pr-str x)))
+            (w-meta [m]
+              (cond
+                (and (= 1 (count m)) (symbol? (:tag m))) (do (.append sb "^") (.append sb (atom-text (:tag m))))
+                (and (= 1 (count m)) (keyword? (key (first m))) (true? (val (first m))))
+                (do (.append sb "^") (.append sb (atom-text (key (first m)))))
+                :else (do (.append sb "^") (w-map m))))
+            (w-map [m]
+              (.append sb "{")
+              (doseq [[i [k v]] (map-indexed vector m)]
+                (when (pos? i) (.append sb " "))
+                (w k) (.append sb " ") (w v))
+              (.append sb "}"))
+            (w-seq [open close xs]
+              (.append sb open)
+              (doseq [[i x] (map-indexed vector xs)]
+                (when (pos? i) (.append sb " "))
+                (w x))
+              (.append sb close))
+            (w [x]
+              (when-let [m (and (instance? arbace.lang.IMeta x) (not-empty (meta x)))]
+                (w-meta m)
+                (.append sb " "))
+              (cond
+                (seq? x) (w-seq "(" ")" x)
+                (vector? x) (w-seq "[" "]" x)
+                (map? x) (w-map x)
+                :else (.append sb (atom-text x))))]
+      (w f))
+    (str sb)))
+
+(defn- write! [f ^String text]
+  (io/make-parents (io/file f))
+  (spit (io/file f) text))
+
+;; ---------------------------------------------------------------------------------------
+;; One configuration's table
+
+(defn- cfg-name [{:keys [goos goarch]}] (str goos "_" goarch))
+
+(defn load-env
+  "The listed packages (and the list's :resolve ones) in one configuration, checked by goi's
+  checker from the root's forms with their imports: {:cfg :session :pkgs {path pkg}}, each
+  package its files' forms (source-package) and their declaration forms (index-package)."
+  [list-cfg cfg root]
+  (let [config (merge {:goos (:goos cfg) :goarch (:goarch cfg)}
+                      (if (= "amd64" (:goarch cfg)) {:goamd64 "v1"} {:goarm64 "v8.0"}))
+        session (ck/session (fn [path _] (load/package-source root path config)))
+        paths (vec (distinct (concat (:packages list-cfg) (:resolve list-cfg))))
+        ;; the packages checked in parallel, each its imports first (the session's cache)
+        checked (with-checker (doall (pmap #(ck/ensure-package session % nil []) paths)))
+        pkgs (into {} (for [[p cp] (map vector paths checked)
+                            :when cp
+                            :let [pk (source-package (load/package-source root p config))]]
+                        [p (assoc pk :index (index-package pk))]))]
+    {:cfg cfg :session session :pkgs pkgs}))
+
+(defn config-table
+  "The members of one configuration's listed packages: {:members {path members}}."
+  [list-cfg env]
+  (let [missing (remove (:pkgs env) (:packages list-cfg))]
+    (when (seq missing)
+      (throw (ex-info (str "goi table: no forms of " (str/join ", " missing) " for " (cfg-name (:cfg env))) {})))
+    {:members (into (sorted-map)
+                    (for [p (:packages list-cfg)]
+                      [p (package-members env p list-cfg)]))}))
+
+(defn- alias-table
+  "Import names for the table's files: each path's last element (made unique by its path's
+  other elements), goi's and reflect's fixed."
+  [paths]
+  (let [base (fn [^String p] (let [els (str/split p #"/") l (last els)]
+                               (str/replace (if (re-matches #"v\d+" l) (str (nth els (- (count els) 2)) l) l) #"[.-]" "_")))
+        fixed {"arbace/goi" "goi" "reflect" "reflect" "unsafe" "unsafe"}]
+    (loop [ps (sort (distinct paths)) taken (set (vals fixed)) m fixed]
+      (if-let [p (first ps)]
+        (if (contains? m p)
+          (recur (rest ps) taken m)
+          (let [b (base p)
+                b (if (#{"goi" "fr" "f" "a" "r" "g" "any" "error" "string" "int" "bool"} b) (str b "_") b)
+                nm (loop [c b k 2] (if (contains? taken c) (recur (str b k) (inc k)) c))]
+            (recur (rest ps) (conj taken nm) (assoc m p nm))))
+        m))))
+
+(defn- build-line [cfgs all-cfgs]
+  (let [by-goos (group-by :goos cfgs)
+        all-by-goos (group-by :goos all-cfgs)]
+    (when-not (= (set cfgs) (set all-cfgs))
+      (str "//go:build "
+           (str/join " || "
+                     (for [[goos cs] (sort-by key by-goos)]
+                       (if (= (set (map :goarch cs)) (set (map :goarch (get all-by-goos goos))))
+                         goos
+                         (str "(" goos " && " (str/join " || " (map :goarch (sort-by :goarch cs))) ")"))))))))
+
+(defn package-table-forms
+  "One package's table in one configuration: the var holding its goi.Package (members m,
+  the package's import name (al p), the invokers' names inv-name by signature key)."
+  [p m al inv-name]
+  (let [a (al p)
+        gv (fn [nm] (symbol (str (str/replace p #"[/.-]" "_") "_" nm)))
+        mem (fn [n value k] (list 'lit '_ n value (if-let [i (and k (inv-name k))] i 'nil)))
+        recv (fn [mm] (if (:pointer mm) (list '* (symbol a (:type mm))) (symbol a (:type mm))))]
+    [(list 'go/var (with-meta (gv "pkg") {:tag 'goi/Package})
+           (list 'lit 'goi/Package
+                 :Path p :Name (str (:pkg-name m))
+                 :Funcs (apply list 'lit '(slice goi/Member)
+                               (for [f (:funcs m)]
+                                 (mem (:name f) (let [v (:value f)] (if (vector? v) (symbol a (nth v 2)) v)) (:key f))))
+                 :Vars (apply list 'lit '(slice goi/Member)
+                              (for [v (:vars m)] (mem (:name v) (list 'addr (symbol a (:name v))) nil)))
+                 :Types (apply list 'lit '(slice goi/TypeMember)
+                               (for [t (:types m)] (list 'lit '_ (:name t) (list (list 'inst 'reflect/TypeFor (symbol a (:name t)))))))
+                 :Methods (apply list 'lit '(slice goi/Member)
+                                 (for [mm (:methods m)]
+                                   (let [r (recv mm)
+                                         i (inv-name (:key mm))]
+                                     (list 'lit '_ (:name mm) (list 'method-expr r (symbol (:mname mm)))
+                                           (if i (list 'inst i r) 'nil)))))))]))
+
+(defn- set-tag
+  "A file name's tag for a set of configurations: s and the bits of its configurations in the
+  order given (never a GOOS or GOARCH, which Go would read as a constraint)."
+  [cfgs all-cfgs]
+  (str "s" (reduce + (for [[i c] (map-indexed vector all-cfgs) :when (some #{c} cfgs)] (bit-shift-left 1 i)))))
+
+(declare run*)
+
+(defn run
+  "Generates the table and the digests (the namespace's doc string)."
+  [{:keys [list-file out configs no-invokers min-sharing no-docs]}]
+  (with-checker (run* list-file out configs no-invokers min-sharing no-docs)))
+
+(defn- run*
+  [list-file out configs no-invokers min-sharing no-docs]
+  (let [t0 (System/currentTimeMillis)
+        list-cfg (read-string (slurp list-file))
+        all-cfgs (mapv :cfg configs)
+        envs (vec (for [{:keys [cfg root]} configs] (load-env list-cfg cfg root)))
+        tables (mapv #(config-table list-cfg %) envs)
+        ;; the signatures of every configuration: key -> {:cfgs #{} :method? :ftype :env}
+        sig-entries (volatile! (sorted-map))
+        note-sig! (fn [env ftype cft method?]
+                    (let [k (str (if method? "m" "f") (sig-key ftype))]
+                      (vswap! sig-entries update k
+                              (fn [e] (-> (or e {:ftype ftype :cft cft :method method? :env env :uses {}})
+                                          (update :cfgs (fnil conj #{}) (:cfg env))
+                                          (update-in [:uses (cfg-name (:cfg env))] (fnil inc 0)))))
+                      k))
+        ;; per configuration, per package: the member data with signature keys
+        pkg-data (vec (for [[env tbl] (map vector envs tables)]
+                        (into (sorted-map)
+                              (for [[p m] (:members tbl)]
+                                [p (assoc m
+                                          :funcs (mapv #(assoc % :key (note-sig! env (:ftype %) (:cft %) false)) (:funcs m))
+                                          :methods (mapv #(assoc % :key (note-sig! env (:sig %) (:cft %) true)) (:methods m)))]))))
+        ;; which signatures get a typed invoker: writable, kinds known, used often enough
+        writable (fn [{:keys [ftype cft env]}]
+                   (let [[_ ps rs va] ftype
+                         a (fn [q] (str "P" (Math/abs (hash q))))
+                         tps (map #(emit-type env a %) ps)
+                         trs (map #(emit-type env a %) rs)]
+                     (and (every? some? tps) (every? some? trs) (sig-kinds cft))))
+        invoked (into (sorted-map)
+                      (for [[k e] @sig-entries
+                            :when (not no-invokers)
+                            ;; GS4 (b): only the signatures that many members share (in one
+                            ;; configuration), the list's :min-sharing unless --min-sharing
+                            :when (>= (apply max (vals (:uses e))) (or min-sharing (:min-sharing list-cfg) 1))
+                            :when (writable e)]
+                        [k e]))
+        inv-name (into {} (map-indexed (fn [i k] [k (symbol (str (if (:method (get invoked k)) "minv" "inv") i))]) (keys invoked)))
+        ;; the paths the table's files import
+        all-paths (volatile! #{})
+        alias-of (fn [p] (vswap! all-paths conj p) p)
+        _ (doseq [[k e] invoked] (let [[_ ps rs] (:ftype e)] (doseq [t (concat ps rs)] (emit-type (:env e) alias-of t))))
+        _ (doseq [pd pkg-data [p _] pd] (alias-of p))
+        aliases (alias-table (concat @all-paths ["arbace/goi" "reflect"]))
+        al #(get aliases %)
+        ;; the invokers' forms, grouped by the configurations that need them
+        inv-forms (for [[k e] invoked]
+                    (let [[_ ps rs va] (:ftype e)
+                          env (:env e)
+                          tps (mapv #(emit-type env al %) ps)
+                          trs (mapv #(emit-type env al %) rs)
+                          [tps kinds] (if (:method e)
+                                        [(vec (cons 'Rcv tps)) (update (sig-kinds (:cft e)) :params #(vec (cons :R %)))]
+                                        [tps (sig-kinds (:cft e))])]
+                      [(:cfgs e) (invoker-form (inv-name k) (:method e) tps trs kinds va)]))
+        ;; (configuration set, file stem) -> forms; the packages' tables grouped by identical text
+        files (volatile! (sorted-map))
+        add-file! (fn [stem cfgs forms]
+                    (let [cs (sort-by cfg-name cfgs)]
+                      (vswap! files assoc [stem (mapv cfg-name cs)] [cs forms])))
+        _ (doseq [p (:packages list-cfg)]
+            (let [by-text (group-by second
+                                    (for [[env pd] (map vector envs pkg-data)]
+                                      [(:cfg env) (package-table-forms p (assoc (get pd p) :pkg-name (:name (pkg-of env p))) al inv-name)]))]
+              (doseq [[forms entries] by-text]
+                (add-file! (str (str/replace p #"[/.-]" "_")) (map first entries) forms))))
+        _ (doseq [[cfgs fs] (group-by first inv-forms)]
+            (add-file! "invokers" cfgs (map second fs)))
+        ;; the digests, one per configuration, embedded by its own file
+        digests (vec (for [env envs]
+                       (let [chunks (for [p (:packages list-cfg)]
+                                      [p (str (str/join "\n" (map form-text (digest-forms env p (not no-docs)))) "\n")])
+                             index (loop [cs chunks at 0 idx (sorted-map)]
+                                     (if-let [[p c] (first cs)]
+                                       (recur (rest cs) (+ at (count c)) (assoc idx p [at (+ at (count c))]))
+                                       idx))]
+                         ;; the first line indexes the packages' texts (their offsets after it)
+                         [(:cfg env) (apply str (form-text index) "\n" (map second chunks))])))
+        gen-dir (io/file out "go/arbace/gotable")
+        _ (when (.exists gen-dir) (doseq [f (reverse (file-seq gen-dir))] (io/delete-file f true)))
+        digest-files (vec (for [[cfg text] digests]
+                            (let [nm (str "digest_" (cfg-name cfg) ".edn.z")
+                                  b (zlib/deflate (.getBytes ^String text "UTF-8"))]
+                              (io/make-parents (io/file gen-dir nm))
+                              (with-open [o (java.io.FileOutputStream. (io/file gen-dir nm))] (.write o ^bytes b))
+                              {:cfg cfg :file nm :bytes (count (.getBytes ^String text "UTF-8")) :compressed (alength ^bytes b)})))
+        ;; the stems of the files written, with their imports
+        stems (volatile! [])
+        file-text (fn [stem cfgs forms]
+                    (let [quals (reduce into #{} (map used-quals forms))
+                          imports (vec (for [[p n] (sort-by val aliases) :when (contains? quals n)]
+                                         ;; an import name other than the package's (its path's last
+                                         ;; element) is written: ^:alias (SPEC.md §4.3)
+                                         (if (= n (last (str/split p #"/")))
+                                           [(symbol n) p]
+                                           (with-meta [(symbol n) p] {:alias true}))))
+                          line (build-line cfgs all-cfgs)
+                          fname (str stem "_" (set-tag cfgs all-cfgs))]
+                      (vswap! stems conj fname)
+                      [fname
+                       (str ";; Generated by arbace.go.table (bin/goi table, doc/go/GOI-SPEC.md §6); do not edit.\n"
+                            "(in-ns 'go.arbace.gotable)\n\n"
+                            (form-text (apply list 'go/file (str fname ".go")
+                                              (concat (when line [:build [line]]) [:imports imports])))
+                            "\n\n"
+                            (str/join "\n\n" (map #(form-text (clean % true)) forms)) "\n")]))
+        texts (vec (for [[[stem _] [cfgs forms]] @files] (file-text stem cfgs forms)))
+        ;; the registration: each configuration's file registers its packages and its digest
+        reg-texts (vec (for [[cfg df] (map vector all-cfgs digest-files)]
+                         (let [line (build-line [cfg] all-cfgs)
+                               fname (str "register_" (set-tag [cfg] all-cfgs))
+                               pkgs (for [p (:packages list-cfg)] (symbol (str (str/replace p #"[/.-]" "_") "_pkg")))]
+                           (vswap! stems conj fname)
+                           [fname
+                            (str ";; Generated by arbace.go.table (bin/goi table, doc/go/GOI-SPEC.md §6); do not edit.\n"
+                                 "(in-ns 'go.arbace.gotable)\n\n"
+                                 (form-text (apply list 'go/file (str fname ".go")
+                                                   (concat (when line [:build [line]])
+                                                           [:imports '[[_ "embed"] [goi "arbace/goi"]]])))
+                                 "\n\n"
+                                 (form-text (list 'go/var (with-meta 'digest {:tag 'string :go/embed [(:file df)]})))
+                                 "\n\n"
+                                 (form-text (list 'go/func 'init []
+                                                  (list 'goi/SetDigest 'digest)
+                                                  (apply list 'goi/Register (map #(list 'addr %) pkgs))))
+                                 "\n")])))
+        all-texts (concat texts reg-texts)]
+    ;; the package's per-configuration package vars hold the right config's tables: each
+    ;; package var is defined in the file of its configuration set
+    (doseq [[fname text] all-texts]
+      (write! (io/file gen-dir (str fname ".ae")) text))
+    (write! (io/file out "go/arbace/gotable.ae")
+            (str ";; Generated by arbace.go.table (bin/goi table, doc/go/GOI-SPEC.md §6); do not edit.\n"
+                 "(ns go.arbace.gotable (:require [arbace.go :as go]))\n\n"
+                 (form-text (list 'go/package 'gotable :path "arbace/gotable"
+                                  :files (vec (sort (map #(str % ".go") @stems)))
+                                  :embed-files (vec (for [d digest-files] [(:file d) nil]))))
+                 "\n\n"
+                 (str/join "\n" (for [s (sort @stems)] (form-text (list 'load (str "gotable/" s)))))
+                 "\n"))
+    (let [report {:configs (mapv cfg-name all-cfgs)
+                  :packages (count (:packages list-cfg))
+                  :signatures (count @sig-entries)
+                  :invokers (count invoked)
+                  :invokers-functions (count (remove (comp :method val) invoked))
+                  :invokers-methods (count (filter (comp :method val) invoked))
+                  :files (count all-texts)
+                  :members (into (sorted-map)
+                                 (for [[env pd] (map vector envs pkg-data)]
+                                   [(cfg-name (:cfg env))
+                                    {:funcs (reduce + (map (comp count :funcs) (vals pd)))
+                                     :vars (reduce + (map (comp count :vars) (vals pd)))
+                                     :types (reduce + (map (comp count :types) (vals pd)))
+                                     :methods (reduce + (map (comp count :methods) (vals pd)))
+                                     :without-invoker (count (for [m (vals pd) x (concat (:funcs m) (:methods m)) :when (not (invoked (:key x)))] x))}]))
+                  :skipped (into (sorted-map) (for [[p m] (first pkg-data) :when (seq (:skipped m))] [p (:skipped m)]))
+                  :digests (mapv #(update % :cfg cfg-name) digest-files)
+                  :seconds (quot (- (System/currentTimeMillis) t0) 1000)}]
+      (write! (io/file out "report.edn") (str (form-text (dissoc report :seconds)) "\n"))
+      (println (str "goi table: " (:packages report) " packages, " (:signatures report) " signatures, "
+                    (:invokers report) " invokers, " (:files report) " files; digests "
+                    (str/join ", " (for [d digest-files] (str (cfg-name (:cfg d)) " " (:bytes d) " bytes (" (:compressed d) " compressed)")))
+                    "; " (:seconds report) " s"))
+      report)))
+
+(defn parse-args [args]
+  (loop [[a & more] args opts {:configs []}]
+    (case a
+      nil opts
+      "--list" (recur (rest more) (assoc opts :list-file (first more)))
+      "--out" (recur (rest more) (assoc opts :out (first more)))
+      "--config" (let [[c r] (str/split (first more) #"=" 2)
+                       [goos goarch] (str/split c #"/")
+                       [dir ov] (str/split r #",")]
+                   (recur (rest more) (update opts :configs conj {:cfg {:goos goos :goarch goarch} :root {:dir dir :overlay ov}})))
+      "--no-invokers" (recur more (assoc opts :no-invokers true))
+      "--no-docs" (recur more (assoc opts :no-docs true))
+      "--min-sharing" (recur (rest more) (assoc opts :min-sharing (Long/parseLong (first more))))
+      (throw (ex-info (str "goi table: unknown option " a) {})))))
+
+(defn -main [& args]
+  (run (parse-args args))
+  (shutdown-agents))

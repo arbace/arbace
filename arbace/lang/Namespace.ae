@@ -46,7 +46,22 @@
 
   (method ^:public getName ^Symbol [this] name)
 
+  ;; Arbace (doc/VENDOR-NOTES.md, hand change 26): a namespace whose vars are made on demand
+  ;; (a package of goi's table, doc/go/GOI-SPEC.md §2.1, S9) has a resolver, an IFn: (r ns sym)
+  ;; makes the var of sym and returns it (nil when there is none), (r ns) makes all of them,
+  ;; which getMappings asks for before it answers (ns-map, ns-publics, refer)
+  (field ^:volatile resolver)
+
+  (method ^:public setResolver ^void [this r] (set! resolver r))
+
+  (method ^:private mappings0 ^IPersistentMap [this]
+    (cast IPersistentMap (.get mappings)))
+
   (method ^:public getMappings ^IPersistentMap [this]
+    (let [r resolver]
+      (when (some? r)
+        (.invoke (cast IFn r) this)
+        (set! resolver nil)))
     (cast IPersistentMap (.get mappings)))
 
   (method ^:private isInternedMapping ^boolean [this ^Symbol sym o]
@@ -56,14 +71,14 @@
   (method ^:public intern ^Var [this ^Symbol sym]
     (when (some? (.-ns sym))
       (throw (IllegalArgumentException. "Can't intern namespace-qualified symbol")))
-    (let [^:mutable map (.getMappings this)
+    (let [^:mutable map (.mappings0 this)
           ^:mutable ^Object o nil
           ^:mutable ^Var v nil]
       (while (nil? (set! o (.valAt map sym)))
         (when (nil? v) (set! v (Var. this sym)))
         (let [newMap (.assoc map sym v)]
           (.compareAndSet mappings map newMap)
-          (set! map (.getMappings this))))
+          (set! map (.mappings0 this))))
       (if (.isInternedMapping this sym o)
           (cast Var o)
           (do
@@ -71,7 +86,7 @@
             (if (.checkReplacement this sym o v)
                 (do
                   (while (not (.compareAndSet mappings map (.assoc map sym v)))
-                    (set! map (.getMappings this)))
+                    (set! map (.mappings0 this)))
                   v)
                 (cast Var o))))))
 
@@ -106,18 +121,18 @@
   (method reference [this ^Symbol sym val]
     (when (some? (.-ns sym))
       (throw (IllegalArgumentException. "Can't intern namespace-qualified symbol")))
-    (let [^:mutable map (.getMappings this)
+    (let [^:mutable map (.mappings0 this)
           ^:mutable ^Object o nil]
       (while (nil? (set! o (.valAt map sym)))
         (let [newMap (.assoc map sym val)]
           (.compareAndSet mappings map newMap)
-          (set! map (.getMappings this))))
+          (set! map (.mappings0 this))))
       (cond
         (identical? o val) o
         (.checkReplacement this sym o val)
           (do
             (while (not (.compareAndSet mappings map (.assoc map sym val)))
-              (set! map (.getMappings this)))
+              (set! map (.mappings0 this)))
             val)
         :else o)))
 
@@ -127,12 +142,12 @@
   (method referenceClass ^Class [this ^Symbol sym ^Class val]
     (when (some? (.-ns sym))
       (throw (IllegalArgumentException. "Can't intern namespace-qualified symbol")))
-    (let [^:mutable map (.getMappings this)
+    (let [^:mutable map (.mappings0 this)
           ^:mutable c (cast Class (.valAt map sym))]
       (while (or (nil? c) (Namespace/areDifferentInstancesOfSameClassName c val))
         (let [newMap (.assoc map sym val)]
           (.compareAndSet mappings map newMap)
-          (set! map (.getMappings this))
+          (set! map (.mappings0 this))
           (set! c (cast Class (.valAt map sym)))))
       (if (identical? c val)
           c
@@ -142,11 +157,11 @@
   (method ^:public unmap ^void [this ^Symbol sym]
     (when (some? (.-ns sym))
       (throw (IllegalArgumentException. "Can't unintern namespace-qualified symbol")))
-    (let [^:mutable map (.getMappings this)]
+    (let [^:mutable map (.mappings0 this)]
       (while (.containsKey map sym)
         (let [newMap (.without map sym)]
           (.compareAndSet mappings map newMap)
-          (set! map (.getMappings this))))))
+          (set! map (.mappings0 this))))))
 
   (method ^:public importClass ^Class [this ^Symbol sym ^Class c]
     (.referenceClass this sym c))
@@ -175,12 +190,19 @@
     (cast Namespace (.get namespaces name)))
 
   (method ^:public getMapping [this ^Symbol name]
-    (.valAt (cast IPersistentMap (.get mappings)) name))
+    (let [o (.valAt (cast IPersistentMap (.get mappings)) name)
+          r resolver]
+      (if (and (nil? o) (some? r) (nil? (.-ns name)))
+          (.invoke (cast IFn r) this name)
+          o)))
 
   (method ^:public findInternedVar ^Var [this ^Symbol symbol]
-    (let [o (.valAt (cast IPersistentMap (.get mappings)) symbol)]
-      (when (and (and (some? o) (instance? Var o)) (identical? (.-ns (cast Var o)) this))
-        (cast Var o))))
+    (let [o (.valAt (cast IPersistentMap (.get mappings)) symbol)
+          r resolver]
+      (if (and (nil? o) (some? r) (nil? (.-ns symbol)))
+          (cast Var (.invoke (cast IFn r) this symbol))
+          (when (and (and (some? o) (instance? Var o)) (identical? (.-ns (cast Var o)) this))
+            (cast Var o)))))
 
   (method ^:public getAliases ^IPersistentMap [this]
     (cast IPersistentMap (.get aliases)))

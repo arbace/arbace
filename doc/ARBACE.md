@@ -26,14 +26,16 @@ code. Three kinds of things live here:
   with its printing steps `arbace.box.print`, the symbol table cut `arbace.box.elf`;
   doc/go/BOX-NOTES.md, S3, S7, S8), `tls.ae` and `tls/` (`arbace.tls`, TLS client connections,
   over `arbace.tls.host`) and `http.ae` (`arbace.http`, a small HTTP/1.1 client; BOX-NOTES.md,
-  "TLS (option 2)").
+  "TLS (option 2)"), `go.ae` and `go/` (`arbace.go`, Go forms at the REPL, goi; since GR1 the
+  namespaces of the table of compiled Go packages, and `arbace.go.table`, the table's generator
+  on the tools' host; doc/go/GOI-SPEC.md).
 - The vendored Clojure, renamed `clojure.*` → `arbace.*`, everything else: the namespaces
   `arbace.core`, `arbace.main`, `arbace.pprint`, ... (`*.ae`), and the Java classes as class
   forms, one namespace per Java package (`lang.ae`, `java/api.ae`) with one file per
   Java file (`lang/RT.ae`, `lang/Compiler.ae`, ...). Clojure's main class `clojure.main` is
   `arbace.lang.Main` (`lang/Main.ae`). A few files among them are Arbace's own, not derived from
   Clojure, and say so in their header (`lang/KeywordInvokeSite.ae`,
-  `lang/ReflectorCallSite.ae`). `lang/go/` holds only the Go build's generated variants of `Compiler`,
+  `lang/ReflectorCallSite.ae`, `lang/GoInterp.ae`: goi's classes, doc/go/GOI-SPEC.md). `lang/go/` holds only the Go build's generated variants of `Compiler`,
   `CompilerOps.ae` (by `test/j2g/eval_ops.ae`) and `CompilerAOTFn.ae` (by `test/c2j/gen_fns.ae`);
   the hand-written variants it held of `RT`, `Main` and `Compiler` were merged into their bases
   (SA150).
