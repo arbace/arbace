@@ -29,6 +29,7 @@
             [arbace.repr.rust.write :as wr]
             [arbace.repr.rust.print :as pr]
             [arbace.repr.rust.syntax :as sx]
+            [arbace.repr.rust.full :as fu]
             [arbace.string :as str])
   (:import [java.io File]))
 
@@ -104,14 +105,16 @@
           cfg (dumped dump 'rsdump/config)
           file (:file cfg)
           c (crate-of corpus file)
-          src (slurp (:abs cfg))
-          src-lines (vec (str/split src #"\n" -1))
+          full (get opts "--full")
+          src (fu/source (slurp (:abs cfg)))
+          src-lines (vec (str/split (:text src) #"\n" -1))
           conf (if c
                  {:crate (:name c) :crate-type (:crate-type c) :kind (:kind c) :rel (:rel c)
                   :corpus (:name corpus)}
                  {:crate (get opts "--crate" "main") :crate-type (get opts "--crate-type")
                   :rel file :ns-root (get opts "--ns-root")})
-          {:keys [ns forms warnings]} (cv/convert-file dump (assoc conf :src-lines src-lines :pin (read-pin (get opts "--pin"))))
+          {:keys [ns forms warnings comments]} (cv/convert-file dump (assoc conf :src-lines src-lines :pin (read-pin (get opts "--pin"))
+                                                                 :full full :src src))
           ns (if-let [r (:ns-root conf)]
                (symbol (str r "." (str/replace (str/replace file #"\.rs$" "") #"[/]" ".")))
                ns)
@@ -119,7 +122,7 @@
                   (assoc forms 0 (list 'ns ns (list :require ['arbace.rust :as 'rs])))
                   forms)
           out (out-file-fn ns)
-          ftext (wr/forms-text forms)
+          ftext (wr/with-comments (wr/forms-text forms) comments)
           d (wr/check forms ftext)]
       (.mkdirs (.getParentFile (File. ^String out)))
       (spit out ftext)
@@ -172,7 +175,10 @@
     (if (= (count results) (count (:ok by))) 0 1)))
 
 (defn- cmd-print [args]
-  (let [{:keys [opts args]} (parse-args args #{"--jobs" "-o" "--root" "--only"})
+  (let [{:keys [opts args]} (parse-args args #{"--jobs" "-o" "--root" "--only" "--layout"})
+        layout (get opts "--layout" "lines")
+        _ (when-not (contains? #{"lines" "full"} layout) (throw (ex-info (str "print: no layout " layout " (lines, full)") {})))
+        print-fn (if (= "full" layout) pr/print-full pr/print-file)
         jobs (Long/parseLong (get opts "--jobs" "8"))
         out (get opts "-o" ".tmp/repr-rust/printed")
         root (get opts "--root")
@@ -184,7 +190,7 @@
                            (fn [f]
                              (try
                                (let [forms (wr/read-all (slurp f))
-                                     {:keys [path text]} (binding [pr/*warnings* (atom {})] (pr/print-file forms))
+                                     {:keys [path text]} (binding [pr/*warnings* (atom {})] (print-fn forms))
                                      o (str out "/" path)]
                                  (.mkdirs (.getParentFile (File. ^String o)))
                                  (spit o text)
@@ -283,6 +289,73 @@
                         :by-level by-level :unexpected (mapv first unexpected) :fixed (mapv first fixed)
                         :times (get opts "--times")
                         :results (into (sorted-map) (for [[k r] results] [k (dissoc r :detail :cand)]))}))))
+    (if (and (empty? unexpected) (empty? fixed)) 0 1)))
+
+;;; The text level (SPEC §11.1, §11.3; RR3)
+
+(defn- first-byte-diff [^bytes a ^bytes b]
+  (let [n (min (alength a) (alength b))]
+    (loop [i 0] (cond (= i n) (when (not= (alength a) (alength b)) n)
+                      (= (aget a i) (aget b i)) (recur (inc i))
+                      :else i))))
+
+(defn compare-text-file
+  "The text level of one file: the printed file byte for byte the original"
+  [^String orig ^String cand]
+  (let [o (File. orig) k (File. cand)]
+    (cond
+      (not (.exists o)) {:status :no-original}
+      (not (.exists k)) {:status :not-printed}
+      :else
+      (let [a (java.nio.file.Files/readAllBytes (.toPath o))
+            b (java.nio.file.Files/readAllBytes (.toPath k))]
+        (if (java.util.Arrays/equals a b)
+          {:status :ok :bytes (alength a)}
+          (let [i (first-byte-diff a b)
+                ctx (fn [^bytes x] (let [s (String. x "UTF-8")
+                                         j (min (count s) i)]
+                                     (subs s (max 0 (- j 120)) (min (count s) (+ j 120)))))]
+            {:status :differs :at i :bytes [(alength a) (alength b)] :orig (ctx a) :cand (ctx b)}))))))
+
+(defn- cmd-compare-text [args]
+  (let [{:keys [opts]} (parse-args args #{"--corpus" "--orig" "--cand" "--known" "--report" "--forms-report" "--only" "--times"})
+        corpus (read-string (slurp (get opts "--corpus")))
+        orig (get opts "--orig")
+        cand (get opts "--cand")
+        known-file (get opts "--known")
+        known (if (and known-file (.exists (File. ^String known-file))) (read-string (slurp known-file)) {})
+        only (some-> (get opts "--only") re-pattern)
+        forms-report (when-let [f (get opts "--forms-report")] (when (.exists (File. ^String f)) (read-string (slurp f))))
+        files (for [c (:crates corpus) f (:files c) :when (or (nil? only) (re-find only f))] f)
+        results (pmap-jobs 16
+                           (fn [f]
+                             (let [conv (get-in forms-report [:files f])]
+                               [f (if (and conv (not= :ok (:status conv)))
+                                    {:status (:status conv) :detail (:error conv)}
+                                    (compare-text-file (str orig "/" f) (str cand "/" f)))]))
+                           files)
+        ok (filter #(= :ok (:status (second %))) results)
+        failing (remove #(= :ok (:status (second %))) results)
+        unexpected (remove #(contains? known (first %)) failing)
+        fixed (filter #(and (contains? known (first %)) (= :ok (:status (second %)))) results)]
+    (doseq [[i [k r]] (map-indexed vector unexpected)]
+      (println "DIFFERS" k (pr-str (dissoc r :orig :cand :detail)))
+      (when (< i 10)
+        (when (:detail r) (println " " (:detail r)))
+        (when (:orig r) (println "  original:\n" (:orig r) "\n  printed:\n" (:cand r)))))
+    (doseq [[k _] fixed] (println "FIXED (listed as known, no longer differs)" k))
+    (doseq [[k r] failing :when (contains? known k)] (println "known" k (pr-str (select-keys r [:status])) "--" (get known k)))
+    (println (format "repr-rust roundtrip (text level): %d files, %d byte-identical (%d bytes), %d differ, %d known, %d unexpected, %d fixed%s"
+                     (count results) (count ok) (reduce + (keep (comp :bytes second) ok)) (count failing)
+                     (count (filter #(contains? known (first %)) failing)) (count unexpected) (count fixed)
+                     (if-let [t (get opts "--times")] (str "; seconds: " t) "")))
+    (when-let [rep (get opts "--report")]
+      (spit rep (with-out-str
+                  (prn {:files (count results) :identical (count ok) :differ (count failing)
+                        :bytes (reduce + (keep (comp :bytes second) ok))
+                        :unexpected (mapv first unexpected) :fixed (mapv first fixed)
+                        :times (get opts "--times")
+                        :results (into (sorted-map) (for [[k r] results] [k (dissoc r :orig :cand)]))}))))
     (if (and (empty? unexpected) (empty? fixed)) 0 1)))
 
 ;;; The interface level (SPEC §11.1, §11.3; RR2)
@@ -454,7 +527,8 @@
                    "print" (cmd-print more)
                    "compare" (cmd-compare more)
                    "compare-iface" (cmd-compare-iface more)
-                   (do (println "usage: -m arbace.repr.rust read|print|compare|compare-iface ...") 2))
+                   "compare-text" (cmd-compare-text more)
+                   (do (println "usage: -m arbace.repr.rust read|print|compare|compare-iface|compare-text ...") 2))
                  (catch Throwable e
                    (.printStackTrace e)
                    1))]

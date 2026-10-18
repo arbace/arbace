@@ -13,7 +13,14 @@
 #   5. the interface level (SPEC §11.3, RR2): rustdoc's JSON of the worked example and of
 #      test/rust/sample/attrs.rs (cfg'd items, whose attributes' texts hold spans; indented by two
 #      spaces, so the printed file's columns differ) equal to their printed files' without spans,
-#      and that of a copy of shapes.rs with one doc comment changed found different.
+#      and that of a copy of shapes.rs with one doc comment changed found different;
+#   6. mode :full (SPEC §9.2, RR3): the worked example, constructs.rs, attrs.rs and
+#      test/rust/sample/space.rs (tabs, trailing blanks, a form feed, raw identifiers, an identifier
+#      not in NFC, trailing commas, comments everywhere, no final newline), and a copy of space.rs
+#      with a byte order mark and CRLF line ends, converted with --full and printed in the full
+#      layout byte for byte; the worked example's forms with a name changed (largest, highest)
+#      print as the original with that name changed; in mode :lines the plain comments of
+#      space.rs are ; comments of its forms text.
 # Usage: bin/lib/repr-rust/test (from bin/repr-rust test). Scratch in .tmp/repr-rust/test.
 set -euo pipefail
 root=$(cd "$(dirname "$0")/../../.." && pwd)
@@ -108,5 +115,42 @@ elif grep -q '^DIFFERS shapes .*:differs' "$work/iface/mutated.log"; then
   echo "ok: a changed doc comment is found (shapes.rs, item $(sed -n 's/^  original, item \([0-9]*\).*/\1/p' "$work/iface/mutated.log"))"
 else
   cat "$work/iface/mutated.log"; echo "FAIL: the changed copy's comparison failed otherwise"; fail=1
+fi
+echo "== 6. mode :full: the samples printed back byte for byte"
+mkdir -p "$work/full/src"
+cp "$root"/test/rust/sample/{shapes,constructs,attrs,space}.rs "$work/full/src/"
+(printf '\xef\xbb\xbf'; sed 's/$/\r/' "$root/test/rust/sample/space.rs") > "$work/full/src/crlf.rs"
+for f in shapes constructs attrs space crlf; do
+  (cd "$work/full/src" && "$helper" dump --full -o "$work/full/dumps" --edition 2024 $f.rs) || fail=1
+done
+(cd "$root" && arbace_tool -m arbace.repr.rust read --full --pin "$root/tools/rsdump/RUSTC_VERSION" -o "$work/full/forms" \
+   "$work"/full/dumps/*.edn) > "$work/full/read.log" || { cat "$work/full/read.log"; fail=1; }
+(cd "$root" && arbace_tool -m arbace.repr.rust print --layout full -o "$work/full/printed" "$work"/full/forms/rs/main/*.ae) > "$work/full/print.log" ||
+  { cat "$work/full/print.log"; fail=1; }
+for f in shapes constructs attrs space crlf; do
+  if cmp -s "$work/full/src/$f.rs" "$work/full/printed/$f.rs"; then
+    echo "ok: $f.rs printed back byte for byte ($(wc -c < "$work/full/src/$f.rs") bytes)"
+  else
+    echo "FAIL: $f.rs printed in the full layout differs ($work/full/printed/$f.rs)"; fail=1
+  fi
+done
+mkdir -p "$work/full/renamed/forms" "$work/full/renamed/want"
+sed 's/\blargest\b/highest/g' "$work/full/forms/rs/main/shapes.ae" > "$work/full/renamed/forms/shapes.ae"
+sed 's/\blargest\b/highest/g' "$root/test/rust/sample/shapes.rs" > "$work/full/renamed/want/shapes.rs"
+(cd "$root" && arbace_tool -m arbace.repr.rust print --layout full -o "$work/full/renamed/printed" "$work/full/renamed/forms/shapes.ae") > "$work/full/renamed.log" ||
+  { cat "$work/full/renamed.log"; fail=1; }
+if cmp -s "$work/full/renamed/want/shapes.rs" "$work/full/renamed/printed/shapes.rs" && ! cmp -s "$work/full/renamed/want/shapes.rs" "$root/test/rust/sample/shapes.rs"; then
+  echo "ok: the worked example's forms with a name changed print as the original with the name changed"
+else
+  echo "FAIL: the renamed forms print otherwise ($work/full/renamed/printed/shapes.rs)"; fail=1
+fi
+(cd "$work/full/src" && "$helper" dump -o "$work/full/lines-dumps" --edition 2024 space.rs) || fail=1
+(cd "$root" && arbace_tool -m arbace.repr.rust read --pin "$root/tools/rsdump/RUSTC_VERSION" -o "$work/full/lines" \
+   "$work/full/lines-dumps/space.rs.edn") > "$work/full/lines.log" || { cat "$work/full/lines.log"; fail=1; }
+n=$(grep -c ';' "$work/full/lines/rs/main/space.ae" || true)
+if grep -q '^;; the end, with no newline$' "$work/full/lines/rs/main/space.ae" && grep -q ' ; tab, then spaces$' "$work/full/lines/rs/main/space.ae"; then
+  echo "ok: mode :lines writes space.rs's plain comments as ; comments ($n lines)"
+else
+  echo "FAIL: space.rs's comments are not in its forms text of mode :lines ($work/full/lines/rs/main/space.ae)"; fail=1
 fi
 exit $fail

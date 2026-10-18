@@ -1,0 +1,310 @@
+(ns arbace.repr.rust.full
+  "Mode :full of repr/rust's converter (doc/rust/SPEC.md §9.2, doc/rust/RUST-NOTES.md, \"RR3\"):
+  the forms of a file converted from a dump of tools/rsdump dump --full keep, besides mode
+  :lines' lines, every position of the file's text, so that the printer's full layout
+  (arbace.repr.rust.print/print-full) gives the text back byte for byte. The dump holds
+  rustc_lexer's tokens and comments with their positions; the converter reads the file itself.
+  The forms carry:
+
+    :rs/pos {:span [l1 c1 l2 c2] :toks [[l c]...]}  on a list, vector or symbol that stands for a
+        node with a span: its span, and the start of every token the printer prints that is
+        inside it and not inside one of its elements' spans, in order (a literal's and a
+        keyword's tokens are their parent's)
+    :rs/text {[l c] \"text\"}  likewise, the source's spelling of a printed token where the
+        printer spells it otherwise (a raw identifier that is no keyword, `> >` for a printed
+        `>>`)
+    :rs/punct [[l c \",\"]...]  likewise, the punctuation of the source the printer does not
+        print (a trailing comma, a leading |)
+    :rs/drop [[l c]...]  likewise, where the printer prints a punctuation token the source does
+        not have (the end of the element before it)
+    on rs/file: :rs/comments [[l1 c1 l2 c2 \"text\"]...] (every plain comment outside the text
+        that (:tt ...) and (:rust ...) forms hold), :rs/space [[l c \"ws\"]...] (the white space
+        after the token ending at l c, or before the first, when it is not what the printer
+        puts: spaces to the next token on its line, else newlines and the next token's column),
+        :rs/tail (the text after the last token when it is not one newline), :rs/crlf, :rs/bom;
+        and the positions of the tokens no form's span holds.
+
+  The converter pairs the printer's tokens (print-pieces) with the source here, in order: a
+  printed token is the source's text at the next token's start; else the source's punctuation
+  before it is recorded (:rs/punct), or the printed token is the source's tokens without their
+  white space or one identifier, lifetime or literal spelled otherwise (:rs/text), or a printed
+  punctuation token the source lacks (:rs/drop); anything else fails the file (as Haskell
+  forms' HR11)."
+  (:require [arbace.repr.rust.syntax :as sx]
+            [arbace.string :as str]))
+
+;;; The text and its positions
+
+(defn source
+  "The text rustc lexes of a file's text (its source map's normalization): {:text :bom :crlf}"
+  [^String raw]
+  (let [bom (str/starts-with? raw "﻿")
+        s (if bom (subs raw 1) raw)
+        crlf (str/includes? s "\r\n")]
+    (when (and crlf (str/includes? (str/replace s "\r\n" "") "\n"))
+      (throw (ex-info "repr-rust: lines that end in \\r\\n and lines that end in \\n in one file (mode :full keeps one of the two, SPEC §9.2)" {})))
+    {:text (if crlf (str/replace s "\r\n" "\n") s) :bom bom :crlf crlf}))
+
+(defn line-starts
+  "The offsets at which the lines of text begin"
+  [^String text]
+  (loop [i 0 acc (transient [0])]
+    (let [j (.indexOf text "\n" (int i))]
+      (if (neg? j) (persistent! acc) (recur (inc j) (conj! acc (inc j)))))))
+
+(defn- plain? [^String text] (= (count text) (.codePointCount text 0 (count text))))
+
+(defn index-fn
+  "A function from a position (rustc's columns: code points from 1) to its offset in text"
+  [^String text starts]
+  (let [n (count text) plain (plain? text)]
+    (fn [l c]
+      (let [s (get starts (dec l) n)]
+        (if plain (min n (+ s (dec c))) (.offsetByCodePoints text (int s) (int (dec c))))))))
+
+(defn pos-fn
+  "A function from an offset in text to its position [l c]"
+  [^String text starts]
+  (let [plain (plain? text) nl (count starts)]
+    (fn [i]
+      (let [k (loop [lo 0 hi nl]
+                (if (< (inc lo) hi)
+                  (let [m (quot (+ lo hi) 2)] (if (<= (get starts m) i) (recur m hi) (recur lo m)))
+                  lo))
+            s (get starts k)]
+        [(inc k) (inc (if plain (- i s) (.codePointCount text (int s) (int i))))]))))
+
+(defn pack ^long [[l c]] (+ (* (long l) 1048576) (long c)))
+
+;;; Pairing the printer's tokens with the source's
+
+(defn- delim? [^String t] (contains? #{"(" ")" "[" "]" "{" "}"} t))
+
+(defn- fail! [msg ^String text at]
+  (throw (ex-info (str "repr-rust :full: " msg " at offset " at ": "
+                       (pr-str (subs text (max 0 (- at 60)) (min (count text) (+ at 60)))))
+                  {})))
+
+(defn align
+  "The printer's tokens pieces (texts, in order) paired with the source text and its lexer
+  tokens toks ([[kind l c l2 c2]...], white space left out): events in the text's order, each
+  [:tok start end spelled?] (spelled? when the source's text there is not the piece's),
+  [:punct start end], [:comment start end] (offsets) or [:drop at]"
+  [^String text toks pieces]
+  (let [starts (line-starts text)
+        idx (index-fn text starts)
+        n (count toks)
+        kinds (mapv first toks)
+        ts (long-array n) te (long-array n)
+        _ (dotimes [k n]
+            (let [[_ l c el ec] (nth toks k)]
+              (aset ts k (long (idx l c))) (aset te k (long (idx el ec)))))
+        np (count pieces)
+        events (java.util.ArrayList.)
+        tok-text (fn [k] (subs text (aget ts k) (aget te k)))
+        ;; the next token from j that is not a comment
+        next-code (fn [j] (loop [j j] (if (and (< j n) (= :c (nth kinds j))) (recur (inc j)) j)))]
+    (loop [i 0 j 0 cur 0]
+      (let [j (loop [j j] (if (and (< j n) (<= (aget te j) cur)) (recur (inc j)) j))]
+        (cond
+          (< i np)
+          (let [^String p (nth pieces i)]
+            (when (>= j n) (fail! (str "the printer's token " (pr-str p) " after the source's last") text cur))
+            (let [tstart (aget ts j)
+                  mid (< tstart cur)
+                  start (if mid cur tstart)
+                  k (nth kinds j)]
+              (cond
+                (and (not mid) (= k :c))
+                (do (.add events [:comment tstart (aget te j)]) (recur i (inc j) (aget te j)))
+
+                (.startsWith text p (int start))
+                (let [e (+ start (count p))] (.add events [:tok start e false]) (recur (inc i) j e))
+
+                :else
+                (let [;; how many pieces from i match the source from offset at, in a row (up
+                      ;; to 4), white space and comments skipped: the alternatives' measure
+                      score (fn [i at]
+                              (loop [c 0 i i at at q 0]
+                                (if (or (= c 4) (>= i np))
+                                  4
+                                  (let [q (loop [q q] (if (and (< q n) (<= (aget te q) at)) (recur (inc q)) q))
+                                        q (if (and (< q n) (< (aget ts q) at)) q (next-code q))
+                                        st (if (< q n) (max at (aget ts q)) -1)]
+                                    (if (and (>= st 0) (.startsWith text ^String (nth pieces i) (int st)))
+                                      (recur (inc c) (inc i) (+ st (count (nth pieces i))) q)
+                                      c)))))
+                      ;; the source's punctuation before the piece (1 to 3 tokens)
+                      skips (when-not mid
+                              (for [m [1 2 3]
+                                    :while (and (< (+ j m -1) n) (= :p (nth kinds (+ j m -1)))
+                                                (not (delim? (tok-text (+ j m -1)))))
+                                    :let [q (next-code (+ j m)) sc (if (< q n) (score i (aget ts q)) 0)]
+                                    :when (pos? sc)]
+                                [sc m]))
+                      ;; a printed punctuation token the source lacks
+                      drop-sc (if (and (sx/punct? p) (not (delim? p)) (< (inc i) np)) (score (inc i) start) 0)
+                      best-skip (first (sort-by (comp - first) skips))
+                      skip (when (and best-skip (> (first best-skip) drop-sc)) (second best-skip))
+                      drop? (and (not skip) (pos? drop-sc))
+                      ;; the source's tokens without their white space
+                      multi (when (and (not mid) (not skip) (not drop?))
+                              (let [pw (str/replace p #"\s" "")]
+                                (loop [q j acc ""]
+                                  (cond
+                                    (= acc pw) (when (> q (inc j)) (aget te (dec q)))
+                                    (or (>= q n) (>= (count acc) (count pw)) (= :c (nth kinds q))) nil
+                                    :else (recur (inc q) (str acc (tok-text q)))))))
+                      word (and (not mid) (not skip) (not drop?) (not multi) (contains? #{:id :lit :lt} k) (not (sx/punct? p)))]
+                  (cond
+                    skip (do (dotimes [m skip] (.add events [:punct (aget ts (+ j m)) (aget te (+ j m))]))
+                             (recur i (+ j skip) (aget te (+ j skip -1))))
+                    drop? (do (.add events [:drop cur]) (recur (inc i) j cur))
+                    multi (do (.add events [:tok start multi true]) (recur (inc i) j multi))
+                    word (do (.add events [:tok start (aget te j) true]) (recur (inc i) (inc j) (aget te j)))
+                    :else (fail! (str "the printer's token " (pr-str p) " (the " i "th) is not the source's "
+                                      (pr-str (tok-text j)) " (after " (pr-str (vec (subvec pieces (max 0 (- i 6)) i))) ")")
+                                 text start))))))
+
+          (< j n)
+          (let [k (nth kinds j)]
+            (case k
+              :c (.add events [:comment (aget ts j) (aget te j)])
+              :p (.add events [:punct (aget ts j) (aget te j)])
+              (fail! (str "the source's token " (pr-str (tok-text j)) " after the printer's last") text (aget ts j)))
+            (recur i (inc j) (aget te j)))
+
+          :else (vec events))))))
+
+(defn positions
+  "The pairing's events as positions: {:toks [[pos spelled-text-or-nil]...] (one per printed
+  token, in order) :drops [pos...] :puncts [[pos text]...] :comments [[l c l2 c2 text]...]
+  :space [[l c ws]...] :tail text-or-nil}"
+  [^String text events]
+  (let [starts (line-starts text)
+        pos (pos-fn text starts)
+        toks (transient []) drops (transient []) puncts (transient []) comments (transient []) space (transient [])
+        prev (volatile! 0)
+        gap! (fn [s]
+               (let [g (subs text @prev s)]
+                 (when-not (re-matches #"\n*[ ]*" g)
+                   (conj! space (conj (pos @prev) g)))))]
+    (doseq [[k a b sp] events]
+      (if (= k :drop)
+        (conj! drops (pos a))
+        (do (gap! a)
+            (case k
+              :tok (conj! toks [(pos a) (when sp (subs text a b))])
+              :punct (conj! puncts [(pos a) (subs text a b)])
+              :comment (conj! comments (vec (concat (pos a) (pos b) [(subs text a b)]))))
+            (vreset! prev b))))
+    (let [tail (subs text @prev)]
+      {:toks (persistent! toks) :drops (persistent! drops) :puncts (persistent! puncts)
+       :comments (persistent! comments) :space (persistent! space)
+       :tail (when (not= tail "\n") tail)})))
+
+;;; The positions on the forms
+
+(def ^:private span-key :arbace.repr.rust.convert/span)
+
+(defn- spanned-forms
+  "The lists, vectors and symbols of forms with a span, in order: [[form span] ...]"
+  [forms]
+  (let [acc (java.util.ArrayList.)]
+    (letfn [(walk [x]
+              (when (and (not (sx/lit? x)) (instance? arbace.lang.IObj x))
+                (when-let [s (span-key (meta x))] (.add acc [x s])))
+              (cond
+                (sx/lit? x) nil
+                (seq? x) (doseq [y x] (walk y))
+                (vector? x) (doseq [y x] (walk y))
+                :else nil))]
+      (doseq [f forms] (walk f)))
+    (vec acc)))
+
+(defn distribute
+  "The positions' items ([[pos kind value]...], kind :tok :text :punct :drop) given to the forms
+  whose spans hold them innermost (idx: a position's offset in the text): an IdentityHashMap
+  form -> {kind [...]}, and the items no span holds"
+  [forms items idx]
+  (let [off (fn [[l c]] (long (idx l c)))
+        fs (spanned-forms forms)
+        ;; by start, the longer first, then in order (a stable sort): an element after the form
+        ;; whose span it shares
+        keyed (mapv (fn [[x s]] (let [a (off s) b (off [(nth s 2) (nth s 3)])] [x a b])) fs)
+        fv (vec (sort-by (fn [[_ a b]] (+ (* a 16777216) (- 16777215 b))) keyed))
+        nf (count fv)
+        owners (java.util.IdentityHashMap.)
+        orphans (transient [])
+        stack (volatile! [])
+        items (sort-by (fn [[p k]] (+ (* 2 (off p)) (if (= k :drop) 0 1))) items)]
+    (loop [items (seq items) f 0]
+      (when items
+        (let [[p k v :as it] (first items)
+              pp (off p)
+              f (loop [f f]
+                  (if (and (< f nf) (<= (nth (nth fv f) 1) pp))
+                    (do (vswap! stack conj (nth fv f)) (recur (inc f)))
+                    f))]
+          (while (and (seq @stack) (<= (nth (peek @stack) 2) pp))
+            (vswap! stack pop))
+          (if (seq @stack)
+            (let [o (first (peek @stack))
+                  e (or (.get owners o) {})]
+              (.put owners o (update e k (fnil conj []) (if (= k :drop) p (if (some? v) [p v] p)))))
+            (conj! orphans it))
+          (recur (next items) f))))
+    {:owners owners :orphans (persistent! orphans)}))
+
+(defn- pos-meta
+  "The :full metadata of a form: its span and the items it owns"
+  [span owned]
+  (let [{:keys [tok text punct drop]} owned]
+    (cond-> {}
+      (or span (seq tok)) (assoc :rs/pos (cond-> {} span (assoc :span (vec (take 4 span))) (seq tok) (assoc :toks tok)))
+      (seq text) (assoc :rs/text (into (sorted-map) (map vec text)))
+      (seq punct) (assoc :rs/punct (mapv (fn [[p t]] (conj p t)) punct))
+      (seq drop) (assoc :rs/drop drop))))
+
+(defn- decorate
+  "x with the :full metadata of the forms the owners map gives data, the converter's spans
+  removed"
+  [x ^java.util.IdentityHashMap owners]
+  (let [m (when (and (not (sx/lit? x)) (instance? arbace.lang.IObj x)) (meta x))
+        span (span-key m)
+        owned (.get owners x)
+        nm (when m (merge (dissoc m span-key) (pos-meta span owned)))]
+    (cond
+      (sx/lit? x) x
+      (seq? x) (with-meta (apply list (map #(decorate % owners) x)) nm)
+      (vector? x) (with-meta (mapv #(decorate % owners) x) nm)
+      (and m (or span owned)) (with-meta x nm)
+      :else x)))
+
+(defn full-forms
+  "A file's forms (ns, rs/file, the rest; with their spans) and the pairing of the printer's
+  tokens (pieces) with the source's (src: source's result; toks the dump's lexer tokens): the
+  forms of mode :full"
+  [forms src toks pieces]
+  (let [text (:text src)
+        evs (align text toks pieces)
+        {:keys [toks drops puncts comments space tail]} (positions text evs)
+        items (concat (for [[p sp] toks] [p :tok nil])
+                      (for [[p sp] toks :when sp] [p :text sp])
+                      (for [[p t] puncts] [p :punct t])
+                      (for [p drops] [p :drop nil]))
+        {:keys [owners orphans]} (distribute forms items (index-fn text (line-starts text)))
+        [ns-form file-form & body] forms
+        orphan-meta (pos-meta nil (reduce (fn [acc [p k v]] (update acc k (fnil conj []) (if (= k :drop) p (if (some? v) [p v] p)))) {} orphans))
+        file-form (with-meta
+                    (apply list (concat (map (fn [x] (if (= x :lines) :full x)) file-form)
+                                        (when (seq comments) [:rs/comments comments])
+                                        (when (seq space) [:rs/space space])
+                                        (when tail [:rs/tail tail])
+                                        (when (:crlf src) [:rs/crlf true])
+                                        (when (:bom src) [:rs/bom true])))
+                    (merge (meta file-form) orphan-meta))]
+    {:forms (vec (concat [ns-form file-form] (map #(decorate % owners) body)))
+     :stats {:full-tokens (count toks) :full-spellings (count (filter second toks))
+             :full-punct (count puncts) :full-drops (count drops) :full-comments (count comments)
+             :full-space (count space) :full-tails (if tail 1 0)}}))

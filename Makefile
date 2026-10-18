@@ -14,7 +14,7 @@ CLOJURE_TESTS_GO ?= target/arbace-go/amd64/arbace-tests
   box box-smoke box-oracle box-suite box-tools box-rebuild mac-bundle arm64-vm-check \
   gate gate-full suite oracle diffcheck verify jdk-verify edge-verify fixtures-verify tamago-verify \
   toolchain-verify box-vendor-verify x509roots-verify repr-go-roundtrip repr-go-roundtrip-text \
-  repr-java-roundtrip repr-java-text repr-clojure-check repr-clojure-roundtrip repr-haskell-roundtrip repr-haskell-iface repr-haskell-text repr-haskell-layout repr-haskell-test repr-rust-roundtrip repr-rust-iface repr-rust-test goi-annotations goi-test alpine-check clean \
+  repr-java-roundtrip repr-java-text repr-clojure-check repr-clojure-roundtrip repr-haskell-roundtrip repr-haskell-iface repr-haskell-text repr-haskell-layout repr-haskell-test repr-rust-roundtrip repr-rust-iface repr-rust-text repr-rust-test goi-annotations goi-test alpine-check clean \
   check-makefile
 
 help: ## list the targets
@@ -139,7 +139,9 @@ repr-rust-roundtrip: ## Rust -> forms -> Rust over std's five crates of rustc 1.
 	bin/repr-rust roundtrip
 repr-rust-iface: ## the same, then rustdoc's JSON of the five crates from the originals and from the printed files, compared without spans (bin/repr-rust roundtrip --iface)
 	bin/repr-rust roundtrip --iface
-repr-rust-test: ## repr/rust's cases: the reader's samples, the spec's worked example and its round trip, the interface level's cases (bin/repr-rust test)
+repr-rust-text: ## std's five crates in mode :full, printed back to the original text byte for byte, and their trees (bin/repr-rust roundtrip --text-only)
+	bin/repr-rust roundtrip --text-only
+repr-rust-test: ## repr/rust's cases: the reader's samples, the spec's worked example and its round trip, the interface level's cases, mode :full's (bin/repr-rust test)
 	bin/repr-rust test
 goi-annotations: ## goi's checker over tamago/goroot, linux std, GOROOT/test: no error, every annotation verified (bin/goi annotations)
 	bin/goi annotations

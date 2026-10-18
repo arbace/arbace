@@ -6,7 +6,7 @@
 // rustc's `-Zunpretty=ast-tree` and rust-lisp's `check.rs` its models. A `rustc_private` driver on
 // the host's rustc, linked dynamically to its `librustc_driver`; built by `bin/repr-rust helper`.
 //
-//   rsdump dump  -o DIR --edition E [--helper-hash H] FILE...   DIR/FILE.edn per file
+//   rsdump dump  [--full] -o DIR --edition E [--helper-hash H] FILE...   DIR/FILE.edn per file
 //   rsdump tree  -o DIR --edition E FILE...                      DIR/FILE.tree, DIR/FILE.lines
 //   rsdump lines --edition E FILE                                the lines on standard output
 //
@@ -15,7 +15,10 @@
 // directly (SPEC §10.3): `(rsdump/mac-exprs [[OPEN :exprs [Expr...]] [OPEN :repeat [Expr Expr]]
 // ...])`, each macro call's tokens parsed by rustc's parser as `expr (, expr)*` (or `e; n` in
 // brackets) when they parse, keyed by the span of the call's open delimiter, and `(rsdump/meta
-// [[SPAN MetaItem] ...])`, each attribute's meta item (`Attribute::meta`), keyed by its span. A
+// [[SPAN MetaItem] ...])`, each attribute's meta item (`Attribute::meta`), keyed by its span, and
+// `(rsdump/comments [[L C L2 C2] ...])`, the plain comments `rustc_lexer` finds in the file (for
+// mode :lines' `;` comments, RR-P1), or with `--full` `(rsdump/tokens [[KIND L C L2 C2] ...])`,
+// all its tokens and comments but white space (mode :full, SPEC §9.2, RR3). A
 // file rustc's parser rejects, or parses with recovered errors, is `(rsdump/error "...")` and the
 // exit status is 1.
 //
@@ -34,6 +37,7 @@ extern crate rustc_ast;
 extern crate rustc_driver;
 extern crate rustc_errors;
 extern crate rustc_interface;
+extern crate rustc_lexer;
 extern crate rustc_parse;
 extern crate rustc_session;
 extern crate rustc_span;
@@ -688,6 +692,75 @@ impl<'a, 'p> Visitor<'a> for Facts<'p> {
     }
 }
 
+// ---- the lexer's tokens and comments (SPEC §9.2, §10.3; RR3)
+
+/// The text rustc lexes (its source map's normalization): a UTF-8 byte order mark removed, `\r\n`
+/// made `\n`
+fn normalized(raw: &str) -> String {
+    let s = raw.strip_prefix('\u{feff}').unwrap_or(raw);
+    if s.contains("\r\n") { s.replace("\r\n", "\n") } else { s.to_string() }
+}
+
+/// `rustc_lexer`'s tokens of the file, white space left out, each `[KIND LINE COL END-LINE
+/// END-COL]` (columns in characters from 1, the end exclusive, as rustc's spans count them): KIND
+/// `:c` a plain comment, `:doc` a doc comment, `:id` an identifier (raw or not), `:lt` a
+/// lifetime, `:lit` a literal, `:p` a punctuation character, `:shebang` the first `#!` line,
+/// `:fm` a front matter, `:x` anything else; with comments_only, the plain comments alone
+fn lex(raw: &str, comments_only: bool) -> String {
+    use rustc_lexer::TokenKind as K;
+    let src = normalized(raw);
+    let mut out = Vec::new();
+    // line and column of byte offset `to`, advanced from (pos, line, col)
+    let (mut pos, mut line, mut col) = (0usize, 1usize, 1usize);
+    let advance = |to: usize, pos: &mut usize, line: &mut usize, col: &mut usize| {
+        for ch in src[*pos..to].chars() {
+            if ch == '\n' {
+                *line += 1;
+                *col = 1;
+            } else {
+                *col += 1;
+            }
+        }
+        *pos = to;
+    };
+    let mut start = 0usize;
+    if let Some(n) = rustc_lexer::strip_shebang(&src) {
+        if !comments_only {
+            out.push(format!("[:shebang 1 1 1 {}]", src[..n].chars().count() + 1));
+        }
+        start = n;
+    }
+    for t in rustc_lexer::tokenize(&src[start..], rustc_lexer::FrontmatterAllowed::Yes) {
+        let lo = start;
+        let hi = start + t.len as usize;
+        start = hi;
+        let k = match t.kind {
+            K::Whitespace => continue,
+            K::LineComment { doc_style: None } | K::BlockComment { doc_style: None, .. } => ":c",
+            _ if comments_only => continue,
+            K::LineComment { .. } | K::BlockComment { .. } => ":doc",
+            K::Ident | K::RawIdent | K::InvalidIdent => ":id",
+            K::Lifetime { .. } | K::RawLifetime => ":lt",
+            K::Literal { .. } => ":lit",
+            K::Frontmatter { .. } => ":fm",
+            K::Semi | K::Comma | K::Dot | K::OpenParen | K::CloseParen | K::OpenBrace | K::CloseBrace
+            | K::OpenBracket | K::CloseBracket | K::At | K::Pound | K::Tilde | K::Question | K::Colon
+            | K::Dollar | K::Eq | K::Bang | K::Lt | K::Gt | K::Minus | K::And | K::Or | K::Plus | K::Star
+            | K::Slash | K::Caret | K::Percent => ":p",
+            _ => ":x",
+        };
+        advance(lo, &mut pos, &mut line, &mut col);
+        let (l1, c1) = (line, col);
+        advance(hi, &mut pos, &mut line, &mut col);
+        if comments_only {
+            out.push(format!("[{l1} {c1} {line} {col}]"));
+        } else {
+            out.push(format!("[{k} {l1} {c1} {line} {col}]"));
+        }
+    }
+    out.join(" ")
+}
+
 // ---- the driver
 
 #[derive(Clone, Copy, PartialEq)]
@@ -699,6 +772,7 @@ enum Verb {
 
 struct Run {
     verb: Verb,
+    full: bool,
     file: String,
     /// dump: the dump's text; tree: (tree, lines); lines: the lines
     out: Option<Result<Vec<String>, String>>,
@@ -717,7 +791,13 @@ impl Callbacks for Run {
                 let psess = ParseSess::with_dcx(DiagCtxt::new(Box::new(SilentEmitter)), compiler.sess.psess.clone_source_map());
                 let mut f = Facts { psess: &psess, file: self.file.clone(), mac: Vec::new(), meta: Vec::new() };
                 f.visit_crate(krate);
-                vec![tree, format!("(rsdump/mac-exprs [{}])", f.mac.join("\n ")), format!("(rsdump/meta [{}])", f.meta.join("\n "))]
+                let raw = std::fs::read_to_string(&self.file).unwrap_or_default();
+                let lexed = if self.full {
+                    format!("(rsdump/tokens [{}])", lex(&raw, false))
+                } else {
+                    format!("(rsdump/comments [{}])", lex(&raw, true))
+                };
+                vec![tree, format!("(rsdump/mac-exprs [{}])", f.mac.join("\n ")), format!("(rsdump/meta [{}])", f.meta.join("\n ")), lexed]
             }
             Verb::Tree => vec![transcode(&text, &self.file, Mode::Tree), transcode(&text, &self.file, Mode::Lines)],
             Verb::Lines => vec![transcode(&text, &self.file, Mode::Lines)],
@@ -757,7 +837,7 @@ fn write_file(path: &str, text: &str) {
 }
 
 fn usage() -> ! {
-    eprintln!("usage: rsdump dump|tree -o DIR --edition E [--helper-hash H] FILE...\n       rsdump lines --edition E FILE");
+    eprintln!("usage: rsdump dump [--full] -o DIR --edition E [--helper-hash H] FILE...\n       rsdump tree -o DIR --edition E FILE...\n       rsdump lines --edition E FILE");
     std::process::exit(2)
 }
 
@@ -780,6 +860,7 @@ fn main() {
     let mut out_dir: Option<String> = None;
     let mut edition = String::from("2024");
     let mut helper_hash = String::new();
+    let mut full = false;
     let mut files = Vec::new();
     let mut i = 2;
     while i < args.len() {
@@ -791,6 +872,10 @@ fn main() {
             "--edition" => {
                 edition = args.get(i + 1).cloned().unwrap_or_else(|| usage());
                 i += 2
+            }
+            "--full" => {
+                full = true;
+                i += 1
             }
             "--helper-hash" => {
                 helper_hash = args.get(i + 1).cloned().unwrap_or_else(|| usage());
@@ -807,7 +892,7 @@ fn main() {
     }
     let mut status = 0;
     for file in &files {
-        let mut run = Run { verb, file: file.clone(), out: None };
+        let mut run = Run { verb, full, file: file.clone(), out: None };
         let rargs: Vec<String> = vec!["rsdump".into(), "--edition".into(), edition.clone(), file.clone()];
         let caught = rustc_span::fatal_error::catch_fatal_errors(|| rustc_driver::run_compiler(&rargs, &mut run));
         let res = match (caught, run.out.take()) {
