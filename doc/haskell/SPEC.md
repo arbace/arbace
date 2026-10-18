@@ -1487,6 +1487,18 @@ survey's E3).
 - **The gate**: `bin/gate --full`'s step is unchanged, `roundtrip --iface --text --layout && test`,
   542 s over the 1,345 modules (R5's 585 s for 1,226).
 
+### 10.10 As built: HR25 (2026-10-18)
+
+[HASKELL-NOTES.md](HASKELL-NOTES.md), "HR25", records the build, HR25 (b) as decided: §10.9's
+positions of mode `:full` (HR23) apply to every module whose text has `{-# LINE #-}` pragmas, not
+only to an `.hsc` module's; a CPP module's module view keeps them as text, and the places of its
+positions follow CPP's line markers that name the module's file as well as the pragmas. The alex
+output `Distribution.Fields.Lexer` (§10.8) then converts in mode `:full` and is printed back byte
+for byte (1,334 modules byte-identical); its trees of mode `:full` still differ, as §10.9's three
+`.hsc` modules': CPP directives remain in it, and after them CPP's markers name the module's own
+lines, which the module view (§2.8, S5) does not keep. Every other module's forms and printed
+modules are unchanged.
+
 ## 11. Decisions and open questions
 
 ### 11.1 Decisions taken while writing (S1-S36)
