@@ -1,0 +1,179 @@
+;; Futamura F6 (doc/FUTAMURA-SURVEY.md, "F6 as built"): primitive fns compiled with an unboxed
+;; entry (invokePrim) beside the boxed invoke, and linked calls (F5) of the unboxed entry. The
+;; checks: the hints honored (conversions of arguments and returns, as the boxed path makes
+;; them), overflow (thrown by the checked operations, wrapped by unchecked-*, promoted by the '
+;; operations), boxing, callers in boxed and primitive contexts, and a primitive fn redefined
+;; (by a defn evaluated at run time, with-redefs, alter-var-root) still seen by its callers, whose
+;; generic path converts what the new fn returns as before. The namespace is compiled into a
+;; program with the runtime's namespaces (as test/c2j/link_redef.ae) and run twice, its loader
+;; compiled and (ARBACE_NO_AOT set) evaluated: each prints the same lines, and exits 1 on a check
+;; that fails.
+;;
+;; Then the speculative workers (F6, step 2): a fn without hints whose parameters Numbers'
+;; operations take gets a worker taking them as longs, entered when they are Longs: the same
+;; values, exceptions and boxes (a parameter returned is the caller's object), and the boxed
+;; path for any other argument.
+;;
+;; Usage: PROGRAM -e '(arbace.lang.Compiler$AOT/load "test/c2j/prim_fns" "test/c2j/prim_fns.ae"
+;; "prim_fns.ae") (test.c2j.prim-fns/-main)' (compiled), or with ARBACE_NO_AOT set
+;; PROGRAM -m test.c2j.prim-fns (evaluated)
+(ns test.c2j.prim-fns)
+
+(def results (atom []))
+
+(defn check [what got want]
+  (swap! results conj [what (= got want)])
+  (println (if (= got want) "ok  " "FAIL") what (pr-str got) (if (= got want) "" (str "(want " (pr-str want) ")"))))
+
+(defmacro thrown
+  "The class name and message of what form throws, or [:value v]."
+  [form]
+  `(try [:value ~form] (catch Throwable t# [(.getName (class t#)) (.getMessage t#)])))
+
+(defn fib-prim ^long [^long n] (if (< n 2) n (+ (fib-prim (- n 1)) (fib-prim (- n 2)))))
+
+(defn add1 ^long [^long x] (inc x))
+(defn uadd1 ^long [^long x] (unchecked-inc x))
+(defn padd1 [^long x] (inc' x))
+(defn sq ^long [^long x] (* x x))
+(defn psq [^long x] (*' x x))
+(defn dsq ^double [^double x] (* x x))
+(defn ld ^double [^long x] (/ (double x) 2))
+(defn dl ^long [^double x] (long x))
+(defn lo [^long x y] [x y])
+(defn ol ^long [x] (count x))
+(defn f4 ^long [^long a ^long b ^long c ^long d] (+ a (* 10 b) (* 100 c) (* 1000 d)))
+(defn f5 ^long [^long a ^long b ^long c ^long d ^long e] (+ a b c d e))
+(defn multi (^long [^long x] (inc x)) (^double [^double x ^double y] (+ x y)) ([x y z] [x y z]))
+(defn mvar (^long [^long x] (inc x)) ([x & r] [x r]))
+(defn mvar-caller [] [(mvar 1) (mvar 1 2)])
+(defn cnt ^long [^long n ^long acc] (if (zero? n) acc (recur (dec n) (+ acc n))))
+(def adder (let [k 5] (fn ^long [^long x] (+ x k))))
+(defn ret-ratio ^long [^long x] (/ x 3))
+(defn ret-big ^long [^long x] (+' x 1))
+
+;; callers: the value converted (primitive contexts) or boxed
+(defn sum2 ^long [^long a ^long b] (+ (add1 a) (add1 b)))
+(defn tail ^long [^long a] (add1 a))
+(defn boxed-caller [a] [(add1 a) (dsq a)])
+(defn str-caller [a] (str (add1 a)))
+(defn mixed-caller [a] (+ (add1 a) 0.5))
+(defn arg-caller [a b] (f4 a b (add1 a) 4))
+(defn double-caller ^double [^double x] (+ (dsq x) (ld 3)))
+(defn identity-caller [] (let [a (add1 999) b (add1 999)] [(identical? a b) (= a b) (identical? (add1 1) (add1 1))]))
+(defn closure-caller [x] (adder x))
+
+;; redefined below
+(defn victim ^long [^long x] (* 2 x))
+(defn victim-user ^long [^long x] (victim x))
+(defn victim-sum [x] (+ (victim x) 1))
+(defn victim-boxed [x] (victim x))
+(defn other ^long [^long x] (* 3 x))
+
+;; speculative workers (each passes a parameter, or an operation of one, to a call: spec-mask)
+(defn pass [x] x)
+(defn fib [n] (if (< n 2) n (+ (fib (- n 1)) (fib (- n 2)))))
+(defn fib-caller [] (fib 15))
+(defn keep-n [n] (if (< n 0) (pass 0) (pass n)))
+(defn twice [n] (if (pos? n) [(pass n) n] []))
+(defn winc [n] (pass (inc n)))
+(defn wincp [n] (pass (inc' n)))
+(defn wdiv [n] (pass (/ (- n 0) 3)))
+(defn wmix [n x] (if (pos? n) (str x (pass (+ n 1))) x))
+(defn wclose [n] (let [f (fn [] n)] (if (pos? n) (pass (f)) (pass (dec n)))))
+(defn wcall [n] (keep-n (- n 1)))
+(defn wcall-same [n] (if (pos? n) (keep-n n) 0))
+(def big 1000000)
+
+(defn in-test-ns
+  "Form evaluated in this namespace, as the REPL evaluates it there."
+  [form]
+  (binding [*ns* (the-ns 'test.c2j.prim-fns)] (eval form)))
+
+(defn -main [& _]
+  (check "fib-prim" (fib-prim 20) 6765)
+  (check "add1" (add1 41) 42)
+  (check "add1 of a double (RT.longCast)" (add1 1.75) 2)
+  (check "add1 of a ratio" (add1 7/2) 4)
+  (check "add1 of an int" (add1 (int 9)) 10)
+  (check "add1 of a bigint in range" (add1 5N) 6)
+  (check "add1 of a bigint out of range" (thrown (add1 9223372036854775808N))
+         ["java.lang.IllegalArgumentException" "Value out of range for long: 9223372036854775808"])
+  (check "add1 of a string" (first (thrown (add1 "x"))) "java.lang.ClassCastException")
+  (check "add1 of nil" (first (thrown (add1 nil))) "java.lang.NullPointerException")
+  (check "add1 overflow" (thrown (add1 Long/MAX_VALUE)) ["java.lang.ArithmeticException" "long overflow"])
+  (check "unchecked-inc wraps" (uadd1 Long/MAX_VALUE) Long/MIN_VALUE)
+  (check "inc' promotes" (padd1 Long/MAX_VALUE) 9223372036854775808N)
+  (check "inc' promotes, class" (class (padd1 Long/MAX_VALUE)) arbace.lang.BigInt)
+  (check "sq overflow" (thrown (sq 4000000000)) ["java.lang.ArithmeticException" "long overflow"])
+  (check "*' promotes" (psq 4000000000) 16000000000000000000N)
+  (check "dsq" (dsq 3) 9.0)
+  (check "dsq of a ratio" (dsq 1/2) 0.25)
+  (check "dsq of a long, class" (class (dsq 3)) Double)
+  (check "long to double" (ld 3) 1.5)
+  (check "double to long" (dl 2.75) 2)
+  (check "double to long out of range" (first (thrown (dl 1e30))) (first (thrown (long 1e30))))
+  (check "lo" (lo 1.5 2/3) [1 2/3])
+  (check "ol" (ol [1 2 3]) 3)
+  (check "f4" (f4 1 2 3 4) 4321)
+  (check "f5 (no unboxed entry)" (f5 1 2 3 4 5) 15)
+  (check "multi 1" (multi 1) 2)
+  (check "multi 2" (multi 1 2) 3.0)
+  (check "multi 3" (multi 1 2 3) [1 2 3])
+  (check "a variadic fn's primitive arity" (mvar-caller) [2 [1 '(2)]])
+  (check "recur on primitive parameters" (cnt 100 0) 5050)
+  (check "a primitive closure" (closure-caller 10) 15)
+  (check "a ratio returned as long" (ret-ratio 10) (long (/ 10 3)))
+  (check "a bigint returned as long" (thrown (ret-big Long/MAX_VALUE)) (thrown (.longValue ^Number (+' Long/MAX_VALUE 1))))
+  (check "sum2" (sum2 1 2) 5)
+  (check "sum2 overflow" (thrown (sum2 Long/MAX_VALUE 0)) ["java.lang.ArithmeticException" "long overflow"])
+  (check "tail" (tail 1) 2)
+  (check "boxed caller" (boxed-caller 3) [4 9.0])
+  (check "str caller" (str-caller 3) "4")
+  (check "mixed caller" (mixed-caller 3) 4.5)
+  (check "arg caller" (arg-caller 1 2) 4221)
+  (check "double caller" (double-caller 2.0) 5.5)
+  (check "boxing identity" (identity-caller) [false true true])
+  (check "victim" [(victim-user 5) (victim-sum 5) (victim-boxed 5)] [10 11 10])
+  (with-redefs [victim (fn [x] (* 4 x))]
+    (check "with-redefs to an evaluated fn" [(victim-user 5) (victim-sum 5) (victim-boxed 5)] [20 21 20]))
+  (with-redefs [victim (fn [x] 2.5)]
+    (check "with-redefs to a fn of a double" [(victim-user 5) (victim-sum 5) (victim-boxed 5)] [2 3 2.5]))
+  (with-redefs [victim (fn [x] 7/2)]
+    (check "with-redefs to a fn of a ratio" [(victim-user 5) (victim-sum 5) (victim-boxed 5)] [3 4 7/2]))
+  (with-redefs [victim (fn [x] "s")]
+    (check "with-redefs to a fn of a string" (first (thrown (victim-user 5))) "java.lang.ClassCastException")
+    (check "with-redefs to a fn of a string, boxed" (victim-boxed 5) "s"))
+  (with-redefs [victim other]
+    (check "with-redefs to another compiled primitive fn" [(victim-user 5) (victim-sum 5) (victim-boxed 5)] [15 16 15]))
+  (check "victim again" [(victim-user 5) (victim-sum 5) (victim-boxed 5)] [10 11 10])
+  (alter-var-root #'victim (constantly add1))
+  (check "alter-var-root to another compiled primitive fn" [(victim-user 5) (victim-sum 5) (victim-boxed 5)] [6 7 6])
+  (in-test-ns '(defn victim ^long [^long x] (- x)))
+  (check "a defn evaluated at run time" [(victim-user 5) (victim-sum 5) (victim-boxed 5)] [-5 -4 -5])
+  (check "worker fib" [(fib 20) (fib-caller)] [6765 610])
+  (let [x (Long/valueOf 123456)]
+    (check "worker: a parameter returned is the caller's" (identical? x (keep-n x)) true)
+    (check "worker: one box per parameter" (let [[a b] (twice 123456)] (identical? a b)) true)
+    (check "worker: the caller's box twice" (let [[a b] (twice x)] (and (identical? a x) (identical? b x))) true)
+    (check "worker: called with the caller's own parameter" (identical? x (wcall-same x)) true))
+  (check "worker: a fresh value" (wcall big) 999999)
+  (check "worker overflow" (thrown (winc Long/MAX_VALUE)) ["java.lang.ArithmeticException" "long overflow"])
+  (check "worker inc' promotes" (wincp Long/MAX_VALUE) 9223372036854775808N)
+  (check "worker ratio" (wdiv 10) 10/3)
+  (check "worker of a ratio" (winc 1/2) 3/2)
+  (check "worker of a double" (winc 1.5) 2.5)
+  (check "worker of a bigint" (class (winc 5N)) arbace.lang.BigInt)
+  (check "worker of an int" [(winc (int 5)) (class (winc (int 5)))] [6 Long])
+  (check "worker of nil" (first (thrown (winc nil))) "java.lang.NullPointerException")
+  (check "worker of a string" (first (thrown (winc "s"))) "java.lang.ClassCastException")
+  (check "worker, two parameters" [(wmix 2 "a") (wmix -1 "b") (wmix 2.5 :k)] ["a3" "b" ":k3.5"])
+  (check "worker closure" [(wclose 7) (wclose -7)] [7 -8])
+  (with-redefs [keep-n (fn [n] [:redef n])]
+    (check "worker calling a redefined fn" (wcall 5) [:redef 4]))
+  (in-test-ns '(defn fib [n] 3))
+  (check "worker fib redefined" [(fib 20) (fib-caller)] [3 3])
+  (in-test-ns '(defn fib-prim ^long [^long n] 8))
+  (check "fib-prim redefined: the compiled callers see it" [(fib-prim 20) (sum2 1 2)] [8 5])
+  (when-not (every? second @results)
+    (System/exit 1)))

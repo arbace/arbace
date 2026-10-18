@@ -139,6 +139,7 @@
   makes its classes run-time ones, and the others are compiled again until none fails anew."
   [us want]
   (let [all-rt (apply arbace.set/union #{} (map (comp source-classes second) us))
+        var-fns (e/var-fns (for [[_ ss] us, [u _] ss] u))
         proxies (set (for [[_ ss] us, ev (events ss) :when (= "proxy" (first ev))] (nth ev 1)))]
     (loop [failed #{}]
       (let [compiled (remove (fn [[src _]] (or (not (want src)) (failed src))) us)
@@ -150,7 +151,7 @@
             sites (atom [])
             results (doall
                       (for [[src ss] compiled]
-                        (binding [e/*link* sites]
+                        (binding [e/*link* sites e/*var-fns* var-fns]
                           (let [before @classes]
                             (try
                               {:src src :loader (e/emit-source classes rt fn-names pools src ss)}
@@ -364,7 +365,7 @@
               (sym! (:tag m))
               (run! sym! (:param-tags m)))
             (cond
-              (and (seq? x) (= 'c2j/link (first x))) (let [{:keys [root args]} (second x)] (walk root) (run! walk args))
+              (and (seq? x) (= 'c2j/link (first x))) (let [{:keys [root args parts]} (second x)] (walk root) (run! walk args) (walk parts))
               (or (seq? x) (vector? x)) (run! walk x)
               (symbol? x) (sym! x)
               :else nil))]
@@ -389,7 +390,7 @@
   in another package than its code's is linked only when the packages' graph, the classes the
   tree's top-level forms (tops: [package form]) name and the links taken so far, does not reach
   the caller's package from the code's; the sites are taken in the order emitted. The result:
-  id → [cname variadic]."
+  id → [cname variadic prims specs]."
   [sites classes fn-names tops pkg-of-class]
   (let [g (atom {})]
     (doseq [[p f] tops
@@ -411,16 +412,21 @@
                                (when-not (reaches? @g q p)
                                  (swap! g update p (fnil conj #{}) q)
                                  true)))]
-            [id [cname (:variadic rec)]]))))
+            [id [cname (:variadic rec) (:prims rec) (:specs rec)]]))))
 
 (defn- linker
   "The resolution of link markers (arbace.c2j.emit/link-form) by plan (link-plan): the guarded
   direct call, or the generic one. Counts the sites in links (:linked, :generic)."
   [plan links]
   (fn [m]
-    (let [[cname variadic] (get plan (:id (second m)))]
+    (let [[cname variadic prims specs] (get plan (:id (second m)))
+          d (second m)]
       (swap! links update (if cname :linked :generic) (fnil inc 0))
-      (e/link-form m cname variadic))))
+      (when (and cname (:psig d) (= (:psig d) (get prims (count (:args d)))))
+        (swap! links update :prim (fnil inc 0)))
+      (when (and cname (:smask d) (= (:smask d) (get specs (count (:args d)))))
+        (swap! links update :spec (fnil inc 0)))
+      (e/link-form m cname variadic prims specs))))
 
 (defn- run*
   "Compiles sources (or all recorded) into directory out; returns the report."
