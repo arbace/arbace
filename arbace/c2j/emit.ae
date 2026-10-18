@@ -587,7 +587,7 @@
       (when (or (not= r Object) (some #(not= % Object) ps))
         {:params ps :ret r}))))
 
-(declare intrinsic-probe)
+(declare intrinsic-probe long-valued-ops)
 
 (defn- walk-nodes
   "Calls f on the node (map) of each Expr of the tree of e, not inside the methods of nested
@@ -607,17 +607,33 @@
 
 (defn- spec-mask
   "Futamura F6, step 2: which parameters of FnMethod mn (its node) a speculative worker takes as
-  longs: those an operation of Numbers with fast paths takes as an Object operand (F3); nil when
-  none, or when the method has an unboxed entry (psig), is variadic, has more than 4 parameters,
-  or recurs to its parameters (a recur would rebind them to values of any type)."
+  longs: those an operation of Numbers with fast paths takes as an Object operand (F3), when the
+  method also passes one of them, or such an operation of them, to a call of a var (where a
+  worker may take it unboxed: the worker's gain; a fn whose parameters only meet operations,
+  as arbace.core's +, would pay the dispatch for nothing); nil when there are none, or when the
+  method has an unboxed entry (psig), is variadic, has more than 4 parameters, or recurs to its
+  parameters (a recur would rebind them to values of any type)."
   [mn]
   (when (and (= "fn-method" (:op mn)) (not (:restParm mn)) (<= 1 (count (:reqParms mn)) 4) (not (psig mn)))
     (let [ps (vec (:reqParms mn))
           used (atom #{})
-          recurs (atom false)]
+          recurs (atom false)
+          passes (atom false)
+          param? (fn [a] (let [an (node a)] (and (= "local" (:op an)) (some #(identical? % (:b an)) ps))))]
       (walk-nodes (:body mn)
                   (fn [n]
                     (case (:op n)
+                      "invoke"
+                      (when (and (= "var" (:op (node (:fexpr n))))
+                                 (some (fn [a]
+                                         (or (param? a)
+                                             (let [an (node a)
+                                                   ^java.lang.reflect.Method m (:method an)]
+                                               (and (= "static-method" (:op an)) m (intrinsic-probe m)
+                                                    (contains? long-valued-ops (.getName m))
+                                                    (some param? (:args an))))))
+                                       (:args n)))
+                        (reset! passes true))
                       "recur" (when (and (= (count (:loopLocals n)) (count ps))
                                          (every? true? (map identical? (:loopLocals n) ps)))
                                 (reset! recurs true))
@@ -630,7 +646,7 @@
                                 :when (identical? lb (:b an))]
                           (swap! used conj i)))
                       nil)))
-      (when (and (seq @used) (not @recurs))
+      (when (and (seq @used) @passes (not @recurs))
         (mapv #(contains? @used %) (range (count ps)))))))
 
 (defn- site-spec
