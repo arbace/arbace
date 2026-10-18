@@ -2392,6 +2392,10 @@ wrappers). The table: 45 packages, 808 signatures, 255 invokers, 22 adapters.
 9. **The box's oracle** leaves `forms/go.ae` out (`bin/gate --full`'s box-oracle step,
    `--exclude forms/go.`): `go/run-compiled` has no toolchain in the box, and goi's crossings
    there are not checked yet (GC25).
+10. **The differential check** (`bin/diffcheck`, Futamura F2) leaves `forms/go.ae` out of Clojure's
+   pair (`test/diffcheck/gen.ae`): its Go forms are calls of `arbace.go.repl` at run time whether
+   evaluated or compiled by c2j, and its `go.*` namespaces are not the pair's corpus namespaces;
+   goi's own pair is the check (§11).
 
 **Proposals for the user** (each built as recommended):
 
