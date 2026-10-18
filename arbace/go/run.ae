@@ -1,0 +1,64 @@
+(ns arbace.go.run
+  "bin/goi run ROOT NS [ARG...] (doc/go/GOI-SPEC.md §2.7, §11): an interpreted Go program in
+  program mode. The package of namespace NS is read from the forms root ROOT (its package file
+  ROOT/go/....ae), checked against the table's digest, built eagerly (so that the builder's
+  errors show before anything runs), initialized and run: os.Exit exits, an uncaught panic is
+  reported as gc reports it (status 2), os.Args is NS and the arguments.
+
+  What goi cannot run (§11.3) ends the run before it starts, on standard error:
+  goi: unsupported: REASON, status 125 (a form of a later milestone, an import neither listed in
+  the table nor interpreted); goi: error: MESSAGE, status 126 (a check error or a builder's
+  failure: goi's bug on a valid program)."
+  (:require [arbace.string :as str]
+            [arbace.go.repl :as repl]
+            [arbace.go.check.load :as load]
+            [arbace.go.build :as b])
+  (:import (arbace.lang GoInterp)
+           (java.io File)))
+
+(defn- fail [status ^String kind ^String msg]
+  (binding [*out* *err*]
+    (println (str "goi: " kind ": " (first (str/split-lines (str msg)))))
+    (flush))
+  (System/exit status))
+
+(defn run
+  "Runs the program of package file pf (forms root root) with args: its exit status."
+  [root ^File pf args]
+  (let [src (load/package-source {:dir root} nil @repl/config pf)
+        _ (when (empty? (:files src)) (fail 125 "unsupported" "no Go files for the configuration"))
+        r (repl/check-source src nil)
+        errs (:errors r)]
+    (when-let [bi (some #(when (= :BrokenImport (:code %)) %) errs)]
+      (fail 125 "unsupported" (str "an import neither in the table nor interpreted: " (:msg bi))))
+    (when (seq errs)
+      (fail 126 "error" (str "check: " (:file (first errs)) ":" (:line (first errs)) ": " (:msg (first errs)))))
+    (let [st (atom {:path (:path src) :name (:name src) :ns (symbol (str "goi.run." (:name src))) :config (:config src)
+                    :files [] :funcs {} :globals {} :types {}})]
+      (swap! repl/packages assoc (:path src) st)
+      (let [{:keys [inits init-funcs main]} (repl/define! st r {:vars? false :eager true})]
+        (when-not main
+          (fail 126 "error" "no main function"))
+        (b/op "SetOSArgs" (object-array (cons (str (.getName pf)) args)))
+        (b/op "RunProgram" (object-array (cons inits init-funcs)) main)))))
+
+(defn -main
+  "bin/goi run's Arbace side: ROOT NS [ARG...]."
+  [& args]
+  (let [[root ns-name & pargs] args]
+    (when-not (and root ns-name)
+      (binding [*out* *err*] (println "usage: arbace -m arbace.go.run ROOT NS [ARG...]"))
+      (System/exit 2))
+    (let [pf (File. (str root "/" (load/ns->file ns-name)))]
+      (when-not (.isFile pf)
+        (fail 126 "error" (str "no package file " pf)))
+      (let [status (try
+                     (run root pf pargs)
+                     (catch Throwable ex
+                       (let [d (ex-data ex)
+                             u (or (:goi/unsupported d)
+                                   (when-let [m (.getMessage ex)] (when (str/includes? m "not supported by goi yet") m)))]
+                         (if u
+                           (fail 125 "unsupported" u)
+                           (fail 126 "error" (str (.getName (class ex)) ": " (.getMessage ex)))))))]
+        (System/exit (int status))))))

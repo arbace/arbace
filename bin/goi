@@ -163,6 +163,204 @@ size() {
   echo "goi table --size: with the table but no typed invokers $noinv (the invokers: $((full - noinv)) bytes)"
 }
 
+# run_exe: the executable that interprets Go forms (GOI_RUN_EXE, else the build's), built when missing
+run_exe() {
+  local exe=${GOI_RUN_EXE:-$root/target/arbace-go/amd64/arbace}
+  if [ ! -x "$exe" ]; then
+    echo "bin/goi: no executable $exe (bin/arbace-go --build)" >&2
+    return 1
+  fi
+  echo "$exe"
+}
+
+# gc_env: Go's environment for gc's builds of printed forms (TamaGo's go1.27.1, GOPATH mode)
+gc_env() {
+  echo GOROOT="$goroot" GOTOOLCHAIN=local GOFLAGS= GO111MODULE=off GOPROXY=off GOEXPERIMENT= CGO_ENABLED=0 \
+    GOOS=linux GOARCH=amd64 GOAMD64=v1 GOCACHE="${GOI_GOCACHE:-$(env GOROOT="$goroot" "$goroot/bin/go" env GOCACHE)}"
+}
+
+# stderr_head FILE: stderr up to the first line that starts with "goroutine " (§11.1), the
+# addresses of a [signal ...] line normalized
+stderr_head() {
+  awk '/^goroutine /{exit} {print}' "$1" | sed -E 's/^\[signal ([A-Z]+): (.*) code=0x[0-9a-f]+ addr=0x[0-9a-f]+ pc=0x[0-9a-f]+\]$/[signal \1: \2 code=X addr=X pc=X]/'
+}
+
+# run_tests [--gc] [--regen]: goi's interpreter tests, test/goi/run/go/t/NAME.ae: each program run
+# by bin/goi run, its standard output, standard error (up to the goroutines' traces) and exit
+# status against NAME.out, NAME.err, NAME.exit; --gc builds each with gc (printed by repr/go)
+# and requires gc's to be them too; --regen writes them from gc's run
+run_tests() {
+  local gc="" regen="" exe t n f pass=0 failn=0 st
+  for a in "$@"; do case $a in --gc) gc=1 ;; --regen) regen=1; gc=1 ;; esac; done
+  exe=$(run_exe) || return 1
+  t=$root/.tmp/goi-test/run
+  mkdir -p "$t"
+  for f in "$root"/test/goi/run/go/t/*.ae; do
+    n=$(basename "$f" .ae)
+    if [ -n "$gc" ]; then
+      rm -rf "$t/$n.gc"; mkdir -p "$t/$n.gc"
+      (cd "$root" && bin/repr-go print "$f" "$t/$n.gc/src") > "$t/$n.gc/print.log" 2>&1 \
+        || { echo "goi test: printing $n failed" >&2; failn=$((failn + 1)); continue; }
+      (cd "$t/$n.gc/src" && env $(gc_env) "$goroot/bin/go" build -o ../exe .) > "$t/$n.gc/build.log" 2>&1 \
+        || { echo "goi test: gc's build of $n failed: $(head -3 "$t/$n.gc/build.log")" >&2; failn=$((failn + 1)); continue; }
+      st=0; (cd "$goroot/test" && timeout 60 "$t/$n.gc/exe" > "$t/$n.gc/out" 2> "$t/$n.gc/err.raw") || st=$?
+      echo $st > "$t/$n.gc/exit"
+      stderr_head "$t/$n.gc/err.raw" > "$t/$n.gc/err"
+      if [ -n "$regen" ]; then
+        cp "$t/$n.gc/out" "${f%.ae}.out"; cp "$t/$n.gc/err" "${f%.ae}.err"; cp "$t/$n.gc/exit" "${f%.ae}.exit"
+      elif ! cmp -s "$t/$n.gc/out" "${f%.ae}.out" || ! cmp -s "$t/$n.gc/err" "${f%.ae}.err" || ! cmp -s "$t/$n.gc/exit" "${f%.ae}.exit"; then
+        echo "goi test: gc's run of $n differs from its expected output (bin/goi test --regen)" >&2; failn=$((failn + 1)); continue
+      fi
+    fi
+    st=0; (cd "$goroot/test" && timeout 60 "$exe" -m arbace.go.run "$root/test/goi/run" "go.t.$n" > "$t/$n.out" 2> "$t/$n.err.raw") || st=$?
+    echo $st > "$t/$n.exit"
+    stderr_head "$t/$n.err.raw" > "$t/$n.err"
+    if cmp -s "$t/$n.out" "${f%.ae}.out" && cmp -s "$t/$n.err" "${f%.ae}.err" && cmp -s "$t/$n.exit" "${f%.ae}.exit"; then
+      pass=$((pass + 1))
+    else
+      failn=$((failn + 1))
+      echo "goi test: $n differs (status $st, expected $(cat "${f%.ae}.exit")):" >&2
+      diff "${f%.ae}.out" "$t/$n.out" | head -20 >&2
+      diff "${f%.ae}.err" "$t/$n.err" | head -10 >&2
+    fi
+  done
+  echo "goi test: the interpreter's programs (test/goi/run): $pass passed, $failn failed"
+  [ "$failn" = 0 ]
+}
+
+# action_of GOFILE: the test driver's action line of a $GOROOT/test program (cmd/internal/testdir:
+# the first line of its header that is not a build constraint, without the //)
+action_of() {
+  awk 'NF==0{exit} /^\/\/go:build/{next} /^\/\/ \+build/{next} {sub(/^\/\/ ?/, ""); print; exit}' "$1"
+}
+
+# check_one PROGRAM: one program of the check (§11.1): gc's reference (the forms printed by
+# repr/go, built by gc, run; cached by the forms' and the toolchain's hashes) and goi's run
+# (bin/goi run, program mode), compared: exit status, standard output byte for byte, standard
+# error up to the goroutines' traces. Prints PROGRAM<TAB>RESULT<TAB>REASON.
+check_one() {
+  local p=$1 g=$goroot/test/$1 f act args=() tmo=10 ns key ref r rc gst st reason
+  f=$cforms/go/test/${p%.go}.ae
+  [ -f "$f" ] || { printf '%s\terror\tno forms (%s)\n' "$p" "${f#$root/}"; return; }
+  act=$(action_of "$g")
+  set -- $act
+  shift
+  while [ $# -gt 0 ] && [ "${1#-}" != "$1" ]; do
+    case $1 in
+      -t) tmo=$2; shift 2 ;;
+      *) printf '%s\tskip\tthe action needs gc flags: %s\n' "$p" "$act"; return ;;
+    esac
+  done
+  args=("$@")
+  ns=$(sed -n '1s/^(ns \([^ )]*\).*/\1/p' "$f")
+  key=$( { cat "$goroot/VERSION"; cat "$f"; [ -d "${f%.ae}" ] && find "${f%.ae}" -type f -name '*.ae' | LC_ALL=C sort | xargs cat; printf '%s\n' "${args[@]}"; } | sha256sum | cut -c1-24)
+  ref=$cwork/ref/$key
+  if [ ! -f "$ref/exit" ]; then
+    rm -rf "$ref.tmp"; mkdir -p "$ref.tmp"
+    if ! (cd "$root" && REPR_GO_EXE=$hexe bin/repr-go print "$f" "$ref.tmp/src") > "$ref.tmp/print.log" 2>&1; then
+      printf '%s\terror\tgc reference: printing failed\n' "$p"; return
+    fi
+    if ! (cd "$ref.tmp/src" && env $(gc_env) "$goroot/bin/go" build -o ../exe .) > "$ref.tmp/build.log" 2>&1; then
+      printf '%s\terror\tgc reference: build failed: %s\n' "$p" "$(head -1 "$ref.tmp/build.log")"; return
+    fi
+    gst=0; (cd "$goroot/test" && timeout $((tmo * 3)) "$ref.tmp/exe" "${args[@]}" > "$ref.tmp/out" 2> "$ref.tmp/err.raw" < /dev/null) || gst=$?
+    stderr_head "$ref.tmp/err.raw" > "$ref.tmp/err"
+    echo $gst > "$ref.tmp/exit"
+    rm -f "$ref.tmp/exe"
+    rm -rf "$ref"; mv "$ref.tmp" "$ref"
+  fi
+  r=$cwork/run/$p
+  mkdir -p "$(dirname "$r")"
+  st=0; (cd "$goroot/test" && timeout "$tmo" "$rexe" -m arbace.go.run "$cforms" "$ns" "${args[@]}" > "$r.out" 2> "$r.err.raw" < /dev/null) || st=$?
+  stderr_head "$r.err.raw" > "$r.err"
+  case $st in
+    125) printf '%s\tunsupported\t%s\n' "$p" "$(sed -n 's/^goi: unsupported: //p' "$r.err.raw" | head -1)"; return ;;
+    126) printf '%s\terror\t%s\n' "$p" "$(sed -n 's/^goi: error: //p' "$r.err.raw" | head -1 | cut -c1-300)"; return ;;
+    124) printf '%s\terror\ttimeout (%s s)\n' "$p" "$tmo"; return ;;
+  esac
+  if [ "$st" = "$(cat "$ref/exit")" ] && cmp -s "$r.out" "$ref/out" && cmp -s "$r.err" "$ref/err"; then
+    printf '%s\tpass\t\n' "$p"
+  else
+    reason="status $st (gc $(cat "$ref/exit"))"
+    cmp -s "$r.out" "$ref/out" || reason="$reason, stdout differs"
+    cmp -s "$r.err" "$ref/err" || reason="$reason, stderr differs: $(diff "$ref/err" "$r.err" | grep '^[<>]' | head -2 | tr '\n' ' ' | cut -c1-200)"
+    printf '%s\tfail\t%s\n' "$p" "$reason"
+  fi
+}
+
+# check [--record] [--jobs N] [--essential] [--only REGEX]: the check (§11): every run program of
+# $GOROOT/test (the corpus linux-test, repr/go's conversion: bin/repr-go read --corpus linux-test,
+# run first when missing) interpreted against gc; results in .tmp/goi-check/results.tsv, against
+# the reference test/goi/check-linux-amd64.edn (a program passing there and not now fails the
+# check; --record writes it) and the known differences test/goi/check-known.edn
+check() {
+  local record="" jobs=16 only="" essential="" ref=$root/test/goi/check-linux-amd64.edn known=$root/test/goi/check-known.edn
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --record) record=1; shift ;;
+      --jobs) jobs=$2; shift 2 ;;
+      --only) only=$2; shift 2 ;;
+      --essential) essential=1; shift ;;
+      *) echo "bin/goi check: unknown option $1" >&2; return 2 ;;
+    esac
+  done
+  rexe=$(run_exe) || return 1
+  . "$root/bin/lib/host.bash"
+  hexe=$(arbace_host_exe) || return 1
+  cforms=$root/.tmp/repr-go/forms/linux-test
+  cwork=$root/.tmp/goi-check
+  mkdir -p "$cwork/ref" "$cwork/run"
+  if [ ! -d "$cforms" ]; then
+    echo "== bin/repr-go read --corpus linux-test (.tmp/goi-check/read.log)" >&2
+    "$root/bin/repr-go" read --corpus linux-test > "$cwork/read.log" 2>&1 || { tail "$cwork/read.log" >&2; return 1; }
+  fi
+  local list=$cwork/programs.txt
+  (cd "$goroot/test" && find . -name '*.go' | sed 's|^\./||' | LC_ALL=C sort) | while read -r p; do
+    [ -f "$cforms/go/test/${p%.go}.ae" ] || continue
+    case $(action_of "$goroot/test/$p") in run|"run "*) echo "$p" ;; esac
+  done > "$list"
+  [ -n "$essential" ] && grep -v '^#' "$root/test/goi/essential.txt" | grep . > "$list.ess" && mv "$list.ess" "$list"
+  [ -n "$only" ] && { grep -E "$only" "$list" > "$list.only" || true; mv "$list.only" "$list"; }
+  echo "== goi check: $(wc -l < "$list") programs, $jobs at a time" >&2
+  export -f check_one action_of stderr_head gc_env
+  export root goroot rexe hexe cforms cwork
+  local t0=$SECONDS
+  xargs -a "$list" -P "$jobs" -I{} bash -c 'check_one "$1"' _ {} | LC_ALL=C sort > "$cwork/results.tsv"
+  # the known differences: a program listed there is known, with its reason, unless it passes
+  if [ -f "$known" ]; then
+    sed -n 's/^ *\["\([^"]*\)" "\(.*\)"\]$/\1\t\2/p' "$known" > "$cwork/known.tsv"
+    awk -F'\t' 'NR==FNR { k[$1] = $2; next }
+                 ($1 in k) && $2 != "pass" { $2 = "known"; $3 = k[$1] } { print $1 "\t" $2 "\t" $3 }' "$cwork/known.tsv" "$cwork/results.tsv" > "$cwork/results.k" \
+      && mv "$cwork/results.k" "$cwork/results.tsv"
+  fi
+  local total pass fail err uns kn skip
+  total=$(wc -l < "$cwork/results.tsv")
+  pass=$(awk -F'\t' '$2=="pass"' "$cwork/results.tsv" | wc -l); fail=$(awk -F'\t' '$2=="fail"' "$cwork/results.tsv" | wc -l)
+  err=$(awk -F'\t' '$2=="error"' "$cwork/results.tsv" | wc -l); uns=$(awk -F'\t' '$2=="unsupported"' "$cwork/results.tsv" | wc -l)
+  kn=$(awk -F'\t' '$2=="known"' "$cwork/results.tsv" | wc -l); skip=$(awk -F'\t' '$2=="skip"' "$cwork/results.tsv" | wc -l)
+  echo "goi check: $total programs: $pass pass, $fail fail, $err error, $uns unsupported, $kn known, $skip skipped; $((SECONDS - t0)) s"
+  awk -F'\t' '$2=="fail" || $2=="error"' "$cwork/results.tsv" | head -30 | sed 's/^/   /'
+  if [ -n "$record" ]; then
+    { echo ";; goi's check (doc/go/GOI-SPEC.md §11.3): every run program of \$GOROOT/test (linux/amd64) and its"
+      echo ";; result, pass, fail, error, unsupported (with the reason), known or skip. bin/goi check --record"
+      echo "["
+      awk -F'\t' '{ gsub(/\\/, "\\\\", $3); gsub(/"/, "\\\"", $3); printf " [\"%s\" :%s \"%s\"]\n", $1, $2, $3 }' "$cwork/results.tsv"
+      echo "]"; } > "$ref"
+    echo "   recorded $ref"
+    return 0
+  fi
+  [ -f "$ref" ] || { echo "   no reference $ref (bin/goi check --record)" >&2; return 1; }
+  local regress
+  sed -n 's/^ *\["\([^"]*\)" :pass.*/\1/p' "$ref" > "$cwork/ref-pass.txt"
+  regress=$(awk -F'\t' 'NR==FNR { p[$1] = 1; next }
+                        ($1 in p) && $2 != "pass" { print "   regression: " $1 ": " $2 " " $3 }' "$cwork/ref-pass.txt" "$cwork/results.tsv")
+  if [ -n "$regress" ]; then
+    echo "$regress"
+    return 1
+  fi
+  echo "   no regression against $(basename "$ref")"
+}
+
 usage() { sed -n '2,/^set -euo/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'; }
 
 cmd=${1:-}
@@ -195,6 +393,7 @@ case $cmd in
     done
     if [ -n "$regen" ]; then
       arbace_tool -p "$root/test" -e "(require 'goi.check-test) (goi.check-test/regen-checked!) (shutdown-agents)"
+      run_tests --regen
       exit
     fi
     arbace_tool -p "$root/test" -e "
@@ -205,7 +404,12 @@ case $cmd in
     if [ -n "$gc" ]; then
       mkdir -p "$root/.tmp/goi-test"
       arbace_tool -p "$root/test" -m goi.gc-errors "$root/.tmp/goi-test/gc"
-    fi ;;
+    fi
+    run_tests ${gc:+--gc} ${regen:+--regen} ;;
+  run)
+    [ $# -ge 2 ] || { echo "usage: bin/goi run ROOT NS [ARG...]" >&2; exit 2; }
+    exec "$(run_exe)" -m arbace.go.run "$@" ;;
+  check) check "$@" ;;
   ""|-h|--help|help) usage ;;
   *) echo "bin/goi: unknown command $cmd (bin/goi --help)" >&2; exit 2 ;;
 esac

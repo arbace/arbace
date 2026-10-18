@@ -1,0 +1,505 @@
+(ns arbace.go.repl
+  "goi's REPL state (doc/go/GOI-SPEC.md §2): interpreted Go packages as namespaces, their files
+  and declarations, checking (arbace.go.check) against the table's digest and the other
+  interpreted packages, defining their vars (functions, variables, constants, types and their
+  generations), loading packages from ARBACE_PATH (the declarations queued, the package checked
+  when its package file's load ends: S6), initialization, go/eval, and running a program in
+  program mode (bin/goi run: arbace.go.run).
+
+  A package's state is an atom {:path :name :ns :config :files [{:name :imports :decls}]
+  :current (the REPL's file) :loading (the package file being loaded) :funcs {name *Func}
+  :globals {name {:ptr :key}} :types {name {:gen :key :desc}} :checked (the last result)}."
+  (:require [arbace.string :as str]
+            [arbace.go.check :as ck]
+            [arbace.go.check.env :as e]
+            [arbace.go.check.types :as t]
+            [arbace.go.check.const :as c]
+            [arbace.go.check.code :as code]
+            [arbace.go.check.load :as load]
+            [arbace.go.build :as b]
+            [arbace.repr.go.print :as rp])
+  (:import (arbace.lang GoInterp GoFn GoVar GoType Namespace)
+           (java.io File)))
+
+;;; The table and the digest (§6)
+
+(def ^:private listed (delay (set (GoInterp/paths))))
+
+(defn listed?
+  "Whether import path p is a package of the table of compiled packages (§6.6)."
+  [p]
+  (contains? @listed p))
+
+(def ^:private digest-index
+  (delay
+    (when-let [^String s (GoInterp/digest)]
+      (let [nl (.indexOf s "\n")]
+        {:index (read-string (subs s 0 nl)) :text s :start (inc nl)}))))
+
+(defn digest-forms
+  "The digest's forms of listed package p (§6.5), read with line numbers, or nil."
+  [p]
+  (when-let [{:keys [index ^String text start]} @digest-index]
+    (when-let [[a b] (get index p)]
+      (ck/read-string-forms (subs text (+ start a) (+ start b))))))
+
+(def config
+  "The program's configuration (:goos, :goarch), as the digest's packages say it."
+  (delay
+    (let [fs (digest-forms "fmt")
+          gp (first (filter #(and (seq? %) (= 'go/package (first %))) fs))
+          cfg (:config (apply hash-map (nnext gp)))]
+      (merge {:goos "linux" :goarch "amd64" :lang "go1.27"} cfg))))
+
+(def ^:private digest-session
+  "The checking session of the table's packages, read from the digest (one per process)."
+  (delay
+    (ck/session (fn [path importer]
+                  (when (listed? path)
+                    (when-let [fs (digest-forms path)]
+                      (ck/forms-source fs @config)))))))
+
+;;; Packages
+
+(defonce ^{:doc "The interpreted packages by import path: atoms of their states."} packages (atom {}))
+
+(defn path->ns
+  "The namespace of import path p (SPEC.md §4.1)."
+  [^String p]
+  (symbol (load/path->ns p)))
+
+(defn ns->path
+  "The import path of a go.* namespace name (S2): the segments after go. joined by /."
+  [ns-name]
+  (str/join "/" (rest (str/split (str ns-name) #"\."))))
+
+(defn- new-state [path nm ns-sym]
+  (atom {:path path :name nm :ns ns-sym :config @config :files [] :current "repl.go"
+         :funcs {} :globals {} :types {} :defined #{}}))
+
+(defn package-state
+  "The state of the package of namespace ns-sym, made implicitly (S2) for a go.* namespace."
+  ([ns-sym] (package-state ns-sym true))
+  ([ns-sym create?]
+   (let [s (str ns-sym)]
+     (when-not (str/starts-with? s "go.")
+       (throw (ex-info (str "Go declarations belong in a go.* namespace (" s " is not one)") {:ns ns-sym})))
+     (let [path (ns->path ns-sym)]
+       (or (get @packages path)
+           (when create?
+             (when (listed? path)
+               (throw (ex-info (str "the package " path " is a compiled package of the table: it cannot be interpreted (S1)") {:path path})))
+             (let [st (new-state path (last (str/split path #"/")) ns-sym)]
+               (swap! packages assoc path st)
+               st)))))))
+
+(defn package!
+  "go/package: the namespace's package (its name, :path, :files ...); in a load, the load's start."
+  [ns-sym nm opts]
+  (let [opts (apply hash-map opts)
+        path (or (:path opts) (ns->path ns-sym))
+        st (or (get @packages path) (let [st (new-state path (str nm) ns-sym)] (swap! packages assoc path st) st))]
+    (swap! st assoc :name (rp/name-text nm) :ns ns-sym :opts opts :package-path path
+           :config (merge @config (:config opts) (when (:lang opts) {:lang (:lang opts)})))
+    (when (:files opts)
+      ;; a package file: the load of its files starts (§2.3), its declarations queued
+      (swap! st assoc :loading true :files []))
+    nil))
+
+(defn- file-entry [st fname]
+  (some #(when (= fname (:name %)) %) (:files @st)))
+
+(defn- update-file [st fname f]
+  (swap! st update :files
+         (fn [fs]
+           (if (some #(= fname (:name %)) fs)
+             (mapv #(if (= fname (:name %)) (f %) %) fs)
+             (conj fs (f {:name fname :opts {} :imports [] :decls []}))))))
+
+(defn file!
+  "go/file: the namespace's current file, its imports replaced (S5)."
+  [ns-sym fname opts]
+  (let [st (package-state ns-sym)]
+    (update-file st fname #(assoc % :opts (dissoc opts :doc) :imports (vec (:imports opts))
+                                  :decls (if (:loading @st) [] (:decls %))))
+    (swap! st assoc :current fname)
+    nil))
+
+(defn import!
+  "go/import at the REPL: import specs added to the current file (S5)."
+  [ns-sym specs]
+  (let [st (package-state ns-sym)]
+    (when (:loading @st)
+      (throw (ex-info "go/import in a package being loaded: a file's imports are its go/file's" {})))
+    (update-file st (:current @st) (fn [fi] (update fi :imports #(vec (distinct (into (or % []) specs))))))
+    nil))
+
+;;; Declarations' names
+
+(defn- decl-names
+  "The package-level names a declaration form declares (methods: T.M)."
+  [f]
+  (let [h (code/head-name f)
+        args (rest f)
+        targets (fn [tf] (if (= "values" (code/head-name tf)) (rest tf) [tf]))
+        group? (fn [args] (let [a (if (string? (first args)) (rest args) args)] (every? vector? a)))
+        specs (fn [args] (vec (if (string? (first args)) (rest args) args)))]
+    (case h
+      "go/func" [(rp/name-text (second f))]
+      "go/method" (let [more (drop 2 f)
+                        more (if (string? (first more)) (rest more) more)
+                        more (if (= :type-params (first more)) (drop 2 more) more)
+                        rf (first (first more))
+                        ty (if (and (symbol? rf) (:tag (meta rf))) (:tag (meta rf)) rf)
+                        ty (if (and (seq? ty) (= '* (first ty))) (second ty) ty)
+                        ty (if (seq? ty) (first ty) ty)]
+                    [(str ty "." (rp/name-text (second f)))])
+      ("go/var" "go/const") (if (group? args)
+                              (vec (for [[tf] (specs args) x (targets tf)] (rp/name-text x)))
+                              (vec (map rp/name-text (targets (first args)))))
+      "go/type" (if (group? args)
+                  (vec (for [[nf] (specs args)] (rp/name-text nf)))
+                  [(rp/name-text (first args))])
+      [])))
+
+;;; Checking (§3)
+
+(defn- error-text [errs]
+  (str/join "\n" (for [er (take 10 errs)] (str (:file er) ":" (:line er) ": " (:msg er)))))
+
+(defn source-of
+  "The checker's source of package state st (its files as they stand)."
+  [st]
+  (let [s @st]
+    {:path (:path s) :name (:name s) :config (:config s) :opts (or (:opts s) {})
+     :files (vec (for [fi (:files s)]
+                   {:name (:name fi) :opts (assoc (:opts fi) :imports (:imports fi))
+                    :imports (:imports fi) :decls (:decls fi)}))}))
+
+(declare load-import)
+
+(defn- session-for
+  "A checking session for an interpreted package: listed imports from the digest, interpreted
+  ones from their states (loaded from ARBACE_PATH when not yet: §2.3)."
+  [extra-src]
+  (assoc (ck/session (fn [path importer]
+                       (or (when extra-src (extra-src path))
+                           (when-let [st (load-import path)]
+                             (source-of st)))))
+         :delegate @digest-session
+         :local (fn [path] (not (listed? path)))))
+
+(defn check-source
+  "Checks src: the package's result (with its trees), its errors included."
+  [src extra-src]
+  (let [s (session-for extra-src)
+        pkg (ck/check-package src (#'ck/resolver s src []) :keep-trees true)]
+    (e/o pkg :result)))
+
+;;; Defining a checked package: cells, descriptors, vars
+
+(defn- type-key
+  "The structure of a type, its interpreted named types by name and generation (a named type's
+  generation is new when this changes: §2.5)."
+  [ty gen-of]
+  (cond
+    (keyword? ty) ty
+    (t/named? ty) (let [i (t/info ty)] [:named (:pkg i) (:name i) (when (gen-of ty) (gen-of ty))])
+    (t/tparam? ty) [:tparam (:name (t/info ty))]
+    :else (case (nth ty 0)
+            :struct [:struct (mapv #(-> % (update :type type-key gen-of) (dissoc :pkg)) (nth ty 1))]
+            :interface [:interface (count (nth ty 1))]
+            :func [:func (mapv #(type-key % gen-of) (nth ty 1)) (mapv #(type-key % gen-of) (nth ty 2)) (nth ty 3)]
+            :tuple (into [:tuple] (map #(type-key % gen-of) (rest ty)))
+            :array [:array (nth ty 1) (type-key (nth ty 2) gen-of)]
+            :chan [:chan (nth ty 1) (type-key (nth ty 2) gen-of)]
+            (into [(nth ty 0)] (map #(type-key % gen-of) (rest ty))))))
+
+(defn- state-of-path [p] (get @packages p))
+
+(defn build-context
+  "The builder's context for the package of state st."
+  [st]
+  {:path (:path @st) :name (:name @st)
+   :compiled? listed?
+   :types (java.util.HashMap.)
+   :lit-count (atom 0) :local-gen (atom 1000000)
+   :gen (fn [nt]
+          (let [i (t/info nt)]
+            (or (when-let [ps (state-of-path (:pkg i))] (get-in @ps [:types (:name i) :gen])) 1)))
+   :func-cell (fn [x]
+                (let [ps (state-of-path (e/o x :pkg))]
+                  (or (and ps (get-in @ps [:funcs (e/o x :name) :cell]))
+                      (throw (ex-info (str "goi: no function " (e/o x :pkg) "." (e/o x :name)) {})))))
+   :global (fn [x]
+             (let [ps (state-of-path (e/o x :pkg))]
+               (or (and ps (get-in @ps [:globals (e/o x :name)]))
+                   (throw (ex-info (str "goi: no variable " (e/o x :pkg) "." (e/o x :name)) {})))))})
+
+(defn- const-arbace
+  "A constant's value as Arbace takes it (§5.6)."
+  [ty v]
+  (let [b (t/under ty)]
+    (cond
+      (boolean? v) v
+      (string? v) (c/value-text v)
+      (c/complex? v) (GoInterp/complex (c/to-double (nth v 1)) (c/to-double (nth v 2)))
+      (and (keyword? b) (#{:float32 :untyped-float :float64} b)) (if (= :float32 b) (float (c/to-double v)) (c/to-double v))
+      (integer? v) v
+      :else (c/to-double v))))
+
+(defn define!
+  "Defines the checked package result r in state st: function cells (their code built on first
+  call, S18, or now when eager), variables' cells, types' generations; with vars?, the
+  namespace's vars (§2.1). Returns {:inits (the initializers' code in order, a *goi.Func) :init-funcs
+  (init cells in order) :main (cell or nil) :new-vars (names of variables made anew)}."
+  [st r {:keys [vars? eager only]}]
+  (let [ctx (build-context st)
+        decls (:decls r)
+        old @st
+        gen-of (fn [nt] (let [i (t/info nt)] (when (= (:pkg i) (:path old)) (get-in old [:types (:name i) :gen]))))
+        unsupported (some #(when (:unsupported %) %) decls)]
+    (when unsupported
+      (throw (ex-info (str "not supported by goi yet: " (:unsupported unsupported) " (GR6)")
+                      {:goi/unsupported (str (:unsupported unsupported) " (GR6)")})))
+    (binding [b/*ctx* ctx]
+      ;; types: a new generation when the underlying type changed (§2.5)
+      (let [type-decls (filter #(and (= :type (:kind %)) (not (e/o (:obj %) :alias))) decls)
+            types (into {}
+                        (for [d type-decls
+                              :let [x (:obj d) nm (e/o x :name) nt (e/o x :type)
+                                    k (type-key (t/under nt) gen-of)
+                                    prev (get-in old [:types nm])]]
+                          [nm {:key k :gen (cond (nil? prev) 1 (= k (:key prev)) (:gen prev) :else (inc (:gen prev)))}]))]
+        (swap! st assoc :types types))
+      ;; functions: a cell per name, kept while the signature is (G9)
+      (let [funcs (filter #(and (= :func (:kind %)) (not (:method %)) (not= "init" (e/o (:obj %) :name))) decls)
+            methods (filter #(and (= :func (:kind %)) (:method %)) decls)
+            new-funcs (into {}
+                            (for [d funcs
+                                  :let [x (:obj d) nm (e/o x :name)
+                                        k (type-key (e/o x :type) (:gen ctx))
+                                        prev (get-in old [:funcs nm])
+                                        cell (if (and prev (= k (:key prev))) (:cell prev) (b/op "FuncCell" nm (:name old) nil))]]
+                              [nm {:cell cell :key k :tree (:tree d) :obj x}]))
+            init-cells (vec (for [x (:inits r)]
+                              (let [d (some #(when (identical? (:obj %) x) %) decls)]
+                                {:cell (b/op "FuncCell" "init" (:name old) nil) :tree (:tree d)})))]
+        (swap! st assoc :funcs new-funcs)
+        ;; variables: a cell per name, kept while its type is (S10)
+        (let [var-objs (for [d decls :when (= :var (:kind d)) x (or (:lhs d) [(:obj d)]) :when (not= "_" (e/o x :name))] x)
+              new-vars (volatile! [])
+              globals (into {}
+                            (for [x (distinct var-objs)
+                                  :let [nm (e/o x :name)
+                                        k (type-key (e/o x :type) (:gen ctx))
+                                        prev (get-in old [:globals nm])]]
+                              (if (and prev (= k (:key prev)))
+                                [nm (assoc prev :obj x)]
+                                (do (vswap! new-vars conj nm)
+                                    [nm {:ptr (b/op "NewGlobal" (b/desc (e/o x :type))) :key k :obj x :type (e/o x :type)}]))))]
+          (swap! st assoc :globals globals)
+          ;; the functions' code: built on first call (S18), or now
+          (doseq [[nm {:keys [cell tree]}] new-funcs
+                  :when (or (nil? only) (contains? only nm))]
+            (if eager
+              (b/op "SetCode" cell (binding [b/*ctx* ctx] (b/build-func tree)) nil)
+              (b/op "SetCode" cell nil (fn [] (binding [b/*ctx* ctx] (b/build-func tree))))))
+          (doseq [{:keys [cell tree]} init-cells]
+            (b/op "SetCode" cell (binding [b/*ctx* ctx] (b/build-func tree)) nil))
+          (when (and eager (seq methods))
+            (b/unsupported! "methods" "GR4"))
+          ;; the initializers (in initialization order)
+          (let [var-trees (into {} (for [d decls :when (= :var (:kind d)) :when (= :var-init (:op (:tree d)))]
+                                     [(first (:lhs (:tree d))) (:tree d)]))
+                ordered (keep #(get var-trees (first %)) (:order r))
+                inits (b/op "FuncCell" "init.vars" (:name old) nil)
+                ordered (if only
+                          (filter #(some (fn [x] (contains? only (e/o x :name))) (:lhs %)) ordered)
+                          ordered)]
+            (b/op "SetCode" inits (b/build-inits ordered) nil)
+            ;; the namespace's vars (§2.1)
+            (when vars?
+              (let [ns (create-ns (:ns old))]
+                (doseq [[nm {:keys [cell obj]}] new-funcs]
+                  (intern ns (with-meta (symbol nm) {:go/kind :func :go/package (:path old) :line (e/o obj :line)
+                                                     :private (not (t/exported? nm))})
+                          (GoFn. (b/op "InterpCallable" cell (b/desc (e/o obj :type)) (str (:path old) "." nm))
+                                 (str (:path old) "." nm))))
+                (doseq [[nm {:keys [ptr obj]}] globals]
+                  (intern ns (with-meta (symbol nm) {:go/kind :var :go/package (:path old) :private (not (t/exported? nm))})
+                          (GoVar. (b/op "GlobalPtr" (b/desc (e/o obj :type)) ptr) (str (:path old) "." nm))))
+                (doseq [d decls :when (= :const (:kind d))
+                        :let [x (:obj d)] :when (not= "_" (e/o x :name))
+                        :when (t/valid? (e/o x :type))]
+                  (intern ns (with-meta (symbol (e/o x :name)) {:go/kind :const :go/package (:path old)
+                                                                 :private (not (t/exported? (e/o x :name)))})
+                          (const-arbace (e/o x :type) (e/o x :val))))
+                (doseq [d decls :when (= :type (:kind d))
+                        :let [x (:obj d)] :when (not (e/o x :tparams-count))]
+                  (try
+                    (intern ns (with-meta (symbol (e/o x :name)) {:go/kind :type :go/package (:path old)
+                                                                   :private (not (t/exported? (e/o x :name)))})
+                            (GoType. (b/desc (e/o x :type))))
+                    (catch Exception _ nil)))))
+            (swap! st assoc :checked r)
+            {:inits inits
+             :init-funcs (mapv :cell init-cells)
+             :main (when (= "main" (:name old)) (get-in new-funcs ["main" :cell]))
+             :new-vars @new-vars}))))))
+
+;;; Loading packages (§2.3)
+
+(defn call0
+  "Calls function cell f of no parameters and no results from Arbace (a panic: a GoPanic)."
+  [f ^String nm]
+  (GoInterp/call (b/op "InterpCallable" f (b/op "TFunc" (object-array []) (object-array []) false) nm)
+                 (object-array [])))
+
+(defn- complete!
+  "Completes package state st after its load: checked whole (a CompilerException-like error
+  listing every error), defined, initialized (§2.6)."
+  [st]
+  (swap! st dissoc :loading)
+  (let [r (check-source (source-of st) nil)]
+    (when (seq (:errors r))
+      (throw (ex-info (str "Go check errors in package " (:path @st) ":\n" (error-text (:errors r)))
+                      {:go/errors (:errors r)})))
+    (let [{:keys [inits init-funcs]} (define! st r {:vars? true})]
+      (call0 inits "init")
+      (doseq [f init-funcs]
+        (call0 f "init"))
+      st)))
+
+(defn after-load
+  "arbace.core/load's hook (§2.3, S6): the load of a resource (path, as load names it) ended
+  (ok: normally); a package whose package file it was is completed (a failed load forgets it)."
+  [^String path ok]
+  (let [p (if (str/starts-with? path "/") (subs path 1) path)]
+    (when (str/starts-with? p "go/")
+      (let [ns-name (str/replace (str/replace p "/" ".") "_" "-")]
+        (doseq [[path st] @packages]
+          (when (and (:loading @st) (= (str (:ns @st)) ns-name))
+            (if ok
+              (complete! st)
+              (swap! packages dissoc path))))))))
+
+(defonce ^:private hook-registered
+  (do (swap! arbace.lang.RT/AFTER_LOAD conj #'after-load) true))
+
+(defn load-import
+  "The state of interpreted package path, loaded from ARBACE_PATH (its namespace) when it is
+  not yet (§2.3), or nil."
+  [path]
+  (or (when-let [st (get @packages path)] (when-not (:loading @st) st))
+      (when-not (listed? path)
+        (let [ns-sym (path->ns path)]
+          (try
+            (require ns-sym)
+            (catch java.io.FileNotFoundException _ nil))
+          (when-let [st (get @packages path)]
+            (when-not (:loading @st) st))))))
+
+;;; Declaring at the REPL (§2.5)
+
+(defn declare!
+  "A declaration macro's form (go/func, go/var ...): queued in a load, else checked against the
+  package and defined at once (§2.5); returns the var of its first name."
+  [form {:keys [ns line]}]
+  (let [ns-sym (or ns (ns-name *ns*))
+        st (package-state ns-sym)]
+    (if (:loading @st)
+      (do (update-file st (:current @st) #(update % :decls conj form)) nil)
+      (let [names (set (decl-names form))
+            old @st
+            ;; the declaration replaces the package's declarations of its names
+            files (vec (for [fi (:files old)]
+                         (update fi :decls (fn [ds] (vec (remove #(some names (decl-names %)) ds))))))
+            files (if (some #(= (:current old) (:name %)) files)
+                    files
+                    (conj files {:name (:current old) :opts {} :imports [] :decls []}))
+            files (mapv #(if (= (:current old) (:name %)) (update % :decls conj form) %) files)
+            _ (swap! st assoc :files files)
+            r (try (check-source (source-of st) nil)
+                   (catch Throwable ex (swap! st assoc :files (:files old)) (throw ex)))
+            errs (remove #(= :UnusedImport (:code %)) (:errors r))]
+        (when (seq errs)
+          (swap! st assoc :files (:files old))
+          (throw (ex-info (str "Go check errors:\n" (error-text errs)) {:go/errors (vec errs)})))
+        (let [{:keys [inits new-vars init-funcs]} (try (define! st r {:vars? true})
+                                                       (catch Throwable ex (swap! st assoc :files (:files old)) (throw ex)))]
+          ;; a variable defined anew is initialized now, an init runs now (S11)
+          (when (and (= "go/var" (code/head-name form)) (seq new-vars))
+            (call0 inits "init"))
+          (when (and (= "go/func" (code/head-name form)) (= "init" (rp/name-text (second form))))
+            (call0 (last init-funcs) "init"))
+          (when-let [nm (first (decl-names form))]
+            (find-var (symbol (str (:ns old)) nm))))))))
+
+;;; go/eval (§2.4)
+
+(def ^:private eval-count (atom 0))
+
+(defn eval!
+  "go/eval: Go statements run as the body of a function of the namespace's package (go.user
+  outside go.*: S3); the last statement's value as Arbace's (§5.6)."
+  [stmts {:keys [ns]}]
+  (let [ns-sym (or ns (ns-name *ns*))
+        ns-sym (if (str/starts-with? (str ns-sym) "go.") ns-sym 'go.user)
+        st (package-state ns-sym)
+        nm (str "goi_eval" (swap! eval-count inc))
+        last-f (last stmts)
+        stmt? (and (seq? last-f) (contains? code/statement-heads (code/head-name last-f)))
+        attempt (fn [results]
+                  (let [form (apply list 'go/func (symbol nm) (concat (cond
+                                                                       (nil? results) [[]]
+                                                                       (= 1 results) [(with-meta [] {:tag 'any})]
+                                                                       :else [[] :results (vec (repeat results 'any))])
+                                                                     stmts))
+                        old @st
+                        files (mapv #(if (= (:current old) (:name %)) (update % :decls conj form) %)
+                                    (if (some #(= (:current old) (:name %)) (:files old))
+                                      (:files old)
+                                      (conj (:files old) {:name (:current old) :opts {} :imports [] :decls []})))]
+                    (swap! st assoc :files files)
+                    (try
+                      (let [r (check-source (source-of st) nil)]
+                        [r form])
+                      (finally (swap! st assoc :files (:files old))))))
+        [r form] (if stmt? (attempt nil) (attempt 1))
+        multi (some #(when (and (= :TooManyValues (:code %)) (str/includes? (:msg %) "multiple-value")) %) (:errors r))
+        novalue (some #(when (str/includes? (:msg %) "(no value) used as value") %) (:errors r))
+        [r form] (cond
+                   multi (let [[_ ts] (re-find #"value of type \(([^)]*)\)" (:msg multi))]
+                           (attempt (count (str/split ts #","))))
+                   novalue (attempt nil)
+                   :else [r form])
+        errs (remove #(= :UnusedImport (:code %)) (:errors r))]
+    (when (seq errs)
+      (throw (ex-info (str "Go check errors:\n" (error-text errs)) {:go/errors (vec errs)})))
+    (let [old @st]
+      (swap! st assoc :files (mapv #(if (= (:current old) (:name %)) (update % :decls conj form) %) (:files old)))
+      (try
+        (define! st r {:vars? false :only #{nm}})
+        (let [{:keys [cell obj]} (get-in @st [:funcs nm])]
+          (GoInterp/call (b/op "InterpCallable" cell (binding [b/*ctx* (build-context st)] (b/desc (e/o obj :type))) nm)
+                         (object-array [])))
+        (finally
+          (swap! st assoc :files (:files old))
+          (swap! st update :funcs dissoc nm))))))
+
+(defn run-main!
+  "go/run-main: package ns-sym's main (program mode's exit semantics in the REPL's process: §2.6)."
+  [ns-sym]
+  (let [st (package-state ns-sym false)
+        cell (get-in @st [:funcs "main" :cell])]
+    (when-not cell
+      (throw (ex-info (str ns-sym " has no main") {})))
+    (call0 cell "main")
+    nil))
+
+(defn check!
+  "go/check: the package's errors, checked again (data), nothing defined."
+  [ns-sym]
+  (let [st (package-state ns-sym false)]
+    (:errors (check-source (source-of st) nil))))

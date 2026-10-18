@@ -1,0 +1,476 @@
+;; goi: types at run time (GOI-SPEC.md §5.2): descriptors and RT, the typed loads and stores
+;; through addresses (§4.4, S25), cells, zero values, and the two representations of a value:
+;; in a frame (its slot) and in Go memory. They differ for two kinds of types only: a function
+;; type, whose frame value may be an interpreted closure (*Closure) while Go memory holds a real
+;; Go func (an adapter, §4.6); and a pointer to a recursive named type (erased: its RT cannot be
+;; made by reflect, which has no recursive types), held in Go memory inside composites and
+;; variables as an unsafe.Pointer (as built: GR3).
+(in-ns 'go.arbace.goi)
+
+(go/file "types.go"
+  :imports [[fmt "fmt"] [reflect "reflect"] [strings "strings"] [sync "sync"] [unsafe "unsafe"]])
+
+(go/const
+  [^{:tag byte} convNone 0]
+  [^{:tag byte} convPtr 1]
+  [^{:tag byte} convFunc 2])
+
+(go/type Field "Field is a struct field: its name, type and offset.\n"
+  (struct ^string Name ^{:tag (* Type)} T ^uintptr Off ^bool Embedded))
+
+(go/type Type
+  "Type is a Go type's descriptor (§5.2). RT is the Go type of its values in frames, Mem in Go
+memory (they differ for erased pointers only: Conv convPtr); Conv convFunc marks function types,
+whose frame values may be closures. K is the slot kind (I, F, S or R), GK the Go kind. Name and
+Pkg name an interpreted named type (Gen its generation; Proxy: its values go into interfaces as
+proxies, its RT not being its own, §5.3), Under its underlying type's descriptor; Elem, Key, Len,
+Fields, Ins, Outs and Variadic the parts of composite types. Compiled types are made from their
+reflect.Type alone (Compiled).\n"
+  (struct ^{:tag reflect/Type} RT ^{:tag reflect/Type} Mem ^byte Conv ^byte K ^{:tag reflect/Kind} GK
+          ^string Name ^string Pkg ^int Gen ^bool Proxy ^bool Erased ^bool Compiled ^bool Iface
+          ^{:tag (* Type)} Under ^{:tag (* Type)} Elem ^{:tag (* Type)} Key ^int Len
+          ^{:tag (slice Field)} Fields ^{:tag (slice (* Type))} Ins ^{:tag (slice (* Type))} Outs ^bool Variadic
+          ^int ChanDir
+          ^bool direct ^bool zeroDone ^any zero))
+
+(go/var ^{:tag sync/Mutex} typesMu)
+
+(go/var ^{:tag (map reflect/Type (* Type)) :doc "types are the compiled types' descriptors, one per reflect.Type.\n"}
+  types (make (map reflect/Type (* Type))))
+
+(go/func slotKindOf "slotKindOf is the slot kind of Go kind k.\n" ^byte [^{:tag reflect/Kind} k]
+  (switch k
+    (case [reflect/Bool reflect/Int reflect/Int8 reflect/Int16 reflect/Int32 reflect/Int64
+           reflect/Uint reflect/Uint8 reflect/Uint16 reflect/Uint32 reflect/Uint64 reflect/Uintptr]
+      (return \I))
+    (case [reflect/Float32 reflect/Float64] (return \F))
+    (case [reflect/String] (return \S)))
+  \R)
+
+(go/func isDirect
+  "isDirect says whether values of t are stored directly in an interface's data word
+(pointer-shaped), as reflect's DirectIface.\n"
+  ^bool [^{:tag reflect/Type} t]
+  (switch (.Kind t)
+    (case [reflect/Pointer reflect/Map reflect/Chan reflect/Func reflect/UnsafePointer] (return true))
+    (case [reflect/Struct] (return (and (== (.NumField t) 1) (isDirect (.-Type (.Field t 0))))))
+    (case [reflect/Array] (return (and (== (.Len t) 1) (isDirect (.Elem t))))))
+  false)
+
+(go/func TypeOf
+  "TypeOf is the descriptor of compiled (or reflect-made) type t, one per type: its parts are
+made from t on demand.\n"
+  ^{:tag (* Type)} [^{:tag reflect/Type} t]
+  (.Lock typesMu)
+  (defer (.Unlock typesMu))
+  (typeOfLocked t))
+
+(go/func typeOfLocked ^{:tag (* Type)} [^{:tag reflect/Type} t]
+  (let [d (aget types t)]
+    (when (== d nil)
+      (set! d (addr (lit Type :RT t :Mem t :K (slotKindOf (.Kind t)) :GK (.Kind t) :Compiled true
+                         :direct (isDirect t) :Iface (== (.Kind t) reflect/Interface))))
+      (when (== (.Kind t) reflect/Func)
+        (set! (.-Conv d) convFunc))
+      (aset types t d))
+    d))
+
+(go/method elem "elem is the element type of a pointer, slice, array, map or channel type.\n"
+  ^{:tag (* Type)} [^{:tag (* Type)} t]
+  (when (and (== (.-Elem t) nil) (.-Compiled t))
+    (set! (.-Elem t) (TypeOf (.Elem (.-RT t)))))
+  (.-Elem t))
+
+(go/method key "key is a map type's key type.\n" ^{:tag (* Type)} [^{:tag (* Type)} t]
+  (when (and (== (.-Key t) nil) (.-Compiled t))
+    (set! (.-Key t) (TypeOf (.Key (.-RT t)))))
+  (.-Key t))
+
+(go/method rt "rt is the type's RT (made now for a pointer to an erased named type).\n"
+  ^{:tag reflect/Type} [^{:tag (* Type)} t]
+  (when (== (.-RT t) nil)
+    (set! (.-RT t) (reflect/PointerTo (.mem (.-Elem t)))))
+  (.-RT t))
+
+(go/method mem "mem is the type's Go type in Go memory.\n" ^{:tag reflect/Type} [^{:tag (* Type)} t]
+  (when (== (.-Mem t) nil)
+    (panic (fmt/Sprintf "goi: the type %s is used before it is complete (a recursive type goi cannot make)" (.String t))))
+  (.-Mem t))
+
+(go/method String "String is the type's name as gc writes it.\n" ^string [^{:tag (* Type)} t]
+  (when (!= (.-Name t) "")
+    (return (.-Name t)))
+  (when (!= (.-RT t) nil)
+    (return (.String (.-RT t))))
+  (when (and (== (.-GK t) reflect/Pointer) (!= (.-Elem t) nil))
+    (return (+ "*" (.String (.-Elem t)))))
+  "?")
+
+(go/method field "field is struct type t's field i (its descriptor made from RT for a compiled type).\n"
+  ^Field [^{:tag (* Type)} t ^int i]
+  (when (and (== (.-Fields t) nil) (.-Compiled t))
+    (let [n (.NumField (.-RT t))
+          fs (make (slice Field) n)]
+      (for [j 0] (< j n) (inc! j)
+        (let [sf (.Field (.-RT t) j)]
+          (aset fs j (lit Field :Name (.-Name sf) :T (TypeOf (.-Type sf)) :Off (.-Offset sf) :Embedded (.-Anonymous sf)))))
+      (set! (.-Fields t) fs)))
+  (aget (.-Fields t) i))
+
+(go/method Zero "Zero is the type's zero value as a frame holds it (R kinds).\n" ^any [^{:tag (* Type)} t]
+  (when (not (.-zeroDone t))
+    (when (and (!= (.-Conv t) convFunc) (not (.-Iface t)))
+      (set! (.-zero t) (.Interface (reflect/Zero (.rt t)))))
+    (set! (.-zeroDone t) true))
+  (.-zero t))
+
+;; ---------------------------------------------------------------------------------------
+;; Making descriptors (the builder's, §4.1)
+
+(go/var anyType ((inst reflect/TypeFor any)))
+(go/var unsafePointerType ((inst reflect/TypeFor unsafe/Pointer)))
+
+(go/func basicRT "basicRT is the reflect.Type of a basic type's name.\n" ^{:tag reflect/Type} [^string n]
+  (switch n
+    (case ["bool"] (return ((inst reflect/TypeFor bool))))
+    (case ["int"] (return ((inst reflect/TypeFor int))))
+    (case ["int8"] (return ((inst reflect/TypeFor int8))))
+    (case ["int16"] (return ((inst reflect/TypeFor int16))))
+    (case ["int32"] (return ((inst reflect/TypeFor int32))))
+    (case ["int64"] (return ((inst reflect/TypeFor int64))))
+    (case ["uint"] (return ((inst reflect/TypeFor uint))))
+    (case ["uint8"] (return ((inst reflect/TypeFor uint8))))
+    (case ["uint16"] (return ((inst reflect/TypeFor uint16))))
+    (case ["uint32"] (return ((inst reflect/TypeFor uint32))))
+    (case ["uint64"] (return ((inst reflect/TypeFor uint64))))
+    (case ["uintptr"] (return ((inst reflect/TypeFor uintptr))))
+    (case ["float32"] (return ((inst reflect/TypeFor float32))))
+    (case ["float64"] (return ((inst reflect/TypeFor float64))))
+    (case ["complex64"] (return ((inst reflect/TypeFor complex64))))
+    (case ["complex128"] (return ((inst reflect/TypeFor complex128))))
+    (case ["string"] (return ((inst reflect/TypeFor string))))
+    (case ["unsafe.Pointer"] (return unsafePointerType))
+    (case ["any"] (return anyType))
+    (case ["error"] (return ((inst reflect/TypeFor error)))))
+  (panic (+ "goi: no basic type " n)))
+
+(go/func TBasic "TBasic is the descriptor of a basic type, any or error by name.\n" ^{:tag (* Type)} [^string n]
+  (TypeOf (basicRT n)))
+
+(go/func TIface "TIface is the descriptor of an interpreted interface type: its RT is any (§5.2).\n"
+  ^{:tag (* Type)} [^string name]
+  (addr (lit Type :RT anyType :Mem anyType :K \R :GK reflect/Interface :Iface true :Name name)))
+
+(go/func composite
+  "composite is the descriptor of an unnamed composite type of Go kind k and RT rt.\n"
+  ^{:tag (* Type)} [^{:tag reflect/Kind} k ^{:tag reflect/Type} rt]
+  (let [t (addr (lit Type :RT rt :Mem rt :K (slotKindOf k) :GK k))]
+    (when (!= rt nil)
+      (set! (.-direct t) (isDirect rt)))
+    t))
+
+(go/func TPtr
+  "TPtr is the descriptor of *elem. A pointer to an erased (recursive) named type is held as an
+unsafe.Pointer in Go memory; its RT is made when first asked.\n"
+  ^{:tag (* Type)} [^{:tag (* Type)} elem]
+  (when (.-Erased elem)
+    (let [t (composite reflect/Pointer nil)]
+      (set! (.-Elem t) elem)
+      (set! (.-Mem t) unsafePointerType)
+      (set! (.-Conv t) convPtr)
+      (set! (.-direct t) true)
+      (return t)))
+  (let [t (composite reflect/Pointer (reflect/PointerTo (.mem elem)))]
+    (set! (.-Elem t) elem)
+    t))
+
+(go/func TSlice ^{:tag (* Type)} [^{:tag (* Type)} elem]
+  (let [t (composite reflect/Slice (reflect/SliceOf (.mem elem)))]
+    (set! (.-Elem t) elem)
+    t))
+
+(go/func TArray ^{:tag (* Type)} [^int n ^{:tag (* Type)} elem]
+  (let [t (composite reflect/Array (reflect/ArrayOf n (.mem elem)))]
+    (set! (.-Elem t) elem)
+    (set! (.-Len t) n)
+    t))
+
+(go/func TMap ^{:tag (* Type)} [^{:tag (* Type)} k ^{:tag (* Type)} v]
+  (let [t (composite reflect/Map (reflect/MapOf (.mem k) (.mem v)))]
+    (set! (.-Key t) k)
+    (set! (.-Elem t) v)
+    t))
+
+(go/func TChan ^{:tag (* Type)} [^int dir ^{:tag (* Type)} elem]
+  (let [d reflect/BothDir]
+    (when (== dir 1) (set! d reflect/RecvDir))
+    (when (== dir 2) (set! d reflect/SendDir))
+    (let [t (composite reflect/Chan (reflect/ChanOf d (.mem elem)))]
+      (set! (.-Elem t) elem)
+      (set! (.-ChanDir t) dir)
+      t)))
+
+(go/func TFunc ^{:tag (* Type)} [^{:tag (slice (* Type))} ins ^{:tag (slice (* Type))} outs ^bool variadic]
+  (let [ri (make (slice reflect/Type) (len ins))
+        ro (make (slice reflect/Type) (len outs))]
+    (range [i x ins] (aset ri i (.mem x)))
+    (range [i x outs] (aset ro i (.mem x)))
+    (let [t (composite reflect/Func (reflect/FuncOf ri ro variadic))]
+      (set! (.-Ins t) ins)
+      (set! (.-Outs t) outs)
+      (set! (.-Variadic t) variadic)
+      (set! (.-Conv t) convFunc)
+      t)))
+
+(go/func structFields
+  "structFields are the reflect fields of a struct type: blank names numbered (reflect refuses
+two fields of one name), unexported ones with their package path, embedded fields as plain
+fields of their type's name (S36); tag0 extends the first field's tag (S37).\n"
+  ^{:tag (slice reflect/StructField)} [^{:tag (slice string)} names ^{:tag (slice (* Type))} ts ^{:tag (slice string)} tags
+                                       ^{:tag (slice string)} pkgs ^string tag0]
+  (let [fs (make (slice reflect/StructField) (len names))
+        blanks 0]
+    (range [i n names]
+      (let [tag (aget tags i)]
+        (when (and (== i 0) (!= tag0 ""))
+          (if (== tag "")
+            (set! tag tag0)
+            (set! tag (+ tag " " tag0))))
+        (when (== n "_")
+          (when (> blanks 0)
+            (set! n (fmt/Sprintf "_%d" blanks)))
+          (inc! blanks))
+        (aset fs i (lit reflect/StructField :Name n :Type (.mem (aget ts i)) :Tag (conv reflect/StructTag tag) :PkgPath (aget pkgs i)))))
+    fs))
+
+(go/func fillFields "fillFields sets t's fields from its RT and the field types.\n"
+  [^{:tag (* Type)} t ^{:tag (slice string)} names ^{:tag (slice (* Type))} ts ^{:tag (slice bool)} emb]
+  (let [fs (make (slice Field) (len names))]
+    (range [i n names]
+      (aset fs i (lit Field :Name n :T (aget ts i) :Off (.-Offset (.Field (.-RT t) i)) :Embedded (aget emb i))))
+    (set! (.-Fields t) fs)))
+
+(go/func TStruct "TStruct is the descriptor of an unnamed struct type.\n"
+  ^{:tag (* Type)} [^{:tag (slice string)} names ^{:tag (slice (* Type))} ts ^{:tag (slice string)} tags
+                    ^{:tag (slice string)} pkgs ^{:tag (slice bool)} emb]
+  (let [t (composite reflect/Struct (reflect/StructOf (structFields names ts tags pkgs "")))]
+    (fillFields t names ts emb)
+    t))
+
+(go/var ^{:tag (map reflect/Type (* Type)) :doc "interp is the registry of faithful interpreted named types by RT (§5.2).\n"}
+  interp (make (map reflect/Type (* Type))))
+
+(go/func TNamed
+  "TNamed is a new interpreted named type pkg.name of generation gen, its underlying type set
+later (TSetUnder); erased: recursive, its pointers erased in Go memory.\n"
+  ^{:tag (* Type)} [^string name ^string pkg ^int gen ^bool erased]
+  (addr (lit Type :Name name :Pkg pkg :Gen gen :Erased erased)))
+
+(go/func TSetUnder
+  "TSetUnder completes named type t with its underlying type u: a struct gets its own RT, the
+first field's tag carrying goi:\"path.Name#gen\" (S37); any other type shares u's RT and goes
+into interfaces as a proxy (§5.3). For a struct, u's fields (names, types, tags, package
+paths, embedded) are given again.\n"
+  [^{:tag (* Type)} t ^{:tag (* Type)} u ^{:tag (slice string)} names ^{:tag (slice (* Type))} ts ^{:tag (slice string)} tags
+   ^{:tag (slice string)} pkgs ^{:tag (slice bool)} emb]
+  (set! (.-Under t) u)
+  (set! (.-GK t) (.-GK u))
+  (set! (.-K t) (.-K u))
+  (set! (.-Iface t) (.-Iface u))
+  (set! (.-Conv t) (.-Conv u))
+  (set! (.-Elem t) (.-Elem u))
+  (set! (.-Key t) (.-Key u))
+  (set! (.-Len t) (.-Len u))
+  (set! (.-Ins t) (.-Ins u))
+  (set! (.-Outs t) (.-Outs u))
+  (set! (.-Variadic t) (.-Variadic u))
+  (set! (.-ChanDir t) (.-ChanDir u))
+  (if (and (== (.-GK u) reflect/Struct) (> (len names) 0))
+    (let [tag0 (fmt/Sprintf "goi:%q" (fmt/Sprintf "%s.%s#%d" (.-Pkg t) (lastName (.-Name t)) (.-Gen t)))
+          rt (reflect/StructOf (structFields names ts tags pkgs tag0))]
+      (set! (.-RT t) rt)
+      (set! (.-Mem t) rt)
+      (set! (.-direct t) (isDirect rt))
+      (fillFields t names ts emb)
+      (.Lock typesMu)
+      (aset interp rt t)
+      (.Unlock typesMu))
+    (do
+      (set! (.-RT t) (.-RT u))
+      (set! (.-Mem t) (.-Mem u))
+      (set! (.-direct t) (.-direct u))
+      (set! (.-Fields t) (.-Fields u))
+      (set! (.-Proxy t) (not (.-Iface u))))))
+
+(go/func lastName "lastName is a qualified name's last element.\n" ^string [^string n]
+  (let [i (strings/LastIndex n ".")]
+    (when (>= i 0)
+      (return (subslice n (+ i 1))))
+    n))
+
+;; ---------------------------------------------------------------------------------------
+;; Interfaces' contents of interpreted types (§5.3): proxies
+
+(go/type Proxy
+  "Proxy is an interface's content whose dynamic type is an interpreted type without an RT of
+its own (a named non-struct type, §5.3 rule 2): its descriptor T and its value V. Go's == on two
+proxies compares T and V; fmt formats V (Format), so Println of a Celsius prints as gc's.\n"
+  (struct ^{:tag (* Type)} T ^any V))
+
+(go/method Format [^Proxy p ^{:tag fmt/State} f ^rune verb]
+  (fmt/Fprintf f (fmt/FormatString f verb) (.-V p)))
+
+;; ---------------------------------------------------------------------------------------
+;; Interface data words, boxes
+
+(go/func efaceData "efaceData is an interface value's data word.\n" ^unsafe/Pointer [^any x]
+  (aget @(conv (* (array 2 unsafe/Pointer)) (conv unsafe/Pointer (addr x))) 1))
+
+(go/func boxAddr
+  "boxAddr is the address of the value an interface holds (a struct or array value in transit,
+an R box): its data word, or for a pointer-shaped type a new variable holding it.\n"
+  ^unsafe/Pointer [^any x ^{:tag (* Type)} t]
+  (when (.-direct t)
+    (let [p (new unsafe/Pointer)]
+      (set! @p (efaceData x))
+      (return (conv unsafe/Pointer p))))
+  (efaceData x))
+
+;; ---------------------------------------------------------------------------------------
+;; The two representations (frames and Go memory)
+
+(go/func toMem
+  "toMem is frame value v of type t as Go memory holds it: an erased pointer as unsafe.Pointer,
+an interpreted closure as a real Go func of t (§4.6).\n"
+  ^any [^{:tag (* Type)} t ^any v]
+  (switch (.-Conv t)
+    (case [convPtr]
+      (return (efaceData v)))
+    (case [convFunc]
+      (let [(values c ok) (assert (* Closure) v)]
+        (when ok
+          (return (.goFunc c t))))))
+  v)
+
+(go/func fromMem
+  "fromMem is Go memory's value v of type t as a frame holds it: an erased pointer typed again,
+a Go func made from an interpreted closure the closure again, a nil func nil.\n"
+  ^any [^{:tag (* Type)} t ^any v]
+  (switch (.-Conv t)
+    (case [convPtr]
+      (return (.Interface (reflect/NewAt (.mem (.-Elem t)) (assert unsafe/Pointer v)))))
+    (case [convFunc]
+      (return (closureOf v))))
+  v)
+
+(go/method valueOf "valueOf is frame value v of t as a reflect.Value of t's Go memory type.\n"
+  ^{:tag reflect/Value} [^{:tag (* Type)} t ^any v]
+  (let [m (toMem t v)]
+    (when (== m nil)
+      (return (reflect/Zero (.mem t))))
+    (let [rv (reflect/ValueOf m)]
+      (when (!= (.Type rv) (.mem t))
+        (let [z (reflect/New (.mem t))]
+          (.Set (.Elem z) rv)
+          (return (.Elem z))))
+      rv)))
+
+;; ---------------------------------------------------------------------------------------
+;; Loads and stores through addresses (§4.4, S25): typed by the place's type
+
+(go/method load "load is the value at p of type t as a frame holds it (R kinds; the others by kind too).\n"
+  ^any [^{:tag (* Type)} t ^unsafe/Pointer p]
+  (when (.-Iface t)
+    (when (== (.mem t) anyType)
+      (return @(conv (* any) p))))
+  (switch (.-GK t)
+    (case [reflect/Complex128] (return @(conv (* complex128) p)))
+    (case [reflect/Complex64] (return @(conv (* complex64) p))))
+  (fromMem t (.Interface (.Elem (reflect/NewAt (.mem t) p)))))
+
+(go/method store "store writes frame value v of type t at p (a typed copy: the write barriers apply).\n"
+  [^{:tag (* Type)} t ^unsafe/Pointer p ^any v]
+  (when (and (.-Iface t) (== (.mem t) anyType))
+    (set! @(conv (* any) p) v)
+    (return))
+  (.Set (.Elem (reflect/NewAt (.mem t) p)) (.valueOf t v)))
+
+(go/method copyAt "copyAt copies the value of type t at src to dst (a typed copy).\n"
+  [^{:tag (* Type)} t ^unsafe/Pointer dst ^unsafe/Pointer src]
+  (.Set (.Elem (reflect/NewAt (.mem t) dst)) (.Elem (reflect/NewAt (.mem t) src))))
+
+(go/method newCell "newCell is the address of a new zero variable of type t.\n" ^unsafe/Pointer [^{:tag (* Type)} t]
+  (.UnsafePointer (reflect/New (.mem t))))
+
+(go/method ptrTo "ptrTo is pointer p to a variable of type t as a frame holds a *t.\n" ^any [^{:tag (* Type)} t ^unsafe/Pointer p]
+  (.Interface (reflect/NewAt (.mem t) p)))
+
+(go/method box "box is the value of type t at p as a frame holds it in transit (a copy).\n"
+  ^any [^{:tag (* Type)} t ^unsafe/Pointer p]
+  (.load t p))
+
+(go/func loadI "loadI is the integer (or bool) at p of Go kind k, normalized.\n" ^int64 [^{:tag reflect/Kind} k ^unsafe/Pointer p]
+  (switch k
+    (case [reflect/Bool] (return (B2I @(conv (* bool) p))))
+    (case [reflect/Int8] (return (conv int64 @(conv (* int8) p))))
+    (case [reflect/Int16] (return (conv int64 @(conv (* int16) p))))
+    (case [reflect/Int32] (return (conv int64 @(conv (* int32) p))))
+    (case [reflect/Uint8] (return (conv int64 @(conv (* uint8) p))))
+    (case [reflect/Uint16] (return (conv int64 @(conv (* uint16) p))))
+    (case [reflect/Uint32] (return (conv int64 @(conv (* uint32) p)))))
+  @(conv (* int64) p))
+
+(go/func storeI "storeI writes integer (or bool) v at p of Go kind k.\n" [^{:tag reflect/Kind} k ^unsafe/Pointer p ^int64 v]
+  (switch k
+    (case [reflect/Bool] (set! @(conv (* bool) p) (!= v 0)))
+    (case [reflect/Int8 reflect/Uint8] (set! @(conv (* uint8) p) (conv uint8 v)))
+    (case [reflect/Int16 reflect/Uint16] (set! @(conv (* uint16) p) (conv uint16 v)))
+    (case [reflect/Int32 reflect/Uint32] (set! @(conv (* uint32) p) (conv uint32 v)))
+    (default (set! @(conv (* int64) p) v))))
+
+(go/func loadF ^float64 [^{:tag reflect/Kind} k ^unsafe/Pointer p]
+  (when (== k reflect/Float32)
+    (return (conv float64 @(conv (* float32) p))))
+  @(conv (* float64) p))
+
+(go/func storeF [^{:tag reflect/Kind} k ^unsafe/Pointer p ^float64 v]
+  (if (== k reflect/Float32)
+    (set! @(conv (* float32) p) (conv float32 v))
+    (set! @(conv (* float64) p) v)))
+
+;; ---------------------------------------------------------------------------------------
+;; Values and reflect.Values by slot kind (maps, compiled calls without an invoker)
+
+(go/method fromValue "fromValue is reflect.Value v of type t as an R frame value.\n" ^any [^{:tag (* Type)} t ^{:tag reflect/Value} v]
+  (when (not (.IsValid v))
+    (return (.Zero t)))
+  (fromMem t (.Interface v)))
+
+(go/func valueI "valueI is integer v as a reflect.Value of type rt.\n" ^{:tag reflect/Value} [^{:tag reflect/Type} rt ^int64 v]
+  (let [x (.Elem (reflect/New rt))]
+    (switch (.Kind rt)
+      (case [reflect/Bool] (.SetBool x (!= v 0)))
+      (case [reflect/Uint reflect/Uint8 reflect/Uint16 reflect/Uint32 reflect/Uint64 reflect/Uintptr] (.SetUint x (conv uint64 v)))
+      (default (.SetInt x v)))
+    x))
+
+(go/func intOfValue "intOfValue is reflect.Value v of an integer or bool kind as an I value.\n" ^int64 [^{:tag reflect/Value} v]
+  (when (not (.IsValid v))
+    (return 0))
+  (switch (.Kind v)
+    (case [reflect/Bool] (return (B2I (.Bool v))))
+    (case [reflect/Uint reflect/Uint8 reflect/Uint16 reflect/Uint32 reflect/Uint64 reflect/Uintptr] (return (conv int64 (.Uint v)))))
+  (.Int v))
+
+;; What the builder asks of descriptors
+
+(go/func FieldOff "FieldOff is struct type t's field i's offset.\n" ^int [^{:tag (* Type)} t ^int i]
+  (conv int (.-Off (.field t i))))
+
+(go/func FieldType "FieldType is struct type t's field i's type.\n" ^{:tag (* Type)} [^{:tag (* Type)} t ^int i]
+  (.-T (.field t i)))
+
+(go/func ElemSize "ElemSize is the size of a value of type t in Go memory.\n" ^int [^{:tag (* Type)} t]
+  (conv int (.Size (.mem t))))
+
+(go/func ElemType "ElemType is t's element type.\n" ^{:tag (* Type)} [^{:tag (* Type)} t] (.elem t))
