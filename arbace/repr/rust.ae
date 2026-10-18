@@ -84,10 +84,11 @@
                [(keyword (if (= k "version") "rustc" k)) v]))))
 
 (defn crate-of
-  "The corpus's crate of a file (its path as rustc was given it), with the file's kind"
+  "The corpus's crate of a file (its path as rustc was given it), with the file's kind: the crate
+  whose directory is the longest that holds it (a package nested in another's directory)"
   [corpus ^String file]
   (when corpus
-    (when-let [c (first (filter #(str/starts-with? file (str (:dir %) "/")) (:crates corpus)))]
+    (when-let [c (last (sort-by #(count (:dir %)) (filter #(str/starts-with? file (str (:dir %) "/")) (:crates corpus))))]
       (let [r (subs file (inc (count (:dir c))))]
         (assoc c :rel r
                  :kind (cond
@@ -110,7 +111,8 @@
           src-lines (vec (str/split (:text src) #"\n" -1))
           conf (if c
                  {:crate (:name c) :crate-type (:crate-type c) :kind (:kind c) :rel (:rel c)
-                  :corpus (:name corpus)}
+                  :corpus (:name corpus) :ns-crate (:ns-crate c)
+                  :has-lib (contains? (set (:files c)) (str (:dir c) "/src/lib.rs"))}
                  {:crate (get opts "--crate" "main") :crate-type (get opts "--crate-type")
                   :rel file :ns-root (get opts "--ns-root")})
           {:keys [ns forms warnings comments]} (cv/convert-file dump (assoc conf :src-lines src-lines :pin (read-pin (get opts "--pin"))
@@ -177,8 +179,8 @@
 (defn- cmd-print [args]
   (let [{:keys [opts args]} (parse-args args #{"--jobs" "-o" "--root" "--only" "--layout"})
         layout (get opts "--layout" "lines")
-        _ (when-not (contains? #{"lines" "full"} layout) (throw (ex-info (str "print: no layout " layout " (lines, full)") {})))
-        print-fn (if (= "full" layout) pr/print-full pr/print-file)
+        _ (when-not (contains? #{"lines" "full" "pretty"} layout) (throw (ex-info (str "print: no layout " layout " (lines, pretty, full)") {})))
+        print-fn (case layout "full" pr/print-full "pretty" pr/print-pretty pr/print-file)
         jobs (Long/parseLong (get opts "--jobs" "8"))
         out (get opts "-o" ".tmp/repr-rust/printed")
         root (get opts "--root")
@@ -223,12 +225,13 @@
   (str/join "\n" (subvec lines (max 0 (- i 8)) (min (count lines) (+ i 4)))))
 
 (defn compare-file
-  "The tree level of one file: {:status :ok} or {:level :tree|:lines :status ...}"
-  [orig-tree cand-tree orig-lines cand-lines]
+  "The tree level of one file: {:status :ok} or {:level :tree|:lines :status ...}; without
+  lines (the pretty layout's, which has its own), the trees alone"
+  [orig-tree cand-tree orig-lines cand-lines & [no-lines]]
   (let [ot (some-> (read-lines-file orig-tree) vec)
         ct (some-> (read-lines-file cand-tree) vec)
-        ol (some-> (read-lines-file orig-lines) vec)
-        cl (some-> (read-lines-file cand-lines) vec)]
+        ol (when-not no-lines (some-> (read-lines-file orig-lines) vec))
+        cl (when-not no-lines (some-> (read-lines-file cand-lines) vec))]
     (cond
       (nil? ot) {:level :tree :status :no-original}
       (str/starts-with? (or (first ot) "") "rsdump/error") {:level :tree :status :original-fails-to-parse :detail (first ot)}
@@ -239,7 +242,7 @@
       (not= ol cl) (let [[i a b] (first-line-diff ol cl)
                          n (count (filter (fn [[x y]] (not= x y)) (map vector ol cl)))]
                      {:level :lines :status :differs :at i :orig a :cand b :count n})
-      :else {:status :ok :spans (count ol)})))
+      :else {:status :ok :spans (count (or ol (read-lines-file orig-lines)))})))
 
 (defn- cmd-compare [args]
   (let [{:keys [opts]} (parse-args args #{"--corpus" "--orig" "--cand" "--known" "--report" "--forms-report" "--only" "--times"})
@@ -259,7 +262,8 @@
                                [f (if (and conv (not= :ok (:status conv)))
                                     {:level :convert :status (:status conv) :detail (:error conv)}
                                     (compare-file (str orig "/" f ".tree") (str cand ".trees/" f ".tree")
-                                                  (str orig "/" f ".lines") (str cand ".trees/" f ".lines")))]))
+                                                  (str orig "/" f ".lines") (str cand ".trees/" f ".lines")
+                                                  (get opts "--trees-only")))]))
                            files)
         ok (filter #(= :ok (:status (second %))) results)
         failing (remove #(= :ok (:status (second %))) results)
@@ -278,8 +282,9 @@
         (when (:cand r) (println "  printed:\n" (:cand r)))))
     (doseq [[k _] fixed] (println "FIXED (listed as known, no longer differs)" k))
     (doseq [[k r] failing :when (contains? known k)] (println "known" k (pr-str (select-keys r [:level :status])) "--" (get known k)))
-    (println (format "repr-rust roundtrip (tree level): %d files, %d equal (trees and lines; %d spans), %d differ (%s), %d known, %d unexpected, %d fixed%s"
-                     (count results) (count ok) (reduce + (keep (comp :spans second) ok)) (count failing) (pr-str by-level)
+    (println (format "repr-rust roundtrip (tree level): %d files, %d equal (%s; %d spans), %d differ (%s), %d known, %d unexpected, %d fixed%s"
+                     (count results) (count ok) (if (get opts "--trees-only") "trees" "trees and lines")
+                     (reduce + (keep (comp :spans second) ok)) (count failing) (pr-str by-level)
                      (count (filter #(contains? known (first %)) failing)) (count unexpected) (count fixed)
                      (if-let [t (get opts "--times")] (str "; seconds: " t) "")))
     (when-let [rep (get opts "--report")]
@@ -488,7 +493,10 @@
         known-file (get opts "--known")
         known (if (and known-file (.exists (File. ^String known-file))) (read-string (slurp known-file)) {})
         only (some-> (get opts "--only") re-pattern)
-        crates (for [c (:crates corpus) :let [n (str (:name c))] :when (or (nil? only) (re-find only n))] n)
+        ;; the crates the corpus documents (:iface; all of them with --crates)
+        crates (for [c (:crates corpus) :let [n (str (:name c))]
+                     :when (and (or (:iface c) (get opts "--crates")) (or (nil? only) (re-find only n)))]
+                 n)
         results (pmap-jobs 5 (fn [c] [c (compare-crate orig cand c)]) crates)
         ok (filter #(= :ok (:status (second %))) results)
         failing (remove #(= :ok (:status (second %))) results)

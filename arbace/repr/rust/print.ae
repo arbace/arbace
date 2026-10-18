@@ -18,11 +18,14 @@
 (def lv sx/lv)
 
 (defn- line-of
-  "An element's own line: a list's, vector's or symbol's :line, a Lit's"
+  "An element's own line: a list's, vector's or symbol's :line, a Lit's; a lifetime's 'a its
+  symbol's (the reader gives the list (quote a) none)"
   [x]
   (cond
     (sx/lit? x) (:line x)
-    (instance? arbace.lang.IObj x) (:line (meta x))
+    (instance? arbace.lang.IObj x) (or (:line (meta x))
+                                       (when (and (seq? x) (= 'quote (first x)) (= 2 (count x)) (symbol? (second x)))
+                                         (:line (meta (second x)))))
     :else nil))
 
 (defn- mget [x k] (when (instance? arbace.lang.IObj x) (get (meta x) k)))
@@ -141,6 +144,12 @@
 
 (def ^:dynamic *warnings* nil)
 
+(def ^:dynamic *pretty*
+  "Whether the printer lays out forms without positions (SPEC §9.4, 2, the pretty layout): every
+  item, statement, arm, field, variant and attribute on a line of its own, a } that closes them
+  on a line of its own (brk!), then lines over 100 columns broken (break-lines)"
+  false)
+
 (defn- warn! [what]
   (when *warnings* (swap! *warnings* update what (fnil inc 0))))
 
@@ -182,6 +191,11 @@
        (vreset! (:ga p) ga)))))
 
 (defn- goto! [p l] (when (and l (> l (cur p))) (newlines! p l)))
+
+(defn- brk!
+  "The pretty layout's line break: the next token on a new line, unless one has just begun"
+  [p]
+  (when (and *pretty* (not @(:start p))) (newlines! p (inc (cur p)))))
 
 (defmacro ^:private indented [p & body]
   `(do (vswap! (:depth ~p) inc)
@@ -643,7 +657,7 @@
   [p x gb]
   (let [v (lv x) l (line-of x)]
     (if (and (number? v) (neg? v))
-      (do (emit! p "-" l gb true) (emit! p (sx/number-text (- v)) nil true false))
+      (do (emit! p "-" l gb true) (emit! p (sx/number-text (-' v)) nil true false))
       (emit! p (or (sx/lit-form-text v) (fail! "a literal" v)) l gb false))))
 
 (defn- print-meta [p x]
@@ -689,6 +703,7 @@
         hn (if (symbol? h) (name h) (name h))
         inner? (str/ends-with? hn "!")
         base (if inner? (subs hn 0 (dec (count hn))) hn)]
+    (brk! p)
     (case base
       "doc" (do (emit! p (str (if inner? "//!" "///") (lv (second v))) l)
                 (vreset! (:nl p) true))
@@ -817,6 +832,7 @@
   ([p owner elems brace offset]
    (emit! p "{" brace false false)
    (indented p (print-body p owner elems offset))
+   (when (seq elems) (brk! p))
    (emit! p "}" nil false false)))
 
 (defn print-body
@@ -831,6 +847,7 @@
             outer (remove #(let [h (name (head %))] (str/ends-with? h "!")) as)]
         (doseq [a as] (print-attr p a))
         (when (some? x)
+          (brk! p)
           (let [v (lv x) h (head v)]
             (cond
               (and (= :semi h) (= 1 (count v))) (emit! p ";" (line-of x) false false)
@@ -903,7 +920,9 @@
   (let [v (vec (lv x))
         pat (nth v 1)
         more (subvec v 2)
-        [guard more] (if (and (seq more) (list-head? (lv (first more)) 'if)) [(first more) (rest more)] [nil more])]
+        ;; a guard (if e) is always followed by the body or :_; a lone (if ...) is the body
+        [guard more] (if (and (next more) (list-head? (lv (first more)) 'if)) [(first more) (rest more)] [nil more])]
+    (brk! p)
     (goto! p (line-of x))
     (print-pat p pat :top)
     (when guard
@@ -947,7 +966,7 @@
               (goto! p (line-of x))
               (print-pat p pt :param) (emit! p ":" nil true false) (print-ty p t :plain))
             (print-pat p x :param))))
-      (emit! p "|" nil true false)
+      (emit! p "|" (mget params :rs/close) true false)
       (cond
         (= '-> (lv (first more)))
         (do (emit! p "->")
@@ -1036,7 +1055,7 @@
           (doseq [[i [as e j]] (map-indexed vector grouped)]
             (when (pos? i)
               (let [hl (when (= i (dec (count grouped))) (line-of (first v)))
-                    el (or (first (keep line-of as)) (line-of e))]
+                    el (or (first (keep line-of as)) (mget e :rs/paren) (line-of e))]
                 (if hl
                   (emit! p (binop-text op) hl)
                   (do (when (and el (> el (cur p))) (goto! p el))
@@ -1121,6 +1140,7 @@
                      (if (str/ends-with? (name (head (lv a))) "!")
                        nil
                        (print-arm p a (seq as))))))
+               (when (> (count xs) 2) (brk! p))
                (emit! p "}"))
       :block (let [xs (vec v)
                    unsafe? (= 'unsafe (lv (first xs)))
@@ -1148,8 +1168,8 @@
                (emit! p "?" nil true false))
       :await (do (goto! p l)
                  (print-expr p (second v) (fx-leftmost-dot fx) false [v 1] (fn [s _] (< (:prec s) P-UNAMBIGUOUS)))
-                 (emit! p "." nil true true)
-                 (emit! p (subs (name (lv (first v))) 1) (line-of (first v)) true false))
+                 (emit! p "." (line-of (first v)) true true)
+                 (emit! p (subs (name (lv (first v))) 1) nil true false))
       :yield-postfix (do (goto! p l)
                          (print-expr p (second v) (fx-leftmost-dot fx) false [v 1] (fn [s _] (< (:prec s) P-UNAMBIGUOUS)))
                          (emit! p "." nil true true)
@@ -1544,7 +1564,7 @@
                               (emit-name! p nm)
                               (emit! p ":" nil true false)
                               (print-ty p t :plain)
-                              (when d (emit! p "=") (print-expr p d fx-default false nil)))
+                              (when (> (count v) 3) (emit! p "=") (print-expr p d fx-default false nil)))
       :else (fail! "a generic parameter" v))))
 
 (defn- print-generic-params [p ps & [close]]
@@ -1567,12 +1587,14 @@
 
 (defn- print-where [p x]
   (let [v (lv x)]
+    (brk! p)
     (emit! p "where" (line-of x))
     (doseq [[i [as pr]] (map-indexed vector (group-attrs (rest v)))]
       (when (pos? i) (emit! p "," nil true false))
       (doseq [a as] (print-attr p a))
       (when (some? pr)
         (let [pv (lv pr)]
+          (when *pretty* (indented p (brk! p)))
           (goto! p (line-of pr))
           (if (list-head? pv 'for)
             (do (emit! p "for")
@@ -1586,7 +1608,8 @@
             (let [[c t & bs] pv]
               (if (lifetime? t) (print-lifetime p t) (print-ty p t :plain))
               (emit! p ":" (line-of c) true false)
-              (print-bounds p bs))))))))
+              (print-bounds p bs))))))
+    (when (next v) (brk! p))))
 
 ;;; Items (SPEC §4)
 
@@ -1710,6 +1733,7 @@
     (indented p
       (loop [i 0]
         (when (< i n)
+          (brk! p)
           (let [i (loop [i i] (if (and (< i n) (attr-form? (nth xs i))) (do (print-attr p (nth xs i)) (recur (inc i))) i))
                 i (loop [i i]
                     (let [w (lv (nth xs i nil))]
@@ -1735,10 +1759,12 @@
                         (+ i 2))]
                 (emit! p "," nil true false)
                 (recur i)))))))
+    (when (pos? n) (brk! p))
     (emit! p "}")))
 
 (defn- print-variant [p x]
   (let [v (lv x) l (line-of x)]
+    (when-not (list-head? v '=) (brk! p))
     (goto! p (line-of x))
     (cond
       (list-head? v '=) (do (print-variant p (second v)) (emit! p "=") (print-expr p (nth v 2) fx-default false [v 2]))
@@ -1872,12 +1898,14 @@
     (doseq [[as it] (group-attrs items)]
       (doseq [a as] (print-attr p a))
       (when (some? it) (print-item p it :assoc))))
+  (when (seq items) (brk! p))
   (emit! p "}"))
 
 (defn print-item
   "An item form (unqualified); ctx :top, :body, :assoc, :foreign, or :probe (returns whether x is
   an item, printing nothing)"
   [p x ctx]
+  (when (and p (not= ctx :probe)) (brk! p))
   (let [v (lv x)
         xs (vec v)]
     (cond
@@ -1928,6 +1956,7 @@
                        (doseq [[as vr] (group-attrs vs)]
                          (doseq [a as] (print-attr p a))
                          (when (some? vr) (print-variant p vr) (emit! p "," nil true false))))
+                     (when (seq vs) (brk! p))
                      (emit! p "}"))
               trait (let [[nm & more] more more (vec more)]
                       (emit! p "trait" (line-of (nth xs k)))
@@ -2007,9 +2036,10 @@
                     (cond
                       (empty? items) (emit! p ";" nil true false)
                       (and (= 1 (count items)) (list-head? (lv (first items)) :braces) (= 1 (count (lv (first items)))))
-                      (do (emit! p "{" (line-of (first items))) (emit! p "}"))
+                      (do (emit! p "{" (line-of (first items))) (emit! p "}" (mget (first items) :rs/close)))
                       :else (do (emit! p "{" (mget x :rs/brace))
                                 (indented p (print-items-seq p items :body))
+                                (brk! p)
                                 (emit! p "}"))))
               extern (if (= 'crate (lv (first more)))
                        (let [[_ a as b] more]
@@ -2024,6 +2054,7 @@
                          (when abi (emit-lit! p abi false))
                          (emit! p "{" (mget x :rs/brace))
                          (indented p (print-items-seq p items :foreign))
+                         (when (seq items) (brk! p))
                          (emit! p "}")))
               macro_rules! (let [[nm body] more]
                              (emit! p "macro_rules" (line-of (nth xs k)) false true)
@@ -2055,12 +2086,15 @@
       f)))
 
 (defn- print-forms!
-  "Prints a file's forms (internalized) after its rs/file's options opts"
+  "Prints a file's forms (internalized) after its rs/file's options opts; a file of no item to
+  the line of its end (rs/file's :rs/close)"
   [p forms opts]
-  (let [body (remove #(and (seq? %) (contains? #{'ns 'rs/file} (first %))) forms)]
+  (let [body (remove #(and (seq? %) (contains? #{'ns 'rs/file} (first %))) forms)
+        end (some #(when (and (seq? %) (= 'rs/file (first %))) (mget % :rs/close)) forms)]
     (when-let [sb (:shebang opts)] (emit! p sb 1))
     (when-let [fm (:frontmatter opts)] (emit! p fm (if (:shebang opts) 2 1)) (vreset! (:nl p) true))
     (doseq [f body]
+      (brk! p)
       (let [h (lv (first f))]
         (cond
           (contains? #{'rs/attr 'rs/attr! 'rs/doc 'rs/doc! 'rs/doc-block 'rs/doc-block!} h)
@@ -2071,7 +2105,8 @@
             (when (not= :brace (mac-delim m)) (emit! p ";" nil true false)))
           (= 'rs/rust h) (emit! p (lv (second f)) (line-of f))
           (and (symbol? h) (= "rs" (namespace h))) (print-item p (unqualify f) :top)
-          :else (fail! "a top-level form" f))))))
+          :else (fail! "a top-level form" f))))
+    (goto! p end)))
 
 (defn- file-opts [forms]
   (apply hash-map (rest (first (filter #(and (seq? %) (= 'rs/file (first %))) forms)))))
@@ -2095,6 +2130,111 @@
     (binding [*tokens* toks]
       (print-forms! (mk-printer 1) forms (file-opts forms)))
     (mapv first toks)))
+
+;;; The pretty layout (SPEC §9.4, 2)
+
+(defn strip-positions
+  "Forms without positions: every list's, vector's and symbol's metadata removed (lines, the
+  layout's keys :rs/brace, :rs/close..., mode :full's :rs/pos...)"
+  [x]
+  (cond
+    (seq? x) (apply list (map strip-positions x))
+    (vector? x) (mapv strip-positions x)
+    (map? x) (into {} (map (fn [[k v]] [(strip-positions k) (strip-positions v)]) x))
+    (symbol? x) (with-meta x nil)
+    :else x))
+
+(def ^:private max-width 100)
+
+(defn- render [indent toks]
+  (let [sb (StringBuilder.)]
+    (dotimes [_ (* 4 indent)] (.append sb " "))
+    (doseq [[i [t sp]] (map-indexed vector toks)]
+      (when (and (pos? i) sp) (.append sb " "))
+      (.append sb ^String t))
+    (str sb)))
+
+(def ^:private opens #{"(" "[" "{"})
+(def ^:private closes #{")" "]" "}"})
+
+(defn- break-line
+  "A line's tokens [[text space-before?]...] at indent as lines of at most 100 columns where it
+  can: the first group (a delimited list on the line, or open to its end) that reaches past the
+  limit, else the widest, is broken consistently, its open delimiter ending the line, each of
+  its elements (split at its commas) on a line of its own one level deeper, its close delimiter
+  beginning the line after, each new line broken again"
+  [indent toks]
+  (let [toks (vec toks)
+        line (render indent toks)]
+    (if (<= (count line) max-width)
+      [line]
+      (let [n (count toks)
+            ;; the columns where each token ends, and the line's top-level groups [open close]
+            ends (loop [i 0 col (* 4 indent) acc []]
+                   (if (= i n) acc
+                       (let [[t sp] (nth toks i) c (+ col (if (and (pos? i) sp) 1 0) (count t))]
+                         (recur (inc i) c (conj acc c)))))
+            groups (loop [i 0 depth 0 open nil acc []]
+                     (if (= i n)
+                       (if open (conj acc [open nil]) acc)
+                       (let [t (first (nth toks i))]
+                         (cond
+                           (contains? opens t) (if (zero? depth) (recur (inc i) 1 i acc) (recur (inc i) (inc depth) open acc))
+                           (contains? closes t) (cond (zero? depth) (recur (inc i) 0 nil acc)
+                                                      (= 1 depth) (recur (inc i) 0 nil (conj acc [open i]))
+                                                      :else (recur (inc i) (dec depth) open acc))
+                           :else (recur (inc i) depth open acc)))))
+            ok (filter (fn [[o c]] (and (< (nth ends o) max-width) (< (inc o) (or c n)))) groups)
+            ;; the first group that reaches past the limit, else the widest
+            g (or (first (filter (fn [[o c]] (> (nth ends (or c (dec n))) max-width)) ok))
+                  (last (sort-by (fn [[o c]] (- (nth ends (or c (dec n))) (nth ends o))) ok)))]
+        (if-not g
+          [line]
+          (let [[o c] g
+                content (subvec toks (inc o) (or c n))
+                elems (loop [xs content depth 0 cur [] acc []]
+                        (if (empty? xs)
+                          (if (seq cur) (conj acc cur) acc)
+                          (let [[t :as x] (first xs)
+                                d (cond (contains? opens t) (inc depth) (contains? closes t) (dec depth) :else depth)]
+                            (if (and (= "," t) (zero? depth))
+                              (recur (rest xs) d [] (conj acc (conj cur x)))
+                              (recur (rest xs) d (conj cur x) acc)))))]
+            (vec (concat (break-line indent (subvec toks 0 (inc o)))
+                         (mapcat #(break-line (inc indent) %) elems)
+                         (when c (break-line indent (subvec toks c)))))))))))
+
+(defn- break-lines
+  "The pretty layout's text with its lines over 100 columns broken (break-line), from the
+  printer's tokens [text line joint? tt] of it; a line a token of several lines touches stays"
+  [^String text toks]
+  (let [lines (vec (str/split text #"\n" -1))
+        frozen (java.util.HashSet.)
+        by-line (reduce (fn [m [t l joint]]
+                          (let [k (sx/count-newlines t)]
+                            (when (pos? k) (doseq [i (range l (+ l k 1))] (.add frozen (long i)))))
+                          (update m l (fnil conj []) [t (not joint)]))
+                        {} toks)]
+    (str/join "\n"
+              (mapcat (fn [i ^String ln]
+                        (let [l (inc i) ts (get by-line l)]
+                          (if (or (<= (count ln) max-width) (.contains frozen (long l)) (empty? ts))
+                            [ln]
+                            (let [indent (quot (- (count ln) (count (str/triml ln))) 4)]
+                              (if (= ln (render indent ts)) (break-line indent ts) [ln])))))
+                      (range) lines))))
+
+(defn print-pretty
+  "A forms file's forms to Rust text in the pretty layout (SPEC §9.4, 2), whatever positions
+  they carry: {:path :text}"
+  [forms]
+  (let [forms (mapv (comp internalize strip-positions) forms)
+        opts (file-opts forms)
+        p (mk-printer 1)
+        toks (java.util.ArrayList.)]
+    (binding [*pretty* true *tokens* toks]
+      (print-forms! p forms opts))
+    {:path (:path opts) :text (str (break-lines (str (:sb p)) (vec toks)) "\n")}))
 
 ;;; The full layout (SPEC §9.2, §9.4, 3)
 
@@ -2218,7 +2358,11 @@
               (let [y2 (rewrite log y)]
                 (case (get d i)
                   :implicit (let [inner (second (lv y2))
-                                  pl (:rs/paren-line (meta (lv y2)))]
+                                  ;; the line of its ( when that begins a line, or is before the
+                                  ;; expression's (a binary operator before it stands there)
+                                  pl (or (:rs/paren-line (meta (lv y2)))
+                                         (let [a (:line (meta (lv y2))) b (line-of inner)]
+                                           (when (and a b (< a b)) a)))]
                               (if (and pl (instance? arbace.lang.IObj inner))
                                 (vary-meta inner assoc :rs/paren pl)
                                 inner))

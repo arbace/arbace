@@ -1,12 +1,17 @@
-;; repr/rust's corpus file (doc/rust/SPEC.md §11.4, RS14; doc/rust/RUST-NOTES.md, "RR1"): prints
-;; test/rust/corpus-rustc-1.99.1.edn from the extracted rust-src apk's library/ directory.
-;; Usage: arbace test/rust/corpus_make.ae LIBRARY-DIR
-;; For each of std's five crates (core, alloc, std, proc_macro, test; edition 2024 by their
-;; Cargo.toml, a library each): every .rs file under CRATE/src, sorted; the crate roots (src/lib.rs
-;; and src/lib.miri.rs, miri's alternative root); the files a #[path = "..."] attribute or a
-;; cfg_attr(..., path = "...") names (resolved against the naming file's directory, the rule for a
-;; mod declared at a file's top level); the .rs files include!d. Paths are relative to library/,
-;; as rustc is given them.
+;; repr/rust's corpus files (doc/rust/SPEC.md §11.4, RS14; doc/rust/RUST-NOTES.md, "RR1", "RR4"):
+;; prints a corpus file test/rust/corpus-CORPUS.edn.
+;; Usage: arbace test/rust/corpus_make.ae std LIBRARY-DIR          (corpus-rustc-1.99.1.edn)
+;;        arbace test/rust/corpus_make.ae library LIBRARY-DIR SYSROOT-LIB (corpus-rustc-1.99.1-library.edn)
+;;        arbace test/rust/corpus_make.ae compiler RUSTC-DIR RUSTC-DEV-LIB (corpus-rustc-1.99.1-compiler.edn)
+;;        arbace test/rust/corpus_make.ae crates CRATES-DIR PINS   (corpus-crates-2026-10-18.edn)
+;; (a single argument LIBRARY-DIR is std, as before RR4.)
+;;
+;; std (RR1): for each of std's five crates (core, alloc, std, proc_macro, test; edition 2024 by
+;; their Cargo.toml, a library each): every .rs file under CRATE/src, sorted; the crate roots
+;; (src/lib.rs and src/lib.miri.rs, miri's alternative root); the files a #[path = "..."] attribute
+;; or a cfg_attr(..., path = "...") names (resolved against the naming file's directory, the rule
+;; for a mod declared at a file's top level); the .rs files include!d. Paths are relative to
+;; library/, as rustc is given them.
 ;; For the interface level (SPEC §11.3, RR2; doc/rust/RUST-NOTES.md, "RR2"), each crate's :iface:
 ;; the root rustdoc documents, the crates it takes from the host's sysroot (--extern NAME=its
 ;; .rmeta: the direct dependencies of the crate's Cargo.toml for this target, the build of
@@ -14,6 +19,17 @@
 ;; backtrace and panic-unwind, proc_macro's rustc-dep-of-std) and of its build.rs (std's
 ;; backtrace_in_libstd; test's enable_unstable_features is set only on a nightly or dev rustc, not
 ;; 1.99.1), and the environment its build.rs sets (std's STD_ENV_ARCH, the target's arch).
+;;
+;; library, compiler, crates (RR4): every Cargo package under the directory (a Cargo.toml with a
+;; [package]), each a crate of the corpus: its name Cargo's ([lib] name, else the package's name
+;; with - made _), its edition its [package]'s (inherited from the workspace's [workspace.package]
+;; for edition.workspace = true; 2015 when none, Cargo's default), its directory, and every .rs
+;; file under it that is in no package nested inside it; roots the files of its targets (src/lib.rs,
+;; src/main.rs, src/bin/*.rs, build.rs, tests/*.rs, benches/*.rs, examples/*.rs and each target's
+;; path = "..."); #[path] and include! files as for std. library: library/ but std's five crates'
+;; src/ (the first corpus) and the files Cargo.toml's [workspace] exclude names; compiler:
+;; RUSTC-DIR/compiler (paths relative to RUSTC-DIR: compiler/rustc_ast/src/ast.rs); crates: each
+;; crate of PINS (lines SHA-256, two spaces, NAME-VERSION.crate) extracted into CRATES-DIR/NAME-VERSION.
 
 (require (quote [arbace.string :as s]))
 (import (quote [java.io File]))
@@ -23,54 +39,470 @@
        (map #(.getPath ^File %)) sort))
 
 (defn norm [^String p]
-  (let [parts (reduce (fn [acc seg] (cond (= seg "..") (pop acc) (= seg ".") acc :else (conj acc seg)))
+  (let [parts (reduce (fn [acc seg] (cond (= seg "..") (if (or (empty? acc) (= ".." (peek acc))) (conj acc seg) (pop acc))
+                                          (= seg ".") acc :else (conj acc seg)))
                       [] (s/split p #"/"))]
     (s/join "/" parts)))
 
-(defn dir-of [^String p] (subs p 0 (.lastIndexOf p "/")))
+(defn dir-of [^String p] (let [i (.lastIndexOf p "/")] (if (neg? i) "" (subs p 0 i))))
 
-(let [lib (first *command-line-args*)
-      crates ["core" "alloc" "std" "proc_macro" "test"]
-      iface {"core" {:externs [] :cfg []}
-             "alloc" {:externs ["core" "compiler_builtins"] :cfg []}
-             "std" {:externs ["alloc" "cfg_if" "panic_unwind" "panic_abort" "core" "unwind" "hashbrown" "std_detect"
-                              "rustc_demangle" "miniz_oxide" "addr2line" "libc" "object"]
-                    :cfg ["backtrace_in_libstd" "feature=\"backtrace\"" "feature=\"panic-unwind\""]
-                    :env {"STD_ENV_ARCH" "x86_64"}}
-             "proc_macro" {:externs ["std" "core" "rustc_literal_escaper"] :cfg ["feature=\"rustc-dep-of-std\""]}
-             "test" {:externs ["getopts" "std" "core" "libc"] :cfg []}}
-      rel (fn [^String p] (subs p (inc (count lib))))
-      all (into {} (for [c crates] [c (mapv rel (rs-files (File. (str lib "/" c "/src"))))]))
-      every (set (apply concat (vals all)))
-      named (fn [pat]
-              (sort (distinct (for [c crates f (get all c)
-                                    m (re-seq pat (slurp (str lib "/" f)))
-                                    :let [t (norm (str (dir-of f) "/" (second m)))]
-                                    :when (contains? every t)]
-                                t))))
-      path-files (set (named #"(?m)^\s*(?:#\[\s*path\s*=|(?:[^/\n]*\bcfg_attr\([^\n]*,\s*)?path\s*=)\s*\"([^\"]+\.rs)\""))
-      include-files (set (named #"(?m)^\s*include!\(\s*\"([^\"]+\.rs)\"\s*\)"))]
-  (println ";; repr/rust's first corpus (doc/rust/SPEC.md §11.4, RS14; doc/rust/RUST-NOTES.md): std's five")
-  (println ";; crates of the pinned rustc, from Alpine's rust-src-1.99.1-r0 (its SHA-256 below, as")
-  (println ";; tools/rsdump/apks.sha256 pins it), extracted into .tmp/repr-rust/apks/rust-src/; paths relative")
-  (println ";; to its usr/src/rust/library/, as rustc is given them. Made by test/rust/corpus_make.ae.")
-  (println "{:name \"rustc-1.99.1\"")
-  (println " :apk {:file \"rust-src-1.99.1-r0.apk\" :sha256 \"0849c88c92333bdbe4f1867872db3499f33100851989a0760eb79685a4936cfb\"")
-  (println "       :root \"usr/src/rust/library\"}")
-  (println " :crates")
-  (println " [")
-  (doseq [c crates]
-    (let [fs (get all c)
-          roots (filter #(contains? #{(str c "/src/lib.rs") (str c "/src/lib.miri.rs")} %) fs)]
-      (println (str "  {:name " c " :dir \"" c "\" :edition 2024 :crate-type lib"))
-      (println (str "   :roots " (pr-str (vec roots))))
-      (println (str "   :path-files " (pr-str (vec (filter #(s/starts-with? % (str c "/")) (sort path-files))))))
-      (println (str "   :include-files " (pr-str (vec (filter #(s/starts-with? % (str c "/")) (sort include-files))))))
-      (let [{:keys [externs cfg env]} (get iface c)]
-        (println (str "   :iface {:root " (pr-str (str c "/src/lib.rs")) " :externs " (pr-str externs) " :cfg " (pr-str cfg)
-                      (when env (str " :env {" (s/join " " (for [[k v] env] (str (pr-str k) " " (pr-str v)))) "}")) "}")))
-      (println (str "   :files ;; " (count fs)))
-      (println "   [")
-      (doseq [f fs] (println (str "    " (pr-str f))))
-      (println "   ]}")))
-  (println " ]}"))
+(def path-pat #"(?m)^\s*(?:#\[\s*path\s*=|(?:[^/\n]*\bcfg_attr\([^\n]*,\s*)?path\s*=)\s*\"([^\"]+\.rs)\"")
+(def include-pat #"(?m)^\s*include!\(\s*\"([^\"]+\.rs)\"\s*\)")
+
+(defn named
+  "The files of every (the set) that a pattern names in the files fs (relative to base)"
+  [base fs every pat]
+  (sort (distinct (for [f fs
+                        m (re-seq pat (slurp (str base "/" f)))
+                        :let [t (norm (str (dir-of f) "/" (second m)))]
+                        :when (contains? every t)]
+                    t))))
+
+;;; Cargo.toml, as much of TOML as the manifests need: [section] and [[section]] headers, key =
+;;; "string", key = true, key.sub = value, key = { workspace = true }
+
+(defn toml-sections
+  "[[header key value]...] of a manifest; header the section's name ([[x]] as x), keys dotted"
+  [^String text]
+  (loop [ls (s/split-lines text) h nil acc []]
+    (if (empty? ls)
+      acc
+      (let [l (s/trim (first ls))]
+        (cond
+          (re-find #"^\[\[([^\]]+)\]\]" l) (recur (rest ls) (s/trim (second (re-find #"^\[\[([^\]]+)\]\]" l))) acc)
+          (re-find #"^\[([^\]]+)\]" l) (recur (rest ls) (s/trim (second (re-find #"^\[([^\]]+)\]" l))) acc)
+          :else
+          (if-let [[_ k v] (re-find #"^([A-Za-z0-9_.\-\"]+)\s*=\s*(.*)$" l)]
+            (let [k (s/replace k "\"" "")
+                  v (s/trim v)
+                  v (cond
+                      (re-find #"^\"([^\"]*)\"" v) (second (re-find #"^\"([^\"]*)\"" v))
+                      (re-find #"^\{\s*workspace\s*=\s*true\s*\}" v) :workspace
+                      (s/starts-with? v "true") true
+                      (s/starts-with? v "false") false
+                      :else v)
+                  [k v] (if (s/ends-with? k ".workspace") [(subs k 0 (- (count k) 10)) (if (= v true) :workspace v)] [k v])]
+              (recur (rest ls) h (conj acc [h k v])))
+            (recur (rest ls) h acc)))))))
+
+(defn toml-get [secs h k] (some (fn [[h2 k2 v]] (when (and (= h h2) (= k k2)) v)) secs))
+
+(defn manifest [^String dir]
+  (let [f (File. (str dir "/Cargo.toml"))]
+    (when (.exists f) (toml-sections (slurp f)))))
+
+(defn workspace-edition
+  "The edition of the nearest workspace above dir whose [workspace.package] has one"
+  [^String base ^String dir]
+  (loop [d (dir-of dir)]
+    (let [m (manifest (str base "/" d))
+          e (when m (toml-get m "workspace.package" "edition"))]
+      (cond e e
+            (= d "") nil
+            :else (recur (dir-of d))))))
+
+(defn packages
+  "The Cargo packages under base/top (relative paths): [{:dir :name :edition :targets}...], each
+  a directory whose Cargo.toml has a [package]"
+  [^String base ^String top]
+  (let [tomls (->> (file-seq (File. (if (= top "") base (str base "/" top))))
+                   (filter #(and (.isFile ^File %) (= "Cargo.toml" (.getName ^File %))))
+                   (map #(dir-of (subs (.getPath ^File %) (inc (count base)))))
+                   sort)]
+    (vec (for [d tomls
+               :let [m (manifest (str base "/" d))]
+               :when (some (fn [[h]] (= "package" h)) m)
+               :let [pkg (toml-get m "package" "name")
+                     lib (toml-get m "lib" "name")
+                     ed (toml-get m "package" "edition")
+                     ed (if (= ed :workspace) (workspace-edition base d) ed)
+                     targets (keep (fn [[h k v]] (when (and (contains? #{"lib" "bin" "test" "bench" "example"} h) (= k "path") (string? v))
+                                                   (norm (str d "/" v))))
+                                   m)
+                     ;; a target's own edition (none in these corpora: checked)
+                     _ (doseq [[h k v] m :when (and (contains? #{"lib" "bin" "test" "bench" "example"} h) (= k "edition"))]
+                         (throw (ex-info (str d ": a target's edition " v) {})))]]
+           {:dir d :name (symbol (s/replace (or lib pkg) "-" "_"))
+            :package pkg
+            :edition (Long/parseLong (or ed "2015"))
+            :proc-macro (= true (toml-get m "lib" "proc-macro"))
+            :targets (vec targets)}))))
+
+(defn package-crates
+  "The corpus's crates of the packages: each package's files (relative to base) but those of the
+  packages nested in it and those excluded"
+  [^String base pkgs excluded]
+  (let [dirs (set (map :dir pkgs))
+        by-dir (into {} (map (juxt :dir identity) pkgs))
+        ;; the package that owns a file: the nearest directory above it that is a package's
+        owner (fn [^String f] (loop [d (dir-of f)] (cond (contains? dirs d) d (= d "") nil :else (recur (dir-of d)))))
+        files (->> (rs-files (File. base)) (map #(subs % (inc (count base)))) (remove excluded))
+        by (group-by owner files)
+        every (set files)]
+    (when-let [lost (seq (get by nil))]
+      (binding [*out* *err*] (println "corpus_make: files in no package, left out:" (count lost) (vec (take 5 lost)))))
+    (vec (for [p pkgs
+               :let [fs (vec (sort (get by (:dir p))))]
+               :when (seq fs)
+               :let [d (:dir p)
+                     ;; a package nested in another's directory (not a member of its workspace:
+                     ;; the codegen backends' build systems, both named y): its namespaces under
+                     ;; the enclosing crate's (SPEC §2.1 as built at RR4)
+                     ns-crate (loop [e d acc (list (str (:name p)))]
+                                (let [o (when (not= e "") (owner e))]
+                                  (if o
+                                    (recur o (cons (str (:name (by-dir o))) acc))
+                                    (when (next acc) (s/join "." acc)))))
+                     in (fn [& xs] (str d "/" (apply str xs)))
+                     std-root (fn [f] (let [r (subs f (inc (count d)))]
+                                        (or (contains? #{"src/lib.rs" "src/main.rs" "build.rs"} r)
+                                            (re-matches #"(src/bin|tests|benches|examples)/[^/]+\.rs" r)
+                                            (re-matches #"(src/bin|tests|benches|examples)/[^/]+/main\.rs" r))))
+                     roots (vec (sort (distinct (concat (filter std-root fs) (filter (set fs) (:targets p))))))]]
+           (assoc p :files fs :roots roots :ns-crate ns-crate
+                    :path-files (vec (named base fs every path-pat))
+                    :include-files (vec (named base fs every include-pat)))))))
+
+;;; The interface level of RR4's corpora (SPEC §11.3): each crate's dependencies from its
+;;; Cargo.toml, for this target (x86_64-alpine-linux-musl)
+
+(def target-cfg
+  {"unix" true "windows" false "target_os" "linux" "target_env" "musl" "target_family" "unix"
+   "target_arch" "x86_64" "target_pointer_width" "64" "target_vendor" "alpine" "target_endian" "little"
+   "target_has_atomic" #{"8" "16" "32" "64" "ptr"} "miri" false "test" false "doc" false})
+
+(defn cfg-true?
+  "Whether a cfg predicate's text (all, any, not, NAME, NAME = \"V\") holds for this target"
+  [^String t]
+  (let [t (s/trim t)]
+    (cond
+      (re-matches #"(?s)(all|any|not)\((.*)\)" t)
+      (let [[_ op body] (re-matches #"(?s)(all|any|not)\((.*)\)" t)
+            parts (loop [cs (seq body) depth 0 cur "" acc []]
+                    (if (empty? cs)
+                      (if (s/blank? cur) acc (conj acc cur))
+                      (let [c (first cs)]
+                        (cond
+                          (and (= c \,) (zero? depth)) (recur (rest cs) depth "" (conj acc cur))
+                          (= c \() (recur (rest cs) (inc depth) (str cur c) acc)
+                          (= c \)) (recur (rest cs) (dec depth) (str cur c) acc)
+                          :else (recur (rest cs) depth (str cur c) acc)))))
+            vs (map cfg-true? parts)]
+        (case op "all" (every? true? vs) "any" (boolean (some true? vs)) "not" (not (first vs))))
+      (re-matches #"(\w+)\s*=\s*\"([^\"]*)\"" t)
+      (let [[_ k v] (re-matches #"(\w+)\s*=\s*\"([^\"]*)\"" t)
+            have (get target-cfg k)]
+        (if (set? have) (contains? have v) (= have v)))
+      :else (= true (get target-cfg t)))))
+
+(defn deps-of
+  "The dependencies of a manifest for this target: [{:key :package :optional}...], dev- and
+  build-dependencies left out"
+  [secs]
+  (let [dep-sec (fn [^String h]
+                  (cond
+                    (nil? h) nil
+                    (= h "dependencies") [:in nil]
+                    (s/starts-with? h "dependencies.") [:table (subs h 13)]
+                    (re-matches #"target\.'?(.*?)'?\.dependencies" h) [:in nil (second (re-matches #"target\.'?(.*?)'?\.dependencies" h))]
+                    (re-matches #"target\.'?(.*?)'?\.dependencies\.([\w-]+)" h)
+                    (let [[_ c k] (re-matches #"target\.'?(.*?)'?\.dependencies\.([\w-]+)" h)] [:table k c])
+                    :else nil))
+        ok-target (fn [c] (or (nil? c) (if (s/starts-with? c "cfg(") (cfg-true? (subs c 4 (dec (count c)))) (= c "x86_64-alpine-linux-musl"))))
+        entries (reduce (fn [acc [h k v]]
+                          (let [[kind nm c] (dep-sec h)]
+                            (cond
+                              (nil? kind) acc
+                              (not (ok-target c)) acc
+                              (= kind :in)
+                              (let [v (str v)
+                                    pkg (second (re-find #"package\s*=\s*\"([^\"]+)\"" v))
+                                    opt (boolean (re-find #"optional\s*=\s*true" v))]
+                                (assoc acc k {:key k :package (or pkg k) :optional opt}))
+                              :else
+                              (let [e (get acc nm {:key nm :package nm :optional false})]
+                                (assoc acc nm (cond-> e
+                                                (= k "package") (assoc :package v)
+                                                (= k "optional") (assoc :optional (= v true))))))))
+                        (sorted-map) secs)]
+    (vec (vals entries))))
+
+(defn default-deps
+  "The optional dependencies the default features enable (a feature named for one, or dep:NAME)"
+  [secs]
+  (let [feats (into {} (for [[h k v] secs :when (= h "features")] [k (str v)]))
+        dflt (get feats "default" "")]
+    (loop [todo (map second (re-seq #"\"([^\"]+)\"" dflt)) seen #{}]
+      (if (empty? todo)
+        seen
+        (let [f (first todo)
+              f (s/replace f #"^dep:" "")
+              more (when-let [d (get feats f)] (map second (re-seq #"\"([^\"]+)\"" d)))]
+          (if (contains? seen f) (recur (rest todo) seen) (recur (concat (rest todo) more) (conj seen f))))))))
+
+(def env-values
+  "The values of the env!(...) the compiler's crates read, as rust's bootstrap sets them for this
+  build (rustc -vV: 1.99.1, 58cf8f9c35b355199727627d07ae34a4e2846d67, 2026-10-13,
+  x86_64-alpine-linux-musl), else a placeholder: both sides of the interface level are documented
+  with the same environment"
+  {"CFG_RELEASE" "1.99.1" "CFG_VERSION" "1.99.1 (58cf8f9c3 2026-10-13)" "CFG_RELEASE_CHANNEL" "stable"
+   "CFG_VER_HASH" "58cf8f9c35b355199727627d07ae34a4e2846d67" "CFG_VER_DATE" "2026-10-13"
+   "CFG_COMPILER_HOST_TRIPLE" "x86_64-alpine-linux-musl" "CFG_LIBDIR_RELATIVE" "lib"
+   "CFG_VIRTUAL_RUST_SOURCE_BASE_DIR" "/rustc/58cf8f9c35b355199727627d07ae34a4e2846d67"
+   "CFG_VIRTUAL_RUSTC_DEV_SOURCE_BASE_DIR" "/rustc-dev/58cf8f9c35b355199727627d07ae34a4e2846d67"})
+
+(def lib-names
+  "Packages whose library is named otherwise than the package"
+  {"md-5" "md5" "thorin-dwp" "thorin"})
+
+(defn lib-files
+  "The crates of a library directory: {lib-name [file...]}, a crate's .rmeta (or a proc macro's
+  .so)"
+  [^String dir]
+  (let [fs (sort (.list (File. dir)))]
+    (reduce (fn [m f]
+              (if-let [[_ n ext] (re-matches #"lib(.+)-[0-9a-f]+\.(rmeta|so)" f)]
+                (update m n (fnil conj []) f)
+                m))
+            {} fs)))
+
+(defn rustc-dev-iface
+  "A compiler crate's :iface, documented against rustc-dev's crates (the build of these very
+  sources): {:iface ...} or {:no-iface reason}"
+  [^String base libdir libs c]
+  (let [n (str (:name c))
+        own (first (filter #(s/ends-with? % ".rmeta") (get libs n (get libs (s/replace n "-" "_")))))
+        own (or own (first (get libs n)))]
+    (if-not own
+      {:no-iface "not in rustc-dev's libraries"}
+      (let [m (manifest (str base "/" (:dir c)))
+            bytes (slurp (str libdir "/" own) :encoding "ISO-8859-1")
+            dflt (default-deps m)
+            deps (filter #(or (not (:optional %)) (contains? dflt (:key %))) (deps-of m))
+            res (for [d deps
+                      :let [lib (get lib-names (:package d) (s/replace (:package d) "-" "_"))
+                            ;; the name the code uses: the key of a renamed dependency, else the
+                            ;; package's library name
+                            ext (if (= (:key d) (:package d)) lib (s/replace (:key d) "-" "_"))
+                            cands (get libs lib)
+                            ;; two builds of one crate in rustc-dev (rustc_hash, object, libloading,
+                            ;; twox_hash): the one the crate's own metadata names first, else the first
+                            cands (if (> (count cands) 1)
+                                    (let [at (fn [f] (let [[_ h] (re-matches #"lib.+-([0-9a-f]+)\..*" f) i (.indexOf ^String bytes (str "-" h))]
+                                                       (if (neg? i) Long/MAX_VALUE i)))]
+                                      [(first (sort-by (juxt at identity) cands))])
+                                    cands)]]
+                  (if (= 1 (count cands)) (str ext "=" (first cands)) {:missing (:package d) :cands cands}))
+            bad (filter map? res)
+            envs (sort (distinct (for [f (:files c) [_ e] (re-seq #"\benv!\(\s*\"([A-Z_0-9]+)\"" (slurp (str base "/" f)))] e)))
+            root (or (first (filter #(contains? #{(str (:dir c) "/src/lib.rs") (str (:dir c) "/lib.rs")} %) (:roots c)))
+                     (first (filter #(s/ends-with? % "/lib.rs") (:roots c))))]
+        (cond
+          (seq bad) {:no-iface (str "a dependency not in rustc-dev: " (pr-str (vec bad)))}
+          (nil? root) {:no-iface "no library root"}
+          :else {:iface (cond-> {:root root :libdir "rustc-dev" :externs (vec (sort (remove map? res)))
+                                 :cfg (vec (sort (for [f dflt :when (some (fn [[h k]] (and (= h "features") (= k f))) m)]
+                                                   (str "feature=\"" f "\""))))}
+                          (seq envs) (assoc :env (into (sorted-map) (for [e envs] [e (get env-values e "")]))))})))))
+
+(defn print-crate [c]
+  (println (str "  {:name " (:name c) " :dir " (pr-str (:dir c)) (when (:version c) (str " :version " (pr-str (:version c))))
+                " :edition " (:edition c) " :crate-type " (if (:proc-macro c) "proc-macro" "lib")))
+  (when-let [n (:ns-crate c)] (println (str "   :ns-crate " (pr-str n))))
+  (println (str "   :roots " (pr-str (:roots c))))
+  (println (str "   :path-files " (pr-str (:path-files c))))
+  (println (str "   :include-files " (pr-str (:include-files c))))
+  (when-let [i (:cargo (:iface c))]
+    (println (str "   :iface {:cargo " (pr-str i) (when-let [fs (:features (:iface c))] (str " :features " (pr-str fs))) "}")))
+  (when-let [i (when-not (:cargo (:iface c)) (:iface c))]
+    (let [{:keys [root externs cfg env libdir]} i]
+      (println (str "   :iface {:root " (pr-str root) (when libdir (str " :libdir " (pr-str libdir)))
+                    " :externs " (pr-str externs) " :cfg " (pr-str cfg)
+                    (when env (str " :env {" (s/join " " (for [[k v] env] (str (pr-str k) " " (pr-str v)))) "}")) "}"))))
+  (when-let [r (:no-iface c)] (println (str "   ;; not documented: " r)))
+  (println (str "   :files ;; " (count (:files c))))
+  (println "   [")
+  (doseq [f (:files c)] (println (str "    " (pr-str f))))
+  (println "   ]}"))
+
+(def std-iface
+  {"core" {:externs [] :cfg []}
+   "alloc" {:externs ["core" "compiler_builtins"] :cfg []}
+   "std" {:externs ["alloc" "cfg_if" "panic_unwind" "panic_abort" "core" "unwind" "hashbrown" "std_detect"
+                    "rustc_demangle" "miniz_oxide" "addr2line" "libc" "object"]
+          :cfg ["backtrace_in_libstd" "feature=\"backtrace\"" "feature=\"panic-unwind\""]
+          :env {"STD_ENV_ARCH" "x86_64"}}
+   "proc_macro" {:externs ["std" "core" "rustc_literal_escaper"] :cfg ["feature=\"rustc-dep-of-std\""]}
+   "test" {:externs ["getopts" "std" "core" "libc"] :cfg []}})
+
+(defn std-corpus [lib]
+  (let [crates ["core" "alloc" "std" "proc_macro" "test"]
+        iface std-iface
+        rel (fn [^String p] (subs p (inc (count lib))))
+        all (into {} (for [c crates] [c (mapv rel (rs-files (File. (str lib "/" c "/src"))))]))
+        every (set (apply concat (vals all)))
+        fs (apply concat (vals all))
+        path-files (set (named lib fs every path-pat))
+        include-files (set (named lib fs every include-pat))]
+    (println ";; repr/rust's first corpus (doc/rust/SPEC.md §11.4, RS14; doc/rust/RUST-NOTES.md): std's five")
+    (println ";; crates of the pinned rustc, from Alpine's rust-src-1.99.1-r0 (its SHA-256 below, as")
+    (println ";; tools/rsdump/apks.sha256 pins it), extracted into .tmp/repr-rust/apks/rust-src/; paths relative")
+    (println ";; to its usr/src/rust/library/, as rustc is given them. Made by test/rust/corpus_make.ae.")
+    (println "{:name \"rustc-1.99.1\"")
+    (println " :apk {:file \"rust-src-1.99.1-r0.apk\" :sha256 \"0849c88c92333bdbe4f1867872db3499f33100851989a0760eb79685a4936cfb\"")
+    (println "       :root \"usr/src/rust/library\"}")
+    (println " :crates")
+    (println " [")
+    (doseq [c crates]
+      (let [fs (get all c)
+            roots (filter #(contains? #{(str c "/src/lib.rs") (str c "/src/lib.miri.rs")} %) fs)
+            {:keys [externs cfg env]} (get iface c)]
+        (print-crate {:name c :dir c :edition 2024 :roots (vec roots)
+                      :path-files (vec (filter #(s/starts-with? % (str c "/")) (sort path-files)))
+                      :include-files (vec (filter #(s/starts-with? % (str c "/")) (sort include-files)))
+                      :iface (cond-> {:root (str c "/src/lib.rs") :externs externs :cfg cfg} env (assoc :env env))
+                      :files fs})))
+    (println " ]}")))
+
+(defn header [name lines]
+  (doseq [l lines] (println (str ";; " l)))
+  (println (str "{:name " (pr-str name))))
+
+(defn sysroot-iface
+  "A library crate's :iface against the host's sysroot (the build of library/): its root, its
+  dependencies for this target but the optional ones, each the sysroot's crate of its name, no
+  features; {:iface ...} or {:no-iface reason}"
+  [^String base sysroot c]
+  (let [m (manifest (str base "/" (:dir c)))
+        root (first (filter (set (:roots c)) (concat (filter #(re-find #"/lib\.rs$" %) (:targets c)) [(str (:dir c) "/src/lib.rs")])))
+        deps (remove :optional (deps-of m))
+        res (for [d deps
+                  :let [lib (get lib-names (:package d) (s/replace (:package d) "-" "_"))
+                        ext (if (= (:key d) (:package d)) lib (s/replace (:key d) "-" "_"))]]
+              ;; a renamed dependency (core = rustc-std-workspace-core) by its file
+              (cond (not (contains? sysroot lib)) {:missing (:package d)}
+                    (= ext lib) ext
+                    (= 1 (count (filter #(s/ends-with? % ".rmeta") (get sysroot lib))))
+                    (str ext "=" (first (filter #(s/ends-with? % ".rmeta") (get sysroot lib))))
+                    :else {:missing (:package d)}))
+        bad (filter map? res)]
+    (cond
+      (nil? root) {:no-iface "no library"}
+      (:proc-macro c) {:no-iface "a proc macro (its dependencies are not in the sysroot)"}
+      (seq bad) {:no-iface (str "a dependency not in the sysroot: " (s/join ", " (map :missing bad)))}
+      :else {:iface {:root root :externs (vec (sort res)) :cfg []}})))
+
+(def library-not-documented
+  "The library's crates whose originals rustdoc does not document as configured (checked by
+  bin/repr-rust roundtrip --iface rustc-1.99.1-library), and why"
+  {})
+
+(defn library-corpus [lib sysroot-dir]
+  (let [std (set (for [c ["core" "alloc" "std" "proc_macro" "test"]
+                       f (rs-files (File. (str lib "/" c "/src")))]
+                   (subs f (inc (count lib)))))
+        ;; rtstartup's two files are no Cargo package: rust's bootstrap compiles each with rustc
+        ;; itself; a crate here, of library/'s edition (they use nothing an edition changes)
+        pkgs (conj (packages lib "") {:dir "rtstartup" :name 'rtstartup :edition 2024
+                                      :targets ["rtstartup/rsbegin.rs" "rtstartup/rsend.rs"]})
+        crates (package-crates lib (vec (sort-by :dir pkgs)) std)
+        sysroot (lib-files sysroot-dir)
+        ;; core and std documented again, with the files #[path] reaches outside them
+        ;; (stdarch's core_arch, portable-simd's core_simd and std_float, backtrace) printed
+        with-std (fn [c] (let [{:keys [externs cfg env]} (get std-iface (str (:name c)))]
+                           (cond-> {:root (str (:name c) "/src/lib.rs") :externs externs :cfg cfg} env (assoc :env env))))
+        core {:dir "core" :name 'core :edition 2024 :roots [] :path-files [] :include-files [] :files []}
+        crates (vec (sort-by :dir (conj crates core)))
+        crates (mapv (fn [c]
+                       (cond
+                         (contains? #{"core" "std"} (:dir c)) (assoc c :iface (with-std c))
+                         (contains? library-not-documented (:dir c)) (assoc c :no-iface (get library-not-documented (:dir c)))
+                         :else (merge c (sysroot-iface lib sysroot c))))
+                     crates)]
+    (header "rustc-1.99.1-library"
+            ["repr/rust's corpus of the rest of library/ (doc/rust/SPEC.md §11.4; doc/rust/RUST-NOTES.md, \"RR4\"):"
+             "every Cargo package of rust-src-1.99.1-r0's usr/src/rust/library/ (its SHA-256 below, as"
+             "tools/rsdump/apks.sha256 pins it) but the .rs files of the first corpus (std's five crates'"
+             "src/): stdarch, vendor, compiler-builtins, portable-simd, backtrace, the *tests crates, std's"
+             "tests and benches...; paths relative to library/. Made by test/rust/corpus_make.ae library."])
+    (println " :apk {:file \"rust-src-1.99.1-r0.apk\" :sha256 \"0849c88c92333bdbe4f1867872db3499f33100851989a0760eb79685a4936cfb\"")
+    (println "       :root \"usr/src/rust/library\"}")
+    (println " :crates")
+    (println " [")
+    (doseq [c crates] (print-crate c))
+    (println " ]}")))
+
+(defn compiler-corpus [rustc libdir]
+  (let [pkgs (packages rustc "compiler")
+        ;; rustc's copy of library/proc_macro (rustc_proc_macro's [lib] path) is the first corpus's
+        crates (package-crates rustc pkgs #(not (s/starts-with? % "compiler/")))
+        libs (lib-files libdir)
+        crates (mapv #(merge % (rustc-dev-iface rustc libdir libs %)) crates)]
+    (header "rustc-1.99.1-compiler"
+            ["repr/rust's corpus of the compiler (doc/rust/SPEC.md §11.4; doc/rust/RUST-NOTES.md, \"RR4\"): every"
+             "Cargo package of rust-src-1.99.1-r0's usr/src/rustc/compiler/ (its SHA-256 below, as"
+             "tools/rsdump/apks.sha256 pins it); paths relative to usr/src/rustc/, as rust's build gives them"
+             "to rustc. Made by test/rust/corpus_make.ae compiler."])
+    (println " :apk {:file \"rust-src-1.99.1-r0.apk\" :sha256 \"0849c88c92333bdbe4f1867872db3499f33100851989a0760eb79685a4936cfb\"")
+    (println "       :root \"usr/src/rustc\"}")
+    (println " :crates")
+    (println " [")
+    (doseq [c crates] (print-crate c))
+    (println " ]}")))
+
+(def crates-not-documented
+  "The crates of the set Cargo does not document in the interface level's workspace (bin/repr-rust's
+  crates_docs), and why"
+  {"chacha20-0.10.1" "yanked on crates.io: Cargo resolves no =0.10.1"
+   "libssh2-sys-0.3.2" "yanked on crates.io: Cargo resolves no =0.3.2"
+   "openssl-sys-0.9.117" "its build script needs an OpenSSL installation, which the host has not (doc/ALPINE.md)"
+   "openssl-0.10.81" "depends on openssl-sys, whose build script needs an OpenSSL installation"
+   "curl-sys-0.4.90+curl-8.21.0" "depends on openssl-sys, whose build script needs an OpenSSL installation"
+   "curl-0.4.50" "depends on openssl-sys, whose build script needs an OpenSSL installation"
+   "git2-curl-0.22.0" "depends on openssl-sys, whose build script needs an OpenSSL installation"})
+
+(def crates-features
+  "The features the interface level's workspace enables for a crate (every crate is taken
+  without its default features), where it builds with none"
+  {"gix-hash-0.25.1" ["sha1"]   ; it requires sha1 or sha256
+   "http-1.4.2" ["std"]})       ; it supports no no_std
+
+(defn crates-corpus [dir pins]
+  (let [ps (for [l (s/split-lines (slurp pins)) :let [[_ sha f] (re-find #"^([0-9a-f]{64})  (\S+)\.crate$" l)] :when f]
+             [sha f])
+        crates (vec (for [[sha f] ps
+                          :let [[_ n v] (re-find #"^(.*?)-(\d+\.\d+\.\d+.*)$" f)
+                                pkgs (packages (str dir "/" f) "")
+                                ;; the crate's own package (the .crate's top Cargo.toml); nested packages
+                                ;; (examples, test crates) are its files' owners within it
+                                cs (package-crates (str dir "/" f) pkgs #{})]
+                          c cs]
+                      (assoc c :dir (if (= "" (:dir c)) f (str f "/" (:dir c)))
+                               :version v
+                               :iface (when-not (contains? crates-not-documented f)
+                                        (cond-> {:cargo (str (:package c) "@" v)}
+                                          (crates-features f) (assoc :features (crates-features f))))
+                               :no-iface (crates-not-documented f)
+                               :files (mapv #(str f "/" %) (:files c))
+                               :roots (mapv #(str f "/" %) (:roots c))
+                               :path-files (mapv #(str f "/" %) (:path-files c))
+                               :include-files (mapv #(str f "/" %) (:include-files c)))))]
+    (header "crates-2026-10-18"
+            ["repr/rust's pinned crate set (doc/rust/SPEC.md §11.4; doc/rust/RUST-NOTES.md, \"RR4\"; the survey's"
+             "E9): the newest version of each of the 402 crates in the host's Cargo cache on 2026-10-18, each"
+             ".crate pinned by its SHA-256 in test/rust/crates-2026-10-18.sha256 (crates.io's own checksums),"
+             "extracted into .tmp/repr-rust/crates/src/NAME-VERSION/; paths relative to that directory. Each"
+             "Cargo package in a .crate is a crate here. Made by test/rust/corpus_make.ae crates."])
+    (println " :crates-io {:pins \"test/rust/crates-2026-10-18.sha256\" :root \"src\"}")
+    (println " :crates")
+    (println " [")
+    (doseq [c crates] (print-crate c))
+    (println " ]}")))
+
+(let [[mode & more] *command-line-args*]
+  (case mode
+    "std" (std-corpus (first more))
+    "library" (library-corpus (first more) (second more))
+    "compiler" (compiler-corpus (first more) (second more))
+    "crates" (crates-corpus (first more) (second more))
+    (std-corpus mode)))

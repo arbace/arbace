@@ -615,8 +615,18 @@ struct Facts<'p> {
 }
 
 impl<'p> Facts<'p> {
-    /// The tokens of a macro call parsed as `expr (, expr)*`, or `e; n` in brackets
+    /// The tokens of a macro call parsed as `expr (, expr)*`, or `e; n` in brackets; a parse
+    /// that reported an error, left a delayed bug (a recovery that expects an error later) or
+    /// raised a fatal error is none, and the silent context is left empty (a delayed bug left in
+    /// it panics when it drops)
     fn parse_args(&self, mac: &MacCall) -> Option<(bool, Vec<Box<Expr>>)> {
+        // a fatal error of the parser (FatalError::raise, a panic) is none too
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.parse_args_in(mac))).unwrap_or(None);
+        self.psess.dcx().reset_err_count();
+        r
+    }
+
+    fn parse_args_in(&self, mac: &MacCall) -> Option<(bool, Vec<Box<Expr>>)> {
         let args = &mac.args;
         if !matches!(args.delim, Delimiter::Parenthesis | Delimiter::Bracket) || args.tokens.is_empty() {
             return None;
@@ -660,8 +670,7 @@ impl<'p> Facts<'p> {
                 return None;
             }
         }
-        if self.psess.dcx().has_errors().is_some() {
-            self.psess.dcx().reset_err_count();
+        if self.psess.dcx().has_errors_or_delayed_bugs().is_some() {
             return None;
         }
         Some((repeat, exprs))
