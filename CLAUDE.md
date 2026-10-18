@@ -214,7 +214,9 @@ Prior art:
   forms interpreted against translated by j2g, against `test/diffcheck/known.edn`; about 5
   minutes, 40 s cached), Clojure's suite on the test build (`test/arbace-go-results.edn`),
   the oracle against the frozen reference, and goi's essential check (`bin/goi check
-  --essential`: `$GOROOT/test`'s programs of `test/goi/essential.txt` interpreted against gc). `bin/gate --full` adds, concurrently: on the frozen
+  --essential`: `$GOROOT/test`'s programs of `test/goi/essential.txt` interpreted against gc), and the generated variants'
+  check (`bin/generated-check`, F7.3: `arbace/lang/go/CompilerNodes.ae` and `CompilerAOTFn.ae`
+  regenerated and compared with the committed files). `bin/gate --full` adds, concurrently: on the frozen
   JVM `bin/repr-java check --suite`, `bin/repr-java roundtrip --corpus baseline,samples,jdk --text`
   (then mode `:full` printed back to the original Java, byte for byte),
   `bin/jrt-convert verify` (`jdk/` converted afresh, byte for byte),
