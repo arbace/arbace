@@ -12,8 +12,16 @@
     `;; Converted from .../Name.java`, else its own name). Options:
       --index DIR     more converted files whose declarations the printer consults (which
                       classes are generic, for the diamond), e.g. jdk/forms (repeatable)
+      --layout L      full (the default): a file read in mode :full (repr/java read --full) is
+                      printed from its record, its forms that are the ones recorded as the Java
+                      text they were read from, the others anew (arbace.repr.java.full); lines:
+                      every file printed anew, in the printer's style
+      --anew          in the full layout, every member printed anew within the recorded text (its
+                      comments, the files' headers and the classes' own text kept): a check of
+                      printing anew in the full layout
       --quiet         no per-file lines"
   (:require [arbace.string :as str]
+            [arbace.repr.java.full :as full]
             [arbace.java.io :as io]
             [arbace.classes.env :as cenv])
   (:import [java.io File PushbackReader StringReader]))
@@ -106,6 +114,13 @@
 
 
 (def ^:dynamic *radix* "The radix map of the file being printed." {})
+
+(def ^:dynamic *full*
+  "In the full layout: {:text t}, the Java text of the file being printed." nil)
+
+(def ^:dynamic *anew*
+  "--anew: every member printed anew, within the recorded text." false)
+
 
 (defn- radix-java
   "Java's spelling of a radix token of a converted file (2r101 is 0b101)."
@@ -279,13 +294,18 @@
       (and (contains? (:members scope) n) (inherited-member-clash? scope n))
       (canonical (get (:members scope) n))
       :else
-      (do (when-let [b (and (not (contains? (:members scope) n))
-                            (not (contains? (:tvars scope) n))
-                            (resolve-simple scope n))]
-            (when (or (contains? (:imports *jfile*) n)
-                      (= b (get @default-imports n)))
-              (need-import! b)))
-          n))))
+      (let [b (and (not (contains? (:members scope) n))
+                   (not (contains? (:tvars scope) n))
+                   (resolve-simple scope n))
+            src (get (:src-imports *jfile*) n)]
+        (if (and b src (not= src (canonical b)))
+          ;; the full layout: the Java file imports another class of that name
+          (canonical b)
+          (do (when b
+                (when (or (contains? (:imports *jfile*) n)
+                          (= b (get @default-imports n)))
+                  (need-import! b)))
+              n))))))
 
 (defn- class-binary
   "The binary name of class symbol `s` in scope, best effort."
@@ -2829,7 +2849,11 @@
   (str (annotations-text (:scope env) m)
        (apply str (for [k modifier-order :when (get m k)] (str (name k) " ")))))
 
-(defn- javadoc [m] (when (:deprecated m) ["/** @deprecated */"]))
+(def ^:dynamic *javadoc?*
+  "Whether a deprecated member's /** @deprecated */ is printed: not for a member printed anew in the
+  full layout, whose doc comment is in the recorded text." true)
+
+(defn- javadoc [m] (when (and *javadoc?* (:deprecated m)) ["/** @deprecated */"]))
 
 (defn- member-classes [members]
   (for [m members :when (is? m 'defclass)] (str (second m))))
@@ -2971,12 +2995,18 @@
                      (into (vec (javadoc m)) lines)))
                  (range n) cs))))
 
+(declare full-member-lines)
+
 (defn member-lines
   "The members of a class body, separated by blank lines; `ckind` the class's kind."
   [env members ckind]
   (let [members (mapcat #(if (is? % 'do) (rest %) [%]) members)
         groups (for [mb members]
-                 (case (str (head mb))
+                 (or
+                  (full-member-lines env mb ckind)
+                  ;; a member printed anew in the full layout: its doc comment is in the record
+                  (binding [*javadoc?* (and *javadoc?* (not (and *full* (full/span mb))))]
+                  (case (str (head mb))
                    "field" (field-lines env mb)
                    "method" (method-lines env mb ckind)
                    "constructor" (ctor-lines env mb ckind)
@@ -2984,20 +3014,25 @@
                    "static-initializer" (block "static" (body-lines env (rest mb) :stmt))
                    "constants" (constants-lines env mb true)
                    "defclass" (class-body-lines env mb :member)
-                   (throw (ex-info (str "unknown member " (head mb)) {:member mb}))))
+                   (throw (ex-info (str "unknown member " (head mb)) {:member mb}))))))
         ;; an enum without constants still needs its ;
         groups (if (and (= ckind :enum) (not (some #(is? % 'constants) members))) (cons [";"] groups) groups)]
     (vec (apply concat (interpose [""] groups)))))
 
+(defn- class-scope
+  "The parts of a class declaration and the env inside its body: {:nm :m :comps :opts :members
+  :ckind :tps :env'}."
+  [env x kind]
+  (let [{nm :name m :meta :keys [comps opts members]} (class-parts x)
+        tps (:type-params opts)]
+    {:nm nm :m m :comps comps :opts opts :members members :ckind (kind-of m) :tps tps
+     :env' (-> (class-frame-env env nm members comps tps kind)
+               (assoc :record-comps comps))}))
+
 (defn class-body-lines
   "A class declaration: defclass form `x` (kind :top or :member) or letclass spec (:local)."
   [env x kind]
-  (let [{nm :name m :meta :keys [comps opts members]} (class-parts x)
-        ckind (kind-of m)
-        sc0 (:scope env)
-        tps (:type-params opts)
-        env' (-> (class-frame-env env nm members comps tps kind)
-                 (assoc :record-comps comps))
+  (let [{:keys [nm m comps opts members ckind tps env']} (class-scope env x kind)
         sc (:scope env')
         simple (last (str/split (str nm) #"\."))
         kw (case ckind :interface "interface" :enum "enum" :record "record" :annotation "@interface" "class")
@@ -3066,18 +3101,37 @@
       (run! walk xs))
     @out))
 
-(defn java-text
-  "The Java source of unit `u`."
-  [{:keys [pkg imports forms] :as u}]
+(declare source-imports)
+
+(defn- with-file-scope
+  "Calls (f env0 used) with the file scope of unit `u` bound (`used` the atom of the classes its
+  printed text imports)."
+  [{:keys [pkg imports forms] :as u} f]
   (let [used (atom (sorted-set))
         taken (into (all-class-names forms)
                     (concat (remove #(str/includes? % "$") (keys imports))
                             (get *pkg-classes* pkg)))]
-    (binding [*jfile* {:pkg pkg :imports imports :used used :taken taken}
+    (binding [*jfile* {:pkg pkg :imports imports :used used :taken taken
+                       ;; the full layout: the simple names the Java file imports, {simple canonical}
+                       :src-imports (when-let [t (:text *full*)]
+                                      (into {} (for [i (source-imports t)
+                                                     :let [[_ c] (re-matches #"import\s+([\w.$]+)\s*;" i)]
+                                                     :when c]
+                                                 [(last (str/split c #"\.")) c])))}
               *radix* (or (:radix u) {})]
-      (let [env0 {:scope {:members {} :tvars #{}} :fields #{} :locals {} :recv nil :outer-recvs #{}
-                  :loops () :jstack () :labels {} :lbl-counter (atom 0) :pkg pkg}
-            pkg-form (first (filter #(is? % 'defpackage) forms))
+      (f {:scope {:members {} :tvars #{}} :fields #{} :locals {} :recv nil :outer-recvs #{}
+          :loops () :jstack () :labels {} :lbl-counter (atom 0) :pkg pkg}
+         used))))
+
+(defn- package-line [env0 pkg-form pkg]
+  (str (annotations-text (:scope env0) (meta (second pkg-form))) "package " pkg ";"))
+
+(defn java-text
+  "The Java source of unit `u`, printed anew."
+  [{:keys [pkg forms] :as u}]
+  (with-file-scope u
+    (fn [env0 used]
+      (let [pkg-form (first (filter #(is? % 'defpackage) forms))
             body (vec (mapcat (fn [f]
                                 (case (str (head f))
                                   "defclass" (conj (class-body-lines env0 f :top) "")
@@ -3086,14 +3140,168 @@
                                   (throw (ex-info (str "unknown top-level form " (head f)) {}))))
                               forms))
             imports-l (vec (for [b @used] (str "import " (canonical b) ";")))
+            ;; the full layout's members printed from their record name classes as the Java file
+            ;; did: its imports too
+            imports-l (if-let [t (:text *full*)] (vec (distinct (concat (source-imports t) imports-l))) imports-l)
             pkg-l (cond
-                    pkg-form [(str (annotations-text (:scope env0) (meta (second pkg-form))) "package " pkg ";")]
+                    pkg-form [(package-line env0 pkg-form pkg)]
                     (and (seq pkg) (not (some #(is? % 'defmodule) forms))) [(str "package " pkg ";")]
                     :else [])]
         (str (str/join "\n" (concat pkg-l (when (seq pkg-l) [""])
                                     imports-l (when (seq imports-l) [""])
                                     (butlast body)))
              "\n")))))
+
+;;; ------------------------------------------------------------------------------------------
+;;; The full layout (forms of mode :full, arbace.repr.java.full; PRINTER-NOTES.md, "Mode :full")
+;;;
+;;; A file read with `read --full` holds its Java text and the spans of its declarations: its
+;;; top-level forms and the members of its top-level and member classes. A declaration that is the
+;;; one recorded (its hash the recorded one) is the text of its span: a member whole, a class its
+;;; own text (between its members' spans) with its members' texts. One that is not is printed
+;;; anew, by the printer of the lines layout, its members that are the ones recorded again their
+;;; text; a class printed anew names the classes it needs that the Java file does not import by
+;;; adding imports after the file's.
+
+(defn- full-intact?
+  "Is positioned form `x` the one recorded? A member never with --anew."
+  [x]
+  (and (full/intact? x) (or (full/class-form? x) (not *anew*))))
+
+(defn- span-groups
+  "Positioned forms `xs` by their spans, overlapping spans grouped (Java's `int a, b;` declares two
+  fields over one text): [[start end [x ...]] ...] in order."
+  [xs]
+  (reduce (fn [gs x]
+            (let [[s e] (full/span x)
+                  [gs0 ge gxs] (peek gs)]
+              (if (and gs0 (< s ge))
+                (conj (pop gs) [gs0 (max e ge) (conj gxs x)])
+                (conj gs [s e [x]]))))
+          [] (sort-by (comp first full/span) xs)))
+
+(defn- line-prefix
+  "The indentation of position `pos` of text `t`: the text before it on its line when that is
+  blank, else as many spaces."
+  [^String t pos]
+  (let [ls (inc (.lastIndexOf t "\n" (int (dec pos))))
+        pre (subs t ls pos)]
+    (if (str/blank? pre) pre (apply str (repeat (count pre) \space)))))
+
+(defn- lines-at
+  "Lines printed anew as the text at position `pos`: the first where `pos` is, the others indented
+  as the line of `pos` is."
+  [lines pos]
+  (let [ind (line-prefix (:text *full*) pos)]
+    (str/join "\n" (map-indexed (fn [i l] (if (or (zero? i) (str/blank? l)) l (str ind l))) lines))))
+
+(defn- text-lines
+  "The recorded text of span [s e] as lines for a class printed anew: the lines after the first
+  without the indentation of the first."
+  [s e]
+  (let [t (:text *full*)
+        ind (line-prefix t s)
+        ls (str/split (subs t s e) #"\n" -1)]
+    (vec (cons (first ls) (map #(if (str/starts-with? % ind) (subs % (count ind)) %) (rest ls))))))
+
+(defn- stitch
+  "The text of span [s e]: the recorded text, with the spans of `children` (positioned forms within
+  it) as (text-of start end [x ...]) gives them, group by group."
+  [[s e] children text-of]
+  (let [^String t (:text *full*)
+        sb (StringBuilder.)]
+    (loop [cur s, gs (span-groups children)]
+      (if-let [[gs0 ge xs] (first gs)]
+        (do (when-not (<= cur gs0 ge e)
+              (throw (ex-info (str "the record's spans are not nested: [" gs0 " " ge "] in [" s " " e "]") {})))
+            (.append sb (subs t cur gs0))
+            (.append sb (str (text-of gs0 ge xs)))
+            (recur ge (rest gs)))
+        (do (.append sb (subs t cur e)) (str sb))))))
+
+(declare class-text-full)
+
+(defn- members-text-full
+  "The text of a group of positioned members `xs` of a class (env `env`, kind `ckind`) at [s e]."
+  [env ckind s e xs]
+  (cond
+    (and (= 1 (count xs)) (full/class-form? (first xs))) (class-text-full env (first xs) :member)
+    (every? full-intact? xs) (subs (:text *full*) s e)
+    :else (let [;; an enum's ; and the constants' last ; are in the record's text
+                ls (binding [*full* nil *javadoc?* false] (member-lines env xs (if (= ckind :enum) :class ckind)))
+                ls (if (is? (last xs) 'constants) (conj (pop ls) (str/replace (peek ls) #";$" "")) ls)]
+            (lines-at ls s))))
+
+(defn class-text-full
+  "The text of positioned class form `x` (kind :top or :member) in the full layout."
+  [env x kind]
+  (let [[s e] (full/span x)]
+    (if (full-intact? x)
+      (let [{:keys [members ckind env']} (class-scope env x kind)
+            members (mapcat #(if (is? % 'do) (rest %) [%]) members)]
+        (stitch [s e] (filter full/span members) (fn [s e xs] (members-text-full env' ckind s e xs))))
+      (lines-at (binding [*javadoc?* false] (class-body-lines env x kind)) s))))
+
+(defn- full-member-lines
+  "In the full layout, the lines of positioned member `mb` of a class printed anew: its record's
+  text when it is the one recorded, a member class's text in the full layout; else nil."
+  [env mb ckind]
+  (when (and *full* (full/span mb))
+    (let [[s e] (full/span mb)]
+      (cond
+        (full/class-form? mb) (let [t (class-text-full env mb :member)
+                                    ind (line-prefix (:text *full*) s)
+                                    ls (str/split t #"\n" -1)]
+                                (vec (cons (first ls) (map #(if (str/starts-with? % ind) (subs % (count ind)) %) (rest ls)))))
+        (full-intact? mb) (text-lines s e)))))
+
+(defn source-imports
+  "The import declarations of Java text `t`, as written."
+  [^String t]
+  (vec (map str/trim (re-seq #"(?m)^[ \t]*import\s+(?:static\s+)?[\w.$]+(?:\s*\.\s*\*)?\s*;" t))))
+
+(defn- add-imports
+  "Java text `t` with an import of each class of `bins` that it does not import, after its package
+  declaration."
+  [^String t bins]
+  (let [have (set (map #(str/replace % #"\s+" " ") (source-imports t)))
+        missing (for [b bins
+                      :let [c (canonical b)]
+                      :when (not (or (have (str "import " c ";"))
+                                     (have (str "import " (pkg-of b) ".*;"))))]
+                  (str "import " c ";"))]
+    (if (empty? missing)
+      t
+      ;; after the package declaration's line: the imports may be followed by commented-out ones
+      (let [m (re-find #"(?m)^[ \t]*package\s[^;]*;[^\n]*\n" t)
+            i (if m (+ (.indexOf t ^String m) (count m)) 0)]
+        (str (subs t 0 i) (str/join (map #(str % "\n") missing)) (subs t i))))))
+
+(defn java-text-full
+  "The Java source of unit `u` in the full layout (its first form holds the record of its file)."
+  [{:keys [pkg forms] :as u}]
+  (let [{:keys [text at]} (:java/file (meta (first forms)))]
+    (binding [*full* {:text text}]
+      (if (= at (mapv #(first (full/span %)) forms))
+        (with-file-scope u
+          (fn [env0 used]
+            (let [t (stitch [0 (count text)] forms
+                            (fn [s e xs]
+                              (cond
+                                (and (= 1 (count xs)) (full/class-form? (first xs))) (class-text-full env0 (first xs) :top)
+                                (every? full-intact? xs) (subs text s e)
+                                :else (lines-at (binding [*javadoc?* false]
+                                                  (vec (mapcat (fn [f]
+                                                                 (case (str (head f))
+                                                                   "defclass" (class-body-lines env0 f :top)
+                                                                   "defmodule" (module-lines env0 f)
+                                                                   "defpackage" [(package-line env0 f pkg)]))
+                                                               xs)))
+                                                s))))]
+              (add-imports t @used))))
+        ;; the top-level forms are not the ones recorded: the file anew, its members from their
+        ;; record where they are the ones recorded
+        (java-text u)))))
 
 (defn- ae-files [paths]
   (sort (for [p paths
@@ -3107,13 +3315,15 @@
 (defn print-units
   "Prints `units` into directory `out`, with the declarations of them and of `index-extra`. Returns
   {:printed n :failed [[path message] ...]}."
-  [units index-extra out & {:keys [quiet]}]
+  [units index-extra out & {:keys [quiet layout anew] :or {layout "full"}}]
   (let [pk (package-classes (concat index-extra units))]
     (binding [*pkg-classes* pk *decls* (binding [*pkg-classes* pk] (declare-units (concat index-extra units)))]
       (let [results (doall
                      (for [u units]
                        (try
-                         (let [text (java-text u)
+                         (let [text (if (and (= "full" layout) (:java/file (meta (first (:forms u)))))
+                                      (binding [*anew* anew] (java-text-full u))
+                                      (java-text u))
                                o (io/file out (out-path u))]
                            (io/make-parents o)
                            (spit o text)
@@ -3129,15 +3339,18 @@
                          (empty? as) [opts ps]
                          (= "--index" (first as)) (recur (nnext as) (update opts :index conj (second as)) ps)
                          (= "--quiet" (first as)) (recur (next as) (assoc opts :quiet true) ps)
+                         (= "--anew" (first as)) (recur (next as) (assoc opts :anew true) ps)
+                         (= "--layout" (first as)) (recur (nnext as) (assoc opts :layout (second as)) ps)
                          :else (recur (next as) opts (conj ps (first as)))))]
     (when (< (count paths) 2)
-      (binding [*out* *err*] (println "usage: bin/repr-java print [--index DIR]... [--quiet] FORMS... OUT"))
+      (binding [*out* *err*] (println "usage: bin/repr-java print [--index DIR]... [--layout full|lines] [--anew] [--quiet] FORMS... OUT"))
       (System/exit 2))
     (let [out (last paths)
           t0 (System/nanoTime)
           units (load-units (butlast paths))
           extra (load-units (:index opts))
-          {:keys [printed failed]} (print-units units extra out :quiet (:quiet opts))]
+          {:keys [printed failed]} (print-units units extra out :quiet (:quiet opts)
+                                                    :layout (or (:layout opts) "full") :anew (:anew opts))]
       (doseq [[p m] failed] (println "FAILED" p m))
       (println (str printed " of " (count units) " files printed into " out ", " (count failed) " failed in "
                     (format "%.1f" (/ (- (System/nanoTime) t0) 1e9)) "s"))

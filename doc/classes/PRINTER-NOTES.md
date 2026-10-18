@@ -10,8 +10,8 @@ the printer's contract; these notes say how it is built, what the round trip che
 it found.
 
 ```sh
-bin/repr-java print [--index DIR]... [--quiet] FORMS... OUT
-bin/repr-java roundtrip [--corpus baseline,samples,jdk] [--no-classes] [--record]
+bin/repr-java print [--index DIR]... [--layout full|lines] [--anew] [--quiet] FORMS... OUT
+bin/repr-java roundtrip [--corpus baseline,samples,jdk] [--no-classes] [--text | --text-only] [--record]
 ```
 
 `FORMS` are converted files or directories of them (`read`'s output). Every file holding Java
@@ -26,11 +26,13 @@ the round trip passes `jdk/forms`.
 | file | namespace | role |
 |---|---|---|
 | `arbace/repr/java/print.ae` | `arbace.repr.java.print` | the printer: reading converted files, names and imports, the declarations index and the expressions' types, types, annotations, code, declarations, files, the CLI |
-| `arbace/repr/java/roundtrip.ae` | `arbace.repr.java.roundtrip` | the round trip's comparator: forms, text and class files, results, references, known differences with their reasons |
+| `arbace/repr/java/roundtrip.ae` | `arbace.repr.java.roundtrip` | the round trip's comparator: forms, text and class files, results, references, known differences with their reasons; the text level (`text`) |
+| `arbace/repr/java/full.ae` | `arbace.repr.java.full` | mode `:full`'s record: spans, the canonical text and hash of a form, `record-hashes` (the reader's), `strip` (below, "Mode :full as built") |
 | `arbace/repr/java/layout.ae` | `arbace.repr.java.layout` | the converter's writer of `.ae` text (until 2026-10-17 `arbace.repr.java.print`, renamed by R1) |
 | `bin/repr-java` | | the verbs `print` (on the tools' host, `bin/lib/tools.bash`'s `arbace_tool`) and `roundtrip` |
 | `bin/lib/repr-java/roundtrip` | | the round trip's driver (its header) |
-| `test/repr/java/roundtrip/` | | per corpus: `CORPUS.edn`, the reference (results without reasons), and `CORPUS-known.edn`, the differences with their reasons |
+| `test/repr/java/roundtrip/` | | per corpus: `CORPUS.edn`, the reference (results without reasons), and `CORPUS-known.edn`, the differences with their reasons; the text level's `CORPUS-text.edn`, `CORPUS-text-known.edn` |
+| `test/repr/java/full/` | | the samples' edited forms of mode `:full` as the full layout prints them |
 
 `arbace/repr/java/` is not embedded in the executable (`arbace.j2g.embed`'s exclusions: repr/java
 needs javac), so the host loads the printer from the checkout's sources, evaluated; no re-seed is
@@ -200,7 +202,142 @@ and a printer that lays a form out from its record when the form is the one reco
 prints it anew otherwise). Since the converter's restructurings are not one-to-one with the
 text, the record would in effect be the original text per member: byte-identical, but by
 copying, not by printing. Not built (JP2): the open end of repr/java, a `:full` mode of `read`
-later.
+later. (Built on 2026-10-18 as that: "Mode :full as built", below.)
+
+## Mode :full as built (2026-10-18)
+
+At the user's decision (JP2 and JP4 (b), "a `:full` mode of `repr/java read` later", then
+2026-10-17 "both next"): `bin/repr-java read --full` records what the Java forms lose, and
+`print` gives every Java file back byte for byte (the full layout, `--layout full`, the default
+for such forms); javac then accepts every printed file and compiles it to the original's class
+files.
+
+```sh
+bin/repr-java read --full OUT ROOT [PATH...]          # also read-jdk --full
+bin/repr-java print [--layout full|lines] [--anew] FORMS... OUT
+bin/repr-java roundtrip [--corpus ...] --text | --text-only [--record]
+```
+
+**What the reader records** (`arbace.repr.java.full`; SPEC §14, 6). The forms are mode `:lines`'
+with two metadata keys more, written on lines of their own before the form:
+
+- `:java/at [start end hash]` on every declaration of javac's tree that a form stands for whole:
+  each top-level class, module and package declaration, and each member of a top-level or member
+  class (field, method, constructor, initializer, member class; an enum's constants as one, their
+  `constants` form). `start` and `end` are javac's positions (`TreeInfo.getStartPos`, `getEndPos`
+  with the unit's `EndPosTable`, which javac keeps since repr/java passes it a diagnostic
+  listener): UTF-16 offsets into the file's text, from the first modifier or annotation to the
+  closing brace or semicolon. `hash` is the form's: of a member the whole form, of a class its
+  skeleton (the class with its positioned members as their starts), a 32-bit `String.hashCode`
+  of a canonical text of the forms as the core's reader reads them (metadata included, but the
+  `:java/` keys; maps and sets sorted), the same on the frozen JVM and on the tools' host. The
+  reader writes each file with the forms numbered, reads it back and writes the hashes in.
+- `:java/file {:text t :at [start ...]}` on the file's first form: the Java file's text (as javac
+  read it: `getCharContent`) and the starts of its top-level forms in their order.
+
+So the record holds the source's comments, layout, spellings (`5L`, `0x7f`, text blocks,
+parentheses, Unicode escapes), the type arguments it wrote or left to javac's inference, and the
+choices the converter restructures away (`?:` or `if`, statement or expression `switch`,
+fall-through, `var`, initializers, `i++`'s place, the loops): as the text of the declarations
+they are in. Positions below a member (statements, expressions) are not recorded (JF2).
+
+**What the printer does** (`java-text-full`, `class-text-full`). A file whose top-level forms are
+the ones its record names (their starts, in order) is its text, with each positioned form in its
+span: a form that is the one recorded (its hash the recorded one) is the text of its span, a
+class through its own text (between its members' spans) with each member in turn; a form that
+is not is printed anew by the lines layout's code, as the text at its span (its lines indented
+as the line it starts on), its own members that are the ones recorded again their text.
+Overlapping spans (Java's `int a, b;`, two fields over one text) are one group, printed from the
+record only when all of it is. A member printed anew leaves its doc comment to the record (no
+`/** @deprecated */` of its own), and an enum's constants their `;`; a class it names by simple
+name that the file does not import is imported after the file's `package` line, and a simple
+name the file imports as another class is written qualified. A file whose top-level forms are
+not the recorded ones is printed anew, its members from their record where they are the ones
+recorded, with the file's imports. `--anew` prints every member anew within the record's text (a
+check of printing anew in the full layout, below). Printing the JDK's 838 files takes 29 s in the
+full layout (the index of `jdk/forms` included), 55 s with `--anew`.
+
+**The text level** (`bin/repr-java roundtrip --text`, `--text-only`; the round trip's driver
+`text_level`, `arbace.repr.java.roundtrip text`): each corpus's Java read with `--full` (the
+jdk corpus from its originals, `.tmp/repr-java-roundtrip/jdk-originals`, as `jdk/forms` were read
+from them), printed in the full layout and judged per converted file at four levels:
+
+| level | compares |
+|---|---|
+| `record` | the forms of mode `:full` without their record (`full/strip`) and the forms of mode `:lines` (`jdk/forms` for the JDK), as data, metadata included |
+| `text` | the printed Java file and the original, byte for byte |
+| `classes` | javac's class files of the original and of the printed Java, `-g:none`, byte for byte |
+| `anew` | javac accepts the Java of `print --anew` (every member printed anew within the record's text) |
+
+against `test/repr/java/roundtrip/CORPUS-text.edn` (the reference) and `CORPUS-text-known.edn`
+(the differences with their reasons). And the samples' Java with two edits made in its forms of
+mode `:full` (a string literal of `Square`'s compact constructor changed, `Shapes.area` renamed)
+prints as `test/repr/java/full/Square-edited.java` and `Shapes-edited.java`, which javac
+accepts: the edited member printed anew, the rest of the file the original's.
+
+### Results (2026-10-18)
+
+| corpus | converted files | record | text (Java files) | classes | anew (javac accepts) |
+|---|---:|---:|---:|---:|---:|
+| baseline | 189 | 189 | 183 of 183 | 183 of 183 | 183 of 183 |
+| samples | 17 | 17 | 14 of 14 | 14 of 14 | 14 of 14 |
+| jdk | 911 | 911 | 838 of 838 | 838 of 838 | 799 of 838 |
+
+Every Java file of the three corpora is printed back byte for byte (1,035 files; the JDK's 18.4 MB
+of its originals' tree hold 838 of them), and javac compiles each to the original's class
+files. No known difference at the levels `record`, `text`, `classes`. The 39 JDK files the
+`--anew` print does not compile are the 39 the lines layout's (above, "javac rejects the printed
+Java"): Java's type arguments in code, which the record holds as text but the printer of the
+lines layout does not use (JF3). javac's first errors, now that every pass's log is kept for the
+reasons: 36 of typing (27 incompatible types, the rest inference of type arguments and of
+generic methods' applicability, and an ambiguous `makeRef`), one `cannot find symbol` and two of
+definite assignment (`Socket`'s local `result`, another file's `clazz`); `jdk-known.edn` gives
+these files the general reason, javac's first pass's log not naming them. The baseline's `Compiler.java` and the JDK's
+`FileURLConnection.java` were rejected at first: an import the printer added had gone after the
+file's last `import` line, inside a comment of commented-out imports, and a simple name the
+member printed anew used (`URLConnection`, `java.net`'s) was imported by the file as another
+class (`sun.net.www.URLConnection`); fixed as above.
+
+The forms of mode `:full` of the JDK are 30.6 MB against `jdk/forms`' 10.4 MB (2.9 times), with
+28,150 positioned forms; reading them takes 32 s (the hashes included). `:lines` is unchanged:
+its forms are mode `:full`'s without the record (the `record` level), `bin/jrt-convert verify`
+gives `jdk/forms` byte for byte, `bin/repr-java check` passes, and the round trip's levels
+`forms`, `ae`, `classes` match their references. Times on 64 cores, shared: the text level
+64 s for the baseline, 56 s for the samples, 216 s for the JDK (its read 31 s, the two prints 29
+s and 55 s, javac of the printed and of the `--anew` trees the rest); `bin/gate --full`'s step
+(`roundtrip --corpus baseline,samples,jdk --text`) 790 s, about 13 minutes, the text levels 336 s
+of it (the three corpora's other levels took 454 s in that run, 265 s on 2026-10-17's quieter
+host).
+
+### Choices for the user (JF1-JF5; built as recommended)
+
+- **JF1 Printing from the record's text.** (a) A declaration that is the one recorded prints as
+  its span of the recorded text, one that is not is printed anew (as built): byte for byte by
+  construction, and an edit prints the edited declaration anew in the printer's style; (b)
+  token-level printing as repr/go's and repr/haskell's `:full`: every token printed from the
+  forms and laid out at recorded positions. (b) needs the printer to reproduce every source choice
+  the converter restructures (loops as `loop`/`recur`, repeated fall-through, the temporaries,
+  folded `if`s, `?:`, switch expressions, `var`, parameterized local types, type arguments,
+  casts, parentheses, spellings, imports), each recorded per construct, where the forms of the
+  JDK give javac's classes back today for 473 of 838 files: a project of its own. *Recommended:
+  (a)*, the notes' expectation of 2026-10-17 ("byte-identical, but by copying").
+- **JF2 The unit of printing anew.** (a) Declarations: top-level forms, and the members of
+  top-level and member classes (a change anywhere in a method prints the method anew); (b) also
+  statements and expressions, whose forms the converter restructures (a `let` holds the rest of
+  its block, a `loop` its update after its body), each needing its own rule of span. *Recommended:
+  (a)*; (b) when a tool edits code inside methods and wants the rest kept.
+- **JF3 The source's choices as data** (JP2 (b), JP4 (b): `?:`, a switch expression, `var`,
+  `:java-type` on casts, explicit type arguments of calls) for the printer of the lines layout
+  and the members printed anew: (a) not built, the record holding them as text (as built; the 39
+  JDK files stay rejected when printed anew); (b) recorded as keys and used by the printer.
+  *Recommended: (a)* until forms edited by tools must print as the source would.
+- **JF4 The text level in the gate.** (a) `bin/gate --full`'s `repr-java-roundtrip` step runs
+  `--text` (about 13 minutes on a shared host, the text levels about 6 of them); (b) outside the gate (`make
+  repr-java-text`). *Recommended: (a)*, as repr/go's and repr/haskell's text levels.
+- **JF5 Keys and the hash.** (a) `:java/at [start end hash]`, `:java/file {:text :at}`, the
+  hash a 32-bit `String.hashCode` of the canonical text; (b) a SHA-256 (no practical collision,
+  slower in the host's evaluated code). *Recommended: (a)*: the hash only tells an edited form
+  from the recorded one.
 
 ## Proposals
 

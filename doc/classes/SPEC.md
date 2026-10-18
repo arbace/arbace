@@ -2122,7 +2122,8 @@ repr/java's `print` (`arbace.repr.java.print`, `bin/repr-java print`, since 2026
 2. **Converted back to the same forms.** repr/java's `read` of the printed Java gives the forms
    printed, as data, metadata included: Java → forms → Java → forms is a fixpoint (the round
    trip, `bin/repr-java roundtrip`). No normalization is applied.
-3. **What the forms do not hold is chosen, not recorded.** The forms keep no comments, layout or
+3. **What the forms do not hold is chosen, not recorded** (in mode `:lines`; mode `:full`, 6,
+   records it). The forms keep no comments, layout or
    spellings but integers' radixes (§5.4), and no record of the source's choices that javac
    compiles to other code but that give the same forms: `c ? a : b` or an `if` returning,
    statement or expression `switch`, `var` or a declared type of the same erasure, an
@@ -2142,3 +2143,13 @@ repr/java's `print` (`arbace.repr.java.print`, `bin/repr-java print`, since 2026
    Where javac's typing needs more than that (inference from captured wildcard types, explicit
    type arguments of calls), the printed Java is rejected: a known limit (PRINTER-NOTES.md, JP4).
 
+6. **Mode `:full`** (`bin/repr-java read --full`, since 2026-10-18; PRINTER-NOTES.md, "Mode :full
+   as built"). The forms are mode `:lines`' with a record as metadata: `:java/at [start end
+   hash]` on each top-level form and each member of a top-level or member class (javac's
+   positions, UTF-16 offsets into the file's text; the hash of the form, of a class its skeleton,
+   its positioned members as their starts), and `:java/file {:text t :at [start ...]}` on the
+   file's first form (the Java file's text, its top-level forms' starts). Without the record
+   (the `:java/` keys) they are mode `:lines`' forms. `print`'s full layout, the default for them,
+   prints a declaration that is the one recorded (its hash the recorded one) as its text, a class
+   through its own text with its members in their spans, and one that is not anew: an unedited
+   file is the original byte for byte, and javac compiles it to the original's class files.

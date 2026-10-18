@@ -11,6 +11,8 @@
       --javac OPT        pass an option to javac (repeatable)
       --check            also check that every output reads with arbace.core/read and
                          arbace.edn/read, and write a coverage report to OUT/repr-java-report.edn
+      --full             mode :full: the forms also record the Java text, for print to give
+                         every file back byte for byte (arbace.repr.java.full)
 
   bin/repr-java read-jdk [options] OUT MODULE SRC [PATH...]
     The same for a module of the JDK itself (java.base: jdk/, bin/jrt-convert), attributed with
@@ -20,6 +22,7 @@
             [arbace.repr.java.jtypes :as jt]
             [arbace.repr.java.names :as names]
             [arbace.repr.java.layout :as pr]
+            [arbace.repr.java.full :as full]
             [arbace.edn :as edn]
             [arbace.java.io :as io]
             [arbace.pprint :as pp]
@@ -52,6 +55,15 @@
       (let [f (read-fn r eof)]
         (if (identical? f eof) n (recur (inc n)))))))
 
+(defn read-forms
+  "The forms of `text`, read with arbace.core/read."
+  [text]
+  (let [r (PushbackReader. (StringReader. text))
+        eof (Object.)]
+    (loop [acc []]
+      (let [f (read r false eof)]
+        (if (identical? f eof) acc (recur (conj acc f)))))))
+
 (defn- read-error [f text]
   (try (f text) nil
        (catch Throwable e (str (.getMessage e) (some->> (.getCause e) .getMessage (str ": "))))))
@@ -62,10 +74,12 @@
   {:core (read-error (fn [t] (binding [*read-eval* false] (read-all #(read %1 false %2) t))) text)
    :edn (read-error (fn [t] (read-all #(edn/read {:eof %2 :default (fn [t v] v)} %1) t)) text)})
 
+(def ^:dynamic *full* "Mode :full (--full)." false)
+
 (defn convert-units
-  "Analyze the Java `files` with javac options `opts` and convert every compilation unit.
-  Returns {:units [...] :failures [...] :errors [...] :stats {...}}."
-  [files opts rename]
+  "Analyze the Java `files` with javac options `opts` and convert every compilation unit (in mode
+  :full with `full`). Returns {:units [...] :failures [...] :errors [...] :stats {...}}."
+  [files opts rename & [full]]
   (let [{:keys [units context errors]} (javac/analyze files opts)
         stats (atom {})]
     (binding [jt/*types* (javac/types context)
@@ -78,7 +92,7 @@
                            :let [src (.getName (.getSourceFile ^com.sun.tools.javac.tree.JCTree$JCCompilationUnit cu))]]
                        (try
                          (let [t0 (System/nanoTime)
-                               u (cv/convert-unit cu {})]
+                               u (cv/convert-unit cu {:full full})]
                            (assoc u :source src :ms (quot (- (System/nanoTime) t0) 1000000)))
                          (catch Throwable e
                            {:failure true :source src
@@ -109,6 +123,9 @@
                files (for [u ordered]
                        (let [nm (out-file-name u)
                              text (names/unit-text table pkg u)
+                             text (if *full*
+                                    (full/record-hashes text #(binding [*read-eval* false] (read-forms %)))
+                                    text)
                              path (str (if (seq pkg) (str pkg-path "/") "") nm ".ae")]
                          {:path path :text text :load (str last-seg "/" nm)}))]
          f (concat files
@@ -194,7 +211,7 @@
                 [root])
         files (java-files paths)
         t0 (System/nanoTime)
-        {:keys [units failures errors stats]} (convert-units files (into ["-sourcepath" root] javac-opts) rename)]
+        {:keys [units failures errors stats]} (convert-units files (into ["-sourcepath" root] javac-opts) rename *full*)]
     (finish out files units failures errors stats check t0)))
 
 (defn- chunks
@@ -249,6 +266,7 @@
         ;; sources whose packages the running JDK lacks (bin/jrt-convert's jrt Java, used
         ;; across packages)
         all? (some? (System/getenv "REPR_JAVA_PATCH_ALL"))
+        full? *full*
         task (fn [[i fs]]
                (let [patch (patch-of i)
                      ppath (str/join File/pathSeparator
@@ -261,7 +279,7 @@
                                   (into ["--patch-module" (str module "=" ppath)
                                          "-implicit:none" "--enable-preview" "-source" "26"]
                                         javac-opts)
-                                  (:rename opts))
+                                  (:rename opts) full?)
                    (catch Throwable e
                      {:failures (mapv (fn [f] {:failure true :source f :error (str "javac: " e)}) copies)}))))
         futures (mapv (fn [w] (.submit pool ^java.util.concurrent.Callable (fn [] (task w)))) work)
@@ -283,13 +301,14 @@
           "--rename" (let [[from to] (str/split b #"=")] (recur more (assoc-in opts [:rename from] to) pos))
           "--javac" (recur more (update opts :javac-opts conj b) pos)
           "--check" (recur (rest args) (assoc opts :check true) pos)
+          "--full" (recur (rest args) (assoc opts :full true) pos)
           "--origins" (recur more (assoc opts :origins b) pos)
           (recur (rest args) opts (conj pos a)))))))
 
 (defn -main [cmd & args]
   (case cmd
     "read" (let [[opts [out root & paths]] (parse-opts args)]
-             (convert out root paths opts))
+             (binding [*full* (boolean (:full opts))] (convert out root paths opts)))
     "read-jdk" (let [[opts [out module src & paths]] (parse-opts args)]
-                 (jdk out module src paths opts)))
+                 (binding [*full* (boolean (:full opts))] (jdk out module src paths opts))))
   (shutdown-agents))
