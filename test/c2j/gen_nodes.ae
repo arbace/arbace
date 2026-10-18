@@ -1,0 +1,167 @@
+;; Writes arbace/lang/go/CompilerNodes.ae (Futamura F7, doc/FUTAMURA-SURVEY.md, "F7 as built"):
+;; the evaluator's half of the node kinds arbace.c2j.emit defines with defnode (arbace.c2j.node):
+;; their Code classes, and CodeNodes, their construction for the closure compiler
+;; (CodeCompiler.compile) and the static calls' table. The back end's half is the same
+;; definitions' expansion, so the two are one text.
+;;
+;; The static-call kind's evaluator half is a switch per arity over the listed methods (until
+;; F7, test/j2g/eval_ops.ae's CompilerOps.ae; doc/go/SPEED-NOTES.md, "The evaluator"): the
+;; public static methods of arbace.lang.Numbers, RT and Util, and of java.lang.Math those jrt
+;; has (go/arbace/jrt/math.ae), whose parameters are long, int, double, boolean or a reference
+;; type of java.lang or arbace.lang (or an array of a primitive or of Object), whose return type
+;; is one of those or void, with at most 3 parameters. The program's reflection lists them, so
+;; it runs on an executable built from the checkout's Numbers, RT, Util and Math (the tools'
+;; host when they are unchanged), with the checkout's arbace.c2j:
+;;   . bin/lib/tools.bash; arbace_tool -s arbace.c2j.node -s arbace.c2j.emit test/c2j/gen_nodes.ae \
+;;     > arbace/lang/go/CompilerNodes.ae
+(ns gen-nodes
+  (:require [arbace.string :as str]
+            [arbace.c2j.node :as node]
+            [arbace.c2j.emit :as emit]))
+
+(def classes [arbace.lang.Numbers arbace.lang.RT arbace.lang.Util java.lang.Math])
+
+(def jrt-math
+  (set (map second (re-seq #"go/func (Math_[A-Za-z0-9_]+)" (slurp "go/arbace/jrt/math.ae")))))
+
+(defn kind
+  "The kind of a parameter or return class: J I D Z V, O for a usable reference, nil otherwise."
+  [^Class c]
+  (cond
+    (= c Long/TYPE) "J"
+    (= c Integer/TYPE) "I"
+    (= c Double/TYPE) "D"
+    (= c Boolean/TYPE) "Z"
+    (= c Void/TYPE) "V"
+    (.isPrimitive c) nil
+    (.isArray c) (let [k (.getComponentType c)]
+                   (when (or (.isPrimitive k) (= k Object)) "O"))
+    (= (.getName c) "java.lang.Object") "O"
+    (or (str/starts-with? (.getName c) "java.lang.") (str/starts-with? (.getName c) "arbace.lang."))
+    (when (and (not (str/includes? (.getName c) "$")) (java.lang.reflect.Modifier/isPublic (.getModifiers c))
+               (not (str/starts-with? (.getName c) "java.lang.reflect.")))
+      "O")
+    :else nil))
+
+(defn desc [^Class c]
+  (cond
+    (= c Long/TYPE) "J" (= c Integer/TYPE) "I" (= c Double/TYPE) "D" (= c Boolean/TYPE) "Z"
+    (= c Void/TYPE) "V" (= c Character/TYPE) "C" (= c Float/TYPE) "F" (= c Short/TYPE) "S"
+    (= c Byte/TYPE) "B"
+    (.isArray c) (str/replace (.getName c) "." "/")
+    :else (str "L" (str/replace (.getName c) "." "/") ";")))
+
+(defn sig
+  "The key the evaluator looks a method up by (CodeRun.op): class.name(descriptor)."
+  [^java.lang.reflect.Method m]
+  (str (.getName (.getDeclaringClass m)) "." (.getName m) "("
+       (apply str (map desc (.getParameterTypes m))) ")" (desc (.getReturnType m))))
+
+(defn go-name
+  "jrt's Go name of a Math method (j2g's: Math_Abs_D__D)."
+  [^java.lang.reflect.Method m]
+  (let [code (fn [^Class c] (cond (= c Long/TYPE) "J" (= c Integer/TYPE) "I" (= c Double/TYPE) "D"
+                                  (= c Float/TYPE) "F" (= c Boolean/TYPE) "Z" :else "O"))]
+    (str "Math_" (str/capitalize (subs (.getName m) 0 1)) (subs (.getName m) 1)
+         (apply str (map #(str "_" (code %)) (.getParameterTypes m)))
+         "__" (code (.getReturnType m)))))
+
+(defn usable? [^java.lang.reflect.Method m]
+  (let [mods (.getModifiers m)]
+    (and (java.lang.reflect.Modifier/isStatic mods)
+         (java.lang.reflect.Modifier/isPublic mods)
+         (not (.isSynthetic m))
+         (<= (.getParameterCount m) 3)
+         (every? kind (.getParameterTypes m))
+         (kind (.getReturnType m))
+         (or (not= (.getDeclaringClass m) java.lang.Math)
+             (and (every? #(not= "O" (kind %)) (cons (.getReturnType m) (.getParameterTypes m)))
+                  (contains? jrt-math (go-name m)))))))
+
+(def listed
+  (->> classes
+       (mapcat #(.getDeclaredMethods ^Class %))
+       (filter usable?)
+       (sort-by sig)
+       vec))
+
+(def helpers
+  {:box @#'emit/box
+   :type-sym emit/type-sym
+   :call-static (fn [m args gs]
+                  (or (emit/numbers-fast m (fn [sig] (vec (repeat (count sig) nil))) gs (constantly args))
+                      (emit/static-call-form m args)))})
+
+(def forms
+  (node/code-forms helpers
+                   {'static-call (group-by #(.getParameterCount ^java.lang.reflect.Method %) listed)}
+                   {'static-call sig}))
+
+;; printing: a form on one line when it fits in the width, else its head and first arguments
+;; with the rest below them, a let's bindings and a cond's, case's or switch's clauses in pairs
+
+(def width 110)
+
+(defn- strip
+  "Form f without the reader's positions (the template's, in arbace/c2j/emit.ae)."
+  [f]
+  (let [m (dissoc (meta f) :line :column)
+        m (when (seq m) m)]
+    (cond
+      (seq? f) (with-meta (apply list (map strip f)) m)
+      (vector? f) (with-meta (mapv strip f) m)
+      (symbol? f) (with-meta f m)
+      :else f)))
+
+(defn- one [f] (binding [*print-meta* true] (pr-str f)))
+
+(declare pp)
+
+(defn- pp-pairs [xs col]
+  (let [ind (apply str (repeat col " "))]
+    (str/join (str "\n" ind)
+              (map (fn [p] (let [s (str/join " " (map one p))]
+                             (if (<= (+ col (count s)) width)
+                               s
+                               (str/join (str "\n" ind "  ") (map-indexed (fn [i x] (pp x (+ col (if (zero? i) 0 2)))) p)))))
+                   (partition-all 2 xs)))))
+
+(defn- pp [f col]
+  (let [s (one f)]
+    (cond
+      (or (<= (+ col (count s)) width) (and (seq? f) (= '.put (first f)))) s
+      (vector? f) (str (when-let [m (meta f)] (str "^" (one m) " ")) "[" (pp-pairs f (inc col)) "]")
+      (seq? f)
+      (let [[h & xs] f
+            hs (one h)
+            ;; the arguments kept on the head's line
+            n (case (str h)
+                "defclass" (if (= :extends (second xs)) 3 1)
+                "method" 2
+                ("constructor" "let" "if" "when" "switch" "case") 1
+                0)
+            [front back] (split-at n xs)
+            col2 (+ col 2)
+            ind (apply str (repeat col2 " "))
+            pre (str (when-let [m (meta f)] (str "^" (one m) " ")) "(" hs)
+            front-s (map #(pp % (+ col (count pre) 1)) front)]
+        (str pre (apply str (map #(str " " %) front-s))
+             (if (#{"cond" "switch" "case"} (str h))
+               (str "\n" ind (pp-pairs back col2))
+               (apply str (map #(str "\n" ind (pp % col2)) back)))
+             ")"))
+      :else s)))
+
+(println ";; Generated by test/c2j/gen_nodes.ae from the node kinds arbace.c2j.emit defines (defnode,")
+(println ";; arbace.c2j.node; Futamura F7) and the JVM's arbace.lang.Numbers, RT, Util and java.lang.Math")
+(println (str ";; (those of jrt's Math, " (count listed) " methods called directly): the evaluator's half of those"))
+(println ";; kinds, a Go-build variant of arbace.lang.Compiler read by j2g only. Regenerate rather than edit.")
+(println "(in-ns 'arbace.lang)")
+(println)
+(print "(j2g/variant Compiler")
+(doseq [[c f] forms]
+  (println)
+  (println)
+  (println (str "  ;; " c))
+  (print (str "  (j2g/add\n    " (pp (strip f) 4) ")")))
+(println ")")

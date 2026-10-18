@@ -23,7 +23,8 @@
     unresolved, Clojure's boxing and conversions (emitBoxReturn, emitTypedArgs)."
   (:require [arbace.string :as str]
             [arbace.j2g.jrt :as jrt]
-            [arbace.j2g.names :as nm])
+            [arbace.j2g.names :as nm]
+            [arbace.c2j.node :refer [defnode]])
   (:import [arbace.lang Compiler$AST Var Keyword Symbol IObj IPersistentMap IPersistentVector
             IPersistentSet IPersistentList ISeq IType IRecord PersistentHashSet Namespace]
            [java.util IdentityHashMap]
@@ -438,7 +439,8 @@
 ;; ---------------------------------------------------------------------------------------
 ;; expressions
 
-(declare emit emit-unboxed emit-fn-class! emit-deftype-class! emit-body jrt-lacks? prim-call spec-intrinsic)
+(declare emit emit-unboxed emit-fn-class! emit-deftype-class! emit-body jrt-lacks? prim-call spec-intrinsic
+         emit-local)
 
 (defn- prim [e] (:prim (node e)))
 
@@ -530,20 +532,22 @@
 
 (defn- long-box* [f] (list (with-meta 'java.lang.Long/valueOf {:param-tags '[long]}) f))
 
-(defn- emit-local [ctx n unboxed?]
+(defn- local-place
+  "Where the local of node n lives in the emitted code (the local node kind's place): {:form
+  its read and the target of its write, :clears true when its use clears it (a ^:once fn's
+  closed-over value read for the last time on its path)}."
+  [ctx n]
   (let [lb (:b n)
         b (node lb)]
     (cond
       (closed? ctx lb)
-      (let [r (field-read ctx lb b)]
-        (if (and (:once ctx) (:shouldClear n) (:canBeCleared b) (not (:bindingPrim b)))
-          (list 'let ['t- r] (list 'set! r nil) 't-)
-          r))
-      (and (zero? (:idx b)) (not (:isArg b))) (or (:self-sym ctx) 'this)
+      {:form (field-read ctx lb b)
+       :clears (boolean (and (:once ctx) (:shouldClear n) (:canBeCleared b) (not (:bindingPrim b))))}
+      (and (zero? (:idx b)) (not (:isArg b))) {:form (or (:self-sym ctx) 'this)}
       ;; a parameter a worker takes as a long (F6, spec-mask): its box, made once, when needed
-      (spec-local ctx lb) (let [{:keys [l b]} (spec-local ctx lb)]
-                            (list 'if (list 'nil? b) (list 'set! b (long-box* l)) b))
-      :else (local-sym b))))
+      (spec-local ctx lb) {:form (let [{:keys [l b]} (spec-local ctx lb)]
+                                   (list 'if (list 'nil? b) (list 'set! b (long-box* l)) b))}
+      :else {:form (local-sym b)})))
 
 ;; ---------------------------------------------------------------------------------------
 ;; guarded direct linking (Futamura F5 (a), doc/FUTAMURA-SURVEY.md, "F5 as built")
@@ -874,20 +878,17 @@
         (when (= p (:ret (site-psig (:var (node (:fexpr n))) (count (:args n)))))
           (line-meta (emit-link-site ctx (node (:fexpr n)) (:args n) key p conv) n))))))
 
-(defn- emit-invoke [ctx n]
+(defn- invoke-linked
+  "The invoke node kind's refinements of the emitted code (its emit-first): a protocol fn's
+  call, the target's own method when it implements the protocol's interface, else the protocol
+  fn (InvokeExpr.emitProto); a linked call (F5, F6); else nil, the generic call."
+  [ctx n _]
   (let [args (:args n)
         fexpr (:fexpr n)
         fnode (node fexpr)
-        key (site-key n)
-        call (fn [f]
-               (if (> (count args) 20)
-                 (list '.applyTo (list 'cast 'arbace.lang.IFn f)
-                       (list (with-meta 'arbace.lang.ArraySeq/create {:param-tags '[java.lang.Object/1]})
-                             (obj-array ctx args)))
-                 (list* '.invoke (list 'cast 'arbace.lang.IFn f) (map #(emit ctx %) args))))]
-    (if (and (:isProtocol n) (:protocolOn n) (not (runtime-class? (:protocolOn n) ctx)))
-      ;; a protocol fn: the target's own method when it implements the protocol's interface,
-      ;; else the protocol fn (InvokeExpr.emitProto)
+        key (site-key n)]
+    (cond
+      (and (:isProtocol n) (:protocolOn n) (not (runtime-class? (:protocolOn n) ctx)))
       (let [^java.lang.reflect.Method m (:onMethod n)
             on (:protocolOn n)
             t (gsym ctx "target-")
@@ -904,9 +905,7 @@
                          (.getReturnType m))
                     (list* '.invoke (list 'cast 'arbace.lang.IFn (emit ctx fexpr)) t
                            (map #(emit ctx %) rest-args)))))
-      (if key
-        (emit-link-site ctx fnode args key)
-        (call (emit ctx fexpr))))))
+      key (emit-link-site ctx fnode args key))))
 
 (defn- descriptor [^Class c]
   (cond
@@ -1102,20 +1101,20 @@
                   nil)]
       (when probe sig))))
 
-(defn- numbers-intrinsic
-  "The call of Numbers' static method m on args with its fast paths, or nil when m is not one
-  of the boxed operations above. An Object operand that is a worker's long parameter (F6,
-  spec-local) is a Long: no test, its long as is, its box for the slow path."
-  [ctx ^java.lang.reflect.Method m args]
+(defn numbers-fast
+  "The call of Numbers' static method m with its fast paths, or nil when m is not one of the
+  boxed operations above: the builder both halves of the static call share (arbace.c2j.node's
+  static-call: the evaluator's CodeOpN too, test/c2j/gen_nodes.ae). (specs-fn sig): per operand,
+  the worker's long parameter it is (F6, spec-local: a Long, no test, its long as is, its box
+  for the slow path) or nil; (gs base): a fresh temporary; (targs-fn): the operands' forms,
+  asked after the temporaries are named."
+  [^java.lang.reflect.Method m specs-fn gs targs-fn]
   (when-let [sig (intrinsic-probe m)]
     (let [ps (vec (.getParameterTypes m))
           op (.getName m)
-          specs (mapv (fn [s e] (when (= s :o)
-                                  (let [n (node e)]
-                                    (when (= "local" (:op n)) (spec-local ctx (:b n))))))
-                      sig args)
-          temps (mapv (fn [sp] (when-not sp (gsym ctx "na-"))) specs)
-          targs (typed-args ctx ps args)
+          specs (specs-fn sig)
+          temps (mapv (fn [sp] (when-not sp (gs "na-"))) specs)
+          targs (targs-fn)
           binds (vec (mapcat (fn [t p f] (when t [(tagged t p) f])) temps ps targs))
           boxes (mapv (fn [t sp] (if sp (list 'if (list 'nil? (:b sp)) (list 'set! (:b sp) (long-box* (:l sp))) (:b sp)) t))
                       temps specs)
@@ -1125,11 +1124,11 @@
           objs (keep (fn [[t s sp]] (when (and (= s :o) (not sp)) t)) (map vector temps sig specs))
           is (fn [c] (let [ts (map #(list 'instance? c %) objs)]
                        (if (next ts) (cons 'and ts) (first ts))))
-          xs (mapv (fn [k] (gsym ctx (str "n" k "-"))) (range (count ps)))
+          xs (mapv (fn [k] (gs (str "n" k "-"))) (range (count ps)))
           ;; the operands as longs: an Object one unboxed, a long one as is
           lbinds (vec (mapcat (fn [x t s sp] [(tagged x Long/TYPE) (cond sp (:l sp) (= s :o) (lv t) :else t)])
                               xs temps sig specs))
-          lfast (if (= 1 (count ps)) (long-op1 op (xs 0) slow) (long-op2 op (xs 0) (xs 1) slow (gsym ctx "nr-")))
+          lfast (if (= 1 (count ps)) (long-op1 op (xs 0) slow) (long-op2 op (xs 0) (xs 1) slow (gs "nr-")))
           dfast (when (and (every? #{:o} sig) (not-any? some? specs))
                   (if (= 1 (count ps)) (double-op1 op (xs 0)) (double-op2 op (xs 0) (xs 1))))
           dbinds (vec (mapcat (fn [x t] [(tagged x Double/TYPE) (dv t)]) xs temps))]
@@ -1141,6 +1140,31 @@
                     (if dfast
                       (list 'if (is 'java.lang.Double) (list 'let dbinds dfast) slow)
                       slow)))))))
+
+(defn- numbers-intrinsic
+  "The call of Numbers' static method m on args (as: a delay of their forms, typed-args's) with
+  its fast paths, or nil (numbers-fast). An Object operand that is a worker's long parameter
+  (F6, spec-local) is a Long."
+  [ctx ^java.lang.reflect.Method m args as]
+  (numbers-fast m
+                (fn [sig] (mapv (fn [s e] (when (= s :o)
+                                            (let [n (node e)]
+                                              (when (= "local" (:op n)) (spec-local ctx (:b n))))))
+                                sig args))
+                #(gsym ctx %)
+                #(deref as)))
+
+(defn static-call-form
+  "The direct call of static method m on argument forms args."
+  [^java.lang.reflect.Method m args]
+  (list* (with-meta (symbol (str (type-sym (.getDeclaringClass m))) (.getName m)) (param-tags (.getParameterTypes m)))
+         args))
+
+(defn- call-static
+  "The direct call of static method m on the arguments as (a delay of their forms, typed-args
+  of the children xs), with Numbers' fast paths (F3) when m is one of its boxed operations."
+  [ctx ^java.lang.reflect.Method m as xs]
+  (or (numbers-intrinsic ctx m xs as) (static-call-form m @as)))
 
 (def ^:private long-valued-ops
   #{"add" "addP" "minus" "minusP" "multiply" "multiplyP" "unchecked_add" "unchecked_minus"
@@ -1180,16 +1204,20 @@
              :guard (list 'or (list 'nil? t) (list 'instance? 'java.lang.Long t))
              :pass [(list 'if (list 'nil? t) tl (list '.longValue (list 'cast 'java.lang.Long t))) t]}))))))
 
-(defn- emit-static-method [ctx n unboxed?]
+(defn- direct-static?
+  "Does the emitted code call the method of static-method node n directly (the static-call
+  node kind), not by reflection?"
+  [ctx n]
   (let [^java.lang.reflect.Method m (:method n)]
-    (cond
-      (and m (public? (.getDeclaringClass m)) (not (runtime-class? (.getDeclaringClass m) ctx))
-           (not (jrt-lacks? m)))
-      (let [f (or (numbers-intrinsic ctx m (:args n)) (method-call ctx m nil (:args n)))]
-        (if unboxed? f (box f (.getReturnType m))))
-      (and m unboxed?)
+    (boolean (and m (public? (.getDeclaringClass m)) (not (runtime-class? (.getDeclaringClass m) ctx))
+                  (not (jrt-lacks? m))))))
+
+(defn- emit-static-method
+  "A static method called by reflection (one direct-static? does not take: static-call)."
+  [ctx n unboxed?]
+  (let [^java.lang.reflect.Method m (:method n)]
+    (if (and m unboxed?)
       (unbox-arg ctx (emit-static-method ctx (assoc n :method nil) false) (.getReturnType m))
-      :else
       (list (with-meta 'arbace.lang.Reflector/invokeStaticMethod
               {:param-tags '[java.lang.Class java.lang.String java.lang.Object/1]})
             (constant ctx (:c n)) (:methodName n) (obj-array ctx (:args n))))))
@@ -1265,15 +1293,6 @@
 
 (defn- coll-call [sym es ctx]
   (list (with-meta sym {:param-tags '[java.lang.Object/1]}) (obj-array ctx es)))
-
-(defn- emit-if [ctx n unboxed?]
-  (let [t (:testExpr n)
-        tn (node t)
-        test (if (and (= (:prim tn) Boolean/TYPE) (can-prim? tn))
-               (emit-unboxed ctx t)
-               (emit ctx t))
-        br (fn [e] (if unboxed? (emit-unboxed ctx e) (emit ctx e)))]
-    (list 'if test (br (:thenExpr n)) (br (:elseExpr n)))))
 
 (defn- emit-binding-init
   "A let or loop binding [sym init] of LocalBinding lb (LetExpr.doEmit)."
@@ -1427,6 +1446,107 @@
                      (mapcat (fn [[i t]] [i (arm i t (get thens i))]) tests)))]
     (list 'label lbl sw (ret (:defaultExpr n)))))
 
+;; ---------------------------------------------------------------------------------------
+;; node kinds defined once (Futamura F7, doc/FUTAMURA-SURVEY.md, "F7 as built"): each defnode
+;; is this back end's emitter of the kind (emit-KIND) and, read by test/c2j/gen_nodes.ae, the
+;; evaluator's Code classes of it (arbace/lang/go/CompilerNodes.ae); arbace.c2j.node says how.
+;; What a definition's expansion asks of this namespace: emit, emit-unboxed, typed-args, box,
+;; call-static, local-place (above) and lift, prim-chan (here)
+
+(defn- lift
+  "A defnode's static value v, of class t (a symbol), as the emitted code's: a primitive's
+  literal; nil, a string, a boolean, an empty collection as Java forms write them; else a
+  constant of the class's pool."
+  [ctx v t]
+  (case t
+    boolean (boolean v)
+    long (long v)
+    int (int v)
+    double (double-form v)
+    (cond
+      (or (nil? v) (string? v)) v
+      (instance? Boolean v) (if v 'java.lang.Boolean/TRUE 'java.lang.Boolean/FALSE)
+      (and (instance? arbace.lang.IPersistentCollection v) (zero? (count v)))
+      (cond (instance? IPersistentList v) 'arbace.lang.PersistentList/EMPTY
+            (instance? IPersistentVector v) 'arbace.lang.PersistentVector/EMPTY
+            (instance? IPersistentMap v) 'arbace.lang.PersistentArrayMap/EMPTY
+            (instance? IPersistentSet v) 'arbace.lang.PersistentHashSet/EMPTY
+            :else (fail "unknown empty collection"))
+      :else (constant ctx v))))
+
+(defn- prim-chan
+  "The channel of node n's unboxed value (its primitive type's): :j a long or int, :d a double,
+  :z a boolean, :p another."
+  [n]
+  (let [p (:prim n)]
+    (cond (or (= p Long/TYPE) (= p Integer/TYPE)) :j (= p Double/TYPE) :d (= p Boolean/TYPE) :z :else :p)))
+
+(defnode const
+  "A literal or a quoted constant (NumberExpr ... TheVarExpr): its value, made when the node is,
+  and a number's long and double."
+  {:exprs [NumberExpr ConstantExpr StringExpr KeywordExpr NilExpr BooleanExpr EmptyExpr TheVarExpr]
+   :chans [:o :j :d]}
+  [v (static Object (arbace.lang.Compiler$AST/literal e))
+   num (static boolean (instance? Number v))
+   lv (static long (if num (.longValue (cast Number v)) 0))
+   dv (static double (if num (.doubleValue (cast Number v)) 0.0))]
+  (static-case ch
+    :o v
+    :j (static-if num lv (.longValue (cast Number v)))
+    :d (static-if num dv (.doubleValue (cast Number v)))))
+
+(defnode local
+  "A use of a local (LocalBindingExpr): its value where it lives; on its last use on its path,
+  where the half keeps it alive, cleared (locals clearing: ObjExpr.emitLocal, emitClearLocals).
+  Where it lives is each half's own (the evaluator's slots, prims and closed-over values, the
+  emitted code's locals and fields)."
+  {:exprs [] :fields [b shouldClear]}
+  [at (place)]
+  (static-if (clears? at)
+    (let [t (get-place at :o)] (set-place at nil) t)
+    (get-place at ch)))
+
+(defnode if
+  "Clojure's if (IfExpr): the test's truth (a boolean's own when the test is one) chooses the
+  branch, in the channel asked."
+  {:exprs [IfExpr]}
+  [test (child testExpr)
+   thn (child thenExpr)
+   els (child elseExpr)
+   z (static boolean (identical? (arbace.lang.Compiler$AST/primType testExpr) Boolean/TYPE))]
+  (if (static-if z (run :z test) (run :o test)) (run ch thn) (run ch els)))
+
+(defnode static-call
+  "A call of a resolved static method the half calls directly (StaticMethodExpr): its
+  arguments converted to the parameters' classes and bound in order, then the call (Numbers'
+  boxed operations with F3's fast paths), its value in the channel asked (boxed as its
+  return's). The evaluator's: Numbers', RT's, Util's and Math's listed methods
+  (test/c2j/gen_nodes.ae), a switch per arity; the emitted code's: every public one
+  (direct-static?)."
+  {:exprs [StaticMethodExpr] :fields [method args line] :class "CodeOp"
+   :domain {:index (if (nil? method) -1 (Compiler$CodeRun/op method))}}
+  [m (static java.lang.reflect.Method method)
+   xs (children args 3 :convert (.getParameterTypes method))
+   line (static int line)]
+  (call-site line [as (run-args m xs)]
+    (box-as ch m (call-static m as))))
+
+(defnode invoke
+  "A call of a fn value (InvokeExpr): the fn, then its arguments, in order, then IFn's invoke
+  (applyTo past 20 arguments); in tail position the evaluator's frame lets go of its object
+  first (InvokeExpr.emitArgsAndCall, ObjMethod.emitClearThis). The emitted code's refinements:
+  protocol calls and linked calls (invoke-linked)."
+  {:exprs [InvokeExpr] :fields [fexpr args line tailPosition] :chans [:o] :emit-first invoke-linked}
+  [fx (child fexpr)
+   xs (children args 20)
+   line (static int line)
+   clear (eval-static boolean (and tailPosition (not (.-canBeDirect (.-objx cc)))))]
+  (call-site line [g (cast arbace.lang.IFn (run :o fx)) as (run-all :o xs)]
+    (eval-only (when clear (Compiler$CodeRun/clearThis f)))
+    (static-if (many? xs)
+      (.applyTo g (^{:param-tags [java.lang.Object/1]} arbace.lang.ArraySeq/create (array-of as)))
+      (.invoke g (splice as)))))
+
 (def ^:private box-of
   {Long/TYPE 'java.lang.Long/valueOf Double/TYPE 'java.lang.Double/valueOf
    Integer/TYPE 'java.lang.Integer/valueOf Boolean/TYPE 'java.lang.Boolean/valueOf
@@ -1450,20 +1570,8 @@
   (let [n (node e)
         f (case (:op n)
             "local" (emit-local ctx n false)
-            "number" (constant ctx (:n n))
-            "constant" (constant ctx (:v n))
-            "string" (:str n)
-            "keyword" (const-field ctx (:k n) 'arbace.lang.Keyword)
-            "nil" nil
-            "boolean" (if (:val n) 'java.lang.Boolean/TRUE 'java.lang.Boolean/FALSE)
-            "empty" (let [c (:coll n)]
-                      (cond (instance? IPersistentList c) 'arbace.lang.PersistentList/EMPTY
-                            (instance? IPersistentVector c) 'arbace.lang.PersistentVector/EMPTY
-                            (instance? IPersistentMap c) 'arbace.lang.PersistentArrayMap/EMPTY
-                            (instance? IPersistentSet c) 'arbace.lang.PersistentHashSet/EMPTY
-                            :else (fail "unknown empty collection")))
+            ("number" "constant" "string" "keyword" "nil" "boolean" "empty" "the-var") (emit-const ctx n false)
             "var" (var-value ctx (:var n))
-            "the-var" (const-field ctx (:var n) 'arbace.lang.Var)
             "def" (emit-def ctx n false)
             "set!" (emit-assign ctx n)
             ;; the class, as ImportExpr.emit leaves it (and the evaluator's ImportExpr.evalIn)
@@ -1472,7 +1580,7 @@
             "instance-field" (emit-instance-field ctx n false)
             "static-field" (emit-static-field ctx n false)
             "instance-method" (emit-instance-method ctx n false)
-            "static-method" (emit-static-method ctx n false)
+            "static-method" (if (direct-static? ctx n) (emit-static-call ctx n false) (emit-static-method ctx n false))
             "monitor-enter" (list 'do (list 'arbace.lang.Compiler$Evaluator/monitorEnter (emit ctx (:target n))) nil)
             "monitor-exit" (list 'do (list 'arbace.lang.Compiler$Evaluator/monitorExit (emit ctx (:target n))) nil)
             "try" (emit-try ctx n false)
@@ -1499,7 +1607,7 @@
                           (if (runtime-class? c ctx)
                             (list '.isInstance (constant ctx c) (emit ctx (:expr n)))
                             (list 'instance? (type-sym c) (emit ctx (:expr n)))))
-            "invoke" (emit-invoke ctx n)
+            "invoke" (emit-invoke ctx n false)
             "fn" (fn-instance ctx n (IdentityHashMap.))
             "new-instance" (if (:isDeftype n)
                              ;; deftype*: the class, made once; its value nil (ObjExpr.emit)
@@ -1528,9 +1636,9 @@
     (line-meta
       (case (:op n)
         "local" (emit-local ctx n true)
-        "number" (let [v (:n n)] (if (instance? Double v) (double-form v) (long v)))
+        "number" (emit-const ctx n true)
         "instance-method" (emit-instance-method ctx n true)
-        "static-method" (emit-static-method ctx n true)
+        "static-method" (if (direct-static? ctx n) (emit-static-call ctx n true) (emit-static-method ctx n true))
         "static-field" (emit-static-field ctx n true)
         "instance-field" (emit-instance-field ctx n true)
         "if" (emit-if ctx n true)
