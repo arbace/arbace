@@ -101,7 +101,8 @@ Prior art:
     `.ae` writer is `arbace.repr.java.layout`) on the tools' host, with its round trip Java →
     forms → Java → forms at the levels forms, ae (the converted text) and classes (javac's, byte
     for byte; `bin/repr-java roundtrip`, corpora baseline, samples and jdk/forms, references in
-    `test/repr/java/roundtrip/`; doc/classes/PRINTER-NOTES.md); `arbace.repr.go`
+    `test/repr/java/roundtrip/`; doc/classes/PRINTER-NOTES.md; mode `:full`, `read --full`,
+    keeps the Java text, printed back byte for byte: `roundtrip --text`); `arbace.repr.go`
     (`arbace/repr/go{.ae,/}`), Go as Go forms and back (spec `doc/go/SPEC.md`; mode `:full` keeps
     the text: comments, spellings, layout, printed back byte for byte; helpers `tools/godump`, `tools/gocmp`;
     `bin/repr-go read`, `print`, `roundtrip`, `check`, `test`), on the tools' host
@@ -201,7 +202,8 @@ Prior art:
   forms interpreted against translated by j2g, against `test/diffcheck/known.edn`; about 5
   minutes, 40 s cached), Clojure's suite on the test build (`test/arbace-go-results.edn`) and
   the oracle against the frozen reference. `bin/gate --full` adds, concurrently: on the frozen
-  JVM `bin/repr-java check --suite`, `bin/repr-java roundtrip --corpus baseline,samples,jdk`,
+  JVM `bin/repr-java check --suite`, `bin/repr-java roundtrip --corpus baseline,samples,jdk --text`
+  (then mode `:full` printed back to the original Java, byte for byte),
   `bin/jrt-convert verify` (`jdk/` converted afresh, byte for byte),
   `bin/j2g-edge verify`, `bin/clojure-tests --java-fixtures verify`; the Go build afresh with its
   smoke test, the box's guests from `tamago/`'s forms byte-identical to TamaGo's originals'

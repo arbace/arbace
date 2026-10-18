@@ -1,0 +1,130 @@
+(ns arbace.repr.java.full
+  "Mode :full of repr/java (doc/classes/PRINTER-NOTES.md, \"Mode :full\"; SPEC §14.1): the record
+  `read --full` adds to the Java forms so that `print` gives the Java file back byte for byte, and
+  the check of a recorded form against its record. Shared by the reader (on the frozen JVM) and the
+  printer (on the tools' host): both compute a form's hash from the forms as the core's reader
+  reads them.
+
+  The record, as metadata (the forms are mode :lines' otherwise):
+    :java/at [start end hash]  on each declaration javac's tree has: a top-level class, module or
+                               package declaration, and each member of a class that is a top-level
+                               or member class (field, method, constructor, initializer, the enum
+                               constants as one, member class); start and end are javac's
+                               positions (UTF-16 offsets into the file's text), hash the form's
+    :java/file {:text t :at [start...]}
+                               on the file's first form: the Java file's text, and the starts of
+                               its top-level forms in their order
+  A form is the one recorded when its hash is the recorded one: a member's hash covers the whole
+  form, a class's its skeleton (the class with its positioned members as their starts)."
+  (:require [arbace.string :as str]))
+
+(defn- java-key? [k] (and (keyword? k) (= "java" (namespace k))))
+
+(defn- meta-of [x]
+  (when (instance? arbace.lang.IMeta x)
+    (let [m (meta x)]
+      (when m
+        (not-empty (into {} (remove (fn [[k _]] (or (java-key? k) (#{:line :column} k)))) m))))))
+
+(defn span
+  "The recorded [start end hash] of form `x`, or nil."
+  [x]
+  (when (instance? arbace.lang.IMeta x) (:java/at (meta x))))
+
+(defn class-form? [x] (and (seq? x) (= 'defclass (first x))))
+
+(declare canon!)
+
+(defn- canon-str [x hole?]
+  (let [sb (StringBuilder.)] (canon! sb x hole?) (str sb)))
+
+(defn- canon-items! [^StringBuilder sb xs hole?]
+  (doseq [y xs]
+    (if (and hole? (span y))
+      (.append sb (str "#@" (first (span y)) " "))
+      (do (canon! sb y nil) (.append sb " ")))))
+
+(defn canon!
+  "Appends a canonical text of form `x` to `sb`: the same for the same data on both hosts, metadata
+  (but :java/ keys and the reader's :line and :column) included, maps and sets sorted. With
+  `hole?`, `x`'s positioned elements are written as their starts."
+  [^StringBuilder sb x hole?]
+  (when-let [m (meta-of x)]
+    (.append sb "^")
+    (canon! sb m nil))
+  (cond
+    (seq? x) (do (.append sb "(") (canon-items! sb x hole?) (.append sb ")"))
+    (vector? x) (do (.append sb "[") (canon-items! sb x hole?) (.append sb "]"))
+    (map? x) (do (.append sb "{")
+                 (doseq [s (sort (for [[k v] x] (str (canon-str k nil) " " (canon-str v nil))))]
+                   (.append sb s) (.append sb ","))
+                 (.append sb "}"))
+    (set? x) (do (.append sb "#{")
+                 (doseq [s (sort (map #(canon-str % nil) x))] (.append sb s) (.append sb ","))
+                 (.append sb "}"))
+    (symbol? x) (.append sb (str "'" x))
+    (keyword? x) (.append sb (str x))
+    (string? x) (.append sb (str "\"" (count x) ":" x))
+    (char? x) (.append sb (str "\\" (int x)))
+    (nil? x) (.append sb "nil")
+    (true? x) (.append sb "true")
+    (false? x) (.append sb "false")
+    (integer? x) (.append sb (str "i" x))
+    (number? x) (.append sb (str "d" (double x)))
+    :else (.append sb (str "?" (pr-str x))))
+  sb)
+
+(defn form-hash
+  "The hash of form `x` as recorded: a class's skeleton (its positioned members as their starts),
+  any other form whole."
+  [x]
+  (long (.hashCode (canon-str x (class-form? x)))))
+
+(defn intact?
+  "Is form `x` the one recorded (its hash the recorded one)? Nil when it has no record."
+  [x]
+  (when-let [[_ _ h] (span x)]
+    (= h (form-hash x))))
+
+(defn positioned
+  "The positioned forms of `forms` (a file's top-level forms) and below them, class by class:
+  [form ...], parents before their members."
+  [forms]
+  (letfn [(walk [x]
+            (when (span x)
+              (cons x (when (class-form? x) (mapcat walk (rest x))))))]
+    (vec (mapcat walk forms))))
+
+(defn record-hashes
+  "The text of a converted file of mode :full with every `^{:java/at [s e k]}` (k numbering the
+  positioned forms, as the converter writes them) given the form's hash in place of k, the forms
+  read back with `read-forms` (the core's reader)."
+  [^String text read-forms]
+  (let [hs (into {} (for [x (positioned (read-forms text))]
+                      [(nth (span x) 2) (form-hash x)]))
+        n (volatile! 0)
+        out (str/replace
+             text #"\^\{:java/at \[(\d+) (\d+) (\d+)\]\}"
+             (fn [[_ s e k]]
+               (vswap! n inc)
+               (str "^{:java/at [" s " " e " " (or (get hs (Long/parseLong k))
+                                                   (throw (ex-info (str "no positioned form " k) {})))
+                    "]}")))]
+    (when-not (= @n (count hs))
+      (throw (ex-info (str "positioned forms: " (count hs) " read, " @n " written") {})))
+    out))
+
+(defn strip
+  "Form `x` without the record of mode :full (the :java/ metadata keys), recursively: the forms of
+  mode :lines."
+  [x]
+  (let [y (cond
+            (seq? x) (apply list (map strip x))
+            (vector? x) (mapv strip x)
+            (map? x) (into (empty x) (for [[k v] x] [(strip k) (strip v)]))
+            (set? x) (into (empty x) (map strip x))
+            :else x)]
+    (if (and (instance? arbace.lang.IObj y) (meta x))
+      (let [m (into {} (remove (fn [[k _]] (java-key? k))) (meta x))]
+        (with-meta y (when (seq m) (strip m))))
+      y)))

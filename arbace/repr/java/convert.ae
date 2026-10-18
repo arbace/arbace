@@ -49,6 +49,21 @@
 
 (def ^:dynamic *text* "")
 
+;; Mode :full (repr/java read --full; full.ae, doc/classes/PRINTER-NOTES.md "Mode :full"): an atom
+;; numbering the positioned forms of the unit being converted, else nil; and its end positions.
+(def ^:dynamic *full* nil)
+(def ^:dynamic *end-pos* nil)
+
+(defn at-span
+  "Form `x` with its span [s e] recorded in mode :full (:java/at, numbered for its hash)."
+  [x s e]
+  (if *full* (m+ x [:java :at [s e (swap! *full* inc)]]) x))
+
+(defn at
+  "Form `x` with the span of javac's tree `t` recorded in mode :full."
+  [x ^JCTree t]
+  (if *full* (at-span x (TreeInfo/getStartPos t) (TreeInfo/getEndPos t *end-pos*)) x))
+
 (defn- gensym! [env base]
   (let [n (swap! (:counter env) inc)]
     (symbol (str base "-" n))))
@@ -2879,9 +2894,13 @@
     (jt/has-flag? (.sym ^JCTree$JCVariableDecl d) Flags/GENERATED_MEMBER)
     :else false))
 
+(declare class-form)
+
 (defn class-body
-  "The member forms of class tree `cd` (env already inside the class)."
-  [env ^JCTree$JCClassDecl cd]
+  "The member forms of class tree `cd` (env already inside the class); with `pos?` (a top-level or
+  member class) their spans recorded in mode :full."
+  ([env cd] (class-body env cd false))
+  ([env ^JCTree$JCClassDecl cd pos?]
   (let [c (.sym cd)
         record? (jt/has-flag? c Flags/RECORD)
         defs (remove generated? (.defs cd))
@@ -2891,7 +2910,7 @@
                       :when (not (some #(identical? d %) consts))
                       :when (not (and record? (instance? JCTree$JCVariableDecl d)
                                       (jt/has-flag? (.sym ^JCTree$JCVariableDecl d) Flags/RECORD)))]
-                  (condp instance? d
+                  (cond-> (condp instance? d
                     JCTree$JCVariableDecl (field-form env d)
                     JCTree$JCMethodDecl (method-form env c d)
                     JCTree$JCBlock (let [b ^JCTree$JCBlock d
@@ -2900,10 +2919,14 @@
                                      (note! (if static? :form/static-initializer :form/initializer))
                                      (apply list (if static? 'static-initializer 'initializer)
                                             (stmts env' ctx0 (.stats b))))
-                    JCTree$JCClassDecl (class-form env d)
-                    (throw (ex-info (str "unsupported member " (.getKind ^JCTree d)) {}))))]
-    (concat (when (seq consts) [(apply list 'constants (map #(enum-constant env %) consts))])
-            members)))
+                    JCTree$JCClassDecl (class-form env d pos?)
+                    (throw (ex-info (str "unsupported member " (.getKind ^JCTree d)) {})))
+                    (and pos? (not (instance? JCTree$JCClassDecl d))) (at d)))]
+    (concat (when (seq consts)
+              [(cond-> (apply list 'constants (map #(enum-constant env %) consts))
+                 pos? (at-span (apply min (map #(TreeInfo/getStartPos %) consts))
+                               (apply max (map #(TreeInfo/getEndPos % *end-pos*) consts))))])
+            members))))
 
 (defn- class-header
   "[name-with-meta record-components? options] for class tree `cd`."
@@ -2944,11 +2967,14 @@
     [nm comps opts]))
 
 (defn class-form
-  "A defclass form for member or top-level class tree `cd`."
-  [env ^JCTree$JCClassDecl cd]
-  (let [[nm comps opts] (class-header env cd)
-        env' (class-env (assoc env :this nil) (.sym cd))]
-    (apply list 'defclass nm (concat (when comps [comps]) opts (class-body env' cd)))))
+  "A defclass form for member or top-level class tree `cd`; with `pos?` (a top-level class, or a
+  member of one with `pos?`) its span and its members' recorded in mode :full."
+  ([env cd] (class-form env cd false))
+  ([env ^JCTree$JCClassDecl cd pos?]
+   (let [[nm comps opts] (class-header env cd)
+         env' (class-env (assoc env :this nil) (.sym cd))]
+     (cond-> (apply list 'defclass nm (concat (when comps [comps]) opts (class-body env' cd pos?)))
+       pos? (at cd)))))
 
 (defn local-class-binding
   "[(Name ...) env'] for a local class declaration."
@@ -3046,6 +3072,8 @@
   [^JCTree$JCCompilationUnit cu opts]
   (count-kinds! cu)
   (binding [*text* (str (.getCharContent (.getSourceFile cu) true))
+            *full* (when (:full opts) (atom 0))
+            *end-pos* (.endPositions cu)
             *assigned* (into #{} (mapcat assigned-syms) (.getTypeDecls cu))
             *local-names* (into #{} (for [d (.getTypeDecls cu)
                                           x (tree-seq #(instance? JCTree %) tree-children d)
@@ -3060,15 +3088,24 @@
                            :when (not (instance? JCTree$JCSkip d))]
                        (simplify
                         (condp instance? d
-                          JCTree$JCClassDecl (class-form env d)
-                          JCTree$JCModuleDecl (module-form env d)))))
+                          JCTree$JCClassDecl (class-form env d true)
+                          JCTree$JCModuleDecl (at (module-form env d) d)))))
           forms (if-let [md (.getModuleDecl cu)]
-                  (into [(simplify (module-form env md))] forms)
+                  (into [(simplify (at (module-form env md) md))] forms)
                   forms)
           pkg-anns (when-let [pd (.getPackage cu)]
                      (seq (annotation-items env (.annotations ^JCTree$JCPackageDecl pd))))
           forms (if (and (= file "package-info.java") pkg-anns)
-                  (into [(apply list 'defpackage (apply m+ (symbol pkg-name) pkg-anns) [])] forms)
+                  (into [(at (apply list 'defpackage (apply m+ (symbol pkg-name) pkg-anns) [])
+                             (.getPackage cu))]
+                        forms)
+                  forms)
+          ;; mode :full: the file's text and its top-level forms' starts on the first form
+          forms (if (and *full* (seq forms))
+                  (update forms 0 m+ [:java :file {:text *text*
+                                                   :at (mapv #(first (some (fn [it] (when (and (vector? it) (= [:java :at] (subvec it 0 2))) (nth it 2)))
+                                                                           (f/items %)))
+                                                             forms)}])
                   forms)]
       {:package pkg-name :file file :forms forms
        :supers (set (for [d (.getTypeDecls cu)

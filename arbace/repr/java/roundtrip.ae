@@ -22,11 +22,30 @@
       --known-out FILE        write the differences with their reasons there
       --javac-logs 'LOG ...'  javac's logs of the printed Java (the reasons of rejected files)
       --reference FILE        an earlier result: fail only on regressions against it
-      --record FILE           write the results as a reference (no times)"
+      --record FILE           write the results as a reference (no times)
+
+  The text level (bin/repr-java roundtrip --text; PRINTER-NOTES.md, \"Mode :full\"): Java -> forms
+  of mode :full (repr/java read --full) -> Java (print, the full layout), judged per converted
+  file at four levels:
+
+    record   the forms of mode :full without their record (the :java/ metadata) are the forms of
+             mode :lines, as data, metadata included
+    text     the printed Java file is the original, byte for byte
+    classes  javac's class files of the original and of the printed Java, -g:none, byte for byte
+    anew     javac accepts the Java the full layout prints with every member printed anew (--anew)
+
+    -m arbace.repr.java.roundtrip text OPTIONS
+      --full DIR --lines DIR  the forms of mode :full and of mode :lines of the same Java files
+      --printed DIR           the full layout's Java
+      --originals DIR         the Java files read, by the printed files' paths
+      --c1 DIR --c2 DIR       the class trees of the originals and of the printed Java (optional)
+      --anew-rejected 'F ...' the files of the --anew print javac rejects (optional)
+      and --corpus, --out, --known, --reference, --record as compare's"
   (:require [arbace.string :as str]
             [arbace.java.io :as io]
             [arbace.java.shell :as sh]
-            [arbace.repr.java.print :as pr])
+            [arbace.repr.java.print :as pr]
+            [arbace.repr.java.full :as full])
   (:import [java.io File]))
 
 ;;; ------------------------------------------------------------------------------------------
@@ -195,7 +214,7 @@
 ;;; ------------------------------------------------------------------------------------------
 ;;; Results, known differences, references
 
-(def levels [:forms :ae :classes])
+(def ^:dynamic levels [:forms :ae :classes])
 
 (defn- read-edn-file [path]
   (pr/read-all (slurp path)))
@@ -269,15 +288,56 @@
                               (pr-str [:file p [l] (reason p r l errors f1)])))
              "\n")))
 
+(defn- merge-results [& rs]
+  (let [results (apply merge-with (fn [a b] (assoc (merge a b) :why (str/join "; " (keep :why [a b])))) rs)]
+    (into (sorted-map) (for [[p r] results] [p (cond-> r (str/blank? (:why r)) (dissoc :why))]))))
+
+(defn compare-text
+  "{path {:record .. :text .. :anew ..}} for the files of mode :full under `full-dir`."
+  [full-dir lines-dir printed originals anew-rejected]
+  (into (sorted-map)
+        (pmap (fn [p]
+                (let [tf (slurp (io/file full-dir p))
+                      lf (io/file lines-dir p)
+                      d (if (.exists lf)
+                          (try (diff (mapv full/strip (pr/read-all tf)) (pr/read-all (slurp lf)))
+                               (catch Throwable t [[] (str "unreadable: " (.getMessage t)) nil]))
+                          [[] "no file of mode :lines" nil])
+                      u (pr/unit p tf)
+                      jp (some-> u pr/out-path)
+                      o (when jp (io/file originals jp))
+                      j (when jp (io/file printed jp))
+                      text (cond
+                             (nil? jp) nil
+                             (not (and o (.exists o))) {:text :missing :why (str "no original " jp)}
+                             (not (.exists j)) {:text :missing :why (str "not printed: " jp)}
+                             (java.util.Arrays/equals (io-bytes o) (io-bytes j)) {:text :pass}
+                             :else {:text :fail :why (str "the printed " jp " differs from the original")})]
+                  [p (get (merge-results
+                      {p (cond-> {:record (if d :fail :pass)}
+                           d (assoc :why (str "at " (pr-str (first d)) ": " (shorten (second d)) " | " (shorten (nth d 2)))))}
+                      (if text {p text} {})
+                      (if (and jp anew-rejected)
+                        {p (if (some #(or (= % jp) (str/ends-with? % (str "/" jp)) (str/ends-with? jp (str "/" %))) anew-rejected)
+                             {:anew :fail :why "javac rejects the --anew print"}
+                             {:anew :pass})}
+                        {})) p)]))
+              (ae-files full-dir))))
+
 (defn -main [cmd & args]
   (let [opts (into {} (for [[k v] (partition 2 args)] [(keyword (subs k 2)) v]))
         {:keys [f1 f2 c1 c2 corpus out known reference record known-out javac-logs]} opts
-        forms (compare-forms f1 f2)
-        classes (when (and c1 c2) (compare-classes f1 c1 c2 (remove str/blank? (str/split (or (:rejected opts) "") #" "))))
-        results (merge-with (fn [a b] (assoc (merge a b) :why (str/join "; " (keep :why [a b]))))
-                            forms (or classes {}))
-        results (into (sorted-map) (for [[p r] results] [p (cond-> r (str/blank? (:why r)) (dissoc :why))]))
-        results (if (and known-out c1 c2) (classify-classes results c1 c2) results)
+        text? (= cmd "text")
+        f1 (if text? (:full opts) f1)
+        words (fn [k] (remove str/blank? (str/split (or (get opts k) "") #" ")))]
+   (binding [levels (if text? [:record :text :classes :anew] levels)]
+    (let [forms (if text?
+                  (compare-text (:full opts) (:lines opts) (:printed opts) (:originals opts)
+                                (when (contains? opts :anew-rejected) (words :anew-rejected)))
+                  (compare-forms f1 f2))
+        classes (when (and c1 c2) (compare-classes f1 c1 c2 (if text? [] (words :rejected))))
+        results (merge-results forms (or classes {}))
+        results (if (and known-out c1 c2 (not text?)) (classify-classes results c1 c2) results)
         km (known-map known)
         ref (reference-map reference)
         problems (for [[p r] results
@@ -304,4 +364,4 @@
       (println "  UNEXPECTED" (name l) (name v) p (or why "")))
     (when (> (count problems) 40) (println "  ..." (- (count problems) 40) "more"))
     (shutdown-agents)
-    (System/exit (if (seq problems) 1 0))))
+    (System/exit (if (seq problems) 1 0))))))
