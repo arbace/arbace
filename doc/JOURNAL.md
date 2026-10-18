@@ -1237,3 +1237,22 @@ the user's direction. The agent's findings, from reading only:
    guest-only switch a guest variable passed through like `ARBACE_BOX_FS`. With `:auto`
    defaulting to processes, the smoke test's no-spawn check needs `:where :guest`, and the
    in-box rebuild might keep the guest-only switch on (a question for the user).
+
+## 2026-10-18: repr/rust RR3 merged
+
+RR3 (doc/rust/SPEC.md §12.6, "As built: RR3"; doc/rust/RUST-NOTES.md, "RR3"; branch
+`repr-rust-rr3`, `ca8d79be`): mode `:full` and the text level. `tools/rsdump`'s `dump --full`
+adds rustc_lexer's tokens and comments. The new `arbace/repr/rust/full.ae` pairs the printer's
+tokens with the source's, in order, and records positions, comments, white space and the
+differing commas on the forms. `print --layout full` prints them back. Over std's five crates of
+rust-src 1.99.1, all 1,074 files print back byte for byte (14,276,761 bytes), with no known
+differences, and the printed files read back to the same trees and lines. The `:full` forms are
+59 MB, against `:lines`' 16 MB. The text level takes about 55 s. RR1 and RR2 are unchanged
+(`:lines` printed byte-identical to before); plain comments are now `;` comments in the `:lines`
+text. `bin/gate --full`'s step is `roundtrip --iface --text && test` (145 s). The essential gate
+passed on the branch; `bin/repr-rust test` passed after the merge.
+
+Open proposals, built as recommended: RR-P6, positions as unnamed `:toks` paired in order (as
+Haskell's HR9/HR10), not SPEC §9.2's named keys per node; RR-P7, only the commas that differ
+from the printer's recorded as data (`:rs/punct`, `:rs/drop`); RR-P8, the `;` comments' text as
+repr/go's (the text after `//`, block comments' lines trimmed).
