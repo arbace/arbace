@@ -1,0 +1,139 @@
+#!/bin/bash
+# The behaviour level's run of one program (doc/rust/SPEC.md §11.1, 5; doc/rust/RUST-NOTES.md,
+# "RR5"), from bin/repr-rust's run_level: the program built and run on its baseline side, then on
+# each other side, and its stdout, stderr and exit status compared with the baseline's.
+#
+#   run-program PLAN N JOBS EMPTY BASE SIDE...
+#
+# PLAN: one program per line, its fields separated by 0x1f: id, file, edition, compile flags, run flags, the run's
+# environment (NAME=VALUE), the compiler's environment (NAME=VALUE) (items space-separated, a
+# space inside an item written \x20); N: the line; JOBS: the directory of this run's scratch
+# (JOBS/N, removed after, but the outputs of a program that differs: JOBS/../diffs/N); EMPTY: an
+# empty file (every run's stdin); BASE, SIDE: NAME:SOURCE-ROOT:SYSROOT[:NORM] (SYSROOT empty: the
+# host's rustc's own; NORM cols or pos: a side whose outputs that differ are compared again with
+# the columns, or the lines and columns, of the source locations they print normalized). Each side builds FILE from SOURCE-ROOT under the same relative path (the paths
+# file!() and panics print are the same), with RUSTC_BOOTSTRAP=1 (the UI suite's programs use
+# unstable features, as compiletest's stage compiler allows), compiletest's lint flags and the
+# program's own; the executables all run as ./t in the same directory JOBS/N/x (argv[0], the
+# current directory and the executable's path are the same), with an environment of PATH, HOME
+# (that directory) and the program's own, at most 60 s; each side's source root remapped to /src
+# (--remap-path-prefix: the paths backtraces print are the same); the thread ids in panic messages
+# (thread 'main' (1234) panicked) written ($TID), as compiletest normalizes them, and a test
+# harness's time (; finished in 0.01s) $TIME; a test harness (--test) runs with --test-threads=1. REPR_RUST_NATIVE: a directory of native
+# libraries every build links from (-L native=; compiletest's librust_test_helpers.a).
+#
+# Prints one line per side but the baseline, tab-separated: STATUS SIDE ID DETAIL; STATUS one of
+#   same        stdout, stderr and the exit status equal the baseline's
+#   same-cols   equal once the columns of the source locations are normalized (NORM cols: mode
+#               :lines keeps the lines of a file, not its columns)
+#   same-pos    equal once the lines and columns of the source locations are normalized (NORM pos:
+#               the pretty layout keeps neither)
+#   differs     they differ, and the baseline gives the same three in three runs
+#   nondet      they differ, and so do the baseline's own runs (the program is not deterministic),
+#               or the side's second run is the baseline's
+#   build-fail  the side does not build, where the baseline does
+#   missing     the side has no FILE (it was not printed)
+#   skip        the baseline does not build, or times out (all sides; SIDE -)
+set -u
+plan=$1 n=$2 jobs=$3 empty=$4; shift 4
+IFS=$'\x1f' read -r id file ed flags rflags xenv renv < <(sed -n "${n}p" "$plan")
+d=$jobs/$n
+rm -rf "$d"; mkdir -p "$d/x"
+words() { local w out=(); for w in $1; do out+=("$(printf '%b' "$w")"); done; printf '%s\0' "${out[@]}"; }
+fl=(); rf=(); xe=(); re=()
+[ -n "$flags" ] && mapfile -d '' fl < <(words "$flags")
+[ -n "$rflags" ] && mapfile -d '' rf < <(words "$rflags")
+# a test harness (--test) runs its tests on one thread, in their order
+case " $flags " in *" --test "*) case " $rflags " in *--test-threads*) ;; *) rf+=(--test-threads=1) ;; esac ;; esac
+[ -n "$xenv" ] && mapfile -d '' xe < <(words "$xenv")
+[ -n "$renv" ] && mapfile -d '' re < <(words "$renv")
+
+# build NAME SRC SYSROOT: $d/NAME/t, its log $d/NAME/build.log
+build() {
+  mkdir -p "$d/$1"
+  (cd "$2" && env RUSTC_BOOTSTRAP=1 "${re[@]}" timeout 300 rustc ${3:+--sysroot "$3"} --edition "$ed" "$file" -o "$d/$1/t" \
+     -A unused -A internal_features -Cdebuginfo=0 --remap-path-prefix "$2=/src" ${REPR_RUST_NATIVE:+-L "native=$REPR_RUST_NATIVE"} "${fl[@]}") > "$d/$1/build.log" 2>&1
+}
+# runit NAME TAG: $d/NAME/TAG.out, .err, .st
+runit() {
+  rm -rf "$d/x"; mkdir -p "$d/x"
+  cp "$d/$1/t" "$d/x/t"
+  { (cd "$d/x" && env -i PATH=/usr/local/bin:/usr/bin:/bin HOME="$d/x" "${xe[@]}" timeout 60 ./t "${rf[@]}" < "$empty" > "$d/$1/$2.out" 2> "$d/$1/$2.err"); } 2> "$d/signal.log"
+  echo $? > "$d/$1/$2.st"
+  # the thread ids panics print (thread 'main' (1234) panicked), as compiletest normalizes them
+  sed -i -E -e "s/^(thread '[^']*' )\([0-9]+\)/\1(\$TID)/" -e 's/(; finished in )[0-9.]+s$/\1$TIME/' "$d/$1/$2.out" "$d/$1/$2.err"
+}
+# normalize cols|pos FROM TO: FROM's outputs with the columns (cols), or the lines and columns
+# (pos), of every source location (FILE.rs:L:C, as panics print them) written _
+normalize() {
+  local e
+  case $1 in
+    cols) e='s/([A-Za-z0-9_.\/-]+\.rs):([0-9]+):[0-9]+/\1:\2:_/g' ;;
+    pos) e='s/([A-Za-z0-9_.\/-]+\.rs):[0-9]+:[0-9]+/\1:_:_/g' ;;
+  esac
+  sed -E "$e" "$d/$2.out" > "$d/$3.out"; sed -E "$e" "$d/$2.err" > "$d/$3.err"; cp "$d/$2.st" "$d/$3.st"
+}
+same() { cmp -s "$d/$1.out" "$d/$2.out" && cmp -s "$d/$1.err" "$d/$2.err" && cmp -s "$d/$1.st" "$d/$2.st"; }
+what() {
+  local w=()
+  cmp -s "$d/$1.st" "$d/$2.st" || w+=("exit $(cat "$d/$1.st") against $(cat "$d/$2.st")")
+  cmp -s "$d/$1.out" "$d/$2.out" || w+=(stdout)
+  cmp -s "$d/$1.err" "$d/$2.err" || w+=(stderr)
+  local IFS=,; echo "${w[*]}"
+}
+first_error() { grep -m1 '^error' "$1" | cut -c1-200; }
+
+IFS=: read -r bname bsrc bsys <<< "$1"; shift
+if ! build "$bname" "$bsrc" "$bsys"; then
+  printf 'skip\t-\t%s\tthe baseline (%s) does not build: %s\n' "$id" "$bname" "$(first_error "$d/$bname/build.log")"
+  rm -rf "$d"; exit 0
+fi
+runit "$bname" 1
+if [ "$(cat "$d/$bname/1.st")" = 124 ]; then
+  printf 'skip\t-\t%s\tthe baseline (%s) times out\n' "$id" "$bname"
+  rm -rf "$d"; exit 0
+fi
+checked=""   # the baseline's own runs compared once: "" (not yet), det, nondet
+keep=0
+for side in "$@"; do
+  IFS=: read -r name src sys norm <<< "$side"
+  if [ ! -e "$src/$file" ]; then
+    printf 'missing\t%s\t%s\tnot printed\n' "$name" "$id"; continue
+  fi
+  if ! build "$name" "$src" "$sys"; then
+    printf 'build-fail\t%s\t%s\t%s\n' "$name" "$id" "$(first_error "$d/$name/build.log")"; keep=1; continue
+  fi
+  runit "$name" 1
+  if same "$bname/1" "$name/1"; then
+    printf 'same\t%s\t%s\t\n' "$name" "$id"; continue
+  fi
+  if [ -n "$norm" ]; then
+    normalize "$norm" "$bname/1" "$bname/1.$norm"; normalize "$norm" "$name/1" "$name/1.$norm"
+    if same "$bname/1.$norm" "$name/1.$norm"; then
+      printf 'same-%s\t%s\t%s\t\n' "$norm" "$name" "$id"; continue
+    fi
+  fi
+  if [ -z "$checked" ]; then
+    runit "$bname" 2; runit "$bname" 3
+    if same "$bname/1" "$bname/2" && same "$bname/1" "$bname/3"; then checked=det; else checked=nondet; fi
+  fi
+  if [ "$checked" = nondet ]; then
+    printf 'nondet\t%s\t%s\t%s\n' "$name" "$id" "$(what "$bname/1" "$bname/2")"
+  elif runit "$name" 2 && same "$bname/1" "$name/2"; then
+    # the side's second run is the baseline's: a program whose rare interleavings three runs of
+    # the baseline did not show
+    printf 'nondet\t%s\t%s\tthe second run the same\n' "$name" "$id"
+  else
+    printf 'differs\t%s\t%s\t%s\n' "$name" "$id" "$(what "$bname/1" "$name/1")"; keep=1
+  fi
+done
+if [ "$keep" = 1 ]; then
+  k=$jobs/../diffs/$n
+  rm -rf "$k"; mkdir -p "$k"
+  for x in "$d"/*/; do
+    x=${x%/}; [ "$(basename "$x")" = x ] && continue
+    mkdir -p "$k/$(basename "$x")"; cp "$x"/*.out "$x"/*.err "$x"/*.st "$x"/build.log "$k/$(basename "$x")/" 2> "$k/cp.log" || true
+  done
+  echo "$id" > "$k/id"
+fi
+rm -rf "$d"

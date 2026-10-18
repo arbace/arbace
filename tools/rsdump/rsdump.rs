@@ -714,8 +714,10 @@ fn normalized(raw: &str) -> String {
 /// END-COL]` (columns in characters from 1, the end exclusive, as rustc's spans count them): KIND
 /// `:c` a plain comment, `:doc` a doc comment, `:id` an identifier (raw or not), `:lt` a
 /// lifetime, `:lit` a literal, `:p` a punctuation character, `:shebang` the first `#!` line,
-/// `:fm` a front matter, `:x` anything else; with comments_only, the plain comments alone
-fn lex(raw: &str, comments_only: bool) -> String {
+/// `:fm` a front matter, `:x` anything else; with comments_only, the plain comments alone. Before
+/// edition 2024 a guarded string's prefix `#"` is a `#` and what follows lexed again, as rustc's
+/// own lexer does (rustc_parse::lexer, `GuardedStrPrefix`: RR5)
+fn lex(raw: &str, comments_only: bool, ed2024: bool) -> String {
     use rustc_lexer::TokenKind as K;
     let src = normalized(raw);
     let mut out = Vec::new();
@@ -739,11 +741,17 @@ fn lex(raw: &str, comments_only: bool) -> String {
         }
         start = n;
     }
-    for t in rustc_lexer::tokenize(&src[start..], rustc_lexer::FrontmatterAllowed::Yes) {
+    let mut fm = rustc_lexer::FrontmatterAllowed::Yes;
+    loop {
+    let mut restart = false;
+    for t in rustc_lexer::tokenize(&src[start..], fm) {
         let lo = start;
-        let hi = start + t.len as usize;
+        let guarded = t.kind == K::GuardedStrPrefix && !ed2024;
+        let hi = if guarded { start + 1 } else { start + t.len as usize };
         start = hi;
         let k = match t.kind {
+            _ if guarded && comments_only => { restart = true; break }
+            _ if guarded => ":p",
             K::Whitespace => continue,
             K::LineComment { doc_style: None } | K::BlockComment { doc_style: None, .. } => ":c",
             _ if comments_only => continue,
@@ -766,6 +774,15 @@ fn lex(raw: &str, comments_only: bool) -> String {
         } else {
             out.push(format!("[{k} {l1} {c1} {line} {col}]"));
         }
+        if guarded {
+            restart = true;
+            break;
+        }
+    }
+    if !restart {
+        break;
+    }
+    fm = rustc_lexer::FrontmatterAllowed::No;
     }
     out.join(" ")
 }
@@ -802,9 +819,9 @@ impl Callbacks for Run {
                 f.visit_crate(krate);
                 let raw = std::fs::read_to_string(&self.file).unwrap_or_default();
                 let lexed = if self.full {
-                    format!("(rsdump/tokens [{}])", lex(&raw, false))
+                    format!("(rsdump/tokens [{}])", lex(&raw, false, compiler.sess.edition().at_least_rust_2024()))
                 } else {
-                    format!("(rsdump/comments [{}])", lex(&raw, true))
+                    format!("(rsdump/comments [{}])", lex(&raw, true, compiler.sess.edition().at_least_rust_2024()))
                 };
                 vec![tree, format!("(rsdump/mac-exprs [{}])", f.mac.join("\n ")), format!("(rsdump/meta [{}])", f.meta.join("\n ")), lexed]
             }

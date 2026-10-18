@@ -86,12 +86,18 @@
                    :when v]
                [(keyword (if (= k "version") "rustc" k)) v]))))
 
+(def ^:private files-index
+  "{file crate} of a corpus (its crates' :files), made once per corpus"
+  (memoize (fn [corpus] (into {} (for [c (reverse (:crates corpus)) f (:files c)] [f c])))))
+
 (defn crate-of
   "The corpus's crate of a file (its path as rustc was given it), with the file's kind: the crate
-  whose directory is the longest that holds it (a package nested in another's directory)"
+  that lists it among its files (the UI suite's crates, one per edition, share a directory: RR5),
+  else whose directory is the longest that holds it (a package nested in another's directory)"
   [corpus ^String file]
   (when corpus
-    (when-let [c (last (sort-by #(count (:dir %)) (filter #(str/starts-with? file (str (:dir %) "/")) (:crates corpus))))]
+    (when-let [c (or (get (files-index corpus) file)
+                     (last (sort-by #(count (:dir %)) (filter #(str/starts-with? file (str (:dir %) "/")) (:crates corpus)))))]
       (let [r (subs file (inc (count (:dir c))))]
         (assoc c :rel r
                  :kind (cond
@@ -227,6 +233,17 @@
 (defn- context-of [lines i]
   (str/join "\n" (subvec lines (max 0 (- i 8)) (min (count lines) (+ i 4)))))
 
+(defn- line-eq?
+  "Two lines of rsdump's .lines equal, or a dummy span (- NAME: no location) against a real one
+  (N1, SPEC §11.2: an empty span at the file's first byte is rustc's dummy span, RR5)"
+  [^String a ^String b]
+  (or (= a b)
+      (and a b (or (str/starts-with? a "- ") (str/starts-with? b "- "))
+           (= (subs a (inc (.indexOf a " "))) (subs b (inc (.indexOf b " ")))))))
+
+(defn- lines-eq? [ol cl]
+  (and (= (count ol) (count cl)) (every? true? (map line-eq? ol cl))))
+
 (defn compare-file
   "The tree level of one file: {:status :ok} or {:level :tree|:lines :status ...}; without
   lines (the pretty layout's, which has its own), the trees alone"
@@ -242,8 +259,8 @@
       (str/starts-with? (or (first ct) "") "rsdump/error") {:level :tree :status :printed-fails-to-parse :detail (first ct)}
       (not= ot ct) (let [[i a b] (first-line-diff ot ct)]
                      {:level :tree :status :differs :at i :detail (context-of ot i) :cand (context-of ct i)})
-      (not= ol cl) (let [[i a b] (first-line-diff ol cl)
-                         n (count (filter (fn [[x y]] (not= x y)) (map vector ol cl)))]
+      (not (lines-eq? ol cl)) (let [[i a b] (first-line-diff ol cl)
+                         n (count (filter (fn [[x y]] (not (line-eq? x y))) (map vector ol cl)))]
                      {:level :lines :status :differs :at i :orig a :cand b :count n})
       :else {:status :ok :spans (count (or ol (read-lines-file orig-lines)))})))
 
@@ -530,6 +547,72 @@
                         :results (into (sorted-map) results)}))))
     (if (and (empty? unexpected) (empty? fixed)) 0 1)))
 
+;;; The behaviour level (SPEC §11.1, 5; RR5)
+
+(defn run-plan
+  "The behaviour level's plan of a corpus's :programs (bin/lib/repr-rust/run-program's PLAN): one
+  line per program, its fields separated by the character 0x1f (unit separator): id (FILE, FILE#REV for a revision), file, edition, compile
+  flags, run flags, the run's environment, the compiler's environment (items space-separated, a
+  space inside an item written as the escape \\x20)"
+  [corpus only]
+  (let [esc (fn [x] (str/replace (str x) " " "\\x20"))
+        j (fn [xs] (str/join " " (map esc xs)))
+        kv (fn [ps] (j (for [[k v] ps] (str k "=" v))))]
+    (str/join (for [p (:programs corpus)
+                    :let [id (str (:file p) (when (:rev p) (str "#" (:rev p))))]
+                    :when (or (nil? only) (re-find only id))]
+                (str (str/join "\u001f" [id (:file p) (:edition p) (j (:flags p)) (j (:run-flags p)) (kv (:exec-env p)) (kv (:rustc-env p))])
+                     "\n")))))
+
+(defn- cmd-run-plan [args]
+  (let [{:keys [opts]} (parse-args args #{"--corpus" "--only" "-o"})
+        corpus (read-string (slurp (get opts "--corpus")))]
+    (spit (get opts "-o") (run-plan corpus (some-> (get opts "--only") re-pattern)))
+    0))
+
+(defn- cmd-compare-run
+  "The behaviour level's results (run-program's lines: STATUS SIDE ID DETAIL) against the known
+  differences of each side (KNOWN-SIDE-known.edn: a map from a program's id to its reason): a
+  program that differs, fails to build or was not printed fails unless listed, and a listed one
+  found the same is a failure; nondeterministic programs (their own runs differ) and those whose
+  baseline does not build or times out are counted, not judged"
+  [args]
+  (let [{:keys [opts]} (parse-args args #{"--results" "--known" "--report" "--times" "--sides" "--level"})
+        lines (remove str/blank? (str/split-lines (slurp (get opts "--results"))))
+        rows (for [l lines :let [[st side id detail] (str/split l #"\t" -1)]] {:status st :side side :id id :detail detail})
+        skips (filter #(= "skip" (:status %)) rows)
+        sides (str/split (get opts "--sides") #",")
+        level (get opts "--level" "behaviour level")
+        reports
+        (vec (for [side sides]
+               (let [rs (filter #(= side (:side %)) rows)
+                     kf (str (get opts "--known") "-" side "-known.edn")
+                     known (if (.exists (File. ^String kf)) (read-string (slurp kf)) {})
+                     failing (filter #(contains? #{"differs" "build-fail" "missing"} (:status %)) rs)
+                     unexpected (remove #(contains? known (:id %)) failing)
+                     fixed (filter #(and (contains? known (:id %)) (str/starts-with? (:status %) "same")) rs)
+                     by (frequencies (map :status rs))]
+                 (doseq [[i r] (map-indexed vector unexpected)]
+                   (println "DIFFERS" side (:id r) (:status r) (:detail r)))
+                 (doseq [r fixed] (println "FIXED (listed as known, now the same)" side (:id r)))
+                 (doseq [r failing :when (contains? known (:id r))] (println "known" side (:id r) (:status r) "--" (get known (:id r))))
+                 (println (format "repr-rust roundtrip (%s, %s): %d programs, %d the same (%d of them once the source locations' %s are normalized), %d nondeterministic, %d differ, %d fail to build, %d not printed, %d known, %d unexpected, %d fixed; %d not judged (their baseline does not build or times out)%s"
+                                  level side (+ (count rs) (count skips))
+                                  (+ (get by "same" 0) (get by "same-cols" 0) (get by "same-pos" 0)) (+ (get by "same-cols" 0) (get by "same-pos" 0))
+                                  (if (pos? (get by "same-pos" 0)) "lines and columns" "columns")
+                                  (get by "nondet" 0) (get by "differs" 0)
+                                  (get by "build-fail" 0) (get by "missing" 0)
+                                  (count (filter #(contains? known (:id %)) failing)) (count unexpected) (count fixed) (count skips)
+                                  (if-let [t (get opts "--times")] (str "; seconds: " t) "")))
+                 {:side side :by-status by :unexpected (mapv :id unexpected) :fixed (mapv :id fixed)
+                  :results (into (sorted-map) (for [r rs] [(:id r) (cond-> {:status (keyword (:status r))} (not (str/blank? (:detail r))) (assoc :detail (:detail r)))]))})))]
+    (when-let [rep (get opts "--report")]
+      (spit rep (with-out-str
+                  (prn {:times (get opts "--times")
+                        :skipped (into (sorted-map) (for [r skips] [(:id r) (:detail r)]))
+                        :sides reports}))))
+    (if (every? #(and (empty? (:unexpected %)) (empty? (:fixed %))) reports) 0 1)))
+
 (defn -main [& args]
   (let [[verb & more] args
         status (try
@@ -539,7 +622,9 @@
                    "compare" (cmd-compare more)
                    "compare-iface" (cmd-compare-iface more)
                    "compare-text" (cmd-compare-text more)
-                   (do (println "usage: -m arbace.repr.rust read|print|compare|compare-iface|compare-text ...") 2))
+                   "run-plan" (cmd-run-plan more)
+                   "compare-run" (cmd-compare-run more)
+                   (do (println "usage: -m arbace.repr.rust read|print|compare|compare-iface|compare-text|run-plan|compare-run ...") 2))
                  (catch Throwable e
                    (.printStackTrace e)
                    1))]
