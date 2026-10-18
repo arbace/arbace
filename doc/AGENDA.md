@@ -94,9 +94,15 @@ The current state of the work. This file is rewritten as things change. For the 
 ## Next
 
 - Running (the user, 2026-10-18: "start all 5"): F6 (primitive fns, then unboxed workers;
-  branch `f6-prim`), goi's GR3 (the interpreter's core; `goi-gr3`), KU3 (processes on arm64;
-  `ku3`), repr/haskell R6 (.hsc, .lhs, boot files; `repr-haskell-r6`), repr/rust RR3 (`:full`
+  branch `f6-prim`), goi's GR3 (the interpreter's core; `goi-gr3`), repr/haskell R6 (.hsc, .lhs, boot files; `repr-haskell-r6`), repr/rust RR3 (`:full`
   and the text level; `repr-rust-rr3`).
+- Parked (the user, 2026-10-18): KU3 (processes on arm64). A safety classifier stopped both
+  agents before they wrote anything. The worktree `ku3` is kept, clean at `80294e9a`. Its
+  findings: TamaGo's arm64 `osInit` reads ID_AA64ISAR0_EL1, ID_AA64ISAR1_EL1 and
+  ID_AA64PFR0_EL1, which trap at EL0, so the kernel must answer them (proposal KS15, against
+  KS2's letter, to decide when KU3 resumes); a Mac step needs the guest package in
+  box-vendor's darwin/arm64 configuration and `image()` not skipping without /dev/kvm.
+  KU4-KU6 go on, on amd64 alone.
 
 - Done (2026-10-18): F5 (guarded direct linking, geometric mean 1.10), `repr/clojure print`, `repr/java`'s
   `:full` mode, the evaluator's compile race fixed. F5.2 found (code layout), CP1 built, the seed
@@ -167,7 +173,7 @@ The current state of the work. This file is rewritten as things change. For the 
   spawn request; SYSCALL round trip 24.5 ns measured at ring 3; plan KU0-KU6, 17-27 days;
   K1-K12 decided as recommended; KU0 done (doc/go/PROCESS-SPEC.md; KS1-KS12 decided as
   recommended); KU1 and KU2 done (amd64 processes at ring 3, a process on the user board equal to
-  a guest byte for byte; KS13 (a), KS14 (a)); next KU3-KU6. The diffcheck flakes' cause, j2g's
+  a guest byte for byte; KS13 (a), KS14 (a)); next KU4-KU6 on amd64 (KU3 parked). The diffcheck flakes' cause, j2g's
   second round, fixed (2026-10-18).
 - The mapped start measured without nested KVM.
 - A note from the user (2026-10-13): the tooling of the Mac GUI app Moshi Go may be useful for

@@ -1193,3 +1193,21 @@ a comment block after the file's last form recording each reader conditional's p
 original text, verbatim; the forms Arbace reads, `:line` and `:column` included, are the same
 as plain `read`'s; `print` restores the conditionals and fails on an edited reading. All 13
 `.cljc` files of the corpora (94 conditionals) go `.cljc` → `.ae` → `.cljc` byte for byte.
+
+## 2026-10-18: KU3 parked
+
+KU3 (processes on arm64, doc/go/PROCESS-SPEC.md §10) was started in the worktree `ku3`
+(branch `ku3`, from `80294e9a`). A safety classifier stopped the agent while it was reading.
+It was retried with a brief stating plainly that this is Arbace's own kernel isolating its own
+processes in its own guest, KU1/KU2 ported to arm64, and the classifier stopped that one too,
+also before it wrote anything. The user parked KU3 rather than retry again or drop arm64
+processes. Alternatives: the user working it through in the main session; dropping arm64
+processes from the plan. KU4-KU6 go on, on amd64 alone.
+
+The agents' findings, from reading only (nothing built): TamaGo's arm64 `osInit`
+(internal/cpu, `cpu_arm64_tamago.go`) reads ID_AA64ISAR0_EL1, ID_AA64ISAR1_EL1 and
+ID_AA64PFR0_EL1. Those trap at EL0, and the board cannot override the reads without
+patching the runtime (S1 forbids that). So the kernel would answer the trapped reads with the
+values it trusts. That is proposal KS15, against KS2's letter; the user left it to decide when
+KU3 resumes. A Mac step would need the guest package in `bin/box-vendor`'s darwin/arm64
+configuration and `image()` not skipping without /dev/kvm.
