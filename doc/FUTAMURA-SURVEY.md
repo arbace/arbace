@@ -1357,3 +1357,55 @@ holds both calls and the guard. The shipped executable is 119,226,528 bytes (G1 
 
 **Decided (2026-10-18, the user):** F5.1 (a), every known call linked (as built); F5.2 (a), the
 `multimethod` slowdown investigated before F6.
+
+## F5.2 as found (2026-10-18)
+
+F5.2 (a): why `multimethod` is 6-7% slower with F5 (7.22 → 7.71 ms, "F5 as built"). Found: code
+layout only. Nothing to fix; *recommended: accept it* (F5.2 (b)).
+
+- **No linked site, no guard on its path.** The benchmark's call `(marea m)` is the generic
+  call in both trees, byte for byte the same Go (`IFn_Cast(var.GetRawRoot()).Invoke_O__O`): the
+  var's root at the end of the prepare run is a `MultiFn`, neither an `EvalFn` nor an `AOTFn`, so
+  `link-plan` never links it and no `linked` guard runs. The methods (`defmethod`'s fns, keyword
+  lookups and `*`) and the loop are the same Go in both; `MultiFn`'s Go (`lang/MultiFn.go`) is
+  the same but for a temporary's name. The runtime's package `lang` differs only by F5's two
+  `Compiler$AOTFn/linked`, `$AOTRestFn/linked` functions and their reflection table entries.
+- **The same machine code.** Of the 72 functions in the profile (Go's pprof, `ARBACE_CPUPROFILE`,
+  8 s of `multimethod` in each build), the 63 with samples of their own (`MultiFn.invoke`,
+  `getFn`, `getMethod`, `Keyword.invoke`, `PersistentArrayMap`'s and `PersistentHashMap`'s
+  lookups, `Var.deref`, the `Cast`/`InstanceOf` helpers, `Numbers`, the methods, `runtime`'s)
+  disassemble to the same instructions in both (`go tool objdump`, addresses relative to the
+  function); the 9 that differ are the start-up chain (`arbace.main`, `load`, `apply`), run once.
+  So gc inlined nothing differently on the hot path (no `-gcflags=-m` difference to find).
+- **Where it moved.** F5's two functions, early in `lang`'s text, shift the package by 0x520
+  bytes: `MultiFn.invoke`, `getMethod`, `getFn`, `Keyword.invoke`, `Var.deref` and
+  `ILookup_InstanceOf` go from 32 mod 64 to 0 mod 64, `IFn_Cast` and `AOTFn.invoke` the other
+  way. The profiles differ by noise but for `getMethod`'s line `(.deref hierarchy)` (320 → 550
+  ms, the same instructions), the kind of cost alignment and branch-predictor aliasing make.
+- **The layout perturbed.** The two measurement programs (`.tmp/f5-linking/`'s, the printed
+  modules rebuilt by `go build` byte for byte: same sha256), linked again with
+  `-ldflags=-funcalign=64` and `=128` (the code unchanged, only where it lies); five interleaved
+  rounds of the whole set as in "F5 as built", the machine shared (load 13-34):
+
+| benchmark | before | F5 | | before, align 64 | F5, align 64 | | before, align 128 | F5, align 128 |
+|---|---:|---:|---|---:|---:|---|---:|---:|
+| `multimethod` | 7.29 | 7.80 | 0.93 | 7.47 | 7.18 | 1.04 | 8.12 | 7.74 | 1.05 |
+| `protocol` | 4.90 | 4.71 | 1.04 | 4.61 | 5.11 | 0.90 | 4.69 | 4.80 | 0.98 |
+| `closures` | 16.17 | 16.65 | 0.97 | 16.34 | 15.85 | 1.03 | 15.80 | 15.16 | 1.04 |
+| `str-build` | 5.97 | 6.16 | 0.97 | 6.10 | 6.15 | 0.99 | 6.08 | 6.28 | 0.97 |
+| `fib` | 1.52 | 0.96 | 1.58 | 1.48 | 0.98 | 1.51 | 1.47 | 0.99 | 1.48 |
+| `seq-ops` | 39.48 | 30.83 | 1.28 | 39.79 | 30.94 | 1.29 | 39.00 | 31.20 | 1.25 |
+| `lazy-walk` | 23.54 | 17.29 | 1.36 | 22.69 | 17.40 | 1.30 | 23.71 | 17.58 | 1.35 |
+| geometric mean (19) | 8.70 | 7.88 | 1.10 | 8.58 | 7.83 | 1.10 | 8.59 | 7.85 | 1.10 |
+
+  The same machine code runs `multimethod` in 7.18 to 8.12 ms depending on where the linker put
+  it, and F5's 7% loss becomes a 4-5% gain under either alignment, every round (F5, align 64:
+  7.18-7.26; before, align 64: 7.47-7.66). `protocol` (and `closures`) swing the same way, by
+  the same cause. F5's gains (`fib`, the sequence benchmarks, `destructure`) and the geometric
+  mean, 1.10, hold under all three layouts.
+- **Not proposed.** Building with `-funcalign=64` is no remedy: it moves other benchmarks
+  (`loop-long` 3.74 → 4.06 in both trees) and the program by 2%; layout effects of ±5% on a
+  single small benchmark are within what any change to the runtime's text causes. A profile
+  (`--pgo`, which orders and inlines by the hot paths) is the tool if they matter, with F6.
+
+Scratch: `.tmp/f5-multimethod/` (the profiles, the rebuilt programs, the rounds `r-*.txt`).
