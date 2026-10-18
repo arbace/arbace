@@ -1482,7 +1482,8 @@ As F5 was (SA139's way): `test/bench/eval-bench.ae` as `bench.eval` (with
 `test/c2j/link_redef.ae` and `test/c2j/prim_fns.ae`) compiled with the runtime's namespaces into
 a measurement program by stage 0 (the seed's runtime is main's), with each tree's c2j, j2g and
 `bin/build-go`; before: main `80294e9a`; step 1: the unboxed entries alone, as first built (the
-guard `linked`, out of line); F6: the branch; run compiled
+guard `linked`, out of line); F6: the branch at `08d5423a` (the final `ea676188` differs by
+`var-fns` alone, one site fewer in the program: `fib` 0.51, `fib-prim` 0.36 in a spot check); run compiled
 (`(Compiler$AOT/load "bench/eval" ...)`); ms, the best of five interleaved rounds, each the
 benchmark's best over at least 1 s and 3 runs; amd64, the machine shared (load 5-20):
 
