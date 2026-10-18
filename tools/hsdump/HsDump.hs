@@ -341,7 +341,8 @@ parseOne hsc_env o file hsc = do
               cpp = if lit && null cmdLines then Nothing else Just record
               -- the text of a literate module is its source (unlit keeps its lines and columns;
               -- R6); an .hsc module's {-# LINE #-} pragmas are hsc2hs's text, not markers
-              view = if lit then decodeUtf8 src else moduleView (isJust hsc) file (decodeUtf8 out)
+              -- (HR25: also any module whose text has them, alex's output)
+              view = if lit then decodeUtf8 src else moduleView (isJust hsc || hasLinePragmas src) file (decodeUtf8 out)
           parseText hsc_env dflagsC file src out cpp view lit hsc
     else parseText hsc_env dflagsP file src src Nothing (decodeUtf8 src) lit hsc
   where
@@ -718,17 +719,25 @@ width = go 1
 -- view), the pragmas as comments. GHC's lexer's raw token stream has those places already (it
 -- returns the pragmas as tokens); a span's start and end are the places of the tokens GHC's
 -- positions name there (of the places the pragmas give a line, when no token's), the nearest
--- pair. Nothing for any other module.
+-- pair. HR25: the same for any module whose text has {-# LINE #-} pragmas (alex's output,
+-- Cabal-syntax's Distribution.Fields.Lexer, names Lexer.x's lines). Nothing for any other module.
 physOf :: FastString -> ModP -> Maybe (RealSrcSpan -> Maybe (Int, Int, Int, Int), Either String [(Int, Int, Int, Int, Bool)])
-physOf modFile p = case pHsc p of
-  Nothing -> Nothing
-  Just _ -> Just (remap, toks)
+physOf modFile p
+  | isJust (pHsc p) || not (null prags) = Just (remap, toks)
+  | otherwise = Nothing
   where
     textLines = lines (pView p)
     prags = [(n, mkFastString f, v, width l) | (n, l) <- zip [1 :: Int ..] textLines, Just (v, f) <- [linePragma l]]
-    -- segments: (the place's first line, the file and line GHC gives it, the last line)
-    starts = (1, modFile, 1) : [(n + 1, f, v) | (n, f, v, _) <- prags]
-    segs = zipWith (\(ps, f, v) lastP -> (ps, f, v, lastP)) starts (map (\(ps, _, _) -> ps - 2) (drop 1 starts) ++ [maxBound])
+    -- segments: (the place's first line, the file and line GHC gives it, the last line): from
+    -- the pragmas, and in a CPP module from CPP's line markers that name the module's file too
+    -- (HR25: after a directive, alex's Lexer.hs is GHC's at its own lines), the later of two at a
+    -- line; a pragma's segment begins after its line, a marker's at it
+    starts = Map.toList (Map.fromList ((1, (modFile, 1, 1)) : [(ps, (f, v, k)) | (ps, f, v, k) <- events]))
+    events = case pCpp p of
+      Nothing -> [(n + 1, f, v, 2) | (n, f, v, _) <- prags]
+      Just _ -> cppEvents (unpackFS modFile) (decodeUtf8 (pText p))
+    segs = zipWith (\(ps, (f, v, _)) lastP -> (ps, f, v, lastP)) starts
+             (map (\(ps, (_, _, k)) -> ps - k) (drop 1 starts) ++ [maxBound])
     -- GHC's position of a place's line
     fwd :: Int -> (String, Int)
     fwd l = case [(unpackFS f, v + (l - ps)) | (ps, f, v, lastP) <- segs, l >= ps, l <= lastP] of
@@ -756,6 +765,32 @@ physOf modFile p = case pHsc p of
            [] -> Nothing
     dist (a, b) (c, d) = (c - a, d - b)
 
+-- HR25: physOf's segments of a CPP module from its CPP output: each {-# LINE n "f" #-} pragma
+-- of the module's text at its line l of the module view (the segment from l + 1, f's line n;
+-- kind 2: the line before a segment is the pragma's), each line marker naming the module's file
+-- (the segment from its line n, the file's line n; kind 1), as moduleView walks them; the
+-- pragmas from CPP's first marker of the file on (GHC's driver writes {-# LINE 1 "file" #-} before
+-- CPP's output, which moduleView's line 1 overwrites)
+cppEvents :: FilePath -> String -> [(Int, FastString, Int, Int)]
+cppEvents file out = walk (lines out) False file 1
+  where
+    walk [] _ _ _ = []
+    walk (l : ls) seen cur n = case marker l of
+      Just (n', f') | f' == file -> (n', mkFastString f', n', 1) : walk ls True f' n'
+                    | otherwise -> walk ls seen f' n'
+      Nothing | seen, cur == file, Just (v, f) <- linePragma l -> (n + 1, mkFastString f, v, 2) : walk ls seen cur (n + 1)
+              | otherwise -> walk ls seen cur (n + 1)
+    marker l = case l of
+      '#' : r -> let r' = dropWhile (== ' ') (if "line" `isPrefixOf` r then drop 4 r else r) in num r'
+      _ -> Nothing
+    num r = case span isDigit r of
+      (ds@(_ : _), ' ' : '"' : q) -> Just (read ds, unq q)
+      _ -> Nothing
+    unq ('\\' : c : xs) = c : unq xs
+    unq ('"' : _) = []
+    unq (c : xs) = c : unq xs
+    unq [] = []
+
 -- {-# LINE n "file" #-} -> (n, file)
 linePragma :: String -> Maybe (Int, String)
 linePragma l = case l of
@@ -764,6 +799,10 @@ linePragma l = case l of
       (ds@(_ : _), ' ' : '"' : q) -> Just (read ds, takeWhile (/= '"') q)
       _ -> Nothing
   _ -> Nothing
+
+-- HR25: a text with {-# LINE #-} pragmas of its own (alex's, happy's output)
+hasLinePragmas :: B.ByteString -> Bool
+hasLinePragmas = any (isJust . linePragma) . lines . decodeUtf8
 
 -- CPP's module view (SPEC §2.8, S5): for each line of the module, the output line the line
 -- markers (# N "file", #line N "file", {-# LINE N "file" #-}) attribute to it; the markers and

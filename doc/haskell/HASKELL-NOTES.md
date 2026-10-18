@@ -1015,3 +1015,43 @@ bin/repr-haskell test                # step 8: test/haskell/r6/
   positions would convert it in mode `:full` too. (a) Keep R5's result (as built; R6 changes no
   R1-R5 result); (b) mode `:full`'s places for every module whose text has `{-# LINE #-}` pragmas,
   the known difference then expected to go. *Recommended: (b)*, as a follow-up, with its own run.
+
+## HR25: alex's output in mode `:full`
+
+Built on 2026-10-18 (branch `repr-haskell-hr25`, from main at `7fb90fc8`), the user's decision of
+HR25 (b): R6's positions of mode `:full` (HR23, the places in the module's own text) for every
+module whose text has `{-# LINE #-}` pragmas, not only an `.hsc` module's.
+
+- **The helper** (`tools/hsdump/HsDump.hs`): `physOf` applies to an `.hsc` module and to any module
+  whose module view has a `{-# LINE #-}` pragma; a CPP module's module view keeps such a module's
+  pragmas as text (`hasLinePragmas`, as an `.hsc` module's). In a CPP module the segments that
+  map GHC's positions to places come from the CPP output (`cppEvents`): the pragmas, and CPP's line
+  markers that name the module's file, which set GHC's positions back to the module's own lines
+  after a directive (`Lexer.hs`'s `#include "ghcconfig.h"`, its `#if`s); before, a position there
+  found its place only by the fallback to the same line. GHC's driver's `{-# LINE 1 "X.hs" #-}`
+  before CPP's output is left out (the module view overwrites it). In the corpus only
+  `Cabal-syntax`'s `Distribution.Fields.Lexer` has such pragmas besides the `.hsc` outputs (no other
+  module of the corpus, generated or not, has them).
+- **Result.** `Distribution.Fields.Lexer` converts in mode `:full` and is printed back byte for
+  byte (its module view, 35,134 bytes). Its trees of mode `:full` differ, as R6's three `.hsc`
+  modules' do, for the same reason: alex's output keeps CPP directives (an `#include`, `#if`s),
+  after which CPP's line markers name `Lexer.hs`'s own lines, whereas the module view (SPEC §2.8,
+  S5) has no directive, so the printed module's positions follow its `{-# LINE #-}` pragmas into
+  `Lexer.x`. HR25's exit, the module equal at the trees of mode `:full`, is not reached: that would
+  take a text-level reference other than the module view (the directives kept), which S5 and HR12
+  decide. Its known entry stays, the reason now "the tree in mode :full only" (the text level's
+  known differences: 7 trees, 11 conversions).
+- **Unchanged.** Every other module's forms (modes `:lines` and `:full`) and printed modules (the
+  braces, the layout and the full layouts) are byte for byte those of main's helper at `7fb90fc8`
+  (the corpus's 1,345 compared); the tree and interface levels as R6's.
+- **Cases.** `bin/repr-haskell test`'s step 8 adds `test/haskell/r6/Alex.hs` and `AlexCpp.hs`
+  (through CPP, no directive): pragmas into a `.x` file and back to the module's lines, equal at
+  every level, printed back byte for byte with equal trees of mode `:full`.
+
+| level | R6 | HR25 |
+|---|---|---|
+| text, byte-identical | 1,333 (11,703,634 bytes) | 1,334 (11,738,768 bytes) |
+| text, trees and lines of mode `:full` equal | 1,327 | 1,327 |
+
+The run (`roundtrip --iface --text --layout`): the text level about 2 minutes (dumps 26 s, conversion 46 s,
+printing 11 s, parses 36 s), the rest as R6's.
