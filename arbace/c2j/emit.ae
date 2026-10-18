@@ -649,24 +649,47 @@
       (when (and (seq @used) @passes (not @recurs))
         (mapv #(contains? @used %) (range (count ps)))))))
 
+(def ^:dynamic *var-fns*
+  "The fn each var's last def in the recorded units defines (an IdentityHashMap Var → FnExpr,
+  var-fns; arbace.c2j.main's compile-all binds it): the code an F6 call site's linked call
+  expects, read from the analysis alone, so that the back end decides the same whether its own
+  namespaces and arbace.core run evaluated (their roots Compiler$EvalFns) or compiled
+  (Compiler$AOTFns, compiled-back-end: the fixpoint's G2); nil when not bound."
+  nil)
+
+(defn var-fns
+  "The index *var-fns* of units us (each the recorded [kind line column lb cb expr events]): by
+  each var, the FnExpr of its last top-level def whose init is a fn."
+  [us]
+  (let [m (IdentityHashMap.)]
+    (doseq [u us]
+      (walk-nodes (nth u 5)
+                  (fn [n]
+                    (when (and (= "def" (:op n)) (:initProvided n))
+                      (let [i (node (:init n))]
+                        (if (= "fn" (:op i))
+                          (.put m (:var n) (:init n))
+                          (.remove m (:var n))))))))
+    m))
+
+(defn- site-fn-methods
+  "The fixed-arity method of nargs parameters (its node) of the fn var v's last def defines."
+  [^Var v nargs]
+  (when-let [^IdentityHashMap m *var-fns*]
+    (when-let [fe (.get m v)]
+      (some (fn [x] (let [mn (node x)]
+                      (when (and (not (:isVariadic mn)) (= nargs (count (:reqParms mn)))) mn)))
+            (:methods (node fe))))))
+
 (defn- site-spec
-  "The worker's mask (spec-mask) of the fixed arity nargs of the code link key k names, or nil."
-  [k nargs]
-  (when (and k (not (string? k)))
-    (some (fn [m] (let [mn (node m)]
-                    (when (and (not (:isVariadic mn)) (= nargs (count (:reqParms mn))))
-                      (spec-mask mn))))
-          (:methods (node k)))))
+  "The worker's mask (spec-mask) of the fixed arity nargs of the fn of var v, or nil."
+  [v nargs]
+  (some-> (site-fn-methods v nargs) spec-mask))
 
 (defn- site-psig
-  "The primitive signature of the fixed arity nargs of the code link key k names (an evaluated
-  fn's FnExpr: link-key), or nil."
-  [k nargs]
-  (when (and k (not (string? k)))
-    (some (fn [m] (let [mn (node m)]
-                    (when (and (not (:isVariadic mn)) (= nargs (count (:reqParms mn))))
-                      (psig mn))))
-          (:methods (node k)))))
+  "The primitive signature of the fixed arity nargs of the fn of var v, or nil."
+  [v nargs]
+  (some-> (site-fn-methods v nargs) psig))
 
 (defn- prim-arg
   "Argument e of a call of an unboxed entry, for its parameter of class p: {:binds (the
@@ -737,10 +760,10 @@
   ([ctx fnode args key] (emit-link-site ctx fnode args key nil nil))
   ([ctx fnode args key out conv]
    (let [root (deep (var-value ctx (:var fnode)))
-         sig (site-psig key (count args))
+         sig (site-psig (:var fnode) (count args))
          syms {:r (gsym ctx "root-") :w (gsym ctx "linked-") :f (gsym ctx "ifn-")
                :as (mapv (fn [_] (gsym ctx "arg-")) args)}
-         mask (when-not sig (site-spec key (count args)))
+         mask (when-not sig (site-spec (:var fnode) (count args)))
          pargs (cond
                  sig (mapv (fn [e p t] (prim-arg ctx e p t)) args (:params sig) (:as syms))
                  mask (mapv (fn [e k t] (spec-arg ctx e k t)) args mask (:as syms)))
@@ -848,7 +871,7 @@
   (let [n (node e)]
     (when (and (= "invoke" (:op n)) (#{Long/TYPE Double/TYPE} p))
       (when-let [key (site-key n)]
-        (when (= p (:ret (site-psig key (count (:args n)))))
+        (when (= p (:ret (site-psig (:var (node (:fexpr n))) (count (:args n)))))
           (line-meta (emit-link-site ctx (node (:fexpr n)) (:args n) key p conv) n))))))
 
 (defn- emit-invoke [ctx n]
